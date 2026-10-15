@@ -100,7 +100,7 @@ func Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// WithLogger 返回同时带上日志器与请求标识的 context。
+// WithLoggerAndRequest 返回同时带上日志器与请求标识的 context。
 //
 // 把两件事合成一个调用点：请求入口需要同时建立它们，
 // 而分成两步容易出现「设了日志器但忘了设 id」这种只在一半日志里显形的疏漏。

@@ -55,6 +55,10 @@ func (e *envelope) hasKey(id string) bool {
 	return false
 }
 
+// KeyIDs 返回密文里包含数据密钥副本的主密钥标识。
+//
+// 用于排查「这份密文该用哪把钥匙解」：标识对不上时，错误信息里给出的
+// 就是这里返回的清单。
 func (e *envelope) KeyIDs() []string {
 	ids := make([]string, 0, len(e.wraps))
 	for _, w := range e.wraps {

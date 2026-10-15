@@ -90,8 +90,8 @@ func TestAccountTextRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	var back Account
-	if err := back.UnmarshalText(text); err != nil {
-		t.Fatalf("读回 %q 失败: %v", text, err)
+	if unmarshalErr := back.UnmarshalText(text); unmarshalErr != nil {
+		t.Fatalf("读回 %q 失败: %v", text, unmarshalErr)
 	}
 	if back != orig {
 		t.Errorf("往返之后 = %q，期望 %q", back, orig)

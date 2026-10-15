@@ -227,19 +227,22 @@ const (
 // 「未知」的话，这两类就混在一起了。
 type UnknownReason string
 
+// 未知的成因。分开记是因为**出路不同**：year_pending 是正常的
+// （公告还没发布），其余几种都要人去查。
 const (
-	// ReasonYearPending：该年公告尚未公布。
+	// ReasonYearPending 表示该年公告尚未公布。这是正常状态，不该告警。
 	ReasonYearPending UnknownReason = "year_pending"
-	// ReasonYearDegraded：公告已公布但同步失败。
+	// ReasonYearDegraded 表示公告已公布但同步失败。
 	ReasonYearDegraded UnknownReason = "year_degraded"
-	// ReasonYearConflict：两个数据源不一致。
+	// ReasonYearConflict 表示两个数据源不一致。
 	ReasonYearConflict UnknownReason = "year_conflict"
-	// ReasonYearUnknown：库里没有该年的记录。
+	// ReasonYearUnknown 表示库里没有该年的记录。
 	ReasonYearUnknown UnknownReason = "year_unknown"
-	// ReasonRowMissing：年份标着已同步，这一天却没有记录。这是数据不完整。
-	// 按普通工作日处理会让节假日按工作日计价，所以仍然是未知。
+	// ReasonRowMissing 表示年份标着已同步，这一天却没有记录。
+	// 这是数据不完整：按普通工作日处理会让节假日按工作日计价，
+	// 所以仍然算未知。
 	ReasonRowMissing UnknownReason = "row_missing"
-	// ReasonRowInconsistent：记录本身自相矛盾（既放假又标成补班日）。
+	// ReasonRowInconsistent 表示记录本身自相矛盾（既放假又标成补班日）。
 	// 猜任何一边都可能让一整天的价格算错，所以判定为未知。
 	ReasonRowInconsistent UnknownReason = "row_inconsistent"
 )
