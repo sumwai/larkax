@@ -71,6 +71,16 @@ gateway  ──►  router  ──►  channel.Adapter  ──►  upstream
 
 Not yet written: `internal/gateway`, `internal/plugin`, `plugins/`, and `web/`.
 
+## Versioning
+
+Two separate things, deliberately:
+
+- the **release version** (`v0.1.0`), which changes on every release
+- the **API version** (`/v1` in the path), which changes only on a breaking change
+
+Shipping `v1.4.2` does not move the API; clients keep calling `/v1`.
+See [docs/versioning.md](docs/versioning.md).
+
 ## Building
 
 Requires Go 1.26 or newer.
@@ -78,6 +88,9 @@ Requires Go 1.26 or newer.
 ```sh
 go build ./...
 go test ./...
+
+# the version comes from the git tag, injected at build time
+go build -ldflags "-X main.version=$(git describe --tags --always --dirty)" ./cmd/larkax
 ```
 
 Building is not enough to run the service — it also needs a PostgreSQL database and

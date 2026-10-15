@@ -21,6 +21,11 @@ import (
 	"github.com/sumwai/larkax/internal/migrate"
 )
 
+// version 由构建时注入，与主服务用**同一个变量名**：
+// 两个二进制的版本必须能对上，否则「命令行跑通了但服务起不来」这类
+// 错配又多出一个来源。
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "larkaxctl: %v\n", err)
@@ -38,6 +43,7 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl migrate status                 显示每个迁移的应用状态
   larkaxctl migrate version                显示当前数据库版本
   larkaxctl migrate create <名称>           生成迁移文件
+  larkaxctl version                        打印版本号
 
 环境变量与主服务一致，见 internal/config。
 
@@ -55,6 +61,9 @@ func run() error {
 	switch os.Args[1] {
 	case "migrate":
 		return runMigrate(os.Args[2:])
+	case "version", "-v", "--version":
+		fmt.Println(version)
+		return nil
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
