@@ -5,6 +5,11 @@
 *.test
 *.out
 
+# go build ./cmd/<name> 会把二进制直接落在仓库根。
+# README 教的正是这个命令，漏掉它就会有 10MB 的 ELF 被 git add -A 收进去。
+/larkax
+/[a-z]*ctl
+
 # Dependencies
 /vendor/
 
