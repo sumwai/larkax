@@ -535,3 +535,66 @@ func TestZeroChargesPreserveBehavior(t *testing.T) {
 		t.Error("零费用不该产生行项")
 	}
 }
+
+// 缓存写入的单价通常高于输入，它必须单独计入预留。
+// 早先只按输入单价估缓存读、完全不算缓存写：带缓存写入的请求
+// 在缓存单价 > 0 的规则下必然撞 Capped——而 Capped 按设计是
+// 「上界算错了」的信号，不该成为常态。
+func TestReserveCoversCacheWrite(t *testing.T) {
+	p := prices()
+	req := ReserveRequest{
+		Prices:           p,
+		InputTokens:      100,
+		CacheWriteTokens: 10000,
+		MaxTokens:        10,
+	}
+
+	reserved, err := Reserve(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 按实际用量结算，包含那 10000 个缓存写入 token
+	actual := Usage{
+		PromptTokens:     100,
+		CacheWriteTokens: 10000,
+		CompletionTokens: 10,
+	}
+	s, err := Settle(actual, p, reserved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Capped {
+		t.Errorf("缓存写入的请求撞上了 Capped：预留 %s，实际 %s", reserved, s.Breakdown.Total)
+	}
+}
+
+func TestReserveRejectsNegativeCacheWrite(t *testing.T) {
+	_, err := Reserve(ReserveRequest{Prices: prices(), MaxTokens: 10, CacheWriteTokens: -1})
+	if err == nil {
+		t.Error("负的缓存写入量应被拒绝")
+	}
+}
+
+// 缓存读按输入单价估（宁贵不贱）：真实用量里缓存读按更便宜的
+// 缓存读单价计费，所以预留必然不低于结算。
+func TestReserveEstimatesCacheReadAtInputPrice(t *testing.T) {
+	p := prices()
+	// 把缓存读写差价拉大，差异才看得出来
+	p.CacheRead = money.MustParse("0.0000001")
+	p.CacheWrite = money.MustParse("0.0001")
+
+	req := ReserveRequest{Prices: p, CacheReadTokens: 1000, CacheWriteTokens: 1000, MaxTokens: 1}
+	reserved, err := Reserve(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := Usage{CacheReadTokens: 1000, CacheWriteTokens: 1000}
+	s, err := Settle(actual, p, reserved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Capped {
+		t.Errorf("缓存读写都算进了预留，不该撞 Capped：预留 %s 实际 %s", reserved, s.Breakdown.Total)
+	}
+}
