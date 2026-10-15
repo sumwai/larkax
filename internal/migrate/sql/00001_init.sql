@@ -8,6 +8,11 @@
 --   * 用量事件与请求快照按时间分区，只追加。
 --   * 渠道凭证只存密文，解密点唯一。
 --
+-- 关于扩展：citext 被 users.username/email 使用。pgcrypto 目前没有任何调用，
+-- 渠道凭证加密在应用层做（信封加密，密钥来自环境变量，不落库）。
+-- 留着是为将来可能出现的「只在库内比对」场景留位——例如用 digest() 存
+-- API Key 的哈希以免明文可比。它要求较高的数据库权限，在托管 PostgreSQL 上
+-- 常需单独申请；若确认不再需要，删掉这一行即可。
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS citext;
 
@@ -136,6 +141,11 @@ CREATE INDEX model_catalog_vendor_idx ON model_catalog (vendor);
 -- 按渠道把上游的实际模型名映射到规范名
 CREATE TABLE model_aliases (
     id                  bigserial PRIMARY KEY,
+    -- 可空表示这是一条平台级别名，不属于任何渠道。此时它由 canonical_name
+    -- 唯一决定，同一条不应出现两次——但下面的 UNIQUE 管不到它：
+    -- SQL 里 NULL 不等于 NULL，channel_id IS NULL 的行可以有任意多条。
+    -- 平台级别名的去重需要 UNIQUE (upstream_model) WHERE channel_id IS NULL
+    -- 这样的偏索引，尚未建立。
     channel_id          bigint,
     upstream_model      text NOT NULL,
     canonical_name      text REFERENCES model_catalog(canonical_name),
@@ -267,7 +277,10 @@ CREATE TABLE pricing_rules (
     created_by      bigint REFERENCES users(id),
     created_at      timestamptz NOT NULL DEFAULT now(),
     updated_at      timestamptz NOT NULL DEFAULT now(),
-    -- 同一作用域内生效时间不重叠的简单保证
+    -- 本约束只管一件事：platform 作用域的规则不得挂 owner。
+    -- 注意它不保证「同一作用域内生效时间不重叠」——表里有 effective_from /
+    -- effective_to，但重叠与否没有数据库级保证（要用需要 EXCLUDE USING gist）。
+    -- 重叠时谁生效由应用层按 priority 决胜。
     CONSTRAINT rule_scope_owner CHECK (
         (scope = 'platform' AND owner_user_id IS NULL) OR scope <> 'platform'
     )
@@ -375,7 +388,9 @@ CREATE TABLE billing_requests (
     error_code          text,
     -- 客户端取消的流式请求走这条路径
     client_cancelled_at timestamptz,
-    -- 关联的结构快照。快照按留存期清理，此列随之置空，不做级联删除
+    -- 关联的结构快照。不做级联删除，也不会有 UPDATE 来置空：
+    -- 快照是按分区 DROP 清理的，不逐行删除，所以分区一删此列就永久悬空。
+    -- 读取方需自行判空并接受查不到。
     request_snapshot_id bigint,
     started_at          timestamptz NOT NULL DEFAULT now(),
     settled_at          timestamptz
@@ -425,7 +440,9 @@ CREATE INDEX usage_events_request_idx ON usage_events (request_id, created_at);
 CREATE INDEX usage_events_user_idx ON usage_events (user_id, created_at DESC);
 CREATE INDEX usage_events_channel_idx ON usage_events (channel_id, created_at DESC);
 
--- 首个分区按月。后续由 larkaxctl 定时创建
+-- 用量事件按月分区。它是只追加的财务底稿，没有留存期要求，月粒度足够。
+-- 注意与下面的 request_snapshots 不同——那张表按天，因为它的留存期以天计。
+-- 分区由 worker 定时预建，这里只铺种子。
 CREATE TABLE usage_events_2026_10 PARTITION OF usage_events
     FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
 CREATE TABLE usage_events_2026_11 PARTITION OF usage_events
@@ -445,6 +462,9 @@ COMMENT ON TABLE usage_events_default IS '兜底分区。监控应告警它非�
 -- 脱敏器出错时丢弃快照，绝不回落成存原文。
 --
 -- 分区按天，默认留存 30 天。这既是隐私要求也是成本控制。
+-- 按天而不是按月：留存期以天计，月分区只能整月留或整月删，
+-- 「30 天」就无从谈起，而清理靠 DROP TABLE 是这份承诺能兑现的前提。
+-- 分区由 larkaxctl 每日预建，保留未来若干天。
 -- ═══════════════════════════════════════════════════════════════════
 
 CREATE TABLE request_snapshots (
@@ -477,9 +497,20 @@ CREATE INDEX request_snapshots_user_idx ON request_snapshots (user_id, created_a
 CREATE INDEX request_snapshots_error_idx ON request_snapshots (error_kind, created_at DESC)
     WHERE error_kind IS NOT NULL;
 
-CREATE TABLE request_snapshots_2026_10 PARTITION OF request_snapshots
-    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+-- 按天铺种子分区，worker 每日预建后续若干天。留 3 天够走通本地流程，
+-- 真实部署由预建任务铺满留存窗口。
+CREATE TABLE request_snapshots_2026_10_15 PARTITION OF request_snapshots
+    FOR VALUES FROM ('2026-10-15') TO ('2026-10-16');
+CREATE TABLE request_snapshots_2026_10_16 PARTITION OF request_snapshots
+    FOR VALUES FROM ('2026-10-16') TO ('2026-10-17');
+CREATE TABLE request_snapshots_2026_10_17 PARTITION OF request_snapshots
+    FOR VALUES FROM ('2026-10-17') TO ('2026-10-18');
+
+-- 兜底分区。落进这里的行没有到期日——「按分区整块删除」删不掉它们，
+-- 而这张表对使用者承诺了 30 天留存。所以它必须和 usage_events_default 一样
+-- 被监控盯着：非空即说明预建任务漏跑了，且已经产生了不受留存期约束的数据。
 CREATE TABLE request_snapshots_default PARTITION OF request_snapshots DEFAULT;
+COMMENT ON TABLE request_snapshots_default IS '兜底分区。必须告警其非空：落进来的数据没有到期日，留存承诺对它不成立。';
 
 COMMENT ON COLUMN request_snapshots.skeleton IS
     '结构骨架，非原文。白名单字段记真实值（模型名、推理深度、max_tokens、各段字符数）；用户 prompt、工具名、思考内容、图片数据一律替换为占位。工具名在单个请求内映射为稳定的 T1/T2 引用，以保证 tool_use 与 tool_result 的对应关系不丢。';
@@ -678,7 +709,9 @@ DROP TABLE IF EXISTS payment_orders CASCADE;
 DROP TABLE IF EXISTS snapshot_access_log CASCADE;
 DROP TABLE IF EXISTS capture_consents CASCADE;
 DROP TABLE IF EXISTS request_snapshots_default CASCADE;
-DROP TABLE IF EXISTS request_snapshots_2026_10 CASCADE;
+DROP TABLE IF EXISTS request_snapshots_2026_10_17 CASCADE;
+DROP TABLE IF EXISTS request_snapshots_2026_10_16 CASCADE;
+DROP TABLE IF EXISTS request_snapshots_2026_10_15 CASCADE;
 DROP TABLE IF EXISTS request_snapshots CASCADE;
 DROP TABLE IF EXISTS usage_events_default CASCADE;
 DROP TABLE IF EXISTS usage_events_2026_11 CASCADE;
