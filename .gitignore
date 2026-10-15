@@ -29,6 +29,10 @@
 .DS_Store
 Thumbs.db
 
+# 本地工具的运行状态。编辑器的 agent 目录不该进公开仓库：
+# 里面是个人会话的残留，与项目无关，也不该被外部读到。
+.claude/
+
 # Local runtime state
 /tmp/
 *.log
