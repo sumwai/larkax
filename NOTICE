@@ -1,0 +1,67 @@
+larkax
+Copyright (c) 2026 sumwai and larkax contributors
+
+This product is licensed under the GNU Affero General Public License v3.0.
+See LICENSE for the full terms.
+
+═══════════════════════════════════════════════════════════════════════════
+Third-party components
+═══════════════════════════════════════════════════════════════════════════
+
+new-api
+  Copyright (c) QuantumNous and contributors
+  Licensed under the GNU Affero General Public License v3.0
+  https://github.com/QuantumNous/new-api
+
+  larkax consumes new-api in two ways:
+
+  1. As a module dependency. The `relaykit` package provides protocol DTOs and
+     conversion between the OpenAI and Anthropic wire formats. It is imported at
+     a pinned version and is not modified.
+
+  2. Through a maintained fork, for patches that have not yet landed upstream.
+     Those patches are published in the fork and submitted upstream where
+     possible.
+
+  AGPLv3 Section 7 additional terms from new-api are retained and reproduced
+  below, as required for modified versions:
+
+    Frontend design and development by New API contributors.
+    https://github.com/QuantumNous/new-api
+
+  Note on scope: larkax does not use new-api's frontend. The larkax console and
+  documentation site are original work. The attribution above is reproduced
+  because the fork carries new-api code, and it must remain in this file and in
+  any prominent notice of a distribution that includes that fork. If larkax ever
+  ships new-api's frontend, the attribution must additionally appear in the
+  user interface itself.
+
+  Changes made in the larkax fork, per Section 7(c), are recorded in the fork's
+  own NOTICE and in its commit history.
+
+moejs
+  Copyright (c) Calcium-Ion and contributors
+  Licensed under the Apache License 2.0
+  https://github.com/Calcium-Ion/moejs
+
+expr-lang/expr
+  Copyright (c) Anton Medvedev and contributors
+  Licensed under the MIT License
+  https://github.com/expr-lang/expr
+
+models.dev
+  Model metadata is derived from the public models.dev dataset.
+  Licensed under the MIT License
+  https://github.com/sst/models.dev
+
+holiday-cn
+  Holiday calendar data for mainland China.
+  Licensed under the MIT License
+  https://github.com/NateScarlet/holiday-cn
+
+Other Go module dependencies and their licenses are enumerated in
+THIRD-PARTY-LICENSES.md, generated from the module graph.
+
+═══════════════════════════════════════════════════════════════════════════
+End of Notices
+═══════════════════════════════════════════════════════════════════════════
