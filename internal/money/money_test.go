@@ -2,6 +2,7 @@ package money
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -314,5 +315,258 @@ func TestSmallUnitPricesSurvive(t *testing.T) {
 	// 一千个 token 的费用
 	if got := price.MulInt(1); got.String() != "0.00010000" {
 		t.Errorf("单价 = %s", got.String())
+	}
+}
+
+// ── 变异测试补的用例 ────────────────────────────────────────────────────
+//
+// 下面这一组是用变异测试（gremlins unleash）找出来的：把代码里的某个
+// 比较符或分支方向改一下，测试**仍然通过**——那说明那个分支没有被真的
+// 钉住。这类缺口用覆盖率看不出来（行被执行过），只有变异测试能发现。
+//
+// 每一条都对应一个曾经「存活」的变异。
+
+// 恰好一半时向远离零的方向进位。
+//
+// 变异：把 `2*|rem| >= |den|` 的 `>=` 改成 `>`，恰好一半就不再进位。
+// 覆盖不到是因为原有用例里没有「除数恰好是余数的两倍」这种情形。
+func TestRoundHalfAwayFromZero(t *testing.T) {
+	cases := []struct {
+		name string
+		got  Amount
+		want string
+	}{
+		// 1 个最小单位除以 2，恰好是一半，应当进位到 1
+		{"正数的一半", Amount{units: 1}.DivInt(2), "0.00000001"},
+		{"负数的一半", Amount{units: -1}.DivInt(2), "-0.00000001"},
+		// 3 个最小单位除以 2 = 1.5，应当进位到 2
+		{"正数的一点五", Amount{units: 3}.DivInt(2), "0.00000002"},
+		{"负数的一点五", Amount{units: -3}.DivInt(2), "-0.00000002"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got.String() != tc.want {
+				t.Errorf("得到 %s，期望 %s", tc.got, tc.want)
+			}
+		})
+	}
+}
+
+// 不足一半时**不**进位，且方向对负数同样正确。
+//
+// 变异：把 `numerator.Sign() < 0` 改掉，负数就会朝错的方向进位。
+func TestRoundBelowHalfDoesNotCarry(t *testing.T) {
+	cases := []struct {
+		name string
+		got  Amount
+		want string
+	}{
+		{"正数不足一半", Amount{units: 1}.DivInt(3), "0.00000000"},
+		{"负数不足一半", Amount{units: -1}.DivInt(3), "0.00000000"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got.String() != tc.want {
+				t.Errorf("得到 %s，期望 %s", tc.got, tc.want)
+			}
+		})
+	}
+}
+
+// 零既不是正数也不是负数。
+//
+// 变异：把 `IsNegative` 的 `< 0` 改成 `<= 0`（或 `IsPositive` 的 `> 0`
+// 改成 `>= 0`），零就会被同时算成两者。原有用例只测了正负，没测零。
+func TestZeroIsNeitherPositiveNorNegative(t *testing.T) {
+	var z Amount
+	if z.IsNegative() {
+		t.Error("零不该是负数")
+	}
+	if z.IsPositive() {
+		t.Error("零不该是正数")
+	}
+}
+
+// ClampZero 只夹负数，不碰零与正数。
+//
+// 变异：把 `a.units < 0` 改成 `<= 0`。零的结果不变，所以看不出来；
+// 但那个分支的形状变了，而这类改动正是「看着没问题」的那类。
+func TestClampZeroBoundary(t *testing.T) {
+	if got := (Amount{units: -1}).ClampZero(); !got.IsZero() {
+		t.Errorf("负数应被夹到零，得到 %s", got)
+	}
+	if got := (Amount{}).ClampZero(); !got.IsZero() {
+		t.Errorf("零应保持不变，得到 %s", got)
+	}
+	if got := (Amount{units: 1}).ClampZero(); got.Units() != 1 {
+		t.Errorf("正数应保持不变，得到 %s", got)
+	}
+}
+
+// Min/Max 在两边相等时应返回其中之一，且不改变值。
+//
+// 变异：把 `<=` 改成 `<`、`>=` 改成 `>`。相等时走的分支不同，
+// 而结果相同——所以只有断言「相等时也正确」才能钉住。
+func TestMinMaxWithEqualValues(t *testing.T) {
+	a, b := MustParse("1.5"), MustParse("1.5")
+	if got := Min(a, b); got.Cmp(a) != 0 {
+		t.Errorf("Min 相等时 = %s，期望 %s", got, a)
+	}
+	if got := Max(a, b); got.Cmp(a) != 0 {
+		t.Errorf("Max 相等时 = %s，期望 %s", got, a)
+	}
+	// 负数与零的边界
+	if got := Min(Zero, MustParse("-1")); got.String() != "-1.00000000" {
+		t.Errorf("Min(0, -1) = %s", got)
+	}
+	if got := Max(Zero, MustParse("-1")); !got.IsZero() {
+		t.Errorf("Max(0, -1) = %s", got)
+	}
+}
+
+// 溢出检测的边界：恰好在上界上不该被误判为溢出。
+//
+// 变异：把 `yuan > MaxInt64/unit` 的 `>` 改成 `>=`，
+// 于是恰好能表示的整数元会被夹到最大值（一个错误的数），
+// 而原有用例只测了明显超界的值。
+func TestFromIntBoundaryIsNotClamped(t *testing.T) {
+	// 恰好能表示的最大整数元
+	maxYuan := int64(math.MaxInt64 / unit)
+	got := FromInt(maxYuan)
+	if got.Units() != maxYuan*unit {
+		t.Errorf("恰好在上界上的值不该被夹：得到 %d，期望 %d", got.Units(), maxYuan*unit)
+	}
+
+	minYuan := int64(math.MinInt64 / unit)
+	got = FromInt(minYuan)
+	if got.Units() != minYuan*unit {
+		t.Errorf("恰好在下界上的值不该被夹：得到 %d，期望 %d", got.Units(), minYuan*unit)
+	}
+}
+
+// 解析时整数部分的溢出门槛。
+//
+// 变异：把 `whole > (MaxInt64-fracUnits)/unit` 的 `>` 改掉，
+// 边界上的值会被误拒或误收。
+func TestParseOverflowBoundary(t *testing.T) {
+	// 恰好能表示的最大值：MaxInt64 个最小单位 = 92233720368.54775807
+	maxStr := Amount{units: math.MaxInt64}.String()
+	got, err := Parse(maxStr)
+	if err != nil {
+		t.Fatalf("最大值应当解析得出来: %v", err)
+	}
+	if got.Units() != math.MaxInt64 {
+		t.Errorf("得到 %d，期望 %d", got.Units(), int64(math.MaxInt64))
+	}
+
+	// 再大一点就应当报溢出
+	if _, err := Parse("92233720368.54775808"); err == nil {
+		t.Error("超出范围应报错")
+	}
+}
+
+// parseInt64 的溢出门槛。
+//
+// 变异：把 `n > (MaxInt64-d)/10` 改掉，边界上的输入会被误收成回绕的值。
+func TestParseInt64Boundary(t *testing.T) {
+	maxStr := fmt.Sprintf("%d", int64(math.MaxInt64))
+	got, err := parseInt64(maxStr)
+	if err != nil {
+		t.Fatalf("MaxInt64 应解析得出来: %v", err)
+	}
+	if got != math.MaxInt64 {
+		t.Errorf("得到 %d，期望 %d", got, int64(math.MaxInt64))
+	}
+
+	// 多一位就溢出
+	if _, err := parseInt64(maxStr + "0"); !errors.Is(err, ErrOverflow) {
+		t.Errorf("应报 ErrOverflow，得到 %v", err)
+	}
+}
+
+// 加法的溢出检测：同号相加才可能溢出，异号相加永远不会。
+//
+// 变异：把 `a.units > 0 && b.units > 0` 里的某个 `>` 改掉，
+// 异号相加（结果必然在范围内）会被误判为溢出。
+func TestAddOverflowDetectionOnlyOnSameSign(t *testing.T) {
+	// 异号相加：不可能溢出，即便两边都很大
+	big1 := Amount{units: math.MaxInt64}
+	big2 := Amount{units: -math.MaxInt64 + 1}
+	got := big1.Add(big2)
+	if got.Units() != 1 {
+		t.Errorf("异号相加被误判为溢出：得到 %d，期望 1", got.Units())
+	}
+
+	// 同号且都接近上限：应当被夹住
+	huge := Amount{units: math.MaxInt64 / 2}
+	sum := huge.Add(huge)
+	if sum.IsNegative() {
+		t.Errorf("同号溢出应夹住而不是回绕，得到 %s", sum)
+	}
+}
+
+// 解析时的进位边界：小数部分进位恰好填满一个整数单位。
+//
+// 变异：把 `f >= unit` 改成 `f > unit`，恰好等于 unit 时就不会
+// 进位到整数部分，得到一个越界的小数部分。
+func TestParseCarryFillsWholeUnit(t *testing.T) {
+	// 0.999999995 的四舍五入会让小数部分恰好进位到 1.0
+	got, err := Parse("0.999999995")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.String() != "1.00000000" {
+		t.Errorf("进位应传播到整数部分，得到 %s", got)
+	}
+
+	// 1.999999995 → 2
+	got, err = Parse("1.999999995")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.String() != "2.00000000" {
+		t.Errorf("进位应传播到整数部分，得到 %s", got)
+	}
+}
+
+// 超大中间结果被夹到边界时，正负方向要分别取正确的边界。
+//
+// 变异：把 `v.Sign() > 0` 改成别的，负向溢出会被夹到 MaxInt64——
+// 一个「看起来正常的大正数」。原先测不到是因为构造一个超出 int64 的
+// 中间结果需要特意设计输入。
+func TestClampFromBigPicksCorrectBoundary(t *testing.T) {
+	// MulInt 用一个超大乘数，让中间结果超出 int64
+	big := Amount{units: math.MaxInt64}
+	if got := big.MulInt(1000); got.Units() != math.MaxInt64 {
+		t.Errorf("正向溢出应夹到 MaxInt64，得到 %d", got.Units())
+	}
+	if got := big.MulInt(-1000); got.Units() != math.MinInt64 {
+		t.Errorf("负向溢出应夹到 MinInt64，得到 %d", got.Units())
+	}
+}
+
+// Cmp 的三个分支都要被走到，包括两边相等时返回 0。
+//
+// 变异：把 `a.units < b.units` 改成 `<=`，相等时就会返回 -1 而不是 0。
+// 原先测过 1 与 2 的比较、以及 a.Cmp(a)，但没测**两个不同的量**相等的情形——
+// 而那恰好是变异能钻的空子。
+func TestCmpAllBranches(t *testing.T) {
+	// 两个独立的、值相同但来源不同的金额
+	a := FromInt(5)
+	b := MustParse("5.00000000")
+	if a.Cmp(b) != 0 {
+		t.Errorf("Cmp(5, 5.00000000) = %d，期望 0", a.Cmp(b))
+	}
+	if a.Cmp(MustParse("4.99999999")) != 1 {
+		t.Error("5 应大于 4.99999999")
+	}
+	if a.Cmp(MustParse("5.00000001")) != -1 {
+		t.Error("5 应小于 5.00000001")
+	}
+	// 负数侧的相等
+	c := MustParse("-5")
+	d := MustParse("-5.00000000")
+	if c.Cmp(d) != 0 {
+		t.Errorf("Cmp(-5, -5.00000000) = %d，期望 0", c.Cmp(d))
 	}
 }
