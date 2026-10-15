@@ -88,7 +88,10 @@ func Timezone(region Region) (*time.Location, error) {
 	}
 	loc, err := time.LoadLocation(name)
 	if err != nil {
-		return nil, fmt.Errorf("%w: 加载 %s（地区 %s）失败: %v；容器内缺时区文件时可在主程序 import _ %q",
+		// 用 %w 包住底层错误而不是 %v：调用方可能想分辨「时区名不存在」
+		// 与「整个时区数据库缺失」——前者是配置错，后者是镜像少装东西，
+		// 两者的处置完全不同。
+		return nil, fmt.Errorf("%w: 加载 %s（地区 %s）失败: %w；容器内缺时区文件时可在主程序 import _ %q",
 			ErrTimezoneUnavailable, name, region, err, "time/tzdata")
 	}
 	locCache[region] = loc

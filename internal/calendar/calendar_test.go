@@ -382,8 +382,8 @@ func TestLookupPropagatesSourceErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New 出错: %v", err)
 	}
-	if _, err := cal.Lookup(context.Background(), RegionCN, d(2026, time.January, 5)); !errors.Is(err, boom) {
-		t.Errorf("数据源错误未透出: %v", err)
+	if _, lookupErr := cal.Lookup(context.Background(), RegionCN, d(2026, time.January, 5)); !errors.Is(lookupErr, boom) {
+		t.Errorf("数据源错误未透出: %v", lookupErr)
 	}
 
 	src = &countingSource{yearErr: boom}
