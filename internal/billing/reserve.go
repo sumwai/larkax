@@ -52,8 +52,15 @@ func Reserve(req ReserveRequest) (money.Amount, error) {
 		total = total.Add(price)
 	}
 
-	// 固定费用与最低消费：由规则给出的保底金额。
-	total = money.Max(total, req.Minimum)
+	// 一次性费用。顺序很要紧，写反了预留就会小于结算。
+	//
+	// 最低消费是**按量部分的下限**，固定费永远另加：先取 max 再加，
+	// 与 ComputeWithCharges 里的 applyMinimum 一致。
+	// 写成「先加固定费再取 max」的话，`固定费 0.5 + 最低消费 1` 的规则
+	// 会给出预留 1 而结算 1.5——每次请求都撞 Capped，
+	// 而 Capped 本该是「上界算错了」的信号，不该成为常态。
+	total = money.Max(total, req.Charges.Minimum)
+	total = total.Add(req.Charges.Fixed)
 
 	return total, nil
 }
@@ -72,8 +79,11 @@ type ReserveRequest struct {
 	// 不给它就没法算出上界，此时必须由调用方给一个兜底值。
 	MaxTokens int64
 
-	// Minimum 是保底金额（固定费用、最低消费），由规则求值得到。
-	Minimum money.Amount
+	// Charges 是一次性费用（固定费、最低消费），由规则求值得到。
+	//
+	// 预留必须把它算进去，否则预留会小于结算——固定费与保底都是
+	// 结算时会收的钱，而预留是上界。
+	Charges Charges
 }
 
 func (r ReserveRequest) validate() error {
@@ -88,8 +98,8 @@ func (r ReserveRequest) validate() error {
 		// 从而破坏「余额不为负」——那正是预留机制要避免的。
 		return fmt.Errorf("%w: max_tokens 必须为正，当前 %d", ErrNoUpperBound, r.MaxTokens)
 	}
-	if r.Minimum.IsNegative() {
-		return fmt.Errorf("保底金额为负: %s", r.Minimum)
+	if err := r.Charges.Validate(); err != nil {
+		return err
 	}
 	for name, price := range r.Prices.Units {
 		if price.IsNegative() {
@@ -142,11 +152,20 @@ type Settlement struct {
 //
 // 截住并置 Capped，让账目对得上，同时留下一条可查的信号。
 func Settle(actual Usage, prices Prices, reserved money.Amount) (Settlement, error) {
-	if err := Validate(actual, prices); err != nil {
+	return SettleWithCharges(actual, prices, Charges{}, reserved)
+}
+
+// SettleWithCharges 与 Settle 相同，但会算上固定费用与最低消费。
+//
+// **结算必须用与预留同一组 Charges。** 若预留算了保底而结算没算，
+// 一笔用量很小的请求会被预留 1 元、结算 0.002 元，差额全额退回——
+// 保底永远收不到，而且不会报错，只是长期少收钱。
+func SettleWithCharges(actual Usage, prices Prices, charges Charges, reserved money.Amount) (Settlement, error) {
+	if err := ValidateCharges(actual, prices, charges); err != nil {
 		return Settlement{}, err
 	}
 
-	breakdown := Compute(actual, prices)
+	breakdown := ComputeWithCharges(actual, prices, charges)
 	actualAmount := breakdown.Total
 
 	s := Settlement{
@@ -175,10 +194,15 @@ func Settle(actual Usage, prices Prices, reserved money.Amount) (Settlement, err
 // 那时截住金额等于少收钱。调用方必须自己保证余额足够——
 // 它通常是在已经有实测用量之后才调用这个。
 func SettleUncapped(actual Usage, prices Prices) (Settlement, error) {
-	if err := Validate(actual, prices); err != nil {
+	return SettleUncappedWithCharges(actual, prices, Charges{})
+}
+
+// SettleUncappedWithCharges 与 SettleUncapped 相同，但会算上一次性费用。
+func SettleUncappedWithCharges(actual Usage, prices Prices, charges Charges) (Settlement, error) {
+	if err := ValidateCharges(actual, prices, charges); err != nil {
 		return Settlement{}, err
 	}
-	breakdown := Compute(actual, prices)
+	breakdown := ComputeWithCharges(actual, prices, charges)
 	if err := breakdown.Verify(); err != nil {
 		return Settlement{}, err
 	}

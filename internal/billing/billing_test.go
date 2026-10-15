@@ -190,7 +190,7 @@ func TestReserveRejectsNegativeInputs(t *testing.T) {
 	cases := []ReserveRequest{
 		{Prices: prices(), InputTokens: -1, MaxTokens: 100},
 		{Prices: prices(), CacheReadTokens: -1, MaxTokens: 100},
-		{Prices: prices(), InputTokens: 1, MaxTokens: 100, Minimum: money.MustParse("-1")},
+		{Prices: prices(), InputTokens: 1, MaxTokens: 100, Charges: Charges{Minimum: money.MustParse("-1")}},
 	}
 	for i, req := range cases {
 		if _, err := Reserve(req); err == nil {
@@ -215,7 +215,7 @@ func TestReserveHonorsMinimum(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	base.Minimum = money.MustParse("10")
+	base.Charges = Charges{Minimum: money.MustParse("10")}
 	withMin, err := Reserve(base)
 	if err != nil {
 		t.Fatal(err)
@@ -389,5 +389,149 @@ func TestUsageHelpers(t *testing.T) {
 	}
 	if got := (Usage{PromptTokens: 1, CompletionTokens: 2}).TotalTokens(); got != 3 {
 		t.Errorf("TotalTokens = %d", got)
+	}
+}
+
+// ── 一次性费用 ──────────────────────────────────────────────────────────
+
+// 保底在预留与结算**两边**都要生效。
+//
+// 早先只有预留算了保底、结算没算：一条「最低消费 1 元」的规则会让
+// 预留是 1 元、结算是实际用量（比如 0.002 元），差额全额退回——
+// 保底永远收不到，而且不会报错，只是长期少收钱。
+func TestMinimumAppliesToBothReserveAndSettle(t *testing.T) {
+	charges := Charges{Minimum: money.MustParse("1")}
+	p := prices()
+
+	reserved, err := Reserve(ReserveRequest{
+		Prices: p, InputTokens: 1, MaxTokens: 1, Charges: charges,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reserved.Cmp(money.MustParse("1")) != 0 {
+		t.Fatalf("预留应等于最低消费，得到 %s", reserved)
+	}
+
+	// 用量很小，按量算只有 0.000002 元
+	actual := Usage{PromptTokens: 1}
+	s, err := SettleWithCharges(actual, p, charges, reserved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Actual.Cmp(money.MustParse("1")) != 0 {
+		t.Errorf("结算应补足到最低消费 1 元，得到 %s", s.Actual)
+	}
+	if !s.Delta.IsZero() {
+		t.Errorf("补足之后 Delta 应为零，得到 %s", s.Delta)
+	}
+	if s.Capped {
+		t.Error("不该标记 Capped：预留算了保底，结算也在同一上界内")
+	}
+}
+
+// 保底补差要记成一条显式的调整项，而不是直接抬高 Total——
+// 那样 Total 仍等于所有行项之和，Verify() 不必为例外开口子。
+func TestMinimumShowsAsExplicitLine(t *testing.T) {
+	b := ComputeWithCharges(Usage{PromptTokens: 1}, prices(), Charges{Minimum: money.MustParse("1")})
+
+	if b.MinimumAdjustment.IsZero() {
+		t.Fatal("补差应作为独立行项")
+	}
+	if err := b.Verify(); err != nil {
+		t.Errorf("加了补差之后明细仍应自洽: %v", err)
+	}
+	// 按量部分 + 补差 = 最低消费
+	if b.Subtotal().Add(b.MinimumAdjustment).Cmp(money.MustParse("1")) != 0 {
+		t.Errorf("按量 %s + 补差 %s 应等于 1", b.Subtotal(), b.MinimumAdjustment)
+	}
+}
+
+// 用量已经超过最低消费时不该再补。
+func TestMinimumNotAppliedAboveThreshold(t *testing.T) {
+	b := ComputeWithCharges(Usage{CompletionTokens: 1000}, prices(), Charges{Minimum: money.MustParse("0.001")})
+	if !b.MinimumAdjustment.IsZero() {
+		t.Errorf("超过保底时不该补差，得到 %s", b.MinimumAdjustment)
+	}
+}
+
+// 固定费用与用量无关，且要作为独立一行。
+func TestFixedChargeAddedOnce(t *testing.T) {
+	p := prices()
+	charges := Charges{Fixed: money.MustParse("0.5")}
+
+	small := ComputeWithCharges(Usage{PromptTokens: 1}, p, charges)
+	large := ComputeWithCharges(Usage{PromptTokens: 100000}, p, charges)
+
+	if small.Fixed.Cmp(large.Fixed) != 0 {
+		t.Error("固定费用与用量无关，两次应相同")
+	}
+	// 固定费只加一次：大用量的金额 = 按量 + 固定费
+	want := large.Subtotal().Add(charges.Fixed)
+	if large.Total.Cmp(want) != 0 {
+		t.Errorf("Total = %s，期望 %s（按量 + 固定费一次）", large.Total, want)
+	}
+}
+
+// 最低消费要拿**按量部分**比较，不是拿 Total 比较——
+// 固定费会把补差抵消掉，「固定费 0.5 元、最低消费 1 元」就永远收不到补差。
+func TestMinimumComparedAgainstSubtotalNotTotal(t *testing.T) {
+	charges := Charges{Fixed: money.MustParse("0.5"), Minimum: money.MustParse("1")}
+	b := ComputeWithCharges(Usage{PromptTokens: 1}, prices(), charges)
+
+	// 按量部分极小，补差应为 1 - 按量，而不是 1 - (按量 + 0.5)
+	expected := money.MustParse("1").Sub(b.Subtotal())
+	if b.MinimumAdjustment.Cmp(expected) != 0 {
+		t.Errorf("补差 = %s，期望 %s", b.MinimumAdjustment, expected)
+	}
+	if b.Total.Cmp(money.MustParse("1").Add(charges.Fixed)) != 0 {
+		t.Errorf("总额 = %s，期望 1 + 固定费", b.Total)
+	}
+}
+
+// 预留是上界：固定费与保底都算进去之后，结算仍不该超。
+func TestReserveIncludesChargesSoSettleNeverCaps(t *testing.T) {
+	p := prices()
+	charges := Charges{Fixed: money.MustParse("0.5"), Minimum: money.MustParse("1")}
+
+	reserved, err := Reserve(ReserveRequest{
+		Prices: p, InputTokens: 100, MaxTokens: 200, Charges: charges,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, out := range []int64{0, 1, 100, 200} {
+		s, err := SettleWithCharges(Usage{PromptTokens: 100, CompletionTokens: out}, p, charges, reserved)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.Capped {
+			t.Errorf("输出 %d 时撞上了 Capped，说明预留没算全一次性费用", out)
+		}
+	}
+}
+
+func TestChargesRejectNegative(t *testing.T) {
+	if err := (Charges{Fixed: money.MustParse("-1")}).Validate(); err == nil {
+		t.Error("负固定费应被拒绝")
+	}
+	if err := (Charges{Minimum: money.MustParse("-1")}).Validate(); err == nil {
+		t.Error("负最低消费应被拒绝")
+	}
+	if !(Charges{}).IsZero() {
+		t.Error("零值应为空")
+	}
+}
+
+// 不传一次性费用时，行为必须与之前完全一致。
+func TestZeroChargesPreserveBehavior(t *testing.T) {
+	usage := Usage{PromptTokens: 1000, CompletionTokens: 500}
+	a := Compute(usage, prices())
+	b := ComputeWithCharges(usage, prices(), Charges{})
+	if a.Total.Cmp(b.Total) != 0 {
+		t.Errorf("零费用应不改变结果: %s vs %s", a.Total, b.Total)
+	}
+	if !b.Fixed.IsZero() || !b.MinimumAdjustment.IsZero() {
+		t.Error("零费用不该产生行项")
 	}
 }
