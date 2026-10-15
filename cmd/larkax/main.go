@@ -61,6 +61,10 @@ func run() error {
 	}
 
 	logger := observe.NewLogger(cfg.LogLevel, "", cfg.IsProduction())
+	// 同时设为包级默认，让 observe.FromContext 的兜底与本进程真正在用的
+	// 日志器一致。不设的话，漏了 WithLogger 的调用点会拿到另一套配置，
+	// 生产环境里表现为部分日志是文本、部分是 JSON。
+	observe.AdoptAsDefault(logger)
 	logger.Info("启动",
 		"version", version,
 		"env", cfg.Env,
@@ -109,6 +113,10 @@ func run() error {
 	// M0 阶段还没有业务路由，公共监听端口先只回一个明确的占位响应。
 	// 这样部署验证能确认端口通、TLS 通、负载均衡转发通，
 	// 同时任何真实流量都会立刻得到「尚未实现」而不是超时或 404 误导。
+	//
+	// 注意 "/" 捕获一切路径，包括 /healthz。健康检查要配到 internal 端口；
+	// 配到这里的实例会拿到 501 并被编排系统摘除。上了负载均衡后这是真实的
+	// 误配陷阱，所以健康检查只注册在 internalMux 上。
 	publicMux := http.NewServeMux()
 	publicMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -136,6 +144,10 @@ type namedServer struct {
 // 排空的超时不是形式主义：流式响应可能持续数分钟，
 // 到点强行关闭会让正在生成的长回复断在半截。超时值的取舍是
 // 「不能让旧实例永远不退」与「不能截断进行中的流」之间的折中。
+//
+// 已知取舍：某个监听器起不来时直接返回错误，不会去排空其余监听器。
+// 此时进程随即退出，已建立的连接是被切断而非排空的。理由是「监听器起不来」
+// 属于启动期错误，此刻还没有真实流量值得保护——启动失败就快速失败。
 func serveUntilSignal(ctx context.Context, logger *slog.Logger, shutdownTimeout time.Duration, servers []namedServer) error {
 	errCh := make(chan error, len(servers))
 

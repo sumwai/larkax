@@ -70,9 +70,21 @@ func WithLogger(ctx context.Context, l *slog.Logger) context.Context {
 }
 
 // FromContext 取出 context 里的日志器；没有就返回默认的。
+//
+// 兜底是 slog.Default()，它不一定与本进程 NewLogger 的产物一致
+// （默认等级是 info，格式取决于谁先设置过）。所以进程启动时应当用
+// AdoptAsDefault 把真正在用的那个设成默认，否则请求链路里一旦漏了
+// WithLogger，同一进程会同时存在两套日志配置。
 func FromContext(ctx context.Context) *slog.Logger {
 	if l, ok := ctx.Value(contextKey{}).(*slog.Logger); ok && l != nil {
 		return l
 	}
 	return slog.Default()
 }
+
+// AdoptAsDefault 把 logger 同时设为 slog 的包级默认。
+//
+// 只在进程启动时调用一次。它的作用是让 FromContext 的兜底与真正在用的
+// 日志器一致，避免"同一个进程两种格式"——生产环境里那会表现为
+// 一部分日志是 JSON、一部分是文本，采集规则只认得其中一种。
+func AdoptAsDefault(l *slog.Logger) { slog.SetDefault(l) }

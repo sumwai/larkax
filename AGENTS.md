@@ -40,8 +40,12 @@ test-key-placeholder                        localhost:5432
 GitHub Flow：`main` 受保护，只能通过 PR 合入。
 
 ```
-功能分支 → PR → CI（lint + 单测 + 集成 + 契约）→ review → 合入 main → 自动部署 staging
+功能分支 → PR → CI → review → 合入 main → 部署 staging
 ```
+
+CI 目前包含：`gofmt` 检查、`go vet`、单测（含 `-race`）、覆盖率摘要、
+迁移 up→down→up 往返（真 PostgreSQL）、红线扫描及其自测。
+**集成测试、契约测试与自动部署尚未接入**，各自落地时补进这条流水线。
 
 分支命名：`feat/`、`fix/`、`refactor/`、`docs/`、`test/`、`chore/` 前缀 + 简短描述。
 
@@ -124,7 +128,12 @@ Review 不只看代码逻辑。让 agent **扮演对项目一无所知的 review
 
 不写：需求来源、讨论过程、决策理由的来龙去脉、会话中产生的上下文。
 
-面向外部使用者的文档（`docs.larkax.com` 的内容）单独维护，语气与结构面向"第一次接触这个项目的人"。
+面向外部使用者的文档（`docs.larkax.com` 的内容）单独维护，语气与结构面向「第一次接触这个项目的人」。
+
+中文文档里的引号统一用「」，不用 ASCII 双引号。代码块内不受此限。
+
+`README.md` 与 `.env.example` 用英文，其余文档用中文：前者面向国际使用者与
+只想跑起来的人，后者面向参与开发的协作者。
 
 ## 待补充
 
