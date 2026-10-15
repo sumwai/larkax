@@ -713,3 +713,33 @@ func TestZeroUsageYieldsZeroAmounts(t *testing.T) {
 		}
 	}
 }
+
+// 没有计量项时，Breakdown.Units 应当是 nil 而不是空 map。
+//
+// 变异：`len(usage.UnitCounts) > 0` 改成 `>= 0`（恒真），于是会先
+// `make` 一个空 map。值相同但**可观察**：账单序列化出来会是
+// `"units":{}` 而不是省略该字段，而对账脚本要区分「没有计量项」
+// 与「有计量项但都是零」。
+func TestUnitsIsNilWhenNoUnitCounts(t *testing.T) {
+	b := Compute(Usage{PromptTokens: 10}, prices())
+	if b.Units != nil {
+		t.Errorf("没有计量项时 Units 应为 nil，实际是空 map: %+v", b.Units)
+	}
+	if err := b.Verify(); err != nil {
+		t.Error(err)
+	}
+}
+
+// 上游报的输入为 0 但缓存非 0 时，压回逻辑的守卫必须生效。
+//
+// 变异：`u.PromptTokens > 0 && total > u.PromptTokens` 里的
+// `u.PromptTokens > 0` 改成 `>= 0`，于是在「输入为 0 却有缓存」时
+// 会触发压回，把缓存量抹成 0——而那会**少算缓存费用**。
+func TestCacheCompressionGuardWhenPromptIsZero(t *testing.T) {
+	// 上游口径不一致：报了缓存却没报输入
+	got := FromChannelUsage(channel.Usage{PromptTokens: 0, CacheReadTokens: 100})
+
+	if got.CacheReadTokens != 100 {
+		t.Errorf("输入为 0 时不该压回缓存量，得到 %d", got.CacheReadTokens)
+	}
+}
