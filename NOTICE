@@ -13,31 +13,22 @@ new-api
   Licensed under the GNU Affero General Public License v3.0
   https://github.com/QuantumNous/new-api
 
-  larkax consumes new-api in two ways:
+  Planned use. new-api's `relaykit` package provides protocol DTOs and
+  conversion between the OpenAI and Anthropic wire formats. It is not yet a
+  dependency of this repository; when it is added it will be imported at a
+  pinned version and will not be modified.
 
-  1. As a module dependency. The `relaykit` package provides protocol DTOs and
-     conversion between the OpenAI and Anthropic wire formats. It is imported at
-     a pinned version and is not modified.
-
-  2. Through a maintained fork, for patches that have not yet landed upstream.
-     Those patches are published in the fork and submitted upstream where
-     possible.
-
-  AGPLv3 Section 7 additional terms from new-api are retained and reproduced
-  below, as required for modified versions:
+  AGPLv3 Section 7 additional terms from new-api are reproduced below and must
+  be retained if and when that code is distributed as part of larkax, as
+  required for modified versions:
 
     Frontend design and development by New API contributors.
     https://github.com/QuantumNous/new-api
 
   Note on scope: larkax does not use new-api's frontend. The larkax console and
-  documentation site are original work. The attribution above is reproduced
-  because the fork carries new-api code, and it must remain in this file and in
-  any prominent notice of a distribution that includes that fork. If larkax ever
-  ships new-api's frontend, the attribution must additionally appear in the
-  user interface itself.
-
-  Changes made in the larkax fork, per Section 7(c), are recorded in the fork's
-  own NOTICE and in its commit history.
+  documentation site are original work. If larkax ever ships new-api's
+  frontend, the attribution must additionally appear in the user interface
+  itself.
 
 moejs
   Copyright (c) Calcium-Ion and contributors
@@ -50,17 +41,22 @@ expr-lang/expr
   https://github.com/expr-lang/expr
 
 models.dev
-  Model metadata is derived from the public models.dev dataset.
+  Model metadata is planned to be derived from the public models.dev dataset.
   Licensed under the MIT License
   https://github.com/sst/models.dev
 
 holiday-cn
-  Holiday calendar data for mainland China.
+  Holiday calendar data for mainland China is planned to be sourced from this
+  project.
   Licensed under the MIT License
   https://github.com/NateScarlet/holiday-cn
 
-Other Go module dependencies and their licenses are enumerated in
-THIRD-PARTY-LICENSES.md, generated from the module graph.
+The three entries above are not yet dependencies of this repository. They are
+listed so that attribution is in place before the code that requires it lands.
+
+Current Go module dependencies and their licenses are visible in `go.mod` and
+`go.sum`. A consolidated third-party license file will be added when the
+dependency set grows beyond what those two files can reasonably express.
 
 ═══════════════════════════════════════════════════════════════════════════
 End of Notices
