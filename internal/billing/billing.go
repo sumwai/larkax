@@ -107,7 +107,21 @@ type Breakdown struct {
 	Reasoning  money.Amount
 	// Units 是非 token 计量的逐项金额。
 	Units map[string]money.Amount
-	// Total 是各项之和。它必须等于逐项相加的结果——有测试钉这一点。
+
+	// Fixed 是每请求的固定费用。它是一行独立的项，不是被藏进某项里：
+	// 对账时要能看出「这一部分是固定费」。
+	Fixed money.Amount
+	// MinimumAdjustment 是保底补差。实际按量金额低于最低消费时，
+	// 这里记下差额，使 Total 达到最低消费。
+	//
+	// 记成**显式的调整项**而不是直接抬高 Total：那样 Total 仍然等于
+	// 所有行项之和，Verify() 不必为例外开口子，对账时也能一眼看出
+	// 「这一部分是保底补的」。
+	MinimumAdjustment money.Amount
+
+	// Total 是所有行项之和，等于按量部分 + Fixed + MinimumAdjustment。
+	// 有测试钉「Total = 逐项之和」——一旦不等，对账时就会出现
+	// 一笔永远找不平的差额。
 	Total money.Amount
 }
 
@@ -116,6 +130,14 @@ type Breakdown struct {
 // 计算顺序无关紧要（加法交换律），但**逐项保留**很重要：
 // 对账与争议处理都需要知道钱花在哪一项上。
 func Compute(usage Usage, prices Prices) Breakdown {
+	return ComputeWithCharges(usage, prices, Charges{})
+}
+
+// ComputeWithCharges 与 Compute 相同，但会算上固定费用与最低消费。
+//
+// 两阶段（预留与结算）必须用**同一个**函数算金额，否则预留的上界
+// 与结算的结果会因为「有没有算保底」而差开，表现为每次都撞 Capped。
+func ComputeWithCharges(usage Usage, prices Prices, charges Charges) Breakdown {
 	var b Breakdown
 
 	b.Prompt = prices.Prompt.MulInt(usage.PromptTokens)
@@ -139,16 +161,26 @@ func Compute(usage Usage, prices Prices) Breakdown {
 		}
 	}
 
+	b.applyFixed(charges.Fixed)
+	b.applyMinimum(charges.Minimum)
 	b.Total = b.sum()
 	return b
 }
 
-func (b Breakdown) sum() money.Amount {
+// Subtotal 是按用量算出的部分，不含固定费用与保底补差。
+//
+// 最低消费要拿它来比较——拿 Total 比较的话，固定费用会把补差抵消掉，
+// 「固定费 0.5 元、最低消费 1 元」的规则就永远收不到补差。
+func (b Breakdown) Subtotal() money.Amount {
 	total := money.Sum(b.Prompt, b.Completion, b.CacheRead, b.CacheWrite, b.Reasoning)
 	for _, v := range b.Units {
 		total = total.Add(v)
 	}
 	return total
+}
+
+func (b Breakdown) sum() money.Amount {
+	return b.Subtotal().Add(b.Fixed).Add(b.MinimumAdjustment)
 }
 
 // Verify 校验 Total 等于逐项之和。
