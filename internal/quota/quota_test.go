@@ -1,0 +1,365 @@
+package quota
+
+import (
+	"errors"
+	"math"
+	"testing"
+	"time"
+)
+
+var base = time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+
+func f(v float64) *float64 { return &v }
+
+func TestValidateAcceptsGoodObservations(t *testing.T) {
+	cases := []Observation{
+		{Kind: KindAPIQuery, Remaining: f(100), ObservedAt: base},
+		{Kind: KindAPIQuery, Exhausted: true, ObservedAt: base},
+		{Kind: KindSelfAccounting, Remaining: f(0), Exhausted: true, ObservedAt: base},
+		{Kind: KindErrorObserved, ErrorCode: "insufficient_quota", ObservedAt: base},
+	}
+	for i, obs := range cases {
+		if err := Validate(obs, base); err != nil {
+			t.Errorf("第 %d 个观测不该被拒: %v", i, err)
+		}
+	}
+}
+
+// 把「消耗」当成「剩余」传进来会得到一个负值。它不会让程序崩，
+// 只会让额度慢慢偏掉，而偏掉之后要很久才看得出来。
+func TestValidateRejectsNegativeRemaining(t *testing.T) {
+	err := Validate(Observation{Kind: KindSelfAccounting, Remaining: f(-5), ObservedAt: base}, base)
+	if err == nil {
+		t.Fatal("负余量应被拒绝")
+	}
+	if !contains(err.Error(), "Exhausted") {
+		t.Errorf("错误信息应指出正确做法: %v", err)
+	}
+}
+
+func TestValidateRejectsBadKind(t *testing.T) {
+	if err := Validate(Observation{Kind: "guessed", ObservedAt: base}, base); err == nil {
+		t.Error("未知观测方式应被拒绝")
+	}
+	if err := Validate(Observation{ObservedAt: base}, base); err == nil {
+		t.Error("空观测方式应被拒绝")
+	}
+}
+
+// 一次「实测」既没给出数值也没说耗尽，等于什么都没观测到。
+// 放过去会让状态被标成「已实测」而实际毫无信息。
+func TestValidateRejectsEmptyAPIQuery(t *testing.T) {
+	err := Validate(Observation{Kind: KindAPIQuery, ObservedAt: base}, base)
+	if err == nil {
+		t.Fatal("空的实测观测应被拒绝")
+	}
+}
+
+func TestValidateRejectsFutureAndNonFinite(t *testing.T) {
+	future := base.Add(time.Hour)
+	if err := Validate(Observation{Kind: KindSelfAccounting, Remaining: f(1), ObservedAt: future}, base); err == nil {
+		t.Error("将来的观测时间应被拒绝")
+	}
+	nan := f(math.NaN())
+	if err := Validate(Observation{Kind: KindSelfAccounting, Remaining: nan, ObservedAt: base}, base); err == nil {
+		t.Error("NaN 应被拒绝")
+	}
+	inf := f(math.Inf(1))
+	if err := Validate(Observation{Kind: KindSelfAccounting, Remaining: inf, ObservedAt: base}, base); err == nil {
+		t.Error("Inf 应被拒绝")
+	}
+}
+
+// ── 合并 ────────────────────────────────────────────────────────────────
+
+// 实测值无条件覆盖：它是我们能拿到的最好的信息。
+func TestMergeAPIQueryOverrides(t *testing.T) {
+	prev := State{ChannelID: 1, Remaining: f(50), Kind: KindSelfAccounting,
+		Estimated: true, Confidence: 0.5, LastErrorCode: "429"}
+
+	next := Merge(prev, Observation{Kind: KindAPIQuery, Remaining: f(999), ObservedAt: base}, base)
+
+	if next.Remaining == nil || *next.Remaining != 999 {
+		t.Errorf("Remaining = %v，期望 999", next.Remaining)
+	}
+	if next.Confidence != confidenceAPIQuery {
+		t.Errorf("Confidence = %v", next.Confidence)
+	}
+	if next.Estimated {
+		t.Error("实测值不该标记为估算")
+	}
+	if next.LastProbeAt == nil {
+		t.Error("应记录探测时间")
+	}
+	// 实测成功即清掉之前的错误信号：它已被更新的信息取代
+	if next.LastErrorCode != "" {
+		t.Errorf("实测成功后应清掉旧错误信号，实际 %q", next.LastErrorCode)
+	}
+}
+
+// 从错误码推断「额度不足」是定性但确定的信号——
+// 它比任何推算都更能说明「现在选它会失败」。
+func TestMergeExhaustedFromError(t *testing.T) {
+	prev := State{ChannelID: 1, Remaining: f(1000), Kind: KindAPIQuery, Confidence: 1.0}
+
+	next := Merge(prev, Observation{
+		Kind: KindErrorObserved, Exhausted: true, ErrorCode: "insufficient_quota", ObservedAt: base,
+	}, base)
+
+	if next.Remaining == nil || *next.Remaining != 0 {
+		t.Errorf("Remaining = %v，期望 0", next.Remaining)
+	}
+	if next.LastErrorCode != "insufficient_quota" {
+		t.Errorf("LastErrorCode = %q", next.LastErrorCode)
+	}
+	if next.Confidence != confidenceErrorObserved {
+		t.Errorf("Confidence = %v", next.Confidence)
+	}
+}
+
+// 一个与额度无关的错误（例如 429 限流）不该动 Remaining。
+// 这里最容易写错的是顺手把可信度也改了——那会让一个准确的实测值被降级。
+func TestMergeUnrelatedErrorDoesNotTouchRemaining(t *testing.T) {
+	prev := State{ChannelID: 1, Remaining: f(1000), Kind: KindAPIQuery,
+		Confidence: confidenceAPIQuery, LastProbeAt: &base}
+
+	next := Merge(prev, Observation{
+		Kind: KindErrorObserved, ErrorCode: "rate_limit_exceeded", ObservedAt: base,
+	}, base)
+
+	if next.Remaining == nil || *next.Remaining != 1000 {
+		t.Errorf("Remaining 被无关错误改动了: %v", next.Remaining)
+	}
+	if next.Confidence != confidenceAPIQuery {
+		t.Errorf("无关错误不该降低可信度: %v", next.Confidence)
+	}
+	if next.LastErrorCode != "rate_limit_exceeded" {
+		t.Errorf("错误码应被记下: %q", next.LastErrorCode)
+	}
+}
+
+// 自记账是一次**推进**，不是一次测量：它以最近一次已知值为基准减去消耗。
+// 所以即便刚探测过，它也必须生效——否则两次探测之间额度永远停在实测值上，
+// 路由会以为一个已经被用掉的渠道还有满额。
+func TestSelfAccountingAdvancesPastFreshAPIQuery(t *testing.T) {
+	probedAt := base.Add(-time.Minute)
+	prev := State{ChannelID: 1, Remaining: f(1000), Kind: KindAPIQuery,
+		Confidence: confidenceAPIQuery, LastProbeAt: &probedAt}
+
+	next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(900), ObservedAt: base}, base)
+
+	if *next.Remaining != 900 {
+		t.Errorf("自记账应在实测值之上推进: %v", *next.Remaining)
+	}
+	if !next.Estimated {
+		t.Error("推进后的值应标记为估算")
+	}
+}
+
+// 刚探测过时，自记账的可信度是基线（0.8）；离探测越远越低。
+// 它永远达不到实测的水平：累积误差是自记账的固有代价。
+func TestSelfAccountingConfidenceDecays(t *testing.T) {
+	mk := func(probeAgo time.Duration) float64 {
+		probedAt := base.Add(-probeAgo)
+		prev := State{Remaining: f(1000), Kind: KindAPIQuery, LastProbeAt: &probedAt}
+		next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(900), ObservedAt: base}, base)
+		return next.Confidence
+	}
+
+	fresh := mk(time.Minute)
+	stale := mk(time.Hour)
+	ancient := mk(48 * time.Hour)
+
+	if fresh != confidenceSelfAccountingBase {
+		t.Errorf("刚探测过的可信度 = %v，期望基线 %v", fresh, confidenceSelfAccountingBase)
+	}
+	if !(fresh > stale && stale > ancient) {
+		t.Errorf("可信度应随探测陈旧程度递减: fresh=%v stale=%v ancient=%v", fresh, stale, ancient)
+	}
+	if fresh >= confidenceAPIQuery {
+		t.Error("自记账的可信度不该达到实测水平")
+	}
+	if ancient <= 0 {
+		t.Error("可信度不该降到零：旧估计仍有信息量")
+	}
+}
+
+// 实测已经过时之后，让自记账接管——一个陈旧的数不该继续被当真。
+func TestSelfAccountingTakesOverWhenProbeIsStale(t *testing.T) {
+	staleProbe := base.Add(-selfAccountingStaleAfter - time.Hour)
+	prev := State{ChannelID: 1, Remaining: f(1000), Kind: KindAPIQuery,
+		Confidence: confidenceAPIQuery, LastProbeAt: &staleProbe}
+
+	next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(800), ObservedAt: base}, base)
+
+	if *next.Remaining != 800 {
+		t.Errorf("陈旧的实测值应被自记账接管: %v", *next.Remaining)
+	}
+	if !next.Estimated {
+		t.Error("应标记为估算")
+	}
+	if next.Confidence >= confidenceAPIQuery {
+		t.Errorf("接管后的可信度应低于实测: %v", next.Confidence)
+	}
+}
+
+// 没有任何实测值时，自记账是唯一的信息来源。
+func TestSelfAccountingUsedWhenNoMeasure(t *testing.T) {
+	prev := State{ChannelID: 1}
+	next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(500), ObservedAt: base}, base)
+
+	if next.Remaining == nil || *next.Remaining != 500 {
+		t.Errorf("Remaining = %v", next.Remaining)
+	}
+	if !next.Estimated {
+		t.Error("应标记为估算")
+	}
+	if next.Confidence != confidenceSelfAccountingBase {
+		t.Errorf("Confidence = %v，期望 %v", next.Confidence, confidenceSelfAccountingBase)
+	}
+}
+
+// 自记账的可信度永远达不到 1：它建立在「我们记全了每一次消耗」这个假设上，
+// 而任何一次漏记都会让它偏高。
+func TestSelfAccountingNeverFullyConfident(t *testing.T) {
+	prev := State{}
+	for i := 0; i < 5; i++ {
+		prev = Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(100), ObservedAt: base}, base)
+	}
+	if prev.Confidence >= confidenceAPIQuery {
+		t.Errorf("自记账可信度不该达到实测水平: %v", prev.Confidence)
+	}
+}
+
+func TestMergeKeepsUnitWhenNotGiven(t *testing.T) {
+	prev := State{Unit: "CNY"}
+	next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(1), ObservedAt: base}, base)
+	if next.Unit != "CNY" {
+		t.Errorf("Unit = %q", next.Unit)
+	}
+	next = Merge(next, Observation{Kind: KindAPIQuery, Remaining: f(1), Unit: "USD", ObservedAt: base}, base)
+	if next.Unit != "USD" {
+		t.Errorf("新观测带了单位时应更新: %q", next.Unit)
+	}
+}
+
+// ── 自记账 ──────────────────────────────────────────────────────────────
+
+func TestProjectSubtractsConsumption(t *testing.T) {
+	prev := State{Remaining: f(100), Unit: "CNY"}
+	obs := Project(prev, 30, base)
+
+	if obs.Remaining == nil || *obs.Remaining != 70 {
+		t.Errorf("Remaining = %v，期望 70", obs.Remaining)
+	}
+	if obs.Kind != KindSelfAccounting {
+		t.Errorf("Kind = %q", obs.Kind)
+	}
+	if obs.Exhausted {
+		t.Error("还有余量时不该标记耗尽")
+	}
+}
+
+// 消耗超过记录的余量说明自记账有漏（例如在别处也用了这个账号）。
+// 记成 0 而不是负数：负余量在路由与界面上都没有意义。
+func TestProjectClampsAtZero(t *testing.T) {
+	prev := State{Remaining: f(10)}
+	obs := Project(prev, 999, base)
+
+	if obs.Remaining == nil || *obs.Remaining != 0 {
+		t.Errorf("Remaining = %v，期望 0", obs.Remaining)
+	}
+	if !obs.Exhausted {
+		t.Error("见底应标记耗尽")
+	}
+}
+
+func TestProjectExhaustsExactlyToZero(t *testing.T) {
+	prev := State{Remaining: f(10)}
+	obs := Project(prev, 10, base)
+	if obs.Remaining == nil || *obs.Remaining != 0 || !obs.Exhausted {
+		t.Errorf("正好用尽应标记耗尽: %+v", obs)
+	}
+}
+
+// 余量未知时推不出新值——凭消耗量算不出总量。
+func TestProjectUnknownStaysUnknown(t *testing.T) {
+	obs := Project(State{}, 5, base)
+	if obs.Remaining != nil {
+		t.Errorf("余量未知时应保持未知: %v", obs.Remaining)
+	}
+}
+
+// 自记账在「先记账再探测」的循环里不该丢信息。
+func TestProjectThenMergeKeepsEstimate(t *testing.T) {
+	state := State{ChannelID: 1, Remaining: f(1000), Unit: "CNY", Kind: KindAPIQuery,
+		Confidence: confidenceAPIQuery, LastProbeAt: &base}
+
+	// 消耗 200
+	state = Merge(state, Project(state, 200, base), base)
+	if state.Remaining == nil || *state.Remaining != 800 {
+		t.Fatalf("推进后 Remaining = %v，期望 800", state.Remaining)
+	}
+
+	// 再探测，拿到实测的 750（说明自记账略偏高，这很常见）
+	state = Merge(state, Observation{Kind: KindAPIQuery, Remaining: f(750), ObservedAt: base}, base)
+	if *state.Remaining != 750 {
+		t.Errorf("实测应覆盖估算: %v", *state.Remaining)
+	}
+	if state.Estimated {
+		t.Error("实测之后不该仍标记为估算")
+	}
+}
+
+// ── 可用性 ──────────────────────────────────────────────────────────────
+
+// 未知一律视为可用——把未知当不可用等于默认停用所有查不到额度的渠道。
+func TestUsableTreatsUnknownAsUsable(t *testing.T) {
+	if !(State{}).Usable() {
+		t.Error("未知余量应视为可用")
+	}
+	if !(State{Remaining: f(0.01)}).Usable() {
+		t.Error("还有余量应视为可用")
+	}
+	if (State{Remaining: f(0)}).Usable() {
+		t.Error("余量为 0 应视为不可用")
+	}
+}
+
+func TestRoutableTreatsNeverObservedAsRoutable(t *testing.T) {
+	if !(State{}).Routable() {
+		t.Error("从未观测过应视为可路由")
+	}
+	if !(State{Remaining: f(0)}).Routable() {
+		t.Error("余量为 0 仍然是「知道」的状态，可路由")
+	}
+	if !(State{Remaining: f(1)}).Routable() {
+		t.Error("有值可路由")
+	}
+}
+
+func TestRoutableWithObservedButUnknownValue(t *testing.T) {
+	at := base
+	s := State{LastProbeAt: &at, Remaining: nil}
+	if s.Routable() {
+		t.Error("观测过却没拿到数值，视为不可路由才对")
+	}
+}
+
+func TestErrUnsupportedIsDistinct(t *testing.T) {
+	if !errors.Is(ErrUnsupported, ErrUnsupported) {
+		t.Error("错误值应可比较")
+	}
+	if ErrUnsupported.Error() == "" {
+		t.Error("错误信息不该为空")
+	}
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
