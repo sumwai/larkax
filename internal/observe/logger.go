@@ -75,11 +75,19 @@ func WithLogger(ctx context.Context, l *slog.Logger) context.Context {
 // （默认等级是 info，格式取决于谁先设置过）。所以进程启动时应当用
 // AdoptAsDefault 把真正在用的那个设成默认，否则请求链路里一旦漏了
 // WithLogger，同一进程会同时存在两套日志配置。
+//
+// 若 context 里带着请求标识，会作为字段附在日志器上。这是有意的：
+// 让调用点不必在每个 log 语句里手写 "request_id", id——
+// 那种写法漏一处就断一条链路，而漏掉的地方往往正是出错的那一处。
 func FromContext(ctx context.Context) *slog.Logger {
-	if l, ok := ctx.Value(contextKey{}).(*slog.Logger); ok && l != nil {
-		return l
+	l, ok := ctx.Value(contextKey{}).(*slog.Logger)
+	if !ok || l == nil {
+		l = slog.Default()
 	}
-	return slog.Default()
+	if id := RequestIDFromContext(ctx); id != "" {
+		l = l.With("request_id", string(id))
+	}
+	return l
 }
 
 // AdoptAsDefault 把 logger 同时设为 slog 的包级默认。
