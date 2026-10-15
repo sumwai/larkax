@@ -3,68 +3,133 @@
 ## 需要什么
 
 - Go 1.26 或更新（`go.mod` 里写明了最低版本）
-- Docker（跑 PostgreSQL 与 Redis）
-- Node.js 20 或更新（只在开发控制台前端时需要，前端尚未开始做）
+- Docker（跑 PostgreSQL，开发控制台前端时也用得到容器化的 Node）
+- 只有开发前端才需要 Node.js 20 或更新
 
-## 起依赖
+## 一次跑通
+
+下面四条命令连着跑，是达成「服务起来并能响应」的最短路径。
 
 ```sh
+# 1. 起数据库。端口被占用就改左边的数字，并同步改下一步的 DSN。
 docker run -d --name larkax-pg \
+  -e POSTGRES_USER=larkax \
   -e POSTGRES_PASSWORD=placeholder \
   -e POSTGRES_DB=larkax \
   -p 127.0.0.1:5432:5432 \
   postgres:16-alpine
 
-docker run -d --name larkax-redis \
-  -p 127.0.0.1:6379:6379 \
-  redis:7-alpine
+# 2. 准备环境变量
+cp .env.example .env
+
+# 3. 生成主密钥并写进 .env 的 LARKAX_MASTER_KEYS
+openssl rand -base64 32
+
+# 4. 加载变量、建表、起服务
+set -a && . ./.env && set +a
+go run ./cmd/larkaxctl migrate up
+go run ./cmd/larkax
 ```
 
-## 配置
+验证：
 
 ```sh
-cp .env.example .env
+curl -i localhost:9090/healthz
+curl -i localhost:8080/v1/chat/completions
 ```
 
-`.env` 里的值按需改。生成主密钥：
+第一个返回 `200`，第二个返回 `501`（推理接口尚未实现，见下文「当前能做什么」）。
+
+`.env.example` 可以直接被 shell 读取，所以用 `set -a && . ./.env && set +a` 加载即可。
+**服务本身不读 `.env` 文件**，只读环境变量；用 direnv 或别的工具加载也行。
+
+## 环境变量
+
+只有五个，都是有原因的：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `LARKAX_ROLE` | `gateway` | `gateway` / `control` / `worker` |
+| `LARKAX_DB_DSN` | 无 | **必填**。PostgreSQL 连接串 |
+| `LARKAX_MASTER_KEYS` | 无 | `gateway` 与 `control` **必填**，`worker` 不需要 |
+| `LARKAX_HTTP_ADDR` | `:8080` | 业务入口监听地址 |
+| `LARKAX_INTERNAL_ADDR` | `:9090` | 内部端点监听地址 |
+| `LARKAX_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
+| `LARKAX_ENV` | `development` | 设为 `production` 切换日志格式 |
+| `LARKAX_REDIS_DSN` | 空 | 留空表示不启用 Redis |
+
+必填项缺失时服务拒绝启动并一次列出全部问题，不会带着半截配置跑起来。
+
+**为什么这么少：** 环境变量必须跟着数据一起走。备份恢复或换机器时漏了一个变量，
+数据就可能不可用，而这类错误往往几周后才被发现。所以只有「连上数据库之前就必须拿到」
+的值才做成环境变量（DSN、主密钥、监听地址），其余全部放在数据库的 `settings` 表里。
+
+加新环境变量前请先问：它是不是必须在连上数据库之前拿到。不是的话就写进 `settings` 表。
+
+`settings` 表已随初始迁移建好，但读取它的代码还没写（M1 的一部分）。
+在那之前，现有环境变量是全部的配置入口。
+
+## 主密钥
+
+格式 `"<标识>:<base64 的 32 字节>"`，多把用逗号分隔：
+
+```
+LARKAX_MASTER_KEYS="current:<MASTER_KEY>,previous:<MASTER_KEY>"
+```
+
+为什么支持多把：渠道凭证是用数据密钥（DEK）加密的，DEK 又用每把主密钥各包一份存在库里。
+任何一把都能解开 DEK，所以——
+
+- **轮换**时新旧并存即可，不需要停机重加密全部数据；
+- **弄丢一把**（变量被覆盖、密钥服务迁移出错）不会让存量数据变成废纸；
+- 可以留一把离线保管作为恢复密钥。
+
+标识必须保持稳定，密文里记着它，改名等于丢失对应数据的可读性。
+只有一把时可以不写前缀，直接填 base64。
+
+生成本地开发用的密钥：
 
 ```sh
 openssl rand -base64 32
 ```
 
-`.env` 在 `.gitignore` 里，不会被提交。**不要把真实凭证写进 `.env.example`**，那是给人看的模板。
-
-服务只从环境变量读配置，不读 `.env` 文件本身。想用 `.env` 的话在启动命令前加
-`set -a && . ./.env && set +a`，或者用你习惯的工具（direnv、dotenv 等）。
-
 ## 建表
 
 ```sh
-export LARKAX_DB_DSN='postgres://postgres:placeholder@127.0.0.1:5432/larkax?sslmode=disable'
-export LARKAX_ROLE=worker
-
 go run ./cmd/larkaxctl migrate up
 go run ./cmd/larkaxctl migrate status
 ```
 
-`migrate down` 只回滚最近一次迁移。开发时想推倒重来就 `down` 到 0 再 `up`，
-不要手写 DROP。
+迁移文件在 `internal/migrate/sql/`，用 goose 的命名与格式（`-- +goose Up` / `-- +goose Down`）。
+它们会被 `go:embed` 编进二进制，部署时不需要另外投放 SQL。
 
-## 起服务
+新建迁移用 `go run ./cmd/larkaxctl migrate create <名称>`，然后**把生成的文件从仓库根目录
+移到 `internal/migrate/sql/`**——goose 只按内嵌的那份跑，留在根目录的文件不会被执行。
+
+开发时想推倒重来：
 
 ```sh
-go run ./cmd/larkax
+go run ./cmd/larkaxctl migrate down-to 0
+go run ./cmd/larkaxctl migrate up
 ```
 
-默认监听两个端口：
+不要手写 `DROP`；迁移的 Down 段是唯一被验证过的回滚路径。
 
-| 端口 | 用途 | 端点 |
+## 当前能做什么
+
+M0 阶段只有骨架，**推理接口还没实现**：
+
+| 端口 | 端点 | 现在返回 |
 |---|---|---|
-| `:8080` | 业务入口 | M0 阶段只有占位响应 |
-| `:9090` | 内部端点 | `/healthz`、`/readyz`，后续加 `/metrics` |
+| `:8080` | 任意路径 | `501`，明确的「尚未实现」JSON |
+| `:9090` | `/healthz` | `200`，进程存活 |
+| `:9090` | `/readyz` | `200`，尚无注册的依赖探针 |
 
-内部端点单独一个端口是有意的：它面向编排系统与指标抓取器，
-不应该和业务入口共用监听地址，也不应该在同一个 ingress 规则下暴露出去。
+`501` 是有意的占位：任何真实流量都会立刻得到明确答复，而不是超时或误导性的 404。
+这样部署验证能确认端口通、TLS 通、负载均衡转发通。
+
+内部端点单独一个端口：它面向编排系统与指标抓取器，不和业务入口共用监听地址，
+也就不需要跟着业务入口一起暴露在 ingress 规则下。
 
 ## 常用检查
 
@@ -81,11 +146,3 @@ bash scripts/check-redlines.sh --all
 
 提交前至少跑一遍 `gofmt -l .`、`go vet ./...`、`go test ./...` 和红线自查。
 CI 会跑同样的东西，本地跑是为了少一轮来回。
-
-## 角色
-
-同一个二进制以 `LARKAX_ROLE` 区分。本地开发一般用 `gateway`，
-跑后台任务（日历同步、额度探测、对账）时用 `worker`。
-
-`gateway` 与 `control` 要求配置渠道凭证主密钥；`worker` 不碰凭证，不要求。
-这是有意的——不碰凭证的进程就不该拿到解密密钥。

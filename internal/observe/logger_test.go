@@ -132,9 +132,9 @@ func TestHealthzAlwaysOK(t *testing.T) {
 	}
 }
 
-// 没有任何依赖检查时，进程尚未证明自己能服务请求，就绪检查必须失败。
-// 否则编排系统会把流量打到一个还没准备好的实例上。
-func TestReadyzFailsWithoutChecks(t *testing.T) {
+// 没有需要检查的依赖就是已就绪。若返回 503，尚未注册探针的实例
+// 会被编排系统永久摘除，现场表现是「起来了但不接流量」。
+func TestReadyzOKWithoutChecks(t *testing.T) {
 	mux := http.NewServeMux()
 	RegisterHealthHandlers(mux, nil)
 
@@ -142,8 +142,8 @@ func TestReadyzFailsWithoutChecks(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("无依赖检查时 /readyz 返回 %d，期望 503", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Errorf("无依赖检查时 /readyz 返回 %d，期望 200", rec.Code)
 	}
 
 	var body struct {
@@ -153,8 +153,8 @@ func TestReadyzFailsWithoutChecks(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("响应不是合法 JSON: %v", err)
 	}
-	if body.Ready {
-		t.Error("无依赖检查时 ready 应为 false")
+	if !body.Ready {
+		t.Error("无依赖检查时 ready 应为 true")
 	}
 }
 

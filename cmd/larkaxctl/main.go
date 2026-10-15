@@ -10,6 +10,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -29,14 +31,22 @@ func main() {
 const usage = `larkaxctl 是 larkax 的运维命令行。
 
 用法：
-  larkaxctl migrate up             应用全部未执行的迁移
-  larkaxctl migrate down           回滚最近一次迁移
-  larkaxctl migrate status         显示迁移状态
-  larkaxctl migrate version        显示当前版本
-  larkaxctl migrate create <名称>   生成一个新的迁移文件
+  larkaxctl migrate up                     应用全部未执行的迁移
+  larkaxctl migrate down                   回滚最近一次迁移
+  larkaxctl migrate down-to <版本>          回滚到指定版本（0 表示全部回滚）
+  larkaxctl migrate up-to <版本>            前进到指定版本
+  larkaxctl migrate status                 显示每个迁移的应用状态
+  larkaxctl migrate version                显示当前数据库版本
+  larkaxctl migrate create <名称>           生成迁移文件
 
 环境变量与主服务一致，见 internal/config。
+
+注意：create 会把文件生成在当前目录，需要手工移到 internal/migrate/sql/，
+否则不会被内嵌进二进制、也不会被执行。
 `
+
+// migrationsDir 是迁移文件所在目录，相对于仓库根目录。
+const migrationsDir = "internal/migrate/sql"
 
 func run() error {
 	if len(os.Args) < 2 {
@@ -68,25 +78,28 @@ func runMigrate(args []string) error {
 		fs.Usage()
 		return errors.New("migrate 需要子命令")
 	}
-	action := rest[0]
+	action, rest := rest[0], rest[1:]
 
 	if action == "create" {
-		if len(rest) < 2 {
+		if len(rest) < 1 {
 			return errors.New("用法：larkaxctl migrate create <名称>")
 		}
-		return goose.Run("create", nil, ".", rest[1])
+		if err := goose.Run("create", nil, migrationsDir, rest[0]); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "已生成到 %s/\n", migrationsDir)
+		return nil
 	}
 
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-
 	if err := migrate.SetDialect("postgres"); err != nil {
 		return fmt.Errorf("设置迁移方言失败: %w", err)
 	}
 
-	db, err := sql.Open("pgx", cfg.DB.DSN)
+	db, err := sql.Open("pgx", cfg.DBDSN)
 	if err != nil {
 		return fmt.Errorf("打开数据库连接失败: %w", err)
 	}
@@ -101,12 +114,74 @@ func runMigrate(args []string) error {
 	goose.SetBaseFS(migrate.FS())
 
 	switch action {
-	case "up", "down", "status", "version", "reset", "redo":
-		if err := goose.RunContext(ctx, action, db, "."); err != nil {
-			return fmt.Errorf("执行 %s 失败: %w", action, err)
+	case "up", "down", "status", "version":
+		return gooseRun(ctx, db, action)
+
+	case "down-to":
+		ver, err := parseVersion(action, rest)
+		if err != nil {
+			return err
 		}
-		return nil
+		return stepTo(ctx, db, *ver, false)
+
+	case "up-to":
+		ver, err := parseVersion(action, rest)
+		if err != nil {
+			return err
+		}
+		return stepTo(ctx, db, *ver, true)
+
 	default:
 		return fmt.Errorf("未知的 migrate 子命令 %q", action)
 	}
+}
+
+// stepTo 一步一步地前进或回滚到目标版本。
+//
+// 不用 goose 自带的 up-to / down-to：实测它们会停在目标版本的相邻位置
+// （从 v2 执行 down-to 0 只退到 v1），差一位的表现比不支持更危险——
+// 使用者会以为已经回滚干净了。自己循环，行为就是「版本号到目标为止」，
+// 与直觉一致，也好测。
+func stepTo(ctx context.Context, db *sql.DB, target int64, forward bool) error {
+	for {
+		current, err := goose.GetDBVersionContext(ctx, db)
+		if err != nil {
+			return fmt.Errorf("读取当前版本失败: %w", err)
+		}
+
+		if forward {
+			if current >= target {
+				return nil
+			}
+			if err := goose.UpByOneContext(ctx, db, "."); err != nil {
+				return fmt.Errorf("前进到 %d 时失败: %w", target, err)
+			}
+			continue
+		}
+
+		if current <= target {
+			return nil
+		}
+		if err := goose.DownContext(ctx, db, "."); err != nil {
+			return fmt.Errorf("回滚到 %d 时失败: %w", target, err)
+		}
+	}
+}
+
+func gooseRun(ctx context.Context, db *sql.DB, action string) error {
+	if err := goose.RunContext(ctx, action, db, "."); err != nil {
+		return fmt.Errorf("执行 %s 失败: %w", action, err)
+	}
+	return nil
+}
+
+func parseVersion(action string, args []string) (*int64, error) {
+	if len(args) < 1 || strings.TrimSpace(args[0]) == "" {
+		return nil, fmt.Errorf("用法：larkaxctl migrate %s <版本>", action)
+	}
+	v, err := strconv.ParseInt(strings.TrimSpace(args[0]), 10, 64)
+	if err != nil || v < 0 {
+		return nil, fmt.Errorf("%s 的版本号必须是非负整数，当前为 %q", action, args[0])
+	}
+	return &v, nil
 }

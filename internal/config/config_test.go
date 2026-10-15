@@ -4,40 +4,46 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
-	"time"
 )
 
-const validKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" // 32 字节
+// rawKey 是 32 字节的测试密钥明文，解码后即 KeySize 长度。
+var rawKey = []byte("0123456789abcdef0123456789abcdef")
 
-// setEnv 用 t.Setenv 设置环境变量，测试结束后自动还原。
+func validKeyB64() string {
+	return base64.StdEncoding.EncodeToString(rawKey)
+}
+
+// setEnv 只设置给定变量并将本包读取的其他变量清空，保证测试之间互不污染。
 func setEnv(t *testing.T, kv map[string]string) {
 	t.Helper()
+	for _, k := range allEnvVars {
+		t.Setenv(k, "")
+	}
 	for k, v := range kv {
 		t.Setenv(k, v)
 	}
 }
 
-// clearAll 把本包读取的全部环境变量置空，保证测试之间不互相污染。
-func clearAll(t *testing.T) {
-	t.Helper()
-	for _, k := range []string{
-		"LARKAX_ENV", "LARKAX_ROLE", "LARKAX_HTTP_ADDR", "LARKAX_LOG_LEVEL",
-		"LARKAX_LOG_FORMAT", "LARKAX_METRICS_ADDR",
-		"LARKAX_DB_DSN", "LARKAX_DB_MAX_CONNS", "LARKAX_DB_MIN_CONNS",
-		"LARKAX_DB_CONN_LIFETIME",
-		"LARKAX_REDIS_ADDR", "LARKAX_REDIS_PASSWORD", "LARKAX_REDIS_DB",
-		"LARKAX_CREDENTIAL_MASTER_KEY", "LARKAX_SHUTDOWN_TIMEOUT",
-	} {
-		t.Setenv(k, "")
+var allEnvVars = []string{
+	"LARKAX_ENV", "LARKAX_ROLE", "LARKAX_HTTP_ADDR", "LARKAX_INTERNAL_ADDR",
+	"LARKAX_LOG_LEVEL",
+	"LARKAX_DB_DSN", "LARKAX_REDIS_DSN", "LARKAX_MASTER_KEYS",
+}
+
+// baseEnv 是让 Load 成功的最小变量集合。
+func baseEnv(extra map[string]string) map[string]string {
+	m := map[string]string{
+		"LARKAX_DB_DSN":      "postgres://user:placeholder@localhost:5432/larkax",
+		"LARKAX_MASTER_KEYS": "k1:" + validKeyB64(),
 	}
+	for k, v := range extra {
+		m[k] = v
+	}
+	return m
 }
 
 func TestLoadDefaults(t *testing.T) {
-	clearAll(t)
-	setEnv(t, map[string]string{
-		"LARKAX_DB_DSN":                "postgres://user:placeholder@localhost:5432/larkax",
-		"LARKAX_CREDENTIAL_MASTER_KEY": validKey,
-	})
+	setEnv(t, baseEnv(nil))
 
 	cfg, err := Load()
 	if err != nil {
@@ -53,20 +59,14 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.HTTPAddr != ":8080" {
 		t.Errorf("HTTPAddr = %q，期望 :8080", cfg.HTTPAddr)
 	}
-	if cfg.DB.MaxConns != 20 {
-		t.Errorf("DB.MaxConns = %d，期望 20", cfg.DB.MaxConns)
+	if cfg.InternalAddr != ":9090" {
+		t.Errorf("InternalAddr = %q，期望 :9090", cfg.InternalAddr)
 	}
-	if cfg.DB.MinConns != 2 {
-		t.Errorf("DB.MinConns = %d，期望 2", cfg.DB.MinConns)
+	if cfg.LogLevel != "info" {
+		t.Errorf("LogLevel = %q，期望 info", cfg.LogLevel)
 	}
-	if cfg.DB.ConnLifetime != time.Hour {
-		t.Errorf("DB.ConnLifetime = %v，期望 1h", cfg.DB.ConnLifetime)
-	}
-	if cfg.ShutdownTimeout != 30*time.Second {
-		t.Errorf("ShutdownTimeout = %v，期望 30s", cfg.ShutdownTimeout)
-	}
-	if len(cfg.Secret.CredentialMasterKey) != KeySize {
-		t.Errorf("主密钥长度 = %d，期望 %d", len(cfg.Secret.CredentialMasterKey), KeySize)
+	if len(cfg.MasterKeys) != 1 || cfg.MasterKeys[0].ID != "k1" {
+		t.Errorf("MasterKeys = %+v，期望一把标识为 k1 的密钥", cfg.MasterKeys)
 	}
 	if cfg.IsProduction() {
 		t.Error("development 环境下 IsProduction() 应为 false")
@@ -74,8 +74,7 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestLoadMissingDSN(t *testing.T) {
-	clearAll(t)
-	setEnv(t, map[string]string{"LARKAX_CREDENTIAL_MASTER_KEY": validKey})
+	setEnv(t, map[string]string{"LARKAX_MASTER_KEYS": validKeyB64()})
 
 	_, err := Load()
 	if err == nil {
@@ -87,12 +86,7 @@ func TestLoadMissingDSN(t *testing.T) {
 }
 
 func TestLoadInvalidRole(t *testing.T) {
-	clearAll(t)
-	setEnv(t, map[string]string{
-		"LARKAX_DB_DSN":                "postgres://user:placeholder@localhost:5432/larkax",
-		"LARKAX_ROLE":                  "router",
-		"LARKAX_CREDENTIAL_MASTER_KEY": validKey,
-	})
+	setEnv(t, baseEnv(map[string]string{"LARKAX_ROLE": "router"}))
 
 	_, err := Load()
 	if err == nil {
@@ -103,9 +97,46 @@ func TestLoadInvalidRole(t *testing.T) {
 	}
 }
 
-// worker 角色不碰渠道凭证，不应要求主密钥。
+// Redis 是可选的。给了就要是合法 DSN，不给就不启用。
+func TestLoadRedisDSN(t *testing.T) {
+	cases := []struct {
+		name    string
+		dsn     string
+		wantErr bool
+	}{
+		{"未设置则不启用", "", false},
+		{"redis 方案", "redis://localhost:6379/0", false},
+		{"rediss 方案", "rediss://localhost:6379/0", false},
+		{"unix 套接字", "unix:///var/run/redis.sock", false},
+		{"缺方案前缀", "localhost:6379", true},
+		{"方案写错", "postgres://localhost:5432/redis", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setEnv(t, baseEnv(map[string]string{"LARKAX_REDIS_DSN": tc.dsn}))
+
+			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("应报错但成功了")
+				}
+				if !strings.Contains(err.Error(), "LARKAX_REDIS_DSN") {
+					t.Errorf("错误信息未提及 LARKAX_REDIS_DSN: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("不应报错: %v", err)
+			}
+			if cfg.RedisDSN != tc.dsn {
+				t.Errorf("RedisDSN = %q，期望 %q", cfg.RedisDSN, tc.dsn)
+			}
+		})
+	}
+}
+
+// worker 不碰渠道凭证，不应要求主密钥。
 func TestLoadWorkerDoesNotRequireMasterKey(t *testing.T) {
-	clearAll(t)
 	setEnv(t, map[string]string{
 		"LARKAX_DB_DSN": "postgres://user:placeholder@localhost:5432/larkax",
 		"LARKAX_ROLE":   "worker",
@@ -115,13 +146,12 @@ func TestLoadWorkerDoesNotRequireMasterKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("worker 角色不应要求主密钥，却报错: %v", err)
 	}
-	if len(cfg.Secret.CredentialMasterKey) != 0 {
+	if len(cfg.MasterKeys) != 0 {
 		t.Error("未提供主密钥时不应有值")
 	}
 }
 
 func TestLoadGatewayRequiresMasterKey(t *testing.T) {
-	clearAll(t)
 	setEnv(t, map[string]string{
 		"LARKAX_DB_DSN": "postgres://user:placeholder@localhost:5432/larkax",
 		"LARKAX_ROLE":   "gateway",
@@ -131,144 +161,150 @@ func TestLoadGatewayRequiresMasterKey(t *testing.T) {
 	if err == nil {
 		t.Fatal("gateway 角色缺少主密钥时应报错")
 	}
-	if !strings.Contains(err.Error(), "LARKAX_CREDENTIAL_MASTER_KEY") {
+	if !strings.Contains(err.Error(), "LARKAX_MASTER_KEYS") {
 		t.Errorf("错误信息未提及主密钥: %v", err)
 	}
 }
 
-func TestLoadBadMasterKeyLength(t *testing.T) {
-	clearAll(t)
-	setEnv(t, map[string]string{
-		"LARKAX_DB_DSN":                "postgres://user:placeholder@localhost:5432/larkax",
-		"LARKAX_CREDENTIAL_MASTER_KEY": base64.StdEncoding.EncodeToString([]byte("too-short")),
-	})
+func TestParseMasterKeys(t *testing.T) {
+	other := base64.StdEncoding.EncodeToString([]byte("fedcba9876543210fedcba9876543210"))
 
-	_, err := Load()
-	if err == nil {
-		t.Fatal("主密钥长度不足时应报错")
+	cases := []struct {
+		name    string
+		raw     string
+		wantIDs []string
+		wantErr string
+	}{
+		{
+			name:    "单把带标识",
+			raw:     "k1:" + validKeyB64(),
+			wantIDs: []string{"k1"},
+		},
+		{
+			name:    "单把不带标识",
+			raw:     validKeyB64(),
+			wantIDs: []string{UnsetMasterKeyID},
+		},
+		{
+			name:    "多把并存",
+			raw:     "old:" + validKeyB64() + ", new:" + other,
+			wantIDs: []string{"old", "new"},
+		},
+		{
+			name:    "容忍空白",
+			raw:     "  k1 : " + validKeyB64() + "  ",
+			wantIDs: []string{"k1"},
+		},
+		{
+			name:    "跳过空段",
+			raw:     "k1:" + validKeyB64() + ",,",
+			wantIDs: []string{"k1"},
+		},
+		{
+			name:    "空字符串",
+			raw:     "",
+			wantErr: "未设置",
+		},
+		{
+			name:    "只有逗号",
+			raw:     " , , ",
+			wantErr: "未解析出任何密钥",
+		},
+		{
+			name:    "标识重复",
+			raw:     "k1:" + validKeyB64() + ",k1:" + other,
+			wantErr: "重复",
+		},
+		{
+			name:    "标识为空",
+			raw:     ":" + validKeyB64(),
+			wantErr: "标识不能为空",
+		},
+		{
+			name:    "长度不足",
+			raw:     "k1:" + base64.StdEncoding.EncodeToString([]byte("short")),
+			wantErr: "字节",
+		},
+		{
+			name:    "不是 base64",
+			raw:     "k1:not base64!!",
+			wantErr: "base64",
+		},
 	}
-	if !strings.Contains(err.Error(), "字节") {
-		t.Errorf("错误信息应说明长度不符: %v", err)
-	}
-}
 
-func TestLoadBadMasterKeyEncoding(t *testing.T) {
-	clearAll(t)
-	setEnv(t, map[string]string{
-		"LARKAX_DB_DSN":                "postgres://user:placeholder@localhost:5432/larkax",
-		"LARKAX_CREDENTIAL_MASTER_KEY": "not base64 at all!!",
-	})
-
-	if _, err := Load(); err == nil {
-		t.Fatal("非法 base64 应报错")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			keys, err := parseMasterKeys(tc.raw)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("应报错（含 %q）但成功了", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("错误信息未包含 %q: %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("不应报错: %v", err)
+			}
+			var gotIDs []string
+			for _, k := range keys {
+				gotIDs = append(gotIDs, k.ID)
+			}
+			if strings.Join(gotIDs, ",") != strings.Join(tc.wantIDs, ",") {
+				t.Errorf("标识 = %v，期望 %v", gotIDs, tc.wantIDs)
+			}
+			for _, k := range keys {
+				if len(k.Key) != KeySize {
+					t.Errorf("密钥 %q 长度为 %d，期望 %d", k.ID, len(k.Key), KeySize)
+				}
+			}
+		})
 	}
 }
 
 // 不同工具生成的 base64 字母表与填充习惯不同，四种写法都要接受。
 func TestDecodeKeyAcceptsCommonEncodings(t *testing.T) {
-	raw := []byte("0123456789abcdef0123456789abcdef") // 32 字节
-	if len(raw) != KeySize {
-		t.Fatalf("测试样本长度 %d，需要 %d", len(raw), KeySize)
-	}
-
 	encodings := map[string]*base64.Encoding{
-		"标准带填充":   base64.StdEncoding,
-		"标准无填充":   base64.RawStdEncoding,
-		"URL 带填充": base64.URLEncoding,
-		"URL 无填充": base64.RawURLEncoding,
+		"标准带填充":     base64.StdEncoding,
+		"标准无填充":     base64.RawStdEncoding,
+		"URL 安全带填充": base64.URLEncoding,
+		"URL 安全无填充": base64.RawURLEncoding,
 	}
 	for name, enc := range encodings {
 		t.Run(name, func(t *testing.T) {
-			key, err := decodeKey(enc.EncodeToString(raw))
+			key, err := decodeKey(enc.EncodeToString(rawKey))
 			if err != nil {
 				t.Fatalf("decodeKey 出错: %v", err)
 			}
-			if string(key) != string(raw) {
+			if string(key) != string(rawKey) {
 				t.Error("解码结果与原文不符")
 			}
 		})
 	}
 }
 
-// 密钥值绝不能出现在 fmt 输出里，否则会随日志泄露。
-func TestSecretStringRedacts(t *testing.T) {
-	s := Secret{CredentialMasterKey: []byte("super-secret-key-material-32byte")}
+// PrimaryMasterKey 取列表第一把，用于包装新生成的数据密钥。
+func TestPrimaryMasterKey(t *testing.T) {
+	setEnv(t, baseEnv(map[string]string{
+		"LARKAX_MASTER_KEYS": "new:" + validKeyB64() + ",old:" + validKeyB64(),
+	}))
 
-	if got := s.String(); strings.Contains(got, "super-secret") {
-		t.Errorf("String() 泄露了密钥内容: %s", got)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() 出错: %v", err)
 	}
-	if got := (&Secret{}).String(); !strings.Contains(got, "unset") {
-		t.Errorf("未设置时应显示 unset，实际为 %s", got)
-	}
-}
-
-func TestLoadRejectsInvalidNumbers(t *testing.T) {
-	cases := []struct {
-		name string
-		env  map[string]string
-		want string
-	}{
-		{
-			name: "连接数不是整数",
-			env:  map[string]string{"LARKAX_DB_MAX_CONNS": "many"},
-			want: "LARKAX_DB_MAX_CONNS",
-		},
-		{
-			name: "连接数为零",
-			env:  map[string]string{"LARKAX_DB_MAX_CONNS": "0"},
-			want: "LARKAX_DB_MAX_CONNS",
-		},
-		{
-			name: "最小连接数超过最大",
-			env:  map[string]string{"LARKAX_DB_MAX_CONNS": "5", "LARKAX_DB_MIN_CONNS": "10"},
-			want: "LARKAX_DB_MIN_CONNS",
-		},
-		{
-			name: "时长为负",
-			env:  map[string]string{"LARKAX_SHUTDOWN_TIMEOUT": "-5s"},
-			want: "LARKAX_SHUTDOWN_TIMEOUT",
-		},
-		{
-			name: "时长不是时长",
-			env:  map[string]string{"LARKAX_DB_CONN_LIFETIME": "一小时"},
-			want: "LARKAX_DB_CONN_LIFETIME",
-		},
-		{
-			name: "Redis DB 不是整数",
-			env:  map[string]string{"LARKAX_REDIS_DB": "first"},
-			want: "LARKAX_REDIS_DB",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			clearAll(t)
-			base := map[string]string{
-				"LARKAX_DB_DSN":                "postgres://user:placeholder@localhost:5432/larkax",
-				"LARKAX_CREDENTIAL_MASTER_KEY": validKey,
-			}
-			for k, v := range tc.env {
-				base[k] = v
-			}
-			setEnv(t, base)
-
-			_, err := Load()
-			if err == nil {
-				t.Fatal("应报错但成功了")
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("错误信息未提及 %s: %v", tc.want, err)
-			}
-		})
+	if got := cfg.PrimaryMasterKey().ID; got != "new" {
+		t.Errorf("PrimaryMasterKey().ID = %q，期望 new", got)
 	}
 }
 
 // 多个问题应一次性全部报出，而不是修一个发现一个。
 func TestLoadReportsAllErrorsAtOnce(t *testing.T) {
-	clearAll(t)
 	setEnv(t, map[string]string{
-		"LARKAX_ROLE":         "bogus",
-		"LARKAX_DB_MAX_CONNS": "0",
+		"LARKAX_ROLE":        "bogus",
+		"LARKAX_REDIS_DSN":   "localhost:6379",
+		"LARKAX_MASTER_KEYS": "not base64!!",
 	})
 
 	_, err := Load()
@@ -276,7 +312,7 @@ func TestLoadReportsAllErrorsAtOnce(t *testing.T) {
 		t.Fatal("应报错")
 	}
 	msg := err.Error()
-	for _, want := range []string{"LARKAX_ROLE", "LARKAX_DB_DSN", "LARKAX_DB_MAX_CONNS", "LARKAX_CREDENTIAL_MASTER_KEY"} {
+	for _, want := range []string{"LARKAX_ROLE", "LARKAX_DB_DSN", "LARKAX_REDIS_DSN", "LARKAX_MASTER_KEYS"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("错误信息未包含 %s:\n%s", want, msg)
 		}

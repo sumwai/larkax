@@ -9,10 +9,19 @@ latency, cost, and quota; usage is metered and billed per request.
 
 ## Status
 
-Early development. The public API is not yet live and nothing here is ready to run
-in production.
+Early development — the repository currently contains the service skeleton and the
+database schema, not a working router. The inference API is not implemented and
+returns `501` on every path. Nothing here is ready to run in production.
 
-## What it does
+What works today:
+
+- Configuration loading, structured logging, `/healthz` and `/readyz`
+- Migrations, applied and rolled back through `larkaxctl`
+- The full initial database schema
+
+See [docs/development.md](docs/development.md) for how to build and run it.
+
+## What it will do
 
 - **Dual protocol.** `/v1/chat/completions` and `/v1/messages` on the same host. The
   official OpenAI and Anthropic SDKs both work by pointing `base_url` at larkax.
@@ -25,22 +34,22 @@ in production.
 - **Plugin system.** Sandboxed JavaScript hooks around the request lifecycle. Plugins
   cannot read channel credentials and cannot make network requests.
 - **Structure-only request capture.** Enough of each request's shape is kept to
-  reproduce an error; prompt and response content is not.
+  reproduce an error; prompt and response content is not. See
+  [docs/request-retention.md](docs/request-retention.md).
 
 ## Repository layout
 
 ```
-cmd/larkax/         the service binary
-cmd/larkaxctl/      migrations and operations CLI
-internal/gateway/   ingress: protocols, auth, rate limits, request IDs
-internal/route/     channel selection and failover
-internal/billing/   pricing rules, calendar, tokenizers
-internal/quota/     upstream quota probing and scheduling
-internal/ledger/    double-entry ledger, wallets, payouts
-internal/plugin/    plugin host and contract
-migrations/         database migrations
-web/                console frontend
+cmd/larkax/            the service binary
+cmd/larkaxctl/         migrations and operations CLI
+internal/config/       startup configuration
+internal/migrate/      embedded migrations (internal/migrate/sql/)
+internal/observe/      logging, health and readiness endpoints
+scripts/               repository tooling
 ```
+
+Later milestones add `internal/gateway`, `internal/route`, `internal/billing`,
+`internal/quota`, `internal/ledger`, `internal/plugin`, `plugins/`, and `web/`.
 
 ## Building
 
@@ -50,6 +59,9 @@ Requires Go 1.26 or newer.
 go build ./...
 go test ./...
 ```
+
+Building is not enough to run the service — it also needs a PostgreSQL database and
+several environment variables. Follow [docs/development.md](docs/development.md).
 
 ## License
 
