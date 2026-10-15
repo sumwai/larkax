@@ -100,6 +100,34 @@ retention_days = 30'
 expect_clean "短标识不算密钥" 'token_type = bearer
 key_id = k1'
 
+# 回归：代码里的字段访问不是凭证
+expect_clean "Go 字段访问" 'Tokens: r.Usage.OutputTokens'
+expect_clean "Go 结构体字面量" 'TokensDetails: dto.InputTokenDetails'
+expect_clean "链式选择器带括号" 'token: cfg.Auth.Token'
+expect_clean "多级选择器单独成值" 'secret: app.config.Store.Key'
+expect_clean "带空格的赋值" 'token = resp.Data.Token'
+
+# 但真凭证混在同类行里仍要报：选择器放行的是「整行只有选择器」，
+# 别处有字面量就得报出来
+expect_hit "选择器同行仍有真口令" 'password: correct-horse-battery-staple'
+
+# ── --all 必须覆盖尚未 add 的文件 ─────────────────────────────────────────
+#
+# 只扫 git ls-files（已跟踪）会留一个盲区：新写的文件在推送前不在扫描范围内，
+# 本机自查「通过」会让人以为没问题，等 CI 扫到时就晚了。
+
+uncovered_dir="$tmp/all-untracked"
+mkdir -p "$uncovered_dir"
+printf '%s\n' 'password=correct-horse-battery-staple' > "$uncovered_dir/new_file.txt"
+( cd "$uncovered_dir" && git init -q )
+if ( cd "$uncovered_dir" && bash "$SCRIPT" --all >/dev/null 2>&1 ); then
+  echo "✗ --all 漏掉了尚未 add 的文件"
+  fail=$((fail + 1))
+else
+  pass=$((pass + 1))
+fi
+
+
 # ── 结果 ──────────────────────────────────────────────────────────────────
 
 echo
