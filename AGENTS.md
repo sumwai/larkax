@@ -181,3 +181,26 @@ Review 不只看代码逻辑。让 agent **扮演对项目一无所知的 review
 - 只跑与自己目录相关的 `go build` / `go vet` / `go test` / `gofmt`
 - **PR 的创建与合并由主会话做**，保证 GitHub 流程一致，
   也避免多个代理同时操作远端
+
+## Lint
+
+```sh
+gofmt -l .                          # 格式
+go vet ./...                        # 标准检查
+golangci-lint run ./...             # 跨文件与语义检查（配置见 .golangci.yml）
+bash scripts/check-redlines.sh      # 公开红线
+```
+
+`golangci-lint` **只开有价值的检查器，不做「全部打开」**——一份报上百条无关警告的
+报告，第二次就没人看了。配置里每一项都有它对应的理由。
+
+版本上有两个坑，都实际撞过：
+
+1. **用比 `go.mod` 更旧的 Go 构建的 golangci-lint 会直接拒绝运行**。
+   release 二进制通常比当前 Go 旧，所以本地要用 `go install` 一份，
+   CI 里用 `install-mode: goinstall`。
+2. **它自带的 typechecker 也要够新**。旧版读不了新版 Go 的导出数据格式，
+   报 `export data version N is greater than maximum supported version M`——
+   这个错看起来像代码问题，其实是工具版本问题。
+
+所以升级 Go 或 golangci-lint 时，两者要一起看。

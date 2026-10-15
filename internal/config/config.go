@@ -29,6 +29,7 @@ import (
 // 因此三者是同一份代码的不同启动模式，而不是三个服务。
 type Role string
 
+// 三个角色的取值，与 --role 参数、配置里的 role 字段一致。
 const (
 	RoleGateway Role = "gateway"
 	RoleControl Role = "control"
@@ -89,6 +90,7 @@ func (k MasterKey) String() string {
 	return fmt.Sprintf("config.MasterKey{ID:%q Key:%d 字节已隐藏}", k.ID, len(k.Key))
 }
 
+// GoString 让 %#v 也走 String。两者不会互相退化，缺一个就等于开了个口子。
 func (k MasterKey) GoString() string { return k.String() }
 
 // KeySize 是主密钥的字节长度（AES-256）。

@@ -48,6 +48,22 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # 与 gofmt/vet 分工：那两者快且零配置，这里放它们覆盖不到的、
+      # 需要跨文件或深入语义的检查。
+      #
+      # 版本有两个坑，都实际撞过：
+      #   1. 用比 go.mod 更旧的 Go 构建的 golangci-lint 会**直接拒绝运行**，
+      #      报 "Go language version ... is lower than the targeted Go version"。
+      #      所以要用本仓库的 toolchain 现构（install-mode: goinstall）。
+      #   2. 它自带的 typechecker 也要够新。v2.5 读不懂 go1.27 的导出数据格式，
+      #      报 "export data version 4 is greater than maximum supported
+      #      version 2"——那个错看起来像代码问题，其实是工具版本问题。
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.14.0
+          install-mode: goinstall
+
       - name: 单元测试
         run: go test -race -coverprofile=coverage.out ./...
 

@@ -36,7 +36,10 @@ func New(timeout time.Duration) *Adapter {
 	return &Adapter{client: httpx.Client(timeout)}
 }
 
-func (a *Adapter) Type() string               { return Type }
+// Type 返回注册表里用的类型名。
+func (a *Adapter) Type() string { return Type }
+
+// Protocol 返回本适配器所说的协议：OpenAI Chat Completions。
 func (a *Adapter) Protocol() channel.Protocol { return channel.ProtocolOpenAI }
 
 // Chat 发起一次非流式请求。
@@ -50,15 +53,16 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 	if err != nil {
 		return nil, err
 	}
-	defer httpx.DrainAndClose(resp.Body)
+	defer func() { _ = resp.Body.Close() }()
+	defer httpx.Drain(resp.Body)
 
-	if err := httpx.CheckStatus(resp); err != nil {
-		return nil, err
+	if statusErr := httpx.CheckStatus(resp); statusErr != nil {
+		return nil, statusErr
 	}
 
 	var parsed json.RawMessage
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, &channel.ErrUpstream{Retryable: true, Err: fmt.Errorf("解析上游响应失败: %w", err)}
+	if decodeErr := json.NewDecoder(resp.Body).Decode(&parsed); decodeErr != nil {
+		return nil, &channel.ErrUpstream{Retryable: true, Err: fmt.Errorf("解析上游响应失败: %w", decodeErr)}
 	}
 
 	// 有些上游在 HTTP 200 里塞一个 error 对象。只看状态码会把它当成正常响应，
@@ -68,8 +72,8 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 	}
 
 	var textResp openAITextResponse
-	if err := json.Unmarshal(parsed, &textResp); err != nil {
-		return nil, &channel.ErrUpstream{Retryable: true, Err: fmt.Errorf("响应结构不符: %w", err)}
+	if unmarshalErr := json.Unmarshal(parsed, &textResp); unmarshalErr != nil {
+		return nil, &channel.ErrUpstream{Retryable: true, Err: fmt.Errorf("响应结构不符: %w", unmarshalErr)}
 	}
 
 	out, err := relay.ResponseFromRelaykit(textResp.toRelaykit())
@@ -100,17 +104,29 @@ func (a *Adapter) ChatStream(ctx context.Context, ch channel.Channel, req *chann
 	// 上游拒绝：状态码与响应体都拿到了，直接报错，不启动 goroutine。
 	// 此时还没有任何内容发给客户端，调用方可以安全地换渠道。
 	if err := httpx.CheckStatus(resp); err != nil {
-		defer httpx.DrainAndClose(resp.Body)
+		defer func() { _ = resp.Body.Close() }()
+		defer httpx.Drain(resp.Body)
 		return nil, err
 	}
 
+	// 读体、排空与关闭都在 goroutine 里做，因此这里不能在 defer 里关闭：
+	// 函数要先带着事件通道返回，响应体要活到调用方读完事件为止。
+	// 交给 pumpResponse 收尾，顺序仍是先排空、后关闭。
 	events := make(chan channel.StreamEvent)
-	go func() {
-		defer close(events)
-		defer httpx.DrainAndClose(resp.Body)
-		a.pump(ctx, resp.Body, events)
-	}()
+	go a.pumpResponse(ctx, resp, events)
 	return events, nil
+}
+
+// pumpResponse 把响应体翻译成统一事件，并负责排空与关闭它。
+//
+// 单独一个方法而不是写在 goroutine 的闭包里：响应体的收尾只在关闭点
+// 完整可见时才好核对，而闭包里的 resp.Body.Close() 会被静态检查当成
+// 「这个响应体没人关」。
+func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, events chan channel.StreamEvent) {
+	defer close(events)
+	defer func() { _ = resp.Body.Close() }()
+	defer httpx.Drain(resp.Body)
+	a.pump(ctx, resp.Body, events)
 }
 
 // ListModels 查询上游可用模型。
@@ -125,7 +141,8 @@ func (a *Adapter) ListModels(ctx context.Context, ch channel.Channel) ([]string,
 	if err != nil {
 		return nil, &channel.ErrUpstream{Retryable: true, Err: err}
 	}
-	defer httpx.DrainAndClose(resp.Body)
+	defer func() { _ = resp.Body.Close() }()
+	defer httpx.Drain(resp.Body)
 
 	if err := httpx.CheckStatus(resp); err != nil {
 		return nil, err

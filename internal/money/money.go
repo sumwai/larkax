@@ -320,7 +320,12 @@ func clampFromBig(v *big.Int) int64 {
 	return math.MinInt64
 }
 
-func clampInt64Sign(v, sign int64) int64 {
+// clampInt64Sign 把溢出后的和夹到 int64 边界。
+//
+// 方向由 sign 决定：同号相加溢出时，结果的符号就是两个加数的符号，
+// 正数溢出取 MaxInt64、负数溢出取 MinInt64。v 只用来表明「这里有一个
+// 溢出后的值」，具体数值不可信，所以不参与判断。
+func clampInt64Sign(_ int64, sign int64) int64 {
 	if sign > 0 {
 		return math.MaxInt64
 	}

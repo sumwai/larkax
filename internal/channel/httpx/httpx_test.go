@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -99,8 +100,8 @@ func TestCheckStatusKeepsTruncatedBody(t *testing.T) {
 		Body:       io.NopCloser(bytes.NewReader(long)),
 	}
 	err := CheckStatus(resp)
-	ue, ok := err.(*channel.ErrUpstream)
-	if !ok {
+	var ue *channel.ErrUpstream
+	if !errors.As(err, &ue) {
 		t.Fatalf("错误类型为 %T", err)
 	}
 	if len(ue.Body) > MaxErrorBody {
@@ -129,10 +130,36 @@ func TestClientConfiguresTimeout(t *testing.T) {
 
 // 排空之后再关闭：留着未读数据会让连接无法复用。
 func TestDrainAndCloseConsumesBody(t *testing.T) {
-	body := io.NopCloser(strings.NewReader("还有没读完的数据"))
-	DrainAndClose(body)
-	if _, err := body.Read(make([]byte, 1)); err == nil {
-		t.Error("响应体应已被关闭")
+	body := &recordingBody{Reader: strings.NewReader("还有没读完的数据")}
+	Drain(body)
+	if body.closed {
+		t.Error("Drain 不该关闭 body")
 	}
+	if body.read != len("还有没读完的数据") {
+		t.Errorf("Drain 读走了 %d 字节，期望全部", body.read)
+	}
+	DrainAndClose(body)
+	if !body.closed {
+		t.Error("DrainAndClose 应关闭 body")
+	}
+	Drain(nil)         // 不该 panic
 	DrainAndClose(nil) // 不该 panic
+}
+
+// recordingBody 记录读了多少字节、以及是否被关闭。
+type recordingBody struct {
+	io.Reader
+	read   int
+	closed bool
+}
+
+func (b *recordingBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	b.read += n
+	return n, err
+}
+
+func (b *recordingBody) Close() error {
+	b.closed = true
+	return nil
 }

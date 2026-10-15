@@ -23,6 +23,7 @@ import (
 // 而不是等到某个深夜第一次读到它时才炸。
 type Kind string
 
+// 配置项的类型取值，与迁移里写入 settings 表的值对应。
 const (
 	KindInt    Kind = "int"
 	KindBool   Kind = "bool"

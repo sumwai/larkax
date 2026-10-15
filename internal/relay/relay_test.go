@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -567,7 +568,7 @@ func TestFromRelaykitOpenAIRequest(t *testing.T) {
 		}},
 	}
 
-	got, err := FromRelaykitRequest(channel.ProtocolOpenAI, &src)
+	got, err := FromRelaykitRequest(context.Background(), channel.ProtocolOpenAI, &src)
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -602,7 +603,7 @@ func TestFromRelaykitClaudeRequest(t *testing.T) {
 		},
 	}
 
-	got, err := FromRelaykitRequest(channel.ProtocolAnthropic, src)
+	got, err := FromRelaykitRequest(context.Background(), channel.ProtocolAnthropic, src)
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -621,10 +622,10 @@ func TestFromRelaykitClaudeRequest(t *testing.T) {
 }
 
 func TestFromRelaykitRejectsUnknownType(t *testing.T) {
-	if _, err := FromRelaykitRequest(channel.ProtocolOpenAI, "不是请求"); err == nil {
+	if _, err := FromRelaykitRequest(context.Background(), channel.ProtocolOpenAI, "不是请求"); err == nil {
 		t.Error("未知类型应报错")
 	}
-	if _, err := FromRelaykitRequest(channel.ProtocolCustom, &dto.GeneralOpenAIRequest{}); err == nil {
+	if _, err := FromRelaykitRequest(context.Background(), channel.ProtocolCustom, &dto.GeneralOpenAIRequest{}); err == nil {
 		t.Error("custom 协议应报错")
 	}
 }
@@ -640,7 +641,7 @@ func TestFromRelaykitAssistantToolCalls(t *testing.T) {
 		}},
 	}
 
-	got, err := FromRelaykitRequest(channel.ProtocolOpenAI, &src)
+	got, err := FromRelaykitRequest(context.Background(), channel.ProtocolOpenAI, &src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -670,7 +671,7 @@ func TestFromRelaykitToolResultBecomesBlock(t *testing.T) {
 		}},
 	}
 
-	got, err := FromRelaykitRequest(channel.ProtocolOpenAI, &src)
+	got, err := FromRelaykitRequest(context.Background(), channel.ProtocolOpenAI, &src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,7 +699,7 @@ func TestFromRelaykitContentBlocks(t *testing.T) {
 		}},
 	}
 
-	got, err := FromRelaykitRequest(channel.ProtocolOpenAI, &src)
+	got, err := FromRelaykitRequest(context.Background(), channel.ProtocolOpenAI, &src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -726,7 +727,7 @@ func TestFromRelaykitImageURLStaysURL(t *testing.T) {
 		}},
 	}
 
-	got, err := FromRelaykitRequest(channel.ProtocolOpenAI, &src)
+	got, err := FromRelaykitRequest(context.Background(), channel.ProtocolOpenAI, &src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -756,7 +757,7 @@ func TestRequestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	back, err := FromRelaykitRequest(channel.ProtocolOpenAI, mid)
+	back, err := FromRelaykitRequest(context.Background(), channel.ProtocolOpenAI, mid)
 	if err != nil {
 		t.Fatal(err)
 	}

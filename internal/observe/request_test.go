@@ -92,7 +92,7 @@ func TestMiddlewareSetsHeaderAndContext(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/chat/completions", nil)
 	req.Header.Set(HeaderRequestID, "client-supplied")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -113,7 +113,7 @@ func TestMiddlewareGeneratesWhenAbsent(t *testing.T) {
 	}))
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
 
 	if fromCtx == "" {
 		t.Error("context 里应有自动生成的标识")

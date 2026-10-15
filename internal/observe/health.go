@@ -31,8 +31,11 @@ const readyzTimeout = 2 * time.Second
 // 就是已就绪；反过来会让尚未注册探针的实例被编排系统永久摘除，
 // 而现场表现是「服务起来了但一直不接流量」，极难排查。
 // 想让实例在依赖可用前不接流量，就注册对应的检查项，而不是靠空列表。
+//
+// 两个 handler 的请求参数用不上（不读请求头也不读方法），
+// 但 http.HandlerFunc 的签名要求它们在场。
 func RegisterHealthHandlers(mux *http.ServeMux, checks []ReadinessCheck) {
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 	})
 
