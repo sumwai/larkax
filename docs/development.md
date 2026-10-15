@@ -103,8 +103,14 @@ go run ./cmd/larkaxctl migrate status
 迁移文件在 `internal/migrate/sql/`，用 goose 的命名与格式（`-- +goose Up` / `-- +goose Down`）。
 它们会被 `go:embed` 编进二进制，部署时不需要另外投放 SQL。
 
-新建迁移用 `go run ./cmd/larkaxctl migrate create <名称>`，然后**把生成的文件从仓库根目录
-移到 `internal/migrate/sql/`**——goose 只按内嵌的那份跑，留在根目录的文件不会被执行。
+新建迁移：
+
+```sh
+go run ./cmd/larkaxctl migrate create <名称>
+```
+
+文件会直接生成到 `internal/migrate/sql/`，并强制为 `.sql` 格式
+（goose 默认生成 `.go`，那种既不会被内嵌也不会被执行，还会在迁移目录里多出一个包）。
 
 开发时想推倒重来：
 
