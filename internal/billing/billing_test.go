@@ -598,3 +598,118 @@ func TestReserveEstimatesCacheReadAtInputPrice(t *testing.T) {
 		t.Errorf("缓存读写都算进了预留，不该撞 Capped：预留 %s 实际 %s", reserved, s.Breakdown.Total)
 	}
 }
+
+// ── 变异测试补的用例 ────────────────────────────────────────────────────
+//
+// 来自变异测试（gremlins unleash）：把比较符或分支方向改一下，测试仍然通过。
+// 覆盖率看不出来这一类缺口——行被执行过了，但边界那一支没被走到。
+
+// TotalTokens 要把五个 token 字段**全部**加起来。
+//
+// 变异：把其中任意一个 `+` 改成 `-`，只要那个字段恰为 0 就看不出来。
+// 原先的用例大多只填了一两个字段。
+func TestTotalTokensSumsEveryField(t *testing.T) {
+	u := Usage{
+		PromptTokens: 1, CompletionTokens: 2, CacheReadTokens: 4,
+		CacheWriteTokens: 8, ReasoningTokens: 16,
+	}
+	if got := u.TotalTokens(); got != 31 {
+		t.Errorf("TotalTokens = %d，期望 31（1+2+4+8+16）", got)
+	}
+	if !u.IsEmpty() == false {
+		t.Error("有 token 时不该判定为空")
+	}
+	// 逐字段：去掉任何一个都不再相等
+	for name, one := range map[string]Usage{
+		"prompt":     {PromptTokens: 1},
+		"completion": {CompletionTokens: 2},
+		"cacheRead":  {CacheReadTokens: 4},
+		"cacheWrite": {CacheWriteTokens: 8},
+		"reasoning":  {ReasoningTokens: 16},
+	} {
+		if one.TotalTokens() <= 0 {
+			t.Errorf("%s 字段没被计入 TotalTokens", name)
+		}
+	}
+}
+
+// 计量项数量为 0 时也应当被校验：负数的检查必须覆盖 0 这个边界。
+//
+// 变异：`count < 0` 改成 `count <= 0`，数量为 0 的计量项会被误拒。
+func TestValidateAllowsZeroUnitCount(t *testing.T) {
+	p := prices()
+	p.Units = map[string]money.Amount{"searches": money.MustParse("0.01")}
+
+	if err := Validate(Usage{UnitCounts: map[string]int64{"searches": 0}}, p); err != nil {
+		t.Errorf("数量为 0 的计量项不该被拒: %v", err)
+	}
+}
+
+// 缓存量恰好等于输入量时，非缓存输入应当是 0 而不是负数。
+//
+// 变异：`nonCached < 0` 改成 `<= 0`，恰好相等时会被当成「不一致」
+// 而触发压回逻辑，虽然结果相同，但分支走向不同。
+func TestNonCachedExactlyZero(t *testing.T) {
+	got := FromChannelUsage(channel.Usage{PromptTokens: 300, CacheReadTokens: 300})
+	if got.PromptTokens != 0 {
+		t.Errorf("非缓存输入 = %d，期望 0", got.PromptTokens)
+	}
+	// 缓存总量恰好等于输入，不该被压
+	if got.CacheReadTokens != 300 {
+		t.Errorf("缓存读 = %d，期望 300（恰好相等不该被压）", got.CacheReadTokens)
+	}
+}
+
+// 缓存总量恰好不超过输入时，不该触发压回。
+//
+// 变异：`total > u.PromptTokens` 改成 `>=`，恰好相等时也会压。
+func TestCacheCompressionBoundary(t *testing.T) {
+	// 100 输入 = 60 缓存读 + 40 缓存写，恰好相等
+	got := FromChannelUsage(channel.Usage{
+		PromptTokens: 100, CacheReadTokens: 60, CacheWriteTokens: 40,
+	})
+	if got.PromptTokens != 0 || got.CacheReadTokens != 60 || got.CacheWriteTokens != 40 {
+		t.Errorf("恰好相等时不该压回: %+v", got)
+	}
+
+	// 超出一份就该压
+	got = FromChannelUsage(channel.Usage{
+		PromptTokens: 100, CacheReadTokens: 60, CacheWriteTokens: 60,
+	})
+	total := got.PromptTokens + got.CacheReadTokens + got.CacheWriteTokens
+	if total > 100 {
+		t.Errorf("超出输入总量时应压回，得到合计 %d", total)
+	}
+}
+
+// 最低消费恰好等于按量金额时不该补差。
+//
+// 变异：`subtotal.Cmp(minimum) >= 0` 改成 `>`，恰好相等时也会补差，
+// 而补差金额为 0——不产生错误结果，但会多出一条零金额的行项。
+func TestMinimumExactlyEqualSubtotal(t *testing.T) {
+	usage := Usage{CompletionTokens: 1000} // 0.008
+	p := prices()
+	b := ComputeWithCharges(usage, p, Charges{Minimum: money.MustParse("0.008")})
+
+	if !b.MinimumAdjustment.IsZero() {
+		t.Errorf("恰好相等时不该补差，得到 %s", b.MinimumAdjustment)
+	}
+	if err := b.Verify(); err != nil {
+		t.Error(err)
+	}
+}
+
+// 计费口径的用量为零时，金额必须为零——且不产生任何非零行项。
+//
+// 变异：把某个 `MulInt` 的参数换成常量，零用量会算出非零金额。
+func TestZeroUsageYieldsZeroAmounts(t *testing.T) {
+	b := ComputeWithCharges(Usage{}, prices(), Charges{})
+	for name, v := range map[string]money.Amount{
+		"prompt": b.Prompt, "completion": b.Completion,
+		"cacheRead": b.CacheRead, "cacheWrite": b.CacheWrite, "reasoning": b.Reasoning,
+	} {
+		if !v.IsZero() {
+			t.Errorf("零用量时 %s 项 = %s，应为零", name, v)
+		}
+	}
+}
