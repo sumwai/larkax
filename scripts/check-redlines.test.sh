@@ -17,12 +17,16 @@ trap 'rm -rf "$tmp"' EXIT
 pass=0
 fail=0
 
-# expect_hit <用例名> <文件内容>
+# 样本文件名默认用 .env：赋值类模式**只在配置与脚本文件上生效**
+#（见 check-redlines.sh 里的 ASSIGN_FILES），用 sample.txt 会让它整组失效。
+DEFAULT_SAMPLE="sample.env"
+
+# expect_hit <用例名> <文件内容> [文件名]
 expect_hit() {
-  local name="$1" content="$2"
+  local name="$1" content="$2" file="${3:-$DEFAULT_SAMPLE}"
   local dir="$tmp/hit-$RANDOM"
   mkdir -p "$dir"
-  printf '%s\n' "$content" > "$dir/sample.txt"
+  printf '%s\n' "$content" > "$dir/$file"
   ( cd "$dir" && git init -q && git add -A >/dev/null 2>&1 )
   if ( cd "$dir" && bash "$SCRIPT" >/dev/null 2>&1 ); then
     echo "✗ $name —— 应命中却报通过"
@@ -32,12 +36,12 @@ expect_hit() {
   fi
 }
 
-# expect_clean <用例名> <文件内容>
+# expect_clean <用例名> <文件内容> [文件名]
 expect_clean() {
-  local name="$1" content="$2"
+  local name="$1" content="$2" file="${3:-$DEFAULT_SAMPLE}"
   local dir="$tmp/clean-$RANDOM"
   mkdir -p "$dir"
-  printf '%s\n' "$content" > "$dir/sample.txt"
+  printf '%s\n' "$content" > "$dir/$file"
   ( cd "$dir" && git init -q && git add -A >/dev/null 2>&1 )
   if ( cd "$dir" && bash "$SCRIPT" >/dev/null 2>&1 ); then
     pass=$((pass + 1))
@@ -111,6 +115,29 @@ expect_clean "带空格的赋值" 'token = resp.Data.Token'
 # 别处有字面量就得报出来
 expect_hit "选择器同行仍有真口令" 'password: correct-horse-battery-staple'
 
+# ── 赋值类只在配置与脚本上生效 ────────────────────────────────────────────
+#
+# 这是被误报逼出来的：赋值类模式认形态，而代码里到处是形状相同的表达式。
+# 补白名单能治标，但每遇到一种新语法就要再补一次。
+
+# 同样的内容在源码文件里不该报——那是变量赋值，不是凭证配置
+expect_clean "Go 源码里的字段访问" 'Tokens: r.Usage.OutputTokens' 'sample.go'
+expect_clean "Go 源码里的解引用" 'Tokens = *u.PromptTokens' 'sample.go'
+expect_clean "TS 源码里的赋值" 'token = resp.data.accessToken' 'sample.ts'
+expect_clean "Python 里的字段访问" 'self.token = cfg.auth.token' 'sample.py'
+
+# 但在配置文件里仍然要报
+expect_hit "配置文件里的真口令" 'password=correct-horse-battery-staple' 'app.yaml'
+expect_hit "env 文件里的真口令" 'DB_PASSWORD=correct-horse-battery-staple' '.env'
+expect_hit "shell 脚本里的导出" 'export API_KEY=abcdef1234567890' 'setup.sh'
+expect_hit "JSON 配置里的真口令" '{"password":"correct-horse-battery-staple"}' 'config.json'
+expect_hit "TOML 配置里的真口令" 'password = "correct-horse-battery-staple"' 'app.toml'
+
+# 形态类（密钥前缀、私钥头、私有主机）不受文件类型限制：
+# 它们在代码里同样意味着泄露
+expect_hit "源码里的私钥头" '-----BEGIN RSA PRIVATE KEY-----' 'sample.go'
+expect_hit "源码里的本机路径" 'root = /home/somebody/work/larkax' 'sample.go'
+
 # ── --all 必须覆盖尚未 add 的文件 ─────────────────────────────────────────
 #
 # 只扫 git ls-files（已跟踪）会留一个盲区：新写的文件在推送前不在扫描范围内，
@@ -118,7 +145,7 @@ expect_hit "选择器同行仍有真口令" 'password: correct-horse-battery-sta
 
 uncovered_dir="$tmp/all-untracked"
 mkdir -p "$uncovered_dir"
-printf '%s\n' 'password=correct-horse-battery-staple' > "$uncovered_dir/new_file.txt"
+printf '%s\n' 'password=correct-horse-battery-staple' > "$uncovered_dir/new_file.env"
 ( cd "$uncovered_dir" && git init -q )
 if ( cd "$uncovered_dir" && bash "$SCRIPT" --all >/dev/null 2>&1 ); then
   echo "✗ --all 漏掉了尚未 add 的文件"
