@@ -49,7 +49,10 @@ func Open(ctx context.Context, dsn string) (*sql.DB, error) {
 	pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
 	defer cancel()
 	if err := handle.PingContext(pingCtx); err != nil {
-		handle.Close()
+		// 连不上就把刚开的池子关掉再返回，否则连接池会跟着这个错误一起
+		// 被丢掉，而它持有的连接要在 GC 之前一直挂着。
+		// 关闭本身的错误盖不过下面那个「连不上」——那才是调用方要知道的事。
+		_ = handle.Close()
 		return nil, fmt.Errorf("连接数据库失败: %w", err)
 	}
 	return handle, nil

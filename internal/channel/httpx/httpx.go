@@ -136,14 +136,37 @@ func ParseRetryAfter(v string) time.Duration {
 	return 0
 }
 
-// DrainAndClose 排空并关闭响应体。
+// Drain 读掉响应体里剩余的内容。
 //
 // 排空是必须的：留着未读数据会让底层连接无法复用，表现为「QPS 一高就
 // 大量新建连接」，而指标上看不出原因（连接数在涨，但没有错误）。
-func DrainAndClose(body io.ReadCloser) {
+//
+// 与关闭分开是因为 defer 的执行顺序：defer 后进先出，
+//
+//	defer resp.Body.Close()
+//	defer httpx.Drain(resp.Body)
+//
+// 实际执行的是「先排空、后关闭」，正合需要。合成一个函数写成
+// `defer DrainAndClose(resp.Body)` 语义相同，但 bodyclose 那次静态检查
+// 只认 `resp.Body` 上直接出现的 Close，看不见被调用函数内部的关闭，
+// 于是每一处正常的收尾都会被报成「响应体未关闭」。
+// 分开之后调用点各自表达完整，检查也就跟得上了。
+func Drain(body io.Reader) {
 	if body == nil {
 		return
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, 1<<20))
+}
+
+// DrainAndClose 排空并关闭响应体。
+//
+// 只给拿不到 *http.Response 的调用点用（例如把 body 单独传出去的地方）。
+// 收尾一个 *http.Response 用 Drain + resp.Body.Close() 两行，
+// 原因见 Drain 的注释。
+func DrainAndClose(body io.ReadCloser) {
+	Drain(body)
+	if body == nil {
+		return
+	}
 	_ = body.Close()
 }

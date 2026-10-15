@@ -123,7 +123,7 @@ func TestHealthzAlwaysOK(t *testing.T) {
 	mux := http.NewServeMux()
 	RegisterHealthHandlers(mux, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -138,7 +138,7 @@ func TestReadyzOKWithoutChecks(t *testing.T) {
 	mux := http.NewServeMux()
 	RegisterHealthHandlers(mux, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -190,7 +190,7 @@ func TestReadyzReflectsCheckResults(t *testing.T) {
 			mux := http.NewServeMux()
 			RegisterHealthHandlers(mux, tc.checks)
 
-			req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil)
 			rec := httptest.NewRecorder()
 			mux.ServeHTTP(rec, req)
 

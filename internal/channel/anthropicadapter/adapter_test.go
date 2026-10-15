@@ -2,6 +2,7 @@ package anthropicadapter
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -239,7 +240,7 @@ func TestMissingMaxTokensGetsDefault(t *testing.T) {
 }
 
 func TestQuotaIsUnsupported(t *testing.T) {
-	if _, err := newAdapter().Quota(context.Background(), testChannel("https://api.example.com")); err != channel.ErrUnsupported {
+	if _, err := newAdapter().Quota(context.Background(), testChannel("https://api.example.com")); !errors.Is(err, channel.ErrUnsupported) {
 		t.Errorf("Quota 应返回 ErrUnsupported，得到 %v", err)
 	}
 }

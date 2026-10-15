@@ -80,7 +80,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer handle.Close()
+	// 进程退出时的关闭错误无处可报：此刻已经在返回的路上，日志器可能已经
+	// 随之结束，而连接池的关闭失败不影响进程已经做完的事。
+	defer func() { _ = handle.Close() }()
 
 	// settings 必须在服务对外之前读出来且校验通过：配置与代码声明的清单不一致
 	// 属于部署错误，应该在启动时就暴露，而不是让某个请求读到不存在的配置项。
@@ -118,7 +120,7 @@ func run() error {
 	// 配到这里的实例会拿到 501 并被编排系统摘除。上了负载均衡后这是真实的
 	// 误配陷阱，所以健康检查只注册在 internalMux 上。
 	publicMux := http.NewServeMux()
-	publicMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	publicMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("x-larkax-version", version)
 		w.WriteHeader(http.StatusNotImplemented)
@@ -169,11 +171,17 @@ func serveUntilSignal(ctx context.Context, logger *slog.Logger, shutdownTimeout 
 		logger.Info("收到退出信号，开始排空")
 	}
 
+	// 排空用的 context 有意从 Background 起，而不是从上面那个 ctx：
+	// ctx 在收到退出信号时已经 Done 了，从它派生出来的 context 一出生就是
+	// 取消状态，Shutdown 会立刻返回，在途请求被直接切断——
+	// 而排空要做的恰恰是「等它们结束」。这里要的是「独立于退出信号，
+	// 但有自己的超时上限」的一条时间线，所以新起一个。
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
 	var failed bool
 	for _, ns := range servers {
+		//nolint:contextcheck // shutdownCtx 的来由见上，它不该继承退出信号
 		if err := ns.srv.Shutdown(shutdownCtx); err != nil {
 			logger.Error("排空失败", "server", ns.name, "err", err)
 			failed = true

@@ -44,8 +44,8 @@ func TestConstructorsProduceBalancedTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Topup: %v", err)
 	}
-	if err := topup.Verify(); err != nil {
-		t.Errorf("Topup 不自洽: %v", err)
+	if verifyErr := topup.Verify(); verifyErr != nil {
+		t.Errorf("Topup 不自洽: %v", verifyErr)
 	}
 
 	consume, err := Consume(ConsumeParams{
@@ -56,8 +56,8 @@ func TestConstructorsProduceBalancedTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
-	if err := consume.Verify(); err != nil {
-		t.Errorf("Consume 不自洽: %v", err)
+	if verifyErr := consume.Verify(); verifyErr != nil {
+		t.Errorf("Consume 不自洽: %v", verifyErr)
 	}
 
 	refund, err := Refund(RefundParams{
@@ -68,8 +68,8 @@ func TestConstructorsProduceBalancedTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Refund: %v", err)
 	}
-	if err := refund.Verify(); err != nil {
-		t.Errorf("Refund 不自洽: %v", err)
+	if verifyErr := refund.Verify(); verifyErr != nil {
+		t.Errorf("Refund 不自洽: %v", verifyErr)
 	}
 
 	settle, err := Settle(SettleParams{
@@ -79,8 +79,8 @@ func TestConstructorsProduceBalancedTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Settle: %v", err)
 	}
-	if err := settle.Verify(); err != nil {
-		t.Errorf("Settle 不自洽: %v", err)
+	if verifyErr := settle.Verify(); verifyErr != nil {
+		t.Errorf("Settle 不自洽: %v", verifyErr)
 	}
 
 	req, err := PayoutRequest(PayoutRequestParams{
@@ -89,8 +89,8 @@ func TestConstructorsProduceBalancedTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PayoutRequest: %v", err)
 	}
-	if err := req.Verify(); err != nil {
-		t.Errorf("PayoutRequest 不自洽: %v", err)
+	if verifyErr := req.Verify(); verifyErr != nil {
+		t.Errorf("PayoutRequest 不自洽: %v", verifyErr)
 	}
 
 	paid, err := PayoutPaid(PayoutPaidParams{
@@ -100,8 +100,8 @@ func TestConstructorsProduceBalancedTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PayoutPaid: %v", err)
 	}
-	if err := paid.Verify(); err != nil {
-		t.Errorf("PayoutPaid 不自洽: %v", err)
+	if verifyErr := paid.Verify(); verifyErr != nil {
+		t.Errorf("PayoutPaid 不自洽: %v", verifyErr)
 	}
 
 	adj, err := Adjustment(AdjustmentParams{

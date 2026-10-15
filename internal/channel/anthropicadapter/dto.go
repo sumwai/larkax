@@ -83,8 +83,8 @@ func (m claudeMediaMessage) toRelaykit() dto.ClaudeMediaMessage {
 	}
 	if len(m.Input) > 0 {
 		var input map[string]any
-		switch err := kitutil.Unmarshal(m.Input, &input); {
-		case err == nil:
+		switch err := kitutil.Unmarshal(m.Input, &input); err {
+		case nil:
 			out.Input = input
 		default:
 			// 工具参数不是合法对象：上游或模型给了半截内容。

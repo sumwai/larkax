@@ -24,7 +24,11 @@ func (s *PgSource) Load(ctx context.Context) ([]Row, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	// rows.Close 的错误在这里无关紧要：遍历之后紧跟着 rows.Err()，
+	// 它已经把「这一轮读取有没有出错」汇总过了（Close 的错误同样记在
+	// lasterr 里），而这个查询是只读的、没有需要提交的收尾动作。
+	// 下面每一处提前返回也都会经过 Close（defer），不会漏掉释放连接。
+	defer func() { _ = rows.Close() }()
 
 	var out []Row
 	for rows.Next() {

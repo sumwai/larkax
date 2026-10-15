@@ -3,6 +3,7 @@ package openaiadapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -159,7 +160,7 @@ func TestChatErrorKeepsBodySeparate(t *testing.T) {
 		t.Errorf("错误文本里含响应体: %s", err.Error())
 	}
 	var ue *channel.ErrUpstream
-	if !asErr(err, &ue) {
+	if !errors.As(err, &ue) {
 		t.Fatalf("错误类型为 %T", err)
 	}
 	if !strings.Contains(ue.Body, "机密内容") {
@@ -171,7 +172,7 @@ func TestChatErrorKeepsBodySeparate(t *testing.T) {
 // 从而让自记账永远接不上。
 func TestQuotaIsUnsupported(t *testing.T) {
 	_, err := newAdapter().Quota(context.Background(), testChannel("https://api.example.com"))
-	if err != channel.ErrUnsupported {
+	if !errors.Is(err, channel.ErrUnsupported) {
 		t.Errorf("Quota 应返回 ErrUnsupported，得到 %v", err)
 	}
 }
@@ -506,22 +507,6 @@ func TestUsageFieldPresenceDistinguishedFromZero(t *testing.T) {
 			}
 		})
 	}
-}
-
-// IsRetryable 是 channel 包提供的判定，这里做一个薄包装以便测试断言。
-func asErr(err error, target **channel.ErrUpstream) bool {
-	for err != nil {
-		if e, ok := err.(*channel.ErrUpstream); ok {
-			*target = e
-			return true
-		}
-		u, ok := err.(interface{ Unwrap() error })
-		if !ok {
-			return false
-		}
-		err = u.Unwrap()
-	}
-	return false
 }
 
 var _ = json.Marshal

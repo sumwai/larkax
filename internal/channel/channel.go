@@ -32,6 +32,7 @@ import (
 // 同一套协议也被多家上游使用。
 type Protocol string
 
+// 各协议的取值，与 channels.protocol 对应。
 const (
 	ProtocolOpenAI    Protocol = "openai"
 	ProtocolAnthropic Protocol = "anthropic"

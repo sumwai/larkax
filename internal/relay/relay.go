@@ -265,7 +265,10 @@ func applyExtras(out *dto.GeneralOpenAIRequest, extra map[string]json.RawMessage
 // 用途是接收客户端请求：客户端说 OpenAI 或 Anthropic 协议，先解析成
 // relaykit 的类型，再用这里转成管道内的类型。放在本包而不是散在 gateway 里，
 // 是为了让「relaykit 的类型」这件事只在这一个文件出现。
-func FromRelaykitRequest(target channel.Protocol, src any) (*channel.Request, error) {
+//
+// ctx 透传给 relaykit 的转换，理由同 ToRelaykitClaude：转换里的规则求值
+// 将来需要调用方的 context，而不是自己开一个新的。
+func FromRelaykitRequest(ctx context.Context, target channel.Protocol, src any) (*channel.Request, error) {
 	_, err := formatFor(target)
 	if err != nil {
 		return nil, err
@@ -280,13 +283,15 @@ func FromRelaykitRequest(target channel.Protocol, src any) (*channel.Request, er
 	case dto.GeneralOpenAIRequest:
 		openaiReq = &v
 	case *dto.ClaudeRequest:
-		res, err := relayconvert.ConvertRequest(context.Background(), nil, types.RelayFormatOpenAI, *v)
+		res, err := relayconvert.ConvertRequest(ctx, nil, types.RelayFormatOpenAI, *v)
 		if err != nil {
 			return nil, fmt.Errorf("解析 Anthropic 请求失败: %w", err)
 		}
 		converted, ok := res.Value.(*dto.GeneralOpenAIRequest)
 		if !ok {
-			return nil, fmt.Errorf("Anthropic 请求转换后得到意外类型 %T", res.Value)
+			// 措辞避开句首大写：Go 的错误信息惯例是首词小写，
+			// 「Anthropic」这类专有名词放在句首会让 ST1005 判为格式错误。
+			return nil, fmt.Errorf("解析 Anthropic 请求后得到意外类型 %T", res.Value)
 		}
 		openaiReq = converted
 	default:
@@ -417,11 +422,17 @@ func fromImageBlock(block map[string]any) channel.ContentBlock {
 // 以 OpenAI Chat 为枢纽，两边都能到，而直接写「本项目 → Claude」会让
 // 枢纽这一层的语义差异（system 是顶层字段、max_tokens 必填、
 // tool_use 与 tool_result 的结构不同）散落在两个地方。
-func ToRelaykitClaude(req *dto.GeneralOpenAIRequest) (*dto.ClaudeRequest, error) {
+//
+// ctx 一路传到 relaykit 的转换里。现在那里用不到它，但这个参数是刻意保留的：
+// 转换将来要按规则求值（例如按日期时段决定某些字段的取值），
+// 那时它需要带着调用方的 context 去查数据，而不是自己开一个新的。
+// 参数缺在签名里，将来就只能从 context.Background() 起一个——
+// 那正是「取消信号与超时传不下去」的来源。
+func ToRelaykitClaude(ctx context.Context, req *dto.GeneralOpenAIRequest) (*dto.ClaudeRequest, error) {
 	if req == nil {
 		return nil, fmt.Errorf("请求为 nil")
 	}
-	res, err := relayconvert.ConvertRequest(context.Background(), nil, types.RelayFormatClaude, *req)
+	res, err := relayconvert.ConvertRequest(ctx, nil, types.RelayFormatClaude, *req)
 	if err != nil {
 		return nil, fmt.Errorf("转换为 Anthropic 请求失败: %w", err)
 	}

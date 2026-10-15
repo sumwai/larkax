@@ -84,7 +84,10 @@ func runMigrate(args []string) error {
 		}
 		// 第二个参数固定为 sql。goose 默认生成 .go 迁移，而内嵌规则是
 		// sql/*.sql，生成的 Go 文件既不会被执行，又会在迁移目录里多出一个包。
-		if err := goose.Run("create", nil, migrationsDir, rest[0], "sql"); err != nil {
+		//
+		// create 只写文件，不碰数据库（第二个参数为 nil），所以这里没有可传的
+		// context；RunContext 在 db 为 nil 时同样只做文件操作。
+		if err := goose.RunContext(context.Background(), "create", nil, migrationsDir, rest[0], "sql"); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "已生成到 %s/\n", migrationsDir)
@@ -95,15 +98,20 @@ func runMigrate(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := migrate.SetDialect("postgres"); err != nil {
-		return fmt.Errorf("设置迁移方言失败: %w", err)
+	// 变量名不复用 err：这里的任何一次重新声明都会让后面读代码的人
+	// 停下来判断「看到的是哪个 err」，而包一层名字的成本是零。
+	dialectErr := migrate.SetDialect("postgres")
+	if dialectErr != nil {
+		return fmt.Errorf("设置迁移方言失败: %w", dialectErr)
 	}
 
 	db, err := sql.Open("pgx", cfg.DBDSN)
 	if err != nil {
 		return fmt.Errorf("打开数据库连接失败: %w", err)
 	}
-	defer db.Close()
+	// 关闭错误无处可报：此时函数已经在返回的路上，命令行该打印的错误
+	// 已经打印了，而关闭失败不会改变命令的结果。
+	defer func() { _ = db.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
