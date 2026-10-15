@@ -9,8 +9,6 @@ require (
 )
 
 require (
-	github.com/dlclark/regexp2/v2 v2.5.1 // indirect
-	github.com/expr-lang/expr v1.17.8 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
@@ -22,7 +20,6 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
-	github.com/tiktoken-go/tokenizer v0.8.1 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
