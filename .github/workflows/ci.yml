@@ -48,6 +48,18 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # 与 gofmt/vet 分工：那两者快且零配置，这里放它们覆盖不到的、
+      # 需要跨文件或深入语义的检查。
+      #
+      # 版本有两个坑：旧版（v2.5）自带的 typechecker 读不懂 go1.27 的
+      # 导出数据格式；release 二进制又比当前 Go 旧、会直接拒绝运行。
+      # 所以既要 v2.14+，又要用本仓库的 toolchain 现构。
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.14.0
+          install-mode: goinstall
+
       - name: 单元测试
         run: go test -race -coverprofile=coverage.out ./...
 

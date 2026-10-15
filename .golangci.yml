@@ -1,0 +1,68 @@
+# golangci-lint 配置。
+#
+# 只开真正有价值的检查器，不开「把所有都打开」的清单：
+# 一份报了上百条无关警告的 lint 报告，第二次就没人看了。
+#
+# 与 gofmt/vet 的关系：那两者在 CI 里单独跑（快、零配置），
+# 这里放的是它们覆盖不到的、需要跨文件或深入语义的检查。
+version: "2"
+
+linters:
+  default: none
+  enable:
+    # 基础正确性
+    - errcheck      # 未处理的错误返回
+    - govet         # 标准 vet（与 CI 里单独跑的重复，但这里能带额外设置）
+    - ineffassign   # 赋值后从未使用的变量
+    - staticcheck   # 静态分析主力
+    - unused        # 未使用的标识符
+
+    # 本项目特别在意的几类
+    - bodyclose     # HTTP 响应体未关闭（适配器里最容易漏的地方）
+    - contextcheck  # context 没往下传
+    - errorlint     # 错误比较与包装用错（errors.Is/As）
+    - nilnil        # 同时返回 nil 错误与 nil 值
+    - noctx         # 发 HTTP 请求不带 context
+
+    # 可读性
+    - misspell      # 拼写
+    - revive        # 风格（取代已废弃的 golint）
+
+  settings:
+    errcheck:
+      # 显式忽略的写法（_ = f()）是刻意的，不该被报
+      check-blank: false
+    govet:
+      enable-all: true
+      # 字段对齐没有意义，会让结构体定义为了对齐而插入空行
+      disable:
+        - fieldalignment
+    revive:
+      rules:
+        # 导出的标识符要有注释——这个项目的注释是设计的一部分
+        - name: exported
+          arguments: ["checkPrivateReceivers", "disableStutteringCheck"]
+        - name: package-comments
+        - name: indent-error-flow
+        - name: unused-parameter
+    misspell:
+      locale: US
+
+  exclusions:
+    generated: lax
+    rules:
+      # 测试文件里长函数与重复的字面量是正常的
+      - path: _test\.go
+        linters:
+          - errcheck
+          - revive
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  # 不限制同类问题的显示条数：限制会让「还有 50 条没显示」被忽略
+  max-issues-per-linter: 0
+  max-same-issues: 0
