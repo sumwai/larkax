@@ -18,11 +18,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/sumwai/larkax/internal/config"
+	"github.com/sumwai/larkax/internal/db"
 	"github.com/sumwai/larkax/internal/observe"
+	"github.com/sumwai/larkax/internal/settings"
 )
 
 // version 由构建时注入：-ldflags "-X main.version=v0.1.0"。
@@ -67,10 +70,33 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// 数据库与配置在启动时一次性装好，任一步失败就不启动。
+	// 带着半截依赖跑起来，故障会推迟到第一个真实请求才出现。
+	handle, err := db.Open(ctx, cfg.DBDSN)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	// settings 必须在服务对外之前读出来且校验通过：配置与代码声明的清单不一致
+	// 属于部署错误，应该在启动时就暴露，而不是让某个请求读到不存在的配置项。
+	values, err := settings.Load(ctx, settings.NewPgSource(handle))
+	if err != nil {
+		return err
+	}
+	logger.Info("配置已加载", "keys", strings.Join(values.Keys(), ","))
+
 	// 内部端点（健康检查与指标）与控制台分端口暴露：
 	// 它们面向编排系统与抓取器，不应与业务入口共用同一个监听地址。
 	internalMux := http.NewServeMux()
-	observe.RegisterHealthHandlers(internalMux, nil)
+	observe.RegisterHealthHandlers(internalMux, []observe.ReadinessCheck{
+		{
+			Name: "postgres",
+			Check: func(ctx context.Context) error {
+				return handle.PingContext(ctx)
+			},
+		},
+	})
 
 	internalSrv := &http.Server{
 		Addr:              cfg.InternalAddr,

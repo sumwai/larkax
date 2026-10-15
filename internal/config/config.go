@@ -17,6 +17,8 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -78,6 +80,17 @@ type MasterKey struct {
 	Key []byte
 }
 
+// String 与 GoString 让密钥在被打印时只留下长度，不留下内容。
+//
+// MasterKey 会跟着 Config 一起出现在日志与调试输出里，默认展开就是明文。
+// 长度是有意保留的：排查配置问题时「解出来多少字节」是唯一有用的信息，
+// 而它不足以还原密钥。
+func (k MasterKey) String() string {
+	return fmt.Sprintf("config.MasterKey{ID:%q Key:%d 字节已隐藏}", k.ID, len(k.Key))
+}
+
+func (k MasterKey) GoString() string { return k.String() }
+
 // KeySize 是主密钥的字节长度（AES-256）。
 const KeySize = 32
 
@@ -132,6 +145,79 @@ func Load() (*Config, error) {
 
 // IsProduction 决定若干默认行为的松紧，例如日志格式与错误详情的暴露程度。
 func (c *Config) IsProduction() bool { return c.Env == "production" }
+
+// String 与 GoString 让 Config 在被打印时自动隐藏敏感字段。
+//
+// 为什么必须实现：Config 里装着数据库口令与主密钥，而打印一个结构体是
+// 顺手就会做的事——`slog.Any("config", cfg)`、`fmt.Printf("%+v")`、
+// 测试失败时 t.Log(cfg)。不实现这两个方法，这些再普通不过的写法
+// 就会把主密钥原样写进日志与 CI 输出。默认实现是按字段原样展开，
+// 也就是说「什么都不做」等于主动泄密。
+//
+// 保留非敏感字段是为了可用性：排查配置问题时要能看见角色、环境、地址。
+func (c *Config) String() string {
+	return c.safeView()
+}
+
+// GoString 覆盖 %#v。%#v 不走 String，会直接展开结构体，必须单独挡住。
+func (c *Config) GoString() string { return c.safeView() }
+
+// LogValue 覆盖 slog 的取值路径。slog 处理 Any 值时优先用它，其次才看
+// String/GoString；显式实现可以避免以后 slog 的取值规则变化。
+func (c *Config) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("env", c.Env),
+		slog.String("role", string(c.Role)),
+		slog.String("http_addr", c.HTTPAddr),
+		slog.String("internal_addr", c.InternalAddr),
+		slog.String("log_level", c.LogLevel),
+		slog.String("db_dsn", RedactDSN(c.DBDSN)),
+		slog.String("redis_dsn", RedactDSN(c.RedisDSN)),
+		slog.Int("master_keys", len(c.MasterKeys)),
+	)
+}
+
+func (c *Config) safeView() string {
+	return fmt.Sprintf(
+		"config.Config{Env:%q Role:%q HTTPAddr:%q InternalAddr:%q LogLevel:%q DBDSN:%q RedisDSN:%q MasterKeys:%d}",
+		c.Env, c.Role, c.HTTPAddr, c.InternalAddr, c.LogLevel,
+		RedactDSN(c.DBDSN), RedactDSN(c.RedisDSN), len(c.MasterKeys),
+	)
+}
+
+// RedactDSN 抹掉连接串里的口令，其余部分保留。
+//
+// 保留主机与库名是有意的：排查「连错环境」时这几个字段是关键线索，
+// 而口令一旦进了日志就等于泄露，且日志的留存与传播范围远大于密钥本身。
+func RedactDSN(dsn string) string {
+	if dsn == "" {
+		return ""
+	}
+	const mask = "REDACTED"
+
+	// URL 形式：postgres://user:pass@host/db、redis://:pass@host/0
+	if u, err := url.Parse(dsn); err == nil && u.Scheme != "" && u.Host != "" {
+		if _, hasPassword := u.User.Password(); hasPassword {
+			u.User = url.UserPassword(u.User.Username(), mask)
+		}
+		return u.String()
+	}
+
+	// 关键字形式：host=... user=... password=... dbname=...
+	// 逐词扫描而不是正则替换：这里不追求看懂语法，只要不把值原样带出去。
+	fields := strings.Fields(dsn)
+	for i, f := range fields {
+		name, _, ok := strings.Cut(f, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(name) {
+		case "password", "passwd", "pass", "pwd":
+			fields[i] = name + "=" + mask
+		}
+	}
+	return strings.Join(fields, " ")
+}
 
 // PrimaryMasterKey 返回用于包装新数据密钥的那一把——列表中的第一把。
 //
