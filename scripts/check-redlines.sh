@@ -78,12 +78,28 @@ PATTERNS_SHAPE=(
 # 右侧允许连字符与下划线：口令常写成 few-words-strung-together 或
 # correct_horse_battery，只认字母数字会漏掉这类真口令。
 #
-# 代价是它会命中 Go 代码：`Tokens: r.Usage.OutputTokens` 里有「token」这个键名，
-# 右侧又是一长串标识符，形态上与凭证无从区分。这类由 ALLOW 里
-# 「值是选择器链」那一条兜掉，见下。
+# **只在配置类文件上跑这一组**，见 ASSIGN_FILES。这是被误报逼出来的结论：
+# 该模式认的是形态，而代码里到处是与凭证形状相同的表达式——
+# `Tokens: r.Usage.OutputTokens`、`Tokens = *u.PromptTokens`、
+# `token := resp.Data.Token`。补白名单能治标，但每遇到一种新语法就要再补一次
+#（LESSONS 第 12 条记了两次）。按文件类型限定适用范围才治本：
+# 真凭证出现在 Go 源码里的概率极低，而它出现在配置里的概率极高。
+# 键名与分隔符之间允许一个收尾引号：JSON / TOML / YAML 里键名带引号，
+# `"password": "..."` 少了这一项就整条漏掉——而 JSON 配置恰恰是最常见的形态。
 PATTERNS_ASSIGN=(
-  '(api[_-]?key|apikey|secret|password|passwd|token|credential|access[_-]?key)[A-Za-z0-9_]*[[:space:]]*[:=][[:space:]]*[^[:space:]]*[A-Za-z0-9_][A-Za-z0-9_-]{11,}'
+  '(api[_-]?key|apikey|secret|password|passwd|token|credential|access[_-]?key)[A-Za-z0-9_]*["'"'"']?[[:space:]]*[:=][[:space:]]*[^[:space:]]*[A-Za-z0-9_][A-Za-z0-9_-]{11,}'
 )
+
+# ASSIGN_FILES 是赋值类模式生效的文件名形态。
+#
+# 包含两类：
+#   - 配置与数据文件（.env / yml / json / toml / ini / conf / properties / tfvars …）
+#   - 脚本（.sh / .bash / .zsh）——`export API_KEY=…` 是真实的泄露渠道
+#
+# 不含 .go / .ts / .py 等源码：那里的「键=值」绝大多数是变量赋值，
+# 而变量名里带 token 的实在太多（本项目光是用量相关就有
+# PromptTokens、CompletionTokens、CachedTokens、ReasoningTokens）。
+ASSIGN_FILES='(\.env|\.env\.[a-z]+|\.example|\.ya?ml|\.json|\.json5|\.toml|\.ini|\.conf|\.cfg|\.properties|\.tfvars|\.sh|\.bash|\.zsh|\.envrc)$'
 
 # 标志位必须分开传。合并成 -n-P 时某些 grep 实现会解析失败并静默返回「无命中」。
 # -i 是有意的：这是按形态抓密钥，大小写不该影响结果。
@@ -147,9 +163,12 @@ while IFS= read -r f; do
   for p in "${PATTERNS_SHAPE[@]}"; do
     found+=$(scan "$f" "$p" frag)$'\n'
   done
-  for p in "${PATTERNS_ASSIGN[@]}"; do
-    found+=$(scan "$f" "$p" value)$'\n'
-  done
+  # 赋值类只在配置与脚本上跑：见 ASSIGN_FILES 的注释。
+  if [[ "$f" =~ $ASSIGN_FILES ]]; then
+    for p in "${PATTERNS_ASSIGN[@]}"; do
+      found+=$(scan "$f" "$p" value)$'\n'
+    done
+  fi
   found=$(printf '%s' "$found" | sed '/^$/d')
 
   if [ -n "$found" ]; then
