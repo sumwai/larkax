@@ -13,13 +13,12 @@ new-api
   Licensed under the GNU Affero General Public License v3.0
   https://github.com/QuantumNous/new-api
 
-  Planned use. new-api's `relaykit` package provides protocol DTOs and
-  conversion between the OpenAI and Anthropic wire formats. It is not yet a
-  dependency of this repository; when it is added it will be imported at a
-  pinned version and will not be modified.
+  In use. new-api's `relaykit` package provides protocol DTOs and conversion
+  between the OpenAI and Anthropic wire formats. It is imported as a module
+  dependency at a pinned version (`go.mod`) and is not modified. larkax's own
+  `internal/relay` package is the only place that imports it.
 
-  AGPLv3 Section 7 additional terms from new-api are reproduced below and must
-  be retained if and when that code is distributed as part of larkax, as
+  AGPLv3 Section 7 additional terms from new-api are retained below, as
   required for modified versions:
 
     Frontend design and development by New API contributors.
@@ -51,12 +50,10 @@ holiday-cn
   Licensed under the MIT License
   https://github.com/NateScarlet/holiday-cn
 
-The three entries above are not yet dependencies of this repository. They are
-listed so that attribution is in place before the code that requires it lands.
-
-Current Go module dependencies and their licenses are visible in `go.mod` and
-`go.sum`. A consolidated third-party license file will be added when the
-dependency set grows beyond what those two files can reasonably express.
+Entries other than new-api are not yet dependencies of this repository; they are
+listed so that attribution is in place before the code that requires them lands.
+Current Go module dependencies and their licences are visible in `go.mod` and
+`go.sum`.
 
 ═══════════════════════════════════════════════════════════════════════════
 End of Notices
