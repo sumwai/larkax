@@ -272,8 +272,10 @@ CREATE TABLE pricing_rules (
     name            text NOT NULL,
     -- 匹配哪些模型。空数组表示全部
     model_patterns  jsonb NOT NULL DEFAULT '[]'::jsonb,
-    -- 表达式源码。变量 p/c/len/cr/cc/cc1h/img/ai/ao，
-    -- 函数 tier()/fixed()/perUnit()/hour(tz)/isWorkday(tz)/isHoliday(tz)
+    -- 表达式源码。变量与函数的完整清单见 internal/billing/expr。
+    --
+    -- 表达式**求值出一组单价**（可含一次性费用），由 Go 侧乘用量——
+    -- 所以用量变量只作**条件**用，不作乘数。理由见本段开头的注释。
     expr            text NOT NULL,
     -- 优先级，数值大者先匹配
     priority        integer NOT NULL DEFAULT 0,
