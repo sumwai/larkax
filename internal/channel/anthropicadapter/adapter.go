@@ -20,10 +20,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channel/httpx"
+	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/relay"
 )
 
@@ -60,7 +62,7 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 		return nil, err
 	}
 
-	resp, err := a.do(ctx, ch, body)
+	resp, err := a.do(ctx, ch, body, req)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +106,7 @@ func (a *Adapter) ChatStream(ctx context.Context, ch channel.Channel, req *chann
 		return nil, err
 	}
 
-	resp, err := a.do(ctx, ch, body)
+	resp, err := a.do(ctx, ch, body, req)
 	if err != nil {
 		return nil, err
 	}
@@ -221,17 +223,18 @@ func (a *Adapter) encodeRequest(ctx context.Context, req *channel.Request) ([]by
 // 而不是「让模型尽可能多写」。给太大反而会让一次失误的调用产生高额费用。
 const DefaultMaxTokens = 4096
 
-func (a *Adapter) do(ctx context.Context, ch channel.Channel, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+func (a *Adapter) do(ctx context.Context, ch channel.Channel, body []byte, req *channel.Request) (*http.Response, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		httpx.Endpoint(ch.BaseURL, "/v1/messages"), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("构造请求失败: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream, application/json")
-	a.setHeaders(req, ch)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream, application/json")
+	a.setHeaders(httpReq, ch)
+	applyCustomHeaders(httpReq, req)
 
-	resp, err := a.client.Do(req)
+	resp, err := a.client.Do(httpReq)
 	if err != nil {
 		return nil, &channel.ErrUpstream{Retryable: true, Err: err}
 	}
@@ -246,4 +249,23 @@ func (a *Adapter) do(ctx context.Context, ch channel.Channel, body []byte) (*htt
 func (a *Adapter) setHeaders(req *http.Request, ch channel.Channel) {
 	req.Header.Set("x-api-key", ch.Credential)
 	req.Header.Set("anthropic-version", AnthropicVersion)
+}
+
+// applyCustomHeaders 把自定义头附加到请求上。
+//
+// 与 openaiadapter 里那个同源：鉴权头与协议头由 httpx.SafeRequestHeaders
+// 滤掉，被拒的头记名字不记值。放在适配器这一道而不只在插件层——
+// 插件层的白名单写错时，这里是最后一道。
+func applyCustomHeaders(httpReq *http.Request, req *channel.Request) {
+	if req == nil {
+		return
+	}
+	safe, rejected := httpx.SafeRequestHeaders(req.Headers)
+	for name, value := range safe {
+		httpReq.Header.Set(name, value)
+	}
+	if len(rejected) > 0 {
+		observe.FromContext(httpReq.Context()).Warn("自定义请求头被拒",
+			"headers", strings.Join(rejected, ","))
+	}
 }

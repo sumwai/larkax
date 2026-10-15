@@ -163,3 +163,104 @@ func (b *recordingBody) Close() error {
 	b.closed = true
 	return nil
 }
+
+// ── 自定义请求头 ────────────────────────────────────────────────────────
+
+// 这个集合必须是**封闭的**：漏掉一个就是一条越权路径。
+// 黑名单永远可能漏——上游加一个新的鉴权头，黑名单不会跟着更新。
+func TestSafeRequestHeadersRejectsAuthHeaders(t *testing.T) {
+	cases := map[string]string{
+		"标准鉴权":         "Authorization",
+		"小写的鉴权":        "authorization",
+		"大小写混写":        "AUTHORIZATION",
+		"Anthropic 风格": "x-api-key",
+		"通用 api-key":   "api-key",
+		"Google 前缀":    "x-goog-api-key",
+		"AWS 前缀":       "x-amz-security-token",
+		"自家的头":         "x-larkax-internal",
+		"Content-Type": "Content-Type",
+		"Host":         "Host",
+		"Connection":   "Connection",
+	}
+	// cases 的键是说明、值是头名。构造时要用**头名**做键——
+	// 早先写成用说明做键，于是所有头都变成了正常自定义头，测试假绿。
+	custom := make(map[string]string, len(cases))
+	for _, header := range cases {
+		custom[header] = "值"
+	}
+
+	safe, rejected := SafeRequestHeaders(custom)
+	if len(safe) != 0 {
+		t.Errorf("这些头都该被拒，实际放行 %v", safe)
+	}
+	if len(rejected) != len(cases) {
+		t.Errorf("被拒的应有 %d 个，实际 %d 个: %v", len(cases), len(rejected), rejected)
+	}
+}
+
+// 大小写不敏感：按字面比较会让插件用 `Authorization` 绕过 `authorization` 的检查。
+func TestSafeRequestHeadersCaseInsensitive(t *testing.T) {
+	for _, name := range []string{"authorization", "AUTHORIZATION", "Authorization", "aUtHoRiZaTiOn"} {
+		safe, _ := SafeRequestHeaders(map[string]string{name: "值"})
+		if len(safe) != 0 {
+			t.Errorf("%q 应被拒", name)
+		}
+	}
+}
+
+func TestSafeRequestHeadersAllowsCustom(t *testing.T) {
+	safe, rejected := SafeRequestHeaders(map[string]string{
+		"X-Custom-Trace": "abc",
+		"X-Tenant":       "t1",
+	})
+	if len(rejected) != 0 {
+		t.Errorf("正常的自定义头不该被拒: %v", rejected)
+	}
+	if len(safe) != 2 {
+		t.Errorf("应放行两个，实际 %v", safe)
+	}
+}
+
+// 值里带换行等于能注入出额外的头，与日志注入是同一类问题。
+func TestSafeRequestHeadersRejectsHeaderInjection(t *testing.T) {
+	safe, rejected := SafeRequestHeaders(map[string]string{
+		"X-Ok":   "fine",
+		"X-Bad":  "值\r\nX-Injected: evil",
+		"X-Bad2": "值\nX-Injected: evil",
+	})
+	if len(safe) != 1 {
+		t.Errorf("带换行的头应被拒，实际放行 %v", safe)
+	}
+	if len(rejected) != 2 {
+		t.Errorf("应拒两个，实际 %v", rejected)
+	}
+}
+
+// 空头名与全被拒时要返回 nil 而不是空 map。
+func TestSafeRequestHeadersEdgeCases(t *testing.T) {
+	if safe, rejected := SafeRequestHeaders(nil); safe != nil || rejected != nil {
+		t.Errorf("空输入应返回 nil, nil，得到 %v, %v", safe, rejected)
+	}
+
+	safe, rejected := SafeRequestHeaders(map[string]string{"": "值", "   ": "值"})
+	if safe != nil {
+		t.Errorf("空头名应被拒，实际 %v", safe)
+	}
+	if len(rejected) != 2 {
+		t.Errorf("应拒两个，实际 %v", rejected)
+	}
+}
+
+// 被拒的名单要排序，否则日志里同一个错两次运行顺序不同，搜不到。
+func TestSafeRequestHeadersRejectedIsSorted(t *testing.T) {
+	_, rejected := SafeRequestHeaders(map[string]string{
+		"X-Zeta": "1", "X-Alpha": "2", "X-Middle": "3",
+		"authorization": "4", "api-key": "5",
+	})
+	for i := 1; i < len(rejected); i++ {
+		if rejected[i-1] > rejected[i] {
+			t.Errorf("被拒名单未排序: %v", rejected)
+			break
+		}
+	}
+}

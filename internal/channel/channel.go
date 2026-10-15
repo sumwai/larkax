@@ -108,6 +108,17 @@ type Request struct {
 
 	// Extra 是上游特有参数，由适配器决定是否透传。
 	Extra map[string]any
+
+	// Headers 是要附加到上游请求上的自定义头。
+	//
+	// 用途是插件系统里插件加的 x-larkax-* 头——**它不是通用透传通道**。
+	// 适配器在写入前必须滤掉鉴权头与协议头（Authorization、x-api-key、
+	// anthropic-version、Content-Type 等），见 httpx.SafeRequestHeaders。
+	//
+	// 为什么滤在适配器而不只在插件层：插件层的白名单写错时，
+	// 适配器是最后一道。而「插件能覆盖 Authorization」意味着它能
+	// 冒充别的渠道身份。
+	Headers map[string]string
 }
 
 // Message 是一条对话消息。

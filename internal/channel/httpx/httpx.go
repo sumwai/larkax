@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -169,4 +170,94 @@ func DrainAndClose(body io.ReadCloser) {
 		return
 	}
 	_ = body.Close()
+}
+
+// 上游请求头里不允许被自定义头覆盖的那些。
+//
+// 白名单而不是黑名单：**这个集合必须是封闭的，否则漏掉一个就是一条
+// 越权路径**。黑名单永远可能漏——上游加一个新的鉴权头，黑名单不会跟着更新。
+//
+// 按前缀与固定名两部分判：
+//   - 固定名是协议与鉴权的关键头，覆盖它们等于冒充身份或破坏协议
+//   - 前缀覆盖各家自己的鉴权头（x-api-key、x-goog-api-key、api-key 等）
+var reservedHeaderPrefixes = []string{
+	"authorization",
+	"x-api-key",
+	"api-key",
+	"x-goog-",
+	"x-amz-",
+	"x-larkax-", // 自己的头也不该从这条路径进来：那是宿主写的，不是插件
+}
+
+// reservedHeaderNames 是**适配器自己会设置**的协议头。
+//
+// 规则很简单：凡是适配器写入的头，就不允许被自定义头覆盖。
+// anthropic-version 被覆盖会让协议版本被插件改掉——上游可能因此
+// 返回完全不同的响应结构，而错误现场离原因很远。
+var reservedHeaderNames = map[string]bool{
+	"anthropic-version":   true,
+	"anthropic-beta":      true,
+	"openai-version":      true,
+	"openai-beta":         true,
+	"openai-organization": true,
+	"openai-project":      true,
+}
+
+// SafeRequestHeaders 从自定义头里滤出可以安全附加的那些。
+//
+// 返回被拒绝的头名，供调用方记录——**静默丢弃是不行的**：插件作者
+// 写了一个被拒的头却没有任何反馈，会以为是上游不支持。
+//
+// 大小写不敏感：HTTP 头名不区分大小写，按字面比较会让插件用
+// `Authorization` 绕过 `authorization` 的检查。
+func SafeRequestHeaders(custom map[string]string) (map[string]string, []string) {
+	if len(custom) == 0 {
+		return nil, nil
+	}
+
+	out := make(map[string]string, len(custom))
+	var rejected []string
+
+	for name, value := range custom {
+		lower := strings.ToLower(strings.TrimSpace(name))
+		if lower == "" {
+			rejected = append(rejected, name)
+			continue
+		}
+		if isReservedHeader(lower) {
+			rejected = append(rejected, name)
+			continue
+		}
+		// 值里带换行等于能注入出额外的头，与日志注入是同一类问题。
+		if strings.ContainsAny(value, "\r\n") {
+			rejected = append(rejected, name)
+			continue
+		}
+		out[name] = value
+	}
+
+	if len(out) == 0 {
+		return nil, rejected
+	}
+	sort.Strings(rejected)
+	return out, rejected
+}
+
+func isReservedHeader(lower string) bool {
+	// content-type / content-length 之类由 Go 的 http 包自己管，
+	// 覆盖它们会让请求体与声明不符。
+	switch lower {
+	case "content-type", "content-length", "host", "transfer-encoding",
+		"connection", "accept", "accept-encoding", "user-agent":
+		return true
+	}
+	if reservedHeaderNames[lower] {
+		return true
+	}
+	for _, prefix := range reservedHeaderPrefixes {
+		if lower == prefix || strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
 }

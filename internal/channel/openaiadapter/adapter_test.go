@@ -510,3 +510,68 @@ func TestUsageFieldPresenceDistinguishedFromZero(t *testing.T) {
 }
 
 var _ = json.Marshal
+
+// 插件加的 x-larkax-* 头要真能到上游——它存在的全部意义就是这个。
+func TestCustomHeadersReachUpstream(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		_, _ = io.WriteString(w, `{"model":"m","choices":[{"message":{"role":"assistant","content":"x"}}]}`)
+	}))
+	defer srv.Close()
+
+	_, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), &channel.Request{
+		Model:   "m",
+		Headers: map[string]string{"X-Custom-Tenant": "t1"},
+	})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if got.Get("X-Custom-Tenant") != "t1" {
+		t.Errorf("自定义头没到上游: %v", got)
+	}
+}
+
+// **插件不能覆盖鉴权头**：那意味着它能冒充别的渠道身份。
+// 适配器是最后一道——插件层的白名单写错时靠这里挡。
+func TestCustomHeadersCannotOverrideAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, `{"model":"m","choices":[{"message":{"role":"assistant","content":"x"}}]}`)
+	}))
+	defer srv.Close()
+
+	_, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), &channel.Request{
+		Model: "m",
+		Headers: map[string]string{
+			"Authorization": "Bearer 冒充的凭证",
+			"authorization": "Bearer 小写写法",
+		},
+	})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if gotAuth != "Bearer placeholder-credential" {
+		t.Errorf("鉴权头被覆盖了，实际 %q", gotAuth)
+	}
+}
+
+// 头值里带换行等于能注入出额外的头。
+func TestCustomHeaderInjectionBlocked(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Injected") != "" {
+			t.Error("头注入成功了")
+		}
+		_, _ = io.WriteString(w, `{"model":"m","choices":[{"message":{"role":"assistant","content":"x"}}]}`)
+	}))
+	defer srv.Close()
+
+	_, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), &channel.Request{
+		Model:   "m",
+		Headers: map[string]string{"X-Bad": "值\r\nX-Injected: evil"},
+	})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+}

@@ -595,3 +595,53 @@ func TestChatHandlesEmptyContent(t *testing.T) {
 		})
 	}
 }
+
+// 插件加的头要能到上游。
+func TestCustomHeadersReachUpstream(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		_, _ = io.WriteString(w, `{"type":"message","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer srv.Close()
+
+	_, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), &channel.Request{
+		Model:   "m",
+		Headers: map[string]string{"X-Custom-Tenant": "t1"},
+	})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if got.Get("X-Custom-Tenant") != "t1" {
+		t.Errorf("自定义头没到上游: %v", got)
+	}
+}
+
+// Anthropic 的鉴权头是 x-api-key，它同样不能被覆盖。
+func TestCustomHeadersCannotOverrideAPIKey(t *testing.T) {
+	var gotKey, gotVersion string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = r.Header.Get("x-api-key")
+		gotVersion = r.Header.Get("anthropic-version")
+		_, _ = io.WriteString(w, `{"type":"message","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer srv.Close()
+
+	_, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), &channel.Request{
+		Model: "m",
+		Headers: map[string]string{
+			"x-api-key":         "冒充的钥匙",
+			"X-API-KEY":         "另一种大小写",
+			"anthropic-version": "1999-01-01",
+		},
+	})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if gotKey != "placeholder-credential" {
+		t.Errorf("x-api-key 被覆盖了，实际 %q", gotKey)
+	}
+	if gotVersion != AnthropicVersion {
+		t.Errorf("anthropic-version 被覆盖了，实际 %q", gotVersion)
+	}
+}
