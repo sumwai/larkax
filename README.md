@@ -43,6 +43,10 @@ See [docs/development.md](docs/development.md) for how to build and run it.
 ```
 cmd/larkax/                       the service binary
 cmd/larkaxctl/                    migrations and operations CLI
+internal/billing/                 turning usage into money: reserve, settle, breakdown
+internal/billing/calendaradapter/  bridges internal/calendar to the pricing engine
+internal/billing/expr/            the expression engine that evaluates pricing rules
+internal/calendar/                workday / holiday / peak-hour judgement per region
 internal/channel/                 adapter interface, registry, unified request/response types
 internal/channel/anthropicadapter/  Anthropic Messages upstream
 internal/channel/httpx/           HTTP details shared by adapters
@@ -50,24 +54,44 @@ internal/channel/openaiadapter/   OpenAI Chat Completions upstream
 internal/config/                  startup configuration (environment variables)
 internal/credential/              envelope encryption for channel credentials
 internal/db/                      database connection pool
+internal/ledger/                  double-entry bookkeeping: construct and verify entries
 internal/migrate/                 embedded migrations (internal/migrate/sql/)
+internal/money/                   fixed-point money; the only place rounding happens
 internal/observe/                 logging, request IDs, health and readiness endpoints
+internal/pipeline/                wires the billing stages into one request flow
+internal/quota/                   upstream quota tracking: probe, self-account, merge
 internal/relay/                   the only place that imports relaykit; protocol conversion
+internal/route/                   channel selection and failover
 internal/settings/                runtime configuration, stored in the database
+internal/tokens/                  token counting and stream-cancel estimation
 scripts/                          repository tooling
 ```
 
 Layering, so the data plane never depends on the control plane:
 
 ```
-gateway  ──►  router  ──►  channel.Adapter  ──►  upstream
+gateway  ──►  route  ──►  channel.Adapter  ──►  upstream
                 │                │
                 │                └── protocol conversion only
                 └── selection, retry, failover
+
+gateway  ──►  pipeline  ──►  billing  ──►  money
+                   │             │
+                   │             └── rules evaluated by billing/expr
+                   └── ledger entries handed back to the caller
 ```
 
-`internal/relay` is the single seam onto
-[relaykit](https://github.com/QuantumNous/new-api); no other package imports it.
+Two rules hold across the tree, and both are checked by eye because they cannot
+be checked by the compiler:
+
+- **`internal/relay` is the only package that imports
+  [relaykit](https://github.com/QuantumNous/new-api).** Others use its own types.
+- **`internal/money` is the only place rounding happens.** Everything else is
+  integer arithmetic on a fixed-point value.
+
+The billing path is deliberately split so each stage can be tested without a
+database or a network: `money` (arithmetic) → `billing` (usage × price) →
+`billing/expr` (rules) → `pipeline` (the order of operations).
 
 Not yet written: `internal/gateway`, `internal/plugin`, `plugins/`, and `web/`.
 
