@@ -29,6 +29,13 @@ import (
 // 未注入时为 dev，便于区分本地构建与正式发布。
 var version = "dev"
 
+// shutdownTimeout 是收到退出信号后等待在途请求结束的上限。
+//
+// 硬编码而不做成环境变量：它属于「改错了也不会造成事故」的那一类，
+// 而且长流场景下几乎总该排空到这个长度。真需要调整时改代码，
+// 比多一个谁都不知道该填多少的环境变量更清楚。
+const shutdownTimeout = 30 * time.Second
+
 func main() {
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
 	flag.Parse()
@@ -50,7 +57,7 @@ func run() error {
 		return err
 	}
 
-	logger := observe.NewLogger(cfg.LogLevel, cfg.LogFormat, cfg.IsProduction())
+	logger := observe.NewLogger(cfg.LogLevel, "", cfg.IsProduction())
 	logger.Info("启动",
 		"version", version,
 		"env", cfg.Env,
@@ -66,7 +73,7 @@ func run() error {
 	observe.RegisterHealthHandlers(internalMux, nil)
 
 	internalSrv := &http.Server{
-		Addr:              cfg.MetricsAddr,
+		Addr:              cfg.InternalAddr,
 		Handler:           internalMux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -90,7 +97,7 @@ func run() error {
 	}
 	servers = append(servers, namedServer{name: "public", srv: publicSrv})
 
-	return serveUntilSignal(ctx, logger, cfg.ShutdownTimeout, servers)
+	return serveUntilSignal(ctx, logger, shutdownTimeout, servers)
 }
 
 type namedServer struct {

@@ -1,17 +1,24 @@
-// Package config 从环境变量加载配置。
+// Package config 处理进程启动所需的配置。
 //
-// 约定：所有配置项都带 LARKAX_ 前缀，一律通过环境变量提供。
-// 配置文件与命令行参数暂不支持——部署形态是容器，环境变量是最直接的注入方式，
-// 且天然不会把值写进镜像层。
+// 配置分三类，只有两类进本包：
+//
+//  1. 启动必需 —— 环境变量。没有它进程连不到数据库。只有数据库 DSN、
+//     主密钥、角色三项。
+//  2. 实例相关 —— 环境变量，全部有默认值。监听地址、日志级别。
+//     每个实例可以不同，丢了只影响行为，不影响数据。
+//  3. 数据相关 —— 数据库的 settings 表，不在本包。留存期、默认模型、
+//     配额策略这些必须跟着数据一起走：换环境或做恢复时不需要把一堆
+//     环境变量照抄一遍，也不会因为漏了一个变量就导致数据不可用。
+//
+// 因此新增环境变量的门槛很高：只有当这个值必须在连上数据库之前拿到时才允许。
+// 其余一律进 settings 表。
 package config
 
 import (
 	"encoding/base64"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
-	"time"
 )
 
 // Role 是同一个二进制承担的服务角色。
@@ -26,6 +33,12 @@ const (
 	RoleWorker  Role = "worker"
 )
 
+// NeedsMasterKey 表示该角色需要解开渠道凭证，因而必须配置主密钥。
+//
+// 判据写成「不等于 worker」而非「等于 gateway 或 control」：
+// 角色写错时按需要密钥处理，失败在安全一侧。
+func (r Role) NeedsMasterKey() bool { return r != RoleWorker }
+
 func (r Role) valid() bool {
 	switch r {
 	case RoleGateway, RoleControl, RoleWorker:
@@ -34,57 +47,47 @@ func (r Role) valid() bool {
 	return false
 }
 
-// Config 是服务的完整配置。
+// Config 是进程启动所需的最小配置。
 type Config struct {
-	Env  string
-	Role Role
+	Env          string
+	Role         Role
+	HTTPAddr     string
+	InternalAddr string
+	LogLevel     string
 
-	HTTPAddr    string
-	MetricsAddr string
-	LogLevel    string
-	LogFormat   string
+	// DBDSN 与 RedisDSN 用 DSN 形式承载地址与凭证，而不是拆成
+	// 主机、端口、用户名、密码、库名五个变量。少四个变量就少四处不同步的可能。
+	DBDSN    string
+	RedisDSN string // 空表示不启用 Redis
 
-	DB     DB
-	Redis  Redis
-	Secret Secret
-
-	ShutdownTimeout time.Duration
+	MasterKeys []MasterKey
 }
 
-// DB 是 PostgreSQL 连接配置。
-type DB struct {
-	DSN          string
-	MaxConns     int32
-	MinConns     int32
-	ConnLifetime time.Duration
-}
-
-// Redis 是 Redis 连接配置。
-type Redis struct {
-	Addr     string
-	Password string
-	DB       int
-}
-
-// Secret 持有解密渠道凭证所需的主密钥。
+// MasterKey 是一把用于解开数据密钥（DEK）的主密钥（KEK）。
 //
-// 这个值只应来自密钥管理服务，不应出现在配置文件或镜像里。
-// String 方法有意不输出内容，避免日志与错误信息里带出密钥。
-type Secret struct {
-	CredentialMasterKey []byte
+// 为什么要多把：凭证密文是用 DEK 加密的，DEK 又用每把 KEK 各包一份存在库里。
+// 任何一把 KEK 都能把 DEK 解出来，于是——
+//   - 轮换密钥时新旧并存，不需要一次性重加密全部数据；
+//   - 弄丢其中一把（环境变量被覆盖、密钥管理服务迁移出错）不会让数据变成废纸；
+//   - 可以留一把离线保管作为恢复密钥。
+//
+// ID 必须显式给出并保持稳定，它记录在密文的包装信息里，
+// 用来判断该用哪把钥匙去解。改名等于丢失对应数据的可读性。
+type MasterKey struct {
+	ID  string
+	Key []byte
 }
 
-func (s Secret) String() string {
-	if len(s.CredentialMasterKey) == 0 {
-		return "Secret{credential_master_key: <unset>}"
-	}
-	return "Secret{credential_master_key: <redacted>}"
-}
+// KeySize 是主密钥的字节长度（AES-256）。
+const KeySize = 32
+
+// UnsetMasterKeyID 是省略 ID 时使用的默认标识。
+const UnsetMasterKeyID = "default"
 
 // Load 读取环境变量并校验。任何缺失或非法的必填项都会让服务拒绝启动：
 // 带着半截配置跑起来比启动失败更难排查。
 //
-// 解析失败一律报错而不回落默认值。静默回落会让「配置写错了」表现为
+// 解析失败一律报错而不回落到默认值。静默回落会让「配置写错了」表现为
 // 「行为跟预期不一样」，排查成本远高于启动时直接失败。
 func Load() (*Config, error) {
 	var errs []string
@@ -93,78 +96,31 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		Env:         env("LARKAX_ENV", "development"),
-		Role:        Role(env("LARKAX_ROLE", string(RoleGateway))),
-		HTTPAddr:    env("LARKAX_HTTP_ADDR", ":8080"),
-		LogLevel:    env("LARKAX_LOG_LEVEL", "info"),
-		LogFormat:   env("LARKAX_LOG_FORMAT", ""),
-		MetricsAddr: env("LARKAX_METRICS_ADDR", ":9090"),
-		DB: DB{
-			DSN: os.Getenv("LARKAX_DB_DSN"),
-		},
-		Redis: Redis{
-			Addr:     env("LARKAX_REDIS_ADDR", ""),
-			Password: os.Getenv("LARKAX_REDIS_PASSWORD"),
-		},
+		Env:          env("LARKAX_ENV", "development"),
+		Role:         Role(env("LARKAX_ROLE", string(RoleGateway))),
+		HTTPAddr:     env("LARKAX_HTTP_ADDR", ":8080"),
+		InternalAddr: env("LARKAX_INTERNAL_ADDR", ":9090"),
+		LogLevel:     env("LARKAX_LOG_LEVEL", "info"),
+		DBDSN:        os.Getenv("LARKAX_DB_DSN"),
+		RedisDSN:     os.Getenv("LARKAX_REDIS_DSN"),
 	}
 
 	if !cfg.Role.valid() {
 		fail("LARKAX_ROLE 必须是 gateway/control/worker 之一，当前为 %q", cfg.Role)
 	}
-	if cfg.DB.DSN == "" {
+	if cfg.DBDSN == "" {
 		fail("LARKAX_DB_DSN 未设置")
 	}
-
-	if n, err := envInt("LARKAX_DB_MAX_CONNS", 20); err != nil {
-		fail("%v", err)
-	} else {
-		cfg.DB.MaxConns = int32(n)
-	}
-	if n, err := envInt("LARKAX_DB_MIN_CONNS", 2); err != nil {
-		fail("%v", err)
-	} else {
-		cfg.DB.MinConns = int32(n)
-	}
-	if cfg.DB.MaxConns < 1 {
-		fail("LARKAX_DB_MAX_CONNS 必须大于 0，当前为 %d", cfg.DB.MaxConns)
-	}
-	if cfg.DB.MinConns < 0 || cfg.DB.MinConns > cfg.DB.MaxConns {
-		fail("LARKAX_DB_MIN_CONNS 必须在 0 与 LARKAX_DB_MAX_CONNS 之间，当前为 %d", cfg.DB.MinConns)
+	if cfg.RedisDSN != "" && !hasScheme(cfg.RedisDSN, "redis", "rediss", "unix") {
+		fail("LARKAX_REDIS_DSN 必须以 redis://、rediss:// 或 unix:// 开头")
 	}
 
-	if d, err := envDuration("LARKAX_DB_CONN_LIFETIME", time.Hour); err != nil {
-		fail("%v", err)
-	} else {
-		cfg.DB.ConnLifetime = d
-	}
-	if d, err := envDuration("LARKAX_SHUTDOWN_TIMEOUT", 30*time.Second); err != nil {
-		fail("%v", err)
-	} else {
-		cfg.ShutdownTimeout = d
-	}
-	if n, err := envInt("LARKAX_REDIS_DB", 0); err != nil {
-		fail("%v", err)
-	} else {
-		cfg.Redis.DB = n
-	}
-
-	// 渠道凭证主密钥只在需要解密的角色上强制要求。
-	// worker 里的日历同步、对账任务不碰凭证，要求它就等于无谓地扩大密钥的暴露面。
-	//
-	// 判据写成「不等于 worker」而非「等于 gateway 或 control」：角色写错时
-	// 按需要密钥处理，失败在安全一侧。
-	if cfg.Role != RoleWorker {
-		raw := os.Getenv("LARKAX_CREDENTIAL_MASTER_KEY")
-		switch {
-		case raw == "":
-			fail("LARKAX_CREDENTIAL_MASTER_KEY 未设置")
-		default:
-			key, err := decodeKey(raw)
-			if err != nil {
-				fail("LARKAX_CREDENTIAL_MASTER_KEY 无效: %v", err)
-			} else {
-				cfg.Secret.CredentialMasterKey = key
-			}
+	if cfg.Role.NeedsMasterKey() {
+		keys, err := parseMasterKeys(os.Getenv("LARKAX_MASTER_KEYS"))
+		if err != nil {
+			fail("LARKAX_MASTER_KEYS 无效: %v", err)
+		} else {
+			cfg.MasterKeys = keys
 		}
 	}
 
@@ -177,10 +133,56 @@ func Load() (*Config, error) {
 // IsProduction 决定若干默认行为的松紧，例如日志格式与错误详情的暴露程度。
 func (c *Config) IsProduction() bool { return c.Env == "production" }
 
-// KeySize 是渠道凭证加密所用主密钥的字节长度（AES-256）。
-const KeySize = 32
+// PrimaryMasterKey 返回用于包装新数据密钥的那一把。
+// 取列表中的第一把；调用方需先确认 len(MasterKeys) > 0。
+func (c *Config) PrimaryMasterKey() MasterKey { return c.MasterKeys[0] }
 
-// decodeKey 解析 base64 编码的主密钥。
+// parseMasterKeys 解析 "<id>:<base64>,<id>:<base64>" 形式的密钥列表。
+//
+// 省略 ID 时（整段就是裸的 base64）按 UnsetMasterKeyID 处理，
+// 让「只有一把钥匙」的简单情形不必写前缀。
+func parseMasterKeys(raw string) ([]MasterKey, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, fmt.Errorf("未设置")
+	}
+
+	var keys []MasterKey
+	seen := make(map[string]bool)
+
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		id, encoded := UnsetMasterKeyID, part
+		if idx := strings.Index(part, ":"); idx >= 0 {
+			id = strings.TrimSpace(part[:idx])
+			encoded = strings.TrimSpace(part[idx+1:])
+		}
+		if id == "" {
+			return nil, fmt.Errorf("密钥标识不能为空")
+		}
+		if seen[id] {
+			return nil, fmt.Errorf("密钥标识 %q 重复", id)
+		}
+
+		key, err := decodeKey(encoded)
+		if err != nil {
+			return nil, fmt.Errorf("密钥 %q: %w", id, err)
+		}
+		seen[id] = true
+		keys = append(keys, MasterKey{ID: id, Key: key})
+	}
+
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("未解析出任何密钥")
+	}
+	return keys, nil
+}
+
+// decodeKey 解析 base64 编码的密钥。
 //
 // 有意同时接受标准与 URL-safe 两种字母表，以及带不带填充的写法：
 // 密钥由运维用不同工具生成（openssl、云厂商 CLI、密码管理器），
@@ -193,7 +195,7 @@ func decodeKey(raw string) ([]byte, error) {
 		base64.RawURLEncoding,
 	}
 	for _, enc := range encodings {
-		key, err := enc.DecodeString(strings.TrimSpace(raw))
+		key, err := enc.DecodeString(raw)
 		if err != nil {
 			continue
 		}
@@ -205,36 +207,18 @@ func decodeKey(raw string) ([]byte, error) {
 	return nil, fmt.Errorf("不是合法的 base64 编码")
 }
 
+func hasScheme(dsn string, schemes ...string) bool {
+	for _, s := range schemes {
+		if strings.HasPrefix(dsn, s+"://") {
+			return true
+		}
+	}
+	return false
+}
+
 func env(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return fallback
-}
-
-func envInt(key string, fallback int) (int, error) {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return fallback, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return 0, fmt.Errorf("%s 必须是整数，当前为 %q", key, v)
-	}
-	return n, nil
-}
-
-func envDuration(key string, fallback time.Duration) (time.Duration, error) {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return fallback, nil
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		return 0, fmt.Errorf("%s 必须是时长（如 30s、5m），当前为 %q", key, v)
-	}
-	if d < 0 {
-		return 0, fmt.Errorf("%s 不能为负，当前为 %q", key, v)
-	}
-	return d, nil
 }
