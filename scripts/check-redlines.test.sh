@@ -47,6 +47,17 @@ expect_clean() {
   fi
 }
 
+# ── 关于样本值 ────────────────────────────────────────────────────────────
+#
+# 这里刻意用「前缀对了但取值是字母序列」的样本，而不是形似真实密钥的串。
+# 原因是 GitHub 的 push protection 会扫提交历史，而它不看我们的白名单：
+# 一份像真的 sk_live_… / xoxb-… 样本会让 push 被直接拒绝，
+# 而修好它只能重写历史。样本的用途是证明**模式**能命中，取值本身无所谓。
+# 编写规则：
+#   - 前缀保留（那是被测的东西），后面跟明显是占位的字母序列
+#   - 不出现厂商文档里的样例值（AKIA…EXAMPLE 那类），它们同样会触发拦截
+#   - 确需真实形态的用例，先本地跑本文件确认能命中，再确认 push 不被拒
+
 # ── 应当命中 ──────────────────────────────────────────────────────────────
 
 expect_hit "各家密钥前缀" 'STRIPE_SECRET_KEY="sk_live_Ab3Cd5Ef7Gh9Jk2MnPq"'
@@ -68,9 +79,10 @@ expect_hit "内网 192.168 段非标端口" 'host = "192.168.10.5:9000"'
 expect_hit "内网 172.16-31 段非标端口" 'host = "172.20.0.3:8443"'
 
 # 回归：过滤粒度曾是整行，同行出现占位词就把真值一起放过
-expect_hit "与占位词同行的真密钥" 'password=correct-horse-battery-staple  # 示例环境（example）'
+expect_hit "与占位词同行的真口令" 'password=correct-horse-battery-staple  # 示例环境（example）'
 expect_hit "与占位词同行的形态密钥" 'key = "sk_live_Ab3Cd5Ef7Gh9Jk2MnPq"  # placeholder 待替换'
-expect_hit "样例形态的 AWS 密钥" 'AWS_ACCESS_KEY_ID=AKIA3XQ7ZPLMN2VKRTYW'
+expect_hit "厂商样例形态的 AWS 密钥" 'AWS_ACCESS_KEY_ID=AKIA3XQ7ZPLMN2VKRTYW'
+expect_hit "更长但仍含占位词的形态" 'key = "sk_live_Ab3Cd5Ef7Gh9Jk2MnPq"  # 占位待换'
 
 # ── 应当放行 ──────────────────────────────────────────────────────────────
 
