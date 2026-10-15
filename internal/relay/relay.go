@@ -410,3 +410,24 @@ func fromImageBlock(block map[string]any) channel.ContentBlock {
 	out.ImageURL = url
 	return out
 }
+
+// ToRelaykitClaude 把统一请求转成 relaykit 的 Anthropic Messages 请求。
+//
+// 路径是「本项目 → OpenAI Chat → Claude Messages」：relaykit 的转换矩阵
+// 以 OpenAI Chat 为枢纽，两边都能到，而直接写「本项目 → Claude」会让
+// 枢纽这一层的语义差异（system 是顶层字段、max_tokens 必填、
+// tool_use 与 tool_result 的结构不同）散落在两个地方。
+func ToRelaykitClaude(req *dto.GeneralOpenAIRequest) (*dto.ClaudeRequest, error) {
+	if req == nil {
+		return nil, fmt.Errorf("请求为 nil")
+	}
+	res, err := relayconvert.ConvertRequest(context.Background(), nil, types.RelayFormatClaude, *req)
+	if err != nil {
+		return nil, fmt.Errorf("转换为 Anthropic 请求失败: %w", err)
+	}
+	out, ok := res.Value.(*dto.ClaudeRequest)
+	if !ok {
+		return nil, fmt.Errorf("转换后得到意外类型 %T", res.Value)
+	}
+	return out, nil
+}
