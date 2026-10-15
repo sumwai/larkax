@@ -71,5 +71,15 @@ jobs:
       - name: 扫描器自测
         run: bash scripts/check-redlines.test.sh
 
+      # 脚本用退出码区分「命中」与「自身故障」，这里要把这个区分带出来：
+      # 不区分的话，扫描器坏掉的日志和干净通过长得一样，没人会去看。
       - name: 扫描密钥与私有信息
-        run: bash scripts/check-redlines.sh --all
+        run: |
+          set +e
+          bash scripts/check-redlines.sh --all
+          rc=$?
+          set -e
+          if [ "$rc" -eq 2 ]; then
+            echo "::error::红线扫描器自身执行失败（退出码 2）。这不是「干净」，是没扫成。"
+          fi
+          exit "$rc"
