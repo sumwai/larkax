@@ -158,3 +158,24 @@ var errBoom = &boomError{}
 type boomError struct{}
 
 func (*boomError) Error() string { return "boom" }
+
+// 重复声明会让后一条安静地覆盖前一条，而两处代码看起来都「写了」。
+func TestIndexRejectsDuplicateKey(t *testing.T) {
+	saved := Registry
+	t.Cleanup(func() { Registry = saved })
+	Registry = append(append([]Spec{}, saved...), saved[0])
+
+	if _, err := index(); err == nil {
+		t.Fatal("重复声明的键应报错")
+	}
+}
+
+func TestIndexRejectsEmptyKey(t *testing.T) {
+	saved := Registry
+	t.Cleanup(func() { Registry = saved })
+	Registry = append(append([]Spec{}, saved...), Spec{Key: "", Kind: KindInt})
+
+	if _, err := index(); err == nil {
+		t.Fatal("空键名应报错")
+	}
+}
