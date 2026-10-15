@@ -1,0 +1,36 @@
+# Build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Dependencies
+/vendor/
+
+# Environment and secrets — never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.jks
+
+# Editor and OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local runtime state
+/tmp/
+*.log
+coverage.out
+coverage.html
+
+# Node
+node_modules/
+web/dist/
+.pnpm-store/
