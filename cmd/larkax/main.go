@@ -125,8 +125,10 @@ func run() error {
 		_, _ = w.Write([]byte(`{"error":{"type":"not_implemented","message":"inference API is not available in this build"}}`))
 	})
 	publicSrv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           publicMux,
+		Addr: cfg.HTTPAddr,
+		// 最外层是关联标识：放在其他中间件之前，
+		// 这样被后续中间件拒绝掉的请求也带着 id，能被排查到。
+		Handler:           observe.Middleware(publicMux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	servers = append(servers, namedServer{name: "public", srv: publicSrv})
