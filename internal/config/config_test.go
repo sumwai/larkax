@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -336,5 +337,81 @@ func TestLoadReportsAllErrorsAtOnce(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("错误信息未包含 %s:\n%s", want, msg)
 		}
+	}
+}
+
+// 打印 Config 是顺手就会做的事（slog.Any、%+v、测试里 t.Log），
+// 而它装着数据库口令与主密钥。这组测试固定「打印不等于泄露」。
+func TestConfigStringRedactsSecrets(t *testing.T) {
+	const (
+		// 用占位形态而非貌似真实的字面量：红线扫描器会（正确地）拦住后者，
+		// 而这里的断言只关心「该串没被原样打印出来」。
+		dbPassword  = "placeholder-db-password"
+		redisPass   = "placeholder-redis-password"
+		masterBytes = "0123456789abcdef0123456789abcdef"
+	)
+	cfg := &Config{
+		Env:        "production",
+		Role:       RoleGateway,
+		DBDSN:      "postgres://larkax:" + dbPassword + "@db.internal:5432/larkax",
+		RedisDSN:   "redis://:" + redisPass + "@cache.internal:6379/0",
+		MasterKeys: []MasterKey{{ID: "current", Key: []byte(masterBytes)}},
+	}
+
+	renders := map[string]string{
+		"String":   fmt.Sprint(cfg),
+		"GoString": fmt.Sprintf("%#v", cfg),
+	}
+	for name, got := range renders {
+		for _, secret := range []string{dbPassword, redisPass, masterBytes} {
+			if strings.Contains(got, secret) {
+				t.Errorf("%s 泄露了 %q：%s", name, secret, got)
+			}
+		}
+		// 非敏感字段要保留，否则排查配置问题时没法用
+		if !strings.Contains(got, "gateway") {
+			t.Errorf("%s 丢了角色信息：%s", name, got)
+		}
+	}
+
+	// 主机与库名保留：排查「连错环境」时靠它们，口令才是要挡的
+	if got := fmt.Sprint(cfg); !strings.Contains(got, "db.internal:5432/larkax") {
+		t.Errorf("String 丢了主机与库名：%s", got)
+	}
+}
+
+// MasterKey 会跟着 Config 出现在日志里，默认展开是明文。
+func TestMasterKeyStringHidesKeyMaterial(t *testing.T) {
+	k := MasterKey{ID: "current", Key: []byte("0123456789abcdef0123456789abcdef")}
+	for _, got := range []string{fmt.Sprint(k), fmt.Sprintf("%#v", k)} {
+		if strings.Contains(got, "0123456789") || strings.Contains(got, "[48 49") {
+			t.Errorf("泄露了密钥内容：%s", got)
+		}
+		if !strings.Contains(got, "current") {
+			t.Errorf("丢了标识：%s", got)
+		}
+	}
+}
+
+func TestRedactDSN(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"URL 形式", "postgres://larkax:pw123@host:5432/db", "postgres://larkax:REDACTED@host:5432/db"},
+		{"Redis 无用户名", "redis://:pw123@host:6379/0", "redis://:REDACTED@host:6379/0"},
+		{"URL 无口令不动", "postgres://larkax@host:5432/db", "postgres://larkax@host:5432/db"},
+		{"关键字形式", "host=h user=u password=pw123 dbname=d", "host=h user=u password=REDACTED dbname=d"},
+		{"关键字别名", "host=h passwd=pw123", "host=h passwd=REDACTED"},
+		{"关键字无口令不动", "host=h user=u dbname=d", "host=h user=u dbname=d"},
+		{"空串", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := RedactDSN(c.in); got != c.want {
+				t.Errorf("RedactDSN(%q) = %q，期望 %q", c.in, got, c.want)
+			}
+		})
 	}
 }
