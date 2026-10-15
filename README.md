@@ -69,8 +69,7 @@ gateway  ──►  router  ──►  channel.Adapter  ──►  upstream
 `internal/relay` is the single seam onto
 [relaykit](https://github.com/QuantumNous/new-api); no other package imports it.
 
-Later milestones add `internal/gateway`, `internal/route`, `internal/billing`,
-`internal/quota`, `internal/ledger`, `internal/plugin`, `plugins/`, and `web/`.
+Not yet written: `internal/gateway`, `internal/plugin`, `plugins/`, and `web/`.
 
 ## Building
 
