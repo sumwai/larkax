@@ -16,6 +16,7 @@ returns `501` on every path. Nothing here is ready to run in production.
 What works today:
 
 - Configuration loading, structured logging, `/healthz` and `/readyz`
+- Runtime settings loaded from the database and validated against the keys the code declares
 - Migrations, applied and rolled back through `larkaxctl`
 - The full initial database schema
 
@@ -42,9 +43,11 @@ See [docs/development.md](docs/development.md) for how to build and run it.
 ```
 cmd/larkax/            the service binary
 cmd/larkaxctl/         migrations and operations CLI
-internal/config/       startup configuration
+internal/config/       startup configuration (environment variables)
+internal/db/           database connection pool
 internal/migrate/      embedded migrations (internal/migrate/sql/)
 internal/observe/      logging, health and readiness endpoints
+internal/settings/     runtime configuration, stored in the database
 scripts/               repository tooling
 ```
 
