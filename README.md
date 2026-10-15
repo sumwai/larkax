@@ -43,13 +43,28 @@ See [docs/development.md](docs/development.md) for how to build and run it.
 ```
 cmd/larkax/            the service binary
 cmd/larkaxctl/         migrations and operations CLI
+internal/channel/      upstream adapters: interface, registry, unified request/response types
 internal/config/       startup configuration (environment variables)
+internal/credential/   envelope encryption for channel credentials
 internal/db/           database connection pool
 internal/migrate/      embedded migrations (internal/migrate/sql/)
-internal/observe/      logging, health and readiness endpoints
+internal/observe/      logging, request IDs, health and readiness endpoints
+internal/relay/        the only place that imports relaykit; protocol conversion
 internal/settings/     runtime configuration, stored in the database
 scripts/               repository tooling
 ```
+
+Layering, so the data plane never depends on the control plane:
+
+```
+gateway  ──►  router  ──►  channel.Adapter  ──►  upstream
+                │                │
+                │                └── protocol conversion only
+                └── selection, retry, failover
+```
+
+`internal/relay` is the single seam onto
+[relaykit](https://github.com/QuantumNous/new-api); no other package imports it.
 
 Later milestones add `internal/gateway`, `internal/route`, `internal/billing`,
 `internal/quota`, `internal/ledger`, `internal/plugin`, `plugins/`, and `web/`.
