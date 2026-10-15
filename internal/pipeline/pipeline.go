@@ -1,0 +1,494 @@
+// Package pipeline 把计费的各个环节串成一次请求的完整流程。
+//
+// 它串起来的是：
+//
+//	取规则 → 求最坏情况 → 预留 → （上游调用）→ 按实际用量结算 → 生成账本分录
+//
+// 这一层**不查库、不发 HTTP、不改余额**：规则从 RuleSource 来，
+// 账本分录交回调用方去持久化。于是整条流程可以脱离数据库与网络测试，
+// 而那恰好是这套系统里最贵的一类 bug 的所在——**算错了不会报错，
+// 只会让账目悄悄错掉**。
+//
+// # 为什么分两个阶段而不是一个函数
+//
+// 预留发生在请求发出**之前**，结算发生在响应回来**之后**，中间隔着一次
+// 可能持续数分钟的上游调用。合成一个函数意味着它必须持有一个跨越整个
+// 上游调用的状态，而那个状态里放着已经冻结的金额——它一旦丢（进程重启、
+// panic），钱就少收或多收了。
+//
+// 分开之后，「预留」的返回值是可以被调用方落库的完整信息，
+// 进程重启也能从库里捡回来。
+package pipeline
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/sumwai/larkax/internal/billing"
+	"github.com/sumwai/larkax/internal/billing/expr"
+	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/ledger"
+	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/tokens"
+)
+
+// RuleSource 提供一次请求适用的计价规则。
+//
+// 抽成接口而不是直接查库：规则的匹配与优先级裁决是 SQL 的活，
+// 而这一层只关心「拿到一条能求值的规则」。
+type RuleSource interface {
+	// Match 返回适用的规则。没有匹配时返回 ErrNoRule——
+	// **不要返回一条默认的零价规则**：那会让「没配价」表现为「免费」，
+	// 而免费是最不容易被发现的错账。
+	Match(ctx context.Context, req RuleQuery) (Rule, error)
+}
+
+// Rule 是一条待求值的计价规则。
+type Rule struct {
+	ID int64
+	// Source 是表达式源码。
+	Source string
+	// Version 是规则的版本号，用于编译缓存的键。
+	//
+	// 它必须参与缓存键：同一 ID 的规则被改过之后，用旧版本号取到的
+	// 编译产物仍是旧表达式，而那会让「改了规则但没生效」表现为
+	// 「规则写错了」——排查方向完全错。
+	Version int64
+}
+
+// CacheKey 是这条规则在编译缓存里的键。
+func (r Rule) CacheKey() string {
+	return fmt.Sprintf("%d:%d", r.ID, r.Version)
+}
+
+// RuleQuery 是匹配规则的条件。
+type RuleQuery struct {
+	// CanonicalModel 是规范模型名（不是上游名）。
+	CanonicalModel string
+	// ChannelID 是最终选中的渠道，0 表示尚未选定。
+	//
+	// 渠道级规则需要在选路之后才能匹配，而预留要在选路之前发生——
+	// 所以预留时传 0，结算时传实际渠道。这中间的差异由
+	// 「预留按所有匹配规则的上界」处理（见 Pipeline.Reserve）。
+	ChannelID int64
+	// OwnerUserID 是渠道所属的商家，用于匹配商家级规则。
+	OwnerUserID int64
+	// At 是匹配用的时刻。生效时间窗口按它判。
+	At time.Time
+}
+
+// ErrNoRule 表示没有匹配的计价规则。
+//
+// 单独一个错误类型是为了让调用方能把它与「规则求值失败」分开：
+// 前者是配置缺失（该拒绝服务并告警），后者是规则本身有问题。
+var ErrNoRule = errors.New("没有匹配的计价规则")
+
+// Pipeline 是完整的计费流程。
+type Pipeline struct {
+	Rules    RuleSource
+	Programs *expr.Cache
+	// Calendar 在规则用到日历时必须给，否则求值会失败。
+	Calendar expr.Calendar
+	// Region 是日历的地区。空则用规则所在地的默认值由调用方决定。
+	Region string
+	// Now 可注入，便于测试时间相关的逻辑。
+	Now func() time.Time
+}
+
+// Request 是一次请求的计费输入。
+//
+// 它只带**计费需要知道的东西**，不带你调上游要用的参数——
+// 那些与计费无关，混进来会让「改一个上游参数」看起来像「改了计费」。
+type Request struct {
+	// RequestID 是幂等键。同一次请求重复计费必须只扣一次。
+	RequestID string
+	UserID    int64
+
+	CanonicalModel string
+	// ChannelID 与 OwnerUserID 是渠道级与商家级规则的匹配条件。
+	ChannelID   int64
+	OwnerUserID int64
+
+	// InputTokens 是请求的输入 token 估算，由分词层给出。
+	InputTokens int64
+	// MaxTokens 是请求允许的最大输出。它是预留上界的关键。
+	MaxTokens int64
+
+	// Usage 是计费口径的用量（缓存读写等）。预留时用它估缓存侧的消耗。
+	Usage billing.Usage
+
+	// Asset 是结算用的资产品种。空则用默认。
+	Asset string
+
+	// BillingRequestID 是 billing_requests 表里那一行的 id，
+	// 由调用方在落预留时拿到。它是账本分录与请求记录的关联点。
+	//
+	// 为 0 表示尚未落库——此时分录也构造得出来，只是追溯时少一层关联。
+	BillingRequestID int64
+}
+
+// Reservation 是预留的结果，调用方需要把它落库。
+//
+// 它带着**求值时的全部依据**（规则标识、表达式快照、求值时刻），
+// 这样事后复算不需要再查规则——规则可能在事后被改过，
+// 而账单必须能解释当时为什么是这个价。
+type Reservation struct {
+	RequestID string
+	UserID    int64
+	Asset     string
+
+	// Amount 是冻结的金额。它是**上界**：结算不会超过它。
+	Amount money.Amount
+
+	RuleID            int64
+	PricingExprSnap   string
+	RuleMatchedAt     time.Time
+	BillingRequestID  int64
+	ReservedBreakdown billing.Breakdown
+}
+
+// Outcome 是上游调用的结果，决定怎么结算。
+//
+// **失败不计费**，而「失败」有几种，处置不同。用一个结构体显式表达
+// 而不是靠调用方传一个 bool：那几种情形在计费上的差别很大，
+// 而它们在上游调用那一侧都表现为「出错了」。
+type Outcome struct {
+	// UpstreamFailed 为 true 表示上游根本没成功返回。
+	//
+	// 不计费。但要落一条记录——「这个请求失败了」本身是排查的依据。
+	UpstreamFailed bool
+
+	// UpstreamStatus 与 ErrorCode 是失败时的依据，供事后核对
+	// 「这个错误码当时是不是真的不该计费」。
+	UpstreamStatus int
+	ErrorCode      string
+
+	// ClientCancelled 为 true 表示客户端在流式响应中途断开。
+	//
+	// **要计费**：已经产生的 token 上游是算了钱的。用量由 Usage 给，
+	// 而它是网关按收到的内容当场估算的——见 tokens 包。
+	ClientCancelled bool
+
+	// Usage 是实际的用量。上游失败时忽略它。
+	//
+	// 它应当是**实测值**；只有在客户端中途断开这类拿不到实测值的
+	// 情形下才是估算值，而那时 UsageSource 会标明。
+	Usage channel.Usage
+	// UsageSource 说明用量是实测还是估算。结算时会落进账本，
+	// 因为「这笔钱是按估的收的」是需要能被事后看出来的。
+	UsageSource tokens.Source
+
+	// UpstreamCost 是上游侧的成本，供对账。
+	UpstreamCost money.Amount
+}
+
+// Charge 是结算的结果，调用方据此写账本。
+type Charge struct {
+	RequestID string
+	UserID    int64
+	Asset     string
+
+	Settlement billing.Settlement
+	Breakdown  billing.Breakdown
+
+	// Entries 是要写入账本的分录。它是平衡的（组内求和为零），
+	// 由 ledger 包构造并校验过。
+	Entries []ledger.Entry
+
+	RuleID          int64
+	PricingExprSnap string
+
+	// UsageSource 与 Usage 是结算依据，落进 usage_events 供对账。
+	UsageSource tokens.Source
+	Usage       billing.Usage
+
+	// Tier 是规则记下的档位名，供账单解释「为什么按这一档算」。
+	Tier string
+	// PricedAt 是求值用的时刻，用于分时计价的事后复算。
+	PricedAt time.Time
+	// LocalHour 与 IsOffDay 是同一次求值里用到的分时依据，
+	// 单独落库是为了让复算不必再查一次日历。
+	LocalHour int
+	IsOffDay  bool
+}
+
+// Reserve 计算并返回这次请求的预留。
+func (p *Pipeline) Reserve(ctx context.Context, req Request) (*Reservation, error) {
+	if err := req.validate(); err != nil {
+		return nil, err
+	}
+
+	rule, err := p.Rules.Match(ctx, RuleQuery{
+		CanonicalModel: req.CanonicalModel,
+		ChannelID:      req.ChannelID,
+		OwnerUserID:    req.OwnerUserID,
+		At:             p.now(),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	program, err := p.programs().Get(rule.CacheKey(), rule.Source)
+	if err != nil {
+		return nil, fmt.Errorf("%w: 规则 %d 无法编译: %w", ErrRuleBroken, rule.ID, err)
+	}
+
+	// 预留用**最坏情况**求值：每个价格位置取所有分支里的最高价。
+	//
+	// 不用「按当前时刻求一次」：规则可以按时间、按缓存命中与否分档，
+	// 而一次普通求值只给出其中一支的价。用那一支去预留，
+	// 结算走到更贵的那一支时就会超过预留。
+	worst, err := program.EvalWorstCase(p.env(req.Usage))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrRuleBroken, err)
+	}
+
+	amount, err := billing.Reserve(billing.ReserveRequest{
+		Prices:      worst.Prices,
+		Charges:     worst.Charges,
+		InputTokens: req.InputTokens,
+		// 缓存读按输入价估，缓存写按它自己的价——见 Reserve 的注释。
+		CacheReadTokens:  req.Usage.CacheReadTokens,
+		CacheWriteTokens: req.Usage.CacheWriteTokens,
+		MaxTokens:        req.MaxTokens,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("计算预留失败: %w", err)
+	}
+
+	// 预留明细按最坏情况的价与「最大可能用量」算，供界面展示
+	// 「这笔钱是怎么估出来的」。它与结算明细用的是同一套计算，
+	// 只是输入不同。
+	preview := billing.ComputeWithCharges(
+		billing.Usage{
+			PromptTokens:     req.InputTokens,
+			CacheReadTokens:  req.Usage.CacheReadTokens,
+			CacheWriteTokens: req.Usage.CacheWriteTokens,
+			CompletionTokens: req.MaxTokens,
+		},
+		worst.Prices, worst.Charges)
+
+	return &Reservation{
+		RequestID:         req.RequestID,
+		UserID:            req.UserID,
+		Asset:             req.asset(),
+		Amount:            amount,
+		RuleID:            rule.ID,
+		PricingExprSnap:   rule.Source,
+		RuleMatchedAt:     worst.At,
+		ReservedBreakdown: preview,
+	}, nil
+}
+
+// Settle 按实际结果结算并生成账本分录。
+//
+// reserved 来自同一个 Request 的 Reserve，**必须是它返回的那个金额**。
+// 传一个自己算的数会让「预留是上界」这条不变量失效，而失效的表现是
+// 结算超过预留、余额变负。
+func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservation, out Outcome) (*Charge, error) {
+	if reserved == nil {
+		return nil, errors.New("缺少预留信息：结算必须基于一次真实的预留")
+	}
+	if reserved.RequestID != req.RequestID {
+		return nil, fmt.Errorf("预留属于请求 %q，与当前的 %q 不符", reserved.RequestID, req.RequestID)
+	}
+	if err := req.validate(); err != nil {
+		return nil, err
+	}
+
+	// 上游失败不计费。这是硬规则，放在结算的最前面：
+	// 后面任何一处计算都不该有机会改变这个结论。
+	if out.UpstreamFailed {
+		return nil, &UpstreamFailure{
+			RequestID: req.RequestID,
+			Status:    out.UpstreamStatus,
+			Code:      out.ErrorCode,
+		}
+	}
+
+	// 结算用规则**当时**的那份。预留与结算必须用同一个规则版本——
+	// 规则在请求在途期间被改过的话，用新规则结算会算出与预留无缘由的差额。
+	rule, err := p.Rules.Match(ctx, RuleQuery{
+		CanonicalModel: req.CanonicalModel,
+		ChannelID:      req.ChannelID,
+		OwnerUserID:    req.OwnerUserID,
+		At:             reserved.RuleMatchedAt,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("结算时重新取规则失败: %w", err)
+	}
+
+	program, err := p.programs().Get(rule.CacheKey(), rule.Source)
+	if err != nil {
+		return nil, fmt.Errorf("%w: 规则 %d 无法编译: %w", ErrRuleBroken, rule.ID, err)
+	}
+
+	usage := billing.FromChannelUsage(out.Usage)
+	val, err := program.Eval(p.env(usage))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrRuleBroken, err)
+	}
+
+	settlement, err := billing.SettleWithCharges(usage, val.Prices, val.Charges, reserved.Amount)
+	if err != nil {
+		return nil, fmt.Errorf("结算失败: %w", err)
+	}
+
+	entries, err := p.entries(req, val, settlement)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Charge{
+		RequestID:       req.RequestID,
+		UserID:          req.UserID,
+		Asset:           req.asset(),
+		Settlement:      settlement,
+		Breakdown:       settlement.Breakdown,
+		Entries:         entries,
+		RuleID:          rule.ID,
+		PricingExprSnap: rule.Source,
+		UsageSource:     out.UsageSource,
+		Usage:           usage,
+		Tier:            val.Tier,
+		PricedAt:        val.At,
+	}, nil
+}
+
+// env 构造求值环境。
+//
+// 时间从 reserved.RuleMatchedAt（或 p.now()）来，**不读墙钟**：
+// 预留与结算要给出同一个答案，而读墙钟会让跨整点的请求按低谷预留、
+// 按高峰结算。这是 expr 包把时间做成显式入参的原因，这里照做。
+func (p *Pipeline) env(usage billing.Usage) expr.Env {
+	return expr.Env{
+		Usage:    usage,
+		At:       p.now(),
+		Region:   p.Region,
+		Calendar: p.Calendar,
+	}
+}
+
+func (p *Pipeline) programs() *expr.Cache {
+	if p.Programs == nil {
+		// 没有显式给缓存时建一个。**不该在每次求值时新建**——
+		// 那会让编译缓存完全失效，而编译一次约 130 µs，
+		// 一次请求要跑两次求值。
+		p.Programs = expr.NewCache(defaultCacheSize)
+	}
+	return p.Programs
+}
+
+// defaultCacheSize 是编译缓存的默认容量。
+//
+// 规则数远小于它，所以正常不会触发淘汰；给一个上限是为了防止
+// 「商家反复改规则」把内存吃满。
+const defaultCacheSize = 256
+
+func (p *Pipeline) now() time.Time {
+	if p.Now != nil {
+		return p.Now()
+	}
+	return time.Now()
+}
+
+// entries 把结算结果变成账本分录。
+//
+// 一次消费的账面形状：用户出钱、商户应付增加、平台留收入、上游成本记账。
+// 中间隔着一次上游调用，所以「平台先垫付了上游成本」这件事在分录里
+// 是显式的——不显式的话，平台的实际毛利只能靠事后减出来。
+func (p *Pipeline) entries(req Request, val expr.Result, s billing.Settlement) ([]ledger.Entry, error) {
+	// 金额为零时不写分录。**不是省事，是避免污染账本**：
+	// 大量零金额分录会让对账时的「有分录就说明发生过消费」这个判据失效。
+	if s.Actual.IsZero() {
+		return nil, nil
+	}
+
+	// 这里只构造「用户被扣了多少」这一侧的完整分录。
+	// 分成与上游成本的拆分需要商家分成规则，那属于另一个环节；
+	// 留一个显式的 TODO 比在这里猜一个比例好。
+	//
+	// 猜错的表现是商户拿到的钱不对，而那要等到结算日才发现。
+	consume, err := ledger.Consume(ledger.ConsumeParams{
+		TxnID:  ledger.NewTxnID(),
+		UserID: req.UserID,
+		Asset:  ledger.Asset(req.asset()),
+		Amount: s.Actual,
+		// 分成与上游成本由另一个环节填：那需要商家的分成规则，
+		// 而在这里猜一个比例的表现是「商户拿到的钱不对」，
+		// 那要等到结算日才发现。这里只记「用户被扣了多少」这一侧，
+		// 未拆分的部分留在平台科目上，事后可查。
+		MerchantID:       req.OwnerUserID,
+		BillingRequestID: req.BillingRequestID,
+		At:               val.At,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("构造账本分录失败: %w", err)
+	}
+	return consume.Denormalize(), nil
+}
+
+// ErrRuleBroken 表示规则本身有问题（编译不过、求值失败）。
+//
+// 与 ErrNoRule 分开：那个是「没配价」，这个是「配了但坏了」。
+// 前者要补一条规则，后者要商家改规则——处置完全不同。
+var ErrRuleBroken = errors.New("计价规则不可用")
+
+// UpstreamFailure 表示这次请求因上游失败而不计费。
+//
+// 它是**返回值**而不是普通错误：调用方需要区分「计费过程出错了」
+// 与「这次本来就不该计费」，前者要告警，后者是正常结局。
+type UpstreamFailure struct {
+	RequestID string
+	Status    int
+	Code      string
+}
+
+func (e *UpstreamFailure) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("上游失败（%d %s），本次不计费", e.Status, e.Code)
+	}
+	return fmt.Sprintf("上游失败（%d），本次不计费", e.Status)
+}
+
+// IsUpstreamFailure 判断一个错误是否表示「本次不该计费」。
+func IsUpstreamFailure(err error) bool {
+	var t *UpstreamFailure
+	return errors.As(err, &t)
+}
+
+func (r Request) asset() string {
+	if r.Asset == "" {
+		return defaultAsset
+	}
+	return r.Asset
+}
+
+// defaultAsset 是未指定时的资产品种。
+//
+// 与 settings 里的 `billing.default_asset` 重复了，但那一个是**运行期
+// 可改的配置**，而这里是「配置没加载时的兜底」。让本包依赖 settings
+// 会把「一个纯编排层」变成「要连数据库才能构造」，而那与它的定位相悖。
+const defaultAsset = "CNY"
+
+func (r Request) validate() error {
+	if r.RequestID == "" {
+		return errors.New("缺少请求标识：它是幂等键，重复计费必须只扣一次")
+	}
+	if r.UserID == 0 {
+		return errors.New("缺少用户标识")
+	}
+	if r.CanonicalModel == "" {
+		return errors.New("缺少规范模型名")
+	}
+	if r.MaxTokens <= 0 {
+		// 没有 max_tokens 就算不出预留上界，而预留必须有上界。
+		return fmt.Errorf("%w: max_tokens 必须为正，当前 %d", billing.ErrNoUpperBound, r.MaxTokens)
+	}
+	if r.InputTokens < 0 {
+		return fmt.Errorf("输入 token 为负: %d", r.InputTokens)
+	}
+	return nil
+}
