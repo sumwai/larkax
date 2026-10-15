@@ -4,7 +4,10 @@
 # 用法：
 #   scripts/check-redlines.sh              # 扫暂存区（pre-commit 用）
 #   scripts/check-redlines.sh --all        # 扫整个工作树
-#   scripts/check-redlines.sh HEAD~1       # 扫某个 commit 的改动
+#   scripts/check-redlines.sh <ref>        # 扫 <ref> 到工作树之间的改动
+#
+# 退出码：0 干净、1 命中、2 扫描器自身出错（grep 失败、文件读不了）。
+# 2 与 1 必须分开：检查工具坏掉时的输出和「干净」长得一样。
 #
 # 这是启发式检查，不是安全边界：它只认形态，不理解语义。
 # 漏报比误报危险，所以宁可多报——命中后人工确认，确属误报就把该行写成
@@ -71,7 +74,9 @@ PATTERNS_ASSIGN=(
 # -i 是有意的：这是按形态抓密钥，大小写不该影响结果。
 # -o 只取命中片段：过滤与输出都以片段为单位，不被同行的无关文字干扰。
 GREP_OPTS=(-n -o -i)
-if echo "" | grep -qP "" 2>/dev/null; then
+# 探测 PCRE 支持时同样不能合并标志——上面那句注释说的就是这件事，
+# 探测本身用 -qP 就是重犯。分开写，让「探测失败」和「引擎不支持」表现一致。
+if echo "" | grep -q -P "" 2>/dev/null; then
   GREP_OPTS+=(-P)
 else
   GREP_OPTS+=(-E)
