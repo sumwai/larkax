@@ -49,6 +49,21 @@ CI 目前包含：`gofmt` 检查、`go vet`、单测（含 `-race`）、覆盖�
 
 分支命名：`feat/`、`fix/`、`refactor/`、`docs/`、`test/`、`chore/` 前缀 + 简短描述。
 
+**开分支后立刻确认父提交是 main**：
+
+```sh
+git switch main && git pull --ff-only && git switch -c feat/xxx
+git log --oneline main..HEAD | wc -l    # 必须是 0
+```
+
+这一条是踩出来的，不是想出来的（见 [LESSONS.md](LESSONS.md) 第 11 条）。
+在别人的分支上工作过之后就地开新分支，会把那个分支的未合并提交一起带进去，
+表现为 PR 的标题与 diff 不符，也让合并难以回溯。**只靠记得检查是不够的**，
+所以把它写成开分支的固定动作。
+
+同理，`git branch -d` 批量清理时先看一眼列表里有没有当前分支——
+`git branch --merged main | xargs git branch -d` 会把 `main` 自己也扫进去。
+
 Commit 用 Conventional Commits。提交信息与 PR 描述里**不得出现会话上下文与私有信息**。
 
 ## 协作角色
