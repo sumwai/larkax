@@ -31,6 +31,15 @@ SKIP_FILES='^scripts/check-redlines\.(sh|test\.sh)$'
 ALLOW='<[A-Z_]+>|placeholder|example\.(com|org|net)|REDACTED|占位|示例'
 # 环境变量引用不是字面量。右侧不要求闭合花括号：-o 取到的片段可能被截在 } 之前。
 ALLOW+='|\$\{?[A-Za-z0-9_]*\}?'
+# 值是**选择器链**而不是字面量：`Tokens: r.Usage.OutputTokens`、`secret: cfg.S.Key`。
+# 凭证不会长成 `pkg.Field.SubField` 这种形状，而 Go/Rust/TS 的字段访问随处可见，
+# 且它们的字段名里常有 token / secret 这类词。不排除的话，
+# 每一个带此类字段名的赋值语句都会被报出来，噪音会淹掉真命中。
+#
+# 这里匹配的是**去掉键名与分隔符之后的值**，所以模式从行首锚定，
+# 不再要求前面有 = 或 :。
+ALLOW+='|^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$'
+ALLOW+='|^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+[[:space:]]*[({]'
 # localhost / 127.0.0.1 / 内网网段配「众所周知的服务端口」放行：那类写法在示例
 # 配置里到处都是，不携带任何本机信息。非默认端口仍然会报。
 ALLOW+='|(localhost|127\.0\.0\.1|10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'
@@ -66,6 +75,10 @@ PATTERNS_SHAPE=(
 # 引号可有可无——.env、shell、YAML、JSON 里没有引号的写法很常见，漏掉等于不设防。
 # 右侧允许连字符与下划线：口令常写成 few-words-strung-together 或
 # correct_horse_battery，只认字母数字会漏掉这类真口令。
+#
+# 代价是它会命中 Go 代码：`Tokens: r.Usage.OutputTokens` 里有「token」这个键名，
+# 右侧又是一长串标识符，形态上与凭证无从区分。这类由 ALLOW 里
+# 「值是选择器链」那一条兜掉，见下。
 PATTERNS_ASSIGN=(
   '(api[_-]?key|apikey|secret|password|passwd|token|credential|access[_-]?key)[A-Za-z0-9_]*[[:space:]]*[:=][[:space:]]*[^[:space:]]*[A-Za-z0-9_][A-Za-z0-9_-]{11,}'
 )
