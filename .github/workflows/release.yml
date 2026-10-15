@@ -1,0 +1,67 @@
+name: Release
+
+# 只在 tag 上触发。发布是一件需要人明确决定的事——
+# 不能让「合进 main」自动等于「发一个版本」。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 构建并发布
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 生成 release notes 要读 tag 之间的提交历史
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 发布前的最后一道门。tag 可能打在没跑过 CI 的 commit 上
+      #（例如从别的分支合的、或本地直接推的 tag），所以这里重跑一遍。
+      - name: 测试
+        run: go test -race ./...
+
+      # 版本号只有一处来源：tag。代码里不写死，构建时注入。
+      # 两个二进制注入同一个变量名，它们的版本必须能对上。
+      - name: 构建
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          for pair in "larkax:./cmd/larkax" "larkaxctl:./cmd/larkaxctl"; do
+            name="${pair%%:*}"
+            pkg="${pair#*:}"
+            for arch in amd64 arm64; do
+              GOOS=linux GOARCH="$arch" CGO_ENABLED=0 \
+                go build -trimpath \
+                  -ldflags "-s -w -X main.version=$VERSION" \
+                  -o "dist/${name}_linux_${arch}" "$pkg"
+            done
+          done
+          # 校验注入成功：漏了这一步，发布出去的二进制会自称 dev，
+          # 而这只有在用户报问题时才会被发现
+          if ! ./dist/larkax_linux_amd64 --version | grep -qx "$VERSION"; then
+            echo "::error::版本注入失败，二进制自称 $(./dist/larkax_linux_amd64 --version)"
+            exit 1
+          fi
+
+      - name: 校验和
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            dist/*
