@@ -111,6 +111,23 @@ expect_clean "带空格的赋值" 'token = resp.Data.Token'
 # 别处有字面量就得报出来
 expect_hit "选择器同行仍有真口令" 'password: correct-horse-battery-staple'
 
+# ── --all 必须覆盖尚未 add 的文件 ─────────────────────────────────────────
+#
+# 只扫 git ls-files（已跟踪）会留一个盲区：新写的文件在推送前不在扫描范围内，
+# 本机自查「通过」会让人以为没问题，等 CI 扫到时就晚了。
+
+uncovered_dir="$tmp/all-untracked"
+mkdir -p "$uncovered_dir"
+printf '%s\n' 'password=correct-horse-battery-staple' > "$uncovered_dir/new_file.txt"
+( cd "$uncovered_dir" && git init -q )
+if ( cd "$uncovered_dir" && bash "$SCRIPT" --all >/dev/null 2>&1 ); then
+  echo "✗ --all 漏掉了尚未 add 的文件"
+  fail=$((fail + 1))
+else
+  pass=$((pass + 1))
+fi
+
+
 # ── 结果 ──────────────────────────────────────────────────────────────────
 
 echo

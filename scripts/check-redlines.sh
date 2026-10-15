@@ -96,7 +96,10 @@ else
 fi
 
 case "${1:-}" in
-  --all)  files=$(git ls-files) ;;
+  # --all 要连**尚未 add 的文件**一起扫。只列 git ls-files（已跟踪）会留一个盲区：
+  # 新写的文件在推送前不在扫描范围内，而本机自查「通过」会让人以为没问题——
+  # 等 CI 扫到时就晚了，那时改动已经提交。
+  --all)  files=$(git ls-files --cached --others --exclude-standard) ;;
   "")     files=$(git diff --cached --name-only --diff-filter=ACM) ;;
   *)      files=$(git diff --name-only --diff-filter=ACM "$1") ;;
 esac
