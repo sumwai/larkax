@@ -82,19 +82,37 @@ type Values struct {
 	byKey map[string]Spec
 }
 
+// index 把 Registry 转成按键索引，并挡住重复声明。
+//
+// 重复声明不报的话，后一条会安静地覆盖前一条：调用方按前者的类型读，
+// 拿到的却是后者的值，而两处代码看起来都「写了」。
+func index() (map[string]Spec, error) {
+	byKey := make(map[string]Spec, len(Registry))
+	for _, s := range Registry {
+		if s.Key == "" {
+			return nil, fmt.Errorf("settings.Registry 里有空的键名")
+		}
+		if _, dup := byKey[s.Key]; dup {
+			return nil, fmt.Errorf("settings.Registry 里 %q 声明了多次", s.Key)
+		}
+		byKey[s.Key] = s
+	}
+	return byKey, nil
+}
+
 // Load 读取全部配置并与 Registry 对照校验。
 //
 // 任何不一致都返回错误而不回落到默认值：静默回落会让「配置写错了」
 // 表现为「行为跟预期不一样」，排查成本远高于启动时直接失败。
 func Load(ctx context.Context, src Source) (*Values, error) {
+	byKey, err := index()
+	if err != nil {
+		return nil, err
+	}
+
 	rows, err := src.Load(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("读取 settings 失败: %w", err)
-	}
-
-	byKey := make(map[string]Spec, len(Registry))
-	for _, s := range Registry {
-		byKey[s.Key] = s
 	}
 
 	raw := make(map[string]json.RawMessage, len(rows))
