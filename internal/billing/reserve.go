@@ -32,8 +32,13 @@ func Reserve(req ReserveRequest) (money.Amount, error) {
 
 	// 输入侧：请求前就知道有多少 token。
 	input := p.Prompt.MulInt(req.InputTokens)
-	// 缓存读命中会让实际更便宜，但预留要按贵的算。
+	// 缓存读命中会让实际更便宜，但预留要按贵的算——按输入单价估，
+	// 而不是按缓存读单价。少算缓存只会让预留更保守。
 	cacheRead := p.Prompt.MulInt(req.CacheReadTokens)
+	// 缓存写入走它自己的单价。它是**独立的一侧**，不是输入的一部分：
+	// 缓存写入的价格通常高于输入（有的上游是 1.25 倍、有的是 2 倍），
+	// 把它按输入单价估会让预留小于结算，而那是每次请求都撞 Capped 的来源。
+	cacheWrite := p.CacheWrite.MulInt(req.CacheWriteTokens)
 
 	// 输出侧：按 max_tokens 估。这是预留里最大的一块，
 	// 也是「大请求冻住余额多」的来源。
@@ -43,7 +48,11 @@ func Reserve(req ReserveRequest) (money.Amount, error) {
 	outputPrice := money.Max(p.Completion, p.Reasoning)
 	output := outputPrice.MulInt(req.MaxTokens)
 
-	total := input.Add(cacheRead).Add(output)
+	// 推理 token：有的上游把它算在 completion 里，有的单独报。
+	// 预留按 max_tokens 那一块已经用 max(Completion, Reasoning) 覆盖了，
+	// 所以这里**不重复加**——重复加会让预留虚高，那本身无害，
+	// 但会让「预留是不是上界」这条不变量变得难以验证。
+	total := input.Add(cacheRead).Add(cacheWrite).Add(output)
 
 	// 非 token 计量的部分按规则里给的单价预留**一次**。
 	// 数量在请求前未知（一张图？十次搜索？），所以只留一份的量，
@@ -75,6 +84,16 @@ type ReserveRequest struct {
 	// 预留按贵的方向算，少算缓存只会让预留更保守。
 	CacheReadTokens int64
 
+	// CacheWriteTokens 是预估的缓存写入量。
+	//
+	// 它必须单独给：缓存写入的单价通常**高于**输入（有的上游是 1.25 倍、
+	// 有的是 2 倍）。按输入单价估会让预留小于结算，而结算超过预留会撞
+	// Capped——Capped 按设计是「上界算错了」的信号，不该成为常态。
+	//
+	// 请求前通常也未知，但规则若对缓存写入定价，调用方就得给一个估计，
+	// 否则这一侧的费用完全不在预留里。
+	CacheWriteTokens int64
+
 	// MaxTokens 是请求允许的最大输出。这是上界的关键：
 	// 不给它就没法算出上界，此时必须由调用方给一个兜底值。
 	MaxTokens int64
@@ -92,6 +111,9 @@ func (r ReserveRequest) validate() error {
 	}
 	if r.CacheReadTokens < 0 {
 		return fmt.Errorf("缓存读 token 为负: %d", r.CacheReadTokens)
+	}
+	if r.CacheWriteTokens < 0 {
+		return fmt.Errorf("缓存写 token 为负: %d", r.CacheWriteTokens)
 	}
 	if r.MaxTokens <= 0 {
 		// 没有 max_tokens 就算不出上界。用典型值兜底会让结算可能超过预留，
