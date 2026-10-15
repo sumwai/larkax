@@ -36,24 +36,6 @@ func TestTypeAndProtocol(t *testing.T) {
 	}
 }
 
-func TestEndpointJoining(t *testing.T) {
-	cases := []struct {
-		base string
-		path string
-		want string
-	}{
-		{"https://api.example.com", "/v1/chat/completions", "https://api.example.com/v1/chat/completions"},
-		{"https://api.example.com/", "/v1/chat/completions", "https://api.example.com/v1/chat/completions"},
-		{"https://api.example.com/v1", "/v1/chat/completions", "https://api.example.com/v1/chat/completions"},
-		{"https://api.example.com/v1/", "/v1/models", "https://api.example.com/v1/models"},
-	}
-	for _, tc := range cases {
-		if got := endpoint(channel.Channel{BaseURL: tc.base}, tc.path); got != tc.want {
-			t.Errorf("endpoint(%q, %q) = %q，期望 %q", tc.base, tc.path, got, tc.want)
-		}
-	}
-}
-
 func TestChatSuccess(t *testing.T) {
 	var gotPath, gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -182,23 +164,6 @@ func TestChatErrorKeepsBodySeparate(t *testing.T) {
 	}
 	if !strings.Contains(ue.Body, "机密内容") {
 		t.Error("响应体应保留在 Body 字段里供排查")
-	}
-}
-
-func TestParseRetryAfter(t *testing.T) {
-	if got := parseRetryAfter("30"); got != 30*time.Second {
-		t.Errorf("秒数形式解析为 %v", got)
-	}
-	if got := parseRetryAfter(""); got != 0 {
-		t.Errorf("空值应为 0，得到 %v", got)
-	}
-	if got := parseRetryAfter("不是时间"); got != 0 {
-		t.Errorf("非法值应为 0，得到 %v", got)
-	}
-	// HTTP 日期形式，取未来一个时间点
-	future := time.Now().Add(45 * time.Second).UTC().Format(http.TimeFormat)
-	if got := parseRetryAfter(future); got <= 0 || got > time.Minute {
-		t.Errorf("日期形式解析为 %v", got)
 	}
 }
 

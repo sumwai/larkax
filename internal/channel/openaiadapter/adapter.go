@@ -13,14 +13,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/channel/httpx"
 	"github.com/sumwai/larkax/internal/relay"
 )
 
@@ -34,7 +33,7 @@ type Adapter struct {
 
 // New 构造适配器。timeout 是「拿到响应头」的上限，不含流式传输过程。
 func New(timeout time.Duration) *Adapter {
-	return &Adapter{client: channel.HTTPClient(timeout)}
+	return &Adapter{client: httpx.Client(timeout)}
 }
 
 func (a *Adapter) Type() string               { return Type }
@@ -51,9 +50,9 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 	if err != nil {
 		return nil, err
 	}
-	defer drainAndClose(resp.Body)
+	defer httpx.DrainAndClose(resp.Body)
 
-	if err := checkStatus(resp); err != nil {
+	if err := httpx.CheckStatus(resp); err != nil {
 		return nil, err
 	}
 
@@ -100,15 +99,15 @@ func (a *Adapter) ChatStream(ctx context.Context, ch channel.Channel, req *chann
 
 	// 上游拒绝：状态码与响应体都拿到了，直接报错，不启动 goroutine。
 	// 此时还没有任何内容发给客户端，调用方可以安全地换渠道。
-	if err := checkStatus(resp); err != nil {
-		defer drainAndClose(resp.Body)
+	if err := httpx.CheckStatus(resp); err != nil {
+		defer httpx.DrainAndClose(resp.Body)
 		return nil, err
 	}
 
 	events := make(chan channel.StreamEvent)
 	go func() {
 		defer close(events)
-		defer drainAndClose(resp.Body)
+		defer httpx.DrainAndClose(resp.Body)
 		a.pump(ctx, resp.Body, events)
 	}()
 	return events, nil
@@ -116,7 +115,7 @@ func (a *Adapter) ChatStream(ctx context.Context, ch channel.Channel, req *chann
 
 // ListModels 查询上游可用模型。
 func (a *Adapter) ListModels(ctx context.Context, ch channel.Channel) ([]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint(ch, "/v1/models"), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, httpx.Endpoint(ch.BaseURL, "/v1/models"), nil)
 	if err != nil {
 		return nil, fmt.Errorf("构造请求失败: %w", err)
 	}
@@ -126,9 +125,9 @@ func (a *Adapter) ListModels(ctx context.Context, ch channel.Channel) ([]string,
 	if err != nil {
 		return nil, &channel.ErrUpstream{Retryable: true, Err: err}
 	}
-	defer drainAndClose(resp.Body)
+	defer httpx.DrainAndClose(resp.Body)
 
-	if err := checkStatus(resp); err != nil {
+	if err := httpx.CheckStatus(resp); err != nil {
 		return nil, err
 	}
 
@@ -188,7 +187,7 @@ func (a *Adapter) encodeRequest(req *channel.Request, stream bool) ([]byte, erro
 
 func (a *Adapter) do(ctx context.Context, ch channel.Channel, body []byte) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		endpoint(ch, "/v1/chat/completions"), bytes.NewReader(body))
+		httpx.Endpoint(ch.BaseURL, "/v1/chat/completions"), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("构造请求失败: %w", err)
 	}
@@ -209,68 +208,6 @@ func (a *Adapter) do(ctx context.Context, ch channel.Channel, body []byte) (*htt
 
 func (a *Adapter) setHeaders(req *http.Request, ch channel.Channel) {
 	req.Header.Set("Authorization", "Bearer "+ch.Credential)
-}
-
-// endpoint 拼出完整 URL。
-//
-// 手工拼接而不是用 url.Parse 再 resolve：上游给的 base_url 常见写法
-// 有带与不带结尾斜杠两种，而路径里也可能已经含 /v1。
-// 用 TrimRight 统一掉结尾斜杠，比 url.ResolveReference 的语义更容易预测。
-func endpoint(ch channel.Channel, path string) string {
-	base := strings.TrimRight(ch.BaseURL, "/")
-	// base 已经带了 /v1 时不再重复加。
-	if strings.HasSuffix(base, "/v1") && strings.HasPrefix(path, "/v1") {
-		path = strings.TrimPrefix(path, "/v1")
-	}
-	return base + path
-}
-
-// checkStatus 把非 2xx 的响应翻译成带可重试判断的错误。
-func checkStatus(resp *http.Response) error {
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return nil
-	}
-
-	// 响应体截断后保留：上游的错误信息里可能回显请求内容，
-	// 而错误会进日志，日志的去向比密钥本身更难控制。
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-
-	return &channel.ErrUpstream{
-		StatusCode: resp.StatusCode,
-		Body:       string(body),
-		Retryable:  retryableStatus(resp.StatusCode),
-		RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
-	}
-}
-
-// retryableStatus 判断某个状态码是否值得换渠道重试。
-//
-// 429 与 5xx 可重试；4xx 里的其余部分（400 参数错、401 钥匙错、403 权限、
-// 404 路径错、422 语义错）重试多少次结果都一样，换渠道也是同一个错，
-// 只会把费用与延迟乘以候选渠道数。
-func retryableStatus(code int) bool {
-	switch code {
-	case http.StatusTooManyRequests:
-		return true
-	}
-	return code >= 500
-}
-
-// parseRetryAfter 解析 Retry-After 头。它有两种合法形式：秒数或 HTTP 日期。
-func parseRetryAfter(v string) time.Duration {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return 0
-	}
-	if secs, err := time.ParseDuration(v + "s"); err == nil && secs > 0 {
-		return secs
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		if d := time.Until(t); d > 0 {
-			return d
-		}
-	}
-	return 0
 }
 
 // extractEmbeddedError 检查 200 响应体里是否藏着错误对象。
@@ -302,14 +239,4 @@ func extractEmbeddedError(raw json.RawMessage) error {
 		Body:      probe.Error.Message,
 		Retryable: false,
 	}
-}
-
-func drainAndClose(body io.ReadCloser) {
-	if body == nil {
-		return
-	}
-	// 排空再关闭：留着未读的数据会让连接无法复用，
-	// 在高频调用下表现为连接数无谓地增长。
-	_, _ = io.Copy(io.Discard, io.LimitReader(body, 1<<20))
-	_ = body.Close()
 }

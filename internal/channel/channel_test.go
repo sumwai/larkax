@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"testing"
-	"time"
 )
 
 // fakeAdapter 是注册表测试用的最小实现。
@@ -176,26 +174,6 @@ func TestProtocolValuesMatchSchema(t *testing.T) {
 	}
 	if Protocol("gemini").valid() {
 		t.Error("未知协议不应有效")
-	}
-}
-
-// 默认客户端没有超时，上游卡住时表现为「请求永远不返回」，
-// 那比报错难排查得多。
-func TestHTTPClientConfiguresTimeouts(t *testing.T) {
-	const timeout = 5 * time.Second
-	c := HTTPClient(timeout)
-	if c.Timeout != timeout {
-		t.Errorf("Timeout = %v，期望 %v", c.Timeout, timeout)
-	}
-	if c.Transport == nil {
-		t.Fatal("不应使用默认 Transport：它没有响应头超时")
-	}
-	tr, ok := c.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("Transport 类型为 %T", c.Transport)
-	}
-	if tr.ResponseHeaderTimeout <= 0 {
-		t.Error("响应头超时必须设置，否则上游不响应时会永久挂住")
 	}
 }
 
