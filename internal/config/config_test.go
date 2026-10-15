@@ -294,8 +294,28 @@ func TestPrimaryMasterKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() 出错: %v", err)
 	}
-	if got := cfg.PrimaryMasterKey().ID; got != "new" {
-		t.Errorf("PrimaryMasterKey().ID = %q，期望 new", got)
+	primary, ok := cfg.PrimaryMasterKey()
+	if !ok {
+		t.Fatal("配置了主密钥却报告没有")
+	}
+	if primary.ID != "new" {
+		t.Errorf("PrimaryMasterKey().ID = %q，期望 new", primary.ID)
+	}
+}
+
+// worker 角色没有主密钥是正常状态，取值时不应 panic。
+func TestPrimaryMasterKeyAbsent(t *testing.T) {
+	setEnv(t, map[string]string{
+		"LARKAX_DB_DSN": "postgres://user:placeholder@localhost:5432/larkax",
+		"LARKAX_ROLE":   "worker",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() 出错: %v", err)
+	}
+	if _, ok := cfg.PrimaryMasterKey(); ok {
+		t.Error("未配置主密钥时应报告没有")
 	}
 }
 

@@ -133,9 +133,16 @@ func Load() (*Config, error) {
 // IsProduction 决定若干默认行为的松紧，例如日志格式与错误详情的暴露程度。
 func (c *Config) IsProduction() bool { return c.Env == "production" }
 
-// PrimaryMasterKey 返回用于包装新数据密钥的那一把。
-// 取列表中的第一把；调用方需先确认 len(MasterKeys) > 0。
-func (c *Config) PrimaryMasterKey() MasterKey { return c.MasterKeys[0] }
+// PrimaryMasterKey 返回用于包装新数据密钥的那一把——列表中的第一把。
+//
+// 返回 ok 而不是直接索引：未配置主密钥是 worker 角色的正常状态，
+// 调用方需要能区分「没有」和「有」，而不是撞上越界 panic。
+func (c *Config) PrimaryMasterKey() (MasterKey, bool) {
+	if len(c.MasterKeys) == 0 {
+		return MasterKey{}, false
+	}
+	return c.MasterKeys[0], true
+}
 
 // parseMasterKeys 解析 "<id>:<base64>,<id>:<base64>" 形式的密钥列表。
 //

@@ -28,7 +28,10 @@ https://api.example.com/v1                  user@example.com
 test-key-placeholder                        localhost:5432
 ```
 
-**提交前自查**：`grep -rniE 'sk-|api[_-]?key|secret|password|token' $(git diff --cached --name-only)`，命中就逐个确认。
+**提交前自查**：跑 `scripts/check-redlines.sh`（无参数扫暂存区，`--all` 扫全树）。
+它按形态抓密钥、私有主机、本机路径与真实邮箱，比手写 grep 覆盖得全。
+改了它本身就跑 `scripts/check-redlines.test.sh`——扫描器坏掉时的输出和「干净」一模一样，
+没有自测就无法证明它还在工作（见 [LESSONS.md](LESSONS.md) 第 2、7 条）。
 
 设计文档、调研笔记、规划过程**不进仓库**。它们留在仓库外的私有笔记区。仓库里的文档只写「是什么、怎么用、怎么改」，不写「为什么要这么做」的讨论过程与需求来源。
 
