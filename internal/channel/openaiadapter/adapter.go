@@ -14,12 +14,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channel/httpx"
+	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/relay"
 )
 
@@ -49,7 +51,7 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 		return nil, err
 	}
 
-	resp, err := a.do(ctx, ch, body)
+	resp, err := a.do(ctx, ch, body, req)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +98,7 @@ func (a *Adapter) ChatStream(ctx context.Context, ch channel.Channel, req *chann
 		return nil, err
 	}
 
-	resp, err := a.do(ctx, ch, body)
+	resp, err := a.do(ctx, ch, body, req)
 	if err != nil {
 		return nil, err
 	}
@@ -202,19 +204,20 @@ func (a *Adapter) encodeRequest(req *channel.Request, stream bool) ([]byte, erro
 	return body, nil
 }
 
-func (a *Adapter) do(ctx context.Context, ch channel.Channel, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+func (a *Adapter) do(ctx context.Context, ch channel.Channel, body []byte, req *channel.Request) (*http.Response, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		httpx.Endpoint(ch.BaseURL, "/v1/chat/completions"), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("构造请求失败: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", "application/json")
 	// 流式响应不要被中间层缓冲：缓冲会让「逐字返回」变成「攒完一次性返回」，
 	// 而那是用户立刻能感觉到的差别。
-	req.Header.Set("Accept", "text/event-stream, application/json")
-	a.setHeaders(req, ch)
+	httpReq.Header.Set("Accept", "text/event-stream, application/json")
+	a.setHeaders(httpReq, ch)
+	applyCustomHeaders(httpReq, req)
 
-	resp, err := a.client.Do(req)
+	resp, err := a.client.Do(httpReq)
 	if err != nil {
 		// 网络层失败一律可重试：连接被拒、超时、DNS 失败都属于换一个渠道
 		// 就可能成功的情形。
@@ -225,6 +228,29 @@ func (a *Adapter) do(ctx context.Context, ch channel.Channel, body []byte) (*htt
 
 func (a *Adapter) setHeaders(req *http.Request, ch channel.Channel) {
 	req.Header.Set("Authorization", "Bearer "+ch.Credential)
+}
+
+// applyCustomHeaders 把自定义头附加到请求上。
+//
+// 鉴权头与协议头由 httpx.SafeRequestHeaders 滤掉，而**被拒的头会被记下来**
+// 而不是静默丢弃：插件作者写了一个被拒的头却没有任何反馈，会以为是
+// 上游不支持它。
+//
+// 放在适配器这一道而不只在插件层：插件层的白名单写错时，这里是最后一道。
+// 「插件能覆盖 Authorization」意味着它能冒充别的渠道身份。
+func applyCustomHeaders(httpReq *http.Request, req *channel.Request) {
+	if req == nil {
+		return
+	}
+	safe, rejected := httpx.SafeRequestHeaders(req.Headers)
+	for name, value := range safe {
+		httpReq.Header.Set(name, value)
+	}
+	if len(rejected) > 0 {
+		// 只记名字不记值：值可能含敏感内容，而这里需要的只是「谁被拒了」。
+		observe.FromContext(httpReq.Context()).Warn("自定义请求头被拒",
+			"headers", strings.Join(rejected, ","))
+	}
 }
 
 // extractEmbeddedError 检查 200 响应体里是否藏着错误对象。
