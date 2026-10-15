@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"sort"
 	"sync"
 	"time"
@@ -393,22 +392,3 @@ func (r *Registry) types() []string {
 // 不认识它」——回滚版本之后最容易出现这种情况，而它必须被明确报出来，
 // 不能当成普通的上游故障。
 var ErrUnknownType = errors.New("未知的渠道类型")
-
-// HTTPClient 返回适配器应当使用的 HTTP 客户端。
-//
-// 集中在一处构造而不是每个适配器各自 http.DefaultClient：
-// 默认客户端没有超时，而上游卡住时表现为「请求永远不返回」，
-// 那比报错难排查得多。
-func HTTPClient(timeout time.Duration) *http.Client {
-	return &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 16,
-			IdleConnTimeout:     90 * time.Second,
-			// 上游大多是流式，响应头之后的连接会长期占用，
-			// 所以超时只设在「拿到响应头」这一步，而不是整个请求。
-			ResponseHeaderTimeout: 60 * time.Second,
-		},
-	}
-}
