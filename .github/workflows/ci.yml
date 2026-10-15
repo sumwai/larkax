@@ -48,6 +48,15 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # 与 gofmt/vet 分工：那两者快且零配置，这里放它们覆盖不到的、
+      # 需要跨文件或深入语义的检查（未处理的错误、响应体未关闭、
+      # context 没往下传这类）。版本必须与 go.mod 里的 Go 版本兼容——
+      # golangci-lint 用比目标更旧的 Go 构建时会直接拒绝运行。
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.5.0
+
       - name: 单元测试
         run: go test -race -coverprofile=coverage.out ./...
 
