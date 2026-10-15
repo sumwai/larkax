@@ -7,42 +7,70 @@
 #   scripts/check-redlines.sh HEAD~1       # 扫某个 commit 的改动
 #
 # 这是启发式检查，不是安全边界：它只认形态，不理解语义。
-# 漏报比误报危险，所以宁可多报——命中后人工确认，确属误报就把该行写成本脚本允许的形态。
+# 漏报比误报危险，所以宁可多报——命中后人工确认，确属误报就把该行写成
+# 本脚本允许的形态（见 AGENTS.md 的占位符约定）。
 # 真正重要凭证的兜底是环境变量 + .gitignore，不是这个脚本。
+#
+# 本脚本有一份自测：scripts/check-redlines.test.sh。改动后必须跑它。
 
 set -uo pipefail
 
 # 本脚本自身满屏都是检测模式，跳过
-SKIP_FILES='^scripts/check-redlines\.sh$'
+SKIP_FILES='^scripts/check-redlines\.(sh|test\.sh)$'
 
-# 行内出现这些词就视为占位内容，不再报（整行粒度，属有意为之的粗筛）。
+# 命中的**片段**里出现这些词就放行，不报。
 #
-# localhost / 127.0.0.1 配「众所周知的服务端口」也放行：那类写法在示例配置里
-# 到处都是，不携带任何本机信息。非默认端口（本机某个私有服务的端口）仍然会报。
-ALLOW='<[A-Z_]+>|placeholder|EXAMPLE|example\.(com|org|net)|REDACTED|占位|示例'
-ALLOW+='|(localhost|127\.0\.0\.1):(80|443|3000|3306|5432|6379|8000|8080|8081|8082|9090|27017)\b'
+# 过滤的是片段而不是整行：按整行过滤时，只要同一行别处出现「example」或「占位」
+# 字样，该行上的真密钥会被一起放过。
+#
+# 白名单里只放**结构性**的占位形态。厂商文档里的样例值（AKIA…EXAMPLE）不能进
+# 白名单——那正是要抓的东西，放行它等于给最像真密钥的字符串开后门。
+ALLOW='<[A-Z_]+>|placeholder|example\.(com|org|net)|REDACTED|占位|示例'
+# 环境变量引用不是字面量。右侧不要求闭合花括号：-o 取到的片段可能被截在 } 之前。
+ALLOW+='|\$\{?[A-Za-z0-9_]*\}?'
+# localhost / 127.0.0.1 / 内网网段配「众所周知的服务端口」放行：那类写法在示例
+# 配置里到处都是，不携带任何本机信息。非默认端口仍然会报。
+ALLOW+='|(localhost|127\.0\.0\.1|10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'
+ALLOW+='|192\.168\.[0-9]{1,3}\.[0-9]{1,3}'
+ALLOW+='|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}):(80|443|3000|3306|5432|6379|8000|8080|8081|8082|9090|27017)\b'
 
-PATTERNS=(
-  # 密钥形态
-  'sk-[A-Za-z0-9_-]{8,}'
-  'gh[pousr]_[A-Za-z0-9]{20,}'
+# 形态类：命中片段整体就是敏感内容，按整个片段判断是否为占位。
+PATTERNS_SHAPE=(
+  # 各家前缀不同，认的是形态而不是某一家。大小写不敏感：
+  # 变量名写成 STRIPE_SECRET_KEY 也要命中。
+  '(sk|pk|rk)[-_](live|test|proj)?[-_]?[A-Za-z0-9_-]{12,}'
   'AKIA[0-9A-Z]{16}'
+  'AIza[0-9A-Za-z_-]{35}'
+  'xox[baprs]-[A-Za-z0-9-]{10,}'
+  'gh[pousr]_[A-Za-z0-9]{20,}'
   '-----BEGIN [A-Z ]*PRIVATE KEY-----'
-  # 赋值式凭证：右边不是占位符才报
-  '(api[_-]?key|apikey|secret|password|passwd|token|credential)[[:space:]]*[:=][[:space:]]*"[^"<{$]{6,}"'
-  "(api[_-]?key|apikey|secret|password|passwd|token|credential)[[:space:]]*[:=][[:space:]]*'[^'<{$]{6,}'"
-  # 私有主机与非标端口。含 RFC1918 内网网段——那正是「本机私有服务地址」
-  # 最常见的形态，只盯 localhost 会漏掉它。
+
+  # 私有主机与非标端口
   '(127\.0\.0\.1|localhost|0\.0\.0\.0|10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}):[0-9]{2,5}'
-  # 本机私有路径
+
+  # 本机私有路径与 shell 配置文件
   '(/home|/Users)/[a-z][a-z0-9_-]+/'
   '\.bashrc|\.zshrc|\.profile'
+
   # 邮箱（example.* 由 ALLOW 兜掉）
   '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
 )
 
+# 赋值类：命中片段形如「键=值」，只按**值**判断是否为占位。
+# 键名里出现 example 之类的词不应当放过同一个片段里的真值，
+# 所以这两类要分开按不同粒度过滤。
+#
+# 引号可有可无——.env、shell、YAML、JSON 里没有引号的写法很常见，漏掉等于不设防。
+# 右侧允许连字符与下划线：口令常写成 few-words-strung-together 或
+# correct_horse_battery，只认字母数字会漏掉这类真口令。
+PATTERNS_ASSIGN=(
+  '(api[_-]?key|apikey|secret|password|passwd|token|credential|access[_-]?key)[A-Za-z0-9_]*[[:space:]]*[:=][[:space:]]*[^[:space:]]*[A-Za-z0-9_][A-Za-z0-9_-]{11,}'
+)
+
 # 标志位必须分开传。合并成 -n-P 时某些 grep 实现会解析失败并静默返回「无命中」。
-GREP_OPTS=(-n)
+# -i 是有意的：这是按形态抓密钥，大小写不该影响结果。
+# -o 只取命中片段：过滤与输出都以片段为单位，不被同行的无关文字干扰。
+GREP_OPTS=(-n -o -i)
 if echo "" | grep -qP "" 2>/dev/null; then
   GREP_OPTS+=(-P)
 else
@@ -60,6 +88,31 @@ if [ -z "$files" ]; then
   exit 0
 fi
 
+# scan <文件> <模式> <过滤粒度: frag|value>
+# 输出该模式下未被放行的命中行；grep 自身出错则以退出码 2 终止整个检查。
+scan() {
+  local f="$1" p="$2" mode="$3" out rc line frag subject
+  out=$(grep "${GREP_OPTS[@]}" -- "$p" "$f" 2>&1)
+  rc=$?
+  # rc>1 是 grep 自身出错（正则语法、参数、权限）。绝不能当成「没命中」放过。
+  if [ "$rc" -gt 1 ]; then
+    echo "错误：grep 在 $f 上执行失败（退出码 $rc）：" >&2
+    printf '%s\n' "$out" | sed 's/^/   /' >&2
+    exit 2
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    frag=${line#*:}
+    if [ "$mode" = value ]; then
+      subject=${frag#*[=:]}
+    else
+      subject=$frag
+    fi
+    grep -qiE "$ALLOW" <<<"$subject" && continue
+    printf '%s\n' "$line"
+  done <<< "$out"
+}
+
 hits=0
 while IFS= read -r f; do
   [ -f "$f" ] || continue
@@ -68,22 +121,17 @@ while IFS= read -r f; do
   case "$f" in *.png|*.jpg|*.jpeg|*.gif|*.webp|*.ico|*.woff*|*.pdf) continue ;; esac
 
   found=""
-  for p in "${PATTERNS[@]}"; do
-    out=$(grep "${GREP_OPTS[@]}" -- "$p" "$f" 2>&1)
-    rc=$?
-    # rc>1 是 grep 自身出错（正则语法、参数、权限）。绝不能当成「没命中」放过。
-    if [ "$rc" -gt 1 ]; then
-      echo "错误：grep 在 $f 上执行失败（退出码 $rc）："
-      printf '%s\n' "$out" | sed 's/^/   /'
-      exit 2
-    fi
-    out=$(printf '%s\n' "$out" | grep -viE "$ALLOW")
-    [ -n "$out" ] && found+="$out"$'\n'
+  for p in "${PATTERNS_SHAPE[@]}"; do
+    found+=$(scan "$f" "$p" frag)$'\n'
   done
+  for p in "${PATTERNS_ASSIGN[@]}"; do
+    found+=$(scan "$f" "$p" value)$'\n'
+  done
+  found=$(printf '%s' "$found" | sed '/^$/d')
 
   if [ -n "$found" ]; then
     echo "── $f"
-    printf '%s' "$found" | sort -u -t: -k1,1n | sed 's/^/   /'
+    printf '%s\n' "$found" | sort -u -t: -k1,1n | sed 's/^/   /'
     hits=$((hits + 1))
   fi
 done <<< "$files"

@@ -68,5 +68,8 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: 扫描器自测
+        run: bash scripts/check-redlines.test.sh
+
       - name: 扫描密钥与私有信息
         run: bash scripts/check-redlines.sh --all
