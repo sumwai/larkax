@@ -52,15 +52,18 @@ jobs:
       # 需要跨文件或深入语义的检查（未处理的错误、响应体未关闭、
       # context 没往下传这类）。
       #
-      # install-mode: goinstall 是必须的，不是可选优化：golangci-lint 用比
-      # go.mod 更旧的 Go 构建时会**直接拒绝运行**（报 "Go language version
-      # used to build golangci-lint is lower than the targeted Go version"）。
-      # release 二进制是 go1.25 构建的，而 go.mod 要求 1.26.0，
-      # 所以必须用本仓库的 toolchain 现构一份。代价是这一步慢几分钟。
+      # 版本有两个坑：
+      #   1. 必须用 v2.14 或更新。旧版（v2.5）自带的 typechecker 不认识
+      #      go1.27 的导出数据格式，报 "export data version 4 is greater
+      #      than maximum supported version 2" 而跑不动。
+      #   2. install-mode: goinstall 是必须的，不是可选优化：release 二进制
+      #      用更旧的 Go 构建时会直接拒绝运行（"Go language version used to
+      #      build golangci-lint is lower than the targeted Go version"）。
+      #      代价是这一步慢几分钟。
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.5.0
+          version: v2.14.0
           install-mode: goinstall
 
       - name: 单元测试
