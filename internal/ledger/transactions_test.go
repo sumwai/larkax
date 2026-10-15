@@ -610,3 +610,113 @@ func TestEmptyGatewayFailsValidation(t *testing.T) {
 		t.Error("缺后缀的通道科目不该能解析")
 	}
 }
+
+// ── 变异测试补的用例 ────────────────────────────────────────────────────
+//
+// 下面这一组来自变异测试（gremlins unleash）：把某个比较符或分支方向
+// 改一下，测试**仍然通过**。这一类缺口用覆盖率看不出来——行被执行过了，
+// 但边界上的那一支没被走到。
+
+// 手续费恰好等于充值额时应当被接受，只有**大于**才拒。
+//
+// 变异：把 `Cmp(p.Amount) > 0` 改成 `>= 0`，恰好相等就被误拒。
+// 原先只测过「手续费明显大于金额」，没测相等这个边界。
+func TestTopupGatewayFeeExactlyEqualAmount(t *testing.T) {
+	p := TopupParams{
+		TxnID: NewTxnID(), UserID: 1, Asset: AssetCNY,
+		Amount: money.MustParse("100"), Gateway: "placeholder-gateway",
+		GatewayFee: money.MustParse("100"),
+	}
+	if _, err := Topup(p); err != nil {
+		t.Errorf("手续费恰好等于充值额应当被接受，得到 %v", err)
+	}
+
+	// 大一点点就该拒
+	p.GatewayFee = money.MustParse("100.00000001")
+	if _, err := Topup(p); err == nil {
+		t.Error("手续费大于充值额应被拒绝")
+	}
+}
+
+// 用户 id 为 0 必须被拒——它是「没传」的表现，而不是一个合法的 id。
+//
+// 变异：把 `UserID <= 0` 改成 `< 0`，0 就被放行，
+// 于是会产生一条挂在「用户 0」名下的分录，而那个用户不存在。
+func TestConsumeRejectsZeroUserID(t *testing.T) {
+	p := ConsumeParams{
+		TxnID: NewTxnID(), UserID: 0, Asset: AssetCNY,
+		Amount: money.MustParse("1"),
+	}
+	if _, err := Consume(p); err == nil {
+		t.Error("用户 id 为 0 应被拒绝")
+	}
+	if _, err := Consume(ConsumeParams{
+		TxnID: NewTxnID(), UserID: -1, Asset: AssetCNY,
+		Amount: money.MustParse("1"),
+	}); err == nil {
+		t.Error("负的用户 id 应被拒绝")
+	}
+}
+
+// 提现打款带了单据号时，备注里要带上它。
+//
+// 变异：把 `p.Ref != ""` 改成 `p.Ref == ""`，有单据号时反而不带，
+// 而原先的用例只断言了「不带单据号时的备注」，没断言带的时候。
+func TestPayoutPaidMemoCarriesReference(t *testing.T) {
+	base := PayoutPaidParams{
+		TxnID: NewTxnID(), PayoutID: 1, UserID: 7, Asset: AssetCNY,
+		Amount: money.MustParse("10"), Gateway: "placeholder-gateway",
+	}
+
+	// 不带单据号
+	tr, err := PayoutPaid(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var withoutRef string
+	for _, e := range tr.Entries {
+		if e.Memo != "" {
+			withoutRef = e.Memo
+		}
+	}
+
+	// 带单据号
+	base.Ref = "ORDER-1"
+	tr, err = PayoutPaid(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var withRef string
+	for _, e := range tr.Entries {
+		if e.Memo != "" {
+			withRef = e.Memo
+		}
+	}
+	if withRef == withoutRef {
+		t.Error("带单据号时备注应当不同")
+	}
+	if !strings.Contains(withRef, "ORDER-1") {
+		t.Errorf("备注里应带单据号，得到 %q", withRef)
+	}
+}
+
+// 单据号为空串与只有空白，都应视为「没有单据号」。
+//
+// 变异：`orderNo == ""` 改成别的会让空串走进拼接分支，
+// 产生一条「（单据 ）」这样带空括号的备注。
+func TestMemoWithOrderEmptyVariants(t *testing.T) {
+	for _, in := range []string{"", "   ", "\t"} {
+		got := memoWithOrder("提现打款", in)
+		if strings.Contains(got, "单据") {
+			t.Errorf("输入 %q 不该产生单据备注，得到 %q", in, got)
+		}
+	}
+	// 非空时应当带上
+	if got := memoWithOrder("提现打款", "R-1"); !strings.Contains(got, "R-1") {
+		t.Errorf("应带单据号，得到 %q", got)
+	}
+	// 单据号里的控制字符要被清掉：它来自外部系统
+	if got := memoWithOrder("提现打款", "R\n1"); strings.ContainsAny(got, "\r\n\t") {
+		t.Errorf("单据号里的控制字符应被清洗，得到 %q", got)
+	}
+}

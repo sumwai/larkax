@@ -3,6 +3,7 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sumwai/larkax/internal/money"
@@ -531,8 +532,13 @@ func Adjustment(p AdjustmentParams) (Transaction, error) {
 // 单据号来自外部系统（支付网关、银行回单），可能带换行或制表符，
 // 所以它也必须过一遍清洗。
 func memoWithOrder(prefix, orderNo string) string {
+	// 判空在清洗之后做，且用 TrimSpace：sanitizeMemo 把控制字符换成
+	// **空格**（保留分隔），所以 `"\t"` 清洗后是 `" "` 而不是空串。
+	// 不 TrimSpace 的话，只有空白字符的单据号会产生「（单据 ）」
+	// 这种备注，读起来像是数据缺失，排查时会去追一个不存在的单据号。
+	orderNo = strings.TrimSpace(sanitizeMemo(orderNo))
 	if orderNo == "" {
 		return prefix
 	}
-	return fmt.Sprintf("%s（单据 %s）", prefix, sanitizeMemo(orderNo))
+	return fmt.Sprintf("%s（单据 %s）", prefix, orderNo)
 }
