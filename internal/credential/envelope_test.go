@@ -63,7 +63,7 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	s := mustSealer(t, testKeys())
 
 	cases := [][]byte{
-		[]byte("sk-abcdefghijklmnop"),
+		[]byte("placeholder-credential-value"),
 		bytes.Repeat([]byte("x"), 4096),
 		[]byte("含中文与 emoji 🎯 的凭证"),
 	}
