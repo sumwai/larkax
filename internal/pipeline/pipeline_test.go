@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -418,5 +419,77 @@ func TestProgramCacheIsReused(t *testing.T) {
 	}
 	if got := p.Programs.Len(); got != 1 {
 		t.Errorf("编译缓存里有 %d 条，期望 1", got)
+	}
+}
+
+// ── 变异测试补的用例 ────────────────────────────────────────────────────
+//
+// 来自变异测试（gremlins unleash）：把比较符改一下，测试仍然通过。
+// 覆盖率看不出来——行被执行过了，但边界那一支没被走到。
+
+// UpstreamFailure 的错误文本要能区分「有错误码」与「只有状态码」。
+//
+// 变异：把 `e.Code != ""` 改成 `== ""`，两者会互换，
+// 而原先只断言了「错误不为空」。
+func TestUpstreamFailureErrorText(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  *UpstreamFailure
+		want string
+	}{
+		{"有错误码", &UpstreamFailure{Status: 503, Code: "upstream_unavailable"}, "upstream_unavailable"},
+		{"只有状态码", &UpstreamFailure{Status: 429}, "429"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.err.Error()
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("错误文本 %q 应含 %q", got, tc.want)
+			}
+			// 两种情况都必须说明「不计费」
+			if !strings.Contains(got, "不计费") {
+				t.Errorf("错误文本 %q 应说明不计费", got)
+			}
+		})
+	}
+}
+
+// max_tokens 恰好为 0 与负数都要被拒——它是上界，必须是正的。
+//
+// 变异：`MaxTokens <= 0` 改成 `< 0`，0 就被放行，
+// 而 0 意味着「最多写 0 个 token」，算不出预留上界。
+func TestMaxTokensBoundary(t *testing.T) {
+	p := newPipeline(t, &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}})
+
+	for _, mt := range []int64{0, -1} {
+		req := baseRequest()
+		req.MaxTokens = mt
+		if _, err := p.Reserve(context.Background(), req); err == nil {
+			t.Errorf("max_tokens = %d 应被拒绝", mt)
+		}
+	}
+
+	// 恰好为 1 应当被接受
+	req := baseRequest()
+	req.MaxTokens = 1
+	if _, err := p.Reserve(context.Background(), req); err != nil {
+		t.Errorf("max_tokens = 1 应被接受: %v", err)
+	}
+}
+
+// 输入 token 恰好为 0 是合法的（例如只有工具调用的请求）。
+//
+// 变异：`InputTokens < 0` 改成 `<= 0`，输入为 0 会被误拒。
+func TestInputTokensZeroIsAllowed(t *testing.T) {
+	p := newPipeline(t, &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}})
+	req := baseRequest()
+	req.InputTokens = 0
+
+	if _, err := p.Reserve(context.Background(), req); err != nil {
+		t.Errorf("输入 token 为 0 应当被接受: %v", err)
+	}
+	// 负数仍要拒
+	req.InputTokens = -1
+	if _, err := p.Reserve(context.Background(), req); err == nil {
+		t.Error("负的输入 token 应被拒绝")
 	}
 }
