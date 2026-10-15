@@ -306,6 +306,20 @@ func (e *ErrUpstream) Error() string {
 
 func (e *ErrUpstream) Unwrap() error { return e.Err }
 
+// IsRetryable 判断一个错误是否值得换渠道重试。
+//
+// 只有适配器给出的 ErrUpstream 带明确判断时才算数；其余错误一律**不可重试**。
+// 这个默认方向是有意的：把不可重试的错当成可重试，会在每个候选渠道上
+// 重复一次注定失败的调用，把费用与延迟乘以渠道数；反过来只是少一次本可
+// 成功的尝试，用户重试一次即可。
+func IsRetryable(err error) bool {
+	var up *ErrUpstream
+	if errors.As(err, &up) {
+		return up.Retryable
+	}
+	return false
+}
+
 // Registry 是适配器的注册表。
 type Registry struct {
 	mu       sync.RWMutex
