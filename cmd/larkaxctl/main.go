@@ -41,8 +41,6 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
 
 环境变量与主服务一致，见 internal/config。
 
-注意：create 会把文件生成在当前目录，需要手工移到 internal/migrate/sql/，
-否则不会被内嵌进二进制、也不会被执行。
 `
 
 // migrationsDir 是迁移文件所在目录，相对于仓库根目录。
@@ -84,7 +82,9 @@ func runMigrate(args []string) error {
 		if len(rest) < 1 {
 			return errors.New("用法：larkaxctl migrate create <名称>")
 		}
-		if err := goose.Run("create", nil, migrationsDir, rest[0]); err != nil {
+		// 第二个参数固定为 sql。goose 默认生成 .go 迁移，而内嵌规则是
+		// sql/*.sql，生成的 Go 文件既不会被执行，又会在迁移目录里多出一个包。
+		if err := goose.Run("create", nil, migrationsDir, rest[0], "sql"); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "已生成到 %s/\n", migrationsDir)
