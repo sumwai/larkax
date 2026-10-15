@@ -41,17 +41,20 @@ See [docs/development.md](docs/development.md) for how to build and run it.
 ## Repository layout
 
 ```
-cmd/larkax/            the service binary
-cmd/larkaxctl/         migrations and operations CLI
-internal/channel/      upstream adapters: interface, registry, unified request/response types
-internal/config/       startup configuration (environment variables)
-internal/credential/   envelope encryption for channel credentials
-internal/db/           database connection pool
-internal/migrate/      embedded migrations (internal/migrate/sql/)
-internal/observe/      logging, request IDs, health and readiness endpoints
-internal/relay/        the only place that imports relaykit; protocol conversion
-internal/settings/     runtime configuration, stored in the database
-scripts/               repository tooling
+cmd/larkax/                       the service binary
+cmd/larkaxctl/                    migrations and operations CLI
+internal/channel/                 adapter interface, registry, unified request/response types
+internal/channel/anthropicadapter/  Anthropic Messages upstream
+internal/channel/httpx/           HTTP details shared by adapters
+internal/channel/openaiadapter/   OpenAI Chat Completions upstream
+internal/config/                  startup configuration (environment variables)
+internal/credential/              envelope encryption for channel credentials
+internal/db/                      database connection pool
+internal/migrate/                 embedded migrations (internal/migrate/sql/)
+internal/observe/                 logging, request IDs, health and readiness endpoints
+internal/relay/                   the only place that imports relaykit; protocol conversion
+internal/settings/                runtime configuration, stored in the database
+scripts/                          repository tooling
 ```
 
 Layering, so the data plane never depends on the control plane:
