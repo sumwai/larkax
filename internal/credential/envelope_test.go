@@ -52,6 +52,50 @@ func TestNewSealerValidation(t *testing.T) {
 	}
 }
 
+// 上界必须钉在具体数字上。
+//
+// 用 maxKeyID 去测 maxKeyID 等于没测：把它改成 128，边界用例跟着一起改，
+// 照样通过。而这两个数改任何一个都会动到存量数据——改大超过 255 会让写入侧
+// 那个 1 字节长度字段被截断、布局错位，改小会让已经写出去的密文读不回来。
+// 所以这里写死字面量。
+func TestMaxKeyIDIsPinned(t *testing.T) {
+	if maxKeyID != 64 {
+		t.Fatalf("maxKeyID = %d，期望 64（读取侧的判据与写入侧的 1 字节长度字段靠它对齐）", maxKeyID)
+	}
+}
+
+// 标识长度的边界：恰好等于上界要能用，而且要真的能往返——「NewSealer 没报错」
+// 不等于「写出的密文读得回来」，这正是本 issue 要修的那类错误。
+// 上界 +1 必须在构造封装器时就拒绝，不能拖到写凭证。
+func TestNewSealerKeyIDLengthBoundary(t *testing.T) {
+	atLimit := strings.Repeat("i", maxKeyID)
+	s := mustSealer(t, []config.MasterKey{key(atLimit, 0x55)})
+
+	sealed, err := s.Seal([]byte("boundary-secret"))
+	if err != nil {
+		t.Fatalf("恰好等于上界的标识应能封装: %v", err)
+	}
+	got, err := s.Open(sealed)
+	if err != nil {
+		t.Fatalf("恰好等于上界的标识写出的密文应能解开: %v", err)
+	}
+	if string(got) != "boundary-secret" {
+		t.Errorf("往返后得到 %q", got)
+	}
+
+	over := strings.Repeat("i", maxKeyID+1)
+	_, err = NewSealer([]config.MasterKey{key(over, 0x55)})
+	if err == nil {
+		t.Fatal("超过上界的标识应被拒绝")
+	}
+	// 错误信息要带上实际长度与上界，否则排查时只知道「太长了」。
+	// 同样写死字面量：65 与 64 是这个边界的定义本身。
+	msg := err.Error()
+	if !strings.Contains(msg, "65") || !strings.Contains(msg, "64") {
+		t.Errorf("错误信息应含标识长度 65 与上界 64，得到: %s", msg)
+	}
+}
+
 func TestPrimaryKeyIDIsFirst(t *testing.T) {
 	s := mustSealer(t, testKeys())
 	if got := s.PrimaryKeyID(); got != "current" {
