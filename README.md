@@ -29,8 +29,9 @@ What works today:
 - The request path end to end, including streaming responses
 - The billing engine: the expression-based pricing rules, time-of-day and tiered
   pricing, reservation and settlement
-- `larkaxctl` management commands for API keys, users, snapshot retention, master
-  key rotation, calendar data, and channels, models, aliases and pricing rules
+- `larkaxctl` management commands for API keys (including per-key rate limits),
+  users, runtime settings, snapshot retention, master key rotation, calendar data,
+  and channels, models, aliases and pricing rules
 - The reconcile job that checks the wallet snapshot against the ledger
 
 Not wired yet:
