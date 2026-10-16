@@ -252,7 +252,6 @@ SELECT
     c.name,
     c.type,
     c.base_url,
-    c.protocol,
     array_to_json(c.models)::text,
     c.setting,
     c.weight,
@@ -306,7 +305,6 @@ type candidateRow struct {
 	name        string
 	channelType string
 	baseURL     string
-	protocol    string
 	// modelsJSON 是 channels.models 的 JSON 形式（见查询里的 array_to_json）。
 	// database/sql 只认有限的几种 driver.Value，text[] 不在其中，
 	// 所以让数据库把它转成 JSON 文本，再在 Go 侧解成 []string。
@@ -338,7 +336,7 @@ type candidateRow struct {
 func scanCandidate(rows *sql.Rows) (candidateRow, error) {
 	var row candidateRow
 	err := rows.Scan(
-		&row.id, &row.name, &row.channelType, &row.baseURL, &row.protocol,
+		&row.id, &row.name, &row.channelType, &row.baseURL,
 		&row.modelsJSON, &row.setting, &row.weight, &row.priority, &row.ownerUserID,
 		&row.credentialEnc,
 		&row.requests, &row.successes, &row.latencyP95,
@@ -379,7 +377,6 @@ func (row candidateRow) candidate(plaintext string, now time.Time) (route.Candid
 			Name:       row.name,
 			Type:       row.channelType,
 			BaseURL:    row.baseURL,
-			Protocol:   channel.Protocol(row.protocol),
 			Credential: plaintext,
 			Models:     row.models,
 			Setting:    setting,

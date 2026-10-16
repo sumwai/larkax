@@ -43,9 +43,9 @@ func formatFor(p channel.Protocol) (types.RelayFormat, error) {
 	case channel.ProtocolAnthropic:
 		return types.RelayFormatClaude, nil
 	default:
-		// ProtocolCustom 没有固定的目标格式：它需要具体适配器自己说清楚
-		// 落到哪一套。在这里猜一个会掩盖配置错误。
-		return "", fmt.Errorf("协议 %q 没有对应的 relaykit 格式，需由适配器显式指定", p)
+		// 只认这两套。在这里猜一个格式会掩盖「调用方给的路径与本项目的
+		// 协议不匹配」，而那是一个必须报出来的错误。
+		return "", fmt.Errorf("协议 %q 没有对应的 relaykit 格式", p)
 	}
 }
 
