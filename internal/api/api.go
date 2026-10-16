@@ -54,7 +54,11 @@ const (
 //
 // 它与 docs/versioning.md 里承诺的那个头是同一个。放在本包是因为这里是
 // 唯一会给公共端口写响应的地方——写成字面量的话，两处迟早会不一致。
-const HeaderVersion = "x-larkax-version"
+// 用**规范形式**（首字母与每个连字符段的首字母大写），不是全小写：
+// http.Header 是个 map，Set 会做规范化，而直接按下标读**不会**。
+// 两者不一致时，`rec.Header()[HeaderVersion]` 永远取不到刚写进去的那个头——
+// 断言会静默地永远成立。写成规范形式，两边就对上了。
+const HeaderVersion = "X-Larkax-Version"
 
 // maxRequestBodyBytes 是请求体的上限，超出回 413。
 //

@@ -75,7 +75,7 @@ const validBody = `{"model":"m-1","messages":[{"role":"user","content":"hi"}],"m
 
 // post 发一个最普通的合法请求，只让调用方改路径与请求体。
 func post(h *Handler, path, body string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -149,7 +149,7 @@ func TestMethodNotAllowed(t *testing.T) {
 
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
-			req := httptest.NewRequest(method, PathChatCompletions, nil)
+			req := httptest.NewRequestWithContext(context.Background(), method, PathChatCompletions, nil)
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
 
@@ -186,7 +186,7 @@ func TestContentType(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h, _, _ := newTestHandler()
-			req := httptest.NewRequest(http.MethodPost, PathChatCompletions, strings.NewReader(validBody))
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, PathChatCompletions, strings.NewReader(validBody))
 			if tc.contentType != "" {
 				req.Header.Set("Content-Type", tc.contentType)
 			}
@@ -205,7 +205,7 @@ func TestBodyTooLarge(t *testing.T) {
 	h, auth, chatter := newTestHandler()
 
 	big := strings.Repeat("a", maxRequestBodyBytes+1)
-	req := httptest.NewRequest(http.MethodPost, PathChatCompletions, strings.NewReader(big))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, PathChatCompletions, strings.NewReader(big))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -341,7 +341,7 @@ func TestRequestsReachingChatter(t *testing.T) {
 
 	// 请求标识走 observe：入口只是把它取出来。
 	handler := observe.Middleware(h)
-	req := httptest.NewRequest(http.MethodPost, PathChatCompletions, strings.NewReader(validBody))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, PathChatCompletions, strings.NewReader(validBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(observe.HeaderRequestID, "trace-me")
 	rec := httptest.NewRecorder()
@@ -515,7 +515,7 @@ func recordError(protocol channel.Protocol, status int) *httptest.ResponseRecord
 func TestUnreadableBody(t *testing.T) {
 	h, _, chatter := newTestHandler()
 
-	req := httptest.NewRequest(http.MethodPost, PathChatCompletions, failingReader{})
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, PathChatCompletions, failingReader{})
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
