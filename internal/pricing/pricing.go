@@ -45,9 +45,6 @@ import (
 // Source 按条件从 pricing_rules 表里选出一条规则。
 type Source struct {
 	db *sql.DB
-
-	// Now 在查询没有给出时刻时兜底。可注入，便于测试生效时间窗口的边界。
-	Now func() time.Time
 }
 
 // New 包装一个已打开的数据库句柄。
@@ -120,12 +117,9 @@ func (s *Source) Match(ctx context.Context, q pipeline.RuleQuery) (pipeline.Rule
 		return pipeline.Rule{}, errors.New("规范模型名为空")
 	}
 
-	at := q.At
-	if at.IsZero() {
-		// 查询没给时刻时用当前的：生效时间窗口必须有一个判据，
-		// 而零值时刻（公元 1 年）会让所有规则都还没生效。
-		at = s.now()
-	}
+	// 查询没给时刻时用当前的：生效时间窗口必须有一个判据，
+	// 而零值时刻（公元 1 年）会让所有规则都还没生效。
+	at := s.now(q)
 
 	var (
 		id   int64
@@ -166,9 +160,13 @@ func versionOf(expr string) int64 {
 	return int64(h.Sum64())
 }
 
-func (s *Source) now() time.Time {
-	if s.Now != nil {
-		return s.Now()
+// now 取匹配用的时刻：查询给了就用它，没给（零值）才用当前时间。
+//
+// 不留一个可注入的时钟字段：调用链那一侧（pipeline）本来就是自己算出时刻
+// 再传下来的，测试要钉窗口边界就传 q.At——两处时钟只会让人分不清谁说了算。
+func (s *Source) now(q pipeline.RuleQuery) time.Time {
+	if !q.At.IsZero() {
+		return q.At
 	}
 	return time.Now()
 }

@@ -451,6 +451,7 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 
 	// 二、钱。12 × 0.00001 + 7 × 0.00003 = 0.00033000。
 	var (
+		billID       int64
 		requestID    string
 		status_      string
 		reserved     string
@@ -459,12 +460,12 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 		exprSnapshot sql.NullString
 	)
 	err := db.QueryRowContext(ctx, `
-		SELECT request_id, status, reserved_amount::text, final_amount::text,
+		SELECT id, request_id, status, reserved_amount::text, final_amount::text,
 		       pricing_rule_id, pricing_expr_snapshot
 		  FROM billing_requests
 		 WHERE user_id = $1
 		 ORDER BY id DESC LIMIT 1`, user,
-	).Scan(&requestID, &status_, &reserved, &final, &ruleID, &exprSnapshot)
+	).Scan(&billID, &requestID, &status_, &reserved, &final, &ruleID, &exprSnapshot)
 	if err != nil {
 		t.Fatalf("查账单失败: %v", err)
 	}
@@ -488,20 +489,21 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	// 三、余额：扣掉实际金额，冻结额回到零。
 	assertWallet(t, db, user, "99.99967", "0")
 
-	// 四、账本：那一笔分录在，且同一个 txn 内借贷相抵。
+	// 四、账本：那一笔分录在、挂回了这次账单，且同一个 txn 内借贷相抵。
 	//
-	// 按科目找，不按 billing_request_id 找——那个字段目前恒为 NULL：
-	// 网关结算时传给 pipeline 的是**落预留之前**的那份请求，于是分录拿不到
-	// 账单 id（见报告里的发现，一行可修）。这里断言的是「分录记了、金额对、
-	// 借贷平」，三条都与那个关联字段无关，修好之后本条断言仍然成立。
+	// 按 billing_request_id 找，不按科目找：分录与账单之间**必须有**这条
+	// 连接，否则「这笔钱是为什么扣的」只能靠时间和金额去猜。它也是下面
+	// 失败用例那条「不写分录」断言的前提——那条断言正是按这个字段查的，
+	// 字段恒为 NULL 时它永远查不出东西，于是永远不失败。
 	userAccount := fmt.Sprintf("user:%d", user)
 	var txnID string
 	err = db.QueryRowContext(ctx, `
 		SELECT txn_id::text FROM ledger_entries
-		 WHERE account = $1 AND entry_type = 'consume'
-		 ORDER BY id DESC LIMIT 1`, userAccount).Scan(&txnID)
+		 WHERE billing_request_id = $1 AND account = $2 AND entry_type = 'consume'
+		 ORDER BY id DESC LIMIT 1`, billID, userAccount).Scan(&txnID)
 	if err != nil {
-		t.Fatalf("账本里没有 %s 的消费分录——请求成功了钱却没记账: %v", userAccount, err)
+		t.Fatalf("账本里没有挂到账单 %d 上的 %s 消费分录——请求成功了钱却没记账，或者分录与账单断了关联: %v",
+			billID, userAccount, err)
 	}
 
 	var (
@@ -534,8 +536,9 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 
 	// 五、快照链路是接上的：请求快照异步落库，所以要等它出现。
 	//
-	// 判据用 Stats 里的写入计数而不是「查得到行」：只查行的话，「快照
-	// 链路根本没接上」与「接上了但还没写完」在断言里长得一样。
+	// 判据是「按这次请求的 request_id 查得到行」。报错时附上写入计数，
+	// 是为了把「链路根本没接上」与「接上了但还没写完」分开——
+	// 计数为零说明是前者，计数非零说明是后者。
 	if !waitForSnapshot(t, db, requestID) {
 		t.Errorf("没有等到请求快照落库（写入计数 %+v）", app.Snapshots.Stats())
 	}
@@ -641,6 +644,11 @@ func TestUpstreamFailureReleasesReservation(t *testing.T) {
 
 	// 四、失败不写分录：账本里出现零金额或失败请求的分录，
 	// 会让「有分录就说明发生过资金流动」这个判据失效。
+	//
+	// 判据是 billing_request_id 这条连接，不是金额或时间——只有它能证明
+	// 「这笔分录属于这次请求」。也因此它**依赖**上面成功用例钉住的那个
+	// 关联字段：字段一旦退回 NULL，`NULL IN (...)` 是 NULL 而不是 true，
+	// 这里会静默变成一条恒过的断言。两条用例要一起看。
 	var entries int
 	if err := db.QueryRowContext(ctx, `
 		SELECT count(*) FROM ledger_entries
@@ -662,9 +670,9 @@ func greaterThan(a, b string) bool {
 
 // waitForSnapshot 等到这次请求的快照落库。
 //
-// 快照是异步写的（网关起 goroutine，不等结果），所以这里要等；
-// 但等的是**写入计数**，不是「查得到行」——后者在链路根本没接上时
-// 也会因为别的用例留下的行而通过。
+// 快照是异步写的（网关起 goroutine，不等结果），所以这里要等。
+// 判据是按 request_id 查行：request_id 唯一，一次请求最多落一条请求方向的
+// 快照，所以查得到行就是这次请求写进去的那一条，不会认成别人留下的。
 func waitForSnapshot(t *testing.T, db *sql.DB, requestID string) bool {
 	t.Helper()
 

@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sumwai/larkax/internal/api"
 	"github.com/sumwai/larkax/internal/assembly"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/credential"
@@ -202,7 +203,7 @@ func notImplemented() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("x-larkax-version", version)
+		w.Header().Set(api.HeaderVersion, version)
 		w.WriteHeader(http.StatusNotImplemented)
 		_, _ = w.Write([]byte(`{"error":{"type":"not_implemented","message":"inference API is not available in this build"}}`))
 	})
