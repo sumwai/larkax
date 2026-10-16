@@ -1,0 +1,32 @@
+# 本地开发的依赖，只有 PostgreSQL 一个服务。
+#
+# app 不进容器：留在宿主上 go run，改一行即时生效，不必 rebuild 镜像。
+# 全栈容器化适合「只想跑起来看看」，不适合开发——见 docs/development.md。
+#
+# 起法用 `docker compose up -d --wait`（需要 compose v2.1+）：
+# 它靠下面的 healthcheck 等到库真能接受连接，直接 up -d 接迁移会 race。
+#
+# Redis 暂时不起：LARKAX_REDIS_DSN 留空表示不启用，代码也只把它当配置项，
+# 起一个没人连的容器只是噪音。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: larkax
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-placeholder}
+      POSTGRES_DB: ${PG_DB:-larkax}
+    ports:
+      # 只绑回环地址：本地开发用不到让局域网里的其他机器连上它。
+      - "127.0.0.1:${PG_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U larkax -d ${PG_DB:-larkax}"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  postgres-data:
