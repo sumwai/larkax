@@ -40,6 +40,13 @@ import (
 type Candidate struct {
 	Channel channel.Channel
 
+	// OwnerUserID 是渠道所属的商家。0 表示平台自营。
+	//
+	// 它不参与打分，但结算需要它：商家级计价规则按这个字段匹配，
+	// 而结算必须用与预留同一个 owner——否则两次调用可能匹配到不同的
+	// 规则，算出一个与预留无缘由的差额。
+	OwnerUserID int64
+
 	// Priority 数值大者先选。商家用它表达「这个渠道是主力」。
 	Priority int
 	// Weight 是同优先级内的分流比例。<= 0 视为 1。
