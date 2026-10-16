@@ -213,12 +213,23 @@ bash scripts/check-redlines.sh      # 公开红线
 
 ```sh
 gremlins unleash --timeout-coefficient=10 --workers=4 ./internal/money/
+gremlins unleash --timeout-coefficient=60 --workers=2 ./internal/calendar/
 ```
 
-`--timeout-coefficient` 不能省：默认值按「跑一次测试集的时间」给变异
-预算，而本包的测试集本身就要一秒，于是大量变异被判**超时**而不是**存活**，
-同一份代码两次运行会给出截然不同的分数。这个坑让一次「100% efficacy」
-的结果完全是假的。
+**`--timeout-coefficient` 必须按包试出来，不能省也不能照搬。** 它按
+「跑一次测试集的时间」给每个变异一个预算，而那个基准在两种情况下都不可靠：
+
+- 测试集里有慢用例时，**大量变异被判「超时」而不是「存活」**。
+  calendar 包实测：系数 10 时 79 个变异超时、Test efficacy 显示 **0.00%**
+  ——看起来像「一个都没杀掉」，实际是「一个都没跑成」
+- 同一个包换个系数又会得到不同分数。billing 包在系数 10 与 20 下
+  分别是 80.35% 与 83.13%
+
+**所以一个「efficacy」的数字本身说明不了什么**，要连着看：超时多少、
+存活清单里有哪些。**判据是清单，不是百分比。**
+
+判断系数够不够：如果 `Timed out` 超过个位数，就把系数调大重跑。
+一个包一旦定下系数，写进这个文件，别让下一个人再试一遍。
 
 对存活的变异逐个判断，只有两类可放过：
 
@@ -228,3 +239,28 @@ gremlins unleash --timeout-coefficient=10 --workers=4 ./internal/money/
   时它不可能为 0」
 
 放过时在测试里写一行说明，否则下一个人会以为是漏了。
+
+## 已知各包的系数与分数
+
+跑之前照这张表取值；改动过某个包的测试之后重跑并在表里更新。
+覆盖率来自 `go test -cover`，efficacy 来自上一条命令。
+
+| 包 | 系数 | 覆盖率 | Test efficacy |
+|---|---|---|---|
+| `internal/pipeline` | 10 | 82.9% | 96% |
+| `internal/calendar` | **60** | 97.8% | 94% |
+| `internal/ledger` | 10 | 96.5% | 93% |
+| `internal/money` | 10 | 93.2% | 85% |
+| `internal/route` | 10 | 93.1% | 81% |
+| `internal/billing` | 20 | 97.5% | 80% |
+| `internal/quota` | 10 | — | 79% |
+| `internal/tokens` | 10 | 97.4% | 71% |
+| `internal/snapshot` | 10 | 88.6% | 69% |
+
+**覆盖率高而 efficacy 低，说明测试断言的是「相对关系」而不是「具体边界」。**
+`route` 与 `snapshot` 两个包都是这个形状：原用例写的是「A 明显比 B 好」
+这种比较，于是改 `<=` 为 `<`、去掉分母的加数、改常量，只要顺序不变就测不出来。
+
+**不要为了把 efficacy 刷上去而写对着分支的琐碎断言。** 它会让数字好看，
+但不会让行为更可信。`snapshot` 的遍历器那一层还没补，因为**它需要按功能
+场景补而不是按函数补**（例如「一次含工具往返的请求走完整流程」）。
