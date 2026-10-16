@@ -26,6 +26,10 @@ func fullRows() []Row {
 		{Key: "quota.probe_interval_seconds", Value: []byte(`300`)},
 		{Key: "billing.default_asset", Value: []byte(`"CNY"`)},
 		{Key: "calendar.default_region", Value: []byte(`"CN"`)},
+		{Key: "plugin.enabled", Value: []byte(`false`)},
+		{Key: "plugin.call_timeout_ms", Value: []byte(`5000`)},
+		{Key: "plugin.memory_limit_bytes", Value: []byte(`67108864`)},
+		{Key: "plugin.max_payload_bytes", Value: []byte(`4194304`)},
 	}
 }
 
@@ -78,14 +82,24 @@ func TestLoadRejectsUndeclaredKey(t *testing.T) {
 }
 
 // Registry 里有而库里没有，同样是配置脱节，必须报出来。
+//
+// 按**键名**删一行，而不是砍掉最后一行：后者在往 Registry 末尾加配置项时
+// 会悄悄换掉被测的那个键，于是失败信息指向一个与改动无关的键名。
 func TestLoadRejectsMissingKey(t *testing.T) {
-	rows := fullRows()[:len(fullRows())-1]
+	const missing = "calendar.default_region"
+	rows := make([]Row, 0, len(fullRows()))
+	for _, r := range fullRows() {
+		if r.Key == missing {
+			continue
+		}
+		rows = append(rows, r)
+	}
 
 	_, err := Load(context.Background(), &fakeSource{rows: rows})
 	if err == nil {
 		t.Fatal("应报错")
 	}
-	if !strings.Contains(err.Error(), "calendar.default_region") {
+	if !strings.Contains(err.Error(), missing) {
 		t.Errorf("错误信息未指出缺哪个键：%v", err)
 	}
 }
