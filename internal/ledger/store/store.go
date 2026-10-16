@@ -52,6 +52,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -90,6 +91,39 @@ type WalletKey struct {
 	Asset  string
 }
 
+// ErrMissingProtocol 表示调用方没有在 pipeline.Request 上设置 Protocol。
+//
+// 它必须是一个**明确的失败**，而不是往那一列写一个空串：billing_requests.protocol
+// 是 NOT NULL，但拦的是 NULL，空串写得进去。于是「漏设了字段」会表现成一条
+// 协议为空的账单——事后按协议统计时它既不是 openai 也不是 anthropic，
+// 看起来像数据脏了，而不像代码里少了一处赋值。这与本包此前写死 "openai"
+// 是同一个形状的错误：**错值静默落库，事后才发现**。
+var ErrMissingProtocol = errors.New(
+	"缺少协议标识：调用方没有设置 pipeline.Request.Protocol（它由入口按请求路径设置）")
+
+// ErrUnknownProtocol 表示 Protocol 不是已知的入口协议。
+//
+// 与 ErrMissingProtocol 分开：那个是**漏了赋值**，这个是**赋了一个不存在
+// 的值**。前者的修法是补一处调用点，后者要查的是赋值处从哪拿到的这个值。
+var ErrUnknownProtocol = errors.New("协议标识不是已知的入口协议")
+
+// checkProtocol 检查这次请求的协议是不是入口真实存在的那两种。
+//
+// 只认两套：调用方的入口只有这两条路径，已注册的适配器也只有这两个
+// （见 channel.Protocol）。列上写着「openai / anthropic」是注释，不是约束——
+// 约束在这里，也在 channel.Protocol 的取值集合里，两处指的是同一份定义。
+func checkProtocol(p channel.Protocol) error {
+	switch p {
+	case channel.ProtocolOpenAI, channel.ProtocolAnthropic:
+		return nil
+	case "":
+		return ErrMissingProtocol
+	default:
+		return fmt.Errorf("%w：%q，只有 %q 与 %q 两种",
+			ErrUnknownProtocol, string(p), channel.ProtocolOpenAI, channel.ProtocolAnthropic)
+	}
+}
+
 // SaveReservation 落一条预留记录并冻住金额。
 //
 // 它做两件事，在同一个事务里：
@@ -107,6 +141,10 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 	}
 	if r.Amount.IsNegative() {
 		return 0, fmt.Errorf("预留金额为负: %s", r.Amount)
+	}
+	// 在开事务、冻余额**之前**查：协议不对时这次预留一个副作用都不该留下。
+	if err := checkProtocol(req.Protocol); err != nil {
+		return 0, err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -155,7 +193,10 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 		VALUES ($1, $2, NULLIF($3, 0), $4, $5, $11, $6::numeric, $7, 'pending',
 		        NULLIF($8, 0), NULLIF($9, ''), $10)
 		RETURNING id`,
-		req.RequestID, r.UserID, req.ChannelID, req.CanonicalModel, "openai",
+		// 协议由入口设置（见 pipeline.Request.Protocol）。这里**不填默认值**：
+		// 写死一个会让另一条入口的账单全部记错，而这张表正是事后按协议统计的
+		// 依据（#143 就是写死了 "openai"）。缺了或取值不对就报错，见 checkProtocol。
+		req.RequestID, r.UserID, req.ChannelID, req.CanonicalModel, string(req.Protocol),
 		r.Amount.String(), r.Asset, r.RuleID, r.PricingExprSnap, r.RuleMatchedAt,
 		// 是不是流式请求由入口告诉计费层（见 pipeline.Request.Streamed）：
 		// 这一层看不出请求的形状，也就不该替它填一个默认值——写死 false

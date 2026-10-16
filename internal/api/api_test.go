@@ -458,6 +458,50 @@ func TestRequestsReachingChatter(t *testing.T) {
 	}
 }
 
+// 协议由**路径**决定，并一路带到计费侧：/v1/chat/completions 是 openai，
+// /v1/messages 是 anthropic，流式与非流式都一样。
+//
+// 断言的是具体取值而不是「非空」：两条路径填同一个协议也能让「非空」通过，
+// 而 billing_requests.protocol 正是事后按协议统计的依据（#143）。
+func TestBillingRequestCarriesProtocol(t *testing.T) {
+	const streamBody = `{"model":"m-1","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":16}`
+
+	cases := []struct {
+		name     string
+		path     string
+		body     string
+		streamed bool
+		want     channel.Protocol
+	}{
+		{name: "OpenAI 非流式", path: PathChatCompletions, body: validBody, want: channel.ProtocolOpenAI},
+		{name: "OpenAI 流式", path: PathChatCompletions, body: streamBody, streamed: true, want: channel.ProtocolOpenAI},
+		{name: "Anthropic 非流式", path: PathMessages, body: validBody, want: channel.ProtocolAnthropic},
+		{name: "Anthropic 流式", path: PathMessages, body: streamBody, streamed: true, want: channel.ProtocolAnthropic},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, chatter := newTestHandler()
+			if tc.streamed {
+				chatter.streamResult = &gateway.Result{Events: streamOf()}
+			}
+
+			rec := post(h, tc.path, tc.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
+			}
+
+			got := chatter.req
+			if tc.streamed {
+				got = chatter.streamReq
+			}
+			if got.Protocol != tc.want {
+				t.Errorf("计费侧 Protocol = %q，期望 %q", got.Protocol, tc.want)
+			}
+		})
+	}
+}
+
 // 调用链上没装中间件时也要有一个非空的标识：它同时是计费的幂等键，
 // 空字符串在库里会与下一条撞上。
 func TestRequestIDGeneratedWhenAbsent(t *testing.T) {

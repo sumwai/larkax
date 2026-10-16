@@ -274,7 +274,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 		return
 	}
 
-	res, err := h.Chatter.Chat(r.Context(), billingRequest(user, upstream, requestID), upstream)
+	res, err := h.Chatter.Chat(r.Context(), billingRequest(user, upstream, requestID, protocol), upstream)
 	if err != nil {
 		if r.Context().Err() != nil {
 			// 调用方已经断开（取消或超时）。没有人在听，写响应只是白费
@@ -328,7 +328,7 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, protocol c
 		return
 	}
 
-	res, err := h.Chatter.ChatStream(r.Context(), billingRequest(user, upstream, requestID), upstream)
+	res, err := h.Chatter.ChatStream(r.Context(), billingRequest(user, upstream, requestID, protocol), upstream)
 	if err != nil {
 		if r.Context().Err() != nil {
 			observe.FromContext(r.Context()).Warn("调用方在流开始前断开", "err", err)
