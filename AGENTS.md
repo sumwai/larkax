@@ -255,7 +255,7 @@ gremlins unleash --timeout-coefficient=60 --workers=2 ./internal/calendar/
 | `internal/billing` | 20 | 97.5% | 80% |
 | `internal/quota` | **20** | 95.6% | 94% |
 | `internal/tokens` | 10 | 97.4% | 71% |
-| `internal/snapshot` | 10 | 88.6% | 69% |
+| `internal/snapshot` | **40** | 88.6% | 69% |
 
 **覆盖率高而 efficacy 低，说明测试断言的是「相对关系」而不是「具体边界」。**
 `route` 与 `snapshot` 两个包都是这个形状：原用例写的是「A 明显比 B 好」
