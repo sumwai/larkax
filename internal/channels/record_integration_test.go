@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -539,5 +540,36 @@ func TestRecordCallSelfAccountingOnlyWithUsage(t *testing.T) {
 	}
 	if snap := readQuota(t, db, id); snap.remaining != 750 {
 		t.Errorf("客户端断开之后 remaining = %v，期望 750", snap.remaining)
+	}
+}
+
+// Validate 接在落库**之前**：观测时间落在将来的那次写入被拒绝，而且库里
+// 一个数都没动。
+//
+// 这条用例同时断言「报错」与「没写」——只断言其中一个的话，把 Validate
+// 那一句删掉之后它照样通过（写入成功、值变了，但没人看错误），
+// 而「观测被拒绝」与「观测悄悄丢了」在库上长得一样。
+func TestRecordCallRejectsFutureObservation(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	insertQuota(t, db, id, "1000", "tokens", "api_query", "healthy")
+
+	r := NewRecorder(db)
+	err := r.RecordCall(context.Background(), route.CallOutcome{
+		ChannelID: id,
+		// 超过 Validate 的一分钟容差。
+		At:      time.Now().UTC().Add(2 * time.Hour),
+		Verdict: route.VerdictSuccess,
+		Usage:   channel.Usage{PromptTokens: 100},
+	})
+	if err == nil {
+		t.Fatal("观测时间在将来的写入应被拒绝")
+	}
+	if !strings.Contains(err.Error(), "自记账观测不自洽") {
+		t.Errorf("错误应说明是观测不自洽，实际: %v", err)
+	}
+	if snap := readQuota(t, db, id); snap.remaining != 1000 {
+		t.Errorf("被拒绝之后 remaining = %v，期望不动（1000）", snap.remaining)
 	}
 }

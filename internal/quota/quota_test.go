@@ -346,6 +346,52 @@ func TestRoutableWithObservedButUnknownValue(t *testing.T) {
 	}
 }
 
+// 「观测过」有两条来源：探针跑过（last_probe_at），与从上游错误里看到过
+// 信号（last_error_code）。两条都算——判据问的是「有没有观测过」，
+// 而不是「探针有没有跑过」。
+func TestRoutableWithObservedErrorCode(t *testing.T) {
+	at := base
+	s := State{LastErrorCode: "insufficient_quota", LastErrorAt: &at}
+	if s.Routable() {
+		t.Error("看到过错误码却没拿到数值，视为不可路由才对")
+	}
+}
+
+// 有数值时观测痕迹不参与判断：那两列只在「没有数值」时才有话说。
+// 否则一次与额度无关的错误码会把一个有余量的渠道判成不可路由。
+func TestRoutableWithValueIgnoresTraces(t *testing.T) {
+	at := base
+	s := State{Remaining: f(3), LastProbeAt: &at, LastErrorCode: "429", LastErrorAt: &at}
+	if !s.Routable() {
+		t.Error("有余量就是「知道」，可路由")
+	}
+}
+
+// 余量为负算不可用。它只可能来自手工写入——写入路径上 Validate 会拒绝
+// 负值——但对路由来说与「见底」是同一个结论。
+func TestUsableTreatsNegativeAsUnusable(t *testing.T) {
+	if (State{Remaining: f(-0.01)}).Usable() {
+		t.Error("负余量应视为不可用")
+	}
+}
+
+// 「观测时间在将来」的容差是**恰好一分钟**：一分钟以内放行（容忍时钟抖动），
+// 超过就拒绝。用两个相邻的字面量把边界钉住，而不是断言「将来的被拒」——
+// 后者把容差改成一天也照样通过。
+func TestValidateFutureToleranceIsExactlyOneMinute(t *testing.T) {
+	atLimit := Observation{Kind: KindSelfAccounting, Remaining: f(1), ObservedAt: base.Add(time.Minute)}
+	if err := Validate(atLimit, base); err != nil {
+		t.Errorf("恰好一分钟不该被拒: %v", err)
+	}
+	overLimit := Observation{
+		Kind: KindSelfAccounting, Remaining: f(1),
+		ObservedAt: base.Add(time.Minute + time.Nanosecond),
+	}
+	if err := Validate(overLimit, base); err == nil {
+		t.Error("超过一分钟应被拒绝")
+	}
+}
+
 func TestErrUnsupportedIsDistinct(t *testing.T) {
 	if !errors.Is(ErrUnsupported, ErrUnsupported) {
 		t.Error("错误值应可比较")

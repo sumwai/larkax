@@ -9,6 +9,7 @@ import (
 	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/quota"
 	"github.com/sumwai/larkax/internal/route"
 )
 
@@ -85,9 +86,9 @@ func TestRouteCandidateCarriesNoBaseURL(t *testing.T) {
 // 把所有不支持查额度的上游都排到最前面。
 func TestRouteCandidateDistinguishesUnknownQuotaFromZero(t *testing.T) {
 	rc := RouteContextFrom("r1", "m", []route.Candidate{
-		{Channel: channel.Channel{ID: 1}, Quota: channel.Quota{Known: false}},
-		{Channel: channel.Channel{ID: 2}, Quota: channel.Quota{Known: true, Remaining: 0}},
-		{Channel: channel.Channel{ID: 3}, Quota: channel.Quota{Known: true, Remaining: 100, Estimated: true}},
+		{Channel: channel.Channel{ID: 1}, Quota: quota.State{}},
+		{Channel: channel.Channel{ID: 2}, Quota: quota.State{Remaining: ptrFloat64(0)}},
+		{Channel: channel.Channel{ID: 3}, Quota: quota.State{Remaining: ptrFloat64(100), Estimated: true}},
 	})
 	if rc.Candidates[0].Remaining != nil {
 		t.Errorf("查不到额度时不该给数字，实际 %v", *rc.Candidates[0].Remaining)
@@ -120,7 +121,7 @@ func TestRouteCandidateRemainingOnlyWhenUnitsComparable(t *testing.T) {
 	known := func(id int64, remaining float64, unit string) route.Candidate {
 		return route.Candidate{
 			Channel: channel.Channel{ID: id},
-			Quota:   channel.Quota{Known: true, Remaining: remaining, Unit: unit},
+			Quota:   quota.State{Remaining: ptrFloat64(remaining), Unit: unit},
 		}
 	}
 	noQuota := func(id int64) route.Candidate {
@@ -207,8 +208,8 @@ func TestRouteCandidateRemainingOnlyWhenUnitsComparable(t *testing.T) {
 // 而插件按 confidence > 0 判断「这个数能不能用」时就踩空了。
 func TestRouteCandidateConfidenceFollowsRemaining(t *testing.T) {
 	rc := RouteContextFrom("r1", "m", []route.Candidate{
-		{Channel: channel.Channel{ID: 1}, Quota: channel.Quota{Known: true, Remaining: 1_000_000, Unit: "tokens"}},
-		{Channel: channel.Channel{ID: 2}, Quota: channel.Quota{Known: true, Remaining: 5, Unit: "money"}},
+		{Channel: channel.Channel{ID: 1}, Quota: quota.State{Remaining: ptrFloat64(1_000_000), Unit: "tokens"}},
+		{Channel: channel.Channel{ID: 2}, Quota: quota.State{Remaining: ptrFloat64(5), Unit: "money"}},
 	})
 	for i, c := range rc.Candidates {
 		if c.Remaining != nil {
@@ -222,8 +223,8 @@ func TestRouteCandidateConfidenceFollowsRemaining(t *testing.T) {
 	// 单位一致时两者都照旧：这一条与上面相对，说明 0 来自混合单位这个判断，
 	// 而不是可信度恒为 0。
 	same := RouteContextFrom("r1", "m", []route.Candidate{
-		{Channel: channel.Channel{ID: 3}, Quota: channel.Quota{Known: true, Remaining: 5, Unit: "money"}},
-		{Channel: channel.Channel{ID: 4}, Quota: channel.Quota{Known: true, Remaining: 5, Unit: "money", Estimated: true}},
+		{Channel: channel.Channel{ID: 3}, Quota: quota.State{Remaining: ptrFloat64(5), Unit: "money"}},
+		{Channel: channel.Channel{ID: 4}, Quota: quota.State{Remaining: ptrFloat64(5), Unit: "money", Estimated: true}},
 	})
 	if got := same.Candidates[0]; got.Remaining == nil || *got.Remaining != 5 || got.Confidence != 1 {
 		t.Errorf("实测值该给 5 / 可信度 1，实际 %+v", got)
@@ -236,7 +237,7 @@ func TestRouteCandidateConfidenceFollowsRemaining(t *testing.T) {
 func TestRouteCandidateCarriesExpiry(t *testing.T) {
 	at := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	rc := RouteContextFrom("r1", "m", []route.Candidate{
-		{Channel: channel.Channel{ID: 1}, Quota: channel.Quota{Known: true, Remaining: 5, ExpiresAt: &at}},
+		{Channel: channel.Channel{ID: 1}, Quota: quota.State{Remaining: ptrFloat64(5), ResetsAt: &at}},
 	})
 	if rc.Candidates[0].ResetsAt == nil || *rc.Candidates[0].ResetsAt != "2026-11-01T00:00:00Z" {
 		t.Fatalf("到期时间该给，实际 %v", rc.Candidates[0].ResetsAt)
@@ -351,9 +352,9 @@ func TestChannelUsageCopiesUnits(t *testing.T) {
 	}
 }
 
-func ptrInt64(v int64) *int64 { return &v }
-
 func ptrFloat64(v float64) *float64 { return &v }
+
+func ptrInt64(v int64) *int64 { return &v }
 
 func ptrBool(v bool) *bool { return &v }
 

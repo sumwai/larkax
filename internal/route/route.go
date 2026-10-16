@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/quota"
 )
 
 // Candidate 是一个可选渠道连同它的实时状态。
@@ -55,11 +56,20 @@ type Candidate struct {
 
 	// Health 是渠道健康度，由 channel_health_rollup 汇总而来。
 	Health Health
-	// Quota 是额度快照。Known 为 false 表示这个渠道查不到额度。
+	// Quota 是额度快照，直接取自 channel_quota_state 那一行。
 	//
-	// 它只在**同一单位**下与其他候选可比（见 scoreQuota）：Remaining 是
+	// 类型是 quota.State 而不是更窄的形态：**判断**「这个额度状态能不能用」
+	// 的判据在 internal/quota（Routable / Usable），而 Routable 要区分
+	// 「从未观测过」与「观测过却没拿到数值」——那需要 LastProbeAt 与
+	// LastErrorCode 两个字段。少带一个，判据就退化成「有没有数值」，
+	// 而那是本包早先自己重写的那一遍（见 issue #204）。
+	//
+	// 读侧只填本包用得上的列（Remaining / Unit / Estimated / ResetsAt /
+	// Kind / LastProbeAt / LastErrorCode）；窗口那几列不填，本包不看它们。
+	//
+	// 余量只在**同一单位**下与其他候选可比（见 scoreQuota）：Remaining 是
 	// 裸数字，Unit 说明它按什么计。
-	Quota channel.Quota
+	Quota quota.State
 
 	// CostPerUnit 是最近观察到的单位成本，用于「成本」这一维度。
 	// 为 0 表示未知——未知不该被当成「免费」。
@@ -153,14 +163,24 @@ func (c Candidate) Eligible() (bool, string) {
 // 与 Eligible 分开：Eligible 是配置层面的、不会自己变的事实；
 // 这里是运行状态。两者的处置也不同——配置错误要告警，
 // 而状态不佳是正常现象，等一会儿自然会好。
+//
+// 额度那两道**判断**只有一处实现：internal/quota 的 Routable 与 Usable。
+// 本包不自己读 Remaining 再判一遍——同一个语义两处实现，迟早分叉，
+// 而分叉的表现是「读侧说能用、写侧说不能用」这类查不出原因的行为。
 func (c Candidate) DrainReason() string {
 	if c.Health.ConsecutiveFailures >= consecutiveFailureCutoff {
 		return fmt.Sprintf("连续失败 %d 次", c.Health.ConsecutiveFailures)
 	}
-	// 额度查得到且已经见底：这是事实，不是偏好，必须挡住。
-	// 查不到额度（Known 为 false）不挡——那说明这个渠道不支持查询，
+	// 状态不足以支撑决策：观测过，却既没有数值也没有别的可用信息。
+	// 「从未观测过」（上游不支持查询额度）**不算**这一档——把它一起挡掉
+	// 等于默认停用所有查不到额度的渠道（见 quota.State.Routable 的注释）。
+	if !c.Quota.Routable() {
+		return "额度观测过但没有可用信息"
+	}
+	// 有数值且已经见底：这是事实，不是偏好，必须挡住。
+	// 未知（Remaining 为 nil）不挡——那说明这个渠道查不到额度，
 	// 不是它没额度了。
-	if q := c.Quota; q.Known && q.Remaining <= 0 {
+	if !c.Quota.Usable() {
 		return "额度已耗尽"
 	}
 	return ""
@@ -319,7 +339,7 @@ func (r *Router) score(c Candidate, mixedUnits bool) float64 {
 // 单位未知（空）也算一种：一个「不知道按什么计」的渠道与一个「按元计」的
 // 渠道之间同样不可比，所以它与任何已知单位放在一起都算混合。
 //
-// 只统计**已知额度**的候选：额度未知的渠道那一项本来就是中性分，
+// 只统计**有数值**的候选：没有数值的渠道那一项本来就是中性分，
 // 与单位无关，把它算进来会让「一个查不到额度的渠道」把其余渠道的额度
 // 全部降成中性分——那等于让「不知道」污染「知道」。
 //
@@ -338,7 +358,7 @@ func MixedQuotaUnits(candidates []Candidate) bool {
 	var first string
 	seen := false
 	for _, c := range candidates {
-		if !c.Quota.Known {
+		if c.Quota.Remaining == nil {
 			continue
 		}
 		if !seen {
@@ -370,34 +390,43 @@ func scoreHealth(h Health) float64 {
 
 // scoreQuota 把额度映射到 0..1。
 //
+// # 这里只回答「怎么排」
+//
+// 「这个额度状态能不能用」是**判断**，它只有一处实现：internal/quota 的
+// Routable 与 Usable，由 DrainReason 调用。本函数回答的是另一半问题——
+// 在都能用的候选里，谁的额度更该先用掉。两者不互相替代：判断是布尔的、
+// 硬性的，排序是连续的、可权衡的。
+//
+// 两道兜底仍然留着，因为 Score 是导出 API，调用方可以绕过 DrainReason
+// 直接调它。它们**不是**第二处判断，而是把同一个判断的结果映射成分数：
+//
+//   - 见底的候选给最低分（Usable 为假）。给 0 而不是负分：负分会让权重
+//     之和的意义变得难解释。这一档与单位无关，所以排在下面那道跨单位的
+//     判断之前——余量见底就是见底，与它按什么计无关。
+//   - 没有数值的候选给中性分。走到这里的是「从未观测过额度」那一档
+//     （上游不支持查询额度）；「观测过却没有数值」已经被 DrainReason
+//     挡在候选集之外了。
+//
 // # 这里的数是什么单位
 //
-// Remaining 的单位由 channel.Quota.Unit 说明，而候选渠道来自不同上游，
+// Remaining 的单位由 State.Unit 说明，而候选渠道来自不同上游，
 // 口径可能不同：按 token 计的套餐（百万量级）、按金额计的账户（个位到百位）、
 // 按请求数计的配额（千量级）。把「剩余 800000 token」与「剩余 5 元」放进
 // 同一个 1/(1+x) 里，前者永远得 0 分、后者永远接近满分——**分差来自单位，
 // 而不是来自余量**，排序被一个与「还剩多少」无关的维度支配。
 //
 // 所以 mixedUnits 为 true（候选集里存在多种单位）时这一项给中性分，
-// 与「查不到额度」同一档：不比，而不是乱比。
+// 与「没有数值」同一档：不比，而不是乱比。
 //
 // 为什么不归一化折算：那需要一个「1 元值多少 token」的假设，而那个假设
 // 没有依据——把它写进代码等于把一个错换成另一个错，还多了一处没人能验证
 // 的换算。**单位相同就可以比**，那时 1/(1+x) 的语义是明确的。
-//
-// 查不到额度的渠道（Known 为 false）给中性分：它既不该因为「不知道」
-// 被优先，也不该被排到最后——那等于把所有不支持查额度的上游都降一等。
-func scoreQuota(q channel.Quota, mixedUnits bool) float64 {
-	if !q.Known {
-		return 0.5
-	}
-	if q.Remaining <= 0 {
-		// 走到这里说明 DrainReason 没挡住（例如调用方直接调 Score）。
-		// 给最低分而不是负分：负分会让权重之和的意义变得难解释。
-		//
-		// 这一档是**单位无关**的，所以它排在下面那道跨单位的判断之前：
-		// 余量为零就是为零，与它按什么计无关。
+func scoreQuota(q quota.State, mixedUnits bool) float64 {
+	if !q.Usable() {
 		return 0
+	}
+	if q.Remaining == nil {
+		return 0.5
 	}
 	if mixedUnits {
 		return 0.5
@@ -406,12 +435,12 @@ func scoreQuota(q channel.Quota, mixedUnits bool) float64 {
 	// 「用掉它」的紧迫度：剩余越少越紧迫。用 1/(1+remaining) 之类的
 	// 反比会让「剩余 0.5 与剩余 0.6」的差别大于「1000 与 2000」，
 	// 这正是想要的——要到见底时才真的着急。
-	urgency := 1.0 / (1.0 + q.Remaining)
+	urgency := 1.0 / (1.0 + *q.Remaining)
 
 	// 到期越近越紧迫。没有到期时间时按中性处理。
 	expiry := 0.5
-	if q.ExpiresAt != nil {
-		remaining := time.Until(*q.ExpiresAt)
+	if q.ResetsAt != nil {
+		remaining := time.Until(*q.ResetsAt)
 		switch {
 		case remaining <= 0:
 			expiry = 1.0

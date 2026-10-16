@@ -220,6 +220,13 @@ ON CONFLICT (channel_id) DO UPDATE
 // （按元计、按次计）换不出来——把 token 数当成元数扣下去是在**改错一个数**，
 // 而它看起来完全正常。这与 route 的 scoreQuota「跨单位不比」是同一条规则，
 // 只是一个管读、一个管写。
+//
+// # 落库前先校验
+//
+// 观测进 Merge 之前过一遍 quota.Validate：余量是不是有限数、是不是负的、
+// 观测时间有没有落在将来。这些错不会让程序崩，只会让额度慢慢偏掉，
+// 而偏掉之后要很久才看得出来。校验失败就**拒绝这次写入并报错**——
+// 静默丢弃会让「观测被丢掉」与「观测写进去了」在库上长得一样。
 func (r *Recorder) selfAccount(ctx context.Context, rec route.CallOutcome) error {
 	consumed := consumedTokens(rec.Usage)
 	if consumed <= 0 {
@@ -242,7 +249,19 @@ func (r *Recorder) selfAccount(ctx context.Context, rec route.CallOutcome) error
 		return nil
 	}
 
-	next := quota.Merge(prev, quota.Project(prev, float64(consumed), rec.At), rec.At)
+	obs := quota.Project(prev, float64(consumed), rec.At)
+	// 落库**之前**校验这次观测自不自洽。失败就拒绝这次写入并把原因报出去，
+	// 不静默丢弃：观测被丢弃与观测写进去了在库上长得一样，而前者的后果是
+	// 额度慢慢偏掉——那正是这道校验要防的事（见 internal/quota 的 Validate）。
+	//
+	// 基准用 time.Now() 而不是 rec.At：rec.At 就是这次观测自己的时刻，
+	// 拿它当「现在」会让「观测时间在将来」那条判据恒真（自己比自己），
+	// 而它要拦的正是「调用方传进来一个未来的时间戳」。
+	if err := quota.Validate(obs, time.Now()); err != nil {
+		return fmt.Errorf("渠道 %d 的自记账观测不自洽，拒绝写入: %w", rec.ChannelID, err)
+	}
+
+	next := quota.Merge(prev, obs, rec.At)
 	if next.Remaining == nil {
 		// Project 在基准未知时返回一个没有数值的观测，Merge 于是也不动
 		// Remaining。上面已经挡过一遍，这里是第二道：写一个 NULL 回去

@@ -167,14 +167,14 @@ func RouteContextFrom(requestID, canonicalModel string, cands []route.Candidate)
 			Health:      healthName(c.Health),
 			Confidence:  1,
 		}
-		// 给数字要同时满足两件事：这个渠道查得到额度，且这一组额度可比。
+		// 给数字要同时满足两件事：这个渠道有余量，且这一组余量可比。
 		// 缺任何一件都是 Remaining 为 null、Confidence 为 0——「没有数」
 		// 与「有一个可信的数」是这里仅有的两种状态。可信度跟着数字一起给，
 		// 免得出现「可信度 1 而数字是 null」这种读不通的组合。
-		if c.Quota.Known && !mixedUnits {
-			// **「查不到」不进这个字段**：给 0 会让插件以为「额度为零」，
+		if c.Quota.Remaining != nil && !mixedUnits {
+			// **「没有数值」不进这个字段**：给 0 会让插件以为「额度为零」，
 			// 而那与「这家不支持查询」是两件事。
-			remaining := c.Quota.Remaining
+			remaining := *c.Quota.Remaining
 			cand.Remaining = &remaining
 			if c.Quota.Estimated {
 				// 估算值的可信度打折。插件据此决定要不要信它。
@@ -187,8 +187,8 @@ func RouteContextFrom(requestID, canonicalModel string, cands []route.Candidate)
 			cost := c.CostPerUnit
 			cand.UpstreamCost = &cost
 		}
-		if c.Quota.ExpiresAt != nil {
-			s := c.Quota.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z")
+		if c.Quota.ResetsAt != nil {
+			s := c.Quota.ResetsAt.UTC().Format("2006-01-02T15:04:05Z")
 			cand.ResetsAt = &s
 		}
 		rc.Candidates = append(rc.Candidates, cand)

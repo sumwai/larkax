@@ -10,6 +10,7 @@ import (
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/plugin/host"
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
+	"github.com/sumwai/larkax/internal/quota"
 	"github.com/sumwai/larkax/internal/route"
 )
 
@@ -187,8 +188,8 @@ func TestEndToEndFiveHooks(t *testing.T) {
 
 	// ── onRoute → 决策在候选集内 ──
 	cands := []route.Candidate{
-		{Channel: channel.Channel{ID: 5}, Quota: channel.Quota{Known: true, Remaining: 900}},
-		{Channel: channel.Channel{ID: 9}, Quota: channel.Quota{Known: true, Remaining: 3}},
+		{Channel: channel.Channel{ID: 5}, Quota: quota.State{Remaining: ptrFloat64(900)}},
+		{Channel: channel.Channel{ID: 9}, Quota: quota.State{Remaining: ptrFloat64(3)}},
 	}
 	rtRes := s.OnRoute(t.Context(), RouteContextFrom("req-1", "acme/vision", cands))
 	if err := rtRes.Err(); err != nil {

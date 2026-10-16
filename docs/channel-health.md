@@ -15,7 +15,7 @@
 |---|---|---|
 | 连续失败计数 | `channels.consecutive_failures` / `last_failure_at` | `route.DrainReason`：连续失败到阈值就暂时摘除 |
 | 小时桶计数 | `channel_health_rollup.requests` / `successes` / `failures` | `route.Health.SuccessRate` |
-| 额度自记账 | `channel_quota_state` 的余量与可信度 | `route.scoreQuota` |
+| 额度自记账 | `channel_quota_state` 的余量与可信度 | `route.DrainReason`（能不能用）与 `route.scoreQuota`（怎么排） |
 
 三处各自按主键或唯一键定位单行，没有把它们绑在一起的大事务：健康度与额度是
 两个独立的信号，其中一处写不进去不该让另外两处也不写。
@@ -65,7 +65,7 @@
 **需要先有基准**才能推进：
 
 - 这一行不存在，或 `remaining_estimate` 为 NULL → 推不出任何数，什么都不写。
-  写一行只有 NULL 的状态改变不了读侧（`Quota.Known` 仍是 false），
+  写一行只有 NULL 的状态改变不了读侧（候选上的 `Quota.Remaining` 仍是 nil），
   只是一次没有信息量的写。
 - 基准来自上游实测或人工录入，两者都不在代码里。
 
@@ -96,6 +96,24 @@ NULL 表示不知道按什么计。这个列是**比较的前提**：`route.scor
 有一条判据与单位无关，任何情况下都照旧生效：**余量 ≤ 0 的渠道被排除**。
 「没有了」不需要知道没有的是什么。
 
+### 「余量未知」有两种，路由对它们的处置相反
+
+`remaining_estimate` 允许为 NULL，而 NULL 有两种来历：
+
+| 来历 | `quota.State.Routable` | 路由怎么处置 |
+|---|---|---|
+| 从来没观测过（多数订阅制上游不提供查询接口） | 真 | 照旧参与排序，额度那一项给中性分 |
+| 观测过却没拿到数值（探针跑了没结果，或只从错误里看到信号） | 假 | 排除该渠道 |
+
+两者靠 `last_probe_at` 与 `last_error_code` 区分——这两列与余量一起进
+`route.Candidate.Quota`，少带一列，判据就退化成「有没有余量」，
+而那是路由侧早先自己重写的那一遍。
+
+判断只有一处实现：`internal/quota` 的 `State.Routable` 与 `State.Usable`，
+由 `route.DrainReason` 调用。路由不自己读余量再判一遍——同一个语义两处实现，
+迟早分叉，而分叉的表现是「读侧说能用、写侧说不能用」这类查不出原因的行为。
+`scoreQuota` 只管排序那一半：余量越少、越接近到期越该先用掉。
+
 自记账只扣 `unit = tokens` 的渠道：上游给的用量本身就是 token 数，换算成按元
 或按次计的量是**改错一个数**，而它看起来完全正常。这与读侧「跨单位不比」是
 同一条规则的读写两面。
@@ -103,12 +121,20 @@ NULL 表示不知道按什么计。这个列是**比较的前提**：`route.scor
 插件看到的候选集上也是同一条规则，落法见 [plugin-contract.md](plugin-contract.md)
 的「额度余量」一节：判据与这里的打分共用一处实现。
 
+观测进 `Merge` 之前过一遍 `quota.Validate`：余量是不是有限数、是不是负的、
+观测时间有没有落在将来。校验失败就**拒绝这次写入并报错**，不静默丢弃——
+观测被丢掉与观测写进去了在库上长得一样，而前者的后果是额度慢慢偏掉。
+
 ## 还没接的部分
 
 - **查上游额度**（`api_query`）：没有实现，也没有地方调用它。
 - **从错误推断额度**（`error_observed`）：没有实现。上游回 402 时直接把
   `health` 写成 `drained` 会让路由永久排除它（`route` 的 drained 没有冷却期），
   而一次 402 也可能只是那一次请求的问题，所以这件事要连同冷却期一起设计。
+  **额度那一侧还有第二处同样的坑**：`Merge` 的 `KindErrorObserved` 分支在没有
+  数值时会设 `LastErrorCode`，而 `LastErrorCode` 只在 `KindAPIQuery` 分支被清。
+  两个分支今天都没有写入方，但一旦接上，一次 429 就会让一个查不到额度的渠道
+  被 `Routable` **永久**排除，而且不留任何持久痕迹。接线前要先有答案。
 - **延迟与成本**：`channel_health_rollup` 的 `latency_p50_ms` /
   `latency_p95_ms` / `cost` / `cache_*` 都还没有写入方。分位数需要多个样本，
   单次调用给不出 p95——把单个样本写进 p95 是给一个错的数起了个对的名字。
