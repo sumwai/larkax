@@ -76,6 +76,21 @@ func hasKind(r *Report, userID int64, kind FindingKind) bool {
 	return false
 }
 
+// malformedOf 挑出某个**科目原文**的畸形科目报告。
+//
+// 畸形科目没有 UserID（它归不到任何人头上），所以不能按用户找；
+// 标识是科目原文（见 Finding.Scope）。
+func malformedOf(t *testing.T, r *Report, account string) Finding {
+	t.Helper()
+	for _, f := range r.Findings {
+		if f.Kind == FindingMalformedAccount && f.Key == account {
+			return f
+		}
+	}
+	t.Fatalf("没有 %q 的畸形科目报告，报告里是 %v", account, kindsOf(r))
+	return Finding{}
+}
+
 func reconcile(t *testing.T, db *sql.DB, cfg ReconcileConfig) *Report {
 	t.Helper()
 	r, err := New(db).Reconcile(context.Background(), cfg, nil)
@@ -579,6 +594,284 @@ func TestReconcileReportsMalformedAccount(t *testing.T) {
 		// 畸形科目属于别人（甚至不属于任何用户），不该把正常用户带成
 		// 一条假的余额不一致。
 		t.Error("正常用户不该因为别人的畸形科目被报成不一致")
+	}
+}
+
+// 非规范写法的 user 科目：那笔钱**属于**那个用户。
+//
+// 写路径把后缀读成整数，所以 `user:0<id>` 这笔钱当初就加进了那个用户的钱包；
+// 而对账的汇总按字符串逐字相等去认，看不见它——于是快照（150）比它算出的
+// 权威值（100）大，对账判定「快照多了」，在 auto_repair 打开时把**正确的**
+// 余额改小 50。方向是用户余额减少，不是增加。
+//
+// 这条用例盯的就是那 50 不被改掉：钱按同一个用户归位，而那种写法本身
+// 另外报出来（新写入已经产生不了它，库里还留着的那条要有人去订正）。
+func TestReconcileKeepsAliasAccountBalance(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	userID := seed(t, db, "100")
+
+	// 别名科目与 user:<id> 指向同一个用户。构造与「写路径会写出什么」
+	// 一致：applyToWallets 把后缀读成整数，所以这 50 也在钱包里。
+	alias := "user:0" + itoa(userID)
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(ctx, `DELETE FROM ledger_entries WHERE account = $1`, alias)
+	})
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO ledger_entries (txn_id, account, asset, amount, entry_type)
+		VALUES (gen_random_uuid(), $1, 'CNY', 50, 'topup')`, alias); err != nil {
+		t.Fatal(err)
+	}
+	breakBalance(t, db, userID, "50") // 钱包 = 150，正是写路径会写出来的值
+
+	// 先复现缺陷成立的前提：逐字相等的那种汇总（改前的口径）只看得见 100。
+	// 权威值比快照小 50，而对账要「把快照对齐到权威值」——这 50 就是这么丢的。
+	var exactSum string
+	if err := db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(amount), 0)::text
+		  FROM ledger_entries WHERE account = $1 AND asset = 'CNY'`,
+		ledger.UserAccount(userID).String()).Scan(&exactSum); err != nil {
+		t.Fatal(err)
+	}
+	if exactSum != "100.00000000" {
+		t.Fatalf("逐字相等的汇总 = %s，期望 100——这条用例要复现的正是它偏小", exactSum)
+	}
+
+	report := reconcile(t, db, withResyncRepair())
+
+	if hasKind(report, userID, FindingBalanceMismatch) {
+		t.Errorf("别名科目的钱属于这个用户，不该报成余额不一致：%v",
+			findingsFor(report, userID))
+	}
+	if balance, _ := walletOf(t, db, userID); balance != "150.00000000" {
+		t.Errorf("余额 = %s，期望 150 一动不动（改前这里会变成 100）", balance)
+	}
+
+	f := malformedOf(t, report, alias)
+	if f.Ledger.Cmp(money.MustParse("50")) != 0 {
+		t.Errorf("报出来的金额 = %s，期望 50", f.Ledger)
+	}
+	if !strings.Contains(f.Detail, ledger.UserAccount(userID).String()) {
+		t.Errorf("Detail 要说清这笔钱按哪个科目归位了，得到 %q", f.Detail)
+	}
+	// 能归位的这一类要带上用户 id：这条不一致说的就是「某个用户名下有一笔
+	// 写法要订正的钱」，按用户查 reconcile_findings 时应当能查到它。
+	// 归不到任何人的那一类才留 0（见 TestReconcileReportsZeroUserAccount）。
+	if f.UserID != userID {
+		t.Errorf("能归位的畸形科目 UserID = %d，期望 %d", f.UserID, userID)
+	}
+}
+
+// 归一化表达式**必须**与写法判据一起用：单用它会把钱算到错的人头上。
+//
+// 表达式只做字符串处理，`split_part(account, ':', 2)` 取的是第一个冒号之后
+// 的全部，于是**别的科目**归一之后与 `user:<id>` 长得一模一样——实测
+// `merchant_payable:42`、`payout:42`、`payment_gateway:42` 都归成 `user:42`；
+// `user :42`（分隔符前多一个空格）与 `user:42:9`（多余的分隔符）也一样。
+// 是 userAccountAliasPattern 把它们挡在查询之外的。
+//
+// 少了那个判据的表现是**余额被抬高**：别人的钱被算进这个用户的权威值，
+// 权威值比快照大，resync 就会把余额改大。方向与主线缺陷相反，但同样是
+// 「对账自己把钱改了」，所以这一条也要钉住。
+func TestLedgerSumsOnlyCountUserAccounts(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	userID := seed(t, db, "100") // 账本上 user:<id> 是 100，钱包也是 100
+
+	// 后缀与这个用户同一个 id，但都不是 user 科目——归一之后都会变成 user:<id>。
+	noise := []struct{ account, amount string }{
+		{"merchant_payable:" + itoa(userID), "7"},
+		{"payout:" + itoa(userID), "11"},
+		{"payment_gateway:" + itoa(userID), "13"},
+		{"user :" + itoa(userID), "17"},
+		{"user:" + itoa(userID) + ":9", "19"},
+	}
+	t.Cleanup(func() {
+		for _, n := range noise {
+			_, _ = db.ExecContext(ctx,
+				`DELETE FROM ledger_entries WHERE account = $1`, n.account)
+		}
+	})
+	for _, n := range noise {
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO ledger_entries (txn_id, account, asset, amount, entry_type)
+			VALUES (gen_random_uuid(), $1, 'CNY', $2::numeric, 'adjustment')`,
+			n.account, n.amount); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	report := reconcile(t, db, withResyncRepair())
+
+	if hasKind(report, userID, FindingBalanceMismatch) {
+		t.Errorf("别的科目的钱被算进了这个用户，余额会被抬高：%v",
+			findingsFor(report, userID))
+	}
+	if balance, _ := walletOf(t, db, userID); balance != "100.00000000" {
+		t.Errorf("余额 = %s，期望 100 一动不动", balance)
+	}
+
+	// 归一只看后缀、认不出大类，所以判据里的那两种畸形也不能被它「归位」：
+	// 它们归一之后也是 user:<id>，但那笔钱谁也不属于。
+	for _, account := range []string{
+		"user :" + itoa(userID),
+		"user:" + itoa(userID) + ":9",
+	} {
+		if f := malformedOf(t, report, account); f.UserID != 0 {
+			t.Errorf("科目 %q 的钱不属于任何人，UserID 应为 0，得到 %d", account, f.UserID)
+		}
+	}
+}
+
+// `user:0` 曾经是整体盲区：旧判据把它当成规范写法（所以不算畸形），
+// 而候选查询是 `user_id > 0`，于是它既不被比对、也不被报出来——
+// 那笔钱在任何地方都看不见。
+//
+// 用户 id 从 1 起（users.id 是 bigserial，钱包行还有外键），0 不是任何用户，
+// 所以这条写法现在按畸形报出来。它也不可能由 store 写出来：钱包行不存在，
+// applyToWallets 会「影响 0 行」而拒绝整笔。
+//
+// 报出来的**话**也要与这个事实一致：`user:0` 与 `user:abc` 同类（钱谁也不
+// 属于），不是「写法要订正、钱已经归位」那类。后者会让处置的人以为钱找着了。
+func TestReconcileReportsZeroUserAccount(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	seed(t, db, "1") // 让这一轮有别的用户可跑
+
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(ctx, `DELETE FROM ledger_entries WHERE account = 'user:0'`)
+	})
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO ledger_entries (txn_id, account, asset, amount, entry_type)
+		VALUES (gen_random_uuid(), 'user:0', 'CNY', 999, 'adjustment')`); err != nil {
+		t.Fatal(err)
+	}
+
+	f := malformedOf(t, reconcile(t, db, noRepair()), "user:0")
+	if f.UserID != 0 {
+		t.Errorf("畸形科目的 UserID 应为 0，得到 %d", f.UserID)
+	}
+	// 0 号用户不存在，这 999 谁也不属于。报成「写法非规范、金额已按 user:0
+	// 归位」是与事实相反的说法，会让处置的人以为钱已经找着了。
+	if !strings.Contains(f.Unrepairable, "归属无法确定") {
+		t.Errorf("Unrepairable = %q，期望「归属无法确定」那一条", f.Unrepairable)
+	}
+	if strings.Contains(f.Detail, "归位") {
+		t.Errorf("Detail = %q 不该声称金额已归位——它不属于任何人", f.Detail)
+	}
+}
+
+// 「有 pending 预留、既没有钱包行也没有账本分录」的用户整体在候选集之外
+// ——而注册流程漏建钱包的用户恰好是这个形状。WalletMissing 那条分支存在的
+// 意义正是把他报出来，所以候选集必须带上未结算预留这一侧。
+func TestReconcileReportsWalletMissingForReservationWithoutOtherSides(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	req := testRequest(userID, reqID(t))
+	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, req.RequestID, "30", "CNY")); err != nil {
+		t.Fatal(err)
+	}
+	// 抹掉另外两侧：钱包行与账本分录都不在，只剩这条 pending 预留。
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM user_wallets WHERE user_id = $1`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM ledger_entries WHERE account = $1`,
+		ledger.UserAccount(userID).String()); err != nil {
+		t.Fatal(err)
+	}
+
+	f := kindOf(t, reconcile(t, db, noRepair()), userID, FindingWalletMissing)
+	if !strings.Contains(f.Detail, "预留") {
+		t.Errorf("Detail 要指出缺的是预留那一侧，得到 %q", f.Detail)
+	}
+	if !strings.Contains(f.Detail, "30.00000000") {
+		t.Errorf("Detail 要带上未结算预留之和，得到 %q", f.Detail)
+	}
+}
+
+// 增量扫描也要看得见这类用户：候选集里新加的那一侧有自己的时间窗口
+// （`started_at`），与钱包、账本两侧的窗口不是同一个，得单独钉一次。
+//
+// 时间戳放到未来，理由与 breakBalanceAhead 相同：增量窗口的起点取自
+// 「最后一轮跑成的对账的开始时刻」，而同一个库上可能有另一轮对账在跑
+// （变异测试就会另起一遍 `go test`），那几行就会落在窗口之外。
+func TestReconcileIncrementalFindsReservationOnlyUser(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	reconcile(t, db, noRepair()) // 建立起点，让接下来这一轮是增量
+
+	userID := seed(t, db, "100")
+	req := testRequest(userID, reqID(t))
+	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, req.RequestID, "30", "CNY")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		UPDATE billing_requests SET started_at = now() + interval '1 hour'
+		 WHERE request_id = $1`, req.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	// 抹掉另外两侧，于是这个用户只能靠未结算预留那一侧进候选集。
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM user_wallets WHERE user_id = $1`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM ledger_entries WHERE account = $1`,
+		ledger.UserAccount(userID).String()); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := noRepair()
+	cfg.FullScanInterval = 24 * time.Hour
+	report := reconcile(t, db, cfg)
+	if report.FullScan {
+		t.Fatal("这一轮应当是增量")
+	}
+	kindOf(t, report, userID, FindingWalletMissing)
+}
+
+// 「规范写法」的定义写在两个地方：ledger.ParseAccount（Go）与畸形判据里的
+// 正则（SQL）。这条用例把它们钉在一起。
+//
+// 两处漂开的时候，会出现「写路径拒绝的写法又不被判为畸形」这类缝——
+// 而本条缺陷正是从那种缝里来的：正则放行了 `user:0<id>`，字符串比对却不认。
+func TestCanonicalUserPatternMatchesParseAccount(t *testing.T) {
+	db := testDB(t)
+
+	forms := []string{
+		"user:1", "user:42", "user:100000", "user:123456789012345678",
+		"user:0", "user:00", "user:042", "user:+42", "user:+0042",
+		"user:1234567890123456789", "user:0000000000000000000042",
+		"user:abc", "user:", "user:1:2", "user :42", "user: 42", "user:-5", "user",
+	}
+	for _, s := range forms {
+		var sqlCanonical, sqlAlias bool
+		if err := db.QueryRowContext(context.Background(),
+			`SELECT $1 ~ $2, $1 ~ $3`,
+			s, userAccountCanonicalPattern, userAccountAliasPattern,
+		).Scan(&sqlCanonical, &sqlAlias); err != nil {
+			t.Fatal(err)
+		}
+
+		_, parseErr := ledger.ParseAccount(s)
+		goAccepts := parseErr == nil
+
+		if goAccepts != sqlCanonical {
+			t.Errorf("写法 %q：ParseAccount 接受 = %v，SQL 认为规范 = %v（两处必须一致）",
+				s, goAccepts, sqlCanonical)
+		}
+		if goAccepts && !sqlAlias {
+			// 能写进账本的写法必须是汇总认得的写法，否则这笔钱会进不了
+			// 权威值，对账就会把余额改小。
+			t.Errorf("写法 %q：ParseAccount 接受但汇总认不出，这笔钱会漏出权威值", s)
+		}
 	}
 }
 

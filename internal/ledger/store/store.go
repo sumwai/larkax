@@ -36,7 +36,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
@@ -358,11 +357,13 @@ func applyToWallets(ctx context.Context, tx *sql.Tx, entries []ledger.Entry) err
 		if e.Account.Type() != ledger.AccountUser {
 			continue
 		}
-		id, err := strconv.ParseInt(e.Account.ID(), 10, 64)
+		// 用科目自己认自己的用户 id，与对账的汇总走同一条判定
+		// （ledger.Account.UserID）：「一笔分录算给哪个用户」只有一处答案。
+		// 非规范写法在这里解不出来只可能是账本层的 Bug——自己拼了一个
+		// 绕过 ParseAccount 的 Account。报出来而不是跳过：跳过会让余额少扣。
+		id, err := e.Account.UserID()
 		if err != nil {
-			// 科目是 user:<id> 但 id 解不出来——那是账本层的 Bug，
-			// 不是数据问题。报出来而不是跳过：跳过会让余额少扣。
-			return fmt.Errorf("科目 %s 的用户 id 非法: %w", e.Account, err)
+			return err
 		}
 		key := WalletKey{UserID: id, Asset: string(e.Asset)}
 		deltas[key] = deltas[key].Add(e.Amount)
@@ -488,14 +489,17 @@ func sortWalletKeys(keys []WalletKey) {
 }
 
 // walletKeysOf 从分录里收集需要加锁的钱包。
+//
+// 认用户 id 走的是与写路径、对账汇总同一条判定（ledger.Account.UserID）。
+// 加锁的键必须与更新时算出来的键是同一批：两处各认各的科目，表现是**漏锁**，
+// 而漏锁只在并发时才看得出来。
 func walletKeysOf(entries []ledger.Entry) []WalletKey {
 	var out []WalletKey
 	for _, e := range entries {
-		if e.Account.Type() != ledger.AccountUser {
-			continue
-		}
-		id, err := strconv.ParseInt(e.Account.ID(), 10, 64)
+		id, err := e.Account.UserID()
 		if err != nil {
+			// 不是 user 科目，或者后缀读不出用户 id。两者都不进钱包，
+			// 也就不需要加锁——applyToWallets 对前者跳过、对后者报错。
 			continue
 		}
 		out = append(out, WalletKey{UserID: id, Asset: string(e.Asset)})

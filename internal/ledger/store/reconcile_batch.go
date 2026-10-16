@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
-	"strconv"
 
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
@@ -146,8 +145,28 @@ func readWallets(ctx context.Context, tx *sql.Tx, ids []int64) (map[userAsset]wa
 
 // readLedgerSums 按 user 科目汇总账本。
 //
-// 只查这批用户的科目：这既用得上 (account, created_at) 上的索引，又把一次
-// 查询的规模限制在一个分片之内——全表汇总在大库上正是这个任务要避免的开销。
+// 只查这批用户的科目：一次查询的**结果**因此限制在一个分片之内。
+//
+// # 为什么谓词不是 account = ANY(规范写法)
+//
+// 逐字相等只认得一种写法，而写路径当初是把后缀读成整数的：`user:0<id>`
+// 那样的科目**是**算进该用户钱包的。等值匹配看不见它，汇总出来的权威值
+// 就偏小，对账据此把**正确的**余额改小。所以这里与写路径用同一套口径归位：
+// 后缀按十进制整数解释，前导零与正号只是同一个 id 的另一种写法。
+//
+// # 代价：每个分片一次全表扫描
+//
+// 归一化表达式不是索引条件，`ledger_account_idx` 在计划里只作为 Filter
+// 出现（没有 Index Cond），实测计划就是 `Seq Scan on ledger_entries`；
+// 把 enable_seqscan 关掉也还是它。于是查询的代价不再由这一批用户决定，
+// 而由 ledger_entries 的**总行数**决定——而 reconcileAll 是按分片循环调用
+// 本函数的，总代价因此是「分片数 × 表行数」，而不是从前的「本分片的行数」。
+//
+// 这个取舍是有意的：认不出旧写法会改错钱，扫全表只是慢。但要说清楚它
+// 现在**慢在哪儿**，以及什么时候才能退回去——收窄 ParseAccount 只挡住了
+// 新的写入，库里已经存在的别名行没有清理路径（畸形科目只报告不修，
+// 见 reconcileMalformed），所以「清理干净之后可以退回等值匹配」这句话
+// 目前**缺一个执行者**：得先有人把那些行订正掉，等值匹配才重新够用。
 func readLedgerSums(ctx context.Context, tx *sql.Tx, ids []int64) (map[userAsset]money.Amount, error) {
 	accounts := make([]string, 0, len(ids))
 	for _, id := range ids {
@@ -155,10 +174,11 @@ func readLedgerSums(ctx context.Context, tx *sql.Tx, ids []int64) (map[userAsset
 	}
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT account, asset, SUM(amount)::text
+		SELECT `+userAccountCanonicalSQL+` AS account, asset, SUM(amount)::text
 		  FROM ledger_entries
-		 WHERE account = ANY($1)
-		 GROUP BY account, asset`, accounts)
+		 WHERE account ~ '`+userAccountAliasPattern+`'
+		   AND `+userAccountCanonicalSQL+` = ANY($1)
+		 GROUP BY 1, 2`, accounts)
 	if err != nil {
 		return nil, fmt.Errorf("汇总账本失败: %w", err)
 	}
@@ -170,15 +190,11 @@ func readLedgerSums(ctx context.Context, tx *sql.Tx, ids []int64) (map[userAsset
 		if err := rows.Scan(&account, &asset, &total); err != nil {
 			return nil, fmt.Errorf("读账本汇总失败: %w", err)
 		}
-		parsed, err := ledger.ParseAccount(account)
-		if err != nil {
-			// 畸形科目到不了这里（SQL 里的 account = ANY 只带了规范写法），
-			// 真到了这里说明账本里有一行本包不认识，报出来而不是跳过。
-			return nil, fmt.Errorf("账本里的科目 %q 不合法: %w", account, err)
-		}
-		userID, err := strconv.ParseInt(parsed.ID(), 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("科目 %q 的用户 id 非法: %w", account, err)
+		userID, ok := ledger.UserIDFromAccount(account)
+		if !ok {
+			// 归一到规范写法之后必然读得出用户 id。读不出说明 SQL 那边的
+			// 规则与 ledger 这边不一致——那是 Bug，报出来而不是跳过。
+			return nil, fmt.Errorf("账本汇总里的科目 %q 读不出用户 id", account)
 		}
 		amt, err := money.Parse(total)
 		if err != nil {
