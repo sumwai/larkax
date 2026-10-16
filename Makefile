@@ -35,7 +35,7 @@ TEMPLATE := .env.example
 # 反斜杠会被上一步再转一遍。
 ESCAPED_DB_PASSWORD := $(subst ','\'',$(subst |,\|,$(subst &,\&,$(subst \,\\,$(DB_PASSWORD)))))
 
-.PHONY: help init up down migrate run test clean
+.PHONY: help init up down migrate run check-ports test clean
 
 help:
 	@echo "make run      准备 .env → 起依赖 → 迁移 → 前台跑服务"
@@ -115,7 +115,36 @@ down:
 migrate: init
 	@set -a; . ./$(ENV_FILE); set +a; go run ./cmd/larkaxctl migrate up
 
-run: init up migrate
+# 起服务前先看两个监听地址在不在。占用时服务会以一句 bind 错误收尾，而那句话
+# 本身虽然清楚，却没说**怎么换**——换的入口（LARKAX_HTTP_ADDR /
+# LARKAX_INTERNAL_ADDR）在 .env 里是注释掉的，得翻文件才知道。
+#
+# 9090 是常被占的那个：Clash / mihomo 的 external-controller 默认就是它，
+# Prometheus 也是。撞上之后服务**完全起不来**，不是降级。
+#
+# 读的是加载 .env 之后的值，所以写在 .env 里的覆盖也算数。放在 up 之前：
+# 端口不通就没必要先把数据库拉起来。
+check-ports: init
+	@set -a; . ./$(ENV_FILE); set +a; \
+	busy=0; \
+	for spec in "公共入口 $${LARKAX_HTTP_ADDR:-:8080} LARKAX_HTTP_ADDR" \
+	            "内部端点 $${LARKAX_INTERNAL_ADDR:-:9090} LARKAX_INTERNAL_ADDR"; do \
+	  set -- $$spec; \
+	  port=$${2##*:}; \
+	  if ss -ltn 2>/dev/null | awk '{print $$4}' | grep -qE "[:.]$$port$$"; then \
+	    busy=1; \
+	    echo "  $$1：端口 $$port 已被占用（用 $$3 换一个）"; \
+	  fi; \
+	done; \
+	if [ "$$busy" = 1 ]; then \
+	  echo "监听地址被占了，服务起不来。用上面点到的那个变量换一个端口，例如:"; \
+	  echo "  LARKAX_HTTP_ADDR=:8081 make run"; \
+	  echo "  LARKAX_INTERNAL_ADDR=:9091 make run"; \
+	  echo "也可以写进 $(ENV_FILE)，那样只需改一次。"; \
+	  exit 1; \
+	fi
+
+run: init check-ports up migrate
 	@echo "前台运行服务，Ctrl-C 退出（数据库仍在跑，用 make down 停）"
 	@set -a; . ./$(ENV_FILE); set +a; go run ./cmd/larkax
 

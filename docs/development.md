@@ -54,6 +54,17 @@ curl -i localhost:8080/v1/chat/completions
 另可验证数据库探针：`curl -s localhost:9090/readyz` 应含 `"postgres":"ok"`。
 **健康检查在 `:9090`，不在 `:8080`**——公共端口的 `/` 捕获一切路径并返回 `501`。
 
+**`:9090` 是个常被占的端口**：Clash / mihomo 的 external-controller 默认就是它，
+Prometheus 也是。撞上之后服务完全起不来（不是降级），所以 `make run` 在起服务前
+会先检查这两个监听地址，占用时会告诉你**是哪个**、以及**怎么换**。
+
+换的方式是把 `LARKAX_INTERNAL_ADDR`（或 `LARKAX_HTTP_ADDR`）写进 `.env`——那样
+只需改一次，不必每次都在命令行上带：
+
+```sh
+LARKAX_INTERNAL_ADDR=":9091"
+```
+
 其余目标：
 
 | 命令 | 做什么 |
