@@ -47,7 +47,8 @@ Not wired yet:
 See [docs/development.md](docs/development.md) for how to build and run it.
 The reconciliation job is documented in [docs/reconciliation.md](docs/reconciliation.md),
 the calendar data behind peak/off-peak pricing in [docs/calendar-data.md](docs/calendar-data.md),
-and the health and quota signals in [docs/channel-health.md](docs/channel-health.md).
+the health and quota signals in [docs/channel-health.md](docs/channel-health.md),
+and the plugin contract in [docs/plugin-contract.md](docs/plugin-contract.md).
 
 ## What it will do
 

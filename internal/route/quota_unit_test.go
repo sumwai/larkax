@@ -74,7 +74,7 @@ func TestMixedQuotaUnits(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := mixedQuotaUnits(tc.set); got != tc.want {
+			if got := MixedQuotaUnits(tc.set); got != tc.want {
 				t.Errorf("mixedQuotaUnits = %v，期望 %v", got, tc.want)
 			}
 		})
