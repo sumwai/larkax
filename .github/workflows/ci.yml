@@ -64,17 +64,70 @@ jobs:
           version: v2.14.0
           install-mode: goinstall
 
+      # 先迁移再跑测试：把库推到已知状态，也让「迁移能应用」这件事
+      # 在测试用到它之前就被验证过。
+      - name: 迁移可应用且可回滚
+        run: |
+          go run ./cmd/larkaxctl migrate up
+          go run ./cmd/larkaxctl migrate down
+          go run ./cmd/larkaxctl migrate up
+
       - name: 单元测试
         run: go test -race -coverprofile=coverage.out ./...
 
       - name: 覆盖率摘要
         run: go tool cover -func=coverage.out | tail -1
 
-      - name: 迁移可应用且可回滚
+      # 集成测试在拿不到 DSN 时会**跳过**，而「跳过」在输出里和「通过」
+      # 长得一样。这一步让「集成测试真的跑了」可被检查——
+      # 否则 CI 会在一个从没跑过集成测试的状态下报绿。
+      #
+      # 三种「没跑成」要分开报，因为处置完全不同：
+      #   编译不过   → 代码问题
+      #   被跳过     → DSN 或连接问题
+      #   跑了但全不过 → 逻辑问题
+      #
+      # 用 set -e 会让 `out=$(go test ...)` 在测试失败时直接终止整步，
+      # 输出被丢掉、错误信息变成一句「exit code 1」。所以显式接住退出码。
+      - name: 确认集成测试确实运行
         run: |
-          go run ./cmd/larkaxctl migrate up
-          go run ./cmd/larkaxctl migrate down
-          go run ./cmd/larkaxctl migrate up
+          set +e
+          out=$(go test -count=1 -v ./internal/ledger/store/ 2>&1)
+          rc=$?
+          set -e
+
+          show() { printf '%s\n' "$out" | tail -30; }
+
+          # 一、编译不过或包不存在——那时连测试都没开始跑
+          if printf '%s\n' "$out" | grep -q -- 'setup failed\|build failed\|no such file'; then
+            echo "::error::store 包没能编译，集成测试根本没开始跑"
+            show
+            exit 1
+          fi
+
+          # 二、被跳过。跳过等于没测，不能算绿
+          if printf '%s\n' "$out" | grep -q -- '--- SKIP'; then
+            echo "::error::store 的集成测试被跳过了：DSN 没传到，或库连不上。跳过等于没测。"
+            printf '%s\n' "$out" | grep -- '--- SKIP'
+            exit 1
+          fi
+
+          # 三、一个用例都没跑到
+          passed=$(printf '%s\n' "$out" | grep -c -- '--- PASS' || true)
+          if [ "$passed" -eq 0 ]; then
+            echo "::error::store 的集成测试一个都没跑"
+            show
+            exit 1
+          fi
+
+          # 四、跑了但有失败
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::store 的集成测试有失败用例"
+            printf '%s\n' "$out" | grep -- '--- FAIL' || show
+            exit 1
+          fi
+
+          echo "集成测试跑了 $passed 个用例，全部通过。"
 
   redlines:
     name: 公开红线
