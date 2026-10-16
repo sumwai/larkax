@@ -54,15 +54,18 @@ internal/channel/openaiadapter/   OpenAI Chat Completions upstream
 internal/config/                  startup configuration (environment variables)
 internal/credential/              envelope encryption for channel credentials
 internal/db/                      database connection pool
+internal/gateway/                 the order of a request: reserve, route, call, settle
 internal/ledger/                  double-entry bookkeeping: construct and verify entries
+internal/ledger/store/            persisting ledger entries, wallets and reservations
 internal/migrate/                 embedded migrations (internal/migrate/sql/)
 internal/money/                   fixed-point money; the only place rounding happens
 internal/observe/                 logging, request IDs, health and readiness endpoints
 internal/pipeline/                wires the billing stages into one request flow
 internal/quota/                   upstream quota tracking: probe, self-account, merge
-internal/relay/                   the only place that imports relaykit; protocol conversion
+internal/relay/                   protocol conversion through relaykit
 internal/route/                   channel selection and failover
 internal/settings/                runtime configuration, stored in the database
+internal/snapshot/                structure-only capture of requests, with redaction
 internal/tokens/                  token counting and stream-cancel estimation
 scripts/                          repository tooling
 ```
@@ -78,22 +81,35 @@ gateway  ──►  route  ──►  channel.Adapter  ──►  upstream
 gateway  ──►  pipeline  ──►  billing  ──►  money
                    │             │
                    │             └── rules evaluated by billing/expr
-                   └── ledger entries handed back to the caller
+                   ├── ledger entries handed back to the caller
+                   └── usage normalized from channel.Usage, tokens only as a label
 ```
 
-Two rules hold across the tree, and both are checked by eye because they cannot
-be checked by the compiler:
+`gateway` is the only layer with no inbound internal edges; `cmd/` sits above it
+and `money`, `calendar`, `relay`, `observe` and `migrate` are leaves.
+`scripts/check-layering.sh` checks that nothing imports `gateway` back.
 
-- **`internal/relay` is the only package that imports
-  [relaykit](https://github.com/QuantumNous/new-api).** Others use its own types.
+Two rules hold across the tree:
+
+- **Only three packages import
+  [relaykit](https://github.com/QuantumNous/new-api):** `internal/relay`, which is
+  the seam itself, and the two protocol adapters, which need the DTO type to talk
+  to it. Everything else uses larkax's own types.
 - **`internal/money` is the only place rounding happens.** Everything else is
   integer arithmetic on a fixed-point value.
+
+Both are enforced by `scripts/check-layering.sh`, which runs in CI: it lists the
+packages allowed to import relaykit and flags `float64(` used on money outside
+`internal/money`.
 
 The billing path is deliberately split so each stage can be tested without a
 database or a network: `money` (arithmetic) → `billing` (usage × price) →
 `billing/expr` (rules) → `pipeline` (the order of operations).
 
-Not yet written: `internal/gateway`, `internal/plugin`, `plugins/`, and `web/`.
+`internal/gateway` holds the order of a whole request — reserve before calling
+upstream, do not switch channels once a stream has emitted, never let the
+snapshot path slow down the request. It is not wired into the binary yet.
+Also absent: `internal/plugin`, `plugins/`, and `web/`.
 
 ## Versioning
 
