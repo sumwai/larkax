@@ -46,14 +46,25 @@ type CandidateSource interface {
 	Candidates(ctx context.Context, canonicalModel string) ([]route.Candidate, error)
 }
 
-// ReservationStore 负责把预留落库并拿回它的标识。
+// ReservationStore 负责把预留落库、并在不计费的结局里把它放开。
 //
 // 为什么必须落库而不是留在内存里：预留与结算之间隔着一次可能数分钟的
 // 上游调用。进程在那期间重启，内存里那份冻结金额就没了——
 // 而钱已经冻在账上，没人记得它为什么冻着。
+//
+// # 方法名与签名跟存储层逐字一致
+//
+// 这里的两个方法（SaveReservation / Release）与 internal/ledger/store 的
+// Store 完全同名同签名，于是那个实现**直接满足**本接口，中间不需要一层
+// 装配适配器——而适配器正是「签名对不上」这类错误最容易藏身的地方：
+// 它把两边的差异从编译期挪到了运行期，还多一处没人读的转发代码。
 type ReservationStore interface {
-	// Save 落一条预留记录，返回它的标识。
-	Save(ctx context.Context, r *pipeline.Reservation) (int64, error)
+	// SaveReservation 落一条预留记录，返回它的标识。
+	SaveReservation(ctx context.Context, req pipeline.Request, r *pipeline.Reservation) (int64, error)
+	// Release 释放一次预留。用于**不计费的结局**：上游失败、客户端中途断开。
+	//
+	// 它必须是幂等的：同一次请求释放两次不该报错，也不该把冻结额减两次。
+	Release(ctx context.Context, req pipeline.Request) error
 }
 
 // SettlementStore 负责把结算结果落库（账本分录 + 用量事件）。
@@ -168,9 +179,11 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 	if err != nil {
 		// 没有可用的渠道，或者全部失败。**不计费**。
 		//
-		// 这里要显式走一次结算而不是直接返回：结算会把预留释放掉，
-		// 而「失败就释放」这条规则如果散在调用方，漏一处就是
-		// 一笔永久冻着的钱。
+		// 这里要显式走一次结算而不是直接返回：计费与否的结论只由
+		// Settle 给出，把「失败不计费」放在这里，它就还是一条能被
+		// 测试的执行顺序，而不是散在调用方的一句 if。钱那一侧由 defer
+		// 的 finish 释放——「失败就释放」这条规则如果散在调用方，
+		// 漏一处就是一笔永久冻着的钱。
 		return res.settleAndFail(ctx, err, pipeline.Outcome{UpstreamFailed: true})
 	}
 
@@ -209,6 +222,17 @@ type handle struct {
 	// 否则「预留了但没结算」的那些分支会留下一笔永久冻着的钱，
 	// 而那种余额在界面上表现为「用户说他的钱不见了」。
 	settled bool
+
+	// charged 表示账单已经**成功交回调用方**，即结算事务真的跑过。
+	//
+	// 只有它为 true 时，冻住的钱才由结算那一步解冻。其余一切结局——
+	// 上游失败、结算本身失败、结算落库失败、客户端中途断开，以及
+	// **根本没配结算落库层**——都只有一条出路：走 Release 把钱放开。
+	//
+	// 它记的是「结算事务真的跑过」，不是「Settle 算出来了」：两者在没有
+	// 落库层时会分叉——那次 Save 与它事务里的解冻都不会发生，此时若把
+	// 它当成结算过，Release 会被挡下，两条路都没走，钱就永久冻着。
+	charged bool
 }
 
 func (g *Gateway) begin(ctx context.Context, req pipeline.Request, upstream *channel.Request) (*handle, error) {
@@ -234,7 +258,7 @@ func (g *Gateway) begin(ctx context.Context, req pipeline.Request, upstream *cha
 	h.reserved = reserved
 
 	if g.Reservations != nil {
-		id, err := g.Reservations.Save(ctx, reserved)
+		id, err := g.Reservations.SaveReservation(ctx, req, reserved)
 		if err != nil {
 			return nil, fmt.Errorf("预留落库失败: %w", err)
 		}
@@ -251,23 +275,58 @@ func (g *Gateway) begin(ctx context.Context, req pipeline.Request, upstream *cha
 
 // finish 是 handle 的收尾。它总是被 defer 调用，负责把还没结算的那次
 // 补上——正常路径已经结算过，这里会发现并跳过。
+//
+// 它也是**唯一**释放预留的地方。放在这里而不是各个失败分支上，理由与
+// handle 本身存在的理由相同：散在分支上的规则，漏一处就是一笔永久冻着
+// 的钱，而漏掉的那一处不会有任何东西报出来。
 func (h *handle) finish(ctx context.Context) {
-	if h.settled {
-		return
+	if !h.settled {
+		// 走到这里说明在结算之前就返回了（客户端断开、context 取消等）。
+		// 按「上游失败」结算：不计费。
+		_, _ = h.g.Pipeline.Settle(ctx, h.req, h.reserved,
+			pipeline.Outcome{UpstreamFailed: true})
 	}
-	// 走到这里说明在结算之前就返回了（客户端断开、context 取消等）。
-	// 按「上游失败」结算：不计费，但把预留释放掉。
-	_, _ = h.g.Pipeline.Settle(ctx, h.req, h.reserved,
-		pipeline.Outcome{UpstreamFailed: true})
+	h.release(ctx)
 }
 
 // settleAndFail 结算一次失败的请求并返回原始错误。
 //
-// 失败不计费，所以这里用 UpstreamFailed；它同时把预留释放掉。
+// 失败不计费，所以这里用 UpstreamFailed。预留的释放交给 finish——
+// 它是**每一个**返回路径的收尾点（见 finish 的注释），在这里再调一次
+// 只会多一次数据库往返。
 func (h *handle) settleAndFail(ctx context.Context, cause error, out pipeline.Outcome) (*Result, error) {
 	h.settled = true
 	_, _ = h.g.Pipeline.Settle(ctx, h.req, h.reserved, out)
 	return nil, cause
+}
+
+// release 把这次请求冻住的钱放开。
+//
+// # 它为什么不跟着请求的 ctx 走
+//
+// 最需要释放的时刻，恰恰是客户端断开、请求 ctx 已经 Done 的那一刻：
+// 拿一个已经取消的 ctx 去释放，释放本身就会失败，而那笔钱于是照旧冻着。
+// 所以这里去掉取消与期限，另配一个独立的上限（releaseTimeout）——
+// 与 internal/ledger/store 里「把对账结局写回去」那一步同一个做法
+// （reconcile.go 的 finishTimeout），理由也一样。
+//
+// # 失败为什么不报
+//
+// 这里已经在一个失败的收尾路径上，而调用方拿到的错误必须是**最初那个**
+// （上游失败、结算失败），不能被释放的错误盖掉——那会让「上游 500」
+// 变成「释放失败」，排查的人会朝错的方向找。
+//
+// 代价要说清楚：释放失败时那笔钱**照旧冻着**，而这一条没有任何东西会
+// 报出来——billing_requests 那一行仍是 pending，而对账把 pending 行之和
+// 当成「本来就该冻住的量」（见 ledger/store 的 readPendingReservations），
+// 于是它对得平。要发现它得另加一条上报，而本包没有日志层。
+func (h *handle) release(ctx context.Context) {
+	if h.charged || h.storeID == 0 || h.g.Reservations == nil {
+		return
+	}
+	relCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+	defer cancel()
+	_ = h.g.Reservations.Release(relCtx, h.req)
 }
 
 func (g *Gateway) finishCharge(ctx context.Context, req pipeline.Request, h *handle, ch channel.Channel, out pipeline.Outcome) (*pipeline.Charge, error) {
@@ -289,8 +348,22 @@ func (g *Gateway) finishCharge(ctx context.Context, req pipeline.Request, h *han
 		if err := g.Settlements.Save(ctx, settleReq, charge); err != nil {
 			// 结算落库失败是**必须报出来**的：账已经算出来了但没记下，
 			// 而钱是真金白银。这里不吞错误。
+			//
+			// 没走到下面那行，所以这次请求仍算「没成功交回账单」——
+			// finish 会把预留释放掉。对**真正的**落库失败而言那是对的：
+			// 事务已经回滚，一分钱都没扣，冻着的那笔钱没有理由留着。
+			//
+			// 例外是 ErrAlreadySettled：那是重放，上一次结算已经扣过钱，
+			// 事务并没有回滚。这里不必为它分支——释放会被存储层按
+			// status='settled' 挡下，重复解冻不会发生。
 			return nil, fmt.Errorf("结算落库失败: %w", err)
 		}
+		// 账单已经交回调用方：冻住的钱由结算那一步解冻，这里不再释放。
+		//
+		// 置位放在这个 if **里面**是有意的。没有落库层时上面那次 Save
+		// 不会跑，它事务里的解冻也就不会发生；此时若把 charged 置成
+		// true，release 会被挡下，那笔钱两条路都没走，永久冻着。
+		h.charged = true
 	}
 	return charge, nil
 }
@@ -360,6 +433,15 @@ func ownerOf(cands []route.Candidate, channelID int64) int64 {
 	}
 	return 0
 }
+
+// releaseTimeout 是释放一次预留的时间上限。
+//
+// 与 snapshotTimeout 分开：那个管的是「丢掉一条快照」，这个管的是
+// 「把用户的钱放开」，两者不该共用一个数。五秒的依据与对账那条一样
+// （见 ledger/store 的 finishTimeout）：写的是按主键定位的单行 UPDATE，
+// 量级是毫秒；连它都写不进去，说明库已经不接受写入了，把上限放宽也
+// 救不回来，而这一步的全部意义就是不许挂住。
+const releaseTimeout = 5 * time.Second
 
 // snapshotTimeout 是单条快照的写入上限。
 //

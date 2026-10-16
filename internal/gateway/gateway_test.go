@@ -42,15 +42,32 @@ type fakeReservations struct {
 	saved []*pipeline.Reservation
 	err   error
 	next  int64
+
+	released []pipeline.Request
+	// releaseCtxErr 记下每次释放时传进来的 ctx 是不是已经不可用。
+	//
+	// 这一条必须被钉住：客户端断开时请求的 ctx 已经 Done，用那个 ctx
+	// 去释放等于没释放，而那笔钱会永久冻着。
+	releaseCtxErr []error
+	releaseErr    error
 }
 
-func (f *fakeReservations) Save(_ context.Context, r *pipeline.Reservation) (int64, error) {
+func (f *fakeReservations) SaveReservation(_ context.Context, _ pipeline.Request, r *pipeline.Reservation) (int64, error) {
 	if f.err != nil {
 		return 0, f.err
 	}
 	f.next++
 	f.saved = append(f.saved, r)
 	return f.next, nil
+}
+
+func (f *fakeReservations) Release(ctx context.Context, req pipeline.Request) error {
+	f.releaseCtxErr = append(f.releaseCtxErr, ctx.Err())
+	if f.releaseErr != nil {
+		return f.releaseErr
+	}
+	f.released = append(f.released, req)
+	return nil
 }
 
 type fakeSettlements struct {
@@ -310,6 +327,134 @@ func TestChatUpstreamFailureIsNotBilled(t *testing.T) {
 	}
 }
 
+// 上游失败**必须**把预留释放掉，否则那笔钱永久冻着——
+// 界面上表现为「用户说他的钱不见了」。
+//
+// 三次断言对应三件事：释放被调用过、释放的是这一次请求、只释放一次
+// （重复释放会把冻结额减两次）。
+func TestUpstreamFailureReleasesReservation(t *testing.T) {
+	h := newHarness(t)
+	h.executor.failFor = map[int64]error{
+		1: &channel.ErrUpstream{StatusCode: 500, Retryable: false},
+	}
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err == nil {
+		t.Fatal("上游失败应返回错误")
+	}
+	if len(h.reservations.released) != 1 {
+		t.Fatalf("上游失败应释放预留一次，实际 %d 次", len(h.reservations.released))
+	}
+	if got := h.reservations.released[0].RequestID; got != "req-1" {
+		t.Errorf("释放的是 %q，期望 req-1", got)
+	}
+	// 释放的是**落过库的那次预留**：没落过库就没有可释放的东西。
+	if len(h.reservations.saved) != 1 {
+		t.Errorf("预留落库 %d 次，期望 1 次", len(h.reservations.saved))
+	}
+}
+
+// 客户端中途断开：请求的 ctx 已经 Done，释放仍必须真的发生。
+//
+// 这是这个修复最容易漏的地方——拿那个已经取消的 ctx 去释放，
+// 释放本身就会失败，而它恰恰是最需要释放的时刻。
+//
+// 断开在这里表现为「预留已经落库、调上游时 ctx 已经取消」：路由在
+// 调上游之前就看见 ctx 的结局并返回，请求于是带着一个失败的结局收尾。
+func TestReleaseWorksWithCancelledRequestContext(t *testing.T) {
+	h := newHarness(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 客户端已经断开
+
+	if _, err := h.gw.Chat(ctx, request(), upstreamRequest()); err == nil {
+		t.Fatal("ctx 已取消时不该成功")
+	}
+	if len(h.reservations.saved) != 1 {
+		t.Fatalf("预留应先落库，实际落库 %d 次", len(h.reservations.saved))
+	}
+	if len(h.reservations.released) != 1 {
+		t.Fatalf("ctx 已取消时仍应释放预留，实际 %d 次", len(h.reservations.released))
+	}
+	if err := h.reservations.releaseCtxErr[0]; err != nil {
+		t.Errorf("释放用的是已经取消的 ctx（%v）——那等于没释放", err)
+	}
+}
+
+// 成功路径**不该**释放：解冻由结算那个事务做。
+//
+// 在这里再释放一次会把冻结额减两次（或让结算的解冻失败），
+// 而那是账目对不上的来源。
+func TestSuccessDoesNotRelease(t *testing.T) {
+	h := newHarness(t)
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.reservations.released) != 0 {
+		t.Errorf("成功路径不该释放预留：%+v", h.reservations.released)
+	}
+}
+
+// 没有配结算落库层时，成功路径也必须把预留放开。
+//
+// 它守的是 charged 语义里的一个分叉：charged 记的必须是「结算事务真的跑过」，
+// 而不是「Settle 算出来了」。没有落库层时那次 Save 与它事务里的解冻都不会
+// 发生，此时若把它当成结算过，Release 会被挡下——两条路都没走，那笔钱就
+// 永久冻着；而对账把 Σpending 当作「本来就该冻住的量」，报不出来。
+//
+// 这与 TestSuccessDoesNotRelease 不矛盾：那一条有落库层，解冻由结算事务做，
+// 再释放一次会减两次；这一条没有落库层，只有 Release 这一条出路。
+func TestSuccessWithoutSettlementStoreReleasesReservation(t *testing.T) {
+	h := newHarness(t)
+	// 必须直接把这个接口字段置空，不能把 harness 里那个指针字段设成 nil
+	// 再让组装去赋值：一个 nil 的具体指针装进接口之后**接口本身不是 nil**
+	// （有类型、没有值），`g.Settlements != nil` 会为真，然后 Save 会在
+	// nil 接收者上 panic。生产装配里「不配」就是把这个字段留成零值，
+	// 这里要测的正是那一种。
+	h.gw.Settlements = nil
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.reservations.released) != 1 {
+		t.Fatalf("没有结算落库层时成功路径也必须释放预留，实际 %d 次", len(h.reservations.released))
+	}
+	if got := h.reservations.released[0].RequestID; got != "req-1" {
+		t.Errorf("释放的应是本次请求，实际 %q", got)
+	}
+}
+
+// 结算这一步自己失败时，钱同样不能冻着——它是同一个缺陷的另一条入口。
+//
+// 结算落库失败时事务已经回滚，一分钱都没扣，冻着的那笔钱没有理由留着。
+func TestSettlementFailureReleasesReservation(t *testing.T) {
+	h := newHarness(t)
+	h.settlements.err = errors.New("账本写不进去")
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err == nil {
+		t.Fatal("结算落库失败必须报出来")
+	}
+	if len(h.reservations.released) != 1 {
+		t.Errorf("结算失败时也该释放预留，实际 %d 次", len(h.reservations.released))
+	}
+}
+
+// 释放失败不能盖掉最初那个错误：调用方要能分清「上游 500」与
+// 「释放失败」，否则排查的人会朝错的方向找。
+func TestReleaseFailureDoesNotMaskCause(t *testing.T) {
+	h := newHarness(t)
+	h.reservations.releaseErr = errors.New("释放写不进去")
+	h.executor.failFor = map[int64]error{
+		1: &channel.ErrUpstream{StatusCode: 500, Retryable: false},
+	}
+
+	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	var up *channel.ErrUpstream
+	if !errors.As(err, &up) {
+		t.Errorf("返回的应是上游错误本身，得到 %v", err)
+	}
+}
+
 // 没有可用渠道时**不该预留**：冻住用户的钱却没有可用的渠道，
 // 那笔钱要等到超时才释放。
 func TestNoCandidatesDoesNotReserve(t *testing.T) {
@@ -322,6 +467,10 @@ func TestNoCandidatesDoesNotReserve(t *testing.T) {
 	}
 	if len(h.reservations.saved) != 0 {
 		t.Errorf("没有候选时不该预留：%+v", h.reservations.saved)
+	}
+	// 没冻过钱就没有可释放的东西，别去多打一次数据库。
+	if len(h.reservations.released) != 0 {
+		t.Errorf("没预留过就不该释放：%+v", h.reservations.released)
 	}
 }
 
@@ -350,6 +499,10 @@ func TestReservationSaveFailureStopsBeforeUpstream(t *testing.T) {
 	}
 	if len(h.executor.calls) != 0 {
 		t.Errorf("预留落库失败却调了上游：%v", h.executor.calls)
+	}
+	// 预留没落库（也就没冻住钱），没有可释放的东西。
+	if len(h.reservations.released) != 0 {
+		t.Errorf("预留没落库时不该释放：%+v", h.reservations.released)
 	}
 }
 
