@@ -87,9 +87,17 @@ const ToolCallFrameTokens = 6
 //	est := tokens.NewStreamEstimator(counter, upstreamModel)
 //	est.ObserveRequest(text, len(messages), len(tools))
 //	for ev := range events {
-//	    est.Observe(ev)          // 每个事件一次
+//	    switch ev.Kind {
+//	    case "delta":
+//	        est.ObserveDelta(ev.Text)
+//	    case "tool_use":
+//	        est.ObserveToolCall(ev.ToolCall.ID, ev.ToolCall.Name, ev.ToolCall.Arguments)
+//	    }
 //	}
+//	est.ObserveDone()
 //	u := est.Result()            // 无论正常结束还是中途断开
+//
+// 上游在流里带了实测用量时，用 ObserveMeasured 覆盖估算（覆盖而不是相加）。
 //
 // **不是并发安全的**：一条流只有一个消费者。要跨 goroutine 用，
 // 由调用方自己加锁——本类型不内置锁，因为流式路径上每个事件都加锁

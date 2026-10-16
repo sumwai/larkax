@@ -37,7 +37,9 @@ type Usage struct {
 	// PromptTokens 是**非缓存**的输入 token。
 	// 缓存命中的部分单独记，因为它们的单价通常低得多。
 	PromptTokens int64
-	// CompletionTokens 是输出 token，不含推理 token（后者单独计价）。
+	// CompletionTokens 是输出 token。按本口径的定义它不含推理 token
+	//（后者单独计价），但 FromChannelUsage 目前原样透传上游的值，不做这层
+	// 拆分——见那里的注释。
 	CompletionTokens int64
 	// CacheReadTokens 是命中缓存的输入 token。
 	CacheReadTokens int64
@@ -154,7 +156,7 @@ func ComputeWithCharges(usage Usage, prices Prices, charges Charges) Breakdown {
 				// 用量里有这个计量项，规则却没给单价。
 				// 不能当成免费——那会让这类用量永远不产生费用，
 				// 而它也不会报错，只会在对账时表现为「用量对不上金额」。
-				// 这里记为零，由 Validate 报出来。
+				// 这里跳过这一项（不放进明细），由 Validate 报出来。
 				continue
 			}
 			b.Units[name] = price.MulInt(count)
@@ -225,8 +227,9 @@ func Validate(usage Usage, prices Prices) error {
 //
 //   - channel.Usage.PromptTokens 含缓存部分（OpenAI 口径），
 //     而计价时缓存与非缓存单价不同，必须拆开。
-//   - ReasoningTokens 在协议层可能已被计入 completion，
-//     在计费层要单独处理，否则会被收两次钱。
+//   - ReasoningTokens 在协议层可能已被计入 completion。本函数**不去重**：
+//     两者从数字上分不出来，是否重复计费由规则给的推理单价决定（见下面
+//     那一段注释）。
 func FromChannelUsage(u channel.Usage) Usage {
 	out := Usage{
 		CompletionTokens: u.CompletionTokens,
@@ -259,9 +262,9 @@ func FromChannelUsage(u channel.Usage) Usage {
 		}
 	}
 
-	// 推理 token 若被上游计入了 completion，这里不重复计。
-	// 判据是「completion 明显大于推理量」——那说明推理是其中一部分。
-	// 无法判断时保持原样，由规则决定怎么定价。
+	// 推理 token 与 completion 的重叠在这里**不做判断**：上游有的把它算进
+	// completion、有的单独报，而从两个数字上看不出是哪一种。所以原样透传，
+	// 是否重复计费由规则给的推理单价决定。
 	return out
 }
 

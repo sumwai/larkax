@@ -254,7 +254,8 @@ func MulAmount(a, b Amount) Amount {
 // 乘上金额之后可能差一分。倍率来自商家配置，会反复用于每一次计费，
 // 一分钱的偏差乘上百万次请求就是一笔真实的差额。
 //
-// 不做任何除法：units × factor 的结果仍是 units 量纲。
+// 除法只用在最后一步：factor 是有理数，乘积要除以它的分母才折回 units
+// 量纲，并按 fromBigDivRounded 四舍五入。所以它是本包里带舍入的入口之一。
 func MulFloat(a Amount, factor float64) Amount {
 	if math.IsNaN(factor) || math.IsInf(factor, 0) {
 		// 系数非法时返回零而不是 panic：它来自配置，而配置写错

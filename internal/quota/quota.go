@@ -73,8 +73,11 @@ type State struct {
 	LastErrorCode string
 	LastErrorAt   *time.Time
 
+	// LastProbeAt 是最近一次**实测**（KindAPIQuery）的时刻。自记账与错误
+	// 观测都不动它——它是自记账可信度的衰减基准（见 Merge）。
 	LastProbeAt *time.Time
-	UpdatedAt   time.Time
+	// UpdatedAt 是最近一次 Merge 的时刻，任何种类的观测都会更新它。
+	UpdatedAt time.Time
 }
 
 // Observation 是一次观测的结果。

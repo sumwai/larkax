@@ -90,18 +90,20 @@ gateway  ──►  route  ──►  channel.Adapter  ──►  upstream
 
 gateway  ──►  pipeline  ──►  billing  ──►  money
                    │             │
-                   │             └── rules evaluated by billing/expr
+                   │             └── rules come from billing/expr, which builds billing.Prices
                    ├── ledger entries handed back to the caller
                    └── usage normalized from channel.Usage, tokens only as a label
 ```
 
 `gateway` is the entry layer, and `internal/api` is its HTTP half; `cmd/` sits
-above them and `money`, `calendar`, `relay`, `observe` and `migrate` are leaves.
-Nothing else reaches back into `gateway` — the two exceptions are named below.
+above them and `money`, `calendar`, `observe` and `migrate` are leaves. `relay`
+is not one — it depends on `internal/channel`'s types. Nothing else reaches back
+into `gateway` — the two exceptions are named below.
 
 A few rules hold across the tree, and `scripts/check-layering.sh` checks them in
 CI rather than by eye — it lists the packages allowed to import relaykit and
-flags `float64(` used on money outside `internal/money`:
+flags `float64(` used on money outside `internal/money` (a hint for a human to
+read, not a failure):
 
 - **Only three packages import
   [relaykit](https://github.com/QuantumNous/new-api):** `internal/relay`, which is
@@ -156,14 +158,15 @@ foreground:
 make run
 ```
 
-On the first run it writes `.env` with a freshly generated master key, and it never
-overwrites an existing one — that key decrypts the stored credentials, so replacing it
-would destroy them. `make up`, `make down`, `make migrate`, `make test` and `make clean`
-each do one step; `make clean` returns the working copy to its freshly cloned state.
+On the first run it writes `.env` with a freshly generated master key. An existing
+`.env` is never replaced — that key decrypts the stored credentials, so replacing it
+would destroy them — but the `LARKAX_DB_DSN` line is kept in sync with
+`PG_PORT` / `PG_DB` / `DB_PASSWORD` on every run. `make up`, `make down`, `make migrate`,
+`make test` and `make clean` each do one step; `make clean` returns the working copy to
+its freshly cloned state.
 
-If 5432 is already taken, `make run PG_PORT=55432`. The port and database name are
-baked into `.env` when it is created, so set them before the first run or after
-`make clean`.
+If 5432 is already taken, `make run PG_PORT=55432` — the DSN line follows, so there is
+no need to delete `.env` first.
 
 The service listens on `:8080`, where every path returns `501` until the inference API
 exists, and serves `/healthz` and `/readyz` on `:9090`. Building alone is not enough to

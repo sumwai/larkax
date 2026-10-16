@@ -43,8 +43,8 @@ func Reserve(req ReserveRequest) (money.Amount, error) {
 	// 输出侧：按 max_tokens 估。这是预留里最大的一块，
 	// 也是「大请求冻住余额多」的来源。
 	//
-	// 用「输入 + 输出」里输出单价的较大者来估推理：推理单价通常更高，
-	// 而预留宁可多留。
+	// 用输出侧两个单价（Completion 与 Reasoning）的较大者来估：推理单价
+	// 通常更高，而预留宁可多留。
 	outputPrice := money.Max(p.Completion, p.Reasoning)
 	output := outputPrice.MulInt(req.MaxTokens)
 

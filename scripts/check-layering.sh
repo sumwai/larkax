@@ -5,8 +5,17 @@
 # 写着「只有 A 包 import X」，半年后 B 包也 import 了，没人会发现，
 # 直到有人按文档去改，发现文档是错的。
 #
+# 检查三条：
+#   一、直接 import relaykit 的包，仅限 relay 与两个协议适配器
+#   二、money 之外谁在算术里用 float64 处理金额
+#   三、import gateway 的包仅限下面 ALLOWED_GATEWAY_IMPORTERS 里列的那几个
+#
+# 一与三有唯一答案，命中即失败；二是**提示型**的——它按关键字做排除，
+# 认不出「这一处到底是不是金额」，所以只把可疑行打出来让人逐条看，
+# 不参与退出码（把误报也判成失败的话，这份报告第二次就没人看了）。
+#
 # 用法：scripts/check-layering.sh
-# 退出码：0 合规、1 违规
+# 退出码：0 合规、1 违规（规则一与规则三）
 
 set -uo pipefail
 cd "$(dirname "$0")/.."

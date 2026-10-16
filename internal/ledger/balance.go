@@ -24,6 +24,8 @@ import (
 //	upstream_cost           正 = 上游成本
 //	payout                  正 = 已申请未打款的待付
 //	payment_gateway         负 = 通道替我们持有的钱
+//	reconcile_difference    正 = 账本高于快照、多出来的那笔被冲回，
+//	                        负 = 账本低于快照、平台补上了差额
 //
 // 用户余额（user_wallets.balance）对应的是 user 科目的和。钱包表的
 // CHECK 约束要求 balance >= 0，所以负的用户余额在那里会写不进去。

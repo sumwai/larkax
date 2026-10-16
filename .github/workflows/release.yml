@@ -13,6 +13,26 @@ jobs:
   release:
     name: 构建并发布
     runs-on: ubuntu-latest
+    # 与 ci.yml 同一套依赖与 DSN。**两样都不能省**：集成测试拿不到
+    # LARKAX_DB_DSN 时整包被 t.Skip，而 `go test` 对跳过的包仍以 0 收尾——
+    # 少了它，下面那道门会在「集成测试根本没跑」的状态下报绿，
+    # 而「跳过」在输出里和「通过」长得一样（见 LESSONS.md 第 16 条）。
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: placeholder
+          POSTGRES_DB: larkax_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      LARKAX_DB_DSN: postgres://postgres:placeholder@localhost:5432/larkax_test?sslmode=disable
+      LARKAX_ROLE: worker
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,8 +46,18 @@ jobs:
 
       # 发布前的最后一道门。tag 可能打在没跑过 CI 的 commit 上
       #（例如从别的分支合的、或本地直接推的 tag），所以这里重跑一遍。
+      #
+      # 它跑的是**带集成测试**的全量测试：上面的 postgres service 与
+      # LARKAX_DB_DSN 就是为它准备的，拿掉任何一样都会让集成测试静默跳过。
       - name: 测试
         run: go test -race ./...
+
+      # 上面那条 `go test` 在集成测试被跳过时**也是绿的**，所以「测试通过」
+      # 并不等于「集成测试跑过」。这一步单独断言它们真的执行了。
+      #
+      # 检查本身与 ci.yml 调的是同一份实现（.github/actions/…）：两份拷贝
+      # 一旦漂移，漂移的那一份会安静地变弱——而那正是这一步要防的东西。
+      - uses: ./.github/actions/check-integration-tests
 
       # 版本号只有一处来源：tag。代码里不写死，构建时注入。
       # 两个二进制注入同一个变量名，它们的版本必须能对上。
