@@ -46,6 +46,10 @@ const (
 	maxCiphertext = 1 << 20
 
 	// maxKeyID 是主密钥标识的长度上限。
+	//
+	// 写入侧把标识长度写成一个字节，能表示到 255，但读取侧只认 1..maxKeyID
+	// （见 format.go 的 decode），所以真正的上界是这里而不是 255。
+	// NewSealer 按同一个常量拒绝过长的标识，两边不会漂移。
 	maxKeyID = 64
 )
 
@@ -73,6 +77,12 @@ type Sealer struct {
 // 列表中的第一把作为「包装新 DEK」用的钥匙，其余用于解开存量密文。
 // 空列表直接报错而不是构造出一个用不了的对象：那会让「忘了配主密钥」
 // 推迟到第一次写凭证时才暴露。
+//
+// 标识的长度也在这里校验，而不是等写凭证的时候。密文布局把标识长度写成
+// 一个字节，读取侧只认 1..maxKeyID：超长的标识写得进去、读不出来，
+// 而故障要等到那条渠道被选中解密时才暴露——那时存量密文已经写坏了。
+// 代价是某些原本能启动的配置从此拒绝启动，这是有意的：启动期失败
+// 比「某天开始所有凭证都解不开」容易排查得多。
 func NewSealer(keys []config.MasterKey) (*Sealer, error) {
 	if len(keys) == 0 {
 		return nil, errors.New("至少需要一把主密钥")
@@ -80,7 +90,15 @@ func NewSealer(keys []config.MasterKey) (*Sealer, error) {
 	byID := make(map[string]config.MasterKey, len(keys))
 	for _, k := range keys {
 		if k.ID == "" {
+			// 读取侧同样拒绝 idLen == 0，所以空标识与超长标识是同一类错误：
+			// 写得出、读不回。这里报的是「缺少」，因为配置里省略前缀时
+			// parseMasterKeys 会补上默认标识，走到这一步就是真的没写。
 			return nil, errors.New("主密钥缺少标识")
+		}
+		if len(k.ID) > maxKeyID {
+			// 长度与上界都写进错误信息：只说「太长了」的话，
+			// 排查的人不知道是超出多少、也不知道该缩到多少。
+			return nil, fmt.Errorf("主密钥标识 %q 长度为 %d 字节，超过上限 %d", k.ID, len(k.ID), maxKeyID)
 		}
 		if len(k.Key) != config.KeySize {
 			return nil, fmt.Errorf("主密钥 %q 长度为 %d 字节，需要 %d", k.ID, len(k.Key), config.KeySize)
