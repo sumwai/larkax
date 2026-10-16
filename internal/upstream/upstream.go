@@ -55,6 +55,29 @@ func New(timeout time.Duration) (*Executor, error) {
 	)
 }
 
+// adapterTimeout 是构造内置适配器时给 HTTP 客户端的超时。
+//
+// 它只在执行器真的发起请求时生效。Registry 用它把适配器装出来，
+// 而那条路径不发请求，所以这个值在那里不会产生任何行为——它只需要是个正数。
+const adapterTimeout = 10 * time.Minute
+
+// Registry 返回内置适配器的注册表，供**不发请求**的调用方使用。
+//
+// 写入路径要按渠道类型校验（见 internal/channels.Admin），而校验需要的只是
+// 「哪些类型有适配器」。适配器清单只在上面的 New 里写一次，于是「运维命令
+// 认得的渠道类型」与「服务认得的类型」不会各自漂移——漂移的表现是某个类型
+// 配不进去，或者配进去了却在请求时报未知类型。
+//
+// 返回的注册表与执行器用的是同一份装配，但它不被执行器持有：调用方只该拿它
+// 查表，不该往里注册。
+func Registry() (*channel.Registry, error) {
+	executor, err := New(adapterTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return executor.registry, nil
+}
+
 // newWith 用给定的适配器建执行器。
 //
 // 与 New 分开，是为了让「重复类型会被拒绝」这类情况在测试里也能钉住——
