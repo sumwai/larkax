@@ -784,12 +784,15 @@ func normalizeDisplayName(raw string) (string, error) {
 // 0 落成 NULL：表上那三列可空，「未知」与「0」在读取侧是同一个状态
 // （见 Model 的注释），所以库里存 0 只会让「没填」看起来像一个测出来的值。
 // 负数一定是算错了——它在上限比较里会让任何请求都不合格。
+//
+// 返回的 nil 是**这一列的合法取值**（SQL NULL），不是「出错了但没报」——
+// 所以这里显式 nolint 而不是造一个哨兵错误。
 func normalizeLimit(field string, limit int) (any, error) {
 	if limit < 0 {
 		return nil, fmt.Errorf("%s 不能为负数：%d", field, limit)
 	}
 	if limit == 0 {
-		return nil, nil
+		return nil, nil //nolint:nilnil // 见上
 	}
 	return limit, nil
 }
