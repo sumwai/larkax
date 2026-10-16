@@ -363,3 +363,61 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// ── 变异测试补的用例 ────────────────────────────────────────────────────
+//
+// 来自变异测试（scripts/check-mutation.sh，workers=1、系数 10）。
+// 存活集中在自记账可信度的**衰减曲线**上——而那条曲线决定
+// 「一个估算值还能不能用来做路由判断」。
+
+// 衰减曲线要逐点精确：三个段（基线 / 线性衰减 / 触底）各自的边界。
+//
+// 这条曲线原本只被断言了「越久越低」这种相对关系，于是改常量、
+// 改插值系数，只要单调性不变就测不出来。
+func TestSelfAccountingConfidenceCurvePoints(t *testing.T) {
+	const baseScore = 0.8 // confidenceSelfAccountingBase
+	const floorScore = 0.2
+
+	score := func(sinceProbe time.Duration) float64 {
+		probedAt := base.Add(-sinceProbe)
+		prev := State{Remaining: f(1000), Kind: KindAPIQuery, LastProbeAt: &probedAt}
+		next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(900), ObservedAt: base}, base)
+		return next.Confidence
+	}
+
+	// 阈值用**字面量**钉住。段一那两条拿 `selfAccountingStaleAfter`
+	// 自己测自己：把这个常量改成 15 秒，它们照样通过，
+	// 于是测到的是「相对关系」而不是这个数。15 分钟是与探测间隔
+	// （settings 里的 quota.probe_interval_seconds，默认 5 分钟）
+	// 绑定的约定，改它就该连带改注释。
+	if got := score(14 * time.Minute); got != baseScore {
+		t.Errorf("14 分钟陈旧应仍给基线 %v，得到 %v", baseScore, got)
+	}
+	if got := score(16 * time.Minute); got == baseScore {
+		t.Errorf("16 分钟陈旧不该仍给基线 %v", got)
+	}
+
+	// 段一：陈旧阈值本身与之内一律给基线
+	if got := score(selfAccountingStaleAfter); got != baseScore {
+		t.Errorf("恰好等于陈旧阈值时应给基线 %v，得到 %v", baseScore, got)
+	}
+	if got := score(selfAccountingStaleAfter - time.Second); got != baseScore {
+		t.Errorf("阈值之内应给基线，得到 %v", got)
+	}
+
+	// 段二：线性衰减的**中点**。过阈值后 3 小时（fadeOver 是 6 小时）
+	// 应当恰好落在基线与下限的中间。
+	mid := score(selfAccountingStaleAfter + 3*time.Hour)
+	wantMid := baseScore - (baseScore-floorScore)*0.5
+	if diff := mid - wantMid; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("衰减中点的可信度 = %v，期望 %v", mid, wantMid)
+	}
+
+	// 段三：过了 fadeOver 之后触底，不再降
+	if got := score(selfAccountingStaleAfter + 6*time.Hour); got != floorScore {
+		t.Errorf("恰好过 fadeOver 时应触底 %v，得到 %v", floorScore, got)
+	}
+	if got := score(selfAccountingStaleAfter + 100*time.Hour); got != floorScore {
+		t.Errorf("很久之后仍应是下限 %v，得到 %v", floorScore, got)
+	}
+}
