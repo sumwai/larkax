@@ -92,42 +92,57 @@ jobs:
       - name: 确认集成测试确实运行
         run: |
           set +e
-          out=$(go test -count=1 -v ./internal/ledger/store/ 2>&1)
-          rc=$?
-          set -e
+          failed=0
+          total=0
+          for pkg in ./internal/ledger/store/ ./internal/snapshotwire/; do
+            out=$(go test -count=1 -v "$pkg" 2>&1)
+            rc=$?
+            show() { printf '%s\n' "$out" | tail -30; }
 
-          show() { printf '%s\n' "$out" | tail -30; }
+            # 一、编译不过或包不存在——那时连测试都没开始跑
+            if printf '%s\n' "$out" | grep -q -- 'setup failed\|build failed\|no such file'; then
+              echo "::error::$pkg 没能编译，集成测试根本没开始跑"
+              show
+              failed=1
+              continue
+            fi
 
-          # 一、编译不过或包不存在——那时连测试都没开始跑
-          if printf '%s\n' "$out" | grep -q -- 'setup failed\|build failed\|no such file'; then
-            echo "::error::store 包没能编译，集成测试根本没开始跑"
-            show
+            # 二、被跳过。跳过等于没测，不能算绿
+            if printf '%s\n' "$out" | grep -q -- '--- SKIP'; then
+              echo "::error::$pkg 的集成测试被跳过了：DSN 没传到，或库连不上。跳过等于没测。"
+              printf '%s\n' "$out" | grep -- '--- SKIP'
+              failed=1
+              continue
+            fi
+
+            # 三、一个用例都没跑到
+            passed=$(printf '%s\n' "$out" | grep -c -- '--- PASS' || true)
+            if [ "$passed" -eq 0 ]; then
+              echo "::error::$pkg 的集成测试一个都没跑"
+              show
+              failed=1
+              continue
+            fi
+
+            # 四、跑了但有失败
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::$pkg 的集成测试有失败用例"
+              printf '%s\n' "$out" | grep -- '--- FAIL' || show
+              failed=1
+              continue
+            fi
+
+            echo "$pkg 的集成测试跑了 $passed 个用例，全部通过。"
+            total=$((total + passed))
+          done
+
+          # 汇总一个总数：两个包都「恰好没有集成用例」时，上面的分支
+          # 会各自报一次 0 并失败；总数在这里再确认一次，避免漏网的静默状态。
+          if [ "$total" -eq 0 ]; then
+            echo "::error::一个集成用例都没跑"
             exit 1
           fi
-
-          # 二、被跳过。跳过等于没测，不能算绿
-          if printf '%s\n' "$out" | grep -q -- '--- SKIP'; then
-            echo "::error::store 的集成测试被跳过了：DSN 没传到，或库连不上。跳过等于没测。"
-            printf '%s\n' "$out" | grep -- '--- SKIP'
-            exit 1
-          fi
-
-          # 三、一个用例都没跑到
-          passed=$(printf '%s\n' "$out" | grep -c -- '--- PASS' || true)
-          if [ "$passed" -eq 0 ]; then
-            echo "::error::store 的集成测试一个都没跑"
-            show
-            exit 1
-          fi
-
-          # 四、跑了但有失败
-          if [ "$rc" -ne 0 ]; then
-            echo "::error::store 的集成测试有失败用例"
-            printf '%s\n' "$out" | grep -- '--- FAIL' || show
-            exit 1
-          fi
-
-          echo "集成测试跑了 $passed 个用例，全部通过。"
+          exit "$failed"
 
   redlines:
     name: 公开红线

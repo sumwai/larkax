@@ -54,14 +54,46 @@ fi
 
 # ── 规则三：数据面不依赖控制面 ────────────────────────────────────────────
 #
-# gateway 还没写，所以这条现在只能检查「有没有反向依赖」：
-# 任何包都不该 import 一个尚不存在的 gateway。
-echo "── 反向依赖检查"
-if grep -rn --include=*.go '"github.com/sumwai/larkax/internal/gateway"' internal/ cmd/ 2>/dev/null; then
-  echo "  ✗ 有包 import 了 gateway（那是入口层，不该被依赖）"
+# gateway 是入口层，别的包不该 import 它——否则一条依赖链会把路由与计费
+# 拖进它们不需要知道的东西里。例外需要一个明确的名字写在这里，
+# 而不是一个「大概可以」的判断。
+#
+# 例外里为什么有 snapshotwire：gateway 用接口声明了自己要什么
+# （Redactor / SnapshotSink），而满足那两个接口需要同时看见 snapshot
+# 与 gateway 两侧的类型。适配放在一个专门的装配包里，gateway 本身
+# 仍然不 import snapshot。
+ALLOWED_GATEWAY_IMPORTERS='internal/snapshotwire'
+
+echo "── 谁 import 了 gateway"
+# 先取「扫到了多少个文件」再取命中：只打印命中与否的话，
+# 一个因为路径写错而扫了 0 个文件的检查输出与「干净」完全一样
+#（LESSONS.md 第 16 条）。条数是这一条的正向证据。
+scanned=$(grep -rl --include=*.go '"github.com/sumwai/larkax/internal/gateway"' internal/ cmd/ 2>/dev/null; echo "rc=$?")
+rc=${scanned##*rc=}
+scanned=${scanned%rc=*}
+go_files=$(find internal cmd -name '*.go' 2>/dev/null | wc -l)
+if [ "$rc" -gt 1 ]; then
+  echo "  ✗ 检查没能执行（grep 退出码 $rc），结果不可信"
+  fail=1
+elif [ "$go_files" -eq 0 ]; then
+  echo "  ✗ 一个 .go 文件都没扫到，检查范围写错了"
   fail=1
 else
-  echo "  ✓ 无"
+  echo "  （在 $go_files 个 .go 文件里查找）"
+  if [ -z "$scanned" ]; then
+    echo "  ✓ 无"
+  else
+    while IFS= read -r dir; do
+      [ -n "$dir" ] || continue
+      rel="${dir#./}"
+      if printf '%s\n' "$ALLOWED_GATEWAY_IMPORTERS" | grep -qx "$rel"; then
+        echo "  ✓ $rel"
+      else
+        echo "  ✗ $rel —— 不在允许清单里（gateway 是入口层，不该被依赖）"
+        fail=1
+      fi
+    done <<< "$(printf '%s\n' "$scanned" | xargs -r -n1 dirname | sort -u)"
+  fi
 fi
 
 echo

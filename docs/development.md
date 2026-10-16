@@ -44,6 +44,24 @@ curl -i localhost:8080/v1/chat/completions
 `.env.example` 可以直接被 shell 读取，所以用 `set -a && . ./.env && set +a` 加载即可。
 **服务本身不读 `.env` 文件**，只读环境变量；用 direnv 或别的工具加载也行。
 
+## 请求快照的留存
+
+快照按天分区（`request_snapshots_YYYY_MM_DD`），留存期从
+`settings.request_snapshot.retention_days` 读。到期是整分区 `DROP`，
+所以清理必须真的被执行——它不会自己发生。
+
+```sh
+go run ./cmd/larkaxctl snapshot cleanup --dry-run   # 只列出会删哪些分区
+go run ./cmd/larkaxctl snapshot cleanup             # 执行删除
+```
+
+没有可删的分区时命令会打印 `已删除：0 个（没有到期分区）`，而不是什么都不输出。
+「没有到期分区」与「命令没跑成」在安静的终端里长得一样，所以这条区别是刻意的。
+
+写入时若当天分区不存在，写入方会**当场补建**它（幂等，每实例每天只做一次）。
+不补建的话行会落进兜底分区 `request_snapshots_default`，而那里的行没有到期日——
+留存承诺对它不成立。**兜底分区非空即说明有写入绕过了补建，应当告警。**
+
 ## 环境变量
 
 一共八个，全部有明确理由：
