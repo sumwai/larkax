@@ -279,22 +279,24 @@ func compareAndRepair(
 			// 知道用户是否存在、默认用哪种资产——都不该由对账任务来猜。
 			// 报出来，让人去查注册流程为什么漏了。
 			//
-			// Detail 要把**是哪一侧缺**写清楚：只有分录、只有预留、
-			// 还是两者都有。三种情况要查的地方不同（分录写错用户 id、
-			// 预留写了但钱包被删、注册流程整个漏了），而只报一句
-			// 「缺钱包行」会让人从三处里挨个试。
+			// Detail 要把**是哪一侧有钱**写清楚：只有分录、只有预留、
+			// 还是两者都有（金额为 0 的那一侧就是没有的那一侧）。三种情况
+			// 要查的地方不同（分录写错用户 id、预留写了但钱包被删、注册
+			// 流程整个漏了），而只报一句「缺钱包行」会让人从三处里挨个试。
+			//
+			// 两侧的金额都要写出来，**包括为 0 的那一侧**。这一行落库之后
+			// 只有 snapshot 与 ledger 两个数字列，而 ledger 列在这一支里
+			// 只表示分录之和（见 internal/migrate/sql/00004_reconcile.sql 的
+			// 列注释）。文字里只提预留、不提分录之和时，读的人对着 ledger
+			// 列的 0 分不清那笔预留算没算进去——文字说的数在列里找不到，
+			// 正是这条缺陷的形状。所以预留那一侧要标明它不在 ledger 列里。
 			f := Finding{
 				RunID: runID, UserID: key.userID, Asset: key.asset,
 				Kind: FindingWalletMissing, Ledger: ledgerSum,
 				Unrepairable: "没有钱包行，对账不负责新建",
-			}
-			switch {
-			case pendingSum.IsZero():
-				f.Detail = "账本里有分录，钱包行不存在"
-			case ledgerSum.IsZero():
-				f.Detail = fmt.Sprintf("有未结算预留 %s，钱包行不存在", pendingSum)
-			default:
-				f.Detail = fmt.Sprintf("账本有 %s、未结算预留 %s，钱包行都不存在", ledgerSum, pendingSum)
+				Detail: fmt.Sprintf(
+					"账本分录之和 %s（即 ledger 列）、未结算预留之和 %s（冻结侧，不在 ledger 列），钱包行不存在",
+					ledgerSum, pendingSum),
 			}
 			findings = append(findings, f)
 			continue
