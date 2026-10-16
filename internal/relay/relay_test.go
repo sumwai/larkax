@@ -494,6 +494,10 @@ func TestUsageFromAnthropicSemantic(t *testing.T) {
 	if got.CompletionTokens != 7 {
 		t.Errorf("CompletionTokens = %d，期望 7", got.CompletionTokens)
 	}
+	// Anthropic 的 output_tokens 含扩展思考的 token，协议不单独报推理量。
+	if !got.CompletionIncludesReasoning {
+		t.Error("Anthropic 口径的 output_tokens 含思考 token，应声明「已含」")
+	}
 }
 
 // 只报了缓存而没报输入时，输入至少等于缓存量。
@@ -507,7 +511,12 @@ func TestUsageCacheOnlyImpliesPrompt(t *testing.T) {
 	}
 }
 
-// 推理 token 只记单独报出来的那部分，不重复计入 completion。
+// 推理 token 照抄上游报的数，输出也照抄——两者的关系由声明字段给出，
+// 减掉推理是计费层（billing.FromChannelUsage）的事。
+//
+// 这里把 completion 改小是错的：channel.Usage 是协议层的归一化结果，
+// 它还要被序列化给调用方看（响应里的 completion_tokens 就是它），
+// 而调用方看到的应当是上游报的那个数。
 func TestUsageReasoningTokens(t *testing.T) {
 	got := UsageFromRelaykit(&dto.Usage{
 		PromptTokens:           10,
@@ -519,6 +528,9 @@ func TestUsageReasoningTokens(t *testing.T) {
 	}
 	if got.CompletionTokens != 100 {
 		t.Errorf("CompletionTokens 不应被推理 token 改动，得到 %d", got.CompletionTokens)
+	}
+	if !got.CompletionIncludesReasoning {
+		t.Error("dto.Usage 是 OpenAI 语义：completion_tokens 含 reasoning_tokens，应声明「已含」")
 	}
 }
 

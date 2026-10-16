@@ -9,6 +9,10 @@
 // 而那恰好是这套系统里最贵的一类 bug 的所在——**算错了不会报错，
 // 只会让账目悄悄错掉**。
 //
+// 唯一的例外是告警：上游报的用量自相矛盾时写一条日志（见 Settle）。
+// 它走 context 上的日志器，不引入任何具体依赖，也不改变任何返回值——
+// 没有日志器的调用方（测试、未来的别的入口）拿到的仍是 slog 的兜底。
+//
 // # 为什么分两个阶段而不是一个函数
 //
 // 预留发生在请求发出**之前**，结算发生在响应回来**之后**，中间隔着一次
@@ -31,6 +35,7 @@ import (
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/tokens"
 )
 
@@ -323,6 +328,21 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 	program, err := p.programs().Get(rule.CacheKey(), rule.Source)
 	if err != nil {
 		return nil, fmt.Errorf("%w: 规则 %d 无法编译: %w", ErrRuleBroken, rule.ID, err)
+	}
+
+	// 拆分会把「推理量大于输出总量」这种自相矛盾钳掉，钳过之后就看不出
+	// 上游报的数对不上——所以要在拆分**之前**问一次。
+	//
+	// 只告警，不让这次请求失败：这是运行时来自上游的数据状况，不是几分钟能
+	// 修好的配置错误。让它失败会把整条渠道的请求都变成失败，而上游那次调用
+	// 已经成功、token 已经花掉，客户端还会看到错误——白服务一次还赔上体验。
+	// 计费照走，按钳过的值算。
+	if billing.ReasoningExceedsCompletion(out.Usage) {
+		observe.FromContext(ctx).Warn("上游报的推理 token 多于输出总量，而用量声明推理含在输出里",
+			"channel_id", req.ChannelID,
+			"completion_tokens", out.Usage.CompletionTokens,
+			"reasoning_tokens", out.Usage.ReasoningTokens,
+		)
 	}
 
 	usage := billing.FromChannelUsage(out.Usage)
