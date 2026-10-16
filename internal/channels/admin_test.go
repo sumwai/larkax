@@ -737,9 +737,9 @@ func TestSetStatusTogglesVisibility(t *testing.T) {
 	src := New(db, sealer)
 	candidates := func() int {
 		t.Helper()
-		got, err := src.Candidates(context.Background(), model)
-		if err != nil {
-			t.Fatalf("Candidates 出错: %v", err)
+		got, listErr := src.Candidates(context.Background(), model)
+		if listErr != nil {
+			t.Fatalf("Candidates 出错: %v", listErr)
 		}
 		return len(got)
 	}
