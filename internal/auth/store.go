@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sumwai/larkax/internal/money"
 )
 
 // api_keys.status 与 users.status 的取值，与迁移里的 CHECK 约束一致。
@@ -150,6 +152,16 @@ type CreateParams struct {
 	Name string
 	// ExpiresAt 为 nil 表示不过期。
 	ExpiresAt *time.Time
+	// RateLimitRPM 是这把 key 的每分钟请求额度。nil 表示写 NULL，即
+	// 「继承用户默认」——而 users 表上目前没有这样一个默认值，所以
+	// 它等价于不限。**0 不是「不限」**，是「一个都不放行」，两者必须分得开。
+	RateLimitRPM *int
+	// QuotaLimit 是这把 key 累计可花费的金额上限，单位是用户钱包的资产品种
+	// （见 user_wallets.asset）。nil 表示写 NULL，即继承用户默认。
+	//
+	// 用 money.Amount 而不是 float64：列是 numeric(20, 8)，而这一层一旦
+	// 让浮点进来，舍入点就跑到 money 包外面去了（见 scripts/check-layering.sh）。
+	QuotaLimit *money.Amount
 }
 
 // Created 是一次创建的结果。
@@ -188,16 +200,39 @@ func (s *Store) Create(ctx context.Context, p CreateParams) (Created, error) {
 	prefix := KeyPrefix(plaintext)
 	var id int64
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO api_keys (user_id, name, key_hash, key_prefix, expires_at)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO api_keys (user_id, name, key_hash, key_prefix, expires_at,
+		                      rate_limit_rpm, quota_limit)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id`,
 		p.UserID, p.Name, HashKey(plaintext), prefix, expiresAt,
+		nullableInt(p.RateLimitRPM), nullableAmount(p.QuotaLimit),
 	).Scan(&id)
 	if err != nil {
 		return Created{}, fmt.Errorf("写入 API Key 失败: %w", err)
 	}
 
 	return Created{ID: id, Prefix: prefix, Plaintext: plaintext}, nil
+}
+
+// nullableInt 把一个可选的整数转成能写进可空列的驱动值。
+func nullableInt(v *int) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
+// nullableAmount 把一个可选的金额转成能写进 numeric 列的驱动值。
+//
+// 传的是十进制字符串（money.Amount.String 的输出），**不是**最小单位数：
+// 列是 numeric(20, 8)，存的是 12.34 这个数本身，而不是它的 1e8 倍。
+// 传 units 进去会安静地把金额写大八个数量级，而对账时它表现为一笔
+// 怎么都找不平的差额。
+func nullableAmount(v *money.Amount) any {
+	if v == nil {
+		return nil
+	}
+	return v.String()
 }
 
 // ResolveUser 把「用户 ID 或用户名」解析成一个用户。

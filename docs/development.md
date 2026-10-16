@@ -157,6 +157,21 @@ go run ./cmd/larkaxctl calendar import ./cn-2031.json
 
 字符串类型的值要写成带引号的 JSON（`'"CNY"'`，不是 `'CNY'`）。
 
+改一个已有配置项的值走命令行，不用写 SQL：
+
+```sh
+go run ./cmd/larkaxctl settings list                              # 列出全部键、值、类型与说明
+go run ./cmd/larkaxctl settings set --key plugin.enabled --value true --by alice
+```
+
+`set` 的值按明文给（整数写 `7`、布尔写 `true`、字符串直接写），
+键名与类型在连库之前就校验掉：**Registry 里没声明的键写不进去**，
+写进去一个代码不认识的键，表现是配置被静默忽略。
+`--by` 必填，它落进 `settings.updated_by`。
+
+迁移里的 `editable` 为 `false` 的键（改错会造成严重后果的那些）
+不接受 `settings set` 的修改，只能由迁移写入。
+
 ## 主密钥
 
 格式 `"<标识>:<base64 的 32 字节>"`，多把用逗号分隔：
@@ -347,6 +362,31 @@ curl -i localhost:8080/v1/chat/completions \
 ```
 
 推理接口接到公共端口上的进度见下文「当前能做什么」。
+
+## 给一把 key 设额度
+
+两列额度可以在创建时给，也可以事后调：
+
+```sh
+go run ./cmd/larkaxctl apikey create --user alice --rate-limit-rpm 60 --quota-limit 12.34
+go run ./cmd/larkaxctl apikey list                       # id、前缀、额度、最近使用
+go run ./cmd/larkaxctl apikey update --id 3 --rate-limit-rpm 120
+go run ./cmd/larkaxctl apikey update --id 3 --clear-rate-limit-rpm
+```
+
+| 旗标 | 含义 |
+|---|---|
+| `--rate-limit-rpm <整数>` | 每分钟请求额度 |
+| `--quota-limit <金额>` | 这把 key 累计可花费的金额上限，单位是该用户钱包的资产品种 |
+| `--clear-rate-limit-rpm` / `--clear-quota-limit` | 写回 NULL（继承用户默认） |
+
+**`0` 与不填不是一回事**：`0` 是一个都不放行，NULL 是继承用户默认
+（`users` 表上目前没有这样一个默认值，所以等价于不限）。
+`update` 不给某个旗标表示「这一项不改」，与清空也不同。
+负数一律拒绝。
+
+`--quota-limit` 这一列目前只有写入路径，**没有读侧**——它记下了额度，
+但还没有任何地方拿它去拦请求。
 
 ## 当前能做什么
 
