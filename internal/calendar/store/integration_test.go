@@ -79,20 +79,27 @@ func newYear(t *testing.T, db *sql.DB) int {
 	year := baseYear + 4*seq.n
 	seq.Unlock()
 
-	t.Cleanup(func() {
-		ctx := context.Background()
-		// 按 source_year 删数据行：用例写下的每一行（含跨年到相邻年份的那几行）
-		// 都带着这个年份来源，所以这一条覆盖得住。
-		if _, err := db.ExecContext(ctx,
-			`DELETE FROM calendar_days WHERE region = 'CN' AND source_year = $1`, year); err != nil {
-			t.Errorf("清理 %d 年的数据行失败: %v", year, err)
-		}
-		if _, err := db.ExecContext(ctx,
-			`DELETE FROM calendar_years WHERE region = 'CN' AND year = $1`, year); err != nil {
-			t.Errorf("清理 %d 年的年份状态失败: %v", year, err)
-		}
-	})
+	t.Cleanup(func() { cleanupYear(t, db, year) })
 	return year
+}
+
+// cleanupYear 把一个年份来源写下的数据行与它的年份状态从库里清掉。
+//
+// 单独一个函数是为了让「用到相邻年份」的用例也能清掉那一侧：newYear 只认它
+// 自己发的那个年份，而跨年用例会往 year-1 里写行。
+func cleanupYear(t *testing.T, db *sql.DB, year int) {
+	t.Helper()
+	ctx := context.Background()
+	// 按 source_year 删数据行：那一年写下的每一行（含跨到相邻年份的那几天）
+	// 都带着这个年份来源，所以这一条覆盖得住。
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM calendar_days WHERE region = 'CN' AND source_year = $1`, year); err != nil {
+		t.Errorf("清理 %d 年的数据行失败: %v", year, err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM calendar_years WHERE region = 'CN' AND year = $1`, year); err != nil {
+		t.Errorf("清理 %d 年的年份状态失败: %v", year, err)
+	}
 }
 
 var seq struct {
@@ -547,6 +554,61 @@ func TestPendingImportClearsEarlierData(t *testing.T) {
 	if status.Kind != calendar.DayUnknown || status.Reason != calendar.ReasonYearPending {
 		t.Errorf("%s 判定 = %q（成因 %q），期望 unknown / %q",
 			day, status.Kind, status.Reason, calendar.ReasonYearPending)
+	}
+}
+
+// 上一年写下的那一行不会被本年的 pending 导入清掉——删除按 source_year 走，
+// 而那一行的来源是**上一年**。
+//
+// 这不是漏网，是「跨年安排本来就是确定判定」的直接后果：元旦的安排出自上一年
+// 的数据集，那一天的判定是确定的，与本年的公告发没发无关。于是本年标成 pending
+// 之后，那一天仍然按行给出确定值，本年其余各天才落到「公告未发布」。
+//
+// 写出来是因为这条路径没有别的地方钉住：TestPendingImportClearsEarlierData
+// 覆盖的是 source_year 等于本年那种情况，两者的结局相反。
+func TestPendingImportKeepsAdjacentYearRows(t *testing.T) {
+	db := testDB(t)
+	year := newYear(t, db)
+	prev := year - 1
+	t.Cleanup(func() { cleanupYear(t, db, prev) })
+
+	// 上一年的文件是 synced，且带了属于本年的那一天。
+	carried := calendar.Date{Year: year, Month: 1, Day: 1}
+	prevDoc := syncedDoc(prev)
+	prevDoc.Days = append(prevDoc.Days, Day{Date: carried.String(), Name: "元旦", OffDay: boolPtr(true)})
+	importDoc(t, db, prevDoc)
+
+	// 关键的一步：那一行挂在**上一年**的来源下。
+	var sourceYear int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT source_year FROM calendar_days WHERE region = 'CN' AND day = $1::date`,
+		carried.String()).Scan(&sourceYear); err != nil {
+		t.Fatalf("读 %s 的来源年份失败: %v", carried, err)
+	}
+	if sourceYear != prev {
+		t.Fatalf("%s 的 source_year = %d，期望 %d", carried, sourceYear, prev)
+	}
+	if got := countYearRows(t, db, year); got != 0 {
+		t.Fatalf("本年名下已经有 %d 行，期望 0——用例的前提是那一行挂在上一年的来源下", got)
+	}
+
+	// 本年标成 pending：删的是 source_year = 本年的行，那一行不在其中。
+	importDoc(t, db, Document{Region: "CN", Year: year, Status: "pending"})
+
+	if got := countDayRow(t, db, carried); got != 1 {
+		t.Fatalf("%s 被清掉了（剩 %d 行）：跨年安排是确定判定，不跟本年度的状态走", carried, got)
+	}
+	// 行在，判定就按行走——这是「某一天只要有行就以行为准」的直接体现。
+	cal := newCalendar(t, db)
+	if status := lookup(t, cal, carried); status.Kind != calendar.DayRestDay {
+		t.Errorf("%s 判定 = %q，期望 %q", carried, status.Kind, calendar.DayRestDay)
+	}
+	// 本年其余各天没有行，落到「公告未发布」。
+	other := calendar.Date{Year: year, Month: 6, Day: 15}
+	status := lookup(t, cal, other)
+	if status.Kind != calendar.DayUnknown || status.Reason != calendar.ReasonYearPending {
+		t.Errorf("%s 判定 = %q（成因 %q），期望 %q / %q",
+			other, status.Kind, status.Reason, calendar.DayUnknown, calendar.ReasonYearPending)
 	}
 }
 

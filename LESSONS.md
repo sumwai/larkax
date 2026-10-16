@@ -257,7 +257,7 @@ for {
 `internal/config` 的 `Config` 装着数据库 DSN（内含口令）与主密钥。实测：
 
 ```
-fmt.Println(cfg)          → DBDSN:postgres://user:<明文口令>@db.internal:5432/larkax
+fmt.Println(cfg)          → DBDSN:postgres://user:<明文口令>@localhost:5432/larkax
 fmt.Printf("%+v", cfg)    → 同上，且主密钥按字节逐个列出
 slog.Any("config", cfg)   → 同上
 ```
@@ -877,8 +877,8 @@ git 不会替你做这两件事：`commit` 只搬暂存区，`checkout --ours` �
 
 **现象**
 
-`internal/pipeline` 的 `Settle` 按**结算时刻**的墙钟定价，而 `reserve.go` 的注释写着
-应当用**预留时刻**。把行为改回注释说的那样之后，4 条用例全挂——**而改之前它们全是绿的**，
+`internal/pipeline` 的 `Settle` 按**结算时刻**的墙钟定价，而 `pipeline.go` 的 `env`
+函数的注释写着应当用**预留时刻**。把行为改回注释说的那样之后，4 条用例全挂——**而改之前它们全是绿的**，
 其中还包括一条名字就叫「跨分时档」的既有用例。
 
 那条既有用例断言的是「没撞 `Capped`」。预留走 `EvalWorstCase`（逐槽取各分支最大价），

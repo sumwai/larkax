@@ -127,6 +127,12 @@ func insertAliasErr(db *sql.DB, channelID any, upstream, canonical string) error
 // insertPricingRule 插一条按规范名精确匹配的计价规则。
 //
 // 表达式本身是假的（`1`）：本包不看它，要测的是「这个名字还挂在一条规则上」。
+//
+// model_patterns 收窄到这一个模型名，用完再删：pricing_rules 是全局表，而测试库
+// 由同包与别的包的用例共用（`go test ./...` 并行跑包）。一条不带 model_patterns
+// 的平台规则匹配**任何**模型，会让「一条规则都匹配不上」这个状态在整库范围内
+// 消失，而那条分支是别的用例要测的（见 internal/pricing 的
+// TestMatchReturnsErrNoRule）。
 func insertPricingRule(t *testing.T, db *sql.DB, canonicalName string) {
 	t.Helper()
 
@@ -134,12 +140,25 @@ func insertPricingRule(t *testing.T, db *sql.DB, canonicalName string) {
 	if err != nil {
 		t.Fatalf("编码 model_patterns 失败: %v", err)
 	}
-	_, err = db.ExecContext(context.Background(), `
+	var id int64
+	err = db.QueryRowContext(context.Background(), `
 		INSERT INTO pricing_rules (scope, name, expr, model_patterns)
-		VALUES ('platform', $1, '1', $2::jsonb)`, "rule-"+itoa(nextID()), string(patterns))
+		VALUES ('platform', $1, '1', $2::jsonb) RETURNING id`,
+		"rule-"+itoa(nextID()), string(patterns)).Scan(&id)
 	if err != nil {
 		t.Fatalf("插入计价规则失败: %v", err)
 	}
+
+	// 清理失败必须报出来：被忽略的失败与清理成功在输出里长得一样，而这一条
+	// 清理掉队就会让规则在共享的库里累积。本包不产生指向 pricing_rules 的账单行
+	// （billing_requests.pricing_rule_id 是指向它的外键，且没有 ON DELETE），
+	// 所以删得掉。
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM pricing_rules WHERE id = $1`, id); err != nil {
+			t.Errorf("清理计价规则失败: %v", err)
+		}
+	})
 }
 
 // findAlias 按上游名从清单里找一条，找不到就失败。
