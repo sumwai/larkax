@@ -178,6 +178,17 @@ type Request struct {
 	// 只看金额分不出这笔账是哪条路产生的。它由入口设置：计费这一层看不出
 	// 请求是不是流式的，也不该去猜。
 	Streamed bool
+
+	// Protocol 是这次请求走的入口协议，落进 billing_requests.protocol。
+	//
+	// 与 Streamed 同一个来源：由**入口**设置——调用方走哪条路径，在
+	// 分派时就定了（见 internal/api 的 ServeHTTP）。计费这一层看不出
+	// 请求是从哪条路径进来的，也不该去猜：写死一个默认值会让另一条入口
+	// 的账单全部记错，而那张表正是事后按协议统计的依据。
+	//
+	// 取值只有 channel.ProtocolOpenAI 与 channel.ProtocolAnthropic 两种；
+	// 落库层拒绝其他取值（含空值），见 internal/ledger/store 的 SaveReservation。
+	Protocol channel.Protocol
 }
 
 // Reservation 是预留的结果，调用方需要把它落库。

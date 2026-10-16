@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -59,6 +60,10 @@ func testRequest(userID int64, requestID string) pipeline.Request {
 		CanonicalModel: "gpt-4o",
 		InputTokens:    1000,
 		MaxTokens:      500,
+		// 落库层拒绝空协议（见 ErrMissingProtocol），所以这里必须给一个。
+		// 给 openai 而不是留空：留空会让每条用例都在测同一条报错路径，
+		// 而真正要测的是「协议按给的值落库」——那由用例自己改这个字段。
+		Protocol: channel.ProtocolOpenAI,
 	}
 }
 
@@ -847,4 +852,123 @@ func TestReservationWithoutRuleStoresNull(t *testing.T) {
 	if ruleID.Valid {
 		t.Errorf("没记规则时应当是 NULL，得到 %d", ruleID.Int64)
 	}
+}
+
+// ── 协议 ────────────────────────────────────────────────────────────────
+
+// 协议按**调用方给的值**落库，而不是某一套入口的固定值。
+//
+// 这一列是事后按协议统计的依据（「Anthropic 入口这个月花了多少」），
+// 所以断言的是字面量 "anthropic" / "openai"，不是「非空」——写死一个值
+// 也能让「非空」通过。
+func TestReservationRecordsProtocol(t *testing.T) {
+	cases := []struct {
+		name     string
+		protocol channel.Protocol
+		want     string
+	}{
+		{name: "OpenAI 入口", protocol: channel.ProtocolOpenAI, want: "openai"},
+		{name: "Anthropic 入口", protocol: channel.ProtocolAnthropic, want: "anthropic"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testDB(t)
+			s := New(db)
+			ctx := context.Background()
+
+			userID := seed(t, db, "100")
+			requestID := reqID(t)
+			req := testRequest(userID, requestID)
+			req.Protocol = tc.protocol
+
+			if _, err := s.SaveReservation(ctx, req,
+				reservation(t, userID, requestID, "30", "CNY")); err != nil {
+				t.Fatalf("预留失败: %v", err)
+			}
+
+			var got string
+			if err := db.QueryRowContext(ctx,
+				`SELECT protocol FROM billing_requests WHERE request_id = $1`,
+				requestID).Scan(&got); err != nil {
+				t.Fatalf("读回协议失败: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("billing_requests.protocol = %q，期望 %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// 漏设协议时**报错**，而不是往那一列写一个空串。
+//
+// 报错要指向调用方漏了字段：这一列的 NOT NULL 拦的是 NULL，空串写得进去，
+// 所以「漏了赋值」本来会表现成一条协议为空的账单——事后看起来像数据脏了，
+// 而不像代码里少了一处。这一条同时钉住「报错时什么都没改」。
+func TestReservationRejectsMissingProtocol(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	requestID := reqID(t)
+	req := testRequest(userID, requestID)
+	req.Protocol = ""
+
+	_, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if !errors.Is(err, ErrMissingProtocol) {
+		t.Fatalf("错误 = %v，期望 ErrMissingProtocol", err)
+	}
+	// 措辞要让读日志的人知道去改哪儿，而不是去查数据库。
+	if !strings.Contains(err.Error(), "pipeline.Request.Protocol") {
+		t.Errorf("报错没指明是调用方漏设了字段: %v", err)
+	}
+
+	if _, frozen := walletOf(t, db, userID); frozen != "0.00000000" {
+		t.Errorf("被拒绝的预留不该冻住余额，冻结 = %s", frozen)
+	}
+	if n := countRequests(t, db, requestID); n != 0 {
+		t.Errorf("被拒绝的预留不该留下记录，却有 %d 行", n)
+	}
+}
+
+// 协议不是两套入口之一时同样报错，且与「漏设」分开。
+func TestReservationRejectsUnknownProtocol(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	requestID := reqID(t)
+	req := testRequest(userID, requestID)
+	// 库里那一列是 text，注释写着 openai / anthropic 但它自己不拦别的值
+	// （见 internal/migrate/sql/00001_init.sql）。约束在代码里，这一条钉住它。
+	req.Protocol = channel.Protocol("custom")
+
+	_, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if !errors.Is(err, ErrUnknownProtocol) {
+		t.Fatalf("错误 = %v，期望 ErrUnknownProtocol", err)
+	}
+	if errors.Is(err, ErrMissingProtocol) {
+		t.Error("「取值不对」不该被报成「漏设」——处置不同")
+	}
+
+	if _, frozen := walletOf(t, db, userID); frozen != "0.00000000" {
+		t.Errorf("被拒绝的预留不该冻住余额，冻结 = %s", frozen)
+	}
+	if n := countRequests(t, db, requestID); n != 0 {
+		t.Errorf("被拒绝的预留不该留下记录，却有 %d 行", n)
+	}
+}
+
+// countRequests 数某个请求标识在 billing_requests 里有几行。
+func countRequests(t *testing.T, db *sql.DB, requestID string) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM billing_requests WHERE request_id = $1`,
+		requestID).Scan(&n); err != nil {
+		t.Fatalf("统计预留记录失败: %v", err)
+	}
+	return n
 }
