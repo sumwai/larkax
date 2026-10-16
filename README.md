@@ -61,11 +61,15 @@ internal/migrate/                 embedded migrations (internal/migrate/sql/)
 internal/money/                   fixed-point money; the only place rounding happens
 internal/observe/                 logging, request IDs, health and readiness endpoints
 internal/pipeline/                wires the billing stages into one request flow
+internal/plugin/                  the five hooks: registry, dispatch, failure policy
+internal/plugin/host/             host capabilities injected into plugins (log, kv, calendar)
+internal/plugin/sandbox/          moejs runtime, limits, interruption
 internal/quota/                   upstream quota tracking: probe, self-account, merge
 internal/relay/                   protocol conversion through relaykit
 internal/route/                   channel selection and failover
 internal/settings/                runtime configuration, stored in the database
 internal/snapshot/                structure-only capture of requests, with redaction
+internal/snapshotwire/            reads snapshot settings, writes skeletons, drops expired partitions
 internal/tokens/                  token counting and stream-cancel estimation
 scripts/                          repository tooling
 ```
@@ -85,11 +89,13 @@ gateway  ──►  pipeline  ──►  billing  ──►  money
                    └── usage normalized from channel.Usage, tokens only as a label
 ```
 
-`gateway` is the only layer with no inbound internal edges; `cmd/` sits above it
-and `money`, `calendar`, `relay`, `observe` and `migrate` are leaves.
-`scripts/check-layering.sh` checks that nothing imports `gateway` back.
+`gateway` is the entry layer; `cmd/` sits above it and `money`, `calendar`,
+`relay`, `observe` and `migrate` are leaves. Nothing reaches back into
+`gateway` except the adapter named below.
 
-Two rules hold across the tree:
+A few rules hold across the tree, and `scripts/check-layering.sh` checks them in
+CI rather than by eye — it lists the packages allowed to import relaykit and
+flags `float64(` used on money outside `internal/money`:
 
 - **Only three packages import
   [relaykit](https://github.com/QuantumNous/new-api):** `internal/relay`, which is
@@ -97,10 +103,9 @@ Two rules hold across the tree:
   to it. Everything else uses larkax's own types.
 - **`internal/money` is the only place rounding happens.** Everything else is
   integer arithmetic on a fixed-point value.
-
-Both are enforced by `scripts/check-layering.sh`, which runs in CI: it lists the
-packages allowed to import relaykit and flags `float64(` used on money outside
-`internal/money`.
+- **Nothing below the entry layer imports `internal/gateway`.** The one
+  exception, `internal/snapshotwire`, is named in `scripts/check-layering.sh`;
+  it adapts the snapshot package to the interfaces the gateway declares.
 
 The billing path is deliberately split so each stage can be tested without a
 database or a network: `money` (arithmetic) → `billing` (usage × price) →
@@ -108,8 +113,8 @@ database or a network: `money` (arithmetic) → `billing` (usage × price) →
 
 `internal/gateway` holds the order of a whole request — reserve before calling
 upstream, do not switch channels once a stream has emitted, never let the
-snapshot path slow down the request. It is not wired into the binary yet.
-Also absent: `internal/plugin`, `plugins/`, and `web/`.
+snapshot path slow down the request. It is not wired into the binary yet, and
+neither is `internal/plugin`. Still absent: `plugins/` and `web/`.
 
 ## Versioning
 

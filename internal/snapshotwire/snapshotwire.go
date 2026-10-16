@@ -1,0 +1,313 @@
+// Package snapshotwire 把请求结构快照的三段接起来：读配置、脱敏、落库。
+//
+// 它存在的原因是两侧的接口不能直接对上：
+//
+//   - internal/snapshot 的脱敏器**只管一个方向**（构造时就定了是请求还是响应），
+//     而 internal/gateway 要求一个能同时处理两个方向的对象；
+//   - snapshot 的产出是它自己的 Result，而网关要的是 gateway.Snapshot。
+//
+// 于是本包是唯一同时 import 两者的地方：它持有两个方向的脱敏器，
+// 把 gateway 的两个接口实现出来，并把落库与留存期清理放在一起。
+// 网关因此不必知道快照是怎么存的，snapshot 也不必知道有一个网关。
+//
+// # 快照链路不能影响请求路径
+//
+// 这条约束决定了本包里的每一次取舍，落到代码上是四处：
+//
+//  1. 落库是**异步**的（网关起 goroutine，不等结果），本包只保证单次调用够快。
+//  2. 并发写有上限，满了就丢快照而不是排队等——见 Save。
+//  3. 任何失败只记日志，绝不向请求路径抛错误。
+//  4. 分区不存在时当场补建，而不是让行落进兜底分区——那条路会让留存承诺失效。
+//
+// # 配置从哪来
+//
+// 开关、字节上限与留存期都来自 settings 表（见 config.go）。
+// 关掉开关时 Redactor 与 Sink 都返回 nil，网关据此完全不采集——
+// 「关掉」是零成本，而不是「采集了再丢掉」。
+package snapshotwire
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"sync/atomic"
+	"time"
+
+	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/gateway"
+	"github.com/sumwai/larkax/internal/observe"
+	"github.com/sumwai/larkax/internal/snapshot"
+)
+
+// maxConcurrentWrites 是同时进行的快照写入数上限。
+//
+// # 它管住的是什么
+//
+// 网关为每条请求起一个 goroutine 去调 Save（那是它的既定行为，见
+// gateway.snapshotAsync）。这里限住的是**同时真的在写库的条数**：
+// 拿不到令牌的那条立刻返回并丢弃，不排队。于是过载时堆积的只有
+// 「正在调 Save 但还没被处理」的那一小段，而不是一个无界的待办队列；
+// 每个被丢弃的 goroutine 都是立刻结束的，不会持着骨架等下去。
+//
+// 不这么做的话，突发流量下同时涌现的是「每条请求一个写连接」：
+// 数据库连接池是 32 条（见 internal/db），会被快照占满，
+// 而那是计费查询要用的同一批连接。
+//
+// 取 8 而不是 1：单条写入是毫秒级的插入，串行会让突发流量下的丢弃率
+// 无谓地高，而 8 仍然远小于连接池，够不着计费。
+const maxConcurrentWrites = 8
+
+// ErrCapacityExceeded 表示并发写已满，这条快照被主动丢弃。
+//
+// 它不是故障：丢快照是本包在过载时的既定行为，丢掉的那条不重试、不排队。
+// 单独一个错误类型是为了让日志里能一眼区分「满了丢了」与「库写失败了」——
+// 前者说明上限或流量需要调整，后者说明存储有问题。
+var ErrCapacityExceeded = errors.New("快照并发写已满，本条被丢弃")
+
+// Collector 是快照链路的装配结果：两个方向的脱敏器 + 一个落库层。
+//
+// 它同时实现 gateway.Redactor 与 gateway.SnapshotSink。
+type Collector struct {
+	requestRedactor  *snapshot.Redactor
+	responseRedactor *snapshot.Redactor
+	store            *Store
+
+	// retentionDays 只被清理动作读，请求路径不碰它。
+	retentionDays int
+
+	// sem 是并发写的令牌桶。缓冲通道在这里的用途是计数而不是传值，
+	// 空结构体不占内存。
+	sem chan struct{}
+
+	logger *slog.Logger
+
+	written atomic.Int64
+	dropped atomic.Int64
+	failed  atomic.Int64
+}
+
+// New 按配置建立快照链路。
+//
+// 开关关闭时返回一个 Enabled 为 false 的 Collector，它的 Redactor 与 Sink
+// 都返回 nil——调用方据此完全不采集。这样「关掉」的代价是零，
+// 而不是先把请求脱敏一遍再丢掉。
+//
+// max_bytes 非法（非正）时返回错误而不回落到默认值：上限配错会导致
+// 每条骨架都降级成摘要层，静默回落会让这种配置错误永远不显形。
+func New(cfg Config, db DB, logger *slog.Logger) (*Collector, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	c := &Collector{
+		logger: logger,
+		sem:    make(chan struct{}, maxConcurrentWrites),
+	}
+	if !cfg.Enabled {
+		return c, nil
+	}
+
+	req, err := snapshot.New(snapshot.RootRequest, snapshot.WithMaxBytes(cfg.MaxBytes))
+	if err != nil {
+		return nil, err
+	}
+	resp, err := snapshot.New(snapshot.RootResponse, snapshot.WithMaxBytes(cfg.MaxBytes))
+	if err != nil {
+		return nil, err
+	}
+	c.requestRedactor = req
+	c.responseRedactor = resp
+	c.store = NewStore(db, logger)
+	c.retentionDays = cfg.RetentionDays
+	return c, nil
+}
+
+// Enabled 表示这条链路是否采集快照。
+func (c *Collector) Enabled() bool { return c.store != nil }
+
+// RetentionDays 返回配置的留存天数。
+func (c *Collector) RetentionDays() int { return c.retentionDays }
+
+// DropExpired 按留存期删除到期分区。
+//
+// 它不在请求路径上：由运维命令或后台任务调用（见 cmd/larkaxctl 的
+// snapshot 子命令）。留存期的承诺靠的是「这个动作真的被执行」，
+// 所以它的返回值是被删掉的分区名清单，而不是一个 bool——
+// 调用方要能看出「删了哪些」，而不只是「没报错」。
+func (c *Collector) DropExpired(ctx context.Context, at time.Time) ([]string, error) {
+	if !c.Enabled() {
+		return nil, nil
+	}
+	return c.store.DropExpired(ctx, c.retentionDays, at)
+}
+
+// ExpiredPartitions 列出到期分区但不动它们，供演练使用。
+//
+// 与 DropExpired 同源判据，「演练说会删哪些」因此等于「执行真的删了哪些」。
+// 采集关闭时返回空：此时没有留存期可谈，也不该声称有分区到期。
+func (c *Collector) ExpiredPartitions(ctx context.Context, at time.Time) ([]string, error) {
+	if !c.Enabled() {
+		return nil, nil
+	}
+	return c.store.ExpiredPartitions(ctx, c.retentionDays, at)
+}
+
+// Redactor 返回给网关用的脱敏器；未启用时返回 nil。
+//
+// 返回 nil 而不是一个「什么都不做」的实现：网关对 nil 的处理是
+// 「根本不采集」，而对空实现的处理是「采集了一条空快照再落库」。
+func (c *Collector) Redactor() gateway.Redactor {
+	if !c.Enabled() {
+		return nil
+	}
+	return c
+}
+
+// Sink 返回给网关用的落库层；未启用时返回 nil。
+func (c *Collector) Sink() gateway.SnapshotSink {
+	if !c.Enabled() {
+		return nil
+	}
+	return c
+}
+
+// Redact 脱敏一次请求。
+func (c *Collector) Redact(req *channel.Request) (*gateway.Snapshot, error) {
+	res, err := c.requestRedactor.RedactRequest(req)
+	return toSnapshot(res, err)
+}
+
+// RedactResponse 脱敏一次响应。
+//
+// 注意它只有归一化字段那部分：上游原样返回的 Response.Raw 与 Usage.Raw
+// 不在其中，见 snapshot.RedactResponse 的注释。要采集它们需要单独传
+// RedactRaw，而那是一个需要单独决定的问题。
+func (c *Collector) RedactResponse(resp *channel.Response) (*gateway.Snapshot, error) {
+	res, err := c.responseRedactor.RedactResponse(resp)
+	return toSnapshot(res, err)
+}
+
+// toSnapshot 把脱敏结果转成网关的快照类型。
+//
+// 只搬脱敏产出，不碰 request_id / user_id / direction 三个字段：
+// 那些属于「这条快照属于谁」，由调用方（网关）填——脱敏器不知道也不该知道。
+func toSnapshot(res *snapshot.Result, err error) (*gateway.Snapshot, error) {
+	if err != nil {
+		return nil, err
+	}
+	return &gateway.Snapshot{
+		Skeleton:      res.Skeleton,
+		RedactedPaths: res.Redacted,
+		Truncated:     res.Truncated,
+		Version:       res.Version,
+	}, nil
+}
+
+// Save 落一条快照。它是 gateway.SnapshotSink 的实现。
+//
+// # 并发满时丢弃，不排队
+//
+// 令牌拿不到就直接丢，日志里说明。**不阻塞等待**是刻意的：等的那个
+// goroutine 会占着内存里的骨架、并与计费路径争同一批连接——过载时
+// 「多救几条快照」的代价是拖慢真正在挣钱的那条路。
+//
+// 丢掉多少条是可观测的（Dropped），因为「静默地丢」与「没有请求」
+// 在日志里长得一样。
+//
+// # 错误只给日志看
+//
+// 返回的错误供调用方记日志，网关**不看**它——快照链路挂掉不影响请求与计费。
+// 两种失败分开报：容量不足是 ErrCapacityExceeded（既定行为，说明上限或流量
+// 需要调整），写库失败是存储的问题。混成一句话会让日志里的「该调上限」
+// 与「库坏了」分不开。
+func (c *Collector) Save(ctx context.Context, snap *gateway.Snapshot) error {
+	if !c.Enabled() || snap == nil {
+		return nil
+	}
+	// request_id 为空时从 context 补上。
+	//
+	// 为什么由本包补：网关那一侧目前从自己的私有 context 键里取请求标识，
+	// 而标识是由 observe 放进 context 的（两者不是同一个键），于是它取到的
+	// 永远是空串。快照落库后 request_id 为空，等于「这条快照属于哪次请求」
+	// 无从回答——而它正是快照的用途。
+	//
+	// 只补空值，不覆盖网关给的值：网关那边改好之后这一行自然不再生效，
+	// 不需要两处同时改。
+	//
+	// 改的是一份副本而不是调用方的那个：骨架里的 map 是浅拷贝共享的，
+	// 但这里只动 RequestID 这一个字段，调用方的快照不会被本包改写。
+	local := *snap
+	local.RequestID = requestIDOr(ctx, local.RequestID)
+
+	select {
+	case c.sem <- struct{}{}:
+	default:
+		c.dropped.Add(1)
+		c.loggerOrContext(ctx).Warn("快照并发已满，丢弃",
+			"request_id", local.RequestID,
+			"direction", local.Direction,
+			"dropped_total", c.dropped.Load(),
+			"limit", maxConcurrentWrites,
+		)
+		return ErrCapacityExceeded
+	}
+	defer func() { <-c.sem }()
+
+	if err := c.store.Insert(ctx, &local); err != nil {
+		c.failed.Add(1)
+		c.loggerOrContext(ctx).Error("快照落库失败",
+			"request_id", local.RequestID,
+			"direction", local.Direction,
+			"err", err,
+		)
+		return err
+	}
+	c.written.Add(1)
+	return nil
+}
+
+// Stats 是这条链路的计数，供测试与指标使用。
+//
+// 有了它，「一条都没写进去」与「没有请求」才分得开：只看日志的话，
+// 两者都是没有输出。
+type Stats struct {
+	Written int64
+	Dropped int64
+	Failed  int64
+}
+
+// Stats 返回当前计数。
+func (c *Collector) Stats() Stats {
+	return Stats{Written: c.written.Load(), Dropped: c.dropped.Load(), Failed: c.failed.Load()}
+}
+
+// 编译期断言：装配出来的对象要能满足网关对脱敏器与落库层的要求。
+//
+// 两个断言都写在这里而不是各自的实现处：本包的存在意义就是这个适配，
+// 它不成立时应该在这一行编译失败。
+var (
+	_ gateway.Redactor     = (*Collector)(nil)
+	_ gateway.SnapshotSink = (*Collector)(nil)
+)
+
+// loggerOrContext 取出请求链路里的日志器，没有就用本包自己的。
+//
+// 走 context 是为了让快照的日志与产生它的那次请求带上同一个 request_id——
+// 这条链路本来就是给排障用的，日志拼不上等于白记。
+func (c *Collector) loggerOrContext(ctx context.Context) *slog.Logger {
+	if id := observe.RequestIDFromContext(ctx); id != "" {
+		return c.logger.With("request_id", string(id))
+	}
+	return c.logger
+}
+
+// requestIDOr 在已有取值为空时，从 context 里取请求标识。
+//
+// 见 Save 里的说明：网关那一侧取的键与 observe 写进去的不是同一个，
+// 所以它交给这里的标识是空的。这一层把缺口补上，取值只来自 observe——
+// 本包与网关不同，它本来就依赖观测层（Logger 就是从那里来的）。
+func requestIDOr(ctx context.Context, existing string) string {
+	if existing != "" {
+		return existing
+	}
+	return string(observe.RequestIDFromContext(ctx))
+}

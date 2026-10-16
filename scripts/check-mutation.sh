@@ -142,6 +142,7 @@ PKGS=(
   internal/tokens
   internal/route
   internal/snapshot
+  internal/snapshotwire
   internal/gateway
 )
 

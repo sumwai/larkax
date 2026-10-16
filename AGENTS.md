@@ -332,6 +332,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/billing` | 97.5% | 81.0% | 0 |
 | `internal/tokens` | 97.4% | 74.6% | 4 |
 | `internal/snapshot` | 88.6% | 70.8% | 7 |
+| `internal/snapshotwire` | 95.2% | 100% | 0 |
 
 **覆盖率高而 efficacy 低，说明测试断言的是「相对关系」而不是「具体边界」。**
 `route` 与 `snapshot` 两个包都是这个形状：原用例写的是「A 明显比 B 好」
