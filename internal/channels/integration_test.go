@@ -4,12 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
@@ -627,5 +630,277 @@ func TestUpstreamModelNotFound(t *testing.T) {
 	_, err := src.UpstreamModel(context.Background(), 1, "nonexistent-"+itoa(nextID()))
 	if !errors.Is(err, ErrAliasNotFound) {
 		t.Errorf("err = %v，期望 ErrAliasNotFound", err)
+	}
+}
+
+// channelID 传 0 是「不针对具体渠道」，只走平台级别名那条。
+func TestUpstreamModelChannelZeroUsesPlatformAlias(t *testing.T) {
+	db := testDB(t)
+	model := uniqueModel()
+	seedModelCatalog(t, db, model)
+	insertAlias(t, db, nil, "platform-"+model, model)
+
+	src := New(db, testSealer(t))
+	got, err := src.UpstreamModel(context.Background(), 0, model)
+	if err != nil {
+		t.Fatalf("UpstreamModel 出错: %v", err)
+	}
+	if got != "platform-"+model {
+		t.Errorf("UpstreamModel = %q，期望平台级别名", got)
+	}
+}
+
+// ── 别名的唯一约束 ──────────────────────────────────────────────────────
+
+// 两条偏索引的名字硬编码自 00007_model_alias_unique.sql。
+// **改那个文件就要同步改这里**，否则下面的断言会认不出来；
+// 失效的方向是失败，不是静默通过。
+const (
+	aliasChannelCanonicalUnique  = "model_aliases_channel_canonical_idx"
+	aliasPlatformCanonicalUnique = "model_aliases_platform_canonical_idx"
+)
+
+// 约束所在的迁移文件，也是「已有重复数据会被拒绝」那条用例要重放的那一份。
+const aliasUniqueMigration = "00007_model_alias_unique.sql"
+
+// insertAliasErr 与 insertAlias 相同，但把错误交回调用方。
+//
+// 「写入被拦下」正是下面几条用例要断言的东西，所以不能在这里 t.Fatalf。
+func insertAliasErr(db *sql.DB, channelID any, upstream, canonical string) error {
+	_, err := db.ExecContext(context.Background(), `
+		INSERT INTO model_aliases (channel_id, upstream_model, canonical_name)
+		VALUES ($1, $2, $3)`, channelID, upstream, canonical)
+	return err
+}
+
+// assertUniqueViolation 断言这次写入被**指定的那条唯一索引**拦下了。
+//
+// 只断言「报错了」不够：连不上库、外键不存在、列名写错都会报错，
+// 而它们与「重复被拦下」是两回事。所以既认 SQLSTATE 23505，也认约束名——
+// 约束名才说明是这条规则在起作用。
+func assertUniqueViolation(t *testing.T, err error, wantIndex string) {
+	t.Helper()
+
+	if err == nil {
+		t.Fatal("重复的别名应当被拒，实际写进去了")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("err = %v，期望 *pgconn.PgError", err)
+	}
+	if pgErr.Code != "23505" {
+		t.Fatalf("SQLSTATE = %s（%s），期望 23505 unique_violation", pgErr.Code, pgErr.Message)
+	}
+	if pgErr.ConstraintName != wantIndex {
+		t.Errorf("被违反的索引是 %q，期望 %q", pgErr.ConstraintName, wantIndex)
+	}
+}
+
+// 同一个渠道下两个上游名映射到同一个规范名：写入侧就该被拦下。
+//
+// 这正是 issue 说的那条歧义——约束建立之前这种数据能写进来，而查询侧只能按
+// 上游名排序取第一条，选错就是差价。
+func TestAliasRejectsChannelDuplicateCanonical(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	channel := insertChannel(t, db, sealer, channelSpec{model: model})
+	seedModelCatalog(t, db, model)
+
+	insertAlias(t, db, channel, "up-a-"+model, model)
+	assertUniqueViolation(t,
+		insertAliasErr(db, channel, "up-b-"+model, model),
+		aliasChannelCanonicalUnique)
+}
+
+// 平台级那一批要单独一条偏索引才拦得住：SQL 里 NULL 不等于 NULL，
+// 普通唯一键对 channel_id IS NULL 的行一行都不管。
+func TestAliasRejectsPlatformDuplicateCanonical(t *testing.T) {
+	db := testDB(t)
+	model := uniqueModel()
+	seedModelCatalog(t, db, model)
+
+	insertAlias(t, db, nil, "up-a-"+model, model)
+	assertUniqueViolation(t,
+		insertAliasErr(db, nil, "up-b-"+model, model),
+		aliasPlatformCanonicalUnique)
+}
+
+// 反方向——一个上游名对应两个规范名——原本就被 (channel_id, upstream_model)
+// 拦着。这条用例把那个约束也钉住：删掉它，镜像的歧义会重新出现。
+func TestAliasRejectsDuplicateUpstreamModel(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	other := uniqueModel()
+	channel := insertChannel(t, db, sealer, channelSpec{model: model})
+	seedModelCatalog(t, db, model)
+	seedModelCatalog(t, db, other)
+
+	insertAlias(t, db, channel, "up-"+model, model)
+	assertUniqueViolation(t,
+		insertAliasErr(db, channel, "up-"+model, other),
+		"model_aliases_channel_id_upstream_model_key")
+}
+
+// 约束只该拦「同一个范围里的同一个规范名」，别的一律不受影响——
+// 拦宽了的话，「两个渠道各配一个上游名指向同一个规范名」这种正常配置
+// 就会写不进去。
+//
+// 这条同时是查询侧简化的前提：允许写进去的这几条里，同一个范围下指向 model
+// 的**各自只有一条**，所以 UpstreamModel 命中什么是确定的。
+func TestAliasAllowsDistinctScopesAndNames(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	other := uniqueModel()
+	mine := insertChannel(t, db, sealer, channelSpec{model: model})
+	theirs := insertChannel(t, db, sealer, channelSpec{model: model})
+	seedModelCatalog(t, db, model)
+	seedModelCatalog(t, db, other)
+
+	insertAlias(t, db, mine, "up-a-"+model, model)
+	insertAlias(t, db, theirs, "up-b-"+model, model) // 另一个渠道：允许
+	insertAlias(t, db, mine, "up-c-"+model, other)   // 同一渠道、另一个规范名：允许
+	insertAlias(t, db, nil, "up-d-"+model, model)    // 平台级与渠道级并存：允许
+	insertAlias(t, db, nil, "up-e-"+model, other)    // 平台级的另一个规范名：允许
+
+	src := New(db, sealer)
+	got, err := src.UpstreamModel(context.Background(), mine, model)
+	if err != nil {
+		t.Fatalf("UpstreamModel 出错: %v", err)
+	}
+	if got != "up-a-"+model {
+		t.Errorf("UpstreamModel = %q，期望渠道级那条 %q", got, "up-a-"+model)
+	}
+}
+
+// migrationUpSQL 取出内嵌迁移文件的 Up 段原文。
+//
+// 用例要在「约束之前」的状态上重放这条迁移，所以需要它的原文。
+// 切分用的是 goose 的标注格式；切不到就报错——失配时**不能**静默返回半段
+// SQL，那样用例会退化成一条什么都没跑的测试。
+func migrationUpSQL(t *testing.T, name string) string {
+	t.Helper()
+
+	raw, err := fs.ReadFile(migrate.FS(), name)
+	if err != nil {
+		t.Fatalf("读取迁移文件 %s 失败: %v", name, err)
+	}
+	up, down, ok := strings.Cut(string(raw), "-- +goose Down")
+	if !ok {
+		t.Fatalf("迁移文件 %s 里没有 -- +goose Down 标注，切分方式要跟着改", name)
+	}
+	up, ok = strings.CutPrefix(up, "-- +goose Up")
+	if !ok {
+		t.Fatalf("迁移文件 %s 里没有 -- +goose Up 标注", name)
+	}
+	if strings.TrimSpace(up) == "" || strings.TrimSpace(down) == "" {
+		t.Fatalf("迁移文件 %s 的 Up 段或 Down 段是空的", name)
+	}
+	return up
+}
+
+// 已有重复数据时，迁移必须报错退出，而不是静默清理。
+//
+// 「约束之前」的状态用事务造出来：索引在事务里摘掉、重复行在事务里插进去，
+// 跑完迁移再整体回滚（PostgreSQL 的 DDL 也在事务里，回滚会把索引带回来）。
+// 这样即使用例中途失败，库也不会被留在「没有约束」的状态上——那种状态不报错，
+// 只会让后面所有用例失去保护。
+func TestMigrationRejectsExistingDuplicateAliases(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	sealer := testSealer(t)
+	model := uniqueModel()
+	channel := insertChannel(t, db, sealer, channelSpec{model: model})
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("开事务失败: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, idx := range []string{aliasChannelCanonicalUnique, aliasPlatformCanonicalUnique} {
+		if _, err = tx.ExecContext(ctx, `DROP INDEX `+idx); err != nil {
+			t.Fatalf("删掉索引 %s 失败: %v", idx, err)
+		}
+	}
+
+	// 两类重复各造一组：同一个规范名在同一个渠道下有两个上游名，
+	// 以及平台级下同样的一对。
+	if _, err = tx.ExecContext(ctx,
+		`INSERT INTO model_catalog (canonical_name, display_name) VALUES ($1, $1)`,
+		model); err != nil {
+		t.Fatalf("插入模型目录失败: %v", err)
+	}
+	for _, dup := range []struct {
+		channelID any
+		upstream  string
+	}{
+		{channel, "up-a-" + model},
+		{channel, "up-b-" + model},
+		{nil, "up-c-" + model},
+		{nil, "up-d-" + model},
+	} {
+		if _, err = tx.ExecContext(ctx, `
+			INSERT INTO model_aliases (channel_id, upstream_model, canonical_name)
+			VALUES ($1, $2, $3)`, dup.channelID, dup.upstream, model); err != nil {
+			t.Fatalf("造重复数据失败: %v", err)
+		}
+	}
+
+	// 迁移报错之后整个事务会被 PostgreSQL 置为 aborted，后面什么都查不了，
+	// 所以先打一个保存点：报错后回到这里，事务恢复可用，造的重复数据还在。
+	if _, err = tx.ExecContext(ctx, `SAVEPOINT before_migration`); err != nil {
+		t.Fatalf("打保存点失败: %v", err)
+	}
+
+	_, err = tx.ExecContext(ctx, migrationUpSQL(t, aliasUniqueMigration))
+	if err == nil {
+		t.Fatal("已有重复数据时迁移必须报错，而不是静默清理")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("err = %v，期望 *pgconn.PgError", err)
+	}
+	if pgErr.Code != "P0001" {
+		t.Fatalf("SQLSTATE = %s（%s），期望 P0001（迁移自己抛的那个）", pgErr.Code, pgErr.Message)
+	}
+	// 报错要说清是哪几行重复，否则人拿到它不知道该改什么。
+	if !strings.Contains(pgErr.Message, model) {
+		t.Errorf("报错里没提重复的规范名 %q：%s", model, pgErr.Message)
+	}
+
+	if _, err := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT before_migration`); err != nil {
+		t.Fatalf("回滚到保存点失败: %v", err)
+	}
+
+	// 一条都不许被删掉：迁移的职责是拒绝，不是替数据挑一条。
+	var left int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM model_aliases WHERE canonical_name = $1`, model).Scan(&left); err != nil {
+		t.Fatalf("回查重复行失败: %v", err)
+	}
+	if left != 4 {
+		t.Errorf("重复行还剩 %d 条，期望 4（迁移不该删数据）", left)
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("回滚失败: %v", err)
+	}
+
+	// 回滚必须把索引带回来，否则这条用例把库留在了没有约束的状态上，
+	// 而后面那些用例会照常通过——它们只是不再受保护。
+	for _, idx := range []string{aliasChannelCanonicalUnique, aliasPlatformCanonicalUnique} {
+		var exists bool
+		if err := db.QueryRowContext(ctx, `
+			SELECT EXISTS (SELECT 1 FROM pg_indexes
+			                WHERE schemaname = current_schema() AND indexname = $1)`,
+			idx).Scan(&exists); err != nil {
+			t.Fatalf("查索引 %s 失败: %v", idx, err)
+		}
+		if !exists {
+			t.Errorf("回滚后索引 %s 不在了", idx)
+		}
 	}
 }
