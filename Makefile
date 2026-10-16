@@ -27,8 +27,13 @@ TEMPLATE := .env.example
 
 # sed 的替换串里 & 是整个匹配、\ 是转义、| 是这里用作分隔符的字符。
 # 口令里带上它们会生成一份语法没错但内容不对的 .env——最难发现的那种坏法。
-# 反斜杠要先转，否则后面两步加进去的反斜杠会被自己再转一遍。
-ESCAPED_DB_PASSWORD := $(subst |,\|,$(subst &,\&,$(subst \,\\,$(DB_PASSWORD))))
+# 反斜杠要先转，否则后面几步加进去的反斜杠会被自己再转一遍。
+#
+# ' 是给 shell 准备的：下面每条 sed 表达式都用单引号包住（否则 shell 会先吃掉
+# 一层反斜杠，口令里的 \ 就没了）。单引号串里没法直接写 '，标准写法是
+# 收尾、转义、重开 —— '\'' 。它必须放在最后一步：先做的话，它自己带进来的
+# 反斜杠会被上一步再转一遍。
+ESCAPED_DB_PASSWORD := $(subst ','\'',$(subst |,\|,$(subst &,\&,$(subst \,\\,$(DB_PASSWORD)))))
 
 .PHONY: help init up down migrate run test clean
 
@@ -42,20 +47,50 @@ help:
 	@echo ""
 	@echo "端口被占用时：make run PG_PORT=55432"
 
-# 生成 .env。**已存在时一律不动**：覆盖等于毁掉已加密的存量数据，
+# 生成 .env。**已存在时不重建**：重建等于毁掉已加密的存量数据，
 # 主密钥一变密文就解不开了。所以这里不写成文件的依赖规则——
 # 那条规则会在 .env.example 变新之后重建 .env，正是这里要防的行为。
 #
-# 三条替换分别填上密码、主密钥，以及示例 DSN 里的端口与库名。
+# 但「不重建」不等于「什么都不看」。DSN 里的口令、端口、库名是
+# DB_PASSWORD / PG_PORT / PG_DB 的第二份拷贝，只在生成那一刻同步过一次；
+# 此后不再同步的话，`make run PG_PORT=55432` 会起在 55432 而服务连到 5432——
+# 连不上还算好的，最坏是 5432 上恰好有另一个 larkax 库、口令也相同，
+# 迁移就安静地打到那里去了。所以已存在时**只同步 DSN 那一行**：
+# 指向本机（127.0.0.1 / localhost）才动，指向远端的说明是故意配的，只警告。
+# 主密钥与 .env 里的其它内容一个字不碰。
+#
+# 生成分支的三条替换分别填上密码、主密钥，以及示例 DSN 里的端口与库名。
 # 第三条与 .env.example 的默认值（:5432/larkax）绑定：改了那边的默认值，
 # 这里也要跟着改。下面紧接着 grep 一次确认它真的命中了——
 # 替换没命中时 .env 会安静地留着旧端口，而服务就连不上 compose 起的那个库。
 init:
 	@if [ -f $(ENV_FILE) ]; then \
-	  echo "$(ENV_FILE) 已存在，保持不动"; \
+	  echo "$(ENV_FILE) 已存在，不重建"; \
 	  if grep -qE '(<MASTER_KEY>|<DB_PASSWORD>)' $(ENV_FILE); then \
 	    echo "警告：它是从 $(TEMPLATE) 直接拷来的，占位符还在，服务会因主密钥无效而拒绝启动"; \
 	  fi; \
+	  before=$$(grep -m1 '^LARKAX_DB_DSN=' $(ENV_FILE) || true); \
+	  case "$$before" in \
+	    '') echo "错误：$(ENV_FILE) 里找不到 LARKAX_DB_DSN 那一行"; exit 1 ;; \
+	    *@127.0.0.1:*|*@localhost:*) \
+	      sed -E 's|^(LARKAX_DB_DSN="[a-z]+://[^:]+:)[^@]*(@[^:]+:)[0-9]+/[^?]*|\1$(ESCAPED_DB_PASSWORD)\2$(PG_PORT)/$(PG_DB)|' $(ENV_FILE) > $(ENV_FILE).tmp \
+	        && mv $(ENV_FILE).tmp $(ENV_FILE) \
+	        || { rm -f $(ENV_FILE).tmp; exit 1; }; \
+	      after=$$(grep -m1 '^LARKAX_DB_DSN=' $(ENV_FILE) || true); \
+	      if ! printf '%s' "$$after" | grep -qF ":$(PG_PORT)/$(PG_DB)"; then \
+	        echo "错误：DSN 没能同步到 :$(PG_PORT)/$(PG_DB)，它现在是"; \
+	        echo "      $$after"; \
+	        exit 1; \
+	      fi; \
+	      if [ "$$before" = "$$after" ]; then \
+	        echo "DSN 已指向 127.0.0.1:$(PG_PORT)/$(PG_DB)"; \
+	      else \
+	        echo "已同步 DSN 到 127.0.0.1:$(PG_PORT)/$(PG_DB)，原为 $$before"; \
+	      fi ;; \
+	    *) \
+	      echo "注意：DSN 不指向本机，compose 起的库不会被它连上"; \
+	      echo "      $$before" ;; \
+	  esac; \
 	else \
 	  sed -e 's|<DB_PASSWORD>|$(ESCAPED_DB_PASSWORD)|' \
 	      -e "s|current:<MASTER_KEY>,previous:<MASTER_KEY>|$$(openssl rand -base64 32)|" \
