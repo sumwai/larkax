@@ -1,9 +1,14 @@
-// Package pricing 从 pricing_rules 表里取出一次请求适用的计价规则。
+// Package pricing 从 pricing_rules 表里取出一次请求适用的计价规则，
+// 并提供这些规则的管理面（创建、修改、列举，见 Admin）。
 //
-// 它是 pipeline.RuleSource 的实现，但**不 import 计价引擎**：接口由
-// pipeline 声明、由本包用结构满足（两边都不必看见对方）。本包只回答
+// 读取路径是 pipeline.RuleSource 的实现，但**不 import 计价引擎**：接口由
+// pipeline 声明、由本包用结构满足（两边都不必看见对方）。它只回答
 // 「这次请求按哪条规则计价」，不做求值、不碰钱——求值在
 // internal/billing/expr，乘用量与写分录在 internal/pipeline。
+//
+// 写入路径反过来要 import 计价引擎：一条规则在落库之前必须先编译一次
+// （见 Admin.Create）。差别在于失败落在哪一侧——编译不过的规则在写入这一侧
+// 是一次可以当场拒绝的输入错误，在请求那一侧是一次线上故障。
 //
 // # 为什么单独一层
 //
@@ -59,13 +64,18 @@ var _ interface {
 	MatchAll(context.Context, pipeline.RuleQuery) ([]pipeline.Rule, error)
 } = (*Source)(nil)
 
-// matchQuery 是选规则的查询。
+// ruleApplicable 是「这条规则适用于这次查询」的判据。
 //
-// 它一次查完，不先按作用域查一遍再回退：规则表不大，而「查了平台规则
-// 发现有条渠道规则」这类往返会让热路径上的数据库往返数随作用域层数增长。
+// 四个条件：启用、在生效时间窗口内、适用于这个模型、适用于这次请求的作用域。
+// 它们在 Match、MatchAll 与 Explain 三条查询里必须**逐字一致**——不一致的
+// 表现是「同一个模型，预留按一条规则算、结算按另一条算」，或者「列举说这条
+// 生效、请求却按另一条算」，两种都是错账。所以这里拼一次、用三处，而不是
+// 靠注释提醒后来者同步修改。
 //
-// $1 是匹配时刻，$2 是规范模型名，$3 是渠道所属商家（0 表示未选定），
-// $4 是渠道（0 表示未选定）。
+// ownerExpr 与 channelExpr 是「这次请求的商家与渠道」那两个表达式：单点查询
+// 传占位符（$3/$4），候选查询传 JOIN 进来的列（c.owner_user_id /
+// c.channel_id）。三处的差别只有这一点。占位符约定：$1 是匹配时刻，
+// $2 是规范模型名，调用方保证这一点。
 //
 // # 为什么「未选定」不需要额外分支
 //
@@ -87,33 +97,60 @@ var _ interface {
 // （jsonb 的 `?` 运算符，它按元素匹配，不是子串匹配）。
 // 通配（`claude-*`）目前不做：`?` 会把它当成一个普通字符串，
 // 于是配了通配的规则**一条都匹配不上**，表现为 ErrNoRule 而不是
-// 「按某条规则少收了钱」。宁可在这里失败，也不要静默地按错的价算。
-const matchQuery = `
+// 「按某条规则少收了钱」。宁可在这里失败，也不要静默地按错的价算——
+// 写入路径据此把带通配符的模式拒掉（见 Admin.Create）。
+func ruleApplicable(ownerExpr, channelExpr string) string {
+	return `r.enabled
+	       AND r.effective_from <= $1
+	       AND (r.effective_to IS NULL OR r.effective_to > $1)
+	       AND (jsonb_array_length(r.model_patterns) = 0
+	            OR (r.model_patterns ? $2))
+	       AND ((r.scope = 'platform' AND r.owner_user_id IS NULL)
+	            OR (r.scope = 'merchant' AND r.owner_user_id = ` + ownerExpr + `)
+	            OR (r.scope = 'channel' AND r.channel_id = ` + channelExpr + `))`
+}
+
+// ruleOrderBy 是裁决次序：作用域的具体程度（channel > merchant > platform）
+// → priority 大的优先 → id 大的优先。表别名必须叫 r。
+//
+// 第 1 条排在最前面，是因为它表达的是「谁定的价」：渠道自己定的价是
+// 这个渠道的价，商家定的价是这个商家的价，平台价是兜底。让 priority
+// 压过作用域会让一个平台规则（priority 很大）盖住渠道自己的价——
+// 那是把「平台统一定价」变成了「平台随时可能悄悄改掉商家的价」。
+// priority 用来在**同一层**里决胜，这个次序与 pricing_rules_lookup_idx
+// 的列顺序一致。
+//
+// 第 3 条是决胜用的，不表达偏好：没有它，两条同作用域同优先级的规则
+// 谁被选中由行的物理顺序决定，同一份数据两次查询可能给出不同的价。
+//
+// 四条查询共用它，于是「列举里排第一的那条」与「Match 选中的那条」是
+// 同一件事——那正是列举要回答的问题，靠两份手抄的排序答不准。
+const ruleOrderBy = `CASE r.scope
+	          WHEN 'channel' THEN 3
+	          WHEN 'merchant' THEN 2
+	          ELSE 1
+	        END DESC,
+	        r.priority DESC,
+	        r.id DESC`
+
+// matchQuery 是选规则的查询。
+//
+// 它一次查完，不先按作用域查一遍再回退：规则表不大，而「查了平台规则
+// 发现有条渠道规则」这类往返会让热路径上的数据库往返数随作用域层数增长。
+//
+// $1 是匹配时刻，$2 是规范模型名，$3 是渠道所属商家（0 表示未选定），
+// $4 是渠道（0 表示未选定）。判据与次序见 ruleApplicable 与 ruleOrderBy。
+var matchQuery = `
 	SELECT r.id, r.expr
 	  FROM pricing_rules r
-	 WHERE r.enabled
-	   AND r.effective_from <= $1
-	   AND (r.effective_to IS NULL OR r.effective_to > $1)
-	   AND (jsonb_array_length(r.model_patterns) = 0
-	        OR (r.model_patterns ? $2))
-	   AND ((r.scope = 'platform' AND r.owner_user_id IS NULL)
-	        OR (r.scope = 'merchant' AND r.owner_user_id = $3)
-	        OR (r.scope = 'channel' AND r.channel_id = $4))
-	 ORDER BY CASE r.scope
-	            WHEN 'channel' THEN 3
-	            WHEN 'merchant' THEN 2
-	            ELSE 1
-	          END DESC,
-	          r.priority DESC,
-	          r.id DESC
+	 WHERE ` + ruleApplicable("$3", "$4") + `
+	 ORDER BY ` + ruleOrderBy + `
 	 LIMIT 1`
 
 // matchAllQuery 是选候选规则的查询：候选集里**每个候选各一条**。
 //
-// 与 matchQuery 是同一条 WHERE、同一套裁决次序，区别只在「取几条」：
-// 这里按候选分组（DISTINCT ON）各取第一条，而不是整体取一条。两处的
-// 条件与排序必须逐字一致——它们不一致的表现是「同一个渠道，预留按一条
-// 规则算、结算按另一条算」，而那正是预留小于结算的来源。
+// 与 matchQuery 是同一条判据、同一套裁决次序（同一段片段），区别只在
+// 「取几条」：这里按候选分组（DISTINCT ON）各取第一条，而不是整体取一条。
 //
 // 一条 SQL 查完，不每个候选往返一次：候选数随渠道配置增长，而这是
 // 请求路径上的一步。
@@ -132,27 +169,13 @@ const matchQuery = `
 // DISTINCT ON 按 (channel_id, owner_user_id) 去重，重复的候选只会得到一条
 // 规则。这不是省略：同一个候选适用哪条规则是确定的，问两次不会得到不同
 // 的答案。
-const matchAllQuery = `
+var matchAllQuery = `
 	SELECT DISTINCT ON (c.channel_id, c.owner_user_id)
 	       c.channel_id, c.owner_user_id, r.id, r.expr
 	  FROM unnest($3::bigint[], $4::bigint[]) AS c(channel_id, owner_user_id)
 	  LEFT JOIN pricing_rules r
-	         ON r.enabled
-	        AND r.effective_from <= $1
-	        AND (r.effective_to IS NULL OR r.effective_to > $1)
-	        AND (jsonb_array_length(r.model_patterns) = 0
-	             OR (r.model_patterns ? $2))
-	        AND ((r.scope = 'platform' AND r.owner_user_id IS NULL)
-	             OR (r.scope = 'merchant' AND r.owner_user_id = c.owner_user_id)
-	             OR (r.scope = 'channel' AND r.channel_id = c.channel_id))
-	 ORDER BY c.channel_id, c.owner_user_id,
-	          CASE r.scope
-	            WHEN 'channel' THEN 3
-	            WHEN 'merchant' THEN 2
-	            ELSE 1
-	          END DESC,
-	          r.priority DESC,
-	          r.id DESC`
+	         ON ` + ruleApplicable("c.owner_user_id", "c.channel_id") + `
+	 ORDER BY c.channel_id, c.owner_user_id, ` + ruleOrderBy
 
 // Match 返回这次请求适用的规则。
 //
