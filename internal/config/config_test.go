@@ -355,8 +355,8 @@ func TestConfigStringRedactsSecrets(t *testing.T) {
 	cfg := &Config{
 		Env:        "production",
 		Role:       RoleGateway,
-		DBDSN:      "postgres://larkax:" + dbPassword + "@db.internal:5432/larkax",
-		RedisDSN:   "redis://:" + redisPass + "@cache.internal:6379/0",
+		DBDSN:      "postgres://larkax:" + dbPassword + "@localhost:5432/larkax",
+		RedisDSN:   "redis://:" + redisPass + "@localhost:6379/0",
 		MasterKeys: []MasterKey{{ID: "current", Key: []byte(masterBytes)}},
 	}
 
@@ -377,7 +377,7 @@ func TestConfigStringRedactsSecrets(t *testing.T) {
 	}
 
 	// 主机与库名保留：排查「连错环境」时靠它们，口令才是要挡的
-	if got := fmt.Sprint(cfg); !strings.Contains(got, "db.internal:5432/larkax") {
+	if got := fmt.Sprint(cfg); !strings.Contains(got, "localhost:5432/larkax") {
 		t.Errorf("String 丢了主机与库名：%s", got)
 	}
 }
@@ -399,8 +399,8 @@ func TestConfigLogValueRedactsSecrets(t *testing.T) {
 		HTTPAddr:     ":8080",
 		InternalAddr: ":9090",
 		LogLevel:     "info",
-		DBDSN:        "postgres://larkax:" + dbPassword + "@db.internal:5432/larkax",
-		RedisDSN:     "redis://:" + redisPass + "@cache.internal:6379/0",
+		DBDSN:        "postgres://larkax:" + dbPassword + "@localhost:5432/larkax",
+		RedisDSN:     "redis://:" + redisPass + "@localhost:6379/0",
 		MasterKeys:   []MasterKey{{ID: "current", Key: []byte(masterBytes)}},
 	}
 

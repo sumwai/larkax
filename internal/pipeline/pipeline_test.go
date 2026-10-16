@@ -804,6 +804,34 @@ func TestSettleRejectsReservationWithoutInstant(t *testing.T) {
 	}
 }
 
+// 上面那条与「上游失败不计费」撞在一起时，后者胜出。
+//
+// 次序是那条硬规则的一部分：一次不计费的请求，定价基准缺不缺都不该改变结论。
+// 两条检查反过来写的话，一次上游失败会被降级成一句普通错误，而调用方正是按
+// IsUpstreamFailure 决定「这笔钱放回去还是收掉」——它变成 false 的后果是那笔
+// 冻结的钱不再被当成「上游失败」来处理。
+//
+// 两个条件同时出现是**测试造出来的**（真实路径里 RuleMatchedAt 不可能为零，
+// 见 Settle 的注释），所以这条用例钉的是次序本身，不是一条会走到的路径。
+func TestSettleUpstreamFailureOutranksMissingInstant(t *testing.T) {
+	p := newPipeline(t, &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}})
+	req := baseRequest()
+	res, err := p.Reserve(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res.RuleMatchedAt = time.Time{}
+	_, err = p.Settle(context.Background(), req, res, Outcome{
+		UpstreamFailed: true,
+		UpstreamStatus: 503,
+		ErrorCode:      "upstream_unavailable",
+	})
+	if !IsUpstreamFailure(err) {
+		t.Fatalf("err = %v，期望仍被当成「上游失败不计费」", err)
+	}
+}
+
 func TestDefaultAsset(t *testing.T) {
 	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}
 	p := newPipeline(t, src)

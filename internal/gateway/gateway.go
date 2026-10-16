@@ -286,7 +286,6 @@ type handle struct {
 	reserved   *pipeline.Reservation
 	storeID    int64
 	candidates []route.Candidate
-	startedAt  time.Time
 	// settled 记录这次请求有没有结算过。
 	//
 	// 它存在的理由只有一个：让**每一个**返回路径都经过结算。
@@ -307,7 +306,7 @@ type handle struct {
 }
 
 func (g *Gateway) begin(ctx context.Context, req pipeline.Request, upstream *channel.Request) (*handle, error) {
-	h := &handle{g: g, req: req, startedAt: g.now()}
+	h := &handle{g: g, req: req}
 
 	// 候选必须在预留**之前**取：没有候选就没有可用的渠道，
 	// 那种情况下不该冻住用户的钱。

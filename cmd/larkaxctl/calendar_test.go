@@ -60,6 +60,17 @@ func TestRunCalendarImportRequiresOneFile(t *testing.T) {
 	}
 }
 
+// --help 不是失败。flag 解析到 -h / --help 时会打印用法并返回 flag.ErrHelp，
+// 而 main 把任何非 nil 的错误都当成失败（退出码 1）——照着 main.go 的用法
+// 文本跑 `larkaxctl calendar import --help` 的人会以为命令失败了。
+func TestRunCalendarImportHelpSucceeds(t *testing.T) {
+	for _, arg := range []string{"-h", "--help"} {
+		if err := runCalendarImport([]string{arg}); err != nil {
+			t.Errorf("calendar import %s 应当成功返回，实际为 %v", arg, err)
+		}
+	}
+}
+
 func TestRunCalendarImportReportsMissingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "没有这个文件.json")
 	err := runCalendarImport([]string{path})
@@ -73,8 +84,12 @@ func TestRunCalendarImportReportsMissingFile(t *testing.T) {
 
 // 文件本身有问题时，命令必须在**连数据库之前**就失败。
 //
-// 这个用例跑在可能设了 LARKAX_DB_DSN 的环境里（CI 就是那样），所以它同时
+// 这个用例跑在数据库连接串已经配好的环境里（CI 就是那样），所以它同时
 // 证明了失败发生在碰库之前：真去连的话，导入会往测试库里写进一整年的数据。
+//
+// 本包的用例一个都不 skip，所以它不属于「集成测试包」，不进
+// .github/actions/check-integration-tests 的包清单——那里的判据是「测试里
+// 有 t.Skip，且跳过的条件是数据库连接串」。
 func TestRunCalendarImportRejectsBadFileBeforeConnecting(t *testing.T) {
 	cases := []struct {
 		name string
