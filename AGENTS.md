@@ -188,7 +188,28 @@ Review 不只看代码逻辑。让 agent **扮演对项目一无所知的 review
 gofmt -l .                          # 格式
 go vet ./...                        # 标准检查
 golangci-lint run ./...             # 跨文件与语义检查（配置见 .golangci.yml）
-bash scripts/check-redlines.sh      # 公开红线
+go test ./...                       # 单测（有 LARKAX_DB_DSN 时连集成测试一起跑）
+
+bash scripts/check-redlines.sh      # 公开红线：密钥、私有主机、本机路径
+bash scripts/check-layering.sh      # 分层约定：谁 import 谁
+scripts/check-mutation.sh           # 变异测试（改动计费/账本时）
+```
+
+`scripts/check-redlines.sh --all` 扫全树而不是暂存区。改了扫描器本身要跑
+`scripts/check-redlines.test.sh`。
+
+**集成测试需要 `LARKAX_DB_DSN`**。没设时它们会跳过，而**「跳过」在输出里和
+「通过」长得一样**——所以 CI 里专门有一道检查确认它们真的跑了（见
+[LESSONS.md](LESSONS.md) 第 16 条）。本地跑集成测试：
+
+```sh
+docker run -d --name larkax-pg -e POSTGRES_USER=larkax \
+  -e POSTGRES_PASSWORD=placeholder -e POSTGRES_DB=larkax \
+  -p 127.0.0.1:5432:5432 postgres:16-alpine
+
+export LARKAX_DB_DSN="postgres://larkax:placeholder@127.0.0.1:5432/larkax?sslmode=disable"
+go run ./cmd/larkaxctl migrate up
+go test ./internal/ledger/store/
 ```
 
 `golangci-lint` **只开有价值的检查器，不做「全部打开」**——一份报上百条无关警告的
