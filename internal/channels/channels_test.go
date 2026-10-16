@@ -201,7 +201,7 @@ func TestConsecutiveFailuresWithoutTimestampIsTreatedAsExpired(t *testing.T) {
 // ── 额度 ────────────────────────────────────────────────────────────────
 
 // 没有额度行、或 remaining_estimate 为 NULL，都是「查不到额度」。
-// 两者都不能变成「额度是 0」——route 会把 0 当成耗尽并永久排除该渠道。
+// 两者都不能变成「额度是 0」——route 会把 0 当成耗尽并排除该渠道。
 func TestQuotaUnknown(t *testing.T) {
 	cases := map[string]candidateRow{
 		"没有额度行": {remaining: sql.NullString{}},
@@ -216,11 +216,13 @@ func TestQuotaUnknown(t *testing.T) {
 			if err != nil {
 				t.Fatalf("quota 出错: %v", err)
 			}
-			if q.Known {
-				t.Errorf("Known = true，期望 false（未知）；实际 %+v", q)
+			if q.Remaining != nil {
+				t.Errorf("Remaining = %v，期望 nil（未知）；实际 %+v", q.Remaining, q)
 			}
-			if q.Remaining != 0 {
-				t.Errorf("Remaining = %v，期望零值", q.Remaining)
+			// 没有数值就既不是实测也不是推算：Estimated 说的是「这个数
+			// 是怎么来的」，而这里根本没有数。
+			if q.Estimated {
+				t.Errorf("没有数值的状态不该标成推算值；实际 %+v", q)
 			}
 		})
 	}
@@ -239,14 +241,14 @@ func TestQuotaKnownAndEstimated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("quota 出错: %v", err)
 	}
-	if !q.Known || q.Remaining != 12.5 {
-		t.Errorf("quota = %+v，期望已知且为 12.5", q)
+	if q.Remaining == nil || *q.Remaining != 12.5 {
+		t.Errorf("quota = %+v，期望有值且为 12.5", q)
 	}
 	if q.Estimated {
 		t.Error("api_query 是上游实测，不该标成推算值")
 	}
-	if q.ExpiresAt == nil || !q.ExpiresAt.Equal(expires) {
-		t.Errorf("ExpiresAt = %v，期望 %v", q.ExpiresAt, expires)
+	if q.ResetsAt == nil || !q.ResetsAt.Equal(expires) {
+		t.Errorf("ResetsAt = %v，期望 %v", q.ResetsAt, expires)
 	}
 }
 
@@ -301,7 +303,7 @@ func TestQuotaSelfAccountingIsEstimated(t *testing.T) {
 //
 // 这条用例钉住的是**判断顺序**——把 drained 的分支放到 NULL 判断之后，
 // 这一行会落进「未知」，route 照旧会选它。改回旧映射时它必须变红。
-func TestQuotaDrainedWithNullRemainingIsKnownZero(t *testing.T) {
+func TestQuotaDrainedWithNullRemainingIsZero(t *testing.T) {
 	row := candidateRow{
 		remaining:   sql.NullString{},
 		quotaHealth: sql.NullString{String: quotaHealthDrained, Valid: true},
@@ -311,8 +313,8 @@ func TestQuotaDrainedWithNullRemainingIsKnownZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("quota 出错: %v", err)
 	}
-	if !q.Known || q.Remaining != 0 {
-		t.Fatalf("quota = %+v，期望 Known=true、Remaining=0", q)
+	if q.Remaining == nil || *q.Remaining != 0 {
+		t.Fatalf("quota = %+v，期望有值且为 0", q)
 	}
 
 	// 这条映射存在的唯一目的就是让 route 排除它，所以直接断言结果。
@@ -334,8 +336,8 @@ func TestQuotaOtherHealthsKeepRemaining(t *testing.T) {
 			if err != nil {
 				t.Fatalf("quota 出错: %v", err)
 			}
-			if !q.Known || q.Remaining != 4 {
-				t.Errorf("quota = %+v，期望已知且为 4", q)
+			if q.Remaining == nil || *q.Remaining != 4 {
+				t.Errorf("quota = %+v，期望有值且为 4", q)
 			}
 			if reason := (&route.Candidate{Quota: q}).DrainReason(); reason != "" {
 				t.Errorf("health=%q 不该被排除：%s", health, reason)
@@ -349,7 +351,7 @@ func TestQuotaOtherHealthsKeepRemaining(t *testing.T) {
 	if err != nil {
 		t.Fatalf("quota 出错: %v", err)
 	}
-	if q.Known {
+	if q.Remaining != nil {
 		t.Errorf("没有额度行时应是未知，实际 %+v", q)
 	}
 }
@@ -361,8 +363,43 @@ func TestQuotaZeroIsKnown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("quota 出错: %v", err)
 	}
-	if !q.Known || q.Remaining != 0 {
-		t.Errorf("quota = %+v，期望已知且为 0", q)
+	if q.Remaining == nil || *q.Remaining != 0 {
+		t.Errorf("quota = %+v，期望有值且为 0", q)
+	}
+}
+
+// 观测痕迹要原样带出去。
+//
+// 「余量未知」有两种：从来没观测过（上游不支持查询额度），与观测过却没
+// 拿到数值（探针跑了没结果、或只从错误里看到信号）。两者在路由侧是相反的
+// 结论——前者照旧参与，后者不足以支撑决策——而区分它们靠的就是这两列。
+// 早先这两列没有进 State，判据在路由侧退化成「有没有数值」。
+func TestQuotaCarriesObservationTraces(t *testing.T) {
+	probed := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	row := candidateRow{
+		probeKind:     sql.NullString{String: probeKindAPIQuery, Valid: true},
+		lastProbeAt:   sql.NullTime{Time: probed, Valid: true},
+		lastErrorCode: sql.NullString{String: "402", Valid: true},
+	}
+
+	q, err := row.quota()
+	if err != nil {
+		t.Fatalf("quota 出错: %v", err)
+	}
+	if q.Remaining != nil {
+		t.Errorf("Remaining = %v，期望 nil", q.Remaining)
+	}
+	if q.LastProbeAt == nil || !q.LastProbeAt.Equal(probed) {
+		t.Errorf("LastProbeAt = %v，期望 %v", q.LastProbeAt, probed)
+	}
+	if q.LastErrorCode != "402" {
+		t.Errorf("LastErrorCode = %q，期望 402", q.LastErrorCode)
+	}
+
+	// 这一行在 route 眼里是不可路由的：观测过，却没有可用信息。
+	// 直接断言结果，因为「带出这两列」的唯一目的就是这个。
+	if reason := (&route.Candidate{Quota: q}).DrainReason(); reason == "" {
+		t.Error("观测过却没有数值的渠道应被 DrainReason 排除")
 	}
 }
 

@@ -41,6 +41,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/credential"
+	"github.com/sumwai/larkax/internal/quota"
 	"github.com/sumwai/larkax/internal/route"
 )
 
@@ -283,7 +284,9 @@ SELECT
     q.unit,
     q.probe_kind,
     q.health,
-    q.resets_at
+    q.resets_at,
+    q.last_probe_at,
+    q.last_error_code
   FROM channels c
   LEFT JOIN LATERAL (
         SELECT
@@ -339,6 +342,12 @@ type candidateRow struct {
 	probeKind   sql.NullString
 	quotaHealth sql.NullString
 	resetsAt    sql.NullTime
+	// lastProbeAt / lastErrorCode 与 remaining 一起决定 quota.State.Routable：
+	// 「余量未知」有两种，一种是从来没观测过（上游不支持查询额度），
+	// 另一种是观测过却没拿到数值。少带这两列就分不出它们，判据退化成
+	// 「有没有数值」。
+	lastProbeAt   sql.NullTime
+	lastErrorCode sql.NullString
 }
 
 func scanCandidate(rows *sql.Rows) (candidateRow, error) {
@@ -351,6 +360,7 @@ func scanCandidate(rows *sql.Rows) (candidateRow, error) {
 		&row.requests, &row.successes, &row.latencyP95,
 		&row.cost, &row.cacheHit, &row.cacheMiss,
 		&row.remaining, &row.unit, &row.probeKind, &row.quotaHealth, &row.resetsAt,
+		&row.lastProbeAt, &row.lastErrorCode,
 	)
 	if err != nil {
 		return candidateRow{}, fmt.Errorf("读取渠道行失败: %w", err)
@@ -385,7 +395,7 @@ func (row candidateRow) candidate(plaintext string, now time.Time) (route.Candid
 	if err != nil {
 		return route.Candidate{}, fmt.Errorf("渠道 %d 的 setting 不是合法 JSON: %w", row.id, err)
 	}
-	quota, err := row.quota()
+	quotaState, err := row.quota()
 	if err != nil {
 		return route.Candidate{}, err
 	}
@@ -408,7 +418,7 @@ func (row candidateRow) candidate(plaintext string, now time.Time) (route.Candid
 		Priority:     row.priority,
 		Weight:       row.weight,
 		Health:       row.health(now),
-		Quota:        quota,
+		Quota:        quotaState,
 		CostPerUnit:  cost,
 		CacheHitRate: row.cacheHitRate(),
 		// SampleCount 取参与缓存统计的 token 数，而不是请求数。
@@ -472,23 +482,23 @@ func (row candidateRow) consecutiveFailures(now time.Time) int {
 	return row.streak
 }
 
-// quota 把额度快照映射成 channel.Quota。
+// quota 把额度快照映射成 quota.State。
 //
 // # 三态，不是两态
 //
 // 「有额度行且 remaining_estimate 有值」「有额度行但它是 NULL」「根本没有额度行」
 // 里，后两种都是**未知**：NULL 表示这个渠道的额度查不出来（多数订阅制上游
-// 不提供查询接口），不是「额度是 0」。两者都映射成 Known=false。
+// 不提供查询接口），不是「额度是 0」。两者都映射成 Remaining 为 nil。
 //
-// 混掉的后果是具体的：route 的 DrainReason 把「Known 且 Remaining <= 0」
-// 当成「额度已耗尽」直接排除该渠道。把未知当 0 会让所有查不到额度的渠道
-// 一律选不上，而这几乎等于把全部订阅制上游排除在外。
+// 混掉的后果是具体的：route 的 DrainReason 把「有值且 <= 0」当成「额度已
+// 耗尽」直接排除该渠道。把未知当 0 会让所有查不到额度的渠道一律选不上，
+// 而这几乎等于把全部订阅制上游排除在外。
 //
 // # 但 drained 是有信号的那一种，它先判
 //
 // 上面那条说的是**没有信号**时的兜底。health = 'drained' 不是没有信号：
 // 它是上游明确说过「这个渠道没额度了」。有信号就该按事实走，映射成
-// Known=true, Remaining=0，让 DrainReason 把它排除掉。
+// Remaining 为 0，让 DrainReason 把它排除掉。
 //
 // 两者的分界是「有没有观测到」，不是「remaining_estimate 是不是 NULL」：
 // 一行 health='drained' 完全可能同时带着 NULL 的 remaining_estimate
@@ -498,39 +508,54 @@ func (row candidateRow) consecutiveFailures(now time.Time) int {
 //
 // 其余三态（healthy / degraded / unknown）都按原映射走：它们说的不是
 // 「没额度了」。degraded 尤其不能当成 0——那是「不太顺」，不是「用完了」。
-func (row candidateRow) quota() (channel.Quota, error) {
+//
+// # 观测痕迹一并带出去
+//
+// last_probe_at 与 last_error_code 也填进 State：它们与余量一起决定
+// Routable（「从未观测过」与「观测过却没拿到数值」是两回事），
+// 而这两列正是本函数早先丢掉的那两列——丢掉的后果是判据在路由侧退化成
+// 「有没有数值」。
+func (row candidateRow) quota() (quota.State, error) {
+	state := quota.State{
+		ChannelID:     row.id,
+		Unit:          row.unit.String,
+		Kind:          quota.Kind(row.probeKind.String),
+		LastErrorCode: row.lastErrorCode.String,
+	}
+	if row.lastProbeAt.Valid {
+		at := row.lastProbeAt.Time
+		state.LastProbeAt = &at
+	}
+	if row.resetsAt.Valid {
+		reset := row.resetsAt.Time
+		state.ResetsAt = &reset
+	}
+
 	if strings.EqualFold(row.quotaHealth.String, quotaHealthDrained) {
-		return row.knownQuota(0), nil
+		return row.withValue(state, 0), nil
 	}
 	if !row.remaining.Valid {
-		return channel.Quota{}, nil
+		return state, nil
 	}
 	remaining, err := strconv.ParseFloat(row.remaining.String, 64)
 	if err != nil {
-		return channel.Quota{}, fmt.Errorf("渠道 %d 的 remaining_estimate 不是数字（%q）: %w",
+		return quota.State{}, fmt.Errorf("渠道 %d 的 remaining_estimate 不是数字（%q）: %w",
 			row.id, row.remaining.String, err)
 	}
-	return row.knownQuota(remaining), nil
+	return row.withValue(state, remaining), nil
 }
 
-// knownQuota 组装一份「剩余量已知」的额度快照。
+// withValue 填上「有余量」的那两列：余量本身，与它是实测还是推算。
 //
-// drained 与实测值共用它，于是「到期时间怎么填」「推算值怎么标」
-// 只有一处答案——两条路径不该在这里分叉。
-//
-// Unit 原样带出去（列允许为 NULL，那时是空字符串）：Remaining 是一个裸数字，
-// 没有单位就无法与别的候选比较，而 route 只对同一单位的渠道比较余量
-// （见 scoreQuota）。空单位也算一种——它与任何已知单位都不可比。
-func (row candidateRow) knownQuota(remaining float64) channel.Quota {
-	q := channel.Quota{Known: true, Remaining: remaining, Unit: row.unit.String}
-	if row.resetsAt.Valid {
-		reset := row.resetsAt.Time
-		q.ExpiresAt = &reset
-	}
+// drained 与实测值共用它，于是「推算值怎么标」只有一处答案——两条路径
+// 不该在这里分叉。它同时保证 Estimated 只在真的有余量时才有值：
+// 没有数值的状态既不是实测也不是推算。
+func (row candidateRow) withValue(state quota.State, remaining float64) quota.State {
+	state.Remaining = &remaining
 	// 只有 api_query 是上游实测。自记账与「从错误里推断」都是推算，
 	// 而 route 对推算值打折（scoreQuota 的 estimateDiscount）。
-	q.Estimated = !isAPIQuery(row.probeKind.String)
-	return q
+	state.Estimated = !isAPIQuery(row.probeKind.String)
+	return state
 }
 
 // quotaHealthDrained 是「上游说这个渠道没额度了」的 quota health 取值。

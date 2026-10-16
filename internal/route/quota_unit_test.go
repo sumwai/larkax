@@ -2,14 +2,15 @@ package route
 
 import (
 	"testing"
+	"time"
 
-	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/quota"
 )
 
 // 中性分是 0.5，与「查不到额度」同一档。用字面量钉住它，而不是与
-// scoreQuota(Quota{}, …) 相比——那样改掉中性值，两个用例会一起变。
+// scoreQuota(quota.State{}, …) 相比——那样改掉中性值，两个用例会一起变。
 func TestScoreQuotaMixedUnitsIsNeutral(t *testing.T) {
-	q := channel.Quota{Known: true, Remaining: 3, Unit: "money"}
+	q := quotaIn(3, "money")
 
 	if got := scoreQuota(q, true); got != 0.5 {
 		t.Errorf("跨单位时 = %v，期望中性分 0.5", got)
@@ -25,7 +26,7 @@ func TestScoreQuotaMixedUnitsIsNeutral(t *testing.T) {
 // 余量为零是**单位无关**的一档：不管候选集里有几种单位，
 // 「这个渠道没额度了」都该是最低分。
 func TestScoreQuotaZeroIsLowestRegardlessOfUnits(t *testing.T) {
-	q := channel.Quota{Known: true, Remaining: 0, Unit: "money"}
+	q := quotaIn(0, "money")
 
 	if got := scoreQuota(q, true); got != 0 {
 		t.Errorf("跨单位时余量为零 = %v，期望 0", got)
@@ -38,10 +39,10 @@ func TestScoreQuotaZeroIsLowestRegardlessOfUnits(t *testing.T) {
 // 额度未知时是中性分，与单位无关：它既不该因为「不知道」被优先，
 // 也不该被排到最后。
 func TestScoreQuotaUnknownIsNeutral(t *testing.T) {
-	if got := scoreQuota(channel.Quota{}, true); got != 0.5 {
+	if got := scoreQuota(quota.State{}, true); got != 0.5 {
 		t.Errorf("跨单位时未知额度 = %v，期望 0.5", got)
 	}
-	if got := scoreQuota(channel.Quota{}, false); got != 0.5 {
+	if got := scoreQuota(quota.State{}, false); got != 0.5 {
 		t.Errorf("同单位时未知额度 = %v，期望 0.5", got)
 	}
 }
@@ -49,10 +50,10 @@ func TestScoreQuotaUnknownIsNeutral(t *testing.T) {
 // 候选集里有没有多种单位，是**整个集合**的性质。
 func TestMixedQuotaUnits(t *testing.T) {
 	known := func(unit string) Candidate {
-		return candidate(1, "m", withQuota(channel.Quota{Known: true, Remaining: 1, Unit: unit}))
+		return candidate(1, "m", withQuota(quotaIn(1, unit)))
 	}
 	unknown := func() Candidate {
-		return candidate(1, "m", withQuota(channel.Quota{Known: false}))
+		return candidate(1, "m", withQuota(quota.State{}))
 	}
 
 	cases := []struct {
@@ -94,10 +95,10 @@ func TestMixedQuotaUnits(t *testing.T) {
 func TestSelectIgnoresQuotaAcrossUnits(t *testing.T) {
 	cheap := candidate(1, "m",
 		withCost(0.0001),
-		withQuota(channel.Quota{Known: true, Remaining: 1_000_000, Unit: "tokens"}))
+		withQuota(quotaIn(1_000_000, "tokens")))
 	expensive := candidate(2, "m",
 		withCost(1),
-		withQuota(channel.Quota{Known: true, Remaining: 0.1, Unit: "money"}))
+		withQuota(quotaIn(0.1, "money")))
 
 	plan := seededRouter(1).Select([]Candidate{expensive, cheap}, "m")
 	if len(plan.Candidates) != 2 {
@@ -113,11 +114,95 @@ func TestSelectIgnoresQuotaAcrossUnits(t *testing.T) {
 //
 // 两个候选只有余量不同，余量少的更紧迫，所以先选。
 func TestSelectComparesQuotaWithinSameUnit(t *testing.T) {
-	scarce := candidate(1, "m", withQuota(channel.Quota{Known: true, Remaining: 0.1, Unit: "money"}))
-	plenty := candidate(2, "m", withQuota(channel.Quota{Known: true, Remaining: 10_000, Unit: "money"}))
+	scarce := candidate(1, "m", withQuota(quotaIn(0.1, "money")))
+	plenty := candidate(2, "m", withQuota(quotaIn(10_000, "money")))
 
 	plan := seededRouter(1).Select([]Candidate{plenty, scarce}, "m")
 	if got := plan.Candidates[0].Channel.ID; got != 1 {
 		t.Errorf("排在第一的是渠道 %d，期望 1（同单位时余量少的先选）", got)
+	}
+}
+
+// ── 判断那一半：route 与 internal/quota 的语义差异 ──────────────────────
+//
+// route 早先自己重写了一遍额度判断（读 Known / Remaining 再判），
+// 现在改成调 quota.State 的 Routable / Usable。下面几条把两处语义的
+// 每一个格子都钉住——差异表见交付报告，这里是它的可执行形态。
+
+// 余量为 0 与余量为负都算「不可用」：前者是见底，后者只可能来自手工写入
+// （写入路径上 Validate 会拒绝负值），但对路由来说都是「别选它」。
+func TestDrainReasonQuotaNotUsable(t *testing.T) {
+	cases := []struct {
+		name string
+		q    quota.State
+	}{
+		{"余量恰好为零", quotaLeft(0)},
+		{"余量为负", quotaLeft(-1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := candidate(1, "m", withQuota(tc.q))
+			if reason := c.DrainReason(); reason != "额度已耗尽" {
+				t.Errorf("DrainReason = %q，期望「额度已耗尽」", reason)
+			}
+		})
+	}
+}
+
+// 「从未观测过」与「观测过却没拿到数值」是两回事：
+// 前者是上游不支持查询额度，不该被扣分；后者是状态不足以支撑决策，挡下。
+//
+// 这一格就是 route 与 quota 唯一的语义差异。早先 route 的输入类型
+// （channel.Quota）只有一个 Known 布尔，两者在它眼里长得一样。
+func TestDrainReasonDistinguishesNeverObservedFromObservedWithoutValue(t *testing.T) {
+	never := candidate(1, "m", withQuota(quota.State{}))
+	if reason := never.DrainReason(); reason != "" {
+		t.Errorf("从未观测过不该被挡下，实际原因: %q", reason)
+	}
+
+	observed := candidate(2, "m", withQuota(quotaObservedNoValue()))
+	if reason := observed.DrainReason(); reason != "额度观测过但没有可用信息" {
+		t.Errorf("观测过却没有数值应当被挡下，实际原因: %q", reason)
+	}
+
+	// 同一个判据的另一半：从错误里看到的信号也算「观测过」。
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	errored := candidate(3, "m", withQuota(quota.State{LastErrorCode: "402", LastErrorAt: &at}))
+	if reason := errored.DrainReason(); reason != "额度观测过但没有可用信息" {
+		t.Errorf("有错误码却没有数值应当被挡下，实际原因: %q", reason)
+	}
+}
+
+// 被挡下的候选不进 Plan，而不是以「分数低」的形式留在里面。
+//
+// 判断与排序是两个角色：一个注定失败的候选不该靠分数排在最后——
+// 候选集里只剩它的时候，它就会被选中。
+func TestSelectExcludesObservedWithoutValue(t *testing.T) {
+	observed := candidate(1, "m", withQuota(quotaObservedNoValue()))
+	healthy := candidate(2, "m", withQuota(quotaLeft(100)))
+
+	plan := seededRouter(1).Select([]Candidate{observed, healthy}, "m")
+	if len(plan.Candidates) != 1 || plan.Candidates[0].Channel.ID != 2 {
+		t.Fatalf("候选集 = %v，期望只剩渠道 2", plan.Candidates)
+	}
+	if len(plan.Excluded) != 1 || plan.Excluded[0].ChannelID != 1 {
+		t.Fatalf("Excluded = %v，期望记下渠道 1", plan.Excluded)
+	}
+	if plan.Excluded[0].Reason != "额度观测过但没有可用信息" {
+		t.Errorf("Excluded 原因 = %q", plan.Excluded[0].Reason)
+	}
+}
+
+// 余量未知但从未观测过：既不排除，也不进跨单位的比较集合。
+func TestSelectKeepsNeverObservedQuota(t *testing.T) {
+	never := candidate(1, "m", withQuota(quota.State{}))
+	money := candidate(2, "m", withQuota(quotaIn(10, "money")))
+
+	plan := seededRouter(1).Select([]Candidate{never, money}, "m")
+	if len(plan.Candidates) != 2 {
+		t.Fatalf("候选数 = %d，期望 2——查不到额度不等于没有额度", len(plan.Candidates))
+	}
+	if len(plan.Excluded) != 0 {
+		t.Errorf("Excluded = %v，期望空", plan.Excluded)
 	}
 }

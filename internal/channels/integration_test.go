@@ -330,8 +330,8 @@ func TestCandidatesIncludesHealthAndQuota(t *testing.T) {
 	if c.Health.ConsecutiveFailures != 0 {
 		t.Errorf("ConsecutiveFailures = %d，期望 0", c.Health.ConsecutiveFailures)
 	}
-	if !c.Quota.Known || c.Quota.Remaining != 12.5 {
-		t.Errorf("Quota = %+v，期望已知且为 12.5", c.Quota)
+	if c.Quota.Remaining == nil || *c.Quota.Remaining != 12.5 {
+		t.Errorf("Quota = %+v，期望有值且为 12.5", c.Quota)
 	}
 	// 单位要一起带出来：Remaining 是裸数字，没有单位 route 就不知道它
 	// 能不能与别的候选比较。
@@ -455,7 +455,7 @@ func TestCandidatesWithoutHealthOrQuotaIsUnknown(t *testing.T) {
 	if c.Health.SuccessRate != 0 || c.Health.LatencyP95 != 0 || c.Health.ConsecutiveFailures != 0 {
 		t.Errorf("健康度应为零值（未知），实际 %+v", c.Health)
 	}
-	if c.Quota.Known {
+	if c.Quota.Remaining != nil {
 		t.Errorf("没有额度行时应是未知，实际 %+v", c.Quota)
 	}
 	if reason := c.DrainReason(); reason != "" {
@@ -480,7 +480,7 @@ func TestCandidatesNullRemainingIsUnknown(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("候选数 = %d，期望 1", len(got))
 	}
-	if got[0].Quota.Known {
+	if got[0].Quota.Remaining != nil {
 		t.Errorf("remaining_estimate 为 NULL 时应是未知，实际 %+v", got[0].Quota)
 	}
 }
@@ -489,7 +489,7 @@ func TestCandidatesNullRemainingIsUnknown(t *testing.T) {
 // 也要映射成「已知且为 0」，让 route 把它排除。
 //
 // 这条同时证明查询里真的取回了 q.health——少扫一列会在这里露出来。
-func TestCandidatesDrainedQuotaIsKnownZero(t *testing.T) {
+func TestCandidatesDrainedQuotaIsZero(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
@@ -506,8 +506,8 @@ func TestCandidatesDrainedQuotaIsKnownZero(t *testing.T) {
 		t.Fatalf("候选数 = %d，期望 1", len(got))
 	}
 	q := got[0].Quota
-	if !q.Known || q.Remaining != 0 {
-		t.Fatalf("Quota = %+v，期望 Known=true、Remaining=0", q)
+	if q.Remaining == nil || *q.Remaining != 0 {
+		t.Fatalf("Quota = %+v，期望有值且为 0", q)
 	}
 	if reason := got[0].DrainReason(); reason == "" {
 		t.Error("drained 的渠道应被 DrainReason 排除")

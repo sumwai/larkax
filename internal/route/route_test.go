@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/quota"
 )
 
 func candidate(id int64, model string, opts ...func(*Candidate)) Candidate {
@@ -32,16 +33,38 @@ func candidate(id int64, model string, opts ...func(*Candidate)) Candidate {
 	return c
 }
 
-func withPriority(p int) func(*Candidate)        { return func(c *Candidate) { c.Priority = p } }
-func withType(t string) func(*Candidate)         { return func(c *Candidate) { c.Channel.Type = t } }
-func withHealth(h Health) func(*Candidate)       { return func(c *Candidate) { c.Health = h } }
-func withQuota(q channel.Quota) func(*Candidate) { return func(c *Candidate) { c.Quota = q } }
-func withCost(v float64) func(*Candidate)        { return func(c *Candidate) { c.CostPerUnit = v } }
+func withPriority(p int) func(*Candidate)      { return func(c *Candidate) { c.Priority = p } }
+func withType(t string) func(*Candidate)       { return func(c *Candidate) { c.Channel.Type = t } }
+func withHealth(h Health) func(*Candidate)     { return func(c *Candidate) { c.Health = h } }
+func withQuota(q quota.State) func(*Candidate) { return func(c *Candidate) { c.Quota = q } }
+func withCost(v float64) func(*Candidate)      { return func(c *Candidate) { c.CostPerUnit = v } }
 func withLatency(d time.Duration) func(*Candidate) {
 	return func(c *Candidate) { c.Health.LatencyP95 = d }
 }
 func withCache(rate float64, n int64) func(*Candidate) {
 	return func(c *Candidate) { c.CacheHitRate, c.SampleCount = rate, n }
+}
+
+// quotaLeft 造一个「有数值、单位未知」的额度状态。
+func quotaLeft(remaining float64) quota.State {
+	return quota.State{Remaining: &remaining}
+}
+
+// quotaIn 造一个「有数值、单位已知」的额度状态。
+func quotaIn(remaining float64, unit string) quota.State {
+	return quota.State{Remaining: &remaining, Unit: unit}
+}
+
+// quotaExpiring 造一个「有数值、有到期时间」的额度状态。
+func quotaExpiring(remaining float64, at time.Time) quota.State {
+	return quota.State{Remaining: &remaining, ResetsAt: &at}
+}
+
+// quotaObservedNoValue 造一个「观测过、却没有任何可用信息」的额度状态：
+// 探针跑过（或从错误里看到过信号），但余量仍然是未知。
+func quotaObservedNoValue() quota.State {
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	return quota.State{LastProbeAt: &at}
 }
 
 func seededRouter(seed int64) *Router {
@@ -106,12 +129,12 @@ func TestSingleFailureDoesNotDrain(t *testing.T) {
 
 // 额度耗尽与「查不到额度」是两件事。
 func TestQuotaExhaustionVsUnknown(t *testing.T) {
-	exhausted := candidate(1, "m", withQuota(channel.Quota{Known: true, Remaining: 0}))
+	exhausted := candidate(1, "m", withQuota(quotaLeft(0)))
 	if reason := exhausted.DrainReason(); reason == "" {
 		t.Error("额度耗尽应当被挡下")
 	}
 
-	unknown := candidate(2, "m", withQuota(channel.Quota{Known: false}))
+	unknown := candidate(2, "m", withQuota(quota.State{}))
 	if reason := unknown.DrainReason(); reason != "" {
 		t.Errorf("查不到额度不该被挡下，实际原因: %s", reason)
 	}
@@ -204,12 +227,8 @@ func TestNoHistoryIsNeutral(t *testing.T) {
 func TestQuotaPrefersScarceAndSoonExpiring(t *testing.T) {
 	r := seededRouter(1)
 
-	plenty := r.Score(candidate(1, "m", withQuota(channel.Quota{
-		Known: true, Remaining: 1000, ExpiresAt: ptr(time.Now().Add(300 * 24 * time.Hour)),
-	})))
-	scarceSoon := r.Score(candidate(2, "m", withQuota(channel.Quota{
-		Known: true, Remaining: 5, ExpiresAt: ptr(time.Now().Add(time.Hour)),
-	})))
+	plenty := r.Score(candidate(1, "m", withQuota(quotaExpiring(1000, time.Now().Add(300*24*time.Hour)))))
+	scarceSoon := r.Score(candidate(2, "m", withQuota(quotaExpiring(5, time.Now().Add(time.Hour)))))
 	if scarceSoon <= plenty {
 		t.Errorf("余额少且快到期(%v) 应高于余额充足(%v)", scarceSoon, plenty)
 	}
@@ -218,8 +237,8 @@ func TestQuotaPrefersScarceAndSoonExpiring(t *testing.T) {
 // 估算的额度不如实测可信，但不该被完全排除——它仍然比「完全不知道」有用。
 func TestEstimatedQuotaIsDiscountedNotExcluded(t *testing.T) {
 	r := seededRouter(1)
-	measured := r.Score(candidate(1, "m", withQuota(channel.Quota{Known: true, Remaining: 5})))
-	estimated := r.Score(candidate(2, "m", withQuota(channel.Quota{Known: true, Remaining: 5, Estimated: true})))
+	measured := r.Score(candidate(1, "m", withQuota(quotaLeft(5))))
+	estimated := r.Score(candidate(2, "m", withQuota(quota.State{Remaining: ptr(5.0), Estimated: true})))
 
 	if estimated >= measured {
 		t.Error("估算值应被打折")
@@ -779,17 +798,17 @@ func TestScoreCacheClampsOutOfRange(t *testing.T) {
 
 // 额度：恰好耗尽是最低分，而「查不到」是中性、必须高于它。
 //
-// 变异：`q.Remaining <= 0` 改成 `< 0`，恰好耗尽时不再给最低分。
+// 变异：`q.Usable()` 那一档被去掉，恰好耗尽时会走反比函数得到**最高**分。
 func TestScoreQuotaExhaustedIsLowest(t *testing.T) {
-	exhausted := defaultScore(t, candidate(1, "m", withQuota(channel.Quota{Known: true, Remaining: 0})))
-	unknown := defaultScore(t, candidate(2, "m", withQuota(channel.Quota{Known: false})))
+	exhausted := defaultScore(t, candidate(1, "m", withQuota(quotaLeft(0))))
+	unknown := defaultScore(t, candidate(2, "m", withQuota(quota.State{})))
 
 	if exhausted >= unknown {
 		t.Errorf("耗尽(%v) 应低于未知(%v)——「查不到」不等于「没有」", exhausted, unknown)
 	}
 
 	// 恰好耗尽与「只剩极小量」应当不同（前者是零，后者还有一点）
-	tiny := defaultScore(t, candidate(3, "m", withQuota(channel.Quota{Known: true, Remaining: 0.000001})))
+	tiny := defaultScore(t, candidate(3, "m", withQuota(quotaLeft(0.000001))))
 	if exhausted >= tiny {
 		t.Errorf("恰好耗尽(%v) 应低于只剩极小量(%v)", exhausted, tiny)
 	}
@@ -797,12 +816,12 @@ func TestScoreQuotaExhaustedIsLowest(t *testing.T) {
 
 // 额度紧迫度：剩余越少分越高，且**严格**单调。
 //
-// 变异：`1.0/(1.0+q.Remaining)` 里的加数被去掉，剩余 0 会除以零得到
+// 变异：`1.0/(1.0+*q.Remaining)` 里的加数被去掉，剩余 0 会除以零得到
 // +Inf；而严格单调能钉住这条曲线的形状。
 func TestScoreQuotaStrictlyIncreasingAsRemainingShrinks(t *testing.T) {
 	var prev float64 = -1
 	for _, remaining := range []float64{10000, 1000, 100, 10, 1, 0.1} {
-		got := defaultScore(t, candidate(1, "m", withQuota(channel.Quota{Known: true, Remaining: remaining})))
+		got := defaultScore(t, candidate(1, "m", withQuota(quotaLeft(remaining))))
 		if got <= prev {
 			t.Fatalf("剩余 %v 的分数 %v 未高于上一档 %v", remaining, got, prev)
 		}
@@ -813,7 +832,7 @@ func TestScoreQuotaStrictlyIncreasingAsRemainingShrinks(t *testing.T) {
 // 额度恰好归零时分数必须是有限的——除以零会给出 +Inf，
 // 而 +Inf 一旦进排序，那个渠道会排到所有渠道前面。
 func TestScoreQuotaZeroRemainingIsFinite(t *testing.T) {
-	got := defaultScore(t, candidate(1, "m", withQuota(channel.Quota{Known: true, Remaining: 0})))
+	got := defaultScore(t, candidate(1, "m", withQuota(quotaLeft(0))))
 	if math.IsInf(got, 0) || math.IsNaN(got) {
 		t.Errorf("额度耗尽时分数 = %v，不该是 Inf 或 NaN", got)
 	}
