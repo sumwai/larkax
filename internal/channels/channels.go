@@ -15,6 +15,12 @@
 // 本包是全仓库唯一真正调用 internal/credential 解密的地方。明文只进
 // channel.Channel.Credential 交给适配器，不进日志、不进错误信息。
 //
+// # 管理面
+//
+// Source 只有读取路径。创建、修改、列举、启停渠道在 Admin 上（见 admin.go），
+// 它不在请求热路径上，也不改变 Source 的行为。两个类型读的是同一套列，
+// 由同一批辅助函数解码。
+//
 // # 取一次，不逐个查
 //
 // 候选通常是几个到几十个，一次查询把所有渠道连同健康度、额度一起取回来。
@@ -347,10 +353,25 @@ func scanCandidate(rows *sql.Rows) (candidateRow, error) {
 	if err != nil {
 		return candidateRow{}, fmt.Errorf("读取渠道行失败: %w", err)
 	}
-	if err := json.Unmarshal([]byte(row.modelsJSON), &row.models); err != nil {
-		return candidateRow{}, fmt.Errorf("渠道 %d 的 models 不是合法的 JSON 数组: %w", row.id, err)
+	models, err := decodeModels(row.id, row.modelsJSON)
+	if err != nil {
+		return candidateRow{}, err
 	}
+	row.models = models
 	return row, nil
+}
+
+// decodeModels 解开 models 列的 JSON 文本。
+//
+// 查询里用 array_to_json 把它转成文本（database/sql 不认 text[]），
+// 所以两处查询都要按同一个假设解回来。写路径也走这个函数：两边对同一列的
+// 读法不一致时，症状是「写进去的值读出来不对」，而那只在某些行上出现。
+func decodeModels(channelID int64, modelsJSON string) ([]string, error) {
+	var models []string
+	if err := json.Unmarshal([]byte(modelsJSON), &models); err != nil {
+		return nil, fmt.Errorf("渠道 %d 的 models 不是合法的 JSON 数组: %w", channelID, err)
+	}
+	return models, nil
 }
 
 // candidate 把一行映射成一个候选。
