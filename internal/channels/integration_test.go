@@ -821,14 +821,14 @@ func TestMigrationRejectsExistingDuplicateAliases(t *testing.T) {
 	defer func() { _ = tx.Rollback() }()
 
 	for _, idx := range []string{aliasChannelCanonicalUnique, aliasPlatformCanonicalUnique} {
-		if _, err := tx.ExecContext(ctx, `DROP INDEX `+idx); err != nil {
+		if _, err = tx.ExecContext(ctx, `DROP INDEX `+idx); err != nil {
 			t.Fatalf("删掉索引 %s 失败: %v", idx, err)
 		}
 	}
 
 	// 两类重复各造一组：同一个规范名在同一个渠道下有两个上游名，
 	// 以及平台级下同样的一对。
-	if _, err := tx.ExecContext(ctx,
+	if _, err = tx.ExecContext(ctx,
 		`INSERT INTO model_catalog (canonical_name, display_name) VALUES ($1, $1)`,
 		model); err != nil {
 		t.Fatalf("插入模型目录失败: %v", err)
@@ -842,7 +842,7 @@ func TestMigrationRejectsExistingDuplicateAliases(t *testing.T) {
 		{nil, "up-c-" + model},
 		{nil, "up-d-" + model},
 	} {
-		if _, err := tx.ExecContext(ctx, `
+		if _, err = tx.ExecContext(ctx, `
 			INSERT INTO model_aliases (channel_id, upstream_model, canonical_name)
 			VALUES ($1, $2, $3)`, dup.channelID, dup.upstream, model); err != nil {
 			t.Fatalf("造重复数据失败: %v", err)
@@ -851,7 +851,7 @@ func TestMigrationRejectsExistingDuplicateAliases(t *testing.T) {
 
 	// 迁移报错之后整个事务会被 PostgreSQL 置为 aborted，后面什么都查不了，
 	// 所以先打一个保存点：报错后回到这里，事务恢复可用，造的重复数据还在。
-	if _, err := tx.ExecContext(ctx, `SAVEPOINT before_migration`); err != nil {
+	if _, err = tx.ExecContext(ctx, `SAVEPOINT before_migration`); err != nil {
 		t.Fatalf("打保存点失败: %v", err)
 	}
 
