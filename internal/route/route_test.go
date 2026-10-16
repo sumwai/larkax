@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"strings"
 	"testing"
@@ -591,6 +592,173 @@ func TestWrapStreamStartedPassesEventsThrough(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("第 %d 个事件 = %q，期望 %q", i, got[i], want[i])
+		}
+	}
+}
+
+// ── 变异测试补的用例 ────────────────────────────────────────────────────
+//
+// 来自变异测试（gremlins unleash）：`internal/route` 的 Test efficacy 是
+// 68%，`internal/quota` 是 79%。存活变异集中在打分函数的**边界**上。
+//
+// 原有用例全是「A 明显比 B 好」这种相对断言，于是把某个 `<=` 改成 `<`、
+// 把某个常量改掉，只要相对顺序不变就测不出来。而选路的分差直接决定
+// 走哪个渠道，也就直接决定成本。
+
+// 打分用的是 DefaultWeights；这个断言让「权重被改」在这里就失败，
+// 而不是表现为线上流量悄悄换了渠道。
+func defaultScore(t *testing.T, c Candidate) float64 {
+	t.Helper()
+	r := &Router{Rand: rand.New(rand.NewSource(1))}
+	return r.Score(c)
+}
+
+// 成功率为 0 与「没有样本」必须给同一个中性分。
+//
+// 变异：`base <= 0` 改成 `< 0`，恰好为 0 时不再给 0.5 而是直接用 0——
+// 一个「成功率 0%」的渠道会被额外惩罚，而它可能只是样本数为 0。
+func TestScoreHealthZeroSuccessRateIsNeutral(t *testing.T) {
+	zero := defaultScore(t, candidate(1, "m", withHealth(Health{SuccessRate: 0})))
+	half := defaultScore(t, candidate(2, "m", withHealth(Health{SuccessRate: 0.5})))
+	if zero != half {
+		t.Errorf("成功率为 0 应与中性的 0.5 等价：%v vs %v", zero, half)
+	}
+}
+
+// 连续失败次数单调压低分数，且**严格递减**（不只是不增）。
+//
+// 变异：把 `1.0/(1.0+f)` 改成 `1.0/f` 之类的写法在 f=0 时行为不同；
+// 把分母的加数去掉则 f=0 与 f=1 的差会变。严格递减能钉住曲线形状。
+func TestScoreHealthStrictlyDecreasingInFailures(t *testing.T) {
+	prev := defaultScore(t, candidate(1, "m", withHealth(Health{SuccessRate: 0.9, ConsecutiveFailures: 0})))
+	for f := 1; f <= 5; f++ {
+		got := defaultScore(t, candidate(1, "m", withHealth(Health{SuccessRate: 0.9, ConsecutiveFailures: f})))
+		if got >= prev {
+			t.Fatalf("失败 %d 次的分数 %v 未低于 %d 次的 %v", f, got, f-1, prev)
+		}
+		prev = got
+	}
+}
+
+// 延迟恰好为 0 是「未知」，不是「最快」。
+//
+// 变异：`p95 <= 0` 改成 `< 0`，未知延迟会走反比函数得到满分类的值——
+// 一个没测过延迟的渠道会被当成最快的。
+func TestScoreLatencyUnknownIsNotPerfect(t *testing.T) {
+	unknown := defaultScore(t, candidate(1, "m", withLatency(0)))
+	veryFast := defaultScore(t, candidate(2, "m", withLatency(time.Millisecond)))
+	if unknown >= veryFast {
+		t.Errorf("未知延迟(%v) 不该高于实测极快(%v)——未知不等于最快", unknown, veryFast)
+	}
+}
+
+// 缓存样本数的阈值是「恰好达到即生效」。
+//
+// 变异：`sampleCount < minSamples` 改成 `<=`，恰好达到阈值的渠道
+// 会被当成样本不足——而阈值本身就是为了「样本足够」而定的。
+func TestScoreCacheThresholdIsInclusiveAt20(t *testing.T) {
+	at20 := defaultScore(t, candidate(1, "m", withCache(1.0, 20)))
+	at19 := defaultScore(t, candidate(2, "m", withCache(1.0, 19)))
+	if at20 == at19 {
+		t.Errorf("样本 20 与 19 应给出不同分数（阈值恰好生效）：%v vs %v", at20, at19)
+	}
+}
+
+// 命中率超出 [0,1] 要被夹住，而不是产生越界分数。
+//
+// 变异：`hitRate < 0` 或 `hitRate > 1` 被改成别的，越界值会直接进分数，
+// 而 2.0 的命中率能让一个渠道的分数超过满分。
+func TestScoreCacheClampsOutOfRange(t *testing.T) {
+	max := defaultScore(t, candidate(1, "m", withCache(1.0, 100)))
+	over := defaultScore(t, candidate(2, "m", withCache(5.0, 100)))
+	if over != max {
+		t.Errorf("命中率超过 1 应夹到 1：%v vs %v", over, max)
+	}
+
+	min := defaultScore(t, candidate(3, "m", withCache(0.0, 100)))
+	under := defaultScore(t, candidate(4, "m", withCache(-1.0, 100)))
+	if under != min {
+		t.Errorf("命中率低于 0 应夹到 0：%v vs %v", under, min)
+	}
+}
+
+// 额度：恰好耗尽是最低分，而「查不到」是中性、必须高于它。
+//
+// 变异：`q.Remaining <= 0` 改成 `< 0`，恰好耗尽时不再给最低分。
+func TestScoreQuotaExhaustedIsLowest(t *testing.T) {
+	exhausted := defaultScore(t, candidate(1, "m", withQuota(channel.Quota{Known: true, Remaining: 0})))
+	unknown := defaultScore(t, candidate(2, "m", withQuota(channel.Quota{Known: false})))
+
+	if exhausted >= unknown {
+		t.Errorf("耗尽(%v) 应低于未知(%v)——「查不到」不等于「没有」", exhausted, unknown)
+	}
+
+	// 恰好耗尽与「只剩极小量」应当不同（前者是零，后者还有一点）
+	tiny := defaultScore(t, candidate(3, "m", withQuota(channel.Quota{Known: true, Remaining: 0.000001})))
+	if exhausted >= tiny {
+		t.Errorf("恰好耗尽(%v) 应低于只剩极小量(%v)", exhausted, tiny)
+	}
+}
+
+// 额度紧迫度：剩余越少分越高，且**严格**单调。
+//
+// 变异：`1.0/(1.0+q.Remaining)` 里的加数被去掉，剩余 0 会除以零得到
+// +Inf；而严格单调能钉住这条曲线的形状。
+func TestScoreQuotaStrictlyIncreasingAsRemainingShrinks(t *testing.T) {
+	var prev float64 = -1
+	for _, remaining := range []float64{10000, 1000, 100, 10, 1, 0.1} {
+		got := defaultScore(t, candidate(1, "m", withQuota(channel.Quota{Known: true, Remaining: remaining})))
+		if got <= prev {
+			t.Fatalf("剩余 %v 的分数 %v 未高于上一档 %v", remaining, got, prev)
+		}
+		prev = got
+	}
+}
+
+// 额度恰好归零时分数必须是有限的——除以零会给出 +Inf，
+// 而 +Inf 一旦进排序，那个渠道会排到所有渠道前面。
+func TestScoreQuotaZeroRemainingIsFinite(t *testing.T) {
+	got := defaultScore(t, candidate(1, "m", withQuota(channel.Quota{Known: true, Remaining: 0})))
+	if math.IsInf(got, 0) || math.IsNaN(got) {
+		t.Errorf("额度耗尽时分数 = %v，不该是 Inf 或 NaN", got)
+	}
+}
+
+// 零成本是「未知」，不是「免费」——它给中性分，而不是满分。
+//
+// 变异：`cost <= 0` 改成 `< 0`，成本未知的渠道会走反比函数得到满分数。
+func TestScoreCostUnknownIsNotPerfect(t *testing.T) {
+	unknown := defaultScore(t, candidate(1, "m", withCost(0)))
+	nearlyFree := defaultScore(t, candidate(2, "m", withCost(0.000001)))
+	if unknown >= nearlyFree {
+		t.Errorf("未知成本(%v) 不该高于实测近乎免费(%v)", unknown, nearlyFree)
+	}
+}
+
+// 同分的打散必须**由注入的随机源驱动**。
+//
+// 变异：`if r.Rand != nil` 改成 `== nil`，注入的种子源被忽略、
+// 改用全局随机——那会让测试不可复现，而「可复现」正是注入 Rand 的目的。
+func TestShuffleUsesInjectedRand(t *testing.T) {
+	cands := []Candidate{candidate(1, "m"), candidate(2, "m"), candidate(3, "m")}
+
+	// 同一个种子跑两次，顺序必须一致
+	order := func() []int64 {
+		r := seededRouter(42)
+		plan := r.Select(cands, "m")
+		out := make([]int64, 0, len(plan.Candidates))
+		for _, c := range plan.Candidates {
+			out = append(out, c.Channel.ID)
+		}
+		return out
+	}
+	a, b := order(), order()
+	if len(a) != len(b) {
+		t.Fatal("两次长度不同")
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatalf("同一个种子两次结果不同：%v vs %v", a, b)
 		}
 	}
 }
