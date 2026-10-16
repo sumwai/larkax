@@ -96,8 +96,16 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 	defer cancel()
 
 	est := tokens.NewStreamEstimator(g.Counter, upstream.Model)
+	// 估算器的方法不收 ctx，下面三处也不给它传一个——这是有意的，不是漏了：
+	// 它们全是纯内存累加，唯一的 I/O 是词表加载，而那发生在 Counter 构造与
+	// Prepare 阶段，不在这条路径上（见 tokens.StreamEstimator 的注释）。
+	//
+	// 硬塞一个 ctx 反而有害：这里手上只有请求 ctx，而它恰恰是**客户端断开时
+	// 被取消**的那个，让估算可取消就等于「断开时少记一笔账」——方向正好反了。
+	//
 	// 输入侧在这里一次性算好。拼的是**整个请求的正文**，只传最后一条消息
 	// 是这一层最常见的错误——一个 agent 循环里输入是输出的几十倍。
+	//nolint:contextcheck // 估算不碰 ctx，理由见上
 	est.ObserveRequest(upstream.PromptText(), len(upstream.Messages), len(upstream.Tools))
 
 	var (
@@ -120,10 +128,12 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 		switch ev.Kind {
 		case "delta":
 			started = true
+			//nolint:contextcheck // 估算不碰 ctx，理由见本函数开头
 			est.ObserveDelta(ev.Text)
 		case "tool_use":
 			started = true
 			if ev.ToolCall != nil {
+				//nolint:contextcheck // 估算不碰 ctx，理由见本函数开头
 				est.ObserveToolCall(ev.ToolCall.ID, ev.ToolCall.Name, ev.ToolCall.Arguments)
 			}
 		case "usage":
@@ -190,14 +200,14 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 }
 
 // billStream 结算一次要计费的流式请求。
-func (g *Gateway) billStream(ctx context.Context, h *handle, res *Result, usage channel.Usage, source tokens.Source, cancelled bool) {
+func (g *Gateway) billStream(ctx context.Context, h *handle, res *Result, usage channel.Usage, source tokens.Source, canceled bool) {
 	charge, err := g.finishCharge(ctx, h, res.Channel, pipeline.Outcome{
 		Usage:       usage,
 		UsageSource: source,
-		// ClientCancelled 只描述「客户端中途断开」这一种结局，别拿它当
+		// ClientCanceled 只描述「客户端中途断开」这一种结局，别拿它当
 		// 「用量是估的」用：上游中途报错时用量同样是估的，但那不是客户端
 		// 断的——两者在对账与告警上是两回事（见 pipeline.Outcome 的注释）。
-		ClientCancelled: cancelled,
+		ClientCanceled: canceled,
 	})
 	if err != nil {
 		// 结算落库失败：账算出来了但没记下，而钱是真金白银。调用方那边流

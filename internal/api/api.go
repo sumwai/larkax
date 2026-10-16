@@ -355,7 +355,7 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, protocol c
 		return rc.Flush()
 	}
 
-	if err := emit(renderer.Start(w)); err != nil {
+	if err := emit(renderer.start(w)); err != nil {
 		// 连第一帧都写不出去，说明调用方已经不在了。事件流仍然要读空。
 		observe.FromContext(r.Context()).Warn("写首帧失败", "err", err)
 		drainStream(res.Events)
@@ -369,7 +369,7 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, protocol c
 		if ev.Kind == "done" {
 			done = true
 		}
-		if err := emit(renderer.Event(w, ev)); err != nil {
+		if err := emit(renderer.event(w, ev)); err != nil {
 			// 写不出去：调用方多半已经断开。剩下的不再写，但**必须把事件流
 			// 读空**——网关的转发 goroutine 阻塞在发送上，不读空它就不会
 			// 结算，那笔预留也就一直冻着。
@@ -379,7 +379,7 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, protocol c
 		}
 	}
 	if done {
-		if err := emit(renderer.Finish(w)); err != nil {
+		if err := emit(renderer.finish(w)); err != nil {
 			observe.FromContext(r.Context()).Warn("写结束帧失败", "err", err)
 		}
 	}

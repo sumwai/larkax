@@ -289,6 +289,9 @@ func anthropicStreamBody(model string) []byte {
 // 返回响应而不是读完的体：流式的断言要看着帧**一帧帧**到，全读进内存再切
 // 就测不出「有没有边生成边发」。取消函数是「客户端中途断开」那条用例的全部
 // 手段——真实的断开就是客户端关连接，在这里等于取消请求的 context。
+//
+// **响应体由调用方负责关**（读完帧之后 defer）。它不替调用方关，因为「读完了」
+// 这个时刻只有调用方知道：中途断开那条用例正是要留着一个没读完的体。
 func openStream(t *testing.T, url, key string, body []byte) (*http.Response, context.CancelFunc) {
 	t.Helper()
 
@@ -306,10 +309,9 @@ func openStream(t *testing.T, url, key string, body []byte) (*http.Response, con
 		cancel()
 		t.Fatalf("发流式请求失败: %v", err)
 	}
-	t.Cleanup(func() {
-		cancel()
-		_ = resp.Body.Close()
-	})
+	// 响应体**不在这里关**，由调用点关：流式的体一直挂到流结束，而「读到该读的
+	// 东西了」只有调用方知道是哪个时刻。这里替它关掉会让「读到一半就断开」
+	// 那条用例连读都读不下去。
 	return resp, cancel
 }
 
@@ -569,7 +571,9 @@ func TestStreamChatCompletionsEndToEnd(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	resp, _ := openStream(t, public.URL+"/v1/chat/completions", key, streamBody(model))
+	resp, cancel := openStream(t, public.URL+"/v1/chat/completions", key, streamBody(model))
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", resp.StatusCode, body)
@@ -682,7 +686,9 @@ func TestStreamMessagesEndToEnd(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	resp, _ := openStream(t, public.URL+"/v1/messages", key, anthropicStreamBody(model))
+	resp, cancel := openStream(t, public.URL+"/v1/messages", key, anthropicStreamBody(model))
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", resp.StatusCode, body)
@@ -798,6 +804,8 @@ func TestStreamClientDisconnectIsBilled(t *testing.T) {
 	t.Cleanup(public.Close)
 
 	resp, cancel := openStream(t, public.URL+"/v1/chat/completions", key, streamBody(model))
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", resp.StatusCode, body)
@@ -864,7 +872,9 @@ func TestStreamUpstreamErrorMidStream(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	resp, _ := openStream(t, public.URL+"/v1/chat/completions", key, streamBody(model))
+	resp, cancel := openStream(t, public.URL+"/v1/chat/completions", key, streamBody(model))
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200（错误发生在流开始之后，改不了状态码了）", resp.StatusCode)
 	}
@@ -948,7 +958,9 @@ func TestStreamDoesNotFailoverAfterOutputStarted(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	resp, _ := openStream(t, public.URL+"/v1/chat/completions", key, streamBody(model))
+	resp, cancel := openStream(t, public.URL+"/v1/chat/completions", key, streamBody(model))
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", resp.StatusCode, body)
@@ -1012,7 +1024,9 @@ func TestStreamUpstreamFailureBeforeOutput(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	resp, _ := openStream(t, public.URL+"/v1/chat/completions", key, streamBody(model))
+	resp, cancel := openStream(t, public.URL+"/v1/chat/completions", key, streamBody(model))
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("状态码 = %d，期望 502。响应体：%s", resp.StatusCode, body)

@@ -225,11 +225,11 @@ type Outcome struct {
 	UpstreamStatus int
 	ErrorCode      string
 
-	// ClientCancelled 为 true 表示客户端在流式响应中途断开。
+	// ClientCanceled 为 true 表示客户端在流式响应中途断开。
 	//
 	// **要计费**：已经产生的 token 上游是算了钱的。用量由 Usage 给，
 	// 而它是网关按收到的内容当场估算的——见 tokens 包。
-	ClientCancelled bool
+	ClientCanceled bool
 
 	// Usage 是实际的用量。上游失败时忽略它。
 	//

@@ -60,16 +60,19 @@ func writeStreamHeaders(w http.ResponseWriter) {
 
 // streamRenderer 把一个统一事件渲染成某个调用协议的 SSE 帧。
 //
-// 三件事分开：Start 写开头的帧（OpenAI 是带 role 的分片，Anthropic 是
-// message_start），Event 写中间的事件，Finish 写结束帧。**调用顺序由调用方
+// 三件事分开：start 写开头的帧（OpenAI 是带 role 的分片，Anthropic 是
+// message_start），event 写中间的事件，finish 写结束帧。**调用顺序由调用方
 // 保证**，渲染器只负责形状。
+//
+// 三个方法都不导出：接口与两个实现都是本包的内部结构，没有任何包外调用点。
+// 导出它们只会让人以为别处可以按形状直接调，而顺序这一半契约在调用方那边。
 //
 // 方法收 io.Writer 而不是 http.ResponseWriter：渲染器不该知道 flush 的存在，
 // 而「每帧之后 flush 一次」是调用方的事（见 serveStream）。
 type streamRenderer interface {
-	Start(w io.Writer) error
-	Event(w io.Writer, ev channel.StreamEvent) error
-	Finish(w io.Writer) error
+	start(w io.Writer) error
+	event(w io.Writer, ev channel.StreamEvent) error
+	finish(w io.Writer) error
 }
 
 // newStreamRenderer 按调用协议选一个渲染器。
@@ -217,13 +220,13 @@ type openAIStreamToolFunction struct {
 	Arguments string `json:"arguments"`
 }
 
-func (s *openAIStream) Start(w io.Writer) error {
+func (s *openAIStream) start(w io.Writer) error {
 	// 第一片只带 role。官方的第一片是 {"role":"assistant","content":""}，
 	// 空 content 被 omitempty 省掉，客户端行为不变。
 	return s.chunk(w, openAIStreamDelta{Role: "assistant"}, nil)
 }
 
-func (s *openAIStream) Event(w io.Writer, ev channel.StreamEvent) error {
+func (s *openAIStream) event(w io.Writer, ev channel.StreamEvent) error {
 	switch ev.Kind {
 	case "delta":
 		return s.chunk(w, openAIStreamDelta{Content: ev.Text}, nil)
@@ -270,7 +273,7 @@ func (s *openAIStream) Event(w io.Writer, ev channel.StreamEvent) error {
 	return nil
 }
 
-func (s *openAIStream) Finish(w io.Writer) error {
+func (s *openAIStream) finish(w io.Writer) error {
 	var reason *string
 	// 认不出来的结束原因原样透出，没有就写 null——不编一个 "stop"：
 	// 把「上游没正常结束」说成「正常结束」，会让调用方按完成去处理一个
@@ -409,7 +412,7 @@ type claudeMessageStop struct {
 	Type string `json:"type"`
 }
 
-func (s *anthropicStream) Start(w io.Writer) error {
+func (s *anthropicStream) start(w io.Writer) error {
 	msg := claudeStreamMessage{
 		ID:    s.id,
 		Type:  "message",
@@ -422,7 +425,7 @@ func (s *anthropicStream) Start(w io.Writer) error {
 	return writeSSE(w, "message_start", claudeStreamMessageStart{Type: "message_start", Message: msg})
 }
 
-func (s *anthropicStream) Event(w io.Writer, ev channel.StreamEvent) error {
+func (s *anthropicStream) event(w io.Writer, ev channel.StreamEvent) error {
 	switch ev.Kind {
 	case "delta":
 		if err := s.openTextBlock(w); err != nil {
@@ -470,7 +473,7 @@ func (s *anthropicStream) Event(w io.Writer, ev channel.StreamEvent) error {
 	return nil
 }
 
-func (s *anthropicStream) Finish(w io.Writer) error {
+func (s *anthropicStream) finish(w io.Writer) error {
 	if err := s.closeBlock(w); err != nil {
 		return err
 	}
