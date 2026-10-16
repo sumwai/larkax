@@ -22,6 +22,7 @@ import (
 	"github.com/pressly/goose/v3"
 
 	"github.com/sumwai/larkax/internal/auth"
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/migrate"
@@ -207,7 +208,7 @@ func testSealer(t *testing.T) *credential.Sealer {
 
 // ── 假上游 ────────────────────────────────────────────────────────────
 
-// fakeUpstream 是一个本地假上游：按 OpenAI 协议回一个固定响应。
+// fakeUpstream 是一个本地假上游：按 protocol 回一个固定响应。
 //
 // 它除了回响应，还记下两件事，两者都是**正向证据**：
 //
@@ -215,16 +216,32 @@ func testSealer(t *testing.T) *credential.Sealer {
 //   - 处理这次请求时库里看到的冻结额：证明预留发生在调上游**之前**。
 //     只看请求结束后的 frozen 无法区分「冻过又放开了」与「压根没冻」——
 //     而后者正是失败路径那条回归要防的东西（见 #119 修的那条）。
+//
+// 两种上游协议都在这里，而不是各起一个类型：渠道声明的类型决定我们往上
+// 发哪套协议，而「调用协议 ≠ 上游协议」正是要测的东西之一。两份几乎相同的
+// 假上游早晚会分叉，而分叉的那一份不会报错。
 type fakeUpstream struct {
 	db     *sql.DB
 	userID int64
 	model  string
+
+	// protocol 是这条渠道说的上游协议，决定回什么形状的响应体与错误体。
+	// 每个用例都显式写出来——零值 "" 既不是 openai 也不是 anthropic。
+	protocol channel.Protocol
+
+	// cacheRead 非零时在用量里报出缓存读取量。
+	//
+	// 这一项是两条协议在用量口径上**唯一真正的差别**：Anthropic 的
+	// input_tokens 不含缓存部分（缓存读写单独报），OpenAI 的 prompt_tokens 含。
+	// 不报出它，这条差别在端到端上就没有判据。
+	cacheRead int64
 
 	// fail 为 true 时回 500，用来走失败路径。
 	fail atomic.Bool
 
 	mu       sync.Mutex
 	calls    int
+	paths    []string
 	bodies   [][]byte
 	frozenAt []string
 }
@@ -243,6 +260,7 @@ func (f *fakeUpstream) handler() http.Handler {
 
 		f.mu.Lock()
 		f.calls++
+		f.paths = append(f.paths, r.URL.Path)
 		f.bodies = append(f.bodies, body)
 		f.frozenAt = append(f.frozenAt, fmt.Sprintf("%s (冻结=%t)", frozen, isFrozen))
 		f.mu.Unlock()
@@ -250,29 +268,68 @@ func (f *fakeUpstream) handler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		if f.fail.Load() {
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":{"message":"placeholder upstream failure","type":"server_error"}}`))
+			_, _ = w.Write([]byte(f.failureBody()))
 			return
 		}
 
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":      "chatcmpl-placeholder",
-			"object":  "chat.completion",
-			"created": 1700000000,
-			"model":   f.model,
-			"choices": []any{map[string]any{
-				"index":         0,
-				"message":       map[string]any{"role": "assistant", "content": "你好，我是假上游"},
-				"finish_reason": "stop",
-			}},
-			// 用量写死在假上游里：结算金额因此可以逐分核对，
-			// 而不是「算出来多少就是多少」。
-			"usage": map[string]any{
-				"prompt_tokens":     12,
-				"completion_tokens": 7,
-				"total_tokens":      19,
-			},
-		})
+		_ = json.NewEncoder(w).Encode(f.successBody())
 	})
+}
+
+// successBody 按上游协议给出一次成功的响应体。
+//
+// 用量写死在假上游里：结算金额因此可以逐分核对，而不是「算出来多少就是
+// 多少」。两套协议报的是同一个用量（12 输入 / 7 输出），所以走哪条路结算
+// 金额都该是同一个数——这正是「协议不影响计费口径」那一条的判据。
+func (f *fakeUpstream) successBody() map[string]any {
+	if f.protocol == channel.ProtocolAnthropic {
+		usage := map[string]any{"input_tokens": 12, "output_tokens": 7}
+		// 不报缓存时**不带这个字段**：上游没报与报了 0 是两件事，
+		// 而适配器把「字段不在」当成「这家没有这个概念」（见 claudeUsage）。
+		if f.cacheRead > 0 {
+			usage["cache_read_input_tokens"] = f.cacheRead
+		}
+		return map[string]any{
+			"id":            "msg-placeholder",
+			"type":          "message",
+			"role":          "assistant",
+			"model":         f.model,
+			"content":       []any{map[string]any{"type": "text", "text": "你好，我是假上游"}},
+			"stop_reason":   "end_turn",
+			"stop_sequence": nil,
+			// Anthropic 的输入侧不含缓存部分（见 internal/api/response.go 的
+			// claudeUsageOf），所以这里给的就是纯输入量。
+			"usage": usage,
+		}
+	}
+	return map[string]any{
+		"id":      "chatcmpl-placeholder",
+		"object":  "chat.completion",
+		"created": 1700000000,
+		"model":   f.model,
+		"choices": []any{map[string]any{
+			"index":         0,
+			"message":       map[string]any{"role": "assistant", "content": "你好，我是假上游"},
+			"finish_reason": "stop",
+		}},
+		"usage": map[string]any{
+			"prompt_tokens":     12,
+			"completion_tokens": 7,
+			"total_tokens":      19,
+		},
+	}
+}
+
+// failureBody 按上游协议给出一个错误体。
+//
+// 两家的错误体形状不同，而上游的适配器是**按自己那套**去解它的：Anthropic
+// 的适配器还认得出「HTTP 200 但体内是 error」这种失败（见 anthropicadapter
+// 的注释），靠的就是这个形状。回错形状等于让假上游扮演一个不存在的上游。
+func (f *fakeUpstream) failureBody() string {
+	if f.protocol == channel.ProtocolAnthropic {
+		return `{"type":"error","error":{"type":"api_error","message":"placeholder upstream failure"}}`
+	}
+	return `{"error":{"message":"placeholder upstream failure","type":"server_error"}}`
 }
 
 // observedFrozen 返回每次被调用时看到的冻结额原文。
@@ -280,6 +337,24 @@ func (f *fakeUpstream) observedFrozen() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.frozenAt...)
+}
+
+// sentBodies 返回每次被调用时收到的请求体。
+func (f *fakeUpstream) sentBodies() [][]byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][]byte(nil), f.bodies...)
+}
+
+// sentPaths 返回每次被调用时收到的路径。
+//
+// 记录它是因为**端点也是协议的一部分**：Anthropic 上游在 /v1/messages 上，
+// OpenAI 上游在 /v1/chat/completions 上。发错端点时上游回 404，而调用方
+// 看到的是一个含糊的 502——原因只有在发出去的那一侧才看得见。
+func (f *fakeUpstream) sentPaths() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.paths...)
 }
 
 // callCount 返回上游被调用的次数。
@@ -432,7 +507,7 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	user := seedUser(t, db, false, balance)
 	key := issueKey(t, db, user)
 
-	fake := &fakeUpstream{db: db, userID: user, model: model}
+	fake := &fakeUpstream{protocol: channel.ProtocolOpenAI, db: db, userID: user, model: model}
 	upstreamSrv := httptest.NewServer(fake.handler())
 	t.Cleanup(upstreamSrv.Close)
 
@@ -591,7 +666,7 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	}
 
 	// 六、上游真的收到了我们发出去的那份请求体。
-	bodies := func() [][]byte { fake.mu.Lock(); defer fake.mu.Unlock(); return fake.bodies }()
+	bodies := fake.sentBodies()
 	if len(bodies) != 1 {
 		t.Fatalf("假上游被调用 %d 次，期望 1 次", len(bodies))
 	}
@@ -633,7 +708,7 @@ func TestMissingMaxTokensIsRejectedBeforeUpstream(t *testing.T) {
 	user := seedUser(t, db, false, "100")
 	key := issueKey(t, db, user)
 
-	fake := &fakeUpstream{db: db, userID: user, model: model}
+	fake := &fakeUpstream{protocol: channel.ProtocolOpenAI, db: db, userID: user, model: model}
 	upstreamSrv := httptest.NewServer(fake.handler())
 	t.Cleanup(upstreamSrv.Close)
 
@@ -712,7 +787,7 @@ func TestReserveCoversPricierCandidateRule(t *testing.T) {
 	user := seedUser(t, db, false, balance)
 	key := issueKey(t, db, user)
 
-	fake := &fakeUpstream{db: db, userID: user, model: model}
+	fake := &fakeUpstream{protocol: channel.ProtocolOpenAI, db: db, userID: user, model: model}
 	upstreamSrv := httptest.NewServer(fake.handler())
 	t.Cleanup(upstreamSrv.Close)
 
@@ -789,7 +864,7 @@ func TestUpstreamFailureReleasesReservation(t *testing.T) {
 	user := seedUser(t, db, false, balance)
 	key := issueKey(t, db, user)
 
-	fake := &fakeUpstream{db: db, userID: user, model: model}
+	fake := &fakeUpstream{protocol: channel.ProtocolOpenAI, db: db, userID: user, model: model}
 	fake.fail.Store(true)
 	upstreamSrv := httptest.NewServer(fake.handler())
 	t.Cleanup(upstreamSrv.Close)
@@ -925,7 +1000,7 @@ func TestRateLimitRPMStopsAtTheLimit(t *testing.T) {
 	user := seedUser(t, db, false, "100")
 	key := issueKey(t, db, user)
 
-	fake := &fakeUpstream{db: db, userID: user, model: model}
+	fake := &fakeUpstream{protocol: channel.ProtocolOpenAI, db: db, userID: user, model: model}
 	upstreamSrv := httptest.NewServer(fake.handler())
 	t.Cleanup(upstreamSrv.Close)
 
