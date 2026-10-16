@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/gateway"
 	"github.com/sumwai/larkax/internal/observe"
@@ -410,7 +411,10 @@ func (h *Handler) failUpstream(w http.ResponseWriter, r *http.Request, protocol 
 		// 措辞不写「上游失败」：5xx 里也有账本、候选来源这些我们自己的环节。
 		log.Error("请求处理失败", "err", err, "status", status)
 	} else {
-		log.Warn("上游拒绝了请求", "err", err, "status", status)
+		// 4xx 里既有上游拒绝的（限流），也有我们自己在调上游之前就判定的
+		// （缺 max_tokens）。措辞不写「上游拒绝」：那样一次「调用方漏填字段」
+		// 会被记成上游的问题，看日志的人会朝上游找。是谁拒的由 err 自己说。
+		log.Warn("请求被拒绝", "err", err, "status", status)
 	}
 	writeError(w, protocol, status, message)
 }
@@ -420,6 +424,10 @@ func (h *Handler) failUpstream(w http.ResponseWriter, r *http.Request, protocol 
 // 原则是「谁的错回谁的错」：
 //
 //   - 没有可用渠道是**我们的**问题（渠道挂了或没配），回 503。
+//   - 缺 max_tokens 是**调用方的**问题，回 400 并点名这个字段。预留要有
+//     输出上界才做得出来（见 pipeline.Request.validate），而「没给上界」
+//     是请求本身的缺陷。不映射的话它会落到默认分支，表现为 500——把
+//     调用方漏填一个字段说成我们内部故障，他会去查我们而不是改请求。
 //   - 上游说限流原样透出 429：调用方该退避，这个信息对他有用。
 //   - 其余上游错误一律回 502，**不**跟着上游回 400。上游说「你的请求
 //     不对」时回 400，会让调用方去改一个本来正确的请求，而真正要改的是
@@ -429,6 +437,8 @@ func (h *Handler) failUpstream(w http.ResponseWriter, r *http.Request, protocol 
 //     联系上游就找错了人。
 func httpStatusOfUpstream(err error) (status int, message string) {
 	switch {
+	case errors.Is(err, billing.ErrNoUpperBound):
+		return http.StatusBadRequest, "max_tokens is required: the request must set a positive output token limit"
 	case errors.Is(err, route.ErrNoCandidates):
 		return http.StatusServiceUnavailable, "no available upstream for the requested model"
 	case errors.Is(err, gateway.ErrNoExecutor):

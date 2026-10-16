@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/gateway"
 	"github.com/sumwai/larkax/internal/route"
@@ -423,6 +424,26 @@ func TestAnthropicStreamWithoutUsageOmitsIt(t *testing.T) {
 	end := at(t, frames, len(frames)-2).decode(t)
 	if _, ok := end["usage"]; ok {
 		t.Errorf("没有实测用量时不该写 usage（写 0 会被当成「这次没消耗」）: %v", end)
+	}
+}
+
+// 流式请求缺 max_tokens 与非流式是同一个处置：一个字都还没发出去，
+// 所以错误按普通 HTTP 响应回，状态码落在 4xx。
+//
+// 这条单独测一次，是因为流式入口在**开始写帧之后**就换了一套错误表达方式
+// （把错误写进流里，见 TestStreamTruncatedAfterOutput）。缺字段发生在更早的
+// 一步，不该走到那套表达方式上去——真走到的话，调用方拿到的是一个 200 加
+// 一条错误事件，而 4xx 才是他该看到的。
+func TestStreamMissingMaxTokensIsClientError(t *testing.T) {
+	h, _, chatter := newTestHandler()
+	chatter.streamErr = fmt.Errorf("%w: max_tokens 必须为正，当前 %d", billing.ErrNoUpperBound, 0)
+
+	rec := post(h, PathChatCompletions, streamBody)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("状态码 = %d，期望 400（响应体 %s）", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "max_tokens") {
+		t.Errorf("错误体没点名缺的是 max_tokens: %s", rec.Body)
 	}
 }
 
