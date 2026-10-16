@@ -23,19 +23,29 @@ func (f *fakeSource) Load(context.Context) ([]settings.Row, error) { return f.ro
 //
 // 必须补齐：settings.Load 会按 Registry 对照，少一个键就报错——
 // 那是它的设计（键名写错不该安静生效），所以测试也得给全。
+//
+// 代价是这份清单与 Registry 耦合：**别的包新增一个配置项，这里就会失败**。
+// 那是有意保留的——失败信息会直接点出缺哪个键，比让测试默默用上一份
+// 过期的配置好。（同样形状的行集在 internal/settings 与
+// internal/ledger/store 的测试里各有一份。）
 func settingsRows(overrides map[string]string) []settings.Row {
 	values := map[string]string{
-		"request_snapshot.retention_days":  `30`,
-		"request_snapshot.enabled":         `true`,
-		"request_snapshot.max_bytes":       `65536`,
-		"capture.consent_max_window_hours": `24`,
-		"quota.probe_interval_seconds":     `300`,
-		"billing.default_asset":            `"CNY"`,
-		"calendar.default_region":          `"CN"`,
-		"plugin.enabled":                   `false`,
-		"plugin.call_timeout_ms":           `5000`,
-		"plugin.memory_limit_bytes":        `67108864`,
-		"plugin.max_payload_bytes":         `4194304`,
+		"request_snapshot.retention_days":    `30`,
+		"request_snapshot.enabled":           `true`,
+		"request_snapshot.max_bytes":         `65536`,
+		"capture.consent_max_window_hours":   `24`,
+		"quota.probe_interval_seconds":       `300`,
+		"billing.default_asset":              `"CNY"`,
+		"calendar.default_region":            `"CN"`,
+		"plugin.enabled":                     `false`,
+		"plugin.call_timeout_ms":             `5000`,
+		"plugin.memory_limit_bytes":          `67108864`,
+		"plugin.max_payload_bytes":           `4194304`,
+		"reconcile.auto_repair":              `false`,
+		"reconcile.repair_mode":              `"resync_snapshot"`,
+		"reconcile.difference_account":       `"reconcile_difference"`,
+		"reconcile.shard_size":               `1000`,
+		"reconcile.full_scan_interval_hours": `168`,
 	}
 	for k, v := range overrides {
 		values[k] = v

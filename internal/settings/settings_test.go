@@ -30,6 +30,11 @@ func fullRows() []Row {
 		{Key: "plugin.call_timeout_ms", Value: []byte(`5000`)},
 		{Key: "plugin.memory_limit_bytes", Value: []byte(`67108864`)},
 		{Key: "plugin.max_payload_bytes", Value: []byte(`4194304`)},
+		{Key: "reconcile.auto_repair", Value: []byte(`false`)},
+		{Key: "reconcile.repair_mode", Value: []byte(`"resync_snapshot"`)},
+		{Key: "reconcile.difference_account", Value: []byte(`"reconcile_difference"`)},
+		{Key: "reconcile.shard_size", Value: []byte(`1000`)},
+		{Key: "reconcile.full_scan_interval_hours", Value: []byte(`168`)},
 	}
 }
 

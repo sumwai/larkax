@@ -471,19 +471,30 @@ type AdjustmentParams struct {
 	// Memo 必填。调账是唯一没有业务依据的分录，没有备注的调账事后
 	// 完全无法解释，只能当成来路不明的一笔。
 	Memo string
-	At   time.Time
+	// CounterAccount 是对家科目。留零表示 platform_revenue（默认）。
+	//
+	// 允许指定它是为了对账：对账差额的来路不明，把它记为平台收入等于
+	// 让一笔没人解释过的钱混进经营收入。对账修正因此传入
+	// ReconcileDifferenceAccount，把差额单独归集，查清来路后再写一笔
+	// 人工调账把它转进 platform_revenue（那时差额已经被解释了）。
+	//
+	// 默认值保留 platform_revenue 而不是要求必填：人工调账的实质就是
+	// 「平台认下这笔差额」，绝大多数调用点要的正是它。
+	CounterAccount Account
+	At             time.Time
 }
 
 // Adjustment 构造一次人工调账。
 //
 // 分录（借方被调科目或贷方被调科目，视金额符号而定）：
 //
-//	金额为正：借 <被调科目>   A      贷 platform_revenue   A
-//	金额为负：贷 <被调科目>  |A|     借 platform_revenue  |A|
+//	金额为正：借 <被调科目>   A      贷 <对家科目>       A
+//	金额为负：贷 <被调科目>  |A|     借 <对家科目>      |A|
 //
-// 对家固定为 platform_revenue，而不是让调用方再指定一个科目：
-// 调账的实质是「平台认下这笔差额」。如果对家可以是任意科目，
-// 这个函数就变成了一个能凭空造分录的工具，而它本应是最少使用的。
+// 对家默认固定为 platform_revenue，而不是让调用方随手指定：调账的实质是
+// 「平台认下这笔差额」。如果对家可以是任意科目，这个函数就变成了一个
+// 能凭空造分录的工具，而它本应是最少使用的。对账传
+// ReconcileDifferenceAccount 是有意的例外——见 AdjustmentParams.CounterAccount。
 //
 // 被调科目若是 user 这类「不该为负」的科目，调减到负值会破坏方向约定。
 // 本包不查库，看不到当前余额，所以这里只能检查**单条分录**的方向；
@@ -494,6 +505,18 @@ func Adjustment(p AdjustmentParams) (Transaction, error) {
 	}
 	if _, err := ParseAccount(p.Account.String()); err != nil {
 		return Transaction{}, err
+	}
+	counter := p.CounterAccount
+	if counter.IsZero() {
+		counter = PlatformRevenueAccount()
+	} else if _, err := ParseAccount(counter.String()); err != nil {
+		return Transaction{}, err
+	}
+	if counter == p.Account {
+		// 同一个科目既是被调方又是对家：两条分录互相抵消，求和为零，
+		// 于是 Verify 放行——而这笔交易什么都没改。它一定是调用方
+		// 传错了参数，静默成立会让一次「以为修好了」的调账变成空操作。
+		return Transaction{}, fmt.Errorf("调账的对家不能是被调科目自己（%s）", counter)
 	}
 	if p.Memo == "" {
 		return Transaction{}, errors.New("人工调账必须写 memo 说明原因")
@@ -515,13 +538,13 @@ func Adjustment(p AdjustmentParams) (Transaction, error) {
 	if p.Amount.IsPositive() {
 		entries = []Entry{
 			debit(p.TxnID, p.Account, p.Asset, p.Amount, EntryAdjustment).withMemo(memo),
-			credit(p.TxnID, PlatformRevenueAccount(), p.Asset, p.Amount, EntryAdjustment).withMemo(memo),
+			credit(p.TxnID, counter, p.Asset, p.Amount, EntryAdjustment).withMemo(memo),
 		}
 	} else {
 		mag := p.Amount.Neg()
 		entries = []Entry{
 			credit(p.TxnID, p.Account, p.Asset, mag, EntryAdjustment).withMemo(memo),
-			debit(p.TxnID, PlatformRevenueAccount(), p.Asset, mag, EntryAdjustment).withMemo(memo),
+			debit(p.TxnID, counter, p.Asset, mag, EntryAdjustment).withMemo(memo),
 		}
 	}
 	return newTxn(EntryAdjustment, p.TxnID, p.At, entries...)
