@@ -97,7 +97,12 @@ type SnapshotSink interface {
 // 请求标识组装起来，不做脱敏本身。
 type Snapshot struct {
 	RequestID string
-	UserID    int64
+	// UserID 是**发起这次请求的用户**，不是渠道所属的商家。
+	//
+	// 两者混起来不报错：这一列没有外键，写谁的 id 都插得进去，而快照是按
+	// 用户查的（见 request_snapshots_user_idx）——记到商家名下等于让这份
+	// 排障数据挂到了另一个人身上。
+	UserID int64
 	// Direction 取值 request / response。
 	Direction string
 	// Skeleton 是脱敏后的骨架。它是**结构**而不是内容。
@@ -317,7 +322,7 @@ func (g *Gateway) begin(ctx context.Context, req pipeline.Request, upstream *cha
 	h.req = req
 
 	// 请求快照在**调上游之前**采集：出错要能复现「当时发出去的是什么」。
-	g.snapshotAsync(ctx, upstream, "request")
+	g.snapshotAsync(ctx, upstream, "request", req.UserID)
 
 	return h, nil
 }
@@ -483,7 +488,13 @@ func (g *Gateway) finishCharge(ctx context.Context, h *handle, ch channel.Channe
 // 两者都做才对：全同步会让一次慢查库拖住一个请求，全异步会让「请求
 // 快照」变成「请求发出后某一刻的快照」——后者在排查时序相关的
 // 问题时正好错过关键状态。
-func (g *Gateway) snapshotAsync(ctx context.Context, req *channel.Request, direction string) {
+//
+// # 归属由本包填
+//
+// request_id / user_id / direction 说的是「这条快照属于谁」，脱敏器不知道
+// 也不该知道（见 internal/snapshotwire 的 toSnapshot），所以三个字段在这里
+// 补齐。userID 必须是**发起这次请求的用户**，见 Snapshot.UserID 的注释。
+func (g *Gateway) snapshotAsync(ctx context.Context, req *channel.Request, direction string, userID int64) {
 	if g.Redactor == nil || g.Snapshots == nil || req == nil {
 		return
 	}
@@ -496,6 +507,7 @@ func (g *Gateway) snapshotAsync(ctx context.Context, req *channel.Request, direc
 		return
 	}
 	snap.RequestID = requestIDOf(ctx)
+	snap.UserID = userID
 	snap.Direction = direction
 
 	// 用请求的 context 值但**不带取消**：请求结束后快照仍该写完，
