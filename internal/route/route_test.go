@@ -19,7 +19,6 @@ func candidate(id int64, model string, opts ...func(*Candidate)) Candidate {
 			ID:         id,
 			Name:       fmt.Sprintf("ch%d", id),
 			BaseURL:    "https://api.example.com",
-			Protocol:   channel.ProtocolOpenAI,
 			Credential: "placeholder",
 			Models:     []string{model},
 		},
@@ -70,10 +69,9 @@ func TestSelectFiltersByModel(t *testing.T) {
 
 func TestEligibleRejectsBrokenConfig(t *testing.T) {
 	cases := map[string]Candidate{
-		"缺 ID":   {Channel: channel.Channel{BaseURL: "https://a", Credential: "c", Protocol: channel.ProtocolOpenAI}},
-		"缺 base": {Channel: channel.Channel{ID: 1, Credential: "c", Protocol: channel.ProtocolOpenAI}},
-		"缺凭证":    {Channel: channel.Channel{ID: 1, BaseURL: "https://a", Protocol: channel.ProtocolOpenAI}},
-		"协议未知":   {Channel: channel.Channel{ID: 1, BaseURL: "https://a", Credential: "c", Protocol: "gemini"}},
+		"缺 ID":   {Channel: channel.Channel{BaseURL: "https://a", Credential: "c"}},
+		"缺 base": {Channel: channel.Channel{ID: 1, Credential: "c"}},
+		"缺凭证":    {Channel: channel.Channel{ID: 1, BaseURL: "https://a"}},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

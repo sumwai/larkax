@@ -47,6 +47,7 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl migrate status                 显示每个迁移的应用状态
   larkaxctl migrate version                显示当前数据库版本
   larkaxctl migrate create <名称>           生成迁移文件
+  larkaxctl user create --name <用户名>     创建用户（stdout 只有新用户的 ID）
   larkaxctl apikey create --user <用户>     创建一把 API Key（明文只打印这一次）
   larkaxctl reconcile                      跑一轮对账（开关与口径见 settings 表）
   larkaxctl snapshot cleanup               按留存期删除到期的快照分区
@@ -74,6 +75,8 @@ func run() error {
 		return runReconcile(os.Args[2:])
 	case "snapshot":
 		return runSnapshot(os.Args[2:])
+	case "user":
+		return runUser(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println(version)
 		return nil

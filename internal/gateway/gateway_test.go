@@ -198,8 +198,8 @@ func candidate(id int64, model string) route.Candidate {
 	return route.Candidate{
 		Channel: channel.Channel{
 			ID: id, Name: "ch", BaseURL: "https://api.example.com",
-			Protocol: channel.ProtocolOpenAI, Credential: "placeholder",
-			Models: []string{model},
+			Credential: "placeholder",
+			Models:     []string{model},
 		},
 		OwnerUserID: 7,
 		Health:      route.Health{SuccessRate: 1.0},
