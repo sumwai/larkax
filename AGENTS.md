@@ -335,8 +335,8 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/calendar` | 97.8% | 93.6% | 1 |
 | `internal/ledger` | 96.5% | 92.3% | 0 |
 | `internal/ledger/store` | 79.8% | 90.2% | 1 |
+| `internal/route` | 93.3% | 84.3% | 0 |
 | `internal/money` | 95.9% | 84.2% | 0 |
-| `internal/route` | 93.1% | 81.2% | 0 |
 | `internal/billing` | 97.5% | 81.0% | 0 |
 | `internal/tokens` | 97.4% | 74.6% | 4 |
 | `internal/snapshot` | 88.6% | 70.8% | 7 |
