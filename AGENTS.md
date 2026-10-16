@@ -45,13 +45,13 @@ GitHub Flow：`main` 受保护，只能通过 PR 合入。
 
 CI 目前包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`）、
 覆盖率摘要、迁移 up→down→up 往返（真 PostgreSQL）、分层自查
-（`check-layering.sh`）、红线扫描及其自测、变异测试脚本的自测。
-集成测试另有一道**「确认真跑了」的门禁**——它显式跑
-`internal/ledger/store`、`internal/channels`、`internal/auth` 与
-`internal/snapshotwire`，
+（`check-layering.sh`）、红线扫描及其自测、变异测试脚本的自测、
+不可达符号门禁及其自测（`check-deadcode.sh`）。
+集成测试另有一道**「确认真跑了」的门禁**——它逐包显式跑依赖数据库的那些包，
 被 `t.Skip` 时报错，因为「跳过」在输出里和「通过」长得一样
-（见 [LESSONS.md](LESSONS.md) 第 16 条）。包清单写在
-`.github/actions/check-integration-tests`，新增依赖数据库的测试包时要往那里补。
+（见 [LESSONS.md](LESSONS.md) 第 16 条）。**包清单的唯一来源是**
+`.github/actions/check-integration-tests`，新增依赖数据库的测试包时要往那里补；
+本文件不重复列一遍——两处清单迟早会不一致，而那时没人知道哪一份算数。
 **契约测试与自动部署尚未接入**，各自落地时补进这条流水线。
 
 分支命名：`feat/`、`fix/`、`refactor/`、`docs/`、`test/`、`chore/` 前缀 + 简短描述。
@@ -201,11 +201,18 @@ go test ./...                       # 单测（有 LARKAX_DB_DSN 时连集成测
 
 bash scripts/check-redlines.sh      # 公开红线：密钥、私有主机、本机路径
 bash scripts/check-layering.sh      # 分层约定：谁 import 谁
+bash scripts/check-deadcode.sh      # 不可达符号：新代码有没有门
 scripts/check-mutation.sh           # 变异测试（改动计费/账本时）
 ```
 
 `scripts/check-redlines.sh --all` 扫全树而不是暂存区。改了扫描器本身要跑
 `scripts/check-redlines.test.sh`。
+
+`scripts/check-deadcode.sh` 需要 `deadcode`，版本必须与脚本里的
+`PINNED_TOOLS_VERSION` 一致——符号集合随 `golang.org/x/tools` 的版本变化，
+版本不对它直接拒绝运行。它比对的白名单是 `scripts/deadcode-allowlist.txt`：
+新出现的不可达符号直接失败；白名单里已经消失的条目只提示「可以删了」，
+不算失败（它出现的原因是有人把没门的东西接上线了）；条目数只许减不许增。
 
 **集成测试需要 `LARKAX_DB_DSN`**。没设时它们会跳过，而**「跳过」在输出里和
 「通过」长得一样**——所以 CI 里专门有一道检查确认它们真的跑了（见
