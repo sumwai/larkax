@@ -1,0 +1,863 @@
+package catalog
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+// 目录写入面上的分类错误。
+//
+// 它们与「库连不上」必须分得开：前者是使用者改一个字段就能继续的错误，
+// 后者是环境问题。两者混在一条消息里，第一次配目录的人会去改名字，
+// 而真正的问题是 DSN 写错了。
+var (
+	// ErrModelExists 表示目录里已经有这个规范名了。
+	ErrModelExists = errors.New("规范模型已存在")
+
+	// ErrCanonicalTaken 表示这个范围下已经有另一个上游名映射到该规范名。
+	//
+	// 它对应两条**偏**唯一索引（渠道级与平台级各一条，见 00007 迁移）。
+	// 这是写入侧最常撞的一条：渠道级与平台级不是同一个范围，所以
+	// 「这个渠道下撞了」与「平台级撞了」要分开说——两条消息给人的下一步动作
+	// 不一样（一个去改这个渠道，一个去改兜底那条）。
+	ErrCanonicalTaken = errors.New("这个范围下已经有另一个上游名映射到该规范名")
+
+	// ErrUpstreamTaken 表示这个上游名在这个渠道里已经映射到另一个规范名。
+	//
+	// 它是 (channel_id, upstream_model) 那条原唯一键。平台级别名没有这个约束：
+	// NULL 不等于 NULL，那条唯一键对 channel_id IS NULL 的行一行都管不到。
+	ErrUpstreamTaken = errors.New("这个上游名在这个渠道里已经映射到另一个规范名")
+
+	// ErrChannelNotFound 表示别名要挂的渠道不存在。
+	//
+	// 与 channels.ErrChannelNotFound 是同一个事实，但在两个包里各有一份：
+	// 别名写入撞的是 model_aliases 那条外键，调用方在这里拿到错误之后要做的
+	// 事（建渠道）与本包无关，所以不值得让本包去 import channels。
+	ErrChannelNotFound = errors.New("渠道不存在")
+
+	// ErrModelInUse 表示这个规范名还被别名或计价规则引用着。
+	//
+	// 单独一个 sentinel 而不是复用 ErrModelExists：处置不同——那个是换个名字，
+	// 这个是先去解除引用。
+	ErrModelInUse = errors.New("规范名还被引用，不能删")
+
+	// ErrAliasIDNotFound 表示按 id 定位的那条别名不在库里。
+	//
+	// 与 ErrAliasNotFound 分开：那个是**读取**路径说的「这个渠道没配这个模型」，
+	// 处置是去配一条；这个是「手里这个 id 已经不对了」，处置是重新列一遍拿到
+	// 现存的 id。两者的消息也不同，混用会让「id 写错了」看起来像配置缺失。
+	ErrAliasIDNotFound = errors.New("别名不存在")
+
+	// ErrNoChanges 表示这次修改没有任何字段要改。
+	//
+	// 与 channels.ErrNoChanges 同一个理由：单独报错而不是发一条只动 updated_at
+	// 的 UPDATE——后者会让「调用方拼错了结构体」看起来像一次成功的修改。
+	ErrNoChanges = errors.New("没有要改的字段")
+)
+
+// PostgreSQL 的错误码与目录上几条约束的名字。
+//
+// 约束名硬编码自迁移 00001_init.sql（model_catalog 的 UNIQUE、model_aliases
+// 的两条外键与那条原唯一键）与 00007_model_alias_unique.sql（两条偏唯一索引）。
+// **改那两个文件就要同步改这里**，否则下面的识别失效。
+//
+// 失效的方向是安全的：认不出来就按原错误上抛，不会静默当成功，只是少一层
+// 分类，报错从「这个渠道下已经有另一个上游名映射到 X 了」退化成一句驱动原文。
+//
+// 只认错误码不够——23505 的含义是「有某个唯一约束被违反」，分不出撞的是
+// 规范名还是上游名，而这两者给人的下一步动作不同。
+const (
+	pgUniqueViolation     = "23505"
+	pgForeignKeyViolation = "23503"
+
+	modelCanonicalUnique = "model_catalog_canonical_name_key"
+
+	aliasChannelCanonicalUnique  = "model_aliases_channel_canonical_idx"
+	aliasPlatformCanonicalUnique = "model_aliases_platform_canonical_idx"
+	aliasChannelUpstreamUnique   = "model_aliases_channel_id_upstream_model_key"
+
+	aliasCanonicalFK = "model_aliases_canonical_name_fkey"
+	aliasChannelFK   = "model_aliases_channel_fk"
+)
+
+// Admin 是模型目录的管理面：创建、修改、删除规范模型，增删改别名。
+//
+// 它不在请求热路径上——那是 Catalog 的事。分成两个类型之后，热路径那个类型
+// **拿不到**写入能力，而管理面这个拿不到选路要用的查询：两者读的是同一套列，
+// 由同一批辅助函数解码，所以「写进去的」与「读出来的」不会各自漂移。
+//
+// # 规范名是计费规则挂靠的键
+//
+// pricing_rules.model_patterns 按规范名匹配（见 internal/pricing），所以
+// 本类型对规范名的**改名与删除**特别保守：
+//
+//   - 改名不做。别名那一侧有外键拦着，但计价规则那一侧是 jsonb 数组、
+//     没有任何外键——改名之后那些规则会静默地匹配不到任何请求，计价回落到
+//     兜底规则，而账单看上去完全正常。要改名就显式走三步：建新名、把别名与
+//     规则逐条挪过去、再删旧名，每一步都看得见。
+//   - 删除只在无人引用时允许，见 Delete。
+type Admin struct {
+	db *sql.DB
+}
+
+// NewAdmin 包装数据库句柄。
+func NewAdmin(db *sql.DB) *Admin { return &Admin{db: db} }
+
+// CreateModelRequest 是新建一条规范模型所需的字段。
+//
+// # 零值的含义
+//
+// 这里的零值都是**有意义的值**，不是「没填」：limits 为 0 表示未知（落 NULL）、
+// vendor / family / canonical_model_id 为空串表示没有这一项、raw 与
+// reasoning_options 为空表示空对象与空数组。所以本类型不用指针去区分
+// 「没提到」与「填了零值」——那个区分在这里没有第二种状态可表达。
+type CreateModelRequest struct {
+	// CanonicalName 是选路与计费共用的键，必须非空、且不含空白字符。
+	CanonicalName string
+
+	// DisplayName 是给人看的名字，必须非空：表上那一列没有默认值，
+	// 本包也不替调用方回落成规范名——回落会让「忘了填」看起来像填过了。
+	DisplayName string
+
+	Vendor string
+	Family string
+
+	// 三个 limit 为 0 表示未知，落库为 NULL。负数会被拒绝。
+	ContextLimit int
+	InputLimit   int
+	OutputLimit  int
+
+	Capabilities Capabilities
+
+	ModalitiesInput  []string
+	ModalitiesOutput []string
+
+	ReasoningOptions []any
+
+	CanonicalModelID string
+
+	KnowledgeCutoff *time.Time
+	ReleaseDate     *time.Time
+
+	Raw map[string]any
+}
+
+// Create 新建一条规范模型，返回它的 id。
+func (a *Admin) Create(ctx context.Context, req CreateModelRequest) (int64, error) {
+	name, err := normalizeCanonicalName(req.CanonicalName)
+	if err != nil {
+		return 0, err
+	}
+	display, err := normalizeDisplayName(req.DisplayName)
+	if err != nil {
+		return 0, err
+	}
+	contextLimit, err := normalizeLimit("context_limit", req.ContextLimit)
+	if err != nil {
+		return 0, err
+	}
+	inputLimit, err := normalizeLimit("input_limit", req.InputLimit)
+	if err != nil {
+		return 0, err
+	}
+	outputLimit, err := normalizeLimit("output_limit", req.OutputLimit)
+	if err != nil {
+		return 0, err
+	}
+	reasoning, err := encodeJSONArray("reasoning_options", req.ReasoningOptions)
+	if err != nil {
+		return 0, err
+	}
+	raw, err := encodeJSONObject("raw", req.Raw)
+	if err != nil {
+		return 0, err
+	}
+
+	var id int64
+	err = a.db.QueryRowContext(ctx, `
+		INSERT INTO model_catalog
+			(canonical_name, display_name, vendor, family,
+			 context_limit, input_limit, output_limit,
+			 supports_reasoning, supports_tools, supports_vision,
+			 supports_audio, supports_cache, supports_batch,
+			 modalities_input, modalities_output, reasoning_options,
+			 canonical_model_id, knowledge_cutoff, release_date, raw)
+		VALUES ($1, $2, $3, $4, $5, $6, $7,
+		        $8, $9, $10, $11, $12, $13,
+		        $14, $15, $16::jsonb,
+		        $17, $18::date, $19::date, $20::jsonb)
+		RETURNING id`,
+		name, display, textOrNull(req.Vendor), textOrNull(req.Family),
+		contextLimit, inputLimit, outputLimit,
+		req.Capabilities.Reasoning, req.Capabilities.Tools, req.Capabilities.Vision,
+		req.Capabilities.Audio, req.Capabilities.Cache, req.Capabilities.Batch,
+		nonNilStrings(req.ModalitiesInput), nonNilStrings(req.ModalitiesOutput),
+		string(reasoning), textOrNull(req.CanonicalModelID),
+		dateOrNull(req.KnowledgeCutoff), dateOrNull(req.ReleaseDate),
+		string(raw)).Scan(&id)
+	if err != nil {
+		return 0, createModelError(name, err)
+	}
+	return id, nil
+}
+
+// UpdateModelRequest 描述对一条规范模型的一次修改。
+//
+// 每个字段都是指针：nil 表示「不改这一项」，非 nil 表示「改成这个值」。
+// 指针指向**零值**表示把这一项清空（落 NULL 或空数组）——表上这些列的 NULL
+// 与零值本来就是同一个意思（见 Model 的注释），所以不需要第三种状态来表达
+// 「清空」。唯一的例外是 Capabilities 那六个布尔：它们 NOT NULL，false 是
+// 一个真实的值，不是「没有」。
+type UpdateModelRequest struct {
+	// CanonicalName 定位要改的那一行，**它本身不可改**，见 Admin 的注释。
+	CanonicalName string
+
+	DisplayName *string
+	Vendor      *string
+	Family      *string
+
+	ContextLimit *int
+	InputLimit   *int
+	OutputLimit  *int
+
+	Capabilities *Capabilities
+
+	ModalitiesInput  *[]string
+	ModalitiesOutput *[]string
+
+	ReasoningOptions *[]any
+
+	CanonicalModelID *string
+
+	KnowledgeCutoff *time.Time
+	ReleaseDate     *time.Time
+
+	Raw *map[string]any
+}
+
+// Update 按 UpdateModelRequest 修改一条规范模型。
+func (a *Admin) Update(ctx context.Context, req UpdateModelRequest) error {
+	name, err := normalizeCanonicalName(req.CanonicalName)
+	if err != nil {
+		return err
+	}
+
+	sets, args, err := modelUpdateSets(req)
+	if err != nil {
+		return err
+	}
+	if len(sets) == 0 {
+		return ErrNoChanges
+	}
+	// updated_at 每次都动，于是「改了几个字段」不影响这条语句的行为，
+	// 下面也就能用影响行数判断这条模型在不在。
+	sets = append(sets, "updated_at = now()")
+	args = append(args, name)
+
+	query := "UPDATE model_catalog SET " + strings.Join(sets, ", ") +
+		" WHERE canonical_name = $" + strconv.Itoa(len(args))
+	res, err := a.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("修改规范模型失败: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("确认修改结果失败: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w：%q", ErrModelNotFound, name)
+	}
+	return nil
+}
+
+// modelUpdateSets 把一次修改编成 SET 片段与参数。
+//
+// # 为什么单独一个函数
+//
+// 它只做「校验 + 编码」，不碰数据库，于是可以单独读、单独改；更要紧的是
+// 它**没有函数作用域上的 err**：每个分支各自 `x, err := ...`，作用域互不重叠，
+// 也就不会遮蔽谁。全写在一个函数里时，最上面那次校验会声明一个函数级 err，
+// 下面每个分支的 `:=` 都变成遮蔽它——govet 的 shadow 检查器会逐个报出来
+// （.golangci.yml 里 govet 开了 enable-all）。
+//
+// 只把真正要改的列拼进 SET：没提到的列连现在是什么值都不必知道。
+func modelUpdateSets(req UpdateModelRequest) ([]string, []any, error) {
+	var sets []string
+	var args []any
+	add := func(column string, value any) {
+		args = append(args, value)
+		sets = append(sets, column+" = $"+strconv.Itoa(len(args)))
+	}
+	// addCast 与 add 相同，但显式写出目标类型。
+	//
+	// jsonb 那一列写不写 `::jsonb` 都能跑：服务器会拿目标列的类型去解这个
+	// 文本参数。显式写出来是为了**不依赖那一步推断**——推断的结论随列类型与
+	// 驱动而变，而它一旦不成立，存进去的就是一个 JSON 字符串（带引号的），
+	// 读出来解不回对象，且只在某些列上出现。
+	addCast := func(column, cast string, value any) {
+		args = append(args, value)
+		sets = append(sets, column+" = $"+strconv.Itoa(len(args))+"::"+cast)
+	}
+
+	if req.DisplayName != nil {
+		display, err := normalizeDisplayName(*req.DisplayName)
+		if err != nil {
+			return nil, nil, err
+		}
+		add("display_name", display)
+	}
+	if req.Vendor != nil {
+		add("vendor", textOrNull(*req.Vendor))
+	}
+	if req.Family != nil {
+		add("family", textOrNull(*req.Family))
+	}
+	if req.ContextLimit != nil {
+		limit, err := normalizeLimit("context_limit", *req.ContextLimit)
+		if err != nil {
+			return nil, nil, err
+		}
+		add("context_limit", limit)
+	}
+	if req.InputLimit != nil {
+		limit, err := normalizeLimit("input_limit", *req.InputLimit)
+		if err != nil {
+			return nil, nil, err
+		}
+		add("input_limit", limit)
+	}
+	if req.OutputLimit != nil {
+		limit, err := normalizeLimit("output_limit", *req.OutputLimit)
+		if err != nil {
+			return nil, nil, err
+		}
+		add("output_limit", limit)
+	}
+	if req.Capabilities != nil {
+		add("supports_reasoning", req.Capabilities.Reasoning)
+		add("supports_tools", req.Capabilities.Tools)
+		add("supports_vision", req.Capabilities.Vision)
+		add("supports_audio", req.Capabilities.Audio)
+		add("supports_cache", req.Capabilities.Cache)
+		add("supports_batch", req.Capabilities.Batch)
+	}
+	if req.ModalitiesInput != nil {
+		add("modalities_input", nonNilStrings(*req.ModalitiesInput))
+	}
+	if req.ModalitiesOutput != nil {
+		add("modalities_output", nonNilStrings(*req.ModalitiesOutput))
+	}
+	if req.ReasoningOptions != nil {
+		reasoning, err := encodeJSONArray("reasoning_options", *req.ReasoningOptions)
+		if err != nil {
+			return nil, nil, err
+		}
+		addCast("reasoning_options", "jsonb", string(reasoning))
+	}
+	if req.CanonicalModelID != nil {
+		add("canonical_model_id", textOrNull(*req.CanonicalModelID))
+	}
+	if req.KnowledgeCutoff != nil {
+		addCast("knowledge_cutoff", "date", dateOrNull(req.KnowledgeCutoff))
+	}
+	if req.ReleaseDate != nil {
+		addCast("release_date", "date", dateOrNull(req.ReleaseDate))
+	}
+	if req.Raw != nil {
+		raw, err := encodeJSONObject("raw", *req.Raw)
+		if err != nil {
+			return nil, nil, err
+		}
+		addCast("raw", "jsonb", string(raw))
+	}
+
+	return sets, args, nil
+}
+
+// Delete 删掉一条规范模型，但**只在无人引用它时**允许。
+//
+// # 为什么是拒绝而不是级联
+//
+// 规范名是计价规则挂靠的键。级联删别名看着干净，实际是把「这个模型不再提供」
+// 翻译成了「这些渠道的配置不见了」——渠道的 models 白名单里还留着这个名字，
+// 于是它变成一条谁都看不懂的废配置。计价规则那一边更糟：model_patterns 是
+// jsonb 数组，删掉一条规则不会报错，只会让下一次请求落到别的规则上。
+//
+// 所以这里把引用数列出来让人自己处置：要么先解除引用，要么确认了再删。
+//
+// # 这个检查是尽力而为的，真正的保证在外键上
+//
+// 别名那一边的保证来自 model_aliases 那条外键：检查通过之后、DELETE 之前
+// 有人插了一条别名，DELETE 会被外键拒掉（并发下会拿到 ErrModelInUse 而不是
+// 「删成功」）。计价规则那一边**没有任何外键**——jsonb 数组建不了外键——所以
+// 那里的检查就是全部：刚查完、还没删的窗口里新配一条规则，是拦不住的。
+// 说清这一点，好过假装挡住了。
+func (a *Admin) Delete(ctx context.Context, canonicalName string) error {
+	name, err := normalizeCanonicalName(canonicalName)
+	if err != nil {
+		return err
+	}
+
+	aliasCount, ruleCount, err := a.countReferences(ctx, name)
+	if err != nil {
+		return err
+	}
+	if aliasCount > 0 || ruleCount > 0 {
+		return fmt.Errorf("%w：%q 还被 %d 条别名与 %d 条计价规则引用。"+
+			"别名要先删（渠道的 models 白名单里还留着这个名字，删别名不等于删那条配置），"+
+			"计价规则要先改掉 model_patterns——直接删规则不会报错，只会让请求落到别的规则上",
+			ErrModelInUse, name, aliasCount, ruleCount)
+	}
+
+	res, err := a.db.ExecContext(ctx, `DELETE FROM model_catalog WHERE canonical_name = $1`, name)
+	if err != nil {
+		return deleteModelError(name, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("确认删除结果失败: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w：%q", ErrModelNotFound, name)
+	}
+	return nil
+}
+
+// countReferences 数出这个规范名被多少条别名与多少条计价规则引用。
+//
+// 计价规则那一侧是精确匹配：pricing 的查询是 `model_patterns ? $2`，
+// 也就是「数组里有这个元素」。所以这里用同一个判据，而不是去猜通配符——
+// 匹配口径要是两处不一致，删掉的就会是一条其实还在被用的名字。
+func (a *Admin) countReferences(ctx context.Context, canonicalName string) (int, int, error) {
+	var aliases int
+	err := a.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM model_aliases WHERE canonical_name = $1`, canonicalName).Scan(&aliases)
+	if err != nil {
+		return 0, 0, fmt.Errorf("统计别名的引用失败: %w", err)
+	}
+
+	var rules int
+	err = a.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pricing_rules WHERE model_patterns ? $1`, canonicalName).Scan(&rules)
+	if err != nil {
+		return 0, 0, fmt.Errorf("统计计价规则的引用失败: %w", err)
+	}
+	return aliases, rules, nil
+}
+
+// CreateAliasRequest 是新建一条别名所需的字段。
+type CreateAliasRequest struct {
+	// ChannelID 为 0 表示平台级别名（库里存 NULL），对全部渠道生效。
+	// 负数无效——id 从 1 开始，负数不可能等于任何真实的渠道。
+	ChannelID int64
+
+	// UpstreamModel 是这家上游对同一个模型的叫法。
+	UpstreamModel string
+
+	// CanonicalName 必须已经在 model_catalog 里，否则外键会拒。
+	CanonicalName string
+
+	Overrides map[string]any
+}
+
+// CreateAlias 新建一条别名，返回它的 id。
+func (a *Admin) CreateAlias(ctx context.Context, req CreateAliasRequest) (int64, error) {
+	if req.ChannelID < 0 {
+		return 0, fmt.Errorf("渠道 id %d 无效（0 表示平台级别名）", req.ChannelID)
+	}
+	canonical, err := normalizeCanonicalName(req.CanonicalName)
+	if err != nil {
+		return 0, err
+	}
+	upstream, err := normalizeUpstreamModel(req.UpstreamModel)
+	if err != nil {
+		return 0, err
+	}
+	overrides, err := encodeJSONObject("overrides", req.Overrides)
+	if err != nil {
+		return 0, err
+	}
+
+	// 平台级要传 NULL，不能传 0：0 会去匹配 id 为 0 的渠道，而那个渠道不存在
+	// ——外键会直接拒绝，于是「平台级别名」这条路径根本走不通。
+	var channel any
+	if req.ChannelID != 0 {
+		channel = req.ChannelID
+	}
+
+	var id int64
+	err = a.db.QueryRowContext(ctx, `
+		INSERT INTO model_aliases (channel_id, upstream_model, canonical_name, overrides)
+		VALUES ($1, $2, $3, $4::jsonb)
+		RETURNING id`,
+		channel, upstream, canonical, string(overrides)).Scan(&id)
+	if err != nil {
+		return 0, aliasWriteError(req.ChannelID, canonical, upstream, err)
+	}
+	return id, nil
+}
+
+// UpdateAliasRequest 描述对一条别名的一次修改。
+//
+// **渠道范围与规范名都不可改**：改渠道范围是换了一条别名（同一对名字在
+// 另一个范围上是另一条配置），改规范名则等于把这条别名改挂到另一个计费键上
+// ——那会让同一次请求的选路与计费指向两个不同的模型。要改就删掉重建，
+// 两次改动各自看得见。
+type UpdateAliasRequest struct {
+	// ID 是 model_aliases 的主键。它而不是「渠道 + 上游名」来定位，是因为
+	// 同一对名字在两个范围上可以各有一条，用名字定位会撞上两条。
+	ID int64
+
+	UpstreamModel *string
+	Overrides     *map[string]any
+}
+
+// UpdateAlias 按 UpdateAliasRequest 修改一条别名。
+func (a *Admin) UpdateAlias(ctx context.Context, req UpdateAliasRequest) error {
+	if req.ID <= 0 {
+		return fmt.Errorf("别名 id %d 无效", req.ID)
+	}
+
+	var sets []string
+	var args []any
+	add := func(column string, value any) {
+		args = append(args, value)
+		sets = append(sets, column+" = $"+strconv.Itoa(len(args)))
+	}
+	// overrides 是 jsonb：参数是文本，不显式转的话写进去的会是一个 JSON
+	// 字符串（带引号的），读出来解不回对象。
+	addCast := func(column, cast string, value any) {
+		args = append(args, value)
+		sets = append(sets, column+" = $"+strconv.Itoa(len(args))+"::"+cast)
+	}
+
+	if req.UpstreamModel != nil {
+		upstream, err := normalizeUpstreamModel(*req.UpstreamModel)
+		if err != nil {
+			return err
+		}
+		add("upstream_model", upstream)
+	}
+	if req.Overrides != nil {
+		overrides, err := encodeJSONObject("overrides", *req.Overrides)
+		if err != nil {
+			return err
+		}
+		addCast("overrides", "jsonb", string(overrides))
+	}
+
+	if len(sets) == 0 {
+		return ErrNoChanges
+	}
+	args = append(args, req.ID)
+
+	query := "UPDATE model_aliases SET " + strings.Join(sets, ", ") +
+		" WHERE id = $" + strconv.Itoa(len(args))
+	res, err := a.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return aliasUpdateError(err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("确认修改结果失败: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w：别名 id %d", ErrAliasIDNotFound, req.ID)
+	}
+	return nil
+}
+
+// DeleteAlias 删掉一条别名。
+func (a *Admin) DeleteAlias(ctx context.Context, id int64) error {
+	if id <= 0 {
+		return fmt.Errorf("别名 id %d 无效", id)
+	}
+
+	res, err := a.db.ExecContext(ctx, `DELETE FROM model_aliases WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("删除别名失败: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("确认删除结果失败: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w：别名 id %d", ErrAliasIDNotFound, id)
+	}
+	return nil
+}
+
+// ── 约束冲突的翻译 ──────────────────────────────────────────────────────
+//
+// 这一批函数把**数据库的拒绝**翻译成调用方认得出的错误。认不出来的原样包一层
+// 返回，绝不因为读不懂而当成成功。
+
+// rejectedError 是一次被数据库约束拒掉的写入。
+//
+// 它的错误链一次满足三件事，与 ledger/store 的 frozenUnderflowError 同一个形状：
+//
+//   - errors.Is(err, <sentinel>)：调用方能按「该改什么」分类
+//   - errors.As(err, &pgErr)：驱动给的原始错误仍在链里，SQLSTATE 与约束名
+//     都还拿得到——**测试正是靠它断言撞的是哪一条索引**，而不是「报了错」。
+//     少了这一条，只有那句人话能证明撞的是什么，而人话是可以写错的。
+//   - Error() 只说人能看懂的那句：把驱动原文拼在后面会让日志里多一段
+//     `ERROR: duplicate key value violates unique constraint ...`，
+//     而那段的信息这句话已经说全了。
+//
+// 不用 errors.Join：它的错误文本是换行拼起来的，而这条要进日志，单行更好读。
+type rejectedError struct {
+	sentinel error
+	detail   string
+	cause    error
+}
+
+func (e *rejectedError) Error() string { return e.sentinel.Error() + "：" + e.detail }
+
+// Unwrap 返回整条错误链。两个元素缺一不可，理由见类型注释。
+func (e *rejectedError) Unwrap() []error { return []error{e.sentinel, e.cause} }
+
+// createModelError 把新建规范模型的错误翻译成分类错误。
+func createModelError(canonicalName string, err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) &&
+		pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == modelCanonicalUnique {
+		return &rejectedError{
+			sentinel: ErrModelExists,
+			detail:   fmt.Sprintf("%q 已经在目录里了", canonicalName),
+			cause:    err,
+		}
+	}
+	return fmt.Errorf("创建规范模型失败: %w", err)
+}
+
+// deleteModelError 把删除规范模型的错误翻译成分类错误。
+//
+// 只有一种要翻译的：并发下刚查完引用、还没删的时候有人配了别名，外键会拒。
+// 那时报出来的应当是 ErrModelInUse（「还有人引用」），而不是一句驱动原文。
+func deleteModelError(canonicalName string, err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) &&
+		pgErr.Code == pgForeignKeyViolation && pgErr.ConstraintName == aliasCanonicalFK {
+		return &rejectedError{
+			sentinel: ErrModelInUse,
+			detail:   fmt.Sprintf("%q 刚有别名挂上来", canonicalName),
+			cause:    err,
+		}
+	}
+	return fmt.Errorf("删除规范模型失败: %w", err)
+}
+
+// aliasWriteError 把别名的写入错误翻译成人能看懂的话。
+//
+// 每条约束对应一句「下一步该改什么」，而不是把 SQLSTATE 抛出去——23505 本身
+// 不说明撞的是规范名还是上游名，也不说明是渠道级还是平台级，而这几件事的
+// 处置完全不同。认不出来的错误原样上抛。
+func aliasWriteError(channelID int64, canonicalName, upstreamModel string, err error) error {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return fmt.Errorf("写入模型别名失败: %w", err)
+	}
+
+	switch {
+	case pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == aliasChannelCanonicalUnique:
+		return &rejectedError{
+			sentinel: ErrCanonicalTaken,
+			detail: fmt.Sprintf("渠道 %d 下已经有另一个上游名映射到 %q 了"+
+				"（同一个渠道里一个规范名只能有一个上游名，否则选路无从取舍）",
+				channelID, canonicalName),
+			cause: err,
+		}
+
+	case pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == aliasPlatformCanonicalUnique:
+		return &rejectedError{
+			sentinel: ErrCanonicalTaken,
+			detail: fmt.Sprintf("平台级已经有另一个上游名映射到 %q 了"+
+				"（要在这个渠道上用另一个名字，就配一条渠道级别名覆盖它）",
+				canonicalName),
+			cause: err,
+		}
+
+	case pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == aliasChannelUpstreamUnique:
+		return &rejectedError{
+			sentinel: ErrUpstreamTaken,
+			detail: fmt.Sprintf("渠道 %d 里 %q 已经映射到另一个规范名了"+
+				"（一个上游名只能对应一个规范名，否则计费按哪个名字算就没有依据）",
+				channelID, upstreamModel),
+			cause: err,
+		}
+
+	case pgErr.Code == pgForeignKeyViolation && pgErr.ConstraintName == aliasCanonicalFK:
+		return &rejectedError{
+			sentinel: ErrModelNotFound,
+			detail:   fmt.Sprintf("%q 不在目录里，先把模型建进 model_catalog 再配别名", canonicalName),
+			cause:    err,
+		}
+
+	case pgErr.Code == pgForeignKeyViolation && pgErr.ConstraintName == aliasChannelFK:
+		return &rejectedError{
+			sentinel: ErrChannelNotFound,
+			detail:   fmt.Sprintf("id %d", channelID),
+			cause:    err,
+		}
+	}
+
+	return fmt.Errorf("写入模型别名失败: %w", err)
+}
+
+// aliasUpdateError 把改别名的错误翻译成人能看懂的话。
+//
+// 与新建不同的只有一处：渠道范围与规范名都不参与 SET（见 UpdateAliasRequest），
+// 所以能撞上的只剩「同一个渠道里一个上游名只对应一个规范名」那条唯一键——
+// 两条偏索引管的是 (channel_id, canonical_name)，那两个字段在这里改不了。
+// 撞上时说不清是哪个渠道（渠道 id 不在参数里），所以那句话里不带渠道。
+func aliasUpdateError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) &&
+		pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == aliasChannelUpstreamUnique {
+		return &rejectedError{
+			sentinel: ErrUpstreamTaken,
+			detail: "这个上游名在这个渠道里已经映射到另一个规范名了" +
+				"（一个上游名只能对应一个规范名，否则计费按哪个名字算就没有依据）",
+			cause: err,
+		}
+	}
+	return fmt.Errorf("修改别名失败: %w", err)
+}
+
+// ── 校验与编码 ──────────────────────────────────────────────────────────
+//
+// 这一批函数是写入路径与读取路径「同一套列」的兑现方式：值的形态在写入侧
+// 定下来，读取侧按同一个假设解。
+
+// normalizeCanonicalName 校验规范名。
+//
+// 它是选路与计费**共用**的键：请求里的模型名要按它匹配，计价规则的
+// model_patterns 也按它匹配。所以这里比别的字段严一格——空白字符一律拒绝：
+// 带空白的名字不会等于任何请求里的模型名，写进去就是一条谁都命中不了的
+// 配置，而它的表现是「这个模型配了却永远选不中」。
+func normalizeCanonicalName(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "", errors.New("规范模型名不能为空")
+	}
+	if strings.ContainsAny(name, " \t\r\n") {
+		return "", fmt.Errorf("规范模型名 %q 里有空白字符：它是选路与计费共用的键，带空白的名字匹配不到任何请求", name)
+	}
+	return name, nil
+}
+
+// normalizeUpstreamModel 校验上游模型名。
+//
+// 只去首尾空白、要求非空：这个名字**原样发给上游**，上游认什么名字由上游决定，
+// 本包没有依据替它定更严的规则。首尾空白则一定是笔误——它同样匹配不上任何
+// 上游的模型名，而报错会来自上游，离「配置多打了一个空格」已经很远。
+func normalizeUpstreamModel(raw string) (string, error) {
+	upstream := strings.TrimSpace(raw)
+	if upstream == "" {
+		return "", errors.New("上游模型名不能为空")
+	}
+	return upstream, nil
+}
+
+// normalizeDisplayName 校验展示名。
+//
+// 表上那一列 NOT NULL 且没有默认值。这里不回落成规范名：回落会让「忘了填」
+// 与「就是这么填的」在库里长得一模一样，而展示名正是给人看的那一栏。
+func normalizeDisplayName(raw string) (string, error) {
+	display := strings.TrimSpace(raw)
+	if display == "" {
+		return "", errors.New("display_name 不能为空：它是给人看的名字，不会回落到规范名")
+	}
+	return display, nil
+}
+
+// normalizeLimit 校验 token 上限。
+//
+// 0 落成 NULL：表上那三列可空，「未知」与「0」在读取侧是同一个状态
+// （见 Model 的注释），所以库里存 0 只会让「没填」看起来像一个测出来的值。
+// 负数一定是算错了——它在上限比较里会让任何请求都不合格。
+//
+// 返回的 nil 是**这一列的合法取值**（SQL NULL），不是「出错了但没报」——
+// 所以这里显式 nolint 而不是造一个哨兵错误。
+func normalizeLimit(field string, limit int) (any, error) {
+	if limit < 0 {
+		return nil, fmt.Errorf("%s 不能为负数：%d", field, limit)
+	}
+	if limit == 0 {
+		return nil, nil //nolint:nilnil // 见上
+	}
+	return limit, nil
+}
+
+// textOrNull 把空串落成 NULL。
+//
+// 表上这几列可空，而读取侧把它们折成空串（见 Model 的注释）——所以「空串」
+// 与「NULL」在库里不该是两种状态：存哪一种，读出来都一样，而看库的人会以为
+// 它们有区别。
+func textOrNull(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+// dateOrNull 把日期落成 `YYYY-MM-DD` 文本，配合 SQL 里的 ::date。
+//
+// 不直接把 time.Time 交出去：驱动会把它当 timestamptz 发，而
+// timestamptz → date 的转换按**会话时区**算——同一个瞬间在 UTC+8 与 UTC-5 下
+// 可能落在不同的日期上。日期本来就是无时区的，所以这里给日期文本，
+// 让转换只发生一次，且不依赖连接是怎么配的。
+//
+// 指针为 nil 或指向零值都落 NULL：表上这两列可空，读取侧用 nil 表示没填
+// （见 Model 的注释），所以库里不该出现一个「零日期」。
+func dateOrNull(value *time.Time) any {
+	if value == nil || value.IsZero() {
+		return nil
+	}
+	return value.Format("2006-01-02")
+}
+
+// nonNilStrings 把 nil 切片换成空切片。
+//
+// modalities 那两列是 NOT NULL DEFAULT '{}'：驱动把 nil 切片发成 NULL，
+// 而 NULL 会被列约束拒掉——报错说的是「不能为空」，而调用方只是没填。
+// 空切片才是「这个模型没有这类模态」的正确表达。
+func nonNilStrings(value []string) []string {
+	if value == nil {
+		return []string{}
+	}
+	return value
+}
+
+// encodeJSONObject 把 map 编成 jsonb 的文本形式。
+func encodeJSONObject(field string, value map[string]any) ([]byte, error) {
+	if len(value) == 0 {
+		return []byte("{}"), nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("%s 不是可序列化的 JSON 对象: %w", field, err)
+	}
+	return raw, nil
+}
+
+// encodeJSONArray 把切片编成 jsonb 的文本形式。
+func encodeJSONArray(field string, value []any) ([]byte, error) {
+	if len(value) == 0 {
+		return []byte("[]"), nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("%s 不是可序列化的 JSON 数组: %w", field, err)
+	}
+	return raw, nil
+}
