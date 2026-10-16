@@ -293,8 +293,14 @@ func (g *Gateway) begin(ctx context.Context, req pipeline.Request, upstream *cha
 		return nil, route.ErrNoCandidates
 	}
 	h.candidates = cands
-	// 预留时还不知道会选中哪个渠道，所以先用请求里给的那个（可能是 0）。
-	// 结算时会按**实际选中的渠道**重取 owner——见 finishCharge。
+
+	// 预留按**整个候选集**取上界：每个候选带它自己的商家，规则那一侧对
+	// 每个候选各取一条，取其中金额最大的那个（见 pipeline.Reserve）。
+	// 只给渠道 id 是不够的——商家级规则按 owner 匹配。
+	//
+	// 这里还不能收窄成一个渠道：选路发生在预留之后。结算时才按实际选中
+	// 的那一个重新匹配——见 finishCharge。
+	req.Candidates = ruleCandidates(cands)
 
 	reserved, err := g.Pipeline.Reserve(ctx, req)
 	if err != nil {
@@ -430,13 +436,21 @@ func (g *Gateway) finishCharge(ctx context.Context, h *handle, ch channel.Channe
 
 	// 结算用**实际选中的渠道**：渠道级与商家级规则按它匹配。
 	//
-	// 预留时还不知道会选中谁，所以那时 ChannelID 是 0，渠道级与商家级
-	// 规则都匹配不上——**预留因此只按平台作用域的规则算**。平台规则比
-	// 渠道级规则便宜时，预留会不够，这是已知问题（见 #150）。这里的
-	// EvalWorstCase 取的是**那一条规则内部**的最坏分支，不跨规则。
+	// 预留时还不知道会选中谁，所以那时按整个候选集取上界——每个候选各取
+	// 自己适用的一条规则，取其中金额最大的（见 pipeline.Reserve）。实际
+	// 选中的渠道必是候选之一，而它的规则在那次取上界里算过，所以结算
+	// 不会超过预留。EvalWorstCase 取的是**一条规则内部**的最坏分支，
+	// 不跨规则；跨规则那一层由预留的「取最大」负责。
 	settleReq := h.req
 	settleReq.ChannelID = ch.ID
 	settleReq.OwnerUserID = ownerOf(h.candidates, ch.ID)
+	// 候选集也收窄成选中的那一个，让这份请求自洽：上面两个字段说的是
+	// 「实际选中了谁」，而候选集若还留着整份，两者对不上。结算本身不读
+	// 候选集（见 pipeline.Request），这一行是给后来读它的人留的。
+	settleReq.Candidates = []pipeline.RuleCandidate{{
+		ChannelID:   settleReq.ChannelID,
+		OwnerUserID: settleReq.OwnerUserID,
+	}}
 
 	charge, err := g.Pipeline.Settle(ctx, settleReq, h.reserved, out)
 	if err != nil {
@@ -531,6 +545,22 @@ func ownerOf(cands []route.Candidate, channelID int64) int64 {
 		}
 	}
 	return 0
+}
+
+// ruleCandidates 把候选渠道折成规则匹配用的集合。
+//
+// 每个候选要带上**它自己的**商家：商家级规则按 owner 匹配，只给渠道 id
+// 会让候选里的商家价一条都匹配不上，而预留因此退回平台价——那正是
+// 「预留小于结算」的来源（见 pipeline.Reserve）。
+func ruleCandidates(cands []route.Candidate) []pipeline.RuleCandidate {
+	out := make([]pipeline.RuleCandidate, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, pipeline.RuleCandidate{
+			ChannelID:   c.Channel.ID,
+			OwnerUserID: c.OwnerUserID,
+		})
+	}
+	return out
 }
 
 // releaseTimeout 是释放一次预留的时间上限。

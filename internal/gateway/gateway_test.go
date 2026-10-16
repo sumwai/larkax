@@ -20,13 +20,31 @@ import (
 
 const simpleRule = `{"prompt": 0.000001, "completion": 0.000002}`
 
-type fakeRules struct{ err error }
+type fakeRules struct {
+	err error
+	// queries 记下每次匹配的条件：预留那一次拿到的应当是**整个候选集**，
+	// 结算那一次是**实际选中的那一个**。
+	queries []pipeline.RuleQuery
+}
 
-func (f *fakeRules) Match(context.Context, pipeline.RuleQuery) (pipeline.Rule, error) {
+func (f *fakeRules) Match(_ context.Context, q pipeline.RuleQuery) (pipeline.Rule, error) {
+	f.queries = append(f.queries, q)
 	if f.err != nil {
 		return pipeline.Rule{}, f.err
 	}
 	return pipeline.Rule{ID: 1, Version: 1, Source: simpleRule}, nil
+}
+
+func (f *fakeRules) MatchAll(_ context.Context, q pipeline.RuleQuery) ([]pipeline.Rule, error) {
+	f.queries = append(f.queries, q)
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := make([]pipeline.Rule, 0, len(q.Candidates))
+	for range q.Candidates {
+		out = append(out, pipeline.Rule{ID: 1, Version: 1, Source: simpleRule})
+	}
+	return out, nil
 }
 
 type fakeCandidates struct {
@@ -716,6 +734,59 @@ func TestFailoverToSecondChannel(t *testing.T) {
 	}
 	if res.Charge == nil {
 		t.Error("成功的这次应当计费")
+	}
+}
+
+// 预留要把**整个候选集**交给规则来源，每个候选带上自己的商家。
+//
+// 两件事各自都会让预留算小：
+//
+//   - 只按平台规则算（候选集里那条更贵的渠道价被漏掉），结算于是撞上
+//     Capped，实际金额被预留截住、差额由平台吃掉——账目仍然是平的。
+//   - 候选里只带渠道 id、不带 owner（商家级规则一条都匹配不上）。
+//
+// 结算则相反：候选集收窄成实际选中的那一个。候选集是拿来挑一个的，
+// 不是拿来结算的。
+func TestReserveSeesWholeCandidateSet(t *testing.T) {
+	h := newHarness(t)
+
+	a := candidate(1, "gpt-4o")
+	a.OwnerUserID = 11
+	b := candidate(2, "gpt-4o")
+	b.OwnerUserID = 22
+	h.candidates.cands = []route.Candidate{a, b}
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(h.rules.queries) != 2 {
+		t.Fatalf("规则匹配 %d 次，期望 2 次（预留与结算各一次）", len(h.rules.queries))
+	}
+
+	reserve := h.rules.queries[0].Candidates
+	if len(reserve) != 2 {
+		t.Fatalf("预留的候选 = %+v，期望整个候选集（2 个）", reserve)
+	}
+	if reserve[0].ChannelID != 1 || reserve[0].OwnerUserID != 11 {
+		t.Errorf("预留的第一个候选 = %+v，期望渠道 1 商家 11", reserve[0])
+	}
+	if reserve[1].ChannelID != 2 || reserve[1].OwnerUserID != 22 {
+		t.Errorf("预留的第二个候选 = %+v，期望渠道 2 商家 22", reserve[1])
+	}
+
+	settle := h.rules.queries[1].Candidates
+	if len(settle) != 1 {
+		t.Fatalf("结算的候选 = %+v，期望收窄成恰好一个", settle)
+	}
+	matched := false
+	for _, c := range []route.Candidate{a, b} {
+		if c.Channel.ID == settle[0].ChannelID && c.OwnerUserID == settle[0].OwnerUserID {
+			matched = true
+		}
+	}
+	if !matched {
+		t.Errorf("结算的候选 %+v 不是任何一个输入候选——商家的对应关系错位了", settle[0])
 	}
 }
 

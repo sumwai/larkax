@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -68,6 +69,16 @@ func unique(prefix string) string {
 	defer seqMu.Unlock()
 	seqN++
 	return fmt.Sprintf("%s-%d-%d", prefix, seqBase, seqN)
+}
+
+// singleCandidate 是结算那一次的条件：**恰好一个**候选，也就是实际选中的
+// 那个渠道（0 表示未选定，退到平台规则）。
+func singleCandidate(model string, channelID, ownerID int64, at time.Time) pipeline.RuleQuery {
+	return pipeline.RuleQuery{
+		CanonicalModel: model,
+		Candidates:     []pipeline.RuleCandidate{{ChannelID: channelID, OwnerUserID: ownerID}},
+		At:             at,
+	}
 }
 
 // ruleSpec 描述一条待插入的规则，零值表示用默认。
@@ -200,19 +211,14 @@ func TestMatchPrefersMostSpecificScope(t *testing.T) {
 	}{
 		{"渠道与商家都在场，选渠道规则", owner, ch, channel},
 		{"只有商家在场，选商家规则", owner, 0, merchant},
-		{"两个都没选定（预留阶段），退到平台规则", 0, 0, platform},
+		{"两个都是 0（未选定），退到平台规则", 0, 0, platform},
 		{"别的商家，退到平台规则", owner + 1, 0, platform},
 		{"别的渠道，退到商家规则", owner, ch + 1, merchant},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := s.Match(ctx, pipeline.RuleQuery{
-				CanonicalModel: model,
-				ChannelID:      tc.channel,
-				OwnerUserID:    tc.owner,
-				At:             at,
-			})
+			got, err := s.Match(ctx, singleCandidate(model, tc.channel, tc.owner, at))
 			if err != nil {
 				t.Fatalf("匹配失败: %v", err)
 			}
@@ -236,7 +242,7 @@ func TestMatchBreaksTiesWithinScope(t *testing.T) {
 	low := insertRule(t, db, ruleSpec{patterns: []string{model}, priority: 1, expr: `{"prompt": 1}`})
 	high := insertRule(t, db, ruleSpec{patterns: []string{model}, priority: 9, expr: `{"prompt": 2}`})
 
-	q := pipeline.RuleQuery{CanonicalModel: model, At: time.Now()}
+	q := singleCandidate(model, 0, 0, time.Now())
 
 	got, err := s.Match(ctx, q)
 	if err != nil {
@@ -277,12 +283,7 @@ func TestMatchFiltersByModel(t *testing.T) {
 	onlyRule := insertRule(t, db, ruleSpec{scope: "channel", channelID: ch, patterns: []string{only}, priority: 5, expr: `{"prompt": 2}`})
 
 	query := func(model string) pipeline.RuleQuery {
-		return pipeline.RuleQuery{
-			CanonicalModel: model,
-			ChannelID:      ch,
-			OwnerUserID:    owner,
-			At:             time.Now(),
-		}
+		return singleCandidate(model, ch, owner, time.Now())
 	}
 
 	// 空数组那条适用于它自己的模型。
@@ -336,7 +337,7 @@ func TestMatchSkipsDisabledAndOutOfWindow(t *testing.T) {
 	insertRule(t, db, ruleSpec{patterns: []string{model}, to: &past, priority: 9, expr: `{"prompt": 4}`})             // 已过期
 	insertRule(t, db, ruleSpec{patterns: []string{model}, from: &past, to: &now, priority: 9, expr: `{"prompt": 5}`}) // 刚好在上界
 
-	got, err := s.Match(ctx, pipeline.RuleQuery{CanonicalModel: model, At: now})
+	got, err := s.Match(ctx, singleCandidate(model, 0, 0, now))
 	if err != nil {
 		t.Fatalf("匹配失败: %v", err)
 	}
@@ -364,12 +365,126 @@ func TestMatchReturnsErrNoRule(t *testing.T) {
 
 	// 1970 早于库里任何一条规则的 effective_from（列默认 now()，迁移里不插规则），
 	// 所以那一刻一条都不生效。
-	_, err := s.Match(context.Background(), pipeline.RuleQuery{
-		CanonicalModel: unique("model-nothing"),
-		At:             time.Unix(0, 0).UTC(),
-	})
+	_, err := s.Match(context.Background(),
+		singleCandidate(unique("model-nothing"), 0, 0, time.Unix(0, 0).UTC()))
 	if !errors.Is(err, pipeline.ErrNoRule) {
 		t.Fatalf("err = %v，期望 ErrNoRule", err)
+	}
+}
+
+// MatchAll 给候选集里**每个候选各取一条**规则，裁决次序与 Match 相同。
+//
+// 这是预留取上界的输入：候选里最贵的那条规则决定预留，而候选之间的规则
+// 差别正来自作用域——渠道自己的价、商家定的价、平台兜底。
+func TestMatchAllPicksRulePerCandidate(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	model := unique("model-all")
+	ownerA := seedUser(t, db)
+	ownerB := seedUser(t, db)
+	ownerC := seedUser(t, db)
+
+	// 三个候选，规则各自不同：
+	//   chA —— 有自己的渠道级规则（最具体）
+	//   chB —— 没有渠道级规则，退到商家 B 的规则
+	//   chC —— 商家与渠道都没有规则，退到平台规则
+	chA := seedChannel(t, db, ownerA)
+	chB := seedChannel(t, db, ownerB)
+	chC := seedChannel(t, db, ownerC)
+
+	platform := insertRule(t, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": 1}`})
+	merchantB := insertRule(t, db, ruleSpec{scope: "merchant", ownerID: ownerB, patterns: []string{model}, expr: `{"prompt": 2}`})
+	channelA := insertRule(t, db, ruleSpec{scope: "channel", channelID: chA, patterns: []string{model}, expr: `{"prompt": 3}`})
+
+	cands := []pipeline.RuleCandidate{
+		{ChannelID: chA, OwnerUserID: ownerA},
+		{ChannelID: chB, OwnerUserID: ownerB},
+		{ChannelID: chC, OwnerUserID: ownerC},
+	}
+	wantByChannel := map[int64]int64{chA: channelA, chB: merchantB, chC: platform}
+
+	// 结果按 (渠道, 商家) 排序，与查询里的 ORDER BY 一致。先把候选排好，
+	// 于是断言不必依赖三个 id 的生成顺序。
+	sort.Slice(cands, func(i, j int) bool { return cands[i].ChannelID < cands[j].ChannelID })
+
+	rules, err := s.MatchAll(ctx, pipeline.RuleQuery{
+		CanonicalModel: model,
+		Candidates:     cands,
+		At:             time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("匹配失败: %v", err)
+	}
+	if len(rules) != len(cands) {
+		t.Fatalf("规则 %d 条，期望每个候选各一条（%d 条）", len(rules), len(cands))
+	}
+	for i, c := range cands {
+		if want := wantByChannel[c.ChannelID]; rules[i].ID != want {
+			t.Errorf("渠道 %d 的规则 = %d，期望 %d", c.ChannelID, rules[i].ID, want)
+		}
+	}
+}
+
+// 一个候选都匹配不上时返回空，而不是零价的兜底规则。
+//
+// 「零行」这个状态是用**时刻**构造的（见 TestMatchReturnsErrNoRule）：
+// 测试库是共享的，别的包会留下适用于任何模型的平台规则，靠「库里恰好
+// 没有适用的规则」构造不出来。
+func TestMatchAllReturnsEmptyWhenNothingMatches(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+
+	rules, err := s.MatchAll(context.Background(), pipeline.RuleQuery{
+		CanonicalModel: unique("model-nothing-all"),
+		Candidates: []pipeline.RuleCandidate{
+			{ChannelID: 1, OwnerUserID: 1},
+			{ChannelID: 2, OwnerUserID: 2},
+		},
+		At: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("匹配失败: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("规则 = %+v，期望空——匹配不上不等于零价", rules)
+	}
+}
+
+// 空候选集返回空，且不去查库。
+//
+// 「空」在调用方那一侧是有意义的：候选集为空算不出预留上界（见
+// pipeline.Reserve），而不是「按平台价算」。
+func TestMatchAllWithNoCandidates(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+
+	rules, err := s.MatchAll(context.Background(), pipeline.RuleQuery{CanonicalModel: unique("model-no-cand")})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("规则 = %+v，期望空", rules)
+	}
+}
+
+// 结算只接受一个候选：把整个候选集交给它，会让「按哪条规则结算」取决于
+// 谁排在第一。
+func TestMatchRejectsMultipleCandidates(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+
+	_, err := s.Match(context.Background(), pipeline.RuleQuery{
+		CanonicalModel: unique("model-multi"),
+		Candidates: []pipeline.RuleCandidate{
+			{ChannelID: 1, OwnerUserID: 1},
+			{ChannelID: 2, OwnerUserID: 2},
+		},
+		At: time.Now(),
+	})
+	if err == nil {
+		t.Fatal("候选多于一个时应报错")
 	}
 }
 
@@ -387,7 +502,7 @@ func TestMatchVersionTracksExpression(t *testing.T) {
 	after := `{"prompt": 0.00002}`
 
 	id := insertRule(t, db, ruleSpec{patterns: []string{model}, expr: before})
-	q := pipeline.RuleQuery{CanonicalModel: model, At: time.Now()}
+	q := singleCandidate(model, 0, 0, time.Now())
 
 	first, err := s.Match(ctx, q)
 	if err != nil {

@@ -42,7 +42,7 @@ import (
 	"github.com/sumwai/larkax/internal/pipeline"
 )
 
-// Source 按条件从 pricing_rules 表里选出一条规则。
+// Source 按条件从 pricing_rules 表里选出规则。
 type Source struct {
 	db *sql.DB
 }
@@ -53,9 +53,10 @@ func New(db *sql.DB) *Source { return &Source{db: db} }
 // 编译期断言：它要满足 pipeline 对规则来源的要求。
 //
 // 写成内联接口而不是 import 一个别处的声明：本包与 pipeline 之间
-// 只有这一个方法，多一层声明只会多一处要跟着改的地方。
+// 只有这两个方法，多一层声明只会多一处要跟着改的地方。
 var _ interface {
 	Match(context.Context, pipeline.RuleQuery) (pipeline.Rule, error)
+	MatchAll(context.Context, pipeline.RuleQuery) ([]pipeline.Rule, error)
 } = (*Source)(nil)
 
 // matchQuery 是选规则的查询。
@@ -107,7 +108,57 @@ const matchQuery = `
 	          r.id DESC
 	 LIMIT 1`
 
+// matchAllQuery 是选候选规则的查询：候选集里**每个候选各一条**。
+//
+// 与 matchQuery 是同一条 WHERE、同一套裁决次序，区别只在「取几条」：
+// 这里按候选分组（DISTINCT ON）各取第一条，而不是整体取一条。两处的
+// 条件与排序必须逐字一致——它们不一致的表现是「同一个渠道，预留按一条
+// 规则算、结算按另一条算」，而那正是预留小于结算的来源。
+//
+// 一条 SQL 查完，不每个候选往返一次：候选数随渠道配置增长，而这是
+// 请求路径上的一步。
+//
+// $1 是匹配时刻，$2 是规范模型名，$3 与 $4 是候选的渠道 id 与商家 id，
+// 两个平行数组按下标对齐（unnest 的多参数形式）。
+//
+// # 为什么是 LEFT JOIN
+//
+// 一个候选可能一条规则都匹配不上。INNER JOIN 会让它整行消失，于是调用方
+// 分不清「这个候选没有规则」与「这个候选不在候选集里」。LEFT JOIN 让每个
+// 候选都有一行，没有规则的那行是 NULL，由调用方显式跳过。
+//
+// # 同一个候选出现两次
+//
+// DISTINCT ON 按 (channel_id, owner_user_id) 去重，重复的候选只会得到一条
+// 规则。这不是省略：同一个候选适用哪条规则是确定的，问两次不会得到不同
+// 的答案。
+const matchAllQuery = `
+	SELECT DISTINCT ON (c.channel_id, c.owner_user_id)
+	       c.channel_id, c.owner_user_id, r.id, r.expr
+	  FROM unnest($3::bigint[], $4::bigint[]) AS c(channel_id, owner_user_id)
+	  LEFT JOIN pricing_rules r
+	         ON r.enabled
+	        AND r.effective_from <= $1
+	        AND (r.effective_to IS NULL OR r.effective_to > $1)
+	        AND (jsonb_array_length(r.model_patterns) = 0
+	             OR (r.model_patterns ? $2))
+	        AND ((r.scope = 'platform' AND r.owner_user_id IS NULL)
+	             OR (r.scope = 'merchant' AND r.owner_user_id = c.owner_user_id)
+	             OR (r.scope = 'channel' AND r.channel_id = c.channel_id))
+	 ORDER BY c.channel_id, c.owner_user_id,
+	          CASE r.scope
+	            WHEN 'channel' THEN 3
+	            WHEN 'merchant' THEN 2
+	            ELSE 1
+	          END DESC,
+	          r.priority DESC,
+	          r.id DESC`
+
 // Match 返回这次请求适用的规则。
+//
+// 用于结算：那时渠道已经选定，q.Candidates 恰好一个元素。多于一个元素
+// 是调用方的错——把整个候选集交给结算，会让「按哪条规则结算」取决于
+// 谁排在第一，而候选集本来就是要拿来挑一个的。
 //
 // 没有匹配的规则时返回 pipeline.ErrNoRule，**不返回一条零价的兜底规则**：
 // 那会让「没配价」表现为「免费」，而免费是最不容易被发现的错账
@@ -116,6 +167,10 @@ func (s *Source) Match(ctx context.Context, q pipeline.RuleQuery) (pipeline.Rule
 	if q.CanonicalModel == "" {
 		return pipeline.Rule{}, errors.New("规范模型名为空")
 	}
+	if len(q.Candidates) != 1 {
+		return pipeline.Rule{}, fmt.Errorf("匹配单条规则时候选必须恰好一个，当前 %d 个", len(q.Candidates))
+	}
+	cand := q.Candidates[0]
 
 	// 查询没给时刻时用当前的：生效时间窗口必须有一个判据，
 	// 而零值时刻（公元 1 年）会让所有规则都还没生效。
@@ -125,17 +180,78 @@ func (s *Source) Match(ctx context.Context, q pipeline.RuleQuery) (pipeline.Rule
 		id   int64
 		expr string
 	)
-	err := s.db.QueryRowContext(ctx, matchQuery, at, q.CanonicalModel, q.OwnerUserID, q.ChannelID).
+	err := s.db.QueryRowContext(ctx, matchQuery, at, q.CanonicalModel, cand.OwnerUserID, cand.ChannelID).
 		Scan(&id, &expr)
 	if errors.Is(err, sql.ErrNoRows) {
 		return pipeline.Rule{}, fmt.Errorf("%w: 模型 %q 在渠道 %d 下没有生效的计价规则",
-			pipeline.ErrNoRule, q.CanonicalModel, q.ChannelID)
+			pipeline.ErrNoRule, q.CanonicalModel, cand.ChannelID)
 	}
 	if err != nil {
 		return pipeline.Rule{}, fmt.Errorf("查询计价规则失败: %w", err)
 	}
 
 	return pipeline.Rule{ID: id, Source: expr, Version: versionOf(expr)}, nil
+}
+
+// MatchAll 返回候选集里**每个候选各自**适用的那一条规则。
+//
+// 用于预留：那时还没选路，只有一个候选集，上界要按候选里最贵的那条规则
+// 算（见 pipeline.Pipeline.Reserve）。裁决次序与 Match 完全相同——每个
+// 候选取它自己适用的那一条，渠道级盖过商家级、商家级盖过平台级。
+//
+// 一个候选都匹配不上时返回空的结果，**不编一条零价的兜底规则**。
+// 调用方要把「空」当成算不出上界，而不是当成零价。
+func (s *Source) MatchAll(ctx context.Context, q pipeline.RuleQuery) ([]pipeline.Rule, error) {
+	if q.CanonicalModel == "" {
+		return nil, errors.New("规范模型名为空")
+	}
+	// 空候选集不去查库：一条 SQL 也不会有结果，而「空」在调用方那一侧
+	// 是有意义的（算不出上界），不该被一次无谓的往返掩盖。
+	if len(q.Candidates) == 0 {
+		return []pipeline.Rule{}, nil
+	}
+
+	at := s.now(q)
+
+	// 两个平行数组而不是一条 VALUES 列表：候选数不定，而 unnest 让
+	// 参数个数固定为两个，与候选数无关。
+	channelIDs := make([]int64, len(q.Candidates))
+	ownerIDs := make([]int64, len(q.Candidates))
+	for i, c := range q.Candidates {
+		channelIDs[i] = c.ChannelID
+		ownerIDs[i] = c.OwnerUserID
+	}
+
+	rows, err := s.db.QueryContext(ctx, matchAllQuery, at, q.CanonicalModel, channelIDs, ownerIDs)
+	if err != nil {
+		return nil, fmt.Errorf("查询候选计价规则失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	// 从空切片开始而不是 nil：没有候选匹配到规则是正常结果，
+	// 不是「没有值」。
+	out := []pipeline.Rule{}
+	for rows.Next() {
+		var (
+			channelID int64
+			ownerID   int64
+			id        sql.NullInt64
+			expr      sql.NullString
+		)
+		if scanErr := rows.Scan(&channelID, &ownerID, &id, &expr); scanErr != nil {
+			return nil, fmt.Errorf("读取候选计价规则失败: %w", scanErr)
+		}
+		// 没有匹配规则的候选在这一行上是 NULL（LEFT JOIN 的产物）。
+		// 跳过它，而不是给它编一条零价规则。
+		if !id.Valid {
+			continue
+		}
+		out = append(out, pipeline.Rule{ID: id.Int64, Source: expr.String, Version: versionOf(expr.String)})
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("读取候选计价规则失败: %w", err)
+	}
+	return out, nil
 }
 
 // versionOf 由表达式源码算出一个版本号。
