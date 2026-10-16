@@ -25,25 +25,35 @@ import (
 	"time"
 )
 
-// Protocol 是上游说的话。
+// Protocol 是协议族的名字。
 //
 // 它决定用哪套 usage 口径、哪种流式分片格式、以及请求体长什么样。
+//
+// 这个类型有两个用它的地方，指的是同一件事的两个视角：**调用方**说的是
+// 哪套协议（由请求路径决定：/v1/chat/completions 是 openai，
+// /v1/messages 是 anthropic），以及**适配器**自述实现的是哪套
+// （Adapter.Protocol()，注册表拿它做自检）。
+//
+// 渠道表里**没有**对应的列：一个渠道说哪套协议，由它的 type 指向的适配器
+// 决定，不再单独存一份。存两份的话，第二份只会填错而无人发现。
+//
 // 与渠道类型（Channel.Type）是两个维度：同一家上游可能同时提供两套协议，
 // 同一套协议也被多家上游使用。
 type Protocol string
 
-// 各协议的取值，与 channels.protocol 对应。
+// 各协议的取值。
+//
+// 只有这两套：调用方的入口只有这两条路径，已注册的适配器也只有这两个。
+// 「大体像 OpenAI 但有几处不一样」不是第三个协议族——它是某个渠道的私有
+// 差异，归属在 Channel.Setting 里。
 const (
 	ProtocolOpenAI    Protocol = "openai"
 	ProtocolAnthropic Protocol = "anthropic"
-	// ProtocolCustom 留给「大体像 OpenAI 但有几处不一样」的上游。
-	// 它仍然需要一个具体适配器，只是协议族标记指向上游自定义。
-	ProtocolCustom Protocol = "custom"
 )
 
 func (p Protocol) valid() bool {
 	switch p {
-	case ProtocolOpenAI, ProtocolAnthropic, ProtocolCustom:
+	case ProtocolOpenAI, ProtocolAnthropic:
 		return true
 	}
 	return false
@@ -54,11 +64,10 @@ func (p Protocol) valid() bool {
 // 做成值类型而不是让适配器自己去查库：适配器要做的事与存储无关，
 // 而它每多一个依赖，测试就多一层要搭的台子。
 type Channel struct {
-	ID       int64
-	Name     string
-	Type     string
-	BaseURL  string
-	Protocol Protocol
+	ID      int64
+	Name    string
+	Type    string
+	BaseURL string
 	// Credential 是**已解密**的凭证。适配器不得记录、不得回传、不得写进错误信息。
 	Credential string
 	// Models 是该渠道支持的规范模型名。

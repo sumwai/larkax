@@ -205,6 +205,37 @@ go run ./cmd/larkaxctl migrate up
 
 首次打 tag、第一个外部贡献者、公开发布都不构成分界线；共享数据库才是。
 
+## 造用户、造 key、打一次请求
+
+推理请求要带一把 API Key，而 key 必须挂在某个用户上，所以这条链的起点是建用户：
+
+```sh
+go run ./cmd/larkaxctl user create --name alice      # stdout 是新用户的 ID
+go run ./cmd/larkaxctl apikey create --user alice    # stdout 是 key 的明文
+```
+
+两条命令的 stdout 都**只有可以直接接走的那个值**（前者是 ID，后者是明文），
+其余信息走 stderr。所以它们能直接串起来：
+
+```sh
+KEY=$(go run ./cmd/larkaxctl apikey create --user "$(go run ./cmd/larkaxctl user create --name alice)")
+```
+
+`user create` 还有 `--email` 与 `--role`（`user`、`merchant`、`admin`，默认 `user`）。
+用户名唯一且大小写不敏感，重名会直接报错——**它不会改到已有的那个用户**，
+所以这条命令不能拿来「给已有用户补点什么」。
+
+拿到的 key 打一次推理请求：
+
+```sh
+curl -i localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"<模型名>","messages":[{"role":"user","content":"hi"}]}'
+```
+
+推理接口接到公共端口上的进度见下文「当前能做什么」。
+
 ## 当前能做什么
 
 **推理接口还没接到公共端口上**：

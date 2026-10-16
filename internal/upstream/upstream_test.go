@@ -55,7 +55,6 @@ func TestNewRejectsNonPositiveTimeout(t *testing.T) {
 func TestChatDispatchesByType(t *testing.T) {
 	cases := []struct {
 		typ         string
-		protocol    channel.Protocol
 		wantPath    string
 		wantAuthKey string // 期望出现的头名
 		wantAuthVal string
@@ -63,7 +62,6 @@ func TestChatDispatchesByType(t *testing.T) {
 	}{
 		{
 			typ:         "openai",
-			protocol:    channel.ProtocolOpenAI,
 			wantPath:    "/v1/chat/completions",
 			wantAuthKey: "Authorization",
 			wantAuthVal: "Bearer <CHANNEL_CREDENTIAL>",
@@ -74,7 +72,6 @@ func TestChatDispatchesByType(t *testing.T) {
 		},
 		{
 			typ:         "anthropic",
-			protocol:    channel.ProtocolAnthropic,
 			wantPath:    "/v1/messages",
 			wantAuthKey: "x-api-key",
 			wantAuthVal: "<CHANNEL_CREDENTIAL>",
@@ -95,7 +92,7 @@ func TestChatDispatchesByType(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			resp, err := newExecutor(t).Chat(context.Background(), testChannel(srv.URL, tc.typ, tc.protocol), request())
+			resp, err := newExecutor(t).Chat(context.Background(), testChannel(srv.URL, tc.typ), request())
 			if err != nil {
 				t.Fatalf("Chat 出错: %v", err)
 			}
@@ -107,7 +104,7 @@ func TestChatDispatchesByType(t *testing.T) {
 			}
 			// Anthropic 用 x-api-key 而不是 Bearer。两条头同时出现说明
 			// 分发到了 openai 适配器上，是这条用例真正要拦的情形。
-			if tc.protocol == channel.ProtocolAnthropic && gotBearer != "" {
+			if tc.typ == "anthropic" && gotBearer != "" {
 				t.Errorf("Anthropic 渠道不该设置 Authorization，实际为 %q", gotBearer)
 			}
 			// 凭证是原样传下去的：执行器不持有、不加工、不解密。
@@ -122,13 +119,11 @@ func TestChatDispatchesByType(t *testing.T) {
 func TestChatStreamDispatchesByType(t *testing.T) {
 	cases := []struct {
 		typ      string
-		protocol channel.Protocol
 		wantPath string
 		body     string
 	}{
 		{
 			typ:      "openai",
-			protocol: channel.ProtocolOpenAI,
 			wantPath: "/v1/chat/completions",
 			body: strings.Join([]string{
 				`data: {"choices":[{"index":0,"delta":{"content":"你"}}]}`,
@@ -138,7 +133,6 @@ func TestChatStreamDispatchesByType(t *testing.T) {
 		},
 		{
 			typ:      "anthropic",
-			protocol: channel.ProtocolAnthropic,
 			wantPath: "/v1/messages",
 			body: strings.Join([]string{
 				`event: content_block_delta`,
@@ -164,7 +158,7 @@ func TestChatStreamDispatchesByType(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			events, err := newExecutor(t).ChatStream(context.Background(), testChannel(srv.URL, tc.typ, tc.protocol), request())
+			events, err := newExecutor(t).ChatStream(context.Background(), testChannel(srv.URL, tc.typ), request())
 			if err != nil {
 				t.Fatalf("ChatStream 出错: %v", err)
 			}
@@ -189,7 +183,7 @@ func TestChatStreamDispatchesByType(t *testing.T) {
 // 用一个「返回时就已装好一个事件」的 channel 来验证：如果执行器读了它，
 // 那个事件就被它吃掉了，调用方读到的第一个事件会不对。
 func TestChatStreamDoesNotConsumeEvents(t *testing.T) {
-	fake := &fakeAdapter{typ: "fake", protocol: channel.ProtocolCustom}
+	fake := &fakeAdapter{typ: "fake", protocol: channel.ProtocolOpenAI}
 	fake.events = make(chan channel.StreamEvent, 1)
 	fake.events <- channel.StreamEvent{Kind: "delta", Text: "第一片"}
 
@@ -198,7 +192,7 @@ func TestChatStreamDoesNotConsumeEvents(t *testing.T) {
 		t.Fatalf("newWith 出错: %v", err)
 	}
 
-	ch := testChannel("http://upstream.invalid", "fake", channel.ProtocolCustom)
+	ch := testChannel("http://upstream.invalid", "fake")
 	req := request()
 	events, err := e.ChatStream(context.Background(), ch, req)
 	if err != nil {
@@ -230,7 +224,7 @@ func TestChatStreamDoesNotConsumeEvents(t *testing.T) {
 // 不是上游故障，重试多少次都一样。
 func TestUnknownTypeIsRecognizable(t *testing.T) {
 	e := newExecutor(t)
-	ch := testChannel("http://upstream.invalid", "不认识的类型", channel.ProtocolCustom)
+	ch := testChannel("http://upstream.invalid", "不认识的类型")
 
 	_, err := e.Chat(context.Background(), ch, request())
 	if !errors.Is(err, channel.ErrUnknownType) {
@@ -262,7 +256,7 @@ func TestUpstreamErrorKeepsRetryability(t *testing.T) {
 	defer srv.Close()
 
 	_, err := newExecutor(t).Chat(context.Background(),
-		testChannel(srv.URL, "openai", channel.ProtocolOpenAI), request())
+		testChannel(srv.URL, "openai"), request())
 	if err == nil {
 		t.Fatal("429 应当报错")
 	}
@@ -278,16 +272,19 @@ func TestUpstreamErrorKeepsRetryability(t *testing.T) {
 // 同一个 Type 注册两次必须被拒绝：覆盖会让「两个适配器抢一个名字」
 // 表现为「其中一个静默失效」，而失效的那个通常是新加的。
 func TestNewWithRejectsBadAdapters(t *testing.T) {
-	ok := &fakeAdapter{typ: "ok", protocol: channel.ProtocolCustom}
+	ok := &fakeAdapter{typ: "ok", protocol: channel.ProtocolOpenAI}
 
 	cases := []struct {
 		name     string
 		adapters []channel.Adapter
 	}{
 		{"nil 适配器", []channel.Adapter{nil}},
-		{"Type 为空", []channel.Adapter{&fakeAdapter{typ: "", protocol: channel.ProtocolCustom}}},
+		{"Type 为空", []channel.Adapter{&fakeAdapter{typ: "", protocol: channel.ProtocolOpenAI}}},
 		{"协议未知", []channel.Adapter{&fakeAdapter{typ: "x", protocol: channel.Protocol("不存在的协议")}}},
-		{"重复类型", []channel.Adapter{ok, &fakeAdapter{typ: "ok", protocol: channel.ProtocolCustom}}},
+		// custom 曾经是合法取值。它已经没有了：适配器只能说它实现的是哪套
+		// 现成的协议，不能自造一个协议族——自造的那个没有任何东西读得懂。
+		{"协议 custom", []channel.Adapter{&fakeAdapter{typ: "y", protocol: channel.Protocol("custom")}}},
+		{"重复类型", []channel.Adapter{ok, &fakeAdapter{typ: "ok", protocol: channel.ProtocolOpenAI}}},
 	}
 
 	for _, tc := range cases {
@@ -299,13 +296,12 @@ func TestNewWithRejectsBadAdapters(t *testing.T) {
 	}
 }
 
-func testChannel(baseURL, typ string, protocol channel.Protocol) channel.Channel {
+func testChannel(baseURL, typ string) channel.Channel {
 	return channel.Channel{
 		ID:         1,
 		Name:       "test",
 		Type:       typ,
 		BaseURL:    baseURL,
-		Protocol:   protocol,
 		Credential: "<CHANNEL_CREDENTIAL>",
 	}
 }

@@ -83,6 +83,22 @@ func (s *Store) lookup(ctx context.Context, plaintext string) (User, error) {
 	return user, nil
 }
 
+// lastUsedWriteInterval 是 last_used_at 的最小写入间隔。
+//
+// 取 1 分钟，是由这个字段**要回答的问题**定下的：它给人看「这把 key 还在用吗」，
+// 精度到分钟就够（见 touch）。1 分钟是仍满足这个精度的最粗窗口，
+// 再细就是无谓的写。
+//
+// 为什么不再拉长：写放大在这一档已经与请求速率脱钩。一把每秒上千次请求的 key，
+// 写量从「每请求一次」降到「每分钟一次」——三个数量级；而窗口从 1 分钟拉到
+// 5 分钟只再降 5 倍，却把「刚用过」这条信息的分辨率一起拉粗，
+// 那正是这个字段唯一的用途。1 分钟是这两者之间的取舍点。
+//
+// 它是常量而不是配置：改它不影响任何正确性，只影响观测数据的粗细。
+// 将来真要可配，按项目的分界线它属于 settings 表（不必在连库前拿到），
+// 不进环境变量。
+const lastUsedWriteInterval = time.Minute
+
 // touch 更新 last_used_at。
 //
 // 它是**观测数据**，不是正确性的一部分，所以错误显式丢弃：
@@ -92,11 +108,27 @@ func (s *Store) lookup(ctx context.Context, plaintext string) (User, error) {
 // 代价是这一列可能悄悄停在旧值上。它只用于「这把 key 还在用吗」这类判断，
 // 真需要精确时可以按 created_at 与访问日志对。
 //
-// 每次鉴权都写一次是刻意的：这里没有节流，因为写入量按请求数走，
-// 而更新的是同一行的一列——真成了瓶颈时该加的是节流，不是异步。
+// # 为什么要节流
+//
+// 这次写落在每个推理请求的最前面，而且更新的是**同一行**：同一把 key 的
+// 并发请求会在这行的行锁上排队。加了窗口条件之后，写量从「每请求一次」
+// 降到「每 lastUsedWriteInterval 最多一次」，与请求速率脱钩。
+//
+// 条件是「为空或早于窗口」，所以**第一次一定写**：新建的 key 有没有被用过，
+// 不受窗口影响，窗口只决定之后多久刷新一次。
+//
+// 时间比较留在 SQL 里（now()），和 SET 用的是同一个时钟；挪到 Go 里算
+// 会引入应用与数据库的时钟差，而这个差没有任何地方能兜住。
+//
+// 不改异步：那会把错误处理丢掉（这个写失败现在不影响鉴权，异步之后
+// 连日志都可能丢），也会在进程退出时留下没写完的写。
 func (s *Store) touch(ctx context.Context, keyID int64) {
-	_, _ = s.db.ExecContext(ctx,
-		`UPDATE api_keys SET last_used_at = now() WHERE id = $1`, keyID)
+	_, _ = s.db.ExecContext(ctx, `
+		UPDATE api_keys SET last_used_at = now()
+		 WHERE id = $1
+		   AND (last_used_at IS NULL
+		        OR last_used_at < now() - make_interval(secs => $2))`,
+		keyID, lastUsedWriteInterval.Seconds())
 }
 
 // CreateParams 描述要创建的一把 key。

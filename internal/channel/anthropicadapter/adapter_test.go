@@ -19,7 +19,6 @@ func testChannel(baseURL string) channel.Channel {
 		Name:       "test",
 		Type:       Type,
 		BaseURL:    baseURL,
-		Protocol:   channel.ProtocolAnthropic,
 		Credential: "placeholder-credential",
 	}
 }

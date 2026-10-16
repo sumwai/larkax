@@ -294,10 +294,10 @@ func TestFormatForKnownProtocols(t *testing.T) {
 	}
 }
 
-// custom 没有固定目标格式，猜一个会掩盖配置错误。
-func TestFormatForCustomIsRejected(t *testing.T) {
-	if _, err := formatFor(channel.ProtocolCustom); err == nil {
-		t.Error("custom 协议应报错，要求适配器显式指定")
+// 不认识的协议没有目标格式，猜一个会掩盖配置错误。
+func TestFormatForUnknownProtocolIsRejected(t *testing.T) {
+	if _, err := formatFor(channel.Protocol("custom")); err == nil {
+		t.Error("未知协议应报错")
 	}
 }
 
@@ -637,8 +637,8 @@ func TestFromRelaykitRejectsUnknownType(t *testing.T) {
 	if _, err := FromRelaykitRequest(context.Background(), channel.ProtocolOpenAI, "不是请求"); err == nil {
 		t.Error("未知类型应报错")
 	}
-	if _, err := FromRelaykitRequest(context.Background(), channel.ProtocolCustom, &dto.GeneralOpenAIRequest{}); err == nil {
-		t.Error("custom 协议应报错")
+	if _, err := FromRelaykitRequest(context.Background(), channel.Protocol("custom"), &dto.GeneralOpenAIRequest{}); err == nil {
+		t.Error("未知协议应报错")
 	}
 }
 
@@ -867,7 +867,7 @@ func TestParseRequestRejectsBadInput(t *testing.T) {
 		{name: "不是 JSON", protocol: channel.ProtocolOpenAI, body: `{`},
 		{name: "不是对象", protocol: channel.ProtocolOpenAI, body: `[1,2,3]`},
 		{name: "空体", protocol: channel.ProtocolAnthropic, body: ``},
-		{name: "custom 没有固定形状", protocol: channel.ProtocolCustom, body: `{"model":"m"}`},
+		{name: "未知协议没有固定形状", protocol: channel.Protocol("custom"), body: `{"model":"m"}`},
 	}
 
 	for _, tc := range cases {
