@@ -91,7 +91,14 @@ func (a *Adapter) DayInfo(region string, day time.Time) (expr.DayInfo, error) {
 		// 把成因带进错误里：`year_pending`（公告未发布，正常）与
 		// `row_missing`（数据不完整，要查）对运维是两个完全不同的问题，
 		// 而它们在这里都表现为「这一天算不出价」。
-		return expr.DayInfo{}, fmt.Errorf("%w: %s %s 的日历数据不可用（%s）",
+		//
+		// 措辞指向**配置缺口**而不是服务故障：日历数据是运维灌进来的
+		// （见 internal/calendar/store），缺数据时该去看的是「这一年的数据
+		// 导入了没有」，而一句「日历不可用」会把人引向「日历服务挂了」——
+		// 这个项目里根本没有那样一个服务。
+		return expr.DayInfo{}, fmt.Errorf("%w：%s %s 的节假日日历还没有数据（%s）。"+
+			"这是配置缺口，不是服务故障：该年的日历数据还没有导入，在它补齐之前"+
+			"用到日历的计价规则一直算不出价",
 			expr.ErrCalendarRequired, region, status.Date, status.Reason)
 
 	default:

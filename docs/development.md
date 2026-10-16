@@ -100,6 +100,18 @@ go run ./cmd/larkaxctl snapshot cleanup             # 执行删除
 不补建的话行会落进兜底分区 `request_snapshots_default`，而那里的行没有到期日——
 留存承诺对它不成立。**兜底分区非空即说明有写入绕过了补建，应当告警。**
 
+## 分时计价的日历数据
+
+分时计价要判断某一天是不是工作日，而这件事不能靠星期推——调休把周末挪成了
+上班日。数据从文件导入：
+
+```sh
+go run ./cmd/larkaxctl calendar import ./cn-2031.json
+```
+
+文件格式、状态取值与落库语义见 [calendar-data.md](calendar-data.md)。
+**仓库里不带任何真实数据集**：数据从哪来由运维决定，这条命令只负责读文件写库。
+
 ## 环境变量
 
 一共八个，全部有明确理由：
@@ -281,14 +293,16 @@ curl -i localhost:8080/v1/chat/completions \
 内部端点单独一个端口：它面向编排系统与指标抓取器，不和业务入口共用监听地址，
 也就不需要跟着业务入口一起暴露在 ingress 规则下。
 
-运维命令行走另一个入口，目前有迁移与对账：
+运维命令行走另一个入口，目前有迁移、对账与日历数据导入：
 
 ```sh
 go run ./cmd/larkaxctl migrate up
 go run ./cmd/larkaxctl reconcile
+go run ./cmd/larkaxctl calendar import ./cn-2031.json
 ```
 
-对账的开关、口径与运行记录见 [reconciliation.md](reconciliation.md)。
+对账的开关、口径与运行记录见 [reconciliation.md](reconciliation.md)，
+日历数据的文件格式见 [calendar-data.md](calendar-data.md)。
 
 ## 常用检查
 
