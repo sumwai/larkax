@@ -45,7 +45,8 @@ Not wired yet:
 
 See [docs/development.md](docs/development.md) for how to build and run it.
 The reconciliation job is documented in [docs/reconciliation.md](docs/reconciliation.md),
-and the calendar data behind peak/off-peak pricing in [docs/calendar-data.md](docs/calendar-data.md).
+the calendar data behind peak/off-peak pricing in [docs/calendar-data.md](docs/calendar-data.md),
+and the health and quota signals in [docs/channel-health.md](docs/channel-health.md).
 
 ## What it will do
 
@@ -55,8 +56,11 @@ and the calendar data behind peak/off-peak pricing in [docs/calendar-data.md](do
   retried on another channel and are not billed.
 - **Real billing.** Peak/off-peak rates, context-length tiers, cache pricing, and
   subscription plans, expressed as versioned rules rather than hardcoded branches.
-- **Quota monitoring.** Upstream accounts are probed and tracked so routing can
-  prefer the channel that expires soonest or has the most balance left.
+- **Channel health and quota.** Every upstream call writes back its outcome, so
+  routing can prefer the channel that expires soonest or has the most balance left.
+  Two of the three quota sources — querying an upstream balance endpoint and
+  inferring from upstream errors — are not wired yet; see
+  [docs/channel-health.md](docs/channel-health.md).
 - **Plugin system.** Sandboxed JavaScript hooks around the request lifecycle. Plugins
   cannot read channel credentials and cannot make network requests.
 - **Structure-only request capture.** Enough of each request's shape is kept to
@@ -79,6 +83,7 @@ internal/channel/                 adapter interface, registry, unified request/r
 internal/channel/anthropicadapter/  Anthropic Messages upstream
 internal/channel/httpx/           HTTP details shared by adapters
 internal/channel/openaiadapter/   OpenAI Chat Completions upstream
+internal/channels/                candidates out of the database, call outcomes back in
 internal/config/                  startup configuration (environment variables)
 internal/credential/              envelope encryption for channel credentials
 internal/db/                      database connection pool
@@ -93,7 +98,7 @@ internal/plugin/                  the five hooks: registry, dispatch, failure po
 internal/plugin/host/             host capabilities injected into plugins (log, kv, calendar)
 internal/plugin/sandbox/          moejs runtime, limits, interruption
 internal/pricing/                 picking the pricing rule that applies to a request
-internal/quota/                   upstream quota tracking: probe, self-account, merge
+internal/quota/                   upstream quota state: observations, self-accounting, confidence
 internal/relay/                   protocol conversion through relaykit
 internal/route/                   channel selection and failover
 internal/settings/                runtime configuration, stored in the database

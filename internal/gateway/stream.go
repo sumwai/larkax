@@ -56,6 +56,12 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 	}
 
 	routed, err := g.Router.ChatStream(ctx, g.Executor, upstream, h.candidates, req.CanonicalModel)
+
+	// 换渠道过程中失败的那些尝试照记——无论这次路由最后成没成，
+	// 那些调用都已经发生过。成功接受的那一个不在这里记：它的结局只有
+	// 读完流才知道（见 recordFailedAttempts）。
+	g.recordFailedAttempts(ctx, streamAttempts(routed))
+
 	if err != nil {
 		// 上游在接受请求之前就失败了：路由层已经换过渠道，剩下的处置与
 		// 非流式完全一样——不计费。
@@ -120,6 +126,9 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 		started bool
 		// done 表示上游给了结束标记（[DONE] / message_stop）。
 		done bool
+		// streamErr 是上游在流里报的错误。它决定这次调用记成渠道的失败
+		// 还是成功——上游接受请求之后中途断了，是渠道此刻不行。
+		streamErr error
 		// clientGone 表示调用方已经断开。
 		clientGone bool
 	)
@@ -145,6 +154,9 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 			done = true
 			est.ObserveDone()
 		case "error":
+			if ev.Err != nil {
+				streamErr = ev.Err
+			}
 			if started && ev.Err != nil {
 				// 已经吐字之后失败：**不能换渠道**——重试会让客户端看到
 				// 两段拼接的回答，而它无法察觉。把这个判断做成一个错误值
@@ -179,12 +191,33 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 		}()
 	}
 
+	// 这次调用在渠道健康度上算成什么，三种结局的判定只有这里做得出来：
+	//
+	//   - 客户端断开不是渠道的失败（是我们这边断的），但它也没有正常结束，
+	//     所以既不加连续失败也不清零
+	//   - 上游接受请求之后报错、或者没吐字就断了，是渠道此刻不行
+	//   - 正常结束（收到结束标记且流里没报错）才是成功
+	verdict := route.VerdictFailure
+	switch {
+	case clientGone:
+		verdict = route.VerdictUnattributed
+	case done && streamErr == nil:
+		verdict = route.VerdictSuccess
+	}
+
 	if !clientGone && !done && !started {
 		// 上游在接受请求之后、吐出任何内容之前就结束了（报错或直接断开）。
 		// 这等于「没有成功返回」：不计费，预留由 finish 释放。
 		//
 		// 注意这与上面那条分支的差别：客户端断开时，上游很可能已经为
 		// 输入计了费，所以那条要计费，这条不用。
+		//
+		// 没有用量可记（一个字都没产生），所以只记结论。
+		g.recordCall(ctx, route.CallOutcome{
+			ChannelID: res.Channel.ID,
+			At:        g.now(),
+			Verdict:   verdict,
+		})
 		_, _ = h.settleAndFail(settleCtx, errStreamAborted,
 			pipeline.Outcome{UpstreamFailed: true})
 		h.finish(settleCtx)
@@ -197,6 +230,53 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 	// Estimated 与 tokens.Source 是同一个口径（见 Result.Estimated）。
 	res.Estimated = source != tokens.SourceMeasured
 	g.billStream(settleCtx, h, res, usage, source, clientGone)
+
+	// 用量照记，即便这次算「不是渠道的失败」：客户端断开时上游已经为
+	// 输入计了费，额度自记账要跟着扣。
+	g.recordCall(ctx, route.CallOutcome{
+		ChannelID: res.Channel.ID,
+		At:        g.now(),
+		Verdict:   verdict,
+		Usage:     usage,
+	})
+}
+
+// recordFailedAttempts 记下换渠道过程中失败的那些尝试。
+//
+// # 成功的那一次为什么不在这里记
+//
+// 流式那条路上「上游接受了请求」不等于成功：它之后还可能中途断掉。
+// 真正的结局只有读完流才知道，所以那一次由 pumpStream 在流结束时记。
+// 在这里把它一起记了的话，同一个渠道每次流式请求会被记两遍——
+// 一遍按「接受请求」算成功、一遍按真实结局算，成功率与连续失败都会偏。
+//
+// 与 recordAttempts 分开而不是加一个开关：两边的规则本来就不同，
+// 一个记全部（非流式的成败在调用返回时就定了），一个只记失败的。
+func (g *Gateway) recordFailedAttempts(ctx context.Context, attempts []route.Attempt) {
+	if g.Recorder == nil {
+		return
+	}
+	for _, a := range attempts {
+		if a.Err == nil {
+			continue
+		}
+		g.recordCall(ctx, route.CallOutcome{
+			ChannelID: a.ChannelID,
+			At:        attemptTime(a, g.now()),
+			Verdict:   verdictOf(a.Err),
+		})
+	}
+}
+
+// streamAttempts 取一次流式路由结果的尝试列表。
+//
+// 与 attemptsOf 分开是因为返回类型不同（StreamResult 与 Result），
+// 而两边都要处理「路由失败时结果可能为 nil」这一件事。
+func streamAttempts(r *route.StreamResult) []route.Attempt {
+	if r == nil {
+		return nil
+	}
+	return r.Attempts
 }
 
 // billStream 结算一次要计费的流式请求。
