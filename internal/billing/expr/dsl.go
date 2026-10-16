@@ -34,6 +34,19 @@ var (
 	clockVarNames = []string{"at", "region"}
 )
 
+// usageVarSet 是 usageVarNames 的集合形态，供按名字判断的地方用。
+//
+// 从同一个切片派生而不是另写一份字面量：用量变量只在一个地方定义，
+// 结构检查与运行期环境都从它出发。手抄一份的风险正好落在最需要它的那件事上——
+// 加一个用量变量时漏掉清单，于是新变量能被写进乘数位置而检查看不出来。
+var usageVarSet = func() map[string]struct{} {
+	out := make(map[string]struct{}, len(usageVarNames))
+	for _, name := range usageVarNames {
+		out[name] = struct{}{}
+	}
+	return out
+}()
+
 // usageVars 构造编译期环境里的用量变量。
 //
 // 计数一律声明成 int64：规则里既有 `len <= 32000` 这样的比较，也有
