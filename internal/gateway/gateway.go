@@ -236,7 +236,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 		Usage:       usageOf(routed.Response),
 		UsageSource: tokens.SourceMeasured,
 	}
-	charge, err := g.finishCharge(ctx, req, res, routed.Channel, out)
+	charge, err := g.finishCharge(ctx, res, routed.Channel, out)
 	if err != nil {
 		return nil, err
 	}
@@ -308,9 +308,13 @@ func (g *Gateway) begin(ctx context.Context, req pipeline.Request, upstream *cha
 			return nil, fmt.Errorf("预留落库失败: %w", err)
 		}
 		h.storeID = id
+		// 没有预留层时它保持 0：那本来就没有账单行可指。
 		req.BillingRequestID = id
-		h.req = req
 	}
+	// 这一行在 if **外面**：无论有没有预留层，h.req 都该是「已经开始的那份
+	// 请求」。结算以它为基准（见 finishCharge），而它少了 BillingRequestID，
+	// 账本分录就挂不回这次账单——两边只剩时间上的巧合。
+	h.req = req
 
 	// 请求快照在**调上游之前**采集：出错要能复现「当时发出去的是什么」。
 	g.snapshotAsync(ctx, upstream, "request")
@@ -417,13 +421,20 @@ func (h *handle) reportReleaseFailure(ctx context.Context, cause error) {
 	}()
 }
 
-func (g *Gateway) finishCharge(ctx context.Context, req pipeline.Request, h *handle, ch channel.Channel, out pipeline.Outcome) (*pipeline.Charge, error) {
+// finishCharge 结算一次成功的请求。
+//
+// 基准是 h.req，不是调用方手上那份请求：BillingRequestID 是在 begin 里
+// 赋给 h.req 的，外层那份看不到它——而少了它，账本分录就挂不回这次账单。
+func (g *Gateway) finishCharge(ctx context.Context, h *handle, ch channel.Channel, out pipeline.Outcome) (*pipeline.Charge, error) {
 	h.settled = true
 
 	// 结算用**实际选中的渠道**：渠道级与商家级规则按它匹配。
-	// 预留时还不知道会选中谁，所以那时用的是请求里给的（通常是 0）——
-	// 那意味着预留按所有候选里**最贵的**那个规则算（见 Pipeline.Reserve 的注释）。
-	settleReq := req
+	//
+	// 预留时还不知道会选中谁，所以那时 ChannelID 是 0，渠道级与商家级
+	// 规则都匹配不上——**预留因此只按平台作用域的规则算**。平台规则比
+	// 渠道级规则便宜时，预留会不够，这是已知问题（见 #150）。这里的
+	// EvalWorstCase 取的是**那一条规则内部**的最坏分支，不跨规则。
+	settleReq := h.req
 	settleReq.ChannelID = ch.ID
 	settleReq.OwnerUserID = ownerOf(h.candidates, ch.ID)
 
