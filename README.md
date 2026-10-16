@@ -49,6 +49,7 @@ The reconciliation job is documented in [docs/reconciliation.md](docs/reconcilia
 cmd/larkax/                       the service binary
 cmd/larkaxctl/                    migrations and operations CLI
 internal/api/                     the public HTTP entry: paths, parsing, response shapes
+internal/assembly/                wires the entry layer into a runnable service
 internal/billing/                 turning usage into money: reserve, settle, breakdown
 internal/billing/calendaradapter/  bridges internal/calendar to the pricing engine
 internal/billing/expr/            the expression engine that evaluates pricing rules
@@ -70,6 +71,7 @@ internal/pipeline/                wires the billing stages into one request flow
 internal/plugin/                  the five hooks: registry, dispatch, failure policy
 internal/plugin/host/             host capabilities injected into plugins (log, kv, calendar)
 internal/plugin/sandbox/          moejs runtime, limits, interruption
+internal/pricing/                 picking the pricing rule that applies to a request
 internal/quota/                   upstream quota tracking: probe, self-account, merge
 internal/relay/                   protocol conversion through relaykit
 internal/route/                   channel selection and failover
@@ -111,11 +113,12 @@ read, not a failure):
   to it. Everything else uses larkax's own types.
 - **`internal/money` is the only place rounding happens.** Everything else is
   integer arithmetic on a fixed-point value.
-- **Nothing below the entry layer imports `internal/gateway`.** The two
+- **Nothing below the entry layer imports `internal/gateway`.** The three
   exceptions are named in `scripts/check-layering.sh`: `internal/api`, which is
-  the HTTP half of the entry layer and calls `gateway.Chat`, and
-  `internal/snapshotwire`, which adapts the snapshot package to the interfaces
-  the gateway declares.
+  the HTTP half of the entry layer and calls `gateway.Chat`; `internal/snapshotwire`,
+  which adapts the snapshot package to the interfaces the gateway declares; and
+  `internal/assembly`, which constructs the gateway and is the only place that
+  sees both the entry layer and the data plane.
 
 The billing path is deliberately split so each stage can be tested without a
 database or a network: `money` (arithmetic) → `billing` (usage × price) →
@@ -123,8 +126,9 @@ database or a network: `money` (arithmetic) → `billing` (usage × price) →
 
 `internal/gateway` holds the order of a whole request — reserve before calling
 upstream, do not switch channels once a stream has emitted, never let the
-snapshot path slow down the request. It is not wired into the binary yet, and
-neither is `internal/plugin`. Still absent: `plugins/` and `web/`.
+snapshot path slow down the request. `internal/assembly` builds it into the
+service binary; `internal/plugin` is not wired yet. Still absent: `plugins/`
+and `web/`.
 
 ## Versioning
 
