@@ -466,10 +466,24 @@ type Executor interface {
 	Chat(ctx context.Context, ch channel.Channel, req *channel.Request) (*channel.Response, error)
 }
 
+// worthNextCandidate 判断一次失败是否值得换下一个候选渠道。
+//
+// 它比 channel.IsRetryable 多认一种错误：ErrUnknownType。那不是「上游坏了」，
+// 而是「这一条候选的配置当前版本的二进制不认识」——它属于**这条候选**，
+// 不属于**这次请求**。按不可重试处理会让它挡住后面的候选：库里只要有一条
+// 回滚后残留的渠道行排在前面，整条请求就失败，而其余候选都是好的。
+//
+// 判据放在这里而不是适配器或执行器里：执行器只看得到自己那一次调用，
+// 只有路由层知道后面还有谁，也就只有它能决定「值不值得换下一个」。
+func worthNextCandidate(err error) bool {
+	return channel.IsRetryable(err) || errors.Is(err, channel.ErrUnknownType)
+}
+
 // Chat 按选路结果依次尝试，直到成功或用尽候选。
 //
-// 重试的边界由 isRetryable 决定：429、5xx、网络层失败换下一个；
+// 重试的边界由 worthNextCandidate 决定：429、5xx、网络层失败换下一个；
 // 400、401 这类换渠道也是同一个错，重试只会把费用与延迟乘以候选数。
+// 唯一的例外是 ErrUnknownType——见 worthNextCandidate。
 func (r *Router) Chat(ctx context.Context, exec Executor, req *channel.Request, candidates []Candidate, canonicalModel string) (*Result, error) {
 	plan := r.Select(candidates, canonicalModel)
 	return r.chatWithPlan(ctx, exec, req, plan)
@@ -494,7 +508,7 @@ func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.R
 			ChannelID:   c.Channel.ID,
 			ChannelName: c.Channel.Name,
 			Err:         err,
-			Retryable:   err != nil && channel.IsRetryable(err),
+			Retryable:   worthNextCandidate(err),
 			StartedAt:   started,
 			Duration:    r.now().Sub(started),
 		})
@@ -504,7 +518,7 @@ func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.R
 			result.Response = resp
 			return result, nil
 		}
-		if !channel.IsRetryable(err) {
+		if !worthNextCandidate(err) {
 			// 不可重试：换渠道也是同一个错，立刻返回。
 			// 已经记录的尝试保留下来，调用方需要知道试过谁。
 			return result, &Errors{Attempts: result.Attempts}
