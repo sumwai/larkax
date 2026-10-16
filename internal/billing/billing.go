@@ -37,13 +37,18 @@ type Usage struct {
 	// PromptTokens 是**非缓存**的输入 token。
 	// 缓存命中的部分单独记，因为它们的单价通常低得多。
 	PromptTokens int64
-	// CompletionTokens 是输出 token，不含推理 token（后者单独计价）。
+	// CompletionTokens 是输出 token，**不含**推理 token：两者互斥，
+	// 各自乘各自的单价，不会对同一批 token 收两次费。
+	// 协议层报的未必是这个口径（OpenAI 的 completion_tokens 含推理），
+	// 那层关系由 channel.Usage.CompletionIncludesReasoning 声明，
+	// 由 FromChannelUsage 折算过来。
 	CompletionTokens int64
 	// CacheReadTokens 是命中缓存的输入 token。
 	CacheReadTokens int64
 	// CacheWriteTokens 是写入缓存的 token。
 	CacheWriteTokens int64
-	// ReasoningTokens 是推理模型的思考 token。
+	// ReasoningTokens 是推理模型的思考 token。与 CompletionTokens 互斥，
+	// 见上一条。
 	ReasoningTokens int64
 
 	// UnitCounts 是非 token 计量：搜索次数、图片张数、视频秒数。
@@ -198,10 +203,30 @@ func (b Breakdown) Verify() error {
 // ErrMissingPrice 表示用量里有计量项，规则却没给它单价。
 var ErrMissingPrice = errors.New("用量里有规则未定价的计量项")
 
+// ReasoningExceedsCompletion 判断协议层用量是否自相矛盾：声明说推理已经算在
+// 输出里，而报出来的推理量却大于输出总量。这两件事不可能同时成立。
+//
+// 它**不是**一条校验规则：这里返回 true 不代表这次用量算错了，只代表上游报的
+// 两个数对不上。所以它不该让结算失败——那会把一条渠道的所有请求都变成失败，
+// 而这是一次运行时来自上游的数据状况，不是几分钟能修好的配置错误
+// （与 ErrMissingPrice 那类正好相反）。调用方拿它去**告警**。
+//
+// 为什么要单独一个函数：拆分（FromChannelUsage）会把矛盾的输出钳到 0，
+// 钳过之后 (输出 50、推理 80) 这种矛盾输入与 (输出 100、推理 100) 这种
+// 「整段输出都是推理」的合法输入得到同一个计费口径用量，**判断只能在
+// 协议层的用量上做**。
+func ReasoningExceedsCompletion(u channel.Usage) bool {
+	return u.CompletionIncludesReasoning && u.ReasoningTokens > u.CompletionTokens
+}
+
 // Validate 检查规则与用量是否自洽。
 //
 // 拦的是「算了但算得不对」的几类情形。它们都不会让程序崩，
 // 只会让账目慢慢偏掉——而偏掉之后要很久才看得出来。
+//
+// 这里的每一条都是**配置与用量对不上**（规则缺单价、用量为负），
+// 运维改一条配置就能修好，所以让结算失败是合适的处置。上游报的数自相矛盾
+// 属于另一类，见 ReasoningExceedsCompletion。
 func Validate(usage Usage, prices Prices) error {
 	if usage.TotalTokens() < 0 {
 		// 负用量只可能来自解析错误（例如把带符号整数读反）。
@@ -225,8 +250,10 @@ func Validate(usage Usage, prices Prices) error {
 //
 //   - channel.Usage.PromptTokens 含缓存部分（OpenAI 口径），
 //     而计价时缓存与非缓存单价不同，必须拆开。
-//   - ReasoningTokens 在协议层可能已被计入 completion，
-//     在计费层要单独处理，否则会被收两次钱。
+//   - 计费口径下 CompletionTokens **不含**推理（两者互斥，见 Usage 的注释），
+//     而协议层是否如此由 channel.Usage.CompletionIncludesReasoning 声明。
+//     声明为「已含」时要在这里减掉——不减就是同一批 token 收两次费：
+//     completion 与 reasoning 两个变量各自乘一次单价，而它们指的是同一批 token。
 func FromChannelUsage(u channel.Usage) Usage {
 	out := Usage{
 		CompletionTokens: u.CompletionTokens,
@@ -234,6 +261,16 @@ func FromChannelUsage(u channel.Usage) Usage {
 		CacheWriteTokens: u.CacheWriteTokens,
 		ReasoningTokens:  u.ReasoningTokens,
 		UnitCounts:       u.UnitCounts,
+	}
+
+	if u.CompletionIncludesReasoning {
+		// 推理是输出的一部分，减掉之后两者才互斥。
+		// 减出来为负说明上游自相矛盾（推理量大于输出总量），钳到 0——
+		// 负数进金额运算会算出一笔「上游付钱给用户」。
+		//
+		// 钳掉不等于放过：矛盾由调用方按 ReasoningExceedsCompletion 告警。
+		// 这里不做那件事，因为本函数只该算数，不该决定怎么上报。
+		out.CompletionTokens = max64(u.CompletionTokens-u.ReasoningTokens, 0)
 	}
 
 	// PromptTokens 含缓存，减掉才是非缓存输入。
@@ -259,14 +296,18 @@ func FromChannelUsage(u channel.Usage) Usage {
 		}
 	}
 
-	// 推理 token 若被上游计入了 completion，这里不重复计。
-	// 判据是「completion 明显大于推理量」——那说明推理是其中一部分。
-	// 无法判断时保持原样，由规则决定怎么定价。
 	return out
 }
 
 func min64(a, b int64) int64 {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func max64(a, b int64) int64 {
+	if a > b {
 		return a
 	}
 	return b

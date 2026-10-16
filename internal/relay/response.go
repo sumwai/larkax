@@ -34,7 +34,10 @@ import (
 //   - 缓存读写取 PromptTokensDetails，它同时覆盖 OpenAI 的
 //     prompt_tokens_details.cached_tokens 与 Anthropic 的 cache_read；
 //     写入侧另有 CachedCreationTokens 与 CacheWriteTokens 两个字段。
-//   - ReasoningTokens 只记单独报出来的那一部分，不重复计入 CompletionTokens。
+//   - ReasoningTokens 照抄 CompletionTokenDetails.ReasoningTokens，
+//     CompletionTokens 也照抄——而在这套口径下推理**是**输出的一部分
+//     （见下面 CompletionIncludesReasoning 处的说明）。两者在这里并不互斥，
+//     减掉推理是计费层的事。
 func UsageFromRelaykit(u *dto.Usage) channel.Usage {
 	if u == nil {
 		return channel.Usage{}
@@ -68,8 +71,19 @@ func UsageFromRelaykit(u *dto.Usage) channel.Usage {
 		CacheReadTokens:  cacheRead,
 		CacheWriteTokens: cacheWrite,
 		ReasoningTokens:  reasoning,
-		UnitCounts:       unitCountsFromRelaykit(u),
-		Raw:              rawUsage(u),
+		// dto.Usage 是 OpenAI 语义的形状，而它的规范化正是把推理并进输出里的：
+		// dto.BillingUsage 在把 Gemini 的用量折成这一形状时写的是
+		// CompletionTokens = CandidatesTokenCount + ThoughtsTokenCount，同时把
+		// ThoughtsTokenCount 记进 CompletionTokenDetails.ReasoningTokens。
+		// OpenAI 自己的定义也一样——completion_tokens 含
+		// completion_tokens_details.reasoning_tokens。
+		//
+		// Anthropic 口径（InputTokens/OutputTokens）同样如此：output_tokens
+		// 含扩展思考的 token，而协议不单独报推理量，所以 ReasoningTokens 恒为 0，
+		// 声明成「已含」在数值上是空的。
+		CompletionIncludesReasoning: true,
+		UnitCounts:                  unitCountsFromRelaykit(u),
+		Raw:                         rawUsage(u),
 	}
 }
 

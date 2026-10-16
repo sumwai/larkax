@@ -343,6 +343,10 @@ func TestChatStreamUsageAccumulatesAcrossEvents(t *testing.T) {
 	if usage.CompletionTokens != 25 {
 		t.Errorf("CompletionTokens = %d，期望 25（来自 message_delta）", usage.CompletionTokens)
 	}
+	// Anthropic 的 output_tokens 含扩展思考的 token，且协议不单独报推理量。
+	if !usage.CompletionIncludesReasoning {
+		t.Error("Anthropic 口径的 output_tokens 含思考 token，应声明「已含」")
+	}
 	if done == nil || done.FinishReason != "end_turn" {
 		t.Errorf("done 事件 = %+v", done)
 	}

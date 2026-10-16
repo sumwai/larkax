@@ -168,15 +168,39 @@ type Tool struct {
 //   - CompletionTokens 是输出。Anthropic 的 output_tokens 与 OpenAI 的
 //     completion_tokens 含义一致。
 //   - CacheReadTokens / CacheWriteTokens 是缓存明细。没有这概念的渠道留 0。
-//   - ReasoningTokens 是推理模型的思考 token。有的上游把它算进
-//     completion_tokens 里，有的单独报。这里记**单独报出来的那一部分**，
-//     不重复计入 CompletionTokens。
+//   - ReasoningTokens 是推理模型的思考 token。它与 CompletionTokens 的关系
+//     **不是固定的**：OpenAI 口径下 completion_tokens 含 reasoning_tokens，
+//     而有的上游把两者分列。这里如实记下上游报的那个数，关系由
+//     CompletionIncludesReasoning 显式声明——不靠数字推断。
 type Usage struct {
 	PromptTokens     int64
 	CompletionTokens int64
 	CacheReadTokens  int64
 	CacheWriteTokens int64
 	ReasoningTokens  int64
+
+	// CompletionIncludesReasoning 声明 ReasoningTokens 是否**已经算在**
+	// CompletionTokens 里。
+	//
+	// 两种口径在上游都真实存在，而光看数字判不出来：completion=100、reasoning=50
+	// 既可能是「100 里含 50」，也可能是「100 可见输出 + 50 推理」。靠启发式猜
+	// 会在另一种上游上把该收的钱减掉，所以这个关系由**知道协议约定的那一层**
+	// 如实声明，不在这里推断。
+	//
+	//   - true：推理已计入 CompletionTokens。OpenAI 口径的官方定义就是这样
+	//     （completion_tokens 含 completion_tokens_details.reasoning_tokens），
+	//     Anthropic 的 output_tokens 同样含扩展思考的 token。
+	//     计费前必须把推理从 completion 里减掉，否则同一批 token 会被收两次钱。
+	//   - false（零值）：推理是**单独报出**的，与 CompletionTokens 互斥，两项各算各的。
+	//
+	// 零值取 false 而不是 true，理由有二：
+	//
+	//  1. 结构体里两个并列的数字字段，按字面读就是互不相干。把「已包含」当默认，
+	//     零值结构体的字面含义会与实际语义相反。
+	//  2. 零值是**漏填**时落到的那一边。漏填的 OpenAI 系生产者会多收——金额偏高
+	//     是用户会来问的那种错；反过来，漏填的「独立报」生产者会少收，
+	//     而少收没有任何人会来问，只会悄悄少赚钱。
+	CompletionIncludesReasoning bool
 	// UnitCounts 是非 token 计量：搜索次数、图片张数、视频秒数。
 	// 键是单位名（如 "searches"、"images"），值是数量。
 	UnitCounts map[string]int64

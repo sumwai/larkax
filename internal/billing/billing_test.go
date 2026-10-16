@@ -368,12 +368,132 @@ func TestFromChannelUsageClampsInconsistentInput(t *testing.T) {
 }
 
 func TestFromChannelUsageKeepsOtherFields(t *testing.T) {
+	// 没声明「已含」时两项原样保留（零值即「独立报」，见 channel.Usage 的注释）。
 	got := FromChannelUsage(channel.Usage{CompletionTokens: 50, ReasoningTokens: 20, UnitCounts: map[string]int64{"searches": 2}})
 	if got.CompletionTokens != 50 || got.ReasoningTokens != 20 {
 		t.Errorf("输出与推理 token 应原样保留: %+v", got)
 	}
 	if got.UnitCounts["searches"] != 2 {
 		t.Errorf("计量项丢了: %+v", got.UnitCounts)
+	}
+}
+
+// 声明「推理已含在输出里」时，同一批 token 不能既按输出价又按推理价收一遍。
+//
+// 上游的 completion_tokens 按 OpenAI 定义含 reasoning_tokens，而规则可以给
+// 推理单独定价。不减掉的话 completion 与 reasoning 两个变量各自乘一次单价，
+// 指的是同一批 token——账单只是偏高，对账发现不了。
+func TestFromChannelUsageDoesNotChargeReasoningTwice(t *testing.T) {
+	ch := channel.Usage{
+		CompletionTokens:            100,
+		ReasoningTokens:             40,
+		CompletionIncludesReasoning: true,
+	}
+	got := FromChannelUsage(ch)
+	if got.CompletionTokens != 60 {
+		t.Errorf("输出 = %d，期望 60（100 里含 40 推理）", got.CompletionTokens)
+	}
+	if got.ReasoningTokens != 40 {
+		t.Errorf("推理 = %d，期望 40", got.ReasoningTokens)
+	}
+
+	// 60*8e-6 + 40*1e-5 = 0.00088；收两遍会是 100*8e-6 + 40*1e-5 = 0.0012
+	total := Compute(got, prices()).Total
+	if total.Cmp(money.MustParse("0.00088")) != 0 {
+		t.Errorf("总额 = %s，期望 0.00088", total)
+	}
+	if total.Cmp(money.MustParse("0.0012")) == 0 {
+		t.Error("推理被收了两次：总额等于「输出整段 + 推理」")
+	}
+}
+
+// 声明「推理是单独报的」时，两项各算各的——那才是真的该相加。
+//
+// 同一组数字（输出 100、推理 40）在两种声明下金额必须不同，否则说明
+// 声明字段根本没被读。
+func TestFromChannelUsageChargesSeparateReasoningSeparately(t *testing.T) {
+	ch := channel.Usage{CompletionTokens: 100, ReasoningTokens: 40}
+	got := FromChannelUsage(ch)
+	if got.CompletionTokens != 100 {
+		t.Errorf("独立报时输出不该被减: %d", got.CompletionTokens)
+	}
+	if got.ReasoningTokens != 40 {
+		t.Errorf("推理 = %d，期望 40", got.ReasoningTokens)
+	}
+
+	// 100*8e-6 + 40*1e-5 = 0.0012
+	if total := Compute(got, prices()).Total; total.Cmp(money.MustParse("0.0012")) != 0 {
+		t.Errorf("总额 = %s，期望 0.0012", total)
+	}
+}
+
+// 整段输出都是推理：拆完输出为 0，推理量原样留着。
+//
+// 这是合法用量（模型把 max_tokens 全用在思考上），不是自相矛盾的输入，
+// 所以告警判据不该命中它。
+func TestFromChannelUsageAllOutputIsReasoning(t *testing.T) {
+	ch := channel.Usage{
+		CompletionTokens:            100,
+		ReasoningTokens:             100,
+		CompletionIncludesReasoning: true,
+	}
+	got := FromChannelUsage(ch)
+	if got.CompletionTokens != 0 {
+		t.Errorf("输出 = %d，期望 0", got.CompletionTokens)
+	}
+	if got.ReasoningTokens != 100 {
+		t.Errorf("推理 = %d，期望 100", got.ReasoningTokens)
+	}
+	if ReasoningExceedsCompletion(ch) {
+		t.Error("整段输出都是推理是合法用量，不该被判成矛盾")
+	}
+}
+
+// 声明说推理含在输出里，而报出来的推理量大于输出总量：上游自相矛盾。
+//
+// 拆分把输出钳到 0——负数进金额运算会算出一笔「上游付钱给用户」。
+// 但矛盾本身不能就此消失：钳过之后它与「整段输出都是推理」得到同一个
+// 计费口径用量，所以判断只能拿协议层的用量来做。
+func TestFromChannelUsageClampsContradictoryReasoning(t *testing.T) {
+	ch := channel.Usage{
+		CompletionTokens:            50,
+		ReasoningTokens:             80,
+		CompletionIncludesReasoning: true,
+	}
+	got := FromChannelUsage(ch)
+	if got.CompletionTokens != 0 {
+		t.Errorf("矛盾时输出应钳到 0，得到 %d", got.CompletionTokens)
+	}
+	if got.ReasoningTokens != 80 {
+		t.Errorf("推理 = %d，期望 80（上游报的照记）", got.ReasoningTokens)
+	}
+	if total := Compute(got, prices()).Total; total.IsNegative() {
+		t.Errorf("金额为负: %s", total)
+	}
+	if !ReasoningExceedsCompletion(ch) {
+		t.Error("推理量大于输出总量、而声明说推理含在输出里，应被判成矛盾")
+	}
+}
+
+// 同一组数字，声明「独立报」时不是矛盾：可见输出 50 之外另有 80 推理。
+// 判据里漏掉声明那一半，这条就会误报。
+func TestReasoningExceedsCompletionRequiresDeclaration(t *testing.T) {
+	ch := channel.Usage{CompletionTokens: 50, ReasoningTokens: 80}
+	if ReasoningExceedsCompletion(ch) {
+		t.Error("声明是「独立报」时，推理量大于输出总量是合法的，不该被判成矛盾")
+	}
+}
+
+// 推理量与输出量恰好相等不是矛盾——它是「整段输出都是推理」。
+// 判据写成 >= 就会把这一条误报。
+func TestReasoningExceedsCompletionAllowsEqual(t *testing.T) {
+	ch := channel.Usage{
+		CompletionTokens:            80,
+		ReasoningTokens:             80,
+		CompletionIncludesReasoning: true,
+	}
+	if ReasoningExceedsCompletion(ch) {
+		t.Error("推理量等于输出量是合法的，不该被判成矛盾")
 	}
 }
 
@@ -676,9 +796,14 @@ func TestCacheCompressionBoundary(t *testing.T) {
 	got = FromChannelUsage(channel.Usage{
 		PromptTokens: 100, CacheReadTokens: 60, CacheWriteTokens: 60,
 	})
+	// 只该抹掉**超出的那 20**，不该把缓存整段抹光。断言写成等式而不是
+	// 「不超过 100」：后者抹光了也满足，而抹光会少算缓存费用。
+	//
+	// 变异：`over := total - u.PromptTokens` 改成 `+`，或 `min64` 改成 max，
+	// 超出的量都算大了，于是缓存被抹成 0——合计变成 60 或 0，等式抓得到。
 	total := got.PromptTokens + got.CacheReadTokens + got.CacheWriteTokens
-	if total > 100 {
-		t.Errorf("超出输入总量时应压回，得到合计 %d", total)
+	if total != 100 {
+		t.Errorf("压回后合计 = %d，应当恰好是 100（只抹掉超出的 20）", total)
 	}
 }
 
