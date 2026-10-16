@@ -9,10 +9,13 @@ latency, cost, and quota; usage is metered and billed per request.
 
 ## Status
 
-Early development — the repository currently contains the service skeleton and the
-database schema, not a working router. The inference entry point exists in
-`internal/api`, but it is not wired into the binary yet, so every path still returns
-`501`. Nothing here is ready to run in production.
+Early development, but the request path is in place: `cmd/larkax` assembles the
+gateway through `internal/assembly` and serves the inference API on the public
+port, speaking both the OpenAI and the Anthropic protocol, streaming included.
+A request is authenticated, rate limited, routed, reserved, forwarded upstream,
+settled, and written to the ledger.
+
+Nothing here is ready to run in production.
 
 What works today:
 
@@ -20,9 +23,22 @@ What works today:
 - Runtime settings loaded from the database and validated against the keys the code declares
 - Migrations, applied and rolled back through `larkaxctl`
 - The full initial database schema
-- The ledger store and the reconcile job that checks the wallet snapshot against it
 - The public HTTP entry: path-to-protocol dispatch, request parsing, and per-protocol
-  response and error shapes (not yet wired into `cmd/larkax`)
+  response and error shapes
+- The request path end to end, including streaming responses
+- The billing engine: the expression-based pricing rules, time-of-day and tiered
+  pricing, reservation and settlement
+- `larkaxctl` management commands for API keys, users, snapshot retention, master
+  key rotation, and calendar data
+- The reconcile job that checks the wallet snapshot against the ledger
+
+Not wired yet:
+
+- The plugin system — `internal/plugin` exists and is tested, but nothing
+  constructs a plugin registry yet
+- Payments and payouts — the ledger transactions exist, the entry points do not
+- The web console (`web/`)
+- Metrics — the internal listener serves health checks only
 
 See [docs/development.md](docs/development.md) for how to build and run it.
 The reconciliation job is documented in [docs/reconciliation.md](docs/reconciliation.md),
@@ -174,9 +190,11 @@ its freshly cloned state.
 If 5432 is already taken, `make run PG_PORT=55432` — the DSN line follows, so there is
 no need to delete `.env` first.
 
-The service listens on `:8080`, where every path returns `501` until the inference API
-exists, and serves `/healthz` and `/readyz` on `:9090`. Building alone is not enough to
-run it — see [docs/development.md](docs/development.md) for the full picture.
+The service serves the inference API on `:8080` and `/healthz` and `/readyz` on `:9090`.
+A deployment running the `worker` role does not serve inference traffic and answers `501`
+on the public port by design — the response names the role, so a misconfigured deployment
+is obvious rather than mysterious. Building alone is not enough to run it — see
+[docs/development.md](docs/development.md) for the full picture.
 
 ## License
 
