@@ -46,6 +46,10 @@ export default definePlugin({
   },
   onRoute(ctx) {
     // 选额度最少的那个（业务上：先用掉快到期的）
+    //
+    // 只在拿得到数时才有意义：候选集里的额度单位不一致时，契约会把
+    // remainingEstimate 全部置 null（见 docs/plugin-contract.md），
+    // 这一段就退化成「选第一个」——不报错，只是不再按额度挑。
     let 选 = null;
     for (const c of ctx.candidates) {
       if (选 === null) { 选 = c; continue; }
