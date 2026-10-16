@@ -454,12 +454,33 @@ go test -cover ./...
 bash scripts/check-redlines.sh      # 检查暂存区是否混入密钥与私有信息
 bash scripts/check-redlines.sh --all
 bash scripts/check-layering.sh      # 检查分层约定有没有被破坏
+bash scripts/check-deadcode.sh      # 检查有没有新出现的不可达符号
 
 bash scripts/check-redlines.test.sh # 只在改过红线脚本后需要跑
+bash scripts/check-deadcode.test.sh # 同上，改过不可达符号脚本后跑
 ```
 
-提交前至少跑一遍 `gofmt -l .`、`go vet ./...`、`go test ./...` 和两个自查脚本。
+提交前至少跑一遍 `gofmt -l .`、`go vet ./...`、`go test ./...` 和三个自查脚本。
 CI 会跑同样的东西，本地跑是为了少一轮来回。
+
+### 不可达符号
+
+`check-deadcode.sh` 从 `cmd/` 下的 main 包（自动发现，当前是 `./cmd/larkax` 与
+`./cmd/larkaxctl`）出发跑 `deadcode`，把不可达的符号与
+`scripts/deadcode-allowlist.txt` 比对：
+
+- **新出现的不可达符号** → 失败。要么接线，要么把它写进白名单
+- **白名单里已经消失的条目** → 只提示「这一条可以删了」，不算失败。
+  它出现的原因是「有人把没门的东西接上线了」，那是个好动作
+- 白名单条目数超过上限 → 失败。新增一条要同时把脚本里的 `MAX_ENTRIES`
+  往上调，那个改动会被 review 看到
+
+它需要 `deadcode`，版本必须与脚本里 `PINNED_TOOLS_VERSION` 一致——
+符号集合随 `golang.org/x/tools` 的版本变化，装错版本脚本会拒绝运行：
+
+```sh
+go install golang.org/x/tools/cmd/deadcode@v0.52.0
+```
 
 ## 变异测试
 

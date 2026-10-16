@@ -64,6 +64,30 @@ jobs:
           version: v2.14.0
           install-mode: goinstall
 
+      # 「新代码没有门」的门禁：从两个 main 包出发跑 deadcode，与签入仓库的
+      # 白名单（scripts/deadcode-allowlist.txt）比对。库写完了、测绿了，而
+      # 「谁来调它」这件事没有任何一步会失败——`go build`、`go vet`、测试、
+      # 覆盖率都不报，于是「有门」与「没门」在 CI 里长得一样。这一道让它失败。
+      #
+      # 版本必须钉住，且要与 scripts/check-deadcode.sh 里的 PINNED_TOOLS_VERSION
+      # 一致：deadcode 的输出随 golang.org/x/tools 的版本变化，工具一升级基线
+      # 就不可比（与 gremlins 那次同一个坑）。对不上时脚本会拒绝运行，不会
+      # 跑出一批看起来像「新增」的结果。
+      #
+      # go install 装到 $(go env GOPATH)/bin，那个目录默认不在 PATH 里。
+      - name: 安装 deadcode
+        run: |
+          go install golang.org/x/tools/cmd/deadcode@v0.52.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: 不可达符号门禁
+        run: bash scripts/check-deadcode.sh
+
+      # 这道门的判据全是集合比对，坏掉时（一个都没解析出来）的输出和
+      # 「全部命中白名单」一模一样。所以自测不是可选的（LESSONS 第 2、16 条）。
+      - name: 不可达符号门禁自测
+        run: bash scripts/check-deadcode.test.sh
+
       # 先迁移再跑测试：把库推到已知状态，也让「迁移能应用」这件事
       # 在测试用到它之前就被验证过。
       - name: 迁移可应用且可回滚
