@@ -295,6 +295,13 @@ func (f *fakeUpstream) observedFrozen() []string {
 	return append([]string(nil), f.frozenAt...)
 }
 
+// callCount 返回上游被调用的次数。
+func (f *fakeUpstream) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
 // ── 装配 ──────────────────────────────────────────────────────────────
 
 // newApp 按生产路径装配一次服务。
@@ -302,6 +309,16 @@ func (f *fakeUpstream) observedFrozen() []string {
 // 执行器用真的 internal/upstream（适配器注册表也是被测对象的一部分），
 // 只是它指向的渠道 base_url 是假上游——「不连真实上游」由渠道那一行保证。
 func newApp(t *testing.T, db *sql.DB, sealer *credential.Sealer) *App {
+	t.Helper()
+	return newAppAt(t, db, sealer, nil)
+}
+
+// newAppAt 与 newApp 相同，但指定可注入的时钟。now 为 nil 时用真实时间。
+//
+// 限流按墙钟分钟切窗口。用例若用真实时间，恰好跑在整点附近的那一次会在
+// 测试中途翻窗口——于是「第 61 次被拒」变成「第 61 次被放行」，用例挂在
+// 一个与被测行为无关的时刻上。给一个固定时刻，这件事就从碰运气变成必然。
+func newAppAt(t *testing.T, db *sql.DB, sealer *credential.Sealer, now func() time.Time) *App {
 	t.Helper()
 
 	values, err := settings.Load(context.Background(), settings.NewPgSource(db))
@@ -322,6 +339,7 @@ func newApp(t *testing.T, db *sql.DB, sealer *credential.Sealer) *App {
 		Version:  "e2e",
 		Executor: executor,
 		Rules:    pricing.New(db),
+		Now:      now,
 	})
 	if err != nil {
 		t.Fatalf("装配失败: %v", err)
@@ -349,6 +367,16 @@ func chatBody(model string) []byte {
 // postChat 打一次公共入口，返回状态码与响应体。
 func postChat(t *testing.T, url, key string, body []byte) (int, []byte) {
 	t.Helper()
+	status, out, _ := postChatFull(t, url, key, body)
+	return status, out
+}
+
+// postChatFull 与 postChat 相同，但把响应头也交出来。
+//
+// 限流那一条要用 Retry-After，而它只出现在响应头里——只看状态码的话，
+// 「回 429 但没告诉客户端该等多久」与「回 429 并给了间隔」在断言里一样。
+func postChatFull(t *testing.T, url, key string, body []byte) (int, []byte, http.Header) {
+	t.Helper()
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -367,7 +395,7 @@ func postChat(t *testing.T, url, key string, body []byte) (int, []byte) {
 	if err != nil {
 		t.Fatalf("读响应失败: %v", err)
 	}
-	return resp.StatusCode, out
+	return resp.StatusCode, out, resp.Header
 }
 
 // ── 断言辅助 ──────────────────────────────────────────────────────────
@@ -801,4 +829,81 @@ func waitForSnapshot(t *testing.T, db *sql.DB, requestID string) (int64, bool) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return 0, false
+}
+
+// TestRateLimitRPMStopsAtTheLimit 是这次改动的落点：写进库里的额度真的生效。
+//
+// api_keys.rate_limit_rpm 此前没有任何代码读它，于是「管理员设了 60，
+// 实际是无限」——一个设了却不生效的额度比没有它更坏。这一条用例走的是
+// 生产用的那条装配路径（assembly.Build）与真库，断言的是**具体数字**：
+// 前 60 次 200、第 61 次 429，而不是「后面比前面少」这类相对关系。
+//
+// 被拒的那一次还必须**没有留下任何痕迹**：限流接在鉴权之后、预留之前，
+// 所以它既不该调用上游（上游那一侧就是预留发生的地方），也不该在
+// billing_requests 里留下账单行——超限的请求先冻住余额再被拒掉，
+// 是这条链路上最容易写错的顺序。
+func TestRateLimitRPMStopsAtTheLimit(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+
+	const limit = 60
+	// 固定时刻，见 newAppAt 的注释：跨整点会让窗口在用例中途翻，
+	// 那一次运行挂在一个与被测行为无关的时刻上。
+	frozen := time.Date(2026, 10, 17, 12, 0, 30, 0, time.UTC)
+
+	model := unique("e2e-model-ratelimit")
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, "100")
+	key := issueKey(t, db, user)
+
+	fake := &fakeUpstream{db: db, userID: user, model: model}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	// 额度直接写进列里：这一列没有写入路径（命令行也没有参数），
+	// 而这次要证明的正是「列里的那个数被读到了」。
+	if _, err := db.ExecContext(ctx,
+		`UPDATE api_keys SET rate_limit_rpm = $2 WHERE key_hash = $1`,
+		auth.HashKey(key), limit); err != nil {
+		t.Fatalf("设置 RPM 额度失败: %v", err)
+	}
+
+	app := newAppAt(t, db, sealer, func() time.Time { return frozen })
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	body := chatBody(model)
+	for i := 1; i <= limit; i++ {
+		status, out := postChat(t, public.URL+"/v1/chat/completions", key, body)
+		if status != http.StatusOK {
+			t.Fatalf("第 %d 次状态码 = %d，期望 200。响应体：%s", i, status, out)
+		}
+	}
+
+	// 第 61 次：429，并且给出重试间隔。
+	status, out, header := postChatFull(t, public.URL+"/v1/chat/completions", key, body)
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("第 %d 次状态码 = %d，期望 429。响应体：%s", limit+1, status, out)
+	}
+	// 时钟固定在 12:00:30，当前窗口还剩 30 秒。
+	if got := header.Get("Retry-After"); got != "30" {
+		t.Errorf("Retry-After = %q，期望 %q", got, "30")
+	}
+
+	if got := fake.callCount(); got != limit {
+		t.Errorf("上游被调用 %d 次，期望 %d（第 %d 次不该走到上游）", got, limit, limit+1)
+	}
+
+	var bills int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM billing_requests WHERE user_id = $1`, user).Scan(&bills); err != nil {
+		t.Fatalf("查账单条数失败: %v", err)
+	}
+	if bills != limit {
+		t.Errorf("账单行数 = %d，期望 %d（被拒的请求不该产生预留）", bills, limit)
+	}
 }

@@ -77,9 +77,24 @@ const maxRequestBodyBytes = 8 << 20
 // User 是一次请求的调用者。
 //
 // 只放计费与限流必须知道的东西。鉴权实现将来可能解析出更多信息（套餐、
-// 分组、限流额度），那些属于鉴权自己的类型，不该顺着这个结构漏进本包。
+// 分组），那些属于鉴权自己的类型，不该顺着这个结构漏进本包。
+//
+// 限流的两个输入是例外，而且是有意的：额度存在**那把 key** 上，本包要
+// 把它交给限流实现，就必须先拿到它。本包仍然**不解释**这两个值（见
+// RateLimiter）——拿到与解释是两件事，把解释放在这里等于开了第二个
+// 定义语义的地方。
 type User struct {
 	ID int64
+
+	// KeyID 是这次请求用的那把 API Key（api_keys.id）。限流按 key 计，
+	// 所以它是限流的输入之一。它与 ID 不是一回事：一个用户可以有多个 key，
+	// 而额度是逐把设的。
+	KeyID int64
+
+	// RateLimitRPM 是这把 key 的每分钟额度，即 api_keys.rate_limit_rpm 的
+	// 原样值：nil 表示列值为 NULL。NULL 与 0 各是什么意思由限流实现定，
+	// 本包只负责原样传下去。
+	RateLimitRPM *int
 }
 
 // Authenticator 从请求里取出凭证并解析出用户。
@@ -98,10 +113,34 @@ type Chatter interface {
 	Chat(ctx context.Context, req pipeline.Request, upstream *channel.Request) (*gateway.Result, error)
 }
 
+// RateLimiter 按 API Key 判断一次请求是否放行。
+//
+// 它是本包对限流的全部要求：入口只管「这一次要不要放行」，不管计数放在
+// 进程内还是别处、也不管窗口怎么切。
+//
+// rpm 是 api_keys.rate_limit_rpm 的原样值（nil 表示 NULL），**它的含义由
+// 实现解释**，本包不做第二次判断：把「NULL 是不限、0 是禁止」写在两处，
+// 两处迟早会不一致，而不一致时没有任何东西会报错。
+type RateLimiter interface {
+	// Allow 记一次请求并返回是否放行。
+	//
+	// allowed 为 false 时，retryAfter 是建议客户端等多久再试；入口会把它
+	// 取整到秒写进 Retry-After（见 writeRateLimited），所以实现给多少精度
+	// 都行。
+	Allow(keyID int64, rpm *int) (allowed bool, retryAfter time.Duration)
+}
+
 // Handler 是公共入口的 HTTP handler。
 type Handler struct {
 	Auth    Authenticator
 	Chatter Chatter
+
+	// RateLimiter 按 key 限流。为 nil 时不做限流。
+	//
+	// 它接在鉴权之后、读请求体之前：被限流的请求不该让我们为它读进最多
+	// maxRequestBodyBytes 的内存，更不该走到预留——那会先把钱冻住，
+	// 再因为限流把请求拒掉。
+	RateLimiter RateLimiter
 
 	// Version 是发布版本，写进每个响应的 x-larkax-version 头。
 	// 见 docs/versioning.md：用户报问题时，「你调的是哪个版本」是最该先
@@ -173,6 +212,21 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 		// 是同一种答复，区分开等于送出一个「这个 Key 存在吗」的探测器。
 		writeError(w, protocol, http.StatusUnauthorized, "invalid credentials")
 		return
+	}
+
+	// 限流在鉴权之后、读请求体之前。
+	//
+	// 「之后」是必须的：按 key 计就要先知道是哪把 key，而没通过鉴权的请求
+	// 不该消耗任何人的额度。
+	// 「之前」也是必须的：超限的请求不该让我们为它读进最多
+	// maxRequestBodyBytes 的内存，更不该走到预留——那会先把余额冻住，
+	// 再因为限流把请求拒掉，一笔钱为一次不会被处理的请求白白占住。
+	if h.RateLimiter != nil {
+		if allowed, retryAfter := h.RateLimiter.Allow(user.KeyID, user.RateLimitRPM); !allowed {
+			observe.FromContext(r.Context()).Warn("请求超出该 Key 的 RPM 额度", "key_id", user.KeyID)
+			writeRateLimited(w, protocol, retryAfter)
+			return
+		}
 	}
 
 	body, err := readBody(w, r)

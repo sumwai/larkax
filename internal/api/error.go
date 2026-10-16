@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
 )
@@ -69,6 +71,38 @@ func writeError(w http.ResponseWriter, protocol channel.Protocol, status int, me
 	// 被发现，不是在这里兜住。
 	raw, _ := json.Marshal(body)
 	writeJSON(w, status, raw)
+}
+
+// HeaderRetryAfter 是限流响应里回给调用方的重试间隔头。
+//
+// 它与状态码 429 是一对：只回 429 而让调用方自己去猜该等多久，多数 SDK
+// 会退化成「立刻重试」，那正好是限流要避免的行为。
+const HeaderRetryAfter = "Retry-After"
+
+// writeRateLimited 写出一次限流的响应。
+//
+// Retry-After 用整数秒：RFC 9110 允许 delay-seconds 与 HTTP-date 两种写法，
+// 整数秒是各家 SDK 都直接解析的那种。至少 1 秒——写 0 会让客户端立刻重试，
+// 而它必然还在同一个窗口里，白白多一次往返。
+//
+// 错误体仍然按调用协议给形状（429 → rate_limit_error，见 errorKind），
+// 所以这一条不需要各协议各写一份。
+func writeRateLimited(w http.ResponseWriter, protocol channel.Protocol, retryAfter time.Duration) {
+	w.Header().Set(HeaderRetryAfter, strconv.FormatInt(retryAfterSeconds(retryAfter), 10))
+	writeError(w, protocol, http.StatusTooManyRequests,
+		"rate limit exceeded for this API key, retry later")
+}
+
+// retryAfterSeconds 把重试间隔换成整数秒，向上取整并至少 1 秒。
+//
+// 取整方向与下限都在这里定：实现给的是 duration，而响应头只能写整数秒，
+// 这个换算放在一处，免得每个调用点各取整一次、方向还不同。
+func retryAfterSeconds(d time.Duration) int64 {
+	secs := int64((d + time.Second - 1) / time.Second)
+	if secs < 1 {
+		return 1
+	}
+	return secs
 }
 
 // errorKind 把状态码映射成调用协议里的错误类型。

@@ -46,6 +46,7 @@ import (
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pipeline"
+	"github.com/sumwai/larkax/internal/ratelimit"
 	"github.com/sumwai/larkax/internal/route"
 	"github.com/sumwai/larkax/internal/settings"
 	"github.com/sumwai/larkax/internal/snapshotwire"
@@ -163,6 +164,16 @@ func Build(cfg Config) (*App, error) {
 	handler := api.New(authenticator{store: auth.New(cfg.DB)}, gw)
 	handler.Version = cfg.Version
 	handler.Now = cfg.Now
+	handler.RateLimiter = ratelimit.New(cfg.Now)
+
+	// 限流按 key 的额度生效了，但计数在**进程内**：多实例部署时每个实例
+	// 各计一份，一把 60 RPM 的 key 在 N 个实例上最多能打到 60×N RPM。
+	//
+	// 这件事必须说出来。「设了额度」与「真的限住了」在配置、响应码和请求
+	// 日志上都一模一样，唯一能把它们分开的就是这句话——而默认沉默的话，
+	// 一个按 60 RPM 配了容量、实际被打到 120 RPM 的部署没有任何提示。
+	// 共享计数要有一个所有实例都连得上的存储，那是另一件事。
+	logger.Warn("RPM 限流按进程内计数：多实例部署时各实例独立计数，额度不共享")
 
 	return &App{
 		Public:    observe.Middleware(handler),
@@ -223,16 +234,16 @@ func buildSnapshots(cfg Config, logger *slog.Logger) (*snapshotwire.Collector, e
 
 // authenticator 把 auth.Store 适配成公共入口要的那份接口。
 //
-// # 为什么是两个类型之间的三行转换，而不是合并它们
+// # 为什么是两个类型之间的几行转换，而不是合并它们
 //
-// auth.User 带 ID、Username 与 KeyID，api.User 只有 ID。两者不合并是
-// 有意的：公共入口的注释写明，套餐、分组、限流额度这些属于鉴权自己的
-// 类型，不该顺着入口的结构漏出去——入口一旦带上它们，改鉴权就变成了
+// auth.User 带 ID、Username、KeyID 与限流额度，api.User 只带入口真正用到的
+// 那几个。两者不合并是有意的：公共入口的注释写明，套餐、分组这些属于鉴权
+// 自己的类型，不该顺着入口的结构漏出去——入口一旦带上它们，改鉴权就变成了
 // 改入口的对外契约。
 //
-// 这里只搬 ID，因为另外两个字段目前**没有消费者**。将来有人要用
-// （例如把 api_key_id 记进账单），那时要在这里显式加一行，而不是在
-// 两个包里各有一份悄悄同步的字段表。
+// 这里搬的是**有消费者**的字段：ID 用于计费，KeyID 与 RateLimitRPM 用于
+// 限流（见 api.RateLimiter）。其余字段（例如 Username）没有消费者就不搬，
+// 要加时在这里显式加一行，而不是在两个包里各有一份悄悄同步的字段表。
 type authenticator struct {
 	store *auth.Store
 }
@@ -246,7 +257,7 @@ func (a authenticator) Authenticate(ctx context.Context, r *http.Request) (api.U
 	if err != nil {
 		return api.User{}, err
 	}
-	return api.User{ID: user.ID}, nil
+	return api.User{ID: user.ID, KeyID: user.KeyID, RateLimitRPM: user.RateLimitRPM}, nil
 }
 
 // 编译期断言：适配器要满足公共入口对鉴权的要求。
@@ -263,3 +274,9 @@ var (
 	_ gateway.ReservationStore = (*store.Store)(nil)
 	_ gateway.SettlementStore  = (*store.Store)(nil)
 )
+
+// 编译期断言：限流实现要满足公共入口对它的要求。
+//
+// 同上，写在装配层：api 不该 import 具体实现，而「两边对得上」必须有人检查
+// ——放在这里，Allow 的签名一改就在改的那一次编译失败。
+var _ api.RateLimiter = (*ratelimit.Limiter)(nil)
