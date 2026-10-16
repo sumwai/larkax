@@ -212,9 +212,13 @@ func (s *Source) decrypt(envelope []byte) (string, error) {
 		switch {
 		case errors.Is(err, credential.ErrNoKey):
 			// 密文里记的钥匙标识，本进程一把都没有。
-			return "", fmt.Errorf("%w：%v", ErrNoMasterKey, err)
+			//
+			// 两个 %w 而不是「%w：%v」：后者会把底层那句「哪把钥匙找不到」
+			// 从错误链上摘掉，而那正是排查时唯一有用的信息。Go 1.20 起
+			// 一个 Errorf 可以带多个 %w，errors.Is 对两个都成立。
+			return "", fmt.Errorf("%w：%w", ErrNoMasterKey, err)
 		case errors.Is(err, credential.ErrMalformed):
-			return "", fmt.Errorf("%w：%v", ErrCredentialCorrupt, err)
+			return "", fmt.Errorf("%w：%w", ErrCredentialCorrupt, err)
 		default:
 			return "", fmt.Errorf("解密凭证失败: %w", err)
 		}
