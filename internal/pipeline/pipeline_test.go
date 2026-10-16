@@ -446,7 +446,7 @@ func TestSettleClientCancelStillBills(t *testing.T) {
 	res, _ := p.Reserve(context.Background(), req)
 
 	charge, err := p.Settle(context.Background(), req, res, Outcome{
-		ClientCancelled: true,
+		ClientCanceled: true,
 		// 拿不到实测值，用量是估算的
 		Usage:       channel.Usage{PromptTokens: 1000, CompletionTokens: 50},
 		UsageSource: tokens.SourceEstimated,

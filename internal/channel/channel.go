@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -84,6 +85,25 @@ func (c Channel) Supports(canonicalModel string) bool {
 		}
 	}
 	return false
+}
+
+// PromptText 把所有消息里的正文块拼成一段文本。
+//
+// 它是 token 计数的输入（见 internal/tokens）：预留要在调上游之前估输入，
+// 流式中断时要估整条请求。两处用同一份口径——各拼一次的话，同一个请求
+// 在预留与结算里会被算成两个不同的量，而差额没有解释。
+//
+// 只拼正文：图片与工具参数是**另一个口径**的东西，各家对它们的计量方式
+// 不同，按字符估出来的数字比正文部分的估算更不可信。工具定义的框架开销
+// 另行按条数补（见 tokens.ObserveRequest 的 messages / tools 参数）。
+func (r *Request) PromptText() string {
+	var b strings.Builder
+	for _, m := range r.Messages {
+		for _, c := range m.Content {
+			b.WriteString(c.Text)
+		}
+	}
+	return b.String()
 }
 
 // Request 是统一格式的请求。

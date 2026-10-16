@@ -147,25 +147,12 @@ func issueKey(t *testing.T, db *sql.DB, userID int64) string {
 }
 
 // seedChannel 插一条指向假上游的渠道，返回渠道 id。
+//
+// 类型固定 openai、优先级用列的默认值（0）。要别的组合用 seedChannelOfType
+// （见 stream_e2e_test.go）——两份 INSERT 早晚会分叉，而分叉的那一份不会报错。
 func seedChannel(t *testing.T, db *sql.DB, sealer *credential.Sealer, owner int64, baseURL, model string) int64 {
 	t.Helper()
-
-	sealed, err := sealer.Seal([]byte("test-key-placeholder"))
-	if err != nil {
-		t.Fatalf("封装凭证失败: %v", err)
-	}
-
-	var id int64
-	if err := db.QueryRowContext(context.Background(), `
-		INSERT INTO channels
-			(owner_user_id, name, type, base_url, credential_enc, status, models)
-		VALUES ($1, $2, 'openai', $3, $4, 'enabled', ARRAY[$5])
-		RETURNING id`,
-		owner, unique("e2e-channel"), baseURL, sealed, model,
-	).Scan(&id); err != nil {
-		t.Fatalf("插渠道失败: %v", err)
-	}
-	return id
+	return seedChannelOfType(t, db, sealer, owner, baseURL, model, "openai", 0)
 }
 
 // seedRule 插一条平台作用域的计价规则，返回规则 id。

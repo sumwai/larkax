@@ -18,8 +18,8 @@
 //     能看到两段拼接答案的唯一原因
 //   - 快照与用量落库在任何情况下都**不能影响请求本身**
 //
-// 上面第二条目前还只是约定：本包只接了非流式入口 Chat，流式入口尚未接入
-// （见 Result.Events 与 Result.Estimated）。
+// 上面第二条在流式那条路上是**可执行**的：上游一旦接受请求就不再换渠道，
+// 判据与处置见 stream.go。
 //
 // 把它们散在 HTTP handler 里，这三条就变成了三处注释；放在这里，
 // 它们是可以被测试的执行顺序。
@@ -178,6 +178,13 @@ type Gateway struct {
 	// Executor 是真正调上游的东西。适配器实现它。
 	Executor Executor
 
+	// Counter 是流式中断时估算用量用的分词计数器。
+	//
+	// 可以为 nil——那时估算退到启发式（见 tokens.StreamEstimator），
+	// 结果仍然可用，只是来源标成 SourceEstimated 而不是 SourceTokenized。
+	// 非流式那条路用不到它：那里的用量只可能来自上游的响应体。
+	Counter *tokens.Counter
+
 	// Now 可注入，便于测试时间相关的逻辑。
 	Now func() time.Time
 }
@@ -199,21 +206,35 @@ type Result struct {
 	// Response 是非流式请求的结果；流式请求为 nil。
 	Response *channel.Response
 	// Events 是流式请求的事件流；非流式请求为 nil。
-	// **流式入口尚未接入**，本字段目前不会被填充。
+	//
+	// **调用方必须读到它关闭为止。** 网关的转发 goroutine 在关闭它**之前**
+	// 完成结算与释放；不读到底，那条 goroutine 会阻塞在发送上，而「钱冻着」
+	// 这件事不会有任何东西报出来。
+	//
+	// 关闭之后 Charge 与 Estimated 才有值——它们也是在那之前写好的，
+	// 所以读完流再读这两个字段是安全的，不需要额外的同步。
 	Events <-chan channel.StreamEvent
 
 	Channel channel.Channel
-	Charge  *pipeline.Charge
+	// Charge 是这次请求的结算结果。流式请求在事件流**关闭之后**才有值。
+	Charge *pipeline.Charge
 
 	// Attempts 记录了换渠道过程中的每一次尝试，含失败的。
 	Attempts []route.Attempt
 
-	// Estimated 为 true 表示用量是估算的（客户端中途断开）。
-	// 与 Events 一样，要等流式入口接入后才有值。
+	// Estimated 为 true 表示用量**不是上游实测值**：客户端中途断开、
+	// 上游在流中途失败、或上游正常结束却没带 usage。
+	//
+	// 它与 pipeline.Outcome.UsageSource 是同一个口径（见 tokens.Source）：
+	// 只有 SourceMeasured 时它为 false。非流式请求恒为 false——那条路上
+	// 用量只可能来自上游的响应体。
 	Estimated bool
 }
 
 // Chat 处理一次非流式请求。
+//
+// 顺序与 ChatStream 完全相同，差别只在用量从哪来：这里来自上游的响应体，
+// 那里来自读完的整条事件流。两条路共用 begin / finish / finishCharge。
 func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *channel.Request) (*Result, error) {
 	if g.Executor == nil {
 		return nil, ErrNoExecutor
