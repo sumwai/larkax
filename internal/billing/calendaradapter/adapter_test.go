@@ -184,6 +184,32 @@ func TestPendingYearBecomesError(t *testing.T) {
 	}
 }
 
+// 错误措辞要指向**配置缺口**，不是服务故障。
+//
+// 日历数据是运维灌进来的（见 internal/calendar/store），缺数据时该去看的是
+// 「这一年的数据导入了没有」。一句「日历不可用」会把人引向「日历服务挂了」，
+// 而这个项目里根本没有那样一个服务——照着那句话排查会一直找不到东西。
+func TestUnknownDayErrorReadsAsConfigGap(t *testing.T) {
+	src := calendar.NewMemorySource()
+	src.SetYearState(calendar.RegionCN, 2026, calendar.YearPending)
+
+	a := adapt(t, src)
+	_, err := a.DayInfo("CN", monday)
+	if err == nil {
+		t.Fatal("公告未发布的年份应当报错")
+	}
+	if !strings.Contains(err.Error(), "配置缺口") {
+		t.Errorf("错误信息应当说明这是配置缺口: %v", err)
+	}
+	if !strings.Contains(err.Error(), "不是服务故障") {
+		t.Errorf("错误信息应当排除「服务故障」这个解释: %v", err)
+	}
+	// 说清缺的是哪一天、哪个地区：否则拿到这条错误的人不知道从哪查起。
+	if !strings.Contains(err.Error(), "CN") || !strings.Contains(err.Error(), "2026-") {
+		t.Errorf("错误信息应当带出地区与日期: %v", err)
+	}
+}
+
 func TestUnknownRegionBecomesError(t *testing.T) {
 	a := adapt(t, workdaySource(t))
 	if _, err := a.DayInfo("ZZ", monday); err == nil {

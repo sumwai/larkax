@@ -25,7 +25,8 @@ What works today:
   response and error shapes (not yet wired into `cmd/larkax`)
 
 See [docs/development.md](docs/development.md) for how to build and run it.
-The reconciliation job is documented in [docs/reconciliation.md](docs/reconciliation.md).
+The reconciliation job is documented in [docs/reconciliation.md](docs/reconciliation.md),
+and the calendar data behind peak/off-peak pricing in [docs/calendar-data.md](docs/calendar-data.md).
 
 ## What it will do
 
@@ -54,6 +55,7 @@ internal/billing/                 turning usage into money: reserve, settle, bre
 internal/billing/calendaradapter/  bridges internal/calendar to the pricing engine
 internal/billing/expr/            the expression engine that evaluates pricing rules
 internal/calendar/                workday / holiday / peak-hour judgement per region
+internal/calendar/store/          the calendar tables, and importing a year of data
 internal/channel/                 adapter interface, registry, unified request/response types
 internal/channel/anthropicadapter/  Anthropic Messages upstream
 internal/channel/httpx/           HTTP details shared by adapters
