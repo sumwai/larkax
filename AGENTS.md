@@ -253,7 +253,7 @@ gremlins unleash --timeout-coefficient=60 --workers=2 ./internal/calendar/
 | `internal/money` | 10 | 93.2% | 85% |
 | `internal/route` | 10 | 93.1% | 81% |
 | `internal/billing` | 20 | 97.5% | 80% |
-| `internal/quota` | 10 | — | 79% |
+| `internal/quota` | **20** | 95.6% | 94% |
 | `internal/tokens` | 10 | 97.4% | 71% |
 | `internal/snapshot` | 10 | 88.6% | 69% |
 
