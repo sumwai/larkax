@@ -302,8 +302,22 @@ go run ./cmd/larkaxctl alias add --canonical claude-x \
 
 ```sh
 go run ./cmd/larkaxctl price add --scope platform --name example-price \
-  --expr '{"prompt": 0.0000015, "completion": 0.0000075}'
+  --expr '{"prompt": 0.0000015, "completion": 0.0000075,
+           "cache_read": 0.0000002, "cache_write": 0.0000019,
+           "reasoning": 0.0000090}'
 ```
+
+计价项一共五个：`prompt`、`completion`、`cache_read`、`cache_write`、`reasoning`。
+**上游报了哪一项，规则里就必须有哪一项的单价**——少一项不是少收，是这次请求
+**整个失败**（500），因为上游报了我们没定价的用量，宁可报错也不要静默少收：
+
+```
+结算失败: 用量里有规则未定价的计量项: "cache_read"（规则里没写这个单价；要免费就显式写 0）
+```
+
+会报缓存的上游很常见（Anthropic 的 `cache_read_input_tokens` /
+`cache_creation_input_tokens`，OpenAI 的 `prompt_tokens_details.cached_tokens`），
+所以**新规则把这五项都写上**、用不到的填 `0`，比漏掉再被 500 拦住省事。
 
 `--models` 留空表示适用于全部模型（兜底规则）。表达式在写入前会编译一次，
 编译不过的命令直接失败。作用域决定哪两栏 id 有效：`platform` 两栏都留空、
