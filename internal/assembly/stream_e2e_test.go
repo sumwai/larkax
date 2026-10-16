@@ -270,18 +270,18 @@ func streamBody(model string) []byte {
 	return out
 }
 
-// anthropicStreamBody 组装一次 Anthropic 协议的流式请求体。
+// anthropicStreamBody 与非流式那份（messagesBody）的唯一区别是 stream: true。
 func anthropicStreamBody(model string) []byte {
-	body, err := json.Marshal(map[string]any{
-		"model":      model,
-		"messages":   []any{map[string]any{"role": "user", "content": "你好"}},
-		"max_tokens": 64,
-		"stream":     true,
-	})
+	var body map[string]any
+	if err := json.Unmarshal(messagesBody(model), &body); err != nil {
+		panic(err)
+	}
+	body["stream"] = true
+	out, err := json.Marshal(body)
 	if err != nil {
 		panic(err)
 	}
-	return body
+	return out
 }
 
 // openStream 发起一次流式请求，返回响应与取消函数。
