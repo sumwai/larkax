@@ -212,6 +212,9 @@ func UsageContextFrom(requestID, protocol string, raw map[string]any) UsageConte
 //
 // 它是**只读的一组数字**：插件在 onResponse 里改不了用量，
 // 因为那个字段是内核算出来的，而插件要改只能走 onUsage 的上报通道。
+//
+// 不带 CompletionIncludesReasoning：那是内核自己那份用量的口径，由内核在
+// 重建时给出（见 UsageFacts.ChannelUsage），不需要绕一圈经过插件。
 func UsageFactsFrom(u channel.Usage) *UsageFacts {
 	n := func(v int64) *int64 {
 		if v == 0 {
@@ -234,6 +237,51 @@ func UsageFactsFrom(u channel.Usage) *UsageFacts {
 		facts.Units = units
 	}
 	return facts
+}
+
+// ChannelUsage 把用量事实重建回协议层的用量，供结算使用。
+//
+// # 口径为什么是必需参数
+//
+// 「completion 里含不含推理」在数字上看不出来，而它决定结算会不会把同一批
+// token 收两次费。所以 coreIncludesReasoning——**内核自己那份用量的口径**——
+// 由调用方显式给出，而不是让字段落到零值：零值是「不含」，那会让 OpenAI 系
+// 上游（completion_tokens 含 reasoning_tokens）的推理量被 completion 与
+// reasoning 各乘一次单价，而账单只是偏高，对账发现不了。
+//
+// 事实里自己声明了口径时以它为准：插件比内核更懂它代理的那个上游，
+// 而它报的量可能来自与内核不同的口径（例如插件自己估的用量）。
+func (f UsageFacts) ChannelUsage(coreIncludesReasoning bool) channel.Usage {
+	u := channel.Usage{CompletionIncludesReasoning: coreIncludesReasoning}
+	if f.CompletionIncludesReasoning != nil {
+		u.CompletionIncludesReasoning = *f.CompletionIncludesReasoning
+	}
+
+	// 指针的 nil 在这里就是 0：事实里的「没上报这一项」与协议层的
+	// 「这一项是 0」在重建之后是同一个意思，计费侧不需要区分
+	// （channel.Usage 的数字字段本来就没有三态）。
+	set := func(dst *int64, src *int64) {
+		if src != nil {
+			*dst = *src
+		}
+	}
+	set(&u.PromptTokens, f.PromptTokens)
+	set(&u.CompletionTokens, f.CompletionTokens)
+	set(&u.CacheReadTokens, f.CacheReadTokens)
+	set(&u.CacheWriteTokens, f.CacheWriteTokens)
+	set(&u.ReasoningTokens, f.ReasoningTokens)
+
+	if len(f.Units) > 0 {
+		// 复制而不是共用：重建出来的用量会跟着请求走到结算，而事实仍可能被
+		// 调用方持有（合并结果、日志）。共用一张 map 时，对一边的改动会
+		// 静默出现在另一边。
+		units := make(map[string]int64, len(f.Units))
+		for k, v := range f.Units {
+			units[k] = v
+		}
+		u.UnitCounts = units
+	}
+	return u
 }
 
 // ResponseContextFrom 把统一的响应翻成 onResponse 的上下文。

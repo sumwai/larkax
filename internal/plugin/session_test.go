@@ -395,6 +395,38 @@ func TestOnUsageEmptyIsNoReport(t *testing.T) {
 	}
 }
 
+// 只声明计费口径也算一次上报：它不改数量，但改金额。
+//
+// 被当成「没上报」丢掉时，插件把口径说对了也没有用——那批推理 token 照样
+// 会被 completion 与 reasoning 各乘一次单价，而账单只是偏高，对账发现不了。
+func TestOnUsageReasoningScopeAloneIsAReport(t *testing.T) {
+	s := sessionFor(t, minimalMeta, `onUsage(){ return { completionIncludesReasoning: true }; }`, sandbox.Host{}, sandbox.Limits{})
+	res := s.OnUsage(t.Context(), UsageContext{RequestID: "r1"})
+	if res.Failed() {
+		t.Fatalf("不该失败: %v", res.Failure)
+	}
+	if res.Patch == nil || res.Patch.CompletionIncludesReasoning == nil || !*res.Patch.CompletionIncludesReasoning {
+		t.Fatalf("只声明口径也是上报，实际 %+v", res.Patch)
+	}
+}
+
+// 口径跟着数量一起合并：插件没声明时保留内核的，声明了就以插件为准。
+func TestMergeUsageCarriesReasoningScope(t *testing.T) {
+	// 插件只报数量时，内核那份口径不能丢——它是重建回协议层用量时的依据。
+	core := UsageFacts{CompletionTokens: ptrInt64(100), CompletionIncludesReasoning: ptrBool(true)}
+	if got := MergeUsage(core, &UsageFacts{CompletionTokens: ptrInt64(120)}); got.CompletionIncludesReasoning == nil || !*got.CompletionIncludesReasoning {
+		t.Errorf("插件没声明口径，该保留内核的 true，实际 %v", got.CompletionIncludesReasoning)
+	}
+	// 插件声明了就覆盖内核的。
+	if got := MergeUsage(core, &UsageFacts{CompletionIncludesReasoning: ptrBool(false)}); got.CompletionIncludesReasoning == nil || *got.CompletionIncludesReasoning {
+		t.Errorf("插件声明为 false，该覆盖内核的 true，实际 %v", got.CompletionIncludesReasoning)
+	}
+	// 不改动入参。
+	if core.CompletionIncludesReasoning == nil || !*core.CompletionIncludesReasoning {
+		t.Error("入参被就地修改了")
+	}
+}
+
 // **用量合并是「叠加」而不是「替换」**：没报的项保留内核的值。
 //
 // 替换会让一次漏报变成一次少收钱，而漏报很可能发生——

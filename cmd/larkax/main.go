@@ -83,10 +83,15 @@ func run() error {
 	// 日志器一致。不设的话，漏了 WithLogger 的调用点会拿到另一套配置，
 	// 生产环境里表现为部分日志是文本、部分是 JSON。
 	observe.AdoptAsDefault(logger)
+	// 启动摘要直接打 Config 本身，由它的 LogValue 负责脱敏：DSN 里的口令抹掉、
+	// 主密钥只留把数。摘要里是运维真会问的那几项（环境、角色、两个监听地址、
+	// 有没有配 Redis），而不是把每个字段都塞进来。
+	//
+	// 这也是这条脱敏链的**触发点**：在此之前没有任何一处打过 Config，
+	// 于是「打出来是脱敏的」只是一个没有调用方走过的性质，而不是被守住的。
 	logger.Info("启动",
 		"version", version,
-		"env", cfg.Env,
-		"role", string(cfg.Role),
+		"config", cfg,
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
