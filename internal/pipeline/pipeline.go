@@ -464,6 +464,9 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 	// 上游失败不计费。这是硬规则，放在结算的最前面：
 	// 后面任何一处计算都不该有机会改变这个结论。
 	if out.UpstreamFailed {
+		// 不计费的结局也要有数：它是「上游在失败」与「计数没接上」之间
+		// 唯一的区别（见 observe.Metrics 的注释）。
+		observe.Metrics.UnbilledSettlements.Inc()
 		return nil, &UpstreamFailure{
 			RequestID: req.RequestID,
 			Status:    out.UpstreamStatus,
@@ -527,6 +530,14 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 	entries, err := p.entries(req, val, settlement)
 	if err != nil {
 		return nil, err
+	}
+
+	// 结算真的走完了。它是下面那条 Capped 的分母——只有这个数同时在涨，
+	// 「Capped 一直是 0」才说明真的没撞上，而不是计数器没接上。
+	observe.Metrics.Settlements.With(out.UsageSource.String()).Inc()
+	// 撞上预留上界：按设计不该发生，一旦成为常态就是静默少收，而账目仍然是平的。
+	if settlement.Capped {
+		observe.Metrics.CappedSettlements.Inc()
 	}
 
 	return &Charge{
