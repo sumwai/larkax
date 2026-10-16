@@ -119,6 +119,21 @@ func index() (map[string]Spec, error) {
 	return byKey, nil
 }
 
+// Lookup 返回一个配置键的声明。第二个返回值为 false 表示 Registry 里没有它。
+//
+// 线性扫一遍 Registry，而不是复用 index()：index() 把重复声明当成错误，
+// 而它唯一的调用点（Load）已经在启动时查过一遍了。这里要的是一个不返回
+// 错误的查询——写入路径拿它的结果去校验，而「键不存在」与「Registry 自己
+// 坏了」是两件事，混进同一个 error 就分不清该改键名还是该改代码。
+func Lookup(key string) (Spec, bool) {
+	for _, s := range Registry {
+		if s.Key == key {
+			return s, true
+		}
+	}
+	return Spec{}, false
+}
+
 // Load 读取全部配置并与 Registry 对照校验。
 //
 // 任何不一致都返回错误而不回落到默认值：静默回落会让「配置写错了」

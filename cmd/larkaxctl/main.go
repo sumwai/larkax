@@ -57,6 +57,11 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl migrate create <名称>           生成迁移文件
   larkaxctl user create --name <用户名>     创建用户（stdout 只有新用户的 ID）
   larkaxctl apikey create --user <用户>     创建一把 API Key（明文只打印这一次）
+  larkaxctl apikey update --id <ID>        改一把已有 API Key 的额度
+  larkaxctl apikey list [--user <用户>]     列出 API Key 及其额度
+  larkaxctl settings list                  列出全部运行期配置及其说明
+  larkaxctl settings set --key <键> --value <值> --by <用户>
+                                           改一个运行期配置项
   larkaxctl channel create|list|update|enable|disable
                                            渠道（创建时凭证从 stdin 或环境变量读）
   larkaxctl model add|list                 模型目录里的规范模型
@@ -113,6 +118,8 @@ func run() error {
 		return runReconcile(os.Args[2:])
 	case "rotate":
 		return runRotate(os.Args[2:])
+	case "settings":
+		return runSettings(os.Args[2:])
 	case "snapshot":
 		return runSnapshot(os.Args[2:])
 	case "user":
@@ -253,6 +260,36 @@ func printFinding(w io.Writer, f store.Finding) {
 	if f.Detail != "" {
 		_, _ = fmt.Fprintf(w, "      详情：%s\n", f.Detail)
 	}
+}
+
+// withDB 打开数据库、确认连得上，再把句柄交给 fn。
+//
+// 收一个回调而不是把「打开」与「关闭」拆成两半：每条子命令都有提前返回的
+// 分支，而漏掉一处 defer 关闭的表现是连接慢慢漏光——那要等到线上跑了一阵
+// 才现形。放在一个函数里，关闭与打开就是同一段代码。
+//
+// timeout 由调用方给：各条命令的合理上限不一样（迁移要几分钟，一条单行
+// 插入 30 秒就够），而把它们统一成一个数会让短的那条失去意义、
+// 或者让长的那条被无故掐断。
+//
+// 打开与探活复用 openDB，不在这里再写一遍：那两件事失败时的处置相同
+// （都归 exitDBUnreach），各写一遍的表现是同一类失败在两条命令上给出
+// 不同的退出码，而脚本对它们的处置是不一样的。
+func withDB(timeout time.Duration, fn func(context.Context, *sql.DB) error) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	db, err := openDB(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+
+	return fn(ctx, db)
 }
 
 func runMigrate(args []string) error {
