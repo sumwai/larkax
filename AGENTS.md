@@ -212,50 +212,58 @@ bash scripts/check-redlines.sh      # 公开红线
 把分支方向反过来，覆盖率一点不变，而测试照样通过。
 
 ```sh
-gremlins unleash --timeout-coefficient=10 --workers=4 ./internal/money/
-gremlins unleash --timeout-coefficient=60 --workers=2 ./internal/calendar/
+scripts/check-mutation.sh              # 全部包
+scripts/check-mutation.sh money route  # 只跑指定的
 ```
 
-**`--timeout-coefficient` 必须按包试出来，不能省也不能照搬。** 它按
-「跑一次测试集的时间」给每个变异一个预算，而那个基准在两种情况下都不可靠：
+**并发与超时系数是同一个旋钮，而并发是更该先调的那个。** gremlins 给每个
+变异的超时预算 = 「跑一次测试集的时间 × 系数」，而那个基准是**串行**测出来
+的；并发跑变异时机器上同时有 N 个 `go test` 在编译与执行，超时按墙钟算，
+于是并发越高、越多变异被判超时。
 
-- 测试集里有慢用例时，**大量变异被判「超时」而不是「存活」**。
-  calendar 包实测：系数 10 时 79 个变异超时、Test efficacy 显示 **0.00%**
-  ——看起来像「一个都没杀掉」，实际是「一个都没跑成」
-- 同一个包换个系数又会得到不同分数。billing 包在系数 10 与 20 下
-  分别是 80.35% 与 83.13%
+实测（`internal/money`，系数固定 10）：
 
-**所以一个「efficacy」的数字本身说明不了什么**，要连着看：超时多少、
-存活清单里有哪些。**判据是清单，不是百分比。**
+| workers | 结果 |
+|---|---|
+| 1 | `Killed 80, Timed out 0` |
+| 2 | `Killed 80, Timed out 0` |
+| **4** | `Killed 3, Timed out 92` |
 
-判断系数够不够：如果 `Timed out` 超过个位数，就把系数调大重跑。
-一个包一旦定下系数，写进这个文件，别让下一个人再试一遍。
+所以**调大系数是在补并发造成的短缺**，而那会让「这个包需要多大系数」
+变成一个随机器负载变化的**假属性**——同一份代码两次运行给出截然不同的
+分数，一次「0.00% efficacy」看起来像真实结论。
+
+`scripts/check-mutation.sh` 因此固定 `workers=1`、系数 10。串行慢，
+但变异测试不是每次提交都跑的东西（见上文协作节奏），**慢而可信比快而误导好**。
+
+判据：**超时的条数**。超过十来个就说明这一轮的分数不可信，
+先查是不是并发跑高了，再考虑调系数。
 
 对存活的变异逐个判断，只有两类可放过：
 
-- **等价变异**：改法与改后行为在数学上不可区分（例如 `f >= unit` 与
-  `f > unit` 在「小数部分恰好填满一个单位」时结果数值相同）
-- **不可达分支**：只有在前置条件已经保证时才走到，例如「商超出 int64
-  时它不可能为 0」
+- **等价变异**：改法与改后行为不可区分（例如 `f >= unit` 与 `f > unit`
+  在「小数部分恰好填满一个单位」时结果相同）
+- **不可达分支**：前置条件已经保证走不到，例如「商超出 int64 时它不可能为 0」
 
 放过时在测试里写一行说明，否则下一个人会以为是漏了。
 
-## 已知各包的系数与分数
+## 各包的现状
 
-跑之前照这张表取值；改动过某个包的测试之后重跑并在表里更新。
-覆盖率来自 `go test -cover`，efficacy 来自上一条命令。
+由 `scripts/check-mutation.sh` 跑出（workers=1、系数 10）。
+改动过某个包的测试之后重跑并在表里更新。
 
-| 包 | 系数 | 覆盖率 | Test efficacy |
-|---|---|---|---|
-| `internal/pipeline` | 10 | 82.9% | 96% |
-| `internal/calendar` | **60** | 97.8% | 94% |
-| `internal/ledger` | 10 | 96.5% | 93% |
-| `internal/money` | 10 | 93.2% | 85% |
-| `internal/route` | 10 | 93.1% | 81% |
-| `internal/billing` | 20 | 97.5% | 80% |
-| `internal/quota` | **20** | 95.6% | 94% |
-| `internal/tokens` | 10 | 97.4% | 71% |
-| `internal/snapshot` | **40** | 88.6% | 69% |
+| 包 | 覆盖率 | Test efficacy |
+|---|---|---|
+| `internal/gateway` | 96.4% | 100% |
+| `internal/pipeline` | 82.9% | 96% |
+| `internal/calendar` | 97.8% | 94% |
+| `internal/quota` | 95.6% | 94% |
+| `internal/ledger` | 96.5% | 93% |
+| `internal/money` | 93.2% | 85% |
+| `internal/route` | 93.1% | 81% |
+| `internal/billing` | 97.5% | 80% |
+| `internal/tokens` | 97.4% | 71% |
+| `internal/snapshot` | 88.6% | 69% |
 
 **覆盖率高而 efficacy 低，说明测试断言的是「相对关系」而不是「具体边界」。**
 `route` 与 `snapshot` 两个包都是这个形状：原用例写的是「A 明显比 B 好」
