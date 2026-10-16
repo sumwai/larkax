@@ -88,6 +88,24 @@ jobs:
       - name: 不可达符号门禁自测
         run: bash scripts/check-deadcode.test.sh
 
+      # 上面那道门的补集。deadcode 只分析**从入口可达的那些包**，一个全仓库
+      # 没有任何 import 方的包**整包不在它的分析范围里**——它的不可达清单是空的，
+      # 而「空」与「全部可达」在输出里长得一模一样。所以「整包没人接」恰恰是
+      # 那道门唯一系统性漏掉的一类，也是「没有门」最严重的一种。
+      #
+      # 这道门把「仓库自己的包」（go list ./...）与「从入口可达的包」
+      #（go list -deps <cmd/ 下自动发现的 main 包>）两个集合相减，差集就是
+      # 整包没人 import 的那些，同样走白名单
+      #（scripts/unimported-allowlist.txt）：新出现的失败，已经接上的只提示。
+      # 只依赖 go，不需要额外装工具。
+      - name: 整包没人 import 门禁
+        run: bash scripts/check-unimported.sh
+
+      # 与上面那道门同理：它的判据全是集合比对，坏掉时（可达集合为空、
+      # 仓库包列表为空）的输出和「通过」一模一样。所以自测不是可选的。
+      - name: 整包没人 import 门禁自测
+        run: bash scripts/check-unimported.test.sh
+
       # 先迁移再跑测试：把库推到已知状态，也让「迁移能应用」这件事
       # 在测试用到它之前就被验证过。
       - name: 迁移可应用且可回滚
