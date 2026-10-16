@@ -297,3 +297,121 @@ func TestRecordMeasured(t *testing.T) {
 		t.Error("负的实测值应报错")
 	}
 }
+
+// ── 变异测试补的用例 ────────────────────────────────────────────────────
+//
+// 来自变异测试（gremlins unleash）：把比较符或分支方向改一下，测试仍然通过。
+// 覆盖率看不出来——行被执行过了，但「两边都填」这种边界没被走到。
+//
+// 归一化层的每一个分支都直接决定收多少钱，所以这里刻意把
+// 「两个字段都填了」的情形都过一遍——那才是分支真正起作用的场景。
+
+func ptrInt(v int64) *int64 { return &v }
+
+// Anthropic 口径下 OutputTokens 是原生字段，优先；CompletionTokens 只是
+// 少数兼容层用的别名，在前者缺席时才回退。
+//
+// 变异：`if out.CompletionTokens == 0` 改成 `!= 0`，两者都填时会被
+// 别名覆盖——而原有用例从没让两个字段**同时有值**，所以看不出差别。
+func TestAnthropicOutputTokensTakesPrecedence(t *testing.T) {
+	got, err := Normalize(RawUsage{
+		Upstream:         UpstreamAnthropic,
+		OutputTokens:     ptrInt(222),
+		CompletionTokens: ptrInt(111),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CompletionTokens != 222 {
+		t.Errorf("CompletionTokens = %d，期望 222（原生字段优先）", got.CompletionTokens)
+	}
+
+	// 只有别名时回退到它
+	got, err = Normalize(RawUsage{
+		Upstream:         UpstreamAnthropic,
+		CompletionTokens: ptrInt(111),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CompletionTokens != 111 {
+		t.Errorf("回退后 CompletionTokens = %d，期望 111", got.CompletionTokens)
+	}
+}
+
+// OpenAI 口径：CompletionTokens 已填时不该被 OutputTokens 覆盖。
+func TestOpenAICompletionNotOverridden(t *testing.T) {
+	got, err := Normalize(RawUsage{
+		Upstream:         UpstreamOpenAI,
+		CompletionTokens: ptrInt(333),
+		OutputTokens:     ptrInt(444),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CompletionTokens != 333 {
+		t.Errorf("CompletionTokens = %d，期望 333", got.CompletionTokens)
+	}
+}
+
+// CacheWriteTokens 与 CacheCreationInputTokens 都填时，前者优先。
+func TestCacheWriteTakesPrecedence(t *testing.T) {
+	got, err := Normalize(RawUsage{
+		Upstream:                 UpstreamOpenAI,
+		PromptTokens:             ptrInt(1000),
+		CacheWriteTokens:         ptrInt(50),
+		CacheCreationInputTokens: ptrInt(999),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CacheWriteTokens != 50 {
+		t.Errorf("CacheWriteTokens = %d，期望 50", got.CacheWriteTokens)
+	}
+}
+
+// 缓存读量与写入量**都填**时，两者相加不能超过输入总量。
+//
+// 变异：`total > out.PromptTokens` 改成 `>=`，恰好相等时也会触发压回，
+// 把两个字段各减一份——而原有用例里没有「两个都填」的情形。
+func TestBothCacheFieldsCountedTogether(t *testing.T) {
+	got, err := Normalize(RawUsage{
+		Upstream:                 UpstreamOpenAI,
+		PromptTokens:             ptrInt(1000),
+		CachedTokens:             ptrInt(300),
+		CacheWriteTokens:         ptrInt(200),
+		CacheCreationInputTokens: ptrInt(900),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CacheReadTokens != 300 || got.CacheWriteTokens != 200 {
+		t.Fatalf("缓存明细 = 读 %d 写 %d，期望 300/200", got.CacheReadTokens, got.CacheWriteTokens)
+	}
+	// 两者之和 500 不超过输入 1000，不该被压
+	if got.CacheReadTokens+got.CacheWriteTokens > got.PromptTokens {
+		t.Errorf("缓存合计超过输入：%d > %d", got.CacheReadTokens+got.CacheWriteTokens, got.PromptTokens)
+	}
+}
+
+// OpenAI 口径下 prompt_tokens 与 input_tokens 都填时，**不该相加**——
+// prompt 已含缓存，再加一次就是重复计费。
+//
+// 变异：`out.PromptTokens == 0 && u.InputTokens != nil` 里的
+// `== 0` 改成 `!= 0`，两个都填时会走 Anthropic 口径把三者相加，
+// 账单悄悄变高。
+func TestOpenAIDoesNotAddInputTokensWhenPromptPresent(t *testing.T) {
+	got, err := Normalize(RawUsage{
+		Upstream:                 UpstreamOpenAI,
+		PromptTokens:             ptrInt(1000),
+		InputTokens:              ptrInt(800),
+		CacheReadInputTokens:     ptrInt(100),
+		CacheCreationInputTokens: ptrInt(50),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PromptTokens != 1000 {
+		t.Errorf("PromptTokens = %d，期望 1000（prompt 已含缓存，不该再加）", got.PromptTokens)
+	}
+}

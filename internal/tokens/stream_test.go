@@ -288,3 +288,73 @@ func TestObserveRequestUsesContextBackground(t *testing.T) {
 		t.Error("ObserveRequest 应正常完成")
 	}
 }
+
+// ── 变异测试补的用例 ────────────────────────────────────────────────────
+//
+// 来自变异测试（gremlins unleash）：把条件改一下，测试仍然通过。
+// 这些都落在「多个参数里只填了一个」的边界上——而流式估算恰好
+// 是拿不到实测值时唯一的计费依据。
+
+// ObserveRequest 的三个参数**各自**都要算进去。
+//
+// 变异：`messages > 0` 或 `tools > 0` 改成别的，只影响「恰好为 0」
+// 与「只填一个」的情形，而原有用例里两个都填了。
+func TestObserveRequestCountsEachParameterSeparately(t *testing.T) {
+	model := "claude-placeholder"
+
+	base := NewStreamEstimator(nil, model)
+	base.ObserveRequest("hello", 0, 0)
+	withoutFrames := base.input.Tokens
+
+	withMessages := NewStreamEstimator(nil, model)
+	withMessages.ObserveRequest("hello", 3, 0)
+	if withMessages.input.Tokens <= withoutFrames {
+		t.Error("有消息条数时应当多算框架 token")
+	}
+
+	withTools := NewStreamEstimator(nil, model)
+	withTools.ObserveRequest("hello", 0, 2)
+	if withTools.input.Tokens <= withoutFrames {
+		t.Error("有工具定义时应当多算框架 token")
+	}
+
+	// 两者都填时应当比只填一个更多
+	both := NewStreamEstimator(nil, model)
+	both.ObserveRequest("hello", 3, 2)
+	if both.input.Tokens <= withMessages.input.Tokens {
+		t.Error("消息与工具都填时应当更多")
+	}
+}
+
+// ObserveToolCall 的 id/name 与 args 是**两段**独立的计量：
+// 前者算框架与标识，后者算参数正文。
+//
+// 变异：`args != "" || id != "" || name != ""` 改成 `&&`，
+// 只给 args 的调用就不再计框架费——而那是流式工具调用里最常见的形态。
+func TestObserveToolCallCountsPartialInput(t *testing.T) {
+	model := "claude-placeholder"
+
+	empty := NewStreamEstimator(nil, model)
+	empty.ObserveToolCall("", "", "")
+	if empty.toolArgs != 0 {
+		t.Errorf("三个都空时不该计费，得到 %d", empty.toolArgs)
+	}
+
+	onlyArgs := NewStreamEstimator(nil, model)
+	onlyArgs.ObserveToolCall("", "", `{"a":1}`)
+	if onlyArgs.toolArgs == 0 {
+		t.Error("只给 args 时应当计费——那是流式工具调用最常见的形态")
+	}
+
+	onlyID := NewStreamEstimator(nil, model)
+	onlyID.ObserveToolCall("call_1", "", "")
+	if onlyID.toolArgs == 0 {
+		t.Error("只给 id 时应当计框架费")
+	}
+
+	onlyName := NewStreamEstimator(nil, model)
+	onlyName.ObserveToolCall("", "get_weather", "")
+	if onlyName.toolArgs == 0 {
+		t.Error("只给 name 时应当计框架费")
+	}
+}
