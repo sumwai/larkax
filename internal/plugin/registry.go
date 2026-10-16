@@ -1,0 +1,337 @@
+package plugin
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/sumwai/larkax/internal/plugin/sandbox"
+)
+
+// SupportedAPIVersion 是当前支持的插件契约版本。
+//
+// 只支持 1：留出「同时支持 N 与 N-1」的位置，但**不预先支持不存在的版本**。
+// 一个写着 apiVersion: 2 的插件，在宿主实现 2 之前拒绝它比接受它好——
+// 接受之后它会以 1 的语义运行，而作者以为自己用的是 2 的契约。
+const SupportedAPIVersion = 1
+
+// Meta 是插件在源码里声明的元数据。
+//
+// 它是**作者写的输入**，所以每个字段都要校验。校验的落点是这里而不是
+// 「用到的时候」：一个 models 写成字符串的插件，如果在请求路径上才发现，
+// 表现是「这个插件的路由偶尔不生效」。
+type Meta struct {
+	// Key 是插件标识，形如 "acme-vision"。它同时是 KV 的命名空间前缀
+	// 与日志里的 plugin 字段，所以不能为空、不能带空白。
+	Key string `json:"key"`
+	// Name 是给人看的名字。
+	Name string `json:"name"`
+	// Version 是插件自己的版本号，与 apiVersion 不是一回事。
+	Version string `json:"version"`
+	// Description 是一句话说明。
+	Description string `json:"description"`
+	// APIVersion 是契约版本。**必填**：没有它就没法判断该按哪套语义跑。
+	APIVersion int `json:"apiVersion"`
+	// Models 是这个插件声称支持的规范模型名。
+	//
+	// 空表示「所有模型」——一个平台级的插件（例如统一加系统提示词）
+	// 无法穷举模型名。这个默认是宽的，所以**它只影响「插件是否参与」，
+	// 不影响插件能做什么**：能做什么由能力白名单与补丁字段表决定。
+	Models []string `json:"models"`
+	// Protocol 是插件期望的协议。空表示不挑。
+	Protocol string `json:"protocol"`
+	// Blocking 声明这个插件是阻断型：它失败时**请求失败**。
+	//
+	// 默认 false。阻断是插件作者主动要的语义（例如「这个模型的请求必须
+	// 经过我的内容检查」），而不是宿主猜的。
+	Blocking bool `json:"blocking"`
+	// Capabilities 是插件申请的能力名。**只能收窄，不能放宽**：
+	// 宿主给的上限是 DefaultCapabilities，这里写的是一个子集申请。
+	// 写进来的名字若不在上限里，注册时就报错而不是静默忽略。
+	Capabilities []string `json:"capabilities"`
+}
+
+// 元数据校验的错误。
+var (
+	// ErrMetaMissingKey 表示插件没有声明 key。
+	ErrMetaMissingKey = errors.New("插件元数据缺少 key")
+	// ErrMetaAPIVersion 表示契约版本不受支持。
+	ErrMetaAPIVersion = errors.New("插件契约版本不受支持")
+	// ErrMetaCapability 表示申请了宿主不提供的能力。
+	ErrMetaCapability = errors.New("插件申请了未开放的能力")
+)
+
+// DefaultCapabilities 是宿主默认开放的能力。
+//
+// 三项都是「读或写插件的私有空间」，没有一项扩大权限：
+// log 写结构化日志、calendar 读日历、kv 读写插件按用户隔离的私有存储。
+// 网络与文件系统不在这张表里，也不在任何一张表里——宿主没有实现它们。
+var DefaultCapabilities = []string{"log", "calendar", "kv"}
+
+// Registration 是一次注册。
+type Registration struct {
+	// Key 是插件标识，必须与 meta.key 一致。
+	//
+	// 两处都写是为了让「注册用的名字」与「插件自己声明的名字」对上：
+	// 不一致时 KV 命名空间、日志字段与启用记录会分属两个名字，
+	// 而那种错法在界面上看不出来。
+	Key string
+	// Source 是插件源码。
+	Source string
+	// Priority 是启用记录的优先级。同优先级时按 Key 升序取一个，
+	// 保证同样的注册集合每次选出同一个插件。
+	Priority int
+}
+
+// Plugin 是一个编译并校验过的插件。
+type Plugin struct {
+	Key      string
+	Priority int
+	Meta     Meta
+	Module   *sandbox.Module
+	// Capabilities 是最终生效的能力清单：申请与上限的交集。
+	Capabilities []string
+}
+
+// Registry 是插件的注册表。
+//
+// 它是**不可变发布**的：注册一批插件得到一个新的 Registry，
+// 旧的继续被在途请求使用。这与插件热更新的要求一致——
+// 编译失败时线上不受影响，编译成功时切换是原子的。
+//
+// 一份 Registry 构造完成之后不再改动，所以读它不需要加锁。
+type Registry struct {
+	plugins []*Plugin
+	index   map[string]*Plugin
+}
+
+// Empty 返回一个空注册表。
+func Empty() *Registry { return &Registry{index: map[string]*Plugin{}} }
+
+// Len 是已注册的插件数。
+func (r *Registry) Len() int {
+	if r == nil {
+		return 0
+	}
+	return len(r.plugins)
+}
+
+// Plugins 返回全部插件，按优先级降序、同优先级按 key 升序。
+func (r *Registry) Plugins() []*Plugin {
+	if r == nil {
+		return nil
+	}
+	return append([]*Plugin(nil), r.plugins...)
+}
+
+// Get 按 key 取一个插件。
+func (r *Registry) Get(key string) (*Plugin, bool) {
+	if r == nil {
+		return nil, false
+	}
+	p, ok := r.index[key]
+	return p, ok
+}
+
+// Compile 编译一个插件并校验它的元数据。它**不注册**，只回答「这份源码能不能用」。
+//
+// 上传路径与试运行路径都用它，于是「界面上说能用」与「线上真能用」
+// 走的是同一段代码——两份校验迟早会不一致。
+func Compile(reg Registration) (*Plugin, error) {
+	if strings.TrimSpace(reg.Key) == "" {
+		return nil, ErrMetaMissingKey
+	}
+	mod, err := sandbox.Compile(reg.Key, reg.Source)
+	if err != nil {
+		return nil, err
+	}
+	meta, err := parseMeta(mod.Meta())
+	if err != nil {
+		return nil, err
+	}
+	if meta.Key != reg.Key {
+		return nil, fmt.Errorf("注册名 %q 与元数据里的 key %q 不一致", reg.Key, meta.Key)
+	}
+	caps, err := narrowCapabilities(meta.Capabilities)
+	if err != nil {
+		return nil, err
+	}
+	return &Plugin{
+		Key:          reg.Key,
+		Priority:     reg.Priority,
+		Meta:         meta,
+		Module:       mod,
+		Capabilities: caps,
+	}, nil
+}
+
+// parseMeta 把 JS 里的 meta 对象翻成 Meta 并校验。
+func parseMeta(raw map[string]any) (Meta, error) {
+	if raw == nil {
+		return Meta{}, fmt.Errorf("%w: 插件必须在源码里 `export const meta`", ErrMetaMissingKey)
+	}
+	// 走一遍 JSON 而不是逐字段读 map：字段是作者写的输入，
+	// 类型判断交给编码层，一处覆盖全部字段（含将来新增的）。
+	blob, err := json.Marshal(raw)
+	if err != nil {
+		return Meta{}, fmt.Errorf("元数据无法序列化: %w", err)
+	}
+	var meta Meta
+	dec := json.NewDecoder(strings.NewReader(string(blob)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&meta); err != nil {
+		return Meta{}, fmt.Errorf("元数据字段不合法: %w", err)
+	}
+
+	if strings.TrimSpace(meta.Key) == "" {
+		return Meta{}, ErrMetaMissingKey
+	}
+	if strings.ContainsAny(meta.Key, " \t\r\n") {
+		return Meta{}, fmt.Errorf("%w: key %q 含空白", ErrMetaMissingKey, meta.Key)
+	}
+	switch meta.APIVersion {
+	case SupportedAPIVersion:
+	case 0:
+		return Meta{}, fmt.Errorf("%w: 缺少 apiVersion，当前为 %d", ErrMetaAPIVersion, SupportedAPIVersion)
+	default:
+		return Meta{}, fmt.Errorf("%w: 声明 %d，宿主支持 %d", ErrMetaAPIVersion, meta.APIVersion, SupportedAPIVersion)
+	}
+	// 多返回一个字段就报错（DisallowUnknownFields）是有意的：元数据是作者
+	// 对宿主的声明，写错的字段名静默失效会让作者以为它生效了。
+	return meta, nil
+}
+
+// narrowCapabilities 把申请的能力收窄到宿主上限之内，结果按名字排序。
+//
+// 排序是为了让「同一份申请每次得到同一份清单」：不排序的话清单顺序
+// 取决于 map 遍历，而它会出现在日志与界面里，于是两次注册看起来不同。
+func narrowCapabilities(requested []string) ([]string, error) {
+	if len(requested) == 0 {
+		out := append([]string(nil), DefaultCapabilities...)
+		sort.Strings(out)
+		return out, nil
+	}
+	allowed := make(map[string]bool, len(DefaultCapabilities))
+	for _, c := range DefaultCapabilities {
+		allowed[c] = true
+	}
+	var out []string
+	seen := make(map[string]bool, len(requested))
+	for _, c := range requested {
+		if !allowed[c] {
+			// **报错而不是忽略**：静默忽略会让作者以为自己申请到了。
+			// 申请列表写错了是作者的 bug，要在上传期就告诉他。
+			return nil, fmt.Errorf("%w: %q 不在宿主开放的能力里（%s）",
+				ErrMetaCapability, c, strings.Join(DefaultCapabilities, "、"))
+		}
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// Publish 用一批注册换出一份新的注册表。旧的注册表不受影响。
+//
+// 这是「编译全部通过才发布」的落点：全部 Compile 成功才返回新表，
+// 任一个失败就返回错误、旧表照旧。于是线上不会出现半批插件生效的状态——
+// 而「一半生效」在界面上看起来与「全都生效」一样。
+func Publish(regs []Registration) (*Registry, error) {
+	next := Empty()
+	for _, reg := range regs {
+		p, err := Compile(reg)
+		if err != nil {
+			// 错误里带上 key：一批十几个插件里只报「元数据不合法」没法排查。
+			return nil, fmt.Errorf("插件 %s 无法注册: %w", reg.Key, err)
+		}
+		if _, dup := next.index[p.Key]; dup {
+			return nil, fmt.Errorf("插件 %s 注册了两次", p.Key)
+		}
+		next.index[p.Key] = p
+		next.plugins = append(next.plugins, p)
+	}
+	sort.Slice(next.plugins, func(i, j int) bool {
+		if next.plugins[i].Priority != next.plugins[j].Priority {
+			return next.plugins[i].Priority > next.plugins[j].Priority
+		}
+		return next.plugins[i].Key < next.plugins[j].Key
+	})
+	return next, nil
+}
+
+// Candidates 挑出这次请求可能用到的插件，按优先级降序、同优先级按 key 升序。
+//
+// 匹配只看 meta 里声明的：模型名与协议。**不看请求内容**——
+// 「按内容决定跑哪个插件」会让同一个模型的两条请求跑到不同的插件上，
+// 而那种不确定性在排查时几乎无法还原。
+func (r *Registry) Candidates(canonicalModel, protocol string) []*Plugin {
+	if r == nil {
+		return nil
+	}
+	var out []*Plugin
+	for _, p := range r.plugins {
+		if !p.supportsModel(canonicalModel) {
+			continue
+		}
+		if p.Meta.Protocol != "" && p.Meta.Protocol != protocol {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func (p *Plugin) supportsModel(canonicalModel string) bool {
+	if len(p.Meta.Models) == 0 {
+		return true
+	}
+	for _, m := range p.Meta.Models {
+		if m == canonicalModel {
+			return true
+		}
+	}
+	return false
+}
+
+// ErrNoPlugin 表示这次请求没有匹配的插件。
+var ErrNoPlugin = errors.New("没有匹配的插件")
+
+// SessionRequest 是挑选插件需要的请求特征。
+type SessionRequest struct {
+	CanonicalModel string
+	Protocol       string
+}
+
+// NewSession 为一次请求挑一个插件并建好运行时。
+//
+// **只取一个。** 多插件如何串联（后一个看到前一个改过的，还是都看到原始数据）
+// 是一个未定的契约问题：它决定插件作者的调试体验，也决定失败时的回退语义。
+// 收窄成「一个请求一个插件」是可逆的（放宽比收紧容易），
+// 而猜错链式语义会让已经写好的插件行为变化。
+//
+// 没有匹配的插件时返回 ErrNoPlugin——调用方据此走「没有插件」的路径，
+// 而不是拿到一个空 Session 却以为插件跑过了。
+func (r *Registry) NewSession(ctx context.Context, req SessionRequest, host sandbox.Host, limits sandbox.Limits) (*Session, error) {
+	cands := r.Candidates(req.CanonicalModel, req.Protocol)
+	if len(cands) == 0 {
+		return nil, ErrNoPlugin
+	}
+	p := cands[0]
+	rt, err := p.Module.NewRuntime(ctx, host, p.Capabilities, limits)
+	if err != nil {
+		return nil, fmt.Errorf("插件 %s 的运行时构造失败: %w", p.Key, err)
+	}
+	return &Session{
+		Plugin: p,
+		rt:     rt,
+		// 候选集之外的插件这次不参与。记录下来是为了让「明明配了三个插件
+		// 为什么只跑了一个」有答案。
+		Shadowed: cands[1:],
+	}, nil
+}
