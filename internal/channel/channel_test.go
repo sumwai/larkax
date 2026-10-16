@@ -164,16 +164,21 @@ func TestChannelSupports(t *testing.T) {
 	}
 }
 
-// 协议的取值必须与数据库的 CHECK 约束一致，否则库里存得进去的值
-// 到了代码里会变成未知协议。
-func TestProtocolValuesMatchSchema(t *testing.T) {
-	for _, p := range []Protocol{ProtocolOpenAI, ProtocolAnthropic, ProtocolCustom} {
+// 协议的取值只有这两套：调用方的入口只有两条路径，已注册的适配器也只有两个。
+// 多认一个没人实现的取值，会让「以为支持了」这件事发生。
+func TestProtocolValuesAreKnown(t *testing.T) {
+	for _, p := range []Protocol{ProtocolOpenAI, ProtocolAnthropic} {
 		if !p.valid() {
 			t.Errorf("协议 %q 应有效", p)
 		}
 	}
 	if Protocol("gemini").valid() {
 		t.Error("未知协议不应有效")
+	}
+	// custom 曾经是第三个取值，没有任何消费者，已删掉：
+	// 适配器只能说它实现的是哪套现成的协议。
+	if Protocol("custom").valid() {
+		t.Error("custom 已不再是合法协议")
 	}
 }
 

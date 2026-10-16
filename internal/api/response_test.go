@@ -260,8 +260,8 @@ func TestFinishReasonMapping(t *testing.T) {
 }
 
 func TestRenderSuccessRejectsUnknownProtocol(t *testing.T) {
-	if _, err := renderSuccess(channel.ProtocolCustom, "id", "m", time.Now(), &channel.Response{}); err == nil {
-		t.Error("custom 协议没有非流式响应形状，应当报错")
+	if _, err := renderSuccess(channel.Protocol("custom"), "id", "m", time.Now(), &channel.Response{}); err == nil {
+		t.Error("未知协议没有非流式响应形状，应当报错")
 	}
 }
 
