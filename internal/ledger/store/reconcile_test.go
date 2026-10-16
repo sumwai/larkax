@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -791,6 +792,87 @@ func TestReconcileReportsWalletMissingForReservationWithoutOtherSides(t *testing
 	}
 	if !strings.Contains(f.Detail, "30.00000000") {
 		t.Errorf("Detail 要带上未结算预留之和，得到 %q", f.Detail)
+	}
+}
+
+// moneyTokenPattern 抠出一段文字里的金额（`0.00000000` 这种形态）。
+var moneyTokenPattern = regexp.MustCompile(`\d+\.\d{8}`)
+
+// hasMoneyToken 判断这段文字里有没有这个金额，按**数字**比而不是子串。
+//
+// 子串判据在这里不成立：`30.00000000` 含 `0.00000000` 这段子串，于是
+// 「文字里只写了预留、没写分录之和」会被 `strings.Contains` 判为通过。
+func hasMoneyToken(text, want string) bool {
+	for _, tok := range moneyTokenPattern.FindAllString(text, -1) {
+		if tok == want {
+			return true
+		}
+	}
+	return false
+}
+
+// 落库之后，detail 里说的数要与同一行的两个数字列对得上。
+//
+// # 这条针对的是一个具体的矛盾
+//
+// wallet_missing 的 ledger 列只表示分录之和（见 00004_reconcile.sql 的列注释），
+// 只有预留、没有分录时它是 0。Detail 从前只写「有未结算预留 30.00000000」，
+// 读这一行的人对着 ledger 列的 0 分不清那 30 算没算进去——文字与数字列互相
+// 矛盾，而数字列是给人和后续查询看的。
+//
+// 断言按数字比（见 hasMoneyToken）而不是子串，否则旧措辞也能通过这条用例。
+func TestReconcileWalletMissingDetailMatchesColumns(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	req := testRequest(userID, reqID(t))
+	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, req.RequestID, "30", "CNY")); err != nil {
+		t.Fatal(err)
+	}
+	// 只留未结算预留这一侧：钱包行与账本分录都不在。
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM user_wallets WHERE user_id = $1`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM ledger_entries WHERE account = $1`,
+		ledger.UserAccount(userID).String()); err != nil {
+		t.Fatal(err)
+	}
+
+	reconcile(t, db, noRepair())
+
+	var snapshot, ledgerCol, detail string
+	if err := db.QueryRowContext(ctx, `
+		SELECT snapshot::text, ledger::text, detail FROM reconcile_findings
+		 WHERE scope = $1 AND kind = $2`,
+		fmt.Sprintf("user:%d@CNY", userID), string(FindingWalletMissing)).
+		Scan(&snapshot, &ledgerCol, &detail); err != nil {
+		t.Fatalf("这条不一致应当记在 reconcile_findings 里: %v", err)
+	}
+
+	// 前提：两个数字列都是 0，这条不一致的全部信息都在文字里。
+	if snapshot != "0.00000000" || ledgerCol != "0.00000000" {
+		t.Fatalf("前提是两列都为 0，得到 snapshot=%s ledger=%s", snapshot, ledgerCol)
+	}
+
+	// 分录之和要写出来，哪怕是 0：文字里没有它，读的人就没法把 ledger 列的
+	// 0 与「有 30 的预留」对上。
+	if !hasMoneyToken(detail, ledgerCol) {
+		t.Errorf("Detail %q 里没有 ledger 列的值 %s，读的人对不上文字与列", detail, ledgerCol)
+	}
+	if !hasMoneyToken(detail, "30.00000000") {
+		t.Errorf("Detail %q 里没有未结算预留之和 30.00000000", detail)
+	}
+	// 预留那一侧不在任何数字列里，文字必须说明这一点：不然它就是一个
+	// 「列里找不到的数」，读的人只能猜它算没算进 ledger 列。
+	if !strings.Contains(detail, "不在 ledger 列") {
+		t.Errorf("Detail %q 要说清预留那一侧不在 ledger 列里", detail)
+	}
+	if !strings.Contains(detail, "钱包行不存在") {
+		t.Errorf("Detail %q 要说明钱包行不存在——那是 snapshot 列为 0 的原因", detail)
 	}
 }
 

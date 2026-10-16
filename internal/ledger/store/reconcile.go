@@ -255,6 +255,11 @@ type Finding struct {
 	// Snapshot 是快照里的值（余额或冻结额）。没有钱包行时是零值。
 	Snapshot money.Amount
 	// Ledger 是推导出来的权威值（账本汇总或未结算预留之和）。
+	//
+	// 例外：Kind 为 FindingWalletMissing 时它**只是分录之和**，不含冻结侧
+	// （那时没有钱包行可挂冻结额，未结算预留之和只写在 Detail 里）。读这个
+	// 字段时别把它当成那一行的全部差额，列注释见
+	// internal/migrate/sql/00004_reconcile.sql 的 ledger 列。
 	Ledger money.Amount
 	// Unrepairable 非空时说明**为什么不能自动修**。
 	//
