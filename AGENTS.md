@@ -200,7 +200,9 @@ scripts/check-mutation.sh           # 变异测试（改动计费/账本时）
 
 **集成测试需要 `LARKAX_DB_DSN`**。没设时它们会跳过，而**「跳过」在输出里和
 「通过」长得一样**——所以 CI 里专门有一道检查确认它们真的跑了（见
-[LESSONS.md](LESSONS.md) 第 16 条）。本地跑集成测试：
+[LESSONS.md](LESSONS.md) 第 16 条）。变异测试也依赖它：`internal/ledger/store`
+被整包跳过后那一包等于没测，脚本因此会拒绝运行（见 [LESSONS.md](LESSONS.md)
+第 17 条）。本地跑集成测试：
 
 ```sh
 docker run -d --name larkax-pg -e POSTGRES_USER=larkax \
@@ -257,10 +259,41 @@ scripts/check-mutation.sh money route  # 只跑指定的
 `scripts/check-mutation.sh` 因此固定 `workers=1`、系数 10。串行慢，
 但变异测试不是每次提交都跑的东西（见上文协作节奏），**慢而可信比快而误导好**。
 
-判据：**超时的条数**。超过十来个就说明这一轮的分数不可信，
-先查是不是并发跑高了，再考虑调系数。
+### 一个分数要连着它的条件一起读
 
-对存活的变异逐个判断，只有两类可放过：
+固定了 workers 还不够。同一个包在两种条件下给出的不是同一个数：
+
+| 条件 | `internal/ledger` | Mutator coverage |
+|---|---|---|
+| `LARKAX_DB_DSN` 有效 | `Killed 132, Lived 11, Not covered 27` | 84.12% |
+| `LARKAX_DB_DSN` 不存在 | `Killed 94, Lived 7, Not covered 69` | 59.41% |
+
+**变的是「有多少变异体被测到」，不是「杀掉的比例」。** 两个 Test efficacy
+几乎一样（92.31% 与 93.07%），差得多的是 Mutator coverage——所以
+**只看 efficacy 会把这件事完全盖住**，要连着 Mutator coverage 一起看。
+
+原因：gremlins 收集覆盖时用的是**整个模块**的测试集，而被测包只是其中一个。
+`internal/ledger/store` 的集成测试要 `LARKAX_DB_DSN`，没设时整包 `t.Skip`，
+于是它给 `internal/ledger` 贡献的那部分覆盖也没了——可测的变异体从 143 个
+掉到 101 个，那 42 个从「被杀/存活」挪进了「不可达」。
+
+修法是**把 DSN 变成硬前提**，而不是去收窄覆盖范围：脚本缺 `LARKAX_DB_DSN`
+时直接拒绝运行。收窄成 `--coverpkg=./<pkg>/` 是错的方向——那是把「被别的包
+测试覆盖到」的部分白白丢掉（可测变异体 143 → 101），数字看着稳了、信息量少了。
+
+另一条来源是机器上的别的负载——它挡不住，只能按下面的判据识别：
+
+| 包 | 机器空闲 | 有别的负载 |
+|---|---|---|
+| `internal/billing` | `Killed 145, Timed out 0` | `Killed 136, Timed out 10` |
+| `internal/tokens` | `Killed 100, Timed out 0` | `Killed 95, Timed out 5` |
+
+**判据是超时条数，不是百分比。** 超时不为 0 就说明这一轮受了干扰，
+那几个数不与历史比较、也不抄进表里。
+
+### 对存活的变异逐个判断
+
+只有两类可放过：
 
 - **等价变异**：改法与改后行为不可区分（例如 `f >= unit` 与 `f > unit`
   在「小数部分恰好填满一个单位」时结果相同）
@@ -268,23 +301,37 @@ scripts/check-mutation.sh money route  # 只跑指定的
 
 放过时在测试里写一行说明，否则下一个人会以为是漏了。
 
+### 用常量测常量等于没测
+
+`internal/quota` 里曾经写成
+
+```go
+if got := score(selfAccountingStaleAfter); got != baseScore { ... }
+```
+
+被测的阈值与喂进去的输入是同一个常量。把它从 15 分钟改成 15 秒，
+用例照样通过——测的是「相对关系」而不是这个数。要钉住一个数就用字面量：
+`score(14 * time.Minute)`。
+
 ## 各包的现状
 
-由 `scripts/check-mutation.sh` 跑出（workers=1、系数 10）。
+由 `scripts/check-mutation.sh` 跑出（workers=1、系数 10、带 `LARKAX_DB_DSN`）。
+**超时列不为 0 的包，这一轮的分数不与历史比较**——见上文。
 改动过某个包的测试之后重跑并在表里更新。
 
-| 包 | 覆盖率 | Test efficacy |
-|---|---|---|
-| `internal/gateway` | 96.4% | 100% |
-| `internal/pipeline` | 82.9% | 96% |
-| `internal/calendar` | 97.8% | 94% |
-| `internal/quota` | 95.6% | 94% |
-| `internal/ledger` | 96.5% | 93% |
-| `internal/money` | 93.2% | 85% |
-| `internal/route` | 93.1% | 81% |
-| `internal/billing` | 97.5% | 80% |
-| `internal/tokens` | 97.4% | 71% |
-| `internal/snapshot` | 88.6% | 69% |
+| 包 | 覆盖率 | Test efficacy | 超时 |
+|---|---|---|---|
+| `internal/gateway` | 96.4% | 100% | 0 |
+| `internal/pipeline` | 86.8% | 96.0% | 0 |
+| `internal/quota` | 95.6% | 93.9% | 0 |
+| `internal/calendar` | 97.8% | 93.6% | 1 |
+| `internal/ledger` | 96.5% | 92.3% | 0 |
+| `internal/ledger/store` | 79.8% | 90.2% | 1 |
+| `internal/money` | 95.9% | 84.2% | 0 |
+| `internal/route` | 93.1% | 81.2% | 0 |
+| `internal/billing` | 97.5% | 81.0% | 0 |
+| `internal/tokens` | 97.4% | 74.6% | 4 |
+| `internal/snapshot` | 88.6% | 70.8% | 7 |
 
 **覆盖率高而 efficacy 低，说明测试断言的是「相对关系」而不是「具体边界」。**
 `route` 与 `snapshot` 两个包都是这个形状：原用例写的是「A 明显比 B 好」
