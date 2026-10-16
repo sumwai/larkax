@@ -202,8 +202,14 @@ type Reservation struct {
 	//
 	// 它**不代表**结算会用的规则：结算按实际选中的渠道重新匹配，
 	// 结果可能不是这一条（见 Settle）。
-	RuleID            int64
-	PricingExprSnap   string
+	RuleID          int64
+	PricingExprSnap string
+	// RuleMatchedAt 是**受理时刻**：这次请求的价格就是按它在规则里选中的
+	// 那一档定下来的。
+	//
+	// 结算复用它，而不是重新读一次钟（见 Settle）。它是「价格在受理那一刻
+	// 定下来」这条口径的载体：跟着预留一起持久化下来，事后才回答得了
+	// 「这次是按哪一刻的档位算的」，也才谈得上复算。
 	RuleMatchedAt     time.Time
 	BillingRequestID  int64
 	ReservedBreakdown billing.Breakdown
@@ -267,9 +273,31 @@ type Charge struct {
 	// Tier 是规则记下的档位名，供账单解释「为什么按这一档算」。
 	Tier string
 	// PricedAt 是求值用的时刻，用于分时计价的事后复算。
+	//
+	// 它记的是**受理时刻**（Reservation.RuleMatchedAt），不是结算这一刻：
+	// 档位是按受理那一刻选的，复算必须从同一个时刻出发。拿结算时刻去
+	// 复算会算出另一个档位的价——两个价看起来都合理，差别只在用的是
+	// 哪一刻，所以事后靠账单本身分不出来。
 	PricedAt time.Time
 	// LocalHour 与 IsOffDay 是同一次求值里用到的分时依据，
 	// 单独落库是为了让复算不必再查一次日历。
+	//
+	// 它们与 PricedAt 描述的是**同一次求值**，所以三个字段必须取自同一个
+	// 时刻：把结算时刻的钟点配上受理时刻的 PricedAt，是一个从未发生过的
+	// 组合，而它照样算得出数来——照它对账会得到一个错的结论，且看不出错。
+	// 复算一律以 PricedAt 为准。
+	//
+	// 结算路径目前不填这两个字段（保持零值）：
+	//
+	//   - 「当地钟点」在规则里不是唯一的值——hour(tz) 的时区由规则作者
+	//     逐次给出，同一条规则里可以出现多个时区，也可以一次都不问钟点。
+	//     按 Env.Region 的时区填一个上去，会得到一个看起来权威、却可能
+	//     与规则实际用的那个不同的数，那比留空更糟。
+	//   - IsOffDay 由 Env.Region 与日历唯一确定，但「At 折成当地哪一天」
+	//     这一步在 expr 的求值运行时里。在这里重写一遍等于把一条计费判据
+	//     抄成两份，而两份迟早会不一致。
+	//
+	// 要填它们，得先让求值把「用了哪个时区、算的是哪一天」报回来。
 	LocalHour int
 	IsOffDay  bool
 }
@@ -303,7 +331,10 @@ func (p *Pipeline) Reserve(ctx context.Context, req Request) (*Reservation, erro
 
 	// 求值环境只造一次：所有候选要在**同一个时刻**下比较，否则跨整点的
 	// 请求会拿两个时刻去算同一笔钱，而取最大就不再是在同一个条件下取的。
-	evalEnv := p.env(req.Usage)
+	//
+	// 时刻取受理这一刻，并随 RuleMatchedAt 一起交给结算——预留与结算
+	// 用同一个时刻，是「一次请求的价格在受理时就定了」这句话的落点。
+	evalEnv := p.env(req.Usage, p.now())
 
 	rules, err := p.Rules.MatchAll(ctx, RuleQuery{
 		CanonicalModel: req.CanonicalModel,
@@ -409,6 +440,12 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 	if reserved.RequestID != req.RequestID {
 		return nil, fmt.Errorf("预留属于请求 %q，与当前的 %q 不符", reserved.RequestID, req.RequestID)
 	}
+	if reserved.RuleMatchedAt.IsZero() {
+		// 结算的定价基准就是它（见下面求值那一步），没有它就只能退回去读墙钟，
+		// 而那正是本次要消除的口径。报出来而不是兜一个 p.now()：一个自己编的
+		// 时刻会让跨档位的请求按另一档计价，而账单上看不出用了哪个时刻。
+		return nil, errors.New("预留缺少受理时刻：结算要按受理那一刻的档位定价")
+	}
 	if err := req.validate(); err != nil {
 		return nil, err
 	}
@@ -462,7 +499,11 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 	}
 
 	usage := billing.FromChannelUsage(out.Usage)
-	val, err := program.Eval(p.env(usage))
+	// 求值时刻取**受理那一刻**，不取现在：这次请求的价格在受理时就已经
+	// 定下来了（见 env）。上游那次调用可能跑了好几分钟，跨过了规则的档位
+	// 边界——按结算这一刻的档位算，价格就取决于上游快不快：同一个请求，
+	// 上游答得快与答得慢会落到两个档位上，而两个价看起来都合理。
+	val, err := program.Eval(p.env(usage, reserved.RuleMatchedAt))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrRuleBroken, err)
 	}
@@ -489,21 +530,35 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 		UsageSource:     out.UsageSource,
 		Usage:           usage,
 		Tier:            val.Tier,
-		PricedAt:        val.At,
+		// val.At 是这次求值用的时刻，也就是受理时刻（见 env）。
+		PricedAt: val.At,
 	}, nil
 }
 
 // env 构造求值环境。
 //
-// 时间从 reserved.RuleMatchedAt（或 p.now()）来，**不读墙钟**：
-// 预留与结算要给出同一个答案，而读墙钟会让跨整点的请求按低谷预留、
-// 按高峰结算。这是 expr 包把时间做成显式入参的原因，这里照做。
+// # 求值时刻是显式入参，**不读墙钟**
 //
-// 现状与上面这段不符：两个调用点拿到的都是 p.now()，见 #160。
-func (p *Pipeline) env(usage billing.Usage) expr.Env {
+// 一次请求的价格在它**被受理的那一刻**就定下来了：那一刻的钟点与日历日
+// 决定了规则里走哪一档，而档位决定单价。之后无论隔多久才结算、中间跨过
+// 几次档位边界，都按那一刻的档位算。
+//
+// 两个调用点因此各传各的时刻，而它们拿到的是**同一个**：
+//
+//   - Reserve 传 p.now()——受理时刻就是「现在」，它同时被记进
+//     Reservation.RuleMatchedAt；
+//   - Settle 传 reserved.RuleMatchedAt——结算复用它，而不是重新读一次钟。
+//
+// 读墙钟会让同一次请求在预留与结算时拿到两个时刻，于是跨整点的请求按
+// 低谷预留、按高峰结算——同一笔钱有两个答案，而它们本应是同一个。
+// 这也是 expr 包把时间做成显式入参的原因（见 expr.Env.At）。
+//
+// 时刻为零值时求值会直接失败（见 expr.Env.validate）：一个按公元 1 年
+// 选出来的档位，算出的价看不出错。
+func (p *Pipeline) env(usage billing.Usage, at time.Time) expr.Env {
 	return expr.Env{
 		Usage:    usage,
-		At:       p.now(),
+		At:       at,
 		Region:   p.Region,
 		Calendar: p.Calendar,
 	}
@@ -560,7 +615,10 @@ func (p *Pipeline) entries(req Request, val expr.Result, s billing.Settlement) (
 		// 未拆分的部分留在平台科目上，事后可查。
 		MerchantID:       req.OwnerUserID,
 		BillingRequestID: req.BillingRequestID,
-		At:               val.At,
+		// At 取 val.At（受理时刻），与这次定价的依据是同一个时刻：
+		// 一笔消费记的就是「哪一次请求、按哪一刻的价」。分录落库时的
+		// created_at 由写库那一侧决定，不从这里取。
+		At: val.At,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("构造账本分录失败: %w", err)
