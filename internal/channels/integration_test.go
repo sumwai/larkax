@@ -150,9 +150,9 @@ func insertChannel(t *testing.T, db *sql.DB, sealer *credential.Sealer, spec cha
 	var id int64
 	err := db.QueryRowContext(context.Background(), `
 		INSERT INTO channels
-			(owner_user_id, name, type, base_url, credential_enc, protocol,
+			(owner_user_id, name, type, base_url, credential_enc,
 			 status, models, weight, priority, setting)
-		VALUES ($1, $2, 'openai-compatible', 'https://api.example.com/v1', $3, 'openai',
+		VALUES ($1, $2, 'openai-compatible', 'https://api.example.com/v1', $3,
 		        $4, $5, $6, $7, '{"supports_tools":true}'::jsonb)
 		RETURNING id`,
 		owner, "ch-"+itoa(nextID()), spec.credential, spec.status,
