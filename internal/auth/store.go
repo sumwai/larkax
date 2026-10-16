@@ -36,14 +36,15 @@ func (s *Store) lookup(ctx context.Context, plaintext string) (User, error) {
 		keyStatus  string
 		userStatus string
 		expiresAt  sql.NullTime
+		rateLimit  sql.NullInt64
 	)
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT k.id, k.status, k.expires_at, u.id, u.username, u.status
+		SELECT k.id, k.status, k.expires_at, k.rate_limit_rpm, u.id, u.username, u.status
 		  FROM api_keys k
 		  JOIN users u ON u.id = k.user_id
 		 WHERE k.key_hash = $1`, HashKey(plaintext),
-	).Scan(&user.KeyID, &keyStatus, &expiresAt, &user.ID, &user.Username, &userStatus)
+	).Scan(&user.KeyID, &keyStatus, &expiresAt, &rateLimit, &user.ID, &user.Username, &userStatus)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, &Error{Reason: ReasonKeyNotFound}
@@ -52,6 +53,16 @@ func (s *Store) lookup(ctx context.Context, plaintext string) (User, error) {
 		// 这里**不**包成 ErrUnauthenticated：查询失败不是「凭证不对」。
 		// 包上去会让调用方按 401 回应一次数据库故障。
 		return User{}, fmt.Errorf("查询 API Key 失败: %w", err)
+	}
+
+	// NULL 与 0 必须分得开：把 NULL 直接扫进 int 会得到 0，而这两者在
+	// 限流那一侧的意思正相反（不限流 / 一个都不放行）。用 NullInt64 接住
+	// 再转成指针，NULL 就落在 nil 上。
+	//
+	// 转换是安全的：列类型是 integer（32 位），int 至少 32 位。
+	if rateLimit.Valid {
+		value := int(rateLimit.Int64)
+		user.RateLimitRPM = &value
 	}
 
 	switch keyStatus {

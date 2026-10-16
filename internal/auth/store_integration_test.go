@@ -522,3 +522,70 @@ func setStatus(ctx context.Context, t *testing.T, db *sql.DB, keyID int64, statu
 		t.Fatalf("改 key 状态失败: %v", err)
 	}
 }
+
+// setRateLimitRPM 把一把 key 的每分钟额度写成指定值。传 nil 写回 NULL。
+func setRateLimitRPM(ctx context.Context, t *testing.T, db *sql.DB, keyID int64, rpm *int) {
+	t.Helper()
+
+	var value any
+	if rpm != nil {
+		value = *rpm
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE api_keys SET rate_limit_rpm = $2 WHERE id = $1`, keyID, value); err != nil {
+		t.Fatalf("改 key 的 RPM 额度失败: %v", err)
+	}
+}
+
+// TestAuthenticateReadsRateLimitRPM 是「这一列真的被读了」的落点。
+//
+// 它必须在真库上跑，因为要钉住的是**扫描**这一层：rate_limit_rpm 可空，
+// 而 NULL 与 0 在限流那一侧的意思正相反（不限流 / 一个都不放行）。
+// 把 NULL 扫进 int 会得到 0，两者就此合并成一个值——这个错只有在真库上
+// 才能暴露，内存实现里没有 NULL 这个东西。
+//
+// 断言的是具体数字：列里写 60，读出来就是 60；列里写 0，读出来是 0
+// 而不是 nil。
+func TestAuthenticateReadsRateLimitRPM(t *testing.T) {
+	ctx := t.Context()
+	db := testDB(ctx, t)
+	store := New(db)
+
+	created, owner := createKey(ctx, t, db, store)
+
+	read := func() *int {
+		t.Helper()
+		got, err := store.Authenticate(ctx, request(ctx, "x-api-key", created.Plaintext))
+		if err != nil {
+			t.Fatalf("认证失败: %v", err)
+		}
+		if got.ID != owner.ID {
+			t.Fatalf("用户 ID = %d，期望 %d", got.ID, owner.ID)
+		}
+		return got.RateLimitRPM
+	}
+
+	// 一、默认是 NULL（这一列没有任何代码写它，新 key 必然是 NULL）。
+	if got := read(); got != nil {
+		t.Errorf("新 key 的 RateLimitRPM = %v，期望 nil（列值为 NULL）", *got)
+	}
+
+	// 二、写进去的数原样读出来。
+	for _, want := range []int{60, 1, 0, -1} {
+		setRateLimitRPM(ctx, t, db, created.ID, &want)
+
+		got := read()
+		if got == nil {
+			t.Fatalf("列里写了 %d，读出来是 nil——NULL 与非 NULL 被合并了", want)
+		}
+		if *got != want {
+			t.Errorf("RateLimitRPM = %d，期望 %d", *got, want)
+		}
+	}
+
+	// 三、写回 NULL 之后再读，必须回到 nil：否则「取消额度」做不到。
+	setRateLimitRPM(ctx, t, db, created.ID, nil)
+	if got := read(); got != nil {
+		t.Errorf("把列写回 NULL 之后 RateLimitRPM = %v，期望 nil", *got)
+	}
+}
