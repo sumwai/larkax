@@ -47,6 +47,7 @@ PKGS=(
   internal/money
   internal/billing
   internal/ledger
+  internal/ledger/store
   internal/pipeline
   internal/calendar
   internal/quota
