@@ -149,8 +149,8 @@ func seedChannel(t *testing.T, db *sql.DB, owner int64) int64 {
 
 	var id int64
 	err := db.QueryRowContext(context.Background(), `
-		INSERT INTO channels (owner_user_id, name, type, base_url, credential_enc, protocol)
-		VALUES ($1, $2, 'openai', 'http://127.0.0.1:1/v1', '\x00'::bytea, 'openai')
+		INSERT INTO channels (owner_user_id, name, type, base_url, credential_enc)
+		VALUES ($1, $2, 'openai', 'http://127.0.0.1:1/v1', '\x00'::bytea)
 		RETURNING id`,
 		owner, unique("pricing-channel"),
 	).Scan(&id)

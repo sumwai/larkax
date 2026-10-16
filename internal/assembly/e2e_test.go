@@ -158,8 +158,8 @@ func seedChannel(t *testing.T, db *sql.DB, sealer *credential.Sealer, owner int6
 	var id int64
 	if err := db.QueryRowContext(context.Background(), `
 		INSERT INTO channels
-			(owner_user_id, name, type, base_url, credential_enc, protocol, status, models)
-		VALUES ($1, $2, 'openai', $3, $4, 'openai', 'enabled', ARRAY[$5])
+			(owner_user_id, name, type, base_url, credential_enc, status, models)
+		VALUES ($1, $2, 'openai', $3, $4, 'enabled', ARRAY[$5])
 		RETURNING id`,
 		owner, unique("e2e-channel"), baseURL, sealed, model,
 	).Scan(&id); err != nil {
