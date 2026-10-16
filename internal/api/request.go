@@ -63,7 +63,10 @@ func checkRequest(req *channel.Request) *rejection {
 //
 // 计费要知道的与调上游要知道的是**两个请求**（见 pipeline.Request 的注释
 // 与 Chatter 的签名），这里只放计费要的，上游要的留在 upstream 里。
-func billingRequest(user User, upstream *channel.Request, requestID string) pipeline.Request {
+//
+// protocol 由调用方从路由处带进来：它是「调用方走的是哪条入口」这件事，
+// 与 upstream 里那些上游参数无关，所以不放进 upstream。
+func billingRequest(user User, upstream *channel.Request, requestID string, protocol channel.Protocol) pipeline.Request {
 	return pipeline.Request{
 		RequestID: requestID,
 		UserID:    user.ID,
@@ -74,6 +77,9 @@ func billingRequest(user User, upstream *channel.Request, requestID string) pipe
 		MaxTokens:      int64(upstream.MaxTokens),
 		InputTokens:    inputTokensOf(upstream),
 		Streamed:       upstream.Stream,
+		// 协议不能由这一层推：它由路径决定，而路径是调用方的事
+		// （见 pipeline.Request.Protocol）。
+		Protocol: protocol,
 	}
 }
 
