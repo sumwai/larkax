@@ -302,9 +302,6 @@ func patchOf[T any](patch *T, failure *sandbox.Failure, blocking bool) Result[T]
 	return Result[T]{Failure: failure, Blocked: blocking}
 }
 
-// ErrUnknownModel 表示插件声称支持的模型不在本次请求里。
-var ErrUnknownModel = errors.New("插件不支持这个模型")
-
 // ErrChannelOutsideCandidates 表示插件选了候选集之外的渠道。
 var ErrChannelOutsideCandidates = errors.New("插件选了候选集之外的渠道")
 
