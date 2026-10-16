@@ -197,19 +197,31 @@ func Normalize(u RawUsage) (channel.Usage, error) {
 		}
 	}
 
-	// 推理 token 的两种口径：单独报，或已含在输出里。上游不说明，而这两种
-	// 通常从数字上分不出来，所以这里不替它选：原样记下来，是否重复计费由
-	// 计费层按规则给的推理单价决定，见 billing.FromChannelUsage。
-	// Raw 里留着原始数字，上游改口径时能看出来。
+	// 推理 token 与输出的关系**由协议决定**，不靠数字猜：
 	//
-	// 唯一的例外是下面那种自相矛盾的组合——推理量大于输出总量，那时它
-	// 不可能是输出的一部分。那不是口径判断，是把这个组合修掉。
+	//   - OpenAI：completion_tokens 按官方定义含 completion_tokens_details
+	//     里的 reasoning_tokens，后者是前者的子集。
+	//   - DeepSeek：同一个形状（completion_tokens_details.reasoning_tokens），
+	//     且它的 usage 满足 total_tokens = prompt_tokens + completion_tokens，
+	//     推理没有被另算一份。
+	//   - Anthropic：output_tokens 含扩展思考的 token，协议不单独报推理量。
+	//
+	// 三家都是「已含」，所以显式声明 true——声明漏了就会落到零值（「独立报」），
+	// 而那会让同一批 token 被收两次钱。减掉推理是计费层（billing.FromChannelUsage）的事。
 	out.ReasoningTokens = deref(u.ReasoningTokens)
+	out.CompletionIncludesReasoning = true
+
 	if out.ReasoningTokens > out.CompletionTokens {
-		// 单独报的值大于输出总量，说明它不是「输出的一部分」而是
-		// 一个独立计数。按「不重复计入输出」的约定，这里保留原值，
-		// 但把输出抬到至少等于它，以免出现「输出 0 但有推理 500」这种
-		// 自相矛盾的账。
+		// 声明说推理含在输出里，报出来的推理量却大于输出总量——上游自相矛盾。
+		// 把输出抬到至少等于推理量，让 channel.Usage 自身自洽：它还要被
+		// 序列化给调用方看，而「输出 50、其中推理 80」是读不通的。
+		//
+		// 抬这一下不改金额：拆分时减掉的量与抬高的量相同，两边都落在 0。
+		// 代价是矛盾在这里被抹平，下游拿到的是一份自洽的用量，判不出它来自
+		// 矛盾输入——所以「报出矛盾」的职责落在那些**不修补**的生产者身上：
+		// relay 路径原样透传上游的两个数，由 pipeline 侧按
+		// billing.ReasoningExceedsCompletion 告警。这里保留修补是为了不动
+		// 响应里已经发出去的 completion_tokens。
 		out.CompletionTokens = out.ReasoningTokens
 	}
 

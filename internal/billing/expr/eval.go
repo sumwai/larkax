@@ -188,6 +188,15 @@ func (p *Program) result(rt *runtime, out any) (Result, error) {
 		CacheRead:  amountFrom(floats["cache_read"]),
 		CacheWrite: amountFrom(floats["cache_write"]),
 		Reasoning:  amountFrom(floats["reasoning"]),
+		Declared:   make(map[string]bool, len(floats)),
+	}
+	// Declared 记的是规则里**写过**哪几个 token 键。floats 只装规则给了的键，
+	// 所以查它的存在性即可。不能拿单价是不是 0 判断：「写了 0」（这一项免费）
+	// 与「没写」（规则漏了）都落在 0 上，而计费层要区别对待这两件事。
+	for _, name := range []string{"prompt", "completion", "cache_read", "cache_write", "reasoning"} {
+		if _, ok := floats[name]; ok {
+			res.Prices.Declared[name] = true
+		}
 	}
 	// fixed/minimum 不是单价，不进 Prices。上面已经把它们折进 Charges 了。
 	if len(units) > 0 {

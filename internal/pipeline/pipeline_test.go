@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/tokens"
 )
 
@@ -491,5 +493,89 @@ func TestInputTokensZeroIsAllowed(t *testing.T) {
 	req.InputTokens = -1
 	if _, err := p.Reserve(context.Background(), req); err == nil {
 		t.Error("负的输入 token 应被拒绝")
+	}
+}
+
+// ── 上游用量自相矛盾时的告警 ────────────────────────────────────────────
+
+// reasoningRule 给推理单独定价，这样「同一批 token 收两次」才在金额上看得出来。
+const reasoningRule = `{"prompt": 0.000001, "completion": 0.000002, "reasoning": 0.00001}`
+
+// 上游报「输出 50、其中推理 80」时：**照常计费，只写一条告警**。
+//
+// 不让它失败是有意的。这是运行时来自上游的数据状况，不是几分钟能修好的配置
+// 错误：让它失败会把整条渠道的请求都变成失败，而上游那次调用已经成功、
+// token 已经花掉，客户端还会拿到错误——白服务一次还赔上体验。
+func TestSettleWarnsButSucceedsOnContradictoryReasoning(t *testing.T) {
+	p := newPipeline(t, &ruleSource{rule: Rule{ID: 1, Version: 1, Source: reasoningRule}})
+	req := baseRequest()
+	res, err := p.Reserve(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	ctx := observe.WithLoggerAndRequest(context.Background(),
+		observe.NewLoggerWithWriter(&buf, "debug", "json", false), "req-1")
+
+	charge, err := p.Settle(ctx, req, res, Outcome{
+		Usage: channel.Usage{
+			PromptTokens:                1000,
+			CompletionTokens:            50,
+			ReasoningTokens:             80,
+			CompletionIncludesReasoning: true,
+		},
+		UsageSource: tokens.SourceMeasured,
+	})
+	if err != nil {
+		t.Fatalf("自相矛盾的用量不该让结算失败: %v", err)
+	}
+
+	// 拆出来为负，钳到 0：不能算出一笔负数消费。推理照上游报的算。
+	// 1000*1e-6 + 0*2e-6 + 80*1e-5 = 0.001 + 0.0008
+	if charge.Usage.CompletionTokens != 0 {
+		t.Errorf("输出应被钳到 0，得到 %d", charge.Usage.CompletionTokens)
+	}
+	if charge.Usage.ReasoningTokens != 80 {
+		t.Errorf("推理 = %d，期望 80", charge.Usage.ReasoningTokens)
+	}
+	if got := charge.Settlement.Actual.String(); got != "0.00180000" {
+		t.Errorf("实际金额 = %s，期望 0.0018", got)
+	}
+
+	// 告警要带够上下文：哪条渠道、上游原样报的两个数。
+	logged := buf.String()
+	for _, want := range []string{"channel_id", "7", "completion_tokens", "50", "reasoning_tokens", "80"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("告警里缺少 %q: %s", want, logged)
+		}
+	}
+}
+
+// 正常的用量不该产生任何告警——否则那条告警等于噪声，
+// 而噪声里的真信号没人会看。
+func TestSettleDoesNotWarnOnConsistentReasoning(t *testing.T) {
+	p := newPipeline(t, &ruleSource{rule: Rule{ID: 1, Version: 1, Source: reasoningRule}})
+	req := baseRequest()
+	res, err := p.Reserve(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	ctx := observe.WithLoggerAndRequest(context.Background(),
+		observe.NewLoggerWithWriter(&buf, "debug", "json", false), "req-1")
+
+	// 两种口径各一次：推理含在输出里，以及推理独立报。
+	for _, u := range []channel.Usage{
+		{CompletionTokens: 100, ReasoningTokens: 40, CompletionIncludesReasoning: true},
+		{CompletionTokens: 100, ReasoningTokens: 40},
+	} {
+		if _, err := p.Settle(ctx, req, res, Outcome{Usage: u}); err != nil {
+			t.Fatalf("结算出错: %v", err)
+		}
+	}
+	if buf.Len() != 0 {
+		t.Errorf("自洽的用量不该产生日志: %s", buf.String())
 	}
 }
