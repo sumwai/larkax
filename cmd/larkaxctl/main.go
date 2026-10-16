@@ -150,6 +150,12 @@ func runReconcile(args []string) error {
 // 命令行要有上限，否则一次卡住的查询会挂到运维发现为止。默认值给得宽：
 // 全量扫描在大库上本来就慢，而把上限设小会让「跑不完」看起来像
 // 「跑完了什么都没有」。
+//
+// 它必须**短于** internal/ledger/store 的 staleRunAfter（一小时）：后者是
+// 「这一行确实已经死了」的判据，它只有在长于一轮合法运行的上限时才成立，
+// 否则并发的另一轮会把一个还活着的运行标成 failed。超时不会留下结不掉的
+// running 行——结账那一步不带取消，见 store.finishReconcileRun；只有结账
+// 那一步自己也写不进去时才会留，那是与硬崩同一种收尾。
 const reconcileTimeout = 30 * time.Minute
 
 // printReconcileReport 把一轮对账的结果打到 w。

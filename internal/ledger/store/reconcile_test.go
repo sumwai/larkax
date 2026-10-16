@@ -1213,6 +1213,67 @@ func TestReconcileClearsStaleRunningRun(t *testing.T) {
 	}
 }
 
+// ctx 被取消之后，这次运行的结局仍然要写回去。
+//
+// # 这条用例守的是什么
+//
+// 结账那一步曾经跟着调用方的 ctx 走，于是它最需要写进去的时刻——ctx 已经
+// 不能用的那一刻——恰好是它写不进去的时刻。库里于是留一行 status='running'，
+// 而它挡住的是「上一轮跑到哪了」这个判断，要等一小时才被 stale 清理捞走。
+// 最常触发它的是**超时**：CLI 给单轮对账的上限（30 分钟）必然短于 stale
+// 清理的一小时，所以那一行本来永远等不到自己这一轮来结。
+//
+// # 怎么让 ctx 在跑到一半时取消
+//
+// 在第一条告警里取消。告警是主循环里**确定会走到**的一步（这一轮必然报出
+// 一条不一致，下面那行 breakBalance 就是为此），而它之后主循环还要再取一批
+// 候选用户，那一次查询必然失败。这样不必靠 sleep 或超时去撞一个时刻——
+// 撞不准的用例会变成偶发失败，而偶发失败最后总是被当成噪声忽略掉。
+func TestReconcileClosesRunWhenContextCancelled(t *testing.T) {
+	db := testDB(t)
+	userID := seed(t, db, "100")
+	breakBalance(t, db, userID, "5")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	alerted := false
+	alert := func(_ context.Context, _ Finding) {
+		alerted = true
+		cancel()
+	}
+	report, err := New(db).Reconcile(ctx, noRepair(), alert)
+	if err == nil {
+		t.Fatal("ctx 取消之后这一轮应当以错误收尾")
+	}
+	if !alerted {
+		t.Fatal("这一轮没有报出任何不一致，用例没能取消到 ctx（断言会空转通过）")
+	}
+	if report == nil {
+		t.Fatal("失败也要返回已经查出来的部分")
+	}
+
+	var (
+		status string
+		reason sql.NullString
+		closed bool
+	)
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT status, error, finished_at IS NOT NULL
+		  FROM reconcile_runs WHERE id = $1`, report.RunID).Scan(&status, &reason, &closed); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" {
+		t.Errorf("状态 = %q，期望 failed：ctx 取消不应当留下一行结不掉的 running", status)
+	}
+	if !closed {
+		t.Error("这一行必须有 finished_at，否则它看起来还在跑")
+	}
+	if !strings.Contains(reason.String, context.Canceled.Error()) {
+		t.Errorf("原因 = %q，期望说明是 ctx 被取消", reason.String)
+	}
+}
+
 // ── 配置 ────────────────────────────────────────────────────────────────
 
 // fakeSource 给 settings.Load 喂一份完整配置。
