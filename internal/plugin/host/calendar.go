@@ -12,6 +12,10 @@ import (
 )
 
 // 日历判定的结果取值，与 DayInfo.Kind 的约定一致。
+//
+// 这三个字面量必须与 internal/calendar 的 DayKind 取值保持一致：本包刻意
+// 不 import 那个包（见 host.go 的 CalendarSource），所以它们对不上时编译器
+// 不会报错，只会让 kindFn 把这些取值当成契约外的值、静默降级成 unknown。
 const (
 	kindWorkday = "workday"
 	kindRestDay = "rest_day"

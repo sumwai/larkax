@@ -43,9 +43,16 @@ GitHub Flow：`main` 受保护，只能通过 PR 合入。
 功能分支 → PR → CI → review → 合入 main → 部署 staging
 ```
 
-CI 目前包含：`gofmt` 检查、`go vet`、单测（含 `-race`）、覆盖率摘要、
-迁移 up→down→up 往返（真 PostgreSQL）、红线扫描及其自测。
-**集成测试、契约测试与自动部署尚未接入**，各自落地时补进这条流水线。
+CI 目前包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`）、
+覆盖率摘要、迁移 up→down→up 往返（真 PostgreSQL）、分层自查
+（`check-layering.sh`）、红线扫描及其自测、变异测试脚本的自测。
+集成测试另有一道**「确认真跑了」的门禁**——它显式跑
+`internal/ledger/store`、`internal/channels`、`internal/auth` 与
+`internal/snapshotwire`，
+被 `t.Skip` 时报错，因为「跳过」在输出里和「通过」长得一样
+（见 [LESSONS.md](LESSONS.md) 第 16 条）。包清单写在
+`.github/actions/check-integration-tests`，新增依赖数据库的测试包时要往那里补。
+**契约测试与自动部署尚未接入**，各自落地时补进这条流水线。
 
 分支命名：`feat/`、`fix/`、`refactor/`、`docs/`、`test/`、`chore/` 前缀 + 简短描述。
 
@@ -116,7 +123,9 @@ Review 不只看代码逻辑。让 agent **扮演对项目一无所知的 review
 
 新增配置项前先问：**它是不是必须在连上数据库之前拿到？**
 
-- 是 → 环境变量。目前只有数据库 DSN、主密钥、角色、监听地址、日志级别。
+- 是 → 环境变量。目前是数据库 DSN、主密钥、角色、日志级别、环境名、
+  Redis 连接串，以及两个监听地址（公共与内部）——共八个。
+  完整清单以 `internal/config` 的 `Load` 为准。
 - 否 → 数据库的 `settings` 表。
 
 **环境变量要少。** 它必须跟着数据一起走：备份恢复、换机器、切环境时漏掉一个变量，
@@ -327,8 +336,8 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/calendar` | 97.8% | 93.6% | 1 |
 | `internal/ledger` | 96.5% | 92.3% | 0 |
 | `internal/ledger/store` | 79.8% | 90.2% | 1 |
+| `internal/route` | 93.3% | 84.3% | 0 |
 | `internal/money` | 95.9% | 84.2% | 0 |
-| `internal/route` | 93.1% | 81.2% | 0 |
 | `internal/billing` | 97.5% | 81.0% | 0 |
 | `internal/tokens` | 97.4% | 74.6% | 4 |
 | `internal/snapshot` | 88.6% | 70.8% | 7 |

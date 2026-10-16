@@ -52,8 +52,9 @@ func NewRequestID() RequestID {
 
 // RequestIDFromHeader 读取客户端提供的标识，没有或不可用时生成一个。
 //
-// 对客户端提供的值做清洗：只保留可见 ASCII 且限制长度。
-// 不清洗的话，一个带换行的 id 会被原样写进日志，从而伪造出额外的日志行——
+// 客户端提供的值只有在「非空、不超过 128 字节、且全是可见 ASCII」时才被沿用；
+// 只要有一项不满足就**整条丢弃**并重新生成，而不是清洗掉非法字符再保留其余。
+// 不校验的话，一个带换行的 id 会被原样写进日志，从而伪造出额外的日志行——
 // 日志注入是最容易被忽略的一类问题，因为日志本身被认为「只是输出」。
 func RequestIDFromHeader(v string) RequestID {
 	v = strings.TrimSpace(v)

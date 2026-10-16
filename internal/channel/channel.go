@@ -2,7 +2,7 @@
 //
 // 分层是这样的：
 //
-//	gateway  ──►  router  ──►  channel.Adapter  ──►  上游
+//	gateway  ──►  route  ──►  channel.Adapter  ──►  上游
 //	                │                │
 //	                │                └── 只做协议转换：把统一请求翻译成上游格式，
 //	                │                    把上游响应翻译回统一结构
@@ -28,7 +28,7 @@ import (
 // Protocol 是上游说的话。
 //
 // 它决定用哪套 usage 口径、哪种流式分片格式、以及请求体长什么样。
-// 与 ChannelType 是两个维度：同一家上游可能同时提供两套协议，
+// 与渠道类型（Channel.Type）是两个维度：同一家上游可能同时提供两套协议，
 // 同一套协议也被多家上游使用。
 type Protocol string
 

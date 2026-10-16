@@ -72,7 +72,7 @@ func (r *Router) chatStreamWithPlan(ctx context.Context, exec StreamExecutor, re
 			ChannelID:   c.Channel.ID,
 			ChannelName: c.Channel.Name,
 			Err:         err,
-			Retryable:   err != nil && channel.IsRetryable(err),
+			Retryable:   worthNextCandidate(err),
 			StartedAt:   started,
 			Duration:    r.now().Sub(started),
 		})
@@ -82,7 +82,7 @@ func (r *Router) chatStreamWithPlan(ctx context.Context, exec StreamExecutor, re
 			result.Events = events
 			return result, nil
 		}
-		if !channel.IsRetryable(err) {
+		if !worthNextCandidate(err) {
 			return result, &Errors{Attempts: result.Attempts}
 		}
 	}

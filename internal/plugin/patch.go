@@ -9,8 +9,10 @@ import (
 
 // errNonPositiveMaxTokens 是 max_tokens 非正时的错误。
 //
-// 单独一个函数而不是内联：pipeline 的校验用同一句话（它是计费预留上界的
-// 输入），两处说法的差别会让排查时以为是两个不同的问题。
+// 单独一个函数而不是内联：pipeline 与 billing 在「预留上界」那一步会拒绝
+// 同一件事（max_tokens 非正）。三处的措辞与哨兵错误**并不相同**——那边是
+// 「当前 %d」+ billing.ErrNoUpperBound，这边是「收到 %d」+ ErrPatchScope——
+// 排查时别把同一件事当成两个不同的问题。
 func errNonPositiveMaxTokens(v int64) error {
 	return fmt.Errorf("%w: max_tokens 必须为正，收到 %d", ErrPatchScope, v)
 }

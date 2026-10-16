@@ -217,9 +217,10 @@ func Normalize(u RawUsage) (channel.Usage, error) {
 		// 序列化给调用方看，而「输出 50、其中推理 80」是读不通的。
 		//
 		// 抬这一下不改金额：拆分时减掉的量与抬高的量相同，两边都落在 0。
-		// 代价是矛盾在这里被抹平，下游的 billing.Validate 看不到它——
-		// 报出矛盾的职责因此落在那些**不修补**的生产者身上（relay 路径原样
-		// 透传上游的两个数，由 Validate 报出来）。这里保留修补是为了不动
+		// 代价是矛盾在这里被抹平，下游拿到的是一份自洽的用量，判不出它来自
+		// 矛盾输入——所以「报出矛盾」的职责落在那些**不修补**的生产者身上：
+		// relay 路径原样透传上游的两个数，由 pipeline 侧按
+		// billing.ReasoningExceedsCompletion 告警。这里保留修补是为了不动
 		// 响应里已经发出去的 completion_tokens。
 		out.CompletionTokens = out.ReasoningTokens
 	}

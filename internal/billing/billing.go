@@ -159,7 +159,7 @@ func ComputeWithCharges(usage Usage, prices Prices, charges Charges) Breakdown {
 				// 用量里有这个计量项，规则却没给单价。
 				// 不能当成免费——那会让这类用量永远不产生费用，
 				// 而它也不会报错，只会在对账时表现为「用量对不上金额」。
-				// 这里记为零，由 Validate 报出来。
+				// 这里跳过这一项（不放进明细），由 Validate 报出来。
 				continue
 			}
 			b.Units[name] = price.MulInt(count)
