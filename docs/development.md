@@ -194,9 +194,14 @@ CI 会跑同样的东西，本地跑是为了少一轮来回。
 改了**计费、账本、金额**这三处代码时，除了单测还要跑变异测试：
 
 ```sh
+export LARKAX_DB_DSN="postgres://larkax:placeholder@127.0.0.1:5432/larkax?sslmode=disable"
 scripts/check-mutation.sh              # 全部包
 scripts/check-mutation.sh money route  # 只跑指定的
 ```
+
+`LARKAX_DB_DSN` 是必须的：没有它 `internal/ledger/store` 的集成测试整包
+被 `t.Skip`，那一包等于没测。脚本会直接拒绝运行，而不是跑出一批
+不可比的数字。
 
 覆盖率只说明「这一行被执行过」，不说明「这一行的每个分支被钉住了」。
 实测：计费与账本各包的覆盖率都在 82%~98%，而变异测试每次都找出两位数个
@@ -207,6 +212,9 @@ scripts/check-mutation.sh money route  # 只跑指定的
 `internal/money` 在系数固定 10 时，workers=1/2 得到 `Killed 80`，
 workers=4 得到 `Killed 3, Timed out 92`——同一份代码，看起来像两个
 不同的结论。脚本固定 `workers=1`，详见 AGENTS.md。
+
+**读分数的时候连结果一起读超时列。** 超时不为 0 说明这一轮受了机器负载的
+干扰（gremlins 的超时按墙钟算），那几个数不与历史比较。
 
 存活变异要**逐条判断**，不是看一个总数。只有两类可以放过：
 

@@ -143,6 +143,12 @@ jobs:
       - name: 扫描器自测
         run: bash scripts/check-redlines.test.sh
 
+      # 变异测试脚本的自测。用桩件、不调真的 gremlins，所以几秒就跑完，
+      # 可以在 CI 里每次都跑。它钉的是「什么算没跑成」这类判据——
+      # 那些判据错了的时候，脚本的输出与「一切正常」长得一样（见 LESSONS 第 16 条）。
+      - name: 变异测试脚本自测
+        run: bash scripts/check-mutation.test.sh
+
       # 脚本用退出码区分「命中」与「自身故障」，这里要把这个区分带出来：
       # 不区分的话，扫描器坏掉的日志和干净通过长得一样，没人会去看。
       - name: 扫描密钥与私有信息
