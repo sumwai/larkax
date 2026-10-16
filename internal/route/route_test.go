@@ -34,6 +34,7 @@ func candidate(id int64, model string, opts ...func(*Candidate)) Candidate {
 }
 
 func withPriority(p int) func(*Candidate)        { return func(c *Candidate) { c.Priority = p } }
+func withType(t string) func(*Candidate)         { return func(c *Candidate) { c.Channel.Type = t } }
 func withHealth(h Health) func(*Candidate)       { return func(c *Candidate) { c.Health = h } }
 func withQuota(q channel.Quota) func(*Candidate) { return func(c *Candidate) { c.Quota = q } }
 func withCost(v float64) func(*Candidate)        { return func(c *Candidate) { c.CostPerUnit = v } }
@@ -255,12 +256,19 @@ type fakeExecutor struct {
 	calls   []int64
 	results map[int64]error
 	resp    *channel.Response
+	// unknownTypes 模拟执行器按 Type 分派适配器：命中的类型返回
+	// channel.ErrUnknownType，与 internal/upstream 的包装方式一致。
+	// 它让「库里有一条当前二进制不认识的渠道」这件事在路由层可被复现。
+	unknownTypes map[string]bool
 }
 
 func (f *fakeExecutor) Chat(_ context.Context, ch channel.Channel, _ *channel.Request) (*channel.Response, error) {
 	f.calls = append(f.calls, ch.ID)
 	if err, ok := f.results[ch.ID]; ok && err != nil {
 		return nil, err
+	}
+	if f.unknownTypes[ch.Type] {
+		return nil, fmt.Errorf("渠道 %d: %w", ch.ID, channel.ErrUnknownType)
 	}
 	return f.resp, nil
 }
@@ -338,6 +346,59 @@ func TestChatTreatsUnknownErrorAsPermanent(t *testing.T) {
 	}
 	if len(exec.calls) != 1 {
 		t.Errorf("未知错误默认不可重试，实际调用了 %v", exec.calls)
+	}
+}
+
+// 类型不被当前二进制认识的渠道只影响它自己：那是**这条候选**的问题，
+// 不是**这次请求**的问题，后面的健康候选照常尝试。
+//
+// 这正是回滚版本之后最容易出现的形态——库里留着新版本写进去的渠道行，
+// 旧二进制的候选集里就有它，而它排在前面时不该毒掉整条请求。
+func TestChatSkipsUnknownChannelType(t *testing.T) {
+	exec := &fakeExecutor{
+		unknownTypes: map[string]bool{"newer-type": true},
+		resp:         &channel.Response{UpstreamModel: "m"},
+	}
+	r := seededRouter(1)
+
+	res, err := r.Chat(context.Background(), exec, &channel.Request{Model: "m"},
+		[]Candidate{
+			candidate(1, "m", withType("newer-type"), withPriority(10)),
+			candidate(2, "m", withPriority(1)),
+		}, "m")
+	if err != nil {
+		t.Fatalf("应跳过类型不认识的候选并成功: %v", err)
+	}
+	if res.Channel.ID != 2 {
+		t.Fatalf("应落在第二个候选上，实际 %d", res.Channel.ID)
+	}
+	if len(exec.calls) != 2 {
+		t.Fatalf("调用序列 = %v，期望 [1 2]", exec.calls)
+	}
+	if len(res.Attempts) != 2 {
+		t.Fatalf("尝试记录数 = %d，期望 2（含失败的那次）", len(res.Attempts))
+	}
+	if !errors.Is(res.Attempts[0].Err, channel.ErrUnknownType) {
+		t.Errorf("第一次尝试应记为未知类型: %v", res.Attempts[0].Err)
+	}
+}
+
+// 全部候选都因类型不认识而失败时，返回的错误仍要能认出原因。
+// 不能变成一句「全都试过了」把原因盖掉——排查时那等于没有信息。
+func TestChatAllUnknownTypesKeepsCause(t *testing.T) {
+	exec := &fakeExecutor{unknownTypes: map[string]bool{"newer-type": true}}
+	r := seededRouter(1)
+
+	_, err := r.Chat(context.Background(), exec, &channel.Request{Model: "m"},
+		[]Candidate{
+			candidate(1, "m", withType("newer-type")),
+			candidate(2, "m", withType("newer-type")),
+		}, "m")
+	if err == nil {
+		t.Fatal("全部候选失败应报错")
+	}
+	if !errors.Is(err, channel.ErrUnknownType) {
+		t.Errorf("错误应仍能认出 channel.ErrUnknownType: %v", err)
 	}
 }
 
@@ -445,12 +506,17 @@ type fakeStreamExecutor struct {
 	calls   []int64
 	results map[int64]error
 	events  []channel.StreamEvent
+	// 见 fakeExecutor.unknownTypes。
+	unknownTypes map[string]bool
 }
 
 func (f *fakeStreamExecutor) ChatStream(_ context.Context, ch channel.Channel, _ *channel.Request) (<-chan channel.StreamEvent, error) {
 	f.calls = append(f.calls, ch.ID)
 	if err, ok := f.results[ch.ID]; ok && err != nil {
 		return nil, err
+	}
+	if f.unknownTypes[ch.Type] {
+		return nil, fmt.Errorf("渠道 %d: %w", ch.ID, channel.ErrUnknownType)
 	}
 	out := make(chan channel.StreamEvent, len(f.events))
 	for _, ev := range f.events {
@@ -493,6 +559,37 @@ func TestChatStreamStopsOnPermanentError(t *testing.T) {
 	}
 	if len(exec.calls) != 1 {
 		t.Errorf("不可重试的错误不该继续尝试，实际 %v", exec.calls)
+	}
+}
+
+// 流式路径与 chatWithPlan 是同一条判据的两份实现，这里单独钉一次：
+// 类型不认识的候选在输出前就被换掉，后面的健康候选照常接管。
+func TestChatStreamSkipsUnknownChannelType(t *testing.T) {
+	exec := &fakeStreamExecutor{
+		unknownTypes: map[string]bool{"newer-type": true},
+		events:       []channel.StreamEvent{{Kind: "delta", Text: "hi"}},
+	}
+	r := seededRouter(1)
+
+	res, err := r.ChatStream(context.Background(), exec, &channel.Request{Model: "m", Stream: true},
+		[]Candidate{
+			candidate(1, "m", withType("newer-type"), withPriority(10)),
+			candidate(2, "m", withPriority(1)),
+		}, "m")
+	if err != nil {
+		t.Fatalf("应跳过类型不认识的候选并成功: %v", err)
+	}
+	if res.Channel.ID != 2 {
+		t.Fatalf("应落在第二个候选上，实际 %d", res.Channel.ID)
+	}
+	if len(exec.calls) != 2 {
+		t.Fatalf("调用序列 = %v，期望 [1 2]", exec.calls)
+	}
+	if len(res.Attempts) != 2 {
+		t.Fatalf("尝试记录数 = %d，期望 2（含失败的那次）", len(res.Attempts))
+	}
+	if !errors.Is(res.Attempts[0].Err, channel.ErrUnknownType) {
+		t.Errorf("第一次尝试应记为未知类型: %v", res.Attempts[0].Err)
 	}
 }
 
