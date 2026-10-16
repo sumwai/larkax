@@ -3,33 +3,36 @@
 ## 需要什么
 
 - Go 1.26 或更新（`go.mod` 里写明了最低版本）
-- Docker（跑 PostgreSQL，开发控制台前端时也用得到容器化的 Node）
+- Docker 与 `docker compose` v2.1 或更新（跑 PostgreSQL）
+- `make`
 - 只有开发前端才需要 Node.js 20 或更新
+
+**app 不进容器。** compose 只负责依赖的生命周期，服务本身留在宿主上 `go run`——
+改一行即时生效，不必每改一次就 rebuild 镜像。全栈容器化适合「只想跑起来看看」，
+不适合开发。
 
 ## 一次跑通
 
-下面四条命令连着跑，是达成「服务起来并能响应」的最短路径。
+```sh
+make run
+```
+
+一条命令走完：生成 `.env`（只在不存在时）→ 起 PostgreSQL 并等它就绪 → 应用迁移 →
+前台跑服务。Ctrl-C 退出服务，数据库仍在跑，用 `make down` 停它。
+
+`.env` 里的主密钥由 `make` 直接生成写进去（`openssl rand -base64 32`），
+不需要手工粘。
+
+`.env` 里的 DSN 默认指向 `127.0.0.1:5432`。**端口被占用就换一个**：
 
 ```sh
-# 1. 起数据库。端口被占用就改左边的数字，并同步改下一步的 DSN。
-docker run -d --name larkax-pg \
-  -e POSTGRES_USER=larkax \
-  -e POSTGRES_PASSWORD=placeholder \
-  -e POSTGRES_DB=larkax \
-  -p 127.0.0.1:5432:5432 \
-  postgres:16-alpine
-
-# 2. 准备环境变量
-cp .env.example .env
-
-# 3. 生成主密钥并写进 .env 的 LARKAX_MASTER_KEYS
-openssl rand -base64 32
-
-# 4. 加载变量、建表、起服务
-set -a && . ./.env && set +a
-go run ./cmd/larkaxctl migrate up
-go run ./cmd/larkax
+make run PG_PORT=55432
 ```
+
+**`.env` 只在不存在时生成，之后一律不动。** 覆盖它等于毁掉已加密的存量数据——
+主密钥一变，密文就解不开了。因此 `PG_PORT` / `PG_DB` 只在生成 `.env` 的那一刻
+写进 DSN：已经有 `.env` 时，改这两个变量不会改变服务连到哪个库。要换端口，
+先 `make clean`（数据卷一起清掉），或直接改 `.env` 里 `LARKAX_DB_DSN` 的端口。
 
 验证：
 
@@ -40,9 +43,23 @@ curl -i localhost:8080/v1/chat/completions
 
 第一个返回 `200`，第二个返回 `501`（推理接口尚未实现，见下文「当前能做什么」）。
 另可验证数据库探针：`curl -s localhost:9090/readyz` 应含 `"postgres":"ok"`。
+**健康检查在 `:9090`，不在 `:8080`**——公共端口的 `/` 捕获一切路径并返回 `501`。
 
-`.env.example` 可以直接被 shell 读取，所以用 `set -a && . ./.env && set +a` 加载即可。
-**服务本身不读 `.env` 文件**，只读环境变量；用 direnv 或别的工具加载也行。
+其余目标：
+
+| 命令 | 做什么 |
+|---|---|
+| `make up` | 只起依赖，等 healthcheck 通过 |
+| `make down` | 只停依赖，保留数据卷 |
+| `make migrate` | 只跑迁移 |
+| `make test` | 跑测试（先确保依赖起着） |
+| `make clean` | 清容器、数据卷与生成的 `.env`，回到刚克隆的状态 |
+
+`make test` 会先起依赖并加载 `.env`——集成测试拿不到 `LARKAX_DB_DSN` 时会**跳过**，
+而「跳过」在输出里和「通过」长得一样。
+
+`.env.example` 可以直接被 shell 读取，所以 `make` 用 `set -a && . ./.env && set +a`
+加载它。**服务本身不读 `.env` 文件**，只读环境变量；用 direnv 或别的工具加载也行。
 
 ## 请求快照的留存
 
