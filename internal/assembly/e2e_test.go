@@ -612,6 +612,87 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	}
 }
 
+// 客户端不给 max_tokens 时，回给它的必须是 4xx 而不是 500。
+//
+// 预留要有输出上界才做得出来，所以缺了它这次请求确实做不成——但**漏填字段
+// 是调用方的问题**。回 500 会把「你少写了一个参数」说成「我们内部故障」：
+// 调用方去查我们的状态页，而真正要改的是他那一行请求。OpenAI 兼容客户端
+// 省略 max_tokens 很常见，所以这条路径不是理论上的。
+//
+// 走的是真实的装配路径（HTTP → 鉴权 → 预留），而不是直接调映射函数：
+// 「映射表里写了 400」与「这条链上真的会走到那张表」是两件事，错误可能在
+// 更早的一层就被换成别的，那样映射表再对也没用。
+func TestMissingMaxTokensIsRejectedBeforeUpstream(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+
+	model := unique("e2e-model-no-max-tokens")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, "100")
+	key := issueKey(t, db, user)
+
+	fake := &fakeUpstream{db: db, userID: user, model: model}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	// 与 chatBody 相同，只是不写 max_tokens。
+	body, err := json.Marshal(map[string]any{
+		"model": model,
+		"messages": []any{
+			map[string]any{"role": "user", "content": "你好"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("组装请求体失败: %v", err)
+	}
+
+	status, out := postChat(t, public.URL+"/v1/chat/completions", key, body)
+	if status != http.StatusBadRequest {
+		t.Fatalf("状态码 = %d，期望 400。响应体：%s", status, out)
+	}
+
+	var got struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v\n%s", err, out)
+	}
+	if got.Error.Type != "invalid_request_error" {
+		t.Errorf("错误类型 = %q，期望 invalid_request_error", got.Error.Type)
+	}
+	if !strings.Contains(got.Error.Message, "max_tokens") {
+		t.Errorf("错误体没点名缺的是 max_tokens: %q", got.Error.Message)
+	}
+
+	// 请求在预留那一步就被挡下了，上游一次都不该被调用——调用方自己的问题
+	// 不该消耗我们的上游额度与延迟。
+	if n := fake.callCount(); n != 0 {
+		t.Errorf("上游被调用 %d 次，期望 0 次", n)
+	}
+	// 钱一分都不该动：没有预留，也就没有账单行。
+	assertWallet(t, db, user, "100", "0")
+	var bills int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM billing_requests WHERE user_id = $1`, user).Scan(&bills); err != nil {
+		t.Fatalf("查账单失败: %v", err)
+	}
+	if bills != 0 {
+		t.Errorf("billing_requests 有 %d 行，期望 0（请求在预留之前就被拒了）", bills)
+	}
+}
+
 // 预留的上界要覆盖候选里**更贵的**那条规则，而不是只按平台规则算。
 //
 // 平台价便宜、这条候选渠道自己的价贵一百倍。只按平台规则预留的话，预留
