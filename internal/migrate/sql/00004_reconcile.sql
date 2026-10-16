@@ -92,7 +92,14 @@ CREATE TABLE reconcile_findings (
     -- 有可解析的用户 id 时填它（畸形科目填 0），供候选查询与展示。
     user_id       bigint NOT NULL DEFAULT 0,
     asset         text NOT NULL DEFAULT '',
+    -- 钱包侧的值：余额类与冻结类不一致时分别是快照里的余额、冻结额。
+    -- wallet_missing 时没有钱包行，恒为 0。
     snapshot      numeric(20, 8) NOT NULL DEFAULT 0,
+    -- 权威侧的值：余额类不一致时是账本汇总，冻结类不一致时是未结算预留之和。
+    --
+    -- 例外：wallet_missing 下它**只表示分录之和**，冻结侧不在这一列里
+    -- （那时没有钱包行可挂冻结额）。有未结算预留时这个数字因此是不完整的，
+    -- 那一侧有多少只写在 detail 里，两者要一起看。
     ledger        numeric(20, 8) NOT NULL DEFAULT 0,
     -- 与 Finding 的两个说明字段一一对应，原样保留：重新报出来时
     -- 要给出与首次相同的信息，否则第二次看的人得回去翻日志。
