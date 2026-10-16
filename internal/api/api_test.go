@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/gateway"
 	"github.com/sumwai/larkax/internal/observe"
@@ -490,6 +491,13 @@ func TestUpstreamErrorStatus(t *testing.T) {
 		{name: "没有可用渠道", err: route.ErrNoCandidates, want: http.StatusServiceUnavailable},
 		{name: "没有执行器", err: gateway.ErrNoExecutor, want: http.StatusNotImplemented},
 		{
+			name: "缺 max_tokens",
+			// 与 pipeline.Request.validate 一样包一层：判据要能穿过这层包装，
+			// 否则它只在测试里成立。
+			err:  fmt.Errorf("%w: max_tokens 必须为正，当前 %d", billing.ErrNoUpperBound, 0),
+			want: http.StatusBadRequest,
+		},
+		{
 			name: "上游限流",
 			err:  &channel.ErrUpstream{StatusCode: http.StatusTooManyRequests, Retryable: true},
 			want: http.StatusTooManyRequests,
@@ -523,6 +531,37 @@ func TestUpstreamErrorStatus(t *testing.T) {
 				t.Errorf("不该回内部错误原文: %s", rec.Body)
 			}
 		})
+	}
+}
+
+// 缺 max_tokens 是**调用方**的请求不完整，不是我们挂了：状态码要落在 4xx，
+// 而且响应体要点名是哪个字段缺了。只回一句「请求无效」的话，调用方不知道
+// 该改哪里；回 500 的话，他会去查我们的日志而不是自己的请求。
+func TestMissingMaxTokensIsClientError(t *testing.T) {
+	h, _, _ := newTestHandler()
+	h.Chatter = &fakeChatter{
+		err: fmt.Errorf("%w: max_tokens 必须为正，当前 %d", billing.ErrNoUpperBound, 0),
+	}
+
+	rec := post(h, PathChatCompletions, validBody)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("状态码 = %d，期望 400（响应体 %s）", rec.Code, rec.Body)
+	}
+
+	var body struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是 JSON: %v（%s）", err, rec.Body)
+	}
+	if body.Error.Type != "invalid_request_error" {
+		t.Errorf("错误类型 = %q，期望 invalid_request_error（调用方按类型分支）", body.Error.Type)
+	}
+	if !strings.Contains(body.Error.Message, "max_tokens") {
+		t.Errorf("错误体没点名缺的是 max_tokens: %q", body.Error.Message)
 	}
 }
 

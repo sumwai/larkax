@@ -160,12 +160,23 @@ func run() error {
 // 配到这里的实例会拿到 501 并被编排系统摘除。上了负载均衡后这是真实的
 // 误配陷阱，所以健康检查只注册在 internalMux 上。
 func publicHandler(cfg *config.Config, handle *sql.DB, values *settings.Values, logger *slog.Logger) (http.Handler, error) {
+	// 公共端口的形状由**角色**决定，而不是从「有没有主密钥」反推角色。
+	// 两者今天恰好等价，但把判据写成角色本身，才不会在改动 NeedsMasterKey
+	// 或增删角色时静默地换掉某个角色的行为。
+	if cfg.Role == config.RoleWorker {
+		// worker 解不开任何渠道凭证，因而装不出候选来源。它本来就不承接推理
+		// 流量，所以公共端口保持占位响应——回一个明确的 501 比让整个进程起不来
+		// 更贴合这个角色，也让部署验证仍然能确认「端口通、TLS 通、负载均衡转发通」。
+		return workerPlaceholder(), nil
+	}
+
 	if len(cfg.MasterKeys) == 0 {
-		// 没有主密钥的角色（worker）解不开任何渠道凭证，因而装不出候选来源。
-		// 它本来就不承接推理流量，所以公共端口保持占位响应——回一个明确的
-		// 501 比让整个进程起不来更贴合这个角色，也让部署验证仍然能确认
-		// 「端口通、TLS 通、负载均衡转发通」。
-		return notImplemented(), nil
+		// 角色本该接推理流量，却一把主密钥都没有：这是部署错误，不能退化成
+		// 占位响应——那样一个接不到任何请求的实例在编排系统看来是「起来了」，
+		// 要等到第一波真实流量才暴露，而现场只是一个与「未实现」无从区分的 501。
+		// config.Load 已经拦下这一种；这里是同一判据的第二道防线，覆盖 Config
+		// 不是经由环境变量构造出来的路径。
+		return nil, fmt.Errorf("角色 %q 需要主密钥才能解开渠道凭证，但一把都没配置", cfg.Role)
 	}
 
 	sealer, err := credential.NewSealer(cfg.MasterKeys)
@@ -200,17 +211,21 @@ func publicHandler(cfg *config.Config, handle *sql.DB, values *settings.Values, 
 	return app.Public, nil
 }
 
-// notImplemented 是公共端口的占位响应。
+// workerPlaceholder 是 worker 角色的公共端口占位响应。
 //
-// 它按路径全捕获，任何真实流量都会立刻得到「这个构建没有推理接口」，
+// 它按路径全捕获，任何真实流量都会立刻得到「这个实例不接推理流量」，
 // 而不是超时或 404 误导——部署验证靠这个性质确认链路是通的。
-func notImplemented() http.Handler {
+//
+// 措辞点名角色，而不是写「本构建没有推理接口」：501 也可能来自别的原因，
+// 而两种情况的排查方向完全不同（一个是部署把 worker 暴露在了公共端口上，
+// 另一个是功能还没接上）。让响应自己说清是哪一种，看到它的人不必先猜。
+func workerPlaceholder() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set(api.HeaderVersion, version)
 		w.WriteHeader(http.StatusNotImplemented)
-		_, _ = w.Write([]byte(`{"error":{"type":"not_implemented","message":"inference API is not available in this build"}}`))
+		_, _ = w.Write([]byte(`{"error":{"type":"not_implemented","message":"this instance runs the worker role and does not serve inference traffic"}}`))
 	})
 	// 最外层是关联标识：放在其他中间件之前，
 	// 这样被后续中间件拒绝掉的请求也带着 id，能被排查到。

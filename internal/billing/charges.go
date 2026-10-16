@@ -1,7 +1,6 @@
 package billing
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/sumwai/larkax/internal/money"
@@ -63,6 +62,3 @@ func ValidateCharges(usage Usage, prices Prices, charges Charges) error {
 	}
 	return charges.Validate()
 }
-
-// ErrNegativeAmount 表示算出了一个负金额。
-var ErrNegativeAmount = errors.New("金额为负")
