@@ -1,0 +1,35 @@
+# check-unimported.sh 的白名单：允许暂时没有任何 import 方的包。
+#
+# 格式，一条一行，三栏用 | 隔开（理由里不能出现 |）：
+#
+#   <包路径> | <类型> | <理由>
+#
+# 包路径是**模块内的相对路径**（`internal/plugin`），不是完整 import path，
+# 也不带 `./` 前缀。存相对路径是为了让这份清单不随模块名变化而整体失效；
+# 脚本剥掉模块前缀之后再比。
+#
+# 类型两档，与 scripts/deadcode-allowlist.txt 同一套：
+#
+#   lib  库构件 / 测试夹具。先有库、后接线是这个仓库刻意的顺序，
+#        库构件本来就该先有、先被测；测试夹具包更是永远不会被生产代码 import。
+#   gap  被追踪的缺口。理由里**必须**带一个 issue 号（`#123`），
+#        否则 check-unimported.sh 会拒绝这份白名单。
+#
+# 这一档的用处是让 review 能问出「这一条为什么还在」：lib 的答案是
+# 「它是积木 / 它是夹具」，gap 的答案是「有一个 issue 在跟」。
+#
+# 本文件按包路径排序，与脚本算出来的顺序无关——比对按集合做，
+# 加一条或删一条只动一行。
+#
+# 这份清单产出时的条件（换任何一个，条数都不可比）：
+#
+#   命令      scripts/check-unimported.sh
+#             （入口由 cmd/ 自动发现，当前是 ./cmd/larkax 与 ./cmd/larkaxctl）
+#   工具      go（版本随 go.mod；go list 的包枚举口径由它决定）
+#   条数      3，与脚本里的 MAX_ENTRIES 一致
+#
+# 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES 往下调。
+# 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
+internal/plugin         | gap | #216 插件系统尚未接线：全仓没有一处 import 它
+internal/plugin/host    | gap | #216 同属插件系统：宿主能力（日志 / 日历 / KV），只被插件树内部与测试 import
+internal/plugin/sandbox | gap | #216 同属插件系统：moejs 封装与限额，只被插件树内部与测试 import

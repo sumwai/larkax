@@ -46,7 +46,8 @@ GitHub Flow：`main` 受保护，只能通过 PR 合入。
 CI 目前包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`）、
 覆盖率摘要、迁移 up→down→up 往返（真 PostgreSQL）、分层自查
 （`check-layering.sh`）、红线扫描及其自测、变异测试脚本的自测、
-不可达符号门禁及其自测（`check-deadcode.sh`）。
+不可达符号门禁及其自测（`check-deadcode.sh`）、
+整包没人 import 的门禁及其自测（`check-unimported.sh`）。
 集成测试另有一道**「确认真跑了」的门禁**——它逐包显式跑依赖数据库的那些包，
 被 `t.Skip` 时报错，因为「跳过」在输出里和「通过」长得一样
 （见 [LESSONS.md](LESSONS.md) 第 16 条）。**包清单的唯一来源是**
@@ -201,7 +202,8 @@ go test ./...                       # 单测（有 LARKAX_DB_DSN 时连集成测
 
 bash scripts/check-redlines.sh      # 公开红线：密钥、私有主机、本机路径
 bash scripts/check-layering.sh      # 分层约定：谁 import 谁
-bash scripts/check-deadcode.sh      # 不可达符号：新代码有没有门
+bash scripts/check-deadcode.sh      # 不可达符号：可达的包内部有没有没人调的函数
+bash scripts/check-unimported.sh    # 整包没人 import：包本身有没有接上
 scripts/check-mutation.sh           # 变异测试（改动计费/账本时）
 ```
 
@@ -213,6 +215,19 @@ scripts/check-mutation.sh           # 变异测试（改动计费/账本时）
 版本不对它直接拒绝运行。它比对的白名单是 `scripts/deadcode-allowlist.txt`：
 新出现的不可达符号直接失败；白名单里已经消失的条目只提示「可以删了」，
 不算失败（它出现的原因是有人把没门的东西接上线了）；条目数只许减不许增。
+
+`scripts/check-unimported.sh` 是它的**补集**，只依赖 `go`：把「仓库自己的包」
+（`go list ./...`）与「从入口可达的包」（`go list -deps`，入口同样由 `cmd/`
+自动发现）两个集合相减，差集就是**整包没有任何 import 方**的那些——
+`deadcode` 照不到这一类，因为它只分析从入口可达的包。白名单是
+`scripts/unimported-allowlist.txt`，口径与上面那份一致：新出现的直接失败，
+已经接上的只提示「可以删了」，条目数只许减不许增。
+
+**只被测试 import 的包算「没人 import」。** 测试自己就能构造调用方，
+所以「只有测试在调」与「生产在调」在覆盖率上长得一样
+（见 [LESSONS.md](LESSONS.md) 第 22 条）；测试夹具包因此也要进白名单。
+
+**不要为了把白名单刷空而去硬接一条调用方**——接一条假的比留着它更坏。
 
 **集成测试需要 `LARKAX_DB_DSN`**。没设时它们会跳过，而**「跳过」在输出里和
 「通过」长得一样**——所以 CI 里专门有一道检查确认它们真的跑了（见
