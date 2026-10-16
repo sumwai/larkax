@@ -192,6 +192,18 @@ func (f *fakeSnapshots) count() int {
 	return len(f.saved)
 }
 
+// first 返回落库的第一条快照，没有则返回 nil。
+//
+// 落库是异步的，所以取用前先用 waitFor 等它出现（见下面那几条用例）。
+func (f *fakeSnapshots) first() *Snapshot {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.saved) == 0 {
+		return nil
+	}
+	return f.saved[0]
+}
+
 // ── 组装 ────────────────────────────────────────────────────────────────
 
 func candidate(id int64, model string) route.Candidate {
@@ -809,6 +821,31 @@ func TestRequestSnapshotTakenBeforeUpstream(t *testing.T) {
 	}
 	if redactsAtCall != 1 {
 		t.Errorf("调上游时的脱敏次数 = %d，期望 1（快照要先采集）", redactsAtCall)
+	}
+}
+
+// 快照要记在**发起这次请求的用户**名下。
+//
+// 这一列没有外键，填 0 或者填成别人都插得进去、不报错——所以「调用没报错」
+// 在这里证明不了任何事，只能断言真正落库的那个值。
+func TestRequestSnapshotRecordsRequestingUser(t *testing.T) {
+	h := newHarness(t)
+	req := request()
+
+	if _, err := h.gw.Chat(context.Background(), req, upstreamRequest()); err != nil {
+		t.Fatal(err)
+	}
+
+	var snap *Snapshot
+	waitFor(t, "请求快照落库", func() bool {
+		snap = h.snapshots.first()
+		return snap != nil
+	})
+	if snap.UserID != req.UserID {
+		t.Errorf("快照的 user_id = %d，期望 %d（发起这次请求的用户）", snap.UserID, req.UserID)
+	}
+	if snap.Direction != "request" {
+		t.Errorf("方向 = %q，期望 request", snap.Direction)
 	}
 }
 

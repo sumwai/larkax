@@ -401,7 +401,7 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	upstreamSrv := httptest.NewServer(fake.handler())
 	t.Cleanup(upstreamSrv.Close)
 
-	seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
+	channelID := seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
 	// 每 token 的单价写死在规则里，于是下面的期望金额可以逐位算出来。
 	rule := seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
 
@@ -456,16 +456,17 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 		status_      string
 		reserved     string
 		final        string
+		billChannel  sql.NullInt64
 		ruleID       sql.NullInt64
 		exprSnapshot sql.NullString
 	)
 	err := db.QueryRowContext(ctx, `
 		SELECT id, request_id, status, reserved_amount::text, final_amount::text,
-		       pricing_rule_id, pricing_expr_snapshot
+		       channel_id, pricing_rule_id, pricing_expr_snapshot
 		  FROM billing_requests
 		 WHERE user_id = $1
 		 ORDER BY id DESC LIMIT 1`, user,
-	).Scan(&billID, &requestID, &status_, &reserved, &final, &ruleID, &exprSnapshot)
+	).Scan(&billID, &requestID, &status_, &reserved, &final, &billChannel, &ruleID, &exprSnapshot)
 	if err != nil {
 		t.Fatalf("查账单失败: %v", err)
 	}
@@ -482,6 +483,12 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	}
 	if !ruleID.Valid || ruleID.Int64 != rule {
 		t.Errorf("pricing_rule_id = %v，期望 %d（账单要能回答按哪条规则算的）", ruleID, rule)
+	}
+	// 账单还要记下这次请求**实际走的渠道**。预留发生在选路之前，那时还不知道
+	// 会选中谁，所以这一列是结算那一步写回去的；写成 NULL 的话，按渠道归因
+	// 用量、渠道级对账都没有数据，而单看哪一层都像是写了的。
+	if !billChannel.Valid || billChannel.Int64 != channelID {
+		t.Errorf("账单的 channel_id = %v，期望 %d（这次请求实际走的渠道）", billChannel, channelID)
 	}
 	if !exprSnapshot.Valid || exprSnapshot.String == "" {
 		t.Error("pricing_expr_snapshot 为空——规则事后可变，账单必须留下当时的表达式")
@@ -539,8 +546,13 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	// 判据是「按这次请求的 request_id 查得到行」。报错时附上写入计数，
 	// 是为了把「链路根本没接上」与「接上了但还没写完」分开——
 	// 计数为零说明是前者，计数非零说明是后者。
-	if !waitForSnapshot(t, db, requestID) {
+	snapshotUser, ok := waitForSnapshot(t, db, requestID)
+	if !ok {
 		t.Errorf("没有等到请求快照落库（写入计数 %+v）", app.Snapshots.Stats())
+	} else if snapshotUser != user {
+		// 快照要记在**发起这次请求的用户**名下。这一列没有外键，填 0 或者
+		// 填成商家都插得进去、不报错——所以只能断言落库的那个值。
+		t.Errorf("快照的 user_id = %d，期望 %d（发起这次请求的用户）", snapshotUser, user)
 	}
 
 	// 六、上游真的收到了我们发出去的那份请求体。
@@ -668,23 +680,26 @@ func greaterThan(a, b string) bool {
 	return errA == nil && errB == nil && pa > pb
 }
 
-// waitForSnapshot 等到这次请求的快照落库。
+// waitForSnapshot 等到这次请求的快照落库，返回它记下的用户 id。
 //
 // 快照是异步写的（网关起 goroutine，不等结果），所以这里要等。
 // 判据是按 request_id 查行：request_id 唯一，一次请求最多落一条请求方向的
 // 快照，所以查得到行就是这次请求写进去的那一条，不会认成别人留下的。
-func waitForSnapshot(t *testing.T, db *sql.DB, requestID string) bool {
+//
+// 顺带把 user_id 取回来：调用方要断言的就是它，而多查一次列比多跑一次
+// 查询简单。取不到时第二个返回值为 false。
+func waitForSnapshot(t *testing.T, db *sql.DB, requestID string) (int64, bool) {
 	t.Helper()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		var n int
+		var userID int64
 		err := db.QueryRowContext(context.Background(),
-			`SELECT count(*) FROM request_snapshots WHERE request_id = $1`, requestID).Scan(&n)
-		if err == nil && n > 0 {
-			return true
+			`SELECT user_id FROM request_snapshots WHERE request_id = $1`, requestID).Scan(&userID)
+		if err == nil {
+			return userID, true
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return false
+	return 0, false
 }

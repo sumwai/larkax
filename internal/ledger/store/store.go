@@ -339,16 +339,29 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request) error {
 // markSettled 把预留标记为已结算并写入最终金额。
 //
 // 返回 false 表示这次请求已经结算过（幂等命中）。
+//
+// # 渠道在这里才写得进去
+//
+// 预留发生在选路**之前**（见 internal/gateway 的 begin），那时还不知道会
+// 选中哪个渠道，所以 SaveReservation 的 INSERT 拿到的是 0、落库成 NULL。
+// 结算时渠道已经定了，req.ChannelID 带着它——**这一行是那个值唯一的落点**。
+// 漏掉它，billing_requests.channel_id 就恒为 NULL，按渠道归因用量、渠道级
+// 对账都拿不到数据，而单看任何一层都像是写了的。
+//
+// 重放不会把它抹掉：判据是下面 WHERE 里的 status = 'pending'，已经结算过的
+// 行影响 0 行、直接返回 false（调用方转成 ErrAlreadySettled），
+// 整条 UPDATE 都不执行。
 func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *pipeline.Charge) (bool, error) {
 	res, err := tx.ExecContext(ctx, `
 		UPDATE billing_requests
 		   SET status = 'settled',
 		       final_amount = $2::numeric,
 		       settled_at = now(),
+		       channel_id = NULLIF($5, 0),
 		       upstream_status = NULLIF($3, 0),
 		       error_code = NULLIF($4, '')
 		 WHERE request_id = $1 AND status = 'pending'`,
-		req.RequestID, charge.Settlement.Actual.String(), 0, "")
+		req.RequestID, charge.Settlement.Actual.String(), 0, "", req.ChannelID)
 	if err != nil {
 		return false, fmt.Errorf("标记结算失败: %w", err)
 	}

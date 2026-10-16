@@ -143,6 +143,22 @@ func seed(t *testing.T, db *sql.DB, balance string) int64 {
 
 func itoa(v int64) string { return strconv.FormatInt(v, 10) }
 
+// seedChannel 插一条渠道，返回它的 id。
+//
+// billing_requests.channel_id 有外键指向 channels，所以「这一列写没写对」
+// 只能在一个真有渠道行的世界里断言。
+func seedChannel(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	var id int64
+	if err := db.QueryRowContext(context.Background(), `
+		INSERT INTO channels (name, type, base_url, credential_enc, status, models)
+		VALUES ($1, 'openai', 'https://api.example.com', '\x00'::bytea, 'enabled', ARRAY['gpt-4o'])
+		RETURNING id`, "ch"+itoa(nextID())).Scan(&id); err != nil {
+		t.Fatalf("建渠道失败: %v", err)
+	}
+	return id
+}
+
 // walletOf 读一个钱包的当前状态。
 func walletOf(t *testing.T, db *sql.DB, userID int64) (balance, frozen string) {
 	t.Helper()
@@ -153,6 +169,19 @@ func walletOf(t *testing.T, db *sql.DB, userID int64) (balance, frozen string) {
 		t.Fatalf("读钱包失败: %v", qerr)
 	}
 	return balance, frozen
+}
+
+// channelOf 读一条账单记下的渠道。没记则 Valid 为 false。
+func channelOf(t *testing.T, db *sql.DB, requestID string) sql.NullInt64 {
+	t.Helper()
+	var id sql.NullInt64
+	qerr := db.QueryRowContext(context.Background(),
+		`SELECT channel_id FROM billing_requests WHERE request_id = $1`,
+		requestID).Scan(&id)
+	if qerr != nil {
+		t.Fatalf("读账单的渠道失败: %v", qerr)
+	}
+	return id
 }
 
 // ledgerBalance 从**账本**算出余额——这是权威值。

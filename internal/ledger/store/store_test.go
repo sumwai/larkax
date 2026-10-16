@@ -272,6 +272,56 @@ func TestSettlementIsIdempotent(t *testing.T) {
 	}
 }
 
+// 结算要把**实际选中的渠道**写回账单。
+//
+// 预留发生在选路之前（见 internal/gateway 的 begin），那时还不知道会选中谁，
+// 所以 INSERT 写进去的是 NULL。结算时渠道已经定了，markSettled 是那个值唯一
+// 的落点——漏掉它，这一列恒为 NULL，按渠道归因用量、渠道级对账都拿不到数据，
+// 而单看预留那一侧（它本来就该是 NULL）看不出任何异常。
+func TestSettlementWritesBackChannel(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	channelID := seedChannel(t, db)
+	requestID := reqID(t)
+
+	// 预留：渠道未知。testRequest 不带 ChannelID，与生产同一条路。
+	req := testRequest(userID, requestID)
+	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
+		t.Fatal(err)
+	}
+	if got := channelOf(t, db, requestID); got.Valid {
+		t.Fatalf("预留时 channel_id = %d，期望 NULL——预留发生在选路之前", got.Int64)
+	}
+
+	// 结算：渠道已知，带着它落库。
+	settleReq := req
+	settleReq.ChannelID = channelID
+
+	charge := &pipeline.Charge{
+		RequestID: requestID, UserID: userID, Asset: "CNY",
+		Entries: consumeEntries(t, userID, "12"),
+	}
+	charge.Settlement.Actual = money.MustParse("12")
+
+	if err := s.Save(ctx, settleReq, charge); err != nil {
+		t.Fatalf("结算失败: %v", err)
+	}
+	if got := channelOf(t, db, requestID); !got.Valid || got.Int64 != channelID {
+		t.Errorf("结算后 channel_id = %v，期望 %d（这次请求实际走的渠道）", got, channelID)
+	}
+
+	// 重放不该把它抹掉：那一行已经 settled，整条 UPDATE 影响 0 行。
+	if err := s.Save(ctx, settleReq, charge); !errors.Is(err, ErrAlreadySettled) {
+		t.Fatalf("重放应当返回 ErrAlreadySettled，得到 %v", err)
+	}
+	if got := channelOf(t, db, requestID); !got.Valid || got.Int64 != channelID {
+		t.Errorf("重放后 channel_id = %v，期望仍是 %d", got, channelID)
+	}
+}
+
 // 并发重放也只能扣一次。
 //
 // 这条与上一条不同：它压的是「幂等判断在加锁之后」这个顺序。
