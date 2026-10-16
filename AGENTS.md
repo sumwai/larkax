@@ -47,7 +47,8 @@ CI 目前包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-r
 覆盖率摘要、迁移 up→down→up 往返（真 PostgreSQL）、分层自查
 （`check-layering.sh`）、红线扫描及其自测、变异测试脚本的自测。
 集成测试另有一道**「确认真跑了」的门禁**——它显式跑
-`internal/ledger/store`、`internal/channels` 与 `internal/snapshotwire`，
+`internal/ledger/store`、`internal/channels`、`internal/auth` 与
+`internal/snapshotwire`，
 被 `t.Skip` 时报错，因为「跳过」在输出里和「通过」长得一样
 （见 [LESSONS.md](LESSONS.md) 第 16 条）。包清单写在
 `.github/actions/check-integration-tests`，新增依赖数据库的测试包时要往那里补。
