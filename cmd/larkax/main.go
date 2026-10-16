@@ -117,19 +117,16 @@ func run() error {
 
 	// 内部端点（健康检查与指标）与控制台分端口暴露：
 	// 它们面向编排系统与抓取器，不应与业务入口共用同一个监听地址。
-	internalMux := http.NewServeMux()
-	observe.RegisterHealthHandlers(internalMux, []observe.ReadinessCheck{
-		{
-			Name: "postgres",
-			Check: func(ctx context.Context) error {
-				return handle.PingContext(ctx)
-			},
-		},
-	})
-
 	internalSrv := &http.Server{
-		Addr:              cfg.InternalAddr,
-		Handler:           internalMux,
+		Addr: cfg.InternalAddr,
+		Handler: newInternalHandler([]observe.ReadinessCheck{
+			{
+				Name: "postgres",
+				Check: func(ctx context.Context) error {
+					return handle.PingContext(ctx)
+				},
+			},
+		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -147,6 +144,19 @@ func run() error {
 	servers = append(servers, namedServer{name: "public", srv: publicSrv})
 
 	return serveUntilSignal(ctx, logger, shutdownTimeout, servers)
+}
+
+// newInternalHandler 装配内部监听端口的 handler：健康检查与指标。
+//
+// 抽成函数是为了让测试拿到**生产用的那一份**装配。写一份只给测试用的
+// 装配，测到的就只是那份替身，而「指标端点到底挂在哪个监听上」正是最该
+// 被钉住的性质之一——挂错了不会 404（公共端口的路径是全捕获的），
+// 只会安静地从另一个端口回一份 501。
+func newInternalHandler(checks []observe.ReadinessCheck) http.Handler {
+	mux := http.NewServeMux()
+	observe.RegisterHealthHandlers(mux, checks)
+	observe.RegisterMetricsHandler(mux)
+	return mux
 }
 
 // publicHandler 装配公共监听端口的 handler。
