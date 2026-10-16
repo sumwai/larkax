@@ -277,12 +277,16 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request) error {
 	// 对账脚本就必须区分「真实的零金额交易」与「只是解冻」，
 	// 而它们在一个只追加的账本里长得一样。
 
+	// 解冻**不夹零**：frozen 减到负数说明快照已经小于待释放的预留之和，
+	// 而那一刻的差额是唯一的证据——夹到零会把两边同时归零，差额从此
+	// 无处可查。交给表上的 CHECK 拒绝，由 unfreezeFailure 翻译成
+	// ErrFrozenUnderflow。
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE user_wallets
-		   SET frozen = GREATEST(frozen - $3::numeric, 0), updated_at = now()
+		   SET frozen = frozen - $3::numeric, updated_at = now()
 		 WHERE user_id = $1 AND asset = $2`,
 		userID, asset, amount); err != nil {
-		return fmt.Errorf("解冻失败: %w", err)
+		return unfreezeFailure(err, fmt.Sprintf("用户 %d 的 %s 预留（%s）", userID, asset, amount))
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -405,13 +409,19 @@ func applyToWallets(ctx context.Context, tx *sql.Tx, entries []ledger.Entry) err
 // 预留机制本该让这种情况不发生（预留是上界），所以真出现它说明
 // 有别的路径动了这个钱包，或者预留算错了。**报出来而不是夹到零**：
 // 夹零等于平台替用户承担差额，而账上完全看不出来。
+//
+// 解冻让 `frozen` 变成负数报的是 ErrFrozenUnderflow，不是这个错误；
+// 但那个错误的链里也带着这个 sentinel（为了兼容既有判断），
+// 所以**别拿它判断用户欠费**——见 ErrFrozenUnderflow 的注释。
 var ErrInsufficientBalance = errors.New("余额不足")
 
 // releaseFrozen 按预留记录解冻。
+//
+// 与 Release 一样**不夹零**，理由见那里的注释。
 func releaseFrozen(ctx context.Context, tx *sql.Tx, requestID string) error {
 	_, err := tx.ExecContext(ctx, `
 		UPDATE user_wallets w
-		   SET frozen = GREATEST(w.frozen - b.reserved_amount, 0),
+		   SET frozen = w.frozen - b.reserved_amount,
 		       updated_at = now()
 		  FROM billing_requests b
 		 WHERE b.request_id = $1
@@ -419,7 +429,7 @@ func releaseFrozen(ctx context.Context, tx *sql.Tx, requestID string) error {
 		   AND w.user_id = b.user_id
 		   AND w.asset = b.reserved_asset`, requestID)
 	if err != nil {
-		return fmt.Errorf("解冻失败: %w", err)
+		return unfreezeFailure(err, "请求 "+requestID+" 的预留")
 	}
 	return nil
 }
