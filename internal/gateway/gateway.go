@@ -110,6 +110,40 @@ type Snapshot struct {
 	Version int
 }
 
+// ReleaseFailureSink 接收「释放预留失败」的记录。
+//
+// # 它必须是可以「不实现」的
+//
+// 与 Snapshots 同理：留痕是排障辅助，计费链路上不能因此多出一个必填依赖。
+// 字段为 nil 时这一条不留痕——那正是今天的形状，接口只是给它一个出口。
+//
+// # 它补的是对账补不了的那一半
+//
+// 释放失败之后那笔钱照旧冻着，而 billing_requests 那一行仍是 pending：
+// 对账的 stale_reservation 那类 finding 会在阈值（一天）之后把它报出来。
+// 那是**结果**上的兜底，它看不到**当时**发生了什么——这一路补的正是那个：
+// 失败的时刻与 Release 返回的错误。
+//
+// 两者都要：对账保证「挂了很久的钱总会被人看见」，这里保证「第一次失败
+// 当时就留下原因」。只留痕而不报，进程重启或日志轮转之后就什么都没有了。
+type ReleaseFailureSink interface {
+	Save(ctx context.Context, f ReleaseFailure) error
+}
+
+// ReleaseFailure 是一次释放失败的记录。
+type ReleaseFailure struct {
+	// RequestID 是这次请求的标识，与 billing_requests.request_id 对应。
+	RequestID string
+	// ReservationID 是预留落库时拿到的 id。
+	ReservationID int64
+	// UserID 是预留归属的用户。
+	UserID int64
+	// At 是失败发生的时刻，取自 Gateway.Now。
+	At time.Time
+	// Err 是 Release 返回的错误。
+	Err error
+}
+
 // Redactor 把请求或响应变成骨架。
 //
 // 它由 internal/snapshotwire 适配 internal/snapshot 实现。抽成接口是为了让
@@ -132,6 +166,9 @@ type Gateway struct {
 	// 这是刻意的默认：快照是可选能力，而不是「配错了就报错」的必填项。
 	Redactor  Redactor
 	Snapshots SnapshotSink
+
+	// ReleaseFailures 可以为空——那样释放失败不留痕（见 ReleaseFailureSink）。
+	ReleaseFailures ReleaseFailureSink
 
 	// Executor 是真正调上游的东西。适配器实现它。
 	Executor Executor
@@ -318,23 +355,66 @@ func (h *handle) settleAndFail(ctx context.Context, cause error, out pipeline.Ou
 // 与 internal/ledger/store 里「把对账结局写回去」那一步同一个做法
 // （reconcile.go 的 finishTimeout），理由也一样。
 //
-// # 失败为什么不报
+// # 失败为什么不把错误交回调用方
 //
 // 这里已经在一个失败的收尾路径上，而调用方拿到的错误必须是**最初那个**
 // （上游失败、结算失败），不能被释放的错误盖掉——那会让「上游 500」
 // 变成「释放失败」，排查的人会朝错的方向找。
 //
-// 代价要说清楚：释放失败时那笔钱**照旧冻着**，而这一条没有任何东西会
-// 报出来——billing_requests 那一行仍是 pending，而对账把 pending 行之和
-// 当成「本来就该冻住的量」（见 ledger/store 的 readPendingReservations），
-// 于是它对得平。要发现它得另加一条上报，而本包没有日志层。
+// 代价要说清楚：释放失败时那笔钱**照旧冻着**——billing_requests 那一行
+// 仍是 pending，而对账把 pending 行之和当成「本来就该冻住的量」（见
+// ledger/store 的 readPendingReservations），于是它对得平，不报错。
+//
+// 现在有两条互补的路让它最终被看见：失败当时交给 ReleaseFailures
+// （可选，见 reportReleaseFailure），以及一天之后由对账的
+// stale_reservation 报出来。两条都不改这里的行为：钱该冻着还是冻着，
+// 处置由人决定。
 func (h *handle) release(ctx context.Context) {
 	if h.charged || h.storeID == 0 || h.g.Reservations == nil {
 		return
 	}
 	relCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
 	defer cancel()
-	_ = h.g.Reservations.Release(relCtx, h.req)
+	if err := h.g.Reservations.Release(relCtx, h.req); err != nil {
+		h.reportReleaseFailure(ctx, err)
+	}
+}
+
+// reportReleaseFailure 把一次释放失败交给上报口。
+//
+// # 为什么是异步的
+//
+// 它在收尾路径上，而调用方正在等这一次请求返回：留痕写不进去不该再拖住
+// 他。取舍与快照落库相同（见 snapshotAsync），连「用不带取消的 context」
+// 也一样——走到这一步时请求的 ctx 多半已经 Done，而那正是最该留下这条痕
+// 的时刻。
+//
+// 异步的代价要说清楚：进程紧接着退出时这条痕会丢。可以接受，因为它是
+// **补充**而不是保证——那笔钱冻着这件事本身由对账兜底，丢掉的只是当时
+// 那个错误。
+//
+// 与快照一样只丢不报：调用方拿到的错误必须是**最初那个**，被释放的错误
+// 盖掉会让排查朝错的方向找（见 release 的注释）。
+func (h *handle) reportReleaseFailure(ctx context.Context, cause error) {
+	if h.g.ReleaseFailures == nil {
+		return
+	}
+	rec := ReleaseFailure{
+		RequestID:     h.req.RequestID,
+		ReservationID: h.storeID,
+		UserID:        h.req.UserID,
+		At:            h.g.now(),
+		Err:           cause,
+	}
+
+	base := context.WithoutCancel(ctx)
+	go func() {
+		// 上限与释放本身共用 releaseTimeout：两者写的都是「按主键定位的
+		// 单行」这个量级的东西，而这一步的全部意义同样是不许挂住。
+		recCtx, cancel := context.WithTimeout(base, releaseTimeout)
+		defer cancel()
+		_ = h.g.ReleaseFailures.Save(recCtx, rec)
+	}()
 }
 
 func (g *Gateway) finishCharge(ctx context.Context, req pipeline.Request, h *handle, ch channel.Channel, out pipeline.Outcome) (*pipeline.Charge, error) {

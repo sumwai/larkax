@@ -70,6 +70,39 @@ func (f *fakeReservations) Release(ctx context.Context, req pipeline.Request) er
 	return nil
 }
 
+type fakeReleaseFailures struct {
+	mu      sync.Mutex
+	recs    []ReleaseFailure
+	err     error
+	blockOn chan struct{}
+}
+
+func (f *fakeReleaseFailures) Save(_ context.Context, rec ReleaseFailure) error {
+	if f.blockOn != nil {
+		<-f.blockOn
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recs = append(f.recs, rec)
+	return f.err
+}
+
+func (f *fakeReleaseFailures) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.recs)
+}
+
+func (f *fakeReleaseFailures) first(t *testing.T) ReleaseFailure {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.recs) == 0 {
+		t.Fatal("没有收到释放失败的记录")
+	}
+	return f.recs[0]
+}
+
 type fakeSettlements struct {
 	saved []*pipeline.Charge
 	err   error
@@ -174,14 +207,15 @@ func candidate(id int64, model string) route.Candidate {
 }
 
 type harness struct {
-	gw           *Gateway
-	rules        *fakeRules
-	candidates   *fakeCandidates
-	reservations *fakeReservations
-	settlements  *fakeSettlements
-	executor     *fakeExecutor
-	redactor     *fakeRedactor
-	snapshots    *fakeSnapshots
+	gw              *Gateway
+	rules           *fakeRules
+	candidates      *fakeCandidates
+	reservations    *fakeReservations
+	settlements     *fakeSettlements
+	executor        *fakeExecutor
+	redactor        *fakeRedactor
+	snapshots       *fakeSnapshots
+	releaseFailures *fakeReleaseFailures
 }
 
 func newHarness(t *testing.T, opts ...func(*harness)) *harness {
@@ -196,8 +230,9 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 			UpstreamModel: "gpt-4o-2024",
 			Usage:         channel.Usage{PromptTokens: 1000, CompletionTokens: 100},
 		}},
-		redactor:  &fakeRedactor{},
-		snapshots: &fakeSnapshots{},
+		redactor:        &fakeRedactor{},
+		snapshots:       &fakeSnapshots{},
+		releaseFailures: &fakeReleaseFailures{},
 	}
 	for _, o := range opts {
 		o(h)
@@ -208,16 +243,34 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 			Rules:    h.rules,
 			Programs: expr.NewCache(16),
 		},
-		Router:       &route.Router{Rand: rand.New(rand.NewSource(1))},
-		Candidates:   h.candidates,
-		Reservations: h.reservations,
-		Settlements:  h.settlements,
-		Executor:     h.executor,
-		Redactor:     h.redactor,
-		Snapshots:    h.snapshots,
-		Now:          func() time.Time { return fixedAt },
+		Router:          &route.Router{Rand: rand.New(rand.NewSource(1))},
+		Candidates:      h.candidates,
+		Reservations:    h.reservations,
+		Settlements:     h.settlements,
+		Executor:        h.executor,
+		Redactor:        h.redactor,
+		Snapshots:       h.snapshots,
+		ReleaseFailures: h.releaseFailures,
+		Now:             func() time.Time { return fixedAt },
 	}
 	return h
+}
+
+// waitFor 等到条件成立，超时则让用例失败。
+//
+// 上报是**异步**的（与快照落库同理），所以断言不能紧跟在 Chat 返回之后。
+// 轮询而不是睡一个固定时长：睡短了在慢机器上会偶发失败，睡长了每次跑都
+// 慢一截，而这两者都会让人开始怀疑用例本身。
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("等待「%s」超时", what)
 }
 
 var fixedAt = time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
@@ -452,6 +505,111 @@ func TestReleaseFailureDoesNotMaskCause(t *testing.T) {
 	var up *channel.ErrUpstream
 	if !errors.As(err, &up) {
 		t.Errorf("返回的应是上游错误本身，得到 %v", err)
+	}
+}
+
+// 释放失败要留下痕。
+//
+// 不报的代价是这个缺陷原来的形状：那笔钱照旧冻着，而 billing_requests
+// 那一行仍是 pending——对账把 pending 行之和当成「本来就该冻住的量」，
+// 于是它对得平、不报错，全仓库没有一处会发现它。对账后来补上的
+// stale_reservation 要等一天，而且它只看得到「这行挂了很久」，看不到
+// 当时为什么没放成。
+func TestReleaseFailureIsReportedToSink(t *testing.T) {
+	h := newHarness(t)
+	cause := errors.New("释放写不进去")
+	h.reservations.releaseErr = cause
+	h.executor.failFor = map[int64]error{
+		1: &channel.ErrUpstream{StatusCode: 500, Retryable: false},
+	}
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err == nil {
+		t.Fatal("上游失败应返回错误")
+	}
+
+	waitFor(t, "释放失败的上报", func() bool { return h.releaseFailures.count() == 1 })
+	rec := h.releaseFailures.first(t)
+	if rec.RequestID != "req-1" {
+		t.Errorf("上报的请求标识 = %q，期望 req-1", rec.RequestID)
+	}
+	if rec.UserID != 42 {
+		t.Errorf("上报的用户 = %d，期望 42", rec.UserID)
+	}
+	if rec.ReservationID == 0 {
+		// 没有它就对不上是哪一行预留——billing_requests 的 id 才是对账
+		// 与运维真正要去查的那个键。
+		t.Error("上报里要带预留落库拿到的 id")
+	}
+	if !errors.Is(rec.Err, cause) {
+		t.Errorf("上报的错误 = %v，期望 %v", rec.Err, cause)
+	}
+	if !rec.At.Equal(fixedAt) {
+		t.Errorf("上报的时刻 = %v，期望注入的 %v", rec.At, fixedAt)
+	}
+}
+
+// 成功路径不释放预留，也就不该有释放失败的痕。
+//
+// 这一条钉的是「上报只在真的失败时发生」：把上报挂在收尾路径上而不看
+// 结局，会造出一堆查不出原因的假痕迹。
+func TestSuccessDoesNotReportReleaseFailure(t *testing.T) {
+	h := newHarness(t)
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+		t.Fatal(err)
+	}
+	// 异步上报若被误触发，这里要给它冒出来的机会。
+	time.Sleep(50 * time.Millisecond)
+	if n := h.releaseFailures.count(); n != 0 {
+		t.Errorf("成功路径不该有释放失败的上报，实际 %d 条", n)
+	}
+}
+
+// 上报口是**可选**的：不实现就不采集，且请求本身的结局不受影响。
+//
+// 它是排障辅助，不是计费路径上的一步——把它做成必填依赖，等于让一次
+// 留痕失败变成一次请求失败。
+func TestReleaseFailureSinkOptional(t *testing.T) {
+	h := newHarness(t)
+	h.gw.ReleaseFailures = nil
+	h.reservations.releaseErr = errors.New("释放写不进去")
+	h.executor.failFor = map[int64]error{
+		1: &channel.ErrUpstream{StatusCode: 500, Retryable: false},
+	}
+
+	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	var up *channel.ErrUpstream
+	if !errors.As(err, &up) {
+		t.Errorf("没配上报口时返回的仍应是上游错误本身，得到 %v", err)
+	}
+}
+
+// 上报口卡住时请求照样返回：它是留痕，不该拖住调用方。
+//
+// 释放本身是同步的（有自己的上限），上报不是——它在收尾路径上，
+// 而调用方正在等这一次请求返回。
+func TestReleaseFailureReportDoesNotBlockRequest(t *testing.T) {
+	h := newHarness(t)
+	h.releaseFailures.blockOn = make(chan struct{})
+	defer close(h.releaseFailures.blockOn)
+	h.reservations.releaseErr = errors.New("释放写不进去")
+	h.executor.failFor = map[int64]error{
+		1: &channel.ErrUpstream{StatusCode: 500, Retryable: false},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("上游失败应返回错误")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("上报口阻塞了请求——它是留痕，不该影响计费路径")
 	}
 }
 

@@ -1,9 +1,11 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strings"
@@ -876,6 +878,203 @@ func TestReconcileWalletMissingDetailMatchesColumns(t *testing.T) {
 	}
 }
 
+// ── 陈旧的 pending 预留 ────────────────────────────────────────────────
+
+// staleAge 与 freshAge 是造「陈旧」与「还不到阈值」的预留时用的时长。
+//
+// 两边都不贴着阈值取，各留了六小时以上的余量：started_at 由**应用时钟**
+// 写（SaveReservation 绑的是 RuleMatchedAt），判据由**数据库时钟**比
+// （见 staleReservationAfter 的注释），两台机器之间的时钟偏差会直接从
+// 余量里扣。贴着阈值取的话，测试机与库之间差几分钟就会让用例飘。
+const (
+	staleAge = staleReservationAfter + 6*time.Hour
+	freshAge = staleReservationAfter / 2
+)
+
+// reserveAt 造一条预留，并让它的 started_at 落在 age 之前。
+//
+// started_at 由 SaveReservation 写成 RuleMatchedAt，所以这里在**写入之前**
+// 就把它设好，而不是写完之后 UPDATE：走的是真实那条路。
+//
+// 必须显式设它。助手的默认值是 `time.Now()`（预留刚刚发生），而这里要测的
+// 是**超过阈值**，所以得自己把时间拨回去。
+func reserveAt(t *testing.T, s *Store, userID int64, amount string, age time.Duration) string {
+	t.Helper()
+	requestID := reqID(t)
+	res := reservation(t, userID, requestID, amount, "CNY")
+	res.RuleMatchedAt = time.Now().Add(-age)
+	if _, err := s.SaveReservation(context.Background(), testRequest(userID, requestID), res); err != nil {
+		t.Fatalf("预留失败: %v", err)
+	}
+	return requestID
+}
+
+// 挂了一天以上的 pending 预留要被报出来。
+//
+// # 它与其余几类不是同一回事
+//
+// 那几类报的是「两边对不上」，这一条报的是「两边对得上，但这笔钱冻着没人
+// 管」：frozen 与未结算预留之和恰好相等（钱冻在钱包上、预留记在预留表上，
+// 两个都在），所以余额与冻结那两类一条都不会报，对账对得平、不报错。
+// 要发现它只能另立判据。
+func TestReconcileReportsStalePendingReservation(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	userID := seed(t, db, "100")
+	requestID := reserveAt(t, s, userID, "30", staleAge)
+
+	report := reconcile(t, db, noRepair())
+
+	f := kindOf(t, report, userID, FindingStaleReservation)
+	if f.Key != requestID {
+		t.Errorf("Key = %q，期望请求标识 %q", f.Key, requestID)
+	}
+	if want := reservationScopePrefix + requestID; f.Scope() != want {
+		t.Errorf("Scope = %q，期望 %q", f.Scope(), want)
+	}
+	// 金额装在 Ledger 里：这一类的两个数字列不成对（见 Finding 的字段
+	// 注释），放在这一列是为了让「一共冻着多少」能直接由 SQL 汇总回答。
+	if f.Ledger.Cmp(money.MustParse("30")) != 0 {
+		t.Errorf("金额 = %s，期望 30", f.Ledger)
+	}
+	if !f.Snapshot.IsZero() {
+		t.Errorf("这一类没有快照侧，Snapshot 应为零，实际 %s", f.Snapshot)
+	}
+	if f.Unrepairable == "" {
+		// 「报出来等人处置」与「报出来又被修掉」处置完全不同，必须说清。
+		t.Error("要写明为什么不自动释放")
+	}
+	if f.Repaired {
+		t.Error("这一类只报不修")
+	}
+
+	// 只报**不释放**：那笔钱照旧冻着，那一行照旧 pending。
+	//
+	// 自动释放与「请求还在途」有竞态，误放一笔在途请求的预留会让冻结额
+	// 低于实际待结算额（frozen 减到负数，被表上的 CHECK 拒绝）。
+	if _, frozen := walletOf(t, db, userID); frozen != "30.00000000" {
+		t.Errorf("冻结额 = %s，期望原样 30——这一类只报不释放", frozen)
+	}
+	if status, _ := requestStatus(t, db, requestID); status != "pending" {
+		t.Errorf("预留状态 = %q，期望 pending（不该被自动放开）", status)
+	}
+
+	// 条数要落进运行记录：它既不是余额差额也不是冻结差额，混进那两项里
+	// 等于把它藏起来（与 malformed_accounts 单列一列同一个理由）。
+	var staleCount int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT stale_reservations FROM reconcile_runs WHERE id = $1`, report.RunID).
+		Scan(&staleCount); err != nil {
+		t.Fatal(err)
+	}
+	if staleCount != report.StaleReservations() {
+		t.Errorf("落库的陈旧预留条数 = %d，报告里是 %d", staleCount, report.StaleReservations())
+	}
+	if staleCount == 0 {
+		t.Error("报了就该记进运行记录")
+	}
+}
+
+// 还不到阈值的预留不报。
+//
+// 与上一条配对，钉的是**阈值本身**：只测「旧的被报出来」的话，把阈值
+// 改成零（每一条 pending 都报）也照样通过，而那会把在途的请求报成滞留。
+// 这一类 finding 一旦开始误报，人就再也不看它了。
+func TestReconcileIgnoresReservationWithinThreshold(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	userID := seed(t, db, "100")
+	requestID := reserveAt(t, s, userID, "30", freshAge)
+
+	report := reconcile(t, db, noRepair())
+
+	if hasKind(report, userID, FindingStaleReservation) {
+		t.Errorf("还不到阈值的预留不该被报成陈旧: %v", findingsFor(report, userID))
+	}
+	if status, _ := requestStatus(t, db, requestID); status != "pending" {
+		t.Errorf("预留状态 = %q，期望 pending", status)
+	}
+}
+
+// 陈旧预留要落进 reconcile_findings、每轮重新报出来，放开之后消失。
+//
+// # 为什么增量那一轮也要报
+//
+// 增量扫描只看「上次起点之后变动过的行」，而这条预留一个字节都没动过。
+// 它之所以还在报告里，靠的是判据本身每轮重筛一遍全部 pending 行——这一条
+// 钉的正是那件事真的接上了：判据、落库、被带回来、消失了就删掉。
+func TestReconcileKeepsReportingStaleReservationUntilReleased(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+	userID := seed(t, db, "100")
+	requestID := reserveAt(t, s, userID, "30", staleAge)
+
+	reconcile(t, db, noRepair()) // 建立起点，让接下来这一轮是增量
+
+	cfg := noRepair()
+	cfg.FullScanInterval = 24 * time.Hour
+	report := reconcile(t, db, cfg)
+	if report.FullScan {
+		t.Fatal("这一轮该是增量")
+	}
+	if !hasKind(report, userID, FindingStaleReservation) {
+		t.Fatalf("增量那一轮把它丢了：%v", findingsFor(report, userID))
+	}
+
+	scope := reservationScopePrefix + requestID
+	countRows := func() int {
+		t.Helper()
+		var n int
+		if err := db.QueryRowContext(ctx,
+			`SELECT count(*) FROM reconcile_findings WHERE scope = $1 AND kind = $2`,
+			scope, string(FindingStaleReservation)).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := countRows(); n != 1 {
+		t.Fatalf("应当记在 reconcile_findings 里，实际 %d 行", n)
+	}
+
+	// 放开之后它必须从清单里消失，否则告警会永远响着。
+	if err := s.Release(ctx, testRequest(userID, requestID)); err != nil {
+		t.Fatal(err)
+	}
+	report = reconcile(t, db, cfg)
+	if hasKind(report, userID, FindingStaleReservation) {
+		t.Error("放开之后不该还报陈旧")
+	}
+	if n := countRows(); n != 0 {
+		t.Errorf("放开之后必须从 reconcile_findings 里删掉，实际还剩 %d 行", n)
+	}
+}
+
+// 打开自动修正也不会放开陈旧的预留。
+//
+// 修正只处理「两边对不上」的那几类，而这一类两边是对得上的——没有任何
+// 一类修正会碰它。这一条把「只报不自动释放」钉在行为上，而不是只写在
+// 注释里：误放一笔在途请求的预留会让冻结额低于实际待结算额。
+func TestReconcileAutoRepairDoesNotReleaseStaleReservation(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	userID := seed(t, db, "100")
+	requestID := reserveAt(t, s, userID, "30", staleAge)
+
+	report := reconcile(t, db, withResyncRepair())
+
+	f := kindOf(t, report, userID, FindingStaleReservation)
+	if f.Repaired {
+		t.Error("这一类不该被自动修掉")
+	}
+	if status, _ := requestStatus(t, db, requestID); status != "pending" {
+		t.Errorf("预留状态 = %q，期望 pending——自动修正不该放开它", status)
+	}
+	if _, frozen := walletOf(t, db, userID); frozen != "30.00000000" {
+		t.Errorf("冻结额 = %s，期望原样 30", frozen)
+	}
+}
+
 // 增量扫描也要看得见这类用户：候选集里新加的那一侧有自己的时间窗口
 // （`started_at`），与钱包、账本两侧的窗口不是同一个，得单独钉一次。
 //
@@ -1512,6 +1711,45 @@ func TestConfigNormalizeFillsZeroValues(t *testing.T) {
 	}
 	if cfg.RepairMode != RepairResyncSnapshot {
 		t.Errorf("口径 = %q，期望 resync_snapshot", cfg.RepairMode)
+	}
+}
+
+// ── 告警 ────────────────────────────────────────────────────────────────
+
+// 告警里不给陈旧预留打 diff。
+//
+// 一个叫 diff 而其实是金额本身的数会被读成一条差额，而这一类恰恰一条差额
+// 都没有（见 Finding.Diff 的注释）。其余类别照旧打 snapshot 与 diff。
+//
+// 这条不需要数据库：告警只是一段格式化，而它容易被顺手改回去。
+func TestLogAlertsOmitsDiffForStaleReservation(t *testing.T) {
+	var buf bytes.Buffer
+	alert := LogAlerts(slog.New(slog.NewTextHandler(&buf, nil)))
+	ctx := context.Background()
+
+	alert(ctx, Finding{
+		Kind: FindingStaleReservation, UserID: 7, Asset: "CNY", Key: "req-1",
+		Ledger:       money.MustParse("30"),
+		Unrepairable: "只报告不释放：自动释放与在途请求有竞态",
+	})
+	out := buf.String()
+	if !strings.Contains(out, "kind=stale_reservation") {
+		t.Errorf("告警里要有类别：%s", out)
+	}
+	if strings.Contains(out, "diff=") {
+		t.Errorf("陈旧预留没有差额，不该打出 diff：%s", out)
+	}
+	if !strings.Contains(out, "ledger=30") {
+		t.Errorf("金额要打出来（它装在 ledger 那一栏里）：%s", out)
+	}
+
+	buf.Reset()
+	alert(ctx, Finding{
+		Kind: FindingFrozenMismatch, UserID: 7, Asset: "CNY",
+		Snapshot: money.MustParse("50"), Ledger: money.MustParse("30"),
+	})
+	if out := buf.String(); !strings.Contains(out, "diff=-20") {
+		t.Errorf("其余类别要打 diff：%s", out)
 	}
 }
 

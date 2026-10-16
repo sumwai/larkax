@@ -184,19 +184,34 @@ func printReconcileReport(w io.Writer, r *store.Report) {
 		_, _ = fmt.Fprintln(w, "没有不一致。")
 		return
 	}
-	_, _ = fmt.Fprintf(w, "不一致 %d 条（余额 %d、冻结 %d、畸形科目 %d）：\n",
-		len(r.Findings), r.BalanceMismatches(), r.FrozenMismatches(), r.MalformedAccounts())
+	_, _ = fmt.Fprintf(w, "不一致 %d 条（余额 %d、冻结 %d、畸形科目 %d、陈旧预留 %d）：\n",
+		len(r.Findings), r.BalanceMismatches(), r.FrozenMismatches(),
+		r.MalformedAccounts(), r.StaleReservations())
 	for _, f := range r.Findings {
+		printFinding(w, f)
+	}
+}
+
+// printFinding 打一条不一致。
+//
+// 陈旧预留单独一种行式：它没有「快照 / 权威值」这一对（见 store.Finding
+// 的字段注释），按通用格式打出来会多出一个叫「差」而其实是金额本身的数。
+// 其余类别共用一种，字段的含义是同一套。
+func printFinding(w io.Writer, f store.Finding) {
+	if f.Kind == store.FindingStaleReservation {
+		_, _ = fmt.Fprintf(w, "  %-18s user=%d asset=%s 冻住=%s 已修=%v\n",
+			f.Kind, f.UserID, f.Asset, f.Ledger, f.Repaired)
+	} else {
 		_, _ = fmt.Fprintf(w, "  %-18s user=%d asset=%s 快照=%s 账本=%s 差=%s 已修=%v\n",
 			f.Kind, f.UserID, f.Asset, f.Snapshot, f.Ledger, f.Diff(), f.Repaired)
-		// 原因与补充说明各占一行：两者都可能很长，挤在同一行里会让人
-		// 分不清哪一段是「为什么没修」、哪一段是「具体是什么情况」。
-		if f.Unrepairable != "" {
-			_, _ = fmt.Fprintf(w, "      未修原因：%s\n", f.Unrepairable)
-		}
-		if f.Detail != "" {
-			_, _ = fmt.Fprintf(w, "      详情：%s\n", f.Detail)
-		}
+	}
+	// 原因与补充说明各占一行：两者都可能很长，挤在同一行里会让人
+	// 分不清哪一段是「为什么没修」、哪一段是「具体是什么情况」。
+	if f.Unrepairable != "" {
+		_, _ = fmt.Fprintf(w, "      未修原因：%s\n", f.Unrepairable)
+	}
+	if f.Detail != "" {
+		_, _ = fmt.Fprintf(w, "      详情：%s\n", f.Detail)
 	}
 }
 

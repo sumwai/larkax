@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
@@ -27,6 +28,14 @@ func reservation(t *testing.T, userID int64, requestID, amount string, asset str
 		UserID:    userID,
 		Asset:     asset,
 		Amount:    amt,
+		// RuleMatchedAt 落库成 billing_requests.started_at。留零值的话那一行
+		// 的时间戳是公元 1 年，而生产里它是**预留当时的墙钟**（pipeline 从
+		// p.now() 取，见 pipeline.Reserve）——零值造出来的是库不可能出现的
+		// 数据，对账里那条「pending 且 started_at 早于一天」的判据会把它
+		// 一律算成陈旧。测试数据必须走同一条路，否则测的是一个假世界。
+		//
+		// 需要陈旧数据的用例自己把它拨回去（见 reconcile_test.go 的 reserveAt）。
+		RuleMatchedAt: time.Now(),
 	}
 }
 
