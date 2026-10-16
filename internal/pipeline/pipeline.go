@@ -171,6 +171,13 @@ type Request struct {
 	//
 	// 为 0 表示尚未落库——此时分录也构造得出来，只是追溯时少一层关联。
 	BillingRequestID int64
+
+	// Streamed 说明这次请求走的是流式入口，落进 billing_requests.streamed。
+	//
+	// 两条路的失败方式与用量来源都不同（流式的用量可能是估算的），而事后
+	// 只看金额分不出这笔账是哪条路产生的。它由入口设置：计费这一层看不出
+	// 请求是不是流式的，也不该去猜。
+	Streamed bool
 }
 
 // Reservation 是预留的结果，调用方需要把它落库。
@@ -218,11 +225,11 @@ type Outcome struct {
 	UpstreamStatus int
 	ErrorCode      string
 
-	// ClientCancelled 为 true 表示客户端在流式响应中途断开。
+	// ClientCanceled 为 true 表示客户端在流式响应中途断开。
 	//
 	// **要计费**：已经产生的 token 上游是算了钱的。用量由 Usage 给，
 	// 而它是网关按收到的内容当场估算的——见 tokens 包。
-	ClientCancelled bool
+	ClientCanceled bool
 
 	// Usage 是实际的用量。上游失败时忽略它。
 	//

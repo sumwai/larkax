@@ -50,6 +50,7 @@ import (
 	"github.com/sumwai/larkax/internal/route"
 	"github.com/sumwai/larkax/internal/settings"
 	"github.com/sumwai/larkax/internal/snapshotwire"
+	"github.com/sumwai/larkax/internal/tokens"
 )
 
 // Config 是装配一次服务所需的全部输入。
@@ -158,7 +159,10 @@ func Build(cfg Config) (*App, error) {
 		Redactor:     snapshots.Redactor(),
 		Snapshots:    snapshots.Sink(),
 		Executor:     cfg.Executor,
-		Now:          cfg.Now,
+		// 计数器按需加载词表（首次精确计数约 40ms），构造本身是廉价的，
+		// 所以这里直接建一个而不是做成参数：它没有第二种实现。
+		Counter: tokens.NewCounter(),
+		Now:     cfg.Now,
 	}
 
 	handler := api.New(authenticator{store: auth.New(cfg.DB)}, gw)

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/observe"
@@ -51,16 +50,6 @@ type rejection struct {
 // 上游判断——各家支持的范围不同，在这里按我们的猜测拒收，会把上游支持的
 // 请求挡在门外。
 func checkRequest(req *channel.Request) *rejection {
-	if req.Stream {
-		// 流式还没实现，而**不能**就这样往下走：非流式那条路会照常调用
-		// 上游（适配器的非流式入口不读 Stream），于是调用方拿到一个
-		// 普通的 JSON 响应，而它按 SSE 去解——失败在客户端表现为
-		// 「解析不了响应」，与服务端真正的原因隔了一层。
-		return &rejection{
-			status:  http.StatusNotImplemented,
-			message: "streaming responses are not implemented yet, retry with \"stream\": false",
-		}
-	}
 	if req.Model == "" {
 		return &rejection{status: http.StatusBadRequest, message: "model is required"}
 	}
@@ -84,6 +73,7 @@ func billingRequest(user User, upstream *channel.Request, requestID string) pipe
 		CanonicalModel: upstream.Model,
 		MaxTokens:      int64(upstream.MaxTokens),
 		InputTokens:    inputTokensOf(upstream),
+		Streamed:       upstream.Stream,
 	}
 }
 
@@ -91,17 +81,16 @@ func billingRequest(user User, upstream *channel.Request, requestID string) pipe
 //
 // 预留发生在调用上游之前，那时拿不到实测值，只能用估算（见 internal/tokens）。
 // 只估消息里的文本：工具定义与图片的 token 消耗各家口径不同，硬估出来的
-// 数字比文本部分的估算更不可信。估算偏低会让预留偏小，而结算是按预留的
-// 金额封顶的（见 pipeline.Reserve），所以这个取舍的代价是**少收**，
-// 不是超收——宁可少收也不要在用户余额上多冻一笔。
+// 数字比文本部分的估算更不可信（口径见 channel.Request.PromptText）。估算
+// 偏低会让预留偏小，而结算是按预留的金额封顶的（见 pipeline.Reserve），
+// 所以这个取舍的代价是**少收**，不是超收——宁可少收也不要在用户余额上
+// 多冻一笔。
+//
+// 流式那条路用同一个函数：它要填进 Anthropic 的 message_start，而同一个
+// 请求在预留与响应里报出两个不同的输入量，只会让对账的人去找一个不存在的
+// 差额。
 func inputTokensOf(req *channel.Request) int64 {
-	var text strings.Builder
-	for _, m := range req.Messages {
-		for _, b := range m.Content {
-			text.WriteString(b.Text)
-		}
-	}
-	return tokens.EstimatedTokens(req.Model, text.String())
+	return tokens.EstimatedTokens(req.Model, req.PromptText())
 }
 
 // requestIDOf 取出本次请求的关联标识，没有就生成一个。

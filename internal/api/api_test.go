@@ -38,6 +38,14 @@ type fakeChatter struct {
 	req      pipeline.Request
 	upstream *channel.Request
 	calls    int
+
+	// 流式那一侧单独一份计数与结果：两条路走的是同一个接口的两个方法，
+	// 而「流式请求被当成非流式发出去」正是要防的那件事，所以调用次数要
+	// 分开断言。
+	streamResult *gateway.Result
+	streamErr    error
+	streamReq    pipeline.Request
+	streamCalls  int
 }
 
 func (f *fakeChatter) Chat(_ context.Context, req pipeline.Request, upstream *channel.Request) (*gateway.Result, error) {
@@ -45,6 +53,26 @@ func (f *fakeChatter) Chat(_ context.Context, req pipeline.Request, upstream *ch
 	f.req = req
 	f.upstream = upstream
 	return f.result, f.err
+}
+
+func (f *fakeChatter) ChatStream(_ context.Context, req pipeline.Request, upstream *channel.Request) (*gateway.Result, error) {
+	f.streamCalls++
+	f.streamReq = req
+	f.upstream = upstream
+	return f.streamResult, f.streamErr
+}
+
+// streamOf 把一串事件做成一个已经写满并关闭的事件流。
+//
+// 预填缓冲而不是另起一个 goroutine：测试要断言的是「入口怎么把这些事件
+// 变成帧」，而不是并发本身——那由网关那一侧测。
+func streamOf(events ...channel.StreamEvent) <-chan channel.StreamEvent {
+	ch := make(chan channel.StreamEvent, len(events))
+	for _, ev := range events {
+		ch <- ev
+	}
+	close(ch)
+	return ch
 }
 
 // fakeResult 是一条最小但完整的成功结果。
@@ -295,20 +323,64 @@ func TestInvalidBody(t *testing.T) {
 	}
 }
 
-// 流式还没实现，而**不能**就这样往下走：非流式那条路会照常调用上游，
-// 于是调用方拿到普通 JSON，而它按 SSE 去解。
-func TestStreamIsRejectedNotSilentlyDowngraded(t *testing.T) {
+// 请求里的 stream 决定走哪条路，而**不能**被静默降级：流式请求若被当成
+// 非流式发出去，调用方会拿到一个普通 JSON 体而它按 SSE 去解——失败在
+// 客户端表现为「解析不了响应」，与服务端真正的原因隔了一层。
+func TestStreamGoesToStreamPath(t *testing.T) {
+	h, _, chatter := newTestHandler()
+	chatter.streamResult = &gateway.Result{Events: streamOf()}
+
+	rec := post(h, PathChatCompletions, `{"model":"m-1","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":16}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
+	}
+	if chatter.streamCalls != 1 || chatter.calls != 0 {
+		t.Errorf("ChatStream 调用 %d 次、Chat 调用 %d 次，期望 1 与 0",
+			chatter.streamCalls, chatter.calls)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Errorf("Content-Type = %q，期望 text/event-stream", ct)
+	}
+	if !chatter.upstream.Stream {
+		t.Error("发往上游的请求要带上 Stream")
+	}
+	// 计费侧那份请求与非流式完全一样：流式不影响预留怎么算。
+	if chatter.streamReq.MaxTokens != 16 {
+		t.Errorf("计费请求的 MaxTokens = %d，期望 16", chatter.streamReq.MaxTokens)
+	}
+}
+
+// 没有 stream 的请求仍然走非流式那条路，且响应不是事件流。
+func TestNonStreamStaysOnChatPath(t *testing.T) {
 	h, _, chatter := newTestHandler()
 
+	rec := post(h, PathChatCompletions, validBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200", rec.Code)
+	}
+	if chatter.calls != 1 || chatter.streamCalls != 0 {
+		t.Errorf("Chat 调用 %d 次、ChatStream 调用 %d 次，期望 1 与 0",
+			chatter.calls, chatter.streamCalls)
+	}
+	if ct := rec.Header().Get("Content-Type"); strings.HasPrefix(ct, "text/event-stream") {
+		t.Errorf("非流式响应不该是事件流: %q", ct)
+	}
+}
+
+// 上游在接受请求之前就失败时，流还没开始，所以还能照常回一个错误响应。
+func TestStreamUpstreamFailureBeforeStart(t *testing.T) {
+	h, _, chatter := newTestHandler()
+	chatter.streamErr = &channel.ErrUpstream{StatusCode: http.StatusTooManyRequests, Retryable: true}
+
 	rec := post(h, PathChatCompletions, `{"model":"m-1","messages":[{"role":"user","content":"hi"}],"stream":true}`)
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("状态码 = %d，期望 501", rec.Code)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("状态码 = %d，期望 429（响应体 %s）", rec.Code, rec.Body)
 	}
-	if chatter.calls != 0 {
-		t.Error("流式请求不该被当成非流式发出去")
+	if strings.HasPrefix(rec.Header().Get("Content-Type"), "text/event-stream") {
+		t.Error("流还没开始时不该写事件流的响应头——那之后改不了状态码")
 	}
-	if !strings.Contains(rec.Body.String(), "stream") {
-		t.Errorf("响应里应当说清楚是 stream 的问题: %s", rec.Body)
+	if !strings.Contains(rec.Body.String(), `"error"`) {
+		t.Errorf("应当是 JSON 错误体: %s", rec.Body)
 	}
 }
 
