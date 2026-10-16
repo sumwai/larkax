@@ -20,6 +20,7 @@ Nothing here is ready to run in production.
 What works today:
 
 - Configuration loading, structured logging, `/healthz` and `/readyz`
+- Prometheus metrics on the internal listener (`/metrics`), see [docs/metrics.md](docs/metrics.md)
 - Runtime settings loaded from the database and validated against the keys the code declares
 - Migrations, applied and rolled back through `larkaxctl`
 - The full initial database schema
@@ -29,7 +30,7 @@ What works today:
 - The billing engine: the expression-based pricing rules, time-of-day and tiered
   pricing, reservation and settlement
 - `larkaxctl` management commands for API keys, users, snapshot retention, master
-  key rotation, and calendar data
+  key rotation, calendar data, and channels, models, aliases and pricing rules
 - The reconcile job that checks the wallet snapshot against the ledger
 
 Not wired yet:
@@ -38,7 +39,9 @@ Not wired yet:
   constructs a plugin registry yet
 - Payments and payouts — the ledger transactions exist, the entry points do not
 - The web console (`web/`)
-- Metrics — the internal listener serves health checks only
+- Most of the metrics worth having — `/metrics` is served, but only the
+  settlement counters are wired to real increment points, see
+  [docs/metrics.md](docs/metrics.md)
 
 See [docs/development.md](docs/development.md) for how to build and run it.
 The reconciliation job is documented in [docs/reconciliation.md](docs/reconciliation.md),

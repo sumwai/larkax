@@ -6,8 +6,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/config"
+	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/observe"
+	"github.com/sumwai/larkax/internal/pipeline"
+	"github.com/sumwai/larkax/internal/tokens"
 )
 
 // worker 角色的公共端口是占位响应，而不是装配失败：它本来就不承接推理流量，
@@ -44,6 +50,157 @@ func TestTrafficRoleWithoutMasterKeyFailsToStart(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "主密钥") {
 				t.Errorf("错误信息应当说明缺的是主密钥: %v", err)
+			}
+		})
+	}
+}
+
+// ruleSource 是一条固定的计价规则：每 token 输入 1e-6 元、输出 2e-6 元。
+//
+// 这里测的是计数，不是规则匹配，所以来源是写死的。
+const ruleSource = `{"prompt": 0.000001, "completion": 0.000002}`
+
+type stubRules struct{}
+
+func (stubRules) Match(context.Context, pipeline.RuleQuery) (pipeline.Rule, error) {
+	return pipeline.Rule{ID: 1, Version: 1, Source: ruleSource}, nil
+}
+
+func (stubRules) MatchAll(ctx context.Context, q pipeline.RuleQuery) ([]pipeline.Rule, error) {
+	rule, err := stubRules{}.Match(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	return []pipeline.Rule{rule}, nil
+}
+
+func settleRequest() pipeline.Request {
+	return pipeline.Request{
+		RequestID:      "req-metrics",
+		UserID:         42,
+		CanonicalModel: "test-model",
+		Candidates:     []pipeline.RuleCandidate{{ChannelID: 7, OwnerUserID: 9}},
+		ChannelID:      7,
+		OwnerUserID:    9,
+		InputTokens:    1000,
+		MaxTokens:      500,
+	}
+}
+
+// settleOutcome 是一次正常的结算结果：输入 1000 token，按规则值 0.001 元。
+func settleOutcome() pipeline.Outcome {
+	return pipeline.Outcome{
+		Usage:       channel.Usage{PromptTokens: 1000},
+		UsageSource: tokens.SourceMeasured,
+	}
+}
+
+// scrape 走**生产用的那一份**内部端点装配抓一次 /metrics。
+func scrape(t *testing.T) []string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	newInternalHandler(nil).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("抓 /metrics 得到状态码 %d，期望 200；正文:\n%s", rec.Code, rec.Body.String())
+	}
+	// 媒体类型是格式契约的一部分：写错或漏写会被采集器当成未知格式，
+	// 而那种失败是「抓到了但解析不出东西」，排查方向会指向采集器。
+	if got := rec.Header().Get("Content-Type"); got != observe.ContentTypeMetrics {
+		t.Errorf("Content-Type = %q，期望 %q", got, observe.ContentTypeMetrics)
+	}
+	return strings.Split(strings.TrimSuffix(rec.Body.String(), "\n"), "\n")
+}
+
+// assertLine 断言某一**整行**存在。
+//
+// 不用 strings.Contains：那样 "…_total 3" 会被 "…_total 30" 里的前缀命中，
+// 一个错掉的数于是看起来是对的。
+func assertLine(t *testing.T, lines []string, want string) {
+	t.Helper()
+	for _, line := range lines {
+		if line == want {
+			return
+		}
+	}
+	t.Errorf("指标里没有这一行: %q\n实际输出:\n%s", want, strings.Join(lines, "\n"))
+}
+
+// 这一条钉的是**整条链**：真实的生产增量点（pipeline.Settle）→ 计数器 →
+// 内部监听上的 /metrics 输出。
+//
+// 只断言「响应里有 larkax_ 开头的行」是不够的：那样把计数器改成不自增、
+// 把标签名拼错、把端点挂到别的监听上，用例都照样通过——而这几件事正是
+// 这一轮要防的（一个一直是 0 的计数器与一个根本没接的计数器长得一样）。
+func TestMetricsEndpointReportsRealSettlementCounts(t *testing.T) {
+	// 计数器是进程级的全局状态。先确认起点是 0，失败时能一眼看出原因。
+	if got := observe.Metrics.CappedSettlements.Value(); got != 0 {
+		t.Fatalf("这个用例假定计数器从 0 开始，现在是 %d——别的用例动过全局计数器了", got)
+	}
+
+	p := &pipeline.Pipeline{Rules: stubRules{}}
+	// 预留只有 1 个最小单位，而按规则算出来是 0.001 元——必然撞上上界。
+	//
+	// RuleMatchedAt 是必填的：结算按**受理那一刻**的档位定价，而不是结算
+	// 这一刻的墙钟，所以缺了它 Settle 会直接拒绝（这条预留没有「哪一刻的价」
+	// 可言）。真实的预留由 Reserve 填上，这里手工构造，就得自己给。
+	reserved := &pipeline.Reservation{
+		RequestID:     "req-metrics",
+		Amount:        money.FromUnits(1),
+		RuleMatchedAt: time.Now(),
+	}
+
+	for i := 1; i <= 3; i++ {
+		if _, err := p.Settle(context.Background(), settleRequest(), reserved, settleOutcome()); err != nil {
+			t.Fatalf("第 %d 次结算失败: %v", i, err)
+		}
+	}
+	// 一次上游失败：不计费，但必须留下一个数。
+	if _, err := p.Settle(context.Background(), settleRequest(), reserved, pipeline.Outcome{
+		UpstreamFailed: true,
+		UpstreamStatus: http.StatusBadGateway,
+		ErrorCode:      "upstream_error",
+	}); err == nil {
+		t.Fatal("上游失败时 Settle 应当返回错误")
+	}
+
+	lines := scrape(t)
+	for _, want := range []string{
+		"# TYPE larkax_billing_capped_settlements_total counter",
+		"larkax_billing_capped_settlements_total 3",
+		"larkax_billing_unbilled_settlements_total 1",
+		`larkax_billing_settlements_total{usage_source="measured"} 3`,
+	} {
+		assertLine(t, lines, want)
+	}
+}
+
+// 公共端口上不该有 /metrics。
+//
+// 这里能拿到的是 worker 角色的公共 handler：gateway 角色那一份由
+// internal/assembly 装配，起它要连库，命令行这一层测不动。所以这条用例
+// 钉住的是「两个 handler 的装配是分开的」这个结构，而不是某一个角色。
+func TestMetricsEndpointIsNotOnPublicHandler(t *testing.T) {
+	rec := httptest.NewRecorder()
+	workerPlaceholder().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", nil))
+
+	if rec.Code == http.StatusOK {
+		t.Errorf("公共端口把 /metrics 服务出去了，状态码 %d；正文:\n%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "larkax_") {
+		t.Errorf("公共端口的响应里出现了指标名:\n%s", rec.Body.String())
+	}
+}
+
+// 健康检查与指标共用同一个内部 handler，抽函数时不能只搬走其中一个。
+func TestInternalHandlerServesHealthAndMetrics(t *testing.T) {
+	handler := newInternalHandler(nil)
+
+	for _, path := range []string{"/healthz", "/readyz", "/metrics"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil))
+			if rec.Code != http.StatusOK {
+				t.Errorf("%s 状态码 = %d，期望 200", path, rec.Code)
 			}
 		})
 	}

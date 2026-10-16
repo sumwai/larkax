@@ -55,6 +55,10 @@ curl -i localhost:8080/v1/chat/completions
 另可验证数据库探针：`curl -s localhost:9090/readyz` 应含 `"postgres":"ok"`。
 **健康检查在 `:9090`，不在 `:8080`**——公共端口的 `/` 捕获一切路径并返回 `501`。
 
+指标在同一个内部端口上，`curl -s localhost:9090/metrics` 应含
+`larkax_billing_capped_settlements_total 0`。指标清单与命名约定见
+[metrics.md](metrics.md)。
+
 **`:9090` 是个常被占的端口**：Clash / mihomo 的 external-controller 默认就是它，
 Prometheus 也是。撞上之后服务完全起不来（不是降级），所以 `make run` 在起服务前
 会先检查这两个监听地址，占用时会告诉你**是哪个**、以及**怎么换**。
@@ -354,6 +358,7 @@ curl -i localhost:8080/v1/chat/completions \
 | `:8080` | 其余任意路径 | `501`，明确的「尚未实现」JSON |
 | `:9090` | `/healthz` | `200`，进程存活 |
 | `:9090` | `/readyz` | `200`，含 `postgres` 探针 |
+| `:9090` | `/metrics` | Prometheus 文本格式的指标，清单见 [metrics.md](metrics.md) |
 
 装配在 `internal/assembly`，由 `cmd/larkax` 调用：鉴权、候选渠道、计费两阶段、
 选路、上游协议适配、账本落库、请求快照都接上了。流式（`stream: true`）返回
@@ -371,8 +376,9 @@ curl -i localhost:8080/v1/chat/completions \
 启动时会连数据库并加载 `settings`。连不上或配置对不上就拒绝启动，
 `/readyz` 也会在数据库不可用时返回 `503`。
 
-内部端点单独一个端口：它面向编排系统与指标抓取器，不和业务入口共用监听地址，
-也就不需要跟着业务入口一起暴露在 ingress 规则下。
+内部端点单独一个端口：它面向编排系统与指标抓取器（`/healthz`、`/readyz`、
+`/metrics`），不和业务入口共用监听地址，也就不需要跟着业务入口一起暴露在
+ingress 规则下。
 
 运维命令行走另一个入口（`cmd/larkaxctl`），目前有这些：
 
