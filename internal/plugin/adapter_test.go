@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/route"
 )
 
@@ -151,6 +153,77 @@ func TestUsageFactsCarryCountsOnly(t *testing.T) {
 		t.Errorf("非 token 计量该给，实际 %v", facts.Units)
 	}
 }
+
+// 重建回协议层用量时，计费口径必须跟着一起重建。
+//
+// 这条断言的是**具体金额**：同一批 token 被收两次时，金额只是偏高，
+// 而「不双收的那次更便宜」在把 60 写成 100 时照样成立——相对断言抓不住它。
+func TestChannelUsageKeepsReasoningScope(t *testing.T) {
+	// 内核报的量：100 个输出，其中 40 个是推理。插件上报了它看到的补全量，
+	// 但**没有声明口径**——于是口径只能来自重建时显式给出的那一个。
+	merged := MergeUsage(
+		UsageFacts{CompletionTokens: ptrInt64(100), ReasoningTokens: ptrInt64(40)},
+		&UsageFacts{CompletionTokens: ptrInt64(100)},
+	)
+	prices := billing.Prices{
+		Completion: money.MustParse("0.000008"),
+		Reasoning:  money.MustParse("0.00001"),
+	}
+
+	// 声明「已含」：拆成 60 个输出 + 40 个推理。
+	// 60*8e-6 + 40*1e-5 = 0.00088
+	got := billing.Compute(billing.FromChannelUsage(merged.ChannelUsage(true)), prices)
+	if got.Total.Cmp(money.MustParse("0.00088")) != 0 {
+		t.Errorf("声明「已含」时总额 = %s，期望 0.00088", got.Total)
+	}
+
+	// 声明「不含」：两项各算各的，100*8e-6 + 40*1e-5 = 0.0012。
+	// 多出来的 0.00032 正是那 40 个 token 被收的第二遍——口径丢成零值时
+	// 得到的就是这个数，而它不会报错，只会在账单上偏高。
+	got = billing.Compute(billing.FromChannelUsage(merged.ChannelUsage(false)), prices)
+	if got.Total.Cmp(money.MustParse("0.0012")) != 0 {
+		t.Errorf("声明「不含」时总额 = %s，期望 0.0012", got.Total)
+	}
+}
+
+// 插件自己声明了口径就以它为准：它比内核更懂自己代理的那个上游。
+func TestChannelUsagePrefersDeclaredScope(t *testing.T) {
+	cases := []struct {
+		name     string
+		core     *bool
+		reported *bool
+		fallback bool
+		want     bool
+	}{
+		{"都没声明，沿用内核口径", nil, nil, true, true},
+		{"都没声明，内核口径为不含", nil, nil, false, false},
+		{"插件声明已含，覆盖内核的不含", ptrBool(false), ptrBool(true), false, true},
+		{"插件声明不含，覆盖内核的已含", ptrBool(true), ptrBool(false), true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			merged := MergeUsage(UsageFacts{CompletionIncludesReasoning: tc.core}, &UsageFacts{CompletionIncludesReasoning: tc.reported})
+			if got := merged.ChannelUsage(tc.fallback); got.CompletionIncludesReasoning != tc.want {
+				t.Errorf("口径 = %v，期望 %v", got.CompletionIncludesReasoning, tc.want)
+			}
+		})
+	}
+}
+
+// 重建出来的用量与事实不共用那张计量表：事实还可能被调用方持有，
+// 而对一边的改动不该静默出现在另一边。
+func TestChannelUsageCopiesUnits(t *testing.T) {
+	facts := UsageFacts{Units: map[string]int64{"searches": 2}}
+	got := facts.ChannelUsage(false)
+	got.UnitCounts["searches"] = 5
+	if facts.Units["searches"] != 2 {
+		t.Errorf("事实里的计量项被重建结果改掉了: %v", facts.Units)
+	}
+}
+
+func ptrInt64(v int64) *int64 { return &v }
+
+func ptrBool(v bool) *bool { return &v }
 
 // 上游没报用量时给一个各项为 nil 的对象，而不是 nil 本身：
 // 插件要能区分「上游没报」与「用量是零」。

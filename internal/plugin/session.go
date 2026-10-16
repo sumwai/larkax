@@ -211,10 +211,15 @@ func (s *Session) OnUsage(ctx context.Context, rc UsageContext) Result[UsageFact
 }
 
 // empty 判断插件有没有真的上报任何一项。
+//
+// 只声明口径（CompletionIncludesReasoning）也算上报：它不改数量但改金额，
+// 当成「没上报」丢掉的话，一个代理 OpenAI 系上游的插件把口径说对了也没用，
+// 那批推理 token 照样被收两次。
 func (f UsageFacts) empty() bool {
 	switch {
 	case f.PromptTokens != nil, f.CompletionTokens != nil, f.CacheReadTokens != nil,
-		f.CacheWriteTokens != nil, f.ReasoningTokens != nil:
+		f.CacheWriteTokens != nil, f.ReasoningTokens != nil,
+		f.CompletionIncludesReasoning != nil:
 		return false
 	}
 	return len(f.Units) == 0
@@ -224,6 +229,10 @@ func (f UsageFacts) empty() bool {
 //
 // 「叠加」而不是「替换」：没报的项保留内核的值。替换会让一次漏报
 // 变成一次少收钱——而漏报是很可能发生的（插件只在特定条件下才报表某个字段）。
+//
+// 口径（CompletionIncludesReasoning）同样按这个规则叠加：插件声明了就以它
+// 为准，没声明就保留内核的。它必须一起并进来——合并出来的用量随后要被
+// 重建回协议层用量去结算，而这一步丢了口径就等于把同一批 token 收两次。
 func MergeUsage(core UsageFacts, reported *UsageFacts) UsageFacts {
 	if reported == nil {
 		return core
@@ -240,6 +249,10 @@ func MergeUsage(core UsageFacts, reported *UsageFacts) UsageFacts {
 	over(&out.CacheReadTokens, reported.CacheReadTokens)
 	over(&out.CacheWriteTokens, reported.CacheWriteTokens)
 	over(&out.ReasoningTokens, reported.ReasoningTokens)
+	if reported.CompletionIncludesReasoning != nil {
+		v := *reported.CompletionIncludesReasoning
+		out.CompletionIncludesReasoning = &v
+	}
 	if len(reported.Units) > 0 {
 		units := make(map[string]int64, len(out.Units)+len(reported.Units))
 		for k, v := range out.Units {
