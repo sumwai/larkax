@@ -458,36 +458,58 @@ type tierMismatch struct{ got, want string }
 
 func (e *tierMismatch) Error() string { return "档位串了: " + e.got + " != " + e.want }
 
-// TestEvalUsageIsNotAMultiplier 说明用量可以作条件、作乘数会被形状检查拦下。
+// TestEvalUsageIsNotAMultiplier 钉住「用量只作条件、不作乘数」这条约定。
 //
-// 这条不是「不允许在价格位置出现用量」——表达式里写 `p * 1.5` 在语法与类型上
-// 都合法，真正被禁止的是它成为**结果**：`{"prompt": p}` 会让单价随用量变化，
-// 而那样最坏情况求值就不再是上界。这里记录实际行为。
+// 用量作乘数在语法与类型上都合法（`p * 1.5` 是个合法的数值表达式），
+// 破坏的是**求值结果的性质**：单价随用量变化，于是最坏情况求值给出的
+// 上界不再成立，而「余额不为负」依赖那个上界。所以拦它的位置不是类型检查，
+// 而是按 AST 上下文判的结构检查（见 usageInArithmetic）。
+//
+// 三种形态都要拦：包一层函数、直接当结果、藏在条件的另一边。
 func TestEvalUsageIsNotAMultiplier(t *testing.T) {
-	// 用量出现在价格位置的表达式里是允许的……
-	p := mustCompile(t, `{"prompt": 0.0000015 * float(p)}`)
-	_, err := p.Eval(Env{Usage: billing.Usage{PromptTokens: 1000}, At: testAt})
-	if err == nil {
-		// ……而它会在求值之后被金额校验拦住：0.0015 是个合法金额，
-		// 所以这里不报错，但单价已经随用量变了。这正是最坏情况求值
-		// 成立的前提被破坏的形态，因此**规则作者不能用它**，
-		// 引擎也无法从结构上禁止——它以文档与 review 约束，
-		// 并在 reservedNames 之外由 Compile 的注释说明。
-		t.Log("用量作乘数在语法上合法（见注释）；上界不成立的风险由文档与 review 约束")
+	// 两类错会在这里被拦下，**错误信息必须说清是哪一类**：
+	//
+	//   - 用量进了算术位置 → 说「价格位置」与「条件」，告诉作者怎么改
+	//   - 结果根本不是一张单价表 → 说「单价表」，那是形状问题不是约定问题
+	//
+	// 前者是规则作者会反复踩的，所以它的提示要具体到「改成条件式」；
+	// 后者是结构性写错（`p * 1.5` 直接当结果），报「不是单价表」就够。
+	cases := []struct {
+		source string
+		want   []string
+	}{
+		{`{"prompt": 0.0000015 * float(p)}`, []string{"价格位置", "用量", "条件"}},
+		{`{"prompt": (p > 0 ? 1.5 : 0) * c}`, []string{"价格位置", "用量", "条件"}},
+		{`{"prompt": p}`, []string{"价格位置", "用量", "条件"}},
+		// 直接当结果：类型检查先于结构检查拦下，报的是「期望一张表」。
+		// 这里不断言具体措辞——那句话来自 expr 引擎，改引擎版本会变；
+		// 要钉的是「它被拦下了」，以及另一组用例钉住的
+		// 「用量作条件时不该被拦」。
+		{`p * 1.5`, []string{"计价规则编译失败"}},
+	}
+	for _, tc := range cases {
+		_, err := Compile(tc.source)
+		if err == nil {
+			t.Errorf("%q 把用量写进了价格位置却编过了", tc.source)
+			continue
+		}
+		for _, want := range tc.want {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%q 的错误信息里缺少 %q: %v", tc.source, want, err)
+			}
+		}
 	}
 
-	// 但把它直接当结果时，形状检查会看到它不是单价表。
-	if _, err := Compile(`p * 1.5`); err == nil {
-		t.Error("结果不是一组单价却编过了")
+	// 用量作条件是正常写法，不能被一起拒掉。
+	for _, source := range []string{
+		`{"prompt": p > 0 ? 1.5 : 0}`,
+		`{"prompt": (p > 0 ? 1.5 : 2.5)}`,
+		`{"prompt": p > 0 && len > 100 ? 1.5 : 0}`,
+	} {
+		if _, err := Compile(source); err != nil {
+			t.Errorf("%q 里的用量只作条件，却编不过: %v", source, err)
+		}
 	}
-}
-
-// TestEvalUsageAsMultiplierInResultBreaksBound 用一条真实的规则钉住上界的前提。
-//
-// 这条测试是给未来的自己看的：如果哪天有人把「用量作乘数」放进了引擎，
-// 这里会失败，而失败的位置恰好指向最坏情况求值。
-func TestEvalUsageAsMultiplierInResultBreaksBound(t *testing.T) {
-	t.Skip("已知限制: 语法上无法禁止用量作乘数，见 TestEvalUsageIsNotAMultiplier 的注释")
 }
 
 // TestEvalAmountRounding 验证舍入只发生一次，而且发生在转 money.Amount 那里。

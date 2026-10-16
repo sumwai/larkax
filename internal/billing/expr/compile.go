@@ -326,6 +326,8 @@ type shape struct {
 //	len <= 32000 ? {...} : {...}                                     按条件选一组单价
 //	tier("peak", {...})                                              带档位追踪的单价表
 //	{"prompt": 1.5 + (isHoliday() ? 0.5 : 0.0)}                      价格位置上的数值运算
+//
+// 检查顺带把用量变量限制在条件位置上（见 pos.cond 与 usageInArithmetic）。
 func inspectShape(root ast.Node) (shape, error) {
 	sh := shape{keys: map[string]struct{}{}}
 	// 从根位置开始：整条表达式的结果必须是一张单价表（或按条件选出的一张）。
@@ -337,9 +339,9 @@ func inspectShape(root ast.Node) (shape, error) {
 
 // walkShape 递归检查 AST，按节点在结果里的**位置**判断它该是什么。
 //
-// 位置是这里唯一需要追踪的状态，因为「同样一个表达式在表里合法、
-// 在根位置非法」正是需要区分的两类情形（见 pos 的注释）。
-// pos 描述一个节点在结果里的位置。这是结构检查的核心抽象。
+// 位置是这里唯一需要追踪的状态：判断一个节点的合法形状要用到它，
+// 判断里面的用量变量能不能出现也要用到它——而这两件事的判据都只能由
+// 「这个子树在结果里处于什么位置」决定，节点自身的类型答不出来。
 type pos struct {
 	// root 为 true 表示这个节点**本身**必须是单价表或条件，
 	// 不能是一个裸的数值——`len <= 1 ? {...} : 2.0` 这种写法要在这里被拦住。
@@ -347,6 +349,26 @@ type pos struct {
 	// slot 非空表示它在单价表的一个具名槽里（键名，或计量项名）。
 	// 这种位置允许数值运算，但不允许再出现一张表。
 	slot string
+	// cond 为 true 表示这个子树只当条件用，它的值不会成为单价。
+	//
+	// 只有这里可以出现用量变量。原因是上界：EvalWorstCase 靠「每个价格位置
+	// 取所有分支的最高价」工作，而那个上界只有当每个分支里的单价都是**与用量
+	// 无关的常数**时才成立（见 Program.EvalWorstCase）。`{"prompt": p * 1.5}`
+	// 让单价随用量变化，于是「余额不为负」所依赖的上界不再成立，而它不会
+	// 报错，只会让账悄悄错掉。
+	//
+	// 为什么不干脆禁止用量变量出现：用量作条件是**正常且必要**的写法，
+	// `p > 0 ? A : B` 与 `len <= 32000 ? A : B` 是同一回事，一刀切会连它一起
+	// 拒掉。所以判据是**上下文**而不是「标识符出现过」——
+	//
+	//	{"prompt": p * 1.5}                  拒绝：p 在算术位置
+	//	{"prompt": p > 0 ? 1.5 : 0}          允许：p 在条件里
+	//	{"prompt": (p > 0 ? 1.5 : 0) * c}    拒绝：c 在算术位置
+	//
+	// cond **向下继承**：条件里的 `p > 0 && len > 100` 整棵都是条件，
+	// 比较与逻辑运算符的两侧也不例外。而三元的两个分支从条件进入值位置，
+	// 所以要清掉——除非外层本来就在条件里（嵌套条件）。
+	cond bool
 }
 
 func walkShape(node ast.Node, sh *shape, at pos) error {
@@ -380,6 +402,7 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 				}
 				continue
 			}
+			// 槽里的表达式是**单价**，不是条件：用量变量到这里就不许再出现了。
 			if err := walkShape(pair.Value, sh, pos{slot: name}); err != nil {
 				return err
 			}
@@ -388,8 +411,21 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 
 	case *ast.ConditionalNode:
 		sh.branches++
-		// 分支继承当前位置：三元在表里选一个槽、在根位置选一张表，
-		// 两种都要继续按同一个位置检查。
+		// 条件子树整棵都在条件位置：`p > 0 && len > 100` 的两个比较都在里面，
+		// 而其中用量变量只能作条件——这个位置正是它们唯一合法的去处。
+		// 它同时是**值位置**（root 清掉）：条件求值出来是布尔值，
+		// 从来不参与结果形状，`{...} ? A : B` 里那个条件并不是一张单价表。
+		if err := walkShape(n.Cond, sh, condPos(valuePos(at))); err != nil {
+			return err
+		}
+		// 两个分支回到值位置：三元在表里选一个槽、在根位置选一张表，
+		// 两种都要继续按同一个位置检查——包括 root：根位置的三元两支都得是表，
+		// `len <= 100 ? {"prompt": 1.0} : 2.0` 正是要在这里被拦住。分支里也
+		// 可能用到用量变量，但那时它必须自己再写一个条件。
+		//
+		// cond 在这里**不无条件清掉**：`p > 0 ? A : B` 的三元本身就在外层
+		// 条件里时（`p > 0 ? (c > 0 ? A : B) : B`），内层三元整棵都还在条件
+		// 位置，用量变量照样合法——那正是嵌套条件要能通过的原因。
 		if err := walkShape(n.Exp1, sh, at); err != nil {
 			return err
 		}
@@ -404,11 +440,16 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 				return fmt.Errorf("tier 的档位名必须是字符串字面量: %w", err)
 			}
 			// tier 是透明的：它只记下档位名并原样返回第二个参数。
+			// 它外面的位置原样穿过第一个参数，所以 cond 也跟着穿过去。
 			return walkShape(n.Arguments[1], sh, at)
 		}
 		// fixed/minimum/hour/isWorkday/isHoliday 返回数值，位置不变。
 		// 参数本身不参与结果形状，但里面不该有单价表——
 		// 规则作者不会那么写，真写了也一定是把 units 放错了地方。
+		//
+		// 参数**不算条件**：fixed(isHoliday() ? 0.2 : 0.5) 里的三元在函数
+		// 外面看是个什么值？分支里出现用量变量时同样要自己写条件，
+		// 所以这里给值位置。
 		for _, arg := range n.Arguments {
 			if err := walkShape(arg, sh, pos{slot: "函数参数"}); err != nil {
 				return err
@@ -417,13 +458,28 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 		return nil
 
 	case *ast.BinaryNode:
-		if err := walkShape(n.Left, sh, at); err != nil {
+		// 运算符决定子节点是什么位置：比较与逻辑运算符的两侧都是条件，
+		// 算术运算符（含 `+ - * / %`、位运算、拼接、合并）的两侧都是值。
+		// `in` 也归条件一侧：`units["img"] in [1,2]` 是条件写法。
+		sub := at
+		if !isConditionOperator(n.Operator) {
+			// 算术位置的子树整体都是「价格位置」：即便它外面包着三元，
+			// `(p > 0 ? A : B) * c` 里的 c 仍然在乘数上。
+			sub.cond = false
+		}
+		if err := walkShape(n.Left, sh, sub); err != nil {
 			return err
 		}
-		return walkShape(n.Right, sh, at)
+		return walkShape(n.Right, sh, sub)
 
 	case *ast.UnaryNode:
-		return walkShape(n.Node, sh, at)
+		// `!`/`not` 取反的是条件，所以里面仍是条件位置；
+		// `-`/`+` 改的是数值，用量变量在那里就是一个用量乘数。
+		sub := at
+		if !isConditionOperator(n.Operator) {
+			sub.cond = false
+		}
+		return walkShape(n.Node, sh, sub)
 
 	case *ast.BuiltinNode:
 		// 谓词类内置（sum/map/reduce/all/groupBy/sortBy…）走的是解析器的
@@ -437,14 +493,26 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 		if _, blocked := blockedBuiltins[n.Name]; blocked {
 			return fmt.Errorf("内置函数 %q 不可用于计价规则：它返回的不是数值", n.Name)
 		}
+		// 参数与函数调用同理：`max(p, 1.0)` 是拿用量当乘数。
+		for _, arg := range n.Arguments {
+			if err := walkShape(arg, sh, pos{slot: "函数参数"}); err != nil {
+				return err
+			}
+		}
 		if at.root {
 			return fmt.Errorf("结果必须是一张单价表，当前是内置函数 %q 的结果", n.Name)
 		}
 		return nil
 
 	case *ast.VariableDeclaratorNode:
-		// `let x = ...; <结果>` 里的声明部分不是结果，只检查它的值；
-		// 结果在 SequenceNode 的最后一个节点上。
+		// `let x = ...; <结果>` 里的声明部分不是结果。它的值会在后面被按
+		// 名字引用，所以按**值**检查：`let x = p * 1.5` 是把用量算进了
+		// 一个接下来要当价格用的名字里，`let x = p > 0 ? A : B` 才是分档。
+		//
+		// 局限：`let x = p; ... x * 1.5` 这样把用量转个手再乘的写法看不出来
+		// （要看出它得做一遍数据流分析）。规则作者真要绕过，直接写
+		// `let x = p * 1.5` 就行，所以拦这里的价值有限，写下来是为了让
+		// 「为什么 let 单独一个分支」有答案。
 		return walkShape(n.Value, sh, pos{})
 
 	case *ast.SequenceNode:
@@ -457,10 +525,34 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 				return err
 			}
 		}
+		// 结果那一个继承当前位置——与 expr 的另外两种写法（`if`/`else`
+		// 与顶层三元）保持一致：三种写法给同样的规则，检查结果也该一样。
 		return walkShape(n.Nodes[len(n.Nodes)-1], sh, at)
 
+	case *ast.IdentifierNode:
+		if err := usageInArithmetic(n.Value, at); err != nil {
+			return err
+		}
+		// 用量变量**直接**落在价格位置（`{"prompt": p}`）也是同一件事的
+		// 极端形态：单价就是用量本身。它在语法与类型上都合法，
+		// 上界的破坏却与 `p * 1.5` 一模一样，所以在同一处拦。
+		// 条件位置上的识别符（`p > 0` 里的 p）不受影响。
+		if !at.cond {
+			if _, isUsage := usageVarSet[n.Value]; isUsage {
+				return usagePriceError(n.Value)
+			}
+		}
+		// 其余（注入常量、let 绑定的名字）在槽里是合法的数值，
+		// 但在**根位置**意味着结果不是一张表：
+		// `len <= 1 ? {"prompt": 1.0} : x` 的假分支正是这一形态，
+		// 而它在运行期会让最坏情况求值在 __worst 里撞上「两支形状不一致」。
+		if at.root {
+			return fmt.Errorf("结果必须是一张单价表，当前是 %s", n.Value)
+		}
+		return nil
+
 	default:
-		// 数值/字符串字面量、标识符、成员访问（units["x"]）等。
+		// 数值/字符串字面量、成员访问（units["x"]）等。
 		//
 		// 它们在槽里是合法的数值，但在**根位置**意味着结果不是一张表：
 		// `len <= 1 ? {"prompt": 1.0} : 2.0` 的假分支正是这一形态，
@@ -498,6 +590,9 @@ func walkUnits(node ast.Node, sh *shape) error {
 
 	case *ast.ConditionalNode:
 		sh.branches++
+		if err := walkShape(n.Cond, sh, condPos(pos{})); err != nil {
+			return err
+		}
 		if err := walkUnits(n.Exp1, sh); err != nil {
 			return err
 		}
@@ -514,6 +609,80 @@ func walkUnits(node ast.Node, sh *shape) error {
 	default:
 		return fmt.Errorf("units 必须是一张计量项表或按条件选出的一张，当前是 %T", node)
 	}
+}
+
+// isConditionOperator 判断一个运算符的两侧是不是**条件**位置。
+//
+// 只有这几类算条件：比较（`> < >= <= == !=`）、逻辑（`&& || and or`）、
+// 取反（`! not`）、集合与字符串判定（`in matches contains startsWith endsWith`）。
+// 其余运算符——`+ - * / % ** .. ??` 与 `|`——的子节点都算值位置，
+// 用量变量出现在那里就是一个用量乘数。
+//
+// 按名字判而不是按「结果类型是不是 bool」判：类型要等 expr 的类型检查跑完
+// 才有，而这一步在形状检查里，拿到的是已经过类型的 AST（这时真有类型），
+// 但把一个「看起来是 bool」的算术表达式放行是错的——`p > 0 == q > 0`
+// 是条件，而 `p * (q > 0)` 里的 `q > 0` 在外面是乘数，两处的判据不同，
+// 只有运算符本身能可靠地区分它们。
+func isConditionOperator(op string) bool {
+	switch op {
+	case ">", "<", ">=", "<=", "==", "!=",
+		"&&", "||", "and", "or", "!", "not",
+		"in", "matches", "contains", "startsWith", "endsWith":
+		return true
+	default:
+		return false
+	}
+}
+
+// condPos 在保留当前位置的同时标记「这棵子树是条件」。
+//
+// 保留 slot 是有意的：条件本身不参与结果形状，而它所在的那个位置的规矩
+// （槽里不能再出现一张表）在这里同样适用，只是用量变量被额外允许了。
+// root 由调用方用 valuePos 清掉——条件求值出来是布尔值，从来不是结果本身。
+func condPos(at pos) pos {
+	at.cond = true
+	return at
+}
+
+// valuePos 标记「这棵子树是值」：它会变成一个数值，参与价格、参与比较、
+// 或直接成为结果，总之不是「只被用来判断真假」的那种位置。
+//
+// root 同时清掉：根位置那条规矩（结果必须是一张单价表）是对**结果**说的，
+// 而这里已经进入了某个表达式的内部——`{...} ? A : B` 里那个条件、
+// 三元的分支、函数的参数，都不该再按「它就是最终结果」判。
+func valuePos(at pos) pos {
+	at.root = false
+	return at
+}
+
+// usageInArithmetic 拦住「用量变量出现在算术位置」。
+//
+// 这条约定写在包注释里：用量只作条件，不作乘数。破坏它不会报错——
+// `{"prompt": p * 1.5}` 语法合法、类型合法、求值也返回一个数，
+// 只是单价随用量变了。后果是 EvalWorstCase 给出的上界不再成立，
+// 而「余额不为负」这条不变量依赖那个上界（见 Program.EvalWorstCase）。
+//
+// 判据是**位置**而不是名字出现过：`p > 0 ? A : B` 里 p 也在，
+// 但它在条件里，不影响单价的确定性，所以允许。
+func usageInArithmetic(name string, at pos) error {
+	if at.cond {
+		return nil
+	}
+	if _, isUsage := usageVarSet[name]; !isUsage {
+		return nil
+	}
+	return usagePriceError(name)
+}
+
+// usagePriceError 生成「用量变量出现在价格位置」的错误。
+//
+// 信息里要同时给出三件事，规则作者才知道怎么改：哪个变量不行、
+// 为什么不行、以及该怎么写。只报「非法表达式」会让他去查语法，
+// 而那个方向永远找不到答案——这句话本身是合法的。
+func usagePriceError(name string) error {
+	return fmt.Errorf("价格位置不能出现用量 %q：单价不该依赖用了多少，"+
+		"否则最坏情况求值不再是上界（预留会不够，结算撞 Capped）；"+
+		"如果只是想按用量分档，把它写成条件（如 `%s > 0 ? A : B`）", name, name)
 }
 
 // stringKey 取一个字符串字面量键。
