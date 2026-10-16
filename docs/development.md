@@ -361,8 +361,8 @@ curl -i localhost:8080/v1/chat/completions \
 | `:9090` | `/metrics` | Prometheus 文本格式的指标，清单见 [metrics.md](metrics.md) |
 
 装配在 `internal/assembly`，由 `cmd/larkax` 调用：鉴权、候选渠道、计费两阶段、
-选路、上游协议适配、账本落库、请求快照都接上了。流式（`stream: true`）返回
-`501`——那一条还没实现。
+选路、上游协议适配、账本落库、请求快照、节假日日历都接上了。流式
+（`stream: true`）返回 `501`——那一条还没实现。
 
 要真的拿到一次 `200`，库里得先有：一个用户与钱包、一把 API Key
 （`larkaxctl apikey create --user <ID 或用户名>`）、一条指向上游的渠道、
