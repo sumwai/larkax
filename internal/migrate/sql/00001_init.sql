@@ -166,7 +166,7 @@ CREATE TABLE channels (
     name                text NOT NULL,
     type                text NOT NULL,     -- 适配器类型，见 internal/channel 的注册表
     base_url            text NOT NULL,
-    -- 凭证密文。唯一解密点是 internal/channel，插件永远拿不到
+    -- 凭证密文。唯一解密点是 internal/channels，插件永远拿不到
     credential_enc      bytea NOT NULL,
     credential_hint     text,              -- 末四位，供界面辨识
     -- 上游协议族：决定用哪套 usage 口径与请求格式
@@ -608,7 +608,9 @@ CREATE INDEX payout_requests_status_idx ON payout_requests (status, created_at);
 -- 套餐
 --
 -- models.dev 不收录套餐，这份目录必须自建。
--- 七个维度的定义见 internal/catalog。
+-- 七个维度落在下面的 dimensions（jsonb）里。它的结构尚未定义到代码里，
+-- 所以这里不指向任何包——写成「见 internal/catalog」那样的引用会指向一个
+-- 不存在的地方，读的人会以为结构已经有了。
 -- ═══════════════════════════════════════════════════════════════════
 
 CREATE TABLE plans (

@@ -27,8 +27,11 @@ GA 之前（`v0.x`）这条放宽：`MINOR` 可以有破坏性变更，`PATCH` �
 **只有一处来源：Git tag。** 构建时用 `-ldflags` 注入，代码里不写死：
 
 ```sh
-go build -ldflags "-X main.version=$(git describe --tags --always --dirty)"
+go build -ldflags "-X main.version=$(git describe --tags --always --dirty)" ./cmd/larkax
 ```
+
+两个二进制各构建一次即可（`./cmd/larkax` 与 `./cmd/larkaxctl`）；漏掉包路径
+的话 `go build` 会在仓库根上找 main 包，那里没有。
 
 未注入时是 `dev`——这样「本地随手构建的二进制」与「正式发布的二进制」
 在 `larkax --version` 的输出里能一眼分开。排查线上问题时，

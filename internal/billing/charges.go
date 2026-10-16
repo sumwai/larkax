@@ -38,7 +38,7 @@ func (c Charges) Validate() error {
 	return nil
 }
 
-// applyFixed 把固定费用加进明细。
+// applyFixed 把固定费用写进明细的 Fixed 字段。
 func (b *Breakdown) applyFixed(fixed money.Amount) {
 	b.Fixed = fixed
 }

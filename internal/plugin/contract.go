@@ -34,7 +34,8 @@ import (
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
 )
 
-// Hook 名。与 sandbox.HookNames 同一份，借它的顺序表达生命周期的先后。
+// Hook 名。取值必须与 sandbox.HookNames 一致（两份独立的字面量，改一处要
+// 同时改另一处），顺序即生命周期的先后。
 const (
 	HookRequest  = "onRequest"
 	HookRoute    = "onRoute"

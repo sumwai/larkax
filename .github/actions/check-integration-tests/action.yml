@@ -1,0 +1,74 @@
+name: 确认集成测试确实运行
+description: >-
+  跑集成测试包，并在它们被 t.Skip（或编译不过、或一个用例都没跑到）时报错。
+  「跳过」在 go test 的输出里和「通过」长得一样，退出码也都是 0——没有这一步，
+  CI 与 release 都会在一个从没跑过集成测试的状态下报绿（见 LESSONS.md 第 16 条）。
+
+  包清单只在这里列一次，CI 与 release 调的是同一份检查：两份拷贝漂移的话，
+  漂移的那一份会安静地变弱，而「安静地变弱」正是这一步要防的东西。
+
+  调用方需要提供 LARKAX_DB_DSN（以及能连上的库），并已 checkout。
+
+runs:
+  using: composite
+  steps:
+    - name: 确认集成测试确实运行
+      shell: bash
+      run: |
+        set +e
+        failed=0
+        total=0
+        # 包清单要与「哪些包真的会连库」保持一致。判据是测试里有
+        # `t.Skip(...)` 且条件是 LARKAX_DB_DSN：加了一个这样的包而忘了往
+        # 这里补，它就会静默跳过，而这道门不会报——正是它要防的那件事。
+        # 找一遍：grep -rl LARKAX_DB_DSN --include='*_test.go' .
+        for pkg in ./internal/ledger/store/ ./internal/channels/ ./internal/snapshotwire/; do
+          out=$(go test -count=1 -v "$pkg" 2>&1)
+          rc=$?
+          show() { printf '%s\n' "$out" | tail -30; }
+
+          # 一、编译不过或包不存在——那时连测试都没开始跑
+          if printf '%s\n' "$out" | grep -q -- 'setup failed\|build failed\|no such file'; then
+            echo "::error::$pkg 没能编译，集成测试根本没开始跑"
+            show
+            failed=1
+            continue
+          fi
+
+          # 二、被跳过。跳过等于没测，不能算绿
+          if printf '%s\n' "$out" | grep -q -- '--- SKIP'; then
+            echo "::error::$pkg 的集成测试被跳过了：DSN 没传到，或库连不上。跳过等于没测。"
+            printf '%s\n' "$out" | grep -- '--- SKIP'
+            failed=1
+            continue
+          fi
+
+          # 三、一个用例都没跑到
+          passed=$(printf '%s\n' "$out" | grep -c -- '--- PASS' || true)
+          if [ "$passed" -eq 0 ]; then
+            echo "::error::$pkg 的集成测试一个都没跑"
+            show
+            failed=1
+            continue
+          fi
+
+          # 四、跑了但有失败
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::$pkg 的集成测试有失败用例"
+            printf '%s\n' "$out" | grep -- '--- FAIL' || show
+            failed=1
+            continue
+          fi
+
+          echo "$pkg 的集成测试跑了 $passed 个用例，全部通过。"
+          total=$((total + passed))
+        done
+
+        # 汇总一个总数：每个包都「恰好没有集成用例」时，上面的分支
+        # 会各自报一次 0 并失败；总数在这里再确认一次，避免漏网的静默状态。
+        # 写「每个包」而不是写个数：包清单会变，这个数不会。
+        if [ "$total" -eq 0 ]; then
+          echo "::error::一个集成用例都没跑"
+          exit 1
+        fi
+        exit "$failed"

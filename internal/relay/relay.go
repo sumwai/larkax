@@ -13,7 +13,9 @@
 // 代价是每个请求多一次类型转换。那点开销换来的是：升级 relaykit 只改这一个
 // 文件，以及管道里所有类型都有本项目的注释可读。
 //
-// 只在本包 import relaykit。其他包若需要 relaykit 的类型，说明这里缺一个转换函数。
+// 直接 import relaykit 的只允许三个包：本包，以及两个协议适配器——后者要拿
+// relaykit 的 dto 类型才能与它对接。允许清单写在 scripts/check-layering.sh 里，
+// 由 CI 检查。其余包若需要 relaykit 的类型，说明这里缺一个转换函数。
 package relay
 
 import (
