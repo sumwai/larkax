@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -16,11 +17,32 @@ import (
 )
 
 // ruleSource 是测试用的规则来源：一条固定规则，或一个错误。
+//
+// 两个方法与真实实现（pricing）同形：Match 给结算那一次，返回**一条**
+// 规则；MatchAll 给预留那一次，按候选逐条返回。分开是因为两者的输入
+// 本来就不一样——结算只有一个已选定的渠道，预留是一整个候选集。
 type ruleSource struct {
+	// rule 是没在 byChannel 里指定的渠道所适用的那一条（平台规则）。
 	rule Rule
 	err  error
-	// queries 记录每次匹配的条件，用于断言「结算用的是预留时的时刻」。
+	// byChannel 按渠道指定规则，让结算那一次按**实际选中的渠道**取到
+	// 与别的候选不同的规则。真实实现就是这个形状：渠道级规则盖过平台
+	// 规则，而结算必须按选定的那个渠道算。
+	byChannel map[int64]Rule
+	// all 直接指定 MatchAll 的返回值，用于「一个候选都匹配不上」这类
+	// 与具体渠道无关的情形。没配时按候选逐个取。
+	all []Rule
+	// queries 记录每次匹配的条件（两个方法都记），用于断言
+	// 「结算用的是预留时的时刻」以及「预留拿到了整个候选集」。
 	queries []RuleQuery
+}
+
+// ruleFor 取某个渠道适用的规则。
+func (r *ruleSource) ruleFor(channelID int64) Rule {
+	if rule, ok := r.byChannel[channelID]; ok {
+		return rule
+	}
+	return r.rule
 }
 
 func (r *ruleSource) Match(_ context.Context, q RuleQuery) (Rule, error) {
@@ -28,7 +50,25 @@ func (r *ruleSource) Match(_ context.Context, q RuleQuery) (Rule, error) {
 	if r.err != nil {
 		return Rule{}, r.err
 	}
-	return r.rule, nil
+	if len(q.Candidates) != 1 {
+		return Rule{}, fmt.Errorf("测试替身只接受恰好一个候选，得到 %d 个", len(q.Candidates))
+	}
+	return r.ruleFor(q.Candidates[0].ChannelID), nil
+}
+
+func (r *ruleSource) MatchAll(_ context.Context, q RuleQuery) ([]Rule, error) {
+	r.queries = append(r.queries, q)
+	if r.err != nil {
+		return nil, r.err
+	}
+	if r.all != nil {
+		return r.all, nil
+	}
+	out := make([]Rule, 0, len(q.Candidates))
+	for _, c := range q.Candidates {
+		out = append(out, r.ruleFor(c.ChannelID))
+	}
+	return out, nil
 }
 
 // 每 token 1e-6 元、输出 2e-6 元的简单规则。
@@ -53,6 +93,7 @@ func baseRequest() Request {
 		RequestID:      "req-1",
 		UserID:         42,
 		CanonicalModel: "gpt-4o",
+		Candidates:     []RuleCandidate{{ChannelID: 7, OwnerUserID: 9}},
 		ChannelID:      7,
 		OwnerUserID:    9,
 		InputTokens:    1000,
@@ -148,6 +189,158 @@ func TestReserveValidatesRequest(t *testing.T) {
 				t.Error("应报错")
 			}
 		})
+	}
+}
+
+// ── 预留的上界要覆盖整个候选集 ──────────────────────────────────────────
+//
+// 预留发生在选路之前，所以「会按哪条规则计价」还没有答案，手上只有一个
+// 候选集。只按平台规则算会让预留小于结算，而结算撞上 Capped 之后实际
+// 金额被预留截住、差额由平台吃掉，**账目仍然是平的**——没有任何东西
+// 会报出来。下面几条钉的就是这个。
+
+// platformRule 便宜、候选里的渠道规则贵：预留必须按贵的那条算。
+//
+// 这一条是本文件里最要紧的断言。把它按老口径（只问平台规则）跑一遍，
+// 预留会算成 0.002 而结算要 1.4，Capped 触发、实际金额被截成 0.002。
+func TestReserveTakesUpperBoundAcrossCandidateRules(t *testing.T) {
+	platformRule := Rule{ID: 10, Version: 1, Source: `{"prompt": 0.000001, "completion": 0.000002}`}
+	channelRule := Rule{ID: 20, Version: 1, Source: `{"prompt": 0.001, "completion": 0.002}`}
+
+	// 两个候选：渠道 7 有自己的渠道规则，渠道 8 退到平台规则。
+	// 结算会选渠道 7，所以 Match 给的也是渠道规则。
+	src := &ruleSource{
+		rule:      platformRule,
+		byChannel: map[int64]Rule{7: channelRule},
+	}
+	p := newPipeline(t, src)
+
+	req := baseRequest()
+	req.Candidates = []RuleCandidate{{ChannelID: 7, OwnerUserID: 9}, {ChannelID: 8, OwnerUserID: 9}}
+
+	res, err := p.Reserve(context.Background(), req)
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	// 输入 1000 × 1e-3 = 1；输出 500 × 2e-3 = 1 → 2
+	if got := res.Amount.String(); got != "2.00000000" {
+		t.Errorf("预留 = %s，期望 2.00000000（按候选里最贵的那条规则算，而不是平台价）", got)
+	}
+	// 记下来的依据要是**给出最大金额的那一条**：界面靠它解释这笔钱怎么估的。
+	if res.RuleID != channelRule.ID {
+		t.Errorf("规则依据 = %d，期望给出最大金额的 %d（平台那条是 %d）",
+			res.RuleID, channelRule.ID, platformRule.ID)
+	}
+	if res.PricingExprSnap != channelRule.Source {
+		t.Errorf("表达式快照 = %q，期望最贵那条的 %q", res.PricingExprSnap, channelRule.Source)
+	}
+
+	// 结算按实际选中的渠道 7：1000 × 1e-3 + 200 × 2e-3 = 1.4。
+	charge, err := p.Settle(context.Background(), req, res, Outcome{
+		Usage:       channel.Usage{PromptTokens: 1000, CompletionTokens: 200},
+		UsageSource: tokens.SourceMeasured,
+	})
+	if err != nil {
+		t.Fatalf("结算出错: %v", err)
+	}
+	if got := charge.Settlement.Actual.String(); got != "1.40000000" {
+		t.Errorf("实际金额 = %s，期望 1.40000000", got)
+	}
+	// 这一条就是「预留是上界」：撞上 Capped 说明上界算小了。
+	if charge.Settlement.Capped {
+		t.Errorf("撞上 Capped：预留 %s 小于结算，差额被平台吃掉且账目仍然平",
+			res.Amount)
+	}
+}
+
+// 多个候选、规则价各不相同时取的是**最大**，不是第一个。
+//
+// 最贵的那条故意排在最后：按第一个候选算只会拿到 0.001。
+func TestReserveTakesMaxNotFirstCandidate(t *testing.T) {
+	cheap := Rule{ID: 1, Version: 1, Source: `{"prompt": 0.000001}`}
+	middle := Rule{ID: 2, Version: 1, Source: `{"prompt": 0.000002}`}
+	dear := Rule{ID: 3, Version: 1, Source: `{"prompt": 0.000005}`}
+
+	src := &ruleSource{byChannel: map[int64]Rule{7: cheap, 8: middle, 9: dear}}
+	p := newPipeline(t, src)
+
+	req := baseRequest()
+	req.Candidates = []RuleCandidate{
+		{ChannelID: 7, OwnerUserID: 9},
+		{ChannelID: 8, OwnerUserID: 9},
+		{ChannelID: 9, OwnerUserID: 9},
+	}
+
+	res, err := p.Reserve(context.Background(), req)
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	// 输入 1000 × 5e-6 = 0.005
+	if got := res.Amount.String(); got != "0.00500000" {
+		t.Errorf("预留 = %s，期望 0.00500000（三条里最贵的那条）", got)
+	}
+	if res.RuleID != dear.ID {
+		t.Errorf("规则依据 = %d，期望最贵的 %d", res.RuleID, dear.ID)
+	}
+}
+
+// 预留要把**整个候选集**交给规则来源，每个候选带自己的商家。
+//
+// 商家级规则按 owner 匹配，只给渠道 id 是不够的——漏掉一条更贵的商家价
+// 正是预留算小的来源。
+func TestReservePassesCandidatesWithOwners(t *testing.T) {
+	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}
+	p := newPipeline(t, src)
+
+	req := baseRequest()
+	req.Candidates = []RuleCandidate{{ChannelID: 7, OwnerUserID: 11}, {ChannelID: 8, OwnerUserID: 22}}
+
+	if _, err := p.Reserve(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if len(src.queries) != 1 {
+		t.Fatalf("规则匹配 %d 次，期望 1 次", len(src.queries))
+	}
+	got := src.queries[0].Candidates
+	if len(got) != 2 {
+		t.Fatalf("候选 = %+v，期望 2 个", got)
+	}
+	if got[0].ChannelID != 7 || got[0].OwnerUserID != 11 {
+		t.Errorf("第一个候选 = %+v，期望渠道 7 商家 11", got[0])
+	}
+	if got[1].ChannelID != 8 || got[1].OwnerUserID != 22 {
+		t.Errorf("第二个候选 = %+v，期望渠道 8 商家 22", got[1])
+	}
+}
+
+// 候选集为空时**拒绝**，而不是退回去按平台规则算。
+//
+// 空候选集算不出上界：候选里的规则可能一条比一条贵，按空集算出来的任何
+// 数都是下界。退回平台规则正是「静默少收」那个毛病。
+func TestReserveRejectsEmptyCandidates(t *testing.T) {
+	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}
+	p := newPipeline(t, src)
+
+	req := baseRequest()
+	req.Candidates = nil
+
+	_, err := p.Reserve(context.Background(), req)
+	if !errors.Is(err, ErrNoRule) {
+		t.Fatalf("err = %v，期望 ErrNoRule", err)
+	}
+	// 连规则来源都不该问：问了也只会得到「平台那条」，而那正是要避免的。
+	if len(src.queries) != 0 {
+		t.Errorf("候选集为空时不该去匹配规则，实际匹配 %d 次", len(src.queries))
+	}
+}
+
+// 候选都在，但一条适用的规则都没有：同样是算不出上界，不是零价。
+func TestReserveRejectsWhenNoCandidateHasRule(t *testing.T) {
+	p := newPipeline(t, &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}, all: []Rule{}})
+
+	_, err := p.Reserve(context.Background(), baseRequest())
+	if !errors.Is(err, ErrNoRule) {
+		t.Errorf("err = %v，期望 ErrNoRule", err)
 	}
 }
 
@@ -315,6 +508,11 @@ func TestSettleMatchesRuleAtReservationTime(t *testing.T) {
 	}
 	if !src.queries[0].At.Equal(src.queries[1].At) {
 		t.Errorf("结算用的时刻 %v 与预留的 %v 不同", src.queries[1].At, src.queries[0].At)
+	}
+	// 结算把候选集收窄成**实际选中的那一个渠道**：候选里挑一条规则是预留
+	// 的事，结算只能按选定的那个渠道算。
+	if got := src.queries[1].Candidates; len(got) != 1 || got[0].ChannelID != 7 || got[0].OwnerUserID != 9 {
+		t.Errorf("结算的候选 = %+v，期望恰好一个：渠道 7 商家 9", got)
 	}
 }
 
