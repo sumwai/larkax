@@ -159,6 +159,25 @@ func seedChannel(t *testing.T, db *sql.DB) int64 {
 	return id
 }
 
+// seedAPIKey 插一把 API Key，返回 api_keys.id。
+//
+// 直接写一行而不是走 internal/auth 的签发流程：本包要的是
+// idempotency_keys.api_key_id 的外键能成立，而这把 key **从不用于鉴权**，
+// 所以哈希口径在这里没有意义。把它拉进来会让账本层的测试依赖鉴权层，
+// 而那条依赖除了满足一个外键之外什么也不证明。
+func seedAPIKey(t *testing.T, db *sql.DB, userID int64) int64 {
+	t.Helper()
+	var id int64
+	if err := db.QueryRowContext(context.Background(), `
+		INSERT INTO api_keys (user_id, name, key_hash, key_prefix)
+		VALUES ($1, 'ledger-test', $2, 'placeholder')
+		RETURNING id`,
+		userID, "hash-"+itoa(nextID())).Scan(&id); err != nil {
+		t.Fatalf("建 API Key 失败: %v", err)
+	}
+	return id
+}
+
 // walletOf 读一个钱包的当前状态。
 func walletOf(t *testing.T, db *sql.DB, userID int64) (balance, frozen string) {
 	t.Helper()

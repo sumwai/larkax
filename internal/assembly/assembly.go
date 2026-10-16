@@ -48,6 +48,7 @@ import (
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/gateway"
+	"github.com/sumwai/larkax/internal/idempotency"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -184,6 +185,12 @@ func Build(cfg Config) (*App, error) {
 	handler.Version = cfg.Version
 	handler.Now = cfg.Now
 	handler.RateLimiter = ratelimit.New(cfg.Now)
+	// 幂等记录的读与写走同一个 Store：入口读它、落库层在预留那个事务里写它，
+	// 两边读写的列是同一批（见 internal/idempotency 的包注释）。
+	//
+	// 建立记录那一步不在这里接线：它必须与预留同一个事务，所以入口拿到的
+	// 只有「读 / 写回结局」这三个方法（见 api.IdempotencyStore）。
+	handler.Idempotency = idempotency.New(cfg.DB)
 
 	// 限流按 key 的额度生效了，但计数在**进程内**：多实例部署时每个实例
 	// 各计一份，一把 60 RPM 的 key 在 N 个实例上最多能打到 60×N RPM。
@@ -343,6 +350,13 @@ var (
 // 只会在装配时暴露。它同时满足读取侧的接口（见 channels 包里的断言），
 // 所以这一处接错会让候选集取不出来或者健康度写不进去。
 var _ gateway.CallRecorder = (*channels.Recorder)(nil)
+
+// 编译期断言：幂等存储要满足公共入口对它的要求。
+//
+// 同上：api 不该 import 具体实现，而「两边对得上」必须有人检查——
+// 放在这里，三个方法的签名一改就在改的那一次编译失败。少了它，
+// 接不上的表现是「幂等静默不生效」，而那与「没人带这个头」长得一样。
+var _ api.IdempotencyStore = (*idempotency.Store)(nil)
 
 // 编译期断言：限流实现要满足公共入口对它的要求。
 //

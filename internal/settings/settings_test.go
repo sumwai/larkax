@@ -26,6 +26,7 @@ func fullRows() []Row {
 		{Key: "quota.probe_interval_seconds", Value: []byte(`300`)},
 		{Key: "billing.default_asset", Value: []byte(`"CNY"`)},
 		{Key: "calendar.default_region", Value: []byte(`"CN"`)},
+		{Key: "idempotency.retention_hours", Value: []byte(`24`)},
 		{Key: "plugin.enabled", Value: []byte(`false`)},
 		{Key: "plugin.call_timeout_ms", Value: []byte(`5000`)},
 		{Key: "plugin.memory_limit_bytes", Value: []byte(`67108864`)},

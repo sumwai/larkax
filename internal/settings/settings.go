@@ -60,6 +60,8 @@ var Registry = []Spec{
 		Description: "新用户钱包的默认资产品种。"},
 	{Key: "calendar.default_region", Kind: KindString,
 		Description: "分时计价默认使用的节假日地区。"},
+	{Key: "idempotency.retention_hours", Kind: KindInt,
+		Description: "幂等记录的留存小时数。到期由 larkaxctl idempotency cleanup 删除。"},
 	{Key: "plugin.enabled", Kind: KindBool,
 		Description: "是否启用插件系统。关闭时插件不注册、不执行。"},
 	{Key: "plugin.call_timeout_ms", Kind: KindInt,

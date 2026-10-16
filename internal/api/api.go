@@ -39,6 +39,7 @@ import (
 	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/gateway"
+	"github.com/sumwai/larkax/internal/idempotency"
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/relay"
@@ -126,6 +127,31 @@ type Chatter interface {
 	ChatStream(ctx context.Context, req pipeline.Request, upstream *channel.Request) (*gateway.Result, error)
 }
 
+// IdempotencyStore 是幂等记录的读写口。
+//
+// 与 Authenticator / RateLimiter 同一个做法：本包只声明自己要什么，
+// 具体实现（internal/idempotency 的 Store）不必 import 本包。
+//
+// # 为什么只有这三个方法
+//
+// 建立记录那一步**不在这里**。它必须与预留写在同一个事务里，所以它由
+// 落库层在预留那个事务内完成（见 internal/ledger/store 的 SaveReservation），
+// 而不是由入口先记一笔、再让落库层记另一笔——两个事务之间的窗口会让
+// 「记了幂等但没预留」或「预留了但没记幂等」这两种状态真实出现，
+// 而它们都没有任何东西会报出来。
+//
+// 所以本包拿到的能力是：读一条记录、把走完的响应写回去、把没走完的标成失败。
+type IdempotencyStore interface {
+	// Lookup 按 (api_key_id, key) 读一条记录，没有时返回 idempotency.ErrNotFound。
+	Lookup(ctx context.Context, apiKeyID int64, key string) (*idempotency.Record, error)
+
+	// Complete 把一次**走完**的响应写回记录，供后续同键请求重放。
+	Complete(ctx context.Context, apiKeyID int64, key string, status int, contentType string, body []byte) error
+
+	// Fail 把一次**没走完**的请求标成失败。它不会被重放，也不会被重新执行。
+	Fail(ctx context.Context, apiKeyID int64, key string) error
+}
+
 // RateLimiter 按 API Key 判断一次请求是否放行。
 //
 // 它是本包对限流的全部要求：入口只管「这一次要不要放行」，不管计数放在
@@ -159,6 +185,14 @@ type Handler struct {
 	// 见 docs/versioning.md：用户报问题时，「你调的是哪个版本」是最该先
 	// 确认的事。留空则不写这个头。
 	Version string
+
+	// Idempotency 是幂等记录的读写口。为 nil 时忽略请求头 Idempotency-Key，
+	// 每个请求都照常执行一次。
+	//
+	// 「为 nil 就不做幂等」是有意的默认：没接上这条链路时，行为与这个头
+	// 出现之前完全一样。反过来（nil 时回 501）会让一次装配疏漏表现为
+	// 「所有带这个头的请求都失败」，而那比不做幂等更糟。
+	Idempotency IdempotencyStore
 
 	// Now 可注入，便于测试与时间相关的字段。
 	Now func() time.Time
@@ -198,6 +232,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // 再是鉴权，最后才读请求体。这样没通过鉴权的请求不会让我们为它读进
 // 最多 maxRequestBodyBytes 的内存，而 Content-Type 这种一眼可判的
 // 错误也轮不到花代价去解析。
+//
+// 幂等键是这条顺序上的**最后一步**（解析之后、调上游之前）：指纹要算在
+// 解析后的请求上，而它必须在任何有副作用的事情之前生效——排在预留之后
+// 就等于没做，因为那时钱已经冻上了。
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel.Protocol) {
 	if r.Method != http.MethodPost {
 		// Allow 头是 405 的必要部分：没有它，调用方无从知道该用什么方法，
@@ -267,30 +305,77 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 	}
 
 	requestID := requestIDOf(r)
+
+	// 幂等键接在**解析成功之后**：指纹算的是解析后的请求（见
+	// idempotency.HashRequest），而解析失败（400）与必要字段缺失都还没有
+	// 「一次请求」可言，那时也没有任何东西需要幂等——把它们记下来只会让
+	// 一个写错请求体的客户端在改正之后还拿到 409。
+	if key := r.Header.Get(idempotency.HeaderName); key != "" && h.Idempotency != nil {
+		h.serveIdempotent(w, r, protocol, upstream, user, requestID, key)
+		return
+	}
+	h.serveOnce(w, r, protocol, upstream, user, requestID, nil)
+}
+
+// served 是一次请求走完之后的结局。
+//
+// 两个字段都不是「有没有出错」的另一种说法，所以它们不能被合成一个 error：
+// 一个是「能不能重放」，一个是「这次请求到底做没做」。调用方要按它们
+// 分别处置，而「失败了」这句话把两件事都盖住了。
+type served struct {
+	// complete 为 true 表示响应**完整地**写给了调用方，可以重放。
+	//
+	// 为 false 不等于出错：调用方中途断开、上游失败都是正常结局，
+	// 只是这一次没有形成完整的响应。
+	complete bool
+
+	// claimed 为 true 表示这个幂等键已被另一个并发请求占住，本次请求
+	// 什么都没做——预留与冻住的钱都随事务回滚了。
+	//
+	// 它与 complete 的差别在**有没有副作用**：claimed 为 true 时上游
+	// 一次都没被调用过，所以调用方可以直接去等那个正在跑的请求。
+	claimed bool
+}
+
+// serveOnce 走一次原路径：选路、调上游、把结果写出去。
+//
+// claim 非 nil 时它会被带进计费请求，落库层据此把幂等记录与预留写在
+// 同一个事务里（见 pipeline.Request.Idempotency）。
+//
+// 它返回的是**结局**而不是错误：各个失败分支已经自己把响应写出去了
+// （或者判断出没人在听），调用方需要的只是「能不能重放」。
+func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, user User, requestID string, claim *idempotency.Claim) served {
+	req := billingRequest(user, upstream, requestID, protocol)
+	req.Idempotency = claim
+
 	if upstream.Stream {
 		// 流式与非流式的差别只在拿到结果之后怎么写出：前面的检查顺序
 		//（方法、Content-Type、鉴权、请求体、解析、必要字段）完全一样。
-		h.serveStream(w, r, protocol, upstream, user, requestID)
-		return
+		return h.serveStream(w, r, protocol, upstream, req)
 	}
 
-	res, err := h.Chatter.Chat(r.Context(), billingRequest(user, upstream, requestID, protocol), upstream)
+	res, err := h.Chatter.Chat(r.Context(), req, upstream)
 	if err != nil {
+		if errors.Is(err, idempotency.ErrClaimed) {
+			// 键被另一个并发请求抢走了。这不是失败：那次预留整个回滚了，
+			// 一分钱没冻、上游一次没调。交给调用方去等那个请求的结果。
+			return served{claimed: true}
+		}
 		if r.Context().Err() != nil {
 			// 调用方已经断开（取消或超时）。没有人在听，写响应只是白费
 			// 一次序列化；原因留在日志里，那条日志带着请求标识。
 			observe.FromContext(r.Context()).Warn("调用方在响应前断开", "err", err)
-			return
+			return served{}
 		}
 		h.failUpstream(w, r, protocol, err)
-		return
+		return served{}
 	}
 	if res == nil || res.Response == nil {
 		// 非流式入口拿到没有 Response 的结果，只可能是上游那条路走了流式。
 		// 这是装配错误，不是调用方的错。
 		observe.FromContext(r.Context()).Error("非流式入口收到没有响应体的结果")
 		writeError(w, protocol, http.StatusInternalServerError, "internal error")
-		return
+		return served{}
 	}
 
 	// 报给调用方的模型名是**他要的那个**，不是上游回报的那个：
@@ -300,9 +385,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 	if err != nil {
 		observe.FromContext(r.Context()).Error("渲染响应失败", "err", err)
 		writeError(w, protocol, http.StatusInternalServerError, "internal error")
-		return
+		return served{}
 	}
 	writeJSON(w, http.StatusOK, rendered)
+	return served{complete: true}
 }
 
 // serveStream 处理一次流式请求。
@@ -318,32 +404,42 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 // 不 flush 的话事件会攒在 Go 的响应缓冲里，「流式」在客户端看来就是
 // 「等一会儿一次性返回」。这里的取舍与计费无关，但它是这个接口存在的
 // 全部意义。
-func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, user User, requestID string) {
+//
+// # 返回值的含义
+//
+// 只有**完整走完**（收到 done 且结束帧真的写出去了）才返回 complete。
+// 截断的流不能重放：重放一段半截的回答比不重放更坏，调用方会把它当成
+// 一次成功的完整回答。
+func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, req pipeline.Request) served {
 	// 渲染器要在写响应头**之前**建好：协议认不出来时还能回一个 500，
 	// 而头一旦发出去就只剩下截断一条路。
-	renderer, err := newStreamRenderer(protocol, requestID, upstream.Model, h.now(), inputTokensOf(upstream))
+	renderer, err := newStreamRenderer(protocol, req.RequestID, upstream.Model, h.now(), inputTokensOf(upstream))
 	if err != nil {
 		observe.FromContext(r.Context()).Error("流式入口收到未知协议", "err", err)
 		writeError(w, protocol, http.StatusInternalServerError, "internal error")
-		return
+		return served{}
 	}
 
-	res, err := h.Chatter.ChatStream(r.Context(), billingRequest(user, upstream, requestID, protocol), upstream)
+	res, err := h.Chatter.ChatStream(r.Context(), req, upstream)
 	if err != nil {
+		if errors.Is(err, idempotency.ErrClaimed) {
+			// 与并发请求撞上了，理由见 serveOnce 里同一条分支。
+			return served{claimed: true}
+		}
 		if r.Context().Err() != nil {
 			observe.FromContext(r.Context()).Warn("调用方在流开始前断开", "err", err)
-			return
+			return served{}
 		}
 		// 流还没开始，一个字都没发出去：这里的处置与非流式完全一样。
 		h.failUpstream(w, r, protocol, err)
-		return
+		return served{}
 	}
 	if res == nil || res.Events == nil {
 		// 流式入口拿到没有事件流的结果，只可能是上游那条路走了非流式。
 		// 这是装配错误，不是调用方的错。
 		observe.FromContext(r.Context()).Error("流式入口收到没有事件流的结果")
 		writeError(w, protocol, http.StatusInternalServerError, "internal error")
-		return
+		return served{}
 	}
 
 	writeStreamHeaders(w)
@@ -360,7 +456,7 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, protocol c
 		// 连第一帧都写不出去，说明调用方已经不在了。事件流仍然要读空。
 		observe.FromContext(r.Context()).Warn("写首帧失败", "err", err)
 		drainStream(res.Events)
-		return
+		return served{}
 	}
 
 	// 结束帧只在**真的收到 done** 时才写。没有 done 就是截断：不补一个
@@ -376,14 +472,19 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, protocol c
 			// 结算，那笔预留也就一直冻着。
 			observe.FromContext(r.Context()).Warn("转发事件失败", "err", err)
 			drainStream(res.Events)
-			return
+			return served{}
 		}
 	}
-	if done {
-		if err := emit(renderer.finish(w)); err != nil {
-			observe.FromContext(r.Context()).Warn("写结束帧失败", "err", err)
-		}
+	if !done {
+		// 截断的流：客户端收到的是半截回答，所以它**不能**被重放。
+		return served{}
 	}
+	if err := emit(renderer.finish(w)); err != nil {
+		// 结束帧没写出去，客户端看到的同样是半截回答。
+		observe.FromContext(r.Context()).Warn("写结束帧失败", "err", err)
+		return served{}
+	}
+	return served{complete: true}
 }
 
 // drainStream 把剩下的事件读掉。
