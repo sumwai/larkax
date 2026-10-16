@@ -225,6 +225,9 @@ func TestCreateKeysAreDistinct(t *testing.T) {
 }
 
 // TestAuthenticateUpdatesLastUsedAt 检查「用过」这件事被记下来了。
+//
+// 它同时是节流里 `last_used_at IS NULL` 那个分支的落点：节流只决定
+// 之后多久刷新一次，**第一次一定写**。
 func TestAuthenticateUpdatesLastUsedAt(t *testing.T) {
 	db := testDB(t.Context(), t)
 	store := New(db)
@@ -257,6 +260,76 @@ func TestAuthenticateUpdatesLastUsedAt(t *testing.T) {
 	if !lastUsed().Valid {
 		t.Fatal("认证成功后 last_used_at 仍是空")
 	}
+}
+
+// TestAuthenticateThrottlesLastUsedAtWrite 钉住 last_used_at 的写入节流。
+//
+// 两个方向都要钉：窗口内不写、窗口外要写。只测前者的话，一个
+// 「第一次之后再也不用写」的实现照样通过——而那会让这一列永久停在
+// 第一次的值上，看起来与「这把 key 早就不用了」一模一样。
+func TestAuthenticateThrottlesLastUsedAtWrite(t *testing.T) {
+	db := testDB(t.Context(), t)
+	store := New(db)
+	owner := newUser(t.Context(), t, db, userStatusActive)
+
+	created, err := store.Create(t.Context(), CreateParams{UserID: owner.ID})
+	if err != nil {
+		t.Fatalf("创建 key 失败: %v", err)
+	}
+
+	readLastUsed := func(t *testing.T) time.Time {
+		t.Helper()
+		var v time.Time
+		if err := db.QueryRowContext(t.Context(),
+			`SELECT last_used_at FROM api_keys WHERE id = $1`, created.ID).Scan(&v); err != nil {
+			t.Fatalf("读 last_used_at 失败: %v", err)
+		}
+		return v
+	}
+	setLastUsed := func(t *testing.T, at time.Time) {
+		t.Helper()
+		if _, err := db.ExecContext(t.Context(),
+			`UPDATE api_keys SET last_used_at = $2 WHERE id = $1`, created.ID, at); err != nil {
+			t.Fatalf("改 last_used_at 失败: %v", err)
+		}
+	}
+	authenticate := func(t *testing.T) {
+		t.Helper()
+		if _, err := store.Authenticate(t.Context(),
+			request(t.Context(), "x-api-key", created.Plaintext)); err != nil {
+			t.Fatalf("认证失败: %v", err)
+		}
+	}
+
+	// 先认证一次，把 last_used_at 从 NULL 变成有值（那条分支另有用例钉住）。
+	authenticate(t)
+
+	t.Run("窗口内不写", func(t *testing.T) {
+		// 手动放到窗口内，而不是用上一次认证留下的值：那个值只比 now()
+		// 早几毫秒，「没被覆盖」与「被覆盖成一个几乎相同的值」分不开。
+		//
+		// 偏移取 5 秒而不是贴着窗口边缘：判定的是相等与否，写没写都分得清，
+		// 而留出余量之后，这一条不会因为机器慢、两次查询之间拖了几秒就翻脸。
+		setLastUsed(t, time.Now().Add(-5*time.Second))
+		before := readLastUsed(t)
+
+		authenticate(t)
+
+		if after := readLastUsed(t); !after.Equal(before) {
+			t.Errorf("窗口内又写了一次：last_used_at 从 %s 变成 %s", before, after)
+		}
+	})
+
+	t.Run("窗口外要写", func(t *testing.T) {
+		setLastUsed(t, time.Now().Add(-2*lastUsedWriteInterval))
+		before := readLastUsed(t)
+
+		authenticate(t)
+
+		if after := readLastUsed(t); !after.After(before) {
+			t.Errorf("窗口外没有更新：last_used_at 仍是 %s", after)
+		}
+	})
 }
 
 // TestAuthenticateRejectsUnusableKeys 逐个走一遍「不能用的 key」。
