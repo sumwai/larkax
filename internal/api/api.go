@@ -109,8 +109,20 @@ type Authenticator interface {
 //
 // 用窄接口而不是直接依赖 *gateway.Gateway：本包只关心「给它两个请求，
 // 它回一个结果」。*gateway.Gateway 天然满足它。
+//
+// 流式与非流式放在**同一个**接口上，而不是两个字段各要一个实现：两者是
+// 同一种能力（调上游）的两种形状，而拆开会让「装了一个没装另一个」变成
+// 一种能装出来的状态——它的现场是一半请求正常、一半请求回 501。
 type Chatter interface {
 	Chat(ctx context.Context, req pipeline.Request, upstream *channel.Request) (*gateway.Result, error)
+
+	// ChatStream 处理一次流式请求。返回的 Result.Events 由调用方读到关闭
+	// 为止——**必须读到底**：网关的转发 goroutine 在关闭它之前完成结算，
+	// 不读到底那条 goroutine 会阻塞在发送上，那笔预留就一直冻着。
+	//
+	// 返回错误只发生在**上游接受请求之前**（没有可用渠道、连不上、非 2xx），
+	// 那时还没有任何内容发给客户端，调用方可以照常回一个错误响应。
+	ChatStream(ctx context.Context, req pipeline.Request, upstream *channel.Request) (*gateway.Result, error)
 }
 
 // RateLimiter 按 API Key 判断一次请求是否放行。
@@ -254,6 +266,13 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 	}
 
 	requestID := requestIDOf(r)
+	if upstream.Stream {
+		// 流式与非流式的差别只在拿到结果之后怎么写出：前面的检查顺序
+		//（方法、Content-Type、鉴权、请求体、解析、必要字段）完全一样。
+		h.serveStream(w, r, protocol, upstream, user, requestID)
+		return
+	}
+
 	res, err := h.Chatter.Chat(r.Context(), billingRequest(user, upstream, requestID), upstream)
 	if err != nil {
 		if r.Context().Err() != nil {
@@ -283,6 +302,99 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 		return
 	}
 	writeJSON(w, http.StatusOK, rendered)
+}
+
+// serveStream 处理一次流式请求。
+//
+// # 两个阶段的分界是「响应头发出去没有」
+//
+// 拿到事件流**之前**的一切失败都还能照常回一个错误响应（状态码与错误体都
+// 按调用协议给）；之后的一切失败只能作为流里的事件表达。分界点就是
+// ChatStream 的返回值：它只在**上游接受请求之前**失败时才返回错误。
+//
+// # 每帧都要 flush
+//
+// 不 flush 的话事件会攒在 Go 的响应缓冲里，「流式」在客户端看来就是
+// 「等一会儿一次性返回」。这里的取舍与计费无关，但它是这个接口存在的
+// 全部意义。
+func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, user User, requestID string) {
+	// 渲染器要在写响应头**之前**建好：协议认不出来时还能回一个 500，
+	// 而头一旦发出去就只剩下截断一条路。
+	renderer, err := newStreamRenderer(protocol, requestID, upstream.Model, h.now(), inputTokensOf(upstream))
+	if err != nil {
+		observe.FromContext(r.Context()).Error("流式入口收到未知协议", "err", err)
+		writeError(w, protocol, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	res, err := h.Chatter.ChatStream(r.Context(), billingRequest(user, upstream, requestID), upstream)
+	if err != nil {
+		if r.Context().Err() != nil {
+			observe.FromContext(r.Context()).Warn("调用方在流开始前断开", "err", err)
+			return
+		}
+		// 流还没开始，一个字都没发出去：这里的处置与非流式完全一样。
+		h.failUpstream(w, r, protocol, err)
+		return
+	}
+	if res == nil || res.Events == nil {
+		// 流式入口拿到没有事件流的结果，只可能是上游那条路走了非流式。
+		// 这是装配错误，不是调用方的错。
+		observe.FromContext(r.Context()).Error("流式入口收到没有事件流的结果")
+		writeError(w, protocol, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeStreamHeaders(w)
+	rc := http.NewResponseController(w)
+	// 写一帧再 flush。写失败与 flush 失败在这里是同一件事：调用方不在了。
+	emit := func(frameErr error) error {
+		if frameErr != nil {
+			return frameErr
+		}
+		return rc.Flush()
+	}
+
+	if err := emit(renderer.Start(w)); err != nil {
+		// 连第一帧都写不出去，说明调用方已经不在了。事件流仍然要读空。
+		observe.FromContext(r.Context()).Warn("写首帧失败", "err", err)
+		drainStream(res.Events)
+		return
+	}
+
+	// 结束帧只在**真的收到 done** 时才写。没有 done 就是截断：不补一个
+	// 正常结束，调用方据此知道回答是半截的（见 stream.go 的说明）。
+	done := false
+	for ev := range res.Events {
+		if ev.Kind == "done" {
+			done = true
+		}
+		if err := emit(renderer.Event(w, ev)); err != nil {
+			// 写不出去：调用方多半已经断开。剩下的不再写，但**必须把事件流
+			// 读空**——网关的转发 goroutine 阻塞在发送上，不读空它就不会
+			// 结算，那笔预留也就一直冻着。
+			observe.FromContext(r.Context()).Warn("转发事件失败", "err", err)
+			drainStream(res.Events)
+			return
+		}
+	}
+	if done {
+		if err := emit(renderer.Finish(w)); err != nil {
+			observe.FromContext(r.Context()).Warn("写结束帧失败", "err", err)
+		}
+	}
+}
+
+// drainStream 把剩下的事件读掉。
+//
+// 它必须在**后台**做：事件流的另一端可能还在等上游吐下一片，在请求处理
+// 的 goroutine 里等下去会把一个已经断开的请求一直挂在这里。读空之后网关
+// 才会走结算，那笔钱也才会被处置。
+func drainStream(events <-chan channel.StreamEvent) {
+	go func() {
+		for range events {
+		}
+	}()
 }
 
 // failUpstream 把一次上游调用的失败翻译成响应，并把原因写进日志。

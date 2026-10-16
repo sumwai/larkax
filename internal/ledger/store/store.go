@@ -152,11 +152,15 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 			(request_id, user_id, channel_id, canonical_model, protocol,
 			 streamed, reserved_amount, reserved_asset, status,
 			 pricing_rule_id, pricing_expr_snapshot, started_at)
-		VALUES ($1, $2, NULLIF($3, 0), $4, $5, false, $6::numeric, $7, 'pending',
+		VALUES ($1, $2, NULLIF($3, 0), $4, $5, $11, $6::numeric, $7, 'pending',
 		        NULLIF($8, 0), NULLIF($9, ''), $10)
 		RETURNING id`,
 		req.RequestID, r.UserID, req.ChannelID, req.CanonicalModel, "openai",
 		r.Amount.String(), r.Asset, r.RuleID, r.PricingExprSnap, r.RuleMatchedAt,
+		// 是不是流式请求由入口告诉计费层（见 pipeline.Request.Streamed）：
+		// 这一层看不出请求的形状，也就不该替它填一个默认值——写死 false
+		// 会让每条流式账单都记成非流式，而那张表正是事后区分两条路的依据。
+		req.Streamed,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("写预留记录失败: %w", err)

@@ -171,6 +171,13 @@ type Request struct {
 	//
 	// 为 0 表示尚未落库——此时分录也构造得出来，只是追溯时少一层关联。
 	BillingRequestID int64
+
+	// Streamed 说明这次请求走的是流式入口，落进 billing_requests.streamed。
+	//
+	// 两条路的失败方式与用量来源都不同（流式的用量可能是估算的），而事后
+	// 只看金额分不出这笔账是哪条路产生的。它由入口设置：计费这一层看不出
+	// 请求是不是流式的，也不该去猜。
+	Streamed bool
 }
 
 // Reservation 是预留的结果，调用方需要把它落库。
