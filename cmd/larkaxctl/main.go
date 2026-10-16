@@ -50,6 +50,7 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl user create --name <用户名>     创建用户（stdout 只有新用户的 ID）
   larkaxctl apikey create --user <用户>     创建一把 API Key（明文只打印这一次）
   larkaxctl reconcile                      跑一轮对账（开关与口径见 settings 表）
+  larkaxctl rotate                         轮换渠道凭证的主密钥（默认干跑）
   larkaxctl snapshot cleanup               按留存期删除到期的快照分区
   larkaxctl version                        打印版本号
 
@@ -73,6 +74,8 @@ func run() error {
 		return runMigrate(os.Args[2:])
 	case "reconcile":
 		return runReconcile(os.Args[2:])
+	case "rotate":
+		return runRotate(os.Args[2:])
 	case "snapshot":
 		return runSnapshot(os.Args[2:])
 	case "user":

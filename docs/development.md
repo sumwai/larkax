@@ -165,6 +165,21 @@ LARKAX_MASTER_KEYS="current:<MASTER_KEY>,previous:<MASTER_KEY>"
 openssl rand -base64 32
 ```
 
+### 轮换
+
+换主密钥分两步：先把新的放进 `LARKAX_MASTER_KEYS` 的**首位**（旧的留在后面）并重启，
+再给存量密文补上新的副本。
+
+```sh
+go run ./cmd/larkaxctl rotate            # 干跑：列出有多少行要改，不写库
+go run ./cmd/larkaxctl rotate --apply    # 轮换：可中断、可重跑
+go run ./cmd/larkaxctl rotate --verify   # 每一行是否都含新主密钥
+```
+
+顺序是「新钥匙放进首位 → 轮换 → `--verify` 退出码为 0 → 才把旧钥匙去掉」。
+旧钥匙去掉得太早，那些还没轮换到的行就再也解不开了。完整说明见
+`larkaxctl rotate -h`。
+
 ## 建表
 
 ```sh
