@@ -3,6 +3,7 @@ package calendar
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -381,5 +382,162 @@ func TestPeakAtPropagatesSourceError(t *testing.T) {
 	}
 	if _, err := cal.PeakAt(context.Background(), RegionCN, time.Now(), PeakSchedule{}); !errors.Is(err, boom) {
 		t.Errorf("数据源错误未透出: %v", err)
+	}
+}
+
+// ── 变异测试补的用例 ────────────────────────────────────────────────────
+//
+// 来自变异测试（gremlins unleash，需 --timeout-coefficient=60：
+// 默认值下 79 个变异会被误判为超时而非存活）。
+//
+// 存活变异集中在时段边界的**形状与校验**上，而时段判定的结果直接
+// 决定按高峰还是低谷计价。
+
+// 跨零点段的显示要标出来，否则 22:00-02:00 看起来像写反了。
+//
+// 变异：`EndMinute <= StartMinute` 改成 `<`，恰好相等（全天段）会被
+// 标成「次日」——而全天段不是跨零点。
+func TestPeakWindowStringMarksOvernight(t *testing.T) {
+	cases := []struct {
+		start, end int
+		wantSep    string
+		why        string
+	}{
+		{9 * 60, 18 * 60, "-", "同日内"},
+		{22 * 60, 2 * 60, "-次日", "跨零点"},
+		{0, 0, "-", "全天段不是跨零点"},
+	}
+	for _, tc := range cases {
+		w, err := NewPeakWindow(tc.start, tc.end)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.why, err)
+		}
+		if !strings.Contains(w.String(), tc.wantSep) {
+			t.Errorf("%s（%d-%d）：%q 里缺少 %q", tc.why, tc.start, tc.end, w.String(), tc.wantSep)
+		}
+	}
+}
+
+// 时段是否落在一分钟里：三种形态（同日内 / 跨零点 / 全天）各自的边界。
+//
+// 变异：`m >= w.StartMinute && m < w.EndMinute` 里的 `<` 改成 `<=`，
+// 结束那一分钟会被算进去——而区间是**前闭后开**的，否则相邻两段的
+// 交界处会被算两次。
+func TestPeakWindowContainsMinuteBoundaries(t *testing.T) {
+	// 同日内 09:00-18:00
+	w, _ := NewPeakWindow(9*60, 18*60)
+	if w.containsMinute(9*60 - 1) {
+		t.Error("起点之前不该在内")
+	}
+	if !w.containsMinute(9 * 60) {
+		t.Error("起点应当在内（前闭）")
+	}
+	if !w.containsMinute(18*60 - 1) {
+		t.Error("终点前一分钟应当在内")
+	}
+	if w.containsMinute(18 * 60) {
+		t.Error("终点不该在内（后开）——否则相邻两段交界处会算两次")
+	}
+
+	// 跨零点 22:00-02:00
+	overnight, _ := NewPeakWindow(22*60, 2*60)
+	if !overnight.containsMinute(23 * 60) {
+		t.Error("22:00-02:00 里 23:00 应当在内")
+	}
+	if !overnight.containsMinute(1 * 60) {
+		t.Error("22:00-02:00 里 01:00 应当在内（跨到次日）")
+	}
+	if overnight.containsMinute(12 * 60) {
+		t.Error("22:00-02:00 里 12:00 不该在内")
+	}
+
+	// 全天段：每一分钟都在内
+	all, _ := NewPeakWindow(0, 0)
+	for _, m := range []int{0, 1, 12 * 60, 24*60 - 1} {
+		if !all.containsMinute(m) {
+			t.Errorf("全天段里 %d 应当在内", m)
+		}
+	}
+}
+
+// 全天段与其他段并列要被拒——安静接受会让「改了一段却没有任何效果」。
+//
+// 变异：`len(s.Windows) > 1` 改成 `>= 1`，单独一个全天段也会被误拒
+// （而那是最简单的「全天高峰」配置）；或改成 `> 2`，两段的情形就漏了。
+func TestFullDayWindowCannotCoexist(t *testing.T) {
+	all, _ := NewPeakWindow(0, 0)
+	morning, _ := NewPeakWindow(9*60, 12*60)
+
+	// 单个全天段是合法的（等价于「全天都是高峰」）
+	if _, err := NewPeakSchedule(true, all); err != nil {
+		t.Errorf("单独一个全天段应当合法: %v", err)
+	}
+	// 全天段与别的并列要被拒
+	if _, err := NewPeakSchedule(true, all, morning); err == nil {
+		t.Error("全天段与别的时段并列应当被拒")
+	}
+	// 两段都不是全天，合法
+	if _, err := NewPeakSchedule(true, morning, all); err == nil {
+		t.Error("全天段放在后面同样应当被拒")
+	}
+}
+
+// 时段校验要挡住起点与终点都越界的值，而不只是其中一种。
+//
+// 变异：`w.StartMinute < 0 || w.StartMinute > 1440` 里的某一半被改掉。
+func TestPeakWindowValidateBounds(t *testing.T) {
+	bad := []int{-1, 1441, 2000}
+	for _, v := range bad {
+		if _, err := NewPeakWindow(v, 10); err == nil {
+			t.Errorf("起点 %d 越界，应当被拒", v)
+		}
+		if _, err := NewPeakWindow(10, v); err == nil {
+			t.Errorf("终点 %d 越界，应当被拒", v)
+		}
+	}
+	// 取值范围是 [0, 1440)：1440 表示「次日零点」，用 0 表达即可，
+	// 所以它越界。这条边界值得钉——差一就会让「全天」有两种写法。
+	if _, err := NewPeakWindow(1440, 1440); err == nil {
+		t.Error("1440 越界（区间是 [0,1440)），应当被拒")
+	}
+	// 两端都是 0 是合法的：它就是「全天」的写法
+	if _, err := NewPeakWindow(0, 0); err != nil {
+		t.Errorf("0-0 是全天段，应当合法: %v", err)
+	}
+	// 恰好落在上界内侧的一分钟合法
+	if _, err := NewPeakWindow(1439, 1439); err != nil {
+		t.Errorf("1439 应当合法: %v", err)
+	}
+}
+
+// 时段校验的错误信息要指出是**第几段**出的问题。
+//
+// 变异：`i+1` 改成 `i`，报错指向的段号会差一——而配置者会照它去改错段。
+func TestPeakScheduleValidateNamesTheSegment(t *testing.T) {
+	good, _ := NewPeakWindow(9*60, 12*60)
+	// 第二段非法（起点越界）
+	_, err := NewPeakSchedule(true, good, PeakWindow{StartMinute: -1, EndMinute: 10})
+	if err == nil {
+		t.Fatal("应当报错")
+	}
+	if !strings.Contains(err.Error(), "2") {
+		t.Errorf("错误信息应指出是第 2 段：%v", err)
+	}
+}
+
+// 多段里全天段的位置不同，报错里的段号也要跟着变。
+//
+// 变异：遍历时用了固定的索引。
+func TestFullDaySegmentNumberInError(t *testing.T) {
+	a, _ := NewPeakWindow(9*60, 12*60)
+	b, _ := NewPeakWindow(13*60, 15*60)
+	all, _ := NewPeakWindow(0, 0)
+
+	_, err := NewPeakSchedule(true, a, b, all)
+	if err == nil {
+		t.Fatal("应当报错")
+	}
+	if !strings.Contains(err.Error(), "3") {
+		t.Errorf("全天段在第 3 位，错误信息应指出 3：%v", err)
 	}
 }
