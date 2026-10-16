@@ -184,6 +184,26 @@ func seedRule(t *testing.T, db *sql.DB, model, expr string) int64 {
 	return id
 }
 
+// seedChannelRule 插一条渠道作用域的计价规则，返回规则 id。
+//
+// 与 seedRule 分开是因为渠道级规则要挂 channel_id：它表达的是「这个渠道
+// 自己的价」，平台规则只是兜底。两者同时存在时渠道价胜出（见
+// internal/pricing 的裁决次序）。
+func seedChannelRule(t *testing.T, db *sql.DB, channelID int64, model, expr string) int64 {
+	t.Helper()
+
+	var id int64
+	if err := db.QueryRowContext(context.Background(), `
+		INSERT INTO pricing_rules (scope, channel_id, name, model_patterns, expr, priority)
+		VALUES ('channel', $1, $2, to_jsonb(ARRAY[$3]::text[]), $4, 0)
+		RETURNING id`,
+		channelID, unique("e2e-rule"), model, expr,
+	).Scan(&id); err != nil {
+		t.Fatalf("插渠道计价规则失败: %v", err)
+	}
+	return id
+}
+
 func testSealer(t *testing.T) *credential.Sealer {
 	t.Helper()
 
@@ -575,6 +595,85 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	if len(sent.Messages) != 1 || sent.Messages[0].Content != "你好" {
 		t.Errorf("上游收到的 messages = %+v，期望原样转发的一条用户消息", sent.Messages)
 	}
+}
+
+// 预留的上界要覆盖候选里**更贵的**那条规则，而不是只按平台规则算。
+//
+// 平台价便宜、这条候选渠道自己的价贵一百倍。只按平台规则预留的话，预留
+// 会小于结算，结算撞上 Capped、实际金额被预留截住、差额由平台吃掉——
+// 而账目仍然是平的，所以这是**静默少收**：请求成功、响应正常、钱没扣够。
+//
+// 断言要落到具体金额，而且要看库里的 final_amount：响应码与它无关。
+func TestReserveCoversPricierCandidateRule(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+
+	const balance = "100"
+	model := unique("e2e-model-candidates")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, balance)
+	key := issueKey(t, db, user)
+
+	fake := &fakeUpstream{db: db, userID: user, model: model}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	ch := seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
+	// 平台兜底价：每 token 1e-5 / 3e-5。
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+	// 这条渠道自己的价：贵一百倍。结算是按它算的。
+	seedChannelRule(t, db, ch, model, `{"prompt": 0.001, "completion": 0.002}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	status, body := postChat(t, public.URL+"/v1/chat/completions", key, chatBody(model))
+	if status != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
+	}
+
+	var (
+		status_  string
+		reserved string
+		final    string
+	)
+	if err := db.QueryRowContext(ctx, `
+		SELECT status, reserved_amount::text, final_amount::text
+		  FROM billing_requests
+		 WHERE user_id = $1
+		 ORDER BY id DESC LIMIT 1`, user,
+	).Scan(&status_, &reserved, &final); err != nil {
+		t.Fatalf("查账单失败: %v", err)
+	}
+
+	if status_ != "settled" {
+		t.Errorf("账单状态 = %q，期望 settled", status_)
+	}
+
+	// 一、结算金额按渠道价算：假上游报的是 12 输入 / 7 输出，
+	// 12 × 0.001 + 7 × 0.002 = 0.012 + 0.014 = 0.026。
+	//
+	// 这一条是核心。只按平台价预留时，金额会被 Capped 截成平台价那个数
+	// （0.00194 上下），对不上 0.026——而请求照样 200。
+	if !sameDecimal(final, "0.026") {
+		t.Errorf("结算金额 = %s，期望 0.026（12 × 0.001 + 7 × 0.002，渠道自己的价）；"+
+			"小于它说明预留按平台价算小了，差额被平台吃掉", final)
+	}
+
+	// 二、预留必须覆盖渠道价的输出侧：max_tokens = 64，64 × 0.002 = 0.128。
+	// 平台价那一侧只有 64 × 0.00003 = 0.00192，差两个数量级。
+	if greaterThan("0.128", reserved) {
+		t.Errorf("预留 = %s，期望不小于 0.128（按渠道价与 max_tokens = 64 算的输出侧）", reserved)
+	}
+	if greaterThan(final, reserved) {
+		t.Errorf("预留 %s 小于结算 %s——预留是结算的上界", reserved, final)
+	}
+
+	// 三、钱：扣掉实际金额，冻结额回到零。
+	assertWallet(t, db, user, "99.974", "0")
 }
 
 // 失败路径的回归：上游失败时那笔预留必须被释放。

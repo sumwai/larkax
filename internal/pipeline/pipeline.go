@@ -43,11 +43,25 @@ import (
 //
 // 抽成接口而不是直接查库：规则的匹配与优先级裁决是 SQL 的活，
 // 而这一层只关心「拿到一条能求值的规则」。
+//
+// 两个方法分别服务计费的两个阶段：结算时渠道已经选定，只需要**一条**规则；
+// 预留时只有一个候选集，需要**每个候选各一条**（见 Reserve）。
 type RuleSource interface {
-	// Match 返回适用的规则。没有匹配时返回 ErrNoRule——
-	// **不要返回一条默认的零价规则**：那会让「没配价」表现为「免费」，
-	// 而免费是最不容易被发现的错账。
+	// Match 返回这次请求实际会用的那一条规则：用于结算，那时渠道已经
+	// 选定，req.Candidates 恰好一个元素。
+	//
+	// 没有匹配时返回 ErrNoRule——**不要返回一条默认的零价规则**：
+	// 那会让「没配价」表现为「免费」，而免费是最不容易被发现的错账。
 	Match(ctx context.Context, req RuleQuery) (Rule, error)
+
+	// MatchAll 返回候选集里**每个候选各自**适用的那一条规则：用于预留。
+	//
+	// 返回的规则集对每个候选至多一条（裁决次序与 Match 相同）。一个候选
+	// 都匹配不上时返回空集——**不要给它编一条零价规则**，理由同上。
+	//
+	// 调用方对空集要有明确处置：空集意味着算不出上界，而不是零价
+	// （见 Reserve）。
+	MatchAll(ctx context.Context, req RuleQuery) ([]Rule, error)
 }
 
 // Rule 是一条待求值的计价规则。
@@ -72,17 +86,32 @@ func (r Rule) CacheKey() string {
 type RuleQuery struct {
 	// CanonicalModel 是规范模型名（不是上游名）。
 	CanonicalModel string
-	// ChannelID 是最终选中的渠道，0 表示尚未选定。
+	// Candidates 是这次请求可能用到的渠道，每个候选带它自己的商家。
 	//
-	// 渠道级规则需要在选路之后才能匹配，而预留要在选路之前发生——
-	// 所以预留时传 0，结算时传实际渠道。传 0 时渠道级与商家级规则都
-	// 匹配不上，**预留因此只按平台作用域的规则算**：平台规则比渠道级
-	// 规则便宜时，预留会不够。这是已知问题，见 #150。
-	ChannelID int64
-	// OwnerUserID 是渠道所属的商家，用于匹配商家级规则。
-	OwnerUserID int64
+	// 两个阶段给的是不同大小的集合：
+	//
+	//   - 预留在选路**之前**，给的是全部候选。每个候选取它自己适用的
+	//     那一条规则，预留按其中金额最大的算——只有一个候选会真正服务
+	//     这次请求，所以是取最大，不是求和（见 Reserve）。
+	//   - 结算在选路**之后**，给的是**恰好一个**候选：实际选中的渠道。
+	//
+	// 两个阶段共用一个字段，是因为它们问的是同一件事——「这次请求涉及
+	// 哪些渠道」。给结算单开一对 channel/owner 字段会让同一份信息有两个
+	// 表示，而它们迟早会不一致。
+	Candidates []RuleCandidate
 	// At 是匹配用的时刻。生效时间窗口按它判。
 	At time.Time
+}
+
+// RuleCandidate 是匹配规则时的一个候选渠道。
+type RuleCandidate struct {
+	// ChannelID 是渠道标识。
+	ChannelID int64
+	// OwnerUserID 是渠道所属的商家，0 表示平台自营。
+	//
+	// 它必须跟着渠道一起来：商家级规则按 owner 匹配，只给渠道 id
+	// 匹配不到商家价，而漏掉一条更贵的商家价会让预留小于结算。
+	OwnerUserID int64
 }
 
 // ErrNoRule 表示没有匹配的计价规则。
@@ -113,7 +142,16 @@ type Request struct {
 	UserID    int64
 
 	CanonicalModel string
-	// ChannelID 与 OwnerUserID 是渠道级与商家级规则的匹配条件。
+
+	// Candidates 是这次请求**可能**选中的渠道集合，供预留取上界。
+	//
+	// 预留发生在选路之前，那时还不知道会选中谁（见 ChannelID），所以
+	// 上界只能按候选集取。空集合算不出上界，Reserve 会拒绝——见那里的
+	// 注释。规则匹配之外没有别处读它。
+	Candidates []RuleCandidate
+	// ChannelID 与 OwnerUserID 是**实际选中**的渠道与商家：选路之前
+	// 为 0，结算时由调用方填上实际的那个。规则匹配之外，账本还要按
+	// ChannelID 记下这次请求走的是哪条渠道。
 	ChannelID   int64
 	OwnerUserID int64
 
@@ -148,6 +186,15 @@ type Reservation struct {
 	// Amount 是冻结的金额。它是**上界**：结算不会超过它。
 	Amount money.Amount
 
+	// RuleID 与 PricingExprSnap 是**算这个上界用的那条**规则。
+	//
+	// 预留时候选不止一个，没有「唯一适用的一条」，所以这里存的不是
+	// 「这次请求会用的规则」，而是候选规则里**给出最大金额的那一条**
+	// （见 Reserve）。它的用途是让界面能解释「这笔钱是怎么估出来的」：
+	// 把这条规则的表达式摊开，上界里的每一项是按什么价算的就一目了然。
+	//
+	// 它**不代表**结算会用的规则：结算按实际选中的渠道重新匹配，
+	// 结果可能不是这一条（见 Settle）。
 	RuleID            int64
 	PricingExprSnap   string
 	RuleMatchedAt     time.Time
@@ -221,34 +268,98 @@ type Charge struct {
 }
 
 // Reserve 计算并返回这次请求的预留。
+//
+// # 上界按**候选集**取
+//
+// 预留发生在选路之前，所以「这次请求会按哪条规则计价」还没有答案——
+// 手上只有一个候选集。此时取上界的口径是：对**每个候选**取它自己适用
+// 的那一条规则，各求一次最坏情况，取其中**最大**的金额。
+//
+// 只有一个候选会真正服务这次请求，所以是取最大，不是求和。
+//
+// 不能只按平台规则算：渠道级与商家级规则可以比平台规则贵，而按平台
+// 规则预留会让预留小于结算。那时结算撞上 Capped，实际金额被预留截住，
+// 差额由平台吃掉——账目仍然是平的，所以这是**静默少收**。
+//
+// 候选集为空时**拒绝**，而不是退回去按平台规则算：候选里的规则可能
+// 一条比一条贵，按空集算出来的任何数都是下界而不是上界。这条路径真实
+// 可达——还没选路就调到这里，或者上游一个可用渠道都没有（网关在更前面
+// 就会拦下空候选，见 gateway.begin，但本函数是公开的，不能假设调用方
+// 一定拦过）。
 func (p *Pipeline) Reserve(ctx context.Context, req Request) (*Reservation, error) {
 	if err := req.validate(); err != nil {
 		return nil, err
 	}
+	if len(req.Candidates) == 0 {
+		return nil, fmt.Errorf("%w: 候选渠道集合为空，算不出预留上界", ErrNoRule)
+	}
 
-	rule, err := p.Rules.Match(ctx, RuleQuery{
+	// 求值环境只造一次：所有候选要在**同一个时刻**下比较，否则跨整点的
+	// 请求会拿两个时刻去算同一笔钱，而取最大就不再是在同一个条件下取的。
+	evalEnv := p.env(req.Usage)
+
+	rules, err := p.Rules.MatchAll(ctx, RuleQuery{
 		CanonicalModel: req.CanonicalModel,
-		ChannelID:      req.ChannelID,
-		OwnerUserID:    req.OwnerUserID,
-		At:             p.now(),
+		Candidates:     req.Candidates,
+		At:             evalEnv.At,
 	})
 	if err != nil {
 		return nil, err
 	}
-
-	program, err := p.programs().Get(rule.CacheKey(), rule.Source)
-	if err != nil {
-		return nil, fmt.Errorf("%w: 规则 %d 无法编译: %w", ErrRuleBroken, rule.ID, err)
+	if len(rules) == 0 {
+		return nil, fmt.Errorf("%w: 候选渠道 %d 个，但没有一条适用的计价规则",
+			ErrNoRule, len(req.Candidates))
 	}
 
-	// 预留用**最坏情况**求值：每个价格位置取所有分支里的最高价。
-	//
-	// 不用「按当前时刻求一次」：规则可以按时间、按缓存命中与否分档，
-	// 而一次普通求值只给出其中一支的价。用那一支去预留，
-	// 结算走到更贵的那一支时就会超过预留。
-	worst, err := program.EvalWorstCase(p.env(req.Usage))
+	// 逐个候选求上界，留最大的那一个。剩下的那条规则连同它的求值结果
+	// 一起带上——见 Reservation.RuleID。
+	var best *candidateBound
+	for _, rule := range rules {
+		bound, err := p.boundOf(rule, evalEnv, req)
+		if err != nil {
+			return nil, err
+		}
+		if best == nil || bound.amount.Cmp(best.amount) > 0 {
+			best = &bound
+		}
+	}
+
+	return &Reservation{
+		RequestID:         req.RequestID,
+		UserID:            req.UserID,
+		Asset:             req.asset(),
+		Amount:            best.amount,
+		RuleID:            best.rule.ID,
+		PricingExprSnap:   best.rule.Source,
+		RuleMatchedAt:     best.at,
+		ReservedBreakdown: best.preview,
+	}, nil
+}
+
+// candidateBound 是**一条**候选规则给出的上界，以及解释它所需的依据。
+type candidateBound struct {
+	rule    Rule
+	amount  money.Amount
+	at      time.Time
+	preview billing.Breakdown
+}
+
+// boundOf 对一条候选规则求最坏情况，算出它对应的预留金额。
+//
+// 预留用**最坏情况**求值：每个价格位置取所有分支里的最高价。
+//
+// 不用「按当前时刻求一次」：规则可以按时间、按缓存命中与否分档，
+// 而一次普通求值只给出其中一支的价。用那一支去预留，
+// 结算走到更贵的那一支时就会超过预留。
+func (p *Pipeline) boundOf(rule Rule, env expr.Env, req Request) (candidateBound, error) {
+	program, err := p.programs().Get(rule.CacheKey(), rule.Source)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrRuleBroken, err)
+		return candidateBound{}, fmt.Errorf("%w: 规则 %d 无法编译: %w", ErrRuleBroken, rule.ID, err)
+	}
+
+	worst, err := program.EvalWorstCase(env)
+	if err != nil {
+		return candidateBound{}, fmt.Errorf("%w: %w", ErrRuleBroken, err)
 	}
 
 	amount, err := billing.Reserve(billing.ReserveRequest{
@@ -261,7 +372,7 @@ func (p *Pipeline) Reserve(ctx context.Context, req Request) (*Reservation, erro
 		MaxTokens:        req.MaxTokens,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("计算预留失败: %w", err)
+		return candidateBound{}, fmt.Errorf("计算预留失败: %w", err)
 	}
 
 	// 预留明细按最坏情况的价与「最大可能用量」算，供界面展示
@@ -276,16 +387,7 @@ func (p *Pipeline) Reserve(ctx context.Context, req Request) (*Reservation, erro
 		},
 		worst.Prices, worst.Charges)
 
-	return &Reservation{
-		RequestID:         req.RequestID,
-		UserID:            req.UserID,
-		Asset:             req.asset(),
-		Amount:            amount,
-		RuleID:            rule.ID,
-		PricingExprSnap:   rule.Source,
-		RuleMatchedAt:     worst.At,
-		ReservedBreakdown: preview,
-	}, nil
+	return candidateBound{rule: rule, amount: amount, at: worst.At, preview: preview}, nil
 }
 
 // Settle 按实际结果结算并生成账本分录。
@@ -316,11 +418,17 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 
 	// 结算用规则**当时**的那份。预留与结算必须用同一个规则版本——
 	// 规则在请求在途期间被改过的话，用新规则结算会算出与预留无缘由的差额。
+	//
+	// 候选集在这里收窄成**实际选中的那一个渠道**：结算按它匹配，
+	// 而不是按预留时的那一整个候选集。实际选中的渠道必是候选之一，
+	// 而它的规则在预留取上界时算过，所以结算不会超过预留。
 	rule, err := p.Rules.Match(ctx, RuleQuery{
 		CanonicalModel: req.CanonicalModel,
-		ChannelID:      req.ChannelID,
-		OwnerUserID:    req.OwnerUserID,
-		At:             reserved.RuleMatchedAt,
+		Candidates: []RuleCandidate{{
+			ChannelID:   req.ChannelID,
+			OwnerUserID: req.OwnerUserID,
+		}},
+		At: reserved.RuleMatchedAt,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("结算时重新取规则失败: %w", err)
@@ -383,6 +491,8 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 // 时间从 reserved.RuleMatchedAt（或 p.now()）来，**不读墙钟**：
 // 预留与结算要给出同一个答案，而读墙钟会让跨整点的请求按低谷预留、
 // 按高峰结算。这是 expr 包把时间做成显式入参的原因，这里照做。
+//
+// 现状与上面这段不符：两个调用点拿到的都是 p.now()，见 #160。
 func (p *Pipeline) env(usage billing.Usage) expr.Env {
 	return expr.Env{
 		Usage:    usage,
