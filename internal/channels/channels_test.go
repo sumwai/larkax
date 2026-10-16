@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/route"
@@ -401,7 +400,7 @@ func TestCandidateMapsChannelFields(t *testing.T) {
 	now := time.Now()
 	row := candidateRow{
 		id: 7, name: "示例渠道", channelType: "openai-compatible",
-		baseURL: "https://api.example.com/v1", protocol: "openai",
+		baseURL: "https://api.example.com/v1",
 		models:  []string{"model-a", "model-b"},
 		setting: []byte(`{"supports_tools":true}`),
 		weight:  3, priority: 5, ownerUserID: 42,
@@ -414,8 +413,7 @@ func TestCandidateMapsChannelFields(t *testing.T) {
 
 	if got.Channel.ID != 7 || got.Channel.Name != "示例渠道" ||
 		got.Channel.Type != "openai-compatible" ||
-		got.Channel.BaseURL != "https://api.example.com/v1" ||
-		got.Channel.Protocol != channel.ProtocolOpenAI {
+		got.Channel.BaseURL != "https://api.example.com/v1" {
 		t.Errorf("Channel 映射不完整: %+v", got.Channel)
 	}
 	if got.Channel.Credential != "test-key-placeholder" {
@@ -463,8 +461,8 @@ func TestCandidateSelectable(t *testing.T) {
 	now := time.Now()
 	row := candidateRow{
 		id: 1, name: "c", channelType: "openai-compatible",
-		baseURL: "https://api.example.com/v1", protocol: "openai",
-		models: []string{"model-a"},
+		baseURL: "https://api.example.com/v1",
+		models:  []string{"model-a"},
 	}
 	cand, err := row.candidate("test-key-placeholder", now)
 	if err != nil {

@@ -135,11 +135,6 @@ func (c Candidate) Eligible() (bool, string) {
 	if c.Channel.Credential == "" {
 		return false, "渠道缺少凭证"
 	}
-	switch c.Channel.Protocol {
-	case channel.ProtocolOpenAI, channel.ProtocolAnthropic, channel.ProtocolCustom:
-	default:
-		return false, fmt.Sprintf("协议 %q 未知", c.Channel.Protocol)
-	}
 	return true, ""
 }
 
