@@ -234,6 +234,10 @@ func (s *Store) Save(ctx context.Context, req pipeline.Request, charge *pipeline
 //
 // 上游失败不计费，但**预留必须释放**：不释放的话那笔钱会一直冻着，
 // 而界面上表现为「用户说他的钱不见了」。
+//
+// 「释放一个不存在的东西」与「解冻时没有钱包行可落」是两件事，别混：
+// 前者是没有预留记录（也就没冻过钱），目的已经达到，返回 nil；后者是
+// 数据不一致——冻结额长在钱包行上，行不在就真的什么都没释放，报错回滚。
 func (s *Store) Release(ctx context.Context, req pipeline.Request) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -280,12 +284,23 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request) error {
 	// 而那一刻的差额是唯一的证据——夹到零会把两边同时归零，差额从此
 	// 无处可查。交给表上的 CHECK 拒绝，由 unfreezeFailure 翻译成
 	// ErrFrozenUnderflow。
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE user_wallets
 		   SET frozen = frozen - $3::numeric, updated_at = now()
 		 WHERE user_id = $1 AND asset = $2`,
-		userID, asset, amount); err != nil {
+		userID, asset, amount)
+	if err != nil {
 		return unfreezeFailure(err, fmt.Sprintf("用户 %d 的 %s 预留（%s）", userID, asset, amount))
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("读取影响行数失败: %w", err)
+	}
+	if affected == 0 {
+		// 这条语句只按主键定位（userID 与 asset 都取自上面 SELECT 出来的
+		// 那一行），所以 0 行只有一个解释：钱包行不在。**不能当成功**——
+		// 那样紧接着的「标记已释放」会照常执行，冻结额却一分未动。
+		return walletRowMissing(fmt.Sprintf("用户 %d 的 %s 预留（%s）", userID, asset, amount))
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -420,7 +435,7 @@ var ErrInsufficientBalance = errors.New("余额不足")
 //
 // 与 Release 一样**不夹零**，理由见那里的注释。
 func releaseFrozen(ctx context.Context, tx *sql.Tx, requestID string) error {
-	_, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE user_wallets w
 		   SET frozen = w.frozen - b.reserved_amount,
 		       updated_at = now()
@@ -432,7 +447,40 @@ func releaseFrozen(ctx context.Context, tx *sql.Tx, requestID string) error {
 	if err != nil {
 		return unfreezeFailure(err, "请求 "+requestID+" 的预留")
 	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("读取影响行数失败: %w", err)
+	}
+	if affected == 0 {
+		// 0 行只有一个解释：钱包行不在。调用点 Save 里，b.status = 'settled'
+		// 是同一事务刚被 markSettled 置上的（它影响 0 行时 Save 已经返回了），
+		// 所以 join 的另一边必然缺行。**不能当成功**：这次结算的分录已经
+		// 写下，冻结额却一分未动，两边从此对不上。
+		return walletRowMissing(unfreezeSubject(ctx, tx, requestID))
+	}
 	return nil
+}
+
+// unfreezeSubject 给「解冻时没有钱包行」这条错误补上对象描述。
+//
+// 由 request_id 回查预留记录拿用户与资产，**只用于错误信息**：releaseFrozen
+// 的调用点手里只有 request_id，而排障先要看的就是「哪个用户、哪种资产」。
+// 这次回查在错误路径上才发生，正常结算不付这份代价；它的结果也不参与判断
+// ——判断已经由「影响 0 行」做出，所以查不到时只是描述得粗一点，
+// 不改变结论（把回查的错也写进文本，免得它悄悄消失）。
+func unfreezeSubject(ctx context.Context, tx *sql.Tx, requestID string) string {
+	var (
+		userID int64
+		asset  string
+	)
+	err := tx.QueryRowContext(ctx,
+		`SELECT user_id, reserved_asset FROM billing_requests WHERE request_id = $1`,
+		requestID).Scan(&userID, &asset)
+	if err != nil {
+		return fmt.Sprintf("请求 %s 的预留（回查预留记录失败: %v）", requestID, err)
+	}
+	// 与 Release 那条 subject 同构：都是「用户 X 的 <资产> 预留（<补充信息>）」。
+	return fmt.Sprintf("用户 %d 的 %s 预留（请求 %s）", userID, asset, requestID)
 }
 
 // lockWallets 按固定顺序给钱包行加锁。
