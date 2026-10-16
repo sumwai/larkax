@@ -25,7 +25,7 @@
 #   命令      deadcode ./cmd/larkax ./cmd/larkaxctl
 #             （扫描起点由 cmd/ 自动发现，这两个就是当前发现的全部）
 #   工具      golang.org/x/tools v0.52.0（脚本里的 PINNED_TOOLS_VERSION）
-#   条数      81，与脚本里的 MAX_ENTRIES 一致
+#   条数      77，与脚本里的 MAX_ENTRIES 一致
 #
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
@@ -85,10 +85,6 @@ internal/pricing/admin.go        | Admin.Update                    | gap | #158 
 internal/pricing/admin.go        | UpdateRequest.applyTo           | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/pricing/admin.go        | UpdateRequest.changesAnything   | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/pricing/admin.go        | loadRuleForUpdate               | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/quota/quota.go          | Kind.valid                      | gap | #204 只被 Validate 调，跟着它一起不可达
-internal/quota/quota.go          | State.Routable                  | gap | #204 不是「暂时没人用」，是 route 自己重写了一遍额度判断——同一个语义两处实现
-internal/quota/quota.go          | State.Usable                    | gap | #204 同上，与 Routable 是同一处的两半
-internal/quota/quota.go          | Validate                        | gap | #204 写入路径上没有一道校验，任何观测都能直接落库
 internal/route/stream.go         | WrapStreamStarted               | gap | #179 流中断时「已经吐过字」的判定还没有接进重试路径
 internal/snapshot/allowlist.go   | Allowlist                       | gap | #179 快照的允许表与读回入口还没有调用方
 internal/snapshot/allowlist.go   | Root.valid                      | lib | 允许表的内部判定：方向是否已知
