@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -46,7 +45,7 @@ func runUser(args []string) error {
 	rest := fs.Args()
 	if len(rest) == 0 {
 		fs.Usage()
-		return errors.New("user 需要子命令")
+		return usageErr(errors.New("user 需要子命令"))
 	}
 	action, rest := rest[0], rest[1:]
 
@@ -54,7 +53,7 @@ func runUser(args []string) error {
 	case "create":
 		return runUserCreate(rest)
 	default:
-		return fmt.Errorf("未知的 user 子命令 %q", action)
+		return usageErr(fmt.Errorf("未知的 user 子命令 %q", action))
 	}
 }
 
@@ -65,10 +64,10 @@ func runUserCreate(args []string) error {
 	email := fs.String("email", "", "邮箱，留空表示不填")
 	role := fs.String("role", string(auth.RoleUser), "角色：user、merchant、admin")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("create 不接受位置参数，得到 %q：用户名用 --name 指定", fs.Arg(0))
+		return usageErr(fmt.Errorf("create 不接受位置参数，得到 %q：用户名用 --name 指定", fs.Arg(0)))
 	}
 
 	// 参数检查全部发生在连库之前（与 apikey create 同一条约定）：
@@ -76,30 +75,24 @@ func runUserCreate(args []string) error {
 	// 还有一个更坏的可能——它没报错。
 	if strings.TrimSpace(*name) == "" {
 		fs.Usage()
-		return errors.New("缺少 --name")
+		return usageErr(errors.New("缺少 --name"))
 	}
 	parsedRole, err := auth.ParseRole(*role)
 	if err != nil {
-		return err
+		return usageErr(err)
 	}
 
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	db, err := sql.Open("pgx", cfg.DBDSN)
-	if err != nil {
-		return fmt.Errorf("打开数据库连接失败: %w", err)
-	}
-	defer func() { _ = db.Close() }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), userTimeout)
 	defer cancel()
-	// 变量名不复用 err：这里的任何一次重新声明都会让后面读代码的人
-	// 停下来判断「看到的是哪个 err」，而包一层名字的成本是零。
-	if pingErr := db.PingContext(ctx); pingErr != nil {
-		return fmt.Errorf("连接数据库失败: %w", pingErr)
+	db, err := openDB(ctx, cfg)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = db.Close() }()
 
 	created, err := auth.New(db).CreateUser(ctx, auth.CreateUserParams{
 		Username: *name,

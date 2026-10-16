@@ -31,10 +31,18 @@ import (
 var version = "dev"
 
 func main() {
-	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "larkaxctl: %v\n", err)
-		os.Exit(1)
+	err := run()
+	if err == nil {
+		return
 	}
+	// 要帮助不是失败：flag 在 -h / --help 时返回 ErrHelp，而那时用法已经
+	// 打印过了。把它当错误会让 `larkaxctl channel -h` 在脚本里看起来像
+	// 一次失败，还多打一行「flag: help requested」。
+	if helpRequested(err) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "larkaxctl: %v\n", err)
+	os.Exit(exitCode(err))
 }
 
 const usage = `larkaxctl 是 larkax 的运维命令行。
@@ -49,13 +57,29 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl migrate create <名称>           生成迁移文件
   larkaxctl user create --name <用户名>     创建用户（stdout 只有新用户的 ID）
   larkaxctl apikey create --user <用户>     创建一把 API Key（明文只打印这一次）
+  larkaxctl channel create|list|update|enable|disable
+                                           渠道（创建时凭证从 stdin 或环境变量读）
+  larkaxctl model add|list                 模型目录里的规范模型
+  larkaxctl alias add|list                 模型别名（上游名 ↔ 规范名）
+  larkaxctl price add|list                 计价规则
   larkaxctl reconcile                      跑一轮对账（开关与口径见 settings 表）
   larkaxctl rotate                         轮换渠道凭证的主密钥（默认干跑）
   larkaxctl snapshot cleanup               按留存期删除到期的快照分区
   larkaxctl calendar import <文件>          导入某一年的日历数据（格式见下）
   larkaxctl version                        打印版本号
 
+子命令的详细用法：larkaxctl <子命令> --help，例如 larkaxctl channel --help。
 日历数据文件的格式与约束见：larkaxctl calendar import --help
+
+退出码：
+  0  成功
+  1  其他失败
+  2  命令行参数错（缺字段、取值解析不了、标志组合不对）
+  3  连不上数据库
+  4  约束冲突（唯一键、外键、要改的那一行不存在）
+
+写入路径自己校验出来的参数问题（作用域与归属的组合、表达式编译不过、
+渠道类型不认识）归入 1，不是 2。
 
 环境变量与主服务一致，见 internal/config。
 
@@ -67,16 +91,24 @@ const migrationsDir = "internal/migrate/sql"
 func run() error {
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
-		return errors.New("缺少子命令")
+		return usageErr(errors.New("缺少子命令"))
 	}
 
 	switch os.Args[1] {
+	case "alias":
+		return runAlias(os.Args[2:])
 	case "apikey":
 		return runAPIKey(os.Args[2:])
 	case "calendar":
 		return runCalendar(os.Args[2:])
+	case "channel":
+		return runChannel(os.Args[2:])
 	case "migrate":
 		return runMigrate(os.Args[2:])
+	case "model":
+		return runModel(os.Args[2:])
+	case "price":
+		return runPrice(os.Args[2:])
 	case "reconcile":
 		return runReconcile(os.Args[2:])
 	case "rotate":
@@ -93,7 +125,7 @@ func run() error {
 		return nil
 	default:
 		fmt.Fprint(os.Stderr, usage)
-		return fmt.Errorf("未知子命令 %q", os.Args[1])
+		return usageErr(fmt.Errorf("未知子命令 %q", os.Args[1]))
 	}
 }
 

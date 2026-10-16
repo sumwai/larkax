@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -49,7 +48,7 @@ func runAPIKey(args []string) error {
 	rest := fs.Args()
 	if len(rest) == 0 {
 		fs.Usage()
-		return errors.New("apikey 需要子命令")
+		return usageErr(errors.New("apikey 需要子命令"))
 	}
 	action, rest := rest[0], rest[1:]
 
@@ -57,7 +56,7 @@ func runAPIKey(args []string) error {
 	case "create":
 		return runAPIKeyCreate(rest)
 	default:
-		return fmt.Errorf("未知的 apikey 子命令 %q", action)
+		return usageErr(fmt.Errorf("未知的 apikey 子命令 %q", action))
 	}
 }
 
@@ -68,21 +67,21 @@ func runAPIKeyCreate(args []string) error {
 	name := fs.String("name", "", "备注名，用于日后在列表里认出这把 key")
 	expiresAt := fs.String("expires-at", "", "过期时间（RFC3339），留空表示不过期")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("create 不接受位置参数，得到 %q：用户用 --user 指定", fs.Arg(0))
+		return usageErr(fmt.Errorf("create 不接受位置参数，得到 %q：用户用 --user 指定", fs.Arg(0)))
 	}
 	if *user == "" {
 		fs.Usage()
-		return errors.New("缺少 --user")
+		return usageErr(errors.New("缺少 --user"))
 	}
 
 	var expires *time.Time
 	if *expiresAt != "" {
 		t, err := time.Parse(time.RFC3339, *expiresAt)
 		if err != nil {
-			return fmt.Errorf("--expires-at 不是 RFC3339 时间（例如 2026-12-31T00:00:00Z）: %w", err)
+			return usageErr(fmt.Errorf("--expires-at 不是 RFC3339 时间（例如 2026-12-31T00:00:00Z）: %w", err))
 		}
 		// 已过去的时刻直接拒绝，而不是建一把立刻不可用的 key。
 		// 那种情况几乎只可能是写错了年份（2025 写成 2024），
@@ -90,8 +89,8 @@ func runAPIKeyCreate(args []string) error {
 		// auth.Create 本身不拦：库层允许建一把已过期的 key（造测试数据、
 		// 补历史数据都要用到），拦在交互式命令这一层才合适。
 		if !t.After(time.Now()) {
-			return fmt.Errorf("--expires-at %s 已经过去了：这样的 key 建出来就是不可用的",
-				t.Format(time.RFC3339))
+			return usageErr(fmt.Errorf("--expires-at %s 已经过去了：这样的 key 建出来就是不可用的",
+				t.Format(time.RFC3339)))
 		}
 		expires = &t
 	}
@@ -100,19 +99,13 @@ func runAPIKeyCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	db, err := sql.Open("pgx", cfg.DBDSN)
-	if err != nil {
-		return fmt.Errorf("打开数据库连接失败: %w", err)
-	}
-	defer func() { _ = db.Close() }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), apiKeyTimeout)
 	defer cancel()
-	// 变量名不复用 err：这里的任何一次重新声明都会让后面读代码的人
-	// 停下来判断「看到的是哪个 err」，而包一层名字的成本是零。
-	if pingErr := db.PingContext(ctx); pingErr != nil {
-		return fmt.Errorf("连接数据库失败: %w", pingErr)
+	db, err := openDB(ctx, cfg)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = db.Close() }()
 
 	store := auth.New(db)
 	// 先解析用户再建 key：外键约束也会挡下不存在的用户，但那时错误信息
