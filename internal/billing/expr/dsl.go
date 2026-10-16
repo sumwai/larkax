@@ -103,9 +103,11 @@ var reservedNames = func() map[string]struct{} {
 //	isWorkday()  地区来自 Env.Region，日历与时区由 Env.Calendar 提供
 //	isHoliday()  同上
 //
-// tier/fixed/minimum 的返回值不参与运算，而是为了让表达式写得下去：
-// 它们是副作用通道，把「命中了哪一档」「每请求收多少」带出表达式，
-// 金额本身仍由 Go 侧的定点运算算（见包注释）。
+// tier/fixed/minimum 除了走副作用通道，**返回值也照常参与表达式**：
+// 三者都把入参原样返回——tier 返回规则作者在调用里给的那张表（它只记下
+// 档位名，不替作者选表），fixed/minimum 返回原值。副作用通道把「命中了
+// 哪一档」「每请求收多少」带出表达式，金额本身仍由 Go 侧的定点运算算
+// （见包注释）。
 var funcSchemas = map[string]any{
 	// 参数名写成 _ 而不是具名的：这几个函数体是被签名占位用的
 	//（真正的实现通过环境值注入），具名参数会让读者以为函数体里

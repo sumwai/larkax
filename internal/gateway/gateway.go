@@ -2,9 +2,12 @@
 //
 // 前面各包各自做一件事，这一层是**唯一知道完整顺序**的地方：
 //
-//	收请求 → 解析协议 → 预留 → 选渠道 → 调上游 → 结算 → 交回分录
+//	收请求 → 预留 → 选渠道 → 调上游 → 结算 → 交回分录
 //
 // 它不实现任何一件事，只决定它们的先后与失败时的走向。
+//
+// 协议解析不在这一层：调用方先经 internal/relay 把**调用方的**协议翻成统一
+// 请求，再把翻好的请求交给本包。上游那套协议由适配器在更后面翻出去。
 //
 // # 为什么顺序本身需要一个包
 //
@@ -14,6 +17,9 @@
 //   - 上游失败要换渠道重试，而**已经吐字的流不能换**——那是客户端
 //     能看到两段拼接答案的唯一原因
 //   - 快照与用量落库在任何情况下都**不能影响请求本身**
+//
+// 上面第二条目前还只是约定：本包只接了非流式入口 Chat，流式入口尚未接入
+// （见 Result.Events 与 Result.Estimated）。
 //
 // 把它们散在 HTTP handler 里，这三条就变成了三处注释；放在这里，
 // 它们是可以被测试的执行顺序。
@@ -80,7 +86,7 @@ type SettlementStore interface {
 // # 它必须是可以「不实现」的
 //
 // 快照是排障辅助，整条链路挂掉时计费不该受任何影响。所以这里的方法
-// 由调用方在后台调用，而本包**不等它的结果**——见 handle 里的用法。
+// 由本包在后台调用，而本包**不等它的结果**——见 snapshotAsync。
 type SnapshotSink interface {
 	Save(ctx context.Context, snap *Snapshot) error
 }
@@ -106,8 +112,8 @@ type Snapshot struct {
 
 // Redactor 把请求或响应变成骨架。
 //
-// 它由 internal/snapshot 实现。抽成接口是为了让本包不依赖那个包的具体
-// 类型——那些类型会随白名单演进变化，而顺序不该跟着变。
+// 它由 internal/snapshotwire 适配 internal/snapshot 实现。抽成接口是为了让
+// 本包不依赖那个包的具体类型——那些类型会随白名单演进变化，而顺序不该跟着变。
 type Redactor interface {
 	Redact(req *channel.Request) (*Snapshot, error)
 	RedactResponse(resp *channel.Response) (*Snapshot, error)
@@ -151,6 +157,7 @@ type Result struct {
 	// Response 是非流式请求的结果；流式请求为 nil。
 	Response *channel.Response
 	// Events 是流式请求的事件流；非流式请求为 nil。
+	// **流式入口尚未接入**，本字段目前不会被填充。
 	Events <-chan channel.StreamEvent
 
 	Channel channel.Channel
@@ -160,6 +167,7 @@ type Result struct {
 	Attempts []route.Attempt
 
 	// Estimated 为 true 表示用量是估算的（客户端中途断开）。
+	// 与 Events 一样，要等流式入口接入后才有值。
 	Estimated bool
 }
 

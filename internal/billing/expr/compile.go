@@ -295,10 +295,16 @@ var mathWhitelist = []string{
 //
 // 与 mathWhitelist 相对：那些是普通内置，Disabled 表能拦住；这一批走的是
 // 解析器的 predicates 表（sum/map/reduce 之类），关掉内置不影响它们，
-// 所以要在结构检查里显式拒绝。它们共同的性质是**返回数组或对象**，
-// 落进价格位置就成了一次静默的量纲错——`{"prompt": map([1,2], #)}`
-// 会返回一个数组，而 asPrice 到那时才报「不是数值」，
-// 报错的位置离规则作者写的那个词很远。
+// 所以要在结构检查里显式拒绝。
+//
+// 它们共同的性质是**第一个参数是一个集合**（`[]any`），而规则的输入里
+// 没有集合——所以任何一次调用要么写不出来，要么就是一次静默的量纲错：
+// `{"prompt": map([1,2], #)}` 会返回一个数组，而 asPrice 到那时才报
+// 「不是数值」，报错的位置离规则作者写的那个词很远。
+//
+// 返回值则各不相同：数组（map/filter/sortBy）、对象（groupBy）、布尔
+// （all/none/any/one）、整数（sum/count/findIndex/findLastIndex）、
+// 以及 any（find/reduce）。所以**按返回类型拦不住**，只能把名字列出来。
 var blockedBuiltins = map[string]struct{}{
 	"all": {}, "none": {}, "any": {}, "one": {},
 	"filter": {}, "map": {}, "find": {}, "findIndex": {},
@@ -485,13 +491,13 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 		// 谓词类内置（sum/map/reduce/all/groupBy/sortBy…）走的是解析器的
 		// predicates 表，**不受 DisableAllBuiltins 影响**——它们不是普通
 		// 内置函数，解析阶段就定型了，检查阶段只看名字在不在表里。
-		// 因而必须在结构检查这一层挡掉：它们返回数组或对象，
-		// 不是数值，落进价格位置就是一次静默的量纲错。
+		// 因而必须在结构检查这一层挡掉：它们都要对一个集合求值，
+		// 而规则的输入里没有集合，落进价格位置就是一次静默的量纲错。
 		//
 		// 白名单里的数学函数也会以 BuiltinNode 出现（max/min/…），
 		// 所以这里按**拒绝名单**判而不是整体拒绝。
 		if _, blocked := blockedBuiltins[n.Name]; blocked {
-			return fmt.Errorf("内置函数 %q 不可用于计价规则：它返回的不是数值", n.Name)
+			return fmt.Errorf("内置函数 %q 不可用于计价规则：它要对一个集合求值，而规则的输入里没有集合", n.Name)
 		}
 		// 参数与函数调用同理：`max(p, 1.0)` 是拿用量当乘数。
 		for _, arg := range n.Arguments {

@@ -59,7 +59,8 @@ const (
 	// AccountMerchantPayable 是应付商户的分成。正数是平台欠商户的钱，
 	// 即「这些消费里有这么多是要分给商户的」。
 	AccountMerchantPayable AccountType = "merchant_payable"
-	// AccountPlatformRevenue 是平台的钱。没有冒号后缀，是唯一的单例科目。
+	// AccountPlatformRevenue 是平台的钱。它没有冒号后缀——三个单例科目之一
+	//（另见 upstream_cost 与 reconcile_difference，见 needsID）。
 	// 正数是平台收到的，负数是平台付出的——退款、以及由平台承担的
 	// 通道手续费都记在它上面。
 	AccountPlatformRevenue AccountType = "platform_revenue"

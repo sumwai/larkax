@@ -197,10 +197,13 @@ func Normalize(u RawUsage) (channel.Usage, error) {
 		}
 	}
 
-	// 推理 token 的两种口径：单独报（这里记下来），或已含在输出里
-	// （此时不额外记，否则会被收两次钱）。
-	// 判据用「单独报的值是否显著小于输出」——这是启发式，所以要留痕：
-	// 一旦上游改了口径，Raw 里能看到原始数字。
+	// 推理 token 的两种口径：单独报，或已含在输出里。上游不说明，而这两种
+	// 通常从数字上分不出来，所以这里不替它选：原样记下来，是否重复计费由
+	// 计费层按规则给的推理单价决定，见 billing.FromChannelUsage。
+	// Raw 里留着原始数字，上游改口径时能看出来。
+	//
+	// 唯一的例外是下面那种自相矛盾的组合——推理量大于输出总量，那时它
+	// 不可能是输出的一部分。那不是口径判断，是把这个组合修掉。
 	out.ReasoningTokens = deref(u.ReasoningTokens)
 	if out.ReasoningTokens > out.CompletionTokens {
 		// 单独报的值大于输出总量，说明它不是「输出的一部分」而是
