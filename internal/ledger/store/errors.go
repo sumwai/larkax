@@ -95,3 +95,31 @@ func unfreezeFailure(err error, subject string) error {
 	}
 	return &frozenUnderflowError{subject: subject, cause: err}
 }
+
+// walletRowMissing 报「解冻时没有钱包行可落」。
+//
+// 它是 unfreezeFailure 的邻居，管的是另一种失败：那条语句**根本没碰到行**。
+// 冻结额长在钱包行上，行不在就没有任何东西被释放，而 SQL 对影响 0 行不报错——
+// 不主动看 RowsAffected，一次解冻就会在账上表现为成功、冻结额却一分未动，
+// 而预留记录已经标成 released，那笔钱再也追不回来。
+//
+// # 为什么不新增 sentinel
+//
+// 这个条件与 SaveReservation 那条路径上的 ErrNoWallet 是**同一件事**：
+// 用户没有对应的钱包行。为同一种事实造第二个 sentinel，只会让调用方
+// 两处都得判断；复用既有的那个，调用方认 ErrNoWallet 一处就够。
+// 报的是哪一步（预留还是解冻）由错误文本说清，不由 sentinel 说。
+//
+// # 为什么不回查一次区分原因
+//
+// diagnoseFreezeFailure 要回查，是因为那里影响 0 行有**两种**解释
+// （没有钱包行 / 可用余额不足）。这里只有一种：两条解冻语句的 WHERE
+// 都不筛业务条件——`Release` 那条只按主键定位，`releaseFrozen` 那条的
+// status = 'settled' 在同一事务里刚被 markSettled 置上。所以 0 行就是
+// 「没有钱包行」，没有第二种解释可区分，回查只会多一次往返和一个
+// 走不到的分支。
+//
+// subject 描述这次解冻的对象，与 unfreezeFailure 的 subject 同构。
+func walletRowMissing(subject string) error {
+	return fmt.Errorf("%w: 解冻%s时没有钱包行可落，冻结额一分未动", ErrNoWallet, subject)
+}
