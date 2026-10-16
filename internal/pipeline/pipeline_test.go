@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/billing"
+	"github.com/sumwai/larkax/internal/billing/expr"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/observe"
@@ -569,7 +570,8 @@ func TestReserveUsesWorstCaseAcrossTimeBranches(t *testing.T) {
 		t.Errorf("预留 = %s，期望按贵的一档算的 0.002", res.Amount)
 	}
 
-	// 白天结算不会撞 Capped
+	// 结算按**受理那一刻**（上海 02:00，低谷档）算，而不是结算时的墙钟：
+	// 这里把墙钟拨到白天，档位边界已经跨过去了。
 	day := time.Date(2026, 10, 16, 4, 0, 0, 0, time.UTC) // 上海 12:00
 	p.Now = func() time.Time { return day }
 	charge, err := p.Settle(context.Background(), req, res, Outcome{
@@ -578,9 +580,227 @@ func TestReserveUsesWorstCaseAcrossTimeBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 1000 × 1e-6（低谷档）= 0.001，而不是白天档的 0.002
+	if got := charge.Settlement.Actual.String(); got != "0.00100000" {
+		t.Errorf("实际金额 = %s，期望 0.00100000（按受理那一刻的低谷档）", got)
+	}
 	if charge.Settlement.Capped {
-		t.Errorf("白天结算撞上了 Capped：预留 %s 实际 %s",
+		t.Errorf("结算撞上了 Capped：预留 %s 实际 %s",
 			res.Amount, charge.Settlement.Breakdown.Total)
+	}
+}
+
+// ── 价格在受理那一刻定下来 ──────────────────────────────────────────────
+//
+// 一次请求的价格由它**被受理的那一刻**决定：那一刻的钟点与日历日选出规则里
+// 的哪一档，而档位决定单价。上游那次调用可能跑很久、跨过档位边界，但结算
+// 复用的是预留记下的受理时刻，不重新读钟（见 pipeline.env）。
+//
+// 下面几条都让受理与结算分处规则的两个档位，看结算按哪一档算，每条都断言
+// 具体金额。只断言「没撞 Capped」是不够的：预留取的是最坏情况，它本来就
+// 大于任何一个档位的价，所以撞不撞 Capped 与用了哪一档无关。
+
+// hourTierRule 按上海钟点分档：09:00 之前低谷，之后高峰。两档差四倍，
+// 所以「用了哪一档」在金额上直接看得出来。档位名也带上，好让断言不必
+// 靠金额反推。
+const hourTierRule = `hour("Asia/Shanghai") < 9 ? tier("off_peak", {"prompt": 0.000001}) : tier("peak", {"prompt": 0.000004})`
+
+// shanghaiAt 造一个上海当地时刻。
+func shanghaiAt(t *testing.T, y int, mo time.Month, d, h, mi int) time.Time {
+	t.Helper()
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		// 镜像里没装 tzdata 时它才会失败，而那时规则里的
+		// hour("Asia/Shanghai") 同样会失败。报出来，别让用例静默跳过。
+		t.Fatalf("加载时区失败: %v", err)
+	}
+	return time.Date(y, mo, d, h, mi, 0, 0, loc)
+}
+
+// 08:59 受理、09:01 结算：按受理那一刻的档位计价。
+//
+// 把 Settle 那一步换回读墙钟（p.env(usage, p.now())），这里拿到的会是
+// 高峰价 0.004 而不是低谷价 0.001，用例即挂。
+func TestSettlePricesAtAcceptanceInstant(t *testing.T) {
+	p := newPipeline(t, &ruleSource{rule: Rule{ID: 1, Version: 1, Source: hourTierRule}})
+
+	accepted := shanghaiAt(t, 2026, 10, 16, 8, 59)
+	p.Now = func() time.Time { return accepted }
+
+	req := baseRequest()
+	res, err := p.Reserve(context.Background(), req)
+	if err != nil {
+		t.Fatalf("预留出错: %v", err)
+	}
+	// 预留取最坏情况：两档里贵的 4e-6 × 1000 = 0.004
+	if got := res.Amount.String(); got != "0.00400000" {
+		t.Fatalf("预留 = %s，期望 0.00400000（最坏情况取高峰档）", got)
+	}
+	if !res.RuleMatchedAt.Equal(accepted) {
+		t.Fatalf("受理时刻 = %v，期望 %v", res.RuleMatchedAt, accepted)
+	}
+
+	// 结算时墙钟已经走过 09:00 这个档位边界。
+	p.Now = func() time.Time { return shanghaiAt(t, 2026, 10, 16, 9, 1) }
+
+	charge, err := p.Settle(context.Background(), req, res, Outcome{
+		Usage:       channel.Usage{PromptTokens: 1000},
+		UsageSource: tokens.SourceMeasured,
+	})
+	if err != nil {
+		t.Fatalf("结算出错: %v", err)
+	}
+
+	// 按受理那一刻（09:00 之前）的档位：1000 × 1e-6 = 0.001
+	if got := charge.Settlement.Actual.String(); got != "0.00100000" {
+		t.Errorf("实际金额 = %s，期望 0.00100000（受理那一刻的低谷档，而不是结算时刻的高峰档 0.004）", got)
+	}
+	if charge.Tier != "off_peak" {
+		t.Errorf("档位 = %q，期望 off_peak", charge.Tier)
+	}
+	if !charge.PricedAt.Equal(accepted) {
+		t.Errorf("PricedAt = %v，期望受理时刻 %v", charge.PricedAt, accepted)
+	}
+
+	// 不变式：预留（最坏情况）≥ 结算（受理那一刻那一档）。
+	if res.Amount.Cmp(charge.Settlement.Actual) < 0 {
+		t.Errorf("预留 %s 小于结算 %s", res.Amount, charge.Settlement.Actual)
+	}
+	if charge.Settlement.Capped {
+		t.Errorf("撞上 Capped：预留 %s 实际 %s", res.Amount, charge.Settlement.Actual)
+	}
+}
+
+// 跨日：23:59 受理、次日 00:01 结算。受理那一刻是 23 点（高峰），
+// 而结算那一刻是次日 0 点（低谷）——按前者算。
+func TestSettlePricesAtAcceptanceAcrossMidnight(t *testing.T) {
+	const rule = `hour("Asia/Shanghai") >= 8 ? tier("peak", {"prompt": 0.000004}) : tier("off_peak", {"prompt": 0.000001})`
+	p := newPipeline(t, &ruleSource{rule: Rule{ID: 1, Version: 1, Source: rule}})
+
+	accepted := shanghaiAt(t, 2026, 10, 16, 23, 59)
+	p.Now = func() time.Time { return accepted }
+
+	req := baseRequest()
+	res, err := p.Reserve(context.Background(), req)
+	if err != nil {
+		t.Fatalf("预留出错: %v", err)
+	}
+	if got := res.Amount.String(); got != "0.00400000" {
+		t.Fatalf("预留 = %s，期望 0.00400000", got)
+	}
+
+	p.Now = func() time.Time { return shanghaiAt(t, 2026, 10, 17, 0, 1) }
+
+	charge, err := p.Settle(context.Background(), req, res, Outcome{
+		Usage: channel.Usage{PromptTokens: 1000},
+	})
+	if err != nil {
+		t.Fatalf("结算出错: %v", err)
+	}
+	if got := charge.Settlement.Actual.String(); got != "0.00400000" {
+		t.Errorf("实际金额 = %s，期望 0.00400000（受理那一刻的 23 点档，而不是次日 0 点档的 0.001）", got)
+	}
+	if charge.Tier != "peak" {
+		t.Errorf("档位 = %q，期望 peak", charge.Tier)
+	}
+	if !charge.PricedAt.Equal(accepted) {
+		t.Errorf("PricedAt = %v，期望受理时刻 %v", charge.PricedAt, accepted)
+	}
+	if res.Amount.Cmp(charge.Settlement.Actual) < 0 {
+		t.Errorf("预留 %s 小于结算 %s", res.Amount, charge.Settlement.Actual)
+	}
+}
+
+// fakeCalendar 是一份写死的日历：时区固定，休息日由 offDays 指定。
+//
+// 用写死的表而不是真日历数据：这条用例要钉的是「按哪一天判档」，
+// 而真日历会随节假日安排变。
+type fakeCalendar struct {
+	tz      string
+	offDays map[string]bool
+}
+
+func (c *fakeCalendar) TimeZone(string) (string, error) { return c.tz, nil }
+
+func (c *fakeCalendar) DayInfo(_ string, day time.Time) (expr.DayInfo, error) {
+	return expr.DayInfo{OffDay: c.offDays[day.Format("2006-01-02")]}, nil
+}
+
+// 跨「工作日 / 休息日」边界：周五 23:59 受理、周六 00:01 结算，
+// 按受理那一刻（周五，工作日）的档位算。
+//
+// 这一条与上一条不同：换的是**日历日**，而档位由 isWorkday() 决定——
+// 同一段墙钟时间里，判档依据从「哪一天」来，而不只是「几点」。
+func TestSettlePricesAtAcceptanceAcrossOffDayBoundary(t *testing.T) {
+	const rule = `isWorkday() ? tier("workday", {"prompt": 0.000001}) : tier("rest_day", {"prompt": 0.000004})`
+	p := newPipeline(t, &ruleSource{rule: Rule{ID: 1, Version: 1, Source: rule}},
+		func(p *Pipeline) {
+			p.Region = "CN"
+			p.Calendar = &fakeCalendar{
+				tz: "Asia/Shanghai",
+				// 2026-10-16 是周五，10-17 是周六。
+				offDays: map[string]bool{"2026-10-17": true},
+			}
+		})
+
+	accepted := shanghaiAt(t, 2026, 10, 16, 23, 59)
+	p.Now = func() time.Time { return accepted }
+
+	req := baseRequest()
+	res, err := p.Reserve(context.Background(), req)
+	if err != nil {
+		t.Fatalf("预留出错: %v", err)
+	}
+	// 最坏情况：两档里贵的 4e-6 × 1000 = 0.004
+	if got := res.Amount.String(); got != "0.00400000" {
+		t.Fatalf("预留 = %s，期望 0.00400000", got)
+	}
+
+	// 结算时已经是周六（休息日）。
+	p.Now = func() time.Time { return shanghaiAt(t, 2026, 10, 17, 0, 1) }
+
+	charge, err := p.Settle(context.Background(), req, res, Outcome{
+		Usage: channel.Usage{PromptTokens: 1000},
+	})
+	if err != nil {
+		t.Fatalf("结算出错: %v", err)
+	}
+	// 按受理那一刻（周五，工作日）：1000 × 1e-6 = 0.001
+	if got := charge.Settlement.Actual.String(); got != "0.00100000" {
+		t.Errorf("实际金额 = %s，期望 0.00100000（受理那一刻是工作日，而不是结算时的休息日 0.004）", got)
+	}
+	if charge.Tier != "workday" {
+		t.Errorf("档位 = %q，期望 workday", charge.Tier)
+	}
+	if !charge.PricedAt.Equal(accepted) {
+		t.Errorf("PricedAt = %v，期望受理时刻 %v", charge.PricedAt, accepted)
+	}
+	if res.Amount.Cmp(charge.Settlement.Actual) < 0 {
+		t.Errorf("预留 %s 小于结算 %s", res.Amount, charge.Settlement.Actual)
+	}
+}
+
+// 预留里没有受理时刻时**拒绝**，而不是退回去读墙钟。
+//
+// 兜一个 p.now() 上去会让跨档位的请求按另一档计价，而账单上看不出
+// 用的是哪个时刻——这正是本次要消除的口径。
+func TestSettleRejectsReservationWithoutInstant(t *testing.T) {
+	p := newPipeline(t, &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}})
+	req := baseRequest()
+	res, err := p.Reserve(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res.RuleMatchedAt = time.Time{}
+	_, err = p.Settle(context.Background(), req, res, Outcome{
+		Usage: channel.Usage{PromptTokens: 100},
+	})
+	if err == nil {
+		t.Fatal("预留缺少受理时刻时应报错")
+	}
+	if IsUpstreamFailure(err) {
+		t.Errorf("这不该被当成「本次不计费」: %v", err)
 	}
 }
 
