@@ -194,18 +194,19 @@ CI 会跑同样的东西，本地跑是为了少一轮来回。
 改了**计费、账本、金额**这三处代码时，除了单测还要跑变异测试：
 
 ```sh
-gremlins unleash --timeout-coefficient=10 --workers=4 ./internal/money/
-gremlins unleash --timeout-coefficient=10 --workers=4 ./internal/billing/
-gremlins unleash --timeout-coefficient=10 --workers=4 ./internal/ledger/
+scripts/check-mutation.sh              # 全部包
+scripts/check-mutation.sh money route  # 只跑指定的
 ```
 
 覆盖率只说明「这一行被执行过」，不说明「这一行的每个分支被钉住了」。
-实测：这三个包的覆盖率都在 91%~97%，而变异测试每次都找出两位数个
+实测：计费与账本各包的覆盖率都在 82%~98%，而变异测试每次都找出两位数个
 **存活**变异——它们集中在「恰好相等」「恰好为零」这类边界上，
 而写测试时的自然倾向正是跳过这些。
 
-`--timeout-coefficient` 不能省：默认值会让大量变异被判**超时**而不是
-**存活**，同一份代码两次运行给出截然不同的分数。
+**不要自己拼 `gremlins` 命令**：并发数用错会让结果完全失真。实测
+`internal/money` 在系数固定 10 时，workers=1/2 得到 `Killed 80`，
+workers=4 得到 `Killed 3, Timed out 92`——同一份代码，看起来像两个
+不同的结论。脚本固定 `workers=1`，详见 AGENTS.md。
 
 存活变异要**逐条判断**，不是看一个总数。只有两类可以放过：
 
