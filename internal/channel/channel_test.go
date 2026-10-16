@@ -175,7 +175,7 @@ func TestProtocolValuesAreKnown(t *testing.T) {
 	if Protocol("gemini").valid() {
 		t.Error("未知协议不应有效")
 	}
-	// custom 曾经是第三个取值，没有任何消费者，已删掉：
+	// custom 曾经是第三个取值，但没有任何适配器产出它，已删掉：
 	// 适配器只能说它实现的是哪套现成的协议。
 	if Protocol("custom").valid() {
 		t.Error("custom 已不再是合法协议")
