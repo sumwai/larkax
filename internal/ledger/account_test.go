@@ -22,6 +22,7 @@ func TestAccountConstructors(t *testing.T) {
 		{UpstreamCostAccount(), "upstream_cost", AccountUpstreamCost, ""},
 		{PaymentGatewayAccount("stripe"), "payment_gateway:stripe", AccountPaymentGateway, "stripe"},
 		{PayoutAccount(9), "payout:9", AccountPayout, "9"},
+		{ReconcileDifferenceAccount(), "reconcile_difference", AccountReconcileDifference, ""},
 	}
 	for _, tc := range cases {
 		if got := tc.got.String(); got != tc.want {
@@ -44,21 +45,22 @@ func TestAccountConstructors(t *testing.T) {
 // 真实存在的问题推迟到对账时才暴露。
 func TestParseAccountRejects(t *testing.T) {
 	bad := []string{
-		"",                   // 整列漏填
-		"user",               // 缺 id 后缀
-		"merchant_payable",   // 同上
-		"payment_gateway",    //
-		"payout",             //
-		"user:",              // 后缀为空
-		"user:1:2",           // 多余分隔符：后缀含义无法确定
-		"bogus:1",            // 大类未知
-		"platform_revenue:x", // 单例科目带了后缀
-		"upstream_cost:1",    // 同上
-		"user:1 2",           // 后缀含空格
-		"user:1\n2",          // 后缀含换行（会污染对账输出）
-		"user_id:1",          // 下划线写法看似合法，实际不是科目
-		" user:1",            // 前后空白
-		"user:1 ",            //
+		"",                       // 整列漏填
+		"user",                   // 缺 id 后缀
+		"merchant_payable",       // 同上
+		"payment_gateway",        //
+		"payout",                 //
+		"user:",                  // 后缀为空
+		"user:1:2",               // 多余分隔符：后缀含义无法确定
+		"bogus:1",                // 大类未知
+		"platform_revenue:x",     // 单例科目带了后缀
+		"upstream_cost:1",        // 同上
+		"reconcile_difference:1", // 同上
+		"user:1 2",               // 后缀含空格
+		"user:1\n2",              // 后缀含换行（会污染对账输出）
+		"user_id:1",              // 下划线写法看似合法，实际不是科目
+		" user:1",                // 前后空白
+		"user:1 ",                //
 	}
 	for _, s := range bad {
 		if _, err := ParseAccount(s); err == nil {

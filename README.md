@@ -19,8 +19,10 @@ What works today:
 - Runtime settings loaded from the database and validated against the keys the code declares
 - Migrations, applied and rolled back through `larkaxctl`
 - The full initial database schema
+- The ledger store and the reconcile job that checks the wallet snapshot against it
 
 See [docs/development.md](docs/development.md) for how to build and run it.
+The reconciliation job is documented in [docs/reconciliation.md](docs/reconciliation.md).
 
 ## What it will do
 

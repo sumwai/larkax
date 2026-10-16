@@ -75,13 +75,27 @@ const (
 	// 商户分成转成提现单时，钱从「他的分成」变成「这条提现单的待付」，
 	// 混在一个科目里就分不清商户还能不能再申请提现。
 	AccountPayout AccountType = "payout"
+	// AccountReconcileDifference 是对账差额的归集科目（单例）。
+	//
+	// 对账修正与人工调账的区别正在于「谁认下这笔差额」：人工调账的对家是
+	// platform_revenue，因为那是人判断过的、平台认下的收支；而对账是被动
+	// 发现快照不对，差额的**来路不明**——它可能是一处代码绕过了 store，
+	// 也可能是预留算错。把它记为平台收入，等于让一笔没人解释过的钱
+	// 混进经营收入里，而收入是要被看、被汇总、被用来定价的。
+	//
+	// 所以单独归集：贷方为负表示账本低于快照、平台补上了差额；借方为正
+	// 表示账本高于快照、多出来的那笔被冲回。这个科目的余额是**待查项**，
+	// 查清来路之后再写一笔人工调账把它转进 platform_revenue（那时差额
+	// 已经被解释了）。长期非零本身就是一条应当被看见的信号。
+	AccountReconcileDifference AccountType = "reconcile_difference"
 )
 
 // validAccountType 判断大类是否受支持。
 func (t AccountType) valid() bool {
 	switch t {
 	case AccountUser, AccountMerchantPayable, AccountPlatformRevenue,
-		AccountUpstreamCost, AccountPaymentGateway, AccountPayout:
+		AccountUpstreamCost, AccountPaymentGateway, AccountPayout,
+		AccountReconcileDifference:
 		return true
 	}
 	return false
@@ -89,11 +103,15 @@ func (t AccountType) valid() bool {
 
 // needsID 判断大类是否必须带一个 id 后缀。
 //
-// 只有 platform_revenue 与 upstream_cost 是单例科目——它们描述的是
-// 「平台」与「上游」这两个整体，没有区分的必要（上游成本若要按渠道拆，
-// 那是新增一类科目的决定，不该在这里悄悄支持）。
+// 只有 platform_revenue、upstream_cost 与 reconcile_difference 是单例科目
+// ——它们描述的是「平台」「上游」「对账差额」这三个整体，没有区分后缀的必要
+// （上游成本若要按渠道拆，那是对账口径的变更，不该在这里悄悄支持）。
 func (t AccountType) needsID() bool {
-	return t != AccountPlatformRevenue && t != AccountUpstreamCost
+	switch t {
+	case AccountPlatformRevenue, AccountUpstreamCost, AccountReconcileDifference:
+		return false
+	}
+	return true
 }
 
 // Account 是一个会计科目，形如 `user:42`。
@@ -113,6 +131,7 @@ func (t AccountType) needsID() bool {
 //	upstream_cost           正 = 上游成本
 //	payment_gateway         负 = 通道替我们持有的钱；净额为零表示通道已结清
 //	payout                  正 = 已申请未打款的待付
+//	reconcile_difference    正 = 账本高于快照的那部分被冲回，负 = 平台补上的差额
 //
 // 每一项正数的含义都不一样——「正数就是有钱」在这里不成立，
 // 而 payment_gateway 的资产方向甚至是负的。这条约定来自各场景的推导
@@ -202,6 +221,14 @@ func PlatformRevenueAccount() Account {
 // UpstreamCostAccount 是上游成本科目（单例）。
 func UpstreamCostAccount() Account {
 	return Account{raw: string(AccountUpstreamCost)}
+}
+
+// ReconcileDifferenceAccount 是对账差额的归集科目（单例）。
+//
+// 命名与 PlatformRevenueAccount 同构，理由也相同：调用点要一眼看出
+// 拿到的是科目而不是金额。
+func ReconcileDifferenceAccount() Account {
+	return Account{raw: string(AccountReconcileDifference)}
 }
 
 // PaymentGatewayAccount 是某个支付通道的科目，装的是通道替我们
