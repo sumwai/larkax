@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -31,7 +30,7 @@ const snapshotUsage = `larkaxctl snapshot 维护请求结构快照。
 func runSnapshot(args []string) error {
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, snapshotUsage)
-		return errors.New("snapshot 需要子命令")
+		return usageErr(errors.New("snapshot 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -43,7 +42,7 @@ func runSnapshot(args []string) error {
 		return nil
 	default:
 		fmt.Fprint(os.Stderr, snapshotUsage)
-		return fmt.Errorf("未知的 snapshot 子命令 %q", action)
+		return usageErr(fmt.Errorf("未知的 snapshot 子命令 %q", action))
 	}
 }
 
@@ -56,26 +55,20 @@ func runSnapshotCleanup(args []string) error {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, snapshotUsage) }
 	dryRun := fs.Bool("dry-run", false, "只列出会被删除的分区，不执行删除")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return usageErr(err)
 	}
 
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	db, err := sql.Open("pgx", cfg.DBDSN)
-	if err != nil {
-		return fmt.Errorf("打开数据库连接失败: %w", err)
-	}
-	defer func() { _ = db.Close() }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	// 变量名不复用 err：这里的每一次重新声明都会让后面读代码的人停下来
-	// 判断「看到的是哪个 err」，而包一层名字的成本是零。
-	if pingErr := db.PingContext(ctx); pingErr != nil {
-		return fmt.Errorf("连接数据库失败: %w", pingErr)
+	db, err := openDB(ctx, cfg)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = db.Close() }()
 
 	values, err := settings.Load(ctx, settings.NewPgSource(db))
 	if err != nil {

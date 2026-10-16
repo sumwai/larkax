@@ -233,6 +233,86 @@ go run ./cmd/larkaxctl migrate up
 
 首次打 tag、第一个外部贡献者、公开发布都不构成分界线；共享数据库才是。
 
+## 配一条能用的渠道
+
+推理请求要落到某个上游，所以库里得先有四样东西：一条渠道（指向上游、带凭证）、
+目录里的一条规范模型、把上游模型名映射到规范名的别名、一条计价规则。
+`larkaxctl` 的 `channel` / `model` / `alias` / `price` 四组子命令就是干这个的。
+
+下面四条命令按顺序跑完，就有了一条能接请求的链路。示例里的上游是假的
+（`https://api.example.com/v1`），换成你自己的即可。
+
+**一、建一条渠道。** 凭证只能从标准输入或环境变量读，**不能写在命令行参数里**
+——参数会出现在 `ps` 的输出与 shell 历史里：
+
+```sh
+# 从标准输入
+cat secret.txt | go run ./cmd/larkaxctl channel create \
+  --name my-upstream --type openai --base-url https://api.example.com/v1 \
+  --models claude-x --credential-stdin
+
+# 或者从环境变量
+LARKAX_CHANNEL_CREDENTIAL=<CHANNEL_CREDENTIAL> go run ./cmd/larkaxctl channel create \
+  --name my-upstream --type openai --base-url https://api.example.com/v1 \
+  --models claude-x --credential-env LARKAX_CHANNEL_CREDENTIAL
+```
+
+`--type` 必须是已注册的适配器类型（当前是 `openai` 与 `anthropic`）。
+`--models` 是这条渠道支持的**规范模型名**（下一步要建的那个），至少一个：
+读取路径把 `models` 当白名单用，空数组的渠道永远选不中。
+stdout 只有新渠道的 ID，其余信息走 stderr。
+
+**二、把规范模型加进目录。** 规范名是选路与计费共用的键，不能带空白字符：
+
+```sh
+go run ./cmd/larkaxctl model add --canonical claude-x --display '示例模型' \
+  --vendor example --context-limit 200000 --tools --vision
+```
+
+**三、配别名：这家上游对同一个模型叫什么名字。**
+
+```sh
+go run ./cmd/larkaxctl alias add --canonical claude-x \
+  --upstream claude-3-5-sonnet-latest
+```
+
+不带 `--channel` 的别名是平台级的，对所有渠道生效；带 `--channel <ID>` 的只对
+那个渠道生效，并盖过平台级那条。同一个范围里一个规范名只能有一个上游名。
+
+**四、配一条计价规则。** 没有生效的规则时请求会失败，而不是按零价放行：
+
+```sh
+go run ./cmd/larkaxctl price add --scope platform --name example-price \
+  --expr '{"prompt": 0.0000015, "completion": 0.0000075}'
+```
+
+`--models` 留空表示适用于全部模型（兜底规则）。表达式在写入前会编译一次，
+编译不过的命令直接失败。作用域决定哪两栏 id 有效：`platform` 两栏都留空、
+`merchant` 必须给 `--owner`、`channel` 必须给 `--channel`。
+
+**查看现状**：
+
+```sh
+go run ./cmd/larkaxctl channel list
+go run ./cmd/larkaxctl model list
+go run ./cmd/larkaxctl alias list
+go run ./cmd/larkaxctl price list
+```
+
+`channel list` **不打印凭证密文**，只打印它挂在哪些主密钥下（那不需要任何
+密钥材料）。`price list` 按裁决次序排列，排第一的那条就是会被选中的那条。
+
+**退出码**：`0` 成功、`1` 其他失败、`2` 命令行参数错、`3` 连不上数据库、
+`4` 约束冲突（唯一键、外键、要改的那一行不存在）。脚本按这个分派处置。
+
+渠道的写入命令需要主密钥（`LARKAX_MASTER_KEYS`）：凭证是信封加密的，只有
+`credential.Sealer` 能产出可解开的密文，直接往库里写一行 `bytea` 补不上。
+它读的是这个环境变量本身，与 `LARKAX_ROLE` 无关。`channel list` / `enable` /
+`disable` 不碰凭证，没有主密钥也能跑。
+
+每条子命令的完整用法见 `larkaxctl <子命令> --help`，例如
+`go run ./cmd/larkaxctl channel --help`。
+
 ## 造用户、造 key、打一次请求
 
 推理请求要带一把 API Key，而 key 必须挂在某个用户上，所以这条链的起点是建用户：
@@ -281,8 +361,9 @@ curl -i localhost:8080/v1/chat/completions \
 
 要真的拿到一次 `200`，库里得先有：一个用户与钱包、一把 API Key
 （`larkaxctl apikey create --user <ID 或用户名>`）、一条指向上游的渠道、
-一条适用的计价规则。除 API Key 之外，这些目前都还没有管理入口，只能直接写库。
-没有计价规则时请求会失败而不是按零价放行。
+一条适用的计价规则。这四样现在都有管理入口——渠道、模型、别名与计价规则
+见上文「配一条能用的渠道」，用户与 API Key 见下文。没有计价规则时请求会
+失败而不是按零价放行。
 
 `501` 是有意的占位：推理路径之外的任何请求都会立刻得到明确答复，而不是超时或
 误导性的 404。这样部署验证能确认端口通、TLS 通、负载均衡转发通。
@@ -293,16 +374,26 @@ curl -i localhost:8080/v1/chat/completions \
 内部端点单独一个端口：它面向编排系统与指标抓取器，不和业务入口共用监听地址，
 也就不需要跟着业务入口一起暴露在 ingress 规则下。
 
-运维命令行走另一个入口，目前有迁移、对账与日历数据导入：
+运维命令行走另一个入口（`cmd/larkaxctl`），目前有这些：
 
-```sh
-go run ./cmd/larkaxctl migrate up
-go run ./cmd/larkaxctl reconcile
-go run ./cmd/larkaxctl calendar import ./cn-2031.json
-```
+| 子命令 | 做什么 |
+|---|---|
+| `channel` | 上游渠道：`create` / `list` / `update` / `enable` / `disable` |
+| `model` | 模型目录：`add` / `list` |
+| `alias` | 规范模型名到上游模型名的映射：`add` / `list` |
+| `price` | 计价规则：`add` / `list` |
+| `user` | 用户：`create` |
+| `apikey` | API Key：`create` |
+| `snapshot` | 请求快照的留存清理 |
+| `calendar` | 节假日日历数据：`import` |
+| `rotate` | 主密钥轮换 |
+| `migrate` | 迁移：`up` / `down-to` / `status` / `create` |
+| `reconcile` | 对账 |
 
-对账的开关、口径与运行记录见 [reconciliation.md](reconciliation.md)，
-日历数据的文件格式见 [calendar-data.md](calendar-data.md)。
+每个子命令的用法见 `go run ./cmd/larkaxctl <子命令> --help`，
+或直接 `go run ./cmd/larkaxctl` 看总览。对账的开关、口径与运行记录见
+[reconciliation.md](reconciliation.md)，日历数据的文件格式见
+[calendar-data.md](calendar-data.md)。
 
 ## 常用检查
 

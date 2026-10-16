@@ -22,7 +22,7 @@ runs:
         # `t.Skip(...)` 且条件是 LARKAX_DB_DSN：加了一个这样的包而忘了往
         # 这里补，它就会静默跳过，而这道门不会报——正是它要防的那件事。
         # 找一遍：grep -rl LARKAX_DB_DSN --include='*_test.go' .
-        for pkg in ./internal/ledger/store/ ./internal/channels/ ./internal/catalog/ ./internal/auth/ ./internal/snapshotwire/ ./internal/pricing/ ./internal/assembly/ ./internal/calendar/store/; do
+        for pkg in ./internal/ledger/store/ ./internal/channels/ ./internal/catalog/ ./internal/auth/ ./internal/snapshotwire/ ./internal/pricing/ ./internal/assembly/ ./internal/calendar/store/ ./cmd/larkaxctl/; do
           out=$(go test -count=1 -v "$pkg" 2>&1)
           rc=$?
           show() { printf '%s\n' "$out" | tail -30; }

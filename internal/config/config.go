@@ -132,7 +132,7 @@ func Load() (*Config, error) {
 	}
 
 	if cfg.Role.NeedsMasterKey() {
-		keys, err := parseMasterKeys(os.Getenv("LARKAX_MASTER_KEYS"))
+		keys, err := MasterKeysFromEnv()
 		if err != nil {
 			fail("LARKAX_MASTER_KEYS 无效: %v", err)
 		} else {
@@ -234,6 +234,17 @@ func (c *Config) PrimaryMasterKey() (MasterKey, bool) {
 		return MasterKey{}, false
 	}
 	return c.MasterKeys[0], true
+}
+
+// MasterKeysFromEnv 解析环境变量里的主密钥，**与角色无关**。
+//
+// Load 只在需要主密钥的角色上用它（worker 不解析），但「要不要主密钥」这件事
+// 由**服务角色**决定，而运维命令不属于任何角色：它要写一条渠道就得能封装凭证，
+// 与 LARKAX_ROLE 取什么值无关。让命令直接读这个变量，好过让
+// `LARKAX_ROLE=worker larkaxctl channel create` 因为一个与本次操作无关的
+// 变量而失败，也好过在命令行里再抄一份 base64 解析。
+func MasterKeysFromEnv() ([]MasterKey, error) {
+	return parseMasterKeys(os.Getenv("LARKAX_MASTER_KEYS"))
 }
 
 // parseMasterKeys 解析 "<id>:<base64>,<id>:<base64>" 形式的密钥列表。
