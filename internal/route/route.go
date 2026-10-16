@@ -249,7 +249,8 @@ func (r *Router) order(candidates []Candidate) []Candidate {
 	}
 	// 额度能不能比，是**整个候选集**的性质：两个余量只有在同一单位下才有
 	// 大小之分。所以这个判断在循环外算一次，再交给每个候选打分。
-	mixedUnits := mixedQuotaUnits(candidates)
+	// 插件契约用的是同一个函数（见 MixedQuotaUnits）。
+	mixedUnits := MixedQuotaUnits(candidates)
 
 	grouped := make(map[int][]scored)
 	for _, c := range candidates {
@@ -313,7 +314,7 @@ func (r *Router) score(c Candidate, mixedUnits bool) float64 {
 		w.Cache*scoreCache(c.CacheHitRate, c.SampleCount)
 }
 
-// mixedQuotaUnits 判断候选集里是不是存在多种额度单位。
+// MixedQuotaUnits 判断候选集里是不是存在多种额度单位。
 //
 // 单位未知（空）也算一种：一个「不知道按什么计」的渠道与一个「按元计」的
 // 渠道之间同样不可比，所以它与任何已知单位放在一起都算混合。
@@ -321,7 +322,19 @@ func (r *Router) score(c Candidate, mixedUnits bool) float64 {
 // 只统计**已知额度**的候选：额度未知的渠道那一项本来就是中性分，
 // 与单位无关，把它算进来会让「一个查不到额度的渠道」把其余渠道的额度
 // 全部降成中性分——那等于让「不知道」污染「知道」。
-func mixedQuotaUnits(candidates []Candidate) bool {
+//
+// # 这是这条规则的唯一一处实现
+//
+// 「跨单位不可比」有两个消费者，它们必须看到同一件事：
+//
+//   - route 自己的打分：混合时 scoreQuota 给中性分（order 调用）
+//   - 插件契约：混合时 plugin.RouteContextFrom 把 Remaining 全部置 null，
+//     让插件看到「这里没有可用的信息」，而不是一组不可比的数
+//
+// 两处各写一遍的话，插件的行为会与内部打分悄悄分叉，而那时没有人能解释
+// 「插件为什么这么选」——解释的人会拿「内核是怎么算的」去对，然后对不上。
+// 所以它是导出的：插件侧调它，而不是照着抄一遍。
+func MixedQuotaUnits(candidates []Candidate) bool {
 	var first string
 	seen := false
 	for _, c := range candidates {

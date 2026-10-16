@@ -138,12 +138,26 @@ func applyBodyToChannel(req *channel.Request, body *RequestBodyPatch) error {
 }
 
 // RouteContextFrom 把候选集翻成 onRoute 的上下文。
+//
+// # 额度余量要不要给，是候选集的性质而不是候选的性质
+//
+// 「剩余 800000」与「剩余 5」只有在同一单位下才有大小之分，而单位由
+// channel.Quota.Unit 说明，各渠道可以不同。插件对这一项唯一说得通的用法是
+// **跨候选比较**（挑一个先用掉），那是一个集合级的操作，所以判断必须在这里
+// 做完，不能甩给插件：它跑在沙箱里，也看不到「这一组数可不可比」之外的上下文。
+//
+// 判据与内核打分共用一处实现（route.MixedQuotaUnits），于是插件看到的
+// 「可不可比」与内核排序时的口径是同一件事。
 func RouteContextFrom(requestID, canonicalModel string, cands []route.Candidate) RouteContext {
 	rc := RouteContext{
 		RequestID:      requestID,
 		CanonicalModel: canonicalModel,
 		Candidates:     make([]RouteCandidate, 0, len(cands)),
 	}
+	// 混合单位时**一个数都不给**，包括单位相同的那几个：只给一部分会让
+	// 「有的有数、有的没数」看起来像那几家查额度失败了，而事实是这一组数
+	// 整体不可比。
+	mixedUnits := route.MixedQuotaUnits(cands)
 	for _, c := range cands {
 		cand := RouteCandidate{
 			ChannelID:   c.Channel.ID,
@@ -153,9 +167,13 @@ func RouteContextFrom(requestID, canonicalModel string, cands []route.Candidate)
 			Health:      healthName(c.Health),
 			Confidence:  1,
 		}
-		if c.Quota.Known {
-			// 查得到额度才给数字。**「查不到」不进这个字段**：
-			// 给 0 会让插件以为「额度为零」，而那与「这家不支持查询」是两件事。
+		// 给数字要同时满足两件事：这个渠道查得到额度，且这一组额度可比。
+		// 缺任何一件都是 Remaining 为 null、Confidence 为 0——「没有数」
+		// 与「有一个可信的数」是这里仅有的两种状态。可信度跟着数字一起给，
+		// 免得出现「可信度 1 而数字是 null」这种读不通的组合。
+		if c.Quota.Known && !mixedUnits {
+			// **「查不到」不进这个字段**：给 0 会让插件以为「额度为零」，
+			// 而那与「这家不支持查询」是两件事。
 			remaining := c.Quota.Remaining
 			cand.Remaining = &remaining
 			if c.Quota.Estimated {

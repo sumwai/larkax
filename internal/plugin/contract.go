@@ -152,12 +152,30 @@ type RouteContext struct {
 // 而 base_url 足以让它推断出上游是谁。状态字段是为了让插件能表达
 // 「优先用快过期的那个」这类偏好。
 type RouteCandidate struct {
-	ChannelID    int64    `json:"channelId"`
-	OwnerUserID  int64    `json:"ownerUserId"`
-	Weight       int      `json:"weight"`
-	Priority     int      `json:"priority"`
-	Health       string   `json:"health"`
-	Remaining    *float64 `json:"remainingEstimate"`
+	ChannelID   int64  `json:"channelId"`
+	OwnerUserID int64  `json:"ownerUserId"`
+	Weight      int    `json:"weight"`
+	Priority    int    `json:"priority"`
+	Health      string `json:"health"`
+	// Remaining 是剩余额度，**只在本次候选集内可与其他候选的 Remaining
+	// 直接比较时才给**。它是 null 的两种情况：
+	//
+	//   - 这个渠道查不到额度。注意这与「额度为零」不同，后者是 0。
+	//   - 候选集里出现了两种以上额度单位。按 token 计的套餐与按元计的账户
+	//     之间，「还剩 100」谁更该先用掉取决于我们不知道的定价与消耗速度，
+	//     比出来的次序完全由单位决定。此时**所有**候选一律为 null，
+	//     包括单位相同的那几个。
+	//
+	// 所以**不要拿它跨候选直接比**：JS 里 null 参与算术会变成 0，
+	// `b.remainingEstimate - a.remainingEstimate` 不会报错，只会把 null
+	// 当成「余量为零」排到最前面——一次静默的选错渠道。判断「可不可比」是
+	// **集合级**的，已经由构造候选集的一方做完（判据见 route.MixedQuotaUnits，
+	// 与内核打分共用同一处实现），插件只需在 null 时当作「这里没有可用的信息」。
+	Remaining *float64 `json:"remainingEstimate"`
+	// Confidence 是 Remaining 这个数的可信度，0..1。它与 Remaining 同生共死：
+	// Remaining 为 null 时它一定是 0，它非 0 就一定能拿到数——免得出现
+	// 「可信度 1 而数字是 null」这种读不通的组合。上游实测的给 1，
+	// 本地推算的估算值打折。
 	Confidence   float64  `json:"confidence"`
 	UpstreamCost *float64 `json:"upstreamCostHint"`
 	ResetsAt     *string  `json:"resetsAt"`

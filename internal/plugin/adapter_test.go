@@ -103,6 +103,136 @@ func TestRouteCandidateDistinguishesUnknownQuotaFromZero(t *testing.T) {
 	}
 }
 
+// 额度余量只在「这一组数可比」时才给。
+//
+// # 为什么这一档要给 null 而不是给数
+//
+// 插件对 Remaining 唯一说得通的用法是**跨候选比较**（挑一个先用掉），
+// 而「可不可比」是整个候选集的性质：按 token 计的套餐与按元计的账户之间，
+// 「还剩 100」谁更该先用掉没有答案，比出来的次序完全由单位决定。
+// 所以单位混在一起时**一个数都不给**——让插件看到「这里没有可用的信息」。
+//
+// # 每一档都钉住具体取值
+//
+// 不写「A 比 B 大」这类相对断言：把 null 换成 0、或把判据反过来，
+// 相对断言照样通过，而那正是要挡住的两类改坏。
+func TestRouteCandidateRemainingOnlyWhenUnitsComparable(t *testing.T) {
+	known := func(id int64, remaining float64, unit string) route.Candidate {
+		return route.Candidate{
+			Channel: channel.Channel{ID: id},
+			Quota:   channel.Quota{Known: true, Remaining: remaining, Unit: unit},
+		}
+	}
+	noQuota := func(id int64) route.Candidate {
+		return route.Candidate{Channel: channel.Channel{ID: id}}
+	}
+
+	cases := []struct {
+		name string
+		in   []route.Candidate
+		want []*float64
+	}{
+		{
+			name: "全同单位：数照给",
+			in:   []route.Candidate{known(1, 0.5, "money"), known(2, 300, "money")},
+			want: []*float64{ptrFloat64(0.5), ptrFloat64(300)},
+		},
+		{
+			name: "单候选：只有一种单位，数照给",
+			in:   []route.Candidate{known(1, 42, "tokens")},
+			want: []*float64{ptrFloat64(42)},
+		},
+		{
+			name: "两种已知单位：全 null",
+			in:   []route.Candidate{known(1, 1_000_000, "tokens"), known(2, 5, "money")},
+			want: []*float64{nil, nil},
+		},
+		{
+			// 单位为空**单独算一类**，不与已知单位合并：一个「不知道按什么计」
+			// 的渠道与一个「按元计」的渠道之间同样不可比。所以这一档也是全 null。
+			name: "一种已知 + 单位未知：未知算第二类，全 null",
+			in:   []route.Candidate{known(1, 5, "money"), known(2, 5, "")},
+			want: []*float64{nil, nil},
+		},
+		{
+			name: "三种已知单位：全 null",
+			in: []route.Candidate{
+				known(1, 1, "tokens"), known(2, 2, "requests"), known(3, 3, "money"),
+			},
+			want: []*float64{nil, nil, nil},
+		},
+		{
+			name: "全空单位：只有一类，数照给",
+			in:   []route.Candidate{known(1, 7, ""), known(2, 8, "")},
+			want: []*float64{ptrFloat64(7), ptrFloat64(8)},
+		},
+		{
+			name: "全查不到额度：全 null",
+			in:   []route.Candidate{noQuota(1), noQuota(2)},
+			want: []*float64{nil, nil},
+		},
+		{
+			// 查不到额度的渠道没有单位可言，不该把查得到的那些也拖成 null：
+			// 那等于让「不知道」污染「知道」（见 route.MixedQuotaUnits）。
+			name: "查不到额度的渠道不参与数单位",
+			in:   []route.Candidate{known(1, 5, "money"), noQuota(2)},
+			want: []*float64{ptrFloat64(5), nil},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rc := RouteContextFrom("r1", "m", tc.in)
+			if len(rc.Candidates) != len(tc.want) {
+				t.Fatalf("候选数 = %d，期望 %d", len(rc.Candidates), len(tc.want))
+			}
+			for i, want := range tc.want {
+				got := rc.Candidates[i].Remaining
+				switch {
+				case want == nil && got != nil:
+					t.Errorf("候选 %d 的 Remaining = %v，期望 null", i, *got)
+				case want != nil && got == nil:
+					t.Errorf("候选 %d 的 Remaining = null，期望 %v", i, *want)
+				case want != nil && *got != *want:
+					t.Errorf("候选 %d 的 Remaining = %v，期望 %v", i, *got, *want)
+				}
+			}
+		})
+	}
+}
+
+// 可信度跟着数字走：没有数字时它必须是 0。
+//
+// 留一个「可信度 1 而数字是 null」的组合会读成「我很确信这里没有数」，
+// 而插件按 confidence > 0 判断「这个数能不能用」时就踩空了。
+func TestRouteCandidateConfidenceFollowsRemaining(t *testing.T) {
+	rc := RouteContextFrom("r1", "m", []route.Candidate{
+		{Channel: channel.Channel{ID: 1}, Quota: channel.Quota{Known: true, Remaining: 1_000_000, Unit: "tokens"}},
+		{Channel: channel.Channel{ID: 2}, Quota: channel.Quota{Known: true, Remaining: 5, Unit: "money"}},
+	})
+	for i, c := range rc.Candidates {
+		if c.Remaining != nil {
+			t.Errorf("候选 %d 单位混合时不该给数，实际 %v", i, *c.Remaining)
+		}
+		if c.Confidence != 0 {
+			t.Errorf("候选 %d 没有数时可信度 = %v，期望 0", i, c.Confidence)
+		}
+	}
+
+	// 单位一致时两者都照旧：这一条与上面相对，说明 0 来自混合单位这个判断，
+	// 而不是可信度恒为 0。
+	same := RouteContextFrom("r1", "m", []route.Candidate{
+		{Channel: channel.Channel{ID: 3}, Quota: channel.Quota{Known: true, Remaining: 5, Unit: "money"}},
+		{Channel: channel.Channel{ID: 4}, Quota: channel.Quota{Known: true, Remaining: 5, Unit: "money", Estimated: true}},
+	})
+	if got := same.Candidates[0]; got.Remaining == nil || *got.Remaining != 5 || got.Confidence != 1 {
+		t.Errorf("实测值该给 5 / 可信度 1，实际 %+v", got)
+	}
+	if got := same.Candidates[1]; got.Remaining == nil || *got.Remaining != 5 || got.Confidence != 0.7 {
+		t.Errorf("估算值该给 5 / 可信度 0.7，实际 %+v", got)
+	}
+}
+
 func TestRouteCandidateCarriesExpiry(t *testing.T) {
 	at := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	rc := RouteContextFrom("r1", "m", []route.Candidate{
@@ -222,6 +352,8 @@ func TestChannelUsageCopiesUnits(t *testing.T) {
 }
 
 func ptrInt64(v int64) *int64 { return &v }
+
+func ptrFloat64(v float64) *float64 { return &v }
 
 func ptrBool(v bool) *bool { return &v }
 
