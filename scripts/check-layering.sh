@@ -76,8 +76,15 @@ fi
 # 那一半，它要调 gateway.Chat 并读 gateway.Result。让 gateway 反过来声明
 # 一个「给 api 用的窄接口」会把入口的形状搬进 gateway，而那个形状正是
 # api 该定的东西。方向仍然是 api → gateway，没有第三个包会顺着它被拖进来。
+#
+# 例外里为什么有 assembly：装配层是**唯一**同时看见入口与数据面的地方——
+# 它构造 gateway，把候选来源、账本存储、快照链路、上游执行器接上去，再交给
+# api。这一层不 import gateway 的话，「谁把 gateway 建起来」就没有答案，
+# 只能落回 cmd/larkax，而那样端到端测试就够不着生产用的那条装配路径了。
+# 它不做任何编排决策，也不被任何包 import。
 ALLOWED_GATEWAY_IMPORTERS='internal/snapshotwire
-internal/api'
+internal/api
+internal/assembly'
 
 echo "── 谁 import 了 gateway"
 # 先取「扫到了多少个文件」再取命中：只打印命中与否的话，

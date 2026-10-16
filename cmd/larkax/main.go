@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,10 +23,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sumwai/larkax/internal/assembly"
 	"github.com/sumwai/larkax/internal/config"
+	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/db"
 	"github.com/sumwai/larkax/internal/observe"
+	"github.com/sumwai/larkax/internal/pricing"
 	"github.com/sumwai/larkax/internal/settings"
+	"github.com/sumwai/larkax/internal/upstream"
 )
 
 // version 由构建时注入：-ldflags "-X main.version=v0.1.0"。
@@ -38,6 +43,18 @@ var version = "dev"
 // 而且长流场景下几乎总该排空到这个长度。真需要调整时改代码，
 // 比多一个谁都不知道该填多少的环境变量更清楚。
 const shutdownTimeout = 30 * time.Second
+
+// upstreamTimeout 是「上游回响应头」的时间上限。
+//
+// 它必须能容下**一次完整的生成**，而不是「首字节要多久」：非流式请求的
+// 上游要等整段回复生成完才回响应头，一次长回复在这个上限之内才算正常。
+// 定小了的表现是长回复被我们自己掐断，而调用方看到的是「上游失败」——
+// 排查方向指向对方，实际是我们的超时。
+//
+// 硬编码而不做成环境变量，与 shutdownTimeout 同理：它属于「改错了也不会
+// 造成事故」的那一类（改小了会失败得很显眼，改大了只是慢），真需要调整时
+// 改代码比多一个没人知道该填多少的变量更清楚。
+const upstreamTimeout = 10 * time.Minute
 
 func main() {
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
@@ -112,30 +129,86 @@ func run() error {
 
 	servers := []namedServer{{name: "internal", srv: internalSrv}}
 
-	// 还没有业务路由，公共监听端口先只回一个明确的占位响应。
-	// 这样部署验证能确认端口通、TLS 通、负载均衡转发通，
-	// 同时任何真实流量都会立刻得到「尚未实现」而不是超时或 404 误导。
-	//
-	// 注意 "/" 捕获一切路径，包括 /healthz。健康检查要配到 internal 端口；
-	// 配到这里的实例会拿到 501 并被编排系统摘除。上了负载均衡后这是真实的
-	// 误配陷阱，所以健康检查只注册在 internalMux 上。
-	publicMux := http.NewServeMux()
-	publicMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("x-larkax-version", version)
-		w.WriteHeader(http.StatusNotImplemented)
-		_, _ = w.Write([]byte(`{"error":{"type":"not_implemented","message":"inference API is not available in this build"}}`))
-	})
+	public, err := publicHandler(cfg, handle, values, logger)
+	if err != nil {
+		return err
+	}
 	publicSrv := &http.Server{
-		Addr: cfg.HTTPAddr,
-		// 最外层是关联标识：放在其他中间件之前，
-		// 这样被后续中间件拒绝掉的请求也带着 id，能被排查到。
-		Handler:           observe.Middleware(publicMux),
+		Addr:              cfg.HTTPAddr,
+		Handler:           public,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	servers = append(servers, namedServer{name: "public", srv: publicSrv})
 
 	return serveUntilSignal(ctx, logger, shutdownTimeout, servers)
+}
+
+// publicHandler 装配公共监听端口的 handler。
+//
+// 装配本身在 internal/assembly 里：端到端测试要跑**同一条**装配路径，
+// 而写在 package main 里的装配只有 cmd/larkax 自己的测试够得着，那要求
+// 连库、监听端口——都不是命令行的职责。这里只负责把环境里的东西读出来
+// 交给它。
+//
+// 注意它捕获一切路径，包括 /healthz。健康检查要配到 internal 端口；
+// 配到这里的实例会拿到 501 并被编排系统摘除。上了负载均衡后这是真实的
+// 误配陷阱，所以健康检查只注册在 internalMux 上。
+func publicHandler(cfg *config.Config, handle *sql.DB, values *settings.Values, logger *slog.Logger) (http.Handler, error) {
+	if len(cfg.MasterKeys) == 0 {
+		// 没有主密钥的角色（worker）解不开任何渠道凭证，因而装不出候选来源。
+		// 它本来就不承接推理流量，所以公共端口保持占位响应——回一个明确的
+		// 501 比让整个进程起不来更贴合这个角色，也让部署验证仍然能确认
+		// 「端口通、TLS 通、负载均衡转发通」。
+		return notImplemented(), nil
+	}
+
+	sealer, err := credential.NewSealer(cfg.MasterKeys)
+	if err != nil {
+		return nil, fmt.Errorf("构造凭证封装器失败: %w", err)
+	}
+	// 只记标识不记材料：标识是「现在写进去的密文挂在哪把钥匙下」，
+	// 轮换时靠它对账；而密钥本身进日志就是泄露。
+	logger.Info("主密钥已加载", "ids", strings.Join(sealer.KeyIDs(), ","))
+
+	executor, err := upstream.New(upstreamTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("构造上游执行器失败: %w", err)
+	}
+	// 「注册了哪些适配器」要写进启动日志：「一个都没注册上」与「注册上了」
+	// 在日志里长得一样，而前者的现场是每个请求都报未知渠道类型。
+	logger.Info("上游适配器已注册", "types", strings.Join(executor.Types(), ","))
+
+	app, err := assembly.Build(assembly.Config{
+		DB:       handle,
+		Sealer:   sealer,
+		Settings: values,
+		Logger:   logger,
+		Version:  version,
+		Executor: executor,
+		Rules:    pricing.New(handle),
+	})
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("公共入口已装配", "snapshots", app.Snapshots.Enabled())
+	return app.Public, nil
+}
+
+// notImplemented 是公共端口的占位响应。
+//
+// 它按路径全捕获，任何真实流量都会立刻得到「这个构建没有推理接口」，
+// 而不是超时或 404 误导——部署验证靠这个性质确认链路是通的。
+func notImplemented() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("x-larkax-version", version)
+		w.WriteHeader(http.StatusNotImplemented)
+		_, _ = w.Write([]byte(`{"error":{"type":"not_implemented","message":"inference API is not available in this build"}}`))
+	})
+	// 最外层是关联标识：放在其他中间件之前，
+	// 这样被后续中间件拒绝掉的请求也带着 id，能被排查到。
+	return observe.Middleware(mux)
 }
 
 type namedServer struct {
