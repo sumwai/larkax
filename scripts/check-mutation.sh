@@ -71,6 +71,24 @@
 # 环境变量：GREMLINS（可执行文件，默认 gremlins）、COEF、WORKERS、
 # LOCK_FILE（锁文件路径，默认 <仓库根>/tmp/check-mutation.lock）。
 #
+# # 变异器集合与工具版本
+#
+# gremlins 默认只开一部分变异器。v0.6.0 的默认集合是 ARITHMETIC_BASE、
+# CONDITIONALS_BOUNDARY、CONDITIONALS_NEGATION、INCREMENT_DECREMENT、
+# INVERT_NEGATIVES；而 INVERT_LOGICAL（`&&` ↔ `||`）**默认关闭**——于是
+# `a || b` 这样的判据一个变异体都不生成，efficacy 再高也证明不了它被钉住。
+# 本仓库里就有这样的判据（internal/route 的 worthNextCandidate 是 `a || b`），
+# 所以这里显式打开它。
+#
+# **打开它意味着历史数字与现在的口径不可比。** efficacy 的分母是变异体数，
+# 分母变了分数就会变。AGENTS.md 那张表因此必须按这一套口径整表重跑一次；
+# 在那之前表里的数字只能当历史值看，不要拿来与新一轮比较。
+#
+# 版本同样要钉住：`@latest` 不是版本，装出来的二进制会随上游发布而变。
+# 而且它自报的版本是 dev（版本号由 release 构建注入，`go install` 装的没有），
+# 所以脚本**没法在运行时核对版本**——只能把版本写死在安装方式里，
+# 并在 AGENTS.md 的表旁记下它出自哪个版本。
+#
 # 本脚本有一份自测：scripts/check-mutation.test.sh。改动后必须跑它。
 
 set -uo pipefail
@@ -114,7 +132,7 @@ fi
 
 GREMLINS="${GREMLINS:-gremlins}"
 if ! command -v "$GREMLINS" >/dev/null 2>&1; then
-  echo "找不到 gremlins。安装：go install github.com/go-gremlins/gremlins/cmd/gremlins@latest"
+  echo "找不到 gremlins。安装：go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0"
   echo "或用 GREMLINS=/path/to/gremlins 指定。"
   exit 1
 fi
@@ -181,7 +199,10 @@ for pkg in "${PKGS[@]}"; do
   # 实测（ledger）：有 DSN 时 132/11/27（可测 143），无 DSN 时 94/7/69（可测 101）。
   # 注意两个百分比别混：Test efficacy 是 92.31% 与 93.07%（几乎不变），
   # 差得多的是 Mutator coverage，84.12% 与 59.41%。
-  out=$("$GREMLINS" unleash --timeout-coefficient="$COEF" --workers="$WORKERS" "./$pkg/" 2>&1)
+  # --invert-logical 是显式打开的（默认关，理由见文件开头）：不开的话
+  # `a || b` 这类判据一个变异体都不生成，而「没生成」与「生成了且被杀死」
+  # 在分数上分不出来。
+  out=$("$GREMLINS" unleash --invert-logical --timeout-coefficient="$COEF" --workers="$WORKERS" "./$pkg/" 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "⚠ $pkg: gremlins 执行失败（退出码 $rc）"
