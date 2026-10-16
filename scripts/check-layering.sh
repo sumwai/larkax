@@ -62,7 +62,13 @@ fi
 # （Redactor / SnapshotSink），而满足那两个接口需要同时看见 snapshot
 # 与 gateway 两侧的类型。适配放在一个专门的装配包里，gateway 本身
 # 仍然不 import snapshot。
-ALLOWED_GATEWAY_IMPORTERS='internal/snapshotwire'
+#
+# 例外里为什么有 api：gateway 是入口层的**实现**，api 是入口层的 HTTP
+# 那一半，它要调 gateway.Chat 并读 gateway.Result。让 gateway 反过来声明
+# 一个「给 api 用的窄接口」会把入口的形状搬进 gateway，而那个形状正是
+# api 该定的东西。方向仍然是 api → gateway，没有第三个包会顺着它被拖进来。
+ALLOWED_GATEWAY_IMPORTERS='internal/snapshotwire
+internal/api'
 
 echo "── 谁 import 了 gateway"
 # 先取「扫到了多少个文件」再取命中：只打印命中与否的话，

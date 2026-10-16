@@ -784,3 +784,85 @@ func TestRequestRoundTrip(t *testing.T) {
 		t.Errorf("工具丢失: %+v", back.Tools)
 	}
 }
+
+// ParseRequest 是入口唯一的解析点：协议由调用方给出，不由请求体猜。
+func TestParseRequestOpenAIBody(t *testing.T) {
+	body := []byte(`{
+		"model": "m-1",
+		"messages": [{"role": "user", "content": "你好"}],
+		"max_tokens": 64,
+		"temperature": 0
+	}`)
+
+	got, err := ParseRequest(context.Background(), channel.ProtocolOpenAI, body)
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if got.Model != "m-1" || got.MaxTokens != 64 {
+		t.Errorf("基本字段 = %+v", got)
+	}
+	if got.Temperature == nil || *got.Temperature != 0 {
+		t.Error("temperature 为 0 是合法值，必须保留指针")
+	}
+	if len(got.Messages) != 1 || got.Messages[0].Content[0].Text != "你好" {
+		t.Errorf("消息 = %+v", got.Messages)
+	}
+}
+
+func TestParseRequestClaudeBody(t *testing.T) {
+	body := []byte(`{
+		"model": "m-1",
+		"max_tokens": 32,
+		"messages": [{"role": "user", "content": "你好"}]
+	}`)
+
+	got, err := ParseRequest(context.Background(), channel.ProtocolAnthropic, body)
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if got.Model != "m-1" || got.MaxTokens != 32 {
+		t.Errorf("基本字段 = %+v", got)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].Content[0].Text != "你好" {
+		t.Errorf("消息 = %+v", got.Messages)
+	}
+}
+
+// 不认识的顶层字段要忽略：调用方可能比我们新，因为多了一个字段就拒收，
+// 等于把一个非破坏性的加法变成了破坏性的（见 docs/versioning.md）。
+func TestParseRequestIgnoresUnknownFields(t *testing.T) {
+	body := []byte(`{
+		"model": "m-1",
+		"messages": [{"role": "user", "content": "hi"}],
+		"future_option": {"nested": [1, 2, 3]}
+	}`)
+
+	got, err := ParseRequest(context.Background(), channel.ProtocolOpenAI, body)
+	if err != nil {
+		t.Fatalf("多了一个未知字段就拒收: %v", err)
+	}
+	if got.Model != "m-1" {
+		t.Errorf("Model = %q", got.Model)
+	}
+}
+
+func TestParseRequestRejectsBadInput(t *testing.T) {
+	cases := []struct {
+		name     string
+		protocol channel.Protocol
+		body     string
+	}{
+		{name: "不是 JSON", protocol: channel.ProtocolOpenAI, body: `{`},
+		{name: "不是对象", protocol: channel.ProtocolOpenAI, body: `[1,2,3]`},
+		{name: "空体", protocol: channel.ProtocolAnthropic, body: ``},
+		{name: "custom 没有固定形状", protocol: channel.ProtocolCustom, body: `{"model":"m"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ParseRequest(context.Background(), tc.protocol, []byte(tc.body)); err == nil {
+				t.Error("应当报错")
+			}
+		})
+	}
+}

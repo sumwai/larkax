@@ -10,8 +10,9 @@ latency, cost, and quota; usage is metered and billed per request.
 ## Status
 
 Early development — the repository currently contains the service skeleton and the
-database schema, not a working router. The inference API is not implemented and
-returns `501` on every path. Nothing here is ready to run in production.
+database schema, not a working router. The inference entry point exists in
+`internal/api`, but it is not wired into the binary yet, so every path still returns
+`501`. Nothing here is ready to run in production.
 
 What works today:
 
@@ -20,6 +21,8 @@ What works today:
 - Migrations, applied and rolled back through `larkaxctl`
 - The full initial database schema
 - The ledger store and the reconcile job that checks the wallet snapshot against it
+- The public HTTP entry: path-to-protocol dispatch, request parsing, and per-protocol
+  response and error shapes (not yet wired into `cmd/larkax`)
 
 See [docs/development.md](docs/development.md) for how to build and run it.
 The reconciliation job is documented in [docs/reconciliation.md](docs/reconciliation.md).
@@ -45,6 +48,7 @@ The reconciliation job is documented in [docs/reconciliation.md](docs/reconcilia
 ```
 cmd/larkax/                       the service binary
 cmd/larkaxctl/                    migrations and operations CLI
+internal/api/                     the public HTTP entry: paths, parsing, response shapes
 internal/billing/                 turning usage into money: reserve, settle, breakdown
 internal/billing/calendaradapter/  bridges internal/calendar to the pricing engine
 internal/billing/expr/            the expression engine that evaluates pricing rules
@@ -91,9 +95,9 @@ gateway  ──►  pipeline  ──►  billing  ──►  money
                    └── usage normalized from channel.Usage, tokens only as a label
 ```
 
-`gateway` is the entry layer; `cmd/` sits above it and `money`, `calendar`,
-`relay`, `observe` and `migrate` are leaves. Nothing reaches back into
-`gateway` except the adapter named below.
+`gateway` is the entry layer, and `internal/api` is its HTTP half; `cmd/` sits
+above them and `money`, `calendar`, `relay`, `observe` and `migrate` are leaves.
+Nothing else reaches back into `gateway` — the two exceptions are named below.
 
 A few rules hold across the tree, and `scripts/check-layering.sh` checks them in
 CI rather than by eye — it lists the packages allowed to import relaykit and
@@ -105,9 +109,11 @@ flags `float64(` used on money outside `internal/money`:
   to it. Everything else uses larkax's own types.
 - **`internal/money` is the only place rounding happens.** Everything else is
   integer arithmetic on a fixed-point value.
-- **Nothing below the entry layer imports `internal/gateway`.** The one
-  exception, `internal/snapshotwire`, is named in `scripts/check-layering.sh`;
-  it adapts the snapshot package to the interfaces the gateway declares.
+- **Nothing below the entry layer imports `internal/gateway`.** The two
+  exceptions are named in `scripts/check-layering.sh`: `internal/api`, which is
+  the HTTP half of the entry layer and calls `gateway.Chat`, and
+  `internal/snapshotwire`, which adapts the snapshot package to the interfaces
+  the gateway declares.
 
 The billing path is deliberately split so each stage can be tested without a
 database or a network: `money` (arithmetic) → `billing` (usage × price) →

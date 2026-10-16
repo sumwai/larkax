@@ -23,6 +23,7 @@ import (
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/sumwai/larkax/internal/channel"
@@ -258,6 +259,38 @@ func applyExtras(out *dto.GeneralOpenAIRequest, extra map[string]json.RawMessage
 	if v, ok := extra["user"]; ok {
 		out.User = v
 	}
+}
+
+// ParseRequest 把调用方发来的请求体解析成管道内的请求。
+//
+// protocol 是**调用协议**，由入口按请求路径决定，不从请求体猜：两套协议的
+// 请求体在浅层很像（都有 model 与 messages），猜错时解析往往照样成功，
+// 于是错误被推迟到上游，以另一种面貌出现——那种失败排查起来要跨两个系统。
+// 用路径决定，解析失败就发生在离原因最近的地方。
+//
+// 不认识的顶层字段被忽略而不是报错：调用方可能比我们新（见
+// docs/versioning.md 的契约冻结规则），因为多了一个字段就拒收，
+// 等于把一个非破坏性的加法变成了破坏性的。
+//
+// 解析完立刻交给 FromRelaykitRequest，于是「relaykit 的类型」这件事仍然
+// 只出现在本包——入口只需要认识 protocol 与 body。
+func ParseRequest(ctx context.Context, protocol channel.Protocol, body []byte) (*channel.Request, error) {
+	var src any
+	switch protocol {
+	case channel.ProtocolOpenAI:
+		src = &dto.GeneralOpenAIRequest{}
+	case channel.ProtocolAnthropic:
+		src = &dto.ClaudeRequest{}
+	default:
+		// custom 没有固定的请求体形状：它由具体适配器说了算，
+		// 在这里猜一个会让「调用方说的是哪套协议」这件事失去意义。
+		return nil, fmt.Errorf("协议 %q 不能作为调用协议", protocol)
+	}
+
+	if err := kitutil.Unmarshal(body, src); err != nil {
+		return nil, fmt.Errorf("解析请求体失败: %w", err)
+	}
+	return FromRelaykitRequest(ctx, protocol, src)
 }
 
 // FromRelaykitRequest 把一个 relaykit 请求转成本项目的请求。
