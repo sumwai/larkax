@@ -50,8 +50,14 @@ type Store struct {
 // New 包装一个已打开的数据库句柄。
 func New(db *sql.DB) *Store { return &Store{db: db} }
 
-// 编译期断言：它要满足网关对结算落库的要求。
+// 编译期断言：它要满足网关对预留与结算落库的要求。
+//
+// 写成匿名接口而不是直接引用 gateway 的类型：本包不该 import gateway
+// （见 scripts/check-layering.sh 规则三），而结构满足不需要那条 import。
+// 代价是这里要与那边的接口定义**逐字对齐**——两边任意一侧改了签名，
+// 这个断言就会红，这正是它存在的意义。
 var _ interface {
+	SaveReservation(context.Context, pipeline.Request, *pipeline.Reservation) (int64, error)
 	Save(context.Context, pipeline.Request, *pipeline.Charge) error
 	Release(context.Context, pipeline.Request) error
 } = (*Store)(nil)
