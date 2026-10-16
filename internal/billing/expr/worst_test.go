@@ -121,8 +121,8 @@ func TestWorstCaseCoversActual(t *testing.T) {
 
 		"缓存与非缓存差很多": `
 			len <= 32000
-				? {"prompt": 0.0000015, "completion": 0.0000075, "cache_read": 0.0000002, "cache_write": 0.0000019}
-				: {"prompt": 0.0000030, "completion": 0.0000113, "cache_read": 0.0000003, "cache_write": 0.0000038}`,
+				? {"prompt": 0.0000015, "completion": 0.0000075, "cache_read": 0.0000002, "cache_write": 0.0000019, "reasoning": 0.0000090}
+				: {"prompt": 0.0000030, "completion": 0.0000113, "cache_read": 0.0000003, "cache_write": 0.0000038, "reasoning": 0.0000135}`,
 
 		"计量项在某一支才有": `
 			units["img"] > 0
@@ -178,9 +178,10 @@ func TestWorstCaseCoversActual(t *testing.T) {
 						Region:   "CN",
 						Calendar: cal,
 					}
-					if !rulePricesEveryUnit(t, p, env) {
-						// 规则没给某个计量项定价。那是「用量与规则不匹配」，
-						// billing.Validate 会报出来，与上界无关，换一条。
+					if !rulePricesEveryItem(t, p, env) {
+						// 规则没给用到的某一项定价（token 或计量项）。那是
+						// 「用量与规则不匹配」，billing.Validate 会报出来，
+						// 与上界无关，换一条。
 						continue
 					}
 					t.Run(ruleName+"/"+timeName, func(t *testing.T) {
@@ -192,15 +193,18 @@ func TestWorstCaseCoversActual(t *testing.T) {
 	}
 }
 
-// rulePricesEveryUnit 判断规则是否为这次用量里的每个计量项都给了单价。
+// rulePricesEveryItem 判断规则是否为这次用量用到的每一项都给了单价
+// （token 与计量项都算）。
 //
 // 缺一项时 billing 会以 ErrMissingPrice 报错——那是「用量与规则不匹配」，
 // 属于另一类问题，不该混进「上界够不够」的验证里。
-func rulePricesEveryUnit(t *testing.T, p *Program, env Env) bool {
+//
+// 判据直接用 billing.Validate，不在这里另写一套：Validate 查什么，这里就跳什么。
+// 早先这里写的是「没有计量项就直接放行」，因为那时 Validate 只查计量项；
+// token 单价也纳入检查之后，那个提前返回会把一批组合放进 settle 里，
+// 让它们以「规则不完整」失败——而那不是这条测试要测的东西。
+func rulePricesEveryItem(t *testing.T, p *Program, env Env) bool {
 	t.Helper()
-	if len(env.Usage.UnitCounts) == 0 {
-		return true
-	}
 	res, err := p.Eval(env)
 	if err != nil {
 		return false

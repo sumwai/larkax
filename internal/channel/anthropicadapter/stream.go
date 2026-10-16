@@ -58,7 +58,12 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 			CompletionTokens: outputTokens,
 			CacheReadTokens:  cacheRead,
 			CacheWriteTokens: cacheWrite,
-			Raw:              map[string]any{"source": "claude_messages"},
+			// Anthropic 的 output_tokens 含扩展思考的 token，而协议不单独报
+			// 推理量——这里也不填 ReasoningTokens。声明成「已含」是把这件事
+			// 如实写下来：万一以后有人把思考量填进 ReasoningTokens，
+			// 计费层不会把它在输出价上再收一遍。
+			CompletionIncludesReasoning: true,
+			Raw:                         map[string]any{"source": "claude_messages"},
 		}
 		// Anthropic 的 input_tokens 不含缓存，归一化后补上才是 OpenAI 口径。
 		u.PromptTokens += cacheRead + cacheWrite

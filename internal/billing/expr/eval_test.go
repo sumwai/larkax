@@ -101,6 +101,35 @@ func TestEvalPricesAndUnits(t *testing.T) {
 	if res.At != testAt {
 		t.Errorf("回传的求值时刻 = %v，期望 %v", res.At, testAt)
 	}
+
+	// Declared 只记规则里**写过**的键：上面写了 prompt / completion /
+	// cache_read，没写 cache_write 与 reasoning。
+	for _, name := range []string{"prompt", "completion", "cache_read"} {
+		if !res.Prices.Declared[name] {
+			t.Errorf("规则写过 %q，Declared 里却没有", name)
+		}
+	}
+	for _, name := range []string{"cache_write", "reasoning"} {
+		if res.Prices.Declared[name] {
+			t.Errorf("规则没写 %q，Declared 里却有", name)
+		}
+	}
+}
+
+// TestEvalRecordsExplicitZeroAsDeclared 验证显式写 0 也记进 Declared。
+// 它是「这一项免费」，与「规则没写」不是一回事——两者的单价都落在 0，
+// 而 Validate 只拒后者。
+func TestEvalRecordsExplicitZeroAsDeclared(t *testing.T) {
+	res := eval(t, `{"prompt": 0.0000015, "reasoning": 0}`, billing.Usage{})
+	if !res.Prices.Declared["reasoning"] {
+		t.Error("规则里显式写了 reasoning: 0，Declared 应记上")
+	}
+	if !res.Prices.Reasoning.IsZero() {
+		t.Errorf("reasoning 单价应为 0，得到 %s", res.Prices.Reasoning)
+	}
+	if res.Prices.Declared["completion"] {
+		t.Error("规则没写 completion，Declared 里不该有")
+	}
 }
 
 // TestEvalConditionalPicksBranch 验证条件按用量选档。

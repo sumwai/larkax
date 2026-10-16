@@ -186,9 +186,10 @@ func TestNormalizeMissingFieldsAreZero(t *testing.T) {
 	}
 }
 
+// 上游报「输出 5、其中推理 500」是自相矛盾的（推理含在输出里）。
+// 把输出抬到至少等于推理，让 channel.Usage 自身自洽——它会被序列化给
+// 调用方看。抬这一下不改金额：计费层拆分时减掉的量与抬高的量相同。
 func TestNormalizeReasoningDoesNotExceedCompletion(t *testing.T) {
-	// 「输出 0 但有推理 500」是自相矛盾的账。把输出抬到至少等于推理，
-	// 而不是把推理压掉——后者会凭空抹去一笔已经发生的费用。
 	got, err := Normalize(RawUsage{
 		Upstream:         UpstreamOpenAI,
 		PromptTokens:     i64(10),
@@ -200,6 +201,45 @@ func TestNormalizeReasoningDoesNotExceedCompletion(t *testing.T) {
 	}
 	if got.CompletionTokens < got.ReasoningTokens {
 		t.Errorf("输出 %d 小于推理 %d", got.CompletionTokens, got.ReasoningTokens)
+	}
+}
+
+// 三家的推理都含在输出里，声明必须显式给出。
+//
+// 漏了声明就会落到零值（「推理是单独报的」），于是同一批 token 在计费层
+// 被按输出价与推理价各收一遍——账单只是偏高，对账发现不了。
+func TestNormalizeDeclaresReasoningIncluded(t *testing.T) {
+	cases := map[string]RawUsage{
+		"openai": {
+			Upstream:         UpstreamOpenAI,
+			PromptTokens:     i64(10),
+			CompletionTokens: i64(100),
+			ReasoningTokens:  i64(60),
+		},
+		"anthropic": {
+			Upstream:        UpstreamAnthropic,
+			InputTokens:     i64(10),
+			OutputTokens:    i64(100),
+			ReasoningTokens: i64(60),
+		},
+		"deepseek": {
+			Upstream:              UpstreamDeepSeek,
+			PromptCacheHitTokens:  i64(10),
+			PromptCacheMissTokens: i64(5),
+			CompletionTokens:      i64(100),
+			ReasoningTokens:       i64(60),
+		},
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			got, err := Normalize(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.CompletionIncludesReasoning {
+				t.Error("未声明「推理含在输出里」")
+			}
+		})
 	}
 }
 
