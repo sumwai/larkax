@@ -25,7 +25,7 @@
 #   命令      deadcode ./cmd/larkax ./cmd/larkaxctl
 #             （扫描起点由 cmd/ 自动发现，这两个就是当前发现的全部）
 #   工具      golang.org/x/tools v0.52.0（脚本里的 PINNED_TOOLS_VERSION）
-#   条数      99，与脚本里的 MAX_ENTRIES 一致
+#   条数      81，与脚本里的 MAX_ENTRIES 一致
 #
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
@@ -33,34 +33,16 @@ internal/billing/billing.go      | Compute                         | lib | 与 C
 internal/billing/reserve.go      | Settle                          | lib | 与 SettleWithCharges 成对的另一半 API
 internal/billing/reserve.go      | SettleUncapped                  | lib | 无上界结算，供「已经有实测用量」的调用方；目前只有测试在调
 internal/billing/reserve.go      | SettleUncappedWithCharges       | lib | 同上，带一次性费用
-internal/calendar/calendar.go    | Calendar.At                     | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/calendar.go    | Calendar.Lookup                 | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/calendar.go    | Date.cmp                        | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/calendar.go    | DayKind.Known                   | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/calendar.go    | DayStatus.withRow               | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/calendar.go    | New                             | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/calendar.go    | reasonOf                        | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/calendar.go    | sign                            | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/memory.go      | MemorySource.AddDay             | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/memory.go      | MemorySource.LookupDay          | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/memory.go      | MemorySource.SetDefaultRange    | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/memory.go      | MemorySource.SetYearState       | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/memory.go      | MemorySource.YearState          | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/memory.go      | NewMemorySource                 | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/peak.go        | Calendar.PeakAt                 | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/peak.go        | NewPeakSchedule                 | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/peak.go        | NewPeakWindow                   | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/peak.go        | PeakKind.Known                  | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/peak.go        | PeakSchedule.Validate           | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/peak.go        | PeakWindow.String               | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/peak.go        | PeakWindow.Validate             | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/peak.go        | PeakWindow.containsMinute       | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/peak.go        | PeakWindow.fullDay              | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/peak.go        | clock                           | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/store/store.go | NewSource                       | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/store/store.go | Source.LookupDay                | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/store/store.go | Source.YearState                | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
-internal/calendar/store/store.go | parseYearState                  | gap | #182 日历整条链还没有入口（数据源没接到 expr.Env.Calendar 上）
+internal/calendar/calendar.go    | Date.cmp                       | lib | 只被内存实现调用，而内存实现是测试夹具（见 memory.go 那几条）
+internal/calendar/calendar.go    | sign                           | lib | 只被内存实现调用，而内存实现是测试夹具（见 memory.go 那几条）
+internal/calendar/memory.go    | MemorySource.AddDay            | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
+internal/calendar/memory.go    | MemorySource.LookupDay         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
+internal/calendar/memory.go    | MemorySource.SetDefaultRange   | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
+internal/calendar/memory.go    | MemorySource.SetYearState      | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
+internal/calendar/memory.go    | MemorySource.YearState         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
+internal/calendar/memory.go    | NewMemorySource                | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
+internal/calendar/peak.go        | NewPeakSchedule                | gap | #205 峰谷计价没有生产调用方（接线之后 deadcode 也不再提醒它）
+internal/calendar/peak.go        | NewPeakWindow                  | gap | #205 峰谷计价没有生产调用方（接线之后 deadcode 也不再提醒它）
 internal/catalog/admin.go        | Admin.Delete                    | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/catalog/admin.go        | Admin.DeleteAlias               | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/catalog/admin.go        | Admin.Update                    | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
