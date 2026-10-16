@@ -25,11 +25,21 @@ var ErrAliasNotFound = errors.New("没有对应的上游模型名")
 // channelID 传 0 表示「不针对具体渠道」，此时只会命中平台级的行
 // （id 从 1 开始，0 不会等于任何真实的 channel_id）。
 //
-// # 同一渠道可能有多条别名指向同一个规范名
+// # 每个范围最多命中一条，所以这里不需要兜底的取舍规则
 //
-// 表上的唯一键是 (channel_id, upstream_model)，它拦不住
-// 「两个上游名都映射到同一个规范名」。真出现这种数据时这里按上游名排序取
-// 第一条，结果是确定的，但**不代表哪条更对**——那要靠数据本身的约定。
+// 两条偏唯一索引（见 00006 迁移）把「两个上游名映射到同一个规范名」挡在了
+// 写入侧：渠道级 (channel_id, canonical_name) 唯一，平台级 canonical_name
+// 唯一。于是这个查询最多命中两条——一条渠道级、一条平台级——按渠道级优先取
+// 一条即可，不需要再拿别的列给「同一范围下的多条候选」排个序。
+//
+// 约束建立之前，这里按 upstream_model 排序取第一条来给多条候选定一个确定的
+// 顺序。那只保证了**确定**，没保证**正确**：上游改名或换版本时，两个名字在
+// 上游侧的计价可能不同，选错就是差价，而账单看上去完全正常。约束到位后那种
+// 数据进不来了，所以这里只按「渠道级优先于平台级」排序——它表达的是配置的
+// 优先级，不是在一堆等价候选里挑一个。
+//
+// 写入被拦下这件事由 integration_test.go 里的用例钉住（断言拿到的是具体的
+// 唯一约束冲突），删掉索引会立刻让那几条用例失败。
 func (s *Source) UpstreamModel(ctx context.Context, channelID int64, canonicalModel string) (string, error) {
 	if canonicalModel == "" {
 		return "", errors.New("规范模型名为空")
@@ -41,7 +51,7 @@ func (s *Source) UpstreamModel(ctx context.Context, channelID int64, canonicalMo
 		  FROM model_aliases
 		 WHERE canonical_name = $2
 		   AND (channel_id = $1 OR channel_id IS NULL)
-		 ORDER BY (channel_id IS NULL), upstream_model
+		 ORDER BY (channel_id IS NULL)
 		 LIMIT 1`, channelID, canonicalModel).Scan(&upstream)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("%w：渠道 %d 的 %q", ErrAliasNotFound, channelID, canonicalModel)

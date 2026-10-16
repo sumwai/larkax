@@ -142,10 +142,10 @@ CREATE INDEX model_catalog_vendor_idx ON model_catalog (vendor);
 CREATE TABLE model_aliases (
     id                  bigserial PRIMARY KEY,
     -- 可空表示这是一条平台级别名，不属于任何渠道。此时它由 canonical_name
-    -- 唯一决定，同一条不应出现两次——但下面的 UNIQUE 管不到它：
+    -- 唯一决定，同一条不应出现两次——但下面那条 UNIQUE 管不到它：
     -- SQL 里 NULL 不等于 NULL，channel_id IS NULL 的行可以有任意多条。
-    -- 平台级别名的去重需要 UNIQUE (upstream_model) WHERE channel_id IS NULL
-    -- 这样的偏索引，尚未建立。
+    -- 平台级与渠道级两个方向的去重各由一条**偏**唯一索引承担，
+    -- 见 00007_model_alias_unique.sql。
     channel_id          bigint,
     upstream_model      text NOT NULL,
     canonical_name      text REFERENCES model_catalog(canonical_name),
