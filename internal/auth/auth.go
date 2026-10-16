@@ -47,6 +47,13 @@ type User struct {
 	//
 	// 它和 ID 不是一回事：一个用户可以有多个 key，账单要能追到**哪一把**在用。
 	KeyID int64
+	// RateLimitRPM 是这把 key 的每分钟请求额度，即 api_keys.rate_limit_rpm
+	// 的**原样**值：nil 表示列值为 NULL。
+	//
+	// 这里不解释 NULL 与 0 各是什么意思——那是限流的事（见 internal/ratelimit）。
+	// 本包只负责把列值带上来：在两处各解释一遍，两处迟早会不一致，
+	// 而不一致时没有任何东西会报错。
+	RateLimitRPM *int
 }
 
 // Authenticator 是公共 HTTP 入口对鉴权层的要求。
