@@ -174,14 +174,42 @@ go run ./cmd/larkaxctl migrate up
 ```sh
 gofmt -l .                          # 列出未格式化的文件
 go vet ./...
+golangci-lint run ./...             # 跨文件与语义检查，配置见 .golangci.yml
 go test ./...
 go test -race ./...
 go test -cover ./...
 
 bash scripts/check-redlines.sh      # 检查暂存区是否混入密钥与私有信息
 bash scripts/check-redlines.sh --all
-bash scripts/check-redlines.test.sh # 只在改过上面那个脚本后需要跑
+bash scripts/check-layering.sh      # 检查分层约定有没有被破坏
+
+bash scripts/check-redlines.test.sh # 只在改过红线脚本后需要跑
 ```
 
-提交前至少跑一遍 `gofmt -l .`、`go vet ./...`、`go test ./...` 和红线自查。
+提交前至少跑一遍 `gofmt -l .`、`go vet ./...`、`go test ./...` 和两个自查脚本。
 CI 会跑同样的东西，本地跑是为了少一轮来回。
+
+## 变异测试
+
+改了**计费、账本、金额**这三处代码时，除了单测还要跑变异测试：
+
+```sh
+gremlins unleash --timeout-coefficient=10 --workers=4 ./internal/money/
+gremlins unleash --timeout-coefficient=10 --workers=4 ./internal/billing/
+gremlins unleash --timeout-coefficient=10 --workers=4 ./internal/ledger/
+```
+
+覆盖率只说明「这一行被执行过」，不说明「这一行的每个分支被钉住了」。
+实测：这三个包的覆盖率都在 91%~97%，而变异测试每次都找出两位数个
+**存活**变异——它们集中在「恰好相等」「恰好为零」这类边界上，
+而写测试时的自然倾向正是跳过这些。
+
+`--timeout-coefficient` 不能省：默认值会让大量变异被判**超时**而不是
+**存活**，同一份代码两次运行给出截然不同的分数。
+
+存活变异要**逐条判断**，不是看一个总数。只有两类可以放过：
+
+- **等价变异**：改法与改后行为在数值上不可区分
+- **不可达分支**：前置条件已经保证了走不到
+
+放过时在测试里写一行说明，否则下一个人会以为是漏了。
