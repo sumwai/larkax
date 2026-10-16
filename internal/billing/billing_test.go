@@ -15,6 +15,11 @@ func prices() Prices {
 		CacheRead:  money.MustParse("0.0000002"), // 缓存命中便宜一个数量级
 		CacheWrite: money.MustParse("0.0000025"),
 		Reasoning:  money.MustParse("0.00001"),
+		// 五个 token 单价都「写过」——Validate 认的是这个，不是单价是否为 0。
+		Declared: map[string]bool{
+			"prompt": true, "completion": true, "cache_read": true,
+			"cache_write": true, "reasoning": true,
+		},
 	}
 }
 
@@ -128,6 +133,36 @@ func TestValidateAcceptsPricedUnits(t *testing.T) {
 	p.Units = map[string]money.Amount{"searches": money.MustParse("0.01")}
 	if err := Validate(Usage{UnitCounts: map[string]int64{"searches": 5}}, p); err != nil {
 		t.Errorf("已定价的计量项不该被拒: %v", err)
+	}
+}
+
+// token 单价漏写同样不能当成免费。改了计费口径之后推理与输出互斥，规则没写
+// reasoning 时它按 0 元计——那是一笔没人会来问的少收。
+func TestValidateRejectsMissingTokenPrice(t *testing.T) {
+	p := prices()
+	delete(p.Declared, "reasoning")
+	err := Validate(Usage{ReasoningTokens: 40}, p)
+	if !errors.Is(err, ErrMissingPrice) {
+		t.Fatalf("漏写 reasoning 单价应被拒绝，得到 %v", err)
+	}
+}
+
+// 反过来：显式写 0 是「这一项免费」，是一个正当的配置，不该被拒。
+// 这一条与上一条一起把「写了 0」和「没写」钉开——两者的单价都是 0，
+// 差别只在规则里有没有那个键。
+func TestValidateAcceptsExplicitZeroTokenPrice(t *testing.T) {
+	p := prices()
+	p.Reasoning = money.Zero
+	if err := Validate(Usage{ReasoningTokens: 40}, p); err != nil {
+		t.Errorf("显式写 0 的单价不该被拒: %v", err)
+	}
+}
+
+// 没有用量的那一项不要求单价：一条只按计量项计费的规则不必写 token 单价。
+func TestValidateIgnoresUnusedTokenSlots(t *testing.T) {
+	p := Prices{Declared: map[string]bool{}}
+	if err := Validate(Usage{}, p); err != nil {
+		t.Errorf("零用量不该要求任何单价: %v", err)
 	}
 }
 

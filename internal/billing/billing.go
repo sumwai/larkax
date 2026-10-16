@@ -80,6 +80,16 @@ type Prices struct {
 	Reasoning  money.Amount
 	// Units 是非 token 计量的单价，键与 Usage.UnitCounts 对应。
 	Units map[string]money.Amount
+	// Declared 记录规则**显式写过**哪几个 token 单价，键是 prompt / completion /
+	// cache_read / cache_write / reasoning。
+	//
+	// 为什么单独记这个：单价的零值与「规则里没写」在 money.Amount 上分不出来，
+	// 而这两件事要区别对待——写了 0 是「这一项免费」，是正当配置；没写是
+	// 「规则漏了」，那样这类用量会永远按 0 元计，且不报错，只在对账时表现为
+	// 「用量对不上金额」。Validate 据此把后者拒掉。
+	//
+	// 由 internal/billing/expr 求值规则时填——只有它知道规则里到底写了哪些键。
+	Declared map[string]bool
 }
 
 // Rule 是一条计价规则。
@@ -239,6 +249,23 @@ func Validate(usage Usage, prices Prices) error {
 		}
 		if _, ok := prices.Units[name]; !ok {
 			return fmt.Errorf("%w: %q", ErrMissingPrice, name)
+		}
+	}
+	// token 单价同样不能漏。判据是「规则有没有写过这个键」，而不是「单价是不是
+	// 0」——显式写 0 是「这一项免费」，正当；没写则落到零值，结果一样是 0 元，
+	// 两者在 money.Amount 上分不出来，所以靠 Prices.Declared 区分。
+	for _, t := range []struct {
+		name  string
+		count int64
+	}{
+		{"prompt", usage.PromptTokens},
+		{"completion", usage.CompletionTokens},
+		{"cache_read", usage.CacheReadTokens},
+		{"cache_write", usage.CacheWriteTokens},
+		{"reasoning", usage.ReasoningTokens},
+	} {
+		if t.count > 0 && !prices.Declared[t.name] {
+			return fmt.Errorf("%w: %q（规则里没写这个单价；要免费就显式写 0）", ErrMissingPrice, t.name)
 		}
 	}
 	return nil
