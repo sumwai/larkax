@@ -233,6 +233,10 @@ func (f UsageFacts) empty() bool {
 // 口径（CompletionIncludesReasoning）同样按这个规则叠加：插件声明了就以它
 // 为准，没声明就保留内核的。它必须一起并进来——合并出来的用量随后要被
 // 重建回协议层用量去结算，而这一步丢了口径就等于把同一批 token 收两次。
+//
+// **目前还没有生产调用方**：那条「合并 → 重建回 channel.Usage → 结算」的
+// 链路还没接上，现在只有本包的测试在调它（同 ChannelUsage，见
+// LESSONS.md 第 22 条）。
 func MergeUsage(core UsageFacts, reported *UsageFacts) UsageFacts {
 	if reported == nil {
 		return core

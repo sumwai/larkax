@@ -251,6 +251,11 @@ func UsageFactsFrom(u channel.Usage) *UsageFacts {
 //
 // 事实里自己声明了口径时以它为准：插件比内核更懂它代理的那个上游，
 // 而它报的量可能来自与内核不同的口径（例如插件自己估的用量）。
+//
+// **目前还没有生产调用方**：把 UsageFacts 重建回 channel.Usage 的那一步
+// （插件报的用量替换掉内核的用量）还没有接上，现在只有本包的测试在调它。
+// 也就是说「漏掉口径会把同一批 token 收两次」这件事在生产路径上还没发生，
+// 也还没被修——它是为那次接线准备的（见 LESSONS.md 第 22 条）。
 func (f UsageFacts) ChannelUsage(coreIncludesReasoning bool) channel.Usage {
 	u := channel.Usage{CompletionIncludesReasoning: coreIncludesReasoning}
 	if f.CompletionIncludesReasoning != nil {

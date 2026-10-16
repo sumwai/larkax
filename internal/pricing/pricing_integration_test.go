@@ -351,10 +351,15 @@ func TestMatchSkipsDisabledAndOutOfWindow(t *testing.T) {
 // 兜底成零价会让「没配价」表现为「免费」，而免费是最不容易被发现的错账。
 //
 // 「零行」这个状态是用**时刻**构造的，不是靠「库里恰好没有适用于这个模型的
-// 规则」。测试库是共享的：别的包会留下平台作用域、空 model_patterns 的规则
-// （当前是 internal/ledger/store 的 TestReservationRecordsPricingRule 造的，
-// 跑完没删），那种规则适用于任何模型，于是后一种构造在共享库上不可达——
-// 一条属于别人的、跑完就留下的行不该让这条用例变红。
+// 规则」。测试库是共享的，而 pricing_rules 是全局表：平台作用域、空
+// model_patterns 的规则适用于**任何**模型，只要它在库里，后一种构造就不成立。
+//
+// 残留窗口来自**本包自己**：admin_test.go 里有两条平台作用域、空
+// model_patterns 的规则——一条绕过写入路径插进去（`INSERT INTO pricing_rules
+// (scope, name, expr)`，没写 model_patterns，而那一列的默认值是空数组），
+// 一条由 TestCreateAllowsEmptyModelPatterns 正常创建。它们都只在 t.Cleanup 里
+// 删，而清理只保证用例**结束之后**库里干净，跑着的那一刻它仍然在；
+// `go test ./...` 并行跑包，别的包正好落在那个窗口里就会读到它。
 //
 // 换的只是 WHERE 上的一个条件（`effective_from <= $1`），走的还是同一个分支：
 // 零行 → ErrNoRule。本文件里凡是空 patterns 的规则都挂在渠道作用域下，
@@ -430,7 +435,7 @@ func TestMatchAllPicksRulePerCandidate(t *testing.T) {
 // 一个候选都匹配不上时返回空，而不是零价的兜底规则。
 //
 // 「零行」这个状态是用**时刻**构造的（见 TestMatchReturnsErrNoRule）：
-// 测试库是共享的，别的包会留下适用于任何模型的平台规则，靠「库里恰好
+// 测试库是共享的，库里可能有一条适用于任何模型的平台规则，靠「库里恰好
 // 没有适用的规则」构造不出来。
 func TestMatchAllReturnsEmptyWhenNothingMatches(t *testing.T) {
 	db := testDB(t)

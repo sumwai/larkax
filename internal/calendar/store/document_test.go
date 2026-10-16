@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -135,6 +136,83 @@ func TestParseDocumentRoundTrip(t *testing.T) {
 	third := got.Days[2]
 	if third.OffDay == nil || *third.OffDay || !third.MakeupWorkday {
 		t.Errorf("第三天解出来是 %+v", third)
+	}
+}
+
+// 每一个键名都要被**手写的 JSON**钉住。
+//
+// 键名是这份文件格式的对外契约：docs/calendar-data.md 与
+// `larkaxctl calendar import --help` 都照着它写。而 TestParseDocumentRoundTrip
+// 拿 json.Marshal(Document) 造输入，编码与解码共用同一批 struct tag——把
+// `off_day` 改成 `offDay`，它照样绿，文档与实现却当场对不上。所以这里手写
+// JSON：键名与 struct tag 成了两个独立的来源，改一个另一个就挂。
+//
+// days 要覆盖全年才通得过校验（synced 的硬要求），所以那一段由一条手写的
+// 模板铺满 2031 年——模板里的键名同样只出现在这里，不是从 struct tag 反推的。
+//
+// 这份文件不是一份真实的日历数据：每个取值都只为覆盖一个键，例如 synced 的
+// 年也带着 last_error（校验不管这一对组合）。
+func TestParseDocumentPinsEveryKeyName(t *testing.T) {
+	const header = `{"region":"CN","year":2031,"status":"synced","source":"manual",` +
+		`"source_paper_urls":["https://example.com/notice","https://example.com/notice-2"],` +
+		`"sources_agree":false,"last_error":"上一次同步失败的原因","days":[`
+
+	var days strings.Builder
+	for _, date := range yearDays(2031) {
+		if days.Len() > 0 {
+			days.WriteString(",")
+		}
+		switch date.String() {
+		case "2031-01-01":
+			// 四个键全写的一天。
+			days.WriteString(`{"date":"2031-01-01","name":"元旦","off_day":true,"makeup_workday":false}`)
+		case "2031-01-04":
+			// 补班日：off_day 为 false 且 makeup_workday 为 true。
+			days.WriteString(`{"date":"2031-01-04","off_day":false,"makeup_workday":true}`)
+		default:
+			// 只写必填的两个键：可选的 name 与 makeup_workday 缺省时该是零值。
+			fmt.Fprintf(&days, `{"date":%q,"off_day":false}`, date.String())
+		}
+	}
+	raw := header + days.String() + `]}`
+
+	doc, err := ParseDocument(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("ParseDocument 出错: %v", err)
+	}
+
+	// 头部的八个键，逐个断言具体的值。
+	if doc.Region != "CN" || doc.Year != 2031 || doc.Status != "synced" || doc.Source != "manual" {
+		t.Errorf("头部解出来是 %+v", doc)
+	}
+	if len(doc.SourcePaperURLs) != 2 ||
+		doc.SourcePaperURLs[0] != "https://example.com/notice" ||
+		doc.SourcePaperURLs[1] != "https://example.com/notice-2" {
+		t.Errorf("source_paper_urls = %v", doc.SourcePaperURLs)
+	}
+	// 指针字段：写 false 与不写是两回事，这里写的是 false，所以指针必须非 nil。
+	if doc.SourcesAgree == nil || *doc.SourcesAgree {
+		t.Errorf("sources_agree = %v，期望 false 而不是「没写」", doc.SourcesAgree)
+	}
+	if doc.LastError != "上一次同步失败的原因" {
+		t.Errorf("last_error = %q", doc.LastError)
+	}
+
+	if len(doc.Days) != 365 {
+		t.Fatalf("解出 %d 天，期望 365", len(doc.Days))
+	}
+	// days 的四个键，各挑一天断言。顺序与文件里的顺序一致。
+	if first := doc.Days[0]; first.Date != "2031-01-01" || first.Name != "元旦" ||
+		first.OffDay == nil || !*first.OffDay || first.MakeupWorkday {
+		t.Errorf("第一天解出来是 %+v", first)
+	}
+	if second := doc.Days[1]; second.Date != "2031-01-02" || second.Name != "" ||
+		second.OffDay == nil || *second.OffDay || second.MakeupWorkday {
+		t.Errorf("第二天解出来是 %+v", second)
+	}
+	if makeup := doc.Days[3]; makeup.Date != "2031-01-04" || makeup.Name != "" ||
+		makeup.OffDay == nil || *makeup.OffDay || !makeup.MakeupWorkday {
+		t.Errorf("补班日解出来是 %+v", makeup)
 	}
 }
 

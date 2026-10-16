@@ -44,7 +44,9 @@ const calendarUsage = `larkaxctl calendar 维护分时计价用的日历数据�
   year                必填。这份数据所属的年份。
   status              必填。synced / pending / conflict / degraded 之一。
   source              数据的出处（holiday-cn、manual 之类），落进
-                      calendar_days.source。status 为 synced 时必填。
+                      calendar_days.source。status 为 synced 时必填；
+                      pending / conflict / degraded 三种状态**必须不写**
+                      ——它只用于数据行，而那三种状态不写数据行。
   days                该年每一天的判定。只有 synced 才带 days，且必须覆盖
                       本年的每一天（含调休补班的周末）。date 用 YYYY-MM-DD，
                       off_day 必填——漏写与写 false 在 JSON 里长得一样，
@@ -54,7 +56,8 @@ const calendarUsage = `larkaxctl calendar 维护分时计价用的日历数据�
   last_error          同步失败的原因，可选，status 为 degraded 时有意义。
 
 pending（公告尚未发布）、conflict、degraded 三种状态只记年份状态，不带
-days——那一年还没有定论，写进去的数据行会被当成确定的判定使用。
+days 也不带 source——那一年还没有定论，写进去的数据行会被当成确定的判定
+使用，而 source 只用于数据行。
 
 同一年再灌一次是覆盖而不是追加：导入会先清掉这一年上一次导入写下的行。
 跨年边界上的日子（例如元旦安排里把去年 12 月 31 日挪成休息）可以写进相邻
@@ -93,6 +96,14 @@ func runCalendarImport(args []string) error {
 	fs := flag.NewFlagSet("calendar import", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, calendarUsage) }
 	if err := fs.Parse(args); err != nil {
+		// -h / --help 不是失败：flag 在返回 ErrHelp 之前已经把用法打印过了，
+		// 再把它当错误返回会让 `larkaxctl calendar import --help` 以退出码 1
+		// 结束（main 把任何非 nil 的错误都当成失败），而 main.go 的用法文本
+		// 正好叫人这么跑。`larkaxctl calendar --help` 走的是另一条分支，
+		// 那条本来就返回 nil。
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	if fs.NArg() != 1 {

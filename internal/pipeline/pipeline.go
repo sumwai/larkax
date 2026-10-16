@@ -277,28 +277,34 @@ type Charge struct {
 	RuleID          int64
 	PricingExprSnap string
 
-	// UsageSource 与 Usage 是结算依据，落进 usage_events 供对账。
+	// UsageSource 与 Usage 是这次结算依据的用量与它的来源。
+	//
+	// 它们**目前不落库**：usage_events 表建好了，但全仓没有写入方
+	// （与 snapshot_access_log 同一种状态，见 LESSONS.md 第 22 条）。
+	// 所以「供对账」说的是那张表接上之后的用途，不是今天的事实。
 	UsageSource tokens.Source
 	Usage       billing.Usage
 
 	// Tier 是规则记下的档位名，供账单解释「为什么按这一档算」。
 	Tier string
-	// PricedAt 是求值用的时刻，用于分时计价的事后复算。
+	// PricedAt 是这次求值用的时刻，它记的是**受理时刻**
+	// （Reservation.RuleMatchedAt），不是结算这一刻：档位按受理那一刻选，
+	// 任何事后复算都必须从同一个时刻出发。拿结算时刻去复算会算出另一个
+	// 档位的价——两个价看起来都合理，差别只在用的是哪一刻，所以靠账单
+	// 本身分不出来。
 	//
-	// 它记的是**受理时刻**（Reservation.RuleMatchedAt），不是结算这一刻：
-	// 档位是按受理那一刻选的，复算必须从同一个时刻出发。拿结算时刻去
-	// 复算会算出另一个档位的价——两个价看起来都合理，差别只在用的是
-	// 哪一刻，所以事后靠账单本身分不出来。
+	// **下面三个字段目前只在内存里。** 结算的调用方不把它们写进任何表
+	// （账本那一侧只写 billing_requests 与 ledger_entries），全仓也还没有
+	// 复算入口。所以它们描述的是「将来复算时不必再查一次日历」这个用途，
+	// 不是今天已有的链路——今天连落库那一步都不存在。
 	PricedAt time.Time
-	// LocalHour 与 IsOffDay 是同一次求值里用到的分时依据，
-	// 单独落库是为了让复算不必再查一次日历。
+	// LocalHour 与 IsOffDay 是同一次求值里用到的分时依据，为复算预留。
 	//
 	// 它们与 PricedAt 描述的是**同一次求值**，所以三个字段必须取自同一个
 	// 时刻：把结算时刻的钟点配上受理时刻的 PricedAt，是一个从未发生过的
 	// 组合，而它照样算得出数来——照它对账会得到一个错的结论，且看不出错。
-	// 复算一律以 PricedAt 为准。
 	//
-	// 结算路径目前不填这两个字段（保持零值）：
+	// 结算路径**从不填这两个字段**（保持零值）：
 	//
 	//   - 「当地钟点」在规则里不是唯一的值——hour(tz) 的时区由规则作者
 	//     逐次给出，同一条规则里可以出现多个时区，也可以一次都不问钟点。
@@ -451,12 +457,6 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 	if reserved.RequestID != req.RequestID {
 		return nil, fmt.Errorf("预留属于请求 %q，与当前的 %q 不符", reserved.RequestID, req.RequestID)
 	}
-	if reserved.RuleMatchedAt.IsZero() {
-		// 结算的定价基准就是它（见下面求值那一步），没有它就只能退回去读墙钟，
-		// 而那正是本次要消除的口径。报出来而不是兜一个 p.now()：一个自己编的
-		// 时刻会让跨档位的请求按另一档计价，而账单上看不出用了哪个时刻。
-		return nil, errors.New("预留缺少受理时刻：结算要按受理那一刻的档位定价")
-	}
 	if err := req.validate(); err != nil {
 		return nil, err
 	}
@@ -472,6 +472,22 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 			Status:    out.UpstreamStatus,
 			Code:      out.ErrorCode,
 		}
+	}
+
+	// 结算的定价基准就是它（见下面求值那一步），没有它就只能退回去读墙钟，
+	// 而那正是本次要消除的口径。报出来而不是兜一个 p.now()：一个自己编的
+	// 时刻会让跨档位的请求按另一档计价，而账单上看不出用了哪个时刻。
+	//
+	// 它排在「上游失败不计费」**之后**，因为那条是硬规则：一次不计费的请求，
+	// 定价基准缺不缺都不该改变结论，更不该把一次上游失败降级成一句普通错误
+	// （IsUpstreamFailure 会因此为假，而调用方按它分支）。
+	//
+	// 这条分支是**防御性的**，当前真实路径造不出来：Reservation 只有一个构造点，
+	// RuleMatchedAt 取自 p.now()；预留也不落库、不从库里读回（SaveReservation
+	// 只把它写进 billing_requests.started_at，没有反向的加载路径）。只有测试
+	// 能手工把它置零（见 TestSettleRejectsReservationWithoutInstant）。
+	if reserved.RuleMatchedAt.IsZero() {
+		return nil, errors.New("预留缺少受理时刻：结算要按受理那一刻的档位定价")
 	}
 
 	// 结算用规则**当时**的那份。预留与结算必须用同一个规则版本——
@@ -638,8 +654,13 @@ func (p *Pipeline) entries(req Request, val expr.Result, s billing.Settlement) (
 		MerchantID:       req.OwnerUserID,
 		BillingRequestID: req.BillingRequestID,
 		// At 取 val.At（受理时刻），与这次定价的依据是同一个时刻：
-		// 一笔消费记的就是「哪一次请求、按哪一刻的价」。分录落库时的
-		// created_at 由写库那一侧决定，不从这里取。
+		// 一笔消费记的就是「哪一次请求、按哪一刻的价」。
+		//
+		// 它今天到不了库里：分录的 created_at 由写库那一侧用 SQL 的 now()
+		// 填（见 ledger/store 的 INSERT），全仓没有读 Entry.CreatedAt 的地方。
+		// 仍然传这个值而不是留零值，是因为分录在语义上属于受理那一刻——
+		// 留零值的话，将来谁开始读它，读到的会是一个公元 1 年的时间戳
+		// （见 LESSONS.md 第 19 条）。
 		At: val.At,
 	})
 	if err != nil {

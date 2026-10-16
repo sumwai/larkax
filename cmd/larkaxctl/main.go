@@ -69,7 +69,7 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl version                        打印版本号
 
 子命令的详细用法：larkaxctl <子命令> --help，例如 larkaxctl channel --help。
-日历数据文件的格式与约束见：larkaxctl calendar import --help
+日历数据文件的格式与约束见：larkaxctl calendar --help
 
 退出码：
   0  成功

@@ -305,9 +305,9 @@ func TestCreateAllowsEmptyModelPatterns(t *testing.T) {
 	admin := NewAdmin(db)
 	model := unique("model-any")
 
-	// priority 给一个非零值：测试库是共享的，别的包会留下「适用于全部模型」
-	// 的平台规则（见 TestMatchReturnsErrNoRule 的注释），没有优先级就只剩
-	// id 决胜，而 id 的大小不由本用例决定。
+	// priority 给一个非零值：测试库是共享的，库里可能留着一条「适用于全部模型」
+	// 的平台规则（残留窗口的来源见 TestMatchReturnsErrNoRule 的注释），没有
+	// 优先级就只剩 id 决胜，而 id 的大小不由本用例决定。
 	id := createRule(t, admin, CreateRequest{
 		Scope: ScopePlatform, Name: unique("rule-any"), ModelPatterns: []string{},
 		Expr: `{"prompt": 1}`, Priority: 50,
