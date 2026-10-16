@@ -246,6 +246,7 @@ type harness struct {
 	redactor        *fakeRedactor
 	snapshots       *fakeSnapshots
 	releaseFailures *fakeReleaseFailures
+	recorder        *fakeRecorder
 }
 
 func newHarness(t *testing.T, opts ...func(*harness)) *harness {
@@ -263,6 +264,7 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 		redactor:        &fakeRedactor{},
 		snapshots:       &fakeSnapshots{},
 		releaseFailures: &fakeReleaseFailures{},
+		recorder:        &fakeRecorder{},
 	}
 	for _, o := range opts {
 		o(h)
@@ -281,6 +283,7 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 		Redactor:        h.redactor,
 		Snapshots:       h.snapshots,
 		ReleaseFailures: h.releaseFailures,
+		Recorder:        h.recorder,
 		Now:             func() time.Time { return fixedAt },
 	}
 	return h

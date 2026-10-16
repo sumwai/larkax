@@ -35,9 +35,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/route"
 	"github.com/sumwai/larkax/internal/tokens"
@@ -89,6 +91,18 @@ type SettlementStore interface {
 // 由本包在后台调用，而本包**不等它的结果**——见 snapshotAsync。
 type SnapshotSink interface {
 	Save(ctx context.Context, snap *Snapshot) error
+}
+
+// CallRecorder 接收每一次上游调用的结局（健康度与额度自记账）。
+//
+// 与 CandidateSource 同一个做法：接口在这里声明、参数类型由 route 定义，
+// 于是满足它的包（internal/channels）不必 import 本包——gateway 是入口层，
+// 数据面依赖它会把整条入口链路拖进去（见 scripts/check-layering.sh）。
+//
+// 它与 SnapshotSink 的取舍相反：快照可以丢，而健康度是**路由的输入**，
+// 所以这一路是同步的、错误要留痕（见 recordCall）。
+type CallRecorder interface {
+	RecordCall(ctx context.Context, rec route.CallOutcome) error
 }
 
 // Snapshot 是交给落库层的一条快照。
@@ -175,6 +189,12 @@ type Gateway struct {
 	// ReleaseFailures 可以为空——那样释放失败不留痕（见 ReleaseFailureSink）。
 	ReleaseFailures ReleaseFailureSink
 
+	// Recorder 接收每一次上游调用的结局：渠道健康度与额度自记账。
+	//
+	// 可以为空——那样什么都不记。它是**可选**的接线，但装上之后它就不再是
+	// 排障辅助：一个正在连续失败的渠道靠它被挡在候选集之外（见 recordCall）。
+	Recorder CallRecorder
+
 	// Executor 是真正调上游的东西。适配器实现它。
 	Executor Executor
 
@@ -255,6 +275,10 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 		// 测试的执行顺序，而不是散在调用方的一句 if。钱那一侧由 defer
 		// 的 finish 释放——「失败就释放」这条规则如果散在调用方，
 		// 漏一处就是一笔永久冻着的钱。
+		//
+		// 健康度先记：失败的调用正是它要记的那些，而下面那次结算
+		// 只动钱。
+		g.recordAttempts(ctx, attemptsOf(routed), nil)
 		return res.settleAndFail(ctx, err, pipeline.Outcome{UpstreamFailed: true})
 	}
 
@@ -262,6 +286,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 		Usage:       usageOf(routed.Response),
 		UsageSource: tokens.SourceMeasured,
 	}
+	g.recordAttempts(ctx, routed.Attempts, &out.Usage)
 	charge, err := g.finishCharge(ctx, res, routed.Channel, out)
 	if err != nil {
 		return nil, err
@@ -595,6 +620,137 @@ func ruleCandidates(cands []route.Candidate) []pipeline.RuleCandidate {
 	}
 	return out
 }
+
+// recordAttempts 把一次路由过程的每一次尝试记成渠道健康度。
+//
+// 逐次记而不是只记最后一次：换渠道之前那些失败的调用同样说明那个渠道
+// 此刻不行，而「连续失败 N 次就别再试」这条保护正是靠它们累起来的。
+//
+// usage 非 nil 时附加给**成功的那一次**——只有它产生了用量。
+func (g *Gateway) recordAttempts(ctx context.Context, attempts []route.Attempt, usage *channel.Usage) {
+	if g.Recorder == nil || len(attempts) == 0 {
+		return
+	}
+	for _, a := range attempts {
+		rec := route.CallOutcome{
+			ChannelID: a.ChannelID,
+			At:        attemptTime(a, g.now()),
+			Verdict:   verdictOf(a.Err),
+		}
+		if a.Err == nil && usage != nil {
+			rec.Usage = *usage
+		}
+		g.recordCall(ctx, rec)
+	}
+}
+
+// attemptTime 取一次尝试**结束**的时刻。
+//
+// 用结束时刻而不是记录时刻：健康度桶的归属与 last_failure_at 说的都是
+// 「这件事什么时候发生的」，而记一条结局可能晚于它几个请求。
+//
+// 时间为零时回落到当前时刻：那种 Attempt 只可能来自没填 StartedAt 的
+// 调用方，而按零值算会把它归进公元 1 年的那个桶，在那里留下一行
+// 永远不会被任何窗口查到的垃圾数据。
+func attemptTime(a route.Attempt, now time.Time) time.Time {
+	if a.StartedAt.IsZero() {
+		return now
+	}
+	return a.StartedAt.Add(a.Duration)
+}
+
+// verdictOf 把一次尝试的错误翻成调用结论。
+func verdictOf(err error) route.Verdict {
+	switch {
+	case err == nil:
+		return route.VerdictSuccess
+	case channelAtFault(err):
+		return route.VerdictFailure
+	default:
+		return route.VerdictUnattributed
+	}
+}
+
+// channelAtFault 判断一次失败该不该记在渠道头上。
+//
+// 判据是「换一个渠道会不会不一样」：
+//
+//   - 适配器判为可重试的（429、5xx、网络层）——会，所以这是渠道此刻不行
+//   - 上游拒绝了我们的身份或余额（401/402/403）——换谁都是同一个错，
+//     但那正是**这个渠道**坏了，而且它会一直坏下去
+//
+// 其余 4xx（400 参数错、404 模型名不存在、422）是**这次请求**的问题：
+// 三次参数错把一个健康渠道摘掉，比不摘它更糟——摘掉之后没有流量，
+// 计数也不会自己降回去（见 internal/channels 的 streakCooldown）。
+//
+// ErrUnknownType（这条候选的配置本版本二进制不认识）同样不算：它是部署
+// 与回滚留下的痕迹，不是渠道的运行状态。
+func channelAtFault(err error) bool {
+	if err == nil {
+		return false
+	}
+	if channel.IsRetryable(err) {
+		return true
+	}
+	var up *channel.ErrUpstream
+	if !errors.As(err, &up) {
+		return false
+	}
+	switch up.StatusCode {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
+		return true
+	}
+	return false
+}
+
+// attemptsOf 取一次路由结果的尝试列表。
+//
+// 路由失败时结果可能为 nil（一个可用候选都没有），那时没有尝试可记。
+func attemptsOf(r *route.Result) []route.Attempt {
+	if r == nil {
+		return nil
+	}
+	return r.Attempts
+}
+
+// recordCall 把一次调用的结局交给写入方。
+//
+// # 为什么是同步的
+//
+// 健康度不是排障数据，而是路由的**输入**：一个正在连续失败的渠道靠它被
+// 挡在候选集之外。放进后台 goroutine 的话，进程在写入之前退出就丢掉一条，
+// 而丢掉的表现是「保护没生效」——它与「这个渠道没失败」在库里长得一样。
+// 代价是每个请求多一次按主键定位的单行写，换的是这条保护真的会落地。
+//
+// # 为什么错误只记不报
+//
+// 调用方拿到的必须是**最初那个**结论（上游失败、结算失败），不能被一次
+// 写健康度的错误盖掉——那会让「上游 500」变成「写健康度失败」，
+// 排查的人会朝错的方向找。丢掉的后果要说清楚：这一次调用的结局不入库，
+// 于是连续失败少记一次、桶少一个请求。
+//
+// # 为什么去掉取消
+//
+// 最需要记一笔的时刻，正是客户端断开、请求 ctx 已经 Done 的那一刻
+// （理由与 handle.release 相同）。拿一个已取消的 ctx 去写，写本身就会失败。
+func (g *Gateway) recordCall(ctx context.Context, rec route.CallOutcome) {
+	if g.Recorder == nil {
+		return
+	}
+	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	if err := g.Recorder.RecordCall(recCtx, rec); err != nil {
+		observe.FromContext(ctx).Error("写渠道健康度失败",
+			"err", err, "channel_id", rec.ChannelID, "request_id", requestIDOf(ctx))
+	}
+}
+
+// recordTimeout 是写一条调用结局的时间上限。
+//
+// 与 releaseTimeout 同一个量级：写的都是按主键定位的单行，量级是毫秒；
+// 连它都写不进去，说明库已经不接受写入了，放宽上限也救不回来，
+// 而这一步不许挂住请求。
+const recordTimeout = 5 * time.Second
 
 // releaseTimeout 是释放一次预留的时间上限。
 //

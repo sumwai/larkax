@@ -80,13 +80,17 @@ const (
 	// 又短到不会让昨天的故障一直影响今天的选路。
 	healthWindow = 24 * time.Hour
 
-	// streakMaxAge 是「连续失败」判定的新鲜度上限。
+	// streakCooldown 是「连续失败」的冷却期。
 	//
-	// 只有最近的桶才代表**当下**。不加这道判断会形成一个死循环：
-	// 渠道连续失败 → 被摘掉 → 没有流量 → 健康数据不再更新 →
-	// 那条旧的失败记录一直挂着 → 永远摘不掉。判断「现在不行」
-	// 只能用现在的数据。
-	streakMaxAge = 2 * time.Hour
+	// 连续失败是一个逐次维护的真计数（成功清零、失败加一，见 RecordCall），
+	// 而它自己就能形成死循环：计数到阈值 → 渠道被摘掉 → 没有流量 →
+	// 计数不动 → 永远摘不掉。冷却期是那个口子：最后一次失败早于冷却期的
+	// 渠道重新进入候选集，试一次；失败就再摘一轮，成功就清零。
+	//
+	// 取 15 分钟：一个坏渠道在此期间最多被打扰一次（一次注定失败的调用），
+	// 而一个已经恢复的渠道不必等太久。取更长会让恢复慢一拍，
+	// 取更短会让坏渠道被反复试。
+	streakCooldown = 15 * time.Minute
 )
 
 // Candidates 返回某个规范模型名下的全部可用渠道。
@@ -252,6 +256,9 @@ func (s *Source) logger() *slog.Logger {
 // 所以要聚合），额度每个渠道最多一行。用 LEFT JOIN 是因为后两者都**允许缺失**：
 // 新渠道还没有健康数据，很多上游也查不到额度。缺失不是错误，
 // 后面的映射会把它们表达成「未知」。
+//
+// 「连续失败」取自 channels 的列而不是从桶里算：桶里没有逐次记录，
+// 桶内有过成功时那段连续长度落在 0 与 failures 之间，算不出来。
 const candidateQuery = `
 SELECT
     c.id,
@@ -264,17 +271,16 @@ SELECT
     c.priority,
     COALESCE(c.owner_user_id, 0),
     c.credential_enc,
+    c.consecutive_failures,
+    c.last_failure_at,
     h.requests,
     h.successes,
     h.latency_p95_ms,
-    h.latest_bucket,
-    h.latest_requests,
-    h.latest_successes,
-    h.latest_failures,
     h.cost,
     h.cache_hit_tokens,
     h.cache_miss_tokens,
     q.remaining_estimate,
+    q.unit,
     q.probe_kind,
     q.health,
     q.resets_at
@@ -285,10 +291,6 @@ SELECT
             COALESCE(SUM(r.successes), 0) AS successes,
             (ARRAY_AGG(r.latency_p95_ms ORDER BY r.bucket DESC)
                 FILTER (WHERE r.latency_p95_ms IS NOT NULL))[1] AS latency_p95_ms,
-            MAX(r.bucket) AS latest_bucket,
-            (ARRAY_AGG(r.requests  ORDER BY r.bucket DESC))[1] AS latest_requests,
-            (ARRAY_AGG(r.successes ORDER BY r.bucket DESC))[1] AS latest_successes,
-            (ARRAY_AGG(r.failures  ORDER BY r.bucket DESC))[1] AS latest_failures,
             COALESCE(SUM(r.cost), 0) AS cost,
             COALESCE(SUM(r.cache_hit_tokens), 0)  AS cache_hit_tokens,
             COALESCE(SUM(r.cache_miss_tokens), 0) AS cache_miss_tokens
@@ -322,18 +324,18 @@ type candidateRow struct {
 	ownerUserID   int64
 	credentialEnc []byte
 
-	requests      int64
-	successes     int64
-	latencyP95    sql.NullInt64
-	latestBucket  sql.NullTime
-	latestReq     sql.NullInt64
-	latestSuccess sql.NullInt64
-	latestFailure sql.NullInt64
-	cost          string
-	cacheHit      int64
-	cacheMiss     int64
+	streak        int
+	lastFailureAt sql.NullTime
+
+	requests   int64
+	successes  int64
+	latencyP95 sql.NullInt64
+	cost       string
+	cacheHit   int64
+	cacheMiss  int64
 
 	remaining   sql.NullString
+	unit        sql.NullString
 	probeKind   sql.NullString
 	quotaHealth sql.NullString
 	resetsAt    sql.NullTime
@@ -345,10 +347,10 @@ func scanCandidate(rows *sql.Rows) (candidateRow, error) {
 		&row.id, &row.name, &row.channelType, &row.baseURL,
 		&row.modelsJSON, &row.setting, &row.weight, &row.priority, &row.ownerUserID,
 		&row.credentialEnc,
+		&row.streak, &row.lastFailureAt,
 		&row.requests, &row.successes, &row.latencyP95,
-		&row.latestBucket, &row.latestReq, &row.latestSuccess, &row.latestFailure,
 		&row.cost, &row.cacheHit, &row.cacheMiss,
-		&row.remaining, &row.probeKind, &row.quotaHealth, &row.resetsAt,
+		&row.remaining, &row.unit, &row.probeKind, &row.quotaHealth, &row.resetsAt,
 	)
 	if err != nil {
 		return candidateRow{}, fmt.Errorf("读取渠道行失败: %w", err)
@@ -441,35 +443,33 @@ func (row candidateRow) health(now time.Time) route.Health {
 	return h
 }
 
-// consecutiveFailures 估计「连续失败次数」。
+// consecutiveFailures 给出「连续失败次数」。
 //
-// # 这是一处近似，原因在表结构
+// # 它取自一个真计数，不是从桶里估的
 //
-// channel_health_rollup 存的是**小时桶**（requests/successes/failures 三个计数），
-// 没有逐次请求的记录，也没有 consecutive_failures 列。所以真正的
-// 「连续失败了 N 次」在库里重建不出来，只能给一个下界：
+// channels.consecutive_failures 由调用收尾处维护：成功清零、失败加一
+// （见 RecordCall）。小时桶里的三个计数重建不出这个量——桶内有过成功时，
+// 那段连续长度落在 0 与 failures 之间。
 //
-//   - 最新一个桶里 successes == 0 且 requests > 0 → 这一桶**全部**失败，
-//     于是这一桶的失败数就是一段真实的连续失败。更早的桶里可能还有，
-//     所以这是**下界**，但它是算出来的而不是猜出来的。
-//   - 最新桶里有成功 → 连续长度在 0 与 failures 之间，无从判断。
-//     返回 0（不猜）：猜大了会误摘一个刚恢复的渠道。
+// # 冷却期
 //
-// 桶太旧同样返回 0——见 streakMaxAge 的注释，那里说明了为什么必须看新鲜度。
+// 计数早于冷却期的渠道按 0 处理，见 streakCooldown：被摘掉的渠道没有流量，
+// 计数不会自己降回去，冷却期是让它重新被试一次的那个口子。
+//
+// 时间戳缺失而计数非零的行按「冷却期已过」处理。那种行只可能来自手工写入
+// ——写入方总是把两列一起写。两个方向不对称：按已过处理最多是少摘一次，
+// 按新鲜处理会让渠道永远摘不掉，而那正是这一列要消除的状态。
 func (row candidateRow) consecutiveFailures(now time.Time) int {
-	if !row.latestBucket.Valid || now.Sub(row.latestBucket.Time) > streakMaxAge {
+	if row.streak <= 0 {
 		return 0
 	}
-	if !row.latestReq.Valid || row.latestReq.Int64 <= 0 {
+	if !row.lastFailureAt.Valid {
 		return 0
 	}
-	if !row.latestSuccess.Valid || row.latestSuccess.Int64 > 0 {
+	if now.Sub(row.lastFailureAt.Time) >= streakCooldown {
 		return 0
 	}
-	if !row.latestFailure.Valid {
-		return 0
-	}
-	return int(row.latestFailure.Int64)
+	return row.streak
 }
 
 // quota 把额度快照映射成 channel.Quota。
@@ -517,15 +517,19 @@ func (row candidateRow) quota() (channel.Quota, error) {
 //
 // drained 与实测值共用它，于是「到期时间怎么填」「推算值怎么标」
 // 只有一处答案——两条路径不该在这里分叉。
+//
+// Unit 原样带出去（列允许为 NULL，那时是空字符串）：Remaining 是一个裸数字，
+// 没有单位就无法与别的候选比较，而 route 只对同一单位的渠道比较余量
+// （见 scoreQuota）。空单位也算一种——它与任何已知单位都不可比。
 func (row candidateRow) knownQuota(remaining float64) channel.Quota {
-	q := channel.Quota{Known: true, Remaining: remaining}
+	q := channel.Quota{Known: true, Remaining: remaining, Unit: row.unit.String}
 	if row.resetsAt.Valid {
 		reset := row.resetsAt.Time
 		q.ExpiresAt = &reset
 	}
 	// 只有 api_query 是上游实测。自记账与「从错误里推断」都是推算，
 	// 而 route 对推算值打折（scoreQuota 的 estimateDiscount）。
-	q.Estimated = !strings.EqualFold(row.probeKind.String, probeKindAPIQuery)
+	q.Estimated = !isAPIQuery(row.probeKind.String)
 	return q
 }
 

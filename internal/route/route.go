@@ -56,6 +56,9 @@ type Candidate struct {
 	// Health 是渠道健康度，由 channel_health_rollup 汇总而来。
 	Health Health
 	// Quota 是额度快照。Known 为 false 表示这个渠道查不到额度。
+	//
+	// 它只在**同一单位**下与其他候选可比（见 scoreQuota）：Remaining 是
+	// 裸数字，Unit 说明它按什么计。
 	Quota channel.Quota
 
 	// CostPerUnit 是最近观察到的单位成本，用于「成本」这一维度。
@@ -71,6 +74,13 @@ type Candidate struct {
 type Health struct {
 	// ConsecutiveFailures 是连续失败次数。它在打分里权重最高——
 	// 一个正在连续失败的渠道，无论多便宜都不该被选中。
+	//
+	// 它是一个**逐次维护的真计数**（成功清零、失败加一，见
+	// internal/channels 的 RecordCall），不是从小时桶里估出来的：
+	// 桶内有过成功时，那段连续长度落在 0 与 failures 之间，估不出来。
+	//
+	// 读取侧会把冷却期已过的计数当作 0（见 internal/channels 的
+	// streakCooldown）：否则被摘掉的渠道没有流量，计数永远不会降回去。
 	ConsecutiveFailures int
 	// SuccessRate 是近期成功率，0..1。
 	SuccessRate float64
@@ -237,11 +247,15 @@ func (r *Router) order(candidates []Candidate) []Candidate {
 		// tie 是组内随机排序用的键，避免了排序不稳定带来的偏差。
 		tie float64
 	}
+	// 额度能不能比，是**整个候选集**的性质：两个余量只有在同一单位下才有
+	// 大小之分。所以这个判断在循环外算一次，再交给每个候选打分。
+	mixedUnits := mixedQuotaUnits(candidates)
+
 	grouped := make(map[int][]scored)
 	for _, c := range candidates {
 		grouped[c.Priority] = append(grouped[c.Priority], scored{
 			c:     c,
-			score: r.Score(c),
+			score: r.score(c, mixedUnits),
 			tie:   r.float64(),
 		})
 	}
@@ -277,16 +291,52 @@ func (r *Router) order(candidates []Candidate) []Candidate {
 // 每一项都归一到 0..1 再乘权重，而不是用原始量纲相加：
 // 成本与延迟的量纲差着几个数量级，直接相加会让成本完全主导结果，
 // 而那多半不是使用者的本意。
+//
+// 它按「所有候选的额度单位相同」来算：跨单位的判断需要看到整个候选集，
+// 而这里只有一个候选。真正排序时走的是 score（由 order 传进那个判断），
+// 所以排序结果与直接调本函数得到的分数**可能不同**——差别只在额度那一项，
+// 而且只在候选集里存在多种单位时出现（见 scoreQuota）。
 func (r *Router) Score(c Candidate) float64 {
+	return r.score(c, false)
+}
+
+// score 是 Score 的内部形态：mixedUnits 由调用方给出。
+func (r *Router) score(c Candidate, mixedUnits bool) float64 {
 	w := r.Weights
 	if w == (Weights{}) {
 		w = DefaultWeights
 	}
 	return w.Health*scoreHealth(c.Health) +
-		w.Quota*scoreQuota(c.Quota) +
+		w.Quota*scoreQuota(c.Quota, mixedUnits) +
 		w.Cost*scoreCost(c.CostPerUnit) +
 		w.Latency*scoreLatency(c.Health.LatencyP95) +
 		w.Cache*scoreCache(c.CacheHitRate, c.SampleCount)
+}
+
+// mixedQuotaUnits 判断候选集里是不是存在多种额度单位。
+//
+// 单位未知（空）也算一种：一个「不知道按什么计」的渠道与一个「按元计」的
+// 渠道之间同样不可比，所以它与任何已知单位放在一起都算混合。
+//
+// 只统计**已知额度**的候选：额度未知的渠道那一项本来就是中性分，
+// 与单位无关，把它算进来会让「一个查不到额度的渠道」把其余渠道的额度
+// 全部降成中性分——那等于让「不知道」污染「知道」。
+func mixedQuotaUnits(candidates []Candidate) bool {
+	var first string
+	seen := false
+	for _, c := range candidates {
+		if !c.Quota.Known {
+			continue
+		}
+		if !seen {
+			first, seen = c.Quota.Unit, true
+			continue
+		}
+		if c.Quota.Unit != first {
+			return true
+		}
+	}
+	return false
 }
 
 // scoreHealth 把健康度映射到 0..1。
@@ -307,22 +357,37 @@ func scoreHealth(h Health) float64 {
 
 // scoreQuota 把额度映射到 0..1。
 //
-// 这里体现的是商家要的两种偏好，用一个分数同时表达：
+// # 这里的数是什么单位
 //
-//   - **余额越少越优先用掉**：额度通常有到期日，放着不用就是浪费。
-//     所以「剩余量少」反而得分高。
-//   - **即将到期的优先**：同理，到期时间近的得分高。
+// Remaining 的单位由 channel.Quota.Unit 说明，而候选渠道来自不同上游，
+// 口径可能不同：按 token 计的套餐（百万量级）、按金额计的账户（个位到百位）、
+// 按请求数计的配额（千量级）。把「剩余 800000 token」与「剩余 5 元」放进
+// 同一个 1/(1+x) 里，前者永远得 0 分、后者永远接近满分——**分差来自单位，
+// 而不是来自余量**，排序被一个与「还剩多少」无关的维度支配。
+//
+// 所以 mixedUnits 为 true（候选集里存在多种单位）时这一项给中性分，
+// 与「查不到额度」同一档：不比，而不是乱比。
+//
+// 为什么不归一化折算：那需要一个「1 元值多少 token」的假设，而那个假设
+// 没有依据——把它写进代码等于把一个错换成另一个错，还多了一处没人能验证
+// 的换算。**单位相同就可以比**，那时 1/(1+x) 的语义是明确的。
 //
 // 查不到额度的渠道（Known 为 false）给中性分：它既不该因为「不知道」
 // 被优先，也不该被排到最后——那等于把所有不支持查额度的上游都降一等。
-func scoreQuota(q channel.Quota) float64 {
+func scoreQuota(q channel.Quota, mixedUnits bool) float64 {
 	if !q.Known {
 		return 0.5
 	}
 	if q.Remaining <= 0 {
 		// 走到这里说明 DrainReason 没挡住（例如调用方直接调 Score）。
 		// 给最低分而不是负分：负分会让权重之和的意义变得难解释。
+		//
+		// 这一档是**单位无关**的，所以它排在下面那道跨单位的判断之前：
+		// 余量为零就是为零，与它按什么计无关。
 		return 0
+	}
+	if mixedUnits {
+		return 0.5
 	}
 
 	// 「用掉它」的紧迫度：剩余越少越紧迫。用 1/(1+remaining) 之类的

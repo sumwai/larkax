@@ -180,11 +180,15 @@ func insertRollup(t *testing.T, db *sql.DB, channelID int64, bucket time.Time, r
 	}
 }
 
-func insertQuota(t *testing.T, db *sql.DB, channelID int64, remaining any, probeKind, health string) {
+// insertQuota 插一行额度状态。
+//
+// unit 收 any：nil 表示这一列是 NULL（「不知道按什么计」），
+// 与空字符串不是一件事。
+func insertQuota(t *testing.T, db *sql.DB, channelID int64, remaining any, unit any, probeKind, health string) {
 	t.Helper()
 	_, err := db.ExecContext(context.Background(), `
-		INSERT INTO channel_quota_state (channel_id, remaining_estimate, probe_kind, health)
-		VALUES ($1, $2::numeric, $3, $4)`, channelID, remaining, probeKind, health)
+		INSERT INTO channel_quota_state (channel_id, remaining_estimate, unit, probe_kind, health)
+		VALUES ($1, $2::numeric, $3, $4, $5)`, channelID, remaining, unit, probeKind, health)
 	if err != nil {
 		t.Fatalf("插入额度失败: %v", err)
 	}
@@ -304,7 +308,7 @@ func TestCandidatesIncludesHealthAndQuota(t *testing.T) {
 	// 两个桶：成功率是两者之和，p95 取**最新**那个非空值。
 	insertRollup(t, db, id, hourBucket(1), 10, 9, 1, 300, "2.0")
 	insertRollup(t, db, id, hourBucket(0), 5, 5, 0, 200, "1.0")
-	insertQuota(t, db, id, "12.5", "api_query", "healthy")
+	insertQuota(t, db, id, "12.5", "money", "api_query", "healthy")
 
 	src := New(db, sealer)
 	got, err := src.Candidates(context.Background(), model)
@@ -329,6 +333,11 @@ func TestCandidatesIncludesHealthAndQuota(t *testing.T) {
 	if !c.Quota.Known || c.Quota.Remaining != 12.5 {
 		t.Errorf("Quota = %+v，期望已知且为 12.5", c.Quota)
 	}
+	// 单位要一起带出来：Remaining 是裸数字，没有单位 route 就不知道它
+	// 能不能与别的候选比较。
+	if c.Quota.Unit != "money" {
+		t.Errorf("Quota.Unit = %q，期望 money", c.Quota.Unit)
+	}
 	if c.Quota.Estimated {
 		t.Error("api_query 是实测，不该标成推算值")
 	}
@@ -338,15 +347,19 @@ func TestCandidatesIncludesHealthAndQuota(t *testing.T) {
 	}
 }
 
-// 最新桶全部失败：连续失败数取该桶的失败数，足以触发 route 的摘除阈值。
-func TestCandidatesConsecutiveFailuresFromLatestBucket(t *testing.T) {
+// 连续失败取自 channels 的列，**不是**从小时桶里算的。
+//
+// 这一条与健康度桶刻意错开：桶里全是失败、而列里是 0，期望取列里的 0。
+// 反过来（桶里全是成功、列里非零）也一样——桶重建不出「连续」这个量，
+// 桶内有过成功时那段长度落在 0 与 failures 之间。
+func TestCandidatesConsecutiveFailuresFromColumn(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
 	id := insertChannel(t, db, sealer, channelSpec{model: model})
 
-	insertRollup(t, db, id, hourBucket(1), 20, 20, 0, 150, "1.0")
 	insertRollup(t, db, id, hourBucket(0), 4, 0, 4, 900, "0")
+	setStreak(t, db, id, 0, nil)
 
 	src := New(db, sealer)
 	got, err := src.Candidates(context.Background(), model)
@@ -356,11 +369,68 @@ func TestCandidatesConsecutiveFailuresFromLatestBucket(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("候选数 = %d，期望 1", len(got))
 	}
+	if got[0].Health.ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d，期望 0（桶里全是失败，但计数是 0）",
+			got[0].Health.ConsecutiveFailures)
+	}
+	if reason := got[0].DrainReason(); reason != "" {
+		t.Errorf("计数为 0 的渠道不该被摘除：%s", reason)
+	}
+
+	// 列里非零时按它走，并足以触发 route 的摘除阈值。
+	at := time.Now().UTC().Add(-time.Minute)
+	setStreak(t, db, id, 4, &at)
+
+	got, err = src.Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
 	if got[0].Health.ConsecutiveFailures != 4 {
 		t.Errorf("ConsecutiveFailures = %d，期望 4", got[0].Health.ConsecutiveFailures)
 	}
 	if reason := got[0].DrainReason(); reason == "" {
 		t.Error("连续失败 4 次的渠道应被判为暂时不该使用")
+	}
+}
+
+// 冷却期已过的计数按 0 处理——被摘掉的渠道没有流量，计数不会自己降回去。
+func TestCandidatesStreakExpiresAfterCooldown(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	id := insertChannel(t, db, sealer, channelSpec{model: model})
+
+	// 16 分钟前失败过：冷却期（15 分钟）已经过了。
+	old := time.Now().UTC().Add(-16 * time.Minute)
+	setStreak(t, db, id, 4, &old)
+
+	got, err := New(db, sealer).Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("候选数 = %d，期望 1", len(got))
+	}
+	if got[0].Health.ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d，期望 0（冷却期已过）", got[0].Health.ConsecutiveFailures)
+	}
+	if reason := got[0].DrainReason(); reason != "" {
+		t.Errorf("冷却期已过的渠道不该被摘除：%s", reason)
+	}
+}
+
+// setStreak 直接改连续失败那两列，模拟写入侧留下的状态。
+func setStreak(t *testing.T, db *sql.DB, channelID int64, count int, at *time.Time) {
+	t.Helper()
+	var last any
+	if at != nil {
+		last = *at
+	}
+	_, err := db.ExecContext(context.Background(),
+		`UPDATE channels SET consecutive_failures = $2, last_failure_at = $3 WHERE id = $1`,
+		channelID, count, last)
+	if err != nil {
+		t.Fatalf("写连续失败失败: %v", err)
 	}
 }
 
@@ -400,7 +470,7 @@ func TestCandidatesNullRemainingIsUnknown(t *testing.T) {
 	model := uniqueModel()
 	id := insertChannel(t, db, sealer, channelSpec{model: model})
 
-	insertQuota(t, db, id, nil, "self_accounting", "unknown")
+	insertQuota(t, db, id, nil, nil, "self_accounting", "unknown")
 
 	src := New(db, sealer)
 	got, err := src.Candidates(context.Background(), model)
@@ -425,7 +495,7 @@ func TestCandidatesDrainedQuotaIsKnownZero(t *testing.T) {
 	model := uniqueModel()
 	id := insertChannel(t, db, sealer, channelSpec{model: model})
 
-	insertQuota(t, db, id, nil, "error_observed", "drained")
+	insertQuota(t, db, id, nil, nil, "error_observed", "drained")
 
 	src := New(db, sealer)
 	got, err := src.Candidates(context.Background(), model)

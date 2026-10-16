@@ -156,9 +156,12 @@ func Build(cfg Config) (*App, error) {
 		Candidates:   channels.New(cfg.DB, cfg.Sealer),
 		Reservations: ledgerStore,
 		Settlements:  ledgerStore,
-		Redactor:     snapshots.Redactor(),
-		Snapshots:    snapshots.Sink(),
-		Executor:     cfg.Executor,
+		// 写入侧与读取侧共用同一个包：两边读写的列是同一批，
+		// 分开放会让「写进去的值读出来不对」这类错没有唯一的归属。
+		Recorder:  channels.NewRecorder(cfg.DB),
+		Redactor:  snapshots.Redactor(),
+		Snapshots: snapshots.Sink(),
+		Executor:  cfg.Executor,
 		// 计数器按需加载词表（首次精确计数约 40ms），构造本身是廉价的，
 		// 所以这里直接建一个而不是做成参数：它没有第二种实现。
 		Counter: tokens.NewCounter(),
@@ -278,6 +281,13 @@ var (
 	_ gateway.ReservationStore = (*store.Store)(nil)
 	_ gateway.SettlementStore  = (*store.Store)(nil)
 )
+
+// 编译期断言：渠道健康度写入方要满足网关对它的要求。
+//
+// 同上：channels 与 gateway 互不 import（数据面不依赖入口层），接不上
+// 只会在装配时暴露。它同时满足读取侧的接口（见 channels 包里的断言），
+// 所以这一处接错会让候选集取不出来或者健康度写不进去。
+var _ gateway.CallRecorder = (*channels.Recorder)(nil)
 
 // 编译期断言：限流实现要满足公共入口对它的要求。
 //

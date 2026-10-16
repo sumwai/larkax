@@ -147,60 +147,54 @@ func TestHealthFromRollup(t *testing.T) {
 	}
 }
 
-// 最新一个桶全部失败：连续失败数取这一桶的失败数（此时是精确值）。
-func TestConsecutiveFailuresFromFailedLatestBucket(t *testing.T) {
+// 连续失败取自 channels 的列：它是一个逐次维护的真计数，不是从桶里估的。
+func TestConsecutiveFailuresFromColumn(t *testing.T) {
 	now := time.Now()
-	row := candidateRow{
-		latestBucket:  sqlNullTime(now.Add(-30 * time.Minute)),
-		latestReq:     sqlNullInt(5),
-		latestSuccess: sqlNullInt(0),
-		latestFailure: sqlNullInt(5),
-	}
+	row := candidateRow{streak: 5, lastFailureAt: sqlNullTime(now.Add(-5 * time.Minute))}
+
 	if got := row.consecutiveFailures(now); got != 5 {
 		t.Errorf("consecutiveFailures = %d，期望 5", got)
 	}
 }
 
-// 最新桶里有过成功：连续长度不可知，返回 0 而不是猜一个。
-func TestConsecutiveFailuresZeroWhenLatestBucketHadSuccess(t *testing.T) {
+// 计数为零就是零，时间戳无所谓——成功清零之后它不该再被判成失败。
+func TestConsecutiveFailuresZeroWithoutStreak(t *testing.T) {
 	now := time.Now()
-	row := candidateRow{
-		latestBucket:  sqlNullTime(now.Add(-30 * time.Minute)),
-		latestReq:     sqlNullInt(9),
-		latestSuccess: sqlNullInt(1),
-		latestFailure: sqlNullInt(8),
-	}
-	if got := row.consecutiveFailures(now); got != 0 {
-		t.Errorf("consecutiveFailures = %d，期望 0（桶内有过成功，连续长度不可知）", got)
-	}
-}
+	row := candidateRow{lastFailureAt: sqlNullTime(now.Add(-time.Minute))}
 
-// 数据太旧就不代表「当下」。不加这道判断会形成死循环：
-// 失败 → 被摘掉 → 没有流量 → 数据不更新 → 永远摘不掉。
-func TestConsecutiveFailuresZeroWhenStale(t *testing.T) {
-	now := time.Now()
-	row := candidateRow{
-		latestBucket:  sqlNullTime(now.Add(-6 * time.Hour)),
-		latestReq:     sqlNullInt(5),
-		latestSuccess: sqlNullInt(0),
-		latestFailure: sqlNullInt(5),
-	}
-	if got := row.consecutiveFailures(now); got != 0 {
-		t.Errorf("consecutiveFailures = %d，期望 0（数据已过期）", got)
-	}
-}
-
-// 空桶（有桶行但没有请求）不算失败。
-func TestConsecutiveFailuresZeroWhenLatestBucketEmpty(t *testing.T) {
-	now := time.Now()
-	row := candidateRow{
-		latestBucket:  sqlNullTime(now.Add(-10 * time.Minute)),
-		latestReq:     sqlNullInt(0),
-		latestSuccess: sqlNullInt(0),
-		latestFailure: sqlNullInt(0),
-	}
 	if got := row.consecutiveFailures(now); got != 0 {
 		t.Errorf("consecutiveFailures = %d，期望 0", got)
+	}
+}
+
+// 冷却期是这条判据唯一的出口：被摘掉的渠道没有流量，计数不会自己降回去。
+//
+// 两个时间点都写字面量而不是引用 streakCooldown——用常量当输入的话，
+// 把阈值从 15 分钟改成 15 秒，用例照样通过（见 LESSONS.md 第 17 条）。
+func TestConsecutiveFailuresExpiresAfterCooldown(t *testing.T) {
+	now := time.Now()
+
+	fresh := candidateRow{streak: 5, lastFailureAt: sqlNullTime(now.Add(-14 * time.Minute))}
+	if got := fresh.consecutiveFailures(now); got != 5 {
+		t.Errorf("14 分钟前失败过：consecutiveFailures = %d，期望 5（冷却期是 15 分钟）", got)
+	}
+
+	stale := candidateRow{streak: 5, lastFailureAt: sqlNullTime(now.Add(-16 * time.Minute))}
+	if got := stale.consecutiveFailures(now); got != 0 {
+		t.Errorf("16 分钟前失败过：consecutiveFailures = %d，期望 0（冷却期已过，放它进来试一次）", got)
+	}
+}
+
+// 计数非零但没有时间戳：按「冷却期已过」处理。
+//
+// 写入方总是把两列一起写，所以这种行只可能来自手工写入。两个方向不对称：
+// 按已过处理最多是少摘一次，按新鲜处理会让渠道永远摘不掉——而那正是
+// 这一列要消除的状态。
+func TestConsecutiveFailuresWithoutTimestampIsTreatedAsExpired(t *testing.T) {
+	row := candidateRow{streak: 5}
+
+	if got := row.consecutiveFailures(time.Now()); got != 0 {
+		t.Errorf("没有时间戳时 consecutiveFailures = %d，期望 0", got)
 	}
 }
 
@@ -253,6 +247,33 @@ func TestQuotaKnownAndEstimated(t *testing.T) {
 	}
 	if q.ExpiresAt == nil || !q.ExpiresAt.Equal(expires) {
 		t.Errorf("ExpiresAt = %v，期望 %v", q.ExpiresAt, expires)
+	}
+}
+
+// 单位要原样带出去：Remaining 是个裸数字，没有单位 route 就不知道它能不能
+// 与别的候选比较（见 route 的 scoreQuota）。
+func TestQuotaCarriesUnit(t *testing.T) {
+	row := candidateRow{
+		remaining: sql.NullString{String: "12.5", Valid: true},
+		unit:      sql.NullString{String: "tokens", Valid: true},
+	}
+	q, err := row.quota()
+	if err != nil {
+		t.Fatalf("quota 出错: %v", err)
+	}
+	if q.Unit != "tokens" {
+		t.Errorf("Unit = %q，期望 tokens", q.Unit)
+	}
+
+	// unit 为 NULL 时是空字符串，**不是**某个默认单位：读侧与 route 都把
+	// 空单位当成「不知道按什么计」，它与任何已知单位都不可比。
+	noUnit := candidateRow{remaining: sql.NullString{String: "12.5", Valid: true}}
+	q, err = noUnit.quota()
+	if err != nil {
+		t.Fatalf("quota 出错: %v", err)
+	}
+	if q.Unit != "" {
+		t.Errorf("unit 为 NULL 时 Unit = %q，期望空字符串", q.Unit)
 	}
 }
 
