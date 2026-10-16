@@ -140,8 +140,28 @@ go test ./...
 go build -ldflags "-X main.version=$(git describe --tags --always --dirty)" ./cmd/larkax
 ```
 
-Building is not enough to run the service — it also needs a PostgreSQL database and
-several environment variables. Follow [docs/development.md](docs/development.md).
+## Running it locally
+
+Requires Go 1.26 or newer, plus Docker with `docker compose` v2.1 or newer and `make`.
+One command brings up PostgreSQL, applies the migrations, and runs the service in the
+foreground:
+
+```sh
+make run
+```
+
+On the first run it writes `.env` with a freshly generated master key, and it never
+overwrites an existing one — that key decrypts the stored credentials, so replacing it
+would destroy them. `make up`, `make down`, `make migrate`, `make test` and `make clean`
+each do one step; `make clean` returns the working copy to its freshly cloned state.
+
+If 5432 is already taken, `make run PG_PORT=55432`. The port and database name are
+baked into `.env` when it is created, so set them before the first run or after
+`make clean`.
+
+The service listens on `:8080`, where every path returns `501` until the inference API
+exists, and serves `/healthz` and `/readyz` on `:9090`. Building alone is not enough to
+run it — see [docs/development.md](docs/development.md) for the full picture.
 
 ## License
 
