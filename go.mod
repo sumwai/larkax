@@ -3,6 +3,7 @@ module github.com/sumwai/larkax
 go 1.26.0
 
 require (
+	github.com/Calcium-Ion/moejs v0.1.0-alpha.7
 	github.com/QuantumNous/new-api/relaykit v0.3.4
 	github.com/expr-lang/expr v1.17.8
 	github.com/jackc/pgx/v5 v5.11.0

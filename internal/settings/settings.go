@@ -60,6 +60,14 @@ var Registry = []Spec{
 		Description: "新用户钱包的默认资产品种。"},
 	{Key: "calendar.default_region", Kind: KindString,
 		Description: "分时计价默认使用的节假日地区。"},
+	{Key: "plugin.enabled", Kind: KindBool,
+		Description: "是否启用插件系统。关闭时插件不注册、不执行。"},
+	{Key: "plugin.call_timeout_ms", Kind: KindInt,
+		Description: "单次插件 hook 调用的时限（毫秒）。"},
+	{Key: "plugin.memory_limit_bytes", Kind: KindInt,
+		Description: "单个插件运行时的内存上限（字节）。"},
+	{Key: "plugin.max_payload_bytes", Kind: KindInt,
+		Description: "插件单次调用的入参与出参字节上限。"},
 }
 
 // Row 是从存储层读出的一行。
