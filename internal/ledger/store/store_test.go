@@ -762,18 +762,44 @@ func TestReservationRecordsPricingRule(t *testing.T) {
 	s := New(db)
 	ctx := context.Background()
 
-	// 造一条真规则
+	requestID := reqID(t)
+
+	// 造一条真规则，只匹配**本用例自己的**模型名。
+	//
+	// pricing_rules 是全局表，而测试库由同包与别的包的用例共用（goose 只
+	// 保证迁移幂等，不隔离数据）。一条不带 model_patterns 的平台规则匹配
+	// **任何**模型，于是「一条规则都匹配不上」（pipeline.ErrNoRule）这个状态
+	// 在整库范围内消失，而那条分支必须能被测到——`go test ./...` 是并行跑
+	// 包的，受影响的正是这条规则留在库里的那个窗口。
+	//
+	// 所以给它一个只有本用例知道的模型名：即使它还在库里，也影响不到别人。
+	model := "model-rule-" + itoa(nextID())
 	var ruleID int64
 	if ruleErr := db.QueryRowContext(ctx, `
-		INSERT INTO pricing_rules (scope, name, expr, priority)
-		VALUES ('platform', 'placeholder-rule', '{"prompt": 0.000001}', 0)
-		RETURNING id`).Scan(&ruleID); ruleErr != nil {
+		INSERT INTO pricing_rules (scope, name, model_patterns, expr, priority)
+		VALUES ('platform', 'placeholder-rule', to_jsonb($1::text[]), '{"prompt": 0.000001}', 0)
+		RETURNING id`, []string{model}).Scan(&ruleID); ruleErr != nil {
 		t.Fatalf("造规则失败: %v", ruleErr)
 	}
 
+	// 用完删掉，不让共享的库累积规则。删的顺序不能反：
+	// billing_requests.pricing_rule_id 指向这条规则且没有 ON DELETE，先删
+	// 规则会被外键挡下（实测报 billing_requests_pricing_rule_id_fkey）。
+	// 清理失败必须报出来——被忽略的失败与清理成功在输出里长得一样。
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(ctx,
+			`DELETE FROM billing_requests WHERE request_id = $1`, requestID); err != nil {
+			t.Errorf("清理账单行失败: %v", err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`DELETE FROM pricing_rules WHERE id = $1`, ruleID); err != nil {
+			t.Errorf("清理计价规则失败: %v", err)
+		}
+	})
+
 	userID := seed(t, db, "100")
-	requestID := reqID(t)
 	req := testRequest(userID, requestID)
+	req.CanonicalModel = model
 
 	if _, err := s.SaveReservation(ctx, req,
 		reservationWithRule(t, userID, requestID, "10", ruleID)); err != nil {
