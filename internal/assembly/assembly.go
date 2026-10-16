@@ -24,8 +24,10 @@
 //   - 规则来源连的是数据库，但它的匹配口径（作用域、优先级）属于计价，
 //     不属于接线。放在参数里，这一层就不必知道规则长什么样。
 //
-// 其余依赖（候选来源、账本存储、快照链路、鉴权）都是本包直接构造的：
-// 它们没有可替换的实现，多一层参数只会让调用方多写几行没有信息的代码。
+// 其余依赖（候选来源、账本存储、快照链路、鉴权、日历）都是本包直接构造的：
+// 它们没有第二种实现，多一层参数只会让调用方多写几行没有信息的代码。
+// 日历尤其如此——它的数据源只有「库里的 calendar_days / calendar_years」
+// 这一条路，把它做成可传可不传的参数，接不接得上就没有任何一步会失败。
 package assembly
 
 import (
@@ -39,7 +41,10 @@ import (
 
 	"github.com/sumwai/larkax/internal/api"
 	"github.com/sumwai/larkax/internal/auth"
+	"github.com/sumwai/larkax/internal/billing/calendaradapter"
 	"github.com/sumwai/larkax/internal/billing/expr"
+	"github.com/sumwai/larkax/internal/calendar"
+	calendarstore "github.com/sumwai/larkax/internal/calendar/store"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/gateway"
@@ -77,11 +82,6 @@ type Config struct {
 
 	// Rules 是计价规则的来源，由调用方构造。
 	Rules pipeline.RuleSource
-
-	// Calendar 提供分时计价要用的工作日与节假日。可以为 nil——
-	// 那时不用日历的规则照常计价，用到日历的规则求值失败并报错
-	// （见 internal/billing/expr 的 ErrCalendarRequired）。
-	Calendar expr.Calendar
 
 	// Now 可注入，便于测试时间相关的逻辑。为 nil 时用 time.Now。
 	Now func() time.Time
@@ -135,9 +135,21 @@ func Build(cfg Config) (*App, error) {
 		return nil, err
 	}
 
+	// 地区只在这里读一次，之后顺着 pipeline.Region → expr.Env.Region 走到
+	// 日历上：求值时由日历按它选时区、查那一天的安排（见 internal/billing/expr
+	// 的 dayInfo 与 internal/billing/calendaradapter）。
+	//
+	// 所以日历对象本身不带地区，装配期也不需要拿它去查什么。同一个进程要能
+	// 回答任何地区的日期问题，而「这次请求按哪个地区算」是求值的入参，
+	// 不是装配期的常量。
 	region, err := cfg.Settings.String(regionKey)
 	if err != nil {
 		return nil, fmt.Errorf("读取分时计价地区失败: %w", err)
+	}
+
+	calendarEnv, err := buildCalendar(cfg.DB)
+	if err != nil {
+		return nil, err
 	}
 
 	// 账本存储同时满足预留与结算两个接口。它的方法名与签名与 gateway
@@ -148,7 +160,7 @@ func Build(cfg Config) (*App, error) {
 		Pipeline: &pipeline.Pipeline{
 			Rules:    cfg.Rules,
 			Programs: expr.NewCache(cacheSize),
-			Calendar: cfg.Calendar,
+			Calendar: calendarEnv,
 			Region:   region,
 			Now:      cfg.Now,
 		},
@@ -237,6 +249,49 @@ func buildSnapshots(cfg Config, logger *slog.Logger) (*snapshotwire.Collector, e
 		return nil, fmt.Errorf("建立快照链路失败: %w", err)
 	}
 	return collector, nil
+}
+
+// buildCalendar 把日历数据源接到计价引擎要的那个接口上。
+//
+// # 三跳，只有这一层知道它们拼得起来
+//
+//	calendarstore.NewSource(db)  —— 读 calendar_days / calendar_years 两张表
+//	calendar.New(src)            —— 判定「工作日 / 休息日 / 未知」
+//	calendaradapter.New(cal)     —— 把判定结果转成 expr.Calendar 的形状
+//
+// 三段分属三个包，彼此不 import（理由写在各自的包文档里），所以只有装配层
+// 知道它们能拼起来。少接任何一跳，用到日历的计价规则都会在运行期报
+// ErrCalendarRequired——而那在响应上只是又一个 5xx，现场分不出「没接」
+// 与「接错了」。
+//
+// # 一个进程一个对象，可以并发共享
+//
+// 返回的对象只构造这一次，之后被所有请求共用：
+//
+//   - *calendar.Calendar 只有 src 一个字段；
+//   - *calendaradapter.Adapter 只有 cal 一个字段；
+//   - src 是 *sql.DB 上的两次只读查询，而 *sql.DB 本身并发安全。
+//
+// 也就是说它**不带请求状态**，不必按请求构造——按请求构造只是多一次分配，
+// 换不来任何隔离。
+//
+// # 装配期一次也不查
+//
+// 这里只把对象拼起来，不读日历数据。日历是逐年补的，未来年份查不到属于
+// 正常状态（见 docs/calendar-data.md），拿它当启动条件会让跨年时的一次例行
+// 重启起不来，而那时未必有任何规则用得到下一年的数据。缺数据要等到规则真的
+// 调用 isWorkday() 时才暴露，那时报出的错误会说明这是配置缺口而非服务故障
+// （见 internal/billing/calendaradapter）。
+func buildCalendar(db *sql.DB) (*calendaradapter.Adapter, error) {
+	cal, err := calendar.New(calendarstore.NewSource(db))
+	if err != nil {
+		return nil, fmt.Errorf("构造日历失败: %w", err)
+	}
+	adapter, err := calendaradapter.New(cal)
+	if err != nil {
+		return nil, fmt.Errorf("构造日历适配器失败: %w", err)
+	}
+	return adapter, nil
 }
 
 // authenticator 把 auth.Store 适配成公共入口要的那份接口。
