@@ -118,9 +118,32 @@ const defaultShardSize = 1000
 
 // staleRunAfter 是判定「上一次运行已经死掉」的时限。
 //
-// 崩在中间的对账会留下一行 status='running'，而它挡住的是「上一轮跑到哪了」
-// 这个判断——留着它比清掉更危险。
+// 它针对的是**硬崩**——进程被 kill、机器掉电，没有任何代码有机会把那一行
+// 结掉。跑出错与超时**不在**此列：结账那一步不带取消，自己就能写回去
+// （见 finishReconcileRun），所以超时不会留下要等一小时才清的 running 行。
+//
+// 阈值必须**长于一轮合法对账可能活着的时长**，否则并发的另一轮会把一个还
+// 活着的运行标成 failed。命令行给单轮的上限是 30 分钟（cmd/larkaxctl 的
+// reconcileTimeout，也是唯一的调用方），一小时留了余量。两个数呈这个大小
+// 关系是有意的：**上限必须短于阈值**，改任何一个都要看另一个。
+//
+// 留着没结掉的行比清掉更危险：运行记录里会堆起一串看不出结局的行，
+// 事后翻的时候说不清哪一轮是真的没跑完。
 const staleRunAfter = time.Hour
+
+// finishTimeout 是「把这次运行的结局写回去」这一步的时间上限。
+//
+// 单独给一个上限，是因为这一步用的是**不带取消**的 ctx（见
+// finishReconcileRun）：它不再受调用方那个 ctx 的期限约束，得自己带一个，
+// 否则一次卡住的写会挂到进程退出为止。这个上限**对成功与失败两条路径一视
+// 同仁**——改前成功路径吃的是调用方剩下的预算（命令行最多给到 30 分钟），
+// 现在也是这么多，是一次收窄，只是不认为会真撞上。
+//
+// 五秒的依据：写的是单行、按主键定位的 UPDATE，量级是毫秒。连它都写不进去，
+// 说明库已经不接受写入了，把上限放宽到几十秒也救不回来；而这一步的全部意义
+// 就是不许挂住。真撞上它，结果是留一行 running——与硬崩同一种收尾，由下一轮
+// 的 stale 清理捞走（见 staleRunAfter）。
+const finishTimeout = 5 * time.Second
 
 // 认「这个科目属于哪个用户」的写法。**对账里的每一处都必须用这里的定义**，
 // 不能各写各的：曾经有三处各写各的，于是 `user:0<id>` 这类写法被写路径
@@ -445,7 +468,8 @@ func (s *Store) Reconcile(ctx context.Context, cfg ReconcileConfig, alert Alert)
 	report := &Report{RunID: runID, FullScan: full, StartedAt: startedAt, Watermark: watermark}
 	if err := s.reconcileAll(ctx, cfg, alert, report); err != nil {
 		// 失败也要把这一行结掉：留着 status='running' 会让下一轮以为
-		// 「上一次还在跑」，而它其实早就死在这里了。
+		// 「上一次还在跑」，而它其实早就死在这里了。ctx 已经不能用时
+		// 同样要能写进去——见 finishReconcileRun。
 		_ = s.finishReconcileRun(ctx, report, err)
 		return report, err
 	}
@@ -529,12 +553,26 @@ func (s *Store) beginReconcileRun(ctx context.Context, startedAt, watermark time
 }
 
 // finishReconcileRun 把这次运行的结局写回去。
+//
+// # 这一步为什么不跟着调用方的 ctx 走
+//
+// 它最需要写进去的时候，恰恰是那个 ctx 已经不能用的那一刻：一轮对账超时、
+// 被取消时，正是这一行在说「这次运行到此为止」。跟着一个已经取消的 ctx 走，
+// 这句「结掉」自己就写不进去，库里于是留一行 status='running'，要等
+// staleRunAfter（一小时）之后才被下一轮的 stale 清理捞走。超时是最常见的
+// 失败，所以那不是罕见情形。
+//
+// WithoutCancel 只去掉取消与期限，另配一个独立的上限（finishTimeout）。
+// 那个上限到了同样会留一行 running——与硬崩同一种收尾。
 func (s *Store) finishReconcileRun(ctx context.Context, r *Report, cause error) error {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
+	defer cancel()
+
 	status, msg := "done", ""
 	if cause != nil {
 		status, msg = "failed", cause.Error()
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.db.ExecContext(writeCtx, `
 		UPDATE reconcile_runs
 		   SET finished_at = now(), checked_wallets = $2,
 		       balance_mismatches = $3, frozen_mismatches = $4,
