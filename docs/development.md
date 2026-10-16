@@ -187,6 +187,15 @@ go run ./cmd/larkaxctl migrate up
 内部端点单独一个端口：它面向编排系统与指标抓取器，不和业务入口共用监听地址，
 也就不需要跟着业务入口一起暴露在 ingress 规则下。
 
+运维命令行走另一个入口，目前有迁移与对账：
+
+```sh
+go run ./cmd/larkaxctl migrate up
+go run ./cmd/larkaxctl reconcile
+```
+
+对账的开关、口径与运行记录见 [reconciliation.md](reconciliation.md)。
+
 ## 常用检查
 
 ```sh

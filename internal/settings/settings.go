@@ -68,6 +68,16 @@ var Registry = []Spec{
 		Description: "单个插件运行时的内存上限（字节）。"},
 	{Key: "plugin.max_payload_bytes", Kind: KindInt,
 		Description: "插件单次调用的入参与出参字节上限。"},
+	{Key: "reconcile.auto_repair", Kind: KindBool,
+		Description: "对账发现不一致时是否自动修正。"},
+	{Key: "reconcile.repair_mode", Kind: KindString,
+		Description: "自动修正的方向：resync_snapshot 以账本为准，adjust_ledger 以快照为准。"},
+	{Key: "reconcile.difference_account", Kind: KindString,
+		Description: "adjust_ledger 口径下修正分录的对家科目。"},
+	{Key: "reconcile.shard_size", Kind: KindInt,
+		Description: "一批比对的钱包行数上限。"},
+	{Key: "reconcile.full_scan_interval_hours", Kind: KindInt,
+		Description: "两次全量对账之间的最长间隔小时数，0 表示每次都全量。"},
 }
 
 // Row 是从存储层读出的一行。

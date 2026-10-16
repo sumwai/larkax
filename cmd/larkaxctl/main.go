@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -18,7 +19,10 @@ import (
 	"github.com/pressly/goose/v3"
 
 	"github.com/sumwai/larkax/internal/config"
+	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/migrate"
+	"github.com/sumwai/larkax/internal/observe"
+	"github.com/sumwai/larkax/internal/settings"
 )
 
 // version 由构建时注入，与主服务用**同一个变量名**：
@@ -43,6 +47,7 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl migrate status                 显示每个迁移的应用状态
   larkaxctl migrate version                显示当前数据库版本
   larkaxctl migrate create <名称>           生成迁移文件
+  larkaxctl reconcile                      跑一轮对账（开关与口径见 settings 表）
   larkaxctl snapshot cleanup               按留存期删除到期的快照分区
   larkaxctl version                        打印版本号
 
@@ -62,6 +67,8 @@ func run() error {
 	switch os.Args[1] {
 	case "migrate":
 		return runMigrate(os.Args[2:])
+	case "reconcile":
+		return runReconcile(os.Args[2:])
 	case "snapshot":
 		return runSnapshot(os.Args[2:])
 	case "version", "-v", "--version":
@@ -73,6 +80,111 @@ func run() error {
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		return fmt.Errorf("未知子命令 %q", os.Args[1])
+	}
+}
+
+// runReconcile 跑一轮对账任务。
+//
+// # 为什么它对接到命令行而不是做成后台定时任务
+//
+// 定时任务需要选主与「上一轮还没跑完怎么办」这两件事，而它们与对账本身的
+// 逻辑无关。挂到命令行之后，跑它的是外部的调度器（cron、Kubernetes 的
+// CronJob、运维的手），那两件事由**那个**调度器负责——它本来就更擅长。
+//
+// 开关与口径全部来自 settings 表，命令行不带参数：这样「线上跑的是哪一套
+// 口径」只有一个答案（库里的值），而不是「命令行里带了什么」。
+func runReconcile(args []string) error {
+	fs := flag.NewFlagSet("reconcile", flag.ContinueOnError)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("reconcile 不接受位置参数，得到 %q：开关与口径在 settings 表里", fs.Arg(0))
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := sql.Open("pgx", cfg.DBDSN)
+	if err != nil {
+		return fmt.Errorf("打开数据库连接失败: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), reconcileTimeout)
+	defer cancel()
+	if pingErr := db.PingContext(ctx); pingErr != nil {
+		return fmt.Errorf("连接数据库失败: %w", pingErr)
+	}
+
+	values, err := settings.Load(ctx, settings.NewPgSource(db))
+	if err != nil {
+		return err
+	}
+	rc, err := store.ConfigFromSettings(values)
+	if err != nil {
+		return err
+	}
+
+	logger := observe.NewLogger(cfg.LogLevel, "", cfg.IsProduction())
+	report, err := store.New(db).Reconcile(ctx, rc, store.LogAlerts(logger))
+	// 报告先打，再处理错误：跑了一半的结果比一句「失败了」有用得多——
+	// 它至少说明比到了哪里、已经发现了什么。
+	printReconcileReport(os.Stdout, report)
+	if err != nil {
+		return err
+	}
+	// 发现不一致时以非零退出码收尾：调度器与告警系统本来就盯着退出码，
+	// 而「对账跑完了但有 3 条不一致」与「对账跑完了一切正常」是两件事，
+	// 让它们落在同一个退出码上等于把告警交给「有没有人去看日志」。
+	if len(report.Findings) > 0 {
+		return fmt.Errorf("发现 %d 条不一致（见上面的清单与 run_id=%d）", len(report.Findings), report.RunID)
+	}
+	return nil
+}
+
+// reconcileTimeout 是单轮对账的时间上限。
+//
+// 命令行要有上限，否则一次卡住的查询会挂到运维发现为止。默认值给得宽：
+// 全量扫描在大库上本来就慢，而把上限设小会让「跑不完」看起来像
+// 「跑完了什么都没有」。
+const reconcileTimeout = 30 * time.Minute
+
+// printReconcileReport 把一轮对账的结果打到 w。
+//
+// 每处写入的返回值都显式丢弃（`_, _ =`）：目标是 stdout，写不进去只可能是
+// 下游管道断了（`larkaxctl reconcile | head` 就是最常见的一种），
+// 那种情况下重试与报错都没有意义，而它对这一轮对账的结论也毫无影响。
+func printReconcileReport(w io.Writer, r *store.Report) {
+	if r == nil {
+		return
+	}
+	scope := "增量"
+	if r.FullScan {
+		scope = "全量"
+	}
+	_, _ = fmt.Fprintf(w, "对账 run_id=%d %s 起点=%s 比对=%d 行\n",
+		r.RunID, scope, r.Watermark.Format(time.RFC3339), r.CheckedWallets)
+
+	if len(r.Findings) == 0 {
+		_, _ = fmt.Fprintln(w, "没有不一致。")
+		return
+	}
+	_, _ = fmt.Fprintf(w, "不一致 %d 条（余额 %d、冻结 %d、畸形科目 %d）：\n",
+		len(r.Findings), r.BalanceMismatches(), r.FrozenMismatches(), r.MalformedAccounts())
+	for _, f := range r.Findings {
+		_, _ = fmt.Fprintf(w, "  %-18s user=%d asset=%s 快照=%s 账本=%s 差=%s 已修=%v\n",
+			f.Kind, f.UserID, f.Asset, f.Snapshot, f.Ledger, f.Diff(), f.Repaired)
+		// 原因与补充说明各占一行：两者都可能很长，挤在同一行里会让人
+		// 分不清哪一段是「为什么没修」、哪一段是「具体是什么情况」。
+		if f.Unrepairable != "" {
+			_, _ = fmt.Fprintf(w, "      未修原因：%s\n", f.Unrepairable)
+		}
+		if f.Detail != "" {
+			_, _ = fmt.Fprintf(w, "      详情：%s\n", f.Detail)
+		}
 	}
 }
 

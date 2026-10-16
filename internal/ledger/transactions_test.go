@@ -342,7 +342,7 @@ func TestAdjustmentRequiresMemo(t *testing.T) {
 	}
 }
 
-// 调账双向都支持，且对家固定是平台收入。
+// 调账双向都支持，对家默认是平台收入。
 func TestAdjustmentBothDirections(t *testing.T) {
 	txn := newTxnID(t, txnA)
 
@@ -367,7 +367,7 @@ func TestAdjustmentBothDirections(t *testing.T) {
 	}
 	for _, e := range append(append([]Entry{}, add.Entries...), sub.Entries...) {
 		if e.Account.Type() != AccountUser && e.Account != PlatformRevenueAccount() {
-			t.Errorf("调账的对家只能是平台收入，得到 %s", e.Account)
+			t.Errorf("默认的对家只能是平台收入，得到 %s", e.Account)
 		}
 	}
 	// 零金额调账没有意义，且会撞上「金额为零」的分录校验。
@@ -375,6 +375,85 @@ func TestAdjustmentBothDirections(t *testing.T) {
 		TxnID: txn, Account: UserAccount(1), Amount: money.Zero, Asset: AssetCNY, Memo: "无",
 	}); err == nil {
 		t.Error("零金额的调账应当被拒")
+	}
+}
+
+// 对家可以指定，方向跟着金额符号走。
+//
+// 对账差额的来路不明，把它记为平台收入等于让一笔没人解释过的钱混进
+// 经营收入，所以它需要一个单独归集的科目；而这两个方向都要能用，
+// 因为差额可正可负。
+func TestAdjustmentHonoursCounterAccount(t *testing.T) {
+	txn := newTxnID(t, txnA)
+	counter := ReconcileDifferenceAccount()
+
+	up, err := Adjustment(AdjustmentParams{
+		TxnID: txn, Account: UserAccount(42), Amount: amount(t, "5"), Asset: AssetCNY,
+		CounterAccount: counter, Memo: "对账差额入账",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	down, err := Adjustment(AdjustmentParams{
+		TxnID: txn, Account: UserAccount(42), Amount: amount(t, "-5"), Asset: AssetCNY,
+		CounterAccount: counter, Memo: "对账差额入账",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 补钱（金额为正）：借用户、贷对家。对家的余额因此是负的。
+	if got := BalanceOf(up.Entries, counter, AssetCNY); got.Cmp(amount(t, "-5")) != 0 {
+		t.Errorf("加钱时对家余额 = %s，期望 -5", got)
+	}
+	// 扣钱（金额为负）：贷用户、借对家。
+	if got := BalanceOf(down.Entries, counter, AssetCNY); got.Cmp(amount(t, "5")) != 0 {
+		t.Errorf("扣钱时对家余额 = %s，期望 5", got)
+	}
+	// 平台收入一个字都没动——这正是单独归集的目的。
+	for _, e := range append(append([]Entry{}, up.Entries...), down.Entries...) {
+		if e.Account == PlatformRevenueAccount() {
+			t.Error("指定了对家之后不该再落到平台收入上")
+		}
+	}
+	for _, tx := range []Transaction{up, down} {
+		if err := tx.Verify(); err != nil {
+			t.Errorf("调账不自洽: %v", err)
+		}
+	}
+}
+
+// 对家写成被调科目自己时，两条分录互相抵消、求和为零，于是 Verify 放行
+// ——而这笔交易什么都没改。静默成立会让一次「以为修好了」的调账变成空操作。
+func TestAdjustmentRejectsSelfCounterAccount(t *testing.T) {
+	txn := newTxnID(t, txnA)
+	_, err := Adjustment(AdjustmentParams{
+		TxnID: txn, Account: UserAccount(1), Amount: amount(t, "5"), Asset: AssetCNY,
+		CounterAccount: UserAccount(1), Memo: "笔误",
+	})
+	if err == nil {
+		t.Fatal("对家不能是被调科目自己")
+	}
+	if !strings.Contains(err.Error(), "自己") {
+		t.Errorf("报错要说清是对家写成了被调科目，得到: %v", err)
+	}
+}
+
+// 零值对家按「没填」处理，落到默认的平台收入上。
+//
+// 与「对家写错」分开说：错的对家在类型层面就构造不出来（Account 的字段
+// 不导出，唯一入口 ParseAccount 会校验），所以这里只剩「没填」这一种，
+// 而它必须有明确行为而不是报错——人工调账的绝大多数调用点要的正是默认值。
+func TestAdjustmentZeroCounterFallsBackToPlatformRevenue(t *testing.T) {
+	txn := newTxnID(t, txnA)
+	tx, err := Adjustment(AdjustmentParams{
+		TxnID: txn, Account: UserAccount(1), Amount: amount(t, "5"), Asset: AssetCNY, Memo: "补发",
+	})
+	if err != nil {
+		t.Fatalf("没填对家不该报错: %v", err)
+	}
+	if got := BalanceOf(tx.Entries, PlatformRevenueAccount(), AssetCNY); got.Cmp(amount(t, "-5")) != 0 {
+		t.Errorf("对家余额 = %s，期望落到 platform_revenue 上的 -5", got)
 	}
 }
 
