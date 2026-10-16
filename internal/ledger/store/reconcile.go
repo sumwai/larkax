@@ -122,6 +122,34 @@ const defaultShardSize = 1000
 // 这个判断——留着它比清掉更危险。
 const staleRunAfter = time.Hour
 
+// 认「这个科目属于哪个用户」的写法。**对账里的每一处都必须用这里的定义**，
+// 不能各写各的：曾经有三处各写各的，于是 `user:0<id>` 这类写法被写路径
+// 算进了用户的钱包，却既不在汇总里、也不被判为畸形——对账拿一个偏小的
+// 权威值去比，把一个**正确的**余额改小。
+//
+// Go 侧的同一套规则是 ledger.UserIDFromAccount（写路径与 ParseAccount 用它）。
+// SQL 没法调用 Go，所以只能在这里再写一遍：**改一处就要四处一起改**——
+// 这里的三个常量，加上 ledger.UserIDFromAccount。不一致本身就是那条缺陷。
+//
+//   - userAccountCanonicalPattern 是唯一能进账本的写法，ledger.ParseAccount
+//     只放行它。畸形判据用它描述「规范」。
+//   - userAccountAliasPattern 是旧写路径也认过的写法：它把后缀读成整数，
+//     所以前导零与正号当年**是**算进钱包的。对账必须照样认出来，否则库里
+//     已有的那些会让汇总值偏小，缺陷照旧。它比规范写法宽，正好覆盖规范写法。
+//   - userAccountCanonicalSQL 把科目原文归一到规范写法。**只做字符串处理、
+//     不转整数**：`::bigint` 在超范围的取值上会报错，而 WHERE 里两个条件的
+//     求值顺序没有保证，一个报错会让整轮对账失败。这里的写法在任何取值上
+//     都不报错。它**必须与 userAccountAliasPattern 一起用**：表达式自己会把
+//     `user :42` 归成 `user:42`（分隔符前面那个空格被 split_part 吃掉了）、
+//     把 `user:1:2` 归成 `user:1`，是那个写法判据把它们挡在外面的。
+//     只用表达式就会把钱算到错的人头上。
+const (
+	userAccountCanonicalPattern = `^user:[1-9][0-9]{0,17}$`
+	userAccountAliasPattern     = `^user:[+]?0*[0-9]{1,18}$`
+	userAccountCanonicalSQL     = `'user:' || ` +
+		`COALESCE(NULLIF(ltrim(ltrim(split_part(account, ':', 2), '+'), '0'), ''), '0')`
+)
+
 // ReconcileConfig 是一轮对账的开关与口径。
 type ReconcileConfig struct {
 	// AutoRepair 为 false 时只报告不修正（默认）。
@@ -194,7 +222,8 @@ const (
 type Finding struct {
 	// RunID 是发现它的那次运行。
 	RunID int64
-	// UserID 是涉及的用户；畸形科目解析不出用户 id 时为零。
+	// UserID 是涉及的用户。畸形科目在能归位到某个用户时（`user:042` 那种）
+	// 也填它，归不到任何人时为零——两种「零」只有后一种。
 	UserID int64
 	// Asset 是资产种类。
 	Asset string
@@ -293,7 +322,11 @@ type Report struct {
 	//
 	// 用计数而不是在 Findings 里再数一遍：Findings 可能被调用方裁剪
 	// （例如只打印前 N 条），而进 reconcile_runs 的数字必须是完整的——
-	// 它回答的是「这一轮账上出现了几处归不到人头上的钱」。
+	// 它回答的是「这一轮账上出现了几处写法不合规范的 user 科目」。
+	//
+	// 其中有一类读得出用户 id（`user:0<id>` 这种），金额已经归到了那个
+	// 用户名下，要订正的只是写法；另一类才是真的归不到人头上。两者的
+	// 分工见 reconcileMalformed。
 	malformed int
 }
 
@@ -568,7 +601,8 @@ func (s *Store) reconcileAll(ctx context.Context, cfg ReconcileConfig, alert Ale
 type openFinding struct {
 	scope string
 	kind  FindingKind
-	// userID 对钱包类不一致是用户 id，畸形科目为零。
+	// userID 是这条不一致涉及的用户，与 Finding.UserID 同一套约定
+	// （畸形科目能归位时也非零）。它只给钱包类当候选用，见 reconcileCandidates。
 	userID int64
 }
 
@@ -681,7 +715,18 @@ func (s *Store) persistFindings(ctx context.Context, report *Report) error {
 // 有分录却没有钱包行本身就是一条不一致（见 FindingWalletMissing），
 // 而它只出现在账本的这一侧。
 //
-// # 关于 `[0-9]{1,18}`
+// # 为什么 union 里还有未结算预留那一侧
+//
+// 「有 pending 预留、既没有钱包行也没有账本分录」的用户，另外两侧都看不见
+// 他——而注册流程漏建钱包的用户恰好是这个形状，WalletMissing 那条分支
+// 存在的意义正是把他报出来。少了这一侧，他整体在候选集之外。
+//
+// # 认科目用的是哪一种写法
+//
+// 账本那一侧用的是 userAccountAliasPattern：旧写路径把后缀读成整数，
+// 所以 `user:0<id>` 这类写法当年也**是**算进钱包的，只认规范写法会让
+// 这些用户进不了候选集。畸形判据用的是更窄的 userAccountCanonicalPattern，
+// 两者一宽一窄是有意的：能归位的一律归位，归不了位的必须报出来。
 //
 // 上限十八位是有意的：`split_part(...)::bigint` 在位数过多时会**报错**，
 // 而一个报错的查询会让整轮对账失败。位数超限的科目不是合法用户 id，
@@ -697,9 +742,15 @@ func (s *Store) reconcileCandidates(
 	full bool, limit int, open []openFinding,
 ) ([]int64, error) {
 	// 已经记下未消除不一致的钱包用户，无论这一轮是不是增量都要带上。
+	//
+	// 按 kind 排掉畸形科目，而不是按 `userID != 0`：畸形科目的 finding 现在
+	// 也带着用户 id（能归位的那一类，见 reconcileMalformed），但它该不该进
+	// 候选集由畸形查询自己管（那里按科目原文捞回来）。带上用户会把他拖进
+	// 钱包比对——比对本身不会出错，只是白扫一遍，而且「carried 是谁」会多出
+	// 一个与钱包不一致无关的来源。
 	carried := make([]int64, 0, len(open))
 	for _, f := range open {
-		if f.userID != 0 {
+		if f.kind != FindingMalformedAccount {
 			carried = append(carried, f.userID)
 		}
 	}
@@ -709,20 +760,45 @@ func (s *Store) reconcileCandidates(
 			SELECT user_id FROM user_wallets
 			UNION
 			SELECT DISTINCT split_part(account, ':', 2)::bigint
-			  FROM ledger_entries WHERE account ~ '^user:[0-9]{1,18}$'
+			  FROM ledger_entries WHERE account ~ '` + userAccountAliasPattern + `'
+			UNION
+			SELECT DISTINCT user_id FROM billing_requests WHERE status = 'pending'
 			UNION
 			SELECT unnest($3::bigint[]) AS user_id
 		) u
 		 WHERE user_id > $1
 		 ORDER BY user_id
 		 LIMIT $2`
+	// 增量这一侧的时间窗口与另外两侧**不同源**，这是既成事实，不是笔误：
+	//
+	//   - user_wallets.updated_at、ledger_entries.created_at 都由 SQL 的 now()
+	//     写，与 watermark（reconcile_runs.started_at）同一个数据库时钟。
+	//   - billing_requests.started_at 是**应用进程的墙钟**：SaveReservation
+	//     显式把 r.RuleMatchedAt 绑进去，绕过了该列的 DEFAULT now()；它记的
+	//     还是「这次请求匹配上规则的时刻」，而不是「这行写进库的时刻」。
+	//     这张表上没有别的库生成时间列（settled_at 要等到结算才写，而结算
+	//     之后这一行已经不是 pending 了），所以换不掉。
+	//
+	// 偏差的方向决定漏不漏，两种方向后果不同：
+	//
+	//   - 应用时钟比数据库**慢**：在 watermark 之后实时写入的行，started_at
+	//     可能落在 watermark 之前，这一轮读不到；watermark 只增不减，下一轮
+	//     同样读不到——**漏读**，直到下一次全量扫描。
+	//   - 应用时钟比数据库快：多读一遍，无害（比对是幂等的）。
+	//
+	// 漏读的那部分落在增量本来就有的盲区里（见本文件顶部），由
+	// FullScanInterval 兜底。要根治得让这一侧也按数据库时钟走，那要改
+	// SaveReservation 的写入，不在这里做。
 	const incrementalQuery = `
 		SELECT user_id FROM (
 			SELECT user_id FROM user_wallets WHERE updated_at >= $3
 			UNION
 			SELECT DISTINCT split_part(account, ':', 2)::bigint
 			  FROM ledger_entries
-			 WHERE account ~ '^user:[0-9]{1,18}$' AND created_at >= $3
+			 WHERE account ~ '` + userAccountAliasPattern + `' AND created_at >= $3
+			UNION
+			SELECT DISTINCT user_id FROM billing_requests
+			 WHERE status = 'pending' AND started_at >= $3
 			UNION
 			SELECT unnest($4::bigint[]) AS user_id
 		) u
@@ -761,9 +837,23 @@ func (s *Store) reconcileCandidates(
 // `user:abc` 或干脆写成 `user` 这种科目，而那笔钱既不属于任何用户的钱包，
 // 也没有别的地方会看见它——除了这里。
 //
-// 判据是 `LIKE 'user%'` 加上规范写法的反匹配，而**不是** `LIKE 'user:%'`：
+// 判据是 `LIKE 'user%'` 加上**规范写法**的反匹配，而**不是** `LIKE 'user:%'`：
 // 后者要求冒号紧跟在 user 后面，恰恰漏掉最典型的那种畸形（中间多一个空格）。
 // 以 user 开头又不合规范的行，只可能是想写成用户科目而写坏了。
+//
+// 「规范」由 userAccountCanonicalPattern 定义，与 ledger.ParseAccount 放行的
+// 是同一套——两处不一致时，一条写法可能既被写路径拒绝、又不会被报出来，
+// 那正是本条缺陷原来的形状。
+//
+// 报出来的这一堆里有两类，处置完全不同，所以 UserID 与 Detail 分开写：
+//
+//   - 读得出用户 id 的（`user:042`、`user:+42`）：钱已经按那个 id 归位了
+//     （见 readLedgerSums），要订正的是写法。新写入不会再产生它们。
+//     这类带上 UserID：这条不一致说的就是「某个用户名下有一笔写法要订正的
+//     钱」，按用户查 reconcile_findings 时应当能查到它。
+//   - 读不出的（`user :42`、`user:abc`、`user:0`、位数超限）：那笔钱不属于
+//     任何人的钱包，得由人判断它原本该记给谁。UserID 为零——不是「还不知道」，
+//     而是**确实没有**归属。
 //
 // 只报告不修：修它要先判断这笔钱原本该记给谁，那是人的事，而猜错的代价
 // 是把钱挪到另一个用户的账上。
@@ -785,13 +875,13 @@ func (s *Store) reconcileMalformed(ctx context.Context, report *Report, alert Al
 	const fullQuery = `
 		SELECT account, asset, SUM(amount)::text, count(*)::text
 		  FROM ledger_entries
-		 WHERE account LIKE 'user%' AND account !~ '^user:[0-9]{1,18}$'
+		 WHERE account LIKE 'user%' AND account !~ '` + userAccountCanonicalPattern + `'
 		 GROUP BY account, asset
 		 ORDER BY account, asset`
 	const incrementalQuery = `
 		SELECT account, asset, SUM(amount)::text, count(*)::text
 		  FROM ledger_entries
-		 WHERE account LIKE 'user%' AND account !~ '^user:[0-9]{1,18}$'
+		 WHERE account LIKE 'user%' AND account !~ '` + userAccountCanonicalPattern + `'
 		   AND (created_at >= $1 OR account = ANY($2))
 		 GROUP BY account, asset
 		 ORDER BY account, asset`
@@ -816,13 +906,30 @@ func (s *Store) reconcileMalformed(ctx context.Context, report *Report, alert Al
 		if err != nil {
 			return fmt.Errorf("解析畸形科目的金额 %q 失败: %w", total, err)
 		}
-		f := Finding{
-			RunID: report.RunID, Asset: asset, Kind: FindingMalformedAccount,
-			Ledger: amt, Unrepairable: "科目写法畸形，归属无法确定",
-			Key: account,
+
+		// 先把三个随类别而定的值算出来，再装进 Finding：默认值与覆盖写在
+		// 同一处，读的人不必回头看后面有没有把它改掉。
+		var (
+			userID       int64
+			unrepairable = "科目写法畸形，归属无法确定"
 			// Detail 里的条数每轮都会变，所以它只给人看；标识用的是
 			// Key（科目原文），见 Finding.Scope。
-			Detail: fmt.Sprintf("科目 %q，%s 条分录", account, count),
+			detail = fmt.Sprintf("科目 %q，%s 条分录", account, count)
+		)
+		if id, ok := ledger.UserIDFromAccount(account); ok {
+			// 读得出用户 id：钱已经归到那个人头上了，这条要订正的是写法。
+			// 与读不出 id 的那一类分开说——不然两条的处置看起来一样，
+			// 而「钱不属于任何人」才是真的钱不见了。
+			userID = id
+			unrepairable = "科目写法非规范，需人工订正"
+			detail = fmt.Sprintf("科目 %q，%s 条分录；金额已按 user:%d 归位",
+				account, count, id)
+		}
+
+		f := Finding{
+			RunID: report.RunID, UserID: userID, Asset: asset,
+			Kind: FindingMalformedAccount, Ledger: amt,
+			Unrepairable: unrepairable, Detail: detail, Key: account,
 		}
 		report.Findings = append(report.Findings, f)
 		report.malformed++

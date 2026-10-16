@@ -152,6 +152,9 @@ type Account struct {
 // 返回字符串而不是 int64：后缀在数据库里就是 text，且不同大类含义不同
 // （user 是用户 id，payment_gateway 是通道名，payout 是提现单 id）。
 // 在这里把它解释成整数，就等于替调用方决定了解释方式。
+//
+// 它只切字符串，不判断后缀能不能当用户 id——那件事只有一处答案，
+// 在 UserIDFromAccount（方法形态是 UserID），且只对 user 科目成立。
 func (a Account) ID() string {
 	_, id := splitAccount(a.raw)
 	return id
@@ -201,6 +204,92 @@ const accountSep = ":"
 // UserAccount 是用户钱包科目。
 func UserAccount(userID int64) Account {
 	return Account{raw: buildAccount(AccountUser, strconv.FormatInt(userID, 10))}
+}
+
+// maxUserIDDigits 是 user 科目里用户 id 的十进制位数上限。
+//
+// 上限的来源不是「用户 id 不会有这么大」，而是**对账的 SQL 必须认得出来**：
+// 它要把后缀转成 bigint，而超出 int64 的取值会让那个转换报错、整轮对账失败，
+// 于是那样一个科目既进不了汇总、又不会走到畸形那一条路。能被写进来的写法
+// 必须是**对账看得见**的写法，否则写入路径认、对账不认，余额就会被改错。
+//
+// 十八位最大是 10^18−1，落在 int64 里；而用户 id 来自 bigserial，
+// 这个上限在现实中够不着。
+const maxUserIDDigits = 18
+
+// UserIDFromAccount 从 user 科目的原文里读出用户 id。
+//
+// 这是「一个科目属于哪个用户」在 Go 侧**唯一的一处**判定：ParseAccount 用它
+// 决定写法是否规范，写路径（把分录的净影响加到钱包上）与对账的畸形科目报告
+// 也用它。SQL 那边没法调用 Go，规则在 store 里再写一遍，两处必须一致——
+// 两边不一致正是这条缺陷的成因。
+//
+// # 它比 ParseAccount 宽松，这是有意的
+//
+// 它认得旧写路径留下的写法（`user:042`、`user:+42`），因为那些钱当初**已经**
+// 被算进那个用户的钱包了（旧写路径把后缀读成整数）。对账必须按同一个口径
+// 把它们归回同一个用户，否则汇总出来的权威值偏小，对账会据此把一个**正确的**
+// 余额改小。写法规范不规范是 ParseAccount 的判断，这里只回答「读成哪个 id」。
+//
+// 返回 false 表示读不出来：不是 user 科目、后缀为空、含非数字字符、带负号、
+// 为 0、或者位数超出 maxUserIDDigits。这些写法上的钱不属于任何人的钱包，
+// 由对账单独报出来。
+//
+// # 为什么 0 不算「读得出」
+//
+// 判据是「这笔钱落在了哪个钱包上」，不是「这个后缀能不能转成整数」。
+// 0 号用户不存在（users.id 是 bigserial，从 1 起，user_wallets.user_id 与
+// billing_requests.user_id 都有外键指过去），所以 `user:0` 的钱没有落在
+// 任何钱包上——把 0 读出来会让对账报出与事实相反的话（说金额已按 user:0
+// 归位），而事实是这笔钱谁也不属于。账本包其余部分也是同一个约定：
+// Topup/Consume/Refund/… 全都拒绝 UserID <= 0。
+func UserIDFromAccount(s string) (int64, bool) {
+	t, suffix := splitAccount(s)
+	if t != AccountUser {
+		return 0, false
+	}
+	// 正号是旧写路径认过的（strconv.ParseInt 接受它），负号不是：
+	// 负 id 的钱包行不可能存在（users.id 是 bigserial），那样的分录写不进库。
+	digits := strings.TrimPrefix(suffix, "+")
+	if digits == "" {
+		return 0, false
+	}
+	for i := 0; i < len(digits); i++ {
+		if digits[i] < '0' || digits[i] > '9' {
+			return 0, false
+		}
+	}
+	if len(strings.TrimLeft(digits, "0")) > maxUserIDDigits {
+		return 0, false
+	}
+	userID, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	if userID <= 0 {
+		// 走到这里只可能是全零后缀（`user:0`、`user:000`、`user:+0`）：
+		// 负号在前面就被字符判断挡掉了。见上面「为什么 0 不算读得出」。
+		return 0, false
+	}
+	return userID, true
+}
+
+// UserID 返回 user 科目的用户 id。
+//
+// 与 UserIDFromAccount 同一条判定，只是接的是已经构造好的科目。
+// 写路径用它，于是「一笔分录算给哪个用户」只有一处答案。
+//
+// 与 ID 的分工：ID 只把字符串切开、不做任何解释（后缀在不同大类里含义不同），
+// 这里解释成用户 id，并且只对 user 科目成立——读不出或不成立的写法一律报错，
+// 不返回一个「大概是对的」的值。
+func (a Account) UserID() (int64, error) {
+	userID, ok := UserIDFromAccount(a.raw)
+	if !ok {
+		return 0, fmt.Errorf(
+			"科目 %q 读不出用户 id（不是 user 科目，或后缀不是正整数：空、含非数字字符、带负号、为 0、超过 %d 位）",
+			a.raw, maxUserIDDigits)
+	}
+	return userID, nil
 }
 
 // MerchantPayableAccount 是应付某商户分成的科目。
@@ -260,6 +349,13 @@ func buildAccount(t AccountType, id string) string {
 //
 // 这是唯一一条「外部输入 → 合法科目」的通道：数据库读回的行、
 // 手工构造的测试数据、其它服务的请求都从这里进。
+//
+// # 用户 id 只放行一种写法
+//
+// `user:42` 是规范的，`user:042` 与 `user:+42` 不是，会被拒。理由是账本里
+// 的科目要按字符串汇总（对账就是把同一个科目加起来），而多种写法指向同一个
+// 用户时，字符串比对看不见另外几种——汇总值偏小，对账会把正确的余额改小。
+// 让写法只有一种，这条缝就不存在了。
 func ParseAccount(s string) (Account, error) {
 	t, id := splitAccount(s)
 
@@ -285,6 +381,26 @@ func ParseAccount(s string) (Account, error) {
 	}
 	if err := checkAccountID(id); err != nil {
 		return Account{}, err
+	}
+	if t == AccountUser {
+		// 用户 id 的写法只放行一种：正整数，十进制，不带前导零与正号。
+		//
+		// 别的写法（`user:042`、`user:+42`）读得出同一个 id，但字符串不相等，
+		// 而「按科目汇总」是字符串比对——汇总值因此偏小，对账会拿它去和快照
+		// 比，把一个**正确的**余额改小。收窄在这里等于堵住新的写入；库里已经
+		// 存在的那种写法由对账按同一个 id 归位（见 UserIDFromAccount）。
+		//
+		// 只收窄 user：它是唯一会被按字符串比对归属的大类。merchant_payable
+		// 与 payout 的后缀不参与任何这样的比对，一起收窄是另一件事。
+		//
+		// 这里不另写 `userID > 0`：UserIDFromAccount 已经把 0 判成读不出
+		// （见它的注释），两处各写一遍正是这条缺陷的成因。写法是否规范由
+		// 「读出来的 id 再写回去是不是原文」决定，于是规范写法只有一种。
+		userID, ok := UserIDFromAccount(s)
+		if !ok || strconv.FormatInt(userID, 10) != id {
+			return Account{}, fmt.Errorf(
+				"科目 %q 的用户 id 不是规范写法：应为 user:<正整数>，十进制、无前导零、无正号", s)
+		}
 	}
 	return Account{raw: s}, nil
 }

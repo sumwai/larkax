@@ -69,6 +69,117 @@ func TestParseAccountRejects(t *testing.T) {
 	}
 }
 
+// 用户 id 只放行一种写法：正整数，十进制，无前导零、无正号。
+//
+// 别的写法读得出同一个用户，但字符串不相等，而账本的汇总是字符串比对
+// ——于是那样一笔钱会同时「算进了钱包」和「不在权威值里」，对账拿一个
+// 偏小的权威值去比，把**正确的**余额改小。让写法只有一种，缝就不存在。
+func TestParseAccountRejectsNonCanonicalUserID(t *testing.T) {
+	bad := []string{
+		"user:0",                   // 用户 id 从 1 起（users.id 是 bigserial），0 不是用户
+		"user:00",                  //
+		"user:+0",                  //
+		"user:042",                 // 前导零：ParseInt 认得，字符串比对不认得
+		"user:+42",                 // 正号：同上
+		"user:-1",                  // 负 id 不可能存在（钱包行有外键约束）
+		"user:abc",                 // 后缀不是整数
+		"user:1234567890123456789", // 十九位：超出对账认得的位数上限
+	}
+	for _, s := range bad {
+		if _, err := ParseAccount(s); err == nil {
+			t.Errorf("ParseAccount(%q) 应当报错", s)
+		}
+	}
+
+	good := []string{
+		"user:1",
+		"user:42",
+		"user:100000",
+		"user:123456789012345678", // 十八位：上限之内
+	}
+	for _, s := range good {
+		if _, err := ParseAccount(s); err != nil {
+			t.Errorf("ParseAccount(%q) 不该报错: %v", s, err)
+		}
+	}
+}
+
+// UserIDFromAccount 比 ParseAccount 宽松：它认得旧写路径留下的写法。
+//
+// 宽松是有意的，不是漏网：那些钱当初**已经**被算进那个用户的钱包了
+// （旧写路径把后缀读成整数），对账必须按同一个口径把它们归回同一个用户，
+// 否则汇总值偏小，会把正确的余额改小。
+//
+// 宽松有底：**0 号用户不存在**，所以 `user:0` 那类写法上的钱没有落在任何
+// 钱包上，「后缀能转成整数」不等于「钱归到位了」。它们与 `user:abc` 同类。
+func TestUserIDFromAccount(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+		ok   bool
+	}{
+		{"user:42", 42, true},
+		{"user:042", 42, true},
+		{"user:+42", 42, true},
+		{"user:+0042", 42, true},
+		{"user:0000000000000000000042", 42, true},
+		{"user:123456789012345678", 123456789012345678, true},
+
+		// 读不出 id：这些写法上的钱不属于任何人的钱包。
+		{"user:abc", 0, false},
+		{"user:", 0, false},
+		{"user:+", 0, false},
+		{"user:1:2", 0, false},
+		{"user :42", 0, false},                 // 分隔符前多一个空格
+		{"user: 42", 0, false},                 // 后缀前多一个空格
+		{"user:-5", 0, false},                  // 负号
+		{"user:1234567890123456789", 0, false}, // 十九位
+		{"user", 0, false},
+		{"", 0, false},
+		// 全零后缀：读得成整数 0，但 0 号用户不存在，钱没落在任何钱包上。
+		{"user:0", 0, false},
+		{"user:00", 0, false},
+		{"user:000", 0, false},
+		{"user:+0", 0, false},
+		// 别的大类的后缀含义不同，不能读成用户 id。
+		{"merchant_payable:42", 0, false},
+		{"payout:42", 0, false},
+		{"payment_gateway:42", 0, false},
+		{"platform_revenue", 0, false},
+	}
+	for _, tc := range cases {
+		got, ok := UserIDFromAccount(tc.in)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("UserIDFromAccount(%q) = (%d, %v)，期望 (%d, %v)",
+				tc.in, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+// Account.UserID 与 UserIDFromAccount 是同一条判定，写路径用的是它。
+func TestAccountUserID(t *testing.T) {
+	if got, err := UserAccount(42).UserID(); err != nil || got != 42 {
+		t.Errorf("UserAccount(42).UserID() = (%d, %v)，期望 (42, nil)", got, err)
+	}
+	for _, a := range []Account{
+		PlatformRevenueAccount(),
+		MerchantPayableAccount(42),
+		PayoutAccount(42),
+		PaymentGatewayAccount("stripe"),
+		{},
+	} {
+		if got, err := a.UserID(); err == nil {
+			t.Errorf("%q 不是用户钱包科目，不该读出用户 id %d", a, got)
+		}
+	}
+	// 是 user 科目、后缀也读得成整数，但 0 号用户不存在：钱没落在任何钱包上。
+	// 这里要报错而不是返回 0——写路径拿到 0 会去更新一个不存在的钱包行，
+	// 而对账会据此说这笔钱「已归位」。
+	if got, err := (Account{raw: "user:0"}).UserID(); err == nil {
+		t.Errorf("user:0 不该读出用户 id %d（0 号用户不存在）", got)
+	}
+}
+
 func TestParseAccountAcceptsIDCharset(t *testing.T) {
 	// 通道名与第三方对账号会带点、连字符、下划线、@。
 	for _, s := range []string{
