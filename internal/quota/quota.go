@@ -43,6 +43,21 @@ func (k Kind) valid() bool {
 	return false
 }
 
+// 剩余量的单位。这几个值是**同一口径的判据**，不是展示用的标签：
+// 路由只对单位完全相同的渠道比较余量（见 internal/route 的 scoreQuota），
+// 所以换一种写法不会算错，只是把两个本可比的渠道判成不可比——偏保守。
+//
+// 这里只列已知的三种。写进来的单位不在其中也合法（上游的口径五花八门），
+// 它只是与别人都不可比而已。空字符串表示未知。
+const (
+	// UnitTokens 是剩余 token 数（按 token 计的套餐）。
+	UnitTokens = "tokens"
+	// UnitRequests 是剩余请求次数（按次计的配额）。
+	UnitRequests = "requests"
+	// UnitMoney 是剩余金额，以本部署的记账单位计（见 internal/money）。
+	UnitMoney = "money"
+)
+
 // State 是一个渠道的额度状态。字段与 channel_quota_state 表对应。
 type State struct {
 	ChannelID int64
