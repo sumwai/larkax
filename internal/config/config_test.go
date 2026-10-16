@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -377,6 +379,46 @@ func TestConfigStringRedactsSecrets(t *testing.T) {
 	// 主机与库名保留：排查「连错环境」时靠它们，口令才是要挡的
 	if got := fmt.Sprint(cfg); !strings.Contains(got, "db.internal:5432/larkax") {
 		t.Errorf("String 丢了主机与库名：%s", got)
+	}
+}
+
+// slog 的取值路径是打印 Config 的**第三个入口**（前两个是 %v 与 %#v）。
+// 服务启动时打的那行摘要走的就是它。
+//
+// 这条测试存在的理由正是这条链此前没有任何调用方：那时「打出来是脱敏的」
+// 只是一个没人验证过的性质。所以这里**真的打一遍**，而不是直接调 LogValue。
+func TestConfigLogValueRedactsSecrets(t *testing.T) {
+	const (
+		dbPassword  = "placeholder-db-password"
+		redisPass   = "placeholder-redis-password"
+		masterBytes = "0123456789abcdef0123456789abcdef"
+	)
+	cfg := &Config{
+		Env:          "production",
+		Role:         RoleGateway,
+		HTTPAddr:     ":8080",
+		InternalAddr: ":9090",
+		LogLevel:     "info",
+		DBDSN:        "postgres://larkax:" + dbPassword + "@db.internal:5432/larkax",
+		RedisDSN:     "redis://:" + redisPass + "@cache.internal:6379/0",
+		MasterKeys:   []MasterKey{{ID: "current", Key: []byte(masterBytes)}},
+	}
+
+	var buf bytes.Buffer
+	// 用最普通的写法：`slog.Any("config", cfg)` 与这里的 attr 走同一条路。
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("启动", "config", cfg)
+	out := buf.String()
+
+	for _, secret := range []string{dbPassword, redisPass, masterBytes} {
+		if strings.Contains(out, secret) {
+			t.Errorf("日志里出现了 %q：%s", secret, out)
+		}
+	}
+	// 摘要要留下运维真会问的那几项，否则这条链就算活着也没人用得上。
+	for _, want := range []string{`"env":"production"`, `"role":"gateway"`, `":8080"`, `":9090"`, "REDACTED"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("摘要里少了 %q：%s", want, out)
+		}
 	}
 }
 

@@ -233,6 +233,30 @@ type UsageFacts struct {
 	CacheWriteTokens *int64           `json:"cacheWriteTokens,omitempty"`
 	ReasoningTokens  *int64           `json:"reasoningTokens,omitempty"`
 	Units            map[string]int64 `json:"units,omitempty"`
+
+	// CompletionIncludesReasoning 声明 CompletionTokens 里是否**已经含**
+	// ReasoningTokens，语义与 channel.Usage 上的同名字段一致。
+	//
+	// 它不是描述而是**计费口径的一部分**：声明为「已含」时结算先把推理从
+	// completion 里减掉，声明为「不含」时两项各乘一次单价。两种口径在上游都
+	// 真实存在，而光看数字判不出来——completion=100、reasoning=50 既可能是
+	// 「100 里含 50」，也可能是「100 可见输出 + 50 推理」。所以这个关系由
+	// 知道协议约定的那一层如实声明，不在计费侧按启发式推断。
+	//
+	// 指针的三种取值各有含义：
+	//
+	//   - nil：**没声明**。重建回协议层用量时沿用内核原有的口径，见
+	//     UsageFacts.ChannelUsage。
+	//   - &true：completion 已含推理（OpenAI 的 completion_tokens 含
+	//     completion_tokens_details.reasoning_tokens，Anthropic 的
+	//     output_tokens 含扩展思考）。
+	//   - &false：推理是单独报出的，与 CompletionTokens 互斥。
+	//
+	// 用指针而不是 bool：「没声明」与「声明为不含」在计费上不是同一件事，
+	// 前者要沿用内核口径、后者要覆盖它，而 bool 的零值会把前者悄悄变成后者——
+	// 一个没声明口径的插件会被当成「推理单独报出」，于是那 50 个推理 token
+	// 与它们在 completion 里的那一份被各乘一次单价，账单只是偏高。
+	CompletionIncludesReasoning *bool `json:"completionIncludesReasoning,omitempty"`
 }
 
 // Result 是一次 hook 调用的结果。
