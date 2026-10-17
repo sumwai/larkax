@@ -735,6 +735,60 @@ func TestEvalUnknownSlotInUnvisitedBranch(t *testing.T) {
 	}
 }
 
+// TestEvalUnitPriceClashIsOrderIndependent 钉住「计量项名与单价键名撞名」
+// 这条判据与 map 的迭代顺序无关。
+//
+// 判据原先查的是 floats 里有没有这个名字，而 floats 与 units 是在**同一个
+// `range table` 循环**里填的——于是「先迭代到 units 还是先迭代到 prompt」
+// 决定了这条规则报不报错。table 是 map、迭代顺序随机，所以同一条规则
+// 有时报错、有时静默通过。
+//
+// 跑 1000 次是刻意的：实测修之前单次**静默放过**的概率约 0.88
+// （2000 次里放过 1757 次），也就是大多数求值根本不报错——只跑一次的用例
+// 大概率是绿的。连着放过 1000 次的概率是 0.88^1000，所以这条用例在判据
+// 修好之前**必然**红。
+func TestEvalUnitPriceClashIsOrderIndependent(t *testing.T) {
+	// prompt 既是 token 槽位、又被写成了一个计量项：这一条必须每次都拦下。
+	p := mustCompile(t, `{"prompt": 1.5, "units": {"prompt": 0.01}}`)
+	for i := 0; i < 1000; i++ {
+		_, err := p.Eval(Env{Usage: billing.Usage{}, At: testAt, Region: "CN", Calendar: newTestCalendar()})
+		if err == nil {
+			t.Fatalf("第 %d 次求值静默放过：撞名的规则每一次都该被拦下", i)
+		}
+		if !strings.Contains(err.Error(), "prompt") {
+			t.Fatalf("第 %d 次的错误没写明撞名的是哪个名字: %v", i, err)
+		}
+	}
+}
+
+// TestEvalDistinctUnitNameIsOrderIndependent 是上一条的另一半。
+//
+// 它不能省：只钉「撞名要报错」的话，一个「一律报错」的实现也能通过。
+// 这里钉的是不撞名时每次都成功，且 Prices 与 Prices.Units 两个命名空间
+// 各自都对——撞名的代价正是「账单上分不清哪个是哪个」。
+func TestEvalDistinctUnitNameIsOrderIndependent(t *testing.T) {
+	p := mustCompile(t, `{"prompt": 1.5, "units": {"search": 0.01}}`)
+	for i := 0; i < 1000; i++ {
+		res, err := p.Eval(Env{Usage: billing.Usage{}, At: testAt, Region: "CN", Calendar: newTestCalendar()})
+		if err != nil {
+			t.Fatalf("第 %d 次求值被拦下：不撞名的规则不该报错: %v", i, err)
+		}
+		if got := res.Prices.Prompt.String(); got != "1.50000000" {
+			t.Fatalf("第 %d 次 prompt 单价 = %s，期望 1.50000000", i, got)
+		}
+		if got := res.Prices.Units["search"].String(); got != "0.01000000" {
+			t.Fatalf("第 %d 次 search 单价 = %s，期望 0.01000000", i, got)
+		}
+		// token 槽位不该同时出现在计量项那一侧。
+		if _, ok := res.Prices.Units["prompt"]; ok {
+			t.Fatalf("第 %d 次 prompt 出现在了计量项命名空间里", i)
+		}
+		if !res.Prices.Declared["prompt"] {
+			t.Fatalf("第 %d 次规则写过 prompt，Declared 里却没有", i)
+		}
+	}
+}
+
 // TestEvalMoneyAmountsAreExact 验证同一组单价在多次求值下给出完全相同的金额。
 func TestEvalMoneyAmountsAreExact(t *testing.T) {
 	source := `{"prompt": 0.0000015, "completion": 0.0000075}`
