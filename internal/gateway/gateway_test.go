@@ -296,7 +296,14 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 		settlements:  &fakeSettlements{},
 		executor: &fakeExecutor{resp: &channel.Response{
 			UpstreamModel: "gpt-4o-2024",
-			Usage:         channel.Usage{PromptTokens: 1000, CompletionTokens: 100},
+			Usage: channel.Usage{
+				PromptTokens: 1000, CompletionTokens: 100,
+				// Raw 里的 "source" 是「上游确实报了 usage 块」的标记：
+				// 生产形状由 internal/relay 在解析到 usage 时留下它
+				// （见 usageSourceOf）。夹具少了它就等于「上游没报」，
+				// 用量来源会落成 Unreported——那是另一个场景的夹具。
+				Raw: map[string]any{"source": "test_protocol"},
+			},
 		}},
 		redactor:        &fakeRedactor{},
 		snapshots:       &fakeSnapshots{},
@@ -1192,6 +1199,12 @@ func TestMissingUsageYieldsZeroAmount(t *testing.T) {
 	if len(res.Charge.Entries) != 0 {
 		t.Error("零金额不该产生账本分录")
 	}
+	if res.Charge.UsageSource != tokens.SourceUnreported {
+		t.Errorf("用量来源 = %v，期望 unreported（上游没报）", res.Charge.UsageSource)
+	}
+	if !res.Estimated {
+		t.Error("上游没报用量时 Estimated 应为 true")
+	}
 }
 
 // 用量来源要标明是实测。
@@ -1203,6 +1216,66 @@ func TestUsageSourceIsMeasured(t *testing.T) {
 	}
 	if res.Charge.UsageSource != tokens.SourceMeasured {
 		t.Errorf("用量来源 = %v，期望实测", res.Charge.UsageSource)
+	}
+	if res.Estimated {
+		t.Error("上游报过 usage 时 Estimated 应为 false")
+	}
+}
+
+// 「上游报了 0」与「上游没报」要分开：两者用量逐列相同，只有来源不同。
+//
+// 上游报一个全 0 的 usage 时，那几个 0 是它给的数——可以拿去跟上游对账
+// （measured）；整块不报时，零值是占位——不能对账（unreported）。
+// 这条用例把两种响应的形状并排放在一起，判据只有一个：响应体里有没有
+// usage 块（在夹具里就是 Usage.Raw 里有没有 relay 留下的 "source"）。
+func TestUsageSourceDistinguishesReportedZeroFromUnreported(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		usage  channel.Usage
+		want   tokens.Source
+		absent bool
+	}{
+		{
+			name: "上游报了 0",
+			usage: channel.Usage{
+				PromptTokens: 0, CompletionTokens: 0,
+				Raw: map[string]any{"source": "test_protocol"},
+			},
+			want: tokens.SourceMeasured,
+		},
+		{
+			name:   "上游没报 usage",
+			usage:  channel.Usage{},
+			want:   tokens.SourceUnreported,
+			absent: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.executor.resp = &channel.Response{
+				UpstreamModel: "m",
+				Usage:         tc.usage,
+			}
+
+			res, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// 两条路的金额与用量逐列相同——这正是「只看数字分不开」
+			// 的证明，分开它们的只有来源。
+			if !res.Charge.Settlement.Actual.IsZero() {
+				t.Errorf("金额 = %s，期望零", res.Charge.Settlement.Actual)
+			}
+			if res.Charge.Usage.PromptTokens != 0 || res.Charge.Usage.CompletionTokens != 0 {
+				t.Errorf("用量 = %+v，期望全零", res.Charge.Usage)
+			}
+			if res.Charge.UsageSource != tc.want {
+				t.Errorf("用量来源 = %v，期望 %v", res.Charge.UsageSource, tc.want)
+			}
+			if res.Estimated != tc.absent {
+				t.Errorf("Estimated = %v，期望 %v", res.Estimated, tc.absent)
+			}
+		})
 	}
 }
 

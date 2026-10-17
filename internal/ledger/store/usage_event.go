@@ -16,17 +16,18 @@ import (
 // 与 ErrUnknownProtocol 分开：那个是**协议**，这个是**用量是怎么来的**。
 //
 // 注意它挡不住「漏了赋值」：tokens.Source 的零值**就是** SourceMeasured，
-// 而 measured 是合法取值（非流式的用量只可能来自上游响应体），两者在这一层
-// 分不开。一个漏设的来源因此会落成「实测值」——那正是最不该凭空声称的一档。
+// 而 measured 是合法取值，两者在这一层分不开。一个漏设的来源因此会落成
+// 「实测值」——那正是最不该凭空声称的一档。
 //
-// 而生产那一侧**也分不开**，至少非流式这条路不行：internal/gateway 的 Chat
-// 无条件写 tokens.SourceMeasured，而上游响应体里没有 usage 块时 usageOf
-// 返回零值。于是落库那一行是 billing_path='measured'、estimator=NULL、cost=0、
-// prompt_tokens=0、completion_tokens=0——**与「上游确实报了 0 token」逐列
-// 相同**，读这一行的人会把「上游压根没报」读成「上游报了 0」。
+// 上游没报 usage 的那条路**已经分得开**：internal/gateway 的 Chat 在记录
+// 用量的那一刻看响应体里有没有 usage 块，没有就记 SourceUnreported
+// （见 usageSourceOf）。它落成 billing_path='estimated'、
+// estimator='unreported'，与「上游报了 0」（measured、estimator 为 NULL）
+// 逐列不同。
 //
 // 流式那条路不同：来源由事件流与入口一起决定，缺 usage 时落 estimated
-// （见 internal/gateway 的 Result.Estimated 与 stream.go）。
+// （见 internal/gateway 的 Result.Estimated 与 stream.go）。决策那条路
+// （Decide）仍然记实测，理由见 decide.go 里那一行。
 var ErrUnknownUsageSource = errors.New("未知的用量来源")
 
 // insertUsageEventSQL 写一行用量事件。
@@ -193,11 +194,13 @@ func unitCountsJSON(counts map[string]int64) (string, error) {
 // （measured / estimated，表上有 CHECK）；estimator 回答「它是怎么来的」，
 // 是自由文本。
 //
-// 表上原本还有第三档 'fallback'，它**没有任何产出点**：tokens.Source 三个取值
-// 里没有一个映射到它，这个函数也不返回它。于是它由迁移 00020 从 CHECK 里删掉了
-// ——留下来会让读的人以为「上游没报用量、估算也没成」那类情形落成的是它，而
-// 那种情形今天根本不产生这一行。真要区分「上游压根没报」，那是新增一个来源的
-// 事，取值该按那时的口径重新定。
+// 表上原本还有第三档 'fallback'，它没有产出点，已由迁移 00020 从 CHECK 里
+// 删掉。它没有被拿回来给「上游没报」用，因为那一档说不出比 estimated
+// 多在哪：billing_path 只分「能不能对账」，而占位的零同样不能对账，
+// 落 estimated 就是正确答案；具体是「没报」还是「估的」，由 estimator 说。
+//
+// 也不为它重新加一档 billing_path：那要一条新迁移改 CHECK，而这一列的
+// 语义（能否对账）已经被两档分完了。
 //
 // # 本地计数落成 estimated，不是 measured
 //
@@ -211,6 +214,10 @@ func unitCountsJSON(counts map[string]int64) (string, error) {
 // char_heuristic，那是举例不是约束。这里给的是**来源**那一层的名字，与
 // tokens.Source 一一对应：实测值没有估算器，留空（落成 NULL）而不是填一个
 // 名字——它本来就不是估出来的。
+//
+// SourceUnreported 落 estimated + "unreported"：那个数不是估出来的，而是
+// **根本没有数**——上游响应体里没有 usage 块，零值是占位。它同样不能拿去
+// 对账（所以是 estimated），而 estimator 把「没报」与「估的」分开。
 func billingPathOf(src tokens.Source) (path, estimator string, err error) {
 	switch src {
 	case tokens.SourceMeasured:
@@ -219,6 +226,8 @@ func billingPathOf(src tokens.Source) (path, estimator string, err error) {
 		return "estimated", "tokenized", nil
 	case tokens.SourceEstimated:
 		return "estimated", "char_heuristic", nil
+	case tokens.SourceUnreported:
+		return "estimated", "unreported", nil
 	default:
 		// 表上的 CHECK 也会挡下它，但那句话是「new row ... violates check
 		// constraint」，读的人得先知道这一列有哪些取值才看得懂。在能说清楚

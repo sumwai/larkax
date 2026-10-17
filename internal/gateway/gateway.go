@@ -217,7 +217,8 @@ type Gateway struct {
 	//
 	// 可以为 nil——那时估算退到启发式（见 tokens.StreamEstimator），
 	// 结果仍然可用，只是来源标成 SourceEstimated 而不是 SourceTokenized。
-	// 非流式那条路用不到它：那里的用量只可能来自上游的响应体。
+	// 非流式那条路用不到它：那里不估算——用量要么来自上游响应体，
+	// 要么上游整块没报（记成 SourceUnreported，金额为零）。
 	Counter *tokens.Counter
 
 	// Now 可注入，便于测试时间相关的逻辑。
@@ -384,10 +385,10 @@ type Result struct {
 	// 它与 pipeline.Outcome.UsageSource 是同一个口径（见 tokens.Source）：
 	// 只有 SourceMeasured 时它为 false。
 	//
-	// **非流式请求恒为 false**，但理由不是「上游一定报了用量」——这条路上
-	// 是无条件写 SourceMeasured 的：上游响应体里没有 usage 块时 usageOf
-	// 返回零值，那一行照样落成「实测 0」。也就是说非流式的「上游没报」
-	// 与「上游报了 0」今天分不开（见 #267），而 Estimated 表达不了这件事。
+	// **非流式请求也可能为 true。** 那条路上用量不可能是本地估出来的，
+	// 但上游**可以不报**：响应体里没有 usage 块时 usageOf 返回零值，
+	// 而来源记成 SourceUnreported（见 usageSourceOf）。那两个零是占位，
+	// 不是上游说的 0——这条判据要回答的正是「这个数是不是上游给的」。
 	Estimated bool
 }
 
@@ -437,7 +438,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 
 	out := pipeline.Outcome{
 		Usage:       usageOf(routed.Response),
-		UsageSource: tokens.SourceMeasured,
+		UsageSource: usageSourceOf(routed.Response),
 	}
 	g.recordAttempts(ctx, routed.Attempts, &out.Usage)
 
@@ -488,6 +489,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 		UpstreamModel: routed.UpstreamModel,
 		Charge:        charge,
 		Attempts:      routed.Attempts,
+		Estimated:     out.UsageSource != tokens.SourceMeasured,
 	}, nil
 }
 
@@ -1029,11 +1031,50 @@ func (g *Gateway) snapshotAsync(ctx context.Context, req *channel.Request, direc
 //
 // 上游没报 usage 时返回零值——那会让结算金额为零，**而不是静默按某个
 // 默认价收钱**。零金额在账上是可见的（有请求无消费），而默认价不可见。
+//
+// 零值有两个来源：上游报了一个全 0 的 usage，或者响应体里根本没有 usage 块。
+// 光看这个函数分不开它们，所以来源要另外问一次（见 usageSourceOf）。
 func usageOf(resp *channel.Response) channel.Usage {
 	if resp == nil {
 		return channel.Usage{}
 	}
 	return resp.Usage
+}
+
+// usageSourceOf 判断这次非流式响应的用量是不是上游给的。
+//
+// # 判据是「有没有 usage 块」，不是「数字是不是 0」
+//
+// 上游可以报一个全 0 的 usage（字段都在，值都是 0），也可以整块不报。
+// 两种情形下 usageOf 拿到的都是零值，**逐列相同**；而读账的人会把后者
+// 读成「这个模型的用量全是 0」。真正的区别只有一处：响应体里有没有
+// 那个块。
+//
+// # 这一事实今天只剩一个落点
+//
+// 它在解析那条路上被压平了：channel.Usage 是一组值字段，没有「在不在」
+// 这一位。唯一还留着它的是 relay 写进 Usage.Raw 的 "source" 键——它只在
+// 生产方（适配器）确实解析到 usage 块时才写（见 internal/relay/response.go
+// 的 rawUsage）。三个 chat 适配器都走那一条，所以这里读它。
+//
+// 不拿「用量等于零」反推：那会把上游报的 0 读成「没报」，方向正好反了
+// ——本函数存在的理由就是不让这两件事混在一起。
+//
+// 判据宁严勿宽：拿不准（没有标记）时记 Unreported，而不是声称实测。
+// 把一个没报的 0 记成实测，正是要消除的那一种；反过来，把一个实测值
+// 误记成「没报」只是让一组本来能对账的数落进不可对账那一档，金额不变。
+//
+// 边界：这条判据依赖 relay 的 "source" 标记，而它不是计费契约的一部分
+// （channel.Usage.Raw 的注释写着「排查用」）。要让它成为一等的字段，
+// 得在 channel.Usage 上加一位——那是另一个包的改动，本轮不动。
+func usageSourceOf(resp *channel.Response) tokens.Source {
+	if resp == nil {
+		return tokens.SourceUnreported
+	}
+	if src, _ := resp.Usage.Raw["source"].(string); src != "" {
+		return tokens.SourceMeasured
+	}
+	return tokens.SourceUnreported
 }
 
 // ownerOf 从候选里找出某个渠道的商家。

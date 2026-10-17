@@ -264,14 +264,18 @@ func TestSourceIsExact(t *testing.T) {
 	if SourceEstimated.IsExact() {
 		t.Error("估算值不可对账")
 	}
+	if SourceUnreported.IsExact() {
+		t.Error("上游没报的占位零值不可对账")
+	}
 }
 
 func TestSourceStringStable(t *testing.T) {
 	// 这几个字符串会进数据库与 API，改名等于一次不兼容变更。
 	for src, want := range map[Source]string{
-		SourceMeasured:  "measured",
-		SourceTokenized: "tokenized",
-		SourceEstimated: "estimated",
+		SourceMeasured:   "measured",
+		SourceTokenized:  "tokenized",
+		SourceEstimated:  "estimated",
+		SourceUnreported: "unreported",
 	} {
 		if got := src.String(); got != want {
 			t.Errorf("Source(%d).String() = %q, 期望 %q", src, got, want)
