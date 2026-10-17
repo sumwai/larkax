@@ -9,7 +9,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/sumwai/larkax/internal/config"
@@ -526,7 +525,7 @@ func printRuleExplain(w io.Writer, q pricing.ExplainQuery, rules []pricing.RuleI
 //
 // verdictOf 非 nil 时多一栏「裁决」，按行号取那一栏的值。
 func printRuleTable(w io.Writer, rules []pricing.RuleInfo, verdictOf func(int) string) {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	tw := newTableWriter(w)
 	header := "ID\t作用域\t商家\t渠道\t名称\t模型\t优先级\t状态\t生效自\t生效至\t单价键"
 	if verdictOf != nil {
 		header += "\t裁决"

@@ -10,7 +10,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/config"
@@ -373,8 +372,11 @@ func resolveScopeLabel(channelID int64) string {
 // printCreatedAlias 打印新别名。
 //
 // 与 printCreatedUser 同一条契约：stdout 恰好一行，只放能被直接接走的值。
+//
+// stderr 那一行把两个名字**各自标出来**，而不是写成「A 对应 B」：两个名字
+// 风格相近时（都带连字符或斜杠），语序不说明哪个是哪个，要停下来想一下。
 func printCreatedAlias(stdout, stderr io.Writer, id int64, req catalog.CreateAliasRequest) {
-	_, _ = fmt.Fprintf(stderr, "已加入别名 id=%d：%s 的 %s 对应 %s。\n",
+	_, _ = fmt.Fprintf(stderr, "已加入别名 id=%d：%s 上游名 %s ← 规范名 %s。\n",
 		id, aliasScope(req.ChannelID), req.UpstreamModel, req.CanonicalName)
 	_, _ = fmt.Fprintln(stdout, id)
 }
@@ -386,7 +388,7 @@ func printAliasList(w io.Writer, aliases []catalog.Alias) {
 		return
 	}
 
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	tw := newTableWriter(w)
 	_, _ = fmt.Fprintln(tw, "ID\t范围\t上游模型名\t规范名\t覆盖")
 	for _, a := range aliases {
 		_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n",

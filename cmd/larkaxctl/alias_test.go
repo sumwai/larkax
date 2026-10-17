@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -10,6 +11,56 @@ import (
 
 	"github.com/sumwai/larkax/internal/catalog"
 )
+
+// TestPrintCreatedAliasLabelsBothNames 钉住那条成功信息的措辞。
+//
+// 「A 对应 B」不说明哪个是哪个——两个名字风格相近时（都带连字符或斜杠）要停
+// 下来想一下，所以这里把两栏各自标出来。措辞本身就是要交付的东西，得有东西
+// 钉住它，否则下一次改动会静默地把它改回去。
+//
+// 顺带钉住 stdout：它恰好一行、只有别名 ID，是能被直接接走的那个值。
+func TestPrintCreatedAliasLabelsBothNames(t *testing.T) {
+	cases := []struct {
+		name string
+		id   int64
+		req  catalog.CreateAliasRequest
+		want string
+	}{
+		{
+			name: "渠道级",
+			id:   3,
+			req: catalog.CreateAliasRequest{
+				ChannelID:     3,
+				UpstreamModel: "vendor/my-model",
+				CanonicalName: "my-model",
+			},
+			want: "已加入别名 id=3：渠道 3 上游名 vendor/my-model ← 规范名 my-model。\n",
+		},
+		{
+			name: "平台级",
+			id:   2,
+			req: catalog.CreateAliasRequest{
+				UpstreamModel: "my-model",
+				CanonicalName: "my-model",
+			},
+			want: "已加入别名 id=2：平台 上游名 my-model ← 规范名 my-model。\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			printCreatedAlias(&stdout, &stderr, tc.id, tc.req)
+
+			if got := stderr.String(); got != tc.want {
+				t.Errorf("stderr = %q，期望 %q", got, tc.want)
+			}
+			if got, want := stdout.String(), strconv.FormatInt(tc.id, 10)+"\n"; got != want {
+				t.Errorf("stdout = %q，期望 %q", got, want)
+			}
+		})
+	}
+}
 
 // TestAliasAddRejectsBadFlags 走的是不碰数据库的那几条路径。
 func TestAliasAddRejectsBadFlags(t *testing.T) {

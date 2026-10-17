@@ -333,16 +333,23 @@ go run ./cmd/larkaxctl migrate up
 
 首次打 tag、第一个外部贡献者、公开发布都不构成分界线；共享数据库才是。
 
-## 配一条能用的渠道
+## 配一条能接请求的链路
 
-推理请求要落到某个上游，所以库里得先有四样东西：一条渠道（指向上游、带凭证）、
-目录里的一条规范模型、把上游模型名映射到规范名的别名、一条计价规则。
-`larkaxctl` 的 `channel` / `model` / `alias` / `price` 四组子命令就是干这个的。
+推理请求要落到某个上游，所以库里得先有四样东西：目录里的一条规范模型、一条渠道
+（指向上游、带凭证）、把上游模型名映射到规范名的别名、一条计价规则。
+`larkaxctl` 的 `model` / `channel` / `alias` / `price` 四组子命令就是干这个的。
 
 下面四条命令按顺序跑完，就有了一条能接请求的链路。示例里的上游是假的
 （`https://api.example.com/v1`），换成你自己的即可。
 
-**一、建一条渠道。** 凭证只能从标准输入或环境变量读，**不能写在命令行参数里**
+**一、把规范模型加进目录。** 规范名是选路与计费共用的键，不能带空白字符：
+
+```sh
+go run ./cmd/larkaxctl model add --canonical claude-x --display '示例模型' \
+  --vendor example --context-limit 200000 --tools --vision
+```
+
+**二、建一条渠道。** 凭证只能从标准输入或环境变量读，**不能写在命令行参数里**
 ——参数会出现在 `ps` 的输出与 shell 历史里：
 
 ```sh
@@ -358,16 +365,9 @@ LARKAX_CHANNEL_CREDENTIAL=<CHANNEL_CREDENTIAL> go run ./cmd/larkaxctl channel cr
 ```
 
 `--type` 必须是已注册的适配器类型（当前是 `openai` 与 `anthropic`）。
-`--models` 是这条渠道支持的**规范模型名**（下一步要建的那个），至少一个：
+`--models` 是这条渠道支持的**规范模型名**（第一步建的那个），至少一个：
 读取路径把 `models` 当白名单用，空数组的渠道永远选不中。
 stdout 只有新渠道的 ID，其余信息走 stderr。
-
-**二、把规范模型加进目录。** 规范名是选路与计费共用的键，不能带空白字符：
-
-```sh
-go run ./cmd/larkaxctl model add --canonical claude-x --display '示例模型' \
-  --vendor example --context-limit 200000 --tools --vision
-```
 
 **三、配别名：这家上游对同一个模型叫什么名字。**
 
@@ -425,8 +425,8 @@ go run ./cmd/larkaxctl price add --scope platform --name example-price \
 **查看现状**：
 
 ```sh
-go run ./cmd/larkaxctl channel list
 go run ./cmd/larkaxctl model list
+go run ./cmd/larkaxctl channel list
 go run ./cmd/larkaxctl alias list
 go run ./cmd/larkaxctl price list
 ```
@@ -526,8 +526,8 @@ go run ./cmd/larkaxctl apikey update --id 3 --clear-rate-limit-rpm
 
 要真的拿到一次 `200`，库里得先有：一个用户与钱包、一把 API Key
 （`larkaxctl apikey create --user <ID 或用户名>`）、一条指向上游的渠道、
-一条适用的计价规则。这四样现在都有管理入口——渠道、模型、别名与计价规则
-见上文「配一条能用的渠道」，用户与 API Key 见下文。没有计价规则时请求会
+一条适用的计价规则。这四样现在都有管理入口——模型、渠道、别名与计价规则
+见上文「配一条能接请求的链路」，用户与 API Key 见下文。没有计价规则时请求会
 失败而不是按零价放行。
 
 `501` 是有意的占位：推理路径之外的任何请求都会立刻得到明确答复，而不是超时或
