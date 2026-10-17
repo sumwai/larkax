@@ -125,9 +125,22 @@ def error_code_of(exc: BaseException):
 
 
 def body_error_message(exc: BaseException) -> str:
-    """取错误体里的 message，用于断言措辞里确实提到了出问题的那个字段。"""
+    """取错误体里的 message，用于断言措辞里确实提到了出问题的那个字段。
+
+    两家 SDK 的取法不一样，与 error_type_of 同一个原因：
+
+    - openai 的异常 `body` 已经拆掉了 `error` 那一层，拿到的就是内层对象。
+    - anthropic 的 `body` 是整个响应体，message 在 `error.message` 里。
+
+    所以两种形状都试：先看 body 自己有没有 message，再看嵌套的那一层。
+    只按嵌套结构取的话，openai 那边会一路退回到 `str(exc)`——断言仍然
+    「碰巧」能过（异常文本里带着整段 JSON），但它读的不是 SDK 解析出来的
+    那个字段，换一版 SDK 就可能静默失效（见 LESSONS.md 第 16 条）。
+    """
     body = getattr(exc, "body", None)
     if isinstance(body, dict):
+        if isinstance(body.get("message"), str):
+            return body["message"]
         inner = body.get("error")
         if isinstance(inner, dict) and isinstance(inner.get("message"), str):
             return inner["message"]
@@ -663,10 +676,9 @@ def responses_tool_call(ctx: Ctx) -> str:
 def responses_bad_request(ctx: Ctx) -> str:
     """客户端错误：不给输出上界要落到 400 上，而不是被算成一笔没有上界的账。
 
-    触发方式与另外两条入口不同，这是有意的：Responses 的请求体里没有
-    `messages`，空 `input` 会被 SDK 在**客户端**就挡下来（pydantic 校验），
-    根本发不出去。不给 `max_output_tokens` 则是服务端必须拒的——预留要有
-    输出上界才做得出来（见 internal/api 的 httpStatusOfUpstream）。
+    触发方式与另外两条入口不同，这是有意的：不给 `max_output_tokens` 是服务端
+    必须拒的——预留要有输出上界才做得出来（见 internal/api 的
+    httpStatusOfUpstream）。
 
     这条同时是「max_output_tokens 在本项目是必填的」这条偏差的判据，
     见 README 的「已知偏差」。
@@ -685,6 +697,40 @@ def responses_bad_request(ctx: Ctx) -> str:
                    "max_tokens" in body_error_message(exc))
         return f"BadRequestError type={error_type_of(exc)}"
     raise CaseFailure("不给 max_output_tokens 的请求没有报错——服务端本该回 400")
+
+
+def responses_empty_input(ctx: Ctx) -> str:
+    """客户端错误：空的 `input` 回 400，且文案点名 **input**。
+
+    判据（转换之后一条消息都没有）三条入口共用，措辞却不能共用：字段名是
+    各协议自己的。Responses 的调用方从来没有写过 `messages`，指着它会让
+    调用方去改一个不存在的字段。
+
+    这条与上一条是**两个不同的字段**：那条缺的是 `max_output_tokens`，这条
+    缺的是输入。合在一起就只能验到一个字段名。
+
+    `input=[]` 会被 SDK 原样发出去（对应的 pydantic 类型不拦空列表），所以
+    这里仍走 SDK 的对象模型，不必绕到裸 HTTP。
+    """
+    import openai
+
+    try:
+        ctx.client.responses.create(
+            model=ctx.model(TEXT_SUFFIX),
+            input=[],
+            max_output_tokens=64,
+        )
+    except openai.BadRequestError as exc:
+        check("status_code", exc.status_code, 400)
+        check("error.type", error_type_of(exc), "invalid_request_error")
+        message = body_error_message(exc)
+        check_true(f"message 要点名 input（实际：{message!r}）", "input" in message)
+        # 只断言「出现 input」的话，一句同时提到两个字段的文案照样能过——
+        # 而「指着调用方没写过的字段」正是这条用例要防的那件事。
+        check_true(f"message 不该提到 messages——Responses 没有这个字段（实际：{message!r}）",
+                   "messages" not in message)
+        return f"BadRequestError type={error_type_of(exc)} message={message!r}"
+    raise CaseFailure("空 input 的请求没有报错——服务端本该回 400")
 
 
 def responses_auth_error(ctx: Ctx) -> str:
@@ -732,6 +778,7 @@ RESPONSES_CASES = [
     ("流式", responses_stream),
     ("工具调用", responses_tool_call),
     ("客户端错误 400", responses_bad_request),
+    ("客户端错误 400（空 input）", responses_empty_input),
     ("认证错误 401", responses_auth_error),
     ("上游错误 5xx", responses_upstream_error),
 ]
