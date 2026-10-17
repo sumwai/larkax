@@ -37,8 +37,8 @@ func newExecutor(t *testing.T) *Executor {
 func TestNewRegistersBuiltinAdapters(t *testing.T) {
 	e := newExecutor(t)
 	got := strings.Join(e.Types(), ",")
-	if got != "anthropic,openai,openai-responses" {
-		t.Errorf("已注册类型 = %q，期望 anthropic,openai,openai-responses", got)
+	if got != "anthropic,openai,openai-responses,systemone" {
+		t.Errorf("已注册类型 = %q，期望 anthropic,openai,openai-responses,systemone", got)
 	}
 }
 
