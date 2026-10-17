@@ -168,7 +168,7 @@ func TestReconcileAcceptsNormalSettlement(t *testing.T) {
 	ctx := context.Background()
 	userID := seed(t, db, "50")
 
-	req := testRequest(t, db, userID, reqID(t))
+	req := testRequest(ctx, t, db, userID, reqID(t))
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, req.RequestID, "10", "CNY")); err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +413,7 @@ func TestReconcileDetectsFrozenMismatch(t *testing.T) {
 	ctx := context.Background()
 	userID := seed(t, db, "100")
 
-	req := testRequest(t, db, userID, reqID(t))
+	req := testRequest(ctx, t, db, userID, reqID(t))
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, req.RequestID, "30", "CNY")); err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +443,7 @@ func TestReconcileAcceptsReleasedReservation(t *testing.T) {
 	ctx := context.Background()
 	userID := seed(t, db, "100")
 
-	req := testRequest(t, db, userID, reqID(t))
+	req := testRequest(ctx, t, db, userID, reqID(t))
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, req.RequestID, "30", "CNY")); err != nil {
 		t.Fatal(err)
 	}
@@ -519,7 +519,7 @@ func TestReconcileReportsWalletMissingForReservationOnly(t *testing.T) {
 	s := New(db)
 	ctx := context.Background()
 	userID := seed(t, db, "100")
-	req := testRequest(t, db, userID, reqID(t))
+	req := testRequest(ctx, t, db, userID, reqID(t))
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, req.RequestID, "30", "CNY")); err != nil {
 		t.Fatal(err)
 	}
@@ -773,7 +773,7 @@ func TestReconcileReportsWalletMissingForReservationWithoutOtherSides(t *testing
 	ctx := context.Background()
 
 	userID := seed(t, db, "100")
-	req := testRequest(t, db, userID, reqID(t))
+	req := testRequest(ctx, t, db, userID, reqID(t))
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, req.RequestID, "30", "CNY")); err != nil {
 		t.Fatal(err)
 	}
@@ -829,7 +829,7 @@ func TestReconcileWalletMissingDetailMatchesColumns(t *testing.T) {
 	ctx := context.Background()
 
 	userID := seed(t, db, "100")
-	req := testRequest(t, db, userID, reqID(t))
+	req := testRequest(ctx, t, db, userID, reqID(t))
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, req.RequestID, "30", "CNY")); err != nil {
 		t.Fatal(err)
 	}
@@ -905,7 +905,7 @@ func reserveAt(t *testing.T, s *Store, userID int64, amount string, age time.Dur
 	res.RuleMatchedAt = time.Now().Add(-age)
 	// 用 s.db 而不是另收一个参数：本包的测试与实现同包，Store 的句柄就在手边，
 	// 多一个参数只会让每个调用点多传一次同一个值。
-	if _, err := s.SaveReservation(context.Background(), testRequest(t, s.db, userID, requestID), res); err != nil {
+	if _, err := s.SaveReservation(context.Background(), testRequest(t.Context(), t, s.db, userID, requestID), res); err != nil {
 		t.Fatalf("预留失败: %v", err)
 	}
 	return requestID
@@ -1040,7 +1040,7 @@ func TestReconcileKeepsReportingStaleReservationUntilReleased(t *testing.T) {
 	}
 
 	// 放开之后它必须从清单里消失，否则告警会永远响着。
-	if err := s.Release(ctx, testRequest(t, db, userID, requestID)); err != nil {
+	if err := s.Release(ctx, testRequest(ctx, t, db, userID, requestID)); err != nil {
 		t.Fatal(err)
 	}
 	report = reconcile(t, db, cfg)
@@ -1091,7 +1091,7 @@ func TestReconcileIncrementalFindsReservationOnlyUser(t *testing.T) {
 	reconcile(t, db, noRepair()) // 建立起点，让接下来这一轮是增量
 
 	userID := seed(t, db, "100")
-	req := testRequest(t, db, userID, reqID(t))
+	req := testRequest(ctx, t, db, userID, reqID(t))
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, req.RequestID, "30", "CNY")); err != nil {
 		t.Fatal(err)
 	}

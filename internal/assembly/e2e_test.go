@@ -497,9 +497,12 @@ func chatBody(model string) []byte {
 }
 
 // postChat 打一次公共入口，返回状态码与响应体。
-func postChat(t *testing.T, url, key string, body []byte) (int, []byte) {
+//
+// ctx 由调用方传进来，一路传到那条 HTTP 请求（见 postChatFull）：
+// 本函数不造 ctx，也就不会把调用方的超时挡在外面。
+func postChat(ctx context.Context, t *testing.T, url, key string, body []byte) (int, []byte) {
 	t.Helper()
-	status, out, _ := postChatFull(t, url, key, body)
+	status, out, _ := postChatFull(ctx, t, url, key, body)
 	return status, out
 }
 
@@ -507,10 +510,15 @@ func postChat(t *testing.T, url, key string, body []byte) (int, []byte) {
 //
 // 限流那一条要用 Retry-After，而它只出现在响应头里——只看状态码的话，
 // 「回 429 但没告诉客户端该等多久」与「回 429 并给了间隔」在断言里一样。
-func postChatFull(t *testing.T, url, key string, body []byte) (int, []byte, http.Header) {
+//
+// ctx 由调用方传进来，不在这里造一个 context.Background()：这一发属于哪次
+// 用例、受不受那次用例的超时约束，是调用方才知道的事（contextcheck 报的
+// 就是这一条，本仓的 clientCanceledAt 是同一个形状）。自己造一个的话，
+// 用例超时了这次请求还挂在连接上。
+func postChatFull(ctx context.Context, t *testing.T, url, key string, body []byte) (int, []byte, http.Header) {
 	t.Helper()
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("构造请求失败: %v", err)
 	}
@@ -589,7 +597,7 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	status, body := postChat(t, public.URL+"/v1/chat/completions", key, chatBody(model))
+	status, body := postChat(ctx, t, public.URL+"/v1/chat/completions", key, chatBody(model))
 	if status != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
 	}
@@ -807,7 +815,7 @@ func TestBillingRequestRecordsAPIKeyID(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			status, body := postChat(t, public.URL+"/v1/chat/completions", tc.key.Plaintext, chatBody(model))
+			status, body := postChat(ctx, t, public.URL+"/v1/chat/completions", tc.key.Plaintext, chatBody(model))
 			if status != http.StatusOK {
 				t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
 			}
@@ -887,7 +895,7 @@ func TestMissingMaxTokensIsRejectedBeforeUpstream(t *testing.T) {
 		t.Fatalf("组装请求体失败: %v", err)
 	}
 
-	status, out := postChat(t, public.URL+"/v1/chat/completions", key, body)
+	status, out := postChat(ctx, t, public.URL+"/v1/chat/completions", key, body)
 	if status != http.StatusBadRequest {
 		t.Fatalf("状态码 = %d，期望 400。响应体：%s", status, out)
 	}
@@ -958,7 +966,7 @@ func TestReserveCoversPricierCandidateRule(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	status, body := postChat(t, public.URL+"/v1/chat/completions", key, chatBody(model))
+	status, body := postChat(ctx, t, public.URL+"/v1/chat/completions", key, chatBody(model))
 	if status != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
 	}
@@ -1033,7 +1041,7 @@ func TestUpstreamFailureReleasesReservation(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	status, body := postChat(t, public.URL+"/v1/chat/completions", key, chatBody(model))
+	status, body := postChat(ctx, t, public.URL+"/v1/chat/completions", key, chatBody(model))
 	if status != http.StatusBadGateway {
 		t.Fatalf("状态码 = %d，期望 502（上游失败是我们与上游之间的问题）。响应体：%s", status, body)
 	}
@@ -1178,14 +1186,14 @@ func TestRateLimitRPMStopsAtTheLimit(t *testing.T) {
 
 	body := chatBody(model)
 	for i := 1; i <= limit; i++ {
-		status, out := postChat(t, public.URL+"/v1/chat/completions", key, body)
+		status, out := postChat(ctx, t, public.URL+"/v1/chat/completions", key, body)
 		if status != http.StatusOK {
 			t.Fatalf("第 %d 次状态码 = %d，期望 200。响应体：%s", i, status, out)
 		}
 	}
 
 	// 第 61 次：429，并且给出重试间隔。
-	status, out, header := postChatFull(t, public.URL+"/v1/chat/completions", key, body)
+	status, out, header := postChatFull(ctx, t, public.URL+"/v1/chat/completions", key, body)
 	if status != http.StatusTooManyRequests {
 		t.Fatalf("第 %d 次状态码 = %d，期望 429。响应体：%s", limit+1, status, out)
 	}

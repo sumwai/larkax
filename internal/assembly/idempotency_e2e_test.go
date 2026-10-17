@@ -998,7 +998,7 @@ func TestWithoutIdempotencyKeyChargesTwice(t *testing.T) {
 	url := f.public.URL + "/v1/chat/completions"
 
 	for i := 1; i <= 2; i++ {
-		if status, body := postChat(t, url, f.key, f.body); status != http.StatusOK {
+		if status, body := postChat(t.Context(), t, url, f.key, f.body); status != http.StatusOK {
 			t.Fatalf("第 %d 次请求状态码 = %d，期望 200。响应体：%s", i, status, body)
 		}
 	}

@@ -112,7 +112,7 @@ func TestReleaseRefusesFrozenUnderflow(t *testing.T) {
 
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 
 	// 1 · 正常预留 30：frozen 应当等于预留之和 30
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
@@ -167,7 +167,7 @@ func TestSettleRefusesFrozenUnderflow(t *testing.T) {
 
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
 		t.Fatalf("预留失败: %v", err)

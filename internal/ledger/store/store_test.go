@@ -59,9 +59,12 @@ func reservationWithRule(t *testing.T, userID int64, requestID, amount string, r
 // 它顺手给这个用户建一把 API Key：billing_requests.api_key_id 有外键，
 // 而落库层拒绝漏设（见 ErrMissingAPIKey）——所以「这一列写没写对」只能在
 // 一个真有 key 行的世界里断言。要指定**哪一把** key 用 testRequestWithKey。
-func testRequest(t *testing.T, db *sql.DB, userID int64, requestID string) pipeline.Request {
+//
+// ctx 由调用方传进来，一路传到 seedAPIKey 的那条 INSERT（理由见那里的注释）：
+// 本函数不造 ctx，也就不会把调用方的超时挡在外面。
+func testRequest(ctx context.Context, t *testing.T, db *sql.DB, userID int64, requestID string) pipeline.Request {
 	t.Helper()
-	return testRequestWithKey(userID, requestID, seedAPIKey(t, db, userID))
+	return testRequestWithKey(userID, requestID, seedAPIKey(ctx, t, db, userID))
 }
 
 // testRequestWithKey 与 testRequest 相同，但 key 由调用方给。
@@ -92,7 +95,7 @@ func TestSaveReservationFreezesFunds(t *testing.T) {
 	ctx := context.Background()
 
 	userID := seed(t, db, "100")
-	res, err := s.SaveReservation(ctx, testRequest(t, db, userID, reqID(t)), reservation(t, userID, reqID(t), "30", "CNY"))
+	res, err := s.SaveReservation(ctx, testRequest(ctx, t, db, userID, reqID(t)), reservation(t, userID, reqID(t), "30", "CNY"))
 	if err != nil {
 		t.Fatalf("预留失败: %v", err)
 	}
@@ -116,7 +119,7 @@ func TestReservationDoesNotTouchBalance(t *testing.T) {
 	s := New(db)
 	userID := seed(t, db, "50")
 
-	req := testRequest(t, db, userID, reqID(t))
+	req := testRequest(t.Context(), t, db, userID, reqID(t))
 	if _, err := s.SaveReservation(context.Background(), req, reservation(t, userID, req.RequestID, "20", "CNY")); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +143,7 @@ func TestReservationInsufficientBalance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := s.SaveReservation(ctx, testRequest(t, db, userID, reqID(t)), reservation(t, userID, reqID(t), "5", "CNY"))
+	_, err := s.SaveReservation(ctx, testRequest(ctx, t, db, userID, reqID(t)), reservation(t, userID, reqID(t), "5", "CNY"))
 	if err == nil {
 		t.Fatal("可用余额不足应当失败")
 	}
@@ -168,7 +171,7 @@ func TestReservationExactBalance(t *testing.T) {
 	s := New(db)
 	userID := seed(t, db, "10")
 
-	req := testRequest(t, db, userID, reqID(t))
+	req := testRequest(t.Context(), t, db, userID, reqID(t))
 	if _, err := s.SaveReservation(context.Background(), req, reservation(t, userID, req.RequestID, "10", "CNY")); err != nil {
 		t.Errorf("恰好够用应当成功: %v", err)
 	}
@@ -185,7 +188,7 @@ func TestReservationWithoutWallet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req := testRequest(t, db, id, reqID(t))
+	req := testRequest(t.Context(), t, db, id, reqID(t))
 	_, err := s.SaveReservation(context.Background(), req, reservation(t, id, req.RequestID, "1", "CNY"))
 	if err == nil {
 		t.Fatal("没有钱包应当失败")
@@ -205,10 +208,10 @@ func TestDuplicateReservationRejected(t *testing.T) {
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
 
-	if _, err := s.SaveReservation(ctx, testRequest(t, db, userID, requestID), reservation(t, userID, requestID, "10", "CNY")); err != nil {
+	if _, err := s.SaveReservation(ctx, testRequest(ctx, t, db, userID, requestID), reservation(t, userID, requestID, "10", "CNY")); err != nil {
 		t.Fatal(err)
 	}
-	_, err := s.SaveReservation(ctx, testRequest(t, db, userID, requestID), reservation(t, userID, requestID, "10", "CNY"))
+	_, err := s.SaveReservation(ctx, testRequest(ctx, t, db, userID, requestID), reservation(t, userID, requestID, "10", "CNY"))
 	if err == nil {
 		t.Fatal("重复的 request_id 应当被唯一键挡下")
 	}
@@ -237,7 +240,7 @@ func TestClaimConflictRollsBackReservation(t *testing.T) {
 	ctx := context.Background()
 
 	userID := seed(t, db, "100")
-	apiKeyID := seedAPIKey(t, db, userID)
+	apiKeyID := seedAPIKey(ctx, t, db, userID)
 	claim := &idempotency.Claim{
 		APIKeyID: apiKeyID,
 		Key:      "claim-rollback-" + itoa(nextID()),
@@ -246,7 +249,7 @@ func TestClaimConflictRollsBackReservation(t *testing.T) {
 
 	// 第一次：正常占住这个键。
 	firstID := reqID(t)
-	firstReq := testRequest(t, db, userID, firstID)
+	firstReq := testRequest(ctx, t, db, userID, firstID)
 	firstReq.Idempotency = claim
 	firstReservationID, err := s.SaveReservation(ctx, firstReq, reservation(t, userID, firstID, "10", "CNY"))
 	if err != nil {
@@ -257,7 +260,7 @@ func TestClaimConflictRollsBackReservation(t *testing.T) {
 	// 第二次：同一个键、另一次请求。它会先把钱冻住，再在写幂等记录时
 	// 发现键已被占住。
 	secondID := reqID(t)
-	secondReq := testRequest(t, db, userID, secondID)
+	secondReq := testRequest(ctx, t, db, userID, secondID)
 	secondReq.Idempotency = claim
 	// 错误单独接一个名字，不遮蔽上面那个 err：遮蔽掉的话，这一行之后
 	// 任何一处用到「第一次那个 err」都会静默地读到这一个。
@@ -299,7 +302,7 @@ func TestSaveSettlementMovesMoney(t *testing.T) {
 
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
 		t.Fatal(err)
@@ -342,7 +345,7 @@ func TestSettlementIsIdempotent(t *testing.T) {
 
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
 		t.Fatal(err)
@@ -386,7 +389,7 @@ func TestSettlementWritesBackChannel(t *testing.T) {
 	requestID := reqID(t)
 
 	// 预留：渠道未知。testRequest 不带 ChannelID，与生产同一条路。
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +448,7 @@ func TestSettlementRecordsClientCancel(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requestID := reqID(t)
-			req := testRequest(t, db, userID, requestID)
+			req := testRequest(ctx, t, db, userID, requestID)
 			if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
 				t.Fatal(err)
 			}
@@ -493,7 +496,7 @@ func TestConcurrentSettlementChargesOnce(t *testing.T) {
 
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "50", "CNY")); err != nil {
 		t.Fatal(err)
@@ -556,7 +559,7 @@ func TestSettlementRefusesNegativeBalance(t *testing.T) {
 
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 
 	// 预留 10，但结算 150 —— 预留机制本该不让这事发生，
 	// 真发生说明有别的路径动了钱包或预留算错了。
@@ -600,7 +603,7 @@ func TestReleaseUnfreezes(t *testing.T) {
 
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
 		t.Fatal(err)
@@ -626,7 +629,7 @@ func TestReleaseIsIdempotentAndWritesNoEntry(t *testing.T) {
 
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
 		t.Fatal(err)
@@ -673,7 +676,7 @@ func TestReleaseAfterSettlementIsNoop(t *testing.T) {
 
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
 		t.Fatal(err)
@@ -712,7 +715,7 @@ func TestWalletMatchesLedger(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		requestID := reqID(t)
-		req := testRequest(t, db, userID, requestID)
+		req := testRequest(ctx, t, db, userID, requestID)
 		if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "100", "CNY")); err != nil {
 			t.Fatal(err)
 		}
@@ -758,7 +761,7 @@ func TestConcurrentMultiWalletNoDeadlock(t *testing.T) {
 	// t.Fatalf，而从测试 goroutine 之外的 goroutine 里调它是不允许的。
 	keys := make(map[int64]int64, len(users))
 	for _, u := range users {
-		keys[u] = seedAPIKey(t, db, u)
+		keys[u] = seedAPIKey(ctx, t, db, u)
 	}
 
 	const rounds = 12
@@ -866,7 +869,7 @@ func TestAmountPrecisionRoundTrip(t *testing.T) {
 	// 带满 8 位小数的金额
 	const amount = "0.00000001"
 	requestID := reqID(t)
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, amount, "CNY")); err != nil {
 		t.Fatal(err)
 	}
@@ -896,7 +899,7 @@ func TestLargeAmountPrecision(t *testing.T) {
 	userID := seed(t, db, start)
 
 	requestID := reqID(t)
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 	const amount = "12345678.87654321"
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, amount, "CNY")); err != nil {
 		t.Fatal(err)
@@ -969,7 +972,7 @@ func TestReservationRecordsPricingRule(t *testing.T) {
 	})
 
 	userID := seed(t, db, "100")
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 	req.CanonicalModel = model
 
 	if _, err := s.SaveReservation(ctx, req,
@@ -1003,7 +1006,7 @@ func TestReservationWithoutRuleStoresNull(t *testing.T) {
 
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "10", "CNY")); err != nil {
 		t.Fatal(err)
@@ -1045,7 +1048,7 @@ func TestReservationRecordsProtocol(t *testing.T) {
 
 			userID := seed(t, db, "100")
 			requestID := reqID(t)
-			req := testRequest(t, db, userID, requestID)
+			req := testRequest(ctx, t, db, userID, requestID)
 			req.Protocol = tc.protocol
 
 			if _, err := s.SaveReservation(ctx, req,
@@ -1078,7 +1081,7 @@ func TestReservationRejectsMissingProtocol(t *testing.T) {
 
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 	req.Protocol = ""
 
 	_, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
@@ -1106,7 +1109,7 @@ func TestReservationRejectsUnknownProtocol(t *testing.T) {
 
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
-	req := testRequest(t, db, userID, requestID)
+	req := testRequest(ctx, t, db, userID, requestID)
 	// 库里那一列是 text，注释写着 openai / anthropic 但它自己不拦别的值
 	// （见 internal/migrate/sql/00001_init.sql）。约束在代码里，这一条钉住它。
 	req.Protocol = channel.Protocol("custom")
@@ -1158,8 +1161,8 @@ func TestReservationRecordsAPIKey(t *testing.T) {
 	userID := seed(t, db, "100")
 	// 同一个用户的两把 key：这一列要能分辨它们，否则「按 key 归因」这件事
 	// 与「按用户归因」没有区别。
-	firstKey := seedAPIKey(t, db, userID)
-	secondKey := seedAPIKey(t, db, userID)
+	firstKey := seedAPIKey(ctx, t, db, userID)
+	secondKey := seedAPIKey(ctx, t, db, userID)
 	if firstKey == secondKey {
 		t.Fatalf("两把 key 拿到了同一个 id %d，用例本身不成立", firstKey)
 	}

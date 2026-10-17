@@ -165,10 +165,15 @@ func seedChannel(t *testing.T, db *sql.DB) int64 {
 // idempotency_keys.api_key_id 的外键能成立，而这把 key **从不用于鉴权**，
 // 所以哈希口径在这里没有意义。把它拉进来会让账本层的测试依赖鉴权层，
 // 而那条依赖除了满足一个外键之外什么也不证明。
-func seedAPIKey(t *testing.T, db *sql.DB, userID int64) int64 {
+//
+// ctx 由调用方传进来，不在这里造一个 context.Background()：这一写属于哪次
+// 用例、受不受那次用例的超时约束，是调用方才知道的事（contextcheck 报的
+// 就是这一条，见 clientCanceledAt）。自己造一个的话，用例超时了这次插入
+// 还挂在库里，而挂着的是一条 INSERT。
+func seedAPIKey(ctx context.Context, t *testing.T, db *sql.DB, userID int64) int64 {
 	t.Helper()
 	var id int64
-	if err := db.QueryRowContext(context.Background(), `
+	if err := db.QueryRowContext(ctx, `
 		INSERT INTO api_keys (user_id, name, key_hash, key_prefix)
 		VALUES ($1, 'ledger-test', $2, 'placeholder')
 		RETURNING id`,
