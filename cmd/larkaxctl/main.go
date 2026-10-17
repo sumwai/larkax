@@ -64,9 +64,11 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
                                            改一个运行期配置项
   larkaxctl channel create|list|update|enable|disable
                                            渠道（创建时凭证从 stdin 或环境变量读）
-  larkaxctl model add|list                 模型目录里的规范模型
-  larkaxctl alias add|list                 模型别名（上游名 ↔ 规范名）
-  larkaxctl price add|list                 计价规则
+  larkaxctl model add|list|show|update|delete
+                                           模型目录里的规范模型
+  larkaxctl alias add|list|update|delete|resolve
+                                           模型别名（上游名 ↔ 规范名）
+  larkaxctl price add|list|update|explain  计价规则
   larkaxctl plugin list                    列出插件及其状态、代次与元数据问题
   larkaxctl plugin publish <文件>           发布一个插件（先在沙箱里编译一遍）
   larkaxctl plugin enable|disable <key>    启用 / 停用一个插件
@@ -89,7 +91,7 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   1  其他失败
   2  命令行参数错（缺字段、取值解析不了、标志组合不对）
   3  连不上数据库
-  4  约束冲突（唯一键、外键、要改的那一行不存在）
+  4  约束冲突（唯一键、外键、要改或要查的那一行不存在）
 
 写入路径自己校验出来的参数问题（作用域与归属的组合、表达式编译不过、
 渠道类型不认识）归入 1，不是 2。

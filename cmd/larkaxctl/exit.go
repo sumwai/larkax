@@ -6,6 +6,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
+	"github.com/sumwai/larkax/internal/pipeline"
 	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
 	"github.com/sumwai/larkax/internal/pricing"
 )
@@ -17,7 +18,7 @@ import (
 //	1  其他失败
 //	2  参数错（用法、取值、缺字段）
 //	3  连不上数据库
-//	4  约束冲突（唯一键、外键、要改的那一行不存在）
+//	4  约束冲突（唯一键、外键、要改或要查的那一行不存在）
 //
 // 分这几类而不是统一给 1，是因为它们的下一步动作不同：参数错要改命令、
 // 连不上库要去看环境、约束冲突要改数据。混成一个码，脚本只能去匹配错误
@@ -77,9 +78,14 @@ var conflictErrors = []error{
 	catalog.ErrModelInUse,
 	catalog.ErrModelNotFound,
 	catalog.ErrAliasIDNotFound,
+	catalog.ErrAliasNotFound,
 	catalog.ErrChannelNotFound,
 
 	pricing.ErrRuleNotFound,
+	// 没有一条规则适用。它与「规则不存在」是同一个形状：要查的那条不在，
+	// 下一步都是先去看数据里现在是什么。请求路径上它是拒绝服务，不是按 0 元计
+	// （见 pricing.Admin.Explain），所以这里也不能让它悄悄退回「其他失败」。
+	pipeline.ErrNoRule,
 
 	pluginstore.ErrPluginNotFound,
 }

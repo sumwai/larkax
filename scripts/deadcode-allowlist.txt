@@ -28,7 +28,8 @@
 #   命令      deadcode ./cmd/larkax ./cmd/larkaxctl
 #             （扫描起点由 cmd/ 自动发现，这两个就是当前发现的全部）
 #   工具      golang.org/x/tools v0.52.0（脚本里的 PINNED_TOOLS_VERSION）
-#   条数      52，与脚本里的 MAX_ENTRIES 一致
+#   条数      见脚本里的 MAX_ENTRIES（**本文件不重复这个数**——抄一份就多一处
+#             会漂的地方，而脚本每次运行都会打印实际条数）
 #
 # **条数从 60 跳到 112 的原因**——这一条要与「条目数只许减不许增」的规矩一起读。
 #
@@ -41,6 +42,11 @@
 # 也就是说这一跳是**结构性的**：一个包刚进入视野，而不是有人拿白名单把新出现的
 # 不可达符号按住。判据是问一句「这些符号是因为有人接了什么才变多的，还是因为
 # 有人躲了什么才变多的」——这里是前者。**#262–#264 落地时条数要跟着降回来。**
+#
+# 52 之后减了 15（#158）：管理面的改 / 删 / 查看接上 `larkaxctl` 之后，
+# `catalog/admin.go` 的八条（`Admin.Update` / `Delete` / `UpdateAlias` / `DeleteAlias`
+# / `countReferences` / `aliasUpdateError` / `deleteModelError` / `modelUpdateSets`）、
+# `catalog/catalog.go` 的两条、`pricing/admin.go` 的五条随之可达。
 #
 # 112 之后减了 8（#245）：上游用量的归一收成一处实现，`internal/tokens/normalize.go`
 # 整文件删除，它名下 7 条随之消失；`internal/route/stream.go` 的
@@ -91,16 +97,6 @@ internal/calendar/memory.go    | MemorySource.YearState         | lib | 测试�
 internal/calendar/memory.go    | NewMemorySource                | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/peak.go        | NewPeakSchedule                | gap | #205 峰谷计价没有生产调用方（接线之后 deadcode 也不再提醒它）
 internal/calendar/peak.go        | NewPeakWindow                  | gap | #205 峰谷计价没有生产调用方（接线之后 deadcode 也不再提醒它）
-internal/catalog/admin.go        | Admin.Delete                    | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/catalog/admin.go        | Admin.DeleteAlias               | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/catalog/admin.go        | Admin.Update                    | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/catalog/admin.go        | Admin.UpdateAlias               | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/catalog/admin.go        | Admin.countReferences           | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/catalog/admin.go        | aliasUpdateError                | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/catalog/admin.go        | deleteModelError                | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/catalog/admin.go        | modelUpdateSets                 | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/catalog/catalog.go      | Catalog.Model                   | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/catalog/catalog.go      | Catalog.UpstreamModel           | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/channel/httpx/httpx.go  | DrainAndClose                   | lib | HTTP 收尾辅助，给拿不到 *http.Response 的调用点用；目前只有测试在调它
 internal/ledger/account.go       | PaymentGatewayAccount           | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
 internal/ledger/account.go       | PayoutAccount                   | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
@@ -122,11 +118,6 @@ internal/plugin/patch.go         | ApplyRequestBodyPatch            | gap | #216
 internal/plugin/patch.go         | originalMaxTokens                | gap | #216 补丁的应用与校验；请求路径接上 hook 之前没有生产调用方
 internal/plugin/registry.go      | Publish                          | gap | #216 注册表的查询与开会话；请求路径接上 hook 之前没有生产调用方
 internal/plugin/sandbox/plugin.go | CompileTypeScript                | gap | #216 TypeScript 转译入口；目前只有测试在调
-internal/pricing/admin.go        | Admin.Explain                   | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/pricing/admin.go        | Admin.Update                    | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/pricing/admin.go        | UpdateRequest.applyTo           | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/pricing/admin.go        | UpdateRequest.changesAnything   | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/pricing/admin.go        | loadRuleForUpdate               | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/snapshot/allowlist.go   | Root.valid                      | lib | 允许表的内部判定：方向是否已知；目前只有测试在调它（New 查的是表，不是它）
 internal/snapshot/allowlist.go   | isAllowKind                     | lib | 允许表的内部判定：测试用它筛出需要顶住敌对取值的条目
 internal/tokens/count.go         | BoundsOf                        | lib | 能力查询：BoundsFor 按模型名的便捷包装；目前只有测试在调它
