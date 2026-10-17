@@ -100,10 +100,14 @@ func (f *fakeKV) Set(_ context.Context, plugin string, userID int64, key, value 
 	return nil
 }
 
-func (f *fakeKV) Del(_ context.Context, plugin string, userID int64, key string) error {
+// Del 回「删之前它在不在」——真实现是一次条件删除的 RowsAffected，
+// 这里照做，于是插件看到的布尔值在两处是同一个口径。
+func (f *fakeKV) Del(_ context.Context, plugin string, userID int64, key string) (bool, error) {
 	f.keys = append(f.keys, "del:"+key)
-	delete(f.rows, f.id(plugin, userID, key))
-	return nil
+	id := f.id(plugin, userID, key)
+	_, existed := f.rows[id]
+	delete(f.rows, id)
+	return existed, nil
 }
 
 func itoa(n int64) string {

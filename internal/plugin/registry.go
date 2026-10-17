@@ -49,8 +49,10 @@ type Meta struct {
 	// 经过我的内容检查」），而不是宿主猜的。
 	Blocking bool `json:"blocking"`
 	// Capabilities 是插件申请的能力名。**只能收窄，不能放宽**：
-	// 宿主给的上限是 DefaultCapabilities，这里写的是一个子集申请。
-	// 写进来的名字若不在上限里，注册时就报错而不是静默忽略。
+	// 写进来的名字必须是宿主真能提供的一个子集（见 CompileWith 的 provided）。
+	// 写进来的名字若不在里面，注册时就报错而不是静默忽略。
+	//
+	// 空表示「宿主提供什么就要什么」。
 	Capabilities []string `json:"capabilities"`
 }
 
@@ -64,12 +66,11 @@ var (
 	ErrMetaCapability = errors.New("插件申请了未开放的能力")
 )
 
-// DefaultCapabilities 是宿主默认开放的能力。
-//
-// 三项都是「读或写插件的私有空间」，没有一项扩大权限：
-// log 写结构化日志、calendar 读日历、kv 读写插件按用户隔离的私有存储。
-// 网络与文件系统不在这张表里，也不在任何一张表里——宿主没有实现它们。
-var DefaultCapabilities = []string{"log", "calendar", "kv"}
+// 这里曾有 DefaultCapabilities——一份手写的、写死 ["log","calendar","kv"] 的
+// 允许集。宿主**真能提供**哪些能力是另一处算出来的（按依赖是否接上），
+// 两份清单各自维护，于是插件申请 kv 注册成功、运行期拿到 undefined，而文档
+// 承诺的是「能力未启用」。现在允许集由装配算出来（host.Available）并作为参数
+// 传进来（CompileWith / PublishPartial），这个包不再持有任何能力名。
 
 // Registration 是一次注册。
 type Registration struct {
@@ -141,9 +142,26 @@ func (r *Registry) Get(key string) (*Plugin, bool) {
 // 上传路径（larkaxctl plugin publish）与加载路径都经过它，于是「命令行说
 // 能用」与「线上真能用」走的是同一段代码——两份校验迟早会不一致。
 //
+// # 它按「宿主认识的能力」校验，而不是「这次装配提供了哪些」
+//
+// 这个入口不知道调用它的进程会被装到什么样的部署上（上传就是一个这样的进程：
+// 命令行只连库，不知道那份装配接上了什么）。所以它判的是**名字存不存在**——
+// 拼错的能力名当场报错。想知道「这次装配真的提供了它吗」，走 CompileWith：
+// 那条路由装配把能力清单算出来传进来，是**注册**该用的入口。
+//
 // 注册名必须由调用方给出（reg.Key）：这个入口的用途是「按这个名字装一个插件」，
 // 名字由谁定是调用方的事。源码里已经写了自己 key 的那条路走 CompileSource。
 func Compile(reg Registration) (*Plugin, error) {
+	return CompileWith(reg, sandbox.CapabilityNames())
+}
+
+// CompileWith 与 Compile 相同，但按**这次装配真的提供的能力**收窄。
+//
+// provided 来自宿主那一侧（host.Available 按接上的依赖算出来），是按请求装配
+// 时唯一说得出口的那份清单。插件申请了不在里面的能力时，这里直接报错——
+// **注册期失败**，而不是注册成功、运行期拿到一个 undefined。那两种错要改的
+// 地方完全不同：前者改 capabilities，后者要去把宿主那条线接上。
+func CompileWith(reg Registration, provided []string) (*Plugin, error) {
 	if strings.TrimSpace(reg.Key) == "" {
 		return nil, ErrMetaMissingKey
 	}
@@ -151,7 +169,7 @@ func Compile(reg Registration) (*Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := fromModule(mod, reg.Priority)
+	p, err := fromModule(mod, reg.Priority, provided)
 	if err != nil {
 		return nil, err
 	}
@@ -166,24 +184,26 @@ func Compile(reg Registration) (*Plugin, error) {
 // 上传路径用它：插件已经在源码里写了一遍自己的 key，命令行不必再写第二遍，
 // 而写两遍就会出现「两处不一致」这种只能靠人记住的错误。name 只进错误信息
 // （通常是文件名），不是注册名。
+//
+// 能力那一侧与 Compile 同一口径（按宿主**认识**的名字校验，见 Compile 的注释）。
 func CompileSource(name, source string, priority int) (*Plugin, error) {
 	mod, err := sandbox.Compile(name, source)
 	if err != nil {
 		return nil, err
 	}
-	return fromModule(mod, priority)
+	return fromModule(mod, priority, sandbox.CapabilityNames())
 }
 
 // fromModule 是两条编译路径共用的尾巴：读元数据、校验、收窄能力。
 //
 // 抽出来是为了让 Compile 与 CompileSource 只差「注册名从哪来」这一步，
 // 校验与能力收窄只有一处实现。
-func fromModule(mod *sandbox.Module, priority int) (*Plugin, error) {
+func fromModule(mod *sandbox.Module, priority int, provided []string) (*Plugin, error) {
 	meta, err := ParseMeta(mod.Meta())
 	if err != nil {
 		return nil, err
 	}
-	caps, err := narrowCapabilities(meta.Capabilities)
+	caps, err := narrowCapabilities(meta.Capabilities, provided)
 	if err != nil {
 		return nil, err
 	}
@@ -237,18 +257,29 @@ func ParseMeta(raw map[string]any) (Meta, error) {
 	return meta, nil
 }
 
-// narrowCapabilities 把申请的能力收窄到宿主上限之内，结果按名字排序。
+// narrowCapabilities 把申请的能力收窄到**这次装配真的提供**的那些，结果按名字排序。
 //
-// 排序是为了让「同一份申请每次得到同一份清单」：不排序的话清单顺序
-// 取决于 map 遍历，而它会出现在日志与界面里，于是两次注册看起来不同。
-func narrowCapabilities(requested []string) ([]string, error) {
+// # 报错而不是忽略
+//
+// 申请列表写错了是作者的 bug（名字拼错了、用了这次部署没有的能力），要在注册期
+// 就告诉他。静默忽略更坏：作者以为自己申请到了，运行期却拿到一个 undefined，
+// 而那在插件侧是 JS 的 TypeError——与「宿主没提供」是两种错，要改的地方也不同。
+//
+// 排序是为了让「同一份申请每次得到同一份清单」：不排序的话清单顺序取决于 map
+// 遍历，而它会出现在日志与界面里，于是两次注册看起来不同。
+func narrowCapabilities(requested, provided []string) ([]string, error) {
+	// 提供的名单排一份出来：错误文案里要列它，而顺序固定才让两次报错长得一样。
+	// 调用方传进来的顺序不作要求（装配那一侧按依赖遍历出来的）。
+	available := append([]string(nil), provided...)
+	sort.Strings(available)
+
 	if len(requested) == 0 {
-		out := append([]string(nil), DefaultCapabilities...)
-		sort.Strings(out)
-		return out, nil
+		// 空表示「宿主提供什么就要什么」：一个平台级插件（例如统一加系统提示词）
+		// 没必要把宿主当前的能力名抄进源码——抄了之后宿主加一个能力，它要跟着改。
+		return available, nil
 	}
-	allowed := make(map[string]bool, len(DefaultCapabilities))
-	for _, c := range DefaultCapabilities {
+	allowed := make(map[string]bool, len(provided))
+	for _, c := range provided {
 		allowed[c] = true
 	}
 	var out []string
@@ -256,9 +287,9 @@ func narrowCapabilities(requested []string) ([]string, error) {
 	for _, c := range requested {
 		if !allowed[c] {
 			// **报错而不是忽略**：静默忽略会让作者以为自己申请到了。
-			// 申请列表写错了是作者的 bug，要在上传期就告诉他。
-			return nil, fmt.Errorf("%w: %q 不在宿主开放的能力里（%s）",
-				ErrMetaCapability, c, strings.Join(DefaultCapabilities, "、"))
+			// 申请列表写错了是作者的 bug，要在注册期就告诉他。
+			return nil, fmt.Errorf("%w: %q 不在宿主提供的能力里（%s）",
+				ErrMetaCapability, c, strings.Join(available, "、"))
 		}
 		if seen[c] {
 			continue
@@ -275,6 +306,10 @@ func narrowCapabilities(requested []string) ([]string, error) {
 // 这是「编译全部通过才发布」的落点：全部 Compile 成功才返回新表，
 // 任一个失败就返回错误、旧表照旧。于是不会出现半批插件生效的状态——
 // 而「一半生效」在界面上看起来与「全都生效」一样。
+//
+// 能力那一侧与 Compile 同一口径：按宿主**认识**的名字校验（理由见 Compile
+// 的注释——这个入口同样不知道调用它的进程会被装到什么样的部署上）。按这次
+// 装配真的提供了什么校验的是 PublishPartial，那是启动路径用的那个。
 //
 // # 今天谁来调它
 //
