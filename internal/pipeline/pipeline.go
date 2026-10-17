@@ -732,8 +732,24 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 	// 估算，决策表面按 internal/systemone 的两个常量），混成一条序列时
 	// 分不出是哪一条协议在漏。协议由入口填在 Request.Protocol 上，这里
 	// 只负责把它带进标签——不在这里猜。
+	//
+	// 同一次判断里再记一条**金额侧**的：撞了几次答不了「少收了多少钱」，
+	// 而后者才是平台真正承担掉的那笔钱。差额是 Breakdown.Total − Actual
+	// （未截断的按用量金额 − 实际收的金额），也就是落库时 computed_amount −
+	// final_amount 的同一个差——两处都从 Settlement 自己的字段减，不在这里
+	// 另存一份，见 billing.Settlement 的类型注释。
+	//
+	// 差额在 Capped 为真时必然为正：Capped 的定义就是 Breakdown.Total >
+	// Reserved，而 Actual 此时等于 Reserved。所以这一条序列被创建出来时
+	// 必然带着一个正数——不会出现「有一条序列，但它是 0」这种读不出意思的行。
+	//
+	// 金额这条也不按请求分标签（那是无界集合），要查具体是哪一次请求撞的、
+	// 撞了多少，去库里看 billing_requests 的 computed_amount。
 	if settlement.Capped {
 		observe.Metrics.CappedSettlements.With(string(req.Protocol)).Inc()
+		observe.Metrics.CappedAmount.
+			With(string(req.Protocol), req.Asset).
+			Add(uint64(settlement.Breakdown.Total.Sub(settlement.Actual).Units()))
 	}
 
 	return &Charge{

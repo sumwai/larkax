@@ -71,8 +71,11 @@ func FromUnits(units int64) Amount { return Amount{units: units} }
 
 // Units 返回最小单位数。
 //
-// 目前只有测试在调它，原因与 FromUnits 相同：库里的金额列是 numeric，
-// 两侧都走十进制字符串，没有一处把最小单位数直接送进 SQL。
+// 与 FromUnits 不同，它在生产里有一个入口：撞上界的金额指标
+// （internal/pipeline 的 CappedAmount）要累加一个**与库里 numeric(20, 8)
+// 逐位相同**的差额，走十进制字符串反而多一次解析与格式化，还可能在
+// 位数上被四舍五入。库里的金额列本身仍然只吃十进制字符串（写用
+// Amount.String，读用 Parse），没有任何一处把最小单位数直接送进 SQL。
 func (a Amount) Units() int64 { return a.units }
 
 // Parse 解析一个十进制字符串，例如 "12.34"。

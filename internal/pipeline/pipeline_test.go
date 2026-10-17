@@ -31,6 +31,19 @@ func adoptTestLogger(t *testing.T, w io.Writer) {
 	observe.AdoptAsDefault(observe.NewLoggerWithWriter(w, "debug", "json", false))
 }
 
+// renderMetrics 渲染一遍**本进程那一份**全局注册表，返回指标文本。
+//
+// 与 cmd/larkax 的 scrape 同一个口径：pipeline 的增量点写死 observe.Metrics，
+// 读一份自己造的注册表的话，被测的那条链根本不会往上加数。
+func renderMetrics(t *testing.T) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := observe.Metrics.Render(&buf); err != nil {
+		t.Fatalf("渲染指标失败: %v", err)
+	}
+	return buf.String()
+}
+
 // ruleSource 是测试用的规则来源：一条固定规则，或一个错误。
 //
 // 两个方法与真实实现（pricing）同形：Match 给结算那一次，返回**一条**
@@ -578,6 +591,119 @@ func TestSettleCountsCappedSettlementPerProtocol(t *testing.T) {
 		t.Errorf("/metrics 的输出里没有 %s\n实际输出:\n%s", want, buf.String())
 	}
 	t.Logf("撞上界被记下的那一条: %s", want)
+}
+
+// 撞上界时还要记下**少收了多少**。上面那条按协议分的计数只回答「撞了几次」，
+// 而平台真正承担掉的那笔钱只在这条金额序列里。
+//
+// 断言的是**具体的最小单位数**，不是「大于 0」，也不是拿 Settlement 的字段
+// 现算一遍再比——后者是拿被测代码算被测代码。差额算错的几种写法（写成
+// Reserved − Actual、把明细里的某一项当差额、单位换成元）都能让「大于 0」
+// 成立，而取值各不相同。这里的数用例自己算得出来：预留 0.002
+// （1000 × 1e-6 + 500 × 2e-6），按上游报的 100000 个输入 token 算是 0.1，
+// 差额 0.098 元 = 9_800_000 个最小单位（money.Scale = 8）。
+func TestSettleCountsCappedAmountGap(t *testing.T) {
+	// 资产品种由入口填，见 pipeline.Request.Asset。
+	const asset = "CNY"
+	// 先把这条序列取出来（值为 0 也会建出来），之后才读得到干净的起点。
+	before := observe.Metrics.CappedAmount.With(string(channel.ProtocolOpenAI), asset).Value()
+
+	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}
+	p := newPipeline(t, src)
+
+	capped := baseRequest()
+	capped.RequestID = "req-capped-amount"
+	res, err := p.Reserve(context.Background(), capped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	charge, err := p.Settle(context.Background(), capped, res, Outcome{
+		Usage:       channel.Usage{PromptTokens: 100_000},
+		UsageSource: tokens.SourceMeasured,
+	})
+	if err != nil {
+		t.Fatalf("结算出错: %v", err)
+	}
+	if !charge.Settlement.Capped {
+		t.Fatalf("这次结算没有撞上界（按用量算是 %s，预留 %s）——用例的前提不成立",
+			charge.Settlement.Breakdown.Total, charge.Settlement.Reserved)
+	}
+	// 先把两个金额钉住，下面那个 9_800_000 才是从它们减出来的。
+	if got := charge.Settlement.Breakdown.Total.String(); got != "0.10000000" {
+		t.Fatalf("按用量算出的金额 = %s，期望 0.10000000（100000 × 1e-6）", got)
+	}
+	if got := charge.Settlement.Actual.String(); got != "0.00200000" {
+		t.Fatalf("实际结算金额 = %s，期望 0.00200000（撞上界时被截成预留）", got)
+	}
+
+	const wantGap = uint64(9_800_000)
+	if got := observe.Metrics.CappedAmount.With(string(channel.ProtocolOpenAI), asset).Value(); got != before+wantGap {
+		t.Errorf("openai/CNY 的撞上界金额 = %d，期望 %d（当前起点 %d）——"+
+			"差额是 Breakdown.Total − Actual，即 0.1 − 0.002 = 0.098 元 = %d 个最小单位",
+			got, before+wantGap, before, wantGap)
+	}
+
+	// 渲染一遍，证明这条序列真的会出现在 /metrics 上，而不是只活在进程里。
+	want := fmt.Sprintf(`larkax_billing_capped_amount_total{protocol="openai",asset="%s"} %d`, asset, before+wantGap)
+	if got := renderMetrics(t); !strings.Contains(got, want) {
+		t.Errorf("/metrics 的输出里没有 %s\n实际输出:\n%s", want, got)
+	}
+	t.Logf("撞上界少收的那一条: %s", want)
+}
+
+// 没撞上界的结算不该在这条金额序列上留下任何东西。
+//
+// # 判据是「序列有没有被建出来」，不是「值有没有涨」
+//
+// 没撞界时 Breakdown.Total 与 Actual 相等，差额是 0——**加 0 与根本不加，
+// 在取值上一模一样**。所以只看取值的话，这段累加就算被搬到 Capped 分支外面
+// （不撞界也走一遍），用例照样通过。真正的区别在 /metrics 上：带标签的计数器
+// 被 With 碰一次就会被建出来，哪怕值是 0，输出里于是多出一行 0——而那一行读
+// 起来正是「撞过，但差额是 0」，一个不存在却看得见的状态。
+//
+// 这条用例因此渲染两次、比「有没有这一行」。它走 openai-responses：本包其余
+// 用例的撞界结算只走 openai 与 systemone，所以这条序列的第一次创建就是这次
+// 结算。将来别处若也在 openai-responses 上撞了上界，这条用例会在开头直接报
+// 出来（那时换一条协议，或把这条移到独立进程里去跑）。
+func TestSettleDoesNotCountCappedAmountWhenNotCapped(t *testing.T) {
+	// 资产品种由入口填，见 pipeline.Request.Asset。
+	const asset = "CNY"
+	protocol := channel.ProtocolOpenAIResponses
+	series := fmt.Sprintf(`larkax_billing_capped_amount_total{protocol="%s",asset="%s"}`, protocol, asset)
+
+	if got := renderMetrics(t); strings.Contains(got, series) {
+		t.Fatalf("用例开始前 %s 就已经存在了，而它按设计只由撞上界的结算建出来。\n"+
+			"它已经存在的话，下面那条「不该出现」的断言无论被测代码写成什么样都成立，\n"+
+			"这条用例等于没写。实际输出:\n%s", series, got)
+	}
+
+	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}
+	p := newPipeline(t, src)
+
+	plain := baseRequest()
+	plain.RequestID = "req-not-capped-amount"
+	plain.Protocol = protocol
+	res, err := p.Reserve(context.Background(), plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 按用量算是 0.0014（1000 × 1e-6 + 200 × 2e-6），小于预留的 0.002。
+	charge, err := p.Settle(context.Background(), plain, res, Outcome{
+		Usage:       channel.Usage{PromptTokens: 1000, CompletionTokens: 200},
+		UsageSource: tokens.SourceMeasured,
+	})
+	if err != nil {
+		t.Fatalf("结算出错: %v", err)
+	}
+	if charge.Settlement.Capped {
+		t.Fatalf("这次结算撞上了上界（按用量算是 %s，预留 %s）——用例的前提不成立",
+			charge.Settlement.Breakdown.Total, charge.Settlement.Reserved)
+	}
+
+	if got := renderMetrics(t); strings.Contains(got, series) {
+		t.Errorf("/metrics 上出现了 %s——没撞上界的结算不该把这条序列建出来：\n"+
+			"差额是 0，可它一旦被 With 碰过就会在输出里留下一行 0。\n实际输出:\n%s", series, got)
+	}
 }
 
 // 客户端在流式响应中途断开**要计费**：已经产生的 token 上游是算了钱的。

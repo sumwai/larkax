@@ -274,12 +274,17 @@ func TestRegistryLabelsAreStable(t *testing.T) {
 	r := NewRegistry()
 	r.Settlements.With("measured").Inc()
 	r.CappedSettlements.With("systemone").Inc()
+	r.CappedAmount.With("systemone", "CNY").Add(9_800_000)
 
 	got := render(t, r)
 	for _, want := range []string{
 		`larkax_billing_settlements_total{usage_source="measured"} 1`,
 		// capped 按入口协议分：告警与排查按 protocol 筛，标签名与取值都不能漂。
 		`larkax_billing_capped_settlements_total{protocol="systemone"} 1`,
+		// 金额侧那条多一个 asset：协议说「哪条入口的上界错了」，资产说
+		// 「少收的是哪一种钱」。取值同样来自闭合枚举（channel.Protocol 与
+		// ledger.Asset），采集端的查询按它们写。
+		`larkax_billing_capped_amount_total{protocol="systemone",asset="CNY"} 9800000`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("标签名或取值变了\n得到:\n%s\n期望含:\n%s", got, want)
