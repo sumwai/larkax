@@ -9,7 +9,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/sumwai/larkax/internal/catalog"
@@ -514,7 +513,7 @@ func printModelList(w io.Writer, models []catalog.Model) {
 		return
 	}
 
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	tw := newTableWriter(w)
 	_, _ = fmt.Fprintln(tw, "ID\t规范名\t展示名\t厂商\t家族\t上下文\t输入\t输出\t能力\t模态")
 	for _, m := range models {
 		_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
@@ -534,7 +533,7 @@ func printModelList(w io.Writer, models []catalog.Model) {
 // reasoning_options 与 raw 不打：它们是采集来的原始元信息，命令行不写它们，
 // 而 raw 可能是一大段嵌套 JSON——把它铺在这里会把上面那几行挤走。
 func printModelDetail(w io.Writer, m catalog.Model) {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	tw := newTableWriter(w)
 	row := func(label, value string) {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\n", label, value)
 	}

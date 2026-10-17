@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/sumwai/larkax/internal/plugin"
@@ -108,7 +107,7 @@ func printPluginList(w io.Writer, rows []pluginstore.Row) {
 		return
 	}
 
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	tw := newTableWriter(w)
 	_, _ = fmt.Fprintln(tw, "KEY\tVERSION\tSTATUS\tGENERATION\tPRIORITY\tNAME")
 	for _, row := range rows {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\n",

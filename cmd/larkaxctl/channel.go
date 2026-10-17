@@ -11,7 +11,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/sumwai/larkax/internal/channels"
@@ -507,7 +506,7 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo) {
 		return
 	}
 
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	tw := newTableWriter(w)
 	_, _ = fmt.Fprintln(tw, "ID\t状态\t类型\t名称\t上游地址\t模型\t归属\t权重\t优先级\t凭证")
 	for _, info := range infos {
 		_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
