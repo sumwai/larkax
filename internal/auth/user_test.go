@@ -21,8 +21,8 @@ func TestParseRole(t *testing.T) {
 	}{
 		{"user", RoleUser, false, false},
 		{"merchant", RoleMerchant, true, false},
-		// admin 天然也是 merchant（迁移里 users.is_admin 的注释）。
-		// 这条断言就是那句话的可执行版本。
+		// admin 同时也落上 merchant（见 Role.flags 的注释）。这两列今天没有
+		// 读方，所以这条断言钉的是「落库的值」，不是任何权限行为。
 		{"admin", RoleAdmin, true, true},
 		{"  admin  ", RoleAdmin, true, true},
 	}
