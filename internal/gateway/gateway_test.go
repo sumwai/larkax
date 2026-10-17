@@ -368,6 +368,12 @@ type harness struct {
 	// 一个要 OverridesFor），而共享一个字段就得让两个假实现同时认下两件事
 	// ——那是把两个概念塞进一个类型里，正是这两条路径分开声明接口要避免的。
 	aliasOverrides AliasOverrideSource
+	// maxOutputTokens 是单次输出上限的全局默认值（见 Gateway.MaxOutputTokens）。
+	//
+	// 默认取 65536：**远高于**下面夹具里的 max_tokens，所以绝大多数用例走的仍是
+	// 「没超限」那条路——那些用例钉的是别的事，不该被这条判据绊住。要钉这条
+	// 判据的用例自己把它压下来（见 outputcap_test.go 的 withMaxOutputTokens）。
+	maxOutputTokens int64
 }
 
 func newHarness(t *testing.T, opts ...func(*harness)) *harness {
@@ -396,6 +402,7 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 		recorder:         &fakeRecorder{},
 		aliases:          identityAliases{},
 		aliasOverrides:   identityOverrides{},
+		maxOutputTokens:  65536,
 	}
 	for _, o := range opts {
 		o(h)
@@ -406,8 +413,10 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 			Rules:    h.rules,
 			Programs: expr.NewCache(16),
 		},
-		Router:           &route.Router{Rand: rand.New(rand.NewSource(1)), Aliases: h.aliases},
-		AliasOverrides:   h.aliasOverrides,
+		Router:         &route.Router{Rand: rand.New(rand.NewSource(1)), Aliases: h.aliases},
+		AliasOverrides: h.aliasOverrides,
+		// 单次输出上限的全局默认值，见 harness.maxOutputTokens。
+		MaxOutputTokens:  h.maxOutputTokens,
 		Candidates:       h.candidates,
 		Reservations:     h.reservations,
 		Settlements:      h.settlements,

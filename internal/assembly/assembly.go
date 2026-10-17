@@ -155,6 +155,22 @@ const (
 	assetKey = "billing.default_asset"
 	// probeIntervalKey 是额度探测的默认间隔（秒）。
 	probeIntervalKey = "quota.probe_interval_seconds"
+	// maxOutputTokensKey 是单次输出上限的全局默认值（token）。
+	maxOutputTokensKey = "billing.max_output_tokens"
+)
+
+// 单次输出上限允许的范围（token）。
+//
+// 下界 1：0 与负数在语义上不成立。这一条判据说的是「一次请求最多冻住多少
+// 余额」，非正的数会让它要么拒掉一切、要么什么都不判。
+//
+// 上界一百万：**这不是一个调参旋钮，而是「这个数还算不算一个界」**。单次
+// 输出一百万 token 在任何意义上都不是一次调用（它比任何模型的上下文窗口都
+// 大），配到那个量级上等于把这条判据关掉——而「关掉」与「配得很宽」在请求上
+// 同形，那正是这条判据要避免的东西。
+const (
+	minMaxOutputTokens = 1
+	maxMaxOutputTokens = 1 << 20
 )
 
 // 探测间隔允许的范围（秒）。
@@ -242,6 +258,19 @@ func Build(cfg Config) (*App, error) {
 		return nil, err
 	}
 
+	// 单次输出上限的全局默认值。判据在请求那条路上（见 gateway.checkOutputCap），
+	// 而它**只在目录里没登记 output_limit 的模型上生效**——所以配错了不会有
+	// 任何别的东西报出来，只表现为一批请求多冻了余额或者突然开始 400。
+	// 那一类错在启动时判掉最省事，于是范围校验放在这里。
+	maxOutputTokens, err := cfg.Settings.Int(maxOutputTokensKey)
+	if err != nil {
+		return nil, fmt.Errorf("读取单次输出上限失败: %w", err)
+	}
+	if maxOutputTokens < minMaxOutputTokens || maxOutputTokens > maxMaxOutputTokens {
+		return nil, fmt.Errorf("settings.%s = %d 超出允许范围 [%d, %d] token",
+			maxOutputTokensKey, maxOutputTokens, minMaxOutputTokens, maxMaxOutputTokens)
+	}
+
 	calendarEnv, err := buildCalendar(cfg.DB)
 	if err != nil {
 		return nil, err
@@ -280,9 +309,15 @@ func Build(cfg Config) (*App, error) {
 		// 请求会失败（见 gateway.ErrNoAliasOverrideSource）——上界算错的表现
 		// 是少收，而那个错没有任何东西会报出来。
 		AliasOverrides: aliasCatalog,
-		Candidates:     channels.New(cfg.DB, cfg.Sealer),
-		Reservations:   ledgerStore,
-		Settlements:    ledgerStore,
+		// MaxOutputTokens 是单次输出上限的全局默认值：调用方声明的
+		// max_tokens 超过它（目录里没登记 output_limit 时）会被拒。
+		// 它必须在装配期就是正的（见下面那次校验）——不接或接成 0 的表现
+		// 是这条判据整条失效，而「没配上限」与「上限配得很宽」在请求上
+		// 长得一模一样。
+		MaxOutputTokens: maxOutputTokens,
+		Candidates:      channels.New(cfg.DB, cfg.Sealer),
+		Reservations:    ledgerStore,
+		Settlements:     ledgerStore,
 		// 写入侧与读取侧共用同一个包：两边读写的列是同一批，
 		// 分开放会让「写进去的值读出来不对」这类错没有唯一的归属。
 		Recorder:  channels.NewRecorder(cfg.DB, staleAfter),
