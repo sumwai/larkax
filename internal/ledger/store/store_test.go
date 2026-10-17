@@ -312,7 +312,8 @@ func TestSaveSettlementMovesMoney(t *testing.T) {
 	entries := consumeEntries(t, userID, "12")
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
-		Entries: entries,
+		PricedAt: pricedAt(),
+		Entries:  entries,
 	}
 	charge.Settlement.Actual = money.MustParse("12")
 
@@ -353,7 +354,8 @@ func TestSettlementIsIdempotent(t *testing.T) {
 
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
-		Entries: consumeEntries(t, userID, "12"),
+		PricedAt: pricedAt(),
+		Entries:  consumeEntries(t, userID, "12"),
 	}
 	charge.Settlement.Actual = money.MustParse("12")
 
@@ -403,7 +405,8 @@ func TestSettlementWritesBackChannel(t *testing.T) {
 
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
-		Entries: consumeEntries(t, userID, "12"),
+		PricedAt: pricedAt(),
+		Entries:  consumeEntries(t, userID, "12"),
 	}
 	charge.Settlement.Actual = money.MustParse("12")
 
@@ -455,6 +458,7 @@ func TestSettlementRecordsClientCancel(t *testing.T) {
 
 			charge := &pipeline.Charge{
 				RequestID: requestID, UserID: userID, Asset: "CNY",
+				PricedAt:       pricedAt(),
 				Entries:        consumeEntries(t, userID, "12"),
 				ClientCanceled: tc.canceled,
 			}
@@ -516,7 +520,8 @@ func TestConcurrentSettlementChargesOnce(t *testing.T) {
 			defer wg.Done()
 			charge := &pipeline.Charge{
 				RequestID: requestID, UserID: userID, Asset: "CNY",
-				Entries: consumeEntries(t, userID, "10"),
+				PricedAt: pricedAt(),
+				Entries:  consumeEntries(t, userID, "10"),
 			}
 			charge.Settlement.Actual = money.MustParse("10")
 
@@ -569,7 +574,8 @@ func TestSettlementRefusesNegativeBalance(t *testing.T) {
 
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
-		Entries: consumeEntries(t, userID, "150"),
+		PricedAt: pricedAt(),
+		Entries:  consumeEntries(t, userID, "150"),
 	}
 	charge.Settlement.Actual = money.MustParse("150")
 
@@ -683,7 +689,8 @@ func TestReleaseAfterSettlementIsNoop(t *testing.T) {
 	}
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
-		Entries: consumeEntries(t, userID, "12"),
+		PricedAt: pricedAt(),
+		Entries:  consumeEntries(t, userID, "12"),
 	}
 	charge.Settlement.Actual = money.MustParse("12")
 	if err := s.Save(ctx, req, charge); err != nil {
@@ -722,7 +729,8 @@ func TestWalletMatchesLedger(t *testing.T) {
 		amount := money.FromInt(int64(10 + i))
 		charge := &pipeline.Charge{
 			RequestID: requestID, UserID: userID, Asset: "CNY",
-			Entries: consumeEntries(t, userID, amount.String()),
+			PricedAt: pricedAt(),
+			Entries:  consumeEntries(t, userID, amount.String()),
 		}
 		charge.Settlement.Actual = amount
 		if err := s.Save(ctx, req, charge); err != nil {
@@ -787,7 +795,8 @@ func TestConcurrentMultiWalletNoDeadlock(t *testing.T) {
 				}
 				charge := &pipeline.Charge{
 					RequestID: requestID, UserID: order[0], Asset: "CNY",
-					Entries: multiUserEntries(t, order),
+					PricedAt: pricedAt(),
+					Entries:  multiUserEntries(t, order),
 				}
 				charge.Settlement.Actual = money.FromInt(1)
 				if err := s.Save(ctx, req, charge); err != nil {
@@ -875,7 +884,8 @@ func TestAmountPrecisionRoundTrip(t *testing.T) {
 	}
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
-		Entries: consumeEntries(t, userID, amount),
+		PricedAt: pricedAt(),
+		Entries:  consumeEntries(t, userID, amount),
 	}
 	charge.Settlement.Actual = money.MustParse(amount)
 	if err := s.Save(ctx, req, charge); err != nil {
@@ -906,7 +916,8 @@ func TestLargeAmountPrecision(t *testing.T) {
 	}
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
-		Entries: consumeEntries(t, userID, amount),
+		PricedAt: pricedAt(),
+		Entries:  consumeEntries(t, userID, amount),
 	}
 	charge.Settlement.Actual = money.MustParse(amount)
 	if err := s.Save(ctx, req, charge); err != nil {

@@ -36,12 +36,14 @@ import (
 //  4. 已经吐字之后不再换渠道——这条最容易在「加个重试」时被顺手破坏，
 //     而它的表现是客户端看到两段拼接的回答。
 //
-// # 估算用量这件事在库里看不见
+// # 估算用量这件事在库里怎么读
 //
-// billing_requests 没有「用量来源」这一列，usage_events 也还没接入 store.Save，
-// 所以「这次是按估算收的」在库里读不出来——那条判据由网关的单元测试钉住
-// （internal/gateway/stream_test.go 里的 Result.Estimated）。这里断言的是
-// **金额**：估算出来的那个数，而不是预留的封顶值。
+// billing_requests 没有「用量来源」这一列，但 usage_events 已经接进
+// store.Save：billing_path 与 estimator 两列记的就是「这个数是实测的、
+// 还是估的，以及是怎么估出来的」。这一组用例断言的是**金额**——估算出来的
+// 那个数，而不是预留的封顶值；「按什么来源记的账」那一半由
+// internal/ledger/store 的集成测试钉住（它拿 Charge 与落库的那一行逐字段比），
+// 网关这一侧则钉 Result.Estimated（见 internal/gateway/stream_test.go）。
 
 // ── 假上游 ────────────────────────────────────────────────────────────
 

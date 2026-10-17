@@ -31,9 +31,9 @@ type Result struct {
 	//
 	// 单独回传是为复算准备的：事后要能回答「当时按哪一刻算的价」。
 	//
-	// 但这条链路**目前不存在**——`usage_events` 表建好了却没有写入方
-	// （见 LESSONS 第 22 条），调用方也还没有把 At 落进任何表。
-	// 所以这里说的是这个字段的用途，不是今天已经有的事。
+	// 这条链路已经接上：pipeline.Settle 把它放进 Charge.PricedAt，落库层
+	// 写进 usage_events.priced_at（见 internal/ledger/store 的 Save）。
+	// 于是「当时按哪一刻算的价」事后读得出来，不必再猜。
 	At time.Time
 	// Keys 是这条规则可能给出的键，已排序。
 	//
