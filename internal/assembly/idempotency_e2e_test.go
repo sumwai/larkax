@@ -5,12 +5,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -207,9 +209,15 @@ func idemCount(t *testing.T, db *sql.DB, key string) int {
 
 // waitForIdemState 等到某个键的记录进入指定状态。
 //
-// 非流式那条路上记录是在响应写完之后才更新的，而客户端拿到响应时它可能
-// 还没写完；流式那条路更晚（收尾在后台 goroutine 里）。等不到就是真的没写，
-// 而那正是要断言的事。
+// # 只有流式那条路需要它
+//
+// 非流式那条路上，结局写在响应**之前**（见 internal/api/idempotency.go），
+// 所以客户端拿到响应时记录已经落了库，直接读就行——那里的用例用 idemOf，
+// 不用这个助手。用了它，断言就退化成「记录最终会变成 X」，而那在两种排序下
+// 都成立。
+//
+// 流式那条路是真的要等：结局只有在流收到结束事件之后才知道，而响应是边生成
+// 边发的。等不到就是真的没写，而那正是要断言的事。
 func waitForIdemState(t *testing.T, db *sql.DB, key, want string) idemRow {
 	t.Helper()
 
@@ -400,8 +408,10 @@ func TestIdempotentReplayChargesOnce(t *testing.T) {
 		t.Fatalf("第一次请求状态码 = %d，期望 200。响应体：%s", status1, body1)
 	}
 
-	// 记录在响应写完之后才更新，所以这里等它——等不到就是真的没写。
-	rec := waitForIdemState(t, f.db, idemKey, "completed")
+	// **不等**：非流式那条路上结局写在响应之前，所以响应回来时记录已经落库。
+	// 等一等再读会把这条断言变成「记录最终会变成 completed」，而那在两种
+	// 排序下都成立——这条用例的分辨力就没了。
+	rec := assertOutcomeLanded(t, f.db, idemKey, "completed")
 
 	status2, body2, _ := postIdempotent(t, f.public.URL+"/v1/chat/completions", f.key, idemKey, f.body)
 	if status2 != http.StatusOK {
@@ -446,6 +456,187 @@ func TestIdempotentReplayChargesOnce(t *testing.T) {
 	}
 }
 
+// assertOutcomeLanded 断言**不等**就能读到指定的结局，并返回那一行。
+//
+// 它刻意不轮询：轮询会把「写回排在响应之前」这条性质抹掉——记录最终总会落到
+// 那个状态上，与排序无关。这也是它不叫 waitForIdemState 的原因。
+//
+// **但它不是「排序」的判据。** 它读库的时刻在客户端拿到响应之后，而把写回挪到
+// 响应之后，写库照样赶在那次读之前完成（几十微秒的事）——实测：把排序改回去，
+// 用它写的断言全部照过。真正的判据是把读放在「响应开始写出去」那一刻，
+// 见 probeFirstWrite 与 TestIdempotentOutcomeIsWrittenWhenTheResponseStartsGoingOut。
+func assertOutcomeLanded(t *testing.T, db *sql.DB, key, want string) idemRow {
+	t.Helper()
+
+	rec, ok := idemOf(t, db, key)
+	if !ok {
+		t.Fatalf("响应已经回来了，库里却没有 %q 这条幂等记录", key)
+	}
+	if rec.state != want {
+		t.Errorf("记录状态 = %q，期望 %q（响应都发出去了，记录不该还停在 in_progress）",
+			rec.state, want)
+	}
+	return rec
+}
+
+// firstWriteProbe 是一个把「响应开始发出去」那一刻的幂等记录状态记下来的
+// ResponseWriter。
+//
+// # 为什么读库要放在这一刻，而不是客户端拿到响应之后
+//
+// 放在之后的话，读到的状态取决于「写库」与「客户端那次查询」谁先到：把写回
+// 挪到响应之后，客户端照样多半读到 completed，于是断言在两种排序下都成立——
+// 那是一个**竞态**，不是判据。放在「响应开始写出去」那一刻，它就是判据：
+// 那一刻记录是什么状态，是排序的直接后果。
+//
+// 探测只做一次（sync.Once），而且**不能碰 testing.T**：它跑在服务端的请求
+// goroutine 里，那个 goroutine 上 t.Fatalf 是禁止的。所以失败信息写进 out，
+// 由测试 goroutine 去读。
+type firstWriteProbe struct {
+	http.ResponseWriter
+	db   *sql.DB
+	key  string
+	out  *atomic.Value
+	once sync.Once
+}
+
+func (p *firstWriteProbe) WriteHeader(status int) {
+	p.probe()
+	p.ResponseWriter.WriteHeader(status)
+}
+
+func (p *firstWriteProbe) Write(b []byte) (int, error) {
+	p.probe()
+	return p.ResponseWriter.Write(b)
+}
+
+// Unwrap 让流式那条路也能穿过这一层：少了它，http.NewResponseController
+// 找不到 Flush，首帧就会被判成写失败。
+func (p *firstWriteProbe) Unwrap() http.ResponseWriter { return p.ResponseWriter }
+
+func (p *firstWriteProbe) probe() {
+	p.once.Do(func() {
+		var state string
+		err := p.db.QueryRowContext(context.Background(),
+			`SELECT state FROM idempotency_keys WHERE key = $1`, p.key).Scan(&state)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			p.out.Store("（还没有这条记录）")
+		case err != nil:
+			p.out.Store("查询失败: " + err.Error())
+		default:
+			p.out.Store(state)
+		}
+	})
+}
+
+// probeFirstWrite 把 next 包一层，把「响应开始写出去」那一刻的记录状态记进 out。
+func probeFirstWrite(next http.Handler, db *sql.DB, key string, out *atomic.Value) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(&firstWriteProbe{ResponseWriter: w, db: db, key: key, out: out}, r)
+	})
+}
+
+// TestIdempotentOutcomeIsWrittenWhenTheResponseStartsGoingOut 是排序在端到端
+// 这一层的判据。
+//
+// 读库放在「响应开始写出去」的那一刻（见 firstWriteProbe），所以它分辨得出
+// 写回在响应之前还是之后。同一条链路上用「客户端拿到响应之后再读」写的断言
+// 分辨不出——那些断言在两种排序下都成立，留着它们只当「记录最终落到了正确
+// 状态」的检查。
+func TestIdempotentOutcomeIsWrittenWhenTheResponseStartsGoingOut(t *testing.T) {
+	model := unique("e2e-idem-first-write")
+	up := newGatedUpstream(model)
+	up.open()
+	srv := httptest.NewServer(up.handler())
+	t.Cleanup(srv.Close)
+
+	f := newIdemFixture(t, srv.URL, model)
+	idemKey := unique("idem")
+
+	// 初值不是任何合法状态：探测一次都没跑过时，断言会报出这件事，
+	// 而不是静默地拿一个看起来像结论的值。
+	state := &atomic.Value{}
+	state.Store("（响应一直没有开始写）")
+	probed := httptest.NewServer(probeFirstWrite(f.app.Public, f.db, idemKey, state))
+	t.Cleanup(probed.Close)
+
+	status, body, _ := postIdempotent(t, probed.URL+"/v1/chat/completions", f.key, idemKey, f.body)
+	if status != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
+	}
+
+	if got := state.Load().(string); got != "completed" {
+		t.Errorf("响应开始写出去的那一刻，记录状态 = %q，期望 completed——"+
+			"写回要排在响应之前，否则调用方手里的 200 与记录里的 in_progress "+
+			"可以同时存在", got)
+	}
+}
+
+// TestIdempotentOutcomeIsLandedWithoutWaiting 钉住「两种结局都不需要等」。
+//
+// # 它证明什么、不证明什么
+//
+// 证明的是：客户端拿到响应时，记录已经落在它的最终状态上（成功那条是
+// completed，上游失败那条是 failed），所以那条路上不存在「响应已经回来、
+// 记录还在写」的中间态。**不证明排序**——判据见
+// TestIdempotentOutcomeIsWrittenWhenTheResponseStartsGoingOut。
+//
+// # 两条结局都要验
+//
+// 主用例（TestIdempotentReplayChargesOnce）走的是成功路径，而且顺带断言了
+// 一堆别的东西。这里两条结局各验一次：失败那条走的是**另一个分支**
+// （failUpstream 那一支），只验成功那条的话，那条分支上「写回在哪一步」就
+// 完全没有断言。
+func TestIdempotentOutcomeIsLandedWithoutWaiting(t *testing.T) {
+	t.Run("completed", func(t *testing.T) {
+		model := unique("e2e-idem-lands-ok")
+		up := newGatedUpstream(model)
+		up.open()
+		srv := httptest.NewServer(up.handler())
+		t.Cleanup(srv.Close)
+
+		f := newIdemFixture(t, srv.URL, model)
+		idemKey := unique("idem")
+
+		status, body, _ := postIdempotent(t, f.public.URL+"/v1/chat/completions", f.key, idemKey, f.body)
+		if status != http.StatusOK {
+			t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
+		}
+		assertOutcomeLanded(t, f.db, idemKey, "completed")
+	})
+
+	t.Run("failed", func(t *testing.T) {
+		model := unique("e2e-idem-lands-fail")
+		fake := &fakeUpstream{model: model}
+		fake.fail.Store(true)
+		srv := httptest.NewServer(fake.handler())
+		t.Cleanup(srv.Close)
+
+		db := testDB(t)
+		sealer := testSealer(t)
+		merchant := seedUser(t, db, true, "0")
+		user := seedUser(t, db, false, "100")
+		key := issueKey(t, db, user)
+		fake.db = db
+		fake.userID = user
+
+		seedChannel(t, db, sealer, merchant, srv.URL, model)
+		seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+		app := newApp(t, db, sealer)
+		public := httptest.NewServer(app.Public)
+		t.Cleanup(public.Close)
+
+		idemKey := unique("idem")
+		status, body, _ := postIdempotent(t, public.URL+"/v1/chat/completions", key, idemKey, chatBody(model))
+		if status == http.StatusOK {
+			t.Fatalf("状态码 = %d，期望一个失败码（假上游在报 500）。响应体：%s", status, body)
+		}
+		assertOutcomeLanded(t, db, idemKey, "failed")
+	})
+}
+
 // TestIdempotentAnthropicReplaysAndChargesOnce 把 happy path 在**另一套协议**上再走一遍。
 //
 // # 为什么不能只有 OpenAI 那一条
@@ -486,7 +677,7 @@ func TestIdempotentAnthropicReplaysAndChargesOnce(t *testing.T) {
 	if status1 != http.StatusOK {
 		t.Fatalf("第一次请求状态码 = %d，期望 200。响应体：%s", status1, first)
 	}
-	rec := waitForIdemState(t, db, idemKey, "completed")
+	rec := assertOutcomeLanded(t, db, idemKey, "completed")
 
 	status2, second, headers2 := postIdempotent(t, url, key, idemKey, body)
 	if status2 != http.StatusOK {
@@ -633,7 +824,7 @@ func TestIdempotentSameKeyDifferentBodyIsRejected(t *testing.T) {
 	if status, body, _ := postIdempotent(t, url, f.key, idemKey, f.body); status != http.StatusOK {
 		t.Fatalf("第一次请求状态码 = %d，期望 200。响应体：%s", status, body)
 	}
-	waitForIdemState(t, f.db, idemKey, "completed")
+	assertOutcomeLanded(t, f.db, idemKey, "completed")
 
 	// 同一个键，换一段消息内容。
 	other := chatBodyWithMessage(model, "换一段话")
@@ -689,7 +880,7 @@ func TestIdempotentFailedAttemptIsRecordedAndNotRetried(t *testing.T) {
 	if status1 == http.StatusOK {
 		t.Fatalf("第一次请求状态码 = %d，期望一个失败码（假上游在报 500）", status1)
 	}
-	waitForIdemState(t, db, idemKey, "failed")
+	assertOutcomeLanded(t, db, idemKey, "failed")
 
 	status2, body2, _ := postIdempotent(t, url, key, idemKey, body)
 	if status2 != http.StatusConflict {
@@ -881,7 +1072,7 @@ func TestIdempotentConflictErrorShapePerProtocol(t *testing.T) {
 			if status, body, _ := postIdempotent(t, url, key, idemKey, chatBody(model)); status == http.StatusOK {
 				t.Fatalf("第一次请求状态码 = %d，期望一个失败码。响应体：%s", status, body)
 			}
-			waitForIdemState(t, db, idemKey, "failed")
+			assertOutcomeLanded(t, db, idemKey, "failed")
 
 			status, body, _ := postIdempotent(t, url, key, idemKey, chatBodyWithMessage(model, "换一段话"))
 			if status != http.StatusConflict {
@@ -1102,10 +1293,7 @@ func TestIdempotentFailoverStillChargesOnce(t *testing.T) {
 	if got := idemCount(t, db, idemKey); got != 1 {
 		t.Errorf("幂等记录有 %d 条，期望 1 条", got)
 	}
-	rec := waitForIdemState(t, db, idemKey, "completed")
-	if rec.state != "completed" {
-		t.Errorf("记录状态 = %q，期望 completed", rec.state)
-	}
+	assertOutcomeLanded(t, db, idemKey, "completed")
 
 	// 重放：不再打上游，也不再扣钱。
 	status, second, _ := postIdempotent(t, url, key, idemKey, body)

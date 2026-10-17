@@ -25,11 +25,19 @@ import (
 //
 //   - **建立**记录与预留同一个事务，由落库层做（见 internal/ledger/store 的
 //     SaveReservation）。两者必须一起成或一起不成。
-//   - **写回结局**（走完了 / 没走完）只能在响应写出去之后做，那时预留那个
-//     事务早就提交了，所以它是单独一笔。
+//   - **写回结局**（走完了 / 没走完）是单独一笔：那时预留那个事务早就提交了。
 //
-// 第二步失败时那条记录会停在 in_progress（见 recordOutcome 的注释），
-// 这是这个设计里唯一一处「记录与实际不一致」的窗口。
+// # 写回结局排在响应的哪一侧
+//
+// 非流式那条路上响应是**一次成型**的——调完上游、渲染完，整份字节就在手里。
+// 所以那条路的写回排在**响应之前**：响应先攒在 heldResponse 里，等结局落了库
+// 再发出去（见 serveIdempotent）。于是有一条能依赖的性质——调用方收到 200，
+// 记录就一定已经是 completed，「客户端手里是成功、记录里说还在跑」这种自相
+// 矛盾不会再出现。
+//
+// 流式那条路做不到：结局要等流收到结束事件才知道，而响应是边生成边发的，
+// 没有「还没发出去」这个时刻。所以那里写回仍然排在响应之后，中间那段窗口
+// 留着——它的形态、代价，以及为什么不给它加一个超时，写在 docs/idempotency.md。
 
 // idempotencyPollInterval 是等待「同键的第一次请求」出结果的轮询间隔。
 //
@@ -77,9 +85,19 @@ func (h *Handler) serveIdempotent(w http.ResponseWriter, r *http.Request, protoc
 			return
 		}
 
-		// 没记录：走原路径，响应同时留一份。
-		captured := &captureWriter{ResponseWriter: w}
-		res := h.serveOnce(captured, r, protocol, upstream, user, requestID, claim)
+		// 非流式那条路上响应整份先攒住，等结局写回之后再发出去；流式那条路
+		// 只能边生成边发，攒不住，所以结局仍然排在它之后。两者的分界就是
+		// 这里——见文件头与 heldResponse。
+		var held *heldResponse
+		var sink responseSink
+		if upstream.Stream {
+			sink = &captureWriter{ResponseWriter: w}
+		} else {
+			held = &heldResponse{ResponseWriter: w}
+			sink = held
+		}
+
+		res := h.serveOnce(sink, r, protocol, upstream, user, requestID, claim)
 
 		if res.claimed {
 			// 在「查完」与「建立记录」之间被另一个并发请求抢走了。这不是
@@ -94,7 +112,23 @@ func (h *Handler) serveIdempotent(w http.ResponseWriter, r *http.Request, protoc
 			continue
 		}
 
-		h.recordOutcome(r, claim, captured, res)
+		err := h.recordOutcome(r, claim, sink, res.complete)
+		if held == nil {
+			// 流式：响应是边生成边发的，写回这一步只能排在它之后，而那时
+			// 失败也改不了任何事——recordOutcome 已经记了那条日志。
+			return
+		}
+		if err != nil {
+			// 结局没写回，而这份响应还没发出去：那就不能发。
+			//
+			// 发出去的话，调用方手里是一份 200，记录却停在 in_progress——
+			// 此后他拿同一个键来问，得到的是「还在跑」。那正是这次排序要
+			// 消掉的自相矛盾；代价（那次上游真的调过、钱也真的扣了，而
+			// 调用方拿不到答案）见 recordOutcome 的注释。
+			writeError(w, protocol, http.StatusInternalServerError, "internal error")
+			return
+		}
+		held.send()
 		return
 	}
 }
@@ -155,6 +189,10 @@ func (h *Handler) resolveExisting(w http.ResponseWriter, r *http.Request, protoc
 
 // recordOutcome 把这次请求的结局写回幂等记录。
 //
+// 返回非 nil 表示**结局没能写回**，那条记录会停在 in_progress。非流式那条路
+// 拿它决定要不要把响应发出去（见 serveIdempotent）；流式那条路响应早就发出去
+// 了，只能忽略它——那时唯一的信号是这里打的日志。
+//
 // # 它为什么用不带取消的 context
 //
 // 最需要写它的时刻，恰恰是调用方已经断开、请求 ctx 已经 Done 的那一刻——
@@ -164,47 +202,65 @@ func (h *Handler) resolveExisting(w http.ResponseWriter, r *http.Request, protoc
 //
 // # 写不进去的代价要说清楚
 //
-// 响应已经发给调用方了，这里改不了任何事，所以只记日志。代价是那条记录
-// 停在 in_progress：后续同键请求会一直等到自己的超时才拿到 409，
-// 而真正的原因只在这条日志里。这是这个设计里唯一一处「记录与实际不一致」
-// 的窗口，也是那条日志必须带着键名的原因。
+// 非流式那条路上，调用方拿到的是 500 而不是那份已经算好的响应——那一次上游
+// 真的调过、钱也真的扣了，而答案没送到他手里。这是刻意的取舍：另一个选择是
+// 照常发响应、只记日志，而那样调用方手里是一份 200、记录里说「还在跑」，
+// 此后同一个键换回来的是一句「稍后重试」。写回失败本来就说明库不正常，这时
+// 宁可让这次请求响亮地失败（5xx 进指标、当场可诊断），也不要送出一份与记录
+// 对不上的成功。与结算落库失败同一条规矩（见 internal/gateway 的 finishCharge）。
 //
-// **记录根本不在**是另一回事，它不是「写不进去」：那说明这一次请求的预留
-// 整个回滚了（余额不足、没有可用渠道、缺 max_tokens），幂等记录随那个事务
-// 一起没了。那是正常路径，只记 Debug——把两种情形混在一起，那条唯一的告警
-// 就会在每次余额不足时都响一遍。
-func (h *Handler) recordOutcome(r *http.Request, claim *idempotency.Claim, captured *captureWriter, res served) {
+// 流式那条路上没有这个选择：响应是边生成边发的，写回只能排在它之后，所以
+// 那里照旧只记日志。代价是那条记录停在 in_progress：后续同键请求会一直等到
+// 自己的超时才拿到 409，而真正的原因只在这条日志里——这就是那条日志必须
+// 带着键名的原因。
+//
+// # 「记录根本不在」不算失败
+//
+// 那说明这一次请求的预留整个回滚了（余额不足、没有可用渠道、缺 max_tokens），
+// 幂等记录随那个事务一起没了。这是**正常路径**——用户余额不足是常态，不是
+// 故障——所以这里返回 nil 并只记 Debug。把两种情形混在一起，那条唯一的告警
+// 就会在每次余额不足时都响一遍：一个总在喊的告警与一个从不喊的告警一样没用。
+func (h *Handler) recordOutcome(r *http.Request, claim *idempotency.Claim, sink responseSink, complete bool) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), idempotencyWriteTimeout)
 	defer cancel()
 
+	status, contentType, body := sink.captured()
+
 	var err error
-	if res.complete {
-		err = h.Idempotency.Complete(ctx, claim.APIKeyID, claim.Key,
-			captured.status, captured.contentType, captured.body.Bytes())
+	if complete {
+		err = h.Idempotency.Complete(ctx, claim.APIKeyID, claim.Key, status, contentType, body)
 	} else {
 		err = h.Idempotency.Fail(ctx, claim.APIKeyID, claim.Key)
 	}
-	if err != nil {
-		if errors.Is(err, idempotency.ErrNotFound) {
-			// 这条记录**根本不在**：这一次请求的预留整个回滚了（余额不足、
-			// 没有可用渠道、缺 max_tokens），幂等记录随那个事务一起没了。
-			//
-			// 这是**正常路径**——用户余额不足是常态，不是故障——所以这里
-			// 不能打 ERROR。那条日志是这个设计里唯一能指出「记录停在
-			// in_progress」的信号（见上面的注释），而它在正常路径上每次都响，
-			// 等于把信号淹掉：一个总在喊的告警与一个从不喊的告警一样没用。
-			observe.FromContext(r.Context()).Debug("这次请求没建成幂等记录，没有结局要写回",
-				"key", claim.Key)
-			return
-		}
-		observe.FromContext(r.Context()).Error("写幂等结局失败",
-			"err", err, "key", claim.Key, "complete", res.complete)
+	if err == nil {
+		return nil
 	}
+	if errors.Is(err, idempotency.ErrNotFound) {
+		observe.FromContext(r.Context()).Debug("这次请求没建成幂等记录，没有结局要写回",
+			"key", claim.Key)
+		return nil
+	}
+	observe.FromContext(r.Context()).Error("写幂等结局失败",
+		"err", err, "key", claim.Key, "complete", complete)
+	return err
+}
+
+// responseSink 是「这次请求写出去的响应」的两种形态。
+//
+// 流式那条路边生成边发（captureWriter），非流式那条路先攒住再发
+// （heldResponse）。写回结局要的是同一份东西——真正发出去的状态码、
+// Content-Type 与响应体字节——所以这里取的是它们共同的那一面。
+type responseSink interface {
+	http.ResponseWriter
+
+	// captured 返回这次请求写出去的状态码、Content-Type 与响应体。
+	// 状态码为 0 表示这次请求一个字节都没写。
+	captured() (status int, contentType string, body []byte)
 }
 
 // captureWriter 把写给调用方的响应同时留一份下来。
 //
-// 它只用在幂等那条路上。留的是**真正写出去的字节**，不是「再渲染一遍」：
+// 它只用在**流式**那条路上。留的是**真正写出去的字节**，不是「再渲染一遍」：
 // 重放要的是逐字节相同，而第二处渲染逻辑迟早与第一处不一致——
 // 那种不一致表现为「重试拿到的回答与第一次不一样」，且没有任何东西会报。
 type captureWriter struct {
@@ -240,11 +296,73 @@ func (c *captureWriter) Write(p []byte) (int, error) {
 	return c.ResponseWriter.Write(p)
 }
 
+func (c *captureWriter) captured() (int, string, []byte) {
+	return c.status, c.contentType, c.body.Bytes()
+}
+
 // Unwrap 让 http.NewResponseController 能穿透到真正的 ResponseWriter。
 //
 // 少了它 Flush 会失败，而流式就此退化成攒完再发——一个只在带了幂等键的
 // 请求上出现的性能退化，正是那种「只在少数路径上复现」的问题。
 func (c *captureWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
+
+// heldResponse 攒下一份**还没发出去**的响应。
+//
+// 它只用在幂等那条路的非流式分支上：那份响应一次成型，所以可以先攥住，
+// 等结局落了库再 send 出去。这样写回就排在响应之前——调用方拿到 200 时，
+// 记录一定已经是 completed（见文件头）。
+//
+// # 它故意不实现 Unwrap
+//
+// 实现了的话 http.NewResponseController 会穿透到真正的 ResponseWriter，
+// flush 出去的帧就绕过了这里攒下的状态——一个只在「流式 + 幂等键」上出现的
+// 错乱。走不到那里是因为流式那条路根本不经过它，但少一个口子总比多一个强：
+// 真接错了，flush 会当场失败，而不是悄悄把响应发出去。
+type heldResponse struct {
+	http.ResponseWriter
+
+	// status 为 0 表示这次请求一个字节都没写。
+	status      int
+	contentType string
+	body        bytes.Buffer
+}
+
+func (h *heldResponse) WriteHeader(status int) {
+	if h.status == 0 {
+		h.status = status
+		// 与 captureWriter 同一个理由：留档的那一份必须与将要发出去的那一份
+		// 是同一个值，所以在这里取，而不是等到 send 的时候再取。
+		h.contentType = h.Header().Get("Content-Type")
+	}
+}
+
+func (h *heldResponse) Write(p []byte) (int, error) {
+	if h.status == 0 {
+		// 与 captureWriter 同一条规矩：没显式写状态码时 net/http 按 200 发出，
+		// 留档的那一份要跟上。
+		h.WriteHeader(http.StatusOK)
+	}
+	return h.body.Write(p)
+}
+
+func (h *heldResponse) captured() (int, string, []byte) {
+	return h.status, h.contentType, h.body.Bytes()
+}
+
+// send 把攒下的响应真正发出去。
+//
+// 攒住的就是**要发出去的那串字节**，send 只把它们挪个地方，不重新渲染——
+// 重放要的是逐字节相同（见 captureWriter 的说明）。
+//
+// 状态码为 0 时什么都不做：这次请求本来就没有响应要发（调用方在响应之前
+// 就断开了），发一个空的 200 反而是凭空造出一个响应。
+func (h *heldResponse) send() {
+	if h.status == 0 {
+		return
+	}
+	h.ResponseWriter.WriteHeader(h.status)
+	_, _ = h.ResponseWriter.Write(h.body.Bytes())
+}
 
 // writeReplay 把第一次的响应原样再发一遍。
 //
