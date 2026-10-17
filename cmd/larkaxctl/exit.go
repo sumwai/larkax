@@ -7,6 +7,7 @@ import (
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
+	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/pipeline"
 	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
 	"github.com/sumwai/larkax/internal/pricing"
@@ -74,6 +75,10 @@ func dbErr(err error) error {
 // 路径共用同一个哨兵，所以这里两类并列而不是只列写入。
 var conflictErrors = []error{
 	auth.ErrUserNotFound,
+	// 「要查的那一行不在」在写入路径上的对应物：解析完用户之后、插入钱包之前
+	// 用户被删，store 那边由外键挡下并返回它（见 store.ErrNoSuchUser）。它与
+	// auth.ErrUserNotFound 是同一个事实的两条路径，共用一个退出码。
+	store.ErrNoSuchUser,
 
 	channels.ErrChannelNotFound,
 

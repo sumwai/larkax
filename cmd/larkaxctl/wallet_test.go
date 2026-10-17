@@ -5,12 +5,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ledger"
+	"github.com/sumwai/larkax/internal/ledger/store"
 )
 
 func TestWalletUnknownSubcommand(t *testing.T) {
@@ -250,5 +252,32 @@ func TestWalletOpenUnknownUserExitCode(t *testing.T) {
 	}
 	if code := exitCode(err); code != exitConflict {
 		t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", code, exitConflict)
+	}
+}
+
+// 写入路径上「用户不存在」是**另一个哨兵**（store.ErrNoSuchUser），它也要落 4。
+//
+// 与上一条是同一个事实的两条路径：上一条在**解析**时认不出标识（auth 那边），
+// 这一条在**写入**时被外键挡下（store 那边，用户解析完到插入之间被删）。
+// 两条路径给出两个退出码，脚本就得按两套处置写；所以两个哨兵都进 conflictErrors。
+//
+// 不走 runWalletOpen 去构造那条路径：正常命令行先解析用户，要走到这里得让
+// 「解析完到插入之间」真的发生一次删除——那是个竞态，钉不稳（造出来的用例要么
+// 靠调度恰好，要么靠一次阻塞式的加锁）。**store 层的那条路径由 store 自己的
+// 用例直接调 OpenWallet 钉住**（internal/ledger/store 的 TestOpenWalletUnknownUser）；
+// 这里钉的是「它冒到命令行这一层时算不算冲突」——也就是 exit.go 里那条登记，
+// 而那正是这条用例能唯一喊出来的东西：把 store.ErrNoSuchUser 从 conflictErrors
+// 里拿掉，它立刻红。
+func TestWalletOpenStoreMissingUserExitCode(t *testing.T) {
+	// 造一个与 store 返回的形状一致的错误：哨兵包在一条带用户 id 的消息里，
+	// 驱动的原文留在链上（见 store.missingUserError）。
+	err := fmt.Errorf("%w: 用户 %d 在 users 里没有对应的一行: %w",
+		store.ErrNoSuchUser, int64(900000000000000), errors.New("SQLSTATE 23503"))
+
+	if !errors.Is(err, store.ErrNoSuchUser) {
+		t.Fatalf("错误链里没有 store.ErrNoSuchUser：%v", err)
+	}
+	if code := exitCode(err); code != exitConflict {
+		t.Errorf("退出码 = %d，期望 %d（要写的那一行引用的用户不存在）", code, exitConflict)
 	}
 }
