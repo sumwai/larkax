@@ -170,12 +170,15 @@ func (u openAIUsage) toRelaykit() *dto.Usage {
 	if u.PromptCacheHitTokens != nil {
 		out.PromptCacheHitTokens = *u.PromptCacheHitTokens
 	}
+	// 回退这一支必须在 PromptTokensDetails != nil **之外**：只报
+	// prompt_cache_hit_tokens 的上游连 prompt_tokens_details 都不发，
+	// 写在里面等于永远走不到，那几个 token 会按普通输入价计费。
+	if d := u.PromptTokensDetails; d != nil && d.CachedTokens != nil {
+		out.PromptTokensDetails.CachedTokens = *d.CachedTokens
+	} else if u.PromptCacheHitTokens != nil {
+		out.PromptTokensDetails.CachedTokens = *u.PromptCacheHitTokens
+	}
 	if d := u.PromptTokensDetails; d != nil {
-		if d.CachedTokens != nil {
-			out.PromptTokensDetails.CachedTokens = *d.CachedTokens
-		} else if u.PromptCacheHitTokens != nil {
-			out.PromptTokensDetails.CachedTokens = *u.PromptCacheHitTokens
-		}
 		if d.CachedCreationTokens != nil {
 			out.PromptTokensDetails.CachedCreationTokens = *d.CachedCreationTokens
 		}

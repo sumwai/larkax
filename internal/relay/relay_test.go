@@ -731,6 +731,21 @@ func TestUsageSemanticMissingIsVisible(t *testing.T) {
 	}
 }
 
+// 上游整条响应没带 usage 时也会缺声明，但那不是生产方的疏漏：
+// 一个数都没读到，就不存在「按哪个口径读」的问题。
+//
+// 两种缺声明都要能走到底，所以这条与上一条成对——只留一条的话，
+// 门槛写成「恒不打」或「恒打」都能通过。
+func TestUsageSemanticMissingNeedsCounts(t *testing.T) {
+	got := UsageFromRelaykit(&dto.Usage{})
+	if got.Raw["semantic_missing"] != nil {
+		t.Errorf("一个数都没读到，不该标 semantic_missing: %+v", got.Raw)
+	}
+	if got.PromptTokens != 0 || got.CompletionTokens != 0 {
+		t.Errorf("空用量应读成 0: %+v", got)
+	}
+}
+
 // 未知取值照 openai 读，而原值留在 Raw 里。
 //
 // 带上缓存是为了让分支可观测：按 openai 读是 7，误按 anthropic 读会是 10。

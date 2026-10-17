@@ -53,7 +53,8 @@ import (
 // 设成 openai；未知取值更可能是 OpenAI 形状的扩展而不是 Anthropic 的。
 // 这仍然不是「猜」——读的是一个声明出来的字段，默认值只是「没声明时按这个
 // 格式自己的原生口径读」。缺声明这件事会留在 Raw 里（semantic_missing），
-// 事后能查出一笔用量是按声明读的还是按默认分支读的。
+// 事后能查出一笔用量是按声明读的还是按默认分支读的；一个数都没读到时不标，
+// 那时没有「按哪个口径读」的问题（见 rawUsage）。
 //
 // # 缓存字段
 //
@@ -105,6 +106,11 @@ func UsageFromRelaykit(u *dto.Usage) channel.Usage {
 
 	reasoning := int64(u.CompletionTokenDetails.ReasoningTokens)
 
+	// 上游整条响应没带 usage 时，上面读出来的全是 0。那与「生产方忘了声明
+	// 口径」都会走到默认分支，但只有后者值得留在账上，所以标记只在
+	// **确实读到了数字**时才打（见 rawUsage）。
+	hasCounts := prompt != 0 || completion != 0 || cacheRead != 0 || cacheWrite != 0 || reasoning != 0
+
 	return channel.Usage{
 		PromptTokens:     prompt,
 		CompletionTokens: completion,
@@ -123,7 +129,7 @@ func UsageFromRelaykit(u *dto.Usage) channel.Usage {
 		// 声明成「已含」在数值上是空的。
 		CompletionIncludesReasoning: true,
 		UnitCounts:                  unitCountsFromRelaykit(u),
-		Raw:                         rawUsage(u),
+		Raw:                         rawUsage(u, hasCounts),
 	}
 }
 
@@ -149,7 +155,11 @@ func unitCountsFromRelaykit(u *dto.Usage) map[string]int64 {
 //
 // 它不参与计费——这一点很重要：Raw 是我方序列化的副本，字段名可能随
 // relaykit 版本变化，把它当计费依据等于把价格绑在依赖的内部结构上。
-func rawUsage(u *dto.Usage) map[string]any {
+//
+// hasCounts 表示这次用量里确实读到了数字。它只影响 semantic_missing
+// 打不打：上游整条响应没带 usage 时也会缺声明，但那种情况没有「按哪个
+// 口径读」的问题，一起标会让这个标记读起来像生产方的疏漏。
+func rawUsage(u *dto.Usage, hasCounts bool) map[string]any {
 	out := map[string]any{
 		"prompt_tokens":     u.PromptTokens,
 		"completion_tokens": u.CompletionTokens,
@@ -160,7 +170,7 @@ func rawUsage(u *dto.Usage) map[string]any {
 	}
 	if u.UsageSemantic != "" {
 		out["semantic"] = u.UsageSemantic
-	} else {
+	} else if hasCounts {
 		// 生产方没有声明口径，上面按 dto.Usage 的原生口径（OpenAI）读了。
 		// 把「没声明」这件事留在账上：否则事后分不出这一笔是按声明的口径
 		// 读的，还是按默认分支读的。

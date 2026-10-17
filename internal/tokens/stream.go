@@ -213,8 +213,9 @@ func (e *StreamEstimator) ObserveToolCall(id, name, args string) {
 // 输入算两遍。这是本文件里最容易写错的一处——写错的表现是「流里带 usage
 // 的请求，输入翻倍」，而它不会触发任何错误，只会让账单变高。
 //
-// **目前没有生产调用方**：`gateway` 只调了 ObserveDone，实测覆盖那条路还没接上，
-// 所以流式请求的用量目前一律是估的。
+// **目前没有生产调用方**：`gateway` 只调了 ObserveDone，实测覆盖那条路还没接上。
+// 这不等于流式用量是估的——`gateway` 在流里读到 usage 时直接用那个数，
+// 只是没经过本函数（见 internal/gateway/stream.go 的 streamUsage）。
 func (e *StreamEstimator) ObserveMeasured(m Count) {
 	if e == nil {
 		return
