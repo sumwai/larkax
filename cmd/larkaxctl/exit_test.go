@@ -2,9 +2,11 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/sumwai/larkax/internal/auth"
+	"github.com/sumwai/larkax/internal/ledger/store"
 )
 
 // 退出码是给脚本用的对外契约，所以这里逐个钉住**具体的数**，而不是拿常量
@@ -100,6 +102,20 @@ func TestExitCodeConflictForUnknownUser(t *testing.T) {
 	}
 	if got := exitCode(err); got != 4 {
 		t.Errorf("要查的那一行不存在时退出码应当是 4，得到 %d（%v）", got, err)
+	}
+}
+
+// TestExitCodeConflictForGenericConstraint 钉住兜底哨兵也落 4。
+//
+// 这个哨兵覆盖的是**没被逐个认出来**的唯一键与外键。它不经过哪条具体命令
+// 就能构造出来，所以这里直接喂一个带哨兵的错误：要钉的是「它被登记进
+// conflictErrors」这件事——漏登记的表现与「这条路径还没人走过」一模一样，
+// 没有任何一条真实路径会喊。
+func TestExitCodeConflictForGenericConstraint(t *testing.T) {
+	err := fmt.Errorf("%w: 写预留记录失败: %w",
+		store.ErrConstraintViolation, errors.New("driver error"))
+	if got := exitCode(err); got != 4 {
+		t.Errorf("通用约束冲突的退出码应当是 4，得到 %d（%v）", got, err)
 	}
 }
 

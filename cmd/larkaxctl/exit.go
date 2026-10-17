@@ -79,6 +79,11 @@ var conflictErrors = []error{
 	// 用户被删，store 那边由外键挡下并返回它（见 store.ErrNoSuchUser）。它与
 	// auth.ErrUserNotFound 是同一个事实的两条路径，共用一个退出码。
 	store.ErrNoSuchUser,
+	// 兜底的约束冲突：store 的写路径认不出具体含义的唯一键 / 外键都归到它。
+	// 上面那个具名哨兵比它精确（errors.Is 能直接问出「是用户不存在」），
+	// 但**只有被逐个认出来的约束**才有具名哨兵——枚举迟早漏，而退出码表
+	// 把外键与唯一键整体算作约束冲突。两条都列，判分类时具名的先命中。
+	store.ErrConstraintViolation,
 
 	channels.ErrChannelNotFound,
 
