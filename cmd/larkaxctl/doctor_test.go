@@ -417,6 +417,9 @@ func TestDoctorEndpointPathsMatchAPI(t *testing.T) {
 	if doctorPathMessages != api.PathMessages {
 		t.Errorf("messages 入口路径 = %q，internal/api 里是 %q", doctorPathMessages, api.PathMessages)
 	}
+	if doctorPathResponses != api.PathResponses {
+		t.Errorf("responses 入口路径 = %q，internal/api 里是 %q", doctorPathResponses, api.PathResponses)
+	}
 }
 
 // TestDoctorLiveSendsRequestAndPrintsResult 钉住「它真的发了请求、并把结果
@@ -524,6 +527,94 @@ func TestDoctorLiveMessagesUsesAnthropicHeaders(t *testing.T) {
 	}
 	if !got.ok() {
 		t.Errorf("这次调用该算通过，得到 status=%d err=%v", got.status, got.sendErr)
+	}
+}
+
+// TestDoctorLiveResponsesUsesResponsesShape 钉住 responses 入口的请求体是
+// **Responses 的形状**，而不是把 chat 的 messages[] 换一个路径发出去。
+//
+// 三处差异都要落到发出去的 JSON 上：顶层的 instructions、input[] 里的一条
+// user message item、以及 max_output_tokens。最后一条尤其不能写成 max_tokens
+// ——relaykit 把 Responses 的 max_output_tokens 落在 MaxCompletionTokens 上，
+// 写错名字时网关按「缺输出上界」回 400，而错误读起来像上游的问题。
+//
+// 判据是假上游收到的 body，不是结构体字段与常量相等：后者把字段从结构体上
+// 去掉也照样过。
+func TestDoctorLiveResponsesUsesResponsesShape(t *testing.T) {
+	var (
+		gotPath string
+		gotKey  string
+		gotAuth string
+		gotBody map[string]any
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotKey = r.Header.Get("x-api-key")
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"resp_1","object":"response","status":"completed",`+
+			`"model":"claude-x","output":[],"usage":{"input_tokens":7,"output_tokens":3,`+
+			`"total_tokens":10}}`)
+	}))
+	defer srv.Close()
+
+	got := runDoctorLive(context.Background(), doctorOptions{
+		live: true, model: "claude-x", endpoint: doctorEndpointResponses,
+		baseURL: srv.URL, key: testDoctorKey,
+	})
+
+	if gotPath != doctorPathResponses {
+		t.Errorf("路径 = %q，期望 %q", gotPath, doctorPathResponses)
+	}
+	if gotAuth != "Bearer "+testDoctorKey {
+		t.Errorf("responses 入口的凭证该走 Authorization: Bearer，得到 %q", gotAuth)
+	}
+	if gotKey != "" {
+		t.Errorf("responses 入口不该同时带 x-api-key，得到 %q", gotKey)
+	}
+
+	if _, ok := gotBody["messages"]; ok {
+		t.Errorf("responses 入口不该发 chat 的 messages[]：%v", gotBody)
+	}
+	if instructions, ok := gotBody["instructions"].(string); !ok || instructions == "" {
+		t.Errorf("顶层的 instructions 缺失或为空：%v", gotBody["instructions"])
+	}
+
+	input, ok := gotBody["input"].([]any)
+	if !ok || len(input) != 1 {
+		t.Fatalf("input 应当是只含一条 item 的数组，得到 %v（%T）", gotBody["input"], gotBody["input"])
+	}
+	item, ok := input[0].(map[string]any)
+	if !ok {
+		t.Fatalf("input[0] 不是对象：%T", input[0])
+	}
+	if item["role"] != "user" {
+		t.Errorf("input[0].role = %v，期望 user", item["role"])
+	}
+	if item["content"] != doctorLivePrompt {
+		t.Errorf("input[0].content = %v，期望 %q", item["content"], doctorLivePrompt)
+	}
+
+	limit, ok := gotBody["max_output_tokens"].(float64)
+	if !ok {
+		t.Fatalf("max_output_tokens 缺失或不是数字：%v（%T）", gotBody["max_output_tokens"], gotBody["max_output_tokens"])
+	}
+	if limit <= 0 {
+		t.Errorf("max_output_tokens = %v，网关要求它为正", limit)
+	}
+	if _, ok := gotBody["max_tokens"]; ok {
+		t.Errorf("responses 入口不该发 chat 的 max_tokens：%v", gotBody)
+	}
+
+	if !got.ok() {
+		t.Errorf("这次调用该算通过，得到 status=%d err=%v", got.status, got.sendErr)
+	}
+	if got.respModel != "claude-x" {
+		t.Errorf("响应里的模型 = %q，期望 claude-x", got.respModel)
+	}
+	if got.usage != "input=7 output=3" {
+		t.Errorf("用量 = %q，期望 input=7 output=3（Responses 的字段名）", got.usage)
 	}
 }
 
