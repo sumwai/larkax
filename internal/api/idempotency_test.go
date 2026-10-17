@@ -568,8 +568,9 @@ func TestIdempotentStoresRenderedResponse(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200", rec.Code)
 	}
-	// 响应本身一个字都不该变。留档那一份与发出去那一份相同（下面第四条）
-	// 只证明了两边一致，证明不了发出去的是原来那份——两条一起才成立。
+	// 响应本身一个字都不该变。这里先钉住**发出去的那一份**（状态码、两个
+	// 响应头、响应体），下面再钉住**留档的那一份**；两条一起才说明留档的
+	// 就是发出去的那份——只查留档那份的话，它自己与自己对得上就够了。
 	if got := rec.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
 		t.Errorf("Content-Type = %q，期望 application/json; charset=utf-8", got)
 	}

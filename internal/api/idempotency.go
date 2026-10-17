@@ -312,6 +312,16 @@ func (c *captureWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
 // 等结局落了库再 send 出去。这样写回就排在响应之前——调用方拿到 200 时，
 // 记录一定已经是 completed（见文件头）。
 //
+// # 它多留一份响应体
+//
+// 攒住的是整份响应体的副本，所以带幂等键的非流式请求峰值内存大致翻一倍
+// （renderSuccess 已经把整份物化过一次）。非流式响应通常不大，这个代价可以
+// 接受；留副本而不是留引用，是因为 http.ResponseWriter 的约定里 p 在 Write
+// 返回之后就可以被调用方复用，想留住它就只能复制。
+//
+// 那份副本会一直挂在这个结构上，直到 serveIdempotent 返回。它就是一个
+// bytes.Buffer，不值得为它加一处提前释放。
+//
 // # 它故意不实现 Unwrap
 //
 // 实现了的话 http.NewResponseController 会穿透到真正的 ResponseWriter，
@@ -327,6 +337,11 @@ type heldResponse struct {
 	body        bytes.Buffer
 }
 
+// WriteHeader 记下这份响应的状态码与 Content-Type，**不转发给底下那个**。
+//
+// 它实现的是 http.ResponseWriter，所以没有「未导出」这个选项——revive 要的
+// 那句话就写在这里。不转发是它与 captureWriter 唯一的差别：攒住就是为了
+// 等 send。
 func (h *heldResponse) WriteHeader(status int) {
 	if h.status == 0 {
 		h.status = status
