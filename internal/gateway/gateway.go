@@ -495,8 +495,13 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 	out := pipeline.Outcome{
 		Usage:       usageOf(routed.Response),
 		UsageSource: usageSourceOf(routed.Response),
+		// 耗时取**最后一次尝试**的量：前面失败的那几次各是一次独立的调用，
+		// 把它们的耗时加起来得到的不是「这个渠道多快」，而是「这次请求
+		// 因为重试耽误了多久」。
+		Duration: attemptDuration(routed.Attempts),
 	}
-	g.recordAttempts(ctx, routed.Attempts, &out.Usage)
+	// 内核的用量留给下面记健康度用：out.Usage 在 onUsage 之后就未必是它了。
+	kernelUsage := out.Usage
 
 	// 插件在**结算之前**跑：它改的是要交给调用方的那份正文，而结算读的
 	// 用量与它无关（ResponsePatch 里没有 usage）。位置选在这里而不是更靠后，
@@ -520,7 +525,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 	// 它改的是结算读的那份用量，而不是响应——所以位置反了不会有任何报错：
 	// 请求成功、响应正确、日志里插件也跑了，只有那笔钱是按内核的估算收的。
 	//
-	// 记给渠道的那一份（recordAttempts，上面）取的是**内核的**用量：这一路
+	// 记给渠道的那一份（recordAttempts，下面）取的是**内核的**用量：这一路
 	// 记的是这个渠道自己消耗了什么（健康度与额度自记账），而插件上报的是
 	// 计费口径上的说法。两者不一致时，以谁为准是插件契约里明确划过的：
 	// 上报只改计费，不改上游实际发生了什么。
@@ -536,8 +541,22 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 
 	charge, err := g.finishCharge(ctx, res, placed, out)
 	if err != nil {
+		// 结算没成，用量事件也就没落库。健康度仍然要记：这些调用真的发生过，
+		// 成功率的分子分母不该因为一次结算失败而少掉一次。
+		//
+		// 这里传给写入方的是 out.Usage 而不是内核那份：这一次没有用量事件，
+		// 缓存与延迟两列不会被重算，而自记账用的是**计费口径**的用量——
+		// 与结算失败时我们能给出的唯一一份数一致。
+		g.recordAttempts(ctx, routed.Attempts, &out.Usage)
 		return nil, err
 	}
+
+	// 健康度排在结算**之后**：延迟那一维的样本来自 usage_events.duration_ms，
+	// 而那一行是结算事务写的。提前记的话，这个桶的分位数里不含这一次
+	// ——它要等下一次调用才被带进去，于是那个数总落后一个请求。
+	//
+	// 用量取内核那份（out.Usage 在 onUsage 之后可能已被插件改过，理由同上）。
+	g.recordAttempts(ctx, routed.Attempts, &kernelUsage)
 
 	return &Result{
 		Response:      routed.Response,
@@ -1266,6 +1285,10 @@ func ruleCandidates(cands []route.Candidate) []pipeline.RuleCandidate {
 // 此刻不行，而「连续失败 N 次就别再试」这条保护正是靠它们累起来的。
 //
 // usage 非 nil 时附加给**成功的那一次**——只有它产生了用量。
+//
+// 它必须在成功请求的结算**之后**调用：延迟与缓存两列由写入方按桶从
+// usage_events 重算，而那一行是结算事务写的（见 route.CallOutcome）。
+// 失败的请求没有用量事件，也就不涉及这个顺序。
 func (g *Gateway) recordAttempts(ctx context.Context, attempts []route.Attempt, usage *channel.Usage) {
 	if g.Recorder == nil || len(attempts) == 0 {
 		return
@@ -1281,6 +1304,20 @@ func (g *Gateway) recordAttempts(ctx context.Context, attempts []route.Attempt, 
 		}
 		g.recordCall(ctx, rec)
 	}
+}
+
+// attemptDuration 取一次路由过程里**最后一次尝试**的耗时。
+//
+// 取最后一次而不是把全部加起来：失败的那几次各是一次独立的调用，加起来
+// 得到的是「这次请求因为重试耽误了多久」，而延迟那一维问的是「这个渠道
+// 多快」。最后一次正是真正服务了这次请求的那一次。
+//
+// 没有尝试时返回 0（写入方把它落成 NULL，不是 0 毫秒）。
+func attemptDuration(attempts []route.Attempt) time.Duration {
+	if len(attempts) == 0 {
+		return 0
+	}
+	return attempts[len(attempts)-1].Duration
 }
 
 // attemptTime 取一次尝试**结束**的时刻。

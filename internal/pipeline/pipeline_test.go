@@ -403,6 +403,41 @@ func TestSettleProducesChargeAndEntries(t *testing.T) {
 	}
 }
 
+// 耗时从 Outcome 原样搬到 Charge：它是 usage_events.duration_ms 的唯一来源。
+//
+// # 为什么这一条值得单独钉
+//
+// 耗时与金额无关，漏搬不会让任何计费用例变红：账单金额照旧正确、分录照旧
+// 平衡，只是渠道健康度的延迟那一维永远没有样本。那正是「三列恒为 0、
+// 权重写着在起作用而实际是常数」这条缺陷的形状。
+//
+// 零值也要原样搬：它到落库层才变成 NULL，本层不能把「没测到」改成 0。
+func TestSettleCarriesOutcomeDuration(t *testing.T) {
+	for _, want := range []time.Duration{1500 * time.Millisecond, 0} {
+		t.Run(want.String(), func(t *testing.T) {
+			src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}
+			p := newPipeline(t, src)
+
+			req := baseRequest()
+			res, err := p.Reserve(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			charge, err := p.Settle(context.Background(), req, res, Outcome{
+				Usage:       channel.Usage{PromptTokens: 1000, CompletionTokens: 200},
+				UsageSource: tokens.SourceMeasured,
+				Duration:    want,
+			})
+			if err != nil {
+				t.Fatalf("结算出错: %v", err)
+			}
+			if charge.Duration != want {
+				t.Errorf("Charge.Duration = %s，期望 %s", charge.Duration, want)
+			}
+		})
+	}
+}
+
 // 分录必须平衡：组内求和为零。这是账本的核心不变量。
 func TestSettleEntriesBalance(t *testing.T) {
 	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}

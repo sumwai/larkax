@@ -15,10 +15,37 @@
 |---|---|---|
 | 连续失败计数 | `channels.consecutive_failures` / `last_failure_at` | `route.DrainReason`：连续失败到阈值就暂时摘除 |
 | 小时桶计数 | `channel_health_rollup.requests` / `successes` / `failures` | `route.Health.SuccessRate` |
+| 小时桶的延迟与缓存 | `channel_health_rollup.latency_p95_ms` / `cache_hit_tokens` / `cache_miss_tokens` | `route.Health.LatencyP95` 与 `route.Candidate.CacheHitRate` |
 | 额度自记账 | `channel_quota_state` 的余量与可信度 | `route.DrainReason`（能不能用）与 `route.scoreQuota`（怎么排） |
 
 三处各自按主键或唯一键定位单行，没有把它们绑在一起的大事务：健康度与额度是
 两个独立的信号，其中一处写不进去不该让另外两处也不写。
+
+### 延迟与缓存是**重算**出来的，不是累加的
+
+后两列要的是分位数与比例，而这两个数都不是可累加的量：每次调用只有一个耗时
+样本，把它写进 p95 等于给一个错的数起了一个对的名字。所以样本留在用量事件里
+（`usage_events.duration_ms` 是「这次调用花了多久」），写入方每次按
+「渠道 × 那个小时桶」把它们重新聚一遍：
+
+| 列 | 算式 | 口径 |
+|---|---|---|
+| `latency_p95_ms` | `percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms)` | 取一个**真实观测到**的毫秒数；NULL 样本不参与 |
+| `cache_hit_tokens` | `SUM(cache_read_tokens)` | 命中缓存、直接复用的输入 |
+| `cache_miss_tokens` | `SUM(prompt_tokens + cache_write_tokens)` | 没被缓存服务到的输入总量 |
+
+缓存两列的分母口径与读侧一致：`cacheHitRate` 算的是 `hit / (hit + miss)`，
+而 `usage_events.prompt_tokens` 已经是**不含缓存**的输入、`cache_write_tokens`
+是这次新建的缓存条目——两者相加正好是输入总量。`cache_write` 不是「没命中」
+的另一种说法，但写入的 token 同样没有被命中服务到，所以它落在 miss 一侧。
+
+重算是幂等的：上一步成功、这一步失败时写进去的是旧值，而该桶的下一次调用会
+把它们整体重算一遍，不会像累加那样永久偏离。代价是每记一次调用要扫一遍该渠道
+在当前小时里的用量行（走 `usage_events_channel_idx`）。
+
+因此**健康度要在结算之后记**：用量事件是结算事务写的，提前记的话这个桶的
+分位数里不含刚刚这一次请求，它要等下一次调用才被带进去——那个数总落后一个
+请求，而金额上完全看不出来。
 
 ### 结局分三种，不是两种
 
@@ -140,17 +167,21 @@ NULL 表示不知道按什么计。这个列是**比较的前提**：`route.scor
   数值时会设 `LastErrorCode`，而 `LastErrorCode` 只在 `KindAPIQuery` 分支被清。
   两个分支今天都没有写入方，但一旦接上，一次 429 就会让一个查不到额度的渠道
   被 `Routable` **永久**排除，而且不留任何持久痕迹。接线前要先有答案。
-- **延迟与成本**：`channel_health_rollup` 的 `latency_p50_ms` /
-  `latency_p95_ms` / `cost` / `cache_*` 都还没有写入方。分位数需要多个样本，
-  单次调用给不出 p95——把单个样本写进 p95 是给一个错的数起了个对的名字。
-  成本属于用量记录那条线。
+- **延迟的分位数只在很小的样本上算**：`latency_p95_ms` 与 `cache_*` 由写入方
+  从 `usage_events` 按「渠道 × 小时桶」重算（见 `internal/channels` 的
+  `rollupSignalsSQL`）。一个低流量渠道的一小时可能只有两三次调用，那时的
+  p95 就是较大的那个观测值，不是统计意义上的分位数——读它的时候要知道这一点。
+  `latency_p50_ms` 没有读方，因此也不算。
+- **成本**：`channel_health_rollup.cost` 仍然没有写入方，而 `route.scoreCost`
+  的 `CostPerUnit` 要的是「售价」还是「我们的成本」还没有定
+  （`usage_events.cost` 是售价，上游成本那一列是 NULL，见 #163）。
+  在口径定下来之前不接，否则会把一个维度接成错的含义。
 
-这三处都是「读侧写好了、写入方没接」的形状。读侧把空值映射成「没有数据」
-（`route.Candidate` 上是一个 nil 指针），打分时**那一维整个退出加权**，
-剩下的维度按各自权重归一。所以它们既不会把候选打成最差，也不会稀释其余
-维度的差别——只是暂时不参与排序。
+延迟与缓存之外，成本这一维仍是「读侧写好了、写入方没接」的形状。读侧把空值
+映射成「没有数据」（`route.Candidate` 上是一个 nil 指针），打分时**那一维
+整个退出加权**，剩下的维度按各自权重归一。所以它既不会把候选打成最差，
+也不会稀释其余维度的差别——只是暂时不参与排序。
 
-反过来说，**一旦某个写入方开始写这三列，它立刻按 `route.DefaultWeights` 里的
-权重生效**，不需要改读侧或打分。今天这三项的权重是 `Cost 0.5 / Latency 0.3 /
-Cache 0.2`；因为没有任何候选有数据，它们加起来的那 1.0 权重目前是个恒定项，
-实际参与排序的只有健康度与额度两项。
+反过来说，**写入方一旦开始写某一列，它立刻按 `route.DefaultWeights` 里的
+权重生效**，不需要改读侧或打分。今天的权重是 `Cost 0.5 / Latency 0.3 /
+Cache 0.2`；延迟与缓存已经有数据，成本那一项还是恒定项。

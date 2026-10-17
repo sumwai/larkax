@@ -57,6 +57,43 @@ func readRollup(t *testing.T, db *sql.DB, channelID int64, bucket time.Time) (re
 	return requests, successes, failures
 }
 
+// readRollupSignals 读回某个小时桶的三列推导值（延迟与缓存）。
+//
+// 三列都可空：延迟在「整桶没有样本」时是 NULL，缓存两列是 NOT NULL，
+// 但没有桶时读不到行——所以这三个都按可空接。
+func readRollupSignals(t *testing.T, db *sql.DB, channelID int64, bucket time.Time) (p95 sql.NullInt64, hit, miss sql.NullInt64) {
+	t.Helper()
+	err := db.QueryRowContext(context.Background(), `
+		SELECT latency_p95_ms, cache_hit_tokens, cache_miss_tokens
+		  FROM channel_health_rollup
+		 WHERE channel_id = $1 AND bucket = $2`,
+		channelID, bucket).Scan(&p95, &hit, &miss)
+	if err != nil {
+		t.Fatalf("读健康度桶的推导列失败: %v", err)
+	}
+	return p95, hit, miss
+}
+
+// insertUsageEvent 按**落库时刻**插一行用量事件，只带聚合要读的四个数。
+//
+// created_at 显式给：它是分区键，也是桶归属的判据（见 rollupSignalsSQL）。
+// 给一个落在当期小时里的时刻，避开「跨整点」这个与本用例无关的边界。
+func insertUsageEvent(t *testing.T, db *sql.DB, channelID int64, at time.Time,
+	prompt, cacheRead, cacheWrite int64, durationMS any) {
+	t.Helper()
+	_, err := db.ExecContext(context.Background(), `
+		INSERT INTO usage_events
+			(request_id, user_id, channel_id, canonical_model, prompt_tokens,
+			 cache_read_tokens, cache_write_tokens, billing_path, cost,
+			 priced_at, duration_ms, created_at)
+		VALUES ($1, $2, $3, 'gpt-4o', $4, $5, $6, 'measured', 0, $7, $8, $9)`,
+		"req-"+itoa(nextID()), nextID(), channelID,
+		prompt, cacheRead, cacheWrite, at, durationMS, at)
+	if err != nil {
+		t.Fatalf("插入用量事件失败: %v", err)
+	}
+}
+
 // ── 连续失败 ────────────────────────────────────────────────────────────
 
 // 失败累加、成功清零，时间戳跟着走。
@@ -255,6 +292,214 @@ func TestRecordCallAccumulatesRollupBucket(t *testing.T) {
 	}
 	if requests, _, _ = readRollup(t, db, id, bucket); requests != 5 {
 		t.Errorf("累加之后 requests = %d，期望 5", requests)
+	}
+}
+
+// 缓存两列按「渠道 × 小时桶」从 usage_events 聚合，且两列相加等于输入总量。
+//
+// # 这条钉住的是两侧口径对得上
+//
+// 读侧算的是 SUM(cache_hit) / SUM(cache_hit + cache_miss)（见
+// cacheHitRate），所以写入侧必须让分母等于输入总量，否则算出来的不是命中率。
+// usage_events.prompt_tokens 是**不含缓存**的输入，cache_read 是命中，
+// cache_write 是这次新写进去的那部分——它同样没被命中服务到。漏掉
+// prompt_tokens 或漏掉 cache_write，命中率都会偏，而偏了之后仍然在 0..1
+// 之间，看起来完全正常。
+func TestRecordCallAggregatesCacheFromUsageEvents(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	id := insertChannel(t, db, sealer, channelSpec{model: model})
+	r := NewRecorder(db, testStaleAfter)
+
+	// 桶归属看的是 usage_events.created_at，所以两个时刻要落在同一个小时里。
+	at := time.Now().UTC().Truncate(time.Hour).Add(10 * time.Minute)
+	bucket := at.Truncate(time.Hour)
+
+	// 两次调用：
+	//   1) 输入 1000，其中 600 命中缓存、100 新建缓存条目，非缓存输入 300
+	//   2) 输入 500， 其中 200 命中缓存、0 新建，        非缓存输入 300
+	insertUsageEvent(t, db, id, at, 300, 600, 100, 120)
+	insertUsageEvent(t, db, id, at.Add(time.Minute), 300, 200, 0, 80)
+
+	if err := r.RecordCall(context.Background(), outcome(id, at.Add(2*time.Minute), route.VerdictSuccess)); err != nil {
+		t.Fatalf("记录失败: %v", err)
+	}
+
+	_, hit, miss := readRollupSignals(t, db, id, bucket)
+	if !hit.Valid || hit.Int64 != 800 {
+		t.Errorf("cache_hit_tokens = %v，期望 800（两次的 cache_read 之和）", hit)
+	}
+	if !miss.Valid || miss.Int64 != 700 {
+		t.Errorf("cache_miss_tokens = %v，期望 700（300+100 与 300+0：没被缓存服务到的输入）", miss)
+	}
+	if total := hit.Int64 + miss.Int64; total != 1500 {
+		t.Errorf("hit + miss = %d，期望 1500（两次的输入总量：1000 + 500）", total)
+	}
+
+	// 读侧看到的命中率必须与这里的分母口径一致：800/1500。
+	got, err := New(db, sealer).Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("候选数 = %d，期望 1", len(got))
+	}
+	if got[0].CacheHitRate == nil {
+		t.Fatal("缓存命中率为 nil，期望有数据（两个计数都非零）")
+	}
+	if want := 800.0 / 1500.0; *got[0].CacheHitRate != want {
+		t.Errorf("CacheHitRate = %v，期望 %v", *got[0].CacheHitRate, want)
+	}
+	if got[0].SampleCount != 1500 {
+		t.Errorf("SampleCount = %d，期望 1500（样本数是 token 数，不是请求数）", got[0].SampleCount)
+	}
+}
+
+// 没有任何用量事件时两列留 0，不是 NULL——表的这两列是 NOT NULL DEFAULT 0。
+//
+// 读侧把「合计为 0」当成没有样本（见 cacheHitRate），所以这里不写也等价于
+// 「未知」。这条用例钉的是「重算不会把一列莫名其妙写成别的数」，以及
+// 重算语句在空集合上不报错——它的 SUM 套了 COALESCE，`FROM` 没有行时
+// 聚合仍返回一行（cache 两列 0、p95 为 NULL）。
+func TestRecordCallWithoutUsageLeavesCacheAtZero(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	r := NewRecorder(db, testStaleAfter)
+
+	// 一次失败调用：没有用量事件（上游没有回执）。
+	at := time.Now().UTC().Truncate(time.Hour).Add(5 * time.Minute)
+	if err := r.RecordCall(context.Background(), outcome(id, at, route.VerdictFailure)); err != nil {
+		t.Fatalf("记录失败: %v", err)
+	}
+
+	p95, hit, miss := readRollupSignals(t, db, id, at.Truncate(time.Hour))
+	if p95.Valid {
+		t.Errorf("latency_p95_ms = %v，期望 NULL（一个耗时样本都没有）", p95)
+	}
+	if hit.Int64 != 0 || miss.Int64 != 0 {
+		t.Errorf("缓存两列 = (%d, %d)，期望 (0, 0)", hit.Int64, miss.Int64)
+	}
+}
+
+// 延迟取桶内耗时的 95 分位，NULL 不参与。
+//
+// # 分位数的一个边界
+//
+// 样本少时 p95 没有统计意义：两条样本的 p95 就是较大的那条（percentile_disc
+// 取的是真实观测值里最靠后的那个）。这条用例刻意只用少量样本，钉的是
+// **口径**（哪个数是 p95、NULL 怎么处理），不是统计性质。
+//
+// NULL 那一次必须不参与：把没测到的调用当成 0 毫秒，会把分位数往下拉，
+// 而拉低之后读出来是「这个渠道很快」——没有任何东西会报出来。
+func TestRecordCallAggregatesLatencyP95(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	id := insertChannel(t, db, sealer, channelSpec{model: model})
+	r := NewRecorder(db, testStaleAfter)
+
+	at := time.Now().UTC().Truncate(time.Hour).Add(20 * time.Minute)
+	bucket := at.Truncate(time.Hour)
+
+	// 20 条有值样本：1..20 毫秒，外加一条 NULL（没测到）。
+	for i := int64(1); i <= 20; i++ {
+		insertUsageEvent(t, db, id, at, 10, 0, 0, i)
+	}
+	insertUsageEvent(t, db, id, at, 10, 0, 0, nil)
+
+	if err := r.RecordCall(context.Background(), outcome(id, at, route.VerdictSuccess)); err != nil {
+		t.Fatalf("记录失败: %v", err)
+	}
+
+	p95, _, _ := readRollupSignals(t, db, id, bucket)
+	// percentile_disc(0.95) 在 20 个样本里取第 ceil(0.95*20)=19 个，即 19ms。
+	// NULL 若被当成 0 参与，排序后样本变成 21 个且最小是 0，第 20 个还是 19
+	// ——所以这里另外单独钉 NULL 不参与（下一条用例用少样本让它显形）。
+	if !p95.Valid || p95.Int64 != 19 {
+		t.Errorf("latency_p95_ms = %v，期望 19（1..20 的 95 分位）", p95)
+	}
+
+	// 读侧把它当毫秒的 Duration 交出去。
+	got, err := New(db, sealer).Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	if len(got) != 1 || got[0].Health.LatencyP95 == nil {
+		t.Fatalf("延迟分位为 nil，期望有数据")
+	}
+	if d := *got[0].Health.LatencyP95; d != 19*time.Millisecond {
+		t.Errorf("LatencyP95 = %s，期望 19ms", d)
+	}
+}
+
+// NULL 样本不参与分位数：把没测到的调用当 0 毫秒会让分位数塌下来。
+//
+// 用两条样本让这件事显形：10ms 与 NULL 的 95 分位是 10ms；
+// 若 NULL 被当成 0，样本变成 {0, 10}，p95 仍是 10（percentile_disc 取最大）
+// ——所以这里再加一条 0 会改变结论的形状：{10, NULL} 配 p95 的判据是
+// 「有没有 0 混进来」，用 5 条样本、其中 4 条 NULL 才分得开：
+// 真值是 10；把 NULL 当 0 时样本 {0,0,0,0,10}，p95 仍是 10。
+// 于是改成：**只有一条 NULL 时结果是 NULL**，有一条 10ms 时结果是 10ms。
+func TestRecordCallLatencyIgnoresNullSamples(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	r := NewRecorder(db, testStaleAfter)
+
+	at := time.Now().UTC().Truncate(time.Hour).Add(30 * time.Minute)
+	bucket := at.Truncate(time.Hour)
+
+	// 只有 NULL 样本：分位数必须是 NULL，不是 0。
+	insertUsageEvent(t, db, id, at, 10, 0, 0, nil)
+	insertUsageEvent(t, db, id, at, 10, 0, 0, nil)
+	if err := r.RecordCall(context.Background(), outcome(id, at, route.VerdictSuccess)); err != nil {
+		t.Fatalf("记录失败: %v", err)
+	}
+	if p95, _, _ := readRollupSignals(t, db, id, bucket); p95.Valid {
+		t.Fatalf("全是 NULL 样本时 latency_p95_ms = %v，期望 NULL", p95)
+	}
+
+	// 再加一条真实样本：结果就是它，NULL 那两条不参与。
+	insertUsageEvent(t, db, id, at, 10, 0, 0, 42)
+	if err := r.RecordCall(context.Background(), outcome(id, at, route.VerdictSuccess)); err != nil {
+		t.Fatalf("记录失败: %v", err)
+	}
+	if p95, _, _ := readRollupSignals(t, db, id, bucket); !p95.Valid || p95.Int64 != 42 {
+		t.Errorf("latency_p95_ms = %v，期望 42（NULL 样本不参与）", p95)
+	}
+}
+
+// 重算只动**本桶**：相邻小时的用量事件不混进来。
+//
+// 读侧按 24 小时窗口把各桶的 p95 取最近一个非空值，所以一个桶里混进上一小时
+// 的样本不会立刻表现为错，只会让那个数悄悄偏掉。
+func TestRecordCallSignalsArePerBucket(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	r := NewRecorder(db, testStaleAfter)
+
+	current := time.Now().UTC().Truncate(time.Hour).Add(40 * time.Minute)
+	previous := current.Add(-time.Hour)
+
+	insertUsageEvent(t, db, id, previous, 100, 900, 0, 900)
+	insertUsageEvent(t, db, id, current, 100, 0, 0, 30)
+
+	if err := r.RecordCall(context.Background(), outcome(id, current, route.VerdictSuccess)); err != nil {
+		t.Fatalf("记录失败: %v", err)
+	}
+
+	p95, hit, miss := readRollupSignals(t, db, id, current.Truncate(time.Hour))
+	if !p95.Valid || p95.Int64 != 30 {
+		t.Errorf("当前桶 latency_p95_ms = %v，期望 30（上一小时的 900ms 不该混进来）", p95)
+	}
+	if hit.Int64 != 0 {
+		t.Errorf("当前桶 cache_hit_tokens = %d，期望 0", hit.Int64)
+	}
+	if miss.Int64 != 100 {
+		t.Errorf("当前桶 cache_miss_tokens = %d，期望 100", miss.Int64)
 	}
 }
 
