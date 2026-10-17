@@ -550,6 +550,30 @@ func TestExpiredPartitionsMatchesDrop(t *testing.T) {
 	}
 }
 
+// 到期线是「哪些分区到期」的定义处：清理的筛选与命令行打印的那句说明都从它取。
+//
+// 上面那条用例把「09-16 当天保留、09-15 删除」钉在了删除行为上，这一条把同一条
+// 线钉在函数本身上——`snapshot cleanup` 在没有到期分区时打出来的就是这个数，
+// 两处各算一遍的话，命令说的到期线会与实际删的错开一天，而那种错误不报错。
+func TestRetentionCutoffIsTheExpiryLine(t *testing.T) {
+	cases := []struct {
+		days int
+		want time.Time
+	}{
+		{30, time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC)},
+		{1, time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)},
+	}
+	for _, tc := range cases {
+		got := RetentionCutoff(tc.days, testDay)
+		if !got.Equal(tc.want) {
+			t.Errorf("RetentionCutoff(%d, %s) = %s，期望 %s", tc.days, testDay, got, tc.want)
+		}
+		if got.Location() != time.UTC {
+			t.Errorf("到期线应当是 UTC 零点，实际时区为 %s", got.Location())
+		}
+	}
+}
+
 // 留存期非正时拒绝执行：静默按一个默认值删，会删掉本来该留的数据。
 func TestRetentionMustBePositive(t *testing.T) {
 	for _, days := range []int{0, -1, -30} {

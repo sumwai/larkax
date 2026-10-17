@@ -81,19 +81,43 @@ func TestLoadConfigReadsAllThree(t *testing.T) {
 	}
 }
 
-// 关掉开关时不校验另外两项：关了就不采集，留存期填错没有后果，
-// 此时拒绝启动只会让「先关掉再说」这条退路也走不通。
-func TestLoadConfigDisabledSkipsValidation(t *testing.T) {
+// 关掉采集时留存期照样要读出来：存量分区仍按它清理，而清理不看采集开关。
+//
+// 这一条的前身（TestLoadConfigDisabledSkipsValidation）断言的是「关掉开关时
+// 另外两项都不读、不校验」。对 max_bytes 那半仍然成立——关了就没有骨架会经过
+// 它，「先关掉再说」这条退路要留着；对 retention_days 那半不成立了：静默留一个
+// 0 的后果是「清理什么也不删，却报成功」。
+func TestLoadConfigDisabledStillReadsRetention(t *testing.T) {
 	cfg, err := LoadConfig(loadValues(t, map[string]string{
 		"request_snapshot.enabled":        `false`,
 		"request_snapshot.max_bytes":      `0`,
-		"request_snapshot.retention_days": `-1`,
+		"request_snapshot.retention_days": `7`,
 	}))
 	if err != nil {
-		t.Fatalf("关掉开关时不该报错: %v", err)
+		t.Fatalf("关掉采集时 max_bytes 不该参与校验: %v", err)
 	}
 	if cfg.Enabled {
 		t.Error("期望 Enabled 为 false")
+	}
+	if cfg.RetentionDays != 7 {
+		t.Errorf("RetentionDays = %d，期望 7：关掉采集时清理仍按它算到期线", cfg.RetentionDays)
+	}
+}
+
+// 关掉采集时留存期非法仍然报错，而不是留一个 0 让它到清理那一刻才静默失败。
+func TestLoadConfigDisabledRejectsBadRetention(t *testing.T) {
+	for _, value := range []string{`0`, `-1`} {
+		_, err := LoadConfig(loadValues(t, map[string]string{
+			"request_snapshot.enabled":        `false`,
+			"request_snapshot.retention_days": value,
+		}))
+		if err == nil {
+			t.Errorf("retention_days = %s 且采集关掉时应当报错，实际通过", value)
+			continue
+		}
+		if !strings.Contains(err.Error(), KeyRetentionDays) {
+			t.Errorf("错误信息里应点名 %s，实际为 %v", KeyRetentionDays, err)
+		}
 	}
 }
 

@@ -24,6 +24,8 @@
 // 开关、字节上限与留存期都来自 settings 表（见 config.go）。
 // 关掉开关时 Redactor 与 Sink 都返回 nil，网关据此完全不采集——
 // 「关掉」是零成本，而不是「采集了再丢掉」。
+//
+// 而落库层照建：清理存量分区只用得上它，与写不写新快照无关（见 New）。
 package snapshotwire
 
 import (
@@ -70,7 +72,18 @@ var ErrCapacityExceeded = errors.New("快照并发写已满，本条被丢弃")
 type Collector struct {
 	requestRedactor  *snapshot.Redactor
 	responseRedactor *snapshot.Redactor
-	store            *Store
+
+	// store 是落库层。**关掉采集时它也照样建**：清理存量分区只用得上它，
+	// 与「要不要写新快照」无关（见 New）。
+	store *Store
+
+	// collecting 表示这条链路要不要写新快照。
+	//
+	// 它只管**写**。不要拿它去判「这条链路能不能清理存量分区」——那个判据
+	// 曾经就是它（当时的名字叫 Enabled），后果是关掉采集时清理被一起废掉，
+	// 而命令照样打印成功、退出码 0。清理没有开关：留存承诺管的是已经存下来
+	// 的数据，与「还要不要写新的」无关。
+	collecting bool
 
 	// retentionDays 只被清理动作读，请求路径不碰它。
 	retentionDays int
@@ -88,9 +101,19 @@ type Collector struct {
 
 // New 按配置建立快照链路。
 //
-// 开关关闭时返回一个 Enabled 为 false 的 Collector，它的 Redactor 与 Sink
-// 都返回 nil——调用方据此完全不采集。这样「关掉」的代价是零，
-// 而不是先把请求脱敏一遍再丢掉。
+// # 关掉采集时仍然建 Store
+//
+// 开关只决定「要不要写新快照」：关掉时 Redactor 与 Sink 都返回 nil，
+// 调用方据此完全不采集，代价是零而不是「脱敏一遍再丢掉」。
+//
+// 而落库层照建。清理存量分区只需要 DDL 能力，与写不写新快照无关；
+// 把两者捆在一个开关上的后果是「关掉采集」这个动作顺带废掉了留存承诺，
+// 而关掉采集的动机通常正是「不想让快照再涨」，那时已有的分区反而更需要被清掉。
+// settings 里这个开关自己的描述也是这么写的：「关闭后不再写入新快照，
+// 已有的按留存期清理」。
+//
+// 于是「写」与「清」各有各的判据：写看 collecting，清不看任何开关。
+// 别用 collecting 去判后者——那正是这里修掉的缺陷。
 //
 // max_bytes 非法（非正）时返回错误而不回落到默认值：上限配错会导致
 // 每条骨架都降级成摘要层，静默回落会让这种配置错误永远不显形。
@@ -99,8 +122,11 @@ func New(cfg Config, db DB, logger *slog.Logger) (*Collector, error) {
 		logger = slog.Default()
 	}
 	c := &Collector{
-		logger: logger,
-		sem:    make(chan struct{}, maxConcurrentWrites),
+		logger:        logger,
+		sem:           make(chan struct{}, maxConcurrentWrites),
+		store:         NewStore(db, logger),
+		collecting:    cfg.Enabled,
+		retentionDays: cfg.RetentionDays,
 	}
 	if !cfg.Enabled {
 		return c, nil
@@ -116,13 +142,15 @@ func New(cfg Config, db DB, logger *slog.Logger) (*Collector, error) {
 	}
 	c.requestRedactor = req
 	c.responseRedactor = resp
-	c.store = NewStore(db, logger)
-	c.retentionDays = cfg.RetentionDays
 	return c, nil
 }
 
-// Enabled 表示这条链路是否采集快照。
-func (c *Collector) Enabled() bool { return c.store != nil }
+// Collecting 表示这条链路是否采集（写新快照）。
+//
+// 它与「能不能清理存量分区」是两件事：清理只看落库层在不在，而落库层在采集
+// 关掉时也建好了（见 New）。所以这个方法不该被用来判清理路径能不能跑——
+// 关掉采集之后旧分区照样要按留存期删掉。
+func (c *Collector) Collecting() bool { return c.collecting }
 
 // RetentionDays 返回配置的留存天数。
 func (c *Collector) RetentionDays() int { return c.retentionDays }
@@ -133,38 +161,39 @@ func (c *Collector) RetentionDays() int { return c.retentionDays }
 // snapshot 子命令）。留存期的承诺靠的是「这个动作真的被执行」，
 // 所以它的返回值是被删掉的分区名清单，而不是一个 bool——
 // 调用方要能看出「删了哪些」，而不只是「没报错」。
+//
+// # 采集关掉时照样删
+//
+// 这里不看 Collecting()：留存承诺管的是**已经存下来的**数据，与「还要不要
+// 写新的」无关。关掉采集之后不再清理的后果是旧分区永久留在库里——而清掉
+// 它们恰恰是关掉采集的人想要的第一件事。
 func (c *Collector) DropExpired(ctx context.Context, at time.Time) ([]string, error) {
-	if !c.Enabled() {
-		return nil, nil
-	}
 	return c.store.DropExpired(ctx, c.retentionDays, at)
 }
 
 // ExpiredPartitions 列出到期分区但不动它们，供演练使用。
 //
 // 与 DropExpired 同源判据，「演练说会删哪些」因此等于「执行真的删了哪些」。
-// 采集关闭时返回空：此时没有留存期可谈，也不该声称有分区到期。
+// 与它一样不看采集开关：关掉采集时存量分区照样按留存期到期，
+// 演练也必须照实列出来，否则「演练说没有到期的」又变成一句无从核对的话。
 func (c *Collector) ExpiredPartitions(ctx context.Context, at time.Time) ([]string, error) {
-	if !c.Enabled() {
-		return nil, nil
-	}
 	return c.store.ExpiredPartitions(ctx, c.retentionDays, at)
 }
 
-// Redactor 返回给网关用的脱敏器；未启用时返回 nil。
+// Redactor 返回给网关用的脱敏器；不采集时返回 nil。
 //
 // 返回 nil 而不是一个「什么都不做」的实现：网关对 nil 的处理是
 // 「根本不采集」，而对空实现的处理是「采集了一条空快照再落库」。
 func (c *Collector) Redactor() gateway.Redactor {
-	if !c.Enabled() {
+	if !c.Collecting() {
 		return nil
 	}
 	return c
 }
 
-// Sink 返回给网关用的落库层；未启用时返回 nil。
+// Sink 返回给网关用的落库层；不采集时返回 nil。
 func (c *Collector) Sink() gateway.SnapshotSink {
-	if !c.Enabled() {
+	if !c.Collecting() {
 		return nil
 	}
 	return c
@@ -220,7 +249,7 @@ func toSnapshot(res *snapshot.Result, err error) (*gateway.Snapshot, error) {
 // 需要调整），写库失败是存储的问题。混成一句话会让日志里的「该调上限」
 // 与「库坏了」分不开。
 func (c *Collector) Save(ctx context.Context, snap *gateway.Snapshot) error {
-	if !c.Enabled() || snap == nil {
+	if !c.Collecting() || snap == nil {
 		return nil
 	}
 	// request_id 为空时从 context 补上。

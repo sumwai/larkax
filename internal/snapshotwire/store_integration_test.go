@@ -247,6 +247,50 @@ func TestIntegrationDropExpiredDropsRealPartitions(t *testing.T) {
 	}
 }
 
+// 采集关掉时清理必须真的跑：写新快照与清存量是两件事，而它们曾经共用一个谓词。
+//
+// 走 Collector 而不是 Store：这条判据挂在 Collector 上，真库要证明的是
+// 「关掉采集之后，那张分区真的没了」。假实现能证明调用到达了 Store，
+// 证明不了 DDL 在真库上发生了。
+func TestIntegrationCleanupRunsWhenCollectingDisabled(t *testing.T) {
+	handle := testDB(t)
+	ctx := context.Background()
+
+	expired := "request_snapshots_1999_05_05"
+	dropRequestSnapshotPartition(ctx, t, handle, expired)
+	from, to := partitionBounds(t, expired)
+	if _, err := handle.ExecContext(ctx,
+		"CREATE TABLE "+expired+" PARTITION OF request_snapshots FOR VALUES FROM ('"+
+			from+"') TO ('"+to+"')"); err != nil {
+		t.Fatalf("造到期分区失败: %v", err)
+	}
+	t.Cleanup(func() {
+		dropRequestSnapshotPartition(context.Background(), t, handle, expired)
+	})
+
+	c := newCollector(t, Config{Enabled: false, RetentionDays: 30}, Wrap(handle))
+	if c.Collecting() {
+		t.Fatal("这条用例的前提是采集关着")
+	}
+
+	dropped, err := c.DropExpired(ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("清理失败: %v", err)
+	}
+	found := false
+	for _, name := range dropped {
+		if name == expired {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("返回的清单 %v 里没有 %s", dropped, expired)
+	}
+	if _, err := handle.ExecContext(ctx, "SELECT 1 FROM "+expired); err == nil {
+		t.Errorf("%s 仍在：关掉采集把清理一起废掉了", expired)
+	}
+}
+
 // 演练与执行在真库上也要给出同一份清单。
 //
 // 测试自己造一个到期分区，而不是「有就比、没有就跳过」：本机与 CI 库里
