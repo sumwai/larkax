@@ -72,16 +72,26 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 
 	var parsed responsesResponse
 	if decodeErr := json.NewDecoder(resp.Body).Decode(&parsed); decodeErr != nil {
-		return nil, &channel.ErrUpstream{Retryable: true, Err: fmt.Errorf("解析上游响应失败: %w", decodeErr)}
+		return nil, &channel.ErrUpstream{
+			StatusCode:  resp.StatusCode,
+			GotResponse: true,
+			Retryable:   true,
+			Err:         fmt.Errorf("解析上游响应失败: %w", decodeErr),
+		}
 	}
 
-	if upErr := parsed.upstreamError(); upErr != nil {
+	if upErr := parsed.upstreamError(resp.StatusCode); upErr != nil {
 		return nil, upErr
 	}
 
 	out, err := relay.ResponseFromRelaykit(parsed.toRelaykit())
 	if err != nil {
-		return nil, &channel.ErrUpstream{Retryable: true, Err: err}
+		return nil, &channel.ErrUpstream{
+			StatusCode:  resp.StatusCode,
+			GotResponse: true,
+			Retryable:   true,
+			Err:         err,
+		}
 	}
 	return out, nil
 }
@@ -96,17 +106,25 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 //   - status == "failed"。它是 Responses 自己的终态之一，与 incomplete
 //     不同：incomplete 是「停在了长度上限上」，那是一次**正常**结束，
 //     照常计费。
-func (r responsesResponse) upstreamError() error {
+//
+// status 是这次响应的真实状态码（调用方已经过了 CheckStatus，所以它一定是
+// 2xx）。它要跟着错误一起带出去：上游确实回了这一个状态，丢掉会让账单上
+// 那一行读成「没有记录到状态码」。
+func (r responsesResponse) upstreamError(status int) error {
 	if !r.Error.empty() {
 		return &channel.ErrUpstream{
-			Body:      r.Error.Message,
-			Retryable: false,
+			StatusCode:  status,
+			GotResponse: true,
+			Body:        r.Error.Message,
+			Retryable:   false,
 		}
 	}
 	if strings.EqualFold(rawString(r.Status), "failed") {
 		return &channel.ErrUpstream{
-			Err:       errors.New("上游把这次响应标记为 failed"),
-			Retryable: false,
+			StatusCode:  status,
+			GotResponse: true,
+			Err:         errors.New("上游把这次响应标记为 failed"),
+			Retryable:   false,
 		}
 	}
 	return nil
@@ -153,7 +171,7 @@ func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, events 
 	defer close(events)
 	defer func() { _ = resp.Body.Close() }()
 	defer httpx.Drain(resp.Body)
-	a.pump(ctx, resp.Body, events)
+	a.pump(ctx, resp.StatusCode, resp.Body, events)
 }
 
 // ListModels 查询上游可用模型。
@@ -184,7 +202,12 @@ func (a *Adapter) ListModels(ctx context.Context, ch channel.Channel) ([]string,
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, &channel.ErrUpstream{Retryable: true, Err: fmt.Errorf("解析模型列表失败: %w", err)}
+		return nil, &channel.ErrUpstream{
+			StatusCode:  resp.StatusCode,
+			GotResponse: true,
+			Retryable:   true,
+			Err:         fmt.Errorf("解析模型列表失败: %w", err),
+		}
 	}
 
 	out := make([]string, 0, len(payload.Data))

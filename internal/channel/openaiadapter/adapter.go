@@ -63,23 +63,38 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 
 	var parsed json.RawMessage
 	if decodeErr := json.NewDecoder(resp.Body).Decode(&parsed); decodeErr != nil {
-		return nil, &channel.ErrUpstream{Retryable: true, Err: fmt.Errorf("解析上游响应失败: %w", decodeErr)}
+		return nil, &channel.ErrUpstream{
+			StatusCode:  resp.StatusCode,
+			GotResponse: true,
+			Retryable:   true,
+			Err:         fmt.Errorf("解析上游响应失败: %w", decodeErr),
+		}
 	}
 
 	// 有些上游在 HTTP 200 里塞一个 error 对象。只看状态码会把它当成正常响应，
 	// 于是「上游失败了」在账上表现为「成功但用量为零」。
-	if e := extractEmbeddedError(parsed); e != nil {
+	if e := extractEmbeddedError(parsed, resp.StatusCode); e != nil {
 		return nil, e
 	}
 
 	var textResp openAITextResponse
 	if unmarshalErr := json.Unmarshal(parsed, &textResp); unmarshalErr != nil {
-		return nil, &channel.ErrUpstream{Retryable: true, Err: fmt.Errorf("响应结构不符: %w", unmarshalErr)}
+		return nil, &channel.ErrUpstream{
+			StatusCode:  resp.StatusCode,
+			GotResponse: true,
+			Retryable:   true,
+			Err:         fmt.Errorf("响应结构不符: %w", unmarshalErr),
+		}
 	}
 
 	out, err := relay.ResponseFromRelaykit(textResp.toRelaykit())
 	if err != nil {
-		return nil, &channel.ErrUpstream{Retryable: true, Err: err}
+		return nil, &channel.ErrUpstream{
+			StatusCode:  resp.StatusCode,
+			GotResponse: true,
+			Retryable:   true,
+			Err:         err,
+		}
 	}
 	return out, nil
 }
@@ -127,7 +142,7 @@ func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, events 
 	defer close(events)
 	defer func() { _ = resp.Body.Close() }()
 	defer httpx.Drain(resp.Body)
-	a.pump(ctx, resp.Body, events)
+	a.pump(ctx, resp.StatusCode, resp.Body, events)
 }
 
 // ListModels 查询上游可用模型。
@@ -158,7 +173,12 @@ func (a *Adapter) ListModels(ctx context.Context, ch channel.Channel) ([]string,
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, &channel.ErrUpstream{Retryable: true, Err: fmt.Errorf("解析模型列表失败: %w", err)}
+		return nil, &channel.ErrUpstream{
+			StatusCode:  resp.StatusCode,
+			GotResponse: true,
+			Retryable:   true,
+			Err:         fmt.Errorf("解析模型列表失败: %w", err),
+		}
 	}
 
 	out := make([]string, 0, len(payload.Data))
@@ -239,7 +259,11 @@ func (a *Adapter) setHeaders(req *http.Request, ch channel.Channel) {
 // 有上游在 HTTP 200 里返回 `{"error": {...}}`。只看状态码会把它当成正常响应，
 // 于是「上游失败了」在账上表现为「成功但用量为零」——那比直接报错更难查，
 // 因为没有任何一处会失败。
-func extractEmbeddedError(raw json.RawMessage) error {
+//
+// status 是这次响应的真实状态码（调用方已经过了 CheckStatus，所以它一定是
+// 2xx）。要把它带进错误里：上游确实回了这一个状态，丢掉它会让账单上那一行
+// 读成「没有记录到状态码」，而它其实是一个确定的事实。
+func extractEmbeddedError(raw json.RawMessage, status int) error {
 	var probe struct {
 		Error *struct {
 			Message string `json:"message"`
@@ -260,7 +284,9 @@ func extractEmbeddedError(raw json.RawMessage) error {
 		return nil
 	}
 	return &channel.ErrUpstream{
-		Body:      probe.Error.Message,
-		Retryable: false,
+		StatusCode:  status,
+		GotResponse: true,
+		Body:        probe.Error.Message,
+		Retryable:   false,
 	}
 }

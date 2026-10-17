@@ -74,22 +74,37 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 
 	var parsed claudeResponse
 	if decodeErr := json.NewDecoder(resp.Body).Decode(&parsed); decodeErr != nil {
-		return nil, &channel.ErrUpstream{Retryable: true, Err: fmt.Errorf("解析上游响应失败: %w", decodeErr)}
+		return nil, &channel.ErrUpstream{
+			StatusCode:  resp.StatusCode,
+			GotResponse: true,
+			Retryable:   true,
+			Err:         fmt.Errorf("解析上游响应失败: %w", decodeErr),
+		}
 	}
 
 	// Anthropic 的错误体形状是 {"type":"error","error":{...}}，而 HTTP 状态码
 	// 也可能是 200。不检查会把失败当成正常响应，于是「上游失败了」在账上
 	// 表现为「成功但用量为零」——没有任何一处会失败，比直接报错更难查。
+	//
+	// 200 要照实记下来：上游确实回了它，丢掉会让账单上那一行读成「没有
+	// 记录到状态码」。
 	if parsed.Type == "error" || parsed.Error != nil {
 		return nil, &channel.ErrUpstream{
-			Body:      parsed.errorMessage(),
-			Retryable: isRetryableErrorType(parsed.errorType()),
+			StatusCode:  resp.StatusCode,
+			GotResponse: true,
+			Body:        parsed.errorMessage(),
+			Retryable:   isRetryableErrorType(parsed.errorType()),
 		}
 	}
 
 	out, err := relay.ResponseFromRelaykit(parsed.toRelaykit())
 	if err != nil {
-		return nil, &channel.ErrUpstream{Retryable: true, Err: err}
+		return nil, &channel.ErrUpstream{
+			StatusCode:  resp.StatusCode,
+			GotResponse: true,
+			Retryable:   true,
+			Err:         err,
+		}
 	}
 	return out, nil
 }
@@ -133,7 +148,7 @@ func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, events 
 	defer close(events)
 	defer func() { _ = resp.Body.Close() }()
 	defer httpx.Drain(resp.Body)
-	a.pump(ctx, resp.Body, events)
+	a.pump(ctx, resp.StatusCode, resp.Body, events)
 }
 
 // ListModels 查询上游可用模型。
@@ -164,7 +179,12 @@ func (a *Adapter) ListModels(ctx context.Context, ch channel.Channel) ([]string,
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, &channel.ErrUpstream{Retryable: true, Err: fmt.Errorf("解析模型列表失败: %w", err)}
+		return nil, &channel.ErrUpstream{
+			StatusCode:  resp.StatusCode,
+			GotResponse: true,
+			Retryable:   true,
+			Err:         fmt.Errorf("解析模型列表失败: %w", err),
+		}
 	}
 
 	out := make([]string, 0, len(payload.Data))

@@ -86,6 +86,17 @@ func (s *Store) nowUTC() time.Time {
 // 用的是数据库的时刻。两者在 UTC 午夜附近会差一天，那时行会落进兜底分区——
 // 而那条路是静默的，直到有人发现留存删不掉它。让补建与写入同源，
 // 「这一行属于哪一天」就只有一个答案。
+//
+// # 为什么这里不写 upstream_status 与 error_kind
+//
+// 这两列是给**响应方向**的快照准备的（采集时的上游状态与错误分类）。
+// 当前的采集链路只产请求方向的快照，而它写于调上游之前——那时结局还没
+// 发生。于是这张表上的 upstream_status 恒为 NULL，**它读作「这一行不适用」，
+// 不是「上游没回状态码」**；同一次请求的上游结局记在 billing_requests 上，
+// 那才是权威值（见 internal/gateway 的 Snapshot 注释）。
+//
+// 不在这里显式写 NULL 的原因：列本来就是可空的，显式写既没有信息量，又会
+// 让人误以为「有值可写但现在没写」。哪天真接了响应方向的采集，再加列与参数。
 const insertSQL = `
 	INSERT INTO request_snapshots (
 		request_id, user_id, direction, skeleton_version, capture_mode,

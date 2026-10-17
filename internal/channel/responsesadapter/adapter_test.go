@@ -399,6 +399,15 @@ func TestChatDetectsEmbeddedError(t *testing.T) {
 	if channel.IsRetryable(err) {
 		t.Error("参数类错误不该可重试：换渠道也是同一个错")
 	}
+	// 拿到过响应：状态码 200 是真的，要跟着错误带出去。
+	var up *channel.ErrUpstream
+	if !errors.As(err, &up) {
+		t.Fatalf("期望 *channel.ErrUpstream，得到 %v", err)
+	}
+	if !up.GotResponse || up.StatusCode != http.StatusOK {
+		t.Errorf("GotResponse=%v StatusCode=%d，期望 true / %d",
+			up.GotResponse, up.StatusCode, http.StatusOK)
+	}
 }
 
 // `"error": null` 是正常的「无错误」写法，不能被误判。
@@ -422,6 +431,15 @@ func TestChatStatusFailedIsError(t *testing.T) {
 	}
 	if channel.IsRetryable(err) {
 		t.Error("上游明确说这次失败了，换渠道重试不该由适配器判断为可重试")
+	}
+	// 这一条与上面那条同路：拿到了响应，状态码 200 要带出去。
+	var up *channel.ErrUpstream
+	if !errors.As(err, &up) {
+		t.Fatalf("期望 *channel.ErrUpstream，得到 %v", err)
+	}
+	if !up.GotResponse || up.StatusCode != http.StatusOK {
+		t.Errorf("GotResponse=%v StatusCode=%d，期望 true / %d",
+			up.GotResponse, up.StatusCode, http.StatusOK)
 	}
 }
 

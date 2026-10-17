@@ -163,6 +163,11 @@ func TestDecideTreatsMalformedResponseAsRetryable(t *testing.T) {
 	if !up.Retryable {
 		t.Error("解析失败应当可重试")
 	}
+	// 响应体解不开，但响应本身到了：GotResponse 与状态码都要有值。
+	if !up.GotResponse || up.StatusCode != http.StatusOK {
+		t.Errorf("GotResponse=%v StatusCode=%d，期望 true / %d",
+			up.GotResponse, up.StatusCode, http.StatusOK)
+	}
 }
 
 // 这条渠道不说 chat 协议。错误要包着 ErrUnsupported：路由层据此**跳过这条
