@@ -113,6 +113,24 @@
 # 新加的 `pluginCalendar.Peak` 上（那一道门按调用语法数，而 `Peak` 确实没有
 # 调用方：SDK 的 calendar 命名空间里没有 peak 函数可调）。于是净减 1。
 #
+# 条数**没变**的那一批（25）：一进一出，`redisLogAdapter.Printf` 进来、
+# `Amount.Units` 出去。
+#
+# `Amount.Units` 是**真的接上了**：`internal/pipeline` 结算那一处按最小单位
+# 截总和（`settlement.Breakdown.Total.Sub(settlement.Actual).Units()`），
+# 它在这道门里一直是陈旧条目（陈旧只提示、不算失败，所以留着没被察觉）。
+#
+# `redisLogAdapter.Printf` 是**同名掩护期结束**：它实现 go-redis 的 Logger 接口，
+# 由库自己的 goroutine 经接口回调，本仓没有也不该有调用点；而这道门按**方法名**
+# 数调用点，`fmt.Printf(...)` 的调用点名字也叫 `Printf`，于是它一直被掩护着。
+# #530 把 `larkaxctl` 最后一批 `fmt.Printf` 换成了 `fmt.Fprintf(humanStdout(), …)`
+# （调用点名字变成 `Fprintf`），掩护消失，它才露出来。
+#
+# 这提醒一件事：**掩护是可以被一次与它无关的重构拿掉的。** 一个改动只在
+# `cmd/` 里换打印函数，就能让 `internal/` 里一个从未被调过的方法从「有人调」
+# 翻成「没人调」。所以这一栏突然冒出一条旧符号时，先看有没有同名调用点刚刚
+# 消失，而不是先怀疑那个符号本身。
+#
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES_DEFAULT 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
 internal/assembly/assembly.go  | pluginCalendar.Peak               | lib | 接口要求实现，而插件 SDK 的 calendar 命名空间没有 peak 函数可调（宿主日历接口里有 Peak）；接上 peak 时删掉这一条
@@ -133,8 +151,8 @@ internal/channel/systemoneadapter/adapter.go | Adapter.Quota         | lib | cha
 internal/ledger/account.go     | Account.ID                        | lib | 科目类型的读取面：取后缀而不解释它（与 Type、UserID 成对）；生产走 Type 与 UserID，目前只有测试在调它
 internal/money/money.go        | Amount.ClampZero                  | lib | 金额库的运算面：负数归零；目前只有测试在调它
 internal/money/money.go        | Amount.DivInt                     | lib | 金额库的运算面：按整数相除；目前只有测试在调它
-internal/money/money.go        | Amount.Units                      | lib | 金额库的读取面：最小单位整数；目前只有测试在调它（读库走 Parse，列是 numeric）
 internal/plugin/sandbox/plugin.go | Module.Hooks                   | lib | 插件模块的自省出口：枚举编译期读出来的 hook 名单；生产只逐个问 Has，目前只有测试在调它
+internal/ratelimit/redis.go    | redisLogAdapter.Printf            | lib | go-redis 的 Logger 接口实现：库自己的 goroutine 拨号失败时经接口回调它，本仓没有调用点也不该有（连测试都没有——测它等于测「日志转接」这一行）；它此前被同名的 fmt.Printf 调用点掩护着，见上面那段
 internal/route/route.go        | Router.Score                      | lib | 路由库的解释出口：单个候选的分数（score 是私有的）；生产排序走 order，目前只有测试在调它
 internal/snapshot/redact.go    | Redactor.RedactResponseWithTransport | lib | 脱敏库的入口：把传输层信息并进骨架；采集传输层这件事被推迟了，目前只有测试在调它
 internal/snapshotwire/snapshotwire.go | Collector.Stats            | lib | 这条链路的观测出口：丢弃与失败的计数；指标那一头还没有写，目前只有测试在读它
