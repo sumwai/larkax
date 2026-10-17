@@ -139,7 +139,8 @@ func applyBodyToChannel(req *channel.Request, body *RequestBodyPatch) error {
 		}
 		// 只许调小。原值取 channel.Request.MaxTokens，也就是客户端请求里
 		// 那个数——补丁还没写回去。0 表示客户端没给，那时补丁给任何值都是
-		// 新增一个上界，而「上界从哪来」正是这条规则要管的（见 UsageBound）。
+		// 新增一个上界，而「上界不能由上报方自己抬起来」正是这条规则要管的
+		// （见 UsageBound）。
 		//
 		// 「客户端没给」这个情形由下面这一个比较覆盖：那时 original ≤ 0，
 		// 而上面刚保证补丁值 ≥ 1，所以 `> original` 必然成立。**不要再写成

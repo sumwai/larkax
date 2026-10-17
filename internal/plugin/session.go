@@ -23,8 +23,7 @@ import (
 // 每个 hook 的调用结果由**返回值**给出（Result[T]），不留在 Session 上：
 // 留一份副本意味着「调用方拿到的」与「Session 记着的」可能不一致，
 // 而那种不一致只在排查时会暴露出来，那时最需要的就是可信的记录。
-// Session 只留下三样跨 hook 的东西：失败清单、让位的插件，以及用量上报的
-// 上界（见 usageBound）。
+// Session 只留下两样跨 hook 的东西：失败清单与让位的插件。
 type Session struct {
 	Plugin *Plugin
 	rt     *sandbox.Runtime
@@ -37,10 +36,6 @@ type Session struct {
 
 	// failures 按发生顺序记录所有失败，含被吞掉的非阻断失败。
 	failures []*sandbox.Failure
-
-	// usageBound 是这次请求给插件上报用量划的那条线，由 ApplyRequest 在
-	// **补丁写回之前**记下（见那里的注释与 UsageBound）。
-	usageBound UsageBound
 }
 
 // Failures 返回这次请求里插件出过的全部错，含非阻断的。
@@ -123,14 +118,10 @@ func (s *Session) ApplyRequest(ctx context.Context, requestID string, req *chann
 	if s == nil || req == nil {
 		return nil, nil
 	}
-	// 上界在这里、**在补丁写回之前**记下来：req.MaxTokens 此刻还是客户端
-	// 请求里的那个数。记在补丁之后等于把上界交回插件手里——插件把 max_tokens
-	// 调小之后，上界与上报值又由同一方决定（见 UsageBound）。
-	//
-	// 记在这一步而不是让调用方传进来：调用方手上那份请求已经被补丁**就地**
-	// 改过（见 internal/api 的 serveOnce），它拿不到原值。而「谁应用补丁、
-	// 谁就记得补丁之前是什么」本来就是一件事，分开写迟早有一处忘了。
-	s.usageBound = UsageBound{MaxOutputTokens: int64(req.MaxTokens)}
+	// 上报用量那条上界**不在这里记**：这一刻插件补丁还没写回、别名上的参数
+	// 覆盖更没应用（覆盖是逐渠道配的，要等选路之后），所以手上这个
+	// max_tokens 既不是插件看到的那份、也不是发出去的那份。上界改在**上报
+	// 那一刻**从实际发出去的那份请求上读一次，见 UsageBound 与 ApplyUsage。
 
 	res := s.OnRequest(ctx, RequestContextFrom(requestID, req, canonicalModel, protocol))
 	if err := res.Err(); err != nil {
@@ -328,15 +319,22 @@ func (s *Session) ApplyResponse(ctx context.Context, requestID string, resp *cha
 //
 // # 上界从哪来
 //
-// 取 s.usageBound，也就是 ApplyRequest 在补丁之前记下的那个 max_tokens。
-// 调用方传不进来：它手上那份请求已经被补丁就地改过（见 ApplyRequest）。
+// 取 outbound 上那个 max_tokens，也就是**这次请求实际发出去的那份请求**
+// （见 UsageBound）。它由调用方交进来，而调用方是从网关的收尾那一段拿到的
+// （见 gateway.Hooks.OnUsage）：上界要等别名覆盖应用之后才定得下来，而覆盖
+// 逐渠道配、在选路之后才生效，所以入口层手上那份（调用方原样发来的）答不出
+// 这个问题。这一刻用量已经定了、钱还没算，那份请求一定已经存在。
+//
+// outbound 为 nil 表示这一次请求压根没发出去。那种情况下没有「有效值」可读，
+// 于是上界是 0，任何正数上报都算越界——与调用方没给 max_tokens 同一处置，
+// 理由见 UsageBound。
 //
 // # 没有上界时拒收
 //
-// 调用方没给 max_tokens、或这个会话根本没走过 ApplyRequest 时上界是 0，
-// 那时任何正数上报都算越界。读不出上界就拒收是唯一安全的方向——把「没有
-// 上界」当成「不设上界」，会让漏传一个参数变成关掉整道检查（见 UsageBound）。
-func (s *Session) ApplyUsage(ctx context.Context, requestID, protocol string, core channel.Usage) (channel.Usage, error) {
+// 有效值非正（调用方没给 max_tokens、也没被覆盖）时上界是 0，那时任何正数
+// 上报都算越界。读不出上界就拒收是唯一安全的方向——把「没有上界」当成
+// 「不设上界」，会让漏传一个参数变成关掉整道检查（见 UsageBound）。
+func (s *Session) ApplyUsage(ctx context.Context, requestID, protocol string, core channel.Usage, outbound *channel.Request) (channel.Usage, error) {
 	if s == nil {
 		return core, nil
 	}
@@ -350,7 +348,7 @@ func (s *Session) ApplyUsage(ctx context.Context, requestID, protocol string, co
 		// 插件没注册 onUsage，或者这次什么都没报。两条都是「用量照内核算」。
 		return core, nil
 	}
-	merged, err := MergeUsage(*UsageFactsFrom(core), res.Patch, s.usageBound)
+	merged, err := MergeUsage(*UsageFactsFrom(core), res.Patch, usageBoundOf(outbound))
 	if err != nil {
 		// 越界是**运行期信号**而不是契约违规：同一份插件在不同请求上可能
 		// 一次越界一次不越界（见 ErrUsageAboveBound）。整份上报已经由
@@ -416,10 +414,21 @@ func (f UsageFacts) empty() bool {
 // 再照着抬高后的上界报用量，报多少就收多少。所以这里的每个数都必须来自
 // **插件改不动**的来源：
 //
-//   - MaxOutputTokens 取客户端在请求里给的 max_tokens。插件只许把它调小
-//     （见 applyBodyToChannel），所以客户端的原值
-//     仍是上界，而补丁之后的值不是——那是插件自己挑的。传补丁后的值进来
-//     等于把上界交回插件手里，这个类型拦不住，只能靠调用方取对。
+//   - MaxOutputTokens 取**这次请求实际发出去的那份请求**上的 max_tokens，
+//     由 ApplyUsage 在**上报那一刻**从调用方交进来的那份请求上读（见那里的
+//     注释）。那份上插件补丁与别名覆盖都已经应用过了，所以它是「这次调用
+//     真的允许生成多少」的唯一答案。
+//
+//     插件改不大它：能改这个数的只有它自己的补丁，而补丁只许把 max_tokens
+//     调小（见 applyBodyToChannel），调大被拒时整份补丁不生效——于是插件只能
+//     把这条线**往下**改，而往下改只会让它自己的上报更容易越界。能把它抬高的
+//     只有别名上的覆盖，那是商家配置，不来自上报方。
+//
+//     **不要**改回「在 ApplyRequest 里记下来」。那一刻补丁还没写回、覆盖更
+//     没应用（覆盖逐渠道配，选路之后才生效），记下的是调用方原样发来的那份，
+//     而它可能比发出去的那份小得多。别名把上限顶大时，插件报一个合法、但
+//     大于原值的用量会被整份丢掉：请求 200、响应正确、账单退回内核的用量，
+//     插件那一侧看到的只有一次静默失败（记在 Failures() 里）。
 //
 // 输入侧（promptTokens / cacheReadTokens / cacheWriteTokens）**不在这里划**：
 // 内核手上的输入量是启发式估算（见 internal/tokens），它的设计方向是
@@ -433,18 +442,32 @@ func (f UsageFacts) empty() bool {
 // 与「结算钳到预留」（billing 的 Capped）。这一条拦的是「插件的账与请求
 // 自带的上限对不上」——那通常说明插件算错了或上游的报文不对。
 //
-// 所以**它拦不住一个想把账单顶到上限的插件**：客户端给 max_tokens=1000、
-// 插件调到 10、再上报 completionTokens=900，这个值不超过 1000，判定界内；
-// 而结算按调小后的 10 去钳，账单不会超过预留。别把这条当成金额防线——
-// 金额防线是上面那两层，它们与插件无关。
+// 所以**它拦不住一个想把账单顶到上限的插件**：客户端给 max_tokens=1000 时，
+// 插件报 completionTokens=1000 判定界内——那正是这条线允许的最大值。真正拦住
+// 金额的是上面那两层：这条线抬不过调用方给的那个数（补丁只许调小；能把它抬高的
+// 只有商家配的别名覆盖，那是配置），而结算钳到预留。别把这条当成金额防线
+// ——金额防线是上面那两层，它们与插件无关。
 type UsageBound struct {
-	// MaxOutputTokens 是输出侧的上界：客户端请求里的 max_tokens。
+	// MaxOutputTokens 是输出侧的上界：这次请求实际发出去的那份请求上的
+	// max_tokens。
 	//
-	// 非正表示调用方没给出上界。**此时任何正数上报都算越界**：这个字段的
-	// 作用就是拦住抬高账单的上报，读不出上界时拒收是唯一安全的方向，
-	// 而不是把「没有上界」当成「不设上界」——后者会让漏传一个参数
-	// 变成关掉整道检查。
+	// 非正表示读不出上界（调用方没给 max_tokens、也没被别名覆盖）。**此时
+	// 任何正数上报都算越界**：这个字段的作用就是拦住抬高账单的上报，读不出
+	// 上界时拒收是唯一安全的方向，而不是把「没有上界」当成「不设上界」——
+	// 后者会让漏传一个参数变成关掉整道检查。
 	MaxOutputTokens int64
+}
+
+// usageBoundOf 从**实际发出去的那份请求**上取这次上报的上界。
+//
+// nil 表示这一次请求压根没发出去（路由没成、context 已取消）。那时没有有效
+// 值可读，于是给出零值上界——任何正数上报都算越界，与「调用方没给
+// max_tokens」同一处置，理由见 UsageBound。
+func usageBoundOf(outbound *channel.Request) UsageBound {
+	if outbound == nil {
+		return UsageBound{}
+	}
+	return UsageBound{MaxOutputTokens: int64(outbound.MaxTokens)}
 }
 
 // ErrUsageAboveBound 表示插件上报的用量超过了这次请求的上界。
@@ -476,7 +499,7 @@ func (b UsageBound) check(reported UsageFacts) error {
 		{"reasoningTokens", reported.ReasoningTokens},
 	} {
 		if item.v != nil && *item.v > b.MaxOutputTokens {
-			return fmt.Errorf("%w: %s=%d 超过输出上界 %d（客户端请求里的 max_tokens）",
+			return fmt.Errorf("%w: %s=%d 超过输出上界 %d（这次请求实际发出的 max_tokens）",
 				ErrUsageAboveBound, item.name, *item.v, b.MaxOutputTokens)
 		}
 	}
@@ -505,8 +528,9 @@ func (b UsageBound) check(reported UsageFacts) error {
 // **不要**在包外另接一条只打日志的路，然后当文档里那句已经落地了。
 //
 // 上界由调用方给出，且必须是插件改不动的那个（见 UsageBound）。请求路径上
-// 那个值由 `Session.ApplyRequest` 在补丁之前记下、由 ApplyUsage 取用，
-// 于是「上界是补丁前的 max_tokens」这件事只有一处实现。
+// 那个值由 `Session.ApplyUsage` 在**上报那一刻**从实际发出去的那份请求上读
+// （见 usageBoundOf），于是「上界取的是发出去的那份 max_tokens」这件事只有
+// 一处实现。
 func MergeUsage(core UsageFacts, reported *UsageFacts, bound UsageBound) (UsageFacts, error) {
 	if reported == nil {
 		return core, nil
