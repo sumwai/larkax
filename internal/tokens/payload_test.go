@@ -22,7 +22,7 @@ func TestToolDefinitionInputTokensFloorLiftsShortKeySchema(t *testing.T) {
 	if got, want := len(def), 207; got != want {
 		t.Fatalf("夹具长度 = %d，期望 %d（改夹具就要重算下面的数）", got, want)
 	}
-	if got, want := int(ToolDefinitionInputTokens("m-1", def)), 81; got != want {
+	if got, want := int(ToolDefinitionInputTokens("m-1", def)), 99; got != want {
 		t.Errorf("ToolDefinitionInputTokens = %d，期望 %d", got, want)
 	}
 	// 地板确实赢了，否则这条用例测的是另一条路。
@@ -40,7 +40,7 @@ func TestToolDefinitionInputTokensKeepsLongDescription(t *testing.T) {
 	if got, want := len(def), 795; got != want {
 		t.Fatalf("夹具长度 = %d，期望 %d（改夹具就要重算下面的数）", got, want)
 	}
-	if got, want := int(ToolDefinitionInputTokens("m-1", def)), 309; got != want {
+	if got, want := int(ToolDefinitionInputTokens("m-1", def)), 327; got != want {
 		t.Errorf("ToolDefinitionInputTokens = %d，期望 %d", got, want)
 	}
 	// 这一条反过来：启发式高于地板 ceil(0.35 × 795) = 279。
@@ -51,12 +51,19 @@ func TestToolDefinitionInputTokensKeepsLongDescription(t *testing.T) {
 
 // 没有内容时仍留着包装开销：上游照样要为一条空声明的框架付 token。
 func TestToolDefinitionInputTokensEmptyKeepsFrame(t *testing.T) {
-	if got := ToolDefinitionInputTokens("m-1", nil); got != int64(ToolDefinitionFrameTokens) {
-		t.Errorf("空定义 = %d，期望只有框架开销 %d", got, ToolDefinitionFrameTokens)
+	if got := ToolDefinitionInputTokens("m-1", nil); got != int64(ToolDefinitionReserveFrameTokens) {
+		t.Errorf("空定义 = %d，期望只有框架开销 %d", got, ToolDefinitionReserveFrameTokens)
 	}
-	// 框架开销本身也钉一次：它是与流式中断那条路共用的数，被改动时这里要知道。
-	if ToolDefinitionFrameTokens != 8 {
-		t.Errorf("ToolDefinitionFrameTokens = %d，期望 8", ToolDefinitionFrameTokens)
+	// 框架开销本身也钉一次：它被顺手改掉时这里要知道。
+	if ToolDefinitionReserveFrameTokens != 26 {
+		t.Errorf("ToolDefinitionReserveFrameTokens = %d，期望 26", ToolDefinitionReserveFrameTokens)
+	}
+	// **两条路刻意不是同一个数**：流式中断那条路拿它去计费（估高=凭空费用），
+	// 预留拿它去冻余额（估低=差额由平台承担），方向相反。谁把两者「统一」成
+	// 一个数，就必然让其中一边吃错方向——这条断言就是为了让那一次改动红。
+	if ToolDefinitionReserveFrameTokens <= ToolDefinitionFrameTokens {
+		t.Errorf("预留侧的包装开销 %d 不大于计费侧的下界 %d，两者已经不是一贯的保守方向",
+			ToolDefinitionReserveFrameTokens, ToolDefinitionFrameTokens)
 	}
 }
 

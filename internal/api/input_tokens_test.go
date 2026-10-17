@@ -78,8 +78,9 @@ func TestInputTokensCountsToolDefinitions(t *testing.T) {
 
 	// "hi" 的正文口径是 1 个 token。
 	textOnly := tokens.EstimatedTokens(req.Model, req.PromptText())
-	if got, want := inputTokensOf(req), textOnly+232; got != want {
-		t.Errorf("inputTokensOf = %d，期望 %d（正文 %d + 工具 232）", got, want, textOnly)
+	// 工具的 250 = 内容 224 + 每条包装 26（tokens.ToolDefinitionReserveFrameTokens）。
+	if got, want := inputTokensOf(req), textOnly+250; got != want {
+		t.Errorf("inputTokensOf = %d，期望 %d（正文 %d + 工具 250）", got, want, textOnly)
 	}
 }
 
@@ -119,7 +120,7 @@ func TestToolDefinitionJSONFallsBackWithoutLosingTheTool(t *testing.T) {
 	if len(def) == 0 {
 		t.Fatal("序列化失败时返回了空定义——这条工具定义会从口径里消失")
 	}
-	if got := tokens.ToolDefinitionInputTokens("m-1", def); got <= int64(tokens.ToolDefinitionFrameTokens) {
+	if got := tokens.ToolDefinitionInputTokens("m-1", def); got <= int64(tokens.ToolDefinitionReserveFrameTokens) {
 		t.Errorf("失败回退后的估计量 = %d，只有框架开销那么多", got)
 	}
 }
@@ -163,7 +164,7 @@ func settleAgainst(t *testing.T, inputTokens int64, maxTokens int64, actual bill
 // 上游报的那个输入量是这样来的：工具定义序列化后 795 字节，按实测的 JSON
 // 密度上沿 0.29 token/字符（见 internal/tokens/COUNTER.md 那张表）≈ 231，
 // 加上上游自己在工具声明外面加的包装（实测约 26，见
-// tokens.ToolDefinitionFrameTokens 的注释）与消息框架，取 280。判据是上界，
+// tokens.ToolDefinitionReserveFrameTokens 的注释）与消息框架，取 280。判据是上界，
 // 所以拿这一档里偏大的那一头试。
 func TestReserveCoversSettlementWithLargeToolDefinitions(t *testing.T) {
 	def := `{"type":"function","function":{"name":"search_docs","description":"` +

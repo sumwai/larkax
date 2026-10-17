@@ -39,16 +39,35 @@ package tokens
 // 上面那两个密度都在 payload_test.go 里有夹具钉着，改估算式会被它们撞到。
 const structuredPayloadDensity = 0.35
 
+// ToolDefinitionReserveFrameTokens 是工具定义的**包装**在**预留**口径里记的
+// token 数。
+//
+// # 为什么不复用 StreamEstimator 的那个常数
+//
+// 同一个「包装开销」在两条路上的代价方向**相反**，所以它们刻意不是同一个数：
+//
+//   - 流式中断那条路（`ToolDefinitionFrameTokens`）拿它去**向用户计费**（上游
+//     断流、拿不到实测值时兜底）。估高了就是一笔凭空费用，还按工具条数放大，
+//     所以那边取的是**下界**（8，理由写在那个常量的注释里）。
+//   - 预留这条路拿它去**冻余额**。估低了的后果是预留低于结算、差额由平台承担，
+//     而结算按预留封顶——这正是本条要修的那类问题。所以这边取**实测到的那个
+//     数**（约 26，见 `ToolDefinitionFrameTokens` 的注释里量过的最小工具定义）。
+//
+// 两处共用一个数，必然让其中一边吃错方向。内容那一侧不受影响：两条路用的是
+// 同一个 `payloadTokens` / `EstimatedTokens`，分叉只在这一项。
+const ToolDefinitionReserveFrameTokens = 26
+
 // ToolDefinitionInputTokens 估算一个工具定义计入输入侧的 token 数。
 //
 // definitionJSON 是工具定义**本体**序列化后的 JSON（name / description /
 // schema 拼成的那个对象）。不要在入口各拼一份：四条入口的写法不同，而链路上
 // 已经统一到 channel.Tool，这里要的是统一之后的那一份。
 //
-// 结果 = 每条的包装开销（ToolDefinitionFrameTokens，与流式中断那条路共用同一
-// 个常量）+ 内容（启发式估算与按字节地板里的较大者，见 payloadTokens）。
+// 结果 = 每条的包装开销（ToolDefinitionReserveFrameTokens，与流式中断那条路
+// **不是**同一个数，理由见那个常量）+ 内容（启发式估算与按字节地板里的较大者，
+// 见 payloadTokens）。
 func ToolDefinitionInputTokens(model string, definitionJSON []byte) int64 {
-	n := int64(ToolDefinitionFrameTokens)
+	n := int64(ToolDefinitionReserveFrameTokens)
 	if len(definitionJSON) == 0 {
 		// 没有内容也留着包装：上游照样要为一条（内容为空的）工具声明付框架开销。
 		return n
