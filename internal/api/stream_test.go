@@ -363,6 +363,238 @@ func TestAnthropicStreamToolCall(t *testing.T) {
 	}
 }
 
+// ── 块的括号 ──────────────────────────────────────────────────────────
+
+// 下面这几条验的是**块的括号**：每个 content_block_delta 都必须落在自己那个
+// 下标的 content_block_start 与 content_block_stop 之间。
+//
+// 不写成逐帧比对：这里要钉的是「顺序错了」这一类缺陷，而它的表现随输入而变
+// （哪个下标、哪一帧错位），逐帧比对会变成「改一次输入抄一遍帧表」。所以先
+// 把帧序列解析成一个结构，再对结构断言。
+
+// blockEvent 是与内容块有关的一帧。
+type blockEvent struct {
+	kind  string // start / delta / stop
+	index int
+	// partial 是 input_json_delta 的分片（只有 delta 有）。
+	partial string
+}
+
+// frameIndex 取帧里的 index（JSON 数字解出来是 float64）。
+func frameIndex(t *testing.T, m map[string]any, i int) int {
+	t.Helper()
+
+	v, ok := m["index"].(float64)
+	if !ok {
+		t.Fatalf("第 %d 帧没有数字形态的 index: %v", i, m)
+	}
+	return int(v)
+}
+
+// strAt 逐层取一个字符串字段，取不到就失败（而不是拿到零值继续跑）。
+func strAt(t *testing.T, m map[string]any, path ...string) string {
+	t.Helper()
+
+	s, ok := dig(t, m, path...).(string)
+	if !ok {
+		t.Fatalf("取 %v 时不是字符串: %v", path, dig(t, m, path...))
+	}
+	return s
+}
+
+// blockEvents 把帧序列抽成与块有关的帧，与块无关的（message_start 等）跳过。
+func blockEvents(t *testing.T, frames []sseFrame) []blockEvent {
+	t.Helper()
+
+	var out []blockEvent
+	for i, f := range frames {
+		switch f.event {
+		case "content_block_start":
+			out = append(out, blockEvent{kind: "start", index: frameIndex(t, f.decode(t), i)})
+		case "content_block_delta":
+			m := f.decode(t)
+			ev := blockEvent{kind: "delta", index: frameIndex(t, m, i)}
+			if dig(t, m, "delta", "type") == "input_json_delta" {
+				ev.partial = strAt(t, m, "delta", "partial_json")
+			}
+			out = append(out, ev)
+		case "content_block_stop":
+			out = append(out, blockEvent{kind: "stop", index: frameIndex(t, f.decode(t), i)})
+		}
+	}
+	return out
+}
+
+// checkBlockBrackets 遍历一次块事件，断言三件事：
+//
+//   - 每个分片都落在自己那个下标**当前开着**的块里（它的 start 已经写出、
+//     stop 还没写出）；
+//   - 同一个下标只被打开一次——重开会让客户端在最终消息里多出一个同 id 的
+//     空 tool_use 块（两个官方 SDK 的累加器都是「start 往 content 数组里
+//     追加、delta 与 stop 按 index 取块」）；
+//   - 打开过的块都等到了 stop。
+func checkBlockBrackets(t *testing.T, evs []blockEvent) {
+	t.Helper()
+
+	open := map[int]bool{}
+	starts := map[int]int{}
+	for _, ev := range evs {
+		switch ev.kind {
+		case "start":
+			starts[ev.index]++
+			if starts[ev.index] > 1 {
+				t.Errorf("下标 %d 的块被打开了 %d 次", ev.index, starts[ev.index])
+			}
+			open[ev.index] = true
+		case "delta":
+			if !open[ev.index] {
+				t.Errorf("分片 %q 落在下标 %d 的块之外（那个块没开着：要么还没 start，要么它的 start 已经配过 stop 了）",
+					ev.partial, ev.index)
+			}
+		case "stop":
+			if !open[ev.index] {
+				t.Errorf("下标 %d 的块在打开之前（或第二次）被关掉了", ev.index)
+			}
+			delete(open, ev.index)
+		}
+	}
+	for index := range open {
+		t.Errorf("下标 %d 的块一直开着，没等到 stop", index)
+	}
+}
+
+// assembledToolCall 是一个工具块按流里的分片拼出来的样子。
+type assembledToolCall struct {
+	index   int
+	id      string
+	name    string
+	partial string
+}
+
+// assembleToolCalls 从帧序列里拼出工具块：id/name 来自 start，参数来自落在
+// 同一个下标上的 input_json_delta。
+func assembleToolCalls(t *testing.T, frames []sseFrame) []assembledToolCall {
+	t.Helper()
+
+	var out []assembledToolCall
+	pos := map[int]int{} // 块下标 → out 里的位置
+	for i, f := range frames {
+		switch f.event {
+		case "content_block_start":
+			m := f.decode(t)
+			if dig(t, m, "content_block", "type") != "tool_use" {
+				continue
+			}
+			index := frameIndex(t, m, i)
+			pos[index] = len(out)
+			out = append(out, assembledToolCall{
+				index: index,
+				id:    strAt(t, m, "content_block", "id"),
+				name:  strAt(t, m, "content_block", "name"),
+			})
+		case "content_block_delta":
+			m := f.decode(t)
+			if dig(t, m, "delta", "type") != "input_json_delta" {
+				continue
+			}
+			index := frameIndex(t, m, i)
+			at, ok := pos[index]
+			if !ok {
+				t.Fatalf("下标 %d 的参数分片出现在它的块打开之前", index)
+			}
+			out[at].partial += strAt(t, m, "delta", "partial_json")
+		}
+	}
+	return out
+}
+
+// toolUseEvent 造一次工具调用增量。
+func toolUseEvent(index int, id, name, args string) channel.StreamEvent {
+	return channel.StreamEvent{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{
+		Index: index, ID: id, Name: name, Arguments: args,
+	}}
+}
+
+// 并行的工具调用：上游给的 index 可以**交错**（OpenAI 的 tool_calls[].index
+// 不保证一个用完再出现下一个），而 Anthropic 的每个分片都必须落在自己那个
+// 下标的 start 与 stop 之间。
+//
+// 这条用例喂的就是交错序列：两个工具调用的**头**先来（上游常常把它们放在
+// 同一个分片里），参数分片随后交替到达。
+func TestAnthropicStreamInterleavedToolIndices(t *testing.T) {
+	_, frames := streamRequest(t, PathMessages,
+		toolUseEvent(0, "toolu_1", "get_weather", ""),
+		toolUseEvent(1, "toolu_2", "get_forecast", ""),
+		toolUseEvent(0, "", "", `{"city":`),
+		toolUseEvent(1, "", "", `{"days":`),
+		toolUseEvent(0, "", "", `"北京"}`),
+		toolUseEvent(1, "", "", `3}`),
+		channel.StreamEvent{Kind: "done", FinishReason: "tool_use"},
+	)
+
+	checkBlockBrackets(t, blockEvents(t, frames))
+
+	// 括号对了还不够：分片还要落回**自己那次**工具调用的块里。错位在客户端
+	// 那里表现为「拼出半截 JSON」，所以按块把分片拼回去逐块比对。
+	got := assembleToolCalls(t, frames)
+	want := []struct{ id, name, partial string }{
+		{"toolu_1", "get_weather", `{"city":"北京"}`},
+		{"toolu_2", "get_forecast", `{"days":3}`},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("工具块数 = %d，期望 %d（每个上游下标一个块）: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i].id != w.id || got[i].name != w.name || got[i].partial != w.partial {
+			t.Errorf("第 %d 个工具块（下标 %d）= %+v，期望 id=%s name=%s 参数=%s",
+				i, got[i].index, got[i], w.id, w.name, w.partial)
+		}
+	}
+}
+
+// 工具调用的两个参数分片之间夹了一段正文。工具块这时**不能**被关掉：关掉
+// 它，后面那个分片就落在自己的 stop 之后了，而重开同一个下标会让客户端多出
+// 一个同 id 的空块——所以正文块开在工具块之后，两个块同时开着。
+func TestAnthropicStreamTextBetweenToolFragments(t *testing.T) {
+	_, frames := streamRequest(t, PathMessages,
+		toolUseEvent(0, "toolu_1", "get_weather", `{"city":`),
+		channel.StreamEvent{Kind: "delta", Text: "查一下"},
+		toolUseEvent(0, "", "", `"北京"}`),
+		channel.StreamEvent{Kind: "done", FinishReason: "tool_use"},
+	)
+
+	checkBlockBrackets(t, blockEvents(t, frames))
+
+	got := assembleToolCalls(t, frames)
+	if len(got) != 1 {
+		t.Fatalf("工具块数 = %d，期望 1: %+v", len(got), got)
+	}
+	if got[0].partial != `{"city":"北京"}` {
+		t.Errorf("工具参数 = %q，期望两个分片拼成一个完整的 JSON", got[0].partial)
+	}
+
+	// 正文块只有一个，且正文分片落在它自己那个下标上。
+	textIndex, textDeltaIndex := -1, -1
+	for i, f := range frames {
+		if f.event != "content_block_start" && f.event != "content_block_delta" {
+			continue
+		}
+		m := f.decode(t)
+		switch {
+		case f.event == "content_block_start" && dig(t, m, "content_block", "type") == "text":
+			if textIndex >= 0 {
+				t.Errorf("正文块被打开了两次（下标 %d 与 %d）", textIndex, frameIndex(t, m, i))
+			}
+			textIndex = frameIndex(t, m, i)
+		case f.event == "content_block_delta" && dig(t, m, "delta", "type") == "text_delta":
+			textDeltaIndex = frameIndex(t, m, i)
+		}
+	}
+	if textIndex < 0 || textDeltaIndex != textIndex {
+		t.Errorf("正文分片的下标 = %d，期望落在正文块 %d 上", textDeltaIndex, textIndex)
+	}
+}
+
 // ── 截断 ──────────────────────────────────────────────────────────────
 
 // 已经吐字之后上游报错：错误作为**流里的事件**表达（响应头早就发出去了），
