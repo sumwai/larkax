@@ -664,8 +664,10 @@ func (h *Handler) runRequestHook(w http.ResponseWriter, r *http.Request, protoco
 	}
 	ctx := r.Context()
 
-	// 规范名与上游模型名在这里取同一个值，与 billingRequest 同一条已知的
-	// 临时状态：规范名到上游名的映射还没做（那属于选路层）。
+	// onRequest 在选路之前，上游名此刻还不存在：别名是逐渠道配的，要等选中
+	// 渠道才翻得出来（见 internal/route 的 upstreamRequest）。所以这里传的是
+	// 规范名，插件看到的 UpstreamModel 与 body.model 也是它
+	// （见 plugin.RequestContext 的字段注释）。
 	sess, err := h.Plugins.NewSession(ctx, plugin.SessionRequest{
 		CanonicalModel: upstream.Model,
 		Protocol:       string(protocol),
@@ -718,8 +720,8 @@ func (h *Handler) pluginHost(requestID string, userID int64) plugin.HostBuilder 
 // **关掉插件的行为不变是结构性的**：零值 Hooks 的字段全是 nil，编排层各自
 // 走那条不碰插件的分支（见 gateway.routeChat 与 gateway.pumpStream）。
 //
-// canonicalModel 由调用方给出，与插件在别的 hook 里看到的那个名字是同一个
-// （今天规范名与上游名还是同一个值，见 serveOnce）。
+// canonicalModel 由调用方给出，与插件在别的 hook 里看到的那个名字是同一个：
+// 它是**别名翻译前**的规范名（见 serveOnce 里 onRequest 的调用点）。
 func (h *Handler) pluginHooks(sess *plugin.Session, requestID, canonicalModel string, protocol channel.Protocol) gateway.Hooks {
 	if sess == nil {
 		return gateway.Hooks{}
