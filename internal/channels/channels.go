@@ -211,10 +211,12 @@ func (s *Source) Candidates(ctx context.Context, canonicalModel string) ([]route
 // 日志与响应里长得一样（同 route.ErrNoAliasSource 的那条理由：别让「没接上」
 // 与「不用这一项」同形）。这次查询与候选查询打的是同一个库，它失败说明
 // 问题不在这一条请求上。
+//
+// 上面那一节就是 `nolint:nilnil` 的理由：这个 nil 是结论，不是「出错了但没报」。
 func (s *Source) profile(ctx context.Context, canonicalName string) (*route.ModelProfile, error) {
 	cons, err := s.catalog.Constraints(ctx, canonicalName)
 	if errors.Is(err, catalog.ErrModelNotFound) {
-		return nil, nil
+		return nil, nil //nolint:nilnil // 见上
 	}
 	if err != nil {
 		return nil, fmt.Errorf("读取模型 %q 的目录声明失败: %w", canonicalName, err)
