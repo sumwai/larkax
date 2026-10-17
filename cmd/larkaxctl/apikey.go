@@ -443,6 +443,9 @@ func printUpdatedLimits(w io.Writer, id int64, p auth.LimitParams) {
 // 每把一行、键=值的形式，与 printCreatedKey 同一套：可 grep，也能直接
 // 看出哪一栏是空的。NULL 打成「继承」而不是留空——留空与「这一栏不存在」
 // 长得一样，而这一列恰恰是「没设过」的意思。
+//
+// 三个时刻（创建、过期、最近使用）连着排：按时间先后读下来正好是一把 key 的
+// 一生，所以创建时刻排在另外两个之前。
 func printKeyList(w io.Writer, keys []auth.Key) {
 	if len(keys) == 0 {
 		_, _ = fmt.Fprintln(w, "没有 API Key。")
@@ -450,9 +453,10 @@ func printKeyList(w io.Writer, keys []auth.Key) {
 	}
 
 	for _, k := range keys {
-		_, _ = fmt.Fprintf(w, "id=%d prefix=%s 用户=%s(id=%d) 备注=%s 状态=%s 每分钟=%s 额度=%s 过期=%s 最近使用=%s\n",
+		_, _ = fmt.Fprintf(w, "id=%d prefix=%s 用户=%s(id=%d) 备注=%s 状态=%s 每分钟=%s 额度=%s 创建=%s 过期=%s 最近使用=%s\n",
 			k.ID, k.Prefix, k.Username, k.UserID, orDash(k.Name), k.Status,
 			formatRPM(k.RateLimitRPM), formatQuota(k.QuotaLimit),
+			formatTimeValue(k.CreatedAt),
 			formatTime(k.ExpiresAt, "不过期"), formatTime(k.LastUsedAt, "从未"))
 	}
 }
@@ -475,5 +479,15 @@ func formatTime(v *time.Time, empty string) string {
 	if v == nil {
 		return empty
 	}
-	return v.Format(time.RFC3339)
+	return formatTimeValue(*v)
+}
+
+// formatTimeValue 格式化一个必然有值的时刻。
+//
+// created_at 是 NOT NULL DEFAULT now()，没有「没设过」这一档，所以它不走
+// formatTime 的占位符参数——那一栏给不出有意义的占位语。共用一个 Format 布局
+// 是为了让三个时刻写法一致：各写一遍 time.RFC3339 的话，改其中一处的布局，
+// 另一处会安静地留着旧样子。
+func formatTimeValue(t time.Time) string {
+	return t.Format(time.RFC3339)
 }

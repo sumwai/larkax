@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sumwai/larkax/internal/money"
 )
@@ -210,6 +211,17 @@ func TestListKeys(t *testing.T) {
 	db := testDB(ctx, t)
 	store := New(db)
 
+	// created_at 由列的 DEFAULT now() 给，所以基准取**数据库自己的** now()，
+	// 而不是 Go 的 time.Now()：取值来源是前者，两个进程的时钟不一定一致。
+	//
+	// 这一条是列表里「创建」那一栏唯一的门。展示那一侧的用例喂的是夹具，
+	// 把 SELECT 里的 created_at 连同 Scan 一起删掉它照样通过——而列表里
+	// 那一栏会静默变成 0001-01-01。
+	var dbBefore time.Time
+	if err := db.QueryRowContext(ctx, "SELECT now()").Scan(&dbBefore); err != nil {
+		t.Fatalf("读数据库时钟失败: %v", err)
+	}
+
 	owner := newUser(ctx, t, db, userStatusActive)
 	rpm := 30
 	quota := money.MustParse("1.5")
@@ -261,6 +273,10 @@ func TestListKeys(t *testing.T) {
 	}
 	if got.LastUsedAt != nil {
 		t.Errorf("last_used_at = %v，期望 nil（还没用过）", got.LastUsedAt)
+	}
+	if got.CreatedAt.Before(dbBefore) {
+		t.Errorf("created_at = %s，早于建 key 时的库时钟 %s：这一栏没从库里取出来",
+			got.CreatedAt, dbBefore)
 	}
 
 	plain, ok := byID[second.ID]

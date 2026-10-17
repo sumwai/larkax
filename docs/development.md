@@ -442,7 +442,7 @@ curl -i localhost:8080/v1/chat/completions \
 
 ```sh
 go run ./cmd/larkaxctl apikey create --user alice --rate-limit-rpm 60 --quota-limit 12.34
-go run ./cmd/larkaxctl apikey list                       # id、前缀、额度、最近使用
+go run ./cmd/larkaxctl apikey list                       # id、前缀、用户、备注、状态、每分钟、额度、创建、过期、最近使用
 go run ./cmd/larkaxctl apikey update --id 3 --rate-limit-rpm 120
 go run ./cmd/larkaxctl apikey update --id 3 --clear-rate-limit-rpm
 ```
