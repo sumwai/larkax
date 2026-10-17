@@ -549,7 +549,7 @@ cat key.txt | go run ./cmd/larkaxctl doctor --live --model claude-x --credential
 | 旗标 | 含义 |
 |---|---|
 | `--model <规范名>` | 这次请求用的规范模型名，`--live` 时必填 |
-| `--endpoint chat\|messages` | 打哪个入口，默认 `chat`。`chat` 是 `POST /v1/chat/completions`（`Authorization: Bearer`），`messages` 是 `POST /v1/messages`（`x-api-key`） |
+| `--endpoint chat\|messages\|responses` | 打哪个入口，默认 `chat`。`chat` 是 `POST /v1/chat/completions`（`Authorization: Bearer`），`messages` 是 `POST /v1/messages`（`x-api-key`），`responses` 是 `POST /v1/responses`（`Authorization: Bearer`） |
 | `--base-url <URL>` | 网关公共入口的地址，默认 `http://127.0.0.1:8080` |
 | `--credential-stdin` / `--credential-env <变量名>` | 读 API Key 的来源，二者只能给一个 |
 
