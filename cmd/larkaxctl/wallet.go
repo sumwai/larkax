@@ -50,12 +50,16 @@ txn_id，于是同一条命令重跑两次只会入账一次。两种结果都�
   第一次：已入账（并逐条列出写了哪些分录）
   重放：  「已经入过账，本次未改动」，退出 0
 
-同一个 --order 配不同的金额或用户不是重放，而是冲突：数据库里那笔交易
+同一个 --order 配不同的金额、用户或通道不是重放，而是冲突：数据库里那笔交易
 与这次要写的不是同一批分录，命令退出 4，一笔都不写。换一个 --order。
 
+键里不能有控制字符（换行、制表符等）：它既算交易号又进备注，而备注会把控制
+字符换成空格，于是两个不同的键会写出两条备注一模一样的入账。
+
 --gateway 是这笔钱从哪个外部来源进来（记进 payment_gateway:<来源> 科目），
-默认 manual，表示线下到账（银行转账、现金）。当前不接支付通道的回调，
-所以来源是操作者说的，不是系统验证过的。
+默认 manual，表示线下到账（银行转账、现金）。来源名归一成小写：MANUAL 与
+manual 是同一个科目。当前不接支付通道的回调，所以来源是操作者说的，
+不是系统验证过的。
 
 钱包必须已经存在：先 wallet open，再 credit。用户或钱包不存在都退出 4。
 
@@ -184,6 +188,9 @@ func runWalletCredit(args []string) error {
 		return usageErr(errors.New(
 			"缺少 --order：它是这次入账的幂等键，重跑同一条命令时靠它认出「已经入过账」"))
 	}
+	if ctrlErr := checkOrderKey(orderKey); ctrlErr != nil {
+		return ctrlErr
+	}
 	amountValue, amountErr := parseCreditAmount(*amount)
 	if amountErr != nil {
 		return amountErr
@@ -288,6 +295,33 @@ func resolveWalletAsset(ctx context.Context, db *sql.DB, explicit ledger.Asset) 
 	return assetValue, nil
 }
 
+// checkOrderKey 拒绝幂等键里的控制字符。
+//
+// 键是**逐字**用来算交易号的，而它同时进备注，备注在 ledger 那边过一道
+// sanitizeMemo（把 \r\n\t 换成空格）。两处口径不一致时会出现两笔账面看起来
+// 一模一样的入账：`ORD\nX` 与 `ORD X` 是两个键、两个交易号、各自合法入账
+// 一次，而库里两条分录的备注都是「充值（单据 ORD X）」——事后按备注核对时，
+// 它们看起来是同一笔写了两次。换行键还会把「一行一条」的输出拆成两行。
+//
+// 归一（把控制字符换成空格）也能消掉这个差，但那样两个不同的键会变成同一个
+// 交易号，第二次入账会静默变成一次「已经入过账」的重放——操作者以为记了一笔，
+// 钱没动。这里选拒绝：键本来就是外部单据号（转账流水号、回单号），出现控制
+// 字符说明它被拼错了，改一下键重发即可。
+//
+// 判据比 sanitizeMemo 宽（它只处理 \r\n\t）：\x07 这类控制字符会原样进备注，
+// 而备注是要被人读的。宽的这一侧只影响这条命令自己的入账，不动别的写路径。
+func checkOrderKey(order string) error {
+	for _, r := range order {
+		if r < 0x20 || r == 0x7f {
+			return usageErr(fmt.Errorf(
+				"--order 不能含控制字符（这里是 %q）：它同时是幂等键与备注里的单据号，"+
+					"带控制字符会让两笔不同的入账在账面上看起来一样",
+				r))
+		}
+	}
+	return nil
+}
+
 // parseCreditAmount 解析 --amount。
 //
 // 与 parseQuotaLimit 同一条判据：先自己数小数位。money.Parse 会把多出来的
@@ -298,10 +332,14 @@ func parseCreditAmount(plain string) (money.Amount, error) {
 	if trimmed == "" {
 		return money.Zero, usageErr(errors.New("缺少 --amount"))
 	}
-	if _, frac, hasDot := strings.Cut(trimmed, "."); hasDot && len(frac) > money.Scale {
-		return money.Zero, usageErr(fmt.Errorf(
-			"--amount 最多 %d 位小数，得到 %q：金额列是 numeric(20, %d)，多出来的位存不进去",
-			money.Scale, plain, money.Scale))
+	// 末尾的 0 不算位数：`1.000000000` 与 `1` 是同一个数，列存得下，没有
+	// 任何东西会被舍掉。不先去尾就拒，会让人以为库有问题。
+	if _, frac, hasDot := strings.Cut(trimmed, "."); hasDot {
+		if kept := strings.TrimRight(frac, "0"); len(kept) > money.Scale {
+			return money.Zero, usageErr(fmt.Errorf(
+				"--amount 最多 %d 位小数，得到 %q：金额列是 numeric(20, %d)，多出来的位存不进去",
+				money.Scale, plain, money.Scale))
+		}
 	}
 	amount, err := money.Parse(trimmed)
 	if err != nil {
@@ -315,12 +353,20 @@ func parseCreditAmount(plain string) (money.Amount, error) {
 }
 
 // parseGatewayFlag 校验 --gateway 并返回通道标识。
+//
+// 来源名归一成小写：它是科目后缀，而科目是按字符串比对与汇总的，
+// `MANUAL` 与 `manual` 是两个科目——同一个来源写成两种大小写会让
+// `payment_gateway` 下面多出一个互不相干的科目，与通道对账时对不上。
+//
+// **拼错的那一半不在这里挡**（`manul` 照样会开出新科目）：来源名是自由取值，
+// 没有一份已知来源的清单可以比。真接上支付通道时它应当换成枚举（那时通道由
+// 系统而不是操作者决定），在那之前靠的是 `--help` 里那句「来源是操作者说的」。
 func parseGatewayFlag(fs *flag.FlagSet, gateway string) (string, error) {
 	if providedFlags(fs)["gateway"] && strings.TrimSpace(gateway) == "" {
 		return "", usageErr(errors.New(
 			"--gateway 不能为空：不给这个旗标才表示 manual（线下到账）"))
 	}
-	name := strings.TrimSpace(gateway)
+	name := strings.ToLower(strings.TrimSpace(gateway))
 	if _, err := ledger.ParseAccount(ledger.PaymentGatewayAccount(name).String()); err != nil {
 		return "", usageErr(fmt.Errorf("--gateway %q 不是合法的通道标识: %w", gateway, err))
 	}

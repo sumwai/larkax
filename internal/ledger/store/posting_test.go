@@ -190,6 +190,80 @@ func TestPostTransactionConflictOnDifferentContent(t *testing.T) {
 	}
 }
 
+// 同一个交易号、金额也一样，只换了**用户**：仍然是冲突，不是重放。
+//
+// 这一条钉的是幂等判据里的**科目**。把 entryFingerprint 里的科目拿掉之后
+// （「科目反正由 txn_id 决定」那种重构），这条会变成一次重放：命令退出 0、
+// 输出「已经入过账，本次未改动」，而第二个用户的钱一分没写——正是
+// ErrTxnConflict 注释里说要防的那种「在账面上消失」。
+//
+// 只换金额的那条用例照不到它：两者的金额相同，指纹里只剩科目不同。
+func TestPostTransactionConflictOnDifferentUser(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+	alice := seed(t, db, "5")
+	bob := seed(t, db, "5")
+	txnID := ledger.NewTxnID()
+
+	if _, err := s.PostTransaction(ctx, topupTxn(t, txnID, alice, "100", "manual", "ORD-7")); err != nil {
+		t.Fatalf("第一次入账失败: %v", err)
+	}
+
+	_, err := s.PostTransaction(ctx, topupTxn(t, txnID, bob, "100", "manual", "ORD-7"))
+	if !errors.Is(err, ErrTxnConflict) {
+		t.Fatalf("只换用户的同一交易号应当返回 ErrTxnConflict，得到 %v", err)
+	}
+
+	if balance, _ := walletOf(t, db, bob); balance != "5.00000000" {
+		t.Errorf("第二个用户的余额 = %s，期望仍是 5.00000000（这笔钱没写给他）", balance)
+	}
+	if balance, _ := walletOf(t, db, alice); balance != "105.00000000" {
+		t.Errorf("第一个用户的余额 = %s，期望仍是 105.00000000", balance)
+	}
+	got := entriesOf(t, db, txnID)
+	if len(got) != 2 {
+		t.Fatalf("冲突之后这个交易有 %d 条分录，期望 2 条：%+v", len(got), got)
+	}
+	bobAccount := ledger.UserAccount(bob).String()
+	for _, e := range got {
+		if e.Account == bobAccount {
+			t.Errorf("库里多了一条记在第二个用户名下的分录：%+v", e)
+		}
+	}
+}
+
+// 同一个交易号、金额与用户都一样，只换了**通道**：同样是冲突。
+//
+// 与上一条同一个形状：通道也是科目的一部分，而科目是指纹的一部分。
+func TestPostTransactionConflictOnDifferentGateway(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+	userID := seed(t, db, "5")
+	txnID := ledger.NewTxnID()
+
+	if _, err := s.PostTransaction(ctx, topupTxn(t, txnID, userID, "100", "manual", "ORD-8")); err != nil {
+		t.Fatalf("第一次入账失败: %v", err)
+	}
+
+	_, err := s.PostTransaction(ctx, topupTxn(t, txnID, userID, "100", "alipay", "ORD-8"))
+	if !errors.Is(err, ErrTxnConflict) {
+		t.Fatalf("只换通道的同一交易号应当返回 ErrTxnConflict，得到 %v", err)
+	}
+
+	if balance, _ := walletOf(t, db, userID); balance != "105.00000000" {
+		t.Errorf("冲突之后余额 = %s，期望仍是 105.00000000", balance)
+	}
+	got := entriesOf(t, db, txnID)
+	if len(got) != 2 {
+		t.Fatalf("冲突之后这个交易有 %d 条分录，期望 2 条：%+v", len(got), got)
+	}
+	if got[0].Account != ledger.PaymentGatewayAccount("manual").String() {
+		t.Errorf("库里那笔的通道科目 = %s，期望仍是 payment_gateway:manual", got[0].Account)
+	}
+}
+
 // 没有钱包行时返回 ErrNoWallet，而不是「余额不足」。
 //
 // 一次入账的金额是正的，缺行会被 applyToWallets 的 WHERE 挡下并报成

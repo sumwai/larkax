@@ -48,6 +48,14 @@ import (
 // 写入前按固定顺序锁住涉及的钱包行；任何一行不存在都返回 ErrNoWallet，
 // 而不是让 applyToWallets 把「没有这一行」误报成「余额不足」——后者是
 // 用户欠费，前者是还没开户，运维的下一步动作完全不同。
+//
+// # Transaction.CreatedAt 目前不落库
+//
+// `insertEntries` 无条件写库上的 `now()`，本方法不读 `txn.CreatedAt`：
+// 传了非零的 `At` 也不会让 `created_at` 变成那个时刻，落库的仍是当前时间，
+// 而且不会报错。当前的调用方（手工入账）不设 `At`，所以这条命令上两者
+// 一致；**将来拿这个入口补录一笔历史交易时要先改这里**——把 `At` 接进
+// `insertEntries` 会同时改到结算那条写路径，那是另一件事，不该顺手做。
 func (s *Store) PostTransaction(ctx context.Context, txn ledger.Transaction) (applied bool, err error) {
 	if verifyErr := txn.Verify(); verifyErr != nil {
 		return false, verifyErr

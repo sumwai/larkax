@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"flag"
 	"fmt"
 	"slices"
 	"strconv"
@@ -299,6 +300,12 @@ func TestWalletCreditRejectsBadArgs(t *testing.T) {
 		// 一笔与上一次互不相干的入账，而两笔在账面上都合法。
 		{"没有 --order", []string{"--user", "1", "--amount", "1"}, "缺少 --order"},
 		{"--order 只有空白", []string{"--user", "1", "--amount", "1", "--order", "  "}, "缺少 --order"},
+		// 控制字符：键既算交易号又进备注，而备注会把 \r\n\t 换成空格——
+		// `ORD\nX` 与 `ORD X` 因此是两笔各自合法、备注却一模一样的入账。
+		{"--order 含换行", []string{"--user", "1", "--amount", "1", "--order", "ORD\nX"}, "控制字符"},
+		{"--order 含制表符", []string{"--user", "1", "--amount", "1", "--order", "ORD\tX"}, "控制字符"},
+		// 备注那边只清洗 \r\n\t，这一个会原样落进备注，所以判据要比它宽。
+		{"--order 含其它控制字符", []string{"--user", "1", "--amount", "1", "--order", "ORD\x07X"}, "控制字符"},
 		{"金额不是数字", []string{"--user", "1", "--amount", "abc", "--order", "o"}, "不是金额"},
 		{"金额为零", []string{"--user", "1", "--amount", "0", "--order", "o"}, "必须为正数"},
 		{"金额为负", []string{"--user", "1", "--amount", "-1", "--order", "o"}, "必须为正数"},
@@ -326,6 +333,53 @@ func TestWalletCreditRejectsBadArgs(t *testing.T) {
 				t.Errorf("退出码 = %d，期望 %d（参数错）", code, exitUsage)
 			}
 		})
+	}
+}
+
+// 小数位判据看的是**有效位数**，不是小数点后的字符个数。
+//
+// `1.000000000` 与 `1` 是同一个数，列存得下，拒它会让文案里那句
+// 「多出来的位存不进去」变成一句不成立的话。
+func TestParseCreditAmountTrailingZeros(t *testing.T) {
+	amount, err := parseCreditAmount("1.000000000")
+	if err != nil {
+		t.Fatalf("末尾是 0 的小数位不该被拒: %v", err)
+	}
+	if amount.String() != "1.00000000" {
+		t.Errorf("解析结果 = %s，期望 1.00000000", amount)
+	}
+
+	// 第 9 位起还有非零：仍然拒，且仍然是参数错。
+	for _, plain := range []string{"1.000000001", "1.0000000010", "0.000000001"} {
+		bad, badErr := parseCreditAmount(plain)
+		if badErr == nil {
+			t.Errorf("%q 应当被拒，却得到 %s", plain, bad)
+			continue
+		}
+		if !strings.Contains(badErr.Error(), "最多 8 位小数") {
+			t.Errorf("%q 的错误信息 %q 里没有「最多 8 位小数」", plain, badErr)
+		}
+		if code := exitCode(badErr); code != exitUsage {
+			t.Errorf("%q 的退出码 = %d，期望 %d（参数错）", plain, code, exitUsage)
+		}
+	}
+}
+
+// 来源名归一成小写：科目按字符串比对，MANUAL 与 manual 不能是两个科目。
+func TestParseGatewayFlagLowercases(t *testing.T) {
+	for _, given := range []string{"manual", "MANUAL", "Manual", "  MANUAL  "} {
+		fs := flag.NewFlagSet("wallet credit", flag.ContinueOnError)
+		gateway := fs.String("gateway", manualGateway, "")
+		if err := fs.Parse([]string{"--gateway", given}); err != nil {
+			t.Fatalf("解析 %q 失败: %v", given, err)
+		}
+		got, err := parseGatewayFlag(fs, *gateway)
+		if err != nil {
+			t.Fatalf("--gateway %q 被拒: %v", given, err)
+		}
+		if got != manualGateway {
+			t.Errorf("--gateway %q 归一成 %q，期望 %q", given, got, manualGateway)
+		}
 	}
 }
 
@@ -520,6 +574,32 @@ func TestWalletCreditCommand(t *testing.T) {
 	}
 	if !slices.Equal(secondRows, wantSecond) {
 		t.Errorf("第二笔的分录 = %v，期望 %v", secondRows, wantSecond)
+	}
+
+	// 来源名大小写归一：`MANUAL` 落进的仍是 `payment_gateway:manual`，
+	// 不会在它旁边再开一个只差大小写的科目。
+	upperOrder := uniqueName("order")
+	if err := runCaptured(t, func() error {
+		return runWalletCredit([]string{
+			"--user", ref, "--amount", "5", "--order", upperOrder, "--gateway", "MANUAL",
+		})
+	}); err != nil {
+		t.Fatalf("--gateway MANUAL 的入账失败: %v", err)
+	}
+	upperRows := txnRows(t, db, txnIDForOrder(upperOrder))
+	if len(upperRows) != 2 || !strings.HasPrefix(upperRows[0], ledger.PaymentGatewayAccount("manual").String()+"|") {
+		t.Errorf("--gateway MANUAL 的分录 = %v，期望对家是 payment_gateway:manual", upperRows)
+	}
+	var upperAccounts int
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT count(*) FROM ledger_entries WHERE account = 'payment_gateway:MANUAL'`).Scan(&upperAccounts); err != nil {
+		t.Fatalf("数大小写科目失败: %v", err)
+	}
+	if upperAccounts != 0 {
+		t.Errorf("库里多出 %d 条 payment_gateway:MANUAL 的分录", upperAccounts)
+	}
+	if balance := walletBalance(t, db, userID); balance != "155.00000000" {
+		t.Errorf("三笔之后余额 = %s，期望 155.00000000", balance)
 	}
 }
 
