@@ -465,9 +465,9 @@ go run ./cmd/larkaxctl model create --model claude-x --display '示例模型' \
 模型下的候选全部落选。两个上限同理——请求的输入加输出超过 `--context-limit`、
 或输出超过 `--output-limit` 时落选。一个候选都不剩时报「N 个候选渠道都不支持
 这次请求」（HTTP 502），一个上游调用都不会发出去。判据里的输入 token 数是
-**只按正文估算**的那个量（`channel.Request.PromptText`），不含工具定义与图片。
-它与**预留**已经不是同一个口径——预留把那两项算了进去（见 `internal/api` 的
-`inputTokensOf`）。方向是判据偏宽松：这个数偏小只会少挡几个其实接得住的请求，
+**只按正文估算**的那个量（`channel.Request.PromptText`），不含工具定义、图片与历史里的
+tool_use 参数。它与**预留**已经不是同一个口径——预留把那几项算了进去（见
+`internal/api` 的 `inputTokensOf`）。方向是判据偏宽松：这个数偏小只会少挡几个其实接得住的请求，
 不会把一个上游接得住的请求拒掉。
 
 「没填」与「声明不支持」在库里不是一回事，读侧的处置正好相反：
