@@ -658,10 +658,15 @@ func printModelList(w io.Writer, models []catalog.Model) {
 	}
 
 	tw := newTableWriter(w)
-	_, _ = fmt.Fprintln(tw, "ID\t规范名\t展示名\t厂商\t家族\t上下文\t输入\t输出\t能力\t模态")
+	p := newPalette(w)
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		p.bold("ID"), p.bold("规范名"), p.bold("展示名"), p.bold("厂商"),
+		p.bold("家族"), p.bold("上下文"), p.bold("输入"), p.bold("输出"),
+		p.bold("能力"), p.bold("模态"))
 	for _, m := range models {
-		_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			m.ID, m.CanonicalName, m.DisplayName, orDash(m.Vendor), orDash(m.Family),
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			p.bold(strconv.FormatInt(m.ID, 10)), p.bold(m.CanonicalName),
+			m.DisplayName, orDash(m.Vendor), orDash(m.Family),
 			limitLabel(m.ContextLimit), limitLabel(m.InputLimit), limitLabel(m.OutputLimit),
 			capabilitySummary(m.Capabilities), modalityLabel(m.ModalitiesInput, m.ModalitiesOutput))
 	}
@@ -678,8 +683,9 @@ func printModelList(w io.Writer, models []catalog.Model) {
 // 而 raw 可能是一大段嵌套 JSON——把它铺在这里会把上面那几行挤走。
 func printModelDetail(w io.Writer, m catalog.Model) {
 	tw := newTableWriter(w)
+	p := newPalette(w)
 	row := func(label, value string) {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", label, value)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
 	}
 	row("ID", strconv.FormatInt(m.ID, 10))
 	row("规范名", m.CanonicalName)
@@ -695,7 +701,7 @@ func printModelDetail(w io.Writer, m catalog.Model) {
 	row("知识截止", dateLabel(m.KnowledgeCutoff))
 	row("发布日期", dateLabel(m.ReleaseDate))
 	row("采集源 ID", orDash(m.CanonicalModelID))
-	row("更新时间", m.UpdatedAt.Format(time.RFC3339))
+	row("更新时间", p.dim(m.UpdatedAt.Format(time.RFC3339)))
 	_ = tw.Flush()
 }
 

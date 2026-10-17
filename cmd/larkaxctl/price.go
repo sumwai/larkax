@@ -696,17 +696,23 @@ func printRuleExplain(w io.Writer, q pricing.ExplainQuery, rules []pricing.RuleI
 // verdictOf 非 nil 时多一栏「裁决」，按行号取那一栏的值。
 func printRuleTable(w io.Writer, rules []pricing.RuleInfo, verdictOf func(int) string) {
 	tw := newTableWriter(w)
-	header := "ID\t作用域\t商家\t渠道\t名称\t模型\t优先级\t状态\t生效自\t生效至\t单价键"
+	p := newPalette(w)
+	headers := []string{"ID", "作用域", "商家", "渠道", "名称", "模型", "优先级", "状态", "生效自", "生效至", "单价键"}
 	if verdictOf != nil {
-		header += "\t裁决"
+		headers = append(headers, "裁决")
 	}
-	_, _ = fmt.Fprintln(tw, header)
+	bolded := make([]string, len(headers))
+	for i, h := range headers {
+		bolded[i] = p.bold(h)
+	}
+	_, _ = fmt.Fprintln(tw, strings.Join(bolded, "\t"))
 
 	for i, r := range rules {
-		line := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s",
-			r.ID, r.Scope, priceOwnerLabel(r.OwnerUserID), priceChannelLabel(r.ChannelID),
-			r.Name, joinOrDash(r.ModelPatterns), r.Priority, enabledLabel(r),
-			r.EffectiveFrom.Format(time.RFC3339), effectiveToLabel(r.EffectiveTo),
+		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s",
+			p.bold(strconv.FormatInt(r.ID, 10)), r.Scope,
+			priceOwnerLabel(r.OwnerUserID), priceChannelLabel(r.ChannelID),
+			p.bold(r.Name), joinOrDash(r.ModelPatterns), r.Priority, enabledLabel(r),
+			p.dim(r.EffectiveFrom.Format(time.RFC3339)), p.dim(effectiveToLabel(r.EffectiveTo)),
 			declaredKeysLabel(r))
 		if verdictOf != nil {
 			line += "\t" + verdictOf(i)
