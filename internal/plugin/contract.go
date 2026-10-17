@@ -52,14 +52,29 @@ const (
 // 要少得多（没有凭证、没有渠道配置），而共用一个类型会让「加一个字段」
 // 悄悄扩大插件的可见范围。
 type RequestContext struct {
-	RequestID      string `json:"requestId"`
+	RequestID string `json:"requestId"`
+	// CanonicalModel 是调用方请求里的规范模型名：注册表的模型匹配
+	// （meta.models）与 onRoute 的上下文用的都是它。
 	CanonicalModel string `json:"canonicalModel"`
-	UpstreamModel  string `json:"upstreamModel"`
-	Protocol       string `json:"protocol"`
-	Streamed       bool   `json:"streamed"`
-	// Body 是上游请求体。插件只能通过 RequestPatch.Body 改其中列出的字段——
-	// **能读到什么与能改什么是两件事**，读整个 body 是必要的（要按内容判断），
-	// 改则限定在白名单。
+	// UpstreamModel 是**别名翻译之前**的模型名。
+	//
+	// 名字说的是「上游模型名」，但 onRequest 时刻那个值还不存在：上游名是
+	// 逐渠道配的（同一个规范名在这家叫 vendor/x、在那家叫 x），要知道它得先
+	// 选中渠道，而选路在 onRequest 之后（见 docs/plugin-contract.md 的接线
+	// 一节与 internal/route 的 upstreamRequest）。所以它恒等于 CanonicalModel。
+	//
+	// **不要拿它拼上游特有的请求体**：它不是实际发给上游的名字。上游实际用了
+	// 哪个名字，看 onResponse 的 body.model（那是上游回报的，见
+	// channel.Response.UpstreamModel）——流式请求拿不到 onResponse。
+	//
+	// 字段名保留是为了不打断已有插件；语义以这里为准。
+	UpstreamModel string `json:"upstreamModel"`
+	Protocol      string `json:"protocol"`
+	Streamed      bool   `json:"streamed"`
+	// Body 是请求体的**协议中立视图**，取自别名翻译之前的那份请求：
+	// `body.model` 与 UpstreamModel 同值，也是规范名。插件只能通过
+	// RequestPatch.Body 改其中列出的字段——**能读到什么与能改什么是两件事**，
+	// 读整个 body 是必要的（要按内容判断），改则限定在白名单。
 	Body map[string]any `json:"body"`
 	// Headers 是客户端请求头里**白名单前缀**可见的那部分。
 	//

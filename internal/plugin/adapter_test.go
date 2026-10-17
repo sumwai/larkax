@@ -52,16 +52,24 @@ func TestRequestContextCarriesNoCredentials(t *testing.T) {
 	_ = cred
 }
 
-// 上游模型名给插件看，但**规范模型名与上游模型名是分开的字段**：
-// 插件要按规范名判断「这是哪个模型」，按上游名拼接上游特有的请求。
-func TestRequestContextDistinguishesModelNames(t *testing.T) {
-	rc := RequestContextFrom("r1", &channel.Request{Model: "acme-vision-pro-2024"}, "acme/vision", "openai")
-	if rc.CanonicalModel != "acme/vision" || rc.UpstreamModel != "acme-vision-pro-2024" {
-		t.Fatalf("两个模型名该分开，实际 %+v", rc)
+// onRequest 在选路之前跑，而上游名是逐渠道配的、选路之后才翻得出来
+// （见 internal/route 的 upstreamRequest）。所以 onRequest 拿到的请求里
+// Model 是规范名，插件看到的两个模型名字段也只能是同一个值。
+//
+// 这条用例钉的是**现实**：UpstreamModel 拿不到上游名不是漏填，而是在
+// onRequest 时刻原理上不可知。语义见 docs/plugin-contract.md 的
+// 「`onRequest` 看到的 `model` 是翻译前的名字」。
+func TestRequestContextModelNamesBeforeAlias(t *testing.T) {
+	// 线上到达 RequestContextFrom 的请求就是没翻过的那份：Model 是规范名。
+	rc := RequestContextFrom("r1", &channel.Request{Model: "acme/vision"}, "acme/vision", "openai")
+	if rc.CanonicalModel != "acme/vision" {
+		t.Fatalf("canonicalModel = %q，期望规范名", rc.CanonicalModel)
 	}
-	// body 里给的是上游名：它是「实际会发出去的那个」。
-	if rc.Body["model"] != "acme-vision-pro-2024" {
-		t.Errorf("body.model = %v，期望上游名", rc.Body["model"])
+	if rc.UpstreamModel != rc.CanonicalModel {
+		t.Errorf("upstreamModel = %q，onRequest 时刻上游名不可知，该与规范名同值", rc.UpstreamModel)
+	}
+	if rc.Body["model"] != rc.CanonicalModel {
+		t.Errorf("body.model = %v，onRequest 时刻它是翻译前的规范名", rc.Body["model"])
 	}
 }
 
