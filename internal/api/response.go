@@ -304,9 +304,12 @@ func renderSuccess(protocol channel.Protocol, id, model string, now time.Time, r
 		return json.Marshal(newOpenAIChatCompletion(id, model, now.Unix(), resp))
 	case channel.ProtocolAnthropic:
 		return json.Marshal(newClaudeMessage(id, model, resp))
+	case channel.ProtocolOpenAIResponses:
+		// 形状在 responses.go 里（那里也写了为什么没有用 relaykit 的转换器）。
+		return json.Marshal(newResponsesResponse(id, model, now.Unix(), resp))
 	default:
 		// 走到这里说明入口把一条不认识的路径接到了本函数上——调用协议
-		// 只有这两套，多一套就该多一个渲染器，而不是回落到其中一套。
+		// 只有这几套，多一套就该多一个渲染器，而不是回落到其中一套。
 		return nil, fmt.Errorf("协议 %q 没有非流式响应形状", protocol)
 	}
 }

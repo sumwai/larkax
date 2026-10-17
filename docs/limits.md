@@ -21,8 +21,16 @@ larkax 对一把 API Key 有**两种**限制，都按 Key 计，**互不相干**
 |---|---|---|---|
 | OpenAI（`/v1/chat/completions`） | RPM | `error.code` | `null` |
 | OpenAI | 累计额度 | `error.code` | `insufficient_quota` |
+| OpenAI Responses（`/v1/responses`） | RPM | `error.code` | `null` |
+| OpenAI Responses | 累计额度 | `error.code` | `insufficient_quota` |
 | Anthropic（`/v1/messages`） | RPM | `error.type` | `rate_limit_error` |
 | Anthropic | 累计额度 | `error.type` | `insufficient_quota` |
+
+Responses 那一套的错误体与 OpenAI 那一套**逐字相同**（两家共用同一个官方
+SDK 的错误解析器，见 `internal/api/error.go`），所以两处的码放在同一个位置。
+差别只在**流式**那条路上：Responses 流中途失败是一个平铺的事件
+（`type` / `code` / `message` 在顶层，没有 `error` 外层），见
+`internal/api/stream.go` 的 `responsesStream.errorFrame`。
 
 **OpenAI 那套要按 `error.code` 分支，不能按 `error.type`**：限流与额度
 两条的 `error.type` 都是 `rate_limit_error`，只有 `error.code` 分得开

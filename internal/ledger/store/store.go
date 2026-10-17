@@ -179,26 +179,30 @@ func checkAPIKey(id int64) error {
 //
 // 认的是**入口**那几条路径，不是渠道能说的协议种类：这个字段记的是入口协议
 // （由 internal/api 分派时填），不是渠道的 type。接一个新的**上游**协议不会让
-// 这里多一个合法取值，只有多一条**入口**路径才会——`openai-responses` 就是一个
-// 合法的渠道类型，而它不在这里。
+// 这里多一个合法取值，只有多一条**入口**路径才会。
 //
-// 列上写着「openai / anthropic」是注释，不是约束——约束在这里。这一份清单是
-// channel.Protocol 取值集合的**子集**（那边多一个 `openai-responses`），所以
-// 两处要一起看：往 channel.Protocol 加取值时，问一句「它有没有对应的入口路径」，
-// 有就也要加到下面这个 switch 里。
+// 四个取值与入口的四条路径一一对应：`/v1/chat/completions`、`/v1/messages`、
+// `/v1/responses`、`/v1/systemone`（见 internal/api 的 ServeHTTP）。所以这里与
+// channel.Protocol.valid 今天**取值相同**——但两者判的不是同一件事：那边问
+// 「这个值是不是一个合法的协议」，这边问「它有没有对应的入口路径」。
+// 一个只有渠道用得上、没有入口路径的协议会出现在那边而不在这边，那时两份
+// 清单就分岔了，所以加取值时仍要各自过一遍。
+//
+// 列上写着「openai / anthropic」是注释，不是约束——约束在这里。
 //
 // 漏了这里的表现是「入口收得下这个请求，却在预留那一步失败」——而那一步在
 // 开事务、冻余额之前，所以钱不会白冻，但每一个请求都会失败。
 func checkProtocol(p channel.Protocol) error {
 	switch p {
-	case channel.ProtocolOpenAI, channel.ProtocolAnthropic, channel.ProtocolSystemOne:
+	case channel.ProtocolOpenAI, channel.ProtocolAnthropic,
+		channel.ProtocolOpenAIResponses, channel.ProtocolSystemOne:
 		return nil
 	case "":
 		return ErrMissingProtocol
 	default:
-		return fmt.Errorf("%w：%q，只有 %q、%q 与 %q 三种",
+		return fmt.Errorf("%w：%q，只有 %q、%q、%q 与 %q 四种",
 			ErrUnknownProtocol, string(p), channel.ProtocolOpenAI, channel.ProtocolAnthropic,
-			channel.ProtocolSystemOne)
+			channel.ProtocolOpenAIResponses, channel.ProtocolSystemOne)
 	}
 }
 

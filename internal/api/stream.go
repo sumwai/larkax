@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
@@ -122,6 +123,14 @@ func newStreamRenderer(protocol channel.Protocol, id, model string, now time.Tim
 			textIndex:  -1,
 			toolBlocks: map[int]int{},
 		}, nil
+	case channel.ProtocolOpenAIResponses:
+		return &responsesStream{
+			id:        id,
+			model:     model,
+			created:   now.Unix(),
+			textIndex: -1,
+			tools:     map[int]*responsesStreamTool{},
+		}, nil
 	default:
 		return nil, fmt.Errorf("协议 %q 没有流式响应形状", protocol)
 	}
@@ -165,20 +174,31 @@ func writeSSE(w io.Writer, event string, payload any) error {
 	return frame{event: event, data: raw}.write(w)
 }
 
-// streamErrorFrame 把一个流中途的错误渲染成调用协议的错误帧。
+// streamErrorMessage 是一句**给调用方看的**流中途失败原因。
 //
 // 措辞按「已经吐过字没有」分两种，判据是 route.ErrOutputStarted（由网关
 // 在吐字之后失败时包上）。这个区分是有用的：已经吐过字时调用方手里有半截
 // 回答，他需要知道的是「这段被截断了」，而不是「服务暂时不可用」——后者
 // 会让他直接重试，而重试会把两段回答接在一起。
 //
+// 三套协议共用它：同一个失败在三种形状里说同一句话，形状的差别只在
+// 字段名与嵌套上（见 streamErrorFrame 与 responsesStream.errorFrame）。
+func streamErrorMessage(err error) string {
+	if errors.Is(err, route.ErrOutputStarted) {
+		return "the response was interrupted before it finished"
+	}
+	return "upstream call failed"
+}
+
+// streamErrorFrame 把一个流中途的错误渲染成调用协议的错误帧。
+//
 // 不回上游的错误原文：那里面可能回显请求内容（与非流式的 writeError 同一条
 // 规矩）。细节留在日志里。
+//
+// Responses 那套**不走这里**：它的事件里带 sequence_number，而那个计数器在
+// 渲染器手里（见 responsesStream.errorFrame）。
 func streamErrorFrame(protocol channel.Protocol, err error) (frame, error) {
-	message := "upstream call failed"
-	if errors.Is(err, route.ErrOutputStarted) {
-		message = "the response was interrupted before it finished"
-	}
+	message := streamErrorMessage(err)
 
 	if protocol == channel.ProtocolAnthropic {
 		raw, mErr := json.Marshal(claudeErrorBody{
@@ -691,3 +711,355 @@ func (s *anthropicStream) allocate() int {
 	s.nextIndex++
 	return index
 }
+
+// ── OpenAI Responses ───────────────────────────────────────────────────
+
+// responsesStream 渲染 OpenAI Responses 的流式事件。
+//
+// 形状是「一串带名字的事件」，每一项输出都有开始 / 增量 / 结束三段：
+//
+//	response.created
+//	response.output_item.added    → response.output_text.delta…
+//	                              → response.output_text.done
+//	                              → response.output_item.done
+//	response.output_item.added    → response.function_call_arguments.delta…
+//	                              → response.function_call_arguments.done
+//	                              → response.output_item.done
+//	response.completed（或 response.incomplete）
+//
+// 与非流式那一份（responses.go）共用同一批结构体：事件里嵌的那个 response
+// 对象就是非流式的响应体，两处各写一份只会让它们慢慢分岔。
+//
+// # output_index 在**打开时**分配，而且只分配一次
+//
+// 它是这一项在最终 output[] 里的位置，客户端按它把增量拼回项里。所以正文项
+// 在第一个正文增量到达时才分配（一个只有工具调用的回答不该出现空的正文项），
+// 工具项在它第一次出现时才分配。
+//
+// # 工具项一旦打开就开到流末尾
+//
+// 中途关掉它，后面那些参数分片就落在自己的 done 之后了。这与 anthropicStream
+// 的取舍相同，理由也相同：统一事件流里没有「这个工具调用说完了」这件事
+// （anthropicadapter 把上游的 content_block_stop 丢掉了，openaiadapter 那边
+// OpenAI 压根不发），所以渲染器根本收不到那个信号。
+//
+// # 正文项只有一项
+//
+// 与 anthropicStream 不同，这里不给工具调用之后的正文另开一项：正文项的
+// 下标已经分配过，后续增量拼进同一项即可（客户端按 index 找项），而多开一项
+// 会让最终 output[] 里出现两条助手消息。顺序因此是「正文项在最前、工具项
+// 按出现顺序在后」，与 responsesOutput 的非流式那一份一致。
+type responsesStream struct {
+	id      string
+	model   string
+	created int64
+
+	// seq 是每个事件的 sequence_number。官方 SDK 的事件模型把它标成必填，
+	// 所以每个事件都要带上，而且从 0 起递增。
+	seq int64
+
+	// items 按分配顺序记下每一项。finish 时按这个顺序收尾，它就是最终
+	// output[] 的顺序。
+	items []responsesStreamItem
+
+	// textIndex 是正文项的下标，-1 表示还没有正文。
+	textIndex int
+	text      strings.Builder
+
+	// tools 把上游给的工具调用下标映射到本流里的一项。
+	tools map[int]*responsesStreamTool
+
+	usage        *channel.Usage
+	finishReason string
+}
+
+// responsesStreamItem 是已分配的一项：tool 为 nil 表示这是正文项。
+type responsesStreamItem struct {
+	outputIndex int
+	tool        *responsesStreamTool
+}
+
+// responsesStreamTool 是一次工具调用在本流里的状态。
+type responsesStreamTool struct {
+	outputIndex int
+	itemID      string
+	callID      string
+	name        string
+	arguments   strings.Builder
+}
+
+// responsesEvent 是一帧 Responses 事件的载荷。
+//
+// 用一个结构接住全部事件类型，而不是按 type 各声明一个：这里只会发其中几种，
+// 而字段集高度重合（每一条都带 type 与 sequence_number）。不在这条事件里的
+// 字段靠 omitempty 省掉——这与另外两套协议的做法不同（那边每帧一个结构体），
+// 因为那边一帧里的字段少且互不重合。
+type responsesEvent struct {
+	Type           string             `json:"type"`
+	SequenceNumber int64              `json:"sequence_number"`
+	Response       *responsesResponse `json:"response,omitempty"`
+	OutputIndex    *int               `json:"output_index,omitempty"`
+	ContentIndex   *int               `json:"content_index,omitempty"`
+	ItemID         string             `json:"item_id,omitempty"`
+	Item           any                `json:"item,omitempty"`
+	Delta          string             `json:"delta,omitempty"`
+	// Text 与 Arguments 用指针：它们只在 done 事件里出现，而**空串是合法值**
+	// （模型答了个空串、工具没有参数），省掉字段与给空串在严格实现里不等价。
+	Text      *string `json:"text,omitempty"`
+	Arguments *string `json:"arguments,omitempty"`
+	// 错误事件（平铺，没有 error 外层，见 errorFrame）。
+	Code    string  `json:"code,omitempty"`
+	Message string  `json:"message,omitempty"`
+	Param   *string `json:"param,omitempty"`
+}
+
+// start 写 response.created，它是这条流的第一条事件。
+//
+// 与非流式那份的差别只有 status 与空的 output：这条流还没开始产出，
+// 而客户端要拿这个 id 与 model 去建自己的状态。
+func (s *responsesStream) start(w io.Writer) error {
+	return s.emit(w, "response.created", responsesEvent{
+		Response: &responsesResponse{
+			ID:         s.id,
+			Object:     "response",
+			CreatedAt:  s.created,
+			Status:     "in_progress",
+			Model:      s.model,
+			Output:     []any{},
+			ToolChoice: "auto",
+			Tools:      []any{},
+		},
+	})
+}
+
+func (s *responsesStream) event(w io.Writer, ev channel.StreamEvent) error {
+	switch ev.Kind {
+	case "delta":
+		if err := s.openText(w); err != nil {
+			return err
+		}
+		s.text.WriteString(ev.Text)
+		index := s.textIndex
+		return s.emit(w, "response.output_text.delta", responsesEvent{
+			OutputIndex:  &index,
+			ContentIndex: intPtr(0),
+			ItemID:       responsesMessageItemID(s.id),
+			Delta:        ev.Text,
+		})
+
+	case "tool_use":
+		if ev.ToolCall == nil {
+			return nil
+		}
+		tool, err := s.openTool(w, ev.ToolCall)
+		if err != nil {
+			return err
+		}
+		if ev.ToolCall.Arguments == "" {
+			return nil
+		}
+		tool.arguments.WriteString(ev.ToolCall.Arguments)
+		index := tool.outputIndex
+		return s.emit(w, "response.function_call_arguments.delta", responsesEvent{
+			OutputIndex: &index,
+			ItemID:      tool.itemID,
+			Delta:       ev.ToolCall.Arguments,
+		})
+
+	case "usage_input":
+		// 输入侧的用量。Responses 的用量只在终态事件里报（见 responsesadapter
+		// 的说明），所以这里没有可写的地方——它不是结算依据。
+		return nil
+
+	case "usage":
+		if ev.Usage != nil {
+			u := *ev.Usage
+			s.usage = &u
+		}
+		return nil
+
+	case "done":
+		// 终态事件由 finish 写：它要带上用量与最终的 output[]，而用量在
+		// done 之前的那一片里。
+		s.finishReason = ev.FinishReason
+		return nil
+
+	case "error":
+		return s.errorFrame(w, ev.Err)
+	}
+	return nil
+}
+
+// errorFrame 写一次流中途失败。
+//
+// Responses 的流中途失败是一个**平铺**的事件——type / code / message / param
+// 就在顶层，没有另外两套那样的 error 外层。这是第三套形状，不能与它们合并，
+// 所以它没有走 streamErrorFrame。
+func (s *responsesStream) errorFrame(w io.Writer, err error) error {
+	return s.emit(w, "error", responsesEvent{
+		Code:    "server_error",
+		Message: streamErrorMessage(err),
+	})
+}
+
+// openText 打开正文项，已经开着就什么都不做。
+func (s *responsesStream) openText(w io.Writer) error {
+	if s.textIndex >= 0 {
+		return nil
+	}
+	s.textIndex = s.allocate(nil)
+	index := s.textIndex
+	return s.emit(w, "response.output_item.added", responsesEvent{
+		OutputIndex: &index,
+		ItemID:      responsesMessageItemID(s.id),
+		Item: responsesMessageItem{
+			Type:    "message",
+			ID:      responsesMessageItemID(s.id),
+			Status:  "in_progress",
+			Role:    "assistant",
+			Content: []responsesContent{},
+		},
+	})
+}
+
+// openTool 打开（或复用）一次工具调用对应的项。
+//
+// 名字取**第一次**出现的那一片：三家的适配器都把 id 与名字放在这个工具调用
+// 的第一个分片里（OpenAI 的首片带 function.name、Anthropic 的
+// content_block_start 带 name、Responses 的 output_item.added 带 name），
+// 后面那些分片只有参数片段。
+func (s *responsesStream) openTool(w io.Writer, tc *channel.ToolCallDelta) (*responsesStreamTool, error) {
+	if tool, ok := s.tools[tc.Index]; ok {
+		return tool, nil
+	}
+	tool := &responsesStreamTool{
+		itemID: responsesCallItemID(s.id, tc.Index),
+		callID: tc.ID,
+		name:   tc.Name,
+	}
+	tool.outputIndex = s.allocate(tool)
+	s.tools[tc.Index] = tool
+	index := tool.outputIndex
+	return tool, s.emit(w, "response.output_item.added", responsesEvent{
+		OutputIndex: &index,
+		ItemID:      tool.itemID,
+		Item: responsesFunctionCallItem{
+			Type:   "function_call",
+			ID:     tool.itemID,
+			Status: "in_progress",
+			CallID: tool.callID,
+			Name:   tool.name,
+		},
+	})
+}
+
+// finish 收尾：逐项写 done 事件，再写终态事件。
+//
+// 逐项的顺序按 output_index 升序——最终 output[] 的顺序就是它，而每项的
+// done 事件要与它在数组里的位置一致。
+func (s *responsesStream) finish(w io.Writer) error {
+	status, incomplete := responsesStatus(s.finishReason)
+
+	output := make([]any, 0, len(s.items))
+	for _, item := range s.items {
+		index := item.outputIndex
+		if item.tool == nil {
+			text := s.text.String()
+			if err := s.emit(w, "response.output_text.done", responsesEvent{
+				OutputIndex:  &index,
+				ContentIndex: intPtr(0),
+				ItemID:       responsesMessageItemID(s.id),
+				Text:         &text,
+			}); err != nil {
+				return err
+			}
+			done := s.messageItem(status)
+			output = append(output, done)
+			if err := s.emit(w, "response.output_item.done", responsesEvent{
+				OutputIndex: &index,
+				ItemID:      done.ID,
+				Item:        done,
+			}); err != nil {
+				return err
+			}
+			continue
+		}
+
+		arguments := item.tool.arguments.String()
+		if err := s.emit(w, "response.function_call_arguments.done", responsesEvent{
+			OutputIndex: &index,
+			ItemID:      item.tool.itemID,
+			Arguments:   &arguments,
+		}); err != nil {
+			return err
+		}
+		done := responsesFunctionCallItem{
+			Type:      "function_call",
+			ID:        item.tool.itemID,
+			Status:    status,
+			CallID:    item.tool.callID,
+			Name:      item.tool.name,
+			Arguments: arguments,
+		}
+		output = append(output, done)
+		if err := s.emit(w, "response.output_item.done", responsesEvent{
+			OutputIndex: &index,
+			ItemID:      done.ID,
+			Item:        done,
+		}); err != nil {
+			return err
+		}
+	}
+
+	resp := &responsesResponse{
+		ID:                s.id,
+		Object:            "response",
+		CreatedAt:         s.created,
+		Status:            status,
+		Model:             s.model,
+		Output:            output,
+		IncompleteDetails: incomplete,
+		ToolChoice:        "auto",
+		Tools:             []any{},
+	}
+	if s.usage != nil {
+		resp.Usage = responsesUsageOf(*s.usage)
+	}
+	return s.emit(w, responsesFinishEvent(status), responsesEvent{Response: resp})
+}
+
+// allocate 分配下一个输出项下标并把它记进顺序表。
+func (s *responsesStream) allocate(tool *responsesStreamTool) int {
+	index := len(s.items)
+	s.items = append(s.items, responsesStreamItem{outputIndex: index, tool: tool})
+	return index
+}
+
+// messageItem 是收尾时写出的那个完整的正文项。
+func (s *responsesStream) messageItem(status string) responsesMessageItem {
+	return responsesMessageItem{
+		Type:   "message",
+		ID:     responsesMessageItemID(s.id),
+		Status: status,
+		Role:   "assistant",
+		Content: []responsesContent{{
+			Type:        "output_text",
+			Text:        s.text.String(),
+			Annotations: []any{},
+		}},
+	}
+}
+
+// emit 写一帧事件，sequence_number 由这里递增。
+//
+// 计数器放在一处而不是每个调用点各给一个数：漏掉一个或重复一个都会让客户端的
+// 顺序判据失效，而那种失效在报文里看不出来。
+func (s *responsesStream) emit(w io.Writer, eventType string, payload responsesEvent) error {
+	payload.Type = eventType
+	payload.SequenceNumber = s.seq
+	s.seq++
+	return writeSSE(w, eventType, payload)
+}
+
+// intPtr 取一个 int 的地址。事件的字段用指针区分「不在这条事件里」与「值是 0」。
+func intPtr(v int) *int { return &v }

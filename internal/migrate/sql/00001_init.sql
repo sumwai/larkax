@@ -380,7 +380,7 @@ CREATE TABLE billing_requests (
     channel_id          bigint REFERENCES channels(id),
     canonical_model     text NOT NULL,
     upstream_model      text,
-    protocol            text NOT NULL,          -- openai / anthropic
+    protocol            text NOT NULL,          -- 入口协议，见 internal/ledger/store 的 checkProtocol
     streamed            boolean NOT NULL DEFAULT false,
     -- 预留
     reserved_amount     numeric(20, 8) NOT NULL DEFAULT 0,

@@ -252,6 +252,27 @@ type fakeUpstream struct {
 	// 状态码的用例才设它——账单上要落的就是那个数，所以它不能是编的。
 	failStatus atomic.Int64
 
+	// 下面四项只对 ProtocolOpenAIResponses 有意义。Responses 的流式是一串
+	// **带事件名的事件**，与非流式那个 JSON 体是两套形状；另外两条协议的流式帧
+	// （OpenAI 的裸 data: 分片、Anthropic 的带事件名帧）在 stream_e2e_test.go 的
+	// streamUpstream 里，本类型不重复实现它们——那两套与这里的字段名毫无重合。
+	//
+	// stream 为 true 时按事件流回，而不是回一个 JSON 体。
+	stream bool
+	// streamChunks 是流式那条路要吐的正文分片，按顺序吐。
+	streamChunks []string
+	// failAfterStreamEvents > 0 时，吐完这么多条事件之后报一个流中途错误。
+	//
+	// 判据是**第几条事件**而不是第几个分片：这条流的第一条事件是
+	// response.created，它不是一个分片，按分片数记会数错一条。
+	failAfterStreamEvents int
+	// toolCall 非 nil 时这次响应里带一次工具调用：非流式放在 output[] 里，
+	// 流式按事件吐出来（分片由 streamToolArgs 给）。
+	toolCall *fakeToolCall
+	// streamToolArgs 是流式吐的工具参数分片，按顺序吐。
+	// 空表示把 toolCall.Arguments 一次给全。
+	streamToolArgs []string
+
 	mu       sync.Mutex
 	calls    int
 	paths    []string
@@ -293,6 +314,15 @@ func (f *fakeUpstream) handler() http.Handler {
 			return
 		}
 
+		// 流式那条路：调用方要的是 SSE，而它的形状与非流式那个 JSON 体是
+		// 两套。判据里带上协议，是因为本类型的流式只实现了 Responses 这一套
+		//（见 stream 的说明）——协议对不上时照旧回 JSON，用例会挂在
+		// 「收到的是一个 JSON 体」上，而不是挂在一个不认识的形状上。
+		if f.stream && f.protocol == channel.ProtocolOpenAIResponses {
+			f.serveResponsesStream(w)
+			return
+		}
+
 		_ = json.NewEncoder(w).Encode(f.successBody())
 	})
 }
@@ -316,10 +346,17 @@ func (f *fakeUpstream) stopReason() string {
 	if f.finishReason != "" {
 		return f.finishReason
 	}
-	if f.protocol == channel.ProtocolAnthropic {
+	switch f.protocol {
+	case channel.ProtocolAnthropic:
 		return "end_turn"
+	case channel.ProtocolOpenAIResponses:
+		// Responses 里没有「结束原因」这个字段，它报的是 **status**
+		//（completed / incomplete / failed）。所以这里返回的就是那个 status，
+		// 用例要别的取值时按这一套词汇给（见 finishReason）。
+		return "completed"
+	default:
+		return "stop"
 	}
-	return "stop"
 }
 
 // successBody 按上游协议给出一次成功的响应体。
@@ -336,6 +373,16 @@ func (f *fakeUpstream) stopReason() string {
 // 而它们说的是同一件事。转换里少补或多减一次，账单就会差出那 5 个 token 的钱。
 // 缓存**写入**那一侧同理，只是它只在 Anthropic 一侧报（见 cacheWrite）。
 func (f *fakeUpstream) successBody() map[string]any {
+	if f.protocol == channel.ProtocolOpenAIResponses {
+		// 有工具调用时**只给那一项**：这一次回答里没有正文，而「只说了一句
+		// 工具调用」与「说了话再调工具」是两种形状。混在一起的话，output[]
+		// 的下标就取决于两项的顺序，而那正是断言要看的东西之一。
+		output := []any{responsesMessageItem("completed", "你好，我是假上游")}
+		if f.toolCall != nil {
+			output = []any{f.toolCall.item("completed")}
+		}
+		return f.responsesBody(f.stopReason(), output)
+	}
 	if f.protocol == channel.ProtocolAnthropic {
 		usage := map[string]any{"input_tokens": 12, "output_tokens": 7}
 		// 不报缓存时**不带这个字段**：上游没报与报了 0 是两件事，
@@ -394,7 +441,226 @@ func (f *fakeUpstream) failureBody() string {
 	if f.protocol == channel.ProtocolAnthropic {
 		return `{"type":"error","error":{"type":"api_error","message":"placeholder upstream failure"}}`
 	}
+	// Responses 的错误体与 OpenAI 那一份是**同一个形状**（两家共用同一个官方
+	// SDK 的错误解析器，见 internal/api/error.go），所以这里不另写一份。
 	return `{"error":{"message":"placeholder upstream failure","type":"server_error"}}`
+}
+
+// ── Responses 上游 ────────────────────────────────────────────────────
+
+// 假上游在 Responses 那条路上用的固定标识。
+//
+// 写死而不是随机：调用方看到的 id 是我们自己发的（见 responsesMessageItemID），
+// 这几个只出现在「上游报的那一项有没有被认出来」这类判据里。
+const (
+	responsesUpstreamResponseID = "resp-placeholder"
+	responsesUpstreamMessageID  = "resp-placeholder_msg_0"
+	responsesUpstreamCallItemID = "resp-placeholder_call_0"
+)
+
+// fakeToolCall 是假上游要报出的一次工具调用。
+//
+// 与 stream_e2e_test.go 的 toolCallDelta 分开：那一个是**上游分片**的模型
+// （id 与名字只在首片给），而这里是一次完整的调用——非流式那条路本来就一次
+// 给全，流式那边由 streamToolArgs 决定怎么切。
+type fakeToolCall struct {
+	CallID    string
+	Name      string
+	Arguments string
+}
+
+// item 造出这次工具调用在 output[] 里的那一项。
+//
+// arguments 用**字符串形态的 JSON**（`"{\"a\":1}"`）：官方形状就是这样，
+// 而适配器对两种形态都收（见 responsesadapter 的 arguments）。假上游该扮演的
+// 是官方那一种——形态失真时测的就不是真实上游发出来的东西了。
+func (t fakeToolCall) item(status string) map[string]any {
+	return map[string]any{
+		"type": "function_call", "id": responsesUpstreamCallItemID, "status": status,
+		"call_id": t.CallID, "name": t.Name, "arguments": t.Arguments,
+	}
+}
+
+// responsesMessageItem 造一个 Responses 的正文项。
+//
+// text 为空时 content 是空数组而不是缺字段：官方形状里它是必填的列表，
+// 而流式那条路的 output_item.added 正是「项已经建好、正文还没来」那一刻。
+func responsesMessageItem(status, text string) map[string]any {
+	content := []any{}
+	if text != "" {
+		content = append(content, map[string]any{
+			"type": "output_text", "text": text, "annotations": []any{},
+		})
+	}
+	return map[string]any{
+		"type": "message", "id": responsesUpstreamMessageID, "status": status,
+		"role": "assistant", "content": content,
+	}
+}
+
+// responsesReasoningTokens 是假上游在 Responses 用量里报的推理量。
+//
+// 取一个非零值：推理在 Responses 里嵌在 output_tokens_details 里，而它在计费上
+// 要从输出里**减掉**再单独计价（见 billing.FromChannelUsage）。报 0 的话，
+// 「推理有没有被读到」与「它有没有被重复计费」都会得到同一个金额，两处都测不出来。
+const responsesReasoningTokens = 3
+
+// responsesUsageBody 按 Responses 的口径给用量。
+//
+// 与 OpenAI 那一份报的是同一批 token，差别只在缓存与推理两项的**位置**：这里
+// 嵌在 input_tokens_details / output_tokens_details 里，而 chat 那边叫
+// prompt_tokens_details / completion_tokens_details。
+//
+// input_tokens **含**缓存（details 是它的子集），所以缓存量要加进去——与
+// OpenAI 那一份同一个理由。output_tokens 同理**含**推理。
+func (f *fakeUpstream) responsesUsageBody() map[string]any {
+	input := int64(12) + f.cacheRead
+	return map[string]any{
+		"input_tokens":  input,
+		"output_tokens": 7,
+		"total_tokens":  input + 7,
+		"input_tokens_details": map[string]any{
+			"cached_tokens":      f.cacheRead,
+			"cache_write_tokens": f.cacheWrite,
+		},
+		"output_tokens_details": map[string]any{"reasoning_tokens": responsesReasoningTokens},
+	}
+}
+
+// responsesBody 造一个 Responses 的响应对象。
+//
+// 非流式的响应体与流式终态事件里嵌的那个对象是**同一个东西**，所以只写一份：
+// 两处各写一份的话，它们迟早会在「用量在不在里面」这类地方分岔，而分岔的
+// 那一份不会报错。
+func (f *fakeUpstream) responsesBody(status string, output []any) map[string]any {
+	return map[string]any{
+		"id": responsesUpstreamResponseID, "object": "response", "status": status,
+		"model": f.upstreamModelName(), "output": output, "usage": f.responsesUsageBody(),
+	}
+}
+
+// toolStreamArgs 是这次工具调用要吐的参数分片。
+func (f *fakeUpstream) toolStreamArgs() []string {
+	if len(f.streamToolArgs) > 0 {
+		return f.streamToolArgs
+	}
+	return []string{f.toolCall.Arguments}
+}
+
+// serveResponsesStream 按 Responses 的事件形状吐一次流。
+//
+// 顺序照真实上游：created → 输出项的 added / 增量 / done → 终态。用量**只在
+// 终态事件里**给（这是 Responses 与 chat 的一处差别：chat 要显式带
+// stream_options.include_usage），所以这次结算的依据只能从那里来。
+//
+// 每条事件都带 event: 行，与真实上游一致。适配器会跳过它（事件名以载荷里的
+// type 为准），所以这条流同时证明「有 event: 行时也解析得出来」。
+func (f *fakeUpstream) serveResponsesStream(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	flush := func() {
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+	}
+
+	written := 0
+	// write 写一条事件。已经吐够 failAfterStreamEvents 条时改写成一条错误事件
+	// 并返回 false，调用方据此收工——那模拟的是「上游在流中途断了」，它与
+	// 「上游在接受请求之前就失败」是两条不同的路（后者回一个非 2xx）。
+	write := func(eventType string, payload map[string]any) bool {
+		if f.failAfterStreamEvents > 0 && written >= f.failAfterStreamEvents {
+			// type 必须写在载荷里，不能只写在 event: 行上：适配器跳过 event:
+			// 行，按载荷里的 type 分支（真实上游两处都有，而载荷那一处才是
+			// 它读的）。只写 event: 行的话这条事件会被当成不认识而静默丢掉。
+			writeResponsesEvent(w, "error", map[string]any{
+				"type": "error", "message": "placeholder upstream failure",
+			})
+			flush()
+			return false
+		}
+		payload["type"] = eventType
+		writeResponsesEvent(w, eventType, payload)
+		flush()
+		written++
+		return true
+	}
+
+	if !write("response.created", map[string]any{
+		"response": f.responsesBody("in_progress", []any{}),
+	}) {
+		return
+	}
+
+	if f.toolCall != nil {
+		// 工具调用：项先建好（名字与 call_id 在这一条里给），参数靠后面的分片
+		// 拼出来——与 Anthropic 的 content_block_start 同一个形状。
+		if !write("response.output_item.added", map[string]any{
+			"output_index": 0, "item": f.toolCall.item("in_progress"),
+		}) {
+			return
+		}
+		for _, args := range f.toolStreamArgs() {
+			if !write("response.function_call_arguments.delta", map[string]any{
+				"output_index": 0, "item_id": responsesUpstreamCallItemID, "delta": args,
+			}) {
+				return
+			}
+		}
+		if !write("response.function_call_arguments.done", map[string]any{
+			"output_index": 0, "item_id": responsesUpstreamCallItemID,
+			"arguments": f.toolCall.Arguments,
+		}) {
+			return
+		}
+		item := f.toolCall.item("completed")
+		if !write("response.output_item.done", map[string]any{"output_index": 0, "item": item}) {
+			return
+		}
+		write("response.completed", map[string]any{
+			"response": f.responsesBody("completed", []any{item}),
+		})
+		return
+	}
+
+	if !write("response.output_item.added", map[string]any{
+		"output_index": 0, "item": responsesMessageItem("in_progress", ""),
+	}) {
+		return
+	}
+	var text strings.Builder
+	for _, chunk := range f.streamChunks {
+		if !write("response.output_text.delta", map[string]any{
+			"output_index": 0, "item_id": responsesUpstreamMessageID, "delta": chunk,
+		}) {
+			return
+		}
+		text.WriteString(chunk)
+	}
+	if !write("response.output_text.done", map[string]any{
+		"output_index": 0, "item_id": responsesUpstreamMessageID, "text": text.String(),
+	}) {
+		return
+	}
+	item := responsesMessageItem("completed", text.String())
+	if !write("response.output_item.done", map[string]any{"output_index": 0, "item": item}) {
+		return
+	}
+	write("response.completed", map[string]any{
+		"response": f.responsesBody("completed", []any{item}),
+	})
+}
+
+// writeResponsesEvent 写一条 Responses 的 SSE 事件。
+//
+// 载荷都由字面量拼成，编不出来只可能是夹具自己写错了，所以当场炸掉而不是
+// 静默少发一条——少发一条事件会让用例挂在一个看不出原因的地方。
+func writeResponsesEvent(w io.Writer, eventType string, payload map[string]any) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		panic(err)
+	}
+	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, raw)
 }
 
 // observedFrozen 返回每次被调用时看到的冻结额原文。

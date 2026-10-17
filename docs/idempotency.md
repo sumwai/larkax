@@ -75,6 +75,9 @@ UUID、`<订单号>-<第几次尝试>` 之类的都可以；带空格、换行�
 
 Anthropic 那套的错误体里只有一个机器可读的槽位，所以码放在 `error.type` 上。
 
+`POST /v1/responses` 的非流式错误体与上面那套 OpenAI 形状**逐字相同**
+（两家共用同一个官方 SDK 的错误解析器），所以它没有第三份定义。
+
 ## 请求体的什么内容进指纹
 
 同键是否「同一个请求」由请求体的**指纹**判断，而不是整串字节的哈希。
@@ -82,7 +85,7 @@ Anthropic 那套的错误体里只有一个机器可读的槽位，所以码放�
 
 | 字段 | 为什么它进 |
 |---|---|
-| `protocol` | 同一个键在 `/v1/chat/completions` 与 `/v1/messages` 上是两个请求 |
+| `protocol` | 同一个键在 `/v1/chat/completions`、`/v1/messages` 与 `/v1/responses` 上是三个请求 |
 | `model` | 换模型就是换请求 |
 | `messages` | 对话内容 |
 | `max_tokens` | 它决定预留金额，也决定回答的长度 |

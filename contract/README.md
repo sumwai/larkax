@@ -20,23 +20,40 @@
 
 ## 覆盖范围
 
-两套协议（`openai` / `anthropic`）各跑六条：
+三套协议（`openai` / `anthropic` / `openai-responses`）各跑六条：
 
 | 用例 | 验什么 |
 |---|---|
-| 非流式 | 正文、`finish_reason` / `stop_reason`、`usage` 三项 |
+| 非流式 | 正文、`finish_reason` / `stop_reason` / `status`、`usage` 三项（Responses 另加两个 `*_tokens_details`） |
 | 流式 | 增量能拼起来、事件顺序、**终止条件**、用量在流里的位置 |
-| 工具调用 | `tool_calls` / `tool_use` 两边的形状（`arguments` 是字符串、`input` 是对象） |
+| 工具调用 | `tool_calls` / `tool_use` / `function_call` 三边的形状（`arguments` 是字符串、Anthropic 的 `input` 是对象） |
 | 客户端错误 400 | SDK 抛 `BadRequestError`，`error.type` 是 `invalid_request_error` |
-| 认证错误 401 | SDK 抛 `AuthenticationError`；OpenAI 的 `error.code` 是 `invalid_api_key`，Anthropic 的 `error.type` 是 `authentication_error` |
+| 认证错误 401 | SDK 抛 `AuthenticationError`；OpenAI 与 Responses 的 `error.code` 是 `invalid_api_key`，Anthropic 的 `error.type` 是 `authentication_error` |
 | 上游错误 5xx | 上游回 500 时我们回 502，SDK 抛 `APIStatusError`，`error.type` 是 `api_error` |
 
 401 那条是**唯一**能验 `error.code` 的地方：OpenAI 那套形状里只有它会把
 `error.code` 填上一个具体值（`invalid_api_key`），普通的 400 给的是 `null`
 （见 `internal/api/error.go` 的 `errorKind`）。
 
+`openai-responses` 与 `openai` 用**同一个** Python 客户端（`openai` 这个包），
+差别只在调 `client.responses.create` 还是 `client.chat.completions.create`。
+它的非流式错误体与 OpenAI 那一套**逐字相同**（两家共用同一个官方 SDK 的错误
+解析器，见 `internal/api/error.go` 的说明），所以 400 / 401 / 5xx 三条的断言
+也相同。
+
+`openai-responses` 的非流式那一条不是「照抄一遍」：它断言的
+`usage.input_tokens_details.cached_tokens` 与
+`usage.output_tokens_details.reasoning_tokens` 是**官方 SDK 的必填字段**，
+而 relaykit 的 Chat→Responses 转换器填不出来（推理量被写进 chat 名字的
+`completion_tokens_details`，缓存写入量根本不写）。照它序列化，客户端读到的
+是一个不存在的属性——实测把这两个字段去掉，SDK 直接抛
+`AttributeError: 'NoneType' object has no attribute 'reasoning_tokens'`。
+所以那条用例是**这个入口存在的形状理由**的判据，不是重复覆盖。
+
 **一律打假上游。** 假上游由 `internal/assembly/contract_test.go` 起，按**请求里的
 模型名**决定回什么，所以三种场景（正文 / 工具调用 / 失败）共用一个服务。
+它按渠道协议说三种不同的话（OpenAI Chat / Anthropic Messages / OpenAI
+Responses），所以同一个模型名在三条入口下回的响应体形状不同。
 
 ## 断言怎么写
 
@@ -102,7 +119,8 @@ python3 contract/check.py \
 
 1. 在 `check.py` 里写一个 `def xxx_case(ctx: Ctx) -> str:`——返回一句话摘要，
    失败就抛 `CaseFailure`（用 `check()` / `check_true()` 抛）。
-2. 把它加进 `OPENAI_CASES` 或 `ANTHROPIC_CASES`。
+2. 把它加进 `OPENAI_CASES` / `ANTHROPIC_CASES` / `RESPONSES_CASES`
+   （三张表由 `CASES_BY_PROTOCOL` 按 `--protocol` 选中）。
 3. 如果它需要假上游换一种响应，在 `internal/assembly/contract_test.go` 的
    `contractUpstream` 上加一个模型名后缀与对应的分支。
 4. 本地跑一遍 `go test -tags=contract ...`，再跑一遍「把它改坏会红」——
@@ -145,6 +163,34 @@ usage 为准**的客户端读到的是对的；**只读 `message_start` 的客�
 
 **我们总是给流式响应带上 usage。** 真实 OpenAI 只在调用方传了
 `stream_options: {"include_usage": true}` 时才给。多给是超集，SDK 容忍它。
+
+### Responses 入口上的四条
+
+这四条都是**有意的**，不是没做完；每一条都有一条用例或一处判据钉着。
+
+**`max_output_tokens` 在本项目是必填的。** 官方 API 里它可选，这里不行——
+预留要有输出上界才做得出来（见 `internal/api` 的 `httpStatusOfUpstream` 与
+`billing.ErrNoUpperBound`）。不给它回 400，`error.message` 里点名 `max_tokens`。
+契约测试那条「客户端错误 400」用的就是这个触发方式：Responses 的请求体里没有
+`messages`，空 `input` 会被 SDK 在客户端就挡下来，根本发不出去。
+
+**有状态的字段被拒（400），不是被丢弃。** `previous_response_id` /
+`conversation` / `context_management` 会让输入里含**上游持有的历史**，
+而本项目的输入量是**本地估**出来的（见 `internal/tokens`）。低估的后果是预留
+不足、结算超支，所以宁可让请求失败。这一条由 `internal/relay` 的用例钉着。
+
+**`store` 被丢弃，且不报错。** 它只表达「上游可以留存这次请求」，既不影响我们
+这边的输入量，也不影响上游这次要算什么。丢弃的代价是调用方以为留了痕而实际
+没有——而它真正会用到的续话手段是 `previous_response_id`，那一条已经被拒。
+
+**非 function 的工具声明被拒（400）。** 远端 MCP（`type: mcp`）与内置工具
+（`web_search` / `file_search` 等）在本项目送不出去：`channel.Tool` 只有名字、
+描述与 schema，没有承载类型的字段。**不拒的表现是静默消失**——relaykit 的转换
+先经 toolconv 抽出工具、再按 chat 格式挂回去，表达不了的类型直接丢掉，请求
+照常成功（实测：发一个 `type: mcp` 的请求得到 200，工具不见了）。所以判据放在
+入口解析层，那里还看得见请求体里原始的 `type`（见 `internal/relay` 的
+`checkResponsesTools`）。它与另外两条入口共用 `checkToolType`，只差一档：
+**Responses 这边缺 `type` 也要拒**，因为缺了它整条声明同样会被丢掉。
 
 ## 版本
 

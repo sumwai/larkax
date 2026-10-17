@@ -1365,3 +1365,195 @@ func TestParseRequestRejectsNonFunctionTools(t *testing.T) {
 		})
 	}
 }
+
+// ── OpenAI Responses 入口的请求体 ──────────────────────────────────────
+
+// Responses 的请求体与另外两条差得远（input / instructions / 平铺的工具声明），
+// 它走的是 parseResponsesRequest 那一条。这里钉住的是「转换之后落进管道的东西
+// 对不对」，而不是 relaykit 自己怎么转的——那有它自己的用例。
+func TestParseResponsesRequest(t *testing.T) {
+	body := `{"model":"m-1","instructions":"你是助手","input":"hi",` +
+		`"max_output_tokens":32,"stream":true}`
+
+	req, err := ParseRequest(context.Background(), channel.ProtocolOpenAIResponses, []byte(body))
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if req.Model != "m-1" {
+		t.Errorf("Model = %q", req.Model)
+	}
+	if !req.Stream {
+		t.Error("stream=true 没被读出来，这条请求会按非流式发出去")
+	}
+	// max_output_tokens 经 relaykit 落在 chat 的 MaxCompletionTokens 上，
+	// 只读 MaxTokens 的话它会静默丢掉——而预留要有输出上界才做得出来，
+	// 表现为每一个 Responses 请求都以「max_tokens 缺失」被拒。
+	if req.MaxTokens != 32 {
+		t.Errorf("MaxTokens = %d，期望 32（max_output_tokens 要变成输出上界）", req.MaxTokens)
+	}
+	if len(req.Messages) != 2 {
+		t.Fatalf("消息 = %+v，期望 instructions 与 input 各一条", req.Messages)
+	}
+	if req.Messages[0].Role != "system" || req.Messages[0].Content[0].Text != "你是助手" {
+		t.Errorf("instructions 应折成 system 消息: %+v", req.Messages[0])
+	}
+	if req.Messages[1].Role != "user" || req.Messages[1].Content[0].Text != "hi" {
+		t.Errorf("input 字符串应折成 user 消息: %+v", req.Messages[1])
+	}
+}
+
+// input 用数组形态（带类型的 item）也要能解析：这是 Responses 最常见的写法。
+func TestParseResponsesRequestInputItems(t *testing.T) {
+	body := `{"model":"m-1","max_output_tokens":16,"input":[` +
+		`{"role":"user","content":"hi"},` +
+		`{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"},` +
+		`{"type":"function_call_output","call_id":"call_1","output":"42"}]}`
+
+	req, err := ParseRequest(context.Background(), channel.ProtocolOpenAIResponses, []byte(body))
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	var roles []string
+	var toolUse, toolResult bool
+	for _, m := range req.Messages {
+		roles = append(roles, m.Role)
+		for _, b := range m.Content {
+			switch b.Type {
+			case "tool_use":
+				toolUse = b.ToolUseID == "call_1" && b.ToolName == "lookup"
+			case "tool_result":
+				toolResult = b.ToolUseID == "call_1"
+			}
+		}
+	}
+	if !toolUse {
+		t.Errorf("function_call 应折成 tool_use 块: %+v", req.Messages)
+	}
+	if !toolResult {
+		t.Errorf("function_call_output 应折成 tool_result 块: %+v", req.Messages)
+	}
+	if len(roles) < 3 {
+		t.Errorf("消息 = %v，期望至少三条", roles)
+	}
+}
+
+// 有状态的字段一律拒绝，不静默丢弃。
+//
+// 它们会让输入里含**上游持有的历史**，而本项目按「输入全在请求体里」估算
+// token 做预留。估算低估的后果是预留不足、结算超支，所以宁可让请求失败。
+func TestParseResponsesRequestRejectsStatefulFields(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "previous_response_id",
+			body: `{"model":"m-1","input":"hi","max_output_tokens":16,"previous_response_id":"resp_1"}`,
+		},
+		{
+			name: "conversation",
+			body: `{"model":"m-1","input":"hi","max_output_tokens":16,"conversation":"conv_1"}`,
+		},
+		{
+			name: "context_management",
+			body: `{"model":"m-1","input":"hi","max_output_tokens":16,"context_management":[]}`,
+		},
+		{
+			name: "prompt",
+			body: `{"model":"m-1","input":"hi","max_output_tokens":16,"prompt":{"id":"pmpt_1"}}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := ParseRequest(context.Background(), channel.ProtocolOpenAIResponses, []byte(tc.body))
+			if err == nil {
+				t.Fatalf("应当报错，否则输入里会有一段我们看不见的历史: %+v", req.Messages)
+			}
+		})
+	}
+}
+
+// store 是**丢弃**而不是拒绝：它只表达「上游可以留存这次请求」，不影响我们
+// 这边的输入量，也不影响上游这次要算什么。这一条钉住的是「它不会被当成
+// 有状态字段一起拒掉」——拒掉会让一批能用的请求失败。
+func TestParseResponsesRequestDropsStore(t *testing.T) {
+	body := `{"model":"m-1","input":"hi","max_output_tokens":16,"store":true}`
+	if _, err := ParseRequest(context.Background(), channel.ProtocolOpenAIResponses, []byte(body)); err != nil {
+		t.Fatalf("store 不该让请求失败: %v", err)
+	}
+}
+
+// 非 function 的工具声明必须在**解析这一步**拒掉。
+//
+// 与 chat 入口那条不同：这里不拒的表现不是改写，是**静默消失**——relaykit
+// 的转换先经 toolconv 抽出工具、再按 chat 格式挂回去，表达不了的类型直接
+// 丢掉，请求照常成功。调用方拿到 200、工具一次都不会被调用。
+//
+// 判据复用 checkToolType，所以三档（显式 function 放行、缺省 type 放行、
+// 其余拒绝）与 chat 入口完全一致。
+func TestParseResponsesRequestRejectsNonFunctionTools(t *testing.T) {
+	cases := []struct {
+		name        string
+		tools       string
+		wantErrType string
+	}{
+		{
+			name:        "远端 MCP",
+			tools:       `[{"type":"mcp","server_label":"x","server_url":"https://mcp.example.com"}]`,
+			wantErrType: "mcp",
+		},
+		{name: "内置工具", tools: `[{"type":"web_search"}]`, wantErrType: "web_search"},
+		{name: "自定义工具类型", tools: `[{"type":"custom","name":"f"}]`, wantErrType: "custom"},
+		// 与 chat 入口**相反**的一档：那边缺 type 放行（解出空串照样能转发），
+		// 这边缺了它整条声明会被 toolconv 丢掉，所以必须拒。
+		{name: "缺 type", tools: `[{"name":"lookup","parameters":{"type":"object"}}]`, wantErrType: "type"},
+		{
+			name:  "显式 function 是最常见的那条路",
+			tools: `[{"type":"function","name":"lookup","parameters":{"type":"object"}}]`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"m-1","input":"hi","max_output_tokens":16,"tools":` + tc.tools + `}`
+			req, err := ParseRequest(context.Background(), channel.ProtocolOpenAIResponses, []byte(body))
+
+			if tc.wantErrType != "" {
+				if err == nil {
+					t.Fatalf("应当报错，否则这个工具会被静默丢掉而请求照常成功：%+v", req.Tools)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrType) {
+					t.Errorf("错误里要带上收到的类型 %q，否则调用方不知道改哪里：%v", tc.wantErrType, err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("不该报错: %v", err)
+			}
+			if len(req.Tools) != 1 || req.Tools[0].Name != "lookup" {
+				t.Fatalf("工具 = %+v，期望一个叫 lookup 的工具", req.Tools)
+			}
+			if _, ok := req.Tools[0].InputSchema["type"]; !ok {
+				t.Errorf("schema 要原样留下，否则上游收到一个没有参数的工具：%+v", req.Tools[0].InputSchema)
+			}
+		})
+	}
+}
+
+// 空 tools 数组与完全不给 tools 都不该报错。
+func TestParseResponsesRequestWithoutTools(t *testing.T) {
+	for _, body := range []string{
+		`{"model":"m-1","input":"hi","max_output_tokens":16}`,
+		`{"model":"m-1","input":"hi","max_output_tokens":16,"tools":[]}`,
+	} {
+		req, err := ParseRequest(context.Background(), channel.ProtocolOpenAIResponses, []byte(body))
+		if err != nil {
+			t.Fatalf("不该报错: %v", err)
+		}
+		if len(req.Tools) != 0 {
+			t.Errorf("工具 = %+v，期望没有", req.Tools)
+		}
+	}
+}
