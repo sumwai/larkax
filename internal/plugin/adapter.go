@@ -118,7 +118,7 @@ func ApplyRequestPatch(req *channel.Request, patch *RequestPatch) (rejected []st
 //
 // 所以当前只应用**标量字段**：max_tokens、temperature、top_p。
 // 结构化的那几项留在补丁里，由调用方按自己的需要决定——这是有意留的口子，
-// 而不是漏掉了。见报告里「需要人决定」那一节。
+// 而不是漏掉了。
 func applyBodyToChannel(req *channel.Request, body *RequestBodyPatch) error {
 	if body.MaxTokens != nil {
 		if *body.MaxTokens <= 0 {
@@ -151,6 +151,58 @@ func applyBodyToChannel(req *channel.Request, body *RequestBodyPatch) error {
 		req.TopP = &v
 	}
 	return nil
+}
+
+// ApplyResponsePatch 把 onResponse 的补丁应用到统一响应上。
+//
+// # 只有正文能落地
+//
+// `ResponsePatch.Metadata` **不进协议层**：channel.Response 上没有对应字段，
+// 而它也不该有——那个类型是协议转换与渲染的输入，往里加一个插件专用的 map
+// 会让它跟着响应一路走到调用方，而契约里它只是插件留给自己的一段附注。
+// 所以元数据的落点是日志与快照，由调用方决定（见 Session.ApplyResponse）。
+//
+// # 正文怎么合并
+//
+// `text` 在插件那一侧是**拼接后的整段正文**（见 ResponseContextFrom 的
+// body.text），所以写回来时也是整段替换：原有的文本块合成一个，位置取
+// 第一块文本的位置，非文本的块（tool_use 等）原样留在原位。补丁里没有
+// 工具调用，**不要顺手把别的块也改掉**——那是契约之外的东西。
+//
+// 一个都没有文本块时追加一块：上游只回了工具调用、而插件要补一句说明，
+// 是这个字段说得通的用法。追加而不是拒绝，是因为「响应里没有正文」不是
+// 补丁的问题。
+//
+// 不改 Usage 与 FinishReason：前者是计费依据、后者是「这次回答是否完整」
+// 的判定，两者都不在 ResponsePatch 里（见它的注释）。
+func ApplyResponsePatch(resp *channel.Response, patch *ResponsePatch) {
+	if resp == nil || patch == nil || patch.Text == nil {
+		return
+	}
+	resp.Message.Content = textBlocksReplaced(resp.Message.Content, *patch.Text)
+}
+
+// textBlocksReplaced 把一串内容块里的文本块换成单独一块。
+//
+// 非文本块保持原顺序与原位置，文本块只留第一处——插件给的是一整段文本，
+// 留着后面那几块会让同一段正文出现两次。
+func textBlocksReplaced(blocks []channel.ContentBlock, text string) []channel.ContentBlock {
+	out := make([]channel.ContentBlock, 0, len(blocks)+1)
+	placed := false
+	for _, b := range blocks {
+		if b.Type != "text" {
+			out = append(out, b)
+			continue
+		}
+		if !placed {
+			out = append(out, channel.ContentBlock{Type: "text", Text: text})
+			placed = true
+		}
+	}
+	if !placed {
+		out = append(out, channel.ContentBlock{Type: "text", Text: text})
+	}
+	return out
 }
 
 // RouteContextFrom 把候选集翻成 onRoute 的上下文。

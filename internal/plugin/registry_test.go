@@ -191,7 +191,7 @@ func TestSessionPicksOnePlugin(t *testing.T) {
 		Registration{Key: "高", Priority: 9, Source: src(`key:"高", apiVersion:1`, `onUsage(){return {promptTokens:1}}`)},
 	)
 	s, err := reg.NewSession(t.Context(), SessionRequest{CanonicalModel: "m", Protocol: "openai"},
-		sandbox.Host{}, sandbox.Limits{})
+		nil, sandbox.Limits{})
 	if err != nil {
 		t.Fatalf("建会话失败: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestNewSessionWithoutMatch(t *testing.T) {
 	reg := mustPublish(t, Registration{Key: "p1", Source: src(
 		`key:"p1", apiVersion:1, models:["别的模型"]`, `onUsage(){return {promptTokens:1}}`)})
 	s, err := reg.NewSession(t.Context(), SessionRequest{CanonicalModel: "m", Protocol: "openai"},
-		sandbox.Host{}, sandbox.Limits{})
+		nil, sandbox.Limits{})
 	if !errors.Is(err, ErrNoPlugin) {
 		t.Fatalf("没有匹配的插件时该返回 ErrNoPlugin，实际 %v", err)
 	}

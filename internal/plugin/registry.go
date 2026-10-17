@@ -356,6 +356,19 @@ type SessionRequest struct {
 	Protocol       string
 }
 
+// HostBuilder 按**已选中的那个插件**构造这次请求的宿主能力。
+//
+// # 为什么是一个函数而不是一个建好的 sandbox.Host
+//
+// 宿主能力里的日志字段与 KV 命名空间都要带上插件 key，而「这次跑哪个插件」
+// 是在 NewSession 里面定的。传一个建好的 Host 进来，那个字段只能是空的，
+// 或者由调用方自己再挑一遍——后者会让「挑哪个插件」有两条实现，
+// 而它们迟早不一致，表现是宿主日志里的 plugin 与真正跑的那个对不上。
+//
+// 返回零值 Host 表示这次请求不给插件任何宿主能力：插件侧的调用会得到
+// 「能力未启用」，而不是一个永远失败的空壳（见 host.Build）。
+type HostBuilder func(p *Plugin) sandbox.Host
+
 // NewSession 为一次请求挑一个插件并建好运行时。
 //
 // **只取一个。** 多插件如何串联（后一个看到前一个改过的，还是都看到原始数据）
@@ -365,13 +378,19 @@ type SessionRequest struct {
 //
 // 没有匹配的插件时返回 ErrNoPlugin——调用方据此走「没有插件」的路径，
 // 而不是拿到一个空 Session 却以为插件跑过了。
-func (r *Registry) NewSession(ctx context.Context, req SessionRequest, host sandbox.Host, limits sandbox.Limits) (*Session, error) {
+//
+// 建出来的 Session **必须由同一个 goroutine 用完再关**（见 Session 的注释）。
+func (r *Registry) NewSession(ctx context.Context, req SessionRequest, host HostBuilder, limits sandbox.Limits) (*Session, error) {
 	cands := r.Candidates(req.CanonicalModel, req.Protocol)
 	if len(cands) == 0 {
 		return nil, ErrNoPlugin
 	}
 	p := cands[0]
-	rt, err := p.Module.NewRuntime(ctx, host, p.Capabilities, limits)
+	var h sandbox.Host
+	if host != nil {
+		h = host(p)
+	}
+	rt, err := p.Module.NewRuntime(ctx, h, p.Capabilities, limits)
 	if err != nil {
 		return nil, fmt.Errorf("插件 %s 的运行时构造失败: %w", p.Key, err)
 	}

@@ -68,7 +68,7 @@ func upstreamErr(status int, retryable bool) error {
 func TestChatRecordsSuccessWithUsage(t *testing.T) {
 	h := newHarness(t)
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
 		t.Fatalf("出错: %v", err)
 	}
 
@@ -90,7 +90,7 @@ func TestChatRecordsRetryableFailure(t *testing.T) {
 	h := newHarness(t)
 	h.executor.err = upstreamErr(503, true)
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err == nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err == nil {
 		t.Fatal("上游失败时该返回错误")
 	}
 
@@ -111,7 +111,7 @@ func TestChatRecordsAuthAndCreditFailures(t *testing.T) {
 			h := newHarness(t)
 			h.executor.err = upstreamErr(status, false)
 
-			if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err == nil {
+			if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err == nil {
 				t.Fatal("上游失败时该返回错误")
 			}
 			if got := h.recorder.only(t).Verdict; got != route.VerdictFailure {
@@ -131,7 +131,7 @@ func TestChatDoesNotBlameChannelForRequestErrors(t *testing.T) {
 			h := newHarness(t)
 			h.executor.err = upstreamErr(status, false)
 
-			if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err == nil {
+			if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err == nil {
 				t.Fatal("上游失败时该返回错误")
 			}
 			if got := h.recorder.only(t).Verdict; got != route.VerdictUnattributed {
@@ -150,7 +150,7 @@ func TestChatRecordsEveryAttempt(t *testing.T) {
 		preferred(candidate(1, "gpt-4o")), candidate(2, "gpt-4o")}
 	h.executor.failFor = map[int64]error{1: upstreamErr(503, true)}
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
 		t.Fatalf("出错: %v", err)
 	}
 
@@ -178,7 +178,7 @@ func TestChatNoCandidatesRecordsNothing(t *testing.T) {
 	h := newHarness(t)
 	h.candidates.cands = nil
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err == nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err == nil {
 		t.Fatal("没有候选时该返回错误")
 	}
 	if got := h.recorder.count(); got != 0 {
@@ -192,7 +192,7 @@ func TestRecordFailureDoesNotBreakRequest(t *testing.T) {
 	h := newHarness(t)
 	h.recorder.err = errors.New("库写不进去")
 
-	res, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("写健康度失败不该让请求失败: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestRecordOptional(t *testing.T) {
 	h := newHarness(t)
 	h.gw.Recorder = nil
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
 		t.Fatalf("出错: %v", err)
 	}
 }
@@ -221,7 +221,7 @@ func TestChatRecordsAttemptEndTime(t *testing.T) {
 	h.gw.Router.Now = func() time.Time { return started }
 	// 执行器立即返回，时长是 0，所以这次尝试的结束时刻就是 started。
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
 		t.Fatalf("出错: %v", err)
 	}
 	if got := h.recorder.only(t).At; !got.Equal(started) {

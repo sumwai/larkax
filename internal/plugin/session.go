@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
 )
 
@@ -89,6 +90,51 @@ func (s *Session) OnRequest(ctx context.Context, rc RequestContext) Result[Reque
 		return Result[RequestPatch]{}
 	}
 	return patchOf(&patch, nil, false)
+}
+
+// ApplyRequest 调 onRequest 并把补丁应用到统一请求上。
+//
+// 返回被拒的请求头名与错误。**错误只在阻断型插件失败时非 nil**——调用方
+// 据此让这次请求失败；非阻断的失败已经记进 Failures()，请求照常继续，
+// 只是这次补丁整个不生效。
+//
+// # 为什么应用补丁这一步在包内
+//
+// 失败要记进会话（record 与 blocking 都未导出），而契约里明写着「被吞掉的
+// 失败也要被看见」。在包外接一条「应用补丁 + 打日志」的路，等于把那条落在
+// 地上：一个每次都失败的插件，从请求的结果上完全看不出来。
+//
+// 被拒的头要报出去，理由见 ApplyHeaderPatch。
+//
+// **必须在预留之前调用**：补丁能改 max_tokens，而它是计费预留上界的关键
+// （见 patch.go 的 errMaxTokensRaised）。排在预留之后，插件调小它就不影响
+// 上界，于是上界与上报值由两个来源决定。
+func (s *Session) ApplyRequest(ctx context.Context, requestID string, req *channel.Request, canonicalModel, protocol string) ([]string, error) {
+	if s == nil || req == nil {
+		return nil, nil
+	}
+	res := s.OnRequest(ctx, RequestContextFrom(requestID, req, canonicalModel, protocol))
+	if err := res.Err(); err != nil {
+		return nil, err
+	}
+	if res.Patch == nil {
+		return nil, nil
+	}
+	rejected, err := ApplyRequestPatch(req, res.Patch)
+	if err == nil {
+		return rejected, nil
+	}
+	// 补丁被拒是**契约违规**（ErrPatchScope），与「插件跑挂了」不是同一件事，
+	// 但处置一样：这次补丁整个不生效。它必须记成一次失败，否则表现是
+	// 「插件改了但没生效」——契约里最难查的一类静默。
+	//
+	// 没有「部分生效」要收拾：ApplyRequestPatch 只在写下去**之前**校验，
+	// 所以走到这里时 req 一个字段都没被改过。
+	f := &sandbox.Failure{Plugin: s.Plugin.Key, Hook: HookRequest, Kind: err}
+	if s.record(f) {
+		return nil, fmt.Errorf("插件声明为阻断型，它的 %s 补丁被拒: %w", HookRequest, err)
+	}
+	return nil, nil
 }
 
 // OnRoute 调 onRoute。
@@ -205,6 +251,40 @@ func (s *Session) OnResponse(ctx context.Context, rc ResponseContext) Result[Res
 		return Result[ResponsePatch]{}
 	}
 	return patchOf(&patch, nil, false)
+}
+
+// ApplyResponse 调 onResponse 并把补丁应用到响应上。
+//
+// 返回插件给的元数据（可能为 nil）与错误。**错误只在阻断型插件失败时非
+// nil**——调用方据此让这次请求失败。非阻断的失败已经记进 Failures()，
+// 响应照常发出去，只是这次补丁整个不生效。
+//
+// # 元数据为什么是返回值
+//
+// 它在协议层没有落点（见 ApplyResponsePatch），所以本包不能替调用方决定
+// 往哪写。交回调用方之后，「元数据只进日志与快照」这条才有一处**看得见**
+// 的实现，而不是一句文档承诺。
+//
+// # 流式请求拿不到它
+//
+// 那一条路上的响应是边生成边发的，没有「整份响应」这个时刻——调用方也
+// 就没有东西可以传进来（见 docs/plugin-contract.md）。
+//
+// 返回的 nil 元数据是**合法结局**（这次没有元数据），不是「出错了但没报」
+// ——所以下面两处显式 nolint，而不是造一个哨兵错误让每个调用方多判一次。
+func (s *Session) ApplyResponse(ctx context.Context, requestID string, resp *channel.Response) (map[string]any, error) {
+	if s == nil || resp == nil {
+		return nil, nil //nolint:nilnil // 见上
+	}
+	res := s.OnResponse(ctx, ResponseContextFrom(requestID, resp))
+	if err := res.Err(); err != nil {
+		return nil, err
+	}
+	if res.Patch == nil {
+		return nil, nil //nolint:nilnil // 见上
+	}
+	ApplyResponsePatch(resp, res.Patch)
+	return res.Patch.Metadata, nil
 }
 
 // OnUsage 调 onUsage。

@@ -45,6 +45,8 @@ import (
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pipeline"
+	"github.com/sumwai/larkax/internal/plugin"
+	"github.com/sumwai/larkax/internal/plugin/sandbox"
 	"github.com/sumwai/larkax/internal/relay"
 	"github.com/sumwai/larkax/internal/route"
 )
@@ -123,7 +125,9 @@ type Authenticator interface {
 // 同一种能力（调上游）的两种形状，而拆开会让「装了一个没装另一个」变成
 // 一种能装出来的状态——它的现场是一半请求正常、一半请求回 501。
 type Chatter interface {
-	Chat(ctx context.Context, req pipeline.Request, upstream *channel.Request) (*gateway.Result, error)
+	// Chat 处理一次非流式请求。hooks 是这次请求的插件挂载点，
+	// 零值表示不跑插件（见 gateway.Hooks）。
+	Chat(ctx context.Context, req pipeline.Request, upstream *channel.Request, hooks gateway.Hooks) (*gateway.Result, error)
 
 	// ChatStream 处理一次流式请求。返回的 Result.Events 由调用方读到关闭
 	// 为止——**必须读到底**：网关的转发 goroutine 在关闭它之前完成结算，
@@ -131,6 +135,10 @@ type Chatter interface {
 	//
 	// 返回错误只发生在**上游接受请求之前**（没有可用渠道、连不上、非 2xx），
 	// 那时还没有任何内容发给客户端，调用方可以照常回一个错误响应。
+	//
+	// 它**没有** hooks 参数：流式那条路上的挂载点（onStream，逐块决定）
+	// 还没接上。先占一个用不上的参数，会让「流式也有插件钩子」看起来
+	// 已经成立——而那正是接线最容易骗过自己的地方。
 	ChatStream(ctx context.Context, req pipeline.Request, upstream *channel.Request) (*gateway.Result, error)
 }
 
@@ -246,6 +254,30 @@ type Handler struct {
 	// 留空不会得到一个默认品种——计费层拒绝空值，每个请求都会失败。
 	// 那是有意的：装配漏了一步要当场响，而不是安静地记错品种。
 	DefaultAsset string
+
+	// Plugins 是插件注册表。为 nil 时请求路径上不跑插件——插件系统关着、
+	// 或者装配时没接上，都是这个状态。
+	//
+	// 「为 nil 就不做」与 RateLimiter / Quota / Idempotency 同一个取舍：
+	// 没接上这条链路时，行为与插件系统出现之前完全一样。反过来（nil 时
+	// 回 501）会让一次装配疏漏表现为「所有请求都失败」。
+	Plugins *plugin.Registry
+
+	// PluginLimits 是插件每次 hook 调用的限额，由装配层从 settings 表的
+	// 四个 plugin.* 键读出来填上（见 internal/assembly）。
+	//
+	// 它与 Plugins 一起给，而不是让本包自己去读那四个键：那份映射只该有
+	// 一处实现，两处不一致的表现是插件跑在另一套限额下——不报错，
+	// 只是行为不同。
+	PluginLimits sandbox.Limits
+
+	// PluginHost 按请求构造宿主能力（日志、日历、KV）。为 nil 时插件拿不到
+	// 任何宿主能力，`log(...)` 之类的调用会得到「能力未启用」。
+	//
+	// 三个参数都是请求期的：插件 key 要进宿主日志，请求标识与用户标识决定
+	// 日志字段与 KV 命名空间。插件 key 由注册表选中之后回填，所以这里收的是
+	// 一个按插件构造的函数（见 plugin.HostBuilder）。
+	PluginHost func(p *plugin.Plugin, requestID string, userID int64) sandbox.Host
 
 	// Now 可注入，便于测试与时间相关的字段。
 	Now func() time.Time
@@ -415,7 +447,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 	// 「一次请求」可言，那时也没有任何东西需要幂等——把它们记下来只会让
 	// 一个写错请求体的客户端在改正之后还拿到 409。
 	if key := r.Header.Get(idempotency.HeaderName); key != "" && h.Idempotency != nil {
-		h.serveIdempotent(w, r, protocol, upstream, user, requestID, key)
+		h.serveIdempotent(w, r, protocol, upstream, body, user, requestID, key)
 		return
 	}
 	h.serveOnce(w, r, protocol, upstream, user, requestID, nil)
@@ -449,16 +481,37 @@ type served struct {
 // 它返回的是**结局**而不是错误：各个失败分支已经自己把响应写出去了
 // （或者判断出没人在听），调用方需要的只是「能不能重放」。
 func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, user User, requestID string, claim *idempotency.Claim) served {
+	// 插件在**构造计费请求之前**跑，位置是有约束的而不是随手放的：
+	// 补丁能改 max_tokens，而它是预留上界的关键（见 billingRequest 的
+	// MaxTokens 与 pipeline.Reserve）。排在 billingRequest 之后的话，那份
+	// 计费请求里留着的仍是补丁前的值，于是插件调小 max_tokens 不影响预留
+	// ——上界与上报值就成了两个来源，而这件事在响应上完全看不出来。
+	//
+	// 它同时排在预留之前（预留在 gateway.begin 里）。这一条由
+	// plugin.ApplyRequest 的注释与 api 的用例一起钉住。
+	sess, ok := h.runRequestHook(w, r, protocol, upstream, user, requestID)
+	if !ok {
+		// 阻断型插件失败，响应已经写出去了。
+		return served{}
+	}
+	if sess != nil {
+		defer sess.Close()
+		defer h.logPluginFailures(r.Context(), sess, requestID)
+	}
+
 	req := h.billingRequest(user, upstream, requestID, protocol)
 	req.Idempotency = claim
 
 	if upstream.Stream {
 		// 流式与非流式的差别只在拿到结果之后怎么写出：前面的检查顺序
 		//（方法、Content-Type、鉴权、请求体、解析、必要字段）完全一样。
+		//
+		// 流式那条路拿不到 onResponse：响应是边生成边发的，没有「整份响应」
+		// 这个时刻（见 docs/plugin-contract.md）。所以这里不传挂载点。
 		return h.serveStream(w, r, protocol, upstream, req)
 	}
 
-	res, err := h.Chatter.Chat(r.Context(), req, upstream)
+	res, err := h.Chatter.Chat(r.Context(), req, upstream, h.responseHooks(sess, requestID))
 	if err != nil {
 		if errors.Is(err, idempotency.ErrClaimed) {
 			// 键被另一个并发请求抢走了。这不是失败：那次预留整个回滚了，
@@ -493,6 +546,104 @@ func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol cha
 	}
 	writeJSON(w, http.StatusOK, rendered)
 	return served{complete: true}
+}
+
+// runRequestHook 为这次请求建插件会话，并把 onRequest 的补丁应用上去。
+//
+// 返回的会话为 nil 表示这次请求不跑插件：插件系统没接上、没有匹配的插件、
+// 或者运行时建不起来。ok 为 false 表示**阻断型插件失败**——那时响应已经
+// 写出去了，调用方直接返回。
+//
+// 建会话失败按「这次请求没有插件」处置而不是让请求失败：插件是可选增强，
+// 一个建不起运行时的插件（内存限额、宿主注入出问题）不该让整个入口开始
+// 拒服务。代价要说清楚：**声明了 blocking 的插件在建会话这一步失败时
+// 也没能让请求失败**，因为那时还拿不到那个插件的 meta。原因是记进日志的。
+func (h *Handler) runRequestHook(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, user User, requestID string) (*plugin.Session, bool) {
+	if h.Plugins == nil {
+		return nil, true
+	}
+	ctx := r.Context()
+
+	// 规范名与上游模型名在这里取同一个值，与 billingRequest 同一条已知的
+	// 临时状态：规范名到上游名的映射还没做（那属于选路层）。
+	sess, err := h.Plugins.NewSession(ctx, plugin.SessionRequest{
+		CanonicalModel: upstream.Model,
+		Protocol:       string(protocol),
+	}, h.pluginHost(requestID, user.ID), h.PluginLimits)
+	switch {
+	case errors.Is(err, plugin.ErrNoPlugin):
+		// 正常：这次请求没有匹配的插件。
+		return nil, true
+	case err != nil:
+		observe.FromContext(ctx).Error("建插件会话失败，这次请求不跑插件",
+			"err", err, "request_id", requestID)
+		return nil, true
+	}
+
+	rejected, err := sess.ApplyRequest(ctx, requestID, upstream, upstream.Model, string(protocol))
+	if err != nil {
+		// 阻断型插件失败：请求失败。这时还没有任何副作用——预留还没发生，
+		// 幂等记录也还没建，所以调用方重试是安全的。
+		h.failUpstream(w, r, protocol, err)
+		sess.Close()
+		return nil, false
+	}
+	for _, name := range rejected {
+		// 被拒的头要报出去：插件作者写了一个被拒的头却没有任何反馈，
+		// 会以为是上游不支持——而真正的原因是它不在白名单里。
+		observe.FromContext(ctx).Warn("插件加的请求头被拒",
+			"header", name, "plugin", sess.Plugin.Key, "request_id", requestID)
+	}
+	return sess, true
+}
+
+// pluginHost 把宿主能力的构造绑上这次请求的标识。
+//
+// 插件 key 由注册表选中之后回填（见 plugin.HostBuilder）：宿主日志里那个
+// 字段要与真正跑的那个插件对得上。
+func (h *Handler) pluginHost(requestID string, userID int64) plugin.HostBuilder {
+	if h.PluginHost == nil {
+		return nil
+	}
+	return func(p *plugin.Plugin) sandbox.Host { return h.PluginHost(p, requestID, userID) }
+}
+
+// responseHooks 把这次请求的插件会话接到编排层的 onResponse 挂载点上。
+//
+// sess 为 nil 时返回零值：不跑插件，与「这次请求没有插件」是同一个意思。
+func (h *Handler) responseHooks(sess *plugin.Session, requestID string) gateway.Hooks {
+	if sess == nil {
+		return gateway.Hooks{}
+	}
+	return gateway.Hooks{
+		OnResponse: func(ctx context.Context, resp *channel.Response) error {
+			metadata, err := sess.ApplyResponse(ctx, requestID, resp)
+			if len(metadata) > 0 {
+				// 元数据的落点是日志：它在协议层没有对应字段，所以这里是
+				// 它唯一看得见的出口（见 plugin.ApplyResponsePatch）。
+				observe.FromContext(ctx).Info("插件给了响应元数据",
+					"plugin", sess.Plugin.Key, "request_id", requestID, "metadata", metadata)
+			}
+			return err
+		},
+	}
+}
+
+// logPluginFailures 把这次请求里被吞掉的插件失败写进日志。
+//
+// 非阻断的失败不改变请求的结果，所以它**只能靠日志被看见**：一个每次都
+// 超时但「不影响请求」的插件，从响应上完全看不出来（见 Session.Failures）。
+// 阻断型的失败另有出口（请求以错误结束），但一起记在这里也不重复——
+// 它同样是这次请求的现场。
+func (h *Handler) logPluginFailures(ctx context.Context, sess *plugin.Session, requestID string) {
+	failures := sess.Failures()
+	if len(failures) == 0 {
+		return
+	}
+	log := observe.FromContext(ctx)
+	for _, f := range failures {
+		log.Warn("插件失败", "err", f, "plugin", sess.Plugin.Key, "hook", f.Hook, "request_id", requestID)
+	}
 }
 
 // serveStream 处理一次流式请求。
