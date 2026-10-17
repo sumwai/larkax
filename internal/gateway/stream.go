@@ -829,11 +829,22 @@ func (b *streamResponseBuilder) response(upstreamModel string) *channel.Response
 
 // streamResponseEvidence 推出响应方向快照要记的两列。
 //
-// 判据与 pumpStream 里那两段结局判定同源：上游在流里报的错走
-// upstreamEvidence（与账单同一套取值），「接受了请求却一个字没吐」走
-// upstream_stream_aborted，其余（正常结束、客户端断开、插件终止）没有
-// 上游失败可归。
+// 判据与 pumpStream 里那两段结局判定同源，**顺序也一致**：「一个字没吐就
+// 结束」先判，不看 streamErr 的类型。这一点是必须的——账单那一侧
+// （pumpStream 的 settleAndFail）已经把「没吐字」归一成 upstream_stream_aborted
+// 了，快照若先看 streamErr，就会把同一次失败记成 upstream_unusable_response
+// （流里那条错误帧恰好带着 *channel.ErrUpstream）。
+//
+// 一个 token 都没吐之后的分类是「流在接受之后断了」；吐过字之后上游把连接
+// 掐断（没有结束标记、也没有错误帧）是「流被截断」，见 streamTruncated。
+// 其余（正常结束、客户端断开、插件终止）没有上游失败可归。
 func streamResponseEvidence(status int, streamErr error, started, done, ended bool) (int, string) {
+	if !ended && !done && !started {
+		return status, pipeline.ErrorUpstreamStreamAborted
+	}
+	if streamTruncated(streamErr, started, done, ended) {
+		return status, pipeline.ErrorUpstreamStreamTruncated
+	}
 	if streamErr != nil {
 		s, kind := upstreamEvidence(streamErr)
 		if s == 0 {
@@ -843,10 +854,27 @@ func streamResponseEvidence(status int, streamErr error, started, done, ended bo
 		}
 		return s, kind
 	}
-	if !ended && !done && !started {
-		return status, pipeline.ErrorUpstreamStreamAborted
-	}
 	return status, ""
+}
+
+// streamTruncated 判断这次流是不是「吐过内容之后被上游掐断」。
+//
+// 四个条件缺一不可，而且它们都是**已经发生过的事实**，不是推断：
+//
+//   - started：至少吐过一个内容块（正文、工具调用或标注）。一个字没吐的
+//     是另一种结局（upstream_stream_aborted），不计费；
+//   - !done：上游没给结束标记（[DONE] / message_stop）。给了就是正常结束；
+//   - streamErr == nil：上游没有报错。报错是另一条路（已经吐字之后报错要
+//     计费，但结局是「上游的响应不可用」而不是「静默截断」）；
+//   - !ended：不是我们这边断的。客户端断开或插件终止时，上游那条连接多半
+//     也跟着断了，把它记成上游截断等于把我们的行为算到上游头上。
+//
+// 它同时是快照与账单两侧的判据：两表对同一次截断必须给出同一个值，所以
+// 判据只能有一处，两边都调这一个函数，不各判一次。账单那一侧的落点是
+// store.Release 之外的另一处（已计费的行不走 Release），见 pipeline 的
+// ErrorUpstreamStreamTruncated。
+func streamTruncated(streamErr error, started, done, ended bool) bool {
+	return !ended && !done && started && streamErr == nil
 }
 
 // streamSettleTimeout 是流式收尾（结算 + 释放）的时间上限。

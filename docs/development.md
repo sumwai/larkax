@@ -145,14 +145,29 @@ go run ./cmd/larkaxctl snapshot cleanup             # 执行删除
 - `error_kind` 是这次响应以上游失败告终时的分类，取值与
   `billing_requests.error_code` 同一套（`upstream_http_error`、
   `upstream_unusable_response`、`upstream_no_answer`、
-  `upstream_stream_aborted`）。NULL 表示没有上游失败可归：正常结束、
-  客户端断开、插件阻断。
+  `upstream_stream_aborted`、`upstream_stream_truncated`）。NULL 表示没有
+  上游失败可归：正常结束、客户端断开、插件阻断。
 
-两列的取值判据与账单同源（`internal/gateway` 的 `upstreamEvidence`），但两张
-表回答的问题不同：账单的 `error_code` 答的是「这次为什么没计费」，所以已计费
-的请求即便上游中途报错，那里也是 NULL；快照的 `error_kind` 答的是「这次响应
-怎么了」，那条中断的流在这里会有分类。出现分歧时，钱的问题以账单为准，
-「上游当时回了什么」以快照为准。
+五个取值的分界线是**这次调用有没有真的产生 token**：
+
+- `upstream_stream_aborted`：上游接受了请求、一个字都没吐就结束了。没有用量，
+  这次不计费，预留被释放。
+- 其余四个都表示上游那边出了事，但计不计费要看路径：非流式那三个
+  （`upstream_http_error`、`upstream_unusable_response`、`upstream_no_answer`）
+  是这次调用失败的原因，响应没交给调用方，不计费；流式里吐过内容之后才出的
+  问题（上游在流里报错 → `upstream_unusable_response`，或者干脆把连接掐断 →
+  `upstream_stream_truncated`）**已经产生了 token**，这次照常计费。
+
+两列的取值判据与账单同源（`internal/gateway` 的 `upstreamEvidence` 与
+`streamResponseEvidence`），但两张表回答的问题不同：账单的 `error_code` 答的是
+「这次为什么没计费」，所以已计费的行上它是 NULL（唯一的例外见下）；快照的
+`error_kind` 答的是「这次响应怎么了」，中断的流在这里都有分类。出现分歧时，
+钱的问题以账单为准，「上游当时回了什么」以快照为准。
+
+`upstream_stream_truncated` 是这条分界上的例外：那一次回答**计了费**，而
+「回答只写了一半」同样值得记在账单上。它今天还只落在快照的 `error_kind` 上——
+已计费的行上 `error_code` 的唯一写入点（`internal/ledger/store` 的
+`markSettled`）还没接。接上之后两表会取同一个值。
 
 `larkaxctl snapshot show` 按方向与列渲染：请求方向的行上打成
 `<不适用（请求方向快照）>`，响应方向的状态码 NULL 打成 `<无上游响应>`、

@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/route"
 	"github.com/sumwai/larkax/internal/tokens"
 )
@@ -896,4 +898,167 @@ func TestStreamResponseBuilderFlushesEarlyAnnotationsOntoLaterText(t *testing.T)
 		blk.Annotations[1]["url"] != "https://example.com/late" {
 		t.Errorf("标注顺序 = %v，期望先到的 early 在后到的 late 之前", blk.Annotations)
 	}
+}
+
+// 一个字没吐就结束，而流里那条错误帧带着 *channel.ErrUpstream（200 + 体里
+// error）时，**快照与账单必须给出同一个分类**。
+//
+// 这是这次改动修的那个分歧：快照原先先看 streamErr，于是同一次失败在快照上
+// 是 upstream_unusable_response、在账单上是 upstream_stream_aborted。判据
+// 的顺序改成「先判有没有吐字」之后，两边都落进账单那一档。
+//
+// 断言两只脚都钉：账单那一侧的释放依据（failure.Code）与快照的 error_kind。
+// 只钉一侧的话，改回去时另一侧照样能过。
+func TestStreamFailureBeforeOutputClassifiedSameOnBothSides(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "上游 200 但体里是 error",
+			err:  &channel.ErrUpstream{StatusCode: http.StatusOK, GotResponse: true, Body: "upstream said: overloaded"},
+		},
+		{
+			name: "吐字前普通错误",
+			err:  errors.New("上游在首片之前断开"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
+				1: {
+					{Kind: "start", StatusCode: http.StatusOK},
+					{Kind: "error", Err: tc.err},
+				},
+			}})
+
+			res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
+			if err != nil {
+				t.Fatalf("出错: %v", err)
+			}
+			collect(t, res)
+
+			// 账单：不计费，依据是「流在接受之后断了」。
+			if len(h.reservations.released) != 1 {
+				t.Fatalf("一个字没吐的结局应释放预留一次，实际 %d 次", len(h.reservations.released))
+			}
+			if got := h.reservations.released[0].failure; got == nil ||
+				got.Code != pipeline.ErrorUpstreamStreamAborted {
+				t.Fatalf("账单依据 = %+v，期望 %q", got, pipeline.ErrorUpstreamStreamAborted)
+			}
+
+			// 快照：同一个值。
+			var snaps []*Snapshot
+			waitFor(t, "响应方向的快照落库", func() bool {
+				snaps = h.snapshots.byDirection("response")
+				return len(snaps) == 1
+			})
+			if snaps[0].ErrorKind == nil || *snaps[0].ErrorKind != pipeline.ErrorUpstreamStreamAborted {
+				t.Errorf("快照的 error_kind = %s，期望 %q（与账单同一个值）",
+					kindOf(snaps[0].ErrorKind), pipeline.ErrorUpstreamStreamAborted)
+			}
+			if snaps[0].UpstreamStatus == nil || *snaps[0].UpstreamStatus != http.StatusOK {
+				t.Errorf("upstream_status = %v，期望 %d（上游确实回过一个响应）",
+					snaps[0].UpstreamStatus, http.StatusOK)
+			}
+		})
+	}
+}
+
+// 吐过字之后上游把连接掐断（没有结束标记、也没有错误帧）：两表都记
+// upstream_stream_truncated，而且这次**计了费**。
+//
+// 这条是 issue #461 的第二件事。改动之前两表都是 NULL，而 NULL 与「记录
+// 没写完」在快照表里是同一个值；而这一次回答是真的产生了 token、账也真的
+// 扣了钱——「这次被截断了」必须能事后读出来。
+//
+// 「计了费」这一半不能省：只钉分类的话，一个把截断当成失败去释放预留的
+// 实现照样能过，而那是一次真实产生的费用没被记下。
+func TestStreamTruncatedAfterOutputClassifiedAndBilled(t *testing.T) {
+	h := newHarness(t)
+	useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
+		1: {
+			{Kind: "start", StatusCode: http.StatusOK},
+			delta("半句"), // 没有 done，也没有 error：连接就这样没了
+		},
+	}})
+
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	collect(t, res)
+
+	// 结算发生了，预留没有被释放。
+	if res.Charge == nil || len(h.settlements.saved) != 1 {
+		t.Fatalf("已经吐出来的部分要计费：Charge=%v，落库 %d 条", res.Charge, len(h.settlements.saved))
+	}
+	if len(h.reservations.released) != 0 {
+		t.Errorf("已吐字之后截断仍要计费，不该释放预留：%+v", h.reservations.released)
+	}
+
+	var snaps []*Snapshot
+	waitFor(t, "响应方向的快照落库", func() bool {
+		snaps = h.snapshots.byDirection("response")
+		return len(snaps) == 1
+	})
+	if snaps[0].ErrorKind == nil || *snaps[0].ErrorKind != pipeline.ErrorUpstreamStreamTruncated {
+		t.Errorf("快照的 error_kind = %s，期望 %q",
+			kindOf(snaps[0].ErrorKind), pipeline.ErrorUpstreamStreamTruncated)
+	}
+	if snaps[0].UpstreamStatus == nil || *snaps[0].UpstreamStatus != http.StatusOK {
+		t.Errorf("upstream_status = %v，期望 %d", snaps[0].UpstreamStatus, http.StatusOK)
+	}
+	// 骨架里要留着上游吐到一半的那份内容：快照记的是「回来的是什么」。
+	bodies := h.redactor.responseBodies()
+	if len(bodies) != 1 || bodies[0] == nil {
+		t.Fatalf("截断的流仍然交回了内容，不该是 nil 响应体：%#v", bodies)
+	}
+}
+
+// 正常结束（有 done、没报错）两表都没有分类。
+//
+// 它与截断那条只差一个 done——把判据写成「没报错就算截断」时，这条会红。
+func TestStreamNormalEndHasNoClassification(t *testing.T) {
+	h := newHarness(t)
+	useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
+		1: {
+			{Kind: "start", StatusCode: http.StatusOK},
+			delta("你好"),
+			{Kind: "done", FinishReason: "stop"},
+		},
+	}})
+
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	collect(t, res)
+
+	var snaps []*Snapshot
+	waitFor(t, "响应方向的快照落库", func() bool {
+		snaps = h.snapshots.byDirection("response")
+		return len(snaps) == 1
+	})
+	if snaps[0].ErrorKind != nil {
+		t.Errorf("正常结束的流不该有分类，实际 %q", kindOf(snaps[0].ErrorKind))
+	}
+	if len(h.reservations.released) != 0 {
+		t.Errorf("正常结束要计费，不该释放预留：%+v", h.reservations.released)
+	}
+	if res.Charge == nil {
+		t.Error("正常结束应当计费")
+	}
+}
+
+// kindOf 把快照的分类打成能读的形态。
+//
+// ErrorKind 是 *string，直接 %v 打出来的是地址——失败信息里出现一串
+// 0xc000... 时，看的人得自己回去读代码才知道是哪个值。NULL 打成一个词，
+// 让「没有分类」与「分类是空串」在输出里也分得开。
+func kindOf(kind *string) string {
+	if kind == nil {
+		return "<nil>"
+	}
+	return strconv.Quote(*kind)
 }
