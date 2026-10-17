@@ -12,15 +12,18 @@ var ErrUnauthenticated = errors.New("认证失败")
 
 // Reason 说明这次认证为什么失败。
 //
-// 它**只给日志看**：Error() 的文案对所有 Reason 都是同一句话，
+// 它**不对外**：Error() 的文案对所有 Reason 都是同一句话，
 // 于是即使调用方把 err.Error() 原样写进响应体，也不会泄露
 // 「这个 key 存在但过期了」这类信息——而那正是试探者下一步要的东西。
 //
 // 但排查时它必须能区分：用户说「我的 key 不能用了」，
 // 「库里没有这个哈希」与「这把 key 上周过期了」是两条完全不同的路径。
+// 所以它有一个消费者：公共入口在回 401 的那一处按它分桶计数
+// （larkax_auth_failures_total，见 internal/api 的 authFailureReason）。
+// 不写日志——401 是攻击者可控的，拿垃圾 key 打就能刷日志、刷盘。
 type Reason string
 
-// 失败原因。取值会进日志与告警规则，改名等于改契约。
+// 失败原因。取值会进指标的标签，改名等于改告警契约。
 const (
 	// ReasonMissingCredential 请求里没有带任何凭证。
 	ReasonMissingCredential Reason = "missing_credential"

@@ -23,6 +23,7 @@ curl -s localhost:9090/metrics
 | `larkax_billing_settlements_total` | counter | `usage_source` | 按实际用量结算完成的次数。`usage_source` 取 `measured` / `tokenized` / `estimated`，即这笔账用的是实测值、本地精确计数还是启发式估算 |
 | `larkax_billing_capped_settlements_total` | counter | 无 | 结算金额被预留上界截住的次数 |
 | `larkax_billing_unbilled_settlements_total` | counter | 无 | 未计费的结算次数：上游失败，或请求在结算之前中止 |
+| `larkax_auth_failures_total` | counter | `reason` | 认证失败被回以 401 的次数，按失败原因分。`reason` 取 `internal/auth` 的 `Reason`：`missing_credential` / `malformed_credential` / `key_not_found` / `key_disabled` / `key_revoked` / `key_inactive` / `key_expired` / `user_inactive`，外加 `unclassified` |
 
 ## 怎么读
 
@@ -58,6 +59,26 @@ SELECT request_id, reserved_amount, computed_amount,
 
 **`settlements_total{usage_source="estimated"}` 上涨。** 这笔账是按估算的用量
 收的，误差范围见 `internal/tokens` 的 `ErrorBounds`。它不该成为常态。
+
+**`auth_failures_total{reason="key_expired"}` 与 `{reason="key_not_found"}` 要分开看。**
+用户报「我的 key 不能用了」时，这两种情况指向的排查动作完全相反：前者是这把 key
+到期了（续期或换一把），后者是库里根本没有这个哈希（发错了 key，或者客户端的
+凭证被改过）。而**它们对外的表现完全一致**——401 的响应体与文案对所有原因都是
+同一句，因为区分开等于送出一个「这个 key 存在吗」的探测器。所以这两条的区分
+只存在于这里，别处都看不到。
+
+**`reason="unclassified"` 出现。** 按设计不该出现。它说明有一条 401 不是由
+`*auth.Error` 产生的（例如某条路径直接 `return auth.ErrUnauthenticated`），
+而那种 401 回答不了「为什么不能用了」。看到它就说明那条路径的接线坏了。
+
+**这条路径上不写日志，只记指标。** 这与上面「指标回答有没有在发生、日志回答是
+哪一次」的分工有一个刻意的例外：401 是攻击者可控的，拿垃圾 key 打就能刷日志、
+刷盘，所以「是哪一次」在这里没法安全地记下来。`reason` 是一个闭合枚举，
+基数有界，正好补上这个位置。
+
+代价是「是哪一把 key」这个问题指标答不了——它没有 key 标签，也不该有（那是
+无界集合），而这条路径上又没有日志可查。所以那个问题要靠报障的人给出 key 前缀，
+再去 `api_keys.key_prefix` 里定位。
 
 ## 命名与标签约定
 

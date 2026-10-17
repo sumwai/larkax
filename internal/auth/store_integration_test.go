@@ -336,7 +336,7 @@ func TestAuthenticateThrottlesLastUsedAtWrite(t *testing.T) {
 // TestAuthenticateRejectsUnusableKeys 逐个走一遍「不能用的 key」。
 //
 // 每种情况的**对外**结果都一样（errors.Is(err, ErrUnauthenticated)），
-// 所以这里断言的是 Reason——它只进日志，但排查时全靠它。
+// 所以这里断言的是 Reason——它只进指标的标签，但排查时全靠它。
 func TestAuthenticateRejectsUnusableKeys(t *testing.T) {
 	ctx := t.Context()
 

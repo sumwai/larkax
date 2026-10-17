@@ -162,6 +162,17 @@ type Registry struct {
 	// （见 pipeline.Outcome.UpstreamFailed）。在这一层分不出是哪一个。
 	UnbilledSettlements *Counter
 
+	// AuthFailures 是认证失败被回以 401 的次数，按失败原因分。
+	//
+	// reason 的取值来自 internal/auth 的 Reason（八个取值，闭合枚举），
+	// 外加一个 unclassified——那是「回了 401 但取不到 auth.Error」。
+	// 后者是**接线缺陷的信号**，按设计不该出现任何一条序列。
+	//
+	// 这里**不**按 key 或用户分：401 是攻击者可控的，拿垃圾 key 打就能
+	// 刷，而标签值必须来自有限集合。这条路径上也不写日志——同一个理由。
+	// 代价是「是哪一把 key」答不了，那要靠报障的人给前缀去库里定位。
+	AuthFailures *LabeledCounter
+
 	families []family
 }
 
@@ -175,6 +186,9 @@ func NewRegistry() *Registry {
 		"结算金额被预留上界截住的次数。按设计应一直为 0；持续大于 0 说明预留上界算错了，差额由平台承担而账目仍然是平的。")
 	r.UnbilledSettlements = r.newCounter("larkax_billing_unbilled_settlements_total",
 		"未计费的结算次数：上游失败，或请求在结算之前中止。")
+	r.AuthFailures = r.newLabeled("larkax_auth_failures_total",
+		"认证失败被回以 401 的次数，按失败原因分（取值见 internal/auth 的 Reason）。reason=\"unclassified\" 说明有一条 401 不是由 auth.Error 产生的，按设计不该出现。",
+		"reason")
 	return r
 }
 
