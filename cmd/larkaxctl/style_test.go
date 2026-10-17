@@ -9,7 +9,12 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/auth"
+	"github.com/sumwai/larkax/internal/catalog"
+	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/money"
+	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
+	"github.com/sumwai/larkax/internal/pricing"
+	"github.com/sumwai/larkax/internal/settings"
 )
 
 // 上色与不上色是同一份代码的两条路，而**默认那条是不上色**：命令的输出多数
@@ -255,4 +260,99 @@ func cellColumn(t *testing.T, line, cell string) int {
 		t.Fatalf("这一行里没有 %q：%q", cell, line)
 	}
 	return terminalCols(stripSGR(line[:i]))
+}
+
+// ── 每张清单表都上色，且上色不改排版 ────────────────────────────────────
+
+// TestListTablesStyleWithoutChangingLayout 把七条渲染路径逐个过一遍：
+// **上色那一档必须真的上了色，而剥掉样式码之后与不上色那一档逐字相同**。
+//
+// 这一条同时钉住 issue 里的两条判据：
+//
+//   - 「六张表的表头都加粗，且上色前后每一栏的起点列不变」——后半句就是
+//     「剥掉样式码逐字相同」，它比逐栏比起点更严：连空行、行尾空格、列间距
+//     一起比了。
+//   - 「非 TTY / NO_COLOR / TERM=dumb 下输出与现在逐字相同」——这里比的是
+//     同一份数据的另一条路，正是那个「现在」。
+//
+// 反过来也要防：如果某个 print 根本没接 palette，只比「两条路相同」是绿的，
+// 所以上色那一档必须同时断言出现了样式码。
+func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
+	at := time.Date(2026, 10, 17, 4, 25, 15, 0, time.UTC)
+	channel := channels.ChannelInfo{
+		ID: 1, Name: "示例渠道", Type: "openai", BaseURL: "https://api.example.com/v1",
+		Status: "enabled", Models: []string{"model-x"}, Weight: 1, Priority: 1,
+		CredentialKeys: []string{"k1"}, CreatedAt: at, UpdatedAt: at,
+	}
+	rules := []pricing.RuleInfo{{
+		ID: 1, Scope: "platform", Name: "示例规则", ModelPatterns: []string{"model-x"},
+		Expr: "input * 1", Priority: 1, EffectiveFrom: at, Enabled: true,
+		DeclaredKeys: []string{"input"},
+	}}
+
+	cases := []struct {
+		name  string
+		print func(w io.Writer)
+	}{
+		{"渠道清单", func(w io.Writer) {
+			printChannelList(w, []channels.ChannelInfo{channel}, false)
+		}},
+		{"渠道清单 --all", func(w io.Writer) {
+			printChannelList(w, []channels.ChannelInfo{channel}, true)
+		}},
+		{"模型清单", func(w io.Writer) {
+			printModelList(w, []catalog.Model{{
+				ID: 7, CanonicalName: "claude-x", DisplayName: "示例模型",
+				Vendor: "example", ContextLimit: 200000,
+			}})
+		}},
+		{"模型详情", func(w io.Writer) {
+			printModelDetail(w, catalog.Model{ID: 7, CanonicalName: "claude-x", UpdatedAt: at})
+		}},
+		{"插件清单", func(w io.Writer) {
+			printPluginList(w, []pluginstore.Row{{
+				Key: "demo", Version: "1.0.0", Name: "示例插件",
+				Status: "published", Generation: 1, Priority: 1,
+			}})
+		}},
+		{"计价规则", func(w io.Writer) { printRuleTable(w, rules, nil) }},
+		{"计价规则带裁决", func(w io.Writer) {
+			printRuleTable(w, rules, func(int) string { return "选中" })
+		}},
+		{"别名清单", func(w io.Writer) {
+			printAliasList(w, []catalog.Alias{{
+				ID: 1, UpstreamModel: "up-x", CanonicalName: "claude-x",
+			}})
+		}},
+		{"配置清单", func(w io.Writer) {
+			printSettingsList(w, []settings.Entry{{
+				Key: "billing.default_asset", Value: []byte(`"CNY"`),
+				Editable: true, UpdatedAt: at,
+			}})
+		}},
+	}
+
+	if len(cases) != 9 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 9 条——少了一条就等于那条没人看", len(cases))
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withTerminal(t, false)
+			colorEnv(t)
+			var plain bytes.Buffer
+			tc.print(&plain)
+
+			withTerminal(t, true)
+			var styled bytes.Buffer
+			tc.print(&styled)
+
+			if !strings.Contains(styled.String(), "\x1b[") {
+				t.Errorf("这一档没上色：这条渲染路径根本没接 palette\n%s", styled.String())
+			}
+			if got, want := stripSGR(styled.String()), plain.String(); got != want {
+				t.Errorf("剥掉样式码之后与不上色那一档不同：\n得到 %q\n期望 %q", got, want)
+			}
+		})
+	}
 }

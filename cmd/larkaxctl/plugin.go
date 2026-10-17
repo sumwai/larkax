@@ -113,10 +113,13 @@ func printPluginList(w io.Writer, rows []pluginstore.Row) {
 	}
 
 	tw := newTableWriter(w)
-	_, _ = fmt.Fprintln(tw, "KEY\tVERSION\tSTATUS\tGENERATION\tPRIORITY\tNAME")
+	p := newPalette(w)
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		p.bold("KEY"), p.bold("VERSION"), p.bold("STATUS"), p.bold("GENERATION"),
+		p.bold("PRIORITY"), p.bold("NAME"))
 	for _, row := range rows {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\n",
-			row.Key, row.Version, row.Status, row.Generation, row.Priority, row.Name)
+			p.bold(row.Key), row.Version, row.Status, row.Generation, row.Priority, row.Name)
 	}
 	_ = tw.Flush()
 

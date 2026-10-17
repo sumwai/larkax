@@ -459,11 +459,13 @@ func printAliasList(w io.Writer, aliases []catalog.Alias) {
 	}
 
 	tw := newTableWriter(w)
-	_, _ = fmt.Fprintln(tw, "ID\t范围\t上游模型名\t规范名\t覆盖")
+	p := newPalette(w)
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+		p.bold("ID"), p.bold("范围"), p.bold("上游模型名"), p.bold("规范名"), p.bold("覆盖"))
 	for _, a := range aliases {
-		_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n",
-			a.ID, aliasScope(a.ChannelID), a.UpstreamModel, a.CanonicalName,
-			overridesLabel(a.Overrides))
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			p.bold(strconv.FormatInt(a.ID, 10)), aliasScope(a.ChannelID), p.bold(a.UpstreamModel),
+			a.CanonicalName, overridesLabel(a.Overrides))
 	}
 	_ = tw.Flush()
 }

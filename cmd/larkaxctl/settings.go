@@ -230,6 +230,7 @@ func printSettingsList(w io.Writer, entries []settings.Entry) {
 		return
 	}
 
+	p := newPalette(w)
 	_, _ = fmt.Fprintln(w, "值打的是 settings.value 的 jsonb 原文：字符串带引号，布尔与整数不带。")
 	for _, e := range entries {
 		// 未声明的键单独标出来：它是「服务加载不起来」的直接原因，
@@ -252,7 +253,7 @@ func printSettingsList(w io.Writer, entries []settings.Entry) {
 		}
 
 		_, _ = fmt.Fprintf(w, "%s = %s  [%s]  可改 %s  改自 %s  改于 %s\n",
-			e.Key, e.Value, kind, editable, by, e.UpdatedAt.Format(time.RFC3339))
+			p.bold(e.Key), e.Value, kind, editable, by, p.dim(e.UpdatedAt.Format(time.RFC3339)))
 		if e.Description != "" {
 			_, _ = fmt.Fprintf(w, "  说明：%s\n", e.Description)
 		}
