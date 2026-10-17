@@ -227,6 +227,52 @@ export default {
 	}
 }
 
+// 宿主超时没被插件 catch 时，这次失败仍要分类成 ErrHostTimeout，
+// 而不是笼统的「插件抛了异常」。
+//
+// 这条错误穿了三层：宿主函数返回的错误 → pluginFacing 折成的 CapabilityError
+// （固定文案给插件，原文留在 Cause）→ moejs 把 Go error 翻成 JS Error 抛出去
+// → classify 看到的 *moejs.Exception。中间多了一层 CapabilityError 的 Unwrap，
+// 所以「还认不认得出来是宿主超时」需要一条用例钉住：它决定上层把这次失败
+// 记成宿主慢还是插件写得慢，而两者的排查方向完全不同。
+func Test未捕获的宿主超时仍分类为宿主超时(t *testing.T) {
+	m, err := Compile("p", `
+export default {
+  onRequest() { globalThis.__larkax.慢(); return {}; },
+};
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := Host{Capabilities: map[string]any{
+		"慢": HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
+			// 形态与 host.expired 给出的一致：包住 ErrHostTimeout 再往上抛。
+			return moejs.Undefined(), fmt.Errorf("%w: %w", ErrHostTimeout, context.DeadlineExceeded)
+		}),
+	}}
+	rt, err := m.NewRuntime(context.Background(), host, []string{"慢"}, Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+
+	f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, nil)
+	if f == nil {
+		t.Fatal("插件没 catch 宿主错误，Call 应当失败")
+	}
+	// 断言 Kind 本身，**不用 errors.Is(f, ...)**：后者会顺着 Failure 的
+	// Cause 链穿到宿主那个错误上，于是改坏分类也照样通过——那正是这条要钉的东西。
+	// 判据要落在 f.Kind 这个字段上，而不是整个 Failure；而 Kind 自己是 error，
+	// 所以字段内部仍然用 errors.Is（它包住了 ErrHostTimeout，不是与它相等）。
+	if !errors.Is(f.Kind, ErrHostTimeout) {
+		t.Errorf("Kind = %v，想要 ErrHostTimeout", f.Kind)
+	}
+	// 两者不能同时成立：一个是宿主慢，一个是插件自己抛了。
+	if errors.Is(f.Kind, ErrPluginThrew) {
+		t.Error("宿主超时不该被记成「插件抛了异常」")
+	}
+}
+
 // 宿主那一侧（host.expired）返回的是**未分类**的错误，分类只在 pluginFacing
 // 这里做一次。这条把那张映射表钉住：同一件事在两条路径上必须是同一个码，
 // 否则插件按码分支时会看到两个答案。

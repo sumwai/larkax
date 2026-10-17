@@ -228,10 +228,20 @@ func objectToGo(o *moejs.Object, depth int, budget *fieldBudget) (any, bool) {
 	if !budget.spend(scalarCost) {
 		return nil, false
 	}
+	// **预分配的容量跟着上限走，不跟着 len(keys) 走。** len(keys) 是插件
+	// 决定的：一个一百万元素的 Float64Array（JS 侧每元素 8 字节）会让这里
+	// 为了留下 32 个键先造一个能装一百万个键的容器——实测一次 log 调用在
+	// 宿主侧分配约 100 MB（其中约 84 字节/元素就是这一句 map），而写出来的
+	// 日志行只有几百字节。上限是 32 个键、1024 个元素（预算 8192 除以每个值
+	// 至少记的 8 字节），两者都远小于插件能给的规模。
+	//
+	// 这一句管不到 OwnEnumerableStringKeys 自己那次分配（实测约 16 字节/键）：
+	// 它一次把键全物化出来，而 moejs 没有给出「键有多少个」的廉价接口。
+	// 那一份与插件的 JS 侧数据同量级，比容器这一份小一个数量级。
 	keys := o.OwnEnumerableStringKeys()
 
 	if o.ClassName() == arrayClassName {
-		out := make([]any, 0, len(keys))
+		out := make([]any, 0, min(len(keys), fieldTotalMaxBytes/scalarCost))
 		for _, k := range keys {
 			if !k.IsIndex() {
 				// 数组上的自定义属性不进日志字段：它与下标含义不同，
@@ -251,7 +261,7 @@ func objectToGo(o *moejs.Object, depth int, budget *fieldBudget) (any, bool) {
 		return out, true
 	}
 
-	out := make(map[string]any, len(keys))
+	out := make(map[string]any, min(len(keys), fieldKeyMax))
 	for _, k := range keys {
 		if len(out) >= fieldKeyMax {
 			break

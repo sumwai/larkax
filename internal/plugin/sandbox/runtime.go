@@ -15,7 +15,15 @@ import (
 // 三项都有默认值（见 DefaultLimits），因为「没设限额」与「限额很宽」
 // 在运行时的表现完全一样，而前者是无限循环吃满 CPU 的那一种。
 type Limits struct {
-	// CallTimeout 是单次 hook 调用的上限。
+	// CallTimeout 是单次 hook 调用**与请求期顶层求值**的上限。
+	//
+	// 两处共用一个值，因为两处都在跑插件代码：顶层可以写一个死循环，
+	// 也可以调宿主能力，它同样必须被兜住（见 loadTopLevel）。
+	//
+	// 代价是**调紧它会连顶层一起掐掉**，而且失败点不在某次 hook 上：
+	// 顶层跑不完就没有 runtime，整个请求变成「没有插件」而不是「这个 hook 失败」。
+	// 默认 5s 下这是宽的——实测一个「干实事」的插件（顶层两千次循环、
+	// 两百次宿主调用、50 KB 出参）顶层只用几百微秒。
 	CallTimeout time.Duration
 	// MemoryBytes 是这个 runtime 的 JS 分配上限。<= 0 表示不设。
 	MemoryBytes int64
@@ -169,18 +177,37 @@ func (r *runtimeState) loadTopLevel(ctx context.Context, mod *moejs.Module) erro
 		fmt.Errorf("%w: 求值插件 %s 的顶层超过 %v", ErrCallTimeout, r.plugin, timeout))
 	defer cancel()
 
-	// 把**这次求值的 ctx** 挂到 runtime 上，好让顶层调到的宿主函数拿到它。
-	// 这与 call 里那个 goroutine 是同一个构造：contextcheck 看不到结构体
-	// 字段的来源，会把这次 Store 当成「凭空造一个 ctx」——而 tctx 就是从
-	// 入参 ctx 派生出来的（见上）。宿主阻塞时 Interrupt 无效，所以
-	// 「宿主函数拿到的 ctx 带 deadline」这件事不能省。
-	captured := tctx
-	r.callCtx.Store(&captured)
-	defer r.callCtx.Store(nil) //nolint:contextcheck // tctx 派生自入参 ctx，见上
-
 	// loadWithin 会在超时与 ctx 结束时 Interrupt，并把这个 runtime 与
 	// 跑着它的 goroutine 一起抛弃——调用方拿到错误之后不会再碰它。
-	return loadWithin(tctx, r.rt, mod, timeout)
+	return loadWithin(tctx, r.rt, mod, timeout, func(ctx context.Context) error {
+		return r.evalTopLevel(ctx, mod)
+	})
+}
+
+// evalTopLevel 求值模块顶层，并在**同一段里**把这次求值的 ctx 挂到 runtime 上、
+// 返回前清掉。它由 loadWithin 在跑 Load 的那个 goroutine 里调起。
+//
+// 挂与清的位置就是这条路径的关键，所以它与「求值」写在一个函数里、拿同一个
+// ctx 参数：写在调用方 goroutine 上的 defer 会在超时返回的那一刻就清掉，
+// 而那时 Load 还在另一个 goroutine 里跑。它随后调的宿主函数于是落到 hostCtx
+// 的 fallback 分支上，拿到注入时那个请求 ctx——调用方传 context.Background()
+// 时那个 ctx 永不结束，于是「顶层超时之后残余的插件代码」既跑不完，也收不到
+// 「该收手了」的信号：限额之外执行插件代码。Interrupt 拦不住它（它只在引擎的
+// 检查点生效，而调一个原生函数不是检查点）。这与 call 里那个构造是同一个。
+func (r *runtimeState) evalTopLevel(ctx context.Context, mod *moejs.Module) error {
+	captured := ctx
+	r.callCtx.Store(&captured)
+	// 上一句挂的是**这次求值自己的 ctx**，分析器也认了它（同一函数里那一行没报）。
+	// 这一句传的是 nil，意思是「这个槽现在是空的」，它不是一个 ctx——而
+	// contextcheck 的判据是「一个 ctx 类型的值进入了一个不传播调用方 ctx 的函数」，
+	// 它对**任何**从 ctx 参数不可达的 ctx 类型实参都会报，不看那个值是 nil。
+	// atomic.Pointer[context.Context] 的清空值就是 nil，所以「清空这个槽」这件事
+	// 无论写成什么样都会踩到它；绕开它只有改字段的表示（把 ctx 装进一个结构体、
+	// 换成加锁的字段、或 atomic.Value 加一个哨兵），那几种都只是不让这个类型判据
+	// 看见它，还会把一次无锁读换成带锁读、或改掉「空槽」的表示——那是把问题藏
+	// 起来，不是修它。call 里那一行是同一处构造，压着同一条。
+	defer r.callCtx.Store(nil) //nolint:contextcheck // 见上：清空槽的 nil 不是「外来的 ctx」
+	return r.rt.Load(mod)
 }
 
 // inject 注入宿主能力。

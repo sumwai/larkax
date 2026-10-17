@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -857,6 +858,53 @@ func TestLogFieldBudgetIsSharedAcrossKeys(t *testing.T) {
 	// 排在前面那个必须完好无损：预算是「放不下才丢」，不是「一律截短」。
 	if got, _ := entries[0]["k0"].(string); got != strings.Repeat("y", 1000) {
 		t.Errorf("k0 被改动了：%d 字节", len(got))
+	}
+}
+
+// TestLogBoundsContainerPreallocation 钉住「容器不按插件的规模预分配」。
+//
+// 键的个数有 fieldKeyMax 管着，每个值的大小有 fieldValueMaxBytes 管着，
+// 但**容器的预分配**曾经跟着 len(keys) 走：一个一百万元素的 Float64Array
+// （JS 侧每元素 8 字节）会让宿主先造一个能装一百万个键的 map，然后才在
+// 循环里截到 32 个。写出来的日志行一直是几百字节，差的正是这一份——
+// 按默认的 64 MiB 内存上限，一个 8M 元素的数组就能让**一次 log 调用**
+// 在宿主侧分配约 800 MB。
+//
+// 断言的是宿主侧的新分配量，不是输出的大小：TotalAlloc 只增不减，
+// 不受 GC 时机影响。上限 64 MiB 是写死的——修好之后这一份只剩「把键
+// 物化出来」那一次（实测约 16 MB，每键 16 字节），坏掉时是它的六倍以上。
+//
+// 数组那一支（`make([]any, 0, len(keys))`）用的是同一个判据，但它的容量
+// 与「键物化」是同一量级（都是每元素 16 字节），所以没有单独设阈值；
+// 它收进多少元素由 TestLogBoundsArrayFieldValues 钉着。
+func TestLogBoundsContainerPreallocation(t *testing.T) {
+	var buf bytes.Buffer
+	env := Env{Logger: testLogger(&buf)}
+	fn := capability(t, Standard(env), capLog).Funcs["log"]
+
+	// Float64Array 走的不是数组那一支：它的 ClassName 不是 "Array"，
+	// 于是按普通对象转，容器是 map。
+	obj := jsEval(t, `({k: new Float64Array(1000000)})`)
+
+	var 前, 后 runtime.MemStats
+	runtime.ReadMemStats(&前)
+	if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
+		t.Fatalf("log 出错: %v", err)
+	}
+	runtime.ReadMemStats(&后)
+	分配 := 后.TotalAlloc - 前.TotalAlloc
+	t.Logf("一次 log 调用在宿主侧新分配 %d 字节", 分配)
+
+	if 分配 > 64<<20 {
+		t.Errorf("一次 log 调用新分配了 %d 字节，超过 64 MiB：容器按插件的规模预分配了", 分配)
+	}
+	// 上面那个上限不能靠「什么都没转」满足：键还是要收到上限为止。
+	got, ok := logEntries(t, &buf)[0]["k"].(map[string]any)
+	if !ok {
+		t.Fatalf("k 应当是对象，实际 %T", logEntries(t, &buf)[0]["k"])
+	}
+	if len(got) == 0 || len(got) > fieldKeyMax {
+		t.Errorf("收进了 %d 个键，想要 (0, %d]", len(got), fieldKeyMax)
 	}
 }
 

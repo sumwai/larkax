@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Calcium-Ion/moejs"
 )
@@ -796,6 +797,54 @@ func TestMeta不是对象时报错(t *testing.T) {
 		if meta := m.Meta(); meta != nil {
 			t.Errorf("meta = %s 时 Meta() 应当是 nil，实际 %#v", src, meta)
 		}
+	}
+}
+
+// meta 里写一个死循环时，报出来的必须是**超时**，而不是「meta 不是一个对象」。
+//
+// 读 meta 这一段同样在跑插件代码（`toJSON`、getter 都会被执行），而它跑在
+// 调用方 goroutine 上、不在 loadWithin 的 select 里：它的界来自 inspect 里
+// 那个 AfterFunc。界是隐式的，失败文案因此更容易说反——原始错误是
+// 「interrupted: 求值插件 p 的顶层超过 2s」，外层包装会说成「meta 不是一个对象」。
+// 上传期这两种错的处置不同：一个要作者改 meta，一个要作者把重活挪进 hook。
+//
+// 这条是全包最慢的一条：要等满 inspectTimeout（界是常量，没法从外面调短）。
+// 它值这个时间——「界还在不在」正是它要钉的东西：去掉那个 AfterFunc，
+// Compile 就不会在这个窗口内返回了。
+func TestMeta里的死循环报的是超时而不是形状错(t *testing.T) {
+	type 结果 struct {
+		m   *Module
+		err error
+	}
+	done := make(chan 结果, 1)
+	开始 := time.Now()
+	go func() {
+		m, err := Compile("p", `
+export const meta = { key: "k", toJSON() { while (true) {} } };
+export default { onRequest() { return {}; } };
+`)
+		done <- 结果{m: m, err: err}
+	}()
+
+	select {
+	case r := <-done:
+		if r.err == nil {
+			t.Fatal("meta 里的死循环应当让 Compile 失败")
+		}
+		if !errors.Is(r.err, ErrCallTimeout) {
+			t.Errorf("错误 = %v，想要包住 ErrCallTimeout", r.err)
+		}
+		// 这里断言**文案**而不是分类：被中断的错误本身就包着那个超时 cause，
+		// 所以「分类还在不在」穿得过外层那层包装，只有文案能区分它说的是
+		// 「meta 的形状不对」还是「超时」。
+		if 文本 := r.err.Error(); strings.Contains(文本, "meta 不是一个对象") {
+			t.Errorf("文案说的是 meta 的形状，而真正的原因是超时: %v", r.err)
+		}
+		if 花了 := time.Since(开始); 花了 < inspectTimeout {
+			t.Errorf("耗时 %v 早于 %v，这条走的不是超时路径", 花了, inspectTimeout)
+		}
+	case <-time.After(inspectTimeout + 2*time.Second):
+		t.Fatal("Compile 没有在窗口内返回：读 meta 那一段没有界了")
 	}
 }
 

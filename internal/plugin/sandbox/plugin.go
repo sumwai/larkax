@@ -124,7 +124,7 @@ func (m *Module) inspect(parent context.Context) error {
 
 	// Load 与 Has 都可能因为有宿主函数卡住而不返回（这里没有注入宿主函数，
 	// 但顶层仍然可以写一个很慢的循环），所以这里也按「不阻塞地等」处理。
-	if err := loadWithin(ctx, rt, m.mod, inspectTimeout); err != nil {
+	if err := loadWithin(ctx, rt, m.mod, inspectTimeout, nil); err != nil {
 		// 顶层失败的**原因分类要看得到**：上传期最常见的两种错法是
 		// 「顶层就吃掉几十兆」与「顶层死循环」，而它们的处置不同
 		// （前者要作者删代码，后者要作者把重活挪进 hook）。
@@ -133,10 +133,19 @@ func (m *Module) inspect(parent context.Context) error {
 		return fmt.Errorf("%w: 求值插件 %s 的顶层失败: %w", f.Kind, m.Name, err)
 	}
 
+	// 下面这一段（读 meta、问 hook）**同样在跑插件代码**：meta 可以是一个
+	// 带 getter 的对象，hook 可以是一个取值器，两者都能写死循环。
+	// 它跑在调用方 goroutine 上，不在 loadWithin 的 select 里，界来自
+	// **上面那个 AfterFunc 还武装着**——inspectTimeout 到点时它 Interrupt，
+	// 而纯 JS 的循环会被打断（实测：meta 里写 `toJSON(){while(true){}}`，
+	// Compile 在 2.004s 返回）。宿主函数在这里面不存在（这一路没注入能力），
+	// 所以「宿主阻塞时 Interrupt 无效」那条边界够不到它。
+	//
+	// 界既然来自 AfterFunc，失败文案就得按它来分（见 afterLoad）。
 	if v, ok := rt.Export("meta"); ok {
 		var meta map[string]any
 		if err := rt.Unmarshal(v, &meta); err != nil {
-			return fmt.Errorf("插件 %s 的 meta 不是一个对象: %w", m.Name, err)
+			return m.afterLoad(ctx, fmt.Errorf("插件 %s 的 meta 不是一个对象: %w", m.Name, err))
 		}
 		// meta 是 null 时 rt.Export 给的是 null 值，而 null 解进一个 map
 		// 会被当成「一个空对象」（json.Unmarshal 的语义）。那样「没有 meta」
@@ -158,7 +167,7 @@ func (m *Module) inspect(parent context.Context) error {
 		}
 		ok, err := rt.Has(h)
 		if err != nil {
-			return fmt.Errorf("插件 %s 的 %s 无法解析: %w", m.Name, name, err)
+			return m.afterLoad(ctx, fmt.Errorf("插件 %s 的 %s 无法解析: %w", m.Name, name, err))
 		}
 		if ok {
 			m.hooks = append(m.hooks, name)
@@ -173,14 +182,38 @@ func (m *Module) inspect(parent context.Context) error {
 	return nil
 }
 
+// afterLoad 给「Load 之后那一段」的失败分类。那一段的界从哪来，见 inspect。
+//
+// 被 AfterFunc 拉回来时错误文本是「interrupted: 求值插件 X 的顶层超过 2s」，
+// 而外层的包装会把它读成「meta 不是一个对象」或「hook 无法解析」——
+// 真正的原因是超时，两者在上传期的处置不同：前者要作者改 meta，
+// 后者要作者把重活挪进 hook。
+func (m *Module) afterLoad(ctx context.Context, err error) error {
+	if ctx.Err() == nil {
+		return err
+	}
+	return fmt.Errorf("%w: 求值插件 %s 的顶层超过 %v", ErrCallTimeout, m.Name, inspectTimeout)
+}
+
 // loadWithin 求值模块顶层，但**不无限等它**。
 //
 // 与调用路径上的 invoke 同理：moejs 的 Runtime 必须单 goroutine 独占，
 // 一个卡住的顶层会占住那个 goroutine，唯一能做的就是把 runtime 与
 // goroutine 一起抛弃。超时之后这个 runtime 不再被碰。
-func loadWithin(ctx context.Context, rt *moejs.Runtime, mod *moejs.Module, timeout time.Duration) error {
+//
+// run 在**跑 Load 的那个 goroutine 里**执行，收到的是这次求值的 ctx。
+// 需要把这次求值的 ctx 挂到 runtime 上的调用方用它——挂的位置不是随便定的：
+// 超时返回之后 Load 还在那个 goroutine 里跑，而残余的插件代码随后会调宿主
+// 能力；挂在调用方 goroutine 上的话，那时 ctx 已经被清掉，宿主函数就落到
+// 「没有 deadline 的 fallback」上（见 loadTopLevel 的注释）。
+//
+// 这个位置**只对请求期那条路径有意义**，编译期的 inspect 不挂 ctx，传 nil。
+func loadWithin(ctx context.Context, rt *moejs.Runtime, mod *moejs.Module, timeout time.Duration, run func(context.Context) error) error {
+	if run == nil {
+		run = func(context.Context) error { return rt.Load(mod) }
+	}
 	done := make(chan error, 1)
-	go func() { done <- rt.Load(mod) }()
+	go func() { done <- run(ctx) }()
 
 	select {
 	case err := <-done:

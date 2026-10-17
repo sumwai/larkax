@@ -178,6 +178,88 @@ export default { onRequest() { return {}; } };
 	}
 }
 
+// 顶层超时之后，被抛弃的那段插件代码**仍会继续跑**——Interrupt 拦不住一个
+// 阻塞的宿主函数（它只在引擎的检查点生效，而调一个原生函数不是检查点）。
+// 所以它随后调宿主能力时必须被兜住：要么在门口被拒，要么进去时 ctx 已经结束。
+//
+// 这条钉的是「callCtx 挂在哪」。写成调用方 goroutine 上的 defer 时，超时返回
+// 的那一刻 callCtx 就被清掉，而 Load 还在另一个 goroutine 里跑：残余代码随后
+// 调的宿主函数落到 hostCtx 的 fallback 上，拿到注入时那个请求 ctx——这里传的
+// 是 context.Background()，于是它永不结束，宿主函数照常执行。
+//
+// 探针形状：顶层先调一个睡 300ms、不看 ctx 的宿主函数（把超时逼出来），
+// 再调一个记录自己 ctx 的宿主函数。第二次调用的结局只有两种可能，两种都算
+// 被兜住了；**放行且 ctx 还能用**才是这条要抓的那一种。
+func Test顶层超时后残余代码的宿主调用被兜住(t *testing.T) {
+	const 超时 = 50 * time.Millisecond
+	m, err := Compile("p", `
+if (typeof globalThis.__larkax !== "undefined") {
+  globalThis.__larkax.慢();    // 不看 ctx，睡 300ms，把这次求值拖过超时
+  globalThis.__larkax.之后();  // 残余代码走到这里
+}
+export default { onRequest() { return {}; } };
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type 观察 struct {
+		有deadline bool
+		剩余        time.Duration
+	}
+	被进入 := make(chan 观察, 1)
+	被拒 := make(chan error, 4)
+
+	host := Host{
+		Capabilities: map[string]any{
+			"慢": HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
+				time.Sleep(300 * time.Millisecond)
+				return moejs.Undefined(), nil
+			}),
+			"之后": HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
+				var o 观察
+				dl, ok := ctx.Deadline()
+				o.有deadline = ok
+				if ok {
+					o.剩余 = time.Until(dl)
+				}
+				被进入 <- o
+				return moejs.Undefined(), nil
+			}),
+		},
+		OnError: func(name string, err error) {
+			if name == "之后" {
+				被拒 <- err
+			}
+		},
+	}
+
+	_, err = m.NewRuntime(context.Background(), host, []string{"慢", "之后"}, Limits{CallTimeout: 超时})
+	if err == nil {
+		t.Fatal("顶层被宿主函数拖过超时，NewRuntime 应当失败")
+	}
+	if !errors.Is(err, ErrCallTimeout) {
+		t.Errorf("错误 = %v，想要 ErrCallTimeout", err)
+	}
+
+	// 残余代码在 ~300ms 处才走到第二次调用，这里只等一个有界的窗口。
+	select {
+	case o := <-被进入:
+		if !o.有deadline || o.剩余 > 0 {
+			t.Errorf("残余代码的宿主调用被放行，而且 ctx 还能用：有 deadline=%v 剩余=%v",
+				o.有deadline, o.剩余)
+		}
+	case err := <-被拒:
+		// 在门口被拒：这是修好之后的正常路径。
+		if !errors.Is(err, ErrCallTimeout) && !errors.Is(err, context.Canceled) {
+			t.Errorf("拒绝的理由 = %v，想要「这次调用的预算已经结束」", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("残余代码在 3 秒内没有走到第二次宿主调用。" +
+			"如果 moejs 的 Interrupt 已经能打断宿主函数，这条用例就观察不到东西了，得换个形态")
+	}
+}
+
 // 出参解码里写的死循环同样要被 CallTimeout 拉回来。
 //
 // UnmarshalWith 会执行插件代码：值带 toJSON 时它走 AppendJSON 那条路，
