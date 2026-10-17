@@ -240,6 +240,148 @@ func TestMatchBreaksTiesWithinScope(t *testing.T) {
 	}
 }
 
+// 同作用域、同优先级时，模型名单非空的那条赢过兜底的那条。
+//
+// 兜底（空 model_patterns）适用于全部模型，于是它与每一条模型专属规则都是
+// 同作用域、同优先级的竞争者。按 id 决胜会让「后加的那条赢」：先加专属、
+// 后加兜底，所有模型的价一起变，而没有任何一处会提示这件事。
+//
+// 两个子用例只差插入顺序，结论必须一样——这正是「同一种意图，结果不取决于
+// 操作顺序」。
+func TestMatchPrefersModelSpecificOverCatchAll(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	cases := []struct {
+		name       string
+		catchFirst bool
+	}{
+		{"先建兜底，后建专属", true},
+		{"先建专属，后建兜底", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// 每条子用例用自己的模型名，两条规则也各自建、各自清。
+			model := unique("model-specific")
+			at := time.Now()
+
+			var catchAll, specific int64
+			if tc.catchFirst {
+				catchAll = insertRule(t, db, ruleSpec{patterns: []string{}, expr: `{"prompt": 1}`})
+				specific = insertRule(t, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": 2}`})
+			} else {
+				specific = insertRule(t, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": 2}`})
+				catchAll = insertRule(t, db, ruleSpec{patterns: []string{}, expr: `{"prompt": 1}`})
+			}
+
+			got, err := s.Match(ctx, singleCandidate(model, 0, 0, at))
+			if err != nil {
+				t.Fatalf("匹配失败: %v", err)
+			}
+			if got.ID != specific {
+				t.Errorf("规则 id = %d，期望模型专属的 %d（兜底的那条是 %d）——"+
+					"后加兜底不该静默盖掉已有的专属价", got.ID, specific, catchAll)
+			}
+		})
+	}
+}
+
+// priority 压过具体性：兜底的 priority 更高时，仍然兜底赢。
+//
+// 这一条钉住的是「想让它赢」的手段还在——具体 > 兜底是同一优先级内的次序，
+// 不是一条比 priority 更硬的规则。没有它，改过之后就没有办法让一条兜底价
+// 盖住某条专属价了。
+func TestMatchPriorityBeatsSpecificity(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	model := unique("model-priority")
+	specific := insertRule(t, db, ruleSpec{patterns: []string{model}, priority: 1, expr: `{"prompt": 1}`})
+	catchAll := insertRule(t, db, ruleSpec{patterns: []string{}, priority: 9, expr: `{"prompt": 2}`})
+
+	got, err := s.Match(ctx, singleCandidate(model, 0, 0, time.Now()))
+	if err != nil {
+		t.Fatalf("匹配失败: %v", err)
+	}
+	if got.ID != catchAll {
+		t.Errorf("规则 id = %d，期望 priority 更高的兜底规则 %d（专属的那条是 %d）",
+			got.ID, catchAll, specific)
+	}
+}
+
+// 两条都是模型专属、同作用域同优先级时，仍然按 id 取最新。
+//
+// 新加的排序键只管「具体 vs 兜底」，不该顺手改掉同一类规则之间的决胜。
+func TestMatchTieBreaksByIDAmongSpecificRules(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	model := unique("model-id-tie")
+	older := insertRule(t, db, ruleSpec{patterns: []string{model}, priority: 5, expr: `{"prompt": 1}`})
+	newer := insertRule(t, db, ruleSpec{patterns: []string{model}, priority: 5, expr: `{"prompt": 2}`})
+
+	got, err := s.Match(ctx, singleCandidate(model, 0, 0, time.Now()))
+	if err != nil {
+		t.Fatalf("匹配失败: %v", err)
+	}
+	if got.ID != newer {
+		t.Errorf("规则 id = %d，期望同作用域同优先级同具体度里最新的 %d（旧的是 %d）",
+			got.ID, newer, older)
+	}
+}
+
+// 列举（Admin.List）排第一的那条，就是 Match 会选中的那条——即使库里同时
+// 有兜底与专属、且兜底是后加的。
+//
+// 列举与 Match 共用 ruleOrderBy，这条用例从**结论**上钉住这一点：两处各写
+// 一份排序的话，它们会在这种「新增了一条决胜键」的改动上先分叉。
+func TestListFirstRowAgreesWithMatch(t *testing.T) {
+	db := testDB(t)
+	admin := NewAdmin(db)
+	s := New(db)
+	ctx := context.Background()
+
+	// 渠道作用域 + 很高的 priority：列举是全局的，这样让本用例的两条规则
+	// 稳定地排在清单最前面，断言「排第一」才不依赖库里别处剩下的行。
+	owner := seedUser(t, db)
+	ch := seedChannel(t, db, owner)
+	model := unique("model-list-match")
+
+	// 先建专属、后建兜底：旧次序会选中后建的兜底，新次序必须选中专属。
+	specific := createRule(t, admin, CreateRequest{
+		Scope: ScopeChannel, ChannelID: ch, Name: unique("rule-list-match"),
+		ModelPatterns: []string{model}, Expr: `{"prompt": 1}`, Priority: 9999,
+	})
+	catchAll := createRule(t, admin, CreateRequest{
+		Scope: ScopeChannel, ChannelID: ch, Name: unique("rule-list-match"),
+		ModelPatterns: []string{}, Expr: `{"prompt": 2}`, Priority: 9999,
+	})
+
+	// 时刻取在规则建好之后：规则默认的生效时刻是创建那一刻（左闭区间）。
+	at := time.Now()
+
+	matched, err := s.Match(ctx, singleCandidate(model, ch, owner, at))
+	if err != nil {
+		t.Fatalf("匹配失败: %v", err)
+	}
+	if matched.ID != specific {
+		t.Fatalf("Match 选中的是 %d，期望专属规则 %d（兜底的是 %d）", matched.ID, specific, catchAll)
+	}
+
+	infos := listAll(t, admin)
+	if len(infos) == 0 {
+		t.Fatal("列举是空的")
+	}
+	if infos[0].ID != matched.ID {
+		t.Errorf("列举的第一条是 %d，Match 选中的是 %d——两处的裁决次序不一致",
+			infos[0].ID, matched.ID)
+	}
+}
+
 // 模型过滤：空数组适用于全部模型，非空数组要求逐字匹配。
 func TestMatchFiltersByModel(t *testing.T) {
 	db := testDB(t)
