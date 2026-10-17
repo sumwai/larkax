@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 
+	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -70,6 +71,8 @@ func dbErr(err error) error {
 // 两类都算冲突：撞上唯一键 / 外键，以及要改的那一行不在库里。后者的下一步
 // 动作与前者的性质相同——都是「先去看数据里现在是什么」。
 var conflictErrors = []error{
+	auth.ErrUserNotFound,
+
 	channels.ErrChannelNotFound,
 
 	catalog.ErrModelExists,

@@ -56,6 +56,8 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl migrate version                显示当前数据库版本
   larkaxctl migrate create <名称>           生成迁移文件
   larkaxctl user create --name <用户名>     创建用户（stdout 只有新用户的 ID）
+  larkaxctl wallet open --user <用户> [--asset <资产>]
+                                           给用户开通钱包（余额 0）
   larkaxctl apikey create --user <用户>     创建一把 API Key（明文只打印这一次）
   larkaxctl apikey update --id <ID>        改一把已有 API Key 的额度
   larkaxctl apikey list [--user <用户>]     列出 API Key 及其额度
@@ -148,6 +150,8 @@ func run() error {
 		return runSnapshot(os.Args[2:])
 	case "user":
 		return runUser(os.Args[2:])
+	case "wallet":
+		return runWallet(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println(version)
 		return nil
