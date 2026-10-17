@@ -117,29 +117,33 @@ func (h *Handler) billingRequest(user User, upstream *channel.Request, requestID
 // inputTokensOf 估算请求的输入 token 数。
 //
 // 预留发生在调用上游之前，那时拿不到实测值，只能用估算（见 internal/tokens）。
-// 口径有三块，都是上游会计入输入的部分：
+// 口径有四块，都是上游会计入输入的部分：
 //
 //  1. **消息正文**——channel.Request.PromptText，逐字分词或估算；
 //  2. **工具定义**——PromptText 只拼 Content[].Text，工具定义整个在它外面，
 //     而在带工具的大请求里它常常比正文还大（见 tokens.ToolDefinitionInputTokens）；
-//  3. **图片**——同样在外面，按每张一个保守常数计（见 tokens.ImageInputTokens）。
+//  3. **图片**——同样在外面，按每张一个保守常数计（见 tokens.ImageInputTokens）；
+//  4. **历史消息里 tool_use 块的参数**——同样在 Content[].Text 之外
+//     （那一块没有正文），而它在多轮工具调用的会话里**随轮数增长**：
+//     每一轮调用的参数都会随后续请求重复出现在历史里
+//     （见 tokens.ToolUseInputTokens）。
 //
-// # 补这两项补的是口径，不是精度
+// # 补这几项补的是口径，不是精度
 //
-// 结算按上游报的 usage，那份 usage **含**工具与图片；预留只算正文，于是
+// 结算按上游报的 usage，那份 usage **含**上面四项；预留只算正文，于是
 // 预留 < 结算，而结算是按预留封顶的（见 pipeline.Reserve 与
 // billing.Settlement.Capped）——差额由平台承担，账目仍然是平的，只在对账时
 // 表现为「用量对不上金额」，并让 larkax_billing_capped_amount_total 变成
 // 常态噪声，而它本该只在「上游不守信」时出现。
 //
 // 所以这里**不加整体余量**：余量是把上界做松，补漏才是把上界做实。口径按
-// 实际出现的工具与图片走，两者都没有时本函数与补漏前逐字相同（有用例钉住）。
+// 实际出现的那几项走，一项都没有时本函数与补漏前逐字相同（有用例钉住）。
 // 加余量的实现会在那条用例上变红。
 //
 // # 为什么不按入口协议分支
 //
-// req 是**协议转换之后**的统一形状：工具是 []channel.Tool、图片是
-// ContentBlock.Type == "image"，三条 chat 形状的入口在这一层是同一套字段，
+// req 是**协议转换之后**的统一形状：工具是 []channel.Tool、图片与工具调用是
+// ContentBlock.Type，三条 chat 形状的入口在这一层是同一套字段，
 // 各入口写法上的差异在 relay.ParseRequest 就消掉了。所以这里不需要认识任何
 // 入口协议，也就没有「四套口径」这回事。
 //
@@ -166,16 +170,50 @@ func inputTokensOf(req *channel.Request) int64 {
 			if c.Type == "image" {
 				n += tokens.ImageInputTokens
 			}
+			// tool_use 则相反，它按载荷算：参数多大就估多少。同一块在历史里
+			// 出现几次就计几次——多轮工具调用的会话里它确实会重复出现。
+			//
+			// tool_result 不在这里：它的正文存在 ContentBlock.Text 上，
+			// PromptText 第一项已经算了（见 relay.messageFromRelaykit 的那一支）。
+			if c.Type == "tool_use" {
+				n += tokens.ToolUseInputTokens(req.Model, toolUseBlockJSON(c))
+			}
 		}
 	}
 	return n
+}
+
+// toolUseBlockJSON 把历史消息里一块 tool_use 序列化成喂给估算的 JSON。
+//
+// 放 id / name / input 三个字段：它们是这一块携带的全部**内容**，也都被上游
+// 计进输入。input 是上一轮工具调用的参数（一段完整的 JSON），在历史里会随轮数
+// 重复出现；id 与 name 同样逐轮重复，只是小得多。type 不进这里——它每块都
+// 一样，属于外面那层包装。
+//
+// 外面那层包装（各家在自己那份 JSON 上还会套的字段与转义）由
+// tokens.ToolUseReserveFrameTokens 按块数补。
+//
+// 序列化失败时退到「id 与 name」：input 是 map[string]any，从请求体解出来的
+// 输入序列化不会失败，但**失败时不能返回空**——那等于把这一块从口径里悄悄
+// 抹掉，而它恰恰是这一层要补的东西。退回去的那一份仍然非零。
+func toolUseBlockJSON(block channel.ContentBlock) []byte {
+	body, err := json.Marshal(struct {
+		ID    string         `json:"id,omitempty"`
+		Name  string         `json:"name,omitempty"`
+		Input map[string]any `json:"input,omitempty"`
+	}{ID: block.ToolUseID, Name: block.ToolName, Input: block.ToolInput})
+	if err == nil {
+		return body
+	}
+	return []byte(block.ToolUseID + " " + block.ToolName)
 }
 
 // toolDefinitionJSON 把工具定义序列化成喂给估算的 JSON。
 //
 // 只放 name / description / schema 三个字段——channel.Tool 上就这三个，
 // 而它们正是各家的工具声明里都有的内容。外面那层包装各家写法不同，
-// 由 tokens.ToolDefinitionFrameTokens 按条数补。
+// 由 tokens.ToolDefinitionReserveFrameTokens 按条数补（那是**预留**侧的那个数，
+// 与流式中断那条路计费用的 ToolDefinitionFrameTokens 刻意不同）。
 //
 // 序列化失败时退到「名字与描述」：schema 是 map[string]any，从请求体解出来的
 // 输入序列化不会失败，但**失败时不能返回空**——那等于把一个工具定义从口径里
