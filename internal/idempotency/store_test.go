@@ -377,6 +377,11 @@ func TestCompleteTwiceIsRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("在 completed 上再 Complete 一次应当报错——影响 0 行不是成功")
 	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("错误 = %v，但它**不该**是 ErrNotFound：记录在，只是状态不对。"+
+			"这两种 0 行的处置相反——记录不在是正常路径（预留回滚了）该静默，"+
+			"状态不对是真异常该报警；混在一起就把那条告警淹掉了", err)
+	}
 
 	// 而且第一次的响应没有被覆盖
 	rec, lookupErr := s.Lookup(ctx, keyID, key)
@@ -415,6 +420,56 @@ func TestFailThenFailAgainIsRejected(t *testing.T) {
 
 	if err := s.Fail(ctx, keyID, key); err == nil {
 		t.Error("在 failed 上再 Fail 一次应当报错——影响 0 行不是成功")
+	} else if errors.Is(err, ErrNotFound) {
+		t.Errorf("错误 = %v，但它**不该**是 ErrNotFound：记录在，只是状态不对（见 Complete 那条）", err)
+	}
+}
+
+// 记录根本不在时，Complete 与 Fail 都返回 ErrNotFound，而不是那句状态错误。
+//
+// # 为什么要分开
+//
+// 这两种 0 行的处置**相反**：
+//
+//   - 记录不在，说明这一次请求的预留整个回滚了（余额不足、没有可用渠道、
+//     缺 max_tokens）。这是**正常路径**——用户余额不足是常态——调用方据此静默。
+//   - 记录在而状态不对，才是真异常，调用方据此报警。
+//
+// 而那条告警是这个设计里**唯一**能指出「记录停在 in_progress」的信号。
+// 不分开的话，它在每次余额不足时都会响一遍，等于被淹掉（一个总在喊的告警
+// 与一个从不喊的告警一样没用）。
+//
+// 这条用例同时是「幂等记录与预留同一个事务」的另一半证据：预留失败之后
+// 库里就是这个样子——一条记录都没有。
+func TestTransitionsOnMissingRecordReturnErrNotFound(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seedUser(t, db)
+	keyID := issueKey(t, db, userID)
+
+	// 刻意**不** claim：这正是「预留回滚了」之后库里的样子。
+	missing := unique("never-claimed")
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{name: "Complete", call: func() error {
+			return s.Complete(ctx, keyID, missing, 200, "application/json", []byte(`{}`))
+		}},
+		{name: "Fail", call: func() error {
+			return s.Fail(ctx, keyID, missing)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("%s 的错误 = %v，期望 ErrNotFound——记录不存在是正常路径，"+
+					"调用方据此静默；混成状态错误会让那条唯一的告警被淹掉", tc.name, err)
+			}
+		})
 	}
 }
 

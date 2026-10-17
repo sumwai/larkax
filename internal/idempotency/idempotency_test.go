@@ -413,7 +413,8 @@ func TestHashRequestRejectsNilRequest(t *testing.T) {
 
 // ── Retention ───────────────────────────────────────────────────────────
 
-// 非正的小时数是「不留存」，不是「留到永远」。
+// 非正的小时数换成 0，而 0 会让清理命令**拒绝执行**——不是「不留存」，
+// 也不是「留到永远」。净效果是命令报错、一条都不删（见 Retention 的注释）。
 //
 // 期望值写**字面量**（24 * time.Hour）而不是拿 Retention 自己算一遍：
 // 后者的期望与被测来自同一个来源，把 24 改成 15 用例照样通过。
@@ -426,9 +427,12 @@ func TestRetention(t *testing.T) {
 		{name: "24 小时", hours: 24, want: 24 * time.Hour},
 		{name: "1 小时", hours: 1, want: time.Hour},
 		{name: "48 小时", hours: 48, want: 48 * time.Hour},
-		{name: "0 表示不留存", hours: 0, want: 0},
-		{name: "负数表示不留存", hours: -1, want: 0},
-		{name: "大负数表示不留存", hours: -24, want: 0},
+		// 非正数一律换成 0，而 0 到了 Cleanup 那里会被**拒绝**：净效果是
+		// 清理命令报错、一条都不删。用例名写的就是这个净效果——写成
+		// 「不留存」会让人以为命令正常退出，而它其实是失败的。
+		{name: "0 会让清理命令拒绝执行", hours: 0, want: 0},
+		{name: "负数会让清理命令拒绝执行", hours: -1, want: 0},
+		{name: "大负数会让清理命令拒绝执行", hours: -24, want: 0},
 	}
 
 	for _, tc := range cases {

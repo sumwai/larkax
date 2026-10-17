@@ -170,11 +170,19 @@ func retryAfterSeconds(d time.Duration) int64 {
 // 只列本入口真的会返回的状态码。多列的那些没有测试覆盖，而它们一旦与
 // 真实语义不符，会静静地误导调用方——一份「看起来很全」的映射表比
 // 一份「只覆盖实际用到」的表更容易出错。
+//
+// 唯一的例外是 409（见下面那条注释）：它现在走不到，但去掉它会让一条
+// **将来**不带码的 409 落到 api_error 上，那是错的。
 func errorKind(protocol channel.Protocol, status int) (kind, code string) {
 	if protocol == channel.ProtocolAnthropic {
 		switch status {
 		case http.StatusBadRequest, http.StatusMethodNotAllowed,
 			http.StatusUnsupportedMediaType, http.StatusConflict:
+			// 409 这一支当前走不到：幂等那三条 409 都带码，而 Anthropic 的
+			// 错误体只有 error.type 一个机器可读的位置，writeErrorCode 会把码
+			// 写在那里（typ = code），轮不到这里。留着它是因为映射表要保证的
+			// 是「任何走到这里的 409 都映射成 invalid_request_error」——删掉
+			// 它，一条不带码的 409 就会落到 api_error 上，而 409 是 4xx。
 			return "invalid_request_error", ""
 		case http.StatusUnauthorized:
 			return "authentication_error", ""

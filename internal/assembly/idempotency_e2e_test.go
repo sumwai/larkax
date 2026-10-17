@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -346,6 +347,43 @@ func newIdemFixture(t *testing.T, upstreamURL, model string) *idemFixture {
 
 // ── 用例 ──────────────────────────────────────────────────────────────
 
+// assertReplayHeadersMatch 断言重放的响应头与第一次**逐项相同**。
+//
+// # 为什么不能只断言「带着 Content-Type」
+//
+// 那样写在丢掉 Cache-Control 与 X-Accel-Buffering 时照样通过，而这两个头
+// 各自有明确理由：一个防中间缓存，一个防反向代理缓冲。少了它们，一次重放
+// 出去的 SSE 会被缓存或缓冲住——第一次请求特意防住的那两件事，在重放这条
+// 路上漏了回来。
+//
+// # 两个头排除在外，各有明确理由
+//
+//   - `Date`：由 net/http 在写出时生成，两次请求必然不同，与重放无关。
+//   - `X-Request-Id`：它标识的是**这一次**请求。重放是另一次请求，值本来
+//     就该不同——相同反倒说明中间件没在跑。
+//
+// 只查「第一次有的，重放也有」这一个方向：重放那边多出来的头不算问题
+// （例如 Content-Length——重放是一次性写出去的，第一次是分帧 flush 的）。
+func assertReplayHeadersMatch(t *testing.T, first, replay http.Header) {
+	t.Helper()
+
+	skip := map[string]bool{"Date": true, "X-Request-Id": true}
+	for name, want := range first {
+		name = http.CanonicalHeaderKey(name)
+		if skip[name] {
+			continue
+		}
+		got, ok := replay[name]
+		if !ok {
+			t.Errorf("重放的响应里没有 %s 头，第一次有（%v）——重放要的是原样再发一遍", name, want)
+			continue
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("%s 头 = %v，期望 %v（与第一次逐项相同）", name, got, want)
+		}
+	}
+}
+
 // TestIdempotentReplayChargesOnce 是这一组的主用例：两次同键请求只扣一次费。
 func TestIdempotentReplayChargesOnce(t *testing.T) {
 	model := unique("e2e-idem-replay")
@@ -405,6 +443,96 @@ func TestIdempotentReplayChargesOnce(t *testing.T) {
 	}
 	if billUser != f.user {
 		t.Errorf("幂等记录指向的账单属于用户 %d，期望 %d", billUser, f.user)
+	}
+}
+
+// TestIdempotentAnthropicReplaysAndChargesOnce 把 happy path 在**另一套协议**上再走一遍。
+//
+// # 为什么不能只有 OpenAI 那一条
+//
+// 重放本身与协议无关（发的是留档的字节），所以风险看着很低。但两条入口的
+// **渲染**与**响应体形状**是两处代码：`/v1/messages` 的响应体是
+// `{"type":"message","content":[...]}`，`/v1/chat/completions` 是
+// `{"object":"chat.completion","choices":[...]}`。形状发错了调用方的 SDK
+// 解不出来，而 OpenAI 那条用例一个字段都对不上，看不见这件事。
+//
+// issue 明确要求「两套协议各验一次」，而在此之前 `/v1/messages` 全文只出现
+// 在 409 形状那条用例里，且第一次请求是**失败**的——happy path 一次都没验过。
+func TestIdempotentAnthropicReplaysAndChargesOnce(t *testing.T) {
+	model := unique("e2e-idem-anthropic")
+	db := testDB(t)
+	sealer := testSealer(t)
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, "100")
+	key := issueKey(t, db, user)
+
+	// 上游说 Anthropic 那套：响应体是 message 形状，用量报 input/output。
+	up := &fakeUpstream{db: db, userID: user, model: model, protocol: channel.ProtocolAnthropic}
+	srv := httptest.NewServer(up.handler())
+	t.Cleanup(srv.Close)
+
+	seedChannelOfType(t, db, sealer, merchant, srv.URL, model, "anthropic", 0)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	idemKey := unique("idem")
+	url := public.URL + "/v1/messages"
+	body := messagesBody(model)
+
+	status1, first, headers1 := postIdempotent(t, url, key, idemKey, body)
+	if status1 != http.StatusOK {
+		t.Fatalf("第一次请求状态码 = %d，期望 200。响应体：%s", status1, first)
+	}
+	rec := waitForIdemState(t, db, idemKey, "completed")
+
+	status2, second, headers2 := postIdempotent(t, url, key, idemKey, body)
+	if status2 != http.StatusOK {
+		t.Fatalf("第二次请求状态码 = %d，期望 200（同键同体应当重放）。响应体：%s", status2, second)
+	}
+
+	// 一、逐字节相同，头也逐项相同。
+	if !bytes.Equal(first, second) {
+		t.Errorf("第二次的响应体与第一次不同——重放必须是同一串字节\n第一次：%s\n第二次：%s", first, second)
+	}
+	assertReplayHeadersMatch(t, headers1, headers2)
+
+	// 二、发出去的确实是 **Anthropic 形状**，不是把 OpenAI 那份发过来。
+	// 这条只有在两套协议各验一次时才存在：重放的字节来自库里，而库里存的
+	// 是第一次渲染出来的那一份，形状对不对由第一次的渲染决定。
+	var obj map[string]any
+	if err := json.Unmarshal(second, &obj); err != nil {
+		t.Fatalf("重放的响应体不是合法 JSON: %v\n%s", err, second)
+	}
+	if got := obj["type"]; got != "message" {
+		t.Errorf("重放响应体的 type = %v，期望 message（Anthropic 的形状）", got)
+	}
+	if _, ok := obj["content"]; !ok {
+		t.Errorf("重放响应体里没有 content 字段——那是 Anthropic 放正文的地方：%s", second)
+	}
+	if _, ok := obj["choices"]; ok {
+		t.Errorf("重放响应体里出现了 choices——那是 OpenAI 的字段，说明这条入口渲染错了形状：%s", second)
+	}
+
+	// 三、上游只被调用一次，账上只有一笔。
+	if got := up.callCount(); got != 1 {
+		t.Errorf("上游被调用了 %d 次，期望 1 次（第二次是重放，不该再打上游）", got)
+	}
+	if got := billingCount(t, db, user); got != 1 {
+		t.Errorf("账单有 %d 行，期望 1 行", got)
+	}
+	if got := settlementCount(t, db, user); got != 1 {
+		t.Errorf("结算有 %d 次，期望 1 次", got)
+	}
+	// 用量是同一个（12 输入 / 7 输出），所以金额与 OpenAI 那条一模一样——
+	// 「协议不影响计费口径」这一条因此有了第二处判据。
+	assertConsumeEntry(t, db, rec.billingRequestID.Int64, user, "0.00033")
+	assertWallet(t, db, user, "99.99967", "0")
+
+	if !rec.billingRequestID.Valid {
+		t.Fatal("幂等记录没有关联到账单行——它与预留不在同一个事务里")
 	}
 }
 
@@ -687,6 +815,10 @@ func TestIdempotentReplaysStreamingResponse(t *testing.T) {
 	if got := resp2.Header.Get("Content-Type"); got != contentType1 {
 		t.Errorf("重放的 Content-Type = %q，期望 %q", got, contentType1)
 	}
+	// 逐项比对，而不是「至少带着 Content-Type」：少了 Cache-Control 或
+	// X-Accel-Buffering，一次重放出去的 SSE 就能被中间缓存住或被反向代理
+	// 缓冲——第一次请求特意防住的那两件事，在重放这条路上漏了回来。
+	assertReplayHeadersMatch(t, resp1.Header, resp2.Header)
 	if !bytes.Contains(raw2, []byte("data: [DONE]")) {
 		t.Errorf("重放的流里没有结束标记——客户端据此知道回答是完整的\n%s", raw2)
 	}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
@@ -167,6 +168,11 @@ func (h *Handler) resolveExisting(w http.ResponseWriter, r *http.Request, protoc
 // 停在 in_progress：后续同键请求会一直等到自己的超时才拿到 409，
 // 而真正的原因只在这条日志里。这是这个设计里唯一一处「记录与实际不一致」
 // 的窗口，也是那条日志必须带着键名的原因。
+//
+// **记录根本不在**是另一回事，它不是「写不进去」：那说明这一次请求的预留
+// 整个回滚了（余额不足、没有可用渠道、缺 max_tokens），幂等记录随那个事务
+// 一起没了。那是正常路径，只记 Debug——把两种情形混在一起，那条唯一的告警
+// 就会在每次余额不足时都响一遍。
 func (h *Handler) recordOutcome(r *http.Request, claim *idempotency.Claim, captured *captureWriter, res served) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), idempotencyWriteTimeout)
 	defer cancel()
@@ -179,6 +185,18 @@ func (h *Handler) recordOutcome(r *http.Request, claim *idempotency.Claim, captu
 		err = h.Idempotency.Fail(ctx, claim.APIKeyID, claim.Key)
 	}
 	if err != nil {
+		if errors.Is(err, idempotency.ErrNotFound) {
+			// 这条记录**根本不在**：这一次请求的预留整个回滚了（余额不足、
+			// 没有可用渠道、缺 max_tokens），幂等记录随那个事务一起没了。
+			//
+			// 这是**正常路径**——用户余额不足是常态，不是故障——所以这里
+			// 不能打 ERROR。那条日志是这个设计里唯一能指出「记录停在
+			// in_progress」的信号（见上面的注释），而它在正常路径上每次都响，
+			// 等于把信号淹掉：一个总在喊的告警与一个从不喊的告警一样没用。
+			observe.FromContext(r.Context()).Debug("这次请求没建成幂等记录，没有结局要写回",
+				"key", claim.Key)
+			return
+		}
 		observe.FromContext(r.Context()).Error("写幂等结局失败",
 			"err", err, "key", claim.Key, "complete", res.complete)
 	}
@@ -230,9 +248,20 @@ func (c *captureWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
 
 // writeReplay 把第一次的响应原样再发一遍。
 //
-// 状态码、Content-Type 与响应体都取自留档的那一份：这是「重放」的全部含义。
+// 状态码、响应头与响应体都取自留档的那一份：这是「重放」的全部含义。
 func writeReplay(w http.ResponseWriter, rec *idempotency.Record) {
+	if strings.HasPrefix(rec.ResponseContentType, sseContentTypePrefix) {
+		// 流式响应不止 Content-Type 一个头。少了另外两个，一次重放出去的
+		// SSE 可以被中间缓存住，也可以被反向代理缓冲——第一次请求特意防住的
+		// 那两件事，在重放这条路上漏了回来。
+		//
+		// 复用 streamHeaders 而不是把三个头抄一遍：抄一遍的话，以后往那里
+		// 加头就只在新请求上生效，重放又会悄悄少一个。
+		streamHeaders(w.Header())
+	}
 	if rec.ResponseContentType != "" {
+		// 以留档的那一份为准：它才是真正发出去的那个值（可能带着别的
+		// charset 写法），streamHeaders 里的只是同一批头的定义。
 		w.Header().Set("Content-Type", rec.ResponseContentType)
 	}
 	status := rec.ResponseStatus

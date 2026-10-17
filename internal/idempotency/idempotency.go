@@ -121,7 +121,12 @@ type Record struct {
 	BillingRequestID int64
 }
 
-// ErrNotFound 表示这个键没有记录。
+// ErrNotFound 表示这个键**根本没有**记录。
+//
+// 它有两个来路：Lookup 查不到，以及 Complete / Fail 要写的那条记录不在库里
+// （那说明这一次请求的预留整个回滚了，见 store.go 的 requireTransition）。
+// 两处说的是同一件事，所以共用一个哨兵，而不是各造一个措辞相近、含义相同的
+// 错误值——两个值迟早会被当成两种情形分别处理。
 var ErrNotFound = errors.New("没有这个幂等键的记录")
 
 // ErrClaimed 表示这个键已经被另一个请求占住了。
@@ -156,8 +161,12 @@ var ErrClaimed = errors.New("这个幂等键已被另一个请求占用")
 //   - Tools：工具定义，影响答案与上游是否走工具调用。
 //   - Stream：流式与非流式的结果形状不同（一串 SSE 帧 vs 一个 JSON 对象），
 //     存下来的那份只能按它当初的样子重放。
-//   - Extra：上游特有参数，适配器会把它透传给上游（见 internal/relay 的
-//     ToRelaykit），所以它影响结果。
+//   - Extra：上游特有参数。**它当前恒为 nil**——入口唯一的解析出口
+//     （internal/relay 的 FromRelaykitRequest）不写这个字段，所以走公共入口
+//     的请求在这里永远是 null。留着它是因为适配器那一层会把它透传给上游
+//     （见 internal/relay 的 ToRelaykit）：哪天那条路接上了，改这个 map 就是
+//     改一次请求，该算成另一次。写在这里是为了让「它现在不生效」与
+//     「它为什么还在这张表里」两件事都留在同一处，而不是靠读代码去发现。
 //
 // 刻意**不**进来的：
 //
@@ -218,9 +227,13 @@ func HashRequest(protocol channel.Protocol, req *channel.Request) ([32]byte, err
 
 // Retention 把小时数换成留存时长。
 //
-// 非正的小时数会被当成「不留存」而不是「留到永远」：settings 里写错一个
-// 符号时，宁可清得比预期早（幂等退化，但账单不受影响），也不要让表无限
-// 增长下去——后者是慢性的，几个月后才有人发现。
+// 非正的小时数返回 0，而 0 到了 Cleanup 那里会被**拒绝**（见它的注释）：
+// 净效果是清理命令响亮地报错、一条都不删，**不是**「不留存」。
+//
+// 这正是想要的：settings 里写错一个符号时，宁可让命令停下来让人看见，
+// 也不要让它按一条写错的判据把整张表清空。这条注释与 Cleanup 的那条必须
+// 说同一件事——两处各说各的，读的人会以为非正数意味着「什么都不删但命令
+// 正常退出」，而实际上是「命令失败」。
 func Retention(hours int64) time.Duration {
 	if hours <= 0 {
 		return 0

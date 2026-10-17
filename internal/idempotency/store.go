@@ -134,7 +134,7 @@ func (s *Store) Complete(ctx context.Context, apiKeyID int64, key string, status
 	if err != nil {
 		return fmt.Errorf("写幂等响应失败: %w", err)
 	}
-	return requireOneRow(res, "幂等记录不在 in_progress 上，响应没有写进去")
+	return s.requireTransition(ctx, res, apiKeyID, key, "幂等记录不在 in_progress 上，响应没有写进去")
 }
 
 // Fail 把一次**没走完**的请求标成 failed。
@@ -150,23 +150,63 @@ func (s *Store) Fail(ctx context.Context, apiKeyID int64, key string) error {
 	if err != nil {
 		return fmt.Errorf("标记幂等记录失败: %w", err)
 	}
-	return requireOneRow(res, "幂等记录不在 in_progress 上，失败状态没有写进去")
+	return s.requireTransition(ctx, res, apiKeyID, key, "幂等记录不在 in_progress 上，失败状态没有写进去")
 }
 
-// requireOneRow 把「影响 0 行」当成错误。
+// requireTransition 把「影响 0 行」当成错误，但**把两种 0 行分开**。
 //
 // 0 行不是成功。它与「写进去了」在返回值上完全一样，而现场表现为
 // 「状态没变」——一个停在 in_progress 的记录会让后续同键请求一直等到超时
 // 再拿到 409，而没有任何东西指出真正的原因（见 LESSONS.md 第 16 条）。
-func requireOneRow(res sql.Result, message string) error {
+//
+// 但 0 行有两种来路，处置**相反**：
+//
+//   - **记录根本不在库里**：这一次请求的预留整个回滚了（余额不足、没有可用
+//     渠道、缺 max_tokens），幂等记录随那个事务一起没了。这是**正常路径**，
+//     用户余额不足是常态，不是故障。返回 ErrNotFound，调用方据此静默。
+//   - **记录在，但状态不是 in_progress**：那才是真的异常，返回 message。
+//
+// 不分开的话，正常路径会每次都去喊「记录停在 in_progress」那条告警，而那是
+// 这个设计里**唯一**能指出这件事的信号——一个总在喊的告警与一个从不喊的
+// 告警一样没用，方向与 LESSONS.md 第 16 条相同。
+//
+// 多出来的那次查询只在 0 行时发生，而按主键定位的单行查询是这个库里最便宜
+// 的东西：拿一次单行读换掉一个被淹掉的告警是划算的。
+func (s *Store) requireTransition(ctx context.Context, res sql.Result, apiKeyID int64, key, message string) error {
 	affected, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("读取影响行数失败: %w", err)
 	}
-	if affected == 0 {
-		return errors.New(message)
+	if affected > 0 {
+		return nil
 	}
-	return nil
+	exists, err := s.recordExists(ctx, apiKeyID, key)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return errors.New(message)
+}
+
+// recordExists 问一句这条记录在不在。
+//
+// 它只被 0 行那条路用到：`UPDATE ... WHERE state = 'in_progress'` 影响 0 行时，
+// 「没有这一行」与「有这一行但状态不对」在返回值上分不出来，而这两件事的
+// 处置相反（见 requireTransition）。
+func (s *Store) recordExists(ctx context.Context, apiKeyID int64, key string) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM idempotency_keys WHERE api_key_id = $1 AND key = $2`,
+		apiKeyID, key).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("确认幂等记录是否存在失败: %w", err)
+	}
+	return true, nil
 }
 
 // Cleanup 删除超过留存期的记录，返回删除条数。
@@ -183,8 +223,9 @@ func requireOneRow(res sql.Result, message string) error {
 // 后者会被 Complete 推到请求结束那一刻，两者差一次上游调用的时长——
 // 拿它当留存起点，等于让留存期随上游快慢漂移。
 //
-// 留存时长为 0 或负数时**什么都不删**并返回 0：那是配置写错的样子
-// （见 Retention），而在这里把它翻译成「删掉全部」会让一次笔误清空整张表。
+// 留存时长为 0 或负数时**拒绝执行**（返回错误，而不是「什么都不删」）：
+// 那是配置写错的样子（见 Retention），而在这里把它翻译成「删掉全部」会让
+// 一次笔误清空整张表。拒绝是安全的那一侧，而且命令会响亮地失败、能被人看见。
 // 判断放在这里而不是只放在 Retention 里，是因为调用方可能绕过那个函数
 // 直接传一个 duration 进来。
 func (s *Store) Cleanup(ctx context.Context, retention time.Duration) (int64, error) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/gateway"
 	"github.com/sumwai/larkax/internal/idempotency"
+	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/relay"
 )
 
@@ -207,6 +209,37 @@ func errorCodeOf(t *testing.T, protocol channel.Protocol, body []byte) string {
 
 // ── 用例 ──────────────────────────────────────────────────────────────
 
+// logCapture 收下这个用例产生的日志。
+//
+// 断言「**没打**某条日志」必须有个能看见日志的地方：没有它，那条用例在
+// 「日志根本没被接出来」与「确实没打」之间分不出来，而这两种情形在测试
+// 输出里长得一模一样（LESSONS.md 第 16 条）。所以配套的那条「仍然要打」
+// 的用例不只是对照，它同时证明这个捕获器在工作。
+type logCapture struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (c *logCapture) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.Write(p)
+}
+
+// logger 造一个把日志写进本捕获器的日志器。
+//
+// 级别给 debug：要断言的正是「正常路径上不该出现的那些」，
+// 而它们会被降到 debug，级别卡在 info 就看不见了。
+func (c *logCapture) logger() *slog.Logger {
+	return observe.NewLoggerWithWriter(c, "debug", "text", false)
+}
+
+func (c *logCapture) text() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+
 // 没有这个头时，幂等那一层一步都不该被碰。
 //
 // 这是「行为完全不变」在入口这一层的证据：不查库、不写记录、请求上也
@@ -326,12 +359,33 @@ func TestIdempotentWaitsForInProgressThenReplays(t *testing.T) {
 	if got := store.lookupCount(); got < 2 {
 		t.Errorf("只查了 %d 次幂等记录，期望至少 2 次——查到 in_progress 之后必须再查一次才知道它变没变", got)
 	}
-	if elapsed < idempotencyPollInterval {
-		t.Errorf("耗时 %s，不足一个轮询间隔 %s——它没有等，而是立刻又查了一次",
-			elapsed, idempotencyPollInterval)
+	// 断言落在**字面量**上，不落在 idempotencyPollInterval 上。
+	//
+	// 拿被测的常量当期望，测的就是「相对关系」而不是「真的等了多久」：
+	// 把 idempotencyPollInterval 从 100ms 改成 1µs（等于每次撞键都忙轮询
+	// 数据库，查询量涨五个数量级），这条断言照样通过。同一个文件里的
+	// TestValidateKey 与 TestRetention 都刻意用了字面量。
+	//
+	// 50ms 是半个轮询间隔：真的等了一个间隔就一定跨过它，忙轮询就一定不到它，
+	// 两边各留一倍余量。常量本身由 TestPollIntervalIs100ms 单独钉住。
+	if elapsed < 50*time.Millisecond {
+		t.Errorf("耗时 %s，不足 50ms——它没有等一个轮询间隔，而是立刻又查了一次", elapsed)
 	}
 	if chatter.calls != 0 {
 		t.Errorf("上游被调用了 %d 次，期望 0 次", chatter.calls)
+	}
+}
+
+// 轮询间隔就是 100ms。
+//
+// 上一条只能证明「至少等了 50ms」，证明不了「等的是 100ms」——把常量改成
+// 60ms，它照样绿。而这个常量是「撞键的请求要多等多久」与「一次长请求要
+// 产生多少次查询」之间唯一的旋钮：它既是调用方感知到的额外延迟，也是
+// 库上多出来的查询量。随手改掉它应该让某条用例挂掉。
+func TestPollIntervalIs100ms(t *testing.T) {
+	if idempotencyPollInterval != 100*time.Millisecond {
+		t.Errorf("idempotencyPollInterval = %s，期望 100ms（字面量，"+
+			"不是拿它自己测自己）", idempotencyPollInterval)
 	}
 }
 
@@ -463,6 +517,69 @@ func TestIdempotentRecordsFailure(t *testing.T) {
 	}
 	if got := len(store.completed()); got != 0 {
 		t.Errorf("把一次失败记成了 %d 次成功", got)
+	}
+}
+
+// 预留失败（记录根本不在）时**不该**打「写幂等结局失败」那条 ERROR。
+//
+// # 为什么这一条是必要的
+//
+// 那条 ERROR 是这个设计里唯一能指出「记录停在 in_progress」的信号，而
+// 预留回滚的每一次（余额不足、没有可用渠道、缺 max_tokens）都会走到这里：
+// 记录随事务一起回滚，于是 Fail/Complete 影响 0 行。这些全是**正常路径**，
+// 让告警在这里每次都响，等于把那个信号淹掉。
+func TestIdempotentMissingRecordDoesNotLogWriteFailure(t *testing.T) {
+	h, store, _ := idemHandler()
+	store.writeErr = idempotency.ErrNotFound
+
+	logs := &logCapture{}
+	ctx := observe.WithLogger(context.Background(), logs.logger())
+
+	rec := postIdemCtx(ctx, h, PathChatCompletions, validBody, "key-no-record")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200。响应体：%s", rec.Code, rec.Body)
+	}
+	// 前提：确实走到了写回那一步——否则这条用例证明不了任何事。
+	if got := len(store.completed()); got != 1 {
+		t.Fatalf("写回被调用了 %d 次，期望 1 次（没走到写回就没有告警可言）", got)
+	}
+	if got := logs.text(); strings.Contains(got, "写幂等结局失败") {
+		t.Errorf("记录不存在时打了「写幂等结局失败」——那是正常路径，"+
+			"它会让这条唯一的告警在每次余额不足时都响一遍\n日志：%s", got)
+	} else if !strings.Contains(got, "没建成幂等记录") {
+		t.Errorf("既没有那条 ERROR，也没有那句 Debug——这条用例就只证明了"+
+			"「什么日志都没打」，证明不了「走的是正常路径那条分支」\n日志：%s", got)
+	}
+}
+
+// 记录在、但真的写不进去时**仍然**要打那条 ERROR。
+//
+// 与上一条配对：只有两条都在，才能说明这里做的是「把两种 0 行分开」，
+// 而不是「把告警关掉」。这条里记录停在 in_progress（写失败的就是它），
+// 而那正是那条日志存在的全部理由——同键的下一次请求会一直等到自己的
+// 超时才拿到 409，真正的原因只在这条日志里。
+func TestIdempotentWriteFailureStillLogs(t *testing.T) {
+	h, store, _ := idemHandler()
+	store.writeErr = errors.New("placeholder: 数据库写不进去")
+
+	logs := &logCapture{}
+	ctx := observe.WithLogger(context.Background(), logs.logger())
+
+	rec := postIdemCtx(ctx, h, PathChatCompletions, validBody, "key-write-fail")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（写库失败改不了已经发出去的响应）。响应体：%s", rec.Code, rec.Body)
+	}
+
+	got := logs.text()
+	// 断言的是 **ERROR 级**，不只是那段文字：把这条日志降级成 Debug 与删掉它
+	// 在现场是同一件事——默认级别下没人看得见——而只比对文字的断言对前者
+	// 完全无感。
+	if !strings.Contains(got, "level=ERROR") || !strings.Contains(got, "写幂等结局失败") {
+		t.Errorf("记录在而写不进去时没打那条 **ERROR**——记录会停在 in_progress，"+
+			"而这条日志是唯一能指出它的信号（降级成 Debug 也算没打）\n日志：%s", got)
+	}
+	if !strings.Contains(got, "key-write-fail") {
+		t.Errorf("那条日志里没有键名——排查时它是唯一的入口\n日志：%s", got)
 	}
 }
 
