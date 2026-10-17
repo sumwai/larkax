@@ -39,6 +39,20 @@ type Spec struct {
 	Key         string
 	Kind        Kind
 	Description string
+
+	// Unwired 非空表示这个键在代码里**还没有读者**：改了它不会有任何效果。
+	// 内容是一句话说明为什么还没接上。
+	//
+	// 它必须出现在 settings list 的输出里。理由与整个 Registry 的用途是同一个：
+	// 没有它，「改了没反应」与「改了就生效」在命令行上长得一模一样——两边都回
+	// 一句「已写入」，而库里那一行也确实变了。接上线之后把它清空，
+	// 那一行说明就跟着消失。
+	//
+	// 它是一份**声明**，不是一条自动判据：没有任何检查能证明某个键真的被读了。
+	// 写在这里是因为它与键的定义在同一处——接线的人本来就在改这几行，
+	// 而写在别处（例如迁移里的 description）就会在接线之后留在原地，
+	// 继续说着已经不成立的话。
+	Unwired string
 }
 
 // Registry 是全部已知配置项。
@@ -53,7 +67,8 @@ var Registry = []Spec{
 	{Key: "request_snapshot.max_bytes", Kind: KindInt,
 		Description: "单条结构骨架的字节上限。"},
 	{Key: "capture.consent_max_window_hours", Kind: KindInt,
-		Description: "用户授权原样采集时，单次授权的最长有效时长。"},
+		Description: "用户授权原样采集时，单次授权的最长有效时长。",
+		Unwired:     "授权采集那条路还没实现，改了不会有任何效果"},
 	{Key: "quota.probe_interval_seconds", Kind: KindInt,
 		Description: "额度探测的默认间隔。"},
 	{Key: "billing.default_asset", Kind: KindString,
@@ -63,13 +78,17 @@ var Registry = []Spec{
 	{Key: "idempotency.retention_hours", Kind: KindInt,
 		Description: "幂等记录的留存小时数。到期由 larkaxctl idempotency cleanup 删除。"},
 	{Key: "plugin.enabled", Kind: KindBool,
-		Description: "是否启用插件系统。关闭时插件不注册、不执行。"},
+		Description: "是否启用插件系统。关闭时插件不注册、不执行。",
+		Unwired:     "插件系统尚未接线（#216），改了不会有任何效果"},
 	{Key: "plugin.call_timeout_ms", Kind: KindInt,
-		Description: "单次插件 hook 调用的时限（毫秒）。"},
+		Description: "单次插件 hook 调用的时限（毫秒）。",
+		Unwired:     "插件系统尚未接线（#216），改了不会有任何效果"},
 	{Key: "plugin.memory_limit_bytes", Kind: KindInt,
-		Description: "单个插件运行时的内存上限（字节）。"},
+		Description: "单个插件运行时的内存上限（字节）。",
+		Unwired:     "插件系统尚未接线（#216），改了不会有任何效果"},
 	{Key: "plugin.max_payload_bytes", Kind: KindInt,
-		Description: "插件单次调用的入参与出参字节上限。"},
+		Description: "插件单次调用的入参与出参字节上限。",
+		Unwired:     "插件系统尚未接线（#216），改了不会有任何效果"},
 	{Key: "reconcile.auto_repair", Kind: KindBool,
 		Description: "对账发现不一致时是否自动修正。"},
 	{Key: "reconcile.repair_mode", Kind: KindString,
@@ -134,6 +153,23 @@ func Lookup(key string) (Spec, bool) {
 		}
 	}
 	return Spec{}, false
+}
+
+// UnwiredNote 给出「这个键还没有读者」那句说明。键已接线、或 Registry 里
+// 根本没有它时返回空串。
+//
+// 给只需要这一句、不需要整份声明的调用方用（`larkaxctl settings set` 写完
+// 一个键之后要打它）。`settings list` 那边手上已经有整份 Spec，直接读
+// spec.Unwired，不必再查一遍。
+//
+// 它取自 Registry 而不是库里那一行 description：接不接线是**代码**的事实，
+// 而接线的人改的正是 Registry 里那几行。
+func UnwiredNote(key string) string {
+	spec, ok := Lookup(key)
+	if !ok {
+		return ""
+	}
+	return spec.Unwired
 }
 
 // Load 读取全部配置并与 Registry 对照校验。

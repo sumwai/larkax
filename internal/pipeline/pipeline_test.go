@@ -94,11 +94,13 @@ func baseRequest() Request {
 		RequestID:      "req-1",
 		UserID:         42,
 		CanonicalModel: "gpt-4o",
-		Candidates:     []RuleCandidate{{ChannelID: 7, OwnerUserID: 9}},
-		ChannelID:      7,
-		OwnerUserID:    9,
-		InputTokens:    1000,
-		MaxTokens:      500,
+		// 资产品种由入口从运行期配置填（见 Request.Asset），本包不再兜默认值。
+		Asset:       "CNY",
+		Candidates:  []RuleCandidate{{ChannelID: 7, OwnerUserID: 9}},
+		ChannelID:   7,
+		OwnerUserID: 9,
+		InputTokens: 1000,
+		MaxTokens:   500,
 	}
 }
 
@@ -862,21 +864,27 @@ func TestSettleUpstreamFailureOutranksMissingInstant(t *testing.T) {
 	}
 }
 
-func TestDefaultAsset(t *testing.T) {
+// 资产品种由调用方给，本包不兜默认值。
+//
+// 原先这里断言「不给就是 CNY」。那个默认值把「入口忘了填」伪装成一笔
+// 人民币分录——与正常的完全一样，而库里那份配置改了它也不会跟着动。
+// 现在不给就报错，给的照原样用。
+func TestAssetIsRequiredAndPassedThrough(t *testing.T) {
 	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}
 	p := newPipeline(t, src)
 
 	req := baseRequest()
-	res, err := p.Reserve(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
+	req.Asset = ""
+	_, err := p.Reserve(context.Background(), req)
+	if err == nil {
+		t.Fatal("不给资产品种应当报错，而不是回落到某个默认值")
 	}
-	if res.Asset != "CNY" {
-		t.Errorf("默认资产 = %q", res.Asset)
+	if !strings.Contains(err.Error(), "资产品种") {
+		t.Errorf("错误信息该说清缺的是什么: %v", err)
 	}
 
 	req.Asset = "USD"
-	res, err = p.Reserve(context.Background(), req)
+	res, err := p.Reserve(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -38,12 +38,18 @@ type Asset string
 // AssetCNY 是本币。其它资产（加密货币）接进来时在这里补。
 const AssetCNY Asset = "CNY"
 
-// valid 判断资产是否受支持。
+// Valid 判断资产是否受支持。
 //
 // 空资产视为不合法，**不**悄悄退回 CNY：调用方漏填 asset 时，
 // 退默认值会让一个「不知道该记哪种资产」的分录变成一笔人民币分录，
 // 而它在账面上与正常的完全一样。宁可在这里报错。
-func (a Asset) valid() bool { return a == AssetCNY }
+//
+// 导出它是给**装配层**用的：结算用的资产品种来自运行期配置
+// （settings 的 billing.default_asset），而「哪些品种记得了账」这件事
+// 只有这里说了算。装配期拿它把配错的品种挡在启动那一步，比让它走到
+// 每个请求的结算上再报错好——后者的现场是「每个请求都 5xx」，
+// 而原因藏在一条与配置无关的错误里。
+func (a Asset) Valid() bool { return a == AssetCNY }
 
 // AccountType 是会计科目的大类。
 //

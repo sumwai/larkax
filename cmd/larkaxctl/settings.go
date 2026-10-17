@@ -42,6 +42,10 @@ set 的值按明文给，不用写成 JSON：
 有些键不接受这条路径的修改（settings.editable 为 false）：它们改错会造成
 严重后果，只允许由迁移写入。命令会报错并指出是哪一个。
 
+另有一些键**写得进去、但改了不会有任何效果**：代码里还没有读它们的路径
+（Registry 里标了 Unwired 的那几个）。命令照常写入，并在输出里指出这一点——
+不指出来的话，它与一个真的生效的键在这条命令的输出上完全一样。
+
 密钥类配置不放这里（明文落盘并进备份），它们走 channels 表的信封加密。
 这条由上面的白名单保证：写入只认 Registry 里声明过的键。
 `
@@ -166,10 +170,31 @@ func runSettingsSet(args []string) error {
 			return err
 		}
 
-		_, _ = fmt.Fprintf(os.Stderr, "已写入 settings.%s = %s 改自 %s(id=%d)\n",
-			key, value, actor.Username, actor.ID)
+		printSettingsSetResult(os.Stderr, key, value, actor.Username, actor.ID)
 		return nil
 	})
+}
+
+// printSettingsSetResult 打印一次写入的结果。
+//
+// # 为什么未接线的键照样写、只是多打一行
+//
+// 不拒绝：Unwired 是一句**声明**，不是权限。库里的值仍然要能改——接线之前
+// 把开关摆到接线后要用的位置、把间隔调成将来那个数，都是合理的操作；而拒绝
+// 之后，「这个键存不存在、现在是什么值」在命令行上就看不出来了，那比一句
+// 提醒更难用。
+//
+// 但那一行必须在**这条输出里**，不能只写进日志：调用方是在命令行上看的，
+// 写进 slog 等于没写。没有它，改 plugin.enabled 与改 request_snapshot.enabled
+// 的输出一模一样——而前者什么都不会发生（见 #215）。
+//
+// 抽成函数是为了有一条不连库也能跑的判据：写入本身要连库，而「输出里有没有
+// 说出这件事」正是要钉住的东西。
+func printSettingsSetResult(w io.Writer, key string, value []byte, by string, byID int64) {
+	_, _ = fmt.Fprintf(w, "已写入 settings.%s = %s 改自 %s(id=%d)\n", key, value, by, byID)
+	if note := settings.UnwiredNote(key); note != "" {
+		_, _ = fmt.Fprintf(w, "  尚未接线：%s\n", note)
+	}
 }
 
 // printSettingsList 打印全部配置项。
@@ -191,8 +216,10 @@ func printSettingsList(w io.Writer, entries []settings.Entry) {
 		// 未声明的键单独标出来：它是「服务加载不起来」的直接原因，
 		// 而它在类型那一列里只是一句话，不标出来就得靠人记得去比对 Registry。
 		kind := "未声明"
+		unwired := ""
 		if spec, ok := settings.Lookup(e.Key); ok {
 			kind = string(spec.Kind)
+			unwired = spec.Unwired
 		}
 
 		editable := "否"
@@ -209,6 +236,16 @@ func printSettingsList(w io.Writer, entries []settings.Entry) {
 			e.Key, e.Value, kind, editable, by, e.UpdatedAt.Format(time.RFC3339))
 		if e.Description != "" {
 			_, _ = fmt.Fprintf(w, "  说明：%s\n", e.Description)
+		}
+		// 还没接线的键单独一行。这一行不是修辞：没有它，改一个没人读的
+		// 键与改一个真的生效的键，在这份输出上完全一样——两边都是
+		// 「值变了、改自谁、改于何时」，而前者什么都不会发生。
+		//
+		// 它取自 Registry 而不是库里那一行 description：接不接线是代码的
+		// 事实，而接线的人改的正是 Registry 里那几行。set 那条路上打的是
+		// 同一份说明（见 settings.UnwiredNote），措辞不会分叉。
+		if unwired != "" {
+			_, _ = fmt.Fprintf(w, "  尚未接线：%s\n", unwired)
 		}
 	}
 }

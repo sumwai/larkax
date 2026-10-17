@@ -96,6 +96,9 @@ func newTestHandler() (*Handler, *fakeAuth, *fakeChatter) {
 	chatter := &fakeChatter{result: fakeResult()}
 	h := New(auth, chatter)
 	h.Version = "v0.1.0-test"
+	// 与生产装配一致：品种由装配层从 settings 读出来填上。留空不是一种
+	// 正常状态——计费层会拒绝空品种，每个请求都会失败。
+	h.DefaultAsset = "CNY"
 	h.Now = func() time.Time { return time.Unix(1700000000, 0) }
 	return h, auth, chatter
 }
@@ -499,6 +502,52 @@ func TestBillingRequestCarriesProtocol(t *testing.T) {
 				t.Errorf("计费侧 Protocol = %q，期望 %q", got.Protocol, tc.want)
 			}
 		})
+	}
+}
+
+// 结算品种从 Handler 原样带进计费请求，两条入口都是。
+//
+// 品种是运行期配置（settings 的 billing.default_asset），装配层读出来填进
+// Handler。这一条钉的是「入口真的把它带上了」：写死一个常量的话，
+// 换个取值这里就挂——而现场的表现会是「改了配置，账单上的品种没变」。
+func TestBillingRequestCarriesConfiguredAsset(t *testing.T) {
+	const streamBody = `{"model":"m-1","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":16}`
+
+	cases := []struct {
+		name     string
+		path     string
+		body     string
+		streamed bool
+	}{
+		{name: "非流式", path: PathChatCompletions, body: validBody},
+		{name: "流式", path: PathChatCompletions, body: streamBody, streamed: true},
+	}
+
+	// 两个取值，都不是「碰巧等于代码里写死的那个」：只测一个的话，
+	// 把常量写回代码里也照样通过。
+	for _, asset := range []string{"CNY", "USD"} {
+		for _, tc := range cases {
+			t.Run(asset+"/"+tc.name, func(t *testing.T) {
+				h, _, chatter := newTestHandler()
+				h.DefaultAsset = asset
+				if tc.streamed {
+					chatter.streamResult = &gateway.Result{Events: streamOf()}
+				}
+
+				rec := post(h, tc.path, tc.body)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
+				}
+
+				got := chatter.req
+				if tc.streamed {
+					got = chatter.streamReq
+				}
+				if got.Asset != asset {
+					t.Errorf("计费侧 Asset = %q，期望 %q", got.Asset, asset)
+				}
+			})
+		}
 	}
 }
 

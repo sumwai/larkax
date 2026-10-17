@@ -10,6 +10,14 @@ import (
 
 var base = time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 
+// testStaleAfter 是这一组用例喂给 Merge 的陈旧阈值。
+//
+// 写成**字面量**而不是拿 SelfAccountingStaleAfter 算一个：那几条曲线正是
+// 要钉住的东西，让被测函数给自己出题，把阈值改小十倍也照样通过。
+// 15 分钟与出厂配置一致（探测间隔 5 分钟 × 3 倍），所以这里断言的曲线
+// 就是出厂配置下那条。导出规则本身另有一条用例。
+const testStaleAfter = 15 * time.Minute
+
 func f(v float64) *float64 { return &v }
 
 // showPtr 把一个可空值渲染成可读文本，供断言失败时打印。
@@ -22,6 +30,44 @@ func showPtr[T any](p *T) string {
 		return "<nil>"
 	}
 	return fmt.Sprint(*p)
+}
+
+// 陈旧阈值由探测间隔导出：探测间隔改小，阈值跟着变小。
+//
+// 这一条钉的是「那个键真的被读了」。原先阈值是写死的 15 分钟，探测间隔
+// 从 5 分钟改成 1 分钟它一动不动，而读代码的人会以为它跟着走。
+func TestSelfAccountingStaleAfterFollowsProbeInterval(t *testing.T) {
+	cases := []struct {
+		interval time.Duration
+		want     time.Duration
+	}{
+		{5 * time.Minute, 15 * time.Minute},
+		{time.Minute, 3 * time.Minute},
+		{30 * time.Second, 90 * time.Second},
+	}
+	for _, tc := range cases {
+		got, err := SelfAccountingStaleAfter(tc.interval)
+		if err != nil {
+			t.Errorf("间隔 %v 不该被拒: %v", tc.interval, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("间隔 %v 的陈旧阈值 = %v，期望 %v", tc.interval, got, tc.want)
+		}
+	}
+
+	// 非正数报错而不回落：阈值非正时任何一次自记账都立刻被判成陈旧，
+	// 那是配置写成 0 之后一个安静的行为改变。
+	for _, bad := range []time.Duration{0, -time.Minute} {
+		got, err := SelfAccountingStaleAfter(bad)
+		if err == nil {
+			t.Errorf("间隔 %v 应被拒，却得到 %v", bad, got)
+			continue
+		}
+		if !contains(err.Error(), "探测间隔") {
+			t.Errorf("错误信息该说清是哪个配置项: %v", err)
+		}
+	}
 }
 
 func TestValidateAcceptsGoodObservations(t *testing.T) {
@@ -90,7 +136,7 @@ func TestMergeAPIQueryOverrides(t *testing.T) {
 	prev := State{ChannelID: 1, Remaining: f(50), Kind: KindSelfAccounting,
 		Estimated: true, Confidence: 0.5, LastErrorCode: "429"}
 
-	next := Merge(prev, Observation{Kind: KindAPIQuery, Remaining: f(999), ObservedAt: base}, base)
+	next := Merge(prev, Observation{Kind: KindAPIQuery, Remaining: f(999), ObservedAt: base}, base, testStaleAfter)
 
 	if next.Remaining == nil || *next.Remaining != 999 {
 		t.Errorf("Remaining = %s，期望 999", showPtr(next.Remaining))
@@ -117,7 +163,7 @@ func TestMergeExhaustedFromError(t *testing.T) {
 
 	next := Merge(prev, Observation{
 		Kind: KindErrorObserved, Exhausted: true, ErrorCode: "insufficient_quota", ObservedAt: base,
-	}, base)
+	}, base, testStaleAfter)
 
 	if next.Remaining == nil || *next.Remaining != 0 {
 		t.Errorf("Remaining = %s，期望 0", showPtr(next.Remaining))
@@ -138,7 +184,7 @@ func TestMergeUnrelatedErrorDoesNotTouchRemaining(t *testing.T) {
 
 	next := Merge(prev, Observation{
 		Kind: KindErrorObserved, ErrorCode: "rate_limit_exceeded", ObservedAt: base,
-	}, base)
+	}, base, testStaleAfter)
 
 	if next.Remaining == nil || *next.Remaining != 1000 {
 		t.Errorf("Remaining 被无关错误改动了: %s", showPtr(next.Remaining))
@@ -159,7 +205,7 @@ func TestSelfAccountingAdvancesPastFreshAPIQuery(t *testing.T) {
 	prev := State{ChannelID: 1, Remaining: f(1000), Kind: KindAPIQuery,
 		Confidence: confidenceAPIQuery, LastProbeAt: &probedAt}
 
-	next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(900), ObservedAt: base}, base)
+	next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(900), ObservedAt: base}, base, testStaleAfter)
 
 	if *next.Remaining != 900 {
 		t.Errorf("自记账应在实测值之上推进: %v", *next.Remaining)
@@ -175,7 +221,7 @@ func TestSelfAccountingConfidenceDecays(t *testing.T) {
 	mk := func(probeAgo time.Duration) float64 {
 		probedAt := base.Add(-probeAgo)
 		prev := State{Remaining: f(1000), Kind: KindAPIQuery, LastProbeAt: &probedAt}
-		next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(900), ObservedAt: base}, base)
+		next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(900), ObservedAt: base}, base, testStaleAfter)
 		return next.Confidence
 	}
 
@@ -199,11 +245,11 @@ func TestSelfAccountingConfidenceDecays(t *testing.T) {
 
 // 实测已经过时之后，让自记账接管——一个陈旧的数不该继续被当真。
 func TestSelfAccountingTakesOverWhenProbeIsStale(t *testing.T) {
-	staleProbe := base.Add(-selfAccountingStaleAfter - time.Hour)
+	staleProbe := base.Add(-testStaleAfter - time.Hour)
 	prev := State{ChannelID: 1, Remaining: f(1000), Kind: KindAPIQuery,
 		Confidence: confidenceAPIQuery, LastProbeAt: &staleProbe}
 
-	next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(800), ObservedAt: base}, base)
+	next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(800), ObservedAt: base}, base, testStaleAfter)
 
 	if *next.Remaining != 800 {
 		t.Errorf("陈旧的实测值应被自记账接管: %v", *next.Remaining)
@@ -219,7 +265,7 @@ func TestSelfAccountingTakesOverWhenProbeIsStale(t *testing.T) {
 // 没有任何实测值时，自记账是唯一的信息来源。
 func TestSelfAccountingUsedWhenNoMeasure(t *testing.T) {
 	prev := State{ChannelID: 1}
-	next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(500), ObservedAt: base}, base)
+	next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(500), ObservedAt: base}, base, testStaleAfter)
 
 	if next.Remaining == nil || *next.Remaining != 500 {
 		t.Errorf("Remaining = %s", showPtr(next.Remaining))
@@ -237,7 +283,7 @@ func TestSelfAccountingUsedWhenNoMeasure(t *testing.T) {
 func TestSelfAccountingNeverFullyConfident(t *testing.T) {
 	prev := State{}
 	for i := 0; i < 5; i++ {
-		prev = Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(100), ObservedAt: base}, base)
+		prev = Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(100), ObservedAt: base}, base, testStaleAfter)
 	}
 	if prev.Confidence >= confidenceAPIQuery {
 		t.Errorf("自记账可信度不该达到实测水平: %v", prev.Confidence)
@@ -246,11 +292,11 @@ func TestSelfAccountingNeverFullyConfident(t *testing.T) {
 
 func TestMergeKeepsUnitWhenNotGiven(t *testing.T) {
 	prev := State{Unit: "CNY"}
-	next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(1), ObservedAt: base}, base)
+	next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(1), ObservedAt: base}, base, testStaleAfter)
 	if next.Unit != "CNY" {
 		t.Errorf("Unit = %q", next.Unit)
 	}
-	next = Merge(next, Observation{Kind: KindAPIQuery, Remaining: f(1), Unit: "USD", ObservedAt: base}, base)
+	next = Merge(next, Observation{Kind: KindAPIQuery, Remaining: f(1), Unit: "USD", ObservedAt: base}, base, testStaleAfter)
 	if next.Unit != "USD" {
 		t.Errorf("新观测带了单位时应更新: %q", next.Unit)
 	}
@@ -309,13 +355,13 @@ func TestProjectThenMergeKeepsEstimate(t *testing.T) {
 		Confidence: confidenceAPIQuery, LastProbeAt: &base}
 
 	// 消耗 200
-	state = Merge(state, Project(state, 200, base), base)
+	state = Merge(state, Project(state, 200, base), base, testStaleAfter)
 	if state.Remaining == nil || *state.Remaining != 800 {
 		t.Fatalf("推进后 Remaining = %s，期望 800", showPtr(state.Remaining))
 	}
 
 	// 再探测，拿到实测的 750（说明自记账略偏高，这很常见）
-	state = Merge(state, Observation{Kind: KindAPIQuery, Remaining: f(750), ObservedAt: base}, base)
+	state = Merge(state, Observation{Kind: KindAPIQuery, Remaining: f(750), ObservedAt: base}, base, testStaleAfter)
 	if *state.Remaining != 750 {
 		t.Errorf("实测应覆盖估算: %v", *state.Remaining)
 	}
@@ -440,15 +486,15 @@ func TestSelfAccountingConfidenceCurvePoints(t *testing.T) {
 	score := func(sinceProbe time.Duration) float64 {
 		probedAt := base.Add(-sinceProbe)
 		prev := State{Remaining: f(1000), Kind: KindAPIQuery, LastProbeAt: &probedAt}
-		next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(900), ObservedAt: base}, base)
+		next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(900), ObservedAt: base}, base, testStaleAfter)
 		return next.Confidence
 	}
 
-	// 阈值用**字面量**钉住。段一那两条拿 `selfAccountingStaleAfter`
-	// 自己测自己：把这个常量改成 15 秒，它们照样通过，
-	// 于是测到的是「相对关系」而不是这个数。15 分钟是与探测间隔
-	// （settings 里的 quota.probe_interval_seconds，默认 5 分钟）
-	// 绑定的约定，改它就该连带改注释。
+	// 阈值用**字面量**钉住。段一那两条拿 `testStaleAfter`
+	// 自己测自己：把它改成 15 秒，它们照样通过，
+	// 于是测到的是「相对关系」而不是这个数。15 分钟与出厂配置一致
+	// （探测间隔 5 分钟 × 3 倍，见 SelfAccountingStaleAfter），
+	// 改那个倍数就该连带改这里的字面量。
 	if got := score(14 * time.Minute); got != baseScore {
 		t.Errorf("14 分钟陈旧应仍给基线 %v，得到 %v", baseScore, got)
 	}
@@ -457,26 +503,26 @@ func TestSelfAccountingConfidenceCurvePoints(t *testing.T) {
 	}
 
 	// 段一：陈旧阈值本身与之内一律给基线
-	if got := score(selfAccountingStaleAfter); got != baseScore {
+	if got := score(testStaleAfter); got != baseScore {
 		t.Errorf("恰好等于陈旧阈值时应给基线 %v，得到 %v", baseScore, got)
 	}
-	if got := score(selfAccountingStaleAfter - time.Second); got != baseScore {
+	if got := score(testStaleAfter - time.Second); got != baseScore {
 		t.Errorf("阈值之内应给基线，得到 %v", got)
 	}
 
 	// 段二：线性衰减的**中点**。过阈值后 3 小时（fadeOver 是 6 小时）
 	// 应当恰好落在基线与下限的中间。
-	mid := score(selfAccountingStaleAfter + 3*time.Hour)
+	mid := score(testStaleAfter + 3*time.Hour)
 	wantMid := baseScore - (baseScore-floorScore)*0.5
 	if diff := mid - wantMid; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("衰减中点的可信度 = %v，期望 %v", mid, wantMid)
 	}
 
 	// 段三：过了 fadeOver 之后触底，不再降
-	if got := score(selfAccountingStaleAfter + 6*time.Hour); got != floorScore {
+	if got := score(testStaleAfter + 6*time.Hour); got != floorScore {
 		t.Errorf("恰好过 fadeOver 时应触底 %v，得到 %v", floorScore, got)
 	}
-	if got := score(selfAccountingStaleAfter + 100*time.Hour); got != floorScore {
+	if got := score(testStaleAfter + 100*time.Hour); got != floorScore {
 		t.Errorf("很久之后仍应是下限 %v，得到 %v", floorScore, got)
 	}
 }
