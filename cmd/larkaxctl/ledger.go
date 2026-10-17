@@ -216,7 +216,10 @@ func runLedgerVerify(args []string) error {
 		})
 		// 报告先打，再处理错误：跑了一半的结果比一句「失败了」有用得多
 		// ——它至少说明比到了哪里、已经发现了什么（与 reconcile 同一个理由）。
-		printLedgerVerifyReport(os.Stdout, report)
+		//
+		// err 一并交给打印函数，理由与 reconcile 相同：报告本身分不出
+		// 「校验完了一笔都没问题」与「校验到一半读不下去了」。
+		printLedgerVerifyReport(os.Stdout, report, err)
 		if err != nil {
 			return err
 		}
@@ -235,11 +238,31 @@ func runLedgerVerify(args []string) error {
 
 // printLedgerVerifyReport 把一次校验的结果打到 w。
 //
+// runErr 是 Verify 返回的错误，非空表示**没跑完**：报告里只有读到失败点为止
+// 的那部分。它不能由报告本身推出来——「校验了 0 笔、没有不合法」既是
+// 「读第一笔就失败了」，也是「区间里确实一笔都没有」，后者是跑完的正常结果。
+// 两条路径的 stdout 因此不能同形：失败时汇总行点明「没跑完」，并且不出现
+// 「全部自洽。」或那句计数之后就收尾、读起来像跑完了的样子。
+//
+// 传 err 而不是别的做法，理由与 printReconcileReport 相同：塞进
+// store.VerifyReport 会让同一个事实有两个来源；失败时不打汇总行又丢掉了
+// 失败前已经校验出来的那部分，而它正是「报告先打」要保住的东西。
+//
 // 每处写入的返回值都显式丢弃（`_, _ =`）：目标是 stdout，写不进去只可能是
 // 下游管道断了（`larkaxctl ledger verify | head`），那种情况下重试与报错
 // 都没有意义，也不影响这一轮的结论。
-func printLedgerVerifyReport(w io.Writer, r *store.VerifyReport) {
+func printLedgerVerifyReport(w io.Writer, r *store.VerifyReport, runErr error) {
 	if r == nil {
+		return
+	}
+	if runErr != nil {
+		// 计数照打（失败前校验过多少是真的），但紧跟一句「没跑完」：
+		// 后面还有没读到的交易，这一轮的结论不完整。
+		_, _ = fmt.Fprintf(w, "校验 %d 笔交易（%d 条分录），这一轮没跑完：只到失败时为止，后面的交易没有校验（原因见 stderr）。\n",
+			r.CheckedTxns, r.CheckedEntries)
+		if len(r.Findings) > 0 {
+			printLedgerVerifyFindings(w, r)
+		}
 		return
 	}
 	// 一笔都没读到时不打「全部自洽」：那正是「跳过与通过长得一样」的形状。
@@ -253,7 +276,11 @@ func printLedgerVerifyReport(w io.Writer, r *store.VerifyReport) {
 		}
 		return
 	}
+	printLedgerVerifyFindings(w, r)
+}
 
+// printLedgerVerifyFindings 打不合法的那几笔，连同受支持的分录类型。
+func printLedgerVerifyFindings(w io.Writer, r *store.VerifyReport) {
 	_, _ = fmt.Fprintf(w, "不合法 %d 笔：\n", len(r.Findings))
 	for _, f := range r.Findings {
 		printLedgerVerifyFinding(w, f)
