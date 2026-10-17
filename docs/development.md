@@ -180,7 +180,7 @@ go run ./cmd/larkaxctl snapshot cleanup             # 执行删除
 已计费的行上 `error_code` 的唯一写入点（`internal/ledger/store` 的
 `markSettled`）还没接。接上之后两表会取同一个值。
 
-`larkaxctl snapshot show` 按方向与列渲染：请求方向的行上打成
+`larkaxctl snapshot get` 按方向与列渲染：请求方向的行上打成
 `<不适用（请求方向快照）>`，响应方向的状态码 NULL 打成 `<无上游响应>`、
 错误分类 NULL 打成 `<无>`。三个文本不能共用——它们分别说的是「这一列在这个
 方向上没有意义」「上游没回过状态码」「这次没有上游失败」。
@@ -194,7 +194,7 @@ go run ./cmd/larkaxctl snapshot allowlist --direction request
 go run ./cmd/larkaxctl snapshot allowlist --surface decision
 
 # 读回一条快照。--actor 与 --reason 都必填，见下。
-go run ./cmd/larkaxctl snapshot show <request_id> --actor <用户 ID 或用户名> --reason <文本>
+go run ./cmd/larkaxctl snapshot get <request_id> --actor <用户 ID 或用户名> --reason <文本>
 
 # 试脱敏：从 stdin 读一段报文，看它会变成什么骨架。不连库。
 echo '{"model":"...","messages":[...]}' | \
@@ -284,7 +284,7 @@ go run ./cmd/larkaxctl calendar import ./cn-2031.json
 `.env`。要指定另一份文件时用全局选项 `--env-file`（写在子命令前后都认）：
 
 ```sh
-go run ./cmd/larkaxctl --env-file .env.staging wallet open --user alice
+go run ./cmd/larkaxctl --env-file .env.staging wallet create --user alice
 ```
 
 指明的文件不存在会报错（退出码 2），不会安静地用自动找到的那一份。
@@ -446,10 +446,17 @@ go run ./cmd/larkaxctl migrate up
 这些命令直接用 `go run` 即可：`larkaxctl` 自己会读 `.env`（见上文
 「环境变量」），不必先手工导出。
 
+**动词与选项名是全仓统一的**：建一条记录是 `create`、读一条是 `get`、改属性是
+`update`、删是 `delete`、启停是 `enable` / `disable`（`price enable <规则 ID>`，
+不是在 `update` 上给 `--enable`）；模型规范名一律 `--model`、归属用户一律
+`--user`。改名之前的旧写法**仍然可用**（`model add`、`wallet open`、
+`--canonical`、`--owner`、`price update --enable`、`wallet credit --order`），
+已经在跑的脚本不必改；它们写在每条子命令 `--help` 的末尾。下面用的都是新写法。
+
 **一、把规范模型加进目录。** 规范名是选路与计费共用的键，不能带空白字符：
 
 ```sh
-go run ./cmd/larkaxctl model add --canonical claude-x --display '示例模型' \
+go run ./cmd/larkaxctl model create --model claude-x --display '示例模型' \
   --vendor example --context-limit 200000 --tools --vision
 ```
 
@@ -467,7 +474,7 @@ go run ./cmd/larkaxctl model add --canonical claude-x --display '示例模型' \
 - **六项能力各是三态**（库里的 `supports_*` 列可空）：不给那个开关 = 未知
   （`NULL`，不参与判断）、给 = 支持、`--tools=false` = 明确声明不支持。
   所以不带那六个开关建出来的记录不会被任何请求筛掉；声明过不支持的才会被筛掉
-  （要放行就 `larkaxctl model update <规范名> --tools`）。`model show` 逐项打出
+  （要放行就 `larkaxctl model update --model <规范名> --tools`）。`model get` 逐项打出
   三态，`model list` 只列已声明的项。
 - **早于 `00025` 建出来的记录，那六项是 `false`**（旧列的默认值）。那条迁移
   不动存量数据——运维没声明过的能力不会被替它猜成「未知」，所以那些记录仍按
@@ -511,7 +518,7 @@ create` / `update` 给了 `--setting` 时）打到 stderr 上，`channel list` �
 适配器实现之后，这两处提示会一起消失（判据是 `internal/channel` 里的
 `SettingReadByAdapters`，由同包的用例盯着它与代码是否一致）。
 
-`--owner` 把渠道记在某个用户名下（留空表示平台自营）。它**只写
+`--user` 把渠道记在某个用户名下（留空表示平台自营）。它**只写
 `channels.owner_user_id`，不做权限检查**：任何存在的用户都可以被写成归属，
 而这个用户是不是 `merchant` 没有一处代码会看（见下文「用户的角色」）。
 归属是分账的依据——商家作用域的计价规则按它匹配，结算时
@@ -520,7 +527,7 @@ create` / `update` 给了 `--setting` 时）打到 stderr 上，`channel list` �
 **三、配别名：这家上游对同一个模型叫什么名字。**
 
 ```sh
-go run ./cmd/larkaxctl alias add --canonical claude-x \
+go run ./cmd/larkaxctl alias create --model claude-x \
   --upstream claude-3-5-sonnet-latest
 ```
 
@@ -540,7 +547,7 @@ go run ./cmd/larkaxctl alias add --canonical claude-x \
 白配；升级后它开始生效，于是「只给部分渠道配过别名」的规范名会在没配的那些
 渠道上失败。
 
-`larkaxctl alias resolve --canonical <名>` 回答的正是「这个规范名在某个渠道上
+`larkaxctl alias resolve --model <名>` 回答的正是「这个规范名在某个渠道上
 实际会发出去什么名字」，它走的就是选路那同一条查询（见 `cmd/larkaxctl/alias.go`
 里 `runAliasResolve` 的注释）。不带 `--channel` 时只看平台级那条，所以「配了
 渠道级别名、没有平台级别名」时它会报错、退出码走「配置缺失」那一档。
@@ -549,7 +556,7 @@ go run ./cmd/larkaxctl alias add --canonical claude-x \
 上游的那份请求**，用来给不传某些参数的调用方一个默认值，或者把某个上限钉住：
 
 ```sh
-go run ./cmd/larkaxctl alias add --canonical claude-x \
+go run ./cmd/larkaxctl alias create --model claude-x \
   --upstream claude-3-5-sonnet-latest \
   --overrides '{"temperature": 0.2, "max_tokens": 4096}'
 ```
@@ -588,7 +595,7 @@ overrides 不允许覆盖 "messages"：它是调用方发来的正文（允许�
 **四、配一条计价规则。** 没有生效的规则时请求会失败，而不是按零价放行：
 
 ```sh
-go run ./cmd/larkaxctl price add --scope platform --name example-price \
+go run ./cmd/larkaxctl price create --scope platform --name example-price \
   --expr '{"prompt": 0.0000015, "completion": 0.0000075,
            "cache_read": 0.0000002, "cache_write": 0.0000019,
            "reasoning": 0.0000090}'
@@ -608,7 +615,7 @@ go run ./cmd/larkaxctl price add --scope platform --name example-price \
 
 `--models` 留空表示适用于全部模型（兜底规则）。表达式在写入前会编译一次，
 编译不过的命令直接失败。作用域决定哪两栏 id 有效：`platform` 两栏都留空、
-`merchant` 必须给 `--owner`、`channel` 必须给 `--channel`。
+`merchant` 必须给 `--user`、`channel` 必须给 `--channel`。
 
 几条规则同时适用时按裁决次序取第一条：**作用域**（`channel` > `merchant` >
 `platform`）→ `priority` 大的优先 → **模型名单非空的优先于兜底** → `id`
@@ -691,7 +698,7 @@ KEY=$(go run ./cmd/larkaxctl apikey create --user "$(go run ./cmd/larkaxctl user
 
 - `--role merchant` **不会**让这个用户多出什么权限，`--role admin` 也**不会**
   让他能进管理接口。管理面还不存在。
-- `channel create --owner <用户>` 不检查那个人是不是 `merchant`：归属只决定
+- `channel create --user <用户>` 不检查那个人是不是 `merchant`：归属只决定
   分账记到谁的账上，不决定「有没有资格」。
 - 角色改不了。`user create` 只建新用户，重名直接报错，没有「改角色」的命令。
 
@@ -704,7 +711,7 @@ KEY=$(go run ./cmd/larkaxctl apikey create --user "$(go run ./cmd/larkaxctl user
 锁住用户的钱包，锁不到就报「没有对应的钱包」。所以新用户在打请求之前要开一次户：
 
 ```sh
-go run ./cmd/larkaxctl wallet open --user alice
+go run ./cmd/larkaxctl wallet create --user alice
 ```
 
 它只建 `user_wallets` 那一行，余额为 0，**不写任何分录**：新开的户在账本上
@@ -724,7 +731,7 @@ go run ./cmd/larkaxctl wallet open --user alice
 `insufficient_quota`，见 [limits.md](limits.md) 的「钱包余额不足」一节）。给它入一笔：
 
 ```sh
-go run ./cmd/larkaxctl wallet credit --user alice --amount 100 --order ORD-20261017-1
+go run ./cmd/larkaxctl wallet credit --user alice --amount 100 --idempotency-key ORD-20261017-1
 ```
 
 它走账本：写一组 `topup` 分录（借 `user:<ID>`、贷 `payment_gateway:<来源>`），
@@ -735,15 +742,15 @@ go run ./cmd/larkaxctl wallet credit --user alice --amount 100 --order ORD-20261
 |---|---|---|---|
 | `--user` | 是 | — | 用户 ID 或用户名 |
 | `--amount` | 是 | — | 正数，最多 8 位小数（末尾的 0 不算位数） |
-| `--order` | 是 | — | 幂等键，没有默认值 |
+| `--idempotency-key` | 是 | — | 幂等键，没有默认值 |
 | `--asset` | 否 | settings 的 `billing.default_asset`（`CNY`） | 当前只有 `CNY` 一种 |
 | `--gateway` | 否 | `manual` | 钱的来源，进 `payment_gateway:<来源>` 科目；来源名归一成小写 |
 
-`--order` 被确定性地映射成这次交易的 `txn_id`，所以同一条命令重跑两次只入账
+`--idempotency-key` 被确定性地映射成这次交易的 `txn_id`，所以同一条命令重跑两次只入账
 一次：第二次输出「已经入过账，本次未改动」并退出 0。同一个键配不同的金额、
 用户或通道不是重放而是冲突——退出 4，一笔都不写。
 
-这条命令是给运营手工记账用的：钱包必须已经存在（先 `wallet open`），
+这条命令是给运营手工记账用的：钱包必须已经存在（先 `wallet create`），
 `--gateway manual` 表示线下到账（转账、现金），那个科目的余额与线下流水核对。
 它不做退款、不做提现，也不接支付通道的回调。
 

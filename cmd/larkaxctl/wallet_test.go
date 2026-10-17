@@ -53,7 +53,7 @@ func TestWalletOpenRejectsBadArgs(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := runWalletOpen(tc.args)
+			err := runWalletCreate(tc.args)
 			if err == nil {
 				t.Fatal("期望报错，却通过了")
 			}
@@ -150,7 +150,7 @@ func TestWalletOpenCommand(t *testing.T) {
 	ref := strconv.FormatInt(userID, 10)
 
 	var firstErr error
-	first, _ := captureStreams(t, func() { firstErr = runWalletOpen([]string{"--user", ref}) })
+	first, _ := captureStreams(t, func() { firstErr = runWalletCreate([]string{"--user", ref}) })
 	if firstErr != nil {
 		t.Fatalf("开户失败: %v", firstErr)
 	}
@@ -161,7 +161,7 @@ func TestWalletOpenCommand(t *testing.T) {
 	}
 
 	var secondErr error
-	second, _ := captureStreams(t, func() { secondErr = runWalletOpen([]string{"--user", ref}) })
+	second, _ := captureStreams(t, func() { secondErr = runWalletCreate([]string{"--user", ref}) })
 	if secondErr != nil {
 		t.Fatalf("重复开户应当成功（幂等）: %v", secondErr)
 	}
@@ -199,7 +199,7 @@ func TestWalletOpenExplicitAssetOverridesSetting(t *testing.T) {
 	setSetting(t, db, defaultAssetKey, `"USDT"`)
 
 	err := runCaptured(t, func() error {
-		return runWalletOpen([]string{"--user", ref})
+		return runWalletCreate([]string{"--user", ref})
 	})
 	if err == nil {
 		t.Fatal("默认资产不受支持时应当报错")
@@ -216,7 +216,7 @@ func TestWalletOpenExplicitAssetOverridesSetting(t *testing.T) {
 
 	var explicitErr error
 	out, _ := captureStreams(t, func() {
-		explicitErr = runWalletOpen([]string{"--user", ref, "--asset", "CNY"})
+		explicitErr = runWalletCreate([]string{"--user", ref, "--asset", "CNY"})
 	})
 	if explicitErr != nil {
 		t.Fatalf("显式 --asset CNY 应当压过非法的默认值，却失败: %v", explicitErr)
@@ -244,7 +244,7 @@ func TestWalletOpenUnknownUserExitCode(t *testing.T) {
 	setupEnv(t)
 
 	err := runCaptured(t, func() error {
-		return runWalletOpen([]string{"--user", uniqueName("nobody")})
+		return runWalletCreate([]string{"--user", uniqueName("nobody")})
 	})
 	if err == nil {
 		t.Fatal("不存在的用户应当报错")
@@ -263,7 +263,7 @@ func TestWalletOpenUnknownUserExitCode(t *testing.T) {
 // 这一条在**写入**时被外键挡下（store 那边，用户解析完到插入之间被删）。
 // 两条路径给出两个退出码，脚本就得按两套处置写；所以两个哨兵都进 conflictErrors。
 //
-// 不走 runWalletOpen 去构造那条路径：正常命令行先解析用户，要走到这里得让
+// 不走 runWalletCreate 去构造那条路径：正常命令行先解析用户，要走到这里得让
 // 「解析完到插入之间」真的发生一次删除——那是个竞态，钉不稳（造出来的用例要么
 // 靠调度恰好，要么靠一次阻塞式的加锁）。**store 层的那条路径由 store 自己的
 // 用例直接调 OpenWallet 钉住**（internal/ledger/store 的 TestOpenWalletUnknownUser）；
@@ -293,31 +293,31 @@ func TestWalletCreditRejectsBadArgs(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"没有 --user", []string{"--amount", "1", "--order", "o"}, "缺少 --user"},
-		{"--user 只有空白", []string{"--user", "  ", "--amount", "1", "--order", "o"}, "缺少 --user"},
-		{"没有 --amount", []string{"--user", "1", "--order", "o"}, "缺少 --amount"},
-		// 幂等键必填且没有默认值：给了默认值，一次「忘了写 --order」就会变成
+		{"没有 --user", []string{"--amount", "1", "--idempotency-key", "o"}, "缺少 --user"},
+		{"--user 只有空白", []string{"--user", "  ", "--amount", "1", "--idempotency-key", "o"}, "缺少 --user"},
+		{"没有 --amount", []string{"--user", "1", "--idempotency-key", "o"}, "缺少 --amount"},
+		// 幂等键必填且没有默认值：给了默认值，一次「忘了写 --idempotency-key」就会变成
 		// 一笔与上一次互不相干的入账，而两笔在账面上都合法。
-		{"没有 --order", []string{"--user", "1", "--amount", "1"}, "缺少 --order"},
-		{"--order 只有空白", []string{"--user", "1", "--amount", "1", "--order", "  "}, "缺少 --order"},
+		{"没有 --idempotency-key", []string{"--user", "1", "--amount", "1"}, "缺少 --idempotency-key"},
+		{"--idempotency-key 只有空白", []string{"--user", "1", "--amount", "1", "--idempotency-key", "  "}, "缺少 --idempotency-key"},
 		// 控制字符：键既算交易号又进备注，而备注会把 \r\n\t 换成空格——
 		// `ORD\nX` 与 `ORD X` 因此是两笔各自合法、备注却一模一样的入账。
-		{"--order 含换行", []string{"--user", "1", "--amount", "1", "--order", "ORD\nX"}, "控制字符"},
-		{"--order 含制表符", []string{"--user", "1", "--amount", "1", "--order", "ORD\tX"}, "控制字符"},
+		{"--idempotency-key 含换行", []string{"--user", "1", "--amount", "1", "--idempotency-key", "ORD\nX"}, "控制字符"},
+		{"--idempotency-key 含制表符", []string{"--user", "1", "--amount", "1", "--idempotency-key", "ORD\tX"}, "控制字符"},
 		// 备注那边只清洗 \r\n\t，这一个会原样落进备注，所以判据要比它宽。
-		{"--order 含其它控制字符", []string{"--user", "1", "--amount", "1", "--order", "ORD\x07X"}, "控制字符"},
-		{"金额不是数字", []string{"--user", "1", "--amount", "abc", "--order", "o"}, "不是金额"},
-		{"金额为零", []string{"--user", "1", "--amount", "0", "--order", "o"}, "必须为正数"},
-		{"金额为负", []string{"--user", "1", "--amount", "-1", "--order", "o"}, "必须为正数"},
+		{"--idempotency-key 含其它控制字符", []string{"--user", "1", "--amount", "1", "--idempotency-key", "ORD\x07X"}, "控制字符"},
+		{"金额不是数字", []string{"--user", "1", "--amount", "abc", "--idempotency-key", "o"}, "不是金额"},
+		{"金额为零", []string{"--user", "1", "--amount", "0", "--idempotency-key", "o"}, "必须为正数"},
+		{"金额为负", []string{"--user", "1", "--amount", "-1", "--idempotency-key", "o"}, "必须为正数"},
 		// 小数位比列多：money.Parse 会四舍五入，而入账金额是「敲进去多少就
 		// 记多少」的数，静默改掉最后一位会让账本与单据对不上。
-		{"小数位过多", []string{"--user", "1", "--amount", "1.000000001", "--order", "o"}, "最多 8 位小数"},
-		{"资产不认识", []string{"--user", "1", "--amount", "1", "--order", "o", "--asset", "USDT"}, "不受支持"},
-		{"--asset 给了但为空", []string{"--user", "1", "--amount", "1", "--order", "o", "--asset", ""}, "--asset 不能为空"},
-		{"--gateway 给了但为空", []string{"--user", "1", "--amount", "1", "--order", "o", "--gateway", ""}, "--gateway 不能为空"},
-		{"通道标识含冒号", []string{"--user", "1", "--amount", "1", "--order", "o", "--gateway", "bad:name"}, "不是合法的通道标识"},
-		{"通道标识含空格", []string{"--user", "1", "--amount", "1", "--order", "o", "--gateway", "bad name"}, "不是合法的通道标识"},
-		{"多出位置参数", []string{"--user", "1", "--amount", "1", "--order", "o", "extra"}, "不接受位置参数"},
+		{"小数位过多", []string{"--user", "1", "--amount", "1.000000001", "--idempotency-key", "o"}, "最多 8 位小数"},
+		{"资产不认识", []string{"--user", "1", "--amount", "1", "--idempotency-key", "o", "--asset", "USDT"}, "不受支持"},
+		{"--asset 给了但为空", []string{"--user", "1", "--amount", "1", "--idempotency-key", "o", "--asset", ""}, "--asset 不能为空"},
+		{"--gateway 给了但为空", []string{"--user", "1", "--amount", "1", "--idempotency-key", "o", "--gateway", ""}, "--gateway 不能为空"},
+		{"通道标识含冒号", []string{"--user", "1", "--amount", "1", "--idempotency-key", "o", "--gateway", "bad:name"}, "不是合法的通道标识"},
+		{"通道标识含空格", []string{"--user", "1", "--amount", "1", "--idempotency-key", "o", "--gateway", "bad name"}, "不是合法的通道标识"},
+		{"多出位置参数", []string{"--user", "1", "--amount", "1", "--idempotency-key", "o", "extra"}, "不接受位置参数"},
 	}
 
 	for _, tc := range cases {
@@ -387,7 +387,7 @@ func TestParseGatewayFlagLowercases(t *testing.T) {
 //
 // 换掉这个映射（加盐、换哈希、改域分隔前缀）不会让任何用例变红，却会让
 // 已经入过账的幂等键算出另一个交易号——于是同一条命令重跑时会**再入一次
-// 账**，而那正是 --order 要防的事。所以这里钉住字面量：改了映射就得改这
+// 账**，而那正是 --idempotency-key 要防的事。所以这里钉住字面量：改了映射就得改这
 // 一行，而改这一行的人必须解释旧键怎么办。
 func TestTxnIDForOrderIsPinned(t *testing.T) {
 	const order = "ORD-1"
@@ -460,7 +460,7 @@ func TestWalletCreditCommand(t *testing.T) {
 	// 还没开户：入账要被拒，且一条分录都不留。缺钱包行与余额不足是两件事
 	// （前者先跑 wallet open，后者要用户充值），所以判据是哨兵而不是「报错了」。
 	noWalletErr := runCaptured(t, func() error {
-		return runWalletCredit([]string{"--user", ref, "--amount", "100", "--order", order})
+		return runWalletCredit([]string{"--user", ref, "--amount", "100", "--idempotency-key", order})
 	})
 	if !errors.Is(noWalletErr, store.ErrNoWallet) {
 		t.Fatalf("没有钱包时应当返回 store.ErrNoWallet，得到 %v", noWalletErr)
@@ -473,14 +473,14 @@ func TestWalletCreditCommand(t *testing.T) {
 	}
 
 	if err := runCaptured(t, func() error {
-		return runWalletOpen([]string{"--user", ref})
+		return runWalletCreate([]string{"--user", ref})
 	}); err != nil {
 		t.Fatalf("开户失败: %v", err)
 	}
 
 	var creditErr error
 	out, _ := captureStreams(t, func() {
-		creditErr = runWalletCredit([]string{"--user", ref, "--amount", "100", "--order", order})
+		creditErr = runWalletCredit([]string{"--user", ref, "--amount", "100", "--idempotency-key", order})
 	})
 	if creditErr != nil {
 		t.Fatalf("入账失败: %v", creditErr)
@@ -518,7 +518,7 @@ func TestWalletCreditCommand(t *testing.T) {
 	// 重放同一条命令：退出 0，但一个字都不改，且输出必须说清是重放。
 	var replayErr error
 	replay, _ := captureStreams(t, func() {
-		replayErr = runWalletCredit([]string{"--user", ref, "--amount", "100", "--order", order})
+		replayErr = runWalletCredit([]string{"--user", ref, "--amount", "100", "--idempotency-key", order})
 	})
 	if replayErr != nil {
 		t.Fatalf("重放不该报错: %v", replayErr)
@@ -540,7 +540,7 @@ func TestWalletCreditCommand(t *testing.T) {
 
 	// 同一个幂等键配不同的金额不是重放，是冲突：退出 4，一笔都不写。
 	conflictErr := runCaptured(t, func() error {
-		return runWalletCredit([]string{"--user", ref, "--amount", "50", "--order", order})
+		return runWalletCredit([]string{"--user", ref, "--amount", "50", "--idempotency-key", order})
 	})
 	if !errors.Is(conflictErr, store.ErrTxnConflict) {
 		t.Fatalf("同键异参应当返回 store.ErrTxnConflict，得到 %v", conflictErr)
@@ -559,7 +559,7 @@ func TestWalletCreditCommand(t *testing.T) {
 	secondOrder := uniqueName("order")
 	if err := runCaptured(t, func() error {
 		return runWalletCredit([]string{
-			"--user", ref, "--amount", "50", "--order", secondOrder, "--gateway", "alipay",
+			"--user", ref, "--amount", "50", "--idempotency-key", secondOrder, "--gateway", "alipay",
 		})
 	}); err != nil {
 		t.Fatalf("第二笔入账失败: %v", err)
@@ -581,7 +581,7 @@ func TestWalletCreditCommand(t *testing.T) {
 	upperOrder := uniqueName("order")
 	if err := runCaptured(t, func() error {
 		return runWalletCredit([]string{
-			"--user", ref, "--amount", "5", "--order", upperOrder, "--gateway", "MANUAL",
+			"--user", ref, "--amount", "5", "--idempotency-key", upperOrder, "--gateway", "MANUAL",
 		})
 	}); err != nil {
 		t.Fatalf("--gateway MANUAL 的入账失败: %v", err)
@@ -610,7 +610,7 @@ func TestWalletCreditUnknownUserExitCode(t *testing.T) {
 
 	err := runCaptured(t, func() error {
 		return runWalletCredit([]string{
-			"--user", uniqueName("nobody"), "--amount", "1", "--order", uniqueName("order"),
+			"--user", uniqueName("nobody"), "--amount", "1", "--idempotency-key", uniqueName("order"),
 		})
 	})
 	if err == nil {

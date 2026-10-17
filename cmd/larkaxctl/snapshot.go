@@ -24,9 +24,9 @@ import (
 // snapshotUsage 是 snapshot 子命令的帮助。
 //
 // 几个动词服务同一件事的不同侧面：allowlist 回答「允许表里有什么」，
-// redact 回答「这段报文交给它会长成什么样」，show 回答「这次请求当时存下了什么」，
+// redact 回答「这段报文交给它会长成什么样」，get 回答「这次请求当时存下了什么」，
 // cleanup 负责把到期的删掉。中间两条是同一张表的两侧——redact 走脱敏的
-// **输入**，show 读脱敏的**产出**。
+// **输入**，get 读脱敏的**产出**。
 const snapshotUsage = `larkaxctl snapshot 维护与查看请求结构快照。
 
 用法：
@@ -34,7 +34,7 @@ const snapshotUsage = `larkaxctl snapshot 维护与查看请求结构快照。
   larkaxctl snapshot cleanup --dry-run     只列出会被删除的分区，不删
   larkaxctl snapshot allowlist [--direction request|response] [--surface chat|decision]
         打印允许表：哪些字段放行、哪些替换成占位、每一行为什么这么定
-  larkaxctl snapshot show <request_id> --actor <用户 ID 或用户名> --reason <文本>
+  larkaxctl snapshot get <request_id> --actor <用户 ID 或用户名> --reason <文本>
         [--direction request|response]
         读出一条请求存下来的结构快照
   larkaxctl snapshot redact --direction request|response [--surface chat|decision]
@@ -49,7 +49,7 @@ allowlist 不需要连库。它只读 internal/snapshot 里那张允许表，那
 数据。所以它能在没有数据库、没有配置的机器上跑——而「我们到底存了什么」
 这个问题，恰恰经常是在一个连不上生产库的地方被问出来的。
 
-show 的 --actor 与 --reason 都是必填。读一条别人的请求结构是读敏感数据的
+get 的 --actor 与 --reason 都是必填。读一条别人的请求结构是读敏感数据的
 动作，所以每一次读都要留痕：snapshot_access_log 里会写下一行，记着谁、
 什么时候、以什么理由看了哪一条。表里 reason 允许为空，那是给系统自己写的行
 留的余地；人手读一次，理由必须留下。两个参数都不给默认值——「我写了
@@ -57,7 +57,7 @@ show 的 --actor 与 --reason 都是必填。读一条别人的请求结构是�
 一个「读了但没记」的成功返回看起来完全正常，而它意味着这张表存在的理由落空了。
 
 同一个 request_id 可能有多行（请求与响应各一行，重试也可能各一行），
-show 全部按 created_at 升序打出来。只取一行会让「这次请求还有另一半」看不见。
+get 全部按 created_at 升序打出来。只取一行会让「这次请求还有另一半」看不见。
 request_id 一条都没读到的时候非零退出，并且不写访问日志：没读到东西不算一次访问。
 
 redact 看到的结果不是库里那条快照。它把一段报文交给脱敏器，回答的是
@@ -75,7 +75,10 @@ settings.request_snapshot.max_bytes 配的，要知道某段报文在**这个部
 请先拆开，一次喂一段。
 
 request 与 response 各有一张允许表，所以 redact 必须指明方向；
-allowlist 与 show 不填时两个方向都处理。
+allowlist 与 get 不填时两个方向都处理。
+
+**旧名仍可用**：snapshot show 等同于 snapshot get。它保留是为了不让已经在跑的
+脚本与部署流程坏掉，行为与新名字逐字相同；新写的命令请用新名字。
 `
 
 // runSnapshot 处理 snapshot 子命令。
@@ -91,8 +94,8 @@ func runSnapshot(args []string) error {
 		return runSnapshotCleanup(rest)
 	case "allowlist":
 		return runSnapshotAllowlist(rest)
-	case "show":
-		return runSnapshotShow(rest)
+	case "get", "show":
+		return runSnapshotGet(rest)
 	case "redact":
 		return runSnapshotRedact(rest)
 	case "help", "-h", "--help":
@@ -432,7 +435,7 @@ const insertSnapshotAccessSQL = `
 	INSERT INTO snapshot_access_log (snapshot_id, request_id, actor_user_id, actor_kind, reason)
 	VALUES ($1, $2, $3, $4, $5)`
 
-// snapshotRead 是一次 show 的输入。
+// snapshotRead 是一次 get 的输入。
 type snapshotRead struct {
 	// RequestID 是要读的那次请求。
 	RequestID string
@@ -467,21 +470,21 @@ type snapshotRow struct {
 	CreatedAt       time.Time
 }
 
-// runSnapshotShow 读出一条请求存下来的结构快照。
+// runSnapshotGet 读出一条请求存下来的结构快照。
 //
 // # 为什么分两趟解析参数
 //
 // Go 的 flag 包在遇到**第一个非旗标参数时就停止解析**，而这条命令的形状是
-// `show <request_id> --actor ... --reason ...`——request_id 在旗标前面。
+// `get <request_id> --actor ... --reason ...`——request_id 在旗标前面。
 // 直接 Parse 会把 --actor 及其取值当成第二、第三个位置参数，报出来的错是
 // 「收到 5 个位置参数」，那句话把人引向参数个数，而问题在参数顺序
 // （settings set 的注释里记着同一个陷阱）。
 //
 // 所以先切出 request_id，再把剩下的交给同一个 FlagSet 解一遍。
-// 于是 `show <id> --actor X` 与 `show --actor X <id>` 两种写法都能用，
+// 于是 `get <id> --actor X` 与 `get --actor X <id>` 两种写法都能用，
 // 而多余的位置参数照样会被拒——它们落在第二趟的 fs.Args() 里。
-func runSnapshotShow(args []string) error {
-	fs := flag.NewFlagSet("snapshot show", flag.ContinueOnError)
+func runSnapshotGet(args []string) error {
+	fs := flag.NewFlagSet("snapshot get", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, snapshotUsage) }
 	actor := fs.String("actor", "", "读这条快照的人：用户 ID 或用户名（必填）")
 	reason := fs.String("reason", "", "读它的理由，会落进 snapshot_access_log（必填）")
@@ -495,7 +498,7 @@ func runSnapshotShow(args []string) error {
 	if len(rest) == 0 {
 		fs.Usage()
 		return usageErr(errors.New(
-			"用法：larkaxctl snapshot show <request_id> --actor <用户> --reason <文本>"))
+			"用法：larkaxctl snapshot get <request_id> --actor <用户> --reason <文本>"))
 	}
 	requestID := strings.TrimSpace(rest[0])
 	if requestID == "" {
@@ -507,7 +510,7 @@ func runSnapshotShow(args []string) error {
 		}
 		if fs.NArg() > 0 {
 			return usageErr(fmt.Errorf(
-				"snapshot show 只接受一个位置参数（request_id），多余的：%q", fs.Arg(0)))
+				"snapshot get 只接受一个位置参数（request_id），多余的：%q", fs.Arg(0)))
 		}
 	}
 	// 两个都不给默认值。理由见 snapshotUsage：「我写了 --reason」与
@@ -618,7 +621,7 @@ func snapshotsDoc(requestID string, rows []snapshotRow) map[string]any {
 // # 为什么一行日志一条快照
 //
 // snapshot_access_log.snapshot_id 是 NOT NULL 的，一条日志对应一行快照。
-// 一次 show 打出几行就写几行，于是「看了请求那一半还是响应那一半」
+// 一次 get 打出几行就写几行，于是「看了请求那一半还是响应那一半」
 // 在日志里分得开。
 func readSnapshotsWithAudit(ctx context.Context, db *sql.DB, req snapshotRead) ([]snapshotRow, error) {
 	// 先解析 actor：actor_user_id 上有外键，写一个不存在的用户会失败，

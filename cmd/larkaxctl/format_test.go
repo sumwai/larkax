@@ -273,7 +273,7 @@ func TestUnsupportedCommandsRefuseJSONBeforeDoingAnything(t *testing.T) {
 		args    []string
 	}{
 		{"user create", runUserCreate, nil},
-		{"wallet open", runWalletOpen, nil},
+		{"wallet create", runWalletCreate, nil},
 		{"wallet credit", runWalletCredit, nil},
 		{"calendar import", runCalendarImport, nil},
 		{"idempotency cleanup", runIdempotencyCleanup, nil},

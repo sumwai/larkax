@@ -56,9 +56,9 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl migrate version                显示当前数据库版本
   larkaxctl migrate create <名称>           生成迁移文件
   larkaxctl user create --name <用户名>     创建用户（stdout 只有新用户的 ID）
-  larkaxctl wallet open --user <用户> [--asset <资产>]
+  larkaxctl wallet create --user <用户> [--asset <资产>]
                                            给用户开通钱包（余额 0）
-  larkaxctl wallet credit --user <用户> --amount <金额> --order <幂等键>
+  larkaxctl wallet credit --user <用户> --amount <金额> --idempotency-key <幂等键>
                                            运营手工入账（写账本分录）
   larkaxctl apikey create --user <用户>     创建一把 API Key（明文只打印这一次）
   larkaxctl apikey update --id <ID>        改一把已有 API Key 的额度
@@ -70,11 +70,12 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
                                            渠道（创建时凭证从 stdin 或环境变量读）
   larkaxctl doctor [--live --model <规范名> ...]
                                            逐项检查这条链路通不通（只读；--live 才真打上游）
-  larkaxctl model add|list|show|update|delete
+  larkaxctl model create|list|get|update|delete
                                            模型目录里的规范模型
-  larkaxctl alias add|list|update|delete|resolve
+  larkaxctl alias create|list|update|delete|resolve
                                            模型别名（上游名 ↔ 规范名）
-  larkaxctl price add|list|update|explain  计价规则
+  larkaxctl price create|list|update|enable|disable|explain
+                                           计价规则
   larkaxctl plugin list                    列出插件及其状态、代次与元数据问题
   larkaxctl plugin publish <文件>           发布一个插件（先在沙箱里编译一遍）
   larkaxctl plugin enable|disable <key>    启用 / 停用一个插件
@@ -83,13 +84,15 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl rotate                         轮换渠道凭证的主密钥（默认干跑）
   larkaxctl partition ensure               建出缺失的 usage_events 月分区
   larkaxctl partition check                只读体检，有问题时非零退出
-  larkaxctl snapshot cleanup|allowlist|show|redact
+  larkaxctl snapshot cleanup|allowlist|get|redact
                                            快照的留存清理、允许表、读回与试脱敏
   larkaxctl idempotency cleanup            按留存期删除到期的幂等记录
   larkaxctl calendar import <文件>          导入某一年的日历数据（格式见下）
   larkaxctl version                        打印版本号
 
 子命令的详细用法：larkaxctl <子命令> --help，例如 larkaxctl channel --help。
+有旧名的那几条子命令，它的 --help 末尾列着旧名（model add、wallet open、
+--canonical、--owner、--order 等）：那些写法仍然可用，只是不再是正式写法。
 日历数据文件的格式与约束见：larkaxctl calendar --help
 
 全局选项：

@@ -1592,7 +1592,7 @@ func createDoctorChannel(t *testing.T, models ...string) (int64, string) {
 func createDoctorModel(t *testing.T, canonical string) {
 	t.Helper()
 	if err := runCaptured(t, func() error {
-		return runModelAdd([]string{"--canonical", canonical, "--display", "示例模型"})
+		return runModelCreate([]string{"--model", canonical, "--display", "示例模型"})
 	}); err != nil {
 		t.Fatalf("建规范模型 %s 失败: %v", canonical, err)
 	}
@@ -1643,7 +1643,7 @@ func TestDoctorIntegrationFlagsAliasWithoutChannel(t *testing.T) {
 	createDoctorModel(t, canonical)
 	upstream := uniqueName("upstream")
 	if err := runCaptured(t, func() error {
-		return runAliasAdd([]string{"--canonical", canonical, "--upstream", upstream})
+		return runAliasCreate([]string{"--model", canonical, "--upstream", upstream})
 	}); err != nil {
 		t.Fatalf("建别名失败: %v", err)
 	}

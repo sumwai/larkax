@@ -23,11 +23,11 @@ import (
 const walletUsage = `larkaxctl wallet 管理用户钱包。
 
 用法：
-  larkaxctl wallet open --user <ID 或用户名> [--asset <资产>]
-  larkaxctl wallet credit --user <ID 或用户名> --amount <金额> --order <幂等键>
+  larkaxctl wallet create --user <ID 或用户名> [--asset <资产>]
+  larkaxctl wallet credit --user <ID 或用户名> --amount <金额> --idempotency-key <幂等键>
                           [--asset <资产>] [--gateway <来源>]
 
-open 给一个已存在的用户开通钱包，余额为 0。它不写任何分录：新开的户在
+create 给一个已存在的用户开通钱包，余额为 0。它不写任何分录：新开的户在
 账本上没有分录，这个用户在 user 科目上的分录之和为 0，与快照里的 0 自洽。
 带初始金额意味着这次开户同时是一次充值，而那属于充值入口——用 credit。
 
@@ -44,14 +44,14 @@ credit 是运营手工入账：走账本写一组 topup 分录（借 user:<ID>�
 payment_gateway:<来源>），并在同一个事务里更新 user_wallets.balance。
 它不绕过账本直接改余额——那样会让钱包快照与分录对不上，下一轮对账会报。
 
---order 是幂等键，**必填且没有默认值**。它被确定性地映射成这次交易的
+--idempotency-key 是幂等键，**必填且没有默认值**。它被确定性地映射成这次交易的
 txn_id，于是同一条命令重跑两次只会入账一次。两种结果都在输出里说清：
 
   第一次：已入账（并逐条列出写了哪些分录）
   重放：  「已经入过账，本次未改动」，退出 0
 
-同一个 --order 配不同的金额、用户或通道不是重放，而是冲突：数据库里那笔交易
-与这次要写的不是同一批分录，命令退出 4，一笔都不写。换一个 --order。
+同一个 --idempotency-key 配不同的金额、用户或通道不是重放，而是冲突：数据库里
+那笔交易与这次要写的不是同一批分录，命令退出 4，一笔都不写。换一个键。
 
 键里不能有控制字符（换行、制表符等）：它既算交易号又进备注，而备注会把控制
 字符换成空格，于是两个不同的键会写出两条备注一模一样的入账。
@@ -61,7 +61,7 @@ txn_id，于是同一条命令重跑两次只会入账一次。两种结果都�
 manual 是同一个科目。当前不接支付通道的回调，所以来源是操作者说的，
 不是系统验证过的。
 
-钱包必须已经存在：先 wallet open，再 credit。用户或钱包不存在都退出 4。
+钱包必须已经存在：先 wallet create，再 credit。用户或钱包不存在都退出 4。
 
 资产默认取 settings 的 billing.default_asset（迁移里的默认值是 CNY）。
 --asset 可以显式指定，但当前只有 CNY 一种受支持的资产，写别的会被拒绝。
@@ -73,6 +73,10 @@ manual 是同一个科目。当前不接支付通道的回调，所以来源是�
 
 这两条命令只写 user_wallets 与 ledger_entries，不碰 users，也不需要
 LARKAX_MASTER_KEYS。
+
+**旧名仍可用**：wallet open 等同于 wallet create，--order 等同于
+--idempotency-key。它们保留是为了不让已经在跑的脚本与部署流程坏掉，行为与
+新名字逐字相同；新写的命令请用新名字。
 `
 
 // walletTimeout 是这条命令连库与写库的时间上限。
@@ -98,8 +102,8 @@ func runWallet(args []string) error {
 	action, rest := args[0], args[1:]
 
 	switch action {
-	case "open":
-		return runWalletOpen(rest)
+	case "create", "open":
+		return runWalletCreate(rest)
 	case "credit":
 		return runWalletCredit(rest)
 	case "help", "-h", "--help":
@@ -111,13 +115,13 @@ func runWallet(args []string) error {
 	}
 }
 
-// runWalletOpen 给一个用户开通钱包。
-func runWalletOpen(args []string) error {
-	if err := jsonUnsupported("wallet open"); err != nil {
+// runWalletCreate 给一个用户开通钱包。
+func runWalletCreate(args []string) error {
+	if err := jsonUnsupported("wallet create"); err != nil {
 		return err
 	}
 
-	fs := flag.NewFlagSet("wallet open", flag.ContinueOnError)
+	fs := flag.NewFlagSet("wallet create", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, walletUsage) }
 	user := fs.String("user", "", "钱包归属的用户：用户 ID 或用户名")
 	asset := fs.String("asset", "", "资产品种；留空表示取 settings 的 billing.default_asset")
@@ -125,7 +129,7 @@ func runWalletOpen(args []string) error {
 		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("open 不接受位置参数，得到 %q：用户用 --user 指定", fs.Arg(0)))
+		return usageErr(fmt.Errorf("create 不接受位置参数，得到 %q：用户用 --user 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
 		fs.Usage()
@@ -175,7 +179,7 @@ func runWalletCredit(args []string) error {
 	user := fs.String("user", "", "入账的用户：用户 ID 或用户名")
 	amount := fs.String("amount", "", "入账金额，必须为正")
 	asset := fs.String("asset", "", "资产品种；留空表示取 settings 的 billing.default_asset")
-	order := fs.String("order", "", "幂等键；必填，同一条命令重跑不会重复入账")
+	order := legacyStringFlag(fs, "idempotency-key", "order", "", "幂等键；必填，同一条命令重跑不会重复入账")
 	gateway := fs.String("gateway", manualGateway, "这笔钱从哪个外部来源进来；manual 表示线下到账")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -194,7 +198,7 @@ func runWalletCredit(args []string) error {
 	if orderKey == "" {
 		fs.Usage()
 		return usageErr(errors.New(
-			"缺少 --order：它是这次入账的幂等键，重跑同一条命令时靠它认出「已经入过账」"))
+			"缺少 --idempotency-key：它是这次入账的幂等键，重跑同一条命令时靠它认出「已经入过账」"))
 	}
 	if ctrlErr := checkOrderKey(orderKey); ctrlErr != nil {
 		return ctrlErr
@@ -322,8 +326,8 @@ func checkOrderKey(order string) error {
 	for _, r := range order {
 		if r < 0x20 || r == 0x7f {
 			return usageErr(fmt.Errorf(
-				"--order 不能含控制字符（这里是 %q）：它同时是幂等键与备注里的单据号，"+
-					"带控制字符会让两笔不同的入账在账面上看起来一样",
+				"--idempotency-key 不能含控制字符（这里是 %q）：它同时是幂等键与备注里的"+
+					"单据号，带控制字符会让两笔不同的入账在账面上看起来一样",
 				r))
 		}
 	}
@@ -383,7 +387,7 @@ func parseGatewayFlag(fs *flag.FlagSet, gateway string) (string, error) {
 
 // txnIDForOrder 把运维给的幂等键确定性映射成一个交易号。
 //
-// 为什么是确定性映射而不是每次生成一个新的随机 uuid：--order 的用途就是
+// 为什么是确定性映射而不是每次生成一个新的随机 uuid：幂等键的用途就是
 // 「同一条命令重跑不会重复入账」。随机 id 会让每次重跑都成为一笔新交易，
 // 幂等就只能靠「先按备注查一遍」——而备注会清洗、会被人改，不是判据。
 // 把键映射成 txn_id 之后，重跑的第二次在写库那一步撞上同一笔交易，
