@@ -289,8 +289,9 @@ func TestNewWithRejectsBadAdapters(t *testing.T) {
 		// custom 曾经是合法取值。它已经没有了：适配器只能说它实现的是哪套
 		// 现成的协议，不能自造一个协议族——自造的那个没有任何东西读得懂。
 		{"协议 custom", []channel.Adapter{&fakeAdapter{typ: string(channel.ProtocolOpenAI), protocol: channel.Protocol("custom")}}},
-		// 类型名不是协议名：注册表按类型算端点，这种名字算出来是空串。
-		{"类型名不是协议名", []channel.Adapter{&fakeAdapter{typ: "my-vendor", protocol: channel.ProtocolOpenAI}}},
+		// 类型名与声明的协议不是同一个字符串：注册表按类型算端点，而这一侧
+		// 按声明的协议走，两端点对不上。
+		{"类型名与协议不一致", []channel.Adapter{&fakeAdapter{typ: "my-vendor", protocol: channel.ProtocolOpenAI}}},
 		{"重复类型", []channel.Adapter{ok, &fakeAdapter{typ: string(channel.ProtocolOpenAI), protocol: channel.ProtocolOpenAI}}},
 	}
 
