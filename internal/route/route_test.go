@@ -445,6 +445,94 @@ func TestChatSkipsUnknownChannelType(t *testing.T) {
 	}
 }
 
+// 渠道类型与这条入口对不上时**跳过它**，后面的候选照常接管。
+//
+// 候选池是按**模型名**筛的、不看渠道类型：同一个规范名可以同时挂在 chat
+// 渠道与决策渠道上（见 internal/upstream 的 Decide 与 systemoneadapter 的
+// Chat）。排在前面的那个类型不对就让整条请求失败的话，一个配错的渠道能
+// 打断该模型的全部流量，而后面明明有能用的候选。
+func TestChatSkipsChannelWithoutCapability(t *testing.T) {
+	exec := &fakeExecutor{
+		results: map[int64]error{
+			1: fmt.Errorf("渠道 1: 类型 %q 不支持决策调用: %w", "openai", channel.ErrUnsupported),
+		},
+		resp: &channel.Response{UpstreamModel: "m"},
+	}
+	r := seededRouter(1)
+
+	res, err := r.Chat(context.Background(), exec, &channel.Request{Model: "m"},
+		[]Candidate{candidate(1, "m", withPriority(10)), candidate(2, "m", withPriority(1))}, "m")
+	if err != nil {
+		t.Fatalf("应跳过不支持的候选并成功: %v", err)
+	}
+	if res.Channel.ID != 2 {
+		t.Fatalf("应落在第二个候选上，实际 %d", res.Channel.ID)
+	}
+	// 两个候选都要**真的被试过**，而且顺序是先 1 后 2（优先级高的在前）。
+	// 只看长度不够：顺序反了说明「跳过」变成了「重排」，那是另一回事。
+	if len(exec.calls) != 2 || exec.calls[0] != 1 || exec.calls[1] != 2 {
+		t.Fatalf("调用序列 = %v，期望 [1 2]（两个候选都要试过）", exec.calls)
+	}
+	if !errors.Is(res.Attempts[0].Err, channel.ErrUnsupported) {
+		t.Errorf("第一次尝试应记为不支持: %v", res.Attempts[0].Err)
+	}
+	// 跳过的那些**不算上游故障**：它决定渠道健康度，见 channel.IsRetryable
+	// 与 gateway 的 channelAtFault。
+	if channel.IsRetryable(res.Attempts[0].Err) {
+		t.Error("「这个渠道不做这件事」不该被记成上游故障")
+	}
+}
+
+// 全部候选都不支持时，错误文本要说「都不支持」，不能说「都失败」——
+// 后者听起来像上游挂了，而这条路径上上游一次都没有真的被调用过。
+func TestChatAllUnsupportedSaysUnsupported(t *testing.T) {
+	exec := &fakeExecutor{
+		results: map[int64]error{
+			1: fmt.Errorf("渠道 1: %w", channel.ErrUnsupported),
+			2: fmt.Errorf("渠道 2: %w", channel.ErrUnsupported),
+		},
+	}
+	r := seededRouter(1)
+
+	_, err := r.Chat(context.Background(), exec, &channel.Request{Model: "m"},
+		[]Candidate{candidate(1, "m"), candidate(2, "m")}, "m")
+	if err == nil {
+		t.Fatal("应报错")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "都不支持") {
+		t.Errorf("错误文本应说清是「都不支持这次请求」: %s", msg)
+	}
+	if strings.Contains(msg, "都失败") {
+		t.Errorf("错误文本把「不支持」说成了「失败」: %s", msg)
+	}
+	if !errors.Is(err, channel.ErrUnsupported) {
+		t.Errorf("错误应仍能认出 channel.ErrUnsupported: %v", err)
+	}
+}
+
+// 提前放弃时**不能说「全部 N 个候选都失败」**：还有候选没试过。
+//
+// 那句话把一次提前放弃说成了「都试过了」，看日志的人据此去查上游，而真正
+// 要改的是排在前面的那条配置。
+func TestChatErrorNamesUntriedCandidates(t *testing.T) {
+	exec := &fakeExecutor{results: map[int64]error{1: permanentErr()}}
+	r := seededRouter(1)
+
+	_, err := r.Chat(context.Background(), exec, &channel.Request{Model: "m"},
+		[]Candidate{candidate(1, "m", withPriority(10)), candidate(2, "m", withPriority(1))}, "m")
+	if err == nil {
+		t.Fatal("应报错")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "还有 1 个候选没试") {
+		t.Errorf("错误文本应点出还有候选没试过: %s", msg)
+	}
+	if strings.Contains(msg, "全部") {
+		t.Errorf("只试了 1 个候选，不该说「全部」: %s", msg)
+	}
+}
+
 // 全部候选都因类型不认识而失败时，返回的错误仍要能认出原因。
 // 不能变成一句「全都试过了」把原因盖掉——排查时那等于没有信息。
 func TestChatAllUnknownTypesKeepsCause(t *testing.T) {
@@ -654,6 +742,27 @@ func TestChatStreamSkipsUnknownChannelType(t *testing.T) {
 	}
 	if !errors.Is(res.Attempts[0].Err, channel.ErrUnknownType) {
 		t.Errorf("第一次尝试应记为未知类型: %v", res.Attempts[0].Err)
+	}
+}
+
+// 非流式那条路的判据在流式这一份实现上同样成立（两份实现，同一个判据）。
+func TestChatStreamSkipsChannelWithoutCapability(t *testing.T) {
+	exec := &fakeStreamExecutor{
+		results: map[int64]error{1: fmt.Errorf("渠道 1: %w", channel.ErrUnsupported)},
+		events:  []channel.StreamEvent{{Kind: "delta", Text: "hi"}},
+	}
+	r := seededRouter(1)
+
+	res, err := r.ChatStream(context.Background(), exec, &channel.Request{Model: "m", Stream: true},
+		[]Candidate{candidate(1, "m", withPriority(10)), candidate(2, "m", withPriority(1))}, "m")
+	if err != nil {
+		t.Fatalf("应跳过不支持的候选并成功: %v", err)
+	}
+	if res.Channel.ID != 2 {
+		t.Fatalf("应落在第二个候选上，实际 %d", res.Channel.ID)
+	}
+	if len(exec.calls) != 2 {
+		t.Fatalf("调用序列 = %v，期望 [1 2]", exec.calls)
 	}
 }
 

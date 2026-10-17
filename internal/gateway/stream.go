@@ -61,10 +61,14 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 		return nil, ErrNoExecutor
 	}
 
-	h, err := g.begin(ctx, req, upstream)
+	h, err := g.begin(ctx, req)
 	if err != nil {
 		return nil, err
 	}
+
+	// 请求快照在**调上游之前**采集，与非流式那条路同一个位置与理由
+	// （见 begin 的注释）。
+	g.snapshotAsync(ctx, upstream, "request", req.UserID)
 
 	routed, err := g.routeStream(ctx, upstream, h.candidates, req.CanonicalModel, hooks)
 
@@ -80,7 +84,7 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 		// settleAndFail 只结算、不释放，非流式那条路靠 defer res.finish
 		// 兜住释放那一步；这里没有 defer 可挂（成功路径的收尾在后台），
 		// 所以显式补一次 finish。
-		_, cause := h.settleAndFail(ctx, err, pipeline.Outcome{UpstreamFailed: true})
+		cause := h.settleAndFail(ctx, err, pipeline.Outcome{UpstreamFailed: true})
 		h.finish(ctx)
 		return nil, cause
 	}
@@ -382,7 +386,7 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 			At:        g.now(),
 			Verdict:   verdict,
 		})
-		_, _ = h.settleAndFail(settleCtx, errStreamAborted,
+		_ = h.settleAndFail(settleCtx, errStreamAborted,
 			pipeline.Outcome{UpstreamFailed: true})
 		h.finish(settleCtx)
 		return

@@ -108,7 +108,12 @@ func (r *Router) chatStreamWithPlan(ctx context.Context, exec StreamExecutor, re
 			return result, nil
 		}
 		if !worthNextCandidate(err) {
-			return result, &Errors{Attempts: result.Attempts}
+			// 与非流式那条路同一个处置：没试过的候选记进 Untried，
+			// 见 Errors 的注释。
+			return result, &Errors{
+				Attempts: result.Attempts,
+				Untried:  len(plan.Candidates) - len(result.Attempts),
+			}
 		}
 	}
 	return result, &Errors{Attempts: result.Attempts}

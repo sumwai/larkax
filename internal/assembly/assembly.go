@@ -85,8 +85,9 @@ type Config struct {
 	// Version 是发布版本，写进每个响应的 x-larkax-version 头。
 	Version string
 
-	// Executor 是调上游的能力，由调用方构造。
-	Executor gateway.Executor
+	// Executor 是调上游的能力，由调用方构造。两条路径（chat 与决策）都要能走，
+	// 见 Executor 那个类型的注释。
+	Executor Executor
 
 	// Rules 是计价规则的来源，由调用方构造。
 	Rules pipeline.RuleSource
@@ -175,6 +176,17 @@ const (
 	minProbeIntervalSeconds = 1
 	maxProbeIntervalSeconds = 365 * 24 * 60 * 60
 )
+
+// Executor 是装配层要求的上游执行器：chat 与决策两条路都要能走。
+//
+// 两个接口嵌在一起，而不是在 Config 上分成两个字段：生产里它们永远是同一个
+// 对象（*upstream.Executor，它按渠道类型查表，两条路共用同一份注册表）。
+// 分成两个字段能装出「只接上一个」的状态，而那种状态的现场是一半路径回 501，
+// 看代码的人却会以为它们本来就是一回事。
+type Executor interface {
+	gateway.Executor
+	gateway.DecideExecutor
+}
 
 // Build 装配一次服务。
 //
@@ -266,6 +278,12 @@ func Build(cfg Config) (*App, error) {
 		Redactor:  snapshots.Redactor(),
 		Snapshots: snapshots.Sink(),
 		Executor:  cfg.Executor,
+		// 决策那条路径与 chat 共用同一个执行器：它按渠道类型查表，
+		// 而「这个类型支不支持决策」由适配器有没有实现 systemone.Decider
+		// 决定（见 upstream.Executor.Decide）。填同一个值而不是再要一个
+		// cfg 字段：两个执行器分开装配时，「其中一个没接上」的表现是
+		// 一半路径回 501，而那时看代码的人会以为它们本来就是一回事。
+		Decider: cfg.Executor,
 		// 计数器按需加载词表（首次精确计数约 25ms），构造本身是廉价的，
 		// 所以这里直接建一个而不是做成参数：它没有第二种实现，而做成
 		// 参数还多一个坏处——调用方传 nil 时网关会安静地退到启发式估算
@@ -279,6 +297,10 @@ func Build(cfg Config) (*App, error) {
 	}
 
 	handler := api.New(authenticator{store: auth.New(cfg.DB)}, gw)
+	// 决策入口的协作者与 Chatter 是同一个对象（*gateway.Gateway 两条路都实现）。
+	// 分开赋值而不是让 api.New 收两个：那样每个构造点都要多传一个参数，
+	// 而这两个值在生产里永远是同一个。
+	handler.Decider = gw
 	handler.Version = cfg.Version
 	handler.DefaultAsset = asset
 	handler.Now = cfg.Now

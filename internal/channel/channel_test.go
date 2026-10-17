@@ -184,7 +184,9 @@ func TestChannelSupports(t *testing.T) {
 // 会让「以为支持了」这件事发生；反过来，**少列一个已实现的取值**会让这道门
 // 对新增的那套协议毫无覆盖——它照样通过，而它看起来像在守「取值集合」。
 func TestProtocolValuesAreKnown(t *testing.T) {
-	for _, p := range []Protocol{ProtocolOpenAI, ProtocolAnthropic, ProtocolOpenAIResponses} {
+	for _, p := range []Protocol{
+		ProtocolOpenAI, ProtocolAnthropic, ProtocolOpenAIResponses, ProtocolSystemOne,
+	} {
 		if !p.valid() {
 			t.Errorf("协议 %q 应有效", p)
 		}

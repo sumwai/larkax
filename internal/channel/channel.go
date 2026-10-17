@@ -32,10 +32,12 @@ import (
 //
 // 它决定用哪套 usage 口径、哪种流式分片格式、以及请求体长什么样。
 //
-// 这个类型有两个用它的地方，指的是同一件事的两个视角：**调用方**说的是
+// 这个类型有三个用它的地方，指的是同一件事的三个视角：**调用方**说的是
 // 哪套协议（由请求路径决定：/v1/chat/completions 是 openai，
-// /v1/messages 是 anthropic），以及**适配器**自述实现的是哪套
-// （Adapter.Protocol()，注册表拿它做自检）。
+// /v1/messages 是 anthropic，/v1/systemone 是 systemone），
+// **适配器**自述实现的是哪套（Adapter.Protocol()，注册表拿它做自检），
+// 以及**账单**记下这次请求走的是哪条入口（pipeline.Request.Protocol，
+// 落进 billing_requests.protocol，供事后按协议统计）。
 //
 // 这两个视角**不要求一一对应**：openai-responses 今天只有适配器那一侧——
 // 渠道说这套协议时，管道里的请求仍是统一格式（贴近 chat completions），
@@ -51,8 +53,17 @@ type Protocol string
 // 各协议的取值。
 //
 // 取值与渠道表里的 channels.type 是同一个字符串（适配器的 Type()）。
-// 「大体像 OpenAI 但有几处不一样」不是新的协议族——它是某个渠道的私有
+// 已注册的适配器只有这几个，调用方的入口也对应这几条路径。
+// 「大体像 OpenAI 但有几处不一样」不是另一个协议族——它是某个渠道的私有
 // 差异，归属在 Channel.Setting 里。
+//
+// # systemone 为什么算一个协议族而不是某套协议的变体
+//
+// 它的请求与响应形状与 chat 没有任何共同点：请求是 state 加一组带类型的
+// 判定问题（questions 是按 id 索引的**对象**），响应是概率而不是文本，
+// 而且从不流式。所以它不是「OpenAI 协议加几个参数」，中间表示也不共用
+// （见 internal/systemone）。用同一个 Protocol 值会让账单把两类请求记成
+// 同一套协议，而那张表正是事后按协议统计的依据。
 const (
 	ProtocolOpenAI    Protocol = "openai"
 	ProtocolAnthropic Protocol = "anthropic"
@@ -64,11 +75,13 @@ const (
 	// 流式分片与用量字段名都不同，合并之后每个用它的地方都要再判一次
 	// 「这次是哪一种」——那正是协议族这个概念要消掉的东西。
 	ProtocolOpenAIResponses Protocol = "openai-responses"
+
+	ProtocolSystemOne Protocol = "systemone"
 )
 
 func (p Protocol) valid() bool {
 	switch p {
-	case ProtocolOpenAI, ProtocolAnthropic, ProtocolOpenAIResponses:
+	case ProtocolOpenAI, ProtocolAnthropic, ProtocolOpenAIResponses, ProtocolSystemOne:
 		return true
 	}
 	return false
@@ -351,8 +364,20 @@ type Adapter interface {
 
 // ErrUnsupported 表示该上游不提供这项能力。
 //
-// 与「调用失败」分开：前者是设计如此，不该告警也不该重试；
-// 后者是真的出问题了。
+// 与「调用失败」分开：前者是设计如此，不该告警；后者是真的出问题了。
+//
+// # 它在请求热路径上意味着「换下一个候选」，但不代表可重试
+//
+// 这条错误以前只从 ListModels / Quota 出来（都不在请求路径上）。现在
+// Chat / ChatStream / Decide 也会返回它——渠道类型与这条入口对不上。
+// 路由层据此**跳过这条候选**（见 internal/route 的 worthNextCandidate）：
+// 候选池是按模型名筛的、不看渠道类型，一个配错类型的渠道不该打断该模型的
+// 全部流量。
+//
+// 但 IsRetryable 对它仍然是 false，两者不要混：IsRetryable 回答的是「这次
+// 失败该算在上游头上吗」，它决定渠道健康度（见 internal/gateway 的
+// channelAtFault）——而一个渠道类型不对不是它坏了，把它记成故障会让健康度
+// 统计里多出一批无辜的失败。
 var ErrUnsupported = errors.New("该上游不支持这项能力")
 
 // ErrUpstream 包装上游返回的错误。
