@@ -15,6 +15,11 @@
 //
 // 解析交给 github.com/joho/godotenv：引号、转义、`export` 前缀、行尾注释这些
 // 边角自己写很容易漏，而漏掉的表现是「值里多了一个引号」这类安静的错误。
+//
+// 上面这一节与 `package config` 之间空一行：紧贴着的注释组会被当成**包注释**，
+// 而本包的包注释在 config.go 里（revive 的 package-comments 要求它以
+// 「Package config」开头，本节不是那个形状）。空一行之后它只是本文件的文件头。
+
 package config
 
 import (
