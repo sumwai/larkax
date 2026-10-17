@@ -782,3 +782,118 @@ func TestStreamAbortedRecordsResponse(t *testing.T) {
 		t.Errorf("没吐字的流应当交 nil 响应体，实际 %#v", bodies)
 	}
 }
+
+// ── 引用标注 ────────────────────────────────────────────────────────────
+
+// 只收到标注、随后上游失败：标注同样是「客户端已经看见了的东西」，所以
+// 它要算进 started，这条流按「已经吐过字」处置——带 ErrOutputStarted、
+// 照常计费，而不是当成「一个字没吐、可以重试」。
+//
+// 这条用例钉住的是那个赋值的**后果**，不是赋值本身：删掉 pumpStream 里
+// "annotation" 分支的 started = true，这条流会退回「接受请求后一个字没吐
+// 就失败」——不计费、释放预留、错误里也不带 ErrOutputStarted。
+func TestChatStreamAnnotationCountsAsOutputStarted(t *testing.T) {
+	h := newHarness(t)
+	usage := channel.Usage{PromptTokens: 5, CompletionTokens: 0}
+	cause := errors.New("上游在标注之后断开")
+	useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
+		1: {
+			{Kind: "start", StatusCode: http.StatusOK},
+			{Kind: "annotation", Annotations: []map[string]any{{"type": "url_citation", "url": "https://example.com/a"}}},
+			{Kind: "usage", Usage: &usage},
+			{Kind: "error", Err: cause},
+		},
+	}})
+
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
+	if err != nil {
+		t.Fatalf("上游已接受请求时不该返回错误: %v", err)
+	}
+	events := collect(t, res)
+
+	// 标注帧照常转发（它不在任何 continue 分支里）。
+	var forwarded bool
+	for _, ev := range events {
+		if ev.Kind == "annotation" {
+			forwarded = true
+		}
+	}
+	if !forwarded {
+		t.Error("标注事件没有被转发给调用方")
+	}
+
+	// 错误要带 ErrOutputStarted：客户端手里已经有标注帧，重试会把两批标注
+	// 接在一起，所以这里不能报「服务暂时不可用」。
+	var foundErr bool
+	for _, ev := range events {
+		if ev.Kind != "error" {
+			continue
+		}
+		foundErr = true
+		if !errors.Is(ev.Err, route.ErrOutputStarted) {
+			t.Errorf("错误 = %v，期望包着 route.ErrOutputStarted", ev.Err)
+		}
+		if !errors.Is(ev.Err, cause) {
+			t.Errorf("包装不该丢掉最初那个错误: %v", ev.Err)
+		}
+	}
+	if !foundErr {
+		t.Fatal("错误事件没有被转发出去")
+	}
+
+	// 已经吐过字：走计费路径，预留由结算解冻而不是释放。
+	if res.Charge == nil {
+		t.Fatal("客户端已经看到标注，这条流要按已经吐过字计费")
+	}
+	if len(h.reservations.released) != 0 {
+		t.Errorf("已经吐过标注之后不该释放预留：%+v", h.reservations.released)
+	}
+	if len(h.settlements.saved) != 1 {
+		t.Fatalf("应当落一次结算，实际 %d 次", len(h.settlements.saved))
+	}
+
+	// 输出为 0：标注不参与分词，金额只来自输入。
+	if got := res.Charge.Settlement.Actual.String(); got != "0.00000500" {
+		t.Errorf("金额 = %s，期望 0.00000500（5 个输入 token，输出为 0）", got)
+	}
+	if res.Charge.ClientCanceled {
+		t.Error("上游报错被标成了客户端取消")
+	}
+}
+
+// 标注先于正文到达：builder 先把它攒起来，等第一段正文出现时再挂上去，
+// 不为它单独造一个空正文块。
+//
+// 直接测 builder 而不是快照：快照的响应骨架是显式字段清单，**不摊
+// Annotations**（见 internal/snapshot），通过快照断言看不到挂载结果。
+func TestStreamResponseBuilderFlushesEarlyAnnotationsOntoLaterText(t *testing.T) {
+	early := map[string]any{"type": "url_citation", "url": "https://example.com/early"}
+	late := map[string]any{"type": "url_citation", "url": "https://example.com/late"}
+
+	b := newStreamResponseBuilder()
+	b.observe(channel.StreamEvent{Kind: "annotation", Annotations: []map[string]any{early}})
+
+	// 还没等来正文：不为标注造块。
+	if len(b.blocks) != 0 {
+		t.Fatalf("正文还没出现时不该造块，实际 %#v", b.blocks)
+	}
+
+	b.observe(delta("引用在这里"))
+	b.observe(channel.StreamEvent{Kind: "annotation", Annotations: []map[string]any{late}})
+
+	if len(b.blocks) != 1 {
+		t.Fatalf("块数 = %d，期望 1（两批标注都挂到同一个正文块上）", len(b.blocks))
+	}
+	blk := b.blocks[0]
+	if blk.Type != "text" || blk.Text != "引用在这里" {
+		t.Errorf("块 = %+v，期望一个正文块「引用在这里」", blk)
+	}
+	if len(blk.Annotations) != 2 {
+		t.Fatalf("标注数 = %d，期望 2（先到的被 flush，后到的直接挂上）", len(blk.Annotations))
+	}
+	// 顺序也要钉：先到的那批必须在前，否则「按到达顺序」这个口径就没了。
+	if blk.Annotations[0]["url"] != "https://example.com/early" ||
+		blk.Annotations[1]["url"] != "https://example.com/late" {
+		t.Errorf("标注顺序 = %v，期望先到的 early 在后到的 late 之前", blk.Annotations)
+	}
+}

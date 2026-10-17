@@ -230,10 +230,11 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 		// started 表示已经向客户端吐过内容。它决定中途失败是「换个渠道
 		// 重来」还是「如实告诉客户端被截断」。
 		//
-		// 判据（delta 与 tool_use 都算「已经吐过字」）**只有这一处**：
-		// 本文件是唯一消费路由事件流的地方，而它本来就在这个 for/switch 里
-		// 做别的事（累加估算、记 measured、判 done），判据留在这里不需要
-		// 多一层通道与 goroutine。
+		// 判据是「这条事件让客户端看见了东西」，参与者是 delta、tool_use
+		// 与 annotation 三种 Kind（各自的 case 里置真）。它就落在下面这个
+		// for/switch 里，**只有这一处**：本文件是唯一消费路由事件流的地方，
+		// 而它本来就在这里做别的事（累加估算、记 measured、判 done），
+		// 判据留在这里不需要多一层通道与 goroutine。
 		//
 		// 将来若出现第二个消费点，要抽的是**一个共享的谓词函数**
 		// （「这个事件算不算已经吐字」），不是包一层通道——包一层只是把
@@ -707,9 +708,15 @@ func (b *streamResponseBuilder) observe(ev channel.StreamEvent) {
 		}
 		b.toolArgs[ev.ToolCall.Index].WriteString(ev.ToolCall.Arguments)
 	case "annotation":
-		// 引用标注。挂在最后一段正文上，与非流式那条路的
-		// relay.attachAnnotations 同一个口径：标注描述的是「正文的哪一段
-		// 引用了哪个来源」，挂在工具调用上没有意义。
+		// 引用标注。挂在最后那个正文块上：标注描述的是「正文的哪一段引用了
+		// 哪个来源」，挂在工具调用上没有意义。这里只要求「最后块是 text」，
+		// 是因为事件流里没有块边界——连续文本本来就聚成一个块，块之间只由
+		// tool_use 分隔（见上方「它是近似」那一段）。
+		//
+		// 与非流式的 relay.attachAnnotations **不是同一处挂载点**：那个在
+		// 事后遍历整份 ContentBlock，挂在**第一个**带文字的 text 块上。差别
+		// 在本条流式的真实形状下看不出来（正文只有一个正文块），但它不是
+		// 「同一个口径」，别照着一边去改另一边。
 		//
 		// 还没有正文块时先攒着，等第一段正文出现再挂上去：上游可能先给标注
 		// 再给正文，而快照要记的是「上游说了什么」——为一批标注凭空造一个
