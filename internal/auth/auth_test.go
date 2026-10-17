@@ -162,7 +162,7 @@ func TestErrorHidesReason(t *testing.T) {
 			t.Errorf("Reason %q 的错误不满足 errors.Is(err, ErrUnauthenticated)", reason)
 		}
 
-		// 日志侧必须拿得到原因，否则「日志里要区分」只是句空话。
+		// 消费侧必须拿得到原因，否则「排查时要区分」只是句空话。
 		var target *Error
 		if !errors.As(err, &target) {
 			t.Fatalf("Reason %q 的错误无法用 errors.As 取出", reason)

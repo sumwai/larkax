@@ -247,6 +247,28 @@ func TestEveryDeclaredCounterIsRegistered(t *testing.T) {
 	}
 }
 
+// 认证失败的原因标签也是对外契约：采集端的告警规则按它写。
+//
+// 用独立注册表而不是包级那份：这条只关心指标的形状，而往包级计数器上加数
+// 会让别的用例看到不该有的初值。至于「增量点有没有按 Reason 落进对的序列」，
+// 那在增量点所在的那个包里钉（见 internal/api 的
+// TestAuthFailureReasonIsCountedPerReason）——注册表不在那边的构造点手里。
+func TestAuthFailureMetricShape(t *testing.T) {
+	r := NewRegistry()
+	r.AuthFailures.With("key_expired").Inc()
+	r.AuthFailures.With("key_not_found").Inc()
+
+	got := render(t, r)
+	for _, want := range []string{
+		`larkax_auth_failures_total{reason="key_expired"} 1`,
+		`larkax_auth_failures_total{reason="key_not_found"} 1`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("渲染结果里没有 %s\n得到:\n%s", want, got)
+		}
+	}
+}
+
 // 生产注册表里的标签名与取值也是对外契约：采集端的查询按它们写。
 func TestRegistryLabelsAreStable(t *testing.T) {
 	r := NewRegistry()

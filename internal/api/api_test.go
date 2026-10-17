@@ -290,7 +290,7 @@ func TestUnauthorized(t *testing.T) {
 			}
 			// 凭证为什么无效不回给调用方：区分开等于送出一个探测器。
 			// auth.Error 的文案对所有 Reason 都是同一句，而 Reason 本身
-			// 只给日志看——两个都不该出现在响应体里。
+			// 不进响应体——两个都不该出现在响应体里。
 			if body := rec.Body.String(); strings.Contains(body, auth.ErrUnauthenticated.Error()) ||
 				strings.Contains(body, string(auth.ReasonKeyNotFound)) {
 				t.Errorf("不该回内部错误原文: %s", body)
@@ -309,6 +309,104 @@ func TestUnauthorized(t *testing.T) {
 			}
 		})
 	}
+}
+
+// 两种凭证失败在可观测面上必须分得开。
+//
+// 用户报「我的 key 不能用了」时，「库里没有这个哈希」与「这把 key 上周过期了」
+// 是两条完全不同的排查路径（见 internal/auth 的包注释）。而这两者在响应上
+// **必须**一致——401 的文案对所有原因都是同一句，区分开等于送出一个
+// 「这个 key 存在吗」的探测器（见 TestUnauthorized）。所以区分只能落在指标上，
+// 这条钉住的就是「Reason 有没有真的传到 larkax_auth_failures_total 的标签里」。
+//
+// # 为什么比增量而不是取值
+//
+// 增量点读的是包级的 observe.Metrics（见 internal/observe/metrics.go 的
+// 「为什么计数器是包级的一份」）：注册表不在本包的构造点手里，夹具换不掉它。
+// 所以这里比的是**增量**，而包内用例默认串行，两次读取之间没有别的请求在跑。
+// 这与 internal/gateway/hooks_test.go 里那条「只能读全局计数器」是同一个形状。
+func TestAuthFailureReasonIsCountedPerReason(t *testing.T) {
+	// 全部会落到的取值都进快照，再逐条比增量。只断言「期望的那条加了一」
+	// 是不够的：那样的话，同时给别的取值也加数照样绿——而「两种失败落进
+	// 同一条序列」正是这条用例要防的事。
+	all := []string{
+		string(auth.ReasonMissingCredential),
+		string(auth.ReasonMalformedCredential),
+		string(auth.ReasonKeyNotFound),
+		string(auth.ReasonKeyDisabled),
+		string(auth.ReasonKeyRevoked),
+		string(auth.ReasonKeyInactive),
+		string(auth.ReasonKeyExpired),
+		string(auth.ReasonUserInactive),
+		reasonUnclassified,
+	}
+
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "库里没有这个哈希",
+			err:  &auth.Error{Reason: auth.ReasonKeyNotFound},
+			want: string(auth.ReasonKeyNotFound),
+		},
+		{
+			name: "这把 key 上周过期了",
+			err:  &auth.Error{Reason: auth.ReasonKeyExpired},
+			want: string(auth.ReasonKeyExpired),
+		},
+		// 哨兵可以不带 *auth.Error 地返回：errors.Is 认得它，errors.As 认不出，
+		// 于是这一类的原因取不到。单列一个取值，而不是让它静默地消失——
+		// 不计的话，「归不了类」与「这条路径没接上」在指标上都是什么都没有。
+		{
+			name: "只带哨兵",
+			err:  auth.ErrUnauthenticated,
+			want: reasonUnclassified,
+		},
+		// 零值的 *auth.Error：类型对得上，原因却没填。空串会在采集端变成一条
+		// reason="" 的序列，读的人不知道那是什么意思，所以与上一种同样处理。
+		{
+			name: "Reason 没填",
+			err:  &auth.Error{},
+			want: reasonUnclassified,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, _ := newTestHandler()
+			h.Auth = &fakeAuth{err: tc.err}
+
+			before := authFailureCounts(all)
+			rec := post(h, PathChatCompletions, validBody)
+			after := authFailureCounts(all)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("状态码 = %d，期望 401", rec.Code)
+			}
+			for _, reason := range all {
+				want := before[reason]
+				if reason == tc.want {
+					want++
+				}
+				if after[reason] != want {
+					t.Errorf("reason=%q 的计数 %d → %d，期望 %d："+
+						"这一条 401 只该落进 reason=%q 那一条序列",
+						reason, before[reason], after[reason], want, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// authFailureCounts 取一组标签值当前的计数。
+func authFailureCounts(reasons []string) map[string]uint64 {
+	out := make(map[string]uint64, len(reasons))
+	for _, r := range reasons {
+		out[r] = observe.Metrics.AuthFailures.With(r).Value()
+	}
+	return out
 }
 
 // 库故障不是凭证问题，不能回 401。
