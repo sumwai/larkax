@@ -31,6 +31,18 @@ import (
 // 不是「这把 key 有多强」。
 const testDoctorKey = "test-key-placeholder"
 
+// printDoctorLive 让用例只喂「真打上游」那一项，就拿到默认输出里那一行的形状。
+//
+// 它走的是与整份报告**同一条**打印路径（`printDoctorLines`），默认输出的形状改了
+// 这里也会跟着红。要有这个入口是因为那一项的几条分支（没开 --live、请求发不出去、
+// 成功、被谁拒了）各要一份输出，而整份报告要连库才跑得起来。
+//
+// 它**只能**写在测试文件里：deadcode 门禁不把测试当调用点，写在 doctor.go 里
+// 会被判成「没人调的函数」。
+func printDoctorLive(w io.Writer, l doctorLive, verbose bool) {
+	printDoctorLines(w, []doctorLine{doctorLiveLine(l)}, verbose)
+}
+
 // ── 第 1 项：数据库 ─────────────────────────────────────────────────────
 
 // TestDoctorDatabaseCheckDoesNotCreateTheVersionTable 钉住第 1 项的只读承诺。
@@ -202,7 +214,7 @@ func TestDoctorCatalogFlagsChannelModelMismatch(t *testing.T) {
 	got := checkDoctorCatalog(in)
 	assertContainsFragments(t, got.findings,
 		"渠道 7（my-upstream）", "渠道 9（other）", `"claude-xx"`, "目录里没有这个名字")
-	if strings.Contains(strings.Join(got.findings, "\n"), "渠道 8") {
+	if strings.Contains(findingsText(got.findings), "渠道 8") {
 		t.Error("disabled 的渠道不该出现在问题里：它本来就不接请求")
 	}
 	if got.status() != doctorFailed {
@@ -319,7 +331,7 @@ func TestDoctorWalletsFlagsEachCondition(t *testing.T) {
 			got := checkDoctorWallets(doctorChainInput{users: tc.users})
 			assertContainsFragments(t, got.findings, tc.want...)
 			if tc.name == "有钱包行但余额都是 0" {
-				if strings.Contains(strings.Join(got.findings, "\n"), "没有钱包行") {
+				if strings.Contains(findingsText(got.findings), "没有钱包行") {
 					t.Error("有钱包行时不该报「没有钱包行」")
 				}
 			}
@@ -350,16 +362,28 @@ func TestDoctorSkippedIsNotPassed(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	printDoctorReport(&buf, rep)
+	printDoctorReport(&buf, rep, false)
 	out := buf.String()
-	if !strings.Contains(out, "没跑成：没有可查的对象") {
-		t.Errorf("「没跑成」的原因没有打出来：\n%s", out)
+	// 默认输出里这一项就是那一行：状态符说明「没跑成」，结论是原因本身。
+	if !strings.Contains(out, "  ! 模型目录  没有可查的对象\n") {
+		t.Errorf("「没跑成」那一项的默认行不对：\n%s", out)
 	}
-	if !strings.Contains(out, "结论：没跑成") {
-		t.Errorf("「没跑成」这一项的结论行没有打出来：\n%s", out)
+	if !strings.Contains(out, "  ✓ 数据库    通过\n") {
+		t.Errorf("通过项的默认行该跟着标题对齐：\n%s", out)
 	}
-	if !strings.Contains(out, "汇总：通过 5 项、不通过 0 项、没跑成 1 项") {
+	if !strings.Contains(out, "doctor: 0 项异常, 1 项跳过, 5 项通过 (运行 -v 查看细节)") {
 		t.Errorf("汇总行不对：\n%s", out)
+	}
+
+	// 细节不是删了，是挪进 -v：原因与结论都要还在。
+	buf.Reset()
+	printDoctorReport(&buf, rep, true)
+	verbose := buf.String()
+	if !strings.Contains(verbose, "没跑成：没有可查的对象") {
+		t.Errorf("-v 里「没跑成」的原因没有打出来：\n%s", verbose)
+	}
+	if !strings.Contains(verbose, "结论：没跑成") {
+		t.Errorf("-v 里那一项的结论没有打出来：\n%s", verbose)
 	}
 }
 
@@ -389,9 +413,9 @@ func TestDoctorKeepsDBUnreachExitCode(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	printDoctorReport(&buf, rep)
+	printDoctorReport(&buf, rep, false)
 	out := buf.String()
-	if !strings.Contains(out, "汇总：通过 0 项、不通过 0 项、没跑成 6 项") {
+	if !strings.Contains(out, "doctor: 0 项异常, 6 项跳过, 0 项通过 (运行 -v 查看细节)") {
 		t.Errorf("连不上库时六项都该报「没跑成」：\n%s", out)
 	}
 	// 那一句错误原文只出现一次：六项各抄一遍会把报告撑成四十行，
@@ -470,11 +494,13 @@ func TestDoctorLiveSendsRequestAndPrintsResult(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	printDoctorLive(&buf, got)
+	printDoctorLive(&buf, got, true)
 	out := buf.String()
+	// 默认那一行要能独立读懂：状态符 + 标题 + 「通过了、状态码与用量是多少」。
+	// 入口与模型是 -v 的细节，所以两处都断言。
 	for _, want := range []string{
-		"POST " + srv.URL + doctorPathChat, "模型：claude-x",
-		"200", "prompt=9 completion=2", "结论：通过",
+		"✓ 上游连通", "通过（200", "用量 prompt=9 completion=2",
+		"入口：POST " + srv.URL + doctorPathChat, "模型：claude-x",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("输出里没有 %q：\n%s", want, out)
@@ -767,12 +793,12 @@ func TestDoctorLiveReportsUpstreamRejection(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	printDoctorLive(&buf, got)
+	printDoctorLive(&buf, got, true)
 	out := buf.String()
 	if !strings.Contains(out, "503") || !strings.Contains(out, got.errMsg) {
 		t.Errorf("输出里该有状态码与错误说明：\n%s", out)
 	}
-	if !strings.Contains(out, "结论：不通过") {
+	if !strings.Contains(out, "✗ 上游连通") {
 		t.Errorf("结论该是不通过：\n%s", out)
 	}
 	if !strings.Contains(out, "在网关入口就被拒了") {
@@ -885,7 +911,7 @@ func TestDoctorLiveAttributesRejection(t *testing.T) {
 			})
 
 			var buf bytes.Buffer
-			printDoctorLive(&buf, got)
+			printDoctorLive(&buf, got, true)
 			out := buf.String()
 
 			if !strings.Contains(out, "谁拒的：") {
@@ -896,6 +922,17 @@ func TestDoctorLiveAttributesRejection(t *testing.T) {
 			}
 			if strings.Contains(out, tc.notWant) {
 				t.Errorf("归因不该含 %q：\n%s", tc.notWant, out)
+			}
+
+			// 归因还必须在**默认那一行**上（不看 -v 也读得到）：#381 那次
+			// 事故的现场就是它只在细节里，而人看的是默认输出。
+			var plain bytes.Buffer
+			printDoctorLive(&plain, got, false)
+			if !strings.Contains(plain.String(), tc.want) {
+				t.Errorf("默认那一行里就该有归因 %q：\n%s", tc.want, plain.String())
+			}
+			if strings.Contains(plain.String(), tc.notWant) {
+				t.Errorf("默认那一行不该含 %q：\n%s", tc.notWant, plain.String())
 			}
 		})
 	}
@@ -925,9 +962,16 @@ func TestDoctorLivePreviewsNonJSONBody(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	printDoctorLive(&buf, got)
+	printDoctorLive(&buf, got, true)
 	if !strings.Contains(buf.String(), "502 Bad Gateway") {
 		t.Errorf("输出里该有响应体的内容：\n%s", buf.String())
+	}
+
+	// 响应体在 -v 里，但默认那一行必须已经说了「不合格」，而不是等 -v。
+	var plain bytes.Buffer
+	printDoctorLive(&plain, got, false)
+	if !strings.Contains(plain.String(), "✗ 上游连通") {
+		t.Errorf("默认那一行该是失败：\n%s", plain.String())
 	}
 }
 
@@ -966,10 +1010,11 @@ func TestDoctorLiveReportsSendFailure(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	printDoctorLive(&buf, got)
+	printDoctorLive(&buf, got, true)
 	out := buf.String()
-	if !strings.Contains(out, "请求没发出去") || !strings.Contains(out, "结论：不通过") {
-		t.Errorf("输出该说清是没发出去、且结论为不通过：\n%s", out)
+	// 「没发出去」与「发出去了、上游拒了」是两件事，结论里就得分开说。
+	if !strings.Contains(out, "✗ 上游连通  请求没发出去：") {
+		t.Errorf("结论该说清是没发出去：\n%s", out)
 	}
 	if strings.Contains(out, testDoctorKey) {
 		t.Errorf("凭证出现在了输出里：\n%s", out)
@@ -991,8 +1036,10 @@ func TestDoctorLiveDisabledByDefault(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	printDoctorLive(&buf, got)
-	if !strings.Contains(buf.String(), "没跑：要加 --live") {
+	printDoctorLive(&buf, got, false)
+	// 没跑的那一档是 `-` 而不是 `!`：它不是「没查成」，是这一项本来就不在
+	// 这次范围内（要 --live 才跑）。
+	if !strings.Contains(buf.String(), "  - 上游连通  没跑：加 --live") {
 		t.Errorf("默认那一次该打一行「没跑」：\n%s", buf.String())
 	}
 }
@@ -1274,19 +1321,24 @@ func TestDoctorIntegrationPrintsEverySection(t *testing.T) {
 	if got := exitCode(err); got != exitFailure {
 		t.Errorf("退出码 = %d，期望 %d", got, exitFailure)
 	}
+	// 六项的标题都在，加最后那一项「上游连通」：默认输出里每项就一行，
+	// 所以标题是唯一的定位手段。
 	for _, title := range []string{
-		"[1/6] 数据库", "[2/6] 渠道", "[3/6] 模型目录",
-		"[4/6] 别名", "[5/6] 计价规则", "[6/6] 钱包", "[真打上游]",
+		"数据库", "渠道", "模型目录", "别名", "计价规则", "钱包", "上游连通",
 	} {
 		if !strings.Contains(out, title) {
 			t.Errorf("报告里没有 %q：\n%s", title, out)
 		}
 	}
-	if !strings.Contains(out, "汇总：通过 ") {
+	if !strings.Contains(out, "doctor: ") {
 		t.Errorf("报告里没有汇总行：\n%s", out)
 	}
-	if !strings.Contains(out, "没跑：要加 --live") {
+	if !strings.Contains(out, "- 上游连通  没跑：加 --live") {
 		t.Errorf("没开 --live 时该打一行「没跑」：\n%s", out)
+	}
+	// 默认输出里不该出现 -v 的细节：`检查：` 是每一段细节的第一行。
+	if strings.Contains(out, "检查：") {
+		t.Errorf("默认输出里混进了 -v 的细节：\n%s", out)
 	}
 }
 
@@ -1319,10 +1371,16 @@ func TestDoctorIntegrationLiveAgainstFakeGateway(t *testing.T) {
 	if gotPath != doctorPathChat {
 		t.Fatalf("假网关收到的路径 = %q，期望 %q", gotPath, doctorPathChat)
 	}
-	liveSection := doctorSection(t, out, "[真打上游]")
-	for _, want := range []string{"POST " + srv.URL + doctorPathChat, canonical, "prompt=4 completion=1", "结论：通过"} {
+	// 状态符按整份输出断言：doctorSection 是从标题开始切的，会把行首那两格
+	// 与状态符一起切掉，而从那里开始正好是最容易错的地方。
+	if !strings.Contains(out, "✓ 上游连通") {
+		t.Errorf("真打上游那一行的状态符不对：\n%s", out)
+	}
+	liveSection := doctorSection(t, out, "上游连通")
+	for _, want := range []string{"通过（200", "响应里的模型是 " + canonical,
+		"用量 prompt=4 completion=1"} {
 		if !strings.Contains(liveSection, want) {
-			t.Errorf("真打上游那一节里没有 %q：\n%s", want, liveSection)
+			t.Errorf("真打上游那一行里没有 %q：\n%s", want, liveSection)
 		}
 	}
 	if strings.Contains(out, testDoctorKey) {
@@ -1336,12 +1394,27 @@ func TestDoctorIntegrationLiveAgainstFakeGateway(t *testing.T) {
 //
 // 按**片段**而不是整句比对：整句断言会把措辞的每一次调整都变成一次失败，
 // 而这里要钉住的是「有没有把这件事指出来、有没有点名到具体对象」。
-func assertContainsFragments(t *testing.T, findings []string, want ...string) {
+//
+// 片段在 headline 与 detail 两截里找（见 doctorProblem）：一截进默认那一行、
+// 一截进 -v，拆开存是输出的事，不该让断言跟着分家。
+// findingsText 把问题清单拼成一段文本，供「不该出现」这类断言用。
+//
+// 走 doctorProblem.String() 把两截拼回去：断言关心的是「这条问题说了什么」，
+// 而不是它哪半句进默认输出、哪半句进 -v。
+func findingsText(findings []doctorProblem) string {
+	lines := make([]string, 0, len(findings))
+	for _, f := range findings {
+		lines = append(lines, f.String())
+	}
+	return strings.Join(lines, "\n")
+}
+
+func assertContainsFragments(t *testing.T, findings []doctorProblem, want ...string) {
 	t.Helper()
 	for _, fragment := range want {
 		found := false
 		for _, f := range findings {
-			if strings.Contains(f, fragment) {
+			if strings.Contains(f.String(), fragment) {
 				found = true
 				break
 			}

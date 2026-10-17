@@ -384,7 +384,7 @@ func printCreatedAlias(stdout, stderr io.Writer, id int64, req catalog.CreateAli
 // printAliasList 打印别名清单。
 func printAliasList(w io.Writer, aliases []catalog.Alias) {
 	if len(aliases) == 0 {
-		_, _ = fmt.Fprintln(w, "没有别名。")
+		_, _ = fmt.Fprintln(w, "暂无别名。可使用 larkaxctl alias add 添加。")
 		return
 	}
 
