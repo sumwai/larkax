@@ -183,7 +183,7 @@ func TestPrintLedgerVerifyReport(t *testing.T) {
 		Findings: []store.VerifyFinding{{
 			TxnID: txn, Entries: entries, Err: errors.New("第 1 条分录: 科目 upstream_cost 的金额为零"),
 		}},
-	})
+	}, nil)
 	out := bad.String()
 	for _, want := range []string{
 		"校验 2 笔交易（5 条分录）",
@@ -205,7 +205,7 @@ func TestPrintLedgerVerifyReport(t *testing.T) {
 	}
 
 	var clean bytes.Buffer
-	printLedgerVerifyReport(&clean, &store.VerifyReport{CheckedTxns: 3, CheckedEntries: 8})
+	printLedgerVerifyReport(&clean, &store.VerifyReport{CheckedTxns: 3, CheckedEntries: 8}, nil)
 	if !strings.Contains(clean.String(), "全部自洽") {
 		t.Errorf("干净的一轮应当明说全部自洽：%q", clean.String())
 	}
@@ -218,7 +218,7 @@ func TestPrintLedgerVerifyReport(t *testing.T) {
 
 	// 一笔都没校验到时**不能**说「全部自洽」——那正是「跳过与通过长得一样」。
 	var none bytes.Buffer
-	printLedgerVerifyReport(&none, &store.VerifyReport{})
+	printLedgerVerifyReport(&none, &store.VerifyReport{}, nil)
 	if strings.Contains(none.String(), "全部自洽") {
 		t.Errorf("一笔都没校验到时不该说全部自洽：%q", none.String())
 	}
@@ -497,6 +497,51 @@ func TestLedgerVerifyFindsBadEntryAndExitsNonZero(t *testing.T) {
 	// 那一笔合法的（good）不该被带出来。
 	if strings.Contains(out, string(good)) {
 		t.Errorf("合法的那一笔被报出来了：\n%s", out)
+	}
+}
+
+// 校验到一半读不下去时，stdout 不能说「全部自洽。」。
+//
+// 这是 issue 里复现的那条路径：所有交易都读不出来时 CheckedTxns == 0，
+// 改动前那一行「校验 0 笔交易（0 条分录）。」与「区间里确实一笔都没有」
+// 逐字相同，而它后面还跟着一条错误——读日志的人只会看见前面那句。
+func TestLedgerVerifyMidwayFailureIsNotClean(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	at, from, to := ledgerSlot()
+	// 金额超出 money 的表示范围：读回来解析不了，Verify 就此停下。
+	// 直接写原始字符串——money.Amount 装不下这个数，用例要的正是库里
+	// 存在一个读不回来的值。
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO ledger_entries (txn_id, account, asset, amount, entry_type, created_at)
+		VALUES ($1, $2, 'CNY', $3::numeric, 'adjustment', $4)`,
+		string(ledger.NewTxnID()), ledger.PlatformRevenueAccount().String(),
+		"184467440736.00000000", at); err != nil {
+		t.Fatalf("写溢出金额的分录失败: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM ledger_entries WHERE created_at >= $1 AND created_at < $2`, from, to); err != nil {
+			t.Fatalf("清理用例的分录失败: %v", err)
+		}
+	})
+
+	var err error
+	out, _ := captureStreams(t, func() {
+		err = runLedgerVerify([]string{"--from", from.Format(time.RFC3339), "--to", to.Format(time.RFC3339)})
+	})
+	if err == nil {
+		t.Fatalf("读不下去时应当以非零退出码收尾，输出：\n%s", out)
+	}
+	if code := exitCode(err); code != exitFailure {
+		t.Errorf("退出码 = %d，期望 %d", code, exitFailure)
+	}
+	if strings.Contains(out, "全部自洽") {
+		t.Errorf("没跑完的一轮不该说全部自洽：\n%s", out)
+	}
+	if !strings.Contains(out, "没跑完") {
+		t.Errorf("没跑完的一轮要在 stdout 上说清楚：\n%s", out)
 	}
 }
 

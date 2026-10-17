@@ -216,7 +216,11 @@ func runReconcile(args []string) error {
 	report, err := store.New(db).Reconcile(ctx, rc, store.LogAlerts(logger))
 	// 报告先打，再处理错误：跑了一半的结果比一句「失败了」有用得多——
 	// 它至少说明比到了哪里、已经发现了什么。
-	printReconcileReport(os.Stdout, report)
+	//
+	// err 一并交给打印函数：它决定这一轮的汇总行是「跑完了」还是「没跑完」。
+	// 只看报告分不出这两种情况——中途失败时 CheckedWallets 也是 0、Findings
+	// 也是空的，与「跑完了、范围内确实没有钱包」逐字相同。
+	printReconcileReport(os.Stdout, report, err)
 	if err != nil {
 		return err
 	}
@@ -244,10 +248,27 @@ const reconcileTimeout = 30 * time.Minute
 
 // printReconcileReport 把一轮对账的结果打到 w。
 //
+// runErr 是这一轮对账返回的错误，非空表示**没跑完**：报告里只有失败之前
+// 已经比出来的那部分。它必须传进来，因为「没跑完」这件事报告本身说不出来
+// ——中途失败时 CheckedWallets 是 0、Findings 是空的，与「跑完了、范围内
+// 确实没有钱包」逐字相同。两条路径的 stdout 因此不能同形：失败时汇总行点明
+// 「没跑完」，并且不出现「没有不一致。」——那句只有跑完才成立。
+//
+// # 为什么是「调用点传 err」而不是别的做法
+//
+//   - 把 err 塞进 store.Report 的一个字段：那等于让 store 在报告里记一个
+//     它自己返回的错误的副本，同一个事实有两个来源，迟早对不上；而且
+//     Report 还要落库（reconcile_runs），这个字段在那里没有对应列。
+//   - 失败时不打印汇总行：与「报告先打」的设计冲突。失败之前比过几个钱包、
+//     报出了哪几条不一致，恰恰是这一轮最有用的部分，不能一起丢掉。
+//   - 按 CheckedWallets == 0 推断「没跑完」：那是拿计数猜原因。一轮正常
+//     跑完而范围内没有钱包时它同样是 0，而那时「比对=0 行」是真话，必须
+//     照常打出来。判据只能是 err。
+//
 // 每处写入的返回值都显式丢弃（`_, _ =`）：目标是 stdout，写不进去只可能是
 // 下游管道断了（`larkaxctl reconcile | head` 就是最常见的一种），
 // 那种情况下重试与报错都没有意义，而它对这一轮对账的结论也毫无影响。
-func printReconcileReport(w io.Writer, r *store.Report) {
+func printReconcileReport(w io.Writer, r *store.Report, runErr error) {
 	if r == nil {
 		return
 	}
@@ -258,10 +279,25 @@ func printReconcileReport(w io.Writer, r *store.Report) {
 	_, _ = fmt.Fprintf(w, "对账 run_id=%d %s 起点=%s 比对=%d 行\n",
 		r.RunID, scope, r.Watermark.Format(time.RFC3339), r.CheckedWallets)
 
+	if runErr != nil {
+		// 已经比出来的不一致照常列出来（它仍然是真的），只是不能收在一句
+		// 「没有不一致」上：这一轮没跑完，没比到的那些行什么也没说明。
+		_, _ = fmt.Fprintln(w, "这一轮没跑完，上面的数字只到失败时为止，没比过的行仍然未知（原因见 stderr）。")
+		if len(r.Findings) > 0 {
+			printReconcileFindings(w, r)
+		}
+		return
+	}
+
 	if len(r.Findings) == 0 {
 		_, _ = fmt.Fprintln(w, "没有不一致。")
 		return
 	}
+	printReconcileFindings(w, r)
+}
+
+// printReconcileFindings 把这一轮发现的不一致逐条打出来。
+func printReconcileFindings(w io.Writer, r *store.Report) {
 	_, _ = fmt.Fprintf(w, "不一致 %d 条（余额 %d、冻结 %d、畸形科目 %d、陈旧预留 %d）：\n",
 		len(r.Findings), r.BalanceMismatches(), r.FrozenMismatches(),
 		r.MalformedAccounts(), r.StaleReservations())
