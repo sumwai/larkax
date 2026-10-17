@@ -179,16 +179,25 @@ go run ./cmd/larkaxctl snapshot cleanup             # 执行删除
 
 ```sh
 # 允许表：哪些字段放行、哪些替换成占位、每一行为什么这么定。不连库。
-go run ./cmd/larkaxctl snapshot allowlist
+go run ./cmd/larkaxctl snapshot allowlist                          # 两条表面都打
 go run ./cmd/larkaxctl snapshot allowlist --direction request
+go run ./cmd/larkaxctl snapshot allowlist --surface decision
 
 # 读回一条快照。--actor 与 --reason 都必填，见下。
 go run ./cmd/larkaxctl snapshot show <request_id> --actor <用户 ID 或用户名> --reason <文本>
 
 # 试脱敏：从 stdin 读一段报文，看它会变成什么骨架。不连库。
 echo '{"model":"...","messages":[...]}' | \
-  go run ./cmd/larkaxctl snapshot redact --direction request
+  go run ./cmd/larkaxctl snapshot redact --direction request --surface chat
 ```
+
+`--surface` 选的是**哪条表面**：`chat`（`/v1/chat/completions` 那条路）或
+`decision`（`/v1/systemone`）。两条表面各有一张允许表，字段集合不同
+（决策那条只留判据，清单见 [request-retention.md](request-retention.md)）。
+`allowlist` 不给 `--surface` 时两条都打，`redact` 不给时按 `chat` 试——
+试脱敏吃的是 chat 形状的报文，默认成 chat 才不会让人拿一份 chat 报文去撞
+决策表然后以为规则写漏了。名字不认识时命令**报错退出**，不静默回退：
+打出一份看着正常的允许表，比报错更坏。
 
 `show` 是读**敏感数据**的动作，所以每一次读都会往 `snapshot_access_log`
 写一行（谁、什么时候、什么理由、读了哪一条）。写日志与读快照在同一个事务里：

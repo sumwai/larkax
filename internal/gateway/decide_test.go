@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sumwai/larkax/internal/channel"
@@ -166,8 +167,10 @@ func TestDecideResolvesUpstreamNamePerChannel(t *testing.T) {
 // 可重试的失败要换下一个候选，且只有最后成功的那一个进账单。
 func TestDecideRetriesNextCandidate(t *testing.T) {
 	d := &fakeDecider{
-		resp:    decisionResponse(),
-		failFor: map[int64]error{1: &channel.ErrUpstream{StatusCode: 503, Retryable: true}},
+		resp: decisionResponse(),
+		failFor: map[int64]error{1: &channel.ErrUpstream{
+			StatusCode: 503, Retryable: true, GotResponse: true,
+		}},
 	}
 	h := newDecideHarness(t, d, func(h *harness) {
 		h.candidates.cands = []route.Candidate{candidate(1, "gpt-4o"), candidate(2, "gpt-4o")}
@@ -264,20 +267,239 @@ func TestDecideWithoutExecutor(t *testing.T) {
 	}
 }
 
-// 决策这条路径**不采请求快照**（脱敏器的允许表按 channel.Request 的形状建）。
-// 这一条钉住「不采」是有意的：哪天有人把快照接上，这条用例会红，
-// 那时要一并把 state/questions 的脱敏规则想清楚。
-func TestDecideTakesNoSnapshot(t *testing.T) {
+// fakeDecisionRedactor 是决策那条表面两个脱敏接口的替身。
+//
+// # 它记的是**足迹本身**，不是骨架
+//
+// 这一层要断言的是「网关交给脱敏器的判据对不对」：候选集合带没带上、
+// 选中的是哪一个、降级经过记全了没有。骨架长什么样是另一层的事，
+// 由 internal/snapshotwire 与 internal/snapshot 的用例管。
+type fakeDecisionRedactor struct {
+	mu       sync.Mutex
+	traces   []*DecisionTrace
+	outcomes []*DecisionOutcome
+	err      error
+}
+
+func (f *fakeDecisionRedactor) RedactDecisionRequest(t *DecisionTrace) (*Snapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.traces = append(f.traces, t)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &Snapshot{Skeleton: map[string]any{"surface": "decision"}, Version: 1}, nil
+}
+
+func (f *fakeDecisionRedactor) RedactDecisionResponse(o *DecisionOutcome) (*Snapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.outcomes = append(f.outcomes, o)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &Snapshot{Skeleton: map[string]any{"surface": "decision"}, Version: 1}, nil
+}
+
+func (f *fakeDecisionRedactor) firstTrace(t *testing.T) *DecisionTrace {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.traces) == 0 {
+		t.Fatal("脱敏器没有收到请求方向的足迹")
+	}
+	return f.traces[0]
+}
+
+func (f *fakeDecisionRedactor) firstOutcome(t *testing.T) *DecisionOutcome {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.outcomes) == 0 {
+		t.Fatal("脱敏器没有收到响应方向的足迹")
+	}
+	return f.outcomes[0]
+}
+
+// 决策这条路径**两个方向都采**：请求方向记「当时手上有哪些候选」，
+// 响应方向记「实际选了谁、试过谁、为什么」。
+//
+// 它与 chat 那条路共用 request / response 两个方向取值，靠骨架里的 surface
+// 标量区分（见 internal/snapshotwire）——所以这两行落在同一张表、同一对方向里，
+// 与账单用同一个 request_id 关联。
+func TestDecideCapturesBothDirections(t *testing.T) {
 	d := &fakeDecider{resp: decisionResponse()}
 	h := newDecideHarness(t, d)
+	req := decisionBilling()
+
+	if _, err := h.gw.Decide(context.Background(), req, decision()); err != nil {
+		t.Fatalf("Decide 出错: %v", err)
+	}
+
+	// 落库是异步的，先等两条都到。
+	waitFor(t, "两个方向的快照都落库", func() bool { return h.snapshots.count() == 2 })
+	if n := len(h.snapshots.byDirection("request")); n != 1 {
+		t.Errorf("请求方向的快照数 = %d，期望 1", n)
+	}
+	if n := len(h.snapshots.byDirection("response")); n != 1 {
+		t.Errorf("响应方向的快照数 = %d，期望 1", n)
+	}
+	// user_id 必须是**发起这次请求的用户**：这一列没有外键，填成商家或填 0
+	// 都插得进去、不报错，所以只能断言真正落库的那个值。
+	for _, s := range h.snapshots.saved {
+		if s.UserID != req.UserID {
+			t.Errorf("方向 %s 的快照 user_id = %d，期望 %d", s.Direction, s.UserID, req.UserID)
+		}
+	}
+
+	// 请求方向交出去的是**候选集合**：这是这条表面的判据主体。
+	trace := h.decisionRedactor.firstTrace(t)
+	if trace.Model != req.CanonicalModel {
+		t.Errorf("足迹里的模型名 = %q，期望 %q", trace.Model, req.CanonicalModel)
+	}
+	if len(trace.Candidates) == 0 {
+		t.Fatal("请求方向的足迹没有候选集合——判据的主体就没了")
+	}
+	if trace.Candidates[0].ChannelID != 1 {
+		t.Errorf("候选的 channel_id = %d，期望 1", trace.Candidates[0].ChannelID)
+	}
+
+	// 响应方向交出去的是「选了谁」。
+	outcome := h.decisionRedactor.firstOutcome(t)
+	if !outcome.Succeeded {
+		t.Error("上游成功了，结局应当记成成功")
+	}
+	if outcome.SelectedChannelID != 1 {
+		t.Errorf("选中的渠道 = %d，期望 1", outcome.SelectedChannelID)
+	}
+	if outcome.UpstreamModel != "gpt-4o" {
+		t.Errorf("上游模型名 = %q，期望 gpt-4o（别名按同名回落）", outcome.UpstreamModel)
+	}
+	if outcome.Model != req.CanonicalModel {
+		t.Errorf("结局里的模型名 = %q，期望 %q", outcome.Model, req.CanonicalModel)
+	}
+	if len(outcome.Candidates) == 0 {
+		t.Error("响应方向也要带候选集合：否则「为什么不是另一个」要去 join 另一行")
+	}
+	if len(outcome.Attempts) != 1 || !outcome.Attempts[0].Succeeded {
+		t.Errorf("尝试记录 = %+v，期望一条成功的", outcome.Attempts)
+	}
+}
+
+// 换渠道重试的经过要逐条记下来，且每一条的失败分类与账单**同源**。
+//
+// 「降级到了哪一步、每一步为什么不成」是响应方向存在的理由；只记最后一条的话，
+// 一次三次重试与一次直接失败在快照上长得一样。
+func TestDecisionSnapshotRecordsDegradationPerAttempt(t *testing.T) {
+	d := &fakeDecider{
+		resp: decisionResponse(),
+		failFor: map[int64]error{1: &channel.ErrUpstream{
+			StatusCode: 503, Retryable: true, GotResponse: true,
+		}},
+	}
+	h := newDecideHarness(t, d, func(h *harness) {
+		h.candidates.cands = []route.Candidate{candidate(1, "gpt-4o"), candidate(2, "gpt-4o")}
+	})
 
 	if _, err := h.gw.Decide(context.Background(), decisionBilling(), decision()); err != nil {
 		t.Fatalf("Decide 出错: %v", err)
 	}
-	// 上报是异步的，但快照那一路在决策这条路径上**根本不会被调用**：
-	// 它挂在 snapshotAsync 上，而 Decide 不调它。
+
+	outcome := h.decisionRedactor.firstOutcome(t)
+	if len(outcome.Attempts) != 2 {
+		t.Fatalf("尝试记录 %d 条，期望 2（第一个失败、第二个成功）", len(outcome.Attempts))
+	}
+	first := outcome.Attempts[0]
+	if first.Succeeded {
+		t.Error("第一个候选回的是 503，不该记成成功")
+	}
+	if !first.Retryable {
+		t.Error("503 值得换下一个候选，retryable 该是 true")
+	}
+	if first.UpstreamStatus == nil || *first.UpstreamStatus != 503 {
+		t.Errorf("第一条尝试的状态码 = %v，期望 503", first.UpstreamStatus)
+	}
+	// 分类与账单上那一列同一套取值（见 upstreamEvidence）。
+	if first.ErrorKind == nil || *first.ErrorKind == "" {
+		t.Error("失败的那次尝试要有分类：降级原因靠它说清失败发生在哪一段")
+	}
+	if !outcome.Attempts[1].Succeeded {
+		t.Error("第二个候选成功了，该记成成功")
+	}
+	if outcome.SelectedChannelID != 2 {
+		t.Errorf("选中的渠道 = %d，期望 2", outcome.SelectedChannelID)
+	}
+}
+
+// 全部候选都失败时也要落一条响应方向的快照，且**没有** selected。
+//
+// route.Result.Channel 在失败路径上是「最后试过的那个」（见那里的注释），
+// 照抄进 selected 会让一次全军覆没读成一次成功选路。
+func TestDecisionSnapshotWithoutSelection(t *testing.T) {
+	d := &fakeDecider{err: &channel.ErrUpstream{
+		StatusCode: 500, Retryable: true, GotResponse: true,
+	}}
+	h := newDecideHarness(t, d)
+
+	if _, err := h.gw.Decide(context.Background(), decisionBilling(), decision()); err == nil {
+		t.Fatal("期望报错")
+	}
+
+	outcome := h.decisionRedactor.firstOutcome(t)
+	if outcome.Succeeded {
+		t.Error("上游全失败，不该记成成功")
+	}
+	if outcome.SelectedChannelID != 0 || outcome.UpstreamModel != "" {
+		t.Errorf("没有选中项时两者该是零值，实际 %d / %q",
+			outcome.SelectedChannelID, outcome.UpstreamModel)
+	}
+	// 整次请求的失败证据要落到快照那两列上（与账单同源）。
+	if outcome.UpstreamStatus == nil || *outcome.UpstreamStatus != 500 {
+		t.Errorf("上游状态码 = %v，期望 500", outcome.UpstreamStatus)
+	}
+	if outcome.ErrorKind == nil || *outcome.ErrorKind == "" {
+		t.Error("失败分类要落到快照那一列上")
+	}
+}
+
+// 没接决策脱敏器、或没接落库层时不采集，且不报错——留痕是可选能力。
+func TestDecisionSnapshotOptional(t *testing.T) {
+	cases := []struct {
+		name string
+		off  func(gw *Gateway)
+	}{
+		{"没接脱敏器", func(gw *Gateway) { gw.DecisionRedactor = nil }},
+		{"没接落库层", func(gw *Gateway) { gw.Snapshots = nil }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &fakeDecider{resp: decisionResponse()}
+			h := newDecideHarness(t, d)
+			tc.off(h.gw)
+
+			if _, err := h.gw.Decide(context.Background(), decisionBilling(), decision()); err != nil {
+				t.Fatalf("没配快照不该影响决策请求: %v", err)
+			}
+			if n := h.snapshots.count(); n != 0 {
+				t.Errorf("不该落任何快照，实际 %d 条", n)
+			}
+		})
+	}
+}
+
+// 脱敏失败就丢快照，绝不回落成存原文——两个方向都要钉。
+//
+// 只让请求方向出错的话，「一条都没落下」证明不了响应那一条也是被丢掉的。
+func TestDecisionRedactionFailureDropsSnapshot(t *testing.T) {
+	d := &fakeDecider{resp: decisionResponse()}
+	h := newDecideHarness(t, d)
+	h.decisionRedactor.err = errors.New("脱敏器出错")
+
+	if _, err := h.gw.Decide(context.Background(), decisionBilling(), decision()); err != nil {
+		t.Fatalf("脱敏失败不该影响决策请求: %v", err)
+	}
 	if n := h.snapshots.count(); n != 0 {
-		t.Errorf("快照数 = %d，期望 0", n)
+		t.Errorf("脱敏失败应当丢快照，实际落了 %d 条", n)
 	}
 }
 

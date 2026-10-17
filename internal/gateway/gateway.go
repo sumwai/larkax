@@ -245,6 +245,16 @@ type Gateway struct {
 	Redactor  Redactor
 	Snapshots SnapshotSink
 
+	// DecisionRedactor 是决策那条表面（见 decide.go）的脱敏器，可以为空。
+	//
+	// 与 Redactor 分开而不是合并：两者收的类型完全不同（channel.Request 与
+	// systemone 的形状），合成一个接口会让每一个只服务其中一条路的实现
+	// 都多出两个用不上的方法。见 DecisionRedactor 的注释。
+	//
+	// 它与 Snapshots **各自独立地为 nil**：留痕是排障辅助，装配层少接一个
+	// 字段时的表现应当是「这条路径不采快照」，而不是请求失败。
+	DecisionRedactor DecisionRedactor
+
 	// ReleaseFailures 可以为空——那样释放失败不留痕（见 ReleaseFailureSink）。
 	ReleaseFailures ReleaseFailureSink
 
