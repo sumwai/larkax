@@ -230,6 +230,80 @@ func ReasoningExceedsCompletion(u channel.Usage) bool {
 	return u.CompletionIncludesReasoning && u.ReasoningTokens > u.CompletionTokens
 }
 
+// TokenSlot 是一个按 token 计费的槽位。
+//
+// 一份槽位清单要回答三个问题：它在规则里叫什么、从 Usage 的哪个字段读数量、
+// 写进 Prices 的哪个字段。三者放在同一行，是因为它们只对得上一半时不会
+// 编译失败——例如把 cache_write 的读取函数写成 CacheReadTokens，
+// 每个槽位单独看都「有」，只有账单上的数字会悄悄错掉。
+type TokenSlot struct {
+	// Name 是槽位在规则与 Prices.Declared 里的键名。
+	Name string
+	// Count 读出一次用量里这一项的 token 数。
+	Count func(Usage) int64
+	// SetCount 写回一次用量里这一项的 token 数。与 Count 成对，供测试
+	// 逐槽造用量——加一个槽位时，「清单里有、算术里没有」不会编译失败。
+	SetCount func(*Usage, int64)
+	// SetPrice 把这一项的单价写进 Prices。
+	SetPrice func(*Prices, money.Amount)
+	// Price 读回 Prices 里这一项的单价。与 SetPrice 成对，供测试核对
+	// 「写进去的确实是这一项」——只写一个函数的话，指错字段的写法
+	// 在行为上仍然自洽（写和读都错到同一处），用例分辨不出来。
+	Price func(Prices) money.Amount
+}
+
+// TokenSlots 是按 token 计费的全部槽位，按用量字段的定义顺序排列。
+//
+// **这是「有哪些 token 槽位、它们在规则里叫什么」的唯一一份清单。**
+// Validate 的逐项判负与漏写单价、internal/billing/expr 的结果键白名单与
+// Prices.Declared 都从它派生。那些地方各抄一份的话，加一个槽位时漏改一处
+// 不会编译失败：漏在键名白名单上，规则写这个键会被当成未知键；漏在
+// Declared 上，这一项永远被当成「规则没写」而拒绝；漏在 Validate 上，
+// 负用量与漏写的单价会静默放过。三种都不是崩溃，只是账慢慢错掉。
+//
+// ComputeWithCharges 是例外：金额要落到 Breakdown 的具名字段上，没法只靠
+// 这张表派生。所以另有一条用例按表逐槽造用量、核对金额——「清单加了、
+// 乘法没加」会在那里挂。
+//
+// 调用方不得修改这个切片。
+var TokenSlots = []TokenSlot{
+	{
+		Name:     "prompt",
+		Count:    func(u Usage) int64 { return u.PromptTokens },
+		SetCount: func(u *Usage, n int64) { u.PromptTokens = n },
+		SetPrice: func(p *Prices, v money.Amount) { p.Prompt = v },
+		Price:    func(p Prices) money.Amount { return p.Prompt },
+	},
+	{
+		Name:     "completion",
+		Count:    func(u Usage) int64 { return u.CompletionTokens },
+		SetCount: func(u *Usage, n int64) { u.CompletionTokens = n },
+		SetPrice: func(p *Prices, v money.Amount) { p.Completion = v },
+		Price:    func(p Prices) money.Amount { return p.Completion },
+	},
+	{
+		Name:     "cache_read",
+		Count:    func(u Usage) int64 { return u.CacheReadTokens },
+		SetCount: func(u *Usage, n int64) { u.CacheReadTokens = n },
+		SetPrice: func(p *Prices, v money.Amount) { p.CacheRead = v },
+		Price:    func(p Prices) money.Amount { return p.CacheRead },
+	},
+	{
+		Name:     "cache_write",
+		Count:    func(u Usage) int64 { return u.CacheWriteTokens },
+		SetCount: func(u *Usage, n int64) { u.CacheWriteTokens = n },
+		SetPrice: func(p *Prices, v money.Amount) { p.CacheWrite = v },
+		Price:    func(p Prices) money.Amount { return p.CacheWrite },
+	},
+	{
+		Name:     "reasoning",
+		Count:    func(u Usage) int64 { return u.ReasoningTokens },
+		SetCount: func(u *Usage, n int64) { u.ReasoningTokens = n },
+		SetPrice: func(p *Prices, v money.Amount) { p.Reasoning = v },
+		Price:    func(p Prices) money.Amount { return p.Reasoning },
+	},
+}
+
 // Validate 检查规则与用量是否自洽。
 //
 // 拦的是「算了但算得不对」的几类情形。它们都不会让程序崩，
@@ -239,28 +313,15 @@ func ReasoningExceedsCompletion(u channel.Usage) bool {
 // 运维改一条配置就能修好，所以让结算失败是合适的处置。上游报的数自相矛盾
 // 属于另一类，见 ReasoningExceedsCompletion。
 func Validate(usage Usage, prices Prices) error {
-	// 五个 token 字段与它们在规则里的键名。下面两处判据（逐项判负、
-	// 逐项判单价漏写）共用这张表，免得将来加一个字段时只补了其中一处。
-	fields := []struct {
-		name  string
-		count int64
-	}{
-		{"prompt", usage.PromptTokens},
-		{"completion", usage.CompletionTokens},
-		{"cache_read", usage.CacheReadTokens},
-		{"cache_write", usage.CacheWriteTokens},
-		{"reasoning", usage.ReasoningTokens},
-	}
-
 	// 负用量**逐项**判，而不是判五项之和。
 	//
 	// 负用量只可能来自解析错误（例如把带符号整数读反）。放过去会算出一笔
 	// 负数消费，即「上游付钱给用户」。判和看不出来：单项为负、被另一项的正值
 	// 抵消时和为 0 或为正，与「完全没用 token」分不出来。
 	// 口径与 internal/billing/expr 的 validateUsage 一致——那里一直是逐项的。
-	for _, f := range fields {
-		if f.count < 0 {
-			return fmt.Errorf("用量为负: %s = %d", f.name, f.count)
+	for _, slot := range TokenSlots {
+		if count := slot.Count(usage); count < 0 {
+			return fmt.Errorf("用量为负: %s = %d", slot.Name, count)
 		}
 	}
 
@@ -275,9 +336,9 @@ func Validate(usage Usage, prices Prices) error {
 	// token 单价同样不能漏。判据是「规则有没有写过这个键」，而不是「单价是不是
 	// 0」——显式写 0 是「这一项免费」，正当；没写则落到零值，结果一样是 0 元，
 	// 两者在 money.Amount 上分不出来，所以靠 Prices.Declared 区分。
-	for _, f := range fields {
-		if f.count > 0 && !prices.Declared[f.name] {
-			return fmt.Errorf("%w: %q（规则里没写这个单价；要免费就显式写 0）", ErrMissingPrice, f.name)
+	for _, slot := range TokenSlots {
+		if slot.Count(usage) > 0 && !prices.Declared[slot.Name] {
+			return fmt.Errorf("%w: %q（规则里没写这个单价；要免费就显式写 0）", ErrMissingPrice, slot.Name)
 		}
 	}
 	return nil

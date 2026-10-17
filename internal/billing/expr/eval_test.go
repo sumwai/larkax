@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -129,6 +130,39 @@ func TestEvalRecordsExplicitZeroAsDeclared(t *testing.T) {
 	}
 	if res.Prices.Declared["completion"] {
 		t.Error("规则没写 completion，Declared 里不该有")
+	}
+}
+
+// TestEveryTokenSlotComesFromBilling 钉住「token 槽位只有一份清单」。
+//
+// 规则源码按 billing.TokenSlots 动态生成：加一个槽位时**不需要改这条测试**，
+// 但任何一处仍在手抄清单都会立刻挂——新槽位要么被结果键白名单当成未知键
+// 拒绝（priceSlots 没派生），要么没被记成「规则写过」（Declared 没派生），
+// 要么单价写到了别的字段上（SetPrice 指错）。
+//
+// 每个槽位给不同的价：写错字段时不会碰巧相等。
+func TestEveryTokenSlotComesFromBilling(t *testing.T) {
+	parts := make([]string, 0, len(billing.TokenSlots))
+	want := make(map[string]money.Amount, len(billing.TokenSlots))
+	for i, slot := range billing.TokenSlots {
+		price := money.MustParse(fmt.Sprintf("0.%08d", i+1))
+		parts = append(parts, fmt.Sprintf("%q: %s", slot.Name, price))
+		want[slot.Name] = price
+	}
+
+	res := eval(t, "{"+strings.Join(parts, ", ")+"}", billing.Usage{})
+
+	if len(res.Prices.Declared) != len(billing.TokenSlots) {
+		t.Errorf("Declared 有 %d 项，TokenSlots 有 %d 项",
+			len(res.Prices.Declared), len(billing.TokenSlots))
+	}
+	for _, slot := range billing.TokenSlots {
+		if !res.Prices.Declared[slot.Name] {
+			t.Errorf("规则写了 %q，Declared 里却没有", slot.Name)
+		}
+		if got := slot.Price(res.Prices); got.Cmp(want[slot.Name]) != 0 {
+			t.Errorf("%s 的单价 = %s，期望 %s", slot.Name, got, want[slot.Name])
+		}
 	}
 }
 

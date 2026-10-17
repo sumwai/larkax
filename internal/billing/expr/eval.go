@@ -185,21 +185,20 @@ func (p *Program) result(rt *runtime, out any) (Result, error) {
 		Minimum: amountFrom(minimum),
 	}
 
-	res.Prices = billing.Prices{
-		Prompt:     amountFrom(floats["prompt"]),
-		Completion: amountFrom(floats["completion"]),
-		CacheRead:  amountFrom(floats["cache_read"]),
-		CacheWrite: amountFrom(floats["cache_write"]),
-		Reasoning:  amountFrom(floats["reasoning"]),
-		Declared:   make(map[string]bool, len(floats)),
-	}
+	res.Prices = billing.Prices{Declared: make(map[string]bool, len(floats))}
+	// token 单价逐项从 billing.TokenSlots 写入：那份表是「有哪些 token 槽位」
+	// 的唯一来源，这里不再手抄键名与 Prices 字段的对应关系。
+	//
 	// Declared 记的是规则里**写过**哪几个 token 键。floats 只装规则给了的键，
 	// 所以查它的存在性即可。不能拿单价是不是 0 判断：「写了 0」（这一项免费）
 	// 与「没写」（规则漏了）都落在 0 上，而计费层要区别对待这两件事。
-	for _, name := range []string{"prompt", "completion", "cache_read", "cache_write", "reasoning"} {
-		if _, ok := floats[name]; ok {
-			res.Prices.Declared[name] = true
+	for _, slot := range billing.TokenSlots {
+		price, ok := floats[slot.Name]
+		if !ok {
+			continue
 		}
+		slot.SetPrice(&res.Prices, amountFrom(price))
+		res.Prices.Declared[slot.Name] = true
 	}
 	// fixed/minimum 不是单价，不进 Prices。上面已经把它们折进 Charges 了。
 	if len(units) > 0 {
