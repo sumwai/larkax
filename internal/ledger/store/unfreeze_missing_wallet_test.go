@@ -43,7 +43,7 @@ func TestReleaseRefusesMissingWallet(t *testing.T) {
 	}
 
 	// 3 · 必须报错。「释放成功」而冻结额一分未动，是账上看不出来的失败。
-	err := s.Release(ctx, req)
+	err := s.Release(ctx, req, nil)
 	if err == nil {
 		t.Fatal("钱包行不存在时解冻应当报错，而不是静默成功（冻结额一分未动）")
 	}

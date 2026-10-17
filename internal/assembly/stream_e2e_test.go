@@ -515,6 +515,15 @@ type billingRow struct {
 	// upstreamModel 可空：预留那一行还没选路，这一列本来就是空的（见 #338）。
 	canonicalModel string
 	upstreamModel  sql.NullString
+
+	// upstreamStatus 与 errorCode 是「这次为什么没计费」的依据（见 #362）。
+	//
+	// 两列都可空，而 NULL 在这里是**正常取值**：它表示这一行没有上游失败的
+	// 证据，不是「没读到」。所以断言要连着 Valid 一起判——只判 String 的话
+	// 「写了个 0 / 空串进去」与「留了 NULL」在用例里长得一样，而前者会让
+	// 「上游回了 0 号」与「没有这回事」在库里分不开。
+	upstreamStatus sql.NullInt64
+	errorCode      sql.NullString
 }
 
 // billingOf 取这个用户最近一行账单。没有行时第二个返回值为 false。
@@ -525,12 +534,13 @@ func billingOf(t *testing.T, db *sql.DB, userID int64) (billingRow, bool) {
 	err := db.QueryRowContext(context.Background(), `
 		SELECT id, request_id, status, reserved_amount::text, final_amount::text,
 		       computed_amount::text, channel_id, streamed, protocol,
-		       canonical_model, upstream_model
+		       canonical_model, upstream_model, upstream_status, error_code
 		  FROM billing_requests
 		 WHERE user_id = $1
 		 ORDER BY id DESC LIMIT 1`, userID,
 	).Scan(&b.id, &b.requestID, &b.status, &b.reserved, &b.final, &b.computed,
-		&b.channelID, &b.streamed, &b.protocol, &b.canonicalModel, &b.upstreamModel)
+		&b.channelID, &b.streamed, &b.protocol, &b.canonicalModel, &b.upstreamModel,
+		&b.upstreamStatus, &b.errorCode)
 	if err == sql.ErrNoRows {
 		return billingRow{}, false
 	}
