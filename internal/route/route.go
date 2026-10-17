@@ -205,12 +205,14 @@ type Needs struct {
 //
 // # 输入 token 用的是哪一个量
 //
-// 与入口预留同一个式子：只算消息里的**正文**（tokens.EstimatedTokens(req.Model,
-// req.PromptText())，见 internal/api 的 inputTokensOf）。工具定义与图片的
-// token 消耗各家口径不同（见 channel.Request.PromptText），硬估出来的数比
-// 正文的估算更不可信。预留那侧因此宁可少算，取的是「少收而不是超收」；
-// 这里同一个数用在**上限**判据上，偏小意味着判据偏宽松——不会把一个上游
-// 其实接得住的请求挡下来。两侧的取舍方向一致，所以共用同一个量。
+// **与入口预留不是同一个式子，而且是刻意的。** 预留那侧这个数决定「这次冻多少
+// 钱」，少算会让预留低于结算、差额由平台承担，所以它把工具定义与图片也算进去
+// （见 internal/api 的 inputTokensOf 与 internal/tokens 的 payload.go）。
+// 这里的数用在**上限判据**上，偏小只意味着判据偏宽松——不会把一个上游其实
+// 接得住的请求挡下来，代价是多打一次上游。两边估错的代价方向不同，所以取的
+// 不是同一个量，改一边不该顺手把另一边也改了。
+//
+// 这里只算消息里的**正文**（tokens.EstimatedTokens(req.Model, req.PromptText())）。
 //
 // # 载体请求
 //
