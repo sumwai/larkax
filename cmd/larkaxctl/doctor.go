@@ -151,6 +151,29 @@ const (
 // 一个能连的地址。让使用者显式给出比在这里替他猜一个更可靠。
 const doctorDefaultBaseURL = "http://127.0.0.1:8080"
 
+// 判「这次失败是谁拒的」用的三个机器可读信号。
+//
+// 值与 internal/api 的 HeaderVersion / HeaderRetryAfter / CodeInsufficientQuota
+// 是同一个，doctor_test.go 里有用例钉住。本包不 import internal/api：那会把
+// 整个入口层（含 gateway）拖进运维命令的二进制里，而这里要的只是几个字符串
+// ——与上面三条路径同一个理由。
+//
+// 只看状态码不够的地方有两处：
+//
+//   - 429 有**两个来源**：我们自己的按 Key 限流（writeRateLimited，带
+//     Retry-After）、额度用尽（带 insufficient_quota 码），以及上游的限流
+//     （网关原样透出 429，两个都没有）。状态码一样，处置相反：前两个是
+//     我们自己这一侧的问题，后一个该等上游缓过来。
+//   - 响应根本可能不是我们的网关给的（--base-url 指到了别的服务、或者链路
+//     上有个反代自己回了 5xx）。那时按状态码归因会把一次「地址配错了」
+//     说成上游的问题。X-Larkax-Version 是每个公共响应都带的头
+//     （见 internal/api.Handler.ServeHTTP），没有它就不是我们回的。
+const (
+	doctorHeaderVersion         = "X-Larkax-Version"
+	doctorHeaderRetryAfter      = "Retry-After"
+	doctorCodeInsufficientQuota = "insufficient_quota"
+)
+
 // doctorHTTPClient 是真打上游用的客户端。
 //
 // 它是一个变量而不是直接调 http.DefaultClient，好让用例把传输层换成假的
@@ -1161,6 +1184,11 @@ type doctorResponsesInput struct {
 //
 // 两套协议的用量字段名不同（prompt/completion 与 input/output），所以两组
 // 都收着，由 usageLabel 挑一组打得出来的。
+//
+// Error.Code 与 Error.Type 是同一个机器可读位置的两种写法：OpenAI 的码在
+// error.code，Anthropic 的码在 error.type（见 internal/api 的 writeErrorCode）。
+// doctor 只用它认一个值——insufficient_quota，而那个码恰恰是两套协议都在
+// 各自那个位置给的（见 internal/api 的 writeInsufficientQuota）。
 type doctorLiveResponse struct {
 	Model string `json:"model"`
 	Usage struct {
@@ -1172,6 +1200,7 @@ type doctorLiveResponse struct {
 	Error struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
+		Code    string `json:"code"`
 	} `json:"error"`
 }
 
@@ -1194,6 +1223,7 @@ type doctorLiveBody struct {
 	model   string
 	usage   string
 	errMsg  string
+	errCode string
 	preview string
 }
 
@@ -1208,6 +1238,15 @@ func parseDoctorLiveBody(body []byte) doctorLiveBody {
 		out.errMsg = parsed.Error.Message
 	case parsed.Error.Type != "":
 		out.errMsg = parsed.Error.Type
+	}
+	// 码优先取 error.code（OpenAI 与 Responses 那一套），其次取 error.type
+	// （Anthropic 把码写在这里，见 internal/api 的 writeErrorCode）。两条
+	// 分支合起来覆盖三套协议，不需要再看别的位置。
+	switch {
+	case parsed.Error.Code != "":
+		out.errCode = parsed.Error.Code
+	case parsed.Error.Type != "":
+		out.errCode = parsed.Error.Type
 	}
 	return out
 }
@@ -1238,14 +1277,70 @@ type doctorLive struct {
 	respModel string
 	usage     string
 	errMsg    string
+	errCode   string
 	preview   string
-	sendErr   error
+
+	// version 是网关回的 X-Larkax-Version 头，没有时为空的。
+	version string
+	// retryAfter 是网关回的 Retry-After 头（限流那一条会带），没有时为空。
+	retryAfter string
+
+	sendErr error
 }
 
 // ok 判断这一次真打上游算不算通过。没开 --live 时它恒为 false，调用方要
 // 先看 enabled。
 func (l doctorLive) ok() bool {
 	return l.enabled && l.sendErr == nil && l.status >= 200 && l.status < 300
+}
+
+// fromGateway 判断这个响应是不是我们自己的网关回的。
+//
+// 判据是响应头 X-Larkax-Version：公共入口的每一个响应都带它（见
+// internal/api 的 Handler.ServeHTTP），而链路上的反代、别的服务、以及
+// 上游自己都不会带。
+//
+// 用头而不是「耗时 3ms」：耗时是一次性的观测，机器负载一变它就不成立，
+// 而它也说不出「是网关的哪一层拒的」。用头而不是状码：502/503/500 既可能
+// 是我们的网关回的，也可能是反代自己回的。
+//
+// 已知边界：网关以 `dev` 版本裸跑时这个头也在（Handler.Version 非空即写），
+// 所以「版本头在不在」与「版本值是什么」是两件事——这里只看在不在。
+func (l doctorLive) fromGateway() bool {
+	return l.version != ""
+}
+
+// rejectedByUs 判断这个失败的响应是我们自己的网关**在调上游之前**拒掉的，
+// 而不是上游拒的。
+//
+// 「在调上游之前」的判据是状态码：internal/api 的 httpStatusOfUpstream 把
+// 每一类失败都映射到固定的状态码，而上游给出的失败只有两种落点——
+// 上游限流原样透出 429，其余一律 502（见那个函数的注释）。所以 4xx 与
+// 401/403/413/415/429/501/503/500 这些是**我们**在这一侧判的，502 才是
+// 上游那一次调用失败。
+//
+// 429 是个例外，必须单独看：网关既会用 429 回自己的按 Key 限流（带
+// Retry-After）与额度用尽（带 insufficient_quota 码），也会把上游的限流
+// 原样透出 429（两个都不带）。前两个是我们这一侧的结论，后一个不是。
+//
+// 没有版本头时一律判「不是我们拒的」：那时连这个响应是谁回的都不确定，
+// 说成「我们拒的」只是把一次地址配错说成一次配置问题。
+func (l doctorLive) rejectedByUs() bool {
+	if !l.fromGateway() || l.ok() {
+		return false
+	}
+	switch {
+	case l.status == http.StatusTooManyRequests:
+		return l.retryAfter != "" || l.errCode == doctorCodeInsufficientQuota
+	case l.status == http.StatusBadGateway:
+		// 上游那一次调用失败。**不是**我们在入口拒的。
+		return false
+	case l.status >= 400 && l.status < 600:
+		return true
+	}
+	// 3xx 之类：网关不会拿它当失败回，走到这里说明判据与实现不一致，
+	// 不替它编一个归因。
+	return false
 }
 
 // runDoctorLive 往公共入口发一次非流式推理请求。
@@ -1303,8 +1398,11 @@ func runDoctorLive(ctx context.Context, opts doctorOptions) doctorLive {
 	}
 
 	out.status = resp.StatusCode
+	out.version = resp.Header.Get(doctorHeaderVersion)
+	out.retryAfter = resp.Header.Get(doctorHeaderRetryAfter)
 	parsed := parseDoctorLiveBody(body)
-	out.respModel, out.usage, out.errMsg, out.preview = parsed.model, parsed.usage, parsed.errMsg, parsed.preview
+	out.respModel, out.usage, out.errMsg = parsed.model, parsed.usage, parsed.errMsg
+	out.errCode, out.preview = parsed.errCode, parsed.preview
 	return out
 }
 
@@ -1397,7 +1495,45 @@ func printDoctorLive(w io.Writer, l doctorLive) {
 		if l.preview != "" {
 			_, _ = fmt.Fprintf(w, "  响应体：%s\n", l.preview)
 		}
+		_, _ = fmt.Fprintf(w, "  谁拒的：%s\n", l.attribution())
 		_, _ = fmt.Fprintln(w, "  结论：不通过")
 	}
 	_, _ = fmt.Fprintln(w)
+}
+
+// attribution 说明这次失败是谁拒的。
+//
+// 这句话是这个命令最要紧的一行：状态码 400 与「上游回了一个 400」在输出里
+// 长得一样，而两者的排查方向完全相反——一个要改自己的请求或配置，
+// 一个要去看上游。doctor 原先只打「结果：400」，于是有人朝上游找，
+// 而问题是它自己发出的请求缺了一个字段（见 issue #381）。
+func (l doctorLive) attribution() string {
+	if !l.fromGateway() {
+		return "这个响应不是 larkax 网关回的（没有 " + doctorHeaderVersion +
+			" 头）：先确认 --base-url 指对了地方、链路上有没有别的服务在拦"
+	}
+	if l.rejectedByUs() {
+		reason := "在网关入口就被拒了，请求没有出网关，不是上游"
+		switch {
+		case l.status == http.StatusTooManyRequests && l.retryAfter != "":
+			reason = "是我们自己的按 Key 限流（带 " + doctorHeaderRetryAfter +
+				" 头），请求没有出网关，不是上游"
+		case l.status == http.StatusTooManyRequests && l.errCode == doctorCodeInsufficientQuota:
+			reason = "是这把 API Key 的额度用尽了（" + doctorCodeInsufficientQuota +
+				"），请求没有出网关，不是上游"
+		}
+		if l.errMsg != "" {
+			reason += "；上面那句错误是我们自己写的"
+		}
+		return reason
+	}
+	if l.status == http.StatusBadGateway {
+		return "上游那一次调用失败（网关回 502 表示「我们与上游之间」）：问题在上游或渠道配置"
+	}
+	if l.status == http.StatusTooManyRequests {
+		// 走到这里说明 429 上既没有 Retry-After、也没有额度码——网关把上游的
+		// 限流原样透出了（见 internal/api 的 httpStatusOfUpstream）。
+		return "上游在限流（网关把它原样透出 429）：等一会儿再试，不是我们这一侧拒的"
+	}
+	return "无法确定是谁拒的：这个状态码不是网关自己会写的失败，看上面的错误说明与响应体"
 }
