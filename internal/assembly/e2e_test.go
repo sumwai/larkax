@@ -1286,6 +1286,162 @@ func TestUpstreamFailureIsRecordedInBillingRequest(t *testing.T) {
 	}
 }
 
+// 上游失败那一行也要记下「这次打的是哪个渠道、发的是哪个上游模型名」。
+//
+// # 缺陷原来的形状
+//
+// 这两列只有结算那一条路写（见 internal/ledger/store 的 markSettled），
+// 而**不计费的结局根本不走结算**——它走 Release，那里只写「为什么不计费」。
+// 于是成功行两列有值、失败行两列恒为 NULL，恰恰是「某个渠道对某批模型
+// 全在报错」时最需要它们的地方没有它们。
+//
+// # 判据为什么必须落到具体值上
+//
+// 「非 NULL」证明不了任何东西：写了个别的渠道、或者把规范名当成上游名
+// 写进去，它一样成立。所以这里给这个模型配一条别名（上游名 ≠ 规范名），
+// 再把渠道 id 取回来，两个值都对着**那一个**断言——上游名对不上就说明
+// 写的是 canonical_model，渠道 id 对不上就说明写的是别的候选。
+//
+// # 成功那一次是对照，不是重复
+//
+// 两条路（结算与释放）写的必须是同一对值。只钉失败那一条的话，把两处
+// 各写成不同的来源也能过，而它们在库里读起来是「同一个请求走了两个渠道」。
+func TestUpstreamFailureRecordsChannelAndModel(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+
+	model := unique("e2e-model-chan")
+	upstreamName := unique("e2e-upstream-name")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, "100")
+	key := issueKey(t, db, user)
+
+	fake := &fakeUpstream{protocol: channel.ProtocolOpenAI, db: db, userID: user, model: model}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	// 别名让「实际发出去的名字」与规范名不同。两者相同时，
+	// 「从选路结果里取」与「把规范名抄进去」在库里长得一模一样。
+	seedCatalogModel(t, db, model)
+	channelID := seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
+	seedAlias(t, db, channelID, upstreamName, model)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	if status, body := postChat(ctx, t, public.URL+"/v1/chat/completions", key, chatBody(model)); status != http.StatusOK {
+		t.Fatalf("成功请求的状态码 = %d，期望 200。响应体：%s", status, body)
+	}
+
+	// 上游回 400。调用方拿到的是 502 而不是 400（见 httpStatusOfUpstream），
+	// 所以判据不能落在响应码上。
+	fake.failStatus.Store(http.StatusBadRequest)
+	fake.fail.Store(true)
+	if status, body := postChat(ctx, t, public.URL+"/v1/chat/completions", key, chatBody(model)); status != http.StatusBadGateway {
+		t.Fatalf("上游 400 时调用方拿到的状态码 = %d，期望 502。响应体：%s", status, body)
+	}
+
+	rows := billingRowsOf(t, db, user)
+	if len(rows) != 2 {
+		t.Fatalf("账单行数 = %d，期望 2（1 条成功 + 1 条上游 400）", len(rows))
+	}
+	// 先钉住这两行确实是那两种结局：否则下面两条断言在一行「其实是别的
+	// 请求留下的」记录上也照样成立。
+	if rows[0].status != "settled" {
+		t.Errorf("成功那一行的状态 = %q，期望 settled", rows[0].status)
+	}
+	if rows[1].status != "released" {
+		t.Errorf("上游 400 那一行的状态 = %q，期望 released", rows[1].status)
+	}
+
+	for i, row := range rows {
+		if !row.channelID.Valid || row.channelID.Int64 != channelID {
+			t.Errorf("第 %d 行的 channel_id = %v，期望 %d（这次请求只配了这一个渠道）",
+				i+1, row.channelID, channelID)
+		}
+		if !row.upstreamModel.Valid || row.upstreamModel.String != upstreamName {
+			t.Errorf("第 %d 行的 upstream_model = %v，期望 %q（别名翻译之后的名字）；"+
+				"等于 %q 说明写进去的是规范名，不是这次实际发出去的那个",
+				i+1, row.upstreamModel, upstreamName, model)
+		}
+	}
+}
+
+// 一个候选都没选中时，那两列只能是 NULL——而且理由要说清楚。
+//
+// # 这里的失败发生在选出渠道之前
+//
+// 候选集非空（所以预留照常发生、账单行照常插入），但选路把它们全筛掉了：
+// 这个渠道连续失败到了阈值（见 route.Candidate.DrainReason）。于是这次请求
+// **一次上游调用都没发生**，没有任何渠道可以被记进去——硬编一个 id 出来
+// 比留空更坏，那会让「这个渠道在报错」这个结论指向一个没被碰过的渠道。
+//
+// 与上面那条合起来才是完整的判据：只钉「有值」的那一条，把 NULLIF 换成
+// 无条件写入、或者在没有渠道时也写一个进去，都不会有人报出来。
+func TestUpstreamFailureWithoutSelectedChannelLeavesNull(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+
+	model := unique("e2e-model-drained")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, "100")
+	key := issueKey(t, db, user)
+
+	fake := &fakeUpstream{protocol: channel.ProtocolOpenAI, db: db, userID: user, model: model}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	channelID := seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	// 把这条渠道摘掉。两列必须**一起**写：只有计数而没有时间戳的行按
+	// 「冷却期已过」处理（见 internal/channels 的 consecutiveFailures），
+	// 于是它会照旧进入候选集，这一条用例就测不到「一个候选都没选中」。
+	if _, err := db.ExecContext(ctx,
+		`UPDATE channels SET consecutive_failures = 3, last_failure_at = now() WHERE id = $1`,
+		channelID); err != nil {
+		t.Fatalf("把渠道标成连续失败失败: %v", err)
+	}
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	if status, body := postChat(ctx, t, public.URL+"/v1/chat/completions", key, chatBody(model)); status != http.StatusBadGateway {
+		t.Fatalf("没有可用候选时调用方拿到的状态码 = %d，期望 502。响应体：%s", status, body)
+	}
+
+	// 上游一次都不该被调用：上面那次 502 必须来自「没选出渠道」，
+	// 而不是来自上游回的错——那两种失败在账单上长得一样，而这一条
+	// 用例断言的是前一种。
+	if bodies := fake.sentBodies(); len(bodies) != 0 {
+		t.Fatalf("假上游被调用了 %d 次，期望 0 次（这个渠道已经被摘掉）", len(bodies))
+	}
+
+	rows := billingRowsOf(t, db, user)
+	if len(rows) != 1 {
+		t.Fatalf("账单行数 = %d，期望 1", len(rows))
+	}
+	row := rows[0]
+	// 预留确实发生过：没有这一条，下面两条 NULL 断言在一个「压根没预留」
+	// 的实现上也成立，而那种实现里 NULL 的含义完全不同。
+	if row.status != "released" {
+		t.Errorf("账单状态 = %q，期望 released（预留过、又放开了）", row.status)
+	}
+	if row.channelID.Valid {
+		t.Errorf("channel_id = %v，期望 NULL：这次请求一个候选都没选中，没有渠道可记", row.channelID)
+	}
+	if row.upstreamModel.Valid {
+		t.Errorf("upstream_model = %v，期望 NULL：没有选路就没有上游名可记", row.upstreamModel)
+	}
+}
+
 // billingStatusRow 是账单按 status 分组之后的一组。
 type billingStatusRow struct {
 	status string
@@ -1330,15 +1486,20 @@ func billingBreakdownOf(t *testing.T, db *sql.DB, userID int64) []billingStatusR
 	return out
 }
 
-// billingRowsOf 按 id 升序取这个用户全部账单行的状态与那两列。
+// billingRowsOf 按 id 升序取这个用户全部账单行的状态、去向与那两列依据。
 //
 // 与 billingOf 分开：那个取的是**最近一行**（流式收尾要等的那一条），
-// 这里要的是一批请求跑完之后每一行的样子——分组统计要的就是整批。
+// 这里要的是一批请求跑完之后每一行的样子——分组统计与逐行对照要的就是整批。
+//
+// channel_id 与 upstream_model 是**可空**的，扫进 sql.Null*：NULL 在
+// 已结算的行上是「写入点掉了」，而在选路之前就失败的行上是正常取值。
+// 两者的区分见各条用例的注释，别用零值把「没有」与「是 0」合并。
 func billingRowsOf(t *testing.T, db *sql.DB, userID int64) []billingRow {
 	t.Helper()
 
 	rows, err := db.QueryContext(context.Background(), `
-		SELECT status, upstream_status, error_code
+		SELECT status, channel_id, canonical_model, upstream_model,
+		       upstream_status, error_code
 		  FROM billing_requests
 		 WHERE user_id = $1
 		 ORDER BY id`, userID)
@@ -1350,7 +1511,8 @@ func billingRowsOf(t *testing.T, db *sql.DB, userID int64) []billingRow {
 	var out []billingRow
 	for rows.Next() {
 		var b billingRow
-		if err := rows.Scan(&b.status, &b.upstreamStatus, &b.errorCode); err != nil {
+		if err := rows.Scan(&b.status, &b.channelID, &b.canonicalModel, &b.upstreamModel,
+			&b.upstreamStatus, &b.errorCode); err != nil {
 			t.Fatalf("读账单失败: %v", err)
 		}
 		out = append(out, b)

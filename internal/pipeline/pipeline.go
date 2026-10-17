@@ -189,6 +189,10 @@ type Request struct {
 	// 预留时它还是空的：那时还没选路，也就不知道会走哪个渠道（见 ChannelID
 	// 的注释，两者在同一个位置被填上）。结算时**必须有**，落库层拒绝空值
 	// （见 internal/ledger/store 的 ErrMissingUpstreamModel）。
+	//
+	// 失败路径上它同样有值（上游回了 4xx 的那一次确实发出去了），只是落库的
+	// 那一处不同：结算走 markSettled、不计费走 Release，两处读的是同一个
+	// 字段。一次调用都没发生时它保持空——那时没有上游名可记。
 	UpstreamModel string
 
 	// Candidates 是这次请求**可能**选中的渠道集合，供预留取上界。
@@ -198,8 +202,12 @@ type Request struct {
 	// 注释。规则匹配之外没有别处读它。
 	Candidates []RuleCandidate
 	// ChannelID 与 OwnerUserID 是**实际选中**的渠道与商家：选路之前
-	// 为 0，结算时由调用方填上实际的那个。规则匹配之外，账本还要按
-	// ChannelID 记下这次请求走的是哪条渠道。
+	// 为 0，选路一返回就由网关填上实际的那个（见 internal/gateway 的
+	// handle.routedTo）。规则匹配之外，账本还要按 ChannelID 记下这次请求
+	// 走的是哪条渠道——**成功与失败两条路都要**，所以它填在结算之前。
+	//
+	// OwnerUserID 只有结算读（规则按商家匹配），失败路径上留着零值不影响
+	// 任何判据。
 	ChannelID   int64
 	OwnerUserID int64
 

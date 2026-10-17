@@ -77,6 +77,11 @@ func (g *Gateway) Decide(ctx context.Context, req pipeline.Request, decision *sy
 	call := &decideCall{exec: g.Decider, req: decision}
 	routed, err := g.Router.Chat(ctx, call, carrierRequest(req.CanonicalModel),
 		h.candidates, req.CanonicalModel)
+	// 与 Chat 同一个位置、同一个理由：选路一返回就把「打到了哪儿」记进
+	// h.req，失败那条路才写得进账单（见 handle.routedTo）。
+	if routed != nil {
+		h.routedTo(routed.Channel, routed.UpstreamModel)
+	}
 	if err != nil {
 		// 与 Chat 同一处置：健康度先记（失败的调用正是它要记的那些），
 		// 再走一次结算得出「不计费」的结论，预留由 defer 的 finish 释放。
@@ -91,7 +96,7 @@ func (g *Gateway) Decide(ctx context.Context, req pipeline.Request, decision *sy
 	}
 	g.recordAttempts(ctx, routed.Attempts, &out.Usage)
 
-	charge, err := g.finishCharge(ctx, h, routed.Channel, routed.UpstreamModel, out)
+	charge, err := g.finishCharge(ctx, h, out)
 	if err != nil {
 		return nil, err
 	}
