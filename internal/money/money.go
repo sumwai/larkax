@@ -274,6 +274,10 @@ func SumChecked(amounts ...Amount) (Amount, bool) {
 // MulInt 乘以一个整数。用于「单价 × 数量」这类运算。
 //
 // 不需要任何除法：units 本身已经是定点表示，乘以整数不改变小数位。
+//
+// 溢出时夹到 int64 边界（与 Add 同一个方向）。**夹住的乘法是写路径上
+// 最隐蔽的一类错**：回报的值不等于真实乘积，而调用方从返回值上看不出来。
+// 要区分两种情形用 MulIntChecked。
 func (a Amount) MulInt(n int64) Amount {
 	if n == 0 || a.units == 0 {
 		return Zero
@@ -283,6 +287,27 @@ func (a Amount) MulInt(n int64) Amount {
 		return Amount{units: clampFromBig(product)}
 	}
 	return Amount{units: product.Int64()}
+}
+
+// MulIntChecked 与 MulInt 相同，但只有**真实乘积**放得进 int64 时才 ok 为 true。
+//
+// 为什么单独一个入口而不是让 MulInt 返回 error：MulInt 是金额库的运算面，
+// 调用点里有一部分（例如「花超了没有」这类判据）夹住的方向是安全的，改签名
+// 会把报错责任摊给每一个调用方。写账与给人看的路径自己换成这个。
+//
+// 溢出时的返回值取自 MulInt：两个函数对「夹到哪个边界」只能有一个答案，
+// 让这里复用它的结果，而不是把 clampFromBig 再写一遍——两份实现迟早会
+// 在某个符号或边界上分岔，而分岔的表现正是「checked 说夹住了、值却不是
+// MulInt 会给的那个」。
+func MulIntChecked(a Amount, n int64) (Amount, bool) {
+	if n == 0 || a.units == 0 {
+		return Zero, true
+	}
+	product := new(big.Int).Mul(big.NewInt(a.units), big.NewInt(n))
+	if !product.IsInt64() {
+		return a.MulInt(n), false
+	}
+	return Amount{units: product.Int64()}, true
 }
 
 // MulAmount 两个金额相乘。

@@ -632,3 +632,38 @@ func TestCmpAllBranches(t *testing.T) {
 		t.Errorf("Cmp(-5, -5.00000000) = %d，期望 0", c.Cmp(d))
 	}
 }
+
+// MulIntChecked 只在**真实乘积**放得进 int64 时说 ok，而返回值与 MulInt
+// 逐字相同——两者是同一个运算的两个视图。
+//
+// 三个分支都要走：正常、每个方向溢出、乘零。乘零那条不能落到乘法上判：
+// 零乘任何数都是零，把它报告成溢出会让「没用量」变成一次失败。
+func TestMulIntChecked(t *testing.T) {
+	cases := []struct {
+		name     string
+		amount   Amount
+		n        int64
+		wantOK   bool
+		wantUnit int64
+	}{
+		{"正常", MustParse("0.000014"), 1_000_000, true, 1_400_000_000},
+		{"乘零", MustParse("1000"), 0, true, 0},
+		{"零乘", Zero, math.MaxInt64, true, 0},
+		{"正向溢出", MustParse("0.000014"), 1e16, false, math.MaxInt64},
+		{"负向溢出", MustParse("-0.000014"), 1e16, false, math.MinInt64},
+		{"边界之内", FromUnits(1), math.MaxInt64, true, math.MaxInt64},
+	}
+	for _, tc := range cases {
+		got, ok := MulIntChecked(tc.amount, tc.n)
+		if ok != tc.wantOK {
+			t.Errorf("%s: ok = %v，期望 %v", tc.name, ok, tc.wantOK)
+		}
+		if got.Units() != tc.wantUnit {
+			t.Errorf("%s: units = %d，期望 %d", tc.name, got.Units(), tc.wantUnit)
+		}
+		// 与 MulInt 同一个结果：checked 版存在的意义只在 ok，不在值。
+		if plain := tc.amount.MulInt(tc.n); plain != got {
+			t.Errorf("%s: MulInt = %d 与 MulIntChecked = %d 不一致", tc.name, plain.Units(), got.Units())
+		}
+	}
+}

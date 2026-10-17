@@ -1545,3 +1545,89 @@ func TestReservationRejectsMissingAPIKey(t *testing.T) {
 		t.Errorf("被拒绝的预留不该留下记录，却有 %d 行", n)
 	}
 }
+
+// 结算路径上的钱包净额溢出：整个事务回滚，账单行也不留。
+//
+// 与 PostTransaction 那条是同一个判据（applyToWallets），这里是**写侧热路径**
+// 的形状：分录由 pipeline 造好、经 Save 落库。夹住的话用户被扣的是一个错的数，
+// 而账单、分录、钱包三处都「成功」——事后只有对账才看得出。
+//
+// 一条 consume 的用户侧只有一条分录，所以这里要的是**同一用户同一事务里
+// 两条**负的大额分录：账本自洽（对家各自相反），而用户侧真实和放不进 int64。
+func TestSettlementRejectsWalletDeltaOverflow(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	requestID := reqID(t)
+	req := testRequest(ctx, t, db, userID, requestID)
+	billID, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := money.Parse("92233720368.54775807")
+	if err != nil {
+		t.Fatalf("解析金额失败: %v", err)
+	}
+	second, err := money.Parse("92233720368.54775806")
+	if err != nil {
+		t.Fatalf("解析金额失败: %v", err)
+	}
+	txn := ledger.NewTxnID()
+	// 人工调账是唯一不设方向与科目限制的类型（见 ledger.entryDirections）。
+	entry := func(acct ledger.Account, amt money.Amount) ledger.Entry {
+		id := billID
+		return ledger.Entry{
+			TxnID: txn, Account: acct, Asset: ledger.AssetCNY,
+			Amount: amt, EntryType: ledger.EntryAdjustment,
+			BillingRequestID: &id, Memo: "溢出用例",
+		}
+	}
+	// 顺序交替：Transaction.Verify 按出现顺序逐个 Add，同号大额分录挨在一起
+	// 时中间值会被夹住而先判成不平（按真实和判 Verify 是 issue #446 的 (c)，
+	// 不在本轮范围）。这里要测的是写路径。
+	entries := []ledger.Entry{
+		entry(ledger.UserAccount(userID), first.Neg()),
+		entry(ledger.PlatformRevenueAccount(), first),
+		entry(ledger.UserAccount(userID), second.Neg()),
+		entry(ledger.PlatformRevenueAccount(), second),
+	}
+
+	charge := &pipeline.Charge{
+		RequestID: requestID, UserID: userID, Asset: "CNY", PricedAt: pricedAt(),
+		Entries: entries,
+	}
+	charge.Settlement.Actual = first.Add(second)
+
+	err = s.Save(ctx, req, charge)
+	if err == nil {
+		t.Fatal("钱包净额溢出时结算必须失败")
+	}
+	if !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("错误里应当能认出 money.ErrOverflow，得到 %v", err)
+	}
+
+	// 整个事务回滚：分录不留、账单行仍是 pending、余额与冻结都没动。
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM ledger_entries WHERE txn_id = $1`, string(txn)).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("被拒的结算留下了 %d 条分录，期望 0 条", n)
+	}
+	var status string
+	if err := db.QueryRowContext(ctx,
+		`SELECT status FROM billing_requests WHERE request_id = $1`, requestID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" {
+		t.Errorf("被拒的结算把账单行改成了 %q，期望仍是 pending", status)
+	}
+	balance, frozen := walletOf(t, db, userID)
+	if balance != "100.00000000" || frozen != "30.00000000" {
+		t.Errorf("被拒的结算动了钱包：余额 %s、冻结 %s，期望 100 与 30", balance, frozen)
+	}
+}

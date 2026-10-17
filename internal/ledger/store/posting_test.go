@@ -437,3 +437,79 @@ func TestPostTransactionWaitsOnTxnLock(t *testing.T) {
 		t.Errorf("这个交易有 %d 条分录，期望 2 条", len(got))
 	}
 }
+
+// 同一用户在同一资产上的多条分录之和放不进 int64 时，整笔交易必须被拒，
+// 而不是把夹住的净额写进钱包快照。
+//
+// 夹住的代价：账本（权威）里那几条分录各自都在 numeric(20, 8) 之内，
+// 而快照上落的是一个**不存在的增量**——账本与钱包从此不一致，且两处
+// 看起来都是「平的」，事后无从发现。
+//
+// 构造：同一用户上两条正的大额分录（金额不同，否则会先撞上「完全重复」），
+// 对家各取相反数，整笔精确平。用户侧的**真实和**是两个 MaxInt64 量级，
+// 放不进 int64——所以判据只能落在真实和上。
+//
+// 分录要**交替**排列（正、负、正、负）：Transaction.Verify 是按出现顺序
+// 逐个 Add 的，同号大额分录挨在一起时中间值会被夹住，于是 Verify 会把一笔
+// 精确平（但表示不了）的交易判成不平而先拒掉——那样用例就测不到写路径。
+// 按真实和判 Verify 是另一件事（issue #446 的 (c)），不在本轮范围。
+func TestPostTransactionRejectsWalletDeltaOverflow(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+	userID := seed(t, db, "5")
+
+	// 两笔都在 numeric(20, 8) 之内，各自合法。
+	first, err := money.Parse("92233720368.54775807")
+	if err != nil {
+		t.Fatalf("解析金额失败: %v", err)
+	}
+	second, err := money.Parse("92233720368.54775806")
+	if err != nil {
+		t.Fatalf("解析金额失败: %v", err)
+	}
+
+	txnID := ledger.NewTxnID()
+	// 人工调账是唯一不设方向限制、也不限科目的类型（见
+	// ledger.entryDirections）：这里要的正是「同一用户同一资产上出现两条
+	// 同号大额分录」这个形状，别的类型构造不出来。
+	entry := func(acct ledger.Account, amt money.Amount) ledger.Entry {
+		return ledger.Entry{
+			TxnID: txnID, Account: acct, Asset: ledger.AssetCNY,
+			Amount: amt, EntryType: ledger.EntryAdjustment,
+			Memo: "溢出用例",
+		}
+	}
+	txn := ledger.Transaction{
+		TxnID: txnID,
+		Entries: []ledger.Entry{
+			entry(ledger.UserAccount(userID), first),
+			entry(ledger.PlatformRevenueAccount(), first.Neg()),
+			entry(ledger.UserAccount(userID), second),
+			entry(ledger.PlatformRevenueAccount(), second.Neg()),
+		},
+	}
+	// 前提：交易在账本上精确平。不平的话下面拒绝的原因就不是溢出了。
+	if verifyErr := txn.Verify(); verifyErr != nil {
+		t.Fatalf("用例前提不成立：交易应当自洽，得到 %v", verifyErr)
+	}
+	if _, ok := money.SumChecked(first, second); ok {
+		t.Fatal("用例前提不成立：这两条的用户侧真实和应当放不进 int64")
+	}
+
+	applied, err := s.PostTransaction(ctx, txn)
+	if err == nil {
+		t.Fatalf("钱包净额溢出时必须拒绝整笔，得到 applied=%v", applied)
+	}
+	if !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("错误里应当能认出 money.ErrOverflow，得到 %v", err)
+	}
+
+	// 整个事务回滚：一条分录都不留，余额一分不动。
+	if got := entriesOf(t, db, txnID); len(got) != 0 {
+		t.Errorf("被拒的交易留下了 %d 条分录，期望 0 条：%+v", len(got), got)
+	}
+	if balance, _ := walletOf(t, db, userID); balance != "5.00000000" {
+		t.Errorf("被拒的交易动了余额：%s，期望 5.00000000", balance)
+	}
+}

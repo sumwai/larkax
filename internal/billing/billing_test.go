@@ -1084,3 +1084,169 @@ func TestCacheCompressionGuardWhenPromptIsZero(t *testing.T) {
 		t.Errorf("输入为 0 时不该压回缓存量，得到 %d", got.CacheReadTokens)
 	}
 }
+
+// ── 写路径上的溢出 ──────────────────────────────────────────────────────
+
+// 单项在**相乘**那一步被夹住时，结算必须报错。
+//
+// 这是「夹住 = 少收」的主形状：Breakdown 的字段存的就是 MulInt 夹住之后的值，
+// 所以判据必须在产生它的那一步记下来（见 Breakdown.clamped）——下游拿字段去
+// 求和、去比对，看到的都是被污染的数，得不出任何异常。
+//
+// 输入取真实量级：单价 0.000014 元/token（比常见价高一个数量级），上游报的
+// prompt_tokens = 1e16。真实金额是 1400 亿元，放不进 int64 的最小单位表示。
+// 这条不需要任何数据前提——上游报什么数、就按什么数算。
+func TestSettleRejectsSingleTermOverflow(t *testing.T) {
+	p := Prices{Prompt: money.MustParse("0.000014"), Declared: map[string]bool{"prompt": true}}
+	actual := Usage{PromptTokens: 1e16}
+
+	// 前提：这一项确实被夹过，且夹住之后**和**放得下——旧判据（求字段之和）
+	// 正是因为这一点才放过它。
+	raw := ComputeWithCharges(actual, p, Charges{})
+	if _, ok := money.MulIntChecked(p.Prompt, actual.PromptTokens); ok {
+		t.Fatal("前提不成立：这一项应当在相乘时被夹住")
+	}
+	if _, ok := raw.sumChecked(); !ok {
+		t.Fatal("前提不成立：夹住之后的字段之和应当放得下（这正是旧判据的盲区）")
+	}
+
+	_, err := SettleWithCharges(actual, p, Charges{}, money.MustParse("92233720368"))
+	if err == nil {
+		t.Fatalf("单项夹住时结算必须报错，得到一项 = %s", raw.Prompt)
+	}
+	if !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("错误里应当能认出 money.ErrOverflow，得到 %v", err)
+	}
+}
+
+// 同一形状的另一个价量组合：单价 1000 元/token，prompt_tokens = 9.3e9。
+//
+// 两个数都「看起来不大」，乘积 93 亿亿个最小单位却放不进 int64。它钉的是
+// 判据不依赖某个特定量级——单价高、用量中等与单价中等、用量高各测一次。
+func TestSettleRejectsSingleTermOverflowHighPrice(t *testing.T) {
+	p := Prices{Prompt: money.MustParse("1000"), Declared: map[string]bool{"prompt": true}}
+	actual := Usage{PromptTokens: 9_300_000_000}
+
+	raw := ComputeWithCharges(actual, p, Charges{})
+	if _, ok := money.MulIntChecked(p.Prompt, actual.PromptTokens); ok {
+		t.Fatal("前提不成立：这一项应当在相乘时被夹住")
+	}
+
+	_, err := SettleWithCharges(actual, p, Charges{}, money.MustParse("92233720368"))
+	if err == nil {
+		t.Fatalf("单项夹住时结算必须报错，得到一项 = %s", raw.Prompt)
+	}
+	if !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("错误里应当能认出 money.ErrOverflow，得到 %v", err)
+	}
+}
+
+// 各项都放得下、但**和**放不下时，同样要报错。
+//
+// 这一条与上面两条各自钉一处：那两条是相乘夹住（和放得下），这条是求和
+// 溢出（各项都放得下）。判据里两条缺一不可。
+func TestSettleRejectsSumOverflow(t *testing.T) {
+	// 两项各 6e18 个最小单位（单价 6e-8 元 × 1e18 个 token = 6e10 元），
+	// 各自放得下；和是 1.2e19，放不进 int64。
+	p := Prices{
+		Prompt:     money.MustParse("0.00000006"),
+		Completion: money.MustParse("0.00000006"),
+		Declared:   map[string]bool{"prompt": true, "completion": true},
+	}
+	actual := Usage{PromptTokens: 1e18, CompletionTokens: 1e18}
+
+	raw := ComputeWithCharges(actual, p, Charges{})
+	if raw.clamped {
+		t.Fatal("前提不成立：两项各自应当放得下")
+	}
+	if _, ok := raw.sumChecked(); ok {
+		t.Fatal("前提不成立：两项之和应当放不进 int64")
+	}
+
+	_, err := SettleWithCharges(actual, p, Charges{}, money.MustParse("92233720368"))
+	if err == nil {
+		t.Fatalf("求和溢出时结算必须报错，得到 Total = %s", raw.Total)
+	}
+	if !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("错误里应当能认出 money.ErrOverflow，得到 %v", err)
+	}
+}
+
+// 正常金额不受影响：没有溢出时结算照旧。
+func TestSettleAcceptsNormalAmounts(t *testing.T) {
+	s, err := SettleWithCharges(Usage{PromptTokens: 1000}, prices(), Charges{}, money.One)
+	if err != nil {
+		t.Fatalf("正常金额不该报错: %v", err)
+	}
+	if s.Actual.String() != "0.00200000" {
+		t.Errorf("Actual = %s，期望 0.00200000", s.Actual)
+	}
+}
+
+// 空输入 + 调用方给的巨大 max_tokens：预留必须报错。
+//
+// 这是三条 P0 输入里**唯一不需要任何前提**的一条：max_tokens 是调用方给的
+// （internal/api 直接取请求里的字段），pipeline.Request.validate 只要求它
+// 为正、没有上界，所以一个请求就能走到。夹住的预留是一个**偏小**的上界，
+// 结算会超过它、撞上 Capped，差额静默由平台承担。
+func TestReserveRejectsSingleTermOverflow(t *testing.T) {
+	p := Prices{
+		Completion: money.MustParse("0.000006"),
+		Declared:   map[string]bool{"completion": true},
+	}
+	const maxTokens = int64(4e18)
+
+	// 前提：这一项在相乘时就被夹住了。真实金额是 2.4e13 元。
+	if _, ok := money.MulIntChecked(p.Completion, maxTokens); ok {
+		t.Fatal("前提不成立：这一项应当在相乘时被夹住")
+	}
+
+	reserved, err := Reserve(ReserveRequest{Prices: p, MaxTokens: maxTokens})
+	if err == nil {
+		t.Fatalf("预留算不出来时必须报错，得到 %s", reserved)
+	}
+	if !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("错误里应当能认出 money.ErrOverflow，得到 %v", err)
+	}
+}
+
+// 各分项都放得下、但求和溢出时，预留同样要报错。
+//
+// 与上一条各自钉一处：那条是相乘夹住，这条是求和溢出。
+func TestReserveRejectsSumOverflow(t *testing.T) {
+	// 输入侧与输出侧各 6e18 个最小单位，和是 1.2e19，放不进 int64。
+	p := Prices{
+		Prompt:     money.MustParse("0.00000006"),
+		Completion: money.MustParse("0.00000006"),
+		Declared:   map[string]bool{"prompt": true, "completion": true},
+	}
+	const tokens = int64(1e18)
+
+	if _, ok := money.MulIntChecked(p.Prompt, tokens); !ok {
+		t.Fatal("前提不成立：输入侧应当放得下")
+	}
+
+	_, err := Reserve(ReserveRequest{Prices: p, InputTokens: tokens, MaxTokens: tokens})
+	if err == nil {
+		t.Fatal("预留求和溢出时必须报错，而不是交回一个偏小的上界")
+	}
+	if !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("错误里应当能认出 money.ErrOverflow，得到 %v", err)
+	}
+}
+
+// 正常量级不受影响：预留照旧、与结算对得上。
+func TestReserveAcceptsNormalAmounts(t *testing.T) {
+	reserved, err := Reserve(ReserveRequest{
+		Prices: prices(), InputTokens: 1000, MaxTokens: 500,
+	})
+	if err != nil {
+		t.Fatalf("正常金额不该报错: %v", err)
+	}
+	// 输入侧按 prompt / cache_read / cache_write 里最贵的估（cacheWrite
+	// 2.5e-6）：1000 × 2.5e-6 = 0.0025；输出侧按 max(completion, reasoning)
+	// 估（reasoning 1e-5）：500 × 1e-5 = 0.005。合计 0.0075。
+	if reserved.String() != "0.00750000" {
+		t.Errorf("预留 = %s，期望 0.00750000", reserved)
+	}
+}
