@@ -67,6 +67,7 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl model add|list                 模型目录里的规范模型
   larkaxctl alias add|list                 模型别名（上游名 ↔ 规范名）
   larkaxctl price add|list                 计价规则
+  larkaxctl ledger balance|verify          读账本（余额查询、完整性校验）
   larkaxctl reconcile                      跑一轮对账（开关与口径见 settings 表）
   larkaxctl rotate                         轮换渠道凭证的主密钥（默认干跑）
   larkaxctl snapshot cleanup               按留存期删除到期的快照分区
@@ -111,6 +112,8 @@ func run() error {
 		return runChannel(os.Args[2:])
 	case "idempotency":
 		return runIdempotency(os.Args[2:])
+	case "ledger":
+		return runLedger(os.Args[2:])
 	case "migrate":
 		return runMigrate(os.Args[2:])
 	case "model":

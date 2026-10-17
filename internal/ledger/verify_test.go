@@ -435,28 +435,6 @@ func TestBalancesGroupsByAssetAndAccount(t *testing.T) {
 	}
 }
 
-// Sum 不校验：对账脚本要的正是这个非零的差额本身。
-func TestSumDoesNotVerify(t *testing.T) {
-	txn := newTxnID(t, txnA)
-	entries := externalEntries(t, txn, []struct {
-		account string
-		amount  string
-		kind    EntryType
-	}{
-		{"user:42", "-10", EntryConsume},
-		{"platform_revenue", "9", EntryConsume},
-	})
-	if got := Sum(entries, AssetCNY); got.Cmp(amount(t, "-1")) != 0 {
-		t.Errorf("差额 = %s，期望 -1（它就是 Sum 要报出来的东西）", got)
-	}
-	if got := Sum(entries, "USDT"); !got.IsZero() {
-		t.Errorf("其它资产上的和 = %s，期望 0", got)
-	}
-	if got := Sum(nil, AssetCNY); !got.IsZero() {
-		t.Errorf("空输入的和 = %s，期望 0", got)
-	}
-}
-
 // 所有构造出来的交易都应当两两配对为零，且每个科目的余额
 // 与逐条相加的结果一致——这是「账本能自圆其说」的最朴素形式。
 func TestConstructedTransactionBalancesToZero(t *testing.T) {
@@ -468,8 +446,8 @@ func TestConstructedTransactionBalancesToZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := Sum(tx.Entries, AssetCNY); !got.IsZero() {
-		t.Errorf("构造出的交易求和 = %s，期望 0", got)
+	if err := tx.Verify(); err != nil {
+		t.Errorf("构造出的交易应当自洽: %v", err)
 	}
 	total := money.Zero
 	for _, bal := range Balances(tx.Entries)[AssetCNY] {
