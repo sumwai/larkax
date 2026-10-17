@@ -933,7 +933,7 @@ func TestUpdateCanDisableRuleWithBrokenExpr(t *testing.T) {
 	model := unique("model-broken")
 
 	// 直接写进库，绕过写入路径的编译检查。
-	id := insertRule(t, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": nope}`, priority: 99})
+	id := insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": nope}`, priority: 99})
 
 	// 读取路径**不编译**，所以这条规则照样会被选中——编译发生在求值那一步。
 	// 这正是它危险的地方：故障出现在热路径上，而不是在写入的时候。
@@ -972,7 +972,7 @@ func TestUpdateCanDisableRuleWithBrokenExpr(t *testing.T) {
 
 // ── 列举 ────────────────────────────────────────────────────────────────
 
-// 列举的次序就是裁决次序：作用域具体程度 → priority → id。
+// 列举的次序就是裁决次序：作用域具体程度 → priority → 具体 > 兜底 → id。
 //
 // 于是这个清单有一个可以直接读出来的性质：适用于某次请求的第一条，就是
 // Match 会选中的那条。
@@ -1024,6 +1024,17 @@ func TestListIsOrderedByAdjudication(t *testing.T) {
 	if rankOf(t, infos, newer) > rankOf(t, infos, high) {
 		t.Error("同作用域同优先级下 id 大的应当排在前面")
 	}
+
+	// 同作用域同优先级时，模型名单非空的排在兜底的前面——与 id 的大小无关：
+	// 兜底那条是后建的，序号更大。
+	catchAll := createRule(t, admin, CreateRequest{
+		Scope: ScopeChannel, ChannelID: ch, Name: unique("rule-order"),
+		ModelPatterns: []string{}, Expr: `{"prompt": 6}`, Priority: 5,
+	})
+	infos = listAll(t, admin)
+	if rankOf(t, infos, catchAll) < rankOf(t, infos, newer) {
+		t.Error("同作用域同优先级下兜底的规则应当排在模型专属的后面")
+	}
 }
 
 // 列举不藏着一行坏规则，也不让一行坏规则遮住别的行。
@@ -1032,7 +1043,7 @@ func TestListReportsBrokenExprPerRow(t *testing.T) {
 	admin := NewAdmin(db)
 
 	// 直接写进库，绕过写入路径。
-	broken := insertRule(t, db, ruleSpec{expr: `{"prompt": nope}`})
+	broken := insertRule(t, t.Context(), db, ruleSpec{expr: `{"prompt": nope}`})
 	good := createRule(t, admin, CreateRequest{Scope: ScopePlatform, Name: unique("rule-good")})
 
 	infos := listAll(t, admin)
