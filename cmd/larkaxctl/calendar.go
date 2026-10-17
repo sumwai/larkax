@@ -181,7 +181,7 @@ func runCalendarImport(args []string) error {
 	if err != nil {
 		return err
 	}
-	printCalendarImport(os.Stdout, result)
+	printCalendarImport(humanStdout(), result)
 	return nil
 }
 

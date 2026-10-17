@@ -72,6 +72,21 @@ delete 是**软删**：置 deleted_at 并把状态改成 disabled，行与它的
 
 **选项的旧名仍可用**：--owner 等同于 --user。它保留是为了不让已经在跑的脚本
 与部署流程坏掉，行为一致；新写的命令请用 --user。
+
+# 别名
+
+下面几个写法仍然可用，只是不再是正式写法（用法行里只写规范名）：
+
+  -u <用户 ID 或用户名>     同 --user
+  --stdin                   同 --credential-stdin
+  --env <变量名>            同 --credential-env。它与全局的 --env-file 只差一个
+                            词，含义却不同：**这里是环境变量的名字**（从那个
+                            变量里读凭证），--env-file 要的是 .env 文件的**路径**。
+  --owner                   同 --user
+
+**--channel 不存在、--type / --base-url / --model… 也都不开简写**：这条命令上
+挑错的是「凭证写给哪条渠道」，而 -c 这类单字母在别的命令行里既可能是
+channel 也可能是 config。纯长参数那一条有用例钉着（见 short_flags_test.go）。
 `
 
 // channelTimeout 是渠道命令连库与写库的时间上限。
@@ -153,7 +168,7 @@ func runChannelCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	printCreatedChannel(os.Stdout, os.Stderr, id, sealer.PrimaryKeyID(), len(req.Setting) > 0)
+	printCreatedChannel(humanStdout(), humanStderr(), id, sealer.PrimaryKeyID(), len(req.Setting) > 0)
 	return nil
 }
 
@@ -169,11 +184,14 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	baseURL := fs.String("base-url", "", "上游地址，必须以 http:// 或 https:// 开头")
 	models := fs.String("models", "", "该渠道支持的规范模型名，逗号分隔，至少一个")
 	owner := legacyStringFlag(fs, "user", "owner", "", "归属用户（ID 或用户名），留空表示平台自营")
+	stringAlias(fs, owner, "u", sameAs("user"))
 	weight := fs.Int("weight", 0, "分流权重，0 表示用默认值 1")
 	priority := fs.Int("priority", 0, "优先级，越大越优先")
 	setting := fs.String("setting", "", "渠道级 JSON 配置对象，留空表示空对象")
 	credentialStdin := fs.Bool("credential-stdin", false, "从标准输入读明文凭证")
+	boolAlias(fs, credentialStdin, "stdin", sameAs("credential-stdin"))
 	credentialEnv := fs.String("credential-env", "", "从指定环境变量读明文凭证")
+	stringAlias(fs, credentialEnv, "env", sameAs("credential-env"))
 	if err := fs.Parse(args); err != nil {
 		return channels.CreateRequest{}, "", err
 	}
@@ -238,7 +256,9 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	priority := fs.Int("priority", 0, "优先级")
 	setting := fs.String("setting", "", "渠道级 JSON 配置对象")
 	credentialStdin := fs.Bool("credential-stdin", false, "从标准输入读新的明文凭证")
+	boolAlias(fs, credentialStdin, "stdin", sameAs("credential-stdin"))
 	credentialEnv := fs.String("credential-env", "", "从指定环境变量读新的明文凭证")
+	stringAlias(fs, credentialEnv, "env", sameAs("credential-env"))
 	if err := fs.Parse(args); err != nil {
 		return channels.UpdateRequest{}, err
 	}
@@ -291,7 +311,10 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 		req.Setting = &parsed
 		changes++
 	}
-	if given["credential-stdin"] || given["credential-env"] {
+	// 判据要连别名一起看（见 flagGiven）：写 `--env FOO` 时 Visit 记的是
+	// "env"，只查规范名的表现是那次轮换被静默跳过——命令报成功，
+	// 而库里那一列还是旧凭证。
+	if flagGiven(given, credentialStdinFlagNames...) || flagGiven(given, credentialEnvFlagNames...) {
 		plaintext, err := readCredential(*credentialStdin, *credentialEnv, true)
 		if err != nil {
 			return channels.UpdateRequest{}, err
@@ -338,9 +361,9 @@ func runChannelUpdate(args []string) error {
 	if err := admin.Update(ctx, req); err != nil {
 		return err
 	}
-	fmt.Printf("已更新渠道 %d。\n", req.ID)
+	_, _ = fmt.Fprintf(humanStdout(), "已更新渠道 %d。\n", req.ID)
 	if req.Setting != nil && len(*req.Setting) > 0 {
-		printSettingUnreadNote(os.Stderr)
+		printSettingUnreadNote(humanStderr())
 	}
 	return nil
 }
@@ -404,7 +427,7 @@ func runChannelList(args []string) error {
 	if jsonOutput() {
 		return emitJSON(os.Stdout, channelListDoc(infos, *all), nil)
 	}
-	printChannelList(os.Stdout, infos, *all)
+	printChannelList(humanStdout(), infos, *all)
 	return nil
 }
 
@@ -449,7 +472,7 @@ func runChannelSetStatus(args []string, status string) error {
 	if err := channels.NewAdmin(db, nil, nil).SetStatus(ctx, *id, status); err != nil {
 		return err
 	}
-	fmt.Printf("渠道 %d %s。\n", *id, done)
+	_, _ = fmt.Fprintf(humanStdout(), "渠道 %d %s。\n", *id, done)
 	return nil
 }
 
@@ -500,10 +523,10 @@ func runChannelDelete(args []string) error {
 		return err
 	}
 	if deleted {
-		fmt.Printf("已删除渠道 %d。\n", *id)
+		_, _ = fmt.Fprintf(humanStdout(), "已删除渠道 %d。\n", *id)
 		return nil
 	}
-	fmt.Printf("渠道 %d 已经是删除状态。\n", *id)
+	_, _ = fmt.Fprintf(humanStdout(), "渠道 %d 已经是删除状态。\n", *id)
 	return nil
 }
 

@@ -24,7 +24,7 @@ const walletUsage = `larkaxctl wallet 管理用户钱包。
 
 用法：
   larkaxctl wallet create --user <ID 或用户名> [--asset <资产>]
-  larkaxctl wallet credit --user <ID 或用户名> --amount <金额> --idempotency-key <幂等键>
+  larkaxctl wallet credit --user <ID 或用户名> --amount <金额> --ref <外部单据号>
                           [--asset <资产>] [--gateway <来源>]
 
 create 给一个已存在的用户开通钱包，余额为 0。它不写任何分录：新开的户在
@@ -44,14 +44,15 @@ credit 是运营手工入账：走账本写一组 topup 分录（借 user:<ID>�
 payment_gateway:<来源>），并在同一个事务里更新 user_wallets.balance。
 它不绕过账本直接改余额——那样会让钱包快照与分录对不上，下一轮对账会报。
 
---idempotency-key 是幂等键，**必填且没有默认值**。它被确定性地映射成这次交易的
-txn_id，于是同一条命令重跑两次只会入账一次。两种结果都在输出里说清：
+--ref 是这笔入账对应的**外部单据号**（银行流水号、支付通道的单号），它同时是
+幂等键：**必填且没有默认值**。它被确定性地映射成这次交易的 txn_id，于是同一条
+命令重跑两次只会入账一次。两种结果都在输出里说清：
 
   第一次：已入账（并逐条列出写了哪些分录）
   重放：  「已经入过账，本次未改动」，退出 0
 
-同一个 --idempotency-key 配不同的金额、用户或通道不是重放，而是冲突：数据库里
-那笔交易与这次要写的不是同一批分录，命令退出 4，一笔都不写。换一个键。
+同一个 --ref 配不同的金额、用户或通道不是重放，而是冲突：数据库里那笔交易与
+这次要写的不是同一批分录，命令退出 4，一笔都不写。换一个单号。
 
 键里不能有控制字符（换行、制表符等）：它既算交易号又进备注，而备注会把控制
 字符换成空格，于是两个不同的键会写出两条备注一模一样的入账。
@@ -74,9 +75,18 @@ manual 是同一个科目。当前不接支付通道的回调，所以来源是�
 这两条命令只写 user_wallets 与 ledger_entries，不碰 users，也不需要
 LARKAX_MASTER_KEYS。
 
-**旧名仍可用**：wallet open 等同于 wallet create，--order 等同于
---idempotency-key。它们保留是为了不让已经在跑的脚本与部署流程坏掉，行为与
-新名字逐字相同；新写的命令请用新名字。
+**旧名仍可用**：wallet open 等同于 wallet create，--idempotency-key 与 --order
+都等同于 --ref，-u 是 --user 的简写。它们保留是为了不让已经在跑的脚本与部署
+流程坏掉，行为与新名字逐字相同；新写的命令请用新名字。
+
+# 别名
+
+下面几个写法仍然可用，只是不再是正式写法（用法行里只写规范名）：
+
+  -u <ID 或用户名>      同 --user，create 与 credit 都认
+  --idempotency-key     同 --ref。它是这一项上一版的正式写法，已经发布过，
+                        删掉就是破坏脚本
+  --order               同 --ref（更早的那一版口语化写法）
 `
 
 // walletTimeout 是这条命令连库与写库的时间上限。
@@ -124,6 +134,7 @@ func runWalletCreate(args []string) error {
 	fs := flag.NewFlagSet("wallet create", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, walletUsage) }
 	user := fs.String("user", "", "钱包归属的用户：用户 ID 或用户名")
+	stringAlias(fs, user, "u", sameAs("user"))
 	asset := fs.String("asset", "", "资产品种；留空表示取 settings 的 billing.default_asset")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -159,7 +170,7 @@ func runWalletCreate(args []string) error {
 			return openErr
 		}
 
-		printOpenedWallet(os.Stdout, owner, assetValue, created)
+		printOpenedWallet(humanStdout(), owner, assetValue, created)
 		return nil
 	})
 }
@@ -177,9 +188,11 @@ func runWalletCredit(args []string) error {
 	fs := flag.NewFlagSet("wallet credit", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, walletUsage) }
 	user := fs.String("user", "", "入账的用户：用户 ID 或用户名")
+	stringAlias(fs, user, "u", sameAs("user"))
 	amount := fs.String("amount", "", "入账金额，必须为正")
 	asset := fs.String("asset", "", "资产品种；留空表示取 settings 的 billing.default_asset")
-	order := legacyStringFlag(fs, "idempotency-key", "order", "", "幂等键；必填，同一条命令重跑不会重复入账")
+	ref := legacyStringFlag(fs, "ref", "idempotency-key", "", "外部单据号，同时是幂等键；必填，同一条命令重跑不会重复入账")
+	stringAlias(fs, ref, "order", legacyNote("ref"))
 	gateway := fs.String("gateway", manualGateway, "这笔钱从哪个外部来源进来；manual 表示线下到账")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -192,13 +205,13 @@ func runWalletCredit(args []string) error {
 		fs.Usage()
 		return usageErr(errors.New("缺少 --user"))
 	}
-	// 幂等键必填且**没有默认值**：默认值会把「操作者忘了给键」变成两笔
+	// 外部单据号必填且**没有默认值**：默认值会把「操作者忘了给单号」变成两笔
 	// 互不相干的入账，而这两笔在账面上都合法——正是最难事后发现的那种错。
-	orderKey := strings.TrimSpace(*order)
+	orderKey := strings.TrimSpace(*ref)
 	if orderKey == "" {
 		fs.Usage()
 		return usageErr(errors.New(
-			"缺少 --idempotency-key：它是这次入账的幂等键，重跑同一条命令时靠它认出「已经入过账」"))
+			"缺少 --ref：它是这笔入账对应的外部单据号，同时是幂等键——重跑同一条命令时靠它认出「已经入过账」"))
 	}
 	if ctrlErr := checkOrderKey(orderKey); ctrlErr != nil {
 		return ctrlErr
@@ -245,7 +258,7 @@ func runWalletCredit(args []string) error {
 			return postErr
 		}
 
-		printCreditedWallet(os.Stdout, owner, txn, orderKey, applied)
+		printCreditedWallet(humanStdout(), owner, txn, orderKey, applied)
 		return nil
 	})
 }

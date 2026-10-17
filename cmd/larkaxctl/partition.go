@@ -190,8 +190,8 @@ func runPartitionCheck(args []string) error {
 
 	printPartitionSpan(from, months)
 	printMissingPartitions(missing)
-	fmt.Printf("兜底分区 %s：%d 行\n", store.UsageEventDefaultPartition, usageDefaultRows)
-	fmt.Printf("兜底分区 %s：%d 行\n", snapshotwire.DefaultPartition, snapshotDefaultRows)
+	_, _ = fmt.Fprintf(humanStdout(), "兜底分区 %s：%d 行\n", store.UsageEventDefaultPartition, usageDefaultRows)
+	_, _ = fmt.Fprintf(humanStdout(), "兜底分区 %s：%d 行\n", snapshotwire.DefaultPartition, snapshotDefaultRows)
 	return cause
 }
 
@@ -272,7 +272,7 @@ func partitionProblems(missing []string, usageDefaultRows, snapshotDefaultRows i
 func printPartitionSpan(from time.Time, months int) {
 	start, _ := store.UsageEventMonthBounds(from)
 	end, _ := store.UsageEventMonthBounds(start.AddDate(0, months-1, 0))
-	fmt.Printf("起点 %s，共 %d 个月（%s ~ %s）\n",
+	_, _ = fmt.Fprintf(humanStdout(), "起点 %s，共 %d 个月（%s ~ %s）\n",
 		start.Format("2006-01"), months, start.Format("2006-01"), end.Format("2006-01"))
 }
 
@@ -281,21 +281,21 @@ func printPartitionSpan(from time.Time, months int) {
 // 一个都没建时也打印一行明确的说明，理由见 runPartitionEnsure。
 func printCreatedPartitions(created []string) {
 	if len(created) == 0 {
-		fmt.Println("没有缺失的分区，本次没有建任何东西。")
+		_, _ = fmt.Fprintln(humanStdout(), "没有缺失的分区，本次没有建任何东西。")
 		return
 	}
-	fmt.Printf("已建立 %d 个分区：\n", len(created))
-	fmt.Println("  " + strings.Join(created, "\n  "))
+	_, _ = fmt.Fprintf(humanStdout(), "已建立 %d 个分区：\n", len(created))
+	_, _ = fmt.Fprintln(humanStdout(), "  "+strings.Join(created, "\n  "))
 }
 
 // printMissingPartitions 打印缺失的月分区名。
 func printMissingPartitions(missing []string) {
 	if len(missing) == 0 {
-		fmt.Println("usage_events 应当存在的月分区都在。")
+		_, _ = fmt.Fprintln(humanStdout(), "usage_events 应当存在的月分区都在。")
 		return
 	}
-	fmt.Printf("usage_events 缺失 %d 个月分区：\n", len(missing))
-	fmt.Println("  " + strings.Join(missing, "\n  "))
+	_, _ = fmt.Fprintf(humanStdout(), "usage_events 缺失 %d 个月分区：\n", len(missing))
+	_, _ = fmt.Fprintln(humanStdout(), "  "+strings.Join(missing, "\n  "))
 }
 
 // countRows 统计一张表的行数。

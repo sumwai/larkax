@@ -21,9 +21,9 @@ const apiKeyUsage = `larkaxctl apikey 管理 API Key。
 
 用法：
   larkaxctl apikey create --user <ID 或用户名> [--name <备注>] [--expires-at <RFC3339>]
-                          [--rate-limit-rpm <整数>] [--quota-limit <金额>]
-  larkaxctl apikey update --id <ID> [--rate-limit-rpm <整数> | --clear-rate-limit-rpm]
-                                  [--quota-limit <金额> | --clear-quota-limit]
+                          [--rpm <整数>] [--quota <金额>]
+  larkaxctl apikey update --id <ID> [--rpm <整数> | --clear-rpm]
+                                  [--quota <金额> | --clear-quota]
   larkaxctl apikey list [--user <ID 或用户名>]
 
 create 生成一把新 key，只把哈希入库。
@@ -41,11 +41,11 @@ create 生成一把新 key，只把哈希入库。
 
 两列额度都按**明文**给，不填表示 NULL：
 
-  --rate-limit-rpm   每分钟请求额度。**0 不是「不限」，是「一个都不放行」。**
-                     不填（或 update 时给 --clear-rate-limit-rpm）写回 NULL，
+  --rpm              每分钟请求额度。**0 不是「不限」，是「一个都不放行」。**
+                     不填（或 update 时给 --clear-rpm）写回 NULL，
                      即「继承用户默认」——users 表上目前没有这样一个默认值，
                      所以它等价于不限。
-  --quota-limit      这把 key 累计可花费的金额上限，单位是**该用户钱包的
+  --quota            这把 key 累计可花费的金额上限，单位是**该用户钱包的
                      资产品种**（见 user_wallets.asset）。最多 8 位小数。
                      0 与不填的区别同上。
 
@@ -59,6 +59,19 @@ update 只改额度，不改备注与过期时间——那两样目前没有入�
 
 这三条命令都不需要 LARKAX_MASTER_KEYS：它们不碰渠道凭证，也就不碰
 信封加密。主密钥是 rotate 与 channels 那一组的事。
+
+# 别名
+
+下面几个写法仍然可用，只是不再是正式写法（用法行里只写规范名）：
+
+  -u <ID 或用户名>         同 --user，create 与 list 都认
+  --rate-limit-rpm <整数>  同 --rpm
+  --clear-rate-limit-rpm   同 --clear-rpm
+  --quota-limit <金额>     同 --quota
+  --clear-quota-limit      同 --clear-quota
+
+两个额度**不开简写**：它们是限额，写短了容易看错也容易按错，要的是完整写出来。
+-u 是这三个子命令上唯一的简写。
 `
 
 // apiKeyTimeout 是这条命令连库与写库的时间上限。
@@ -105,10 +118,11 @@ func runAPIKeyCreate(args []string) error {
 	fs := flag.NewFlagSet("apikey create", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, apiKeyUsage) }
 	user := fs.String("user", "", "key 的归属用户：用户 ID 或用户名")
+	stringAlias(fs, user, "u", sameAs("user"))
 	name := fs.String("name", "", "备注名，用于日后在列表里认出这把 key")
 	expiresAt := fs.String("expires-at", "", "过期时间（RFC3339），留空表示不过期")
-	rpm := fs.String("rate-limit-rpm", "", "每分钟请求额度；0 表示一个都不放行，不填表示 NULL")
-	quota := fs.String("quota-limit", "", "累计可花费的金额上限；0 表示一个都不放行，不填表示 NULL")
+	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "", "每分钟请求额度；0 表示一个都不放行，不填表示 NULL")
+	quota := legacyStringFlag(fs, "quota", "quota-limit", "", "累计可花费的金额上限；0 表示一个都不放行，不填表示 NULL")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -163,7 +177,7 @@ func runAPIKeyCreate(args []string) error {
 			return err
 		}
 
-		printCreatedKey(os.Stdout, os.Stderr, owner, created, expires, limits)
+		printCreatedKey(humanStdout(), humanStderr(), owner, created, expires, limits)
 		return nil
 	})
 }
@@ -177,10 +191,12 @@ func runAPIKeyUpdate(args []string) error {
 	fs := flag.NewFlagSet("apikey update", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, apiKeyUsage) }
 	id := fs.Int64("id", 0, "要改的 API Key 的 id（apikey list 里能看到）")
-	rpm := fs.String("rate-limit-rpm", "", "每分钟请求额度；0 表示一个都不放行")
-	clearRPM := fs.Bool("clear-rate-limit-rpm", false, "把每分钟额度清空（写回 NULL）")
-	quota := fs.String("quota-limit", "", "累计可花费的金额上限；0 表示一个都不放行")
-	clearQuota := fs.Bool("clear-quota-limit", false, "把金额上限清空（写回 NULL）")
+	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "", "每分钟请求额度；0 表示一个都不放行")
+	clearRPM := fs.Bool("clear-rpm", false, "把每分钟额度清空（写回 NULL）")
+	boolAlias(fs, clearRPM, "clear-rate-limit-rpm", legacyNote("clear-rpm"))
+	quota := legacyStringFlag(fs, "quota", "quota-limit", "", "累计可花费的金额上限；0 表示一个都不放行")
+	clearQuota := fs.Bool("clear-quota", false, "把金额上限清空（写回 NULL）")
+	boolAlias(fs, clearQuota, "clear-quota-limit", legacyNote("clear-quota"))
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -208,7 +224,7 @@ func runAPIKeyUpdate(args []string) error {
 		if err := auth.New(db).UpdateLimits(ctx, *id, params); err != nil {
 			return err
 		}
-		printUpdatedLimits(os.Stderr, *id, params)
+		printUpdatedLimits(humanStderr(), *id, params)
 		return nil
 	})
 }
@@ -217,6 +233,7 @@ func runAPIKeyList(args []string) error {
 	fs := flag.NewFlagSet("apikey list", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, apiKeyUsage) }
 	user := fs.String("user", "", "只看这个用户的 key：用户 ID 或用户名；留空表示全部")
+	stringAlias(fs, user, "u", sameAs("user"))
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -248,7 +265,7 @@ func runAPIKeyList(args []string) error {
 		if jsonOutput() {
 			return emitJSON(os.Stdout, apiKeyListDoc(keys), nil)
 		}
-		printKeyList(os.Stdout, keys)
+		printKeyList(humanStdout(), keys)
 		return nil
 	})
 }
@@ -277,12 +294,21 @@ type limitFlag struct {
 // 抽成一个不碰数据库的函数，是因为这三态正是最容易写错、也最该被单测钉住的
 // 地方：把「清空」实现成「写成 0」，表现是每一次「恢复默认」都变成一次静默的
 // 封禁，而它不报任何错。
+// 两列额度各有几种写法，判「这次到底给没给」时要全查（见 flagGiven）。
+//
+// 漏掉一种的表现是「`--rpm 60 --clear-rpm` 不报冲突」：两个写着相反意思的旗标
+// 一起生效，后一个安静地赢。所以名字组与注册那一段一起看。
+var (
+	rpmFlagNames   = []string{"rpm", "rate-limit-rpm"}
+	quotaFlagNames = []string{"quota", "quota-limit"}
+)
+
 func updateLimits(seen map[string]bool, rpm, quota limitFlag) (auth.LimitParams, error) {
 	var params auth.LimitParams
 
-	switch rpmGiven := seen["rate-limit-rpm"]; {
+	switch rpmGiven := flagGiven(seen, rpmFlagNames...); {
 	case rpm.clear && rpmGiven:
-		return auth.LimitParams{}, errors.New("--rate-limit-rpm 与 --clear-rate-limit-rpm 不能同时给：" +
+		return auth.LimitParams{}, errors.New("--rpm 与 --clear-rpm 不能同时给：" +
 			"一个是设值，一个是写回 NULL")
 	case rpm.clear:
 		// RateLimitRPM 留 nil：SetRateLimit 为真而指针为 nil 就是「写回 NULL」。
@@ -295,9 +321,9 @@ func updateLimits(seen map[string]bool, rpm, quota limitFlag) (auth.LimitParams,
 		params.SetRateLimit, params.RateLimitRPM = true, parsed
 	}
 
-	switch quotaGiven := seen["quota-limit"]; {
+	switch quotaGiven := flagGiven(seen, quotaFlagNames...); {
 	case quota.clear && quotaGiven:
-		return auth.LimitParams{}, errors.New("--quota-limit 与 --clear-quota-limit 不能同时给：" +
+		return auth.LimitParams{}, errors.New("--quota 与 --clear-quota 不能同时给：" +
 			"一个是设值，一个是写回 NULL")
 	case quota.clear:
 		params.SetQuota = true
@@ -312,8 +338,8 @@ func updateLimits(seen map[string]bool, rpm, quota limitFlag) (auth.LimitParams,
 	// 一条什么都没要求的 update 是「看起来做了、其实没做」的命令，而它的
 	// 表现与成功一模一样。零值在这里的意思是「不改」，所以这个检查不能省。
 	if !params.SetRateLimit && !params.SetQuota {
-		return auth.LimitParams{}, errors.New("没有要改的东西：--rate-limit-rpm、" +
-			"--clear-rate-limit-rpm、--quota-limit、--clear-quota-limit 至少要给一个")
+		return auth.LimitParams{}, errors.New("没有要改的东西：--rpm、" +
+			"--clear-rpm、--quota、--clear-quota 至少要给一个")
 	}
 
 	return params, nil
@@ -335,7 +361,7 @@ func parseLimits(fs *flag.FlagSet, rpm, quota string) (keyLimits, error) {
 	var out keyLimits
 	seen := providedFlags(fs)
 
-	if seen["rate-limit-rpm"] {
+	if flagGiven(seen, rpmFlagNames...) {
 		parsed, err := parseRateLimitRPM(rpm)
 		if err != nil {
 			return keyLimits{}, err
@@ -343,7 +369,7 @@ func parseLimits(fs *flag.FlagSet, rpm, quota string) (keyLimits, error) {
 		out.rpm = parsed
 	}
 
-	if seen["quota-limit"] {
+	if flagGiven(seen, quotaFlagNames...) {
 		parsed, err := parseQuotaLimit(quota)
 		if err != nil {
 			return keyLimits{}, err
@@ -372,22 +398,22 @@ func providedFlags(fs *flag.FlagSet) map[string]bool {
 func parseRateLimitRPM(plain string) (*int, error) {
 	trimmed := strings.TrimSpace(plain)
 	if trimmed == "" {
-		return nil, errors.New("--rate-limit-rpm 需要一个整数（0 表示一个都不放行），得到空值")
+		return nil, errors.New("--rpm 需要一个整数（0 表示一个都不放行），得到空值")
 	}
 
 	n, err := strconv.Atoi(trimmed)
 	if err != nil {
-		return nil, fmt.Errorf("--rate-limit-rpm 需要整数，得到 %q", plain)
+		return nil, fmt.Errorf("--rpm 需要整数，得到 %q", plain)
 	}
 	// 列是 integer（32 位）。超出上界时数据库会报一句 numeric out of range，
 	// 那句话没说清是哪个旗标，而这条命令上只有这一个整数旗标之外的东西……
 	// 所以在这里拦下来，把话说在旗标的名字上。
 	if n > math.MaxInt32 {
-		return nil, fmt.Errorf("--rate-limit-rpm 最大 %d，得到 %d：列是 32 位整数",
+		return nil, fmt.Errorf("--rpm 最大 %d，得到 %d：列是 32 位整数",
 			int64(math.MaxInt32), n)
 	}
 	if n < 0 {
-		return nil, fmt.Errorf("--rate-limit-rpm 不能是负数，得到 %d："+
+		return nil, fmt.Errorf("--rpm 不能是负数，得到 %d："+
 			"限流那一侧把负数与 0 一样当成「一个都不放行」，而写下负数的人几乎总是漏了一个减号",
 			n)
 	}
@@ -403,23 +429,23 @@ const quotaScale = 8
 func parseQuotaLimit(plain string) (*money.Amount, error) {
 	trimmed := strings.TrimSpace(plain)
 	if trimmed == "" {
-		return nil, errors.New("--quota-limit 需要一个金额（0 表示一个都不放行），得到空值")
+		return nil, errors.New("--quota 需要一个金额（0 表示一个都不放行），得到空值")
 	}
 
 	// 先自己数一遍小数位。money.Parse 会把多出来的位四舍五入，而额度是一个
 	// 会被拿去比较的边界值——「存进去的数与敲进去的数不一样」在这里是不该
 	// 发生的事，哪怕差的只是最后一位。
 	if _, frac, hasDot := strings.Cut(trimmed, "."); hasDot && len(frac) > quotaScale {
-		return nil, fmt.Errorf("--quota-limit 最多 %d 位小数，得到 %q："+
+		return nil, fmt.Errorf("--quota 最多 %d 位小数，得到 %q："+
 			"列是 numeric(20, %d)，多出来的位存不进去", quotaScale, plain, quotaScale)
 	}
 
 	amount, err := money.Parse(trimmed)
 	if err != nil {
-		return nil, fmt.Errorf("--quota-limit 不是金额（例如 12.34）: %w", err)
+		return nil, fmt.Errorf("--quota 不是金额（例如 12.34）: %w", err)
 	}
 	if amount.IsNegative() {
-		return nil, fmt.Errorf("--quota-limit 不能是负数，得到 %s：金额上限没有负数这一档",
+		return nil, fmt.Errorf("--quota 不能是负数，得到 %s：金额上限没有负数这一档",
 			amount)
 	}
 	return &amount, nil

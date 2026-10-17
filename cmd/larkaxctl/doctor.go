@@ -92,6 +92,19 @@ LARKAX_HTTP_ADDR 的默认值一致；网关不在本机时要显式给。
 
   larkaxctl doctor
   larkaxctl doctor --live --model claude-x --credential-env LARKAX_API_KEY
+
+# 别名
+
+下面几个写法仍然可用，只是不再是正式写法（用法行里只写规范名）：
+
+  -m <规范名>        同 --model
+  --env <变量名>     同 --credential-env。它与全局的 --env-file 只差一个词，含义
+                     却不同：**这里是环境变量的名字**（从那个变量里读凭证），
+                     --env-file 要的是 .env 文件的**路径**。
+  --stdin            同 --credential-stdin
+
+-v / --verbose 与 -q / --quiet 是全局选项（见 larkaxctl --help 的「全局选项」），
+写在子命令前后都认。两个不能一起给。
 `
 
 // doctorTimeout 是六项只读检查的时间上限。
@@ -208,11 +221,14 @@ const (
 
 // doctorOptions 是 doctor 的参数。
 //
+// --verbose 不在里面：它是**全局**控制选项（见 globals.go），由最外层的 run()
+// 摘出来，写在子命令前面也一样认。这里再注册一次会得到第二个格子，而那只在
+// 「从 run() 进来」这条路上被摘掉、从别处调过来时才有用——两个格子迟早对不上。
+//
 // key 只在 --live 时有值。它不进日志、不进错误信息、不进任何一行输出：
 // 全仓库唯一读它的地方是发请求时设置请求头。
 type doctorOptions struct {
 	live     bool
-	verbose  bool
 	model    string
 	endpoint string
 	baseURL  string
@@ -249,7 +265,7 @@ func runDoctor(args []string) error {
 	// 仍然退出 1（与交互模式一致），而 JSON 里的 exit_code 也是同一个数——
 	// 各算一遍的话，两处迟早分叉，分叉的表现是「报告说 failed、
 	// 脚本读到的退出码是 0」。
-	return emitDoctorReport(os.Stdout, rep, dbErr, opts.verbose)
+	return emitDoctorReport(os.Stdout, rep, dbErr, verboseOutput)
 }
 
 // emitDoctorReport 把一份报告按选定的格式打出去，并把该用的退出码返回。
@@ -257,6 +273,9 @@ func runDoctor(args []string) error {
 // 单独抽出来的理由与 printDoctorLines 相同，不是复用，是**让用例打到同一条
 // 路径上**：真跑一次 doctor 要连库，而「有失败项时 json 模式仍退出 1」
 // 恰恰是最该被钉住的一条，不能因为造不出一个有失败项的库就不测。
+//
+// --quiet 只落在表格那一档上（humanOut）：机器可读那一份照打，理由见
+// globals.go 的 humanStdout。
 func emitDoctorReport(w io.Writer, rep doctorReport, dbErr error, verbose bool) error {
 	cause := rep.exitErr(dbErr)
 	if jsonOutput() {
@@ -264,7 +283,7 @@ func emitDoctorReport(w io.Writer, rep doctorReport, dbErr error, verbose bool) 
 		return emitJSON(w, doctorDoc(rep), cause)
 	}
 
-	printDoctorReport(w, rep, verbose)
+	printDoctorReport(humanOut(w), rep, verbose)
 	return cause
 }
 
@@ -276,15 +295,14 @@ func parseDoctorOptions(args []string) (doctorOptions, error) {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, doctorUsage) }
 	live := fs.Bool("live", false, "真打一次上游（会花钱、要凭证）")
-	// -v 与 --verbose 是同一个开关的两个写法。两个都注册：脚本里习惯写
-	// --verbose，手敲时 -v 更短，而不必去记这一版支持哪个。
-	verbose := fs.Bool("v", false, "把每一项的细节也打出来")
-	fs.BoolVar(verbose, "verbose", false, "同 -v")
 	model := fs.String("model", "", "真打上游时用的规范模型名")
+	stringAlias(fs, model, "m", sameAs("model"))
 	endpoint := fs.String("endpoint", doctorEndpointChat, "真打上游打哪个入口：chat、messages 或 responses")
 	baseURL := fs.String("base-url", doctorDefaultBaseURL, "网关公共入口的地址")
 	credentialStdin := fs.Bool("credential-stdin", false, "从标准输入读 API Key")
+	boolAlias(fs, credentialStdin, "stdin", sameAs("credential-stdin"))
 	credentialEnv := fs.String("credential-env", "", "从指定环境变量读 API Key")
+	stringAlias(fs, credentialEnv, "env", sameAs("credential-env"))
 	if err := fs.Parse(args); err != nil {
 		return doctorOptions{}, err
 	}
@@ -292,17 +310,27 @@ func parseDoctorOptions(args []string) (doctorOptions, error) {
 		return doctorOptions{}, fmt.Errorf("doctor 不接受位置参数，得到 %q", fs.Arg(0))
 	}
 
-	opts := doctorOptions{live: *live, verbose: *verbose, endpoint: *endpoint, baseURL: *baseURL}
+	opts := doctorOptions{live: *live, endpoint: *endpoint, baseURL: *baseURL}
 
 	if !*live {
 		// 只有 --live 才用得上这些标志。静默忽略它们会让「我给了 --model
 		// 但它没生效」看起来像一次成功的检查——而那正是这一项要防的东西。
+		//
+		// 判据要连别名一起看（见 flagGiven）：写 `-m x` 或 `--env FOO` 时
+		// Visit 记的是 "m" / "env"，只查规范名的表现是这几条**静默放行**，
+		// 而那恰好是这一段要拦的东西。
 		given := map[string]bool{}
 		fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
-		for _, name := range []string{"model", "endpoint", "base-url", "credential-stdin", "credential-env"} {
-			if given[name] {
+		for _, group := range [][]string{
+			modelFlagNames,
+			{"endpoint"},
+			{"base-url"},
+			credentialStdinFlagNames,
+			credentialEnvFlagNames,
+		} {
+			if flagGiven(given, group...) {
 				return doctorOptions{}, fmt.Errorf(
-					"--%s 只在 --live 时才有意义：默认那六项不碰网络", name)
+					"--%s 只在 --live 时才有意义：默认那六项不碰网络", group[0])
 			}
 		}
 		return opts, nil

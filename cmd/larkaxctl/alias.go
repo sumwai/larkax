@@ -58,6 +58,17 @@ resolve 回答的是选路那个问题：**这个规范名在这个渠道上实�
 **旧名仍可用**：alias add 等同于 alias create，--canonical 等同于 --model。
 它们保留是为了不让已经在跑的脚本与部署流程坏掉，行为与新名字逐字相同；
 新写的命令请用新名字。
+
+# 别名
+
+下面两个写法仍然可用，只是不再是正式写法（用法行里只写规范名）：
+
+  -m <规范名>            同 --model，create / list / resolve 三条都认
+  --canonical <规范名>   同 --model
+
+**--channel 不开简写**：-c 在别的命令行里既可能是 channel 也可能是 config、
+count，而这条命令上挑错渠道范围的后果是别名挂到另一个渠道上——那类错误要等到
+某次请求选路上游时才会现形。这个约束有用例钉着（见 short_flags_test.go）。
 `
 
 func runAlias(args []string) error {
@@ -113,7 +124,7 @@ func runAliasCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	printCreatedAlias(os.Stdout, os.Stderr, id, req)
+	printCreatedAlias(humanStdout(), humanStderr(), id, req)
 	return nil
 }
 
@@ -121,6 +132,7 @@ func parseAliasCreate(args []string) (catalog.CreateAliasRequest, error) {
 	fs := flag.NewFlagSet("alias create", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, aliasUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "", "规范模型名，必须已经在目录里")
+	stringAlias(fs, canonical, "m", sameAs("model"))
 	upstream := fs.String("upstream", "", "这家上游对这个模型的叫法")
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示平台级别名")
 	overrides := fs.String("overrides", "", "上游请求参数的覆盖，JSON 对象，只允许 temperature / top_p / max_tokens")
@@ -162,6 +174,7 @@ func runAliasList(args []string) error {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, aliasUsage) }
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示平台级别名")
 	canonical := legacyStringFlag(fs, "model", "canonical", "", "按规范名列，两种范围一起列出")
+	stringAlias(fs, canonical, "m", sameAs("model"))
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -170,8 +183,9 @@ func runAliasList(args []string) error {
 	}
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
-	// 判据要连旧名一起看：`--canonical` 写出来时 Visit 记的是它，不是 --model。
-	if given["channel"] && legacyGiven(given, "model", "canonical") {
+	// 判据要连旧名与简写一起看：写 `--canonical` 或 `-m` 时 Visit 记的是它们，
+	// 不是 --model（见 flagGiven）。
+	if given["channel"] && flagGiven(given, modelFlagNames...) {
 		return usageErr(errors.New("--channel 与 --model 只能给一个：" +
 			"前者按渠道列，后者按规范名列（它的结果里两种范围都有）"))
 	}
@@ -204,7 +218,7 @@ func runAliasList(args []string) error {
 	if jsonOutput() {
 		return emitJSON(os.Stdout, aliasListDoc(aliases), nil)
 	}
-	printAliasList(os.Stdout, aliases)
+	printAliasList(humanStdout(), aliases)
 	return nil
 }
 
@@ -233,7 +247,7 @@ func runAliasUpdate(args []string) error {
 	if err := catalog.NewAdmin(db).UpdateAlias(ctx, req); err != nil {
 		return err
 	}
-	fmt.Printf("已更新别名 %d。\n", req.ID)
+	_, _ = fmt.Fprintf(humanStdout(), "已更新别名 %d。\n", req.ID)
 	return nil
 }
 
@@ -322,7 +336,7 @@ func runAliasDelete(args []string) error {
 	if err := catalog.NewAdmin(db).DeleteAlias(ctx, *id); err != nil {
 		return err
 	}
-	fmt.Printf("已删除别名 %d。\n", *id)
+	_, _ = fmt.Fprintf(humanStdout(), "已删除别名 %d。\n", *id)
 	return nil
 }
 
@@ -335,6 +349,7 @@ func runAliasResolve(args []string) error {
 	fs := flag.NewFlagSet("alias resolve", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, aliasUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "", "规范模型名")
+	stringAlias(fs, canonical, "m", sameAs("model"))
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示不针对具体渠道（只看平台级那条）")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -374,7 +389,7 @@ func runAliasResolve(args []string) error {
 	if jsonOutput() {
 		return emitJSON(os.Stdout, aliasResolveDoc(*canonical, *channelID, upstream), nil)
 	}
-	printResolvedAlias(os.Stdout, os.Stderr, *canonical, *channelID, upstream)
+	printResolvedAlias(humanStdout(), humanStderr(), *canonical, *channelID, upstream)
 	return nil
 }
 

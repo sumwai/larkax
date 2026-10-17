@@ -148,7 +148,7 @@ func runLedgerBalance(args []string) error {
 			if jsonOutput() {
 				return emitJSON(os.Stdout, ledgerBalancesDoc(assetValue, report), nil)
 			}
-			printLedgerBalances(os.Stdout, assetValue, report)
+			printLedgerBalances(humanStdout(), assetValue, report)
 			return nil
 		}
 		balance, err := s.AccountBalance(ctx, acct, assetValue)
@@ -158,7 +158,7 @@ func runLedgerBalance(args []string) error {
 		if jsonOutput() {
 			return emitJSON(os.Stdout, ledgerBalanceDoc(acct, assetValue, balance), nil)
 		}
-		printLedgerBalance(os.Stdout, acct, assetValue, balance)
+		printLedgerBalance(humanStdout(), acct, assetValue, balance)
 		return nil
 	})
 }
@@ -248,7 +248,7 @@ func runLedgerVerify(args []string) error {
 			//
 			// err 一并交给打印函数，理由与 reconcile 相同：报告本身分不出
 			// 「校验完了一笔都没问题」与「校验到一半读不下去了」。
-			printLedgerVerifyReport(os.Stdout, report, err)
+			printLedgerVerifyReport(humanStdout(), report, err)
 			return cause
 		}
 
