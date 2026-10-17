@@ -146,8 +146,12 @@ go run ./cmd/larkaxctl calendar import ./cn-2031.json
 
 两步，缺一不可：
 
-1. 在 `internal/migrate/sql/` 里新增一条迁移，插入默认值。
-2. 在 `internal/settings/settings.go` 的 `Registry` 里加一行，声明键、类型与说明。
+1. 在 `internal/migrate/sql/` 里新增一条迁移，插入默认值，并写一句说明
+   （`settings.description` 那一列，`settings list` 打的就是它）。
+2. 在 `internal/settings/settings.go` 的 `Registry` 里加一行，声明键与类型。
+
+说明只写在迁移里一份，`Registry` 里没有第二份——写两份的话，改了一处另一处不动，
+而改错了不会有任何反馈。
 
 只做一步会被拒绝启动，并指出是哪个键对不上。这是有意的——
 否则写错键名会安静地生效为一个不存在的配置，改动看起来做了，其实没做。
