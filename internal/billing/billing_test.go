@@ -113,6 +113,22 @@ func TestValidateRejectsNegativeUsage(t *testing.T) {
 	if err := Validate(Usage{UnitCounts: map[string]int64{"images": -2}}, prices()); err == nil {
 		t.Error("负计量应被拒绝")
 	}
+
+	// 逐项判，而不是判五项之和：单项为负、被另一项的正值抵消时，
+	// 求和与「完全没用 token」分不出来（-100 + 100 = 0）。
+	// 五项逐个来一遍是为了钉住「每一项都查了」——只查其中一两项时，
+	// 其余几行会挂。
+	for name, u := range map[string]Usage{
+		"prompt":      {PromptTokens: -100, CompletionTokens: 100},
+		"completion":  {CompletionTokens: -100, PromptTokens: 100},
+		"cache_read":  {CacheReadTokens: -100, PromptTokens: 100},
+		"cache_write": {CacheWriteTokens: -100, PromptTokens: 100},
+		"reasoning":   {ReasoningTokens: -100, PromptTokens: 100},
+	} {
+		if err := Validate(u, prices()); err == nil {
+			t.Errorf("%s 为负、被别的项抵消成非负，应被拒绝", name)
+		}
+	}
 }
 
 // 用量里有规则没定价的计量项，不能当成免费——那会让这类用量永远不产生费用，
@@ -714,8 +730,12 @@ func TestReserveRejectsNegativeCacheWrite(t *testing.T) {
 	}
 }
 
-// 缓存读按输入单价估（宁贵不贱）：真实用量里缓存读按更便宜的
-// 缓存读单价计费，所以预留必然不低于结算。
+// 缓存读按 max(输入单价, 缓存读单价) 估。
+//
+// 取 max 而不是直接取输入单价：上界算法成立的前提是「缓存读单价不高于
+// 输入单价」，而这个前提**没有任何地方被校验**——规则里 cache_read > prompt
+// 是合法配置（两个数填反、抄错行都会写成这样）。此时按输入单价估会让
+// 预留小于结算，Capped 变成常态，差额静默由平台吃掉。
 func TestReserveEstimatesCacheReadAtInputPrice(t *testing.T) {
 	p := prices()
 	// 把缓存读写差价拉大，差异才看得出来
@@ -727,6 +747,15 @@ func TestReserveEstimatesCacheReadAtInputPrice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 断言具体金额，而不是「没撞 Capped」——后者在按缓存读单价估时也成立
+	//（1e-7 × 1000 = 0.0001，比输入单价更便宜），分辨不出用的是哪一个价。
+	//
+	// 0.002（缓存读 2e-6 × 1000）+ 0.1（缓存写 1e-4 × 1000）
+	// + 0.00001（输出 1e-5 × 1）
+	if want := money.MustParse("0.10201"); reserved.Cmp(want) != 0 {
+		t.Errorf("预留 = %s，期望 %s", reserved, want)
+	}
+
 	actual := Usage{CacheReadTokens: 1000, CacheWriteTokens: 1000}
 	s, err := SettleWithCharges(actual, p, Charges{}, reserved)
 	if err != nil {
@@ -734,6 +763,56 @@ func TestReserveEstimatesCacheReadAtInputPrice(t *testing.T) {
 	}
 	if s.Capped {
 		t.Errorf("缓存读写都算进了预留，不该撞 Capped：预留 %s 实际 %s", reserved, s.Breakdown.Total)
+	}
+
+	// 规则把缓存读单价写成输入的 5 倍时，预留仍须覆盖结算。
+	// 按输入单价估会得到预留 10、实际 50——被截到 10 且 Capped，
+	// 那 40 由平台静默吃掉。
+	flipped := prices()
+	flipped.Prompt = money.MustParse("1")
+	flipped.CacheRead = money.MustParse("5")
+	flipped.Completion = money.Zero
+	flipped.CacheWrite = money.Zero
+	flipped.Reasoning = money.Zero
+
+	reserved, err = Reserve(ReserveRequest{Prices: flipped, CacheReadTokens: 10, MaxTokens: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 10 × max(1, 5) = 50
+	if want := money.MustParse("50"); reserved.Cmp(want) != 0 {
+		t.Errorf("缓存读单价高于输入时，预留要按贵的那个估：得到 %s，期望 %s", reserved, want)
+	}
+
+	s, err = SettleWithCharges(Usage{CacheReadTokens: 10}, flipped, Charges{}, reserved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := money.MustParse("50"); s.Actual.Cmp(want) != 0 {
+		t.Errorf("实际金额 = %s，期望 %s（10 token × 单价 5）", s.Actual, want)
+	}
+	if s.Capped {
+		t.Errorf("预留应覆盖结算，却撞了 Capped：预留 %s 实际 %s", reserved, s.Breakdown.Total)
+	}
+}
+
+// 规则没配缓存读单价（零值）时，max 取输入单价——行为与取 max 之前一致。
+//
+// 这条边界要钉住：max 是「两个单价里取较大的那个」，不是「缓存读有单价就用它」。
+func TestReserveCacheReadWithoutPriceUsesInputPrice(t *testing.T) {
+	p := prices()
+	p.CacheRead = money.Zero
+	// 其余两侧清零，断言里剩下的就只有缓存读那一项
+	p.Completion = money.Zero
+	p.Reasoning = money.Zero
+
+	reserved, err := Reserve(ReserveRequest{Prices: p, CacheReadTokens: 1000, MaxTokens: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1000 × 2e-6 = 0.002（按没配的缓存读单价算是 0）
+	if want := money.MustParse("0.002"); reserved.Cmp(want) != 0 {
+		t.Errorf("没配缓存读单价时应按输入单价估：得到 %s，期望 %s", reserved, want)
 	}
 }
 

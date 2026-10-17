@@ -32,9 +32,17 @@ func Reserve(req ReserveRequest) (money.Amount, error) {
 
 	// 输入侧：请求前就知道有多少 token。
 	input := p.Prompt.MulInt(req.InputTokens)
-	// 缓存读命中会让实际更便宜，但预留要按贵的算——按输入单价估，
-	// 而不是按缓存读单价。少算缓存只会让预留更保守。
-	cacheRead := p.Prompt.MulInt(req.CacheReadTokens)
+	// 缓存读按两个单价里**较大**的那个估，而不是按输入单价估。
+	//
+	// 预留是上界，而上界成立有一个前提：缓存读的单价不高于输入单价。
+	// 这个前提**没有任何地方被校验**——规则里把 cache_read 写成 prompt 的
+	// 几倍是合法配置（两个数填反、抄错行都会这样），此时按输入单价估会让
+	// 预留小于结算，于是每次命中缓存的请求都撞 Capped，差额静默由平台吃掉
+	//（账目仍然平，只在对账时表现为「用量对不上金额」）。
+	//
+	// 取 max 让上界不再依赖那个前提。代价是规则把缓存读定得比输入便宜时
+	// 预留偏保守——而预留只在秒级内存在，偏保守远好过静默少收。
+	cacheRead := money.Max(p.Prompt, p.CacheRead).MulInt(req.CacheReadTokens)
 	// 缓存写入走它自己的单价。它是**独立的一侧**，不是输入的一部分：
 	// 缓存写入的价格通常高于输入（有的上游是 1.25 倍、有的是 2 倍），
 	// 把它按输入单价估会让预留小于结算，而那是每次请求都撞 Capped 的来源。
@@ -81,7 +89,7 @@ type ReserveRequest struct {
 	// InputTokens 是请求的输入 token 数。请求前由分词器算出。
 	InputTokens int64
 	// CacheReadTokens 是预估的缓存命中量。请求前通常未知，留 0 即可——
-	// 预留按贵的方向算，少算缓存只会让预留更保守。
+	// 这一侧按 max(输入单价, 缓存读单价) 估，见 Reserve 里那段的说明。
 	CacheReadTokens int64
 
 	// CacheWriteTokens 是预估的缓存写入量。
