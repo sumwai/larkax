@@ -63,8 +63,11 @@ func TestNewKeyFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("key 的随机部分不是无填充 base64url: %v", err)
 	}
-	if len(raw) != keyRandomBytes {
-		t.Fatalf("随机部分解码后 %d 字节，期望 %d", len(raw), keyRandomBytes)
+	// 32 是字面量，不是 keyRandomBytes。写成常量比常量时，把 keyRandomBytes
+	// 从 32 改成 16 这条用例照样通过——而 key.go 里「随机部分是 256 位，
+	// 所以可以用快哈希」那条论证正落在这个数上。论证得有一条用例能钉住它。
+	if len(raw) != 32 {
+		t.Fatalf("随机部分解码后 %d 字节，期望 32（256 位）", len(raw))
 	}
 	// 补上填充也能解码，说明它确实是标准 base64url 而不是某种自定义编码；
 	// 而 key 本身不该带 `=`——带填充的串在 URL 与 shell 里更容易被截断。
@@ -99,8 +102,10 @@ func TestKeyPrefix(t *testing.T) {
 	}
 
 	prefix := KeyPrefix(key)
-	if len(prefix) != keyPrefixLen {
-		t.Fatalf("前缀长度 = %d，期望 %d", len(prefix), keyPrefixLen)
+	// 12 同样是字面量，理由与 TestNewKeyFormat 里那条 32 相同：
+	// 用常量比常量时，把 keyPrefixLen 改成 8 这条用例照样通过。
+	if len(prefix) != 12 {
+		t.Fatalf("前缀长度 = %d，期望 12", len(prefix))
 	}
 	if !strings.HasPrefix(key, prefix) {
 		t.Fatalf("前缀 %q 不是 %q 的开头", prefix, key)
@@ -108,6 +113,25 @@ func TestKeyPrefix(t *testing.T) {
 	// 前缀必须能自证是哪种 key：只看前缀的人要能认出它来自本系统。
 	if !strings.HasPrefix(prefix, keyScheme) {
 		t.Errorf("前缀 %q 不含方案前缀", prefix)
+	}
+
+	// key.go 对 keyPrefixLen 的论证由两个数撑着：前缀里的随机部分占 5 个字符
+	// （约 30 位，够在列表里认出是哪把钥匙），而 32 字节的随机部分里还有
+	// 27 字节不在前缀里（「前缀泄露不了可用的熵」）。
+	//
+	// 期望值都写成字面量：keyRandomBytes 被改小，第二条会挂；把方案前缀加长
+	// （前缀里放得下的随机字符就少了），第一条会挂。keyPrefixLen 自己被动时
+	// 先挂在上面那条长度断言上。
+	const (
+		wantRandomCharsInPrefix = 5
+		wantUnexposedBytes      = 27
+	)
+	if got := len(strings.TrimPrefix(prefix, keyScheme)); got != wantRandomCharsInPrefix {
+		t.Errorf("前缀里的随机部分 = %d 个字符，期望 %d", got, wantRandomCharsInPrefix)
+	}
+	if got := keyRandomBytes - wantRandomCharsInPrefix; got != wantUnexposedBytes {
+		t.Errorf("前缀之外的随机字节 = %d，期望 %d：前缀变长就是把更多熵摆到列表里",
+			got, wantUnexposedBytes)
 	}
 
 	// 比前缀还短的输入原样返回，而不是越界或补零。
