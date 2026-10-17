@@ -12,6 +12,10 @@ larkax 对一把 API Key 有**两种**限制，都按 Key 计，**互不相干**
 
 两者都不设时（两列都是 `NULL`）这把 key 不受任何限制。
 
+另有一条**按用户钱包**的限制（余额够不够这次预留），它不按 key 设、
+与上面两条互不相干，但拒绝时用的是**同一套码**——见下面的
+「[钱包余额不足](#钱包余额不足)」。
+
 ## 超限时的响应
 
 两条都是 `429`，但**处置相反**，所以区分它们的是**机器可读的码**，
@@ -70,6 +74,43 @@ SDK 的错误解析器，见 `internal/api/error.go`），所以两处的码放�
 额度那条不回这个头是刻意的：回一个等待时间等于告诉客户端「照做就行」，
 而它照做之后必然再撞一次。不给这个头，客户端就只能去看码，而码会告诉它
 该改配置而不是该退避。
+
+## 钱包余额不足
+
+按 Key 的额度之外还有一条限制，**按用户钱包**算：每次请求在预留那一步会
+检查钱包的「余额 − 冻结」够不够这笔上界，不够就拒绝。两条限制互不相干
+——一把没设额度上限的 key 照样会因为用户余额不足被拒。
+
+它回的是**同一套码**：
+
+| 调用协议 | 码放在哪 | 取值 |
+|---|---|---|
+| OpenAI / OpenAI Responses | `error.code` | `insufficient_quota` |
+| Anthropic | `error.type` | `insufficient_quota` |
+
+理由是按 Key 的额度用尽与这里的余额不足都是**账户状态**而不是服务故障，
+调用方只该写一个分支。状态码同为 `429`，同样**不回** `Retry-After`
+（充值不是等一会儿的事），同样不该重发。
+
+两者的**文案**不同，因为该做的事不同——按 `error.code` / `error.type`
+分支的程序不受影响，读文案的人才能得到正确的下一步：
+
+```json
+{"error":{"message":"the account balance is insufficient for this request; top up the wallet before retrying",
+          "type":"rate_limit_error","param":null,"code":"insufficient_quota"}}
+```
+
+```json
+{"type":"error","error":{"type":"insufficient_quota",
+                         "message":"the account balance is insufficient for this request; top up the wallet before retrying"}}
+```
+
+充值走 `larkaxctl wallet credit`（见 [development.md](development.md) 的
+「入账」一节），之后**下一个请求就生效**。
+
+**注意这一条与「结算时扣款让余额变成负」不是一回事。** 后者是账本内部的
+不变量被破坏（预留本该挡住它），不是「现在没钱了」，它的处置仍是 `500`
+且不带可分支的码——看到它要查账，不要去充值。
 
 ## 累计额度的口径
 
@@ -143,7 +184,7 @@ larkaxctl apikey update --id 42 --clear-rate-limit-rpm
 |---|---|
 | 两种限制各自的语义（`NULL` / `0` / 正数） | `internal/ratelimit`（RPM）与 `internal/keyquota`（额度），各只有一处 |
 | 「累计花费」的口径（算哪段时间、哪些状态、预留算不算） | `internal/keyquota` 的 `spentSQL` |
-| 超限响应的状态码与码 | `internal/api/error.go`（`writeRateLimited` / `writeInsufficientQuota`） |
+| 超限响应的状态码与码 | `internal/api/error.go`（`writeRateLimited` / `writeInsufficientQuota` / `writeInsufficientBalance`） |
 | 判定发生在请求的哪一步 | `internal/api` 的 `serve`（入口早拒绝）与 `internal/ledger/store` 的 `SaveReservation`（权威判定） |
 
 两种限制都是**两处判定、一份口径**：入口那一层在读请求体之前做一次早拒绝

@@ -593,8 +593,8 @@ go run ./cmd/larkaxctl wallet open --user alice
 
 ### 入账：给钱包写一笔
 
-新开的户余额是 0，所以第一次调用会在预留那一步因余额不足被拒绝（`500`，响应体
-只有 `internal error`）。给它入一笔：
+新开的户余额是 0，所以第一次调用会在预留那一步因余额不足被拒绝（`429` +
+`insufficient_quota`，见 [limits.md](limits.md) 的「钱包余额不足」一节）。给它入一笔：
 
 ```sh
 go run ./cmd/larkaxctl wallet credit --user alice --amount 100 --order ORD-20261017-1
