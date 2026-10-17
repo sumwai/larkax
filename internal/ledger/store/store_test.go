@@ -1348,6 +1348,7 @@ func TestReservationRecordsProtocol(t *testing.T) {
 	}{
 		{name: "OpenAI 入口", protocol: channel.ProtocolOpenAI, want: "openai"},
 		{name: "Anthropic 入口", protocol: channel.ProtocolAnthropic, want: "anthropic"},
+		{name: "Responses 入口", protocol: channel.ProtocolOpenAIResponses, want: "openai-responses"},
 	}
 
 	for _, tc := range cases {
@@ -1411,7 +1412,7 @@ func TestReservationRejectsMissingProtocol(t *testing.T) {
 	}
 }
 
-// 协议不是两套入口之一时同样报错，且与「漏设」分开。
+// 协议不是入口那几条路径之一时同样报错，且与「漏设」分开。
 func TestReservationRejectsUnknownProtocol(t *testing.T) {
 	db := testDB(t)
 	s := New(db)
@@ -1420,7 +1421,7 @@ func TestReservationRejectsUnknownProtocol(t *testing.T) {
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
 	req := testRequest(ctx, t, db, userID, requestID)
-	// 库里那一列是 text，注释写着 openai / anthropic 但它自己不拦别的值
+	// 库里那一列是 text，没有 CHECK，它自己不拦别的值
 	// （见 internal/migrate/sql/00001_init.sql）。约束在代码里，这一条钉住它。
 	req.Protocol = channel.Protocol("custom")
 

@@ -7,8 +7,9 @@
 // # 协议由路径决定
 //
 // /v1/chat/completions 说 OpenAI 协议，/v1/messages 说 Anthropic 协议，
-// /v1/systemone 说 System One 决策协议（见 systemone.go）。
-// 不从请求体猜：前两套协议的请求体在浅层很像（都有 model 与 messages），
+// /v1/responses 说 OpenAI 的 Responses 协议，/v1/systemone 说 System One
+// 决策协议（见 systemone.go）。
+// 不从请求体猜：头两套协议的请求体在浅层很像（都有 model 与 messages），
 // 猜错时解析往往照样成功，于是错误被推迟到上游才暴露。路径是调用方明确
 // 给出的信息，用它就不需要猜。
 //
@@ -52,14 +53,21 @@ import (
 	"github.com/sumwai/larkax/internal/route"
 )
 
-// 公共入口上两条 **chat** 路径。它们与调用协议一一对应，见包注释。
+// 公共入口上的推理路径。它们与调用协议一一对应，见包注释。
 //
-// 第三条（PathSystemOne）在 systemone.go 里，与它们并列而不是挤进这里：
-// 它带的那几个常量只有那条路径用得上，两处分开是为了让「这条表面有什么、
-// 没有什么」在一处读完。
+// 三条 chat 形状的路径在这里，第四条（PathSystemOne）在 systemone.go 里，
+// 与它们并列而不是挤进这里：它带的那几个常量只有那条路径用得上，两处分开
+// 是为了让「这条表面有什么、没有什么」在一处读完。
 const (
 	PathChatCompletions = "/v1/chat/completions"
 	PathMessages        = "/v1/messages"
+	// PathResponses 是 OpenAI Responses 协议的入口。
+	//
+	// 它与 PathChatCompletions 是**两条**路径而不是一条加参数：两套协议的
+	// 请求体（input/instructions 对 messages）、响应体（output[] 对 choices）
+	// 与流式事件（一串带名字的事件对裸 delta）都不同，靠路径分开就与另外两条
+	// 入口同一个做法——协议由路径决定，不从请求体猜。
+	PathResponses = "/v1/responses"
 )
 
 // HeaderVersion 是响应头里回带发布版本的字段名。
@@ -321,11 +329,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serve(w, r, channel.ProtocolOpenAI)
 	case PathMessages:
 		h.serve(w, r, channel.ProtocolAnthropic)
+	case PathResponses:
+		h.serve(w, r, channel.ProtocolOpenAIResponses)
 	case PathSystemOne:
 		h.serveDecision(w, r)
 	default:
 		// 未知路径：这里不知道调用方说哪套协议（协议由路径决定，而路径
-		// 我们并不认识），所以用 OpenAI 形状——两套里更通用的那一套。
+		// 我们并不认识），所以用 OpenAI 形状——三套里更通用的那一套。
+		// Responses 那套的错误体与它逐字相同（见 error.go 的说明），
+		// 所以这个选择没有第二种可能。
 		writeError(w, channel.ProtocolOpenAI, http.StatusNotImplemented,
 			"this endpoint is not implemented")
 	}

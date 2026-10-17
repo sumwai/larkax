@@ -598,7 +598,7 @@ go run ./cmd/larkaxctl apikey update --id 3 --clear-rate-limit-rpm
 
 | 端口 | 端点 | 现在返回 |
 |---|---|---|
-| `:8080` | `POST /v1/chat/completions`、`POST /v1/messages` | 推理；`stream: true` 时是 SSE 流；没有有效 API Key 时 `401` |
+| `:8080` | `POST /v1/chat/completions`、`POST /v1/messages`、`POST /v1/responses` | 推理；`stream: true` 时是 SSE 流；没有有效 API Key 时 `401` |
 | `:8080` | `POST /v1/systemone` | 决策调用，见下节；**从不流式**，带了 `stream: true` 回 `400` |
 | `:8080` | 其余任意路径 | `501`，明确的「尚未实现」JSON |
 | `:9090` | `/healthz` | `200`，进程存活 |

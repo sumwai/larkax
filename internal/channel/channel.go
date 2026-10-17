@@ -34,14 +34,16 @@ import (
 //
 // 这个类型有三个用它的地方，指的是同一件事的三个视角：**调用方**说的是
 // 哪套协议（由请求路径决定：/v1/chat/completions 是 openai，
-// /v1/messages 是 anthropic，/v1/systemone 是 systemone），
+// /v1/messages 是 anthropic，/v1/responses 是 openai-responses，
+// /v1/systemone 是 systemone），
 // **适配器**自述实现的是哪套（Adapter.Protocol()，注册表拿它做自检），
 // 以及**账单**记下这次请求走的是哪条入口（pipeline.Request.Protocol，
 // 落进 billing_requests.protocol，供事后按协议统计）。
 //
-// 这两个视角**不要求一一对应**：openai-responses 今天只有适配器那一侧——
-// 渠道说这套协议时，管道里的请求仍是统一格式（贴近 chat completions），
-// 由适配器经 internal/relay 转换过去。调用方那条路径是另一件事。
+// 这三个视角**不要求一一对应**：一个只有适配器的协议族（渠道说它，但入口
+// 没有对应的路径）是能存在的，那时管道里的请求仍是统一格式（贴近 chat
+// completions），由适配器经 internal/relay 转换过去。今天四个取值两边都有，
+// 但两份清单判的不是同一件事，所以加取值时仍要各自过一遍。
 //
 // 渠道表里**没有**对应的列：一个渠道说哪套协议，由它的 type 指向的适配器
 // 决定，不再单独存一份。存两份的话，第二份只会填错而无人发现。

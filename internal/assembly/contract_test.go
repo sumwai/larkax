@@ -58,6 +58,15 @@ const (
 
 	contractPromptTokens     = 12
 	contractCompletionTokens = 7
+
+	// 输入侧缓存量与输出侧推理量，**故意非零**：Responses 的响应体里那两个
+	// details 子对象是 SDK 的必填字段，而 0 恰好是「字段在不在」都一样的
+	// 取值——Python 那一侧要断言的是具体数，不是「有就行」。
+	//
+	// 它们不改变结算口径：缓存量含在 prompt_tokens 里（见 channel.Usage），
+	// 推理量含在 completion_tokens 里。
+	contractCachedTokens    = 5
+	contractReasoningTokens = 2
 )
 
 // 三个模型名的后缀。假上游按**请求里的模型名**决定回什么，
@@ -76,6 +85,16 @@ func TestContractOpenAI(t *testing.T) {
 // TestContractAnthropic 用官方 anthropic SDK 走一遍 /v1/messages。
 func TestContractAnthropic(t *testing.T) {
 	runContract(t, channel.ProtocolAnthropic)
+}
+
+// TestContractResponses 用官方 openai SDK 的 responses 资源走一遍 /v1/responses。
+//
+// 与上面两条同一套装配、同一个假上游，只换入口协议与假上游那一侧说的协议。
+// 它单独占一条用例而不是塞进 TestContractOpenAI：两条入口的**请求体与响应体
+// 都不同**（input/output[] 对 messages/choices），合在一起会让「哪一条挂了」
+// 在输出里分不出来。
+func TestContractResponses(t *testing.T) {
+	runContract(t, channel.ProtocolOpenAIResponses)
 }
 
 func runContract(t *testing.T, protocol channel.Protocol) {
@@ -109,9 +128,23 @@ func runContract(t *testing.T, protocol channel.Protocol) {
 	upstreamSrv := httptest.NewServer(fake.handler())
 	t.Cleanup(upstreamSrv.Close)
 
+	// 规则里把五项 token 单价**全写上**，虽然只有 Responses 那一侧的假上游
+	// 会报出缓存量与推理量。
+	//
+	// 理由是结算层的判据：规则里没写的计量项、而用量里非零，结算会失败
+	// （见 billing.Validate——「没写」与「写了 0」是两件事，后者是「这项免费」）。
+	// 只写 prompt / completion 的话，Responses 那两条用例会拿到 500，
+	// 而流式那一条更隐蔽：响应照常发完，结算在后台失败，客户端看到的是
+	// 一个完全正常的流。两类都得靠把规则写全来避免，而不是靠假上游少报。
+	//
+	// 单价与 prompt / completion 取同一个数，是为了不动另外两条用例的账：
+	// 预留上界按输入侧最贵的那一项估（见 billing 的 worst 估算），
+	// cache_read 与 prompt 相等时它不变。
+	const rule = `{"prompt": 0.00001, "completion": 0.00003,` +
+		`"cache_read": 0.00001, "cache_write": 0.00001, "reasoning": 0.00003}`
 	for _, model := range []string{fake.textModel, fake.toolModel, fake.failModel} {
 		seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL, model, string(protocol), 0)
-		seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+		seedRule(t, db, model, rule)
 	}
 
 	app := newApp(t, db, sealer)
@@ -249,6 +282,11 @@ func (u *contractUpstream) record(body []byte) {
 // 「我们透出的是上游回报的名字」这件事本身。
 func upstreamModelName(model string) string { return model + "-upstream" }
 
+// writeFailure 回一个错误响应。
+//
+// Responses 与非流式 OpenAI **共用同一个错误体形状**（`{"error":{...}}`，
+// 两家共用同一个官方 SDK 的错误解析器），所以它走下面那条兜底分支，
+// 不另写一份——多一份一模一样的定义只会在改一处时漏掉另一处。
 func (u *contractUpstream) writeFailure(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusInternalServerError)
@@ -261,8 +299,68 @@ func (u *contractUpstream) writeFailure(w http.ResponseWriter) {
 		`{"error":{"message":"placeholder upstream failure","type":"server_error"}}`))
 }
 
+// contractResponsesUsage 是假上游按 Responses 口径报的用量。
+//
+// 缓存量与推理量都报非零，而且用 **Responses 自己的字段名**
+// （input_tokens_details.cached_tokens / output_tokens_details.reasoning_tokens）。
+// 这正是 relaykit 那个 Chat→Responses 转换器做不到的地方：它把推理量写进
+// chat 名字的 completion_tokens_details，而 SDK 要读的是 Responses 名字的
+// 那一个（见 internal/api/responses.go 的说明）。报 0 的话「字段在不在」
+// 在断言里分不出来。
+func contractResponsesUsage() string {
+	return fmt.Sprintf(
+		`{"input_tokens":%d,"input_tokens_details":{"cached_tokens":%d},`+
+			`"output_tokens":%d,"output_tokens_details":{"reasoning_tokens":%d},`+
+			`"total_tokens":%d}`,
+		contractPromptTokens, contractCachedTokens,
+		contractCompletionTokens, contractReasoningTokens,
+		contractPromptTokens+contractCompletionTokens)
+}
+
+// responsesEnvelope 拼一个 Responses 的 response 对象。
+//
+// 它同时是**非流式响应体**与流式事件里嵌的那个对象——真实上游就是同一个东西，
+// 假上游也照同一个来。usage 由调用方给：开场事件里是 null（那时还没有用量），
+// 终态事件里才是真值。
+func contractResponsesEnvelope(model, status, output, usage string) string {
+	return fmt.Sprintf(
+		`{"id":"resp_contract","object":"response","created_at":1700000000,"status":%q,`+
+			`"model":%q,"output":%s,"usage":%s}`,
+		status, model, output, usage)
+}
+
+// responsesMessageItem 是一条助手消息在 output[] 里的样子。
+func contractResponsesMessageItem(status string) string {
+	return fmt.Sprintf(
+		`{"type":"message","id":"msg_contract","status":%q,"role":"assistant",`+
+			`"content":[{"type":"output_text","text":%q,"annotations":[]}]}`,
+		status, contractTextPartA+contractTextPartB)
+}
+
+// responsesFunctionCallItem 是一次工具调用在 output[] 里的样子。
+//
+// 关联 id 叫 call_id（不是 chat 的 id），参数是**字符串**形态的 JSON。
+func contractResponsesFunctionCallItem(status string) string {
+	return fmt.Sprintf(
+		`{"type":"function_call","id":"fc_contract","status":%q,`+
+			`"call_id":%q,"name":%q,"arguments":%q}`,
+		status, contractToolID, contractToolName, contractToolArgs)
+}
+
 // writeText 回一次纯正文的响应。
 func (u *contractUpstream) writeText(w http.ResponseWriter, stream bool, model string) {
+	if u.protocol == channel.ProtocolOpenAIResponses {
+		if stream {
+			u.responsesTextStream(w, model)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, contractResponsesEnvelope(
+			upstreamModelName(model), "completed",
+			"["+contractResponsesMessageItem("completed")+"]", contractResponsesUsage()))
+		return
+	}
+
 	if u.protocol == channel.ProtocolAnthropic {
 		if stream {
 			u.anthropicTextStream(w, model)
@@ -294,6 +392,18 @@ func (u *contractUpstream) writeText(w http.ResponseWriter, stream bool, model s
 
 // writeToolCall 回一次纯工具调用的响应。
 func (u *contractUpstream) writeToolCall(w http.ResponseWriter, stream bool, model string) {
+	if u.protocol == channel.ProtocolOpenAIResponses {
+		if stream {
+			u.responsesToolStream(w, model)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, contractResponsesEnvelope(
+			upstreamModelName(model), "completed",
+			"["+contractResponsesFunctionCallItem("completed")+"]", contractResponsesUsage()))
+		return
+	}
+
 	if u.protocol == channel.ProtocolAnthropic {
 		if stream {
 			u.anthropicToolStream(w, model)
@@ -393,6 +503,74 @@ func (u *contractUpstream) openAIToolStream(w http.ResponseWriter, model string)
 		name, contractPromptTokens, contractCompletionTokens,
 		contractPromptTokens+contractCompletionTokens))
 	data("[DONE]")
+}
+
+// responsesTextStream 按 Responses 的顺序吐事件。
+//
+// 形状与另外两套都不同：每一帧都带**事件名**，正文项有「开 / 增量 / 完」
+// 三段，终态事件里嵌着一整个 response 对象——**用量就在那里**，不像 chat
+// 那样单独占一帧。中间那几帧的 output_index / item_id 是客户端把增量拼回
+// 项里的依据，所以它们不能省。
+func (u *contractUpstream) responsesTextStream(w http.ResponseWriter, model string) {
+	_, event := u.sse(w)
+	name := upstreamModelName(model)
+
+	event("response.created", fmt.Sprintf(
+		`{"type":"response.created","sequence_number":0,"response":%s}`,
+		contractResponsesEnvelope(name, "in_progress", "[]", "null")))
+	event("response.output_item.added",
+		`{"type":"response.output_item.added","sequence_number":1,"output_index":0,`+
+			`"item":{"type":"message","id":"msg_contract","status":"in_progress",`+
+			`"role":"assistant","content":[]}}`)
+	for _, part := range []string{contractTextPartA, contractTextPartB} {
+		event("response.output_text.delta", fmt.Sprintf(
+			`{"type":"response.output_text.delta","sequence_number":2,"output_index":0,`+
+				`"content_index":0,"item_id":"msg_contract","delta":%q}`, part))
+	}
+	event("response.output_text.done", fmt.Sprintf(
+		`{"type":"response.output_text.done","sequence_number":3,"output_index":0,`+
+			`"content_index":0,"item_id":"msg_contract","text":%q}`,
+		contractTextPartA+contractTextPartB))
+	event("response.output_item.done", fmt.Sprintf(
+		`{"type":"response.output_item.done","sequence_number":4,"output_index":0,`+
+			`"item":%s}`, contractResponsesMessageItem("completed")))
+	event("response.completed", fmt.Sprintf(
+		`{"type":"response.completed","sequence_number":5,"response":%s}`,
+		contractResponsesEnvelope(name, "completed",
+			"["+contractResponsesMessageItem("completed")+"]", contractResponsesUsage())))
+}
+
+// responsesToolStream 吐一次工具调用：项开始时给 call_id 与名字，参数按
+// function_call_arguments.delta 分片给（真实上游就是分片的，中途解析必然失败）。
+//
+// 终态事件的 output[] 里要有那个 function_call 项：结束原因（tool_calls）
+// 就是从它推出来的（见 responsesadapter 的 finishReason）。
+func (u *contractUpstream) responsesToolStream(w http.ResponseWriter, model string) {
+	_, event := u.sse(w)
+	name := upstreamModelName(model)
+
+	event("response.created", fmt.Sprintf(
+		`{"type":"response.created","sequence_number":0,"response":%s}`,
+		contractResponsesEnvelope(name, "in_progress", "[]", "null")))
+	event("response.output_item.added", fmt.Sprintf(
+		`{"type":"response.output_item.added","sequence_number":1,"output_index":0,`+
+			`"item":{"type":"function_call","id":"fc_contract","status":"in_progress",`+
+			`"call_id":%q,"name":%q,"arguments":""}}`, contractToolID, contractToolName))
+	for _, part := range []string{`{"city":`, `"Paris"}`} {
+		event("response.function_call_arguments.delta", fmt.Sprintf(
+			`{"type":"response.function_call_arguments.delta","sequence_number":2,`+
+				`"output_index":0,"item_id":"fc_contract","delta":%q}`, part))
+	}
+	event("response.function_call_arguments.done", fmt.Sprintf(
+		`{"type":"response.function_call_arguments.done","sequence_number":3,`+
+			`"output_index":0,"item_id":"fc_contract","arguments":%q}`, contractToolArgs))
+	event("response.output_item.done", fmt.Sprintf(
+		`{"type":"response.output_item.done","sequence_number":4,"output_index":0,`+
+			`"item":%s}`, contractResponsesFunctionCallItem("completed")))
+	event("response.completed", fmt.Sprintf(
+		`{"type":"response.completed","sequence_number":5,"response":%s}`,
+		contractResponsesEnvelope(name, "completed",
+			"["+contractResponsesFunctionCallItem("completed")+"]", contractResponsesUsage())))
 }
 
 // anthropicTextStream 按 Anthropic 的顺序吐事件。
