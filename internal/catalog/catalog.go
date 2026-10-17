@@ -159,26 +159,85 @@ func New(db *sql.DB) *Catalog { return &Catalog{db: db} }
 //
 // 写入被拦下这件事由 integration_test.go 里的用例钉住（断言拿到的是具体的
 // 唯一约束冲突），删掉索引会立刻让那几条用例失败。
+//
+// # 一条别名都没配过的规范名按同名处理
+//
+// 判据按**规范名**分，不按「这一次查不查得到」分：
+//
+//   - 这个规范名在**任何范围**下都没有别名 → 上游就叫这个名字，原样返回。
+//     大多数部署一条别名都没配（规范名与上游名逐字相同），而「查不到就报错」
+//     会把它们每一次请求都打死——那是把一个能用的部署变成完全不能用。
+//     别名表表达的是「哪些模型的上游叫法与规范名不同」，一条都没有的模型
+//     不在这个集合里。
+//   - 有别名，但没有一条覆盖这个渠道 → ErrAliasNotFound。
+//
+// 后一种正是**配了一半**：别名是逐渠道配的，某个渠道漏了的时候静默回落成
+// 规范名，会让它表现为「上游说这个模型不存在」，排查方向指向对方。前一种
+// 不是配置缺失——它连一条要翻的映射都没有。
+//
+// 两种情形各有用例钉住（见 integration_test.go）：只判「这次查不到」会让
+// 前者与后者同形，而它们在「一条都没配」与「配了一半」两个部署下的正确
+// 处置正好相反。
 func (c *Catalog) UpstreamModel(ctx context.Context, channelID int64, canonicalModel string) (string, error) {
 	if canonicalModel == "" {
 		return "", errors.New("规范模型名为空")
 	}
 
-	var upstream string
-	err := c.db.QueryRowContext(ctx, `
-		SELECT upstream_model
+	// 一次取回这个规范名的**全部**别名行，在 Go 里挑。
+	//
+	// 不写成「先查命中的那一行，没命中再查一次『这个规范名配过没有』」：
+	// 那样在**最常见的部署**（一条别名都没配）上要两次往返，而第二次只在
+	// 没命中时才发生——最贵的顺序恰好就是最常见的顺序。
+	//
+	// 行数是个位数：按 canonical_name 有索引，且 `(channel_id, canonical_name)`
+	// 与 `(canonical_name)` 各有一条唯一约束。整行取回来比多一次往返便宜。
+	rows, err := c.db.QueryContext(ctx, `
+		SELECT channel_id, upstream_model
 		  FROM model_aliases
-		 WHERE canonical_name = $2
-		   AND (channel_id = $1 OR channel_id IS NULL)
-		 ORDER BY (channel_id IS NULL)
-		 LIMIT 1`, channelID, canonicalModel).Scan(&upstream)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("%w：渠道 %d 的 %q", ErrAliasNotFound, channelID, canonicalModel)
-	}
+		 WHERE canonical_name = $1`, canonicalModel)
 	if err != nil {
 		return "", fmt.Errorf("查询模型别名失败: %w", err)
 	}
-	return upstream, nil
+	defer func() { _ = rows.Close() }()
+
+	var (
+		platformUpstream string
+		havePlatform     bool
+		channelUpstream  string
+		haveChannel      bool
+		rowsSeen         int
+	)
+	for rows.Next() {
+		var rowChannelID sql.NullInt64
+		var upstream string
+		if err := rows.Scan(&rowChannelID, &upstream); err != nil {
+			return "", fmt.Errorf("读取模型别名失败: %w", err)
+		}
+		rowsSeen++
+		switch {
+		case rowChannelID.Valid && rowChannelID.Int64 == channelID:
+			channelUpstream, haveChannel = upstream, true
+		case !rowChannelID.Valid:
+			platformUpstream, havePlatform = upstream, true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("读取模型别名失败: %w", err)
+	}
+
+	// 渠道级优先于平台级：与旧查询的 `ORDER BY (channel_id IS NULL)` 是同一条
+	// 判据（Postgres 里 FALSE 排在 TRUE 前面）。
+	if haveChannel {
+		return channelUpstream, nil
+	}
+	if havePlatform {
+		return platformUpstream, nil
+	}
+	if rowsSeen == 0 {
+		// 这个规范名一条别名都没配过：上游就叫这个名字。
+		return canonicalModel, nil
+	}
+	return "", fmt.Errorf("%w：渠道 %d 的 %q", ErrAliasNotFound, channelID, canonicalModel)
 }
 
 // Model 按规范名取回一条规范模型。

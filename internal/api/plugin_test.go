@@ -174,7 +174,11 @@ func newPluginHarness(t *testing.T, reg *plugin.Registry, cands ...route.Candida
 			Programs: expr.NewCache(8),
 			Now:      now,
 		},
-		Router:       &route.Router{Rand: rand.New(rand.NewSource(1)), Now: now},
+		Router: &route.Router{
+			Rand: rand.New(rand.NewSource(1)), Now: now,
+			// 这个文件测的是插件钩子，不关心别名，所以按同名回落。
+			Aliases: identityAliases{},
+		},
 		Candidates:   &pluginCandidates{cands: cands},
 		Reservations: reservations,
 		Settlements:  settlements,
@@ -194,6 +198,15 @@ func newPluginHarness(t *testing.T, reg *plugin.Registry, cands ...route.Candida
 		settlements:  settlements,
 		executor:     exec,
 	}
+}
+
+// identityAliases 是「规范名就是上游名」的别名来源，代表一条别名都没配的
+// 部署。选路要求必须接一个来源（nil 时请求直接失败），所以每个组装 Router
+// 的测试夹具都要给一个；这个文件测的是插件钩子，不关心映射怎么算。
+type identityAliases struct{}
+
+func (identityAliases) UpstreamModel(_ context.Context, _ int64, canonical string) (string, error) {
+	return canonical, nil
 }
 
 func pluginCandidate(id int64, model string) route.Candidate {

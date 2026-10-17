@@ -19,6 +19,12 @@ type StreamResult struct {
 	Events <-chan channel.StreamEvent
 	// Channel 是最终选中的渠道。
 	Channel channel.Channel
+	// UpstreamModel 是这次请求**实际发出去**的上游模型名。
+	//
+	// 与非流式那条路上的 Result.UpstreamModel 同一件事：由本包给出来，因为
+	// 只有这里知道最终用的是哪一次翻译（见 Router.upstreamRequest）。失败
+	// 路径上它没有意义。
+	UpstreamModel string
 	// Attempts 记录了换渠道过程中的每一次尝试。
 	Attempts []Attempt
 }
@@ -77,8 +83,15 @@ func (r *Router) chatStreamWithPlan(ctx context.Context, exec StreamExecutor, re
 			return nil, err
 		}
 
+		attempt, aliasErr := r.upstreamRequest(ctx, req, c)
+		if aliasErr != nil {
+			// 与非流式那条路同一个处置：配置问题不换下一个候选（见
+			// chatWithPlan）。已经试过的那几次照常带回去记健康度。
+			return result, aliasErr
+		}
+
 		started := r.now()
-		events, err := exec.ChatStream(ctx, c.Channel, req)
+		events, err := exec.ChatStream(ctx, c.Channel, attempt)
 		result.Attempts = append(result.Attempts, Attempt{
 			ChannelID:   c.Channel.ID,
 			ChannelName: c.Channel.Name,
@@ -91,6 +104,7 @@ func (r *Router) chatStreamWithPlan(ctx context.Context, exec StreamExecutor, re
 
 		if err == nil {
 			result.Events = events
+			result.UpstreamModel = attempt.Model
 			return result, nil
 		}
 		if !worthNextCandidate(err) {

@@ -350,6 +350,13 @@ type Result struct {
 	Events <-chan channel.StreamEvent
 
 	Channel channel.Channel
+	// UpstreamModel 是这次请求**实际发出去**的上游模型名（规范名经别名翻过
+	// 之后的那一个），取自选路的结果。
+	//
+	// 它与 Channel 同一个来源、同一类事实：选路之后才知道。它也是
+	// billing_requests.upstream_model 的值——导出它是为了让测试与排查能看到
+	// 「发出去的是什么」，而不必从库里反推。
+	UpstreamModel string
 	// Charge 是这次请求的结算结果。流式请求在事件流**关闭之后**才有值。
 	Charge *pipeline.Charge
 
@@ -444,16 +451,17 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 		out.Usage = usage
 	}
 
-	charge, err := g.finishCharge(ctx, res, routed.Channel, out)
+	charge, err := g.finishCharge(ctx, res, routed.Channel, routed.UpstreamModel, out)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Result{
-		Response: routed.Response,
-		Channel:  routed.Channel,
-		Charge:   charge,
-		Attempts: routed.Attempts,
+		Response:      routed.Response,
+		Channel:       routed.Channel,
+		UpstreamModel: routed.UpstreamModel,
+		Charge:        charge,
+		Attempts:      routed.Attempts,
 	}, nil
 }
 
@@ -669,7 +677,13 @@ func (h *handle) reportReleaseFailure(ctx context.Context, cause error) {
 //
 // 基准是 h.req，不是调用方手上那份请求：BillingRequestID 是在 begin 里
 // 赋给 h.req 的，外层那份看不到它——而少了它，账本分录就挂不回这次账单。
-func (g *Gateway) finishCharge(ctx context.Context, h *handle, ch channel.Channel, out pipeline.Outcome) (*pipeline.Charge, error) {
+//
+// upstreamModel 是这次请求**实际发出去**的上游模型名，取自选路的结果
+// （route.Result.UpstreamModel）。它与 ch 一样属于「选路之后才知道」的那
+// 一类，所以也在这里填进 settleReq、由落库层写进 billing_requests。
+// 不在这里重查一次别名：事后重查答不出「当时发的是什么」——配置可能已经
+// 改过，而那正是账单要能回答的问题。
+func (g *Gateway) finishCharge(ctx context.Context, h *handle, ch channel.Channel, upstreamModel string, out pipeline.Outcome) (*pipeline.Charge, error) {
 	h.settled = true
 
 	// 结算用**实际选中的渠道**：渠道级与商家级规则按它匹配。
@@ -682,6 +696,7 @@ func (g *Gateway) finishCharge(ctx context.Context, h *handle, ch channel.Channe
 	settleReq := h.req
 	settleReq.ChannelID = ch.ID
 	settleReq.OwnerUserID = ownerOf(h.candidates, ch.ID)
+	settleReq.UpstreamModel = upstreamModel
 	// 候选集也收窄成选中的那一个，让这份请求自洽：上面两个字段说的是
 	// 「实际选中了谁」，而候选集若还留着整份，两者对不上。结算本身不读
 	// 候选集（见 pipeline.Request），这一行是给后来读它的人留的。

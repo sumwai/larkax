@@ -123,14 +123,19 @@ func (f *fakeReleaseFailures) first(t *testing.T) ReleaseFailure {
 
 type fakeSettlements struct {
 	saved []*pipeline.Charge
-	err   error
+	// reqs 按顺序记下**交给结算的那份请求**。上游模型名与渠道 id 一样，
+	// 只有选路之后才知道，所以它由网关从选路结果里搬过来——搬没搬只有
+	// 看这份请求才知道（见 #338）。
+	reqs []pipeline.Request
+	err  error
 }
 
-func (f *fakeSettlements) Save(_ context.Context, _ pipeline.Request, c *pipeline.Charge) error {
+func (f *fakeSettlements) Save(_ context.Context, req pipeline.Request, c *pipeline.Charge) error {
 	if f.err != nil {
 		return f.err
 	}
 	f.saved = append(f.saved, c)
+	f.reqs = append(f.reqs, req)
 	return nil
 }
 
@@ -236,6 +241,27 @@ func candidate(id int64, model string) route.Candidate {
 	}
 }
 
+// identityAliases 是「规范名就是上游名」的别名来源，代表**一条别名都没配**
+// 的部署：大多数部署都是这样，而它们必须照旧能打通。
+//
+// 网关这一层不关心映射怎么算，只关心「选路给出的上游名有没有跟着账单落下去」。
+// 所以除了下面那条专门钉这件事的用例，其余用例都用它。
+type identityAliases struct{}
+
+func (identityAliases) UpstreamModel(_ context.Context, _ int64, canonical string) (string, error) {
+	return canonical, nil
+}
+
+// fixedAliases 不管渠道、一律把规范名翻成同一个上游名。
+//
+// 只用来分辨「网关有没有把选路结果里的上游名搬到结算请求上」——按渠道配
+// 不同的名字是路由层那条用例的事。
+type fixedAliases struct{ upstream string }
+
+func (f fixedAliases) UpstreamModel(_ context.Context, _ int64, _ string) (string, error) {
+	return f.upstream, nil
+}
+
 type harness struct {
 	gw              *Gateway
 	rules           *fakeRules
@@ -247,6 +273,8 @@ type harness struct {
 	snapshots       *fakeSnapshots
 	releaseFailures *fakeReleaseFailures
 	recorder        *fakeRecorder
+	// aliases 是选路用的别名来源，默认按同名回落。
+	aliases route.ModelAliases
 }
 
 func newHarness(t *testing.T, opts ...func(*harness)) *harness {
@@ -265,6 +293,7 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 		snapshots:       &fakeSnapshots{},
 		releaseFailures: &fakeReleaseFailures{},
 		recorder:        &fakeRecorder{},
+		aliases:         identityAliases{},
 	}
 	for _, o := range opts {
 		o(h)
@@ -275,7 +304,7 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 			Rules:    h.rules,
 			Programs: expr.NewCache(16),
 		},
-		Router:          &route.Router{Rand: rand.New(rand.NewSource(1))},
+		Router:          &route.Router{Rand: rand.New(rand.NewSource(1)), Aliases: h.aliases},
 		Candidates:      h.candidates,
 		Reservations:    h.reservations,
 		Settlements:     h.settlements,
@@ -831,6 +860,29 @@ type capturingSettlements struct{ onSave func(pipeline.Request) }
 func (c *capturingSettlements) Save(_ context.Context, req pipeline.Request, _ *pipeline.Charge) error {
 	c.onSave(req)
 	return nil
+}
+
+// 上游模型名与渠道 id 一样，只有选路之后才知道，所以由网关从选路结果里
+// 搬到结算请求上。搬没搬，只有看**交给结算的那份请求**才知道。
+//
+// 漏搬的表现是 billing_requests.upstream_model 恒为 NULL——而它从建表那天
+// 起就一直是 NULL，所以「漏了」与「历史行」在库里长得一样（见 #338）。
+func TestSettlementUsesActualUpstreamModel(t *testing.T) {
+	h := newHarness(t, func(h *harness) {
+		h.aliases = fixedAliases{upstream: "vendor/gpt-4o"}
+	})
+
+	var seenUpstreamModel string
+	h.gw.Settlements = &capturingSettlements{onSave: func(req pipeline.Request) {
+		seenUpstreamModel = req.UpstreamModel
+	}}
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if seenUpstreamModel != "vendor/gpt-4o" {
+		t.Errorf("结算带的上游模型名 = %q，期望选路给出的 %q", seenUpstreamModel, "vendor/gpt-4o")
+	}
 }
 
 // ── 快照 ────────────────────────────────────────────────────────────────

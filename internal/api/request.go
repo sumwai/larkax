@@ -82,9 +82,10 @@ func (h *Handler) billingRequest(user User, upstream *channel.Request, requestID
 		// 而单看任何一层都像是写了的。
 		APIKeyID: user.KeyID,
 		Asset:    h.DefaultAsset,
-		// CanonicalModel 与上游模型名在这里取同一个值，因为规范名到上游名的
-		// 映射还没做（那属于选路层）。这是**已知的临时状态**，不是设计：
-		// 接通映射时改的正是这一行。
+		// CanonicalModel 是**调用方要的那个**名字。上游名由选路层按选中的
+		// 渠道翻出来（见 internal/route 的 upstreamRequest），落进
+		// billing_requests.upstream_model；两者在这一层分开，是因为入口
+		// 还不知道会走哪个渠道，而别名是逐渠道配的。
 		CanonicalModel: upstream.Model,
 		MaxTokens:      int64(upstream.MaxTokens),
 		InputTokens:    inputTokensOf(upstream),

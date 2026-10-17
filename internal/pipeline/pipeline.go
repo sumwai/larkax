@@ -175,6 +175,22 @@ type Request struct {
 
 	CanonicalModel string
 
+	// UpstreamModel 是这次请求**实际发给上游**的模型名，由网关在选路之后
+	// 填上（见 internal/route 的 Result.UpstreamModel）。
+	//
+	// 它与 CanonicalModel 是两个不同的东西，别混：**计价按规范名**
+	// （pricing_rules.model_patterns 匹配的是它），而发出去的名字是某个渠道
+	// 上这家上游的叫法。别名没配时两者相同。
+	//
+	// 它落进 billing_requests.upstream_model——那一列存在的意义正是记下
+	// 「这次实际用了哪个上游名」，而事后重查一次别名答不出这个问题：
+	// 配置可能已经改过，而上游改名正是要配别名的那类事。
+	//
+	// 预留时它还是空的：那时还没选路，也就不知道会走哪个渠道（见 ChannelID
+	// 的注释，两者在同一个位置被填上）。结算时**必须有**，落库层拒绝空值
+	// （见 internal/ledger/store 的 ErrMissingUpstreamModel）。
+	UpstreamModel string
+
 	// Candidates 是这次请求**可能**选中的渠道集合，供预留取上界。
 	//
 	// 预留发生在选路之前，那时还不知道会选中谁（见 ChannelID），所以

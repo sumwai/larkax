@@ -489,6 +489,30 @@ func TestChatStreamSettlesBeforeClosingEvents(t *testing.T) {
 	}
 }
 
+// 流式那条路同样要把选路给出的上游名交给结算：两条路各写一份结算调用，
+// 只钉一条的话另一条漏搬不会有任何迹象。
+func TestChatStreamSettlementUsesActualUpstreamModel(t *testing.T) {
+	h := newHarness(t, func(h *harness) {
+		h.aliases = fixedAliases{upstream: "vendor/gpt-4o"}
+	})
+	useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
+		1: {delta("好"), {Kind: "done", FinishReason: "stop"}},
+	}})
+
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collect(t, res)
+
+	if len(h.settlements.reqs) != 1 {
+		t.Fatalf("结算应当落库一次，实际 %d 次", len(h.settlements.reqs))
+	}
+	if got := h.settlements.reqs[0].UpstreamModel; got != "vendor/gpt-4o" {
+		t.Errorf("结算带的上游模型名 = %q，期望选路给出的 %q", got, "vendor/gpt-4o")
+	}
+}
+
 // 请求快照仍然在**调上游之前**采集，流式那条路也一样。
 func TestChatStreamSnapshotTakenBeforeUpstream(t *testing.T) {
 	var redactsAtCall int
