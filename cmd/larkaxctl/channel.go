@@ -522,15 +522,26 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo) {
 }
 
 // credentialKeysLabel 是清单里的「凭证」那一栏。
+//
+// 两样一起给：主密钥标识回答「挂在哪把钥匙下、轮换补到哪一步」，
+// 末四位提示回答「挂的是我刚发的那个凭证吗」。它们是两个不同的问题，
+// 只给其中一个都会让运维去别处再查一次。
 func credentialKeysLabel(info channels.ChannelInfo) string {
 	if info.CredentialErr != nil {
 		// 上面会另起一行说明原因，这里只留一个显眼的标记。
 		return "密文不合法"
 	}
-	if len(info.CredentialKeys) == 0 {
-		return "-"
+	keys := "-"
+	if len(info.CredentialKeys) > 0 {
+		keys = strings.Join(info.CredentialKeys, ",")
 	}
-	return strings.Join(info.CredentialKeys, ",")
+	if info.Hint == "" {
+		// 空提示只可能来自「这一列接上之前建的渠道」——接上之后每一次写入
+		// 都会带上它。这里不补一个占位符，让「没有提示」与「提示是某几个
+		// 字符」在清单上分得开：补一个 `…-` 会让两种情形长得一样。
+		return keys
+	}
+	return keys + " …" + info.Hint
 }
 
 // ownerLabel 把归属打成「平台」或用户 ID。

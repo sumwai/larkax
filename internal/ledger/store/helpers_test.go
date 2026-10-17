@@ -203,6 +203,22 @@ func channelOf(t *testing.T, db *sql.DB, requestID string) sql.NullInt64 {
 	return id
 }
 
+// clientCancelledAt 读账单上「客户端断开」那一刻。
+//
+// 返回 NULL 有两种来历，这一列分不开也不该分：没取消（结算路径必然知道），
+// 或者这一行还没结算过（那时它根本没被写过）。
+func clientCancelledAt(t *testing.T, db *sql.DB, requestID string) sql.NullTime {
+	t.Helper()
+	var at sql.NullTime
+	qerr := db.QueryRowContext(context.Background(),
+		`SELECT client_cancelled_at FROM billing_requests WHERE request_id = $1`,
+		requestID).Scan(&at)
+	if qerr != nil {
+		t.Fatalf("读账单的客户端取消时刻失败: %v", qerr)
+	}
+	return at
+}
+
 // ledgerBalance 从**账本**算出余额——这是权威值。
 func ledgerBalance(t *testing.T, db *sql.DB, userID int64) money.Amount {
 	t.Helper()

@@ -143,6 +143,11 @@ func TestChatStreamBillsMeasuredUsage(t *testing.T) {
 	if len(h.reservations.released) != 0 {
 		t.Errorf("正常结束不该释放预留（解冻由结算事务做）：%+v", h.reservations.released)
 	}
+	// 另一头也要钉：正常结束不能被标成客户端取消。只钉上面那条的话，
+	// 把这一列写成恒真也能过，而恒真会让每一笔账单都记上「客户端断的」。
+	if len(h.settlements.saved) == 1 && h.settlements.saved[0].ClientCanceled {
+		t.Error("上游正常返回被标成了客户端取消")
+	}
 }
 
 // 上游没报 usage 但正常结束：按本地估算计费，来源标成估算。
@@ -225,6 +230,12 @@ func TestChatStreamClientDisconnectIsBilled(t *testing.T) {
 	}
 	if len(h.settlements.saved) != 1 {
 		t.Errorf("结算落库 %d 次，期望 1 次", len(h.settlements.saved))
+	}
+	// 落库的那份账单要带着「客户端断的」这个事实：从判定到落库中间隔着
+	// 三层（pumpStream → Outcome → Charge），任何一层漏掉它，库里那一列
+	// 就永远是 NULL，而这条链上的每一层单看都像是写了的。
+	if len(h.settlements.saved) == 1 && !h.settlements.saved[0].ClientCanceled {
+		t.Error("结算落库的账单没带上「客户端取消」：client_cancelled_at 会永远是 NULL")
 	}
 }
 

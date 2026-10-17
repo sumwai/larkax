@@ -76,13 +76,18 @@ type State struct {
 	// Estimated 为 true 表示当前值来自推算而非实测。
 	Estimated bool
 
-	// WindowKind / WindowBudget / WindowUsed / ResetsAt 描述滚动窗口。
-	// 有些上游按周期给量而不是给余额（「每天 1000 次」），
-	// 那种情况下「剩余」是算出来的，不是查出来的。
-	WindowKind   string
-	WindowBudget float64
-	WindowUsed   float64
-	ResetsAt     *time.Time
+	// ResetsAt 是额度重置的时刻，nil 表示不知道或不会重置。
+	//
+	// 它描述的是**按周期给量**的上游（「每天 1000 次」那类）：额度到点回满。
+	// 路由按它给「越接近到期越该先用掉」的分（见 internal/route 的 scoreQuota），
+	// 所以它是活的。取值只能来自上游实测或人工录入——自记账推不出这个时刻。
+	//
+	// 这里早先还有 WindowKind / WindowBudget / WindowUsed 三个字段描述窗口的
+	// 形状。它们全仓没有一处赋值、也没有一处读，对应的四列已由
+	// 00013_drop_quota_window_columns.sql 从 channel_quota_state 上删掉。
+	// 真要接按周期给量的上游时，那几列该按当时的口径重新定，而不是照着
+	// 一个从没被验证过的形状填。
+	ResetsAt *time.Time
 
 	// LastErrorCode / LastErrorAt 是上游最近一次给出的定性信号。
 	LastErrorCode string
