@@ -660,10 +660,92 @@ func TestDoctorLiveChatPayloadCarriesMaxTokens(t *testing.T) {
 	}
 }
 
+// TestDoctorLiveEveryEndpointCarriesAnOutputBound 一次覆盖三个入口：
+// 每个入口都要在自己的字段名上给出**正的**输出上界。
+//
+// 拆成三条用例会重复同一段断言，而这里要防的恰恰是「只给其中一条加了、
+// 另外两条漏了」——放在同一张表里，漏一条就是这条用例红。
+//
+// 字段名各按各的协议（见 internal/relay 的 FromRelaykitRequest：chat 的
+// max_tokens 与 Responses 的 max_output_tokens 最后都落在同一个 MaxTokens 上，
+// 而 messages 走 Anthropic 形状，字段名也是 max_tokens）。写错名字的后果
+// 与漏写一样：网关按「缺输出上界」回 400，错误读起来却像上游的问题。
+func TestDoctorLiveEveryEndpointCarriesAnOutputBound(t *testing.T) {
+	cases := []struct {
+		endpoint string
+		field    string
+		forbid   string
+		resp     string
+	}{
+		{
+			endpoint: doctorEndpointChat,
+			field:    "max_tokens",
+			forbid:   "max_output_tokens",
+			resp: `{"id":"cmpl-1","object":"chat.completion","model":"claude-x",` +
+				`"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":2}}`,
+		},
+		{
+			endpoint: doctorEndpointMessages,
+			field:    "max_tokens",
+			forbid:   "max_output_tokens",
+			resp: `{"id":"msg-1","type":"message","model":"claude-x","content":[],` +
+				`"usage":{"input_tokens":7,"output_tokens":3}}`,
+		},
+		{
+			endpoint: doctorEndpointResponses,
+			field:    "max_output_tokens",
+			forbid:   "max_tokens",
+			resp: `{"id":"resp-1","object":"response","model":"claude-x","output":[],` +
+				`"usage":{"input_tokens":7,"output_tokens":3}}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.endpoint, func(t *testing.T) {
+			var gotBody map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&gotBody)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.resp)
+			}))
+			defer srv.Close()
+
+			got := runDoctorLive(context.Background(), doctorOptions{
+				live: true, model: "claude-x", endpoint: tc.endpoint,
+				baseURL: srv.URL, key: testDoctorKey,
+			})
+			if !got.ok() {
+				t.Fatalf("这次调用该算通过，得到 status=%d err=%v", got.status, got.sendErr)
+			}
+
+			raw, ok := gotBody[tc.field]
+			if !ok {
+				t.Fatalf("%s 入口的请求体里没有 %s：网关会在请求出网关之前就 400：%v",
+					tc.endpoint, tc.field, gotBody)
+			}
+			limit, ok := raw.(float64)
+			if !ok {
+				t.Fatalf("%s 不是数字：%v（%T）", tc.field, raw, raw)
+			}
+			if limit <= 0 {
+				t.Errorf("%s = %v，网关要求它为正", tc.field, limit)
+			}
+			if _, ok := gotBody[tc.forbid]; ok {
+				t.Errorf("%s 入口不该发另一个协议的输出上界字段 %s：%v",
+					tc.endpoint, tc.forbid, gotBody)
+			}
+		})
+	}
+}
+
 // TestDoctorLiveReportsUpstreamRejection 钉住非 2xx 时把错误说明打出来。
+//
+// 这个 503 是**网关自己**回的（「没有可用上游」），所以带上版本头——
+// 不带的话它模拟的是「链路上别的服务在拦」，那是另一条归因分支。
 func TestDoctorLiveReportsUpstreamRejection(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(doctorHeaderVersion, "v0.1.0-test")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = io.WriteString(w, `{"error":{"message":"no available upstream for the requested model","type":"server_error"}}`)
 	}))
@@ -692,6 +774,130 @@ func TestDoctorLiveReportsUpstreamRejection(t *testing.T) {
 	}
 	if !strings.Contains(out, "结论：不通过") {
 		t.Errorf("结论该是不通过：\n%s", out)
+	}
+	if !strings.Contains(out, "在网关入口就被拒了") {
+		t.Errorf("503 是我们自己这一侧回的，归因该这么说：\n%s", out)
+	}
+}
+
+// TestDoctorLiveAttributesRejection 钉住「谁拒的」这一行：入口拒绝、上游
+// 失败、上游限流、以及「不是网关回的」四种情形要分开说。
+//
+// 这是 issue #381 那次事故的教训：doctor 只打了「结果：400」，而 400 既可能
+// 是网关入口拒的、也可能是上游拒的，两者的排查方向相反。用假网关按
+// internal/api 的 httpStatusOfUpstream 那套状态码头造出来。
+func TestDoctorLiveAttributesRejection(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		headers map[string]string
+		body    string
+		want    string
+		notWant string
+	}{
+		{
+			name:   "入口拒绝：缺 max_tokens",
+			status: http.StatusBadRequest,
+			headers: map[string]string{
+				doctorHeaderVersion: "v0.1.0-test",
+			},
+			body:    `{"error":{"message":"max_tokens is required: the request must set a positive output token limit","type":"invalid_request_error"}}`,
+			want:    "在网关入口就被拒了",
+			notWant: "上游那一次调用失败",
+		},
+		{
+			name:   "入口拒绝：没有可用上游",
+			status: http.StatusServiceUnavailable,
+			headers: map[string]string{
+				doctorHeaderVersion: "v0.1.0-test",
+			},
+			body:    `{"error":{"message":"no available upstream for the requested model","type":"server_error"}}`,
+			want:    "在网关入口就被拒了",
+			notWant: "上游那一次调用失败",
+		},
+		{
+			name:   "上游失败：网关回 502",
+			status: http.StatusBadGateway,
+			headers: map[string]string{
+				doctorHeaderVersion: "v0.1.0-test",
+			},
+			body:    `{"error":{"message":"upstream call failed","type":"upstream_error"}}`,
+			want:    "上游那一次调用失败",
+			notWant: "在网关入口就被拒了",
+		},
+		{
+			name:   "我们自己的限流：429 带 Retry-After",
+			status: http.StatusTooManyRequests,
+			headers: map[string]string{
+				doctorHeaderVersion:    "v0.1.0-test",
+				doctorHeaderRetryAfter: "2",
+			},
+			body:    `{"error":{"message":"rate limit exceeded for this API key, retry later","type":"rate_limit_error"}}`,
+			want:    "按 Key 限流",
+			notWant: "上游在限流",
+		},
+		{
+			name:   "额度用尽：429 带 insufficient_quota",
+			status: http.StatusTooManyRequests,
+			headers: map[string]string{
+				doctorHeaderVersion: "v0.1.0-test",
+			},
+			body:    `{"error":{"message":"this API key has reached its spending limit","type":"rate_limit_error","code":"insufficient_quota"}}`,
+			want:    "额度用尽",
+			notWant: "上游在限流",
+		},
+		{
+			name:   "上游限流：429 不带我们那两个标记",
+			status: http.StatusTooManyRequests,
+			headers: map[string]string{
+				doctorHeaderVersion: "v0.1.0-test",
+			},
+			body:    `{"error":{"message":"upstream is rate limited, retry later","type":"rate_limit_error"}}`,
+			want:    "上游在限流",
+			notWant: "在网关入口就被拒了",
+		},
+		{
+			name:   "不是网关回的：没有版本头",
+			status: http.StatusBadRequest,
+			body:   `{"error":{"message":"bad request"}}`,
+			want:   "不是 larkax 网关回的",
+			// 没有版本头时不能咬着「是我们拒的」不放——那会把一次地址
+			// 配错说成一次配置问题。
+			notWant: "在网关入口就被拒了",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				for k, v := range tc.headers {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			got := runDoctorLive(context.Background(), doctorOptions{
+				live: true, model: "claude-x", endpoint: doctorEndpointChat,
+				baseURL: srv.URL, key: testDoctorKey,
+			})
+
+			var buf bytes.Buffer
+			printDoctorLive(&buf, got)
+			out := buf.String()
+
+			if !strings.Contains(out, "谁拒的：") {
+				t.Fatalf("失败时该打出「谁拒的」那一行：\n%s", out)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("归因该含 %q：\n%s", tc.want, out)
+			}
+			if strings.Contains(out, tc.notWant) {
+				t.Errorf("归因不该含 %q：\n%s", tc.notWant, out)
+			}
+		})
 	}
 }
 
