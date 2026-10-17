@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/sumwai/larkax/internal/billing"
@@ -122,8 +123,16 @@ type RuleCandidate struct {
 var ErrNoRule = errors.New("没有匹配的计价规则")
 
 // Pipeline 是完整的计费流程。
+//
+// 它由 gateway **单实例并发共用**，所以 Reserve 与 Settle 会同时在多个
+// goroutine 上跑。构造完就不要再改它的字段：字段是给装配点填的，
+// 装配发生在任何请求之前。
 type Pipeline struct {
-	Rules    RuleSource
+	Rules RuleSource
+	// Programs 是规则表达式的编译缓存。
+	//
+	// 不给时由 programs 兜底建一个（容量 defaultCacheSize）。要换容量
+	// 就在**构造时**给——它是共享状态，构造之后再写会与并发调用者竞争。
 	Programs *expr.Cache
 	// Calendar 在规则用到日历时必须给，否则求值会失败。
 	Calendar expr.Calendar
@@ -131,6 +140,10 @@ type Pipeline struct {
 	Region string
 	// Now 可注入，便于测试时间相关的逻辑。
 	Now func() time.Time
+
+	// programsOnce 让 Programs 的兜底初始化只发生一次，且对并发的
+	// 调用者可见（见 programs）。
+	programsOnce sync.Once
 }
 
 // Request 是一次请求的计费输入。
@@ -259,9 +272,8 @@ type Reservation struct {
 	// 结算复用它，而不是重新读一次钟（见 Settle）。它是「价格在受理那一刻
 	// 定下来」这条口径的载体：跟着预留一起持久化下来，事后才回答得了
 	// 「这次是按哪一刻的档位算的」，也才谈得上复算。
-	RuleMatchedAt     time.Time
-	BillingRequestID  int64
-	ReservedBreakdown billing.Breakdown
+	RuleMatchedAt    time.Time
+	BillingRequestID int64
 }
 
 // Outcome 是上游调用的结果，决定怎么结算。
@@ -415,8 +427,8 @@ func (p *Pipeline) Reserve(ctx context.Context, req Request) (*Reservation, erro
 			ErrNoRule, len(req.Candidates))
 	}
 
-	// 逐个候选求上界，留最大的那一个。剩下的那条规则连同它的求值结果
-	// 一起带上——见 Reservation.RuleID。
+	// 逐个候选求上界，留最大的那一个。留下的是**整条**候选而不只是金额：
+	// Reservation 要带走给出这个上界的那条规则——见 Reservation.RuleID。
 	var best *candidateBound
 	for _, rule := range rules {
 		bound, err := p.boundOf(rule, evalEnv, req)
@@ -429,23 +441,21 @@ func (p *Pipeline) Reserve(ctx context.Context, req Request) (*Reservation, erro
 	}
 
 	return &Reservation{
-		RequestID:         req.RequestID,
-		UserID:            req.UserID,
-		Asset:             req.Asset,
-		Amount:            best.amount,
-		RuleID:            best.rule.ID,
-		PricingExprSnap:   best.rule.Source,
-		RuleMatchedAt:     best.at,
-		ReservedBreakdown: best.preview,
+		RequestID:       req.RequestID,
+		UserID:          req.UserID,
+		Asset:           req.Asset,
+		Amount:          best.amount,
+		RuleID:          best.rule.ID,
+		PricingExprSnap: best.rule.Source,
+		RuleMatchedAt:   best.at,
 	}, nil
 }
 
-// candidateBound 是**一条**候选规则给出的上界，以及解释它所需的依据。
+// candidateBound 是**一条**候选规则给出的上界。
 type candidateBound struct {
-	rule    Rule
-	amount  money.Amount
-	at      time.Time
-	preview billing.Breakdown
+	rule   Rule
+	amount money.Amount
+	at     time.Time
 }
 
 // boundOf 对一条候选规则求最坏情况，算出它对应的预留金额。
@@ -470,7 +480,8 @@ func (p *Pipeline) boundOf(rule Rule, env expr.Env, req Request) (candidateBound
 		Prices:      worst.Prices,
 		Charges:     worst.Charges,
 		InputTokens: req.InputTokens,
-		// 缓存读按输入价估，缓存写按它自己的价——见 Reserve 的注释。
+		// 缓存读与缓存写各按什么价估，见 billing.Reserve 的注释——
+		// 上界的构成写在那里，这里只负责把两个量传进去。
 		CacheReadTokens:  req.Usage.CacheReadTokens,
 		CacheWriteTokens: req.Usage.CacheWriteTokens,
 		MaxTokens:        req.MaxTokens,
@@ -479,19 +490,7 @@ func (p *Pipeline) boundOf(rule Rule, env expr.Env, req Request) (candidateBound
 		return candidateBound{}, fmt.Errorf("计算预留失败: %w", err)
 	}
 
-	// 预留明细按最坏情况的价与「最大可能用量」算，供界面展示
-	// 「这笔钱是怎么估出来的」。它与结算明细用的是同一套计算，
-	// 只是输入不同。
-	preview := billing.ComputeWithCharges(
-		billing.Usage{
-			PromptTokens:     req.InputTokens,
-			CacheReadTokens:  req.Usage.CacheReadTokens,
-			CacheWriteTokens: req.Usage.CacheWriteTokens,
-			CompletionTokens: req.MaxTokens,
-		},
-		worst.Prices, worst.Charges)
-
-	return candidateBound{rule: rule, amount: amount, at: worst.At, preview: preview}, nil
+	return candidateBound{rule: rule, amount: amount, at: worst.At}, nil
 }
 
 // Settle 按实际结果结算并生成账本分录。
@@ -652,13 +651,21 @@ func (p *Pipeline) env(usage billing.Usage, at time.Time) expr.Env {
 	}
 }
 
+// programs 取编译缓存，没显式给时兜底建一个。
+//
+// 兜底那一次走 sync.Once，不用裸的 `if p.Programs == nil`：Pipeline 由
+// gateway 单实例共用，两个 goroutine 同时进来时那个判断就是同一块内存上
+// 的无同步读写。**它不报错**——表现是两个 goroutine 各建一份缓存，
+// 于是编译缓存静默失效（编译一次约 130 µs，一次请求要跑两次求值），
+// 而这类「没坏但没生效」正是最难发现的一种。
+//
+// 缓存本身是并发安全的（见 expr.Cache），这里要挡的只是**建它**这一步。
 func (p *Pipeline) programs() *expr.Cache {
-	if p.Programs == nil {
-		// 没有显式给缓存时建一个。**不该在每次求值时新建**——
-		// 那会让编译缓存完全失效，而编译一次约 130 µs，
-		// 一次请求要跑两次求值。
-		p.Programs = expr.NewCache(defaultCacheSize)
-	}
+	p.programsOnce.Do(func() {
+		if p.Programs == nil {
+			p.Programs = expr.NewCache(defaultCacheSize)
+		}
+	})
 	return p.Programs
 }
 
