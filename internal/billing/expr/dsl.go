@@ -128,16 +128,33 @@ var funcSchemas = map[string]any{
 	},
 }
 
+// nonTokenPriceSlots 是不在 billing.Usage 里的结果键：计量项表与两项一次性费用。
+//
+// 它们只在这里列一份，因为它们不属于「token 槽位」这个事实——
+// 加一项 token 槽位时不该需要改这里，反过来也不该。
+var nonTokenPriceSlots = []string{"units", "fixed", "minimum"}
+
 // priceSlots 是求值结果里允许出现的键，对应 billing.Prices 与 billing.Charges。
+//
+// token 槽位从 billing.TokenSlots 派生，不在这里再抄一份：那份表是
+// 「有哪些 token 槽位、它们叫什么」的唯一来源。手抄一份的话，加一个槽位时
+// 漏改这里不会编译失败，规则作者写新键会得到一句「未知的键」，
+// 而引擎看起来一切正常。
 //
 // 用下划线而不用驼峰，与 SQL/JSON 侧的字段名保持一致。单位一律是
 // 「每位 token 多少元」和「每次请求多少元」，与 billing 的约定相同——
 // 按千 token 标价的供应商在录入规则时换算；换算错在这边无从发现，
 // 所以不做单位推断。
-var priceSlots = map[string]struct{}{
-	"prompt": {}, "completion": {}, "cache_read": {}, "cache_write": {},
-	"reasoning": {}, "units": {}, "fixed": {}, "minimum": {},
-}
+var priceSlots = func() map[string]struct{} {
+	out := make(map[string]struct{}, len(billing.TokenSlots)+len(nonTokenPriceSlots))
+	for _, slot := range billing.TokenSlots {
+		out[slot.Name] = struct{}{}
+	}
+	for _, name := range nonTokenPriceSlots {
+		out[name] = struct{}{}
+	}
+	return out
+}()
 
 // --- 运行时 ---
 
