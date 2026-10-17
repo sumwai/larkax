@@ -184,7 +184,7 @@ func TestChatStreamDispatchesByType(t *testing.T) {
 // 用一个「返回时就已装好一个事件」的 channel 来验证：如果执行器读了它，
 // 那个事件就被它吃掉了，调用方读到的第一个事件会不对。
 func TestChatStreamDoesNotConsumeEvents(t *testing.T) {
-	fake := &fakeAdapter{typ: "fake", protocol: channel.ProtocolOpenAI}
+	fake := &fakeAdapter{typ: string(channel.ProtocolOpenAI), protocol: channel.ProtocolOpenAI}
 	fake.events = make(chan channel.StreamEvent, 1)
 	fake.events <- channel.StreamEvent{Kind: "delta", Text: "第一片"}
 
@@ -193,7 +193,7 @@ func TestChatStreamDoesNotConsumeEvents(t *testing.T) {
 		t.Fatalf("newWith 出错: %v", err)
 	}
 
-	ch := testChannel("http://upstream.invalid", "fake")
+	ch := testChannel("http://upstream.invalid", string(channel.ProtocolOpenAI))
 	req := request()
 	events, err := e.ChatStream(context.Background(), ch, req)
 	if err != nil {
@@ -272,8 +272,12 @@ func TestUpstreamErrorKeepsRetryability(t *testing.T) {
 
 // 同一个 Type 注册两次必须被拒绝：覆盖会让「两个适配器抢一个名字」
 // 表现为「其中一个静默失效」，而失效的那个通常是新加的。
+//
+// 这些坏适配器要从 newWith 这条路出去才算数：注册是装配时做的，而装配的
+// 失败才是进程起不来——注册表自己报错、newWith 把它吞掉的话，现场看到的
+// 仍是「启动无异常，那条渠道静默不判」。
 func TestNewWithRejectsBadAdapters(t *testing.T) {
-	ok := &fakeAdapter{typ: "ok", protocol: channel.ProtocolOpenAI}
+	ok := &fakeAdapter{typ: string(channel.ProtocolOpenAI), protocol: channel.ProtocolOpenAI}
 
 	cases := []struct {
 		name     string
@@ -281,11 +285,13 @@ func TestNewWithRejectsBadAdapters(t *testing.T) {
 	}{
 		{"nil 适配器", []channel.Adapter{nil}},
 		{"Type 为空", []channel.Adapter{&fakeAdapter{typ: "", protocol: channel.ProtocolOpenAI}}},
-		{"协议未知", []channel.Adapter{&fakeAdapter{typ: "x", protocol: channel.Protocol("不存在的协议")}}},
+		{"协议未知", []channel.Adapter{&fakeAdapter{typ: string(channel.ProtocolOpenAI), protocol: channel.Protocol("不存在的协议")}}},
 		// custom 曾经是合法取值。它已经没有了：适配器只能说它实现的是哪套
 		// 现成的协议，不能自造一个协议族——自造的那个没有任何东西读得懂。
-		{"协议 custom", []channel.Adapter{&fakeAdapter{typ: "y", protocol: channel.Protocol("custom")}}},
-		{"重复类型", []channel.Adapter{ok, &fakeAdapter{typ: "ok", protocol: channel.ProtocolOpenAI}}},
+		{"协议 custom", []channel.Adapter{&fakeAdapter{typ: string(channel.ProtocolOpenAI), protocol: channel.Protocol("custom")}}},
+		// 类型名不是协议名：注册表按类型算端点，这种名字算出来是空串。
+		{"类型名不是协议名", []channel.Adapter{&fakeAdapter{typ: "my-vendor", protocol: channel.ProtocolOpenAI}}},
+		{"重复类型", []channel.Adapter{ok, &fakeAdapter{typ: string(channel.ProtocolOpenAI), protocol: channel.ProtocolOpenAI}}},
 	}
 
 	for _, tc := range cases {

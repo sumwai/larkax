@@ -67,18 +67,18 @@ func (s *stubAdapter) Quota(context.Context, channel.Channel) (quota.State, erro
 // stubType 是注册表里会有的那个类型。用它而不是真实适配器的类型名：
 // 这一层测的是「类型经注册表校验」，与某个具体适配器无关。
 //
-// 它**不是**一个协议取值，所以按它算出来的端点是空串——端点判据于是不判它
-// （见下面对那两个同名常量的说明）。
-const stubType = "stub-adapter"
+// 它只能取协议取值——注册表拒收别的名字（见 channel.Registry.Register 的
+// 类型名自检），所以它现在是 systemone。取哪一个都行，选 systemone 是为了
+// 不与下面那两个常量撞：那两个要拿 openai 与 anthropic 去测端点判据。
+const stubType = "systemone"
 
 // endpointChatType / endpointMessagesType 是两个类型名，它们与 channel.Protocol
 // 的取值**同名**（"openai" / "anthropic"）。
 //
-// 这不是巧合，而是端点判据的前提：两侧都按 channel.Protocol(<渠道 type>) 算
-// 这条渠道打哪条端点（见 channels.Source 的候选构造与 Admin.checkModelEndpoints），
-// 而 channel.Protocol 的文档写着「取值与渠道表里的 channels.type 是同一个
-// 字符串（适配器的 Type()）」。stubType 那种名字算出来是空串 = 不知道，
-// 端点判据不判它——所以要测这条判据，替身的类型名必须落在协议取值上。
+// 端点判据按 channel.Protocol(<渠道 type>) 算这条渠道打哪条端点（见
+// channels.Source 的候选构造与 Admin.checkModelEndpoints），所以测这条判据就
+// 得用协议取值当类型名——注册表也本来就只收协议名。两个常量单列出来，是为了
+// 让用例里读到的类型名与它期望的那条端点对得上。
 const (
 	endpointChatType     = "openai"
 	endpointMessagesType = "anthropic"
@@ -87,7 +87,7 @@ const (
 func testRegistry(t *testing.T) *channel.Registry {
 	t.Helper()
 	r := channel.NewRegistry()
-	if err := r.Register(&stubAdapter{typ: stubType}); err != nil {
+	if err := r.Register(&stubAdapter{typ: stubType, protocol: channel.ProtocolSystemOne}); err != nil {
 		t.Fatalf("注册 stub 适配器失败: %v", err)
 	}
 	// 另外两个按协议取值命名：端点判据要按类型算路径，见上面那段说明。
@@ -1248,8 +1248,8 @@ func TestUpdateRejectsModelOnUndeclaredEndpoint(t *testing.T) {
 	}
 }
 
-// 一起改 type 与 models 时按**新的**类型判：从 anthropic（messages）换成 stub
-// （chat completions）之后，一个只在 messages 上被服务的模型就该被拦下。
+// 一起改 type 与 models 时按**新的**类型判：从 anthropic（messages）换成
+// openai（chat completions）之后，一个只在 messages 上被服务的模型就该被拦下。
 //
 // 判据用哪一侧的类型不能想当然：用库里那个旧的会把这次修改放过去，而放过去
 // 之后这条渠道就一直在往一条错端点上发请求。

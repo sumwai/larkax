@@ -3,7 +3,6 @@ package channel
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -60,6 +59,11 @@ func (f *fakeAdapter) Quota(context.Context, Channel) (quota.State, error) {
 	return quota.State{}, ErrUnsupported
 }
 
+// mustRegister 用替身占住一个类型名。
+//
+// 类型名只能取协议取值——注册表拒收别的名字（见 Registry.Register 的类型名自检）
+// ——所以下面这些用例都从 protocolNames 里挑名字。它们测的是注册表的机制
+// （查得到、去重、排序、报错时列出来），那件事与名字长什么样无关。
 func mustRegister(t *testing.T, r *Registry, typ string, p Protocol) {
 	t.Helper()
 	if err := r.Register(&fakeAdapter{typ: typ, protocol: p}); err != nil {
@@ -69,12 +73,12 @@ func mustRegister(t *testing.T, r *Registry, typ string, p Protocol) {
 
 func TestRegistryRegisterAndLookup(t *testing.T) {
 	r := NewRegistry()
-	a := &fakeAdapter{typ: "example", protocol: ProtocolOpenAI}
+	a := &fakeAdapter{typ: string(ProtocolOpenAI), protocol: ProtocolOpenAI}
 	if err := r.Register(a); err != nil {
 		t.Fatalf("Register 出错: %v", err)
 	}
 
-	got, err := r.Lookup("example")
+	got, err := r.Lookup(string(ProtocolOpenAI))
 	if err != nil {
 		t.Fatalf("Lookup 出错: %v", err)
 	}
@@ -85,20 +89,26 @@ func TestRegistryRegisterAndLookup(t *testing.T) {
 
 // 覆盖注册会让「两个适配器抢一个名字」表现为其中一个静默失效，
 // 而失效的那个通常是新加的、本该生效的那个。
+//
+// 两个替身声明的协议不同，是为了钉住「撞的是**类型名**这一列」：若判据是
+// 「类型加协议」，那两条不同协议的适配器就会被放进去，而库里只有一列 type。
 func TestRegistryRejectsDuplicateType(t *testing.T) {
 	r := NewRegistry()
-	mustRegister(t, r, "dup", ProtocolOpenAI)
-	if err := r.Register(&fakeAdapter{typ: "dup", protocol: ProtocolAnthropic}); err == nil {
+	mustRegister(t, r, string(ProtocolOpenAI), ProtocolOpenAI)
+	if err := r.Register(&fakeAdapter{
+		typ: string(ProtocolOpenAI), protocol: ProtocolAnthropic,
+	}); err == nil {
 		t.Error("重复注册应报错")
 	}
 }
 
 func TestRegistryRejectsInvalidAdapter(t *testing.T) {
 	cases := map[string]Adapter{
-		"nil 适配器": nil,
-		"未声明类型":   &fakeAdapter{typ: "", protocol: ProtocolOpenAI},
-		"未知协议":    &fakeAdapter{typ: "x", protocol: "gemini"},
-		"空协议":     &fakeAdapter{typ: "y", protocol: ""},
+		"nil 适配器":  nil,
+		"未声明类型":    &fakeAdapter{typ: "", protocol: ProtocolOpenAI},
+		"未知协议":     &fakeAdapter{typ: string(ProtocolOpenAI), protocol: "gemini"},
+		"空协议":      &fakeAdapter{typ: string(ProtocolOpenAI), protocol: ""},
+		"类型名不是协议名": &fakeAdapter{typ: "my-vendor", protocol: ProtocolOpenAI},
 	}
 	for name, a := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -109,12 +119,37 @@ func TestRegistryRejectsInvalidAdapter(t *testing.T) {
 	}
 }
 
+// 类型名不是一个协议名时要报出来，且说清三件事：它声明的类型、它声明的协议
+// （那才是改的目标）、本包认的取值有哪些。只报一句「不符合」的话，改的人
+// 不知道该往哪个方向改。
+func TestRegistryRejectsNonProtocolType(t *testing.T) {
+	r := NewRegistry()
+	err := r.Register(&fakeAdapter{typ: "my-vendor", protocol: ProtocolAnthropic})
+	if err == nil {
+		t.Fatal("类型名不是协议名时注册应当失败")
+	}
+	// 声明的协议那一处连着引号一起判：光判取值有没有出现的话，协议取值本来就
+	// 在「认的只有…」那一串里，去掉这个子句用例照样绿。
+	want := append([]string{"my-vendor", `声明的协议是 "anthropic"`}, protocolNames...)
+	for _, w := range want {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("报错里没出现 %q：%v", w, err)
+		}
+	}
+	// 失败之后那一条**没有**被注册进去：留在注册表里等于把「启动时报错」
+	// 变成「这台机器上一直有一条端点评据失效的渠道」。
+	if _, lookupErr := r.Lookup("my-vendor"); lookupErr == nil {
+		t.Error("自检失败的适配器不该留在注册表里")
+	}
+}
+
 // 未知类型要报错并列出已知类型。调用方拿到 nil 接口的话，第一次调用时才崩，
 // 而那时现场是「某个请求 panic」而不是「这个渠道类型没接」。
 func TestLookupUnknownTypeListsKnown(t *testing.T) {
 	r := NewRegistry()
-	for _, typ := range []string{"bbb", "aaa", "ccc"} {
-		mustRegister(t, r, typ, ProtocolOpenAI)
+	known := []string{string(ProtocolAnthropic), string(ProtocolOpenAI), string(ProtocolSystemOne)}
+	for _, typ := range known {
+		mustRegister(t, r, typ, Protocol(typ))
 	}
 
 	_, err := r.Lookup("nope")
@@ -124,7 +159,7 @@ func TestLookupUnknownTypeListsKnown(t *testing.T) {
 	if !errors.Is(err, ErrUnknownType) {
 		t.Errorf("期望 ErrUnknownType，得到 %v", err)
 	}
-	for _, want := range []string{"aaa", "bbb", "ccc"} {
+	for _, want := range known {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("错误信息未列出已知类型 %q: %v", want, err)
 		}
@@ -133,12 +168,15 @@ func TestLookupUnknownTypeListsKnown(t *testing.T) {
 
 func TestTypesIsSorted(t *testing.T) {
 	r := NewRegistry()
-	for _, typ := range []string{"zebra", "alpha", "middle"} {
-		mustRegister(t, r, typ, ProtocolOpenAI)
+	// 注册的顺序与期望的顺序不同：这条用例判的是 Types() 会排序。
+	for _, typ := range []string{
+		string(ProtocolSystemOne), string(ProtocolOpenAI), string(ProtocolAnthropic),
+	} {
+		mustRegister(t, r, typ, Protocol(typ))
 	}
 
 	got := r.Types()
-	want := []string{"alpha", "middle", "zebra"}
+	want := []string{string(ProtocolAnthropic), string(ProtocolOpenAI), string(ProtocolSystemOne)}
 	if len(got) != len(want) {
 		t.Fatalf("得到 %v，期望 %v", got, want)
 	}
@@ -150,16 +188,20 @@ func TestTypesIsSorted(t *testing.T) {
 }
 
 // 注册表会被并发查询：每个请求都要查一次。
+//
+// 写那个 goroutine 只能在那几个协议名上轮着来——注册表不收别的名字了（见
+// Registry.Register 的类型名自检），所以这里没有十六个各不相同的键。这条用例
+// 在意的是**并发**：一个 goroutine 写 map、十六个读它，竞态与键有几个无关。
 func TestRegistryConcurrentLookupAndRegister(t *testing.T) {
 	r := NewRegistry()
-	mustRegister(t, r, "base", ProtocolOpenAI)
+	mustRegister(t, r, string(ProtocolOpenAI), ProtocolOpenAI)
 
 	done := make(chan struct{})
 	for i := 0; i < 16; i++ {
 		go func() {
 			defer func() { done <- struct{}{} }()
 			for j := 0; j < 100; j++ {
-				if _, err := r.Lookup("base"); err != nil {
+				if _, err := r.Lookup(string(ProtocolOpenAI)); err != nil {
 					t.Errorf("Lookup 出错: %v", err)
 					return
 				}
@@ -170,7 +212,8 @@ func TestRegistryConcurrentLookupAndRegister(t *testing.T) {
 	go func() {
 		defer func() { done <- struct{}{} }()
 		for j := 0; j < 16; j++ {
-			_ = r.Register(&fakeAdapter{typ: fmt.Sprintf("extra%02d", j), protocol: ProtocolOpenAI})
+			p := Protocol(protocolNames[j%len(protocolNames)])
+			_ = r.Register(&fakeAdapter{typ: string(p), protocol: p})
 		}
 	}()
 	for i := 0; i < 17; i++ {

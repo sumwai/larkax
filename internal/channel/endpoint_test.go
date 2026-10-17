@@ -86,7 +86,7 @@ func TestParseEndpoint(t *testing.T) {
 func TestRegistryRejectsEndpointProtocolMismatch(t *testing.T) {
 	r := NewRegistry()
 	err := r.Register(&fakeAdapter{
-		typ:      "mismatched",
+		typ:      string(ProtocolOpenAI),
 		protocol: ProtocolOpenAI,
 		endpoint: EndpointResponses,
 	})
@@ -103,18 +103,21 @@ func TestRegistryRejectsEndpointProtocolMismatch(t *testing.T) {
 	}
 	// 失败之后那一条**没有**被注册进去：注册表里留一条自检不过的适配器，
 	// 等于把「启动时报错」变成「这台机器上一直有一条配错的渠道」。
-	if _, lookupErr := r.Lookup("mismatched"); lookupErr == nil {
+	if _, lookupErr := r.Lookup(string(ProtocolOpenAI)); lookupErr == nil {
 		t.Error("自检失败的适配器不该留在注册表里")
 	}
 }
 
 // 按协议推端点的适配器（真实适配器走的就是这条路）要能通过自检。
+//
+// 类型名取的就是协议取值本身：注册表不收别的名字（见 Registry.Register 的
+// 类型名自检），而真实适配器本来也是这么命名的。
 func TestRegistryAcceptsMatchingEndpoint(t *testing.T) {
 	for _, p := range []Protocol{
 		ProtocolOpenAI, ProtocolAnthropic, ProtocolOpenAIResponses, ProtocolSystemOne,
 	} {
 		r := NewRegistry()
-		if err := r.Register(&fakeAdapter{typ: "t-" + string(p), protocol: p}); err != nil {
+		if err := r.Register(&fakeAdapter{typ: string(p), protocol: p}); err != nil {
 			t.Errorf("协议 %q 的适配器注册失败: %v", p, err)
 		}
 	}
