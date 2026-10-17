@@ -547,72 +547,22 @@ golangci-lint run ./...             # 跨文件与语义检查，配置见 .gola
 go test ./...
 go test -race ./...
 go test -cover ./...
-
-bash scripts/check-redlines.sh      # 检查暂存区是否混入密钥与私有信息
-bash scripts/check-redlines.sh --all
-bash scripts/check-layering.sh      # 检查分层约定有没有被破坏
-bash scripts/check-deadcode.sh      # 检查有没有新出现的不可达符号
-bash scripts/check-unimported.sh    # 检查有没有整包没人 import
-
-bash scripts/check-redlines.test.sh   # 只在改过红线脚本后需要跑
-bash scripts/check-deadcode.test.sh   # 同上，改过不可达符号脚本后跑
-bash scripts/check-unimported.test.sh # 同上，改过整包没人 import 脚本后跑
 ```
 
-提交前至少跑一遍 `gofmt -l .`、`go vet ./...`、`go test ./...` 和四个自查脚本。
-CI 会跑同样的东西，本地跑是为了少一轮来回。
+`scripts/` 下另有一组门禁脚本，多数还带一份自测。**这份清单的唯一来源是
+[AGENTS.md](../AGENTS.md) 的「Lint」一节**——有哪些门、各自挡什么、判据与白名单
+在哪、怎么改，都写在那里，这里不重复列一遍。
 
-### 不可达符号
+本地跑它们时的几个前提：
 
-`check-deadcode.sh` 从 `cmd/` 下的 main 包（自动发现，当前是 `./cmd/larkax` 与
-`./cmd/larkaxctl`）出发跑 `deadcode`，把不可达的符号与
-`scripts/deadcode-allowlist.txt` 比对：
+- **`check-deadcode.sh` 要先装 `deadcode`**，版本与脚本里的 `PINNED_TOOLS_VERSION`
+  一致；不一致时脚本会打印该装哪一版，然后拒绝运行。
+- **集成测试要数据库**：`LARKAX_DB_DSN` 没设时那些用例整包 `t.Skip`，
+  而「跳过」在输出里和「通过」长得一样。起库见上文「一次跑通」。
+- **`check-mutation.sh` 最慢**：它串行跑（固定 `workers=1`），只在改动计费、
+  账本、金额时跑，见下文「变异测试」。
 
-- **新出现的不可达符号** → 失败。要么接线，要么把它写进白名单
-- **白名单里已经消失的条目** → 只提示「这一条可以删了」，不算失败。
-  它出现的原因是「有人把没门的东西接上线了」，那是个好动作
-- 白名单条目数超过上限 → 失败。新增一条要同时把脚本里的 `MAX_ENTRIES`
-  往上调，那个改动会被 review 看到
-
-它需要 `deadcode`，版本必须与脚本里 `PINNED_TOOLS_VERSION` 一致——
-符号集合随 `golang.org/x/tools` 的版本变化，装错版本脚本会拒绝运行：
-
-```sh
-go install golang.org/x/tools/cmd/deadcode@v0.52.0
-```
-
-### 整包没人 import
-
-`check-deadcode.sh` 从入口出发跑 `deadcode`，而 `deadcode` 只分析**从入口可达
-的那些包**。一个全仓库没有任何 import 方的包**整包不在它的分析范围里**，
-于是它的不可达清单是空的——而「空」与「全部可达」在输出里长得一样。
-所以「整包没人接」是那道门唯一系统性漏掉的一类，也是「有实现、有测试、
-没有门」最严重的一种。
-
-`check-unimported.sh` 补上这一半，只依赖 `go`：
-
-```sh
-go list ./...             # 仓库自己的包
-go list -deps ./cmd/...   # 从入口可达的包（入口由 cmd/ 自动发现）
-                          # 两者相减 = 整包没人 import 的包
-```
-
-结果与 `scripts/unimported-allowlist.txt` 比对，口径与 `check-deadcode.sh` 一致：
-
-- **新出现的无人 import 包** → 失败。要么接线，要么把它写进白名单
-- **白名单里已经可达的条目** → 只提示「这一条可以删了」，不算失败
-- 白名单条目数超过上限 → 失败。新增一条要同时把脚本里的 `MAX_ENTRIES`
-  往上调，那个改动会被 review 看到
-
-两处需要知道的约定：
-
-- **只被测试 import 的包算「没人 import」。** 测试自己就能构造调用方，
-  所以「只有测试在调」与「生产在调」在覆盖率上长得一样。代价是测试夹具包
-  也会被报出来，它们进白名单。
-- **入口是自动发现的**（`cmd/` 下带 `package main` 的目录），不手写清单——
-  一道需要人记得同步维护的门，会以它要防的方式坏掉。
-
-不要为了把白名单刷空而去硬接一条调用方：接一条假的比留着它更坏。
+CI 跑的是同一批门（变异测试只跑它的自测），本地先跑一遍是为了少一轮来回。
 
 ## 变异测试
 

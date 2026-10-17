@@ -240,8 +240,12 @@ bash scripts/check-test-names.sh    # Go 顶层函数声明的名字必须是 AS
 scripts/check-mutation.sh           # 变异测试（改动计费/账本时）
 ```
 
-`scripts/check-redlines.sh --all` 扫全树而不是暂存区。改了扫描器本身要跑
-`scripts/check-redlines.test.sh`。
+`scripts/check-redlines.sh --all` 扫全树而不是暂存区。**改了哪个脚本就跑它自己的
+自测**：`scripts/check-redlines.test.sh`、`check-deadcode.test.sh`、
+`check-unimported.test.sh`、`check-deadmethods.test.sh`、`check-test-names.test.sh`、
+`check-mutation.test.sh`（`check-layering.sh` 没有自测）。扫描器坏掉时的输出和
+「干净」一模一样，没有自测就无法证明它还在工作（见 [LESSONS.md](LESSONS.md)
+第 2、7 条）。
 
 `scripts/check-deadcode.sh` 需要 `deadcode`，版本必须与脚本里的
 `PINNED_TOOLS_VERSION` 一致——符号集合随 `golang.org/x/tools` 的版本变化，
