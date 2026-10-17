@@ -246,8 +246,12 @@ type Result struct {
 	// 上游在流中途失败、或上游正常结束却没带 usage。
 	//
 	// 它与 pipeline.Outcome.UsageSource 是同一个口径（见 tokens.Source）：
-	// 只有 SourceMeasured 时它为 false。非流式请求恒为 false——那条路上
-	// 用量只可能来自上游的响应体。
+	// 只有 SourceMeasured 时它为 false。
+	//
+	// **非流式请求恒为 false**，但理由不是「上游一定报了用量」——这条路上
+	// 是无条件写 SourceMeasured 的：上游响应体里没有 usage 块时 usageOf
+	// 返回零值，那一行照样落成「实测 0」。也就是说非流式的「上游没报」
+	// 与「上游报了 0」今天分不开（见 #267），而 Estimated 表达不了这件事。
 	Estimated bool
 }
 

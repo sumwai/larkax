@@ -37,7 +37,10 @@ func setQuotaLimit(ctx context.Context, t *testing.T, db *sql.DB, keyID int64, l
 // 走的是与生产同一条路（Save + Charge），而不是直接 UPDATE 那一行：额度算的
 // 是 final_amount，而 final_amount 只有这条路写得进去。直接改库会让用例
 // 测到一个真实流程到不了的状态。
-func settle(ctx context.Context, t *testing.T, s *Store, req pipeline.Request, amount string) {
+//
+// billID 是这次预留拿到的 billing_requests.id，原样传给分录——生产路径上
+// 它一定非零（见 consumeEntries）。
+func settle(ctx context.Context, t *testing.T, s *Store, req pipeline.Request, billID int64, amount string) {
 	t.Helper()
 
 	charge := &pipeline.Charge{
@@ -45,7 +48,7 @@ func settle(ctx context.Context, t *testing.T, s *Store, req pipeline.Request, a
 		// 受理时刻是 Save 的必填项（它决定按哪个档位定价），生产路径上由
 		// pipeline.Settle 填。夹具与既有的其它 Charge 字面量一致。
 		PricedAt: pricedAt(),
-		Entries:  consumeEntries(t, req.UserID, amount),
+		Entries:  consumeEntries(t, req.UserID, amount, billID),
 	}
 	charge.Settlement.Actual = money.MustParse(amount)
 	if err := s.Save(ctx, req, charge); err != nil {
@@ -118,10 +121,11 @@ func TestQuotaCountsSettledFinalAmount(t *testing.T) {
 	setQuotaLimit(ctx, t, db, keyID, &limit)
 
 	first := testRequestWithKey(userID, reqID(t), keyID)
-	if _, err := s.SaveReservation(ctx, first, reservation(t, userID, first.RequestID, "30", "CNY")); err != nil {
-		t.Fatal(err)
+	billID, reserveErr := s.SaveReservation(ctx, first, reservation(t, userID, first.RequestID, "30", "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
 	}
-	settle(ctx, t, s, first, "30")
+	settle(ctx, t, s, first, billID, "30")
 
 	// 已结算 30，再要 80 —— 合计 110，超过 100。
 	over := testRequestWithKey(userID, reqID(t), keyID)
