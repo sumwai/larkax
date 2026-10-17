@@ -452,7 +452,7 @@ func TestPostTransactionWaitsOnTxnLock(t *testing.T) {
 // 分录要**交替**排列（正、负、正、负）：Transaction.Verify 是按出现顺序
 // 逐个 Add 的，同号大额分录挨在一起时中间值会被夹住，于是 Verify 会把一笔
 // 精确平（但表示不了）的交易判成不平而先拒掉——那样用例就测不到写路径。
-// 按真实和判 Verify 是另一件事（issue #446 的 (c)），不在本轮范围。
+// Verify 该按真实和判还是按表示值判，是另一件事（issue #446 的 (c)）；本用例只走写路径。
 func TestPostTransactionRejectsWalletDeltaOverflow(t *testing.T) {
 	db := testDB(t)
 	s := New(db)
