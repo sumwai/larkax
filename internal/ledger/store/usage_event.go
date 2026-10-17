@@ -186,9 +186,15 @@ func unitCountsJSON(counts map[string]int64) (string, error) {
 //
 // # 为什么是两列
 //
-// billing_path 回答「这个数能不能拿去跟上游对账」，只有三档
-// （measured / estimated / fallback，表上有 CHECK）；estimator 回答「它是
-// 怎么来的」，是自由文本。
+// billing_path 回答「这个数能不能拿去跟上游对账」，只有两档
+// （measured / estimated，表上有 CHECK）；estimator 回答「它是怎么来的」，
+// 是自由文本。
+//
+// 表上原本还有第三档 'fallback'，它**没有任何产出点**：tokens.Source 三个取值
+// 里没有一个映射到它，这个函数也不返回它。于是它由迁移 00020 从 CHECK 里删掉了
+// ——留下来会让读的人以为「上游没报用量、估算也没成」那类情形落成的是它，而
+// 那种情形今天根本不产生这一行。真要区分「上游压根没报」，那是新增一个来源的
+// 事，取值该按那时的口径重新定。
 //
 // # 本地计数落成 estimated，不是 measured
 //
