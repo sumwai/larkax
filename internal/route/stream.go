@@ -26,6 +26,10 @@ type StreamResult struct {
 	// 而且**与 Channel 成对**——失败路径上它是「最后一次真的发出去的那次
 	// 用的是哪个名字」。两者的口径一起写在 Result.UpstreamModel 上。
 	UpstreamModel string
+	// OutboundRequest 是最后一次尝试**真正发出去的那份请求**，口径与非流式
+	// 那条路上的 Result.OutboundRequest 完全相同（见那里的注释）：就是交给
+	// 执行器的那一个对象，一份都没发出去时是 nil。
+	OutboundRequest *channel.Request
 	// Attempts 记录了换渠道过程中的每一次尝试。
 	Attempts []Attempt
 }
@@ -108,6 +112,7 @@ func (r *Router) chatStreamWithPlan(ctx context.Context, exec StreamExecutor, re
 		// 哪里、用哪个名字」，失败的那一次调用同样发出去过（见
 		// Result.UpstreamModel）。
 		result.UpstreamModel = attempt.Model
+		result.OutboundRequest = attempt
 
 		if err == nil {
 			result.Events = events

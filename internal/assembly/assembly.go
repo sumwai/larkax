@@ -256,6 +256,12 @@ func Build(cfg Config) (*App, error) {
 	// 声明的逐字一致，所以这里没有适配器——那正是两边刻意对齐的地方。
 	ledgerStore := store.New(cfg.DB)
 
+	// 别名的两个读点共用这一个实例：选路按选中的渠道取覆盖，预留按候选集
+	// 取输出上界（见 gateway.outputBound），两处读的是同一张表。分成两个
+	// 实例不会有任何东西报错，但「选路时用的覆盖」与「算上界时用的覆盖」
+	// 会来自两次不同的读。
+	aliasCatalog := catalog.New(cfg.DB)
+
 	gw := &gateway.Gateway{
 		Pipeline: &pipeline.Pipeline{
 			Rules:    cfg.Rules,
@@ -268,10 +274,15 @@ func Build(cfg Config) (*App, error) {
 		// 把规范名翻成上游名。不接这一项的表现是**别名配了不生效**——上游
 		// 收到的永远是规范名，只要两者不同就必然打不通，而现场看到的只是
 		// 上游说这个模型不存在。
-		Router:       &route.Router{Now: cfg.Now, Aliases: catalog.New(cfg.DB)},
-		Candidates:   channels.New(cfg.DB, cfg.Sealer),
-		Reservations: ledgerStore,
-		Settlements:  ledgerStore,
+		Router: &route.Router{Now: cfg.Now, Aliases: aliasCatalog},
+		// AliasOverrides 是预留要用的那一半：别名上的 max_tokens 覆盖顶掉
+		// 调用方给的那个数，所以预留的输出上界要按覆盖之后的算。不接这一项
+		// 请求会失败（见 gateway.ErrNoAliasOverrideSource）——上界算错的表现
+		// 是少收，而那个错没有任何东西会报出来。
+		AliasOverrides: aliasCatalog,
+		Candidates:     channels.New(cfg.DB, cfg.Sealer),
+		Reservations:   ledgerStore,
+		Settlements:    ledgerStore,
 		// 写入侧与读取侧共用同一个包：两边读写的列是同一批，
 		// 分开放会让「写进去的值读出来不对」这类错没有唯一的归属。
 		Recorder:  channels.NewRecorder(cfg.DB, staleAfter),
@@ -586,6 +597,13 @@ var _ api.IdempotencyStore = (*idempotency.Store)(nil)
 // 要写在装配层——选路在 Aliases 为 nil 时会拒绝每个请求（见
 // route.ErrNoAliasSource），而那是一个**运行期**才看得见的失败。
 var _ route.ModelAliases = (*catalog.Catalog)(nil)
+
+// 编译期断言：别名覆盖来源要满足网关对它的要求。
+//
+// 与上一条同一个理由，而这一条更容易漏：Route 与 AliasOverrides 是**两个**
+// 字段，两个都实现自同一个 *catalog.Catalog，只接上一个时编译、启动、选路
+// 全都正常，只有预留那条路会失败（见 gateway.ErrNoAliasOverrideSource）。
+var _ gateway.AliasOverrideSource = (*catalog.Catalog)(nil)
 
 // 编译期断言：限流实现要满足公共入口对它的要求。
 //

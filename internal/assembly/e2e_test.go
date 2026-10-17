@@ -1072,7 +1072,7 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 			len(byDir), breakdown)
 	}
 	if b := byDir["request"]; b.rows != 1 || b.withStatus != 0 || b.withKind != 0 {
-		t.Errorf("request 那一组 = %+v，期望 1 行且两列都为空（采集在调上游之前）", b)
+		t.Errorf("request 那一组 = %+v，期望 1 行且两列都为空（那两列说的是上游回来的什么）", b)
 	}
 	if b := byDir["response"]; b.rows != 1 || b.withStatus != 1 || b.withKind != 0 {
 		t.Errorf("response 那一组 = %+v，期望 1 行、upstream_status 非空、error_kind 为空", b)
@@ -1626,8 +1626,8 @@ func TestUpstreamFailureIsRecordedInBillingRequest(t *testing.T) {
 	// 连行都不存在。现在两条路都写，两列的值也对得上。
 	//
 	// 按 direction 分组数：非空的那几条必须**全部**落在 response 那一组。
-	// 请求方向的行采于调上游之前，两列在那条路上不适用——它们要是也有值，
-	// 说明写入路径绕过了采集点。
+	// 请求方向那一行记的是发出去的东西，那两列（上游回了几号、这次响应怎么
+	// 结束的）在那条路上不适用——它要是也有值，说明写入路径绕过了采集点。
 	want := successes + 2
 	waitForSnapshotRows(t, db, user, want*2)
 
@@ -1645,7 +1645,7 @@ func TestUpstreamFailureIsRecordedInBillingRequest(t *testing.T) {
 			len(byDir), snapBreak)
 	}
 	if b := byDir["request"]; b.rows != want || b.withStatus != 0 || b.withKind != 0 {
-		t.Errorf("request 那一组 = %+v，期望 %d 行且两列都非空 0 行（采集在调上游之前）", b, want)
+		t.Errorf("request 那一组 = %+v，期望 %d 行且两列都非空 0 行（那两列说的是上游回来的什么）", b, want)
 	}
 	// 成功的那几条也拿到过上游的 200，所以非空的状态码是 successes+1 条；
 	// 分类只有两条失败有。

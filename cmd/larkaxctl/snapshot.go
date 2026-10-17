@@ -651,8 +651,8 @@ func printSnapshots(w io.Writer, requestID string, rows []snapshotRow) {
 //
 // # upstream_status 与 error_kind 按方向读
 //
-// 两列在**请求方向**的行上不适用：采集在选路与调上游之前，那时连会打到
-// 哪个渠道都不知道。在**响应方向**的行上它们有值，而 NULL 也有确定的含义：
+// 两列在**请求方向**的行上不适用：那一行回答的是「发出去的是什么」，
+// 不记这次调用的结局。在**响应方向**的行上它们有值，而 NULL 也有确定的含义：
 // 状态码 NULL 是「一个 HTTP 响应都没拿到」，错误分类 NULL 是「没有上游失败
 // 可归」（见 upstreamStatusCell / errorKindCell）。
 //
@@ -713,8 +713,8 @@ const (
 	// notApplicableOnRequest 是 upstream_status / error_kind 在请求方向行上的
 	// 渲染文本。
 	//
-	// 请求方向的采集点在选路与调上游之前，那时没有上游状态码可记。
-	// 打成另一个文本会让读命令的人以为漏记了。
+	// 请求方向的那一行回答的是「发出去的是什么」，上游状态码不在它回答的
+	// 范围里。打成另一个文本会让读命令的人以为漏记了。
 	notApplicableOnRequest = "<不适用（请求方向快照）>"
 
 	// noUpstreamResponse 是响应方向快照上 upstream_status 为 NULL 的渲染文本。

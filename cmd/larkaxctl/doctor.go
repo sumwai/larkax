@@ -975,7 +975,7 @@ func checkDoctorAliasAndPricing(ctx context.Context, db *sql.DB, in doctorChainI
 	for i := range pairs {
 		p := &pairs[i]
 
-		upstream, err := cat.UpstreamModel(ctx, p.channelID, p.model)
+		upstream, _, err := cat.Alias(ctx, p.channelID, p.model)
 		switch {
 		case err == nil:
 			p.upstream = upstream

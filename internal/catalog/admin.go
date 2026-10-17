@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/sumwai/larkax/internal/overrides"
 )
 
 // 目录写入面上的分类错误。
@@ -465,6 +467,10 @@ type CreateAliasRequest struct {
 	// CanonicalName 必须已经在 model_catalog 里，否则外键会拒。
 	CanonicalName string
 
+	// Overrides 是这条别名上配的一组**上游请求参数**覆盖。空/nil 表示没配。
+	//
+	// 允许的键与冲突时谁赢，见 internal/overrides——写入校验、热路径应用与
+	// 预留上界三处共用那一份判据。非法键在这里就被拒绝（见 checkOverrides）。
 	Overrides map[string]any
 }
 
@@ -481,7 +487,14 @@ func (a *Admin) CreateAlias(ctx context.Context, req CreateAliasRequest) (int64,
 	if err != nil {
 		return 0, err
 	}
-	overrides, err := encodeJSONObject("overrides", req.Overrides)
+	// 覆盖的键在**写入时**校验，不拖到热路径（见 checkOverrides）。
+	//
+	// 变量名不复用外层那个 err：同一个块里再 `err :=` 是遮蔽，govet 的 shadow
+	// 检查器会报（同 Model 里那一处）。
+	if overrideErr := checkOverrides(req.Overrides); overrideErr != nil {
+		return 0, overrideErr
+	}
+	overridesJSON, err := encodeJSONObject("overrides", req.Overrides)
 	if err != nil {
 		return 0, err
 	}
@@ -498,7 +511,7 @@ func (a *Admin) CreateAlias(ctx context.Context, req CreateAliasRequest) (int64,
 		INSERT INTO model_aliases (channel_id, upstream_model, canonical_name, overrides)
 		VALUES ($1, $2, $3, $4::jsonb)
 		RETURNING id`,
-		channel, upstream, canonical, string(overrides)).Scan(&id)
+		channel, upstream, canonical, string(overridesJSON)).Scan(&id)
 	if err != nil {
 		return 0, aliasWriteError(req.ChannelID, canonical, upstream, err)
 	}
@@ -517,7 +530,10 @@ type UpdateAliasRequest struct {
 	ID int64
 
 	UpstreamModel *string
-	Overrides     *map[string]any
+	// Overrides 为 nil 表示不动这一栏；指针指向空对象表示清空。
+	//
+	// 取值同样在写入时校验（见 checkOverrides）。
+	Overrides *map[string]any
 }
 
 // UpdateAlias 按 UpdateAliasRequest 修改一条别名。
@@ -547,11 +563,16 @@ func (a *Admin) UpdateAlias(ctx context.Context, req UpdateAliasRequest) error {
 		add("upstream_model", upstream)
 	}
 	if req.Overrides != nil {
-		overrides, err := encodeJSONObject("overrides", *req.Overrides)
+		// 与新建那条路同一个位置、同一条判据：改这一栏也要在写入时拦住
+		// （见 checkOverrides）。
+		if err := checkOverrides(*req.Overrides); err != nil {
+			return err
+		}
+		overridesJSON, err := encodeJSONObject("overrides", *req.Overrides)
 		if err != nil {
 			return err
 		}
-		addCast("overrides", "jsonb", string(overrides))
+		addCast("overrides", "jsonb", string(overridesJSON))
 	}
 
 	if len(sets) == 0 {
@@ -779,6 +800,22 @@ func normalizeUpstreamModel(raw string) (string, error) {
 		return "", errors.New("上游模型名不能为空")
 	}
 	return upstream, nil
+}
+
+// checkOverrides 校验一条别名的参数覆盖。
+//
+// # 拦在写入时
+//
+// 覆盖的键与取值在这里判，热路径只是把判过的值用起来。理由是**谁配错了要能
+// 立刻看见**：一旦非法值进了库，它表现为这个别名上的每一次请求都失败，而现场
+// 能拿到的是一个笼统的失败——是哪一行、哪个键配错了，得回库里翻那一行才知道。
+// 写入时报错则直接指着那个键说。
+//
+// 白名单与取值判据在 internal/overrides，与热路径（internal/route 的应用、
+// internal/gateway 取预留上界）用的是**同一份**：这里多一个键而热路径不认它，
+// 就会变回这一列此前那种「配了跟没配一样」。
+func checkOverrides(v map[string]any) error {
+	return overrides.Validate(v)
 }
 
 // normalizeDisplayName 校验展示名。

@@ -89,9 +89,9 @@ func (s *Store) nowUTC() time.Time {
 //
 // # upstream_status 与 error_kind 照实写
 //
-// 两列由网关填好交进来：请求方向的行上它们是 nil（采集发生在调上游之前，
-// 结局还没发生），响应方向的行上分别表示「上游回了几号」与「这次响应怎么
-// 结束的」（见 internal/gateway 的 Snapshot 注释）。nil 落成 NULL，
+// 两列由网关填好交进来：请求方向的行上它们是 nil——那一行回答的是「发出去的
+// 是什么」，不记结局（见 internal/gateway 的 Snapshot 注释）；响应方向的行上
+// 分别表示「上游回了几号」与「这次响应怎么结束的」。nil 落成 NULL，
 // 而 NULL 在响应方向的行上是一个有内容的值——「一个 HTTP 响应都没拿到」。
 const insertSQL = `
 	INSERT INTO request_snapshots (

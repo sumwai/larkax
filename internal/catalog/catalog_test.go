@@ -123,7 +123,7 @@ func TestDecodeStrings(t *testing.T) {
 
 // 读取路径的入参校验：空名字与负数渠道 id 都不该落到 SQL 上。
 func TestReadPathValidatesInput(t *testing.T) {
-	if _, err := New(nil).UpstreamModel(context.Background(), 1, ""); err == nil {
+	if _, _, err := New(nil).Alias(context.Background(), 1, ""); err == nil {
 		t.Error("空的规范名应当被拒绝")
 	}
 	if _, err := New(nil).Model(context.Background(), ""); err == nil {
