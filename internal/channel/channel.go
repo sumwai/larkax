@@ -284,6 +284,17 @@ type Usage struct {
 
 // Response 是统一格式的非流式响应。
 type Response struct {
+	// StatusCode 是这次调用真正拿到的上游 HTTP 状态码，2xx 也照实填。
+	//
+	// 适配器在 CheckStatus 通过之后填它（那时一定有一个状态码），零值表示
+	// 「没填」——生产适配器不会留零值。它与 ErrUpstream.StatusCode 是同一个
+	// 事实的两侧：成功走这里，失败走那里，因为失败时没有 Response 可回。
+	//
+	// 为什么它不在归一化的正文里：状态码是传输层的事实，不属于任何一家
+	// 协议的响应体。以前它只存在于适配器内部，于是「这次到底收到了几号」
+	// 在成功路径上只有 2xx 这个区间，没有确切值——响应方向的快照要把它
+	// 作为独立一列记下来（见 request_snapshots.upstream_status）。
+	StatusCode int
 	// UpstreamModel 是上游回报的实际模型名。它与请求里的可能不同
 	//（上游做了别名或版本替换），计费要按实际用的那个算。
 	UpstreamModel string

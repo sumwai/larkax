@@ -93,6 +93,9 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 			Err:         err,
 		}
 	}
+	// 状态码照实带出去：响应方向的快照要把「上游回了几号」单独记一列，
+	// 而它只在这里出现过一次（见 channel.Response.StatusCode）。
+	out.StatusCode = resp.StatusCode
 	return out, nil
 }
 

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -660,5 +661,124 @@ func TestChatStreamEstimatesWholeRequestInput(t *testing.T) {
 	if res.Charge.Usage.PromptTokens != 26 {
 		t.Errorf("输入 = %d，期望 26（三段正文 + 三条消息的框架开销）",
 			res.Charge.Usage.PromptTokens)
+	}
+}
+
+// ── 响应方向的快照 ──────────────────────────────────────────────────────
+
+// 一条正常结束的流要落一行响应方向的快照，内容是**上游回来的**那份响应。
+//
+// 事件流里没有整份响应的形状，这一行是网关把事件归一回 channel.Response
+// 得来的（见 streamResponseBuilder）。用它钉住归一：拼错了不会报错，
+// 只会让快照少一块内容。
+func TestStreamRecordsResponseSnapshot(t *testing.T) {
+	h := newHarness(t)
+	usage := channel.Usage{PromptTokens: 12, CompletionTokens: 7, Reported: true}
+	useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
+		1: {
+			{Kind: "start", StatusCode: http.StatusOK},
+			delta("你"),
+			delta("好"),
+			{Kind: "usage", Usage: &usage},
+			{Kind: "done", FinishReason: "stop"},
+		},
+	}})
+
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	collect(t, res)
+
+	var snaps []*Snapshot
+	waitFor(t, "响应方向的快照落库", func() bool {
+		snaps = h.snapshots.byDirection("response")
+		return len(snaps) == 1
+	})
+	snap := snaps[0]
+	if snap.UpstreamStatus == nil || *snap.UpstreamStatus != http.StatusOK {
+		t.Errorf("upstream_status = %v，期望 %d（start 事件里带的就是它）",
+			snap.UpstreamStatus, http.StatusOK)
+	}
+	if snap.ErrorKind != nil {
+		t.Errorf("正常结束时 error_kind 应为 nil，实际 %q", *snap.ErrorKind)
+	}
+
+	bodies := h.redactor.responseBodies()
+	if len(bodies) != 1 {
+		t.Fatalf("交给脱敏器的响应 = %d 份，期望 1", len(bodies))
+	}
+	body := bodies[0]
+	if body == nil {
+		t.Fatal("正常结束的流不该交一份 nil 响应给脱敏器")
+	}
+	if body.UpstreamModel != "gpt-4o" {
+		t.Errorf("归一后的上游模型 = %q，期望选路给出的 gpt-4o", body.UpstreamModel)
+	}
+	if body.FinishReason != "stop" {
+		t.Errorf("finish_reason = %q，期望 stop", body.FinishReason)
+	}
+	if len(body.Message.Content) != 1 || body.Message.Content[0].Text != "你好" {
+		t.Errorf("归一后的内容 = %#v，期望把两段增量拼成一个文本块「你好」", body.Message.Content)
+	}
+	if body.Usage.PromptTokens != 12 || body.Usage.CompletionTokens != 7 {
+		t.Errorf("归一后的用量 = %+v，期望 12/7", body.Usage)
+	}
+}
+
+// 上游在接受请求之前就失败：仍然落一行响应方向的快照。
+func TestStreamPreAcceptFailureRecordsResponse(t *testing.T) {
+	h := newHarness(t)
+	useStreamExecutor(h, &scriptedExecutor{preErr: map[int64]error{
+		1: &channel.ErrUpstream{StatusCode: http.StatusBadGateway, GotResponse: true},
+	}})
+
+	if _, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{}); err == nil {
+		t.Fatal("上游在接受请求前失败，ChatStream 应当报错")
+	}
+
+	var snaps []*Snapshot
+	waitFor(t, "响应方向的快照落库", func() bool {
+		snaps = h.snapshots.byDirection("response")
+		return len(snaps) == 1
+	})
+	if snaps[0].UpstreamStatus == nil || *snaps[0].UpstreamStatus != http.StatusBadGateway {
+		t.Errorf("upstream_status = %v，期望 %d", snaps[0].UpstreamStatus, http.StatusBadGateway)
+	}
+	if snaps[0].ErrorKind == nil || *snaps[0].ErrorKind != "upstream_http_error" {
+		t.Errorf("error_kind = %v，期望 upstream_http_error", snaps[0].ErrorKind)
+	}
+}
+
+// 上游接受了请求、一个字没吐就结束：状态码是 start 事件里的那个真实值，
+// 分类是 upstream_stream_aborted——与账单上的口径一致。
+func TestStreamAbortedRecordsResponse(t *testing.T) {
+	h := newHarness(t)
+	useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
+		1: {{Kind: "start", StatusCode: http.StatusOK}},
+	}})
+
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	collect(t, res)
+
+	var snaps []*Snapshot
+	waitFor(t, "响应方向的快照落库", func() bool {
+		snaps = h.snapshots.byDirection("response")
+		return len(snaps) == 1
+	})
+	if snaps[0].UpstreamStatus == nil || *snaps[0].UpstreamStatus != http.StatusOK {
+		t.Errorf("upstream_status = %v，期望 %d（拿到过响应这个事实成立）",
+			snaps[0].UpstreamStatus, http.StatusOK)
+	}
+	if snaps[0].ErrorKind == nil || *snaps[0].ErrorKind != "upstream_stream_aborted" {
+		t.Errorf("error_kind = %v，期望 upstream_stream_aborted", snaps[0].ErrorKind)
+	}
+	// 什么都没观察到时交 nil，让骨架为空而不是一份「上游报了零用量」的假象。
+	bodies := h.redactor.responseBodies()
+	if len(bodies) != 1 || bodies[0] != nil {
+		t.Errorf("没吐字的流应当交 nil 响应体，实际 %#v", bodies)
 	}
 }

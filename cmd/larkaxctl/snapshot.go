@@ -604,11 +604,14 @@ func printSnapshots(w io.Writer, requestID string, rows []snapshotRow) {
 //
 // # upstream_status 与 error_kind 按方向读
 //
-// 这两列只对**响应方向**的快照有意义：请求方向的行采于选路与调上游之前，
-// 那时连会打到哪个渠道都不知道（见 #384 的结论与 docs/development.md）。
-// 把它们的 NULL 打成 <未记录>，读起来正是「应该有值但没记下来」——
-// 与本条要消除的那个误读一模一样。所以请求方向的行打成「不适用」，
-// 响应方向的行才打 <未记录>。
+// 两列在**请求方向**的行上不适用：采集在选路与调上游之前，那时连会打到
+// 哪个渠道都不知道。在**响应方向**的行上它们有值，而 NULL 也有确定的含义：
+// 状态码 NULL 是「一个 HTTP 响应都没拿到」，错误分类 NULL 是「没有上游失败
+// 可归」（见 upstreamStatusCell / errorKindCell）。
+//
+// 三个文本不能合并：<不适用> 说这一列在这个方向上没有意义，<无上游响应>
+// 说上游没回过状态码，<无> 说这次没有上游失败。共用一个文本就会把其中
+// 两种读成第三种。
 //
 // # 为什么截断必须显式说出来
 //
@@ -620,8 +623,8 @@ func printSnapshot(w io.Writer, seq int, row snapshotRow) {
 	_, _ = fmt.Fprintf(w, "  created_at=%s\n", row.CreatedAt.UTC().Format(time.RFC3339Nano))
 	_, _ = fmt.Fprintf(w, "  skeleton_version=%d\n", row.SkeletonVersion)
 	_, _ = fmt.Fprintf(w, "  capture_mode=%s\n", row.CaptureMode)
-	_, _ = fmt.Fprintf(w, "  upstream_status=%s\n", evidenceCell(row.Direction, nullableInt(row.UpstreamStatus)))
-	_, _ = fmt.Fprintf(w, "  error_kind=%s\n", evidenceCell(row.Direction, nullableText(row.ErrorKind)))
+	_, _ = fmt.Fprintf(w, "  upstream_status=%s\n", upstreamStatusCell(row.Direction, row.UpstreamStatus))
+	_, _ = fmt.Fprintf(w, "  error_kind=%s\n", errorKindCell(row.Direction, row.ErrorKind))
 	_, _ = fmt.Fprintf(w, "  skeleton_truncated=%t\n", row.Truncated)
 	printRedactedPaths(w, "  ", row.RedactedPaths)
 
@@ -659,51 +662,55 @@ func printRedactedPaths(w io.Writer, indent string, paths []string) {
 	}
 }
 
-// nullableInt 把可空的整数列渲染成文本。
-//
-// NULL 打成 <未记录> 而不是空串：空串与「这个值就是空的」分不开，
-// 而「上游当时没给状态码」本身是一条信息。
-func nullableInt(v sql.NullInt64) string {
-	if !v.Valid {
-		return nullableUnrecorded
-	}
-	return strconv.FormatInt(v.Int64, 10)
-}
-
-// nullableText 把可空的文本列渲染成文本。
-func nullableText(v sql.NullString) string {
-	if !v.Valid {
-		return nullableUnrecorded
-	}
-	return v.String
-}
-
 const (
-	// nullableUnrecorded 是可空列没有值时的渲染文本。
-	//
-	// 它读作「应该有值，但没记下来」——这对响应方向的行是对的，
-	// 对请求方向的行不对（那两个值在那条路上本来就不适用，见 evidenceCell）。
-	nullableUnrecorded = "<未记录>"
-
 	// notApplicableOnRequest 是 upstream_status / error_kind 在请求方向行上的
 	// 渲染文本。
 	//
-	// 这两列是给响应方向快照准备的：请求方向的采集点在选路与调上游之前，
-	// 那时没有上游状态码可记（见 #384 的结论与 docs/development.md）。
-	// 打成 <未记录> 会让读命令的人以为漏记了。
+	// 请求方向的采集点在选路与调上游之前，那时没有上游状态码可记。
+	// 打成另一个文本会让读命令的人以为漏记了。
 	notApplicableOnRequest = "<不适用（请求方向快照）>"
+
+	// noUpstreamResponse 是响应方向快照上 upstream_status 为 NULL 的渲染文本。
+	//
+	// 它读作「上游一个 HTTP 响应都没给过」：连不上、超时、DNS 失败。
+	// 不能写成 <未记录>——那读作「应该有值却漏记了」，而这一列在那几种
+	// 结局里**本来就没有值**。同一条快照的 error_kind 会是
+	// upstream_no_answer，两列一起读才能把「没拿到」与「拿到了但不是 2xx」
+	// 分开。
+	noUpstreamResponse = "<无上游响应>"
+
+	// noUpstreamError 是响应方向快照上 error_kind 为 NULL 的渲染文本。
+	//
+	// 它表示「这次响应没有以上游失败告终」：正常结束、客户端断开、
+	// 插件阻断都归这一档。写成 <未记录> 会把一次成功的请求说成漏记。
+	noUpstreamError = "<无>"
 )
 
-// evidenceCell 按快照方向渲染「上游证据」那一列（upstream_status / error_kind）。
+// upstreamStatusCell 按快照方向渲染 upstream_status。
 //
-// 只改写 NULL：请求方向的行上这两列不适用，而响应方向的行上没记就是没记。
-// 非 NULL 的值照常显示，哪怕它出现在请求方向的行上——那说明有写入路径绕过了
-// internal/snapshotwire 的门，把一个异常藏起来比显示出来更坏。
-func evidenceCell(direction, value string) string {
-	if direction == string(snapshot.RootRequest) && value == nullableUnrecorded {
+// 非 NULL 的值原样显示，哪怕它出现在请求方向的行上——那说明有写入路径
+// 绕过了 internal/gateway 的采集点，把一个异常藏起来比显示出来更坏。
+func upstreamStatusCell(direction string, v sql.NullInt64) string {
+	if v.Valid {
+		return strconv.FormatInt(v.Int64, 10)
+	}
+	if direction == string(snapshot.RootRequest) {
 		return notApplicableOnRequest
 	}
-	return value
+	return noUpstreamResponse
+}
+
+// errorKindCell 按快照方向渲染 error_kind。
+//
+// 与 upstreamStatusCell 同一个做法：有值照原样显示，NULL 按方向解释。
+func errorKindCell(direction string, v sql.NullString) string {
+	if v.Valid {
+		return v.String
+	}
+	if direction == string(snapshot.RootRequest) {
+		return notApplicableOnRequest
+	}
+	return noUpstreamError
 }
 
 // runSnapshotCleanup 删除到期分区。

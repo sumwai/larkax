@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/rand"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -182,6 +183,12 @@ type fakeRedactor struct {
 	respErr error
 	mu      sync.Mutex
 	redacts int
+	// responses 按顺序记下交给响应方向脱敏的每一份响应。
+	//
+	// 它钉的是「归一对不对」：流式那条路手里只有事件流，交给脱敏器的
+	// 那份 channel.Response 是网关自己拼的，拼错了不会报错，只会让快照
+	// 少一块或多一块。
+	responses []*channel.Response
 }
 
 func (f *fakeRedactor) Redact(*channel.Request) (*Snapshot, error) {
@@ -194,11 +201,21 @@ func (f *fakeRedactor) Redact(*channel.Request) (*Snapshot, error) {
 	return &Snapshot{Skeleton: map[string]any{"model": "placeholder"}}, nil
 }
 
-func (f *fakeRedactor) RedactResponse(*channel.Response) (*Snapshot, error) {
+func (f *fakeRedactor) RedactResponse(resp *channel.Response) (*Snapshot, error) {
+	f.mu.Lock()
+	f.responses = append(f.responses, resp)
+	f.mu.Unlock()
 	if f.respErr != nil {
 		return nil, f.respErr
 	}
 	return &Snapshot{}, nil
+}
+
+// responseBodies 返回交给响应方向脱敏的响应体清单。
+func (f *fakeRedactor) responseBodies() []*channel.Response {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*channel.Response(nil), f.responses...)
 }
 
 type fakeSnapshots struct {
@@ -224,16 +241,20 @@ func (f *fakeSnapshots) count() int {
 	return len(f.saved)
 }
 
-// first 返回落库的第一条快照，没有则返回 nil。
+// byDirection 返回某个方向的全部快照，按落库顺序。
 //
-// 落库是异步的，所以取用前先用 waitFor 等它出现（见下面那几条用例）。
-func (f *fakeSnapshots) first() *Snapshot {
+// 一次请求会落两条（请求方向与响应方向），所以「那一条快照」必须按方向
+// 找，不能取第一条。落库是异步的，取用前先用 waitFor 等它出现。
+func (f *fakeSnapshots) byDirection(dir string) []*Snapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.saved) == 0 {
-		return nil
+	var out []*Snapshot
+	for _, s := range f.saved {
+		if s.Direction == dir {
+			out = append(out, s)
+		}
 	}
-	return f.saved[0]
+	return out
 }
 
 // ── 组装 ────────────────────────────────────────────────────────────────
@@ -1116,9 +1137,13 @@ func TestSnapshotDoesNotBlockRequest(t *testing.T) {
 }
 
 // 脱敏失败就丢快照，绝不回落成存原文。
+//
+// 两个方向都要钉：只设请求方向的错误而让响应方向照常落库的话，
+// 「一条都没落下」这句话就证明不了请求那一条是被丢掉的。
 func TestRedactionFailureDropsSnapshot(t *testing.T) {
 	h := newHarness(t)
 	h.redactor.reqErr = errors.New("脱敏器出错")
+	h.redactor.respErr = errors.New("脱敏器出错")
 
 	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
 		t.Fatalf("脱敏失败不该影响请求: %v", err)
@@ -1138,6 +1163,9 @@ func TestSnapshotOptional(t *testing.T) {
 
 	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
 		t.Fatalf("没配快照不该报错: %v", err)
+	}
+	if n := h.snapshots.count(); n != 0 {
+		t.Errorf("没配脱敏器时不该落任何快照，实际 %d 条", n)
 	}
 }
 
@@ -1171,16 +1199,134 @@ func TestRequestSnapshotRecordsRequestingUser(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var snap *Snapshot
+	var snaps []*Snapshot
 	waitFor(t, "请求快照落库", func() bool {
-		snap = h.snapshots.first()
-		return snap != nil
+		snaps = h.snapshots.byDirection("request")
+		return len(snaps) == 1
 	})
-	if snap.UserID != req.UserID {
-		t.Errorf("快照的 user_id = %d，期望 %d（发起这次请求的用户）", snap.UserID, req.UserID)
+	if snaps[0].UserID != req.UserID {
+		t.Errorf("快照的 user_id = %d，期望 %d（发起这次请求的用户）",
+			snaps[0].UserID, req.UserID)
 	}
-	if snap.Direction != "request" {
-		t.Errorf("方向 = %q，期望 request", snap.Direction)
+}
+
+// ── 响应方向的快照 ──────────────────────────────────────────────────────
+
+// 一次成功的非流式请求要落**两行**：请求方向与响应方向。
+//
+// 两行是配对读的：前者回答「发出去的是什么」，后者回答「回来的是什么」。
+// 只有一行的话，`direction = 'response'` 这个枚举值在表里等于不存在。
+func TestChatRecordsResponseSnapshotOnSuccess(t *testing.T) {
+	h := newHarness(t)
+	h.executor.resp.StatusCode = http.StatusOK
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+
+	var snaps []*Snapshot
+	waitFor(t, "响应方向的快照落库", func() bool {
+		snaps = h.snapshots.byDirection("response")
+		return len(snaps) == 1
+	})
+	if got := len(h.snapshots.byDirection("request")); got != 1 {
+		t.Errorf("请求方向的快照 = %d 条，期望 1", got)
+	}
+	snap := snaps[0]
+	if snap.UpstreamStatus == nil || *snap.UpstreamStatus != http.StatusOK {
+		t.Errorf("upstream_status = %v，期望 %d（上游真的回了这个码）", snap.UpstreamStatus, http.StatusOK)
+	}
+	if snap.ErrorKind != nil {
+		t.Errorf("成功时 error_kind 应为 nil，实际 %q", *snap.ErrorKind)
+	}
+	if snap.UserID != request().UserID {
+		t.Errorf("响应快照的 user_id = %d，期望 %d", snap.UserID, request().UserID)
+	}
+}
+
+// 上游回了 4xx：仍然要落一行响应方向的快照，且两列都说得出发生了什么。
+//
+// 这一条正是「没拿到」与「拿到了但不是 2xx」的分界用例之一：状态码是
+// 上游真的回的那个，分类是非 2xx 那一档。
+func TestResponseSnapshotOnUpstreamHTTPError(t *testing.T) {
+	h := newHarness(t)
+	h.executor.err = &channel.ErrUpstream{
+		StatusCode:  http.StatusForbidden,
+		GotResponse: true,
+		Body:        "forbidden",
+	}
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err == nil {
+		t.Fatal("上游 403 应当让请求失败")
+	}
+
+	var snaps []*Snapshot
+	waitFor(t, "失败也落响应方向的快照", func() bool {
+		snaps = h.snapshots.byDirection("response")
+		return len(snaps) == 1
+	})
+	snap := snaps[0]
+	if snap.UpstreamStatus == nil || *snap.UpstreamStatus != http.StatusForbidden {
+		t.Errorf("upstream_status = %v，期望 %d", snap.UpstreamStatus, http.StatusForbidden)
+	}
+	if snap.ErrorKind == nil || *snap.ErrorKind != "upstream_http_error" {
+		t.Errorf("error_kind = %v，期望 upstream_http_error", snap.ErrorKind)
+	}
+	// 没有归一化的响应体，骨架是空的；两列才是这一行要说的东西。
+	if len(snap.Skeleton) != 0 {
+		t.Errorf("失败行不该凭空造一个骨架，实际 %v", snap.Skeleton)
+	}
+}
+
+// 连不上上游：一个 HTTP 响应都没拿到，状态码必须是 NULL。
+//
+// 这一条钉的是「没拿到」：把它写成 0 或写成某个编出来的 5xx，都会让
+// 前一条用例的分界失效。
+func TestResponseSnapshotWhenNoUpstreamAnswer(t *testing.T) {
+	h := newHarness(t)
+	h.executor.err = &channel.ErrUpstream{
+		GotResponse: false,
+		Err:         errors.New("connection refused"),
+	}
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err == nil {
+		t.Fatal("连不上上游应当让请求失败")
+	}
+
+	var snaps []*Snapshot
+	waitFor(t, "失败也落响应方向的快照", func() bool {
+		snaps = h.snapshots.byDirection("response")
+		return len(snaps) == 1
+	})
+	if snaps[0].UpstreamStatus != nil {
+		t.Errorf("连不上时 upstream_status 必须是 nil（HTTP 里没有 0 号），实际 %d", *snaps[0].UpstreamStatus)
+	}
+	if snaps[0].ErrorKind == nil || *snaps[0].ErrorKind != "upstream_no_answer" {
+		t.Errorf("error_kind = %v，期望 upstream_no_answer", snaps[0].ErrorKind)
+	}
+}
+
+// 一次上游调用都没发生时不写响应方向的行。
+//
+// 插件在选路时阻断——这不是「上游回来了什么」，写一行方向为 response 的
+// 空快照会让人以为上游回了个空。
+func TestResponseSnapshotSkippedWithoutUpstreamCall(t *testing.T) {
+	h := newHarness(t)
+	blocked := errors.New("插件阻断")
+	hooks := Hooks{OnRoute: func(context.Context, []route.Candidate) (int64, error) {
+		return 0, blocked
+	}}
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), hooks); !errors.Is(err, blocked) {
+		t.Fatalf("期望插件阻断的错误，实际 %v", err)
+	}
+
+	// 等请求方向那一条落下来，确保采集那一步已经跑过。
+	waitFor(t, "请求方向的快照落库", func() bool {
+		return len(h.snapshots.byDirection("request")) == 1
+	})
+	if got := len(h.snapshots.byDirection("response")); got != 0 {
+		t.Errorf("没有上游调用时不该写响应方向的快照，实际 %d 条", got)
 	}
 }
 

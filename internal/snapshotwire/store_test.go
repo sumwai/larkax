@@ -251,21 +251,20 @@ func TestInsertWritesAllColumns(t *testing.T) {
 	if !strings.Contains(db.execs[1], "INSERT INTO request_snapshots") {
 		t.Errorf("第二次 Exec 应当是插入，实际为 %q", db.execs[1])
 	}
-	// 这两列**故意不写**：当前只采请求方向的快照，写入发生在调上游之前，
-	// 那时上游结局还没发生。NULL 在这些行上读作「这一行不适用」，不是
-	// 「上游没回状态码」；同一次请求的上游结局记在 billing_requests 上。
-	// 哪天真接了响应方向的采集，这条断言会先失败，提醒改的人把语义一起改。
+	// 两列必须出现在 INSERT 里：响应方向的行靠它们说清「上游回了几号、
+	// 这次响应怎么了」。写入的是 nil 时落成 NULL（见下一条用例）。
 	for _, col := range []string{"upstream_status", "error_kind"} {
-		if strings.Contains(db.execs[1], col) {
-			t.Errorf("请求快照的插入不该写 %s（它取自调上游之前，结局还没发生）: %q", col, db.execs[1])
+		if !strings.Contains(db.execs[1], col) {
+			t.Errorf("插入语句里没有 %s：%q", col, db.execs[1])
 		}
 	}
 
 	args := db.lastArgs()
 	// 插入的列顺序：request_id, user_id, direction, skeleton_version,
-	// capture_mode, skeleton, skeleton_truncated, redacted_paths, created_at
-	if len(args) != 9 {
-		t.Fatalf("插入参数 %d 个，期望 9", len(args))
+	// capture_mode, skeleton, skeleton_truncated, redacted_paths,
+	// upstream_status, error_kind, created_at
+	if len(args) != 11 {
+		t.Fatalf("插入参数 %d 个，期望 11", len(args))
 	}
 	if args[0] != "req-1" || args[1] != int64(42) || args[2] != "request" {
 		t.Errorf("前三列 = %v, %v, %v", args[0], args[1], args[2])
@@ -282,15 +281,53 @@ func TestInsertWritesAllColumns(t *testing.T) {
 	if got, ok := args[7].([]string); !ok || len(got) != 1 || got[0] != "messages[0].content" {
 		t.Errorf("redacted_paths = %#v", args[7])
 	}
+	// nil 的两列落成 NULL，而不是 0 或空串。
+	if args[8] != nil {
+		t.Errorf("upstream_status = %#v，期望 nil（NULL）", args[8])
+	}
+	if args[9] != nil {
+		t.Errorf("error_kind = %#v，期望 nil（NULL）", args[9])
+	}
 	// created_at 由应用给出，而不是交给列上的 DEFAULT now()：补建的是
 	// 应用算出来的那天的分区，写入的时刻必须同源，否则 UTC 午夜附近
 	// 两者会差一天，行就落进兜底分区了。
-	createdAt, ok := args[8].(time.Time)
+	createdAt, ok := args[10].(time.Time)
 	if !ok {
-		t.Fatalf("created_at = %#v，期望 time.Time", args[8])
+		t.Fatalf("created_at = %#v，期望 time.Time", args[10])
 	}
 	if PartitionName(createdAt) != dayOf(t, db.execs[0]) {
 		t.Errorf("写入时刻 %v 与补建的分区 %q 不同源", createdAt, db.execs[0])
+	}
+}
+
+// 响应方向的两列要照实写进参数位。
+//
+// 只断言语句里有列名是不够的：参数位错一格时 SQL 照样执行（都是
+// 可空列），而 status 会落进 error_kind 那一列——库里读出来是一个
+// 「状态码 403」的文本分类，谁都不会报错。
+func TestInsertWritesUpstreamEvidence(t *testing.T) {
+	db := &fakeDB{}
+	s := newTestStore(db)
+
+	snap := newSnap()
+	snap.Direction = "response"
+	status := 403
+	kind := "upstream_http_error"
+	snap.UpstreamStatus = &status
+	snap.ErrorKind = &kind
+	if err := s.Insert(context.Background(), snap); err != nil {
+		t.Fatalf("Insert 出错: %v", err)
+	}
+
+	args := db.lastArgs()
+	if args[2] != "response" {
+		t.Errorf("direction = %v，期望 response", args[2])
+	}
+	if args[8] != 403 {
+		t.Errorf("upstream_status = %#v，期望 403", args[8])
+	}
+	if args[9] != "upstream_http_error" {
+		t.Errorf("error_kind = %#v，期望 upstream_http_error", args[9])
 	}
 }
 

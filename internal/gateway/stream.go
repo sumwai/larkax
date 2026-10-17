@@ -25,8 +25,10 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
@@ -84,6 +86,11 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 		// 上游在接受请求之前就失败了：路由层已经换过渠道，剩下的处置与
 		// 非流式完全一样——不计费。
 		//
+		// 响应方向的快照在这里采：上游有过调用（或至少有过一次尝试），
+		// 只是没拿到可用的响应。失败同样要留一条，那正是排查时最该看的。
+		respBody, respStatus, respKind := responseEvidence(nil, err)
+		g.responseSnapshotAsync(ctx, respBody, req.UserID, respStatus, respKind)
+
 		// settleAndFail 只结算、不释放，非流式那条路靠 defer res.finish
 		// 兜住释放那一步；这里没有 defer 可挂（成功路径的收尾在后台），
 		// 所以显式补一次 finish。
@@ -259,9 +266,28 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 		// 只能在同一处更新——错开就会出现「按原文计费、按替换后的文本发给
 		// 调用方」这种账单与回答对不上的状态。
 		accText string
+		// upstreamResp 把这条流归一回整份响应，供响应方向的快照使用。
+		//
+		// 它与 accText 的口径相反：观察发生在插件的处置**之前**，记的是
+		// 上游回来的那份内容。插件改的是发给调用方的东西，不是上游的事实。
+		upstreamResp = newStreamResponseBuilder()
 	)
 
+	// 响应方向的快照在流结束时采一次。
+	//
+	// 用 defer 而不是写在循环之后：本函数有两条返回路径（「一个字没吐」与
+	// 「计费」），只挂在其中一条上就会漏掉另一半——那正是这张表想要的
+	// 「上游出过什么事」。
+	defer func() {
+		status, kind := streamResponseEvidence(upstreamStatus, streamErr, started, done, clientGone || terminated)
+		g.responseSnapshotAsync(ctx, upstreamResp.response(res.UpstreamModel), h.req.UserID,
+			optionalInt(status), optionalString(kind))
+	}()
+
 	for ev := range events {
+		// 归一看**插件事先**的事件：快照记的是上游回来的内容（见 upstreamResp）。
+		upstreamResp.observe(ev)
+
 		// onStream 排在**累加之前**，而且是这一块被决定之后才累加：插件
 		// 替换掉的正文是这次流式中断时的计费依据（见 StreamChunk），
 		// 排在 est.ObserveDelta 之后就变成按原文计费了。
@@ -586,6 +612,144 @@ func (e *streamAbortedError) Error() string { return errStreamAborted.Error() }
 // Unwrap 让 errors.Is(err, errStreamAborted) 继续成立：所有把这次结局
 // 认成「流在接受之后断了」的调用方不必知道有没有状态码。
 func (e *streamAbortedError) Unwrap() error { return errStreamAborted }
+
+// streamResponseBuilder 把一条已消费的事件流归一回 channel.Response。
+//
+// # 为什么在网关里做
+//
+// 适配器已经把上游的协议形状翻译成了 channel.StreamEvent——那是本项目认的
+// 唯一形状。这里只是把同一份事件重新拼成「整份响应」那个形状，供响应方向的
+// 快照使用；它不引入第三种协议表示，也不改任何一条事件的语义。
+//
+// # 它是近似，近似在哪里
+//
+// 事件流里没有块边界：文本增量与工具增量按到达顺序给出。这里按到达顺序
+// 聚块——连续文本归一个 text 块，同一个 Index 的工具增量归一个 tool_use 块。
+// 还原不出的是零长度的块（上游发了一个空的文本块），因而块的数量可能比
+// 上游原样响应少。快照记的是形状与长度，这个差别不影响计费，也不影响
+// 「这次回答长什么样」的判读。
+//
+// # 谁不在这里
+//
+// 插件的 drop / replace 不在这里：那些是发给调用方的处置，不是上游回来的
+// 内容。所以观察必须发生在插件处理**之前**（见 pumpStream 的循环）。
+type streamResponseBuilder struct {
+	status       int
+	finishReason string
+	usage        channel.Usage
+	measured     bool
+	blocks       []channel.ContentBlock
+	// toolAt 把增量里的工具序号映射到 blocks 里的下标。
+	toolAt map[int]int
+	// toolArgs 按增量序号累计参数分片。参数在流里是分片给的，
+	// 拼齐之后才是一个 JSON 对象。
+	toolArgs map[int]*strings.Builder
+}
+
+func newStreamResponseBuilder() *streamResponseBuilder {
+	return &streamResponseBuilder{
+		toolAt:   make(map[int]int),
+		toolArgs: make(map[int]*strings.Builder),
+	}
+}
+
+// observe 看一条事件。
+func (b *streamResponseBuilder) observe(ev channel.StreamEvent) {
+	switch ev.Kind {
+	case "start":
+		// 第一条事件的信封信息，不是正文（见 channel.StreamEvent.StatusCode）。
+		b.status = ev.StatusCode
+	case "delta":
+		if ev.Text == "" {
+			return
+		}
+		if n := len(b.blocks); n > 0 && b.blocks[n-1].Type == "text" {
+			b.blocks[n-1].Text += ev.Text
+			return
+		}
+		b.blocks = append(b.blocks, channel.ContentBlock{Type: "text", Text: ev.Text})
+	case "tool_use":
+		if ev.ToolCall == nil {
+			return
+		}
+		i, ok := b.toolAt[ev.ToolCall.Index]
+		if !ok {
+			i = len(b.blocks)
+			b.toolAt[ev.ToolCall.Index] = i
+			b.blocks = append(b.blocks, channel.ContentBlock{Type: "tool_use"})
+			b.toolArgs[ev.ToolCall.Index] = &strings.Builder{}
+		}
+		blk := &b.blocks[i]
+		// id 与 name 只在第一个分片里给出（见 channel.ToolCallDelta）。
+		if ev.ToolCall.ID != "" {
+			blk.ToolUseID = ev.ToolCall.ID
+		}
+		if ev.ToolCall.Name != "" {
+			blk.ToolName = ev.ToolCall.Name
+		}
+		b.toolArgs[ev.ToolCall.Index].WriteString(ev.ToolCall.Arguments)
+	case "usage":
+		if ev.Usage != nil {
+			b.usage = *ev.Usage
+			b.measured = true
+		}
+	case "done":
+		b.finishReason = ev.FinishReason
+	}
+}
+
+// response 产出一份归一化响应；什么都没观察到时返回 nil。
+//
+// 返回 nil 的条件是「没有内容、没有实测用量、没有结束原因」——那说明这条流
+// 在给出任何东西之前就结束了。返回一条字段全是零值的 Response 会让骨架里
+// 出现 `usage: {prompt_tokens: 0, completion_tokens: 0}`，读起来像「上游报了
+// 零用量」，而事实是上游什么都没报。空骨架配状态码与错误分类，才是那次
+// 调用的忠实记录。
+func (b *streamResponseBuilder) response(upstreamModel string) *channel.Response {
+	if len(b.blocks) == 0 && !b.measured && b.finishReason == "" {
+		return nil
+	}
+	for idx, buf := range b.toolArgs {
+		blk := &b.blocks[b.toolAt[idx]]
+		// 拼不成一个 JSON 对象就留空：参数可能因为断流只到了一半，
+		// 而快照不猜内容（见 internal/snapshot 的铁律）。
+		var input map[string]any
+		if s := buf.String(); s != "" && json.Unmarshal([]byte(s), &input) == nil {
+			blk.ToolInput = input
+		}
+	}
+	return &channel.Response{
+		StatusCode:    b.status,
+		UpstreamModel: upstreamModel,
+		// 响应一定是 assistant 的；事件流里没有角色字段，因为上游的
+		// 流式分片从不带它（协议决定的）。
+		Message:      channel.Message{Role: "assistant", Content: b.blocks},
+		FinishReason: b.finishReason,
+		Usage:        b.usage,
+	}
+}
+
+// streamResponseEvidence 推出响应方向快照要记的两列。
+//
+// 判据与 pumpStream 里那两段结局判定同源：上游在流里报的错走
+// upstreamEvidence（与账单同一套取值），「接受了请求却一个字没吐」走
+// upstream_stream_aborted，其余（正常结束、客户端断开、插件终止）没有
+// 上游失败可归。
+func streamResponseEvidence(status int, streamErr error, started, done, ended bool) (int, string) {
+	if streamErr != nil {
+		s, kind := upstreamEvidence(streamErr)
+		if s == 0 {
+			// 适配器没带上状态码时退回 start 事件里的那个（见
+			// channel.StreamEvent.StatusCode）。
+			s = status
+		}
+		return s, kind
+	}
+	if !ended && !done && !started {
+		return status, pipeline.ErrorUpstreamStreamAborted
+	}
+	return status, ""
+}
 
 // streamSettleTimeout 是流式收尾（结算 + 释放）的时间上限。
 //
