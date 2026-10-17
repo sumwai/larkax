@@ -329,8 +329,10 @@ type Outcome struct {
 	// Release——不计费的结局只有那一条写库的路）。两者都只在**上游这一侧**
 	// 的失败上有值：
 	//
-	//   - UpstreamStatus 是上游那次 HTTP 响应的状态码。上游没给出状态码时是 0，
-	//     落库成 NULL——HTTP 里没有 0 这个状态码，写 0 会读成「上游回了 0 号」。
+	//   - UpstreamStatus 是上游那次 HTTP 响应的状态码。**拿到过响应就有值**，
+	//     包括上游回 2xx、却把错误写在体里的那些（通常是 200）；一个响应都
+	//     没拿到时是 0，落库成 NULL——HTTP 里没有 0 这个状态码，写 0 会读成
+	//     「上游回了 0 号」。
 	//   - ErrorCode 的取值口径见下面那组常量。
 	//
 	// **口径是「因上游失败而不计费」，不是「上游失败过」。** 上游吐了字之后
@@ -371,10 +373,11 @@ type Outcome struct {
 // 三个部署之间也拼不起来。上游自己那个机器可读的数字没有丢：它在
 // UpstreamStatus 里。两列合起来既看得出「哪一类」，也看得出「上游说的几号」。
 //
-// 要取原文得改 internal/channel：channel.ErrUpstream 今天只带状态码与响应体
-// 原文，错误码要从体里解出来才拿得到，而解它的是适配器。
+// 要取原文得改 internal/channel：channel.ErrUpstream 今天带状态码、「拿到过
+// 响应吗」与响应体原文，上游自己那个错误码要从体里解出来才拿得到，而解它的
+// 是适配器。
 //
-// 取值只有下面三个，**都属于「上游这一侧出了事」**，记的是「这次为什么
+// 取值只有下面四个，**都属于「上游这一侧出了事」**，记的是「这次为什么
 // 不计费」。我们这边的失败（插件阻断、别名没配、结算自己出错）不进这一列：
 // 混进来之后，`error_code IS NOT NULL` 连「是不是上游挂的」都答不了了。
 //
@@ -390,22 +393,28 @@ const (
 	// 名字得自己说得清。
 	ErrorUpstreamHTTPError = "upstream_http_error"
 
-	// ErrorUpstreamNoAnswer 表示上游这一侧没给出可用的回答。它下面其实混着
-	// 好几种情形：连不上、TLS 失败、超时、响应体解不开、以及上游回了 2xx
-	// 但把错误写在体里（见适配器的 extractEmbeddedError）。
+	// ErrorUpstreamUnusableResponse 表示上游回了响应，但那份响应不是一个
+	// 可用的回答。两种情形并在这里：响应体解不开（解析失败、结构不符），
+	// 以及上游回了 2xx 却把错误写在体里（见适配器的 extractEmbeddedError）。
 	//
-	// 它们合成一档，是因为**在这一层分不开**：channel.ErrUpstream 只带状态码
-	// 与响应体原文，上面几种的状态码都是 0，体在「解不开」时也拿不到。要拆开
-	// 得让适配器把「拿到过响应吗」记进 ErrUpstream——那要改 internal/channel，
-	// 不在这次改动的范围内。宁可给一档诚实的粗分类，也不要按猜的拆细。
+	// 它与 ErrorUpstreamNoAnswer 的分界是**拿到过响应吗**，由
+	// channel.ErrUpstream.GotResponse 显式给出，不从 Body 反推。拿到过响应
+	// 就有一个真实的状态码，所以 UpstreamStatus 此时有值（通常是 200）：
+	// 把它丢掉会让库里那一行读成「没有记录到状态码」，而它其实是一个确定的
+	// 事实。
+	ErrorUpstreamUnusableResponse = "upstream_unusable_response"
+
+	// ErrorUpstreamNoAnswer 表示上游这一侧**一个 HTTP 响应都没有给过**：
+	// 连不上、TLS 失败、超时。响应头都没收到，所以 UpstreamStatus 是 0
+	// （落库成 NULL）：上游没有给出过一个状态码，编一个出来比留空更坏。
 	//
-	// 此时 UpstreamStatus 是 0（落库成 NULL）：上游没有给出过一个状态码，
-	// 编一个出来比留空更坏。
+	// 「拿到了响应但读不懂」不在这里，见 ErrorUpstreamUnusableResponse。
 	ErrorUpstreamNoAnswer = "upstream_no_answer"
 
 	// ErrorUpstreamStreamAborted 表示上游接受了请求，但一个 token 都没吐就
-	// 结束了（流式）。它发生在响应头之后，所以状态码拿不到——那时只知道它是
-	// 2xx，具体是几号没有别的地方记着，UpstreamStatus 因此也是 0。
+	// 结束了（流式）。它发生在响应头之后：适配器其实拿得到那个 2xx 状态码，
+	// 但网关的这条收尾路径只留下这个哨兵、没有把具体几号带下来，所以
+	// UpstreamStatus 是 0（落库成 NULL）。
 	ErrorUpstreamStreamAborted = "upstream_stream_aborted"
 )
 

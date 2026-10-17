@@ -172,6 +172,15 @@ func TestChatDetectsEmbeddedError(t *testing.T) {
 	if !channel.IsRetryable(err) {
 		t.Error("overloaded_error 应可重试：换渠道可能成功")
 	}
+	// 拿到过响应：状态码 200 是真的，要跟着错误带出去。
+	var up *channel.ErrUpstream
+	if !errors.As(err, &up) {
+		t.Fatalf("期望 *channel.ErrUpstream，得到 %v", err)
+	}
+	if !up.GotResponse || up.StatusCode != http.StatusOK {
+		t.Errorf("GotResponse=%v StatusCode=%d，期望 true / %d",
+			up.GotResponse, up.StatusCode, http.StatusOK)
+	}
 }
 
 func TestEmbeddedErrorRetryability(t *testing.T) {
@@ -689,6 +698,16 @@ func TestChatNetworkFailureIsRetryable(t *testing.T) {
 	}
 	if !channel.IsRetryable(err) {
 		t.Error("网络层失败应可重试")
+	}
+	// 一个 HTTP 响应都没有过。下游靠 GotResponse 把这一档与
+	// 「拿到了响应但用不了」分开。
+	var up *channel.ErrUpstream
+	if !errors.As(err, &up) {
+		t.Fatalf("期望 *channel.ErrUpstream，得到 %v", err)
+	}
+	if up.GotResponse || up.StatusCode != 0 {
+		t.Errorf("GotResponse=%v StatusCode=%d，连不上时都该是零值",
+			up.GotResponse, up.StatusCode)
 	}
 }
 

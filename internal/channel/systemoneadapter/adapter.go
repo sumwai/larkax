@@ -137,17 +137,32 @@ func (a *Adapter) Decide(ctx context.Context, ch channel.Channel, req *systemone
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, &channel.ErrUpstream{Retryable: true, Err: fmt.Errorf("读取上游响应失败: %w", err)}
+		return nil, &channel.ErrUpstream{
+			StatusCode:  resp.StatusCode,
+			GotResponse: true,
+			Retryable:   true,
+			Err:         fmt.Errorf("读取上游响应失败: %w", err),
+		}
 	}
 
 	out, err := systemone.ParseResponse(raw)
 	if err != nil {
 		// 与 openaiadapter 同一个判断：形状不符是**这个渠道**的问题，
 		// 换一个渠道可能就好了，所以标成可重试。
-		return nil, &channel.ErrUpstream{Retryable: true, Err: err}
+		return nil, &channel.ErrUpstream{
+			StatusCode:  resp.StatusCode,
+			GotResponse: true,
+			Retryable:   true,
+			Err:         err,
+		}
 	}
 	if out == nil {
-		return nil, &channel.ErrUpstream{Retryable: true, Err: errors.New("上游返回了空响应")}
+		return nil, &channel.ErrUpstream{
+			StatusCode:  resp.StatusCode,
+			GotResponse: true,
+			Retryable:   true,
+			Err:         errors.New("上游返回了空响应"),
+		}
 	}
 	return out, nil
 }

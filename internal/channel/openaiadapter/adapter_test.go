@@ -91,6 +91,16 @@ func TestChatDetectsEmbeddedError(t *testing.T) {
 	if channel.IsRetryable(err) {
 		t.Error("参数类错误不该可重试：换渠道也是同一个错")
 	}
+	// 这是一次**拿到过响应**的失败：上游真的回了 200。状态码要跟着错误
+	// 一起带出去，否则账单上那一行会读成「没有记录到状态码」。
+	var up *channel.ErrUpstream
+	if !errors.As(err, &up) {
+		t.Fatalf("期望 *channel.ErrUpstream，得到 %v", err)
+	}
+	if !up.GotResponse || up.StatusCode != http.StatusOK {
+		t.Errorf("GotResponse=%v StatusCode=%d，期望 true / %d",
+			up.GotResponse, up.StatusCode, http.StatusOK)
+	}
 }
 
 // `"error": null` 与空对象是正常的「无错误」写法，不能被误判。
@@ -438,6 +448,18 @@ func TestChatNetworkFailureIsRetryable(t *testing.T) {
 	}
 	if !channel.IsRetryable(err) {
 		t.Error("网络层失败应可重试：换渠道可能成功")
+	}
+	// 一个 HTTP 响应都没有过：GotResponse 必须是 false。下游靠它把这一档
+	// 与「拿到了响应但用不了」分开。
+	var up *channel.ErrUpstream
+	if !errors.As(err, &up) {
+		t.Fatalf("期望 *channel.ErrUpstream，得到 %v", err)
+	}
+	if up.GotResponse {
+		t.Error("连不上时不该说拿到过响应")
+	}
+	if up.StatusCode != 0 {
+		t.Errorf("StatusCode = %d，期望 0（没有响应就没有状态码）", up.StatusCode)
 	}
 }
 

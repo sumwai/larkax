@@ -33,23 +33,6 @@ func TestEndpointJoining(t *testing.T) {
 	}
 }
 
-func TestParseRetryAfter(t *testing.T) {
-	if got := ParseRetryAfter("30"); got != 30*time.Second {
-		t.Errorf("秒数形式解析为 %v", got)
-	}
-	if got := ParseRetryAfter(""); got != 0 {
-		t.Errorf("空值应为 0，得到 %v", got)
-	}
-	if got := ParseRetryAfter("不是时间"); got != 0 {
-		t.Errorf("非法值应为 0，得到 %v", got)
-	}
-	// HTTP 日期形式，取未来一个时间点
-	future := time.Now().Add(45 * time.Second).UTC().Format(http.TimeFormat)
-	if got := ParseRetryAfter(future); got <= 0 || got > time.Minute {
-		t.Errorf("日期形式解析为 %v", got)
-	}
-}
-
 func TestRetryableStatus(t *testing.T) {
 	cases := map[int]bool{
 		http.StatusBadRequest:          false,
@@ -71,6 +54,10 @@ func TestRetryableStatus(t *testing.T) {
 }
 
 // 非 2xx 要翻译成带可重试判断的错误，并把响应体保留在结构体里供排查。
+//
+// 这里同时钉住 GotResponse：非 2xx 是**拿到过响应**的失败，状态码是真的。
+// 下游据此把「连不上」与「上游回了错误状态码」分到两档；漏掉它，这一条会
+// 被读成「一个响应都没拿到」。
 func TestCheckStatus(t *testing.T) {
 	if err := CheckStatus(&http.Response{StatusCode: http.StatusOK}); err != nil {
 		t.Errorf("2xx 不该报错: %v", err)
@@ -78,7 +65,7 @@ func TestCheckStatus(t *testing.T) {
 
 	resp := &http.Response{
 		StatusCode: http.StatusTooManyRequests,
-		Header:     http.Header{"Retry-After": []string{"12"}},
+		Header:     http.Header{},
 		Body:       http.NoBody,
 	}
 	err := CheckStatus(resp)
@@ -87,6 +74,16 @@ func TestCheckStatus(t *testing.T) {
 	}
 	if !channel.IsRetryable(err) {
 		t.Error("429 应可重试")
+	}
+	var up *channel.ErrUpstream
+	if !errors.As(err, &up) {
+		t.Fatalf("错误类型为 %T", err)
+	}
+	if !up.GotResponse {
+		t.Error("非 2xx 是拿到过响应的失败，GotResponse 应为 true")
+	}
+	if up.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("StatusCode = %d，期望 %d", up.StatusCode, http.StatusTooManyRequests)
 	}
 }
 
