@@ -55,12 +55,7 @@ internal/catalog/catalog.go      | Catalog.UpstreamModel           | gap | #158 
 internal/channel/httpx/httpx.go  | DrainAndClose                   | lib | HTTP 收尾辅助，给拿不到 *http.Response 的调用点用；目前只有测试在调它
 internal/ledger/account.go       | PaymentGatewayAccount           | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
 internal/ledger/account.go       | PayoutAccount                   | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
-internal/ledger/balance.go       | BalanceOf                       | gap | #173 余额查询与账本完整性校验还没有入口
-internal/ledger/balance.go       | Balances                        | gap | #173 余额查询与账本完整性校验还没有入口
-internal/ledger/balance.go       | Sum                             | gap | #173 余额查询与账本完整性校验还没有入口
 internal/ledger/entry.go         | Entry.withPayout                | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
-internal/ledger/entry.go         | EntryTypes                      | lib | 账本的类型清单，供配置校验与界面枚举用；两者都还没有调用方，目前只有测试在调
-internal/ledger/entry.go         | VerifyEntries                   | gap | #173 余额查询与账本完整性校验还没有入口
 internal/ledger/transactions.go  | PayoutPaid                      | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
 internal/ledger/transactions.go  | PayoutRequest                   | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
 internal/ledger/transactions.go  | Refund                          | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口

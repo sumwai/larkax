@@ -64,25 +64,6 @@ func Balances(entries []Entry) map[Asset]map[Account]money.Amount {
 	return out
 }
 
-// Sum 汇总一组分录在某个资产上的金额，不区分科目。
-//
-// 它与 Verify 的「和为零」是同一个量，但**不校验**：对账脚本想知道
-// 「这批分录加起来差多少」时，正需要这个非零的差额本身；
-// 而 Verify 只回答「平不平」。
-//
-// 调用单位是「一个 txn_id 的那几条分录」——跨交易求和对账本没有意义，
-// 因为不同交易的金额本来就不该抵消。
-func Sum(entries []Entry, asset Asset) money.Amount {
-	total := money.Zero
-	for _, e := range entries {
-		if e.Asset != asset {
-			continue
-		}
-		total = total.Add(e.Amount)
-	}
-	return total
-}
-
 // sortedAssets 按资产的字典序返回键。
 //
 // 存在的理由只有一个：map 的遍历顺序是随机的，而校验失败时的错误信息
