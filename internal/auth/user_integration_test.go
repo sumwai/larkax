@@ -201,9 +201,12 @@ func TestCreateUserEmptyEmailIsNull(t *testing.T) {
 
 // TestCreateUserRoleFlags 钉住角色到两个布尔标记的对应关系。
 //
-// admin 天然也是 merchant（迁移里 users.is_admin 的注释就是这么写的）：
-// 建一个 admin 却不同时打上 merchant 标记，会让「谁能挂渠道」这类判断
-// 在两种建法下给出不同答案。
+// 它只证明「写进去的值读得回来」。这两列今天**没有生产读方**（见 Role 的
+// 注释），所以这条用例不证明任何权限行为——将来接上判断时，要另写按角色
+// 放行/拒绝的用例，而不是把这一条当成那件事已经生效的证据。
+//
+// admin 同时落上 merchant：建一个 admin 却不同时打上 merchant 标记，会让
+// 将来接上的「谁能挂渠道」在两种建法下给出不同答案。
 func TestCreateUserRoleFlags(t *testing.T) {
 	ctx := t.Context()
 	db := testDB(ctx, t)

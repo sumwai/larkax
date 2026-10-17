@@ -50,14 +50,27 @@ var (
 // 迁移里写得很清楚：**所有角色都是用户**，merchant 与 admin 只是 users 表上
 // 的布尔标记，不是独立实体。所以这里不建三张表，只把「称呼 → 标记」的
 // 对应关系收在一处，免得命令行与将来别的调用方各写一份、又各自漂移。
+//
+// # 这两个标记今天还是**预留**，不是权限
+//
+// 全仓没有任何生产代码读 users.is_merchant / users.is_admin：写入点在
+// CreateUser，读取点只有用例（核对写进去的值读得回来）。所以 `--role`
+// 今天只是**把称呼记下来**，它不改任何一处行为——`channel create --owner`
+// 接受任何存在的用户，建完也不会去问这个人是不是 merchant。
+//
+// 它们打算给管理面的鉴权用（#158）：那时「谁能挂渠道、谁能进管理接口」
+// 才是被检查的。接上之前别把这里的注释读成「已经生效」——一句写下来却
+// 没人执行的声明，比没有声明更容易让下一个人以为有人管。
 type Role string
 
 const (
 	// RoleUser 是普通用户：能调推理、能被计费。
 	RoleUser Role = "user"
-	// RoleMerchant 表示该用户可以挂载上游渠道并获得分成。
+	// RoleMerchant 是 merchant 角色的称呼：**预留**指「可以挂载上游渠道并获得分成」，
+	// 今天不生效（没有一处代码按它放行或拒绝，见 Role 的注释）。
 	RoleMerchant Role = "merchant"
-	// RoleAdmin 表示该用户是管理员。
+	// RoleAdmin 是 admin 角色的称呼：**预留**指「可以进管理面」，今天不生效
+	// （管理面本身还不存在，见 #158）。
 	RoleAdmin Role = "admin"
 )
 
@@ -84,14 +97,20 @@ func ParseRole(s string) (Role, error) {
 }
 
 // flags 把角色翻译成 users 表上的两个标记。
+//
+// 生产代码里这里是这两列**唯一**的写入点，而全仓没有读方（见 Role 的注释）：
+// 翻出来的值只是落库，今天不参与任何判断。所以它现在的作用是「把 --role
+// 记下来」，把对应关系收在一处是为了将来接上时有唯一一处可改，而不是因为它
+// 已经生效。
 func (r Role) flags() (isMerchant, isAdmin bool) {
 	switch r {
 	case RoleMerchant:
 		return true, false
 	case RoleAdmin:
-		// admin 天然也是 merchant（迁移里 users.is_admin 的注释就是这么写的）。
-		// 建一个 admin 却不同时打上 merchant 标记，会让「谁能挂渠道」这类判断
-		// 在两种建法下给出不同答案，而那个差异要等到有人去挂渠道时才暴露。
+		// admin 同时也是 merchant：迁移里 users.is_admin 的注释这么写，而
+		// 「admin 天然是 merchant」这条不变式只在**落库时**能保证——将来接上
+		// 「谁能挂渠道」的判断时，两种建法（--role admin / --role merchant 再改）
+		// 才不会给出不同答案。今天没有读者，所以这条也只是预留。
 		return true, true
 	default:
 		return false, false
@@ -105,8 +124,9 @@ type CreateUserParams struct {
 	// Email 为空表示不填。填了就唯一（同样大小写不敏感）。
 	Email string
 	// Role 必须是三个已知角色之一，**没有默认值**：
-	// 这是个访问控制字段，让它随零值静默变成普通用户，
-	// 等于把「忘了传」和「特意要普通用户」写成同一件事。
+	// 它是将来用于访问控制的那个字段（今天只落库、不参与判断，见 Role 的注释），
+	// 让它随零值静默变成普通用户，等于把「忘了传」和「特意要普通用户」
+	// 写成同一件事——而将来接上判断时，这个差别会变成权限的差别。
 	Role Role
 }
 
@@ -140,6 +160,7 @@ func (s *Store) CreateUser(ctx context.Context, p CreateUserParams) (User, error
 		email = sql.NullString{String: e, Valid: true}
 	}
 
+	// 这两列是**预留**：按角色写进去，今天全仓没有生产代码读它们（见 Role 的注释）。
 	isMerchant, isAdmin := p.Role.flags()
 
 	// status、created_at、updated_at 不写：它们都有默认值（active / now()），
