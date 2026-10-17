@@ -6,7 +6,7 @@
 # 直到有人按文档去改，发现文档是错的。
 #
 # 检查三条：
-#   一、直接 import relaykit 的包，仅限 relay 与两个协议适配器
+#   一、直接 import relaykit 的包，仅限 relay 与各协议适配器
 #   二、money 之外谁在算术里用 float64 处理金额
 #   三、import gateway 的包仅限下面 ALLOWED_GATEWAY_IMPORTERS 里列的那几个
 #
@@ -24,11 +24,12 @@ fail=0
 
 # ── 规则一：直接 import relaykit 的包，仅限这一份清单 ─────────────────────
 #
-# relay 是协议转换的入口；两个适配器为了与它的接口对接，也直接用它的
+# relay 是协议转换的入口；各协议适配器为了与它的接口对接，也直接用它的
 # DTO 类型。清单之外出现新的 import，说明有人绕过了这道缝。
 ALLOWED_RELAYKIT_IMPORTERS='internal/relay
 internal/channel/openaiadapter
-internal/channel/anthropicadapter'
+internal/channel/anthropicadapter
+internal/channel/responsesadapter'
 
 echo "── 谁 import 了 relaykit"
 found=$(for p in $(go list ./internal/... ./cmd/... 2>/dev/null); do

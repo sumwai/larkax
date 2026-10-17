@@ -93,6 +93,13 @@
 # 后三条被 gateway 的两条实测路取代。同批的 `Usage.IsEmpty` **保留**，
 # 理由栏从 `#282` 改挂 `#267`（语义与那条缺口是同一处，不许提前动）。
 #
+# 22 之后加了 2（接第三个协议适配器）：`responsesadapter` 的
+# `Adapter.ListModels` / `Adapter.Quota` 与另外两个适配器同一条处境——
+# 接口要求实现，而生产里还没有调用方。这是**结构性**的增加，不是有人拿
+# 白名单把新出现的符号按住：判据是问一句「这些符号是因为有人接了什么才
+# 变多的，还是因为有人躲了什么才变多的」——这里是前者（与
+# scripts/deadcode-allowlist.txt 里那段「条数从 60 跳到 112」同一个形状）。
+#
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES_DEFAULT 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
 internal/billing/billing.go    | Usage.IsEmpty                     | gap | #267 与那条「非流式的 billing_path 分不开『上游没报 usage』与『上游报了 0』」是同一处缺口的两面；那一处修的时候用它兑现，语义不许提前动
@@ -103,10 +110,12 @@ internal/calendar/memory.go    | MemorySource.AddDay               | lib | 测�
 internal/calendar/memory.go    | MemorySource.SetDefaultRange      | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.SetYearState         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/peak.go      | Calendar.PeakAt                   | gap | #205 峰谷计价没有生产调用方（接线之后 deadcode 也不再提醒它）
-internal/channel/anthropicadapter/adapter.go | Adapter.ListModels   | lib | channel.Adapter 的契约面：接口方法由两个适配器实现；生产里还没有拉取上游模型列表的入口，目前只有测试在调它
-internal/channel/anthropicadapter/adapter.go | Adapter.Quota        | lib | channel.Adapter 的契约面：接口方法由两个适配器实现；额度查询还没接线，目前只有测试在调它
-internal/channel/openaiadapter/adapter.go | Adapter.ListModels      | lib | channel.Adapter 的契约面：接口方法由两个适配器实现；生产里还没有拉取上游模型列表的入口，目前只有测试在调它
-internal/channel/openaiadapter/adapter.go | Adapter.Quota           | lib | channel.Adapter 的契约面：接口方法由两个适配器实现；额度查询还没接线，目前只有测试在调它
+internal/channel/anthropicadapter/adapter.go | Adapter.ListModels   | lib | channel.Adapter 的契约面：接口方法由各适配器实现；生产里还没有拉取上游模型列表的入口，目前只有测试在调它
+internal/channel/anthropicadapter/adapter.go | Adapter.Quota        | lib | channel.Adapter 的契约面：接口方法由各适配器实现；额度查询还没接线，目前只有测试在调它
+internal/channel/openaiadapter/adapter.go | Adapter.ListModels      | lib | channel.Adapter 的契约面：接口方法由各适配器实现；生产里还没有拉取上游模型列表的入口，目前只有测试在调它
+internal/channel/openaiadapter/adapter.go | Adapter.Quota           | lib | channel.Adapter 的契约面：接口方法由各适配器实现；额度查询还没接线，目前只有测试在调它
+internal/channel/responsesadapter/adapter.go | Adapter.ListModels    | lib | channel.Adapter 的契约面：接口方法由各适配器实现；生产里还没有拉取上游模型列表的入口，目前只有测试在调它
+internal/channel/responsesadapter/adapter.go | Adapter.Quota         | lib | channel.Adapter 的契约面：接口方法由各适配器实现；额度查询还没接线，目前只有测试在调它
 internal/ledger/account.go     | Account.ID                        | lib | 科目类型的读取面：取后缀而不解释它（与 Type、UserID 成对）；生产走 Type 与 UserID，目前只有测试在调它
 internal/money/money.go        | Amount.ClampZero                  | lib | 金额库的运算面：负数归零；目前只有测试在调它
 internal/money/money.go        | Amount.DivInt                     | lib | 金额库的运算面：按整数相除；目前只有测试在调它

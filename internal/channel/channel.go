@@ -37,26 +37,38 @@ import (
 // /v1/messages 是 anthropic），以及**适配器**自述实现的是哪套
 // （Adapter.Protocol()，注册表拿它做自检）。
 //
+// 这两个视角**不要求一一对应**：openai-responses 今天只有适配器那一侧——
+// 渠道说这套协议时，管道里的请求仍是统一格式（贴近 chat completions），
+// 由适配器经 internal/relay 转换过去。调用方那条路径是另一件事。
+//
 // 渠道表里**没有**对应的列：一个渠道说哪套协议，由它的 type 指向的适配器
 // 决定，不再单独存一份。存两份的话，第二份只会填错而无人发现。
 //
-// 与渠道类型（Channel.Type）是两个维度：同一家上游可能同时提供两套协议，
+// 与渠道类型（Channel.Type）是两个维度：同一家上游可能同时提供多套协议，
 // 同一套协议也被多家上游使用。
 type Protocol string
 
 // 各协议的取值。
 //
-// 只有这两套：调用方的入口只有这两条路径，已注册的适配器也只有这两个。
-// 「大体像 OpenAI 但有几处不一样」不是第三个协议族——它是某个渠道的私有
+// 取值与渠道表里的 channels.type 是同一个字符串（适配器的 Type()）。
+// 「大体像 OpenAI 但有几处不一样」不是新的协议族——它是某个渠道的私有
 // 差异，归属在 Channel.Setting 里。
 const (
 	ProtocolOpenAI    Protocol = "openai"
 	ProtocolAnthropic Protocol = "anthropic"
+	// ProtocolOpenAIResponses 是 OpenAI 的 Responses 表面：请求体是
+	// input/instructions 而不是 messages，用量在顶层且缓存与推理两项
+	// 嵌在 details 里，流式是一串带名字的事件而不是裸 delta。
+	//
+	// 它与 ProtocolOpenAI 分开而不是合并成一个「OpenAI 系」：两者的请求体、
+	// 流式分片与用量字段名都不同，合并之后每个用它的地方都要再判一次
+	// 「这次是哪一种」——那正是协议族这个概念要消掉的东西。
+	ProtocolOpenAIResponses Protocol = "openai-responses"
 )
 
 func (p Protocol) valid() bool {
 	switch p {
-	case ProtocolOpenAI, ProtocolAnthropic:
+	case ProtocolOpenAI, ProtocolAnthropic, ProtocolOpenAIResponses:
 		return true
 	}
 	return false
@@ -254,7 +266,7 @@ type Response struct {
 
 // StreamEvent 是流式响应里的一次事件。
 //
-// 用「事件」而不是「分片」：两套协议的流式结构差异不小，
+// 用「事件」而不是「分片」：各协议的流式结构差异不小，
 // 但归一化之后要传达的信息就是这几类。适配器负责把上游的分片序列
 // 翻译成这几种事件，路由层与计费层只认这里。
 type StreamEvent struct {

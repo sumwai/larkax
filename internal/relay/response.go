@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 
 	"github.com/sumwai/larkax/internal/channel"
@@ -25,7 +26,7 @@ import (
 // relaykit 的 dto.Usage 是**多来源归一化后的产物**，它同时带着两套字段名：
 // PromptTokens/CompletionTokens 与 InputTokens/OutputTokens。同一个位置上的
 // 数字在两家口径下含义不同，所以不能挑一个字段就用。哪一套成立由
-// dto.Usage.UsageSemantic 声明——生产方（两个协议适配器）填它，这里读它。
+// dto.Usage.UsageSemantic 声明——生产方（各协议适配器）填它，这里读它。
 //
 // **不再用「PromptTokens 是不是 0」反推来源**：整段 prompt 命中缓存时
 // Anthropic 的 input_tokens 本来就是 0，而那时正是最需要判对口径的时候。
@@ -186,17 +187,65 @@ func rawUsage(u *dto.Usage, hasCounts bool) map[string]any {
 
 // ResponseFromRelaykit 把 relaykit 的响应转成本项目的响应。
 //
-// src 允许是 OpenAI 形状或 Claude 形状：上游说什么协议是适配器决定的，
-// 而计费与路由不关心那个。两条路径在这里汇合。
+// src 允许是 OpenAI 形状、Claude 形状或 Responses 形状：上游说什么协议是
+// 适配器决定的，而计费与路由不关心那个。三条路径在这里汇合。
 func ResponseFromRelaykit(src any) (*channel.Response, error) {
 	switch v := src.(type) {
 	case *dto.OpenAITextResponse:
 		return fromOpenAIResponse(v)
 	case *dto.ClaudeResponse:
 		return fromClaudeResponse(v)
+	case *dto.OpenAIResponsesResponse:
+		return fromResponsesResponse(v)
 	default:
 		return nil, fmt.Errorf("不认识的响应类型 %T", src)
 	}
+}
+
+// fromResponsesResponse 把 Responses 形状的上游响应转成本项目的响应。
+//
+// 正文、工具调用与结束原因交给 relaykit 的
+// ResponsesResponseToChatCompletionsResponse：output[] 里按 type 分块
+// （message 的 content[]、reasoning 的 summary[]、function_call 与
+// custom_tool_call）、以及 incomplete 的 reason 折成 finish_reason，
+// 那些它已经做过并有测试覆盖。
+//
+// **用量不走它返回的那一份，而是直接读 r.Usage。** 理由有两条：
+//
+//  1. r.Usage 是适配器按本项目口径填好的（PromptTokens 含缓存、缓存读写
+//     另立字段、推理记在 CompletionTokenDetails），与 fromClaudeResponse
+//     的做法一致——换算只在 UsageFromRelaykit 里发生一次。
+//  2. 那个函数返回的用量是拿 r.Usage 再按 Responses 口径读一遍的产物，
+//     两份都留着就会出现「哪一个算数」的问题，而它们迟早会分岔。
+func fromResponsesResponse(r *dto.OpenAIResponsesResponse) (*channel.Response, error) {
+	if r == nil {
+		return nil, fmt.Errorf("响应为 nil")
+	}
+
+	chat, _, err := relayconvert.ResponsesResponseToChatCompletionsResponse(r, r.ID)
+	if err != nil {
+		return nil, fmt.Errorf("解析 Responses 响应失败: %w", err)
+	}
+
+	out := &channel.Response{
+		UpstreamModel: r.Model,
+		Usage:         UsageFromRelaykit(r.Usage),
+	}
+	if len(chat.Choices) > 0 {
+		out.FinishReason = chat.Choices[0].FinishReason
+		msg, msgErr := messageFromRelaykit(chat.Choices[0].Message)
+		if msgErr != nil {
+			return nil, msgErr
+		}
+		out.Message = msg
+	}
+
+	raw, err := toRawMap(r)
+	if err != nil {
+		return nil, err
+	}
+	out.Raw = raw
+	return out, nil
 }
 
 func fromOpenAIResponse(r *dto.OpenAITextResponse) (*channel.Response, error) {
