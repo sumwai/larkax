@@ -183,6 +183,29 @@ func TestDecideUpstreamFailureIsNotBilled(t *testing.T) {
 	}
 }
 
+// 决策那条路的不计费失败也要带上「打到了哪个渠道、用哪个上游名」。
+//
+// 它与 Chat 走的是同一个收尾出口，但入口是另一条：漏了这一个，失败账单行
+// 上那两列又是 NULL，而库里的 NULL 与「确实没有渠道可记」逐列相同。
+func TestDecideUpstreamFailureCarriesPlacementToRelease(t *testing.T) {
+	d := &fakeDecider{err: &channel.ErrUpstream{StatusCode: 500, Retryable: true}}
+	h := newDecideHarness(t, d)
+
+	if _, err := h.gw.Decide(context.Background(), decisionBilling(), decision()); err == nil {
+		t.Fatal("期望报错")
+	}
+	if len(h.reservations.released) != 1 {
+		t.Fatalf("释放次数 = %d，期望 1", len(h.reservations.released))
+	}
+	rel := h.reservations.released[0].req
+	if rel.ChannelID != 1 {
+		t.Errorf("释放时带的 channel_id = %d，期望 1", rel.ChannelID)
+	}
+	if rel.UpstreamModel != "gpt-4o" {
+		t.Errorf("释放时带的 upstream_model = %q，期望 gpt-4o", rel.UpstreamModel)
+	}
+}
+
 // 执行器成功却交回空响应时**报错，而不是解引用 nil 崩掉**。
 //
 // 今天不可达（唯一的实现自己检查过），留着是因为崩溃的现场是一次 panic：

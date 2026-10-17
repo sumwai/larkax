@@ -70,15 +70,10 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 	// （见 begin 的注释）。
 	g.snapshotAsync(ctx, upstream, "request", req.UserID)
 
-	routed, err := g.routeStream(ctx, upstream, h.candidates, req.CanonicalModel, hooks)
-
-	// 与 Chat 同一个位置、同一个理由：选路一返回就把「打到了哪儿」记进
-	// h.req。这里尤其不能省——成功那条路的收尾在后台的 pumpStream 里，
-	// 而中途断流那一次走的是释放，两条路都从 h.req 上读这两个值
-	// （见 handle.routedTo）。
-	if routed != nil {
-		h.routedTo(routed.Channel, routed.UpstreamModel)
-	}
+	// 与 Chat 同一个位置、同一个理由：选路一返回就拿到「打到了哪儿」
+	// （见 placement）。这里尤其不能省——成功那条路的收尾在后台的
+	// pumpStream 里，而中途断流那一次走的是释放，两条路都要收这个值。
+	routed, placed, err := g.routeStream(ctx, upstream, h.candidates, req.CanonicalModel, hooks)
 
 	// 换渠道过程中失败的那些尝试照记——无论这次路由最后成没成，
 	// 那些调用都已经发生过。成功接受的那一个不在这里记：它的结局只有
@@ -92,8 +87,8 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 		// settleAndFail 只结算、不释放，非流式那条路靠 defer res.finish
 		// 兜住释放那一步；这里没有 defer 可挂（成功路径的收尾在后台），
 		// 所以显式补一次 finish。
-		cause := h.settleAndFail(ctx, err, pipeline.Outcome{UpstreamFailed: true})
-		h.finish(ctx)
+		cause := h.settleAndFail(ctx, placed, err, pipeline.Outcome{UpstreamFailed: true})
+		h.finish(ctx, placed)
 		return nil, cause
 	}
 
@@ -104,25 +99,30 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 		UpstreamModel: routed.UpstreamModel,
 		Attempts:      routed.Attempts,
 	}
-	go g.pumpStream(ctx, h, res, out, routed.Events, upstream, hooks)
+	go g.pumpStream(ctx, h, placed, res, out, routed.Events, upstream, hooks)
 	return res, nil
 }
 
 // routeStream 选路并执行一次流式请求。顺序与 routeChat 完全相同，
-// 差别只在执行器是流式的那个（见 routeChat）。
+// 差别只在执行器是流式的那个（见 routeChat），以及结果的类型。
+//
+// 它同样同时交回「打到了哪儿」（placement）：流式那条路的收尾在后台的
+// pumpStream 里，这个值要一路带过去（见 placement）。
 //
 // 「已经吐字之后不能换渠道」那条边界不受钉首渠道影响：它由
 // route.chatStreamWithPlan 保证，钉住的渠道排在第一位也一样受它约束。
-func (g *Gateway) routeStream(ctx context.Context, upstream *channel.Request, candidates []route.Candidate, canonicalModel string, hooks Hooks) (*route.StreamResult, error) {
+func (g *Gateway) routeStream(ctx context.Context, upstream *channel.Request, candidates []route.Candidate, canonicalModel string, hooks Hooks) (*route.StreamResult, placement, error) {
 	if hooks.OnRoute == nil {
-		return g.Router.ChatStream(ctx, g.Executor, upstream, candidates, canonicalModel)
+		res, err := g.Router.ChatStream(ctx, g.Executor, upstream, candidates, canonicalModel)
+		return res, streamPlacementOf(res), err
 	}
 	plan := g.Router.Select(candidates, canonicalModel)
 	pin, err := hooks.OnRoute(ctx, plan.Candidates)
 	if err != nil {
-		return nil, err
+		return nil, placement{}, err
 	}
-	return g.Router.ChatStreamPlan(ctx, g.Executor, upstream, plan, pin)
+	res, err := g.Router.ChatStreamPlan(ctx, g.Executor, upstream, plan, pin)
+	return res, streamPlacementOf(res), err
 }
 
 // StreamChunk 是逐块决策里交给插件的那一块的上下文。
@@ -183,7 +183,7 @@ func isContentChunk(ev channel.StreamEvent) bool {
 //
 // out 单独传而不是用 res.Events：那个字段是只收的（<-chan），写不了也关不了，
 // 而这里要做的正是这两件事。
-func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out chan channel.StreamEvent, events <-chan channel.StreamEvent, upstream *channel.Request, hooks Hooks) {
+func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, res *Result, out chan channel.StreamEvent, events <-chan channel.StreamEvent, upstream *channel.Request, hooks Hooks) {
 	// 关流放在最后：它一旦执行，调用方就会读到 Charge / Estimated，
 	// 而那两个字段在下面才写好。
 	defer close(out)
@@ -394,9 +394,9 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 			At:        g.now(),
 			Verdict:   verdict,
 		})
-		_ = h.settleAndFail(settleCtx, errStreamAborted,
+		_ = h.settleAndFail(settleCtx, placed, errStreamAborted,
 			pipeline.Outcome{UpstreamFailed: true})
-		h.finish(settleCtx)
+		h.finish(settleCtx, placed)
 		return
 	}
 
@@ -432,7 +432,7 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 		}
 	}
 
-	g.billStream(settleCtx, h, res, usage, source, clientGone)
+	g.billStream(settleCtx, h, placed, res, usage, source, clientGone)
 
 	// 用量照记，即便这次算「不是渠道的失败」：客户端断开时上游已经为
 	// 输入计了费，额度自记账要跟着扣。
@@ -487,8 +487,8 @@ func streamAttempts(r *route.StreamResult) []route.Attempt {
 }
 
 // billStream 结算一次要计费的流式请求。
-func (g *Gateway) billStream(ctx context.Context, h *handle, res *Result, usage channel.Usage, source tokens.Source, canceled bool) {
-	charge, err := g.finishCharge(ctx, h, pipeline.Outcome{
+func (g *Gateway) billStream(ctx context.Context, h *handle, placed placement, res *Result, usage channel.Usage, source tokens.Source, canceled bool) {
+	charge, err := g.finishCharge(ctx, h, placed, pipeline.Outcome{
 		Usage:       usage,
 		UsageSource: source,
 		// ClientCanceled 只描述「客户端中途断开」这一种结局，别拿它当
@@ -510,7 +510,7 @@ func (g *Gateway) billStream(ctx context.Context, h *handle, res *Result, usage 
 	}
 	// 与 Chat 的 defer res.finish 同一件事：已经结算过的会跳过再结算，
 	// 释放总是走一遍（结算成功时被 charged 挡下，失败时真的放开）。
-	h.finish(ctx)
+	h.finish(ctx, placed)
 }
 
 // forward 把一个事件交给调用方。返回 false 表示调用方已经断开，不必再转发。
