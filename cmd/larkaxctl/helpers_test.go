@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -108,6 +109,23 @@ func uniqueName(prefix string) string {
 	defer seq.Unlock()
 	seq.n++
 	return fmt.Sprintf("%s-%d-%d", prefix, base, seq.n)
+}
+
+// createTestUser 建一个用户并返回它的 ID。
+//
+// 名字每个用例各不相同：user create 不做幂等，重名会直接报错。
+func createTestUser(t *testing.T) int64 {
+	t.Helper()
+	stdout, _ := captureStreams(t, func() {
+		if err := runUserCreate([]string{"--name", uniqueName("user")}); err != nil {
+			t.Fatalf("user create 失败: %v", err)
+		}
+	})
+	id, err := strconv.ParseInt(strings.TrimSpace(stdout), 10, 64)
+	if err != nil {
+		t.Fatalf("stdout 不是用户 ID：%q（%v）", stdout, err)
+	}
+	return id
 }
 
 // captureStreams 捕获函数执行期间写到 os.Stdout 与 os.Stderr 的内容。

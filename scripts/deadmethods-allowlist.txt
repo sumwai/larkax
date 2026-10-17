@@ -30,7 +30,8 @@
 #   命令      scripts/check-deadmethods.sh
 #             （扫描起点由 cmd/ 自动发现，当前是 ./cmd/larkax 与 ./cmd/larkaxctl）
 #   工具      go（版本随 go.mod；判据是脚本里嵌的那份 AST 扫描器）
-#   条数      32，与脚本里的 MAX_ENTRIES_DEFAULT 一致
+#   条数      见脚本里的 MAX_ENTRIES_DEFAULT（**本文件不重复这个数**——
+#             抄一份就多一处会漂的地方，而脚本每次运行都会打印实际条数）
 #
 # # 这份清单与 scripts/deadcode-allowlist.txt 的关系
 #
@@ -78,6 +79,11 @@
 # 同批另有 14 条从 `gap` 改判成 `lib`——**条数没变**，但类型栏变了，
 # 那 14 条是库构件与契约面，理由栏一律写明「目前只有测试在调它」。
 #
+# 28 之后减了 6（#158）：管理面的改 / 删 / 查看接上 `larkaxctl` 之后，
+# `catalog/admin.go` 的三条、`catalog/catalog.go` 的两条、`pricing/admin.go` 的一条
+# 有了生产调用点。`catalog.Admin.Update` 与 `pricing.Admin.Update` 不在这份清单里
+# ——它们被同名掩护着（见上面那段）。
+#
 # 38 之后减了 6（#282）：`Cache.Invalidate` / `Program.BranchCount` / `Program.Source` /
 # `StreamEstimator.HasMeasured` / `StreamEstimator.ObserveMeasured` / `Usage.RequiresReview`
 # 逐条核过调用点之后删掉——前三条注释里那条路不存在或与调用方自己的输入冗余，
@@ -94,11 +100,6 @@ internal/calendar/memory.go    | MemorySource.AddDay               | lib | 测�
 internal/calendar/memory.go    | MemorySource.SetDefaultRange      | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.SetYearState         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/peak.go      | Calendar.PeakAt                   | gap | #205 峰谷计价没有生产调用方（接线之后 deadcode 也不再提醒它）
-internal/catalog/admin.go      | Admin.Delete                      | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/catalog/admin.go      | Admin.DeleteAlias                 | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/catalog/admin.go      | Admin.UpdateAlias                 | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/catalog/catalog.go    | Catalog.Model                     | gap | #158 管理面的写入路径用它读回来核对，那个入口还没有
-internal/catalog/catalog.go    | Catalog.UpstreamModel             | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/channel/anthropicadapter/adapter.go | Adapter.ListModels   | lib | channel.Adapter 的契约面：接口方法由两个适配器实现；生产里还没有拉取上游模型列表的入口，目前只有测试在调它
 internal/channel/anthropicadapter/adapter.go | Adapter.Quota        | lib | channel.Adapter 的契约面：接口方法由两个适配器实现；额度查询还没接线，目前只有测试在调它
 internal/channel/openaiadapter/adapter.go | Adapter.ListModels      | lib | channel.Adapter 的契约面：接口方法由两个适配器实现；生产里还没有拉取上游模型列表的入口，目前只有测试在调它
@@ -108,7 +109,6 @@ internal/money/money.go        | Amount.ClampZero                  | lib | 金�
 internal/money/money.go        | Amount.DivInt                     | lib | 金额库的运算面：按整数相除；目前只有测试在调它
 internal/money/money.go        | Amount.Units                      | lib | 金额库的读取面：最小单位整数；目前只有测试在调它（读库走 Parse，列是 numeric）
 internal/plugin/sandbox/plugin.go | Module.Hooks                   | lib | 插件模块的自省出口：枚举编译期读出来的 hook 名单；生产只逐个问 Has，目前只有测试在调它
-internal/pricing/admin.go      | Admin.Explain                     | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/route/route.go        | Router.Score                      | lib | 路由库的解释出口：单个候选的分数（score 是私有的）；生产排序走 order，目前只有测试在调它
 internal/snapshot/redact.go    | Redactor.RedactResponseWithTransport | lib | 脱敏库的入口：把传输层信息并进骨架；采集传输层这件事被推迟了，目前只有测试在调它
 internal/snapshotwire/snapshotwire.go | Collector.Stats            | lib | 这条链路的观测出口：丢弃与失败的计数；指标那一头还没有写，目前只有测试在读它
