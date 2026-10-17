@@ -12,13 +12,19 @@ import (
 
 // Session 是一次请求与一个插件的会话。
 //
-// 它持有这次请求的 runtime，所以**必须由同一个 goroutine 使用**：
+// 它持有这次请求的 runtime，所以**同一时刻只能有一个 goroutine 用它**：
 // moejs 的 Runtime 必须单 goroutine 独占（只有 Interrupt 例外）。
+//
+// 「同一时刻」而不是「同一个 goroutine」：流式那条路上，onStream 与 onUsage
+// 跑在网关的转发 goroutine 里，而 onRequest / onRoute 跑在请求自己的 goroutine
+// 里。两者之间隔着事件通道的发送与关闭，有明确的先后关系，不会重叠——但
+// 谁要是把 onStream 挪到另一个 goroutine 里与它并发，那条独占就不成立了。
 //
 // 每个 hook 的调用结果由**返回值**给出（Result[T]），不留在 Session 上：
 // 留一份副本意味着「调用方拿到的」与「Session 记着的」可能不一致，
 // 而那种不一致只在排查时会暴露出来，那时最需要的就是可信的记录。
-// Session 只留下两样跨 hook 的东西：失败清单与让位的插件。
+// Session 只留下三样跨 hook 的东西：失败清单、让位的插件，以及用量上报的
+// 上界（见 usageBound）。
 type Session struct {
 	Plugin *Plugin
 	rt     *sandbox.Runtime
@@ -31,6 +37,10 @@ type Session struct {
 
 	// failures 按发生顺序记录所有失败，含被吞掉的非阻断失败。
 	failures []*sandbox.Failure
+
+	// usageBound 是这次请求给插件上报用量划的那条线，由 ApplyRequest 在
+	// **补丁写回之前**记下（见那里的注释与 UsageBound）。
+	usageBound UsageBound
 }
 
 // Failures 返回这次请求里插件出过的全部错，含非阻断的。
@@ -113,6 +123,15 @@ func (s *Session) ApplyRequest(ctx context.Context, requestID string, req *chann
 	if s == nil || req == nil {
 		return nil, nil
 	}
+	// 上界在这里、**在补丁写回之前**记下来：req.MaxTokens 此刻还是客户端
+	// 请求里的那个数。记在补丁之后等于把上界交回插件手里——插件把 max_tokens
+	// 调小之后，上界与上报值又由同一方决定（见 UsageBound）。
+	//
+	// 记在这一步而不是让调用方传进来：调用方手上那份请求已经被补丁**就地**
+	// 改过（见 internal/api 的 serveOnce），它拿不到原值。而「谁应用补丁、
+	// 谁就记得补丁之前是什么」本来就是一件事，分开写迟早有一处忘了。
+	s.usageBound = UsageBound{MaxOutputTokens: int64(req.MaxTokens)}
+
 	res := s.OnRequest(ctx, RequestContextFrom(requestID, req, canonicalModel, protocol))
 	if err := res.Err(); err != nil {
 		return nil, err
@@ -202,20 +221,27 @@ type StreamInput struct {
 	// Chunk 是当前这一块的原始数据。
 	Chunk any
 	Index int
-	// AccumulatedText 是至此累积的正文。
+	// AccumulatedText 是**在这一块之前**累积的正文，不含当前块。
 	//
 	// 它是**流式中断计费的依据**：客户端取消时内核用对应模型的分词器对它计数。
-	// 所以插件替换正文时改的正是这个值，而不是只改「客户端看到的文本」。
+	// 所以插件替换正文时改的正是这个值，而不是只改「客户端看到的文本」——
+	// 替换后的文本会进分词器，这一块的原文不会（见 StreamDecision）。
 	AccumulatedText string
-	// AccumulatedTokensApprox 是内核按分词器增量估算的 token 数。
+	// AccumulatedTokensApprox 是上面那段正文的 token 数，由内核按分词器
+	// 增量估算。它与 AccumulatedText 是同一个累加器出来的两个数。
 	AccumulatedTokensApprox int64
 }
 
 // OnStream 调 onStream。
 //
-// **每个块都调一次。** 采样（每 N 块调一次）会让「drop 第 3 块」这类
+// **每个内容块都调一次。** 采样（每 N 块调一次）会让「drop 第 3 块」这类
 // 逐块决定失效，而那是这个 hook 的主要用途。逐块的代价是每块一次
 // 跨语言调用，所以这里不对块大小做任何猜测——由内核决定怎么切块。
+//
+// 哪些块算内容块由**调用方**定：网关只把 delta 与 tool_use 交给它，
+// usage 与 done / error 不进插件的手（见 gateway.Hooks.OnStream）。
+// 这条边界放在网关那一侧，因为只有它看得见事件流；本函数只负责
+// 「有就调、没有就跳过」。
 func (s *Session) OnStream(ctx context.Context, rc StreamContext, in StreamInput) Result[StreamDecision] {
 	if s == nil || !s.Next() || !s.Plugin.Module.Has(HookStream) {
 		return Result[StreamDecision]{}
@@ -285,6 +311,59 @@ func (s *Session) ApplyResponse(ctx context.Context, requestID string, resp *cha
 	}
 	ApplyResponsePatch(resp, res.Patch)
 	return res.Patch.Metadata, nil
+}
+
+// ApplyUsage 调 onUsage 并把上报的用量合并进内核的用量，返回结算该用的那一份。
+//
+// 返回的错误只在**阻断型插件失败**时非 nil——调用方据此让这次请求失败。
+// 非阻断的失败已经记进 Failures()，用量照内核那份算。
+//
+// # 为什么合并这一步在包内
+//
+// 与 ApplyRequest / ApplyResponse 同一条理由，而这里更要紧：上报越界时
+// 那份上报**整份丢掉**，而丢掉必须被看见——看不见的表现是「插件报了但没
+// 生效」，契约里最难查的一类。记这次失败要用未导出的 record / blocking，
+// 所以只能在包内做；在包外接一条「合并 + 打日志」的路，等于把「一次被丢掉
+// 的上报必须看得见」留在纸上（见 MergeUsage 的注释）。
+//
+// # 上界从哪来
+//
+// 取 s.usageBound，也就是 ApplyRequest 在补丁之前记下的那个 max_tokens。
+// 调用方传不进来：它手上那份请求已经被补丁就地改过（见 ApplyRequest）。
+//
+// # 没有上界时拒收
+//
+// 调用方没给 max_tokens、或这个会话根本没走过 ApplyRequest 时上界是 0，
+// 那时任何正数上报都算越界。读不出上界就拒收是唯一安全的方向——把「没有
+// 上界」当成「不设上界」，会让漏传一个参数变成关掉整道检查（见 UsageBound）。
+func (s *Session) ApplyUsage(ctx context.Context, requestID, protocol string, core channel.Usage) (channel.Usage, error) {
+	if s == nil {
+		return core, nil
+	}
+	// raw 就是上游原样的那个 usage 对象。流式那条路上它只在流里带过 usage
+	// 时才有——本地估算出来的用量没有「上游原样」可言（见 docs/plugin-contract.md）。
+	res := s.OnUsage(ctx, UsageContextFrom(requestID, protocol, core.Raw))
+	if err := res.Err(); err != nil {
+		return core, err
+	}
+	if res.Patch == nil {
+		// 插件没注册 onUsage，或者这次什么都没报。两条都是「用量照内核算」。
+		return core, nil
+	}
+	merged, err := MergeUsage(*UsageFactsFrom(core), res.Patch, s.usageBound)
+	if err != nil {
+		// 越界是**运行期信号**而不是契约违规：同一份插件在不同请求上可能
+		// 一次越界一次不越界（见 ErrUsageAboveBound）。整份上报已经由
+		// MergeUsage 丢掉了，下面交回去的仍是内核那份。
+		f := &sandbox.Failure{Plugin: s.Plugin.Key, Hook: HookUsage, Kind: err}
+		if s.record(f) {
+			return core, fmt.Errorf("插件声明为阻断型，它的 %s 上报被拒: %w", HookUsage, err)
+		}
+		return core, nil
+	}
+	// 重建回协议层用量时带上**内核那份**的口径：事实里自己声明了口径就
+	// 以它为准，没声明就沿用内核的（见 UsageFacts.ChannelUsage）。
+	return merged.ChannelUsage(core.CompletionIncludesReasoning), nil
 }
 
 // OnUsage 调 onUsage。
@@ -420,18 +499,14 @@ func (b UsageBound) check(reported UsageFacts) error {
 // 调用方要做的另一件事是把它记成一条失败——一次被丢掉的上报必须看得见，
 // 否则它表现为「插件报了但没生效」。
 //
-// **那件事现在只有包内调用方做得到**：`Session.record` 与 `Session.blocking`
-// 都未导出，`Session.Failures()` 只读。所以在包外接线时，一次被丢掉的上报
-// **只能进日志**。接线时二选一：把「应用补丁 / 合并用量」这两步放进本包
-// （本包可以 import internal/pipeline，没有环），或者在本包上开一个导出的
-// 记录入口。**不要**在包外接一条只打日志的路，然后当文档里那句已经落地了。
+// **那件事只有包内调用方做得到**：`Session.record` 与 `Session.blocking`
+// 都未导出，`Session.Failures()` 只读。所以「调这个函数 + 记这次失败」
+// 被收成了一个导出的入口——`Session.ApplyUsage`，请求路径调的是它。
+// **不要**在包外另接一条只打日志的路，然后当文档里那句已经落地了。
 //
-// 上界由调用方给出，且必须是插件改不动的那个（见 UsageBound）。
-//
-// **目前还没有生产调用方**：那条「合并 → 重建回 channel.Usage → 结算」的
-// 链路还没接上，现在只有本包的测试在调它（同 ChannelUsage，见
-// LESSONS.md 第 22 条）。上界因此是**参数**而不是这里读来的值：接线时
-// 少传一个参数会编译不过，比「记得在校验之后再合并」可靠。
+// 上界由调用方给出，且必须是插件改不动的那个（见 UsageBound）。请求路径上
+// 那个值由 `Session.ApplyRequest` 在补丁之前记下、由 ApplyUsage 取用，
+// 于是「上界是补丁前的 max_tokens」这件事只有一处实现。
 func MergeUsage(core UsageFacts, reported *UsageFacts, bound UsageBound) (UsageFacts, error) {
 	if reported == nil {
 		return core, nil

@@ -140,8 +140,9 @@ type Chatter interface {
 	// 是同一件（见 gateway.ChatStream）。只给一边，一个「把这个模型的流量钉到
 	// 某个渠道」的插件会对流式请求静默不生效——接了一半最难发现的样子。
 	//
-	// 流式那条路**独有**的挂载点（onStream，逐块决定）还没接上；onResponse
-	// 则相反，它只可能发生在非流式那条路上（见 docs/plugin-contract.md）。
+	// 这条路上**独有**的挂载点是 onStream（逐块决定）；onResponse 则相反，
+	// 它只可能发生在非流式那条路上。onRequest / onRoute / onUsage 两条路都有，
+	// 位置也相同（见 docs/plugin-contract.md 的「接线」一节）。
 	ChatStream(ctx context.Context, req pipeline.Request, upstream *channel.Request, hooks gateway.Hooks) (*gateway.Result, error)
 }
 
@@ -552,13 +553,15 @@ func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol cha
 		//（方法、Content-Type、鉴权、请求体、解析、必要字段）完全一样。
 		//
 		// 挂载点**两个入口都要传**：onRoute 与选渠道是同一件事，流式与非流式
-		// 都要走（见 Chatter.ChatStream）。onResponse 在流式那边不会被调到
-		// ——响应是边生成边发的，没有「整份响应」这个时刻，所以它自己不检查
-		// 这一点：传下去的那个闭包本来就不会被调（见 docs/plugin-contract.md）。
-		return h.serveStream(w, r, protocol, upstream, req, h.pluginHooks(sess, requestID, upstream.Model))
+		// 都要走（见 Chatter.ChatStream）。各自只调自己那条路上会发生的那些
+		// ——onResponse 在流式那边不会被调到（响应是边生成边发的，没有
+		// 「整份响应」这个时刻），onStream 在非流式那边不会被调到（没有
+		// 「块」可言）。传下去的那个闭包本来就不会被调，所以这里不额外判断
+		// （见 docs/plugin-contract.md）。
+		return h.serveStream(w, r, protocol, upstream, req, h.pluginHooks(sess, requestID, upstream.Model, protocol))
 	}
 
-	res, err := h.Chatter.Chat(r.Context(), req, upstream, h.pluginHooks(sess, requestID, upstream.Model))
+	res, err := h.Chatter.Chat(r.Context(), req, upstream, h.pluginHooks(sess, requestID, upstream.Model, protocol))
 	if err != nil {
 		if errors.Is(err, idempotency.ErrClaimed) {
 			// 键被另一个并发请求抢走了。这不是失败：那次预留整个回滚了，
@@ -657,17 +660,17 @@ func (h *Handler) pluginHost(requestID string, userID int64) plugin.HostBuilder 
 
 // pluginHooks 把这次请求的插件会话接到编排层的挂载点上。
 //
-// 两个挂载点一起给，因为它们出自**同一个会话**：分两次建会话会让 onRoute 与
-// onResponse 看到两份互不相干的插件状态（KV、计数器、Failures），而插件作者
-// 眼里它们是一次请求的两步。
+// 挂载点一起给，因为它们出自**同一个会话**：分几次建会话会让各个 hook 看到
+// 几份互不相干的插件状态（KV、计数器、Failures），而插件作者眼里它们是一次
+// 请求的几步。
 //
 // sess 为 nil 时返回零值：不跑插件，与「这次请求没有插件」是同一个意思。
-// **关掉插件的行为不变是结构性的**：零值 Hooks 的两个字段都是 nil，编排层
-// 各自走那条不碰插件的分支（见 gateway.routeChat）。
+// **关掉插件的行为不变是结构性的**：零值 Hooks 的字段全是 nil，编排层各自
+// 走那条不碰插件的分支（见 gateway.routeChat 与 gateway.pumpStream）。
 //
 // canonicalModel 由调用方给出，与插件在别的 hook 里看到的那个名字是同一个
 // （今天规范名与上游名还是同一个值，见 serveOnce）。
-func (h *Handler) pluginHooks(sess *plugin.Session, requestID, canonicalModel string) gateway.Hooks {
+func (h *Handler) pluginHooks(sess *plugin.Session, requestID, canonicalModel string, protocol channel.Protocol) gateway.Hooks {
 	if sess == nil {
 		return gateway.Hooks{}
 	}
@@ -686,6 +689,31 @@ func (h *Handler) pluginHooks(sess *plugin.Session, requestID, canonicalModel st
 			}
 			return res.Patch.ChannelID, nil
 		},
+		OnStream: func(ctx context.Context, ev channel.StreamEvent, in gateway.StreamChunk) (gateway.StreamDecision, error) {
+			res := sess.OnStream(ctx, plugin.StreamContext{RequestID: requestID}, plugin.StreamInput{
+				// 交给插件的是**挑出来的那几项**，不是 channel.StreamEvent
+				// 本身：共用一个类型意味着给那个类型加一个字段就静默扩大
+				// 了插件的可见范围（见 plugin.StreamChunkFrom）。
+				Chunk:                   plugin.StreamChunkFrom(ev),
+				Index:                   in.Index,
+				AccumulatedText:         in.AccumulatedText,
+				AccumulatedTokensApprox: in.AccumulatedTokensApprox,
+			})
+			if err := res.Err(); err != nil {
+				// 阻断型插件失败：这条流到此为止（网关按提前终止收尾）。
+				// 非阻断的失败这里为 nil——它已经记进 Failures()，而返回的
+				// 零值决策让这一块原样转发。
+				return gateway.StreamDecision{}, err
+			}
+			if res.Patch == nil {
+				return gateway.StreamDecision{}, nil
+			}
+			return gateway.StreamDecision{
+				Drop:      res.Patch.Drop,
+				Replace:   res.Patch.Replace,
+				Terminate: res.Patch.Terminate,
+			}, nil
+		},
 		OnResponse: func(ctx context.Context, resp *channel.Response) error {
 			metadata, err := sess.ApplyResponse(ctx, requestID, resp)
 			if len(metadata) > 0 {
@@ -695,6 +723,12 @@ func (h *Handler) pluginHooks(sess *plugin.Session, requestID, canonicalModel st
 					"plugin", sess.Plugin.Key, "request_id", requestID, "metadata", metadata)
 			}
 			return err
+		},
+		OnUsage: func(ctx context.Context, usage channel.Usage) (channel.Usage, error) {
+			// 合并这一步在插件包里（见 plugin.Session.ApplyUsage）：一次
+			// 越界的上报会被整份丢掉，而丢掉必须记进会话才看得见——那两个
+			// 方法未导出，在包外接不出来。
+			return sess.ApplyUsage(ctx, requestID, string(protocol), usage)
 		},
 	}
 }

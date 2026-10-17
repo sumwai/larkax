@@ -240,7 +240,9 @@ type Executor interface {
 // 同一件事，两条路都要走。只给非流式入口挂上，插件会对一半请求静默不生效
 // ——那件事从响应、日志和账上都看不出来。
 //
-// 流式那条路上**独有**的挂载点是 onStream（逐块决定），它还没接上。
+// 流式那条路上**独有**的挂载点是 onStream（逐块决定），它在非流式那条路上
+// 不会被调到——非流式没有「块」可言。两个入口收的是同一份 Hooks，各自只调
+// 自己那条路上会发生的那些。
 type Hooks struct {
 	// OnRoute 在候选**筛完之后、执行之前**调用一次，返回要钉在尝试顺序
 	// 第一位的渠道。
@@ -266,6 +268,33 @@ type Hooks struct {
 	// （见 internal/plugin 的 pickChannel），因为那一侧才看得到「候选集是什么」。
 	OnRoute func(ctx context.Context, candidates []route.Candidate) (int64, error)
 
+	// OnStream 在流式响应的**每一个内容块**上调用一次，返回这一块怎么处置。
+	//
+	// # 只有内容块会走到这里
+	//
+	// 交给插件的只有 delta 与 tool_use 两种事件。usage 与 done / error 是
+	// 这次流的**计费依据与框架**，不进插件的手：允许它丢掉 usage 就等于让
+	// 插件绕过 onUsage 的那道上界（计费退回内核估算），丢掉 done 则会让一次
+	// 正常结束看起来像被截断。这一条是**结构性**的——那几种事件根本不会被
+	// 传进来（见 isContentChunk），不是靠插件自觉。
+	//
+	// # 每个块一次跨语言调用
+	//
+	// 延迟敏感：这条路上每一块都要进一次沙箱。所以本包不采样（采样会让
+	// 「丢掉第 3 块」这类逐块决定失效），而插件没注册 onStream 时一次调用
+	// 都不会发生——那个判断在 Session.OnStream 里，它先查 hook 名单。
+	//
+	// # 决策怎么落地
+	//
+	// Drop 的那一块不转发，也不进累计正文与分词计数；Replace 换掉的是这一块
+	// 的正文，而累计正文与分词计数跟着换后的走（见 StreamChunk）；Terminate
+	// 提前结束这条流。三者的收尾走的是**同一条**路径——与「上游结束 / 客户端
+	// 断开」一起并进结局判定与计费分支，不另开一条绕过结算的出口。
+	//
+	// 返回错误表示决策方声明了阻断：这条流到此为止（已经吐给调用方的部分
+	// 收不回来），收尾与 Terminate 相同。
+	OnStream func(ctx context.Context, ev channel.StreamEvent, in StreamChunk) (StreamDecision, error)
+
 	// OnResponse 在非流式响应拿到之后、结算之前调用。
 	//
 	// 返回错误表示插件声明了阻断：**这次请求失败**。契约里唯一的阻断旋钮是
@@ -274,6 +303,33 @@ type Hooks struct {
 	// 改的是要发给调用方的那份响应（补丁就地应用）。结算读的用量与它无关
 	// ——ResponsePatch 里没有 usage。
 	OnResponse func(ctx context.Context, resp *channel.Response) error
+
+	// OnUsage 在用量成形之后、结算之前调用一次，返回结算该用的那一份用量。
+	//
+	// # 两条路上它都在同一个位置
+	//
+	// 非流式：上游响应的用量取出来之后、finishCharge 之前（排在 onResponse
+	// 之后——那一步改的是要发给调用方的响应，与用量无关）。
+	// 流式：读完事件流、streamUsage 之后、billStream 之前。
+	//
+	// 判据是同一句：**用量已经定了，钱还没算**。排在结算之后的话，插件上报
+	// 的用量改不动这次账单——而请求照样成功、响应照样正确、日志里插件照样
+	// 跑了，只有那笔钱是按内核的估算收的。
+	//
+	// # 返回值与错误
+	//
+	// 返回的用量就是结算用的那一份：插件没报的项保留内核的值（见
+	// internal/plugin 的 MergeUsage），所以「没上报」不会被当成「归零」。
+	//
+	// 返回错误表示插件声明了阻断。**两条路的处置不同**，因为可表达的东西
+	// 不同：非流式那条路上响应还没发出去，这次请求失败（与 onResponse 阻断
+	// 同一条路，不计费）；流式那条路上整个回答已经送到调用方手里了，没有
+	// 「让请求失败」这个对象，失败记进会话（由入口记成日志），用量按内核
+	// 那份算——按不计费结算等于把一次已经送出去的回答白送。
+	//
+	// 出错时**返回的用量整个忽略**（两条路都一样）：让一个出错的决策方决定
+	// 金额，方向正好反了——它多半交回来的就是零值。
+	OnUsage func(ctx context.Context, usage channel.Usage) (channel.Usage, error)
 }
 
 // ErrNoExecutor 表示没有配置调上游的能力。
@@ -366,6 +422,26 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 			// 在对账上表现为一笔解释不通的扣费。
 			return res.settleAndFail(ctx, hookErr, pipeline.Outcome{UpstreamFailed: true})
 		}
+	}
+
+	// onUsage 排在 onResponse **之后**、结算之前：用量已经定了，钱还没算
+	// （五个挂载点的先后见 docs/plugin-contract.md 的「接线」一节）。
+	//
+	// 它改的是结算读的那份用量，而不是响应——所以位置反了不会有任何报错：
+	// 请求成功、响应正确、日志里插件也跑了，只有那笔钱是按内核的估算收的。
+	//
+	// 记给渠道的那一份（recordAttempts，上面）取的是**内核的**用量：这一路
+	// 记的是这个渠道自己消耗了什么（健康度与额度自记账），而插件上报的是
+	// 计费口径上的说法。两者不一致时，以谁为准是插件契约里明确划过的：
+	// 上报只改计费，不改上游实际发生了什么。
+	if hooks.OnUsage != nil {
+		usage, hookErr := hooks.OnUsage(ctx, out.Usage)
+		if hookErr != nil {
+			// 阻断型插件失败：这次请求失败。与非流式那条路上的 onResponse
+			// 同一个处置——响应还没发出去，所以「失败」有可表达的对象。
+			return res.settleAndFail(ctx, hookErr, pipeline.Outcome{UpstreamFailed: true})
+		}
+		out.Usage = usage
 	}
 
 	charge, err := g.finishCharge(ctx, res, routed.Channel, out)

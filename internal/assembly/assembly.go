@@ -114,10 +114,10 @@ type App struct {
 	// Plugins 是启动时从 plugins 表加载出来的注册表，plugin.enabled 为
 	// false 时为 nil。
 	//
-	// 它已经挂在请求路径上：`onRequest` / `onRoute` / `onResponse` 三个挂载点
-	// 接在入口与网关里（见 internal/api 的 runRequestHook 与 gateway.Hooks）。
-	// 其余两个 hook（onStream / onUsage）**还没有调用点**，
-	// 所以声明了它们的插件这次不会被调到。
+	// 它已经挂在请求路径上：五个挂载点都接在入口与网关里（onRequest 见
+	// internal/api 的 runRequestHook，其余四个见同文件的 pluginHooks 与
+	// gateway.Hooks）。两条路各自只跑自己那条路上会发生的那几个——onResponse
+	// 只在非流式那条路上跑，onStream 只在流式那条路上跑。
 	Plugins *plugin.Registry
 
 	// PluginLimits 是插件每次调用的限额，来自 settings 表。
