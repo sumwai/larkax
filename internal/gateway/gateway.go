@@ -115,20 +115,26 @@ type CallRecorder interface {
 // 字段与 request_snapshots 表对应。本包只负责把脱敏器与方向、
 // 请求标识组装起来，不做脱敏本身。
 //
-// # 这里为什么没有 upstream_status
+// # 两个方向回答的不是同一件事
 //
-// 今天只采**请求方向**（direction = "request"）：采集点在 begin 之后、
-// 选路与调上游之前（见 Chat 与 ChatStream 的 snapshotAsync 调用），那时
-// 连打到哪个渠道都还不知道，更不会有上游状态码。
+// **请求方向**（direction = "request"）采于 begin 之后、选路与调上游之前
+// （见 Chat 与 ChatStream 的 snapshotAsync 调用）。那时连打到哪个渠道都还
+// 不知道，所以这类行上的 UpstreamStatus 与 ErrorKind 恒为 nil——它读作
+// 「这一行不适用」，不是「上游没回状态码」。
 //
-// 所以 request_snapshots.upstream_status 在这些行上恒为 NULL，**它读作
-// 「这一行不适用」，不是「上游没回状态码」**。列本身是为响应方向的快照
-// 准备的（见 internal/snapshot 的响应侧允许表），而响应方向的采集链路
-// 还没接上。同一次请求的上游结局记在 billing_requests 上，那才是权威值
-// （见 internal/ledger/store 的 Release）。
+// **响应方向**（direction = "response"）采于上游那次调用有了结局之后：
+// 非流式在 routeChat 返回之后、流式在那条流读完（或中断）之后。它回答
+// 「回来的是什么」，两个字段因此有值（见 responseSnapshotAsync）。
+// 两份是排查时配对读的：一份说发出去的是什么，一份说回来的是什么。
 //
-// 不要把两表的 upstream_status 对齐：请求快照回答「发出去的是什么」，
-// 账单回答「结果是什么」，它们本就取自请求生命周期的不同时刻。
+// # 与 billing_requests 那两列的关系
+//
+// 同一个事实，**各记各的**。取值口径与 derivation 是同一套（见
+// upstreamEvidence 与 pipeline 的那组常量），但两列回答的问题不同：
+// 账单上的 error_code 答的是「这次为什么没计费」——已计费的请求即便上游
+// 中途报错，那里也是 NULL；而快照的 ErrorKind 答的是「这次响应怎么了」，
+// 所以一条中途报错、照常计费的流在这里会有分类。两列出现分歧时，
+// 以账单为准的是「钱为什么没扣」，以快照为准的是「上游当时回了什么」。
 type Snapshot struct {
 	RequestID string
 	// UserID 是**发起这次请求的用户**，不是渠道所属的商家。
@@ -147,6 +153,25 @@ type Snapshot struct {
 	Truncated bool
 	// Version 是骨架格式版本。
 	Version int
+
+	// UpstreamStatus 是这次调用**真的拿到过**的上游 HTTP 状态码，2xx 也填。
+	//
+	// nil 是唯一表示「没有上游状态码」的形态，含义有两层，且必须分开读：
+	//   - 请求方向的行永远是 nil——那时还没有上游调用（见类型注释）；
+	//   - 响应方向的行上 nil 表示这次调用**一个 HTTP 响应都没拿到**：
+	//     连不上、TLS 失败、超时、DNS 失败。它不是「忘了填」，也不是
+	//     「上游回了 0 号」——HTTP 里没有 0 这个状态码。
+	//
+	// 指针而不是 0：request_snapshots.upstream_status 可空，而 0 会在库里
+	// 落成一个真实存在的整数，把「没拿到」读成「上游回了 0」。
+	UpstreamStatus *int
+
+	// ErrorKind 是这次响应以上游失败告终时的分类，取值见 pipeline 的
+	// ErrorUpstream* 常量（与 billing_requests.error_code 同一套词汇）。
+	//
+	// nil 表示「没有上游失败可归」：成功、客户端断开、插件阻断，以及
+	// 一切不是上游那一侧出的错。两列的关系见类型注释。
+	ErrorKind *string
 }
 
 // ReleaseFailureSink 接收「释放预留失败」的记录。
@@ -189,6 +214,12 @@ type ReleaseFailure struct {
 // 本包不依赖那个包的具体类型——那些类型会随白名单演进变化，而顺序不该跟着变。
 type Redactor interface {
 	Redact(req *channel.Request) (*Snapshot, error)
+	// RedactResponse 脱敏一次上游响应。
+	//
+	// resp 为 nil 表示这次调用**没有可脱敏的响应体**（连不上、超时，或者
+	// 上游回了非 2xx、正文没有归一化成 channel.Response）。那时实现应当
+	// 返回一条空骨架而不是错误：这一行仍然要落下来，它的内容是
+	// UpstreamStatus 与 ErrorKind 两列，而不是骨架。
 	RedactResponse(resp *channel.Response) (*Snapshot, error)
 }
 
@@ -436,6 +467,16 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 	// 收尾路径（结算与释放）都要收它，漏传编不过（见 placement）。
 	// 它排在兜底那个 defer 之后注册，所以正常路径上先跑的是这一个。
 	defer res.finish(ctx, placed)
+
+	// 响应方向的快照在**这里**采：上游那次调用已经有了结局（成功或失败），
+	// 而插件还没碰过响应——它记录的是上游回来的那份东西。失败也要采，
+	// 那一条正是排查时最该看的。
+	var routedResp *channel.Response
+	if routed != nil {
+		routedResp = routed.Response
+	}
+	respBody, respStatus, respKind := responseEvidence(routedResp, err)
+	g.responseSnapshotAsync(ctx, respBody, req.UserID, respStatus, respKind)
 	if err != nil {
 		// 没有可用的渠道，或者全部失败。**不计费**。
 		//
@@ -1053,8 +1094,53 @@ func (g *Gateway) snapshotAsync(ctx context.Context, req *channel.Request, direc
 	snap.UserID = userID
 	snap.Direction = direction
 
-	// 用请求的 context 值但**不带取消**：请求结束后快照仍该写完，
-	// 而因为客户端断开就丢掉一条快照，恰恰丢掉了最该看的那条。
+	g.saveSnapshotAsync(ctx, snap)
+}
+
+// responseSnapshotAsync 采集一条响应方向的快照。
+//
+// # 采集点与请求方向不同
+//
+// 请求方向采在调上游之前（那时还不知道会打到哪儿），响应方向采在**那次
+// 调用有了结局之后**：非流式在 routeChat 返回之后、流式在事件流读完
+// （或中断）之后。它回答的是「回来的是什么」，与请求方向配对读。
+//
+// # 三个入参都可以是零值
+//
+// resp 为 nil 表示没有可脱敏的响应体（连不上、上游回了非 2xx）；status 与
+// kind 由 upstreamEvidence 推出。**三者全空时不采集**：那说明这次请求
+// 根本没有走到上游（没有候选、别名翻不出来、插件在选路前就阻断了），
+// 写一行方向为 response、内容为空的快照只会让人以为上游回了个空。
+//
+// 脱敏与落库的同步/异步分界与请求方向完全相同，见 snapshotAsync。
+func (g *Gateway) responseSnapshotAsync(ctx context.Context, resp *channel.Response, userID int64, status *int, kind *string) {
+	if g.Redactor == nil || g.Snapshots == nil {
+		return
+	}
+	if resp == nil && status == nil && kind == nil {
+		return
+	}
+
+	snap, err := g.Redactor.RedactResponse(resp)
+	if err != nil {
+		return
+	}
+	snap.RequestID = requestIDOf(ctx)
+	snap.UserID = userID
+	snap.Direction = "response"
+	snap.UpstreamStatus = status
+	snap.ErrorKind = kind
+
+	g.saveSnapshotAsync(ctx, snap)
+}
+
+// saveSnapshotAsync 把一条已经组装好的快照交给落库层。
+//
+// # 用请求的 context 值但**不带取消**
+//
+// 请求结束后快照仍该写完，而因为客户端断开就丢掉一条快照，恰恰丢掉了最该
+// 看的那条——响应方向尤其如此：断流正是这条快照要回答的事。
+func (g *Gateway) saveSnapshotAsync(ctx context.Context, snap *Snapshot) {
 	base := context.WithoutCancel(ctx)
 
 	go func() {
@@ -1062,6 +1148,46 @@ func (g *Gateway) snapshotAsync(ctx context.Context, req *channel.Request, direc
 		defer cancel()
 		_ = g.Snapshots.Save(snapCtx, snap)
 	}()
+}
+
+// responseEvidence 从一次请求的结局里取出响应方向的证据。
+//
+// 三个返回值对应响应快照要用的三样东西：脱敏的对象、状态码、错误分类。
+// 上游成功时对象是那份响应，状态码取自它（适配器在拿到响应头后填的）；
+// 失败时没有可脱敏的响应体，两列由 upstreamEvidence 推出——它与账单那
+// 两列走的是**同一个**判据，见 upstreamEvidence。
+func responseEvidence(resp *channel.Response, err error) (body *channel.Response, status *int, kind *string) {
+	if err != nil {
+		s, k := upstreamEvidence(err)
+		return nil, optionalInt(s), optionalString(k)
+	}
+	if resp == nil {
+		return nil, nil, nil
+	}
+	return resp, optionalInt(resp.StatusCode), nil
+}
+
+// optionalInt 把「0 表示没有」翻成快照的 nil 形态。
+//
+// 上游状态码 0 与「没有状态码」在库里必须落到同一个 NULL：
+// HTTP 里没有 0 这个状态码，写进去会读成「上游回了 0 号」。
+func optionalInt(v int) *int {
+	if v == 0 {
+		return nil
+	}
+	return &v
+}
+
+// optionalString 把空串翻成快照的 nil 形态。
+//
+// 分类的零值是空串（见 upstreamEvidence），库里对应的无值是 NULL。
+// 不把空串写进去：`error_kind IS NOT NULL` 是「有分类」的判据，
+// 一个空串会让它按「有」来数。
+func optionalString(v string) *string {
+	if v == "" {
+		return nil
+	}
+	return &v
 }
 
 // usageOf 从上游响应里取出用量。

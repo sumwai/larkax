@@ -1056,7 +1056,45 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 		t.Errorf("快照的 user_id = %d，期望 %d（发起这次请求的用户）", snapshotUser, user)
 	}
 
-	// 六、上游真的收到了我们发出去的那份请求体。
+	// 六、一次请求落**两行**：请求方向与响应方向，后者带着上游那个 200。
+	//
+	// 两行是配对读的——一份说发出去的是什么，一份说回来的是什么。只落一行
+	// 时 `direction = 'response'` 这个枚举值在表里等于不存在，而那正是这张
+	// 表此前几个月的形状。
+	waitForSnapshotRows(t, db, user, 2)
+	breakdown := snapshotBreakdownOf(t, db, user)
+	byDir := make(map[string]snapshotDirectionRow, len(breakdown))
+	for _, b := range breakdown {
+		byDir[b.direction] = b
+	}
+	if len(byDir) != 2 {
+		t.Fatalf("按 direction 分组得到 %d 组，期望 2 组（request 与 response）：%+v",
+			len(byDir), breakdown)
+	}
+	if b := byDir["request"]; b.rows != 1 || b.withStatus != 0 || b.withKind != 0 {
+		t.Errorf("request 那一组 = %+v，期望 1 行且两列都为空（采集在调上游之前）", b)
+	}
+	if b := byDir["response"]; b.rows != 1 || b.withStatus != 1 || b.withKind != 0 {
+		t.Errorf("response 那一组 = %+v，期望 1 行、upstream_status 非空、error_kind 为空", b)
+	}
+	var gotStatus sql.NullInt64
+	var gotKind sql.NullString
+	if err := db.QueryRowContext(ctx, `
+		SELECT upstream_status, error_kind
+		  FROM request_snapshots
+		 WHERE request_id = $1 AND direction = 'response'`, requestID).
+		Scan(&gotStatus, &gotKind); err != nil {
+		t.Fatalf("查响应方向的快照失败: %v", err)
+	}
+	if !gotStatus.Valid || gotStatus.Int64 != http.StatusOK {
+		t.Errorf("响应快照的 upstream_status = %+v，期望 %d（上游真的回了它）",
+			gotStatus, http.StatusOK)
+	}
+	if gotKind.Valid {
+		t.Errorf("成功时响应快照的 error_kind 应当为空，实际 %q", gotKind.String)
+	}
+
+	// 七、上游真的收到了我们发出去的那份请求体。
 	bodies := fake.sentBodies()
 	if len(bodies) != 1 {
 		t.Fatalf("假上游被调用 %d 次，期望 1 次", len(bodies))
@@ -1505,8 +1543,8 @@ func TestUpstreamFailureIsRecordedInBillingRequest(t *testing.T) {
 	// 一、成功的那几条：状态是 settled，两列留 NULL。
 	//
 	// 这两列记的是「**因上游失败而不计费**」的证据，成功那一条没有可记的。
-	// 而上游响应里也没有状态码可用（channel.Response 不带它），所以这里
-	// 写得出来的只有一个编出来的 200。
+	// 上游那个 200 记在**快照**的响应方向那一行上（见下面第五节）：
+	// 账单答的是「为什么没扣钱」，没有失败就没有可写的。
 	//
 	// 注意这句话不等于「这次没有上游失败」：上游吐了字之后才失败的那一次
 	// 要计费，账单同样是 settled、两列同样是 NULL（见
@@ -1580,6 +1618,101 @@ func TestUpstreamFailureIsRecordedInBillingRequest(t *testing.T) {
 	if b := byStatus["released"]; b.rows != 2 || b.withStatus != 1 || b.withCode != 2 {
 		t.Errorf("released 那一组 = %+v，期望 2 行、upstream_status 非空 1 行、error_code 非空 2 行", b)
 	}
+
+	// 五、同一次失败在**快照**那一侧也要有说法，且与账单一致。
+	//
+	// 这一段是本条用例存在的理由的另一半：曾经 `request_snapshots` 里一行
+	// 响应方向的快照都没有，于是同一次上游 400，账单说 400、快照那一侧
+	// 连行都不存在。现在两条路都写，两列的值也对得上。
+	//
+	// 按 direction 分组数：非空的那几条必须**全部**落在 response 那一组。
+	// 请求方向的行采于调上游之前，两列在那条路上不适用——它们要是也有值，
+	// 说明写入路径绕过了采集点。
+	want := successes + 2
+	waitForSnapshotRows(t, db, user, want*2)
+
+	snapBreak := snapshotBreakdownOf(t, db, user)
+	t.Logf("direction | rows | non_null(upstream_status) | non_null(error_kind)")
+	for _, b := range snapBreak {
+		t.Logf("%-9s | %4d | %25d | %19d", b.direction, b.rows, b.withStatus, b.withKind)
+	}
+	byDir := make(map[string]snapshotDirectionRow, len(snapBreak))
+	for _, b := range snapBreak {
+		byDir[b.direction] = b
+	}
+	if len(byDir) != 2 {
+		t.Fatalf("按 direction 分组得到 %d 组，期望 2 组（request 与 response）：%+v",
+			len(byDir), snapBreak)
+	}
+	if b := byDir["request"]; b.rows != want || b.withStatus != 0 || b.withKind != 0 {
+		t.Errorf("request 那一组 = %+v，期望 %d 行且两列都非空 0 行（采集在调上游之前）", b, want)
+	}
+	// 成功的那几条也拿到过上游的 200，所以非空的状态码是 successes+1 条；
+	// 分类只有两条失败有。
+	if b := byDir["response"]; b.rows != want || b.withStatus != successes+1 || b.withKind != 2 {
+		t.Errorf("response 那一组 = %+v，期望 %d 行、upstream_status 非空 %d 行、error_kind 非空 2 行",
+			b, want, successes+1)
+	}
+
+	// 逐行对照：两表对同一次失败给的是同一对值。
+	//
+	// 分组计数证明不了这件事——把 400 那一行的分类写成别的字符串，计数
+	// 一样对得上。
+	type evidence struct {
+		status sql.NullInt64
+		kind   sql.NullString
+	}
+	var got []evidence
+	snapRows, err := db.QueryContext(ctx, `
+		SELECT upstream_status, error_kind
+		  FROM request_snapshots
+		 WHERE user_id = $1 AND direction = 'response'
+		 ORDER BY id`, user)
+	if err != nil {
+		t.Fatalf("查响应方向的快照失败: %v", err)
+	}
+	defer func() { _ = snapRows.Close() }()
+	for snapRows.Next() {
+		var e evidence
+		if err := snapRows.Scan(&e.status, &e.kind); err != nil {
+			t.Fatalf("读响应快照失败: %v", err)
+		}
+		got = append(got, e)
+	}
+	if err := snapRows.Err(); err != nil {
+		t.Fatalf("读响应快照失败: %v", err)
+	}
+	if len(got) != want {
+		t.Fatalf("响应方向的快照 = %d 条，期望 %d", len(got), want)
+	}
+	counts := map[string]int{}
+	for _, e := range got {
+		counts[evidenceKey(e.status, e.kind)]++
+	}
+	wantCounts := map[string]int{
+		evidenceKey(sql.NullInt64{Int64: http.StatusOK, Valid: true}, sql.NullString{}): successes,
+		evidenceKey(sql.NullInt64{Int64: http.StatusBadRequest, Valid: true},
+			sql.NullString{String: pipeline.ErrorUpstreamHTTPError, Valid: true}): 1,
+		evidenceKey(sql.NullInt64{}, sql.NullString{String: pipeline.ErrorUpstreamNoAnswer, Valid: true}): 1,
+	}
+	for k, n := range wantCounts {
+		if counts[k] != n {
+			t.Errorf("响应方向的快照里 %s 有 %d 条，期望 %d 条（实际分布 %v）", k, counts[k], n, counts)
+		}
+	}
+}
+
+// evidenceKey 把两列拼成一个可比较的键，供分布断言用。
+func evidenceKey(status sql.NullInt64, kind sql.NullString) string {
+	s := "NULL"
+	if status.Valid {
+		s = strconv.FormatInt(status.Int64, 10)
+	}
+	k := "NULL"
+	if kind.Valid {
+		k = kind.String
+	}
+	return "status=" + s + " kind=" + k
 }
 
 // 上游失败那一行也要记下「这次打的是哪个渠道、发的是哪个上游模型名」。
@@ -1738,6 +1871,78 @@ func TestUpstreamFailureWithoutSelectedChannelLeavesNull(t *testing.T) {
 	}
 }
 
+// snapshotDirectionRow 是快照按 direction 分组之后的一组。
+type snapshotDirectionRow struct {
+	direction string
+	rows      int
+	// withStatus 与 withKind 是这一组里那两列非空的行数。
+	//
+	// 与账单那一侧同源：数的是非空而不是「等于某个值」。
+	withStatus int
+	withKind   int
+}
+
+// snapshotBreakdownOf 按 direction 分组数这个用户的快照，按 direction 排序。
+//
+// 形状与 billingBreakdownOf 一样，因为当初发现「响应方向一行都没有」用的
+// 就是这个形状的查询：一张分组表能同时说明「有没有这一类行」与「两列有没有
+// 值」，而只看总行数会把两件事混在一起。
+func snapshotBreakdownOf(t *testing.T, db *sql.DB, userID int64) []snapshotDirectionRow {
+	t.Helper()
+
+	rows, err := db.QueryContext(context.Background(), `
+		SELECT direction,
+		       count(*),
+		       count(upstream_status),
+		       count(error_kind)
+		  FROM request_snapshots
+		 WHERE user_id = $1
+		 GROUP BY direction
+		 ORDER BY direction`, userID)
+	if err != nil {
+		t.Fatalf("按方向分组查快照失败: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []snapshotDirectionRow
+	for rows.Next() {
+		var b snapshotDirectionRow
+		if err := rows.Scan(&b.direction, &b.rows, &b.withStatus, &b.withKind); err != nil {
+			t.Fatalf("读分组结果失败: %v", err)
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("读分组结果失败: %v", err)
+	}
+	return out
+}
+
+// waitForSnapshotRows 等到这个用户的快照总数达到 want。
+//
+// 落库是异步的（见 gateway.snapshotAsync），所以「一条都没等到」与「还没写
+// 完」必须分开：等不到时把当前的分组打出来，看的人一眼能分辨是没接上还是
+// 慢了一拍。
+func waitForSnapshotRows(t *testing.T, db *sql.DB, userID int64, want int) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		total := 0
+		for _, b := range snapshotBreakdownOf(t, db, userID) {
+			total += b.rows
+		}
+		if total >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("等到超时：快照总数 = %d，期望 %d。当前分组：%+v",
+				total, want, snapshotBreakdownOf(t, db, userID))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // billingStatusRow 是账单按 status 分组之后的一组。
 type billingStatusRow struct {
 	status string
@@ -1822,8 +2027,9 @@ func billingRowsOf(t *testing.T, db *sql.DB, userID int64) []billingRow {
 // waitForSnapshot 等到这次请求的快照落库，返回它记下的用户 id。
 //
 // 快照是异步写的（网关起 goroutine，不等结果），所以这里要等。
-// 判据是按 request_id 查行：request_id 唯一，一次请求最多落一条请求方向的
-// 快照，所以查得到行就是这次请求写进去的那一条，不会认成别人留下的。
+// 判据是按 request_id 查行：一次请求落两条（请求方向与响应方向），两条
+// 同属这次请求，所以取回哪一条的 user_id 都一样，不会认成别人留下的。
+// 要区分方向的断言用 snapshotBreakdownOf，不要在这里加方向条件。
 //
 // 顺带把 user_id 取回来：调用方要断言的就是它，而多查一次列比多跑一次
 // 查询简单。取不到时第二个返回值为 false。

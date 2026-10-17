@@ -133,6 +133,31 @@ func TestRedactResponseBridgesDirection(t *testing.T) {
 	assertNoContent(t, snap, "上游回复正文")
 }
 
+// 没有可脱敏的响应体时返回空骨架，而不是错误。
+//
+// nil 是一个正常结局（连不上、超时、非 2xx 的正文没有归一化），那一行
+// 仍然要落——它的内容是 upstream_status 与 error_kind 两列。返回错误的话
+// 网关会把整条快照丢掉，「连不上上游」这件事就不会出现在表里。
+func TestRedactResponseNilGivesEmptySkeleton(t *testing.T) {
+	c := newCollector(t, testConfig(), &fakeDB{})
+	snap, err := c.RedactResponse(nil)
+	if err != nil {
+		t.Fatalf("nil 响应不该报错: %v", err)
+	}
+	if snap == nil {
+		t.Fatal("nil 响应也该给出一条可落库的快照")
+	}
+	if snap.Version != 1 {
+		t.Errorf("skeleton_version = %d，期望 1", snap.Version)
+	}
+	if len(snap.Skeleton) != 0 {
+		t.Errorf("没有响应体时骨架应当为空，实际 %v", snap.Skeleton)
+	}
+	if snap.Direction != "" || snap.UserID != 0 {
+		t.Errorf("脱敏不该填归属信息，实际 %q / %d", snap.Direction, snap.UserID)
+	}
+}
+
 // 骨架里有不可序列化的值时，Save 只报错、不 panic，也不让调用方以为成功了。
 func TestSaveReportsInsertFailure(t *testing.T) {
 	c := newCollector(t, testConfig(), &fakeDB{})

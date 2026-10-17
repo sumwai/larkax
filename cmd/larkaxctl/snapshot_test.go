@@ -239,13 +239,15 @@ func TestPrintSnapshotsPrintsEveryRow(t *testing.T) {
 	}
 }
 
-// TestPrintSnapshotResponseDirectionKeepsUnrecorded 钉住另一半：响应方向的行
-// 上，NULL 仍然是 <未记录>——那条路上这两列本该有值。
+// TestPrintSnapshotResponseDirectionExplainsNulls 钉住另一半：响应方向的行上，
+// NULL 是一个有内容的值，两列的含义不同。
 //
-// 与上面那条合起来才说明「按方向区分」真的发生了：只钉请求方向的话，
-// 把所有 NULL 一律改成「不适用」同样能通过，而那会把响应方向真正的漏记
-// 说成「不适用」——比原来的误读更坏。
-func TestPrintSnapshotResponseDirectionKeepsUnrecorded(t *testing.T) {
+//   - upstream_status 为 NULL = 一个 HTTP 响应都没拿到（连不上、超时）；
+//   - error_kind 为 NULL = 没有上游失败可归（正常结束、客户端断开、插件阻断）。
+//
+// 打成同一个文本会把两件事混成一件事，而「没拿到响应」与「没有失败」
+// 在排查时指向完全不同的方向。
+func TestPrintSnapshotResponseDirectionExplainsNulls(t *testing.T) {
 	rows := []snapshotRow{
 		{
 			ID: 1, Direction: "response", SkeletonVersion: 1, CaptureMode: "skeleton",
@@ -259,19 +261,22 @@ func TestPrintSnapshotResponseDirectionKeepsUnrecorded(t *testing.T) {
 	out := buf.String()
 
 	for _, want := range []string{
-		"upstream_status=<未记录>",
-		"error_kind=<未记录>",
+		"upstream_status=<无上游响应>",
+		"error_kind=<无>",
 	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("响应方向的 NULL 应保持「未记录」，输出里没有 %q：\n%s", want, out)
+			t.Errorf("响应方向的 NULL 应按列解释，输出里没有 %q：\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "未记录") {
+		t.Errorf("响应方向的 NULL 不该再打「未记录」——它读作漏记，而这两种 NULL 都是有内容的值：\n%s", out)
 	}
 	if strings.Contains(out, "不适用") {
 		t.Errorf("响应方向的行不该打「不适用」：\n%s", out)
 	}
 }
 
-// TestPrintSnapshotRequestDirectionShowsUnexpectedValue 钉住 evidenceCell 的
+// TestPrintSnapshotRequestDirectionShowsUnexpectedValue 钉住那两个渲染函数的
 // 「只改写 NULL」：请求方向的行上出现非 NULL 值，说明有写入路径绕过了
 // snapshotwire 的门，那个异常必须原样显示出来，不能被「不适用」藏掉。
 func TestPrintSnapshotRequestDirectionShowsUnexpectedValue(t *testing.T) {
