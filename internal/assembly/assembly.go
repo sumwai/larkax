@@ -128,12 +128,25 @@ const (
 	probeIntervalKey = "quota.probe_interval_seconds"
 )
 
-// maxProbeIntervalSeconds 是探测间隔的上限。
+// 探测间隔允许的范围（秒）。
 //
-// 挡的是换算时的溢出：time.Duration 以纳秒计，秒数乘 1e9 之后会绕回一个
-// 看起来正常的数，而那条路不会报错——阈值于是变成一个谁也没配过的值。
-// 一年已经远超任何合理的探测间隔。
-const maxProbeIntervalSeconds = 365 * 24 * 60 * 60
+// 两个界都在**换算之前**判。time.Duration 以纳秒计，秒数乘 1e9 会溢出，
+// 而 Go 的整数溢出不报错——它绕回一个看起来正常的数。实测两个绕法：
+//
+//	-9223372036854775807 秒 → 换算后 +1s，再乘 staleAfterFactor 得 +3s
+//	-3074457345618258603 秒 → 换算后 +1708031h…，再乘得 -1s
+//
+// 两个都会装配成功、服务照常启动，而阈值是一个谁也没配过的值。只判上界
+// 挡不住它们——它们都「小于」上界——所以下界必须一起判，判的是配置里那个
+// 秒数本身，而不是换算之后的结果。
+//
+// 上界一年：远超任何合理的探测间隔。下界 1 秒：0 与负数在语义上就不成立
+// （见 quota.SelfAccountingStaleAfter），在这里一并挡掉，顺带把「负数绕成
+// 正数」这条整个堵死。
+const (
+	minProbeIntervalSeconds = 1
+	maxProbeIntervalSeconds = 365 * 24 * 60 * 60
+)
 
 // Build 装配一次服务。
 //
@@ -291,14 +304,17 @@ func (c Config) validate() error {
 //
 // 间隔配成 0 或负数时拒绝启动而不是回落到某个默认值：阈值也非正时，任何
 // 一次自记账都会立刻被判成陈旧，而它在库里与「配置生效了」长得一样。
+//
+// 范围检查在**换算之前**：换算本身会溢出，而溢出绕出来的数看着是正常的
+// （见 minProbeIntervalSeconds / maxProbeIntervalSeconds 上的说明）。
 func quotaStaleAfter(v *settings.Values) (time.Duration, error) {
 	seconds, err := v.Int(probeIntervalKey)
 	if err != nil {
 		return 0, fmt.Errorf("读取额度探测间隔失败: %w", err)
 	}
-	if seconds > maxProbeIntervalSeconds {
-		return 0, fmt.Errorf("settings.%s = %d 秒，超出上限 %d 秒",
-			probeIntervalKey, seconds, maxProbeIntervalSeconds)
+	if seconds < minProbeIntervalSeconds || seconds > maxProbeIntervalSeconds {
+		return 0, fmt.Errorf("settings.%s = %d 秒，超出允许范围 [%d, %d] 秒",
+			probeIntervalKey, seconds, minProbeIntervalSeconds, maxProbeIntervalSeconds)
 	}
 	staleAfter, err := quota.SelfAccountingStaleAfter(time.Duration(seconds) * time.Second)
 	if err != nil {

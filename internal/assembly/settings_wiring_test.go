@@ -151,6 +151,69 @@ func TestBuildRefusesNonPositiveProbeInterval(t *testing.T) {
 	}
 }
 
+// 换算会溢出的探测间隔必须在装配期被拒，而且要在**乘法之前**判掉。
+//
+// 只判上界挡不住超大负数：Go 的整数溢出不报错，它绕回一个看起来正常的数，
+// 于是装配成功、服务照常启动，而阈值是一个谁也没配过的值。下面两个数都是
+// 实测出来的绕法，不是「大得离谱所以显然会挂」：
+//
+//	-9223372036854775807 秒 → 换算后 +1s，再乘 staleAfterFactor 得 +3s
+//	-3074457345618258603 秒 → 换算后 +1708031h…，再乘得 -1s
+//
+// 两个都「小于上界」，所以只判上界时它们一路通过。断言里写的是**字面量**，
+// 不拿 minProbeIntervalSeconds / maxProbeIntervalSeconds 去测它们自己——那
+// 等于让被测常量给自己出题，把它改掉也照样通过。
+func TestBuildRefusesProbeIntervalOutOfRange(t *testing.T) {
+	db := testDB(t)
+
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"超大负数，换算后绕成正阈值", `-9223372036854775807`},
+		{"超大负数，换算后绕成负阈值", `-3074457345618258603`},
+		{"比上限多一秒", `31536001`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := buildWithSetting(t, db, "quota.probe_interval_seconds", tc.value)
+			if err == nil {
+				t.Fatalf("settings.quota.probe_interval_seconds = %s 时装配成功了——"+
+					"绕出来的阈值谁也没配过，而服务会照常启动", tc.value)
+			}
+			if !strings.Contains(err.Error(), "quota.probe_interval_seconds") {
+				t.Errorf("错误信息 %q 里没有键名：配错的人要能一眼看出改哪个键", err.Error())
+			}
+		})
+	}
+}
+
+// 上下界的**边界值本身**必须装得起来。
+//
+// 上面几条只说明「界外会失败」，它们分辨不出「界画错了一位」：把上限写成
+// 3153600（少一个零）时，上面几条照样全过，而一个完全合理的配置会在启动时
+// 被拒。这一条把两个界钉死：31536000 秒与 1 秒都装得起来，界往内挪一格
+// 它就挂。
+func TestBuildAcceptsProbeIntervalAtBounds(t *testing.T) {
+	db := testDB(t)
+
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"上界（一年）", `31536000`},
+		{"下界（一秒）", `1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := buildWithSetting(t, db, "quota.probe_interval_seconds", tc.value); err != nil {
+				t.Fatalf("settings.quota.probe_interval_seconds = %s 是允许范围内的值，"+
+					"装配却失败了：%v", tc.value, err)
+			}
+		})
+	}
+}
+
 // 出厂配置下装配必须成功。
 //
 // 上面两条断言的是「配错会失败」，而它们自己分辨不出「校验太严，什么都装

@@ -151,6 +151,40 @@ func TestPrintSettingsList(t *testing.T) {
 	}
 }
 
+// TestPrintSettingsSetResult 钉住 `settings set` 写完之后的输出。
+//
+// #215 点名的就是这条命令：改一个没人读的键，它回一句「已写入」，与改一个
+// 真的生效的键**一模一样**。写入本身没有错（值确实进库了），缺的是说出
+// 「这个键改了不会有任何效果」。
+//
+// 这里比对两条**完整输出**而不是只查关键字：要的正是「两者不一样」。只断言
+// 未接线那条里有某个词的话，一个把同一句话打到所有键上的实现也能过，而那样
+// 「标出来了」就不再是一个信号。
+//
+// 期望值写死字面量，不取 Registry 里的文案：那等于让被测对象给自己出题。
+func TestPrintSettingsSetResult(t *testing.T) {
+	var unwired bytes.Buffer
+	printSettingsSetResult(&unwired, "plugin.enabled", []byte("true"), "ops", 7)
+	wantUnwired := "已写入 settings.plugin.enabled = true 改自 ops(id=7)\n" +
+		"  尚未接线：插件系统尚未接线（#216），改了不会有任何效果\n"
+	if got := unwired.String(); got != wantUnwired {
+		t.Errorf("未接线的键，输出 =\n%q\n期望\n%q", got, wantUnwired)
+	}
+
+	// 对照组用一个确实接上了线的键（见 internal/assembly 那几条用例：
+	// 配错它会让装配失败，所以它是真的被读了）。
+	var wired bytes.Buffer
+	printSettingsSetResult(&wired, "billing.default_asset", []byte(`"CNY"`), "ops", 7)
+	wantWired := "已写入 settings.billing.default_asset = \"CNY\" 改自 ops(id=7)\n"
+	if got := wired.String(); got != wantWired {
+		t.Errorf("已接线的键，输出 =\n%q\n期望\n%q", got, wantWired)
+	}
+
+	if unwired.String() == wired.String() {
+		t.Error("未接线与已接线的输出一样——那正是 #215 说的那件事")
+	}
+}
+
 func TestPrintSettingsListEmpty(t *testing.T) {
 	var buf bytes.Buffer
 	printSettingsList(&buf, nil)

@@ -155,6 +155,23 @@ func Lookup(key string) (Spec, bool) {
 	return Spec{}, false
 }
 
+// UnwiredNote 给出「这个键还没有读者」那句说明。键已接线、或 Registry 里
+// 根本没有它时返回空串。
+//
+// 给只需要这一句、不需要整份声明的调用方用（`larkaxctl settings set` 写完
+// 一个键之后要打它）。`settings list` 那边手上已经有整份 Spec，直接读
+// spec.Unwired，不必再查一遍。
+//
+// 它取自 Registry 而不是库里那一行 description：接不接线是**代码**的事实，
+// 而接线的人改的正是 Registry 里那几行。
+func UnwiredNote(key string) string {
+	spec, ok := Lookup(key)
+	if !ok {
+		return ""
+	}
+	return spec.Unwired
+}
+
 // Load 读取全部配置并与 Registry 对照校验。
 //
 // 任何不一致都返回错误而不回落到默认值：静默回落会让「配置写错了」

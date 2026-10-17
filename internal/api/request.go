@@ -81,7 +81,7 @@ func (h *Handler) billingRequest(user User, upstream *channel.Request, requestID
 		// 入口与落库层之间断掉——断了的表现是那一列恒为 NULL，
 		// 而单看任何一层都像是写了的。
 		APIKeyID: user.KeyID,
-		Asset:     h.DefaultAsset,
+		Asset:    h.DefaultAsset,
 		// CanonicalModel 与上游模型名在这里取同一个值，因为规范名到上游名的
 		// 映射还没做（那属于选路层）。这是**已知的临时状态**，不是设计：
 		// 接通映射时改的正是这一行。
