@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/credential"
@@ -58,6 +59,9 @@ list **不打印凭证密文**，只打印它挂在哪些主密钥下（那不�
 
 渠道类型必须是已注册的适配器类型；类型写错时错误信息会列出已知的类型。
 --models 至少要有一个：读取路径把 models 当白名单用，空数组的渠道永远选不中。
+--setting 是渠道私有配置（自由形态的 JSON 对象），键由该渠道 type 指向的
+适配器解释，选路层不认，管理面也不校验键名。**当前没有任何适配器读它**，
+所以给了 --setting 时命令会把这一点说出来，见 internal/channel 的 Setting。
 `
 
 // channelTimeout 是渠道命令连库与写库的时间上限。
@@ -133,7 +137,7 @@ func runChannelCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	printCreatedChannel(os.Stdout, os.Stderr, id, sealer.PrimaryKeyID())
+	printCreatedChannel(os.Stdout, os.Stderr, id, sealer.PrimaryKeyID(), len(req.Setting) > 0)
 	return nil
 }
 
@@ -315,7 +319,31 @@ func runChannelUpdate(args []string) error {
 		return err
 	}
 	fmt.Printf("已更新渠道 %d。\n", req.ID)
+	if req.Setting != nil && len(*req.Setting) > 0 {
+		printSettingUnreadNote(os.Stderr)
+	}
 	return nil
+}
+
+// printSettingUnreadNote 说出「配了 setting 也不会影响请求路径」。
+//
+// 打在写入**成功之后**：命令确实写进去了，所以不能报成错误；而「写进去
+// 了、但没有任何东西按它做判断」正是使用者当场该看见的事实——只写在文档里
+// 的话没人会读，而它在库里、在清单上看起来都与一个生效的配置一模一样
+// （见 #360）。
+//
+// 走 stderr，与 create 的其余信息同一处：stdout 只放能被下一段脚本接走的
+// 那个值（create 是 ID，update 是一行结果），一句提示混进去会把它弄脏。
+//
+// 措辞与「什么时候会变」取自 channel.SettingUnreadNote，不在这里另写一份：
+// 那段说明属于 channel 包（键归适配器解释是那条契约的一部分），而两处各写
+// 一句的话，一处改了一处不动，于是其中一处开始说谎。
+func printSettingUnreadNote(w io.Writer) {
+	note := channel.SettingUnreadNote()
+	if note == "" {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "注意：%s。\n", note)
 }
 
 func runChannelList(args []string) error {
@@ -488,8 +516,15 @@ func readCredential(fromStdin bool, envName string, required bool) (*string, err
 //
 // 挂在哪把主密钥下要打出来：轮换时「新写进去的密文挂在旧钥匙下」是个
 // 需要当场看见的事实，事后从库里翻不如建的时候就说清楚。
-func printCreatedChannel(stdout, stderr io.Writer, id int64, primaryKeyID string) {
+//
+// hasSetting 为真时再补一句「setting 今天没有读者」：那句话必须与这次调用
+// 是否真的写了这个键挂钩——每次 create 都打一遍的话，它很快会变成所有输出
+// 里的一行背景音，而真正配了键的人反而不会看见。
+func printCreatedChannel(stdout, stderr io.Writer, id int64, primaryKeyID string, hasSetting bool) {
 	_, _ = fmt.Fprintf(stderr, "已创建渠道 id=%d，凭证挂在主密钥 %s 下。\n", id, primaryKeyID)
+	if hasSetting {
+		printSettingUnreadNote(stderr)
+	}
 	_, _ = fmt.Fprintln(stdout, id)
 }
 
@@ -521,6 +556,23 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo) {
 	for _, info := range infos {
 		if info.CredentialErr != nil {
 			_, _ = fmt.Fprintf(w, "渠道 %d 的凭证密文不合法：%v\n", info.ID, info.CredentialErr)
+		}
+	}
+
+	// 带着 setting 的行单独点出来：那一栏在库里、在这张清单上都与一个生效的
+	// 配置没有区别，而今天没有任何适配器读它（见 #360）。不新开一列是同一条
+	// 理由——空列只是把噪音铺满每一行，而这里要说的只有「这几行配过东西」。
+	// 只在**至少一行**带 setting 时打：没有这种行时，这一句在每次 list 上
+	// 都是背景音。
+	if note := channel.SettingUnreadNote(); note != "" {
+		var rows []string
+		for _, info := range infos {
+			if len(info.Setting) > 0 {
+				rows = append(rows, strconv.FormatInt(info.ID, 10))
+			}
+		}
+		if len(rows) > 0 {
+			_, _ = fmt.Fprintf(w, "渠道 %s 配了 setting：%s。\n", strings.Join(rows, "、"), note)
 		}
 	}
 }
