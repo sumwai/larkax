@@ -1,0 +1,105 @@
+# check-deadmethods.sh 的白名单：允许暂时没有调用点的导出方法。
+#
+# 格式，一条一行，四栏用 | 隔开（理由里不能出现 |）：
+#
+#   <文件路径> | <符号名> | <类型> | <理由>
+#
+# 路径与符号名取扫描结果里的那两栏（`internal/money/money.go|Amount.Units`
+# 取 `internal/money/money.go` 与 `Amount.Units`），**不带行号**——行号会随任何
+# 一次编辑漂移，那样每改一行代码白名单就得全量重写，第二次就没人维护了。
+#
+# 类型两档，与 scripts/deadcode-allowlist.txt、scripts/unimported-allowlist.txt
+# 同一套：
+#
+#   lib  库构件 / 测试夹具。先有库、后接线是这个仓库刻意的顺序，库构件本来就该
+#        先有、先被测；测试夹具更是永远不会被生产代码调。
+#   gap  被追踪的缺口。理由里**必须**带一个 issue 号（`#123`），
+#        否则 check-deadmethods.sh 会拒绝这份白名单。
+#
+# 这一档的用处是让 review 能问出「这一条为什么还在」：lib 的答案是「它是积木 /
+# 它是夹具」，gap 的答案是「有一个 issue 在跟」。
+#
+# **lib 那几条的理由要写清「目前只有测试在调」**——「有实现、有测试、没有调用方」
+# 的方法，看代码的人会以为它已经生效。理由栏说不清的事，对应方法的注释里要补一句。
+#
+# 本文件按 <路径> 再按 <符号名> 排序，与扫描结果里的顺序无关——
+# 比对按集合做，加一条或删一条只动一行。
+#
+# 这份清单产出时的条件（换任何一个，条数都不可比）：
+#
+#   命令      scripts/check-deadmethods.sh
+#             （扫描起点由 cmd/ 自动发现，当前是 ./cmd/larkax 与 ./cmd/larkaxctl）
+#   工具      go（版本随 go.mod；判据是脚本里嵌的那份 AST 扫描器）
+#   条数      48，与脚本里的 MAX_ENTRIES_DEFAULT 一致
+#
+# # 这份清单与 scripts/deadcode-allowlist.txt 的关系
+#
+# **两份清单不共享条目，有重叠是正常的。** 两道门的判据不同（一道看调用图，
+# 一道看语法），同一个符号可能在两边各记一条，也可能只在一处出现：
+#
+#   MemorySource.AddDay          两边都有（那边：不是 runtime type；这边：没人调）
+#   catalog.Admin.Update         只在 deadcode 那边有——`.Update(` 在别处出现过，
+#                                这道门的判据按方法名做，于是它看不见（见脚本开头
+#                                「同名方法互相掩护」那一段）
+#   money.Amount.Units           只在这边有——它在 RTA 的盲区里，deadcode 报不出来
+#
+# 不共享是有意的：共享之后「改一处要动两处」会变成三处，而两道门的判据将来
+# 还可能各自调整。
+#
+# # 关于 #282
+#
+# 下面有一批 gap 挂的是 #282。那个 issue 的正文只点名了四个符号，而这一轮扫出来的
+# 比它多得多——**它现在是这一类缺口的收容所**。挂它的每一条都写着「只有测试在调」，
+# 逐条接线或删除时，#282 的正文要跟着这份清单一起更新，否则「这一条为什么还在」
+# 答不上来。
+#
+# 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES_DEFAULT 往下调。
+# 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
+internal/billing/billing.go    | Usage.IsEmpty                     | gap | #282 注释说计费层据此区分「这次真的没用 token」与「我们没读到用量」，而没有任何一层据此区分（与 #267 是同一处缺口的两面）
+internal/billing/expr/compile.go | Cache.GetWithGlobals            | gap | #278 注入常量 Globals 那条链路没有生产入口；它是 CompileWithGlobals 唯一的调用点，掩蔽沿调用链传到了那个自由函数
+internal/billing/expr/compile.go | Cache.Invalidate                | gap | #282 注释写「规则被停用或删除时调用」，而调用点不存在（实际靠 CacheKey 里的源码哈希自然换键）
+internal/billing/expr/compile.go | Program.BranchCount             | gap | #282 诊断用的三元分支计数，只有测试在读它
+internal/billing/expr/compile.go | Program.Source                  | gap | #282 返回原始表达式源码，只有测试在读它
+internal/calendar/calendar.go  | Calendar.At                       | gap | #282 按时刻判定当天状态；目前只有测试在调它
+internal/calendar/calendar.go  | Date.IsWeekend                    | gap | #282 只有测试在调它（判定走的是 Weekday / Kind，不经这一处）
+internal/calendar/memory.go    | MemorySource.AddDay               | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
+internal/calendar/memory.go    | MemorySource.SetDefaultRange      | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
+internal/calendar/memory.go    | MemorySource.SetYearState         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
+internal/calendar/peak.go      | Calendar.PeakAt                   | gap | #205 峰谷计价没有生产调用方（接线之后 deadcode 也不再提醒它）
+internal/catalog/admin.go      | Admin.Delete                      | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
+internal/catalog/admin.go      | Admin.DeleteAlias                 | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
+internal/catalog/admin.go      | Admin.UpdateAlias                 | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
+internal/catalog/catalog.go    | Catalog.Model                     | gap | #158 管理面的写入路径用它读回来核对，那个入口还没有
+internal/catalog/catalog.go    | Catalog.UpstreamModel             | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
+internal/channel/anthropicadapter/adapter.go | Adapter.ListModels   | gap | #282 channel.Adapter 的接口方法，生产里没有调用点（还没有拉取上游模型列表的入口）
+internal/channel/anthropicadapter/adapter.go | Adapter.Quota        | gap | #282 channel.Adapter 的接口方法，生产里没有调用点（额度查询还没接线）
+internal/channel/openaiadapter/adapter.go | Adapter.ListModels      | gap | #282 channel.Adapter 的接口方法，生产里没有调用点（还没有拉取上游模型列表的入口）
+internal/channel/openaiadapter/adapter.go | Adapter.Quota           | gap | #282 channel.Adapter 的接口方法，生产里没有调用点（额度查询还没接线）
+internal/config/config.go      | Config.PrimaryMasterKey           | gap | #282 只有测试在调它；生产读主密钥走的是装配处直接取列表，不经这一处
+internal/ledger/account.go     | Account.ID                        | gap | #282 只有测试在调它（孪生的 UserID 在生产里用到）
+internal/money/money.go        | Amount.ClampZero                  | gap | #282 金额库的运算面：负数归零；目前只有测试在调它
+internal/money/money.go        | Amount.DivInt                     | gap | #282 金额库的运算面：按整数相除；目前只有测试在调它
+internal/money/money.go        | Amount.Units                      | gap | #282 金额库的读取面：最小单位整数；目前只有测试在调它（读库走 Parse，列是 numeric）
+internal/plugin/adapter.go     | UsageFacts.ChannelUsage           | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
+internal/plugin/contract.go    | Result.Failed                     | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/registry.go    | Registry.NewSession               | gap | #216 注册表的查询与开会话；请求路径接上 hook 之前没有生产调用方
+internal/plugin/sandbox/plugin.go | Module.Hooks                   | gap | #282 只有测试在调它；hook 名单在生产里还没有读者
+internal/plugin/session.go     | Session.Failures                  | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go     | Session.OnRequest                 | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go     | Session.OnResponse                | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go     | Session.OnRoute                   | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go     | Session.OnStream                  | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go     | Session.OnUsage                   | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/pricing/admin.go      | Admin.Explain                     | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
+internal/route/route.go        | Router.Score                      | gap | #282 候选打分只有测试在调它（选择走的是 Select）
+internal/snapshot/redact.go    | Redactor.RedactResponseWithTransport | gap | #282 只有测试在调它（生产走的是不带传输层信息的那条路）
+internal/snapshot/redact.go    | Result.SkeletonJSON               | gap | #282 只有测试在调它
+internal/snapshotwire/snapshotwire.go | Collector.RetentionDays    | gap | #282 只有测试在调它
+internal/snapshotwire/snapshotwire.go | Collector.Stats            | gap | #282 丢弃与失败的计数只有测试在读它
+internal/tokens/count.go       | Counter.CountTextEstimated        | gap | #282 强制走估算路径的入口，目前只有测试在调它
+internal/tokens/stream.go      | StreamEstimator.HasMeasured       | gap | #282 与 ObserveMeasured 同一组：这个入口没有接进 gateway，目前只有测试在调它
+internal/tokens/stream.go      | StreamEstimator.ObserveMeasured   | gap | #282 这个入口没有生产调用方：它收的是一个总数，而流里的 usage 分着输入与输出两个数
+internal/tokens/stream.go      | Usage.RequiresReview              | gap | #282 估算复核的判据，没有生产调用方：本包不持有告警通道
+internal/tokens/tokens.go      | Counter.Loaded                    | lib | 能力查询：本机能精确计数的编码集合；目前只有测试在调它（与 Prepare / AvailableEncodings 一组）
+internal/tokens/tokens.go      | Counter.Prepare                   | gap | #259 启动预热没有生产调用方：不预热时第一次精确计数要多付约 40ms
+internal/tokens/tokens.go      | Source.IsExact                    | gap | #282 对账判据，目前只有测试在调它：对账面还没有入口
