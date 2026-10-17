@@ -308,7 +308,21 @@ scripts/check-mutation.sh           # 变异测试（改动计费/账本时）
 「通过」长得一样**——所以 CI 里专门有一道检查确认它们真的跑了（见
 [LESSONS.md](LESSONS.md) 第 16 条）。变异测试也依赖它：`internal/ledger/store`
 被整包跳过后那一包等于没测，脚本因此会拒绝运行（见 [LESSONS.md](LESSONS.md)
-第 17 条）。本地跑集成测试：
+第 17 条）。
+
+**每个连库的测试包跑在自己的库上**（`internal/testdb`）：它按包路径建一个
+`larkax_test_<包路径>`、在上面跑全量迁移、跑完删掉。原先所有包共用 DSN 指向的
+那一个库，而 `go test ./...` 默认并行跑包，于是「A 包的夹具被 B 包看见」只在
+并行窗口里现形。
+
+由此多了两条前提：
+
+- **DSN 里那个角色要有 `CREATEDB`**——助手要连维护库（`postgres`）建库、删库。
+  没有这个权限时它**报错退出**，不是跳过。
+- **DSN 里的库名只当连接信息用**，测试不会写它。所以 DSN 指向一个空库就够了，
+  **不必先手工 `migrate up`**。
+
+本地跑集成测试：
 
 ```sh
 docker run -d --name larkax-pg -e POSTGRES_USER=larkax \
@@ -316,9 +330,10 @@ docker run -d --name larkax-pg -e POSTGRES_USER=larkax \
   -p 127.0.0.1:5432:5432 postgres:16-alpine
 
 export LARKAX_DB_DSN="postgres://larkax:placeholder@127.0.0.1:5432/larkax?sslmode=disable"
-go run ./cmd/larkaxctl migrate up
 go test ./internal/ledger/store/
 ```
+
+（`larkaxctl` 自己要连的那个库仍然要迁移，那是另一回事：`go run ./cmd/larkaxctl migrate up`。）
 
 `golangci-lint` **只开有价值的检查器，不做「全部打开」**——一份报上百条无关警告的
 报告，第二次就没人看了。配置里每一项都有它对应的理由。

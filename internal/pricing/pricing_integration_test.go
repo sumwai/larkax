@@ -11,11 +11,8 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
-
-	"github.com/sumwai/larkax/internal/migrate"
 	"github.com/sumwai/larkax/internal/pipeline"
+	"github.com/sumwai/larkax/internal/testdb"
 )
 
 // 规则的匹配是 SQL 的活，所以这一层要真的连库。
@@ -30,31 +27,11 @@ import (
 // 长得一样**，所以 CI 里有一道专门确认它真的跑了的门。
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-
-	dsn := os.Getenv("LARKAX_DB_DSN")
-	if dsn == "" {
-		t.Skip("未设置 LARKAX_DB_DSN，跳过集成测试（CI 里会跑）")
-	}
-
-	handle, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("打开数据库失败: %v", err)
-	}
-	t.Cleanup(func() { _ = handle.Close() })
-
-	if err := handle.PingContext(context.Background()); err != nil {
-		t.Skipf("连不上数据库，跳过集成测试: %v", err)
-	}
-
-	goose.SetBaseFS(migrate.FS())
-	if err := migrate.SetDialect("postgres"); err != nil {
-		t.Fatalf("设置方言失败: %v", err)
-	}
-	if err := goose.UpContext(context.Background(), handle, "."); err != nil {
-		t.Fatalf("应用迁移失败: %v", err)
-	}
-	return handle
+	return testdb.Open(t)
 }
+
+// TestMain 给这个包建一个独立的库，跑完删掉（见 internal/testdb）。
+func TestMain(m *testing.M) { os.Exit(testdb.Main(m)) }
 
 // 每个用例用独立的标识，避免彼此干扰：同一个库上跑第二次 `go test` 时
 // 纯计数会从头开始，撞上上一次留下的行。
