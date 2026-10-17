@@ -196,9 +196,11 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 	var (
 		// measured 是上游在流里带过的实测用量。
 		//
-		// 这里**不用 est.ObserveMeasured**：那个入口收的是一个总数（整次
-		// 请求的 token 量），而流里的 usage 分着输入与输出两个数——计费对
-		// 两者用不同的单价，压成一个总数就再也拆不回来，账会算错。
+		// 它由本文件持有而不是交给 `tokens.StreamEstimator`：那个累加器
+		// 的结论是一个总数（Count），而流里的 usage 分着输入与输出、还带
+		// 缓存与推理的明细——计费对它们用不同的单价，压成一个总数就再也
+		// 拆不回来，账会算错。所以「实测优先」这条判据落在 streamUsage 上，
+		// 估算器只负责「拿不到实测值」那一半。
 		measured *channel.Usage
 		// started 表示已经向客户端吐过内容。它决定中途失败是「换个渠道
 		// 重来」还是「如实告诉客户端被截断」。
@@ -295,7 +297,6 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 			}
 		case "done":
 			done = true
-			est.ObserveDone()
 		case "error":
 			if ev.Err != nil {
 				streamErr = ev.Err

@@ -247,23 +247,6 @@ func TestCacheKeepsHotEntries(t *testing.T) {
 	}
 }
 
-// TestCacheInvalidate 验证停用规则时能丢掉它的缓存。
-func TestCacheInvalidate(t *testing.T) {
-	c := NewCache(8)
-	if _, err := c.Get("rule-1@v1", `{"prompt": 1.0}`); err != nil {
-		t.Fatal(err)
-	}
-	if c.Len() != 1 {
-		t.Fatalf("条目数 = %d", c.Len())
-	}
-	c.Invalidate("rule-1@v1")
-	if c.Len() != 0 {
-		t.Errorf("作废之后条目数 = %d，期望 0", c.Len())
-	}
-	// 作废不存在的键不该 panic。
-	c.Invalidate("nope")
-}
-
 // TestCacheFailureNotCached 验证编译失败的规则不进缓存。
 //
 // 失败的规则是商家写错的中间态；把失败也缓存等于给每一条写错的规则
@@ -332,9 +315,6 @@ func TestCacheConcurrent(t *testing.T) {
 				if _, err := c.Get(key, `{"prompt": 0.0000015}`); err != nil {
 					t.Error(err)
 					return
-				}
-				if i%7 == 0 {
-					c.Invalidate(key)
 				}
 			}
 		}(w)

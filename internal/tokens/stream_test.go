@@ -8,43 +8,6 @@ import (
 // 这些用例覆盖的正是本包存在的理由：客户端在流式响应中途断开，
 // 上游的 usage 永远不会到达，只能本地算一个数并如实标注。
 
-func TestStreamEstimatorNormalCompletionUsesMeasured(t *testing.T) {
-	c := newPrepared(t)
-	e := NewStreamEstimator(c, "gpt-4o")
-	e.ObserveRequest("What is the capital of France?", 1, 0)
-	e.ObserveDelta("The capital of France is Paris.")
-	e.ObserveMeasured(Count{Tokens: 42})
-	e.ObserveDone()
-
-	u := e.Result()
-	if !u.Complete {
-		t.Error("正常结束且带 usage 时应 Complete")
-	}
-	if u.Input.Source != SourceMeasured {
-		t.Errorf("输入来源 = %v, 期望 measured", u.Input.Source)
-	}
-	if u.Input.Tokens != 42 {
-		t.Errorf("输入 = %d, 期望 42（实测值覆盖估算）", u.Input.Tokens)
-	}
-}
-
-func TestStreamEstimatorMeasuredDoesNotDoubleCountInput(t *testing.T) {
-	// 覆盖而不是相加。写错的表现是「流里带 usage 的请求，输入翻倍」，
-	// 而它不会触发任何错误，只会让账单变高。
-	c := newPrepared(t)
-	e := NewStreamEstimator(c, "gpt-4o")
-	e.ObserveRequest(strings.Repeat("long prompt content ", 50), 1, 0)
-	localInput := e.input.Tokens
-	if localInput < 100 {
-		t.Fatalf("构造失败：本地输入只有 %d token", localInput)
-	}
-	e.ObserveMeasured(Count{Tokens: 200})
-	u := e.Result()
-	if u.Input.Tokens != 200 {
-		t.Errorf("输入 = %d, 期望 200（不是 200 + 本地估算 %d）", u.Input.Tokens, localInput)
-	}
-}
-
 func TestStreamEstimatorMidStreamDisconnect(t *testing.T) {
 	// 核心场景：收了几个增量就断了，流里没有 usage。
 	c := newPrepared(t)
@@ -53,12 +16,8 @@ func TestStreamEstimatorMidStreamDisconnect(t *testing.T) {
 	e.ObserveDelta("The document ")
 	e.ObserveDelta("describes a ")
 	e.ObserveDelta("model routing gateway.")
-	// 没有 ObserveMeasured，也没有 ObserveDone——客户端断了。
 
 	u := e.Result()
-	if u.Complete {
-		t.Error("中途断开时不应 Complete——这笔账要按估算处理")
-	}
 	if u.Output.Tokens < 1 {
 		t.Error("已收到的内容必须计入输出")
 	}
@@ -67,24 +26,6 @@ func TestStreamEstimatorMidStreamDisconnect(t *testing.T) {
 	}
 	if u.Note == "" {
 		t.Error("应给出「为什么这个数是本地算的」的说明")
-	}
-}
-
-func TestStreamEstimatorNoUsageOnNormalEnd(t *testing.T) {
-	// 正常结束但上游没带 usage——同样要退到本地算。
-	// 「正常结束」与「用量是实测的」是两件事。
-	c := newPrepared(t)
-	e := NewStreamEstimator(c, "gpt-4o")
-	e.ObserveRequest("hi", 1, 0)
-	e.ObserveDelta("hello there")
-	e.ObserveDone()
-
-	u := e.Result()
-	if u.Complete {
-		t.Error("没有 usage 时 Complete 必须为 false，否则调用方会以为可以对账")
-	}
-	if u.Output.Tokens < 1 {
-		t.Error("输出必须被计入")
 	}
 }
 
@@ -192,66 +133,21 @@ func TestStreamEstimatorNilMethodsDoNotPanic(t *testing.T) {
 	e.ObserveRequest("x", 1, 1)
 	e.ObserveDelta("x")
 	e.ObserveToolCall("id", "name", "args")
-	e.ObserveMeasured(Count{Tokens: 1})
-	e.ObserveDone()
 	if u := e.Result(); u.Total().Tokens != 0 {
 		t.Errorf("nil 累加器应返回零用量, 得到 %+v", u)
 	}
 }
 
-func TestStreamEstimatorHasMeasured(t *testing.T) {
-	c := newPrepared(t)
-	e := NewStreamEstimator(c, "gpt-4o")
-	if e.HasMeasured() {
-		t.Error("初始状态不该有实测值")
-	}
-	e.ObserveMeasured(Count{Tokens: 1})
-	if !e.HasMeasured() {
-		t.Error("给了实测值之后 HasMeasured 应为 true")
-	}
-
-	var nilE *StreamEstimator
-	if nilE.HasMeasured() {
-		t.Error("nil 累加器不该报告已有实测值")
-	}
-}
-
-func TestUsageTotalAndReview(t *testing.T) {
+func TestUsageTotal(t *testing.T) {
 	u := Usage{
-		Input:    Count{Tokens: 1000, Source: SourceEstimated},
-		Output:   Count{Tokens: 500, Source: SourceEstimated},
-		Complete: false,
+		Input:  Count{Tokens: 1000, Source: SourceEstimated},
+		Output: Count{Tokens: 500, Source: SourceEstimated},
 	}
 	if got := u.Total().Tokens; got != 1500 {
 		t.Errorf("合计 = %d, 期望 1500", got)
 	}
 	if got := u.Total().Source; got != SourceEstimated {
 		t.Errorf("合计来源 = %v, 期望 estimated", got)
-	}
-	if !u.RequiresReview() {
-		t.Error("量大的估算值应要求人工复核")
-	}
-
-	// 实测值不需要复核——它可以拿去对账。
-	measured := Usage{Input: Count{Tokens: 5000, Source: SourceMeasured}, Complete: true}
-	if measured.RequiresReview() {
-		t.Error("实测值不需要人工复核")
-	}
-
-	// 小额估算也不值得复核：一个每次都报的告警第三次就没人看了。
-	small := Usage{Input: Count{Tokens: 5, Source: SourceEstimated}}
-	if small.RequiresReview() {
-		t.Error("小额估算不该触发复核")
-	}
-
-	// Complete 但输出来源是估算（正常结束却没带 usage）：仍要复核。
-	mixed := Usage{
-		Input:    Count{Tokens: 2000, Source: SourceMeasured},
-		Output:   Count{Tokens: 2000, Source: SourceEstimated},
-		Complete: false,
-	}
-	if !mixed.RequiresReview() {
-		t.Error("输出来源是估算且量大时应要求复核")
 	}
 }
 

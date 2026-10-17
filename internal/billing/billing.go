@@ -22,7 +22,6 @@ package billing
 import (
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/money"
@@ -65,6 +64,10 @@ func (u Usage) TotalTokens() int64 {
 //
 // 空用量是有意义的信号：它通常意味着上游返回了错误，或者解析没读到 usage。
 // 计费层据此区分「这次真的没用 token」与「我们没读到用量」。
+//
+// **目前没有生产调用方**：上面那句话描述的区分还没有一层做出来，而它与 #267
+// 是同一处缺口的两面——非流式的 billing_path 今天分不开「上游没报 usage」与
+// 「上游报了 0」。那一处修的时候应当把本方法一起用上，而不是另造一个判据。
 func (u Usage) IsEmpty() bool { return u.TotalTokens() == 0 && len(u.UnitCounts) == 0 }
 
 // Prices 是各项单价。
@@ -90,24 +93,6 @@ type Prices struct {
 	//
 	// 由 internal/billing/expr 求值规则时填——只有它知道规则里到底写了哪些键。
 	Declared map[string]bool
-}
-
-// Rule 是一条计价规则。
-//
-// Expr 是规则源码，由计价引擎求值。把源码留在规则里而不是编译成函数：
-// 历史账单要能解释「当时用的是哪条规则」，而一份可读的源码比一个函数指针
-// 更能满足这一点。
-type Rule struct {
-	ID       int64
-	Name     string
-	Scope    string
-	Priority int
-	Expr     string
-	// Prices 是由规则求值得到的单价。规则可以是任意表达式（分时、阶梯、
-	// 套餐），求值之后落到一组单价上，再乘用量。
-	Prices Prices
-	// MatchedAt 是这次求值适用的时间点，用于事后复算。
-	MatchedAt time.Time
 }
 
 // Breakdown 是一次计费的明细。

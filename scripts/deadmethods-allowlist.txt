@@ -30,7 +30,7 @@
 #   命令      scripts/check-deadmethods.sh
 #             （扫描起点由 cmd/ 自动发现，当前是 ./cmd/larkax 与 ./cmd/larkaxctl）
 #   工具      go（版本随 go.mod；判据是脚本里嵌的那份 AST 扫描器）
-#   条数      41，与脚本里的 MAX_ENTRIES_DEFAULT 一致
+#   条数      32，与脚本里的 MAX_ENTRIES_DEFAULT 一致
 #
 # # 这份清单与 scripts/deadcode-allowlist.txt 的关系
 #
@@ -48,10 +48,14 @@
 #
 # # 关于 #282
 #
-# 下面有一批 gap 挂的是 #282。那个 issue 的正文只点名了四个符号，而这一轮扫出来的
-# 比它多得多——**它现在是这一类缺口的收容所**。挂它的每一条都写着「只有测试在调」，
+# 下面有一批 gap 挂的是 #282。那个 issue 的正文只点名了四个符号，而扫出来的比它多
+# 得多——**它现在是这一类缺口的收容所**。挂它的每一条都写着「只有测试在调」，
 # 逐条接线或删除时，#282 的正文要跟着这份清单一起更新，否则「这一条为什么还在」
 # 答不上来。
+#
+# 它**不能关**：这一批处置完之后，挂 #282 的还有 22 条（`money.Amount.*`、
+# `route.Router.Score`、`snapshot.*`、`calendar.Calendar.At`、`channel.*Adapter.ListModels`
+# 一类）。
 #
 # 48 之后减了 4（#262）：`Registry.NewSession`、`Session.OnRequest`、
 # `Session.OnResponse`、`Session.Failures` 随请求侧的 hook 接上而有了生产调用点。
@@ -66,13 +70,19 @@
 # 生产调用点（`cmd/larkax` 的 `warmVocab` 调 `Prepare`，它自己读 `Loaded` 打日志）。
 # 这两个是**真的接上了**，不是被分析器的近似判成可达。
 #
+# 41 之后减了 3（#264）：`Session.OnStream` / `Session.OnUsage` / `UsageFacts.ChannelUsage`
+# 随 `onStream` / `onUsage` 接进请求路径而有了生产调用点。
+#
+# 38 之后减了 6（#282）：`Cache.Invalidate` / `Program.BranchCount` / `Program.Source` /
+# `StreamEstimator.HasMeasured` / `StreamEstimator.ObserveMeasured` / `Usage.RequiresReview`
+# 逐条核过调用点之后删掉——前三条注释里那条路不存在或与调用方自己的输入冗余，
+# 后三条被 gateway 的两条实测路取代。同批的 `Usage.IsEmpty` **保留**，
+# 理由栏从 `#282` 改挂 `#267`（语义与那条缺口是同一处，不许提前动）。
+#
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES_DEFAULT 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
-internal/billing/billing.go    | Usage.IsEmpty                     | gap | #282 注释说计费层据此区分「这次真的没用 token」与「我们没读到用量」，而没有任何一层据此区分（与 #267 是同一处缺口的两面）
+internal/billing/billing.go    | Usage.IsEmpty                     | gap | #267 与那条「非流式的 billing_path 分不开『上游没报 usage』与『上游报了 0』」是同一处缺口的两面；那一处修的时候用它兑现，语义不许提前动
 internal/billing/expr/compile.go | Cache.GetWithGlobals            | gap | #278 注入常量 Globals 那条链路没有生产入口；它是 CompileWithGlobals 唯一的调用点，掩蔽沿调用链传到了那个自由函数
-internal/billing/expr/compile.go | Cache.Invalidate                | gap | #282 注释写「规则被停用或删除时调用」，而调用点不存在（实际靠 CacheKey 里的源码哈希自然换键）
-internal/billing/expr/compile.go | Program.BranchCount             | gap | #282 诊断用的三元分支计数，只有测试在读它
-internal/billing/expr/compile.go | Program.Source                  | gap | #282 返回原始表达式源码，只有测试在读它
 internal/calendar/calendar.go  | Calendar.At                       | gap | #282 按时刻判定当天状态；目前只有测试在调它
 internal/calendar/calendar.go  | Date.IsWeekend                    | gap | #282 只有测试在调它（判定走的是 Weekday / Kind，不经这一处）
 internal/calendar/memory.go    | MemorySource.AddDay               | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
@@ -102,7 +112,4 @@ internal/snapshot/redact.go    | Result.SkeletonJSON               | gap | #282 
 internal/snapshotwire/snapshotwire.go | Collector.RetentionDays    | gap | #282 只有测试在调它
 internal/snapshotwire/snapshotwire.go | Collector.Stats            | gap | #282 丢弃与失败的计数只有测试在读它
 internal/tokens/count.go       | Counter.CountTextEstimated        | gap | #282 强制走估算路径的入口，目前只有测试在调它
-internal/tokens/stream.go      | StreamEstimator.HasMeasured       | gap | #282 与 ObserveMeasured 同一组：这个入口没有接进 gateway，目前只有测试在调它
-internal/tokens/stream.go      | StreamEstimator.ObserveMeasured   | gap | #282 这个入口没有生产调用方：它收的是一个总数，而流里的 usage 分着输入与输出两个数
-internal/tokens/stream.go      | Usage.RequiresReview              | gap | #282 估算复核的判据，没有生产调用方：本包不持有告警通道
 internal/tokens/tokens.go      | Source.IsExact                    | gap | #282 对账判据，目前只有测试在调它：对账面还没有入口

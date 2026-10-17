@@ -315,9 +315,8 @@ func TestCountStringIncludesSource(t *testing.T) {
 
 func TestUsageStringIncludesSource(t *testing.T) {
 	u := Usage{
-		Input:    Count{Tokens: 1, Source: SourceMeasured},
-		Output:   Count{Tokens: 2, Source: SourceEstimated},
-		Complete: false,
+		Input:  Count{Tokens: 1, Source: SourceMeasured},
+		Output: Count{Tokens: 2, Source: SourceEstimated},
 	}
 	s := fmt.Sprint(u)
 	if !strings.Contains(s, "estimated") {
