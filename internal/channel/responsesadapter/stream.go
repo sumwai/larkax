@@ -429,8 +429,12 @@ func (ev responsesStreamEvent) itemKey() (itemID string, outputIndex *int) {
 // annotation 取出这条事件里的引用标注。
 //
 // ok 为 false 有三种情况：事件里没有 annotation 字段、它不是 JSON 对象、
-// 或者它是个空对象。三者在处置上相同（没有可转发的东西），而调用方据
-// len(Annotation) 区分「本来就是空的」与「给了但解析不出来」。
+// 或者它是个空对象。三者在处置上相同（没有可转发的东西）。
+//
+// 调用方据 len(Annotation) 只能区分「字段缺失」与「字段在」：`null` 与空
+// 对象都解不出东西，都会走那条 warn 分支（见上面的 case）。那两条 warn 的
+// 措辞因此不是「解析失败」的严格含义——它说的是「字段给了，但里面没有
+// 可转发的内容」。
 func (ev responsesStreamEvent) annotation() (map[string]any, bool) {
 	if len(ev.Annotation) == 0 {
 		return nil, false

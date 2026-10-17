@@ -793,7 +793,7 @@ type responsesStream struct {
 	//
 	// 它是收尾事件里 output[].content[].annotations 的来源：增量事件与最终
 	// 那一份必须同序同内容，否则客户端按 annotation_index 拼出来的结果与
-	// 收尾时整份替换掉的结果对不上。与非流式那条路（response.go 的
+	// 收尾时整份替换掉的结果对不上。与非流式那条路（responses.go 的
 	// responsesOutput）是同一个口径。
 	annotations []map[string]any
 
