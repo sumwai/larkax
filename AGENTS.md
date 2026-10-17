@@ -2,7 +2,9 @@
 
 本文件记录 larkax 项目的长期约定：开发流程、协作规则、代码与文档要求。
 
-开发中遇到的问题与解决方案记录在 [LESSONS.md](LESSONS.md)。**开始任何工作前先读它**，那里有踩过的坑，能避免重犯。
+开发中遇到的问题与解决方案按条拆在 [`lessons/`](lessons/)，根目录的 [LESSONS.md](LESSONS.md) 是索引。
+**开始任何工作前先读索引**，按「什么时候读」那一列找到与手上的活相关的条目，再点编号进正文——
+那里有踩过的坑，能避免重犯，但不必整份读一遍。
 
 ## 沟通语言
 
@@ -182,6 +184,7 @@ Review 不只看代码逻辑。让 agent **扮演对项目一无所知的 review
 
 | 要找什么 | 在哪 |
 |---|---|
+| 开发中踩过的坑（按条，含「什么时候读」） | [LESSONS.md](LESSONS.md) 索引 → [lessons/](lessons/) 正文 |
 | 本地开发环境搭建 | [docs/development.md](docs/development.md) |
 | 测试与 lint 的具体命令 | 本文件的「Lint」一节 |
 | 发布流程的操作细节 | [docs/versioning.md](docs/versioning.md) |

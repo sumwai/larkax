@@ -228,5 +228,6 @@ in [NOTICE](NOTICE), along with attribution for other dependencies.
 ## Contributing
 
 See [AGENTS.md](AGENTS.md) for development conventions, the workflow, and the rules
-this repository follows. Read [LESSONS.md](LESSONS.md) before starting work — it
-records problems already encountered and how they were resolved.
+this repository follows. Before starting work, read the [LESSONS.md](LESSONS.md)
+index and open the entries it points at in [`lessons/`](lessons/) — they record
+problems already encountered and how they were resolved.
