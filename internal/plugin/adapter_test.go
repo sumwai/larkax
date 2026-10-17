@@ -310,7 +310,7 @@ func TestChannelUsageKeepsReasoningScope(t *testing.T) {
 
 	// 声明「已含」：拆成 60 个输出 + 40 个推理。
 	// 60*8e-6 + 40*1e-5 = 0.00088
-	got := billing.Compute(billing.FromChannelUsage(merged.ChannelUsage(true)), prices)
+	got := billing.ComputeWithCharges(billing.FromChannelUsage(merged.ChannelUsage(true)), prices, billing.Charges{})
 	if got.Total.Cmp(money.MustParse("0.00088")) != 0 {
 		t.Errorf("声明「已含」时总额 = %s，期望 0.00088", got.Total)
 	}
@@ -318,7 +318,7 @@ func TestChannelUsageKeepsReasoningScope(t *testing.T) {
 	// 声明「不含」：两项各算各的，100*8e-6 + 40*1e-5 = 0.0012。
 	// 多出来的 0.00032 正是那 40 个 token 被收的第二遍——口径丢成零值时
 	// 得到的就是这个数，而它不会报错，只会在账单上偏高。
-	got = billing.Compute(billing.FromChannelUsage(merged.ChannelUsage(false)), prices)
+	got = billing.ComputeWithCharges(billing.FromChannelUsage(merged.ChannelUsage(false)), prices, billing.Charges{})
 	if got.Total.Cmp(money.MustParse("0.0012")) != 0 {
 		t.Errorf("声明「不含」时总额 = %s，期望 0.0012", got.Total)
 	}

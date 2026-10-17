@@ -241,6 +241,20 @@ func (c *logCapture) text() string {
 	return c.buf.String()
 }
 
+// adoptLogCapture 把捕获器装成进程默认日志器，并在用例结束时还原，
+// 返回一个干净的 context。
+//
+// 被测代码的日志走 observe.FromContext，而它的日志器**只**来自 slog 的
+// 包级默认（见 observe.AdoptAsDefault）——往 context 里塞日志器那条路
+// 已经没有了，所以捕获器得从那条路进去。
+func adoptLogCapture(t *testing.T, c *logCapture) context.Context {
+	t.Helper()
+	original := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(original) })
+	observe.AdoptAsDefault(c.logger())
+	return context.Background()
+}
+
 // ── 次序的观测点 ──────────────────────────────────────────────────────
 //
 // 「写回结局」与「写出响应」谁在前，从最终状态上看不出来：happy path 上
@@ -644,7 +658,7 @@ func TestIdempotentMissingRecordDoesNotLogWriteFailure(t *testing.T) {
 	store.writeErr = idempotency.ErrNotFound
 
 	logs := &logCapture{}
-	ctx := observe.WithLogger(context.Background(), logs.logger())
+	ctx := adoptLogCapture(t, logs)
 
 	rec := postIdemCtx(ctx, h, PathChatCompletions, validBody, "key-no-record")
 	if rec.Code != http.StatusOK {
@@ -681,7 +695,7 @@ func TestIdempotentWriteFailureWithholdsResponse(t *testing.T) {
 	store.writeErr = errors.New("placeholder: 数据库写不进去")
 
 	logs := &logCapture{}
-	ctx := observe.WithLogger(context.Background(), logs.logger())
+	ctx := adoptLogCapture(t, logs)
 
 	rec := postIdemCtx(ctx, h, PathChatCompletions, validBody, "key-write-fail")
 

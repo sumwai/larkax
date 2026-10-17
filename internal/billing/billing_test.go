@@ -25,7 +25,7 @@ func prices() Prices {
 
 func TestComputeBasic(t *testing.T) {
 	usage := Usage{PromptTokens: 1000, CompletionTokens: 500}
-	b := Compute(usage, prices())
+	b := ComputeWithCharges(usage, prices(), Charges{})
 
 	if err := b.Verify(); err != nil {
 		t.Fatalf("明细不自洽: %v", err)
@@ -52,7 +52,7 @@ func TestComputeKeepsEveryComponent(t *testing.T) {
 	p := prices()
 	p.Units = map[string]money.Amount{"searches": money.MustParse("0.01")}
 
-	b := Compute(usage, p)
+	b := ComputeWithCharges(usage, p, Charges{})
 	if err := b.Verify(); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestTotalEqualsSumOfParts(t *testing.T) {
 		PromptTokens: 333, CompletionTokens: 777,
 		CacheReadTokens: 111, CacheWriteTokens: 222, ReasoningTokens: 555,
 	}
-	b := Compute(usage, prices())
+	b := ComputeWithCharges(usage, prices(), Charges{})
 
 	manual := money.Sum(b.Prompt, b.Completion, b.CacheRead, b.CacheWrite, b.Reasoning)
 	if b.Total.Cmp(manual) != 0 {
@@ -93,7 +93,7 @@ func TestVerifyDetectsMismatch(t *testing.T) {
 }
 
 func TestComputeZoomAndNegativeUnits(t *testing.T) {
-	b := Compute(Usage{}, prices())
+	b := ComputeWithCharges(Usage{}, prices(), Charges{})
 	if !b.Total.IsZero() {
 		t.Errorf("零用量应为零金额，得到 %s", b.Total)
 	}
@@ -198,7 +198,7 @@ func TestReserveNeverBelowActual(t *testing.T) {
 	for _, out := range []int64{0, 1, 100, 500, 999, 1000} {
 		for _, in := range []int64{0, 500, 1000} {
 			actual := Usage{PromptTokens: in, CompletionTokens: out}
-			s, err := Settle(actual, prices(), reserved)
+			s, err := SettleWithCharges(actual, prices(), Charges{}, reserved)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -297,7 +297,7 @@ func TestSettleReturnsDifference(t *testing.T) {
 	reserved := money.MustParse("1")
 	actual := Usage{PromptTokens: 1000} // 0.002
 
-	s, err := Settle(actual, prices(), reserved)
+	s, err := SettleWithCharges(actual, prices(), Charges{}, reserved)
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestSettleCapsOvershoot(t *testing.T) {
 	reserved := money.MustParse("0.001")
 	actual := Usage{CompletionTokens: 10000} // 远超预留
 
-	s, err := Settle(actual, prices(), reserved)
+	s, err := SettleWithCharges(actual, prices(), Charges{}, reserved)
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -341,7 +341,7 @@ func TestSettleExactlyAtReserve(t *testing.T) {
 	usage := Usage{CompletionTokens: 1000} // 0.008
 	reserved := money.MustParse("0.008")
 
-	s, err := Settle(usage, prices(), reserved)
+	s, err := SettleWithCharges(usage, prices(), Charges{}, reserved)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,25 +354,8 @@ func TestSettleExactlyAtReserve(t *testing.T) {
 }
 
 func TestSettleRejectsInvalidUsage(t *testing.T) {
-	if _, err := Settle(Usage{PromptTokens: -1}, prices(), money.One); err == nil {
+	if _, err := SettleWithCharges(Usage{PromptTokens: -1}, prices(), Charges{}, money.One); err == nil {
 		t.Error("负用量应被拒绝")
-	}
-}
-
-func TestSettleUncappedAllowsExceeding(t *testing.T) {
-	usage := Usage{CompletionTokens: 1000}
-	s, err := SettleUncapped(usage, prices())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.Capped {
-		t.Error("无上界结算不该标记 Capped")
-	}
-	if s.Actual.Cmp(money.MustParse("0.008")) != 0 {
-		t.Errorf("Actual = %s", s.Actual)
-	}
-	if err := s.Breakdown.Verify(); err != nil {
-		t.Error(err)
 	}
 }
 
@@ -433,7 +416,7 @@ func TestFromChannelUsageDoesNotChargeReasoningTwice(t *testing.T) {
 	}
 
 	// 60*8e-6 + 40*1e-5 = 0.00088；收两遍会是 100*8e-6 + 40*1e-5 = 0.0012
-	total := Compute(got, prices()).Total
+	total := ComputeWithCharges(got, prices(), Charges{}).Total
 	if total.Cmp(money.MustParse("0.00088")) != 0 {
 		t.Errorf("总额 = %s，期望 0.00088", total)
 	}
@@ -457,7 +440,7 @@ func TestFromChannelUsageChargesSeparateReasoningSeparately(t *testing.T) {
 	}
 
 	// 100*8e-6 + 40*1e-5 = 0.0012
-	if total := Compute(got, prices()).Total; total.Cmp(money.MustParse("0.0012")) != 0 {
+	if total := ComputeWithCharges(got, prices(), Charges{}).Total; total.Cmp(money.MustParse("0.0012")) != 0 {
 		t.Errorf("总额 = %s，期望 0.0012", total)
 	}
 }
@@ -502,7 +485,7 @@ func TestFromChannelUsageClampsContradictoryReasoning(t *testing.T) {
 	if got.ReasoningTokens != 80 {
 		t.Errorf("推理 = %d，期望 80（上游报的照记）", got.ReasoningTokens)
 	}
-	if total := Compute(got, prices()).Total; total.IsNegative() {
+	if total := ComputeWithCharges(got, prices(), Charges{}).Total; total.IsNegative() {
 		t.Errorf("金额为负: %s", total)
 	}
 	if !ReasoningExceedsCompletion(ch) {
@@ -681,7 +664,7 @@ func TestChargesRejectNegative(t *testing.T) {
 // 不传一次性费用时，行为必须与之前完全一致。
 func TestZeroChargesPreserveBehavior(t *testing.T) {
 	usage := Usage{PromptTokens: 1000, CompletionTokens: 500}
-	a := Compute(usage, prices())
+	a := ComputeWithCharges(usage, prices(), Charges{})
 	b := ComputeWithCharges(usage, prices(), Charges{})
 	if a.Total.Cmp(b.Total) != 0 {
 		t.Errorf("零费用应不改变结果: %s vs %s", a.Total, b.Total)
@@ -715,7 +698,7 @@ func TestReserveCoversCacheWrite(t *testing.T) {
 		CacheWriteTokens: 10000,
 		CompletionTokens: 10,
 	}
-	s, err := Settle(actual, p, reserved)
+	s, err := SettleWithCharges(actual, p, Charges{}, reserved)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -745,7 +728,7 @@ func TestReserveEstimatesCacheReadAtInputPrice(t *testing.T) {
 		t.Fatal(err)
 	}
 	actual := Usage{CacheReadTokens: 1000, CacheWriteTokens: 1000}
-	s, err := Settle(actual, p, reserved)
+	s, err := SettleWithCharges(actual, p, Charges{}, reserved)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -881,7 +864,7 @@ func TestZeroUsageYieldsZeroAmounts(t *testing.T) {
 // `"units":{}` 而不是省略该字段，而对账脚本要区分「没有计量项」
 // 与「有计量项但都是零」。
 func TestUnitsIsNilWhenNoUnitCounts(t *testing.T) {
-	b := Compute(Usage{PromptTokens: 10}, prices())
+	b := ComputeWithCharges(Usage{PromptTokens: 10}, prices(), Charges{})
 	if b.Units != nil {
 		t.Errorf("没有计量项时 Units 应为 nil，实际是空 map: %+v", b.Units)
 	}

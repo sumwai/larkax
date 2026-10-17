@@ -150,6 +150,9 @@ func (d Date) String() string {
 // cmp 比较两个日期的先后，返回 -1 / 0 / 1。
 //
 // 不用时刻相减：那要绕开时区与夏令时，而这里问的纯粹是公历日期的先后。
+//
+// 目前只有 MemorySource 在调它，而那个类型是测试夹具（见 memory.go）——
+// 所以这一条也只被测试走到。生产里比较日期用的是 Date 的取值本身。
 func (d Date) cmp(o Date) int {
 	switch {
 	case d.Year != o.Year:
@@ -162,6 +165,9 @@ func (d Date) cmp(o Date) int {
 	return 0
 }
 
+// sign 把差值的符号取出来。
+//
+// 只被 Date.cmp 调用，所以与它同一条处境：目前只有测试走到（见 cmp）。
 func sign(n int) int {
 	switch {
 	case n > 0:

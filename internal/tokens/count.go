@@ -81,6 +81,8 @@ func (c *Counter) CountTextEstimated(model, text string) Count {
 //
 // tokens 为负时按 0 处理并返回错误：负 token 只可能来自解析错误，
 // 放过去会算出一笔负数消费。
+//
+// **目前只有测试在调它**：上游实测 usage 那条路还没有接进生产，生产走的是估算路径。
 func RecordMeasured(model string, tokens int64) (Count, error) {
 	if tokens < 0 {
 		return Count{}, errors.New("实测 token 数为负，疑似解析错误")
@@ -128,4 +130,6 @@ func EstimatedTokens(model, text string) int64 {
 //
 // 它是对 BoundsFor(FamilyOf(model)) 的便捷包装：调用方手里通常有模型名
 // 而不是族，让它们各写一遍 FamilyOf 迟早会有人漏掉。
+//
+// 目前只有测试在调它，原因与 BoundsFor 相同。
 func BoundsOf(model string) ErrorBounds { return BoundsFor(FamilyOf(model)) }

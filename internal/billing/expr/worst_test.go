@@ -412,8 +412,8 @@ func TestWorstCaseIsMonotoneInQuantity(t *testing.T) {
 			t.Fatalf("%+v: %v", usage, err)
 		}
 
-		actualAmount := billing.Compute(usage, actual.Prices).Total
-		worstAmount := billing.Compute(usage, worst.Prices).Total
+		actualAmount := billing.ComputeWithCharges(usage, actual.Prices, billing.Charges{}).Total
+		worstAmount := billing.ComputeWithCharges(usage, worst.Prices, billing.Charges{}).Total
 		if worstAmount.Cmp(actualAmount) < 0 {
 			t.Errorf("用量 %+v: 上界金额 %s 小于实际 %s", usage, worstAmount, actualAmount)
 		}
@@ -540,7 +540,7 @@ func TestWorstCaseAmountsAreExact(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got := billing.Compute(env.Usage, res.Prices).Total
+		got := billing.ComputeWithCharges(env.Usage, res.Prices, billing.Charges{}).Total
 		if i == 0 {
 			first = got
 			continue

@@ -57,10 +57,6 @@ func (c *Counter) Inc() { c.v.Add(1) }
 // Value 返回当前值。它只用于测试与断言，不参与渲染之外的逻辑。
 func (c *Counter) Value() uint64 { return c.v.Load() }
 
-// Name 返回指标名。它让「注册表里声明了哪些计数器」这件事可以被遍历，
-// 而不是只能靠人读代码（见 TestEveryDeclaredCounterIsRegistered）。
-func (c *Counter) Name() string { return c.name }
-
 // LabeledCounter 是一族按标签区分的计数器。
 //
 // **标签值必须来自有限集合。** 用户 id、渠道 id、请求 id、模型名都不能
@@ -93,9 +89,6 @@ func (c *LabeledCounter) With(values ...string) *Counter {
 	c.series[key] = ct
 	return ct
 }
-
-// Name 返回指标名。
-func (c *LabeledCounter) Name() string { return c.name }
 
 // samples 取当前全部序列的快照，按标签排序。
 //

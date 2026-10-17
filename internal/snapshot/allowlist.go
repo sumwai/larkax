@@ -36,6 +36,10 @@ const (
 )
 
 // valid 判断方向是否已知。
+//
+// 目前只有测试在调它。**New 不用它**：那里查的是「有没有这个方向的表」
+// （`allowlists[root]`），比「取值是不是那两个常量之一」更强——加了常量
+// 却忘了写表时，valid 会说是，而查表会报错，后者才是想要的结论。
 func (r Root) valid() bool {
 	return r == RootRequest || r == RootResponse
 }
