@@ -16,7 +16,7 @@ import (
 //
 // # 这个缺陷原来的形状
 //
-// 写入路径是齐的（`larkaxctl alias add` 能把别名写进 model_aliases），
+// 写入路径是齐的（`larkaxctl alias create` 能把别名写进 model_aliases），
 // 而请求热路径上一次都不读它——于是上游收到的仍是规范名，别名配了等于没配。
 // 那种状态下，库里那行别名写得完全正确，读别名的函数也有实现、有单测。
 //

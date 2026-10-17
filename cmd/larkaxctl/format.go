@@ -77,7 +77,7 @@ func isFormatFlag(name string) bool {
 // 认不出这个选项，更不会出现「有的命令认、有的命令安静地当没看见」。
 //
 // 代价是这个字面量在**子命令的参数区里**也会被摘走。它没有第二种含义，
-// 而把它当普通参数传下去的场景（`snapshot show` 的 request_id 恰好叫
+// 而把它当普通参数传下去的场景（`snapshot get` 的 request_id 恰好叫
 // `--format`）不值得为它多开一条规则。
 //
 // 认 `--format json` 与 `--format=json` 两种写法，与 flag 包一致。

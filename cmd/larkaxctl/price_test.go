@@ -20,8 +20,8 @@ import (
 // 必须是合法的，否则测的就不是命令那一层了。
 const testExpr = `{"prompt": 0.0000015, "completion": 0.0000075}`
 
-// TestPriceAddRejectsBadFlags 走的是不碰数据库的那几条路径。
-func TestPriceAddRejectsBadFlags(t *testing.T) {
+// TestPriceCreateRejectsBadFlags 走的是不碰数据库的那几条路径。
+func TestPriceCreateRejectsBadFlags(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
@@ -44,7 +44,7 @@ func TestPriceAddRejectsBadFlags(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := runCaptured(t, func() error { return runPriceAdd(tc.args) })
+			err := runCaptured(t, func() error { return runPriceCreate(tc.args) })
 			if err == nil {
 				t.Fatalf("期望报错，却通过了")
 			}
@@ -58,8 +58,8 @@ func TestPriceAddRejectsBadFlags(t *testing.T) {
 	}
 }
 
-// TestPriceAddThenList 钉住计价规则的写入与列举。
-func TestPriceAddThenList(t *testing.T) {
+// TestPriceCreateThenList 钉住计价规则的写入与列举。
+func TestPriceCreateThenList(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 
@@ -106,12 +106,12 @@ func TestPriceAddThenList(t *testing.T) {
 	}
 }
 
-// TestPriceAddDisabledAndUnlimited 钉住两个「零值不是默认值」的地方。
+// TestPriceCreateDisabledAndUnlimited 钉住两个「零值不是默认值」的地方。
 //
 // --disabled 是「明确要一条停用的规则」，不给它时是启用；--models 留空是
 // 「适用于全部模型」（兜底规则），与 channels 的 models 正好相反。
 // 这两处都是「没填」与「填了」必须分得开的地方。
-func TestPriceAddDisabledAndUnlimited(t *testing.T) {
+func TestPriceCreateDisabledAndUnlimited(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 
@@ -128,16 +128,16 @@ func TestPriceAddDisabledAndUnlimited(t *testing.T) {
 	}
 }
 
-// TestPriceAddRejectsBadExpression 钉住「编译不过的表达式进不了库」。
+// TestPriceCreateRejectsBadExpression 钉住「编译不过的表达式进不了库」。
 //
 // 一条编译不过的规则进了库，表现是每个用到它的请求都失败，而失败点在请求
 // 路径上——排查的人会先去怀疑请求。所以它必须被写入路径当场拒掉。
-func TestPriceAddRejectsBadExpression(t *testing.T) {
+func TestPriceCreateRejectsBadExpression(t *testing.T) {
 	testDB(t)
 	setupEnv(t)
 
 	err := runCaptured(t, func() error {
-		return runPriceAdd([]string{
+		return runPriceCreate([]string{
 			"--scope", "platform", "--name", uniqueName("rule"), "--expr", "p * ",
 		})
 	})
@@ -149,16 +149,16 @@ func TestPriceAddRejectsBadExpression(t *testing.T) {
 	}
 }
 
-// TestPriceAddRejectsWildcardModel 钉住通配符模型名。
+// TestPriceCreateRejectsWildcardModel 钉住通配符模型名。
 //
 // 读取路径按元素逐字匹配，`claude-*` 只是一个普通字符串——配了通配的规则
 // 一条都匹配不上，而它不报错，只是静默退到别的价上。
-func TestPriceAddRejectsWildcardModel(t *testing.T) {
+func TestPriceCreateRejectsWildcardModel(t *testing.T) {
 	testDB(t)
 	setupEnv(t)
 
 	err := runCaptured(t, func() error {
-		return runPriceAdd([]string{
+		return runPriceCreate([]string{
 			"--scope", "platform", "--name", uniqueName("rule"), "--expr", testExpr,
 			"--models", "claude-*",
 		})
@@ -188,7 +188,7 @@ func TestPriceUpdateRejectsBadFlags(t *testing.T) {
 		{"--clear-effective-to 与 --effective-to 一起", []string{
 			"--id", "1", "--clear-effective-to", "--effective-to", "2027-01-01T00:00:00Z",
 		}, "只能给一个"},
-		{"--owner 是空串", []string{"--id", "1", "--owner", ""}, "空串"},
+		{"--user 是空串", []string{"--id", "1", "--user", ""}, "空串"},
 		{"--channel 是负数", []string{"--id", "1", "--channel", "-1"}, "无效"},
 		{"--expr 是空串", []string{"--id", "1", "--expr", ""}, "不能为空"},
 		{"--effective-from 是空串", []string{"--id", "1", "--effective-from", ""}, "不能为空"},
@@ -239,7 +239,7 @@ func TestPriceUpdateChangesOnlyGivenFields(t *testing.T) {
 	name := uniqueName("rule")
 	model := uniqueName("model")
 	id := addPriceRule(t, []string{
-		"--scope", "merchant", "--owner", strconv.FormatInt(ownerID, 10),
+		"--scope", "merchant", "--user", strconv.FormatInt(ownerID, 10),
 		"--name", name, "--expr", testExpr,
 		"--models", model, "--priority", "3",
 	})
@@ -307,7 +307,7 @@ func TestPriceUpdateScopeChangeNeedsClearing(t *testing.T) {
 	ownerID := createTestUser(t)
 	id := addPriceRule(t, []string{
 		"--scope", "merchant", "--name", uniqueName("rule"), "--expr", testExpr,
-		"--owner", strconv.FormatInt(ownerID, 10), "--models", uniqueName("model"),
+		"--user", strconv.FormatInt(ownerID, 10), "--models", uniqueName("model"),
 	})
 	idArg := strconv.FormatInt(id, 10)
 
@@ -322,9 +322,9 @@ func TestPriceUpdateScopeChangeNeedsClearing(t *testing.T) {
 		t.Errorf("错误信息应当说清是哪一栏不合法，得到 %v", err)
 	}
 
-	// 把 owner 清掉（--owner 0 就是「改成不挂商家」）之后改得动。
+	// 把 owner 清掉（--user 0 就是「改成不挂商家」）之后改得动。
 	_, _ = captureStreams(t, func() {
-		if err := runPriceUpdate([]string{"--id", idArg, "--scope", "platform", "--owner", "0"}); err != nil {
+		if err := runPriceUpdate([]string{"--id", idArg, "--scope", "platform", "--user", "0"}); err != nil {
 			t.Fatalf("清掉 owner 之后应当改得动: %v", err)
 		}
 	})
@@ -463,7 +463,7 @@ func selectedRuleIs(out string, id int64) bool {
 func addPriceRule(t *testing.T, args []string) int64 {
 	t.Helper()
 	stdout, _ := captureStreams(t, func() {
-		if err := runPriceAdd(args); err != nil {
+		if err := runPriceCreate(args); err != nil {
 			t.Fatalf("price add 失败: %v", err)
 		}
 	})
@@ -619,7 +619,7 @@ func TestPriceWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
 		command string
 		run     func() error
 	}{
-		{"price add", func() error { return runPriceAdd(nil) }},
+		{"price create", func() error { return runPriceCreate(nil) }},
 		{"price update", func() error { return runPriceUpdate(nil) }},
 	}
 

@@ -206,13 +206,13 @@ func TestEmptyListMessages(t *testing.T) {
 			func(w io.Writer) { printChannelList(w, nil, false) }},
 		{"插件", "暂无插件。可使用 larkaxctl plugin publish 添加。",
 			func(w io.Writer) { printPluginList(w, nil) }},
-		{"模型", "暂无模型。可使用 larkaxctl model add 添加。",
+		{"模型", "暂无模型。可使用 larkaxctl model create 添加。",
 			func(w io.Writer) { printModelList(w, nil) }},
-		{"计价规则", "暂无计价规则。可使用 larkaxctl price add 添加。",
+		{"计价规则", "暂无计价规则。可使用 larkaxctl price create 添加。",
 			func(w io.Writer) { printRuleList(w, nil) }},
 		{"API Key", "暂无 API Key。可使用 larkaxctl apikey create 添加。",
 			func(w io.Writer) { printKeyList(w, nil) }},
-		{"别名", "暂无别名。可使用 larkaxctl alias add 添加。",
+		{"别名", "暂无别名。可使用 larkaxctl alias create 添加。",
 			func(w io.Writer) { printAliasList(w, nil) }},
 	}
 

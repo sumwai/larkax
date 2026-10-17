@@ -427,7 +427,7 @@ func TestDecodeSkeletonRejectsNull(t *testing.T) {
 //
 // 一个写错的命令不该先连上生产库再报错——而「连上库之后才发现参数不对」
 // 还有一个更坏的可能：它没报错，而是照着错的参数读了一条别人的请求出来。
-func TestSnapshotShowRejectsBadArgs(t *testing.T) {
+func TestSnapshotGetRejectsBadArgs(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
@@ -446,7 +446,7 @@ func TestSnapshotShowRejectsBadArgs(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := runSnapshotShow(tc.args)
+			err := runSnapshotGet(tc.args)
 			if err == nil {
 				t.Fatal("期望报错，却通过了")
 			}
@@ -460,7 +460,7 @@ func TestSnapshotShowRejectsBadArgs(t *testing.T) {
 	}
 }
 
-// TestSnapshotShowParsesFlagsAfterRequestID 钉住参数顺序。
+// TestSnapshotGetParsesFlagsAfterRequestID 钉住参数顺序。
 //
 // Go 的 flag 包遇到第一个非旗标参数就停止解析，而这条命令的形状是
 // `show <request_id> --actor X --reason Y`——request_id 在旗标前面。
@@ -470,8 +470,8 @@ func TestSnapshotShowRejectsBadArgs(t *testing.T) {
 // 判据是**报出来的错是哪一个**：缺 --reason 说明 --actor 被认出来了。
 // 这条断言在两种实现下取值不同（一次 Parse 给「位置参数」，
 // 分两趟给「缺少 --reason」），所以它分辨得出走的是哪条路。
-func TestSnapshotShowParsesFlagsAfterRequestID(t *testing.T) {
-	err := runSnapshotShow([]string{"req-1", "--actor", "ops"})
+func TestSnapshotGetParsesFlagsAfterRequestID(t *testing.T) {
+	err := runSnapshotGet([]string{"req-1", "--actor", "ops"})
 	if err == nil {
 		t.Fatal("缺 --reason 应当报错")
 	}
@@ -481,8 +481,8 @@ func TestSnapshotShowParsesFlagsAfterRequestID(t *testing.T) {
 }
 
 // 旗标写在 request_id 前面也要能用——两种写法都自然。
-func TestSnapshotShowAcceptsFlagsBeforeRequestID(t *testing.T) {
-	err := runSnapshotShow([]string{"--actor", "ops", "--reason", "看看", "--direction", "request"})
+func TestSnapshotGetAcceptsFlagsBeforeRequestID(t *testing.T) {
+	err := runSnapshotGet([]string{"--actor", "ops", "--reason", "看看", "--direction", "request"})
 	if err == nil {
 		t.Fatal("缺 request_id 应当报错")
 	}
@@ -829,12 +829,12 @@ func readAccessLog(t *testing.T, db *sql.DB, requestID string) []accessLogRow {
 	return out
 }
 
-// TestSnapshotShowWritesAccessLog 是这条命令最要紧的判据：
+// TestSnapshotGetWritesAccessLog 是这条命令最要紧的判据：
 // 读了别人的请求结构，就必须留下痕迹。
 //
 // 它同时覆盖「同一个 request_id 的多行都打出来」——造的是请求与响应各一行，
 // 而只取一行的那种实现会在这里挂掉。
-func TestSnapshotShowWritesAccessLog(t *testing.T) {
+func TestSnapshotGetWritesAccessLog(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 	userID, username := seedSnapshotUser(t, db)
@@ -858,7 +858,7 @@ func TestSnapshotShowWritesAccessLog(t *testing.T) {
 	const reason = "排查一次 500"
 	var runErr error
 	out, _ := captureStreams(t, func() {
-		runErr = runSnapshotShow([]string{
+		runErr = runSnapshotGet([]string{
 			requestID, "--actor", username, "--reason", reason,
 		})
 	})
@@ -901,12 +901,12 @@ func TestSnapshotShowWritesAccessLog(t *testing.T) {
 	}
 }
 
-// TestSnapshotShowUnknownRequestDoesNotLog 是判据「不存在的 request_id
+// TestSnapshotGetUnknownRequestDoesNotLog 是判据「不存在的 request_id
 // 非零退出，且不写访问日志」。
 //
 // 没读到东西不算一次访问：把「没找到」也记进去，日志里就会混进一批
 // 「有人查过这个不存在的 ID」，而那不是审计要回答的问题。
-func TestSnapshotShowUnknownRequestDoesNotLog(t *testing.T) {
+func TestSnapshotGetUnknownRequestDoesNotLog(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 	_, username := seedSnapshotUser(t, db)
@@ -914,7 +914,7 @@ func TestSnapshotShowUnknownRequestDoesNotLog(t *testing.T) {
 
 	var runErr error
 	out, _ := captureStreams(t, func() {
-		runErr = runSnapshotShow([]string{requestID, "--actor", username, "--reason", "看看"})
+		runErr = runSnapshotGet([]string{requestID, "--actor", username, "--reason", "看看"})
 	})
 	if runErr == nil {
 		t.Fatal("不存在的 request_id 应当报错")
@@ -930,8 +930,8 @@ func TestSnapshotShowUnknownRequestDoesNotLog(t *testing.T) {
 	}
 }
 
-// TestSnapshotShowDirectionFilterNarrowsTheRead 确认 --direction 只读那一个方向。
-func TestSnapshotShowDirectionFilterNarrowsTheRead(t *testing.T) {
+// TestSnapshotGetDirectionFilterNarrowsTheRead 确认 --direction 只读那一个方向。
+func TestSnapshotGetDirectionFilterNarrowsTheRead(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 	userID, username := seedSnapshotUser(t, db)
@@ -949,7 +949,7 @@ func TestSnapshotShowDirectionFilterNarrowsTheRead(t *testing.T) {
 
 	var runErr error
 	out, _ := captureStreams(t, func() {
-		runErr = runSnapshotShow([]string{
+		runErr = runSnapshotGet([]string{
 			requestID, "--actor", username, "--reason", "只看请求", "--direction", "request",
 		})
 	})
@@ -968,12 +968,12 @@ func TestSnapshotShowDirectionFilterNarrowsTheRead(t *testing.T) {
 	}
 }
 
-// TestSnapshotShowFilteredMissSaysWhichDirection 钉住「一条都没读到」的措辞。
+// TestSnapshotGetFilteredMissSaysWhichDirection 钉住「一条都没读到」的措辞。
 //
 // 库里确实有这次请求、但只有另一个方向那一行时，「没有快照」与
 // 「没有这个方向的快照」是两件事，而后者指向一个写错的 --direction，
 // 不是一次写错的采集。
-func TestSnapshotShowFilteredMissSaysWhichDirection(t *testing.T) {
+func TestSnapshotGetFilteredMissSaysWhichDirection(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 	userID, username := seedSnapshotUser(t, db)
@@ -986,7 +986,7 @@ func TestSnapshotShowFilteredMissSaysWhichDirection(t *testing.T) {
 
 	var runErr error
 	_, _ = captureStreams(t, func() {
-		runErr = runSnapshotShow([]string{
+		runErr = runSnapshotGet([]string{
 			requestID, "--actor", username, "--reason", "看请求", "--direction", "request",
 		})
 	})
@@ -1001,7 +1001,7 @@ func TestSnapshotShowFilteredMissSaysWhichDirection(t *testing.T) {
 	}
 }
 
-// TestSnapshotShowLogFailureBlocksRead 是判据「读了但没记不可能发生」。
+// TestSnapshotGetLogFailureBlocksRead 是判据「读了但没记不可能发生」。
 //
 // 让写日志那一步在真库上失败：reason 里带一个 NUL 字节，PostgreSQL 的 text
 // 收不了它（表上没有任何约束会因为「理由太长」而拒绝，所以这是这条路径上
@@ -1009,7 +1009,7 @@ func TestSnapshotShowFilteredMissSaysWhichDirection(t *testing.T) {
 //
 // 判据是**输出里有没有骨架**：把写日志挪到读之后（或者去掉事务）的实现，
 // 会在这里打出骨架并且返回 nil——那正是「读了但没记」的形状。
-func TestSnapshotShowLogFailureBlocksRead(t *testing.T) {
+func TestSnapshotGetLogFailureBlocksRead(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 	userID, username := seedSnapshotUser(t, db)
@@ -1022,7 +1022,7 @@ func TestSnapshotShowLogFailureBlocksRead(t *testing.T) {
 
 	var runErr error
 	out, _ := captureStreams(t, func() {
-		runErr = runSnapshotShow([]string{
+		runErr = runSnapshotGet([]string{
 			requestID, "--actor", username, "--reason", "坏\x00理由",
 		})
 	})
@@ -1267,7 +1267,7 @@ func TestSnapshotAllowlistJSONStdoutIsPure(t *testing.T) {
 //
 // 读快照要落访问日志是一条硬契约（谁读了、为什么读）。JSON 这一档换的是
 // **怎么打**，不是「读没读」，所以日志那一半必须原样还在。
-func TestSnapshotShowJSONStdoutIsPure(t *testing.T) {
+func TestSnapshotGetJSONStdoutIsPure(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 	userID, username := seedSnapshotUser(t, db)
@@ -1288,7 +1288,7 @@ func TestSnapshotShowJSONStdoutIsPure(t *testing.T) {
 	withFormat(t, formatJSON)
 	var runErr error
 	stdout, _ := captureStreams(t, func() {
-		runErr = runSnapshotShow([]string{
+		runErr = runSnapshotGet([]string{
 			requestID, "--actor", username, "--reason", "排查一次 500",
 		})
 	})

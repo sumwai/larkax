@@ -18,40 +18,40 @@ import (
 const modelUsage = `larkaxctl model 管理模型目录里的规范模型。
 
 用法：
-  larkaxctl model add --canonical <规范名> --display <展示名>
-                      [--vendor <厂商>] [--family <家族>]
-                      [--context-limit <tokens>] [--input-limit <tokens>]
-                      [--output-limit <tokens>]
-                      [--reasoning[=false]] [--tools[=false]] [--vision[=false]]
-                      [--audio[=false]] [--cache[=false]] [--batch[=false]]
-                      [--modalities-input <模态,...>] [--modalities-output <模态,...>]
-                      [--knowledge-cutoff <YYYY-MM-DD>] [--release-date <YYYY-MM-DD>]
+  larkaxctl model create --model <规范名> --display <展示名>
+                         [--vendor <厂商>] [--family <家族>]
+                         [--context-limit <tokens>] [--input-limit <tokens>]
+                         [--output-limit <tokens>]
+                         [--reasoning[=false]] [--tools[=false]] [--vision[=false]]
+                         [--audio[=false]] [--cache[=false]] [--batch[=false]]
+                         [--modalities-input <模态,...>] [--modalities-output <模态,...>]
+                         [--knowledge-cutoff <YYYY-MM-DD>] [--release-date <YYYY-MM-DD>]
   larkaxctl model list
-  larkaxctl model show --canonical <规范名>
-  larkaxctl model update --canonical <规范名>
-                        [--display <展示名>] [--vendor <厂商>] [--family <家族>]
-                        [--context-limit <tokens>] [--input-limit <tokens>]
-                        [--output-limit <tokens>]
-                        [--reasoning[=false]] [--tools[=false]] [--vision[=false]]
-                        [--audio[=false]] [--cache[=false]] [--batch[=false]]
-                        [--modalities-input <模态,...>] [--modalities-output <模态,...>]
-                        [--knowledge-cutoff <YYYY-MM-DD>] [--release-date <YYYY-MM-DD>]
-  larkaxctl model delete --canonical <规范名>
+  larkaxctl model get --model <规范名>
+  larkaxctl model update --model <规范名>
+                         [--display <展示名>] [--vendor <厂商>] [--family <家族>]
+                         [--context-limit <tokens>] [--input-limit <tokens>]
+                         [--output-limit <tokens>]
+                         [--reasoning[=false]] [--tools[=false]] [--vision[=false]]
+                         [--audio[=false]] [--cache[=false]] [--batch[=false]]
+                         [--modalities-input <模态,...>] [--modalities-output <模态,...>]
+                         [--knowledge-cutoff <YYYY-MM-DD>] [--release-date <YYYY-MM-DD>]
+  larkaxctl model delete --model <规范名>
 
 **规范名是选路与计费共用的键**：请求里的模型名按它匹配，别名与计价规则也挂在
 它上面。所以它不能带空白字符，也不能改（要换名字就建新名、把别名与规则挪过去、
-再删旧名）。update 与 delete 都按 --canonical 定位，它本身不可改。
+再删旧名）。update 与 delete 都按 --model 定位，它本身不可改。
 
-add 的 stdout 只有新模型的 ID，其余信息走 stderr。
+create 的 stdout 只有新模型的 ID，其余信息走 stderr。
 三个 limit 留空表示未知，负数会被拒绝。--display 必填，不会回落到规范名。
 
 **六个能力标志各有三态**：不给 = 未知（库里是 NULL）、给 = 支持、
 --tools=false = 明确声明不支持。三者在选路时处置不同：未知与支持放行，
-不支持会让用到那一项的请求选不到这个模型。所以 add 时没给的开关落库是 NULL
+不支持会让用到那一项的请求选不到这个模型。所以 create 时没给的开关落库是 NULL
 而不是 false——那是「还没配过」，不是「配了说不支持」。
 
-**判断一条记录配没配过，看 list / show 的那一栏**：没配过的项在 list 里不列
-（六项都没配过时打 -），show 里逐项打出「未知 / 支持 / 不支持」。
+**判断一条记录配没配过，看 list / get 的那一栏**：没配过的项在 list 里不列
+（六项都没配过时打 -），get 里逐项打出「未知 / 支持 / 不支持」。
 
 update **只改真的给了的那几项**，其余保持库里的值。空串与 0 是几种有含义的写法：
 --vendor '' 与 --context-limit 0 都是「把这一栏清空」（库里存 NULL），
@@ -67,8 +67,12 @@ delete 只在**无人引用**时允许：还有别名或计价规则挂着这个
 不等于删那条配置），计价规则要先改掉 model_patterns——直接删规则不会报错，
 只会让请求落到别的规则上。那条错误原样打出来，不要绕过它去库里删。
 
-show 打印一条规范模型：ID、命令能写的那些字段、采集源那边的 ID 与更新时间。
+get 打印一条规范模型：ID、命令能写的那些字段、采集源那边的 ID 与更新时间。
 reasoning_options 与 raw 是采集来的原始元信息，命令行不写它们，也不在这里打。
+
+**旧名仍可用**：model add 与 model show 分别等同于 model create 与
+model get，--canonical 等同于 --model。它们保留是为了不让已经在跑的脚本与
+部署流程坏掉，行为与新名字逐字相同；新写的命令请用新名字。
 `
 
 func runModel(args []string) error {
@@ -79,12 +83,12 @@ func runModel(args []string) error {
 	action, rest := args[0], args[1:]
 
 	switch action {
-	case "add":
-		return runModelAdd(rest)
+	case "create", "add":
+		return runModelCreate(rest)
 	case "list":
 		return runModelList(rest)
-	case "show":
-		return runModelShow(rest)
+	case "get", "show":
+		return runModelGet(rest)
 	case "update":
 		return runModelUpdate(rest)
 	case "delete":
@@ -98,12 +102,12 @@ func runModel(args []string) error {
 	}
 }
 
-func runModelAdd(args []string) error {
-	if err := jsonUnsupported("model add"); err != nil {
+func runModelCreate(args []string) error {
+	if err := jsonUnsupported("model create"); err != nil {
 		return err
 	}
 
-	req, err := parseModelAdd(args)
+	req, err := parseModelCreate(args)
 	if err != nil {
 		return usageErr(err)
 	}
@@ -128,10 +132,10 @@ func runModelAdd(args []string) error {
 	return nil
 }
 
-func parseModelAdd(args []string) (catalog.CreateModelRequest, error) {
-	fs := flag.NewFlagSet("model add", flag.ContinueOnError)
+func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
+	fs := flag.NewFlagSet("model create", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, modelUsage) }
-	canonical := fs.String("canonical", "", "规范模型名，选路与计费共用的键")
+	canonical := legacyStringFlag(fs, "model", "canonical", "", "规范模型名，选路与计费共用的键")
 	display := fs.String("display", "", "给人看的展示名")
 	vendor := fs.String("vendor", "", "厂商")
 	family := fs.String("family", "", "家族")
@@ -148,12 +152,12 @@ func parseModelAdd(args []string) (catalog.CreateModelRequest, error) {
 	}
 	if fs.NArg() > 0 {
 		return catalog.CreateModelRequest{}, fmt.Errorf(
-			"add 不接受位置参数，得到 %q：规范名用 --canonical 指定", fs.Arg(0))
+			"create 不接受位置参数，得到 %q：规范名用 --model 指定", fs.Arg(0))
 	}
 
 	if strings.TrimSpace(*canonical) == "" {
 		fs.Usage()
-		return catalog.CreateModelRequest{}, errors.New("缺少 --canonical")
+		return catalog.CreateModelRequest{}, errors.New("缺少 --model")
 	}
 	if strings.TrimSpace(*display) == "" {
 		fs.Usage()
@@ -270,7 +274,7 @@ func anyCapabilityGiven(flags []modelCapabilityFlag) bool {
 
 // applyCapabilityFlags 把这次给出的能力标志盖到 base 上。
 //
-// 没给的项原样留着 base 里那一栏——add 时 base 是零值（六项都是 nil = 未知），
+// 没给的项原样留着 base 里那一栏——create 时 base 是零值（六项都是 nil = 未知），
 // update 时 base 是库里当前那一行。
 //
 // # update 为什么要一个 base
@@ -341,7 +345,7 @@ func runModelUpdate(args []string) error {
 func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabilityFlag, error) {
 	fs := flag.NewFlagSet("model update", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, modelUsage) }
-	canonical := fs.String("canonical", "", "要改的规范模型名（它本身不可改）")
+	canonical := legacyStringFlag(fs, "model", "canonical", "", "要改的规范模型名（它本身不可改）")
 	display := fs.String("display", "", "展示名")
 	vendor := fs.String("vendor", "", "厂商，给空串表示清空")
 	family := fs.String("family", "", "家族，给空串表示清空")
@@ -358,11 +362,11 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabil
 	}
 	if fs.NArg() > 0 {
 		return catalog.UpdateModelRequest{}, nil, fmt.Errorf(
-			"update 不接受位置参数，得到 %q：要改的模型用 --canonical 指定", fs.Arg(0))
+			"update 不接受位置参数，得到 %q：要改的模型用 --model 指定", fs.Arg(0))
 	}
 	if strings.TrimSpace(*canonical) == "" {
 		fs.Usage()
-		return catalog.UpdateModelRequest{}, nil, errors.New("缺少 --canonical（要改的规范模型名）")
+		return catalog.UpdateModelRequest{}, nil, errors.New("缺少 --model（要改的规范模型名）")
 	}
 
 	// 只有**真的给了**的标志才进请求。--context-limit 0 与「没提这一项」是
@@ -449,17 +453,17 @@ func runModelDelete(args []string) error {
 
 	fs := flag.NewFlagSet("model delete", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, modelUsage) }
-	canonical := fs.String("canonical", "", "要删的规范模型名")
+	canonical := legacyStringFlag(fs, "model", "canonical", "", "要删的规范模型名")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
 		return usageErr(fmt.Errorf(
-			"delete 不接受位置参数，得到 %q：要删的模型用 --canonical 指定", fs.Arg(0)))
+			"delete 不接受位置参数，得到 %q：要删的模型用 --model 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*canonical) == "" {
 		fs.Usage()
-		return usageErr(errors.New("缺少 --canonical（要删的规范模型名）"))
+		return usageErr(errors.New("缺少 --model（要删的规范模型名）"))
 	}
 
 	cfg, err := config.LoadOps()
@@ -481,25 +485,25 @@ func runModelDelete(args []string) error {
 	return nil
 }
 
-// runModelShow 打印一条规范模型。
+// runModelGet 打印一条规范模型。
 //
 // 走的是 catalog.Catalog 那条读取路径（选路与列举读的同一套列），不是
 // 另写一条 SQL：写入与读取对同一套列的假设是否一致，只有「写进去再读出来」
 // 能证明，而这里正是那个读回来的一端。
-func runModelShow(args []string) error {
-	fs := flag.NewFlagSet("model show", flag.ContinueOnError)
+func runModelGet(args []string) error {
+	fs := flag.NewFlagSet("model get", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, modelUsage) }
-	canonical := fs.String("canonical", "", "要看的规范模型名")
+	canonical := legacyStringFlag(fs, "model", "canonical", "", "要看的规范模型名")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
 		return usageErr(fmt.Errorf(
-			"show 不接受位置参数，得到 %q：要看的模型用 --canonical 指定", fs.Arg(0)))
+			"get 不接受位置参数，得到 %q：要看的模型用 --model 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*canonical) == "" {
 		fs.Usage()
-		return usageErr(errors.New("缺少 --canonical（要看的规范模型名）"))
+		return usageErr(errors.New("缺少 --model（要看的规范模型名）"))
 	}
 
 	cfg, err := config.LoadOps()
@@ -519,7 +523,7 @@ func runModelShow(args []string) error {
 		return err
 	}
 	if jsonOutput() {
-		return emitJSON(os.Stdout, modelShowDoc(model), nil)
+		return emitJSON(os.Stdout, modelGetDoc(model), nil)
 	}
 	printModelDetail(os.Stdout, model)
 	return nil
@@ -583,11 +587,11 @@ func modelListDoc(models []catalog.Model) map[string]any {
 	return doc
 }
 
-// modelShowDoc 组装 model show 的机器可读输出。
+// modelGetDoc 组装 model get 的机器可读输出。
 //
 // 只有一条，所以不打 summary（没有可数的东西），形状是 `{"model": {...}}`：
 // 一眼能看出这一条是「哪个东西」的详情。
-func modelShowDoc(m catalog.Model) map[string]any {
+func modelGetDoc(m catalog.Model) map[string]any {
 	doc := jsonDoc(jsonOK)
 	doc["model"] = modelDetailEntry(m)
 	return doc
@@ -616,11 +620,11 @@ func modelEntry(m catalog.Model) map[string]any {
 	}
 }
 
-// modelDetailEntry 打 model show 的那一条：清单里的那十栏，外加采集源那边
+// modelDetailEntry 打 model get 的那一条：清单里的那十栏，外加采集源那边
 // 的几栏。表格那一档也是这个口径（见 printModelDetail）。
 //
 // reasoning_options 与 raw 不打：它们不参与任何判断，而 raw 可能是一大段
-// 嵌套 JSON。要它们的一方直接查库，而不是让每条 show 都拖着这一坨。
+// 嵌套 JSON。要它们的一方直接查库，而不是让每条 get 都拖着这一坨。
 func modelDetailEntry(m catalog.Model) map[string]any {
 	entry := modelEntry(m)
 	entry["knowledge_cutoff"] = jsonDate(m.KnowledgeCutoff)
@@ -649,7 +653,7 @@ func capabilityEntry(c catalog.Capabilities) map[string]any {
 // printModelList 打印目录里的规范模型。
 func printModelList(w io.Writer, models []catalog.Model) {
 	if len(models) == 0 {
-		_, _ = fmt.Fprintln(w, "暂无模型。可使用 larkaxctl model add 添加。")
+		_, _ = fmt.Fprintln(w, "暂无模型。可使用 larkaxctl model create 添加。")
 		return
 	}
 
@@ -722,7 +726,7 @@ func limitLabel(limit int) string {
 // 只列**已声明**的项：没配过的项在这里省略，六项都没配过时打 -。清单是一张
 // 十栏的表，把六项「未知」逐条铺开会让这一栏比其余九栏加起来还宽，而它要
 // 回答的问题（这条记录配过什么）本来就只看已声明的那些。要逐项看三态用
-// show（见 capabilityDetail）。
+// get（见 capabilityDetail）。
 func capabilitySummary(c catalog.Capabilities) string {
 	var declared []string
 	for _, cap := range capabilityFields(c) {

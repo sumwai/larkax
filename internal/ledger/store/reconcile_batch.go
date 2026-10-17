@@ -278,7 +278,7 @@ func compareAndRepair(
 			// 有分录或有预留，却没有钱包行。修它要新建一行钱包，而那需要
 			// 知道用户是否存在、默认用哪种资产——都不该由对账任务来猜。
 			// 报出来，让人去查这一行为什么不在（开户当前由
-			// `larkaxctl wallet open` 做，见 internal/ledger/store/wallet.go；
+			// `larkaxctl wallet create` 做，见 internal/ledger/store/wallet.go；
 			// 注册流程不建钱包行，所以别去那里找漏掉的一步）。
 			//
 			// Detail 要把**是哪一侧有钱**写清楚：只有分录、只有预留、

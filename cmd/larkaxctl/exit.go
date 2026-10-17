@@ -82,7 +82,7 @@ var conflictErrors = []error{
 	store.ErrNoSuchUser,
 	// 用户存在、但没有那一行钱包。与上一条是同一个形状（缺一行），只是缺的
 	// 是从属的那一行，下一步动作也一样：先去看数据里现在是什么——这一次是
-	// 先跑 wallet open。
+	// 先跑 wallet create。
 	store.ErrNoWallet,
 	// 同一个 txn_id 已经是一笔内容不同的交易。它同样要人去看一眼库里那笔
 	// 是什么，而不是改一下命令重发（那会写进第二笔，或者继续撞同一笔）。
