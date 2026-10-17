@@ -52,6 +52,7 @@ CI 目前包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-r
 整包没人 import 的门禁及其自测（`check-unimported.sh`）、
 导出方法调用点门禁及其自测（`check-deadmethods.sh`）、
 测试函数名门禁及其自测（`check-test-names.sh`）、
+索引与正文一致性门禁及其自测（`check-lessons-index.sh`）、
 契约测试（`contract/`，见下）。
 集成测试另有一道**「确认真跑了」的门禁**——它逐包显式跑依赖数据库的那些包，
 被 `t.Skip` 时报错，因为「跳过」在输出里和「通过」长得一样
@@ -237,6 +238,7 @@ bash scripts/check-deadcode.sh      # 不可达符号：可达的包内部有没
 bash scripts/check-unimported.sh    # 整包没人 import：包本身有没有接上
 bash scripts/check-deadmethods.sh   # 导出方法有没有调用点（上面两道门都照不到）
 bash scripts/check-test-names.sh    # Go 顶层函数声明的名字必须是 ASCII
+bash scripts/check-lessons-index.sh # LESSONS.md 的索引与 lessons/ 下的正文对得上
 scripts/check-mutation.sh           # 变异测试（改动计费/账本时）
 ```
 
@@ -272,6 +274,16 @@ scripts/check-mutation.sh           # 变异测试（改动计费/账本时）
 所以同名方法会互相掩护（假阴性）；`f := x.Name` 这种方法值语法与字段访问
 无法区分，取严的一侧（假阳性）。它与 `deadcode` 的白名单**不共享条目**——
 判据不同，同一个符号可能在两边各记一条，也可能只在一处出现。
+
+`scripts/check-lessons-index.sh` 管的是 [LESSONS.md](LESSONS.md) 与 `lessons/`
+下正文的一致性。LESSONS.md 是索引、每条正文各一个文件，两者原先只靠手工对齐——
+索引里多一条、正文没建，点进去是 404；编号与文件名脱钩时更坏，点进去是**另一条**
+而没人会察觉。它只依赖 bash 与 coreutils，与分层自查同一类，所以放在那个 job 里。
+
+它与上面几道门同一个形状：判据是集合比对，坏掉时（索引一行都没解析出来、
+`lessons/` 一个文件都没扫到）的输出和「全部对得上」一模一样。所以它每次都打印
+「解析出多少行索引 / 扫到多少个文件」，任一为 0 就判「没跑成」（退出码 2），
+而不是报通过（见 [LESSONS.md](LESSONS.md) 第 16 条），自测也照第 2、23 条一并跑。
 
 `scripts/check-test-names.sh` 管的是「标识符保持英文」这条约定：**Go 顶层
 `func` 声明的名字**只许由 `[A-Za-z0-9_]` 组成。判的是**名字那个标识符**，
