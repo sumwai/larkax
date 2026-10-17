@@ -102,22 +102,131 @@ func TestPrintCreatedPartitionsListsEveryName(t *testing.T) {
 	}
 }
 
-// 体检通过时也要说清「分区都在」，而不是只打两行兜底分区的行数。
+// 三项判据各自一行、各有自己的状态符。
 //
-// 缺分区那一路会列出缺了哪些；「一个都不缺」必须同样有正向证据，
-// 否则「都查过了、都齐」与「根本没查」在输出上分不开。
-func TestPrintMissingPartitionsEmptyIsExplicit(t *testing.T) {
-	out := captureStdout(t, func() { printMissingPartitions(nil) })
-	if !strings.Contains(out, "都在") {
-		t.Errorf("没有缺失时的输出应当明说分区都在，实际为 %q", out)
+// # 为什么断言的是 partitionCheckLines 而不是整条命令的输出
+//
+// 这条命令的输出要连库才跑得起来，而「一项不通过时它是 ✗」恰恰是最要紧的判据。
+// 折成状态行之后判据与取值分开了：这一层不连库就能把三种条件各测一遍。
+//
+// 体检通过时也要说清「分区都在」，而不是只打两行兜底分区的行数：缺分区那一路
+// 会点名缺的是哪一个，「一个都不缺」必须同样有正向证据，否则「都查过了、都齐」
+// 与「根本没查」在输出上分不开。
+func TestPartitionCheckLinesHealthyIsExplicit(t *testing.T) {
+	lines := partitionCheckLines(nil, 0, 0)
+	if len(lines) != 3 {
+		t.Fatalf("体检有 %d 项，期望 3 项", len(lines))
+	}
+	for i, l := range lines {
+		if l.kind != glyphPass {
+			t.Errorf("第 %d 项在干净时的状态符是 %q，期望通过（%q）",
+				i+1, l.kind.symbol(), glyphPass.symbol())
+		}
+	}
+	if !strings.Contains(lines[0].conclusion, "都在") {
+		t.Errorf("没有缺失时的结论应当明说分区都在：%q", lines[0].conclusion)
+	}
+	// 两张兜底分区的行数照打：0 行是「查过了」的证据。
+	for i, table := range []string{store.UsageEventDefaultPartition, snapshotwire.DefaultPartition} {
+		if !strings.Contains(lines[1+i].conclusion, table) ||
+			!strings.Contains(lines[1+i].conclusion, "0 行") {
+			t.Errorf("兜底分区 %s 那一行应当带上表名与行数：%q", table, lines[1+i].conclusion)
+		}
 	}
 }
 
-func TestPrintMissingPartitionsListsEveryName(t *testing.T) {
-	names := []string{"usage_events_2026_12"}
-	out := captureStdout(t, func() { printMissingPartitions(names) })
-	if !strings.Contains(out, "usage_events_2026_12") {
-		t.Errorf("输出里应当列出缺的分区名，实际为 %q", out)
+// 缺月分区时：默认那一行点名第一个、其余折成一句指向 -v，整份清单进 detail。
+//
+// 一条问题一行会让一次坏掉的运行刷屏，而一屏里最先要看的是「坏了哪几处」；
+// 但清单一条都不许丢——它折在 -v 后面，不是被删掉了。
+func TestPartitionCheckLinesNamesMissingPartitions(t *testing.T) {
+	names := []string{"usage_events_2026_11", "usage_events_2026_12", "usage_events_2027_01"}
+	lines := partitionCheckLines(names, 0, 0)
+
+	missing := lines[0]
+	if missing.kind != glyphFail {
+		t.Errorf("缺月分区时那一项应当是失败，得到 %q", missing.kind.symbol())
+	}
+	if !strings.Contains(missing.conclusion, names[0]) {
+		t.Errorf("默认那一行要点名缺的第一个分区：%q", missing.conclusion)
+	}
+	if !strings.Contains(missing.conclusion, "另有 2 个") {
+		t.Errorf("其余几个要折成一句指向 -v：%q", missing.conclusion)
+	}
+	detail := strings.Join(missing.detail, "\n")
+	for _, n := range names {
+		if !strings.Contains(detail, n) {
+			t.Errorf("-v 的细节里应当有 %s，实际为 %q", n, detail)
+		}
+	}
+}
+
+// 两张兜底分区互不串味：一行有行、另一行没有时，两行的状态符必须不同。
+//
+// 两行长得一模一样（同一个标题、同一种结论写法），把表名接错（一个数被用了
+// 两遍）时，只有这一条会现形。
+func TestPartitionCheckLinesKeepsDefaultPartitionsApart(t *testing.T) {
+	lines := partitionCheckLines(nil, 3, 0)
+	usage, snapshot := lines[1], lines[2]
+
+	if usage.kind != glyphFail {
+		t.Errorf("%s 有行时那一项应当失败，得到 %q",
+			store.UsageEventDefaultPartition, usage.kind.symbol())
+	}
+	if !strings.Contains(usage.conclusion, store.UsageEventDefaultPartition) ||
+		!strings.Contains(usage.conclusion, "3 行") {
+		t.Errorf("usage 那一行应当带上表名与 3 行：%q", usage.conclusion)
+	}
+	if snapshot.kind != glyphPass {
+		t.Errorf("%s 是空的，那一项应当通过，得到 %q",
+			snapshotwire.DefaultPartition, snapshot.kind.symbol())
+	}
+	if !strings.Contains(snapshot.conclusion, snapshotwire.DefaultPartition) ||
+		!strings.Contains(snapshot.conclusion, "0 行") {
+		t.Errorf("快照那一行应当带上表名与 0 行：%q", snapshot.conclusion)
+	}
+
+	// 反过来也要成立：只有快照那张有行时，不能连 usage 一起判成失败。
+	flipped := partitionCheckLines(nil, 0, 7)
+	if flipped[1].kind != glyphPass || flipped[2].kind != glyphFail {
+		t.Errorf("表名接反了：usage=%q snapshot=%q",
+			flipped[1].kind.symbol(), flipped[2].kind.symbol())
+	}
+}
+
+// 状态符那一档与退出码必须是同一个判据。
+//
+// 两处各判一遍时会出现「屏幕上三项全 ✓、退出码却是 1」这种自相矛盾的输出，
+// 而脚本正是按退出码分派的。这里把「有没有 ✗」与 partitionCheckErr 是否非空
+// 逐组对上。
+func TestPartitionCheckGlyphAgreesWithExitCode(t *testing.T) {
+	cases := []struct {
+		name                    string
+		missing                 []string
+		usageRows, snapshotRows int64
+	}{
+		{"干净", nil, 0, 0},
+		{"缺分区", []string{"usage_events_2026_11"}, 0, 0},
+		{"usage 兜底分区有行", nil, 1, 0},
+		{"快照兜底分区有行", nil, 0, 1},
+		{"三项都有问题", []string{"usage_events_2026_11"}, 9, 9},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := partitionCheckLines(tc.missing, tc.usageRows, tc.snapshotRows)
+			linesFailed := false
+			for _, l := range lines {
+				if l.kind == glyphFail {
+					linesFailed = true
+				}
+			}
+			exitFails := partitionCheckErr(
+				partitionProblems(tc.missing, tc.usageRows, tc.snapshotRows)) != nil
+			if linesFailed != exitFails {
+				t.Errorf("屏幕上的 ✗ = %v，退出码非零 = %v：两者必须是同一个判据",
+					linesFailed, exitFails)
+			}
+		})
 	}
 }
 
@@ -332,8 +441,16 @@ func TestPartitionCheckFailsWhenUsageDefaultPartitionHasRows(t *testing.T) {
 	// 0 行。判据那一层由 TestPartitionProblemsFlagsEachCondition 钉住，这一
 	// 句钉的是**取值**——两处把表名接错的话，会在这里现形（一个数被用了两遍
 	// 时，快照那一行会跟着变成 1）。
-	if !strings.Contains(out, snapshotwire.DefaultPartition+"：0 行") {
+	if !strings.Contains(out, snapshotwire.DefaultPartition+" 0 行") {
 		t.Errorf("快照兜底分区应当仍读作 0 行，实际输出为 %q", out)
+	}
+	// 表名与行数在**同一行**上：分成两处时，两栏可以对调而这一条看不出来。
+	if !strings.Contains(out, store.UsageEventDefaultPartition+" 1 行") {
+		t.Errorf("usage 兜底分区那一行应当把表名与行数打在一起，实际输出为 %q", out)
+	}
+	// 不通过那一项的状态符要出现在屏幕上：退出码与屏幕说的是同一件事。
+	if !strings.Contains(out, glyphFail.symbol()) {
+		t.Errorf("有一项不通过时屏幕上要有 %q，实际输出为 %q", glyphFail.symbol(), out)
 	}
 }
 
@@ -422,6 +539,15 @@ func TestPartitionCheckPassesWhenClean(t *testing.T) {
 	if !strings.Contains(out, store.UsageEventDefaultPartition) ||
 		!strings.Contains(out, snapshotwire.DefaultPartition) {
 		t.Errorf("通过时也要把两张兜底分区的行数打出来，实际为 %q", out)
+	}
+	// 三项通过时屏幕上要有三个 ✓：一屏全是说明文字时，「都查过了」与
+	// 「什么都没查」在安静的终端里长得一样（LESSONS 第 16 条）。
+	if got := strings.Count(out, glyphPass.symbol()); got != 3 {
+		t.Errorf("三项都通过时屏幕上应当有 3 个 %q，实际 %d 个：\n%s",
+			glyphPass.symbol(), got, out)
+	}
+	if strings.Contains(out, glyphFail.symbol()) {
+		t.Errorf("干净的一轮不该出现 %q：\n%s", glyphFail.symbol(), out)
 	}
 }
 

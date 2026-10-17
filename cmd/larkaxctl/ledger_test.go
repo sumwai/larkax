@@ -124,21 +124,28 @@ func TestPrintLedgerBalances(t *testing.T) {
 	printLedgerBalances(&buf, ledger.AssetCNY, report)
 
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
-	// 表头 + 四个科目 + 读不出来的那一行 + 指路的那一行。
-	if len(lines) != 7 {
-		t.Fatalf("打了 %d 行，期望 7 行：\n%s", len(lines), buf.String())
+	// 抬头那一行 + 表头 + 四个科目 + 读不出来的那一行 + 指路的那一行。
+	if len(lines) != 8 {
+		t.Fatalf("打了 %d 行，期望 8 行：\n%s", len(lines), buf.String())
 	}
 	if !strings.Contains(lines[0], "科目数=4") || !strings.Contains(lines[0], "随分录数增长") {
-		t.Errorf("表头没有说明这是什么、以及它随什么增长：%q", lines[0])
+		t.Errorf("抬头没有说明这是什么、以及它随什么增长：%q", lines[0])
+	}
+	// 这是一张表：表头必须有自己的名字，只有值的那一栏读的人得回去看代码。
+	// 两栏之间的空格数取决于最宽的科目名（tableWriter 按显示宽度补齐），
+	// 所以比的是「切出来的两栏是不是那两个列名」。
+	if got := strings.Fields(lines[1]); len(got) != 2 || got[0] != "科目" || got[1] != "余额" {
+		t.Errorf("表头应当是「科目 余额」两栏，实际为 %q", lines[1])
 	}
 	want := []string{"payout:3", "platform_revenue", "upstream_cost", "user:7"}
 	for i, name := range want {
-		if !strings.Contains(lines[1+i], name) {
-			t.Errorf("第 %d 行应当是 %s：%q", i+1, name, lines[1+i])
+		// 科目与余额在同一行、之间按显示宽度对齐（两列以上的空格）。
+		if !strings.HasPrefix(lines[2+i], name+"  ") {
+			t.Errorf("第 %d 行应当是 %s 开头：%q", i+2, name, lines[2+i])
 		}
 	}
-	if !strings.Contains(lines[5], "nonsense:1") || !strings.Contains(lines[5], "没有计进") {
-		t.Errorf("读不出来的科目没有被说出来：%q", lines[5])
+	if !strings.Contains(lines[6], "nonsense:1") || !strings.Contains(lines[6], "没有计进") {
+		t.Errorf("读不出来的科目没有被说出来：%q", lines[6])
 	}
 
 	// 连着打二十次必须逐行相同。比一次是不够的：map 的遍历顺序随机，
@@ -366,14 +373,14 @@ func balanceAllLines(out string) ([]string, map[string]string) {
 	var names []string
 	byName := make(map[string]string)
 	for _, line := range strings.Split(out, "\n") {
-		if !strings.HasPrefix(line, "  ") {
+		// 表格那一档的一行是「科目 + 两列以上空格 + 余额」（见 table.go），
+		// 所以按空白切正好两栏；抬头（「资产=CNY 科目数=4…」）与读不出来的
+		// 那一句都不是两栏，自然被跳过。
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] == "科目" {
 			continue
 		}
-		name, value, ok := strings.Cut(strings.TrimSpace(line), " ")
-		if !ok {
-			continue
-		}
-		value = strings.TrimSpace(value)
+		name, value := fields[0], fields[1]
 		if _, err := money.Parse(value); err != nil {
 			continue
 		}

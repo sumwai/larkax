@@ -183,7 +183,6 @@ func runRotateVerify(ctx context.Context, rotator *channels.Rotator) error {
 		return fmt.Errorf("有 %d 行不含当前主密钥 %q：现在还不能退役旧主密钥（见上面的清单）",
 			len(report.Missing), report.PrimaryKeyID)
 	}
-	_, _ = fmt.Fprintf(humanStdout(), "全库每一行都含当前主密钥 %q，可以退役旧主密钥了。\n", report.PrimaryKeyID)
 	return nil
 }
 
@@ -222,14 +221,34 @@ func printRotateReport(w io.Writer, r *channels.RotateReport) {
 }
 
 // printVerifyReport 打一次验证的结果。
+//
+// 结论一行由 printStatusLines（style.go）渲染，与其余诊断体检类命令共用同一条
+// 路径。状态符那一档取自 channels.VerifyReport.OK()——与退出码用的是同一个
+// 判据（见 runRotateVerify）：两处各判一遍时会出现「屏幕上一行 ✓、退出码却
+// 是 1」，而调这条命令的正是盯退出码的调度器。
+//
+// 「可以退役旧主密钥了」那句原先单独打一行，现在收进结论里：它与 `✓` 说的是
+// 同一件事，各打一遍时两句话会随改动漂移开。
 func printVerifyReport(w io.Writer, r *channels.VerifyReport) {
 	if r == nil {
 		return
 	}
 
-	_, _ = fmt.Fprintf(w, "扫过 %d 行：含当前主密钥 %q 的 %d 行，不含的 %d 行。\n",
-		r.Scanned, r.PrimaryKeyID, r.Wrapped, len(r.Missing))
+	line := statusLine{kind: glyphPass, title: "主密钥覆盖"}
+	if r.OK() {
+		line.conclusion = fmt.Sprintf("扫过 %d 行，每一行都含当前主密钥 %q，可以退役旧主密钥了",
+			r.Scanned, r.PrimaryKeyID)
+	} else {
+		line.kind = glyphFail
+		line.conclusion = fmt.Sprintf(
+			"扫过 %d 行，含当前主密钥 %q 的 %d 行、不含的 %d 行；现在还不能退役旧主密钥（清单见下）",
+			r.Scanned, r.PrimaryKeyID, r.Wrapped, len(r.Missing))
+	}
+	printStatusLines(w, []statusLine{line}, false)
+
 	if r.RotationRunning {
+		// 这一句必须默认就打：它改的是「上面那个结论怎么读」——另一处轮换还
+		// 没轮到那些行时，缺的那几行可能只是暂时的。
 		_, _ = fmt.Fprintln(w, "注意：扫描时另有一处轮换持着互斥锁，清单里的行可能只是还没轮到。")
 	}
 	if len(r.Missing) > 0 {

@@ -611,8 +611,10 @@ func runModelList(args []string) error {
 // printCreatedModel 打印新模型。
 //
 // 与 printCreatedUser 同一条契约：stdout 恰好一行，只放能被直接接走的值。
+// 规范名的后面不带 `(id=N)`：名字已经认出这一条了，而 ID 就是 stdout 上那一个
+// （见 docs/cli-output.md 的「实体只点一次身份」）。
 func printCreatedModel(stdout, stderr io.Writer, id int64, canonicalName string) {
-	_, _ = fmt.Fprintf(stderr, "已加入规范模型 %s(id=%d)。\n", canonicalName, id)
+	_, _ = fmt.Fprintf(stderr, "已加入规范模型 %s。\n", canonicalName)
 	_, _ = fmt.Fprintln(stdout, id)
 }
 
@@ -699,7 +701,7 @@ func capabilityEntry(c catalog.Capabilities) map[string]any {
 // printModelList 打印目录里的规范模型。
 func printModelList(w io.Writer, models []catalog.Model) {
 	if len(models) == 0 {
-		_, _ = fmt.Fprintln(w, "暂无模型。可使用 larkaxctl model create 添加。")
+		_, _ = fmt.Fprintln(w, emptyListNote("模型", "model create"))
 		return
 	}
 

@@ -74,15 +74,20 @@ func TestPrintOpenedWallet(t *testing.T) {
 
 	var created bytes.Buffer
 	printOpenedWallet(&created, owner, ledger.AssetCNY, true)
-	for _, want := range []string{"已为", "user-placeholder", "id=7", "CNY", "余额 0"} {
+	for _, want := range []string{"已为", "user-placeholder", "CNY", "余额 0"} {
 		if !strings.Contains(created.String(), want) {
 			t.Errorf("新建的输出里没有 %q：%q", want, created.String())
 		}
 	}
+	// 归属人只点一次身份（见 docs/cli-output.md 的「实体只点一次身份」）：
+	// 用户名后面不再挂一个用户 ID。
+	if strings.Contains(created.String(), "id=") {
+		t.Errorf("用户名后面不该再挂一个 ID：%q", created.String())
+	}
 
 	var existing bytes.Buffer
 	printOpenedWallet(&existing, owner, ledger.AssetCNY, false)
-	for _, want := range []string{"已有", "user-placeholder", "id=7", "CNY", "未改动"} {
+	for _, want := range []string{"已有", "user-placeholder", "CNY", "未改动"} {
 		if !strings.Contains(existing.String(), want) {
 			t.Errorf("已存在的输出里没有 %q：%q", want, existing.String())
 		}
@@ -148,13 +153,19 @@ func TestWalletOpenCommand(t *testing.T) {
 	setupEnv(t)
 	userID := createTestUser(t)
 	ref := strconv.FormatInt(userID, 10)
+	// 输出里点名的是用户名而不是 ID（见 docs/cli-output.md 的「实体只点一次
+	// 身份」），所以这里把它查出来，断言才有得比。
+	owner, err := auth.New(db).ResolveUser(t.Context(), ref)
+	if err != nil {
+		t.Fatalf("解析用户失败: %v", err)
+	}
 
 	var firstErr error
 	first, _ := captureStreams(t, func() { firstErr = runWalletCreate([]string{"--user", ref}) })
 	if firstErr != nil {
 		t.Fatalf("开户失败: %v", firstErr)
 	}
-	for _, want := range []string{"已为", "id=" + ref, "CNY", "余额 0"} {
+	for _, want := range []string{"已为", "用户 " + owner.Username, "CNY", "余额 0"} {
 		if !strings.Contains(first, want) {
 			t.Errorf("第一次开户的输出里没有 %q：%q", want, first)
 		}
@@ -460,6 +471,12 @@ func TestWalletCreditCommand(t *testing.T) {
 	ref := strconv.FormatInt(userID, 10)
 	order := uniqueName("order")
 	txnID := txnIDForOrder(order)
+	// 输出里点名的是用户名而不是 ID（见 docs/cli-output.md 的「实体只点一次
+	// 身份」），所以这里把它查出来，断言才有得比。
+	owner, err := auth.New(db).ResolveUser(t.Context(), ref)
+	if err != nil {
+		t.Fatalf("解析用户失败: %v", err)
+	}
 
 	// 还没开户：入账要被拒，且一条分录都不留。缺钱包行与余额不足是两件事
 	// （前者先跑 wallet open，后者要用户充值），所以判据是哨兵而不是「报错了」。
@@ -476,10 +493,10 @@ func TestWalletCreditCommand(t *testing.T) {
 		t.Fatalf("被拒的入账留下了 %d 条分录：%v", len(rows), rows)
 	}
 
-	if err := runCaptured(t, func() error {
+	if openErr := runCaptured(t, func() error {
 		return runWalletCreate([]string{"--user", ref})
-	}); err != nil {
-		t.Fatalf("开户失败: %v", err)
+	}); openErr != nil {
+		t.Fatalf("开户失败: %v", openErr)
 	}
 
 	var creditErr error
@@ -490,7 +507,7 @@ func TestWalletCreditCommand(t *testing.T) {
 		t.Fatalf("入账失败: %v", creditErr)
 	}
 	for _, want := range []string{
-		"已入账", "id=" + ref, "100.00000000", "幂等键 " + order, string(txnID),
+		"已入账", "用户 " + owner.Username, "100.00000000", "幂等键 " + order, string(txnID),
 		"借 " + ledger.UserAccount(userID).String(), "贷 " + ledger.PaymentGatewayAccount("manual").String(),
 	} {
 		if !strings.Contains(out, want) {

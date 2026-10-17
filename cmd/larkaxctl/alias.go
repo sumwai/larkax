@@ -469,7 +469,7 @@ func aliasResolveDoc(canonical string, channelID int64, upstream string) map[str
 // printAliasList 打印别名清单。
 func printAliasList(w io.Writer, aliases []catalog.Alias) {
 	if len(aliases) == 0 {
-		_, _ = fmt.Fprintln(w, "暂无别名。可使用 larkaxctl alias create 添加。")
+		_, _ = fmt.Fprintln(w, emptyListNote("别名", "alias create"))
 		return
 	}
 

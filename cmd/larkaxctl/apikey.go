@@ -456,11 +456,16 @@ func parseQuotaLimit(plain string) (*money.Amount, error) {
 // 明文与其余信息分走两个流：`> key.txt` 是保存一把 key 最自然的动作，
 // 而元信息混进去会让那个文件没法被程序直接读走（粘贴到客户端配置里时
 // 多一行就少一个能用的 key）。
+//
+// 归属人只打名字，不带 `(id=N)`：同一行里 `用户=` 已经把「这把 key 是谁的」
+// 说清楚了，再挂一个用户 ID 是把身份说两遍（见 docs/cli-output.md 的
+// 「实体只点一次身份」）。要用户 ID 就在造用户那一步接走——那正是
+// `larkaxctl user create` 往 stdout 上只打一个 ID 的用途。
 func printCreatedKey(stdout, stderr io.Writer, owner auth.User, c auth.Created,
 	expires *time.Time, limits keyLimits,
 ) {
-	_, _ = fmt.Fprintf(stderr, "已创建 API Key id=%d prefix=%s 用户=%s(id=%d) 过期=%s 每分钟=%s 额度=%s\n",
-		c.ID, c.Prefix, owner.Username, owner.ID,
+	_, _ = fmt.Fprintf(stderr, "已创建 API Key id=%d prefix=%s 用户=%s 过期=%s 每分钟=%s 额度=%s\n",
+		c.ID, c.Prefix, owner.Username,
 		formatTime(expires, "不过期"), formatRPM(limits.rpm), formatQuota(limits.quota))
 	_, _ = fmt.Fprintln(stderr, "明文只打印这一次，请立即保存：库里只有哈希，无法再取回。")
 	_, _ = fmt.Fprintln(stdout, c.Plaintext)
@@ -502,7 +507,7 @@ func printUpdatedLimits(w io.Writer, id int64, p auth.LimitParams) {
 func printKeyList(w io.Writer, keys []auth.Key) {
 	p := newPalette(w)
 	if len(keys) == 0 {
-		_, _ = fmt.Fprintln(w, "暂无 API Key。可使用 larkaxctl apikey create 添加。")
+		_, _ = fmt.Fprintln(w, emptyListNote("API Key", "apikey create"))
 		return
 	}
 
@@ -608,6 +613,7 @@ func formatTime(v *time.Time, empty string) string {
 // formatTime 的占位符参数——那一栏给不出有意义的占位语。共用一个 Format 布局
 // 是为了让三个时刻写法一致：各写一遍 time.RFC3339 的话，改其中一处的布局，
 // 另一处会安静地留着旧样子。
+//
 // formatTimeValue 与 formatTime 服务的是**终端那一档**，按进程时区打
 // （`+08:00`）。机器读的那一档不要用它们：库里交回来的时刻带会话时区，
 // 同一行在两台机器上会变成两个字符串（见 apikeyEntry 里那几条与 format.go

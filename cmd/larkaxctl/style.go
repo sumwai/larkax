@@ -1,12 +1,17 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"strings"
+	"unicode/utf8"
 )
 
-// 这一层是**自研的薄样式层**，不是 github.com/charmbracelet/lipgloss。理由两条：
+// 这一层是**面向终端的输出层**：样式（状态符、加粗、置灰）与几条固定的文案，
+// 那些文案是「同一类命令说出同一句话」的落点。机器可读那一档在 format.go。
+//
+// 它是**自研的薄样式层**，不是 github.com/charmbracelet/lipgloss。理由两条：
 //
 //  1. 本包真正需要它的只有两件事：终端显示宽度对齐与 ANSI 控制码剥离。前者
 //     table.go 的 displayWidth 已经有了（按东亚宽算，中英混排本来就是对的），
@@ -182,4 +187,99 @@ func padRight(s string, width int) string {
 		return s + strings.Repeat(" ", gap)
 	}
 	return s
+}
+
+// ── 诊断体检类命令的单行状态 ────────────────────────────────────────────
+
+// statusLine 是诊断体检类命令默认输出里的一行：状态符、标题、一句结论，
+// 外加 -v 才打的细节。
+//
+// 先收成切片再打，是因为标题那一栏要按**最宽的那个**补空格，而宽度得等所有行
+// 到齐才知道（与 tableWriter 同一个理由，见 table.go）。
+//
+// 这一组命令（doctor、partition check、ledger verify、secret rotate --verify）
+// 共用这一条渲染路径，不是各写一遍：共用的地方才数得出来。调用点登记在
+// renderpaths_test.go 的 TestEveryStatusRenderPathIsRegistered 里，多一个
+// 没登记的、少一个登记过的都会红。
+type statusLine struct {
+	kind       glyphKind
+	title      string
+	conclusion string
+	detail     []string
+}
+
+// printStatusLines 打一组状态行：`状态符 标题 结论`，标题那一栏按最宽的对齐，
+// verbose 时每行后面缩进跟它的细节。
+//
+// 收敛掉的不是信息量，是**默认那一屏**：一次全通过的运行原先要刷三十多行，
+// 而其中没有一行需要动作。原来的长句一条都没删，只是挪到了 -v。
+func printStatusLines(w io.Writer, lines []statusLine, verbose bool) {
+	p := newPalette(w)
+	width := 0
+	for _, l := range lines {
+		if n := displayWidth(l.title); n > width {
+			width = n
+		}
+	}
+	for _, l := range lines {
+		_, _ = fmt.Fprintf(w, "  %s %s  %s\n",
+			p.glyph(l.kind), p.title(l.kind, padRight(l.title, width)),
+			p.conclusion(l.kind, l.conclusion))
+		if !verbose {
+			continue
+		}
+		for _, line := range l.detail {
+			_, _ = fmt.Fprintf(w, "      %s\n", p.dim(line))
+		}
+	}
+}
+
+// countStatusLines 数一组状态行里各档各有多少项。
+//
+// 从**打出去的那些行**数，而不是从上游的数据结构数：汇总行说的是「上面这一屏
+// 里有几项」，两处各数一遍时，多打或少打一行都会让那句汇总说谎。
+func countStatusLines(lines []statusLine) (passed, failed, skipped int) {
+	for _, l := range lines {
+		switch l.kind {
+		case glyphPass:
+			passed++
+		case glyphFail:
+			failed++
+		case glyphSkip:
+			skipped++
+		}
+	}
+	return passed, failed, skipped
+}
+
+// ── 清单空状态的文案 ────────────────────────────────────────────────────
+
+// emptyListNoteFmt 是所有清单空状态共用的模板。
+//
+// 「暂无<实体>。可使用 larkaxctl <子命令> 添加。」这一句把两件事说在一起：
+// 这一栏现在是空的，以及下一步该敲哪条命令。拆成两句会让人在两个地方找那个
+// 命令名，而「还没有…」与「没有…」两套说法并存时，读的人分不清它们是同一件事
+// 还是两个不同的状态（见 docs/cli-output.md 的「加一个清单命令」）。
+//
+// 它是包内**唯一**出现「暂无」的地方，且由 renderpaths_test.go 按字面量计数
+// 钉住：新加一条清单命令、空状态自己另写一句，那道门会红。
+const emptyListNoteFmt = "暂无%s。可使用 larkaxctl %s 添加。"
+
+// emptyListNote 返回一句清单空状态。
+//
+// entity 是实体名（「API Key」「渠道」），action 是添加它的子命令
+// （「apikey create」）。没有「添加」这个动作的清单不走这里：这一句的后半截
+// 是它的一半，给不出可执行的下一步时不该硬造一个。
+//
+// 实体名以 ASCII 字符开头时前面补一个空格（「暂无 API Key」而不是
+// 「暂无API Key」）：中文与西文之间留一个空格是本仓一贯的写法，而这一点由这里
+// 统一，调用点只写实体名本身。
+//
+// 补空格只能按 entity 的**首字节**判（`entity[0] < utf8.RuneSelf` 就是 ASCII），
+// 本包这几条实体名都是纯 ASCII 或纯中文，没有混排的首字符边界要处理。
+func emptyListNote(entity, action string) string {
+	if entity != "" && entity[0] < utf8.RuneSelf {
+		entity = " " + entity
+	}
+	return fmt.Sprintf(emptyListNoteFmt, entity, action)
 }
