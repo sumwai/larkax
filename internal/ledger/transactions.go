@@ -28,7 +28,7 @@ func validateCommon(kind EntryType, txn TxnID, asset Asset, amount money.Amount)
 	if txn == "" {
 		return errors.New("缺少 txn_id")
 	}
-	if !asset.valid() {
+	if !asset.Valid() {
 		return fmt.Errorf("资产 %q 未知", asset)
 	}
 	if !amount.IsPositive() {
@@ -526,7 +526,7 @@ func Adjustment(p AdjustmentParams) (Transaction, error) {
 	if p.TxnID == "" {
 		return Transaction{}, errors.New("缺少 txn_id")
 	}
-	if !p.Asset.valid() {
+	if !p.Asset.Valid() {
 		return Transaction{}, fmt.Errorf("资产 %q 未知", p.Asset)
 	}
 	if p.Amount.IsZero() {

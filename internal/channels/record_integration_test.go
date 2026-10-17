@@ -15,6 +15,14 @@ import (
 // 这一层测的是写入侧的 SQL：桶怎么累加、连续失败怎么动、额度怎么扣。
 // 纯映射与口径在 record_test.go 里用构造出来的值测，不需要数据库。
 
+// testStaleAfter 是这些用例喂给 Recorder 的陈旧阈值。
+//
+// 写成**字面量**而不是拿 quota.SelfAccountingStaleAfter 算一个：后者是被测
+// 生产代码，让它给自己出题，把倍数改成 1 也照样通过。15 分钟与出厂配置一致
+// （探测间隔 5 分钟 × 3 倍）。要分辨「阈值跟着配置走」的那条用例自己带两个
+// 不同的值。
+const testStaleAfter = 15 * time.Minute
+
 // outcome 造一条调用结局。
 func outcome(channelID int64, at time.Time, verdict route.Verdict) route.CallOutcome {
 	return route.CallOutcome{ChannelID: channelID, At: at, Verdict: verdict}
@@ -59,7 +67,7 @@ func TestRecordCallMaintainsStreak(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
-	r := NewRecorder(db)
+	r := NewRecorder(db, testStaleAfter)
 	at := time.Now().UTC()
 
 	for i := 1; i <= 3; i++ {
@@ -96,7 +104,7 @@ func TestRecordCallStreakIsVisibleToCandidates(t *testing.T) {
 	sealer := testSealer(t)
 	model := uniqueModel()
 	id := insertChannel(t, db, sealer, channelSpec{model: model})
-	r := NewRecorder(db)
+	r := NewRecorder(db, testStaleAfter)
 	at := time.Now().UTC()
 
 	for i := 0; i < 3; i++ {
@@ -127,7 +135,7 @@ func TestRecordCallStreakExpiresForCandidates(t *testing.T) {
 	sealer := testSealer(t)
 	model := uniqueModel()
 	id := insertChannel(t, db, sealer, channelSpec{model: model})
-	r := NewRecorder(db)
+	r := NewRecorder(db, testStaleAfter)
 
 	// 失败发生在 16 分钟前：冷却期（15 分钟）已经过了。
 	old := time.Now().UTC().Add(-16 * time.Minute)
@@ -162,7 +170,7 @@ func TestRecordCallStreakExpiresForCandidates(t *testing.T) {
 // 那不是故障。硬写的话 rollup 会撞外键。
 func TestRecordCallMissingChannelIsNoop(t *testing.T) {
 	db := testDB(t)
-	r := NewRecorder(db)
+	r := NewRecorder(db, testStaleAfter)
 	at := time.Now().UTC()
 
 	if err := r.RecordCall(context.Background(), outcome(999999999, at, route.VerdictSuccess)); err != nil {
@@ -186,7 +194,7 @@ func TestRecordCallRejectsUnknownVerdict(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
-	r := NewRecorder(db)
+	r := NewRecorder(db, testStaleAfter)
 	at := time.Now().UTC()
 
 	err := r.RecordCall(context.Background(), outcome(id, at, route.Verdict("bogus")))
@@ -214,7 +222,7 @@ func TestRecordCallAccumulatesRollupBucket(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
-	r := NewRecorder(db)
+	r := NewRecorder(db, testStaleAfter)
 	at := time.Now().UTC()
 	bucket := at.Truncate(time.Hour)
 
@@ -255,7 +263,7 @@ func TestRecordCallUnattributedDoesNotTouchStreak(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
-	r := NewRecorder(db)
+	r := NewRecorder(db, testStaleAfter)
 	at := time.Now().UTC()
 
 	if err := r.RecordCall(context.Background(), outcome(id, at, route.VerdictFailure)); err != nil {
@@ -279,7 +287,7 @@ func TestRecordCallBucketsByHour(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
-	r := NewRecorder(db)
+	r := NewRecorder(db, testStaleAfter)
 
 	// 两个小时之前与现在。用整点减去一小时，避开「正好卡在整点」的边界。
 	now := time.Now().UTC().Truncate(time.Hour).Add(30 * time.Minute)
@@ -368,7 +376,7 @@ func TestRecordCallSelfAccountsAgainstBaseline(t *testing.T) {
 	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
 	insertQuota(t, db, id, "1000", "tokens", "api_query", "healthy")
 
-	r := NewRecorder(db)
+	r := NewRecorder(db, testStaleAfter)
 	at := time.Now().UTC()
 	call := route.CallOutcome{
 		ChannelID: id,
@@ -409,6 +417,77 @@ func TestRecordCallSelfAccountsAgainstBaseline(t *testing.T) {
 	}
 }
 
+// 陈旧阈值跟着配置走：同一个夹具，阈值小的时候可信度已经衰减，
+// 阈值大的时候还是基线。
+//
+// 这一条钉的是「装配层读出来的那个值真的走到了自记账上」。阈值写死时，
+// 两种配置给出的是同一个数，而两次都算「通过」——那正是这个键原先的状态：
+// 改 settings 里的 quota.probe_interval_seconds，写回库里的 confidence
+// 一动不动，而读代码的人会以为它跟着走。
+//
+// 夹具里 last_probe_at 是 10 分钟前，于是 15 分钟的阈值之内、3 分钟的阈值
+// 之外：两个断言分别是「恰好等于基线」与「已经低于基线」，两者都写死字面量。
+func TestRecordCallStaleThresholdComesFromConfig(t *testing.T) {
+	const (
+		baseConfidence = 0.8 // quota 的自记账基线
+		probeAgo       = 10 * time.Minute
+	)
+
+	// insertQuota 不写 last_probe_at（NULL 时不衰减，测不出差别），
+	// 所以这一条自己插一行带探测时刻的。
+	insertProbedQuota := func(t *testing.T, db *sql.DB, channelID int64, ago time.Duration) {
+		t.Helper()
+		_, err := db.ExecContext(context.Background(), `
+			INSERT INTO channel_quota_state
+			       (channel_id, remaining_estimate, unit, probe_kind, health, last_probe_at)
+			VALUES ($1, 1000, 'tokens', 'api_query', 'healthy', now() - $2::interval)`,
+			channelID, ago.String())
+		if err != nil {
+			t.Fatalf("插入额度状态失败: %v", err)
+		}
+	}
+
+	cases := []struct {
+		name       string
+		staleAfter time.Duration
+		want       float64
+	}{
+		{"阈值之内取基线", testStaleAfter, baseConfidence},
+		{"阈值之外开始衰减", 3 * time.Minute, baseConfidence - 0.01},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testDB(t)
+			sealer := testSealer(t)
+			id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+			insertProbedQuota(t, db, id, probeAgo)
+
+			r := NewRecorder(db, tc.staleAfter)
+			call := route.CallOutcome{
+				ChannelID: id,
+				At:        time.Now().UTC(),
+				Verdict:   route.VerdictSuccess,
+				Usage:     channel.Usage{PromptTokens: 100},
+			}
+			if err := r.RecordCall(context.Background(), call); err != nil {
+				t.Fatalf("记录失败: %v", err)
+			}
+
+			snap := readQuota(t, db, id)
+			switch {
+			case tc.want == baseConfidence && snap.confidence != baseConfidence:
+				t.Errorf("阈值 %v（探测在 %v 前）的 confidence = %v，期望基线 %v",
+					tc.staleAfter, probeAgo, snap.confidence, baseConfidence)
+			case tc.want < baseConfidence && snap.confidence >= baseConfidence:
+				t.Errorf("阈值 %v（探测在 %v 前）的 confidence = %v，"+
+					"期望低于基线 %v——阈值没有跟着配置走",
+					tc.staleAfter, probeAgo, snap.confidence, baseConfidence)
+			}
+		})
+	}
+}
+
 // 扣到见底时记 0，不是负数——负余量在路由与界面上都没有意义。
 func TestRecordCallSelfAccountingClampsAtZero(t *testing.T) {
 	db := testDB(t)
@@ -416,7 +495,7 @@ func TestRecordCallSelfAccountingClampsAtZero(t *testing.T) {
 	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
 	insertQuota(t, db, id, "100", "tokens", "api_query", "healthy")
 
-	r := NewRecorder(db)
+	r := NewRecorder(db, testStaleAfter)
 	err := r.RecordCall(context.Background(), route.CallOutcome{
 		ChannelID: id,
 		At:        time.Now().UTC(),
@@ -440,7 +519,7 @@ func TestRecordCallSelfAccountingNeedsBaseline(t *testing.T) {
 	sealer := testSealer(t)
 	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
 
-	r := NewRecorder(db)
+	r := NewRecorder(db, testStaleAfter)
 	call := route.CallOutcome{
 		ChannelID: id,
 		At:        time.Now().UTC(),
@@ -477,7 +556,7 @@ func TestRecordCallSelfAccountingNeedsBaseline(t *testing.T) {
 func TestRecordCallSelfAccountingSkipsForeignUnit(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
-	r := NewRecorder(db)
+	r := NewRecorder(db, testStaleAfter)
 
 	for _, tc := range []struct {
 		name string
@@ -518,7 +597,7 @@ func TestRecordCallSelfAccountingOnlyWithUsage(t *testing.T) {
 	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
 	insertQuota(t, db, id, "1000", "tokens", "api_query", "healthy")
 
-	r := NewRecorder(db)
+	r := NewRecorder(db, testStaleAfter)
 	at := time.Now().UTC()
 
 	// 失败：上游没给回执，用量未知，扣零等于没扣。
@@ -555,7 +634,7 @@ func TestRecordCallRejectsFutureObservation(t *testing.T) {
 	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
 	insertQuota(t, db, id, "1000", "tokens", "api_query", "healthy")
 
-	r := NewRecorder(db)
+	r := NewRecorder(db, testStaleAfter)
 	err := r.RecordCall(context.Background(), route.CallOutcome{
 		ChannelID: id,
 		// 超过 Validate 的一分钟容差。

@@ -66,7 +66,12 @@ func checkRequest(req *channel.Request) *rejection {
 //
 // protocol 由调用方从路由处带进来：它是「调用方走的是哪条入口」这件事，
 // 与 upstream 里那些上游参数无关，所以不放进 upstream。
-func billingRequest(user User, upstream *channel.Request, requestID string, protocol channel.Protocol) pipeline.Request {
+//
+// 资产品种取自 Handler.DefaultAsset——那是装配层从 settings 的
+// billing.default_asset 读出来的值。本包不认识那个键，也不给默认值：
+// 计费层拒绝空品种（见 pipeline.Request.validate），所以「装配时忘了填」
+// 会表现为每个请求都失败，而不是一笔记错品种的账。
+func (h *Handler) billingRequest(user User, upstream *channel.Request, requestID string, protocol channel.Protocol) pipeline.Request {
 	return pipeline.Request{
 		RequestID: requestID,
 		UserID:    user.ID,
@@ -76,6 +81,7 @@ func billingRequest(user User, upstream *channel.Request, requestID string, prot
 		// 入口与落库层之间断掉——断了的表现是那一列恒为 NULL，
 		// 而单看任何一层都像是写了的。
 		APIKeyID: user.KeyID,
+		Asset:    h.DefaultAsset,
 		// CanonicalModel 与上游模型名在这里取同一个值，因为规范名到上游名的
 		// 映射还没做（那属于选路层）。这是**已知的临时状态**，不是设计：
 		// 接通映射时改的正是这一行。

@@ -84,6 +84,9 @@ func settleRequest() pipeline.Request {
 		OwnerUserID:    9,
 		InputTokens:    1000,
 		MaxTokens:      500,
+		// 资产品种由入口从运行期配置填（见 pipeline.Request.Asset），
+		// 计费层不再兜默认值。夹具给一个具体的值，与生产的形状一致。
+		Asset: "CNY",
 	}
 }
 

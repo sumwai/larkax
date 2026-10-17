@@ -56,6 +56,48 @@ func TestLoadAndRead(t *testing.T) {
 	}
 }
 
+// 未接线的键是一份**显式清单**。
+//
+// 这一条钉的是清单本身，不是「谁真的没有读者」——那件事没有自动判据
+// （见 Spec.Unwired 的注释）。它失败只有两种原因，两种都该看一眼：
+// 有人接线之后忘了把 Unwired 清掉（那一行会继续说着不成立的话），
+// 或者有人新加了一个还没接线的键却忘了标——后者正是这个清单要防的事：
+// 一个没人读的键，在命令行上和一个真的生效的键长得一模一样。
+func TestUnwiredKeysAreDeclared(t *testing.T) {
+	// 与 Registry 里的 Unwired 逐字对应。改这里之前先确认对应的那条线
+	// 真的接上了（或真的还没接）。
+	want := map[string]string{
+		"capture.consent_max_window_hours": "授权采集那条路还没实现，改了不会有任何效果",
+		"plugin.enabled":                   "插件系统尚未接线（#216），改了不会有任何效果",
+		"plugin.call_timeout_ms":           "插件系统尚未接线（#216），改了不会有任何效果",
+		"plugin.memory_limit_bytes":        "插件系统尚未接线（#216），改了不会有任何效果",
+		"plugin.max_payload_bytes":         "插件系统尚未接线（#216），改了不会有任何效果",
+	}
+
+	got := map[string]string{}
+	for _, s := range Registry {
+		if s.Unwired != "" {
+			got[s.Key] = s.Unwired
+		}
+	}
+
+	for key, note := range want {
+		switch {
+		case got[key] == "":
+			t.Errorf("settings.%s 的未接线说明没了：接上了就把它从这份清单里删掉，"+
+				"没接上就补回来", key)
+		case got[key] != note:
+			t.Errorf("settings.%s 的未接线说明 = %q，期望 %q", key, got[key], note)
+		}
+	}
+	for key := range got {
+		if _, ok := want[key]; !ok {
+			t.Errorf("settings.%s 被标成了未接线，但不在清单里：新标一个键要有理由，"+
+				"写进这份清单才算数", key)
+		}
+	}
+}
+
 func TestKeysSorted(t *testing.T) {
 	v, err := Load(context.Background(), &fakeSource{rows: fullRows()})
 	if err != nil {

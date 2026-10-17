@@ -42,11 +42,25 @@ import (
 // 读侧对空的 p95 给中性分，所以留空是「未知」而不是「很差」。
 type Recorder struct {
 	db *sql.DB
+
+	// selfAccountingStaleAfter 是实测值开始显得陈旧的时长，由装配层从
+	// settings 的 quota.probe_interval_seconds 导出（见 quota.SelfAccountingStaleAfter）。
+	//
+	// 它决定自记账写回的 confidence：基准越旧，写回去的那个数越低。
+	// 跟着配置走而不是在 quota 里写死，是因为「多久算旧」与「多久探测一次」
+	// 本来就是同一个约定——写死的话，改探测间隔对这个数毫无影响，
+	// 而那条链路看上去是通的。
+	selfAccountingStaleAfter time.Duration
 }
 
 // NewRecorder 包装一个已打开的数据库句柄。
-func NewRecorder(db *sql.DB) *Recorder {
-	return &Recorder{db: db}
+//
+// staleAfter 是自记账的陈旧阈值，必须为正。做成必填参数而不是给一个默认值：
+// 默认值会让「忘了给」在运行期表现为一个安静的行为改变（零值下每一次
+// 自记账都被判成陈旧），而它在库上只体现为一个偏低的 confidence。
+// 取值由装配层从 settings 导出并校验（见 internal/assembly）。
+func NewRecorder(db *sql.DB, staleAfter time.Duration) *Recorder {
+	return &Recorder{db: db, selfAccountingStaleAfter: staleAfter}
 }
 
 // 编译期断言：它要满足 gateway 对「调用结局写入方」的要求。
@@ -261,7 +275,7 @@ func (r *Recorder) selfAccount(ctx context.Context, rec route.CallOutcome) error
 		return fmt.Errorf("渠道 %d 的自记账观测不自洽，拒绝写入: %w", rec.ChannelID, err)
 	}
 
-	next := quota.Merge(prev, obs, rec.At)
+	next := quota.Merge(prev, obs, rec.At, r.selfAccountingStaleAfter)
 	if next.Remaining == nil {
 		// Project 在基准未知时返回一个没有数值的观测，Merge 于是也不动
 		// Remaining。上面已经挡过一遍，这里是第二道：写一个 NULL 回去

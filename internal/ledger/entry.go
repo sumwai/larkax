@@ -421,7 +421,7 @@ func (e Entry) verify(txn TxnID) error {
 	if _, err := ParseAccount(e.Account.String()); err != nil {
 		return err
 	}
-	if !e.Asset.valid() {
+	if !e.Asset.Valid() {
 		return fmt.Errorf("资产 %q 未知", e.Asset)
 	}
 	if !validEntryType(e.EntryType) {

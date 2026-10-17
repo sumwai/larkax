@@ -182,7 +182,11 @@ type Request struct {
 	// Usage 是计费口径的用量（缓存读写等）。预留时用它估缓存侧的消耗。
 	Usage billing.Usage
 
-	// Asset 是结算用的资产品种。空则用默认。
+	// Asset 是结算用的资产品种。**必填**，空值会被 validate 拒掉。
+	//
+	// 它由**入口**从运行期配置里填（settings 的 billing.default_asset），
+	// 见 internal/api。本包不再兜一个默认值：兜底意味着同一个概念有两处
+	// 取值，而库里那一份改了之后，代码里那一份会安静地继续生效。
 	Asset string
 
 	// BillingRequestID 是 billing_requests 表里那一行的 id，
@@ -424,7 +428,7 @@ func (p *Pipeline) Reserve(ctx context.Context, req Request) (*Reservation, erro
 	return &Reservation{
 		RequestID:         req.RequestID,
 		UserID:            req.UserID,
-		Asset:             req.asset(),
+		Asset:             req.Asset,
 		Amount:            best.amount,
 		RuleID:            best.rule.ID,
 		PricingExprSnap:   best.rule.Source,
@@ -601,7 +605,7 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 	return &Charge{
 		RequestID:       req.RequestID,
 		UserID:          req.UserID,
-		Asset:           req.asset(),
+		Asset:           req.Asset,
 		Settlement:      settlement,
 		Breakdown:       settlement.Breakdown,
 		Entries:         entries,
@@ -688,7 +692,7 @@ func (p *Pipeline) entries(req Request, val expr.Result, s billing.Settlement) (
 	consume, err := ledger.Consume(ledger.ConsumeParams{
 		TxnID:  ledger.NewTxnID(),
 		UserID: req.UserID,
-		Asset:  ledger.Asset(req.asset()),
+		Asset:  ledger.Asset(req.Asset),
 		Amount: s.Actual,
 		// 分成与上游成本由另一个环节填：那需要商家的分成规则，
 		// 而在这里猜一个比例的表现是「商户拿到的钱不对」，
@@ -741,21 +745,14 @@ func IsUpstreamFailure(err error) bool {
 	return errors.As(err, &t)
 }
 
-func (r Request) asset() string {
-	if r.Asset == "" {
-		return defaultAsset
-	}
-	return r.Asset
-}
-
-// defaultAsset 是未指定时的资产品种。
-//
-// 与 settings 里的 `billing.default_asset` 重复了，但那一个是**运行期
-// 可改的配置**，而这里是「配置没加载时的兜底」。让本包依赖 settings
-// 会把「一个纯编排层」变成「要连数据库才能构造」，而那与它的定位相悖。
-const defaultAsset = "CNY"
-
 func (r Request) validate() error {
+	if r.Asset == "" {
+		// 这里**没有**兜底值，是刻意的。原先有一个写死的 "CNY"，理由写着
+		// 「配置没加载时的兜底」——而配置缺键时 settings.Load 直接拒绝启动，
+		// 那个场景根本到不了这里。它实际的作用只是让「入口忘了填」表现为
+		// 一笔人民币分录，与正常的完全一样。
+		return errors.New("缺少资产品种：结算写进哪个钱包由它决定，入口要从配置里填进来")
+	}
 	if r.RequestID == "" {
 		return errors.New("缺少请求标识：它是幂等键，重复计费必须只扣一次")
 	}
