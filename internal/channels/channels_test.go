@@ -3,6 +3,7 @@ package channels
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -217,7 +218,7 @@ func TestQuotaUnknown(t *testing.T) {
 				t.Fatalf("quota 出错: %v", err)
 			}
 			if q.Remaining != nil {
-				t.Errorf("Remaining = %v，期望 nil（未知）；实际 %+v", q.Remaining, q)
+				t.Errorf("Remaining = %s，期望 nil（未知）；实际 %+v", showPtr(q.Remaining), q)
 			}
 			// 没有数值就既不是实测也不是推算：Estimated 说的是「这个数
 			// 是怎么来的」，而这里根本没有数。
@@ -387,7 +388,7 @@ func TestQuotaCarriesObservationTraces(t *testing.T) {
 		t.Fatalf("quota 出错: %v", err)
 	}
 	if q.Remaining != nil {
-		t.Errorf("Remaining = %v，期望 nil", q.Remaining)
+		t.Errorf("Remaining = %s，期望 nil", showPtr(q.Remaining))
 	}
 	if q.LastProbeAt == nil || !q.LastProbeAt.Equal(probed) {
 		t.Errorf("LastProbeAt = %v，期望 %v", q.LastProbeAt, probed)
@@ -535,3 +536,15 @@ func TestCandidateSelectable(t *testing.T) {
 
 func sqlNullInt(v int64) sql.NullInt64     { return sql.NullInt64{Int64: v, Valid: true} }
 func sqlNullTime(v time.Time) sql.NullTime { return sql.NullTime{Time: v, Valid: true} }
+
+// showPtr 把一个可空值渲染成可读文本，供断言失败时打印。
+//
+// 直接 %v 一个指向基本类型的指针打出来的是地址（`0xc000...`），而报错信息
+// 本身是要给人读的——那串地址看不出实际值是什么，也就看不出这次失败是
+// 「值算错了」还是「字段根本没给」。
+func showPtr[T any](p *T) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprint(*p)
+}

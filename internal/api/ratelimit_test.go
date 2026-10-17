@@ -86,7 +86,7 @@ func TestRateLimitedRequestIsRejectedBeforeUpstream(t *testing.T) {
 				t.Errorf("限流器收到的 keyID = %d，期望 42", limiter.keyID)
 			}
 			if limiter.rpm == nil || *limiter.rpm != 60 {
-				t.Errorf("限流器收到的 rpm = %v，期望指向 60", limiter.rpm)
+				t.Errorf("限流器收到的 rpm = %s，期望指向 60", showPtr(limiter.rpm))
 			}
 
 			// 错误体按调用协议给形状：调用方的 SDK 按自己那套解，形状不对

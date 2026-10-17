@@ -84,7 +84,7 @@ func TestOpenAIContentIsStringWithText(t *testing.T) {
 
 	got := newOpenAIChatCompletion("id", "m", 1, resp)
 	if got.Choices[0].Message.Content == nil || *got.Choices[0].Message.Content != "先查一下" {
-		t.Errorf("content = %v", got.Choices[0].Message.Content)
+		t.Errorf("content = %s", showPtr(got.Choices[0].Message.Content))
 	}
 }
 
@@ -149,7 +149,7 @@ func TestClaudeContentOrder(t *testing.T) {
 		t.Errorf("input = %v", got.Content[1].Input)
 	}
 	if got.StopReason == nil || *got.StopReason != "tool_use" {
-		t.Errorf("stop_reason = %v，期望 tool_use", got.StopReason)
+		t.Errorf("stop_reason = %s，期望 tool_use", showPtr(got.StopReason))
 	}
 	if got.StopSequence != nil {
 		t.Errorf("stop_sequence 应为 null，实际 %v", *got.StopSequence)

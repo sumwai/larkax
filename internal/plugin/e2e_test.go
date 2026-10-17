@@ -169,7 +169,7 @@ func TestEndToEndFiveHooks(t *testing.T) {
 		t.Fatalf("应用补丁失败: %v", err)
 	}
 	if req.MaxTokens != 128 || req.Temperature == nil || *req.Temperature != 0.25 {
-		t.Fatalf("补丁没落到请求上: max_tokens=%d temperature=%v", req.MaxTokens, req.Temperature)
+		t.Fatalf("补丁没落到请求上: max_tokens=%d temperature=%s", req.MaxTokens, showPtr(req.Temperature))
 	}
 	if len(rejected) != 1 || !strings.EqualFold(rejected[0], "authorization") {
 		t.Fatalf("authorization 该被拒且报出来，实际 %v", rejected)
