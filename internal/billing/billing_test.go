@@ -193,10 +193,13 @@ func TestReserveCoversWorstCase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
-	// 输入 1000 * 2e-6 = 0.002
-	// 输出 4000 × max(输出价 8e-6, 推理价 1e-5) = 4000 * 1e-5 = 0.04
-	// 推理单价更高，预留按贵的算
-	want := money.MustParse("0.042")
+	// 输入 1000 × max(输入 2e-6, 缓存读 2e-7, 缓存写 2.5e-6) = 1000 * 2.5e-6 = 0.0025
+	// 输出 4000 × max(输出 8e-6, 推理 1e-5) = 4000 * 1e-5 = 0.04
+	//
+	// 两侧都按最贵的单价估：请求前不知道结算会把输入拆成
+	// prompt / cache_read / cache_write 各多少，也不知道输出会不会被判成推理，
+	// 所以取最大值——那是与拆法无关的上界。
+	want := money.MustParse("0.0425")
 	if r.Cmp(want) != 0 {
 		t.Errorf("预留 = %s，期望 %s", r, want)
 	}
@@ -730,13 +733,13 @@ func TestReserveRejectsNegativeCacheWrite(t *testing.T) {
 	}
 }
 
-// 缓存读按 max(输入单价, 缓存读单价) 估。
+// 输入侧按 prompt / cache_read / cache_write 三者里**最贵**的单价估。
 //
-// 取 max 而不是直接取输入单价：上界算法成立的前提是「缓存读单价不高于
-// 输入单价」，而这个前提**没有任何地方被校验**——规则里 cache_read > prompt
-// 是合法配置（两个数填反、抄错行都会写成这样）。此时按输入单价估会让
-// 预留小于结算，Capped 变成常态，差额静默由平台吃掉。
-func TestReserveEstimatesCacheReadAtInputPrice(t *testing.T) {
+// 取三者最大值而不是固定取输入单价：上界算法成立的前提是「缓存读、缓存写的
+// 单价都不高于输入单价」，而这个前提**没有任何地方被校验**——规则里
+// cache_read > prompt 是合法配置（两个数填反、抄错行都会写成这样）。
+// 此时按输入单价估会让预留小于结算，Capped 变成常态，差额静默由平台吃掉。
+func TestReserveEstimatesCacheReadAtHigherPrice(t *testing.T) {
 	p := prices()
 	// 把缓存读写差价拉大，差异才看得出来
 	p.CacheRead = money.MustParse("0.0000001")
@@ -788,11 +791,57 @@ func TestReserveEstimatesCacheReadAtInputPrice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := money.MustParse("50"); s.Actual.Cmp(want) != 0 {
-		t.Errorf("实际金额 = %s，期望 %s（10 token × 单价 5）", s.Actual, want)
+	// 断言 Breakdown.Total 而不是 s.Actual：Capped 时 s.Actual **就是**预留
+	//（结算在上界处截断），于是「结算真是 50」与「结算其实是 60、被截到 50」
+	// 在 s.Actual 上取值相同。Total 才是没被截断的那个数。
+	if want := money.MustParse("50"); s.Breakdown.Total.Cmp(want) != 0 {
+		t.Errorf("实际金额 = %s，期望 %s（10 token × 单价 5）", s.Breakdown.Total, want)
 	}
 	if s.Capped {
 		t.Errorf("预留应覆盖结算，却撞了 Capped：预留 %s 实际 %s", reserved, s.Breakdown.Total)
+	}
+}
+
+// **生产的请求形状**下，输入侧自己就是上界。
+//
+// 这一条与上一条测的不是同一件事：上一条里调用方**显式给了** CacheReadTokens，
+// 于是缓存读那一项非零、能自己撑住上界。而生产里 `pipeline.Request.Usage`
+// **从来没有被填过**（入口只给 InputTokens），CacheReadTokens 与
+// CacheWriteTokens 恒为 0——乘出来还是 0。所以上界只能靠输入侧。
+//
+// 输入侧估的是**整段** prompt，而结算时那一段会按三种单价拆开。这条用例钉的
+// 就是「拆法怎么变，预留都盖得住」：1000 个 token 里 900 个命中缓存，
+// 而缓存读单价是输入的 5 倍。
+func TestReserveCoversSplitPromptWithoutCacheEstimates(t *testing.T) {
+	p := prices()
+	p.Prompt = money.MustParse("1")
+	p.CacheRead = money.MustParse("5")
+	p.CacheWrite = money.Zero
+	p.Completion = money.Zero
+	p.Reasoning = money.Zero
+
+	// 生产的形状：只有 InputTokens，两个缓存估计量都是零值。
+	reserved, err := Reserve(ReserveRequest{Prices: p, InputTokens: 1000, MaxTokens: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1000 × max(输入 1, 缓存读 5, 缓存写 0) = 5000
+	if want := money.MustParse("5000"); reserved.Cmp(want) != 0 {
+		t.Errorf("输入侧要按三者里最贵的单价估：得到 %s，期望 %s", reserved, want)
+	}
+
+	// 结算时整段 prompt 被拆成「100 未命中 + 900 命中」。
+	actual := Usage{PromptTokens: 100, CacheReadTokens: 900}
+	s, err := SettleWithCharges(actual, p, Charges{}, reserved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := money.MustParse("4600"); s.Breakdown.Total.Cmp(want) != 0 {
+		t.Fatalf("实际金额 = %s，期望 %s（100 × 1 + 900 × 5）", s.Breakdown.Total, want)
+	}
+	if s.Capped {
+		t.Errorf("预留 %s 应覆盖结算 %s，却撞了 Capped——输入侧没有按最贵的单价估",
+			reserved, s.Breakdown.Total)
 	}
 }
 
