@@ -240,6 +240,10 @@ func Build(cfg Config) (*App, error) {
 	handler.DefaultAsset = asset
 	handler.Now = cfg.Now
 	handler.RateLimiter = ratelimit.New(cfg.Now)
+	// 额度这道早拒绝与账本共用同一个 Store：它读的是 billing_requests，
+	// 而那正是账本存储管的表。权威判定在预留那个事务里（见 api.QuotaChecker），
+	// 两处共用 internal/keyquota 里同一份口径。
+	handler.Quota = ledgerStore
 	// 幂等记录的读与写走同一个 Store：入口读它、落库层在预留那个事务里写它，
 	// 两边读写的列是同一批（见 internal/idempotency 的包注释）。
 	//
@@ -409,7 +413,12 @@ func (a authenticator) Authenticate(ctx context.Context, r *http.Request) (api.U
 	if err != nil {
 		return api.User{}, err
 	}
-	return api.User{ID: user.ID, KeyID: user.KeyID, RateLimitRPM: user.RateLimitRPM}, nil
+	return api.User{
+		ID:           user.ID,
+		KeyID:        user.KeyID,
+		RateLimitRPM: user.RateLimitRPM,
+		QuotaLimit:   user.QuotaLimit,
+	}, nil
 }
 
 // 编译期断言：适配器要满足公共入口对鉴权的要求。

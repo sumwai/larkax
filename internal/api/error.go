@@ -130,6 +130,41 @@ func writeIdempotencyError(w http.ResponseWriter, protocol channel.Protocol, cod
 	writeErrorCode(w, protocol, http.StatusConflict, code, message)
 }
 
+// CodeInsufficientQuota 是这把 API Key 的累计花费已经用完了它的额度上限时的错误码。
+//
+// 它与限流共用 429，但**不是同一件事**，所以码必须分开给：
+//
+//   - 限流是「这一秒打得太快」——窗口会过去，等一会儿重发就对了；
+//   - 额度是「这把 key 累计花够了」——等多久都不会变，要改的是那把 key 的
+//     额度，或者换一把 key。
+//
+// 状态码相同而处置相反，正是 writeErrorCode 存在的理由（见它的注释）：
+// 只给状态码的话，SDK 只能靠读 message 来分辨，而 SDK 不做那件事。
+const CodeInsufficientQuota = "insufficient_quota"
+
+const msgInsufficientQuota = "this API key has reached its spending limit; " +
+	"raise the limit on this key or use a different key"
+
+// writeInsufficientQuota 写出一次「额度用尽」的响应。
+//
+// # 为什么不回 Retry-After
+//
+// 这与 writeRateLimited 的差别是有意的，不是漏了。那个头的意思是「等这么久
+// 再来」，而额度**不会自己回来**：回一个等待时间等于让客户端在一个不会变的
+// 状态上反复重试，还给了它一个「照做就行」的理由。额度要变只能靠人（改额度
+// 或换 key），所以这里没有可等的时长可给——不给头，客户端就没有可照做的
+// 退避，只能去看码。
+//
+// # 错误体
+//
+// 仍然按调用协议给形状，码由 writeErrorCode 放到各自那个机器可读的位置：
+// OpenAI 在 error.code，Anthropic 在 error.type（理由见 writeErrorCode）。
+// 状态码取 429 而不是 402：402 在各家 SDK 里普遍没有对应的处理分支，而 429
+// 是「现在别发了」这个语义的通用落点，两套协议都认。
+func writeInsufficientQuota(w http.ResponseWriter, protocol channel.Protocol) {
+	writeErrorCode(w, protocol, http.StatusTooManyRequests, CodeInsufficientQuota, msgInsufficientQuota)
+}
+
 // HeaderRetryAfter 是限流响应里回给调用方的重试间隔头。
 //
 // 它与状态码 429 是一对：只回 429 而让调用方自己去猜该等多久，多数 SDK

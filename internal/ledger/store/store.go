@@ -59,6 +59,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/idempotency"
+	"github.com/sumwai/larkax/internal/keyquota"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -222,6 +223,26 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 		return 0, fmt.Errorf("开启事务失败: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// 额度判定排在**所有加锁与写入之前**，它自己拿的那把锁就是判据的
+	// 串行化点（见 internal/keyquota 的 limitSQL：锁住 api_keys 那一行）。
+	//
+	// 为什么它必须是判据而不是像入口那样只是一次早拒绝：判据的形状是
+	// 「读一次这把 key 的累计花费，再插一行 pending」，这两步之间只要有另一个
+	// 事务插进一行，两个并发请求就都会看到「没超」，于是都放行——上限被整个
+	// 穿过去，而事后从数据上完全看不出来（每一行都是合法的）。
+	//
+	// 为什么排在钱包锁**之前**：求和要扫这把 key 的全部历史行，而钱包行锁
+	// 是这个用户所有请求（包括他别的 key）的串行点。把一次可能很慢的求和
+	// 塞进钱包锁的持有期里，会连累那些与本次判定无关的请求。排在前面之后，
+	// 钱包锁的持有期仍然只覆盖「改冻结额 + 插账单行」这两条按主键定位的语句。
+	//
+	// 拿锁顺序因此是「先 key 后钱包」。另一条会改钱包的路径是 Save（结算），
+	// 它只锁钱包、不碰 api_keys；auth 的 touch 只 UPDATE api_keys、不碰钱包。
+	// 没有任何路径按「先钱包后 key」拿锁，所以这个顺序不会成环。
+	if quotaErr := keyquota.CheckInTx(ctx, tx, req.APIKeyID, r.Amount); quotaErr != nil {
+		return 0, quotaErr
+	}
 
 	key := WalletKey{UserID: r.UserID, Asset: r.Asset}
 

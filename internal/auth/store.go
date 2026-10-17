@@ -39,14 +39,17 @@ func (s *Store) lookup(ctx context.Context, plaintext string) (User, error) {
 		userStatus string
 		expiresAt  sql.NullTime
 		rateLimit  sql.NullInt64
+		quotaLimit sql.NullString
 	)
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT k.id, k.status, k.expires_at, k.rate_limit_rpm, u.id, u.username, u.status
+		SELECT k.id, k.status, k.expires_at, k.rate_limit_rpm, k.quota_limit::text,
+		       u.id, u.username, u.status
 		  FROM api_keys k
 		  JOIN users u ON u.id = k.user_id
 		 WHERE k.key_hash = $1`, HashKey(plaintext),
-	).Scan(&user.KeyID, &keyStatus, &expiresAt, &rateLimit, &user.ID, &user.Username, &userStatus)
+	).Scan(&user.KeyID, &keyStatus, &expiresAt, &rateLimit, &quotaLimit,
+		&user.ID, &user.Username, &userStatus)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, &Error{Reason: ReasonKeyNotFound}
@@ -65,6 +68,18 @@ func (s *Store) lookup(ctx context.Context, plaintext string) (User, error) {
 	if rateLimit.Valid {
 		value := int(rateLimit.Int64)
 		user.RateLimitRPM = &value
+	}
+
+	// 金额多一步解析，理由与 ListKeys 那一处相同：列是 numeric，而 Go 这一侧
+	// 的金额类型是定点数，没有能直接扫进去的驱动类型。NULL 与「0」在这里也
+	// 必须分得开（0 是「一分钱都不放行」），所以同样用可空类型接。
+	if quotaLimit.Valid {
+		amount, parseErr := money.Parse(quotaLimit.String)
+		if parseErr != nil {
+			return User{}, fmt.Errorf("api_keys.id=%d 的 quota_limit %q 解析失败: %w",
+				user.KeyID, quotaLimit.String, parseErr)
+		}
+		user.QuotaLimit = &amount
 	}
 
 	switch keyStatus {

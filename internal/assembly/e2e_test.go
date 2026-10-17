@@ -26,6 +26,7 @@ import (
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/migrate"
+	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/pricing"
 	"github.com/sumwai/larkax/internal/settings"
 	"github.com/sumwai/larkax/internal/upstream"
@@ -1213,5 +1214,133 @@ func TestRateLimitRPMStopsAtTheLimit(t *testing.T) {
 	}
 	if bills != limit {
 		t.Errorf("账单行数 = %d，期望 %d（被拒的请求不该产生预留）", bills, limit)
+	}
+}
+
+// TestQuotaLimitStopsAtTheLimit 是「给一把 key 设了上限，请求真的被拦住」的落点。
+//
+// 这一条存在的理由与上面那条限流的相同，但更硬一点：quota_limit 曾经**写得
+// 进去、列得出来，而没有任何代码读它**（#200）。那种缺口在库里看不出来，在
+// 命令行的输出里也看不出来——`apikey update --quota-limit` 会回一句「已更新」，
+// 然后什么都没发生。所以「读到了、而且真的拦住了」必须有一条走**生产装配
+// 路径**的用例钉住，而不是只靠各层各自用桩拼出来的断言。
+//
+// # 边界从库里读回来，不在用例里重算
+//
+// 预留额是上界（见 internal/pipeline 的 Reserve），而这个上界取决于模型、
+// token 上限与计价规则三样东西。在用例里把那个算法再写一遍，等于把被测的
+// 逻辑抄成第二份——抄错了这条用例照样通过。所以先跑一笔（不设上限），再从
+// 那一行的 reserved_amount 取回边界值。
+//
+// # 两个阶段各挡一层
+//
+// 第二笔的上限设成「恰好一笔预留额」，此时**入口那一层会放行**（已结算的
+// 最终额 ≤ 预留额），拦住它的是预留事务里的权威判定——那正是并发穿透要靠的
+// 那一层。最后一段再把上限压到已花之下，用一段不合法的请求体去证明入口那一层
+// 真的接上了：没有它，这段请求体会得到 400（解析失败）而不是 429。
+func TestQuotaLimitStopsAtTheLimit(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+
+	model := unique("e2e-model-quota")
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, "100")
+	key := issueKey(t, db, user)
+
+	fake := &fakeUpstream{protocol: channel.ProtocolOpenAI, db: db, userID: user, model: model}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	body := chatBody(model)
+	endpoint := public.URL + "/v1/chat/completions"
+
+	setQuota := func(value string) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx,
+			`UPDATE api_keys SET quota_limit = $2 WHERE key_hash = $1`,
+			auth.HashKey(key), value); err != nil {
+			t.Fatalf("设置额度上限失败: %v", err)
+		}
+	}
+
+	// 一、没设上限时照常放行。这一笔同时给出下面要用的边界值。
+	if status, out := postChat(ctx, t, endpoint, key, body); status != http.StatusOK {
+		t.Fatalf("没设上限时状态码 = %d，期望 200。响应体：%s", status, out)
+	}
+
+	var reservedText, settledText string
+	if err := db.QueryRowContext(ctx, `
+		SELECT reserved_amount::text, COALESCE(final_amount, 0)::text
+		  FROM billing_requests WHERE user_id = $1`, user).Scan(&reservedText, &settledText); err != nil {
+		t.Fatalf("读账单金额失败: %v", err)
+	}
+	reserved, settled := money.MustParse(reservedText), money.MustParse(settledText)
+	// 用例的前提：这一笔真的花了钱，而且预留额确实是上界。两者都不成立时，
+	// 下面的「超限」会以别的原因通过，而那条断言就什么也没证明。
+	if !settled.IsPositive() {
+		t.Fatalf("这一笔的最终金额是 %s，用例的前提（已花 > 0）不成立", settled)
+	}
+	if settled.Cmp(reserved) > 0 {
+		t.Fatalf("最终金额 %s 超过了预留额 %s：预留本该是上界", settled, reserved)
+	}
+
+	// 二、上限设成恰好一笔预留额。已花的加上再要的这一笔必然超过它。
+	setQuota(reserved.String())
+
+	status, out, header := postChatFull(ctx, t, endpoint, key, body)
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("超出额度后状态码 = %d，期望 429。响应体：%s", status, out)
+	}
+	// 额度不会自己回来，所以**没有**可等的时长可给（见 writeInsufficientQuota）。
+	if got := header.Get("Retry-After"); got != "" {
+		t.Errorf("Retry-After = %q，期望不出现：回一个等待时间等于让客户端反复重试", got)
+	}
+	var errBody struct {
+		Error struct {
+			Code *string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out, &errBody); err != nil {
+		t.Fatalf("解析错误体失败: %v（原文 %s）", err, out)
+	}
+	if errBody.Error.Code == nil || *errBody.Error.Code != "insufficient_quota" {
+		t.Errorf("error.code = %v，期望 %q", errBody.Error.Code, "insufficient_quota")
+	}
+
+	// 三、被拒的那一笔没有走到上游，也没有留下账单行。
+	if got := fake.callCount(); got != 1 {
+		t.Errorf("上游被调用 %d 次，期望 1（被额度拒掉的那一笔不该走到上游）", got)
+	}
+	var bills int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM billing_requests WHERE user_id = $1`, user).Scan(&bills); err != nil {
+		t.Fatalf("查账单条数失败: %v", err)
+	}
+	if bills != 1 {
+		t.Errorf("账单行数 = %d，期望 1（被拒的请求不该产生预留）", bills)
+	}
+
+	// 四、把上限压到已花之下，入口那一层就该在**读请求体之前**拦住它。
+	//
+	// 请求体故意给一段不合法的 JSON：没有这道早拒绝时它会得到 400（解析失败）。
+	// 拿到 429 才说明 handler.Quota 真的接上了——接线漏掉时，上面三段全都照样
+	// 通过，因为权威判定自己就能拦住超限的请求。
+	setQuota("0.00000001")
+
+	status, out = postChat(ctx, t, endpoint, key, []byte("{"))
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("已超限时状态码 = %d，期望 429（若是 400，说明入口那道早拒绝没接上）。响应体：%s",
+			status, out)
+	}
+	if got := fake.callCount(); got != 1 {
+		t.Errorf("上游被调用 %d 次，期望 1", got)
 	}
 }
