@@ -104,7 +104,13 @@ func (s *Session) OnRoute(ctx context.Context, rc RouteContext) Result[RouteDeci
 	// 传给插件之前按 channelId 排一次序：让输入与「内核给的顺序」脱钩，
 	// 于是插件写 `candidates[0]` 不会意外表达「内核评分最高的那个」——
 	// 那是一种依赖内核实现细节的隐式偏好。
-	sort.Slice(rc.Candidates, func(i, j int) bool { return rc.Candidates[i].ChannelID < rc.Candidates[j].ChannelID })
+	//
+	// **排的是副本，不是调用方那份。** sort.Slice 排的是底层数组本身，
+	// 直接排 rc.Candidates 会把调用方手上的顺序一起改掉，而路由层之后
+	// 还要拿这份切片重试、记账、把「当时有哪些候选」记进快照——
+	// 那时它已经不是内核筛出来的那个顺序了。
+	// 同 patch.go 的合并函数：返回新的，不改动入参。
+	rc.Candidates = sortedByChannelID(rc.Candidates)
 
 	var decision RouteDecision
 	f := s.rt.Call(ctx, HookRoute, rc, &decision)
@@ -128,6 +134,20 @@ func (s *Session) OnRoute(ctx context.Context, rc RouteContext) Result[RouteDeci
 		return patchOf[RouteDecision](nil, failure, s.record(failure))
 	}
 	return patchOf(&decision, nil, false)
+}
+
+// sortedByChannelID 返回按 channelId 升序排好的副本，不改动入参。
+func sortedByChannelID(cands []RouteCandidate) []RouteCandidate {
+	if len(cands) == 0 {
+		// 没有元素就没有「排了谁」的问题，也就不必复制。
+		// 直接返回入参同时保住了 nil 与空切片在序列化上的区别
+		// （null 与 []）——插件看到的是哪一种，修这一处时不该顺手改掉。
+		return cands
+	}
+	out := make([]RouteCandidate, len(cands))
+	copy(out, cands)
+	sort.Slice(out, func(i, j int) bool { return out[i].ChannelID < out[j].ChannelID })
+	return out
 }
 
 // StreamInput 是 onStream 的输入。

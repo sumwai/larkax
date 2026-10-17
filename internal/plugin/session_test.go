@@ -209,8 +209,13 @@ func TestTimeoutStopsLaterHooks(t *testing.T) {
 // ── onRoute ───────────────────────────────────────────────────────────
 
 func TestOnRouteSelectsWithinCandidates(t *testing.T) {
+	// 插件把「它看到的候选顺序」原样写进 reason，好让这一层能断言
+	// 插件侧看到的到底是什么——候选集是内核构造的，从外面看不出来。
 	s := sessionFor(t, minimalMeta,
-		`onRoute(ctx){ return { channelId: 42, reason: "到期最近" }; }`,
+		`onRoute(ctx){
+			return { channelId: 42, reason: "" + ctx.candidates[0].channelId + "," +
+			         ctx.candidates[1].channelId + "," + ctx.candidates[2].channelId };
+		}`,
 		sandbox.Host{}, sandbox.Limits{})
 
 	cands := []RouteCandidate{{ChannelID: 7}, {ChannelID: 42}, {ChannelID: 3}}
@@ -218,13 +223,32 @@ func TestOnRouteSelectsWithinCandidates(t *testing.T) {
 	if err := res.Err(); err != nil {
 		t.Fatalf("出错: %v", err)
 	}
-	if res.Patch == nil || res.Patch.ChannelID != 42 || res.Patch.Reason != "到期最近" {
+	if res.Patch == nil || res.Patch.ChannelID != 42 {
 		t.Fatalf("决策 = %+v", res.Patch)
 	}
-	// 传给插件的候选集按 channelId 排序，与内核的尝试顺序脱钩。
+	// 插件看到的候选集按 channelId 排序，与内核的尝试顺序脱钩。
 	// 于是插件写 candidates[0] 不会意外表达「内核评分最高的那个」。
-	if cands[0].ChannelID != 3 || cands[2].ChannelID != 42 {
-		t.Errorf("传给插件的候选集该按 channelId 排序，实际 %v", cands)
+	if res.Patch.Reason != "3,7,42" {
+		t.Errorf("插件看到的候选集该按 channelId 排序（3,7,42），实际 %q", res.Patch.Reason)
+	}
+}
+
+// 排序**只对插件生效**：调用方手上那份切片的顺序不变。
+//
+// 排的是副本。sort.Slice 排的是底层数组本身，直接排 rc.Candidates
+// 会把内核拿到的候选顺序改掉，而路由层之后还要拿它重试、记账、
+// 把「当时有哪些候选」记进快照。
+func TestOnRouteLeavesCallerCandidatesUntouched(t *testing.T) {
+	s := sessionFor(t, minimalMeta, `onRoute(){ return { channelId: 42 }; }`,
+		sandbox.Host{}, sandbox.Limits{})
+
+	cands := []RouteCandidate{{ChannelID: 7}, {ChannelID: 42}, {ChannelID: 3}}
+	if err := s.OnRoute(t.Context(), RouteContext{RequestID: "r1", Candidates: cands}).Err(); err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if cands[0].ChannelID != 7 || cands[1].ChannelID != 42 || cands[2].ChannelID != 3 {
+		t.Errorf("调用方的候选顺序不该被插件层改动（期望 7,42,3），实际 %d,%d,%d",
+			cands[0].ChannelID, cands[1].ChannelID, cands[2].ChannelID)
 	}
 }
 
