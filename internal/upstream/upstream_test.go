@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/quota"
 	"github.com/sumwai/larkax/internal/route"
 )
 
@@ -349,6 +350,6 @@ func (f *fakeAdapter) ListModels(context.Context, channel.Channel) ([]string, er
 	return nil, channel.ErrUnsupported
 }
 
-func (f *fakeAdapter) Quota(context.Context, channel.Channel) (channel.Quota, error) {
-	return channel.Quota{}, nil
+func (f *fakeAdapter) Quota(context.Context, channel.Channel) (quota.State, error) {
+	return quota.State{}, nil
 }

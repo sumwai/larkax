@@ -22,6 +22,7 @@ import (
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channel/httpx"
 	"github.com/sumwai/larkax/internal/observe"
+	"github.com/sumwai/larkax/internal/quota"
 	"github.com/sumwai/larkax/internal/relay"
 )
 
@@ -176,8 +177,8 @@ func (a *Adapter) ListModels(ctx context.Context, ch channel.Channel) ([]string,
 //
 // 不在这里猜一个路径：猜错的话，一个 404 会被当成「额度查不到」，
 // 而实际原因是路径不对——那会让自记账永远接不上。
-func (a *Adapter) Quota(context.Context, channel.Channel) (channel.Quota, error) {
-	return channel.Quota{}, channel.ErrUnsupported
+func (a *Adapter) Quota(context.Context, channel.Channel) (quota.State, error) {
+	return quota.State{}, channel.ErrUnsupported
 }
 
 // encodeRequest 把统一请求编码成上游 JSON。

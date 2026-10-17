@@ -14,6 +14,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/credential"
+	"github.com/sumwai/larkax/internal/quota"
 )
 
 // ── 测试台 ──────────────────────────────────────────────────────────────
@@ -36,8 +37,8 @@ func (s *stubAdapter) ListModels(context.Context, channel.Channel) ([]string, er
 	return nil, channel.ErrUnsupported
 }
 
-func (s *stubAdapter) Quota(context.Context, channel.Channel) (channel.Quota, error) {
-	return channel.Quota{}, channel.ErrUnsupported
+func (s *stubAdapter) Quota(context.Context, channel.Channel) (quota.State, error) {
+	return quota.State{}, channel.ErrUnsupported
 }
 
 // stubType 是注册表里会有的那个类型。用它而不是真实适配器的类型名：

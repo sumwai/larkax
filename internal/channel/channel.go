@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sumwai/larkax/internal/quota"
 )
 
 // Protocol 是协议族的名字。
@@ -288,21 +290,6 @@ type ToolCallDelta struct {
 	Arguments string
 }
 
-// Quota 是渠道的额度快照。
-type Quota struct {
-	// Known 为 false 表示这个渠道查不到额度。
-	// 调用方必须区分「查不到」与「查到了，是 0」——前者不该触发停用。
-	Known bool
-	// Remaining 是剩余量，单位由 Unit 说明。
-	Remaining float64
-	Unit      string
-	// ExpiresAt 用于「最先到期优先」的选路策略。
-	ExpiresAt *time.Time
-	// Estimated 为 true 表示这个数字是本地推算的，不是上游实测。
-	// 路由可以据此降低权重，界面也要如实标注。
-	Estimated bool
-}
-
 // Adapter 是一个上游协议的实现。
 //
 // 实现必须是并发安全的：同一个适配器实例会被多个请求同时使用。
@@ -329,9 +316,16 @@ type Adapter interface {
 	// 不是所有上游都提供，不支持时返回 ErrUnsupported。
 	ListModels(ctx context.Context, ch Channel) ([]string, error)
 
-	// Quota 查询额度。查不到时返回 Known 为 false 的 Quota 而不是错误——
-	// 「这家查不到」是正常情况，不是故障。
-	Quota(ctx context.Context, ch Channel) (Quota, error)
+	// Quota 查询额度。查不到时返回 ErrUnsupported，而不是一个「余量未知」
+	// 的状态——「这家查不到」是正常情况，不是故障。
+	//
+	// 返回的是 quota.State 而不是一个本包自己的快照类型：额度状态是路由与
+	// 监控共用的一个东西，本包再声明一个只会变成它的**有损投影**——投影里
+	// 没有 last_probe_at / last_error_code 这两列，而正是这两列让
+	// quota.State.Routable 能区分「从未观测过」（可用）与「观测过却没拿到
+	// 数值」（排除）。类型统一之后，适配器拿到的状态可以不经转换地交给
+	// route.Candidate.Quota。
+	Quota(ctx context.Context, ch Channel) (quota.State, error)
 }
 
 // ErrUnsupported 表示该上游不提供这项能力。

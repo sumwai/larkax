@@ -152,8 +152,8 @@ func TestDrainReasonQuotaNotUsable(t *testing.T) {
 // 「从未观测过」与「观测过却没拿到数值」是两回事：
 // 前者是上游不支持查询额度，不该被扣分；后者是状态不足以支撑决策，挡下。
 //
-// 这一格就是 route 与 quota 唯一的语义差异。早先 route 的输入类型
-// （channel.Quota）只有一个 Known 布尔，两者在它眼里长得一样。
+// 这一格就是 route 与 quota 唯一的语义差异。早先 route 的输入类型是一次
+// 有损投影（只有一个 Known 布尔），两者在它眼里长得一样。
 func TestDrainReasonDistinguishesNeverObservedFromObservedWithoutValue(t *testing.T) {
 	never := candidate(1, "m", withQuota(quota.State{}))
 	if reason := never.DrainReason(); reason != "" {
