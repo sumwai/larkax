@@ -102,8 +102,9 @@ func kvSet(env Env) func(context.Context, []moejs.Value) (moejs.Value, error) {
 // kvWriteError 把一次失败的写入翻成插件看得懂的那一类。
 //
 // 「配额到顶」必须与「存储坏了」分开：前者插件能做点什么（先删掉一些旧键），
-// 后者做什么都没用，而两者的下一步动作不同。配额那一支**连 Cause 都不带**——
-// 存储侧的原文（现在有多少字节）对插件没有用，它要的是「写不进去了」。
+// 后者做什么都没用，而两者的下一步动作不同。配额那一支的 Cause 是**本包的
+// 哨兵**（`ErrKVQuotaExceeded`），不是存储侧交上来的原文——存储的原文
+// （现在有多少字节）对插件没有用，它要的是「写不进去了」。
 func kvWriteError(err error) error {
 	if errors.Is(err, ErrKVQuotaExceeded) {
 		return &sandbox.CapabilityError{

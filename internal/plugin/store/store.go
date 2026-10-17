@@ -117,7 +117,7 @@ func (s *Store) LoadRegistry(ctx context.Context, logger *slog.Logger, provided 
 	//nolint:contextcheck // 理由见上
 	reg, err := plugin.PublishPartial(regs, provided, func(r plugin.Registration, cause error) {
 		skipped++
-		logger.Error("插件编译失败，已跳过（其余插件照常上线）",
+		logger.Error("插件未能上线，已跳过（其余插件照常上线）",
 			"plugin", r.Key, "原因", cause)
 	})
 	if err != nil {
