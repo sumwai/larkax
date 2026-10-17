@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
@@ -215,6 +216,9 @@ func (s *Session) OnResponse(ctx context.Context, rc ResponseContext) Result[Res
 // 这是有意的：插件比内核更懂它的上游，它说「这次是 123 个 completion token」
 // 比内核按字符数估的准。但只覆盖它报了的项——没报的仍用内核的值，
 // 而不是归零（归零会让一次漏报变成一次少收钱）。
+//
+// 覆盖不等于照单全收：上报要过一道上界，见 UsageBound 与 MergeUsage。
+// 越界的那一份整份丢掉并按内核的值计费。
 func (s *Session) OnUsage(ctx context.Context, rc UsageContext) Result[UsageFacts] {
 	if s == nil || !s.Next() || !s.Plugin.Module.Has(HookUsage) {
 		return Result[UsageFacts]{}
@@ -245,6 +249,81 @@ func (f UsageFacts) empty() bool {
 	return len(f.Units) == 0
 }
 
+// UsageBound 是这次请求给插件上报用量划的那条线。
+//
+// # 它只能由内核给出
+//
+// 上界与上报值由同一方控制时，两者一起放大就等于没有上界：插件把上界抬高、
+// 再照着抬高后的上界报用量，报多少就收多少。所以这里的每个数都必须来自
+// **插件改不动**的来源：
+//
+//   - MaxOutputTokens 取客户端在请求里给的 max_tokens。插件只许把它调小
+//     （见 ApplyRequestBodyPatch 与 applyBodyToChannel），所以客户端的原值
+//     仍是上界，而补丁之后的值不是——那是插件自己挑的。传补丁后的值进来
+//     等于把上界交回插件手里，这个类型拦不住，只能靠调用方取对。
+//
+// 输入侧（promptTokens / cacheReadTokens / cacheWriteTokens）**不在这里划**：
+// 内核手上的输入量是启发式估算（见 internal/tokens），它的设计方向是
+// 「宁可偏高」而不是「一定是上界」——拿它当上界会把上游报的合法
+// prompt_tokens 拒掉，而退回估算的表现是少收。输入侧超报撞的是预留
+// （结算时 Capped），不是无限计费。
+//
+// # 它是**一致性**信号，不是最后一道钱闸
+//
+// 拦住金额的是另外两层：「max_tokens 只许调小」（上界因此不会被插件抬高）
+// 与「结算钳到预留」（billing 的 Capped）。这一条拦的是「插件的账与请求
+// 自带的上限对不上」——那通常说明插件算错了或上游的报文不对。
+//
+// 所以**它拦不住一个想把账单顶到上限的插件**：客户端给 max_tokens=1000、
+// 插件调到 10、再上报 completionTokens=900，这个值不超过 1000，判定界内；
+// 而结算按调小后的 10 去钳，账单不会超过预留。别把这条当成金额防线——
+// 金额防线是上面那两层，它们与插件无关。
+type UsageBound struct {
+	// MaxOutputTokens 是输出侧的上界：客户端请求里的 max_tokens。
+	//
+	// 非正表示调用方没给出上界。**此时任何正数上报都算越界**：这个字段的
+	// 作用就是拦住抬高账单的上报，读不出上界时拒收是唯一安全的方向，
+	// 而不是把「没有上界」当成「不设上界」——后者会让漏传一个参数
+	// 变成关掉整道检查。
+	MaxOutputTokens int64
+}
+
+// ErrUsageAboveBound 表示插件上报的用量超过了这次请求的上界。
+//
+// 与 ErrPatchScope 分开：那是**契约违规**（补丁的写法不对，作者回去改代码，
+// 上传期就该被发现），而这是**这一次上报的数据越界**——同一份插件在不同请求上
+// 可能一次越界一次不越界，所以它是一条运行期信号，要记成一次失败。
+var ErrUsageAboveBound = errors.New("插件上报的用量超过了这次请求的上界")
+
+// check 检查一份上报有没有越过上界。
+//
+// 只查输出侧，理由见 UsageBound。
+//
+// 逐项查而不是查总和：口径声明为「completion 含推理」时推理本来就在
+// completion 里，两项相加会把同一批 token 数两遍，于是合法的上报被判越界。
+// 代价是口径声明为「不含」时，两项各自贴在上界上（合起来是两倍）不算越界——
+// 那一侧撞的是预留，不会无限计费。
+//
+// 想收紧成「口径为『已含』时逐项判、为『不含』时判总和」得先改 UsageBound 的
+// 形状：这个检查跑在**合并之前**，而内核那份口径（UsageFacts 的
+// CompletionIncludesReasoning）也可能为 nil，所以这里现在表达不出「已含」。
+// 这是**没做**，不是漏了——别把它当成一个可以顺手补上的判断。
+func (b UsageBound) check(reported UsageFacts) error {
+	for _, item := range []struct {
+		name string
+		v    *int64
+	}{
+		{"completionTokens", reported.CompletionTokens},
+		{"reasoningTokens", reported.ReasoningTokens},
+	} {
+		if item.v != nil && *item.v > b.MaxOutputTokens {
+			return fmt.Errorf("%w: %s=%d 超过输出上界 %d（客户端请求里的 max_tokens）",
+				ErrUsageAboveBound, item.name, *item.v, b.MaxOutputTokens)
+		}
+	}
+	return nil
+}
+
 // MergeUsage 把插件上报的用量叠加到内核的事实上。
 //
 // 「叠加」而不是「替换」：没报的项保留内核的值。替换会让一次漏报
@@ -254,12 +333,31 @@ func (f UsageFacts) empty() bool {
 // 为准，没声明就保留内核的。它必须一起并进来——合并出来的用量随后要被
 // 重建回协议层用量去结算，而这一步丢了口径就等于把同一批 token 收两次。
 //
+// # 越界的上报整份丢掉
+//
+// 任何一项超过 bound 时返回的是**内核那份原样**与 ErrUsageAboveBound：
+// 于是即使调用方忽略了错误，也拿不到被夸大的用量，账单不会因此变高。
+// 调用方要做的另一件事是把它记成一条失败——一次被丢掉的上报必须看得见，
+// 否则它表现为「插件报了但没生效」。
+//
+// **那件事现在只有包内调用方做得到**：`Session.record` 与 `Session.blocking`
+// 都未导出，`Session.Failures()` 只读。所以在包外接线时，一次被丢掉的上报
+// **只能进日志**。接线时二选一：把「应用补丁 / 合并用量」这两步放进本包
+// （本包可以 import internal/pipeline，没有环），或者在本包上开一个导出的
+// 记录入口。**不要**在包外接一条只打日志的路，然后当文档里那句已经落地了。
+//
+// 上界由调用方给出，且必须是插件改不动的那个（见 UsageBound）。
+//
 // **目前还没有生产调用方**：那条「合并 → 重建回 channel.Usage → 结算」的
 // 链路还没接上，现在只有本包的测试在调它（同 ChannelUsage，见
-// LESSONS.md 第 22 条）。
-func MergeUsage(core UsageFacts, reported *UsageFacts) UsageFacts {
+// LESSONS.md 第 22 条）。上界因此是**参数**而不是这里读来的值：接线时
+// 少传一个参数会编译不过，比「记得在校验之后再合并」可靠。
+func MergeUsage(core UsageFacts, reported *UsageFacts, bound UsageBound) (UsageFacts, error) {
 	if reported == nil {
-		return core
+		return core, nil
+	}
+	if err := bound.check(*reported); err != nil {
+		return core, err
 	}
 	out := core
 	over := func(dst **int64, src *int64) {
@@ -289,5 +387,5 @@ func MergeUsage(core UsageFacts, reported *UsageFacts) UsageFacts {
 		}
 		out.Units = units
 	}
-	return out
+	return out, nil
 }
