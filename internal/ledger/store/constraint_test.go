@@ -75,8 +75,15 @@ func TestIsConstraintViolation(t *testing.T) {
 // 返回（同一个错误值），否则调用方原有的分类会被这层兜底搅乱。
 func TestConstraintFailureWrapsOnlyConstraints(t *testing.T) {
 	plain := errors.New("连接断了")
-	if got := constraintFailure(plain); got.Error() != plain.Error() {
-		t.Errorf("非约束错误应当原样返回，得到 %v", got)
+	// 比的是**同一个值**，不是同一段文本：写成 `got.Error() != plain.Error()`
+	// 的话，把这一层改成 `fmt.Errorf("%v", err)` 照样绿，而那样会把
+	// SaveReservation 里 ErrClaimed 的透传打断（见 store.go 里
+	// constraintFailure(ClaimInTx 的错误) 那一处）。
+	//
+	//nolint:errorlint // 这里要的正是**身份**而不是 errors.Is：包一层 `%w` 也能过
+	// errors.Is，而「原样返回」这个性质要求连包装都不许加。
+	if got := constraintFailure(plain); got != plain {
+		t.Errorf("非约束错误应当原样返回同一个值，得到 %v", got)
 	}
 	if got := constraintFailure(nil); got != nil {
 		t.Errorf("nil 应当原样返回，得到 %v", got)
@@ -102,9 +109,6 @@ func TestConstraintFailureWrapsOnlyConstraints(t *testing.T) {
 		t.Errorf("错误文本 %q 里没有写明这是约束冲突", err)
 	}
 }
-
-// billingRequestsChannelConstraint 在 wallet_missing_user_test.go 里已经
-// 写过一次，这里复用同一个常量：它描述的是同一条外键。
 
 // TestSaveReservationForeignKeyIsConstraintConflict 用真库上**另一条**外键
 // 的冲突，验写路径能被通用哨兵兜住。
