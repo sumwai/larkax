@@ -57,6 +57,10 @@ type streamUpstream struct {
 	model    string
 	// chunks 是正文分片，按顺序吐出。
 	chunks []string
+	// toolCalls 是工具调用分片，按给定的顺序**原样**吐在正文分片之后、
+	// 结束分片之前。不按 index 分组：交错的下标（0、1、0、1）是合法的，
+	// 而它正是跨协议那条路上最容易出错的一种形状。
+	toolCalls []toolCallDelta
 	// usage 非 nil 时在结束标记之前报一片实测用量。
 	usage *channel.Usage
 	// failAfter > 0 时，吐完这么多片之后报一个上游错误并结束。
@@ -163,6 +167,10 @@ func (u *streamUpstream) serveOpenAI(w io.Writer, r *http.Request, flush func())
 		return
 	}
 
+	for _, tc := range u.toolCalls {
+		write(toolCallChunk(u.model, tc))
+	}
+
 	if u.hang {
 		<-r.Context().Done()
 		return
@@ -179,6 +187,57 @@ func (u *streamUpstream) serveOpenAI(w io.Writer, r *http.Request, flush func())
 			u.usage.PromptTokens+u.usage.CompletionTokens))
 	}
 	write("[DONE]")
+}
+
+// toolCallDelta 是假上游吐出的一片工具调用增量。
+//
+// ID 与 Name 只在一次工具调用的**第一个**分片里给（OpenAI 就是这么发的），
+// 后续分片只有 index 与参数片段——留空时那两个字段整个不写，与真实上游一致。
+type toolCallDelta struct {
+	// Index 是上游自己那条流里的工具调用下标。它**可以交错**：0、1、0、1 是
+	// 合法的，而下游要靠它把分片归回各自的块。
+	Index int
+	ID    string
+	Name  string
+	Args  string
+}
+
+// openAIFakeToolCall 是分片里 tool_calls 数组的元素。
+//
+// 内层用结构体编码而不是拼字符串：该省哪些字段正是这条流要测的东西之一
+// ——多写一个 `"name":""` 会让上游的形状失真，而失真的夹具不会报错，
+// 只会让用例测的不是真实的那条路。
+type openAIFakeToolCall struct {
+	Index    int                    `json:"index"`
+	ID       string                 `json:"id,omitempty"`
+	Type     string                 `json:"type,omitempty"`
+	Function openAIFakeToolFunction `json:"function"`
+}
+
+type openAIFakeToolFunction struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments"`
+}
+
+// toolCallChunk 造一个只带工具调用增量的分片。外层形状与 serveOpenAI 里
+// 那几个分片相同（choices[0].delta），只有 delta 里装的是 tool_calls。
+func toolCallChunk(model string, tc toolCallDelta) string {
+	call := openAIFakeToolCall{
+		Index:    tc.Index,
+		ID:       tc.ID,
+		Function: openAIFakeToolFunction{Name: tc.Name, Arguments: tc.Args},
+	}
+	if tc.ID != "" {
+		call.Type = "function"
+	}
+	calls, err := json.Marshal([]openAIFakeToolCall{call})
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf(
+		`{"id":"chatcmpl-placeholder","object":"chat.completion.chunk","model":%q,`+
+			`"choices":[{"index":0,"delta":{"tool_calls":%s},"finish_reason":null}]}`,
+		model, calls)
 }
 
 // serveAnthropic 按 Anthropic 的顺序吐事件。
