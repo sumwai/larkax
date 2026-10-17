@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
@@ -92,6 +93,72 @@ type RequestBodyPatch struct {
 	ToolChoice  any      `json:"tool_choice,omitempty"`
 }
 
+// decodePatch 严格解析插件返回的补丁：出现契约之外的字段就报错。
+//
+// # 为什么不能宽松
+//
+// 宽松解析在这里不是「不够严谨」，而是**造出最难查的一类静默**。插件写
+// `return { channeId: 7 }` 时那个字段被丢掉，于是这次「不决策」——
+// 作者看到的是「我的插件没生效」，而没有任何一条日志或错误告诉他为什么。
+// 越权也是同一个形状：插件写 `{ body: { model: "更贵的模型" } }` 时宽松解析
+// 把 model 悄悄丢掉，作者以为改成功了、而上游收到的是原模型，
+// 一次「看起来生效了」的越权尝试。
+//
+// 这与 parseMeta 对插件元数据的态度是同一个：作者写给宿主的声明，
+// 写错了要立刻说，而不是让它静默失效（见 registry.go 的 parseMeta）。
+//
+// # 报错用 ErrPatchScope
+//
+// 与 RequestBodyPatch 共用同一个哨兵：「写了契约里没有的字段」与「试图改一个
+// 改不了的字段」在实现上是同一件事——字段不在类型里，而作者要做的动作也一样，
+// 都是把字段名改对。分成两个哨兵只会让同一类错误有两个名字，
+// 调用方要同时判两个才算判全。
+//
+// # 报错里的字段清单是推出来的
+//
+// 从结构体标签推（见 contractFieldNames），不手写一份清单：手写的那份与结构体
+// 会各自漂移，而它只出现在报错文本里——漂移的表现是「报错少列了一个本来能用
+// 的字段」，没有测试会因此失败。
+func decodePatch(data []byte, target any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(target); err != nil {
+		if errors.Is(err, ErrPatchScope) {
+			// 内层已经按契约报过错了（`body` 里那一份由 RequestBodyPatch 报出），
+			// 原样传出去。再包一层会让「可改的字段只有」出现两次，
+			// 而两份清单指的是不同的东西——一份是请求体里能改的字段，
+			// 一份是这个补丁能给的字段。作者要的是**出错那一层**的那份。
+			return err
+		}
+		return fmt.Errorf("%w: %w（可改的字段只有 %s）",
+			ErrPatchScope, err, strings.Join(contractFieldNames(target), "、"))
+	}
+	return nil
+}
+
+// contractFieldNames 按声明顺序取出一份补丁类型的契约字段名（json 标签那部分）。
+//
+// 只用于报错文本：真正决定「哪些字段收得下」的是结构体本身，
+// 也就是 DisallowUnknownFields 读的那份标签。
+func contractFieldNames(target any) []string {
+	t := reflect.TypeOf(target)
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == nil || t.Kind() != reflect.Struct {
+		return nil
+	}
+	names := make([]string, 0, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+		if name == "" || name == "-" {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
 // UnmarshalJSON 严格解析请求体补丁：出现白名单之外的字段就报错。
 //
 // **宽松解析在这里是危险的**，而不是仅仅「不够严谨」：插件写
@@ -103,12 +170,9 @@ type RequestBodyPatch struct {
 // 「插件改了但没生效」，而那是最难排查的一类。
 func (p *RequestBodyPatch) UnmarshalJSON(data []byte) error {
 	type plain RequestBodyPatch // 去掉方法集，避免递归调到自己
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
 	var out plain
-	if err := dec.Decode(&out); err != nil {
-		return fmt.Errorf("%w: %w（可改的字段只有 %s）",
-			ErrPatchScope, err, strings.Join(patchableBodyFields, "、"))
+	if err := decodePatch(data, &out); err != nil {
+		return err
 	}
 	*p = RequestBodyPatch(out)
 	return nil
@@ -137,6 +201,21 @@ func (p *RequestBodyPatch) empty() bool {
 type RequestPatch struct {
 	Body    *RequestBodyPatch `json:"body,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// UnmarshalJSON 严格解析 onRequest 的返回值。
+//
+// 外层与内层用同一把尺子：只严格解析 Body 的话，`return { bodyy: {...} }`
+// 仍然静默无效果——而它与 `{ body: { model: ... } }` 是同一类问题，
+// 只是错在更外面一层。理由见 decodePatch。
+func (p *RequestPatch) UnmarshalJSON(data []byte) error {
+	type plain RequestPatch
+	var out plain
+	if err := decodePatch(data, &out); err != nil {
+		return err
+	}
+	*p = RequestPatch(out)
+	return nil
 }
 
 // RouteContext 是 onRoute 看到的候选集。
@@ -191,6 +270,21 @@ type RouteDecision struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
+// UnmarshalJSON 严格解析路由决策：契约之外的字段报错，理由见 decodePatch。
+//
+// 这一处尤其要紧：写错字段名的表现是 ChannelID 停在 0，而 0 归一成
+// 「没给决策」（见 Session.OnRoute）——于是插件「跑过了、没报错、也没生效」，
+// 三件事同时成立，作者无从下手。
+func (d *RouteDecision) UnmarshalJSON(data []byte) error {
+	type plain RouteDecision
+	var out plain
+	if err := decodePatch(data, &out); err != nil {
+		return err
+	}
+	*d = RouteDecision(out)
+	return nil
+}
+
 // StreamContext 是 onStream 看到的当前块。
 type StreamContext struct {
 	RequestID string `json:"requestId"`
@@ -211,6 +305,20 @@ type StreamDecision struct {
 	Terminate bool    `json:"terminate,omitempty"`
 }
 
+// UnmarshalJSON 严格解析逐块决策：契约之外的字段报错，理由见 decodePatch。
+//
+// 它每个块都要解一次，所以「拼错就报错」在这里的收益也最大：错一次就报一次，
+// 而不是让插件在整条流上一直不生效。
+func (d *StreamDecision) UnmarshalJSON(data []byte) error {
+	type plain StreamDecision
+	var out plain
+	if err := decodePatch(data, &out); err != nil {
+		return err
+	}
+	*d = StreamDecision(out)
+	return nil
+}
+
 // ResponseContext 是 onResponse 看到的响应。
 type ResponseContext struct {
 	RequestID string         `json:"requestId"`
@@ -228,6 +336,20 @@ type ResponseContext struct {
 type ResponsePatch struct {
 	Text     *string        `json:"text,omitempty"`
 	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+// UnmarshalJSON 严格解析响应补丁：契约之外的字段报错，理由见 decodePatch。
+//
+// Metadata 是自由形状的，它的**键**不受影响：严格解析管的是这个结构体自己的
+// 字段名（`text` / `metadata`），map 里放什么由插件决定。
+func (p *ResponsePatch) UnmarshalJSON(data []byte) error {
+	type plain ResponsePatch
+	var out plain
+	if err := decodePatch(data, &out); err != nil {
+		return err
+	}
+	*p = ResponsePatch(out)
+	return nil
 }
 
 // UsageContext 是 onUsage 看到的原始用量。
@@ -275,6 +397,25 @@ type UsageFacts struct {
 	// 一个没声明口径的插件会被当成「推理单独报出」，于是那 50 个推理 token
 	// 与它们在 completion 里的那一份被各乘一次单价，账单只是偏高。
 	CompletionIncludesReasoning *bool `json:"completionIncludesReasoning,omitempty"`
+}
+
+// UnmarshalJSON 严格解析插件上报的用量：契约之外的字段报错，理由见 decodePatch。
+//
+// 这里报错的对象多半不是「越权」而是「写错」——用量里没有金额字段，
+// 所以 `{ amount: 5 }` 与 `{ promptToken: 5 }` 都是「契约里没有这个名字」。
+// 两者都要报：前者正是「不能报价」这条在解析期的落点，
+// 后者的静默失效会让一次漏报看起来像一次正常上报。
+//
+// Units 与 ResponsePatch.Metadata 同理：它的**键**是自由形状的，
+// 严格解析只管 `units` 这个名字本身。
+func (f *UsageFacts) UnmarshalJSON(data []byte) error {
+	type plain UsageFacts
+	var out plain
+	if err := decodePatch(data, &out); err != nil {
+		return err
+	}
+	*f = UsageFacts(out)
+	return nil
 }
 
 // Result 是一次 hook 调用的结果。
