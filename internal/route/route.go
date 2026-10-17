@@ -247,7 +247,7 @@ func NeedsOf(req *channel.Request) Needs {
 	return needs
 }
 
-// profileRejection 说明这条候选为什么接不住这次请求，空串表示放行。
+// profileRejection 说明这条候选为什么接不住这次请求，空分类表示放行。
 //
 // 能力、端点与上限三类判据的处置相同（这条候选出局），所以在这里合成一个
 // 函数，由 Select 记进 Exclusion——分成几处判会让「为什么没选那个渠道」在
@@ -258,19 +258,23 @@ func NeedsOf(req *channel.Request) Needs {
 // 端点排在能力之后是因为它更接近「这条渠道根本不该试」：能力那一栏说的是
 // 「这个模型做不做得了这件事」，调参数或许能绕过；端点不对则怎么改请求都
 // 没用——换一条候选才行。
-func (c Candidate) profileRejection(needs Needs) string {
+//
+// 两个返回值是这条排除的分类与说明（见 Exclusion.Code 与 Reason）。分类只有
+// 两档：能力与端点合成 CodeCapability（它们说的都是「目录里那一条声明覆盖
+// 不到这次请求」），上限是 CodeLimit。分类与说明一起算出来，理由同 DrainReason。
+func (c Candidate) profileRejection(needs Needs) (ExclusionCode, string) {
 	p := c.Profile
 	if p == nil {
-		return ""
+		return "", ""
 	}
 
 	switch {
 	case needs.Tools && declaredUnsupported(p.Tools):
-		return "模型目录里不支持工具调用"
+		return CodeCapability, "模型目录里不支持工具调用"
 	case needs.Vision && declaredUnsupported(p.Vision):
-		return "模型目录里不支持图片"
+		return CodeCapability, "模型目录里不支持图片"
 	case needs.Reasoning && declaredUnsupported(p.Reasoning):
-		return "模型目录里不支持推理"
+		return CodeCapability, "模型目录里不支持推理"
 	}
 
 	// 端点：目录说这个模型在哪几条端点上被服务，而这条候选把请求发到
@@ -299,25 +303,26 @@ func (c Candidate) profileRejection(needs Needs) string {
 			// `{}`：明确一条都不支持。它没有清单可列，所以单独说一句——
 			// 「只在这些端点上服务：」后面空着的话，读的人会以为那句话
 			// 没打完，而这一档的结论是「任何候选都选不中」。
-			return fmt.Sprintf("模型目录里这个模型一条端点都不支持；这条候选走的是 %s", c.Endpoint)
+			return CodeCapability, fmt.Sprintf(
+				"模型目录里这个模型一条端点都不支持；这条候选走的是 %s", c.Endpoint)
 		}
-		return fmt.Sprintf("模型目录里只在这些端点上服务：%s；这条候选走的是 %s",
+		return CodeCapability, fmt.Sprintf("模型目录里只在这些端点上服务：%s；这条候选走的是 %s",
 			joinEndpoints(p.Endpoints), c.Endpoint)
 	}
 
 	// 上限：只有目录里填了数（> 0）时才判。0 是未知（库里是 NULL），不判
 	// ——一次采集失败不该让整批模型用不了（见 ModelProfile）。
 	if p.OutputLimit > 0 && needs.MaxOutputTokens > p.OutputLimit {
-		return fmt.Sprintf("模型目录里输出上限 %d，这次请求要 %d",
+		return CodeLimit, fmt.Sprintf("模型目录里输出上限 %d，这次请求要 %d",
 			p.OutputLimit, needs.MaxOutputTokens)
 	}
 	// 上下文按「输入 + 输出」比：那是窗口的两半，只比输入会让一个装不下
 	// 这么多输出的请求看起来是合规的。
 	if p.ContextLimit > 0 && needs.InputTokens+needs.MaxOutputTokens > p.ContextLimit {
-		return fmt.Sprintf("模型目录里上下文上限 %d，这次请求输入 %d + 输出 %d",
+		return CodeLimit, fmt.Sprintf("模型目录里上下文上限 %d，这次请求输入 %d + 输出 %d",
 			p.ContextLimit, needs.InputTokens, needs.MaxOutputTokens)
 	}
-	return ""
+	return "", ""
 }
 
 // declaredUnsupported 判断一项能力是不是**被明确声明为不支持**。
@@ -481,7 +486,7 @@ func (c Candidate) Eligible() (bool, string) {
 	return true, ""
 }
 
-// DrainReason 返回「现在不该往这个渠道发请求」的原因，没有则返回空。
+// DrainReason 返回「现在不该往这个渠道发请求」的分类与说明，没有则两者都是零值。
 //
 // 与 Eligible 分开：Eligible 是配置层面的、不会自己变的事实；
 // 这里是运行状态。两者的处置也不同——配置错误要告警，
@@ -490,23 +495,30 @@ func (c Candidate) Eligible() (bool, string) {
 // 额度那两道**判断**只有一处实现：internal/quota 的 Routable 与 Usable。
 // 本包不自己读 Remaining 再判一遍——同一个语义两处实现，迟早分叉，
 // 而分叉的表现是「读侧说能用、写侧说不能用」这类查不出原因的行为。
-func (c Candidate) DrainReason() string {
+//
+// 两个返回值出自**同一次判断**，所以一起在这里算出来：分成两处各判一遍的话，
+// 留痕上记的分类与日志里写的那句话迟早会对不上，而那种偏差只有在下一次排查
+// 时才会被发现，那时两份都已经是「现场」了。分类的读者是留痕（见
+// Exclusion.Code），那句话的读者是日志与 runbook。
+//
+// 只关心那句话的调用方（含别的包的测试）写成 `_, reason := …`。
+func (c Candidate) DrainReason() (ExclusionCode, string) {
 	if c.Health.ConsecutiveFailures >= consecutiveFailureCutoff {
-		return fmt.Sprintf("连续失败 %d 次", c.Health.ConsecutiveFailures)
+		return CodeHealth, fmt.Sprintf("连续失败 %d 次", c.Health.ConsecutiveFailures)
 	}
 	// 状态不足以支撑决策：观测过，却既没有数值也没有别的可用信息。
 	// 「从未观测过」（上游不支持查询额度）**不算**这一档——把它一起挡掉
 	// 等于默认停用所有查不到额度的渠道（见 quota.State.Routable 的注释）。
 	if !c.Quota.Routable() {
-		return "额度观测过但没有可用信息"
+		return CodeQuota, "额度观测过但没有可用信息"
 	}
 	// 有数值且已经见底：这是事实，不是偏好，必须挡住。
 	// 未知（Remaining 为 nil）不挡——那说明这个渠道查不到额度，
 	// 不是它没额度了。
 	if !c.Quota.Usable() {
-		return "额度已耗尽"
+		return CodeQuota, "额度已耗尽"
 	}
-	return ""
+	return "", ""
 }
 
 // consecutiveFailureCutoff 是连续失败多少次之后暂时不再选它。
@@ -529,7 +541,21 @@ type Plan struct {
 type Exclusion struct {
 	ChannelID int64
 	Name      string
-	Reason    string
+
+	// Reason 是给人看的一句话，带着现场的具体取值——模型名、上限、连续失败
+	// 次数。它留给日志与 runbook，**今天还没有出口**：生产里没有任何一处读它
+	// （`Errors.Error()` 只用计数值与最后一次尝试的错误，不读这一段），
+	// 读它的目前只有测试。它也不是留痕里的形态——那一侧要的是 Code。
+	Reason string
+	// Code 是这条排除的**机器可读分类**（见 ExclusionCode）。
+	//
+	// 它与 Reason 分成两个字段，而不是把 Reason 换成枚举词：Reason 里的模型名
+	// 与数字是排查时唯一能把「为什么是它」复核下去的东西，去掉它们等于把这条
+	// 记录变成一句无用的话；而留痕（request_snapshots 的 surface=decision）
+	// 要的是稳定、可聚合、不需要再过一遍脱敏判据的取值——那正是 Code。
+	// 一句话概括：**Reason 是给人看的，Code 是给机器看的。**
+	Code ExclusionCode
+
 	// Unsupported 表示这条排除的依据是**模型目录**（能力不匹配或超出上限）。
 	//
 	// 它与别的排除理由分开，只为一件事：一个候选都不剩时，错误文本要分得开
@@ -538,6 +564,42 @@ type Exclusion struct {
 	// 它只是排查时的一条附加信息。
 	Unsupported bool
 }
+
+// ExclusionCode 是一条候选被排除的机器可读分类。
+//
+// # 为什么要有它
+//
+// Exclusion.Reason 是给人看的一句话（「模型目录里输出上限 4096，这次请求要
+// 8192」），它带着模型名与数字，是**自由文本**。留痕那一侧不能直接收它：那条
+// 链路对字符串的处置是「看起来像枚举词才原样留下，否则按内容脱敏」，而一句话
+// 必然落进后者——排查时看到的是一个文本占位符，等于没记。取它的**分类**则是
+// 一个固定的 ASCII 词：过得了那一道判据，可以直接按它聚合，也不会因为哪天
+// 有人在 Reason 里多拼一个用户输入片段就漏出去。
+//
+// # 取值与判据的对应
+//
+// 每一个取值对应 Select 里的一处判据，顺序与那里的先后一致（见 Select 的
+// 注释）：配置 → 渠道声明 → 模型目录 → 运行状态。
+type ExclusionCode string
+
+const (
+	// CodeIneligible 表示渠道本身配置不全（缺 ID / base_url / 凭证）。
+	CodeIneligible ExclusionCode = "ineligible"
+	// CodeModelNotDeclared 表示渠道没有声明支持这个模型。
+	CodeModelNotDeclared ExclusionCode = "model_not_declared"
+	// CodeCapability 表示模型目录声明它做不了这次请求要用到的能力（工具 /
+	// 图片 / 推理），或者目录说这个模型不在候选走的那条端点上。
+	//
+	// 端点与三项能力共用一个取值：两处说的都是「目录里那一条声明覆盖不到
+	// 这次请求」，差别只在声明的是哪一列——而那一列写在 Reason 里。
+	CodeCapability ExclusionCode = "capability"
+	// CodeLimit 表示请求超出模型目录声明的上限（输出上限或上下文窗口）。
+	CodeLimit ExclusionCode = "limit"
+	// CodeHealth 表示渠道当前健康度不佳（连续失败到了阈值）。
+	CodeHealth ExclusionCode = "health"
+	// CodeQuota 表示渠道当前没有可用额度（已耗尽，或观测不到可用信息）。
+	CodeQuota ExclusionCode = "quota"
+)
 
 // pinFirst 返回一份把 channelID 那个候选提到最前的副本。
 //
@@ -616,24 +678,27 @@ func (r *Router) Select(candidates []Candidate, canonicalModel string, needs Nee
 	for _, c := range candidates {
 		if ok, reason := c.Eligible(); !ok {
 			plan.Excluded = append(plan.Excluded, Exclusion{
-				ChannelID: c.Channel.ID, Name: c.Channel.Name, Reason: reason})
+				ChannelID: c.Channel.ID, Name: c.Channel.Name, Reason: reason,
+				Code: CodeIneligible})
 			continue
 		}
 		if !c.Channel.Supports(canonicalModel) {
 			plan.Excluded = append(plan.Excluded, Exclusion{
 				ChannelID: c.Channel.ID, Name: c.Channel.Name,
-				Reason: fmt.Sprintf("不支持模型 %q", canonicalModel)})
+				Reason: fmt.Sprintf("不支持模型 %q", canonicalModel),
+				Code:   CodeModelNotDeclared})
 			continue
 		}
-		if reason := c.profileRejection(needs); reason != "" {
+		if code, reason := c.profileRejection(needs); code != "" {
 			plan.Excluded = append(plan.Excluded, Exclusion{
 				ChannelID: c.Channel.ID, Name: c.Channel.Name, Reason: reason,
-				Unsupported: true})
+				Code: code, Unsupported: true})
 			continue
 		}
-		if reason := c.DrainReason(); reason != "" {
+		if code, reason := c.DrainReason(); code != "" {
 			plan.Excluded = append(plan.Excluded, Exclusion{
-				ChannelID: c.Channel.ID, Name: c.Channel.Name, Reason: reason})
+				ChannelID: c.Channel.ID, Name: c.Channel.Name, Reason: reason,
+				Code: code})
 			continue
 		}
 		eligible = append(eligible, c)
@@ -656,9 +721,9 @@ func (r *Router) Select(candidates []Candidate, canonicalModel string, needs Nee
 // 而真正要改的可能是某个渠道的额度。
 func (p Plan) emptyError() *Errors {
 	if p.unsupportedOnly() {
-		return &Errors{Unsupported: len(p.Excluded)}
+		return &Errors{Unsupported: len(p.Excluded), Excluded: p.Excluded}
 	}
-	return &Errors{}
+	return &Errors{Excluded: p.Excluded}
 }
 
 // unsupportedOnly 判断这次排除是不是全部来自模型目录判据。
@@ -1117,6 +1182,19 @@ type Result struct {
 	// Attempts 按顺序记录了每一次尝试，包括失败的。
 	// 计费与排查都需要它：失败的调用不计费，但要知道发生过。
 	Attempts []Attempt
+
+	// Excluded 是被选路筛掉的候选及其原因（见 Plan.Excluded）。
+	//
+	// # 它与 Attempts 分开
+	//
+	// Attempts 记的是**真的发出去过**的候选；被筛掉的那些连试都没试过，
+	// 在上面的列表里没有影子。少了这一份，「我配了三个渠道为什么只用一个」
+	// 与「我只配了一个渠道」在调用方看到的现场上完全一样——而前者是配置
+	// 问题，要改的是被筛掉那几条渠道的配置。
+	//
+	// 它随第一次成功的选路就一直带着（不进 Attempts 的循环），因为筛选发生
+	// 在循环之前，与被选中谁无关。
+	Excluded []Exclusion
 }
 
 // Errors 是候选都试不下去时返回的错误。
@@ -1137,6 +1215,13 @@ type Errors struct {
 	// 「试过、上游一个个都说自己不支持」是同一个结论（见 Error 的
 	// allCapabilityMismatch 那一支），措辞也就同一句。
 	Unsupported int
+	// Excluded 是**一个候选都不剩**时被筛掉的那些候选与原因（见 Plan.Excluded）。
+	//
+	// 它只在这一支非空：一个候选都没剩下时，Plan 不进 Result，被筛掉的那些
+	// 就只剩这里有——而「我配了三个渠道为什么一个都没用上」正是这一支要回答
+	// 的问题。提前放弃与试完为止那两支里它是空的：那时调用方手上的
+	// Result.Excluded 才是那一份（见 Result.Excluded）。
+	Excluded []Exclusion
 }
 
 func (e *Errors) Error() string {
@@ -1315,7 +1400,7 @@ func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.R
 		return nil, plan.emptyError()
 	}
 
-	result := &Result{}
+	result := &Result{Excluded: plan.Excluded}
 	for _, c := range plan.Candidates {
 		if err := ctx.Err(); err != nil {
 			// 客户端断开：不再尝试剩余渠道。已经发生的尝试照常记录，

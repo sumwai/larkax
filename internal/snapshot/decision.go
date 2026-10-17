@@ -115,6 +115,40 @@ var decisionResponseTail = []fieldRule{
 		Note: "这一次耗了多久。超时类的失败靠它区分「真的慢」与「根本没连上」"},
 }
 
+// decisionExclusionFields 是被选路筛掉的候选的判据字段。
+//
+// # 它为什么只在响应方向
+//
+// 请求方向那一行采在**选路之前**（见 gateway.DecisionTrace），那时还没有
+// 「筛掉了谁」这件事——排除是选路的结果。把它写进请求方向的表，等于宣示
+// 一个永远不会出现的键。
+//
+// # 为什么要有它
+//
+// 候选集合与尝试列表之间的那一段从前没有出口：candidates 记的是选路之前
+// 有几个候选，attempts 记的是真的发出去过哪几个，而那两条**没被发出去的**
+// 为什么不在候选里，没有任何一个字段说得出来——差额本身也只是一道差额。
+// 其中「有几条渠道的声明或状态不对，在选路那一步就被筛掉」正是这一节记的
+// 那一类；差额里剩下的那些是没轮到就被提前放弃的（见 excluded 字段那条
+// Note 与 gateway.DecisionOutcome.Excluded）。
+//
+// # 理由为什么是枚举词
+//
+// 记的不是那句给人看的话（「模型目录里输出上限 4096，这次请求要 8192」），
+// 而是它的**分类**（route.Exclusion.Code）：那句话里带着模型名与数字，是自由
+// 文本，按枚举词那一档会退成占位符；分类则是几个固定的 ASCII 词，过得了取值
+// 检查，也能按它聚合。那句原文留在 `Exclusion.Reason` 里（今天还没有出口）。
+var decisionExclusionFields = []fieldRule{
+	{Path: "excluded_count", Kind: allowUint,
+		Note: "被筛掉的候选数。它与 candidates_count 一起才是「当时有几个、几个被筛掉」；骨架超限降级成摘要层时，它是这一件事唯一还留下的痕迹（见 snapshot 的 topScalars）"},
+	{Path: "excluded", Kind: keepShape,
+		Note: "被选路筛掉的候选，一个一段。没有排除时整段不写，与 candidates 不同——「零个排除」不是一个事实，是「没有这件事」。它不是一份穷尽划分：candidates 与 attempts 的差额里还有「没轮到就被提前放弃」的候选（别名翻不出来、客户端断开、不可重试的失败后仍有未试候选），那些既不在这一段也不在 attempts 里"},
+	{Path: "excluded[].channel_id", Kind: allowUint,
+		Note: "被筛掉的是哪个渠道。它与 candidates[].channel_id 是同一个身份，两边对得上才说明「这个候选取过、被筛掉了」"},
+	{Path: "excluded[].code", Kind: allowEnumWord,
+		Note: "为什么被筛掉，取值见 internal/route 的 ExclusionCode，字面量是 ineligible / model_not_declared / capability / limit / health / quota（依次为：配置不全 / 渠道没声明支持这个模型 / 目录能力 / 目录上限 / 健康度 / 额度）。它是机器可读的分类而不是那句原文：原文带着模型名与数字，按枚举词判会退成占位符"},
+}
+
 // decisionRequestRules 是决策请求方向的允许表。
 //
 // 它记的是「我们打算怎么处理」：选路之前手上有哪些候选、各自什么状态。
@@ -125,11 +159,12 @@ var decisionRequestRules = append(
 
 // decisionResponseRules 是决策响应方向的允许表。
 //
-// 它在请求方向那张表上追加一段，而不是另写一份：两份表的第一个后果是
+// 它在请求方向那张表上追加两段，而不是另写一份：两份表的第一个后果是
 // 加一维判据时只加一处，而两个方向记的是同一组判据。
 var decisionResponseRules = append(
-	append(append([]fieldRule{}, decisionCommonRules...), decisionCandidateFields...),
-	decisionResponseTail...,
+	append(append(append([]fieldRule{}, decisionCommonRules...), decisionCandidateFields...),
+		decisionResponseTail...),
+	decisionExclusionFields...,
 )
 
 // decisionAllowlists 把方向映射到决策表面的允许表。
