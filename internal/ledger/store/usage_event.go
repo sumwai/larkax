@@ -90,6 +90,9 @@ var ErrUnknownUsageSource = errors.New("未知的用量来源")
 // NULL。这一列是「这次请求花了多久」，而 pipeline.Charge 上没有承载它的
 // 字段——耗时只有网关量得到，而它今天没把那个数带进结算。这一轮不写，
 // 等那条路接上再说。
+//
+// NULLIF($3, 0::bigint) 里的类型标注是必要的：channel_id 列为 bigint，
+// 裸 0 会把 $3 推成 int4（见 store.go 的 SaveReservation）。
 const insertUsageEventSQL = `
 	INSERT INTO usage_events (
 		request_id, user_id, channel_id, canonical_model,
@@ -97,7 +100,7 @@ const insertUsageEventSQL = `
 		reasoning_tokens, unit_counts, billing_path, estimator,
 		cost, asset, priced_at, local_hour, is_off_day
 	) VALUES (
-		$1, $2, NULLIF($3, 0), $4,
+		$1, $2, NULLIF($3, 0::bigint), $4,
 		$5, $6, $7, $8,
 		$9, $10::jsonb, $11, NULLIF($12, ''),
 		$13::numeric, $14, $15, NULL, NULL
