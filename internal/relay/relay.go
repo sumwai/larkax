@@ -286,6 +286,10 @@ func ParseRequest(ctx context.Context, protocol channel.Protocol, body []byte) (
 		src = &dto.GeneralOpenAIRequest{}
 	case channel.ProtocolAnthropic:
 		src = &dto.ClaudeRequest{}
+	case channel.ProtocolOpenAIResponses:
+		// 这一条的请求体与另外两条差得远，所以它走自己的解析（见
+		// parseResponsesRequest），转出来的仍是同一个 OpenAI Chat 形状。
+		return parseResponsesRequest(ctx, body)
 	default:
 		// custom 没有固定的请求体形状：它由具体适配器说了算，
 		// 在这里猜一个会让「调用方说的是哪套协议」这件事失去意义。
@@ -296,6 +300,89 @@ func ParseRequest(ctx context.Context, protocol channel.Protocol, body []byte) (
 		return nil, fmt.Errorf("解析请求体失败: %w", err)
 	}
 	return FromRelaykitRequest(ctx, protocol, src)
+}
+
+// parseResponsesRequest 解析一条 OpenAI Responses 协议的请求体。
+//
+// 它不自己拼 messages：Responses 的 input[] 有十几种 item 类型
+// （message / function_call / function_call_output / reasoning / item_reference…），
+// system 是顶层的 instructions，工具声明是**平铺**的（{"type":"function","name":…}，
+// 而不是 chat 的 function 嵌套）。那些差异 relaykit 的
+// ResponsesRequestToChatCompletionsRequest 已经处理过并有测试覆盖，所以这里
+// 只做「解 JSON → 交给它 → 落回本项目」。
+//
+// # 两类字段它替我们挡住
+//
+// **有状态的字段一律拒绝**，不静默丢弃：previous_response_id、conversation、
+// prompt、context_management 都会让输入里含**上游持有的历史**，而本项目按
+// 「输入全在请求体里」估算 token 做预留（见 FromRelaykitRequest 的
+// MaxTokens 与 api 的 inputTokensOf）。估算低估的后果是预留不足、结算超支，
+// 所以那几个字段由 relaykit 直接报错（表现为 400），而不是被丢掉之后
+// 我们照旧按本地输入算账。
+//
+// **store 被丢弃**（它进了中间那个 chat 请求，而 FromRelaykitRequest 不读它）。
+// 这是有意的：它只表达「上游可以留存这次请求」，不影响我们这边的输入量，
+// 也不影响上游这次要算什么。丢弃的代价是调用方以为留了痕而实际没有——
+// 而它真正会用到的续话手段是 previous_response_id，那一条已经被拒。
+//
+// # 工具声明里的类型要在这一步拦
+//
+// 非 function 的工具（type=mcp 的远端 MCP、web_search 这类内置工具）必须在
+// 这里拒掉，因为转换链上**没有任何一层会替我们报错**：relaykit 的
+// ResponsesRequestToChatCompletionsRequest 内部先经 toolconv 把工具声明从
+// 请求里抽出来、再按目标格式重新挂回去，而目标格式（chat）表达不了这些类型，
+// 于是它们被**静默丢掉**。实测发一个 type=mcp 的请求得到的是 200，工具不见了
+// 而回答照常返回——客户端会以为工具挂上了，而它一次都不会被调用。
+//
+// FromRelaykitRequest 的 checkToolType 照不到这一条：它读的是转换**之后**的
+// dto.ToolCallRequest.Type，而那时非 function 的声明已经没了。上游适配器那
+// 一层同样照不到——channel.Tool 只有名字、描述与 schema，没有承载类型的字段。
+// 入口是唯一还看得见原始 type 的地方，所以判据放在这里，并复用 checkToolType
+// 的措辞（与另外两条入口同一句话）。
+func parseResponsesRequest(ctx context.Context, body []byte) (*channel.Request, error) {
+	src := &dto.OpenAIResponsesRequest{}
+	if err := kitutil.Unmarshal(body, src); err != nil {
+		return nil, fmt.Errorf("解析请求体失败: %w", err)
+	}
+	if err := checkResponsesTools(src.Tools); err != nil {
+		return nil, err
+	}
+	converted, err := relayconvert.ResponsesRequestToChatCompletionsRequest(src)
+	if err != nil {
+		return nil, fmt.Errorf("解析 Responses 请求失败: %w", err)
+	}
+	return FromRelaykitRequest(ctx, channel.ProtocolOpenAIResponses, converted)
+}
+
+// checkResponsesTools 在转换之前拦下转发不了的工具声明。
+//
+// 它读的是**请求体里原始的 tools 数组**（转换之后就没有 type 可看了，见
+// parseResponsesRequest 的说明），判据复用 checkToolType。
+//
+// # 与 chat 入口差一档：缺 type 也要拒
+//
+// checkToolType 放行空串，因为 chat 那边解出空串之后照样能转发（理由见它
+// 自己的注释）。Responses 这边不行——toolconv 按 type 认工具，缺了它整条
+// 声明会被丢掉，而请求照常成功。同一句「放行」在两条入口上落出相反的结果，
+// 所以这一档在这里单独判，措辞也说清缺的是哪个字段。
+func checkResponsesTools(raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var tools []map[string]any
+	if err := json.Unmarshal(raw, &tools); err != nil {
+		return fmt.Errorf("解析工具声明失败: %w", err)
+	}
+	for _, tool := range tools {
+		typ, _ := tool["type"].(string)
+		if typ == "" {
+			return fmt.Errorf("工具声明缺少 type 字段，本项目只能转发 type=%q 的工具", "function")
+		}
+		if err := checkToolType(typ); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // FromRelaykitRequest 把一个 relaykit 请求转成本项目的请求。
@@ -343,8 +430,20 @@ func FromRelaykitRequest(ctx context.Context, target channel.Protocol, src any) 
 		TopP:            openaiReq.TopP,
 		Stream:          openaiReq.Stream != nil && *openaiReq.Stream,
 	}
+	// 输出上界有两个拼法。MaxTokens 是 chat 的老名字，MaxCompletionTokens 是
+	// 新名字——而 **Responses 的 max_output_tokens 经 relaykit 的转换落在
+	// 后者上**（见 ResponsesRequestToChatCompletionsRequest）。只读前者的话，
+	// Responses 入口的输出上界会静默丢掉：预留要有上界才做得出来
+	// （见 pipeline.Request.validate 与 billing.ErrNoUpperBound），
+	// 表现为**每一个** Responses 请求都 400，而错误说的是 max_tokens 缺失，
+	// 排查方向会指向调用方写错了字段。
+	//
+	// 两者都给时以 MaxTokens 为准：chat 的语义是「同时给就是错的」，
+	// 但那是上游该拒的事，不是这里该猜的。
 	if openaiReq.MaxTokens != nil {
 		out.MaxTokens = int(*openaiReq.MaxTokens)
+	} else if openaiReq.MaxCompletionTokens != nil {
+		out.MaxTokens = int(*openaiReq.MaxCompletionTokens)
 	}
 
 	for _, m := range openaiReq.Messages {
@@ -381,12 +480,23 @@ func FromRelaykitRequest(ctx context.Context, target channel.Protocol, src any) 
 //
 // 第三档为什么是「不等于 function」而不是「等于 mcp」：channel.Tool 今天
 // 只有名字、描述与 schema，**没有承载工具类型的字段**，所以任何非 function
-// 的声明都送不出去。而送不出去时的表现是静默改写——下面构造的 channel.Tool
-// 再经 ToRelaykit 出来，一律是 {"type":"function"}，名字还可能被 omitempty
-// 掉。客户端发 {"type":"mcp",…} 或 {"type":"web_search"} 时，上游收到的是
-// 一个我们伪造出来的、谁都认不出的工具。远端 MCP 尤其糟：它表现为一个上游
-// 400，而原因在我们发出去的请求里，排查方向会指向对方。只拦 mcp 会让内置
-// 工具走同一条静默改写的路，而静默改写比拒绝更坏——拒绝至少指向正确方向。
+// 的声明都送不出去。而送不出去时的表现不是报错，是**静默消失**——两条入口
+// 各是一种消失法：
+//
+//   - chat 入口：下面构造的 channel.Tool 再经 ToRelaykit 出来，一律是
+//     {"type":"function"}，名字还可能被 omitempty 掉。客户端发
+//     {"type":"mcp",…} 或 {"type":"web_search"} 时，上游收到的是一个我们
+//     伪造出来的、谁都认不出的工具。
+//   - Responses 入口：relaykit 的转换先经 toolconv 抽出工具再按 chat 格式挂
+//     回去，表达不了的类型直接丢掉。调用方拿到的是 200，工具不见了。
+//
+// 两种都比拒绝更坏——拒绝至少指向正确方向，而这两种在响应上完全看不出来。
+// 远端 MCP 尤其糟：chat 那一种表现为一个上游 400，而原因在我们发出去的请求
+// 里，排查方向会指向对方。
+//
+// 它由两个调用点共用：FromRelaykitRequest 读转换后的声明（chat / Anthropic
+// 两条入口），checkResponsesTools 读请求体里原始的 tools（Responses 入口，
+// 那里转换之后已经没得看了）。
 //
 // 将来 channel.Tool 加了类型字段、内置工具能真正转发时，这条判据要收窄成
 // 「仍然送不出去的那些」（届时 mcp 是其中之一）。relaykit 的

@@ -60,8 +60,9 @@ and the plugin contract in [docs/plugin-contract.md](docs/plugin-contract.md).
 
 ## What it will do
 
-- **Dual protocol.** `/v1/chat/completions` and `/v1/messages` on the same host. The
-  official OpenAI and Anthropic SDKs both work by pointing `base_url` at larkax.
+- **Three protocols.** `/v1/chat/completions`, `/v1/messages` and `/v1/responses` on
+  the same host. The official OpenAI, Anthropic and OpenAI Responses SDKs all work by
+  pointing `base_url` at larkax.
 - **Channel routing.** Multiple upstream accounts per model. Failed upstreams are
   retried on another channel and are not billed.
 - **Real billing.** Peak/off-peak rates, context-length tiers, cache pricing, and

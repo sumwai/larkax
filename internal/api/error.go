@@ -17,6 +17,17 @@ import (
 // 所以本文件里每种形状都是一份**独立的**结构体，不做「一套字段两种渲染」：
 // 两家的字段名与嵌套层次都不一样（OpenAI 是 error.message，Anthropic 是
 // error.message 加顶层的 type），硬凑成一套只会让两边的形状都不对。
+//
+// # Responses 那一套为什么没有自己的结构体
+//
+// 它的**非流式**错误体与 OpenAI 那一套是同一个形状（{"error":{message,
+// type,param,code}}，两家共用同一个官方 SDK 的错误解析器），逐字相同，
+// 所以这里没有第三个结构体——多一份一模一样的定义只会在改一处时漏掉另一处。
+// 这与 systemone.go 把「未知路径」那一支也归到 OpenAI 形状是同一个判断。
+//
+// 它**流式**那一条是第三套形状：一个平铺的 error 事件（type / code /
+// message / param 在顶层，没有 error 外层）。那一份在 stream.go 的
+// responsesStream.errorFrame 里，与这里不是同一件事。
 
 // openAIErrorBody 是 OpenAI 的错误体。
 type openAIErrorBody struct {

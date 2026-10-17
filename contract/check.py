@@ -51,6 +51,12 @@ PROMPT_TOKENS = 12
 COMPLETION_TOKENS = 7
 TOTAL_TOKENS = 19
 
+# 输入侧缓存量与输出侧推理量。**故意非零**：它们是 Responses 那两个 details
+# 子对象里唯一会被断言的数，而 0 恰好是「字段在不在」都一样的取值——
+# 缺了整个对象与报了 0 在读出来之后分不出来（见 responses_nonstream）。
+CACHED_TOKENS = 5
+REASONING_TOKENS = 2
+
 # 假上游报的工具调用。
 TOOL_ID = "call_contract"
 TOOL_NAME = "get_weather"
@@ -532,6 +538,211 @@ ANTHROPIC_CASES = [
 ]
 
 
+# ── OpenAI Responses 协议 ─────────────────────────────────────────────
+
+
+def responses_nonstream(ctx: Ctx) -> str:
+    """非流式：正文在 output[] 的项里，用量带两个 details 子对象。
+
+    这一条盯的正是**响应形状最容易被将就过去的地方**：`usage` 里那两个
+    `*_tokens_details` 是官方 SDK 的必填字段，而 relaykit 那个
+    Chat→Responses 转换器填不出来（推理量被写进 chat 名字的
+    completion_tokens_details，缓存写入量根本不写）。照它序列化，这里读到的
+    会是一个不存在的属性——`resp.usage.output_tokens_details` 直接抛
+    AttributeError。所以这两条断言不是「多测一点」，它们就是这条用例存在的理由。
+    """
+    resp = ctx.client.responses.create(
+        model=ctx.model(TEXT_SUFFIX),
+        input="你好",
+        max_output_tokens=64,
+    )
+    check("object", resp.object, "response")
+    check("status", resp.status, "completed")
+    check("model", resp.model, ctx.model(TEXT_SUFFIX))
+
+    check("output 项数", len(resp.output), 1)
+    item = resp.output[0]
+    check("output[0].type", item.type, "message")
+    check("output[0].role", item.role, "assistant")
+    check("output[0].content 块数", len(item.content), 1)
+    block = item.content[0]
+    check("output[0].content[0].type", block.type, "output_text")
+    check("output[0].content[0].text", block.text, TEXT)
+
+    check_true("usage 不是 None", resp.usage is not None)
+    check("usage.input_tokens", resp.usage.input_tokens, PROMPT_TOKENS)
+    check("usage.output_tokens", resp.usage.output_tokens, COMPLETION_TOKENS)
+    check("usage.total_tokens", resp.usage.total_tokens, TOTAL_TOKENS)
+    check("usage.input_tokens_details.cached_tokens",
+          resp.usage.input_tokens_details.cached_tokens, CACHED_TOKENS)
+    check("usage.output_tokens_details.reasoning_tokens",
+          resp.usage.output_tokens_details.reasoning_tokens, REASONING_TOKENS)
+
+    return (f"status={resp.status} usage={resp.usage.input_tokens}/{resp.usage.output_tokens}"
+            f"（缓存 {resp.usage.input_tokens_details.cached_tokens}、"
+            f"推理 {resp.usage.output_tokens_details.reasoning_tokens}）")
+
+
+def responses_stream(ctx: Ctx) -> str:
+    """流式：一串**带事件名**的事件，正文按增量拼，终态事件里带用量。
+
+    与另外两套协议的流式差别在形状上：这里每一帧都有事件名（OpenAI 的
+    chat 流是裸 delta），正文增量与「这一段说完了」是两个事件，终态事件
+    （`response.completed`）里嵌着一整个 response 对象——用量就在那里，
+    不像 chat 那样单独占一帧。
+
+    顺序是契约的一部分：`response.created` 一定在最先、终态一定在最后。
+    中间那几帧的顺序由 Go 那侧的流式用例逐帧钉着（那里的断言更细），
+    这里只钉 SDK 读得到什么。
+    """
+    stream = ctx.client.responses.create(
+        model=ctx.model(TEXT_SUFFIX),
+        input="你好",
+        max_output_tokens=64,
+        stream=True,
+    )
+
+    seen = []
+    text = ""
+    completed = None
+    for event in stream:
+        seen.append(event.type)
+        if event.type == "response.output_text.delta":
+            text += event.delta
+        elif event.type == "response.completed":
+            completed = event.response
+
+    check_true("一个事件都没收到", bool(seen))
+    check("第一个事件", seen[0], "response.created")
+    check("最后一个事件", seen[-1], "response.completed")
+    check("拼起来的正文", text, TEXT)
+    check_true("流里没有终态事件", completed is not None)
+    check("终态的 status", completed.status, "completed")
+    check("终态的 usage.output_tokens", completed.usage.output_tokens, COMPLETION_TOKENS)
+    check("终态的 usage.output_tokens_details.reasoning_tokens",
+          completed.usage.output_tokens_details.reasoning_tokens, REASONING_TOKENS)
+    # 终态里嵌的那个 response 对象就是非流式的响应体，output[] 要完整。
+    check("终态的 output[0].content[0].text",
+          completed.output[0].content[0].text, TEXT)
+
+    return f"{len(seen)} 个事件，末事件={seen[-1]}，usage 在终态里读到"
+
+
+def responses_tool_call(ctx: Ctx) -> str:
+    """含工具调用的往返：工具声明是**平铺**的，参数是字符串形态的 JSON。"""
+    resp = ctx.client.responses.create(
+        model=ctx.model(TOOLS_SUFFIX),
+        input="巴黎天气如何",
+        max_output_tokens=64,
+        tools=[
+            {
+                "type": "function",
+                "name": TOOL_NAME,
+                "description": "查一个城市的天气",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            }
+        ],
+    )
+
+    calls = [item for item in resp.output if item.type == "function_call"]
+    check("function_call 项数", len(calls), 1)
+    call = calls[0]
+    check("function_call.call_id", call.call_id, TOOL_ID)
+    check("function_call.name", call.name, TOOL_NAME)
+    # arguments 是**字符串形态**的 JSON（与 chat 一致，与 Anthropic 的对象相反）。
+    check("function_call.arguments 解出来的对象",
+          json.loads(call.arguments), TOOL_INPUT)
+
+    return f"tool={call.name} args={call.arguments}"
+
+
+def responses_bad_request(ctx: Ctx) -> str:
+    """客户端错误：不给输出上界要落到 400 上，而不是被算成一笔没有上界的账。
+
+    触发方式与另外两条入口不同，这是有意的：Responses 的请求体里没有
+    `messages`，空 `input` 会被 SDK 在**客户端**就挡下来（pydantic 校验），
+    根本发不出去。不给 `max_output_tokens` 则是服务端必须拒的——预留要有
+    输出上界才做得出来（见 internal/api 的 httpStatusOfUpstream）。
+
+    这条同时是「max_output_tokens 在本项目是必填的」这条偏差的判据，
+    见 README 的「已知偏差」。
+    """
+    import openai
+
+    try:
+        ctx.client.responses.create(
+            model=ctx.model(TEXT_SUFFIX),
+            input="你好",
+        )
+    except openai.BadRequestError as exc:
+        check("status_code", exc.status_code, 400)
+        check("error.type", error_type_of(exc), "invalid_request_error")
+        check_true("message 提到 max_tokens",
+                   "max_tokens" in body_error_message(exc))
+        return f"BadRequestError type={error_type_of(exc)}"
+    raise CaseFailure("不给 max_output_tokens 的请求没有报错——服务端本该回 400")
+
+
+def responses_auth_error(ctx: Ctx) -> str:
+    """认证错误：与非流式那两套共用同一个错误体形状（同一批断言）。
+
+    它的非流式错误体与 OpenAI 那一套**逐字相同**（两家共用同一个官方 SDK 的
+    错误解析器），所以 `error.code` 也是 `invalid_api_key`——这一条同时验了
+    「我们确实按 OpenAI 的形状回，而不是另写了一套长得像的」。
+    """
+    import openai
+
+    try:
+        ctx.bad_client.responses.create(
+            model=ctx.model(TEXT_SUFFIX),
+            input="你好",
+            max_output_tokens=64,
+        )
+    except openai.AuthenticationError as exc:
+        check("status_code", exc.status_code, 401)
+        check("error.type", error_type_of(exc), "invalid_request_error")
+        check("error.code", error_code_of(exc), "invalid_api_key")
+        return f"AuthenticationError type={error_type_of(exc)} code={error_code_of(exc)}"
+    raise CaseFailure("凭证无效时本该回 401，但请求没有报错")
+
+
+def responses_upstream_error(ctx: Ctx) -> str:
+    """上游错误：假上游回 500，我们对外回 502。"""
+    import openai
+
+    try:
+        ctx.client.responses.create(
+            model=ctx.model(FAIL_SUFFIX),
+            input="你好",
+            max_output_tokens=64,
+        )
+    except openai.APIStatusError as exc:
+        check("status_code", exc.status_code, 502)
+        check("error.type", error_type_of(exc), "api_error")
+        return f"{type(exc).__name__} status={exc.status_code} type={error_type_of(exc)}"
+    raise CaseFailure("上游 500 时我们本该回 502，但请求没有报错")
+
+
+RESPONSES_CASES = [
+    ("非流式", responses_nonstream),
+    ("流式", responses_stream),
+    ("工具调用", responses_tool_call),
+    ("客户端错误 400", responses_bad_request),
+    ("认证错误 401", responses_auth_error),
+    ("上游错误 5xx", responses_upstream_error),
+]
+
+CASES_BY_PROTOCOL = {
+    "openai": OPENAI_CASES,
+    "anthropic": ANTHROPIC_CASES,
+    "openai-responses": RESPONSES_CASES,
+}
+
+
 # ── 入口 ──────────────────────────────────────────────────────────────
 
 
@@ -545,10 +756,14 @@ def build_client(protocol: str, base_url: str, api_key: str):
     - anthropic 的默认 base_url 是 `https://api.anthropic.com`，它自己接
       `/v1/messages`，所以这里只给服务根地址。
 
+    Responses 那一条与 openai 共用同一个客户端：`responses.create` 也是在
+    同一个 `/v1` 基址后面接 `/responses`。**协议不同不等于 SDK 不同**——
+    两者都是 openai 这个包，靠调哪个资源方法区分。
+
     `max_retries=0`：默认的重试会在 429/5xx 上多打几次，而契约测试要的是
     「这一次响应的形状对不对」——重试会把失败变慢、也会把状态码搅乱。
     """
-    if protocol == "openai":
+    if protocol in ("openai", "openai-responses"):
         import openai
 
         return openai.OpenAI(
@@ -564,14 +779,16 @@ def build_client(protocol: str, base_url: str, api_key: str):
             api_key=api_key,
             max_retries=0,
         )
-    raise SystemExit(f"不认识的协议：{protocol!r}（只支持 openai / anthropic）")
+    raise SystemExit(
+        f"不认识的协议：{protocol!r}（只支持 openai / anthropic / openai-responses）")
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="larkax 契约测试")
     parser.add_argument("--base-url", required=True, help="服务的根地址，例如 http://127.0.0.1:8080")
     parser.add_argument("--api-key", required=True, help="一把可用的 API Key 明文")
-    parser.add_argument("--protocol", required=True, choices=["openai", "anthropic"])
+    parser.add_argument("--protocol", required=True,
+                        choices=sorted(CASES_BY_PROTOCOL))
     parser.add_argument("--model-prefix", required=True,
                         help="三个模型名的公共前缀，由装配侧生成")
     args = parser.parse_args(argv)
@@ -579,7 +796,7 @@ def main(argv: list[str]) -> int:
     client = build_client(args.protocol, args.base_url, args.api_key)
     bad_client = build_client(args.protocol, args.base_url, BAD_API_KEY)
     ctx = Ctx(client, bad_client, args.model_prefix, args.protocol)
-    cases = OPENAI_CASES if args.protocol == "openai" else ANTHROPIC_CASES
+    cases = CASES_BY_PROTOCOL[args.protocol]
 
     print(f"契约测试 · {args.protocol} · 模型前缀 {args.model_prefix}")
     print(f"服务地址 {args.base_url}")
