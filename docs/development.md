@@ -501,6 +501,12 @@ go run ./cmd/larkaxctl price add --scope platform --name example-price \
 编译不过的命令直接失败。作用域决定哪两栏 id 有效：`platform` 两栏都留空、
 `merchant` 必须给 `--owner`、`channel` 必须给 `--channel`。
 
+几条规则同时适用时按裁决次序取第一条：**作用域**（`channel` > `merchant` >
+`platform`）→ `priority` 大的优先 → **模型名单非空的优先于兜底** → `id`
+大的优先。于是同作用域、同优先级下，后加一条兜底规则**不会**盖掉已有的
+模型专属规则；要让一条兜底赢过专属的，把它的 `--priority` 调高——改价因此
+总是显式的。
+
 **查看现状**：
 
 ```sh
