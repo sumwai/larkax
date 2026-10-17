@@ -162,6 +162,10 @@ type Account struct {
 //
 // 它只切字符串，不判断后缀能不能当用户 id——那件事只有一处答案，
 // 在 UserIDFromAccount（方法形态是 UserID），且只对 user 科目成立。
+//
+// 目前只有测试在调它：生产里读科目走的是 Type（判大类）与 UserID（取用户 id），
+// 还没有一处需要「不解释后缀」的那一半。它留着是为了不让调用方自己去切
+// `user:42` 这个字符串——那样迟早有一处切错。
 func (a Account) ID() string {
 	_, id := splitAccount(a.raw)
 	return id

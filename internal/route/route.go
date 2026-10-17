@@ -377,6 +377,9 @@ func (r *Router) order(candidates []Candidate) []Candidate {
 // 而这里只有一个候选。真正排序时走的是 score（由 order 传进那个判断），
 // 所以排序结果与直接调本函数得到的分数**可能不同**——差别只在额度那一项，
 // 而且只在候选集里存在多种单位时出现（见 scoreQuota）。
+//
+// 目前只有测试在调它：它是「解释某个候选为什么排在这里」的出口，
+// 生产排序走的是 order→score，还没有哪个界面或接口把分数摆出来。
 func (r *Router) Score(c Candidate) float64 {
 	return r.score(c, false)
 }

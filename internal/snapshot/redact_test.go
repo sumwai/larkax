@@ -128,9 +128,10 @@ func TestContentNeverSurvives(t *testing.T) {
 			for _, s := range sensitive {
 				assertAbsent(t, res.Skeleton, s)
 			}
-			// 骨架本身也要序列化一次：落库的是序列化后的字节，
+			// 骨架本身也要序列化一次：落库的是序列化后的字节（落库那一侧
+			// 用的就是这个 json.Marshal，见 snapshotwire 的 Store.Insert），
 			// 只检查内存里的 map 会漏掉「序列化时又被写回去」这类路径。
-			encoded, err := res.SkeletonJSON()
+			encoded, err := json.Marshal(res.Skeleton)
 			if err != nil {
 				t.Fatalf("骨架序列化失败: %v", err)
 			}
@@ -687,7 +688,7 @@ func TestBudgetDegradesThenFails(t *testing.T) {
 				t.Fatalf("摘要层里不该有容器 %q: %#v", key, res.Skeleton)
 			}
 		}
-		raw, err := res.SkeletonJSON()
+		raw, err := json.Marshal(res.Skeleton)
 		if err != nil {
 			t.Fatalf("摘要层序列化失败: %v", err)
 		}
@@ -715,24 +716,12 @@ func TestBudgetDegradesThenFails(t *testing.T) {
 	})
 }
 
-// TestSkeletonJSONFailsOnUnserializable 覆盖序列化失败这一分支。
-//
-// 序列化不出来的内容必须变成错误，而不是变成一句日志然后照样落库：
-// 这条链路的每一次「算了，先存着」都可能是把原文存下来。
-func TestSkeletonJSONFailsOnUnserializable(t *testing.T) {
-	res := &Result{Skeleton: map[string]any{"不认识的取值": make(chan int)}}
-	if _, err := res.SkeletonJSON(); !errors.Is(err, ErrRedaction) {
-		t.Fatalf("序列化失败应当报错: %v", err)
-	}
-
-	var nilRes *Result
-	if _, err := nilRes.SkeletonJSON(); !errors.Is(err, ErrRedaction) {
-		t.Fatalf("空结果应当报错: %v", err)
-	}
-}
-
 // TestUnserializableValueDoesNotLeak 确认不可序列化的取值既不会进骨架、
 // 也不会让脱敏回落成「那就留着吧」。
+//
+// 「序列化不出来的骨架必须变成错误，而不是照样落库」那条判据在落库那一侧
+// （见 snapshotwire 的 TestInsertFailsOnUnserializableSkeleton）：序列化
+// 只有那一处真的发生。
 func TestUnserializableValueDoesNotLeak(t *testing.T) {
 	r := mustNew(t, RootRequest)
 	res := mustRedact(t, r, map[string]any{
@@ -748,7 +737,7 @@ func TestUnserializableValueDoesNotLeak(t *testing.T) {
 		t.Fatalf("认不出的取值类型没有记成 unknown: %#v", res.Skeleton["unexpected"])
 	}
 	// 整个骨架必须还能序列化——落库那一步就在序列化上。
-	if _, err := res.SkeletonJSON(); err != nil {
+	if _, err := json.Marshal(res.Skeleton); err != nil {
 		t.Fatalf("骨架不该因为一个认不出的取值而无法序列化: %v", err)
 	}
 }
@@ -1120,7 +1109,7 @@ func TestSamplingParamsRejectBadFloats(t *testing.T) {
 			t.Errorf("%s 收到了不能落进 JSON 的浮点，不该原样放行: %#v", key, res.Skeleton[key])
 		}
 	}
-	if _, err := res.SkeletonJSON(); err != nil {
+	if _, err := json.Marshal(res.Skeleton); err != nil {
 		t.Fatalf("其余骨架应当照常序列化: %v", err)
 	}
 	assertMarked(t, res, "temperature")
@@ -1237,7 +1226,7 @@ func TestWireShapesFromRawJSON(t *testing.T) {
 		if _, ok := shape[fieldType]; !ok {
 			t.Fatalf("形状里没有类型: %#v", shape)
 		}
-		if _, err := res.SkeletonJSON(); err != nil {
+		if _, err := json.Marshal(res.Skeleton); err != nil {
 			t.Fatalf("其余骨架应当照常序列化: %v", err)
 		}
 	})
@@ -1252,7 +1241,7 @@ func TestWireShapesFromRawJSON(t *testing.T) {
 		res := mustRedact(t, req, map[string]any{
 			"tools": []any{map[string]any{"name": "probe-tool", "input_schema": deep}},
 		})
-		if _, err := res.SkeletonJSON(); err != nil {
+		if _, err := json.Marshal(res.Skeleton); err != nil {
 			t.Fatalf("深 schema 不该让骨架无法序列化: %v", err)
 		}
 	})
