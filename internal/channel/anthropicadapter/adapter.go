@@ -26,6 +26,7 @@ import (
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channel/httpx"
 	"github.com/sumwai/larkax/internal/observe"
+	"github.com/sumwai/larkax/internal/quota"
 	"github.com/sumwai/larkax/internal/relay"
 )
 
@@ -178,8 +179,8 @@ func (a *Adapter) ListModels(ctx context.Context, ch channel.Channel) ([]string,
 //
 // Messages 协议里没有查额度的端点，与 OpenAI 一侧同理：
 // 猜一个路径会让 404 被当成「额度查不到」，从而让自记账永远接不上。
-func (a *Adapter) Quota(context.Context, channel.Channel) (channel.Quota, error) {
-	return channel.Quota{}, channel.ErrUnsupported
+func (a *Adapter) Quota(context.Context, channel.Channel) (quota.State, error) {
+	return quota.State{}, channel.ErrUnsupported
 }
 
 // encodeRequest 把统一请求编码成 Anthropic Messages 的 JSON。
