@@ -70,6 +70,8 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl ledger balance|verify          读账本（余额查询、完整性校验）
   larkaxctl reconcile                      跑一轮对账（开关与口径见 settings 表）
   larkaxctl rotate                         轮换渠道凭证的主密钥（默认干跑）
+  larkaxctl partition ensure               建出缺失的 usage_events 月分区
+  larkaxctl partition check                只读体检，有问题时非零退出
   larkaxctl snapshot cleanup|allowlist|show|redact
                                            快照的留存清理、允许表、读回与试脱敏
   larkaxctl idempotency cleanup            按留存期删除到期的幂等记录
@@ -119,6 +121,8 @@ func run() error {
 		return runMigrate(os.Args[2:])
 	case "model":
 		return runModel(os.Args[2:])
+	case "partition":
+		return runPartition(os.Args[2:])
 	case "price":
 		return runPrice(os.Args[2:])
 	case "reconcile":
