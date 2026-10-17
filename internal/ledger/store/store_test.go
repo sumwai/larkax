@@ -833,6 +833,80 @@ func TestReleaseRecordsUpstreamFailure(t *testing.T) {
 	}
 }
 
+// 不计费的结局也要记下「打到了哪个渠道、用哪个上游名」。
+//
+// 与上面那条同一个位置、同一个理由：这两列在**预留**时写不出来（预留发生
+// 在选路之前），而失败这条路不走结算——不写在这里，失败行上它们恒为 NULL。
+// 那正是「某个渠道对某批模型全在报错」时最需要它们的地方：只有 status 与
+// error_code 时，看得出「为什么失败」，看不出「打的是谁」。
+//
+// # 判据为什么是两个具体值
+//
+// 夹具给的上游名（vendor/gpt-4o）**故意与规范名不同**，渠道 id 也是真插了
+// 一行拿到的。写了个别的渠道、或者把规范名抄进 upstream_model，都过不了；
+// 只断言「非 NULL」的话那两种写法一样能过。
+func TestReleaseRecordsChannelAndModel(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	requestID := reqID(t)
+	req := testRequest(ctx, t, db, userID, requestID)
+	// 选路之后才知道的那两样东西，由网关在释放之前填上
+	// （见 internal/gateway 的 handle.routedTo）。
+	req.ChannelID = seedChannel(t, db)
+
+	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Release(ctx, req, nil); err != nil {
+		t.Fatalf("释放失败: %v", err)
+	}
+
+	channelID, model := channelAndModelOf(t, db, requestID)
+	if !channelID.Valid || channelID.Int64 != req.ChannelID {
+		t.Errorf("channel_id = %v，期望 %d", channelID, req.ChannelID)
+	}
+	if !model.Valid || model.String != req.UpstreamModel {
+		t.Errorf("upstream_model = %v，期望 %q（夹具的上游名与规范名故意不同，"+
+			"相等说明写的是规范名）", model, req.UpstreamModel)
+	}
+}
+
+// 一个候选都没选中时，那两列是 NULL 而不是 0 与空串。
+//
+// 两个方向都要钉：只钉「选出来了就写得进去」的话，把两列无条件写成 `$4` 与
+// `$5`（0 与空串照写）也能通过，而 0 在库里会读成「渠道 0」——那个 id 根本
+// 不存在（外键会拒绝它），空串则让「没有名字」与「名字是空的」分不开。
+//
+// 这条路径真实存在：候选集被筛空、别名翻不出来、选路之前 context 就取消了，
+// 都走到这里，而它们一次上游调用都没发生。
+func TestReleaseWithoutSelectedChannelWritesNull(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	requestID := reqID(t)
+	req := testRequest(ctx, t, db, userID, requestID)
+	// 选路一次都没选出渠道：两列保持零值，与网关那边的行为一致。
+	req.ChannelID = 0
+	req.UpstreamModel = ""
+
+	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Release(ctx, req, nil); err != nil {
+		t.Fatalf("释放失败: %v", err)
+	}
+
+	if channelID, model := channelAndModelOf(t, db, requestID); channelID.Valid || model.Valid {
+		t.Errorf("没有选中渠道时两列应当是 NULL，得到 channel_id=%v upstream_model=%v",
+			channelID, model)
+	}
+}
+
 // 没有上游失败的依据时，两列必须是 NULL 而不是 0 与空串。
 //
 // 两个方向都要钉：只钉「有依据时写得进去」的话，把两列无条件写成

@@ -22,8 +22,9 @@ type StreamResult struct {
 	// UpstreamModel 是这次请求**实际发出去**的上游模型名。
 	//
 	// 与非流式那条路上的 Result.UpstreamModel 同一件事：由本包给出来，因为
-	// 只有这里知道最终用的是哪一次翻译（见 Router.upstreamRequest）。失败
-	// 路径上它没有意义。
+	// 只有这里知道最终用的是哪一次翻译（见 Router.upstreamRequest），
+	// 而且**与 Channel 成对**——失败路径上它是「最后一次真的发出去的那次
+	// 用的是哪个名字」。两者的口径一起写在 Result.UpstreamModel 上。
 	UpstreamModel string
 	// Attempts 记录了换渠道过程中的每一次尝试。
 	Attempts []Attempt
@@ -101,10 +102,13 @@ func (r *Router) chatStreamWithPlan(ctx context.Context, exec StreamExecutor, re
 			Duration:    r.now().Sub(started),
 		})
 		result.Channel = c.Channel
+		// 与非流式那条路同一个位置、同一个理由：这一对说的是「这次实际发去了
+		// 哪里、用哪个名字」，失败的那一次调用同样发出去过（见
+		// Result.UpstreamModel）。
+		result.UpstreamModel = attempt.Model
 
 		if err == nil {
 			result.Events = events
-			result.UpstreamModel = attempt.Model
 			return result, nil
 		}
 		if !worthNextCandidate(err) {

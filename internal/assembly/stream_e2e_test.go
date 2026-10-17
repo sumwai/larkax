@@ -1284,7 +1284,7 @@ func TestStreamAbortedBeforeOutputRecordsEvidence(t *testing.T) {
 	upstreamSrv := httptest.NewServer(fake.handler())
 	t.Cleanup(upstreamSrv.Close)
 
-	seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
+	channelID := seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
 	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
 
 	app := newApp(t, db, sealer)
@@ -1317,6 +1317,17 @@ func TestStreamAbortedBeforeOutputRecordsEvidence(t *testing.T) {
 	if !bill.errorCode.Valid || bill.errorCode.String != pipeline.ErrorUpstreamStreamAborted {
 		t.Errorf("error_code = %v，期望 %q", bill.errorCode, pipeline.ErrorUpstreamStreamAborted)
 	}
+
+	// 打到哪儿同样要记：上游接受了请求（响应头是 200），那次调用真的发生过，
+	// 所以渠道是确定的。这一条走的是**流式那条**释放路径——收尾在后台的
+	// pumpStream 里，与非流式那条不是同一段代码，所以两边各钉一条。
+	if !bill.channelID.Valid || bill.channelID.Int64 != channelID {
+		t.Errorf("账单的 channel_id = %v，期望 %d", bill.channelID, channelID)
+	}
+	if !bill.upstreamModel.Valid || bill.upstreamModel.String != model {
+		t.Errorf("账单的 upstream_model = %v，期望 %q", bill.upstreamModel, model)
+	}
+
 	assertWallet(t, db, user, balance, "0")
 	assertNoLedgerEntry(t, db, user)
 }

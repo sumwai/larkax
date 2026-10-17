@@ -72,6 +72,14 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 
 	routed, err := g.routeStream(ctx, upstream, h.candidates, req.CanonicalModel, hooks)
 
+	// 与 Chat 同一个位置、同一个理由：选路一返回就把「打到了哪儿」记进
+	// h.req。这里尤其不能省——成功那条路的收尾在后台的 pumpStream 里，
+	// 而中途断流那一次走的是释放，两条路都从 h.req 上读这两个值
+	// （见 handle.routedTo）。
+	if routed != nil {
+		h.routedTo(routed.Channel, routed.UpstreamModel)
+	}
+
 	// 换渠道过程中失败的那些尝试照记——无论这次路由最后成没成，
 	// 那些调用都已经发生过。成功接受的那一个不在这里记：它的结局只有
 	// 读完流才知道（见 recordFailedAttempts）。
@@ -480,7 +488,7 @@ func streamAttempts(r *route.StreamResult) []route.Attempt {
 
 // billStream 结算一次要计费的流式请求。
 func (g *Gateway) billStream(ctx context.Context, h *handle, res *Result, usage channel.Usage, source tokens.Source, canceled bool) {
-	charge, err := g.finishCharge(ctx, h, res.Channel, res.UpstreamModel, pipeline.Outcome{
+	charge, err := g.finishCharge(ctx, h, pipeline.Outcome{
 		Usage:       usage,
 		UsageSource: source,
 		// ClientCanceled 只描述「客户端中途断开」这一种结局，别拿它当
