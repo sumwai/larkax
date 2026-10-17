@@ -30,6 +30,7 @@ type usageEventRow struct {
 	CacheWriteTokens int64
 	ReasoningTokens  int64
 	UnitCounts       []byte
+	UnitPrices       []byte
 	BillingPath      string
 	Estimator        sql.NullString
 	Cost             string
@@ -48,7 +49,7 @@ type usageEventRow struct {
 // 报的是「扫描列数不匹配」，看不出是哪一列写错了。
 const usageEventColumns = `user_id, channel_id, canonical_model,
 	prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens,
-	reasoning_tokens, unit_counts, billing_path, estimator,
+	reasoning_tokens, unit_counts, unit_prices, billing_path, estimator,
 	cost, upstream_cost, asset, priced_at, local_hour, is_off_day,
 	duration_ms, created_at`
 
@@ -62,7 +63,7 @@ func usageEventOf(ctx context.Context, t *testing.T, db *sql.DB, requestID strin
 		  FROM usage_events WHERE request_id = $1`, requestID).
 		Scan(&r.UserID, &r.ChannelID, &r.CanonicalModel,
 			&r.PromptTokens, &r.CompletionTokens, &r.CacheReadTokens, &r.CacheWriteTokens,
-			&r.ReasoningTokens, &r.UnitCounts, &r.BillingPath, &r.Estimator,
+			&r.ReasoningTokens, &r.UnitCounts, &r.UnitPrices, &r.BillingPath, &r.Estimator,
 			&r.Cost, &r.UpstreamCost, &r.Asset, &r.PricedAt, &r.LocalHour, &r.IsOffDay,
 			&r.DurationMS, &r.CreatedAt)
 	if err != nil {
@@ -87,11 +88,13 @@ func countUsageEvents(ctx context.Context, t *testing.T, db *sql.DB, requestID s
 // 三个值都必须由用例显式给出，而不是靠零值：零值落库时分别是「全是 0 的用量」
 // 「来源 0（实测）」与「公元 1 年」，三者看起来都是**合法**的数据，
 // 于是「漏设」与「真的是这样」在库里分不开。
-func billedCharge(t *testing.T, userID int64, requestID, amount string, source tokens.Source, at time.Time) *pipeline.Charge {
+//
+// billID 原样传给分录，理由见 consumeEntries。
+func billedCharge(t *testing.T, userID int64, requestID string, billID int64, amount string, source tokens.Source, at time.Time) *pipeline.Charge {
 	t.Helper()
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
-		Entries:     consumeEntries(t, userID, amount),
+		Entries:     consumeEntries(t, userID, amount, billID),
 		PricedAt:    at,
 		UsageSource: source,
 		Usage: billing.Usage{
@@ -130,8 +133,9 @@ func TestSaveWritesUsageEvent(t *testing.T) {
 
 	// 预留：渠道未知，与生产同一条路（预留发生在选路之前）。
 	req := testRequest(ctx, t, db, userID, requestID)
-	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
-		t.Fatal(err)
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
 	}
 
 	// 结算：渠道已知，用量与受理时刻都由计费层给出。
@@ -140,7 +144,7 @@ func TestSaveWritesUsageEvent(t *testing.T) {
 
 	acceptAt := time.Date(2026, 10, 17, 9, 30, 0, 0, time.UTC)
 	// 本地词表数出来的用量——它不能记成 measured，见 billingPathOf。
-	charge := billedCharge(t, userID, requestID, "12", tokens.SourceTokenized, acceptAt)
+	charge := billedCharge(t, userID, requestID, billID, "12", tokens.SourceTokenized, acceptAt)
 
 	if err := s.Save(ctx, settleReq, charge); err != nil {
 		t.Fatalf("结算失败: %v", err)
@@ -222,6 +226,13 @@ func TestSaveWritesUsageEvent(t *testing.T) {
 			t.Errorf("%s 有值，期望 NULL——这一列这一轮不写", tc.column)
 		}
 	}
+
+	// unit_prices 也在「这一轮不写」那一档里，但它是 NOT NULL DEFAULT '{}'，
+	// 进不了上面那个循环：它的表现是**空对象**，而空对象与「这次确实没有单价」
+	// 在库里长得一样。按空对象断言，同样是为了让「哪天接上」必须显式改这一处。
+	if string(got.UnitPrices) != "{}" {
+		t.Errorf("unit_prices = %s，期望 {}——这一列这一轮不写", got.UnitPrices)
+	}
 }
 
 // created_at 是**落库时刻**，不是受理时刻。
@@ -241,12 +252,13 @@ func TestUsageEventCreatedAtIsWriteTime(t *testing.T) {
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
 	req := testRequest(ctx, t, db, userID, requestID)
-	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
-		t.Fatal(err)
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
 	}
 
 	acceptAt := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
-	charge := billedCharge(t, userID, requestID, "12", tokens.SourceMeasured, acceptAt)
+	charge := billedCharge(t, userID, requestID, billID, "12", tokens.SourceMeasured, acceptAt)
 
 	start := time.Now()
 	if err := s.Save(ctx, req, charge); err != nil {
@@ -278,11 +290,12 @@ func TestUsageEventIsNotWrittenOnReplay(t *testing.T) {
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
 	req := testRequest(ctx, t, db, userID, requestID)
-	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
-		t.Fatal(err)
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
 	}
 
-	charge := billedCharge(t, userID, requestID, "12", tokens.SourceMeasured, pricedAt())
+	charge := billedCharge(t, userID, requestID, billID, "12", tokens.SourceMeasured, pricedAt())
 	if err := s.Save(ctx, req, charge); err != nil {
 		t.Fatalf("结算失败: %v", err)
 	}
@@ -306,6 +319,26 @@ func TestUsageEventIsNotWrittenOnReplay(t *testing.T) {
 //
 // 断言里连着错误文本一起钉，理由同上：失败点若被挪到前面，这条用例要**报出来**，
 // 而不是继续以「分录没落」的名义通过。
+//
+// # 四条断言各自的牙
+//
+// 失败点落在**哪一步**，决定了这四条不是同一种断言。逐条写清楚，免得下一个人
+// 以为它们等价（把 Save 改成「用量事件失败就提交」时，只有两条会挂）：
+//
+//   - **分录：有牙。** 分录写在失败点**之前**，所以它确实进过这次事务——
+//     留在库里就说明回滚没发生。前提是那组分录带着 billing_request_id：
+//     夹具不带时它是 NULL，按它查恒为空（见 consumeEntries）。
+//   - **用量事件：今天的注入点下恒真。** 失败的那条语句本身没写成任何东西，
+//     所以「一行都没有」在回滚与不回滚两种情形下都成立。它钉的是「这次请求
+//     在 usage_events 里没有半行」这个可读的结论；哪天失败点挪到它之后
+//     （例如挪到 COMMIT），它才分辨得出。
+//   - **钱包：同样恒真。** applyToWallets 与 releaseFrozen 排在那条 INSERT
+//     **之后**，这条路上根本不会执行。它守的是**顺序**：谁把用量事件挪到
+//     那两步之后，余额会变成 88、冻结会变成 0，这条立刻报出来。钱包那两步的
+//     回滚由 unfreeze_underflow_test.go 的 TestSettleRefusesFrozenUnderflow
+//     覆盖——那一条的失败点排在 applyToWallets 之后，真的分辨得出。
+//   - **账单状态：有牙。** markSettled 也写在失败点之前，事务提交了它就会
+//     是 settled。
 func TestUsageEventFailureRollsBackSettlement(t *testing.T) {
 	db := testDB(t)
 	s := New(db)
@@ -315,12 +348,12 @@ func TestUsageEventFailureRollsBackSettlement(t *testing.T) {
 	requestID := reqID(t)
 	req := testRequest(ctx, t, db, userID, requestID)
 
-	billID, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
-	if err != nil {
-		t.Fatal(err)
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
 	}
 
-	charge := billedCharge(t, userID, requestID, "12", tokens.SourceMeasured,
+	charge := billedCharge(t, userID, requestID, billID, "12", tokens.SourceMeasured,
 		time.Date(-5000, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	saveErr := s.Save(ctx, req, charge)
@@ -333,6 +366,9 @@ func TestUsageEventFailureRollsBackSettlement(t *testing.T) {
 
 	// 分录：一条都不该落。分录在事务里写在用量事件**之前**，所以它确实
 	// 进过这次事务——留在库里说明回滚没发生。
+	//
+	// 这个查询有牙的前提是那组分录带着 billing_request_id（夹具传了 billID）。
+	// 不带时那一列是 NULL，按它查**恒为空**，回滚有没有发生都看不出区别。
 	var entries int
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM ledger_entries WHERE billing_request_id = $1`, billID).
@@ -343,13 +379,16 @@ func TestUsageEventFailureRollsBackSettlement(t *testing.T) {
 		t.Errorf("结算失败后落了 %d 条分录，期望 0 条", entries)
 	}
 
-	// 用量事件本身也不该有。
+	// 用量事件本身也不该有。这一条在今天的注入点下恒真（失败的那条 INSERT
+	// 什么都没写成），见上面「四条断言各自的牙」。
 	if n := countUsageEvents(ctx, t, db, requestID); n != 0 {
 		t.Errorf("结算失败后落了 %d 行用量事件，期望 0 行", n)
 	}
 
-	// 钱包：一分钱没动，冻结额也照旧——markSettled 与 releaseFrozen 的
-	// UPDATE 同样在这一次事务里。
+	// 钱包：一分钱没动，冻结额也照旧。这两条**今天证明不了回滚**——
+	// applyToWallets 与 releaseFrozen 排在那条失败的 INSERT 之后，这条路上
+	// 根本没执行，所以事务提交与否它们都不会变。它们守的是顺序：谁把用量
+	// 事件挪到那两步之后，余额会变成 88、冻结会变成 0。
 	balance, frozen := walletOf(t, db, userID)
 	if balance != "100.00000000" {
 		t.Errorf("结算失败后余额 = %s，期望 100（那次事务整个回滚了）", balance)
@@ -381,11 +420,12 @@ func TestSaveRejectsMissingPricedAt(t *testing.T) {
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
 	req := testRequest(ctx, t, db, userID, requestID)
-	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
-		t.Fatal(err)
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
 	}
 
-	charge := billedCharge(t, userID, requestID, "12", tokens.SourceMeasured, pricedAt())
+	charge := billedCharge(t, userID, requestID, billID, "12", tokens.SourceMeasured, pricedAt())
 	charge.PricedAt = time.Time{}
 
 	if err := s.Save(ctx, req, charge); !errors.Is(err, ErrMissingPricedAt) {

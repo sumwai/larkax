@@ -304,12 +304,13 @@ func TestSaveSettlementMovesMoney(t *testing.T) {
 	requestID := reqID(t)
 	req := testRequest(ctx, t, db, userID, requestID)
 
-	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
-		t.Fatal(err)
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
 	}
 
 	// 实际只花了 12，比预留少
-	entries := consumeEntries(t, userID, "12")
+	entries := consumeEntries(t, userID, "12", billID)
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
 		PricedAt: pricedAt(),
@@ -348,14 +349,15 @@ func TestSettlementIsIdempotent(t *testing.T) {
 	requestID := reqID(t)
 	req := testRequest(ctx, t, db, userID, requestID)
 
-	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
-		t.Fatal(err)
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
 	}
 
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
 		PricedAt: pricedAt(),
-		Entries:  consumeEntries(t, userID, "12"),
+		Entries:  consumeEntries(t, userID, "12", billID),
 	}
 	charge.Settlement.Actual = money.MustParse("12")
 
@@ -392,8 +394,9 @@ func TestSettlementWritesBackChannel(t *testing.T) {
 
 	// 预留：渠道未知。testRequest 不带 ChannelID，与生产同一条路。
 	req := testRequest(ctx, t, db, userID, requestID)
-	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
-		t.Fatal(err)
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
 	}
 	if got := channelOf(t, db, requestID); got.Valid {
 		t.Fatalf("预留时 channel_id = %d，期望 NULL——预留发生在选路之前", got.Int64)
@@ -406,7 +409,7 @@ func TestSettlementWritesBackChannel(t *testing.T) {
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
 		PricedAt: pricedAt(),
-		Entries:  consumeEntries(t, userID, "12"),
+		Entries:  consumeEntries(t, userID, "12", billID),
 	}
 	charge.Settlement.Actual = money.MustParse("12")
 
@@ -452,14 +455,15 @@ func TestSettlementRecordsClientCancel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			requestID := reqID(t)
 			req := testRequest(ctx, t, db, userID, requestID)
-			if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
-				t.Fatal(err)
+			billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+			if reserveErr != nil {
+				t.Fatal(reserveErr)
 			}
 
 			charge := &pipeline.Charge{
 				RequestID: requestID, UserID: userID, Asset: "CNY",
 				PricedAt:       pricedAt(),
-				Entries:        consumeEntries(t, userID, "12"),
+				Entries:        consumeEntries(t, userID, "12", billID),
 				ClientCanceled: tc.canceled,
 			}
 			charge.Settlement.Actual = money.MustParse("12")
@@ -502,8 +506,9 @@ func TestConcurrentSettlementChargesOnce(t *testing.T) {
 	requestID := reqID(t)
 	req := testRequest(ctx, t, db, userID, requestID)
 
-	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "50", "CNY")); err != nil {
-		t.Fatal(err)
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "50", "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
 	}
 
 	const n = 8
@@ -521,7 +526,7 @@ func TestConcurrentSettlementChargesOnce(t *testing.T) {
 			charge := &pipeline.Charge{
 				RequestID: requestID, UserID: userID, Asset: "CNY",
 				PricedAt: pricedAt(),
-				Entries:  consumeEntries(t, userID, "10"),
+				Entries:  consumeEntries(t, userID, "10", billID),
 			}
 			charge.Settlement.Actual = money.MustParse("10")
 
@@ -568,14 +573,15 @@ func TestSettlementRefusesNegativeBalance(t *testing.T) {
 
 	// 预留 10，但结算 150 —— 预留机制本该不让这事发生，
 	// 真发生说明有别的路径动了钱包或预留算错了。
-	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "10", "CNY")); err != nil {
-		t.Fatal(err)
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "10", "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
 	}
 
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
 		PricedAt: pricedAt(),
-		Entries:  consumeEntries(t, userID, "150"),
+		Entries:  consumeEntries(t, userID, "150", billID),
 	}
 	charge.Settlement.Actual = money.MustParse("150")
 
@@ -684,13 +690,14 @@ func TestReleaseAfterSettlementIsNoop(t *testing.T) {
 	requestID := reqID(t)
 	req := testRequest(ctx, t, db, userID, requestID)
 
-	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
-		t.Fatal(err)
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
 	}
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
 		PricedAt: pricedAt(),
-		Entries:  consumeEntries(t, userID, "12"),
+		Entries:  consumeEntries(t, userID, "12", billID),
 	}
 	charge.Settlement.Actual = money.MustParse("12")
 	if err := s.Save(ctx, req, charge); err != nil {
@@ -723,14 +730,15 @@ func TestWalletMatchesLedger(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		requestID := reqID(t)
 		req := testRequest(ctx, t, db, userID, requestID)
-		if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "100", "CNY")); err != nil {
-			t.Fatal(err)
+		billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "100", "CNY"))
+		if reserveErr != nil {
+			t.Fatal(reserveErr)
 		}
 		amount := money.FromInt(int64(10 + i))
 		charge := &pipeline.Charge{
 			RequestID: requestID, UserID: userID, Asset: "CNY",
 			PricedAt: pricedAt(),
-			Entries:  consumeEntries(t, userID, amount.String()),
+			Entries:  consumeEntries(t, userID, amount.String(), billID),
 		}
 		charge.Settlement.Actual = amount
 		if err := s.Save(ctx, req, charge); err != nil {
@@ -879,13 +887,14 @@ func TestAmountPrecisionRoundTrip(t *testing.T) {
 	const amount = "0.00000001"
 	requestID := reqID(t)
 	req := testRequest(ctx, t, db, userID, requestID)
-	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, amount, "CNY")); err != nil {
-		t.Fatal(err)
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, amount, "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
 	}
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
 		PricedAt: pricedAt(),
-		Entries:  consumeEntries(t, userID, amount),
+		Entries:  consumeEntries(t, userID, amount, billID),
 	}
 	charge.Settlement.Actual = money.MustParse(amount)
 	if err := s.Save(ctx, req, charge); err != nil {
@@ -911,13 +920,14 @@ func TestLargeAmountPrecision(t *testing.T) {
 	requestID := reqID(t)
 	req := testRequest(ctx, t, db, userID, requestID)
 	const amount = "12345678.87654321"
-	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, amount, "CNY")); err != nil {
-		t.Fatal(err)
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, amount, "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
 	}
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
 		PricedAt: pricedAt(),
-		Entries:  consumeEntries(t, userID, amount),
+		Entries:  consumeEntries(t, userID, amount, billID),
 	}
 	charge.Settlement.Actual = money.MustParse(amount)
 	if err := s.Save(ctx, req, charge); err != nil {
