@@ -217,7 +217,7 @@ func publicHandler(cfg *config.Config, handle *sql.DB, values *settings.Values, 
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("公共入口已装配", "snapshots", app.Snapshots.Enabled())
+	logger.Info("公共入口已装配", "snapshots", app.Snapshots.Collecting())
 	return app.Public, nil
 }
 

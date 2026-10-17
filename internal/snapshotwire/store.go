@@ -288,6 +288,19 @@ func (s *Store) DropExpired(ctx context.Context, retentionDays int, at time.Time
 	return dropped, nil
 }
 
+// RetentionCutoff 返回到期线：分区日期早于这一天的分区都已到期。
+//
+// 它是「哪些分区到期」这个判据的定义处——Store 的筛选与命令行打印的那句说明
+// 都从这里取。两处各算一遍的话，命令说出来的到期线会与实际删的错开一天，
+// 而那种错误不报错，只是把话说错。
+//
+// retentionDays 必须为正：判据在 LoadConfig（配错就拒绝启动）与 expiredNames
+// （不删任何东西并报错）上各有一道，这里不再判第三次。
+func RetentionCutoff(retentionDays int, at time.Time) time.Time {
+	cutoff, _ := DayBounds(at.AddDate(0, 0, -retentionDays))
+	return cutoff
+}
+
 // expiredNames 是到期分区的唯一判据。清理与演练都走它。
 func (s *Store) expiredNames(ctx context.Context, retentionDays int, at time.Time) ([]string, error) {
 	if retentionDays <= 0 {
@@ -316,7 +329,7 @@ func (s *Store) expiredNames(ctx context.Context, retentionDays int, at time.Tim
 
 	// 到期线：日期早于这一天的分区都删。今天减去留存天数，
 	// 于是「留存 30 天」意味着最近 30 天的分区（含今天）留着。
-	cutoff, _ := DayBounds(at.AddDate(0, 0, -retentionDays))
+	cutoff := RetentionCutoff(retentionDays, at)
 
 	var expired []string
 	for _, name := range names {
