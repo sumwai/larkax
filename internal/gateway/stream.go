@@ -52,6 +52,10 @@ import (
 // ——候选集、筛选与排序都在 route 里，与响应怎么发出去无关。少了它，
 // 一个「把这个模型的流量钉到某个渠道」的插件会对流式请求静默不生效，
 // 而那正是接了一半最难发现的样子。
+//
+// 这条路上**独有**的是 onStream（逐块决定）。onUsage 两条路都有，位置也相同
+// （用量成形之后、结算之前）。onResponse 则相反，它只可能发生在非流式那条路上：
+// 这里的响应是边生成边发的，没有「整份响应」这个时刻。
 func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream *channel.Request, hooks Hooks) (*Result, error) {
 	if g.Executor == nil {
 		return nil, ErrNoExecutor
@@ -87,7 +91,7 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 		Channel:  routed.Channel,
 		Attempts: routed.Attempts,
 	}
-	go g.pumpStream(ctx, h, res, out, routed.Events, upstream)
+	go g.pumpStream(ctx, h, res, out, routed.Events, upstream, hooks)
 	return res, nil
 }
 
@@ -108,6 +112,57 @@ func (g *Gateway) routeStream(ctx context.Context, upstream *channel.Request, ca
 	return g.Router.ChatStreamPlan(ctx, g.Executor, upstream, plan, pin)
 }
 
+// StreamChunk 是逐块决策里交给插件的那一块的上下文。
+//
+// 它与 internal/plugin 的 StreamInput 是同一个形状的两处声明，理由与 Hooks
+// 相同：本包不认识插件包，只声明「它要调什么」，装配处把两边对上。
+//
+// 两个累积量说的都是**这一块之前**的数，不含当前块——当前块在 ev 里，
+// 而它是不是要算进去，取决于插件下面返回什么（见 Hooks.OnStream）。
+type StreamChunk struct {
+	// Index 是这一块在本次流里的序号，从 0 起，只数**内容块**。
+	//
+	// 数内容块而不是数全部事件：插件看到的就是这些块，序号里混进它看不见的
+	// 事件（usage / done）会让「第几块」变成一个它无从验证的数。
+	Index int
+	// AccumulatedText 是已经发给调用方的正文，也就是分词器已经数过的那些。
+	AccumulatedText string
+	// AccumulatedTokensApprox 是上面那段正文的 token 数，由内核按分词器
+	// 增量估算。
+	AccumulatedTokensApprox int64
+}
+
+// StreamDecision 是插件对一块的处置。
+//
+// 零值是「什么都不做」：这一块原样转发。
+type StreamDecision struct {
+	// Drop 表示这一块不发给调用方，也不算进累计正文与分词计数。
+	Drop bool
+	// Replace 是替换后的正文。只对正文块（delta）有效；工具调用块上没有
+	// 可作用的对象，按无效果处理（见 plugin.StreamDecision 的注释）。
+	Replace *string
+	// Terminate 表示提前结束这条流。已经发出去的部分收不回来，所以它与
+	// 「客户端断开」走同一条收尾路径（见 pumpStream 的结局判定）。
+	Terminate bool
+}
+
+// isContentChunk 判断一块是不是「内容块」——只有内容块交给插件。
+//
+// 它同时是**权限边界**：usage 是这次流的计费依据（插件丢掉它就能绕过
+// onUsage 的上界，计费退回内核估算），done / error 是这次流的框架（丢掉
+// done 会让一次正常结束看起来像被截断，还会把渠道健康度判成失败）。
+// 这三样因此根本不进插件的手。
+//
+// 判据写成白名单而不是「不是 usage/done/error 就算内容」：将来事件类型
+// 变多时，新类型默认**不给**插件，而不是默认给——能改的比能看的少。
+func isContentChunk(ev channel.StreamEvent) bool {
+	switch ev.Kind {
+	case "delta", "tool_use":
+		return true
+	}
+	return false
+}
+
 // pumpStream 把上游的事件流转发给调用方，并在流结束时结算。
 //
 // 它是流式路径上**唯一**的收尾点，地位与非流式的 defer res.finish 相同：
@@ -115,7 +170,7 @@ func (g *Gateway) routeStream(ctx context.Context, upstream *channel.Request, ca
 //
 // out 单独传而不是用 res.Events：那个字段是只收的（<-chan），写不了也关不了，
 // 而这里要做的正是这两件事。
-func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out chan channel.StreamEvent, events <-chan channel.StreamEvent, upstream *channel.Request) {
+func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out chan channel.StreamEvent, events <-chan channel.StreamEvent, upstream *channel.Request, hooks Hooks) {
 	// 关流放在最后：它一旦执行，调用方就会读到 Charge / Estimated，
 	// 而那两个字段在下面才写好。
 	defer close(out)
@@ -165,14 +220,68 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 		streamErr error
 		// clientGone 表示调用方已经断开。
 		clientGone bool
+		// terminated 表示插件要求提前结束这条流（onStream 返回 terminate，
+		// 或它作为阻断型插件在那里失败）。
+		//
+		// 它与 clientGone 分开记，因为两者在**一个**字段上有差别：
+		// pipeline.Outcome.ClientCanceled 说的是「客户端断的」，而插件终止
+		// 不是客户端断的。其余一切（结局判定、计费分支、读空上游）两者同路
+		// ——见下面那一段。
+		terminated bool
+		// chunkIndex 是交给插件的块序号，只数内容块（见 StreamChunk）。
+		chunkIndex int
+		// accText 是已经发给调用方的正文。
+		//
+		// 它按**插件处置之后**的样子累加：drop 掉的块不进来，replace 过的
+		// 块进来的是替换后的文本。累加器（est）与它是同一个口径，所以两者
+		// 只能在同一处更新——错开就会出现「按原文计费、按替换后的文本发给
+		// 调用方」这种账单与回答对不上的状态。
+		accText string
 	)
 
 	for ev := range events {
+		// onStream 排在**累加之前**，而且是这一块被决定之后才累加：插件
+		// 替换掉的正文是这次流式中断时的计费依据（见 StreamChunk），
+		// 排在 est.ObserveDelta 之后就变成按原文计费了。
+		if hooks.OnStream != nil && isContentChunk(ev) {
+			dec, hookErr := hooks.OnStream(ctx, ev, StreamChunk{
+				Index:                   chunkIndex,
+				AccumulatedText:         accText,
+				AccumulatedTokensApprox: est.Result().Output.Tokens,
+			})
+			chunkIndex++
+			if hookErr != nil {
+				// 阻断型插件失败：这条流到此为止。已经吐给调用方的部分收不
+				// 回来，所以「让这次请求失败」在这里没有可表达的对象——
+				// 终止是唯一做得到的处置，而它走的是下面那条**共同的**收尾
+				// 路径（结算照走），不是在这里另开一个出口。
+				//
+				// 非阻断的失败不会走到这里：那一侧网关拿到的是零值决策，
+				// 这一块原样转发（见 internal/api 的 pluginHooks）。
+				terminated = true
+				break
+			}
+			if dec.Terminate {
+				terminated = true
+				break
+			}
+			if dec.Drop {
+				// 丢掉的那一块连累计也不进：计费依据是调用方实际看到的
+				// 正文，而这一块他没看到（见 StreamChunk 与契约里的
+				// StreamDecision）。
+				continue
+			}
+			if dec.Replace != nil {
+				ev.Text = *dec.Replace
+			}
+		}
+
 		switch ev.Kind {
 		case "delta":
 			started = true
 			//nolint:contextcheck // 估算不碰 ctx，理由见本函数开头
 			est.ObserveDelta(ev.Text)
+			accText += ev.Text
 		case "tool_use":
 			started = true
 			if ev.ToolCall != nil {
@@ -215,7 +324,17 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 	// done 之后不再看 ctx：流正常结束之后调用方才断开，那是正常结束。
 	clientGone = clientGone || (!done && ctx.Err() != nil)
 
-	if clientGone {
+	// ended 表示这次流不是正常走完的，但也不是上游的错：客户端断开、或者
+	// 插件要求提前结束。两者在**结局判定、计费分支、读空上游**这三件事上
+	// 完全同路，所以下面只有这一个判据；差别只有 ClientCanceled 那一个字段
+	// （它说的是「客户端断的」，而插件终止不是——见 pipeline.Outcome）。
+	//
+	// 插件终止之所以要并进这里而不是自己 break 出去，正是下面那两段决定的：
+	// 它必须走同一条结算路径。单独一个 break 会让那条路绕开结算，表现是
+	// 「已经吐出去的回答一分钱没记」。
+	ended := clientGone || terminated
+
+	if ended {
 		// 我们不再转发，但上游那条流可能还没读完：适配器的泵阻塞在发送上，
 		// 不读空它就永远不退出，它持有的上游连接也不会被释放。这里在后台
 		// 读掉——上游的 ctx 就是被取消的这个，所以它很快就会结束。
@@ -228,23 +347,25 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 	// 这次调用在渠道健康度上算成什么，三种结局的判定只有这里做得出来：
 	//
 	//   - 客户端断开不是渠道的失败（是我们这边断的），但它也没有正常结束，
-	//     所以既不加连续失败也不清零
+	//     所以既不加连续失败也不清零；插件终止同理——那是插件按自己的策略
+	//     截的，与这个渠道好不好无关
 	//   - 上游接受请求之后报错、或者没吐字就断了，是渠道此刻不行
 	//   - 正常结束（收到结束标记且流里没报错）才是成功
 	verdict := route.VerdictFailure
 	switch {
-	case clientGone:
+	case ended:
 		verdict = route.VerdictUnattributed
 	case done && streamErr == nil:
 		verdict = route.VerdictSuccess
 	}
 
-	if !clientGone && !done && !started {
+	if !ended && !done && !started {
 		// 上游在接受请求之后、吐出任何内容之前就结束了（报错或直接断开）。
 		// 这等于「没有成功返回」：不计费，预留由 finish 释放。
 		//
 		// 注意这与上面那条分支的差别：客户端断开时，上游很可能已经为
-		// 输入计了费，所以那条要计费，这条不用。
+		// 输入计了费，所以那条要计费，这条不用。插件终止也一样——它是我们
+		// 这边主动停的，而上游已经读了 prompt。
 		//
 		// 没有用量可记（一个字都没产生），所以只记结论。
 		g.recordCall(ctx, route.CallOutcome{
@@ -258,20 +379,51 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 		return
 	}
 
-	// 其余结局都要计费：正常结束、客户端中途断开、以及已经吐字之后
-	// 上游失败或截断——那几种情况下上游都真的产生了 token。
-	usage, source := streamUsage(est, measured)
+	// 其余结局都要计费：正常结束、客户端中途断开、插件提前终止，以及已经
+	// 吐字之后上游失败或截断——那几种情况下上游都真的产生了 token。
+	//
+	// coreUsage 是内核算出来的那份，usage 是**结算**用的那份：两者只在
+	// 插件上报过用量时不同（见下面 onUsage 那一段）。
+	coreUsage, source := streamUsage(est, measured)
+	usage := coreUsage
 	// Estimated 与 tokens.Source 是同一个口径（见 Result.Estimated）。
 	res.Estimated = source != tokens.SourceMeasured
+
+	// onUsage 排在用量成形之后、结算之前：它改的是结算读的那份用量。
+	// 排在结算之后就一点用都没有——请求成功、响应正确、日志里插件也跑了，
+	// 只有那笔钱是按内核的估算收的。
+	if hooks.OnUsage != nil {
+		merged, hookErr := hooks.OnUsage(settleCtx, usage)
+		if hookErr != nil {
+			// 阻断型插件失败。这里**不改变控制流**：整个回答已经送到调用方
+			// 手里了，没有「让这次请求失败」这个对象；而按不计费结算等于把
+			// 一次已经送出去的回答白送（上游那笔钱是真的花掉了）。
+			//
+			// 失败本身已经记进会话，入口在请求结束时把它记成告警
+			// （见 internal/api 的 logPluginFailures），所以它不是静默的。
+			//
+			// 出错时交回来的用量**整个忽略**，下面仍按内核那份结算：让一个
+			// 出错的 hook 决定金额，方向正好反了——它多半交回来的就是零值。
+			observe.FromContext(settleCtx).Warn("流式请求的 onUsage 失败，用量按内核的值计",
+				"err", hookErr, "request_id", h.req.RequestID)
+		} else {
+			usage = merged
+		}
+	}
+
 	g.billStream(settleCtx, h, res, usage, source, clientGone)
 
 	// 用量照记，即便这次算「不是渠道的失败」：客户端断开时上游已经为
 	// 输入计了费，额度自记账要跟着扣。
+	//
+	// 记的是**内核那份**（usage 上面可能已被插件改过）：这一路记的是这个
+	// 渠道自己消耗了什么，而插件上报的是计费口径上的说法——与非流式那条
+	// 路上 recordAttempts 取 out.Usage（插件跑之前）是同一个口径。
 	g.recordCall(ctx, route.CallOutcome{
 		ChannelID: res.Channel.ID,
 		At:        g.now(),
 		Verdict:   verdict,
-		Usage:     usage,
+		Usage:     coreUsage,
 	})
 }
 

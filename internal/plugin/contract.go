@@ -287,12 +287,24 @@ func (d *RouteDecision) UnmarshalJSON(data []byte) error {
 }
 
 // StreamContext 是 onStream 看到的当前块。
+//
+// 它**只在内容块上出现**：usage 与 done / error 是这次流的计费依据与框架，
+// 不进插件的手（见 gateway.Hooks.OnStream），所以下面几个字段说的都是正文
+// 或工具调用那两种块。
 type StreamContext struct {
 	RequestID string `json:"requestId"`
-	// Chunk 是已解析的当前块。它的形状由上游协议决定，
-	// 所以插件改它的方式是 drop / replace 正文，而不是改这个对象。
-	Chunk  any    `json:"chunk"`
-	Index  int    `json:"index"`
+	// Chunk 是当前这一块。形状由内核给出（见 adapter.go 的 StreamChunkFrom）：
+	// delta 是 `{ kind, text }`，tool_use 是 `{ kind, toolCall: {...} }`。
+	// 插件改这一块的方式是 drop / replace 正文，而不是改这个对象——
+	// 它是一份快照，改它不影响任何东西。
+	Chunk any `json:"chunk"`
+	// Index 是这一块在本次流里的序号，从 0 起，只数内容块。
+	Index int `json:"index"`
+	// Text 与 Tokens 是**这一块之前**已经累积的正文与它的 token 数，
+	// 不含当前块——当前块在 Chunk 里，插件要看全文自己拼。
+	//
+	// 两者与内核的分词累加器是同一个数，因为它们是**同一处**累加出来的：
+	// 插件 Replace 之后，进累加器的是替换后的正文（见 StreamDecision）。
 	Text   string `json:"accumulatedText"`
 	Tokens int64  `json:"accumulatedTokensApprox"`
 }
@@ -300,6 +312,14 @@ type StreamContext struct {
 // StreamDecision 是 onStream 的返回值。
 //
 // Replace 是指针：`replace: ""` 是「把这一块替换成空」，与「不替换」不同。
+//
+// Drop 与 Replace 的差别只在**这一块还有没有正文**：两者都不把原文发给
+// 调用方，也都不把原文算进累计正文（累计正文是流式中断时的计费依据，
+// 见 StreamContext.Text）。所以 `drop: true` 与 `replace: ""` 在计费上
+// 是同一件事——这不是漏了，是刻意的：同一类决策只有一套口径。
+//
+// Replace 只对正文块（`chunk.kind === "delta"`）有效。工具调用块上它没有
+// 可作用的对象，按无效果处理——那一种块要用的是 Drop 或 Terminate。
 type StreamDecision struct {
 	Drop      bool    `json:"drop,omitempty"`
 	Replace   *string `json:"replace,omitempty"`

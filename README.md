@@ -36,12 +36,13 @@ What works today:
   retention, master key rotation, calendar data, and channels, models, aliases and
   pricing rules
 - The reconcile job that checks the wallet snapshot against the ledger
+- The plugin system: JavaScript plugins loaded from the `plugins` table at startup,
+  with all five hooks (`onRequest` / `onRoute` / `onStream` / `onResponse` /
+  `onUsage`) running on the request path, see
+  [docs/plugin-contract.md](docs/plugin-contract.md)
 
 Not wired yet:
 
-- Two of the five plugin hooks — plugins are loaded from the `plugins` table at
-  startup and `onRequest` / `onRoute` / `onResponse` run on the request path, but
-  `onStream` and `onUsage` have no call sites yet
 - Payments and payouts — the ledger transactions exist, the entry points do not
 - The web console (`web/`)
 - Most of the metrics worth having — `/metrics` is served, but only the

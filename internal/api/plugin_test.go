@@ -111,6 +111,9 @@ type pluginExecutor struct {
 	reqs     []*channel.Request
 	channels []int64
 	resp     *channel.Response
+	// stream 是流式调用要吐的事件。为 nil 时吐一个 done——那是最短的一条
+	// 合法流，不需要正文的用例用它。要测逐块决策就得给出真正的分片。
+	stream []channel.StreamEvent
 }
 
 func (f *pluginExecutor) Chat(_ context.Context, ch channel.Channel, req *channel.Request) (*channel.Response, error) {
@@ -123,10 +126,11 @@ func (f *pluginExecutor) ChatStream(ctx context.Context, ch channel.Channel, req
 	if _, err := f.Chat(ctx, ch, req); err != nil {
 		return nil, err
 	}
-	out := make(chan channel.StreamEvent, 1)
-	out <- channel.StreamEvent{Kind: "done"}
-	close(out)
-	return out, nil
+	events := f.stream
+	if events == nil {
+		events = []channel.StreamEvent{{Kind: "done"}}
+	}
+	return streamOf(events...), nil
 }
 
 // ── 组装 ──────────────────────────────────────────────────────────────

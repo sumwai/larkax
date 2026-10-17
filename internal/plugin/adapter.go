@@ -291,8 +291,45 @@ func healthName(h route.Health) string {
 //
 // raw 是**上游原样的对象**：插件比内核更懂它的上游，而口径变化（上游改了
 // 字段名、加了新的计量单位）在 raw 里才看得见。
+//
+// raw 为 nil 是**合法输入**，不是漏传：流式那条路上用量可能是内核本地估算的
+// （客户端断开、上游没在流里带 usage），估算值没有「上游原样」可言。插件据此
+// 能分辨「上游报了个零」与「这次根本没有上游的数」——前者是一个对象，各项为 0。
 func UsageContextFrom(requestID, protocol string, raw map[string]any) UsageContext {
 	return UsageContext{RequestID: requestID, Protocol: protocol, Raw: raw}
+}
+
+// StreamChunkFrom 把统一的流事件翻成插件看到的「当前块」。
+//
+// # 为什么不是 channel.StreamEvent 本身
+//
+// 与本文件开头同一条理由：共用一个类型意味着给那个类型加一个字段就静默
+// 扩大了插件的可见范围。这里只挑出插件真正用得上的那几项，加一项必须显式发生。
+//
+// 形状由 kind 决定：
+//
+//	{ kind: "delta",    text: "..." }
+//	{ kind: "tool_use", toolCall: { index, id, name, arguments } }
+//
+// 只有**内容块**会走到这里。usage 与 done / error 是这次流的计费依据与框架，
+// 网关根本不会把它们交给插件（见 gateway.Hooks.OnStream），所以这里也不必
+// 为它们留形状——插件看不到的东西，写进契约只会让人以为拿得到。
+func StreamChunkFrom(ev channel.StreamEvent) map[string]any {
+	out := map[string]any{"kind": ev.Kind}
+	switch ev.Kind {
+	case "delta":
+		out["text"] = ev.Text
+	case "tool_use":
+		if ev.ToolCall != nil {
+			out["toolCall"] = map[string]any{
+				"index":     ev.ToolCall.Index,
+				"id":        ev.ToolCall.ID,
+				"name":      ev.ToolCall.Name,
+				"arguments": ev.ToolCall.Arguments,
+			}
+		}
+	}
+	return out
 }
 
 // UsageFactsFrom 把内核的用量翻成插件看到的事实（onResponse 的 usage 字段）。
@@ -339,10 +376,8 @@ func UsageFactsFrom(u channel.Usage) *UsageFacts {
 // 事实里自己声明了口径时以它为准：插件比内核更懂它代理的那个上游，
 // 而它报的量可能来自与内核不同的口径（例如插件自己估的用量）。
 //
-// **目前还没有生产调用方**：把 UsageFacts 重建回 channel.Usage 的那一步
-// （插件报的用量替换掉内核的用量）还没有接上，现在只有本包的测试在调它。
-// 也就是说「漏掉口径会把同一批 token 收两次」这件事在生产路径上还没发生，
-// 也还没被修——它是为那次接线准备的（见 LESSONS.md 第 22 条）。
+// 请求路径上的调用方是 `Session.ApplyUsage`：它拿内核那份用量的事实去合并
+// 插件上报，再把合并结果重建回这里，最后交给结算。
 func (f UsageFacts) ChannelUsage(coreIncludesReasoning bool) channel.Usage {
 	u := channel.Usage{CompletionIncludesReasoning: coreIncludesReasoning}
 	if f.CompletionIncludesReasoning != nil {
