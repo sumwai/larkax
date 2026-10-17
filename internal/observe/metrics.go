@@ -180,7 +180,7 @@ type Registry struct {
 func NewRegistry() *Registry {
 	r := &Registry{}
 	r.Settlements = r.newLabeled("larkax_billing_settlements_total",
-		"按实际用量结算完成的次数，按用量来源分（measured / tokenized / estimated）。",
+		"按实际用量结算完成的次数，按用量来源分（measured / tokenized / estimated / unreported）。unreported 表示上游响应里没有 usage 块，用量是零值占位。",
 		"usage_source")
 	r.CappedSettlements = r.newCounter("larkax_billing_capped_settlements_total",
 		"结算金额被预留上界截住的次数。按设计应一直为 0；持续大于 0 说明预留上界算错了，差额由平台承担而账目仍然是平的。")

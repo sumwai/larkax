@@ -441,6 +441,59 @@ func TestSaveRejectsMissingPricedAt(t *testing.T) {
 	}
 }
 
+// 上游没报 usage 的那一行，落库之后要能与「上游报了 0」分开。
+//
+// 两者落库的 token 列与 cost 逐列相同（都是 0），区别只在
+// billing_path 与 estimator：没报 → estimated + unreported。
+// 「报了 0」那一侧落 measured + estimator NULL，由 TestBillingPathOf
+// 里 SourceMeasured 那一行负责。这里钉住整条写库路径，而不只是翻译函数。
+func TestSaveUsageEventUnreportedUsage(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	channelID := seedChannel(t, db)
+	requestID := reqID(t)
+
+	req := testRequest(ctx, t, db, userID, requestID)
+	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
+		t.Fatal(err)
+	}
+	settleReq := req
+	settleReq.ChannelID = channelID
+
+	acceptAt := time.Date(2026, 10, 17, 9, 30, 0, 0, time.UTC)
+	// 上游整块没报 usage：用量是零值占位，金额为零。
+	charge := &pipeline.Charge{
+		RequestID:   requestID,
+		UserID:      userID,
+		Asset:       "CNY",
+		PricedAt:    acceptAt,
+		UsageSource: tokens.SourceUnreported,
+	}
+	charge.Settlement.Actual = money.MustParse("0")
+
+	if err := s.Save(ctx, settleReq, charge); err != nil {
+		t.Fatalf("结算失败: %v", err)
+	}
+
+	got := usageEventOf(ctx, t, db, requestID)
+	if got.BillingPath != "estimated" {
+		t.Errorf("billing_path = %q，期望 %q（占位的零不能拿去对账）", got.BillingPath, "estimated")
+	}
+	if !got.Estimator.Valid || got.Estimator.String != "unreported" {
+		t.Errorf("estimator = %v，期望 %q", got.Estimator, "unreported")
+	}
+	// 与「上游报了 0」逐列相同的部分：这正是旧行为分不开它们的原因。
+	if got.PromptTokens != 0 || got.CompletionTokens != 0 {
+		t.Errorf("用量 = %d/%d，期望全零", got.PromptTokens, got.CompletionTokens)
+	}
+	if got.Cost != "0.00000000" {
+		t.Errorf("cost = %s，期望 0", got.Cost)
+	}
+}
+
 // ── 用量来源到两列的翻译 ────────────────────────────────────────────────
 
 // 三个来源各自落到哪一档，逐个钉住。
@@ -462,6 +515,9 @@ func TestBillingPathOf(t *testing.T) {
 		// 本地词表：准，但**不能**记成 measured（见 billingPathOf）。
 		{tokens.SourceTokenized, "estimated", "tokenized"},
 		{tokens.SourceEstimated, "estimated", "char_heuristic"},
+		// 上游没报：同样不能对账（所以是 estimated），由 estimator
+		// 说明它连估算都不是——零值是占位。
+		{tokens.SourceUnreported, "estimated", "unreported"},
 	} {
 		path, estimator, err := billingPathOf(tc.src)
 		if err != nil {

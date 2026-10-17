@@ -62,6 +62,17 @@ const (
 	// 误差范围见 ErrorBounds。用它算出的金额只能作为参考，
 	// 界面上必须如实标注。
 	SourceEstimated
+	// SourceUnreported 表示上游**根本没有报**这次的用量。
+	//
+	// 它与 SourceMeasured 的区别是「上游响应里有没有 usage 块」，不是数字：
+	// 上游可以报一个全 0 的 usage（SourceMeasured），也可以整块不报
+	// （SourceUnreported）。后者的数字是零值占位，不是上游说的 0 ——
+	// 两者逐列相同，只有来源能把它们分开。
+	//
+	// 它也不是估算：没有任何一层为这次请求算过数。落库时它与估算同归
+	// 「不能拿去跟上游对账」那一档，由 estimator 说明具体是哪一种
+	// （见 internal/ledger/store 的 billingPathOf）。
+	SourceUnreported
 )
 
 // String 返回稳定的英文标识，用于日志、数据库与 API 输出。
@@ -73,6 +84,8 @@ func (s Source) String() string {
 		return "tokenized"
 	case SourceEstimated:
 		return "estimated"
+	case SourceUnreported:
+		return "unreported"
 	default:
 		return fmt.Sprintf("Source(%d)", uint8(s))
 	}

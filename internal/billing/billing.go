@@ -63,11 +63,13 @@ func (u Usage) TotalTokens() int64 {
 // IsEmpty 判断是否完全没有用量。
 //
 // 空用量是有意义的信号：它通常意味着上游返回了错误，或者解析没读到 usage。
-// 计费层据此区分「这次真的没用 token」与「我们没读到用量」。
 //
-// **目前没有生产调用方**：上面那句话描述的区分还没有一层做出来，而它与 #267
-// 是同一处缺口的两面——非流式的 billing_path 今天分不开「上游没报 usage」与
-// 「上游报了 0」。那一处修的时候应当把本方法一起用上，而不是另造一个判据。
+// **它不是「上游没报 usage」的判据。** 上游报一个全 0 的 usage 同样让
+// 它为 true，而「报了 0」与「压根没报」在账上必须分开：前者可以拿去跟
+// 上游对账，后者不能。那一区分由网关在记录用量那一刻判定（看响应体里
+// 有没有 usage 块，见 internal/gateway 的 usageSourceOf），落成
+// tokens.SourceUnreported。本方法因此仍然没有生产调用方——它回答的是
+// 「这次有没有用量」，而计费分支要问的是「这个数是谁给的」。
 func (u Usage) IsEmpty() bool { return u.TotalTokens() == 0 && len(u.UnitCounts) == 0 }
 
 // Prices 是各项单价。

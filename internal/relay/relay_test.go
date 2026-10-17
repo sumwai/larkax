@@ -708,6 +708,29 @@ func TestUsageMarksEstimated(t *testing.T) {
 	}
 }
 
+// 「上游报没报 usage」在归一化之后只剩 Raw 里的 "source" 一个落点。
+//
+// internal/gateway 的 usageSourceOf 靠它把「上游报了 0」与「压根没报」
+// 分开（两者用量逐列相同），所以这个键的出现条件要钉住：**适配器解析到了
+// usage 块**（给了 UsageSource）才写，没给就不写。
+//
+// 这里不验「适配器什么时候给 UsageSource」——那是各适配器自己的用例；
+// 这条只管归一化这一层不会把两者写成同一种形状。
+func TestUsageRawCarriesSourceMarker(t *testing.T) {
+	reported := UsageFromRelaykit(&dto.Usage{
+		PromptTokens: 0, CompletionTokens: 0,
+		UsageSource: "openai_chat",
+	})
+	if got, _ := reported.Raw["source"].(string); got != "openai_chat" {
+		t.Errorf("报过 usage 时 Raw[source] = %v，期望 openai_chat", reported.Raw["source"])
+	}
+
+	absent := UsageFromRelaykit(&dto.Usage{})
+	if _, ok := absent.Raw["source"]; ok {
+		t.Errorf("没报 usage 时 Raw 不该有 source: %+v", absent.Raw)
+	}
+}
+
 func TestUsageCacheCreationSplit(t *testing.T) {
 	got := UsageFromRelaykit(&dto.Usage{
 		PromptTokens:                1,
