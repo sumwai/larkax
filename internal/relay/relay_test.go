@@ -1677,3 +1677,179 @@ func TestParseResponsesRequestWithoutTools(t *testing.T) {
 		}
 	}
 }
+
+// unrecognizedContent 是一个本项目没有枚举的内容承载形态，用来钉住兜底报错。
+// 真实世界里它是「客户端给了个我们还没见过的形状」。
+type unrecognizedContent struct{ Text string }
+
+// 块数组形态的 content 在**三条入口**上都要转出来。
+//
+// 三条入口的承载类型不一样，而其中一条曾经整条丢掉：Anthropic 请求先经
+// relaykit 转成 OpenAI 形状，那一步用 dto.Message.SetMediaContent 挂内容，
+// 于是 m.Content 是带类型的 []dto.MediaContent，而不是 JSON 反序列化出来的
+// []any。认不出这一种时**没有任何一层报错**——文本与图片一起消失，转发给
+// 上游的是空 content，而调用方拿到的是「模型答非所问」。
+//
+// 三条分别钉住：
+//
+//   - Anthropic：带类型的那一种承载（本组用例里唯一会红过的一条）；
+//   - OpenAI：[]any 那一种，防回归对照；
+//   - Responses：另一条转换链（parseResponsesRequest 经
+//     ResponsesRequestToChatCompletionsRequest），它给出的同样是 []any，
+//     所以走的是与 OpenAI 相同的那条分支——这条用例钉的是«它不要漂到
+//     带类型那一种上去»，而不是«它今天坏着»。
+func TestParseRequestBlockArrayContent(t *testing.T) {
+	cases := []struct {
+		name     string
+		protocol channel.Protocol
+		body     string
+	}{
+		{
+			name:     "anthropic",
+			protocol: channel.ProtocolAnthropic,
+			body: `{"model":"m-1","max_tokens":64,"messages":[{"role":"user","content":[
+				{"type":"text","text":"你好"},
+				{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}
+			]}]}`,
+		},
+		{
+			name:     "openai",
+			protocol: channel.ProtocolOpenAI,
+			body: `{"model":"m-1","messages":[{"role":"user","content":[
+				{"type":"text","text":"你好"},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}
+			]}]}`,
+		},
+		{
+			name:     "openai-responses",
+			protocol: channel.ProtocolOpenAIResponses,
+			body: `{"model":"m-1","max_output_tokens":64,"input":[{"role":"user","content":[
+				{"type":"input_text","text":"你好"},
+				{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}
+			]}]}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseRequest(context.Background(), tc.protocol, []byte(tc.body))
+			if err != nil {
+				t.Fatalf("出错: %v", err)
+			}
+			if len(got.Messages) != 1 {
+				t.Fatalf("消息 = %+v，期望一条", got.Messages)
+			}
+			blocks := got.Messages[0].Content
+			if len(blocks) != 2 {
+				t.Fatalf("内容块 = %+v，期望文本与图片各一块（少了就是被静默丢了）", blocks)
+			}
+			if blocks[0].Type != "text" || blocks[0].Text != "你好" {
+				t.Errorf("文本块 = %+v", blocks[0])
+			}
+			if blocks[1].Type != "image" || blocks[1].ImageBase64 != "aGVsbG8=" || blocks[1].ImageMediaType != "image/png" {
+				t.Errorf("图片块 = %+v", blocks[1])
+			}
+		})
+	}
+}
+
+// 认不出的内容承载形态必须报错，不能静默跳过。
+//
+// 这条兜底针对的正是上面那类事故：在代码里「没命中任何 case」与「这条消息
+// 本来就没内容」长得一模一样，于是整条内容可以一直丢着而没人发现。报错时
+// 带上实际类型 %T——只说「不支持」的话，排查时不知道不支持的是什么。
+//
+// 两个形态**必须放过**，它们不是「认不出」，是「本来就没内容」：
+// content 为 nil（只有工具调用的助手消息）与空字符串。把它们判成错误，
+// 等于把一批正常请求拒之门外。
+func TestFromRelaykitContentShapes(t *testing.T) {
+	cases := []struct {
+		name       string
+		content    any
+		wantBlocks int
+		// wantErrType 非空表示这个形态必须报错，且错误里要带上这个 %T 渲染值。
+		wantErrType string
+	}{
+		{name: "nil（只有工具调用的助手消息）", content: nil},
+		{name: "空字符串", content: ""},
+		{name: "字符串", content: "文本", wantBlocks: 1},
+		{
+			name:       "JSON 反序列化出来的块数组",
+			content:    []any{map[string]any{"type": "text", "text": "文本"}},
+			wantBlocks: 1,
+		},
+		{
+			name:       "relaykit 的带类型块数组",
+			content:    []dto.MediaContent{{Type: "text", Text: "文本"}},
+			wantBlocks: 1,
+		},
+		{
+			name:    "对象",
+			content: map[string]any{"type": "text"},
+			// 不是数组的对象：今天没有任何一层会产出它，认不出就要说得出类型。
+			wantErrType: "map[string]interface {}",
+		},
+		{name: "数字", content: 42, wantErrType: "int"},
+		{name: "自定义类型", content: unrecognizedContent{}, wantErrType: "relay.unrecognizedContent"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := messageFromRelaykit(dto.Message{Role: "user", Content: tc.content})
+
+			if tc.wantErrType != "" {
+				if err == nil {
+					t.Fatalf("应当报错，否则这个形态的内容会被静默丢掉: %+v", got.Content)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrType) {
+					t.Errorf("错误里要带上实际类型 %q，否则排查时不知道不支持的是什么: %v", tc.wantErrType, err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("不该报错: %v", err)
+			}
+			if len(got.Content) != tc.wantBlocks {
+				t.Errorf("内容块 = %+v，期望 %d 块", got.Content, tc.wantBlocks)
+			}
+		})
+	}
+}
+
+// 响应方向遇到认不出的内容形状**不能失败**，判据与请求方向不同。
+//
+// 理由具体，不是口味：out.Usage 在调用 messageFromRelaykit **之前**就填好了，
+// 而 return nil, err 会把已经解析出来的用量一起丢掉——这一次调用的账就漏了，
+// 而调用方多半会重试一次、上游再收一次钱。相比之下「回答是空的」调用方当场
+// 就能看见，不是静默的。完整理由见 response.go 里那两处调用点的注释。
+//
+// 这条用例钉住三件事：响应照常返回、内容为空、Usage 与 FinishReason 完好。
+// 请求方向那一条判据相反的用例见 TestFromRelaykitContentShapes。
+func TestResponseKeepsUsageOnUnknownContentShape(t *testing.T) {
+	src := &dto.OpenAITextResponse{
+		Model: "gpt-4o",
+		Choices: []dto.OpenAITextResponseChoice{{
+			Message:      dto.Message{Role: "assistant", Content: unrecognizedContent{Text: "x"}},
+			FinishReason: "stop",
+		}},
+		Usage: dto.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+	}
+
+	got, err := ResponseFromRelaykit(src)
+	if err != nil {
+		t.Fatalf("响应方向不该因为认不出的内容形状失败，用量会跟着一起丢: %v", err)
+	}
+	if got.Usage.PromptTokens != 10 || got.Usage.CompletionTokens != 5 {
+		t.Errorf("用量 = %+v，抛错会连它一起丢", got.Usage)
+	}
+	if got.FinishReason != "stop" {
+		t.Errorf("FinishReason = %q", got.FinishReason)
+	}
+	if len(got.Message.Content) != 0 {
+		t.Errorf("内容 = %+v，认不出的形状只该让内容是空的", got.Message.Content)
+	}
+	if got.Raw == nil {
+		t.Error("Raw 应保留上游原样数据，供事后发现口径变化")
+	}
+}
