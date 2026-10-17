@@ -54,9 +54,12 @@
 # 逐条接线或删除时，#282 的正文要跟着这份清单一起更新，否则「这一条为什么还在」
 # 答不上来。
 #
-# 它**不能关**：这一批处置完之后，挂 #282 的还有 22 条（`money.Amount.*`、
-# `route.Router.Score`、`snapshot.*`、`calendar.Calendar.At`、`channel.*Adapter.ListModels`
-# 一类）。
+# **它已经处置完了，没有一条 gap 还挂着它。** 那批符号最后落在两处：能被删的删了
+# （`Cache.Invalidate` / `Program.Source` 一类），剩下的逐条判过之后改成了 `lib`
+# ——它们是库构件或契约面，理由栏写着「目前只有测试在调它」。最后两条
+# （`Counter.CountTextEstimated` / `Source.IsExact`）也是这样收的尾。
+#
+# 所以这一段留着的意义只剩一条：**下次再有人问「#282 那一批去哪了」，答案在理由栏里。**
 #
 # 48 之后减了 4（#262）：`Registry.NewSession`、`Session.OnRequest`、
 # `Session.OnResponse`、`Session.Failures` 随请求侧的 hook 接上而有了生产调用点。
@@ -112,5 +115,5 @@ internal/plugin/sandbox/plugin.go | Module.Hooks                   | lib | 插�
 internal/route/route.go        | Router.Score                      | lib | 路由库的解释出口：单个候选的分数（score 是私有的）；生产排序走 order，目前只有测试在调它
 internal/snapshot/redact.go    | Redactor.RedactResponseWithTransport | lib | 脱敏库的入口：把传输层信息并进骨架；采集传输层这件事被推迟了，目前只有测试在调它
 internal/snapshotwire/snapshotwire.go | Collector.Stats            | lib | 这条链路的观测出口：丢弃与失败的计数；指标那一头还没有写，目前只有测试在读它
-internal/tokens/count.go       | Counter.CountTextEstimated        | gap | #282 强制走估算路径的入口，目前只有测试在调它
-internal/tokens/tokens.go      | Source.IsExact                    | gap | #282 对账判据，目前只有测试在调它：对账面还没有入口
+internal/tokens/count.go       | Counter.CountTextEstimated        | lib | 估算路径的显式入口：调用方知道上游换了词表而本地还没跟上时用它避开本地词表；目前只有测试在调它
+internal/tokens/tokens.go      | Source.IsExact                    | lib | 枚举上的具名判据：「这个来源能不能直接与上游对账」。两处生产代码以它为准（pipeline 与 ledger/store 的注释各引一次），而各自把比较写成了 `== SourceMeasured`（一处是 switch 的 case，一处要读成 Estimated），所以它没有调用点；目前只有测试在调它
