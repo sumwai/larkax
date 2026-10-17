@@ -140,15 +140,16 @@ type Breakdown struct {
 	Total money.Amount
 }
 
-// Compute 按规则与用量算出金额明细。
+// ComputeWithCharges 按规则与用量算出金额明细，算上固定费用与最低消费。
 //
 // 计算顺序无关紧要（加法交换律），但**逐项保留**很重要：
 // 对账与争议处理都需要知道钱花在哪一项上。
-func Compute(usage Usage, prices Prices) Breakdown {
-	return ComputeWithCharges(usage, prices, Charges{})
-}
-
-// ComputeWithCharges 与 Compute 相同，但会算上固定费用与最低消费。
+//
+// **没有「不带 Charges」的版本。** 一次性费用是规则的一部分，而预留与结算
+// 必须用**同一组** Charges：若一侧算了保底而另一侧没算，一笔用量很小的请求
+// 会被预留 1 元、结算 0.002 元，差额全额退回——保底永远收不到，而且不会报错，
+// 只是长期少收钱。省掉那个参数看起来只是少写一个 `Charges{}`，代价是
+// 把这条静默少收的路径留在手边。
 //
 // 两阶段（预留与结算）必须用**同一个**函数算金额，否则预留的上界
 // 与结算的结果会因为「有没有算保底」而差开，表现为每次都撞 Capped。

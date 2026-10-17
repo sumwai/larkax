@@ -550,7 +550,7 @@ func TestEvalAmountRounding(t *testing.T) {
 	}
 
 	// 之后乘以用量是整数运算，不再产生新的舍入。
-	b := billing.Compute(billing.Usage{PromptTokens: 3}, res.Prices)
+	b := billing.ComputeWithCharges(billing.Usage{PromptTokens: 3}, res.Prices, billing.Charges{})
 	if got := b.Prompt.String(); got != "0.00000006" {
 		t.Errorf("单价 × 用量 = %s，期望 0.00000006", got)
 	}
@@ -719,7 +719,7 @@ func TestEvalMoneyAmountsAreExact(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		b := billing.Compute(usage, res.Prices)
+		b := billing.ComputeWithCharges(usage, res.Prices, billing.Charges{})
 		if i == 0 {
 			first = b.Total
 			continue

@@ -48,6 +48,8 @@ var (
 var ErrOverflow = errors.New("金额超出可表示范围")
 
 // FromInt 用整数元构造。
+//
+// 目前只有测试在调它。
 func FromInt(yuan int64) Amount {
 	if yuan > math.MaxInt64/unit {
 		// 直接乘会溢出，回绕出来的可能是一个「看起来正常」的负数金额，
@@ -60,10 +62,17 @@ func FromInt(yuan int64) Amount {
 	return Amount{units: yuan * unit}
 }
 
-// FromUnits 用最小单位构造，供从数据库读取时使用。
+// FromUnits 用最小单位构造。
+//
+// 目前只有测试在调它。**库里的金额列存的不是最小单位**：它是 numeric(20, 8)，
+// 读写两侧都走十进制字符串（写用 Amount.String，读用 Parse），
+// 所以这个构造器在生产里没有入口。
 func FromUnits(units int64) Amount { return Amount{units: units} }
 
-// Units 返回最小单位数，供写入数据库时使用。
+// Units 返回最小单位数。
+//
+// 目前只有测试在调它，原因与 FromUnits 相同：库里的金额列是 numeric，
+// 两侧都走十进制字符串，没有一处把最小单位数直接送进 SQL。
 func (a Amount) Units() int64 { return a.units }
 
 // Parse 解析一个十进制字符串，例如 "12.34"。
@@ -149,7 +158,10 @@ func parseInt64(s string) (int64, error) {
 	return n, nil
 }
 
-// MustParse 在解析失败时 panic。只用于包级常量与测试。
+// MustParse 在解析失败时 panic。
+//
+// 目前只有测试在调它（用例拿它写期望值）。生产里的金额一律走 Parse——
+// 那里出错要报出来而不是炸掉进程，因为来源是配置与上游报文。
 func MustParse(s string) Amount {
 	a, err := Parse(s)
 	if err != nil {
@@ -239,6 +251,9 @@ func (a Amount) MulInt(n int64) Amount {
 //
 // 语义上是「每单位 a 元，共 b 个单位」。结果的小数位取 Scale，
 // **四舍五入**——截断会让一批小额计算系统性地偏向一方。
+//
+// 目前只有测试在调它：按量计费用的是 MulInt（单价 × 整数用量），
+// 计价规则里没有「金额 × 金额」这一项。
 func MulAmount(a, b Amount) Amount {
 	product := new(big.Int).Mul(big.NewInt(a.units), big.NewInt(b.units))
 	// 两个 Scale 位小数相乘 → 结果有 2*Scale 位，除以 unit 回到 Scale 位。
@@ -251,8 +266,11 @@ func MulAmount(a, b Amount) Amount {
 // MulFloat 乘以一个浮点系数（倍率、折扣）。
 //
 // 用 big.Rat 而不是 float64 直接乘：0.85 这样的折扣系数在浮点里不精确，
-// 乘上金额之后可能差一分。倍率来自商家配置，会反复用于每一次计费，
+// 乘上金额之后可能差一分。倍率一旦用上就会反复用于每一次计费，
 // 一分钱的偏差乘上百万次请求就是一笔真实的差额。
+//
+// 目前只有测试在调它：**现在还没有倍率这个概念**，计价规则里没有乘法。
+// 它是为「折扣 / 倍率」预置的入口，先用 big.Rat 把口径定死。
 //
 // 除法只用在最后一步：factor 是有理数，乘积要除以它的分母才折回 units
 // 量纲，并按 fromBigDivRounded 四舍五入。所以它是本包里带舍入的入口之一。
@@ -334,6 +352,10 @@ func clampInt64Sign(_ int64, sign int64) int64 {
 }
 
 // Min 返回较小者。
+//
+// 目前只有测试在调它。孪生的 Max 在生产里有用到（billing/reserve.go 拿它
+// 取「输出单价与推理单价的较大者」和「保底与按量金额的较大者」），
+// 这一半是配对的运算面。
 func Min(a, b Amount) Amount {
 	if a.units <= b.units {
 		return a

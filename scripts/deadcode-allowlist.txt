@@ -17,6 +17,9 @@
 # 这一档的用处是让 review 能问出「这一条为什么还在」：lib 的答案是「它是积木」，
 # gap 的答案是「有一个 issue 在跟」。
 #
+# **lib 那几条的理由要写清「目前只有测试在调」**——「有实现、有测试、没有调用方」
+# 的符号，看代码的人会以为它已经生效。理由栏说不清的事，对应函数的注释里要补一句。
+#
 # 本文件按 <路径> 再按 <符号名> 排序，与 deadcode 的输出顺序无关——
 # 比对按集合做，加一条或删一条只动一行。
 #
@@ -25,16 +28,12 @@
 #   命令      deadcode ./cmd/larkax ./cmd/larkaxctl
 #             （扫描起点由 cmd/ 自动发现，这两个就是当前发现的全部）
 #   工具      golang.org/x/tools v0.52.0（脚本里的 PINNED_TOOLS_VERSION）
-#   条数      77，与脚本里的 MAX_ENTRIES 一致
+#   条数      68，与脚本里的 MAX_ENTRIES 一致
 #
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
-internal/billing/billing.go      | Compute                         | lib | 与 ComputeWithCharges 成对的另一半 API，生产只用带一次性费用的那一半
-internal/billing/reserve.go      | Settle                          | lib | 与 SettleWithCharges 成对的另一半 API
-internal/billing/reserve.go      | SettleUncapped                  | lib | 无上界结算，供「已经有实测用量」的调用方；目前只有测试在调
-internal/billing/reserve.go      | SettleUncappedWithCharges       | lib | 同上，带一次性费用
-internal/calendar/calendar.go    | Date.cmp                       | lib | 只被内存实现调用，而内存实现是测试夹具（见 memory.go 那几条）
-internal/calendar/calendar.go    | sign                           | lib | 只被内存实现调用，而内存实现是测试夹具（见 memory.go 那几条）
+internal/calendar/calendar.go    | Date.cmp                        | lib | 只被内存实现调用，而内存实现是测试夹具（见 memory.go 那几条）
+internal/calendar/calendar.go    | sign                            | lib | 只被 Date.cmp 调用，同一条处境：目前只有测试走到
 internal/calendar/memory.go    | MemorySource.AddDay            | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.LookupDay         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.SetDefaultRange   | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
@@ -53,14 +52,14 @@ internal/catalog/admin.go        | deleteModelError                | gap | #158 
 internal/catalog/admin.go        | modelUpdateSets                 | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/catalog/catalog.go      | Catalog.Model                   | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/catalog/catalog.go      | Catalog.UpstreamModel           | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/channel/httpx/httpx.go  | DrainAndClose                   | lib | HTTP 收尾辅助，给拿不到 *http.Response 的调用点用
+internal/channel/httpx/httpx.go  | DrainAndClose                   | lib | HTTP 收尾辅助，给拿不到 *http.Response 的调用点用；目前只有测试在调它
 internal/ledger/account.go       | PaymentGatewayAccount           | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
 internal/ledger/account.go       | PayoutAccount                   | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
 internal/ledger/balance.go       | BalanceOf                       | gap | #173 余额查询与账本完整性校验还没有入口
 internal/ledger/balance.go       | Balances                        | gap | #173 余额查询与账本完整性校验还没有入口
 internal/ledger/balance.go       | Sum                             | gap | #173 余额查询与账本完整性校验还没有入口
 internal/ledger/entry.go         | Entry.withPayout                | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
-internal/ledger/entry.go         | EntryTypes                      | lib | 账本的类型清单，供配置校验与界面枚举用
+internal/ledger/entry.go         | EntryTypes                      | lib | 账本的类型清单，供配置校验与界面枚举用；两者都还没有调用方，目前只有测试在调
 internal/ledger/entry.go         | VerifyEntries                   | gap | #173 余额查询与账本完整性校验还没有入口
 internal/ledger/transactions.go  | PayoutPaid                      | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
 internal/ledger/transactions.go  | PayoutRequest                   | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
@@ -68,41 +67,36 @@ internal/ledger/transactions.go  | Refund                          | gap | #172 
 internal/ledger/transactions.go  | Settle                          | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
 internal/ledger/transactions.go  | Topup                           | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
 internal/ledger/transactions.go  | memoWithOrder                   | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
-internal/money/money.go          | FromInt                         | lib | 金额库的构造面：用整数元构造
-internal/money/money.go          | FromUnits                       | lib | 金额库的构造面：用最小单位构造，供从库里读回时使用
-internal/money/money.go          | Min                             | lib | 金额库的运算面：取较小者
-internal/money/money.go          | MulAmount                       | lib | 金额库的运算面：两个金额相乘
-internal/money/money.go          | MulFloat                        | lib | 金额库的运算面：按倍率相乘，内部走 big.Rat
-internal/money/money.go          | MustParse                       | lib | 金额库的构造面：解析失败即 panic，只用于包级常量与测试
-internal/observe/logger.go       | WithLogger                      | lib | context 辅助：装上日志器，与下面那个成对
-internal/observe/metrics.go      | Counter.Name                    | lib | 只给测试用：反射把「结构体字段名 ↔ 登记名」对上，删了那条用例就失去依据
+internal/money/money.go          | FromInt                         | lib | 金额库的构造面：用整数元构造；目前只有测试在调它
+internal/money/money.go          | FromUnits                       | lib | 金额库的构造面：用最小单位构造；目前只有测试在调它（读库走 Parse，列是 numeric）
+internal/money/money.go          | Min                             | lib | 金额库的运算面：取较小者；目前只有测试在调它（孪生的 Max 在生产里用到）
+internal/money/money.go          | MulAmount                       | lib | 金额库的运算面：两个金额相乘；目前只有测试在调它（计价规则里没有金额相乘）
+internal/money/money.go          | MulFloat                        | lib | 金额库的运算面：按倍率相乘，内部走 big.Rat；目前只有测试在调它（还没有倍率这个概念）
+internal/money/money.go          | MustParse                       | lib | 金额库的构造面：解析失败即 panic；只给测试写期望值用，生产一律走 Parse
 internal/observe/metrics.go      | Counter.Value                   | lib | 只给测试与断言用：cmd/larkax 的 main_test 跨包读它（所以必须导出），删了那条断言就没了
-internal/observe/metrics.go      | LabeledCounter.Name             | lib | 只给测试用：同上，带标签的那一族
-internal/observe/request.go      | WithLoggerAndRequest            | lib | context 辅助：一次装上日志器与请求标识
-internal/pipeline/pipeline.go    | IsUpstreamFailure               | lib | 错误分类谓词，供调用方判断「本次不该计费」
 internal/pricing/admin.go        | Admin.Explain                   | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/pricing/admin.go        | Admin.Update                    | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/pricing/admin.go        | UpdateRequest.applyTo           | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/pricing/admin.go        | UpdateRequest.changesAnything   | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/pricing/admin.go        | loadRuleForUpdate               | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/route/stream.go         | WrapStreamStarted               | gap | #179 流中断时「已经吐过字」的判定还没有接进重试路径
-internal/snapshot/allowlist.go   | Allowlist                       | gap | #179 快照的允许表与读回入口还没有调用方
-internal/snapshot/allowlist.go   | Root.valid                      | lib | 允许表的内部判定：方向是否已知
-internal/snapshot/allowlist.go   | Roots                           | gap | #179 快照的允许表与读回入口还没有调用方
+internal/route/stream.go         | WrapStreamStarted               | gap | #245 流中断时「已经吐过字」的判定还没有接进重试路径（这一条随 #245 删掉）
+internal/snapshot/allowlist.go   | Allowlist                       | gap | #252 快照的允许表与读回入口还没有调用方
+internal/snapshot/allowlist.go   | Root.valid                      | lib | 允许表的内部判定：方向是否已知；目前只有测试在调它（New 查的是表，不是它）
+internal/snapshot/allowlist.go   | Roots                           | gap | #252 快照的允许表与读回入口还没有调用方
 internal/snapshot/allowlist.go   | isAllowKind                     | lib | 允许表的内部判定：测试用它筛出需要顶住敌对取值的条目
-internal/snapshot/redact.go      | Decode                          | gap | #179 快照的允许表与读回入口还没有调用方
-internal/tokens/count.go         | BoundsOf                        | lib | 能力查询：BoundsFor 按模型名的便捷包装
-internal/tokens/count.go         | RecordMeasured                  | gap | #179 上游实测 usage 的归一那条路还没有调用方，走的是估算路径
-internal/tokens/normalize.go     | CacheWriteDetail                | gap | #179 上游实测 usage 的归一那条路还没有调用方，走的是估算路径
-internal/tokens/normalize.go     | Normalize                       | gap | #179 上游实测 usage 的归一那条路还没有调用方，走的是估算路径
-internal/tokens/normalize.go     | NormalizeResponseUsage          | gap | #179 上游实测 usage 的归一那条路还没有调用方，走的是估算路径
-internal/tokens/normalize.go     | Upstream.String                 | lib | 稳定的英文标识，供日志与界面用
-internal/tokens/normalize.go     | checkNonNegative                | gap | #179 上游实测 usage 的归一那条路还没有调用方，走的是估算路径
-internal/tokens/normalize.go     | deref                           | gap | #179 上游实测 usage 的归一那条路还没有调用方，走的是估算路径
-internal/tokens/normalize.go     | min64                           | gap | #179 上游实测 usage 的归一那条路还没有调用方，走的是估算路径
-internal/tokens/stream.go        | StreamEstimator.HasMeasured     | gap | #179 上游实测 usage 的归一那条路还没有调用方，走的是估算路径
-internal/tokens/stream.go        | StreamEstimator.ObserveMeasured | gap | #179 上游实测 usage 的归一那条路还没有调用方，走的是估算路径
-internal/tokens/stream.go        | Usage.RequiresReview            | gap | #179 上游实测 usage 的归一那条路还没有调用方，走的是估算路径
-internal/tokens/tokens.go        | AvailableEncodings              | lib | 能力查询：本机能精确计数的编码集合
-internal/tokens/tokens.go        | BoundsFor                       | lib | 能力查询：某个族的估算误差范围，供健康检查与文档用
-internal/tokens/vocab.go         | loadableEncodings               | lib | 能力查询：第三方词表支持哪些编码，是外部事实
+internal/snapshot/redact.go      | Decode                          | gap | #252 快照的允许表与读回入口还没有调用方
+internal/tokens/count.go         | BoundsOf                        | lib | 能力查询：BoundsFor 按模型名的便捷包装；目前只有测试在调它
+internal/tokens/count.go         | RecordMeasured                  | gap | #245 上游实测 usage 那条路没有接进生产：这里只是把它包成带来源标记的计数，没有调用方
+internal/tokens/normalize.go     | CacheWriteDetail                | gap | #245 上游实测 usage 的归一那条路还没有调用方，走的是估算路径（这一条随 #245 删掉）
+internal/tokens/normalize.go     | Normalize                       | gap | #245 上游实测 usage 的归一那条路还没有调用方，走的是估算路径（这一条随 #245 删掉）
+internal/tokens/normalize.go     | NormalizeResponseUsage          | gap | #245 上游实测 usage 的归一那条路还没有调用方，走的是估算路径（这一条随 #245 删掉）
+internal/tokens/normalize.go     | Upstream.String                 | lib | 稳定的英文标识；目前只有测试在调它（同族的 Source.String 在生产里用）
+internal/tokens/normalize.go     | checkNonNegative                | gap | #245 上游实测 usage 的归一那条路还没有调用方，走的是估算路径（这一条随 #245 删掉）
+internal/tokens/normalize.go     | deref                           | gap | #245 上游实测 usage 的归一那条路还没有调用方，走的是估算路径（这一条随 #245 删掉）
+internal/tokens/normalize.go     | min64                           | gap | #245 上游实测 usage 的归一那条路还没有调用方，走的是估算路径（这一条随 #245 删掉）
+internal/tokens/stream.go        | StreamEstimator.HasMeasured     | gap | #245 与 ObserveMeasured 同一组：实测用量覆盖估算这条路没有接进生产，目前只有测试在调
+internal/tokens/stream.go        | StreamEstimator.ObserveMeasured | gap | #245 实测用量覆盖估算这条路没有接进生产（gateway 只调了 ObserveDone），走的是估算路径
+internal/tokens/stream.go        | Usage.RequiresReview            | gap | #245 估算复核的判据，没有生产调用方：本包不持有告警通道，那一头还没有写
+internal/tokens/tokens.go        | AvailableEncodings              | lib | 能力查询：本机能精确计数的编码集合；目前只有测试在调它（与 Prepare / Loaded 一组，启动预热还没接线）
+internal/tokens/tokens.go        | BoundsFor                       | lib | 能力查询：某个族的估算误差范围；目前只有测试在调它
+internal/tokens/vocab.go         | loadableEncodings               | lib | 能力查询：第三方词表支持哪些编码；只被 AvailableEncodings 调用，那个也还没有生产调用方

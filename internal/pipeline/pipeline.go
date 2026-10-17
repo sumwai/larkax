@@ -529,7 +529,7 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 	//
 	// 它排在「上游失败不计费」**之后**，因为那条是硬规则：一次不计费的请求，
 	// 定价基准缺不缺都不该改变结论，更不该把一次上游失败降级成一句普通错误
-	// （IsUpstreamFailure 会因此为假，而调用方按它分支）。
+	// （调用方要靠 `*UpstreamFailure` 认出「这笔钱放回去而不是收掉」）。
 	//
 	// 这条分支是**防御性的**，当前真实路径造不出来：Reservation 只有一个构造点，
 	// RuleMatchedAt 取自 p.now()；预留也不落库、不从库里读回（SaveReservation
@@ -740,12 +740,6 @@ func (e *UpstreamFailure) Error() string {
 		return fmt.Sprintf("上游失败（%d %s），本次不计费", e.Status, e.Code)
 	}
 	return fmt.Sprintf("上游失败（%d），本次不计费", e.Status)
-}
-
-// IsUpstreamFailure 判断一个错误是否表示「本次不该计费」。
-func IsUpstreamFailure(err error) bool {
-	var t *UpstreamFailure
-	return errors.As(err, &t)
 }
 
 func (r Request) validate() error {

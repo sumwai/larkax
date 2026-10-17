@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,17 @@ import (
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/tokens"
 )
+
+// adoptTestLogger 把日志器装成进程默认，并在用例结束时还原。
+//
+// 结算里的告警走 observe.FromContext，而它的日志器**只**来自 slog 的包级
+// 默认（见 observe.AdoptAsDefault）——往 context 里塞日志器那条路已经没有了。
+func adoptTestLogger(t *testing.T, w io.Writer) {
+	t.Helper()
+	original := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(original) })
+	observe.AdoptAsDefault(observe.NewLoggerWithWriter(w, "debug", "json", false))
+}
 
 // ruleSource 是测试用的规则来源：一条固定规则，或一个错误。
 //
@@ -430,11 +443,10 @@ func TestSettleUpstreamFailureIsNotBilled(t *testing.T) {
 	if charge != nil {
 		t.Error("上游失败不该产生账单")
 	}
-	if !IsUpstreamFailure(err) {
-		t.Errorf("应是 UpstreamFailure，得到 %T", err)
-	}
 	var uf *UpstreamFailure
-	errors.As(err, &uf)
+	if !errors.As(err, &uf) {
+		t.Fatalf("应是 UpstreamFailure，得到 %T", err)
+	}
 	if uf.Status != 503 || uf.Code != "upstream_unavailable" {
 		t.Errorf("失败依据没带上: %+v", uf)
 	}
@@ -831,7 +843,8 @@ func TestSettleRejectsReservationWithoutInstant(t *testing.T) {
 	if err == nil {
 		t.Fatal("预留缺少受理时刻时应报错")
 	}
-	if IsUpstreamFailure(err) {
+	var uf *UpstreamFailure
+	if errors.As(err, &uf) {
 		t.Errorf("这不该被当成「本次不计费」: %v", err)
 	}
 }
@@ -839,8 +852,8 @@ func TestSettleRejectsReservationWithoutInstant(t *testing.T) {
 // 上面那条与「上游失败不计费」撞在一起时，后者胜出。
 //
 // 次序是那条硬规则的一部分：一次不计费的请求，定价基准缺不缺都不该改变结论。
-// 两条检查反过来写的话，一次上游失败会被降级成一句普通错误，而调用方正是按
-// IsUpstreamFailure 决定「这笔钱放回去还是收掉」——它变成 false 的后果是那笔
+// 两条检查反过来写的话，一次上游失败会被降级成一句普通错误，而调用方正是靠
+// `*UpstreamFailure` 认出「这笔钱放回去还是收掉」——认不出来的后果是那笔
 // 冻结的钱不再被当成「上游失败」来处理。
 //
 // 两个条件同时出现是**测试造出来的**（真实路径里 RuleMatchedAt 不可能为零，
@@ -859,7 +872,8 @@ func TestSettleUpstreamFailureOutranksMissingInstant(t *testing.T) {
 		UpstreamStatus: 503,
 		ErrorCode:      "upstream_unavailable",
 	})
-	if !IsUpstreamFailure(err) {
+	var uf *UpstreamFailure
+	if !errors.As(err, &uf) {
 		t.Fatalf("err = %v，期望仍被当成「上游失败不计费」", err)
 	}
 }
@@ -999,10 +1013,9 @@ func TestSettleWarnsButSucceedsOnContradictoryReasoning(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	ctx := observe.WithLoggerAndRequest(context.Background(),
-		observe.NewLoggerWithWriter(&buf, "debug", "json", false), "req-1")
+	adoptTestLogger(t, &buf)
 
-	charge, err := p.Settle(ctx, req, res, Outcome{
+	charge, err := p.Settle(context.Background(), req, res, Outcome{
 		Usage: channel.Usage{
 			PromptTokens:                1000,
 			CompletionTokens:            50,
@@ -1047,15 +1060,14 @@ func TestSettleDoesNotWarnOnConsistentReasoning(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	ctx := observe.WithLoggerAndRequest(context.Background(),
-		observe.NewLoggerWithWriter(&buf, "debug", "json", false), "req-1")
+	adoptTestLogger(t, &buf)
 
 	// 两种口径各一次：推理含在输出里，以及推理独立报。
 	for _, u := range []channel.Usage{
 		{CompletionTokens: 100, ReasoningTokens: 40, CompletionIncludesReasoning: true},
 		{CompletionTokens: 100, ReasoningTokens: 40},
 	} {
-		if _, err := p.Settle(ctx, req, res, Outcome{Usage: u}); err != nil {
+		if _, err := p.Settle(context.Background(), req, res, Outcome{Usage: u}); err != nil {
 			t.Fatalf("结算出错: %v", err)
 		}
 	}

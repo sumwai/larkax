@@ -184,6 +184,9 @@ const ShortInputNote = "短输入（不足约 16 字符）的比例误差比 Err
 	"（实测低至 0.35 倍），但绝对误差只有个位数 token；比例区间对长输入才可靠。"
 
 // BoundsFor 返回某个族走估算路径时的误差范围。
+//
+// 目前只有测试在调它：调用方要拿它做「这次估算有多不可信」的判断，
+// 而那条路（实测 usage 的归一）还没有接上。
 func BoundsFor(f Family) ErrorBounds {
 	switch f {
 	case FamilyOpenAI:
@@ -251,6 +254,11 @@ func (c *Counter) Loaded() []string {
 // 与 Loaded 的区别：这个是能力上限，那个是当前状态。健康检查与文档
 // 需要前者（「这台机器支持到什么程度」），启动日志需要后者
 // （「那 40ms 花掉了没有」）。
+//
+// **目前只有测试在调它，而 Loaded 也一样**：Prepare / Loaded /
+// AvailableEncodings 这一组是「启动时预热词表并把结果打进启动日志」的
+// 三件套，而生产装配还没有调用 Prepare（见它的注释：生产环境应当调用它）。
+// 接线之前别把它当成已经在跑的东西。
 func AvailableEncodings() []string {
 	out := make([]string, 0, 6)
 	for _, enc := range loadableEncodings() {
