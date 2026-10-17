@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -145,6 +146,16 @@ func (c *decideCall) Chat(ctx context.Context, ch channel.Channel, carrier *chan
 	resp, err := c.exec.Decide(ctx, ch, &attempt)
 	if err != nil {
 		return nil, err
+	}
+	// 成功却交回空响应是**实现**的问题，不是上游的：唯一的实现有检查，所以
+	// 今天不可达。留着这一行是因为解引用 nil 的现场是一次 panic，而调用方
+	// 拿到的是断连而不是一个能查的失败（与 internal/api 里
+	// `res == nil || res.Response == nil` 同一个处置）。
+	//
+	// 不包 ErrNoExecutor 一类的哨兵：那是「没接上」，这是「接上了但坏了」，
+	// 报成 501 会把一个实现缺陷说成部署缺件，把排查方向带偏。
+	if resp == nil {
+		return nil, fmt.Errorf("渠道 %d: 决策执行器成功却没有交回响应", ch.ID)
 	}
 	c.response = resp
 

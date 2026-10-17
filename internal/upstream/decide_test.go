@@ -65,7 +65,8 @@ func TestDecideDispatchesToSystemOne(t *testing.T) {
 }
 
 // chat 那两套协议的适配器不实现决策。错误要包着 ErrUnsupported，
-// 这样路由层不换下一个候选——换谁都是同一个错。
+// 这样路由层**跳过这条候选、试下一个**（见 route 的 worthNextCandidate）——
+// 候选池里可以同时有 chat 渠道与决策渠道。
 func TestDecideRejectsChatOnlyChannels(t *testing.T) {
 	for _, typ := range []string{"openai", "anthropic"} {
 		t.Run(typ, func(t *testing.T) {

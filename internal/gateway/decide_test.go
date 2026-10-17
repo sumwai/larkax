@@ -183,6 +183,35 @@ func TestDecideUpstreamFailureIsNotBilled(t *testing.T) {
 	}
 }
 
+// 执行器成功却交回空响应时**报错，而不是解引用 nil 崩掉**。
+//
+// 今天不可达（唯一的实现自己检查过），留着是因为崩溃的现场是一次 panic：
+// 调用方拿到的是断连，而账上那笔预留要靠 defer 才放开——一个能查的失败
+// 比一次「服务重启了但不知道为什么」便宜得多。
+func TestDecideRejectsNilResponse(t *testing.T) {
+	h := newHarness(t)
+	h.gw.Decider = deciderFunc(
+		func(context.Context, channel.Channel, *systemone.Request) (*systemone.Response, error) {
+			// 「成功（err 为 nil）却交回空响应」正是这条用例要造的形状，
+			// 不是「出错了但没报」——所以这里显式 nolint。
+			return nil, nil //nolint:nilnil // 见上
+		})
+
+	_, err := h.gw.Decide(context.Background(), decisionBilling(), decision())
+	if err == nil {
+		t.Fatal("期望报错")
+	}
+	if !strings.Contains(err.Error(), "没有交回响应") {
+		t.Errorf("错误应说清是执行器没交回响应: %v", err)
+	}
+	if len(h.settlements.saved) != 0 {
+		t.Errorf("失败却结算了 %d 次", len(h.settlements.saved))
+	}
+	if len(h.reservations.released) != 1 {
+		t.Errorf("释放次数 = %d，期望 1", len(h.reservations.released))
+	}
+}
+
 // 没有接上决策执行器时回 ErrNoExecutor，而不是 panic 或一个静默的 nil。
 func TestDecideWithoutExecutor(t *testing.T) {
 	h := newHarness(t)

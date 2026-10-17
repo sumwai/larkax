@@ -91,12 +91,22 @@ func (f *systemoneUpstream) handler() http.Handler {
 		// 上游回报的模型名**故意与调用方要的那个不同**：真实上游回报的名字
 		// 经常不是调用方要的那一个。两边同名时，「报给调用方的是哪一个」
 		// 就分不出来——把入口那一步的覆盖删掉，用例照样全绿。
+		// 三种答案都按**完整形状**给：legend 与 probabilities 也要在。
+		// 只给标量的话，「这两个 map 有没有原样透出去」在端到端上就没有判据
+		// ——而它们与标量走的是同一段编解码，只测一半等于没测那一半。
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"model": f.model + "-upstream",
 			"answers": map[string]any{
-				"q_noul":   map[string]any{"type": "noul", "noul": 0.75},
-				"q_choice": map[string]any{"type": "choice", "choice": "billing", "confidence": 1},
-				"q_score":  map[string]any{"type": "score", "score": 1.8, "confidence": 0.7},
+				"q_noul": map[string]any{"type": "noul", "noul": 0.75},
+				"q_choice": map[string]any{
+					"type": "choice", "choice": "billing", "confidence": 1,
+					"probabilities": map[string]float64{"billing": 1, "tech": 0},
+				},
+				"q_score": map[string]any{
+					"type": "score", "score": 1.8, "confidence": 0.7,
+					"legend":        map[string]string{"0": "low", "1": "medium", "2": "high"},
+					"probabilities": map[string]float64{"0": 0, "1": 0.2, "2": 0.8},
+				},
 			},
 			"usage": map[string]any{
 				"input_tokens":  f.inputTokens,
@@ -178,10 +188,13 @@ func TestSystemOneEndToEnd(t *testing.T) {
 	var got struct {
 		Model   string `json:"model"`
 		Answers map[string]struct {
-			Type   string  `json:"type"`
-			Noul   float64 `json:"noul"`
-			Choice string  `json:"choice"`
-			Score  float64 `json:"score"`
+			Type          string             `json:"type"`
+			Noul          float64            `json:"noul"`
+			Choice        string             `json:"choice"`
+			Confidence    float64            `json:"confidence"`
+			Score         float64            `json:"score"`
+			Legend        map[string]string  `json:"legend"`
+			Probabilities map[string]float64 `json:"probabilities"`
 		} `json:"answers"`
 		Usage struct {
 			InputTokens  int64 `json:"input_tokens"`
@@ -202,6 +215,23 @@ func TestSystemOneEndToEnd(t *testing.T) {
 	if got.Answers["q_noul"].Noul != 0.75 || got.Answers["q_choice"].Choice != "billing" ||
 		got.Answers["q_score"].Score != 1.8 {
 		t.Errorf("三种答案的形状没有原样透出来: %+v", got.Answers)
+	}
+	// 两个 map 与标量走同一段编解码，要一起钉住：只断言标量的话，把
+	// legend / probabilities 丢掉的那次改动照样全绿。
+	score := got.Answers["q_score"]
+	if score.Legend["2"] != "high" || len(score.Legend) != 3 {
+		t.Errorf("score 的 legend 没有原样透出来: %v", score.Legend)
+	}
+	if score.Probabilities["2"] != 0.8 || score.Confidence != 0.7 {
+		t.Errorf("score 的 probabilities/confidence 没有原样透出来: %+v", score)
+	}
+	// 零值也要透出来：`"0": 0` 是合法的一项，被 omitempty 吞掉的话这里就是
+	// 缺键（读出来是 0，所以判据要落在**键在不在**上）。
+	if _, ok := score.Probabilities["0"]; !ok {
+		t.Errorf("score 的 probabilities 少了值为 0 的那一项: %v", score.Probabilities)
+	}
+	if got.Answers["q_choice"].Probabilities["billing"] != 1 {
+		t.Errorf("choice 的 probabilities 没有原样透出来: %+v", got.Answers["q_choice"])
 	}
 	if got.Usage.InputTokens != 387 || got.Usage.OutputTokens != 72 {
 		t.Errorf("usage = %+v，期望上游报的 387/72", got.Usage)
@@ -310,6 +340,76 @@ func TestSystemOneEndToEnd(t *testing.T) {
 	}
 	if strings.Contains(string(bodies[0]), `"stream"`) {
 		t.Errorf("发上去的请求体里出现了 stream: %s", bodies[0])
+	}
+}
+
+// 候选池里同时有 chat 渠道与决策渠道时，**类型不对的那一条要被跳过**，
+// 而不是让整条请求失败。
+//
+// 候选集是按「渠道支不支持这个模型名」筛的，**不看渠道类型**——同一个规范名
+// 可以同时挂在两种渠道上（见 route 的 Select）。优先级高的那条类型不对时，
+// 老行为是整条请求失败：一个配错的渠道打断该模型的**全部**流量，而后面明明
+// 有能用的候选。
+//
+// 判据有两处，缺一不可：
+//
+//   - 类型不对的那条**一次都没有被真的调用过**（能力检查发生在发 HTTP 之前）
+//   - 账单落在类型对的那条渠道上
+//
+// 只断言「请求成功了」是不够的：候选顺序由 priority 决定（见 route 的
+// order），把两条渠道的类型换一下，请求照样成功，而那时这条用例什么都没证明。
+func TestSystemOneSkipsChannelWithoutCapability(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+
+	model := unique("e2e-model-decision-skip")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, "100")
+	key := issueKey(t, db, user)
+
+	// 类型不对的那条排在前面：priority 是排序的第一判据，大者先试。
+	chatFake := &systemoneUpstream{db: db, userID: user, model: model, inputTokens: 387, outputTokens: 72}
+	chatSrv := httptest.NewServer(chatFake.handler())
+	t.Cleanup(chatSrv.Close)
+	chatChannel := seedChannelOfType(t, db, sealer, merchant, chatSrv.URL, model, "openai", 10)
+
+	decisionFake := &systemoneUpstream{db: db, userID: user, model: model, inputTokens: 387, outputTokens: 72}
+	decisionSrv := httptest.NewServer(decisionFake.handler())
+	t.Cleanup(decisionSrv.Close)
+	decisionChannel := seedChannelOfType(t, db, sealer, merchant, decisionSrv.URL, model, "systemone", 1)
+
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	status, body := postChat(ctx, t, public.URL+"/v1/systemone", key, decisionBody(model))
+	if status != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200——类型不对的候选该被跳过，而不是让整条请求失败。响应体：%s",
+			status, body)
+	}
+
+	if calls, _, _, _, _ := chatFake.snapshot(); calls != 0 {
+		t.Errorf("类型不对的渠道被真的调用了 %d 次——它该在发 HTTP 之前就被跳过", calls)
+	}
+	calls, _, _, _, _ := decisionFake.snapshot()
+	if calls != 1 {
+		t.Errorf("类型对的渠道被调用 %d 次，期望 1", calls)
+	}
+
+	bill, ok := billingOf(t, db, user)
+	if !ok {
+		t.Fatal("没有账单行——请求成功了钱却没记")
+	}
+	if !bill.channelID.Valid || bill.channelID.Int64 != decisionChannel {
+		t.Errorf("账单的 channel_id = %v，期望 %d（真正服务了这次请求的那条）",
+			bill.channelID, decisionChannel)
+	}
+	if bill.channelID.Valid && bill.channelID.Int64 == chatChannel {
+		t.Errorf("账单落在了类型不对的那条渠道 %d 上", chatChannel)
 	}
 }
 

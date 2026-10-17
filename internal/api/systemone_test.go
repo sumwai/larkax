@@ -222,6 +222,32 @@ func TestSystemOneInvalidBody(t *testing.T) {
 	}
 }
 
+// Parse 阶段的字段级错误也要点名到调用方，而不是压成一句概括。
+//
+// 「criteria 的形状与 type 对不上」是在 Parse 里判的（要按 type 决定用哪个
+// 结构体去解 criteria），而入口原先把**所有** Parse 错误统一成
+// "invalid request body"——于是那句带字段名的措辞只进日志，调用方拿到的
+// 是一句没有指向的概括，只能自己去猜是哪个字段写错了。
+func TestSystemOneParseErrorsNameTheField(t *testing.T) {
+	h, d := newDecisionHandler()
+	body := `{"model":"m","state":"s",
+		"questions":{"q":{"type":"choice","instructions":"i","criteria":["billing"]}}}`
+	rec := post(h, PathSystemOne, body)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("状态码 = %d，期望 400；响应体 %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "questions.q.criteria") {
+		t.Errorf("错误信息没点名出问题的字段: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "invalid request body") {
+		t.Errorf("字段级的问题被压成了概括文案: %s", rec.Body.String())
+	}
+	if d.calls != 0 {
+		t.Errorf("被拒的请求不该调上游，实际调了 %d 次", d.calls)
+	}
+}
+
 // 没接上决策执行器时回 501，而不是让请求走到一半失败。
 func TestSystemOneUnwired(t *testing.T) {
 	h, _, _ := newTestHandler() // Decider 留空

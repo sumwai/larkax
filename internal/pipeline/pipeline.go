@@ -238,8 +238,13 @@ type Request struct {
 	// 请求是从哪条路径进来的，也不该去猜：写死一个默认值会让另一条入口
 	// 的账单全部记错，而那张表正是事后按协议统计的依据。
 	//
-	// 取值只有 channel.ProtocolOpenAI 与 channel.ProtocolAnthropic 两种；
-	// 落库层拒绝其他取值（含空值），见 internal/ledger/store 的 SaveReservation。
+	// 取值是 channel.Protocol 的取值集合：ProtocolOpenAI、ProtocolAnthropic
+	// 与 ProtocolSystemOne 三种；落库层拒绝其他取值（含空值），见
+	// internal/ledger/store 的 checkProtocol。
+	//
+	// 这一份清单是 channel.Protocol.valid 的**副本**，三处（这里、那里、
+	// 落库层）要一起改——漏了落库层那一处的表现是「入口收得下这个请求，
+	// 却在预留那一步失败」。
 	Protocol channel.Protocol
 
 	// Idempotency 是这次请求的幂等声明，由入口按请求头 Idempotency-Key 设置；

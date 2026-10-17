@@ -62,8 +62,21 @@ func (h *Handler) serveDecision(w http.ResponseWriter, r *http.Request) {
 
 	decision, err := systemone.Parse(body)
 	if err != nil {
-		// 与 chat 那条路同一个处置：解析失败的细节不回给调用方，那里面会带上
-		// 内部类型名与字段名。
+		// 字段级的问题（criteria 的形状与类型对不上）**原样回给调用方**：
+		// systemone.Invalid 的 Field/Message 就是给他看的，他改请求就能过。
+		// 它与 Validate 那一支是同一类，所以共用同一个出口。
+		//
+		// 压成一句「invalid request body」的话，我们精心构造的那句
+		// 「questions.q.criteria: ...」只进日志，而调用方拿到的是一句没有
+		// 指向的概括——那条只在测试里可见的错误信息，等于不存在。
+		var invalid *systemone.Invalid
+		if errors.As(err, &invalid) {
+			rejectDecision(w, invalid)
+			return
+		}
+		// 其余是 JSON 层面的错误（语法错误，或类型对不上——例如 model 给了
+		// 一个数组）：细节里会带上内部类型名与字段名，不回给调用方
+		// （与 chat 那条路同一个处置）。
 		observe.FromContext(r.Context()).Warn("解析决策请求失败", "err", err)
 		writeError(w, systemoneErrorProtocol, http.StatusBadRequest, "invalid request body")
 		return
@@ -81,9 +94,7 @@ func (h *Handler) serveDecision(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if rejected := decision.Validate(); rejected != nil {
-		// 校验失败的措辞是**给调用方看的**（他改请求就能过），所以原样回出去。
-		// 与解析失败不同：那一类会带上内部类型名，这一类不会。
-		writeError(w, systemoneErrorProtocol, http.StatusBadRequest, rejected.Error())
+		rejectDecision(w, rejected)
 		return
 	}
 
@@ -116,6 +127,16 @@ func (h *Handler) serveDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, rendered)
+}
+
+// rejectDecision 回一句**给调用方看的** 400。
+//
+// Parse 与 Validate 两条支路共用它：两条报的都是「请求本身不合法」，措辞
+// 都是给调用方改请求用的（Field 指向线格式里的字段名），所以出口只有一个。
+// 与「body 不是合法 JSON」那一类分开：后者的细节带内部类型名与字段名，
+// 只进日志。
+func rejectDecision(w http.ResponseWriter, err error) {
+	writeError(w, systemoneErrorProtocol, http.StatusBadRequest, err.Error())
 }
 
 // decideBillingRequest 组装决策请求的计费输入。

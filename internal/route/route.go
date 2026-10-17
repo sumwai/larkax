@@ -690,17 +690,45 @@ type Result struct {
 	Attempts []Attempt
 }
 
-// Errors 是全部候选都失败时返回的错误。
+// Errors 是候选都试不下去时返回的错误。
 type Errors struct {
 	Attempts []Attempt
+	// Untried 是**没有试过**的候选数。提前返回（遇到不可重试的错误）时它
+	// 大于零，试完为止时它是零。
+	//
+	// 它必须与 Attempts 分开：只报「试过几个」会让「全部 1 个候选渠道都失败」
+	// 出现在还有 2 个候选没试过的时候——那句话把一次提前放弃说成了「都试过了」，
+	// 看日志的人据此去查上游，而真正要改的是排在前面的那条配置。
+	Untried int
 }
 
 func (e *Errors) Error() string {
 	if len(e.Attempts) == 0 {
 		return "没有可用的渠道"
 	}
-	return fmt.Sprintf("全部 %d 个候选渠道都失败，最后一个错误: %v",
-		len(e.Attempts), e.Attempts[len(e.Attempts)-1].Err)
+	last := e.Attempts[len(e.Attempts)-1].Err
+	switch {
+	case e.Untried > 0:
+		return fmt.Sprintf("第 %d 个候选渠道失败，还有 %d 个候选没试: %v",
+			len(e.Attempts), e.Untried, last)
+	case allCapabilityMismatch(e.Attempts):
+		// 一句「都失败」会让人去查上游，而这里上游一次都没有真的被调用过
+		// ——是我们这边的配置没有覆盖这条入口。
+		return fmt.Sprintf("%d 个候选渠道都不支持这次请求: %v", len(e.Attempts), last)
+	default:
+		return fmt.Sprintf("全部 %d 个候选渠道都失败，最后一个错误: %v",
+			len(e.Attempts), last)
+	}
+}
+
+// allCapabilityMismatch 判断这几次尝试是不是都属于「这条候选做不了这件事」。
+func allCapabilityMismatch(attempts []Attempt) bool {
+	for _, a := range attempts {
+		if !capabilityMismatch(a.Err) {
+			return false
+		}
+	}
+	return true
 }
 
 // Unwrap 返回最后一个错误，让 errors.Is/As 能对上游错误类型生效。
@@ -722,15 +750,38 @@ type Executor interface {
 
 // worthNextCandidate 判断一次失败是否值得换下一个候选渠道。
 //
-// 它比 channel.IsRetryable 多认一种错误：ErrUnknownType。那不是「上游坏了」，
-// 而是「这一条候选的配置当前版本的二进制不认识」——它属于**这条候选**，
-// 不属于**这次请求**。按不可重试处理会让它挡住后面的候选：库里只要有一条
-// 回滚后残留的渠道行排在前面，整条请求就失败，而其余候选都是好的。
+// 它比 channel.IsRetryable 多认两种错误：ErrUnknownType 与 ErrUnsupported。
+// 两者都不是「上游坏了」，而是「这一条候选做不了这件事」——前者是库里那条
+// 配置当前版本的二进制不认识，后者是渠道类型与这条入口对不上。它们属于
+// **这条候选**，不属于**这次请求**。
+//
+// # ErrUnsupported 为什么也在这里（#348）
+//
+// 它以前只从 ListModels / Quota 出来，两个都不在请求热路径上，所以「不换
+// 下一个」当时是安全的。现在 Chat / Decide 也会返回它，而**候选池是按模型名
+// 筛的、不看渠道类型**：同一个规范名可以同时挂在 chat 渠道与决策渠道上。
+// 此时「不换下一个」意味着一个配错类型的渠道能打断该模型的**全部**流量，
+// 而后面明明还有能用的候选。老论证「换谁都是同一个错」在多协议候选池里
+// 不再成立——换一个类型对的候选就是另一个结果。
+//
+// 注意它与 channel.IsRetryable 的分工，别把两者合成一个：IsRetryable 回答
+// 「这次失败该算在上游头上吗」（它决定渠道健康度，见 gateway 的
+// channelAtFault），而一个渠道类型不对不是它坏了。所以 ErrUnsupported 在
+// 那边仍然不是「可重试」，在这里却是「值得换下一个」。
 //
 // 判据放在这里而不是适配器或执行器里：执行器只看得到自己那一次调用，
 // 只有路由层知道后面还有谁，也就只有它能决定「值不值得换下一个」。
 func worthNextCandidate(err error) bool {
-	return channel.IsRetryable(err) || errors.Is(err, channel.ErrUnknownType)
+	return channel.IsRetryable(err) || capabilityMismatch(err)
+}
+
+// capabilityMismatch 判断一次失败是不是「这条候选做不了这件事」。
+//
+// 与 worthNextCandidate 分开，是因为它还有第二个读者：错误文本要按它区分
+// 「试过但失败了」与「压根不支持」（见 Errors.Error）。两处用同一个判据，
+// 免得「换下一个」与「怎么措辞」各判各的。
+func capabilityMismatch(err error) bool {
+	return errors.Is(err, channel.ErrUnknownType) || errors.Is(err, channel.ErrUnsupported)
 }
 
 // Chat 按选路结果依次尝试，直到成功或用尽候选。
@@ -824,8 +875,12 @@ func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.R
 		}
 		if !worthNextCandidate(err) {
 			// 不可重试：换渠道也是同一个错，立刻返回。
-			// 已经记录的尝试保留下来，调用方需要知道试过谁。
-			return result, &Errors{Attempts: result.Attempts}
+			// 已经记录的尝试保留下来，调用方需要知道试过谁；没试过的那些
+			// 记进 Untried，免得错误文本把「提前放弃」说成「都试过了」。
+			return result, &Errors{
+				Attempts: result.Attempts,
+				Untried:  len(plan.Candidates) - len(result.Attempts),
+			}
 		}
 	}
 	return result, &Errors{Attempts: result.Attempts}

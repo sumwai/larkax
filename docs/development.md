@@ -654,6 +654,9 @@ ingress 规则下。
 - 三种类型的 `criteria` 形状不同：`noul`（是/否）不带；`choice` 是
   `{选项 id: 说明}`；`score` 是档位名的数组。
 - `state` 空不空由上游判断，入口不拦。
+- **未定义的字段会被忽略。** 请求里多写的键（例如 `temperature`）不会报错，
+  也不会转发给上游——它们只是没生效。上游将来加的参数也一样：这里认的是
+  本文列出的那几个键，多写一个不会让你收到 400，但也不会有任何作用。
 
 响应体：
 
@@ -662,15 +665,23 @@ ingress 规则下。
   "model": "decision-model",
   "answers": {
     "q_noul":   {"type": "noul",   "noul": 0.75},
-    "q_choice": {"type": "choice", "choice": "billing", "confidence": 1},
-    "q_score":  {"type": "score",  "score": 1.8, "confidence": 0.7}
+    "q_choice": {"type": "choice", "choice": "billing", "confidence": 1,
+                 "probabilities": {"billing": 1, "tech": 0}},
+    "q_score":  {"type": "score",  "score": 1.8, "confidence": 0.7,
+                 "legend": {"0": "low", "1": "medium", "2": "high"},
+                 "probabilities": {"0": 0, "1": 0.2, "2": 0.8}}
   },
   "usage": {"input_tokens": 387, "output_tokens": 72}
 }
 ```
 
-`model` 回的是**调用方要的那个名字**，不是上游回报的那个。`score` 是数值
-而不是档位下标。
+`model` 回的是**调用方要的那个名字**，不是上游回报的那个。
+
+`score` 是**数值**而不是档位下标：上面这个 1.8 落在下标 1 与 2 之间，要
+连着 `legend` 读——`legend` 是「下标 → 标签」的映射（`"2"` → `"high"`），
+它原样透传。`probabilities` 的键随类型变：`choice` 是选项名，`score` 是
+档位下标的字符串形式。零值也照常出现（`"score": 0` 是合法答案，最低那一档），
+不会因为它是零就被省掉。
 
 ### 配一条能接决策请求的渠道
 

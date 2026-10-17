@@ -272,6 +272,121 @@ func TestEncodeResponseOmitsForeignFields(t *testing.T) {
 	}
 }
 
+// 上游报的**零值**必须原样回给调用方。
+//
+// 这是「响应形状与上游一致」这个承诺里最容易破的一处：score 的最低档恰好
+// 是 0、noul 可以是 0（「是」的概率为 0）、confidence 也可以是 0。用
+// omitempty 表达「这个类型没有这个字段」会把它们一起抹掉——legend 还在、
+// score 那个键却消失了，而调用方按上游形状写的严格解析器当场失败。
+//
+// 判据落在**键在不在**上，不是「值等不等于零」：键不在时用零值读出来也是 0，
+// 只看值的话这条用例在坏掉时照样全绿。
+func TestEncodeResponseKeepsZeroValues(t *testing.T) {
+	upstream := []byte(`{
+		"model": "decision-model",
+		"answers": {
+			"q_noul":   {"type":"noul","noul":0},
+			"q_score":  {"type":"score","score":0,"confidence":0,
+			             "legend":{"0":"low","1":"high"},
+			             "probabilities":{"0":1,"1":0}},
+			"q_choice": {"type":"choice","choice":"billing","confidence":0,
+			             "probabilities":{"billing":1,"tech":0}}
+		},
+		"usage": {"input_tokens": 387, "output_tokens": 72}
+	}`)
+
+	resp, err := ParseResponse(upstream)
+	if err != nil {
+		t.Fatalf("ParseResponse 出错: %v", err)
+	}
+	body, err := EncodeResponse(resp)
+	if err != nil {
+		t.Fatalf("EncodeResponse 出错: %v", err)
+	}
+
+	var out struct {
+		Answers map[string]map[string]json.RawMessage `json:"answers"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("编出来的响应解不回来: %v\n%s", err, body)
+	}
+
+	for _, tc := range []struct{ id, key string }{
+		{"q_noul", "noul"},
+		{"q_score", "score"},
+		{"q_score", "confidence"},
+		{"q_choice", "confidence"},
+	} {
+		raw, ok := out.Answers[tc.id][tc.key]
+		if !ok {
+			t.Errorf("%s 的 %q 键不见了——上游报过它，值是 0", tc.id, tc.key)
+			continue
+		}
+		if string(raw) != "0" {
+			t.Errorf("%s 的 %q = %s，期望 0", tc.id, tc.key, raw)
+		}
+	}
+
+	// 与标量同一份答案里的那两个 map 也要在：只保住标量而丢掉 map 是同一类
+	// 缺陷的另一半。
+	if _, ok := out.Answers["q_score"]["legend"]; !ok {
+		t.Errorf("score 的 legend 不见了: %s", body)
+	}
+	if _, ok := out.Answers["q_score"]["probabilities"]; !ok {
+		t.Errorf("score 的 probabilities 不见了: %s", body)
+	}
+	if _, ok := out.Answers["q_choice"]["probabilities"]; !ok {
+		t.Errorf("choice 的 probabilities 不见了: %s", body)
+	}
+}
+
+// score 是**数值**，我们原样透传，不换算成档位下标。
+//
+// 上游报的 1.8 落在下标 1 与 2 之间：取整成 2、截断成 1、或者干脆按 legend
+// 换成标签，都是把一条上游没做过的判断加到响应里——而调用方按上游形状读，
+// 它期望的就是那个小数。这条语义原来只写在 Answer.Score 的注释里，没有用例。
+func TestEncodeResponseKeepsScoreAsNumber(t *testing.T) {
+	upstream := []byte(`{
+		"model": "decision-model",
+		"answers": {
+			"q_score": {"type":"score","score":1.8,"confidence":0.7,
+			            "legend":{"0":"low","1":"medium","2":"high"},
+			            "probabilities":{"0":0,"1":0.2,"2":0.8}}
+		},
+		"usage": {"input_tokens": 387, "output_tokens": 72}
+	}`)
+
+	resp, err := ParseResponse(upstream)
+	if err != nil {
+		t.Fatalf("ParseResponse 出错: %v", err)
+	}
+	body, err := EncodeResponse(resp)
+	if err != nil {
+		t.Fatalf("EncodeResponse 出错: %v", err)
+	}
+
+	var out struct {
+		Answers map[string]struct {
+			Score  float64           `json:"score"`
+			Legend map[string]string `json:"legend"`
+		} `json:"answers"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("编出来的响应解不回来: %v\n%s", err, body)
+	}
+	if got := out.Answers["q_score"].Score; got != 1.8 {
+		t.Errorf("score = %v，期望 1.8——它是数值，不该被取整成档位下标", got)
+	}
+	if got := out.Answers["q_score"].Legend["2"]; got != "high" {
+		t.Errorf("legend = %v，期望原样透传", out.Answers["q_score"].Legend)
+	}
+	// 编码成文本之后它仍是一个小数：这一条挡的是「把 1.8 写成字符串或者
+	// 换成了标签」这类改法，它们在解成 float64 时都会失败或变成零值。
+	if !strings.Contains(string(body), "1.8") {
+		t.Errorf("编出来的响应里没有 1.8: %s", body)
+	}
+}
+
 // stream 只用来识别调用方要了流式，**不编码进上游请求**：入口在更前面就
 // 把带 stream 的请求拒了（见 internal/api 的 serveDecision），所以真走到
 // 编码这一步时它必须是 false。这条用例钉住「它不会被原样发上去」。

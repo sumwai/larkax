@@ -52,10 +52,11 @@ import (
 	"github.com/sumwai/larkax/internal/route"
 )
 
-// 公共入口的两条推理路径。它们与调用协议一一对应，见包注释。
+// 公共入口上两条 **chat** 路径。它们与调用协议一一对应，见包注释。
 //
-// 第三条（PathSystemOne）在 systemone.go 里：它带的常量只有那条路径用得上，
-// 两处分开是为了让「这条表面有什么、没有什么」在一处读完。
+// 第三条（PathSystemOne）在 systemone.go 里，与它们并列而不是挤进这里：
+// 它带的那几个常量只有那条路径用得上，两处分开是为了让「这条表面有什么、
+// 没有什么」在一处读完。
 const (
 	PathChatCompletions = "/v1/chat/completions"
 	PathMessages        = "/v1/messages"

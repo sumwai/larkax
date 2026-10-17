@@ -364,8 +364,20 @@ type Adapter interface {
 
 // ErrUnsupported 表示该上游不提供这项能力。
 //
-// 与「调用失败」分开：前者是设计如此，不该告警也不该重试；
-// 后者是真的出问题了。
+// 与「调用失败」分开：前者是设计如此，不该告警；后者是真的出问题了。
+//
+// # 它在请求热路径上意味着「换下一个候选」，但不代表可重试
+//
+// 这条错误以前只从 ListModels / Quota 出来（都不在请求路径上）。现在
+// Chat / ChatStream / Decide 也会返回它——渠道类型与这条入口对不上。
+// 路由层据此**跳过这条候选**（见 internal/route 的 worthNextCandidate）：
+// 候选池是按模型名筛的、不看渠道类型，一个配错类型的渠道不该打断该模型的
+// 全部流量。
+//
+// 但 IsRetryable 对它仍然是 false，两者不要混：IsRetryable 回答的是「这次
+// 失败该算在上游头上吗」，它决定渠道健康度（见 internal/gateway 的
+// channelAtFault）——而一个渠道类型不对不是它坏了，把它记成故障会让健康度
+// 统计里多出一批无辜的失败。
 var ErrUnsupported = errors.New("该上游不支持这项能力")
 
 // ErrUpstream 包装上游返回的错误。

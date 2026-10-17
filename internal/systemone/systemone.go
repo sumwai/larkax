@@ -53,8 +53,26 @@ const (
 // 它是预留里输入侧取的数（见 internal/api 的 decideBillingRequest）：
 // 这条表面拿不到输入的实际 token 数——那是上游在响应里报的，而预留发生在
 // 请求发出之前。**按正文估出来的数不能当上界**：上游会自己拼一段指令开销进去，
-// 估出来的是下界（见 Request.Text）。所以这里直接取上游自己的预算上界：
-// 只要上游守它自己的预算，结算的输入侧就不会超过这个数。
+// 估出来的是下界（见 Request.Text）。所以这里直接取上游自己的预算上界。
+//
+// # ⚠️ 这个上界成立依赖一个**没有核实过**的前提
+//
+// 前提是「上游真的会拒绝超出预算的请求，而且它算的预算包含自己拼的那段指令
+// 开销」。**这两句话都没有证据**——它们是从上游文档的预算口径转述来的，没有
+// 实测过，也不该去连真实上游试。前提一旦不成立，合规请求的 input_tokens
+// 就可能高于这个数。
+//
+// 后果是**静默**的：结算超过预留时 final_amount 被截成预留额（Capped），
+// 账目仍然平、响应照常 200、日志里也没有异常，事后只能靠对账发现
+// 「用量对不上金额」。所以不要把这里读成既成事实。
+//
+// 还有一点：「撞上界」的判据不是单独某一边超过它自己的上界，而是**两个常量
+// 合起来的金额**（MaxInputTokens×输入单价 + MaxOutputTokens×输出单价）——
+// 一侧超出可以被另一侧没用完的预留吸收。所以「输出没超过 4096」并不等于
+// 没撞上界。
+//
+// 核实的时候要向上游确认两件事：预算是否由上游强制；input_tokens 是否计入
+// 上游自己拼的那段指令开销。
 const MaxInputTokens = 64 * 1024
 
 // MaxOutputTokens 是输出侧的上界，单位是 token。
@@ -127,7 +145,7 @@ type Response struct {
 
 // Answer 是一道问题的答案。
 //
-// 四种类型共用一个结构体而不是做成接口：它们的字段是**并列的**而不是
+// 三种类型共用一个结构体而不是做成接口：它们的字段是**并列的**而不是
 // 互斥的多态（一个 answer 只会有其中一组字段有值），而接口会让调用方为了
 // 读一个概率写一次类型断言——那个断言失败时表现为「答案读不到」，
 // 比读到一个零值更难查。
@@ -323,19 +341,84 @@ type wireResponse struct {
 
 // wireAnswer 是一道答案的线格式。
 //
-// 除 type 之外一律 omitempty：一份答案只会带它那一组字段（noul 只有一个
-// 概率，choice 有选项与逐项概率，score 有得分与档位表），而**回给调用方的
-// 响应是把这里编回去的**——不 omitempty 的话，一道 noul 答案会带着
-// `"choice":"","legend":null` 一起发出去，与上游的形状对不上，
-// 而调用方按上游形状写的解析器读到的是一份「多了一堆空字段」的响应。
+// 一份答案只带它那一组字段（noul 只有一个概率，choice 有选项与逐项概率，
+// score 有得分与档位表），而**回给调用方的响应是把这里编回去的**——多带
+// 字段的话，一道 noul 答案会带着 `"choice":"","legend":null` 一起发出去，
+// 与上游的形状对不上。
+//
+// # 为什么标量是指针，而 map 仍是 omitempty
+//
+// 「这个类型没有这个字段」与「这个字段是零值」是**两件事**，omitempty 把它们
+// 混成了一件，于是上游真的报过的零值被静默抹掉：score 的最低档恰好是 0、
+// noul 可以是 0（「是」的概率为 0）、confidence 也可以是 0。抹掉之后 legend
+// 还在、score 那个键却消失了，而调用方按上游形状写的严格解析器当场失败。
+//
+// 指针把「有没有这个键」显式带出来：nil 是「没有」，非 nil 是「有，哪怕是 0」。
+// map 不必这样：一个空的 map 与「没有这个键」在形状上是一回事，omitempty
+// 丢掉它不会丢信息。
+//
+// **哪些字段属于哪个类型由 answerToWire 按 Answer.Type 决定**：中间表示里
+// 那三个标量是普通 float64，分不出「上游没给」与「上游给了 0」，所以这一步
+// 只能靠类型——而类型恰恰是这条表面上唯一的判据。
 type wireAnswer struct {
 	Type          string             `json:"type"`
-	Noul          float64            `json:"noul,omitempty"`
-	Choice        string             `json:"choice,omitempty"`
-	Confidence    float64            `json:"confidence,omitempty"`
+	Noul          *float64           `json:"noul,omitempty"`
+	Choice        *string            `json:"choice,omitempty"`
+	Confidence    *float64           `json:"confidence,omitempty"`
 	Probabilities map[string]float64 `json:"probabilities,omitempty"`
-	Score         float64            `json:"score,omitempty"`
+	Score         *float64           `json:"score,omitempty"`
 	Legend        map[string]string  `json:"legend,omitempty"`
+}
+
+// answerToWire 把一道答案编成线格式：**哪些键该出现由类型决定**。
+//
+// 三种已知类型各给一个确定的键集，零值照带。认不出的类型只带非零的那些：
+// 那种情况下我们没有「哪些字段属于它」的判据，**不凭空造键**比少带一个更
+// 要紧——凭空造出来的键是调用方按上游形状读不到的东西，而少带的那一个，
+// 上游本来也没给过零值之外的证据。
+func answerToWire(a Answer) wireAnswer {
+	w := wireAnswer{Type: a.Type}
+	switch a.Type {
+	case TypeNoul:
+		w.Noul = &a.Noul
+	case TypeChoice:
+		w.Choice = &a.Choice
+		w.Confidence = &a.Confidence
+		w.Probabilities = a.Probabilities
+	case TypeScore:
+		w.Score = &a.Score
+		w.Confidence = &a.Confidence
+		w.Legend = a.Legend
+		w.Probabilities = a.Probabilities
+	default:
+		if a.Noul != 0 {
+			w.Noul = &a.Noul
+		}
+		if a.Choice != "" {
+			w.Choice = &a.Choice
+		}
+		if a.Confidence != 0 {
+			w.Confidence = &a.Confidence
+		}
+		if a.Score != 0 {
+			w.Score = &a.Score
+		}
+		w.Legend = a.Legend
+		w.Probabilities = a.Probabilities
+	}
+	return w
+}
+
+// deref 取出指针指向的值，nil 给零值。
+//
+// 解析时用它把「上游有没有给这个键」折进中间表示——那一步之后这个信息就
+// 没了（Answer 里是普通 float64），编码时由 answerToWire 按类型重新决定。
+func deref[T any](p *T) T {
+	var zero T
+	if p == nil {
+		return zero
+	}
+	return *p
 }
 
 type wireUsage struct {
@@ -468,11 +551,11 @@ func ParseResponse(body []byte) (*Response, error) {
 	for id, wa := range wire.Answers {
 		out.Answers[id] = Answer{
 			Type:          wa.Type,
-			Noul:          wa.Noul,
-			Choice:        wa.Choice,
-			Confidence:    wa.Confidence,
+			Noul:          deref(wa.Noul),
+			Choice:        deref(wa.Choice),
+			Confidence:    deref(wa.Confidence),
 			Probabilities: wa.Probabilities,
-			Score:         wa.Score,
+			Score:         deref(wa.Score),
 			Legend:        wa.Legend,
 		}
 	}
@@ -501,15 +584,7 @@ func EncodeResponse(resp *Response) ([]byte, error) {
 		},
 	}
 	for id, a := range resp.Answers {
-		wire.Answers[id] = wireAnswer{
-			Type:          a.Type,
-			Noul:          a.Noul,
-			Choice:        a.Choice,
-			Confidence:    a.Confidence,
-			Probabilities: a.Probabilities,
-			Score:         a.Score,
-			Legend:        a.Legend,
-		}
+		wire.Answers[id] = answerToWire(a)
 	}
 
 	body, err := json.Marshal(wire)

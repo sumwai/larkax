@@ -165,8 +165,8 @@ func TestDecideTreatsMalformedResponseAsRetryable(t *testing.T) {
 	}
 }
 
-// 这条渠道不说 chat 协议。错误要包着 ErrUnsupported：路由层据此**不换**
-// 下一个候选——换谁都是同一个错。
+// 这条渠道不说 chat 协议。错误要包着 ErrUnsupported：路由层据此**跳过这条
+// 候选、试下一个**（见 route 的 worthNextCandidate）。
 func TestChatIsUnsupported(t *testing.T) {
 	a := New(time.Second)
 
@@ -176,8 +176,12 @@ func TestChatIsUnsupported(t *testing.T) {
 	if _, err := a.ChatStream(context.Background(), channel.Channel{}, &channel.Request{}); !errors.Is(err, channel.ErrUnsupported) {
 		t.Errorf("ChatStream 的错误 = %v，期望包着 ErrUnsupported", err)
 	}
+	// 「路由层会换下一个候选」与「这条错误可重试」是**两件事**，不要合成
+	// 一件：IsRetryable 说的是「这次失败该算在上游头上吗」（它决定渠道健康
+	// 度，见 gateway 的 channelAtFault），而一个渠道类型不对不是它坏了。
+	// 路由层换下一个候选的判据更宽，见 worthNextCandidate。
 	if channel.IsRetryable(channel.ErrUnsupported) {
-		t.Error("ErrUnsupported 不该是可重试的")
+		t.Error("ErrUnsupported 不该是可重试的——它不算上游的故障")
 	}
 }
 

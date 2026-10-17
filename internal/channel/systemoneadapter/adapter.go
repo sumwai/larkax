@@ -62,13 +62,15 @@ func (a *Adapter) Protocol() channel.Protocol { return channel.ProtocolSystemOne
 // errNoChat 表示这条渠道不做 chat 补全。
 //
 // 它包着 channel.ErrUnsupported：这个渠道**设计上**不提供这项能力，不是它
-// 此刻坏了。路由层据此不换下一个候选——换谁都是同一个错，只会把延迟与费用
-// 乘以候选数（见 channel.IsRetryable 的默认方向）。
+// 此刻坏了。路由层据此**跳过这条候选、试下一个**（见 route 的
+// worthNextCandidate）——候选池里可以同时有 chat 渠道与决策渠道，一个配错
+// 类型的渠道不该打断该模型的全部流量。
 //
 // 这条错误真的会出现：候选是按「渠道支不支持这个模型」筛的，而渠道表里没有
 // 「这条渠道说哪套协议」这一列——协议由 type 指向的适配器决定。所以一个
 // systemone 渠道配上了 chat 请求要用的模型名时，它会进候选集，然后在这里失败。
-// 这是配置问题，报出来比静默跳过好。
+// 这是配置问题；全部候选都这样时，路由层给出的错误文本会说清是「都不支持」
+// 而不是「都失败了」。
 var errNoChat = fmt.Errorf("systemone 渠道不提供 chat 补全: %w", channel.ErrUnsupported)
 
 // Chat 不实现：这条渠道不说 chat 协议。见 errNoChat。
