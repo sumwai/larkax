@@ -177,21 +177,50 @@ func (r ReserveRequest) validate() error {
 var ErrNoUpperBound = errors.New("无法确定预留上界")
 
 // Settlement 是一次结算的结果。
+//
+// # 「算出来多少」与「收了多少钱」是两个数
+//
+// 没撞上界时它们相等；撞上界时 Actual 被截成 Reserved，而**算出来的那个数
+// 还在 Breakdown.Total 里**——截断只改 Actual，明细一项都不动。所以
+//
+//	Actual = min(Breakdown.Total, Reserved)
+//
+// 在每次结算上都成立，而「这次撞了上界」等价于 Breakdown.Total > Reserved。
+//
+// 需要这个差的不只是排查：落库时 computed_amount 取自 Breakdown.Total
+// （见 internal/ledger/store 的 markSettled），差额就是被预留截住、由平台
+// 承担掉的那笔钱。**别把它读成「Breakdown 是没用的中间产物」**——它是这两个
+// 数里唯一那个「按用量该收多少」的答案。
 type Settlement struct {
-	// Actual 是按实际用量算出的金额。
+	// Actual 是按实际用量算出的金额，**撞上上界时是 Reserved**（被截断）。
+	// 未截断的那个数在 Breakdown.Total 里。
 	Actual money.Amount
 	// Reserved 是预先冻结的金额。
 	Reserved money.Amount
 	// Delta 是 Actual - Reserved。
 	// 正数表示要再扣，负数表示要退回。
+	//
+	// 今天它恒为 0 或负数——Actual 是 min(Breakdown.Total, Reserved)，不可能
+	// 超过 Reserved（上界就是这么设计的，见 Reserve）。「要再扣」那一支是
+	// 上界被破坏之后才会有的形状，留着它是为了让那种情况下这个数仍然说得清。
+	//
+	// 本仓今天没有生产读者读它，只有测试在断言。要接一个读者之前先想清楚
+	// 它比 Breakdown.Total 与 Reserved 两个数本身多回答了什么问题——答不上来
+	// 就不要接（见 LESSONS.md 第 22 条）。
 	Delta money.Amount
-	// Breakdown 是实际用量的明细。
+	// Breakdown 是实际用量的明细。它的 Total 是**未截断**的计算金额，
+	// 见类型注释。
 	Breakdown Breakdown
 	// Capped 为 true 表示实际金额被预留上界截住了。
 	//
 	// 它不该发生——预留是上界。真发生了说明上界算错了（例如上游报的
 	// 输出 token 超过了我们给的 max_tokens），那是一条需要查的信号，
 	// 而不是把差额静默吞掉。
+	//
+	// 它与 Breakdown.Total.Cmp(Reserved) > 0 是同一件事，只是给调用方一个
+	// 不用自己比的口径。**进程内的聚合读者是 internal/pipeline 的
+	// CappedSettlements 计数**；要查「是哪一次请求撞的、撞了多少」，那个
+	// 计数答不了——那是落库的 computed_amount 的活（见迁移 00021）。
 	Capped bool
 }
 

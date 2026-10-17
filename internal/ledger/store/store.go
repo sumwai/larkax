@@ -591,11 +591,32 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request) error {
 // 写成 CASE 而不是两个分支：一行已经结算的记录只有两种结局——取消过，
 // 或者没有。NULL 表示没有取消，而**不是**「不知道」：没取消是一次确定的
 // 事实（这一行是在结算路径上写下的，那条路径必然知道客户端有没有走）。
+//
+// # 未截断的结算金额也在这里落
+//
+// final_amount 落的是 Settlement.Actual，而它撞上预留上界时**就是**预留额
+// （见 internal/billing 的 SettleWithCharges）——超出预留的那一截到这里已经
+// 被抹平了。所以光有 final_amount，事后从库里判不出这一行有没有撞上界：
+// 撞了与没撞看起来一样，都是一笔不超过预留的金额。
+//
+// 未截断的那个数在 Settlement.Breakdown.Total 里（截断只改 Actual，明细不动），
+// 这里把它写进 computed_amount。于是
+//
+//	final_amount = min(computed_amount, reserved_amount)
+//
+// 在每一行上都成立，而 computed_amount > reserved_amount 就是「这一行撞了」。
+// 差出来的那一截是被预留截住、由平台承担掉的金额——记下来才看得出上界是
+// 错得离谱还是擦边（见迁移 00021 的注释）。
+//
+// 两列写在同一条 UPDATE 里，不另起一条：分开写会有一个窗口让这一行
+// status 已经是 settled 而 computed_amount 还是 NULL，而那个组合在库里
+// 读起来正是「结算了但没有计算金额」——一个不存在却看得见的状态。
 func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *pipeline.Charge) (bool, error) {
 	res, err := tx.ExecContext(ctx, `
 		UPDATE billing_requests
 		   SET status = 'settled',
 		       final_amount = $2::numeric,
+		       computed_amount = $7::numeric,
 		       settled_at = now(),
 		       channel_id = NULLIF($5, 0),
 		       upstream_status = NULLIF($3, 0),
@@ -603,7 +624,7 @@ func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *
 		       client_canceled_at = CASE WHEN $6 THEN now() END
 		 WHERE request_id = $1 AND status = 'pending'`,
 		req.RequestID, charge.Settlement.Actual.String(), 0, "", req.ChannelID,
-		charge.ClientCanceled)
+		charge.ClientCanceled, charge.Settlement.Breakdown.Total.String())
 	if err != nil {
 		return false, fmt.Errorf("标记结算失败: %w", err)
 	}
