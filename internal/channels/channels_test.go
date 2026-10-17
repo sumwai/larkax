@@ -608,7 +608,7 @@ func TestCandidateSelectable(t *testing.T) {
 		t.Fatalf("candidate 出错: %v", err)
 	}
 
-	plan := (&route.Router{}).Select([]route.Candidate{cand}, "model-a")
+	plan := (&route.Router{}).Select([]route.Candidate{cand}, "model-a", route.Needs{})
 	if len(plan.Candidates) != 1 {
 		t.Errorf("选路结果 %d 个，期望 1；排除原因 %+v", len(plan.Candidates), plan.Excluded)
 	}

@@ -33,6 +33,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/quota"
+	"github.com/sumwai/larkax/internal/tokens"
 )
 
 // Candidate 是一个可选渠道连同它的实时状态。
@@ -91,6 +92,145 @@ type Candidate struct {
 	// SampleCount 是上述统计的样本数。少于 minCacheSamples 时不参与打分——
 	// 一两次请求的命中率不说明任何事。
 	SampleCount int64
+
+	// Profile 是模型目录对**这个候选所服务的规范模型**声明的能力与上限
+	// （见 ModelProfile）。nil 表示目录里没有这个模型的记录：未知，不做
+	// 目录判据。
+	//
+	// # 为什么它挂在这里
+	//
+	// 它是**模型级**的：同一个规范名下的候选拿到的是同一份，逐候选携带
+	// 确实有冗余。挂在这里是因为本包不碰数据库（见 Router.Aliases 的同一条
+	// 理由），而选路这一步既要知道候选是谁、也要知道这次请求要什么——
+	// 两边缺一个都判不出来。候选的来源（internal/channels）读目录、把这份
+	// 数据摆进来，本包只按它判。
+	Profile *ModelProfile
+}
+
+// ModelProfile 是模型目录对一个规范模型声明的能力与上限。
+//
+// # 判据只看三项能力与两个上限
+//
+// 目录里的能力矩阵有六列，这里只带判据用得上的三项：请求里能观察到、
+// 而模型可能不支持的。audio / cache / batch 没有对应的请求信号（请求里
+// 看不出「这次要用缓存」），带上它们只是让这个结构体看起来像那张表。
+//
+// # 未知与「不支持」是两件事，处置相反
+//
+//   - 能力列是 `NOT NULL DEFAULT false`，「没写进目录」与「写了不支持」在
+//     读侧分不开（见 internal/catalog 的 Capabilities）。所以**有记录就按
+//     记录判**：false 就是不支持。
+//   - 两个上限列允许为 NULL，读出来是 0（见 internal/catalog 的
+//     Constraints）。0 一律按**未知**放行。
+//
+// nil 的 ModelProfile 覆盖第一种情形里剩下的一半：目录里压根没有这个模型的
+// 记录时不做任何判据（见 Candidate.Profile）。
+type ModelProfile struct {
+	// Tools / Vision / Reasoning 是目录声明的三项能力。
+	Tools     bool
+	Vision    bool
+	Reasoning bool
+
+	// ContextLimit 是上下文窗口（输入 + 输出）。0 表示未知，不判。
+	ContextLimit int64
+	// OutputLimit 是单次输出的上限。0 表示未知，不判。
+	OutputLimit int64
+}
+
+// Needs 是一次请求对上游的要求。
+//
+// 它只装「能从请求本身读出来、且目录里有对应声明」的那几项：用到哪些能力、
+// 要花多少 token。余额、区域、合规之类不在其中——那些不是模型目录能回答的。
+type Needs struct {
+	// Tools 表示这次请求带工具：有工具定义，或消息里有工具调用/结果块。
+	Tools bool
+	// Vision 表示这次请求里有图片。
+	Vision bool
+	// Reasoning 表示这次请求要了推理：带了推理参数，或消息里有思维链块。
+	Reasoning bool
+
+	// InputTokens 是输入侧的估算值（口径见 NeedsOf）。
+	InputTokens int64
+	// MaxOutputTokens 是这次请求要的输出上限，即 channel.Request.MaxTokens。
+	MaxOutputTokens int64
+}
+
+// NeedsOf 从一条 chat 形状的请求里读出它需要上游具备什么。
+//
+// # 输入 token 用的是哪一个量
+//
+// 与入口预留同一个式子：只算消息里的**正文**（tokens.EstimatedTokens(req.Model,
+// req.PromptText())，见 internal/api 的 inputTokensOf）。工具定义与图片的
+// token 消耗各家口径不同（见 channel.Request.PromptText），硬估出来的数比
+// 正文的估算更不可信。预留那侧因此宁可少算，取的是「少收而不是超收」；
+// 这里同一个数用在**上限**判据上，偏小意味着判据偏宽松——不会把一个上游
+// 其实接得住的请求挡下来。两侧的取舍方向一致，所以共用同一个量。
+//
+// # 载体请求
+//
+// ChatModel 那条路递进来的是只含 Model 的载体（见 ChatModel），于是这里的
+// 每一项都是零值：不带能力、不判上限。这不是遗漏——决策那条表面没有 chat
+// 形状的请求，它的输入预算是一个常量（见 internal/systemone 的
+// MaxInputTokens），压根不经过这条载体。
+func NeedsOf(req *channel.Request) Needs {
+	needs := Needs{
+		Tools:           len(req.Tools) > 0,
+		Reasoning:       req.ReasoningEffort != "",
+		InputTokens:     tokens.EstimatedTokens(req.Model, req.PromptText()),
+		MaxOutputTokens: int64(req.MaxTokens),
+	}
+
+	// 消息里的块也算：一个带 tool_use / tool_result 的历史、一张图片、
+	// 一段思维链，都是「这次请求用到了这项能力」——它们与参数形态的
+	// 信号（Tools 定义、ReasoningEffort）在做同一件事，只是写法不同。
+	for _, m := range req.Messages {
+		for _, block := range m.Content {
+			switch block.Type {
+			case "image":
+				needs.Vision = true
+			case "tool_use", "tool_result":
+				needs.Tools = true
+			case "thinking":
+				needs.Reasoning = true
+			}
+		}
+	}
+	return needs
+}
+
+// profileRejection 说明这条候选为什么接不住这次请求，空串表示放行。
+//
+// 能力与上限两类判据的处置相同（这条候选出局），所以在这里合成一个函数，
+// 由 Select 记进 Exclusion——分成两处判会让「为什么没选那个渠道」在排查时
+// 要读两个地方，而它们记的是同一份 Profile 上的结论。
+func (c Candidate) profileRejection(needs Needs) string {
+	p := c.Profile
+	if p == nil {
+		return ""
+	}
+
+	switch {
+	case needs.Tools && !p.Tools:
+		return "模型目录里不支持工具调用"
+	case needs.Vision && !p.Vision:
+		return "模型目录里不支持图片"
+	case needs.Reasoning && !p.Reasoning:
+		return "模型目录里不支持推理"
+	}
+
+	// 上限：只有目录里填了数（> 0）时才判。0 是未知（库里是 NULL），不判
+	// ——一次采集失败不该让整批模型用不了（见 ModelProfile）。
+	if p.OutputLimit > 0 && needs.MaxOutputTokens > p.OutputLimit {
+		return fmt.Sprintf("模型目录里输出上限 %d，这次请求要 %d",
+			p.OutputLimit, needs.MaxOutputTokens)
+	}
+	// 上下文按「输入 + 输出」比：那是窗口的两半，只比输入会让一个装不下
+	// 这么多输出的请求看起来是合规的。
+	if p.ContextLimit > 0 && needs.InputTokens+needs.MaxOutputTokens > p.ContextLimit {
+		return fmt.Sprintf("模型目录里上下文上限 %d，这次请求输入 %d + 输出 %d",
+			p.ContextLimit, needs.InputTokens, needs.MaxOutputTokens)
+	}
+	return ""
 }
 
 // Health 是渠道的健康度。
@@ -272,6 +412,13 @@ type Exclusion struct {
 	ChannelID int64
 	Name      string
 	Reason    string
+	// Unsupported 表示这条排除的依据是**模型目录**（能力不匹配或超出上限）。
+	//
+	// 它与别的排除理由分开，只为一件事：一个候选都不剩时，错误文本要分得开
+	// 「这个模型/这次请求本来就不该走这些候选」（一次都不会被试，也没人有
+	// 必要重试）与「这些渠道现在都不行」（见 Errors.Unsupported）。其余场合
+	// 它只是排查时的一条附加信息。
+	Unsupported bool
 }
 
 // pinFirst 返回一份把 channelID 那个候选提到最前的副本。
@@ -330,7 +477,19 @@ func (p Plan) pinFirst(channelID int64) Plan {
 //
 // 返回 Plan 而不是单个候选人：换渠道重试是调用方驱动的，它需要知道
 // 下一个是谁。返回一个切片也让「为什么选了这个」可被完整解释。
-func (r *Router) Select(candidates []Candidate, canonicalModel string) Plan {
+//
+// # 判据的先后
+//
+// 硬性条件（Eligible）→ 渠道是否声明支持这个模型 → 模型目录声明的能力与
+// 上限（needs 对 Profile）→ 运行状态（健康度、额度）。前两条是渠道级的配置，
+// 中间那条是模型级的声明，最后一条是「现在怎么样」——一条候选只记**第一个**
+// 命中的理由，所以顺序决定了排查时看到的是哪一条：先看到「这条配置本身
+// 就不该进来」，再看到「它此刻不可用」。
+//
+// needs 是这次请求对上游的要求（见 NeedsOf）。它由调用方给而不是在这里算：
+// 同一个请求在插件那条路上也要被同一套判据筛（见 ChatPlan），而那一步由
+// gateway 拿到的是适配器那条路上的请求。
+func (r *Router) Select(candidates []Candidate, canonicalModel string, needs Needs) Plan {
 	var (
 		eligible []Candidate
 		plan     = Plan{}
@@ -338,16 +497,25 @@ func (r *Router) Select(candidates []Candidate, canonicalModel string) Plan {
 
 	for _, c := range candidates {
 		if ok, reason := c.Eligible(); !ok {
-			plan.Excluded = append(plan.Excluded, Exclusion{c.Channel.ID, c.Channel.Name, reason})
+			plan.Excluded = append(plan.Excluded, Exclusion{
+				ChannelID: c.Channel.ID, Name: c.Channel.Name, Reason: reason})
 			continue
 		}
 		if !c.Channel.Supports(canonicalModel) {
-			plan.Excluded = append(plan.Excluded, Exclusion{c.Channel.ID, c.Channel.Name,
-				fmt.Sprintf("不支持模型 %q", canonicalModel)})
+			plan.Excluded = append(plan.Excluded, Exclusion{
+				ChannelID: c.Channel.ID, Name: c.Channel.Name,
+				Reason: fmt.Sprintf("不支持模型 %q", canonicalModel)})
+			continue
+		}
+		if reason := c.profileRejection(needs); reason != "" {
+			plan.Excluded = append(plan.Excluded, Exclusion{
+				ChannelID: c.Channel.ID, Name: c.Channel.Name, Reason: reason,
+				Unsupported: true})
 			continue
 		}
 		if reason := c.DrainReason(); reason != "" {
-			plan.Excluded = append(plan.Excluded, Exclusion{c.Channel.ID, c.Channel.Name, reason})
+			plan.Excluded = append(plan.Excluded, Exclusion{
+				ChannelID: c.Channel.ID, Name: c.Channel.Name, Reason: reason})
 			continue
 		}
 		eligible = append(eligible, c)
@@ -355,6 +523,37 @@ func (r *Router) Select(candidates []Candidate, canonicalModel string) Plan {
 
 	plan.Candidates = r.order(eligible)
 	return plan
+}
+
+// emptyError 说明一个候选都不剩是为什么。
+//
+// 分两种。**全部候选都被模型目录判据挡掉**时，结论是「这些候选做不了这次
+// 请求」——与「试过、上游一个个都说自己不支持」是同一件事，措辞也就用同一
+// 句（见 Error 与 allCapabilityMismatch）；区别只在判据来自目录的声明而不是
+// 上游的响应，所以这里一个候选都没被试过。其余情形（健康度、额度、渠道没
+// 声明支持这个模型、压根没有候选）沿用原来的「没有可用的渠道」。
+//
+// 判据写成「所有排除都是目录判据」而不是「有目录判据的排除」：只要还有别的
+// 原因说得通，就不该说「都不支持这次请求」——那句话会让人去查模型目录，
+// 而真正要改的可能是某个渠道的额度。
+func (p Plan) emptyError() *Errors {
+	if p.unsupportedOnly() {
+		return &Errors{Unsupported: len(p.Excluded)}
+	}
+	return &Errors{}
+}
+
+// unsupportedOnly 判断这次排除是不是全部来自模型目录判据。
+func (p Plan) unsupportedOnly() bool {
+	if len(p.Candidates) > 0 || len(p.Excluded) == 0 {
+		return false
+	}
+	for _, e := range p.Excluded {
+		if !e.Unsupported {
+			return false
+		}
+	}
+	return true
 }
 
 // order 把候选排成尝试顺序。
@@ -788,10 +987,24 @@ type Errors struct {
 	// 出现在还有 2 个候选没试过的时候——那句话把一次提前放弃说成了「都试过了」，
 	// 看日志的人据此去查上游，而真正要改的是排在前面的那条配置。
 	Untried int
+	// Unsupported 是被模型目录判据排除、**一次都没试过**的候选数。
+	//
+	// 它与 Untried 分开：Untried 说的是「试了几个之后提前放弃，还有几个没试」，
+	// 而这里说的是「一个都没试，因为目录里那些声明说它们做不了这件事」。
+	// 两者都会让「全部 N 个候选渠道都失败」失真，但要说的话不同——后者与
+	// 「试过、上游一个个都说自己不支持」是同一个结论（见 Error 的
+	// allCapabilityMismatch 那一支），措辞也就同一句。
+	Unsupported int
 }
 
 func (e *Errors) Error() string {
 	if len(e.Attempts) == 0 {
+		if e.Unsupported > 0 {
+			// 与下面 allCapabilityMismatch 那一支同一句话、同一个结论：
+			// 上游一次都没被调用过，是我们这边的配置/目录声明覆盖不到
+			// 这次请求。
+			return fmt.Sprintf("%d 个候选渠道都不支持这次请求", e.Unsupported)
+		}
 		return "没有可用的渠道"
 	}
 	last := e.Attempts[len(e.Attempts)-1].Err
@@ -820,8 +1033,16 @@ func allCapabilityMismatch(attempts []Attempt) bool {
 }
 
 // Unwrap 返回最后一个错误，让 errors.Is/As 能对上游错误类型生效。
+//
+// 一个候选都没试过、但全部被目录判据挡掉时返回 channel.ErrUnsupported：
+// 那一支与下面 allCapabilityMismatch 那一支说的是同一件事（这条候选做不了
+// 这件事），只是判据来自目录的声明而不是上游的响应。调用方据此把「配置/
+// 目录没覆盖这条入口」与「上游都挂了」分开。
 func (e *Errors) Unwrap() error {
 	if len(e.Attempts) == 0 {
+		if e.Unsupported > 0 {
+			return channel.ErrUnsupported
+		}
 		return nil
 	}
 	return e.Attempts[len(e.Attempts)-1].Err
@@ -905,7 +1126,7 @@ func (r *Router) ChatModel(ctx context.Context, exec Executor, canonicalModel st
 // 它是「筛 + 排 + 执行」一步到位的形态。要在这两步之间插一件事（今天只有
 // 插件）的调用方走 ChatPlan。
 func (r *Router) Chat(ctx context.Context, exec Executor, req *channel.Request, candidates []Candidate, canonicalModel string) (*Result, error) {
-	return r.ChatPlan(ctx, exec, req, r.Select(candidates, canonicalModel), 0)
+	return r.ChatPlan(ctx, exec, req, r.Select(candidates, canonicalModel, NeedsOf(req)), 0)
 }
 
 // ChatPlan 按一份**已经算好的**选路结果执行，并把 pinChannelID 钉在第一位。
@@ -943,7 +1164,7 @@ func (r *Router) ChatPlan(ctx context.Context, exec Executor, req *channel.Reque
 
 func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.Request, plan Plan) (*Result, error) {
 	if len(plan.Candidates) == 0 {
-		return nil, &Errors{}
+		return nil, plan.emptyError()
 	}
 
 	result := &Result{}

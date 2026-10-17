@@ -1638,3 +1638,38 @@ func TestRequestIDOfWithoutValue(t *testing.T) {
 		t.Errorf("没有值时 = %q，期望空串", got)
 	}
 }
+
+// 带工具的请求在插件之前就被目录判据筛掉了。
+//
+// 钉两件事：这条路上的判据来自**这份请求**（route.NeedsOf(upstream)），
+// 以及插件看到的就是内核会执行的那一份候选。少了任何一件，插件与内核就
+// 各自按不同的候选集做决定，而那种分叉表现为「插件选了一个渠道，请求却
+// 发去了另一个」。
+func TestRouteHooksSeeProfileFilteredCandidates(t *testing.T) {
+	h := newHarness(t, func(h *harness) {
+		noTools := candidate(1, "gpt-4o")
+		noTools.Profile = &route.ModelProfile{Tools: false}
+		h.candidates.cands = []route.Candidate{noTools}
+	})
+
+	var seen []route.Candidate
+	hooks := Hooks{OnRoute: func(_ context.Context, cands []route.Candidate) (int64, error) {
+		seen = cands
+		return 0, nil
+	}}
+	upstream := upstreamRequest()
+	upstream.Tools = []channel.Tool{{Name: "get_weather"}}
+
+	_, err := h.gw.Chat(context.Background(), request(), upstream, hooks)
+
+	const want = "1 个候选渠道都不支持这次请求"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v，期望 %q", err, want)
+	}
+	if len(seen) != 0 {
+		t.Errorf("插件看到的候选 = %+v，期望空", seen)
+	}
+	if len(h.executor.calls) != 0 {
+		t.Errorf("上游被调用了 %d 次，期望 0 次", len(h.executor.calls))
+	}
+}

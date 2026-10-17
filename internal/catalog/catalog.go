@@ -240,6 +240,78 @@ func (c *Catalog) UpstreamModel(ctx context.Context, channelID int64, canonicalM
 	return "", fmt.Errorf("%w：渠道 %d 的 %q", ErrAliasNotFound, channelID, canonicalModel)
 }
 
+// Constraints 是 model_catalog 上选路要认的那几列：能力矩阵与两个上限。
+//
+// # 为什么与 Model 分开
+//
+// 它读的是**请求热路径**：每个请求选路时都要按它筛候选（见
+// internal/route 的 Candidate.Profile）。Model 是管理面的读取面，会把
+// raw、reasoning_options 两个 JSON 列一起解出来——那些列对选路没有用，
+// 而热路径上每一条请求都要付这份解码成本。
+//
+// 六个能力布尔一起读，不做「只读判据用到的那三项」的裁剪：它们在同一行上，
+// 少读三列省不下一次往返，却会让这个结构体的字段看起来像「这个模型只有
+// 三项能力」。判据用到哪几项是**读侧**的事（见 internal/route 的 ModelProfile）。
+//
+// # input_limit 不在这里
+//
+// 三个上限里只有 context_limit 与 output_limit 参与选路判据；input_limit
+// 今天没有消费者（管理面读写它，没有一处按它判断）。所以不读它——不为消掉
+// 一列硬接一条假的消费，与 internal/channels 的 candidateQuery 对 failures
+// 那一列的处置同一条理由。
+type Constraints struct {
+	// Capabilities 是六个能力布尔，一律 NOT NULL DEFAULT false，
+	// 所以这里没有「未知」这个状态：没写进目录就等于不支持。
+	Capabilities Capabilities
+	// ContextLimit 是上下文窗口（输入 + 输出）。**0 表示未知**（库里是 NULL）
+	// ——与能力列不同，这一列允许为空。
+	ContextLimit int
+	// OutputLimit 是单次输出的上限。0 表示未知。
+	OutputLimit int
+}
+
+// Constraints 按规范名读回选路要的那几列。
+//
+// 目录里没有这个模型时返回 ErrModelNotFound：那是**未知**，不是「不支持」
+// ——调用方据此放行（见 internal/route 的 ModelProfile 注释）。两者的区别
+// 在库里看不出来：一条采集到一半的记录与一条没采集到的记录，长得很不一样，
+// 而「有一条记录但能力列全是 false」与「压根没有这条记录」恰恰是后者更像
+// 「未知」的那一侧。
+func (c *Catalog) Constraints(ctx context.Context, canonicalName string) (Constraints, error) {
+	if canonicalName == "" {
+		return Constraints{}, errors.New("规范模型名为空")
+	}
+
+	rows, err := c.db.QueryContext(ctx, constraintsQuery, canonicalName)
+	if err != nil {
+		return Constraints{}, fmt.Errorf("查询规范模型失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	if !rows.Next() {
+		// 与 Model 同一条：变量名不复用外层那个 err，避免 govet 的 shadow。
+		if rowErr := rows.Err(); rowErr != nil {
+			return Constraints{}, fmt.Errorf("查询规范模型失败: %w", rowErr)
+		}
+		return Constraints{}, fmt.Errorf("%w：%q", ErrModelNotFound, canonicalName)
+	}
+
+	var out Constraints
+	err = rows.Scan(
+		&out.ContextLimit, &out.OutputLimit,
+		&out.Capabilities.Reasoning, &out.Capabilities.Tools,
+		&out.Capabilities.Vision, &out.Capabilities.Audio,
+		&out.Capabilities.Cache, &out.Capabilities.Batch,
+	)
+	if err != nil {
+		return Constraints{}, fmt.Errorf("读取规范模型行失败: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return Constraints{}, fmt.Errorf("遍历规范模型失败: %w", err)
+	}
+	return out, nil
+}
+
 // Model 按规范名取回一条规范模型。
 //
 // 管理面的写入路径用它读回来核对——写入与读取对同一套列的假设是否一致，
@@ -399,6 +471,24 @@ SELECT
     m.raw,
     m.updated_at
   FROM model_catalog m`
+
+// constraintsQuery 是热路径那条查询：只取选路判据要的列。
+//
+// 与 modelQuery 一样对两个上限套 COALESCE（NULL 折成 0 = 未知），能力列
+// 原样读——它们是 NOT NULL，false 是一个真实的值。两个列族的这个差别写在
+// Capabilities 与 Model 的注释里，改这张表的列时要一起看。
+const constraintsQuery = `
+SELECT
+    COALESCE(m.context_limit, 0),
+    COALESCE(m.output_limit, 0),
+    m.supports_reasoning,
+    m.supports_tools,
+    m.supports_vision,
+    m.supports_audio,
+    m.supports_cache,
+    m.supports_batch
+  FROM model_catalog m
+ WHERE m.canonical_name = $1`
 
 // aliasQuery 取回一条别名的全部列。
 //
