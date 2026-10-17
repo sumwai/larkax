@@ -13,7 +13,6 @@ import (
 
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/config"
-	"github.com/sumwai/larkax/internal/credential"
 )
 
 const rotateUsage = `larkaxctl rotate 轮换渠道凭证的主密钥。
@@ -49,8 +48,8 @@ const rotateUsage = `larkaxctl rotate 轮换渠道凭证的主密钥。
 只回答「这一轮跑完了没有」——轮换不了的行会被逐行打出来，但那一行坏掉不该
 让整次轮换报失败（它再跑一次也还是坏的，由 --verify 与人工处置）。
 
-它需要读到主密钥，所以要在一个会读主密钥的角色下运行（LARKAX_ROLE 不是
-worker），并设好 LARKAX_MASTER_KEYS。
+它需要读到主密钥，所以要设好 LARKAX_MASTER_KEYS。这与 LARKAX_ROLE 无关：
+运维命令不属于任何角色，主密钥直接从这个变量读。
 `
 
 // rotateTimeout 是这条命令连库与跑完整轮换的时间上限。
@@ -85,19 +84,17 @@ func runRotate(args []string) error {
 		return fmt.Errorf("--batch-size 必须是正整数，当前为 %d", *batchSize)
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
-	if len(cfg.MasterKeys) == 0 {
-		// 这一条要单独报：config.Load 对 worker 角色根本不读主密钥，
-		// 而轮换连「当前主密钥是哪一把」都答不出来。
-		return fmt.Errorf("没有读到主密钥（LARKAX_ROLE=%s）：轮换要知道当前主密钥的标识，"+
-			"请设好 LARKAX_MASTER_KEYS，并在一个会读它的角色下运行", cfg.Role)
-	}
-	sealer, err := credential.NewSealer(cfg.MasterKeys)
+	// 主密钥从环境变量直接读，与 channel 的写入命令走同一个函数：轮换需要
+	// 主密钥，而「要不要主密钥」由**服务角色**决定，运维命令不属于任何角色。
+	// 绑到角色上的表现是 `LARKAX_ROLE=worker larkaxctl rotate` 明明设好了
+	// LARKAX_MASTER_KEYS 却报「没有读到主密钥」。
+	sealer, err := masterKeySealer()
 	if err != nil {
-		return fmt.Errorf("构造主密钥封装器失败: %w", err)
+		return err
 	}
 
 	db, err := sql.Open("pgx", cfg.DBDSN)

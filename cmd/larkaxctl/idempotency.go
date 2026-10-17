@@ -71,7 +71,7 @@ func runIdempotencyCleanup(args []string) error {
 		return usageErr(err)
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}

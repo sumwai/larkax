@@ -106,7 +106,7 @@ func runChannelCreate(args []string) error {
 		return usageErr(err)
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -296,7 +296,7 @@ func runChannelUpdate(args []string) error {
 		return usageErr(err)
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -329,7 +329,7 @@ func runChannelList(args []string) error {
 		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -371,7 +371,7 @@ func runChannelSetStatus(args []string, status string) error {
 		return usageErr(errors.New("缺少 --id（渠道 ID）"))
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -411,6 +411,11 @@ func channelWriteAdmin(db *sql.DB) (*channels.Admin, *credential.Sealer, error) 
 // 需要主密钥的**服务角色**下才存在（worker 角色不解析它），而运维命令不属于
 // 任何角色——把「命令跑不跑得起来」绑到 LARKAX_ROLE 上，会让
 // LARKAX_ROLE=worker 时 channel create 因为一个与本次操作无关的变量而失败。
+//
+// 这条判断是**通则**，不是这一处的特例：运维命令一律走 config.LoadOps
+// （它的配置面里没有角色与主密钥），需要主密钥的命令调这里——写渠道与轮换
+// 都走这一个函数。反过来，服务那一侧照旧走 config.Load，gateway / control
+// 缺主密钥仍然拒绝启动。
 func masterKeySealer() (*credential.Sealer, error) {
 	keys, err := config.MasterKeysFromEnv()
 	if err != nil {

@@ -84,7 +84,7 @@ func runAliasAdd(args []string) error {
 		return usageErr(err)
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -165,7 +165,7 @@ func runAliasList(args []string) error {
 		return usageErr(fmt.Errorf("--channel %d 无效：渠道 ID 从 1 开始", *channelID))
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -197,7 +197,7 @@ func runAliasUpdate(args []string) error {
 		return usageErr(err)
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -282,7 +282,7 @@ func runAliasDelete(args []string) error {
 		return usageErr(errors.New("缺少 --id（要删的别名 ID）"))
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -327,7 +327,7 @@ func runAliasResolve(args []string) error {
 			"--channel %d 无效：渠道 ID 从 1 开始，留空表示不针对具体渠道", *channelID))
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}

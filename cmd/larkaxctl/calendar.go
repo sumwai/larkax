@@ -125,7 +125,7 @@ func runCalendarImport(args []string) error {
 		return fmt.Errorf("%s: %w", path, err)
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}

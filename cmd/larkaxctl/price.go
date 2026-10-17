@@ -100,7 +100,7 @@ func runPriceAdd(args []string) error {
 		return usageErr(err)
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -205,7 +205,7 @@ func runPriceUpdate(args []string) error {
 		return usageErr(err)
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -417,7 +417,7 @@ func runPriceExplain(args []string) error {
 		when = &now
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -456,7 +456,7 @@ func runPriceList(args []string) error {
 		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}

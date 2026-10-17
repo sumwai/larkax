@@ -96,7 +96,9 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
 写入路径自己校验出来的参数问题（作用域与归属的组合、表达式编译不过、
 渠道类型不认识）归入 1，不是 2。
 
-环境变量与主服务一致，见 internal/config。
+环境变量：运维命令只读 LARKAX_DB_DSN、LARKAX_ENV 与 LARKAX_LOG_LEVEL，
+LARKAX_ROLE 与它无关。需要主密钥的命令（channel 的写入、rotate）另读
+LARKAX_MASTER_KEYS。见 internal/config 的 LoadOps。
 
 `
 
@@ -174,7 +176,7 @@ func runReconcile(args []string) error {
 		return fmt.Errorf("reconcile 不接受位置参数，得到 %q：开关与口径在 settings 表里", fs.Arg(0))
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -294,7 +296,7 @@ func printFinding(w io.Writer, f store.Finding) {
 // （都归 exitDBUnreach），各写一遍的表现是同一类失败在两条命令上给出
 // 不同的退出码，而脚本对它们的处置是不一样的。
 func withDB(timeout time.Duration, fn func(context.Context, *sql.DB) error) error {
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -340,7 +342,7 @@ func runMigrate(args []string) error {
 		return nil
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
