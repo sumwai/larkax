@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/internal/dberr"
 	"github.com/sumwai/larkax/internal/money"
 )
 
@@ -223,7 +224,12 @@ func (s *Store) Create(ctx context.Context, p CreateParams) (Created, error) {
 		nullableInt(p.RateLimitRPM), nullableAmount(p.QuotaLimit),
 	).Scan(&id)
 	if err != nil {
-		return Created{}, fmt.Errorf("写入 API Key 失败: %w", err)
+		// 这条语句能撞上两条没在这里具名认出来的约束：
+		// api_keys.user_id → users(id) 的外键（解析完用户、插入之前用户被删），
+		// 以及 key_hash 上的唯一键。前者尤其不是理论情况——命令行的
+		// `apikey create` 就走在它上面，没被认出来时退出码会落到 1，
+		// 而退出码表把外键算作 4。
+		return Created{}, dberr.ConstraintFailure(fmt.Errorf("写入 API Key 失败: %w", err))
 	}
 
 	return Created{ID: id, Prefix: prefix, Plaintext: plaintext}, nil

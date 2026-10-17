@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/sumwai/larkax/internal/auth"
+	"github.com/sumwai/larkax/internal/dberr"
 	"github.com/sumwai/larkax/internal/ledger/store"
 )
 
@@ -116,6 +118,33 @@ func TestExitCodeConflictForGenericConstraint(t *testing.T) {
 		store.ErrConstraintViolation, errors.New("driver error"))
 	if got := exitCode(err); got != 4 {
 		t.Errorf("通用约束冲突的退出码应当是 4，得到 %d（%v）", got, err)
+	}
+}
+
+// TestExitCodeConflictForUnnamedForeignKey 从**包的写路径**造一个真库上的
+// 外键冲突，断言它落 4 而不是 1。
+//
+// 造法就是 issue 里举的那个场景：`apikey create` 先把标识解析成用户，插入
+// 之前那个用户被删了。命令这一层没法确定性地把删除塞进解析与插入之间，
+// 所以直接调 `auth.Store.Create` 并给一个 users 里没有的 id——撞上的约束
+// 是同一条（api_keys_user_id_fkey），判据与造法无关。
+//
+// 改之前这条错误从 auth 原样上抛，链里没有任何哨兵，exitCode 落到 1；
+// 改之后它带着 dberr.ErrConstraintViolation。这条用例钉的正是那个数。
+func TestExitCodeConflictForUnnamedForeignKey(t *testing.T) {
+	db := testDB(t)
+
+	_, err := auth.New(db).Create(context.Background(), auth.CreateParams{
+		UserID: 900000000000000,
+	})
+	if err == nil {
+		t.Fatal("用户不存在时建 key 应当报错")
+	}
+	if !errors.Is(err, dberr.ErrConstraintViolation) {
+		t.Fatalf("错误链里没有 dberr.ErrConstraintViolation：%v", err)
+	}
+	if got := exitCode(err); got != 4 {
+		t.Errorf("没被具名认出来的外键冲突，退出码应当是 4，得到 %d（%v）", got, err)
 	}
 }
 
