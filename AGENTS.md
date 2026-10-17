@@ -47,13 +47,25 @@ CI 目前包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-r
 覆盖率摘要、迁移 up→down→up 往返（真 PostgreSQL）、分层自查
 （`check-layering.sh`）、红线扫描及其自测、变异测试脚本的自测、
 不可达符号门禁及其自测（`check-deadcode.sh`）、
-整包没人 import 的门禁及其自测（`check-unimported.sh`）。
+整包没人 import 的门禁及其自测（`check-unimported.sh`）、
+契约测试（`contract/`，见下）。
 集成测试另有一道**「确认真跑了」的门禁**——它逐包显式跑依赖数据库的那些包，
 被 `t.Skip` 时报错，因为「跳过」在输出里和「通过」长得一样
 （见 [LESSONS.md](LESSONS.md) 第 16 条）。**包清单的唯一来源是**
 `.github/actions/check-integration-tests`，新增依赖数据库的测试包时要往那里补；
 本文件不重复列一遍——两处清单迟早会不一致，而那时没人知道哪一份算数。
-**契约测试与自动部署尚未接入**，各自落地时补进这条流水线。
+**自动部署尚未接入**，落地时补进这条流水线。
+
+契约测试是**独立的一个 job**（`契约`），与上面那道流水线并列：它多两个运行期
+依赖（Python 3.12 与两个官方 SDK），塞进 Go 那个 job 会让「Go 测试挂了」与
+「Python 依赖没装」混在同一份日志里。它验的是**我们对外响应的形状**，
+用官方 SDK 当客户端——仓库里的端到端用例用的是自己写的假上游与自己构造的
+请求，证明的只是「我们的响应我们自己能解析」。怎么跑、怎么加一条、
+有哪些已知偏差，见 [contract/README.md](contract/README.md)。
+
+它与集成测试那道门是同一个形状：`-run Contract` **匹配不到任何用例时
+`go test` 照样退出 0**，所以那个 job 的判据是「`--- PASS: TestContract...`
+出现过几次」，不是退出码。
 
 分支命名：`feat/`、`fix/`、`refactor/`、`docs/`、`test/`、`chore/` 前缀 + 简短描述。
 
@@ -199,6 +211,12 @@ gofmt -l .                          # 格式
 go vet ./...                        # 标准检查
 golangci-lint run ./...             # 跨文件与语义检查（配置见 .golangci.yml）
 go test ./...                       # 单测（有 LARKAX_DB_DSN 时连集成测试一起跑）
+
+# 契约测试：用官方 SDK 当客户端验我们对外响应的形状。要先装 Python 依赖，
+# 且 go vet 默认不看 build tag 后面的文件，所以这里要单独带 -tags 跑一遍。
+pip install -r contract/requirements.txt
+go test -tags=contract -count=1 -v ./internal/assembly/ -run Contract
+go vet -tags=contract ./internal/assembly/
 
 bash scripts/check-redlines.sh      # 公开红线：密钥、私有主机、本机路径
 bash scripts/check-layering.sh      # 分层约定：谁 import 谁

@@ -43,3 +43,13 @@ coverage.html
 node_modules/
 web/dist/
 .pnpm-store/
+
+# Python（contract/ 下的契约测试用它）
+#
+# 漏掉这两条的代价不只是多几个文件：.pyc 是二进制，红线扫描器读到它会报
+# 「binary file matches」——一次假命中会让人开始忽略这个检查，而它的价值
+# 全在「每次报出来的都值得看」。
+__pycache__/
+*.py[cod]
+.venv/
+venv/
