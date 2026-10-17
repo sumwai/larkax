@@ -242,10 +242,28 @@ func checkPricedAt(at time.Time) error {
 // pipeline.Request（见 internal/gateway 的 finishCharge），而结算必然发生在
 // 一次成功的选路之后。它挡的是手工构造请求的调用方与测试夹具——那种行
 // 回答不了「这次实际用了哪个上游名」，而那一列正是为此存在的。
+//
+// # 它前面那两道管的是别的东西
+//
+// 这个值的来源是别名配置：网关按规范名查 model_aliases.upstream_model 拿到它
+// （见 internal/catalog 的 UpstreamModel）。那一段现在有两道保证——
+// 写入侧 catalog.normalizeUpstreamModel 规整并拒绝空白，schema 侧 model_aliases
+// 上的 CHECK（迁移 00022）拒绝空串与纯空白。所以「配了一个空的上游名」在配置
+// 写进去的时候就被挡下了，走不到这里。
+//
+// 但那两道判的都是**配置列**，与这里判的不是同一个东西：这里是这次结算带上来的
+// 入参，配置之后还可能经过网关与 pipeline，没有哪一道替这一列做保证。
 var ErrMissingUpstreamModel = errors.New(
 	"缺少上游模型名：调用方没有设置 pipeline.Request.UpstreamModel（它由网关在选路之后填）")
 
 // checkUpstreamModel 检查这次结算有没有带上实际发出去的上游模型名。
+//
+// 判的是**这次结算带上来的那个值**（pipeline.Request.UpstreamModel），不是别名
+// 配置那一列——两者是两样东西：配置列由 model_aliases 上的 CHECK 与
+// catalog.normalizeUpstreamModel 管（见迁移 00022），而这个是网关在选路之后填进
+// 来的入参，schema 照不到它。
+//
+// 位置在 Save 的最前面（开事务之前）：为空时这次结算一个副作用都不该留下。
 func checkUpstreamModel(model string) error {
 	if model == "" {
 		return ErrMissingUpstreamModel

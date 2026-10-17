@@ -290,6 +290,20 @@ func TestUpstreamModelChannelZeroUsesPlatformAlias(t *testing.T) {
 // 约束所在的迁移文件，也是「已有重复数据会被拒绝」那条用例要重放的那一份。
 const aliasUniqueMigration = "00007_model_alias_unique.sql"
 
+// upstream_model 上那条「不能是空白」的 CHECK，以及它所在的迁移文件。
+//
+// 这两个常量**不**进 admin.go 那个常量块：那一块列的是「写入路径翻译错误时要
+// 认的东西」，而写入路径在碰到 SQL 之前就把空白挡掉了（normalizeUpstreamModel），
+// aliasWriteError 里没有这个码的分支。判据仍然硬编码自迁移文件，失效的方向是
+// 失败，不是静默通过。
+const (
+	aliasBlankMigration        = "00022_model_alias_upstream_model_not_blank.sql"
+	aliasUpstreamModelNotBlank = "model_aliases_upstream_model_not_blank"
+)
+
+// pgCheckViolation 是 CHECK 约束违反的 SQLSTATE，同样只在测试里用。
+const pgCheckViolation = "23514"
+
 // 同一个渠道下两个上游名映射到同一个规范名：写入侧就该被拦下。
 //
 // 这正是那条歧义——约束建立之前这种数据能写进来，而查询侧只能按
@@ -488,6 +502,165 @@ func TestMigrationRejectsExistingDuplicateAliases(t *testing.T) {
 		if !exists {
 			t.Errorf("回滚后索引 %s 不在了", idx)
 		}
+	}
+}
+
+// 空串与纯空白都不许写进 upstream_model——直接走 SQL 也不行。
+//
+// 这一列是 text NOT NULL，而 NOT NULL 拦不住空串。它一旦是空的，别名查询就会
+// 返回 ("", nil)，请求带着 "model": "" 发给上游；上游若照收，这次请求**已经
+// 成功、钱已经花掉**，走到 internal/ledger/store 的 Save 才失败——账记不上而
+// 钱花了。
+//
+// 断言落在**约束名**上而不是「报错了」：连不上库、列名写错、外键不认都会报错，
+// 而它们与「这一列被这条 CHECK 挡住了」是两回事。
+func TestAliasRejectsBlankUpstreamModelOnInsert(t *testing.T) {
+	db := testDB(t)
+	model := uniqueName("model")
+	seedModel(t, db, model)
+
+	for _, tc := range []struct{ name, blank string }{
+		{"空串", ""},
+		{"纯空白", "   "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := insertAliasErr(db, nil, tc.blank, model)
+			assertViolation(t, err, pgCheckViolation, aliasUpstreamModelNotBlank, nil)
+		})
+	}
+
+	var left int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM model_aliases WHERE canonical_name = $1`, model).Scan(&left); err != nil {
+		t.Fatalf("回查失败: %v", err)
+	}
+	if left != 0 {
+		t.Errorf("被拒之后还剩 %d 行，期望一行都没写进去", left)
+	}
+}
+
+// 改别名时同样拦得住：这条路径上原本只有 normalizeUpstreamModel 一道，
+// 而它照不到直接走 SQL 的调用方。
+func TestAliasRejectsBlankUpstreamModelOnUpdate(t *testing.T) {
+	db := testDB(t)
+	model := uniqueName("model")
+	channel := insertChannel(t, db, model)
+	seedModel(t, db, model)
+	upstream := "up-" + model
+	insertAlias(t, db, channel, upstream, model)
+
+	var id int64
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT id FROM model_aliases WHERE channel_id = $1 AND upstream_model = $2`,
+		channel, upstream).Scan(&id); err != nil {
+		t.Fatalf("取别名 id 失败: %v", err)
+	}
+
+	for _, tc := range []struct{ name, blank string }{
+		{"空串", ""},
+		{"纯空白", "   "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := db.ExecContext(context.Background(),
+				`UPDATE model_aliases SET upstream_model = $1 WHERE id = $2`, tc.blank, id)
+			assertViolation(t, err, pgCheckViolation, aliasUpstreamModelNotBlank, nil)
+		})
+	}
+
+	// 被拒的那两次都不许动到这一行：UPDATE 报错时值必须原样。
+	var got string
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT upstream_model FROM model_aliases WHERE id = $1`, id).Scan(&got); err != nil {
+		t.Fatalf("回查失败: %v", err)
+	}
+	if got != upstream {
+		t.Errorf("upstream_model = %q，期望没被动过（%q）", got, upstream)
+	}
+}
+
+// 存量里已经有空白行时，迁移必须报错退出、并把那几行列出来，而不是静默清理
+// （那是替数据选一个上游模型名）或静默装上约束（那时这条 CHECK 对已有的坏行
+// 一点用都没有，而读的人会以为这一列从此有保证了）。
+//
+// 与 TestMigrationRejectsExistingDuplicateAliases 同一个形状：先造出「约束之前」
+// 的状态——约束在事务里摘掉、坏行在事务里插进去，跑完迁移再整体回滚。
+func TestMigrationRejectsExistingBlankUpstreamModel(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	model := uniqueName("model")
+	seedModel(t, db, model)
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("开事务失败: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err = tx.ExecContext(ctx,
+		`ALTER TABLE model_aliases DROP CONSTRAINT `+aliasUpstreamModelNotBlank); err != nil {
+		t.Fatalf("摘掉约束失败: %v", err)
+	}
+
+	// 用纯空白而不是空串：判据是 btrim(...) <> ''，这两种都该被同一条拦住，
+	// 而只判 `<> ''` 的写法会在这里放走它。
+	var badID int64
+	if err = tx.QueryRowContext(ctx, `
+		INSERT INTO model_aliases (channel_id, upstream_model, canonical_name)
+		VALUES (NULL, '   ', $1) RETURNING id`, model).Scan(&badID); err != nil {
+		t.Fatalf("造空白行失败: %v", err)
+	}
+
+	// 迁移报错之后事务会被 PostgreSQL 置为 aborted，后面什么都查不了，
+	// 所以先打一个保存点：报错后回到这里，事务恢复可用，造的坏行还在。
+	if _, err = tx.ExecContext(ctx, `SAVEPOINT before_migration`); err != nil {
+		t.Fatalf("打保存点失败: %v", err)
+	}
+
+	_, err = tx.ExecContext(ctx, migrationUpSQL(t, aliasBlankMigration))
+	if err == nil {
+		t.Fatal("存量有空白行时迁移必须报错，而不是静默装上约束")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("err = %v，期望 *pgconn.PgError", err)
+	}
+	if pgErr.Code != "P0001" {
+		t.Fatalf("SQLSTATE = %s（%s），期望 P0001（迁移自己抛的那个）", pgErr.Code, pgErr.Message)
+	}
+	// 报错要说清是**哪几行**：ALTER TABLE 自己的报错不指名任何行，也不说有几行，
+	// 人拿到它还得自己再查一遍。
+	if !strings.Contains(pgErr.Message, itoa(badID)) {
+		t.Errorf("报错里没提空白行的 id %d：%s", badID, pgErr.Message)
+	}
+
+	if _, err := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT before_migration`); err != nil {
+		t.Fatalf("回滚到保存点失败: %v", err)
+	}
+	// 那一行不许被删掉或改写：迁移的职责是拒绝，不是替数据挑一个上游名。
+	var upstream string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT upstream_model FROM model_aliases WHERE id = $1`, badID).Scan(&upstream); err != nil {
+		t.Fatalf("回查空白行失败: %v", err)
+	}
+	if upstream != "   " {
+		t.Errorf("upstream_model = %q，期望原样留着（迁移不该改数据）", upstream)
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("回滚失败: %v", err)
+	}
+
+	// 回滚必须把约束带回来，否则这条用例把库留在了没有约束的状态上，而后面
+	// 那些用例会照常通过——它们只是不再受保护。
+	var exists bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM pg_constraint
+		                WHERE conname = $1 AND conrelid = 'model_aliases'::regclass)`,
+		aliasUpstreamModelNotBlank).Scan(&exists); err != nil {
+		t.Fatalf("查约束失败: %v", err)
+	}
+	if !exists {
+		t.Errorf("回滚后约束 %s 不在了", aliasUpstreamModelNotBlank)
 	}
 }
 
