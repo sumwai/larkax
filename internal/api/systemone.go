@@ -151,7 +151,7 @@ func rejectDecision(w http.ResponseWriter, err error) {
 //   - 输入侧取 MaxInputTokens，那是**上游自己的预算**（state 加全部问题 64K
 //     token）。它取代了「按正文估一个数」——估出来的是下界，而上界必须真的
 //     是上界：拿一个偏小的数去预留，结算会撞上界被截断（Capped），差额由
-//     平台吃掉，且账目仍然平，事后完全看不出来。
+//     平台吃掉，且账目仍然平——事后只有按协议分的 capped 计数器能看见。
 //   - 输出侧取 MaxOutputTokens。上游文档没给这个数，4096 是保守估计
 //     （见那个常量的注释）。
 func (h *Handler) decideBillingRequest(user User, decision *systemone.Request, requestID string) pipeline.Request {

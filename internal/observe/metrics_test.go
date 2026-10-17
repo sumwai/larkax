@@ -273,19 +273,22 @@ func TestAuthFailureMetricShape(t *testing.T) {
 func TestRegistryLabelsAreStable(t *testing.T) {
 	r := NewRegistry()
 	r.Settlements.With("measured").Inc()
+	r.CappedSettlements.With("systemone").Inc()
 
 	got := render(t, r)
-	want := `larkax_billing_settlements_total{usage_source="measured"} 1`
-	if !strings.Contains(got, want) {
-		t.Errorf("标签名或取值变了\n得到:\n%s\n期望含:\n%s", got, want)
+	for _, want := range []string{
+		`larkax_billing_settlements_total{usage_source="measured"} 1`,
+		// capped 按入口协议分：告警与排查按 protocol 筛，标签名与取值都不能漂。
+		`larkax_billing_capped_settlements_total{protocol="systemone"} 1`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("标签名或取值变了\n得到:\n%s\n期望含:\n%s", got, want)
+		}
 	}
 
 	// 不带标签的计数器输出的样本行里不该出现花括号。
 	for _, line := range strings.Split(got, "\n") {
-		if strings.HasPrefix(line, "larkax_billing_capped_settlements_total ") {
-			continue
-		}
-		if strings.HasPrefix(line, "larkax_billing_capped_settlements_total{") {
+		if strings.HasPrefix(line, "larkax_billing_unbilled_settlements_total{") {
 			t.Errorf("这条计数器不该有标签: %q", line)
 		}
 	}

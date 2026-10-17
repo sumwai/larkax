@@ -26,7 +26,7 @@ import (
 // 它们各自拿一个注册表，就得改它们的结构体与装配处，「加一个计数器」
 // 于是变成一次跨包改动。包级的 Metrics 让增量点始终是**一行**：
 //
-//	observe.Metrics.CappedSettlements.Inc()
+//	observe.Metrics.Settlements.With("measured").Inc()
 //
 // # 指标与日志的分工
 //
@@ -150,11 +150,16 @@ type Registry struct {
 	// 才说明真的没撞上，而不是计数器没接上。
 	Settlements *LabeledCounter
 
-	// CappedSettlements 是结算金额被预留上界截住的次数。
+	// CappedSettlements 是结算金额被预留上界截住的次数，按入口协议分。
 	//
 	// 按设计它应当一直是 0。持续大于 0 说明预留上界算错了，差额由平台
 	// 承担，而**账目仍然是平的**——对账看不出来，只有这个数能看见。
-	CappedSettlements *Counter
+	//
+	// 标签值取自 pipeline.Request.Protocol（channel.Protocol 的取值集合，
+	// 闭合枚举）。三种 chat 协议与决策协议的上界来源不同：chat 按
+	// max_tokens 与正文估算，决策表面按 internal/systemone 的两个常量。
+	// 混成一条序列时分不出是哪一条协议的上界在漏。
+	CappedSettlements *LabeledCounter
 
 	// UnbilledSettlements 是未计费的结算次数。
 	//
@@ -182,8 +187,9 @@ func NewRegistry() *Registry {
 	r.Settlements = r.newLabeled("larkax_billing_settlements_total",
 		"按实际用量结算完成的次数，按用量来源分（measured / tokenized / estimated / unreported）。unreported 表示上游响应里没有 usage 块，用量是零值占位。",
 		"usage_source")
-	r.CappedSettlements = r.newCounter("larkax_billing_capped_settlements_total",
-		"结算金额被预留上界截住的次数。按设计应一直为 0；持续大于 0 说明预留上界算错了，差额由平台承担而账目仍然是平的。")
+	r.CappedSettlements = r.newLabeled("larkax_billing_capped_settlements_total",
+		"结算金额被预留上界截住的次数，按入口协议分（openai / anthropic / openai-responses / systemone）。按设计应一直为 0；某一协议持续大于 0 说明那条协议的预留上界算错了，差额由平台承担而账目仍然是平的。",
+		"protocol")
 	r.UnbilledSettlements = r.newCounter("larkax_billing_unbilled_settlements_total",
 		"未计费的结算次数：上游失败，或请求在结算之前中止。")
 	r.AuthFailures = r.newLabeled("larkax_auth_failures_total",

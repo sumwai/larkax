@@ -144,6 +144,10 @@ func settleRequest() pipeline.Request {
 		// 资产品种由入口从运行期配置填（见 pipeline.Request.Asset），
 		// 计费层不再兜默认值。夹具给一个具体的值，与生产的形状一致。
 		Asset: "CNY",
+		// 协议由入口填（见 pipeline.Request.Protocol）。夹具给一条具体的，
+		// 与生产的形状一致：capped 计数器按它分序列，空值会造出一条生产上
+		// 不该有的序列。
+		Protocol: channel.ProtocolOpenAI,
 	}
 }
 
@@ -199,7 +203,7 @@ type settlementCounts struct {
 // 但那条序列本来就会被下面这几次结算建出来，不改变被测的行为。
 func snapshotSettlementCounts() settlementCounts {
 	return settlementCounts{
-		capped:   observe.Metrics.CappedSettlements.Value(),
+		capped:   observe.Metrics.CappedSettlements.With(string(channel.ProtocolOpenAI)).Value(),
 		unbilled: observe.Metrics.UnbilledSettlements.Value(),
 		measured: observe.Metrics.Settlements.With("measured").Value(),
 	}
@@ -251,7 +255,7 @@ func TestMetricsEndpointReportsRealSettlementCounts(t *testing.T) {
 	lines := scrape(t)
 	for _, want := range []string{
 		"# TYPE larkax_billing_capped_settlements_total counter",
-		fmt.Sprintf("larkax_billing_capped_settlements_total %d", before.capped+3),
+		fmt.Sprintf(`larkax_billing_capped_settlements_total{protocol="openai"} %d`, before.capped+3),
 		fmt.Sprintf("larkax_billing_unbilled_settlements_total %d", before.unbilled+1),
 		fmt.Sprintf(`larkax_billing_settlements_total{usage_source="measured"} %d`, before.measured+3),
 	} {

@@ -707,8 +707,13 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 	// 「Capped 一直是 0」才说明真的没撞上，而不是计数器没接上。
 	observe.Metrics.Settlements.With(out.UsageSource.String()).Inc()
 	// 撞上预留上界：按设计不该发生，一旦成为常态就是静默少收，而账目仍然是平的。
+	//
+	// 按协议分：各条入口的上界来源不同（chat 那几条按 max_tokens 与正文
+	// 估算，决策表面按 internal/systemone 的两个常量），混成一条序列时
+	// 分不出是哪一条协议在漏。协议由入口填在 Request.Protocol 上，这里
+	// 只负责把它带进标签——不在这里猜。
 	if settlement.Capped {
-		observe.Metrics.CappedSettlements.Inc()
+		observe.Metrics.CappedSettlements.With(string(req.Protocol)).Inc()
 	}
 
 	return &Charge{

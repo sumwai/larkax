@@ -21,15 +21,21 @@ curl -s 127.0.0.1:9090/metrics
 | 指标 | 类型 | 标签 | 含义 |
 |---|---|---|---|
 | `larkax_billing_settlements_total` | counter | `usage_source` | 按实际用量结算完成的次数。`usage_source` 取 `measured` / `tokenized` / `estimated`，即这笔账用的是实测值、本地精确计数还是启发式估算 |
-| `larkax_billing_capped_settlements_total` | counter | 无 | 结算金额被预留上界截住的次数 |
+| `larkax_billing_capped_settlements_total` | counter | `protocol` | 结算金额被预留上界截住的次数，按入口协议分。`protocol` 取 `channel.Protocol` 的取值：`openai` / `anthropic` / `openai-responses` / `systemone` |
 | `larkax_billing_unbilled_settlements_total` | counter | 无 | 未计费的结算次数：上游失败，或请求在结算之前中止 |
 | `larkax_auth_failures_total` | counter | `reason` | 认证失败被回以 401 的次数，按失败原因分。`reason` 取 `internal/auth` 的 `Reason`：`missing_credential` / `malformed_credential` / `key_not_found` / `key_disabled` / `key_revoked` / `key_inactive` / `key_expired` / `user_inactive`，外加 `unclassified` |
 
 ## 怎么读
 
-**`capped` 大于 0。** 预留是上界，所以这个数按设计应当一直是 0。它涨起来说明
-上界算错了（例如上游报的输出 token 超过了我们给的 `max_tokens`），差额由平台
-承担。要注意的是此时**账目仍然是平的**——对账看不出来，只有这个数能看见。
+**`capped` 大于 0。** 预留是上界，所以这些序列按设计应当一直是 0。哪一条
+`protocol` 的序列涨起来，就说明那一条入口的上界算错了（chat 按 `max_tokens`
+与正文估算，决策表面按 `internal/systemone` 的两个常量），差额由平台承担。
+要注意的是此时**账目仍然是平的**——对账看不出来，只有这个数能看见。
+
+`capped` 是**带标签**的计数器：第一次撞上界之前，它一条序列都不输出。所以
+「没有这一行」与「一次都没撞上」在输出里长得一样，不能只看它——要连着
+`settlements_total` 一起读（见下一条）。分协议读同时回答了「是哪一条协议
+在漏」：只有一个 `protocol` 的序列在涨，就只看那一条的预留上界来源。
 
 **是哪一次请求撞的、撞了多少**，这个计数答不了（它没有 `request_id` 标签）。
 要落到具体请求上，查 `billing_requests` 的 `computed_amount`——它是**未截断**的
@@ -50,9 +56,11 @@ SELECT request_id, reserved_amount, computed_amount,
 是 NULL，且补不回来（撞上界时 `final_amount` 就等于预留，未截断的那个数没有
 留下痕迹）。那些行是「没有记录」，不能并进「没撞上界」——见迁移 00021 的注释。
 
-**`capped` 一直是 0。** 先看 `settlements_total` 有没有在涨。它也不涨，说明
-计数器根本没接上，而不是「一次都没撞上」——一个一直是 0 的计数器与一个没有
-接的计数器，光看这一行是分不出来的，所以这一条必须连着分母一起读。
+**`capped` 一直是 0（或者一条序列都没有）。** 先看 `settlements_total` 有没有
+在涨。它也不涨，说明计数器根本没接上，而不是「一次都没撞上」——一个一直是 0
+的计数器与一个没有接的计数器，光看这一行是分不出来的，所以这一条必须连着
+分母一起读。`capped` 现在带标签，第一次撞上界之前不出现，这一点让「没接上」
+与「没撞过」在它自己那一行上更难分辨，分母因此更重要。
 
 **`unbilled` 上涨。** 上游失败或请求中途中止。它与 `settlements_total` 的比值
 是上游健康度的第一手数据。
