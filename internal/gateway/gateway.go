@@ -203,6 +203,16 @@ type Gateway struct {
 	// Executor 是真正调上游的东西。适配器实现它。
 	Executor Executor
 
+	// Decider 是调上游**决策接口**的能力（见 decide.go）。为 nil 时决策那条
+	// 路径回 ErrNoExecutor，其余路径不受影响。
+	//
+	// 与 Executor 分开而不是合并：两者的签名不同（一个收 *channel.Request，
+	// 一个收 *systemone.Request），合并只能靠再包一层类型断言或者往
+	// channel.Request 里塞字段——前者把编译期的事推到运行期，后者正是
+	// internal/systemone 要避免的。装配层通常把同一个 *upstream.Executor
+	// 填进两个字段。
+	Decider DecideExecutor
+
 	// Counter 是流式中断时估算用量用的分词计数器。
 	//
 	// 可以为 nil——那时估算退到启发式（见 tokens.StreamEstimator），
@@ -392,11 +402,15 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 		return nil, ErrNoExecutor
 	}
 
-	res, err := g.begin(ctx, req, upstream)
+	res, err := g.begin(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	defer res.finish(ctx)
+
+	// 请求快照在**调上游之前**采集：出错要能复现「当时发出去的是什么」。
+	// 位置在 begin 之后而不是里面，见 begin 的注释。
+	g.snapshotAsync(ctx, upstream, "request", req.UserID)
 
 	routed, err := g.routeChat(ctx, upstream, res.candidates, req.CanonicalModel, hooks)
 	if err != nil {
@@ -411,7 +425,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 		// 健康度先记：失败的调用正是它要记的那些，而下面那次结算
 		// 只动钱。
 		g.recordAttempts(ctx, attemptsOf(routed), nil)
-		return res.settleAndFail(ctx, err, pipeline.Outcome{UpstreamFailed: true})
+		return nil, res.settleAndFail(ctx, err, pipeline.Outcome{UpstreamFailed: true})
 	}
 
 	out := pipeline.Outcome{
@@ -432,7 +446,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 			// 上游其实成功了、钱也花掉了，但仍然不向调用方收：他拿到的
 			// 是一个错误，而不是那份回答。把一次没送出去的回答记成消费，
 			// 在对账上表现为一笔解释不通的扣费。
-			return res.settleAndFail(ctx, hookErr, pipeline.Outcome{UpstreamFailed: true})
+			return nil, res.settleAndFail(ctx, hookErr, pipeline.Outcome{UpstreamFailed: true})
 		}
 	}
 
@@ -451,7 +465,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 		if hookErr != nil {
 			// 阻断型插件失败：这次请求失败。与非流式那条路上的 onResponse
 			// 同一个处置——响应还没发出去，所以「失败」有可表达的对象。
-			return res.settleAndFail(ctx, hookErr, pipeline.Outcome{UpstreamFailed: true})
+			return nil, res.settleAndFail(ctx, hookErr, pipeline.Outcome{UpstreamFailed: true})
 		}
 		out.Usage = usage
 	}
@@ -539,7 +553,13 @@ type handle struct {
 	failure *pipeline.UpstreamFailure
 }
 
-func (g *Gateway) begin(ctx context.Context, req pipeline.Request, upstream *channel.Request) (*handle, error) {
+// # 它为什么不收上游请求
+//
+// 早先它收一个 *channel.Request，只为在最后采一次请求快照。那条表面之外的
+// 调用方（决策，见 decide.go）没有 chat 形状的请求，而「为了采快照把一个
+// 不适用的类型传进来」正是本包要避免的事。快照改由各条入口自己采——顺序
+// 不变，仍在预留之后、调上游之前。
+func (g *Gateway) begin(ctx context.Context, req pipeline.Request) (*handle, error) {
 	h := &handle{g: g, req: req}
 
 	// 候选必须在预留**之前**取：没有候选就没有可用的渠道，
@@ -581,9 +601,6 @@ func (g *Gateway) begin(ctx context.Context, req pipeline.Request, upstream *cha
 	// 账本分录就挂不回这次账单——两边只剩时间上的巧合。
 	h.req = req
 
-	// 请求快照在**调上游之前**采集：出错要能复现「当时发出去的是什么」。
-	g.snapshotAsync(ctx, upstream, "request", req.UserID)
-
 	return h, nil
 }
 
@@ -606,7 +623,7 @@ func (h *handle) finish(ctx context.Context) {
 	h.release(ctx)
 }
 
-// settleAndFail 结算一次失败的请求并返回原始错误。
+// settleAndFail 结算一次失败的请求，并把原始错误原样交回调用方。
 //
 // 失败不计费，所以这里用 UpstreamFailed。预留的释放交给 finish——
 // 它是**每一个**返回路径的收尾点（见 finish 的注释），在这里再调一次
@@ -622,11 +639,19 @@ func (h *handle) finish(ctx context.Context) {
 //
 // 判据虽然只有一处，它要覆盖的是**四类失败**：上游非 2xx、连不上、
 // 流中途断、插件阻断（见 upstreamEvidence 的分支与 handle.failure 的注释）。
-func (h *handle) settleAndFail(ctx context.Context, cause error, out pipeline.Outcome) (*Result, error) {
+//
+// # 它为什么只回错误、不回结果
+//
+// 它从来只回 (nil, cause)。早先的签名是 (*Result, error)，于是调用方写成
+// `return res.settleAndFail(...)`——读起来像「返回一个结果」，实际返回的
+// 永远是 nil。决策那条路（见 decide.go）的产出是 *DecideResult，那个签名
+// 直接把这件事变成了编译错误。去掉结果那一位之后，「失败没有结果」是
+// 签名上看得见的事。
+func (h *handle) settleAndFail(ctx context.Context, cause error, out pipeline.Outcome) error {
 	h.settled = true
 	out.UpstreamStatus, out.ErrorCode = upstreamEvidence(cause)
 	h.settleFailure(ctx, out)
-	return nil, cause
+	return cause
 }
 
 // settleFailure 结算一次不计费的请求，并把这次失败的依据记在 handle 上。

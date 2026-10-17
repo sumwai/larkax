@@ -21,6 +21,8 @@ import (
 	"github.com/sumwai/larkax/internal/channel/anthropicadapter"
 	"github.com/sumwai/larkax/internal/channel/openaiadapter"
 	"github.com/sumwai/larkax/internal/channel/responsesadapter"
+	"github.com/sumwai/larkax/internal/channel/systemoneadapter"
+	"github.com/sumwai/larkax/internal/systemone"
 )
 
 // Executor 按渠道类型把请求分发给对应的适配器。
@@ -54,6 +56,7 @@ func New(timeout time.Duration) (*Executor, error) {
 		openaiadapter.New(timeout),
 		anthropicadapter.New(timeout),
 		responsesadapter.New(timeout),
+		systemoneadapter.New(timeout),
 	)
 }
 
@@ -127,6 +130,29 @@ func (e *Executor) ChatStream(ctx context.Context, ch channel.Channel, req *chan
 		return nil, err
 	}
 	return a.ChatStream(ctx, ch, req)
+}
+
+// Decide 发起一次决策调用，按 ch.Type 分发。
+//
+// 它不在 channel.Adapter 上，而是**按类型断言**找实现：那条接口是 chat 那套
+// 协议的契约，让每个适配器都实现一个 Decide（哪怕只返回 ErrUnsupported）
+// 会把「这条渠道到底支不支持决策」变成要读实现才知道的事。分开之后判据就是
+// 「这个适配器实现了 systemone.Decider 吗」，在编译期与运行期都看得见。
+//
+// 未知类型与「这个类型不支持决策」是两件事，错误链里分得开：前者包着
+// channel.ErrUnknownType（库里有一条配置，当前二进制不认识），后者包着
+// channel.ErrUnsupported（这个类型设计上不做这件事）。两者都不可重试，
+// 处置也一样——让这条候选出局，而不是换下一个候选重试。
+func (e *Executor) Decide(ctx context.Context, ch channel.Channel, req *systemone.Request) (*systemone.Response, error) {
+	a, err := e.adapter(ch)
+	if err != nil {
+		return nil, err
+	}
+	d, ok := a.(systemone.Decider)
+	if !ok {
+		return nil, fmt.Errorf("渠道 %d: 类型 %q 不支持决策调用: %w", ch.ID, ch.Type, channel.ErrUnsupported)
+	}
+	return d.Decide(ctx, ch, req)
 }
 
 // adapter 按渠道类型取适配器。

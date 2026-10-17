@@ -6,8 +6,9 @@
 //
 // # 协议由路径决定
 //
-// /v1/chat/completions 说 OpenAI 协议，/v1/messages 说 Anthropic 协议。
-// 不从请求体猜：两套协议的请求体在浅层很像（都有 model 与 messages），
+// /v1/chat/completions 说 OpenAI 协议，/v1/messages 说 Anthropic 协议，
+// /v1/systemone 说 System One 决策协议（见 systemone.go）。
+// 不从请求体猜：前两套协议的请求体在浅层很像（都有 model 与 messages），
 // 猜错时解析往往照样成功，于是错误被推迟到上游才暴露。路径是调用方明确
 // 给出的信息，用它就不需要猜。
 //
@@ -17,7 +18,7 @@
 //
 // # 未实现的路径仍然回 501
 //
-// 这两条路径之外的任何请求都得到 501，与推理接口尚未实现时的行为一致。
+// 这几条路径之外的任何请求都得到 501，与推理接口尚未实现时的行为一致。
 // 这是有意的：部署验证靠「任何请求都立刻得到明确答复」来确认端口、TLS
 // 与负载均衡转发是通的，而这个性质不该因为多了一条路由就消失。
 //
@@ -52,6 +53,9 @@ import (
 )
 
 // 公共入口的两条推理路径。它们与调用协议一一对应，见包注释。
+//
+// 第三条（PathSystemOne）在 systemone.go 里：它带的常量只有那条路径用得上，
+// 两处分开是为了让「这条表面有什么、没有什么」在一处读完。
 const (
 	PathChatCompletions = "/v1/chat/completions"
 	PathMessages        = "/v1/messages"
@@ -241,6 +245,15 @@ type Handler struct {
 	// 确认的事。留空则不写这个头。
 	Version string
 
+	// Decider 是调上游决策接口的能力（见 systemone.go）。为 nil 时
+	// /v1/systemone 回 501，其余路径不受影响。
+	//
+	// 与 Chatter 分开而不是合并成一个接口：两者的签名不同（一个收
+	// *channel.Request，一个收 *systemone.Request），合并只能靠类型断言，
+	// 而那会把编译期的事推到运行期。装配层通常把同一个 *gateway.Gateway
+	// 填进两个字段。
+	Decider Decider
+
 	// Idempotency 是幂等记录的读写口。为 nil 时忽略请求头 Idempotency-Key，
 	// 每个请求都照常执行一次。
 	//
@@ -307,6 +320,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serve(w, r, channel.ProtocolOpenAI)
 	case PathMessages:
 		h.serve(w, r, channel.ProtocolAnthropic)
+	case PathSystemOne:
+		h.serveDecision(w, r)
 	default:
 		// 未知路径：这里不知道调用方说哪套协议（协议由路径决定，而路径
 		// 我们并不认识），所以用 OpenAI 形状——两套里更通用的那一套。
@@ -317,33 +332,78 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // serve 处理一条推理路径上的一次请求。
 //
-// 检查顺序是刻意的：先是纯请求头层面的判断（方法、Content-Type），
-// 再是鉴权，最后才读请求体。这样没通过鉴权的请求不会让我们为它读进
-// 最多 maxRequestBodyBytes 的内存，而 Content-Type 这种一眼可判的
-// 错误也轮不到花代价去解析。
+// 解析之前的检查全在 admit 里，三条路径共用同一份顺序与措辞。
 //
-// 幂等键是这条顺序上的**最后一步**（解析之后、调上游之前）：指纹要算在
+// 幂等键是那条顺序上的**最后一步**（解析之后、调上游之前）：指纹要算在
 // 解析后的请求上，而它必须在任何有副作用的事情之前生效——排在预留之后
 // 就等于没做，因为那时钱已经冻上了。
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel.Protocol) {
+	user, body, ok := h.admit(w, r, protocol, h.Auth != nil && h.Chatter != nil)
+	if !ok {
+		return
+	}
+
+	upstream, err := relay.ParseRequest(r.Context(), protocol, body)
+	if err != nil {
+		// 解析失败的细节不回给调用方：那里面会带上 relaykit 的类型名与
+		// 内部字段名，而调用方需要知道的只是「body 不是合法的 JSON」。
+		observe.FromContext(r.Context()).Warn("解析请求失败", "err", err)
+		writeError(w, protocol, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if rejected := checkRequest(upstream); rejected != nil {
+		writeError(w, protocol, rejected.status, rejected.message)
+		return
+	}
+
+	requestID := requestIDOf(r)
+
+	// 幂等键接在**解析成功之后**：指纹算的是解析后的请求（见
+	// idempotency.HashRequest），而解析失败（400）与必要字段缺失都还没有
+	// 「一次请求」可言，那时也没有任何东西需要幂等——把它们记下来只会让
+	// 一个写错请求体的客户端在改正之后还拿到 409。
+	if key := r.Header.Get(idempotency.HeaderName); key != "" && h.Idempotency != nil {
+		h.serveIdempotent(w, r, protocol, upstream, body, user, requestID, key)
+		return
+	}
+	h.serveOnce(w, r, protocol, upstream, user, requestID, nil)
+}
+
+// admit 跑一次请求在**解析请求体之前**的全部检查，返回调用者与请求体。
+//
+// ok 为 false 表示这一次已经处理完了——响应写出去了，调用方直接返回。
+//
+// # 检查顺序是刻意的
+//
+// 先是纯请求头层面的判断（方法、Content-Type），再是装配检查，然后是鉴权，
+// 最后才读请求体。这样没通过鉴权的请求不会让我们为它读进最多
+// maxRequestBodyBytes 的内存，而 Content-Type 这种一眼可判的错误也轮不到
+// 花代价去解析。三条路径共用这一份，所以「哪条路径少了一道检查」不会发生。
+//
+// # ready 为什么由调用方给
+//
+// 它说的是「这条路径要的协作者都装上了吗」。三条路径要的东西不同（决策那条
+// 要的是 Decider 而不是 Chatter），在这里写死一个判据会让「决策没接上」
+// 表现为「chat 也没接上」——而这两句话的排查方向完全不同。
+func (h *Handler) admit(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, ready bool) (User, []byte, bool) {
 	if r.Method != http.MethodPost {
 		// Allow 头是 405 的必要部分：没有它，调用方无从知道该用什么方法，
 		// 只能去翻文档。
 		w.Header().Set("Allow", http.MethodPost)
 		writeError(w, protocol, http.StatusMethodNotAllowed, "method not allowed, use POST")
-		return
+		return User{}, nil, false
 	}
 	if !isJSON(r.Header.Get("Content-Type")) {
 		writeError(w, protocol, http.StatusUnsupportedMediaType,
 			"Content-Type must be application/json")
-		return
+		return User{}, nil, false
 	}
-	if h.Auth == nil || h.Chatter == nil {
+	if !ready {
 		// 依赖没装配。这不是调用方的错，也不该在请求期 panic——
 		// 一个 501 说明「这个构建没接上」，比一个栈回溯有用。
 		writeError(w, protocol, http.StatusNotImplemented,
 			"inference is not wired in this build")
-		return
+		return User{}, nil, false
 	}
 
 	user, err := h.Auth.Authenticate(r.Context(), r)
@@ -373,11 +433,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 		if errors.Is(err, auth.ErrUnauthenticated) {
 			observe.Metrics.AuthFailures.With(authFailureReason(err)).Inc()
 			writeError(w, protocol, http.StatusUnauthorized, "invalid credentials")
-			return
+			return User{}, nil, false
 		}
 		observe.FromContext(r.Context()).Error("鉴权查询失败", "err", err)
 		writeError(w, protocol, http.StatusInternalServerError, "internal error")
-		return
+		return User{}, nil, false
 	}
 
 	// 限流在鉴权之后、读请求体之前。
@@ -391,7 +451,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 		if allowed, retryAfter := h.RateLimiter.Allow(user.KeyID, user.RateLimitRPM); !allowed {
 			observe.FromContext(r.Context()).Warn("请求超出该 Key 的 RPM 额度", "key_id", user.KeyID)
 			writeRateLimited(w, protocol, retryAfter)
-			return
+			return User{}, nil, false
 		}
 	}
 
@@ -413,7 +473,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 		case errors.Is(quotaErr, keyquota.ErrExceeded):
 			observe.FromContext(r.Context()).Warn("请求超出该 Key 的额度上限", "key_id", user.KeyID)
 			writeInsufficientQuota(w, protocol)
-			return
+			return User{}, nil, false
 		default:
 			// 查不出来（连不上库、超时）时**放行**，把判定交给预留那一层。
 			//
@@ -433,36 +493,13 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 		if errors.Is(err, errBodyTooLarge) {
 			writeError(w, protocol, http.StatusRequestEntityTooLarge,
 				fmt.Sprintf("request body exceeds %d bytes", maxRequestBodyBytes))
-			return
+			return User{}, nil, false
 		}
 		writeError(w, protocol, http.StatusBadRequest, "could not read request body")
-		return
+		return User{}, nil, false
 	}
 
-	upstream, err := relay.ParseRequest(r.Context(), protocol, body)
-	if err != nil {
-		// 解析失败的细节不回给调用方：那里面会带上 relaykit 的类型名与
-		// 内部字段名，而调用方需要知道的只是「body 不是合法的 JSON」。
-		observe.FromContext(r.Context()).Warn("解析请求失败", "err", err)
-		writeError(w, protocol, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if rejected := checkRequest(upstream); rejected != nil {
-		writeError(w, protocol, rejected.status, rejected.message)
-		return
-	}
-
-	requestID := requestIDOf(r)
-
-	// 幂等键接在**解析成功之后**：指纹算的是解析后的请求（见
-	// idempotency.HashRequest），而解析失败（400）与必要字段缺失都还没有
-	// 「一次请求」可言，那时也没有任何东西需要幂等——把它们记下来只会让
-	// 一个写错请求体的客户端在改正之后还拿到 409。
-	if key := r.Header.Get(idempotency.HeaderName); key != "" && h.Idempotency != nil {
-		h.serveIdempotent(w, r, protocol, upstream, body, user, requestID, key)
-		return
-	}
-	h.serveOnce(w, r, protocol, upstream, user, requestID, nil)
+	return user, body, true
 }
 
 // authFailureReason 把一次认证失败归到 larkax_auth_failures_total 的一个

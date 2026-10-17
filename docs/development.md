@@ -570,6 +570,7 @@ go run ./cmd/larkaxctl apikey update --id 3 --clear-rate-limit-rpm
 | 端口 | 端点 | 现在返回 |
 |---|---|---|
 | `:8080` | `POST /v1/chat/completions`、`POST /v1/messages` | 推理；`stream: true` 时是 SSE 流；没有有效 API Key 时 `401` |
+| `:8080` | `POST /v1/systemone` | 决策调用，见下节；**从不流式**，带了 `stream: true` 回 `400` |
 | `:8080` | 其余任意路径 | `501`，明确的「尚未实现」JSON |
 | `:9090` | `/healthz` | `200`，进程存活 |
 | `:9090` | `/readyz` | `200`，含 `postgres` 探针 |
@@ -582,6 +583,7 @@ go run ./cmd/larkaxctl apikey update --id 3 --clear-rate-limit-rpm
 调用协议与上游协议可以不同，转换在 `internal/relay` 那一层做，用量口径的换算
 也在那里——Anthropic 的 `input_tokens` 不含缓存而 OpenAI 的 `prompt_tokens` 含，
 互转时这个差要补上或拆掉，否则**账单金额会错而响应形状看着完全正常**。
+决策那条路（`/v1/systemone`）不走 `internal/relay`，见下节。
 
 要真的拿到一次 `200`，库里得先有：一个用户与钱包、一把 API Key
 （`larkaxctl apikey create --user <ID 或用户名>`）、一条指向上游的渠道、
@@ -625,6 +627,79 @@ ingress 规则下。
 两个端点都认请求头 `Idempotency-Key`：带上它时同一个键重复发送只执行一次，
 第一次的结果被原样重放。用法、三条 `409` 的码与留存规则见
 [idempotency.md](idempotency.md)。
+
+## 决策接口（`/v1/systemone`）
+
+`POST /v1/systemone` 是第三条公开路径。它不做对话，而是拿一段**状态**（一段
+自由文本，比如一张工单）与一组**带类型的判定问题**，回一组答案。与另外两条
+路径一样：协议由路径决定，计费走同一条两阶段流水线，上游由选路层按渠道挑。
+
+请求体是一个 JSON 对象：
+
+```json
+{
+  "model": "decision-model",
+  "state": "工单: 用户说付款后没到账",
+  "questions": {
+    "q_noul":   {"type": "noul",   "instructions": "这是账单问题吗"},
+    "q_choice": {"type": "choice", "instructions": "路由到哪个团队",
+                 "criteria": {"billing": "付款相关", "tech": "技术故障"}},
+    "q_score":  {"type": "score",  "instructions": "紧急程度",
+                 "criteria": ["low", "medium", "high"]}
+  }
+}
+```
+
+- `questions` 是**按 id 索引的对象**，不是数组。数组会被上游拒。
+- 三种类型的 `criteria` 形状不同：`noul`（是/否）不带；`choice` 是
+  `{选项 id: 说明}`；`score` 是档位名的数组。
+- `state` 空不空由上游判断，入口不拦。
+
+响应体：
+
+```json
+{
+  "model": "decision-model",
+  "answers": {
+    "q_noul":   {"type": "noul",   "noul": 0.75},
+    "q_choice": {"type": "choice", "choice": "billing", "confidence": 1},
+    "q_score":  {"type": "score",  "score": 1.8, "confidence": 0.7}
+  },
+  "usage": {"input_tokens": 387, "output_tokens": 72}
+}
+```
+
+`model` 回的是**调用方要的那个名字**，不是上游回报的那个。`score` 是数值
+而不是档位下标。
+
+### 配一条能接决策请求的渠道
+
+与推理那条链路的四样东西相同，只是渠道的 `--type` 用 `systemone`：
+
+```sh
+cat secret.txt | go run ./cmd/larkaxctl channel create \
+  --name my-decision-upstream --type systemone --base-url https://api.example.com/v1 \
+  --models decision-model --credential-stdin
+```
+
+### 计费
+
+`usage.input_tokens` 与 `usage.output_tokens` 按 prompt 与 completion 两个槽位
+计价，与另外两条路径同一套规则。规则里**两个槽位都要有价**：少写一个时整条
+请求失败，而不是按写了的那个少收。
+
+预留的上界来自 `internal/systemone` 的两个常量（输入 64K、输出 4096），不是
+按正文估出来的数——这条表面的请求里没有 `max_tokens` 一类的参数，而按正文
+估出来的是**下界**，拿它去预留会让结算撞上界被静默截断。
+
+### 这条表面没有的东西
+
+- **从不流式。** 上游收到 `stream: true` 会当没看见、照常回普通 JSON，所以
+  入口**拒掉**带 `stream: true` 的请求（`400`），而不是忽略它——忽略的结果是
+  调用方按 SSE 去解析一份 JSON，错误出现在他那一侧而且离原因很远。
+- **没有幂等。** `Idempotency-Key` 不生效，带上它的请求照常执行。
+- **没有请求快照。** 见 [request-retention.md](request-retention.md)。
+- **没有插件挂载点。** 五个 hook 都不在这条路径上。
 
 ## 常用检查
 
