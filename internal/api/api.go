@@ -40,6 +40,8 @@ import (
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/gateway"
 	"github.com/sumwai/larkax/internal/idempotency"
+	"github.com/sumwai/larkax/internal/keyquota"
+	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/relay"
@@ -97,6 +99,10 @@ type User struct {
 	// 原样值：nil 表示列值为 NULL。NULL 与 0 各是什么意思由限流实现定，
 	// 本包只负责原样传下去。
 	RateLimitRPM *int
+
+	// QuotaLimit 是这把 key 的累计花费上限，即 api_keys.quota_limit 的
+	// 原样值：nil 表示列值为 NULL。同样由实现解释（见 QuotaChecker）。
+	QuotaLimit *money.Amount
 }
 
 // Authenticator 从请求里取出凭证并解析出用户。
@@ -169,6 +175,32 @@ type RateLimiter interface {
 	Allow(keyID int64, rpm *int) (allowed bool, retryAfter time.Duration)
 }
 
+// QuotaChecker 判断一把 API Key 的额度还收不收得下这一笔请求。
+//
+// 与 RateLimiter 同一个做法：本包只声明自己要什么，具体实现
+// （internal/ledger/store 的 CheckQuota）不必 import 本包。limit 是
+// api_keys.quota_limit 的原样值（nil 表示列值为 NULL），**它的含义由实现
+// 解释**——把「NULL 是不限、0 是一个都不放行」写在两处，两处迟早会不一致。
+//
+// # 它是早拒绝，不是判据
+//
+// 这一层不加锁、不开事务，并发的两个请求可能都过得了它——所以它**不能**是
+// 唯一的判定。真正的判据在预留那个事务里（见 internal/ledger/store 的
+// SaveReservation），那里与插 pending 行同一个事务、靠行锁串行化。两处共用
+// internal/keyquota 里同一份口径，所以「同一份判据被调两次」不会有两份实现。
+//
+// 留着它的理由与限流那一处相同：超限的请求不该让我们为它读进最多
+// maxRequestBodyBytes 的内存，更不该走到预留——那会先把余额冻住，再因为
+// 额度把它拒掉。
+type QuotaChecker interface {
+	// CheckQuota 报告这把 key 还收不收得下这一笔。
+	//
+	// 返回 nil 表示放行；错误链里有 keyquota.ErrExceeded 表示超限；其余错误
+	// 表示这一次没查出来（连不上库、超时），入口会记一条日志然后**放行**——
+	// 理由见 serve 里那一段。
+	CheckQuota(ctx context.Context, keyID int64, limit *money.Amount) error
+}
+
 // Handler 是公共入口的 HTTP handler。
 type Handler struct {
 	Auth    Authenticator
@@ -180,6 +212,16 @@ type Handler struct {
 	// maxRequestBodyBytes 的内存，更不该走到预留——那会先把钱冻住，
 	// 再因为限流把请求拒掉。
 	RateLimiter RateLimiter
+
+	// Quota 按 key 的累计花费判断这一次要不要放行。为 nil 时不做这道早拒绝。
+	//
+	// 与 RateLimiter 接在同一个位置、同一个理由。区别是它**不是判据**：
+	// 真正的判定在预留那个事务里（见 QuotaChecker）。
+	//
+	// 「为 nil 就不做」是有意的默认，与 Idempotency 同一个取舍：没接上这条
+	// 链路时，行为与这道检查出现之前完全一样，而权威判定仍然在。反过来
+	// （nil 时回 501）会让一次装配疏漏表现为「所有请求都失败」。
+	Quota QuotaChecker
 
 	// Version 是发布版本，写进每个响应的 x-larkax-version 头。
 	// 见 docs/versioning.md：用户报问题时，「你调的是哪个版本」是最该先
@@ -287,6 +329,39 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 			observe.FromContext(r.Context()).Warn("请求超出该 Key 的 RPM 额度", "key_id", user.KeyID)
 			writeRateLimited(w, protocol, retryAfter)
 			return
+		}
+	}
+
+	// 额度判定接在限流之后、读请求体之前，理由与限流那一处逐字相同：
+	// 超限的请求不该让我们为它读进最多 maxRequestBodyBytes 的内存，更不该
+	// 走到预留——那会先把余额冻住，再因为额度把它拒掉。
+	//
+	// 排在限流**之后**是因为限流是进程内计数（不查库），先做便宜的那个，
+	// 被限流的请求就不必为此多一次数据库往返。
+	//
+	// # 这一层不是判据
+	//
+	// 它不加锁、不开事务，并发的两个请求可能都过得了它。真正的判定在预留
+	// 那个事务里（见 QuotaChecker），两处共用同一份口径。所以这里**不需要**
+	// 挡得住并发——挡得住的那一处才是判据。
+	if h.Quota != nil {
+		switch quotaErr := h.Quota.CheckQuota(r.Context(), user.KeyID, user.QuotaLimit); {
+		case quotaErr == nil:
+		case errors.Is(quotaErr, keyquota.ErrExceeded):
+			observe.FromContext(r.Context()).Warn("请求超出该 Key 的额度上限", "key_id", user.KeyID)
+			writeInsufficientQuota(w, protocol)
+			return
+		default:
+			// 查不出来（连不上库、超时）时**放行**，把判定交给预留那一层。
+			//
+			// 放行是安全的，而不是「赌一把」：权威判定读的是同一个库，这一次
+			// 读不出来而那一次读得出来时，超限的请求照样会在那里被拒；两次都
+			// 读不出来时，预留本身就失败了，请求不会因此被放过去。
+			//
+			// 反过来在这里拒掉，一次数据库抖动就会表现为「全站额度突然用尽」，
+			// 而那与「有人真的把额度花完了」是两个方向完全相反的排查。
+			observe.FromContext(r.Context()).Warn(
+				"额度早拒绝检查失败，交给预留那一层判定", "err", quotaErr)
 		}
 	}
 
@@ -509,14 +584,31 @@ func drainStream(events <-chan channel.StreamEvent) {
 	}()
 }
 
-// failUpstream 把一次上游调用的失败翻译成响应，并把原因写进日志。
+// failUpstream 把一次请求处理的失败翻译成响应，并把原因写进日志。
 //
 // 两件事都要做，因为它们是给不同的人看的：调用方拿到一句概括（不回上游的
 // 错误原文——那里面可能回显请求内容），运维从日志里拿到完整原因。
 // 只做前者的话，一次线上故障就没有任何现场。
+//
+// 进来的不全是上游的错误：这个函数是 serveOnce 与 serveStream 两条路上
+// **唯一**的失败出口，所以候选来源、预留、账本这些我们自己的环节也走这里
+// （见 httpStatusOfUpstream 的说明）。
 func (h *Handler) failUpstream(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, err error) {
-	status, message := httpStatusOfUpstream(err)
 	log := observe.FromContext(r.Context())
+
+	// 额度用尽要单独接住：它是唯一一个**状态码推不出码**的情形。
+	//
+	// 它与限流共用 429，但处置相反——限流等一会儿就对了，额度等多久都不会
+	// 变——所以码必须显式给出（见 writeInsufficientQuota）。走下面那条按
+	// 状态码推形状的路，调用方只会看到一个光秃秃的 429，然后照限流那样退避
+	// 重试，而它永远不会成功。
+	if errors.Is(err, keyquota.ErrExceeded) {
+		log.Warn("请求超出该 Key 的额度上限", "err", err)
+		writeInsufficientQuota(w, protocol)
+		return
+	}
+
+	status, message := httpStatusOfUpstream(err)
 	if status >= http.StatusInternalServerError {
 		// 5xx 意味着「不是调用方的错」，这类故障必须有人能看到。
 		// 措辞不写「上游失败」：5xx 里也有账本、候选来源这些我们自己的环节。

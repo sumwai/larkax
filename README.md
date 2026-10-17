@@ -31,9 +31,10 @@ What works today:
   [docs/idempotency.md](docs/idempotency.md)
 - The billing engine: the expression-based pricing rules, time-of-day and tiered
   pricing, reservation and settlement
-- `larkaxctl` management commands for API keys (including per-key rate limits),
-  users, runtime settings, snapshot and idempotency retention, master key rotation,
-  calendar data, and channels, models, aliases and pricing rules
+- `larkaxctl` management commands for API keys (including per-key rate limits and
+  per-key spending limits), users, runtime settings, snapshot and idempotency
+  retention, master key rotation, calendar data, and channels, models, aliases and
+  pricing rules
 - The reconcile job that checks the wallet snapshot against the ledger
 
 Not wired yet:
@@ -50,6 +51,7 @@ See [docs/development.md](docs/development.md) for how to build and run it.
 The reconciliation job is documented in [docs/reconciliation.md](docs/reconciliation.md),
 the calendar data behind peak/off-peak pricing in [docs/calendar-data.md](docs/calendar-data.md),
 the health and quota signals in [docs/channel-health.md](docs/channel-health.md),
+the per-key limits in [docs/limits.md](docs/limits.md),
 and the plugin contract in [docs/plugin-contract.md](docs/plugin-contract.md).
 
 ## What it will do

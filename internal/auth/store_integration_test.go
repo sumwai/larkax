@@ -16,6 +16,7 @@ import (
 	"github.com/pressly/goose/v3"
 
 	"github.com/sumwai/larkax/internal/migrate"
+	"github.com/sumwai/larkax/internal/money"
 )
 
 // 集成测试需要一个真实的 PostgreSQL。
@@ -587,5 +588,78 @@ func TestAuthenticateReadsRateLimitRPM(t *testing.T) {
 	setRateLimitRPM(ctx, t, db, created.ID, nil)
 	if got := read(); got != nil {
 		t.Errorf("把列写回 NULL 之后 RateLimitRPM = %v，期望 nil", *got)
+	}
+}
+
+// TestAuthenticateReadsQuotaLimit 是「额度上限有没有被取出来」的落点。
+//
+// 这一条存在的理由与上面那条相同，但代价更高一点：quota_limit 曾经**没有任何
+// 读者**（写得进去、列得出来，而设了上限什么都不发生，见 issue #200）。那种
+// 缺口在库里看不出来——列上有值，读的那一侧只是没人写。所以「读出来了吗」
+// 必须有一条用例钉住，而不是靠「代码里搜一下有没有人读」。
+//
+// 与 RateLimitRPM 一样，NULL 与「0」要分得开：0 是「一分钱都不放行」，
+// NULL 是「没设上限」，两者合并是这一整件事里最不能犯的错。
+func TestAuthenticateReadsQuotaLimit(t *testing.T) {
+	ctx := t.Context()
+	db := testDB(ctx, t)
+	store := New(db)
+
+	created, owner := createKey(ctx, t, db, store)
+
+	read := func() *money.Amount {
+		t.Helper()
+		got, err := store.Authenticate(ctx, request(ctx, "x-api-key", created.Plaintext))
+		if err != nil {
+			t.Fatalf("认证失败: %v", err)
+		}
+		if got.ID != owner.ID {
+			t.Fatalf("用户 ID = %d，期望 %d", got.ID, owner.ID)
+		}
+		return got.QuotaLimit
+	}
+
+	// 一、默认是 NULL：这一列在创建时没人写，新 key 必然是 NULL。
+	if got := read(); got != nil {
+		t.Errorf("新 key 的 QuotaLimit = %v，期望 nil（列值为 NULL）", *got)
+	}
+
+	// 二、写进去的数原样读出来。0 要能读成一个非 nil 的 0，而不是落回 nil。
+	for _, want := range []string{"100", "0", "0.00000001", "12345.67890123"} {
+		setQuotaLimit(ctx, t, db, created.ID, &want)
+
+		got := read()
+		if got == nil {
+			t.Fatalf("列里写了 %s，读出来是 nil——NULL 与具体金额被合并了", want)
+		}
+		// 比**数值**而不是比文本：列是 numeric(20, 8)，而这里的口径是
+		// 「这个数对不对」，不是「它打出来几位小数」。
+		if wantAmount := money.MustParse(want); got.Cmp(wantAmount) != 0 {
+			t.Errorf("QuotaLimit = %s，期望 %s", got, wantAmount)
+		}
+	}
+
+	// 三、写回 NULL 之后再读，必须回到 nil：否则「取消额度」做不到。
+	setQuotaLimit(ctx, t, db, created.ID, nil)
+	if got := read(); got != nil {
+		t.Errorf("把列写回 NULL 之后 QuotaLimit = %v，期望 nil", *got)
+	}
+}
+
+// setQuotaLimit 把一把 key 的额度上限写成指定值。传 nil 写回 NULL。
+//
+// 直接 UPDATE 而不走 auth.UpdateLimits：这一条用例测的是**读**那一侧，
+// 写那一侧有自己的用例（limits_integration_test.go）。从这里绕过去，读的
+// 口径变了这条会失败，而写的口径变了那条会失败——两条各自指向一处。
+func setQuotaLimit(ctx context.Context, t *testing.T, db *sql.DB, keyID int64, limit *string) {
+	t.Helper()
+
+	var value any
+	if limit != nil {
+		value = *limit
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE api_keys SET quota_limit = $2 WHERE id = $1`, keyID, value); err != nil {
+		t.Fatalf("改 key 的额度上限失败: %v", err)
 	}
 }
