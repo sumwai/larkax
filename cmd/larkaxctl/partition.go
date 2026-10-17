@@ -193,7 +193,7 @@ func runPartitionCheck(args []string) error {
 //
 // 折成纯函数是为了让判据能**逐项**测。三项里有两项要靠往兜底分区里真的写行
 // 才造得出来，而 `request_snapshots_default` 那一项不能那么造：那张表的行数
-// 是**全库共享**的状态，而 `internal/snapshotwire` 自己的集成测试断言它是空
+// 是**全库共享**的状态，本包的 TestPartitionCheckPassesWhenClean 断言它是空
 // 的（见 TestPartitionProblemsFlagsEachCondition 的说明）。判据与取值分开之
 // 后，这一层不必连库就能把三种条件各测一遍。
 func partitionProblems(missing []string, usageDefaultRows, snapshotDefaultRows int64) []string {
