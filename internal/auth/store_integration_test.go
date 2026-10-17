@@ -497,6 +497,9 @@ func TestResolveUser(t *testing.T) {
 		if err == nil {
 			t.Fatal("不存在的用户没有报错")
 		}
+		if !errors.Is(err, ErrUserNotFound) {
+			t.Fatalf("错误链里没有 ErrUserNotFound：%v", err)
+		}
 		if errors.Is(err, ErrUnauthenticated) {
 			t.Fatalf("「用户不存在」被归为认证失败: %v", err)
 		}

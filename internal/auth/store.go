@@ -250,6 +250,14 @@ func nullableAmount(v *money.Amount) any {
 	return v.String()
 }
 
+// ErrUserNotFound 表示按标识找不到用户。
+//
+// 单独一个哨兵是为了让命令行把它归到「要查的那一行不存在」（退出码 4），
+// 而不是与「其他失败」（退出码 1）混进同一个退出码：前者的下一步是换一个
+// 标识或先建用户，后者是去看这次的报错本身。按错误文本判断做不到这一点
+// ——措辞会随改动而变。
+var ErrUserNotFound = errors.New("找不到用户")
+
 // ResolveUser 把「用户 ID 或用户名」解析成一个用户。
 //
 // 命令行便利：运维手里通常只有用户名，而 api_keys 认的是 user_id。
@@ -278,7 +286,7 @@ func (s *Store) ResolveUser(ctx context.Context, ref string) (User, error) {
 	}
 
 	if errors.Is(err, sql.ErrNoRows) {
-		return User{}, fmt.Errorf("找不到用户 %q", ref)
+		return User{}, fmt.Errorf("%w: %q", ErrUserNotFound, ref)
 	}
 	if err != nil {
 		return User{}, fmt.Errorf("查询用户失败: %w", err)
