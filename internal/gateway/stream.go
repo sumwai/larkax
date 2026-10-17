@@ -700,6 +700,22 @@ func (f *streamFreeze) produced(est *tokens.StreamEstimator, measured *channel.U
 // （一次几 token 的流会打出上百次数据库往返）。对齐之后，检查点落在**跨过段
 // 边界**那一刻，与「按累计 token 跨过阈值」是同一件事。
 func (f *streamFreeze) pending(produced int64) int64 {
+	// 阈值段非正时**不补冻**，也就走不到下面那个整除。
+	//
+	// 这条守卫落在调用点而不是 roundUpTo 里：roundUpTo 是一个纯数学小工具，
+	// 它的前置条件（step 为正）由这里保证；把「step<=0」解释成「不递进冻结」
+	// 是这一层的语义，塞进那个函数反而会让它悄悄吞掉别处传错的段而看不出来。
+	//
+	// 为什么它今天够得着：pumpStream 无论 req.Streamed 真假都会造 streamFreeze
+	// （见它的调用点），而 begin 只在**流式**那一支挡了 StreamFreezeStep<=0
+	// （见 gateway.go）。于是「ChatStream + Streamed=false + 阈值段为 0」这条
+	// 路上 f.step 就是 0，第一次产出就撞上 roundUpTo 的整数除零 panic——而
+	// 崩点离原因（一个没设的字段）很远。零值的语义是「不递进冻结」，不是
+	// 「每次事件都查」：不补冻即可，不该崩。
+	if f.step <= 0 {
+		return 0
+	}
+
 	want := roundUpTo(produced, f.step) + f.step
 	if want > f.max {
 		want = f.max
@@ -779,9 +795,11 @@ func (f *streamFreeze) markUnderfrozen(ctx context.Context, err error) {
 
 // roundUpTo 把 n 向上对齐到 step 的整数倍。
 //
-// step 必须为正（装配期与 Gateway.StreamFreezeStep 的注释保证），n 为负数时
-// 返回 0：调用方给的是「已经产出了多少 token」，负值表达不出来，返回 0 相当于
-// 「还没产出」，不会算出一个小于已冻额的目标。
+// step 必须为正：step 为 0 时 `(n+step-1)/step` 是整数除零、会 panic，所以
+// 调用方（pending）在进来之前就把 step<=0 挡掉了——这一段前置条件由它保证，
+// 这里不重复判（就在这里判的话，别处传错的段会被悄悄吞成 0，看不出来）。
+// n 为负数时返回 0：调用方给的是「已经产出了多少 token」，负值表达不出来，
+// 返回 0 相当于「还没产出」，不会算出一个小于已冻额的目标。
 func roundUpTo(n, step int64) int64 {
 	if n <= 0 {
 		return 0

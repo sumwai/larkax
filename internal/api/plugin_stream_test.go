@@ -111,6 +111,13 @@ func TestOnStreamTerminateTruncatesButStillBills(t *testing.T) {
 		t.Errorf("预留释放 %d 次，期望 0 次（结算已经解冻了这笔钱）",
 			len(h.reservations.released))
 	}
+	// 补冻一次都不该发生：夹具的阈值段（65536）远大于声明的 max_tokens（1000），
+	// 初始那一笔就把整笔冻满（见 pluginReservations.added）。它一旦发生，说明
+	// 这些用例的前提变了——那时它走的是递进冻结那条路，而不再是我们以为的非补冻
+	// 路径，断言的结果也就不再有意义。
+	if got := h.reservations.added; got != 0 {
+		t.Errorf("递进冻结补冻 %d 次，期望 0 次（阈值段大于声明上界，初始预留即冻满整笔）", got)
+	}
 }
 
 // ── onUsage ───────────────────────────────────────────────────────────

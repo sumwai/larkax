@@ -24,6 +24,8 @@ curl -s 127.0.0.1:9090/metrics
 | `larkax_billing_capped_settlements_total` | counter | `protocol` | 结算金额被预留上界截住的次数，按入口协议分。`protocol` 取 `channel.Protocol` 的取值：`openai` / `anthropic` / `openai-responses` / `systemone` |
 | `larkax_billing_capped_amount_total` | counter | `protocol`, `asset` | 结算被预留上界截住的那部分**金额**，按入口协议与资产品种分。与上一条是一对：那个数次数，这个数少收了多少钱。`protocol` 同上一行；`asset` 取 `ledger.Asset` 的取值：`CNY`。**单位是最小计价单位（`money.Scale` 位定点，1e-8），不是元**——理由见下面的命名约定 |
 | `larkax_billing_unbilled_settlements_total` | counter | 无 | 未计费的结算次数：上游失败，或请求在结算之前中止 |
+| `larkax_billing_stream_underfrozen_total` | counter | 无 | 流式请求**补冻没冻上而放行**的次数：写库失败，或算不出价（取规则 / 编译 / 求值失败）。之后产出的 token 没有对应冻结额，结算到它们时会撞上界，差额由平台承担。按设计应当一直是 0 |
+| `larkax_billing_stream_balance_exhausted_total` | counter | 无 | 因可用余额不足被**我们切断**的流式请求次数。调用方收到一条流内错误帧，它的文案说的是充值而不是重试（见 [limits.md](limits.md)）。替代了原先「按声明上界冻满而遭 429 拒掉」的那个形状 |
 | `larkax_auth_failures_total` | counter | `reason` | 认证失败被回以 401 的次数，按失败原因分。`reason` 取 `internal/auth` 的 `Reason`：`missing_credential` / `malformed_credential` / `key_not_found` / `key_disabled` / `key_revoked` / `key_inactive` / `key_expired` / `user_inactive`，外加 `unclassified` |
 | `larkax_ratelimit_exact` | gauge | 无 | RPM 限流的计数**当前**是否取自共享存储：`1` 精确（计数在 Redis 里，各实例共用一份，放行总量不超过配置值），`0` 近似（退回进程内计数，各实例各算各的，放行量偏大）。**没设置过就不输出**，所以「没有这一行」表示这个实例上没接限流器（worker 角色） |
 | `larkax_ratelimit_store_errors_total` | counter | 无 | 共享计数存储（Redis）调用失败的次数。每发生一次，就有一个判定退回进程内计数——也就是上面那个仪表变成 `0` 的原因 |
@@ -78,6 +80,18 @@ SELECT request_id, reserved_amount, computed_amount,
 
 **`unbilled` 上涨。** 上游失败或请求中途中止。它与 `settlements_total` 的比值
 是上游健康度的第一手数据。
+
+**`stream_underfrozen_total` 大于 0。** 流式请求的补冻没冻上就放行了——库在拒绝
+写入，或定价侧算不出价（取规则 / 编译 / 求值失败）。按设计应当一直是 0：它一涨，
+说明**这一次请求的账已经对不上预留**，之后产出的 token 没有冻结额，结算撞上界、
+差额由平台承担，而对账看不出来（撞上界时两边记的是同一个被截小的数，账目仍然是
+平的）。所以它是那件事唯一的即时信号。要分「库在报错」还是「算不出价」，去日志里
+按 `request_id` 查那条告警——它把失败的 `error` 原样记下来。
+
+**`stream_balance_exhausted_total` 上涨。** 我们因为用户余额不够继续冻而切断了
+一条流（本轮不引入透支），它与「上游失败」是两回事，处置也不同：那一条流**不会**
+被记成渠道的失败（不污染渠道健康度），调用方收到的错误帧文案指向充值。它涨得多
+与 `capped` 指的不是同一件事——那里是我们的上界算错，这里多半是用户真的没钱了。
 
 **`settlements_total{usage_source="estimated"}` 上涨。** 这笔账是按估算的用量
 收的，误差范围见 `internal/tokens` 的 `ErrorBounds`。它不该成为常态。

@@ -68,8 +68,10 @@ type pluginReservations struct {
 
 	// added 是 AddReservation（流式递进冻结的补冻）被调用的次数。
 	//
-	// 这些用例里它按前提应当是 0（见那个方法的注释），记下来是为了让
-	// 「前提变了」这件事有一个可以断言的地方。
+	// 这些用例里它按前提应当是 0（见那个方法的注释）：夹具的阈值段（65536）
+	// 远大于声明的 max_tokens，初始那一笔就把整笔冻满。断言在 plugin_stream_test.go
+	// 的 onStream 用例里（见 TestOnStreamTerminateTruncatesButStillBills）——
+	// 记下来就是为了让「前提变了」这件事有一个会红的落点，不能只自增没人读。
 	added int
 
 	// claimTimes 是「头几次预留落库时报键已被占住」的次数（claimErr 为 nil

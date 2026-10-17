@@ -333,8 +333,12 @@ func TestBuildReadsStreamFreezeStep(t *testing.T) {
 // 阈值段超出允许范围或非正时必须在装配期被拒。
 //
 // 非正的值会让每一个流式请求都失败（网关拒掉整条路），而这与代码故障同形；
-// 大于输出上界的值让第一段就冻满整笔，等于把递进冻结关掉——「关掉」与
-// 「配得很宽」在请求上长得一模一样。
+// 超过出厂输出上界默认值（65536）的段让初始预留就冻满整笔，等于把递进冻结
+// 关掉——「关掉」与「配得很宽」在请求上长得一模一样。
+//
+// 越界值写**字面量** 65537，不写 maxStreamFreezeStep + 1：后者是拿实现里的
+// 常量测实现里的常量，把上界改成多少这条用例都绿，钉不住这个数（见 AGENTS.md
+// 的「用常量测常量等于没测」）。边界值本身装得起来那一半见下一条。
 func TestBuildRefusesOutOfRangeStreamFreezeStep(t *testing.T) {
 	db := testDB(t)
 
@@ -344,7 +348,7 @@ func TestBuildRefusesOutOfRangeStreamFreezeStep(t *testing.T) {
 	}{
 		{"零", `0`},
 		{"负数", `-1`},
-		{"超过上界", strconv.Itoa(maxStreamFreezeStep + 1)},
+		{"超过上界", `65537`},
 	}
 
 	for _, tc := range cases {
@@ -356,6 +360,31 @@ func TestBuildRefusesOutOfRangeStreamFreezeStep(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), streamFreezeStepKey) {
 				t.Errorf("错误信息 %q 里没有键名：配错的人要能一眼看出改哪个键", err.Error())
+			}
+		})
+	}
+}
+
+// 阈值段的**边界值本身**必须装得起来。
+//
+// 上一条只说明「界外会失败」，它分辨不出「界画错了一位」：把上界写成 6553
+// （少一位）时，上一条照样全过，而一个完全合理的配置会在启动时被拒；反过来
+// 把上界抬回 1<<20 时，上一条也全过，而那条要防的配置又放行了。这一条把上界
+// 钉在 65536：它装得起来，界往内挪一格它就红。下界 1 同理。
+func TestBuildAcceptsStreamFreezeStepAtBounds(t *testing.T) {
+	db := testDB(t)
+
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"上界（65536，出厂输出上界默认值）", `65536`},
+		{"下界（一段）", `1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := buildWithSetting(t, db, streamFreezeStepKey, tc.value); err != nil {
+				t.Fatalf("settings.%s = %s 是允许范围内的值，装配却失败了：%v",
+					streamFreezeStepKey, tc.value, err)
 			}
 		})
 	}

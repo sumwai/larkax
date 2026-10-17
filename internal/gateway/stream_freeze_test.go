@@ -521,6 +521,45 @@ func TestChatStreamRejectsMissingFreezeStep(t *testing.T) {
 	}
 }
 
+// 阈值段为 0 而请求又**不是流式**的（Streamed=false）时必须不 panic。
+//
+// pumpStream 无论 Streamed 真假都会造 streamFreeze（见它的调用点），而 begin
+// 只在**流式**那一支挡了 StreamFreezeStep<=0（见 gateway.go）。于是「ChatStream
+// + Streamed=false + 阈值段为 0」会让 pumpStream 拿着 step=0 一路跑到补冻那一步，
+// 在 roundUpTo 的整数除零上 panic——而崩点离原因（一个没设的字段）很远。网关是
+// 公开类型，一个忘了设这个字段的新夹具就能撞上。
+//
+// 零值的语义是「不递进冻结」：这条流该照常跑完，一次补冻都不发生，也不崩。
+func TestChatStreamWithZeroFreezeStepDoesNotPanic(t *testing.T) {
+	h := newHarness(t, withStreamFreezeStep(0))
+	useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
+		1: append(longScript(8, 200), channel.StreamEvent{Kind: "done", FinishReason: "stop"}),
+	}})
+
+	// request() 的 Streamed 为假，走的是 begin 的非流式那一支——正是那条
+	// 绕开了守卫的路。它的 max_tokens（500）在单次上限之内，于是一路走到
+	// pumpStream，产出足够触发补冻检查。
+	req := request()
+
+	res, err := h.gw.ChatStream(context.Background(), req, upstreamRequest(), Hooks{})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	events := collect(t, res)
+
+	if got := events[len(events)-1].Kind; got != "done" {
+		t.Errorf("最后一条事件是 %q，期望 done（流该照常跑完）", got)
+	}
+	for _, ev := range events {
+		if ev.Kind == "error" {
+			t.Errorf("阈值段为 0 不该注入错误帧，实际有: %v", ev.Err)
+		}
+	}
+	if got := len(h.reservations.added); got != 0 {
+		t.Errorf("阈值段为 0 时不该补冻，实际补了 %d 次", got)
+	}
+}
+
 // 无效的 max_tokens 仍然在**开始之前**被拒（4xx 那条判据在入口层，这里钉的是
 // 它没有被递进冻结改掉）：先冻一段不等于「没有上界也能跑」。
 func TestChatStreamRejectsInvalidMaxTokensBeforeStreaming(t *testing.T) {
