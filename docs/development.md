@@ -427,6 +427,21 @@ LARKAX_CHANNEL_CREDENTIAL=<CHANNEL_CREDENTIAL> go run ./cmd/larkaxctl channel cr
 读取路径把 `models` 当白名单用，空数组的渠道永远选不中。
 stdout 只有新渠道的 ID，其余信息走 stderr。
 
+**`--setting`：键归适配器解释，选路层不认。** 它是渠道私有差异的归属地
+（`channels.setting`，一个自由形态的 JSON 对象）：某个渠道「大体像 OpenAI
+但有几处不一样」时，那几处属于这个渠道与它的协议族之间的差别，由**该渠道
+`type` 指向的那个适配器**解释；选路层不读这里的任何键——选路要认的判据
+（能力、上下文上限）在 `model_catalog` 那边，不从这份 jsonb 里读第二份。
+因此管理面**不做键名校验**：拼错一个键不会报错，只会静默地不生效。
+
+**当前没有任何适配器读它。** 四个适配器与选路层一次都没按 `setting` 做判断，
+所以写进去的键今天对请求路径没有任何影响。这件事会在写入成功后（`channel
+create` / `update` 给了 `--setting` 时）打到 stderr 上，`channel list` 也会
+把带着 `setting` 的渠道单独点出来——一个配了却不生效的键，从库里和清单上
+看与一个生效的配置完全一样，不说出来就只能等人去查代码。第一个键被某个
+适配器实现之后，这两处提示会一起消失（判据是 `internal/channel` 里的
+`SettingReadByAdapters`，由同包的用例盯着它与代码是否一致）。
+
 **三、配别名：这家上游对同一个模型叫什么名字。**
 
 ```sh
