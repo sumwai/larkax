@@ -214,7 +214,8 @@ func settledCharge(t *testing.T, userID int64, requestID, amount string) *pipeli
 	}
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
-		Entries: consumeEntries(t, userID, amount),
+		PricedAt: pricedAt(),
+		Entries:  consumeEntries(t, userID, amount),
 	}
 	charge.Settlement.Actual = amt
 	return charge
