@@ -47,16 +47,34 @@ var ErrModelNotFound = errors.New("规范模型不存在")
 
 // Capabilities 是 model_catalog 上的能力矩阵。
 //
-// 六个布尔各对应一列，一律 NOT NULL DEFAULT false，所以这里没有「未知」这个
-// 状态：没写进目录就等于不支持。这与 context_limit 那种「0 表示未知」的
-// 数值列不同，见 Model 的注释。
+// # 六个字段都是三态
+//
+// 每一项是一个指针，对应库里那一列的三态：
+//
+//	nil    未知：这一列是 NULL，从没配过。**这一项不参与任何判据**
+//	false  明确声明不支持：请求用到它时这条候选出局
+//	true   支持
+//
+// 「未知」必须与「不支持」分开。写入侧只有显式开关（`larkaxctl model`
+// 的 --tools 等），所以一条只填了名字的记录在库里是六个 NULL；按「不支持」
+// 读会让带工具的请求从此选不到它，而那个上游其实支持工具（见 #485）。
+//
+// 判别指针而不是再包一层结构体：`rows.Scan` 直接认 `*bool`（NULL 落成 nil），
+// 传参方向也一样（nil 落成 NULL，见 driver.DefaultParameterConverter）。
+// 两个方向都不需要解包代码，也就不存在「某一处忘了转换」这个失败模式。
+//
+// # 与两个上限列同一个口径
+//
+// context_limit / output_limit 也是可空的，读出来的「未知」不参与判据
+// （那里用 0 表示未知，因为 0 个 token 的模型不存在；布尔列没有多余的取值
+// 可用，所以用指针）。见 Model 的注释。
 type Capabilities struct {
-	Reasoning bool
-	Tools     bool
-	Vision    bool
-	Audio     bool
-	Cache     bool
-	Batch     bool
+	Reasoning *bool
+	Tools     *bool
+	Vision    *bool
+	Audio     *bool
+	Cache     *bool
+	Batch     *bool
 }
 
 // Model 是 model_catalog 里的一条规范模型。
@@ -67,6 +85,10 @@ type Capabilities struct {
 // 三个 limit 没填时也是 NULL，读出来是 0。**「未知」与「0」在库里是同一个
 // 状态**，所以这里不造一个额外的区分——真正需要区分的是「0 个 token」，
 // 而那样的模型不存在。
+//
+// 六个能力列同样允许为空，但那里**必须**有第三种状态（见 Capabilities）：
+// 「没配过」与「配成不支持」在判据里处置相反，合并成一个零值就是本条要
+// 修掉的那个缺陷。
 //
 // 两个日期是可空的，用指针：nil 表示目录里没填，而不是某个「零日期」。
 type Model struct {
@@ -317,7 +339,7 @@ func (c *Catalog) OverridesFor(ctx context.Context, canonicalModel string, chann
 // raw、reasoning_options 两个 JSON 列一起解出来——那些列对选路没有用，
 // 而热路径上每一条请求都要付这份解码成本。
 //
-// 六个能力布尔一起读，不做「只读判据用到的那三项」的裁剪：它们在同一行上，
+// 六个能力一起读，不做「只读判据用到的那三项」的裁剪：它们在同一行上，
 // 少读三列省不下一次往返，却会让这个结构体的字段看起来像「这个模型只有
 // 三项能力」。判据用到哪几项是**读侧**的事（见 internal/route 的 ModelProfile）。
 //
@@ -328,11 +350,10 @@ func (c *Catalog) OverridesFor(ctx context.Context, canonicalModel string, chann
 // 一列硬接一条假的消费，与 internal/channels 的 candidateQuery 对 failures
 // 那一列的处置同一条理由。
 type Constraints struct {
-	// Capabilities 是六个能力布尔，一律 NOT NULL DEFAULT false，
-	// 所以这里没有「未知」这个状态：没写进目录就等于不支持。
+	// Capabilities 是六个能力列，**三态**：nil 未知、false 明确不支持、
+	// true 支持（见 Capabilities）。选路只判其中三项，理由同上。
 	Capabilities Capabilities
-	// ContextLimit 是上下文窗口（输入 + 输出）。**0 表示未知**（库里是 NULL）
-	// ——与能力列不同，这一列允许为空。
+	// ContextLimit 是上下文窗口（输入 + 输出）。**0 表示未知**（库里是 NULL）。
 	ContextLimit int
 	// OutputLimit 是单次输出的上限。0 表示未知。
 	OutputLimit int
@@ -341,10 +362,10 @@ type Constraints struct {
 // Constraints 按规范名读回选路要的那几列。
 //
 // 目录里没有这个模型时返回 ErrModelNotFound：那是**未知**，不是「不支持」
-// ——调用方据此放行（见 internal/route 的 ModelProfile 注释）。两者的区别
-// 在库里看不出来：一条采集到一半的记录与一条没采集到的记录，长得很不一样，
-// 而「有一条记录但能力列全是 false」与「压根没有这条记录」恰恰是后者更像
-// 「未知」的那一侧。
+// ——调用方据此放行（见 internal/route 的 ModelProfile 注释）。它与「有一条
+// 记录、但六个能力列都是 NULL」是两件事，而两者在选路里的处置相同（放行）：
+// 前者没有依据可判，后者有明确依据——依据说「没配过」。分得开是为了让
+// 排查能落到正确的地方（要去补一条记录，还是要去补几个开关）。
 func (c *Catalog) Constraints(ctx context.Context, canonicalName string) (Constraints, error) {
 	if canonicalName == "" {
 		return Constraints{}, errors.New("规范模型名为空")
@@ -542,9 +563,11 @@ SELECT
 
 // constraintsQuery 是热路径那条查询：只取选路判据要的列。
 //
-// 与 modelQuery 一样对两个上限套 COALESCE（NULL 折成 0 = 未知），能力列
-// 原样读——它们是 NOT NULL，false 是一个真实的值。两个列族的这个差别写在
-// Capabilities 与 Model 的注释里，改这张表的列时要一起看。
+// 两个上限套 COALESCE（NULL 折成 0 = 未知）而能力列原样读：上限那一侧
+// 只有「未知」一种空值含义，折成 0 之后读侧少一次解包；能力列的三态
+// （NULL / false / true）一个都不能少，所以 NULL 必须原样传到 Go 侧，
+// 由 *bool 接住（见 Capabilities）。两个列族的这个差别写在 Capabilities
+// 与 Constraints 的注释里，改这张表的列时要一起看。
 const constraintsQuery = `
 SELECT
     COALESCE(m.context_limit, 0),

@@ -54,11 +54,18 @@ func withCache(rate float64, n int64) func(*Candidate) {
 
 // withProfile 摆上模型目录对这条候选所服务模型的能力与上限。
 //
-// 传 nil 是**未知**（目录里没有这个模型），与「有记录、六项全 false」
-// 不是同一件事——那正是目录判据里那对相反的结论（见 ModelProfile）。
+// 传 nil 是**未知**（目录里没有这个模型），与「有记录、某一项没配过」
+// 都是「没有依据可判」；而「有记录、写了 false」是**有依据的不支持**——
+// 那正是目录判据里那对相反的结论（见 ModelProfile）。
 func withProfile(p *ModelProfile) func(*Candidate) {
 	return func(c *Candidate) { c.Profile = p }
 }
+
+// declared 造一项**已声明**的能力：true 支持、false 明确不支持。
+//
+// 没配过是另一个状态，用 nil 写出来（不经过这个助手）——同上面那三个造
+// 「有数据」的助手：把「未知」与「声明了」分得开，是用例要表达的东西。
+func declared(v bool) *bool { return &v }
 
 // 下面三个助手都带 Confidence 1.0：它们造的是**一次实测**的额度状态，
 // 而实测的置信度就是 1（见 internal/quota 的 confidenceAPIQuery）。

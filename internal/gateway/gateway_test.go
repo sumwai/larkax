@@ -1659,7 +1659,10 @@ func TestRequestIDOfWithoutValue(t *testing.T) {
 func TestRouteHooksSeeProfileFilteredCandidates(t *testing.T) {
 	h := newHarness(t, func(h *harness) {
 		noTools := candidate(1, "gpt-4o")
-		noTools.Profile = &route.ModelProfile{Tools: false}
+		// 目录**明确声明**不支持工具（false）——与「没配过」（nil）不同：
+		// 后者不参与判据，这条用例要的是前者。
+		unsupported := false
+		noTools.Profile = &route.ModelProfile{Tools: &unsupported}
 		h.candidates.cands = []route.Candidate{noTools}
 	})
 
