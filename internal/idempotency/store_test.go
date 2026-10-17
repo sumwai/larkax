@@ -11,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/sumwai/larkax/internal/auth"
+	"github.com/sumwai/larkax/internal/dberr"
 	"github.com/sumwai/larkax/internal/testdb"
 )
 
@@ -146,6 +149,39 @@ func claim(t *testing.T, db *sql.DB, c *Claim, reservationID int64) error {
 }
 
 // ── 声明与读取 ──────────────────────────────────────────────────────────
+
+// TestClaimForMissingAPIKeyIsConstraintConflict 钉住幂等写入的外键分类。
+//
+// (api_key_id, key) 的唯一键由 ON CONFLICT 处理，所以「撞键」不会以 23505
+// 冒上来；能冒上来的是 api_key_id 与 billing_request_id 两条外键，而本包
+// 没有为它们准备具名哨兵。兜底哨兵在这里要说清的是「约束拒绝了这次写入」，
+// 而不是把它与「连不上库」混在同一类里。
+func TestClaimForMissingAPIKeyIsConstraintConflict(t *testing.T) {
+	db := testDB(t)
+
+	err := claim(t, db, &Claim{
+		APIKeyID: 900000000000000,
+		Key:      unique("key"),
+		Hash:     hashOf(0x33),
+	}, 0)
+	if err == nil {
+		t.Fatal("api_key_id 不存在时应当被外键挡下")
+	}
+	if !errors.Is(err, dberr.ErrConstraintViolation) {
+		t.Fatalf("错误链里没有 dberr.ErrConstraintViolation：%v", err)
+	}
+
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("错误链里没有驱动的原始错误：%v", err)
+	}
+	if pgErr.Code != "23503" {
+		t.Errorf("SQLSTATE = %q，期望 23503", pgErr.Code)
+	}
+	if pgErr.ConstraintName != "idempotency_keys_api_key_id_fkey" {
+		t.Errorf("约束名 = %q，期望 idempotency_keys_api_key_id_fkey", pgErr.ConstraintName)
+	}
+}
 
 func TestClaimThenLookupRoundTrip(t *testing.T) {
 	db := testDB(t)

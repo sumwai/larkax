@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/sumwai/larkax/internal/dberr"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/testdb"
 )
@@ -79,6 +82,41 @@ func request(ctx context.Context, header, value string) *http.Request {
 	r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/chat/completions", nil)
 	r.Header.Set(header, value)
 	return r
+}
+
+// TestCreateKeyForMissingUserIsConstraintConflict 钉住 api_keys 的写路径对
+// **没被具名认出来的外键**的分类。
+//
+// 造法：直接给一个 users 里不存在的 id。生产上走到这里的路径是并发——
+// `apikey create` 先把标识解析成用户，插入之前那个用户被删了。判据与
+// 造法无关：撞上的都是 api_keys_user_id_fkey。
+//
+// 断言三件事，缺一不可：
+//
+//   - 错误链里有 dberr.ErrConstraintViolation（退出码因此落到 4，不是 1）
+//   - 驱动错误仍在链里，约束名能取回（分类不替掉现场）
+//   - 它没有被认成任何具名哨兵——这条外键本包没有更精确的名字
+func TestCreateKeyForMissingUserIsConstraintConflict(t *testing.T) {
+	db := testDB(t.Context(), t)
+
+	_, err := New(db).Create(t.Context(), CreateParams{UserID: 900000000000000})
+	if err == nil {
+		t.Fatal("用户不存在时建 key 应当被外键挡下")
+	}
+	if !errors.Is(err, dberr.ErrConstraintViolation) {
+		t.Fatalf("错误链里没有 dberr.ErrConstraintViolation：%v", err)
+	}
+
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("错误链里没有驱动的原始错误：%v", err)
+	}
+	if pgErr.Code != "23503" {
+		t.Errorf("SQLSTATE = %q，期望 23503", pgErr.Code)
+	}
+	if pgErr.ConstraintName != "api_keys_user_id_fkey" {
+		t.Errorf("约束名 = %q，期望 api_keys_user_id_fkey", pgErr.ConstraintName)
+	}
 }
 
 // TestCreateThenAuthenticate 是「创建与校验同口径」的落点。

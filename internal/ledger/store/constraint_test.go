@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/sumwai/larkax/internal/dberr"
 )
 
 // 这一组用例钉的是 ErrConstraintViolation 这条**兜底**判据，以及它与
@@ -62,8 +64,8 @@ func TestIsConstraintViolation(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isConstraintViolation(tc.err); got != tc.want {
-				t.Errorf("isConstraintViolation(%v) = %v，期望 %v", tc.err, got, tc.want)
+			if got := dberr.IsConstraintViolation(tc.err); got != tc.want {
+				t.Errorf("dberr.IsConstraintViolation(%v) = %v，期望 %v", tc.err, got, tc.want)
 			}
 		})
 	}

@@ -32,6 +32,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/sumwai/larkax/internal/dberr"
 	"github.com/sumwai/larkax/internal/plugin"
 )
 
@@ -339,7 +340,12 @@ func (s *Store) Publish(ctx context.Context, pub Publication) (Result, error) {
 			         (SELECT COALESCE(MAX(generation), -1) + 1 FROM plugins WHERE key = $1))
 			 RETURNING generation`,
 			pub.Key, pub.Version, pub.Name, pub.Source, string(pub.Meta)).Scan(&res.Generation); scanErr != nil {
-			return Result{}, fmt.Errorf("写入插件 %s 失败: %w", pub.Key, scanErr)
+			// 上面那次 SELECT 到这次 INSERT 之间，另一次发布可能已经把同一个
+			// (key, version) 插进去了；唯一键会挡下后到的那一次并给出 23505。
+			// 本包没有为它准备具名哨兵（它不是调用方按名字处理的失败），
+			// 兜底哨兵至少让「约束冲突」这个分类存在。
+			return Result{}, dberr.ConstraintFailure(
+				fmt.Errorf("写入插件 %s 失败: %w", pub.Key, scanErr))
 		}
 
 	default:
