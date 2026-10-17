@@ -219,6 +219,12 @@ on the public port by design — the response names the role, so a misconfigured
 is obvious rather than mysterious. Building alone is not enough to run it — see
 [docs/development.md](docs/development.md) for the full picture.
 
+A healthy service is not the same as a successful inference call. The call also
+needs an upstream account, the model / channel / alias / price chain, a user with
+a wallet, and an API key — and money in that wallet. There is no top-up entry
+point yet, so a freshly set up deployment cannot get past the reservation step.
+[docs/development.md](docs/development.md) walks through the chain.
+
 ## License
 
 AGPL-3.0. See [LICENSE](LICENSE).
