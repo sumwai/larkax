@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/tokens"
 )
@@ -62,18 +63,37 @@ var ErrUnknownUsageSource = errors.New("未知的用量来源")
 //
 // 上游成本的**口径还没定**（适配器按自己的计价口径算，还是从上游响应的用量
 // 字段折算），而填一个猜出来的数比不填更糟——见 issue #163 的第 2 条。
-// 这一列留给那一半。
+// 这一列留给那一半：**今天全仓库没有任何写入点**，
+// pipeline.Outcome.UpstreamCost 也还没有生产者（它那处注释同样标了「没有来源」）。
 //
-// # unit_prices 为什么不写
+// 尤其不能拿这次收的钱顶上：那是售价，混起来毛利永远是零。
 //
-// 这一列**不在这条 INSERT 的列表里**，于是取库上的默认值 `'{}'`。
-// 它比可空的那几列更难发现：落库之后看起来像「这次没有单价」，而实际是
-// 「这一列这一轮不填」——两种含义在那一列上长得一样，而它是 NOT NULL，
-// 连「没写」这个信号都没有。
+// # unit_prices 写什么
 //
-// 这次结算按哪些单价算的，要复算得回到 billing_requests 的 pricing_rule_id
-// 与 pricing_expr_snapshot：那是求值当时的规则快照，比事后补一份单价更接近
-// 事实。等真要在这里落单价时，先看下面这一条。
+// 写这次结算**按哪些单价算的**，取自 Charge.Prices——它是这次求值用的那一组
+// 价（见 pipeline.Charge.Prices）。键与 unit_counts 同名同源：
+// 五个 token 槽位（prompt / completion / cache_read / cache_write /
+// reasoning，名字出自 billing.TokenSlots）+ 非 token 计量项名。
+//
+// 只写规则**显式写过**的那几个 token 槽位（billing.Prices.Declared）：
+// 「写了 0」（这一项免费）与「没写」（规则漏了）在 money.Amount 上分不出来，
+// 写进去会让两件事在库里长得一样。少一个键，就说明当时没给这个价。
+//
+// 值是 money 的定点十进制**字符串**（"0.00000100"），不是 JSON 数字：
+// 每 token 1e-6 这种量级写成数字要先变成 float64，而 float64 表示不了所有
+// 8 位小数的定点值——落库的价与当时用的价差一点点，复算时就对不上。
+// unit_counts 用数字是因为那些是计数，整数在 JSON 里本来就没有精度问题。
+//
+// 撞名（一个非 token 计量项叫 prompt）在这里报错而不是挑一个写：这一列是
+// 一个扁平对象，两个同名的单价只有一个键位，写下去的那一行会同时有「两个
+// 都收过费」与「只写下了其中一个」两种读法。expr 求值时已把这种规则判为
+// 非法（见 internal/billing/expr 的撞名检查），这里补的是那道判据可能的
+// 漏网（它按 map 迭代顺序判，见 unitPricesJSON）。
+//
+// 空对象现在只有一个含义：**这次结算没有单价可记**——这一列**总是**在
+// INSERT 的列表里，所以 {} 不再是「没人填」。一次零用量的结算、或者规则只
+// 写了固定费时，它确实是 {}。这一列是 NOT NULL DEFAULT '{}'，NULL 不是
+// 可选项——可空的那几列（local_hour 等）才有「写 NULL 表示不知道」这个选项。
 //
 // # Capped 时 Settlement.Breakdown.Total 没有被截
 //
@@ -83,8 +103,12 @@ var ErrUnknownUsageSource = errors.New("未知的用量来源")
 // 供排查超了多少」）。所以 Capped 时 Actual 与 Breakdown.Total **本来就不等**，
 // 而 cost 这一列取的是 Actual。
 //
-// 后果：哪天有人从 Breakdown 去填 unit_prices，那一行的 cost 会与明细对不上
-// （明细算出来的总额大于 cost）。要填得先决定填哪一侧，而不是顺手取一个。
+// unit_prices 取的是**价格侧**（Charge.Prices），所以与这次截断无关：单价是
+// 规则给的，不随金额被截而变化，两者在那一行里是对得上的（用量 × 单价 = 明细
+// 的金额，而明细的总额在那次是被记在 Breakdown 里、不是 cost 里的那个数）。
+// 反过来从 Breakdown 反推单价则要除、要猜零用量那一项，撞上界时还会推出一个
+// 与规则无关的价——这一列存在的意义正是「事后能复算」，推出来的价让复算
+// 看起来成立却对不上 cost。
 //
 // # duration_ms 从哪来
 //
@@ -96,7 +120,7 @@ var ErrUnknownUsageSource = errors.New("未知的用量来源")
 // 来的分位数往下拉，而那条渠道的延迟分因此在库里读作「很快」——没有任何
 // 东西会报出来。NULL 在读侧是「没有样本」，聚合时被 FILTER 掉。
 //
-// duration_ms 是 integer 列，$16 传的是 Go 的 int64 毫秒数。这里**不加**
+// duration_ms 是 integer 列，$17 传的是 Go 的 int64 毫秒数。这里**不加**
 // 类型标注：裸 0 与 $3 那处不同——它与列宽一致（integer），而 $3 是 bigint，
 // 不加标注会被推成 int4。超过 int32 的耗时（约 24 天）会在数据库这一侧
 // 报溢出，不会静默截断。
@@ -107,13 +131,13 @@ const insertUsageEventSQL = `
 	INSERT INTO usage_events (
 		request_id, user_id, channel_id, canonical_model,
 		prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens,
-		reasoning_tokens, unit_counts, billing_path, estimator,
+		reasoning_tokens, unit_counts, unit_prices, billing_path, estimator,
 		cost, asset, priced_at, local_hour, is_off_day, duration_ms
 	) VALUES (
 		$1, $2, NULLIF($3, 0::bigint), $4,
 		$5, $6, $7, $8,
-		$9, $10::jsonb, $11, NULLIF($12, ''),
-		$13::numeric, $14, $15, NULL, NULL, NULLIF($16, 0)
+		$9, $10::jsonb, $11::jsonb, $12, NULLIF($13, ''),
+		$14::numeric, $15, $16, NULL, NULL, NULLIF($17, 0)
 	)`
 
 // insertUsageEvent 写一行用量事件：这次结算**按什么用量**算出来的。
@@ -146,6 +170,10 @@ func insertUsageEvent(ctx context.Context, tx *sql.Tx, req pipeline.Request, cha
 	if err != nil {
 		return err
 	}
+	prices, err := unitPricesJSON(charge.Prices)
+	if err != nil {
+		return err
+	}
 
 	usage := charge.Usage
 	if _, err := tx.ExecContext(ctx, insertUsageEventSQL,
@@ -161,6 +189,7 @@ func insertUsageEvent(ctx context.Context, tx *sql.Tx, req pipeline.Request, cha
 		usage.CacheWriteTokens,
 		usage.ReasoningTokens,
 		counts,
+		prices,
 		path,
 		estimator,
 		// 收的钱取 Settlement.Actual（按实际用量算出的金额），不是预留额：
@@ -214,6 +243,52 @@ func unitCountsJSON(counts map[string]int64) (string, error) {
 	b, err := json.Marshal(counts)
 	if err != nil {
 		return "", fmt.Errorf("序列化非 token 用量失败: %w", err)
+	}
+	return string(b), nil
+}
+
+// unitPricesJSON 把这次结算按的单价序列化成 jsonb 的字面量。
+//
+// 键名不在这里手抄：token 那几项逐槽从 billing.TokenSlots 取，那份表是
+// 「有哪些 token 槽位、它们在规则里叫什么」的唯一来源（它同时喂着
+// Prices.Declared 与 expr 的结果键白名单）。这里再抄一份的话，加一个槽位时
+// 漏改这一处不会编译失败，只会让新槽位的单价在账上消失。
+//
+// 只写规则显式写过的那几项，理由见 insertUsageEventSQL 的 unit_prices 一节。
+//
+// 空与 nil 都写成 {}，而不是让 json.Marshal 把 nil map 写成 JSON 的 null：
+// 那一列是 NOT NULL，而 JSON 的 null 不是 SQL 的 NULL，NOT NULL 挡不住它
+// （与 unit_countsJSON 同一条理由，那里还有「null 与 {} 在查询里分不开」）。
+func unitPricesJSON(prices billing.Prices) (string, error) {
+	out := make(map[string]string, len(billing.TokenSlots)+len(prices.Units))
+	for _, slot := range billing.TokenSlots {
+		if !prices.Declared[slot.Name] {
+			continue
+		}
+		out[slot.Name] = slot.Price(prices).String()
+	}
+	// 非 token 计量项：键与 unit_counts 相同，于是同一行里「这个计量项多少钱、
+	// 收了多少」是对得上的。
+	for name, price := range prices.Units {
+		if _, clash := out[name]; clash {
+			// 计量项与 token 槽位撞名。两个都是这次真正用到的单价，而这一列
+			// 只有一个键位——挑一个写进去，那一行就同时读得出「两项都收过费」
+			// 与「只记下了其中一项」，而它照样算得出数来（见
+			// insertUsageEventSQL 的 unit_prices 一节）。
+			//
+			// 挡在这里而不是放过去，是因为 expr 求值时的撞名检查按 map 迭代
+			// 顺序判（先碰到哪一项决定了报不报），同一条规则可能这次报、下次
+			// 不报。这里是它漏过之后的最后一道：写不下去就说出来。
+			return "", fmt.Errorf("计量项名 %q 与 token 单价键名冲突，unit_prices 写不下两个同名的单价", name)
+		}
+		out[name] = price.String()
+	}
+	if len(out) == 0 {
+		return "{}", nil
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Errorf("序列化单价失败: %w", err)
 	}
 	return string(b), nil
 }
