@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -97,19 +98,30 @@ func runSettingsList(args []string) error {
 		if err != nil {
 			return fmt.Errorf("读取 settings 失败: %w", err)
 		}
-		printSettingsList(os.Stdout, entries)
+		// 表先打出来。json 那一档在这里什么都不打，它打的是下面那份文档。
+		if !jsonOutput() {
+			printSettingsList(os.Stdout, entries)
+		}
 
 		// 列完之后再让 Load 校验一遍。它跑的是**服务启动时那一份**校验
 		// （缺键、未声明的键、类型不对、JSON 不合法），所以这一步回答的是
 		// 运维真正要问的那个问题：这套配置服务能不能加载起来。
 		//
-		// 放在列完之后：配置有问题的时候，恰恰是最需要看到内容的时候，
-		// 而一个「校验不过就什么都不列」的清单等于在最需要它的时候闭嘴。
-		if _, err := settings.Load(ctx, src); err != nil {
-			fmt.Fprintf(os.Stderr, "警告：这套配置服务加载不起来——%v\n", err)
-			return err
+		// 结果收在 loadErr 里而不是直接返回：配置有问题的时候，恰恰是最需要
+		// 看到内容的时候，而一个「校验不过就什么都不列」的清单等于在最需要它
+		// 的时候闭嘴。json 那一档同一条：清单照打，结论由 exit_code 说。
+		_, loadErr := settings.Load(ctx, src)
+		if loadErr != nil {
+			// 警告走 stderr，两档都是：stdout 是给管道下游的
+			// （`larkaxctl settings list -o json | jq`），混进一行提示就会让
+			// jq 报错——而它报的那句话离原因很远。
+			fmt.Fprintf(os.Stderr, "警告：这套配置服务加载不起来——%v\n", loadErr)
 		}
-		return nil
+
+		if jsonOutput() {
+			return emitJSON(os.Stdout, settingsListDoc(entries), loadErr)
+		}
+		return loadErr
 	})
 }
 
@@ -126,6 +138,12 @@ func runSettingsList(args []string) error {
 // 陷阱，形状也与其余子命令一致。另外以减号开头的值（--value -1）走旗标
 // 是安全的，走位置参数会被当成一个旗标。
 func runSettingsSet(args []string) error {
+	// 在**函数体第一行**拦下来，早于 flag 解析、更早于连库：这条命令会写进
+	// settings 表，做完再报不支持就成了一次没人知道的写入（见 format.go）。
+	if err := jsonUnsupported("settings set"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("settings set", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, settingsUsage) }
 	keyFlag := fs.String("key", "", "要改的配置键，例如 plugin.enabled")
@@ -248,6 +266,65 @@ func printSettingsList(w io.Writer, entries []settings.Entry) {
 		if unwired != "" {
 			_, _ = fmt.Fprintf(w, "  尚未接线：%s\n", unwired)
 		}
+	}
+}
+
+// settingsListDoc 组装 settings list 的机器可读输出。
+//
+// 与 printSettingsList 是同一份数据的另一条渲染路径（见 format.go 开头）。
+// 表头那句「值打的是 settings.value 的 jsonb 原文」不进这里：它是给终端里看
+// 表的人的一句说明，而 JSON 里值本身就是原文，没有第二种读法要交代。
+func settingsListDoc(entries []settings.Entry) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["summary"] = map[string]any{"total": len(entries)}
+
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	rows := make([]map[string]any, 0, len(entries))
+	for _, e := range entries {
+		rows = append(rows, settingsEntry(e))
+	}
+	doc["settings"] = rows
+	return doc
+}
+
+// settingsEntry 打清单里的一条配置。
+//
+// value 走 json.RawMessage，也就是把库里那一列**原文**搬进 JSON。这一列里到底
+// 存了什么，正是核对时要看的东西，而**解码再编码会把它盖住**：一个漏了引号的
+// 字符串配置（类型写错，例如本该是 `"CNY"` 却写成 `7`）解码之后与一个正常的
+// 值看起来差不多，可它会让服务起不来。原文还让大整数的位数原样经过，不借道
+// float64——那一条正是这份输出的读者最不能接受的。
+func settingsEntry(e settings.Entry) map[string]any {
+	// kind 与 unwired 取自 Registry，不是库里那一列：类型与接不接线都是**代码**
+	// 的事实（见 settings.UnwiredNote 的注释），而接线的人改的正是 Registry
+	// 里那几行。Registry 里没有这个键时两栏都是 null——那正是「服务加载不起来」
+	// 的直接原因，表格那一档把类型打成「未声明」，这里给 null，脚本按它筛得出来。
+	var kind, unwired any
+	if spec, ok := settings.Lookup(e.Key); ok {
+		kind = string(spec.Kind)
+		unwired = nullableString(spec.Unwired)
+	}
+
+	var updatedBy any
+	if e.UpdatedBy != nil {
+		updatedBy = *e.UpdatedBy
+	}
+
+	return map[string]any{
+		"key":      e.Key,
+		"value":    json.RawMessage(e.Value),
+		"kind":     kind,
+		"editable": e.Editable,
+		// nil 是「没有记录」——迁移或手工 SQL 写下的行（库里那一列可空），
+		// 与「改自用户 0」不是一回事。
+		"updated_by": updatedBy,
+		// 走 jsonTime（恒 UTC、完整精度），不走表格那一档的 Format：库里
+		// 交回来的是带会话时区的时刻，直接打出来同一行在两台机器上不一样。
+		"updated_at": jsonTime(e.UpdatedAt),
+		// 空说明给 null 而不给空串：那一列是 NOT NULL DEFAULT ''，所以空串就是
+		// 「这一行没有说明」，而 null 才是机器读得懂的那个「没有值」。
+		"description": nullableString(e.Description),
+		"unwired":     unwired,
 	}
 }
 

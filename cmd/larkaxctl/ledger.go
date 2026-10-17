@@ -129,12 +129,20 @@ func runLedgerBalance(args []string) error {
 			if err != nil {
 				return err
 			}
+			// JSON 是**另一条渲染路径**（见 format.go 开头）：表格那一档把
+			// 「没有任何分录」折成一句话，这一档给两个空数组。
+			if jsonOutput() {
+				return emitJSON(os.Stdout, ledgerBalancesDoc(assetValue, report), nil)
+			}
 			printLedgerBalances(os.Stdout, assetValue, report)
 			return nil
 		}
 		balance, err := s.AccountBalance(ctx, acct, assetValue)
 		if err != nil {
 			return err
+		}
+		if jsonOutput() {
+			return emitJSON(os.Stdout, ledgerBalanceDoc(acct, assetValue, balance), nil)
 		}
 		printLedgerBalance(os.Stdout, acct, assetValue, balance)
 		return nil
@@ -214,26 +222,51 @@ func runLedgerVerify(args []string) error {
 		report, err := store.New(db).Verify(ctx, store.VerifyScope{
 			From: fromAt, To: toAt, MaxTxns: *maxTxns,
 		})
-		// 报告先打，再处理错误：跑了一半的结果比一句「失败了」有用得多
-		// ——它至少说明比到了哪里、已经发现了什么（与 reconcile 同一个理由）。
-		//
-		// err 一并交给打印函数，理由与 reconcile 相同：报告本身分不出
-		// 「校验完了一笔都没问题」与「校验到一半读不下去了」。
-		printLedgerVerifyReport(os.Stdout, report, err)
-		if err != nil {
-			return err
+
+		// 结论先定出来，再决定往 stdout 打什么。两条渲染路径共用同一个错误：
+		// emitJSON 拿它同时定 status 与 exit_code，table 那一档返回的也是它
+		// ——两处各判一遍的表现是同一轮校验在两条路径上给出不同的退出码。
+		cause := ledgerVerifyCause(report, err)
+
+		if !jsonOutput() {
+			// 报告先打，再处理错误：跑了一半的结果比一句「失败了」有用得多
+			// ——它至少说明比到了哪里、已经发现了什么（与 reconcile 同一个理由）。
+			//
+			// err 一并交给打印函数，理由与 reconcile 相同：报告本身分不出
+			// 「校验完了一笔都没问题」与「校验到一半读不下去了」。
+			printLedgerVerifyReport(os.Stdout, report, err)
+			return cause
 		}
-		if report.CheckedTxns == 0 {
-			// 「一条都没校验到」不是成功。范围写错、库是空的、连错了环境，
-			// 三种情况都会走到这里，而它们的输出与「校验完了一切正常」
-			// 必须不一样（LESSONS 第 16 条）。
-			return errors.New("区间里一条分录都没有，没有可校验的东西：--from / --to 是不是写错了")
+
+		// 查询就没跑起来时还没有任何结果（Verify 返回 nil 报告加错误）。这时
+		// stdout 上一个字节都不打，错误照旧返回、由 main 打到 stderr：打一份
+		// 全零的文档更坏——它读起来正是「校验了 0 笔、一笔都没问题」。
+		if report == nil {
+			return cause
 		}
-		if len(report.Findings) > 0 {
-			return fmt.Errorf("发现 %d 笔不合法的交易（见上面的清单）", len(report.Findings))
-		}
-		return nil
+		return emitJSON(os.Stdout, ledgerVerifyDoc(report, cause), cause)
 	})
+}
+
+// ledgerVerifyCause 给一次校验定下要返回的那个错误。
+//
+// 抽成函数是因为它有**两个**调用点（table 与 json 两条渲染路径）。判据在这里
+// 只写一遍：抄第二份的那天就是两份开始分叉的那天，而分叉的表现是同一个库在
+// 两条路径上给出不同的退出码。
+func ledgerVerifyCause(report *store.VerifyReport, runErr error) error {
+	if runErr != nil {
+		return runErr
+	}
+	if report == nil || report.CheckedTxns == 0 {
+		// 「一条都没校验到」不是成功。范围写错、库是空的、连错了环境，
+		// 三种情况都会走到这里，而它们的输出与「校验完了一切正常」
+		// 必须不一样（LESSONS 第 16 条）。
+		return errors.New("区间里一条分录都没有，没有可校验的东西：--from / --to 是不是写错了")
+	}
+	if len(report.Findings) > 0 {
+		return fmt.Errorf("发现 %d 笔不合法的交易（见上面的清单）", len(report.Findings))
+	}
+	return nil
 }
 
 // printLedgerVerifyReport 把一次校验的结果打到 w。
@@ -313,6 +346,136 @@ func entryTypeNames() []string {
 		names = append(names, string(t))
 	}
 	return names
+}
+
+// ── 机器可读输出 ────────────────────────────────────────────────────────
+//
+// 下面这几个与上面的 printXxx 是同一份数据的另一条渲染路径（见 format.go
+// 开头）。它们排在文件末尾，是为了让表格那一档的几段读起来是连着的。
+
+// ledgerBalanceDoc 组装 ledger balance --account 的机器可读输出。
+//
+// 不给 summary：这一档要数的东西只有余额本身，再给一个 {total: 1} 只是背景音。
+func ledgerBalanceDoc(acct ledger.Account, asset ledger.Asset, balance money.Amount) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["account"] = acct.String()
+	doc["asset"] = string(asset)
+	// 金额走 jsonAmount（十进制定点字符串）：直接塞 money.Amount 编出来是 `{}`，
+	// 而它的字段不导出（见 format.go）。
+	doc["balance"] = jsonAmount(balance)
+	return doc
+}
+
+// ledgerBalancesDoc 组装 ledger balance --all 的机器可读输出。
+//
+// 排序与 printLedgerBalances 一样按**科目字符串**，不按 map 的遍历顺序：同一个
+// 库两次跑出来的 JSON 必须逐字节相同。这一档多半会被接进定时任务，逐字节相同
+// 才让 `diff` 两次输出成为一件有意义的事。
+func ledgerBalancesDoc(asset ledger.Asset, report *store.AccountBalancesReport) map[string]any {
+	byAccount := report.ByAccount[asset]
+	accounts := make([]ledger.Account, 0, len(byAccount))
+	for acct := range byAccount {
+		accounts = append(accounts, acct)
+	}
+	sort.Slice(accounts, func(i, j int) bool { return accounts[i].String() < accounts[j].String() })
+
+	balances := make([]map[string]any, 0, len(accounts))
+	for _, acct := range accounts {
+		balances = append(balances, map[string]any{
+			"account": acct.String(),
+			"balance": jsonAmount(byAccount[acct]),
+		})
+	}
+
+	doc := jsonDoc(jsonOK)
+	doc["asset"] = string(asset)
+	doc["summary"] = map[string]any{
+		"accounts": len(balances),
+		// 读不出来的那几个科目单独计数，与表格那一档同一条理由：一份少了几行
+		// 的汇总与一份完整的汇总长得一模一样，而这几行恰恰是账本里最该被看见
+		// 的东西——钱在库里，却归不到任何科目上。计数在这里，原文在 unreadable。
+		"unreadable": len(report.Unreadable),
+	}
+	doc["accounts"] = balances
+	// 空时打 `[]` 而不是 null（见 format.go 的 jsonList）：一栏有、一条都没有，
+	// 与「这一栏没有」是两件事。
+	doc["unreadable"] = jsonList(report.Unreadable)
+	return doc
+}
+
+// ledgerVerifyDoc 组装 ledger verify 的机器可读输出。
+//
+// cause 是这一轮最终要返回的那个错误（见 ledgerVerifyCause），status 由它定：
+//
+//	ok       校验跑完、一笔问题都没有
+//	failed   查出问题，或者根本没跑完
+//	skipped  没查出问题，但这一轮**不是**全量：达到 --max-txns 上限，后面还有
+//	         没校验的交易
+//
+// skipped 那一档不是修辞。被截断的一轮与跑完的一轮，findings 与两个计数可以
+// 逐字相同，差别只在 truncated 那一个布尔——这正是「没跑成与通过不能落进同一个
+// 字符串」那条约定（LESSONS 第 16 条）在机器可读输出里的落点。退出码仍是
+// 0：被截断是操作者用 --max-txns 要的，不是失败，只是这一轮的结论不完整。
+//
+// 前两档优先于第三档：有 findings 时即使也被截断，status 也是 failed。
+func ledgerVerifyDoc(report *store.VerifyReport, cause error) map[string]any {
+	status := jsonOK
+	switch {
+	case cause != nil:
+		status = jsonFailed
+	case report.Truncated:
+		status = jsonSkipped
+	}
+
+	doc := jsonDoc(status)
+	doc["summary"] = map[string]any{
+		"checked_txns":    report.CheckedTxns,
+		"checked_entries": report.CheckedEntries,
+		"truncated":       report.Truncated,
+	}
+
+	findings := make([]map[string]any, 0, len(report.Findings))
+	for _, f := range report.Findings {
+		findings = append(findings, verifyFindingDoc(f))
+	}
+	doc["findings"] = findings
+	// 受支持的分录类型取自 ledger.EntryTypes()（见 entryTypeNames），与表格那
+	// 一档同一个来源：校验那句「分录类型 %q 未知」正是拿这份清单判的，这里抄
+	// 一份意味着两处迟早不一致，而不一致的表现是提示里列的类型与实际认的对不上
+	// ——照着改的人会改出一个仍然报错的值。
+	doc["supported_entry_types"] = entryTypeNames()
+	return doc
+}
+
+// verifyFindingDoc 打一笔校验不过的交易。
+//
+// entries 逐条列出来（带组内下标），与表格那一档同一个理由：错误里的「第 N 条
+// 分录」是**组内**下标，只有把这一组按同一个顺序打出来，那句话才对得上具体是哪
+// 一行；而「和不为零」那类错误根本不点名任何一条，整组打出来是唯一的线索。
+//
+// index 与表格那一栏一样从 0 起：它就是组内下标本身，从这里再减一层只会让两处
+// 的数字对不上，而对着错误信息数行数的人正是拿它当坐标的。
+func verifyFindingDoc(f store.VerifyFinding) map[string]any {
+	entries := make([]map[string]any, 0, len(f.Entries))
+	for i, e := range f.Entries {
+		entries = append(entries, map[string]any{
+			"index":      i,
+			"entry_type": string(e.EntryType),
+			"account":    e.Account.String(),
+			// 金额**保持符号**：账本里借为正、贷为负，这个符号是数据的一部分
+			// （见 internal/ledger/entry.go），取绝对值会把方向这件事抹掉。
+			"amount": jsonAmount(e.Amount),
+			"asset":  string(e.Asset),
+		})
+	}
+
+	return map[string]any{
+		"txn_id": string(f.TxnID),
+		// 错误那句话由 internal/ledger 给，原样转述、不在这里改写：改写会让看
+		// JSON 的人与看终端的人拿到两种说法，而排查时两边的说法要能对上。
+		"error":   nullableError(f.Err),
+		"entries": entries,
+	}
 }
 
 // parseLedgerTime 解析一个时刻参数，空串表示不限。

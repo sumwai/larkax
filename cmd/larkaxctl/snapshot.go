@@ -183,8 +183,49 @@ func runSnapshotAllowlist(args []string) error {
 	if surface != "" {
 		surfaces = []snapshot.Surface{surface}
 	}
+	if jsonOutput() {
+		return emitJSON(os.Stdout, allowlistDoc(surfaces, roots), nil)
+	}
 	printAllowlists(os.Stdout, surfaces, roots)
 	return nil
+}
+
+// allowlistDoc 把一组「表面 × 方向」的允许表折成机器可读输出。
+//
+// 行式而不是「表面 → 方向 → 规则」的嵌套：打印的顺序本来就是逐对打一遍，
+// 拍平之后读的人不必先知道有哪几个表面，也保住了那一层顺序。
+//
+// Note 与表格那一档一样要完整带出来，这一条命令存在的理由就是它：省略或
+// 截断它，这条命令就退化成一个字段名清单。
+func allowlistDoc(surfaces []snapshot.Surface, roots []snapshot.Root) map[string]any {
+	groups := make([]map[string]any, 0, len(surfaces)*len(roots))
+	rules := 0
+	for _, s := range surfaces {
+		for _, root := range roots {
+			entries := snapshot.AllowlistFor(s, root)
+			rules += len(entries)
+
+			items := make([]map[string]any, 0, len(entries))
+			for _, rule := range entries {
+				items = append(items, map[string]any{
+					"path":           rule.Path,
+					"kind":           rule.Kind,
+					"upstream_value": rule.UpstreamValue,
+					"note":           rule.Note,
+				})
+			}
+			groups = append(groups, map[string]any{
+				"surface":   string(s),
+				"direction": string(root),
+				"rules":     items,
+			})
+		}
+	}
+
+	doc := jsonDoc(jsonOK)
+	doc["summary"] = map[string]any{"groups": len(groups), "rules": rules}
+	doc["allowlist"] = groups
+	return doc
 }
 
 // printAllowlists 打印一组表面 × 方向的允许表。
@@ -224,6 +265,15 @@ func printAllowlists(w io.Writer, surfaces []snapshot.Surface, roots []snapshot.
 // 这是 Decode 唯一的调用方，也是「这段报文我们存下来会是什么样」这个问题的
 // 答案。它不连库：脱敏器是纯函数，报文从标准输入来。
 func runSnapshotRedact(args []string) error {
+	// redact 有自己的 stdout 契约，而且它**已经是**机器可读的：产物是脱敏后
+	// 那段骨架的 JSON，直接接给 jq（见 printRedaction）。它不是一份带
+	// status / exit_code 的信封，所以照 `-o json` 那一档的约定改不了它，
+	// 也不该改——那段骨架就是这个命令的结果本身。这里拒掉，免得让人以为
+	// `-o json` 能给它套上一层信封。
+	if err := jsonUnsupported("snapshot redact"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("snapshot redact", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, snapshotUsage) }
 	direction := fs.String("direction", "", "报文的方向：request 或 response（必填）")
@@ -492,9 +542,61 @@ func runSnapshotShow(args []string) error {
 		if err != nil {
 			return err
 		}
+		if jsonOutput() {
+			return emitJSON(os.Stdout, snapshotsDoc(req.RequestID, rows), nil)
+		}
 		printSnapshots(os.Stdout, req.RequestID, rows)
 		return nil
 	})
+}
+
+// snapshotsDoc 把读回来的快照折成机器可读输出。
+//
+// # 两栏 NULL 在 JSON 里就是 null
+//
+// 表格那一档给 upstream_status / error_kind 的三段文本（<不适用（请求方向
+// 快照）>、<无上游响应>、<无>）在 JSON 里一律是 null：占位符进 JSON 比留空
+// 更坏——按时间或数字解析它的一方会拿到一个解析不了的值。两个方向上的差别
+// 由 direction 推得出来（请求方向的采集点在选路之前，那两列**本来就不适用**），
+// 不需要再给一栏布尔去复述它。
+//
+// 有值的一栏照原样给：连请求方向上出现状态码也一样（那说明有写入路径绕过了
+// internal/gateway 的采集点，把一个异常藏起来比显示出来更坏，见
+// upstreamStatusCell）。
+func snapshotsDoc(requestID string, rows []snapshotRow) map[string]any {
+	items := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		item := map[string]any{
+			"id":               row.ID,
+			"direction":        row.Direction,
+			"created_at":       row.CreatedAt.UTC().Format(time.RFC3339Nano),
+			"skeleton_version": row.SkeletonVersion,
+			"capture_mode":     row.CaptureMode,
+			// 被降级成摘要层的骨架与一份完整的骨架在肉眼下长得一样，所以这个
+			// 布尔必须带出来：没有它，读的人会把「这里只有这些」读成
+			// 「上游只发了这些」（见 printSnapshot）。
+			"skeleton_truncated": row.Truncated,
+			"redacted_paths":     jsonList(row.RedactedPaths),
+			"skeleton":           row.Skeleton,
+		}
+		if row.UpstreamStatus.Valid {
+			item["upstream_status"] = row.UpstreamStatus.Int64
+		} else {
+			item["upstream_status"] = nil
+		}
+		if row.ErrorKind.Valid {
+			item["error_kind"] = row.ErrorKind.String
+		} else {
+			item["error_kind"] = nil
+		}
+		items = append(items, item)
+	}
+
+	doc := jsonDoc(jsonOK)
+	doc["summary"] = map[string]any{"total": len(items)}
+	doc["request_id"] = requestID
+	doc["snapshots"] = items
+	return doc
 }
 
 // readSnapshotsWithAudit 在一个事务里读出快照，并为读到的每一行写下访问日志。
@@ -765,6 +867,10 @@ func errorKindCell(direction string, v sql.NullString) string {
 // 它是留存承诺的兑现方式，所以输出的是**被删除的分区名**而不是一句
 // 「完成」：一天都没到期时，命令的输出必须与「根本没跑成」区分得开。
 func runSnapshotCleanup(args []string) error {
+	if err := jsonUnsupported("snapshot cleanup"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("snapshot cleanup", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, snapshotUsage) }
 	dryRun := fs.Bool("dry-run", false, "只列出会被删除的分区，不执行删除")

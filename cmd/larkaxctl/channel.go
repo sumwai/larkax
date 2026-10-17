@@ -113,6 +113,10 @@ func runChannel(args []string) error {
 }
 
 func runChannelCreate(args []string) error {
+	if err := jsonUnsupported("channel create"); err != nil {
+		return err
+	}
+
 	req, ownerRef, err := parseChannelCreate(args)
 	if err != nil {
 		return usageErr(err)
@@ -303,6 +307,10 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 }
 
 func runChannelUpdate(args []string) error {
+	if err := jsonUnsupported("channel update"); err != nil {
+		return err
+	}
+
 	req, err := parseChannelUpdate(args)
 	if err != nil {
 		return usageErr(err)
@@ -390,6 +398,9 @@ func runChannelList(args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutput() {
+		return emitJSON(os.Stdout, channelListDoc(infos, *all), nil)
+	}
 	printChannelList(os.Stdout, infos, *all)
 	return nil
 }
@@ -398,6 +409,11 @@ func runChannelSetStatus(args []string, status string) error {
 	verb, done := "enable", "已启用"
 	if status == channels.StatusDisabled {
 		verb, done = "disable", "已停用"
+	}
+	// 命令名按 status 算出来：enable 与 disable 共用这一个入口，写死一个
+	// 会让另一条命令在不支持 json 时报出兄弟命令的名字。
+	if err := jsonUnsupported("channel " + verb); err != nil {
+		return err
 	}
 
 	fs := flag.NewFlagSet("channel "+verb, flag.ContinueOnError)
@@ -446,6 +462,10 @@ func runChannelSetStatus(args []string, status string) error {
 // 第二条不是错误：删除是幂等的，脚本重跑一次不该失败。而 id 不存在仍然报错
 // （ErrChannelNotFound）——那说明调用方拿错了 id，报成功会让它以为删对了。
 func runChannelDelete(args []string) error {
+	if err := jsonUnsupported("channel delete"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("channel delete", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, channelUsage) }
 	id := fs.Int64("id", 0, "要删的渠道 ID")
@@ -669,6 +689,65 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo, withDeleted boo
 		if len(rows) > 0 {
 			_, _ = fmt.Fprintf(w, "渠道 %s 配了 setting：%s。\n", strings.Join(rows, "、"), note)
 		}
+	}
+}
+
+// channelListDoc 组装 channel list 的机器可读输出。
+//
+// 与 printChannelList 是同一份数据的另一条渲染路径（见 format.go 开头）：
+// 那一档打表、用 `-` 与「平台」铺空栏，这一档给原始值与 null。
+//
+// withDeleted 是这次有没有 --all：默认清单按软删过滤（每一行的 deleted_at
+// 都是 null），带上 --all 之后才可能出现非空的。summary 里那个 deleted 计数
+// 只在 --all 下给：它的读者问的是「这条是删了还是只是停用」，而没带 --all 时
+// 它恒为 0，给出来只是一栏背景音。
+func channelListDoc(infos []channels.ChannelInfo, withDeleted bool) map[string]any {
+	doc := jsonDoc(jsonOK)
+
+	summary := map[string]any{"total": len(infos)}
+	if withDeleted {
+		deleted := 0
+		for _, info := range infos {
+			if !info.DeletedAt.IsZero() {
+				deleted++
+			}
+		}
+		summary["deleted"] = deleted
+	}
+	doc["summary"] = summary
+
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	entries := make([]map[string]any, 0, len(infos))
+	for _, info := range infos {
+		entries = append(entries, channelEntry(info))
+	}
+	doc["channels"] = entries
+	return doc
+}
+
+// channelEntry 打清单里的一条渠道。
+//
+// **这一份里没有、也不会有凭证密文**：ChannelInfo 根本没有那一栏（见它的
+// 注释），这里能给的只有「挂在哪些主密钥下」与末四位提示。
+func channelEntry(info channels.ChannelInfo) map[string]any {
+	return map[string]any{
+		"id":       info.ID,
+		"status":   info.Status,
+		"type":     info.Type,
+		"name":     info.Name,
+		"base_url": info.BaseURL,
+		"models":   jsonList(info.Models),
+		// 0 表示平台自营（库里存 NULL），不是「编号 0 的用户」。
+		"owner_user_id": jsonID(info.OwnerUserID),
+		"weight":        info.Weight,
+		"priority":      info.Priority,
+		// 密文与凭证明文都不在这里：这两栏一个是主密钥标识、一个是末四位提示，
+		// 二者都不需要密钥材料就能算出来（见 credentialKeysLabel）。
+		"credential_keys":  jsonList(info.CredentialKeys),
+		"credential_hint":  nullableString(info.Hint),
+		"credential_error": nullableError(info.CredentialErr),
+		"setting":          jsonObject(info.Setting),
+		"deleted_at":       jsonTimeOrNull(info.DeletedAt),
 	}
 }
 

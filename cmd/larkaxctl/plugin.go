@@ -89,6 +89,11 @@ func runPluginList(args []string) error {
 		if err != nil {
 			return err
 		}
+		// JSON 是**另一条渲染路径**（见 format.go 开头）：表格那一档把坏掉的
+		// meta 折成表后的一行说明，这一档给 meta_problem 那一栏。
+		if jsonOutput() {
+			return emitJSON(os.Stdout, pluginListDoc(rows), nil)
+		}
 		printPluginList(os.Stdout, rows)
 		return nil
 	})
@@ -126,7 +131,50 @@ func printPluginList(w io.Writer, rows []pluginstore.Row) {
 	}
 }
 
+// pluginListDoc 组装 plugin list 的机器可读输出。
+//
+// 与 printPluginList 是同一份数据的另一条渲染路径（见 format.go 开头）。
+// 键名用**库里的列名**，与那张表的表头同一条理由：它们在 psql 里、在迁移
+// 文件里、在这里是同一个东西。
+func pluginListDoc(rows []pluginstore.Row) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["summary"] = map[string]any{"total": len(rows)}
+
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	entries := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		entries = append(entries, pluginEntry(row))
+	}
+	doc["plugins"] = entries
+	return doc
+}
+
+// pluginEntry 打清单里的一个插件。
+//
+// meta_problem 是那一行的 meta 快照有什么问题，没问题时是 null：它在表格那一档
+// 折成表后的一行说明，在这里必须落进**这一条自己**——脚本问的是「哪几个插件的
+// meta 有问题」，而表后那几行是给人读的。
+func pluginEntry(row pluginstore.Row) map[string]any {
+	return map[string]any{
+		"key":        row.Key,
+		"version":    row.Version,
+		"status":     row.Status,
+		"generation": row.Generation,
+		"priority":   row.Priority,
+		"name":       row.Name,
+		// 坏掉的那一行照样在清单里（见 printPluginList 的注释）：整次报错或
+		// 跳过它，都会让最需要看清单的那一刻看不到东西。
+		"meta_problem": nullableString(row.MetaProblem),
+	}
+}
+
 func runPluginPublish(args []string) error {
+	// 在**函数体第一行**拦下来，早于读文件、更早于连库与落库：publish 会写进
+	// plugins 表，做完再报不支持就成了一次静默的写入（见 format.go）。
+	if err := jsonUnsupported("plugin publish"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("plugin publish", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, pluginUsage) }
 	key := fs.String("key", "", "插件 key；省略时取源码 meta 里声明的那个")
@@ -304,6 +352,12 @@ func runPluginSetEnabled(args []string, enable bool) error {
 	verb, done := "enable", "已启用"
 	if !enable {
 		verb, done = "disable", "已停用"
+	}
+	// 命令名按 enable 算出来：这两条命令共用这一个入口，写死一个会让其中一条
+	// 在不支持 json 时报出兄弟命令的名字。拦在**函数体第一行**、连库之前——
+	// 它会改 plugin_activations，做完再报不支持就成了一次静默的启用/停用。
+	if err := jsonUnsupported("plugin " + verb); err != nil {
+		return err
 	}
 
 	fs := flag.NewFlagSet("plugin "+verb, flag.ContinueOnError)

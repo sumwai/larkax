@@ -99,6 +99,10 @@ func runModel(args []string) error {
 }
 
 func runModelAdd(args []string) error {
+	if err := jsonUnsupported("model add"); err != nil {
+		return err
+	}
+
 	req, err := parseModelAdd(args)
 	if err != nil {
 		return usageErr(err)
@@ -293,6 +297,10 @@ func applyCapabilityFlags(base catalog.Capabilities, flags []modelCapabilityFlag
 // 另一个做法是把六个标志当成「一组必须给全」，那会让「加一个能力」变成
 // 每次都要把另外五个也抄一遍，而抄漏一个就是静默地关掉一个能力。
 func runModelUpdate(args []string) error {
+	if err := jsonUnsupported("model update"); err != nil {
+		return err
+	}
+
 	req, capFlags, err := parseModelUpdate(args)
 	if err != nil {
 		return usageErr(err)
@@ -435,6 +443,10 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabil
 // 判据要是两处各写一份，删掉的就可能是一条其实还在被用的名字。被引用时
 // 那条错误里带着「各有多少条」，原样打出来。
 func runModelDelete(args []string) error {
+	if err := jsonUnsupported("model delete"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("model delete", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, modelUsage) }
 	canonical := fs.String("canonical", "", "要删的规范模型名")
@@ -506,6 +518,9 @@ func runModelShow(args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutput() {
+		return emitJSON(os.Stdout, modelShowDoc(model), nil)
+	}
 	printModelDetail(os.Stdout, model)
 	return nil
 }
@@ -536,6 +551,9 @@ func runModelList(args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutput() {
+		return emitJSON(os.Stdout, modelListDoc(models), nil)
+	}
 	printModelList(os.Stdout, models)
 	return nil
 }
@@ -546,6 +564,86 @@ func runModelList(args []string) error {
 func printCreatedModel(stdout, stderr io.Writer, id int64, canonicalName string) {
 	_, _ = fmt.Fprintf(stderr, "已加入规范模型 %s(id=%d)。\n", canonicalName, id)
 	_, _ = fmt.Fprintln(stdout, id)
+}
+
+// modelListDoc 组装 model list 的机器可读输出。
+//
+// 与 printModelList 是同一份数据的另一条渲染路径：那一档打表、把没设的上限
+// 打成 `-`，这一档给原始值与 null。
+func modelListDoc(models []catalog.Model) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["summary"] = map[string]any{"total": len(models)}
+
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	entries := make([]map[string]any, 0, len(models))
+	for _, m := range models {
+		entries = append(entries, modelEntry(m))
+	}
+	doc["models"] = entries
+	return doc
+}
+
+// modelShowDoc 组装 model show 的机器可读输出。
+//
+// 只有一条，所以不打 summary（没有可数的东西），形状是 `{"model": {...}}`：
+// 一眼能看出这一条是「哪个东西」的详情。
+func modelShowDoc(m catalog.Model) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["model"] = modelDetailEntry(m)
+	return doc
+}
+
+// modelEntry 打清单里的一条规范模型：表格那十栏对应的**原始值**。
+//
+// 三个 limit 在库里可空、Go 侧用 0 表示没设，这里换成 null。表格那一档的
+// `-` 是给人扫的，机器读的一方要能分清「没设」与「设成了 0」——而 0 不是
+// 任何模型的合法上限，所以 0 只可能是前者（见 catalog.Model 的注释）。
+func modelEntry(m catalog.Model) map[string]any {
+	return map[string]any{
+		"id":             m.ID,
+		"canonical_name": m.CanonicalName,
+		"display_name":   m.DisplayName,
+		// 厂商与家族是 text 可空列，空串就是「没填」（update 的 --vendor ''
+		// 正是把它清成 NULL）。
+		"vendor":            nullableString(m.Vendor),
+		"family":            nullableString(m.Family),
+		"context_limit":     nullableInt(m.ContextLimit),
+		"input_limit":       nullableInt(m.InputLimit),
+		"output_limit":      nullableInt(m.OutputLimit),
+		"capabilities":      capabilityEntry(m.Capabilities),
+		"modalities_input":  jsonList(m.ModalitiesInput),
+		"modalities_output": jsonList(m.ModalitiesOutput),
+	}
+}
+
+// modelDetailEntry 打 model show 的那一条：清单里的那十栏，外加采集源那边
+// 的几栏。表格那一档也是这个口径（见 printModelDetail）。
+//
+// reasoning_options 与 raw 不打：它们不参与任何判断，而 raw 可能是一大段
+// 嵌套 JSON。要它们的一方直接查库，而不是让每条 show 都拖着这一坨。
+func modelDetailEntry(m catalog.Model) map[string]any {
+	entry := modelEntry(m)
+	entry["knowledge_cutoff"] = jsonDate(m.KnowledgeCutoff)
+	entry["release_date"] = jsonDate(m.ReleaseDate)
+	entry["canonical_model_id"] = nullableString(m.CanonicalModelID)
+	entry["updated_at"] = jsonTime(m.UpdatedAt)
+	return entry
+}
+
+// capabilityEntry 打六个能力。
+//
+// 做成一个对象而不是拼成一栏文本：表格那一档把打开的几个逗号连起来
+// （`tools,vision`）是排版，机器读的一方要能直接问 `capabilities.tools`
+// 而不必去切字符串。
+func capabilityEntry(c catalog.Capabilities) map[string]any {
+	return map[string]any{
+		"reasoning": c.Reasoning,
+		"tools":     c.Tools,
+		"vision":    c.Vision,
+		"audio":     c.Audio,
+		"cache":     c.Cache,
+		"batch":     c.Batch,
+	}
 }
 
 // printModelList 打印目录里的规范模型。

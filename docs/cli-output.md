@@ -73,3 +73,110 @@
 
 `settings list` 是例外：settings 表是空的与「还没有配过」不是一回事（那些键来自
 Registry，加不了），它留着自己的说法。
+
+## 机器可读输出
+
+上面几节说的都是「给人看」那一档。给别的程序读的那一档是 `--format json`
+（`-o json` 是同一个选项的简写）：
+
+```sh
+larkaxctl doctor --format json | jq -r '.checks[] | select(.status != "passed") | .name'
+larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled") | .id'
+```
+
+它是**全局选项**，写在子命令前面或后面都认（`larkaxctl doctor -o json` 与
+`larkaxctl -o json doctor` 一样）。不给就是 `table`，也就是前面几节说的那一档。
+取值不认识时报参数错（退出码 2），**不静默回落成表格**——回落的表现是脚本拿到
+一段文本，而报错的是下游的 `jq`，看日志的人会去查 jq 的用法。
+
+### stdout 的契约
+
+- 指定 `--format json` 时，stdout 上**恰好一份 JSON 文档**，以一个换行结尾。
+  没有提示、没有前缀、没有 ANSI 转义，也没有表格。
+- 提示与警告一律走 stderr（例如 `settings list` 那句「警告：这套配置服务加载
+  不起来」）。管道下游读的是 stdout，混进一行提示就会让 `jq` 报错。
+- 命令在**产出结果之前**就失败时（连不上库、参数错），stdout 是**空的**，
+  错误在 stderr、退出码非 0。这一条与上一条不矛盾：那份文档回答的是「这一次
+  查到了什么」，而那时还没有「查到了什么」。**接管道的一方要先看退出码**。
+
+顶层形状对所有子命令一致：
+
+```json
+{
+  "status": "ok",
+  "summary": { "total": 6, "passed": 4, "failed": 1, "skipped": 1 },
+  "checks": [ ... ],
+  "exit_code": 0
+}
+```
+
+- `status` 三档：`ok`（全部通过）、`failed`（至少一项查出问题）、
+  `skipped`（一项都没查出问题，但有项目**没跑成**）。`skipped` 不是 `ok` 的
+  近义词，理由与状态符那一节完全相同。
+- `summary` 是这一档的计数，没有可数的东西时这个键不出现。
+- 条目数组的键名是英文复数（`checks`、`channels`、`models`、`rules`……），
+  一屏看不完的那种。
+- `exit_code` 是**这一次运行该用的退出码**。
+
+### 退出码
+
+**与交互模式完全一致**，脚本基于退出码的逻辑不因为换了输出格式而变：
+`doctor` 有失败项时 json 模式仍然退出 1，连不上库时仍然是 3。
+`exit_code` 那一栏与进程真正退出的码是同一个数（从同一个错误算出来）；
+两者万一不一致，以**退出码**为准——它是命令行对外的老契约。
+
+### 值的约定
+
+- **金额是十进制定点字符串**（`"12.34000000"`），不是 JSON 数字：过一遍
+  `float64` 会丢精度，而丢掉的恰好是账单要精确到的那几位。
+- **时间是 RFC3339 字符串，按 UTC 打**（`2026-10-17T01:02:03.001Z`），
+  不截到秒——截到分钟是表格那一档的排版需要，不是数据的精度。没有值时是
+  `null`。库里是无时区的 `date` 列（模型的知识截止、发布日期）照 `2006-01-02`
+  打，给它补一个时区等于凭空编一个事实。
+- **缺值一律是 `null`，不打占位符**。表格里的 `-`、`不过期`、`从未`、`平台`、
+  `继承` 一个都不进 JSON：`"expires_at": "不过期"` 会让按时间解析它的一方拿到
+  一个解析不了的值。「平台自营」是 `"owner_user_id": null`，不是 `0`。
+- **空清单是 `[]`**，不是 `null`，也不是那句「暂无渠道。可使用……添加。」——
+  后者是给终端里的人的。
+- 库里本来就是 JSON 的列（渠道的 `setting`、别名的 `overrides`、快照的
+  `skeleton`）原样放进去，不再包一层。
+
+### 哪些命令接上了
+
+**只读类**（`list` / `show` / `resolve` / `explain` / `balance` / `verify` /
+`check` 以及 `doctor`、`version`）已经接上。**写类子命令还没接**：给它们
+`-o json` 会报参数错，而不是打出一段表格——写类命令那时事情已经做完了，
+脚本却只看到一句解析错误，于是重跑一次。
+
+几个读起来像只读、但同样还没接的：
+
+| 命令 | 为什么 |
+|---|---|
+| `migrate status` / `migrate version` | 输出是 goose 自己往 stdout 打的，要接 JSON 得先把它那份 logger 收住 |
+| `rotate --verify` | 与 `rotate --apply` 共用同一条命令，先按整条命令拒掉 |
+| `snapshot redact` | 它的 stdout 本来就是产物本身（脱敏后那段骨架的 JSON），套不上一层信封 |
+
+### 加一条机器可读输出
+
+1. 写一个**纯函数** `xxxDoc(数据…) map[string]any`：不连库、不写输出，
+   只把已经拿到的数据折成文档。放在那条命令的打印函数旁边。
+2. 返回值用 `jsonDoc(status)` 起头，往里加 `summary` 与条目数组。
+   `exit_code` **不要自己填**：`emitJSON` 从「该用的那个错误」算出来。
+3. 在调用点并排加一条分支，`printXxx` 那一行一个字都不要改：
+
+   ```go
+   if jsonOutput() {
+       return emitJSON(os.Stdout, xxxDoc(data), cause)
+   }
+   printXxx(os.Stdout, data)
+   return cause
+   ```
+
+   **不要**把表格转成 JSON：转出来的金额是字符串、缺值是占位符，而这两件事
+   正是这一档最不能有的。
+4. 写类等还没接的命令，在函数体**第一行**、连库之前
+   `if err := jsonUnsupported("<命令名>"); err != nil { return err }`。
+   放在写库之后就成了「先把事情做完，再报不支持」。
+5. 用例一律 `json.Unmarshal` 之后断言字段，**不靠人眼看**；空清单、`null`
+   的那几栏、以及退出码各钉一条。命令级再补一条：跑一遍真命令，断言 stdout
+   整份能被 `json.Unmarshal` 收下且不含 `\x1b`。

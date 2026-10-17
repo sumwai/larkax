@@ -97,6 +97,14 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
                                            往上找，不越过 git 仓库根，用最近的那一份。
                                            两种情况都只填补尚未设置的环境变量，
                                            系统环境变量优先。见 internal/config。
+  --format <table|json>                    输出的读者是谁。默认 table：面向终端的
+                                           表格与状态符。json：stdout 只有一份
+                                           JSON，提示与警告走 stderr，给管道下游
+                                           的 jq 与探针用。-o json 是它的简写。
+                                           两个都写在子命令前后都认。取值不合法时
+                                           报参数错，不静默回落成表格。
+                                           目前接上的是读类子命令，清单见
+                                           docs/cli-output.md 的「机器可读输出」。
 
 退出码：
   0  成功
@@ -123,8 +131,13 @@ LARKAX_MASTER_KEYS。见 internal/config 的 LoadOps。
 const migrationsDir = "internal/migrate/sql"
 
 func run() error {
-	// 全局选项先摘出来，再分派子命令：它必须在**任何**子命令之前生效，
-	// 因为每条子命令一进去就加载配置，而配置可能就来自这个文件。
+	// 全局选项先摘出来，再分派子命令：它们必须在**任何**子命令之前生效——
+	// --env-file 是因为每条子命令一进去就加载配置，而配置可能就来自那个文件；
+	// --format 是因为它决定那几条命令往 stdout 上打什么。
+	//
+	// 两个各扫一遍全表，所以它们之间的先后不影响结果：
+	// `--env-file x --format json doctor` 与 `--format json --env-file x doctor`
+	// 都认。
 	envFile, args, err := takeEnvFileFlag(os.Args[1:])
 	if err != nil {
 		return err
@@ -135,6 +148,12 @@ func run() error {
 			return usageErr(envErr)
 		}
 	}
+
+	format, args, err := takeFormatFlag(args)
+	if err != nil {
+		return err
+	}
+	outputFormat = format
 
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usage)
@@ -179,6 +198,11 @@ func run() error {
 	case "wallet":
 		return runWallet(args[1:])
 	case "version", "-v", "--version":
+		if jsonOutput() {
+			doc := jsonDoc(jsonOK)
+			doc["version"] = version
+			return emitJSON(os.Stdout, doc, nil)
+		}
 		fmt.Println(version)
 		return nil
 	case "help", "-h", "--help":
@@ -260,6 +284,10 @@ func takeEnvFileFlag(args []string) (string, []string, error) {
 // 开关与口径全部来自 settings 表，命令行不带参数：这样「线上跑的是哪一套
 // 口径」只有一个答案（库里的值），而不是「命令行里带了什么」。
 func runReconcile(args []string) error {
+	if err := jsonUnsupported("reconcile"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("reconcile", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
@@ -454,6 +482,14 @@ func runMigrate(args []string) error {
 		return errors.New("migrate 需要子命令")
 	}
 	action, rest := rest[0], rest[1:]
+
+	// migrate 的每一条子命令都还没接机器可读输出：它的输出是 goose 自己打的
+	// （goose.RunContext 往 stdout 直接写「goose: no migrations to run」这类
+	// 行），要接 JSON 得先把它那份 logger 收住，那是另一件事。在那之前，
+	// `migrate up -o json` 报参数错，而不是打一半 goose 的日志再打一半 JSON。
+	if jsonErr := jsonUnsupported("migrate " + action); jsonErr != nil {
+		return jsonErr
+	}
 
 	if action == "create" {
 		if len(rest) < 1 {

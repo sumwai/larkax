@@ -494,3 +494,147 @@ func findRule(t *testing.T, rules []pricing.RuleInfo, id int64) pricing.RuleInfo
 	t.Fatalf("清单里没有规则 %d", id)
 	return pricing.RuleInfo{}
 }
+
+// ── 机器可读输出（--format json）─────────────────────────────────────────
+
+// TestPriceListDocIsMachineReadable 钉住 price list 的机器可读形状。
+func TestPriceListDocIsMachineReadable(t *testing.T) {
+	from := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	to := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	rules := []pricing.RuleInfo{
+		{
+			ID: 41, Scope: "platform", Name: "默认价",
+			ModelPatterns: []string{"m1", "m2"}, Priority: 3, Enabled: true,
+			EffectiveFrom: from, EffectiveTo: &to,
+			DeclaredKeys: []string{"prompt", "completion"},
+		},
+		{
+			// 不挂商家、不挂渠道（两栏都是 null）、不过期、表达式编译不过的
+			// 一条：表格那一档的 `-`、「不过期」与「（表达式编译不过）」三个
+			// 渲染一个都不该进 JSON。
+			ID: 42, Scope: "platform", Name: "坏规则",
+			Enabled: false, EffectiveFrom: from,
+			ExprErr: errors.New("编译失败：未知变量"),
+		},
+	}
+
+	got := jsonRoundTrip(t, priceListDoc(rules))
+	assertJSONField(t, got, "status", jsonOK)
+	assertJSONField(t, jsonObjectField(t, got, "summary"), "total", float64(2))
+
+	list := jsonEntries(t, got, "rules")
+	if len(list) != 2 {
+		t.Fatalf("规则数 = %d，期望 2", len(list))
+	}
+	first := list[0].(map[string]any)
+	assertJSONField(t, first, "id", float64(41))
+	assertJSONField(t, first, "scope", "platform")
+	assertJSONField(t, first, "owner_user_id", nil)
+	assertJSONField(t, first, "channel_id", nil)
+	assertJSONField(t, first, "name", "默认价")
+	assertJSONField(t, first, "model_patterns", []any{"m1", "m2"})
+	assertJSONField(t, first, "priority", float64(3))
+	// 状态是布尔，不是表格那一栏的「启用/停用」。
+	assertJSONField(t, first, "enabled", true)
+	assertJSONField(t, first, "effective_from", "2026-01-02T03:04:05Z")
+	assertJSONField(t, first, "effective_to", "2026-06-01T00:00:00Z")
+	// 单价键是那一份原始清单，不是 declaredKeysLabel 渲染出来的那一栏。
+	assertJSONField(t, first, "quota_keys", []any{"prompt", "completion"})
+	assertJSONField(t, first, "expr_error", nil)
+
+	second := list[1].(map[string]any)
+	assertJSONField(t, second, "enabled", false)
+	assertJSONField(t, second, "effective_to", nil)
+	assertJSONField(t, second, "model_patterns", []any{})
+	assertJSONField(t, second, "quota_keys", []any{})
+	assertJSONField(t, second, "expr_error", "编译失败：未知变量")
+
+	t.Run("空清单是空数组，不是 null", func(t *testing.T) {
+		empty := jsonRoundTrip(t, priceListDoc(nil))
+		assertJSONField(t, jsonObjectField(t, empty, "summary"), "total", float64(0))
+		if len(jsonEntries(t, empty, "rules")) != 0 {
+			t.Error("空清单应当是空数组")
+		}
+	})
+}
+
+// TestPriceExplainDocIsMachineReadable 钉住 price explain 的机器可读形状。
+func TestPriceExplainDocIsMachineReadable(t *testing.T) {
+	at := time.Date(2026, 7, 8, 9, 10, 11, 0, time.UTC)
+	q := pricing.ExplainQuery{
+		CanonicalModel: "m1", OwnerUserID: 5, ChannelID: 9, At: at,
+	}
+	rules := []pricing.RuleInfo{
+		{
+			ID: 41, Scope: "channel", OwnerUserID: 5, ChannelID: 9, Name: "选中",
+			ModelPatterns: []string{"m1"}, Enabled: true, EffectiveFrom: at,
+			DeclaredKeys: []string{"prompt"},
+		},
+		{
+			ID: 42, Scope: "platform", Name: "被压住",
+			Enabled: true, EffectiveFrom: at,
+			DeclaredKeys: []string{"prompt"},
+		},
+	}
+
+	got := jsonRoundTrip(t, priceExplainDoc(q, rules))
+	assertJSONField(t, got, "status", jsonOK)
+
+	query := jsonObjectField(t, got, "query")
+	assertJSONField(t, query, "canonical_model", "m1")
+	assertJSONField(t, query, "owner_user_id", float64(5))
+	assertJSONField(t, query, "channel_id", float64(9))
+	assertJSONField(t, query, "at", "2026-07-08T09:10:11Z")
+
+	list := jsonEntries(t, got, "rules")
+	if len(list) != 2 {
+		t.Fatalf("规则数 = %d，期望 2", len(list))
+	}
+	// 排第一的就是会被计价的那条：裁决那一栏是给脚本分派用的，所以用英文
+	// 的取值，而不是表格那一档的「选中 / 被压住」。
+	assertJSONField(t, list[0].(map[string]any), "verdict", "selected")
+	assertJSONField(t, list[1].(map[string]any), "verdict", "shadowed")
+
+	t.Run("没选定商家与渠道时是 null", func(t *testing.T) {
+		bare := jsonRoundTrip(t, priceExplainDoc(pricing.ExplainQuery{
+			CanonicalModel: "m1", At: at,
+		}, nil))
+		query := jsonObjectField(t, bare, "query")
+		assertJSONField(t, query, "owner_user_id", nil)
+		assertJSONField(t, query, "channel_id", nil)
+		// 一条都不适用时写入路径报错而不是给空清单（见 pricing.Admin.Explain），
+		// 但组装函数这一层仍然要给 `[]`——空数组与 null 是两件事。
+		if len(jsonEntries(t, bare, "rules")) != 0 {
+			t.Error("没有规则时应当是空数组")
+		}
+	})
+}
+
+// TestPriceWriteCommandsRejectJSONBeforeDoingAnything 钉住写类命令的守卫位置。
+func TestPriceWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
+	withFormat(t, formatJSON)
+
+	cases := []struct {
+		command string
+		run     func() error
+	}{
+		{"price add", func() error { return runPriceAdd(nil) }},
+		{"price update", func() error { return runPriceUpdate(nil) }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.command, func(t *testing.T) {
+			err := tc.run()
+			if err == nil {
+				t.Fatalf("%s 在 json 模式下应当被拒", tc.command)
+			}
+			if !strings.Contains(err.Error(), tc.command+" 还不支持 --format json") {
+				t.Fatalf("错误信息应当指出 %s 不支持 json，得到 %q", tc.command, err.Error())
+			}
+			if got := exitCode(err); got != exitUsage {
+				t.Errorf("退出码 = %d，期望参数错的 %d", got, exitUsage)
+			}
+		})
+	}
+}

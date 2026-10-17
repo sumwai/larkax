@@ -102,6 +102,10 @@ func parsePartitionMonths(args []string, name string) (int, error) {
 // 明确输出——「没有缺失的分区」与「命令根本没跑成」在安静的终端里长得一样
 // （见 LESSONS.md 第 16 条）。判据与 snapshot cleanup 相同。
 func runPartitionEnsure(args []string) error {
+	if err := jsonUnsupported("partition ensure"); err != nil {
+		return err
+	}
+
 	months, err := parsePartitionMonths(args, "partition ensure")
 	if err != nil {
 		return err
@@ -177,16 +181,65 @@ func runPartitionCheck(args []string) error {
 	}
 
 	problems := partitionProblems(missing, usageDefaultRows, snapshotDefaultRows)
+	cause := partitionCheckErr(problems)
+
+	if jsonOutput() {
+		return emitJSON(os.Stdout, partitionCheckDoc(
+			from, months, missing, usageDefaultRows, snapshotDefaultRows, problems), cause)
+	}
 
 	printPartitionSpan(from, months)
 	printMissingPartitions(missing)
 	fmt.Printf("兜底分区 %s：%d 行\n", store.UsageEventDefaultPartition, usageDefaultRows)
 	fmt.Printf("兜底分区 %s：%d 行\n", snapshotwire.DefaultPartition, snapshotDefaultRows)
+	return cause
+}
 
+// partitionCheckErr 把体检的问题清单折成退出码。
+//
+// 抽出来是因为两条渲染路径都要用它，而「有几条问题才算不通过」只有一处判据：
+// 各写一遍的表现是 json 模式下的退出码与交互模式不同，而脚本正是按退出码
+// 分派的（见 docs/cli-output.md 的「退出码」）。
+func partitionCheckErr(problems []string) error {
 	if len(problems) > 0 {
 		return fmt.Errorf("usage_events 月分区体检不通过：%s", strings.Join(problems, "；"))
 	}
 	return nil
+}
+
+// partitionCheckDoc 把一次体检折成机器可读输出。
+//
+// 三条判据各自的**取值**都给出来（缺几个分区、两个兜底分区各几行），不只给
+// 一个「过没过」：那句结论由它们算出来，而「有 3 行落进兜底分区」与
+// 「有 3000 行」要做的处置完全不同。
+//
+// 月份区间三个键一起给：缺分区时最要紧的上下文就是「这一段区间本来该有几个
+// 分区」，而它只存在于命令行参数里（见 printPartitionSpan）。
+func partitionCheckDoc(
+	from time.Time, months int, missing []string,
+	usageDefaultRows, snapshotDefaultRows int64, problems []string,
+) map[string]any {
+	start, _ := store.UsageEventMonthBounds(from)
+	end, _ := store.UsageEventMonthBounds(start.AddDate(0, months-1, 0))
+
+	status := jsonOK
+	if len(problems) > 0 {
+		status = jsonFailed
+	}
+	doc := jsonDoc(status)
+	doc["summary"] = map[string]any{"months": months, "missing": len(missing)}
+	doc["from_month"] = start.Format("2006-01")
+	doc["to_month"] = end.Format("2006-01")
+	doc["missing"] = jsonList(missing)
+	doc["problems"] = jsonList(problems)
+	// 两个兜底分区的**行数**按表名给：它们是库里真实的表名，脚本要按它去查
+	// 那几行是什么，翻译一遍就多一层对应关系。行数不进 summary——同一个事实
+	// 有两个键时，改了其中一处另一处就开始说谎。
+	doc["default_partitions"] = map[string]any{
+		store.UsageEventDefaultPartition: usageDefaultRows,
+		snapshotwire.DefaultPartition:    snapshotDefaultRows,
+	}
+	return doc
 }
 
 // partitionProblems 把三项检查的结果折成一张问题清单，空清单表示体检通过。

@@ -1042,3 +1042,287 @@ func TestSnapshotShowLogFailureBlocksRead(t *testing.T) {
 
 // ptrTo 造一个指向字面量的指针，供可空列用。
 func ptrTo[T any](v T) *T { return &v }
+
+// ── 机器可读输出 ────────────────────────────────────────────────────────
+
+// jsonDocOf 把一份文档编成 JSON 再解回 map。
+//
+// 先编再解而不是直接读 map：用例要钉的正是**编出来的那串字节**能不能被
+// 下游解析。直接读 map 会漏掉「有个字段编不出来」这一类——那正是
+// docs/cli-output.md 里 stdout 纯净性那一条要防的东西。
+func jsonDocOf(t *testing.T, doc map[string]any) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("文档编不成 JSON: %v", err)
+	}
+	if strings.ContainsRune(string(raw), escByte) {
+		t.Errorf("不许有转义序列：%s", raw)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("编出来的不是一份合法的 JSON: %v\n%s", err, raw)
+	}
+	return got
+}
+
+// 快照的每一栏都要进 JSON，且两栏 NULL 给 null 而不是表格里那句占位符。
+func TestSnapshotsDocCarriesEveryColumn(t *testing.T) {
+	first := time.Date(2026, 10, 17, 1, 2, 3, 0, time.UTC)
+	rows := []snapshotRow{
+		{
+			ID: 1, Direction: "request", SkeletonVersion: 1, CaptureMode: "skeleton",
+			Skeleton:      map[string]any{"model": "probe-model"},
+			RedactedPaths: []string{"messages[0].content[0].text"},
+			CreatedAt:     first,
+		},
+		{
+			ID: 2, Direction: "response", SkeletonVersion: 1, CaptureMode: "summary",
+			Skeleton:       map[string]any{"upstream_model": "probe-model"},
+			Truncated:      true,
+			UpstreamStatus: sql.NullInt64{Int64: 500, Valid: true},
+			ErrorKind:      sql.NullString{String: "upstream_error", Valid: true},
+			CreatedAt:      first.Add(time.Millisecond),
+		},
+	}
+
+	doc := jsonDocOf(t, snapshotsDoc("req-probe", rows))
+	if doc["request_id"] != "req-probe" {
+		t.Errorf("request_id = %v", doc["request_id"])
+	}
+	if summary, _ := doc["summary"].(map[string]any); summary["total"] != float64(2) {
+		t.Errorf("summary.total = %v，想要 2", doc["summary"])
+	}
+
+	items, ok := doc["snapshots"].([]any)
+	if !ok || len(items) != 2 {
+		t.Fatalf("snapshots 不是两条：%#v", doc["snapshots"])
+	}
+	req, _ := items[0].(map[string]any)
+	resp, _ := items[1].(map[string]any)
+
+	if req["id"] != float64(1) || req["direction"] != "request" {
+		t.Errorf("请求方向那一行不对：%#v", req)
+	}
+	// 时刻给完整精度（表格那一档截到分钟是排版需要）。
+	if req["created_at"] != "2026-10-17T01:02:03Z" {
+		t.Errorf("created_at = %v", req["created_at"])
+	}
+	if req["skeleton_version"] != float64(1) || req["capture_mode"] != "skeleton" {
+		t.Errorf("版本与采集模式不对：%#v", req)
+	}
+	// 表格里的三段文本（<不适用…>、<无上游响应>、<无>）一个都不进 JSON。
+	for _, item := range []map[string]any{req, resp} {
+		if item["upstream_status"] == "不适用" || item["upstream_status"] == "<不适用（请求方向快照）>" {
+			t.Errorf("占位符不该进 JSON：%#v", item)
+		}
+	}
+	if req["upstream_status"] != nil || req["error_kind"] != nil {
+		t.Errorf("请求方向那两列该是 null：%#v", req)
+	}
+	if req["skeleton_truncated"] != false {
+		t.Errorf("没被截断时该是 false，得到 %v", req["skeleton_truncated"])
+	}
+	paths, _ := req["redacted_paths"].([]any)
+	if len(paths) != 1 || paths[0] != "messages[0].content[0].text" {
+		t.Errorf("redacted_paths 不对：%#v", req["redacted_paths"])
+	}
+	skeleton, _ := req["skeleton"].(map[string]any)
+	if skeleton["model"] != "probe-model" {
+		t.Errorf("骨架要原样带出来：%#v", req["skeleton"])
+	}
+
+	if resp["upstream_status"] != float64(500) || resp["error_kind"] != "upstream_error" {
+		t.Errorf("响应方向那两列不对：%#v", resp)
+	}
+	// 被降级成摘要层这件事必须带出来：它与一份完整的骨架在肉眼下长得一样。
+	if resp["skeleton_truncated"] != true {
+		t.Errorf("被截断时该是 true，得到 %v", resp["skeleton_truncated"])
+	}
+}
+
+// 一条都没读到时是空数组，不是 null，也不是表格那句「0 条快照」。
+func TestSnapshotsDocEmptyListIsArray(t *testing.T) {
+	doc := jsonDocOf(t, snapshotsDoc("req-none", nil))
+	items, ok := doc["snapshots"].([]any)
+	if !ok {
+		t.Fatalf("空清单该是数组而不是 null：%#v", doc["snapshots"])
+	}
+	if len(items) != 0 {
+		t.Errorf("空清单该是空的：%#v", items)
+	}
+	if summary, _ := doc["summary"].(map[string]any); summary["total"] != float64(0) {
+		t.Errorf("summary.total = %v，想要 0", doc["summary"])
+	}
+}
+
+// 允许表：每一对「表面 × 方向」一段，每条规则的 Note 完整带出来。
+//
+// Note 是这条命令存在的理由（见 printAllowlists），JSON 这一档同样不许省。
+func TestAllowlistDocCarriesEveryNote(t *testing.T) {
+	surfaces := snapshot.Surfaces()
+	roots := snapshot.Roots()
+
+	doc := jsonDocOf(t, allowlistDoc(surfaces, roots))
+	groups, ok := doc["allowlist"].([]any)
+	if !ok {
+		t.Fatalf("allowlist 不是数组：%#v", doc["allowlist"])
+	}
+	if len(groups) != len(surfaces)*len(roots) {
+		t.Fatalf("分段数 = %d，想要 %d", len(groups), len(surfaces)*len(roots))
+	}
+
+	rules := 0
+	for i, raw := range groups {
+		group, _ := raw.(map[string]any)
+		s := surfaces[i/len(roots)]
+		root := roots[i%len(roots)]
+		if group["surface"] != string(s) || group["direction"] != string(root) {
+			t.Errorf("第 %d 段的表面/方向不对：%#v", i, group)
+		}
+
+		items, _ := group["rules"].([]any)
+		want := snapshot.AllowlistFor(s, root)
+		if len(items) != len(want) {
+			t.Fatalf("表面 %s 方向 %s 的规则数 = %d，想要 %d", s, root, len(items), len(want))
+		}
+		rules += len(items)
+		for j, rawRule := range items {
+			rule, _ := rawRule.(map[string]any)
+			if rule["path"] != want[j].Path {
+				t.Errorf("规则路径 = %v，想要 %q", rule["path"], want[j].Path)
+			}
+			if rule["kind"] != want[j].Kind {
+				t.Errorf("%s 的 kind = %v，想要 %q", want[j].Path, rule["kind"], want[j].Kind)
+			}
+			if rule["upstream_value"] != want[j].UpstreamValue {
+				t.Errorf("%s 的 upstream_value = %v，想要 %t",
+					want[j].Path, rule["upstream_value"], want[j].UpstreamValue)
+			}
+			// 按整串比对而不是子串：一条 Note 是另一条的前缀时，
+			// 子串匹配分辨不出「后一条被截断了」。
+			if rule["note"] != want[j].Note {
+				t.Errorf("%s 的 Note 没有完整带出来：%v", want[j].Path, rule["note"])
+			}
+		}
+	}
+	if summary, _ := doc["summary"].(map[string]any); summary["rules"] != float64(rules) {
+		t.Errorf("summary.rules = %v，想要 %d", doc["summary"], rules)
+	}
+}
+
+// 命令级：`snapshot allowlist -o json` 的 stdout 是一份纯 JSON。
+//
+// 这条命令不连库，所以它是「整条命令的 stdout 契约」最省事的那条证据。
+func TestSnapshotAllowlistJSONStdoutIsPure(t *testing.T) {
+	withFormat(t, formatJSON)
+
+	var err error
+	stdout, _ := captureStreams(t, func() { err = runSnapshotAllowlist(nil) })
+	if err != nil {
+		t.Fatalf("allowlist 失败: %v", err)
+	}
+	if strings.ContainsRune(stdout, escByte) {
+		t.Errorf("json 模式下 stdout 里不许有转义序列：%q", stdout)
+	}
+
+	var got struct {
+		Status    string `json:"status"`
+		ExitCode  int    `json:"exit_code"`
+		Allowlist []struct {
+			Surface   string `json:"surface"`
+			Direction string `json:"direction"`
+			Rules     []struct {
+				Path string `json:"path"`
+				Note string `json:"note"`
+			} `json:"rules"`
+		} `json:"allowlist"`
+	}
+	if jsonErr := json.Unmarshal([]byte(stdout), &got); jsonErr != nil {
+		t.Fatalf("json 模式下 stdout 不是一份合法的 JSON: %v\n%s", jsonErr, stdout)
+	}
+	if got.Status != jsonOK || got.ExitCode != exitOK {
+		t.Errorf("status=%q exit_code=%d", got.Status, got.ExitCode)
+	}
+	if len(got.Allowlist) == 0 {
+		t.Fatal("允许表不该是空的，这条命令就没有内容可打")
+	}
+	for _, group := range got.Allowlist {
+		if len(group.Rules) == 0 {
+			t.Errorf("表面 %s 方向 %s 的规则是空的", group.Surface, group.Direction)
+		}
+		for _, rule := range group.Rules {
+			if strings.TrimSpace(rule.Note) == "" {
+				t.Errorf("规则 %s 没有 Note", rule.Path)
+			}
+		}
+	}
+	// 表格那一档的那句「表面 chat 方向 request：N 条」不该出现在 json 里。
+	if strings.Contains(stdout, "表面 ") || strings.Contains(stdout, " 条\n") {
+		t.Errorf("json 的 stdout 里混进了表格那一档的排版：\n%s", stdout)
+	}
+}
+
+// 命令级：`snapshot show -o json` 在真库上也是一份纯 JSON，且访问日志照写。
+//
+// 读快照要落访问日志是一条硬契约（谁读了、为什么读）。JSON 这一档换的是
+// **怎么打**，不是「读没读」，所以日志那一半必须原样还在。
+func TestSnapshotShowJSONStdoutIsPure(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+	userID, username := seedSnapshotUser(t, db)
+
+	requestID := uniqueName("req-json")
+	at := time.Now().UTC().Add(-time.Minute)
+	insertSnapshot(t, db, probeSnapshot{
+		requestID: requestID, userID: userID, direction: "request",
+		skeleton: `{"model":"probe-model"}`, createdAt: at,
+	})
+	insertSnapshot(t, db, probeSnapshot{
+		requestID: requestID, userID: userID, direction: "response",
+		skeleton: `{"upstream_model":"probe-model"}`, truncated: true,
+		status: ptrTo(500), errorKind: ptrTo("upstream_error"),
+		createdAt: at.Add(time.Millisecond),
+	})
+
+	withFormat(t, formatJSON)
+	var runErr error
+	stdout, _ := captureStreams(t, func() {
+		runErr = runSnapshotShow([]string{
+			requestID, "--actor", username, "--reason", "排查一次 500",
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("show 失败: %v", runErr)
+	}
+
+	var got struct {
+		RequestID string `json:"request_id"`
+		Snapshots []struct {
+			ID            int64  `json:"id"`
+			Direction     string `json:"direction"`
+			Truncated     bool   `json:"skeleton_truncated"`
+			UpstreamState *int64 `json:"upstream_status"`
+			ErrorKind     string `json:"error_kind"`
+		} `json:"snapshots"`
+	}
+	if jsonErr := json.Unmarshal([]byte(stdout), &got); jsonErr != nil {
+		t.Fatalf("json 模式下 stdout 不是一份合法的 JSON: %v\n%s", jsonErr, stdout)
+	}
+	if got.RequestID != requestID {
+		t.Errorf("request_id = %q，想要 %q", got.RequestID, requestID)
+	}
+	if len(got.Snapshots) != 2 {
+		t.Fatalf("快照数 = %d，想要 2", len(got.Snapshots))
+	}
+	if got.Snapshots[0].Direction != "request" || got.Snapshots[0].UpstreamState != nil {
+		t.Errorf("请求方向那一行不对：%#v", got.Snapshots[0])
+	}
+	if got.Snapshots[1].ErrorKind != "upstream_error" || !got.Snapshots[1].Truncated {
+		t.Errorf("响应方向那一行不对：%#v", got.Snapshots[1])
+	}
+
+	if logged := readAccessLog(t, db, requestID); len(logged) != 2 {
+		t.Errorf("换输出格式不该少写访问日志：得到 %d 行，想要 2 行", len(logged))
+	}
+}
