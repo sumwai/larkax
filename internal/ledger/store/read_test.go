@@ -17,15 +17,139 @@ import (
 // 「从库里读回来的行算什么」，而拿内存假装的那些性质——uuid 的文本形态、
 // numeric 的精度、`account` 是 text 因而能存下任何写法——都只在真库上存在。
 
+// slotEnd 是时段空间的终点。它取在**过去**：本包其他用例写进 ledger_entries
+// 的分录用的是库里的 now()（seed 造的充值、写路径的分录都是），而校验按时间
+// 区间读、不分科目——时段落在「现在」附近，那些分录会被一起数进来。
+var slotEnd = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// slotOrigin 是时段空间的起点：从 slotEnd 往前 slotSpan 秒。
+var slotOrigin = slotEnd.Add(-slotSpan * time.Second)
+
+// slotSpan 是时段空间的宽度（秒）。它等于 base 的取值个数——不多不少，
+// 也就是把 base 的熵全部用上。10 亿秒 ≈ 31.7 年。
+//
+// # 为什么宽度是这件事的全部
+//
+// 「撞车」指的是上一次运行留下的分录落在这一次的查询区间里，而区间是时段
+// ±500 毫秒。判据因此不是「两次运行的时段相等」，而是**相差不到一秒**。
+//
+// 于是「时段有多少个不同取值」这个数本身不说明问题：把起点按微秒铺满一秒
+// （同样是 10 亿个取值），相邻两个起点给出的时段只差一微秒、区间整个套在
+// 一起，撞车概率实测 2.5%——比原来那 100 个时段（1.0%）还糟。只有空间比
+// 区间宽好几个数量级，概率才真的下去。
+//
+// 时段按**秒**对齐、不掺亚秒的部分，也是同一个道理：比秒更细的偏移不会把
+// 两次运行分开，只会把「相差多少」变成一个连续量——那反而更容易撞上。
+// 这一条由 TestSlotWindowsDoNotOverlap 的「起点相邻」钉住。
+const slotSpan = 1_000_000_000
+
+// slotHalfWidth 是区间从时段中心向两侧各伸出的长度。
+const slotHalfWidth = 500 * time.Millisecond
+
+// slotAtFrom 由「本次运行的起点」与「用例序号」算出时段与区间。
+//
+// 两项各管一头：
+//
+//   - epoch 管**跨运行**。它是本次运行的起点，10 亿个取值摊在 slotSpan 秒上，
+//     两次运行撞上的概率因此是十亿分之几（宽度为什么是关键，见 slotSpan）。
+//   - n 管**同一次运行内**。第 n 个用例的时段落在第 n 秒，间隔恰好一秒，而
+//     区间只向两侧各伸 500 毫秒，于是相邻两段恰好相接、互不重叠。
+//
+// 拆成一个纯函数是为了能被直接钉住：跨运行的唯一性是概率性质，跑两遍测不出
+// 来（见 TestSlotIsInjectiveInRunStart）。
+//
+// # 它原先错在哪
+//
+// 时段当初由 nextID()%100000 算出，而 base*1000 % 100000 == (base%100)*1000
+// ——base*1000 里能被 100000 整除的部分整段丢了。于是时段只由 base%100 决定，
+// 一共 100 个可能值：两次运行有 1% 的概率落在同一段，上一次运行留在那段窗口
+// 里的分录会被这一次一起数进去，CheckedTxns 这类计数断言于是失败，而报出来
+// 像是校验逻辑坏了。
+func slotAtFrom(epoch, n int64) (at, from, to time.Time) {
+	at = slotOrigin.Add(time.Duration(epoch%slotSpan)*time.Second +
+		time.Duration(n)*time.Second)
+	return at, at.Add(-slotHalfWidth), at.Add(slotHalfWidth)
+}
+
 // slotAt 给这次用例一个**独占**的时刻，以及一个只覆盖它的区间。
 //
 // 本包的其他用例会在同一个库里留下分录（seed 造的充值不清理），所以
 // 「校验某个区间」的断言必须只圈到自己插进去的那几条，否则它测的是
-// 别人留了什么。相邻两次调用相隔一秒，区间取 ±500 毫秒，于是两两不相交。
+// 别人留了什么。独占是怎么来的，见 slotAtFrom。
 func slotAt() (at, from, to time.Time) {
-	at = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).
-		Add(time.Duration(nextID()%100000) * time.Second)
-	return at, at.Add(-500 * time.Millisecond), at.Add(500 * time.Millisecond)
+	return slotAtFrom(base, nextSeq())
+}
+
+// 时段生成器对「本次运行的起点」必须是单射：起点不同，时段就得不同。
+//
+// # 为什么钉的是这个，而不是「两次运行不撞车」
+//
+// 后者没法当判据：它只在真的跑两遍、且恰好撞上时才红，于是红的概率就是它要
+// 防的那个概率本身——实测 1.01%。能钉住的是生成器：时段是起点的单射，两次
+// 运行撞车就只剩「起点之差恰好等于两个用例序号之差」这一条路，而那是十亿分
+// 之几（见 slotSpan）。
+//
+// 一段连续的起点取值代表若干次不同的运行；序号固定，因为同一个用例在两次
+// 运行里拿到的是同一个序号（见 nextSeq）。
+//
+// 这条断言在旧实现上是红的：旧时段是 (base%100)*1000+n 秒，于是起点相差 100
+// 的两次运行给出**完全相同**的时段。
+func TestSlotIsInjectiveInRunStart(t *testing.T) {
+	// 前提：起点要落在时段空间内。落在外面的话 epoch%slotSpan 会把它折回来，
+	// 两个相差 slotSpan 的起点给出同一个时段——单射就没有了。
+	if base < 0 || base >= slotSpan {
+		t.Fatalf("本次运行的起点 %d 落在时段空间 [0, %d) 之外", base, slotSpan)
+	}
+
+	const (
+		first = 123_456_789
+		span  = 1000 // 远超旧实现能分辨的 100 个起点
+	)
+	seen := make(map[time.Time]int64, span)
+	for epoch := int64(first); epoch < first+span; epoch++ {
+		at, _, _ := slotAtFrom(epoch, 1)
+		if prev, dup := seen[at]; dup {
+			t.Fatalf("起点 %d 与起点 %d 给出同一个时段 %s——这两次运行会撞车",
+				prev, epoch, at)
+		}
+		seen[at] = epoch
+	}
+}
+
+// 时段与区间要一起看：**两个参数各自相邻**时，区间都不许重叠。
+//
+//   - 序号相邻 = 同一次运行内的相邻用例。时段相隔一秒，区间各向两侧伸 500
+//     毫秒，于是恰好相接。
+//   - 起点相邻 = 两次运行的起点最接近的情形。时段同样相隔一秒。
+//
+// 后一条比看上去重要：它排除的是「把起点铺得比区间还细」那种改法。按微秒
+// 铺满一秒时，相邻起点给出的时段只差一微秒，区间整个套在一起——而时段仍有
+// 10 亿个取值，「有多少个不同时段」那条断言照过（见 slotSpan）。
+func TestSlotWindowsDoNotOverlap(t *testing.T) {
+	const epoch = 123_456_789
+
+	// 序号相邻。
+	for n := int64(1); n <= 4; n++ {
+		if windowsOverlap(epoch, n, epoch, n+1) {
+			t.Errorf("序号 %d 与 %d 的区间重叠", n, n+1)
+		}
+	}
+	// 起点相邻。
+	for d := int64(1); d <= 4; d++ {
+		if windowsOverlap(epoch+d-1, 1, epoch+d, 1) {
+			t.Errorf("起点 %d 与 %d 的区间重叠", epoch+d-1, epoch+d)
+		}
+	}
+}
+
+// windowsOverlap 报告两个时段的区间有没有重叠。
+//
+// 区间是半开区间 [时段-500 毫秒, 时段+500 毫秒)（见 readScope.where），
+// 所以相邻两段恰好相接时**不算**重叠——那正是时段相隔一秒时的情形。
+func windowsOverlap(prevEpoch, prevN, nextEpoch, nextN int64) bool {
+	_, _, prevTo := slotAtFrom(prevEpoch, prevN)
+	nextFrom, _, _ := slotAtFrom(nextEpoch, nextN)
+	return nextFrom.Before(prevTo)
 }
 
 // insertAt 写一组分录，created_at 由调用方给。
