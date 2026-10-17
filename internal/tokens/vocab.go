@@ -228,6 +228,8 @@ func (v *vocabSet) loaded() []string {
 // 与 preparedCodecs 的区别：那个是启动时**主动**加载的子集（覆盖主流
 // 流量），这个是**能力上限**。r50k/p50k/gpt2 能加载，只是本包不预先加载
 // 它们——真遇到那些老模型时，codecFor 会按需惰性加载。
+//
+// 目前只有 AvailableEncodings 在调它，而那个也还没有生产调用方（见它的注释）。
 func loadableEncodings() []tokenizer.Encoding {
 	return []tokenizer.Encoding{
 		tokenizer.O200kBase,

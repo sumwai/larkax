@@ -79,9 +79,9 @@ func run() error {
 	}
 
 	logger := observe.NewLogger(cfg.LogLevel, "", cfg.IsProduction())
-	// 同时设为包级默认，让 observe.FromContext 的兜底与本进程真正在用的
-	// 日志器一致。不设的话，漏了 WithLogger 的调用点会拿到另一套配置，
-	// 生产环境里表现为部分日志是文本、部分是 JSON。
+	// 设为包级默认，因为 observe.FromContext 取的就是它——请求链路里
+	// 每一处日志都走这条路。不设的话它们会落到 slog 自己的默认配置上，
+	// 生产环境里表现为日志格式与级别都不是这里配的那一套。
 	observe.AdoptAsDefault(logger)
 	// 启动摘要直接打 Config 本身，由它的 LogValue 负责脱敏：DSN 里的口令抹掉、
 	// 主密钥只留把数。摘要里是运维真会问的那几项（环境、角色、两个监听地址、

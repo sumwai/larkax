@@ -230,15 +230,15 @@ func TestEveryDeclaredCounterIsRegistered(t *testing.T) {
 		switch c := f.Interface().(type) {
 		case *Counter:
 			fields++
-			if !registered[c.Name()] {
+			if !registered[c.name] {
 				t.Errorf("字段 %s 的计数器 %q 没有登记进注册表，它不会被输出",
-					rv.Type().Field(i).Name, c.Name())
+					rv.Type().Field(i).Name, c.name)
 			}
 		case *LabeledCounter:
 			fields++
-			if !registered[c.Name()] {
+			if !registered[c.name] {
 				t.Errorf("字段 %s 的计数器 %q 没有登记进注册表，它不会被输出",
-					rv.Type().Field(i).Name, c.Name())
+					rv.Type().Field(i).Name, c.name)
 			}
 		}
 	}

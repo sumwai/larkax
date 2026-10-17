@@ -164,6 +164,8 @@ func Drain(body io.Reader) {
 // 只给拿不到 *http.Response 的调用点用（例如把 body 单独传出去的地方）。
 // 收尾一个 *http.Response 用 Drain + resp.Body.Close() 两行，
 // 原因见 Drain 的注释。
+//
+// 目前只有测试在调它：适配器手里都有完整的 *http.Response，走的是那两行。
 func DrainAndClose(body io.ReadCloser) {
 	Drain(body)
 	if body == nil {

@@ -3,11 +3,25 @@ package observe
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+// adoptTestLogger 把日志器装成进程默认，并在用例结束时还原。
+//
+// FromContext 的日志器**只**来自 slog 的包级默认（见 AdoptAsDefault），
+// 所以用例要拿到输出就得走这条路，而不是往 context 里塞一个——
+// 那条路已经不存在了。
+func adoptTestLogger(t *testing.T, w io.Writer) {
+	t.Helper()
+	original := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(original) })
+	AdoptAsDefault(NewLoggerWithWriter(w, "info", "json", true))
+}
 
 func TestNewRequestIDIsUniqueAndWellFormed(t *testing.T) {
 	seen := make(map[RequestID]bool)
@@ -126,9 +140,9 @@ func TestMiddlewareGeneratesWhenAbsent(t *testing.T) {
 // 带上请求标识的日志器应自动附上该字段，调用点不必手写。
 func TestFromContextAttachesRequestID(t *testing.T) {
 	var sb strings.Builder
-	l := NewLoggerWithWriter(&sb, "info", "json", true)
+	adoptTestLogger(t, &sb)
 
-	ctx := WithLoggerAndRequest(context.Background(), l, RequestID("trace-me"))
+	ctx := WithRequestID(context.Background(), RequestID("trace-me"))
 	FromContext(ctx).Info("probe", "key", "value")
 
 	var rec map[string]any
@@ -146,10 +160,9 @@ func TestFromContextAttachesRequestID(t *testing.T) {
 // 没有标识时不应凭空多出一个空字段，那会让日志看起来像是漏了埋点。
 func TestFromContextWithoutRequestIDAddsNothing(t *testing.T) {
 	var sb strings.Builder
-	l := NewLoggerWithWriter(&sb, "info", "json", true)
+	adoptTestLogger(t, &sb)
 
-	ctx := WithLogger(context.Background(), l)
-	FromContext(ctx).Info("probe")
+	FromContext(context.Background()).Info("probe")
 
 	if strings.Contains(sb.String(), "request_id") {
 		t.Errorf("无标识时不应出现 request_id 字段: %s", sb.String())
@@ -160,21 +173,13 @@ func TestFromContextWithoutRequestIDAddsNothing(t *testing.T) {
 // 而不是在被派生的那个上面继续派生。
 func TestFromContextIsIdempotent(t *testing.T) {
 	var sb strings.Builder
-	l := NewLoggerWithWriter(&sb, "info", "json", true)
-	ctx := WithLoggerAndRequest(context.Background(), l, RequestID("once"))
+	adoptTestLogger(t, &sb)
+	ctx := WithRequestID(context.Background(), RequestID("once"))
 
 	FromContext(ctx).Info("first")
 	FromContext(ctx).Info("second")
 
 	if n := strings.Count(sb.String(), "request_id"); n != 2 {
 		t.Errorf("两条日志各应有一次 request_id，共 2 次，实际 %d 次：%s", n, sb.String())
-	}
-}
-
-// 放 nil 日志器不应让后续取值 panic。
-func TestWithLoggerAndRequestNilLogger(t *testing.T) {
-	ctx := WithLoggerAndRequest(context.Background(), nil, RequestID("x"))
-	if FromContext(ctx) == nil {
-		t.Error("取出不应为 nil")
 	}
 }

@@ -98,24 +98,18 @@ func TestLoggerJSONShape(t *testing.T) {
 	}
 }
 
-func TestContextLogger(t *testing.T) {
-	if FromContext(context.Background()) == nil {
-		t.Fatal("无日志器时应返回默认日志器而非 nil")
-	}
+// FromContext 的日志器来自 slog 的包级默认，由进程启动时的 AdoptAsDefault
+// 装好——没有任何一处会把日志器放进 context，所以这条路必须自己站得住。
+func TestContextLoggerComesFromDefault(t *testing.T) {
+	original := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(original) })
 
 	var sb strings.Builder
 	custom := NewLoggerWithWriter(&sb, "debug", "text", false)
-	ctx := WithLogger(context.Background(), custom)
-	if FromContext(ctx) != custom {
-		t.Error("应取回放入的日志器")
-	}
-}
+	AdoptAsDefault(custom)
 
-// nil 日志器放进 context 不应导致取出时得到 nil。
-func TestContextLoggerRejectsNil(t *testing.T) {
-	ctx := WithLogger(context.Background(), nil)
-	if FromContext(ctx) == nil {
-		t.Error("放入 nil 后取出不应为 nil")
+	if got := FromContext(context.Background()); got != custom {
+		t.Error("应取回 AdoptAsDefault 装的那个日志器")
 	}
 }
 

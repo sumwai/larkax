@@ -47,6 +47,10 @@ const (
 )
 
 // String 返回稳定的英文标识。
+//
+// 目前只有测试在调它。同一族的 Source.String 在生产里有用到
+// （pipeline 拿它当 Settlements 计数器的标签值），这一条是配对的一半，
+// 一旦日志或界面要报上游口径就会用上。
 func (u Upstream) String() string {
 	switch u {
 	case UpstreamOpenAI:

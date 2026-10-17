@@ -61,39 +61,26 @@ func ParseLevel(level string) slog.Level {
 	}
 }
 
-// contextKey 是本包在 context 中存放日志器的私有键类型。
-// 用空结构体而非字符串，避免与其他包的键冲突。
-type contextKey struct{}
-
-// WithLogger 返回带日志器的 context。
-func WithLogger(ctx context.Context, l *slog.Logger) context.Context {
-	return context.WithValue(ctx, contextKey{}, l)
-}
-
-// FromContext 取出 context 里的日志器；没有就返回默认的。
+// FromContext 取回本进程的日志器，并把请求标识附成字段。
 //
-// 兜底是 slog.Default()，它不一定与本进程 NewLogger 的产物一致
-// （默认等级是 info，格式取决于谁先设置过）。所以进程启动时应当用
-// AdoptAsDefault 把真正在用的那个设成默认，否则请求链路里一旦漏了
-// WithLogger，同一进程会同时存在两套日志配置。
+// 日志器来自 slog.Default()，由进程启动时的 AdoptAsDefault 装好。
+// **没有「把日志器放进 context」这条路**：日志器是进程级的，逐请求要变的
+// 只是请求标识，而它由 Middleware 装进 context。
 //
 // 若 context 里带着请求标识，会作为字段附在日志器上。这是有意的：
 // 让调用点不必在每个 log 语句里手写 "request_id", id——
 // 那种写法漏一处就断一条链路，而漏掉的地方往往正是出错的那一处。
 func FromContext(ctx context.Context) *slog.Logger {
-	l, ok := ctx.Value(contextKey{}).(*slog.Logger)
-	if !ok || l == nil {
-		l = slog.Default()
-	}
+	l := slog.Default()
 	if id := RequestIDFromContext(ctx); id != "" {
 		l = l.With("request_id", string(id))
 	}
 	return l
 }
 
-// AdoptAsDefault 把 logger 同时设为 slog 的包级默认。
+// AdoptAsDefault 把 logger 设为 slog 的包级默认。
 //
-// 只在进程启动时调用一次。它的作用是让 FromContext 的兜底与真正在用的
-// 日志器一致，避免"同一个进程两种格式"——生产环境里那会表现为
-// 一部分日志是 JSON、一部分是文本，采集规则只认得其中一种。
+// 只在进程启动时调用一次。**它是 FromContext 取到日志器的唯一来源**：
+// 不设的话，请求链路里的每一处日志都会走 slog 自己的默认配置，
+// 生产环境里表现为日志格式与级别都不是这里配的那一套。
 func AdoptAsDefault(l *slog.Logger) { slog.SetDefault(l) }

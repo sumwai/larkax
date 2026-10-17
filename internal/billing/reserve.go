@@ -161,7 +161,7 @@ type Settlement struct {
 	Capped bool
 }
 
-// Settle 按实际用量结算。
+// SettleWithCharges 按实际用量结算，算上固定费用与最低消费。
 //
 // # 超过预留时截住而不是让余额变负
 //
@@ -173,11 +173,6 @@ type Settlement struct {
 //   - 静默吞掉差额等于平台承担了这笔钱，而且不会有任何人知道。
 //
 // 截住并置 Capped，让账目对得上，同时留下一条可查的信号。
-func Settle(actual Usage, prices Prices, reserved money.Amount) (Settlement, error) {
-	return SettleWithCharges(actual, prices, Charges{}, reserved)
-}
-
-// SettleWithCharges 与 Settle 相同，但会算上固定费用与最低消费。
 //
 // **结算必须用与预留同一组 Charges。** 若预留算了保底而结算没算，
 // 一笔用量很小的请求会被预留 1 元、结算 0.002 元，差额全额退回——
@@ -208,28 +203,4 @@ func SettleWithCharges(actual Usage, prices Prices, charges Charges, reserved mo
 		return Settlement{}, err
 	}
 	return s, nil
-}
-
-// SettleUncapped 按实际用量结算，不设上界。
-//
-// 用于那些不该有上界的情形：请求已经在途且上游报了真实用量，
-// 那时截住金额等于少收钱。调用方必须自己保证余额足够——
-// 它通常是在已经有实测用量之后才调用这个。
-func SettleUncapped(actual Usage, prices Prices) (Settlement, error) {
-	return SettleUncappedWithCharges(actual, prices, Charges{})
-}
-
-// SettleUncappedWithCharges 与 SettleUncapped 相同，但会算上一次性费用。
-func SettleUncappedWithCharges(actual Usage, prices Prices, charges Charges) (Settlement, error) {
-	if err := ValidateCharges(actual, prices, charges); err != nil {
-		return Settlement{}, err
-	}
-	breakdown := ComputeWithCharges(actual, prices, charges)
-	if err := breakdown.Verify(); err != nil {
-		return Settlement{}, err
-	}
-	return Settlement{
-		Actual:    breakdown.Total,
-		Breakdown: breakdown,
-	}, nil
 }

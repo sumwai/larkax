@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -93,18 +92,13 @@ func RequestIDFromContext(ctx context.Context) RequestID {
 //
 // 顺序上它应当是最外层的一层：放在鉴权、限流之前，
 // 这样那些中间件拒绝的请求也带着 id，能被排查到。
+//
+// 它只装请求标识，不装日志器：日志器是进程级的（见 FromContext 与
+// AdoptAsDefault），逐请求变化的那一项只有标识。
 func Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := RequestIDFromHeader(r.Header.Get(HeaderRequestID))
 		w.Header().Set(HeaderRequestID, string(id))
 		next.ServeHTTP(w, r.WithContext(WithRequestID(r.Context(), id)))
 	})
-}
-
-// WithLoggerAndRequest 返回同时带上日志器与请求标识的 context。
-//
-// 把两件事合成一个调用点：请求入口需要同时建立它们，
-// 而分成两步容易出现「设了日志器但忘了设 id」这种只在一半日志里显形的疏漏。
-func WithLoggerAndRequest(ctx context.Context, l *slog.Logger, id RequestID) context.Context {
-	return WithRequestID(WithLogger(ctx, l), id)
 }

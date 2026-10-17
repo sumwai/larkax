@@ -212,6 +212,9 @@ func (e *StreamEstimator) ObserveToolCall(id, name, args string) {
 // **覆盖而不是相加**：实测值本身就是整次请求的用量，与累加值相加会把
 // 输入算两遍。这是本文件里最容易写错的一处——写错的表现是「流里带 usage
 // 的请求，输入翻倍」，而它不会触发任何错误，只会让账单变高。
+//
+// **目前没有生产调用方**：`gateway` 只调了 ObserveDone，实测覆盖那条路还没接上，
+// 所以流式请求的用量目前一律是估的。
 func (e *StreamEstimator) ObserveMeasured(m Count) {
 	if e == nil {
 		return
@@ -236,6 +239,8 @@ func (e *StreamEstimator) ObserveDone() {
 }
 
 // HasMeasured 表示流里是否已经带过实测用量。
+//
+// 目前没有生产调用方：与 ObserveMeasured 是同一组，实测覆盖那条路还没接上。
 func (e *StreamEstimator) HasMeasured() bool { return e != nil && e.measured != nil }
 
 // Result 返回最终的用量结论。三种结局，按可信度从高到低：
@@ -342,6 +347,8 @@ const ReviewThresholdTokens = 1000
 //
 // 让调用方自己决定「要不要上报」而不是本包直接告警：本包不持有告警通道，
 // 也不该持有。
+//
+// **目前没有生产调用方**：告警通道那一头还没有写，所以这个判据暂时没人问。
 func (u Usage) RequiresReview() bool {
 	return !u.Complete && u.Output.Source == SourceEstimated &&
 		u.Total().Tokens >= ReviewThresholdTokens
