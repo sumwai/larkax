@@ -13,6 +13,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/credential"
+	"github.com/sumwai/larkax/internal/dberr"
 )
 
 // 渠道状态里运维能设置的两个取值。
@@ -146,7 +147,11 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 		owner, name, req.Type, baseURL, envelope, credential.Hint(req.Credential),
 		StatusEnabled, models, weight, req.Priority, string(setting)).Scan(&id)
 	if err != nil {
-		return 0, fmt.Errorf("创建渠道失败: %w", err)
+		// owner_user_id 上有一条指向 users 的外键：解析完归属用户、插入之前
+		// 那个用户被删，这里拿到的是 23503。本包没有为它准备具名哨兵——
+		// 这条路径要回答的只是「数据库因为约束拒绝了这次写入」，兜底哨兵够用，
+		// 退出码也因此落在 4 而不是 1。
+		return 0, dberr.ConstraintFailure(fmt.Errorf("创建渠道失败: %w", err))
 	}
 	return id, nil
 }

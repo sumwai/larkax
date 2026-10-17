@@ -14,6 +14,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/credential"
+	"github.com/sumwai/larkax/internal/dberr"
 	"github.com/sumwai/larkax/internal/quota"
 )
 
@@ -425,11 +426,13 @@ func TestCreateWithoutRegistry(t *testing.T) {
 	}
 }
 
-// 外键约束（owner_user_id 指向不存在的用户）要原样报出来，不能被吞掉。
+// 外键约束（owner_user_id 指向不存在的用户）要原样报出来，不能被吞掉，
+// 而且要带上跨包的兜底哨兵。
 //
 // channels 表上没有别的唯一键：**渠道名不是唯一的**（见 00001_init.sql，
 // 只有 owner 与 status 两条普通索引），所以没有「名字冲突」这条路径可测。
-// 数据库层的完整性失败就只剩这一条外键。
+// 数据库层的完整性失败就只剩这一条外键，而它没有具名哨兵——命令行那边
+// 靠 dberr.ErrConstraintViolation 把它归到「约束冲突」。
 func TestCreateForeignKeyViolationSurfaces(t *testing.T) {
 	db := testDB(t)
 	admin := newAdmin(t, db, testSealer(t))
@@ -447,6 +450,9 @@ func TestCreateForeignKeyViolationSurfaces(t *testing.T) {
 	}
 	if pgErr.Code != "23503" {
 		t.Errorf("SQLSTATE = %s（%s），期望 23503 foreign_key_violation", pgErr.Code, pgErr.Message)
+	}
+	if !errors.Is(err, dberr.ErrConstraintViolation) {
+		t.Errorf("错误链里没有 dberr.ErrConstraintViolation：%v", err)
 	}
 	if n := countByName(t, db, req.Name); n != 0 {
 		t.Errorf("被拒的请求留下了 %d 行", n)

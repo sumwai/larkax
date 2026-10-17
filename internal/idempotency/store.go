@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/sumwai/larkax/internal/dberr"
 )
 
 // Store 是幂等记录的持久化。
@@ -61,7 +63,11 @@ func ClaimInTx(ctx context.Context, tx *sql.Tx, c *Claim, reservationID int64) e
 		ON CONFLICT (api_key_id, key) DO NOTHING`,
 		c.APIKeyID, c.Key, c.Hash[:], reservationID)
 	if err != nil {
-		return fmt.Errorf("写幂等记录失败: %w", err)
+		// 唯一键由 ON CONFLICT 处理，剩下能从这里冒上来的是两条外键：
+		// api_key_id → api_keys(id) 与 billing_request_id → billing_requests(id)。
+		// 它们都没有具名哨兵，而「键被占住」与「引用了一行不存在的」在调用方
+		// 是两件事——前者由 ErrClaimed 表达，后者必须能由兜底哨兵问出来。
+		return dberr.ConstraintFailure(fmt.Errorf("写幂等记录失败: %w", err))
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {

@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/sumwai/larkax/internal/dberr"
 )
 
 // 本文件把**数据库的拒绝**翻译成调用方认得出的 Go 错误。
@@ -80,59 +82,23 @@ const (
 // 退出 4、在这条写入路径上退出 1。运维脚本按退出码分派处置，两个码是两种处置。
 var ErrNoSuchUser = errors.New("用户不存在")
 
-// ErrConstraintViolation 表示这次写入被数据库的约束拒绝：唯一键或外键。
+// ErrConstraintViolation 是 dberr.ErrConstraintViolation 的别名。
 //
-// 它是**兜底**，不是具名哨兵的替代品：
-//
-//   - 认得出具体含义的路径返回那个更精确的错误，调用方可以直接问出
-//     「是用户不存在」（ErrNoSuchUser）这类事实
-//   - 认不出的路径返回它，调用方只知道「某条唯一键或外键拒绝了这次写入」
-//
-// 两者可以同时出现在一条错误链里：具名的仍是更精确的那一个，兜底的那个
-// 让「是不是约束冲突」有一个统一的判据。判分类时先判具名的，再判它。
-//
-// # 为什么要有它
-//
-// 命令行的退出码表把「唯一键、外键」明确算作约束冲突（退出 4），而在它
-// 之前只有被逐个认出来的约束才落得到那里：没认出来的外键冲突把驱动的原文
-// 直接抛上去，错误链里没有任何哨兵，退出码落到 1。枚举约束名迟早漏——
-// 表上多一条外键就多一个口子——所以写路径的出口按 SQLSTATE 兜一层。
-//
-// # 它不抹平「哪个约束」
-//
-// 驱动的 *pgconn.PgError 仍然在错误链里（`%w`），表名与约束名都在它上面。
-// 这一层只给调用方一个能 errors.Is 的分类，运维要看现场时照旧 errors.As
-// 取回驱动错误。
-var ErrConstraintViolation = errors.New("违反数据库约束")
+// 判据与哨兵都搬到了 internal/dberr：它只回答「唯一键 / 外键拒绝了这次
+// 写入」，而这句话对每个写路径都成立，不该由账本层独占一份。本包保留这个
+// 名字，是因为它早已是调用方（命令行与测试）认得的那一个；两处指向同一个
+// 错误值，errors.Is 在任意一边判断都成立。
+var ErrConstraintViolation = dberr.ErrConstraintViolation
 
-// isConstraintViolation 判断 err 是不是唯一键或外键冲突。
+// constraintFailure 是写路径的统一出口，也是 dberr.ConstraintFailure 的薄封装：
+// 认出唯一键 / 外键冲突时挂上 ErrConstraintViolation，其余错误原样返回
+// （同一个错误值）。
 //
-// 只判 SQLSTATE：这两个码在这里的含义是明确的——「某条唯一键 / 外键被
-// 违反」。具体是哪一条由驱动错误上的表名与约束名回答，不由这一层猜：
-// 猜错会让分类说谎（#391 的 ErrNoSuchUser 就是为此把判据窄到一条约束上）。
-//
-// CHECK 违反（23514）不在里面：它与唯一键、外键的下一步处置不同，由各自的
-// 调用点翻译成具名哨兵（见 wallet_non_negative 与 ErrFrozenUnderflow）。
-func isConstraintViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) {
-		return false
-	}
-	return pgErr.Code == pgForeignKeyViolation || pgErr.Code == pgUniqueViolation
-}
-
-// constraintFailure 是写路径的统一出口：认出唯一键 / 外键冲突时挂上
-// ErrConstraintViolation，其余错误原样返回。
-//
-// **认不出来时一个字都不加**，所以可以无差别地套在每一条写语句的错误上，
-// 包括那些今天还撞不到约束的语句。新增一条外键时不必回头找这里是哪一处；
-// 约束名也不再需要逐个硬编码。
-func constraintFailure(err error) error {
-	if !isConstraintViolation(err) {
-		return err
-	}
-	return fmt.Errorf("%w: %w", ErrConstraintViolation, err)
-}
+// 本包内部的调用点按这个名字写；真正的判据只有 dberr 里那一份，这里不再
+// 自己判 SQLSTATE。判据本身（dberr.IsConstraintViolation）不在这边再包一层：
+// 包内除了这个出口没有别处要单独问「是不是约束冲突」，多一个没有调用方的
+// 转发函数只会让「谁在用这份判据」更难回答。
+func constraintFailure(err error) error { return dberr.ConstraintFailure(err) }
 
 // ErrFrozenUnderflow 表示这次解冻会让 frozen 变成负数。
 //

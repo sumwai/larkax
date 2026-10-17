@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/dberr"
 	"github.com/sumwai/larkax/internal/quota"
 	"github.com/sumwai/larkax/internal/route"
 )
@@ -178,7 +179,10 @@ func (r *Recorder) rollup(ctx context.Context, rec route.CallOutcome) error {
 	bucket := rec.At.UTC().Truncate(time.Hour)
 	_, err := r.db.ExecContext(ctx, rollupSQL, rec.ChannelID, bucket, success, failure)
 	if err != nil {
-		return fmt.Errorf("累加渠道 %d 的健康度桶失败: %w", rec.ChannelID, err)
+		// channel_health_rollup.channel_id 有指向 channels 的外键。渠道在
+		// 「选出候选」与「记下这次调用」之间被删掉时，这里拿到的是 23503；
+		// 兜底哨兵让调用方至少能把它与「库连不上」分开。
+		return dberr.ConstraintFailure(fmt.Errorf("累加渠道 %d 的健康度桶失败: %w", rec.ChannelID, err))
 	}
 	return nil
 }
@@ -354,7 +358,10 @@ func writeQuotaState(ctx context.Context, tx *sql.Tx, s quota.State) error {
 	_, err := tx.ExecContext(ctx, quotaUpsertSQL,
 		s.ChannelID, *s.Remaining, unit, s.Confidence, string(s.Kind), lastProbe, s.UpdatedAt)
 	if err != nil {
-		return fmt.Errorf("写回渠道 %d 的额度状态失败: %w", s.ChannelID, err)
+		// channel_quota_state.channel_id 有指向 channels 的外键：渠道在这条
+		// 写回之前被删时，插入分支拿到 23503。ON CONFLICT 管的是主键重复，
+		// 管不到「这个渠道已经不在了」。
+		return dberr.ConstraintFailure(fmt.Errorf("写回渠道 %d 的额度状态失败: %w", s.ChannelID, err))
 	}
 	return nil
 }
