@@ -41,6 +41,16 @@ type Store struct {
 	db     DB
 	logger *slog.Logger
 
+	// now 是写入时用的时钟，nil 表示 time.Now。
+	//
+	// 它同时决定「这一行属于哪一天」与「补建哪一天的分区」——两者必须同源
+	// （见 insertSQL 上的注释），所以只留这一个口子，而不是分开传两个时刻。
+	//
+	// 留这个口子是为了让集成用例能把写入指向一个合成的日期。用例要证明的是
+	// 「缺的那天分区会被补出来」，而按当天写用例就等于删当天分区——那是全库
+	// 共享的状态，会连累同一个库上并行跑的别的包（见 LESSONS.md 第 26 条）。
+	now func() time.Time
+
 	// partitionDay 记录当前实例已经确认过「哪一天的分区存在」。
 	//
 	// 记到天而不是一个 bool：跨天之后必须重新确认一次，否则新的一天里
@@ -56,6 +66,14 @@ func NewStore(db DB, logger *slog.Logger) *Store {
 		logger = slog.Default()
 	}
 	return &Store{db: db, logger: logger}
+}
+
+// nowUTC 返回写入用的当前时刻，统一 UTC。没设过时钟就用 time.Now。
+func (s *Store) nowUTC() time.Time {
+	if s.now != nil {
+		return s.now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // insertSQL 是唯一写入这张表的地方。
@@ -100,7 +118,7 @@ func (s *Store) Insert(ctx context.Context, snap *gateway.Snapshot) error {
 	if snap == nil {
 		return errors.New("快照为空")
 	}
-	createdAt := time.Now().UTC()
+	createdAt := s.nowUTC()
 
 	if err := s.ensurePartition(ctx, createdAt); err != nil {
 		// 补建失败仍然尝试写入：分区可能刚被别人建好，或者表根本没有分区
