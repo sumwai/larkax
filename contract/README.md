@@ -119,22 +119,24 @@ python3 contract/check.py \
 
 ## 已知偏差
 
-**Anthropic 流式的 `message_start.message.usage.input_tokens` 是估算值，
-不是上游报的真值。** 实测（假上游报 12）：那一帧给的是 `3`。
+**跨协议流式的 `message_start.message.usage.input_tokens` 仍是估算值。**
+Anthropic 客户端配 OpenAI 上游时，那一帧给的是本地估算，不是上游报的真值。
 
-原因是时序：这一帧必须在我们读到上游的用量**之前**写出去——上游的用量在它
-自己的 `message_stop` 才攒齐（见 `internal/channel/anthropicadapter` 的
-`emitUsage`），而 `message_start` 是流的第一帧，不能等。Anthropic 的 SDK 把
-`message_start.message.usage.input_tokens` 标成必填，所以那里必须放一个数，
-放的就是请求进来时按分词估出来的那个（见 `internal/api` 的 `inputTokensOf`）。
+原因是时序：OpenAI 上游的用量在**结束分片**里，而 `message_start` 是流的
+第一帧，不能等到那里。所以渲染器在**第一个事件到达时**写这一帧——事件带用量
+就用真值，不带就用请求进来时按分词估出来的那个（见 `internal/api` 的
+`inputTokensOf`）。Anthropic 上游的第一帧就是 `message_start` 且带
+`usage.input_tokens`，所以那条路拿到的是真值；OpenAI 上游的第一个事件是正文帧，
+拿到的是估算。
 
-真值在 `message_delta.usage.input_tokens` 里，契约测试断言的就是它。所以
-**以最后一个 usage 为准**的客户端读到的是对的；**只读 `message_start` 的
-客户端会读到错数**（成本统计、用量面板是常见的那类）。
+无论哪条路，`message_delta.usage.input_tokens` 都是真值。所以**以最后一个
+usage 为准**的客户端读到的是对的；**只读 `message_start` 的客户端**在跨协议
+那条路上会读到偏低的数（成本统计、用量面板是常见的那类）。
 
-契约测试因此对 `message_start` 只断言「是个正数」，对 `message_delta` 断言
-真值——这不是放宽断言，是把「我们实际保证的是什么」写清楚。修掉这条偏差要
-改的是第一帧的写出时机，不在契约测试这一层。
+契约测试那条 Anthropic 流式用例**断言 `message_start` 的 `input_tokens` 等于
+上游报的值**——它曾经只断言「是个正数」，而那个宽断言让上面这条偏差长期看不见
+（实测：上游报 12，那一帧给 3，用例照样绿）。跨协议那条路的估算由
+`internal/assembly/stream_e2e_test.go` 钉着。
 
 **OpenAI 流式的 `[DONE]` 从 SDK 这一侧看不到。** 它由 SDK 的 SSE 解码器吃掉，
 不会作为分片交给调用方。能看到的正向证据是「迭代正常结束」加上「最后一个带

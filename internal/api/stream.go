@@ -25,9 +25,12 @@ package api
 //   - OpenAI 的用量合并在结束分片里，而官方是在它之后另发一个 choices 为空的
 //     分片。分开写会让按 choices[0] 取值的朴素客户端读到空数组而崩，合并
 //     则是多一个它们不认识的字段——后者是更安全的偏差。
-//   - Anthropic 的 message_start 里 input_tokens 是本地的输入估算（就是预留
-//     用的那个数），因为上游的实测用量要到流末尾才拿得到。上游报过 usage 时，
-//     真实数字在 message_delta 里给出。
+//   - Anthropic 的 message_start 里的 input_tokens 在**上游没在流的最前面报过
+//     输入用量**时是本地的输入估算（就是预留用的那个数）。上游报过就是真值：
+//     Anthropic 上游在自己的 message_start 里就给了输入用量，适配器把它发成
+//     一个 usage_input 事件，第一帧因此等得到它。跨协议那条路（OpenAI 上游的
+//     用量在结束分片里）没有这个数，只能填估算——**等下去会把整个流卡到结束**，
+//     那比填估算更坏。真值在 message_delta 里也给，那一处一直是真的。
 
 import (
 	"encoding/json"
@@ -81,6 +84,16 @@ func writeStreamHeaders(w http.ResponseWriter) {
 // 三件事分开：start 写开头的帧（OpenAI 是带 role 的分片，Anthropic 是
 // message_start），event 写中间的事件，finish 写结束帧。**调用顺序由调用方
 // 保证**，渲染器只负责形状。
+//
+// # 开头的帧可以推迟到第一个事件
+//
+// 调用顺序是「先 start、再逐个 event」，但这不等于第一帧必须在 start 里写出去：
+// Anthropic 的 message_start 里要填上游报的输入用量，而那个数**可能就在第一个
+// 事件里**（见 channel.StreamEvent 的 usage_input）。所以它的 start 什么都不写，
+// 把第一帧留到 event 里——谁先到就按谁写。
+//
+// **推迟的实现必须在第一个 event 里把它写出去**：帧的顺序是契约的一部分，
+// 留到 finish 就等于整条流都没有 message_start。
 //
 // 三个方法都不导出：接口与两个实现都是本包的内部结构，没有任何包外调用点。
 // 导出它们只会让人以为别处可以按形状直接调，而顺序这一半契约在调用方那边。
@@ -373,8 +386,13 @@ func (s *openAIStream) usageJSON() *openAIUsage {
 type anthropicStream struct {
 	id    string
 	model string
-	// input 是输入 token 的本地估算，只用在 message_start 里。
+	// input 是输入 token 的本地估算。它只在**上游没在流的最前面报过输入用量**
+	// 时用来填 message_start（见 writeStart）——也就是跨协议那条路。
 	input int64
+
+	// started 表示 message_start 已经写出去了。第一帧由第一个事件写出，
+	// 理由见 writeStart。
+	started bool
 
 	usage        *channel.Usage
 	finishReason string
@@ -456,7 +474,36 @@ type claudeMessageStop struct {
 	Type string `json:"type"`
 }
 
-func (s *anthropicStream) start(w io.Writer) error {
+// start 在这里**什么都不写**，第一帧由第一个事件写出去（见 writeStart）。
+//
+// 理由是时序：message_start 里的 input_tokens 要用上游报的真值，而那个数
+// **可能就在第一个事件里**（usage_input——Anthropic 上游在自己的 message_start
+// 里就给了输入用量），也可能永远不来（跨协议那条路：OpenAI 的用量在结束分片
+// 里）。所以「写第一帧」只能发生在**看到第一个事件之后**：谁先到就按谁写。
+//
+// 调用方那边没有变化：它照旧先 start、再逐个 event，而 start 不写东西与写一帧
+// 在它看来是同一件事（每帧之后 flush 一次）。
+func (s *anthropicStream) start(io.Writer) error { return nil }
+
+// writeStart 写 message_start，input_tokens 取第一个事件里能拿到的东西。
+//
+// 判据是**第一个事件是谁**：
+//
+//   - 带用量的事件（usage_input 是输入侧刚确定，usage 是完整用量）：上游在流
+//     的最前面就报了输入用量，用真值；
+//   - 其余（内容帧、结束标记、错误）：流里没有更早的输入用量可给，用本地估算。
+//
+// 最后一条是**必须**的，不是保守：等下去的话，跨协议那条路会把整个流卡到结束
+// 才发第一帧——那比报一个偏低的估算更坏。
+//
+// 估算与真值都走 claudeUsageOf 这**同一个**换算入口（message_delta 用的也是
+// 它）：自己拼一份的话，缓存那一份会只加在一边，两帧对同一个请求报出两个不同的
+// input_tokens，而对账的人会去找一个不存在的差额。
+func (s *anthropicStream) writeStart(w io.Writer, first channel.StreamEvent) error {
+	u := channel.Usage{PromptTokens: s.input}
+	if first.Usage != nil && (first.Kind == "usage_input" || first.Kind == "usage") {
+		u = *first.Usage
+	}
 	msg := claudeStreamMessage{
 		ID:    s.id,
 		Type:  "message",
@@ -464,12 +511,18 @@ func (s *anthropicStream) start(w io.Writer) error {
 		Model: s.model,
 		// content 必须是数组，不能是 null。
 		Content: []any{},
-		Usage:   claudeUsage{InputTokens: s.input},
+		Usage:   claudeUsageOf(u),
 	}
 	return writeSSE(w, "message_start", claudeStreamMessageStart{Type: "message_start", Message: msg})
 }
 
 func (s *anthropicStream) event(w io.Writer, ev channel.StreamEvent) error {
+	if !s.started {
+		s.started = true
+		if err := s.writeStart(w, ev); err != nil {
+			return err
+		}
+	}
 	switch ev.Kind {
 	case "delta":
 		if err := s.openTextBlock(w); err != nil {
@@ -495,6 +548,13 @@ func (s *anthropicStream) event(w io.Writer, ev channel.StreamEvent) error {
 		delta.Delta.Type = "input_json_delta"
 		delta.Delta.PartialJSON = ev.ToolCall.Arguments
 		return writeSSE(w, "content_block_delta", delta)
+
+	case "usage_input":
+		// 输入侧的用量。第一个事件就是它时，writeStart 已经用它填了
+		// message_start；更晚才到时，那一帧早就写出去了，这里也补不回来。
+		// 两种情况下这一层都没有别的可做——它不是结算依据，结算等 "usage"
+		// （见 channel.StreamEvent 的 Usage）。
+		return nil
 
 	case "usage":
 		if ev.Usage != nil {
