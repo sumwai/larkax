@@ -76,6 +76,8 @@ expect_hit "Slack token" 'SLACK=xoxb-482913750246-AbCdEfGh'
 expect_hit "私钥文件头" '-----BEGIN RSA PRIVATE KEY-----'
 expect_hit "本机路径" 'root = /home/somebody/work/larkax'
 expect_hit "shell 配置文件" 'source ~/.bashrc'
+expect_hit "行首的 shell 配置文件" '.profile'
+expect_hit "赋值里的 shell 配置文件" 'PATH="$PATH:~/.zshrc"'
 expect_hit "真实邮箱" 'contact = "zhang.wei@somecorp.cn"'
 expect_hit "本机非标端口" 'listen = "127.0.0.1:18080"'
 expect_hit "内网 10 段非标端口" 'host = "10.1.2.3:7788"'
@@ -110,6 +112,12 @@ expect_clean "Go 结构体字面量" 'TokensDetails: dto.InputTokenDetails'
 expect_clean "链式选择器带括号" 'token: cfg.Auth.Token'
 expect_clean "多级选择器单独成值" 'secret: app.config.Store.Key'
 expect_clean "带空格的赋值" 'token = resp.Data.Token'
+
+# 回归：字段名叫 Profile 不是 shell 配置文件。这条抓到过一次真实误报——
+# 一个 `*ModelProfile` 字段在十几处被访问，整棵树的红线自查全红。
+expect_clean "Go 里的 Profile 字段" 'profile, err := s.profile(ctx, name)' 'sample.go'
+expect_clean "Go 里的切片元素字段" 'out[i].Profile = profile' 'sample.go'
+expect_clean "Go 注释里的候选字段" '// 记录时不做判据（见 Candidate.Profile）' 'sample.go'
 
 # 但真凭证混在同类行里仍要报：选择器放行的是「整行只有选择器」，
 # 别处有字面量就得报出来
