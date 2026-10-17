@@ -363,6 +363,18 @@ type Outcome struct {
 
 	// UpstreamCost 是上游侧的成本，供对账。
 	UpstreamCost money.Amount
+
+	// Duration 是这次上游调用**实际花了多久**，只用于统计，不参与金额计算。
+	//
+	// 它由网关量：非流式取最后一次尝试的耗时（route.Attempt.Duration），
+	// 流式再加上读完那条流的时间（那次尝试只覆盖到上游接受请求）。记账层
+	// 把它写进 usage_events.duration_ms，渠道健康度的延迟那一维再从那里
+	// 按小时桶取分位数。
+	//
+	// 零值表示**没有测到**（调用没有发生，或者调用方没给），不是「耗时 0」。
+	// 与 charge.Usage 的零值一样，落库层要靠这一条把它写成 NULL——
+	// 0 毫秒的样本会把聚合出来的分位数拉低，而那个数看起来完全正常。
+	Duration time.Duration
 }
 
 // Outcome.ErrorCode 的取值。它们是**我们自己归一化过的分类**，不是上游错误
@@ -450,6 +462,14 @@ type Charge struct {
 	// 用量确实是估的，但上游中途报错时用量同样是估的，而那不是客户端断的
 	// ——两者在对账与告警上是两回事（见 Outcome.ClientCanceled 的注释）。
 	ClientCanceled bool
+
+	// Duration 是这次上游调用的耗时，由 Settle 从 Outcome 搬过来。
+	//
+	// 它唯一的下游是 usage_events.duration_ms（见 internal/ledger/store 的
+	// insertUsageEvent）：渠道健康度的延迟那一维从那张表按小时桶取分位数，
+	// 于是「一次请求花了多久」只在账本的用量底稿上留一份。零值表示没测到，
+	// 落库层写 NULL——理由见 Outcome.Duration。
+	Duration time.Duration
 
 	// Tier 是规则记下的档位名，供账单解释「为什么按这一档算」。
 	Tier string
@@ -727,7 +747,10 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 		UsageSource:     out.UsageSource,
 		Usage:           usage,
 		ClientCanceled:  out.ClientCanceled,
-		Tier:            val.Tier,
+		// 耗时与金额无关，原样带过去：它只在落库时变成 usage_events 的一列，
+		// 延迟那一维的输入就从那里按桶聚出来。
+		Duration: out.Duration,
+		Tier:     val.Tier,
 		// val.At 是这次求值用的时刻，也就是受理时刻（见 env）。
 		PricedAt: val.At,
 	}, nil

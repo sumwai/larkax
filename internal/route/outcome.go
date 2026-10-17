@@ -46,5 +46,9 @@ type CallOutcome struct {
 	// 只有成功的调用有值：失败的调用上游没有回执，用量未知。
 	// 未知时它是零值，写入方不得把它当成「用零个 token」——
 	// 自记账扣零等于没扣，而那是**偏高**的方向（以为额度还剩着）。
+	//
+	// 它本身不参与缓存与延迟那两列：那两列由写入方按「渠道 × 小时桶」从
+	// usage_events 重算（见 internal/channels 的 rollupSignalsSQL），
+	// 所以调用方要在结算落库**之后**才记这一次——结算才写 usage_events。
 	Usage channel.Usage
 }

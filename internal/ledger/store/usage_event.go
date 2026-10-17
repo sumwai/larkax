@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/tokens"
@@ -85,12 +86,20 @@ var ErrUnknownUsageSource = errors.New("未知的用量来源")
 // 后果：哪天有人从 Breakdown 去填 unit_prices，那一行的 cost 会与明细对不上
 // （明细算出来的总额大于 cost）。要填得先决定填哪一侧，而不是顺手取一个。
 //
-// # duration_ms 为什么不写
+// # duration_ms 从哪来
 //
-// 与 unit_prices 同一个形状：它也不在上面那条 INSERT 的列表里，于是落成
-// NULL。这一列是「这次请求花了多久」，而 pipeline.Charge 上没有承载它的
-// 字段——耗时只有网关量得到，而它今天没把那个数带进结算。这一轮不写，
-// 等那条路接上再说。
+// 它是「这次上游调用花了多久」，量它的只有网关（非流式取最后一次尝试的
+// 耗时，流式再加上读完那条流的时间），由 gateway 放进 pipeline.Outcome，
+// Settle 搬到 Charge.Duration，这里落库。
+//
+// 零值写 NULL 而不是 0：0 毫秒是一个**看起来正常的样本**，它会把按桶算出
+// 来的分位数往下拉，而那条渠道的延迟分因此在库里读作「很快」——没有任何
+// 东西会报出来。NULL 在读侧是「没有样本」，聚合时被 FILTER 掉。
+//
+// duration_ms 是 integer 列，$16 传的是 Go 的 int64 毫秒数。这里**不加**
+// 类型标注：裸 0 与 $3 那处不同——它与列宽一致（integer），而 $3 是 bigint，
+// 不加标注会被推成 int4。超过 int32 的耗时（约 24 天）会在数据库这一侧
+// 报溢出，不会静默截断。
 //
 // NULLIF($3, 0::bigint) 里的类型标注是必要的：channel_id 列为 bigint，
 // 裸 0 会把 $3 推成 int4（见 store.go 的 SaveReservation）。
@@ -99,12 +108,12 @@ const insertUsageEventSQL = `
 		request_id, user_id, channel_id, canonical_model,
 		prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens,
 		reasoning_tokens, unit_counts, billing_path, estimator,
-		cost, asset, priced_at, local_hour, is_off_day
+		cost, asset, priced_at, local_hour, is_off_day, duration_ms
 	) VALUES (
 		$1, $2, NULLIF($3, 0::bigint), $4,
 		$5, $6, $7, $8,
 		$9, $10::jsonb, $11, NULLIF($12, ''),
-		$13::numeric, $14, $15, NULL, NULL
+		$13::numeric, $14, $15, NULL, NULL, NULLIF($16, 0)
 	)`
 
 // insertUsageEvent 写一行用量事件：这次结算**按什么用量**算出来的。
@@ -161,6 +170,7 @@ func insertUsageEvent(ctx context.Context, tx *sql.Tx, req pipeline.Request, cha
 		charge.Settlement.Actual.String(),
 		charge.Asset,
 		charge.PricedAt,
+		durationMS(charge.Duration),
 	); err != nil {
 		// 这张表今天没有外键（user_id 与 channel_id 都是裸 bigint），
 		// 套一层是为了「写路径的错误都从同一个出口分类」这个形状不破：
@@ -168,6 +178,24 @@ func insertUsageEvent(ctx context.Context, tx *sql.Tx, req pipeline.Request, cha
 		return constraintFailure(fmt.Errorf("写用量事件失败: %w", err))
 	}
 	return nil
+}
+
+// durationMS 把耗时折成 usage_events.duration_ms 的整数毫秒。
+//
+// 零值返回 0，由 SQL 里的 NULLIF 写成 NULL（理由见 insertUsageEventSQL）。
+//
+// 向上取整到 1 毫秒：一次真实发生的调用再快也不是 0 秒，而 0 会被 NULLIF
+// 当成「没测到」丢掉——那等于把最快的那一批样本从分位数里删掉，聚合出来
+// 的 p95 会偏高，而偏高看起来像渠道变慢。
+func durationMS(d time.Duration) int64 {
+	if d <= 0 {
+		return 0
+	}
+	ms := d / time.Millisecond
+	if d%time.Millisecond != 0 {
+		ms++
+	}
+	return int64(ms)
 }
 
 // unitCountsJSON 把非 token 用量序列化成 jsonb 的字面量。

@@ -94,13 +94,24 @@ func (g *Gateway) Decide(ctx context.Context, req pipeline.Request, decision *sy
 		// 再经 ChannelUsage 折进这里。一个不报 usage 的决策上游因此落成
 		// Unreported，而不是「实测 0」。
 		UsageSource: usageSourceOf(routed.Response),
+		// 耗时口径与 Chat 相同：取最后一次尝试（见 attemptDuration）。
+		Duration: attemptDuration(routed.Attempts),
 	}
-	g.recordAttempts(ctx, routed.Attempts, &out.Usage)
+	// 内核的用量留给下面记健康度用。这条路径今天不跑插件（见本函数的
+	// 注释），两者相同；记健康度那一处与 Chat 共用同一条口径——
+	// 取计费之前的那一份。
+	kernelUsage := out.Usage
 
 	charge, err := g.finishCharge(ctx, h, placed, out)
 	if err != nil {
+		// 与 Chat 同一处置：结算没成，用量事件也就没落库；健康度仍然要记。
+		g.recordAttempts(ctx, routed.Attempts, &out.Usage)
 		return nil, err
 	}
+
+	// 与 Chat 同一个顺序、同一个理由：延迟与缓存两列由写入方按桶从
+	// usage_events 重算，所以健康度要等结算落库之后再记。
+	g.recordAttempts(ctx, routed.Attempts, &kernelUsage)
 
 	return &DecideResult{
 		Response:      call.response,

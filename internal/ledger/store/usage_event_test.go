@@ -220,6 +220,9 @@ func TestSaveWritesUsageEvent(t *testing.T) {
 		{"local_hour", !got.LocalHour.Valid},
 		{"is_off_day", !got.IsOffDay.Valid},
 		{"upstream_cost", !got.UpstreamCost.Valid},
+		// duration_ms 是**有条件的 NULL**：Charge.Duration 为零时写 NULL。
+		// 这个夹具（billedCharge）没有给耗时，所以这里期望 NULL；有值的
+		// 那一支由 TestSaveWritesUsageEventDuration 钉住。
 		{"duration_ms", !got.DurationMS.Valid},
 	} {
 		if !tc.isNull {
@@ -232,6 +235,63 @@ func TestSaveWritesUsageEvent(t *testing.T) {
 	// 在库里长得一样。按空对象断言，同样是为了让「哪天接上」必须显式改这一处。
 	if string(got.UnitPrices) != "{}" {
 		t.Errorf("unit_prices = %s，期望 {}——这一列这一轮不写", got.UnitPrices)
+	}
+}
+
+// 耗时按毫秒写进 duration_ms，零值写 NULL。
+//
+// # 为什么两种都要钉
+//
+// 这一列是渠道健康度**延迟**那一维唯一的样本来源：写入方按桶对它取分位数
+// （见 internal/channels 的 rollupSignalsSQL）。所以「有值」那一支错了会让
+// 分位数算错，而「零值写 NULL」那一支错了会让没测到的调用落成 0 毫秒
+// 样本——它把分位数往下拉，读出来的渠道看起来「很快」，没有任何东西报出来。
+//
+// 不足 1 毫秒的耗时向上取整：向下取整会变成 0，于是那次调用被当成「没测到」
+// 丢掉，等于把最快的那批样本从分位数里删掉。
+func TestSaveWritesUsageEventDuration(t *testing.T) {
+	cases := []struct {
+		name string
+		in   time.Duration
+		want sql.NullInt64
+	}{
+		{"整毫秒", 1500 * time.Millisecond, sql.NullInt64{Int64: 1500, Valid: true}},
+		{"不足 1 毫秒向上取整", 300 * time.Microsecond, sql.NullInt64{Int64: 1, Valid: true}},
+		{"零值写 NULL", 0, sql.NullInt64{}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testDB(t)
+			s := New(db)
+			ctx := context.Background()
+
+			userID := seed(t, db, "100")
+			channelID := seedChannel(t, db)
+			requestID := reqID(t)
+
+			req := testRequest(ctx, t, db, userID, requestID)
+			billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+			if reserveErr != nil {
+				t.Fatal(reserveErr)
+			}
+
+			settleReq := req
+			settleReq.ChannelID = channelID
+
+			charge := billedCharge(t, userID, requestID, billID, "12",
+				tokens.SourceMeasured, time.Date(2026, 10, 17, 9, 30, 0, 0, time.UTC))
+			charge.Duration = tc.in
+
+			if err := s.Save(ctx, settleReq, charge); err != nil {
+				t.Fatalf("结算失败: %v", err)
+			}
+
+			got := usageEventOf(ctx, t, db, requestID).DurationMS
+			if got != tc.want {
+				t.Errorf("duration_ms = %+v，期望 %+v（输入 %s）", got, tc.want, tc.in)
+			}
+		})
 	}
 }
 

@@ -270,6 +270,9 @@ func (s *Source) logger() *slog.Logger {
 // 与「记了个 0」在库里就是同一个值，读侧再抹一层就更分不开。这正是「三列
 // 恒为 0、权重写着在起作用而实际是常数」那条缺陷的根因。
 //
+// 读侧仍然只取最近一桶的 p95（见下面的 ARRAY_AGG）：写入侧每桶算一次，
+// 这里取最近的那个非空值，不跨桶合并。
+//
 // 所以聚合列原样返回 NULL，由 candidateRow 用 sql.Null* 接住，
 // 再映射成 route.Candidate 上的 nil。
 //
@@ -278,10 +281,16 @@ func (s *Source) logger() *slog.Logger {
 //   - latency_p95_ms 本来就可空，而且查询里已经用 FILTER 滤掉了空值，
 //     所以「没有样本」与「样本是 0 毫秒」在 SQL 这一层就分得开。
 //     它此前的问题只在 Go 侧：那个 NULL 被扫进一个零值 Duration。
+//     写入侧今天确实会写它了（见 record.go 的 rollupSignalsSQL），
+//     但「这个窗口里没有一条带耗时的用量事件」仍然是 NULL。
 //   - cost 与两个 cache 列是 `NOT NULL DEFAULT 0`，所以去掉 COALESCE 只能
 //     还原「窗口里一行都没有」这一种缺失。**「有桶、但那一列从没被写过」
 //     仍然是 0**，与「真的是 0」在库上无法区分——那一层由 costPerUnit /
 //     cacheHitRate 的判据兜着（0 按「没有数据」处理，理由见那两处注释）。
+//     cache 两列今天由写入侧按桶重算（它们是 **命中与未命中的 token 数**，
+//     见 rollupSignalsSQL），一个请求都没服务过的桶里它们就是 0；
+//     而 0 在 cacheHitRate 那里读作「没有样本」——两件事在这里恰好同义，
+//     因为 token 数为 0 的请求不存在。cost 仍然没有写入方。
 //
 // 其中 requests / successes 仍然套 COALESCE：它们的 0 是**有意义的 0**
 // （这个窗口里一次都没请求过），不是缺失。
@@ -674,8 +683,11 @@ func (row candidateRow) costPerUnit() (*float64, error) {
 
 // cacheHitRate 取窗口内的缓存命中率，没有样本时返回 nil。
 //
-// 两个计数是 `bigint NOT NULL DEFAULT 0`，写入侧也没写过它们——合计为 0
-// 就表示**没有样本**（一次请求的 token 数不可能是 0 还带着缓存明细）。
+// 两个计数是 `bigint NOT NULL DEFAULT 0`，由写入侧按桶从 usage_events
+// 重算（见 record.go 的 rollupSignalsSQL）——它们分别是**命中**与
+// **没被缓存服务到**的输入 token 数，分母因此就是输入总量。
+//
+// 合计为 0 就表示**没有样本**（一次请求的输入不可能是 0 个 token）。
 // 所以这里不需要额外判 NULL：合计为 0 与「没有数据」是同一件事。
 //
 // 命中率**恰好为 0** 只有一种来路：有样本、且一次都没命中。那时返回的是
