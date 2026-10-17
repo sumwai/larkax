@@ -32,6 +32,46 @@ const (
 	walletNonNegativeConstraint = "wallet_non_negative"
 )
 
+// pgForeignKeyViolation 是外键约束冲突的错误码，userWalletsUserIDConstraint
+// 是 `user_wallets.user_id → users(id)` 这条外键的名字（PostgreSQL 自动生成
+// 的名字，硬编码自迁移 00001_init.sql）。
+//
+// **两个都要判。** 23503 的含义只是「有某个外键被违反」，不是「这个用户不存在」
+// ——同一个库里还有十几条外键，别的表插错一行拿到的也是 23503。只认错误码会把
+// 「别的表的外键冲突」也说成「用户不存在」，而调用方（命令行）照这个分类给退出码，
+// 于是退出码在说谎。判据要窄到这一条约束上。
+//
+// 与 walletNonNegativeConstraint 同一个形状：**改迁移里的约束名就要同步改这里**。
+// 失效的方向是安全的：认不出来就按原错误上抛，不会静默当成成功，只是少一层分类
+// （命令行那边表现为退出码从 4 退回 1）。
+const (
+	pgForeignKeyViolation       = "23503"
+	userWalletsUserIDConstraint = "user_wallets_user_id_fkey"
+)
+
+// ErrNoSuchUser 表示这次写入引用的用户在 users 里没有对应的一行。
+//
+// 它与 ErrNoWallet 是**两个方向**的事，不要合并：
+//
+//   - ErrNoWallet：用户存在，但他没有那一行钱包——缺的是**从属的那一行**
+//   - ErrNoSuchUser：连用户本身都没有——缺的是**主那一行**
+//
+// 报出来的是哪一步由错误文本说清，分类由哨兵说清。
+//
+// # 为什么不复用 auth.ErrUserNotFound
+//
+// 那一个属于解析路径（`auth.ResolveUser` 认不出一个标识），而本包**不 import
+// auth**：账本层不该依赖鉴权层，只为共用一句错误文本就拉一条依赖，方向是反的。
+// 两个哨兵都进命令行的 conflictErrors、都落到退出码 4，所以「同一件事在两条
+// 路径上给出同一个退出码」照样成立。
+//
+// # 为什么要有它
+//
+// 在这之前 OpenWallet 把驱动的原文（含 SQLSTATE 23503 与约束名）原样上抛，
+// 错误链里没有任何哨兵，于是同一个事实——「这个用户不在库里」——在解析路径上
+// 退出 4、在这条写入路径上退出 1。运维脚本按退出码分派处置，两个码是两种处置。
+var ErrNoSuchUser = errors.New("用户不存在")
+
 // ErrFrozenUnderflow 表示这次解冻会让 frozen 变成负数。
 //
 // 它与 ErrInsufficientBalance 是**两件事**，处置也不同：
@@ -47,6 +87,32 @@ const (
 // 将来按错误分类时，先排掉 ErrFrozenUnderflow，再按 ErrInsufficientBalance
 // 判断欠费。
 var ErrFrozenUnderflow = errors.New("冻结额下溢")
+
+// isMissingUserViolation 判断 err 是不是 user_wallets 上那条指向 users 的
+// 外键被违反。
+//
+// **判据是两个条件的与**（见上面两个常量的注释）：只判错误码会把任何表上的
+// 外键冲突都认成「用户不存在」。反向用例 TestMissingUserViolationIsNarrow
+// 钉的就是这一点——把约束名那一半去掉，它会红。
+//
+// 不去查库确认「这个 id 真的不在 users 里」：那要么多一次往返、要么多一个
+// 竞态窗口（查完到报错之间用户可能刚被建出来），而这两种做法都不能让分类更准
+// ——违反这条约束本身就意味着插入那一刻 users 里没有这一行。
+func isMissingUserViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == pgForeignKeyViolation &&
+		pgErr.ConstraintName == userWalletsUserIDConstraint
+}
+
+// missingUserError 把「这次插入引用的用户不在库里」翻译成调用方认得出的错误。
+//
+// 保留驱动错误在链里（`%w` 而不是 `%v`）：SQLSTATE 与 DETAIL 是运维现场唯一
+// 拿得到的依据，而这里只是给它加一个名字，不是替掉它。
+func missingUserError(err error, userID int64) error {
+	return fmt.Errorf("%w: 用户 %d 在 users 里没有对应的一行: %w",
+		ErrNoSuchUser, userID, err)
+}
 
 // isFrozenUnderflow 判断 err 是不是「这次更新会让 frozen 变成负数」被拒。
 func isFrozenUnderflow(err error) bool {

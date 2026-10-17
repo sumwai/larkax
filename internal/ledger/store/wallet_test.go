@@ -3,9 +3,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sumwai/larkax/internal/ledger"
 )
@@ -283,15 +286,39 @@ func TestOpenWalletRejectsNonPositiveUser(t *testing.T) {
 //
 // 命令行的正常路径会先解析用户、走不到这里；这条覆盖的是绕过解析的调用方
 // 与「解析之后用户被删」那个窗口。
+//
+// **哨兵与文本都要判**：文本是给人看的，哨兵是给调用方分类用的——命令行按它
+// 给退出码（见 cmd/larkaxctl 的 conflictErrors）。只判文本的话，把哨兵从错误链
+// 里拿掉这条照样绿，而那条路径会悄悄退回退出码 1。
 func TestOpenWalletUnknownUser(t *testing.T) {
 	db := testDB(t)
 	s := New(db)
 
-	_, err := s.OpenWallet(context.Background(), 900000000000000, ledger.AssetCNY)
+	const ghost = int64(900000000000000)
+	_, err := s.OpenWallet(context.Background(), ghost, ledger.AssetCNY)
 	if err == nil {
 		t.Fatal("不存在的用户应当报错")
 	}
+	if !errors.Is(err, ErrNoSuchUser) {
+		t.Errorf("错误链里没有 ErrNoSuchUser：%v", err)
+	}
 	if !strings.Contains(err.Error(), "不存在") {
 		t.Errorf("错误信息 %q 里没有说清用户不存在", err)
+	}
+	if !strings.Contains(err.Error(), itoa(ghost)) {
+		t.Errorf("错误信息 %q 里没有指认是哪个用户", err)
+	}
+
+	// 驱动给的原始错误仍在链里：SQLSTATE 与约束名是现场唯一拿得到的依据，
+	// 加一个哨兵是给它加名字，不是替掉它。
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("错误链里没有驱动的原始错误：%v", err)
+	}
+	if pgErr.Code != pgForeignKeyViolation {
+		t.Errorf("SQLSTATE = %q，期望 %q", pgErr.Code, pgForeignKeyViolation)
+	}
+	if pgErr.ConstraintName != userWalletsUserIDConstraint {
+		t.Errorf("约束名 = %q，期望 %q", pgErr.ConstraintName, userWalletsUserIDConstraint)
 	}
 }

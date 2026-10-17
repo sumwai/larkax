@@ -2,10 +2,7 @@ package store
 
 import (
 	"context"
-	"errors"
 	"fmt"
-
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sumwai/larkax/internal/ledger"
 )
@@ -42,6 +39,11 @@ import (
 // 不存在的 id 会被数据库挡下，而先查一次只会多出一个竞态窗口（查完到插入
 // 之间用户可能被删）。调用方（命令行）本来就会先把「ID 或用户名」解析成
 // 用户，走到这里的报错是给绕过那一步的调用方与并发删除留下的。
+//
+// 挡下之后返回的是 **ErrNoSuchUser**（见 errors.go），不是驱动的原文：调用方
+// 按哨兵分类给退出码，而「这个用户不在库里」与解析路径上的 auth.ErrUserNotFound
+// 是同一个事实，两条路径要给同一个码。判据只认 user_wallets 上那一条外键——
+// 别的表的外键冲突不是「用户不存在」。
 func (s *Store) OpenWallet(ctx context.Context, userID int64, asset ledger.Asset) (created bool, err error) {
 	if userID <= 0 {
 		return false, fmt.Errorf("用户 id 非法: %d", userID)
@@ -57,7 +59,7 @@ func (s *Store) OpenWallet(ctx context.Context, userID int64, asset ledger.Asset
 		userID, string(asset))
 	if err != nil {
 		if isMissingUserViolation(err) {
-			return false, fmt.Errorf("用户 %d 不存在（users 里没有这一行）: %w", userID, err)
+			return false, missingUserError(err, userID)
 		}
 		return false, fmt.Errorf("开通钱包失败: %w", err)
 	}
@@ -66,16 +68,4 @@ func (s *Store) OpenWallet(ctx context.Context, userID int64, asset ledger.Asset
 		return false, fmt.Errorf("读取影响行数失败: %w", err)
 	}
 	return affected > 0, nil
-}
-
-// pgForeignKeyViolation 是外键约束冲突的错误码。
-//
-// 与 errors.go 里的 pgCheckViolation 同一个来源（驱动给的 SQLSTATE）。这条
-// 插入上只有一个外键（user_id → users），所以认错误码就够，不必再看约束名。
-const pgForeignKeyViolation = "23503"
-
-// isMissingUserViolation 判断这次插入是不是被「用户不存在」挡下的。
-func isMissingUserViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == pgForeignKeyViolation
 }
