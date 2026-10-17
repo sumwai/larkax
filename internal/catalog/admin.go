@@ -759,6 +759,20 @@ func normalizeCanonicalName(raw string) (string, error) {
 // 只去首尾空白、要求非空：这个名字**原样发给上游**，上游认什么名字由上游决定，
 // 本包没有依据替它定更严的规则。首尾空白则一定是笔误——它同样匹配不上任何
 // 上游的模型名，而报错会来自上游，离「配置多打了一个空格」已经很远。
+//
+// # 与 schema 上那条 CHECK 的分工
+//
+// model_aliases.upstream_model 上还有一条 CHECK（见迁移 00022），判据是
+// btrim(upstream_model) 不为空。两者不是同一道门的两次实现，去掉哪一道都会
+// 少一样保证：
+//
+//   - 这道函数多做的、CHECK 不做的是**规整**：它 trim 之后才判，于是
+//     '  x  ' 在这里变成 'x' 再写进去；直接走 SQL 写 '  x  ' 能通过 CHECK
+//     （它不是空白）。
+//   - CHECK 多做的、这道函数做不到的是覆盖**不走本包的写入方**：管理面之外的
+//     SQL、以及将来新增的写入路径，这道函数一道都照不到。
+//
+// 所以别因为「反正库里有 CHECK」就把这里放宽。
 func normalizeUpstreamModel(raw string) (string, error) {
 	upstream := strings.TrimSpace(raw)
 	if upstream == "" {
