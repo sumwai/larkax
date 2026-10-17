@@ -12,6 +12,10 @@
 //
 // 因此新增环境变量的门槛很高：只有当这个值必须在连上数据库之前拿到时才允许。
 // 其余一律进 settings 表。
+//
+// 两个加载入口，面向两类调用方：Load 给服务进程，LoadOps 给运维命令
+// （cmd/larkaxctl）。两者的差别不只是「读哪些变量」，而是**校验哪些项**——
+// 运维命令不属于任何角色，所以角色与主密钥的校验不适用于它。
 package config
 
 import (
@@ -148,6 +152,62 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
+// OpsConfig 是**运维命令**所需的配置面。
+//
+// 它与 Config 分开，因为两者回答的不是同一个问题。Config 描述「一个服务实例
+// 以什么身份启动」——角色决定它要不要解渠道凭证，主密钥与监听地址跟着角色走。
+// 运维命令不属于任何角色：它要的只是「连哪个库」，加上打日志要的级别。
+//
+// 做成一个具名的类型，是为了让这个面**只有这几项**。想给运维命令加配置时改的是
+// 这里，而服务那一侧不受影响；反过来，加进 Config 的字段也不会悄悄变成
+// 「运维命令也依赖它」。
+type OpsConfig struct {
+	Env      string
+	LogLevel string
+	DBDSN    string
+}
+
+// IsProduction 与 Config 的同名方法一致：只用来选日志格式。
+func (c *OpsConfig) IsProduction() bool { return c.Env == "production" }
+
+// LoadOps 读取运维命令所需的配置。它是**运维命令唯一的加载入口**，
+// 与 Load 分开。
+//
+// # 它为什么不校验 LARKAX_ROLE 与 LARKAX_MASTER_KEYS
+//
+// 这两项描述的是服务角色——谁来解渠道凭证、以什么身份接流量。运维命令不属于
+// 任何角色，所以把「命令跑不跑得起来」绑到它们身上，会让一个与本次操作无关的
+// 变量决定命令的成败。实测的两种形态：
+//
+//	LARKAX_ROLE=worker larkaxctl rotate      # 主密钥设好了，却因为角色而失败
+//	larkaxctl migrate up                     # 不设角色反而要求主密钥，而建表不需要它
+//
+// 第二种尤其难查：它只在手工部署、或者只用运维命令的路径上出现，而报错信息
+// 不会提示「这一步其实不需要主密钥」。
+//
+// 命令真需要主密钥时（轮换、写渠道）自己调 MasterKeysFromEnv，与
+// cmd/larkaxctl/channel.go 的 masterKeySealer 走同一条路。
+//
+// 同理不校验 LARKAX_REDIS_DSN：运维命令不连 Redis。
+//
+// # 服务那一侧的校验强度不受影响
+//
+// Load 一行没动，它该报的错一条不少：gateway / control 缺主密钥就拒绝启动，
+// 那是数据面的防线，与这里放宽的是两件事。
+func LoadOps() (*OpsConfig, error) {
+	cfg := &OpsConfig{
+		Env:      env("LARKAX_ENV", "development"),
+		LogLevel: env("LARKAX_LOG_LEVEL", "info"),
+		DBDSN:    os.Getenv("LARKAX_DB_DSN"),
+	}
+	if cfg.DBDSN == "" {
+		// 措辞与 Load 保持一致：两者都是「配置无效」这一类，而缺 DSN 是
+		// 运维命令唯一真正必需的一项。
+		return nil, fmt.Errorf("配置无效:\n  - LARKAX_DB_DSN 未设置")
+	}
+	return cfg, nil
+}
+
 // IsProduction 目前只用来选日志格式（开发是文本、生产是 JSON）。
 //
 // 它本意是「若干默认行为的松紧」的开关，但错误详情的暴露程度尚未接进来，
@@ -229,9 +289,10 @@ func RedactDSN(dsn string) string {
 
 // MasterKeysFromEnv 解析环境变量里的主密钥，**与角色无关**。
 //
-// Load 只在需要主密钥的角色上用它（worker 不解析），但「要不要主密钥」这件事
-// 由**服务角色**决定，而运维命令不属于任何角色：它要写一条渠道就得能封装凭证，
-// 与 LARKAX_ROLE 取什么值无关。让命令直接读这个变量，好过让
+// Load 只在需要主密钥的角色上用它（worker 不解析），LoadOps 完全不碰它。
+// 「要不要主密钥」这件事由**服务角色**决定，而运维命令不属于任何角色：它要写
+// 一条渠道（或轮换一次凭证）就得拿到主密钥，与 LARKAX_ROLE 取什么值无关。
+// 需要它的命令（channel、rotate）直接调这里，好过让
 // `LARKAX_ROLE=worker larkaxctl channel create` 因为一个与本次操作无关的
 // 变量而失败，也好过在命令行里再抄一份 base64 解析。
 func MasterKeysFromEnv() ([]MasterKey, error) {

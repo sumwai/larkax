@@ -96,7 +96,7 @@ func runModelAdd(args []string) error {
 		return usageErr(err)
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -248,7 +248,7 @@ func runModelUpdate(args []string) error {
 		return usageErr(err)
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -409,7 +409,7 @@ func runModelDelete(args []string) error {
 		return usageErr(errors.New("缺少 --canonical（要删的规范模型名）"))
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -449,7 +449,7 @@ func runModelShow(args []string) error {
 		return usageErr(errors.New("缺少 --canonical（要看的规范模型名）"))
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
@@ -479,7 +479,7 @@ func runModelList(args []string) error {
 		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}

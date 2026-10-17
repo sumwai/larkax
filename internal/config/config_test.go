@@ -192,6 +192,85 @@ func TestLoadGatewayRequiresMasterKey(t *testing.T) {
 	}
 }
 
+// LoadOps 是运维命令的加载入口。它的配置面只有三项，其中只有 DSN 是必需的。
+//
+// 角色与主密钥**都不设**——那正是手工部署第一步（migrate）的情形。
+func TestLoadOpsNeedsOnlyDSN(t *testing.T) {
+	setEnv(t, map[string]string{
+		"LARKAX_DB_DSN": "postgres://user:placeholder@localhost:5432/larkax",
+	})
+
+	cfg, err := LoadOps()
+	if err != nil {
+		t.Fatalf("只设 DSN 时 LoadOps 不该报错: %v", err)
+	}
+	if cfg.DBDSN != "postgres://user:placeholder@localhost:5432/larkax" {
+		t.Errorf("DBDSN = %q", cfg.DBDSN)
+	}
+	if cfg.Env != "development" {
+		t.Errorf("Env = %q，期望 development", cfg.Env)
+	}
+	if cfg.LogLevel != "info" {
+		t.Errorf("LogLevel = %q，期望 info", cfg.LogLevel)
+	}
+	if cfg.IsProduction() {
+		t.Error("development 环境下 IsProduction() 应为 false")
+	}
+}
+
+// DSN 是运维命令唯一真正必需的一项，缺了要报出来，而且要点名缺的是哪个变量。
+func TestLoadOpsMissingDSN(t *testing.T) {
+	setEnv(t, nil)
+
+	_, err := LoadOps()
+	if err == nil {
+		t.Fatal("缺少 LARKAX_DB_DSN 时应报错")
+	}
+	if !strings.Contains(err.Error(), "LARKAX_DB_DSN") {
+		t.Errorf("错误信息未提及缺失的变量: %v", err)
+	}
+}
+
+// 描述**服务角色**的那几个变量，一个都不许让运维命令失败。
+//
+// 这里用的是「设了但非法」而不是「不设」：不设只是没走到那条分支，
+// 设成非法值才会真的去碰校验。两者都要挡住，而后者是更严的那一侧。
+// 非法角色同理——命令根本不读它，值对不对与它无关。
+func TestLoadOpsIgnoresServiceRoleVariables(t *testing.T) {
+	setEnv(t, map[string]string{
+		"LARKAX_DB_DSN":      "postgres://user:placeholder@localhost:5432/larkax",
+		"LARKAX_ROLE":        "router",
+		"LARKAX_MASTER_KEYS": "not base64!!",
+		"LARKAX_REDIS_DSN":   "localhost:6379",
+	})
+
+	if _, err := LoadOps(); err != nil {
+		t.Fatalf("与服务角色有关的变量不该让运维命令失败: %v", err)
+	}
+}
+
+// 反过来钉住不能放松的那一侧：Load 的校验强度一条都不能少。
+//
+// 角色**未设置**时默认就是 gateway，而 gateway 要解渠道凭证——缺主密钥
+// 必须报错。这是数据面的防线：放松它，服务会带着「解不开存量凭证」的状态
+// 启动，而那个故障要等到第一个真实请求才出现。
+//
+// 这条与上面那条是一对：同一个环境变量，Load 要它、LoadOps 不要它。
+// 少了任何一条，另一条都可以被「顺手统一一下」改坏。
+func TestLoadStillRequiresMasterKeyWhenRoleUnset(t *testing.T) {
+	setEnv(t, map[string]string{
+		"LARKAX_DB_DSN": "postgres://user:placeholder@localhost:5432/larkax",
+	})
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("角色未设置时默认是 gateway，缺主密钥应当报错")
+	}
+	if !strings.Contains(err.Error(), "LARKAX_MASTER_KEYS") {
+		t.Errorf("错误信息未提及主密钥: %v", err)
+	}
+}
+
 func TestParseMasterKeys(t *testing.T) {
 	other := base64.StdEncoding.EncodeToString([]byte("fedcba9876543210fedcba9876543210"))
 

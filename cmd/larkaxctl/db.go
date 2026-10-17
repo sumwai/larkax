@@ -16,7 +16,7 @@ import (
 // 处置是同一种。
 //
 // 失败时自己关掉句柄，调用方不必为「没拿到连接」再去关一次。
-func openDB(ctx context.Context, cfg *config.Config) (*sql.DB, error) {
+func openDB(ctx context.Context, cfg *config.OpsConfig) (*sql.DB, error) {
 	db, err := sql.Open("pgx", cfg.DBDSN)
 	if err != nil {
 		return nil, dbErr(fmt.Errorf("打开数据库连接失败: %w", err))
