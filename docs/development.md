@@ -245,7 +245,7 @@ go run ./cmd/larkaxctl partition check  --months 3   # 只读体检，有问题�
 上班日。数据从文件导入：
 
 ```sh
-go run ./cmd/larkaxctl calendar import ./cn-2031.json
+go run ./cmd/larkaxctl price calendar import ./cn-2031.json
 ```
 
 文件格式、状态取值与落库语义见 [calendar-data.md](calendar-data.md)。
@@ -298,7 +298,7 @@ go run ./cmd/larkaxctl --env-file .env.staging wallet create --user alice
 它只读 `LARKAX_DB_DSN`、`LARKAX_LOG_LEVEL` 与 `LARKAX_ENV`，缺 DSN 才失败。
 `LARKAX_ROLE` 决定不了任何一条运维命令的成败——命令不属于任何角色——所以
 `larkaxctl migrate up` 在没有配角色的机器上照样能跑。真正需要主密钥的命令只有
-两个（`channel` 的写入与 `rotate`），它们自己读 `LARKAX_MASTER_KEYS`。
+两个（`channel` 的写入与 `secret rotate`），它们自己读 `LARKAX_MASTER_KEYS`。
 两个入口见 `internal/config` 的 `Load` 与 `LoadOps`。
 
 **为什么这么少：** 环境变量必须跟着数据一起走。备份恢复或换机器时漏了一个变量，
@@ -384,14 +384,14 @@ openssl rand -base64 32
 再给存量密文补上新的副本。
 
 ```sh
-go run ./cmd/larkaxctl rotate            # 干跑：列出有多少行要改，不写库
-go run ./cmd/larkaxctl rotate --apply    # 轮换：可中断、可重跑
-go run ./cmd/larkaxctl rotate --verify   # 每一行是否都含新主密钥
+go run ./cmd/larkaxctl secret rotate            # 干跑：列出有多少行要改，不写库
+go run ./cmd/larkaxctl secret rotate --apply    # 轮换：可中断、可重跑
+go run ./cmd/larkaxctl secret rotate --verify   # 每一行是否都含新主密钥
 ```
 
 顺序是「新钥匙放进首位 → 轮换 → `--verify` 退出码为 0 → 才把旧钥匙去掉」。
 旧钥匙去掉得太早，那些还没轮换到的行就再也解不开了。完整说明见
-`larkaxctl rotate -h`。
+`larkaxctl secret rotate -h`。
 
 ## 建表
 
@@ -451,7 +451,13 @@ go run ./cmd/larkaxctl migrate up
 不是在 `update` 上给 `--enable`）；模型规范名一律 `--model`、归属用户一律
 `--user`。改名之前的旧写法**仍然可用**（`model add`、`wallet open`、
 `--canonical`、`--owner`、`price update --enable`、`wallet credit --order`），
-已经在跑的脚本不必改；它们写在每条子命令 `--help` 的末尾。下面用的都是新写法。
+已经在跑的脚本不必改；它们写在每条子命令 `--help` 的末尾。
+
+同一批还搬了几条命令的位置：对账 `reconcile` → `ledger reconcile`、主密钥轮换
+`rotate` → `secret rotate`、幂等记录清理 `idempotency cleanup` →
+`maintenance idempotency`、日历导入 `calendar import` → `price calendar import`。
+旧路径同样仍然可用，`larkaxctl --help` 末尾与各条命令的 `--help` 里都写着。
+下面用的都是新写法。
 
 **一、把规范模型加进目录。** 规范名是选路与计费共用的键，不能带空白字符：
 
@@ -652,7 +658,7 @@ go run ./cmd/larkaxctl channel delete --id 7
 
 - 那个渠道不再进候选集，也不再出现在 `channel list` 的默认输出里（`--all` 才看得见）；
 - `channel update` / `enable` / `disable` 对它会**明确报错**，而不是改一行你看不见的数据；
-- 凭证密文与从属的行都不动，所以 `rotate` 与健康度统计都会跳过它。
+- 凭证密文与从属的行都不动，所以 `secret rotate` 与健康度统计都会跳过它。
 
 删除是幂等的：重复删同一条不是错误，第二次打印「已经是删除状态」。
 
@@ -663,7 +669,7 @@ go run ./cmd/larkaxctl channel delete --id 7
 用户名），它的下一步与撞唯一键一样：先去看数据里现在是什么。
 
 需要主密钥（`LARKAX_MASTER_KEYS`）的命令只有两个：渠道的**写入**
-（`channel create` / `update`）与 `rotate`。凭证是信封加密的，只有
+（`channel create` / `update`）与 `secret rotate`。凭证是信封加密的，只有
 `credential.Sealer` 能产出可解开的密文，直接往库里写一行 `bytea` 补不上。
 它们读的是这个环境变量本身，与 `LARKAX_ROLE` 无关——运维命令不属于任何角色，
 把命令的成败绑到角色上，会让 `LARKAX_ROLE=worker` 时明明设好了主密钥却报
@@ -739,7 +745,7 @@ go run ./cmd/larkaxctl wallet credit --user alice --amount 100 --idempotency-key
 
 它走账本：写一组 `topup` 分录（借 `user:<ID>`、贷 `payment_gateway:<来源>`），
 并在同一个事务里更新 `user_wallets.balance`。余额因此始终等于分录之和，
-`ledger balance` 与 `reconcile` 都不会报出差额。
+`ledger balance` 与 `ledger reconcile` 都不会报出差额。
 
 | 旗标 | 必填 | 默认 | 说明 |
 |---|---|---|---|
@@ -959,23 +965,21 @@ ingress 规则下。
 | 子命令 | 做什么 |
 |---|---|
 | `channel` | 上游渠道：`create` / `list`（`--all` 含已删）/ `update` / `enable` / `disable` / `delete`（软删） |
-| `model` | 模型目录：`add` / `list` / `show` / `update` / `delete` |
-| `alias` | 规范模型名到上游模型名的映射：`add` / `list` / `update` / `delete` / `resolve` |
-| `price` | 计价规则：`add` / `list` / `update` / `explain` |
+| `model` | 模型目录：`create` / `list` / `get` / `update` / `delete` |
+| `alias` | 规范模型名到上游模型名的映射：`create` / `list` / `update` / `delete` / `resolve` |
+| `price` | 计价规则：`create` / `list` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`price calendar import` |
 | `user` | 用户：`create` |
-| `wallet` | 用户钱包：`open`（余额 0）/ `credit`（手工入账，走账本写分录） |
+| `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录） |
 | `apikey` | API Key：`create` / `update` / `list` |
-| `ledger` | 只读账本：`balance` / `verify` |
+| `ledger` | 账本：`balance` / `verify`（两条都只读）与 `reconcile`（对账，会写运行记录） |
 | `settings` | 运行期配置：`list` / `set` |
 | `plugin` | 插件：`list` / `publish` / `enable` / `disable` |
 | `partition` | `usage_events` 月分区：`ensure` / `check` |
 | `doctor` | 逐项检查这条链路通不通（`--live` 才真打上游） |
-| `snapshot` | 请求快照：`cleanup` / `allowlist` / `show` / `redact` |
-| `idempotency` | 幂等记录的留存清理：`cleanup` / `cleanup --dry-run` |
-| `calendar` | 节假日日历数据：`import` |
-| `rotate` | 主密钥轮换 |
+| `snapshot` | 请求快照：`cleanup` / `allowlist` / `get` / `redact` |
+| `secret` | 主密钥轮换：`rotate` |
+| `maintenance` | 运行期数据的留存清理：`idempotency`（`--dry-run` 只数不删） |
 | `migrate` | 迁移：`up` / `down` / `down-to` / `up-to` / `status` / `version` / `create` |
-| `reconcile` | 对账 |
 | `version` | 打印版本号 |
 
 每个子命令的用法见 `go run ./cmd/larkaxctl <子命令> --help`，

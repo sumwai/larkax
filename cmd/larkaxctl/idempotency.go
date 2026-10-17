@@ -14,22 +14,33 @@ import (
 	"github.com/sumwai/larkax/internal/settings"
 )
 
-// idempotencyUsage 是 idempotency 子命令的帮助。
-const idempotencyUsage = `larkaxctl idempotency 维护请求级幂等记录。
+// maintenanceIdempotencyUsage 是 maintenance idempotency 子命令的帮助。
+//
+// 它原先是一个顶层命令组（larkaxctl idempotency cleanup）的帮助，#475 把它
+// 收进维护域：删的是到期数据，与「幂等」这个概念本身无关。旧路径仍然可用
+// （见 main.go 的 legacyCommands），接的是同一个清理函数。
+const maintenanceIdempotencyUsage = `larkaxctl maintenance idempotency 按留存期清理请求级幂等记录。
 
 用法：
-  larkaxctl idempotency cleanup               按 settings 里的留存期删除到期的记录
-  larkaxctl idempotency cleanup --dry-run     只数一遍会被删除的条数，不删
+  larkaxctl maintenance idempotency               按 settings 里的留存期删除到期的记录
+  larkaxctl maintenance idempotency --dry-run     只数一遍会被删除的条数，不删
 
 留存期取自 settings 表的 idempotency.retention_hours，
 不在命令行上另设参数：同一件事有两个来源时，命令行的那个会悄悄赢，
 而「留存期到底是几小时」会变成一件要看是谁执行的才知道的事。
+
+旧路径：larkaxctl idempotency cleanup 仍然可用，与 larkaxctl maintenance idempotency
+逐字相同。
 `
 
-// runIdempotency 处理 idempotency 子命令。
+// runIdempotency 处理顶层的 idempotency 子命令。
+//
+// 这是一个旧路径：这一组已经搬进 maintenance 域（#475），这里只为已经在跑的
+// 脚本与部署流程留着，不列进根帮助页。它把 cleanup 与 help 原样接给搬过去
+// 的那一套，所以新旧两条路径的输出逐字相同。
 func runIdempotency(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, idempotencyUsage)
+		fmt.Fprint(os.Stderr, maintenanceIdempotencyUsage)
 		return usageErr(errors.New("idempotency 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -38,10 +49,10 @@ func runIdempotency(args []string) error {
 	case "cleanup":
 		return runIdempotencyCleanup(rest)
 	case "help", "-h", "--help":
-		fmt.Print(idempotencyUsage)
+		fmt.Print(maintenanceIdempotencyUsage)
 		return nil
 	default:
-		fmt.Fprint(os.Stderr, idempotencyUsage)
+		fmt.Fprint(os.Stderr, maintenanceIdempotencyUsage)
 		return usageErr(fmt.Errorf("未知的 idempotency 子命令 %q", action))
 	}
 }
@@ -64,12 +75,12 @@ const cleanupExpiredPredicate = `created_at < now() - ($1::bigint * interval '1 
 // 它是留存承诺的兑现方式，所以输出的是**删了多少条**而不是一句「完成」：
 // 一条都没到期时，命令的输出必须与「根本没跑成」区分得开。
 func runIdempotencyCleanup(args []string) error {
-	if err := jsonUnsupported("idempotency cleanup"); err != nil {
+	if err := jsonUnsupported("maintenance idempotency"); err != nil {
 		return err
 	}
 
-	fs := flag.NewFlagSet("idempotency cleanup", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, idempotencyUsage) }
+	fs := flag.NewFlagSet("maintenance idempotency", flag.ContinueOnError)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, maintenanceIdempotencyUsage) }
 	dryRun := fs.Bool("dry-run", false, "只数一遍会被删除的条数，不执行删除")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)

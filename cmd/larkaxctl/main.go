@@ -45,55 +45,146 @@ func main() {
 	os.Exit(exitCode(err))
 }
 
-const usage = `larkaxctl 是 larkax 的运维命令行。
+// command 是顶层命令空间里的一个条目。
+type command struct {
+	// name 是命令名，在整个顶层空间里必须唯一：分派按它查表，
+	// 重名的后一个条目永远轮不到。
+	name string
+	// summary 是根帮助页上跟在名字后面的那一句话。
+	summary string
+	// help 是这条命令自己的 --help 正文。
+	help string
+	// run 处理这条命令，args 是命令名之后的参数。
+	run func([]string) error
+}
 
-用法：
-  larkaxctl migrate up                     应用全部未执行的迁移
-  larkaxctl migrate down                   回滚最近一次迁移
-  larkaxctl migrate down-to <版本>          回滚到指定版本（0 表示全部回滚）
-  larkaxctl migrate up-to <版本>            前进到指定版本
-  larkaxctl migrate status                 显示每个迁移的应用状态
-  larkaxctl migrate version                显示当前数据库版本
-  larkaxctl migrate create <名称>           生成迁移文件
-  larkaxctl user create --name <用户名>     创建用户（stdout 只有新用户的 ID）
-  larkaxctl wallet create --user <用户> [--asset <资产>]
-                                           给用户开通钱包（余额 0）
-  larkaxctl wallet credit --user <用户> --amount <金额> --idempotency-key <幂等键>
-                                           运营手工入账（写账本分录）
-  larkaxctl apikey create --user <用户>     创建一把 API Key（明文只打印这一次）
-  larkaxctl apikey update --id <ID>        改一把已有 API Key 的额度
-  larkaxctl apikey list [--user <用户>]     列出 API Key 及其额度
-  larkaxctl settings list                  列出全部运行期配置及其说明
-  larkaxctl settings set --key <键> --value <值> --by <用户>
-                                           改一个运行期配置项
-  larkaxctl channel create|list|update|enable|disable|delete
-                                           渠道（创建时凭证从 stdin 或环境变量读）
-  larkaxctl doctor [--live --model <规范名> ...]
-                                           逐项检查这条链路通不通（只读；--live 才真打上游）
-  larkaxctl model create|list|get|update|delete
-                                           模型目录里的规范模型
-  larkaxctl alias create|list|update|delete|resolve
-                                           模型别名（上游名 ↔ 规范名）
-  larkaxctl price create|list|update|enable|disable|explain
-                                           计价规则
-  larkaxctl plugin list                    列出插件及其状态、代次与元数据问题
-  larkaxctl plugin publish <文件>           发布一个插件（先在沙箱里编译一遍）
-  larkaxctl plugin enable|disable <key>    启用 / 停用一个插件
-  larkaxctl ledger balance|verify          读账本（余额查询、完整性校验）
-  larkaxctl reconcile                      跑一轮对账（开关与口径见 settings 表）
-  larkaxctl rotate                         轮换渠道凭证的主密钥（默认干跑）
-  larkaxctl partition ensure               建出缺失的 usage_events 月分区
-  larkaxctl partition check                只读体检，有问题时非零退出
-  larkaxctl snapshot cleanup|allowlist|get|redact
-                                           快照的留存清理、允许表、读回与试脱敏
-  larkaxctl idempotency cleanup            按留存期删除到期的幂等记录
-  larkaxctl calendar import <文件>          导入某一年的日历数据（格式见下）
-  larkaxctl version                        打印版本号
+// commandGroup 是根帮助页上的一个业务领域分组。
+//
+// 分组只影响排版，不影响分派：一条命令属于哪一组，与它能被怎么调用无关。
+type commandGroup struct {
+	title    string
+	commands []command
+}
 
-子命令的详细用法：larkaxctl <子命令> --help，例如 larkaxctl channel --help。
-有旧名的那几条子命令，它的 --help 末尾列着旧名（model add、wallet open、
---canonical、--owner、--order 等）：那些写法仍然可用，只是不再是正式写法。
-日历数据文件的格式与约束见：larkaxctl calendar --help
+// commandGroups 是顶层命令的注册表，顺序就是根帮助页上的顺序。
+//
+// 根帮助页与分派共用这一份数据：分成两处写的话，加一条命令要记得改两个
+// 地方，而漏掉分派那一处的表现是「帮助里有它、跑起来却是未知子命令」。
+var commandGroups = []commandGroup{
+	{
+		title: "核心与诊断 (Core & Diagnostics)",
+		commands: []command{
+			{name: "doctor", summary: "系统健康与链路连通性体检", help: doctorUsage, run: runDoctor},
+			{name: "settings", summary: "运行期动态配置项管理（settings 表）", help: settingsUsage, run: runSettings},
+			{name: "version", summary: "打印版本号与编译元数据", help: versionUsage, run: runVersion},
+		},
+	},
+	{
+		title: "路由与模型配置 (Routing & Models)",
+		commands: []command{
+			{name: "channel", summary: "上游渠道管理（网关、凭证、关联模型）", help: channelUsage, run: runChannel},
+			{name: "model", summary: "规范模型目录（catalog 基础定义）", help: modelUsage, run: runModel},
+			{name: "alias", summary: "模型别名映射（上游模型名 ↔ 规范名）", help: aliasUsage, run: runAlias},
+			{name: "price", summary: "模型计价规则与日历管理（含 calendar 子命令）", help: priceUsage, run: runPrice},
+		},
+	},
+	{
+		title: "权限与财务 (Access & Ledger)",
+		commands: []command{
+			{name: "user", summary: "系统用户管理（创建用户）", help: userUsage, run: runUser},
+			{name: "apikey", summary: "API Key 访问密钥与额度管理", help: apiKeyUsage, run: runAPIKey},
+			{name: "wallet", summary: "用户钱包账户与入账管理", help: walletUsage, run: runWallet},
+			{name: "ledger", summary: "财务账本管理（余额查询、分录校验、对账）", help: ledgerUsage, run: runLedger},
+		},
+	},
+	{
+		title: "系统与数据维护 (Maintenance & Data)",
+		commands: []command{
+			{name: "migrate", summary: "数据库版本迁移（up、down、status、version）", help: migrateUsage, run: runMigrate},
+			{name: "partition", summary: "数据库月度分区维护（check、ensure）", help: partitionUsage, run: runPartition},
+			{name: "secret", summary: "安全凭证与主密钥维护（rotate 密钥轮换）", help: secretUsage, run: runSecret},
+			{name: "maintenance", summary: "数据留存与过期清理（idempotency 幂等记录）", help: maintenanceUsage, run: runMaintenance},
+			{name: "snapshot", summary: "请求结构快照管理（cleanup、allowlist、get、redact）", help: snapshotUsage, run: runSnapshot},
+			{name: "plugin", summary: "动态插件系统管理（list、publish、enable、disable）", help: pluginUsage, run: runPlugin},
+		},
+	},
+}
+
+// legacyCommands 是搬过家、但旧路径必须继续能用的那几条。
+//
+// 它们不进根帮助页（见 usage），也**不是**「注册了却指向另一个格子」：
+// 每一条都直接接在同一个处理函数上，于是新旧两条路径走的是同一段代码、
+// 打出的是同一份输出。这与 flags.go 里 legacyStringFlag 是同一个立场——
+// 旧名字留下来，而且真的生效。
+//
+// name 与 commandGroups 里的命令名不重叠（有用例钉着），所以查表时谁先谁后
+// 不影响结果，旧路径也不会遮住任何一条正式命令。
+var legacyCommands = []command{
+	{name: "reconcile", run: runReconcile},
+	{name: "rotate", run: runRotate},
+	{name: "idempotency", run: runIdempotency},
+	{name: "calendar", run: runCalendar},
+}
+
+// lookupCommand 按名字找出顶层命令的处理函数。
+func lookupCommand(name string) (func([]string) error, bool) {
+	for _, g := range commandGroups {
+		for _, c := range g.commands {
+			if c.name == name {
+				return c.run, true
+			}
+		}
+	}
+	for _, c := range legacyCommands {
+		if c.name == name {
+			return c.run, true
+		}
+	}
+	return nil, false
+}
+
+// usage 是根帮助页。
+//
+// 它由 commandGroups 渲染出来，不是手写的：手写的那一份与分派表是两处数据，
+// 加一条命令要记得改两个地方，而漏掉这一处的表现是「命令跑得通，根页面里
+// 却没有它」。
+//
+// 根页面只列到一级命令为止，每行一句话；二级动作与它们的参数各在自己的
+// --help 里。三四级的参数（--amount、--idempotency-key 这些）堆在根页面上
+// 时，看的人要在三十来行里找自己要的那一条。
+var usage = buildUsage()
+
+// buildUsage 渲染根帮助页：命令清单由注册表生成，说明文字来自 usageNotes。
+func buildUsage() string {
+	width := 0
+	for _, g := range commandGroups {
+		for _, c := range g.commands {
+			if n := len(c.name); n > width {
+				width = n
+			}
+		}
+	}
+
+	var b strings.Builder
+	// 命令名都是 ASCII，所以按字节数对齐与按显示宽度对齐是一回事。
+	b.WriteString("larkaxctl 是 larkax 的运维命令行。\n\n用法：\n  larkaxctl <命令> [子命令] [选项]\n")
+	for _, g := range commandGroups {
+		b.WriteString("\n" + g.title + "：\n")
+		for _, c := range g.commands {
+			fmt.Fprintf(&b, "  %-*s  %s\n", width, c.name, c.summary)
+		}
+	}
+	b.WriteString(usageNotes)
+	return b.String()
+}
+
+// usageNotes 是根帮助页上不随命令清单变化的那几段。
+const usageNotes = `
+二级动作、参数与详情各在自己的 --help 里：larkaxctl <命令> --help，
+例如 larkaxctl channel --help、larkaxctl ledger --help。
+搬过家的那几条命令的旧路径仍然可用（reconcile、rotate、idempotency cleanup、
+calendar import），各条命令的 --help 末尾写着它们：那些写法只是不再是正式写法。
+日历数据文件的格式与约束见：larkaxctl price calendar --help。
 
 全局选项：
   --env-file <路径>                        指定要加载的 .env 文件。不给时从当前目录
@@ -121,13 +212,50 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
 渠道类型不认识）归入 1，不是 2。
 
 环境变量：运维命令只读 LARKAX_DB_DSN、LARKAX_ENV 与 LARKAX_LOG_LEVEL，
-LARKAX_ROLE 与它无关。需要主密钥的命令（channel 的写入、rotate）另读
+LARKAX_ROLE 与它无关。需要主密钥的命令（channel 的写入、secret rotate）另读
 LARKAX_MASTER_KEYS。见 internal/config 的 LoadOps。
 
 .env 文件：不进环境变量、只用 .env 里的值也可以。默认从当前目录往上找
 （不越过 git 仓库根），要指定另一份就加 --env-file。两种来源都只填补
 尚未设置的环境变量——已经导出的环境变量优先。
 
+`
+
+// migrateUsage 是 migrate 子命令的帮助。
+//
+// 迁移的七个动作原先列在根帮助页上，那是一行一条的三级用法——根页面只留
+// 一级命令，具体动作各归各的 --help。
+const migrateUsage = `larkaxctl migrate 应用、回滚与生成数据库迁移（goose，见 internal/migrate）。
+
+用法：
+  larkaxctl migrate up                     应用全部未执行的迁移
+  larkaxctl migrate down                   回滚最近一次迁移
+  larkaxctl migrate down-to <版本>          回滚到指定版本（0 表示全部回滚）
+  larkaxctl migrate up-to <版本>            前进到指定版本
+  larkaxctl migrate status                 显示每个迁移的应用状态
+  larkaxctl migrate version                显示当前数据库版本
+  larkaxctl migrate create <名称>           生成迁移文件（固定为 .sql）
+
+up-to / down-to 是一步一步走到目标版本的，不调用 goose 自带的同名命令：
+实测它们会停在目标版本的相邻位置（从 v2 执行 down-to 0 只退到 v1），
+差一位的表现比不支持更危险。
+
+create 只写文件、不碰数据库，其余各条都要连库。
+
+退出码见 larkaxctl --help。
+`
+
+// versionUsage 是 version 子命令的帮助。
+//
+// 「每个一级命令的 --help 至少有一句话」：这条命令原先把参数全丢掉、直接打
+// 版本号，于是 `larkaxctl version --help` 打出来的是一个版本号。
+const versionUsage = `larkaxctl version 打印版本号与编译元数据。
+
+用法：
+  larkaxctl version              打印版本号
+  larkaxctl version -o json      打成 {"ok":true,"version":"..."}
+
+版本号在构建时注入（见 Makefile），从源码直接编译出来的是 dev。
 `
 
 // migrationsDir 是迁移文件所在目录，相对于仓库根目录。
@@ -163,58 +291,46 @@ func run() error {
 		return usageErr(errors.New("缺少子命令"))
 	}
 
-	switch args[0] {
-	case "alias":
-		return runAlias(args[1:])
-	case "apikey":
-		return runAPIKey(args[1:])
-	case "calendar":
-		return runCalendar(args[1:])
-	case "channel":
-		return runChannel(args[1:])
-	case "doctor":
-		return runDoctor(args[1:])
-	case "idempotency":
-		return runIdempotency(args[1:])
-	case "ledger":
-		return runLedger(args[1:])
-	case "migrate":
-		return runMigrate(args[1:])
-	case "model":
-		return runModel(args[1:])
-	case "partition":
-		return runPartition(args[1:])
-	case "plugin":
-		return runPlugin(args[1:])
-	case "price":
-		return runPrice(args[1:])
-	case "reconcile":
-		return runReconcile(args[1:])
-	case "rotate":
-		return runRotate(args[1:])
-	case "settings":
-		return runSettings(args[1:])
-	case "snapshot":
-		return runSnapshot(args[1:])
-	case "user":
-		return runUser(args[1:])
-	case "wallet":
-		return runWallet(args[1:])
-	case "version", "-v", "--version":
-		if jsonOutput() {
-			doc := jsonDoc(jsonOK)
-			doc["version"] = version
-			return emitJSON(os.Stdout, doc, nil)
-		}
-		fmt.Println(version)
-		return nil
+	name, rest := args[0], args[1:]
+	switch name {
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
-	default:
-		fmt.Fprint(os.Stderr, usage)
-		return usageErr(fmt.Errorf("未知子命令 %q", args[0]))
+	case "-v", "--version":
+		name, rest = "version", nil
 	}
+
+	run, ok := lookupCommand(name)
+	if !ok {
+		fmt.Fprint(os.Stderr, usage)
+		return usageErr(fmt.Errorf("未知子命令 %q", name))
+	}
+	return run(rest)
+}
+
+// runVersion 打印版本号与编译元数据。
+//
+// 多出来的这些参数原先被整段丢掉：`larkaxctl version --help` 打出来的是一个
+// 版本号，而未知子命令会被分派拦下、`larkaxctl version --nonsense` 却会安安静
+// 静地成功。参数错要报成参数错（退出码 2），脚本才分得清「我写错了」与
+// 「命令跑了」。
+func runVersion(args []string) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "help", "-h", "--help":
+			fmt.Print(versionUsage)
+			return nil
+		}
+		return usageErr(fmt.Errorf("version 不接受参数，得到 %q", args[0]))
+	}
+
+	if jsonOutput() {
+		doc := jsonDoc(jsonOK)
+		doc["version"] = version
+		return emitJSON(os.Stdout, doc, nil)
+	}
+	fmt.Println(version)
+	return nil
 }
 
 // isEnvFileFlag 判断一个参数名是不是全局选项 --env-file。
@@ -276,7 +392,7 @@ func takeEnvFileFlag(args []string) (string, []string, error) {
 	return envFile, rest, nil
 }
 
-// runReconcile 跑一轮对账任务。
+// runReconcile 跑一轮对账任务，命令是 larkaxctl ledger reconcile。
 //
 // # 为什么它对接到命令行而不是做成后台定时任务
 //
@@ -286,18 +402,21 @@ func takeEnvFileFlag(args []string) (string, []string, error) {
 //
 // 开关与口径全部来自 settings 表，命令行不带参数：这样「线上跑的是哪一套
 // 口径」只有一个答案（库里的值），而不是「命令行里带了什么」。
+//
+// 它原先是一个顶层命令（larkaxctl reconcile），#475 把它收进账本域。那条旧
+// 路径留着（见 legacyCommands），接的就是这个函数。
 func runReconcile(args []string) error {
-	if err := jsonUnsupported("reconcile"); err != nil {
+	if err := jsonUnsupported("ledger reconcile"); err != nil {
 		return err
 	}
 
-	fs := flag.NewFlagSet("reconcile", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	fs := flag.NewFlagSet("ledger reconcile", flag.ContinueOnError)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, ledgerUsage) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("reconcile 不接受位置参数，得到 %q：开关与口径在 settings 表里", fs.Arg(0))
+		return fmt.Errorf("ledger reconcile 不接受位置参数，得到 %q：开关与口径在 settings 表里", fs.Arg(0))
 	}
 
 	cfg, err := config.LoadOps()
@@ -474,7 +593,7 @@ func withDB(timeout time.Duration, fn func(context.Context, *sql.DB) error) erro
 
 func runMigrate(args []string) error {
 	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	fs.Usage = func() { fmt.Fprint(os.Stderr, migrateUsage) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

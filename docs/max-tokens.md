@@ -30,14 +30,14 @@
 
 | 顺序 | 取哪个 | 在哪儿配 | 什么时候生效 |
 |---|---|---|---|
-| 1 | 模型目录里登记的 `output_limit` | `larkaxctl model add` / `model update --output-limit` | 下一个请求 |
+| 1 | 模型目录里登记的 `output_limit` | `larkaxctl model create` / `model update --output-limit` | 下一个请求 |
 | 2 | 全局默认值（出厂 `65536`） | `larkaxctl settings set --key billing.max_output_tokens --value <token 数>` | 重启服务 |
 
 两条要说清楚：
 
 - **目录里那一列是逐个模型登记的**，与选路用的能力、上下文上限同一张表同一行
   （写它的命令见 [development.md](development.md) 的「配一条能接请求的链路」，
-  读回来用 `larkaxctl model show --canonical <规范名>`）。目录里没登记
+  读回来用 `larkaxctl model get --model <规范名>`）。目录里没登记
   （`NULL`，读出来是 `0`）的模型用全局默认值。**`0` 是「未知」，不是「零额度」**
   ——一次采集失败不该让整批模型用不了。
 - **全局默认值只在启动时读一次**（settings 表里所有键都是这个口径，见

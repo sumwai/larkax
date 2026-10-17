@@ -14,14 +14,17 @@ import (
 	"github.com/sumwai/larkax/internal/config"
 )
 
-// calendarUsage 是 calendar 子命令的帮助，同时也是这份文件格式的说明。
+// priceCalendarUsage 是 price calendar 子命令的帮助，同时也是这份文件格式的说明。
 //
-// 格式写在这里而不是只写在文档里：跑 `larkaxctl calendar import` 时手边
+// 格式写在这里而不是只写在文档里：跑 `larkaxctl price calendar import` 时手边
 // 应当就能查到它，否则「文件该怎么写」要先去找文档。
-const calendarUsage = `larkaxctl calendar 维护分时计价用的日历数据。
+//
+// 它挂在 price 下面（#475）：这些数据是分时计价规则的输入，离开计价规则没有
+// 别的用处。旧路径 larkaxctl calendar import 仍然可用，见末尾那一行。
+const priceCalendarUsage = `larkaxctl price calendar 维护分时计价用的日历数据。
 
 用法：
-  larkaxctl calendar import <文件>   把一份日历数据文件灌进库里
+  larkaxctl price calendar import <文件>   把一份日历数据文件灌进库里
 
 文件是一个 JSON 对象，只认下面这些字段（键名写错会直接报错）：
 
@@ -64,13 +67,16 @@ days 也不带 source——那一年还没有定论，写进去的数据行会�
 年份的文件里，同一天以最后一次导入为准。
 
 数据从哪来不在本命令的范围内：它只负责「读文件 → 写库」。
+
+旧路径：larkaxctl calendar import <文件> 仍然可用，与
+larkaxctl price calendar import <文件> 逐字相同。
 `
 
-// runCalendar 处理 calendar 子命令。
-func runCalendar(args []string) error {
+// runPriceCalendar 处理 price 下的 calendar 子命令。
+func runPriceCalendar(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, calendarUsage)
-		return errors.New("calendar 需要子命令")
+		fmt.Fprint(os.Stderr, priceCalendarUsage)
+		return usageErr(errors.New("price calendar 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -78,11 +84,35 @@ func runCalendar(args []string) error {
 	case "import":
 		return runCalendarImport(rest)
 	case "help", "-h", "--help":
-		fmt.Print(calendarUsage)
+		fmt.Print(priceCalendarUsage)
 		return nil
 	default:
-		fmt.Fprint(os.Stderr, calendarUsage)
-		return fmt.Errorf("未知的 calendar 子命令 %q", action)
+		fmt.Fprint(os.Stderr, priceCalendarUsage)
+		return usageErr(fmt.Errorf("未知的 price calendar 子命令 %q", action))
+	}
+}
+
+// runCalendar 处理顶层的 calendar 子命令。
+//
+// 这是一个旧路径：这一组已经搬进 price 域（#475），这里只为已经在跑的脚本与
+// 部署流程留着，不列进根帮助页。它把 import 与 help 原样接给搬过去的那一套，
+// 所以新旧两条路径的输出逐字相同。
+func runCalendar(args []string) error {
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, priceCalendarUsage)
+		return usageErr(errors.New("calendar 需要子命令"))
+	}
+	action, rest := args[0], args[1:]
+
+	switch action {
+	case "import":
+		return runCalendarImport(rest)
+	case "help", "-h", "--help":
+		fmt.Print(priceCalendarUsage)
+		return nil
+	default:
+		fmt.Fprint(os.Stderr, priceCalendarUsage)
+		return usageErr(fmt.Errorf("未知的 calendar 子命令 %q", action))
 	}
 }
 
@@ -93,17 +123,17 @@ func runCalendar(args []string) error {
 // 坑。文件读不出来或校验不过时**不连数据库**——那种情况下连上去也没有用，
 // 而失败发生在碰库之前，日志里就不会出现一条看不懂的连接记录。
 func runCalendarImport(args []string) error {
-	if err := jsonUnsupported("calendar import"); err != nil {
+	if err := jsonUnsupported("price calendar import"); err != nil {
 		return err
 	}
 
-	fs := flag.NewFlagSet("calendar import", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, calendarUsage) }
+	fs := flag.NewFlagSet("price calendar import", flag.ContinueOnError)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, priceCalendarUsage) }
 	if err := fs.Parse(args); err != nil {
 		// -h / --help 不是失败：flag 在返回 ErrHelp 之前已经把用法打印过了，
-		// 再把它当错误返回会让 `larkaxctl calendar import --help` 以退出码 1
-		// 结束（main 把任何非 nil 的错误都当成失败），而 main.go 的用法文本
-		// 正好叫人这么跑。`larkaxctl calendar --help` 走的是另一条分支，
+		// 再把它当错误返回会让 `larkaxctl price calendar import --help` 以退出码 1
+		// 结束（main 把任何非 nil 的错误都当成失败），而 priceCalendarUsage
+		// 正好叫人这么跑。`larkaxctl price calendar --help` 走的是另一条分支，
 		// 那条本来就返回 nil。
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -112,7 +142,7 @@ func runCalendarImport(args []string) error {
 	}
 	if fs.NArg() != 1 {
 		fs.Usage()
-		return fmt.Errorf("calendar import 需要一个文件参数，得到 %d 个", fs.NArg())
+		return fmt.Errorf("price calendar import 需要一个文件参数，得到 %d 个", fs.NArg())
 	}
 	path := fs.Arg(0)
 

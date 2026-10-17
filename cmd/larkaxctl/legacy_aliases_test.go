@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -246,9 +249,15 @@ func TestLegacyPriceVerbAndFlagAliases(t *testing.T) {
 	t.Run("explain 的 --owner 等同于 --user", func(t *testing.T) {
 		// 两次问的是**同一个**模型名，而且就是这一组建的那些规则唯一适用的
 		// 那个名字：要比的是选项名，不是「库里有没有规则」。
+		//
+		// --at 固定成一个远处的将来：不给它时，explain 打出来的「时刻」是跑那
+		// 一瞬间的墙钟（截到秒），两次调用跨过秒的边界就不同了——那与要比的
+		// 选项名毫无关系，却会让这条用例偶发失败。固定的时刻不改变选中哪条
+		// 规则：这些规则都是「不过期」、生效自建立那一刻。
+		const at = "2099-01-01T00:00:00Z"
 		assertIdentical(t,
-			runOnce(t, runPrice, []string{"explain", "--model", onlyModel, "--owner", ownerRef}),
-			runOnce(t, runPrice, []string{"explain", "--model", onlyModel, "--user", ownerRef}))
+			runOnce(t, runPrice, []string{"explain", "--model", onlyModel, "--owner", ownerRef, "--at", at}),
+			runOnce(t, runPrice, []string{"explain", "--model", onlyModel, "--user", ownerRef, "--at", at}))
 	})
 }
 
@@ -437,4 +446,147 @@ func TestLegacySnapshotGetVerb(t *testing.T) {
 		runOnce(t, runSnapshot, []string{
 			"get", requestID, "--actor", username, "--reason", "排查一次 500",
 		}))
+}
+
+// ── #475：搬过家的那几条命令，旧路径仍然可用 ────────────────────────────
+//
+// 上面那一组测的是**同一个命令的两种写法**（动词与选项名改名），这一组测的是
+// **同一条命令挂在两个地方**：收进资源域之后，旧的顶层路径必须继续能用，
+// 因为已经在跑的脚本与部署流程靠它们。
+//
+// 比法一样：同一件事，两种写法，三个流逐字相同。
+
+// TestLegacyReconcilePath 钉住 larkaxctl reconcile 与 larkaxctl ledger reconcile。
+//
+// # 为什么先跑一轮，以及为什么有两个字段要抹掉
+//
+// 对账每一轮都往 reconcile_runs 写一行，报告里的 run_id 因此必然不同；
+// 「起点」是**上一轮**的水位，连跑两次也不一样。这两个字段是这一轮的身份，
+// 不是行为——把它们算成差异，等于要求两次运行是同一次运行。
+//
+// 先跑一轮（暖场）是为了让被比较的两次都站在「前面已经有一轮跑完了」这个
+// 起点上：第一轮与后面的轮次水位不同，而被比的范围由水位圈定。
+//
+// 其余部分逐字比：比对了几行、发现了哪几条不一致、结论是「没有不一致」还是
+// 「发现 N 条」，都在这份报告里。对账默认不动手（settings 的
+// reconcile.auto_repair 出厂是 false），所以两次看到的是同一份数据。
+func TestLegacyReconcilePath(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	// 暖场：这一步同时证明 larkaxctl reconcile 真的把一轮跑完了。
+	if r := runOnce(t, runReconcile, nil); !strings.Contains(r.stdout, "对账 run_id=") {
+		t.Fatalf("reconcile 没有跑出一轮报告（err=%v）：\n%s", r.err, r.stdout)
+	}
+
+	assertSameReconcileRun(t,
+		runOnce(t, runReconcile, nil),
+		runOnce(t, runLedger, []string{"reconcile"}))
+}
+
+// reconcileIdentity 把一轮对账的「身份」抹掉：run_id、增量起点与日志时间戳。
+//
+// 只抹这三样。它们的共同点是「每一轮各自的值」：那一行是这一轮刚写进去的、
+// 水位是上一轮留下的、时间戳是这一刻打出来的。把它们当成差异就永远比不出
+// 东西来；其余每一个字段——比对了几行、每条不一致的用户与金额、结论那一句
+// ——都要逐字对上。
+func reconcileIdentity(s string) string {
+	s = regexp.MustCompile(`run_id=\d+`).ReplaceAllString(s, "run_id=<N>")
+	s = regexp.MustCompile(`起点=\S+`).ReplaceAllString(s, "起点=<T>")
+	return regexp.MustCompile(`time=\S+`).ReplaceAllString(s, "time=<T>")
+}
+
+// assertSameReconcileRun 断言两轮对账除身份之外逐字相同。
+func assertSameReconcileRun(t *testing.T, old, new commandRun) {
+	t.Helper()
+
+	oldOut, newOut := reconcileIdentity(old.stdout), reconcileIdentity(new.stdout)
+	if oldOut != newOut {
+		t.Errorf("stdout 不同：\n旧写法 %q\n新写法 %q", oldOut, newOut)
+	}
+
+	oldErrOut, newErrOut := reconcileIdentity(old.stderr), reconcileIdentity(new.stderr)
+	if oldErrOut != newErrOut {
+		t.Errorf("stderr 不同：\n旧写法 %q\n新写法 %q", oldErrOut, newErrOut)
+	}
+
+	// 发现不一致时退出码非零，那句话里也带着 run_id——两轮都可能以它收尾，
+	// 所以它同样要比。
+	oldErr, newErr := reconcileIdentity(errorText(old.err)), reconcileIdentity(errorText(new.err))
+	if oldErr != newErr {
+		t.Errorf("错误不同：\n旧写法 %q\n新写法 %q", oldErr, newErr)
+	}
+}
+
+// TestLegacyRotatePath 钉住 larkaxctl rotate 与 larkaxctl secret rotate。
+//
+// 跑的是默认的干跑：它只读、不写库，所以两次看到的是同一份数据，连「扫过
+// N 行」都一样，三个流可以逐字比。--apply 不在这里跑——它改写全库的凭证
+// 密文，用例不该动它。
+func TestLegacyRotatePath(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	assertIdentical(t,
+		runOnce(t, runRotate, nil),
+		runOnce(t, runSecret, []string{"rotate"}))
+}
+
+// TestLegacyIdempotencyPath 钉住 larkaxctl idempotency cleanup 与
+// larkaxctl maintenance idempotency。
+//
+// 用 --dry-run 比：真删会改库，而这里要比的是路径，不是留存期算得对不对
+// （那是 idempotency_test.go 那一组的事）。干跑只数一遍，两次落在同一个数上。
+func TestLegacyIdempotencyPath(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	assertIdentical(t,
+		runOnce(t, runIdempotency, []string{"cleanup", "--dry-run"}),
+		runOnce(t, runMaintenance, []string{"idempotency", "--dry-run"}))
+}
+
+// TestLegacyCalendarPath 钉住 larkaxctl calendar import 与
+// larkaxctl price calendar import。
+//
+// # 为什么要先灌一次
+//
+// 导入的结果里最后一段是「替换原有 N 行」：第一次灌某一年时 N=0，之后再灌是
+// 这一年的天数。直接比新旧两次，差的是「库里本来有没有那一年的数据」，不是
+// 路径——所以先用旧路径灌一次，被比的两次就都落在「这一年已经有了」那一档。
+func TestLegacyCalendarPath(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	path := writeCalendarFile(t, 2031)
+	if r := runOnce(t, runCalendar, []string{"import", path}); r.err != nil {
+		t.Fatalf("calendar import 失败: %v", r.err)
+	}
+
+	assertIdentical(t,
+		runOnce(t, runCalendar, []string{"import", path}),
+		runOnce(t, runPrice, []string{"calendar", "import", path}))
+}
+
+// writeCalendarFile 造一份覆盖整整一年的日历数据文件，返回它的路径。
+//
+// 每一天都要有判定是导入的硬要求（少一天就报错），所以按年份生成而不是手写：
+// 手写的那份会在碰上闰年时少一天，而那一天正好是 12 月 31 日，看起来像导入
+// 本身出了问题。
+func writeCalendarFile(t *testing.T, year int) string {
+	t.Helper()
+
+	days := make([]string, 0, 366)
+	for d := time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC); d.Year() == year; d = d.AddDate(0, 0, 1) {
+		weekend := d.Weekday() == time.Saturday || d.Weekday() == time.Sunday
+		days = append(days, fmt.Sprintf(`{"date":%q,"off_day":%t}`, d.Format("2006-01-02"), weekend))
+	}
+	body := fmt.Sprintf(`{"region":"CN","year":%d,"status":"synced","source":"manual","days":[%s]}`,
+		year, strings.Join(days, ","))
+
+	path := filepath.Join(t.TempDir(), fmt.Sprintf("cn-%d.json", year))
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("写日历数据文件失败: %v", err)
+	}
+	return path
 }
