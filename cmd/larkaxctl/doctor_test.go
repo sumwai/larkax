@@ -31,6 +31,18 @@ import (
 // 不是「这把 key 有多强」。
 const testDoctorKey = "test-key-placeholder"
 
+// printDoctorLive 让用例只喂「真打上游」那一项，就拿到默认输出里那一行的形状。
+//
+// 它走的是与整份报告**同一条**打印路径（`printDoctorLines`），默认输出的形状改了
+// 这里也会跟着红。要有这个入口是因为那一项的几条分支（没开 --live、请求发不出去、
+// 成功、被谁拒了）各要一份输出，而整份报告要连库才跑得起来。
+//
+// 它**只能**写在测试文件里：deadcode 门禁不把测试当调用点，写在 doctor.go 里
+// 会被判成「没人调的函数」。
+func printDoctorLive(w io.Writer, l doctorLive, verbose bool) {
+	printDoctorLines(w, []doctorLine{doctorLiveLine(l)}, verbose)
+}
+
 // ── 第 1 项：数据库 ─────────────────────────────────────────────────────
 
 // TestDoctorDatabaseCheckDoesNotCreateTheVersionTable 钉住第 1 项的只读承诺。

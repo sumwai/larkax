@@ -1596,11 +1596,24 @@ type doctorLine struct {
 // 收敛掉的不是信息量，是**默认那一屏**：一次全通过的运行原先要刷三十多行，
 // 而其中没有一行需要动作。原来的长句一条都没删，只是挪到了 -v。
 func printDoctorReport(w io.Writer, rep doctorReport, verbose bool) {
-	p := newPalette(w)
 	_, _ = fmt.Fprintln(w, "larkaxctl doctor：逐项检查「配好的链路能不能接一次请求」。")
 	_, _ = fmt.Fprintln(w)
 
-	lines := doctorLines(rep)
+	printDoctorLines(w, doctorLines(rep), verbose)
+
+	passed, failed, skipped := rep.counts()
+	_, _ = fmt.Fprintf(w, "\n  doctor: %d 项异常, %d 项跳过, %d 项通过 (运行 -v 查看细节)\n",
+		failed, skipped, passed)
+}
+
+// printDoctorLines 打默认输出那几行：标题那一栏按最宽的自算宽度对齐，-v 时每行
+// 后面跟它的细节。
+//
+// 单独抽出来的理由不是复用，是**让用例打到同一条路径上**：真打上游那一项的几条
+// 分支（没开 --live、请求发不出去、成功、被谁拒了）各要一份输出，而整份报告要连库
+// 才跑得起来，所以用例只喂那一行。它若各打各的，「改坏了默认输出」在用例里看不见。
+func printDoctorLines(w io.Writer, lines []doctorLine, verbose bool) {
+	p := newPalette(w)
 	width := 0
 	for _, l := range lines {
 		if n := displayWidth(l.title); n > width {
@@ -1618,10 +1631,6 @@ func printDoctorReport(w io.Writer, rep doctorReport, verbose bool) {
 			_, _ = fmt.Fprintf(w, "      %s\n", p.dim(line))
 		}
 	}
-
-	passed, failed, skipped := rep.counts()
-	_, _ = fmt.Fprintf(w, "\n  doctor: %d 项异常, %d 项跳过, %d 项通过 (运行 -v 查看细节)\n",
-		failed, skipped, passed)
 }
 
 // doctorLines 把报告折成默认输出的那几行。
@@ -1637,24 +1646,6 @@ func doctorLines(rep doctorReport) []doctorLine {
 		})
 	}
 	return append(lines, doctorLiveLine(rep.live))
-}
-
-// printDoctorLive 打真打上游那一行（verbose 时连细节）。
-//
-// 单独留一个入口是给用例用的：那一项的几条分支（没开 --live、请求发不出去、
-// 成功、被谁拒了）各要一份输出，而整份报告要连库才跑得起来。
-func printDoctorLive(w io.Writer, l doctorLive, verbose bool) {
-	p := newPalette(w)
-	line := doctorLiveLine(l)
-	_, _ = fmt.Fprintf(w, "  %s %s  %s\n",
-		p.glyph(line.kind), p.title(line.kind, line.title),
-		p.conclusion(line.kind, line.conclusion))
-	if !verbose {
-		return
-	}
-	for _, detail := range line.detail {
-		_, _ = fmt.Fprintf(w, "      %s\n", p.dim(detail))
-	}
 }
 
 // doctorLiveLine 把真打上游那一次折成一行。
