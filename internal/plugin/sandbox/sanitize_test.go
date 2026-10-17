@@ -219,7 +219,7 @@ export default {
 		if !errors.Is(err, ErrCallTimeout) {
 			t.Errorf("宿主日志里的原文 = %v，想要包住 ErrCallTimeout", err)
 		}
-		if errors.Is(err, ErrClientCancelled) {
+		if errors.Is(err, ErrClientCanceled) {
 			t.Error("预算用尽不该被记成客户端断开")
 		}
 	case <-time.After(2 * time.Second):

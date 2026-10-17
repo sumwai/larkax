@@ -254,9 +254,9 @@ func TestHostFuncStopsOnExpiredContext(t *testing.T) {
 	}
 }
 
-// TestCancelledContextPassesCauseThrough 确认客户端断开（取消而非超时）时
+// TestCanceledContextPassesCauseThrough 确认客户端断开（取消而非超时）时
 // 报的是取消本身，而不是被归到宿主超时里——两者的处置不同。
-func TestCancelledContextPassesCauseThrough(t *testing.T) {
+func TestCanceledContextPassesCauseThrough(t *testing.T) {
 	store := newFakeKV()
 	env := Env{Plugin: "p", Logger: testLogger(&bytes.Buffer{}), KV: store}
 

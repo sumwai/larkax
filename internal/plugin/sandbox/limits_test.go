@@ -559,9 +559,9 @@ func TestCallTimeout进入宿主函数的ctx(t *testing.T) {
 	}
 }
 
-// 客户端断开：ctx 被取消后 Call 返回 ErrClientCancelled，
+// 客户端断开：ctx 被取消后 Call 返回 ErrClientCanceled，
 // 与「插件自己超时」是两种失败，排查方向完全不同。
-func Test客户端取消时返回ErrClientCancelled(t *testing.T) {
+func Test客户端取消时返回ErrClientCanceled(t *testing.T) {
 	m, err := Compile("p", `export default { onRequest() { while (true) {} } };`)
 	if err != nil {
 		t.Fatal(err)
@@ -582,8 +582,8 @@ func Test客户端取消时返回ErrClientCancelled(t *testing.T) {
 	if f == nil {
 		t.Fatal("取消应当返回失败")
 	}
-	if !errors.Is(f, ErrClientCancelled) {
-		t.Errorf("Kind = %v，想要 ErrClientCancelled", f.Kind)
+	if !errors.Is(f, ErrClientCanceled) {
+		t.Errorf("Kind = %v，想要 ErrClientCanceled", f.Kind)
 	}
 	if errors.Is(f, ErrCallTimeout) {
 		t.Error("客户端取消不该被当成调用超时")
