@@ -66,6 +66,10 @@ const rotateTimeout = 30 * time.Minute
 const rotateRowLimit = 100
 
 func runRotate(args []string) error {
+	if err := jsonUnsupported("rotate"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("rotate", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, rotateUsage) }
 	apply := fs.Bool("apply", false, "真正改写 credential_enc（不加这个参数只干跑）")

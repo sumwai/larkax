@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -424,4 +425,204 @@ func hasActive(t *testing.T, db *sql.DB, key string) bool {
 		t.Fatalf("统计插件行失败: %v", err)
 	}
 	return n > 0
+}
+
+// ── 机器可读输出（--format json） ───────────────────────────────────────
+
+// 清单里的每一栏都要能读出来，坏掉的那一行尤其要**留在这条自己身上**。
+//
+// 表格那一档把坏 meta 折成表后的一行说明；脚本问的却是「哪几个插件的 meta 有
+// 问题」，所以这一档必须有 meta_problem 这一栏，否则它只能去解析给人看的那句话。
+func TestPluginListDocIsMachineReadable(t *testing.T) {
+	doc := pluginListDoc([]pluginstore.Row{
+		{Key: "good", Version: "1.0.0", Status: "active", Generation: 0, Priority: 3, Name: "好的"},
+		{Key: "bad", Version: "2.0.0", Status: "pending", Generation: 1, Name: "坏的",
+			MetaProblem: "meta 里的 key \"另一个名字\" 与行上的 key \"bad\" 不一致"},
+	})
+
+	var got struct {
+		Status  string `json:"status"`
+		Summary struct {
+			Total int `json:"total"`
+		} `json:"summary"`
+		Plugins []struct {
+			Key         string  `json:"key"`
+			Version     string  `json:"version"`
+			Status      string  `json:"status"`
+			Generation  int64   `json:"generation"`
+			Priority    int     `json:"priority"`
+			Name        string  `json:"name"`
+			MetaProblem *string `json:"meta_problem"`
+		} `json:"plugins"`
+	}
+	decodeDoc(t, doc, &got)
+
+	if got.Status != jsonOK {
+		t.Errorf("status = %q，想要 %q", got.Status, jsonOK)
+	}
+	if got.Summary.Total != 2 || len(got.Plugins) != 2 {
+		t.Fatalf("summary.total = %d、plugins 有 %d 条，都想要 2",
+			got.Summary.Total, len(got.Plugins))
+	}
+
+	first := got.Plugins[0]
+	if first.Key != "good" || first.Version != "1.0.0" || first.Status != "active" ||
+		first.Generation != 0 || first.Priority != 3 || first.Name != "好的" {
+		t.Errorf("第一条对不上：%+v", first)
+	}
+	// 这一条没有 meta 问题 → null（不是空串：空串读起来像一个值）。
+	if first.MetaProblem != nil {
+		t.Errorf("meta 正常的插件，meta_problem = %q，想要 null", *first.MetaProblem)
+	}
+
+	second := got.Plugins[1]
+	if second.Key != "bad" || second.Status != "pending" || second.Generation != 1 {
+		t.Errorf("第二条对不上：%+v", second)
+	}
+	// 坏掉的那一行**照样在清单里**：整次报错或跳过它，都会让最需要看清单的
+	// 那一刻看不到东西。
+	if second.MetaProblem == nil || !strings.Contains(*second.MetaProblem, "与行上的 key") {
+		t.Errorf("坏 meta 的原文没打出来：%s", showPtr(second.MetaProblem))
+	}
+	// 计数与代次是 JSON 数字，不是字符串。
+	var generic map[string]any
+	raw := decodeDoc(t, doc, &generic)
+	entries, ok := generic["plugins"].([]any)
+	if !ok || len(entries) != 2 {
+		t.Fatalf("plugins 不是两条的数组：%v", generic["plugins"])
+	}
+	if _, ok := entries[1].(map[string]any)["generation"].(float64); !ok {
+		t.Errorf("generation 应当是 JSON 数字，得到 %#v", entries[1].(map[string]any)["generation"])
+	}
+	for i, item := range entries {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("第 %d 条不是对象：%v", i, item)
+		}
+		assertDocKeys(t, entry, []string{
+			"key", "version", "status", "generation", "priority", "name", "meta_problem",
+		})
+	}
+	if strings.Contains(string(raw), "插件 good 的 meta 有问题") {
+		t.Errorf("表格那一档的那句话混进了 JSON：\n%s", raw)
+	}
+}
+
+// 空清单是 `[]`，不是 null，也不是那句「暂无插件。」。
+func TestPluginListDocEmptyListIsEmptyArray(t *testing.T) {
+	var got struct {
+		Plugins *[]map[string]any `json:"plugins"`
+	}
+	decodeDoc(t, pluginListDoc(nil), &got)
+
+	if got.Plugins == nil {
+		t.Fatal("空清单编成了 null，要的是 []")
+	}
+	if len(*got.Plugins) != 0 {
+		t.Errorf("空清单里有 %d 条", len(*got.Plugins))
+	}
+}
+
+// 三条写类命令在 json 模式下必须在连库之前被拦下，且命名的正是自己那一条。
+//
+// enable 与 disable 共用 runPluginSetEnabled：命令名写死一个的话，另一条命令
+// 在不支持 json 时会报出兄弟命令的名字——而照着那句话去改的人会改错命令。
+func TestPluginWriteCommandsRejectJSONFormatBeforeTouchingTheDB(t *testing.T) {
+	withFormat(t, formatJSON)
+	// 连不上的库：真的去连就会以 exitDBUnreach 收场。
+	t.Setenv("LARKAX_DB_DSN", "postgres://larkax:placeholder@127.0.0.1:1/larkax?sslmode=disable")
+
+	cases := []struct {
+		name string
+		run  func() error
+		want string
+	}{
+		{"publish", func() error {
+			return runPluginPublish([]string{"plugin.js"})
+		}, "plugin publish"},
+		{"enable", func() error { return runPluginSetEnabled([]string{"k"}, true) }, "plugin enable"},
+		{"disable", func() error { return runPluginSetEnabled([]string{"k"}, false) }, "plugin disable"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var err error
+			stdout, _ := captureStreams(t, func() { err = tc.run() })
+			if err == nil {
+				t.Fatal("json 模式下应当把写类命令拦下来")
+			}
+			if !strings.Contains(err.Error(), "不支持 --format json") {
+				t.Fatalf("错误信息 %q 里没有「不支持 --format json」——是不是先连库了", err.Error())
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("错误信息里要点名 %q：%v", tc.want, err)
+			}
+			if code := exitCode(err); code != exitUsage {
+				t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+			}
+			if stdout != "" {
+				t.Errorf("被拦下时 stdout 应当为空，得到 %q", stdout)
+			}
+		})
+	}
+}
+
+// 命令级：发布一个插件再列出来，stdout 整体是一份合法 JSON。
+//
+// 用真库是因为这一档的键值几乎全来自库里那几列（代次、优先级、名称），而
+// 「优先级取自 platform 作用域那条启用记录」这类口径只有真库能给。
+func TestPluginListJSONStdoutIsMachineReadable(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	key := uniqueName("jsoncli")
+	path := writePluginFile(t, "cli.js", pluginSource(key, "1.0.0", 0))
+	if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+		t.Fatalf("发布插件失败: %v", err)
+	}
+
+	withFormat(t, formatJSON)
+	var err error
+	stdout, _ := captureStreams(t, func() { err = runPluginList(nil) })
+	if err != nil {
+		t.Fatalf("plugin list 失败: %v", err)
+	}
+	assertOnlyJSON(t, stdout)
+
+	var got struct {
+		Status   string `json:"status"`
+		ExitCode int    `json:"exit_code"`
+		Plugins  []struct {
+			Key      string  `json:"key"`
+			Version  string  `json:"version"`
+			Status   string  `json:"status"`
+			Name     string  `json:"name"`
+			Problem  *string `json:"meta_problem"`
+			Priority int     `json:"priority"`
+		} `json:"plugins"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("解不回来: %v\n%s", err, stdout)
+	}
+	if got.Status != jsonOK || got.ExitCode != exitOK {
+		t.Errorf("status=%q exit_code=%d，想要 %q / %d",
+			got.Status, got.ExitCode, jsonOK, exitOK)
+	}
+
+	var found bool
+	for _, p := range got.Plugins {
+		if p.Key != key {
+			continue
+		}
+		found = true
+		if p.Version != "1.0.0" || p.Status != pluginstore.StatusPending {
+			t.Errorf("刚发布的那一条对不上：%+v", p)
+		}
+		if p.Problem != nil {
+			t.Errorf("刚发布的插件不该有 meta 问题：%q", *p.Problem)
+		}
+	}
+	if !found {
+		t.Fatalf("清单里没有刚发布的 %s：\n%s", key, stdout)
+	}
 }

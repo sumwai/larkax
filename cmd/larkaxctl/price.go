@@ -97,6 +97,10 @@ func runPrice(args []string) error {
 }
 
 func runPriceAdd(args []string) error {
+	if err := jsonUnsupported("price add"); err != nil {
+		return err
+	}
+
 	req, ownerRef, err := parsePriceAdd(args)
 	if err != nil {
 		return usageErr(err)
@@ -202,6 +206,10 @@ func parsePriceAdd(args []string) (pricing.CreateRequest, string, error) {
 }
 
 func runPriceUpdate(args []string) error {
+	if err := jsonUnsupported("price update"); err != nil {
+		return err
+	}
+
 	req, ownerRef, err := parsePriceUpdate(args)
 	if err != nil {
 		return usageErr(err)
@@ -444,6 +452,9 @@ func runPriceExplain(args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutput() {
+		return emitJSON(os.Stdout, priceExplainDoc(q, rules), nil)
+	}
 	printRuleExplain(os.Stdout, q, rules)
 	return nil
 }
@@ -474,8 +485,88 @@ func runPriceList(args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutput() {
+		return emitJSON(os.Stdout, priceListDoc(rules), nil)
+	}
 	printRuleList(os.Stdout, rules)
 	return nil
+}
+
+// priceListDoc 组装 price list 的机器可读输出。
+//
+// 与 printRuleList 是同一份数据的另一条渲染路径：那一档把「生效/停用」、
+// 「不过期」、商家栏的 `-` 铺成给人扫的表，这一档给布尔、null 与原始值。
+func priceListDoc(rules []pricing.RuleInfo) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["summary"] = map[string]any{"total": len(rules)}
+
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	entries := make([]map[string]any, 0, len(rules))
+	for _, r := range rules {
+		entries = append(entries, ruleEntry(r))
+	}
+	doc["rules"] = entries
+	return doc
+}
+
+// priceExplainDoc 组装 price explain 的机器可读输出。
+//
+// 它比 list 多两样：query（问的是哪一次请求）与每条规则上的 verdict。
+// query 里那两个外键同样用 null 表示「这次没选定」，与请求路径上
+// OwnerUserID / ChannelID 为 0 的含义一致（见 pricing.ExplainQuery）。
+func priceExplainDoc(q pricing.ExplainQuery, rules []pricing.RuleInfo) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["query"] = map[string]any{
+		"canonical_model": q.CanonicalModel,
+		"owner_user_id":   jsonID(q.OwnerUserID),
+		"channel_id":      jsonID(q.ChannelID),
+		"at":              jsonTime(q.At),
+	}
+
+	entries := make([]map[string]any, 0, len(rules))
+	for i, r := range rules {
+		entry := ruleEntry(r)
+		entry["verdict"] = ruleVerdict(i)
+		entries = append(entries, entry)
+	}
+	doc["rules"] = entries
+	return doc
+}
+
+// ruleEntry 打一条计价规则。
+//
+// 它打的是**原始值**：表格那一档的打法（`生效/停用`、`不过期`、商家栏的
+// `-`）一个都不进来。enabled 是布尔、effective_to 是 null 或时刻、
+// quota_keys 是那一份原始清单而不是 declaredKeysLabel 渲染出来的那句
+// 「（一项都没有）」——表达式编译不过时它是空数组，原因在 expr_error 上。
+func ruleEntry(r pricing.RuleInfo) map[string]any {
+	return map[string]any{
+		"id": r.ID,
+		// 0 表示不挂商家 / 不挂渠道（平台价），库里存的是 NULL。
+		"scope":          r.Scope,
+		"owner_user_id":  jsonID(r.OwnerUserID),
+		"channel_id":     jsonID(r.ChannelID),
+		"name":           r.Name,
+		"model_patterns": jsonList(r.ModelPatterns),
+		"priority":       r.Priority,
+		"enabled":        r.Enabled,
+		"effective_from": jsonTime(r.EffectiveFrom),
+		"effective_to":   jsonTimePtr(r.EffectiveTo),
+		"quota_keys":     jsonList(r.DeclaredKeys),
+		"expr_error":     nullableError(r.ExprErr),
+	}
+}
+
+// ruleVerdict 是 explain 里「裁决」那一栏在 JSON 里的取值。
+//
+// 给英文的两个词而不是表格那一档的「选中 / 被压住」：它是这个字段的取值域，
+// 脚本按它分派（`select(.verdict == "selected")`），而中文渲染属于终端那一档。
+// 语义与 printRuleExplain 的第一行同一条：排第一的就是会被计价的那条。
+func ruleVerdict(index int) string {
+	if index == 0 {
+		return "selected"
+	}
+	return "shadowed"
 }
 
 // printCreatedRule 打印新规则。

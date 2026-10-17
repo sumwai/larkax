@@ -41,6 +41,10 @@ const doctorUsage = `larkaxctl doctor 逐项检查「配好的链路能不能接
   larkaxctl doctor -v
         每项多打一段细节：检查范围、读到的数、表，以及每条问题的完整原文
 
+  larkaxctl doctor --format json
+        打一份机器可读的报告，给探针与管道下游的 jq 用（见 docs/cli-output.md）。
+        它不走 -v：所有细节本来就在里面，问题清单也不截断。
+
 输出默认每项一行：状态符、标题、一句结论。状态符 ✓ 通过、✗ 不通过、
 ! 没跑成、- 没跑（这一项不在本次范围内，例如没开 --live）。最后一行是
 汇总。**细节一条都没删，只是默认不打**：加 -v 就跟着各自那一行缩进打出来。
@@ -241,8 +245,27 @@ func runDoctor(args []string) error {
 		rep = collectDoctorReport(ctx, db, opts)
 	}
 
-	printDoctorReport(os.Stdout, rep, opts.verbose)
-	return rep.exitErr(dbErr)
+	// 退出码先算出来，两条渲染路径共用它：`-o json` 下 doctor 有失败项时
+	// 仍然退出 1（与交互模式一致），而 JSON 里的 exit_code 也是同一个数——
+	// 各算一遍的话，两处迟早分叉，分叉的表现是「报告说 failed、
+	// 脚本读到的退出码是 0」。
+	return emitDoctorReport(os.Stdout, rep, dbErr, opts.verbose)
+}
+
+// emitDoctorReport 把一份报告按选定的格式打出去，并把该用的退出码返回。
+//
+// 单独抽出来的理由与 printDoctorLines 相同，不是复用，是**让用例打到同一条
+// 路径上**：真跑一次 doctor 要连库，而「有失败项时 json 模式仍退出 1」
+// 恰恰是最该被钉住的一条，不能因为造不出一个有失败项的库就不测。
+func emitDoctorReport(w io.Writer, rep doctorReport, dbErr error, verbose bool) error {
+	cause := rep.exitErr(dbErr)
+	if jsonOutput() {
+		// verbose 在这里没有意义：JSON 那份本来就把 -v 才打的细节全带上了。
+		return emitJSON(w, doctorDoc(rep), cause)
+	}
+
+	printDoctorReport(w, rep, verbose)
+	return cause
 }
 
 // parseDoctorOptions 解析并校验参数。
@@ -353,6 +376,22 @@ func (s doctorStatus) label() string {
 		return "不通过"
 	default:
 		return "没跑成"
+	}
+}
+
+// jsonLabel 是这一档在机器可读输出里的取值。
+//
+// 三档各自一个词，与顶层 status 的 ok / failed / skipped 是**两套**词：
+// 顶层说的是整份报告，这里是单项。单项的「通过」是 passed，用 ok 会让
+// 「这一项过了」与「整份报告没问题」在文本上长得一样。
+func (s doctorStatus) jsonLabel() string {
+	switch s {
+	case doctorPassed:
+		return "passed"
+	case doctorFailed:
+		return "failed"
+	default:
+		return "skipped"
 	}
 }
 
@@ -510,9 +549,39 @@ type doctorReport struct {
 	live     doctorLive
 }
 
+// doctorNamedCheck 是一项检查与它**机器可读的名字**。
+//
+// 名字是英文、稳定、与 doctorReport 的字段同名：人在终端上看到的是「模型目录」，
+// 而脚本要按一个不会被翻译、也不会随排版改动的标识去认它。两套名字放在同一条
+// 记录里，是因为它们的**顺序**必须一致——各写一份列表，加一项时只改一处，
+// 另一处就会张冠李戴，而那种错在输出上完全看不出来。
+type doctorNamedCheck struct {
+	name  string
+	check doctorCheck
+}
+
+// namedChecks 按输出顺序给出六项检查，连同它们的机器可读名字。
+func (r doctorReport) namedChecks() []doctorNamedCheck {
+	return []doctorNamedCheck{
+		{"database", r.database},
+		{"channel", r.channel},
+		{"catalog", r.catalog},
+		{"alias", r.alias},
+		{"pricing", r.pricing},
+		{"wallet", r.wallet},
+	}
+}
+
 // checks 按输出顺序给出六项检查。
+//
+// 从 namedChecks 推出来而不是另列一份：顺序只有一处来源（见 doctorNamedCheck）。
 func (r doctorReport) checks() []doctorCheck {
-	return []doctorCheck{r.database, r.channel, r.catalog, r.alias, r.pricing, r.wallet}
+	named := r.namedChecks()
+	out := make([]doctorCheck, 0, len(named))
+	for _, n := range named {
+		out = append(out, n.check)
+	}
+	return out
 }
 
 func (r doctorReport) counts() (passed, failed, skipped int) {
@@ -1749,4 +1818,148 @@ func (l doctorLive) attribution() string {
 		return "上游在限流（网关把它原样透出 429）：等一会儿再试，不是我们这一侧拒的"
 	}
 	return "无法确定是谁拒的：这个状态码不是网关自己会写的失败，看上面的错误说明与响应体"
+}
+
+// ── 机器可读输出 ────────────────────────────────────────────────────────
+//
+// 这一节把同一份报告渲染成 `--format json` 那一档（见 format.go 与
+// docs/cli-output.md）。它与上面 printDoctorReport 那一条路**并列**，共用的
+// 是同一个 doctorReport，所以两条路不可能出现「表格说过了、JSON 说没过」。
+//
+// 与表格那一档的三处刻意的差别：
+//
+//   - **问题不截断**。表格默认只打第一条、其余的折成「另有 N 条」——
+//     那是屏幕宽度的问题。脚本按模型名去筛某一条问题时，截断会让它
+//     「查不到」而不是「有更多」，那是两件完全不同的事。
+//   - **-v 不存在**。表格那边细节要 -v 才打；这里所有字段一直都在，
+//     否则 `-o json` 的调用方还得再记一个 -v。
+//   - **结论那一栏两种都有**。每项既给结论那一句（`conclusion`，与终端上
+//     看到的一字不差），也给结构化的问题清单（`problems`）。前者是「人会
+//     怎么读」，后者是「脚本要筛什么」，从同一份 doctorCheck 推出来。
+
+// jsonStatus 给出整份报告的那一档结论。
+//
+// 判据与退出码**无关**：退出码是进程的契约（连不上库是 3），而这里的
+// status 说的是「这份报告读出什么」。两者不一致时以 exit_code 为准
+// （见 docs/cli-output.md），所以 status 不必去复刻那五个数。
+func (r doctorReport) jsonStatus() string {
+	_, failed, skipped := r.counts()
+	if failed > 0 || (r.live.enabled && !r.live.ok()) {
+		return jsonFailed
+	}
+	if skipped > 0 {
+		return jsonSkipped
+	}
+	return jsonOK
+}
+
+// doctorDoc 把一份体检报告折成机器可读输出。
+//
+// summary 里的 total 是**六项只读检查**，不含真打上游那一次：那一项有自己的
+// 开关（--live），把它算进分母会让「六项都过了」与「六项都过了、上游也通了」
+// 给出不同的 total，而两者的区别在 live 那个对象里。
+func doctorDoc(r doctorReport) map[string]any {
+	passed, failed, skipped := r.counts()
+	doc := jsonDoc(r.jsonStatus())
+	doc["summary"] = map[string]any{
+		"total":   len(r.checks()),
+		"passed":  passed,
+		"failed":  failed,
+		"skipped": skipped,
+	}
+
+	checks := make([]map[string]any, 0, len(r.checks()))
+	for _, named := range r.namedChecks() {
+		checks = append(checks, doctorCheckDoc(named.name, named.check))
+	}
+	doc["checks"] = checks
+	doc["live"] = doctorLiveDoc(r.live)
+	return doc
+}
+
+// doctorCheckDoc 把一项检查折成机器可读的一条。
+func doctorCheckDoc(name string, c doctorCheck) map[string]any {
+	problems := make([]map[string]any, 0, len(c.findings))
+	for _, p := range c.findings {
+		problems = append(problems, map[string]any{
+			"headline": p.headline,
+			"detail":   nullableString(p.detail),
+		})
+	}
+
+	out := map[string]any{
+		"name":       name,
+		"title":      c.title,
+		"status":     c.status().jsonLabel(),
+		"subject":    c.subject,
+		"conclusion": c.conclusion(),
+		"ok":         nullableString(c.ok),
+		"notes":      jsonList(c.notes),
+		"problems":   problems,
+		// skip 与 problems 是两种不同的坏消息，分开两栏：前者是「没查成」，
+		// 后者是「查了，有问题」。合成一栏会让脚本分不出「这项没问题」
+		// 与「这项没查」——而这个项目为这一条单独立过一个状态符（见 style.go）。
+		"skip_reason": nullableString(c.skip),
+		"table":       doctorTableDoc(c.table),
+	}
+	return out
+}
+
+// doctorTableDoc 把某一项的表折成机器可读的形状。
+//
+// 表里的单元格是**已经渲染好的字符串**（列宽、状态符那些都在
+// printXxx 那一层），这里不假装它们是结构化数据：给出表头与行，让读的人
+// 自己按表头对。没有表时是 null 而不是空表——空表会让「这一项本来就没有表」
+// 与「表在、但一行都没有」长得一样。
+func doctorTableDoc(t *doctorTable) any {
+	if t == nil || len(t.rows) == 0 {
+		return nil
+	}
+	rows := make([][]string, 0, len(t.rows))
+	for _, row := range t.rows {
+		rows = append(rows, jsonList(row))
+	}
+	return map[string]any{"header": jsonList(t.header), "rows": rows}
+}
+
+// doctorLiveDoc 把真打上游那一次折成机器可读的一条。
+//
+// 没开 --live 时只给 enabled=false 一个键：其余几栏都没有取值，铺一排 null
+// 会让人以为「跑了，只是没读到」。enabled 为真时所有栏都在（缺的给 null），
+// 因为那时「没有值」本身是有含义的——没有 status_code 就是「一个 HTTP 响应
+// 都没拿到」，与「上游回了 4xx」是两件事。
+func doctorLiveDoc(l doctorLive) map[string]any {
+	if !l.enabled {
+		return map[string]any{"enabled": false, "ok": false}
+	}
+
+	out := map[string]any{
+		"enabled":  true,
+		"ok":       l.ok(),
+		"endpoint": l.endpoint,
+		"url":      l.url,
+		"model":    l.model,
+		// 状态码 0 表示请求根本没拿到 HTTP 响应（发不出去、或读响应体失败），
+		// 这里给 null 而不是 0：0 不是一个 HTTP 状态码，读成「上游回了 0」
+		// 比读成「没拿到」坏得多。
+		"status_code":     nullableInt(l.status),
+		"elapsed_ms":      l.elapsed.Milliseconds(),
+		"response_model":  nullableString(l.respModel),
+		"usage":           nullableString(l.usage),
+		"error":           nullableString(l.errMsg),
+		"error_code":      nullableString(l.errCode),
+		"send_error":      nullableError(l.sendErr),
+		"gateway_version": nullableString(l.version),
+		"retry_after":     nullableString(l.retryAfter),
+		"from_gateway":    l.fromGateway(),
+		"rejected_by_us":  l.rejectedByUs(),
+		// 归因那一句只在失败时给：成功时 attribution 会去打 200 的
+		// 那一串「无法确定是谁拒的」分支，把那句话放进一份通过的报告里
+		// 只会让读的人以为自己漏了什么。
+		"attribution": nil,
+	}
+	if !l.ok() {
+		out["attribution"] = l.attribution()
+	}
+	return out
 }

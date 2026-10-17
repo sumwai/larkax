@@ -84,6 +84,10 @@ func runAlias(args []string) error {
 }
 
 func runAliasAdd(args []string) error {
+	if err := jsonUnsupported("alias add"); err != nil {
+		return err
+	}
+
 	req, err := parseAliasAdd(args)
 	if err != nil {
 		return usageErr(err)
@@ -192,11 +196,18 @@ func runAliasList(args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutput() {
+		return emitJSON(os.Stdout, aliasListDoc(aliases), nil)
+	}
 	printAliasList(os.Stdout, aliases)
 	return nil
 }
 
 func runAliasUpdate(args []string) error {
+	if err := jsonUnsupported("alias update"); err != nil {
+		return err
+	}
+
 	req, err := parseAliasUpdate(args)
 	if err != nil {
 		return usageErr(err)
@@ -272,6 +283,10 @@ func parseAliasUpdate(args []string) (catalog.UpdateAliasRequest, error) {
 }
 
 func runAliasDelete(args []string) error {
+	if err := jsonUnsupported("alias delete"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("alias delete", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, aliasUsage) }
 	id := fs.Int64("id", 0, "要删的别名 ID")
@@ -351,6 +366,9 @@ func runAliasResolve(args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutput() {
+		return emitJSON(os.Stdout, aliasResolveDoc(*canonical, *channelID, upstream), nil)
+	}
 	printResolvedAlias(os.Stdout, os.Stderr, *canonical, *channelID, upstream)
 	return nil
 }
@@ -388,6 +406,44 @@ func printCreatedAlias(stdout, stderr io.Writer, id int64, req catalog.CreateAli
 	_, _ = fmt.Fprintf(stderr, "已加入别名 id=%d：%s 上游名 %s ← 规范名 %s。\n",
 		id, aliasScope(req.ChannelID), req.UpstreamModel, req.CanonicalName)
 	_, _ = fmt.Fprintln(stdout, id)
+}
+
+// aliasListDoc 组装 alias list 的机器可读输出。
+//
+// 与 printAliasList 是同一份数据的另一条渲染路径：那一档把范围打成「平台」
+// 「渠道 3」，这一档给 channel_id 的原始值（null 才是平台级）。
+func aliasListDoc(aliases []catalog.Alias) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["summary"] = map[string]any{"total": len(aliases)}
+
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	entries := make([]map[string]any, 0, len(aliases))
+	for _, a := range aliases {
+		entries = append(entries, map[string]any{
+			"id": a.ID,
+			// null 表示平台级别名（库里 channel_id 为 NULL），不是「渠道 0」。
+			"channel_id":     jsonID(a.ChannelID),
+			"upstream_model": a.UpstreamModel,
+			"canonical_name": a.CanonicalName,
+			"overrides":      jsonObject(a.Overrides),
+		})
+	}
+	doc["aliases"] = entries
+	return doc
+}
+
+// aliasResolveDoc 组装 alias resolve 的机器可读输出。
+//
+// 表格那一档（printResolvedAlias）在 stdout 上只放上游模型名，而这里要把
+// 「问的是谁」一并带上：同一个规范名在渠道级与平台级各有一条时会给出不同的
+// 上游名，只给结果的那份输出事后对不上是哪一次提问（见 resolveScopeLabel）。
+func aliasResolveDoc(canonical string, channelID int64, upstream string) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["canonical"] = canonical
+	// null 表示这次没针对具体渠道（只看平台级那条）。
+	doc["channel_id"] = jsonID(channelID)
+	doc["upstream_model"] = upstream
+	return doc
 }
 
 // printAliasList 打印别名清单。
