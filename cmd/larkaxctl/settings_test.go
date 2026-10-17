@@ -542,3 +542,31 @@ func TestSettingsListJSONKeepsValidationWarningOffStdout(t *testing.T) {
 		t.Fatalf("清单里没有那一行未声明的键：\n%s", stdout)
 	}
 }
+
+// TestSettingsUpdatedAtIsUTCWhateverTheProcessZone 钉住「时刻一律按 UTC 打」。
+//
+// 理由与 apikey 的 TestAPIKeyTimesAreUTCWhateverTheProcessZone 相同：这一列
+// 从库（timestamptz）读回来时带的是会话时区，直接 Format 出来同一行在两台机器
+// 上是两个字符串。fixture 特地在东八区、断言那个瞬间的 UTC 写法，所以把
+// .UTC() 去掉（或换回按 location 打的写法）时这条用例当场变红。
+func TestSettingsUpdatedAtIsUTCWhateverTheProcessZone(t *testing.T) {
+	east8 := time.FixedZone("UTC+8", 8*60*60)
+	at := time.Date(2026, 10, 17, 14, 10, 0, 0, east8) // = 06:10:00Z
+
+	var got struct {
+		Settings []struct {
+			UpdatedAt string `json:"updated_at"`
+		} `json:"settings"`
+	}
+	decodeDoc(t, settingsListDoc([]settings.Entry{{
+		Key: "plugin.enabled", Value: []byte(`false`), UpdatedAt: at,
+	}}), &got)
+
+	if len(got.Settings) != 1 {
+		t.Fatalf("settings 有 %d 条，想要 1", len(got.Settings))
+	}
+	if want := "2026-10-17T06:10:00Z"; got.Settings[0].UpdatedAt != want {
+		t.Errorf("updated_at = %q，想要 %q（同一瞬间的 UTC 写法，与进程时区无关）",
+			got.Settings[0].UpdatedAt, want)
+	}
+}

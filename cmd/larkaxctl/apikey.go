@@ -609,10 +609,3 @@ func formatTimeShort(v *time.Time, empty string) string {
 	}
 	return formatStampShort(*v)
 }
-
-// nullableTime 曾经在这里，把「可空的时刻」打成 RFC3339。
-//
-// 它删掉的原因是**打的是进程时区**：`t.Format(time.RFC3339)` 用 t 自己的
-// location，而库里交回来的时刻带的是会话时区，于是同一行在 TZ=UTC 与
-// TZ=Asia/Shanghai 的机器上是两个字符串。机器读的那一份改成走 format.go 的
-// jsonTimePtr（恒 UTC、完整精度），这一档只剩终端在用，见 formatTime。

@@ -776,3 +776,52 @@ func TestAPIKeyListJSONWithoutResultWritesNothingToStdout(t *testing.T) {
 		t.Errorf("还没有结果时 stdout 应当为空，得到 %q", stdout)
 	}
 }
+
+// TestAPIKeyTimesAreUTCWhateverTheProcessZone 钉住「时刻一律按 UTC 打」。
+//
+// 库里那三列是 timestamptz，驱动交回来的是**带会话时区**的 time.Time：
+// 同一行在 TZ=UTC 与 TZ=Asia/Shanghai 的机器上，`t.Format(time.RFC3339)` 出来的
+// 是两个不同的字符串（`2026-01-02T03:04:05Z` 与 `2026-01-02T11:04:05+08:00`）。
+// 机器读的那一份不能这样——读它的是脚本，而脚本不会去猜写它的机器在哪个时区。
+//
+// fixture 特地构造成东八区：断言的是**同一个瞬间的 UTC 写法**，所以把 .UTC()
+// 去掉（或换回按 location 打的写法）时这条用例当场变红。
+func TestAPIKeyTimesAreUTCWhateverTheProcessZone(t *testing.T) {
+	// 东八区的 11:04:05 就是 UTC 的 03:04:05，同一瞬间。
+	east8 := time.FixedZone("UTC+8", 8*60*60)
+	created := time.Date(2026, 1, 2, 11, 4, 5, 0, east8)
+	expires := time.Date(2027, 6, 7, 16, 9, 10, 0, east8)
+	used := time.Date(2026, 10, 17, 14, 10, 11, 0, east8)
+
+	doc := apiKeyListDoc([]auth.Key{{
+		ID: 3, Username: "user-placeholder", Prefix: "larkax_abcd", Status: "active",
+		CreatedAt: created, ExpiresAt: &expires, LastUsedAt: &used,
+	}})
+
+	var got struct {
+		Keys []struct {
+			CreatedAt  string  `json:"created_at"`
+			ExpiresAt  *string `json:"expires_at"`
+			LastUsedAt *string `json:"last_used_at"`
+		} `json:"keys"`
+	}
+	decodeDoc(t, doc, &got)
+	if len(got.Keys) != 1 {
+		t.Fatalf("keys 有 %d 条，想要 1", len(got.Keys))
+	}
+
+	for _, tc := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"created_at", got.Keys[0].CreatedAt, "2026-01-02T03:04:05Z"},
+		{"expires_at", showPtr(got.Keys[0].ExpiresAt), "2027-06-07T08:09:10Z"},
+		{"last_used_at", showPtr(got.Keys[0].LastUsedAt), "2026-10-17T06:10:11Z"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q，想要 %q（同一瞬间的 UTC 写法，与进程时区无关）",
+				tc.name, tc.got, tc.want)
+		}
+	}
+}
