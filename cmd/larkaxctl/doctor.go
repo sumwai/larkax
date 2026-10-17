@@ -34,7 +34,7 @@ const doctorUsage = `larkaxctl doctor 逐项检查「配好的链路能不能接
   larkaxctl doctor
         只读检查六项，不碰网络
 
-  larkaxctl doctor --live --model <规范名> [--endpoint chat|messages]
+  larkaxctl doctor --live --model <规范名> [--endpoint chat|messages|responses]
                    [--base-url <URL>] (--credential-stdin | --credential-env <变量名>)
         额外真打一次上游
 
@@ -68,7 +68,8 @@ const doctorUsage = `larkaxctl doctor 逐项检查「配好的链路能不能接
 
 --model 是这次请求要用的**规范模型名**（第 3 项建的那个）。--endpoint 选打哪个
 入口：chat 是 POST /v1/chat/completions（Authorization: Bearer），messages 是
-POST /v1/messages（x-api-key）。--base-url 默认 http://127.0.0.1:8080，与主服务
+POST /v1/messages（x-api-key），responses 是 POST /v1/responses
+（Authorization: Bearer）。--base-url 默认 http://127.0.0.1:8080，与主服务
 LARKAX_HTTP_ADDR 的默认值一致；网关不在本机时要显式给。
 
 退出码：0 表示六项都通过（--live 给了的话那一次也成功）、1 表示有问题或某一项
@@ -115,23 +116,33 @@ const doctorPreviewRunes = 160
 // 一句。它也会进账单，虽然只有几个 token。
 const doctorLivePrompt = "hi"
 
-// doctorLiveMaxTokens 是真打上游时这次请求的 max_tokens，两个入口共用。
+// doctorLiveInstructions 是 responses 入口顶层的 instructions。
+//
+// Responses 协议把 system 放在顶层的 instructions 里，而不是 messages 里的
+// 一条。这里放一句最短的说明：这条命令要的是「上游收下了、回了一个正常响应」，
+// 不是一段好回答。
+const doctorLiveInstructions = "Reply briefly."
+
+// doctorLiveMaxTokens 是真打上游时这次请求的 max_tokens，三个入口共用。
 //
 // 网关按它算预留上界（见 pipeline.Request.validate 与 billing.ErrNoUpperBound），
-// 所以两个入口都必须带；给得小是为了让这次调用的花费有个上界。
+// 所以三个入口都必须带；给得小是为了让这次调用的花费有个上界。
 const doctorLiveMaxTokens = 16
 
-// 真打上游的两个入口。
+// 真打上游的三个入口。
 //
-// 路径与 internal/api 的 PathChatCompletions / PathMessages 是同一个值，
-// doctor_test.go 里有用例钉住这一点。本包不 import internal/api：那会把整个
-// 入口层（含 gateway）拖进运维命令的二进制里，而这里要的只是两个字符串。
+// 路径与 internal/api 的 PathChatCompletions / PathMessages / PathResponses
+// 是同一个值，doctor_test.go 里有用例钉住这一点。本包不 import internal/api：
+// 那会把整个入口层（含 gateway）拖进运维命令的二进制里，而这里要的只是几个
+// 字符串。
 const (
-	doctorEndpointChat     = "chat"
-	doctorEndpointMessages = "messages"
+	doctorEndpointChat      = "chat"
+	doctorEndpointMessages  = "messages"
+	doctorEndpointResponses = "responses"
 
-	doctorPathChat     = "/v1/chat/completions"
-	doctorPathMessages = "/v1/messages"
+	doctorPathChat      = "/v1/chat/completions"
+	doctorPathMessages  = "/v1/messages"
+	doctorPathResponses = "/v1/responses"
 )
 
 // doctorDefaultBaseURL 与主服务 LARKAX_HTTP_ADDR 的默认值一致。
@@ -212,7 +223,7 @@ func parseDoctorOptions(args []string) (doctorOptions, error) {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, doctorUsage) }
 	live := fs.Bool("live", false, "真打一次上游（会花钱、要凭证）")
 	model := fs.String("model", "", "真打上游时用的规范模型名")
-	endpoint := fs.String("endpoint", doctorEndpointChat, "真打上游打哪个入口：chat 或 messages")
+	endpoint := fs.String("endpoint", doctorEndpointChat, "真打上游打哪个入口：chat、messages 或 responses")
 	baseURL := fs.String("base-url", doctorDefaultBaseURL, "网关公共入口的地址")
 	credentialStdin := fs.Bool("credential-stdin", false, "从标准输入读 API Key")
 	credentialEnv := fs.String("credential-env", "", "从指定环境变量读 API Key")
@@ -1067,10 +1078,26 @@ func lookupDoctorEndpoint(name string) (doctorEndpointSpec, error) {
 			},
 			setAuth: func(h http.Header, key string) { h.Set("x-api-key", key) },
 		}, nil
+
+	case doctorEndpointResponses:
+		return doctorEndpointSpec{
+			name: doctorEndpointResponses,
+			path: doctorPathResponses,
+			payload: func(model string) any {
+				return doctorResponsesRequest{
+					Model:           model,
+					Instructions:    doctorLiveInstructions,
+					Input:           []doctorResponsesInput{{Role: "user", Content: doctorLivePrompt}},
+					MaxOutputTokens: doctorLiveMaxTokens,
+				}
+			},
+			// Responses 是 OpenAI 那一套，凭证按它的习惯走 Bearer。
+			setAuth: func(h http.Header, key string) { h.Set("Authorization", "Bearer "+key) },
+		}, nil
 	}
 
-	return doctorEndpointSpec{}, fmt.Errorf("--endpoint 只能是 %s 或 %s，当前为 %q",
-		doctorEndpointChat, doctorEndpointMessages, name)
+	return doctorEndpointSpec{}, fmt.Errorf("--endpoint 只能是 %s、%s 或 %s，当前为 %q",
+		doctorEndpointChat, doctorEndpointMessages, doctorEndpointResponses, name)
 }
 
 // doctorChatRequest 是 chat 入口的请求体（OpenAI 形状）。
@@ -1101,7 +1128,36 @@ type doctorChatMessage struct {
 	Content string `json:"content"`
 }
 
-// doctorLiveResponse 是两个入口的响应体里 doctor 要看的那几栏。
+// doctorResponsesRequest 是 responses 入口的请求体（OpenAI Responses 形状）。
+//
+// 它与另外两条差得远，不能照 chat 的 messages[] 凑：
+//
+//   - system 是顶层的 instructions，不是一条 system 消息；
+//   - 输入放在 input[] 里，这里放一条 message item；
+//   - 输出上界叫 max_output_tokens。
+//
+// max_output_tokens 同样是必填——协议里它是可选的，但 larkax 的网关按它算
+// 预留上界（见 pipeline.Request.validate 与 billing.ErrNoUpperBound），缺了
+// 会在请求出网关之前就 400。relaykit 把它落在 MaxCompletionTokens 上，
+// 所以这个字段名不能写成 max_tokens（见 internal/relay 的 FromRelaykitRequest）。
+type doctorResponsesRequest struct {
+	Model           string                 `json:"model"`
+	Instructions    string                 `json:"instructions"`
+	Input           []doctorResponsesInput `json:"input"`
+	MaxOutputTokens int                    `json:"max_output_tokens"`
+}
+
+// doctorResponsesInput 是 input[] 里的一条 message item。
+//
+// content 用字符串形态：Responses 也接受 [{"type":"input_text","text":…}]，
+// 但一条纯文本消息用字符串更短，且 relaykit 的两条形状都认（见 internal/relay
+// 的 TestParseResponsesRequestInputItems）。
+type doctorResponsesInput struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// doctorLiveResponse 是三个入口的响应体里 doctor 要看的那几栏。
 //
 // 两套协议的用量字段名不同（prompt/completion 与 input/output），所以两组
 // 都收着，由 usageLabel 挑一组打得出来的。
