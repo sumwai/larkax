@@ -20,6 +20,7 @@ import (
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channel/anthropicadapter"
 	"github.com/sumwai/larkax/internal/channel/openaiadapter"
+	"github.com/sumwai/larkax/internal/channel/responsesadapter"
 )
 
 // Executor 按渠道类型把请求分发给对应的适配器。
@@ -52,6 +53,7 @@ func New(timeout time.Duration) (*Executor, error) {
 	return newWith(
 		openaiadapter.New(timeout),
 		anthropicadapter.New(timeout),
+		responsesadapter.New(timeout),
 	)
 }
 

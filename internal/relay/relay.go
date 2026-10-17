@@ -33,7 +33,7 @@ import (
 
 // Format 是 relaykit 对协议族的称呼，本包把它映射成本项目的 Protocol。
 //
-// 只映射本项目真正支持的两套。relaykit 还认 Gemini、Responses、Realtime 等，
+// 只映射本项目真正支持的那几套。relaykit 还认 Gemini、Realtime 等，
 // 那些等接进来时再补——提前为没有适配器的协议写映射，只会让「以为支持了」
 // 这件事更容易发生。
 func formatFor(p channel.Protocol) (types.RelayFormat, error) {
@@ -42,8 +42,10 @@ func formatFor(p channel.Protocol) (types.RelayFormat, error) {
 		return types.RelayFormatOpenAI, nil
 	case channel.ProtocolAnthropic:
 		return types.RelayFormatClaude, nil
+	case channel.ProtocolOpenAIResponses:
+		return types.RelayFormatOpenAIResponses, nil
 	default:
-		// 只认这两套。在这里猜一个格式会掩盖「调用方给的路径与本项目的
+		// 只认这几套。在这里猜一个格式会掩盖「调用方给的路径与本项目的
 		// 协议不匹配」，而那是一个必须报出来的错误。
 		return "", fmt.Errorf("协议 %q 没有对应的 relaykit 格式", p)
 	}
@@ -472,6 +474,31 @@ func ToRelaykitClaude(ctx context.Context, req *dto.GeneralOpenAIRequest) (*dto.
 		return nil, fmt.Errorf("转换为 Anthropic 请求失败: %w", err)
 	}
 	out, ok := res.Value.(*dto.ClaudeRequest)
+	if !ok {
+		return nil, fmt.Errorf("转换后得到意外类型 %T", res.Value)
+	}
+	return out, nil
+}
+
+// ToRelaykitResponses 把统一请求转成 relaykit 的 OpenAI Responses 请求。
+//
+// 路径与 ToRelaykitClaude 同源：「本项目 → OpenAI Chat → Responses」。
+// relaykit 的转换矩阵以 OpenAI Chat 为枢纽，两边都能到，而直接写
+// 「本项目 → Responses」会让枢纽这一层已经处理过的差异（instructions 是
+// 顶层字段而不是一条消息、max_tokens 叫 max_output_tokens、工具声明的
+// 形状不同）在这里重做一遍。
+//
+// 与 Claude 那一条的差别：Responses 的 max_output_tokens 是**可选**的，
+// 缺了走上游默认值，所以这里不像 ToRelaykitClaude 那样补一个默认值。
+func ToRelaykitResponses(ctx context.Context, req *dto.GeneralOpenAIRequest) (*dto.OpenAIResponsesRequest, error) {
+	if req == nil {
+		return nil, fmt.Errorf("请求为 nil")
+	}
+	res, err := relayconvert.ConvertRequest(ctx, nil, types.RelayFormatOpenAIResponses, *req)
+	if err != nil {
+		return nil, fmt.Errorf("转换为 OpenAI Responses 请求失败: %w", err)
+	}
+	out, ok := res.Value.(*dto.OpenAIResponsesRequest)
 	if !ok {
 		return nil, fmt.Errorf("转换后得到意外类型 %T", res.Value)
 	}

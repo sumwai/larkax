@@ -32,13 +32,13 @@ func newExecutor(t *testing.T) *Executor {
 	return e
 }
 
-// 两个适配器都要真的被注册上。这条是这次改动的核心：它们此前从未被构造过，
+// 内置适配器都要真的被注册上。这条是这次改动的核心：它们此前从未被构造过，
 // 而「没注册上」在运行期的表现是每个请求都报未知渠道类型。
-func TestNewRegistersBothAdapters(t *testing.T) {
+func TestNewRegistersBuiltinAdapters(t *testing.T) {
 	e := newExecutor(t)
 	got := strings.Join(e.Types(), ",")
-	if got != "anthropic,openai" {
-		t.Errorf("已注册类型 = %q，期望 anthropic,openai", got)
+	if got != "anthropic,openai,openai-responses" {
+		t.Errorf("已注册类型 = %q，期望 anthropic,openai,openai-responses", got)
 	}
 }
 
