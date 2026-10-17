@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -230,6 +231,94 @@ func TestOverflowClampsNotWraps(t *testing.T) {
 	got = small.Add(small)
 	if got.IsPositive() {
 		t.Errorf("负向溢出不该回绕成正数: %s", got.String())
+	}
+}
+
+// MinInt64 也要拼出合法的十进制串。
+//
+// `units = -units` 在 MinInt64 上会回绕成自己（-MinInt64 == MinInt64），
+// 于是整数与小数部分各带一个负号，拼出 "--92233720368.-54775808"，
+// 送进 SQL 是 22P02: invalid input syntax for type numeric。
+func TestStringOfMinInt64(t *testing.T) {
+	got := Amount{units: math.MinInt64}.String()
+	if want := "-92233720368.54775808"; got != want {
+		t.Fatalf("String() = %q，期望 %q", got, want)
+	}
+
+	// 形状：整个串只有一个负号且在开头，小数恰好 Scale 位。
+	if strings.Count(got, "-") != 1 || got[0] != '-' {
+		t.Fatalf("String() = %q，负号应只有开头一处", got)
+	}
+	wholeStr, fracStr, found := strings.Cut(got[1:], ".")
+	if !found || len(fracStr) != Scale {
+		t.Fatalf("String() = %q，应恰有一个小数点且小数 %d 位", got, Scale)
+	}
+	whole, err := strconv.ParseUint(wholeStr, 10, 64)
+	if err != nil {
+		t.Fatalf("整数部分 %q 不是无符号十进制: %v", wholeStr, err)
+	}
+	frac, err := strconv.ParseUint(fracStr, 10, 64)
+	if err != nil {
+		t.Fatalf("小数部分 %q 不是无符号十进制: %v", fracStr, err)
+	}
+	// 拼回去的幅值必须恰好是 2^63，即 |MinInt64|。
+	if magnitude := whole*uint64(unit) + frac; magnitude != uint64(1)<<63 {
+		t.Fatalf("解析回的最小单位数是 %d，期望 %d", magnitude, uint64(1)<<63)
+	}
+
+	// 已知边界：Parse 读不回这一串。它按「整数部分 × unit + 小数部分」累加，
+	// 幅值 2^63 已越过 MaxInt64，于是报 ErrOverflow。这是 Parse 的输入范围问题，
+	// 与 String 的兜底是两件事——这里把它钉住，将来有人扩 Parse 的范围时这条会说话。
+	if _, err := Parse(got); !errors.Is(err, ErrOverflow) {
+		t.Fatalf("Parse(%q) 应报 ErrOverflow，得到 %v", got, err)
+	}
+}
+
+// MinInt64 由加法产生，不由字面量产生：SumChecked 是它的真实来路。
+func TestSumCheckedToMinInt64String(t *testing.T) {
+	got, ok := SumChecked(Amount{units: -math.MaxInt64}, Amount{units: -1})
+	if !ok {
+		t.Fatal("-MaxInt64 加 -1 放得下 int64，不该报溢出")
+	}
+	if got.Units() != math.MinInt64 {
+		t.Fatalf("和 = %d，期望 %d", got.Units(), int64(math.MinInt64))
+	}
+	if s := got.String(); s != "-92233720368.54775808" {
+		t.Fatalf("String() = %q，期望 -92233720368.54775808", s)
+	}
+}
+
+// String 与 Parse 在其余边界上的往返不变。
+//
+// 上面两处改的是最小值的兜底，这一条确认兜底之外的值一个都没动。
+func TestStringParseRoundTripBoundaries(t *testing.T) {
+	cases := []struct {
+		name  string
+		units int64
+		want  string
+	}{
+		{"零", 0, "0.00000000"},
+		{"一", int64(unit), "1.00000000"},
+		{"普通正数", 12345678901, "123.45678901"},
+		{"普通负数", -12345678901, "-123.45678901"},
+		{"MaxInt64", math.MaxInt64, "92233720368.54775807"},
+		{"-MaxInt64", -math.MaxInt64, "-92233720368.54775807"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := Amount{units: tc.units}
+			s := a.String()
+			if s != tc.want {
+				t.Fatalf("String() = %q，期望 %q", s, tc.want)
+			}
+			back, err := Parse(s)
+			if err != nil {
+				t.Fatalf("Parse(%q) 出错: %v", s, err)
+			}
+			if back.Units() != tc.units {
+				t.Fatalf("Parse(%q).Units() = %d，期望 %d", s, back.Units(), tc.units)
+			}
+		})
 	}
 }
 

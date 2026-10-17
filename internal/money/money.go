@@ -177,12 +177,16 @@ func MustParse(s string) Amount {
 func (a Amount) String() string {
 	units := a.units
 	sign := ""
+	// 幅值走无符号：units = -units 在 MinInt64 上会回绕成自己
+	// （-MinInt64 == MinInt64），于是整数与小数部分各带一个负号，
+	// 拼出 "--92233720368.-54775808"。uint64 取负对 2^63 给出的仍是 2^63。
+	magnitude := uint64(units)
 	if units < 0 {
 		sign = "-"
-		units = -units
+		magnitude = -magnitude
 	}
-	whole := units / unit
-	frac := units % unit
+	whole := magnitude / uint64(unit)
+	frac := magnitude % uint64(unit)
 	return fmt.Sprintf("%s%d.%0*d", sign, whole, Scale, frac)
 }
 
