@@ -2,6 +2,7 @@ package billing
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/sumwai/larkax/internal/channel"
@@ -179,6 +180,81 @@ func TestValidateIgnoresUnusedTokenSlots(t *testing.T) {
 	p := Prices{Declared: map[string]bool{}}
 	if err := Validate(Usage{}, p); err != nil {
 		t.Errorf("零用量不该要求任何单价: %v", err)
+	}
+}
+
+// TestTokenSlotsPinFieldMapping 逐个钉住槽位与 Usage/Prices 字段的对应关系。
+//
+// TokenSlots 是 Validate 与 internal/billing/expr 共同的事实来源。表里写错
+// 一行不会编译失败——把 cache_write 的计数函数写成 CacheReadTokens，两边都
+// 还能跑，只是缓存写从此按缓存读判负、判「有没有写单价」。所以每一项都用
+// **各不相同的值**钉一遍：读错、写错、读和写错到同一处，都会让某一行挂。
+func TestTokenSlotsPinFieldMapping(t *testing.T) {
+	usage := Usage{
+		PromptTokens:     11,
+		CompletionTokens: 22,
+		CacheReadTokens:  33,
+		CacheWriteTokens: 44,
+		ReasoningTokens:  55,
+	}
+	wantCount := map[string]int64{
+		"prompt": 11, "completion": 22, "cache_read": 33,
+		"cache_write": 44, "reasoning": 55,
+	}
+	if len(TokenSlots) != len(wantCount) {
+		t.Fatalf("槽位数 = %d，期望 %d；加槽位时下面这张表也要一起更新", len(TokenSlots), len(wantCount))
+	}
+
+	seen := make(map[string]bool, len(TokenSlots))
+	for i, slot := range TokenSlots {
+		want, ok := wantCount[slot.Name]
+		if !ok {
+			t.Fatalf("未知的槽位名 %q", slot.Name)
+		}
+		seen[slot.Name] = true
+		if got := slot.Count(usage); got != want {
+			t.Errorf("%s 的计数 = %d，期望 %d", slot.Name, got, want)
+		}
+
+		// 每个槽位给不同的单价，写进去再读回来：写错字段、读错字段都会挂。
+		price := money.MustParse(fmt.Sprintf("0.%08d", i+1))
+		var p Prices
+		slot.SetPrice(&p, price)
+		if got := slot.Price(p); got.Cmp(price) != 0 {
+			t.Errorf("%s 的单价写回 = %s，期望 %s", slot.Name, got, price)
+		}
+	}
+	if len(seen) != len(TokenSlots) {
+		t.Errorf("槽位名有重复: %d 个名字，%d 条清单", len(seen), len(TokenSlots))
+	}
+}
+
+// TestEveryTokenSlotIsCharged 逐槽确认「清单里有的，算术里也真的算了」。
+//
+// 它防的是另一种漏改：TokenSlots 加了一项、Prices 也写进去了，而
+// ComputeWithCharges 里少了一行乘法。那样 Validate 照样通过、单价也照样
+// 出现在求值结果里，只是这一项永远收不到钱。逐槽单独造一份用量，
+// 金额对不上就会挂。
+func TestEveryTokenSlotIsCharged(t *testing.T) {
+	for _, slot := range TokenSlots {
+		var usage Usage
+		slot.SetCount(&usage, 1000)
+
+		var p Prices
+		price := money.MustParse("0.000001")
+		slot.SetPrice(&p, price)
+		p.Declared = map[string]bool{slot.Name: true}
+
+		if err := Validate(usage, p); err != nil {
+			t.Errorf("%s: %v", slot.Name, err)
+		}
+
+		b := ComputeWithCharges(usage, p, Charges{})
+		want := money.MustParse("0.001")
+		if b.Total.Cmp(want) != 0 {
+			t.Errorf("%s 的金额 = %s，期望 %s（槽位进了清单却没进 ComputeWithCharges？）",
+				slot.Name, b.Total, want)
+		}
 	}
 }
 

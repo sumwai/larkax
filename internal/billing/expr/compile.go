@@ -129,6 +129,10 @@ func Compile(source string) (*Program, error) {
 
 // CompileWithGlobals 与 Compile 相同，但声明了可注入的常量及其类型。
 //
+// **目前没有生产入口：只有本包的测试在调它。** 生产走 pipeline →
+// Cache.Get → Compile，不声明任何注入常量；要用这条路，先回答
+// Env.Globals 注释里列的三个问题。
+//
 // globals 的**值**不重要，只有键与类型进编译期环境：求值时注入的常量
 // 必须与这里声明的名字和类型一致，否则规则在编译期就该被拒绝——
 // 一个 `library == "arxiv"` 的规则配上一个整数 library 会安静地永远为假，
@@ -862,6 +866,9 @@ func (c *Cache) Get(key, source string) (*Program, error) {
 }
 
 // GetWithGlobals 与 Get 相同，但用 CompileWithGlobals 编译。
+//
+// **目前没有生产入口：只有本包的测试在调它。** 与 CompileWithGlobals 同样，
+// 接线前先回答 Env.Globals 注释里列的问题。
 //
 // 键里必须体现 globals 的名字与类型：同一个 (ruleID, version) 配上不同的
 // globals 声明是不同的编译产物，而它们调用的校验规则也不同。

@@ -10,9 +10,14 @@ import (
 
 // worstUsage 是一批真实用量的样本。
 //
-// 覆盖各种形状：空请求、短上下文、长上下文、缓存命中、有计量项、
+// 覆盖各种形状：空请求、短上下文、长上下文、缓存命中、缓存写入、有计量项、
 // 只读不写、只写不读。最坏情况的验证要在**每一条**上都成立，
 // 而不是在挑出来的那几条上成立。
+//
+// 缓存写必须有样本：生产走 pipeline.boundOf，那里把 CacheWriteTokens
+// 一并传给 billing.Reserve。夹具不传的话，这条测试测的是「没有缓存写时
+// 上界够不够」，而缓存写正是单价最高的一项——它漏掉的那一侧恰是最容易
+// 撞 Capped 的一侧（见 LESSONS 第 19 条）。
 var worstUsage = []billing.Usage{
 	{},
 	{PromptTokens: 1},
@@ -24,6 +29,7 @@ var worstUsage = []billing.Usage{
 	{PromptTokens: 1_000_000},
 	{PromptTokens: 50_000, CacheReadTokens: 250_000},
 	{CacheReadTokens: 10_000},
+	{PromptTokens: 1000, CacheWriteTokens: 5000},
 	{PromptTokens: 100, ReasoningTokens: 20_000},
 	// 计量项的数量都取 1。数量大于 1 时预留本来就不够：
 	// billing.Reserve 对非 token 计量只留**一份**的量（请求前数量未知，
@@ -74,6 +80,10 @@ func settle(t *testing.T, p *Program, env Env, maxTokens int64) {
 		MaxTokens:       maxTokens,
 		InputTokens:     probe.Usage.PromptTokens,
 		CacheReadTokens: probe.Usage.CacheReadTokens,
+		// 生产传了它（internal/pipeline/pipeline.go 的 boundOf）。探针少传一项，
+		// 预留就少算一份缓存写的钱，而结算照收——于是这条测试会在缓存写
+		// 单价高于输入时撞 Capped，看起来像「上界算法错了」，实际是夹具漏了。
+		CacheWriteTokens: probe.Usage.CacheWriteTokens,
 	})
 	if err != nil {
 		t.Fatalf("预留失败: %v", err)
@@ -123,6 +133,14 @@ func TestWorstCaseCoversActual(t *testing.T) {
 			len <= 32000
 				? {"prompt": 0.0000015, "completion": 0.0000075, "cache_read": 0.0000002, "cache_write": 0.0000019, "reasoning": 0.0000090}
 				: {"prompt": 0.0000030, "completion": 0.0000113, "cache_read": 0.0000003, "cache_write": 0.0000038, "reasoning": 0.0000135}`,
+
+		// 缓存写**低于**输入单价的那一侧。billing.Reserve 的输入侧取
+		// max(prompt, cache_read, cache_write)，只配「缓存写更贵」的规则
+		// 会把 max 的另一条路径永远遮住——那种配置下选错也是对的。
+		"缓存写比输入便宜": `
+			len <= 32000
+				? {"prompt": 0.0000019, "completion": 0.0000075, "cache_read": 0.0000002, "cache_write": 0.0000005}
+				: {"prompt": 0.0000038, "completion": 0.0000113, "cache_read": 0.0000003, "cache_write": 0.0000010}`,
 
 		"计量项在某一支才有": `
 			units["img"] > 0
