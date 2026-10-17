@@ -82,7 +82,9 @@ func quotaObservedNoValue() quota.State {
 }
 
 func seededRouter(seed int64) *Router {
-	return &Router{Rand: rand.New(rand.NewSource(seed))}
+	// 别名来源按同名回落：这些用例关心的是选路与重试，不是翻译。
+	// 翻译本身由 alias_test.go 里的用例钉住。
+	return &Router{Rand: rand.New(rand.NewSource(seed)), Aliases: identityAliases{}}
 }
 
 func TestSelectFiltersByModel(t *testing.T) {
@@ -310,14 +312,20 @@ type fakeExecutor struct {
 	calls   []int64
 	results map[int64]error
 	resp    *channel.Response
+	// sent 记下**实际发出去的那一份请求**（含 model）。
+	//
+	// 记它而不是只看入参：规范名到上游名的翻译就发生在调用之前，而
+	// 「发出去的是什么」只有这里看得到（见 alias_test.go）。
+	sent []channel.Request
 	// unknownTypes 模拟执行器按 Type 分派适配器：命中的类型返回
 	// channel.ErrUnknownType，与 internal/upstream 的包装方式一致。
 	// 它让「库里有一条当前二进制不认识的渠道」这件事在路由层可被复现。
 	unknownTypes map[string]bool
 }
 
-func (f *fakeExecutor) Chat(_ context.Context, ch channel.Channel, _ *channel.Request) (*channel.Response, error) {
+func (f *fakeExecutor) Chat(_ context.Context, ch channel.Channel, req *channel.Request) (*channel.Response, error) {
 	f.calls = append(f.calls, ch.ID)
+	f.sent = append(f.sent, *req)
 	if err, ok := f.results[ch.ID]; ok && err != nil {
 		return nil, err
 	}
@@ -513,7 +521,8 @@ func TestAttemptsRecordTiming(t *testing.T) {
 	now := time.Unix(0, 0)
 	exec := &fakeExecutor{results: map[int64]error{}, resp: &channel.Response{}}
 	r := &Router{
-		Rand: rand.New(rand.NewSource(1)),
+		Rand:    rand.New(rand.NewSource(1)),
+		Aliases: identityAliases{},
 		Now: func() time.Time {
 			now = now.Add(50 * time.Millisecond)
 			return now
@@ -558,12 +567,15 @@ type fakeStreamExecutor struct {
 	calls   []int64
 	results map[int64]error
 	events  []channel.StreamEvent
+	// sent 见 fakeExecutor.sent。
+	sent []channel.Request
 	// 见 fakeExecutor.unknownTypes。
 	unknownTypes map[string]bool
 }
 
-func (f *fakeStreamExecutor) ChatStream(_ context.Context, ch channel.Channel, _ *channel.Request) (<-chan channel.StreamEvent, error) {
+func (f *fakeStreamExecutor) ChatStream(_ context.Context, ch channel.Channel, req *channel.Request) (<-chan channel.StreamEvent, error) {
 	f.calls = append(f.calls, ch.ID)
+	f.sent = append(f.sent, *req)
 	if err, ok := f.results[ch.ID]; ok && err != nil {
 		return nil, err
 	}

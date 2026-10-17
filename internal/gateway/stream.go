@@ -87,9 +87,10 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 
 	out := make(chan channel.StreamEvent)
 	res := &Result{
-		Events:   out,
-		Channel:  routed.Channel,
-		Attempts: routed.Attempts,
+		Events:        out,
+		Channel:       routed.Channel,
+		UpstreamModel: routed.UpstreamModel,
+		Attempts:      routed.Attempts,
 	}
 	go g.pumpStream(ctx, h, res, out, routed.Events, upstream, hooks)
 	return res, nil
@@ -475,7 +476,7 @@ func streamAttempts(r *route.StreamResult) []route.Attempt {
 
 // billStream 结算一次要计费的流式请求。
 func (g *Gateway) billStream(ctx context.Context, h *handle, res *Result, usage channel.Usage, source tokens.Source, canceled bool) {
-	charge, err := g.finishCharge(ctx, h, res.Channel, pipeline.Outcome{
+	charge, err := g.finishCharge(ctx, h, res.Channel, res.UpstreamModel, pipeline.Outcome{
 		Usage:       usage,
 		UsageSource: source,
 		// ClientCanceled 只描述「客户端中途断开」这一种结局，别拿它当

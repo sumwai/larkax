@@ -407,19 +407,81 @@ func TestAliasResolvePrefersChannelScope(t *testing.T) {
 	}
 }
 
-// TestAliasResolveMissing 钉住「一条都没配上」的退出码。
+// TestAliasResolveNotConfiguredFallsBackToCanonical 钉住「一条都没配上」这一档。
 //
-// 它与「查询失败」分开：没有别名是**配置缺失**，下一步是去配一条；
-// 查询失败是数据库的问题。两者都退化成一个笼统的错误时，脚本没法分派处置。
-func TestAliasResolveMissing(t *testing.T) {
+// 别名表表达的是「哪些模型的上游叫法与规范名不同」，一条都没配过的模型不在
+// 这个集合里——选路时原样发出，所以 resolve 也应当原样报出规范名。
+//
+// 这一档**不报错**，是因为报错就是在向使用者描述一条与请求热路径不同的规则：
+// 两边各有一套判据时，漂移的表现是「工具说会报错，而线上照常发出去了」。
+func TestAliasResolveNotConfiguredFallsBackToCanonical(t *testing.T) {
 	testDB(t)
 	setupEnv(t)
 
-	err := runCaptured(t, func() error {
-		return runAliasResolve([]string{"--canonical", uniqueName("model")})
+	canonical := uniqueName("model")
+	var err error
+	stdout, _ := captureStreams(t, func() {
+		err = runAliasResolve([]string{"--canonical", canonical})
+	})
+	if err != nil {
+		t.Fatalf("一条别名都没配时应当原样返回规范名，得到 %v", err)
+	}
+	if got := strings.TrimSpace(stdout); got != canonical {
+		t.Errorf("stdout = %q，期望规范名 %q", got, canonical)
+	}
+	// 恰好一行：那一行是要被直接接走的值。
+	if strings.Count(stdout, "\n") != 1 {
+		t.Errorf("stdout 应当恰好一行，得到 %q", stdout)
+	}
+}
+
+// TestAliasResolveMissingForThisChannel 钉住「配了一半」这一档的退出码。
+//
+// 它与「一条都没配」分开：别名是**逐渠道**配的，某个渠道漏了的时候静默回落成
+// 规范名，会让它表现为「上游说这个模型不存在」——排查方向指向对方。所以这一档
+// 报 ErrAliasNotFound，退出码走「配置缺失」那一档。
+//
+// 它与「查询失败」也分开：配置缺失的下一步是去配一条，查询失败是数据库的问题。
+// 两者都退化成一个笼统的错误时，脚本没法分派处置。
+func TestAliasResolveMissingForThisChannel(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	canonical := uniqueName("model")
+	_, _ = captureStreams(t, func() {
+		if err := runModelAdd([]string{"--canonical", canonical, "--display", "展示名"}); err != nil {
+			t.Fatalf("model add 失败: %v", err)
+		}
+	})
+	withStdin(t, testSecret)
+	channelOut, _ := captureStreams(t, func() {
+		if err := runChannelCreate([]string{
+			"--name", uniqueName("channel"), "--type", testChanType,
+			"--base-url", testBaseURL, "--models", canonical, "--credential-stdin",
+		}); err != nil {
+			t.Fatalf("channel create 失败: %v", err)
+		}
+	})
+	channelID, err := strconv.ParseInt(strings.TrimSpace(channelOut), 10, 64)
+	if err != nil {
+		t.Fatalf("stdout 不是渠道 ID：%q（%v）", channelOut, err)
+	}
+	// 别名只配在这一个渠道上：别的渠道查它时命中不了，但这个规范名确实配过。
+	_, _ = captureStreams(t, func() {
+		if addErr := runAliasAdd([]string{
+			"--canonical", canonical, "--upstream", uniqueName("upstream"),
+			"--channel", strconv.FormatInt(channelID, 10),
+		}); addErr != nil {
+			t.Fatalf("渠道级别名 add 失败: %v", addErr)
+		}
+	})
+
+	// 不指定渠道 = 只看平台级那条，而平台级没有这一条。
+	err = runCaptured(t, func() error {
+		return runAliasResolve([]string{"--canonical", canonical})
 	})
 	if err == nil {
-		t.Fatal("没有别名的规范名应当报错")
+		t.Fatal("配过别名、却没有一条覆盖这个渠道时应当报错")
 	}
 	if !errors.Is(err, catalog.ErrAliasNotFound) {
 		t.Errorf("期望 catalog.ErrAliasNotFound，得到 %v", err)

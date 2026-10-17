@@ -217,6 +217,28 @@ func checkPricedAt(at time.Time) error {
 	return nil
 }
 
+// ErrMissingUpstreamModel 表示这次结算没有带上「实际发出去的上游模型名」。
+//
+// 与 ErrMissingProtocol / ErrMissingAPIKey 同一个形状，理由要多一层：
+// billing_requests.upstream_model 从建表那天起**每一行都是 NULL**（别名
+// 从来没有读取方，见 #338），于是「漏设」与「历史行」在库里长得完全一样。
+// 写进去的那一刻是这两者唯一还分得清的地方。
+//
+// 生产路径不会撞上它：网关在选路之后把 route.Result.UpstreamModel 填进
+// pipeline.Request（见 internal/gateway 的 finishCharge），而结算必然发生在
+// 一次成功的选路之后。它挡的是手工构造请求的调用方与测试夹具——那种行
+// 回答不了「这次实际用了哪个上游名」，而那一列正是为此存在的。
+var ErrMissingUpstreamModel = errors.New(
+	"缺少上游模型名：调用方没有设置 pipeline.Request.UpstreamModel（它由网关在选路之后填）")
+
+// checkUpstreamModel 检查这次结算有没有带上实际发出去的上游模型名。
+func checkUpstreamModel(model string) error {
+	if model == "" {
+		return ErrMissingUpstreamModel
+	}
+	return nil
+}
+
 // SaveReservation 落一条预留记录并冻住金额。
 //
 // 它做三件事，在**同一个事务**里：
@@ -430,6 +452,10 @@ func (s *Store) Save(ctx context.Context, req pipeline.Request, charge *pipeline
 	if err := checkPricedAt(charge.PricedAt); err != nil {
 		return err
 	}
+	// 同一位置、同一个理由：漏了上游模型名时也不该留下任何副作用。
+	if err := checkUpstreamModel(req.UpstreamModel); err != nil {
+		return err
+	}
 	// 用量事件按月分区，而分区不会自己长出来——没有这一步，种子覆盖的月份
 	// 过完之后每一行都落进兜底分区，静默地。位置在 BeginTx **之前**，
 	// 理由见 ensureUsageEventPartition 的注释。
@@ -611,6 +637,14 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request) error {
 // 两列写在同一条 UPDATE 里，不另起一条：分开写会有一个窗口让这一行
 // status 已经是 settled 而 computed_amount 还是 NULL，而那个组合在库里
 // 读起来正是「结算了但没有计算金额」——一个不存在却看得见的状态。
+//
+// # 上游模型名与渠道同一个位置落
+//
+// upstream_model 与 channel_id 说的是同一件事的两面：这次请求**实际发去了
+// 哪里、用哪个名字**。两者都只有在选路之后才答得出来，所以都在这条 UPDATE
+// 里写（见 pipeline.Request.UpstreamModel）。写成 NULLIF 而不是让它报错：
+// 值本身非空已经由 Save 开头的 checkUpstreamModel 挡住，这里只是不把一个
+// 空串当名字写进去。
 func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *pipeline.Charge) (bool, error) {
 	res, err := tx.ExecContext(ctx, `
 		UPDATE billing_requests
@@ -619,12 +653,14 @@ func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *
 		       computed_amount = $7::numeric,
 		       settled_at = now(),
 		       channel_id = NULLIF($5, 0),
+		       upstream_model = NULLIF($8, ''),
 		       upstream_status = NULLIF($3, 0),
 		       error_code = NULLIF($4, ''),
 		       client_canceled_at = CASE WHEN $6 THEN now() END
 		 WHERE request_id = $1 AND status = 'pending'`,
 		req.RequestID, charge.Settlement.Actual.String(), 0, "", req.ChannelID,
-		charge.ClientCanceled, charge.Settlement.Breakdown.Total.String())
+		charge.ClientCanceled, charge.Settlement.Breakdown.Total.String(),
+		req.UpstreamModel)
 	if err != nil {
 		return false, fmt.Errorf("标记结算失败: %w", err)
 	}

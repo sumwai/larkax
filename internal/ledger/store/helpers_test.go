@@ -208,6 +208,23 @@ func channelOf(t *testing.T, db *sql.DB, requestID string) sql.NullInt64 {
 	return id
 }
 
+// upstreamModelOf 读一条账单记下的**上游**模型名。没记则 Valid 为 false。
+//
+// 与 channelOf 同一类：这一列也只有选路之后才知道，所以预留那一行必然是
+// NULL，值由结算补上。返回 NullString 而不是 string，是为了让「没记」与
+// 「记了个空串」在用例里分得开——后者是落库层的写法出了问题。
+func upstreamModelOf(t *testing.T, db *sql.DB, requestID string) sql.NullString {
+	t.Helper()
+	var model sql.NullString
+	qerr := db.QueryRowContext(context.Background(),
+		`SELECT upstream_model FROM billing_requests WHERE request_id = $1`,
+		requestID).Scan(&model)
+	if qerr != nil {
+		t.Fatalf("读账单的上游模型名失败: %v", qerr)
+	}
+	return model
+}
+
 // clientCanceledAt 读账单上「客户端断开」那一刻。
 //
 // 返回 NULL 有两种来历，这一列分不开也不该分：没取消（结算路径必然知道），
