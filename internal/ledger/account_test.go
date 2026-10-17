@@ -3,9 +3,13 @@ package ledger
 import (
 	"encoding/json"
 	"errors"
+	"io/fs"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/internal/migrate"
 	"github.com/sumwai/larkax/internal/money"
 )
 
@@ -245,29 +249,109 @@ func TestAccountZeroValue(t *testing.T) {
 	}
 }
 
+// TestEntryTypesMatchDatabaseConstraint 把 EntryTypes() 与迁移文件里的
+// CHECK 约束逐条比对。
+//
+// 比的是**迁移文件本身**（goose 的 embed.FS），不是一份抄过来的字面量：
+// 抄一份的话，迁移里加了一个类型而 Go 这边没加，用例照样通过——而它承诺的
+// 恰恰是「与迁移一致」。对不上的两种表现都是失败的业务动作：
+// 迁移里有而 Go 里没有 → 写库时才报错；Go 里有而迁移里没有 → 合法交易被判非法。
 func TestEntryTypesMatchDatabaseConstraint(t *testing.T) {
-	// 这份清单必须与迁移文件 00001_init.sql 里 ledger_entries.entry_type
-	// 的 CHECK 约束逐字一致。不一致的表现是写库时才报错，而那已经是
-	// 一次失败的业务动作了。
-	want := []EntryType{
-		"topup", "consume", "refund", "settle",
-		"payout_request", "payout_paid", "adjustment",
-	}
 	got := EntryTypes()
-	if len(got) != len(want) {
-		t.Fatalf("分录类型有 %d 种，期望 %d 种: %v", len(got), len(want), got)
+	if len(got) == 0 {
+		t.Fatal("EntryTypes() 是空的，这条用例什么都没测")
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("第 %d 种分录类型 = %q，期望 %q", i, got[i], want[i])
+	known := make(map[EntryType]bool, len(got))
+	for _, e := range got {
+		if known[e] {
+			t.Errorf("EntryTypes() 里 %q 出现了两次", e)
 		}
-		if !validEntryType(want[i]) {
-			t.Errorf("%q 应当被判为合法", want[i])
+		known[e] = true
+	}
+
+	inDB := make([]EntryType, 0, len(got))
+	for _, v := range sqlCheckInValues(t, "entry_type") {
+		inDB = append(inDB, EntryType(v))
+	}
+	inDBSet := make(map[EntryType]bool, len(inDB))
+	for _, e := range inDB {
+		inDBSet[e] = true
+	}
+	for _, e := range inDB {
+		if !known[e] {
+			t.Errorf("迁移的 CHECK 约束里有 %q，EntryTypes() 里没有", e)
+		}
+	}
+	for _, e := range got {
+		if !inDBSet[e] {
+			t.Errorf("EntryTypes() 里有 %q，迁移的 CHECK 约束里没有", e)
+		}
+	}
+
+	// validEntryType 是生产里真正的判据（checkDirection 走它），它认的每一个
+	// 都必须在清单里，清单里的每一个它也都得认——只对一边，另一边的漂移就
+	// 会表现成「合法分录写不进去」或者「不该写进去的写进去了」。
+	for _, e := range got {
+		if !validEntryType(e) {
+			t.Errorf("%q 在清单里，validEntryType 却不认它", e)
+		}
+	}
+	for e := range entryDirections {
+		if !known[e] {
+			t.Errorf("validEntryType 认 %q，EntryTypes() 里却没有它", e)
 		}
 	}
 	if validEntryType("gift") {
 		t.Error("未列在约束里的取值不该通过校验")
 	}
+}
+
+// sqlCheckInValues 从迁移 SQL 里读出 `<column> ... CHECK (<column> IN (...))`
+// 的字面量清单。
+//
+// 迁移按文件名顺序执行，所以同一个约束在后面的文件里重新声明时以后者为准：
+// 取最后一个匹配，而不是第一个。一条都没读到直接失败——「没扫到」与
+// 「约束里本来就是空的」在比对里长得一样，而前者意味着这条用例什么都没测。
+func sqlCheckInValues(t *testing.T, column string) []string {
+	t.Helper()
+
+	fsys := migrate.FS()
+	names, err := fs.Glob(fsys, "*.sql")
+	if err != nil {
+		t.Fatalf("枚举迁移文件: %v", err)
+	}
+	if len(names) == 0 {
+		t.Fatal("迁移目录里一个 .sql 都没有，检查范围是空的")
+	}
+	sort.Strings(names)
+
+	check := regexp.MustCompile(`(?s)CHECK\s*\(\s*` + regexp.QuoteMeta(column) + `\s+IN\s*\(([^)]*)\)`)
+	literal := regexp.MustCompile(`'([^']*)'`)
+
+	var found []string
+	var foundIn string
+	for _, name := range names {
+		b, err := fs.ReadFile(fsys, name)
+		if err != nil {
+			t.Fatalf("读迁移 %s: %v", name, err)
+		}
+		m := check.FindSubmatch(b)
+		if m == nil {
+			continue
+		}
+		foundIn = name
+		found = found[:0]
+		for _, lit := range literal.FindAllSubmatch(m[1], -1) {
+			found = append(found, string(lit[1]))
+		}
+	}
+	if foundIn == "" {
+		t.Fatalf("扫了 %d 个迁移文件，没找到 %s 的 CHECK (... IN (...)) 约束", len(names), column)
+	}
+	if len(found) == 0 {
+		t.Fatalf("%s 里 %s 的 CHECK 约束一个取值都没读到", foundIn, column)
+	}
+	return found
 }
 
 func TestAssetValidity(t *testing.T) {
