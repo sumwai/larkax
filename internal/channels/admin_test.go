@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -500,7 +501,7 @@ func TestListReturnsNoCiphertext(t *testing.T) {
 	want := []string{
 		"ID", "OwnerUserID", "Name", "Type", "BaseURL", "Status", "Models",
 		"Weight", "Priority", "Setting", "CreatedAt", "UpdatedAt",
-		"CredentialKeys", "Hint", "CredentialErr",
+		"CredentialKeys", "Hint", "CredentialErr", "DeletedAt",
 	}
 	typ := reflect.TypeOf(ChannelInfo{})
 	names := make([]string, 0, typ.NumField())
@@ -891,4 +892,160 @@ func TestSetStatusUnknownChannel(t *testing.T) {
 	if !errors.Is(err, ErrChannelNotFound) {
 		t.Errorf("err = %v，期望 ErrChannelNotFound", err)
 	}
+}
+
+// ── 软删 ────────────────────────────────────────────────────────────────
+
+// TestSoftDeleteIsIdempotent 钉住删除的两条结果：第一次返回 true，第二次返回
+// false 且**不报错**（幂等），而不存在的 id 仍然报 ErrChannelNotFound。
+//
+// 三者混在一起是危险的：把「已经删了」报成成功会让拿错 id 的调用悄悄过去，
+// 反过来把重跑报成失败会让脚本没法重复执行。
+func TestSoftDeleteIsIdempotent(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	admin := newAdmin(t, db, sealer)
+	model := uniqueModel()
+
+	id, err := admin.Create(context.Background(), baseRequest("ch-del-"+itoa(nextID())))
+	if err != nil {
+		t.Fatalf("Create 出错: %v", err)
+	}
+
+	deleted, err := admin.SoftDelete(context.Background(), id)
+	if err != nil {
+		t.Fatalf("第一次 SoftDelete 出错: %v", err)
+	}
+	if !deleted {
+		t.Error("第一次 SoftDelete 应当返回 true")
+	}
+
+	deleted, err = admin.SoftDelete(context.Background(), id)
+	if err != nil {
+		t.Fatalf("再删一次不该报错（幂等），得到 %v", err)
+	}
+	if deleted {
+		t.Error("再删一次应当返回 false（已经是删除状态）")
+	}
+
+	// 删除时刻不该被第二次调用刷新：它说「什么时候删的」。
+	var deletedAt sql.NullTime
+	if scanErr := db.QueryRowContext(context.Background(),
+		`SELECT deleted_at FROM channels WHERE id = $1`, id).Scan(&deletedAt); scanErr != nil {
+		t.Fatalf("读回 deleted_at 失败: %v", scanErr)
+	}
+	if !deletedAt.Valid {
+		t.Fatal("deleted_at 仍是 NULL：删除没落库")
+	}
+
+	_, err = admin.SoftDelete(context.Background(), 1<<40)
+	if !errors.Is(err, ErrChannelNotFound) {
+		t.Errorf("删一个不存在的 id 应当报 ErrChannelNotFound，得到 %v", err)
+	}
+
+	// 删除把状态一并置成 disabled：那是给漏网读路径的兜底。
+	var status string
+	if scanErr := db.QueryRowContext(context.Background(),
+		`SELECT status FROM channels WHERE id = $1`, id).Scan(&status); scanErr != nil {
+		t.Fatalf("读回 status 失败: %v", scanErr)
+	}
+	if status != StatusDisabled {
+		t.Errorf("删除后的 status = %q，期望 %q", status, StatusDisabled)
+	}
+
+	// 选路看不见它。
+	got, err := New(db, sealer).Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	for _, c := range got {
+		if c.Channel.ID == id {
+			t.Errorf("已删的渠道 %d 仍出现在候选集里", id)
+		}
+	}
+}
+
+// TestWritePathsRejectDeletedChannel 钉住「已删的渠道不能再改」。
+//
+// 判据不只是「返回了错误」：**那一行必须一个字节都没变**。静默改一行用户
+// 看不见的数据，会让「我已经删掉它了」与「它又被改回来了」在库里分不出来，
+// 而后者没有任何东西会报出来。
+func TestWritePathsRejectDeletedChannel(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	admin := newAdmin(t, db, sealer)
+
+	req := baseRequest("ch-frozen-" + itoa(nextID()))
+	id, err := admin.Create(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Create 出错: %v", err)
+	}
+	if _, err = admin.SoftDelete(context.Background(), id); err != nil {
+		t.Fatalf("SoftDelete 出错: %v", err)
+	}
+
+	before := readChannelRaw(t, db, id)
+
+	newName := "renamed-after-delete"
+	newPriority := 99
+	cases := map[string]func() error{
+		"Update 名字": func() error {
+			return admin.Update(context.Background(), UpdateRequest{ID: id, Name: &newName})
+		},
+		"Update 优先级": func() error {
+			return admin.Update(context.Background(), UpdateRequest{ID: id, Priority: &newPriority})
+		},
+		"Enable": func() error {
+			return admin.SetStatus(context.Background(), id, StatusEnabled)
+		},
+		"Disable": func() error {
+			return admin.SetStatus(context.Background(), id, StatusDisabled)
+		},
+	}
+	for name, call := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := call()
+			if !errors.Is(err, ErrChannelDeleted) {
+				t.Fatalf("err = %v，期望 ErrChannelDeleted", err)
+			}
+		})
+	}
+
+	// 一组调用之后整行不变——逐个字段比对，而不是只看 deleted_at。
+	after := readChannelRaw(t, db, id)
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("已删的渠道被改动了：\n之前 %+v\n之后 %+v", before, after)
+	}
+}
+
+// channelRaw 是一行的全部可写列，用来证明「一个字节都没动」。
+type channelRaw struct {
+	Name        string
+	Status      string
+	Priority    int
+	Weight      int
+	Setting     string
+	UpdatedAt   time.Time
+	DeletedAt   sql.NullTime
+	CredentialE string
+}
+
+func readChannelRaw(t *testing.T, db *sql.DB, id int64) channelRaw {
+	t.Helper()
+	var (
+		row channelRaw
+		enc []byte
+		set []byte
+	)
+	err := db.QueryRowContext(context.Background(), `
+		SELECT name, status, priority, weight, setting, updated_at, deleted_at, credential_enc
+		  FROM channels WHERE id = $1`, id).
+		Scan(&row.Name, &row.Status, &row.Priority, &row.Weight, &set,
+			&row.UpdatedAt, &row.DeletedAt, &enc)
+	if err != nil {
+		t.Fatalf("读渠 %d 失败: %v", id, err)
+	}
+	row.Setting = string(set)
+	row.CredentialE = hex.EncodeToString(enc)
+	return row
 }
