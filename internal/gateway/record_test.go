@@ -239,7 +239,7 @@ func TestChatStreamRecordsSuccess(t *testing.T) {
 		1: {delta("你好"), {Kind: "usage", Usage: &usage}, {Kind: "done"}},
 	}})
 
-	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestChatStreamRecordsClientDisconnectAsUnattributed(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	res, err := h.gw.ChatStream(ctx, request(), upstreamRequest())
+	res, err := h.gw.ChatStream(ctx, request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestChatStreamRecordsAbortBeforeOutputAsFailure(t *testing.T) {
 	h := newHarness(t)
 	useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{1: nil}})
 
-	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestChatStreamRecordsMidStreamErrorAsFailure(t *testing.T) {
 		1: {delta("你好"), {Kind: "error", Err: errors.New("上游中途断了")}},
 	}})
 
-	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestChatStreamRecordsOnlyPreAcceptFailures(t *testing.T) {
 		script: map[int64][]channel.StreamEvent{2: {{Kind: "done"}}},
 	})
 
-	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestChatStreamAllPreAcceptFailuresRecorded(t *testing.T) {
 		2: upstreamErr(502, true),
 	}})
 
-	if _, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest()); err == nil {
+	if _, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{}); err == nil {
 		t.Fatal("全部失败时该返回错误")
 	}
 
