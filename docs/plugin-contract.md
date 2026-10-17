@@ -175,6 +175,21 @@ JSON 解码器的行为，不是契约的一部分——把名字写准仍然是
 `routeStream`、`pumpStream` 里的逐块判断），不跑插件时那一段分支体根本不会进。
 所以「关掉插件行为不变」不需要靠用例去覆盖每一种插件配置来证明，读那几行就够了。
 
+### `onRequest` 看到的 `model` 是翻译前的名字
+
+`onRequest` 在选路之前跑（见上面的接线图），而规范名到上游名的翻译发生在选路
+之后——每个候选按自己的渠道翻一次，因为同一个规范名在不同渠道下可以叫不同的
+名字。所以 `onRequest` 的上下文里：
+
+- `ctx.canonicalModel` 与 `ctx.upstreamModel` 是**同一个值**，都是调用方请求里
+  的规范名；
+- `ctx.body.model` 也是它。
+
+**不要拿 `ctx.upstreamModel` 拼上游特有的请求体**：它不是实际发给上游的名字。
+上游名在 `onRequest` 时刻原理上不可知——它取决于这次选中哪个渠道。要知道上游
+实际用了哪个名字，看 `onResponse` 的 `ctx.body.model`（上游回报的那个；流式
+请求永远拿不到 `onResponse`，见下文）。
+
 ### `onRequest` 为什么在组装计费请求之前
 
 补丁能改 `max_tokens`，而它是**预留上界**的输入（见「`max_tokens` 只许调小」）。
