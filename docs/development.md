@@ -62,8 +62,10 @@ curl -i 127.0.0.1:8080/v1/chat/completions
 **健康检查在 `:9090`，不在 `:8080`**——公共端口的 `/` 捕获一切路径并返回 `501`。
 
 指标在同一个内部端口上，`curl -s 127.0.0.1:9090/metrics` 应含
-`larkax_billing_capped_settlements_total 0`。指标清单与命名约定见
-[metrics.md](metrics.md)。
+`larkax_billing_unbilled_settlements_total 0`。没有请求时只有不带标签的
+计数器会输出；带标签的几条（`settlements_total`、`capped_settlements_total`、
+`auth_failures_total`）在第一次自增之前没有序列，不出现是正常的。指标清单与
+命名约定见 [metrics.md](metrics.md)。
 
 **两个监听地址默认都只绑回环**（`127.0.0.1`），服务默认只在本机可达；要对外时
 见下文「环境变量」。
