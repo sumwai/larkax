@@ -32,6 +32,8 @@ import (
 	"database/sql"
 	"net/http"
 	"strings"
+
+	"github.com/sumwai/larkax/internal/money"
 )
 
 // User 是认证通过后的用户身份。
@@ -54,6 +56,16 @@ type User struct {
 	// 本包只负责把列值带上来：在两处各解释一遍，两处迟早会不一致，
 	// 而不一致时没有任何东西会报错。
 	RateLimitRPM *int
+	// QuotaLimit 是这把 key 的累计花费上限，即 api_keys.quota_limit 的
+	// **原样**值：nil 表示列值为 NULL。
+	//
+	// 与 RateLimitRPM 同一个理由：额度长在**那把 key** 上，要判它就必须先
+	// 拿到它，而鉴权是唯一一次读 api_keys 那一行的地方——多读一列不增加
+	// 任何往返。含义同样不由本包解释，那是额度判定的事（见 internal/keyquota）。
+	//
+	// 用 money.Amount 而不是 float64：列是 numeric(20, 8)，而这一层一旦让
+	// 浮点进来，舍入点就跑到 money 包外面去了（见 scripts/check-layering.sh）。
+	QuotaLimit *money.Amount
 }
 
 // Authenticator 是公共 HTTP 入口对鉴权层的要求。
