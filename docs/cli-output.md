@@ -19,6 +19,17 @@
 长得一样，是这个项目反复踩的坑（见 [LESSONS.md](../LESSONS.md) 第 16 条），
 所以它们各有各的符号，也各自影响退出码。
 
+体检类命令（`doctor`、`partition check`、`ledger verify`、`secret rotate
+--verify`）共用同一条渲染路径 `printStatusLines`（`cmd/larkaxctl/style.go`）：
+每一项一行「状态符 标题 一句结论」，标题那一栏按最宽的那个对齐，细节只在 `-v`
+时跟着各自那一行缩进打出来。默认一屏收敛的是**篇幅**，不是信息量——原先那些
+长句一条都没删，只是挪进了 `-v`。
+
+调用点登记在 `cmd/larkaxctl/renderpaths_test.go` 的
+`TestEveryStatusRenderPathIsRegistered` 里：加一条同类命令、或者某条命令不再走
+这条路，那张表对不上就红。**别在调用点自己拼一行状态符**：那样它就不在这条
+计数里，颜色也绕过了下面那一节说的唯一出口。
+
 ## 颜色什么时候出现
 
 三条里任何一条成立就**一个 ANSI 转义序列都不输出**：
@@ -32,7 +43,10 @@
 
 样式只有三种：关键实体（表头、主键、出错的对象）加粗，辅助描述（版本号、耗时、
 时间戳）置灰，失败项的状态符是加粗红。都收在 `cmd/larkaxctl/style.go` 里，
-**调用点不要自己拼转义序列**。
+**调用点不要自己拼转义序列**：转义序列是唯一样式出口 `palette` 的产物，自己拼
+就绕过了上面那三个判断，`| grep` 里会夹进控制码。这一点按字面量钉在
+`renderpaths_test.go` 的 `TestOnlyThePalettePaints` 里（用法文本那几段是例外：
+它们举例子解释输出长什么样，自己不打印）。
 
 ## 表格按显示宽度对齐
 
@@ -42,7 +56,14 @@
 不要改回标准库的 `tabwriter`：它按 rune 数补空格，同一栏里既有 `ID` 又有
 `采集源 ID` 时，补出来的 rune 数一样、看起来却差好几列。
 
+走表格的调用点登记在 `renderpaths_test.go` 的
+`TestEveryTableRenderPathIsRegistered` 里，每条路径的样本喂给
+`style_test.go` 的 `TestListTablesStyleWithoutChangingLayout`（后者比对「上色
+那一档剥掉样式码之后与不上色那一档逐字相同」）。
+
 ## 加一个检查项
+
+`doctor` 的一项是一个 `checkDoctorXxx`，返回 `doctorCheck`：
 
 1. 在 `doctor.go` 里加一个 `checkDoctorXxx`，返回 `doctorCheck`；
 2. **通过时填 `ok`**：那是默认输出里跟在标题后面的一句。只有查的人知道该写什么
@@ -59,17 +80,32 @@
 默认那一行是 `状态符 标题 结论`，标题那一栏按最宽的那个对齐。一项超过一条问题时
 默认只打第一条，其余的折成「（另有 N 条，用 -v 看）」。
 
+`doctor` 之外的体检命令（`partition check`、`ledger verify`、`secret rotate
+--verify`）自己收一组 `statusLine` 交给 `printStatusLines`，不要另起一套渲染：
+状态符、对齐、`-v` 缩进、以及那句「N 项异常、N 项通过」的汇总都从这条路出来。
+汇总那一句要用 `countStatusLines` 从**打出去的行**里数，不要从上游的数据结构再
+数一遍——两处各数一遍时，多打或少打一行就会让那句汇总说谎。
+
 ## 加一个清单命令
 
 - 一律**固定列宽的表格**，不要拼长单行 `key=value`：字段一多，长行会在窄终端里
-  自己折行，折出来的行与下一条记录分不开。
+  自己折行，折出来的行与下一条记录分不开。新加一条走表格的路径要登记进
+  `renderpaths_test.go`（见上面「表格按显示宽度对齐」那一节）。
 - 表头用中文；主键与核心标识加粗，时间戳一类的次要属性置灰。
 - 时间戳**截到分钟**（`01-02 15:04`）：清单回答的是「哪一条最近动过」，整条
   RFC3339 会把一栏撑到 25 列。要精确到秒的时候看单个实体的回显，它仍然打完整时刻。
 - 空清单打一句 **`暂无<实体>。可使用 larkaxctl <子命令> 添加。`**，不要什么都不
-  输出：空清单与「命令没跑起来」在安静的终端里长得一样。逐条钉在
-  `cmd/larkaxctl/style_test.go` 的 `TestEmptyListMessages` 里。
-- 列里出现 id 时**单独一列**，不要挂在用户名后面（`user-1 (id: 7)`）。
+  输出：空清单与「命令没跑起来」在安静的终端里长得一样。这句模板只有
+  `style.go` 的 `emptyListNote` 一处，调用点传实体名与添加它的子命令；
+  **没有「添加」这个动作的清单不走它**（给不出可执行的下一步时硬造一个命令名
+  更坏，例如 `ledger balance --all` 的科目由分录产生）。逐条钉在
+  `style_test.go` 的 `TestEmptyListMessages` 里，模板的唯一性钉在
+  `renderpaths_test.go` 的 `TestEmptyStateWordingHasASingleSource` 里。
+- 一个实体**只点一次身份**：写名字就不挂 ID（`用户 alice`，不是
+  `用户 alice(id=7)`）——名字已经认出这条记录了，括号里的 ID 只是让按名字读的人
+  多跳一次。这条命令自己创建的那个对象上，ID 单独成一个字段
+  （`已创建 API Key id=5 prefix=… 用户=alice`），方便脚本接着用；行里其余的位置
+  仍然只写名字。挂括号的写法由 `TestNoParenthesisedIDInHumanOutput` 按字面量钉住。
 
 `settings list` 是例外：settings 表是空的与「还没有配过」不是一回事（那些键来自
 Registry，加不了），它留着自己的说法。
@@ -94,8 +130,8 @@ Registry，加不了），它留着自己的说法。
 - **退出码不变**。`-q` 只影响写不写，不影响算什么。
 
 `--verbose` 是它的反面。两个一起给报参数错（退出码 2）而不是「后者赢」：它们要的
-是相反的东西，安静地采纳一个会让另一个看起来没生效。详细模式目前只有 `doctor`
-用（每一项多打一段细节），其余命令接受它但不使用。
+是相反的东西，安静地采纳一个会让另一个看起来没生效。详细模式目前由 `doctor` 与
+`partition check` 用（每一项多打一段细节），其余命令接受它但不使用。
 
 ## 机器可读输出
 

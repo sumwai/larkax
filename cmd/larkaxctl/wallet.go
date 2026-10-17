@@ -34,8 +34,8 @@ create 给一个已存在的用户开通钱包，余额为 0。它不写任何�
 **幂等**：钱包已经存在时什么都不做、照样退出 0。两种结果都退出 0，只能靠
 输出的那一行分辨，它们逐字是：
 
-  刚建出来：已为用户 <用户名>(id=<ID>) 开通 <资产> 钱包，余额 0。
-  本来就有：用户 <用户名>(id=<ID>) 已有 <资产> 钱包，未改动。
+  刚建出来：已为用户 <用户名> 开通 <资产> 钱包，余额 0。
+  本来就有：用户 <用户名> 已有 <资产> 钱包，未改动。
 
 脚本要判断时匹配「开通」与「未改动」：前者只出现在刚建出来的那一行，
 后者只出现在本来就有那一行。
@@ -437,12 +437,12 @@ func txnIDForOrder(order string) ledger.TxnID {
 // 没有需要被脚本接走的单个值，所以只有 stdout 一个流。
 func printOpenedWallet(w io.Writer, owner auth.User, asset ledger.Asset, created bool) {
 	if created {
-		_, _ = fmt.Fprintf(w, "已为用户 %s(id=%d) 开通 %s 钱包，余额 0。\n",
-			owner.Username, owner.ID, asset)
+		_, _ = fmt.Fprintf(w, "已为用户 %s 开通 %s 钱包，余额 0。\n",
+			owner.Username, asset)
 		return
 	}
-	_, _ = fmt.Fprintf(w, "用户 %s(id=%d) 已有 %s 钱包，未改动。\n",
-		owner.Username, owner.ID, asset)
+	_, _ = fmt.Fprintf(w, "用户 %s 已有 %s 钱包，未改动。\n",
+		owner.Username, asset)
 }
 
 // printCreditedWallet 打印入账结果。
@@ -470,8 +470,8 @@ func printCreditedWallet(w io.Writer, owner auth.User, txn ledger.Transaction,
 	}
 
 	if applied {
-		_, _ = fmt.Fprintf(w, "已入账：用户 %s(id=%d) %s %s，幂等键 %s，交易 %s。\n",
-			owner.Username, owner.ID, credited, asset, order, txn.TxnID)
+		_, _ = fmt.Fprintf(w, "已入账：用户 %s %s %s，幂等键 %s，交易 %s。\n",
+			owner.Username, credited, asset, order, txn.TxnID)
 		_, _ = fmt.Fprintln(w, "分录：")
 	} else {
 		_, _ = fmt.Fprintf(w, "幂等键 %s 已经入过账，本次未改动。交易 %s。\n",

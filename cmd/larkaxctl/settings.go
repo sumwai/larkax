@@ -189,12 +189,16 @@ func runSettingsSet(args []string) error {
 			return err
 		}
 
-		printSettingsSetResult(humanStderr(), key, value, actor.Username, actor.ID)
+		printSettingsSetResult(humanStderr(), key, value, actor.Username)
 		return nil
 	})
 }
 
 // printSettingsSetResult 打印一次写入的结果。
+//
+// 改写人只打名字，不带 `(id=N)`：名字已经认出是谁了，再挂一个 ID 是把身份说
+// 两遍（见 docs/cli-output.md 的「实体只点一次身份」）。审计要的是用户 ID 时
+// 看 settings.updated_by 那一列——它记的就是那个 ID。
 //
 // # 为什么未接线的键照样写、只是多打一行
 //
@@ -209,8 +213,8 @@ func runSettingsSet(args []string) error {
 //
 // 抽成函数是为了有一条不连库也能跑的判据：写入本身要连库，而「输出里有没有
 // 说出这件事」正是要钉住的东西。
-func printSettingsSetResult(w io.Writer, key string, value []byte, by string, byID int64) {
-	_, _ = fmt.Fprintf(w, "已写入 settings.%s = %s 改自 %s(id=%d)\n", key, value, by, byID)
+func printSettingsSetResult(w io.Writer, key string, value []byte, by string) {
+	_, _ = fmt.Fprintf(w, "已写入 settings.%s = %s 改自 %s\n", key, value, by)
 	if note := settings.UnwiredNote(key); note != "" {
 		_, _ = fmt.Fprintf(w, "  尚未接线：%s\n", note)
 	}

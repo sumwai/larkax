@@ -172,11 +172,17 @@ func printLedgerBalance(w io.Writer, acct ledger.Account, asset ledger.Asset, ba
 //
 // 按**科目字符串**排序，不按金额：map 的遍历顺序是随机的，而同一个库两次
 // 跑出来的清单必须逐行相同——否则比对两次输出就变成一件只能靠肉眼做的事。
+//
+// 科目与余额走固定列宽的表格（与其余清单同一条约定，见 docs/cli-output.md）：
+// 科目名长短不一，用 `%-28s` 那样按**字节**补空格的写法在名字里出现非 ASCII
+// 字符时会错位，而 tableWriter 补的是显示宽度（见 table.go）。
 func printLedgerBalances(w io.Writer, asset ledger.Asset, report *store.AccountBalancesReport) {
 	byAccount := report.ByAccount[asset]
 	if len(byAccount) == 0 {
 		// 一行都不打的话，「这种资产上没有分录」与「命令没跑成」看起来一样
-		// （LESSONS 第 16 条）。
+		// （LESSONS 第 16 条）。这一条**不**套清单空状态那一句（style.go 的
+		// emptyListNote）：科目不是被「添加」出来的，它们由分录产生，给不出
+		// 那句话后半截要的那个命令。
 		_, _ = fmt.Fprintf(w, "资产=%s 没有任何分录，汇总为空。\n", asset)
 	} else {
 		accounts := make([]ledger.Account, 0, len(byAccount))
@@ -188,9 +194,15 @@ func printLedgerBalances(w io.Writer, asset ledger.Asset, report *store.AccountB
 		// 「随分录数增长」写进输出：这份汇总是一次全表读之后才算得出来的，
 		// 而看输出的人（可能正在判断要不要把它接进定时任务）应当知道这件事。
 		_, _ = fmt.Fprintf(w, "资产=%s 科目数=%d（全表汇总，随分录数增长）\n", asset, len(accounts))
+
+		p := newPalette(w)
+		tw := newTableWriter(w)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold("科目"), p.bold("余额"))
 		for _, acct := range accounts {
-			_, _ = fmt.Fprintf(w, "  %-28s %s\n", acct, byAccount[acct])
+			// 科目是这张表的主键，加粗；余额是数据本身，不上样式。
+			_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(acct.String()), byAccount[acct])
 		}
+		_ = tw.Flush()
 	}
 
 	// 少算的那些行必须当场说出来：一份少了几行的汇总与一份完整的汇总
@@ -262,6 +274,14 @@ func runLedgerVerify(args []string) error {
 	})
 }
 
+// errLedgerVerifyEmpty 是「一笔都没校验到」那一个判据的错误。
+//
+// 单独一个变量而不是就地构造：结论那一行与退出码要说的是**同一件事**，
+// 而它们分属两个渲染处。抄一份措辞的那天就是两份开始分叉的那天——屏幕上一行
+// 写着「区间里一条分录都没有」，退出码却是 0 的那种不一致。
+var errLedgerVerifyEmpty = errors.New(
+	"区间里一条分录都没有，没有可校验的东西：--from / --to 是不是写错了")
+
 // ledgerVerifyCause 给一次校验定下要返回的那个错误。
 //
 // 抽成函数是因为它有**两个**调用点（table 与 json 两条渲染路径）。判据在这里
@@ -273,9 +293,9 @@ func ledgerVerifyCause(report *store.VerifyReport, runErr error) error {
 	}
 	if report == nil || report.CheckedTxns == 0 {
 		// 「一条都没校验到」不是成功。范围写错、库是空的、连错了环境，
-		// 三种情况都会走到这里，而它们的输出与「校验完了一切正常」
+		// 三种情况都会走到这里，而它们的输出与「校验完了一笔都没问题」
 		// 必须不一样（LESSONS 第 16 条）。
-		return errors.New("区间里一条分录都没有，没有可校验的东西：--from / --to 是不是写错了")
+		return errLedgerVerifyEmpty
 	}
 	if len(report.Findings) > 0 {
 		return fmt.Errorf("发现 %d 笔不合法的交易（见上面的清单）", len(report.Findings))
@@ -283,16 +303,64 @@ func ledgerVerifyCause(report *store.VerifyReport, runErr error) error {
 	return nil
 }
 
+// ledgerVerifyLine 把一次校验折成一行状态行。
+//
+// 状态符的档位与退出码取的是**同一个判据**（ledgerVerifyCause 是不是非空，
+// 以及那之后的截断那一档），所以「屏幕上一行 ✓、退出码却是 1」这种自相矛盾的
+// 输出不会有。措辞各自写：那一句给脚本看，这一行给人看。
+//
+// 截断那一档是 `!` 而不是 `✓`：被截断的一轮与跑完的一轮，findings 与两个计数
+// 可以逐字相同，差别只在那一个布尔（LESSONS 第 16 条）——所以这一行既不能打
+// 「全部自洽」，也不能用通过的那个符号。它退出 0：上限是操作者用 --max-txns
+// 要的，不是失败，只是这一轮的结论不完整（与 ledgerVerifyDoc 的 skipped 同）。
+//
+// 细节（不合法的那几笔与它们的分录）不打进 detail：那是这条命令默认就该看见的
+// 内容，不是 -v 才展开的推导过程。它们由 printLedgerVerifyFindings 接着打。
+func ledgerVerifyLine(r *store.VerifyReport, runErr error) statusLine {
+	counts := fmt.Sprintf("校验 %d 笔交易（%d 条分录）", r.CheckedTxns, r.CheckedEntries)
+	line := statusLine{kind: glyphPass, title: "分录校验", conclusion: counts + "，全部自洽"}
+
+	switch {
+	case runErr != nil:
+		// 计数照打（失败前校验过多少是真的），但明说这一轮没跑完：后面还有
+		// 没读到的交易，这一轮的结论不完整。
+		line.kind = glyphFail
+		line.conclusion = counts + "，这一轮没跑完：只到失败时为止，后面的交易没有校验（原因见 stderr）"
+	case ledgerVerifyCause(r, nil) != nil:
+		line.kind = glyphFail
+		if len(r.Findings) > 0 {
+			line.conclusion = fmt.Sprintf("%s，发现 %d 笔不合法的交易（见下面的清单）",
+				counts, len(r.Findings))
+		} else {
+			line.conclusion = counts + "，" + errLedgerVerifyEmpty.Error()
+		}
+	case r.Truncated:
+		line.kind = glyphSkip
+		line.conclusion = counts
+	}
+
+	// 截断那一句挂在**任何一种**结论后面，而且挂在最后：有 findings 时那一行
+	// 整行都换成了失败的说法，而「后面还有没校验的交易」并不会因此变得不成立
+	// ——把它并进上面某一支里，另一支就会把它漏掉。
+	if r.Truncated {
+		line.conclusion += "；达到 --max-txns 上限，后面还有没校验的交易"
+	}
+	return line
+}
+
 // printLedgerVerifyReport 把一次校验的结果打到 w。
+//
+// 结论那一行由 printStatusLines（style.go）渲染，与其余诊断体检类命令共用
+// 同一条路径。
 //
 // runErr 是 Verify 返回的错误，非空表示**没跑完**：报告里只有读到失败点为止
 // 的那部分。它不能由报告本身推出来——「校验了 0 笔、没有不合法」既是
 // 「读第一笔就失败了」，也是「区间里确实一笔都没有」，后者是跑完的正常结果。
-// 两条路径的 stdout 因此不能同形：失败时汇总行点明「没跑完」，并且不出现
-// 「全部自洽。」或那句计数之后就收尾、读起来像跑完了的样子。
+// 两条路径的 stdout 因此不能同形：失败时那一行点明「没跑完」，并且不出现
+// 「全部自洽」——那句只有跑完才成立。
 //
 // 传 err 而不是别的做法，理由与 printReconcileReport 相同：塞进
-// store.VerifyReport 会让同一个事实有两个来源；失败时不打汇总行又丢掉了
+// store.VerifyReport 会让同一个事实有两个来源；失败时不打结论又丢掉了
 // 失败前已经校验出来的那部分，而它正是「报告先打」要保住的东西。
 //
 // 每处写入的返回值都显式丢弃（`_, _ =`）：目标是 stdout，写不进去只可能是
@@ -302,27 +370,12 @@ func printLedgerVerifyReport(w io.Writer, r *store.VerifyReport, runErr error) {
 	if r == nil {
 		return
 	}
-	if runErr != nil {
-		// 计数照打（失败前校验过多少是真的），但紧跟一句「没跑完」：
-		// 后面还有没读到的交易，这一轮的结论不完整。
-		_, _ = fmt.Fprintf(w, "校验 %d 笔交易（%d 条分录），这一轮没跑完：只到失败时为止，后面的交易没有校验（原因见 stderr）。\n",
-			r.CheckedTxns, r.CheckedEntries)
-		if len(r.Findings) > 0 {
-			printLedgerVerifyFindings(w, r)
-		}
-		return
-	}
-	// 一笔都没读到时不打「全部自洽」：那正是「跳过与通过长得一样」的形状。
-	_, _ = fmt.Fprintf(w, "校验 %d 笔交易（%d 条分录）。\n", r.CheckedTxns, r.CheckedEntries)
-	if r.Truncated {
-		_, _ = fmt.Fprintf(w, "达到 --max-txns 上限，后面还有没校验的交易。\n")
-	}
+	printStatusLines(w, []statusLine{ledgerVerifyLine(r, runErr)}, false)
+
 	if len(r.Findings) == 0 {
-		if r.CheckedTxns > 0 {
-			_, _ = fmt.Fprintln(w, "全部自洽。")
-		}
 		return
 	}
+	_, _ = fmt.Fprintln(w)
 	printLedgerVerifyFindings(w, r)
 }
 
