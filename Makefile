@@ -125,8 +125,8 @@ migrate: init
 # 读的是加载 .env 之后的值，所以写在 .env 里的覆盖也算数。放在 up 之前：
 # 端口不通就没必要先把数据库拉起来。
 #
-# 下面的兜底值与 internal/config 的默认值保持一致（这里只取冒号后面那段端口，
-# 但两处写得不一样会让人以为默认值不同）。
+# 下面的兜底值由 internal/config/makefile_ports_test.go 与 config 的默认值钉在
+# 一起：只改一边 CI 会红。（这里只取冒号后面那段端口。）
 check-ports: init
 	@set -a; . ./$(ENV_FILE); set +a; \
 	busy=0; \
