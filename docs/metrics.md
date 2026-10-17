@@ -29,7 +29,25 @@ curl -s localhost:9090/metrics
 **`capped` 大于 0。** 预留是上界，所以这个数按设计应当一直是 0。它涨起来说明
 上界算错了（例如上游报的输出 token 超过了我们给的 `max_tokens`），差额由平台
 承担。要注意的是此时**账目仍然是平的**——对账看不出来，只有这个数能看见。
-是哪一次请求，靠日志里的 `request_id` 找。
+
+**是哪一次请求撞的、撞了多少**，这个计数答不了（它没有 `request_id` 标签）。
+要落到具体请求上，查 `billing_requests` 的 `computed_amount`——它是**未截断**的
+结算金额，于是
+
+```sql
+SELECT request_id, reserved_amount, computed_amount,
+       computed_amount - reserved_amount AS 平台承担的差额
+  FROM billing_requests
+ WHERE computed_amount > reserved_amount
+ ORDER BY settled_at DESC;
+```
+
+就是那些撞上界的请求，差额一列是平台吃掉的钱。`computed_amount` 与
+`reserved_amount` 都记在同一行上，所以这件事不必再靠日志拼。
+
+注意查出来的行数**只覆盖这一列上线之后结算的请求**：更早的行 `computed_amount`
+是 NULL，且补不回来（撞上界时 `final_amount` 就等于预留，未截断的那个数没有
+留下痕迹）。那些行是「没有记录」，不能并进「没撞上界」——见迁移 00021 的注释。
 
 **`capped` 一直是 0。** 先看 `settlements_total` 有没有在涨。它也不涨，说明
 计数器根本没接上，而不是「一次都没撞上」——一个一直是 0 的计数器与一个没有

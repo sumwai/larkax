@@ -645,17 +645,20 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 		status_      string
 		reserved     string
 		final        string
+		computed     sql.NullString
 		billChannel  sql.NullInt64
 		ruleID       sql.NullInt64
 		exprSnapshot sql.NullString
 	)
 	err := db.QueryRowContext(ctx, `
 		SELECT id, request_id, status, reserved_amount::text, final_amount::text,
+		       computed_amount::text,
 		       channel_id, pricing_rule_id, pricing_expr_snapshot
 		  FROM billing_requests
 		 WHERE user_id = $1
 		 ORDER BY id DESC LIMIT 1`, user,
-	).Scan(&billID, &requestID, &status_, &reserved, &final, &billChannel, &ruleID, &exprSnapshot)
+	).Scan(&billID, &requestID, &status_, &reserved, &final, &computed,
+		&billChannel, &ruleID, &exprSnapshot)
 	if err != nil {
 		t.Fatalf("查账单失败: %v", err)
 	}
@@ -666,10 +669,7 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	if !sameDecimal(final, "0.00033") {
 		t.Errorf("结算金额 = %s，期望 0.00033（12 × 0.00001 + 7 × 0.00003）", final)
 	}
-	// 预留是上界：结算是按实际用量算的，不可能超过它。
-	if !sameDecimal(reserved, "0.00033") && !greaterThan(reserved, final) {
-		t.Errorf("预留 %s 应当不小于结算 %s——预留按最坏情况算，是结算的上界", reserved, final)
-	}
+	assertNotCapped(t, billingRow{requestID: requestID, reserved: reserved, computed: computed})
 	if !ruleID.Valid || ruleID.Int64 != rule {
 		t.Errorf("pricing_rule_id = %v，期望 %d（账单要能回答按哪条规则算的）", ruleID, rule)
 	}
@@ -973,16 +973,19 @@ func TestReserveCoversPricierCandidateRule(t *testing.T) {
 	}
 
 	var (
-		status_  string
-		reserved string
-		final    string
+		requestID string
+		status_   string
+		reserved  string
+		final     string
+		computed  sql.NullString
 	)
 	if err := db.QueryRowContext(ctx, `
-		SELECT status, reserved_amount::text, final_amount::text
+		SELECT request_id, status, reserved_amount::text, final_amount::text,
+		       computed_amount::text
 		  FROM billing_requests
 		 WHERE user_id = $1
 		 ORDER BY id DESC LIMIT 1`, user,
-	).Scan(&status_, &reserved, &final); err != nil {
+	).Scan(&requestID, &status_, &reserved, &final, &computed); err != nil {
 		t.Fatalf("查账单失败: %v", err)
 	}
 
@@ -1005,9 +1008,7 @@ func TestReserveCoversPricierCandidateRule(t *testing.T) {
 	if greaterThan("0.128", reserved) {
 		t.Errorf("预留 = %s，期望不小于 0.128（按渠道价与 max_tokens = 64 算的输出侧）", reserved)
 	}
-	if greaterThan(final, reserved) {
-		t.Errorf("预留 %s 小于结算 %s——预留是结算的上界", reserved, final)
-	}
+	assertNotCapped(t, billingRow{requestID: requestID, reserved: reserved, computed: computed})
 
 	// 三、钱：扣掉实际金额，冻结额回到零。
 	assertWallet(t, db, user, "99.974", "0")

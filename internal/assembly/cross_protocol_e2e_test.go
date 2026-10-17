@@ -207,9 +207,7 @@ func TestMessagesWithOpenAIUpstreamEndToEnd(t *testing.T) {
 	if !sameDecimal(bill.final.String, "0.00033") {
 		t.Errorf("结算金额 = %s，期望 0.00033（12 × 0.00001 + 7 × 0.00003）", bill.final.String)
 	}
-	if greaterThan(bill.final.String, bill.reserved) {
-		t.Errorf("预留 %s 小于结算 %s——预留按最坏情况算，是结算的上界", bill.reserved, bill.final.String)
-	}
+	assertNotCapped(t, bill)
 	if !bill.channelID.Valid || bill.channelID.Int64 != channelID {
 		t.Errorf("账单的 channel_id = %v，期望 %d（这次请求实际走的那个 openai 渠道）", bill.channelID, channelID)
 	}
@@ -383,9 +381,7 @@ func TestMessagesWithOpenAIUpstreamCacheUsage(t *testing.T) {
 			"0.00033 说明缓存没参与计价，0.00038 说明缓存没被拆出去（只按输入单价收了一遍），"+
 			"0.00039 说明那 5 个 token 被收了两遍", bill.final.String)
 	}
-	if greaterThan(bill.final.String, bill.reserved) {
-		t.Errorf("预留 %s 小于结算 %s——预留按最坏情况算，是结算的上界", bill.reserved, bill.final.String)
-	}
+	assertNotCapped(t, bill)
 	assertWallet(t, db, user, "99.99966", "0")
 }
 
@@ -481,9 +477,7 @@ func TestChatCompletionsWithAnthropicUpstreamEndToEnd(t *testing.T) {
 	if !sameDecimal(bill.final.String, "0.00033") {
 		t.Errorf("结算金额 = %s，期望 0.00033（12 × 0.00001 + 7 × 0.00003）", bill.final.String)
 	}
-	if greaterThan(bill.final.String, bill.reserved) {
-		t.Errorf("预留 %s 小于结算 %s——预留按最坏情况算，是结算的上界", bill.reserved, bill.final.String)
-	}
+	assertNotCapped(t, bill)
 	if !bill.channelID.Valid || bill.channelID.Int64 != channelID {
 		t.Errorf("账单的 channel_id = %v，期望 %d（这次请求实际走的那个 anthropic 渠道）", bill.channelID, channelID)
 	}
@@ -644,9 +638,7 @@ func TestChatCompletionsWithAnthropicUpstreamCacheUsage(t *testing.T) {
 			"0.00029 说明输入被当成了 7 个（缓存补进来又整个减掉了），0.00033 说明缓存没参与计价",
 			bill.final.String)
 	}
-	if greaterThan(bill.final.String, bill.reserved) {
-		t.Errorf("预留 %s 小于结算 %s——预留按最坏情况算，是结算的上界", bill.reserved, bill.final.String)
-	}
+	assertNotCapped(t, bill)
 	assertWallet(t, db, user, "99.99966", "0")
 }
 
@@ -742,8 +734,6 @@ func TestChatCompletionsWithAnthropicUpstreamCacheWriteUsage(t *testing.T) {
 			"0.000322 说明写入没补进 prompt 而计费那侧仍在减它（输入被少算了 3 个），"+
 			"0.00034 说明写入整项丢了", bill.final.String)
 	}
-	if greaterThan(bill.final.String, bill.reserved) {
-		t.Errorf("预留 %s 小于结算 %s——预留按最坏情况算，是结算的上界", bill.reserved, bill.final.String)
-	}
+	assertNotCapped(t, bill)
 	assertWallet(t, db, user, "99.999648", "0")
 }

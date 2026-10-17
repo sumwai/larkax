@@ -435,6 +435,15 @@ type billingRow struct {
 	status    string
 	reserved  string
 	final     sql.NullString
+	// computed 是**未截断**的结算金额，见迁移 00021。
+	//
+	// 它与 final 分开取回来，是因为 final 判不了「这一行有没有撞上预留上界」：
+	// 撞上界时 final **就是** reserved，没撞时 final ≤ reserved，两种情况下
+	// `final > reserved` 都取假。判据要用 computed。
+	//
+	// 可空：这一行还没结算（status = 'pending'）时是 NULL。已结算的行一定有值，
+	// 所以 NULL 在已结算的行上是「写入点掉了」，不是「没撞上界」——见 assertNotCapped。
+	computed  sql.NullString
 	channelID sql.NullInt64
 	streamed  bool
 	// protocol 是这次请求的**调用协议**（由入口按路径决定），不是上游协议。
@@ -449,11 +458,12 @@ func billingOf(t *testing.T, db *sql.DB, userID int64) (billingRow, bool) {
 	var b billingRow
 	err := db.QueryRowContext(context.Background(), `
 		SELECT id, request_id, status, reserved_amount::text, final_amount::text,
-		       channel_id, streamed, protocol
+		       computed_amount::text, channel_id, streamed, protocol
 		  FROM billing_requests
 		 WHERE user_id = $1
 		 ORDER BY id DESC LIMIT 1`, userID,
-	).Scan(&b.id, &b.requestID, &b.status, &b.reserved, &b.final, &b.channelID, &b.streamed, &b.protocol)
+	).Scan(&b.id, &b.requestID, &b.status, &b.reserved, &b.final, &b.computed,
+		&b.channelID, &b.streamed, &b.protocol)
 	if err == sql.ErrNoRows {
 		return billingRow{}, false
 	}
@@ -461,6 +471,43 @@ func billingOf(t *testing.T, db *sql.DB, userID int64) (billingRow, bool) {
 		t.Fatalf("查账单失败: %v", err)
 	}
 	return b, true
+}
+
+// assertNotCapped 断言这一行**没有**撞上预留上界。
+//
+// # 为什么判据是 computed_amount 而不是 final_amount
+//
+// final_amount 落的是 Settlement.Actual，而它在撞上界时被改成等于预留额
+// （见 internal/billing 的 SettleWithCharges）：没撞时 Actual ≤ 预留，撞了时
+// Actual == 预留。两种情况 `final > reserved` 都取假——所以「断言 final 不超过
+// 预留」是一条**恒真**的断言，一次都不会响，哪怕上界真的算错了。
+//
+// computed_amount 是**未截断**的那个数，它大于预留就说明这次真的撞了。
+// 这也正是「预留 ≥ 结算」这条不变量的可验证形式：final = min(computed, reserved)
+// 恒成立，所以要钉的是 computed ≤ reserved。
+//
+// # 已结算而 computed_amount 是 NULL 要当成失败
+//
+// 已结算的行两列写在同一条 UPDATE 里（见 internal/ledger/store 的 markSettled），
+// 所以 computed_amount 为 NULL 只有两种解释：这一行在迁移 00021 之前就结算了
+// （那批行补不回来），或者写入点掉了。
+//
+// **两种都不能当成「没撞上界」。** 那正是「没跑成」与「跑成了」长得一样的老
+// 毛病（见 LESSONS.md 第 16 条）：写入点掉了之后这条断言会静默通过，而它本该
+// 是唯一能报出「上界算错了」的地方。所以这里当场失败，不往下走。
+func assertNotCapped(t *testing.T, bill billingRow) {
+	t.Helper()
+
+	if !bill.computed.Valid {
+		t.Fatalf("账单 %s 已结算，而 computed_amount 是 NULL——未截断的结算金额没有落库，"+
+			"「有没有撞上界」就判不出来（见迁移 00021 与 internal/ledger/store 的 markSettled）",
+			bill.requestID)
+	}
+	if greaterThan(bill.computed.String, bill.reserved) {
+		t.Errorf("账单 %s 撞上了预留上界：按实际用量算出的 %s 大于预留 %s——"+
+			"预留按最坏情况算，本该是结算的上界；差出来的那一截由平台承担",
+			bill.requestID, bill.computed.String, bill.reserved)
+	}
 }
 
 // waitForBillingStatus 等到最近一行账单变成某个状态。
