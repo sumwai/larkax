@@ -473,6 +473,67 @@ func TestApplyRequestPatchMaxTokensOnlyShrinks(t *testing.T) {
 	}
 }
 
+// 认得但不应用的 5 个字段在**接线用的这条路径**上同样被拒。
+//
+// 与 patch_test.go 里那条（ApplyRequestBodyPatch）是同一个判定的两处落点：
+// 只拦一条的话，接线时用哪条就把洞开在哪条上。而这两条路径今天**覆盖并不
+// 相同**——宽的那条（协议中立视图）曾经会写 messages / tools / tool_choice，
+// 窄的这条一个都不写、也不报错，于是同一个补丁在两条路上是两个结果。
+//
+// 这里直接构造 RequestBodyPatch 而不是从 JSON 解：要证明的是**应用这一步**
+// 的判定，解析那一步的行为由 patch_test.go 钉住。
+func TestApplyRequestPatchRejectsUnappliedFields(t *testing.T) {
+	system := "你是助手"
+	cases := map[string]*RequestBodyPatch{
+		"messages":    {Messages: []any{map[string]any{"role": "user"}}},
+		"system":      {System: &system},
+		"stop":        {Stop: []string{"\n\n"}},
+		"tools":       {Tools: []any{map[string]any{"name": "t"}}},
+		"tool_choice": {ToolChoice: "auto"},
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			req := &channel.Request{Model: "m", MaxTokens: 1000}
+			_, err := ApplyRequestPatch(req, &RequestPatch{Body: body})
+			if !errors.Is(err, ErrPatchScope) {
+				t.Fatalf("%s 该被拒，实际 err=%v", name, err)
+			}
+			// 报错要点出字段名——插件作者拿到的就是这句话。
+			if !strings.Contains(err.Error(), name) {
+				t.Errorf("报错该点出 %s，实际 %q", name, err)
+			}
+			if req.MaxTokens != 1000 || req.Temperature != nil || req.TopP != nil {
+				t.Errorf("报错时不该改动请求，实际 %+v", req)
+			}
+		})
+	}
+}
+
+// 混着被应用与被拒字段的补丁在这条路径上也是**整份不生效**：
+// 能应用的那几个也不写下去。
+//
+// 「先写一半再报错」会让调用方手上留着一份被改了一半的请求，而它随后
+// 要么进计费、要么被重试——两种都会把「插件到底改了什么」变成一个
+// 要看执行顺序才能回答的问题。
+func TestApplyRequestPatchRejectsMixedPatchWholesale(t *testing.T) {
+	mt, temp := int64(10), 0.1
+	req := &channel.Request{Model: "m", MaxTokens: 1000}
+	_, err := ApplyRequestPatch(req, &RequestPatch{Body: &RequestBodyPatch{
+		MaxTokens:   &mt,
+		Temperature: &temp,
+		Messages:    []any{map[string]any{"role": "user"}},
+	}})
+	if !errors.Is(err, ErrPatchScope) {
+		t.Fatalf("混了被拒字段的补丁该被拒，实际 err=%v", err)
+	}
+	if !strings.Contains(err.Error(), "messages") {
+		t.Errorf("报错该点出被拒的字段，实际 %q", err)
+	}
+	if req.MaxTokens != 1000 || req.Temperature != nil {
+		t.Errorf("整份不生效：max_tokens 与 temperature 都不该落上，实际 %+v", req)
+	}
+}
+
 // 补丁里的头经白名单过滤后落到请求上，被拒的报出来。
 func TestApplyRequestPatchHeaders(t *testing.T) {
 	req := &channel.Request{Headers: map[string]string{"X-Larkax-Host": "宿主"}}

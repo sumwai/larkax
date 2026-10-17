@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -42,9 +43,16 @@ func TestBodyPatchRejectsOutOfScopeFields(t *testing.T) {
 	}
 }
 
-// 白名单里的字段**必须**放行。漏掉一个的表现是「插件改了但没生效」，
-// 而作者会以为是上游不支持。
-func TestBodyPatchAcceptsEveryWhitelistedField(t *testing.T) {
+// 契约认得的 8 个字段**都要能解出来**——解析这一层放行它们，拒绝发生在应用
+// 那一步（见 TestBodyPatchRejectsUnappliedFields）。
+//
+// 为什么不在解析这一层就把那 5 个拒掉：拒在应用那一步，报错才说得清是
+// 「这个字段不会被应用」，而不是把它当成一个不认识的字段名（那与
+// `maxTokens` 拼错是同一句话，而作者要做的事不一样：一个改字段名，
+// 一个把这个字段从补丁里去掉）。另外 `{ body: { messages: [...] } }` 必须
+// 仍然算「这份补丁改了东西」（见 RequestBodyPatch.empty），否则它会被当成
+// 空补丁跳过，拒绝就永远不触发。
+func TestBodyPatchDecodesEveryContractField(t *testing.T) {
 	raw := `{
 		"messages": [{"role":"user","content":"x"}],
 		"system": "你是助手",
@@ -57,23 +65,59 @@ func TestBodyPatchAcceptsEveryWhitelistedField(t *testing.T) {
 	}`
 	patch, err := unmarshalPatch(raw)
 	if err != nil {
-		t.Fatalf("这些字段都该放行，出错: %v", err)
+		t.Fatalf("这些字段都该解得出来，出错: %v", err)
+	}
+	// 逐个判，不只看「没报错」：少解出一个字段的表现是它变成 nil，
+	// 而 nil 在应用那一步是「没给」——于是补丁静默少了一项。
+	switch {
+	case patch.Messages == nil:
+		t.Error("messages 没解出来")
+	case patch.System == nil:
+		t.Error("system 没解出来")
+	case patch.MaxTokens == nil:
+		t.Error("max_tokens 没解出来")
+	case patch.Temperature == nil:
+		t.Error("temperature 没解出来")
+	case patch.TopP == nil:
+		t.Error("top_p 没解出来")
+	case patch.Stop == nil:
+		t.Error("stop 没解出来")
+	case patch.Tools == nil:
+		t.Error("tools 没解出来")
+	case patch.ToolChoice == nil:
+		t.Error("tool_choice 没解出来")
+	}
+	// 这一份补丁不是空的：8 个字段里有一个给了就算改过东西。
+	if patch.empty() {
+		t.Error("给了 8 个字段的补丁不该算空补丁")
+	}
+}
+
+// 会应用的三个字段必须真的写下去。
+//
+// 这一条与下面那条（5 个被拒）是一对：只证明「该拒的拒了」是不够的，
+// 把整条路拦死也满足那一句。所以这里逐个确认 appliedBodyFields 每一项
+// 都进了请求体、都出现在改动清单里。
+func TestBodyPatchAppliesScalarFields(t *testing.T) {
+	patch, err := unmarshalPatch(`{"max_tokens":128,"temperature":0.5,"top_p":0.9}`)
+	if err != nil {
+		t.Fatalf("解析出错: %v", err)
 	}
 	// body 里带着客户端的 max_tokens：补丁里的 128 是把它**调小**。
 	// 原值取得更大是有意的——「只许调小」那条规则有自己的用例，
-	// 这条测的是白名单上的字段一个都没漏。
+	// 这条测的是会应用的字段一个都没漏。
 	body := map[string]any{"model": "canonical-name", "stream": true, "max_tokens": 256}
 	out, changed, err := ApplyRequestBodyPatch(body, patch)
 	if err != nil {
 		t.Fatalf("应用补丁出错: %v", err)
 	}
-	for _, f := range patchableBodyFields {
+	for _, f := range appliedBodyFields {
 		if _, ok := out[f]; !ok {
 			t.Errorf("字段 %s 应当被写入，实际没有", f)
 		}
 	}
-	if len(changed) != len(patchableBodyFields) {
-		t.Errorf("改动字段数 = %d，期望 %d：%v", len(changed), len(patchableBodyFields), changed)
+	if len(changed) != len(appliedBodyFields) {
+		t.Errorf("改动字段数 = %d，期望 %d：%v", len(changed), len(appliedBodyFields), changed)
 	}
 	// 没有出现在补丁里的字段保持原样。
 	if out["model"] != "canonical-name" || out["stream"] != true {
@@ -83,6 +127,103 @@ func TestBodyPatchAcceptsEveryWhitelistedField(t *testing.T) {
 	// 「当时发出去的是什么」这个问题的答案随时间变化。
 	if _, ok := body["temperature"]; ok {
 		t.Errorf("入参 map 被就地修改了: %v", body)
+	}
+}
+
+// 认得但不应用的 5 个字段**逐个**被拒，报错里点出是哪一个。
+//
+// 表驱动而不是一份大补丁：一份含全部 5 个字段的补丁只能证明「报了错」，
+// 证明不了 5 个字段各自都进了判定——漏判一个的表现是那一份补丁被静默应用，
+// 而其余 4 个照样报错，整体看着是好的（见 LESSONS.md 第 30 条）。
+func TestBodyPatchRejectsUnappliedFields(t *testing.T) {
+	cases := map[string]string{
+		"messages":    `{"messages":[{"role":"user","content":"改一下"}]}`,
+		"system":      `{"system":"你是助手"}`,
+		"stop":        `{"stop":["\n\n"]}`,
+		"tools":       `{"tools":[{"name":"t"}]}`,
+		"tool_choice": `{"tool_choice":"auto"}`,
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			// 解析这一层必须放行：拒在应用那一步（见上面那条测试的注释）。
+			patch, err := unmarshalPatch(raw)
+			if err != nil {
+				t.Fatalf("解析 %s 不该出错，实际 %v", name, err)
+			}
+			out, changed, err := ApplyRequestBodyPatch(map[string]any{"model": "m"}, patch)
+			if !errors.Is(err, ErrPatchScope) {
+				t.Fatalf("%s 该被拒，实际 err=%v", name, err)
+			}
+			// 报错要点出字段名：只说「不符合契约」的话，作者手上那份补丁里
+			// 有 8 个字段可选，他得逐个试。
+			if !strings.Contains(err.Error(), name) {
+				t.Errorf("报错该点出 %s，实际 %q", name, err)
+			}
+			// 拒掉时什么都不改：不给请求体，也不给改动清单。
+			if out != nil || changed != nil {
+				t.Errorf("拒掉时不该有产物，实际 out=%v changed=%v", out, changed)
+			}
+		})
+	}
+}
+
+// 被拒的字段与被应用的字段混在一起：**整份补丁都不生效**。
+//
+// 理由与 patchOf 一致：部分应用过的补丁是没法解释的状态，作者看到的会是
+// 「有的字段生效了、有的没有」——比整个不生效难查得多。Session.ApplyRequest
+// 对 ErrPatchScope 的处置也是整份丢掉，两边同一个语义。
+func TestBodyPatchRejectsMixedPatchWholesale(t *testing.T) {
+	patch, err := unmarshalPatch(`{"temperature":0.1,"messages":[{"role":"user"}],"tools":[]}`)
+	if err != nil {
+		t.Fatalf("解析出错: %v", err)
+	}
+	body := map[string]any{"model": "m", "temperature": 0.9}
+	out, changed, err := ApplyRequestBodyPatch(body, patch)
+	if !errors.Is(err, ErrPatchScope) {
+		t.Fatalf("混了被拒字段的补丁该被拒，实际 err=%v", err)
+	}
+	// 两个被拒的字段都要点出来，按契约顺序（tools 在 messages 之后）。
+	// 只报一个的话，作者改完再跑一次才知道还有第二个。
+	if !strings.Contains(err.Error(), "messages、tools") {
+		t.Errorf("报错该按契约顺序点出两个字段，实际 %q", err)
+	}
+	if out != nil || changed != nil {
+		t.Errorf("整份不生效：不该有产物，实际 out=%v changed=%v", out, changed)
+	}
+	if body["temperature"] != 0.9 {
+		t.Errorf("入参不该被改动，实际 %v", body)
+	}
+}
+
+// 字段表与契约对得上：RequestBodyPatch 每加一个字段，都必须在这里表态
+// （会应用，还是拒掉）。
+//
+// 为什么要有这一条：#306 那个缺陷的形状是「字段进了契约、没人应用它、
+// 也没人报错」，而**加字段**正是同一个形状的入口——往结构体里加一个字段，
+// 编译、测试、三道门禁都不会有任何反应，于是它静默地不被应用。
+// 判据是**并集**：unappliedFields 认出来的 5 个 + appliedBodyFields 的 3 个，
+// 必须与 RequestBodyPatch 的 json 标签一字不差。
+// 少一个名字 = 有人加了字段没表态；多一个名字 = 有人删了字段没收拾。
+func TestBodyPatchFieldTableMatchesContract(t *testing.T) {
+	// 每个字段都给上值：unappliedFields 判的是「给了没有」。
+	system := "s"
+	all := &RequestBodyPatch{
+		Messages:    []any{},
+		System:      &system,
+		MaxTokens:   ptrInt64(1),
+		Temperature: ptrFloat64(1),
+		TopP:        ptrFloat64(1),
+		Stop:        []string{},
+		Tools:       []any{},
+		ToolChoice:  "auto",
+	}
+	got := append(all.unappliedFields(), appliedBodyFields...)
+	sort.Strings(got)
+	want := contractFieldNames(&RequestBodyPatch{})
+	sort.Strings(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("字段表与契约对不上：\n处置过的是 %v\n契约里的是 %v\n"+
+			"（加了字段就来这里表态：会应用就进 appliedBodyFields，不会就进 unappliedFields）", got, want)
 	}
 }
 
@@ -221,22 +362,29 @@ func TestBodyPatchEmptyChangesNothing(t *testing.T) {
 	}
 }
 
-// 合并是浅合并：给 messages 就整块替换，不是往原数组里追加。
-// 这条钉住语义，免得有人以为它能「只改某一条消息」。
-func TestBodyPatchReplacesSliceWholesale(t *testing.T) {
-	patch, _ := unmarshalPatch(`{"messages":[{"role":"user","content":"新"}]}`)
-	out, _, err := ApplyRequestBodyPatch(map[string]any{
-		"messages": []any{map[string]any{"role": "user", "content": "旧"}},
-	}, patch)
+// 被拒的字段连入参都不碰：补丁整个不生效，客户端的请求体一个字都不该变。
+//
+// 这里用的是 `messages`（一条被拒的结构化字段），因为「整块替换」这条语义
+// 最容易被误读成「往原数组里追加」。今天会应用的三个字段都是标量，
+// 所以这条用例钉的是拒绝那一支：原数组还在原处，且没有产物。
+func TestBodyPatchLeavesOriginalUntouchedOnReject(t *testing.T) {
+	patch, err := unmarshalPatch(`{"messages":[{"role":"user","content":"新"}]}`)
 	if err != nil {
-		t.Fatalf("出错: %v", err)
+		t.Fatalf("解析出错: %v", err)
 	}
-	msgs, ok := out["messages"].([]any)
-	if !ok || len(msgs) != 1 {
-		t.Fatalf("messages 应是替换后的 1 条，实际 %v", out["messages"])
+	body := map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "旧"}},
 	}
-	if got := msgs[0].(map[string]any)["content"]; got != "新" {
-		t.Errorf("message 内容是 %v，期望「新」", got)
+	out, changed, err := ApplyRequestBodyPatch(body, patch)
+	if !errors.Is(err, ErrPatchScope) {
+		t.Fatalf("messages 该被拒，实际 err=%v", err)
+	}
+	if out != nil || changed != nil {
+		t.Errorf("拒掉时不该有产物，实际 out=%v changed=%v", out, changed)
+	}
+	msgs, ok := body["messages"].([]any)
+	if !ok || len(msgs) != 1 || msgs[0].(map[string]any)["content"] != "旧" {
+		t.Errorf("入参的 messages 被改动了: %v", body["messages"])
 	}
 }
 

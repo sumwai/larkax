@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/sumwai/larkax/internal/channel"
@@ -178,6 +179,71 @@ func TestApplyRequestBlockingReturnsErrorAndLeavesRequestUntouched(t *testing.T)
 	}
 	if !errors.Is(err, ErrPatchScope) {
 		t.Errorf("错误里该能认出是越界，实际 %v", err)
+	}
+	if req.Model != "m" || req.MaxTokens != 1000 {
+		t.Errorf("补丁该整个丢掉，实际 req = %+v", req)
+	}
+}
+
+// 只含 messages 的补丁走**整条接线**（真插件、真沙箱、真解码）：请求继续，
+// 补丁整个不生效，而失败记进会话。
+//
+// 这条就是 issue 里那句验收——「插件写一个只含 messages 的补丁时，可观测面上
+// 能看出这份补丁没有被应用」——的落点。出口与上面那条越界（`model`）相同：
+// 契约违规一律按插件失败处置，而非阻断的失败只能靠 Failures() 被看见
+// （internal/api 的 logPluginFailures 把它写进日志）。
+//
+// 为什么这条要单列：`messages` 是**契约认得**的字段，而 `model` 不是。
+// 两者走的是同一句「不符合契约」，但前者的作者以为自己写对了字段名——
+// 报错必须点出是哪个字段，否则他只会看到「我的插件没生效」。
+func TestApplyRequestRecordsUnappliedField(t *testing.T) {
+	s := sessionFor(t, minimalMeta,
+		`onRequest(){ return { body: { messages: [{ role: "user", content: "改一下" }] } }; }`,
+		sandbox.Host{}, sandbox.Limits{})
+
+	req := &channel.Request{Model: "m", MaxTokens: 1000}
+	rejected, err := s.ApplyRequest(t.Context(), "r1", req, "m", "openai")
+	if err != nil {
+		t.Fatalf("非阻断型插件不该让请求失败，实际 %v", err)
+	}
+	if rejected != nil {
+		t.Errorf("这一路没有头被拒，实际 %v", rejected)
+	}
+	if req.Model != "m" || req.MaxTokens != 1000 {
+		t.Errorf("补丁该整个丢掉，实际 req = %+v", req)
+	}
+	failures := s.Failures()
+	if len(failures) != 1 {
+		t.Fatalf("该记一条失败，实际 %v", failures)
+	}
+	if !errors.Is(failures[0], ErrPatchScope) {
+		t.Errorf("该认出是契约违规，实际 kind=%v cause=%v", failures[0].Kind, failures[0].Cause)
+	}
+	// 日志里那一行就是 Failure.Error()，所以字段名必须出现在这里。
+	if msg := failures[0].Error(); !strings.Contains(msg, "messages") {
+		t.Errorf("失败文本该点出字段名，实际 %q", msg)
+	}
+}
+
+// 同一份补丁在阻断型插件上让请求失败，错误里同样点出字段。
+//
+// 与上一条只差 meta 里的 blocking：出口不同（这条走 internal/api 的
+// failUpstream，请求以错误结束），但「是哪个字段」这件事必须在两条出口上都拿得到。
+func TestApplyRequestBlockingUnappliedField(t *testing.T) {
+	s := sessionFor(t, `key:"p1", apiVersion:1, blocking:true,`,
+		`onRequest(){ return { body: { tools: [{ name: "t" }] } }; }`,
+		sandbox.Host{}, sandbox.Limits{})
+
+	req := &channel.Request{Model: "m", MaxTokens: 1000}
+	_, err := s.ApplyRequest(t.Context(), "r1", req, "m", "openai")
+	if err == nil {
+		t.Fatal("阻断型插件的补丁被拒时该返回错误")
+	}
+	if !errors.Is(err, ErrPatchScope) {
+		t.Errorf("错误里该能认出是契约违规，实际 %v", err)
+	}
+	if !strings.Contains(err.Error(), "tools") {
+		t.Errorf("错误里该点出字段名，实际 %q", err)
 	}
 	if req.Model != "m" || req.MaxTokens != 1000 {
 		t.Errorf("补丁该整个丢掉，实际 req = %+v", req)
