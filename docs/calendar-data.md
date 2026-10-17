@@ -10,7 +10,7 @@
 | `calendar_years` | 某地区某一年的同步状态：已同步 / 公告未发布 / 双源不一致 / 同步失败 |
 
 ```sh
-go run ./cmd/larkaxctl calendar import <文件>
+go run ./cmd/larkaxctl price calendar import <文件>
 ```
 
 **数据从哪来不在本命令的范围内。** 它只负责「读文件 → 写库」，文件由公开的

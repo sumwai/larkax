@@ -95,7 +95,7 @@ larkaxctl partition check  [--months N]   只读体检，有问题时非零退�
 ## 接调度器
 
 `ensure` 与 `check` 都是给外部调度器用的：**退出码就是告警信号**，0 表示
-这一次没有问题。这与 `larkaxctl reconcile` 的约定一致（见
+这一次没有问题。这与 `larkaxctl ledger reconcile` 的约定一致（见
 [docs/reconciliation.md](reconciliation.md)）。
 
 建议两条独立的调度：一条定期 `ensure` 铺满未来若干个月，一条定期 `check`

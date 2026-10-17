@@ -142,7 +142,7 @@ Anthropic 那套的错误体里只有一个机器可读的槽位，所以码放�
 |---|---|
 | 什么时候会卡 | 写回失败，或进程在流结束与写回之间被杀 |
 | 卡住的是谁 | 那个键。同键的后续请求会轮询到自己的超时，然后拿到 `409 idempotency_in_progress` |
-| 卡多久 | 到留存期（默认 24 小时）到期、`larkaxctl idempotency cleanup` 删掉它为止 |
+| 卡多久 | 到留存期（默认 24 小时）到期、`larkaxctl maintenance idempotency` 删掉它为止 |
 | 卡住时客户端看到什么 | 一次完整读完的流；此后同键请求在等到自己的超时之后拿到那条 409。真正的原因只在服务端一条日志里 |
 | 写回失败时响应还发不发 | 发。帧已经出去了，没有「扣住」这个选项——这里只记一条 ERROR 日志 |
 
@@ -159,8 +159,8 @@ Anthropic 那套的错误体里只有一个机器可读的槽位，所以码放�
 到期靠运维命令删，不在请求路径上删：
 
 ```sh
-larkaxctl idempotency cleanup             # 按留存期删除到期记录，打印删了多少条
-larkaxctl idempotency cleanup --dry-run   # 只数一遍，不删
+larkaxctl maintenance idempotency             # 按留存期删除到期记录，打印删了多少条
+larkaxctl maintenance idempotency --dry-run   # 只数一遍，不删
 ```
 
 留存期只在 `settings` 里配，命令行上不另设参数——同一件事有两个来源时，

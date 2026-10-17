@@ -153,7 +153,7 @@ larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled
 | 命令 | 为什么 |
 |---|---|
 | `migrate status` / `migrate version` | 输出是 goose 自己往 stdout 打的，要接 JSON 得先把它那份 logger 收住 |
-| `rotate --verify` | 与 `rotate --apply` 共用同一条命令，先按整条命令拒掉 |
+| `secret rotate --verify` | 与 `secret rotate --apply` 共用同一条命令，先按整条命令拒掉 |
 | `snapshot redact` | 它的 stdout 本来就是产物本身（脱敏后那段骨架的 JSON），套不上一层信封 |
 
 ### 加一条机器可读输出

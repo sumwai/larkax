@@ -15,13 +15,18 @@ import (
 	"github.com/sumwai/larkax/internal/config"
 )
 
-const rotateUsage = `larkaxctl rotate 轮换渠道凭证的主密钥。
+// rotateUsage 是 secret rotate 子命令的帮助。
+//
+// 它原先是一个顶层命令（larkaxctl rotate）的帮助，#475 把这个动词收进
+// secret 域：轮换的是渠道凭证的主密钥，与渠道管理是两件事，所以不挂在
+// channel 下面。旧路径留着，见末尾那一行。
+const rotateUsage = `larkaxctl secret rotate 轮换渠道凭证的主密钥。
 
 用法：
-  larkaxctl rotate                     干跑：列出会被改动的行，不写库（默认）
-  larkaxctl rotate --apply             轮换：逐批补上当前主密钥的数据密钥副本
-  larkaxctl rotate --verify            验证：每一行是否都含当前主密钥
-  larkaxctl rotate --batch-size <N>    每批处理的行数（默认 500）
+  larkaxctl secret rotate                     干跑：列出会被改动的行，不写库（默认）
+  larkaxctl secret rotate --apply             轮换：逐批补上当前主密钥的数据密钥副本
+  larkaxctl secret rotate --verify            验证：每一行是否都含当前主密钥
+  larkaxctl secret rotate --batch-size <N>    每批处理的行数（默认 500）
 
 轮换补的是「当前主密钥的一份数据密钥副本」，**不解密凭证正文**：每个信封
 本来就被旧主密钥包着，本命令给它再包一份新的。全程不需要明文凭证。
@@ -29,9 +34,9 @@ const rotateUsage = `larkaxctl rotate 轮换渠道凭证的主密钥。
 顺序（重要）：本命令只保证新主密钥的副本存在，**不退役旧主密钥**。
 
   1. 把新主密钥放进 LARKAX_MASTER_KEYS 的**首位**，旧密钥留在后面，重启服务；
-  2. larkaxctl rotate           看清有多少行要改；
-  3. larkaxctl rotate --apply   轮换（可中断、可重跑，重跑是幂等的）；
-  4. larkaxctl rotate --verify  退出码为 0 才说明全库每一行都含新主密钥；
+  2. larkaxctl secret rotate           看清有多少行要改；
+  3. larkaxctl secret rotate --apply   轮换（可中断、可重跑，重跑是幂等的）；
+  4. larkaxctl secret rotate --verify  退出码为 0 才说明全库每一行都含新主密钥；
   5. 到这一步才能把旧主密钥从 LARKAX_MASTER_KEYS 里去掉。
 
 第 4 步之前去掉旧主密钥，那些还没轮换到的行就再也解不开了。
@@ -50,6 +55,8 @@ const rotateUsage = `larkaxctl rotate 轮换渠道凭证的主密钥。
 
 它需要读到主密钥，所以要设好 LARKAX_MASTER_KEYS。这与 LARKAX_ROLE 无关：
 运维命令不属于任何角色，主密钥直接从这个变量读。
+
+旧路径：larkaxctl rotate 仍然可用，与 larkaxctl secret rotate 逐字相同。
 `
 
 // rotateTimeout 是这条命令连库与跑完整轮换的时间上限。
@@ -65,12 +72,16 @@ const rotateTimeout = 30 * time.Minute
 // 说明的是另一回事，那时把终端刷满反而看不清结论。
 const rotateRowLimit = 100
 
+// runRotate 跑主密钥轮换，命令是 larkaxctl secret rotate。
+//
+// 旧路径 larkaxctl rotate 接的也是这个函数（见 main.go 的 legacyCommands）：
+// 两条路径走的是同一段代码，输出因此逐字相同。
 func runRotate(args []string) error {
-	if err := jsonUnsupported("rotate"); err != nil {
+	if err := jsonUnsupported("secret rotate"); err != nil {
 		return err
 	}
 
-	fs := flag.NewFlagSet("rotate", flag.ContinueOnError)
+	fs := flag.NewFlagSet("secret rotate", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, rotateUsage) }
 	apply := fs.Bool("apply", false, "真正改写 credential_enc（不加这个参数只干跑）")
 	verify := fs.Bool("verify", false, "只验证每一行是否都含当前主密钥，不写库")
@@ -79,7 +90,7 @@ func runRotate(args []string) error {
 		return err
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("rotate 不接受位置参数，得到 %q：模式用 --apply 或 --verify 指定", fs.Arg(0))
+		return fmt.Errorf("secret rotate 不接受位置参数，得到 %q：模式用 --apply 或 --verify 指定", fs.Arg(0))
 	}
 	if *apply && *verify {
 		return errors.New("--apply 与 --verify 不能同时用：一个改写密文，一个只读")
@@ -154,7 +165,7 @@ func runRotateApply(ctx context.Context, rotator *channels.Rotator) error {
 	if err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintln(os.Stdout, "跑 larkaxctl rotate --verify 确认全库都补上了，再退役旧主密钥。")
+	_, _ = fmt.Fprintln(os.Stdout, "跑 larkaxctl secret rotate --verify 确认全库都补上了，再退役旧主密钥。")
 	return nil
 }
 
@@ -179,7 +190,7 @@ func runRotateVerify(ctx context.Context, rotator *channels.Rotator) error {
 // printRotateReport 打一次干跑或轮换的结果。
 //
 // 每一处写入的返回值都显式丢弃（`_, _ =`）：目标是 stdout，写不进去只可能是
-// 下游管道断了（`larkaxctl rotate | head` 就是最常见的一种），
+// 下游管道断了（`larkaxctl secret rotate | head` 就是最常见的一种），
 // 那种情况下重试与报错都没有意义，而它对这一轮的结论也毫无影响。
 func printRotateReport(w io.Writer, r *channels.RotateReport) {
 	if r == nil {
