@@ -380,6 +380,54 @@ func TestChatStreamPreAcceptFailureReturnsError(t *testing.T) {
 	}
 }
 
+// 不计费的流式失败同样要带上「打到了哪个渠道、用哪个上游名」。
+//
+// 非流式那条路由 TestUpstreamFailureCarriesEvidenceToRelease 钉着；流式这条
+// 路有两种不计费的失败，它们走的是**不同的**收尾出口（前者直接
+// settleAndFail + finish，后者在 pumpStream 里），两条都要写进失败账单行
+// ——它们都真的打到了渠道 1。没有这个值，失败行上那两列是 NULL，与「确实
+// 没有渠道可记」在库里逐列相同。
+func TestChatStreamFailureCarriesPlacementToRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		exec *scriptedExecutor
+	}{
+		{
+			name: "上游接受请求之前就失败",
+			exec: &scriptedExecutor{preErr: map[int64]error{
+				1: &channel.ErrUpstream{StatusCode: 500, Retryable: false},
+			}},
+		},
+		{
+			name: "接受之后没吐字就断开",
+			exec: &scriptedExecutor{script: map[int64][]channel.StreamEvent{
+				1: {{Kind: "error", Err: errors.New("上游在首片之前断开")}},
+			}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			useStreamExecutor(h, tc.exec)
+
+			res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
+			if err == nil {
+				// 收尾在 pumpStream 里，读完流才等得到释放。
+				collect(t, res)
+			}
+			if len(h.reservations.released) != 1 {
+				t.Fatalf("不计费的结局应释放预留一次，实际 %d 次", len(h.reservations.released))
+			}
+			rel := h.reservations.released[0].req
+			if rel.ChannelID != 1 {
+				t.Errorf("释放时带的 channel_id = %d，期望 1", rel.ChannelID)
+			}
+			if rel.UpstreamModel != "gpt-4o" {
+				t.Errorf("释放时带的 upstream_model = %q，期望 gpt-4o", rel.UpstreamModel)
+			}
+		})
+	}
+}
+
 // 接受请求之前失败**可以**换渠道：第一个 503，第二个接上。
 func TestChatStreamFailsOverBeforeAccept(t *testing.T) {
 	h := newHarness(t)

@@ -66,7 +66,9 @@ func (g *Gateway) Decide(ctx context.Context, req pipeline.Request, decision *sy
 	if err != nil {
 		return nil, err
 	}
-	defer h.finish(ctx)
+	// 与 Chat 同一个位置、同一个理由：选路之前的兜底只管「预留一定被放开」，
+	// 那时还没有「打到了哪儿」可记（见 handle.abort）。
+	defer h.abort(ctx)
 
 	// 这条路径**不采请求快照**：脱敏器的允许表按 channel.Request 的形状建
 	// （见 internal/snapshot 的 allowlist.go），这条表面没有对应的根。
@@ -74,17 +76,16 @@ func (g *Gateway) Decide(ctx context.Context, req pipeline.Request, decision *sy
 	// gateway 与 snapshotwire 之间再加一层按通用 map 脱敏的接口，那是另一片。
 
 	call := &decideCall{exec: g.Decider, req: decision}
-	routed, err := g.Router.ChatModel(ctx, call, req.CanonicalModel, h.candidates)
-	// 与 Chat 同一个位置、同一个理由：选路一返回就把「打到了哪儿」记进
-	// h.req，失败那条路才写得进账单（见 handle.routedTo）。
-	if routed != nil {
-		h.routedTo(routed.Channel, routed.UpstreamModel)
-	}
+	routed, placed, err := g.routeDecide(ctx, call, req.CanonicalModel, h.candidates)
+	// 与 Chat 同一个位置、同一个理由：选路一返回就拿到「打到了哪儿」，
+	// 下面每一条收尾路径都要收它（见 placement）。它排在兜底之后注册，
+	// 所以正常路径上先跑的是这一个。
+	defer h.finish(ctx, placed)
 	if err != nil {
 		// 与 Chat 同一处置：健康度先记（失败的调用正是它要记的那些），
 		// 再走一次结算得出「不计费」的结论，预留由 defer 的 finish 释放。
 		g.recordAttempts(ctx, attemptsOf(routed), nil)
-		return nil, h.settleAndFail(ctx, err, pipeline.Outcome{UpstreamFailed: true})
+		return nil, h.settleAndFail(ctx, placed, err, pipeline.Outcome{UpstreamFailed: true})
 	}
 
 	out := pipeline.Outcome{
@@ -94,7 +95,7 @@ func (g *Gateway) Decide(ctx context.Context, req pipeline.Request, decision *sy
 	}
 	g.recordAttempts(ctx, routed.Attempts, &out.Usage)
 
-	charge, err := g.finishCharge(ctx, h, out)
+	charge, err := g.finishCharge(ctx, h, placed, out)
 	if err != nil {
 		return nil, err
 	}
@@ -106,6 +107,15 @@ func (g *Gateway) Decide(ctx context.Context, req pipeline.Request, decision *sy
 		Charge:        charge,
 		Attempts:      routed.Attempts,
 	}, nil
+}
+
+// routeDecide 选路并执行一次决策请求。
+//
+// 它与 routeChat / routeStream 同一个形状：结果与「打到了哪儿」一起交回，
+// 于是每条收尾路径拿到的 placement 都来自选路本身（见 placement）。
+func (g *Gateway) routeDecide(ctx context.Context, call *decideCall, canonicalModel string, candidates []route.Candidate) (*route.Result, placement, error) {
+	res, err := g.Router.ChatModel(ctx, call, canonicalModel, candidates)
+	return res, placementOf(res), err
 }
 
 // decideCall 把一次决策调用适配成 route.Executor。

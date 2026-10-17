@@ -406,19 +406,20 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 	if err != nil {
 		return nil, err
 	}
-	defer res.finish(ctx)
+	// 选路返回之前没有正常返回路径——只有 panic 会走到这里——所以这个兜底
+	// 按零值 placement 收尾：那时确实还没有「打到了哪儿」。它守的是
+	// 「预留一定被放开」这条不变量（见 handle.abort）。
+	defer res.abort(ctx)
 
 	// 请求快照在**调上游之前**采集：出错要能复现「当时发出去的是什么」。
 	// 位置在 begin 之后而不是里面，见 begin 的注释。
 	g.snapshotAsync(ctx, upstream, "request", req.UserID)
 
-	routed, err := g.routeChat(ctx, upstream, res.candidates, req.CanonicalModel, hooks)
-	// 选路一返回就把「打到了哪儿」记下来，成功失败都一样：下面每一条
-	// 收尾路径（结算与释放）都从 h.req 上读它，而失败那一条**没有别的
-	// 机会**再记一次（见 handle.routedTo）。
-	if routed != nil {
-		res.routedTo(routed.Channel, routed.UpstreamModel)
-	}
+	routed, placed, err := g.routeChat(ctx, upstream, res.candidates, req.CanonicalModel, hooks)
+	// 选路一返回就把「打到了哪儿」拿到手，成功失败都一样：下面每一条
+	// 收尾路径（结算与释放）都要收它，漏传编不过（见 placement）。
+	// 它排在兜底那个 defer 之后注册，所以正常路径上先跑的是这一个。
+	defer res.finish(ctx, placed)
 	if err != nil {
 		// 没有可用的渠道，或者全部失败。**不计费**。
 		//
@@ -431,7 +432,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 		// 健康度先记：失败的调用正是它要记的那些，而下面那次结算
 		// 只动钱。
 		g.recordAttempts(ctx, attemptsOf(routed), nil)
-		return nil, res.settleAndFail(ctx, err, pipeline.Outcome{UpstreamFailed: true})
+		return nil, res.settleAndFail(ctx, placed, err, pipeline.Outcome{UpstreamFailed: true})
 	}
 
 	out := pipeline.Outcome{
@@ -452,7 +453,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 			// 上游其实成功了、钱也花掉了，但仍然不向调用方收：他拿到的
 			// 是一个错误，而不是那份回答。把一次没送出去的回答记成消费，
 			// 在对账上表现为一笔解释不通的扣费。
-			return nil, res.settleAndFail(ctx, hookErr, pipeline.Outcome{UpstreamFailed: true})
+			return nil, res.settleAndFail(ctx, placed, hookErr, pipeline.Outcome{UpstreamFailed: true})
 		}
 	}
 
@@ -471,12 +472,12 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 		if hookErr != nil {
 			// 阻断型插件失败：这次请求失败。与非流式那条路上的 onResponse
 			// 同一个处置——响应还没发出去，所以「失败」有可表达的对象。
-			return nil, res.settleAndFail(ctx, hookErr, pipeline.Outcome{UpstreamFailed: true})
+			return nil, res.settleAndFail(ctx, placed, hookErr, pipeline.Outcome{UpstreamFailed: true})
 		}
 		out.Usage = usage
 	}
 
-	charge, err := g.finishCharge(ctx, res, out)
+	charge, err := g.finishCharge(ctx, res, placed, out)
 	if err != nil {
 		return nil, err
 	}
@@ -491,6 +492,9 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 }
 
 // routeChat 选路并执行一次非流式请求。
+//
+// 它同时交回「打到了哪儿」（placement）——那是每条收尾路径的必填参数
+// （见 placement）。结果与它在同一处取出，于是两者不会分叉。
 //
 // 有插件挂载点时走的是两步：**先筛**（Select），把筛过的候选交给插件，
 // 再拿它给的渠道去执行（ChatPlan）。这两步必须由 route 自己做——本包
@@ -507,18 +511,20 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 // 评分最高的那个。这一层不依赖两份顺序一致：插件给回来的只是一个 channelId，
 // 由 ChatPlan 按 ID 在**内核自己那份** plan 上找（见 route.Plan.pinFirst）。
 // 反过来说，任何「插件看到的下标 == 内核的下标」的假设都不成立。
-func (g *Gateway) routeChat(ctx context.Context, upstream *channel.Request, candidates []route.Candidate, canonicalModel string, hooks Hooks) (*route.Result, error) {
+func (g *Gateway) routeChat(ctx context.Context, upstream *channel.Request, candidates []route.Candidate, canonicalModel string, hooks Hooks) (*route.Result, placement, error) {
 	if hooks.OnRoute == nil {
-		return g.Router.Chat(ctx, g.Executor, upstream, candidates, canonicalModel)
+		res, err := g.Router.Chat(ctx, g.Executor, upstream, candidates, canonicalModel)
+		return res, placementOf(res), err
 	}
 	plan := g.Router.Select(candidates, canonicalModel)
 	pin, err := hooks.OnRoute(ctx, plan.Candidates)
 	if err != nil {
 		// 阻断型插件失败：这次请求失败。一个候选都没试过，也没有任何
 		// 上游调用发生过，所以不计费（调用方按「上游失败」处置）。
-		return nil, err
+		return nil, placement{}, err
 	}
-	return g.Router.ChatPlan(ctx, g.Executor, upstream, plan, pin)
+	res, err := g.Router.ChatPlan(ctx, g.Executor, upstream, plan, pin)
+	return res, placementOf(res), err
 }
 
 // handle 是内部的一次请求状态。
@@ -538,6 +544,12 @@ type handle struct {
 	// 否则「预留了但没结算」的那些分支会留下一笔永久冻着的钱，
 	// 而那种余额在界面上表现为「用户说他的钱不见了」。
 	settled bool
+
+	// finished 表示收尾（结算 + 释放）已经跑过。
+	//
+	// 它让 abort 与 finish 两条 defer 可以同时挂着而不重复收尾：选路之前
+	// 那个兜底在正常路径上也会执行，而那时 finish 已经把该做的做完了。
+	finished bool
 
 	// charged 表示账单已经**成功交回调用方**，即结算事务真的跑过。
 	//
@@ -559,7 +571,69 @@ type handle struct {
 	failure *pipeline.UpstreamFailure
 }
 
-// routedTo 记下这次请求**实际打到了哪儿**：哪个渠道、用哪个上游模型名。
+// placement 是这次请求**实际打到了哪儿**：哪一个渠道、用哪个上游模型名。
+//
+// # 它为什么是一个值，而不是选路之后的一行赋值
+//
+// 这两个值要同时写进成功与失败的账单行：成功走 finishCharge，失败走
+// settleAndFail 与 finish（释放）。早先它们由选路返回后调一次 routedTo
+// 记进 h.req，再由那三处去读——那是一条**位置约定**。新增一个入口时忘了
+// 那一行，它那条路的失败账单行又是两列 NULL，而且不会有任何东西报出来：
+// 失败行上 NULL 与「确实没有渠道可记」在库里逐列相同。
+//
+// 现在它是那三处的**必填参数**，并且由选路的包装交回（见 routeChat /
+// routeStream / routeDecide）。忘了把它交给任何一条收尾路径，就编不过——
+// 「漏记」不再是一种可表达的写法。
+//
+// # 零值
+//
+// 零值表示「没有打到任何渠道」：候选集为空、别名翻不出来、context 已取消。
+// 那时两列留 NULL 是正确答案，不是漏记（见
+// TestReleaseWithoutUpstreamCallCarriesNoEvidence）。
+//
+// # 新增入口时
+//
+// 新的 Chat / ChatStream / Decide 形态要照三件事做：
+//
+//  1. 选路经一个同时交回 placement 的包装（routeChat / routeStream /
+//     routeDecide），不要直接调 g.Router 再把结果自己拼起来；
+//  2. 把这个值交给入口的**每一条**收尾路径：成功结算（finishCharge）、
+//     不计费的结算（settleAndFail）与释放（finish）。
+//  3. 第 2 步漏了会编不过；第 1 步漏了只会得到零值，而那在「一个候选中
+//     都没选中」时也是正确答案——所以新入口至少要有一条用例覆盖「上游
+//     失败」，断言释放时带的渠道与上游名不是零值（照
+//     TestUpstreamFailureCarriesEvidenceToRelease 写）。
+type placement struct {
+	channelID     int64
+	upstreamModel string
+}
+
+// placementOf 从一次非流式选路的结果里取出 placement。
+//
+// 结果为 nil 时返回零值：一个候选都没选中，确实没有渠道可记。
+// 失败路径上结果通常不是 nil（route 会带上最后尝试的那个渠道），这正是
+// 「上游回了 4xx 的那一次明明打到了某个确定的渠道」能写进账单的原因。
+func placementOf(r *route.Result) placement {
+	if r == nil {
+		return placement{}
+	}
+	return placement{channelID: r.Channel.ID, upstreamModel: r.UpstreamModel}
+}
+
+// streamPlacementOf 与 placementOf 同一件事，只是流式结果的类型不同。
+func streamPlacementOf(r *route.StreamResult) placement {
+	if r == nil {
+		return placement{}
+	}
+	return placement{channelID: r.Channel.ID, upstreamModel: r.UpstreamModel}
+}
+
+// routedTo 把 placement 记到这次请求上。
+//
+// 它只有三个调用点，都是**钱的出口**：settleAndFail、finishCharge、finish。
+// 三个都要收 placement 才调得起来（见 placement 的注释），所以「忘了记」
+// 在编译期就不成立，而不是靠「选路返回后记得调一次」这种位置约定。
+// **新增一个入口时要做什么，见 placement 的「新增入口时」一节。**
 //
 // # 它为什么记在 req 上
 //
@@ -571,18 +645,9 @@ type handle struct {
 // 不记的话，成功那一行两列有值而失败那一行恒为 NULL——恰恰是「某个渠道对
 // 某批模型全在报错」时最需要它们的地方没有它们。**这不是「没选中渠道就不记」**：
 // 上游回了 4xx 的那一次明明打到了某个确定的渠道。
-//
-// # 什么时候可以不记
-//
-// 选路一次都没选出渠道时不记（候选集为空、别名翻不出来、context 已取消），
-// 两列于是留 NULL——那是「没有渠道可记」，不是「漏了」。所以调用点要判
-// 路由结果是不是 nil。
-//
-// 位置固定在**选路返回之后、任何结算与释放之前**：它必须在 finishCharge
-// 与 release 之前跑完，而那两处分别在成功与失败两条路上。
-func (h *handle) routedTo(ch channel.Channel, upstreamModel string) {
-	h.req.ChannelID = ch.ID
-	h.req.UpstreamModel = upstreamModel
+func (h *handle) routedTo(p placement) {
+	h.req.ChannelID = p.channelID
+	h.req.UpstreamModel = p.upstreamModel
 }
 
 // # 它为什么不收上游请求
@@ -642,7 +707,15 @@ func (g *Gateway) begin(ctx context.Context, req pipeline.Request) (*handle, err
 // 它也是**唯一**释放预留的地方。放在这里而不是各个失败分支上，理由与
 // handle 本身存在的理由相同：散在分支上的规则，漏一处就是一笔永久冻着
 // 的钱，而漏掉的那一处不会有任何东西报出来。
-func (h *handle) finish(ctx context.Context) {
+//
+// placed 是这次请求打到了哪儿，释放把它一起交给落库层（见 placement）。
+// 它是必填参数：调用点从选路结果上拿到它，忘了传编不过。
+func (h *handle) finish(ctx context.Context, placed placement) {
+	if h.finished {
+		return
+	}
+	h.finished = true
+	h.routedTo(placed)
 	if !h.settled {
 		// 走到这里说明在结算之前就返回了（客户端断开、context 取消等）。
 		// 按「上游失败」结算：不计费。
@@ -655,7 +728,22 @@ func (h *handle) finish(ctx context.Context) {
 	h.release(ctx)
 }
 
+// abort 是选路**之前**的兜底收尾。
+//
+// 选路返回之前没有正常返回路径（只有 panic 会走到这里），那时还没有
+// 「打到了哪儿」可记，所以按零值 placement 收尾——与它取代的那条
+// defer 是同一个位置，守的也是同一条不变量：预留一定要被放开。
+//
+// finish 跑过之后它是空操作（见 handle.finished）：正常路径上两条 defer
+// 都会执行，重复释放不该发生。
+func (h *handle) abort(ctx context.Context) {
+	h.finish(ctx, placement{})
+}
+
 // settleAndFail 结算一次失败的请求，并把原始错误原样交回调用方。
+//
+// placed 是这次请求打到了哪儿（见 placement）：失败账单行上的渠道与上游名
+// 靠它写进去。它是必填参数，调用点从选路结果上拿到它。
 //
 // 失败不计费，所以这里用 UpstreamFailed。预留的释放交给 finish——
 // 它是**每一个**返回路径的收尾点（见 finish 的注释），在这里再调一次
@@ -679,8 +767,9 @@ func (h *handle) finish(ctx context.Context) {
 // 永远是 nil。决策那条路（见 decide.go）的产出是 *DecideResult，那个签名
 // 直接把这件事变成了编译错误。去掉结果那一位之后，「失败没有结果」是
 // 签名上看得见的事。
-func (h *handle) settleAndFail(ctx context.Context, cause error, out pipeline.Outcome) error {
+func (h *handle) settleAndFail(ctx context.Context, placed placement, cause error, out pipeline.Outcome) error {
 	h.settled = true
+	h.routedTo(placed)
 	out.UpstreamStatus, out.ErrorCode = upstreamEvidence(cause)
 	h.settleFailure(ctx, out)
 	return cause
@@ -826,16 +915,20 @@ func (h *handle) reportReleaseFailure(ctx context.Context, cause error) {
 
 // finishCharge 结算一次成功的请求。
 //
+// placed 是这次请求打到了哪儿（见 placement）：成功账单行上的渠道与上游名
+// 靠它写进去，与 settleAndFail / finish 收的是同一个值。
+//
 // 基准是 h.req，不是调用方手上那份请求：BillingRequestID 是在 begin 里
 // 赋给 h.req 的，外层那份看不到它——而少了它，账本分录就挂不回这次账单。
 //
-// 「实际选中了谁」也取自 h.req：渠道 id 与上游模型名由选路那一步记上去
+// 「实际选中了谁」也取自 h.req：渠道 id 与上游模型名由 placed 记上去
 // （见 handle.routedTo），这里只是把它收窄成**一个**渠道——规则按实际选中的
 // 那个匹配，而不是按预留时的一整个候选集（见 pipeline.Reserve）。
 // 别名不在这里重查一次：事后重查答不出「当时发的是什么」——配置可能已经
 // 改过，而那正是账单要能回答的问题。
-func (g *Gateway) finishCharge(ctx context.Context, h *handle, out pipeline.Outcome) (*pipeline.Charge, error) {
+func (g *Gateway) finishCharge(ctx context.Context, h *handle, placed placement, out pipeline.Outcome) (*pipeline.Charge, error) {
 	h.settled = true
+	h.routedTo(placed)
 
 	// 结算用**实际选中的渠道**：渠道级与商家级规则按它匹配。
 	//
