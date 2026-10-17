@@ -154,8 +154,8 @@ func countExpired(ctx context.Context, db *sql.DB, retention time.Duration) (int
 // （见 LESSONS.md 第 16 条）。
 func printCleanup(verb string, n int64) {
 	if n == 0 {
-		fmt.Printf("%s：0 条（没有到期记录）\n", verb)
+		_, _ = fmt.Fprintf(humanStdout(), "%s：0 条（没有到期记录）\n", verb)
 		return
 	}
-	fmt.Printf("%s %d 条\n", verb, n)
+	_, _ = fmt.Fprintf(humanStdout(), "%s %d 条\n", verb, n)
 }

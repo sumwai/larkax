@@ -186,7 +186,7 @@ const usageNotes = `
 calendar import），各条命令的 --help 末尾写着它们：那些写法只是不再是正式写法。
 日历数据文件的格式与约束见：larkaxctl price calendar --help。
 
-全局选项：
+全局选项（写在子命令前后都认）：
   --env-file <路径>                        指定要加载的 .env 文件。不给时从当前目录
                                            往上找，不越过 git 仓库根，用最近的那一份。
                                            两种情况都只填补尚未设置的环境变量，
@@ -195,10 +195,37 @@ calendar import），各条命令的 --help 末尾写着它们：那些写法只
                                            表格与状态符。json：stdout 只有一份
                                            JSON，提示与警告走 stderr，给管道下游
                                            的 jq 与探针用。-o json 是它的简写。
-                                           两个都写在子命令前后都认。取值不合法时
-                                           报参数错，不静默回落成表格。
+                                           -o 与 --format 一样，写在子命令前后都认。
+                                           取值不合法时报参数错，不静默回落成表格。
                                            目前接上的是读类子命令，清单见
                                            docs/cli-output.md 的「机器可读输出」。
+  --verbose                                打细节。-v 是它的简写。目前接上的是
+                                           doctor（每项多打一段检查范围、读到的数、
+                                           表，以及每条问题的完整原文）；其余命令
+                                           接受它、输出不变。
+  --quiet                                  压掉全部「给人看」的输出：-q 是它的简写。
+                                           成功时一声不吭，只在出错时说话，给脚本
+                                           与守护调用用。--format json 那一份不受
+                                           影响（脚本要的正是它），致命错误也不受
+                                           影响（那一句由本程序打到 stderr）。
+                                           与 --verbose 不能同时给。
+
+短选项（白名单，就下面这六个，其余的选项一律写全名）：
+  -u  --user        -m  --model       -o  --format
+  -v  --verbose     -q  --quiet       -V  --version
+
+-o 是行业惯例（kubectl、gh），-u / -m 是天天要写的那两个实体（Key 的归属人、
+模型名），-v / -q / -V 是三个不带值的开关（写错了也写不坏什么）。**安全、财务
+与边界参数不开短选项**——上游渠道、凭证来源、外部单据号、速率上限、生效截止
+这几类，写短了容易看错也容易按错，它们要的是把全名完整写出来。根页面上不列
+这些名字（列了就成了「根页面写着子命令的参数」，见 usage_test.go 那条用例），
+各条命令自己的 --help 里有。
+
+**-V 打版本、-v 是详细模式**，与多数工具相反：版本号是偶尔才问一次的，详细模式
+是天天要补一个的，-v 给后者。
+
+上面两条约束（短选项只有这六个、-V 与 -v 的分工）都各有用例钉着
+（见 short_flags_test.go）。
 
 退出码：
   0  成功
@@ -286,6 +313,22 @@ func run() error {
 	}
 	outputFormat = format
 
+	// 两个开关也扫全表，理由与上面两个相同。它们之间的先后不影响结果。
+	verboseOutput, args, err = takeVerboseFlag(args)
+	if err != nil {
+		return err
+	}
+	quietOutput, args, err = takeQuietFlag(args)
+	if err != nil {
+		return err
+	}
+	// 两个一起给是**参数错**，不是「后者赢」：它们要的是相反的东西，而按顺序
+	// 取一个的表现是「我明明加了 -v，怎么什么都没多打」——那种错要人查半天。
+	if verboseOutput && quietOutput {
+		return usageErr(errors.New(
+			"--verbose 与 --quiet 不能同时给：一个要每一项的细节，一个要一声不吭"))
+	}
+
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usage)
 		return usageErr(errors.New("缺少子命令"))
@@ -296,7 +339,7 @@ func run() error {
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
-	case "-v", "--version":
+	case "-V", "--version":
 		name, rest = "version", nil
 	}
 
@@ -329,7 +372,7 @@ func runVersion(args []string) error {
 		doc["version"] = version
 		return emitJSON(os.Stdout, doc, nil)
 	}
-	fmt.Println(version)
+	_, _ = fmt.Fprintln(humanStdout(), version)
 	return nil
 }
 
@@ -452,7 +495,7 @@ func runReconcile(args []string) error {
 	// err 一并交给打印函数：它决定这一轮的汇总行是「跑完了」还是「没跑完」。
 	// 只看报告分不出这两种情况——中途失败时 CheckedWallets 也是 0、Findings
 	// 也是空的，与「跑完了、范围内确实没有钱包」逐字相同。
-	printReconcileReport(os.Stdout, report, err)
+	printReconcileReport(humanStdout(), report, err)
 	if err != nil {
 		return err
 	}
@@ -625,7 +668,7 @@ func runMigrate(args []string) error {
 		if err := goose.RunContext(context.Background(), "create", nil, migrationsDir, rest[0], "sql"); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "已生成到 %s/\n", migrationsDir)
+		_, _ = fmt.Fprintf(humanStderr(), "已生成到 %s/\n", migrationsDir)
 		return nil
 	}
 

@@ -82,6 +82,24 @@ explain 回答「这次请求按哪条规则计价」：它把**全部适用**�
 现在。--user 与 --channel 是这次请求的商家与渠道，都不给时按平台级规则算。
 一条适用的都没有时非零退出，与请求路径上的处置一致（那是拒绝服务，不是
 「按 0 元计」）。
+
+# 别名
+
+下面几个写法仍然可用，只是不再是正式写法（用法行里只写规范名）：
+
+  -u <用户 ID 或用户名>   同 --user，create / update / explain 都认
+  --owner                 同 --user
+  --from <RFC3339>        同 --effective-from
+  --to <RFC3339>          同 --effective-to
+  --no-expire             同 --clear-effective-to
+
+**--channel 与 --effective-to 不开简写**：-c 在别的命令行里既可能是 channel
+也可能是 config、count，挑错作用域会把一条规则挂到另一个渠道上；--effective-to
+是边界参数，写短了容易看错。这两个约束有用例钉着（见 short_flags_test.go）。
+
+--from / --to 在这一组命令上表示**生效区间的起止**。ledger verify 上的
+--from / --to 是它自己的规范名（查账区间），与这里不冲突：两条命令不重名，
+也没有一条命令同时认这两种含义。
 `
 
 func runPrice(args []string) error {
@@ -151,7 +169,7 @@ func runPriceCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	printCreatedRule(os.Stdout, os.Stderr, id, req)
+	printCreatedRule(humanStdout(), humanStderr(), id, req)
 	return nil
 }
 
@@ -166,11 +184,14 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, string, error) {
 	name := fs.String("name", "", "规则名，列举与告警都靠它指认一条规则")
 	expression := fs.String("expr", "", "规则表达式源码")
 	owner := legacyStringFlag(fs, "user", "owner", "", "商家的用户 ID 或用户名，merchant 作用域必填")
+	stringAlias(fs, owner, "u", sameAs("user"))
 	channelID := fs.Int64("channel", 0, "渠道 ID，channel 作用域必填")
 	models := fs.String("models", "", "适用的规范模型名，逗号分隔，留空表示全部")
 	priority := fs.Int("priority", 0, "优先级，同一作用域里越大越优先")
 	effectiveFrom := fs.String("effective-from", "", "生效时刻（RFC3339），留空表示从现在起")
+	stringAlias(fs, effectiveFrom, "from", sameAs("effective-from"))
 	effectiveTo := fs.String("effective-to", "", "失效时刻（RFC3339），留空表示不过期")
+	stringAlias(fs, effectiveTo, "to", sameAs("effective-to"))
 	disabled := fs.Bool("disabled", false, "建一条停用的规则")
 	if err := fs.Parse(args); err != nil {
 		return pricing.CreateRequest{}, "", err
@@ -259,7 +280,7 @@ func runPriceUpdate(args []string) error {
 	if err := pricing.NewAdmin(db).Update(ctx, req); err != nil {
 		return err
 	}
-	fmt.Printf("已更新计价规则 %d。\n", req.ID)
+	_, _ = fmt.Fprintf(humanStdout(), "已更新计价规则 %d。\n", req.ID)
 	return nil
 }
 
@@ -317,13 +338,19 @@ func runPriceSetEnabled(args []string, enable bool) error {
 		}); err != nil {
 			return err
 		}
-		fmt.Printf("计价规则 %d %s。\n", id, done)
+		_, _ = fmt.Fprintf(humanStdout(), "计价规则 %d %s。\n", id, done)
 		return nil
 	})
 }
 
 // parsePriceUpdate 解析 update 的参数。
 //
+// 这几项各有别名，判「这次给没给」时要把别名一起查（见 flagGiven）。
+var (
+	effectiveFromFlagNames = []string{"effective-from", "from"}
+	effectiveToFlagNames   = []string{"effective-to", "to"}
+)
+
 // 与 parsePriceCreate 同一个形状，多带一个 ownerRef 返回值：--user 要连库才能
 // 解析成用户 ID，而参数解析必须在连库之前完成。这里只做「有没有给、给了什么」。
 func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
@@ -333,13 +360,17 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 	scope := fs.String("scope", "", "作用域：platform、merchant、channel")
 	name := fs.String("name", "", "规则名")
 	owner := legacyStringFlag(fs, "user", "owner", "", "商家的用户 ID 或用户名；0 表示改成不挂商家")
+	stringAlias(fs, owner, "u", sameAs("user"))
 	channelID := fs.Int64("channel", 0, "渠道 ID；0 表示改成不挂渠道")
 	models := fs.String("models", "", "适用的规范模型名，逗号分隔，给空串表示全部")
 	expression := fs.String("expr", "", "规则表达式源码")
 	priority := fs.Int("priority", 0, "优先级，同一作用域里越大越优先")
 	effectiveFrom := fs.String("effective-from", "", "生效时刻（RFC3339）")
+	stringAlias(fs, effectiveFrom, "from", sameAs("effective-from"))
 	effectiveTo := fs.String("effective-to", "", "失效时刻（RFC3339）")
+	stringAlias(fs, effectiveTo, "to", sameAs("effective-to"))
 	clearEffectiveTo := fs.Bool("clear-effective-to", false, "把失效时刻清成不过期")
+	boolAlias(fs, clearEffectiveTo, "no-expire", sameAs("clear-effective-to"))
 	// --enable / --disable 是**旧形态**（见 priceUsage 的「启停是独立的二级
 	// 动词」那一节）：留着是为了不让已经在跑的脚本坏掉，新写的命令用
 	// price enable / price disable。它们不出现在用法行里。
@@ -377,7 +408,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 	// --user 给了空串就拒，而不是当成 0：它多半是一个没展开的 shell 变量，
 	// 而 0 在这里是有含义的（改成不挂商家）——静默地按 0 处理会把
 	// 「我本来想挂某个商家」变成一条平台价，而那条规则照样匹配得上。
-	if legacyGiven(given, "user", "owner") && strings.TrimSpace(*owner) == "" {
+	if flagGiven(given, userFlagNames...) && strings.TrimSpace(*owner) == "" {
 		fs.Usage()
 		return pricing.UpdateRequest{}, "", errors.New(
 			"--user 不能是空串（多半是变量没展开）：要改成不挂商家写 --user 0")
@@ -390,7 +421,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 		req.Scope = scope
 		changes++
 	}
-	if legacyGiven(given, "user", "owner") {
+	if flagGiven(given, userFlagNames...) {
 		ownerRef = *owner
 		changes++
 	}
@@ -423,7 +454,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 	// 生效下界清不掉（那一栏非空），所以给了空串要当场拒：静默地当成
 	// 「不改这一项」会让一次只想改下界的调用变成「什么都没改」，
 	// 而它看起来像一次成功的修改。
-	if given["effective-from"] {
+	if flagGiven(given, effectiveFromFlagNames...) {
 		if strings.TrimSpace(*effectiveFrom) == "" {
 			fs.Usage()
 			return pricing.UpdateRequest{}, "", errors.New(
@@ -436,7 +467,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 		req.EffectiveFrom = from
 		changes++
 	}
-	if given["effective-to"] {
+	if flagGiven(given, effectiveToFlagNames...) {
 		if strings.TrimSpace(*effectiveTo) == "" {
 			fs.Usage()
 			return pricing.UpdateRequest{}, "", errors.New(
@@ -481,7 +512,9 @@ func runPriceExplain(args []string) error {
 	fs := flag.NewFlagSet("price explain", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, priceUsage) }
 	model := fs.String("model", "", "这次请求的规范模型名")
+	stringAlias(fs, model, "m", sameAs("model"))
 	owner := legacyStringFlag(fs, "user", "owner", "", "这次请求的商家（用户 ID 或用户名），留空表示未选定")
+	stringAlias(fs, owner, "u", sameAs("user"))
 	channelID := fs.Int64("channel", 0, "这次请求的渠道 ID，留空表示未选定")
 	at := fs.String("at", "", "问的是哪一刻（RFC3339），留空表示现在")
 	if err := fs.Parse(args); err != nil {
@@ -538,7 +571,7 @@ func runPriceExplain(args []string) error {
 	if jsonOutput() {
 		return emitJSON(os.Stdout, priceExplainDoc(q, rules), nil)
 	}
-	printRuleExplain(os.Stdout, q, rules)
+	printRuleExplain(humanStdout(), q, rules)
 	return nil
 }
 
@@ -571,7 +604,7 @@ func runPriceList(args []string) error {
 	if jsonOutput() {
 		return emitJSON(os.Stdout, priceListDoc(rules), nil)
 	}
-	printRuleList(os.Stdout, rules)
+	printRuleList(humanStdout(), rules)
 	return nil
 }
 
