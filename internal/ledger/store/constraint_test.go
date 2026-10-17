@@ -124,9 +124,6 @@ func TestSaveReservationForeignKeyIsConstraintConflict(t *testing.T) {
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
 	req := testRequest(ctx, t, db, userID, requestID)
-	// 选一个 int4 装得下的值：INSERT 里写的是 NULLIF($3, 0)，PostgreSQL
-	// 由字面量 0 把 $3 推成 int4，更大的值会在驱动编码阶段就失败，
-	// 走不到外键那一步。
 	req.ChannelID = 2000000000 // channels 里没有这一行
 
 	_, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "10", "CNY"))
@@ -143,6 +140,47 @@ func TestSaveReservationForeignKeyIsConstraintConflict(t *testing.T) {
 
 	// 分类之外，现场依据要原样保留：这张用例造的是哪条约束，只有驱动
 	// 错误上的名字能回答。
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("错误链里没有驱动的原始错误：%v", err)
+	}
+	if pgErr.Code != pgForeignKeyViolation {
+		t.Errorf("SQLSTATE = %q，期望 %q", pgErr.Code, pgForeignKeyViolation)
+	}
+	if pgErr.ConstraintName != billingRequestsChannelConstraint {
+		t.Errorf("约束名 = %q，期望 %q", pgErr.ConstraintName, billingRequestsChannelConstraint)
+	}
+}
+
+// TestReservationChannelIDBeyondInt4 钉住 channel_id 的参数类型推演。
+//
+// INSERT 里写的是 NULLIF($3, 0)：字面量 0 是 int4，而 $3 在解析期是
+// unknown，于是 PostgreSQL 把 $3 推成 int4——尽管 channels.id 与
+// billing_requests.channel_id 都是 bigint。类型一旦是 int4，超过 2^31-1
+// 的渠道 id 在**驱动编码阶段**就失败，走不到外键校验；而 schema 明确
+// 允许那些值，这是一处「schema 说可以、实现说不行」的不一致。
+//
+// 字面量标成 0::bigint 之后 $3 保持 bigint，超范围的值才能走到它该到的
+// 那一步：channels 里没有这一行，所以是外键冲突。
+func TestReservationChannelIDBeyondInt4(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	requestID := reqID(t)
+	req := testRequest(ctx, t, db, userID, requestID)
+	req.ChannelID = 3000000000 // > 2^31-1，且在 int64 范围内；channels 里没有这一行
+
+	_, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "10", "CNY"))
+	if err == nil {
+		t.Fatal("指向不存在的渠道应当被外键挡下")
+	}
+	if !errors.Is(err, ErrConstraintViolation) {
+		t.Errorf("错误链里没有 ErrConstraintViolation（超 int4 的值应当走到外键，而不是在驱动编码阶段失败）：%v", err)
+	}
+
+	// 定位到具体那一条：判据既要认出这是约束冲突，也要留下现场。
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
 		t.Fatalf("错误链里没有驱动的原始错误：%v", err)

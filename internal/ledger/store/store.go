@@ -367,14 +367,19 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 		return 0, diagnoseFreezeFailure(ctx, tx, key)
 	}
 
+	// NULLIF 的第二个实参写成 0::bigint 而不是裸 0：NULLIF 要求两个实参
+	// 同型，裸 0 是 int4，会把解析期还是 unknown 的 $3 / $8 一并推成 int4。
+	// 那两列（channel_id、pricing_rule_id）在 schema 里是 bigint，推窄之后
+	// int4 范围外的 id 会在**驱动编码阶段**失败，走不到外键校验。
+	// 见 TestReservationChannelIDBeyondInt4。
 	var id int64
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO billing_requests
 			(request_id, user_id, api_key_id, channel_id, canonical_model, protocol,
 			 streamed, reserved_amount, reserved_asset, status,
 			 pricing_rule_id, pricing_expr_snapshot, started_at)
-		VALUES ($1, $2, $12, NULLIF($3, 0), $4, $5, $11, $6::numeric, $7, 'pending',
-		        NULLIF($8, 0), NULLIF($9, ''), $10)
+		VALUES ($1, $2, $12, NULLIF($3, 0::bigint), $4, $5, $11, $6::numeric, $7, 'pending',
+		        NULLIF($8, 0::bigint), NULLIF($9, ''), $10)
 		RETURNING id`,
 		// 协议由入口设置（见 pipeline.Request.Protocol）。这里**不填默认值**：
 		// 写死一个会让另一条入口的账单全部记错，而这张表正是事后按协议统计的
@@ -663,12 +668,14 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request, failure *pipe
 	// 它写在**同一条** UPDATE 里，理由与 status 那条相同：分两次写会有一个
 	// 窗口让这一行已经是 released 而「打到了哪儿」还没写上。
 	failureStatus, failureCode := failureColumns(failure)
+	// channel_id 的 NULLIF 实参标成 bigint，理由同 SaveReservation——
+	// 该列是 bigint，裸 0 会把参数推成 int4。
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE billing_requests
 		   SET status = 'released', settled_at = now(),
 		       upstream_status = NULLIF($2, 0),
 		       error_code = NULLIF($3, ''),
-		       channel_id = NULLIF($4, 0),
+		       channel_id = NULLIF($4, 0::bigint),
 		       upstream_model = NULLIF($5, '')
 		 WHERE id = $1`,
 		id, failureStatus, failureCode, req.ChannelID, req.UpstreamModel); err != nil {
@@ -774,13 +781,14 @@ func failureColumns(failure *pipeline.UpstreamFailure) (status int, code string)
 // 所以 `error_code IS NOT NULL` 不能当成「上游出过问题的请求」的判据，
 // 它答的只是「这次没向上游收钱，是不是因为上游这一侧出了事」。
 func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *pipeline.Charge) (bool, error) {
+	// channel_id 是 bigint，NULLIF 的实参标成 bigint（理由见 SaveReservation）。
 	res, err := tx.ExecContext(ctx, `
 		UPDATE billing_requests
 		   SET status = 'settled',
 		       final_amount = $2::numeric,
 		       computed_amount = $5::numeric,
 		       settled_at = now(),
-		       channel_id = NULLIF($3, 0),
+		       channel_id = NULLIF($3, 0::bigint),
 		       upstream_model = NULLIF($6, ''),
 		       client_canceled_at = CASE WHEN $4 THEN now() END
 		 WHERE request_id = $1 AND status = 'pending'`,
@@ -799,13 +807,14 @@ func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *
 }
 
 func insertEntries(ctx context.Context, tx *sql.Tx, entries []ledger.Entry) error {
+	// 两个关联 id 列都是 bigint，NULLIF 的实参标成 bigint（理由见 SaveReservation）。
 	for _, e := range entries {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO ledger_entries
 				(txn_id, account, asset, amount, entry_type,
 				 billing_request_id, payout_id, memo, created_at)
 			VALUES ($1, $2, $3, $4::numeric, $5,
-			        NULLIF($6, 0), NULLIF($7, 0), NULLIF($8, ''), now())`,
+			        NULLIF($6, 0::bigint), NULLIF($7, 0::bigint), NULLIF($8, ''), now())`,
 			string(e.TxnID), e.Account.String(), string(e.Asset), e.Amount.String(),
 			string(e.EntryType), int64OrZero(e.BillingRequestID), int64OrZero(e.PayoutID),
 			e.Memo)
