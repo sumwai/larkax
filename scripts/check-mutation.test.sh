@@ -78,6 +78,24 @@ EOF
   chmod +x "$path"
 }
 
+# 带存活明细的桩件：gremlins 每测一个变异会打一行
+# `LIVED <类型> at <文件>:<行>:<列>`（前面可能带缩进）。脚本要把它们抄下来，
+# 否则「对存活的变异逐个判断」这句话没有可判断的对象。
+make_gremlins_with_survivors() {
+  local path="$1"
+  cat > "$path" <<'EOF'
+#!/usr/bin/env bash
+# 桩件：汇总行之外还带存活明细
+echo " LIVED CONDITIONALS_BOUNDARY at money.go:103:8"
+echo "  LIVED ARITHMETIC_BASE at money.go:54:25"
+echo "Killed: 8, Lived: 2, Not covered: 3"
+echo "Timed out: 0, Not viable: 0, Skipped: 0"
+echo "Test efficacy: 80.00%"
+echo "Mutator coverage: 100.00%"
+EOF
+  chmod +x "$path"
+}
+
 # run <桩件> <锁文件> [筛选项...]
 # 退出码由调用者立刻取走：$? 必须在下一句就读。
 #
@@ -267,6 +285,30 @@ if ! command -v flock >/dev/null 2>&1; then
   grep -q 'rm -rf ' "$last_out" || bad "残留锁 —— 提示里应给出清理命令"
 else
   echo "（跳过残留锁一条：本机有 flock，锁由内核释放，不存在残留锁）"
+fi
+
+# 15. 存活清单要打出来，并且**带包名与位置**——只打计数的话，
+#     AGENTS.md 那句「对存活的变异逐个判断」没有可判断的对象。
+stub_surv="$tmp/gremlins-survivors"
+make_gremlins_with_survivors "$stub_surv"
+run "$stub_surv" "$tmp/lock15" internal/money
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "带存活明细 —— 存活不是失败，应通过，实际退出码 $rc"; dump; fi
+grep -q '存活的变异' "$last_out" || bad "带存活明细 —— 应打出存活清单"
+# 桩件的输出前面带缩进，抄下来时要归一化成「包名 + 类型 + 位置」。
+grep -q 'internal/money  CONDITIONALS_BOUNDARY at money.go:103:8' "$last_out" \
+  || bad "带存活明细 —— 清单里应有「包名 + 类型 + 位置」（缩进要去掉）"
+grep -q 'internal/money  ARITHMETIC_BASE at money.go:54:25' "$last_out" \
+  || bad "带存活明细 —— 第二条存活也应列出"
+
+# 16. 没有存活变异时，不该凭空打出一节空清单。
+run "$stub_all_killed" "$tmp/lock16" internal/money
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "无存活 —— 应通过，实际退出码 $rc"; dump; fi
+if grep -q '存活的变异' "$last_out"; then
+  bad "无存活 —— 不该打出空的存活清单"
+else
+  ok
 fi
 
 # ── 结果 ──────────────────────────────────────────────────────────────────

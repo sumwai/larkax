@@ -182,6 +182,13 @@ checked=0
 printf '%-20s %8s %7s %8s  %s\n' "包" "killed" "存活" "超时" "efficacy"
 printf '%s\n' "──────────────────────────────────────────────────────────────"
 
+# 存活清单。收尾时打出来——AGENTS.md 要求「对存活的变异逐个判断」，
+# 而只打一个计数的话那句话没法执行：数得出来，看不了。
+SURVIVORS=$(mktemp -t check-mutation-survivors.XXXXXX)
+# 这条 trap 会盖掉上面退化锁路径设的那一条，所以两条要一起写在这里。
+# 用 flock 时 $LOCK_FILE.d 不存在，`rm -rf` 是空操作。
+trap 'rm -f "$SURVIVORS"; rm -rf "$LOCK_FILE.d"' EXIT
+
 for pkg in "${PKGS[@]}"; do
   selected "$pkg" || continue
   checked=$((checked + 1))
@@ -228,6 +235,15 @@ for pkg in "${PKGS[@]}"; do
 
   printf '%-20s %8s %7s %8s  %s\n' "$pkg" "$killed" "$lived" "$timed" "$eff"
 
+  # gremlins 每测一个变异就打一行 `LIVED <类型> at <文件>:<行>:<列>`
+  # （前面可能带缩进），把它抄下来。**不解析 JSON**：那要再引一个解析器，
+  # 而这里要的只是「哪几个活了」，gremlins 自己已经打出来了。
+  printf '%s\n' "$out" | awk -v pkg="$pkg" '
+    /^[[:space:]]*LIVED[[:space:]]/ {
+      sub(/^[[:space:]]*LIVED[[:space:]]+/, "")
+      print pkg "  " $0
+    }' >>"$SURVIVORS"
+
   # 一个变异都没测到：这不是「这个包质量不行」，是「这一次没有结果」。
   # 最省事的判据是 Killed 与 Lived 同时为 0——Not covered 有多少个都不算数。
   if [ "$killed" -eq 0 ] && [ "$lived" -eq 0 ]; then
@@ -253,4 +269,15 @@ if [ "$failed" -ne 0 ]; then
   echo "有包的结果不可信或没跑成，见上面的 ⚠。"
   exit 1
 fi
-echo "全部跑成。存活清单要逐条人看——等价变异与不可达分支都该放过。"
+echo "全部跑成。"
+
+# 存活清单打出来。AGENTS.md 写着「对存活的变异逐个判断，只有等价变异与
+# 不可达分支可以放过」——**只打计数时那句话没法执行**：看不了就判不了，
+# 于是「逐个判断」实际退化成「看一个百分比」。清单本身是判据的一部分。
+#
+# 这一节不进退出码：存活不是失败（判过之后可以放过），失败的是「没跑成」。
+if [ -s "$SURVIVORS" ]; then
+  echo
+  echo "── 存活的变异（逐条判断：等价变异 / 不可达分支才可放过，放过时在测试里写一行说明）──"
+  cat "$SURVIVORS"
+fi
