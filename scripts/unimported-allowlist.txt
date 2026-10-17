@@ -26,8 +26,13 @@
 #   命令      scripts/check-unimported.sh
 #             （入口由 cmd/ 自动发现，当前是 ./cmd/larkax 与 ./cmd/larkaxctl）
 #   工具      go（版本随 go.mod；go list 的包枚举口径由它决定）
-#   条数      1，与脚本里的 MAX_ENTRIES_DEFAULT 一致
+#   条数      0，与脚本里的 MAX_ENTRIES_DEFAULT 一致
 #
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
-internal/plugin/host    | gap | #216 宿主能力的组装（host.Build）目前只有插件树自己的用例在调，生产侧还没有调用点
+#
+# 现在这份清单是**空的**，而这是对的：装配层接上插件注册表之后
+# `internal/assembly` 会 import `internal/plugin/host`，唯一那条
+# （#216 的 gap）随之消失。空的含义是「仓库里每个包都有人 import」，
+# 不是「这份清单没人维护了」——判据是门禁自己打的那行
+# 「无人 import 的包：0 个」。0 是这份清单能达到的最小值。

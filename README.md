@@ -39,8 +39,9 @@ What works today:
 
 Not wired yet:
 
-- The plugin system — `internal/plugin` exists and is tested, but nothing
-  constructs a plugin registry yet
+- Three of the five plugin hooks — plugins are loaded from the `plugins` table at
+  startup and `onRequest` / `onResponse` run on the request path, but `onRoute`,
+  `onStream` and `onUsage` have no call sites yet
 - Payments and payouts — the ledger transactions exist, the entry points do not
 - The web console (`web/`)
 - Most of the metrics worth having — `/metrics` is served, but only the
@@ -161,8 +162,8 @@ database or a network: `money` (arithmetic) → `billing` (usage × price) →
 `internal/gateway` holds the order of a whole request — reserve before calling
 upstream, do not switch channels once a stream has emitted, never let the
 snapshot path slow down the request. `internal/assembly` builds it into the
-service binary; `internal/plugin` is not wired yet. Still absent: `plugins/`
-and `web/`.
+service binary, including the plugin registry it loads from the database. Still
+absent: `plugins/` (bundled plugin sources) and `web/`.
 
 ## Versioning
 

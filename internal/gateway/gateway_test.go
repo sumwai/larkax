@@ -333,7 +333,7 @@ func upstreamRequest() *channel.Request {
 func TestChatSucceeds(t *testing.T) {
 	h := newHarness(t)
 
-	res, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestReservationSavedBeforeUpstreamCall(t *testing.T) {
 		reserved: func() int { return reservedAt },
 	}
 
-	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +403,7 @@ func TestChatUpstreamFailureIsNotBilled(t *testing.T) {
 		1: &channel.ErrUpstream{StatusCode: 400, Retryable: false},
 	}
 
-	res, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err == nil {
 		t.Fatal("上游失败应返回错误")
 	}
@@ -427,7 +427,7 @@ func TestUpstreamFailureReleasesReservation(t *testing.T) {
 		1: &channel.ErrUpstream{StatusCode: 500, Retryable: false},
 	}
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err == nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err == nil {
 		t.Fatal("上游失败应返回错误")
 	}
 	if len(h.reservations.released) != 1 {
@@ -455,7 +455,7 @@ func TestReleaseWorksWithCanceledRequestContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // 客户端已经断开
 
-	if _, err := h.gw.Chat(ctx, request(), upstreamRequest()); err == nil {
+	if _, err := h.gw.Chat(ctx, request(), upstreamRequest(), Hooks{}); err == nil {
 		t.Fatal("ctx 已取消时不该成功")
 	}
 	if len(h.reservations.saved) != 1 {
@@ -476,7 +476,7 @@ func TestReleaseWorksWithCanceledRequestContext(t *testing.T) {
 func TestSuccessDoesNotRelease(t *testing.T) {
 	h := newHarness(t)
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(h.reservations.released) != 0 {
@@ -502,7 +502,7 @@ func TestSuccessWithoutSettlementStoreReleasesReservation(t *testing.T) {
 	// 这里要测的正是那一种。
 	h.gw.Settlements = nil
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(h.reservations.released) != 1 {
@@ -520,7 +520,7 @@ func TestSettlementFailureReleasesReservation(t *testing.T) {
 	h := newHarness(t)
 	h.settlements.err = errors.New("账本写不进去")
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err == nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err == nil {
 		t.Fatal("结算落库失败必须报出来")
 	}
 	if len(h.reservations.released) != 1 {
@@ -537,7 +537,7 @@ func TestReleaseFailureDoesNotMaskCause(t *testing.T) {
 		1: &channel.ErrUpstream{StatusCode: 500, Retryable: false},
 	}
 
-	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 	var up *channel.ErrUpstream
 	if !errors.As(err, &up) {
 		t.Errorf("返回的应是上游错误本身，得到 %v", err)
@@ -559,7 +559,7 @@ func TestReleaseFailureIsReportedToSink(t *testing.T) {
 		1: &channel.ErrUpstream{StatusCode: 500, Retryable: false},
 	}
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err == nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err == nil {
 		t.Fatal("上游失败应返回错误")
 	}
 
@@ -591,7 +591,7 @@ func TestReleaseFailureIsReportedToSink(t *testing.T) {
 func TestSuccessDoesNotReportReleaseFailure(t *testing.T) {
 	h := newHarness(t)
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
 		t.Fatal(err)
 	}
 	// 异步上报若被误触发，这里要给它冒出来的机会。
@@ -613,7 +613,7 @@ func TestReleaseFailureSinkOptional(t *testing.T) {
 		1: &channel.ErrUpstream{StatusCode: 500, Retryable: false},
 	}
 
-	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 	var up *channel.ErrUpstream
 	if !errors.As(err, &up) {
 		t.Errorf("没配上报口时返回的仍应是上游错误本身，得到 %v", err)
@@ -635,7 +635,7 @@ func TestReleaseFailureReportDoesNotBlockRequest(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+		_, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 		done <- err
 	}()
 
@@ -655,7 +655,7 @@ func TestNoCandidatesDoesNotReserve(t *testing.T) {
 	h := newHarness(t)
 	h.candidates.cands = nil
 
-	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 	if !errors.Is(err, route.ErrNoCandidates) {
 		t.Errorf("期望 ErrNoCandidates，得到 %v", err)
 	}
@@ -673,7 +673,7 @@ func TestCandidateErrorDoesNotReserve(t *testing.T) {
 	h := newHarness(t)
 	h.candidates.err = errors.New("数据库挂了")
 
-	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err == nil {
 		t.Fatal("应报错")
 	}
@@ -687,7 +687,7 @@ func TestReservationSaveFailureStopsBeforeUpstream(t *testing.T) {
 	h := newHarness(t)
 	h.reservations.err = errors.New("写库失败")
 
-	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err == nil {
 		t.Fatal("应报错")
 	}
@@ -705,7 +705,7 @@ func TestBrokenRuleStopsBeforeUpstream(t *testing.T) {
 	h := newHarness(t)
 	h.rules.err = pipeline.ErrNoRule
 
-	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err == nil {
 		t.Fatal("应报错")
 	}
@@ -719,7 +719,7 @@ func TestSettlementSaveFailureIsReported(t *testing.T) {
 	h := newHarness(t)
 	h.settlements.err = errors.New("账本写不进去")
 
-	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	_, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err == nil {
 		t.Fatal("结算落库失败必须报出来，不能吞掉")
 	}
@@ -739,7 +739,7 @@ func TestFailoverToSecondChannel(t *testing.T) {
 		1: &channel.ErrUpstream{StatusCode: 503, Retryable: true},
 	}
 
-	res, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("应换渠道成功: %v", err)
 	}
@@ -774,7 +774,7 @@ func TestReserveSeesWholeCandidateSet(t *testing.T) {
 	b.OwnerUserID = 22
 	h.candidates.cands = []route.Candidate{a, b}
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -818,7 +818,7 @@ func TestSettlementUsesActualChannel(t *testing.T) {
 		seenChannelID = req.ChannelID
 	}}
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
 		t.Fatal(err)
 	}
 	if seenChannelID != 9 {
@@ -843,7 +843,7 @@ func TestSnapshotDoesNotBlockRequest(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+		_, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 		done <- err
 	}()
 
@@ -862,7 +862,7 @@ func TestRedactionFailureDropsSnapshot(t *testing.T) {
 	h := newHarness(t)
 	h.redactor.reqErr = errors.New("脱敏器出错")
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
 		t.Fatalf("脱敏失败不该影响请求: %v", err)
 	}
 	// 给 goroutine 一点时间
@@ -878,7 +878,7 @@ func TestSnapshotOptional(t *testing.T) {
 	h.gw.Redactor = nil
 	h.gw.Snapshots = nil
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
 		t.Fatalf("没配快照不该报错: %v", err)
 	}
 }
@@ -893,7 +893,7 @@ func TestRequestSnapshotTakenBeforeUpstream(t *testing.T) {
 		seen:    &redactsAtCall,
 	}
 
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); err != nil {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
 		t.Fatal(err)
 	}
 	if redactsAtCall != 1 {
@@ -909,7 +909,7 @@ func TestRequestSnapshotRecordsRequestingUser(t *testing.T) {
 	h := newHarness(t)
 	req := request()
 
-	if _, err := h.gw.Chat(context.Background(), req, upstreamRequest()); err != nil {
+	if _, err := h.gw.Chat(context.Background(), req, upstreamRequest(), Hooks{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -947,7 +947,7 @@ func (c *countingRedactExecutor) ChatStream(ctx context.Context, ch channel.Chan
 func TestNoExecutor(t *testing.T) {
 	h := newHarness(t)
 	h.gw.Executor = nil
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest()); !errors.Is(err, ErrNoExecutor) {
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); !errors.Is(err, ErrNoExecutor) {
 		t.Errorf("期望 ErrNoExecutor，得到 %v", err)
 	}
 }
@@ -959,7 +959,7 @@ func TestMissingUsageYieldsZeroAmount(t *testing.T) {
 	h := newHarness(t)
 	h.executor.resp = &channel.Response{UpstreamModel: "m"} // 没有 Usage
 
-	res, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -974,7 +974,7 @@ func TestMissingUsageYieldsZeroAmount(t *testing.T) {
 // 用量来源要标明是实测。
 func TestUsageSourceIsMeasured(t *testing.T) {
 	h := newHarness(t)
-	res, err := h.gw.Chat(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatal(err)
 	}

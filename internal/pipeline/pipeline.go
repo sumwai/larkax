@@ -282,9 +282,15 @@ type Reservation struct {
 // 而不是靠调用方传一个 bool：那几种情形在计费上的差别很大，
 // 而它们在上游调用那一侧都表现为「出错了」。
 type Outcome struct {
-	// UpstreamFailed 为 true 表示上游根本没成功返回。
+	// UpstreamFailed 为 true 表示**这次结算不计费**。
 	//
-	// 不计费。但要落一条记录——「这个请求失败了」本身是排查的依据。
+	// 今天有两个来源：上游根本没成功返回；以及上游成功了、响应也拿到了，
+	// 但它在交给调用方之前被插件拦下（上游那笔钱花了，却不向调用方收——
+	// 他拿到的是一个错误，而不是那份回答）。两者在计费上的处置完全一样，
+	// 所以共用一个开关；在这一层分不出是哪一个（见 observe 的
+	// UnbilledSettlements）。
+	//
+	// 不计费，但仍然要落一条记录——「这个请求失败了」本身是排查的依据。
 	UpstreamFailed bool
 
 	// UpstreamStatus 与 ErrorCode 是失败时的依据，供事后核对

@@ -218,6 +218,36 @@ type Executor interface {
 	route.StreamExecutor
 }
 
+// Hooks 是一次请求挂上来的插件钩子。零值表示这次请求不跑插件。
+//
+// # 形状为什么在这里、实现为什么在别处
+//
+// 声明在本包、实现在 internal/plugin：那个包不认识本包，所以由本包声明
+// 它要调什么，装配处把两边对上（编译期就对上——api 把它当参数传进来）。
+// 反过来让本包 import 插件包也能编译，但那样网关就依赖了插件包的注册表、
+// 沙箱与配置，而它只该知道「有一个函数要在这一步被调」。
+//
+// # 为什么是参数而不是本包的字段
+//
+// 会话是**一次请求一个**的（它持有 moejs 运行时，且必须单 goroutine 用完），
+// 而 Gateway 是长驻对象、被所有请求共用。挂在字段上就等于让并发请求共用
+// 一个会话——那是数据竞争，而且是那种只在有插件时出现的竞争。
+//
+// # 为什么 ChatStream 没有它
+//
+// 流式那条路上的挂载点是 onStream（逐块决定），它还没接上。这里不先占一个
+// 用不上的参数：一个收下不用的参数会让「流式也有插件钩子」看起来已经成立。
+type Hooks struct {
+	// OnResponse 在非流式响应拿到之后、结算之前调用。
+	//
+	// 返回错误表示插件声明了阻断：**这次请求失败**。契约里唯一的阻断旋钮是
+	// 插件自己声明的 meta.blocking，不为任何 hook 位置开特例。
+	//
+	// 改的是要发给调用方的那份响应（补丁就地应用）。结算读的用量与它无关
+	// ——ResponsePatch 里没有 usage。
+	OnResponse func(ctx context.Context, resp *channel.Response) error
+}
+
 // ErrNoExecutor 表示没有配置调上游的能力。
 var ErrNoExecutor = errors.New("未配置上游执行器")
 
@@ -259,7 +289,9 @@ type Result struct {
 //
 // 顺序与 ChatStream 完全相同，差别只在用量从哪来：这里来自上游的响应体，
 // 那里来自读完的整条事件流。两条路共用 begin / finish / finishCharge。
-func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *channel.Request) (*Result, error) {
+//
+// hooks 为这次请求的插件挂载点，零值表示不跑插件（见 Hooks）。
+func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *channel.Request, hooks Hooks) (*Result, error) {
 	if g.Executor == nil {
 		return nil, ErrNoExecutor
 	}
@@ -291,6 +323,23 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 		UsageSource: tokens.SourceMeasured,
 	}
 	g.recordAttempts(ctx, routed.Attempts, &out.Usage)
+
+	// 插件在**结算之前**跑：它改的是要交给调用方的那份正文，而结算读的
+	// 用量与它无关（ResponsePatch 里没有 usage）。位置选在这里而不是更靠后，
+	// 是为了让「响应最终长什么样」在交给结算之前就定下来——结算之后再改，
+	// 账单对应的那份响应就与调用方拿到的不是同一个了。
+	if hooks.OnResponse != nil {
+		if hookErr := hooks.OnResponse(ctx, routed.Response); hookErr != nil {
+			// 阻断型插件失败：这次请求失败。与上游失败走同一条路——
+			// 不计费、预留由 defer 的 finish 释放。
+			//
+			// 上游其实成功了、钱也花掉了，但仍然不向调用方收：他拿到的
+			// 是一个错误，而不是那份回答。把一次没送出去的回答记成消费，
+			// 在对账上表现为一笔解释不通的扣费。
+			return res.settleAndFail(ctx, hookErr, pipeline.Outcome{UpstreamFailed: true})
+		}
+	}
+
 	charge, err := g.finishCharge(ctx, res, routed.Channel, out)
 	if err != nil {
 		return nil, err
