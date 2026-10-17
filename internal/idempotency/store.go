@@ -56,10 +56,15 @@ func ClaimInTx(ctx context.Context, tx *sql.Tx, c *Claim, reservationID int64) e
 		return err
 	}
 
+	// NULLIF 的第二个实参写成 0::bigint 而不是裸 0：NULLIF 要求两个实参
+	// 同型，裸 0 是 int4，会把解析期还是 unknown 的 $4 一并推成 int4。
+	// billing_request_id 在 schema 里是 bigint，推窄之后 int4 范围外的
+	// id 会在**驱动编码阶段**失败，走不到外键校验。
+	// 见 TestClaimBillingRequestIDBeyondInt4。
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO idempotency_keys
 			(api_key_id, key, request_hash, state, billing_request_id)
-		VALUES ($1, $2, $3, 'in_progress', NULLIF($4, 0))
+		VALUES ($1, $2, $3, 'in_progress', NULLIF($4, 0::bigint))
 		ON CONFLICT (api_key_id, key) DO NOTHING`,
 		c.APIKeyID, c.Key, c.Hash[:], reservationID)
 	if err != nil {
