@@ -199,7 +199,7 @@ func TestEmitJSONFillsExitCodeFromCause(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := emitJSON(&buf, jsonDoc(jsonFailed), tc.cause); !errors.Is(err, tc.cause) && err != tc.cause {
+			if err := emitJSON(&buf, jsonDoc(jsonFailed), tc.cause); !errors.Is(err, tc.cause) {
 				t.Fatalf("emitJSON 应当把 cause 原样返回，得到 %v", err)
 			}
 			var got struct {

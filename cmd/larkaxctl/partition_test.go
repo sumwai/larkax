@@ -507,13 +507,13 @@ func TestPartitionCheckDocCarriesEachCondition(t *testing.T) {
 	if items[0] != "usage_events_202610" {
 		t.Errorf("缺失的分区名不对：%#v", items)
 	}
-	if problemsOut, ok := doc["problems"].([]any); !ok || len(problemsOut) != len(problems) {
+	if problemsOut, okProblems := doc["problems"].([]any); !okProblems || len(problemsOut) != len(problems) {
 		t.Errorf("problems 有 %v 条，想要 %d 条", doc["problems"], len(problems))
 	}
 
 	// 兜底分区的行数按**表名**给：脚本要拿它去查那几行是什么。
-	defaults, ok := doc["default_partitions"].(map[string]any)
-	if !ok {
+	defaults, okDefaults := doc["default_partitions"].(map[string]any)
+	if !okDefaults {
 		t.Fatalf("default_partitions 不是对象：%#v", doc["default_partitions"])
 	}
 	if defaults[store.UsageEventDefaultPartition] != float64(3) {

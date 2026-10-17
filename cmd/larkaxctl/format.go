@@ -30,13 +30,12 @@ const (
 	formatJSON                    // 机器可读：stdout 只有一份 JSON
 )
 
-// String 把格式打成命令行上的那个取值。
-func (f formatKind) String() string {
-	if f == formatJSON {
-		return "json"
-	}
-	return "table"
-}
+// 这一档**不给 formatKind 写 String()**：`--format` 在命令行上的两个取值
+// 由 takeFormatFlag 直接与字面量比，没有任何地方要把 formatKind 打成字符串。
+// 先前有过一个 String()，check-deadcode 报它不可达（`format.go|formatKind.String`）
+// ——它与 fmt 的 Stringer 接口一样只在 AST 上看不到调用点，所以这里选择删掉，
+// 而不是去把白名单的 MAX_ENTRIES 往上调：留一个没人调的方法只换来测试失败
+// 信息里多一个词。将来真要用到再就地加回来。
 
 // outputFormat 是本次运行选定的输出格式。
 //
