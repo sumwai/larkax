@@ -22,35 +22,56 @@ import (
 // **每次调用都续一次 EXPIRE**，取值是两倍窗口（见 keyTTL）。每次都续，而不是
 // 只在第一次写的时候设一次，换来两件事：
 //
-//   - 自愈。上一次调用没设上过期时间（下面那一段）时，下一次调用会补上。
+//   - 自愈。键在别处被设丢过期时间时（见下），下一次调用会补上。
 //   - 键的存活时间与它最后一次被用到的时间挂钩，而不是与窗口起点挂钩。
 //
-// # INCR 成功而 EXPIRE 失败
+// # 计数是一步
 //
-// 这是这条路径上最值得单独说的一种失败：命令是分两次发的，第一次落库、
-// 第二次没落库，于是留下一个**没有过期时间**的键。它记的是这个窗口的次数，
-// 键名里带着窗口起点，所以它在下一个窗口里不会再被读到——但**它永远留着**，
-// 既不会被读到也不会自己消失，是这一层唯一会无限增长的形态。
+// 加一与设过期合成**一次 EVAL**（见 incrScript），而不是先 INCR 再 EXPIRE 两条
+// 命令、失败再补偿删除。分两步时那两条命令之间有两条缝：
 //
-// 处置是补偿删除（见 compensate）：删掉之后取到的计数从 1 重新开始（判定偏松，
-// 与降级同一个方向），而不是留一个永远不消失的键。删不掉也不会永久卡住这个
-// Key（键名带窗口起点，下一个窗口是另一个键），代价是 Redis 里多一个孤键。
+//   - 进程死在两条命令中间（INCR 落了库、EXPIRE 还没发出去）；
+//   - EXPIRE 失败，而随后的补偿删除也失败。
+//
+// 两种都留下一个**没有过期时间的键**（TTL = -1）：它记的是这个窗口的次数、
+// 键名带窗口起点所以不会再被读到，但**永远占着内存**——这是这一层唯一会无限
+// 增长的形态。合成一次 EVAL 之后，Redis 保证两条命令要么都生效、要么都不生效，
+// 两条缝一起消失，补偿删除也随之不需要了。
+//
+// 副产品是热路径的往返数从 2 降到 1：一次判定只发这一条命令。
 type RedisStore struct {
-	// cmds 是这条路径用到的命令集。抽成一个窄接口是为了让「INCR 成功、
-	// EXPIRE 失败」那条路径可以被测到：真实 Redis 上没法只让其中一条失败，
+	// cmds 是这条路径用到的命令集。抽成一个窄接口是为了让「存储命令失败」
+	// 那条路径可以被测到：真实 Redis 上没法稳定地造出「连得上但报错」，
 	// 而它恰恰是这里最需要被钉住的失败。*redis.Client 满足它。
 	cmds redisCmds
 }
 
-// redisCmds 是 RedisStore 用到的命令。方法集与 *redis.Client 一致，
-// 所以生产侧直接填客户端，测试侧填一个只让指定命令失败的替身。
+// redisCmds 是 RedisStore 用到的命令。方法集是 *redis.Client 的子集，
+// 所以生产侧直接填客户端，测试侧填一个受控的替身。
+//
+// 只有三个方法：计数那条路径只有一条命令（Eval），另两条是只读查询（Get）
+// 与探活（Ping）。
 type redisCmds interface {
-	Incr(ctx context.Context, key string) *redis.IntCmd
-	Expire(ctx context.Context, key string, expiration time.Duration) *redis.BoolCmd
-	Del(ctx context.Context, keys ...string) *redis.IntCmd
+	Eval(ctx context.Context, script string, keys []string, args ...any) *redis.Cmd
 	Get(ctx context.Context, key string) *redis.StringCmd
 	Ping(ctx context.Context) *redis.StatusCmd
 }
+
+// incrScript 是热路径上那一次原子计数：加一、续上过期时间，返回加后的值。
+//
+// 为什么合成一次 EVAL、它堵住的那两条缝是什么，见 RedisStore 的「计数是一步」
+// 一段。
+//
+// **续期每次都做**，与合并之前逐字一致：每次调用都把键的过期时间设回两倍窗口
+// （ARGV[1] 是秒数）。只在 `TTL < 0` 时才设是**不够**的——那样一个持续被用的
+// 键会在**第一次写入**之后的两倍窗口处准时消失，键的寿命就与第一次写入挂钩，
+// 而不是与最后一次使用挂钩。`TTL < 0` 时当然也要设（那是自愈），但自愈只是
+// 「每次续」的一个子集，不是它的替代；这里无条件 EXPIRE，于是两者都成立。
+const incrScript = `
+local n = redis.call('INCR', KEYS[1])
+redis.call('EXPIRE', KEYS[1], ARGV[1])
+return n
+`
 
 // OpenRedis 按 DSN 造一个共享计数器。
 //
@@ -66,7 +87,7 @@ func OpenRedis(dsn string) (*RedisStore, error) {
 		return nil, fmt.Errorf("解析 Redis DSN 失败: %w", err)
 	}
 	// 关掉重试（-1 而不是 0，0 表示用库的默认值 3 次）。理由与超时同一个：
-	// 一次判定只做那两条命令，重试把时间花在等待上，而这段时间是用户请求在等。
+	// 一次判定只做那一条命令，重试把时间花在等待上，而这段时间是用户请求在等。
 	// 抖一下的正确处置是降级——那一次判定偏松——而不是让请求多等几百毫秒。
 	opt.MaxRetries = -1
 
@@ -94,36 +115,18 @@ func (redisLogAdapter) Printf(ctx context.Context, format string, args ...any) {
 	slog.Default().DebugContext(ctx, "redis 客户端", "msg", fmt.Sprintf(format, args...))
 }
 
-// Incr 把 key 的计数加一并返回加后的值。
+// Incr 原子地把 key 的计数加一、续上过期时间，并返回加后的值。
+//
+// 一次调用就是**一次往返**（一条 EVAL，见 incrScript）。命令失败时返回错误，
+// 调用方据此按「存储不可用」降级（见 Limiter.Allow），于是这一次判定不会拿
+// 一个可能已经不对的数去拒人。又因为两条命令是原子的，失败时存储里不会留下
+// 任何需要清理的残留——没有「INCR 成功而 EXPIRE 失败」这个中间态。
 func (s *RedisStore) Incr(ctx context.Context, key string) (int64, error) {
-	n, err := s.cmds.Incr(ctx, key).Result()
+	n, err := s.cmds.Eval(ctx, incrScript, []string{key}, int(keyTTL/time.Second)).Int64()
 	if err != nil {
-		return 0, err
-	}
-	if err := s.cmds.Expire(ctx, key, keyTTL).Err(); err != nil {
-		// 走到这里说明计数已经加上去了、过期时间没设上（见类型注释）。
-		// 先补偿删除，再把错误报上去——调用方会按「存储不可用」降级，
-		// 于是这一次判定不会用一个可能已经不对的数去拒人。
-		s.compensate(ctx, key)
-		return 0, fmt.Errorf("INCR 之后续 EXPIRE 失败: %w", err)
+		return 0, fmt.Errorf("原子计数失败: %w", err)
 	}
 	return n, nil
-}
-
-// compensate 尽力删掉那个没有过期时间的键。
-//
-// 它从一个**掐掉取消信号**的 context 派生新的超时，而不是直接复用传进来那个：
-// EXPIRE 失败最常见的原因正是那个 context 已经到点了（超时），复用它的话这次
-// 删除必然也发不出去。WithoutCancel 保留值、去掉取消，于是父 context 的截止
-// 时间不影响这里，而它仍然是同一个调用链上的子 context。
-//
-// 失败只记账不报错：删不掉时上面那条错误照样要报上去，而这里没有第二个
-// 处置可做——键名带窗口起点，下一个窗口用的是另一个键，所以最坏的结果是
-// Redis 里多一个读不到的孤键，而不是某个 Key 被永久卡住。
-func (s *RedisStore) compensate(ctx context.Context, key string) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), storeTimeout)
-	defer cancel()
-	_ = s.cmds.Del(ctx, key).Err()
 }
 
 // Get 读 key 的当前值。键不存在时返回 (0, false, nil)。
