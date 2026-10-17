@@ -593,9 +593,12 @@ func snapshotsDoc(requestID string, rows []snapshotRow) map[string]any {
 	items := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		item := map[string]any{
-			"id":               row.ID,
-			"direction":        row.Direction,
-			"created_at":       row.CreatedAt.UTC().Format(time.RFC3339Nano),
+			"id":        row.ID,
+			"direction": row.Direction,
+			// created_at 走 format.go 的 jsonTime，不在这里手工 Format：机器读
+			// 的时刻只有那一条出口（恒 UTC、完整精度），多一处手工 Format 就多
+			// 一处要记得带 .UTC() 的地方（见 docs/cli-output.md 的「时刻与时区」）。
+			"created_at":       jsonTime(row.CreatedAt),
 			"skeleton_version": row.SkeletonVersion,
 			"capture_mode":     row.CaptureMode,
 			// 被降级成摘要层的骨架与一份完整的骨架在肉眼下长得一样，所以这个

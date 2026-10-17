@@ -245,7 +245,12 @@ func TestRouteCandidateConfidenceFollowsRemaining(t *testing.T) {
 }
 
 func TestRouteCandidateCarriesExpiry(t *testing.T) {
-	at := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	// 到期时刻在库里是 timestamptz，pgx 交回来带的是**进程时区**（time.Local），
+	// 所以 fixture 取进程时区（`instant.In(time.Local)`）：契约里给插件的那一栏
+	// 恒 UTC，同一瞬间的 UTC 写法就是下面那个 Z 串。去掉 adapter 里的 .UTC()
+	// 之后，TZ=UTC 下编出的是同一个串（绿）、TZ=Asia/Shanghai 下编出
+	// `2026-11-01T08:00:00+08:00`（红）。
+	at := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC).In(time.Local)
 	rc := RouteContextFrom("r1", "m", []route.Candidate{
 		{Channel: channel.Channel{ID: 1}, Quota: quota.State{Remaining: ptrFloat64(5), ResetsAt: &at}},
 	})

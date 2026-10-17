@@ -546,12 +546,21 @@ func TestSettingsListJSONKeepsValidationWarningOffStdout(t *testing.T) {
 // TestSettingsUpdatedAtIsUTCWhateverTheProcessZone 钉住「时刻一律按 UTC 打」。
 //
 // 理由与 apikey 的 TestAPIKeyTimesAreUTCWhateverTheProcessZone 相同：这一列
-// 从库（timestamptz）读回来时带的是会话时区，直接 Format 出来同一行在两台机器
-// 上是两个字符串。fixture 特地在东八区、断言那个瞬间的 UTC 写法，所以把
-// .UTC() 去掉（或换回按 location 打的写法）时这条用例当场变红。
+// 从库（timestamptz）读回来时带的是**进程时区**（pgx 未设 ScanLocation 时用
+// time.Local 构造），直接 Format 出来同一行在两台机器上是两个字符串。
+//
+// fixture 的时刻取**进程时区**（`instant.In(time.Local)`），与驱动交回来的
+// 那个 location 一致。于是这条用例的成败取决于进程时区：
+//
+//   - TZ=UTC：location 是 UTC，去掉 .UTC() 也编出同样的串 → 绿；
+//   - TZ=Asia/Shanghai：去掉 .UTC() 编出 `2026-10-17T14:10:00+08:00` → 红。
+//
+// 这一对反差是 gates.yml 的「非 UTC 时区下的时刻门禁」那一步的判据（见
+// docs/cli-output.md 的「时刻与时区」）：用固定东八区 fixture 的话它在任何
+// 时区下都会红，证明的是「这一列恒 UTC」，证明不了「这道门跑在哪个时区」。
 func TestSettingsUpdatedAtIsUTCWhateverTheProcessZone(t *testing.T) {
-	east8 := time.FixedZone("UTC+8", 8*60*60)
-	at := time.Date(2026, 10, 17, 14, 10, 0, 0, east8) // = 06:10:00Z
+	// 06:10:00Z 这一个瞬间，location 取进程时区。
+	at := time.Date(2026, 10, 17, 6, 10, 0, 0, time.UTC).In(time.Local)
 
 	var got struct {
 		Settings []struct {

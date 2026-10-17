@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // withFormat 把这一次运行的输出格式换成 f，用例结束时复原。
@@ -439,5 +440,47 @@ func TestDoctorJSONWithoutDatabaseStillEmitsReport(t *testing.T) {
 		if c.Skipped == nil || c.Skipped == "" {
 			t.Errorf("第 %s 项没跑成，skip_reason 必须有原文", c.Name)
 		}
+	}
+}
+
+// ── 机器读的时刻恒 UTC ──────────────────────────────────────────────────
+
+// TestJSONTimeIsUTCWhateverTheProcessZone 钉住「机器读的时刻恒 UTC，
+// 与进程时区无关」。
+//
+// ⚠️ 这条用例的价值全在**非 UTC 时区下会不会变红**。CI runner 默认 UTC，
+// 而库里 timestamptz 经 pgx 交回来的 time.Time 带的是 time.Local
+// （pgx v5 的 timestamptz 在 ScanLocation 未设时用 time.Local 构造，
+// 见 pgtype/timestamptz.go 的 ScanLocation 说明）。于是「本地恰好是 UTC」
+// 的机器上，去掉 .UTC() 与留着它编出**同一个**字符串——只在 UTC 下跑的
+// 那道门在结构上必然通过，它就是个摆设。gates.yml 里因此单开一步
+// `TZ=Asia/Shanghai ... go test`，并先证明那个时区真的生效了。
+//
+// fixture 特意用 **time.Local** 构造，而不是 FixedZone：FixedZone 的那一版
+// （见 apikey_test.go 的 TestAPIKeyTimesAreUTCWhateverTheProcessZone）在任何
+// 进程时区下都会红，证明不了「这道门跑在哪个时区」。这一版的成败**取决于
+// 进程时区**，正是那道门的判据：
+//
+//   - TZ=UTC：tm 的 location 就是 UTC，去掉 .UTC() 也编出同样的串 → 绿；
+//   - TZ=Asia/Shanghai：tm 是 +08:00，去掉 .UTC() 编出
+//     `2026-01-02T11:04:05+08:00`（同一瞬间的另一个写法）→ 红。
+func TestJSONTimeIsUTCWhateverTheProcessZone(t *testing.T) {
+	// 东八区的 11:04:05 与 UTC 的 03:04:05 是同一瞬间。先构造成 UTC，
+	// 再 .In(time.Local) 得到「同一瞬间、location 是进程时区」的那个值。
+	instant := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	tm := instant.In(time.Local)
+
+	const want = "2026-01-02T03:04:05Z"
+	if got := jsonTime(tm); got != want {
+		t.Errorf("jsonTime = %q，想要 %q：机器读的时刻必须恒 UTC，与进程时区无关",
+			got, want)
+	}
+	// 可空那两档走的是同一个 jsonTime，一并钉住：将来把其中一档改成自己
+	// Format（绕开 jsonTime）时，这一条会把它照出来。
+	if got := jsonTimePtr(&tm); got != want {
+		t.Errorf("jsonTimePtr = %v，想要 %q", got, want)
+	}
+	if got := jsonTimeOrNull(tm); got != want {
+		t.Errorf("jsonTimeOrNull = %v，想要 %q", got, want)
 	}
 }
