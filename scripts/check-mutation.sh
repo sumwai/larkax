@@ -61,7 +61,8 @@
 #
 # 退出码：
 #   0  全部跑成
-#   1  有包没跑成（超时过多、一个变异都没跑到、认不出输出、或工具缺失）
+#   1  没跑成：gremlins 缺失、版本不符、读不出变异器集合，或者有包没跑成
+#      （超时过多、一个变异都没跑到、认不出输出）
 #   3  拿不到锁：另一个实例正在跑（或锁文件不可用），本次未执行
 # 1 与 3 分开是因为处置不同：前者要去看代码或环境，后者等一会儿重跑就行。
 #
@@ -69,25 +70,61 @@
 # 不可达分支都该放过，而脚本分不出来。这里只保证跑出来的数字可信。
 #
 # 环境变量：GREMLINS（可执行文件，默认 gremlins）、COEF、WORKERS、
-# LOCK_FILE（锁文件路径，默认 <仓库根>/tmp/check-mutation.lock）。
+# LOCK_FILE（锁文件路径，默认 <仓库根>/tmp/check-mutation.lock）、
+# GREMLINS_VERSION（自测注入用，见下；CI 与本地都不该设）。
 #
-# # 变异器集合与工具版本
+# # 变异器集合与工具版本：每次运行都要说清「这把尺子是什么」
 #
-# gremlins 默认只开一部分变异器。v0.6.0 的默认集合是 ARITHMETIC_BASE、
+# gremlins 默认只开一部分变异器。实测 v0.6.0 的默认集合是 ARITHMETIC_BASE、
 # CONDITIONALS_BOUNDARY、CONDITIONALS_NEGATION、INCREMENT_DECREMENT、
 # INVERT_NEGATIVES；而 INVERT_LOGICAL（`&&` ↔ `||`）**默认关闭**——于是
 # `a || b` 这样的判据一个变异体都不生成，efficacy 再高也证明不了它被钉住。
 # 本仓库里就有这样的判据（internal/route 的 worthNextCandidate 是 `a || b`），
-# 所以这里显式打开它。
+# 所以这里显式打开它（见 EXTRA_MUTATOR_FLAGS）。
 #
-# **打开它意味着历史数字与现在的口径不可比。** efficacy 的分母是变异体数，
-# 分母变了分数就会变。AGENTS.md 那张表因此必须按这一套口径整表重跑一次；
-# 在那之前表里的数字只能当历史值看，不要拿来与新一轮比较。
+# **变异体数就是 efficacy 的分母，而分母由变异器集合决定。** 换一个 gremlins
+# 版本 → 换一批变异器 → 同一个包的 efficacy 从 84% 变成 91%，而代码一行没动。
+# 而「分母变了」在输出里与「代码改好了」长得一模一样：两行都干净、都像结论，
+# 没有一个字说这两次不是同一把尺子。（AGENTS.md 那张表的数字尤其如此——它旁边
+# 写着的条件里就有「版本」与「启用的变异器集合」这两项，靠人记得填。）
 #
-# 版本同样要钉住：`@latest` 不是版本，装出来的二进制会随上游发布而变。
-# 而且它自报的版本是 dev（版本号由 release 构建注入，`go install` 装的没有），
-# 所以脚本**没法在运行时核对版本**——只能把版本写死在安装方式里，
-# 并在 AGENTS.md 的表旁记下它出自哪个版本。
+# 所以这里做两件事。
+#
+# ## 一、钉住版本并校验
+#
+# 探测方式与 scripts/check-deadcode.sh 一致：读二进制里嵌的模块信息，
+# **不用工具自报的版本号**。实测：
+#
+#   $ gremlins --version    → gremlins version dev linux/amd64
+#   $ go version -m <bin>   → mod github.com/go-gremlins/gremlins v0.6.0 h1:…
+#
+# 自报的那串是 dev：版本号由 release 构建注入，`go install` 装出来的没有。
+# 所以「装的是哪一版」只能从模块信息里读。读不出时报错退出，不猜——猜出来的
+# 版本比没有版本更坏，它会让下面那一行看起来像个结论。
+#
+# 边界：`go version -m` 读不了非 go 构建的二进制（自测那种桩件就是），
+# GOPATH 模式构建的也可能没有模块信息。那时一律按「读不出」处理。
+#
+# ## 二、每次运行打一行「这把尺子是什么」
+#
+# 版本 + 变异器集合 + 已显式打开的开关 + workers + 系数。这样**粘进 AGENTS.md
+# 那张表的数字自带条件**，不依赖人记得在旁边补一句。
+#
+# 集合是**探测来的，不是写死一份常量**：写死的那份会在升版本时与工具脱钩，
+# 而脱钩之后打出来的那一行仍然长得像结论——那正是这一行要防的事
+#（LESSONS 第 2、17 条：门禁坏掉时的输出与「干净」一样）。读不出集合时同样
+# 报错退出，理由与版本读不出时一样。
+#
+# 边界：探测靠的是 `unleash --help` 的排版。排版整个变了（`enable "X" mutants`
+# 一行都认不出）会被「读不出」挡住；但如果只是**部分**行丢了 `(default true)`，
+# 打出来的集合就会少记一个默认变异器而不报错。自测的夹具用的是真 gremlins 的
+# `unleash --help` 原文，就是为了让这条探测有据可依，而不是按想象造一份。
+#
+# **版本常量与安装方式必须一致**：安装提示里的 `@版本` 由 PINNED_GREMLINS_VERSION
+# 拼出来，不写第二遍。注意本仓**没有** CI job 装 gremlins——变异测试只在发布时
+# 本地跑（见 AGENTS.md），CI 跑的是本脚本的自测（用桩件、不调真 gremlins）。
+# 将来若加了这样的 job，它的 `go install` 版本必须与这里一致，
+# 与 deadcode 那条同理（见 .github/workflows/gates.yml 里装 deadcode 的那一步）。
 #
 # 本脚本有一份自测：scripts/check-mutation.test.sh。改动后必须跑它。
 
@@ -130,12 +167,120 @@ else
   fi
 fi
 
+# ── 工具、版本、变异器集合（「这把尺子是什么」）────────────────────────────
+#
+# 「没装」「版本不符」「读不出变异器集合」都必须是响的：静默通过在这里
+# 等于没有这道门（LESSONS 第 16 条）。
+
+# 钉住的 gremlins 版本。换它 = 换变异器集合 = 换 efficacy 的分母，
+# 所以 AGENTS.md 那张表的数字必须连同这一版一起读（理由见文件开头）。
+# **安装方式要与它一致**：下面所有提示文案都由它拼出来，不写第二遍。
+PINNED_GREMLINS_VERSION="v0.6.0"
+
+COEF="${COEF:-10}"
+WORKERS="${WORKERS:-1}"
+
 GREMLINS="${GREMLINS:-gremlins}"
-if ! command -v "$GREMLINS" >/dev/null 2>&1; then
-  echo "找不到 gremlins。安装：go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0"
+bin=$(command -v "$GREMLINS" 2>/dev/null) || {
+  echo "找不到 gremlins。安装：go install github.com/go-gremlins/gremlins/cmd/gremlins@${PINNED_GREMLINS_VERSION}"
   echo "或用 GREMLINS=/path/to/gremlins 指定。"
+  echo "要装钉住的那一版：版本不同变异器集合就不同，变异体数（efficacy 的分母）"
+  echo "跟着变——同一份代码会跑出两个分数，而代码一行没动。"
+  exit 1
+}
+
+if [ -n "${GREMLINS_VERSION:-}" ]; then
+  # 自测注入点：桩件是 bash 脚本，go version -m 探不出来。
+  got_version="$GREMLINS_VERSION"
+else
+  got_version=$(go version -m "$bin" 2>/dev/null |
+    awk '$1 == "mod" && $2 == "github.com/go-gremlins/gremlins" { print $3; exit }')
+fi
+if [ -z "$got_version" ]; then
+  echo "读不出 $bin 的版本（go 不在 PATH 里，或者它不是 go install 装出来的？）。"
+  echo "版本不同变异器集合就不同，这一轮的分数不可比，所以这里不猜。装钉住的那一份："
+  echo "  go install github.com/go-gremlins/gremlins/cmd/gremlins@${PINNED_GREMLINS_VERSION}"
   exit 1
 fi
+if [ "$got_version" != "$PINNED_GREMLINS_VERSION" ]; then
+  echo "gremlins 的版本与钉住的不一致，这一轮的结果不可比。"
+  echo "  钉住：${PINNED_GREMLINS_VERSION}"
+  echo "  实际：${got_version}"
+  echo "版本不同 → 变异器集合不同 → 变异体数（efficacy 的分母）不同。"
+  echo "代码一行没动，分数照样会变，而两个分数看起来都是结论。装钉住的那一份："
+  echo "  go install github.com/go-gremlins/gremlins/cmd/gremlins@${PINNED_GREMLINS_VERSION}"
+  exit 1
+fi
+
+# 变异器集合从 `unleash --help` 里读出来。相关的那几行形如：
+#
+#   --arithmetic-base             enable "ARITHMETIC_BASE" mutants (default true)
+#   --invert-logical              enable "INVERT_LOGICAL" mutants
+#
+# 认的是 `enable "X" mutants` 这一段，所以非变异器的开关（--workers、
+# --coverpkg 之类）会被滤掉。一行都认不出时下面的判据报错退出，不静默当成
+# 「没有变异器」——那正是「读不出」与「干净」长得一样的那一类。
+unleash_help=$("$bin" unleash --help 2>&1)
+mutator_table=$(printf '%s\n' "$unleash_help" | awk '
+  {
+    if (!match($0, /--[a-z][a-z-]*/)) next
+    flag = substr($0, RSTART, RLENGTH)
+    if (!match($0, /enable "[A-Z_]+" mutants/)) next
+    name = substr($0, RSTART + 8, RLENGTH - 17)
+    def = (index($0, "(default true)") > 0) ? "yes" : "no"
+    print name "|" flag "|" def
+  }')
+if [ -z "$mutator_table" ]; then
+  echo "读不出 gremlins 的变异器集合（$GREMLINS unleash --help 里没有 enable \"X\" mutants 那几行）。"
+  echo "变异器集合就是 efficacy 的分母的来源，读不出就说不清这一轮用的是哪把尺子——"
+  echo "而说不清的分数不该被当成结论。先确认装的是钉住的那一版："
+  echo "  go install github.com/go-gremlins/gremlins/cmd/gremlins@${PINNED_GREMLINS_VERSION}"
+  exit 1
+fi
+
+# gremlins 默认关闭、而本仓库需要显式打开的开关（理由见文件开头）。
+# 命令行由这个数组拼出来，所以「实际传了哪些开关」与「下面那行说开了哪些」
+# 不会各说各话——不需要人记得同步两处。
+EXTRA_MUTATOR_FLAGS=(--invert-logical)
+
+enabled_mutators=""
+default_mutators=0
+while IFS='|' read -r m_name m_flag m_def; do
+  [ -n "$m_name" ] || continue
+  if [ "$m_def" = "yes" ]; then
+    enabled_mutators="$enabled_mutators $m_name"
+    default_mutators=$((default_mutators + 1))
+  fi
+done <<<"$mutator_table"
+enabled_mutators="${enabled_mutators# }"
+
+GREMLINS_ARGS=(unleash --timeout-coefficient="$COEF" --workers="$WORKERS")
+for f in "${EXTRA_MUTATOR_FLAGS[@]}"; do
+  # 开关名 → 变异器名。读不出来说明这一版不认识这个开关：那这一轮到底开了
+  # 什么就说不清，而说不清的分数不该被当成结论。
+  f_name=$(printf '%s\n' "$mutator_table" | awk -F'|' -v f="$f" '$2 == f { print $1; exit }')
+  if [ -z "$f_name" ]; then
+    echo "$f 不是这一版 gremlins 认得的变异器开关（unleash --help 里没有它）。"
+    echo "说不清这一轮开了什么，就不跑。"
+    exit 1
+  fi
+  GREMLINS_ARGS+=("$f")
+  # 默认集合之后跟上显式打开的那些，让「比默认多开了什么」一眼看得出来。
+  enabled_mutators="$enabled_mutators $f_name"
+done
+
+# 一个默认变异器都没有，几乎不可能是真的——更可能是 `--help` 的排版变了、
+# `(default true)` 没被认出来，而那会让下面那行少记一批变异器而不报错。
+if [ "$default_mutators" -eq 0 ]; then
+  echo "gremlins 的 --help 里没有一行带 (default true) 的变异器开关。"
+  echo "更可能是排版变了而不是真的一个都不开，所以这里不猜，直接退出。"
+  exit 1
+fi
+
+# 「这把尺子是什么」：粘进 AGENTS.md 那张表的数字自带条件，不依赖人记得补。
+extra_desc=""
+for f in "${EXTRA_MUTATOR_FLAGS[@]}"; do extra_desc="$extra_desc $f 已开"; done
+echo "这把尺子：gremlins ${got_version} / 变异器集合 ${enabled_mutators} /${extra_desc} / workers=${WORKERS} / 系数 ${COEF}"
 
 # 集成测试需要它。缺了的话 internal/ledger/store 整包被 t.Skip，
 # 那个包根本没测到——而跳过的输出与「跑成了」在屏幕上一样。
@@ -145,9 +290,6 @@ if [ -z "${LARKAX_DB_DSN:-}" ]; then
   echo "本地起库的办法见 AGENTS.md 的「Lint」一节。"
   exit 1
 fi
-
-COEF="${COEF:-10}"
-WORKERS="${WORKERS:-1}"
 
 PKGS=(
   internal/money
@@ -206,10 +348,11 @@ for pkg in "${PKGS[@]}"; do
   # 实测（ledger）：有 DSN 时 132/11/27（可测 143），无 DSN 时 94/7/69（可测 101）。
   # 注意两个百分比别混：Test efficacy 是 92.31% 与 93.07%（几乎不变），
   # 差得多的是 Mutator coverage，84.12% 与 59.41%。
-  # --invert-logical 是显式打开的（默认关，理由见文件开头）：不开的话
-  # `a || b` 这类判据一个变异体都不生成，而「没生成」与「生成了且被杀死」
-  # 在分数上分不出来。
-  out=$("$GREMLINS" unleash --invert-logical --timeout-coefficient="$COEF" --workers="$WORKERS" "./$pkg/" 2>&1)
+  # 开关都在 GREMLINS_ARGS 里拼好了（--invert-logical 是显式打开的，默认关，
+  # 理由见文件开头：不开的话 `a || b` 这类判据一个变异体都不生成，而「没生成」
+  # 与「生成了且被杀死」在分数上分不出来）。这里不再单独写一遍开关，
+  # 免得命令行与上面那行「这把尺子」各说各话。
+  out=$("$GREMLINS" "${GREMLINS_ARGS[@]}" "./$pkg/" 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "⚠ $pkg: gremlins 执行失败（退出码 $rc）"

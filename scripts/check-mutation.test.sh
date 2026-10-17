@@ -12,6 +12,12 @@
 # gremlins（一个普通 bash 脚本，chmod +x），用 GREMLINS= 注入。
 # 与 check-redlines.test.sh 用桩件而不是真跑工具是同一个做法：快、可重复。
 #
+# 桩件还要**答得上来 `unleash --help`**：脚本每次运行都靠它读「这把尺子是什么」
+#（版本 + 变异器集合），读不出会直接拒绝运行。夹具用的是真 gremlins 的
+# `unleash --help` 原文（只去掉它自己那两行行尾的空格），不是按想象造一份——
+# 探测的判据就架在那份排版上，造出来的夹具只能证明「脚本能解析我造的东西」。
+# 版本探测同理用 GREMLINS_VERSION= 注入（桩件是脚本，go version -m 探不出来）。
+#
 # 每个用例用独立的锁文件，互不干扰，也不会撞上正在跑的真实实例。
 #
 # 改动 check-mutation.sh 后跑：
@@ -27,54 +33,148 @@ trap 'rm -rf "$tmp"' EXIT
 pass=0
 fail=0
 
+# 脚本里钉住的版本：自测不写死它，否则改一处要动两处。
+PINNED=$(grep -m1 '^PINNED_GREMLINS_VERSION=' "$SCRIPT" | cut -d'"' -f2)
+if [ -z "$PINNED" ]; then
+  echo "✗ 读不出 $SCRIPT 里的 PINNED_GREMLINS_VERSION"
+  exit 1
+fi
+
 # 用例输出留在这里，失败时打印出来便于定位。
 last_out="$tmp/last.txt"
 
 ok()   { pass=$((pass + 1)); }
 bad()  { echo "✗ $1"; fail=$((fail + 1)); }
 
+# ── 夹具：gremlins 的 `unleash --help` ────────────────────────────────────
+#
+# 逐字抄自真 gremlins（v0.6.0）的 `unleash --help`，只去掉了它自己那两行
+# 行尾的空格（不参与解析）。**不按想象造**：脚本的变异器集合就是从这份排版里
+# 读出来的，造一份「我以为它长这样」的夹具，只能证明脚本能解析我造的东西
+#（LESSONS 第 33 条）。
+HELP_FILE="$tmp/gremlins-help.txt"
+cat > "$HELP_FILE" <<'EOF'
+Unleashes the gremlins and performs mutation testing on a Go module. It works by
+first gathering the coverage of the test suite and then analysing the source
+code to look for supported mutants.
+
+Unleash only tests covered mutants, since it doesn't make sense to test mutants
+that no test case is able to catch.
+
+In 'dry-run' mode, unleash only performs the analysis of the source code, but it
+doesn't actually perform the test.
+
+Thresholds are configurable quality gates that make gremlins exit with an error
+if those values are not met. Efficacy is the percent of KILLED mutants over
+the total KILLED and LIVED mutants. Mutant coverage is the percent of total
+KILLED + LIVED mutants, over the total mutants.
+
+Usage:
+  gremlins unleash [path] [flags]
+
+Aliases:
+  unleash, run, r
+
+Flags:
+  -d, --dry-run                     find mutations but do not executes tests
+  -S, --output-statuses string      print only statuses from this flag, allowed values - 'lctkvsr'
+  -t, --tags string                 a comma-separated list of build tags
+      --coverpkg string             a comma-separated list of package patterns
+  -D, --diff string                 diff branch or commit
+  -o, --output string               set the output file for machine readable results
+  -i, --integration                 makes Gremlins run the complete test suite for each mutation
+  -E, --exclude-files stringArray   exclude files from Gremlins run by filepath regexp
+      --threshold-efficacy float    threshold for code-efficacy percent
+      --threshold-mcover float      threshold for mutant-coverage percent
+      --workers int                 the number of workers to use in mutation testing
+      --test-cpu int                the number of CPUs to allow each test run to use
+      --timeout-coefficient int     the coefficient by which the timeout is increased
+      --arithmetic-base             enable "ARITHMETIC_BASE" mutants (default true)
+      --conditionals-boundary       enable "CONDITIONALS_BOUNDARY" mutants (default true)
+      --conditionals-negation       enable "CONDITIONALS_NEGATION" mutants (default true)
+      --invert-assignments          enable "INVERT_ASSIGNMENTS" mutants
+      --invert-bitwise              enable "INVERT_BITWISE" mutants
+      --invert-bwassign             enable "INVERT_BWASSIGN" mutants
+      --increment-decrement         enable "INCREMENT_DECREMENT" mutants (default true)
+      --invert-logical              enable "INVERT_LOGICAL" mutants
+      --invert-loopctrl             enable "INVERT_LOOPCTRL" mutants
+      --invert-negatives            enable "INVERT_NEGATIVES" mutants (default true)
+      --remove-self-assignments     enable "REMOVE_SELF_ASSIGNMENTS" mutants
+  -h, --help                        help for unleash
+
+Global Flags:
+      --config string   override config file
+  -s, --silent          suppress output and run in silent mode
+EOF
+
+# 上面那份 help 里默认开着的变异器，与显式打开的 INVERT_LOGICAL。
+# 脚本打出的「这把尺子」那一行必须正好是这些——**这个字面量是判据的一部分**：
+# 探测悄悄少认一个默认变异器时，只有把它写死在这里才看得见。
+HELP_DEFAULT_MUTATORS="ARITHMETIC_BASE CONDITIONALS_BOUNDARY CONDITIONALS_NEGATION INCREMENT_DECREMENT INVERT_NEGATIVES"
+HELP_EXTRA_MUTATOR="INVERT_LOGICAL"
+
 # ── 假 gremlins ───────────────────────────────────────────────────────────
 #
 # 输出照抄 gremlins 的汇总行：脚本读的就是这几行。
 
+# stub_head：每个桩件的共同开头。
+#
+# 脚本每次运行都会先问一句 `unleash --help`（读「这把尺子是什么」），
+# 答不上来它会拒绝运行——所以桩件必须答得上来，否则下面每个用例都变成
+# 「拒绝运行」，测不到本来要测的判据。
+stub_head() {
+  cat <<EOF
+#!/usr/bin/env bash
+# 桩件：check-mutation.sh 的自测用，不是真的变异测试
+for __a in "\$@"; do
+  case "\$__a" in
+    --help|-h) cat "$HELP_FILE"; exit 0 ;;
+  esac
+done
+EOF
+}
+
 # make_gremlins <路径> <killed> <lived> <timed> <efficacy> [退出码]
 make_gremlins() {
   local path="$1" killed="$2" lived="$3" timed="$4" eff="$5" rc="${6:-0}"
-  cat > "$path" <<EOF
-#!/usr/bin/env bash
-# 桩件：check-mutation.sh 的自测用，不是真的变异测试
+  {
+    stub_head
+    cat <<EOF
 echo "Killed: $killed, Lived: $lived, Not covered: 3"
 echo "Timed out: $timed, Not viable: 0, Skipped: 0"
 echo "Test efficacy: $eff"
 echo "Mutator coverage: 100.00%"
 exit $rc
 EOF
+  } > "$path"
   chmod +x "$path"
 }
 
 # 没有那几个汇总行的桩件：模拟 gremlins 升级后格式变了。
 make_gremlins_unknown_format() {
   local path="$1"
-  cat > "$path" <<'EOF'
-#!/usr/bin/env bash
-# 桩件：一段认不出格式的输出
+  {
+    stub_head
+    cat <<'EOF'
 echo "gremlins v9: ran some mutants, all good probably"
 echo "done"
 EOF
+  } > "$path"
   chmod +x "$path"
 }
 
 # 跑得慢的桩件：用来在第一个实例持锁期间发第二个实例。
 make_gremlins_slow() {
   local path="$1" secs="$2"
-  cat > "$path" <<EOF
-#!/usr/bin/env bash
-# 桩件：慢速版本，模拟一次真实的变异测试
+  {
+    stub_head
+    cat <<EOF
 sleep $secs
 echo "Killed: 5, Lived: 2, Not covered: 1"
 echo "Timed out: 0, Not viable: 0, Skipped: 0"
 echo "Test efficacy: 71.43%"
 EOF
+  } > "$path"
   chmod +x "$path"
 }
 
@@ -83,9 +183,9 @@ EOF
 # 否则「对存活的变异逐个判断」这句话没有可判断的对象。
 make_gremlins_with_survivors() {
   local path="$1"
-  cat > "$path" <<'EOF'
-#!/usr/bin/env bash
-# 桩件：汇总行之外还带存活明细
+  {
+    stub_head
+    cat <<'EOF'
 echo " LIVED CONDITIONALS_BOUNDARY at money.go:103:8"
 echo "  LIVED ARITHMETIC_BASE at money.go:54:25"
 echo "Killed: 8, Lived: 2, Not covered: 3"
@@ -93,6 +193,7 @@ echo "Timed out: 0, Not viable: 0, Skipped: 0"
 echo "Test efficacy: 80.00%"
 echo "Mutator coverage: 100.00%"
 EOF
+  } > "$path"
   chmod +x "$path"
 }
 
@@ -101,11 +202,16 @@ EOF
 #
 # LARKAX_DB_DSN 给个占位值：脚本缺它会直接拒绝运行（集成测试会被跳过，
 # internal/ledger/store 那一包等于没测）。桩件不看这个值，只要它在。
-# 「缺 DSN 要拒绝」本身是第 13 条用例，那一条显式把它清掉。
+# 「缺 DSN 要拒绝」本身是第 12 条用例，那一条显式把它清掉。
+#
+# GREMLINS_VERSION 注入脚本里钉住的那一版：桩件是 bash 脚本，脚本用
+# `go version -m` 探版本探不出来。**这条注入是刻意的**——每个用例只测它自己
+# 那一件事，版本探测本身由第 17、18 条单独钉。
 testdsn="postgres://user:placeholder@localhost:5432/larkax?sslmode=disable"
 run() {
   local stub="$1" lock="$2"; shift 2
-  LARKAX_DB_DSN="$testdsn" GREMLINS="$stub" LOCK_FILE="$lock" bash "$SCRIPT" "$@" >"$last_out" 2>&1
+  LARKAX_DB_DSN="$testdsn" GREMLINS="$stub" GREMLINS_VERSION="$PINNED" LOCK_FILE="$lock" \
+    bash "$SCRIPT" "$@" >"$last_out" 2>&1
 }
 
 dump() { sed 's/^/    | /' "$last_out" | tail -6; }
@@ -130,7 +236,20 @@ make_gremlins "$stub_rc1"         0 0 0 "0.00%" 1     # gremlins 自己失败
 make_gremlins_unknown_format "$stub_unknown"
 
 # 既没有数字也没有已知关键词的失败输出：解析不到任何东西。
-printf '%s\n' 'error: could not build the test binary' 'make: *** [Makefile:12: test] Error 2' > "$stub_junk"
+#
+# **要退出 0**：退出码非 0 是第 6 条（「gremlins 自己失败」）那一类，脚本在解析
+# 之前就拦下了。这一条要的是「跑完了、退出码 0，但输出里没有任何可判的东西」——
+# 那才是最难与「通过」区分开的一类。
+#
+# 也要带 stub_head：否则脚本在更早的一步（读不出变异器集合）就退出了，
+# 第 8 条会「通过」得毫无理由。
+{
+  stub_head
+  cat <<'EOF'
+echo "error: could not build the test binary"
+echo "make: *** [Makefile:12: test] Error 2"
+EOF
+} > "$stub_junk"
 chmod +x "$stub_junk"
 
 # ── 用例 ──────────────────────────────────────────────────────────────────
@@ -184,6 +303,9 @@ grep -q '认不出' "$last_out" || bad "输出格式变了 —— 应报出是�
 run "$stub_junk" "$tmp/lock8" internal/money
 rc=$?
 if [ "$rc" -eq 1 ]; then ok; else bad "无法解析的输出 —— 应失败，实际退出码 $rc"; dump; fi
+# 断言**理由**，不只断言退出码：这一步若因为别的原因（比如读不出变异器集合）
+# 退出 1，只看退出码的用例会绿着什么都不测。
+grep -q '认不出' "$last_out" || bad "无法解析的输出 —— 应报出是「认不出输出」"
 
 # 9. 两个实例同时跑：第二个必须拒绝执行。
 #    并行会让超时判据失真（两个实例各自固定 workers=1，机器上照样是 2 个 go test），
@@ -194,7 +316,8 @@ lock_par="$tmp/lock-par"
 out_par1="$tmp/par1.txt"
 out_par2="$tmp/par2.txt"
 (
-  LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_par" LOCK_FILE="$lock_par" bash "$SCRIPT" internal/money >"$out_par1" 2>&1
+  LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_par" GREMLINS_VERSION="$PINNED" LOCK_FILE="$lock_par" \
+    bash "$SCRIPT" internal/money >"$out_par1" 2>&1
 ) &
 bg=$!
 # 等锁真的被持有（文件出现不等于锁已拿到），再发第二个实例
@@ -209,7 +332,8 @@ while [ "$waited" -lt 60 ]; do
   waited=$((waited + 1))
 done
 sleep 0.2
-LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_par" LOCK_FILE="$lock_par" bash "$SCRIPT" internal/money >"$out_par2" 2>&1
+LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_par" GREMLINS_VERSION="$PINNED" LOCK_FILE="$lock_par" \
+  bash "$SCRIPT" internal/money >"$out_par2" 2>&1
 rc2=$?
 wait "$bg"
 rc1=$?
@@ -237,7 +361,7 @@ grep -q '不算通过' "$last_out" || bad "筛选项没选中任何包 —— �
 # 12. 缺 LARKAX_DB_DSN：必须拒绝运行，而不是跑出一批不可比的数字。
 #     internal/ledger/store 的集成测试会整包被 t.Skip，而它给别的包贡献的
 #     那部分覆盖也跟着没了——同一个包的可测变异体会少掉四成。
-env -u LARKAX_DB_DSN GREMLINS="$stub_ok" LOCK_FILE="$tmp/lock12" \
+env -u LARKAX_DB_DSN GREMLINS="$stub_ok" GREMLINS_VERSION="$PINNED" LOCK_FILE="$tmp/lock12" \
   bash "$SCRIPT" internal/money >"$last_out" 2>&1
 rc=$?
 if [ "$rc" -eq 1 ]; then ok; else bad "缺 DSN —— 应拒绝运行，实际退出码 $rc"; dump; fi
@@ -251,16 +375,17 @@ grep -q 't.Skip' "$last_out" || bad "缺 DSN —— 应说明 store 会被整包
 #     真正的变量是 DSN，那就固定 DSN（第 12 条），不要砍范围。
 #     桩件把收到的参数打出来，这里断言 --coverpkg 不在其中。
 stub_args="$tmp/gremlins-args"
-cat > "$stub_args" <<'EOF'
-#!/usr/bin/env bash
-# 桩件：把收到的参数记下来，供自测断言
+{
+  stub_head
+  cat <<'EOF'
 printf '%s\n' "$*" > "$ARGS_OUT"
 echo "Killed: 5, Lived: 2, Not covered: 1"
 echo "Timed out: 0, Not viable: 0, Skipped: 0"
 echo "Test efficacy: 71.43%"
 EOF
+} > "$stub_args"
 chmod +x "$stub_args"
-ARGS_OUT="$tmp/args.txt" LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_args" \
+ARGS_OUT="$tmp/args.txt" LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_args" GREMLINS_VERSION="$PINNED" \
   LOCK_FILE="$tmp/lock13" bash "$SCRIPT" internal/money >"$last_out" 2>&1
 rc=$?
 if [ "$rc" -eq 0 ]; then ok; else bad "记录参数 —— 应通过，实际退出码 $rc"; dump; fi
@@ -269,6 +394,10 @@ if grep -q -- '--coverpkg' "$tmp/args.txt" 2>/dev/null; then
 else
   ok
 fi
+# 顺带钉住：显式打开的那个开关真的传给了 gremlins。它只在「这把尺子」那一行里
+# 被说出来，命令行里漏了的话，说出来的条件就是假的。
+grep -q -- '--invert-logical' "$tmp/args.txt" 2>/dev/null \
+  || bad "记录参数 —— --invert-logical 应真的传给 gremlins（收到：$(cat "$tmp/args.txt" 2>/dev/null)）"
 
 # 14. 退化路径（没有 flock）崩溃后留下的锁：报错要说清怎么清。
 #     这里直接验证提示文本本身——它由 check-mutation.sh 按锁目录里的 PID
@@ -279,7 +408,8 @@ if ! command -v flock >/dev/null 2>&1; then
   lock_stale="$tmp/lock-stale"
   mkdir -p "$lock_stale.d"
   printf '%s\n' 4000001 > "$lock_stale.d/pid"   # 这个 PID 不会存在
-  LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_ok" LOCK_FILE="$lock_stale" bash "$SCRIPT" internal/money >"$last_out" 2>&1
+  LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_ok" GREMLINS_VERSION="$PINNED" LOCK_FILE="$lock_stale" \
+    bash "$SCRIPT" internal/money >"$last_out" 2>&1
   rc=$?
   if [ "$rc" -eq 3 ]; then ok; else bad "残留锁 —— 应拒绝执行（退出码 3），实际 $rc"; dump; fi
   grep -q 'rm -rf ' "$last_out" || bad "残留锁 —— 提示里应给出清理命令"
@@ -310,6 +440,116 @@ if grep -q '存活的变异' "$last_out"; then
 else
   ok
 fi
+
+# ── 「这把尺子」：版本与变异器集合 ────────────────────────────────────────
+#
+# 这一组是本轮补上的。理由：efficacy 的分母是变异体数，而分母由 gremlins 的
+# 变异器集合决定——换一个版本就换一批变异器，同一个包的分数会变而代码一行没动。
+# 而「分母变了」在输出里与「代码改好了」长得一模一样，所以「用的是哪把尺子」
+# 必须是响的：不符就拒绝运行，并且每次运行都自己说出来。
+
+# 17. 版本不符：必须拒绝运行，并说清钉住的是哪一版、实际是哪一版。
+#     这条是活的：把 check-mutation.sh 里那几行校验删掉，它会红
+#     （脚本会照常跑完，退出码 0）。
+LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_ok" GREMLINS_VERSION="v9.9.9" \
+  LOCK_FILE="$tmp/lock17" bash "$SCRIPT" internal/money >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 1 ]; then ok; else bad "版本不符 —— 应拒绝运行（退出码 1），实际 $rc"; dump; fi
+grep -q '版本与钉住的不一致' "$last_out" || bad "版本不符 —— 要说明是版本对不上"
+grep -q "钉住：${PINNED}" "$last_out" || bad "版本不符 —— 要打出钉住的是哪一版（$PINNED）"
+grep -q '实际：v9.9.9' "$last_out" || bad "版本不符 —— 要打出实际装的是哪一版"
+grep -q "gremlins@${PINNED}" "$last_out" || bad "版本不符 —— 要给出该装哪一版的命令"
+# 拒绝运行的意思就是**一个包都没跑**：不能跑出半份分数再报错。
+# 判据是那张表的表头（`killed`）与收尾那行，不是 grep `efficacy`——
+# 报错文案自己就写着「efficacy 的分母」，拿它当判据等于什么都没测。
+if grep -q 'killed\|全部跑成' "$last_out"; then
+  bad "版本不符 —— 拒绝运行前不该跑出任何分数"
+else
+  ok
+fi
+
+# 18. 版本读不出来（桩件是 bash 脚本，`go version -m` 探不出模块信息）：
+#     同样拒绝运行。**不猜**——猜出来的版本比没有版本更坏。
+env -u GREMLINS_VERSION LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_ok" \
+  LOCK_FILE="$tmp/lock18" bash "$SCRIPT" internal/money >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 1 ]; then ok; else bad "版本读不出 —— 应拒绝运行，实际 $rc"; dump; fi
+grep -q '读不出' "$last_out" || bad "版本读不出 —— 要报出是这个原因"
+
+# 19. 读不出变异器集合（工具答不上 `unleash --help`）：拒绝运行。
+#     集合就是分母的来源，读不出就说不清这一轮用的是哪把尺子。
+stub_nohelp="$tmp/gremlins-nohelp"
+cat > "$stub_nohelp" <<'EOF'
+#!/usr/bin/env bash
+# 桩件：答不上 --help（模拟换了实现或排版整个变了）
+echo "Killed: 8, Lived: 2, Not covered: 3"
+echo "Timed out: 0, Not viable: 0, Skipped: 0"
+echo "Test efficacy: 80.00%"
+EOF
+chmod +x "$stub_nohelp"
+run "$stub_nohelp" "$tmp/lock19" internal/money
+rc=$?
+if [ "$rc" -eq 1 ]; then ok; else bad "读不出变异器集合 —— 应拒绝运行，实际 $rc"; dump; fi
+grep -q '读不出 gremlins 的变异器集合' "$last_out" || bad "读不出变异器集合 —— 要报出是这个原因"
+
+# 20. 正常跑时，第一行就是「这把尺子是什么」：版本 + 变异器集合 + 已开的开关
+#     + workers + 系数。**粘进 AGENTS.md 那张表的数字自带条件**，不依赖人记得补。
+#     集合是探测来的，所以这里逐项比对，而不是只看它打了一行字。
+run "$stub_ok" "$tmp/lock20" internal/money
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "「这把尺子」—— 应通过，实际退出码 $rc"; dump; fi
+grep -q '这把尺子' "$last_out" || bad "「这把尺子」—— 每次运行都要打出这一行"
+grep -q "gremlins ${PINNED}" "$last_out" || bad "「这把尺子」—— 要带版本"
+grep -q 'workers=1' "$last_out" || bad "「这把尺子」—— 要带 workers"
+grep -q '系数 10' "$last_out" || bad "「这把尺子」—— 要带超时系数"
+grep -q -- '--invert-logical 已开' "$last_out" || bad "「这把尺子」—— 要说明 INVERT_LOGICAL 是显式打开的"
+mismatch=""
+for m in $HELP_DEFAULT_MUTATORS $HELP_EXTRA_MUTATOR; do
+  grep -q "$m" "$last_out" || mismatch="$mismatch $m"
+done
+if [ -n "$mismatch" ]; then
+  bad "「这把尺子」—— 变异器集合少了：$mismatch（实际那行：$(grep '这把尺子' "$last_out"))"
+else
+  ok
+fi
+# 反面：默认关着的变异器**不该**出现在那一行里。少了这个断言的话，
+# 把「默认集合」写成「--help 里所有变异器」也会绿。
+for m in INVERT_ASSIGNMENTS INVERT_BITWISE INVERT_BWASSIGN INVERT_LOOPCTRL REMOVE_SELF_ASSIGNMENTS; do
+  if grep -q "$m" "$last_out"; then
+    bad "「这把尺子」—— 默认关着的 $m 不该算进这一轮的集合里"
+  else
+    ok
+  fi
+done
+
+# 21. `--help` 里有变异器开关，但一个默认开的都没有：拒绝运行。
+#     这几乎不可能是真的——更可能是排版变了、`(default true)` 没被认出来。
+#     那会让上面那一行少记一批默认变异器**而不报错**，所以这里要挡住。
+stub_nodefault="$tmp/gremlins-nodefault"
+{
+  cat <<'EOF'
+#!/usr/bin/env bash
+for __a in "$@"; do
+  case "$__a" in
+    --help|-h)
+      echo '      --arithmetic-base             enable "ARITHMETIC_BASE" mutants'
+      echo '      --invert-logical              enable "INVERT_LOGICAL" mutants'
+      exit 0
+      ;;
+  esac
+done
+EOF
+  cat <<'EOF'
+echo "Killed: 8, Lived: 2, Not covered: 3"
+echo "Timed out: 0, Not viable: 0, Skipped: 0"
+echo "Test efficacy: 80.00%"
+EOF
+} > "$stub_nodefault"
+chmod +x "$stub_nodefault"
+run "$stub_nodefault" "$tmp/lock21" internal/money
+rc=$?
+if [ "$rc" -eq 1 ]; then ok; else bad "一个默认变异器都没有 —— 应拒绝运行，实际 $rc"; dump; fi
+grep -q 'default true' "$last_out" || bad "一个默认变异器都没有 —— 要报出是这个原因"
 
 # ── 结果 ──────────────────────────────────────────────────────────────────
 
