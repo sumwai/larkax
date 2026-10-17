@@ -174,6 +174,33 @@ func withStdin(t *testing.T, content string) {
 	t.Cleanup(func() { credentialInput = saved })
 }
 
+// withOSStdin 把 os.Stdin 换成给定的内容，用完还原。
+//
+// 与 withStdin 分开：那个换的是凭证的注入点，这个是**进程真正的标准输入**。
+// 走 os.Stdin 的命令（snapshot redact 从那里读报文）只有把标准输入真的换掉，
+// 「读到的到底是不是那段内容」才断言得了。
+//
+// 内容在命令跑之前就写完并关掉写端：用例里的报文都很小，装得进管道缓冲区，
+// 所以不会在「没人读」的时候把自己堵住。
+func withOSStdin(t *testing.T, content string) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("建标准输入管道失败: %v", err)
+	}
+	if _, err := io.WriteString(w, content); err != nil {
+		t.Fatalf("写标准输入失败: %v", err)
+	}
+	_ = w.Close()
+
+	saved := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() {
+		os.Stdin = saved
+		_ = r.Close()
+	})
+}
+
 // showPtr 把一个可空值渲染成可读文本，供断言失败时打印。
 //
 // 直接 %v 一个指向基本类型的指针打出来的是地址（`0xc000...`），而报错信息
