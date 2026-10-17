@@ -16,7 +16,6 @@
 package quota
 
 import (
-	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -311,10 +310,6 @@ func Project(prev State, consumed float64, now time.Time) Observation {
 	}
 	return obs
 }
-
-// ErrUnsupported 表示这个渠道查不到额度。与 channel.ErrUnsupported 同义，
-// 独立一份是为了让本包不依赖 channel 包——它只需要「有这么一个结局」。
-var ErrUnsupported = errors.New("该渠道不支持查询额度")
 
 // Routable 判断一个额度状态是否足以支撑路由决策。
 //
