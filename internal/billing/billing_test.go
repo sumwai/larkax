@@ -399,8 +399,10 @@ func TestSettleReturnsDifference(t *testing.T) {
 	if s.Actual.Cmp(money.MustParse("0.002")) != 0 {
 		t.Errorf("Actual = %s", s.Actual)
 	}
-	if s.Delta.Cmp(money.MustParse("-0.998")) != 0 {
-		t.Errorf("Delta = %s，期望 -0.998（要退回）", s.Delta)
+	// 退回的差额是 Reserved - Actual。它不在结构体里单存一份（见 Settlement
+	// 的注释），要用就当场减。
+	if refund := s.Reserved.Sub(s.Actual); refund.Cmp(money.MustParse("0.998")) != 0 {
+		t.Errorf("退回差额 = %s，期望 0.998", refund)
 	}
 	if s.Capped {
 		t.Error("未超预留不该标记 Capped")
@@ -423,9 +425,6 @@ func TestSettleCapsOvershoot(t *testing.T) {
 	if s.Actual.Cmp(reserved) != 0 {
 		t.Errorf("超限时 Actual 应截到预留，得到 %s", s.Actual)
 	}
-	if !s.Delta.IsZero() {
-		t.Errorf("截住之后 Delta 应为零，得到 %s", s.Delta)
-	}
 	// 明细仍要保留真实用量算出的金额：排查时要知道超了多少
 	if s.Breakdown.Total.Cmp(reserved) <= 0 {
 		t.Error("明细应保留未截断的金额，供排查超了多少")
@@ -443,8 +442,9 @@ func TestSettleExactlyAtReserve(t *testing.T) {
 	if s.Capped {
 		t.Error("正好相等不该标记 Capped")
 	}
-	if !s.Delta.IsZero() {
-		t.Errorf("正好相等 Delta 应为零，得到 %s", s.Delta)
+	// 边界是 `>` 而不是 `>=`：正好相等时收的钱就是预留额，不多不少。
+	if s.Actual.Cmp(money.MustParse("0.008")) != 0 {
+		t.Errorf("正好相等时实收应等于预留，得到 %s", s.Actual)
 	}
 }
 
@@ -654,9 +654,6 @@ func TestMinimumAppliesToBothReserveAndSettle(t *testing.T) {
 	}
 	if s.Actual.Cmp(money.MustParse("1")) != 0 {
 		t.Errorf("结算应补足到最低消费 1 元，得到 %s", s.Actual)
-	}
-	if !s.Delta.IsZero() {
-		t.Errorf("补足之后 Delta 应为零，得到 %s", s.Delta)
 	}
 	if s.Capped {
 		t.Error("不该标记 Capped：预留算了保底，结算也在同一上界内")
