@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/internal/gateway"
 	"github.com/sumwai/larkax/internal/testdb"
 )
 
@@ -324,4 +325,77 @@ func partitionBounds(t *testing.T, name string) (string, string) {
 	}
 	from, to := DayBounds(day)
 	return from.Format(time.RFC3339), to.Format(time.RFC3339)
+}
+
+// 上游证据两列在真库上要真的落进对应的列，NULL 与值都要过。
+//
+// 假实现能证明参数按什么顺序交给驱动，证明不了「驱动与列类型说得上话」：
+// upstream_status 是 integer、error_kind 是 text，而 Go 侧的 *int / *string
+// 变成 NULL 这一步只有真库会报错。响应方向的行正是靠这两列说清
+// 「上游回了几号、这次响应怎么了」，它们落错列时不会有任何东西报出来。
+func TestIntegrationInsertPersistsUpstreamEvidence(t *testing.T) {
+	handle := testDB(t)
+	store := NewStore(Wrap(handle), quietLogger())
+	store.now = func() time.Time { return ownDay }
+	ctx := context.Background()
+
+	day := PartitionName(ownDay)
+	dropRequestSnapshotPartition(ctx, t, handle, day)
+	t.Cleanup(func() {
+		dropRequestSnapshotPartition(context.Background(), t, handle, day)
+	})
+
+	stamp := time.Now().UTC().Format("20060102150405.000000000")
+	status := 403
+	kind := "upstream_http_error"
+
+	withEvidence := newSnap()
+	withEvidence.RequestID = "wire-evidence-" + stamp
+	withEvidence.Direction = "response"
+	withEvidence.UpstreamStatus = &status
+	withEvidence.ErrorKind = &kind
+
+	noAnswer := newSnap()
+	noAnswer.RequestID = "wire-no-answer-" + stamp
+	noAnswer.Direction = "response"
+
+	for _, snap := range []*gateway.Snapshot{withEvidence, noAnswer} {
+		if err := store.Insert(ctx, snap); err != nil {
+			t.Fatalf("写入 %s 失败: %v", snap.RequestID, err)
+		}
+	}
+
+	var gotStatus sql.NullInt64
+	var gotKind sql.NullString
+	err := handle.QueryRowContext(ctx, `
+		SELECT upstream_status, error_kind
+		  FROM request_snapshots
+		 WHERE request_id = $1`, withEvidence.RequestID).Scan(&gotStatus, &gotKind)
+	if err != nil {
+		t.Fatalf("查询失败: %v", err)
+	}
+	if !gotStatus.Valid || gotStatus.Int64 != 403 {
+		t.Errorf("upstream_status = %+v，期望 403", gotStatus)
+	}
+	if !gotKind.Valid || gotKind.String != "upstream_http_error" {
+		t.Errorf("error_kind = %+v，期望 upstream_http_error", gotKind)
+	}
+
+	// 一个 HTTP 响应都没拿到的那一行：两列都是 NULL，而 NULL 在这里
+	// 表示「没拿到」，不是「漏记」。
+	gotStatus = sql.NullInt64{}
+	gotKind = sql.NullString{}
+	err = handle.QueryRowContext(ctx, `
+		SELECT upstream_status, error_kind
+		  FROM request_snapshots
+		 WHERE request_id = $1`, noAnswer.RequestID).Scan(&gotStatus, &gotKind)
+	if err != nil {
+		t.Fatalf("查询失败: %v", err)
+	}
+	if gotStatus.Valid {
+		t.Errorf("没拿到响应时 upstream_status 应当是 NULL，实际 %d", gotStatus.Int64)
+	}
+	if gotKind.Valid {
+		t.Errorf("没拿到响应时 error_kind 应当是 NULL，实际 %q", gotKind.String)
+	}
 }

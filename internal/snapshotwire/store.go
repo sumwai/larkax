@@ -87,21 +87,18 @@ func (s *Store) nowUTC() time.Time {
 // 而那条路是静默的，直到有人发现留存删不掉它。让补建与写入同源，
 // 「这一行属于哪一天」就只有一个答案。
 //
-// # 为什么这里不写 upstream_status 与 error_kind
+// # upstream_status 与 error_kind 照实写
 //
-// 这两列是给**响应方向**的快照准备的（采集时的上游状态与错误分类）。
-// 当前的采集链路只产请求方向的快照，而它写于调上游之前——那时结局还没
-// 发生。于是这张表上的 upstream_status 恒为 NULL，**它读作「这一行不适用」，
-// 不是「上游没回状态码」**；同一次请求的上游结局记在 billing_requests 上，
-// 那才是权威值（见 internal/gateway 的 Snapshot 注释）。
-//
-// 不在这里显式写 NULL 的原因：列本来就是可空的，显式写既没有信息量，又会
-// 让人误以为「有值可写但现在没写」。哪天真接了响应方向的采集，再加列与参数。
+// 两列由网关填好交进来：请求方向的行上它们是 nil（采集发生在调上游之前，
+// 结局还没发生），响应方向的行上分别表示「上游回了几号」与「这次响应怎么
+// 结束的」（见 internal/gateway 的 Snapshot 注释）。nil 落成 NULL，
+// 而 NULL 在响应方向的行上是一个有内容的值——「一个 HTTP 响应都没拿到」。
 const insertSQL = `
 	INSERT INTO request_snapshots (
 		request_id, user_id, direction, skeleton_version, capture_mode,
-		skeleton, skeleton_truncated, redacted_paths, created_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+		skeleton, skeleton_truncated, redacted_paths,
+		upstream_status, error_kind, created_at
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
 
 // captureModeSkeleton 是默认采集模式。
 //
@@ -157,6 +154,18 @@ func (s *Store) Insert(ctx context.Context, snap *gateway.Snapshot) error {
 		paths = []string{}
 	}
 
+	// 指针列转成 database/sql 认的形态：nil 落 NULL，非 nil 落值本身。
+	// sql 包也会解引用指针，但显式写出来，「NULL 是有意的」这件事就不靠
+	// 读者去记驱动的行为。
+	var upstreamStatus any
+	if snap.UpstreamStatus != nil {
+		upstreamStatus = *snap.UpstreamStatus
+	}
+	var errorKind any
+	if snap.ErrorKind != nil {
+		errorKind = *snap.ErrorKind
+	}
+
 	_, err = s.db.ExecContext(ctx, insertSQL,
 		snap.RequestID,
 		snap.UserID,
@@ -166,6 +175,8 @@ func (s *Store) Insert(ctx context.Context, snap *gateway.Snapshot) error {
 		skeleton,
 		snap.Truncated,
 		paths,
+		upstreamStatus,
+		errorKind,
 		createdAt,
 	)
 	if err != nil {

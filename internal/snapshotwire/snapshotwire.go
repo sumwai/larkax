@@ -207,7 +207,23 @@ func (c *Collector) Redact(req *channel.Request) (*gateway.Snapshot, error) {
 // 注意它只有归一化字段那部分：上游原样返回的 Response.Raw 与 Usage.Raw
 // 不在其中，见 snapshot.RedactResponse 的注释。要采集它们需要单独传
 // RedactRaw，而那是一个需要单独决定的问题。
+//
+// # resp 为 nil 时返回空骨架
+//
+// nil 表示这次调用没有可脱敏的响应体：连不上、超时，或者上游回了非 2xx、
+// 正文只留在 channel.ErrUpstream.Body 里而没有归一化。那一行仍然要落——
+// 它的内容是 upstream_status 与 error_kind 两列，不是骨架（见
+// gateway.Redactor 的接口注释）。
+//
+// 这里不把 nil 交给 snapshot.Redactor：那个包把 nil 读作调用方的 bug，
+// 而在这里它是一个正常结局。
 func (c *Collector) RedactResponse(resp *channel.Response) (*gateway.Snapshot, error) {
+	if resp == nil {
+		return &gateway.Snapshot{
+			Skeleton: map[string]any{},
+			Version:  snapshot.SkeletonVersion,
+		}, nil
+	}
 	res, err := c.responseRedactor.RedactResponse(resp)
 	return toSnapshot(res, err)
 }
