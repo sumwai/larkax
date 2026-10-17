@@ -428,6 +428,376 @@ func TestDoctorKeepsDBUnreachExitCode(t *testing.T) {
 	}
 }
 
+// ── 机器可读输出 ────────────────────────────────────────────────────────
+//
+// 这一节钉的是 `doctor --format json` 那一条路（见 format.go 与
+// docs/cli-output.md）。它与表格那一档读的是同一个 doctorReport，所以这里
+// 每一条都在问「同一份报告，两个读者拿到的是同一件事吗」。
+
+// doctorRep 造一份报告，只填用例关心的那几项。
+func doctorRep(checks ...doctorCheck) doctorReport {
+	rep := doctorReport{}
+	named := rep.namedChecks()
+	for i, c := range checks {
+		if i >= len(named) {
+			break
+		}
+		switch named[i].name {
+		case "database":
+			rep.database = c
+		case "channel":
+			rep.channel = c
+		case "catalog":
+			rep.catalog = c
+		case "alias":
+			rep.alias = c
+		case "pricing":
+			rep.pricing = c
+		case "wallet":
+			rep.wallet = c
+		}
+	}
+	return rep
+}
+
+// doctorJSON 跑一遍真的那条渲染路径（emitDoctorReport），把 stdout 解成 map。
+//
+// 直接调 emitDoctorReport 而不是 doctorDoc：前者才是命令走的那条路，
+// **退出码也在里面定**。只测 doctorDoc 会漏掉「报告说 failed、退出码却是 0」
+// 这一类分叉，而那正是这条命令最要紧的一条契约。
+func doctorJSON(t *testing.T, rep doctorReport, dbErr error) (map[string]any, error) {
+	t.Helper()
+	withFormat(t, formatJSON)
+
+	var buf bytes.Buffer
+	err := emitDoctorReport(&buf, rep, dbErr, false)
+	out := buf.String()
+
+	if strings.ContainsRune(out, escByte) {
+		t.Errorf("json 模式的输出里不许有转义序列：%q", out)
+	}
+	var got map[string]any
+	if jsonErr := json.Unmarshal([]byte(out), &got); jsonErr != nil {
+		t.Fatalf("json 模式下 stdout 不是一份合法的 JSON: %v\n%s", jsonErr, out)
+	}
+	return got, err
+}
+
+// docChecks 取 checks 那一栏。
+func docChecks(t *testing.T, doc map[string]any) []map[string]any {
+	t.Helper()
+	raw, ok := doc["checks"].([]any)
+	if !ok {
+		t.Fatalf("checks 不是数组：%#v", doc["checks"])
+	}
+	out := make([]map[string]any, 0, len(raw))
+	for _, item := range raw {
+		m, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("checks 里有一项不是对象：%#v", item)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// 顶层 status 与退出码说的是同一件事，且与交互模式一致。
+//
+// 「有失败项时仍退出 1」是 issue 里点名的验收项：脚本基于退出码的逻辑不许
+// 因为换了输出格式而变。
+func TestDoctorJSONStatusAndExitCodeAgree(t *testing.T) {
+	pass := doctorCheck{title: "数据库", ok: "迁移版本 23"}
+	fail := doctorCheck{title: "模型目录",
+		findings: []doctorProblem{{headline: "模型 model-x 找不到"}}}
+	skip := doctorCheck{title: "别名", skip: "没有可查的对象"}
+
+	cases := []struct {
+		name       string
+		rep        doctorReport
+		dbErr      error
+		wantStatus string
+		wantCode   int
+	}{
+		{"六项全通过", doctorRep(pass, pass, pass, pass, pass, pass), nil, jsonOK, exitOK},
+		{"一项不通过", doctorRep(pass, pass, fail, pass, pass, pass), nil, jsonFailed, exitFailure},
+		{"一项没跑成", doctorRep(pass, pass, pass, skip, pass, pass), nil, jsonSkipped, exitFailure},
+		{
+			// 连不上库：六项都「没跑成」，退出码 3。这是 doctor 最要紧的一次
+			// 输出，json 模式下它同样要认得出来——探针不能因为库挂了就拿到
+			// 一份空的 stdout。
+			"连不上库",
+			doctorReportWithoutDB(context.Background(), dbErr(errors.New("连不上")), doctorOptions{}),
+			dbErr(errors.New("连不上")),
+			jsonSkipped,
+			exitDBUnreach,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, err := doctorJSON(t, tc.rep, tc.dbErr)
+
+			if got := exitCode(err); got != tc.wantCode {
+				t.Errorf("退出码 = %d，想要 %d", got, tc.wantCode)
+			}
+			if doc["status"] != tc.wantStatus {
+				t.Errorf("status = %v，想要 %q", doc["status"], tc.wantStatus)
+			}
+			// 报告里的 exit_code 必须与进程的退出码是同一个数：探针既可能读
+			// 管道里的 JSON，也可能只看退出码，两者不一致时它得猜信哪个。
+			if got := doc["exit_code"]; got != float64(tc.wantCode) {
+				t.Errorf("exit_code = %v，与进程的退出码 %d 对不上", got, tc.wantCode)
+			}
+		})
+	}
+}
+
+// 「没跑成」与「通过」在 JSON 里也不许同形。
+//
+// 表格那一档靠状态符 `!` 与 `✓` 分开（见 style.go），JSON 这一档靠 status
+// 那一栏。两处说的是同一件事：一次什么都没查的运行不是一次全部通过的运行
+// （见 LESSONS.md 第 16 条）。
+func TestDoctorJSONSkippedIsNotPassed(t *testing.T) {
+	doc, err := doctorJSON(t, doctorRep(
+		doctorCheck{title: "数据库"},
+		doctorCheck{title: "渠道"},
+		doctorCheck{title: "模型目录", skip: "没有可查的对象"},
+		doctorCheck{title: "别名"},
+		doctorCheck{title: "计价规则"},
+		doctorCheck{title: "钱包"},
+	), nil)
+	if err == nil {
+		t.Fatal("有一项没跑成时退出码必须非 0")
+	}
+
+	checks := docChecks(t, doc)
+	if checks[0]["status"] != "passed" {
+		t.Errorf("通过项的 status = %v，想要 passed", checks[0]["status"])
+	}
+	if checks[0]["skip_reason"] != nil {
+		t.Errorf("通过项不该有 skip_reason：%v", checks[0]["skip_reason"])
+	}
+	if checks[2]["status"] != "skipped" {
+		t.Errorf("没跑成项的 status = %v，想要 skipped", checks[2]["status"])
+	}
+	if checks[2]["skip_reason"] != "没有可查的对象" {
+		t.Errorf("没跑成的原因没有原样带出来：%v", checks[2]["skip_reason"])
+	}
+	// summary 里的三档计数与终端上那行汇总说的是同一批数。
+	summary, ok := doc["summary"].(map[string]any)
+	if !ok {
+		t.Fatalf("summary 不是对象：%#v", doc["summary"])
+	}
+	for key, want := range map[string]float64{"total": 6, "passed": 5, "failed": 0, "skipped": 1} {
+		if summary[key] != want {
+			t.Errorf("summary[%q] = %v，想要 %v", key, summary[key], want)
+		}
+	}
+}
+
+// 问题清单**不截断**：表格那边「另有 N 条，用 -v 看」是屏幕宽度的问题，
+// 脚本按模型名去筛某一条问题时，截断会让它「查不到」而不是「还有更多」。
+func TestDoctorJSONDoesNotCapProblems(t *testing.T) {
+	total := doctorMaxListed + 5
+	findings := make([]doctorProblem, 0, total)
+	for i := 0; i < total; i++ {
+		findings = append(findings, doctorProblem{
+			headline: fmt.Sprintf("第 %d 个模型不存在", i),
+			detail:   "多半是拼写差了一个字符",
+		})
+	}
+	rep := doctorRep(
+		doctorCheck{title: "数据库"}, doctorCheck{title: "渠道"},
+		doctorCheck{title: "模型目录", findings: findings},
+		doctorCheck{title: "别名"}, doctorCheck{title: "计价规则"}, doctorCheck{title: "钱包"},
+	)
+
+	doc, _ := doctorJSON(t, rep, nil)
+	problems, ok := docChecks(t, doc)[2]["problems"].([]any)
+	if !ok {
+		t.Fatalf("problems 不是数组：%#v", docChecks(t, doc)[2]["problems"])
+	}
+	if len(problems) != total {
+		t.Errorf("problems 有 %d 条，想要全部 %d 条（表格那一档才截断）", len(problems), total)
+	}
+	first, _ := problems[0].(map[string]any)
+	if first["headline"] != "第 0 个模型不存在" {
+		t.Errorf("第一条问题不对：%#v", first)
+	}
+	if first["detail"] != "多半是拼写差了一个字符" {
+		t.Errorf("问题的 detail 要一起带出来：%#v", first)
+	}
+
+	// 表格那一档仍然按老样子截断：两档的取舍不同，不是一处改另一处跟着改。
+	var buf bytes.Buffer
+	printDoctorReport(&buf, rep, true)
+	if !strings.Contains(buf.String(), "另有 5 条同类问题没有列出") {
+		t.Errorf("表格那一档该照旧截断：\n%s", buf.String())
+	}
+	// 结论那一句仍然是「第一条 + 另有 N 条」：它是给人看的那一行，
+	// 与结构化的 problems 并存，不是二选一。
+	if got := docChecks(t, doc)[2]["conclusion"]; got != "第 0 个模型不存在（另有 24 条，用 -v 看）" {
+		t.Errorf("conclusion = %v，与终端上那一行对不上", got)
+	}
+}
+
+// 各项的字段逐个钉住：机器可读的名字、表、notes 的空值口径。
+func TestDoctorJSONCheckFields(t *testing.T) {
+	rep := doctorRep(
+		doctorCheck{
+			title: "数据库", subject: "连得上、迁移跑到哪一版", ok: "迁移版本 23",
+			notes: []string{"读的是 goose 的版本表"},
+			table: &doctorTable{header: []string{"项", "值"}, rows: [][]string{{"版本", "23"}}},
+		},
+		doctorCheck{title: "渠道"}, doctorCheck{title: "模型目录"},
+		doctorCheck{title: "别名"}, doctorCheck{title: "计价规则"}, doctorCheck{title: "钱包"},
+	)
+
+	doc, _ := doctorJSON(t, rep, nil)
+	checks := docChecks(t, doc)
+
+	// 名字是英文、稳定、不随排版改：脚本按它认项目，人看到的是 title。
+	wantNames := []string{"database", "channel", "catalog", "alias", "pricing", "wallet"}
+	for i, want := range wantNames {
+		if checks[i]["name"] != want {
+			t.Errorf("第 %d 项的名字 = %v，想要 %q", i, checks[i]["name"], want)
+		}
+	}
+
+	db := checks[0]
+	if db["ok"] != "迁移版本 23" {
+		t.Errorf("通过时那一句没有带出来：%v", db["ok"])
+	}
+	if db["subject"] != "连得上、迁移跑到哪一版" {
+		t.Errorf("subject 没有带出来：%v", db["subject"])
+	}
+	notes, _ := db["notes"].([]any)
+	if len(notes) != 1 || notes[0] != "读的是 goose 的版本表" {
+		t.Errorf("notes 不对：%#v", db["notes"])
+	}
+	problems, _ := db["problems"].([]any)
+	if len(problems) != 0 {
+		t.Errorf("没有问题时 problems 该是空数组，得到 %#v", problems)
+	}
+	if db["table"] == nil {
+		t.Error("表要带出来：它上面挂着 notes 里没有的数")
+	}
+
+	// 没填 notes 的项给空数组而不是 null：`[]` 是「一条都没有」，
+	// nul 读起来像「这一栏没有」——两者在本仓是反复要分清的两件事。
+	channel := checks[1]
+	emptyNotes, ok := channel["notes"].([]any)
+	if !ok {
+		t.Fatalf("notes 该是数组而不是 null：%#v", channel["notes"])
+	}
+	if len(emptyNotes) != 0 {
+		t.Errorf("没填 notes 的项该是空数组，得到 %#v", emptyNotes)
+	}
+	if channel["table"] != nil {
+		t.Errorf("没有表时该给 null，得到 %#v", channel["table"])
+	}
+	if channel["ok"] != nil {
+		t.Errorf("没填 ok 时该给 null，得到 %#v", channel["ok"])
+	}
+}
+
+// 真打上游那一项在 JSON 里有自己的对象，且失败时的归因不丢。
+//
+// 归因那一句是这条命令最要紧的一行（见 issue #381）：状态码 400 与「上游回了
+// 一个 400」在输出里长得一样，而两者要改的地方完全相反。它在表格那一档进
+// 默认那一行，在 JSON 这一档进 `attribution`。
+func TestDoctorJSONLiveObject(t *testing.T) {
+	// 没开 --live：只给 enabled=false。铺一排 null 会让人以为「跑了但没读到」。
+	doc, _ := doctorJSON(t, doctorRep(), nil)
+	live, ok := doc["live"].(map[string]any)
+	if !ok {
+		t.Fatalf("live 不是对象：%#v", doc["live"])
+	}
+	if live["enabled"] != false || live["ok"] != false {
+		t.Errorf("没开 --live 时 live = %#v，想要 enabled/ok 都为 false", live)
+	}
+	if len(live) != 2 {
+		t.Errorf("没开 --live 时不该铺一排空栏：%#v", live)
+	}
+	if doc["status"] != jsonOK {
+		t.Errorf("没开 --live 不该影响整份报告的结论，得到 %v", doc["status"])
+	}
+
+	// 开了 --live 且被网关拒了：归因、状态码、rejected_by_us 都要在。
+	rep := doctorRep(
+		doctorCheck{title: "数据库"}, doctorCheck{title: "渠道"},
+		doctorCheck{title: "模型目录"}, doctorCheck{title: "别名"},
+		doctorCheck{title: "计价规则"}, doctorCheck{title: "钱包"},
+	)
+	rep.live = doctorLive{
+		enabled: true, endpoint: doctorEndpointChat, model: "claude-x",
+		url: "http://127.0.0.1:8080" + doctorPathChat,
+		// 版本头在 = 这个响应是我们自己的网关回的（见 fromGateway）。
+		status: http.StatusBadRequest, version: "1.2.3", errMsg: "缺少 messages",
+	}
+	doc, err := doctorJSON(t, rep, nil)
+	if err == nil {
+		t.Fatal("真打上游失败时退出码必须非 0")
+	}
+	if doc["status"] != jsonFailed {
+		t.Errorf("真打上游失败时整份报告该是 failed，得到 %v", doc["status"])
+	}
+	live, _ = doc["live"].(map[string]any)
+	if live["ok"] != false || live["enabled"] != true {
+		t.Errorf("live.ok/enabled 不对：%#v", live)
+	}
+	if live["status_code"] != float64(http.StatusBadRequest) {
+		t.Errorf("status_code = %v，想要 400", live["status_code"])
+	}
+	if live["from_gateway"] != true || live["rejected_by_us"] != true {
+		t.Errorf("归因用的两个布尔不对：%#v", live)
+	}
+	if live["attribution"] == nil || live["attribution"] == "" {
+		t.Error("失败时归因那一句必须带出来")
+	}
+	if live["send_error"] != nil {
+		t.Errorf("请求发出去了，send_error 该是 null：%v", live["send_error"])
+	}
+}
+
+// 凭证不进任何一个字节的输出——json 那一档也是。
+//
+// 这条命令的凭证只出现在请求头里（见 runDoctorLive），而 JSON 这一档多了一条
+// 往外倒数据的路，所以这里对着**真实的**那条路再钉一遍：打一个真的请求、
+// 拿真的响应，然后把整份 stdout 搜一遍。
+func TestDoctorJSONNeverCarriesCredential(t *testing.T) {
+	const key = "test-key-placeholder"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(doctorHeaderVersion, "1.2.3")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"cmpl-1","model":"claude-x",`+
+			`"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	defer srv.Close()
+
+	saved := doctorHTTPClient
+	doctorHTTPClient = srv.Client()
+	t.Cleanup(func() { doctorHTTPClient = saved })
+
+	rep := doctorRep()
+	rep.live = runDoctorLive(context.Background(), doctorOptions{
+		live: true, model: "claude-x", endpoint: doctorEndpointChat,
+		baseURL: srv.URL, key: key,
+	})
+	if !rep.live.ok() {
+		t.Fatalf("这次调用该算通过，得到 status=%d err=%v", rep.live.status, rep.live.sendErr)
+	}
+
+	doc, _ := doctorJSON(t, rep, nil)
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	if strings.Contains(string(raw), key) {
+		t.Errorf("凭证出现在了 json 输出里：\n%s", raw)
+	}
+}
+
 // ── 第 7 项：真打一次上游 ───────────────────────────────────────────────
 
 // TestDoctorEndpointPathsMatchAPI 钉住路径与 internal/api 是同一份值。

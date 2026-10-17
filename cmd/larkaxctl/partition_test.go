@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -474,5 +475,144 @@ func TestPartitionEnsureReportsWhatItCreated(t *testing.T) {
 	}
 	if !strings.Contains(out, "没有缺失的分区") {
 		t.Errorf("第二次 ensure 应当明说没有缺失的分区，实际为 %q", out)
+	}
+}
+
+// ── 机器可读输出 ────────────────────────────────────────────────────────
+
+// 三条判据的取值都要在 JSON 里看得见。
+//
+// 只给一个「过没过」不够：「有 3 行落进兜底分区」与「有 3000 行」要做的处置
+// 完全不同，而结论那一句是把它们折起来之后的说法。
+func TestPartitionCheckDocCarriesEachCondition(t *testing.T) {
+	from := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	missing := []string{"usage_events_202610", "usage_events_202611"}
+	problems := partitionProblems(missing, 3, 0)
+
+	doc := jsonDocOf(t, partitionCheckDoc(from, 3, missing, 3, 0, problems))
+
+	// 区间三个键一起给：缺分区时最要紧的上下文是「这一段本来该有几个分区」，
+	// 而它只存在于命令行参数里（见 printPartitionSpan）。
+	if doc["from_month"] != "2026-10" || doc["to_month"] != "2026-12" {
+		t.Errorf("月份区间不对：%v ~ %v", doc["from_month"], doc["to_month"])
+	}
+	if summary, _ := doc["summary"].(map[string]any); summary["months"] != float64(3) {
+		t.Errorf("summary.months = %v，想要 3", doc["summary"])
+	}
+
+	items, ok := doc["missing"].([]any)
+	if !ok || len(items) != 2 {
+		t.Fatalf("missing 不是两条：%#v", doc["missing"])
+	}
+	if items[0] != "usage_events_202610" {
+		t.Errorf("缺失的分区名不对：%#v", items)
+	}
+	if problemsOut, okProblems := doc["problems"].([]any); !okProblems || len(problemsOut) != len(problems) {
+		t.Errorf("problems 有 %v 条，想要 %d 条", doc["problems"], len(problems))
+	}
+
+	// 兜底分区的行数按**表名**给：脚本要拿它去查那几行是什么。
+	defaults, okDefaults := doc["default_partitions"].(map[string]any)
+	if !okDefaults {
+		t.Fatalf("default_partitions 不是对象：%#v", doc["default_partitions"])
+	}
+	if defaults[store.UsageEventDefaultPartition] != float64(3) {
+		t.Errorf("usage_events 兜底分区的行数不对：%#v", defaults)
+	}
+	if defaults[snapshotwire.DefaultPartition] != float64(0) {
+		t.Errorf("快照兜底分区的行数不对：%#v", defaults)
+	}
+}
+
+// 干净时是 ok、有问题时是 failed，且与退出码说的是同一件事。
+//
+// 「有问题却退出 0」与「没问题却退出 1」都会让按退出码分派的巡检脚本失准，
+// 而 json 这一档多出一栏 status，两处不一致时读的人得猜信哪个。
+func TestPartitionCheckDocStatusAgreesWithExitCode(t *testing.T) {
+	from := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name       string
+		problems   []string
+		wantStatus string
+		wantExit   int
+	}{
+		{"干净", nil, jsonOK, exitOK},
+		{"缺分区", []string{"usage_events 缺 2 个月分区"}, jsonFailed, exitFailure},
+		{"兜底分区有行", []string{"兜底分区里有 3 行"}, jsonFailed, exitFailure},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := jsonDocOf(t, partitionCheckDoc(from, 3, nil, 0, 0, tc.problems))
+			if doc["status"] != tc.wantStatus {
+				t.Errorf("status = %v，想要 %q", doc["status"], tc.wantStatus)
+			}
+			if got := exitCode(partitionCheckErr(tc.problems)); got != tc.wantExit {
+				t.Errorf("退出码 = %d，想要 %d", got, tc.wantExit)
+			}
+		})
+	}
+}
+
+// 空清单是 [] 而不是 null：`null` 读起来像「这一栏没有」，而「一个都不缺」
+// 正是这里要说的那件事。
+func TestPartitionCheckDocEmptyMissingIsArray(t *testing.T) {
+	doc := jsonDocOf(t, partitionCheckDoc(time.Now(), 3, nil, 0, 0, nil))
+	items, ok := doc["missing"].([]any)
+	if !ok {
+		t.Fatalf("missing 该是数组而不是 null：%#v", doc["missing"])
+	}
+	if len(items) != 0 {
+		t.Errorf("missing 该是空的：%#v", items)
+	}
+	if problems, ok := doc["problems"].([]any); !ok || len(problems) != 0 {
+		t.Errorf("problems 该是空数组：%#v", doc["problems"])
+	}
+}
+
+// 命令级：体检不通过时 json 模式仍然退出 1，且 stdout 是一份纯 JSON。
+//
+// 用 --months 120 造出「区间里必然有缺的」，不删任何分区——这条命令是只读的，
+// 用例不该为了造现场去动全局状态（与 TestPartitionCheckFailsOnMissingMonth
+// 同一个做法）。
+func TestPartitionCheckJSONStdoutIsPure(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+	withFormat(t, formatJSON)
+
+	var err error
+	stdout, _ := captureStreams(t, func() {
+		err = runPartitionCheck([]string{"--months", "120"})
+	})
+	if err == nil {
+		t.Fatal("缺月分区时应当非零退出")
+	}
+	if got := exitCode(err); got != exitFailure {
+		t.Errorf("json 模式下退出码 = %d，想要 %d", got, exitFailure)
+	}
+	if strings.ContainsRune(stdout, escByte) {
+		t.Errorf("json 模式下 stdout 里不许有转义序列：%q", stdout)
+	}
+
+	var got struct {
+		Status   string   `json:"status"`
+		ExitCode int      `json:"exit_code"`
+		Missing  []string `json:"missing"`
+		Problems []string `json:"problems"`
+	}
+	if jsonErr := json.Unmarshal([]byte(stdout), &got); jsonErr != nil {
+		t.Fatalf("json 模式下 stdout 不是一份合法的 JSON: %v\n%s", jsonErr, stdout)
+	}
+	if got.Status != jsonFailed || got.ExitCode != exitFailure {
+		t.Errorf("status=%q exit_code=%d，想要 %q / %d",
+			got.Status, got.ExitCode, jsonFailed, exitFailure)
+	}
+	if len(got.Missing) == 0 {
+		t.Error("缺的分区名要列出来，只给一个计数看不出是哪几个")
+	}
+	// 表格那一档的排版（「起点 …，共 N 个月」「usage_events 缺失 N 个」）
+	// 一个都不该混进来。
+	if strings.Contains(stdout, "起点 ") || strings.Contains(stdout, "兜底分区 ") {
+		t.Errorf("json 的 stdout 里混进了表格那一档的排版：\n%s", stdout)
 	}
 }

@@ -63,6 +63,10 @@ func runUser(args []string) error {
 }
 
 func runUserCreate(args []string) error {
+	if err := jsonUnsupported("user create"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("user create", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, userUsage) }
 	name := fs.String("name", "", "用户名，唯一（大小写不敏感）")

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sumwai/larkax/internal/catalog"
 )
@@ -461,4 +462,195 @@ func TestModelAddRejectsDuplicateCanonical(t *testing.T) {
 	if got := exitCode(err); got != exitConflict {
 		t.Errorf("重复的规范名是约束冲突，退出码应当是 %d，得到 %d（%v）", exitConflict, got, err)
 	}
+}
+
+// ── 机器可读输出（--format json）─────────────────────────────────────────
+
+// TestModelListDocIsMachineReadable 钉住 model list 的机器可读形状。
+func TestModelListDocIsMachineReadable(t *testing.T) {
+	models := []catalog.Model{
+		{
+			ID: 21, CanonicalName: "m1", DisplayName: "模型一",
+			Vendor: "example", Family: "fam",
+			ContextLimit:     200000,
+			Capabilities:     catalog.Capabilities{Tools: ptrTo(true), Vision: ptrTo(true)},
+			ModalitiesInput:  []string{"text", "image"},
+			ModalitiesOutput: []string{"text"},
+		},
+		{
+			// 三个上限都没设（Go 侧是 0，库里是 NULL）、厂商与家族是空串、
+			// 模态是空数组的一条：表格那一档把它们打成 `-`，而机器读的
+			// 那一档必须打成 null 与 `[]`——「没设」与「设成了 0」在 JSON
+			// 里要分得开（0 不是任何模型的合法上限）。
+			ID: 22, CanonicalName: "m2", DisplayName: "模型二",
+		},
+	}
+
+	got := jsonRoundTrip(t, modelListDoc(models))
+	assertJSONField(t, got, "status", jsonOK)
+	assertJSONField(t, jsonObjectField(t, got, "summary"), "total", float64(2))
+
+	list := jsonEntries(t, got, "models")
+	if len(list) != 2 {
+		t.Fatalf("模型数 = %d，期望 2", len(list))
+	}
+	first := list[0].(map[string]any)
+	assertJSONField(t, first, "id", float64(21))
+	assertJSONField(t, first, "canonical_name", "m1")
+	assertJSONField(t, first, "display_name", "模型一")
+	assertJSONField(t, first, "vendor", "example")
+	assertJSONField(t, first, "family", "fam")
+	assertJSONField(t, first, "context_limit", float64(200000))
+	assertJSONField(t, first, "input_limit", nil)
+	assertJSONField(t, first, "output_limit", nil)
+	assertJSONField(t, first, "modalities_input", []any{"text", "image"})
+	assertJSONField(t, first, "modalities_output", []any{"text"})
+
+	caps := jsonObjectField(t, first, "capabilities")
+	assertJSONField(t, caps, "tools", true)
+	assertJSONField(t, caps, "vision", true)
+	// 没声明过的能力是 null，不是 false：库里那一列是 NULL（「从没配过」），
+	// 与「明确配成不支持」是两回事（见迁移 00025）。JSON 里也得分得开，
+	// 否则下游会把「不知道」当成「做不了」。
+	assertJSONField(t, caps, "reasoning", nil)
+	assertJSONField(t, caps, "audio", nil)
+	assertJSONField(t, caps, "cache", nil)
+	assertJSONField(t, caps, "batch", nil)
+
+	// 清单里那条不带 show 的那几栏：采集源的元信息是给单条详情用的。
+	if _, ok := first["knowledge_cutoff"]; ok {
+		t.Error("清单不该带 knowledge_cutoff：那是 model show 多出来的几栏之一")
+	}
+
+	second := list[1].(map[string]any)
+	assertJSONField(t, second, "vendor", nil)
+	assertJSONField(t, second, "family", nil)
+	assertJSONField(t, second, "context_limit", nil)
+	assertJSONField(t, second, "input_limit", nil)
+	assertJSONField(t, second, "output_limit", nil)
+	assertJSONField(t, second, "modalities_input", []any{})
+	assertJSONField(t, second, "modalities_output", []any{})
+
+	t.Run("空清单是空数组，不是 null", func(t *testing.T) {
+		empty := jsonRoundTrip(t, modelListDoc(nil))
+		assertJSONField(t, jsonObjectField(t, empty, "summary"), "total", float64(0))
+		if len(jsonEntries(t, empty, "models")) != 0 {
+			t.Error("空清单应当是空数组")
+		}
+	})
+}
+
+// TestModelShowDocIsMachineReadable 钉住 model show 的机器可读形状。
+func TestModelShowDocIsMachineReadable(t *testing.T) {
+	cutoff := time.Date(2025, 4, 30, 0, 0, 0, 0, time.UTC)
+	released := time.Date(2026, 2, 3, 0, 0, 0, 0, time.UTC)
+
+	t.Run("采集源那几栏都在", func(t *testing.T) {
+		m := catalog.Model{
+			ID: 21, CanonicalName: "m1", DisplayName: "模型一",
+			CanonicalModelID: "example/m1",
+			KnowledgeCutoff:  &cutoff,
+			ReleaseDate:      &released,
+			UpdatedAt:        time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		}
+
+		got := jsonRoundTrip(t, modelShowDoc(m))
+		assertJSONField(t, got, "status", jsonOK)
+		model := jsonObjectField(t, got, "model")
+		assertJSONField(t, model, "canonical_name", "m1")
+		// 表上那两列是 date（无时区），所以只打日子；把无时区的日期按某个
+		// 时区渲染成时刻，会让同一个值在不同机器上打出来不一样。
+		assertJSONField(t, model, "knowledge_cutoff", "2025-04-30")
+		assertJSONField(t, model, "release_date", "2026-02-03")
+		assertJSONField(t, model, "canonical_model_id", "example/m1")
+		// 时刻那一栏按 UTC 打 RFC3339，不在本地时区上漂。
+		assertJSONField(t, model, "updated_at", "2026-01-02T03:04:05Z")
+	})
+
+	t.Run("没采集过的几栏是 null", func(t *testing.T) {
+		m := catalog.Model{
+			ID: 22, CanonicalName: "m2", DisplayName: "模型二",
+			UpdatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		}
+
+		model := jsonObjectField(t, jsonRoundTrip(t, modelShowDoc(m)), "model")
+		assertJSONField(t, model, "knowledge_cutoff", nil)
+		assertJSONField(t, model, "release_date", nil)
+		assertJSONField(t, model, "canonical_model_id", nil)
+	})
+}
+
+// TestModelWriteCommandsRejectJSONBeforeDoingAnything 钉住写类命令的守卫位置。
+//
+// 参数本身就不成立（缺 --canonical 一类），而要看到的是**不支持 json** 那条错
+// ——它证明守卫在参数解析与连库之前。
+func TestModelWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
+	withFormat(t, formatJSON)
+
+	cases := []struct {
+		command string
+		run     func() error
+	}{
+		{"model add", func() error { return runModelAdd(nil) }},
+		{"model update", func() error { return runModelUpdate(nil) }},
+		{"model delete", func() error { return runModelDelete(nil) }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.command, func(t *testing.T) {
+			err := tc.run()
+			if err == nil {
+				t.Fatalf("%s 在 json 模式下应当被拒", tc.command)
+			}
+			if !strings.Contains(err.Error(), tc.command+" 还不支持 --format json") {
+				t.Fatalf("错误信息应当指出 %s 不支持 json，得到 %q", tc.command, err.Error())
+			}
+			if got := exitCode(err); got != exitUsage {
+				t.Errorf("退出码 = %d，期望参数错的 %d", got, exitUsage)
+			}
+		})
+	}
+}
+
+// TestModelListJSONStdoutIsPure 拿真命令跑一遍 json 那一档。
+//
+// 它比文档组装那一条多证明一件事：**库里读回来的值**也照这套口径落进 JSON
+// ——没给过的 limit 在库里是 NULL，读出来必须还是 null，而不是表格里的 `-`。
+func TestModelListJSONStdoutIsPure(t *testing.T) {
+	_ = testDB(t)
+	setupEnv(t)
+
+	canonical := uniqueName("model")
+	_, _ = captureStreams(t, func() {
+		if err := runModelAdd([]string{"--canonical", canonical, "--display", "展示名"}); err != nil {
+			t.Fatalf("model add 失败: %v", err)
+		}
+	})
+
+	withFormat(t, formatJSON)
+	stdout, _ := captureStreams(t, func() {
+		if err := runModelList(nil); err != nil {
+			t.Fatalf("model list 失败: %v", err)
+		}
+	})
+
+	got := assertJSONStdout(t, stdout)
+	list := jsonEntries(t, got, "models")
+
+	var found map[string]any
+	for _, item := range list {
+		entry, ok := item.(map[string]any)
+		if ok && entry["canonical_name"] == canonical {
+			found = entry
+		}
+	}
+	if found == nil {
+		t.Fatalf("清单里没有刚加进去的 %s：\n%s", canonical, stdout)
+	}
+	assertJSONField(t, found, "context_limit", nil)
+	assertJSONField(t, found, "input_limit", nil)
+	assertJSONField(t, found, "output_limit", nil)
+	assertJSONField(t, found, "vendor", nil)
+	assertJSONField(t, found, "modalities_input", []any{})
+	assertJSONField(t, found, "display_name", "展示名")
 }

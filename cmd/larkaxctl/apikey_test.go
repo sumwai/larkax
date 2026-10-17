@@ -2,7 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -425,5 +429,399 @@ func TestPrintUpdatedLimitsDistinguishesClearFromZero(t *testing.T) {
 	}
 	if cleared.String() == setToZero.String() {
 		t.Error("清空与设成 0 打出来的东西一样")
+	}
+}
+
+// ── 机器可读输出（--format json） ───────────────────────────────────────
+//
+// 每条接上的命令一条用例，判据一律是「编一遍、再解回来，按字段断言」，而不是
+// 比对整段文本：字段一多，整段比对会因为一个空格而红，而它证明不了脚本读得到
+// 那个字段。**null 的那几条最要紧**——它们正是表格里那些 `-`、「继承」的对应物，
+// 落地成空串或 0 之后看的人不会察觉，按它分派的脚本会走错分支。
+
+// decodeDoc 把一份文档编出来、再解进 out（传 &结构体 或 &map），返回编出来的原文。
+//
+// 走一遍编码再解码而不是直接看那个 map：编不出来的东西（chan、函数、循环引用）
+// 在这里失败，而混进一行提示、一个 ANSI 转义、或者把金额从字符串改成了数字，
+// 也各自在这里失败——一份多了 `"name": "-"` 的 JSON 仍然**是**合法 JSON，
+// 肉眼未必看得出来。
+//
+// 解进**结构体**是刻意的：字段的类型也一并被钉住（`*string` 解一个数字会失败，
+// 于是「金额必须是字符串」这件事不用另写一条断言）。
+func decodeDoc(t *testing.T, doc map[string]any, out any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("这份文档编不出来: %v", err)
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		t.Fatalf("编出来的东西解不回来: %v\n%s", err, raw)
+	}
+	return raw
+}
+
+// assertDocKeys 断言一个 JSON 对象的键**恰好**是这些。
+//
+// 多一个键就红：多出来的可能是一个不该出现在这里的字段（凭证明文、哈希、
+// 别人的 id），而它一旦编进 JSON，没有人会注意到。
+func assertDocKeys(t *testing.T, obj map[string]any, want []string) {
+	t.Helper()
+	got := make([]string, 0, len(obj))
+	for k := range obj {
+		got = append(got, k)
+	}
+	sort.Strings(got)
+
+	sorted := slices.Clone(want)
+	sort.Strings(sorted)
+	if !slices.Equal(got, sorted) {
+		t.Errorf("键集 = %v，期望 %v", got, sorted)
+	}
+}
+
+// assertOnlyJSON 断言一段 stdout **整体**是一份合法 JSON，且不含转义序列。
+//
+// 这是 `--format json` 对外的全部承诺。拿整段去 json.Unmarshal 而不是
+// 「看着像 JSON」：混进一行提示、一个进度点、或者一段 ANSI 上色都会在这里失败，
+// 而人眼看那些输出时，一行提示语与 JSON 混在一起未必看得出来。
+func assertOnlyJSON(t *testing.T, stdout string) {
+	t.Helper()
+	var got any
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("json 模式下 stdout 不是一份合法的 JSON: %v\n%s", err, stdout)
+	}
+	if strings.ContainsRune(stdout, escByte) {
+		t.Errorf("json 模式的 stdout 里不许有转义序列：%q", stdout)
+	}
+}
+
+func TestAPIKeyListDocIsMachineReadable(t *testing.T) {
+	rpm := 60
+	quota := money.MustParse("12.34")
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	expires := time.Date(2027, 6, 7, 8, 9, 10, 0, time.UTC)
+	used := time.Date(2026, 10, 17, 6, 10, 11, 0, time.UTC)
+
+	doc := apiKeyListDoc([]auth.Key{
+		{
+			ID: 3, UserID: 7, Username: "user-placeholder", Name: "限额的",
+			Prefix: "larkax_abcd", Status: "active",
+			RateLimitRPM: &rpm, QuotaLimit: &quota,
+			CreatedAt: created, ExpiresAt: &expires, LastUsedAt: &used,
+		},
+		{
+			// 第二把什么都没设过：两列额度、过期与最近使用全是 NULL。
+			ID: 4, UserID: 7, Username: "user-placeholder",
+			Prefix: "larkax_efgh", Status: "revoked", CreatedAt: created,
+		},
+	})
+
+	var got struct {
+		Status  string `json:"status"`
+		Summary struct {
+			Total int `json:"total"`
+		} `json:"summary"`
+		Keys []struct {
+			ID       int64  `json:"id"`
+			Prefix   string `json:"prefix"`
+			Username string `json:"username"`
+			// 指针类型是刻意的：键不在、或者编成了 null 之外的别的东西，
+			// 这里就是 nil，下面的断言当场失败。
+			Name         *string `json:"name"`
+			Status       string  `json:"status"`
+			RateLimitRPM *int    `json:"rate_limit_rpm"`
+			QuotaLimit   *string `json:"quota_limit"`
+			CreatedAt    string  `json:"created_at"`
+			ExpiresAt    *string `json:"expires_at"`
+			LastUsedAt   *string `json:"last_used_at"`
+		} `json:"keys"`
+	}
+	decodeDoc(t, doc, &got)
+
+	if got.Status != jsonOK {
+		t.Errorf("status = %q，想要 %q：清单类命令的结论一律是 ok", got.Status, jsonOK)
+	}
+	if got.Summary.Total != 2 {
+		t.Errorf("summary.total = %d，想要 2", got.Summary.Total)
+	}
+	if len(got.Keys) != 2 {
+		t.Fatalf("keys 有 %d 条，想要 2", len(got.Keys))
+	}
+
+	first := got.Keys[0]
+	if first.ID != 3 || first.Prefix != "larkax_abcd" || first.Username != "user-placeholder" {
+		t.Errorf("第一把的标识对不上：%+v", first)
+	}
+	if first.Name == nil || *first.Name != "限额的" {
+		t.Errorf("name = %s，想要「限额的」", showPtr(first.Name))
+	}
+	if first.Status != "active" {
+		t.Errorf("status = %q，想要 active", first.Status)
+	}
+	// 有值的那一档走 jsonAmount（十进制定点字符串），不是 JSON 数字，
+	// 也不是表格里那个「继承」。
+	if first.RateLimitRPM == nil || *first.RateLimitRPM != 60 {
+		t.Errorf("rate_limit_rpm = %s，想要 60", showPtr(first.RateLimitRPM))
+	}
+	if first.QuotaLimit == nil || *first.QuotaLimit != "12.34000000" {
+		t.Errorf("quota_limit = %s，想要字符串 \"12.34000000\"", showPtr(first.QuotaLimit))
+	}
+	// 三个时刻都是完整精度的 RFC3339，且取自不同的列（接错栏会当场挂）。
+	for _, tc := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"created_at", first.CreatedAt, "2026-01-02T03:04:05Z"},
+		{"expires_at", showPtr(first.ExpiresAt), "2027-06-07T08:09:10Z"},
+		{"last_used_at", showPtr(first.LastUsedAt), "2026-10-17T06:10:11Z"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q，想要 %q", tc.name, tc.got, tc.want)
+		}
+	}
+
+	// 第二把：五个空值全是 null，而不是「继承」「不过期」「从未」或空串。
+	// 逐个判指针为 nil，不把它们装进 any 再比——装进去的是接口，一个 nil 的
+	// `*string` 装进去之后**不等于** nil，那样的断言永远不会红。
+	second := got.Keys[1]
+	if second.Name != nil {
+		t.Errorf("第二把的 name = %q，想要 null（没给 --name）", *second.Name)
+	}
+	if second.RateLimitRPM != nil {
+		t.Errorf("第二把的 rate_limit_rpm = %d，想要 null（继承用户默认）", *second.RateLimitRPM)
+	}
+	if second.QuotaLimit != nil {
+		t.Errorf("第二把的 quota_limit = %q，想要 null（继承用户默认）", *second.QuotaLimit)
+	}
+	if second.ExpiresAt != nil {
+		t.Errorf("第二把的 expires_at = %q，想要 null（不过期）", *second.ExpiresAt)
+	}
+	if second.LastUsedAt != nil {
+		t.Errorf("第二把的 last_used_at = %q，想要 null（从未用过）", *second.LastUsedAt)
+	}
+	// created_at 是 NOT NULL DEFAULT now()，没有 null 这一档。
+	if second.CreatedAt != "2026-01-02T03:04:05Z" {
+		t.Errorf("created_at = %q，想要 2026-01-02T03:04:05Z", second.CreatedAt)
+	}
+
+	// 键集逐个钉住。
+	var generic map[string]any
+	raw := decodeDoc(t, doc, &generic)
+	keys, ok := generic["keys"].([]any)
+	if !ok || len(keys) != 2 {
+		t.Fatalf("keys 不是两条的数组：%v", generic["keys"])
+	}
+	for i, item := range keys {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("第 %d 条不是对象：%v", i, item)
+		}
+		assertDocKeys(t, entry, []string{
+			"id", "prefix", "username", "name", "status",
+			"rate_limit_rpm", "quota_limit", "created_at", "expires_at", "last_used_at",
+		})
+	}
+	// 明文与哈希一个字节都不许出现：库里只存哈希（见 internal/auth），而这份
+	// 输出是给管道下游的，任何一处漏出去都不可撤销。
+	if text := string(raw); strings.Contains(text, "plaintext") || strings.Contains(text, "hash") {
+		t.Errorf("清单里出现了 key 的明文或哈希字段：\n%s", text)
+	}
+}
+
+// 空清单是 `[]`，不是 null，也不是表格那一档的那句「暂无 API Key。」。
+func TestAPIKeyListDocEmptyListIsEmptyArray(t *testing.T) {
+	var got struct {
+		Summary struct {
+			Total int `json:"total"`
+		} `json:"summary"`
+		Keys *[]map[string]any `json:"keys"`
+	}
+	decodeDoc(t, apiKeyListDoc(nil), &got)
+
+	if got.Keys == nil {
+		t.Fatal("空清单编成了 null，要的是 []")
+	}
+	if len(*got.Keys) != 0 {
+		t.Errorf("空清单里有 %d 条", len(*got.Keys))
+	}
+	if got.Summary.Total != 0 {
+		t.Errorf("空清单的 summary.total = %d，想要 0", got.Summary.Total)
+	}
+}
+
+// 写类命令在 json 模式下**必须在连库之前**被拦下。
+//
+// 这一条钉的是顺序，不是那句错误信息本身：DSN 指向一个没人听的端口，于是
+// 「先连库、再报不支持」的实现在这里会拿到一句「连接数据库失败」（退出码 3），
+// 而不是「还不支持 --format json」（退出码 2）。写类命令上这个顺序是硬要求
+// ——先做了再报不支持，库里那一行已经改了，而调用方只看到一句参数错，于是重跑。
+func TestAPIKeyWriteCommandsRejectJSONFormatBeforeTouchingTheDB(t *testing.T) {
+	withFormat(t, formatJSON)
+	// 连不上的库：真的去连就会以 exitDBUnreach 收场。
+	t.Setenv("LARKAX_DB_DSN", "postgres://larkax:placeholder@127.0.0.1:1/larkax?sslmode=disable")
+
+	cases := []struct {
+		name string
+		run  func() error
+		want string
+	}{
+		{"create", func() error {
+			return runAPIKeyCreate([]string{"--user", "1"})
+		}, "apikey create"},
+		{"update", func() error {
+			return runAPIKeyUpdate([]string{"--id", "3", "--rate-limit-rpm", "60"})
+		}, "apikey update"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var err error
+			stdout, _ := captureStreams(t, func() { err = tc.run() })
+			if err == nil {
+				t.Fatal("json 模式下应当把还没接上的写类命令拦下来")
+			}
+			if !strings.Contains(err.Error(), "不支持 --format json") {
+				t.Fatalf("错误信息 %q 里没有「不支持 --format json」——是不是先连库了", err.Error())
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("错误信息里要点名是哪条命令（%q）：%v", tc.want, err)
+			}
+			if code := exitCode(err); code != exitUsage {
+				t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+			}
+			if stdout != "" {
+				t.Errorf("被拦下时 stdout 应当为空，得到 %q", stdout)
+			}
+		})
+	}
+}
+
+// 命令级：过真命令、连真库，stdout 整体是一份合法 JSON，且不含转义序列。
+func TestAPIKeyListJSONStdoutIsMachineReadable(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	owner := createTestUser(t)
+	rpm := 60
+	created, err := auth.New(db).Create(context.Background(), auth.CreateParams{
+		UserID: owner, Name: uniqueName("json"), RateLimitRPM: &rpm,
+	})
+	if err != nil {
+		t.Fatalf("建一把 key 失败: %v", err)
+	}
+
+	withFormat(t, formatJSON)
+	userRef := strconv.FormatInt(owner, 10)
+	stdout, _ := captureStreams(t, func() {
+		err = runAPIKeyList([]string{"--user", userRef})
+	})
+	if err != nil {
+		t.Fatalf("apikey list 失败: %v", err)
+	}
+	assertOnlyJSON(t, stdout)
+
+	var got struct {
+		Status string `json:"status"`
+		Keys   []struct {
+			ID       int64   `json:"id"`
+			Prefix   string  `json:"prefix"`
+			Username string  `json:"username"`
+			Quota    *string `json:"quota_limit"`
+		} `json:"keys"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("解不回来: %v\n%s", err, stdout)
+	}
+	if got.Status != jsonOK {
+		t.Errorf("status = %q，想要 %q", got.Status, jsonOK)
+	}
+	if len(got.Keys) != 1 {
+		t.Fatalf("这个用户下应当只有一把 key，得到 %d 把：\n%s", len(got.Keys), stdout)
+	}
+	if got.Keys[0].ID != created.ID || got.Keys[0].Prefix != created.Prefix {
+		t.Errorf("这一行不是刚建的那把：%+v（想要 id=%d prefix=%s）",
+			got.Keys[0], created.ID, created.Prefix)
+	}
+	// 没设过的额度是 null（表格那一档打「继承」），明文一个字节都不许进 stdout。
+	if got.Keys[0].Quota != nil {
+		t.Errorf("没设过的额度应当是 null，得到 %v", *got.Keys[0].Quota)
+	}
+	if strings.Contains(stdout, created.Plaintext) {
+		t.Errorf("stdout 里出现了 key 的明文：\n%s", stdout)
+	}
+}
+
+// 还没有结果时，json 模式的 stdout 上一个字节都不打。
+//
+// 命令在产出结果之前就失败（连不上库、查询失败）时，这份文档的 exit_code 契约
+// 覆盖不了它——不过没有 exit_code 可填，一份「全零、0 条」的 JSON 更坏：它读起来
+// 正是一次成功的空查询（见 format.go 里那条「还没有结果」的约定）。错误照旧返回，
+// 由 main 打到 stderr。
+func TestAPIKeyListJSONWithoutResultWritesNothingToStdout(t *testing.T) {
+	setupEnv(t)
+	withFormat(t, formatJSON)
+	// 指向一个没人听的端口：连接立刻被拒。
+	t.Setenv("LARKAX_DB_DSN", "postgres://larkax:placeholder@127.0.0.1:1/larkax?sslmode=disable")
+
+	var err error
+	stdout, _ := captureStreams(t, func() { err = runAPIKeyList(nil) })
+	if err == nil {
+		t.Fatal("连不上库时应当报错")
+	}
+	if code := exitCode(err); code != exitDBUnreach {
+		t.Errorf("退出码 = %d，想要 %d（连不上库）", code, exitDBUnreach)
+	}
+	if stdout != "" {
+		t.Errorf("还没有结果时 stdout 应当为空，得到 %q", stdout)
+	}
+}
+
+// TestAPIKeyTimesAreUTCWhateverTheProcessZone 钉住「时刻一律按 UTC 打」。
+//
+// 库里那三列是 timestamptz，驱动交回来的是**带会话时区**的 time.Time：
+// 同一行在 TZ=UTC 与 TZ=Asia/Shanghai 的机器上，`t.Format(time.RFC3339)` 出来的
+// 是两个不同的字符串（`2026-01-02T03:04:05Z` 与 `2026-01-02T11:04:05+08:00`）。
+// 机器读的那一份不能这样——读它的是脚本，而脚本不会去猜写它的机器在哪个时区。
+//
+// fixture 特地构造成东八区：断言的是**同一个瞬间的 UTC 写法**，所以把 .UTC()
+// 去掉（或换回按 location 打的写法）时这条用例当场变红。
+func TestAPIKeyTimesAreUTCWhateverTheProcessZone(t *testing.T) {
+	// 东八区的 11:04:05 就是 UTC 的 03:04:05，同一瞬间。
+	east8 := time.FixedZone("UTC+8", 8*60*60)
+	created := time.Date(2026, 1, 2, 11, 4, 5, 0, east8)
+	expires := time.Date(2027, 6, 7, 16, 9, 10, 0, east8)
+	used := time.Date(2026, 10, 17, 14, 10, 11, 0, east8)
+
+	doc := apiKeyListDoc([]auth.Key{{
+		ID: 3, Username: "user-placeholder", Prefix: "larkax_abcd", Status: "active",
+		CreatedAt: created, ExpiresAt: &expires, LastUsedAt: &used,
+	}})
+
+	var got struct {
+		Keys []struct {
+			CreatedAt  string  `json:"created_at"`
+			ExpiresAt  *string `json:"expires_at"`
+			LastUsedAt *string `json:"last_used_at"`
+		} `json:"keys"`
+	}
+	decodeDoc(t, doc, &got)
+	if len(got.Keys) != 1 {
+		t.Fatalf("keys 有 %d 条，想要 1", len(got.Keys))
+	}
+
+	for _, tc := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"created_at", got.Keys[0].CreatedAt, "2026-01-02T03:04:05Z"},
+		{"expires_at", showPtr(got.Keys[0].ExpiresAt), "2027-06-07T08:09:10Z"},
+		{"last_used_at", showPtr(got.Keys[0].LastUsedAt), "2026-10-17T06:10:11Z"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q，想要 %q（同一瞬间的 UTC 写法，与进程时区无关）",
+				tc.name, tc.got, tc.want)
+		}
 	}
 }

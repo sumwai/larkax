@@ -95,6 +95,13 @@ func runAPIKey(args []string) error {
 }
 
 func runAPIKeyCreate(args []string) error {
+	// 在**函数体第一行**拦下来，早于 flag 解析、更早于连库：写类命令在 json
+	// 模式下必须一个字节都不写库。放在写库之后就成了「先把 key 建出来，再报
+	// 不支持」——而调用方只看到一句参数错，于是重跑一次（见 format.go）。
+	if err := jsonUnsupported("apikey create"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("apikey create", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, apiKeyUsage) }
 	user := fs.String("user", "", "key 的归属用户：用户 ID 或用户名")
@@ -162,6 +169,11 @@ func runAPIKeyCreate(args []string) error {
 }
 
 func runAPIKeyUpdate(args []string) error {
+	// 与 create 同一条：必须在改任何一列之前拦下来。
+	if err := jsonUnsupported("apikey update"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("apikey update", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, apiKeyUsage) }
 	id := fs.Int64("id", 0, "要改的 API Key 的 id（apikey list 里能看到）")
@@ -229,6 +241,12 @@ func runAPIKeyList(args []string) error {
 		keys, err := store.ListKeys(ctx, userID)
 		if err != nil {
 			return fmt.Errorf("列出 API Key 失败: %w", err)
+		}
+		// JSON 是**另一条渲染路径**，不是把上面那张表转成 JSON：表格那一档
+		// 用 `-`、「继承」铺空栏，转出来的 JSON 里金额会变成字符串、空值会
+		// 变成占位符（见 format.go 开头）。
+		if jsonOutput() {
+			return emitJSON(os.Stdout, apiKeyListDoc(keys), nil)
 		}
 		printKeyList(os.Stdout, keys)
 		return nil
@@ -478,6 +496,65 @@ func printKeyList(w io.Writer, keys []auth.Key) {
 	_ = tw.Flush()
 }
 
+// apiKeyListDoc 组装 apikey list 的机器可读输出。
+//
+// 与 printKeyList 是同一份数据的另一条渲染路径（见 format.go 开头）：那一档
+// 打表、把缺值铺成「-」「继承」「不过期」「从未」，这一档给 null。
+//
+// **这一份里没有、也不会有 key 的明文或哈希**：auth.Key 里根本没有这两样
+// （见 limits.go），所以这里能给的只有 prefix——它本来就够在列表里认出是
+// 哪一把钥匙，而认出是哪一把正是这一栏的用途。
+func apiKeyListDoc(keys []auth.Key) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["summary"] = map[string]any{"total": len(keys)}
+
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	entries := make([]map[string]any, 0, len(keys))
+	for _, k := range keys {
+		entries = append(entries, apiKeyEntry(k))
+	}
+	doc["keys"] = entries
+	return doc
+}
+
+// apiKeyEntry 打清单里的一把 key。
+//
+// 两列额度给的是**原样**的列值：null 表示这一列没设过（继承用户默认），
+// 0 表示「一个都不放行」。表格那一档把 null 打成「继承」，正是为了不让这两
+// 件事看起来一样——JSON 里靠 null 保住同一件事，而「继承」那个词不能进这里
+// （它是个字符串，按金额解析它的一方会拿到一个解析不了的值）。
+func apiKeyEntry(k auth.Key) map[string]any {
+	var rpm any
+	if k.RateLimitRPM != nil {
+		rpm = *k.RateLimitRPM
+	}
+	// 金额走 jsonAmount：money.Amount 的字段不导出，直接塞进来编出来是 `{}`。
+	var quota any
+	if k.QuotaLimit != nil {
+		quota = jsonAmount(*k.QuotaLimit)
+	}
+
+	return map[string]any{
+		"id":       k.ID,
+		"prefix":   k.Prefix,
+		"username": k.Username,
+		// 空串是「创建时没给 --name」（列是 NOT NULL DEFAULT ''），
+		// 与表格那一栏打 `-` 是同一件事。
+		"name":           nullableString(k.Name),
+		"status":         k.Status,
+		"rate_limit_rpm": rpm,
+		"quota_limit":    quota,
+		// 三个时刻都走 format.go 的 jsonTime/jsonTimePtr，**不**走上面那几个
+		// formatXxx：那几档服务的是终端，按进程时区打（`+08:00`）并截到分钟。
+		// 库里那几列是 timestamptz，驱动交回来的是带会话时区的 time.Time，
+		// 直接 Format 出来的是「同一行在两台机器上是两个字符串」。机器读的
+		// 那一份必须与机器无关（见 docs/cli-output.md 的「值的约定」）。
+		"created_at":   jsonTime(k.CreatedAt),
+		"expires_at":   jsonTimePtr(k.ExpiresAt),
+		"last_used_at": jsonTimePtr(k.LastUsedAt),
+	}
+}
+
 func formatRPM(v *int) string {
 	if v == nil {
 		return "继承"
@@ -505,6 +582,10 @@ func formatTime(v *time.Time, empty string) string {
 // formatTime 的占位符参数——那一栏给不出有意义的占位语。共用一个 Format 布局
 // 是为了让三个时刻写法一致：各写一遍 time.RFC3339 的话，改其中一处的布局，
 // 另一处会安静地留着旧样子。
+// formatTimeValue 与 formatTime 服务的是**终端那一档**，按进程时区打
+// （`+08:00`）。机器读的那一档不要用它们：库里交回来的时刻带会话时区，
+// 同一行在两台机器上会变成两个字符串（见 apikeyEntry 里那几条与 format.go
+// 的 jsonTime/jsonTimePtr）。
 func formatTimeValue(t time.Time) string {
 	return t.Format(time.RFC3339)
 }

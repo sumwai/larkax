@@ -64,6 +64,10 @@ const cleanupExpiredPredicate = `created_at < now() - ($1::bigint * interval '1 
 // 它是留存承诺的兑现方式，所以输出的是**删了多少条**而不是一句「完成」：
 // 一条都没到期时，命令的输出必须与「根本没跑成」区分得开。
 func runIdempotencyCleanup(args []string) error {
+	if err := jsonUnsupported("idempotency cleanup"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("idempotency cleanup", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, idempotencyUsage) }
 	dryRun := fs.Bool("dry-run", false, "只数一遍会被删除的条数，不执行删除")

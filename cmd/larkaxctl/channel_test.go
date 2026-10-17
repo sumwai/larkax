@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -675,5 +677,240 @@ func TestChannelWriteCommandsRejectDeleted(t *testing.T) {
 	}
 	if !after.Equal(before) {
 		t.Errorf("已删渠道的 updated_at 从 %s 变成了 %s：有写路径改动了它", before, after)
+	}
+}
+
+// ── 机器可读输出（--format json）─────────────────────────────────────────
+//
+// 下面几个是这一组命令（channel / model / alias / price 四个文件）的用例
+// 共用的助手，放在这一组的第一个文件里。withFormat 由主控的 format_test.go
+// 提供，这里不再定义一份。
+
+// jsonRoundTrip 把一份文档过一遍 json.Marshal → json.Unmarshal。
+//
+// 走一遍编码而不是直接断言那份 map：混进一个编不出来的值（chan、函数）、
+// 一个非法的键，都只有在这一步才现形，而机器读的输出里这些是最不能有的。
+func jsonRoundTrip(t *testing.T, doc map[string]any) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("文档编不成 JSON: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("文档编出来的不是合法 JSON: %v\n%s", err, raw)
+	}
+	return got
+}
+
+// assertJSONField 断言解出来之后某个键的取值。
+//
+// want 用的是 json.Unmarshal 之后的形态：数字是 float64、null 是 nil、
+// 数组是 []any、对象是 map[string]any。形态写错本身也是线索——它说明这个值
+// 在 JSON 里不是我以为什么类型（`"weight": "3"` 与 `"weight": 3` 在这里现形）。
+//
+// 要 null 的键**必须存在**：`"expires_at": null` 与根本没有这一栏是两件事。
+func assertJSONField(t *testing.T, doc map[string]any, key string, want any) {
+	t.Helper()
+	got, ok := doc[key]
+	if !ok {
+		t.Errorf("文档里没有 %q（要 null 也得有这个键）：%v", key, doc)
+		return
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("%s = %#v（%T），期望 %#v（%T）", key, got, got, want, want)
+	}
+}
+
+// jsonEntries 取一个数组字段，并断言它确实是数组。
+//
+// `null` 解出来是 nil 接口，过不了这里的类型断言——所以这一句同时钉住
+// 「空清单要给 []，不是 null」。
+func jsonEntries(t *testing.T, doc map[string]any, key string) []any {
+	t.Helper()
+	raw, ok := doc[key]
+	if !ok {
+		t.Fatalf("文档里没有 %q：%v", key, doc)
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("%q 应当是数组，拿到 %T（%#v）——空清单要给 []，不是 null", key, raw, raw)
+	}
+	return list
+}
+
+// jsonObjectField 取一个对象字段。
+func jsonObjectField(t *testing.T, doc map[string]any, key string) map[string]any {
+	t.Helper()
+	raw, ok := doc[key]
+	if !ok {
+		t.Fatalf("文档里没有 %q：%v", key, doc)
+	}
+	obj, ok := raw.(map[string]any)
+	if !ok {
+		t.Fatalf("%q 应当是对象，拿到 %T（%#v）", key, raw, raw)
+	}
+	return obj
+}
+
+// assertJSONStdout 断言一段 stdout 整体是一份合法的 JSON，且不含终端转义。
+//
+// 这是 `--format json` 那一档的核心契约：stdout 只给管道下游，混进一行提示
+// 或一个着色转义就会让 `| jq` 报错，而报错的是 jq，看起来像 jq 的问题。
+func assertJSONStdout(t *testing.T, stdout string) map[string]any {
+	t.Helper()
+	if strings.ContainsRune(stdout, escByte) {
+		t.Errorf("stdout 里有 ANSI 转义（0x%x）:\n%s", escByte, stdout)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("stdout 不是一份合法的 JSON：%v\n%s", err, stdout)
+	}
+	return got
+}
+
+// TestChannelListDocIsMachineReadable 钉住 channel list 的机器可读形状。
+func TestChannelListDocIsMachineReadable(t *testing.T) {
+	infos := []channels.ChannelInfo{
+		{
+			ID: 7, Status: channels.StatusEnabled, Type: testChanType, Name: "c1",
+			BaseURL: testBaseURL, Models: []string{"m1", "m2"},
+			Weight: 3, Priority: 5,
+			CredentialKeys: []string{"test"},
+			Hint:           "cdef",
+			Setting:        map[string]any{"region": "sg"},
+		},
+		{
+			// 平台自营（owner_user_id 为 0）、凭证密文结构坏掉、已软删的一条：
+			// 「平台」与「已删」这两个占位符最容易被顺手带进 JSON，所以专门
+			// 盯住这一行。它也没有模型清单，正好钉住「空数组不是 null」。
+			ID: 8, Status: channels.StatusDisabled, Type: testChanType, Name: "c2",
+			BaseURL:       testBaseURL,
+			CredentialErr: errors.New("信封头部不合法"),
+			DeletedAt:     time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		},
+	}
+
+	got := jsonRoundTrip(t, channelListDoc(infos, true))
+	assertJSONField(t, got, "status", jsonOK)
+
+	summary := jsonObjectField(t, got, "summary")
+	assertJSONField(t, summary, "total", float64(2))
+	assertJSONField(t, summary, "deleted", float64(1))
+
+	list := jsonEntries(t, got, "channels")
+	if len(list) != 2 {
+		t.Fatalf("渠道数 = %d，期望 2", len(list))
+	}
+	first := list[0].(map[string]any)
+	assertJSONField(t, first, "id", float64(7))
+	assertJSONField(t, first, "status", channels.StatusEnabled)
+	assertJSONField(t, first, "type", testChanType)
+	assertJSONField(t, first, "name", "c1")
+	assertJSONField(t, first, "base_url", testBaseURL)
+	assertJSONField(t, first, "models", []any{"m1", "m2"})
+	assertJSONField(t, first, "owner_user_id", nil)
+	assertJSONField(t, first, "weight", float64(3))
+	assertJSONField(t, first, "priority", float64(5))
+	assertJSONField(t, first, "credential_keys", []any{"test"})
+	assertJSONField(t, first, "credential_hint", "cdef")
+	assertJSONField(t, first, "credential_error", nil)
+	assertJSONField(t, first, "setting", map[string]any{"region": "sg"})
+	assertJSONField(t, first, "deleted_at", nil)
+
+	second := list[1].(map[string]any)
+	assertJSONField(t, second, "models", []any{})
+	assertJSONField(t, second, "owner_user_id", nil)
+	assertJSONField(t, second, "credential_keys", []any{})
+	assertJSONField(t, second, "credential_hint", nil)
+	assertJSONField(t, second, "credential_error", "信封头部不合法")
+	assertJSONField(t, second, "setting", nil)
+	assertJSONField(t, second, "deleted_at", "2026-01-02T03:04:05Z")
+
+	// 密文与凭证明文一栏都不许出现：这份输出会进管道、进日志。
+	for key := range first {
+		if strings.Contains(key, "credential_enc") || strings.Contains(key, "secret") {
+			t.Errorf("清单里出现了不该有的栏：%q", key)
+		}
+	}
+
+	t.Run("空清单是空数组，不是 null", func(t *testing.T) {
+		empty := jsonRoundTrip(t, channelListDoc(nil, false))
+		assertJSONField(t, empty, "status", jsonOK)
+		assertJSONField(t, jsonObjectField(t, empty, "summary"), "total", float64(0))
+		if len(jsonEntries(t, empty, "channels")) != 0 {
+			t.Error("空清单应当是空数组")
+		}
+		// 没带 --all 时那个计数恒为 0，给出来只是一栏背景音。
+		if _, ok := jsonObjectField(t, empty, "summary")["deleted"]; ok {
+			t.Error("没带 --all 时 summary 里不该有 deleted")
+		}
+	})
+}
+
+// TestChannelWriteCommandsRejectJSONBeforeDoingAnything 钉住写类命令的守卫位置。
+//
+// 给的参数本身就不成立（缺 --name / 缺 --id），而要看到的是**不支持 json**
+// 那条错：它证明守卫在参数解析与连库之前，而不是「先把事情做完再报不支持」。
+// 写类命令上后者的代价是一次真的写入，而脚本只看到一句参数错。
+func TestChannelWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
+	withFormat(t, formatJSON)
+
+	cases := []struct {
+		command string
+		run     func() error
+	}{
+		{"channel create", func() error { return runChannelCreate(nil) }},
+		{"channel update", func() error { return runChannelUpdate(nil) }},
+		{"channel enable", func() error {
+			return runChannelSetStatus(nil, channels.StatusEnabled)
+		}},
+		{"channel disable", func() error {
+			return runChannelSetStatus(nil, channels.StatusDisabled)
+		}},
+		{"channel delete", func() error { return runChannelDelete(nil) }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.command, func(t *testing.T) {
+			err := tc.run()
+			if err == nil {
+				t.Fatalf("%s 在 json 模式下应当被拒", tc.command)
+			}
+			if !strings.Contains(err.Error(), tc.command+" 还不支持 --format json") {
+				t.Fatalf("错误信息应当指出 %s 不支持 json，得到 %q", tc.command, err.Error())
+			}
+			if got := exitCode(err); got != exitUsage {
+				t.Errorf("退出码 = %d，期望参数错的 %d", got, exitUsage)
+			}
+		})
+	}
+}
+
+// TestChannelListJSONStdoutIsPure 拿真命令跑一遍 json 那一档。
+//
+// 文档的组装函数是纯函数（上面那条钉住了它的形状），而这一条钉的是**命令
+// 那一层**：stdout 上从头到尾只有一份 JSON、没有表格文本、没有转义序列。
+func TestChannelListJSONStdoutIsPure(t *testing.T) {
+	_ = testDB(t)
+	setupEnv(t)
+
+	withFormat(t, formatJSON)
+	stdout, _ := captureStreams(t, func() {
+		if err := runChannelList(nil); err != nil {
+			t.Fatalf("channel list 失败: %v", err)
+		}
+	})
+
+	got := assertJSONStdout(t, stdout)
+	assertJSONField(t, got, "status", jsonOK)
+	if len(jsonEntries(t, got, "channels")) == 0 && got["summary"] == nil {
+		t.Error("清单与 summary 至少要有一个")
+	}
+	summary := jsonObjectField(t, got, "summary")
+	total, _ := summary["total"].(float64)
+	if int(total) != len(jsonEntries(t, got, "channels")) {
+		t.Errorf("summary.total = %v 与 channels 的长度 %d 对不上",
+			summary["total"], len(jsonEntries(t, got, "channels")))
 	}
 }

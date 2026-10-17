@@ -93,6 +93,10 @@ func runCalendar(args []string) error {
 // 坑。文件读不出来或校验不过时**不连数据库**——那种情况下连上去也没有用，
 // 而失败发生在碰库之前，日志里就不会出现一条看不懂的连接记录。
 func runCalendarImport(args []string) error {
+	if err := jsonUnsupported("calendar import"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("calendar import", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, calendarUsage) }
 	if err := fs.Parse(args); err != nil {

@@ -113,6 +113,10 @@ func runWallet(args []string) error {
 
 // runWalletOpen 给一个用户开通钱包。
 func runWalletOpen(args []string) error {
+	if err := jsonUnsupported("wallet open"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("wallet open", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, walletUsage) }
 	user := fs.String("user", "", "钱包归属的用户：用户 ID 或用户名")
@@ -162,6 +166,10 @@ func runWalletOpen(args []string) error {
 // 交给 store.PostTransaction 落库。记账逻辑一行都不在这里——见
 // internal/ledger 的包注释与 store.PostTransaction 的幂等说明。
 func runWalletCredit(args []string) error {
+	if err := jsonUnsupported("wallet credit"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("wallet credit", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, walletUsage) }
 	user := fs.String("user", "", "入账的用户：用户 ID 或用户名")

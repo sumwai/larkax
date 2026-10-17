@@ -566,3 +566,94 @@ func hasAlias(aliases []catalog.Alias, id int64) bool {
 	}
 	return false
 }
+
+// ── 机器可读输出（--format json）─────────────────────────────────────────
+
+// TestAliasListDocIsMachineReadable 钉住 alias list 的机器可读形状。
+func TestAliasListDocIsMachineReadable(t *testing.T) {
+	aliases := []catalog.Alias{
+		{
+			ID: 31, ChannelID: 0, UpstreamModel: "up-1", CanonicalName: "m1",
+			Overrides: map[string]any{"temperature": 0},
+		},
+		{
+			// 渠道级、没有覆盖的一条：表格那一档把范围打成「渠道 9」、把空
+			// 覆盖打成 `-`，而机器读的那一档要的是 9 与 null。
+			ID: 32, ChannelID: 9, UpstreamModel: "up-2", CanonicalName: "m1",
+		},
+	}
+
+	got := jsonRoundTrip(t, aliasListDoc(aliases))
+	assertJSONField(t, got, "status", jsonOK)
+	assertJSONField(t, jsonObjectField(t, got, "summary"), "total", float64(2))
+
+	list := jsonEntries(t, got, "aliases")
+	if len(list) != 2 {
+		t.Fatalf("别名数 = %d，期望 2", len(list))
+	}
+	first := list[0].(map[string]any)
+	assertJSONField(t, first, "id", float64(31))
+	assertJSONField(t, first, "channel_id", nil)
+	assertJSONField(t, first, "upstream_model", "up-1")
+	assertJSONField(t, first, "canonical_name", "m1")
+	assertJSONField(t, first, "overrides", map[string]any{"temperature": float64(0)})
+
+	second := list[1].(map[string]any)
+	assertJSONField(t, second, "channel_id", float64(9))
+	assertJSONField(t, second, "overrides", nil)
+
+	t.Run("空清单是空数组，不是 null", func(t *testing.T) {
+		empty := jsonRoundTrip(t, aliasListDoc(nil))
+		assertJSONField(t, jsonObjectField(t, empty, "summary"), "total", float64(0))
+		if len(jsonEntries(t, empty, "aliases")) != 0 {
+			t.Error("空清单应当是空数组")
+		}
+	})
+}
+
+// TestAliasResolveDocIsMachineReadable 钉住 alias resolve 的机器可读形状。
+func TestAliasResolveDocIsMachineReadable(t *testing.T) {
+	t.Run("平台级", func(t *testing.T) {
+		got := jsonRoundTrip(t, aliasResolveDoc("m1", 0, "up-1"))
+		assertJSONField(t, got, "status", jsonOK)
+		assertJSONField(t, got, "canonical", "m1")
+		// 表格那一档把范围打成「平台级」；机器读的那一档是 null。
+		assertJSONField(t, got, "channel_id", nil)
+		assertJSONField(t, got, "upstream_model", "up-1")
+	})
+
+	t.Run("渠道级", func(t *testing.T) {
+		got := jsonRoundTrip(t, aliasResolveDoc("m1", 9, "up-2"))
+		assertJSONField(t, got, "channel_id", float64(9))
+		assertJSONField(t, got, "upstream_model", "up-2")
+	})
+}
+
+// TestAliasWriteCommandsRejectJSONBeforeDoingAnything 钉住写类命令的守卫位置。
+func TestAliasWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
+	withFormat(t, formatJSON)
+
+	cases := []struct {
+		command string
+		run     func() error
+	}{
+		{"alias add", func() error { return runAliasAdd(nil) }},
+		{"alias update", func() error { return runAliasUpdate(nil) }},
+		{"alias delete", func() error { return runAliasDelete(nil) }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.command, func(t *testing.T) {
+			err := tc.run()
+			if err == nil {
+				t.Fatalf("%s 在 json 模式下应当被拒", tc.command)
+			}
+			if !strings.Contains(err.Error(), tc.command+" 还不支持 --format json") {
+				t.Fatalf("错误信息应当指出 %s 不支持 json，得到 %q", tc.command, err.Error())
+			}
+			if got := exitCode(err); got != exitUsage {
+				t.Errorf("退出码 = %d，期望参数错的 %d", got, exitUsage)
+			}
+		})
+	}
+}
