@@ -34,7 +34,11 @@ const Type = "systemone"
 // 这条表面「原样暴露」——上游认的路径就是调用方打的路径，中间不换名字。
 // httpx.Endpoint 会把 base_url 结尾已经带的版本段去掉，所以
 // 「base 到 /v1」与「base 到域名」两种写法拼出来是同一个地址。
-const Path = "/v1/systemone"
+//
+// 取值直接取自 channel.EndpointSystemOne，不另写一份字面量：选路判「这个
+// 模型的目录声明里有没有这条端点」时读的正是那一个常量，两处各写一遍的话
+// 它们可以各自改，而比对判的就成了另一个字符串。
+const Path = string(channel.EndpointSystemOne)
 
 // maxResponseBytes 是读上游响应体的上限。
 //
@@ -58,6 +62,9 @@ func (a *Adapter) Type() string { return Type }
 
 // Protocol 返回本适配器所说的协议：System One 决策。
 func (a *Adapter) Protocol() channel.Protocol { return channel.ProtocolSystemOne }
+
+// Endpoint 返回本适配器把请求发到哪条路径。见 channel.Adapter.Endpoint。
+func (a *Adapter) Endpoint() channel.Endpoint { return channel.EndpointSystemOne }
 
 // errNoChat 表示这条渠道不做 chat 补全。
 //

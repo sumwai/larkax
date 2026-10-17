@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"github.com/pressly/goose/v3"
 
 	"github.com/sumwai/larkax/internal/catalog"
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/migrate"
@@ -1342,5 +1344,88 @@ func insertModelCatalogB(b *testing.B, db *sql.DB, model string) {
 		VALUES ($1, $1, true, true, true, 200000, 8192)`, model)
 	if err != nil {
 		b.Fatalf("插入规范模型失败: %v", err)
+	}
+}
+
+// 目录里声明的端点清单要**原样**落到候选上，三态一个不少。
+//
+// 这是选路那侧端点评据的一半输入（另一半是候选自己那条端点，见
+// channels_test.go 的 TestCandidateEndpointFromChannelType）。投影里折平任意
+// 两档都会让「没配过」与「一条都不支持」重新合成一个值，而它们的结论相反
+// ——那种错不会报错，只会让一批模型静默地选不到或选得到。
+func TestCandidatesCarriesDeclaredEndpoints(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+
+	cases := []struct {
+		name     string
+		seed     func(model string)
+		want     []channel.Endpoint
+		wantProf bool // 期望候选上有一个非 nil 的 Profile
+	}{
+		{
+			// 目录里没有这个模型：Profile 为 nil（没有依据），而不是
+			// 一份「六项都没配过」的空声明。
+			name: "目录里没有这个模型",
+			seed: func(string) {},
+		},
+		{
+			name:     "端点那一项没配过",
+			seed:     func(model string) { seedCatalogEndpoints(t, db, model, nil) },
+			wantProf: true,
+		},
+		{
+			name:     "明确一条都不支持",
+			seed:     func(model string) { seedCatalogEndpoints(t, db, model, []channel.Endpoint{}) },
+			want:     []channel.Endpoint{},
+			wantProf: true,
+		},
+		{
+			name: "声明了两条",
+			seed: func(model string) {
+				seedCatalogEndpoints(t, db, model, []channel.Endpoint{
+					channel.EndpointChatCompletions, channel.EndpointMessages})
+			},
+			want:     []channel.Endpoint{channel.EndpointChatCompletions, channel.EndpointMessages},
+			wantProf: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			model := uniqueModel()
+			tc.seed(model)
+			insertChannel(t, db, sealer, channelSpec{model: model})
+
+			// ctx 在这个用例里内联着写：insertChannel 是夹具，它自己起一个
+			// context.Background()，本文件其余用例也是这么用的（contextcheck
+			// 会因为作用域里有一个 ctx 而要求把夹具也改成收 ctx——那要动它
+			// 几十个调用点，换不来任何东西）。
+			got, err := New(db, sealer).Candidates(context.Background(), model)
+			if err != nil {
+				t.Fatalf("Candidates 出错: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("候选数 = %d，期望 1", len(got))
+			}
+			profile := got[0].Profile
+			if !tc.wantProf {
+				if profile != nil {
+					t.Fatalf("目录里没有这个模型时 Profile 应为 nil，得到 %+v", profile)
+				}
+				return
+			}
+			if profile == nil {
+				t.Fatal("目录里有这条记录时 Profile 不该是 nil")
+			}
+			if !slices.Equal(profile.Endpoints, tc.want) {
+				t.Errorf("Endpoints = %v，期望 %v", profile.Endpoints, tc.want)
+			}
+			// nil 与空切片必须分得开：两者在 route 的端点评据里处置相反
+			// （放行 vs 出局）。
+			if (tc.want == nil) != (profile.Endpoints == nil) {
+				t.Errorf("nil 与空切片被混了：期望 %v，得到 %v", tc.want, profile.Endpoints)
+			}
+		})
 	}
 }

@@ -54,6 +54,9 @@ func (a *Adapter) Type() string { return Type }
 // Protocol 返回本适配器所说的协议：Anthropic Messages。
 func (a *Adapter) Protocol() channel.Protocol { return channel.ProtocolAnthropic }
 
+// Endpoint 返回本适配器把请求发到哪条路径。见 channel.Adapter.Endpoint。
+func (a *Adapter) Endpoint() channel.Endpoint { return channel.EndpointMessages }
+
 // Chat 发起一次非流式请求。
 func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Request) (*channel.Response, error) {
 	body, err := a.encodeRequest(ctx, req)
@@ -256,7 +259,7 @@ const DefaultMaxTokens = 4096
 
 func (a *Adapter) do(ctx context.Context, ch channel.Channel, body []byte, req *channel.Request) (*http.Response, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		httpx.Endpoint(ch.BaseURL, "/v1/messages"), bytes.NewReader(body))
+		httpx.Endpoint(ch.BaseURL, string(channel.EndpointMessages)), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("构造请求失败: %w", err)
 	}

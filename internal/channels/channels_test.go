@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/route"
@@ -611,6 +612,39 @@ func TestCandidateSelectable(t *testing.T) {
 	plan := (&route.Router{}).Select([]route.Candidate{cand}, "model-a", route.Needs{})
 	if len(plan.Candidates) != 1 {
 		t.Errorf("选路结果 %d 个，期望 1；排除原因 %+v", len(plan.Candidates), plan.Excluded)
+	}
+}
+
+// 候选上的端点由这条渠道的 type 指向的协议算出来。
+//
+// 它是选路那侧端点评据的一半输入（另一半是目录里的声明）：算错了会让一条
+// 本来配好的渠道被判成「端点对不上」——而现场看到的是「没有可用的渠道」，
+// 与「这些渠道都挂了」分不开。
+func TestCandidateEndpointFromChannelType(t *testing.T) {
+	cases := map[string]channel.Endpoint{
+		"openai":           channel.EndpointChatCompletions,
+		"anthropic":        channel.EndpointMessages,
+		"openai-responses": channel.EndpointResponses,
+		"systemone":        channel.EndpointSystemOne,
+		// 库里写着当前版本的二进制不认识的类型：空串 = 不知道。端点判据
+		// 不判它，而这条候选本来就选不中（执行器会报 ErrUnknownType）。
+		"some-vendor": "",
+	}
+	for channelType, want := range cases {
+		t.Run(channelType, func(t *testing.T) {
+			row := candidateRow{
+				id: 1, name: "c", channelType: channelType,
+				baseURL: "https://api.example.com/v1",
+				models:  []string{"model-a"},
+			}
+			got, err := row.candidate("test-key-placeholder", time.Now())
+			if err != nil {
+				t.Fatalf("candidate 出错: %v", err)
+			}
+			if got.Endpoint != want {
+				t.Errorf("Endpoint = %q，期望 %q", got.Endpoint, want)
+			}
+		})
 	}
 }
 
