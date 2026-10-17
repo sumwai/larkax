@@ -236,6 +236,22 @@ type fakeUpstream struct {
 	// 不报出它，这条差别在端到端上就没有判据。
 	cacheRead int64
 
+	// cacheWrite 非零时在用量里报出缓存写入量，与 cacheRead 同理。
+	//
+	// 只在 Anthropic 一侧建模：`cache_creation_input_tokens` 是 Anthropic 协议
+	// 里确定的字段，而 OpenAI 那一侧对应哪个键名（`cached_creation_tokens`
+	// 还是 `cache_write_tokens`）各家不一，没有用例驱动就不去编一个形状出来
+	//（见 LESSONS.md 第 19 条：夹具造出生产不可能出现的数据，比不造更坏）。
+	cacheWrite int64
+
+	// finishReason 是这次响应的结束原因，按**上游协议**的词汇给。
+	//
+	// 空串表示用本协议最常见的那一个（见 stopReason）。跨协议的用例会显式
+	// 给另一个值：两家的词汇不同（end_turn ↔ stop、max_tokens ↔ length），
+	// 而用一个「默认值恰好等于期望值」的输入，测不出那个值有没有真的从上游
+	// 传到调用方——把转换整个删掉、直接写死默认值的实现照样能过。
+	finishReason string
+
 	// fail 为 true 时回 500，用来走失败路径。
 	fail atomic.Bool
 
@@ -276,11 +292,44 @@ func (f *fakeUpstream) handler() http.Handler {
 	})
 }
 
+// upstreamModelName 返回假上游在响应体里**回报**的模型名。
+//
+// 它故意与请求里的模型名不同：真实上游回报的名字经常不是调用方要的那一个
+// （别名、版本后缀、上游自己的路由）。两边用同一个字符串时，「响应里报给
+// 调用方的是哪一个」就分不出来——把响应体的 model 换成上游回报的那个，
+// 用例照样全绿。加上这个后缀，那条断言才真的钉得住东西。
+//
+// UpstreamModel 只被插件与快照消费，不参与计价（计价按渠道 + 规范模型名），
+// 所以改它不影响这些用例里的金额。
+func (f *fakeUpstream) upstreamModelName() string { return f.model + "-upstream" }
+
+// stopReason 返回这次响应报的结束原因。
+//
+// 没显式指定时用本协议最常见的那一个。指定值由用例给，且**按上游协议的词汇**
+// 给——上游说的是它自己那套，转成调用方那套是链上某一层的责任。
+func (f *fakeUpstream) stopReason() string {
+	if f.finishReason != "" {
+		return f.finishReason
+	}
+	if f.protocol == channel.ProtocolAnthropic {
+		return "end_turn"
+	}
+	return "stop"
+}
+
 // successBody 按上游协议给出一次成功的响应体。
 //
 // 用量写死在假上游里：结算金额因此可以逐分核对，而不是「算出来多少就是
-// 多少」。两套协议报的是同一个用量（12 输入 / 7 输出），所以走哪条路结算
-// 金额都该是同一个数——这正是「协议不影响计费口径」那一条的判据。
+// 多少」。两套协议报的是**同一批 token**（12 个非缓存输入 / 7 个输出），
+// 所以走哪条路结算金额都该是同一个数——这正是「协议不影响计费口径」那一条
+// 的判据。两家的差别只在缓存那一项的报法上，而这正是跨协议转换要拆/补的：
+//
+//	Anthropic：input_tokens = 12（**不含**缓存）+ cache_read / cache_creation
+//	OpenAI   ：prompt_tokens = 12 + 缓存（**含**缓存）+ prompt_tokens_details.cached_tokens
+//
+// 于是「上游报了 5 个缓存命中」在两条协议下是两个不同的输入数（12 与 17），
+// 而它们说的是同一件事。转换里少补或多减一次，账单就会差出那 5 个 token 的钱。
+// 缓存**写入**那一侧同理，只是它只在 Anthropic 一侧报（见 cacheWrite）。
 func (f *fakeUpstream) successBody() map[string]any {
 	if f.protocol == channel.ProtocolAnthropic {
 		usage := map[string]any{"input_tokens": 12, "output_tokens": 7}
@@ -289,34 +338,45 @@ func (f *fakeUpstream) successBody() map[string]any {
 		if f.cacheRead > 0 {
 			usage["cache_read_input_tokens"] = f.cacheRead
 		}
+		if f.cacheWrite > 0 {
+			usage["cache_creation_input_tokens"] = f.cacheWrite
+		}
 		return map[string]any{
 			"id":            "msg-placeholder",
 			"type":          "message",
 			"role":          "assistant",
-			"model":         f.model,
+			"model":         f.upstreamModelName(),
 			"content":       []any{map[string]any{"type": "text", "text": "你好，我是假上游"}},
-			"stop_reason":   "end_turn",
+			"stop_reason":   f.stopReason(),
 			"stop_sequence": nil,
 			// Anthropic 的输入侧不含缓存部分（见 internal/api/response.go 的
 			// claudeUsageOf），所以这里给的就是纯输入量。
 			"usage": usage,
 		}
 	}
+	// OpenAI 的 prompt_tokens **含**缓存部分，所以缓存量要加进去。报成 12
+	// 会让同一个 cacheRead 在两条协议上表示两件不同的事，而那个差别正是
+	// 「拆缓存」这一步的判据所要依赖的前提。
+	prompt := int64(12) + f.cacheRead
+	usage := map[string]any{
+		"prompt_tokens":     prompt,
+		"completion_tokens": 7,
+		"total_tokens":      prompt + 7,
+	}
+	if f.cacheRead > 0 {
+		usage["prompt_tokens_details"] = map[string]any{"cached_tokens": f.cacheRead}
+	}
 	return map[string]any{
 		"id":      "chatcmpl-placeholder",
 		"object":  "chat.completion",
 		"created": 1700000000,
-		"model":   f.model,
+		"model":   f.upstreamModelName(),
 		"choices": []any{map[string]any{
 			"index":         0,
 			"message":       map[string]any{"role": "assistant", "content": "你好，我是假上游"},
-			"finish_reason": "stop",
+			"finish_reason": f.stopReason(),
 		}},
-		"usage": map[string]any{
-			"prompt_tokens":     12,
-			"completion_tokens": 7,
-			"total_tokens":      19,
-		},
+		"usage": usage,
 	}
 }
 
