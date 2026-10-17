@@ -86,7 +86,7 @@ LARKAX_INTERNAL_ADDR=":9091"
 `.env.example` 可以直接被 shell 读取，所以 `make` 用 `set -a && . ./.env && set +a`
 加载它。**服务本身不读 `.env` 文件**，只读环境变量；用 direnv 或别的工具加载也行。
 
-## 请求快照的留存
+## 请求快照
 
 快照按天分区（`request_snapshots_YYYY_MM_DD`），留存期从
 `settings.request_snapshot.retention_days` 读。到期是整分区 `DROP`，
@@ -103,6 +103,37 @@ go run ./cmd/larkaxctl snapshot cleanup             # 执行删除
 写入时若当天分区不存在，写入方会**当场补建**它（幂等，每实例每天只做一次）。
 不补建的话行会落进兜底分区 `request_snapshots_default`，而那里的行没有到期日——
 留存承诺对它不成立。**兜底分区非空即说明有写入绕过了补建，应当告警。**
+
+### 允许表与读回
+
+```sh
+# 允许表：哪些字段放行、哪些替换成占位、每一行为什么这么定。不连库。
+go run ./cmd/larkaxctl snapshot allowlist
+go run ./cmd/larkaxctl snapshot allowlist --direction request
+
+# 读回一条快照。--actor 与 --reason 都必填，见下。
+go run ./cmd/larkaxctl snapshot show <request_id> --actor <用户 ID 或用户名> --reason <文本>
+
+# 试脱敏：从 stdin 读一段报文，看它会变成什么骨架。不连库。
+echo '{"model":"...","messages":[...]}' | \
+  go run ./cmd/larkaxctl snapshot redact --direction request
+```
+
+`show` 是读**敏感数据**的动作，所以每一次读都会往 `snapshot_access_log`
+写一行（谁、什么时候、什么理由、读了哪一条）。写日志与读快照在同一个事务里：
+日志写不进去时命令整体失败，一行数据都不返回。`--actor` 与 `--reason` 都没有
+默认值——「我写了 --reason」与「我忘了写」在库里必须分得开。
+
+同一个 `request_id` 可能有多行（请求与响应各一行，重试也可能各一行），
+`show` 全部按 `created_at` 升序打出来。`skeleton_truncated` 为真的那条会额外
+说明它被降级成了摘要层——一份被截断的骨架与一份完整的骨架在肉眼下长得一样。
+
+`redact` 的骨架走 stdout（可以直接接给 `jq`），方向、字节上限、被替换的路径
+与那句提醒走 stderr。它回答的是「这段报文会长成什么样」，**不是**库里那条快照：
+库里那条来自解析之后的请求/响应，字段集合与它不完全一样。
+
+标准输入有 64 MiB 上限，不配开关：这条命令是拿一段**单次请求**的报文来试，
+不是拿整份日志。把整份日志喂进来会超出上限并报错，要先拆开、一次喂一段。
 
 ## 分时计价的日历数据
 
@@ -462,7 +493,7 @@ ingress 规则下。
 | `price` | 计价规则：`add` / `list` |
 | `user` | 用户：`create` |
 | `apikey` | API Key：`create` |
-| `snapshot` | 请求快照的留存清理 |
+| `snapshot` | 请求快照：`cleanup` / `allowlist` / `show` / `redact` |
 | `idempotency` | 幂等记录的留存清理：`cleanup` / `cleanup --dry-run` |
 | `calendar` | 节假日日历数据：`import` |
 | `rotate` | 主密钥轮换 |

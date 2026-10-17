@@ -70,7 +70,8 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl ledger balance|verify          读账本（余额查询、完整性校验）
   larkaxctl reconcile                      跑一轮对账（开关与口径见 settings 表）
   larkaxctl rotate                         轮换渠道凭证的主密钥（默认干跑）
-  larkaxctl snapshot cleanup               按留存期删除到期的快照分区
+  larkaxctl snapshot cleanup|allowlist|show|redact
+                                           快照的留存清理、允许表、读回与试脱敏
   larkaxctl idempotency cleanup            按留存期删除到期的幂等记录
   larkaxctl calendar import <文件>          导入某一年的日历数据（格式见下）
   larkaxctl version                        打印版本号
