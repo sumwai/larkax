@@ -70,6 +70,12 @@ func billingRequest(user User, upstream *channel.Request, requestID string, prot
 	return pipeline.Request{
 		RequestID: requestID,
 		UserID:    user.ID,
+		// APIKeyID 与 UserID 一起取自鉴权结果，但两者不是一回事：一个用户
+		// 可以有多把 key，而账单要能追到**哪一把**在用。鉴权那一步已经把它
+		// 解析出来了（限流按 key 计，用的就是同一个值），这里只是不让它在
+		// 入口与落库层之间断掉——断了的表现是那一列恒为 NULL，
+		// 而单看任何一层都像是写了的。
+		APIKeyID: user.KeyID,
 		// CanonicalModel 与上游模型名在这里取同一个值，因为规范名到上游名的
 		// 映射还没做（那属于选路层）。这是**已知的临时状态**，不是设计：
 		// 接通映射时改的正是这一行。

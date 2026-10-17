@@ -30,7 +30,7 @@ func TestReleaseRefusesMissingWallet(t *testing.T) {
 
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
-	req := testRequest(userID, requestID)
+	req := testRequest(t, db, userID, requestID)
 
 	// 1 · 正常预留 30，冻结额落在钱包行上
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
@@ -69,7 +69,7 @@ func TestSettleRefusesMissingWallet(t *testing.T) {
 
 	userID := seed(t, db, "100")
 	requestID := reqID(t)
-	req := testRequest(userID, requestID)
+	req := testRequest(t, db, userID, requestID)
 
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
 		t.Fatalf("预留失败: %v", err)
