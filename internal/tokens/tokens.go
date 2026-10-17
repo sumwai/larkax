@@ -213,9 +213,10 @@ type Counter struct {
 
 // NewCounter 构造计数器。
 //
-// **不加载词表。** 词表约 16MB，编译进二进制；首次解出实测约 40ms 与
-// 约 7MB 常驻堆（两者都随编码数增加）。服务进程里并非每条路径都需要
-// 精确计数（比如控制面只做展示、`/v1/models` 根本不计数），对它们纯属浪费。
+// **不加载词表。** 词表约 16MB，编译进二进制；首次解出一种实测约 25ms、
+// 堆上多约 7MB（o200k；cl100k 约 9ms 与 3.4MB，两者都随编码数增加）。
+// 服务进程里并非每条路径都需要精确计数（比如控制面只做展示、
+// `/v1/models` 根本不计数），对它们纯属浪费。
 //
 // 「不加载」的意思是**不用**，不是「不占用」：词表是 Go 的字符串表初始化，
 // 以符号表的形式躺在二进制文件里（o200k 约 7.9MB、cl100k 约 3.9MB 的源码
@@ -224,13 +225,18 @@ type Counter struct {
 // 但**二进制体积**会固定增加约 16MB。
 //
 // 需要精确计数时调用 Prepare；不调用也不会错，只是第一次走到精确路径时
-// 会惰性加载，那一次请求多 40ms。
+// 会惰性加载，那一次请求多约 25ms。
 func NewCounter() *Counter { return &Counter{vocab: newVocabSet()} }
 
 // Prepare 预先加载词表，并返回每种编码的加载耗时供启动日志使用。
 //
-// 服务启动时调用一次（每个进程一次就够）。这是**唯一**能让那 40ms
-// 不落在用户请求上的时机，生产环境应当调用它。
+// 服务启动时调用一次（每个进程一次就够）。这是**唯一**能让词表加载不落在
+// 用户请求上的时机：生产侧由 cmd/larkax 在**监听端口之前**调用
+// （见那里的 warmVocab）——那之前的任何时刻都还没有请求，之后的第一个
+// 请求就得自己付这笔钱。
+//
+// 失败**不是**致命的：不预热只是慢，不是不能用（codecFor 会惰性加载），
+// 所以调用方应当记一条日志后继续，而不是让进程起不来。
 //
 // ctx 给调用方一个放弃点。加载本身是纯 CPU 计算，不可中断，但等待它的
 // 启动探针可以超时退出，所以这里尊重取消。
@@ -241,7 +247,11 @@ func (c *Counter) Prepare(ctx context.Context) (map[string]time.Duration, error)
 	return c.vocab.prepare(ctx)
 }
 
-// Loaded 返回已经加载的编码名，供体检与启动日志使用。
+// Loaded 返回已经加载的编码名，供启动日志使用。
+//
+// 它与 Prepare 的返回值是同一个问题的两面：那一次启动把什么解进了内存、
+// 各花了多久。cmd/larkax 的启动日志两个都打（见 warmVocab）——只打
+// 「预热完成」的话，「一种都没解开」与「都解开了」在日志里长得一样。
 func (c *Counter) Loaded() []string {
 	if c == nil || c.vocab == nil {
 		return nil
@@ -251,17 +261,17 @@ func (c *Counter) Loaded() []string {
 
 // AvailableEncodings 返回本机能够精确计数的编码（未必已加载）。
 //
-// 与 Loaded 的区别：这个是能力上限，那个是当前状态。健康检查与文档
-// 需要前者（「这台机器支持到什么程度」），启动日志需要后者
-// （「那 40ms 花掉了没有」）。
+// 与 Loaded 的区别：这个是能力上限，那个是当前状态。要回答「这台机器支持到
+// 什么程度」用前者，要回答「那一次启动解开了哪些、各花了多久」用后者。
 //
-// **目前只有测试在调它，而 Loaded 也一样**：Prepare / Loaded /
-// AvailableEncodings 这一组是「启动时预热词表并把结果打进启动日志」的
-// 三件套，而生产装配还没有调用 Prepare（见它的注释：生产环境应当调用它）。
-// 接线之前别把它当成已经在跑的东西。
+// **目前只有测试在调它。** 同一组的另外两个已经接上了（cmd/larkax 的
+// warmVocab 调 Prepare 与 Loaded），而它还没有——内部端口的就绪检查今天
+// 只报 postgres 的连通性（见 cmd/larkax 的 newInternalHandler）。接线之前
+// 别把它当成已经在跑的东西。
 func AvailableEncodings() []string {
-	out := make([]string, 0, 6)
-	for _, enc := range loadableEncodings() {
+	encodings := loadableEncodings()
+	out := make([]string, 0, len(encodings))
+	for _, enc := range encodings {
 		out = append(out, string(enc))
 	}
 	return out

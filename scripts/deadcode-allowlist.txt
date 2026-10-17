@@ -126,6 +126,6 @@ internal/tokens/count.go         | RecordMeasured                  | gap | #282 
 internal/tokens/stream.go        | StreamEstimator.HasMeasured     | gap | #282 与 ObserveMeasured 同一组：这个入口没有接进 gateway，目前只有测试在调它（流式账单本身走的是实测，见 internal/gateway/stream.go 的 streamUsage）
 internal/tokens/stream.go        | StreamEstimator.ObserveMeasured | gap | #282 这个入口没有生产调用方：它收的是一个总数，而流里的 usage 分着输入与输出两个数，压成一个总数就拆不回来（gateway 只调了 ObserveDone）
 internal/tokens/stream.go        | Usage.RequiresReview            | gap | #282 估算复核的判据，没有生产调用方：本包不持有告警通道，那一头还没有写
-internal/tokens/tokens.go        | AvailableEncodings              | lib | 能力查询：本机能精确计数的编码集合；目前只有测试在调它（与 Prepare / Loaded 一组，启动预热还没接线）
+internal/tokens/tokens.go        | AvailableEncodings              | lib | 能力查询：本机能精确计数的编码集合；目前只有测试在调它（同一组的 Prepare / Loaded 已随启动预热接线，它自己还没有——就绪检查今天只报 postgres）
 internal/tokens/tokens.go        | BoundsFor                       | lib | 能力查询：某个族的估算误差范围；目前只有测试在调它
 internal/tokens/vocab.go         | loadableEncodings               | lib | 能力查询：第三方词表支持哪些编码；只被 AvailableEncodings 调用，那个也还没有生产调用方

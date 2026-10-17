@@ -2,6 +2,8 @@ package tokens
 
 import (
 	"context"
+	"slices"
+	"sort"
 	"testing"
 )
 
@@ -28,8 +30,44 @@ func TestPrepareContextCanceledMidway(t *testing.T) {
 	if _, err := c.Prepare(context.Background()); err != nil {
 		t.Fatalf("正常 Prepare 应成功: %v", err)
 	}
-	if len(c.Loaded()) != 2 {
-		t.Errorf("已加载编码数 = %d, 期望 2（o200k 与 cl100k）", len(c.Loaded()))
+	// 判据从 preparedCodecs 派生，不写死数量：写死的话，改那个集合就要
+	// 回来改这里，而漏改的表现是这条用例报一个与改动无关的数字。
+	want := make([]string, 0, len(preparedCodecs))
+	for _, enc := range preparedCodecs {
+		want = append(want, string(enc))
+	}
+	sort.Strings(want)
+	if got := c.Loaded(); !slices.Equal(got, want) {
+		t.Errorf("已加载编码 = %v, 期望 %v（preparedCodecs 的全部）", got, want)
+	}
+}
+
+// 预热之后，第一次精确计数不该再解开任何新词表——这正是 #259 要的性质：
+// 那 25ms 落在启动期，而不是落在第一个用户的第一次调用上。
+//
+// 判据是**前后对比 Loaded()**，不是「Prepare 返回了 nil 错误」：后者只说明
+// 加载那一步没报错，说明不了接下来那条请求路径用的是同一批词表。
+func TestPreparedCounterCountsWithoutLoadingMore(t *testing.T) {
+	c := NewCounter()
+	if _, err := c.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare 失败: %v", err)
+	}
+	before := c.Loaded()
+
+	// 两种编码各取一个模型名，把「预热的那两种」都走一遍。
+	for _, model := range []string{"gpt-4o", "gpt-3.5-turbo"} {
+		got, err := c.CountText(context.Background(), model, "hello world")
+		if err != nil {
+			t.Fatalf("CountText(%s) 失败: %v", model, err)
+		}
+		if got.Source != SourceTokenized {
+			t.Errorf("模型 %s 的来源 = %s，期望 tokenized（预热之后应当走精确路径）",
+				model, got.Source)
+		}
+	}
+
+	if after := c.Loaded(); !slices.Equal(before, after) {
+		t.Errorf("精确计数又解开了新词表: %v -> %v（预热没覆盖到它会走的那一种）", before, after)
 	}
 }
 

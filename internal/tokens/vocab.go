@@ -100,6 +100,52 @@ func hasAnyPrefix(s string, prefixes ...string) bool {
 	return false
 }
 
+// encodingRule 是「一组模型名前缀 → 一种编码」。
+//
+// 前缀按顺序匹配，先命中的胜。顺序有意义，所以它是一条条列出来的，
+// 不是一张无序的映射。
+type encodingRule struct {
+	prefixes []string
+	enc      tokenizer.Encoding
+}
+
+// encodingRules 是模型名前缀到编码的对应关系。
+//
+// 写成一张表而不是一串 switch 分支，是为了让「encodingForModel 会返回哪些
+// 编码」成为一个**从数据里算得出来的**事实：预热集合的完备性用例直接取这张
+// 表的值域（见 preparedCodecs），而不是另外抄一份模型名清单。抄一份的话，
+// 表里加一条规则而清单没跟着改，两边都不会红——而那个模型第一次调用时照样
+// 要为词表加载付时间（同一件事实写在两处、谁也不从谁推导，见 #289）。
+var encodingRules = []encodingRule{
+	{
+		// 老一代：cl100k_base。gpt-4-*（不含 gpt-4o / gpt-4.1）与
+		// gpt-3.5-turbo 一代。注意 "gpt-4o" 与 "gpt-4.1" 不是 "gpt-4-" 前缀
+		//（以 o / . 分界），所以它们不会落到这一条。
+		prefixes: []string{"gpt-4-", "gpt-3.5-turbo", "gpt-35-turbo"},
+		enc:      tokenizer.Cl100kBase,
+	},
+	{
+		// 同属 cl100k_base，但是另一类名字：嵌入模型与 002/003 代补全。
+		prefixes: []string{"text-embedding-ada-002", "text-davinci-003", "text-davinci-002"},
+		enc:      tokenizer.Cl100kBase,
+	},
+	{
+		// 更老的一代：r50k_base。这些名字在上游已经罕见，但别名表里偶尔会残留。
+		prefixes: []string{
+			"text-davinci-001", "text-curie", "text-babbage", "text-ada",
+			"davinci", "curie", "babbage", "ada", "text-search-", "text-similarity-",
+			"code-search-", "code-cushman", "code-davinci-001",
+		},
+		enc: tokenizer.R50kBase,
+	},
+}
+
+// defaultEncoding 是 encodingRules 一条都没命中时用的编码。
+//
+// 兜底给新的那个（而不是旧的）是有意的：新模型的上线速度远快于旧模型的
+// 使用率增长，猜错时新编码在多数情况下是对的。
+const defaultEncoding = tokenizer.O200kBase
+
 // encodingForModel 返回该 OpenAI 模型用的编码。
 //
 // 只用族级的映射，不逐个模型登记：`o200k_base` 覆盖 gpt-4o 之后的全线
@@ -107,26 +153,15 @@ func hasAnyPrefix(s string, prefixes ...string) bool {
 // 新模型落在哪一边取决于它是哪一代的底座，用发布日期判断比用名字判断稳，
 // 但发布日期不在模型名里——所以这里按已知的名字前缀判断，兜底给 o200k。
 //
-// 兜底给新的那个（而不是旧的）是有意的：新模型的上线速度远快于旧模型的
-// 使用率增长，猜错时新编码在多数情况下是对的。
+// 对应关系在 encodingRules 那张表里，这个函数只负责匹配。
 func encodingForModel(m string) tokenizer.Encoding {
 	m = strings.ToLower(strings.TrimSpace(m))
-	switch {
-	// 老一代：cl100k_base。gpt-4-*（不含 gpt-4o / gpt-4.1）与 gpt-3.5-turbo 一代。
-	// 注意 "gpt-4o" 与 "gpt-4.1" 不是 "gpt-4-" 前缀（以 o / . 分界），
-	// 所以它们不会落到这一支。
-	case hasAnyPrefix(m, "gpt-4-", "gpt-3.5-turbo", "gpt-35-turbo"):
-		return tokenizer.Cl100kBase
-	case hasAnyPrefix(m, "text-embedding-ada-002", "text-davinci-003", "text-davinci-002"):
-		return tokenizer.Cl100kBase
-	// 更老的一代：r50k_base。这些名字在上游已经罕见，但别名表里偶尔会残留。
-	case hasAnyPrefix(m, "text-davinci-001", "text-curie", "text-babbage", "text-ada",
-		"davinci", "curie", "babbage", "ada", "text-search-", "text-similarity-",
-		"code-search-", "code-cushman", "code-davinci-001"):
-		return tokenizer.R50kBase
+	for _, rule := range encodingRules {
+		if hasAnyPrefix(m, rule.prefixes...) {
+			return rule.enc
+		}
 	}
-	// 其余（gpt-4o、gpt-4.1、o 系列、gpt-5 及以后）走 o200k_base。
-	return tokenizer.O200kBase
+	return defaultEncoding
 }
 
 // ── 词表加载 ───────────────────────────────────────────────────────
@@ -152,7 +187,7 @@ func newVocabSet() *vocabSet {
 // codecFor 取一个词表句柄，必要时加载。
 //
 // 加锁的范围包含加载过程：两个 goroutine 同时首次请求同一种编码时，
-// 让后到的那一个等前面那个加载完，比各自解一份（多花 7MB、白算 40ms）
+// 让后到的那一个等前面那个加载完，比各自解一份（多花 7MB、白算 25ms）
 // 更划算。加载是每进程一次的路径，这里不追求无锁。
 func (v *vocabSet) codecFor(enc tokenizer.Encoding) (tokenizer.Codec, error) {
 	v.mu.Lock()
@@ -172,9 +207,31 @@ func (v *vocabSet) codecFor(enc tokenizer.Encoding) (tokenizer.Codec, error) {
 
 // preparedCodecs 是 Prepare 要加载的编码集合。
 //
-// 只加载覆盖主流流量的两种（o200k 与 cl100k）。把它们全部加载会让
-// 常驻内存多出约 16MB，而那三种老编码（r50k/p50k/gpt2）的流量占比可以忽略。
-var preparedCodecs = []tokenizer.Encoding{tokenizer.O200kBase, tokenizer.Cl100kBase}
+// 它覆盖 encodingForModel 的**整个值域**：encodingRules 里出现过的每一种
+// 编码，加上兜底那个。这样「没有任何请求为词表加载付过时间」是一句结构性
+// 保证，而不是「我们猜哪些模型重要，猜对了的那部分请求不用付」——按流量
+// 猜的话，猜错的表现只是那一次请求多几毫秒，**没有任何东西会发现**。
+//
+// 完备性由 TestPreparedCodecsCoverEveryReachableEncoding 从 encodingRules
+// 推导着判，不靠这份清单和那张表各自维护。
+//
+// 实测：每种编码各起一个独立进程量它自己的加载耗时与增量；合计那一行是
+// 同一次 Prepare 的实际值，**不是上面三行相加**（每次加载都含该进程里首次
+// 编译切分正则的开销，跨进程加会重复计）：
+//
+//	o200k_base   约 25ms  RSS +12.4MB（堆 +6.8MB）
+//	cl100k_base  约  9ms  RSS  +6.1MB（堆 +3.4MB）
+//	r50k_base    约  6ms  RSS  +3.4MB（堆 +1.7MB）
+//	三种合计     约 43ms  RSS +21.3MB（堆 +11.9MB，八次实测 40~50ms）
+//
+// 这个集合只跟着**值域**长：p50k_base 与 p50k_edit 能加载，但不在任何一条
+// 规则里，预解它们是纯浪费。反过来，值域里多出一种就必须跟着加——那正是
+// 上面那条用例判的事。
+var preparedCodecs = []tokenizer.Encoding{
+	tokenizer.O200kBase,
+	tokenizer.Cl100kBase,
+	tokenizer.R50kBase,
+}
 
 // prepare 预加载词表，返回每种编码的加载耗时。
 func (v *vocabSet) prepare(ctx context.Context) (map[string]time.Duration, error) {
@@ -225,11 +282,21 @@ func (v *vocabSet) loaded() []string {
 // 调用方（例如健康检查）要能知道「这台机器上能精确计数哪些编码」，
 // 而不必去读依赖的源码或试错。
 //
-// 与 preparedCodecs 的区别：那个是启动时**主动**加载的子集（覆盖主流
-// 流量），这个是**能力上限**。r50k/p50k/gpt2 能加载，只是本包不预先加载
-// 它们——真遇到那些老模型时，codecFor 会按需惰性加载。
+// **只列 tokenizer.Get 真的认的那些。** 依赖里另有一个 GPT2Enc 常量，而
+// Get 的 switch 里没有它的分支（codec 包里也没有对应的构造函数），传进去
+// 得到的是 ErrEncodingNotSupported。列上去的后果是 AvailableEncodings
+// 报出一个永远加载不出来的编码——「能力上限」比真实能力高，而它恰恰是
+// 用来回答「这台机器支持到什么程度」的。它不在 encodingForModel 的返回值
+// 里，所以计数路径不受影响，受影响的只有这份清单本身。
+//
+// 与 preparedCodecs 的区别：那个是启动时**主动**加载的子集（= 下面这个
+// 集合里、encodingForModel 的值域覆盖到的那部分），这个是**能力上限**。
+// p50k/p50k_edit 能加载，但不在任何一条 encodingRule 里，所以本包不预先
+// 加载它们；r50k 在值域里，因而会被预解。
 //
 // 目前只有 AvailableEncodings 在调它，而那个也还没有生产调用方（见它的注释）。
+// TestAvailableEncodingsActuallyLoad 逐项真的调一次 tokenizer.Get，所以依赖
+// 换了支持范围时这里会有一条用例失败，而不是悄悄失真。
 func loadableEncodings() []tokenizer.Encoding {
 	return []tokenizer.Encoding{
 		tokenizer.O200kBase,
@@ -237,6 +304,5 @@ func loadableEncodings() []tokenizer.Encoding {
 		tokenizer.P50kBase,
 		tokenizer.P50kEdit,
 		tokenizer.R50kBase,
-		tokenizer.GPT2Enc,
 	}
 }

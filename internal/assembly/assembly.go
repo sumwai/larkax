@@ -261,8 +261,14 @@ func Build(cfg Config) (*App, error) {
 		Redactor:  snapshots.Redactor(),
 		Snapshots: snapshots.Sink(),
 		Executor:  cfg.Executor,
-		// 计数器按需加载词表（首次精确计数约 40ms），构造本身是廉价的，
-		// 所以这里直接建一个而不是做成参数：它没有第二种实现。
+		// 计数器按需加载词表（首次精确计数约 25ms），构造本身是廉价的，
+		// 所以这里直接建一个而不是做成参数：它没有第二种实现，而做成
+		// 参数还多一个坏处——调用方传 nil 时网关会安静地退到启发式估算
+		// （Counter 允许为 nil），「忘了接」就没有任何一步会失败。
+		//
+		// 预热不在这里做：那一步不能失败，而 Build 的契约是「要么能用，
+		// 要么启动就失败」。调用方拿到 App 之后自己预热（见 cmd/larkax
+		// 的 warmVocab）。
 		Counter: tokens.NewCounter(),
 		Now:     cfg.Now,
 	}

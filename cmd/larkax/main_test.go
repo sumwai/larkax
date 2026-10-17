@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +23,7 @@ import (
 // worker 角色的公共端口是占位响应，而不是装配失败：它本来就不承接推理流量，
 // 而起不来的进程连「端口通、TLS 通、负载均衡转发通」都验证不了。
 func TestWorkerRoleServesPlaceholder(t *testing.T) {
-	h, err := publicHandler(&config.Config{Role: config.RoleWorker}, nil, nil, nil)
+	h, err := publicHandler(context.Background(), &config.Config{Role: config.RoleWorker}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("worker 角色不该装配失败: %v", err)
 	}
@@ -45,7 +48,7 @@ func TestWorkerRoleServesPlaceholder(t *testing.T) {
 func TestTrafficRoleWithoutMasterKeyFailsToStart(t *testing.T) {
 	for _, role := range []config.Role{config.RoleGateway, config.RoleControl} {
 		t.Run(string(role), func(t *testing.T) {
-			h, err := publicHandler(&config.Config{Role: role}, nil, nil, nil)
+			h, err := publicHandler(context.Background(), &config.Config{Role: role}, nil, nil, nil)
 			if err == nil {
 				t.Fatalf("%s 角色缺主密钥时应当装配失败，实际拿到 %T", role, h)
 			}
@@ -53,6 +56,57 @@ func TestTrafficRoleWithoutMasterKeyFailsToStart(t *testing.T) {
 				t.Errorf("错误信息应当说明缺的是主密钥: %v", err)
 			}
 		})
+	}
+}
+
+// 预热的判据不是「调过 Prepare」，而是**预热之后词表真的在内存里**。
+//
+// 只断言调用发生了的话，把 Prepare 换成一句空实现、或者让它在某个角色上
+// 被跳过，用例照样通过——而那时第一个请求仍然要多付约 25ms。
+func TestWarmVocabLoadsVocab(t *testing.T) {
+	counter := tokens.NewCounter()
+	var logs bytes.Buffer
+	warmVocab(context.Background(), counter, slog.New(slog.NewTextHandler(&logs, nil)))
+
+	loaded := counter.Loaded()
+	for _, want := range []string{"o200k_base", "cl100k_base"} {
+		if !slices.Contains(loaded, want) {
+			t.Errorf("预热之后 %s 不在 Loaded() 里: %v", want, loaded)
+		}
+	}
+	// 日志是这条链路上唯一的现场：「预热了」与「预热失败后退到惰性加载」
+	// 在行为上没有区别，只在日志里有。
+	if !strings.Contains(logs.String(), "词表已预热") {
+		t.Errorf("启动日志里没有预热的记录: %s", logs.String())
+	}
+}
+
+// 预热失败只记日志，不拦住启动。
+//
+// 不预热只是慢，不是不能用（词表会惰性加载）。这条用例同时钉住两件事：
+// 日志里留下痕迹（否则「这台机器上预热没成功」是静默的），
+// 以及计数在预热失败之后**仍然可用**。
+func TestWarmVocabFailureStillServes(t *testing.T) {
+	counter := tokens.NewCounter()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var logs bytes.Buffer
+	warmVocab(ctx, counter, slog.New(slog.NewTextHandler(&logs, nil)))
+
+	if !strings.Contains(logs.String(), "词表预热失败") {
+		t.Errorf("取消后的预热应当在日志里留下痕迹: %s", logs.String())
+	}
+	// 判据取「一种都没加载上」而不是「没崩」：后者对空实现也成立。
+	if loaded := counter.Loaded(); len(loaded) != 0 {
+		t.Errorf("取消之后不该有已加载编码, 得到 %v", loaded)
+	}
+	got, err := counter.CountText(context.Background(), "gpt-4o", "hello world")
+	if err != nil {
+		t.Fatalf("预热失败后计数仍应可用: %v", err)
+	}
+	if got.Tokens == 0 {
+		t.Error("预热失败后算出的 token 数为 0")
 	}
 }
 
