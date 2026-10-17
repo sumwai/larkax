@@ -1,6 +1,9 @@
 package channel
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // Endpoint 是一次上游请求打到哪条路径。
 //
@@ -68,20 +71,53 @@ func ParseEndpoint(raw string) (Endpoint, error) {
 	return e, nil
 }
 
+// protocolEndpoints 是「协议取值 → 它打的那条端点」这张表。
+//
+// # 它是协议取值的唯一来源
+//
+// 本包关于协议取值要说两件事：**认哪些**（valid，以及注册自检报错里列的那串）
+// 与**每个协议打哪条端点**（Endpoint）。两件事都从这一张表回答——键是前者，
+// 值是后者。
+//
+// 先前它们各自维护（`valid` 一个 switch、`protocolNames` 一个包级变量、
+// `Endpoint` 又一个 switch），三份对不上时端点算出来是空串，而空串在端点评据
+// 里等于**放行**，且没有任何自检照到：协议名是合法的、类型名与声明也一致，
+// 注册与选路都不响。收成一张表之后，「加一个协议取值」只有这一处要改，
+// 另一处不可能忘。
+//
+// 表漏没漏，由 TestEveryProtocolConstantIsInTable 兜着：它扫本包源码里的
+// Protocol 常量与变量声明，逐个要求在这里有一行。
+var protocolEndpoints = map[Protocol]Endpoint{
+	ProtocolAnthropic:       EndpointMessages,
+	ProtocolOpenAI:          EndpointChatCompletions,
+	ProtocolOpenAIResponses: EndpointResponses,
+	ProtocolSystemOne:       EndpointSystemOne,
+}
+
+// protocolNames 是表里那批协议名，已排序。
+//
+// 它只用在报错信息里（「本包认的只有 …」）：那个顺序要稳定，否则同一份配置在
+// 两次启动里给出顺序不同的提示，读日志的人会以为中间有什么变了。
+var protocolNames = func() []string {
+	names := make([]string, 0, len(protocolEndpoints))
+	for p := range protocolEndpoints {
+		names = append(names, string(p))
+	}
+	slices.Sort(names)
+	return names
+}()
+
 // Endpoint 返回这套协议族的适配器往哪条路径发请求。
 //
-// 未知协议返回空串。空串在端点评据里是「不知道」，与 Valid 为 false 一起
-// 由调用方决定怎么处置（本仓的处置是放行，见 route.profileRejection）。
+// 未知协议拿到空串。空串在端点评据里是「不知道」，与 Valid 为 false 一起由
+// 调用方决定怎么处置（本仓的处置是放行，见 route.profileRejection）。
+//
+// # 空串现在只有一个来源
+//
+// 「本版本不认识这个协议」——库里写着一个更新的版本才有的 type 时就是这种，
+// 而那条渠道本来就选不中（执行器报 ErrUnknownType）。表里有的协议**不可能**
+// 算不出端点：端点就是表的一列，两者同源。先前那种「协议本身合法、只是忘了给
+// 它配端点」的写法已经没有位置了。
 func (p Protocol) Endpoint() Endpoint {
-	switch p {
-	case ProtocolOpenAI:
-		return EndpointChatCompletions
-	case ProtocolOpenAIResponses:
-		return EndpointResponses
-	case ProtocolAnthropic:
-		return EndpointMessages
-	case ProtocolSystemOne:
-		return EndpointSystemOne
-	}
-	return ""
+	return protocolEndpoints[p]
 }
