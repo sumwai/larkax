@@ -429,6 +429,6 @@ func (r *runtimeState) call(ctx context.Context, hook moejs.Hook, hookName strin
 	case <-ctx.Done():
 		r.markUnusable()
 		r.rt.Interrupt(context.Cause(ctx))
-		return moejs.Undefined(), &Failure{Plugin: r.plugin, Hook: hookName, Kind: ErrClientCancelled, Cause: context.Cause(ctx)}
+		return moejs.Undefined(), &Failure{Plugin: r.plugin, Hook: hookName, Kind: ErrClientCanceled, Cause: context.Cause(ctx)}
 	}
 }

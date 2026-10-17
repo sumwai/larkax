@@ -449,7 +449,7 @@ func TestUpstreamFailureReleasesReservation(t *testing.T) {
 //
 // 断开在这里表现为「预留已经落库、调上游时 ctx 已经取消」：路由在
 // 调上游之前就看见 ctx 的结局并返回，请求于是带着一个失败的结局收尾。
-func TestReleaseWorksWithCancelledRequestContext(t *testing.T) {
+func TestReleaseWorksWithCanceledRequestContext(t *testing.T) {
 	h := newHarness(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
