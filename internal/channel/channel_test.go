@@ -90,13 +90,13 @@ func TestRegistryRegisterAndLookup(t *testing.T) {
 // 覆盖注册会让「两个适配器抢一个名字」表现为其中一个静默失效，
 // 而失效的那个通常是新加的、本该生效的那个。
 //
-// 两个替身声明的协议不同，是为了钉住「撞的是**类型名**这一列」：若判据是
-// 「类型加协议」，那两条不同协议的适配器就会被放进去，而库里只有一列 type。
+// 两条替身长得一样：类型名与协议名一致是注册的前提（见下面那条用例），
+// 所以撞的只能是 type 那一列。
 func TestRegistryRejectsDuplicateType(t *testing.T) {
 	r := NewRegistry()
 	mustRegister(t, r, string(ProtocolOpenAI), ProtocolOpenAI)
 	if err := r.Register(&fakeAdapter{
-		typ: string(ProtocolOpenAI), protocol: ProtocolAnthropic,
+		typ: string(ProtocolOpenAI), protocol: ProtocolOpenAI,
 	}); err == nil {
 		t.Error("重复注册应报错")
 	}
@@ -104,11 +104,10 @@ func TestRegistryRejectsDuplicateType(t *testing.T) {
 
 func TestRegistryRejectsInvalidAdapter(t *testing.T) {
 	cases := map[string]Adapter{
-		"nil 适配器":  nil,
-		"未声明类型":    &fakeAdapter{typ: "", protocol: ProtocolOpenAI},
-		"未知协议":     &fakeAdapter{typ: string(ProtocolOpenAI), protocol: "gemini"},
-		"空协议":      &fakeAdapter{typ: string(ProtocolOpenAI), protocol: ""},
-		"类型名不是协议名": &fakeAdapter{typ: "my-vendor", protocol: ProtocolOpenAI},
+		"nil 适配器": nil,
+		"未声明类型":   &fakeAdapter{typ: "", protocol: ProtocolOpenAI},
+		"未知协议":    &fakeAdapter{typ: string(ProtocolOpenAI), protocol: "gemini"},
+		"空协议":     &fakeAdapter{typ: string(ProtocolOpenAI), protocol: ""},
 	}
 	for name, a := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -119,27 +118,49 @@ func TestRegistryRejectsInvalidAdapter(t *testing.T) {
 	}
 }
 
-// 类型名不是一个协议名时要报出来，且说清三件事：它声明的类型、它声明的协议
-// （那才是改的目标）、本包认的取值有哪些。只报一句「不符合」的话，改的人
-// 不知道该往哪个方向改。
-func TestRegistryRejectsNonProtocolType(t *testing.T) {
-	r := NewRegistry()
-	err := r.Register(&fakeAdapter{typ: "my-vendor", protocol: ProtocolAnthropic})
-	if err == nil {
-		t.Fatal("类型名不是协议名时注册应当失败")
+// 类型名与声明的协议必须是同一个字符串，两种走法都要拦下：
+// 一种是类型名自造了一个谁都不认识的名字，另一种是类型名落在协议取值上、
+// 但不是这个适配器声明的那个。
+//
+// 报错要说清三件事：它声明的类型、它声明的协议（那才是改的目标）、本包认的
+// 取值有哪些。只报一句「不一致」的话，改的人不知道该往哪个方向改。
+func TestRegistryRejectsTypeProtocolMismatch(t *testing.T) {
+	cases := map[string]struct {
+		a Adapter
+		// 两处的**引号形式**：协议取值本来就在「认的只有…」那一串里，
+		// 报错若漏了这两个值里的某一个，不带引号的断言照样绿。
+		typText   string
+		protoText string
+	}{
+		"类型名自造了一个名字": {
+			a:         &fakeAdapter{typ: "my-vendor", protocol: ProtocolAnthropic},
+			typText:   `"my-vendor"`,
+			protoText: `"anthropic"`,
+		},
+		"类型名落在协议取值上，但不是它声明的那个": {
+			a:         &fakeAdapter{typ: string(ProtocolSystemOne), protocol: ProtocolOpenAI},
+			typText:   `"systemone"`,
+			protoText: `"openai"`,
+		},
 	}
-	// 声明的协议那一处连着引号一起判：光判取值有没有出现的话，协议取值本来就
-	// 在「认的只有…」那一串里，去掉这个子句用例照样绿。
-	want := append([]string{"my-vendor", `声明的协议是 "anthropic"`}, protocolNames...)
-	for _, w := range want {
-		if !strings.Contains(err.Error(), w) {
-			t.Errorf("报错里没出现 %q：%v", w, err)
-		}
-	}
-	// 失败之后那一条**没有**被注册进去：留在注册表里等于把「启动时报错」
-	// 变成「这台机器上一直有一条端点评据失效的渠道」。
-	if _, lookupErr := r.Lookup("my-vendor"); lookupErr == nil {
-		t.Error("自检失败的适配器不该留在注册表里")
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := NewRegistry()
+			err := r.Register(tc.a)
+			if err == nil {
+				t.Fatal("类型名与声明的协议不是同一个字符串时，注册应当失败")
+			}
+			for _, want := range append([]string{tc.typText, tc.protoText}, protocolNames...) {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("报错里没出现 %q：%v", want, err)
+				}
+			}
+			// 失败之后那一条**没有**被注册进去：留在注册表里等于把「启动时报错」
+			// 变成「这台机器上一直有一条端点评据失效的渠道」。
+			if _, lookupErr := r.Lookup(tc.a.Type()); lookupErr == nil {
+				t.Error("自检失败的适配器不该留在注册表里")
+			}
+		})
 	}
 }
 
