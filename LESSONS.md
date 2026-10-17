@@ -53,3 +53,5 @@
 | [35](lessons/35-hardcoded-maximum.md) | 用例里写死的「当前最大值」，会在它增长时无理由地红 | 断言里要写一个由仓库自身增长的数时 | 活 |
 | [36](lessons/36-test-entry-in-production-file.md) | 给用例留的入口写在生产文件里，deadcode 判它没人调 | 为用例加一个包装、为测试抽一段共用逻辑时 | 活 |
 | [37](lessons/37-migration-down-names-the-latest.md) | 用「退最近一次迁移」验回滚的用例，会被下一条迁移悄悄换掉对象 | 写「回滚最近一次」的用例、往仓库里加迁移时 | 活 |
+| [38](lessons/38-migration-number-allocated-upfront.md) | 迁移编号靠「先发后写」，扫盘面看不见已分配但未落盘的号 | 往仓库里加迁移、同时有多条分支要加迁移时 | 活 |
+| [39](lessons/39-wording-floor-of-shared-strings.md) | 一个字符串被两个入口共用时，措辞下限由最窄的那个入口决定 | 写一句会经多个入口返回给使用者的话（错误、提示）时 | 活 |
