@@ -148,7 +148,11 @@ type Request struct {
 
 	Messages []Message
 
-	// MaxTokens 为 0 表示未指定，交给上游默认值。
+	// MaxTokens 是这次请求允许的最大输出。**到适配器时它总是正数**：
+	// 入口侧的 `pipeline.Request.validate` 在预留之前就拒掉 0
+	// （没有它算不出预留上界，见 `billing.ErrNoUpperBound`），所以「0 表示
+	// 未指定、交给上游默认值」这条路走不到——它是给将来直接调用适配器的
+	// 场景留的语义，不是当前的取值域。
 	MaxTokens int
 	// Temperature 用指针：0 是合法取值，与「未指定」必须区分开。
 	Temperature *float64

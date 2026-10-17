@@ -115,9 +115,10 @@ const doctorPreviewRunes = 160
 // 一句。它也会进账单，虽然只有几个 token。
 const doctorLivePrompt = "hi"
 
-// doctorLiveMaxTokens 是 messages 入口的 max_tokens。
+// doctorLiveMaxTokens 是真打上游时这次请求的 max_tokens，两个入口共用。
 //
-// Anthropic 协议必填；给得小是为了让这次调用的花费有个上界。
+// 网关按它算预留上界（见 pipeline.Request.validate 与 billing.ErrNoUpperBound），
+// 所以两个入口都必须带；给得小是为了让这次调用的花费有个上界。
 const doctorLiveMaxTokens = 16
 
 // 真打上游的两个入口。
@@ -1045,8 +1046,9 @@ func lookupDoctorEndpoint(name string) (doctorEndpointSpec, error) {
 			path: doctorPathChat,
 			payload: func(model string) any {
 				return doctorChatRequest{
-					Model:    model,
-					Messages: []doctorChatMessage{{Role: "user", Content: doctorLivePrompt}},
+					Model:     model,
+					MaxTokens: doctorLiveMaxTokens,
+					Messages:  []doctorChatMessage{{Role: "user", Content: doctorLivePrompt}},
 				}
 			},
 			setAuth: func(h http.Header, key string) { h.Set("Authorization", "Bearer "+key) },
@@ -1072,14 +1074,22 @@ func lookupDoctorEndpoint(name string) (doctorEndpointSpec, error) {
 }
 
 // doctorChatRequest 是 chat 入口的请求体（OpenAI 形状）。
+//
+// max_tokens 必填：OpenAI 协议里它是可选的，但 larkax 的网关按它算预留上界
+// （见 pipeline.Request.validate 与 billing.ErrNoUpperBound），缺了会在请求
+// 出网关之前就 400。
 type doctorChatRequest struct {
-	Model    string              `json:"model"`
-	Messages []doctorChatMessage `json:"messages"`
+	Model     string              `json:"model"`
+	MaxTokens int                 `json:"max_tokens"`
+	Messages  []doctorChatMessage `json:"messages"`
 }
 
 // doctorMessagesRequest 是 messages 入口的请求体（Anthropic 形状）。
 //
-// max_tokens 必填，这是两套协议在请求体上的一个实际差别。
+// max_tokens 与 chat 入口一样必填——**不是**因为 Anthropic 协议要求它，而是
+// 因为 larkax 的网关按它算预留上界（见 pipeline.Request.validate 与
+// billing.ErrNoUpperBound）：算不出上界就不放行，否则结算可能超过预留。
+// 两个入口在这件事上没有差别。
 type doctorMessagesRequest struct {
 	Model     string              `json:"model"`
 	MaxTokens int                 `json:"max_tokens"`
