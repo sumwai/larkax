@@ -179,8 +179,8 @@ func TestPrintSettingsList(t *testing.T) {
 // 期望值写死字面量，不取 Registry 里的文案：那等于让被测对象给自己出题。
 func TestPrintSettingsSetResult(t *testing.T) {
 	var unwired bytes.Buffer
-	printSettingsSetResult(&unwired, "capture.consent_max_window_hours", []byte("24"), "ops", 7)
-	wantUnwired := "已写入 settings.capture.consent_max_window_hours = 24 改自 ops(id=7)\n" +
+	printSettingsSetResult(&unwired, "capture.consent_max_window_hours", []byte("24"), "ops")
+	wantUnwired := "已写入 settings.capture.consent_max_window_hours = 24 改自 ops\n" +
 		"  尚未接线：授权采集那条路还没实现，改了不会有任何效果\n"
 	if got := unwired.String(); got != wantUnwired {
 		t.Errorf("未接线的键，输出 =\n%q\n期望\n%q", got, wantUnwired)
@@ -190,8 +190,8 @@ func TestPrintSettingsSetResult(t *testing.T) {
 	// 是刚接上的那一批：internal/assembly 的装配用例钉着「配错会让装配失败」，
 	// 所以它们是真的被读了。
 	var wired bytes.Buffer
-	printSettingsSetResult(&wired, "plugin.enabled", []byte("true"), "ops", 7)
-	wantWired := "已写入 settings.plugin.enabled = true 改自 ops(id=7)\n"
+	printSettingsSetResult(&wired, "plugin.enabled", []byte("true"), "ops")
+	wantWired := "已写入 settings.plugin.enabled = true 改自 ops\n"
 	if got := wired.String(); got != wantWired {
 		t.Errorf("已接线的键，输出 =\n%q\n期望\n%q", got, wantWired)
 	}

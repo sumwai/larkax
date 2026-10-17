@@ -270,7 +270,7 @@ func runDoctor(args []string) error {
 
 // emitDoctorReport 把一份报告按选定的格式打出去，并把该用的退出码返回。
 //
-// 单独抽出来的理由与 printDoctorLines 相同，不是复用，是**让用例打到同一条
+// 单独抽出来的理由与 printStatusLines 相同，不是复用，是**让用例打到同一条
 // 路径上**：真跑一次 doctor 要连库，而「有失败项时 json 模式仍退出 1」
 // 恰恰是最该被钉住的一条，不能因为造不出一个有失败项的库就不测。
 //
@@ -459,9 +459,16 @@ type doctorProblem struct {
 //
 // -v 的输出与「只关心说了什么」的地方（用例）都走这里：拆开存是为了输出，
 // 不是为了让人去记「哪半句在哪一栏」。
+//
+// headline 自己已经是一句完整的话时（以句号结尾，例如清单空状态那一句）用空格
+// 接，不再补一个冒号：`暂无用户。可使用 …添加。：没有任何一把 API Key …`
+// 里的那个冒号落在句号后面，是两套标点的叠用，读起来像打错了。
 func (p doctorProblem) String() string {
 	if p.detail == "" {
 		return p.headline
+	}
+	if strings.HasSuffix(p.headline, "。") {
+		return p.headline + " " + p.detail
 	}
 	return p.headline + "：" + p.detail
 }
@@ -1287,7 +1294,10 @@ func checkDoctorWallets(in doctorChainInput) doctorCheck {
 
 	if len(in.users) == 0 {
 		c.findings = append(c.findings, doctorProblem{
-			headline: "还没有用户",
+			// 这一条就是「用户清单是空的」那件事，所以它说清单空状态那一句
+			// （style.go 的 emptyListNote）：同一个状态在两处各说各的措辞时，
+			// 读的人分不清它们是同一件事还是两个不同的状态。
+			headline: emptyListNote("用户", "user create"),
 			detail:   "没有任何一把 API Key 能挂上去，请求会回 401",
 		})
 		return c
@@ -1674,68 +1684,27 @@ func runDoctorLive(ctx context.Context, opts doctorOptions) doctorLive {
 
 // ── 输出 ────────────────────────────────────────────────────────────────
 
-// doctorLine 是默认输出里的一行：状态符、标题、一句结论，外加 -v 才打的细节。
-//
-// 先收成切片再打，是因为标题那一栏要按**最宽的那个**补空格，而宽度得等所有行
-// 到齐才知道（与 tableWriter 同一个理由，见 table.go）。
-type doctorLine struct {
-	kind       glyphKind
-	title      string
-	conclusion string
-	detail     []string
-}
-
 // printDoctorReport 打一份体检报告。
 //
-// 默认每项一行：`状态符 标题 结论`。细节（检查范围、读到的数、表、每条问题的
-// 完整原文）只在 verbose 时缩进跟在那一行之后。
-//
-// 收敛掉的不是信息量，是**默认那一屏**：一次全通过的运行原先要刷三十多行，
-// 而其中没有一行需要动作。原来的长句一条都没删，只是挪到了 -v。
+// 每一行由 statusLine / printStatusLines（style.go）渲染，与其余诊断体检类
+// 命令共用同一条路径：一行一个状态符，细节只在 -v 时缩进跟在后面。
 func printDoctorReport(w io.Writer, rep doctorReport, verbose bool) {
 	_, _ = fmt.Fprintln(w, "larkaxctl doctor：逐项检查「配好的链路能不能接一次请求」。")
 	_, _ = fmt.Fprintln(w)
 
-	printDoctorLines(w, doctorLines(rep), verbose)
+	printStatusLines(w, statusLines(rep), verbose)
 
 	passed, failed, skipped := rep.counts()
 	_, _ = fmt.Fprintf(w, "\n  doctor: %d 项异常, %d 项跳过, %d 项通过 (运行 -v 查看细节)\n",
 		failed, skipped, passed)
 }
 
-// printDoctorLines 打默认输出那几行：标题那一栏按最宽的自算宽度对齐，-v 时每行
-// 后面跟它的细节。
-//
-// 单独抽出来的理由不是复用，是**让用例打到同一条路径上**：真打上游那一项的几条
-// 分支（没开 --live、请求发不出去、成功、被谁拒了）各要一份输出，而整份报告要连库
-// 才跑得起来，所以用例只喂那一行。它若各打各的，「改坏了默认输出」在用例里看不见。
-func printDoctorLines(w io.Writer, lines []doctorLine, verbose bool) {
-	p := newPalette(w)
-	width := 0
-	for _, l := range lines {
-		if n := displayWidth(l.title); n > width {
-			width = n
-		}
-	}
-	for _, l := range lines {
-		_, _ = fmt.Fprintf(w, "  %s %s  %s\n",
-			p.glyph(l.kind), p.title(l.kind, padRight(l.title, width)),
-			p.conclusion(l.kind, l.conclusion))
-		if !verbose {
-			continue
-		}
-		for _, line := range l.detail {
-			_, _ = fmt.Fprintf(w, "      %s\n", p.dim(line))
-		}
-	}
-}
-
-// doctorLines 把报告折成默认输出的那几行。
-func doctorLines(rep doctorReport) []doctorLine {
+// statusLines 把报告折成默认输出的那几行。
+func statusLines(rep doctorReport) []statusLine {
 	checks := rep.checks()
-	lines := make([]doctorLine, 0, len(checks)+1)
+	lines := make([]statusLine, 0, len(checks)+1)
 	for _, c := range checks {
-		lines = append(lines, doctorLine{
+		lines = append(lines, statusLine{
 			kind:       c.glyph(),
 			title:      c.title,
 			conclusion: c.conclusion(),
@@ -1746,8 +1715,8 @@ func doctorLines(rep doctorReport) []doctorLine {
 }
 
 // doctorLiveLine 把真打上游那一次折成一行。
-func doctorLiveLine(l doctorLive) doctorLine {
-	line := doctorLine{title: "上游连通", detail: liveDetail(l)}
+func doctorLiveLine(l doctorLive) statusLine {
+	line := statusLine{title: "上游连通", detail: liveDetail(l)}
 	switch {
 	case !l.enabled:
 		line.kind = glyphNone

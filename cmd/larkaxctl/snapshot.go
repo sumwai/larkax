@@ -241,7 +241,17 @@ func allowlistDoc(surfaces []snapshot.Surface, roots []snapshot.Root) map[string
 // 走 snapshot.AllowlistFor 而不是去读包内的表：它返回的是**副本**
 // （见那个函数的注释），所以打印它不会影响脱敏行为——这一点让这条命令
 // 可以放心地在任何地方跑，包括生产库旁边。
+//
+// 规则走固定列宽的表格（与其余清单同一条约定）：一条规则的三个字段原先拼在
+// 一行 `Path=… Kind=… UpstreamValue=…` 里，路径长的时候这一行会折行，而折出来
+// 的行与下一条规则分不开。
+//
+// **Note 单独列在下面，不进表的第四栏**：那是一整句「这一行为什么放行、为什么
+// 脱敏」，进栏会把宽度撑到一屏之外。它按规则原来的顺序排在表下面，键是路径，
+// 于是「哪一段说明属于哪一条」仍然对得上——这份说明正是这条命令存在的理由，
+// 不能因为排版把它与规则拆散。
 func printAllowlists(w io.Writer, surfaces []snapshot.Surface, roots []snapshot.Root) {
+	p := newPalette(w)
 	for i, s := range surfaces {
 		if i > 0 {
 			_, _ = fmt.Fprintln(w)
@@ -254,10 +264,23 @@ func printAllowlists(w io.Writer, surfaces []snapshot.Surface, roots []snapshot.
 			// 条数一起打：0 条与「这一步没跑」在安静的终端里长得一样
 			// （见 LESSONS.md 第 16 条）。
 			_, _ = fmt.Fprintf(w, "表面 %s 方向 %s：%d 条\n", s, root, len(rules))
+			if len(rules) == 0 {
+				continue
+			}
+
+			tw := newTableWriter(w)
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n",
+				p.bold("路径"), p.bold("类型"), p.bold("上游值"))
 			for _, rule := range rules {
-				_, _ = fmt.Fprintf(w, "  Path=%s Kind=%s UpstreamValue=%t\n",
-					rule.Path, rule.Kind, rule.UpstreamValue)
-				_, _ = fmt.Fprintf(w, "    Note=%s\n", rule.Note)
+				// 路径是这张表的主键，加粗。
+				_, _ = fmt.Fprintf(tw, "%s\t%s\t%t\n",
+					p.bold(rule.Path), rule.Kind, rule.UpstreamValue)
+			}
+			_ = tw.Flush()
+
+			_, _ = fmt.Fprintln(w, "  说明：")
+			for _, rule := range rules {
+				_, _ = fmt.Fprintf(w, "    %s：%s\n", p.bold(rule.Path), rule.Note)
 			}
 		}
 	}
@@ -769,10 +792,19 @@ func printSnapshots(w io.Writer, requestID string, rows []snapshotRow) {
 //
 // 被降级成摘要层的骨架与一份完整的骨架在肉眼下长得一样，而前者会让人以为
 // 「上游就是只发了这些」。这一行不是排版，是这个数字唯一的出口。
+//
+// # 为什么这几行不改成表格
+//
+// 这段输出的主体是一段 JSON 骨架（见下面 skeleton 那几行），它进不了任何一张表。
+// 而上面那几栏本来就已经是「一栏一行」，不存在这一节要治的那个形态——超长单行
+// 键值拼接。所以这里按清单那一条约定只做**视觉重心**：方向是这条快照的身份，
+// 加粗；时刻置灰。
 func printSnapshot(w io.Writer, seq int, row snapshotRow) {
+	p := newPalette(w)
 	_, _ = fmt.Fprintf(w, "\n第 %d 条\n", seq)
-	_, _ = fmt.Fprintf(w, "  direction=%s\n", row.Direction)
-	_, _ = fmt.Fprintf(w, "  created_at=%s\n", row.CreatedAt.UTC().Format(time.RFC3339Nano))
+	_, _ = fmt.Fprintf(w, "  direction=%s\n", p.bold(row.Direction))
+	_, _ = fmt.Fprintf(w, "  created_at=%s\n",
+		p.dim(row.CreatedAt.UTC().Format(time.RFC3339Nano)))
 	_, _ = fmt.Fprintf(w, "  skeleton_version=%d\n", row.SkeletonVersion)
 	_, _ = fmt.Fprintf(w, "  capture_mode=%s\n", row.CaptureMode)
 	_, _ = fmt.Fprintf(w, "  upstream_status=%s\n", upstreamStatusCell(row.Direction, row.UpstreamStatus))

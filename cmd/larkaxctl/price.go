@@ -701,7 +701,7 @@ func printCreatedRule(stdout, stderr io.Writer, id int64, req pricing.CreateRequ
 // 声明了哪几项单价由最后一栏给出。
 func printRuleList(w io.Writer, rules []pricing.RuleInfo) {
 	if len(rules) == 0 {
-		_, _ = fmt.Fprintln(w, "暂无计价规则。可使用 larkaxctl price create 添加。")
+		_, _ = fmt.Fprintln(w, emptyListNote("计价规则", "price create"))
 		return
 	}
 	printRuleTable(w, rules, nil)

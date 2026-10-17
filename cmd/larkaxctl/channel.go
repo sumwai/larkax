@@ -653,7 +653,7 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo, withDeleted boo
 		// 明确打一句，而不是什么都不输出：「暂无渠道」与「命令因为某个
 		// 原因没跑起来」在安静的终端里长得一样（见 LESSONS.md 第 16 条）。
 		// 带上添加的命令：空清单是「还没配」，读者下一步的动作就写在那一句里。
-		_, _ = fmt.Fprintln(w, "暂无渠道。可使用 larkaxctl channel create 添加。")
+		_, _ = fmt.Fprintln(w, emptyListNote("渠道", "channel create"))
 		return
 	}
 

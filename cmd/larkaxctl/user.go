@@ -125,7 +125,10 @@ func runUserCreate(args []string) error {
 //
 // 是造完用户之后最自然的下一步。那一行里多一个前缀或一句提示语，这条链就断了，
 // 而断了的表现是 apikey create 收到一个不是用户标识的字符串，报「找不到用户」。
+//
+// stderr 那一行只说名字：ID 已经是被接走的那个值，再在名字后面挂一个同一件事
+// 是把身份说两遍（见 docs/cli-output.md 的「实体只点一次身份」）。
 func printCreatedUser(stdout, stderr io.Writer, u auth.User) {
-	_, _ = fmt.Fprintf(stderr, "已创建用户 %s(id=%d)\n", u.Username, u.ID)
+	_, _ = fmt.Fprintf(stderr, "已创建用户 %s\n", u.Username)
 	_, _ = fmt.Fprintln(stdout, u.ID)
 }

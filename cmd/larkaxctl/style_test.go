@@ -11,10 +11,13 @@ import (
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
+	"github.com/sumwai/larkax/internal/ledger"
+	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/money"
 	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
 	"github.com/sumwai/larkax/internal/pricing"
 	"github.com/sumwai/larkax/internal/settings"
+	"github.com/sumwai/larkax/internal/snapshot"
 )
 
 // 上色与不上色是同一份代码的两条路，而**默认那条是不上色**：命令的输出多数
@@ -199,6 +202,10 @@ func TestDoctorCarriesTheOldSentencesIntoVerbose(t *testing.T) {
 // 而它们是同一件事。文案里带上下一步的命令：空清单是「还没配」，读者接下来
 // 要做什么就写在那一句里。
 //
+// doctor 的钱包体检是第七处调用点（一个用户都没有），它的期望值在 doctor_test.go
+// 里——它打的是整份报告，不是单独一句清单。第七处的存在由 renderpaths_test.go
+// 按调用点计数钉住。
+//
 // settings list 不在这张表里：settings 表是空的与「还没有配过」不是一回事
 // （键来自 Registry，加不了），那句文案留着它自己的说法。
 func TestEmptyListMessages(t *testing.T) {
@@ -219,6 +226,12 @@ func TestEmptyListMessages(t *testing.T) {
 			func(w io.Writer) { printKeyList(w, nil) }},
 		{"别名", "暂无别名。可使用 larkaxctl alias create 添加。",
 			func(w io.Writer) { printAliasList(w, nil) }},
+	}
+
+	// 与另一张样式表同一个做法：条数写死。少了一条就等于那条没人看，而
+	// 「用例还在跑、只是不覆盖那条命令」在输出里和通过长得一样。
+	if len(cases) != 6 {
+		t.Fatalf("这张表里 %d 条清单命令，期望 6 条", len(cases))
 	}
 
 	for _, tc := range cases {
@@ -264,7 +277,7 @@ func cellColumn(t *testing.T, line, cell string) int {
 
 // ── 每张清单表都上色，且上色不改排版 ────────────────────────────────────
 
-// TestListTablesStyleWithoutChangingLayout 把七条渲染路径逐个过一遍：
+// TestListTablesStyleWithoutChangingLayout 把每条清单渲染路径逐个过一遍：
 // **上色那一档必须真的上了色，而剥掉样式码之后与不上色那一档逐字相同**。
 //
 // 这一条同时钉住 issue 里的两条判据：
@@ -277,6 +290,11 @@ func cellColumn(t *testing.T, line, cell string) int {
 //
 // 反过来也要防：如果某个 print 根本没接 palette，只比「两条路相同」是绿的，
 // 所以上色那一档必须同时断言出现了样式码。
+//
+// 表里是**调用点**，与 renderpaths_test.go 的 tableRenderPaths 登记表一一对应
+// （那张表按 AST 扫出来的调用点计数，少了谁都会红）：这里给每条路径喂一份样本，
+// 那张表管「有没有漏掉一条路径」。两处都要，是因为它们判的不是同一件事——
+// 一条路径可能被登记了却没人喂样本，也可能有人喂了样本却没登记。
 func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 	at := time.Date(2026, 10, 17, 4, 25, 15, 0, time.UTC)
 	channel := channels.ChannelInfo{
@@ -330,10 +348,32 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				Editable: true, UpdatedAt: at,
 			}})
 		}},
+		// 下面三条是这一轮补上的清单路径：原先只有渠道、模型、插件、计价规则、
+		// 别名、配置这几条，余额汇总与允许表是「本来就在打清单、只是没走表格」，
+		// 快照详情是「本来就不是列联表、只该有视觉重心」。
+		{"科目余额表", func(w io.Writer) {
+			printLedgerBalances(w, ledger.Asset("CNY"), &store.AccountBalancesReport{
+				ByAccount: map[ledger.Asset]map[ledger.Account]money.Amount{
+					"CNY": {
+						ledger.PlatformRevenueAccount(): money.MustParse("12.34"),
+						ledger.UserAccount(7):           money.MustParse("-1.00"),
+					},
+				},
+			})
+		}},
+		{"快照允许表", func(w io.Writer) {
+			printAllowlists(w, snapshot.Surfaces(), snapshot.Roots())
+		}},
+		{"快照详情", func(w io.Writer) {
+			printSnapshot(w, 1, snapshotRow{
+				Direction: "response", CreatedAt: at, SkeletonVersion: 2,
+				CaptureMode: "full", Skeleton: map[string]any{"model": "model-x"},
+			})
+		}},
 	}
 
-	if len(cases) != 9 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 9 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 12 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 12 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {

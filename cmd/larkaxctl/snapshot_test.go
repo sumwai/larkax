@@ -157,18 +157,18 @@ func TestPrintAllowlistsCarriesEveryNote(t *testing.T) {
 				}
 				// 按整行比对而不是子串：一条 Note 是另一条的前缀时，
 				// 子串匹配分辨不出「后一条被截断了」。
-				if !strings.Contains(out, "    Note="+rule.Note+"\n") {
+				if !strings.Contains(out, "    "+rule.Path+"："+rule.Note+"\n") {
 					t.Errorf("表面 %s 方向 %s 的 %s 的 Note 没有完整打出来", s, root, rule.Path)
 				}
 			}
 		}
 	}
 
-	// 字段名一起打出来，输出才是自解释的——只有值没有名字的清单，
+	// 列名一起打出来，输出才是自解释的——只有值没有名字的清单，
 	// 读的人得先回去看代码才知道哪一列是什么。
-	for _, want := range []string{"Path=", "Kind=", "UpstreamValue="} {
+	for _, want := range []string{"路径", "类型", "上游值"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("输出里没有字段名 %q", want)
+			t.Errorf("输出里没有列名 %q", want)
 		}
 	}
 }

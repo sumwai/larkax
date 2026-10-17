@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -128,7 +129,7 @@ func runPartitionEnsure(args []string) error {
 
 	// 先打结果再处理错误：跑了一半的结果比一句「失败了」有用得多——
 	// 它至少说明建成了哪几个、卡在哪一个。与 reconcile 的处置一致。
-	printPartitionSpan(from, months)
+	printPartitionSpan(humanStdout(), from, months)
 	printCreatedPartitions(created)
 	if ensureErr != nil {
 		return ensureErr
@@ -188,11 +189,77 @@ func runPartitionCheck(args []string) error {
 			from, months, missing, usageDefaultRows, snapshotDefaultRows, problems), cause)
 	}
 
-	printPartitionSpan(from, months)
-	printMissingPartitions(missing)
-	_, _ = fmt.Fprintf(humanStdout(), "兜底分区 %s：%d 行\n", store.UsageEventDefaultPartition, usageDefaultRows)
-	_, _ = fmt.Fprintf(humanStdout(), "兜底分区 %s：%d 行\n", snapshotwire.DefaultPartition, snapshotDefaultRows)
+	printPartitionCheck(humanStdout(), from, months, missing, usageDefaultRows, snapshotDefaultRows)
 	return cause
+}
+
+// printPartitionCheck 打一次体检的默认输出：一行一个检查项。
+//
+// 三项各自一行状态符（见 style.go 的 statusLine），判据是 partitionProblems
+// 与 partitionCheckErr 用的同一套——两处各判一遍时会出现「屏幕上三项全 ✓、
+// 退出码却是 1」这种自相矛盾的输出，而脚本正是按退出码分派的。
+//
+// 区间那一行照旧先打：缺分区时最要紧的上下文就是「这一段区间本来该有几个
+// 分区」，而它只存在于命令行参数里（见 printPartitionSpan）。
+func printPartitionCheck(w io.Writer, from time.Time, months int, missing []string,
+	usageDefaultRows, snapshotDefaultRows int64,
+) {
+	printPartitionSpan(w, from, months)
+	_, _ = fmt.Fprintln(w)
+
+	lines := partitionCheckLines(missing, usageDefaultRows, snapshotDefaultRows)
+	printStatusLines(w, lines, verboseOutput)
+
+	_, failed, _ := countStatusLines(lines)
+	_, _ = fmt.Fprintf(w, "\n  partition check: %d 项异常, %d 项通过 (运行 -v 查看细节)\n",
+		failed, len(lines)-failed)
+}
+
+// partitionCheckLines 把三项判据折成状态行。
+//
+// 三项各占一行、各有自己的状态符（而不是三句平铺的说明）：调度器与运维扫的
+// 就是「哪一项 ✗ 了」，三项合成一段话时那句话得读到最后一个字才知道有没有问题。
+func partitionCheckLines(missing []string, usageDefaultRows, snapshotDefaultRows int64) []statusLine {
+	lines := make([]statusLine, 0, 3)
+
+	partitions := statusLine{kind: glyphPass, title: "月分区"}
+	if len(missing) == 0 {
+		partitions.conclusion = "usage_events 应当存在的月分区都在"
+	} else {
+		partitions.kind = glyphFail
+		// 默认只点名第一个：一次坏掉的运行里要看的先是「坏了哪几处」，
+		// 整份清单折在 -v 后面（与 doctor 同一取舍）。
+		partitions.conclusion = fmt.Sprintf("usage_events 缺 %d 个月分区：%s",
+			len(missing), missing[0])
+		if extra := len(missing) - 1; extra > 0 {
+			partitions.conclusion += fmt.Sprintf("（另有 %d 个，用 -v 看）", extra)
+		}
+		partitions.detail = []string{"缺的月分区：" + strings.Join(missing, "、")}
+	}
+	lines = append(lines, partitions)
+
+	for _, d := range []struct {
+		table string
+		rows  int64
+	}{
+		{store.UsageEventDefaultPartition, usageDefaultRows},
+		{snapshotwire.DefaultPartition, snapshotDefaultRows},
+	} {
+		line := statusLine{kind: glyphPass, title: "兜底分区"}
+		if d.rows == 0 {
+			// 行数照打：0 行是这一项**查过**的证据，不打的话它与「没查」
+			// 在输出上分不开（见 LESSONS.md 第 16 条）。
+			line.conclusion = fmt.Sprintf("%s 0 行", d.table)
+		} else {
+			line.kind = glyphFail
+			line.conclusion = fmt.Sprintf("%s %d 行（越界写入落进了这里）", d.table, d.rows)
+			line.detail = []string{
+				"这一张表里的行挡着它对应的那个月的月分区建不出来，要人工先把行搬走。",
+			}
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 // partitionCheckErr 把体检的问题清单折成退出码。
@@ -269,10 +336,10 @@ func partitionProblems(missing []string, usageDefaultRows, snapshotDefaultRows i
 //
 // 它把「--months 是多少、从哪个月起」摆在输出里：缺分区时最要紧的上下文
 // 就是「这一段区间本来该有几个分区」，而它只存在于命令行参数里。
-func printPartitionSpan(from time.Time, months int) {
+func printPartitionSpan(w io.Writer, from time.Time, months int) {
 	start, _ := store.UsageEventMonthBounds(from)
 	end, _ := store.UsageEventMonthBounds(start.AddDate(0, months-1, 0))
-	_, _ = fmt.Fprintf(humanStdout(), "起点 %s，共 %d 个月（%s ~ %s）\n",
+	_, _ = fmt.Fprintf(w, "起点 %s，共 %d 个月（%s ~ %s）\n",
 		start.Format("2006-01"), months, start.Format("2006-01"), end.Format("2006-01"))
 }
 
@@ -286,16 +353,6 @@ func printCreatedPartitions(created []string) {
 	}
 	_, _ = fmt.Fprintf(humanStdout(), "已建立 %d 个分区：\n", len(created))
 	_, _ = fmt.Fprintln(humanStdout(), "  "+strings.Join(created, "\n  "))
-}
-
-// printMissingPartitions 打印缺失的月分区名。
-func printMissingPartitions(missing []string) {
-	if len(missing) == 0 {
-		_, _ = fmt.Fprintln(humanStdout(), "usage_events 应当存在的月分区都在。")
-		return
-	}
-	_, _ = fmt.Fprintf(humanStdout(), "usage_events 缺失 %d 个月分区：\n", len(missing))
-	_, _ = fmt.Fprintln(humanStdout(), "  "+strings.Join(missing, "\n  "))
 }
 
 // countRows 统计一张表的行数。
