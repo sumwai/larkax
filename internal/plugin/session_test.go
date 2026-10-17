@@ -436,13 +436,23 @@ func TestOnUsageReasoningScopeAloneIsAReport(t *testing.T) {
 
 // 口径跟着数量一起合并：插件没声明时保留内核的，声明了就以插件为准。
 func TestMergeUsageCarriesReasoningScope(t *testing.T) {
+	// 上界取得比上报值大：这条测的是口径的合并，越界那条有自己的用例。
+	bound := UsageBound{MaxOutputTokens: 200}
 	// 插件只报数量时，内核那份口径不能丢——它是重建回协议层用量时的依据。
 	core := UsageFacts{CompletionTokens: ptrInt64(100), CompletionIncludesReasoning: ptrBool(true)}
-	if got := MergeUsage(core, &UsageFacts{CompletionTokens: ptrInt64(120)}); got.CompletionIncludesReasoning == nil || !*got.CompletionIncludesReasoning {
+	got, err := MergeUsage(core, &UsageFacts{CompletionTokens: ptrInt64(120)}, bound)
+	if err != nil {
+		t.Fatalf("合并失败: %v", err)
+	}
+	if got.CompletionIncludesReasoning == nil || !*got.CompletionIncludesReasoning {
 		t.Errorf("插件没声明口径，该保留内核的 true，实际 %s", showPtr(got.CompletionIncludesReasoning))
 	}
 	// 插件声明了就覆盖内核的。
-	if got := MergeUsage(core, &UsageFacts{CompletionIncludesReasoning: ptrBool(false)}); got.CompletionIncludesReasoning == nil || *got.CompletionIncludesReasoning {
+	got, err = MergeUsage(core, &UsageFacts{CompletionIncludesReasoning: ptrBool(false)}, bound)
+	if err != nil {
+		t.Fatalf("合并失败: %v", err)
+	}
+	if got.CompletionIncludesReasoning == nil || *got.CompletionIncludesReasoning {
 		t.Errorf("插件声明为 false，该覆盖内核的 true，实际 %s", showPtr(got.CompletionIncludesReasoning))
 	}
 	// 不改动入参。
@@ -463,7 +473,11 @@ func TestMergeUsageKeepsCoreForUnreportedFields(t *testing.T) {
 		CacheReadTokens:  n(30),
 		Units:            map[string]int64{"searches": 1},
 	}
-	got := MergeUsage(core, &UsageFacts{CompletionTokens: n(250), Units: map[string]int64{"searches": 2}})
+	bound := UsageBound{MaxOutputTokens: 300}
+	got, err := MergeUsage(core, &UsageFacts{CompletionTokens: n(250), Units: map[string]int64{"searches": 2}}, bound)
+	if err != nil {
+		t.Fatalf("合并失败: %v", err)
+	}
 
 	if *got.PromptTokens != 100 {
 		t.Errorf("插件没报 prompt，该保留内核的 100，实际 %d", *got.PromptTokens)
@@ -483,8 +497,74 @@ func TestMergeUsageKeepsCoreForUnreportedFields(t *testing.T) {
 	}
 
 	// nil 上报等于什么都没发生。
-	if same := MergeUsage(core, nil); *same.CompletionTokens != 200 {
+	same, err := MergeUsage(core, nil, bound)
+	if err != nil {
+		t.Fatalf("nil 上报不该报错: %v", err)
+	}
+	if *same.CompletionTokens != 200 {
 		t.Errorf("nil 上报该原样返回，实际 %d", *same.CompletionTokens)
+	}
+}
+
+// 上报越过上界时**整份丢掉**，并按内核的值计费。
+//
+// 上界必须来自插件改不动的地方（见 UsageBound）：插件既能把上界抬高、
+// 又能照着抬高后的上界报用量时，报多少就收多少。这条钉住「拒收」这一半，
+// 「上界从哪来」那一半钉在 max_tokens 只许调小那条用例上。
+func TestMergeUsageRejectsReportAboveBound(t *testing.T) {
+	n := func(v int64) *int64 { return &v }
+	core := UsageFacts{PromptTokens: n(10), CompletionTokens: n(20)}
+	bound := UsageBound{MaxOutputTokens: 500}
+
+	cases := []struct {
+		name     string
+		reported *UsageFacts
+		wantErr  bool
+	}{
+		{"界内放行", &UsageFacts{PromptTokens: n(11), CompletionTokens: n(499)}, false},
+		{"恰好等于上界算界内", &UsageFacts{CompletionTokens: n(500)}, false},
+		{"completion 超一位就拒", &UsageFacts{CompletionTokens: n(501)}, true},
+		{"推理量同样受上界约束", &UsageFacts{ReasoningTokens: n(501)}, true},
+		{"整份丢掉：同一份里报对了的项也不采用", &UsageFacts{PromptTokens: n(11), CompletionTokens: n(501)}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := MergeUsage(core, tc.reported, bound)
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("界内不该报错: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrUsageAboveBound) {
+				t.Fatalf("本该按越界拒掉，实际 err=%v", err)
+			}
+			// 报错要能指到是哪个字段、值是多少、上界是多少。
+			msg := err.Error()
+			for _, want := range []string{"501", "500"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("报错该带上 %s，实际 %q", want, msg)
+				}
+			}
+			// 返回的是内核那份原样：调用方即使忽略了错误，也拿不到被夸大的用量。
+			if *got.PromptTokens != 10 || *got.CompletionTokens != 20 {
+				t.Errorf("越界时该原样返回内核那份，实际 %+v", got)
+			}
+		})
+	}
+}
+
+// 上界非正时任何正数上报都算越界。
+//
+// 方向必须是拒收而不是「不设上界」：后者会让调用方漏传一个参数
+// 变成关掉整道检查，而那种关法在账单上看不出来。
+func TestMergeUsageWithoutBoundRejectsAnyCount(t *testing.T) {
+	got, err := MergeUsage(UsageFacts{}, &UsageFacts{CompletionTokens: ptrInt64(1)}, UsageBound{})
+	if !errors.Is(err, ErrUsageAboveBound) {
+		t.Fatalf("没有上界时该拒收，实际 err=%v", err)
+	}
+	if got.CompletionTokens != nil {
+		t.Errorf("拒收时不该采用上报值，实际 %+v", got)
 	}
 }
 

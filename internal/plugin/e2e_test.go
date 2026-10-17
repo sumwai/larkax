@@ -152,9 +152,11 @@ func TestEndToEndFiveHooks(t *testing.T) {
 	}
 
 	// ── onRequest → 补丁落到 channel.Request 上 ──
+	// 原值取得比插件要给的 128 大：max_tokens 只许调小，而这条测试要测的是
+	// 「补丁落到请求上」，不该顺带撞上那条规则（它有自己的用例）。
 	req := &channel.Request{
 		Model:     "acme-vision-2024",
-		MaxTokens: 32,
+		MaxTokens: 256,
 		Messages:  []channel.Message{{Role: "user", Content: []channel.ContentBlock{{Type: "text", Text: "你好"}}}},
 	}
 	rcRes := s.OnRequest(t.Context(), RequestContextFrom("req-1", req, "acme/vision", "openai"))
@@ -245,7 +247,11 @@ func TestEndToEndFiveHooks(t *testing.T) {
 		t.Fatalf("用量没被上报，实际 %+v", uuRes.Patch)
 	}
 	core := *UsageFactsFrom(channel.Usage{PromptTokens: 10, CompletionTokens: 20})
-	merged := MergeUsage(core, uuRes.Patch)
+	// 上界取客户端请求里的 max_tokens（补丁之前的那个），见 UsageBound。
+	merged, mergeErr := MergeUsage(core, uuRes.Patch, UsageBound{MaxOutputTokens: 256})
+	if mergeErr != nil {
+		t.Fatalf("合并用量失败: %v", mergeErr)
+	}
 	if *merged.PromptTokens != 10 {
 		t.Errorf("插件没报的项该保留内核的值，实际 %d", *merged.PromptTokens)
 	}

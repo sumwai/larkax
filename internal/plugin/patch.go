@@ -15,8 +15,66 @@ import (
 // 同一件事（max_tokens 非正）。三处的措辞与哨兵错误**并不相同**——那边是
 // 「当前 %d」+ billing.ErrNoUpperBound，这边是「收到 %d」+ ErrPatchScope——
 // 排查时别把同一件事当成两个不同的问题。
+//
+// 这一层还有**另一件**关于 max_tokens 的事：只许调小（见 errMaxTokensRaised）。
+// 两者的哨兵错误相同（都是 ErrPatchScope），所以判错时不能只看 errors.Is：
+// 一个说这个值本身不成立，另一个说这个值本身没问题、相对原值不行。
 func errNonPositiveMaxTokens(v int64) error {
 	return fmt.Errorf("%w: max_tokens 必须为正，收到 %d", ErrPatchScope, v)
+}
+
+// errMaxTokensRaised 是插件试图抬高输出上界时的错误。
+//
+// 为什么只许调小：预留的上界（billing.Reserve）主项是
+// max_tokens × max(输出单价, 推理单价)，而结算会把实际金额钳到预留。
+// 插件既能把上界抬高、又能照着抬高后的上界报用量时，两者一起放大就等于
+// 没有上界——报多少收多少。压短输出是策略插件的正当用法，抬高不是。
+//
+// hasOriginal 为 false 表示原请求根本没给 max_tokens。那算**新增**一个上界，
+// 与调大是同一件事：上界从无到有仍然由插件决定，而「上界从哪来」正是
+// 这条规则要管的东西（见 UsageBound）。能读到原值时两个数都打进文本里，
+// 因为「只许调小」这句话本身不告诉你原来是多少。
+func errMaxTokensRaised(original int64, hasOriginal bool, patched int64) error {
+	if !hasOriginal {
+		return fmt.Errorf("%w: max_tokens 只许调小，但原请求没有给 max_tokens（补丁给了 %d）",
+			ErrPatchScope, patched)
+	}
+	return fmt.Errorf("%w: max_tokens 只许调小，原值 %d，补丁给了 %d",
+		ErrPatchScope, original, patched)
+}
+
+// originalMaxTokens 从请求体里读出客户端的 max_tokens。
+//
+// 三种结局，调用方各有一种处置：
+//
+//   - has 为 true：读出一个数，拿它比；
+//   - has 为 false：请求体里没有这一项，也就是原请求没给上界；
+//   - 错误：有这一项但读不出来。**按「比不了」拒收**——这一层的职责是拦住
+//     抬高上界的补丁，而一个读不出来的原值证明不了补丁没有抬高它。
+//     放过去的话，把原值写成字符串就成了绕过这条规则的写法。
+//
+// patched 只用在报错文本里：读不出来时要把补丁给的值一起说出来，
+// 否则那条报错看不出插件想改成多少。
+//
+// 认 int（RequestContextFrom 放进去的就是它）与 int64，另外认 float64 的
+// 整数值：请求体一旦经 encoding/json 走过一圈，数字就是这个类型。
+func originalMaxTokens(body map[string]any, patched int64) (value int64, has bool, err error) {
+	raw, ok := body["max_tokens"]
+	if !ok || raw == nil {
+		return 0, false, nil
+	}
+	switch v := raw.(type) {
+	case int:
+		return int64(v), true, nil
+	case int64:
+		return v, true, nil
+	case float64:
+		if v == float64(int64(v)) {
+			return int64(v), true, nil
+		}
+	}
+	return 0, false, fmt.Errorf("%w: 请求体里的 max_tokens 读不出来（%T: %v），无法判断补丁给的 %d 有没有把它调大",
+		ErrPatchScope, raw, raw, patched)
 }
 
 // patchableBodyFields 是插件能改的请求体字段。
@@ -30,6 +88,11 @@ func errNonPositiveMaxTokens(v int64) error {
 //
 // 这张表**不是**按协议分的：`stop` 与 `stop_sequences` 是两套协议里同一个
 // 意思的不同写法，而插件只看得到一种。当前采用契约里的字段名（`stop`）。
+//
+// `max_tokens` 留在表里，但**只许调小**（见 ApplyRequestBodyPatch 与
+// applyBodyToChannel）：把输出压短是策略插件的正当用法，而调大会把计费预留
+// 的上界一起抬高。它在这一层有校验，只是方向只有一个——别把它当成漏了校验
+// 而顺手放开，那正好是「上界与上报值由同一方控制」那条路径。
 var patchableBodyFields = []string{
 	"messages",
 	"system",
@@ -111,6 +174,21 @@ func ApplyRequestBodyPatch(body map[string]any, patch *RequestBodyPatch) (map[st
 		// 给一个 0 或负数会让预留算不出来。
 		if *patch.MaxTokens <= 0 {
 			return nil, nil, errNonPositiveMaxTokens(*patch.MaxTokens)
+		}
+		// 而且只许调小。原值从**入参 body**里读，那是客户端的请求；
+		// 读不出来或没有这一项都按「调大」处置，理由见 errMaxTokensRaised。
+		//
+		// 这一个比较已经把「原值缺失」也覆盖了：那时 original 是 0，而上面
+		// 刚保证补丁值 ≥ 1，所以 `> original` 必然成立。**不要再写成
+		// `!hasOriginal || ...`**——它读起来像一道独立的门，而删掉它不会
+		// 放开任何东西（实测过），那种「看起来承重其实不承重」的条件会让
+		// 下一个人对着它猜。
+		original, hasOriginal, err := originalMaxTokens(body, *patch.MaxTokens)
+		if err != nil {
+			return nil, nil, err
+		}
+		if *patch.MaxTokens > original {
+			return nil, nil, errMaxTokensRaised(original, hasOriginal, *patch.MaxTokens)
 		}
 		set("max_tokens", *patch.MaxTokens)
 	}

@@ -3,6 +3,8 @@ package plugin
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -57,7 +59,10 @@ func TestBodyPatchAcceptsEveryWhitelistedField(t *testing.T) {
 	if err != nil {
 		t.Fatalf("这些字段都该放行，出错: %v", err)
 	}
-	body := map[string]any{"model": "canonical-name", "stream": true}
+	// body 里带着客户端的 max_tokens：补丁里的 128 是把它**调小**。
+	// 原值取得更大是有意的——「只许调小」那条规则有自己的用例，
+	// 这条测的是白名单上的字段一个都没漏。
+	body := map[string]any{"model": "canonical-name", "stream": true, "max_tokens": 256}
 	out, changed, err := ApplyRequestBodyPatch(body, patch)
 	if err != nil {
 		t.Fatalf("应用补丁出错: %v", err)
@@ -120,6 +125,82 @@ func TestBodyPatchRejectsNonPositiveMaxTokens(t *testing.T) {
 		if !errors.Is(err, ErrPatchScope) {
 			t.Errorf("%s：应当被拒，实际 err=%v", raw, err)
 		}
+	}
+}
+
+// max_tokens 只许调小。
+//
+// 上界与上报值由同一方控制时，两者一起放大就等于没有上界：插件把
+// max_tokens 调大，预留跟着涨，于是它报多少用量就收多少钱。压短输出是策略
+// 插件的正当用法，所以它留在白名单里；抬高不是，所以在合并这一步拒掉。
+//
+// 三个数（原值、补丁值、上界）里只要有一个错了，这条用例就会挂：
+// 把比较反过来、把「原值缺失」当成放行、把两个数从报错文本里去掉，
+// 都会命中。
+func TestBodyPatchMaxTokensOnlyShrinks(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    map[string]any
+		patched int64
+		// wantText 非空表示该被拒，且报错里要出现这句话；原值读不出来时
+		// 说的不是「只许调小」而是「读不出来」——那是另一种拒法。
+		wantText string
+		// wantOrig 非空表示报错里还要出现原值这个数。
+		wantOrig string
+	}{
+		{"调小放行", map[string]any{"max_tokens": 100}, 40, "", ""},
+		{"持平放行", map[string]any{"max_tokens": 100}, 100, "", ""},
+		{"调大被拒", map[string]any{"max_tokens": 100}, 101, "只许调小", "100"},
+		{"客户端没给 max_tokens 时补丁给一个也算调大", map[string]any{"model": "m"}, 10, "只许调小", ""},
+		{"原值是 null 时同上", map[string]any{"max_tokens": nil}, 10, "只许调小", ""},
+		{"原值读不出来时拒收", map[string]any{"max_tokens": "100"}, 10, "读不出来", ""},
+		{"原值是小数时拒收", map[string]any{"max_tokens": 100.5}, 10, "读不出来", ""},
+		{"原值是 int64 时照常比", map[string]any{"max_tokens": int64(100)}, 101, "只许调小", "100"},
+		{"原值是 float64 的整数值时照常比", map[string]any{"max_tokens": float64(100)}, 101, "只许调小", "100"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			patch, err := unmarshalPatch(fmt.Sprintf(`{"max_tokens":%d}`, tc.patched))
+			if err != nil {
+				t.Fatalf("解析出错: %v", err)
+			}
+			out, changed, err := ApplyRequestBodyPatch(tc.body, patch)
+			if tc.wantText != "" {
+				if !errors.Is(err, ErrPatchScope) {
+					t.Fatalf("本该被拒，实际 err=%v", err)
+				}
+				msg := err.Error()
+				if !strings.Contains(msg, tc.wantText) {
+					t.Errorf("报错里该出现 %q，实际 %q", tc.wantText, msg)
+				}
+				// 补丁给的值与（能读出来时的）原值都要打出来：
+				// 只说「只许调小」看不出它想改成多少、原来是多少。
+				if !strings.Contains(msg, strconv.FormatInt(tc.patched, 10)) {
+					t.Errorf("报错该带上补丁给的值 %d，实际 %q", tc.patched, msg)
+				}
+				if tc.wantOrig != "" && !strings.Contains(msg, tc.wantOrig) {
+					t.Errorf("报错该带上原值 %s，实际 %q", tc.wantOrig, msg)
+				}
+				// 拒掉时什么都不改：不改请求体，也不给改动清单。
+				if out != nil || changed != nil {
+					t.Errorf("拒掉时不该有产物，实际 out=%v changed=%v", out, changed)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("出错: %v", err)
+			}
+			if got := out["max_tokens"]; got != tc.patched {
+				t.Errorf("max_tokens = %v，期望 %d", got, tc.patched)
+			}
+			if len(changed) != 1 || changed[0] != "max_tokens" {
+				t.Errorf("改动清单 = %v，期望 [max_tokens]", changed)
+			}
+			// 原值那几项不能被顺手改掉。
+			if v, ok := tc.body["model"]; ok && out["model"] != v {
+				t.Errorf("model 被改动了: %v", out)
+			}
+		})
 	}
 }
 

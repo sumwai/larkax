@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
@@ -399,7 +400,8 @@ type UsageFacts struct {
 	CompletionIncludesReasoning *bool `json:"completionIncludesReasoning,omitempty"`
 }
 
-// UnmarshalJSON 严格解析插件上报的用量：契约之外的字段报错，理由见 decodePatch。
+// UnmarshalJSON 严格解析插件上报的用量：契约之外的字段报错，理由见 decodePatch；
+// 字段名对而值为负也报错，理由见 checkNonNegative。
 //
 // 这里报错的对象多半不是「越权」而是「写错」——用量里没有金额字段，
 // 所以 `{ amount: 5 }` 与 `{ promptToken: 5 }` 都是「契约里没有这个名字」。
@@ -408,13 +410,93 @@ type UsageFacts struct {
 //
 // Units 与 ResponsePatch.Metadata 同理：它的**键**是自由形状的，
 // 严格解析只管 `units` 这个名字本身。
+//
+// 键自由，**值不自由**：负数会被拒掉，理由见 checkNonNegative。那不是
+// 「键不能自定义」的例外——插件照样可以用任何键名，受约束的只是数量。
 func (f *UsageFacts) UnmarshalJSON(data []byte) error {
 	type plain UsageFacts
 	var out plain
 	if err := decodePatch(data, &out); err != nil {
 		return err
 	}
+	// 先判错再赋值，与同文件其它 UnmarshalJSON 一致：报错时接收者里不该
+	// 留着那份被判为无效的数据。今天的调用方（Session.OnUsage）在失败时
+	// 整份丢掉，所以还没有实际后果——但「fail closed」要落到接收者上，
+	// 不能靠调用方每次都记得丢。
+	if err := UsageFacts(out).checkNonNegative(); err != nil {
+		return err
+	}
 	*f = UsageFacts(out)
+	return nil
+}
+
+// errNegativeUsage 是插件上报的用量为负时的错误。
+//
+// 与 errNonPositiveMaxTokens 同族：都是「字段名对而值不能用」，共用 ErrPatchScope。
+// 文本里带字段名与值——token 字段有五个，Units 的键又由插件自己定，
+// 只说「用量为负」查不出是哪一个。Units 的键写成 `units["searches"]`
+// 那种形状，指得到 JSON 里的位置。
+func errNegativeUsage(field string, v int64) error {
+	return fmt.Errorf("%w: %s 不能为负，收到 %d", ErrPatchScope, field, v)
+}
+
+// checkNonNegative 逐个检查上报的用量没有负数。
+//
+// # 为什么必须在解码层拦
+//
+// 负数进计费没有一个方向是对的，而下游各自只挡一半：
+//
+//   - **completion 为负**：声明了「completion 含推理」时（OpenAI 系的常规
+//     口径）billing.FromChannelUsage 把它钳成 0——输出费用整块消失。金额侧
+//     没有任何信号（Capped 仍是 false），只有一条
+//     billing.ReasoningExceedsCompletion 的告警会响（pipeline 拿它发 Warn），
+//     而那条告警说的是「推理量多于输出总量」，与「用量是负数」不是同一件事；
+//     没声明时它原样进 billing.Validate，用量合计为负就**整次结算失败**——
+//     一次上报把一笔已经产生的费用变成一笔收不回来的账。
+//   - **promptTokens 为负**：相减之后被钳成 0，输入费用同样消失。
+//   - **reasoning 与缓存量为负**：相减减掉了一个负数，把另一项**抬高**。
+//
+// 下游两处各挡一半，说明这件事本来就该在**唯一**的入口处判：插件给的值
+// 从这里进来，别处再判都是在补一个已经漏出去的洞。
+//
+// # Units 为什么也在这里
+//
+// 它的负数由 billing.Validate 拦下（`计量项 %q 的数量为负`），代价与上面那条
+// 一模一样——**整次结算失败**，而那时上游那次调用已经成功、token 已经花掉。
+// 判据是「下游会怎么处置」而不是字段的类型：后果相同就该同处置。
+//
+// # 不查 NaN 与 ±Inf
+//
+// 不是漏了：这个结构里每个数都是 int64（`channel.Usage` 也是），它们表达
+// 不出来；`1e999` 这种溢出由解码器自己拒（cannot unmarshal ... into int64），
+// `NaN` / `Infinity` 根本不是合法 JSON。所以这里没有第二道检查可加。
+func (f UsageFacts) checkNonNegative() error {
+	for _, item := range []struct {
+		name string
+		v    *int64
+	}{
+		{"promptTokens", f.PromptTokens},
+		{"completionTokens", f.CompletionTokens},
+		{"cacheReadTokens", f.CacheReadTokens},
+		{"cacheWriteTokens", f.CacheWriteTokens},
+		{"reasoningTokens", f.ReasoningTokens},
+	} {
+		if item.v != nil && *item.v < 0 {
+			return errNegativeUsage(item.name, *item.v)
+		}
+	}
+	// 先按键排序再查：map 的遍历顺序是随机的，而这个报错会进日志与测试
+	// ——同一份坏上报报出哪个键，不该每次不一样。
+	keys := make([]string, 0, len(f.Units))
+	for k := range f.Units {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if v := f.Units[k]; v < 0 {
+			return errNegativeUsage(fmt.Sprintf("units[%q]", k), v)
+		}
+	}
 	return nil
 }
 

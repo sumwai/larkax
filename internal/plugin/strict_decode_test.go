@@ -144,6 +144,69 @@ func TestEveryHookReturnValueRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+// 上报的用量为负时在**解码层**就拒，而不是留给下游各自钳。
+//
+// 两个下游各挡一半，正是这件事该在这里判的理由：声明了「completion 含推理」
+// 时 billing.FromChannelUsage 把负数钳到 0（输出费用被整个抹平，金额侧没有
+// 信号，只有一条「推理量多于输出总量」的告警会响），没声明时负数进
+// billing.Validate、整次结算失败。一次上报不该有这两种结局里的任何一种。
+//
+// 五个字段各喂一遍：只钉其中一个的话，剩下四个会随下一次改动悄悄放宽。
+// Units 也各喂几遍，且用**插件自定义的键**——它的键名不受契约约束，
+// 按固定清单去查的写法在这几条上会挂。
+func TestUsageFactsRejectsNegativeCounts(t *testing.T) {
+	cases := []struct {
+		raw       string
+		wantField string
+		wantValue string
+	}{
+		{`{"promptTokens":-1}`, "promptTokens", "-1"},
+		{`{"completionTokens":-2}`, "completionTokens", "-2"},
+		{`{"cacheReadTokens":-3}`, "cacheReadTokens", "-3"},
+		{`{"cacheWriteTokens":-4}`, "cacheWriteTokens", "-4"},
+		{`{"reasoningTokens":-5}`, "reasoningTokens", "-5"},
+		// Units 的负数由 billing.Validate 拦，但代价与上面几条一样：
+		// 整次结算失败，而上游那次调用已经成功、token 已经花掉。
+		{`{"units":{"searches":-6}}`, `units["searches"]`, "-6"},
+		// 键名是插件自己定的，检查不能照着某个固定清单做。
+		{`{"units":{"任意计量":-7}}`, `units["任意计量"]`, "-7"},
+		// 两个都是负的：报出来的该是**按键排序后**的第一个。
+		// map 的遍历顺序是随机的，不排序的话同一份上报每次报的键都不一样。
+		{`{"units":{"b":-1,"a":-8}}`, `units["a"]`, "-8"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.wantField, func(t *testing.T) {
+			var f UsageFacts
+			err := json.Unmarshal([]byte(tc.raw), &f)
+			if !errors.Is(err, ErrPatchScope) {
+				t.Fatalf("负数该被拒，实际 err=%v", err)
+			}
+			msg := err.Error()
+			// 报错要指到**是哪个字段**为负：五个字段共用「用量为负」这句
+			// 话时，作者只能靠猜。
+			if !strings.Contains(msg, tc.wantField) {
+				t.Errorf("报错该点出字段 %s，实际 %q", tc.wantField, msg)
+			}
+			// 值也要在里面：-1 与 -1000000 是两种不同的 bug。
+			if !strings.Contains(msg, tc.wantValue) {
+				t.Errorf("报错该带上那个负数 %s，实际 %q", tc.wantValue, msg)
+			}
+		})
+	}
+
+	// 零是合法的：上游返回了空回答、这次一次搜索都没调，那是事实而不是缺值。
+	var f UsageFacts
+	if err := json.Unmarshal([]byte(`{"completionTokens":0,"units":{"searches":0,"任意计量":0}}`), &f); err != nil {
+		t.Fatalf("0 不该被拒: %v", err)
+	}
+	if f.CompletionTokens == nil || *f.CompletionTokens != 0 {
+		t.Errorf("0 该原样解出来，实际 %v", f.CompletionTokens)
+	}
+	if _, ok := f.Units["searches"]; !ok {
+		t.Errorf("Units 的 0 该原样解出来，实际 %v", f.Units)
+	}
+}
+
 // 严格不等于把字段拒之门外：契约里的字段必须照常解出来。
 //
 // 漏掉一个的表现是「插件报了但没生效」，与宽松解析造成的静默一模一样——
@@ -345,6 +408,19 @@ func TestUnknownFieldFailsPluginNotRequest(t *testing.T) {
 			name:  "onUsage 字段拼错",
 			hook:  HookUsage,
 			hooks: `onUsage(){ return { promptToken: 9 }; }`,
+			run: func(s *Session) callOutcome {
+				r := s.OnUsage(t.Context(), UsageContext{RequestID: "r1", Protocol: "openai"})
+				return callOutcome{err: r.Err(), hasPat: r.Patch != nil, failure: r.Failure}
+			},
+		},
+		{
+			// 负数用量是**同一个形状**的契约违规：它不改金额字段、不改身份，
+			// 只是一个不能用的值。所以处置也一样——按插件失败记下来，
+			// 而不是让它流到计费侧（那边两个方向都错：钳掉是静默少收，
+			// 不钳是整次结算失败）。
+			name:  "onUsage 上报负数",
+			hook:  HookUsage,
+			hooks: `onUsage(){ return { completionTokens: -1 }; }`,
 			run: func(s *Session) callOutcome {
 				r := s.OnUsage(t.Context(), UsageContext{RequestID: "r1", Protocol: "openai"})
 				return callOutcome{err: r.Err(), hasPat: r.Patch != nil, failure: r.Failure}

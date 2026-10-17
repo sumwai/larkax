@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -293,10 +294,15 @@ func TestUsageFactsCarryCountsOnly(t *testing.T) {
 func TestChannelUsageKeepsReasoningScope(t *testing.T) {
 	// 内核报的量：100 个输出，其中 40 个是推理。插件上报了它看到的补全量，
 	// 但**没有声明口径**——于是口径只能来自重建时显式给出的那一个。
-	merged := MergeUsage(
+	merged, err := MergeUsage(
 		UsageFacts{CompletionTokens: ptrInt64(100), ReasoningTokens: ptrInt64(40)},
 		&UsageFacts{CompletionTokens: ptrInt64(100)},
+		// 上界恰好等于上报值：边界算在界内（判据是「超过」而不是「达到」）。
+		UsageBound{MaxOutputTokens: 100},
 	)
+	if err != nil {
+		t.Fatalf("合并用量失败: %v", err)
+	}
 	prices := billing.Prices{
 		Completion: money.MustParse("0.000008"),
 		Reasoning:  money.MustParse("0.00001"),
@@ -334,7 +340,10 @@ func TestChannelUsagePrefersDeclaredScope(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			merged := MergeUsage(UsageFacts{CompletionIncludesReasoning: tc.core}, &UsageFacts{CompletionIncludesReasoning: tc.reported})
+			merged, err := MergeUsage(UsageFacts{CompletionIncludesReasoning: tc.core}, &UsageFacts{CompletionIncludesReasoning: tc.reported}, UsageBound{MaxOutputTokens: 64})
+			if err != nil {
+				t.Fatalf("只声明口径的上报不该越界: %v", err)
+			}
 			if got := merged.ChannelUsage(tc.fallback); got.CompletionIncludesReasoning != tc.want {
 				t.Errorf("口径 = %v，期望 %v", got.CompletionIncludesReasoning, tc.want)
 			}
@@ -417,6 +426,50 @@ func TestApplyRequestPatchRejectsBadMaxTokens(t *testing.T) {
 	}
 	if req.MaxTokens != 100 {
 		t.Errorf("报错时不该改动请求，实际 %d", req.MaxTokens)
+	}
+}
+
+// max_tokens 只许调小，这条路径（补丁 → channel.Request）也得拦。
+//
+// 校验在两条应用路径上各有一份：这一条与 patch_test.go 里那条是**同一个
+// 判据的两处落点**，不是重复。只拦一条的话，接线时用哪条就把洞开在哪条上
+// ——而这条路径写的正是随后进计费的那个 channel.Request。
+func TestApplyRequestPatchMaxTokensOnlyShrinks(t *testing.T) {
+	cases := []struct {
+		name     string
+		original int
+		patched  int64
+		wantErr  bool
+	}{
+		{"调小放行", 100, 40, false},
+		{"持平放行", 100, 100, false},
+		{"调大被拒", 100, 101, true},
+		{"客户端没给 max_tokens 时补丁给一个也算调大", 0, 10, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &channel.Request{Model: "m", MaxTokens: tc.original}
+			mt := tc.patched
+			_, err := ApplyRequestPatch(req, &RequestPatch{Body: &RequestBodyPatch{MaxTokens: &mt}})
+			if tc.wantErr {
+				if !errors.Is(err, ErrPatchScope) {
+					t.Fatalf("本该被拒，实际 err=%v", err)
+				}
+				if !strings.Contains(err.Error(), "只许调小") {
+					t.Errorf("报错该说清只许调小，实际 %q", err)
+				}
+				if req.MaxTokens != tc.original {
+					t.Errorf("报错时不该改动请求，实际 %d", req.MaxTokens)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("出错: %v", err)
+			}
+			if req.MaxTokens != int(tc.patched) {
+				t.Errorf("max_tokens = %d，期望 %d", req.MaxTokens, tc.patched)
+			}
+		})
 	}
 }
 
