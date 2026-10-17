@@ -69,6 +69,13 @@
 # 那条路整条删除而消失。同批的 `Cache.Invalidate` / `Program.BranchCount` /
 # `Program.Source` 是导出方法，只由 deadmethods 那道门照到，不在这份清单里。
 #
+# **34 之后减了 3（#216）**：`internal/plugin` 里三条已被取代或根本没有位置的符号
+# 删掉——`patch.go` 的 `ApplyRequestBodyPatch` 与只被它用的 `originalMaxTokens`
+# （请求路径走的是 `adapter.go` 的 `applyBodyToChannel`，那是唯一一条应用路径），
+# 以及 `sandbox/plugin.go` 的 `CompileTypeScript`（契约与上传路径都只说 JS）。
+# `registry.go` 的 `Publish` 留下，类型从 `gap` 改成 `lib`：它回答的是「一次上传
+# 一批插件时整批拒绝还是逐条接收」，而那个入口今天不存在，不是漏接。
+#
 # ⚠️ **在这一片包上，「报告里没有」不再等于「已经接上」。** `contractFieldNames`
 # 里那句 `reflect.TypeOf` 随 #262 变成可达之后，RTA 的反射过近似生效：`internal/plugin`
 # 里凡是「运行时类型的方法」一律被判成可达，`deadcode -whylive` 对它们一律回
@@ -77,6 +84,11 @@
 # （#264 的缺口）、`Registry.Get` 一类没有生产调用方的方法。
 # 删掉它们是对的——白名单要跟的是 deadcode 的输出，不是「已知缺口」的账本
 #（那个账本在 issue 里）——但要清楚删掉不等于接上了。
+#
+# **反过来的情形同样存在**：在报告里、却没有生产调用方的符号，不一定是缺口。
+# `registry.go` 的 `Publish` 就是这种——它是 `lib` 而不是 `gap`，因为该接它的
+# 入口（一次上传一批插件）还没建，不是有人躲掉了接线。判据不是「有没有调用方」，
+# 而是「它做的事今天有没有位置」。
 #
 # **举例子别用已经被删掉的符号**：这一段原先点的是 `Result.Failed`，
 # 而它随 #282 的第二批真的删掉了，注释里就留下一个不存在的方法。
@@ -111,10 +123,7 @@ internal/money/money.go          | MulAmount                       | lib | 金�
 internal/money/money.go          | MulFloat                        | lib | 金额库的运算面：按倍率相乘，内部走 big.Rat；目前只有测试在调它（还没有倍率这个概念）
 internal/money/money.go          | MustParse                       | lib | 金额库的构造面：解析失败即 panic；只给测试写期望值用，生产一律走 Parse
 internal/observe/metrics.go      | Counter.Value                   | lib | 只给测试与断言用：cmd/larkax 的 main_test 跨包读它（所以必须导出），删了那条断言就没了
-internal/plugin/patch.go         | ApplyRequestBodyPatch            | gap | #216 补丁的应用与校验；请求路径接上 hook 之前没有生产调用方
-internal/plugin/patch.go         | originalMaxTokens                | gap | #216 补丁的应用与校验；请求路径接上 hook 之前没有生产调用方
-internal/plugin/registry.go      | Publish                          | gap | #216 注册表的查询与开会话；请求路径接上 hook 之前没有生产调用方
-internal/plugin/sandbox/plugin.go | CompileTypeScript                | gap | #216 TypeScript 转译入口；目前只有测试在调
+internal/plugin/registry.go      | Publish                          | lib | 批量上传的 all-or-nothing 发布：今天没有生产调用方（启动走 PublishPartial、上传逐条 Compile），只有测试在调它
 internal/snapshot/allowlist.go   | Root.valid                      | lib | 允许表的内部判定：方向是否已知；目前只有测试在调它（New 查的是表，不是它）
 internal/snapshot/allowlist.go   | isAllowKind                     | lib | 允许表的内部判定：测试用它筛出需要顶住敌对取值的条目
 internal/tokens/count.go         | BoundsOf                        | lib | 能力查询：BoundsFor 按模型名的便捷包装；目前只有测试在调它

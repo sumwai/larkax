@@ -121,15 +121,15 @@ func ApplyRequestPatch(req *channel.Request, patch *RequestPatch) (rejected []st
 // system 消息？）。那是权限边界，要单独拍板。
 //
 // **有意的是不应用，不是静默。** 这段注释早先写的是「结构化的那几项留在补丁里，
-// 由调用方按自己的需要决定——这是有意留的口子」，而两条应用路径都不写它们、
+// 由调用方按自己的需要决定——这是有意留的口子」，而应用那一步既不写它们、
 // 也不报错：作者看到的是「我的插件没生效」，与字段名拼错一模一样。现在给了
 // 这几个字段就返回 ErrPatchScope，与「写了契约之外的字段」同一个处置。
 //
 // 判定在**写下去之前**：走到错误那一支时 req 一个字段都没被改过，
 // 于是「整份补丁不生效」是这里唯一可能的结局（见 Session.ApplyRequest）。
 func applyBodyToChannel(req *channel.Request, body *RequestBodyPatch) error {
-	// 与 patch.go 的 ApplyRequestBodyPatch 调同一个判据：两条应用路径对同一份
-	// 补丁必须给出同一个判定，只拦一条的话，接线时用哪条就把洞开在哪条上。
+	// 判据只有一份（patch.go 的 unappliedFields）：应用路径只有这一条，
+	// 校验也就没有第二处可写。
 	if fields := body.unappliedFields(); len(fields) > 0 {
 		return errBodyFieldsNotApplied(fields)
 	}
@@ -137,18 +137,14 @@ func applyBodyToChannel(req *channel.Request, body *RequestBodyPatch) error {
 		if *body.MaxTokens <= 0 {
 			return errNonPositiveMaxTokens(*body.MaxTokens)
 		}
-		// 只许调小。这一条在 patch.go 的 ApplyRequestBodyPatch 里也有一份，
-		// 因为那是**另一条**应用路径（协议中立视图）：两条都得拦，
-		// 只拦一条的话，接线时用哪条就把洞开在哪条上。
-		//
-		// 原值取 channel.Request.MaxTokens，也就是客户端请求里那个数——
-		// 补丁还没写回去。0 表示客户端没给，那时补丁给任何值都是新增一个
-		// 上界，而「上界从哪来」正是这条规则要管的（见 UsageBound）。
+		// 只许调小。原值取 channel.Request.MaxTokens，也就是客户端请求里
+		// 那个数——补丁还没写回去。0 表示客户端没给，那时补丁给任何值都是
+		// 新增一个上界，而「上界从哪来」正是这条规则要管的（见 UsageBound）。
 		//
 		// 「客户端没给」这个情形由下面这一个比较覆盖：那时 original ≤ 0，
 		// 而上面刚保证补丁值 ≥ 1，所以 `> original` 必然成立。**不要再写成
 		// `!hasOriginal || ...`**——它看起来像一道独立的门，删掉却不会放开
-		// 任何东西（实测过，patch.go 那一处同形）。
+		// 任何东西（实测过）。
 		original, hasOriginal := int64(req.MaxTokens), req.MaxTokens > 0
 		if *body.MaxTokens > original {
 			return errMaxTokensRaised(original, hasOriginal, *body.MaxTokens)

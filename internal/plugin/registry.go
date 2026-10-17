@@ -138,8 +138,8 @@ func (r *Registry) Get(key string) (*Plugin, bool) {
 
 // Compile 编译一个插件并校验它的元数据。它**不注册**，只回答「这份源码能不能用」。
 //
-// 上传路径与试运行路径都用它，于是「界面上说能用」与「线上真能用」
-// 走的是同一段代码——两份校验迟早会不一致。
+// 上传路径（larkaxctl plugin publish）与加载路径都经过它，于是「命令行说
+// 能用」与「线上真能用」走的是同一段代码——两份校验迟早会不一致。
 //
 // 注册名必须由调用方给出（reg.Key）：这个入口的用途是「按这个名字装一个插件」，
 // 名字由谁定是调用方的事。源码里已经写了自己 key 的那条路走 CompileSource。
@@ -273,11 +273,23 @@ func narrowCapabilities(requested []string) ([]string, error) {
 // Publish 用一批注册换出一份新的注册表。旧的注册表不受影响。
 //
 // 这是「编译全部通过才发布」的落点：全部 Compile 成功才返回新表，
-// 任一个失败就返回错误、旧表照旧。于是线上不会出现半批插件生效的状态——
+// 任一个失败就返回错误、旧表照旧。于是不会出现半批插件生效的状态——
 // 而「一半生效」在界面上看起来与「全都生效」一样。
 //
-// 上传路径用它（一个编译不过的插件不许进库）。启动路径用 PublishPartial：
-// 那里已经有了一批插件，一个坏的不该让服务起不来。
+// # 今天谁来调它
+//
+// **生产代码没有调用方，只有测试。** 两条生产路径都不经过它：
+//
+//   - 启动：store.LoadRegistry 用 PublishPartial（跳过坏的，见 load.go）；
+//   - 上传：larkaxctl plugin publish 自己 Compile 一个插件，再把结果写库
+//     （见 cmd/larkaxctl/plugin.go），不建内存注册表。
+//
+// 留着的理由是它回答一个今天还没有入口的问题：一次上传**一批**插件时，
+// 是整批拒绝还是逐条接收。单条上传没有这个选择；等那个入口出现时，
+// 「全部通过才换表」的语义已经在这里、也有测试钉着了。
+//
+// 别为了「把它接上」让启动路径改用它：那会把一个坏插件升级成整个服务起不来
+// （理由见 PublishPartial 的注释）。
 func Publish(regs []Registration) (*Registry, error) {
 	compiled := make([]*Plugin, 0, len(regs))
 	for _, reg := range regs {
@@ -294,7 +306,7 @@ func Publish(regs []Registration) (*Registry, error) {
 // assemble 把已经编译好的插件装成一份注册表。
 //
 // 它是 Publish 与 PublishPartial 共用的那一步：重复检测与排序只写一遍，
-// 于是「两条路径选出来的插件顺序一样」不需要靠两边各自记得。
+// 于是「哪条路径装出来的表，顺序都一样」不需要靠各处各自记得。
 func assemble(compiled []*Plugin) (*Registry, error) {
 	next := Empty()
 	for _, p := range compiled {

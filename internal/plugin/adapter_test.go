@@ -439,11 +439,10 @@ func TestApplyRequestPatchRejectsBadMaxTokens(t *testing.T) {
 	}
 }
 
-// max_tokens 只许调小，这条路径（补丁 → channel.Request）也得拦。
+// max_tokens 只许调小，这条路径（补丁 → channel.Request）得拦。
 //
-// 校验在两条应用路径上各有一份：这一条与 patch_test.go 里那条是**同一个
-// 判据的两处落点**，不是重复。只拦一条的话，接线时用哪条就把洞开在哪条上
-// ——而这条路径写的正是随后进计费的那个 channel.Request。
+// 它写的正是随后进计费的那个 channel.Request，所以「原值从哪来」这件事在
+// 这条路径上最要紧：原值取补丁写回之前的 req.MaxTokens。
 func TestApplyRequestPatchMaxTokensOnlyShrinks(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -483,12 +482,11 @@ func TestApplyRequestPatchMaxTokensOnlyShrinks(t *testing.T) {
 	}
 }
 
-// 认得但不应用的 5 个字段在**接线用的这条路径**上同样被拒。
+// 认得但不应用的 5 个字段在**接线用的这条路径**上被拒。
 //
-// 与 patch_test.go 里那条（ApplyRequestBodyPatch）是同一个判定的两处落点：
-// 只拦一条的话，接线时用哪条就把洞开在哪条上。而这两条路径今天**覆盖并不
-// 相同**——宽的那条（协议中立视图）曾经会写 messages / tools / tool_choice，
-// 窄的这条一个都不写、也不报错，于是同一个补丁在两条路上是两个结果。
+// 覆盖曾经并不相同：早先另有一条应用路径（协议中立视图）会写 messages /
+// tools / tool_choice，而这条一个都不写、也不报错，于是同一个补丁在两条路上
+// 是两个结果。那条路径已经删掉，接线用的是这一条。
 //
 // 这里直接构造 RequestBodyPatch 而不是从 JSON 解：要证明的是**应用这一步**
 // 的判定，解析那一步的行为由 patch_test.go 钉住。
