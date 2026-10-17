@@ -36,6 +36,9 @@ const priceUsage = `larkaxctl price 管理计价规则。
   larkaxctl price explain --model <规范模型名>
                           [--user <用户 ID 或用户名>] [--channel <渠道 ID>]
                           [--at <RFC3339>]
+  larkaxctl price calendar import <文件>
+        导入某一年的日历数据（分时计价要用它判断哪天是休息日，
+        文件格式见 larkaxctl price calendar --help）
 
 作用域决定哪两栏 id 有效：platform 两栏都留空；merchant 必须给 --user；
 channel 必须给 --channel。写了读取路径不看的那一栏会被拒绝，因为那是一条
@@ -101,6 +104,10 @@ func runPrice(args []string) error {
 		return runPriceSetEnabled(rest, false)
 	case "explain":
 		return runPriceExplain(rest)
+	case "calendar":
+		// 分时计价的日历原先是一个顶层命令组（larkaxctl calendar），#475 把它
+		// 收进 price：这些数据是计价规则的输入，离开规则没有别的用处。
+		return runPriceCalendar(rest)
 	case "help", "-h", "--help":
 		fmt.Print(priceUsage)
 		return nil

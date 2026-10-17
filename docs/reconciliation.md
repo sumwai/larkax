@@ -3,7 +3,7 @@
 对账任务校验钱包快照与账本是否一致，并把不一致落库、告警。
 
 ```sh
-go run ./cmd/larkaxctl reconcile
+go run ./cmd/larkaxctl ledger reconcile
 ```
 
 它不需要额外参数：开关与口径全部来自 `settings` 表。发现不一致时以非零退出码
@@ -11,7 +11,7 @@ go run ./cmd/larkaxctl reconcile
 
 ```sh
 # 发现不一致时退出码为 1，报告已经打到 stdout
-go run ./cmd/larkaxctl reconcile || echo "这一轮有需要人看的东西"
+go run ./cmd/larkaxctl ledger reconcile || echo "这一轮有需要人看的东西"
 ```
 
 ## 范围
@@ -216,7 +216,7 @@ go run ./cmd/larkaxctl reconcile || echo "这一轮有需要人看的东西"
 
 ## 告警
 
-不一致逐条走 `Alert` 通道，`larkaxctl reconcile` 接的是错误级别的结构化日志
+不一致逐条走 `Alert` 通道，`larkaxctl ledger reconcile` 接的是错误级别的结构化日志
 （`LogAlerts`）。要换成通知或工单，实现 `store.Alert` 即可——告警落地的方式
 是部署的事，`store` 只管「发现了什么」。
 
