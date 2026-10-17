@@ -24,7 +24,8 @@ func noopHostFunc() HostFunc {
 
 // 白名单是「没列出来就不给」：allowed 为空时插件调用任何能力都拿到
 // 「未启用」，而**不是**一个能用的能力。这条钉住默认拒绝。
-func Test白名单为空时任何能力都不可用(t *testing.T) {
+// 白名单为空时任何能力都不可用。
+func TestEmptyAllowlistDeniesEveryCapability(t *testing.T) {
 	m, err := Compile("p", `
 import { log, calendar, kv } from "larkax";
 export default {
@@ -72,7 +73,8 @@ export default {
 }
 
 // 白名单只列了一部分时，列出来的可用、没列出来的不可用。
-func Test白名单只放行列出来的能力(t *testing.T) {
+// 白名单只放行列出来的能力。
+func TestAllowlistExposesOnlyListedCapabilities(t *testing.T) {
 	m, err := Compile("p", `
 import { log, calendar } from "larkax";
 export default {
@@ -116,7 +118,8 @@ export default {
 }
 
 // 注入进去的能力名必须与白名单一致：多一个就是越权。
-func Test注入的能力名与白名单一致(t *testing.T) {
+// 注入的能力名与白名单一致。
+func TestInjectedCapabilityNamesMatchAllowlist(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -159,7 +162,8 @@ export default {
 }
 
 // 白名单里写了 host 没有的能力名：不该报错，也不该凭空出现一个能力。
-func Test白名单里的名字host没提供时不影响启动(t *testing.T) {
+// 白名单里的名字host没提供时不影响启动。
+func TestAllowlistedNameMissingFromHostDoesNotBreakStartup(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -193,7 +197,8 @@ export default {
 
 // 宿主没有任何能力时，插件连 __larkax 都看不到。
 // 这条与「白名单为空」是两回事：那次是能力被挡住，这次是压根没注入。
-func Test没有能力时插件看不到能力命名空间(t *testing.T) {
+// 没有能力时插件看不到能力命名空间。
+func TestNoCapabilitiesMeansNoCapabilityNamespace(t *testing.T) {
 	m, err := Compile("p", `export default { onRequest() { return { t: typeof globalThis.__larkax }; } };`)
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +224,8 @@ func Test没有能力时插件看不到能力命名空间(t *testing.T) {
 
 // 能力表里写了一个不是 HostFunc 的值时，插件调用它只拿到错误，
 // **不能 panic**：宿主 panic 会变成 *moejs.InternalError，把整个 runtime 一起拖死。
-func Test能力不是函数时插件拿到错误且runtime不崩(t *testing.T) {
+// 能力不是函数时插件拿到错误且runtime不崩。
+func TestNonFuncCapabilityReturnsErrorWithoutPanickingRuntime(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -277,7 +283,8 @@ export default {
 // 这条要钉的是 wrapFunc 那一处判断，直接调它才是它该测的东西。
 //
 // 插件那一侧看到什么，由 sanitize_test.go 那几条钉（它们不依赖取消时机）。
-func Test宿主函数在ctx已取消时不进入实现(t *testing.T) {
+// 宿主函数在ctx已取消时不进入实现。
+func TestHostFuncWithCanceledCtxNeverEntersImpl(t *testing.T) {
 	// 宿主函数若被进入，这个计数从另一条路径被写，所以用 atomic。
 	var 进入 atomic.Int64
 	原文 := make(chan error, 4)
@@ -332,7 +339,8 @@ func Test宿主函数在ctx已取消时不进入实现(t *testing.T) {
 // ctx 在**调用进行中**被取消时，宿主函数能看到取消并自己返回。
 // 这条是「宿主函数自带 deadline」在宿主侧的实现方式：
 // 沙箱的 Interrupt 拉不回来一个阻塞的宿主函数，只能靠它自己看 ctx。
-func Test宿主函数能在调用途中看到ctx取消(t *testing.T) {
+// 宿主函数能在调用途中看到ctx取消。
+func TestHostFuncSeesCtxCanceledMidCall(t *testing.T) {
 	m, err := Compile("p", `export default { onRequest() { globalThis.__larkax.等(); return {}; } };`)
 	if err != nil {
 		t.Fatal(err)
@@ -378,7 +386,8 @@ func Test宿主函数能在调用途中看到ctx取消(t *testing.T) {
 // 渠道密钥不进插件：这一层不往 Host 里放，插件就看不到。
 // 这里构造「宿主手里有一份 credential，但白名单没放行」的情形：
 // 白名单是最终判据，没列出来就不会注入。
-func Test未放进白名单的密钥字段不会进插件(t *testing.T) {
+// 未放进白名单的密钥字段不会进插件。
+func TestCredentialFieldNotAllowlistedNeverReachesPlugin(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -417,7 +426,8 @@ export default {
 // 每次请求新建 runtime，是「插件把上一个请求的数据留在模块变量里」
 // 这个泄漏的防线。这条钉住：同一个 Module、两个 runtime，
 // 第二个读不到第一个存下的 ctx。
-func Test新建runtime读不到上一个的数据(t *testing.T) {
+// 新建runtime读不到上一个的数据。
+func TestNewRuntimeCannotReadPreviousRuntimeState(t *testing.T) {
 	m, err := Compile("p", `
 let 上次的 = null;
 export default {
@@ -460,7 +470,8 @@ export default {
 // 这不是漏洞，是同一个请求内的合法行为——把几个 hook 串在一次请求上时，
 // 插件需要能在 hook 之间记住东西。
 // 单独钉一条，免得有人以为「每请求新建 runtime」能防住同一请求内的状态。
-func Test同一个runtime的连续调用共享模块状态(t *testing.T) {
+// 同一个runtime的连续调用共享模块状态。
+func TestCallsInOneRuntimeShareModuleState(t *testing.T) {
 	m, err := Compile("p", `
 let 计数 = 0;
 export default {
@@ -493,7 +504,8 @@ export default {
 // Close 之后的调用必须稳定地返回 ErrRunaway，
 // 而且不该再去碰已经放开的宿主值（出参保持原样）。
 // Close 还要幂等：它会在 defer 里被调，重复调不该 panic。
-func TestClose之后的调用返回ErrRunaway且幂等(t *testing.T) {
+// Close之后的调用返回ErrRunaway且幂等。
+func TestCallAfterCloseReturnsErrRunawayAndCloseIsIdempotent(t *testing.T) {
 	m, err := Compile("p", `export default { onRequest() { return { ok: true }; } };`)
 	if err != nil {
 		t.Fatal(err)
@@ -526,7 +538,8 @@ func TestClose之后的调用返回ErrRunaway且幂等(t *testing.T) {
 
 // 并发：同一个 Module 被多个 goroutine 各自 NewRuntime 并 Call，
 // 结果各自正确、无数据竞争。这条配 -race 跑才有意义。
-func Test多个goroutine各自建runtime互不干扰(t *testing.T) {
+// 多个goroutine各自建runtime互不干扰。
+func TestGoroutinesWithOwnRuntimesDoNotInterfere(t *testing.T) {
 	m, err := Compile("p", `
 import { definePlugin } from "larkax";
 export default definePlugin({

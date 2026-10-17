@@ -21,10 +21,11 @@ import (
 // 断言的是「它没出现」，用真形态的取值反而会让红线扫描器报警。
 
 // 不该跨到插件侧的记号。它在宿主日志里必须出现，在插件侧必须不出现。
-const 不该外泄 = "dsn-fragment-MUST-NOT-LEAK"
+const mustNotLeakMark = "dsn-fragment-MUST-NOT-LEAK"
 
 // 未分类的宿主错误：插件只拿到固定文案，原文进宿主日志。
-func Test宿主错误原文不回显给插件(t *testing.T) {
+// 宿主错误原文不回显给插件。
+func TestHostErrorTextIsNotEchoedToPlugin(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -42,7 +43,7 @@ export default {
 		Capabilities: map[string]any{
 			"查": HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
 				// 形态就是真实实现会给出的那一种：依赖错误被 %w 包了一层。
-				return moejs.Undefined(), fmt.Errorf("查询失败: %w", errors.New(不该外泄))
+				return moejs.Undefined(), fmt.Errorf("查询失败: %w", errors.New(mustNotLeakMark))
 			}),
 		},
 		OnError: func(name string, err error) { 原文 <- err },
@@ -58,7 +59,7 @@ export default {
 		t.Fatalf("插件 catch 了，Call 不该失败: %v", f)
 	}
 	看到 := fmt.Sprint(out["看到"])
-	if strings.Contains(看到, 不该外泄) {
+	if strings.Contains(看到, mustNotLeakMark) {
 		t.Errorf("插件看到了宿主错误的原文: %q", 看到)
 	}
 	// 分类码必须还在：插件要能据此分支，否则消毒就等于把信息全丢了。
@@ -68,7 +69,7 @@ export default {
 	// 而原文必须留在宿主这一侧——不然排查就没有依据了。
 	select {
 	case err := <-原文:
-		if !strings.Contains(err.Error(), 不该外泄) {
+		if !strings.Contains(err.Error(), mustNotLeakMark) {
 			t.Errorf("宿主日志里应当有原文，实际 %v", err)
 		}
 	case <-time.After(time.Second):
@@ -80,7 +81,8 @@ export default {
 //
 // 这一条与上一条相对：上一条是「没分类的默认拒绝」，这一条是
 // 「分过类的按分类给」，两者合起来才是完整的规则。
-func Test已分类的宿主错误按分类给插件(t *testing.T) {
+// 已分类的宿主错误按分类给插件。
+func TestClassifiedHostErrorIsReportedByClass(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -100,7 +102,7 @@ export default {
 				return moejs.Undefined(), &CapabilityError{
 					Code:    CodeUnavailable,
 					Message: "读取插件 KV 失败",
-					Cause:   errors.New(不该外泄),
+					Cause:   errors.New(mustNotLeakMark),
 				}
 			}),
 		},
@@ -117,7 +119,7 @@ export default {
 		t.Fatalf("插件 catch 了，Call 不该失败: %v", f)
 	}
 	看到 := fmt.Sprint(out["看到"])
-	if strings.Contains(看到, 不该外泄) {
+	if strings.Contains(看到, mustNotLeakMark) {
 		t.Errorf("插件看到了宿主错误的原文: %q", 看到)
 	}
 	if !strings.Contains(看到, CodeUnavailable) || !strings.Contains(看到, "读取插件 KV 失败") {
@@ -125,7 +127,7 @@ export default {
 	}
 	select {
 	case err := <-原文:
-		if !strings.Contains(err.Error(), 不该外泄) {
+		if !strings.Contains(err.Error(), mustNotLeakMark) {
 			t.Errorf("宿主日志里应当有原文，实际 %v", err)
 		}
 	case <-time.After(time.Second):
@@ -135,7 +137,8 @@ export default {
 
 // 能力表配错（某个成员不是函数）的文案同样要过去：那是集成方写错了，
 // 而插件作者看到的应该是一句能指向问题的话。
-func Test能力不是函数时文案保留(t *testing.T) {
+// 能力不是函数时文案保留。
+func TestNonFuncCapabilityKeepsItsMessage(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -170,7 +173,8 @@ export default {
 // 只钉宿主日志。分类信息必须穿过 CapabilityError 的包装仍然可见——
 // 它决定上层把这次失败记成 ErrHostTimeout 还是 ErrCallTimeout，
 // 而两者的排查方向完全不同。
-func Test超时拒绝宿主调用时原文报给宿主日志(t *testing.T) {
+// 超时拒绝宿主调用时原文报给宿主日志。
+func TestTimeoutRejectionLogsRawTextToHost(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -235,7 +239,8 @@ export default {
 // → classify 看到的 *moejs.Exception。中间多了一层 CapabilityError 的 Unwrap，
 // 所以「还认不认得出来是宿主超时」需要一条用例钉住：它决定上层把这次失败
 // 记成宿主慢还是插件写得慢，而两者的排查方向完全不同。
-func Test未捕获的宿主超时仍分类为宿主超时(t *testing.T) {
+// 未捕获的宿主超时仍分类为宿主超时。
+func TestUncaughtHostTimeoutStaysClassifiedAsHostTimeout(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() { globalThis.__larkax.慢(); return {}; },
@@ -280,7 +285,8 @@ export default {
 // 「宿主超时」这一条尤其重要：expired 报的是 ErrHostTimeout，而不是在那一层
 // 自己拼一个码——拼的话，wrapFunc 进门那一次判断会给出 CodeTimeout，
 // 两处就不一致了。
-func Test宿主侧的超时与取消按同一套码分类(t *testing.T) {
+// 宿主侧的超时与取消按同一套码分类。
+func TestHostSideTimeoutAndCancelShareOneSetOfCodes(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
