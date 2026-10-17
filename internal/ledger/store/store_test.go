@@ -84,6 +84,10 @@ func testRequestWithKey(userID int64, requestID string, keyID int64) pipeline.Re
 		// 给 openai 而不是留空：留空会让每条用例都在测同一条报错路径，
 		// 而真正要测的是「协议按给的值落库」——那由用例自己改这个字段。
 		Protocol: channel.ProtocolOpenAI,
+		// 上游模型名同理必须非空（见 ErrMissingUpstreamModel），且**故意与
+		// 规范名不同**：两者相同时「落对了哪一列」分辨不出来，而这一列存在的
+		// 全部意义就是记下与规范名不同的那个名字。
+		UpstreamModel: "vendor/gpt-4o",
 	}
 }
 
@@ -333,6 +337,99 @@ func TestSaveSettlementMovesMoney(t *testing.T) {
 	// 钱包余额必须等于账本推出来的——这是「快照是账本的具体化物」
 	if got, want := balance, ledgerBalance(t, db, userID).String(); got != want {
 		t.Errorf("钱包 %s 与账本 %s 不一致", got, want)
+	}
+}
+
+// 结算要把**上游模型名**落进 billing_requests.upstream_model。
+//
+// 这一列与 channel_id 同一个位置：两者都只有选路之后才知道，所以预留那一行
+// 必然是 NULL，值由结算补上。它也**必须**与 canonical_model 分开落——这一列
+// 存在的全部意义就是记下「发出去的与用户要的不是同一个名字」，两者落成一样
+// 时它一点信息都没有（见 #338）。
+func TestSaveSettlementWritesUpstreamModel(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	requestID := reqID(t)
+	req := testRequest(ctx, t, db, userID, requestID)
+	if req.UpstreamModel == req.CanonicalModel {
+		t.Fatalf("夹具的上游名与规范名相同（%q），这条用例分辨不出落错了哪一列", req.UpstreamModel)
+	}
+
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
+	}
+	// 预留时还没选路，这一列必须留空——写一个「当时猜的」名字比留空更坏，
+	// 因为它看起来像一个已经确定的事实。
+	if got := upstreamModelOf(t, db, requestID); got.Valid {
+		t.Errorf("预留时 upstream_model = %q，期望 NULL", got.String)
+	}
+
+	charge := &pipeline.Charge{
+		RequestID: requestID, UserID: userID, Asset: "CNY",
+		PricedAt: pricedAt(),
+		Entries:  consumeEntries(t, userID, "12", billID),
+	}
+	charge.Settlement.Actual = money.MustParse("12")
+
+	if err := s.Save(ctx, req, charge); err != nil {
+		t.Fatalf("结算失败: %v", err)
+	}
+
+	got := upstreamModelOf(t, db, requestID)
+	if !got.Valid || got.String != req.UpstreamModel {
+		t.Errorf("结算后 upstream_model = %+v，期望 %q", got, req.UpstreamModel)
+	}
+}
+
+// 漏设上游模型名要**报错**，而不是往那一列写 NULL。
+//
+// 与 ErrMissingPricedAt 同一条理由：写入的那一刻是唯一还分得清「漏设」与
+// 「历史行」的地方。这一列从建表那天起一直全是 NULL，所以事后从库里看，
+// 「新代码漏传了」与「那行是接通之前留下的」完全一样——而前者意味着
+// 「别名到底生效没有」这个问题又回到了无从查证的状态。
+func TestSaveRejectsMissingUpstreamModel(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	requestID := reqID(t)
+	req := testRequest(ctx, t, db, userID, requestID)
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
+	}
+
+	charge := &pipeline.Charge{
+		RequestID: requestID, UserID: userID, Asset: "CNY",
+		PricedAt: pricedAt(),
+		Entries:  consumeEntries(t, userID, "12", billID),
+	}
+	charge.Settlement.Actual = money.MustParse("12")
+
+	req.UpstreamModel = ""
+	if err := s.Save(ctx, req, charge); !errors.Is(err, ErrMissingUpstreamModel) {
+		t.Fatalf("漏设 UpstreamModel 应当返回 ErrMissingUpstreamModel，得到 %v", err)
+	}
+
+	// 一个副作用都不该留下：它在开事务之前就被挡下了。
+	if n := countUsageEvents(ctx, t, db, requestID); n != 0 {
+		t.Errorf("被挡下的结算写了 %d 行用量事件，期望 0 行", n)
+	}
+	if balance, frozen := walletOf(t, db, userID); balance != "100.00000000" || frozen != "30.00000000" {
+		t.Errorf("被挡下的结算动了钱包：余额 %s、冻结 %s，期望 100 与 30", balance, frozen)
+	}
+	var status string
+	if qerr := db.QueryRowContext(ctx,
+		`SELECT status FROM billing_requests WHERE request_id = $1`, requestID).Scan(&status); qerr != nil {
+		t.Fatalf("读账单状态失败: %v", qerr)
+	}
+	if status != "pending" {
+		t.Errorf("被挡下的结算把账单状态改成了 %q，期望仍是 pending", status)
 	}
 }
 

@@ -508,6 +508,13 @@ type billingRow struct {
 	// protocol 是这次请求的**调用协议**（由入口按路径决定），不是上游协议。
 	// 跨协议的用例里两者不同，而这一列是事后按协议归因时的唯一依据。
 	protocol string
+	// canonicalModel 是调用方要的那个模型名；upstreamModel 是**实际发给
+	// 上游**的那个（别名翻译之后）。两者分开取回来，是因为「别名生效没有」
+	// 只能靠它们的差异回答——只取一个的话，翻译没做时两列一样，判据消失。
+	//
+	// upstreamModel 可空：预留那一行还没选路，这一列本来就是空的（见 #338）。
+	canonicalModel string
+	upstreamModel  sql.NullString
 }
 
 // billingOf 取这个用户最近一行账单。没有行时第二个返回值为 false。
@@ -517,12 +524,13 @@ func billingOf(t *testing.T, db *sql.DB, userID int64) (billingRow, bool) {
 	var b billingRow
 	err := db.QueryRowContext(context.Background(), `
 		SELECT id, request_id, status, reserved_amount::text, final_amount::text,
-		       computed_amount::text, channel_id, streamed, protocol
+		       computed_amount::text, channel_id, streamed, protocol,
+		       canonical_model, upstream_model
 		  FROM billing_requests
 		 WHERE user_id = $1
 		 ORDER BY id DESC LIMIT 1`, userID,
 	).Scan(&b.id, &b.requestID, &b.status, &b.reserved, &b.final, &b.computed,
-		&b.channelID, &b.streamed, &b.protocol)
+		&b.channelID, &b.streamed, &b.protocol, &b.canonicalModel, &b.upstreamModel)
 	if err == sql.ErrNoRows {
 		return billingRow{}, false
 	}

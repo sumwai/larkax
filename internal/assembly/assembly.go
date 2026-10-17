@@ -45,6 +45,7 @@ import (
 	"github.com/sumwai/larkax/internal/billing/expr"
 	"github.com/sumwai/larkax/internal/calendar"
 	calendarstore "github.com/sumwai/larkax/internal/calendar/store"
+	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/gateway"
@@ -251,7 +252,11 @@ func Build(cfg Config) (*App, error) {
 			Region:   region,
 			Now:      cfg.Now,
 		},
-		Router:       &route.Router{Now: cfg.Now},
+		// Aliases 是选路要用的那一半：选路之后、编码请求之前，按选中的渠道
+		// 把规范名翻成上游名。不接这一项的表现是**别名配了不生效**——上游
+		// 收到的永远是规范名，只要两者不同就必然打不通，而现场看到的只是
+		// 上游说这个模型不存在。
+		Router:       &route.Router{Now: cfg.Now, Aliases: catalog.New(cfg.DB)},
 		Candidates:   channels.New(cfg.DB, cfg.Sealer),
 		Reservations: ledgerStore,
 		Settlements:  ledgerStore,
@@ -547,6 +552,13 @@ var _ gateway.CallRecorder = (*channels.Recorder)(nil)
 // 放在这里，三个方法的签名一改就在改的那一次编译失败。少了它，
 // 接不上的表现是「幂等静默不生效」，而那与「没人带这个头」长得一样。
 var _ api.IdempotencyStore = (*idempotency.Store)(nil)
+
+// 编译期断言：别名来源要满足选路对它的要求。
+//
+// 同上：catalog 与 route 互不 import，接不上只会在装配时暴露。这一条尤其
+// 要写在装配层——选路在 Aliases 为 nil 时会拒绝每个请求（见
+// route.ErrNoAliasSource），而那是一个**运行期**才看得见的失败。
+var _ route.ModelAliases = (*catalog.Catalog)(nil)
 
 // 编译期断言：限流实现要满足公共入口对它的要求。
 //

@@ -244,7 +244,12 @@ func TestUpstreamModelFallsBackToPlatform(t *testing.T) {
 	}
 }
 
-// 别的渠道的别名不该被用上。
+// 别的渠道的别名不该被用上——这是「配了一半」那种情况：这个规范名**配过**
+// 别名，只是没有一条覆盖当前渠道。此时报错，不回落成规范名。
+//
+// 回落的表现是上游回一句「这个模型不存在」，排查方向指向对方；而真正要改的
+// 是我们这一侧的别名配置。判据是「这个规范名有没有配过别名」，不是「表里有没有
+// 任何一行」——后者会让配过别的模型名的部署一起失败（见下面那条）。
 func TestUpstreamModelIgnoresOtherChannels(t *testing.T) {
 	db := testDB(t)
 	model := uniqueName("model")
@@ -259,12 +264,25 @@ func TestUpstreamModelIgnoresOtherChannels(t *testing.T) {
 	}
 }
 
-func TestUpstreamModelNotFound(t *testing.T) {
+// 一条别名都没配过的规范名按同名处理——这是「一条别名都没配」的部署，
+// 大多数部署都是这样，它们必须照旧能打通。
+//
+// 判据只落在**这个规范名**上：表里有没有别的行不参与判断。所以下面先插一条
+// 别的规范名的别名，再断言这个没配过的名字照样按同名返回——「表里有行就报错」
+// 那种写法会在这里失败。
+func TestUpstreamModelFallsBackToIdentityWhenNoAliasForThisName(t *testing.T) {
 	db := testDB(t)
+	otherModel := uniqueName("model")
+	seedModel(t, db, otherModel)
+	insertAlias(t, db, nil, "platform-"+otherModel, otherModel)
 
-	_, err := New(db).UpstreamModel(context.Background(), 1, uniqueName("nonexistent"))
-	if !errors.Is(err, ErrAliasNotFound) {
-		t.Errorf("err = %v，期望 ErrAliasNotFound", err)
+	model := uniqueName("nonexistent")
+	got, err := New(db).UpstreamModel(context.Background(), 1, model)
+	if err != nil {
+		t.Fatalf("一条别名都没配过的规范名不该报错: %v", err)
+	}
+	if got != model {
+		t.Errorf("UpstreamModel = %q，期望按同名返回 %q", got, model)
 	}
 }
 
@@ -1122,9 +1140,15 @@ func TestDeleteAlias(t *testing.T) {
 			t.Fatalf("别名 %d 还在清单里", id)
 		}
 	}
-	// 删过的那条再查一次：选路那条路径要报 ErrAliasNotFound，不是拿到空串。
-	if _, err := New(db).UpstreamModel(context.Background(), channel, model); !errors.Is(err, ErrAliasNotFound) {
-		t.Errorf("err = %v，期望 ErrAliasNotFound", err)
+	// 删过的那条再查一次：这个规范名**一条别名都不剩**了，于是回到「没配过
+	// 别名」那个状态，按同名返回——不是报错，也不是拿到空串。
+	//
+	// 这里刻意不报 ErrAliasNotFound：那会让「删掉最后一条别名」把整个模型名
+	// 变成不可用，而删别名的本意只是让这个名字恢复原样。
+	if got, err := New(db).UpstreamModel(context.Background(), channel, model); err != nil {
+		t.Errorf("删掉最后一条别名后应按同名返回，得到错误 %v", err)
+	} else if got != model {
+		t.Errorf("UpstreamModel = %q，期望按同名返回 %q", got, model)
 	}
 	if err := admin.DeleteAlias(context.Background(), id); !errors.Is(err, ErrAliasIDNotFound) {
 		t.Errorf("err = %v，期望 ErrAliasIDNotFound", err)

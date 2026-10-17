@@ -114,7 +114,43 @@ type Router struct {
 	Rand *rand.Rand
 	// Now 可注入，便于测试时间相关的逻辑。
 	Now func() time.Time
+
+	// Aliases 把规范名翻成某个渠道上的上游名。**必填**，nil 时请求失败
+	// （见 ErrNoAliasSource）。
+	//
+	// # 为什么这一项在路由层
+	//
+	// 一个规范名在不同渠道下对应不同上游名，所以「翻成什么」只有拿到
+	// **选中的那个渠道**之后才答得出来，而选渠道正是本包的事。放在更上层
+	// （入口）只能翻一次，翻出来的是「某个候选」的名字；放在更下层
+	// （适配器）则要让适配器自己去查库，而它连渠道配置之外的东西都不该碰。
+	//
+	// # 为什么是接口而不是直接查库
+	//
+	// 本包不碰数据库：它只做排序与重试，脱离库与网络就能测。别名的判据
+	// （渠道级优先于平台级、一条都没配过时按同名处理）只有一份实现，在
+	// internal/catalog；这里只问一句「这个渠道上这个规范名该叫什么」。
+	Aliases ModelAliases
 }
+
+// ModelAliases 把规范模型名翻成某个渠道上的上游模型名。
+//
+// 声明在本包、实现在 internal/catalog——与 CandidateSource 在 gateway 声明、
+// 由 internal/channels 实现是同一个做法：本包不认识那张表，只要求一个答案。
+type ModelAliases interface {
+	UpstreamModel(ctx context.Context, channelID int64, canonicalModel string) (string, error)
+}
+
+// ErrNoAliasSource 表示没有配置别名来源。
+//
+// 它与「这个渠道没配别名」分开：那个是配置缺失（要人去补一条别名），
+// 这个是**装配缺失**（要人去接一行代码）。两者的处置完全不同。
+//
+// 不把 nil 当成「不做翻译、原样发规范名」：那会让「忘接了」与「这个部署
+// 不用别名」在响应、日志和账单上完全一样，而前者意味着别名功能整个没生效
+// ——上游收到的名字是规范名，只要两者不同就必然打不通，而现场看到的只是
+// 上游说这个模型不存在。
+var ErrNoAliasSource = errors.New("未配置别名来源：规范名到上游名的映射没有接上")
 
 // Weights 是各维度在总分里的权重。
 //
@@ -640,6 +676,15 @@ type Result struct {
 	Response *channel.Response
 	// Channel 是最终成功（或最后失败）的那个渠道。
 	Channel channel.Channel
+	// UpstreamModel 是这次请求**实际发出去**的上游模型名（见 upstreamRequest）。
+	//
+	// 它由本包给出来，因为只有这里知道最终用的是哪一次翻译：别名逐渠道配，
+	// 换渠道重试时每个候选各翻一次，翻出来的名字可能不同。上层据此记下
+	// billing_requests.upstream_model——那一列要回答的是「这次实际用了哪个
+	// 上游名」，而事后重查一次别名答不出这个问题（配置可能已经改过）。
+	//
+	// 失败路径（返回错误）时它没有意义：没有一次调用成功。
+	UpstreamModel string
 	// Attempts 按顺序记录了每一次尝试，包括失败的。
 	// 计费与排查都需要它：失败的调用不计费，但要知道发生过。
 	Attempts []Attempt
@@ -694,6 +739,9 @@ func worthNextCandidate(err error) bool {
 // 400、401 这类换渠道也是同一个错，重试只会把费用与延迟乘以候选数。
 // 唯一的例外是 ErrUnknownType——见 worthNextCandidate。
 //
+// req.Model 是**规范名**：本包在每次尝试之前按那个候选的渠道把它翻成上游名
+// （见 upstreamRequest），并且**不改动 req 本身**。
+//
 // 它是「筛 + 排 + 执行」一步到位的形态。要在这两步之间插一件事（今天只有
 // 插件）的调用方走 ChatPlan。
 func (r *Router) Chat(ctx context.Context, exec Executor, req *channel.Request, candidates []Candidate, canonicalModel string) (*Result, error) {
@@ -723,6 +771,12 @@ func (r *Router) Chat(ctx context.Context, exec Executor, req *channel.Request, 
 // 的候选」与「被执行的候选」是同一份，这一点由调用约定保证，本方法不重复
 // 校验——决策者那一侧已经挡下了候选集之外的决策（见 internal/plugin 的
 // pickChannel），而本方法看不到那一侧的上下文。
+//
+// # 规范名在这里翻成上游名
+//
+// 每个候选在被执行**之前**按它自己的渠道翻一次（见 upstreamRequest），
+// 所以决策者看到的是规范名（那是调用方要的名字），上游收到的是上游名。
+// 翻不出来时这次请求失败，不换下一个候选——见 chatWithPlan。
 func (r *Router) ChatPlan(ctx context.Context, exec Executor, req *channel.Request, plan Plan, pinChannelID int64) (*Result, error) {
 	return r.chatWithPlan(ctx, exec, req, plan.pinFirst(pinChannelID))
 }
@@ -740,8 +794,19 @@ func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.R
 			return nil, err
 		}
 
+		attempt, aliasErr := r.upstreamRequest(ctx, req, c)
+		if aliasErr != nil {
+			// 翻不出上游名是**配置/装配**问题，不是上游抖动：不换下一个
+			// 候选，直接失败。换下去只会把「这个渠道没配别名」说成
+			// 「所有候选都试过了」，而后者看起来像上游全挂了。
+			//
+			// 已经试过的那几次照常带回去（result 里），调用方要按它们记
+			// 渠道健康度——那些调用真的发生过。
+			return result, aliasErr
+		}
+
 		started := r.now()
-		resp, err := exec.Chat(ctx, c.Channel, req)
+		resp, err := exec.Chat(ctx, c.Channel, attempt)
 		result.Attempts = append(result.Attempts, Attempt{
 			ChannelID:   c.Channel.ID,
 			ChannelName: c.Channel.Name,
@@ -754,6 +819,7 @@ func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.R
 
 		if err == nil {
 			result.Response = resp
+			result.UpstreamModel = attempt.Model
 			return result, nil
 		}
 		if !worthNextCandidate(err) {
@@ -763,6 +829,43 @@ func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.R
 		}
 	}
 	return result, &Errors{Attempts: result.Attempts}
+}
+
+// upstreamRequest 给出这次尝试要发出去的那份请求：规范名已按**这个渠道**
+// 翻成上游名。
+//
+// # 为什么每次尝试各翻一次
+//
+// 别名是逐渠道配的（同一个规范名在这家上游叫 vendor/x、在那家叫 x），
+// 而换渠道重试意味着同一个请求会发给不同的渠道。翻一次、所有候选共用的话，
+// 第二个渠道收到的会是第一个渠道的名字——那是一次**静默发错**：上游可能
+// 恰好也认识那个名字（两家叫法偶尔相同），于是请求成功、账单正常，只有
+// 用的是别家的名字这件事没有任何地方报出来。
+//
+// # 为什么返回副本
+//
+// req 是调用方的东西，它还要用它去渲染响应（报给调用方的模型名是**他要的
+// 那个**，见 internal/api 的 renderSuccess）与采集请求快照。就地改 Model
+// 会让响应里的 model 变成上游名，也会让重试循环的第二圈拿一个已经翻过的
+// 名字再翻一次。
+func (r *Router) upstreamRequest(ctx context.Context, req *channel.Request, c Candidate) (*channel.Request, error) {
+	if r.Aliases == nil {
+		return nil, ErrNoAliasSource
+	}
+	// 变量名写全成 upstreamName：本包与 internal/gateway、internal/api 里一路
+	// 叫 upstream 的形参指的是**调用方发来的那份请求**（它的 Model 是规范名），
+	// 而这里要的是「上游模型名」这一个字符串。同一个词在相邻两个包里指相反
+	// 的东西，而本包反复强调的正是「上游名与规范名别混」。
+	upstreamName, err := r.Aliases.UpstreamModel(ctx, c.Channel.ID, req.Model)
+	if err != nil {
+		// 原样返回，不再包一层：internal/catalog 的错误已经写明了渠道 id 与
+		// 规范名，再包一次只是把同一句话重复两遍。
+		return nil, err
+	}
+
+	attempt := *req
+	attempt.Model = upstreamName
+	return &attempt, nil
 }
 
 func (r *Router) now() time.Time {
