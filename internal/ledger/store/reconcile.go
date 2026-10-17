@@ -870,7 +870,7 @@ func (s *Store) persistFindings(ctx context.Context, report *Report) error {
 // 「有 pending 预留、既没有钱包行也没有账本分录」的用户，另外两侧都看不见
 // 他——而还没开过户的用户恰好是这个形状，WalletMissing 那条分支存在的意义
 // 正是把他报出来。少了这一侧，他整体在候选集之外。（开户当前由
-// `larkaxctl wallet open` 做，见 internal/ledger/store/wallet.go：注册流程
+// `larkaxctl wallet create` 做，见 internal/ledger/store/wallet.go：注册流程
 // 从来就不建钱包行，所以这不是「注册漏了一步」，而是「还没人开过户」。）
 //
 // # 认科目用的是哪一种写法

@@ -20,23 +20,23 @@ const aliasUsage = `larkaxctl alias 管理模型别名。
 别名说的是「某家上游对同一个模型叫什么名字」：一个上游模型名对应一个规范名。
 
 用法：
-  larkaxctl alias add --canonical <规范名> --upstream <上游模型名>
-                      [--channel <渠道 ID>] [--overrides <JSON 对象>]
-  larkaxctl alias list [--channel <渠道 ID>] [--canonical <规范名>]
+  larkaxctl alias create --model <规范名> --upstream <上游模型名>
+                         [--channel <渠道 ID>] [--overrides <JSON 对象>]
+  larkaxctl alias list [--channel <渠道 ID>] [--model <规范名>]
   larkaxctl alias update --id <别名 ID>
                          [--upstream <上游模型名>] [--overrides <JSON 对象>]
   larkaxctl alias delete --id <别名 ID>
-  larkaxctl alias resolve --canonical <规范名> [--channel <渠道 ID>]
+  larkaxctl alias resolve --model <规范名> [--channel <渠道 ID>]
 
 不带 --channel 的别名是**平台级**，对所有渠道生效；带 --channel 的是渠道级，
 只对那个渠道生效，并盖过同一条平台级别名。同一个规范名在每个范围里最多
 只能有一个上游名——两个上游名指向同一个规范名时，选路无从取舍。
 
 list 默认列平台级别名；--channel <ID> 列那个渠道的渠道级别名；
---canonical <名称> 列出这个规范名在**所有范围**下对应的上游名（两种范围一起）。
+--model <名称> 列出这个规范名在**所有范围**下对应的上游名（两种范围一起）。
 后两者只能给一个。
 
-add 的 stdout 只有新别名的 ID，其余信息走 stderr。
+create 的 stdout 只有新别名的 ID，其余信息走 stderr。
 
 --overrides 是一组**上游请求参数**的覆盖，只允许三个键：temperature、top_p、
 max_tokens。别的键在写入时就被拒绝——它们要么改的是请求的形状（model、
@@ -54,6 +54,10 @@ resolve 回答的是选路那个问题：**这个规范名在这个渠道上实�
 在这里看得见（list 只是把两种范围各列一遍，不回答谁赢）。stdout 只有那个
 上游模型名，其余信息走 stderr；--channel 留空表示不针对具体渠道，只看平台级
 那条。一条都没配上时非零退出。
+
+**旧名仍可用**：alias add 等同于 alias create，--canonical 等同于 --model。
+它们保留是为了不让已经在跑的脚本与部署流程坏掉，行为与新名字逐字相同；
+新写的命令请用新名字。
 `
 
 func runAlias(args []string) error {
@@ -64,8 +68,8 @@ func runAlias(args []string) error {
 	action, rest := args[0], args[1:]
 
 	switch action {
-	case "add":
-		return runAliasAdd(rest)
+	case "create", "add":
+		return runAliasCreate(rest)
 	case "list":
 		return runAliasList(rest)
 	case "update":
@@ -83,12 +87,12 @@ func runAlias(args []string) error {
 	}
 }
 
-func runAliasAdd(args []string) error {
-	if err := jsonUnsupported("alias add"); err != nil {
+func runAliasCreate(args []string) error {
+	if err := jsonUnsupported("alias create"); err != nil {
 		return err
 	}
 
-	req, err := parseAliasAdd(args)
+	req, err := parseAliasCreate(args)
 	if err != nil {
 		return usageErr(err)
 	}
@@ -113,10 +117,10 @@ func runAliasAdd(args []string) error {
 	return nil
 }
 
-func parseAliasAdd(args []string) (catalog.CreateAliasRequest, error) {
-	fs := flag.NewFlagSet("alias add", flag.ContinueOnError)
+func parseAliasCreate(args []string) (catalog.CreateAliasRequest, error) {
+	fs := flag.NewFlagSet("alias create", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, aliasUsage) }
-	canonical := fs.String("canonical", "", "规范模型名，必须已经在目录里")
+	canonical := legacyStringFlag(fs, "model", "canonical", "", "规范模型名，必须已经在目录里")
 	upstream := fs.String("upstream", "", "这家上游对这个模型的叫法")
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示平台级别名")
 	overrides := fs.String("overrides", "", "上游请求参数的覆盖，JSON 对象，只允许 temperature / top_p / max_tokens")
@@ -125,12 +129,12 @@ func parseAliasAdd(args []string) (catalog.CreateAliasRequest, error) {
 	}
 	if fs.NArg() > 0 {
 		return catalog.CreateAliasRequest{}, fmt.Errorf(
-			"add 不接受位置参数，得到 %q：规范名用 --canonical 指定", fs.Arg(0))
+			"create 不接受位置参数，得到 %q：规范名用 --model 指定", fs.Arg(0))
 	}
 
 	if strings.TrimSpace(*canonical) == "" {
 		fs.Usage()
-		return catalog.CreateAliasRequest{}, errors.New("缺少 --canonical")
+		return catalog.CreateAliasRequest{}, errors.New("缺少 --model")
 	}
 	if strings.TrimSpace(*upstream) == "" {
 		fs.Usage()
@@ -157,7 +161,7 @@ func runAliasList(args []string) error {
 	fs := flag.NewFlagSet("alias list", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, aliasUsage) }
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示平台级别名")
-	canonical := fs.String("canonical", "", "按规范名列，两种范围一起列出")
+	canonical := legacyStringFlag(fs, "model", "canonical", "", "按规范名列，两种范围一起列出")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -166,8 +170,9 @@ func runAliasList(args []string) error {
 	}
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
-	if given["channel"] && given["canonical"] {
-		return usageErr(errors.New("--channel 与 --canonical 只能给一个：" +
+	// 判据要连旧名一起看：`--canonical` 写出来时 Visit 记的是它，不是 --model。
+	if given["channel"] && legacyGiven(given, "model", "canonical") {
+		return usageErr(errors.New("--channel 与 --model 只能给一个：" +
 			"前者按渠道列，后者按规范名列（它的结果里两种范围都有）"))
 	}
 	if *channelID < 0 {
@@ -234,7 +239,7 @@ func runAliasUpdate(args []string) error {
 
 // parseAliasUpdate 解析 update 的参数。
 //
-// 没有 --channel 与 --canonical：那两栏不可改，见 catalog.UpdateAliasRequest。
+// 没有 --channel 与 --model：那两栏不可改，见 catalog.UpdateAliasRequest。
 // 把它们做成标志再拒绝，比根本没有这两个标志更容易让人以为改得动。
 func parseAliasUpdate(args []string) (catalog.UpdateAliasRequest, error) {
 	fs := flag.NewFlagSet("alias update", flag.ContinueOnError)
@@ -329,18 +334,18 @@ func runAliasDelete(args []string) error {
 func runAliasResolve(args []string) error {
 	fs := flag.NewFlagSet("alias resolve", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, aliasUsage) }
-	canonical := fs.String("canonical", "", "规范模型名")
+	canonical := legacyStringFlag(fs, "model", "canonical", "", "规范模型名")
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示不针对具体渠道（只看平台级那条）")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
 		return usageErr(fmt.Errorf(
-			"resolve 不接受位置参数，得到 %q：规范名用 --canonical 指定", fs.Arg(0)))
+			"resolve 不接受位置参数，得到 %q：规范名用 --model 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*canonical) == "" {
 		fs.Usage()
-		return usageErr(errors.New("缺少 --canonical"))
+		return usageErr(errors.New("缺少 --model"))
 	}
 	if *channelID < 0 {
 		return usageErr(fmt.Errorf(
@@ -378,7 +383,7 @@ func runAliasResolve(args []string) error {
 // 与 printCreatedUser 同一条契约：**stdout 恰好一行，只放能被直接接走的那个值**，
 // 其余信息走 stderr。这里要接走的是上游模型名——
 //
-//	larkaxctl alias resolve --channel 3 --canonical m1
+//	larkaxctl alias resolve --channel 3 --model m1
 //
 // 的输出可以直接喂给别的工具，而「用哪个范围的名字」这件事必须让人看见：
 // 同一个规范名在渠道级与平台级各有一条时，只看名字分不出命中的是哪一条。
@@ -449,7 +454,7 @@ func aliasResolveDoc(canonical string, channelID int64, upstream string) map[str
 // printAliasList 打印别名清单。
 func printAliasList(w io.Writer, aliases []catalog.Alias) {
 	if len(aliases) == 0 {
-		_, _ = fmt.Fprintln(w, "暂无别名。可使用 larkaxctl alias add 添加。")
+		_, _ = fmt.Fprintln(w, "暂无别名。可使用 larkaxctl alias create 添加。")
 		return
 	}
 

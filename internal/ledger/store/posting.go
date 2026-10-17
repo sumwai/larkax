@@ -195,7 +195,7 @@ func lockPostingWallets(ctx context.Context, tx *sql.Tx, entries []ledger.Entry)
 			`SELECT 1 FROM user_wallets WHERE user_id = $1 AND asset = $2 FOR UPDATE`,
 			k.UserID, k.Asset).Scan(&one)
 		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%w: 用户 %d 没有 %s 钱包，先用 larkaxctl wallet open 开户",
+			return fmt.Errorf("%w: 用户 %d 没有 %s 钱包，先用 larkaxctl wallet create 开户",
 				ErrNoWallet, k.UserID, k.Asset)
 		}
 		if err != nil {

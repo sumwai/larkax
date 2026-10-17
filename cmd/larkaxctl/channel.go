@@ -26,7 +26,7 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel create --name <名称> --type <类型> --base-url <URL>
                            --models <模型名,...>
                            (--credential-stdin | --credential-env <变量名>)
-                           [--owner <用户 ID 或用户名>] [--weight <权重>]
+                           [--user <用户 ID 或用户名>] [--weight <权重>]
                            [--priority <优先级>] [--setting <JSON 对象>]
   larkaxctl channel list [--all]
   larkaxctl channel update --id <渠道 ID>
@@ -69,6 +69,9 @@ delete 是**软删**：置 deleted_at 并把状态改成 disabled，行与它的
 --setting 是渠道私有配置（自由形态的 JSON 对象），键由该渠道 type 指向的
 适配器解释，选路层不认，管理面也不校验键名。**当前没有任何适配器读它**，
 所以给了 --setting 时命令会把这一点说出来，见 internal/channel 的 Setting。
+
+**选项的旧名仍可用**：--owner 等同于 --user。它保留是为了不让已经在跑的脚本
+与部署流程坏掉，行为一致；新写的命令请用 --user。
 `
 
 // channelTimeout 是渠道命令连库与写库的时间上限。
@@ -156,7 +159,7 @@ func runChannelCreate(args []string) error {
 
 // parseChannelCreate 解析 create 的参数。
 //
-// 它多带一个 ownerRef 返回值：--owner 要连库才能解析成用户 ID，而参数解析
+// 它多带一个 ownerRef 返回值：--user 要连库才能解析成用户 ID，而参数解析
 // 必须在连库之前完成。所以这里只做「有没有给、给了什么」，解析留给调用方。
 func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	fs := flag.NewFlagSet("channel create", flag.ContinueOnError)
@@ -165,7 +168,7 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	channelType := fs.String("type", "", "适配器类型")
 	baseURL := fs.String("base-url", "", "上游地址，必须以 http:// 或 https:// 开头")
 	models := fs.String("models", "", "该渠道支持的规范模型名，逗号分隔，至少一个")
-	owner := fs.String("owner", "", "归属用户（ID 或用户名），留空表示平台自营")
+	owner := legacyStringFlag(fs, "user", "owner", "", "归属用户（ID 或用户名），留空表示平台自营")
 	weight := fs.Int("weight", 0, "分流权重，0 表示用默认值 1")
 	priority := fs.Int("priority", 0, "优先级，越大越优先")
 	setting := fs.String("setting", "", "渠道级 JSON 配置对象，留空表示空对象")
@@ -221,7 +224,7 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 
 // parseChannelUpdate 解析 update 的参数。
 //
-// 没有 --owner：归属（平台自营 / 某个商家）不在写入路径能改的字段里，
+// 没有 --user：归属（平台自营 / 某个商家）不在写入路径能改的字段里，
 // 见 channels.UpdateRequest。要换归属是另一件事，不该混在一次「改配置」里。
 func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	fs := flag.NewFlagSet("channel update", flag.ContinueOnError)

@@ -1234,7 +1234,7 @@ func TestCatalogProfileFiltersCandidateInRoute(t *testing.T) {
 
 // 目录里那条记录**没配过**能力（六列都是 NULL）时，带工具的请求照样选得到它。
 //
-// 这是 #485 的核心：`larkaxctl model add` 不勾那六个开关时，库里落的是 NULL
+// 这是 #485 的核心：`larkaxctl model create` 不勾那六个开关时，库里落的是 NULL
 // 而不是 false。落成 false 的话，一条只填了名字的记录会让所有带工具的请求
 // 选不到它——哪怕那个上游其实支持工具。上一组用例钉的是另一半（写了 false
 // 就是不支持），两条并排才有意义。
@@ -1244,7 +1244,7 @@ func TestUnknownCapabilityDoesNotFilterCandidate(t *testing.T) {
 	model := uniqueModel()
 	insertChannel(t, db, sealer, channelSpec{model: model})
 
-	// 走写入路径且不给任何能力开关：与 `larkaxctl model add --canonical …
+	// 走写入路径且不给任何能力开关：与 `larkaxctl model create --model …
 	// --display …`（不带那六个标志）是同一条路——命令行那一层只把参数搬进
 	// 这个请求，判据不重写第二遍。
 	if _, err := catalog.NewAdmin(db).Create(context.Background(), catalog.CreateModelRequest{

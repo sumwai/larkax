@@ -12,25 +12,25 @@ import (
 	"github.com/sumwai/larkax/internal/catalog"
 )
 
-// TestModelAddRejectsBadFlags 走的是不碰数据库的那几条路径。
-func TestModelAddRejectsBadFlags(t *testing.T) {
+// TestModelCreateRejectsBadFlags 走的是不碰数据库的那几条路径。
+func TestModelCreateRejectsBadFlags(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
 		want string
 	}{
-		{"没有 --canonical", []string{"--display", "展示名"}, "缺少 --canonical"},
-		{"没有 --display", []string{"--canonical", "m1"}, "缺少 --display"},
+		{"没有 --model", []string{"--display", "展示名"}, "缺少 --model"},
+		{"没有 --display", []string{"--model", "m1"}, "缺少 --display"},
 		{"日期不是 YYYY-MM-DD", []string{
-			"--canonical", "m1", "--display", "展示名",
+			"--model", "m1", "--display", "展示名",
 			"--knowledge-cutoff", "2026/01/31",
 		}, "YYYY-MM-DD"},
-		{"多出位置参数", []string{"--canonical", "m1", "--display", "展示名", "extra"}, "不接受位置参数"},
+		{"多出位置参数", []string{"--model", "m1", "--display", "展示名", "extra"}, "不接受位置参数"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := runCaptured(t, func() error { return runModelAdd(tc.args) })
+			err := runCaptured(t, func() error { return runModelCreate(tc.args) })
 			if err == nil {
 				t.Fatalf("期望报错，却通过了")
 			}
@@ -44,11 +44,11 @@ func TestModelAddRejectsBadFlags(t *testing.T) {
 	}
 }
 
-// TestModelAddThenList 钉住规范模型的写入与列举。
+// TestModelCreateThenList 钉住规范模型的写入与列举。
 //
 // 写进去的值直接从读取路径读回来核对——命令行这一层只是把字符串变成包要的
 // 结构，所以「写对了」这件事只能由「读出来对得上」证明。
-func TestModelAddThenList(t *testing.T) {
+func TestModelCreateThenList(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 
@@ -56,8 +56,8 @@ func TestModelAddThenList(t *testing.T) {
 	display := canonical + "-展示名"
 
 	stdout, _ := captureStreams(t, func() {
-		if err := runModelAdd([]string{
-			"--canonical", canonical, "--display", display,
+		if err := runModelCreate([]string{
+			"--model", canonical, "--display", display,
 			"--vendor", "example-vendor", "--family", "example-family",
 			"--context-limit", "200000", "--output-limit", "64000",
 			"--tools", "--vision", "--cache=false",
@@ -132,13 +132,13 @@ func TestModelUpdateRejectsBadFlags(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"没有 --canonical", []string{"--display", "展示名"}, "缺少 --canonical"},
-		{"没有要改的字段", []string{"--canonical", "m1"}, "至少要改一项"},
+		{"没有 --model", []string{"--display", "展示名"}, "缺少 --model"},
+		{"没有要改的字段", []string{"--model", "m1"}, "至少要改一项"},
 		{"日期不是 YYYY-MM-DD", []string{
-			"--canonical", "m1", "--release-date", "2026/01/31",
+			"--model", "m1", "--release-date", "2026/01/31",
 		}, "YYYY-MM-DD"},
 		{"多出位置参数", []string{
-			"--canonical", "m1", "--vendor", "v", "extra",
+			"--model", "m1", "--vendor", "v", "extra",
 		}, "不接受位置参数"},
 	}
 
@@ -170,8 +170,8 @@ func TestModelUpdateMergesCapabilities(t *testing.T) {
 
 	canonical := uniqueName("model")
 	_, _ = captureStreams(t, func() {
-		if err := runModelAdd([]string{
-			"--canonical", canonical, "--display", "展示名",
+		if err := runModelCreate([]string{
+			"--model", canonical, "--display", "展示名",
 			"--tools", "--vision", "--cache",
 		}); err != nil {
 			t.Fatalf("add 失败: %v", err)
@@ -181,7 +181,7 @@ func TestModelUpdateMergesCapabilities(t *testing.T) {
 	// 只给 --reasoning：另外三个能力原样留着，而没配过的两项**仍是未知**
 	// ——不是被这次全量覆盖折成 false。
 	_, _ = captureStreams(t, func() {
-		if err := runModelUpdate([]string{"--canonical", canonical, "--reasoning"}); err != nil {
+		if err := runModelUpdate([]string{"--model", canonical, "--reasoning"}); err != nil {
 			t.Fatalf("update 失败: %v", err)
 		}
 	})
@@ -196,7 +196,7 @@ func TestModelUpdateMergesCapabilities(t *testing.T) {
 	// 而 flag 包的零值分不出它们——判据是 fs.Visit 记下的清单。判据写错时，
 	// 这个标志会静默地永远算「没给」，表现是「关不掉一个能力」。
 	_, _ = captureStreams(t, func() {
-		if err := runModelUpdate([]string{"--canonical", canonical, "--tools=false"}); err != nil {
+		if err := runModelUpdate([]string{"--model", canonical, "--tools=false"}); err != nil {
 			t.Fatalf("update --tools=false 失败: %v", err)
 		}
 	})
@@ -219,8 +219,8 @@ func TestModelUpdateClearsFields(t *testing.T) {
 	canonical := uniqueName("model")
 	display := canonical + "-展示名"
 	_, _ = captureStreams(t, func() {
-		if err := runModelAdd([]string{
-			"--canonical", canonical, "--display", display,
+		if err := runModelCreate([]string{
+			"--model", canonical, "--display", display,
 			"--vendor", "example-vendor", "--family", "example-family",
 			"--context-limit", "200000", "--modalities-input", "text,image",
 			"--knowledge-cutoff", "2026-01-31",
@@ -231,7 +231,7 @@ func TestModelUpdateClearsFields(t *testing.T) {
 
 	_, _ = captureStreams(t, func() {
 		if err := runModelUpdate([]string{
-			"--canonical", canonical,
+			"--model", canonical,
 			"--vendor", "", "--context-limit", "0",
 			"--modalities-input", "", "--knowledge-cutoff", "",
 		}); err != nil {
@@ -260,15 +260,15 @@ func TestModelUpdateClearsFields(t *testing.T) {
 	}
 }
 
-// TestModelShow 钉住 show 打出来的那一份。
-func TestModelShow(t *testing.T) {
+// TestModelGet 钉住 show 打出来的那一份。
+func TestModelGet(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 
 	canonical := uniqueName("model")
 	_, _ = captureStreams(t, func() {
-		if err := runModelAdd([]string{
-			"--canonical", canonical, "--display", "展示名",
+		if err := runModelCreate([]string{
+			"--model", canonical, "--display", "展示名",
 			"--vendor", "example-vendor", "--context-limit", "200000",
 			"--tools", "--vision=false", "--knowledge-cutoff", "2026-01-31",
 		}); err != nil {
@@ -278,7 +278,7 @@ func TestModelShow(t *testing.T) {
 	id := readModel(t, db, canonical).ID
 
 	out, _ := captureStreams(t, func() {
-		if err := runModelShow([]string{"--canonical", canonical}); err != nil {
+		if err := runModelGet([]string{"--model", canonical}); err != nil {
 			t.Fatalf("show 失败: %v", err)
 		}
 	})
@@ -304,16 +304,16 @@ func TestModelShow(t *testing.T) {
 	}
 }
 
-// TestModelShowMissing 钉住「要查的那一行不存在」的退出码。
+// TestModelGetMissing 钉住「要查的那一行不存在」的退出码。
 //
 // 它必须与「其他失败」分开：前者是名字写错了或者模型被删了，下一步是去看
 // 目录里现在有什么；后者是环境问题。混成一个码，脚本只能去匹配错误文本。
-func TestModelShowMissing(t *testing.T) {
+func TestModelGetMissing(t *testing.T) {
 	testDB(t)
 	setupEnv(t)
 
 	err := runCaptured(t, func() error {
-		return runModelShow([]string{"--canonical", uniqueName("nonexistent")})
+		return runModelGet([]string{"--model", uniqueName("nonexistent")})
 	})
 	if err == nil {
 		t.Fatal("不存在的规范名应当报错")
@@ -337,13 +337,13 @@ func TestModelDeleteRefusesWhenReferenced(t *testing.T) {
 
 	canonical := uniqueName("model")
 	_, _ = captureStreams(t, func() {
-		if err := runModelAdd([]string{"--canonical", canonical, "--display", "展示名"}); err != nil {
+		if err := runModelCreate([]string{"--model", canonical, "--display", "展示名"}); err != nil {
 			t.Fatalf("model add 失败: %v", err)
 		}
 	})
 	aliasOut, _ := captureStreams(t, func() {
-		if err := runAliasAdd([]string{
-			"--canonical", canonical, "--upstream", uniqueName("upstream"),
+		if err := runAliasCreate([]string{
+			"--model", canonical, "--upstream", uniqueName("upstream"),
 		}); err != nil {
 			t.Fatalf("alias add 失败: %v", err)
 		}
@@ -354,7 +354,7 @@ func TestModelDeleteRefusesWhenReferenced(t *testing.T) {
 	}
 
 	delErr := runCaptured(t, func() error {
-		return runModelDelete([]string{"--canonical", canonical})
+		return runModelDelete([]string{"--model", canonical})
 	})
 	if delErr == nil {
 		t.Fatal("还被别名引用着的规范名不该删得掉")
@@ -376,7 +376,7 @@ func TestModelDeleteRefusesWhenReferenced(t *testing.T) {
 		}
 	})
 	_, _ = captureStreams(t, func() {
-		if deleteErr := runModelDelete([]string{"--canonical", canonical}); deleteErr != nil {
+		if deleteErr := runModelDelete([]string{"--model", canonical}); deleteErr != nil {
 			t.Fatalf("解除引用之后应当删得掉: %v", deleteErr)
 		}
 	})
@@ -386,7 +386,7 @@ func TestModelDeleteRefusesWhenReferenced(t *testing.T) {
 
 	// 再删一次：那一行已经不在了。
 	err = runCaptured(t, func() error {
-		return runModelDelete([]string{"--canonical", canonical})
+		return runModelDelete([]string{"--model", canonical})
 	})
 	if !errors.Is(err, catalog.ErrModelNotFound) {
 		t.Errorf("重复删除期望 ErrModelNotFound，得到 %v", err)
@@ -437,18 +437,18 @@ func declaredText(c catalog.Capabilities) string {
 		" batch=" + state(c.Batch)
 }
 
-// TestModelAddRejectsDuplicateCanonical 钉住重复的规范名。
+// TestModelCreateRejectsDuplicateCanonical 钉住重复的规范名。
 //
 // 它是选路与计费共用的键，重复的键会让「这次请求按哪个模型算」没有答案，
 // 所以必须撞在唯一键上，而不是静默地多出一行。
-func TestModelAddRejectsDuplicateCanonical(t *testing.T) {
+func TestModelCreateRejectsDuplicateCanonical(t *testing.T) {
 	testDB(t)
 	setupEnv(t)
 
 	canonical := uniqueName("model")
 	add := func() error {
 		return runCaptured(t, func() error {
-			return runModelAdd([]string{"--canonical", canonical, "--display", "展示名"})
+			return runModelCreate([]string{"--model", canonical, "--display", "展示名"})
 		})
 	}
 
@@ -540,8 +540,8 @@ func TestModelListDocIsMachineReadable(t *testing.T) {
 	})
 }
 
-// TestModelShowDocIsMachineReadable 钉住 model show 的机器可读形状。
-func TestModelShowDocIsMachineReadable(t *testing.T) {
+// TestModelGetDocIsMachineReadable 钉住 model show 的机器可读形状。
+func TestModelGetDocIsMachineReadable(t *testing.T) {
 	cutoff := time.Date(2025, 4, 30, 0, 0, 0, 0, time.UTC)
 	released := time.Date(2026, 2, 3, 0, 0, 0, 0, time.UTC)
 
@@ -554,7 +554,7 @@ func TestModelShowDocIsMachineReadable(t *testing.T) {
 			UpdatedAt:        time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
 		}
 
-		got := jsonRoundTrip(t, modelShowDoc(m))
+		got := jsonRoundTrip(t, modelGetDoc(m))
 		assertJSONField(t, got, "status", jsonOK)
 		model := jsonObjectField(t, got, "model")
 		assertJSONField(t, model, "canonical_name", "m1")
@@ -573,7 +573,7 @@ func TestModelShowDocIsMachineReadable(t *testing.T) {
 			UpdatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
 		}
 
-		model := jsonObjectField(t, jsonRoundTrip(t, modelShowDoc(m)), "model")
+		model := jsonObjectField(t, jsonRoundTrip(t, modelGetDoc(m)), "model")
 		assertJSONField(t, model, "knowledge_cutoff", nil)
 		assertJSONField(t, model, "release_date", nil)
 		assertJSONField(t, model, "canonical_model_id", nil)
@@ -582,7 +582,7 @@ func TestModelShowDocIsMachineReadable(t *testing.T) {
 
 // TestModelWriteCommandsRejectJSONBeforeDoingAnything 钉住写类命令的守卫位置。
 //
-// 参数本身就不成立（缺 --canonical 一类），而要看到的是**不支持 json** 那条错
+// 参数本身就不成立（缺 --model 一类），而要看到的是**不支持 json** 那条错
 // ——它证明守卫在参数解析与连库之前。
 func TestModelWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
 	withFormat(t, formatJSON)
@@ -591,7 +591,7 @@ func TestModelWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
 		command string
 		run     func() error
 	}{
-		{"model add", func() error { return runModelAdd(nil) }},
+		{"model create", func() error { return runModelCreate(nil) }},
 		{"model update", func() error { return runModelUpdate(nil) }},
 		{"model delete", func() error { return runModelDelete(nil) }},
 	}
@@ -622,7 +622,7 @@ func TestModelListJSONStdoutIsPure(t *testing.T) {
 
 	canonical := uniqueName("model")
 	_, _ = captureStreams(t, func() {
-		if err := runModelAdd([]string{"--canonical", canonical, "--display", "展示名"}); err != nil {
+		if err := runModelCreate([]string{"--model", canonical, "--display", "展示名"}); err != nil {
 			t.Fatalf("model add 失败: %v", err)
 		}
 	})

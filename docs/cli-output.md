@@ -143,7 +143,7 @@ larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled
 
 ### 哪些命令接上了
 
-**只读类**（`list` / `show` / `resolve` / `explain` / `balance` / `verify` /
+**只读类**（`list` / `get` / `resolve` / `explain` / `balance` / `verify` /
 `check` 以及 `doctor`、`version`）已经接上。**写类子命令还没接**：给它们
 `-o json` 会报参数错，而不是打出一段表格——写类命令那时事情已经做完了，
 脚本却只看到一句解析错误，于是重跑一次。

@@ -62,22 +62,22 @@ func TestPrintCreatedAliasLabelsBothNames(t *testing.T) {
 	}
 }
 
-// TestAliasAddRejectsBadFlags 走的是不碰数据库的那几条路径。
-func TestAliasAddRejectsBadFlags(t *testing.T) {
+// TestAliasCreateRejectsBadFlags 走的是不碰数据库的那几条路径。
+func TestAliasCreateRejectsBadFlags(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
 		want string
 	}{
-		{"没有 --canonical", []string{"--upstream", "u1"}, "缺少 --canonical"},
-		{"没有 --upstream", []string{"--canonical", "m1"}, "缺少 --upstream"},
-		{"--channel 是负数", []string{"--canonical", "m1", "--upstream", "u1", "--channel", "-2"}, "无效"},
-		{"多出位置参数", []string{"--canonical", "m1", "--upstream", "u1", "extra"}, "不接受位置参数"},
+		{"没有 --model", []string{"--upstream", "u1"}, "缺少 --model"},
+		{"没有 --upstream", []string{"--model", "m1"}, "缺少 --upstream"},
+		{"--channel 是负数", []string{"--model", "m1", "--upstream", "u1", "--channel", "-2"}, "无效"},
+		{"多出位置参数", []string{"--model", "m1", "--upstream", "u1", "extra"}, "不接受位置参数"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := runCaptured(t, func() error { return runAliasAdd(tc.args) })
+			err := runCaptured(t, func() error { return runAliasCreate(tc.args) })
 			if err == nil {
 				t.Fatalf("期望报错，却通过了")
 			}
@@ -91,13 +91,13 @@ func TestAliasAddRejectsBadFlags(t *testing.T) {
 	}
 }
 
-// TestAliasListRejectsBothModes 钉住 --channel 与 --canonical 互斥。
+// TestAliasListRejectsBothModes 钉住 --channel 与 --model 互斥。
 //
 // 两个一起给时，命令没法同时按两种范围列，而「按其中一个悄悄列出来」会让
 // 使用者以为看到的是另一种——所以它是参数错，不是「随便挑一个」。
 func TestAliasListRejectsBothModes(t *testing.T) {
 	err := runCaptured(t, func() error {
-		return runAliasList([]string{"--channel", "1", "--canonical", "m1"})
+		return runAliasList([]string{"--channel", "1", "--model", "m1"})
 	})
 	if err == nil || !strings.Contains(err.Error(), "只能给一个") {
 		t.Fatalf("两个都给应当被拒，得到 %v", err)
@@ -107,12 +107,12 @@ func TestAliasListRejectsBothModes(t *testing.T) {
 	}
 }
 
-// TestAliasAddThenList 钉住两种范围各自的清单。
+// TestAliasCreateThenList 钉住两种范围各自的清单。
 //
 // 平台级别名对全部渠道生效，渠道级别名只对那个渠道生效并盖过平台级那条——
 // 两种范围混在一条清单里会让人以为渠道级那条对所有渠道都生效，所以
 // `alias list` 默认只列平台级，按渠道列要显式给 --channel。
-func TestAliasAddThenList(t *testing.T) {
+func TestAliasCreateThenList(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 
@@ -122,7 +122,7 @@ func TestAliasAddThenList(t *testing.T) {
 
 	// 别名要挂在一个已经存在的规范名上，所以先建模型。
 	_, _ = captureStreams(t, func() {
-		if err := runModelAdd([]string{"--canonical", canonical, "--display", "展示名"}); err != nil {
+		if err := runModelCreate([]string{"--model", canonical, "--display", "展示名"}); err != nil {
 			t.Fatalf("model add 失败: %v", err)
 		}
 	})
@@ -143,8 +143,8 @@ func TestAliasAddThenList(t *testing.T) {
 	}
 
 	platformOut, _ := captureStreams(t, func() {
-		if addErr := runAliasAdd([]string{
-			"--canonical", canonical, "--upstream", platformUpstream,
+		if addErr := runAliasCreate([]string{
+			"--model", canonical, "--upstream", platformUpstream,
 		}); addErr != nil {
 			t.Fatalf("平台级别名 add 失败: %v", addErr)
 		}
@@ -155,8 +155,8 @@ func TestAliasAddThenList(t *testing.T) {
 	}
 
 	channelAliasOut, _ := captureStreams(t, func() {
-		if addErr := runAliasAdd([]string{
-			"--canonical", canonical, "--upstream", channelUpstream,
+		if addErr := runAliasCreate([]string{
+			"--model", canonical, "--upstream", channelUpstream,
 			"--channel", strconv.FormatInt(channelID, 10),
 		}); addErr != nil {
 			t.Fatalf("渠道级别名 add 失败: %v", addErr)
@@ -211,8 +211,8 @@ func TestAliasAddThenList(t *testing.T) {
 
 	// 按规范名列：两种范围一起出现。
 	byCanonical, _ := captureStreams(t, func() {
-		if listErr := runAliasList([]string{"--canonical", canonical}); listErr != nil {
-			t.Fatalf("list --canonical 失败: %v", listErr)
+		if listErr := runAliasList([]string{"--model", canonical}); listErr != nil {
+			t.Fatalf("list --model 失败: %v", listErr)
 		}
 	})
 	for _, want := range []string{platformUpstream, channelUpstream, "平台", "渠道"} {
@@ -222,25 +222,25 @@ func TestAliasAddThenList(t *testing.T) {
 	}
 }
 
-// TestAliasAddRejectsDuplicateCanonicalInScope 钉住「一个范围里一个规范名
+// TestAliasCreateRejectsDuplicateCanonicalInScope 钉住「一个范围里一个规范名
 // 只能有一个上游名」。
 //
 // 两个上游名指向同一个规范名时，选路无从取舍——选错就是差价，而账单看上去
 // 完全正常。写入路径把它挡在唯一键上，命令这一层要把冲突翻译成退出码 4。
-func TestAliasAddRejectsDuplicateCanonicalInScope(t *testing.T) {
+func TestAliasCreateRejectsDuplicateCanonicalInScope(t *testing.T) {
 	testDB(t)
 	setupEnv(t)
 
 	canonical := uniqueName("model")
 	_, _ = captureStreams(t, func() {
-		if err := runModelAdd([]string{"--canonical", canonical, "--display", "展示名"}); err != nil {
+		if err := runModelCreate([]string{"--model", canonical, "--display", "展示名"}); err != nil {
 			t.Fatalf("model add 失败: %v", err)
 		}
 	})
 
 	add := func(upstream string) error {
 		return runCaptured(t, func() error {
-			return runAliasAdd([]string{"--canonical", canonical, "--upstream", upstream})
+			return runAliasCreate([]string{"--model", canonical, "--upstream", upstream})
 		})
 	}
 	if err := add(uniqueName("upstream")); err != nil {
@@ -290,9 +290,9 @@ func TestAliasResolveRejectsBadFlags(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"没有 --canonical", []string{"--channel", "1"}, "缺少 --canonical"},
-		{"--channel 是负数", []string{"--canonical", "m1", "--channel", "-1"}, "无效"},
-		{"多出位置参数", []string{"--canonical", "m1", "extra"}, "不接受位置参数"},
+		{"没有 --model", []string{"--channel", "1"}, "缺少 --model"},
+		{"--channel 是负数", []string{"--model", "m1", "--channel", "-1"}, "无效"},
+		{"多出位置参数", []string{"--model", "m1", "extra"}, "不接受位置参数"},
 	}
 
 	for _, tc := range cases {
@@ -322,13 +322,13 @@ func TestAliasUpdateAndDelete(t *testing.T) {
 
 	canonical := uniqueName("model")
 	_, _ = captureStreams(t, func() {
-		if err := runModelAdd([]string{"--canonical", canonical, "--display", "展示名"}); err != nil {
+		if err := runModelCreate([]string{"--model", canonical, "--display", "展示名"}); err != nil {
 			t.Fatalf("model add 失败: %v", err)
 		}
 	})
 	out, _ := captureStreams(t, func() {
-		if err := runAliasAdd([]string{
-			"--canonical", canonical, "--upstream", uniqueName("upstream"),
+		if err := runAliasCreate([]string{
+			"--model", canonical, "--upstream", uniqueName("upstream"),
 			"--overrides", `{"temperature":0.5}`,
 		}); err != nil {
 			t.Fatalf("alias add 失败: %v", err)
@@ -400,7 +400,7 @@ func TestAliasResolvePrefersChannelScope(t *testing.T) {
 	channelUpstream := uniqueName("upstream")
 
 	_, _ = captureStreams(t, func() {
-		if err := runModelAdd([]string{"--canonical", canonical, "--display", "展示名"}); err != nil {
+		if err := runModelCreate([]string{"--model", canonical, "--display", "展示名"}); err != nil {
 			t.Fatalf("model add 失败: %v", err)
 		}
 	})
@@ -419,13 +419,13 @@ func TestAliasResolvePrefersChannelScope(t *testing.T) {
 	}
 
 	_, _ = captureStreams(t, func() {
-		if err := runAliasAdd([]string{"--canonical", canonical, "--upstream", platformUpstream}); err != nil {
+		if err := runAliasCreate([]string{"--model", canonical, "--upstream", platformUpstream}); err != nil {
 			t.Fatalf("平台级别名 add 失败: %v", err)
 		}
 	})
 	_, _ = captureStreams(t, func() {
-		if err := runAliasAdd([]string{
-			"--canonical", canonical, "--upstream", channelUpstream,
+		if err := runAliasCreate([]string{
+			"--model", canonical, "--upstream", channelUpstream,
 			"--channel", strconv.FormatInt(channelID, 10),
 		}); err != nil {
 			t.Fatalf("渠道级别名 add 失败: %v", err)
@@ -434,7 +434,7 @@ func TestAliasResolvePrefersChannelScope(t *testing.T) {
 
 	stdout, _ := captureStreams(t, func() {
 		if err := runAliasResolve([]string{
-			"--canonical", canonical, "--channel", strconv.FormatInt(channelID, 10),
+			"--model", canonical, "--channel", strconv.FormatInt(channelID, 10),
 		}); err != nil {
 			t.Fatalf("resolve 失败: %v", err)
 		}
@@ -449,7 +449,7 @@ func TestAliasResolvePrefersChannelScope(t *testing.T) {
 
 	// 不针对具体渠道：平台级那条兜底。
 	stdout, _ = captureStreams(t, func() {
-		if err := runAliasResolve([]string{"--canonical", canonical}); err != nil {
+		if err := runAliasResolve([]string{"--model", canonical}); err != nil {
 			t.Fatalf("resolve 失败: %v", err)
 		}
 	})
@@ -472,7 +472,7 @@ func TestAliasResolveNotConfiguredFallsBackToCanonical(t *testing.T) {
 	canonical := uniqueName("model")
 	var err error
 	stdout, _ := captureStreams(t, func() {
-		err = runAliasResolve([]string{"--canonical", canonical})
+		err = runAliasResolve([]string{"--model", canonical})
 	})
 	if err != nil {
 		t.Fatalf("一条别名都没配时应当原样返回规范名，得到 %v", err)
@@ -500,7 +500,7 @@ func TestAliasResolveMissingForThisChannel(t *testing.T) {
 
 	canonical := uniqueName("model")
 	_, _ = captureStreams(t, func() {
-		if err := runModelAdd([]string{"--canonical", canonical, "--display", "展示名"}); err != nil {
+		if err := runModelCreate([]string{"--model", canonical, "--display", "展示名"}); err != nil {
 			t.Fatalf("model add 失败: %v", err)
 		}
 	})
@@ -519,8 +519,8 @@ func TestAliasResolveMissingForThisChannel(t *testing.T) {
 	}
 	// 别名只配在这一个渠道上：别的渠道查它时命中不了，但这个规范名确实配过。
 	_, _ = captureStreams(t, func() {
-		if addErr := runAliasAdd([]string{
-			"--canonical", canonical, "--upstream", uniqueName("upstream"),
+		if addErr := runAliasCreate([]string{
+			"--model", canonical, "--upstream", uniqueName("upstream"),
 			"--channel", strconv.FormatInt(channelID, 10),
 		}); addErr != nil {
 			t.Fatalf("渠道级别名 add 失败: %v", addErr)
@@ -529,7 +529,7 @@ func TestAliasResolveMissingForThisChannel(t *testing.T) {
 
 	// 不指定渠道 = 只看平台级那条，而平台级没有这一条。
 	err = runCaptured(t, func() error {
-		return runAliasResolve([]string{"--canonical", canonical})
+		return runAliasResolve([]string{"--model", canonical})
 	})
 	if err == nil {
 		t.Fatal("配过别名、却没有一条覆盖这个渠道时应当报错")
@@ -637,7 +637,7 @@ func TestAliasWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
 		command string
 		run     func() error
 	}{
-		{"alias add", func() error { return runAliasAdd(nil) }},
+		{"alias create", func() error { return runAliasCreate(nil) }},
 		{"alias update", func() error { return runAliasUpdate(nil) }},
 		{"alias delete", func() error { return runAliasDelete(nil) }},
 	}
