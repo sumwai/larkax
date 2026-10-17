@@ -130,11 +130,15 @@ type CallRecorder interface {
 // # 与 billing_requests 那两列的关系
 //
 // 同一个事实，**各记各的**。取值口径与 derivation 是同一套（见
-// upstreamEvidence 与 pipeline 的那组常量），但两列回答的问题不同：
-// 账单上的 error_code 答的是「这次为什么没计费」——已计费的请求即便上游
-// 中途报错，那里也是 NULL；而快照的 ErrorKind 答的是「这次响应怎么了」，
-// 所以一条中途报错、照常计费的流在这里会有分类。两列出现分歧时，
-// 以账单为准的是「钱为什么没扣」，以快照为准的是「上游当时回了什么」。
+// upstreamEvidence、streamResponseEvidence 与 pipeline 的那组常量），但两列
+// 回答的问题不同：账单上的 error_code 答的是「这次为什么没计费」，而快照的
+// ErrorKind 答的是「这次响应怎么了」。两列出现分歧时，以账单为准的是
+// 「钱为什么没扣」，以快照为准的是「上游当时回了什么」。
+//
+// 例外是 upstream_stream_truncated：它**应该**在两表上都写。那一次回答计了费
+// （上游已经产生了 token），而「回答只写了一半」是需要能事后读出来的——
+// 只写在快照上的话，按账单核对金额的人看不到它。今天它只落在快照那一侧：
+// 已计费的行上 error_code 的唯一写入点（markSettled）还没接，见 #461。
 type Snapshot struct {
 	RequestID string
 	// UserID 是**发起这次请求的用户**，不是渠道所属的商家。
@@ -171,6 +175,10 @@ type Snapshot struct {
 	//
 	// nil 表示「没有上游失败可归」：成功、客户端断开、插件阻断，以及
 	// 一切不是上游那一侧出的错。两列的关系见类型注释。
+	//
+	// 取值与账单**同源**：同一个事件在两表上必须给同一个词，所以判据只有
+	// 一处（streamResponseEvidence / upstreamEvidence），两边各推一次的话，
+	// 「快照说 A、账单说 B」会静默地发生——那正是 #461 修掉的形状。
 	ErrorKind *string
 }
 

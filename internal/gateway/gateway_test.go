@@ -1388,6 +1388,53 @@ func TestResponseSnapshotWhenNoUpstreamAnswer(t *testing.T) {
 	}
 }
 
+// 非流式、上游回了 2xx 但响应不可用：两表要对同一个值。
+//
+// 这一条是 #461 那两条用例的非流式对照。流式那两条走的是 pumpStream 的
+// 三个闸门，非流式走 responseEvidence，两处判据不同——所以「流式对得上」
+// 推不出「非流式也对得上」，这里单独钉一次。
+//
+// 这一条今天就是绿的（非流式两侧本来就调同一个 upstreamEvidence）。留着
+// 是为了让以后改任一侧的人先看到它红，而不是等到库里两表分岔了才发现。
+func TestNonStreamUnusableResponseClassifiedSameOnBothSides(t *testing.T) {
+	h := newHarness(t)
+	// 200 是真的（上游确实回了响应），但体里是错误：拿到的不是回答。
+	h.executor.err = &channel.ErrUpstream{
+		StatusCode:  http.StatusOK,
+		GotResponse: true,
+		Body:        "upstream said: model not found",
+	}
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err == nil {
+		t.Fatal("上游 200 但体里是 error 应当让请求失败")
+	}
+
+	if got := len(h.reservations.released); got != 1 {
+		t.Fatalf("释放表 = %d 条，期望 1 条", got)
+	}
+	fail := h.reservations.released[0].failure
+	if fail == nil {
+		t.Fatal("这一档失败必须带依据（两列都 NULL 与「这一批没有失败」在库里长得一样）")
+	}
+	if fail.Code != pipeline.ErrorUpstreamUnusableResponse {
+		t.Errorf("账单那一侧的分类 = %q，期望 %q", fail.Code, pipeline.ErrorUpstreamUnusableResponse)
+	}
+
+	var snaps []*Snapshot
+	waitFor(t, "失败也落响应方向的快照", func() bool {
+		snaps = h.snapshots.byDirection("response")
+		return len(snaps) == 1
+	})
+	snap := snaps[0]
+	if snap.UpstreamStatus == nil || *snap.UpstreamStatus != http.StatusOK {
+		t.Errorf("upstream_status = %v，期望 %d（上游真的回了这个码）", snap.UpstreamStatus, http.StatusOK)
+	}
+	if snap.ErrorKind == nil || *snap.ErrorKind != pipeline.ErrorUpstreamUnusableResponse {
+		t.Errorf("快照的 error_kind = %s，期望 %q（与账单同一个值）",
+			kindOf(snap.ErrorKind), pipeline.ErrorUpstreamUnusableResponse)
+	}
+}
+
 // 一次上游调用都没发生时不写响应方向的行。
 //
 // 插件在选路时阻断——这不是「上游回来了什么」，写一行方向为 response 的
