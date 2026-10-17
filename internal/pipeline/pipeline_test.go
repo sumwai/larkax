@@ -115,6 +115,9 @@ func baseRequest() Request {
 		OwnerUserID: 9,
 		InputTokens: 1000,
 		MaxTokens:   500,
+		// 协议由入口填（见 Request.Protocol）。夹具给一条具体的：capped
+		// 计数器按它分序列，空值会造出一条生产上不该有的序列。
+		Protocol: channel.ProtocolOpenAI,
 	}
 }
 
@@ -451,6 +454,95 @@ func TestSettleUpstreamFailureIsNotBilled(t *testing.T) {
 	if uf.Status != 503 || uf.Code != "upstream_unavailable" {
 		t.Errorf("失败依据没带上: %+v", uf)
 	}
+}
+
+// 撞上预留上界时，那条按协议分的观测必须真的被记一次——它是「撞了」在账目
+// 之外唯一的信号（账目仍然是平的，见 observe.CappedSettlements 的注释）。
+//
+// 断言落在**增量**上而不是绝对值：observe.Metrics 是进程级的一份，别的用例
+// 也在往上面加数。四条协议各取一次差，同时钉住两件事：
+//
+//   - 「记了」：撞上界的那条协议的计数 +1；
+//   - 「记对了序列」：没撞的协议一个都不动。只断言总数的话，把标签写死成
+//     任何一条协议、或者干脆不按协议分，用例都照样通过——而那正是这一轮
+//     要防的（各条入口的上界来源不同，混在一起分不出是哪一条在漏）。
+func TestSettleCountsCappedSettlementPerProtocol(t *testing.T) {
+	protocols := []channel.Protocol{
+		channel.ProtocolOpenAI,
+		channel.ProtocolAnthropic,
+		channel.ProtocolOpenAIResponses,
+		channel.ProtocolSystemOne,
+	}
+	// 先把四条序列都取一遍（值为 0 也会建出来），之后才读得到干净的起点。
+	before := map[channel.Protocol]uint64{}
+	for _, protocol := range protocols {
+		before[protocol] = observe.Metrics.CappedSettlements.With(string(protocol)).Value()
+	}
+
+	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}
+	p := newPipeline(t, src)
+
+	// 一次**撞上界**的结算：预留按 1000 输入 + 500 输出的最坏情况算出
+	// 0.002，而上游报 100000 个输入 token，按 1e-6 算是 0.1。
+	capped := baseRequest()
+	capped.RequestID = "req-capped-systemone"
+	capped.Protocol = channel.ProtocolSystemOne
+	res, err := p.Reserve(context.Background(), capped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	charge, err := p.Settle(context.Background(), capped, res, Outcome{
+		Usage:       channel.Usage{PromptTokens: 100_000},
+		UsageSource: tokens.SourceMeasured,
+	})
+	if err != nil {
+		t.Fatalf("结算出错: %v", err)
+	}
+	if !charge.Settlement.Capped {
+		t.Fatalf("这次结算没有撞上界（按用量算是 %s，预留 %s）——用例的前提不成立",
+			charge.Settlement.Breakdown.Total, charge.Settlement.Reserved)
+	}
+
+	// 一次**没撞**的结算，走另一条协议：它不该动任何 capped 序列。
+	plain := baseRequest()
+	plain.RequestID = "req-plain-openai"
+	plain.Protocol = channel.ProtocolOpenAI
+	res, err = p.Reserve(context.Background(), plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Settle(context.Background(), plain, res, Outcome{
+		Usage:       channel.Usage{PromptTokens: 1000, CompletionTokens: 200},
+		UsageSource: tokens.SourceMeasured,
+	}); err != nil {
+		t.Fatalf("结算出错: %v", err)
+	}
+
+	wantSystemOne := before[channel.ProtocolSystemOne] + 1
+	if got := observe.Metrics.CappedSettlements.With(string(channel.ProtocolSystemOne)).Value(); got != wantSystemOne {
+		t.Errorf("systemone 的撞上界计数 = %d，期望 %d——撞了却没记，事后从账上看不出来",
+			got, wantSystemOne)
+	}
+	for _, protocol := range protocols {
+		if protocol == channel.ProtocolSystemOne {
+			continue
+		}
+		if got := observe.Metrics.CappedSettlements.With(string(protocol)).Value(); got != before[protocol] {
+			t.Errorf("%s 的撞上界计数 = %d，期望不变（%d）——没撞上界的协议不该被记，也不该被记到别的协议上",
+				protocol, got, before[protocol])
+		}
+	}
+
+	// 渲染一遍，证明这一条序列真的会出现在 /metrics 上，而不是只活在进程里。
+	var buf bytes.Buffer
+	if err := observe.Metrics.Render(&buf); err != nil {
+		t.Fatalf("渲染指标失败: %v", err)
+	}
+	want := fmt.Sprintf(`larkax_billing_capped_settlements_total{protocol="systemone"} %d`, wantSystemOne)
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("/metrics 的输出里没有 %s\n实际输出:\n%s", want, buf.String())
+	}
+	t.Logf("撞上界被记下的那一条: %s", want)
 }
 
 // 客户端在流式响应中途断开**要计费**：已经产生的 token 上游是算了钱的。
