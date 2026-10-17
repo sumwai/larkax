@@ -52,3 +52,4 @@
 | [34](lessons/34-gate-is-not-overlap.md) | 并发用例只加闸门，不保证 goroutine 真的重叠 | 写并发/竞态用例时 | 活 |
 | [35](lessons/35-hardcoded-maximum.md) | 用例里写死的「当前最大值」，会在它增长时无理由地红 | 断言里要写一个由仓库自身增长的数时 | 活 |
 | [36](lessons/36-test-entry-in-production-file.md) | 给用例留的入口写在生产文件里，deadcode 判它没人调 | 为用例加一个包装、为测试抽一段共用逻辑时 | 活 |
+| [37](lessons/37-migration-down-names-the-latest.md) | 用「退最近一次迁移」验回滚的用例，会被下一条迁移悄悄换掉对象 | 写「回滚最近一次」的用例、往仓库里加迁移时 | 活 |
