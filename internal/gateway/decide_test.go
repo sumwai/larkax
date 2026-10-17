@@ -431,6 +431,96 @@ func TestDecisionSnapshotRecordsDegradationPerAttempt(t *testing.T) {
 	}
 }
 
+// 被选路筛掉的候选要跟着响应方向的足迹一起交出去。
+//
+// # 它补的是哪一段
+//
+// 「配了三个渠道为什么只用一个」从前在留痕里看不出来：请求方向记的是选路
+// **之前**有几个候选，attempts 记的是**真的发出去过**哪几个，而那两个没被
+// 发出去的候选**为什么**不在候选里，没有任何一处说得出来——差额本身也只是一道
+// 差额，看不出它是被选路筛掉的（配置问题：那几条渠道的声明或状态不对）还是
+// 没轮到就被提前放弃的（选路那一步之外的事）。
+//
+// 分类钉成字面量而不是拿 route 的常量来比：这条记录是给排障的人读的，
+// 取值改了就是一次对外的行为变化，用例该跟着变红（见 AGENTS.md 的
+// 「用常量测常量等于没测」）。
+func TestDecisionSnapshotRecordsExcludedCandidates(t *testing.T) {
+	d := &fakeDecider{resp: decisionResponse()}
+	h := newDecideHarness(t, d, func(h *harness) {
+		h.candidates.cands = []route.Candidate{
+			candidate(1, "gpt-4o"),
+			candidate(2, "gpt-4o"),
+			candidate(3, "gpt-4o"),
+		}
+		// 渠道 2 连续失败 3 次，到了该被摘掉的阈值（见 route 的
+		// consecutiveFailureCutoff）。
+		h.candidates.cands[1].Health.ConsecutiveFailures = 3
+	})
+
+	if _, err := h.gw.Decide(context.Background(), decisionBilling(), decision()); err != nil {
+		t.Fatalf("Decide 出错: %v", err)
+	}
+
+	outcome := h.decisionRedactor.firstOutcome(t)
+	if len(outcome.Candidates) != 3 {
+		t.Fatalf("候选集合 = %d 条，期望 3（选路之前那一份）", len(outcome.Candidates))
+	}
+	if len(outcome.Excluded) != 1 {
+		t.Fatalf("排除记录 = %+v，期望 1 条", outcome.Excluded)
+	}
+	if got := outcome.Excluded[0].ChannelID; got != 2 {
+		t.Errorf("被筛掉的渠道 = %d，期望 2", got)
+	}
+	if got := outcome.Excluded[0].Code; got != "health" {
+		t.Errorf("排除分类 = %q，期望 health", got)
+	}
+	// 它真的被试过没有：被筛掉的候选不进尝试列表，这正是两者之和回答
+	// 「三个候选怎么只用了一个」的地方。
+	for _, a := range outcome.Attempts {
+		if a.ChannelID == 2 {
+			t.Errorf("被筛掉的渠道不该出现在尝试列表里: %+v", outcome.Attempts)
+		}
+	}
+}
+
+// 一个候选都没剩下时，被筛掉的那些也要落进留痕。
+//
+// 这一支里选路直接返回错误、不进 Result，所以排除记录只能从错误上取回来
+// （见 route.Errors.Excluded）。它是**最该被看见**的一支：「这些渠道现在
+// 一条都用不了」与「压根没配渠道」在留痕上从前长得一样。
+func TestDecisionSnapshotRecordsExcludedWhenNothingLeft(t *testing.T) {
+	d := &fakeDecider{resp: decisionResponse()}
+	h := newDecideHarness(t, d, func(h *harness) {
+		h.candidates.cands = []route.Candidate{
+			candidate(1, "gpt-4o"),
+			candidate(2, "gpt-4o"),
+		}
+		h.candidates.cands[0].Health.ConsecutiveFailures = 3
+		h.candidates.cands[1].Health.ConsecutiveFailures = 3
+	})
+
+	if _, err := h.gw.Decide(context.Background(), decisionBilling(), decision()); err == nil {
+		t.Fatal("一条候选都用不了时应当报错")
+	}
+	if len(d.channels) != 0 {
+		t.Errorf("一个候选都没剩下时不该打到上游，实际打了 %v", d.channels)
+	}
+
+	outcome := h.decisionRedactor.firstOutcome(t)
+	if outcome.Succeeded {
+		t.Error("没选中任何渠道，不该记成成功")
+	}
+	if len(outcome.Excluded) != 2 {
+		t.Fatalf("排除记录 = %+v，期望 2 条", outcome.Excluded)
+	}
+	if outcome.Excluded[0].ChannelID != 1 || outcome.Excluded[1].ChannelID != 2 {
+		t.Errorf("被筛掉的渠道 = %+v，期望 1 与 2", outcome.Excluded)
+	}
+	if outcome.Excluded[0].Code != "health" {
+		t.Errorf("排除分类 = %q，期望 health", outcome.Excluded[0].Code)
+	}
+}
+
 // 全部候选都失败时也要落一条响应方向的快照，且**没有** selected。
 //
 // route.Result.Channel 在失败路径上是「最后试过的那个」（见那里的注释），

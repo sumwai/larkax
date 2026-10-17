@@ -204,6 +204,105 @@ func TestDecisionAttemptsCarryReasonOnlyOnFailure(t *testing.T) {
 	assertKeys(t, ok, "channel_id", "succeeded", "duration_ms")
 }
 
+// 有候选被选路筛掉时，留痕里要看得见是谁、为什么。
+//
+// 它与「只配了一个候选」是两件事，而 candidates_count 与 excluded_count 一起
+// 才说得清「当时有几个、几个没进候选集」；少了这一段，**没被发出去的那几个
+// 为什么不在候选里**就答不出来——差额本身看不出发成两端的原因。
+func TestDecisionResponseRecordsExclusions(t *testing.T) {
+	m := decisionResponseMap(&gateway.DecisionOutcome{
+		Model:      "probe-model",
+		Candidates: []gateway.DecisionCandidate{fullDecisionCandidate(7), fullDecisionCandidate(8), fullDecisionCandidate(9)},
+		Excluded:   []gateway.DecisionExclusion{{ChannelID: 9, Code: "model_not_declared"}},
+	})
+	// 没有排除的那一份：单独一个候选、没有排除。
+	alone := decisionResponseMap(&gateway.DecisionOutcome{
+		Model:      "probe-model",
+		Candidates: []gateway.DecisionCandidate{fullDecisionCandidate(7)},
+	})
+
+	if got := m["excluded_count"]; got != 1 {
+		t.Errorf("被筛掉的候选数 = %#v，期望 1", got)
+	}
+	excluded, ok := m["excluded"].([]any)
+	if !ok || len(excluded) != 1 {
+		t.Fatalf("排除记录 = %#v，期望一条", m["excluded"])
+	}
+	// 每一段只有身份与分类两格：渠道名、上游地址这些摆都别摆上来
+	// （见 decisionExclusionsOf）。
+	assertKeys(t, excluded[0].(map[string]any), "channel_id", "code")
+	dropped := excluded[0].(map[string]any)
+	if dropped["channel_id"] != int64(9) || dropped["code"] != "model_not_declared" {
+		t.Errorf("排除记录 = %#v，期望渠道 9 的分类 model_not_declared", dropped)
+	}
+
+	// 与「只配了一个候选」区分得开：三个数一起看才说明白。
+	if alone["candidates_count"] != 1 {
+		t.Errorf("对照组的候选数 = %#v，期望 1", alone["candidates_count"])
+	}
+	if _, ok := alone["excluded_count"]; ok {
+		t.Error("对照组不该有 excluded_count——它没有排除")
+	}
+	if m["candidates_count"] != 3 {
+		t.Errorf("候选数 = %#v，期望 3", m["candidates_count"])
+	}
+}
+
+// 没有候选被筛掉时，这一行与加这段留痕之前**逐字相同**。
+//
+// 「多一个空数组」也算变：排障的人是拿两份快照对比的，凭空多出来的
+// `"excluded": []` 会让人以为「这次有过排除，只是没记下」。
+func TestDecisionResponseWithoutExclusionsKeepsShape(t *testing.T) {
+	m := decisionResponseMap(&gateway.DecisionOutcome{
+		Model:      "probe-model",
+		Candidates: []gateway.DecisionCandidate{fullDecisionCandidate(7)},
+	})
+	assertKeys(t, m, "surface", "model", "candidates_count", "candidates", "attempts")
+	for _, key := range []string{"excluded", "excluded_count"} {
+		if _, ok := m[key]; ok {
+			t.Errorf("没有排除时不该有 %s：%#v", key, m[key])
+		}
+	}
+}
+
+// 骨架超限降级成摘要层时，「几个候选里筛掉了几个」仍然读得出来。
+//
+// # 它为什么必须成立
+//
+// 排除清单是**容器**，降级时整段一起丢（见 snapshot 的 topScalars）；留下的
+// 只有顶层标量。所以 excluded_count 不是 excluded 的冗余——它是这一件事在超限
+// 之后唯一的痕迹。只靠数组长度的话，一条候选很多的决策请求在超限之后与
+// 「没有排除」逐列相同。
+func TestDecisionExclusionCountSurvivesTruncation(t *testing.T) {
+	const maxBytes = 400
+	c := newCollector(t, Config{Enabled: true, MaxBytes: maxBytes, RetentionDays: 30}, &fakeDB{})
+	snap, err := c.RedactDecisionResponse(&gateway.DecisionOutcome{
+		Model: "probe-model",
+		Candidates: []gateway.DecisionCandidate{
+			fullDecisionCandidate(7), fullDecisionCandidate(8), fullDecisionCandidate(9),
+		},
+		Excluded: []gateway.DecisionExclusion{{ChannelID: 9, Code: "quota"}},
+	})
+	if err != nil {
+		t.Fatalf("脱敏失败: %v", err)
+	}
+	// 夹具没超限的话这一条什么也没验到——那是「没跑成」，不是「通过」。
+	if !snap.Truncated {
+		t.Fatalf("骨架没有超过 %d 字节，这条用例就没跑成", maxBytes)
+	}
+	if _, ok := snap.Skeleton["excluded"]; ok {
+		t.Errorf("摘要层不该留下列表（容器整段被丢掉）：%#v", snap.Skeleton["excluded"])
+	}
+	// 数字取 int64 而不是 int：允许表那一档把非负整数收成 int64（见
+	// snapshot 的 allowUint），拿 int 去比会在接口那一层对不上类型。
+	if got := snap.Skeleton["excluded_count"]; got != int64(1) {
+		t.Errorf("摘要层里的被筛掉候选数 = %#v，期望 1", got)
+	}
+	if got := snap.Skeleton["candidates_count"]; got != int64(3) {
+		t.Errorf("摘要层里的候选数 = %#v，期望 3", got)
+	}
+}
+
 // ── 走真脱敏器的那一层 ──────────────────────────────────────────────────
 //
 // 上面几条钉的是「适配层摊了什么」，下面这几条把摊出来的东西真的交给
@@ -286,6 +385,67 @@ func TestRedactDecisionResponseKeepsSelectionAndAttempts(t *testing.T) {
 	}
 	if len(snap.RedactedPaths) != 0 {
 		t.Errorf("判据被脱敏了 %v", snap.RedactedPaths)
+	}
+}
+
+// 排除记录经允许表走一遍：分类原样留下，一格都不该被脱敏。
+//
+// 它是**判据**，与候选那几列同一档——渠道名与上游地址那类要脱敏的东西根本没有
+// 摆进这个 map（见 decisionExclusionsOf 的注释）。
+func TestRedactDecisionResponseKeepsExclusions(t *testing.T) {
+	c := newDecisionCollector(t)
+	snap, err := c.RedactDecisionResponse(&gateway.DecisionOutcome{
+		Model:      "probe-model",
+		Candidates: []gateway.DecisionCandidate{fullDecisionCandidate(7), fullDecisionCandidate(8)},
+		Excluded: []gateway.DecisionExclusion{
+			{ChannelID: 7, Code: "health"},
+			{ChannelID: 8, Code: "quota"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("脱敏失败: %v", err)
+	}
+	excluded, ok := snap.Skeleton["excluded"].([]any)
+	if !ok || len(excluded) != 2 {
+		t.Fatalf("排除记录 = %#v，期望两条", snap.Skeleton["excluded"])
+	}
+	first := excluded[0].(map[string]any)
+	if first["channel_id"] != int64(7) || first["code"] != "health" {
+		t.Errorf("第一条排除记录 = %#v，期望渠道 7 的分类 health", first)
+	}
+	if len(snap.RedactedPaths) != 0 {
+		t.Errorf("判据被脱敏了 %v——允许表里少了它，或者档位对不上它的取值",
+			snap.RedactedPaths)
+	}
+}
+
+// 分类那一格必须是**枚举词**，落到那里的自由文本会被脱敏掉。
+//
+// 这条用例钉的是「记分类，不记原文」这个取舍本身：那句给人看的原因
+// （「模型目录里输出上限 4096，这次请求要 8192」）里带着模型名与数字，
+// 一旦有人把它顺手摆进这一格，落库的就是一个文本占位符——记录还在，
+// 但读不出是哪一档，而且不会有任何报错。
+func TestRedactDecisionExclusionCodeMustBeEnumWord(t *testing.T) {
+	c := newDecisionCollector(t)
+	const freeText = "模型目录里输出上限 4096，这次请求要 8192"
+	snap, err := c.RedactDecisionResponse(&gateway.DecisionOutcome{
+		Excluded: []gateway.DecisionExclusion{{ChannelID: 9, Code: freeText}},
+	})
+	if err != nil {
+		t.Fatalf("脱敏失败: %v", err)
+	}
+	got := snap.Skeleton["excluded"].([]any)[0].(map[string]any)["code"]
+	if got == freeText {
+		t.Errorf("自由文本原样落库了：%#v", got)
+	}
+	found := false
+	for _, p := range snap.RedactedPaths {
+		if p == "excluded[0].code" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("这一格该被记进 redacted_paths，实际 %v", snap.RedactedPaths)
 	}
 }
 

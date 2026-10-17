@@ -69,8 +69,12 @@ func (g *Gateway) Decide(ctx context.Context, req pipeline.Request, decision *sy
 	// 那时还没有「打到了哪儿」可记（见 handle.abort）。
 	defer h.abort(ctx)
 
-	// 请求方向的快照在**选路之前**采集，与 Chat 同一个位置、同一个理由：
-	// 它要回答的是「当时手上有什么」，而候选集合在选路之后就只剩「试过哪些」。
+	// 请求方向的快照在**选路之前**采集，这一点与 Chat 不同：chat（含流式）
+	// 那条路的请求方向记的是**发出去的那一份**请求，所以要等选路返回、上游名
+	// 与参数覆盖都落上去之后才采得到（见 docs/development.md 的快照一节）；
+	// 这条表面要回答的是「当时手上有什么」，而「当时一共配了几个候选」只有
+	// 这一步答得出来——选路会在它基础上筛一轮，筛掉的那些记在结果那一侧
+	// （见 DecisionOutcome.Excluded）。
 	// 这条表面记的是**判据**不是内容——state 与 questions 进不到这里，
 	// 见 DecisionTrace 的注释。
 	g.decisionSnapshotAsync(ctx, &DecisionTrace{

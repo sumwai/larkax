@@ -53,7 +53,7 @@ func TestIntegrationDecisionSnapshotsLandBothDirections(t *testing.T) {
 	requestSnap, err := collector.RedactDecisionRequest(&gateway.DecisionTrace{
 		Model: "probe-decision-model",
 		Candidates: []gateway.DecisionCandidate{
-			fullDecisionCandidate(7), fullDecisionCandidate(8),
+			fullDecisionCandidate(7), fullDecisionCandidate(8), fullDecisionCandidate(9),
 		},
 	})
 	if err != nil {
@@ -65,7 +65,7 @@ func TestIntegrationDecisionSnapshotsLandBothDirections(t *testing.T) {
 	responseSnap, err := collector.RedactDecisionResponse(&gateway.DecisionOutcome{
 		Model: "probe-decision-model",
 		Candidates: []gateway.DecisionCandidate{
-			fullDecisionCandidate(7), fullDecisionCandidate(8),
+			fullDecisionCandidate(7), fullDecisionCandidate(8), fullDecisionCandidate(9),
 		},
 		Succeeded:         true,
 		SelectedChannelID: 8,
@@ -74,6 +74,8 @@ func TestIntegrationDecisionSnapshotsLandBothDirections(t *testing.T) {
 			{ChannelID: 7, Succeeded: false, Retryable: true, UpstreamStatus: &status, ErrorKind: &kind},
 			{ChannelID: 8, Succeeded: true, Duration: 30 * time.Millisecond},
 		},
+		// 渠道 9 一次都没试过：它在选路那一步就被筛掉了。
+		Excluded: []gateway.DecisionExclusion{{ChannelID: 9, Code: "model_not_declared"}},
 	})
 	if err != nil {
 		t.Fatalf("脱敏响应方向失败: %v", err)
@@ -126,14 +128,21 @@ func TestIntegrationDecisionSnapshotsLandBothDirections(t *testing.T) {
 	req := byDirection["request"]
 	// 从 jsonb 读回来的数字一律是 float64：这一列存的是 JSON，
 	// 不是 Go 的 int。
-	if got := req.skeleton["candidates_count"]; got != float64(2) {
-		t.Errorf("请求方向的候选数 = %#v，期望 2", got)
+	if got := req.skeleton["candidates_count"]; got != float64(3) {
+		t.Errorf("请求方向的候选数 = %#v，期望 3", got)
 	}
 	if _, ok := req.skeleton["selected"]; ok {
 		t.Error("请求方向不该有 selected：那时还没有选中项")
 	}
 	if _, ok := req.skeleton["attempts"]; ok {
 		t.Error("请求方向不该有 attempts：一次尝试都还没发生")
+	}
+	// 被筛掉的候选也**不在**请求方向那一行：那一行采在选路之前，那时还没有
+	// 「筛掉了谁」这件事。这一条钉住的是「写进请求方向」这个顺手会犯的错。
+	for _, key := range []string{"excluded", "excluded_count"} {
+		if _, ok := req.skeleton[key]; ok {
+			t.Errorf("请求方向不该有 %s：排除是选路的结果", key)
+		}
 	}
 
 	// 响应方向记的是「选了谁、为什么」。
@@ -149,13 +158,27 @@ func TestIntegrationDecisionSnapshotsLandBothDirections(t *testing.T) {
 		t.Errorf("上游模型名 = %#v", selected["upstream_model"])
 	}
 	cands, ok := resp.skeleton["candidates"].([]any)
-	if !ok || len(cands) != 2 {
-		t.Fatalf("响应方向的候选集 = %#v，期望两个", resp.skeleton["candidates"])
+	if !ok || len(cands) != 3 {
+		t.Fatalf("响应方向的候选集 = %#v，期望三个", resp.skeleton["candidates"])
 	}
 	// 「选中」与「淘汰」在同一张清单里：读一行就能回答「为什么是它」。
 	if cands[0].(map[string]any)["selected"] != false ||
-		cands[1].(map[string]any)["selected"] != true {
+		cands[1].(map[string]any)["selected"] != true ||
+		cands[2].(map[string]any)["selected"] != false {
 		t.Errorf("候选上的 selected 记错了：%#v", cands)
+	}
+	// 被筛掉的候选与原因落地了，且**与候选集合对得上**：三个候选里渠道 9
+	// 连试都没试过，读这一行就能回答「为什么只用了两个」。
+	if got := resp.skeleton["excluded_count"]; got != float64(1) {
+		t.Errorf("被筛掉的候选数 = %#v，期望 1", got)
+	}
+	excluded, ok := resp.skeleton["excluded"].([]any)
+	if !ok || len(excluded) != 1 {
+		t.Fatalf("排除记录 = %#v，期望一条", resp.skeleton["excluded"])
+	}
+	dropped := excluded[0].(map[string]any)
+	if dropped["channel_id"] != float64(9) || dropped["code"] != "model_not_declared" {
+		t.Errorf("被筛掉的那一条记错了：%#v", dropped)
 	}
 	attempts, ok := resp.skeleton["attempts"].([]any)
 	if !ok || len(attempts) != 2 {

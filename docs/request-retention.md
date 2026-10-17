@@ -57,8 +57,8 @@ larkax 保留每个请求的**结构**，不保留**内容**。
 
 - `request` 方向记**选路之前**手上的候选集合与它们的判据；
 - `response` 方向记**选路之后**的结局：选中的渠道与上游名、每一次尝试的结果
-  （是否值得换下一个渠道、失败分类、上游状态码、耗时），以及同一份候选集合
-  上哪几个被选中、哪几个被淘汰。
+  （是否值得换下一个渠道、失败分类、上游状态码、耗时），同一份候选集合
+  上哪几个被选中、哪几个被淘汰，以及**被选路筛掉的候选与原因**。
 
 **怎么区分这两条表面。** `request_snapshots.direction` 只有 `request` 与
 `response` 两个取值，决策请求与对话请求落在相同的两个方向里。区分它们的是
@@ -98,10 +98,31 @@ attempts[].retryable           这次的失败是否值得换下一个渠道
 attempts[].upstream_status     这次拿到的上游 HTTP 状态码
 attempts[].error_kind          这次的失败分类
 attempts[].duration_ms         这一次耗了多久
+excluded_count                 被选路筛掉的候选数（没有排除时整个字段不出现）
+excluded                       被选路筛掉的候选（没有排除时整段不出现）
+excluded[].channel_id          被筛掉的是哪个渠道
+excluded[].code                为什么被筛掉：ineligible（配置不全）/ model_not_declared（渠道没声明支持这个模型）/ capability（目录能力）/ limit（目录上限）/ health（健康度）/ quota（额度）
 ```
 
-最后六项与 `selected` 三段只出现在 `response` 方向的行上；`candidates[].selected`
-同样只在 `response` 方向出现。其余每一项在两个方向的行上都有。
+`selected` 三项、`attempts` 七项、`excluded` 四项，以及 `candidates[].selected`，
+只出现在 `response` 方向的行上；其余每一项在两个方向的行上都有。
+
+`excluded` 记的是「那几个没发出去的候选**为什么**不在候选里」的答案：
+`candidates_count` 说的是选路**之前**有几个候选，`attempts` 说的是**真的发出去过**
+哪几个，两者之间那几条从前只剩一道差额——差额本身看不出发成两端的原因。
+`excluded[].code` 记的是**分类**（一个固定的词）而不是那段原文：原文里带着模型名与
+数值，属于自由文本，不在留存范围内。
+
+**它不是一份穷尽的划分。** 差额里还有「没轮到就被提前放弃」的候选——别名翻不出来、
+客户端断开、遇到不可重试的失败时仍有候选没试过。它们既不在 `excluded` 里，也不在
+`attempts` 里（不可重试那一种能从 `attempts[].retryable` 读出来）。
+
+**`excluded` 的条数上界。** 它最多是这次请求手上候选集合的大小（被筛掉的候选
+只能来自那个集合），而候选集合由渠道配置决定，没有单独的条数上限。整条骨架受
+`request_snapshot.max_bytes`（默认 64 KiB）约束：超限时降级成只留顶层标量的摘要层，
+那时 `excluded` 整段连同 `candidates`、`attempts` 一起消失，留下的是
+`excluded_count` 与 `candidates_count` 两个标量——「几个候选里筛掉了几个」这件事
+仍然读得出来。摘要层仍然超限时整条快照被丢弃。
 
 没有数据的项**整个字段不出现**，而不是写成 0：「没有成本数据」与「成本是 0」
 在选路里是两个不同的结论，快照把两者记成一样，下一次排查就得重新踩一遍。
