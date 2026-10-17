@@ -362,7 +362,15 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 		// 等于送出一个「这个 Key 存在吗」的探测器，而库为什么连不上同样是
 		// 我们内部的事。所以 5xx 这一支还要有一条日志，否则这类故障在生产
 		// 里只有一个状态码可看。
+		//
+		// 401 这一支**不写日志，只记指标**，理由与上面正相反：401 是攻击者
+		// 可控的，拿垃圾 key 打就能刷日志、刷盘；而「库里没有这个哈希」与
+		// 「这把 key 上周过期了」这两种失败必须分得开（用户报「我的 key 不能
+		// 用了」时，它们是两条完全不同的排查路径，见 internal/auth 的包注释）。
+		// 按 auth.Reason 分桶计数同时满足这两条：标签值是一个闭合枚举，
+		// 基数有界，刷不动。
 		if errors.Is(err, auth.ErrUnauthenticated) {
+			observe.Metrics.AuthFailures.With(authFailureReason(err)).Inc()
 			writeError(w, protocol, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
@@ -455,6 +463,40 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 	}
 	h.serveOnce(w, r, protocol, upstream, user, requestID, nil)
 }
+
+// authFailureReason 把一次认证失败归到 larkax_auth_failures_total 的一个
+// 标签值上。
+//
+// 判据走 errors.As 取 *auth.Error，而不是 errors.Is：后者只说明「这是凭证
+// 问题」，取不出是哪一种，而这一层要的正是那一种。
+//
+// # 为什么取不到原因时单列一个取值，而不是不计
+//
+// errors.Is 认哨兵、errors.As 认类型，两者可以不一致——一条路径只要
+// `return auth.ErrUnauthenticated`（不包 *auth.Error），这里就会回一个 401
+// 却归不了类。今天没有这样的路径（internal/auth 里每一处失败都构造
+// *auth.Error，哨兵本身只经 Error.Unwrap 出现），但将来加一条是不报错的。
+//
+// 丢进 unclassified 而不是不计，是为了让那种情况**看得见**：不计的话，
+// 「这条 401 归不了类」与「这条路径没接上」在指标上都是「什么都没有」。
+// 空串同理——它会在采集端变成一条 reason="" 的序列，读的人不知道那是
+// 什么意思。所以零值的 *auth.Error（Reason 没填）也走 unclassified。
+func authFailureReason(err error) string {
+	var authErr *auth.Error
+	if errors.As(err, &authErr) && authErr.Reason != "" {
+		return string(authErr.Reason)
+	}
+	return reasonUnclassified
+}
+
+// reasonUnclassified 是「回了 401 但取不到原因」这一类在指标上的取值。
+//
+// 它不是 auth.Reason 的取值之一：那个枚举是闭合的（八个），本包不去扩它
+// ——扩了的话，采集端的告警规则要跟着改，而它本来只需要认 auth 那八个。
+//
+// 这条序列按设计不该出现。它一旦出现，说明有一条 401 不是由 *auth.Error
+// 产生的，而那种 401 在排查时回答不了「为什么不能用了」。
+const reasonUnclassified = "unclassified"
 
 // served 是一次请求走完之后的结局。
 //
