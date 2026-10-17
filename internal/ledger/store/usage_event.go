@@ -157,7 +157,10 @@ func insertUsageEvent(ctx context.Context, tx *sql.Tx, req pipeline.Request, cha
 		charge.Asset,
 		charge.PricedAt,
 	); err != nil {
-		return fmt.Errorf("写用量事件失败: %w", err)
+		// 这张表今天没有外键（user_id 与 channel_id 都是裸 bigint），
+		// 套一层是为了「写路径的错误都从同一个出口分类」这个形状不破：
+		// 将来加上外键时不必回来找这一处。
+		return constraintFailure(fmt.Errorf("写用量事件失败: %w", err))
 	}
 	return nil
 }
