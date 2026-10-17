@@ -50,15 +50,28 @@ var seq struct {
 	n int64
 }
 
-// base 是本次运行的起点，取自纳秒时间戳。
+// base 是本次运行的起点，取自纳秒时间戳。它有 10 亿个取值。
 var base = time.Now().UnixNano() % 1_000_000_000
 
-func nextID() int64 {
+// nextSeq 取下一个用例序号。
+//
+// 序号只由调用顺序决定，而 `go test` 每次都按同一个顺序跑同一批用例，所以
+// **同一个用例在两次运行里拿到的是同一个序号**。两次运行的同一个用例之间，
+// 唯一的差别就是 base——slotAt 的时段依赖这一点（见 slotAtFrom）。
+func nextSeq() int64 {
 	seq.Lock()
 	defer seq.Unlock()
 	seq.n++
-	return base*1000 + seq.n
+	return seq.n
 }
+
+// nextID 由本次运行的起点与序号拼出一个标识。
+//
+// 两次运行拼出同一个标识，需要 (base1-base2)*1000 == n2-n1；序号是本次运行里
+// 的调用次序，三位数封顶（每个用例只用几个），于是只剩「序号相同、base 也
+// 相同」这一条路，也就是十亿分之一的概率。时段那边不是这样：它当初把 base
+// 的低位整段丢掉了（见 slotAtFrom 的注释）。
+func nextID() int64 { return base*1000 + nextSeq() }
 
 // seed 建一个用户，并给他一笔充值，返回用户 id。
 //
