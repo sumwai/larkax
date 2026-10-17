@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -293,8 +294,9 @@ func TestExtrasUnserializableIsRejected(t *testing.T) {
 
 func TestFormatForKnownProtocols(t *testing.T) {
 	cases := map[channel.Protocol]string{
-		channel.ProtocolOpenAI:    "openai",
-		channel.ProtocolAnthropic: "claude",
+		channel.ProtocolOpenAI:          "openai",
+		channel.ProtocolAnthropic:       "claude",
+		channel.ProtocolOpenAIResponses: "openai_responses",
 	}
 	for p, want := range cases {
 		got, err := formatFor(p)
@@ -473,6 +475,150 @@ func TestResponseFromClaude(t *testing.T) {
 	}
 }
 
+func TestResponseFromResponses(t *testing.T) {
+	src := &dto.OpenAIResponsesResponse{
+		ID:     "resp_1",
+		Model:  "gpt-5-2026",
+		Status: json.RawMessage(`"completed"`),
+		Output: []dto.ResponsesOutput{
+			{
+				Type:    "reasoning",
+				Summary: []dto.ResponsesReasoningSummaryPart{{Type: "summary_text", Text: "先想一下"}},
+			},
+			{
+				Type:    "message",
+				Role:    "assistant",
+				Content: []dto.ResponsesOutputContent{{Type: "output_text", Text: "你好"}},
+			},
+			{
+				Type:      "function_call",
+				CallId:    "call_1",
+				Name:      "lookup",
+				Arguments: json.RawMessage(`"{\"q\":\"天气\"}"`),
+			},
+		},
+		Usage: &dto.Usage{
+			PromptTokens:        100,
+			CompletionTokens:    40,
+			PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 30},
+			CompletionTokenDetails: dto.OutputTokenDetails{
+				ReasoningTokens: 25,
+			},
+			UsageSource:   dto.BillingUsageSourceOAIResponses,
+			UsageSemantic: dto.BillingUsageSemanticOpenAI,
+		},
+	}
+
+	got, err := ResponseFromRelaykit(src)
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if got.UpstreamModel != "gpt-5-2026" {
+		t.Errorf("UpstreamModel = %q", got.UpstreamModel)
+	}
+	if got.FinishReason != "tool_calls" {
+		t.Errorf("FinishReason = %q", got.FinishReason)
+	}
+
+	var text, tool string
+	for _, b := range got.Message.Content {
+		switch b.Type {
+		case "text":
+			text += b.Text
+		case "tool_use":
+			tool = b.ToolName
+			if b.ToolUseID != "call_1" {
+				t.Errorf("工具调用 id = %q", b.ToolUseID)
+			}
+			if b.ToolInput["q"] != "天气" {
+				t.Errorf("工具参数 = %+v", b.ToolInput)
+			}
+		case "thinking":
+			t.Errorf("思考摘要不该进正文块: %+v", b)
+		}
+	}
+	if text != "你好" {
+		t.Errorf("正文 = %q（思考摘要不是可见输出）", text)
+	}
+	if tool != "lookup" {
+		t.Errorf("工具名 = %q", tool)
+	}
+
+	// 用量直接读 r.Usage，不经 relaykit 那条 Responses→Chat 的转换。
+	if got.Usage.PromptTokens != 100 || got.Usage.CompletionTokens != 40 ||
+		got.Usage.CacheReadTokens != 30 || got.Usage.ReasoningTokens != 25 {
+		t.Errorf("用量 = %+v", got.Usage)
+	}
+	if !got.Usage.CompletionIncludesReasoning {
+		t.Error("OpenAI 口径下推理含在输出里，要声明出来")
+	}
+	if got.Raw == nil {
+		t.Error("Raw 应保留上游原样数据，供事后发现口径变化")
+	}
+}
+
+// status=incomplete 是「停在了长度上限上」，不是失败：结束原因折成 length。
+func TestResponseFromResponsesIncomplete(t *testing.T) {
+	src := &dto.OpenAIResponsesResponse{
+		ID:                "resp_1",
+		Model:             "m",
+		Status:            json.RawMessage(`"incomplete"`),
+		IncompleteDetails: &dto.IncompleteDetails{Reason: "max_output_tokens"},
+	}
+
+	got, err := ResponseFromRelaykit(src)
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if got.FinishReason != "length" {
+		t.Errorf("FinishReason = %q", got.FinishReason)
+	}
+}
+
+func TestToRelaykitResponses(t *testing.T) {
+	req := &channel.Request{
+		Model:     "gpt-5",
+		MaxTokens: 256,
+		Messages: []channel.Message{
+			{Role: "system", Content: []channel.ContentBlock{{Type: "text", Text: "你是助手"}}},
+			{Role: "user", Content: []channel.ContentBlock{{Type: "text", Text: "hi"}}},
+		},
+	}
+
+	openaiReq, err := ToRelaykit(req)
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	got, err := ToRelaykitResponses(context.Background(), openaiReq)
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if got.Model != "gpt-5" {
+		t.Errorf("Model = %q", got.Model)
+	}
+	if got.MaxOutputTokens == nil || *got.MaxOutputTokens != 256 {
+		t.Errorf("MaxOutputTokens = %s", showPtr(got.MaxOutputTokens))
+	}
+	// system 消息折成顶层字段，不再占 input 里的一项。
+	var instructions string
+	if err := json.Unmarshal(got.Instructions, &instructions); err != nil || instructions != "你是助手" {
+		t.Errorf("Instructions = %s（%v）", got.Instructions, err)
+	}
+	var input []map[string]any
+	if err := json.Unmarshal(got.Input, &input); err != nil {
+		t.Fatalf("input 解析失败: %v", err)
+	}
+	if len(input) != 1 || input[0]["role"] != "user" {
+		t.Errorf("input = %v", input)
+	}
+}
+
+func TestToRelaykitResponsesRejectsNil(t *testing.T) {
+	if _, err := ToRelaykitResponses(context.Background(), nil); err == nil {
+		t.Error("nil 请求应报错")
+	}
+}
+
 func TestResponseRejectsUnknownAndNil(t *testing.T) {
 	if _, err := ResponseFromRelaykit("字符串"); err == nil {
 		t.Error("未知类型应报错")
@@ -481,6 +627,9 @@ func TestResponseRejectsUnknownAndNil(t *testing.T) {
 		t.Error("nil 响应应报错")
 	}
 	if _, err := ResponseFromRelaykit((*dto.ClaudeResponse)(nil)); err == nil {
+		t.Error("nil 响应应报错")
+	}
+	if _, err := ResponseFromRelaykit((*dto.OpenAIResponsesResponse)(nil)); err == nil {
 		t.Error("nil 响应应报错")
 	}
 }
@@ -781,6 +930,34 @@ func TestUsageDialectsAgreeOnSameRequest(t *testing.T) {
 		PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 8000},
 		UsageSemantic:       dto.BillingUsageSemanticOpenAI,
 	})
+	// Responses 的 input_tokens 与 OpenAI 的 prompt_tokens 同义（都含缓存），
+	// 所以它与 openai 那一支归一后应当是同一个数——它是**同一族**，
+	// 而不是像 Anthropic 那样要补一次缓存。
+	responses := UsageFromRelaykit(&dto.Usage{
+		PromptTokens:        9000,
+		CompletionTokens:    200,
+		PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 8000},
+		UsageSource:         dto.BillingUsageSourceOAIResponses,
+		UsageSemantic:       dto.BillingUsageSemanticOpenAI,
+	})
+
+	// 逐个字段比而不是比结构体：channel.Usage 里有 map，整个结构体不可比较，
+	// 而 Raw 那一栏本来就该有差别（它记着来源）。
+	for _, tc := range []struct {
+		name       string
+		responses  int64
+		openaiLike int64
+	}{
+		{"输入总量", responses.PromptTokens, openai.PromptTokens},
+		{"缓存读取", responses.CacheReadTokens, openai.CacheReadTokens},
+		{"输出", responses.CompletionTokens, openai.CompletionTokens},
+		{"推理", responses.ReasoningTokens, openai.ReasoningTokens},
+	} {
+		if tc.responses != tc.openaiLike {
+			t.Errorf("%s: Responses %d, OpenAI %d（同一族的两种表面应当一致）",
+				tc.name, tc.responses, tc.openaiLike)
+		}
+	}
 
 	if anthropic.PromptTokens != openai.PromptTokens {
 		t.Errorf("归一后输入总量不一致: Anthropic %d, OpenAI %d（应为同一个数）",
@@ -1120,6 +1297,70 @@ func TestParseRequestRejectsBadInput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := ParseRequest(context.Background(), tc.protocol, []byte(tc.body)); err == nil {
 				t.Error("应当报错")
+			}
+		})
+	}
+}
+
+// 非 function 的工具声明必须在解析层拒掉。
+//
+// 不拒的表现是**静默改写**：channel.Tool 没有承载工具类型的字段，于是
+// {"type":"mcp"} 与 {"type":"web_search"} 都会被变成同一个
+// {"parameters":null,"type":"function"}（名字还被 omitempty 掉）。上游收到
+// 一个我们伪造的、谁都认不出的工具；而远端 MCP 在上游一律 400——错误信息
+// 指向的是我们发出去的请求，排查方向会落到对方身上。
+//
+// 三档判据各有用例：显式 function 放行、**缺省 type 放行**、其余拒绝。
+// 中间那一档最容易被下一个人「顺手统一掉」，所以它单独占一条：省略 type 的
+// 客户端今天能用，拒掉它是把一个能用的形状改坏，不是为了修 bug。
+func TestParseRequestRejectsNonFunctionTools(t *testing.T) {
+	cases := []struct {
+		name string
+		// tools 是请求体里 tools 字段的原文。
+		tools string
+		// wantErrType 非空表示应当报错，且错误里要出现这个类型名。
+		wantErrType string
+	}{
+		{
+			name:        "远端 MCP",
+			tools:       `[{"type":"mcp","server_label":"x","server_url":"https://mcp.example.com"}]`,
+			wantErrType: "mcp",
+		},
+		{name: "内置工具", tools: `[{"type":"web_search"}]`, wantErrType: "web_search"},
+		{name: "自定义工具类型", tools: `[{"type":"custom","name":"f"}]`, wantErrType: "custom"},
+		{
+			name:  "显式 function 是最常见的那条路",
+			tools: `[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]`,
+		},
+		{
+			name:  "缺省 type 按 function 用",
+			tools: `[{"function":{"name":"lookup","parameters":{"type":"object"}}}]`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":` + tc.tools + `}`
+			req, err := ParseRequest(context.Background(), channel.ProtocolOpenAI, []byte(body))
+
+			if tc.wantErrType != "" {
+				if err == nil {
+					t.Fatalf("应当报错，否则它会被静默改写成 function 工具：%+v", req.Tools)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrType) {
+					t.Errorf("错误里要带上收到的类型 %q，否则调用方不知道改哪里：%v", tc.wantErrType, err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("不该报错: %v", err)
+			}
+			if len(req.Tools) != 1 || req.Tools[0].Name != "lookup" {
+				t.Fatalf("工具 = %+v，期望一个叫 lookup 的工具", req.Tools)
+			}
+			if _, ok := req.Tools[0].InputSchema["type"]; !ok {
+				t.Errorf("schema 要原样留下，否则上游收到一个没有参数的工具：%+v", req.Tools[0].InputSchema)
 			}
 		})
 	}

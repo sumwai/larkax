@@ -364,7 +364,8 @@ LARKAX_CHANNEL_CREDENTIAL=<CHANNEL_CREDENTIAL> go run ./cmd/larkaxctl channel cr
   --models claude-x --credential-env LARKAX_CHANNEL_CREDENTIAL
 ```
 
-`--type` 必须是已注册的适配器类型（当前是 `openai` 与 `anthropic`）。
+`--type` 必须是已注册的适配器类型（当前是 `openai`、`anthropic` 与
+`openai-responses`）。
 `--models` 是这条渠道支持的**规范模型名**（第一步建的那个），至少一个：
 读取路径把 `models` 当白名单用，空数组的渠道永远选不中。
 stdout 只有新渠道的 ID，其余信息走 stderr。

@@ -20,6 +20,7 @@ import (
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channel/anthropicadapter"
 	"github.com/sumwai/larkax/internal/channel/openaiadapter"
+	"github.com/sumwai/larkax/internal/channel/responsesadapter"
 )
 
 // Executor 按渠道类型把请求分发给对应的适配器。
@@ -52,6 +53,7 @@ func New(timeout time.Duration) (*Executor, error) {
 	return newWith(
 		openaiadapter.New(timeout),
 		anthropicadapter.New(timeout),
+		responsesadapter.New(timeout),
 	)
 }
 
@@ -81,7 +83,7 @@ func Registry() (*channel.Registry, error) {
 // newWith 用给定的适配器建执行器。
 //
 // 与 New 分开，是为了让「重复类型会被拒绝」这类情况在测试里也能钉住——
-// 不必为了造一个重复注册而真的往 New 里加第三个适配器。
+// 不必为了造一个重复注册而真的往 New 里再加一个适配器。
 func newWith(adapters ...channel.Adapter) (*Executor, error) {
 	registry := channel.NewRegistry()
 	for _, a := range adapters {

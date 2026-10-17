@@ -180,10 +180,11 @@ func TestChannelSupports(t *testing.T) {
 	}
 }
 
-// 协议的取值只有这两套：调用方的入口只有两条路径，已注册的适配器也只有两个。
-// 多认一个没人实现的取值，会让「以为支持了」这件事发生。
+// 每一个有适配器实现的协议取值都要在这里出现。多认一个没人实现的取值，
+// 会让「以为支持了」这件事发生；反过来，**少列一个已实现的取值**会让这道门
+// 对新增的那套协议毫无覆盖——它照样通过，而它看起来像在守「取值集合」。
 func TestProtocolValuesAreKnown(t *testing.T) {
-	for _, p := range []Protocol{ProtocolOpenAI, ProtocolAnthropic} {
+	for _, p := range []Protocol{ProtocolOpenAI, ProtocolAnthropic, ProtocolOpenAIResponses} {
 		if !p.valid() {
 			t.Errorf("协议 %q 应有效", p)
 		}
