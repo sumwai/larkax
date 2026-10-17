@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -717,7 +718,7 @@ func TestReleaseUnfreezes(t *testing.T) {
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Release(ctx, req); err != nil {
+	if err := s.Release(ctx, req, nil); err != nil {
 		t.Fatalf("释放失败: %v", err)
 	}
 
@@ -744,7 +745,7 @@ func TestReleaseIsIdempotentAndWritesNoEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
-		if err := s.Release(ctx, req); err != nil {
+		if err := s.Release(ctx, req, nil); err != nil {
 			t.Fatalf("第 %d 次释放失败: %v", i+1, err)
 		}
 	}
@@ -772,8 +773,125 @@ func TestReleaseUnknownRequest(t *testing.T) {
 	db := testDB(t)
 	s := New(db)
 	req := testRequestWithKey(1, reqID(t), 0)
-	if err := s.Release(context.Background(), req); err != nil {
+	if err := s.Release(context.Background(), req, nil); err != nil {
 		t.Errorf("释放不存在的预留不该报错: %v", err)
+	}
+}
+
+// 不计费的结局要把上游失败的依据落进账单的两列。
+//
+// 这两列此前恒为 NULL：markSettled 里那两个参数位写的是字面量 0 与空串，
+// 而失败那条路根本不走结算。于是「这次结算对应的上游回了什么」在账单表里
+// 答不出来，得去 join 快照表——而快照是可以被关掉、按月清掉的。
+//
+// 写入点只有 Release 这一处（见它的注释），所以三条断言都落在这一行上：
+// 依据写进去了、重复释放不会把它改掉、没有依据时是 NULL 而不是 0 或空串。
+func TestReleaseRecordsUpstreamFailure(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	requestID := reqID(t)
+	req := testRequest(ctx, t, db, userID, requestID)
+
+	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
+		t.Fatal(err)
+	}
+
+	// 上游回了 400。这一条正是「这两列最该有值」的那个场景。
+	failure := &pipeline.UpstreamFailure{
+		RequestID: requestID,
+		Status:    http.StatusBadRequest,
+		Code:      pipeline.ErrorUpstreamHTTPError,
+	}
+	if err := s.Release(ctx, req, failure); err != nil {
+		t.Fatalf("释放失败: %v", err)
+	}
+
+	status, code := upstreamFailureOf(t, db, requestID)
+	if !status.Valid || status.Int64 != http.StatusBadRequest {
+		t.Errorf("upstream_status = %v，期望 400", status)
+	}
+	if !code.Valid || code.String != pipeline.ErrorUpstreamHTTPError {
+		t.Errorf("error_code = %v，期望 %q", code, pipeline.ErrorUpstreamHTTPError)
+	}
+
+	// 重复释放是空操作（那一行已经不是 pending 了），依据不能被第二次的
+	// 覆盖掉：把「谁先写的」交给调用顺序，事后读到的就不是当时那一次失败。
+	if err := s.Release(ctx, req, &pipeline.UpstreamFailure{
+		RequestID: requestID,
+		Status:    http.StatusInternalServerError,
+		Code:      pipeline.ErrorUpstreamNoAnswer,
+	}); err != nil {
+		t.Fatalf("重复释放失败: %v", err)
+	}
+	if status, code := upstreamFailureOf(t, db, requestID); status.Int64 != http.StatusBadRequest ||
+		code.String != pipeline.ErrorUpstreamHTTPError {
+		t.Errorf("重复释放改掉了依据：upstream_status=%v error_code=%v，期望仍是 400 / %q",
+			status, code, pipeline.ErrorUpstreamHTTPError)
+	}
+}
+
+// 没有上游失败的依据时，两列必须是 NULL 而不是 0 与空串。
+//
+// 两个方向都要钉：只钉「有依据时写得进去」的话，把两列无条件写成
+// `$2` 与 `$3`（0 与空串照写）也能通过，而那样库里就分不出「上游回了 0 号」
+// 与「没有这回事」——HTTP 里没有 0 这个状态码，它是「没有值」的编码。
+//
+// 这条路径真实存在：插件阻断、结算本身出错，以及「结算之前就返回了」
+// （客户端断开、context 取消）都走到这里，而它们都不是上游的失败。
+func TestReleaseWithoutEvidenceWritesNull(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	requestID := reqID(t)
+	req := testRequest(ctx, t, db, userID, requestID)
+
+	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Release(ctx, req, nil); err != nil {
+		t.Fatalf("释放失败: %v", err)
+	}
+
+	if status, code := upstreamFailureOf(t, db, requestID); status.Valid || code.Valid {
+		t.Errorf("没有依据时两列应当是 NULL，得到 upstream_status=%v error_code=%v", status, code)
+	}
+}
+
+// 已结算的行这两列仍然是 NULL——它们记的是**上游失败**的证据。
+//
+// 它钉的是另一半：把这两列顺手也写进结算那条 UPDATE（写个 200 上去）会让
+// 「这一行是不是上游挂的」这个问题失去判据。而上游响应里根本没有状态码
+// （channel.Response 不带它），所以那一步写得出来的只有编出来的数。
+func TestSettlementLeavesUpstreamFailureColumnsNull(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	requestID := reqID(t)
+	req := testRequest(ctx, t, db, userID, requestID)
+
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
+	}
+	charge := &pipeline.Charge{
+		RequestID: requestID, UserID: userID, Asset: "CNY",
+		PricedAt: pricedAt(),
+		Entries:  consumeEntries(t, userID, "12", billID),
+	}
+	charge.Settlement.Actual = money.MustParse("12")
+	if err := s.Save(ctx, req, charge); err != nil {
+		t.Fatalf("结算失败: %v", err)
+	}
+
+	if status, code := upstreamFailureOf(t, db, requestID); status.Valid || code.Valid {
+		t.Errorf("已结算的行不该有上游失败的依据，得到 upstream_status=%v error_code=%v", status, code)
 	}
 }
 
@@ -801,7 +919,7 @@ func TestReleaseAfterSettlementIsNoop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.Release(ctx, req); err != nil {
+	if err := s.Release(ctx, req, nil); err != nil {
 		t.Fatalf("结算后释放不该报错: %v", err)
 	}
 

@@ -133,7 +133,7 @@ func TestReleaseRefusesFrozenUnderflow(t *testing.T) {
 	}
 
 	// 3 · 释放必须失败：夹零会把差额抹掉，所以这里不能静默。
-	assertFrozenUnderflow(t, s.Release(ctx, req))
+	assertFrozenUnderflow(t, s.Release(ctx, req, nil))
 
 	// 4 · 整个事务回滚：快照没被改成 0（也没被扣成 -20），
 	//     预留记录仍停在 pending——释放没有发生。

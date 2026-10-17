@@ -120,7 +120,7 @@ func (s *Store) nowUTC() time.Time {
 var _ interface {
 	SaveReservation(context.Context, pipeline.Request, *pipeline.Reservation) (int64, error)
 	Save(context.Context, pipeline.Request, *pipeline.Charge) error
-	Release(context.Context, pipeline.Request) error
+	Release(context.Context, pipeline.Request, *pipeline.UpstreamFailure) error
 } = (*Store)(nil)
 
 // ErrAlreadySettled 表示这次请求已经结算过。
@@ -513,7 +513,24 @@ func (s *Store) Save(ctx context.Context, req pipeline.Request, charge *pipeline
 // 「释放一个不存在的东西」与「解冻时没有钱包行可落」是两件事，别混：
 // 前者是没有预留记录（也就没冻过钱），目的已经达到，返回 nil；后者是
 // 数据不一致——冻结额长在钱包行上，行不在就真的什么都没释放，报错回滚。
-func (s *Store) Release(ctx context.Context, req pipeline.Request) error {
+//
+// # upstream_status 与 error_code 唯一的写入点就是这里
+//
+// 那两列说的是「这次请求为什么没计费」，而不计费的结局**只有这一条写库的
+// 路**：结算那条路（markSettled）只在计费时才走——上游失败时 pipeline.Settle
+// 直接返回一个错误、一个副作用都不留。所以把它们写在别处（包括 markSettled
+// 里那两个曾经摆在那儿的字面量参数位）都等于永远不写。
+//
+// failure 为 nil 表示这次没有上游失败的依据：插件阻断、结算本身出错，
+// 以及「还没到结算那一步就返回了」那条路（结算之前客户端就断了、context
+// 被取消——那时上游那一次调用多半压根没发生）都是这样。两列那时留 NULL，
+// 而 **NULL 在这里不是「不知道」，是「这次不是因上游失败而不计费」**——
+// 与 client_canceled_at 的 NULL 同一个口径（见 markSettled 的注释）。
+//
+// 它与 status 写在同一条 UPDATE 里，不另起一条：分开写会有一个窗口让这一行
+// 已经是 released 而依据还没写上，而那个组合在库里读起来正是「释放了但
+// 没有理由」——一个不存在却看得见的状态。
+func (s *Store) Release(ctx context.Context, req pipeline.Request, failure *pipeline.UpstreamFailure) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("开启事务失败: %w", err)
@@ -578,9 +595,19 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request) error {
 		return walletRowMissing(fmt.Sprintf("用户 %d 的 %s 预留（%s）", userID, asset, amount))
 	}
 
+	// 依据跟着 status 一起写，就在这个事务里：这一行上面已经被 FOR UPDATE
+	// 锁住、而且仍是 pending（不是 pending 的话上面就返回了），所以写进去的
+	// 必然是这次释放带来的那一份，不会有别的写方插进来。
+	//
+	// NULLIF 挡住的是「没有值」而不是「值为空」：没有上游响应时状态码是 0，
+	// 没有依据时分类是空串，两个都不该作为数据写进去（见 Release 的注释）。
+	failureStatus, failureCode := failureColumns(failure)
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE billing_requests SET status = 'released', settled_at = now()
-		 WHERE id = $1`, id); err != nil {
+		UPDATE billing_requests
+		   SET status = 'released', settled_at = now(),
+		       upstream_status = NULLIF($2, 0),
+		       error_code = NULLIF($3, '')
+		 WHERE id = $1`, id, failureStatus, failureCode); err != nil {
 		return fmt.Errorf("标记释放失败: %w", err)
 	}
 
@@ -588,6 +615,19 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request) error {
 		return fmt.Errorf("提交释放失败: %w", err)
 	}
 	return nil
+}
+
+// failureColumns 把一份可空的失败依据拆成两个 SQL 参数。
+//
+// 拆解本身在这里，是为了让「有没有依据」的判据只有一处：调用方拿到的是
+// 两个标量，两个都空就是没有依据。顺带，nil 与零值因此落成同一个 NULL
+// ——SQL 那侧的 NULLIF 收到的已经是标量，它分不出「没传」与「传了个 0」，
+// 那一层挡不住这件事。
+func failureColumns(failure *pipeline.UpstreamFailure) (status int, code string) {
+	if failure == nil {
+		return 0, ""
+	}
+	return failure.Status, failure.Code
 }
 
 // markSettled 把预留标记为已结算并写入最终金额。
@@ -645,20 +685,40 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request) error {
 // 里写（见 pipeline.Request.UpstreamModel）。写成 NULLIF 而不是让它报错：
 // 值本身非空已经由 Save 开头的 checkUpstreamModel 挡住，这里只是不把一个
 // 空串当名字写进去。
+//
+// # 上游失败那两列为什么不在这里
+//
+// upstream_status 与 error_code 曾经也在这条 UPDATE 里，参数位写的是字面量
+// 0 与空串，所以那两列恒为 NULL——包括上游回了 400 的那条失败记录。参数位
+// 是字面量时 NULLIF 挡不住任何东西，它读起来却像「这里可能有值」，于是
+// 「这两列没有写入方」这件事被一个看起来有逻辑的表达式盖住了。
+//
+// 它们现在写在 Release 里，那是它们唯一写得进去的地方：结算这条路只在
+// **计费**时才走，而因上游失败不计费——那时 pipeline.Settle 直接返回错误，
+// 这一行 UPDATE 一条都不执行。计费这一侧也确实没有值可写：上游响应里
+// 没有状态码（channel.Response 不带它），「这次是 2xx」这件事在链路里
+// 根本没有一个字段记着，编一个 200 出来就是假数据。
+//
+// 于是两列在**已结算**的行上恒为 NULL，含义是「这次**不是因上游失败而
+// 不计费**」——与 client_canceled_at 的 NULL 同一个口径（见上面那段注释）。
+//
+// **这句话不能读成「这次没有上游失败」。** 上游吐了字之后才失败的那一次
+// 要计费（token 已经产生了，上游是算了钱的），账单就是已结算的行，两列
+// 同样是 NULL——见 stream_e2e_test.go 的 TestStreamUpstreamErrorMidStream。
+// 所以 `error_code IS NOT NULL` 不能当成「上游出过问题的请求」的判据，
+// 它答的只是「这次没向上游收钱，是不是因为上游这一侧出了事」。
 func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *pipeline.Charge) (bool, error) {
 	res, err := tx.ExecContext(ctx, `
 		UPDATE billing_requests
 		   SET status = 'settled',
 		       final_amount = $2::numeric,
-		       computed_amount = $7::numeric,
+		       computed_amount = $5::numeric,
 		       settled_at = now(),
-		       channel_id = NULLIF($5, 0),
-		       upstream_model = NULLIF($8, ''),
-		       upstream_status = NULLIF($3, 0),
-		       error_code = NULLIF($4, ''),
-		       client_canceled_at = CASE WHEN $6 THEN now() END
+		       channel_id = NULLIF($3, 0),
+		       upstream_model = NULLIF($6, ''),
+		       client_canceled_at = CASE WHEN $4 THEN now() END
 		 WHERE request_id = $1 AND status = 'pending'`,
-		req.RequestID, charge.Settlement.Actual.String(), 0, "", req.ChannelID,
+		req.RequestID, charge.Settlement.Actual.String(), req.ChannelID,
 		charge.ClientCanceled, charge.Settlement.Breakdown.Total.String(),
 		req.UpstreamModel)
 	if err != nil {

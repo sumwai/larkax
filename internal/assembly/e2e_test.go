@@ -27,6 +27,7 @@ import (
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/migrate"
 	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/pricing"
 	"github.com/sumwai/larkax/internal/settings"
 	"github.com/sumwai/larkax/internal/upstream"
@@ -263,14 +264,29 @@ type fakeUpstream struct {
 	// 传到调用方——把转换整个删掉、直接写死默认值的实现照样能过。
 	finishReason string
 
-	// fail 为 true 时回 500，用来走失败路径。
+	// fail 为 true 时回一个错误响应，用来走失败路径。
 	fail atomic.Bool
+
+	// failStatus 是 fail 为 true 时回的状态码，0 表示 500。
+	//
+	// 单开一项而不是把 fail 换成一个整数：已有用例读的就是 fail 这个布尔，
+	// 而它们要的是「失败了」这件事本身，与几号无关。只有需要分辨**哪个**
+	// 状态码的用例才设它——账单上要落的就是那个数，所以它不能是编的。
+	failStatus atomic.Int64
 
 	mu       sync.Mutex
 	calls    int
 	paths    []string
 	bodies   [][]byte
 	frozenAt []string
+}
+
+// failCode 是这次失败要回的状态码。
+func (f *fakeUpstream) failCode() int {
+	if code := f.failStatus.Load(); code != 0 {
+		return int(code)
+	}
+	return http.StatusInternalServerError
 }
 
 func (f *fakeUpstream) handler() http.Handler {
@@ -294,7 +310,7 @@ func (f *fakeUpstream) handler() http.Handler {
 
 		w.Header().Set("Content-Type", "application/json")
 		if f.fail.Load() {
-			w.WriteHeader(http.StatusInternalServerError)
+			w.WriteHeader(f.failCode())
 			_, _ = w.Write([]byte(f.failureBody()))
 			return
 		}
@@ -1115,6 +1131,234 @@ func greaterThan(a, b string) bool {
 	pa, errA := strconv.ParseFloat(a, 64)
 	pb, errB := strconv.ParseFloat(b, 64)
 	return errA == nil && errB == nil && pa > pb
+}
+
+// 不计费的结局要在账单上留下「上游回了什么」。
+//
+// 这两列（upstream_status / error_code）此前恒为 NULL：写入那条 UPDATE 的
+// 参数位写的是字面量 0 与空串，而失败那条路根本不走结算。于是事后核对
+// 「这次结算对应的上游回了什么」时，账单表答不出来——得去 join 快照表，
+// 而快照是可以被关掉、按月清掉的。
+//
+// # 为什么判据是「有一条已知该有值的记录」
+//
+// 「永远是 NULL」与「这一批恰好没有值」在单次查询里长得一样，所以「有没有
+// 非空的」证明不了任何东西。这里跑的是当初发现这个缺陷的那个场景（几条成功
+// 加两条不同的失败），断言落在**那两条已知该有值的行**上。
+//
+// 两条失败的落法不同，必须都钉：上游回 400 那一条有状态码，连不上那一条
+// **没有**——上游一个响应都没回过。只钉前一条的话，把状态码无条件写成
+// 取回来的值（连不上时是 0）同样能过，而 0 在库里会读成「上游回了 0 号」。
+func TestUpstreamFailureIsRecordedInBillingRequest(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+
+	const balance = "100"
+	model := unique("e2e-model-status")
+	// 连不上那条渠道服务另一个模型：选路按模型筛候选，所以两个模型各走各的
+	// 渠道，两条失败不会互相顶掉（见 route.Select）。
+	unreachableModel := unique("e2e-model-unreachable")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, balance)
+	key := issueKey(t, db, user)
+
+	fake := &fakeUpstream{protocol: channel.ProtocolOpenAI, db: db, userID: user, model: model}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	// 127.0.0.1:1 上不会有人监听，于是这一条走的是「一个 HTTP 响应都没拿到」。
+	seedChannel(t, db, sealer, merchant, "http://127.0.0.1:1", unreachableModel)
+	seedRule(t, db, unreachableModel, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	const successes = 3
+	for i := 0; i < successes; i++ {
+		status, body := postChat(ctx, t, public.URL+"/v1/chat/completions", key, chatBody(model))
+		if status != http.StatusOK {
+			t.Fatalf("第 %d 次成功请求的状态码 = %d，期望 200。响应体：%s", i+1, status, body)
+		}
+	}
+
+	// 上游回 400。调用方拿到的是 502 而不是 400：上游说「你的请求不对」时
+	// 回 400，会让调用方去改一个本来正确的请求（见 internal/api 的
+	// httpStatusOfUpstream），所以这一条不能拿响应码当判据。
+	fake.failStatus.Store(http.StatusBadRequest)
+	fake.fail.Store(true)
+	if status, body := postChat(ctx, t, public.URL+"/v1/chat/completions", key, chatBody(model)); status != http.StatusBadGateway {
+		t.Fatalf("上游 400 时调用方拿到的状态码 = %d，期望 502。响应体：%s", status, body)
+	}
+
+	if status, body := postChat(ctx, t, public.URL+"/v1/chat/completions", key, chatBody(unreachableModel)); status != http.StatusBadGateway {
+		t.Fatalf("连不上上游时调用方拿到的状态码 = %d，期望 502。响应体：%s", status, body)
+	}
+
+	rows := billingRowsOf(t, db, user)
+	if len(rows) != successes+2 {
+		t.Fatalf("账单行数 = %d，期望 %d（%d 条成功 + 上游 400 + 连不上）",
+			len(rows), successes+2, successes)
+	}
+
+	// 一、成功的那几条：状态是 settled，两列留 NULL。
+	//
+	// 这两列记的是「**因上游失败而不计费**」的证据，成功那一条没有可记的。
+	// 而上游响应里也没有状态码可用（channel.Response 不带它），所以这里
+	// 写得出来的只有一个编出来的 200。
+	//
+	// 注意这句话不等于「这次没有上游失败」：上游吐了字之后才失败的那一次
+	// 要计费，账单同样是 settled、两列同样是 NULL（见
+	// stream_e2e_test.go 的 TestStreamUpstreamErrorMidStream）。所以
+	// `error_code IS NOT NULL` 不是「上游出过问题的请求」的判据。
+	for i, row := range rows[:successes] {
+		if row.status != "settled" {
+			t.Errorf("第 %d 条成功请求的账单状态 = %q，期望 settled", i+1, row.status)
+		}
+		if row.upstreamStatus.Valid || row.errorCode.Valid {
+			t.Errorf("第 %d 条成功请求的两列应当是 NULL，得到 %v / %v",
+				i+1, row.upstreamStatus, row.errorCode)
+		}
+	}
+
+	// 二、上游 400：状态码就是上游回的那个，分类是「上游回了个错误状态码」。
+	//
+	// 失败的那一行是 released 而不是 settled——上游失败不计费（见
+	// pipeline.Settle 的 UpstreamFailed 分支），预留被放开。
+	rejected := rows[successes]
+	if rejected.status != "released" {
+		t.Errorf("上游 400 那一行的状态 = %q，期望 released", rejected.status)
+	}
+	if !rejected.upstreamStatus.Valid || rejected.upstreamStatus.Int64 != http.StatusBadRequest {
+		t.Errorf("上游 400 那一行的 upstream_status = %v，期望 400", rejected.upstreamStatus)
+	}
+	if !rejected.errorCode.Valid || rejected.errorCode.String != pipeline.ErrorUpstreamHTTPError {
+		t.Errorf("上游 400 那一行的 error_code = %v，期望 %q",
+			rejected.errorCode, pipeline.ErrorUpstreamHTTPError)
+	}
+
+	// 三、连不上：**没有**状态码，两列里只有分类有值。
+	//
+	// 写成 0 会让「上游回了 0 号」与「上游根本没回过」在库里分不开，而 HTTP
+	// 里没有 0 这个状态码——0 是「没有值」的编码，落库时要变成 NULL。
+	unreachable := rows[successes+1]
+	if unreachable.status != "released" {
+		t.Errorf("连不上那一行的状态 = %q，期望 released", unreachable.status)
+	}
+	if unreachable.upstreamStatus.Valid {
+		t.Errorf("上游没给出状态码时 upstream_status = %v，期望 NULL",
+			unreachable.upstreamStatus)
+	}
+	if !unreachable.errorCode.Valid || unreachable.errorCode.String != pipeline.ErrorUpstreamNoAnswer {
+		t.Errorf("连不上上游时的 error_code = %v，期望 %q",
+			unreachable.errorCode, pipeline.ErrorUpstreamNoAnswer)
+	}
+
+	// 四、按 status 分组数一遍——当初发现这个缺陷用的就是这个形状的查询。
+	// 它同时钉住两件事：两组的行数（少一行说明有请求没落账单），以及
+	// 「非空的那两条落在哪一组」（把它们挪到 settled 那组就说明结算那条路
+	// 也在写这两列，而它没有值可写）。
+	breakdown := billingBreakdownOf(t, db, user)
+	t.Logf("status  | rows | non_null(upstream_status) | non_null(error_code)")
+	for _, b := range breakdown {
+		t.Logf("%-7s | %4d | %25d | %21d", b.status, b.rows, b.withStatus, b.withCode)
+	}
+	// 按 status 取而不是按下标：分组的顺序是 SQL 给的（这里按 status 排），
+	// 拿它当判据的话，加一条 ORDER BY 就会让断言指向另一组。
+	byStatus := make(map[string]billingStatusRow, len(breakdown))
+	for _, b := range breakdown {
+		byStatus[b.status] = b
+	}
+	if len(byStatus) != 2 {
+		t.Fatalf("按 status 分组得到 %d 组，期望 2 组（settled 与 released）：%+v",
+			len(byStatus), breakdown)
+	}
+	if b := byStatus["settled"]; b.rows != successes || b.withStatus != 0 || b.withCode != 0 {
+		t.Errorf("settled 那一组 = %+v，期望 %d 行且两列都非空 0 行", b, successes)
+	}
+	if b := byStatus["released"]; b.rows != 2 || b.withStatus != 1 || b.withCode != 2 {
+		t.Errorf("released 那一组 = %+v，期望 2 行、upstream_status 非空 1 行、error_code 非空 2 行", b)
+	}
+}
+
+// billingStatusRow 是账单按 status 分组之后的一组。
+type billingStatusRow struct {
+	status string
+	rows   int
+	// withStatus 与 withCode 是这一组里那两列非空的行数。
+	//
+	// 数的是非空而不是「等于某个值」：这两列的取值口径会变（上游状态码是
+	// 上游给的），而「有没有值」不会。
+	withStatus int
+	withCode   int
+}
+
+// billingBreakdownOf 按 status 分组数这个用户的账单行，按 status 排序。
+func billingBreakdownOf(t *testing.T, db *sql.DB, userID int64) []billingStatusRow {
+	t.Helper()
+
+	rows, err := db.QueryContext(context.Background(), `
+		SELECT status,
+		       count(*),
+		       count(upstream_status),
+		       count(error_code)
+		  FROM billing_requests
+		 WHERE user_id = $1
+		 GROUP BY status
+		 ORDER BY status`, userID)
+	if err != nil {
+		t.Fatalf("按状态分组查账单失败: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []billingStatusRow
+	for rows.Next() {
+		var b billingStatusRow
+		if err := rows.Scan(&b.status, &b.rows, &b.withStatus, &b.withCode); err != nil {
+			t.Fatalf("读分组结果失败: %v", err)
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("读分组结果失败: %v", err)
+	}
+	return out
+}
+
+// billingRowsOf 按 id 升序取这个用户全部账单行的状态与那两列。
+//
+// 与 billingOf 分开：那个取的是**最近一行**（流式收尾要等的那一条），
+// 这里要的是一批请求跑完之后每一行的样子——分组统计要的就是整批。
+func billingRowsOf(t *testing.T, db *sql.DB, userID int64) []billingRow {
+	t.Helper()
+
+	rows, err := db.QueryContext(context.Background(), `
+		SELECT status, upstream_status, error_code
+		  FROM billing_requests
+		 WHERE user_id = $1
+		 ORDER BY id`, userID)
+	if err != nil {
+		t.Fatalf("查账单失败: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []billingRow
+	for rows.Next() {
+		var b billingRow
+		if err := rows.Scan(&b.status, &b.upstreamStatus, &b.errorCode); err != nil {
+			t.Fatalf("读账单失败: %v", err)
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("读账单失败: %v", err)
+	}
+	return out
 }
 
 // waitForSnapshot 等到这次请求的快照落库，返回它记下的用户 id。

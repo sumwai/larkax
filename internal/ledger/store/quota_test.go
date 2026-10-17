@@ -187,7 +187,7 @@ func TestQuotaIgnoresReleasedRequests(t *testing.T) {
 	if _, err := s.SaveReservation(ctx, first, reservation(t, userID, first.RequestID, "100", "CNY")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Release(ctx, first); err != nil {
+	if err := s.Release(ctx, first, nil); err != nil {
 		t.Fatalf("释放预留失败: %v", err)
 	}
 
