@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/sumwai/larkax/internal/channel"
 )
 
 // errNonPositiveMaxTokens 是 max_tokens 非正时的错误。
@@ -136,8 +138,9 @@ func ApplyRequestBodyPatch(body map[string]any, patch *RequestBodyPatch) (map[st
 // 返回放行的头与被拒的头名。**被拒的必须报出去**：插件作者写了一个被拒的头
 // 却没有任何反馈，会以为是上游不支持——而真正的原因是它不在白名单里。
 //
-// 这里只做这一层的规则（前缀 + 值里不能有换行）。适配器还会再过一道
-// 更严的过滤（SafeRequestHeaders），那是最后一道防线。
+// 这里只做这一层的规则（前缀 + 值的文法）。适配器还会再过一道过滤
+// （SafeRequestHeaders），那是最后一道防线。两道用的是同一个判据
+// （channel.ValidHeaderValue），不是两份各自维护的规则。
 func ApplyHeaderPatch(base, patch map[string]string) (map[string]string, []string) {
 	if len(patch) == 0 {
 		return base, nil
@@ -162,8 +165,10 @@ func ApplyHeaderPatch(base, patch map[string]string) (map[string]string, []strin
 			// 只查值不查名会漏掉一半：`"x-larkax-a: 1\r\nx-evil"` 作为一个
 			// 名字传进来，它既是名字也带着一整个头。
 			rejected = append(rejected, name)
-		case strings.ContainsAny(value, "\r\n"):
-			// 值里带换行等于能注入出额外的头。
+		case !channel.ValidHeaderValue(value):
+			// 值必须符合 RFC 7230 的 field-value 文法。**只挡换行是不够的**：
+			// NUL 之类的控制字符会一路走到 net/http 才报错，那时它表现为
+			// 「上游失败」而不是「插件写了个坏头」，可能触发换渠道重试。
 			rejected = append(rejected, name)
 		default:
 			out[name] = value

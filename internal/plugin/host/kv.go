@@ -2,8 +2,6 @@ package host
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"time"
 
 	"github.com/Calcium-Ion/moejs"
@@ -42,7 +40,7 @@ func kvGet(env Env) func(context.Context, []moejs.Value) (moejs.Value, error) {
 		}
 		value, found, err := env.KV.Get(ctx, env.Plugin, env.UserID, key)
 		if err != nil {
-			return moejs.Undefined(), fmt.Errorf("读取插件 KV 失败: %w", err)
+			return moejs.Undefined(), unavailable("读取插件 KV 失败", err)
 		}
 		if !found {
 			return moejs.Null(), nil
@@ -63,19 +61,19 @@ func kvSet(env Env) func(context.Context, []moejs.Value) (moejs.Value, error) {
 		}
 		value := argString(args, 1)
 		if len(value) > kvValueMaxBytes {
-			return moejs.Undefined(), fmt.Errorf("值超过 %d 字节上限", kvValueMaxBytes)
+			return moejs.Undefined(), badArgument("值超过 %d 字节上限", kvValueMaxBytes)
 		}
-		ttl, err := argInt64Or(args, 2, 0)
+		ttl, err := argInt64Or(args, 2, "ttlSeconds", 0)
 		if err != nil {
-			return moejs.Undefined(), fmt.Errorf("ttlSeconds 无效: %w", err)
+			return moejs.Undefined(), err
 		}
 		if ttl < 0 {
 			// 负数没有明确含义（是「立刻过期」还是「永不过期」？），
 			// 猜一个等于让插件的一次写变成不可预期的事。
-			return moejs.Undefined(), fmt.Errorf("ttlSeconds 不能为负数: %d", ttl)
+			return moejs.Undefined(), badArgument("ttlSeconds 不能为负数: %d", ttl)
 		}
 		if err := env.KV.Set(ctx, env.Plugin, env.UserID, key, value, time.Duration(ttl)*time.Second); err != nil {
-			return moejs.Undefined(), fmt.Errorf("写入插件 KV 失败: %w", err)
+			return moejs.Undefined(), unavailable("写入插件 KV 失败", err)
 		}
 		// 不返回值：SDK 的契约里 set 没有返回值，凭空多给一个会让插件
 		// 依赖上一个没写在契约里的东西。
@@ -99,10 +97,10 @@ func kvDel(env Env) func(context.Context, []moejs.Value) (moejs.Value, error) {
 		// 而不是在这一层加锁：锁只能挡住同一个进程里的两个插件实例。
 		_, found, err := env.KV.Get(ctx, env.Plugin, env.UserID, key)
 		if err != nil {
-			return moejs.Undefined(), fmt.Errorf("读取插件 KV 失败: %w", err)
+			return moejs.Undefined(), unavailable("读取插件 KV 失败", err)
 		}
 		if err := env.KV.Del(ctx, env.Plugin, env.UserID, key); err != nil {
-			return moejs.Undefined(), fmt.Errorf("删除插件 KV 失败: %w", err)
+			return moejs.Undefined(), unavailable("删除插件 KV 失败", err)
 		}
 		return moejs.Bool(found), nil
 	}
@@ -112,10 +110,10 @@ func kvDel(env Env) func(context.Context, []moejs.Value) (moejs.Value, error) {
 func kvKey(args []moejs.Value) (string, error) {
 	key := argString(args, 0)
 	if key == "" {
-		return "", errors.New("键不能为空")
+		return "", badArgument("键不能为空")
 	}
 	if len(key) > kvKeyMaxBytes {
-		return "", fmt.Errorf("键超过 %d 字节上限", kvKeyMaxBytes)
+		return "", badArgument("键超过 %d 字节上限", kvKeyMaxBytes)
 	}
 	return key, nil
 }

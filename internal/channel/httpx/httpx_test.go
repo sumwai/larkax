@@ -236,6 +236,32 @@ func TestSafeRequestHeadersRejectsHeaderInjection(t *testing.T) {
 	}
 }
 
+// 值里的控制字符与换行是同一类问题：只挡 CR/LF 的话，NUL 之类的字符会一路
+// 走到 net/http 才报错，那时它表现为「上游失败」而不是「这个头不合法」。
+//
+// 同时钉住反面：HTAB 是 RFC 7230 的 field-value 允许的，别把它一起拒了。
+func TestSafeRequestHeadersRejectsControlCharsInValue(t *testing.T) {
+	safe, rejected := SafeRequestHeaders(map[string]string{
+		"X-Nul": "\x00",
+		"X-Vt":  "a\x0bb",
+		"X-Del": "a\x7fb",
+		"X-Tab": "a\tb",
+		"X-Ok":  "a b",
+	})
+	if len(rejected) != 3 {
+		t.Errorf("带控制字符的三个头都该被拒，实际被拒 %v", rejected)
+	}
+	if safe["X-Tab"] != "a\tb" {
+		t.Errorf("HTAB 是 RFC 允许的，不该被拒: %v", safe)
+	}
+	if safe["X-Ok"] != "a b" {
+		t.Errorf("普通值不该被拒: %v", safe)
+	}
+	if len(safe) != 2 {
+		t.Errorf("只该放行两个，实际 %v", safe)
+	}
+}
+
 // 空头名与全被拒时要返回 nil 而不是空 map。
 func TestSafeRequestHeadersEdgeCases(t *testing.T) {
 	if safe, rejected := SafeRequestHeaders(nil); safe != nil || rejected != nil {

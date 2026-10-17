@@ -228,8 +228,10 @@ func SafeRequestHeaders(custom map[string]string) (map[string]string, []string) 
 			rejected = append(rejected, name)
 			continue
 		}
-		// 值里带换行等于能注入出额外的头，与日志注入是同一类问题。
-		if strings.ContainsAny(value, "\r\n") {
+		// 值必须符合 RFC 7230 的 field-value 文法：换行能注入出额外的头，
+		// 而 NUL 之类的控制字符会被 net/http 拒掉——那时失败看起来像
+		// 「上游出错」，而不是「这个头的值不合法」。
+		if !channel.ValidHeaderValue(value) {
 			rejected = append(rejected, name)
 			continue
 		}

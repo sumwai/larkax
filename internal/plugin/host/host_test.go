@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -677,6 +678,369 @@ func TestLogFieldsKeyLimit(t *testing.T) {
 	}
 }
 
+// TestLogTruncatesLongFieldValue 钉住**单个值**的字节上限。
+//
+// 键的个数由 fieldKeyMax 管着，值的长度一直没人管：一个 100 KB 的字符串
+// 会原样进日志（实测 1129 字节的日志行里 1022 字节是它）。日志的留存期与
+// 传播范围远大于插件本身，所以「插件决定宿主为此花多少内存」这件事
+// 在值这一维上同样不能成立。
+//
+// 用例里的数字是**写死的**：1024 就是 fieldValueMaxBytes 的值。
+// 用常量断言等于用常量测常量——把常量改成 1，用例照样通过。
+func TestLogTruncatesLongFieldValue(t *testing.T) {
+	var buf bytes.Buffer
+	env := Env{Logger: testLogger(&buf)}
+	fn := capability(t, Standard(env), capLog).Funcs["log"]
+
+	// 多字节字符顺带钉住截断落在 rune 边界上（否则日志里会出现乱码）。
+	obj := jsEval(t, `({k: "占".repeat(100000)})`)
+	if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
+		t.Fatalf("log 出错: %v", err)
+	}
+	entries := logEntries(t, &buf)
+	got, ok := entries[0]["k"].(string)
+	if !ok {
+		t.Fatalf("k 应当是字符串，实际 %T", entries[0]["k"])
+	}
+	if len(got) > 1024 {
+		t.Errorf("字段值有 %d 字节，超过 1024", len(got))
+	}
+	// 反过来也要钉：截到只剩几十字节同样是坏的——那是把日志写没了。
+	if len(got) < 900 {
+		t.Errorf("字段值只剩 %d 字节，截得太狠", len(got))
+	}
+	if !strings.HasSuffix(got, truncatedMark) {
+		t.Error("截断没有标注：读的人会以为插件只打印了这么多")
+	}
+	if strings.ContainsRune(got, '�') {
+		t.Error("截断落在了 rune 边界之外")
+	}
+}
+
+// TestLogFieldValueBoundary 钉住上限的边界：正好到上限的原样通过，
+// 超一个字节才截断，且截断标记也占预算（截完不超过 1024 字节）。
+//
+// 只测「很大的值被截了」是不够的——把上限写成 0 也满足那一条。
+func TestLogFieldValueBoundary(t *testing.T) {
+	cases := []struct {
+		name   string
+		field  string
+		want   int
+		marked bool
+	}{
+		{"正好到上限", `({k: "x".repeat(1024)})`, 1024, false},
+		{"超一个字节", `({k: "x".repeat(1025)})`, 1024, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			env := Env{Logger: testLogger(&buf)}
+			fn := capability(t, Standard(env), capLog).Funcs["log"]
+
+			if _, err := fn(context.Background(), js("info", "m", jsEval(t, tc.field))); err != nil {
+				t.Fatalf("log 出错: %v", err)
+			}
+			got, _ := logEntries(t, &buf)[0]["k"].(string)
+			if len(got) != tc.want {
+				t.Errorf("字段值 %d 字节，想要 %d", len(got), tc.want)
+			}
+			if strings.HasSuffix(got, truncatedMark) != tc.marked {
+				t.Errorf("截断标记 = %v，想要 %v: %q", !tc.marked, tc.marked, got[max(0, len(got)-20):])
+			}
+		})
+	}
+}
+
+// TestLogBoundsArrayFieldValues 钉住**数组长度**这一维。
+//
+// 只限单个值是不够的：每个元素都在单值上限之内，而数组长度没有上限。
+// 十万个短字符串曾经原样进日志（实测字段渲染后 32705 字节）。
+//
+// 8192 与 32768 都是写死的，两条都是**上界**：一字节的字符串现在也至少记
+// scalarCost，所以实际只收进 1023 个（渲染约 4 KB），离上界还有很远。
+// 紧的那两个数由 TestLogBoundsEmptyStringValues 与
+// TestLogBoundsWorstCaseRenderedBytes 钉着。
+func TestLogBoundsArrayFieldValues(t *testing.T) {
+	var buf bytes.Buffer
+	env := Env{Logger: testLogger(&buf)}
+	fn := capability(t, Standard(env), capLog).Funcs["log"]
+
+	obj := jsEval(t, `({k: Array.from({length: 100000}, () => "x")})`)
+	if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
+		t.Fatalf("log 出错: %v", err)
+	}
+	arr, ok := logEntries(t, &buf)[0]["k"].([]any)
+	if !ok {
+		t.Fatalf("k 应当是数组，实际 %T", logEntries(t, &buf)[0]["k"])
+	}
+	if len(arr) > 8192 {
+		t.Errorf("数组收进了 %d 个元素，超过 8192", len(arr))
+	}
+	encoded, err := json.Marshal(arr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > 32768 {
+		t.Errorf("字段渲染后有 %d 字节，超过 32768", len(encoded))
+	}
+	if len(arr) == 0 {
+		t.Error("一个元素都没收进来")
+	}
+}
+
+// TestLogBoundsScalarFieldValues 是上一条的另一种元素：数字不占字符串的字节数，
+// 但它在日志里同样各占一个位置。不记账的话「一百万个数字」这条路径没有界。
+//
+// 1024 是写死的：预算是 8192 字节，每个非字符串值记 8 字节。
+func TestLogBoundsScalarFieldValues(t *testing.T) {
+	var buf bytes.Buffer
+	env := Env{Logger: testLogger(&buf)}
+	fn := capability(t, Standard(env), capLog).Funcs["log"]
+
+	obj := jsEval(t, `({k: Array.from({length: 100000}, (_, i) => i)})`)
+	if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
+		t.Fatalf("log 出错: %v", err)
+	}
+	arr, ok := logEntries(t, &buf)[0]["k"].([]any)
+	if !ok {
+		t.Fatalf("k 应当是数组，实际 %T", logEntries(t, &buf)[0]["k"])
+	}
+	if len(arr) > 1024 {
+		t.Errorf("数组收进了 %d 个数字，超过 1024", len(arr))
+	}
+	if len(arr) == 0 {
+		t.Error("一个数字都没收进来")
+	}
+}
+
+// countFields 数一条日志里除固定键之外的字段个数。
+func countFields(entry map[string]any) int {
+	n := 0
+	for k := range entry {
+		switch k {
+		case "time", "level", "msg", "plugin", "request_id":
+		default:
+			n++
+		}
+	}
+	return n
+}
+
+// TestLogBoundsKeyBytes 钉住**键的字节**也走同一份预算。
+//
+// 键曾经一个字节都不记，也没有长度上限：一个 1 MB 的键原样进日志
+// （实测日志行 1000105 字节）。值与键都是「插件决定宿主为此花多少内存」的
+// 入口，而键还额外决定日志行的长度——只记值等于把这一维留着一个洞。
+//
+// 300 与 26 都是写死的：每个条目记 300（键）+ 8（值，一个数字）= 308 字节，
+// 8192 / 308 = 26。**这条用例就是靠这个差分辨「键记账了」与「没记账」**：
+// 只记值的话 32 个条目合计 256 字节，32 个会全进（fieldKeyMax 正好是 32，
+// 数量上限一个都拦不住）。
+func TestLogBoundsKeyBytes(t *testing.T) {
+	var buf bytes.Buffer
+	env := Env{Logger: testLogger(&buf)}
+	fn := capability(t, Standard(env), capLog).Funcs["log"]
+
+	// 键长 300 字节且互不相同（尾三位的序号），于是每个条目都真的占一份预算。
+	obj := jsEval(t, `(() => {
+		const o = {};
+		for (let i = 0; i < 32; i++) o["k".repeat(297) + ("000" + i).slice(-3)] = 1;
+		return o;
+	})()`)
+	if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
+		t.Fatalf("log 出错: %v", err)
+	}
+	if got := countFields(logEntries(t, &buf)[0]); got != 26 {
+		t.Errorf("收进了 %d 个字段，想要 26（每个条目 300 字节的键 + 8 字节的值，8192/308）", got)
+	}
+
+	// 单个键就超过整份预算时：整个条目丢掉，不截短键、也不留一个只剩键名的空壳。
+	buf.Reset()
+	obj = jsEval(t, `({["k".repeat(1000000)]: 1})`)
+	if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
+		t.Fatalf("log 出错: %v", err)
+	}
+	entries := logEntries(t, &buf)
+	if got := countFields(entries[0]); got != 0 {
+		t.Errorf("1 MB 的键放不下，却收进了 %d 个字段", got)
+	}
+	t.Logf("1 MB 的键：日志行 %d 字节", buf.Len())
+	// 1024 是写死的：修前这一行是 1000105 字节（键原样进日志）。
+	if n := buf.Len(); n > 1024 {
+		t.Errorf("日志行 %d 字节，超过 1024：键的字节没有过预算", n)
+	}
+}
+
+// TestLogBoundsEmptyStringValues 钉住**零字节的值**也要记账。
+//
+// 空字符串的字节数是 0，而 spend(0) 恒真——数组那一支只限了初始容量
+// （min(len(keys), 8192/scalarCost)），append 之后长度不受约束，于是一百万个
+// 空字符串能一个字节都不花地全进日志（实测日志行 3000106 字节、一次 log 调用
+// 在宿主侧多分配约 116 MB）。既有用例用的是 `"x"`，每个元素至少占 1 字节，
+// 正好绕开了这一支。
+//
+// 1024 与 1000 都是写死的：预算 8192 除以每个值至少记的 8 字节是 1024 个，
+// 而容器（外层对象 8 + 键 "k" 1 + 数组 8）先扣掉 17，所以实际是 1021 个；
+// 下界 1000 挡的是「记账记成了另一个量级」（例如每个值记 1024 字节，
+// 那就只收得进 8 个）——只钉上界的话，把每个值记成 8192 也照样通过。
+func TestLogBoundsEmptyStringValues(t *testing.T) {
+	var buf bytes.Buffer
+	env := Env{Logger: testLogger(&buf)}
+	fn := capability(t, Standard(env), capLog).Funcs["log"]
+
+	obj := jsEval(t, `({k: new Array(1000000).fill("")})`)
+	if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
+		t.Fatalf("log 出错: %v", err)
+	}
+	arr, ok := logEntries(t, &buf)[0]["k"].([]any)
+	if !ok {
+		t.Fatalf("k 应当是数组，实际 %T", logEntries(t, &buf)[0]["k"])
+	}
+	t.Logf("收进 %d 个空字符串，日志行 %d 字节", len(arr), buf.Len())
+	if len(arr) > 1024 {
+		t.Errorf("数组收进了 %d 个空字符串，超过 1024：零字节的值没有记账", len(arr))
+	}
+	if len(arr) < 1000 {
+		t.Errorf("数组只收进了 %d 个空字符串，记账比名义开销重太多", len(arr))
+	}
+	// 8192 是写死的：修前这一行是 3000106 字节。
+	if n := buf.Len(); n > 8192 {
+		t.Errorf("日志行 %d 字节，超过 8192", n)
+	}
+}
+
+// TestLogBoundsWorstCaseRenderedBytes 钉住**渲染口径**的那个数。
+//
+// 记账不超过 8192，但记账不等于渲染：数字记 8 字节，而最长的 float64
+// （1.7976931348623157e+308）写成 JSON 有 24 字节，加一个逗号是 25——
+// 于是整条 fields 渲染出来最多是 25 × 1021 上下（实测 24610 字节）。
+//
+// 32 KiB 是写死的：它是「这条 fields 最多多少字节」在**日志行**那一侧的答案，
+// 与记账口径的 8192 是两个数，两个都要说。
+//
+// 元素故意用最长的数字而不是 `"x"`：后者一个字节记 8 字节、渲染只有 4 字节，
+// **放大方向是反的**，钉不住上界。
+func TestLogBoundsWorstCaseRenderedBytes(t *testing.T) {
+	var buf bytes.Buffer
+	env := Env{Logger: testLogger(&buf)}
+	fn := capability(t, Standard(env), capLog).Funcs["log"]
+
+	obj := jsEval(t, `({k: Array.from({length: 1000000}, () => 1.7976931348623157e308)})`)
+	if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
+		t.Fatalf("log 出错: %v", err)
+	}
+	arr, ok := logEntries(t, &buf)[0]["k"].([]any)
+	if !ok {
+		t.Fatalf("k 应当是数组，实际 %T", logEntries(t, &buf)[0]["k"])
+	}
+	t.Logf("收进 %d 个最长数字，日志行 %d 字节", len(arr), buf.Len())
+	if len(arr) > 1024 {
+		t.Errorf("数组收进了 %d 个数字，超过 1024", len(arr))
+	}
+	if len(arr) < 1000 {
+		t.Errorf("数组只收进了 %d 个数字，记账比名义开销重太多", len(arr))
+	}
+	if n := buf.Len(); n > 32768 {
+		t.Errorf("日志行 %d 字节，超过 32768（记账 8192，渲染放大三倍上下）", n)
+	}
+}
+
+// TestLogFieldBudgetIsSharedAcrossKeys 钉住预算是**整条 fields 共享**的。
+//
+// 二十个一千字节的值合起来两万字节，每一个都在单值上限之内——
+// 只限单值的实现会把它们全部放行。放不下时丢的是排在后面的键，
+// 而不是把每个值都截短：一条被截过的 fields 在日志里读起来和完整的一样。
+func TestLogFieldBudgetIsSharedAcrossKeys(t *testing.T) {
+	var buf bytes.Buffer
+	env := Env{Logger: testLogger(&buf)}
+	fn := capability(t, Standard(env), capLog).Funcs["log"]
+
+	obj := jsEval(t, `(() => {
+		const o = {};
+		for (let i = 0; i < 20; i++) o["k" + i] = "y".repeat(1000);
+		return o;
+	})()`)
+	if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
+		t.Fatalf("log 出错: %v", err)
+	}
+	entries := logEntries(t, &buf)
+
+	total, survived := 0, 0
+	for k, v := range entries[0] {
+		switch k {
+		case "time", "level", "msg", "plugin", "request_id":
+			continue
+		}
+		s, ok := v.(string)
+		if !ok {
+			t.Fatalf("%s 应当是字符串，实际 %T", k, v)
+		}
+		total += len(s)
+		survived++
+	}
+	// 8192 是写死的：它就是 fieldTotalMaxBytes 的值。
+	if total > 8192 {
+		t.Errorf("所有字段值合计 %d 字节，超过 8192", total)
+	}
+	if survived >= 20 {
+		t.Errorf("二十个值全收进来了（合计 %d 字节），预算没有共享", total)
+	}
+	if survived == 0 {
+		t.Fatal("一个字段都没收进来")
+	}
+	// 排在前面那个必须完好无损：预算是「放不下才丢」，不是「一律截短」。
+	if got, _ := entries[0]["k0"].(string); got != strings.Repeat("y", 1000) {
+		t.Errorf("k0 被改动了：%d 字节", len(got))
+	}
+}
+
+// TestLogBoundsContainerPreallocation 钉住「容器不按插件的规模预分配」。
+//
+// 键的个数有 fieldKeyMax 管着，每个值的大小有 fieldValueMaxBytes 管着，
+// 但**容器的预分配**曾经跟着 len(keys) 走：一个一百万元素的 Float64Array
+// （JS 侧每元素 8 字节）会让宿主先造一个能装一百万个键的 map，然后才在
+// 循环里截到 32 个。写出来的日志行一直是几百字节，差的正是这一份——
+// 按默认的 64 MiB 内存上限，一个 8M 元素的数组就能让**一次 log 调用**
+// 在宿主侧分配约 800 MB。
+//
+// 断言的是宿主侧的新分配量，不是输出的大小：TotalAlloc 只增不减，
+// 不受 GC 时机影响。上限 64 MiB 是写死的——修好之后这一份只剩「把键
+// 物化出来」那一次（实测约 16 MB，每键 16 字节），坏掉时是它的六倍以上。
+//
+// 数组那一支（`make([]any, 0, len(keys))`）用的是同一个判据，但它的容量
+// 与「键物化」是同一量级（都是每元素 16 字节），所以没有单独设阈值；
+// 它收进多少元素由 TestLogBoundsArrayFieldValues 钉着。
+func TestLogBoundsContainerPreallocation(t *testing.T) {
+	var buf bytes.Buffer
+	env := Env{Logger: testLogger(&buf)}
+	fn := capability(t, Standard(env), capLog).Funcs["log"]
+
+	// Float64Array 走的不是数组那一支：它的 ClassName 不是 "Array"，
+	// 于是按普通对象转，容器是 map。
+	obj := jsEval(t, `({k: new Float64Array(1000000)})`)
+
+	var 前, 后 runtime.MemStats
+	runtime.ReadMemStats(&前)
+	if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
+		t.Fatalf("log 出错: %v", err)
+	}
+	runtime.ReadMemStats(&后)
+	分配 := 后.TotalAlloc - 前.TotalAlloc
+	t.Logf("一次 log 调用在宿主侧新分配 %d 字节", 分配)
+
+	if 分配 > 64<<20 {
+		t.Errorf("一次 log 调用新分配了 %d 字节，超过 64 MiB：容器按插件的规模预分配了", 分配)
+	}
+	// 上面那个上限不能靠「什么都没转」满足：键还是要收到上限为止。
+	got, ok := logEntries(t, &buf)[0]["k"].(map[string]any)
+	if !ok {
+		t.Fatalf("k 应当是对象，实际 %T", logEntries(t, &buf)[0]["k"])
+	}
+	if len(got) == 0 || len(got) > fieldKeyMax {
+		t.Errorf("收进了 %d 个键，想要 (0, %d]", len(got), fieldKeyMax)
+	}
+}
+
 func TestLogTruncatesLongMessage(t *testing.T) {
 	var buf bytes.Buffer
 	env := Env{Logger: testLogger(&buf)}
@@ -789,7 +1153,7 @@ func TestArgHelpers(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := argInt64(tc.args, 0)
+			got, err := argInt64(tc.args, 0, "时间戳")
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("argInt64 错误 = %v，期望报错 %v", err, tc.wantErr)
 			}
@@ -799,13 +1163,13 @@ func TestArgHelpers(t *testing.T) {
 		})
 	}
 
-	if _, err := argInt64Or(nil, 2, 42); err != nil {
+	if _, err := argInt64Or(nil, 2, "ttlSeconds", 42); err != nil {
 		t.Errorf("可缺省的参数不该在缺失时报错: %v", err)
 	}
-	if got, _ := argInt64Or(nil, 2, 42); got != 42 {
+	if got, _ := argInt64Or(nil, 2, "ttlSeconds", 42); got != 42 {
 		t.Errorf("缺省值 = %d，期望 42", got)
 	}
-	if _, err := argInt64Or(js("x"), 0, 1); err == nil {
+	if _, err := argInt64Or(js("x"), 0, "ttlSeconds", 1); err == nil {
 		t.Error("显式传了一个非整数时应当报错，而不是用缺省值")
 	}
 	if got := argString(js("k"), 0); got != "k" {

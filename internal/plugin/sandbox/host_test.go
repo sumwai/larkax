@@ -270,60 +270,59 @@ export default {
 // 宿主函数拿到的 ctx 已经取消时，**实现本体不会被进入**：
 // wrapFunc 在调用实现之前先看一次 context.Cause。
 // 这条钉住「宿主函数不做事就返回」，是宿主侧超时的第一道防线。
+//
+// 这里直接调 wrapFunc 的产物，**不经过 rt.Call**：经过它的话，取消同时会让
+// 那个 AfterFunc 去 Interrupt 插件执行，两者赛跑——插件可能在调到宿主函数
+// 之前就被中断了，用例于是变成「谁先到」，跑一次绿跑一次红（LESSONS 第 15 条）。
+// 这条要钉的是 wrapFunc 那一处判断，直接调它才是它该测的东西。
+//
+// 插件那一侧看到什么，由 sanitize_test.go 那几条钉（它们不依赖取消时机）。
 func Test宿主函数在ctx已取消时不进入实现(t *testing.T) {
-	m, err := Compile("p", `
-export default {
-  onRequest() {
-    const out = {};
-    try { globalThis.__larkax.probe(); out.调到了 = true; } catch (e) { out.错误 = e.message; }
-    return out;
-  },
-};
-`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 宿主函数跑在 rt.Call 那个 goroutine 上，所以这个计数用 atomic——
-	// 测试里读它时不能假定与宿主函数的执行有 happens-before 关系。
+	// 宿主函数若被进入，这个计数从另一条路径被写，所以用 atomic。
 	var 进入 atomic.Int64
-	host := Host{Capabilities: map[string]any{
-		"probe": HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
+	原文 := make(chan error, 4)
+
+	已取消, 取消 := context.WithCancel(context.Background())
+	取消()
+
+	rs := newRuntime("p", Limits{})
+	probe := wrapFunc(rs, 已取消, "probe",
+		HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
 			进入.Add(1)
 			return moejs.Undefined(), nil
 		}),
-	}}
+		func(name string, err error) { 原文 <- err })
 
-	// 已取消的 ctx 传进 NewRuntime，调用时用的是另一个 ctx：
-	// 宿主函数拿到的仍是 NewRuntime 那个，所以第一道判断就能挡住。
-	已取消, 取消 := context.WithCancel(context.Background())
-	取消()
-	rt, err := m.NewRuntime(已取消, host, []string{"probe"}, Limits{})
-	if err != nil {
-		t.Fatal(err)
+	_, err := probe(nil, moejs.Undefined(), nil)
+	if err == nil {
+		t.Fatal("ctx 已取消时宿主函数应当报错，而不是照常返回")
 	}
-	defer rt.Close()
-	var out map[string]any
-	if f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, &out); f != nil {
-		t.Fatalf("插件 catch 了，Call 不该失败: %v", f)
-	}
-	if out["调到了"] == true {
-		t.Error("ctx 已取消，宿主函数的实现本体不该被进入")
+	var ce *CapabilityError
+	if !errors.As(err, &ce) || ce.Code != CodeCanceled {
+		t.Errorf("错误 = %v，想要 %s 那一类", err, CodeCanceled)
 	}
 	if n := 进入.Load(); n != 0 {
 		t.Errorf("宿主函数被进入了 %d 次，想要 0", n)
 	}
-	if !strings.Contains(fmt.Sprint(out["错误"]), "context canceled") {
-		t.Errorf("插件应看到一个 context canceled 的错误，实际 %v", out["错误"])
+	// 原文进了宿主日志——插件侧看不见它，排查只能靠这一份。
+	select {
+	case 原始错误 := <-原文:
+		if !errors.Is(原始错误, context.Canceled) {
+			t.Errorf("宿主日志里的原文 = %v，想要 context.Canceled", 原始错误)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("宿主函数被拒绝时没有把原因报给 OnError")
 	}
 
 	// 同一个宿主函数在 ctx 正常时会被进入——否则上一条可能是别的原因造成的。
-	rt2, err := m.NewRuntime(context.Background(), host, []string{"probe"}, Limits{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rt2.Close()
-	if f := rt2.Call(context.Background(), "onRequest", map[string]any{"a": 1}, nil); f != nil {
-		t.Fatalf("调用不该失败: %v", f)
+	rs2 := newRuntime("p", Limits{})
+	probe2 := wrapFunc(rs2, context.Background(), "probe",
+		HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
+			进入.Add(1)
+			return moejs.Undefined(), nil
+		}), nil)
+	if _, err := probe2(nil, moejs.Undefined(), nil); err != nil {
+		t.Fatalf("ctx 正常时不该报错: %v", err)
 	}
 	if n := 进入.Load(); n != 1 {
 		t.Errorf("ctx 正常时宿主函数应被进入 1 次，实际共 %d 次", n)

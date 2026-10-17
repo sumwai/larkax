@@ -2,8 +2,6 @@ package host
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"time"
 
 	"github.com/Calcium-Ion/moejs"
@@ -51,7 +49,7 @@ func isOffDay(env Env) func(context.Context, []moejs.Value) (moejs.Value, error)
 		}
 		info, err := env.Calendar.Day(ctx, region, instant)
 		if err != nil {
-			return moejs.Undefined(), fmt.Errorf("查询日历失败: %w", err)
+			return moejs.Undefined(), unavailable("查询日历失败", err)
 		}
 		switch info.Kind {
 		case kindWorkday:
@@ -59,7 +57,7 @@ func isOffDay(env Env) func(context.Context, []moejs.Value) (moejs.Value, error)
 		case kindRestDay:
 			return moejs.Bool(true), nil
 		default:
-			return moejs.Undefined(), fmt.Errorf(
+			return moejs.Undefined(), badArgument(
 				"日历没有 %s 在 %s 的判定，无法回答是否休息日（不按工作日处理）", region, instant.UTC().Format(time.RFC3339))
 		}
 	}
@@ -76,10 +74,10 @@ func isMakeupWorkday(env Env) func(context.Context, []moejs.Value) (moejs.Value,
 		}
 		info, err := env.Calendar.Day(ctx, region, instant)
 		if err != nil {
-			return moejs.Undefined(), fmt.Errorf("查询日历失败: %w", err)
+			return moejs.Undefined(), unavailable("查询日历失败", err)
 		}
 		if info.Kind == kindUnknown {
-			return moejs.Undefined(), fmt.Errorf(
+			return moejs.Undefined(), badArgument(
 				"日历没有 %s 在 %s 的判定，无法回答是否调休上班日", region, instant.UTC().Format(time.RFC3339))
 		}
 		return moejs.Bool(info.MakeupWorkday), nil
@@ -98,7 +96,7 @@ func holidayNameFn(env Env) func(context.Context, []moejs.Value) (moejs.Value, e
 		}
 		info, err := env.Calendar.Day(ctx, region, instant)
 		if err != nil {
-			return moejs.Undefined(), fmt.Errorf("查询日历失败: %w", err)
+			return moejs.Undefined(), unavailable("查询日历失败", err)
 		}
 		if info.Name == "" {
 			return moejs.Null(), nil
@@ -119,7 +117,7 @@ func kindFn(env Env) func(context.Context, []moejs.Value) (moejs.Value, error) {
 		}
 		info, err := env.Calendar.Day(ctx, region, instant)
 		if err != nil {
-			return moejs.Undefined(), fmt.Errorf("查询日历失败: %w", err)
+			return moejs.Undefined(), unavailable("查询日历失败", err)
 		}
 		switch info.Kind {
 		case kindWorkday, kindRestDay, kindUnknown:
@@ -140,10 +138,10 @@ func hourIn(env Env) func(context.Context, []moejs.Value) (moejs.Value, error) {
 		}
 		info, err := env.Calendar.Day(ctx, region, env.clock())
 		if err != nil {
-			return moejs.Undefined(), fmt.Errorf("查询日历失败: %w", err)
+			return moejs.Undefined(), unavailable("查询日历失败", err)
 		}
 		if info.LocalHour < 0 || info.LocalHour > 23 {
-			return moejs.Undefined(), fmt.Errorf("日历给出的钟点超出范围: %d", info.LocalHour)
+			return moejs.Undefined(), badArgument("日历给出的钟点超出范围: %d", info.LocalHour)
 		}
 		return moejs.Int(int64(info.LocalHour)), nil
 	}
@@ -158,10 +156,10 @@ func weekdayIn(env Env) func(context.Context, []moejs.Value) (moejs.Value, error
 		}
 		info, err := env.Calendar.Day(ctx, region, env.clock())
 		if err != nil {
-			return moejs.Undefined(), fmt.Errorf("查询日历失败: %w", err)
+			return moejs.Undefined(), unavailable("查询日历失败", err)
 		}
 		if info.LocalWeekday < 0 || info.LocalWeekday > 6 {
-			return moejs.Undefined(), fmt.Errorf("日历给出的星期超出范围: %d", info.LocalWeekday)
+			return moejs.Undefined(), badArgument("日历给出的星期超出范围: %d", info.LocalWeekday)
 		}
 		return moejs.Int(int64(info.LocalWeekday)), nil
 	}
@@ -171,9 +169,9 @@ func weekdayIn(env Env) func(context.Context, []moejs.Value) (moejs.Value, error
 //
 // ts 按**秒**解释（JS 惯例 Date.now()/1000）。
 func calendarArgs(args []moejs.Value) (time.Time, string, error) {
-	ts, err := argInt64(args, 0)
+	ts, err := argInt64(args, 0, "时间戳")
 	if err != nil {
-		return time.Time{}, "", fmt.Errorf("时间戳无效: %w", err)
+		return time.Time{}, "", err
 	}
 	region := argString(args, 1)
 	if err := checkRegion(region); err != nil {
@@ -188,7 +186,7 @@ func calendarArgs(args []moejs.Value) (time.Time, string, error) {
 // 等于让插件拿到一个它没要过的地方的判定结果。
 func checkRegion(region string) error {
 	if region == "" {
-		return errors.New("地区不能为空")
+		return badArgument("地区不能为空")
 	}
 	return nil
 }
