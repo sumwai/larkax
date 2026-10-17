@@ -71,6 +71,10 @@ type streamUpstream struct {
 	failAfter int
 	// hang 为 true 时，吐完全部分片之后挂住，直到调用方断开。
 	hang bool
+	// truncate 为 true 时，吐完全部分片之后**直接结束响应**：既不发结束
+	// 分片，也不发结束标记，也没有错误帧。它模拟的是上游把连接掐断
+	// （或一个不守协议的网关把流截在半路），与「正常结束」只差一个标记。
+	truncate bool
 	// status > 0 时直接回这个状态码，用来走「上游接受请求之前就失败」那条路。
 	status int
 
@@ -180,6 +184,10 @@ func (u *streamUpstream) serveOpenAI(w io.Writer, r *http.Request, flush func())
 		return
 	}
 
+	if u.truncate {
+		return
+	}
+
 	write(fmt.Sprintf(
 		`{"id":"chatcmpl-placeholder","object":"chat.completion.chunk","model":%q,`+
 			`"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`, u.model))
@@ -282,6 +290,10 @@ func (u *streamUpstream) serveAnthropic(w io.Writer, r *http.Request, flush func
 
 	if u.hang {
 		<-r.Context().Done()
+		return
+	}
+
+	if u.truncate {
 		return
 	}
 
@@ -1348,5 +1360,107 @@ func TestStreamEstimateMatchesReservationForUnknownFamily(t *testing.T) {
 
 	if got, want := est.Result().Input.Tokens, tokens.EstimatedTokens(model, "你好")+tokens.MessageFrameTokens; got != want {
 		t.Errorf("估算器的输入 = %d，预留口径 = %d：未知族时两者必须相同", got, want)
+	}
+}
+
+// 上游吐了字之后把连接掐断（没有结束标记、也没有错误帧）：两表都记
+// upstream_stream_truncated，而这次**计了费**。
+//
+// 它走的是真链路：假上游发一条正文分片就结束响应，客户端读到流关闭。
+// 断言分三块——
+//
+//  1. 客户端拿到正文，**没有** [DONE]（伪造一个正常结束会让半截回答
+//     看起来像答完了）；
+//  2. 账单是 settled，金额按估算算出来（上游没报 usage），说明这次计了费；
+//  3. 快照的 error_kind 与账单的 error_code 是**同一个词**。
+//
+// 第 3 条是这次改动的核心：两表对同一次截断各说各的时，读的人只能靠
+// 猜把两边对上；而它们的判据本该只有一处（见 gateway 的 streamTruncated）。
+func TestStreamTruncatedAfterOutputRecordsSameClassification(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+
+	const balance = "100"
+	model := unique("e2e-stream-truncated")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, balance)
+	key := issueKey(t, db, user)
+
+	// 一条正文分片之后直接返回：既没有结束分片，也没有 [DONE]。
+	fake := &streamUpstream{
+		protocol: channel.ProtocolOpenAI,
+		model:    model,
+		chunks:   []string{"半句"},
+		truncate: true,
+		db:       db,
+		userID:   user,
+	}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	resp, cancel := openStream(t, public.URL+"/v1/chat/completions", key, streamBody(model))
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("状态码 = %d，期望 200。响应体：%s", resp.StatusCode, body)
+	}
+
+	var sawText bool
+	for _, f := range readFrames(t, resp.Body, 0) {
+		if f.data == "[DONE]" {
+			t.Fatal("上游没有给结束标记，却给调用方补了一个 [DONE]")
+		}
+		if strings.Contains(f.data, "半句") {
+			sawText = true
+		}
+	}
+	if !sawText {
+		t.Fatal("调用方没收到已经吐出来的那半句")
+	}
+
+	bill := waitForBillingStatus(t, db, user, "settled")
+	// 输入 7（「你好」3 + 一条消息的框架 4），输出 3（「半句」）：
+	// 7 × 0.00001 + 3 × 0.00003 = 0.00016。金额真的算出来了，说明这次
+	// 不是「记了条 settled 但没扣钱」。
+	assertConsumeEntry(t, db, bill.id, user, "0.00016")
+
+	waitForSnapshotRows(t, db, user, 2)
+	var snapKind sql.NullString
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT error_kind FROM request_snapshots
+		 WHERE user_id = $1 AND direction = 'response'`, user).Scan(&snapKind); err != nil {
+		t.Fatalf("查响应方向的快照失败: %v", err)
+	}
+	if !snapKind.Valid || snapKind.String != pipeline.ErrorUpstreamStreamTruncated {
+		t.Fatalf("快照的 error_kind = %v，期望 %q",
+			snapKind, pipeline.ErrorUpstreamStreamTruncated)
+	}
+
+	// 账单侧：分类与快照同值。
+	//
+	// **已知边界（#461 之后仍开着）**：已结算的行上 error_code 今天恒为
+	// NULL——唯一写这两列的地方是 store.Release，而它只走「不计费」那条路；
+	// markSettled 不写这两列（见 internal/ledger/store 的注释与
+	// TestSettlementLeavesUpstreamFailureColumnsNull）。所以「两表同值」这
+	// 一半还没落地，这里断言的是**当前**的落库结果，而不是目标值。
+	//
+	// 它写成断言而不是放过：这一行一旦有人把 markSettled 接上，这条用例
+	// 会立刻变红，提醒把那两行改成同一个值——比留一句注释更难被忽略。
+	// 目标值的断言在 internal/gateway 的
+	// TestStreamTruncatedAfterOutputClassifiedAndBilled 里（那一层不落库，
+	// 已经钉住了快照与结算两侧）。
+	if bill.errorCode.Valid {
+		t.Errorf("账单的 error_code = %q：已结算的行今天不该有值，"+
+			"接上 markSettled 之后请把这一条改成 %q（与快照同值）",
+			bill.errorCode.String, pipeline.ErrorUpstreamStreamTruncated)
 	}
 }
