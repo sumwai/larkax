@@ -202,7 +202,16 @@ func (a Amount) IsNegative() bool { return a.units < 0 }
 // IsPositive 判断是否为正。
 func (a Amount) IsPositive() bool { return a.units > 0 }
 
-// Add 相加。
+// Add 相加，溢出时夹到 int64 边界（正向取 MaxInt64、负向取 MinInt64）。
+//
+// 夹住而不是回绕的理由见 clampFromBig。要注意的是夹住的代价：真实的和落在
+// int64 之外，而返回的边界值**不等于**它，调用方从返回值上看不出被夹过。
+// 所以凡是把金额给人看、或写进账的路径，都要能区分这两种情形——那用
+// SumChecked（它按真实的和判断，而不是按中间值）。
+//
+// 保留夹住的行为，是因为有些调用点的溢出方向是安全的（例如「花超了没有」
+// 这类判据，夹到 MaxInt64 会判成「超了」而拒绝服务），在那里报错只是多一条
+// 没人能处置的失败。
 func (a Amount) Add(b Amount) Amount {
 	sum := a.units + b.units
 	// 溢出检测：同号相加的结果必然同号，否则溢出了
@@ -224,13 +233,42 @@ func (a Amount) Neg() Amount {
 	return Amount{units: -a.units}
 }
 
-// Sum 求一组金额之和。
+// Sum 求一组金额之和，溢出时夹到 int64 边界。
+//
+// 夹住给出的是一个**不等于真实和**的数（正向溢出时比真实和小），而调用方从
+// 这里看不出任何迹象。要区分「算得出来」与「被夹过」用 SumChecked。
 func Sum(amounts ...Amount) Amount {
-	var total Amount
-	for _, a := range amounts {
-		total = total.Add(a)
-	}
+	total, _ := SumChecked(amounts...)
 	return total
+}
+
+// SumChecked 求一组金额之和，只有**真实的和**放不下 int64 时才 ok 为 false。
+//
+// # 为什么不是「逐个 Add 再看有没有溢出」
+//
+// 那样判的是**中间值**，而中间值溢出不等于真实的和放不下：[+MaxInt64, +145,
+// -145] 的真实和是 MaxInt64（放得下），但累加到第二项时中间值已经溢出，于是
+// 一笔完全正常的余额会被判成溢出。这里用 big.Int 精确累加，报出来的才是
+// 「这个和真的放不下」。
+//
+// # 调用方必须看 ok
+//
+// 溢出时返回的是夹到边界的值（与 Add 一致，Sum 因此可能是它的薄封装），
+// 而那个值**不等于**真实和。它存在只是为了让两个函数的非溢出行为逐字相同，
+// 不该被当成结果用。
+func SumChecked(amounts ...Amount) (Amount, bool) {
+	total := new(big.Int)
+	// 复用同一个加数而不是每次 big.NewInt：调用方会把整表的分录喂进来，
+	// 每个元素一次分配是白花的代价。
+	addend := new(big.Int)
+	for _, a := range amounts {
+		addend.SetInt64(a.units)
+		total.Add(total, addend)
+	}
+	if !total.IsInt64() {
+		return Amount{units: clampFromBig(total)}, false
+	}
+	return Amount{units: total.Int64()}, true
 }
 
 // MulInt 乘以一个整数。用于「单价 × 数量」这类运算。
