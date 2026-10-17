@@ -147,13 +147,26 @@ func seedChannel(t *testing.T, db *sql.DB, sealer *credential.Sealer, owner int6
 }
 
 // seedRule 插一条平台作用域的计价规则，返回规则 id。
+//
+// # effective_from 必须显式写成一个很早的时刻
+//
+// 列默认是 `now()`，而**这个包的用例会注入一个冻结的时钟**（`newAppAt`）：
+// 选价那条查询带 `effective_from <= $1`，于是「规则插入时的真实时刻」与
+// 「用例冻结的那个时刻」谁大谁小，决定了这条规则可不可见。
+//
+// 冻结在**过去**的用例（`TestRateLimitRPMStopsAtTheLimit` 冻在 2026-10-17
+// 12:00:30 UTC）在真实时间走过那个时刻之后就会 100% 失败，报的是
+// 「没有匹配的计价规则」——**而那与用例要证的事毫无关系**。它一度真的
+// 红过整条 CI，而当时看代码看不出问题：红之前那些运行都发生在那个时刻之前。
+//
+// 写成 1970 之后，无论用例把时钟冻在哪一个时刻，规则都已经生效。
 func seedRule(t *testing.T, db *sql.DB, model, expr string) int64 {
 	t.Helper()
 
 	var id int64
 	if err := db.QueryRowContext(context.Background(), `
-		INSERT INTO pricing_rules (scope, name, model_patterns, expr, priority)
-		VALUES ('platform', $1, to_jsonb(ARRAY[$2]::text[]), $3, 0)
+		INSERT INTO pricing_rules (scope, name, model_patterns, expr, priority, effective_from)
+		VALUES ('platform', $1, to_jsonb(ARRAY[$2]::text[]), $3, 0, '1970-01-01T00:00:00Z')
 		RETURNING id`,
 		unique("e2e-rule"), model, expr,
 	).Scan(&id); err != nil {
@@ -167,19 +180,58 @@ func seedRule(t *testing.T, db *sql.DB, model, expr string) int64 {
 // 与 seedRule 分开是因为渠道级规则要挂 channel_id：它表达的是「这个渠道
 // 自己的价」，平台规则只是兜底。两者同时存在时渠道价胜出（见
 // internal/pricing 的裁决次序）。
+//
+// `effective_from` 与 seedRule 同一个理由显式写成很早的时刻。
 func seedChannelRule(t *testing.T, db *sql.DB, channelID int64, model, expr string) int64 {
 	t.Helper()
 
 	var id int64
 	if err := db.QueryRowContext(context.Background(), `
-		INSERT INTO pricing_rules (scope, channel_id, name, model_patterns, expr, priority)
-		VALUES ('channel', $1, $2, to_jsonb(ARRAY[$3]::text[]), $4, 0)
+		INSERT INTO pricing_rules (scope, channel_id, name, model_patterns, expr, priority, effective_from)
+		VALUES ('channel', $1, $2, to_jsonb(ARRAY[$3]::text[]), $4, 0, '1970-01-01T00:00:00Z')
 		RETURNING id`,
 		channelID, unique("e2e-rule"), model, expr,
 	).Scan(&id); err != nil {
 		t.Fatalf("插渠道计价规则失败: %v", err)
 	}
 	return id
+}
+
+// TestSeedRuleIsEffectiveAtAnyFrozenInstant 钉住两个 seed 帮手写进去的
+// effective_from。
+//
+// 它守的不是「规则插进去了」，而是「无论用例把时钟冻在哪个时刻，这条规则都
+// 已经生效」——见 seedRule 的注释：列默认是 now()，而用例会注入冻结的时钟，
+// 于是**冻结在过去的用例会随着真实时间走过那一刻而开始 100% 失败**，报的是
+// 「没有匹配的计价规则」，与它要证的事毫无关系。
+//
+// 判据取 2000-01-01：比它早的冻结时刻在用例里不存在，而任何「写成列默认
+// now()」的实现都必然晚于它。把两处 INSERT 里的 effective_from 去掉，这条
+// 立刻红。
+func TestSeedRuleIsEffectiveAtAnyFrozenInstant(t *testing.T) {
+	db := testDB(t)
+	model := unique("e2e-model-seed-effective")
+
+	platform := seedRule(t, db, model, `{"prompt": 0.00001}`)
+	channel := seedChannelRule(t, db,
+		seedChannel(t, db, testSealer(t), seedUser(t, db, true, "0"), "http://127.0.0.1:1", model),
+		model, `{"prompt": 0.00002}`)
+
+	cutoff := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name string
+		id   int64
+	}{{"平台规则", platform}, {"渠道规则", channel}} {
+		var from time.Time
+		if err := db.QueryRowContext(context.Background(),
+			`SELECT effective_from FROM pricing_rules WHERE id = $1`, c.id).Scan(&from); err != nil {
+			t.Fatalf("查 %s 的 effective_from 失败: %v", c.name, err)
+		}
+		if !from.Before(cutoff) {
+			t.Errorf("%s 的 effective_from = %v，期望早于 %v——写成列默认的 now() "+
+				"会让冻结在过去时钟的用例失败", c.name, from, cutoff)
+		}
+	}
 }
 
 func testSealer(t *testing.T) *credential.Sealer {
