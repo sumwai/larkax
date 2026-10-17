@@ -134,6 +134,20 @@ echo '{"model":"...","messages":[...]}' | \
 
 标准输入有 64 MiB 上限，不配开关：这条命令是拿一段**单次请求**的报文来试，
 不是拿整份日志。把整份日志喂进来会超出上限并报错，要先拆开、一次喂一段。
+## 用量事件的分区
+
+`usage_events` 按月分区，粒度与维护方式都与快照不同——**分区不会自己长出来**，
+所以要有一个预建任务。开发时手动跑：
+
+```sh
+go run ./cmd/larkaxctl partition ensure --months 3   # 铺满未来 3 个月（含当月）
+go run ./cmd/larkaxctl partition check  --months 3   # 只读体检，有问题时非零退出
+```
+
+没有缺失的分区时 `ensure` 会打印「没有缺失的分区，本次没有建任何东西。」——
+理由与 `snapshot cleanup` 那条一样，刻意区分「没东西可建」与「没跑成」。
+
+线上由外部调度器调用，接法与两张表的分工见 [docs/partitions.md](partitions.md)。
 
 ## 分时计价的日历数据
 
