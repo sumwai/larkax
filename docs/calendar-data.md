@@ -20,6 +20,24 @@ go run ./cmd/larkaxctl calendar import <文件>
 `isWorkday()`、`isHoliday()` 查的就是它。接线本身**不读数据、也不做校验**：
 库里是空的照常启动，见下文「没有数据的那一年会怎样」。
 
+## 峰谷那一半今天接不上
+
+上面那句「某个时刻算不算高峰」目前**只在库里与代码里成立，规则里写不出来**。
+
+`internal/calendar/peak.go` 的 `PeakAt` / `PeakWindow` / `PeakSchedule` 是完整的、
+被测过的，但规则能调用的函数只有 `isWorkday()` / `isHoliday()` / `holidayName()` /
+`hour()` 这些——**没有一个走 `PeakAt`**。所以在规则里写峰谷价不是「写错」，
+是**没有这个函数**。要接上它得先定「高峰窗口从哪来」（库里还是配置里），
+那是一个独立决定。
+
+**这一条不会再被工具提醒。** `PeakAt` 挂在 `*Calendar` 这个类型上，而把
+`*Calendar` 接进 assembly 之后，这个类型进了可达图，`deadcode` 就把它的方法
+都算成可达，于是 `peak.go` 里那几条**从不可达清单里掉了出去**。清单里没有它，
+读起来像「已经在用了」——见 [LESSONS.md](../LESSONS.md) 第 22 条。
+
+在那之前，`internal/calendar` 的包注释是这一支「未接线」的唯一标记。改了那一块
+代码、或者要往规则里加峰谷价时，先把那条标记一起改掉。
+
 ## 文件格式
 
 一个 JSON 对象。**只认下面这些字段，键名写错会直接报错**——JSON 解码默认
