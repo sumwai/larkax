@@ -238,10 +238,19 @@ func fromResponsesResponse(r *dto.OpenAIResponsesResponse) (*channel.Response, e
 	}
 	if len(chat.Choices) > 0 {
 		out.FinishReason = chat.Choices[0].FinishReason
-		msg, msgErr := messageFromRelaykit(chat.Choices[0].Message)
-		if msgErr != nil {
-			return nil, msgErr
-		}
+		// # 响应方向吞掉 messageFromRelaykit 的错误，与请求方向判据不同
+		//
+		// 请求方向（FromRelaykitRequest）保持严格：那里的消息来自我们自己的
+		// 入站契约，认不出的形状是「调用方给了我们不支持的东西」，报错是对的。
+		//
+		// 响应方向不能失败，理由具体：out.Usage 在调用它**之前**就填好了，而
+		// return nil, err 会把已经解析出来的用量一起丢掉——这一次调用的账就漏了，
+		// 而调用方多半会重试一次、上游再收一次钱。相比之下「回答是空的」调用方
+		// 当场就能看见，不是静默的。fromOpenAIResponse 那一处同理。
+		//
+		// 它返回的那份部分结果照收：工具调用是在 content 之前解析出来的，
+		// 内容形状认不出时它们仍然有效。
+		msg, _ := messageFromRelaykit(chat.Choices[0].Message)
 		out.Message = msg
 	}
 
@@ -266,10 +275,10 @@ func fromOpenAIResponse(r *dto.OpenAITextResponse) (*channel.Response, error) {
 	if len(r.Choices) > 0 {
 		choice := r.Choices[0]
 		out.FinishReason = choice.FinishReason
-		msg, err := messageFromRelaykit(choice.Message)
-		if err != nil {
-			return nil, err
-		}
+		// 与 fromResponsesResponse 同一处判据，也在同一条理由上：这一支的
+		// out.Usage 同样在调用之前就填好了，抛出去会连用量一起丢（完整理由见
+		// fromResponsesResponse 里那一段注释）。
+		msg, _ := messageFromRelaykit(choice.Message)
 		out.Message = msg
 	}
 

@@ -536,7 +536,28 @@ func messageFromRelaykit(m dto.Message) (channel.Message, error) {
 		}
 	}
 
+	// content 有四种承载形态，都要认：
+	//
+	//   - nil：只有工具调用的助手消息，内容本来就是空的；
+	//   - string：纯文本消息，三条入口都能直接给；
+	//   - []any：JSON 反序列化出来的块数组（OpenAI 入口与 Responses 入口
+	//     走这一条）；
+	//   - []dto.MediaContent：relaykit 挂上去的**带类型**块数组。Anthropic
+	//     入口先经 relayconvert.ConvertRequest 转成 OpenAI 形状，那一步用
+	//     dto.Message.SetMediaContent 挂内容，于是类型是具体切片而不是 []any。
+	//
+	// 除这四种之外的形态**必须报错，不能什么都不做**：什么都不做正是 Anthropic
+	// 块数组被整条丢掉时的表现——文本与图片一起消失，转发出去的是空 content，
+	// 而调用方拿到的是「模型答非所问」。在代码里「没命中任何 case」与「这条消息
+	// 本来就没内容」长得一模一样，所以静默跳过这件事能一直藏着。报错时带上实际
+	// 类型 %T——否则排查时只知道「不支持」，不知道不支持的是什么。
+	//
+	// 认不出的**块类型**（数组里的元素）不在此列：那由 contentBlockFrom 处置，
+	// 它不转那个块但也不失败（理由见那里）。
 	switch content := m.Content.(type) {
+	case nil:
+		// 内容为空是这条消息的正常形态，不是「认不出」：下面报错的那一档
+		// 针对的是**有值但不是我们认识的形状**。
 	case string:
 		if content != "" {
 			out.Content = append([]channel.ContentBlock{{Type: "text", Text: content}}, out.Content...)
@@ -548,14 +569,19 @@ func messageFromRelaykit(m dto.Message) (channel.Message, error) {
 				continue
 			}
 			typ, _ := block["type"].(string)
-			switch typ {
-			case "text":
-				text, _ := block["text"].(string)
-				out.Content = append(out.Content, channel.ContentBlock{Type: "text", Text: text})
-			case "image_url":
-				out.Content = append(out.Content, fromImageBlock(block))
+			text, _ := block["text"].(string)
+			if converted, ok := contentBlockFrom(typ, text, block["image_url"]); ok {
+				out.Content = append(out.Content, converted)
 			}
 		}
+	case []dto.MediaContent:
+		for _, item := range content {
+			if converted, ok := contentBlockFrom(item.Type, item.Text, item.ImageUrl); ok {
+				out.Content = append(out.Content, converted)
+			}
+		}
+	default:
+		return out, fmt.Errorf("消息内容是本项目不认识的形式 %T", m.Content)
 	}
 
 	// role=tool 的消息靠消息上的 tool_call_id 关联，把它补成内容块，
@@ -624,18 +650,53 @@ func attachAnnotations(out *channel.Message, raw json.RawMessage) {
 	// 空正文块去装它——那会让客户端看到一个并不存在的正文项。
 }
 
-func fromImageBlock(block map[string]any) channel.ContentBlock {
-	out := channel.ContentBlock{Type: "image"}
-	urlObj, ok := block["image_url"]
-	if !ok {
-		return out
+// contentBlockFrom 把一个内容项折成管道里的内容块，是这件事在本包里的唯一
+// 一处实现。
+//
+// 两个调用点描述的是同一件事——客户端给的一个内容项——只有承载它的类型不同：
+// JSON 反序列化出来的是 map，relaykit 挂上来的是 dto.MediaContent。各写一份
+// 的话，两份对「一个块有哪些字段」的理解迟早分岔，而分岔的表现正是本包刚修掉
+// 的那类事故：一边转得出来、另一边转不出来，两边看上去都在工作。所以这里按
+// 三个字段收口（类型、正文、图片地址），两条分支各自把值取出来交给它。
+//
+// 返回 false 表示这个块类型不转：它是「这个块我们不带」，与「认不出的承载形态」
+// 是两回事，后者由 messageFromRelaykit 的类型 switch 报错。这里保留「不转」，
+// 因为两类入口都会给出本项目管道表达不了的块（Anthropic 的 document、音频、
+// 视频），把每一条都变成请求失败，等于把「少带一个块」升级成「整条请求不可用」。
+func contentBlockFrom(typ, text string, imageURL any) (channel.ContentBlock, bool) {
+	switch typ {
+	case "text":
+		return channel.ContentBlock{Type: "text", Text: text}, true
+	case "image_url":
+		return fromImageURL(imageURL), true
+	default:
+		return channel.ContentBlock{}, false
 	}
+}
+
+// fromImageURL 读出一个图片块里的地址，返回管道里的图片块。
+//
+// 地址有三种写法，都实际出现过：
+//
+//   - 字符串：OpenAI 的简写形态 {"image_url":"https://…"}；
+//   - 带 url 的对象：OpenAI 的完整形态 {"image_url":{"url":"…"}}；
+//   - *dto.MessageImageUrl：relaykit 把 JSON 那一层解析掉之后的带类型形态
+//     （Anthropic 入口的图片经转换后就是这个）。
+//
+// 认不出来时返回一个空的图片块而不是报错，与 contentBlockFrom 对认不出的块
+// 类型的处置同一条理由（见它自己的注释）。
+func fromImageURL(raw any) channel.ContentBlock {
+	out := channel.ContentBlock{Type: "image"}
 	var url string
-	switch v := urlObj.(type) {
+	switch v := raw.(type) {
 	case string:
 		url = v
 	case map[string]any:
 		url, _ = v["url"].(string)
+	case *dto.MessageImageUrl:
+		if v != nil {
+			url = v.Url
+		}
 	}
 	if data, mediaType, ok := splitDataURL(url); ok {
 		out.ImageBase64 = data
