@@ -37,15 +37,22 @@ type scriptedExecutor struct {
 
 	mu    sync.Mutex
 	calls []int64
+	// sentRefs 按顺序记下交给执行器的每一份请求的**指针**。
+	//
+	// 与 fakeExecutor.sentRefs 同一个用途：请求快照该采的是发出去的那一个
+	// 对象，而按值比较分不出「同一个」与「内容相同」（见
+	// snapshot_request_test.go）。
+	sentRefs []*channel.Request
 }
 
 func (s *scriptedExecutor) Chat(context.Context, channel.Channel, *channel.Request) (*channel.Response, error) {
 	return nil, errors.New("流式用例不该走非流式入口")
 }
 
-func (s *scriptedExecutor) ChatStream(ctx context.Context, ch channel.Channel, _ *channel.Request) (<-chan channel.StreamEvent, error) {
+func (s *scriptedExecutor) ChatStream(ctx context.Context, ch channel.Channel, req *channel.Request) (<-chan channel.StreamEvent, error) {
 	s.mu.Lock()
 	s.calls = append(s.calls, ch.ID)
+	s.sentRefs = append(s.sentRefs, req)
 	s.mu.Unlock()
 
 	if err, ok := s.preErr[ch.ID]; ok {
@@ -561,30 +568,6 @@ func TestChatStreamSettlementUsesActualUpstreamModel(t *testing.T) {
 	}
 	if got := h.settlements.reqs[0].UpstreamModel; got != "vendor/gpt-4o" {
 		t.Errorf("结算带的上游模型名 = %q，期望选路给出的 %q", got, "vendor/gpt-4o")
-	}
-}
-
-// 请求快照仍然在**调上游之前**采集，流式那条路也一样。
-func TestChatStreamSnapshotTakenBeforeUpstream(t *testing.T) {
-	var redactsAtCall int
-	h := newHarness(t)
-	useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
-		1: {{Kind: "done"}},
-	}})
-	h.gw.Executor = &countingRedactExecutor{
-		inner:   h.gw.Executor,
-		redacts: func() int { return h.redactor.redacts },
-		seen:    &redactsAtCall,
-	}
-
-	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	collect(t, res)
-
-	if redactsAtCall != 1 {
-		t.Errorf("调上游时的脱敏次数 = %d，期望 1（快照要先采集）", redactsAtCall)
 	}
 }
 

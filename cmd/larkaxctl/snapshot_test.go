@@ -269,8 +269,8 @@ func TestPrintSnapshotsPrintsEveryRow(t *testing.T) {
 		t.Errorf("两条快照应当按 created_at 升序打：\n%s", out)
 	}
 
-	// 请求方向的行上那两列**不适用**：采集点在选路与调上游之前，那时
-	// 没有上游状态码可记。打成 <未记录> 会被读成「该有值却漏记了」。
+	// 请求方向的行上那两列**不适用**：这一路收不到状态码与分类（它记的是
+	// 发出去的那份请求）。打成 <未记录> 会被读成「该有值却漏记了」。
 	if !strings.Contains(out, "upstream_status=<不适用（请求方向快照）>") {
 		t.Errorf("请求方向的 NULL 状态码应标成不适用：\n%s", out)
 	}

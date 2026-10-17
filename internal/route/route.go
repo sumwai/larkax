@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/overrides"
 	"github.com/sumwai/larkax/internal/quota"
 	"github.com/sumwai/larkax/internal/tokens"
 )
@@ -261,8 +262,8 @@ type Router struct {
 	// Now 可注入，便于测试时间相关的逻辑。
 	Now func() time.Time
 
-	// Aliases 把规范名翻成某个渠道上的上游名。**必填**，nil 时请求失败
-	// （见 ErrNoAliasSource）。
+	// Aliases 把规范名翻成某个渠道上的上游名，连同这条别名上配的参数覆盖。
+	// **必填**，nil 时请求失败（见 ErrNoAliasSource）。
 	//
 	// # 为什么这一项在路由层
 	//
@@ -270,6 +271,10 @@ type Router struct {
 	// **选中的那个渠道**之后才答得出来，而选渠道正是本包的事。放在更上层
 	// （入口）只能翻一次，翻出来的是「某个候选」的名字；放在更下层
 	// （适配器）则要让适配器自己去查库，而它连渠道配置之外的东西都不该碰。
+	//
+	// 参数覆盖跟着名字一起来，理由与名字同一条：它是**行**上的字段，命中哪条
+	// 别名就只有那条别名的覆盖（见 internal/catalog 的 Alias）。分成两次问
+	// 还会多一次往返。
 	//
 	// # 为什么是接口而不是直接查库
 	//
@@ -279,12 +284,17 @@ type Router struct {
 	Aliases ModelAliases
 }
 
-// ModelAliases 把规范模型名翻成某个渠道上的上游模型名。
+// ModelAliases 把规范模型名翻成某个渠道上的上游模型名，并给出这条别名上
+// 配的参数覆盖。
 //
 // 声明在本包、实现在 internal/catalog——与 CandidateSource 在 gateway 声明、
 // 由 internal/channels 实现是同一个做法：本包不认识那张表，只要求一个答案。
+//
+// 覆盖那一项在这里只**取回来**，不在这条接口上表达它的语义：能覆盖哪些键、
+// 与调用方冲突时谁赢，判据在 internal/overrides，本包只负责把它应用到这次
+// 尝试的请求副本上（见 upstreamRequest）。
 type ModelAliases interface {
-	UpstreamModel(ctx context.Context, channelID int64, canonicalModel string) (string, error)
+	Alias(ctx context.Context, channelID int64, canonicalModel string) (upstreamModel string, overrides map[string]any, err error)
 }
 
 // ErrNoAliasSource 表示没有配置别名来源。
@@ -972,6 +982,30 @@ type Result struct {
 	// 一次调用都没发生时它是空的（候选集为空、别名翻不出来、context 已取消），
 	// 与 Channel 的零值同时出现。
 	UpstreamModel string
+	// OutboundRequest 是**最后一次尝试真正发出去的那份请求**，就是交给执行器
+	// 的那一个对象（见 upstreamRequest），不是照着它再拼一份。
+	//
+	// # 为什么要有它
+	//
+	// 发出去的那份请求与本包收到的那份**不是同一份**：上游名按选中的渠道翻过，
+	// 别名上配的参数覆盖也应用上去了（见 upstreamRequest）。也就是说「上游实际
+	// 收到了什么」只有这里答得出来，而收到本包入参的地方（internal/gateway 采
+	// 请求快照那一步）答不出来——它手上只有调用方发来的那份。
+	//
+	// 再拼一份是不行的：覆盖的判据只该有一处（见 internal/overrides），拼第二份
+	// 就是第二处，两处迟早不一致，而那种不一致的表现是快照与实物对不上。
+	//
+	// # 它与 UpstreamModel / Channel 的分工
+	//
+	// 三者口径相同：**最后一次真的发出去的那一次**，失败的那次也算（那次调用
+	// 发生过，也就有东西可记）。UpstreamModel 是从这份请求上摘下来的一个字段，
+	// 留它是因为账单那一列读的是名字而不是整份请求。
+	//
+	// 一次都没发出去时它是 nil（候选集为空、别名翻不出来、context 已取消——
+	// 与 UpstreamModel 为空、Channel 为零值同时发生）。它必须是 nil 而不是一份
+	// 空的请求：调用方据此分辨「这次请求根本没发出去」与「发出去的那份恰好是
+	// 零值」，前者要退回调用方发来的那份去采快照。
+	OutboundRequest *channel.Request
 	// Attempts 按顺序记录了每一次尝试，包括失败的。
 	// 计费与排查都需要它：失败的调用不计费，但要知道发生过。
 	Attempts []Attempt
@@ -1110,6 +1144,12 @@ func capabilityMismatch(err error) bool {
 // **改 upstreamRequest、让它开始读 req 的别的字段之前，先看这条路径。**
 // 这条路径递进来的载体除 Model 之外全是零值，读到的会是零值本身，而且不会
 // 报错。chat 那条路径的载体是真请求，读错了至少读到的还是真数据；这里不是。
+//
+// 别名覆盖（#354）正是这个动作，当时按上面这句看过一次：upstreamRequest
+// 开始读 req 的 Temperature / TopP、并把覆盖算出的 max_tokens 写进 attempt。
+// 本函数合成的载体上那些字段是零值，而它唯一的调用方 decideCall 明确只读
+// Model——所以覆盖在这条路上**不生效**。风险没有消失，只是有人看过一次：
+// 决定路径今天仍然不适合承载「本包读载体的别的字段」。
 func (r *Router) ChatModel(ctx context.Context, exec Executor, canonicalModel string, candidates []Candidate) (*Result, error) {
 	return r.Chat(ctx, exec, &channel.Request{Model: canonicalModel}, candidates, canonicalModel)
 }
@@ -1211,6 +1251,11 @@ func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.R
 		// 别名翻不出来时走的是上面那条 return，两列都还是上一次尝试留下的值
 		// ——那次尝试真的发生过，记它是对的；一次都没发生时两者同时是零值。
 		result.UpstreamModel = attempt.Model
+		// 发出去的那份请求也在同一个位置落：它与上面那一对说的是同一次尝试
+		// （见 Result.OutboundRequest）。记的是 attempt 本身而不是它的副本——
+		// 上层要的正是「执行器收到的那一个」，复制一份只会多出一份可能走样的
+		// 东西。
+		result.OutboundRequest = attempt
 
 		if err == nil {
 			result.Response = resp
@@ -1230,7 +1275,7 @@ func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.R
 }
 
 // upstreamRequest 给出这次尝试要发出去的那份请求：规范名已按**这个渠道**
-// 翻成上游名。
+// 翻成上游名，这条别名上配的参数覆盖也已经应用上去。
 //
 // # 为什么每次尝试各翻一次
 //
@@ -1240,12 +1285,20 @@ func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.R
 // 恰好也认识那个名字（两家叫法偶尔相同），于是请求成功、账单正常，只有
 // 用的是别家的名字这件事没有任何地方报出来。
 //
+// 参数覆盖同理，而且更硬：它也是**行**上的字段，第二个渠道那条别名上的
+// max_tokens 与第一家配的可能不同。翻一次共用会把第一家配的上限用到别家身上。
+//
 // # 为什么返回副本
 //
 // req 是调用方的东西，它还要用它去渲染响应（报给调用方的模型名是**他要的
-// 那个**，见 internal/api 的 renderSuccess）与采集请求快照。就地改 Model
-// 会让响应里的 model 变成上游名，也会让重试循环的第二圈拿一个已经翻过的
-// 名字再翻一次。
+// 那个**，见 internal/api 的 renderSuccess）。就地改 Model 会让响应里的 model
+// 变成上游名，也会让重试循环的第二圈拿一个已经翻过的名字再翻一次。覆盖也写在
+// 这份副本上：就地改调用方那份的话，重试循环的第二圈会带着第一个渠道的上限
+// 去发第二个渠道。
+//
+// 覆盖**只**落在这份副本上。上游名同样是这份副本上的东西，两者一起构成
+// 「上游实际收到了什么」，而那份请求由 Result.OutboundRequest 交出去——上层
+// 采请求快照时用的就是它，不是调用方发来的那份。
 func (r *Router) upstreamRequest(ctx context.Context, req *channel.Request, c Candidate) (*channel.Request, error) {
 	if r.Aliases == nil {
 		return nil, ErrNoAliasSource
@@ -1254,7 +1307,7 @@ func (r *Router) upstreamRequest(ctx context.Context, req *channel.Request, c Ca
 	// 叫 upstream 的形参指的是**调用方发来的那份请求**（它的 Model 是规范名），
 	// 而这里要的是「上游模型名」这一个字符串。同一个词在相邻两个包里指相反
 	// 的东西，而本包反复强调的正是「上游名与规范名别混」。
-	upstreamName, err := r.Aliases.UpstreamModel(ctx, c.Channel.ID, req.Model)
+	upstreamName, override, err := r.Aliases.Alias(ctx, c.Channel.ID, req.Model)
 	if err != nil {
 		// 原样返回，不再包一层：internal/catalog 的错误已经写明了渠道 id 与
 		// 规范名，再包一次只是把同一句话重复两遍。
@@ -1263,6 +1316,14 @@ func (r *Router) upstreamRequest(ctx context.Context, req *channel.Request, c Ca
 
 	attempt := *req
 	attempt.Model = upstreamName
+	// 覆盖在**翻名之后**应用：它改的是发出去的那份请求，而不是调用方那份
+	// ——上游名也是这么处理的。非法覆盖会在这里报错（只可能来自绕过写入
+	// 校验的历史行或手工改库），与别名翻不出来一样按配置问题处置：不换下一个
+	// 候选，直接失败。静默跳过的话，那条配置的表现是「配了没生效」，正是
+	// 这一列此前的问题。
+	if err := overrides.Apply(&attempt, override); err != nil {
+		return nil, err
+	}
 	return &attempt, nil
 }
 

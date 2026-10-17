@@ -186,7 +186,7 @@ func assertViolation(t *testing.T, err error, wantCode, wantConstraint string, w
 
 // ── 选路要的那条读取路径（从 internal/channels 搬来） ────────────────────
 
-func TestUpstreamModelPrefersChannelSpecific(t *testing.T) {
+func TestAliasPrefersChannelSpecific(t *testing.T) {
 	db := testDB(t)
 	model := uniqueName("model")
 	channel := insertChannel(t, db, model)
@@ -196,29 +196,29 @@ func TestUpstreamModelPrefersChannelSpecific(t *testing.T) {
 	insertAlias(t, db, nil, "platform-"+model, model)
 	insertAlias(t, db, channel, "channel-"+model, model)
 
-	got, err := New(db).UpstreamModel(context.Background(), channel, model)
+	got, _, err := New(db).Alias(context.Background(), channel, model)
 	if err != nil {
-		t.Fatalf("UpstreamModel 出错: %v", err)
+		t.Fatalf("Alias 出错: %v", err)
 	}
 	if got != "channel-"+model {
-		t.Errorf("UpstreamModel = %q，期望渠道级别名优先", got)
+		t.Errorf("Alias = %q，期望渠道级别名优先", got)
 	}
 }
 
 // 渠道级没有时回落到平台级。
-func TestUpstreamModelFallsBackToPlatform(t *testing.T) {
+func TestAliasFallsBackToPlatform(t *testing.T) {
 	db := testDB(t)
 	model := uniqueName("model")
 	channel := insertChannel(t, db, model)
 	seedModel(t, db, model)
 	insertAlias(t, db, nil, "platform-"+model, model)
 
-	got, err := New(db).UpstreamModel(context.Background(), channel, model)
+	got, _, err := New(db).Alias(context.Background(), channel, model)
 	if err != nil {
-		t.Fatalf("UpstreamModel 出错: %v", err)
+		t.Fatalf("Alias 出错: %v", err)
 	}
 	if got != "platform-"+model {
-		t.Errorf("UpstreamModel = %q，期望回落到平台级别名", got)
+		t.Errorf("Alias = %q，期望回落到平台级别名", got)
 	}
 }
 
@@ -228,7 +228,7 @@ func TestUpstreamModelFallsBackToPlatform(t *testing.T) {
 // 回落的表现是上游回一句「这个模型不存在」，排查方向指向对方；而真正要改的
 // 是我们这一侧的别名配置。判据是「这个规范名有没有配过别名」，不是「表里有没有
 // 任何一行」——后者会让配过别的模型名的部署一起失败（见下面那条）。
-func TestUpstreamModelIgnoresOtherChannels(t *testing.T) {
+func TestAliasIgnoresOtherChannels(t *testing.T) {
 	db := testDB(t)
 	model := uniqueName("model")
 	mine := insertChannel(t, db, model)
@@ -236,7 +236,7 @@ func TestUpstreamModelIgnoresOtherChannels(t *testing.T) {
 	seedModel(t, db, model)
 	insertAlias(t, db, other, "other-"+model, model)
 
-	_, err := New(db).UpstreamModel(context.Background(), mine, model)
+	_, _, err := New(db).Alias(context.Background(), mine, model)
 	if !errors.Is(err, ErrAliasNotFound) {
 		t.Errorf("err = %v，期望 ErrAliasNotFound", err)
 	}
@@ -248,35 +248,35 @@ func TestUpstreamModelIgnoresOtherChannels(t *testing.T) {
 // 判据只落在**这个规范名**上：表里有没有别的行不参与判断。所以下面先插一条
 // 别的规范名的别名，再断言这个没配过的名字照样按同名返回——「表里有行就报错」
 // 那种写法会在这里失败。
-func TestUpstreamModelFallsBackToIdentityWhenNoAliasForThisName(t *testing.T) {
+func TestAliasFallsBackToIdentityWhenNoAliasForThisName(t *testing.T) {
 	db := testDB(t)
 	otherModel := uniqueName("model")
 	seedModel(t, db, otherModel)
 	insertAlias(t, db, nil, "platform-"+otherModel, otherModel)
 
 	model := uniqueName("nonexistent")
-	got, err := New(db).UpstreamModel(context.Background(), 1, model)
+	got, _, err := New(db).Alias(context.Background(), 1, model)
 	if err != nil {
 		t.Fatalf("一条别名都没配过的规范名不该报错: %v", err)
 	}
 	if got != model {
-		t.Errorf("UpstreamModel = %q，期望按同名返回 %q", got, model)
+		t.Errorf("Alias = %q，期望按同名返回 %q", got, model)
 	}
 }
 
 // channelID 传 0 是「不针对具体渠道」，只走平台级别名那条。
-func TestUpstreamModelChannelZeroUsesPlatformAlias(t *testing.T) {
+func TestAliasChannelZeroUsesPlatformAlias(t *testing.T) {
 	db := testDB(t)
 	model := uniqueName("model")
 	seedModel(t, db, model)
 	insertAlias(t, db, nil, "platform-"+model, model)
 
-	got, err := New(db).UpstreamModel(context.Background(), 0, model)
+	got, _, err := New(db).Alias(context.Background(), 0, model)
 	if err != nil {
-		t.Fatalf("UpstreamModel 出错: %v", err)
+		t.Fatalf("Alias 出错: %v", err)
 	}
 	if got != "platform-"+model {
-		t.Errorf("UpstreamModel = %q，期望平台级别名", got)
+		t.Errorf("Alias = %q，期望平台级别名", got)
 	}
 }
 
@@ -367,12 +367,12 @@ func TestAliasAllowsDistinctScopesAndNames(t *testing.T) {
 	insertAlias(t, db, nil, "up-d-"+model, model)    // 平台级与渠道级并存：允许
 	insertAlias(t, db, nil, "up-e-"+model, other)    // 平台级的另一个规范名：允许
 
-	got, err := New(db).UpstreamModel(context.Background(), mine, model)
+	got, _, err := New(db).Alias(context.Background(), mine, model)
 	if err != nil {
-		t.Fatalf("UpstreamModel 出错: %v", err)
+		t.Fatalf("Alias 出错: %v", err)
 	}
 	if got != "up-a-"+model {
-		t.Errorf("UpstreamModel = %q，期望渠道级那条 %q", got, "up-a-"+model)
+		t.Errorf("Alias = %q，期望渠道级那条 %q", got, "up-a-"+model)
 	}
 }
 
@@ -979,7 +979,7 @@ func TestCreateAliasRoundTrip(t *testing.T) {
 		ChannelID:     channel,
 		UpstreamModel: upstream,
 		CanonicalName: model,
-		Overrides:     map[string]any{"context_limit": float64(4096)},
+		Overrides:     map[string]any{"temperature": float64(0.2)},
 	})
 	if err != nil {
 		t.Fatalf("CreateAlias 出错: %v", err)
@@ -993,7 +993,7 @@ func TestCreateAliasRoundTrip(t *testing.T) {
 	if got.ID != id || got.CanonicalName != model || got.ChannelID != channel {
 		t.Errorf("别名 = %+v，期望 id=%d、规范名 %q、渠道 %d", got, id, model, channel)
 	}
-	if got.Overrides["context_limit"] != float64(4096) {
+	if got.Overrides["temperature"] != float64(0.2) {
 		t.Errorf("Overrides = %v，期望解回对象", got.Overrides)
 	}
 	if got.CreatedAt.IsZero() {
@@ -1048,12 +1048,12 @@ func TestCreateAliasPlatformScope(t *testing.T) {
 	}
 
 	// 但任何渠道查这个名字都要回落到它。
-	got, err := New(db).UpstreamModel(context.Background(), channel, model)
+	got, _, err := New(db).Alias(context.Background(), channel, model)
 	if err != nil {
-		t.Fatalf("UpstreamModel 出错: %v", err)
+		t.Fatalf("Alias 出错: %v", err)
 	}
 	if got != upstream {
-		t.Errorf("UpstreamModel = %q，期望 %q", got, upstream)
+		t.Errorf("Alias = %q，期望 %q", got, upstream)
 	}
 }
 
@@ -1175,6 +1175,170 @@ func TestCreateAliasValidation(t *testing.T) {
 	}
 }
 
+// 写入时拒绝改请求形状的那几个键，而且错误里**说得出是哪一个**。
+//
+// # 为什么拒绝发生在写入时
+//
+// 这几个键改的是请求的形状（发给哪个模型、正文是什么、是不是流式），让别名去
+// 改它们等于让商家改写调用方的请求。判据放在写入时而不是热路径上：写进来的
+// 那一刻是唯一还分得清「配错了」与「这一列本来就这么用」的地方，而热路径拒绝
+// 的表现是那个别名上的每一个请求都在失败——那时看到的是故障，不是配置。
+//
+// # 为什么断言错误文本
+//
+// 只断言 err != nil 的话，任何一条拒绝都成立：键名写错、库连不上、外键不存在，
+// 全都算「通过了」。而这里要钉的恰恰是**它拒绝的是这个键**，理由是那一句。
+func TestCreateAliasRejectsForbiddenOverrides(t *testing.T) {
+	db := testDB(t)
+	admin := NewAdmin(db)
+
+	// 逐个键单独试：一次写两个的话，错误里只会出现其中一个，另一个是不是也
+	// 被拒了看不出来。
+	cases := []struct {
+		key   string
+		value any
+	}{
+		{"model", "vendor/other-model"},
+		{"messages", []any{map[string]any{"role": "user", "content": "改写过的正文"}}},
+		{"stream", true},
+		{"tools", []any{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			model := uniqueName("model")
+			channel := insertChannel(t, db, model)
+			seedModel(t, db, model)
+
+			id, err := admin.CreateAlias(context.Background(), CreateAliasRequest{
+				ChannelID: channel, UpstreamModel: "up-" + model, CanonicalName: model,
+				Overrides: map[string]any{tc.key: tc.value},
+			})
+			if err == nil {
+				t.Fatalf("写入 %q 应当被拒绝，实际写成了 id=%d", tc.key, id)
+			}
+			// 错误里要说得出是哪个键，也要说得出为什么——「不在允许的字段里」
+			// 与「它改了请求的形状」是两句不同的话，配这个键的人需要看的是后一句。
+			if !strings.Contains(err.Error(), `"`+tc.key+`"`) {
+				t.Errorf("错误文本里没有键名 %q: %v", tc.key, err)
+			}
+			if !strings.Contains(err.Error(), "temperature") {
+				t.Errorf("错误文本里没有列出允许覆盖的键: %v", err)
+			}
+
+			// 更要紧的是**一行都没写进去**：报错而写进去了的话，那个别名上的
+			// 请求会带着一份非法覆盖上路，而热路径上看到的是请求失败。
+			aliases, err := New(db).Aliases(context.Background(), channel)
+			if err != nil {
+				t.Fatalf("Aliases 出错: %v", err)
+			}
+			if len(aliases) != 0 {
+				t.Errorf("被拒的那条写进去了: %+v", aliases)
+			}
+		})
+	}
+}
+
+// 白名单之外的键（多半是名字写错了）同样在写入时被拒，错误里列出能用的那几个。
+func TestCreateAliasRejectsUnknownOverrideKey(t *testing.T) {
+	db := testDB(t)
+	admin := NewAdmin(db)
+	model := uniqueName("model")
+	channel := insertChannel(t, db, model)
+	seedModel(t, db, model)
+
+	_, err := admin.CreateAlias(context.Background(), CreateAliasRequest{
+		ChannelID: channel, UpstreamModel: "up-" + model, CanonicalName: model,
+		Overrides: map[string]any{"context_limit": float64(4096)},
+	})
+	if err == nil {
+		t.Fatal("白名单之外的键应当被拒绝")
+	}
+	if !strings.Contains(err.Error(), `"context_limit"`) {
+		t.Errorf("错误文本里没有键名: %v", err)
+	}
+	if !strings.Contains(err.Error(), "temperature") {
+		t.Errorf("错误文本里应列出允许覆盖的键: %v", err)
+	}
+}
+
+// 改别名时同样在写入时校验，而且**改不动原来的那一份**。
+//
+// 与 CreateAlias 那条分开：改是一条独立的写入路径（UPDATE），两条各自都要有
+// 判据——只钉一条的话，另一条漏掉校验时没有任何东西会响，而它照样能把非法
+// 覆盖写进库。
+func TestUpdateAliasRejectsForbiddenOverrides(t *testing.T) {
+	db := testDB(t)
+	admin := NewAdmin(db)
+	model := uniqueName("model")
+	channel := insertChannel(t, db, model)
+	seedModel(t, db, model)
+	upstream := "up-" + model
+
+	id, err := admin.CreateAlias(context.Background(), CreateAliasRequest{
+		ChannelID: channel, UpstreamModel: upstream, CanonicalName: model,
+		Overrides: map[string]any{"temperature": float64(0.3)},
+	})
+	if err != nil {
+		t.Fatalf("CreateAlias 出错: %v", err)
+	}
+
+	bad := map[string]any{"stream": true}
+	err = admin.UpdateAlias(context.Background(), UpdateAliasRequest{ID: id, Overrides: &bad})
+	if err == nil {
+		t.Fatal("改成一个非法的覆盖应当被拒绝")
+	}
+	if !strings.Contains(err.Error(), `"stream"`) {
+		t.Errorf("错误文本里没有键名: %v", err)
+	}
+
+	// 原来那份还在，没被这次失败的更新动过。
+	aliases, err := New(db).Aliases(context.Background(), channel)
+	if err != nil {
+		t.Fatalf("Aliases 出错: %v", err)
+	}
+	got := findAlias(t, aliases, upstream)
+	if got.Overrides["temperature"] != float64(0.3) {
+		t.Errorf("Overrides = %v，期望原来那份 %.1f 还在", got.Overrides, 0.3)
+	}
+	if _, leaked := got.Overrides["stream"]; leaked {
+		t.Errorf("被拒的那份覆盖写进去了: %v", got.Overrides)
+	}
+}
+
+// 合法取值在写入时**照收**：校验不能宽到把正常配置也拦下来。
+//
+// 与上面几条成对：只有拒绝那几条的话，一个「什么键都拒」的实现能让它们全绿。
+func TestCreateAliasAcceptsWhitelistedOverrides(t *testing.T) {
+	db := testDB(t)
+	admin := NewAdmin(db)
+	model := uniqueName("model")
+	channel := insertChannel(t, db, model)
+	seedModel(t, db, model)
+
+	// 值走一遍 JSON 之后一律是 float64，所以这里给的就是 float64——与从 HTTP
+	// 请求体解出来的形状一致。
+	id, err := admin.CreateAlias(context.Background(), CreateAliasRequest{
+		ChannelID: channel, UpstreamModel: "up-" + model, CanonicalName: model,
+		Overrides: map[string]any{
+			"temperature": float64(0.2),
+			"top_p":       float64(0.9),
+			"max_tokens":  float64(2048),
+		},
+	})
+	if err != nil {
+		t.Fatalf("合法覆盖应当能写进去，得到 %v", err)
+	}
+
+	aliases, err := New(db).Aliases(context.Background(), channel)
+	if err != nil {
+		t.Fatalf("Aliases 出错: %v", err)
+	}
+	got := findAlias(t, aliases, "up-"+model)
+	if got.ID != id || len(got.Overrides) != 3 {
+		t.Errorf("别名 = %+v，期望三项覆盖都落库", got)
+	}
+}
+
 // 改别名：上游名与 overrides 要能改，改完读回来核对。
 func TestUpdateAliasRoundTrip(t *testing.T) {
 	db := testDB(t)
@@ -1191,7 +1355,7 @@ func TestUpdateAliasRoundTrip(t *testing.T) {
 	}
 
 	newUpstream := "up-new-" + model
-	overrides := map[string]any{"note": "changed"}
+	overrides := map[string]any{"top_p": float64(0.9)}
 	err = admin.UpdateAlias(context.Background(), UpdateAliasRequest{
 		ID: id, UpstreamModel: &newUpstream, Overrides: &overrides,
 	})
@@ -1207,7 +1371,7 @@ func TestUpdateAliasRoundTrip(t *testing.T) {
 	if got.ID != id || got.CanonicalName != model {
 		t.Errorf("别名 = %+v，期望 id 与规范名不变", got)
 	}
-	if got.Overrides["note"] != "changed" {
+	if got.Overrides["top_p"] != float64(0.9) {
 		t.Errorf("Overrides = %v，期望 %v", got.Overrides, overrides)
 	}
 }
@@ -1296,10 +1460,10 @@ func TestDeleteAlias(t *testing.T) {
 	//
 	// 这里刻意不报 ErrAliasNotFound：那会让「删掉最后一条别名」把整个模型名
 	// 变成不可用，而删别名的本意只是让这个名字恢复原样。
-	if got, err := New(db).UpstreamModel(context.Background(), channel, model); err != nil {
+	if got, _, err := New(db).Alias(context.Background(), channel, model); err != nil {
 		t.Errorf("删掉最后一条别名后应按同名返回，得到错误 %v", err)
 	} else if got != model {
-		t.Errorf("UpstreamModel = %q，期望按同名返回 %q", got, model)
+		t.Errorf("Alias = %q，期望按同名返回 %q", got, model)
 	}
 	if err := admin.DeleteAlias(context.Background(), id); !errors.Is(err, ErrAliasIDNotFound) {
 		t.Errorf("err = %v，期望 ErrAliasIDNotFound", err)

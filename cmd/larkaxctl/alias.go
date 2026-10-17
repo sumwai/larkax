@@ -38,6 +38,12 @@ list 默认列平台级别名；--channel <ID> 列那个渠道的渠道级别名
 
 add 的 stdout 只有新别名的 ID，其余信息走 stderr。
 
+--overrides 是一组**上游请求参数**的覆盖，只允许三个键：temperature、top_p、
+max_tokens。别的键在写入时就被拒绝——它们要么改的是请求的形状（model、
+messages、tools、stream），要么根本不是这个请求的参数。与调用方冲突时的口径：
+调用方**给了**的采样参数以调用方为准，没给的取覆盖值；max_tokens 反过来，
+一律以覆盖值为准。
+
 update 按 --id 定位，**渠道范围与规范名都不可改**：改渠道范围是换了一条别名，
 改规范名等于把这条别名改挂到另一个计费键上，而那样同一次请求的选路与计费会
 指向两个不同的模型。要改就删掉重建，两次改动各自看得见。--overrides '' 表示
@@ -109,7 +115,7 @@ func parseAliasAdd(args []string) (catalog.CreateAliasRequest, error) {
 	canonical := fs.String("canonical", "", "规范模型名，必须已经在目录里")
 	upstream := fs.String("upstream", "", "这家上游对这个模型的叫法")
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示平台级别名")
-	overrides := fs.String("overrides", "", "对上游模型名的静态覆盖，JSON 对象")
+	overrides := fs.String("overrides", "", "上游请求参数的覆盖，JSON 对象，只允许 temperature / top_p / max_tokens")
 	if err := fs.Parse(args); err != nil {
 		return catalog.CreateAliasRequest{}, err
 	}
@@ -224,7 +230,7 @@ func parseAliasUpdate(args []string) (catalog.UpdateAliasRequest, error) {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, aliasUsage) }
 	id := fs.Int64("id", 0, "要改的别名 ID")
 	upstream := fs.String("upstream", "", "这家上游对这个模型的叫法")
-	overrides := fs.String("overrides", "", "对上游模型名的静态覆盖，JSON 对象，给空串表示清空")
+	overrides := fs.String("overrides", "", "上游请求参数的覆盖，JSON 对象（只允许 temperature / top_p / max_tokens），给空串表示清空")
 	if err := fs.Parse(args); err != nil {
 		return catalog.UpdateAliasRequest{}, err
 	}
@@ -338,7 +344,10 @@ func runAliasResolve(args []string) error {
 	}
 	defer func() { _ = db.Close() }()
 
-	upstream, err := catalog.New(db).UpstreamModel(ctx, *channelID, *canonical)
+	// 覆盖在这里用不上（resolve 回答的是「叫什么名字」），但它与名字来自
+	// 同一条别名，所以走的是同一个方法——分成两个方法的话，「按哪一条别名
+	// 回答」这件事会有两份实现。
+	upstream, _, err := catalog.New(db).Alias(ctx, *channelID, *canonical)
 	if err != nil {
 		return err
 	}
