@@ -814,10 +814,19 @@ func NewCache(max int) *Cache {
 
 // Get 取一条编译好的规则。未命中时编译并存入。
 //
-// 键由调用方给出：**推荐用 (ruleID, version) 而不是源码**。
-// 用源码做键时，表达式里的空白差异会造成两份缓存，
-// 而 (ruleID, version) 与 pricing_rule_versions 表的主键一致，
-// 商家改规则必然换一次 version，缓存也就自然分成两份而不是被覆盖。
+// 键由调用方给出（见 pipeline.Rule.CacheKey，它是 `<规则 id>:<版本>`）。
+// 那个「版本」是**源码原文的哈希**（见 internal/pricing 的 versionOf），
+// 与 pricing_rule_versions 表里的 version **不是一回事**，两套编号互不相干：
+//
+//   - 缓存键里的版本 = `fnv64a(表达式源码原文)`。**空白敏感**——改一个空格，
+//     哈希就变，缓存分成两份而不是命中原来那份。
+//   - pricing_rule_versions.version = 那条规则的第几次改版，
+//     由 `COALESCE(MAX(version), 0) + 1` 数出来。它不进缓存键，
+//     改它**不会**让缓存失效。
+//
+// 所以「用 (ruleID, version) 做键就不会被空白差异分成两份」是不成立的：
+// 那个 version 本身就是源码的函数。真要让它对空白不敏感，该改的是 versionOf
+// （先把源码规范化再哈希），而不是这里。
 //
 // 返回值里的 *Program 是共享的：它不可变且并发安全，调用方不要改动它。
 func (c *Cache) Get(key, source string) (*Program, error) {
