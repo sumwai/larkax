@@ -444,6 +444,19 @@ func TestRotateApplyBatchesByID(t *testing.T) {
 	if len(batches) == 0 {
 		t.Fatal("一批都没报进度")
 	}
+	// 断言钉的是 Done/Total 这对量的**语义**（CLI 进度条的百分比），
+	// 而不是实现里那次自增：
+	//
+	//  1. Done 是**累计**行数——第 k 批的 Done 等于到此为止各批 Batch 之和。
+	//     写成「本批的行数」（`Done: result.rows`）时进度条永远停在第一批。
+	//  2. 收尾时 Done 不小于开始时数到的 Total——小于的话进度条到不了 100%。
+	//  3. Total 不小于本用例插进去的行数——它真的是数了一遍表，不是个常量。
+	//
+	// 不断言 Done == Total：轮换期间别的包会往 channels 里插行，那时 Done
+	// 大于 Total 是正常的（见 RotateProgress 的注释），共用库上等式会挂。
+	// 也不断言 Done == report.Scanned：两者由同一个累加器喂出来，等式恒成立，
+	// 钉不住任何东西（改成 `Done: report.Scanned` 照样绿）。
+	cumulative := 0
 	for i, p := range batches {
 		if p.Batch > 2 {
 			t.Errorf("第 %d 批处理了 %d 行，超过 BatchSize 2", i+1, p.Batch)
@@ -454,12 +467,21 @@ func TestRotateApplyBatchesByID(t *testing.T) {
 		if p.Total <= 0 {
 			t.Errorf("第 %d 批的总行数 = %d，期望为正", i+1, p.Total)
 		}
-		if i > 0 && p.Done <= batches[i-1].Done {
-			t.Errorf("第 %d 批的累计行数 %d 没有比上一批的 %d 前进", i+1, p.Done, batches[i-1].Done)
+		cumulative += p.Batch
+		if p.Done != int64(cumulative) {
+			t.Errorf("第 %d 批的累计行数 = %d，到此为止各批之和 = %d——Done 是累计值，不是本批的行数",
+				i+1, p.Done, cumulative)
 		}
 	}
-	if last := batches[len(batches)-1]; last.Done != report.Scanned {
-		t.Errorf("最后一批的累计行数 = %d，扫过的行数 = %d，两者应当相等", last.Done, report.Scanned)
+	last := batches[len(batches)-1]
+	if last.Done < last.Total {
+		t.Errorf("收尾时累计 %d 小于开始时数到的 %d：进度条到不了 100%%", last.Done, last.Total)
+	}
+	if last.Total < int64(len(ids)) {
+		t.Errorf("开始时数到的总行数 = %d，比本用例插进去的 %d 行还少", last.Total, len(ids))
+	}
+	if report.Scanned < int64(len(ids)) {
+		t.Errorf("报告里扫过 %d 行，比本用例插进去的 %d 行还少", report.Scanned, len(ids))
 	}
 
 	for _, id := range ids {

@@ -512,9 +512,16 @@ func TestRewrapRefusesToExceedWrapLimit(t *testing.T) {
 		t.Fatalf("副本份数为 %d，期望 %d", len(ids), maxWraps)
 	}
 
-	// 再加一把全新钥匙，应当被拒绝而不是写出一份读不回来的密文
-	extra := mustSealer(t, []config.MasterKey{key("extra", 0x99)})
-	if _, err := extra.Rewrap(sealed); err == nil {
-		t.Error("超过副本上限时应报错")
+	// 再加一把新钥匙，应当被拒绝而不是写出一份读不回来的密文。
+	//
+	// 这把钥匙必须**认得其中一把旧钥匙**（keys[0] 留在列表后面）：解出
+	// 数据密钥是走到上限守卫的前置条件，而只拿一把谁也不认得的钥匙时，
+	// Rewrap 在「解出数据密钥」那一步就带着 ErrNoKey 返回了，守卫一次都
+	// 执行不到——把守卫改成 `if false` 用例照样绿。断言因此必须落在
+	// ErrWrapLimit 上而不是「err != nil」：两种失败都是非 nil。
+	full := mustSealer(t, []config.MasterKey{key("extra", 0x99), keys[0]})
+	if _, err = full.Rewrap(sealed); !errors.Is(err, ErrWrapLimit) {
+		t.Fatalf("补第 %d 份副本时 err = %v，期望 ErrWrapLimit——"+
+			"走到 ErrNoKey 说明这条用例没碰到上限守卫", maxWraps+1, err)
 	}
 }

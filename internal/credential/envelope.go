@@ -65,6 +65,14 @@ var ErrMalformed = errors.New("凭证密文格式不合法")
 // 单独一个错误类型是为了让调用方能给出「缺哪把钥匙」而不是笼统的失败。
 var ErrNoKey = errors.New("没有能解开这份密文的主密钥")
 
+// ErrWrapLimit 表示这份密文已经带满数据密钥副本，补不进当前主密钥了。
+//
+// 与 ErrNoKey 分开的理由和 ErrMalformed 一样：处置动作完全不同。
+// 解不开的处置是「把缺的那把钥匙加回配置」，而这一条的处置是
+// 「把不再使用的主密钥从配置里删掉」——照前者的方向做只会让副本更多，
+// 于是每一次轮换都在原地打转。
+var ErrWrapLimit = errors.New("数据密钥副本已达上限")
+
 // Sealer 用一组主密钥封装与解开凭证。并发安全：内部无可变状态。
 type Sealer struct {
 	keys    []config.MasterKey
@@ -231,7 +239,7 @@ func (s *Sealer) Rewrap(envelopeBytes []byte) ([]byte, error) {
 	if len(env.wraps) >= maxWraps {
 		// 加上这一份就会超出解析器接受的上限，产出自己读不回来的密文。
 		// 报错而不是静默丢弃：这说明主密钥列表该清理了。
-		return nil, fmt.Errorf("数据密钥副本已达上限 %d，请先清理不再使用的主密钥", maxWraps)
+		return nil, fmt.Errorf("%w: 已有 %d 份，请先清理不再使用的主密钥", ErrWrapLimit, maxWraps)
 	}
 	env.wraps = append(env.wraps, w)
 	return encode(env.wraps, tail(env.dekNonce, env.body)), nil
