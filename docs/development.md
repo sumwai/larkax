@@ -6,6 +6,8 @@
 - Docker 与 `docker compose` v2.1 或更新（跑 PostgreSQL）
 - `make`
 - 只有开发前端才需要 Node.js 20 或更新
+- **要真的打通一次推理**，还需要一个上游服务与它的凭证——本仓库不自带上游，
+  示例里的上游地址都是假的
 
 **app 不进容器。** compose 只负责依赖的生命周期，服务本身留在宿主上 `go run`——
 改一行即时生效，不必每改一次就 rebuild 镜像。全栈容器化适合「只想跑起来看看」，
@@ -19,6 +21,10 @@ make run
 
 一条命令走完：生成 `.env`（只在不存在时）→ 起 PostgreSQL 并等它就绪 → 应用迁移 →
 前台跑服务。Ctrl-C 退出服务，数据库仍在跑，用 `make down` 停它。
+
+**`make run` 只证明服务起来了，不证明能成功推理。** 要真的打一次成功的推理，还需要
+一个上游账号、一条配好的模型 / 渠道 / 别名 / 定价链路、一个用户与钱包——而钱包目前
+**没有充值入口**，新开的户余额是 0。后面几节分别讲这些；先知道这一点可以少走一段弯路。
 
 `.env` 里的主密钥由 `make` 直接生成写进去（`openssl rand -base64 32`），
 不需要手工粘。
@@ -206,6 +212,16 @@ go run ./cmd/larkaxctl calendar import ./cn-2031.json
 
 必填项缺失时服务拒绝启动并一次列出全部问题，不会带着半截配置跑起来。
 
+**直接在 shell 里跑运维命令时，先加载 `.env`。** 服务与 `larkaxctl` 都只读
+环境变量，不读 `.env` 文件；`make` 的目标（`make run` / `migrate` / `test`）
+已经替你加载。手敲 `go run ./cmd/larkaxctl ...` 之前先：
+
+```sh
+set -a && . ./.env && set +a
+```
+
+否则第一条命令就会报 `LARKAX_DB_DSN 未设置`。
+
 上表是**服务**（`cmd/larkax`）的清单。运维命令（`cmd/larkaxctl`）的配置面小得多：
 它只读 `LARKAX_DB_DSN`、`LARKAX_LOG_LEVEL` 与 `LARKAX_ENV`，缺 DSN 才失败。
 `LARKAX_ROLE` 决定不了任何一条运维命令的成败——命令不属于任何角色——所以
@@ -355,6 +371,9 @@ go run ./cmd/larkaxctl migrate up
 下面四条命令按顺序跑完，就有了一条能接请求的链路。示例里的上游是假的
 （`https://api.example.com/v1`），换成你自己的即可。
 
+这些命令直接用 `go run`，所以先按上文「环境变量」加载 `.env`：
+`set -a && . ./.env && set +a`。`larkaxctl` 只读环境变量，不读 `.env` 文件。
+
 **一、把规范模型加进目录。** 规范名是选路与计费共用的键，不能带空白字符：
 
 ```sh
@@ -378,7 +397,8 @@ LARKAX_CHANNEL_CREDENTIAL=<CHANNEL_CREDENTIAL> go run ./cmd/larkaxctl channel cr
 ```
 
 `--type` 必须是已注册的适配器类型（当前是 `openai`、`anthropic` 与
-`openai-responses`）。
+`openai-responses`）。上面的示例用 `openai` 只是占位；上游说的是 Anthropic
+协议（例如 Claude）时用 `anthropic`，不要照抄示例的 `openai`。
 `--models` 是这条渠道支持的**规范模型名**（第一步建的那个），至少一个：
 读取路径把 `models` 当白名单用，空数组的渠道永远选不中。
 stdout 只有新渠道的 ID，其余信息走 stderr。
@@ -522,6 +542,19 @@ curl -i 127.0.0.1:8080/v1/chat/completions \
 
 推理接口接到公共端口上的进度见下文「当前能做什么」。
 
+### 看余额与花费
+
+余额用只读的账本命令查，值从分录现算：
+
+```sh
+go run ./cmd/larkaxctl ledger balance --account user:1
+go run ./cmd/larkaxctl ledger balance --all
+```
+
+每次请求的金额落在 `billing_requests` 表：`reserved_amount` 是预留，
+`final_amount` 是实际结算。按请求查要直接连库，SQL 示例见
+[metrics.md](metrics.md) 的「怎么读」。**目前没有一条按请求列出花费的命令。**
+
 ## 检查这条链路通不通
 
 上面两节走完之后，「通不通」由一条命令回答：
@@ -546,6 +579,10 @@ go run ./cmd/larkaxctl doctor
 `503 no available upstream for the requested model`——那句话不会说是哪一个
 名字不对，而 doctor 会点名是哪个渠道、哪个名字。第 6 项把「用户没有钱包行」
 这类缺口在第一次调用之前指出来，而不是让人从 `500` 往回推。
+
+**新配好的一套里第 6 项一定会不通过。** 开户后钱包余额是 0，而充值入口还没接上
+（见上文「开户」），所以 doctor 会以「通过 5 项、不通过 1 项」收尾。这是预期结果，
+不是配置漏了；要让它变绿，得先有办法给钱包入账。
 
 **前六项只读**：不写任何一行、不建任何东西、不发网络请求。
 
@@ -648,18 +685,24 @@ ingress 规则下。
 | 子命令 | 做什么 |
 |---|---|
 | `channel` | 上游渠道：`create` / `list` / `update` / `enable` / `disable` |
-| `model` | 模型目录：`add` / `list` |
-| `alias` | 规范模型名到上游模型名的映射：`add` / `list` |
-| `price` | 计价规则：`add` / `list` |
+| `model` | 模型目录：`add` / `list` / `show` / `update` / `delete` |
+| `alias` | 规范模型名到上游模型名的映射：`add` / `list` / `update` / `delete` / `resolve` |
+| `price` | 计价规则：`add` / `list` / `update` / `explain` |
 | `user` | 用户：`create` |
-| `apikey` | API Key：`create` |
+| `wallet` | 用户钱包：`open`（余额 0，充值入口尚未接入） |
+| `apikey` | API Key：`create` / `update` / `list` |
+| `ledger` | 只读账本：`balance` / `verify` |
+| `settings` | 运行期配置：`list` / `set` |
+| `plugin` | 插件：`list` / `publish` / `enable` / `disable` |
+| `partition` | `usage_events` 月分区：`ensure` / `check` |
 | `doctor` | 逐项检查这条链路通不通（`--live` 才真打上游） |
 | `snapshot` | 请求快照：`cleanup` / `allowlist` / `show` / `redact` |
 | `idempotency` | 幂等记录的留存清理：`cleanup` / `cleanup --dry-run` |
 | `calendar` | 节假日日历数据：`import` |
 | `rotate` | 主密钥轮换 |
-| `migrate` | 迁移：`up` / `down-to` / `status` / `create` |
+| `migrate` | 迁移：`up` / `down` / `down-to` / `up-to` / `status` / `version` / `create` |
 | `reconcile` | 对账 |
+| `version` | 打印版本号 |
 
 每个子命令的用法见 `go run ./cmd/larkaxctl <子命令> --help`，
 或直接 `go run ./cmd/larkaxctl` 看总览。对账的开关、口径与运行记录见
