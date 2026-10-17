@@ -836,7 +836,11 @@ func insertEntries(ctx context.Context, tx *sql.Tx, entries []ledger.Entry) erro
 // 同一科目在一个事务里可能出现多次，所以先按科目汇总再更新，
 // 而不是逐条 UPDATE：后者会多几次往返，也可能让锁的持有时间变长。
 func applyToWallets(ctx context.Context, tx *sql.Tx, entries []ledger.Entry) error {
-	deltas := map[WalletKey]money.Amount{}
+	// 按科目收集金额切片而不是边遍历边 Add：Add 溢出时夹到 int64 边界，
+	// 而夹住之后写进钱包的是一个**错的增量**——账本（权威）与钱包快照
+	// 从此不一致，且两处看起来都是「平的」，事后无从发现。判据要按真实和
+	// 判（见 money.SumChecked），所以先把每条分录的金额留着。
+	deltas := map[WalletKey][]money.Amount{}
 	for _, e := range entries {
 		if e.Account.Type() != ledger.AccountUser {
 			continue
@@ -850,7 +854,7 @@ func applyToWallets(ctx context.Context, tx *sql.Tx, entries []ledger.Entry) err
 			return err
 		}
 		key := WalletKey{UserID: id, Asset: string(e.Asset)}
-		deltas[key] = deltas[key].Add(e.Amount)
+		deltas[key] = append(deltas[key], e.Amount)
 	}
 
 	// 按固定的键序更新：与加锁顺序一致，避免并发时出现交叉等待。
@@ -861,7 +865,17 @@ func applyToWallets(ctx context.Context, tx *sql.Tx, entries []ledger.Entry) err
 	sortWalletKeys(keys)
 
 	for _, key := range keys {
-		delta := deltas[key]
+		delta, ok := money.SumChecked(deltas[key]...)
+		if !ok {
+			// 同一个事务里这个用户在这一资产上的净增量放不进 int64。库里
+			// 的列是 numeric(20, 8)，存得下一个 money 表示不了的余额，所以
+			// 这个数据真的读得出来；而写回快照时只能夹住——那会把错的增量
+			// 落进 user_wallets，账本与快照从此不一致。拒绝整笔，由调用方
+			// 决定怎么处置（拆成多笔、或先修数据）。
+			return fmt.Errorf(
+				"用户 %d 的 %s 分录净额超出金额可表示范围（%d 条分录之和放不进 int64；库里的 numeric(20, 8) 存得下，money 表示不了）: %w",
+				key.UserID, key.Asset, len(deltas[key]), money.ErrOverflow)
+		}
 		if delta.IsZero() {
 			continue
 		}
