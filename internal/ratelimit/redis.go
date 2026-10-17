@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -92,9 +93,24 @@ func OpenRedis(dsn string) (*RedisStore, error) {
 	opt.MaxRetries = -1
 
 	// 把库自己的诊断日志接到 slog 上，见 redisLogAdapter。
-	redis.SetLogger(redisLogAdapter{})
+	setRedisLogger()
 
 	return &RedisStore{cmds: redis.NewClient(opt)}, nil
+}
+
+// setRedisLogger 每个进程只把库的日志接一次。
+//
+// go-redis 的 Logger 是**包级**变量，而读它的是库自己的 goroutine（拨号失败后的
+// 诊断路径）。每调一次 OpenRedis 就写一次，与那些还活着的 goroutine 构成数据竞争：
+// `-race -count=5` 下稳定报出来，而 `-count=1`（门禁与 CI 的口径）连跑五次全绿——
+// 也就是说这道门本身照不到它。生产上 OpenRedis 只在装配期调一次，窗口很窄，
+// 但「很窄」不是「没有」。
+//
+// 接一次就够：适配器是无状态的，所有客户端共用同一个。
+var redisLoggerOnce sync.Once
+
+func setRedisLogger() {
+	redisLoggerOnce.Do(func() { redis.SetLogger(redisLogAdapter{}) })
 }
 
 // redisLogAdapter 把 Redis 客户端库自己的诊断日志转到 slog 上。
