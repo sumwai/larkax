@@ -246,6 +246,26 @@ func upstreamFailureOf(t *testing.T, db *sql.DB, requestID string) (sql.NullInt6
 	return status, code
 }
 
+// channelAndModelOf 读一条账单上「这次打到了哪儿」那两列。
+//
+// 两个都返回可空类型，理由与 upstreamFailureOf 相同：NULL 是**正常**的一种
+// 取值（这一次没有选中渠道），而用例要分辨的正是「NULL」与「写了个 0 /
+// 空串进去」——0 在库里读成「渠道 0」，那个 id 不存在。
+func channelAndModelOf(t *testing.T, db *sql.DB, requestID string) (sql.NullInt64, sql.NullString) {
+	t.Helper()
+	var (
+		channelID sql.NullInt64
+		model     sql.NullString
+	)
+	qerr := db.QueryRowContext(context.Background(),
+		`SELECT channel_id, upstream_model FROM billing_requests WHERE request_id = $1`,
+		requestID).Scan(&channelID, &model)
+	if qerr != nil {
+		t.Fatalf("读账单的渠道与上游模型名失败: %v", qerr)
+	}
+	return channelID, model
+}
+
 // clientCanceledAt 读账单上「客户端断开」那一刻。
 //
 // 返回 NULL 有两种来历，这一列分不开也不该分：没取消（结算路径必然知道），

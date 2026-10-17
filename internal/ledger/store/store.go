@@ -540,6 +540,12 @@ func (s *Store) Save(ctx context.Context, req pipeline.Request, charge *pipeline
 // 它与 status 写在同一条 UPDATE 里，不另起一条：分开写会有一个窗口让这一行
 // 已经是 released 而依据还没写上，而那个组合在库里读起来正是「释放了但
 // 没有理由」——一个不存在却看得见的状态。
+//
+// # channel_id 与 upstream_model 也在这里补
+//
+// 同一件事的另一半：这次请求**打到了哪个渠道、用哪个上游名**。两列在预留
+// 时写不出来（那时还没选路），成功那条路由 markSettled 补，不计费这条路
+// 只有这里能补。口径与那一处逐字一致，理由见下面那条 UPDATE 前的注释。
 func (s *Store) Release(ctx context.Context, req pipeline.Request, failure *pipeline.UpstreamFailure) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -611,13 +617,31 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request, failure *pipe
 	//
 	// NULLIF 挡住的是「没有值」而不是「值为空」：没有上游响应时状态码是 0，
 	// 没有依据时分类是空串，两个都不该作为数据写进去（见 Release 的注释）。
+	//
+	// # 渠道与上游模型名为什么也在这里
+	//
+	// 它们与 status 是同一件事的两面：这一行在**预留**时插进去（见
+	// SaveReservation），而预留发生在选路之前，那时还不知道会打到哪儿。
+	// 成功那条路在结算时补上（见 markSettled）；不计费这条路**不走结算**，
+	// 所以补在这里——不补的话失败行上这两列恒为 NULL，恰恰是「某个渠道对
+	// 某批模型全在报错」时最需要它们的地方没有它们。
+	//
+	// 口径与 markSettled 逐字一致（同样是 NULLIF）：写进来的值由调用方在
+	// 选路之后填进 pipeline.Request，一个候选都没选中时是 0 与空串，落成
+	// NULL——那是「没有渠道可记」，不是「漏了」。
+	//
+	// 它写在**同一条** UPDATE 里，理由与 status 那条相同：分两次写会有一个
+	// 窗口让这一行已经是 released 而「打到了哪儿」还没写上。
 	failureStatus, failureCode := failureColumns(failure)
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE billing_requests
 		   SET status = 'released', settled_at = now(),
 		       upstream_status = NULLIF($2, 0),
-		       error_code = NULLIF($3, '')
-		 WHERE id = $1`, id, failureStatus, failureCode); err != nil {
+		       error_code = NULLIF($3, ''),
+		       channel_id = NULLIF($4, 0),
+		       upstream_model = NULLIF($5, '')
+		 WHERE id = $1`,
+		id, failureStatus, failureCode, req.ChannelID, req.UpstreamModel); err != nil {
 		return fmt.Errorf("标记释放失败: %w", err)
 	}
 

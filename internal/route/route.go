@@ -683,7 +683,15 @@ type Result struct {
 	// billing_requests.upstream_model——那一列要回答的是「这次实际用了哪个
 	// 上游名」，而事后重查一次别名答不出这个问题（配置可能已经改过）。
 	//
-	// 失败路径（返回错误）时它没有意义：没有一次调用成功。
+	// 它与 Channel **成对**：两者在同一个位置落，成功与失败一样有值。
+	// 失败路径上它说的是「最后一次真的发出去的那次用的是哪个名字」——
+	// 那一次调用发生过，也就有名字可记；而账单上那两列正是成对读的
+	// （见 internal/ledger/store 的 Release）。只在成功时填它，失败行上
+	// 就只剩渠道这一半，而需要这一对的那类排查（某个渠道对某批模型全在
+	// 报错）恰好落在失败行上。
+	//
+	// 一次调用都没发生时它是空的（候选集为空、别名翻不出来、context 已取消），
+	// 与 Channel 的零值同时出现。
 	UpstreamModel string
 	// Attempts 按顺序记录了每一次尝试，包括失败的。
 	// 计费与排查都需要它：失败的调用不计费，但要知道发生过。
@@ -867,10 +875,17 @@ func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.R
 			Duration:    r.now().Sub(started),
 		})
 		result.Channel = c.Channel
+		// 上游名与渠道在**同一个位置**落，成功失败都一样：这一对说的是
+		// 「这次实际发去了哪里、用哪个名字」，而失败的那一次调用同样发出去过。
+		// 放进下面那个 if 里的话，失败路径上就只剩渠道这一半（见
+		// Result.UpstreamModel 的注释）。
+		//
+		// 别名翻不出来时走的是上面那条 return，两列都还是上一次尝试留下的值
+		// ——那次尝试真的发生过，记它是对的；一次都没发生时两者同时是零值。
+		result.UpstreamModel = attempt.Model
 
 		if err == nil {
 			result.Response = resp
-			result.UpstreamModel = attempt.Model
 			return result, nil
 		}
 		if !worthNextCandidate(err) {

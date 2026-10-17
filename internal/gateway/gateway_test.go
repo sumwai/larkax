@@ -571,6 +571,24 @@ func TestUpstreamFailureCarriesEvidenceToRelease(t *testing.T) {
 				t.Fatalf("不计费的结局应释放预留一次，实际 %d 次", len(h.reservations.released))
 			}
 
+			// 「打到了哪个渠道、用哪个上游名」跟着释放一起交下去。
+			//
+			// 六类失败**都**打到过渠道 1——包括插件阻断那一次，它上游其实
+			// 成功了、钱也花了。这两列回答的是「某个渠道是不是对某批模型
+			// 全在报错」，而那正是失败行上原本缺的那一半：只有 status 与
+			// error_code 时，看得出「为什么失败」，看不出「打的是谁」。
+			//
+			// 夹具用的是同名别名，所以这里只钉得住「有没有从选路结果搬到
+			// 请求上」；「搬的是别名翻出来的那个名字、不是规范名」由端到端
+			// 那条钉（见 internal/assembly 的 TestUpstreamFailureRecordsChannelAndModel）。
+			rel := h.reservations.released[0].req
+			if rel.ChannelID != 1 {
+				t.Errorf("释放时带的 channel_id = %d，期望 1", rel.ChannelID)
+			}
+			if rel.UpstreamModel != "gpt-4o" {
+				t.Errorf("释放时带的 upstream_model = %q，期望 %q", rel.UpstreamModel, "gpt-4o")
+			}
+
 			got := h.reservations.released[0].failure
 			if tc.wantNone {
 				if got != nil {
@@ -610,6 +628,17 @@ func TestReleaseWithoutUpstreamCallCarriesNoEvidence(t *testing.T) {
 	}
 	if got := h.reservations.released[0].failure; got != nil {
 		t.Errorf("上游根本没被调用，不该带依据，得到 %+v", got)
+	}
+
+	// 同一个道理，另外两列也留空：**一个候选都没选中**，没有渠道可记。
+	// 兜一个候选进去会让「这个渠道在报错」这个结论指向一个没被碰过的渠道，
+	// 而那种错在库里看不出来（那一行看起来只是「记了」）。
+	rel := h.reservations.released[0].req
+	if rel.ChannelID != 0 {
+		t.Errorf("一次上游调用都没发生，channel_id 应当是 0（落库成 NULL），得到 %d", rel.ChannelID)
+	}
+	if rel.UpstreamModel != "" {
+		t.Errorf("一次上游调用都没发生，upstream_model 应当是空（落库成 NULL），得到 %q", rel.UpstreamModel)
 	}
 }
 

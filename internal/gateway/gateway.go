@@ -413,6 +413,12 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 	g.snapshotAsync(ctx, upstream, "request", req.UserID)
 
 	routed, err := g.routeChat(ctx, upstream, res.candidates, req.CanonicalModel, hooks)
+	// 选路一返回就把「打到了哪儿」记下来，成功失败都一样：下面每一条
+	// 收尾路径（结算与释放）都从 h.req 上读它，而失败那一条**没有别的
+	// 机会**再记一次（见 handle.routedTo）。
+	if routed != nil {
+		res.routedTo(routed.Channel, routed.UpstreamModel)
+	}
 	if err != nil {
 		// 没有可用的渠道，或者全部失败。**不计费**。
 		//
@@ -470,7 +476,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 		out.Usage = usage
 	}
 
-	charge, err := g.finishCharge(ctx, res, routed.Channel, routed.UpstreamModel, out)
+	charge, err := g.finishCharge(ctx, res, out)
 	if err != nil {
 		return nil, err
 	}
@@ -551,6 +557,32 @@ type handle struct {
 	// 散着记就是四处都要记得写一次，而漏掉的那一处表现为「这一类失败在
 	// 账单上仍然没有依据」——与修之前一模一样，且不会有任何东西报出来。
 	failure *pipeline.UpstreamFailure
+}
+
+// routedTo 记下这次请求**实际打到了哪儿**：哪个渠道、用哪个上游模型名。
+//
+// # 它为什么记在 req 上
+//
+// billing_requests 的那两列有两个写入点：计费走 markSettled，不计费走
+// Release。两者读的都是**同一份请求**（前者是 finishCharge 从 h.req 拷出来
+// 的那份，后者就是 h.req 本身），所以「这次打到了哪儿」只有记在 h.req 上
+// 才对两条路同时生效。
+//
+// 不记的话，成功那一行两列有值而失败那一行恒为 NULL——恰恰是「某个渠道对
+// 某批模型全在报错」时最需要它们的地方没有它们。**这不是「没选中渠道就不记」**：
+// 上游回了 4xx 的那一次明明打到了某个确定的渠道。
+//
+// # 什么时候可以不记
+//
+// 选路一次都没选出渠道时不记（候选集为空、别名翻不出来、context 已取消），
+// 两列于是留 NULL——那是「没有渠道可记」，不是「漏了」。所以调用点要判
+// 路由结果是不是 nil。
+//
+// 位置固定在**选路返回之后、任何结算与释放之前**：它必须在 finishCharge
+// 与 release 之前跑完，而那两处分别在成功与失败两条路上。
+func (h *handle) routedTo(ch channel.Channel, upstreamModel string) {
+	h.req.ChannelID = ch.ID
+	h.req.UpstreamModel = upstreamModel
 }
 
 // # 它为什么不收上游请求
@@ -797,12 +829,12 @@ func (h *handle) reportReleaseFailure(ctx context.Context, cause error) {
 // 基准是 h.req，不是调用方手上那份请求：BillingRequestID 是在 begin 里
 // 赋给 h.req 的，外层那份看不到它——而少了它，账本分录就挂不回这次账单。
 //
-// upstreamModel 是这次请求**实际发出去**的上游模型名，取自选路的结果
-// （route.Result.UpstreamModel）。它与 ch 一样属于「选路之后才知道」的那
-// 一类，所以也在这里填进 settleReq、由落库层写进 billing_requests。
-// 不在这里重查一次别名：事后重查答不出「当时发的是什么」——配置可能已经
+// 「实际选中了谁」也取自 h.req：渠道 id 与上游模型名由选路那一步记上去
+// （见 handle.routedTo），这里只是把它收窄成**一个**渠道——规则按实际选中的
+// 那个匹配，而不是按预留时的一整个候选集（见 pipeline.Reserve）。
+// 别名不在这里重查一次：事后重查答不出「当时发的是什么」——配置可能已经
 // 改过，而那正是账单要能回答的问题。
-func (g *Gateway) finishCharge(ctx context.Context, h *handle, ch channel.Channel, upstreamModel string, out pipeline.Outcome) (*pipeline.Charge, error) {
+func (g *Gateway) finishCharge(ctx context.Context, h *handle, out pipeline.Outcome) (*pipeline.Charge, error) {
 	h.settled = true
 
 	// 结算用**实际选中的渠道**：渠道级与商家级规则按它匹配。
@@ -813,9 +845,7 @@ func (g *Gateway) finishCharge(ctx context.Context, h *handle, ch channel.Channe
 	// 不会超过预留。EvalWorstCase 取的是**一条规则内部**的最坏分支，
 	// 不跨规则；跨规则那一层由预留的「取最大」负责。
 	settleReq := h.req
-	settleReq.ChannelID = ch.ID
-	settleReq.OwnerUserID = ownerOf(h.candidates, ch.ID)
-	settleReq.UpstreamModel = upstreamModel
+	settleReq.OwnerUserID = ownerOf(h.candidates, settleReq.ChannelID)
 	// 候选集也收窄成选中的那一个，让这份请求自洽：上面两个字段说的是
 	// 「实际选中了谁」，而候选集若还留着整份，两者对不上。结算本身不读
 	// 候选集（见 pipeline.Request），这一行是给后来读它的人留的。
