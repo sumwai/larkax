@@ -72,7 +72,7 @@ type ruleSpec struct {
 }
 
 // insertRule 插一条规则并返回 id。
-func insertRule(t *testing.T, db *sql.DB, spec ruleSpec) int64 {
+func insertRule(t *testing.T, ctx context.Context, db *sql.DB, spec ruleSpec) int64 {
 	t.Helper()
 
 	if spec.scope == "" {
@@ -104,7 +104,7 @@ func insertRule(t *testing.T, db *sql.DB, spec ruleSpec) int64 {
 	}
 
 	var id int64
-	err := db.QueryRowContext(context.Background(), `
+	err := db.QueryRowContext(ctx, `
 		INSERT INTO pricing_rules
 			(scope, owner_user_id, channel_id, name, model_patterns, expr, priority,
 			 enabled, effective_from, effective_to)
@@ -122,7 +122,10 @@ func insertRule(t *testing.T, db *sql.DB, spec ruleSpec) int64 {
 	// 消失，而那条分支必须能被测到（见 TestMatchReturnsErrNoRule）。
 	// 本包不产生任何指向 pricing_rules 的外键，所以删得掉。
 	t.Cleanup(func() {
-		_, _ = db.ExecContext(context.Background(),
+		// ctx 而不是 context.Background()：两者都是「与测试同生同死」，
+		// 但 t.Cleanup 里那一次删除今天也是链路的一部分，用同一个 ctx
+		// 能让 contextcheck 看清这个 context 确实一路传了下去。
+		_, _ = db.ExecContext(ctx,
 			`DELETE FROM pricing_rules WHERE id = $1`, id)
 	})
 	return id
@@ -175,9 +178,9 @@ func TestMatchPrefersMostSpecificScope(t *testing.T) {
 	ch := seedChannel(t, db, owner)
 
 	// 三条规则同时适用于这个模型，只有作用域不同。
-	platform := insertRule(t, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": 1}`})
-	merchant := insertRule(t, db, ruleSpec{scope: "merchant", ownerID: owner, patterns: []string{model}, expr: `{"prompt": 2}`})
-	channel := insertRule(t, db, ruleSpec{scope: "channel", channelID: ch, patterns: []string{model}, expr: `{"prompt": 3}`})
+	platform := insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": 1}`})
+	merchant := insertRule(t, ctx, db, ruleSpec{scope: "merchant", ownerID: owner, patterns: []string{model}, expr: `{"prompt": 2}`})
+	channel := insertRule(t, ctx, db, ruleSpec{scope: "channel", channelID: ch, patterns: []string{model}, expr: `{"prompt": 3}`})
 
 	at := time.Now()
 	cases := []struct {
@@ -216,8 +219,8 @@ func TestMatchBreaksTiesWithinScope(t *testing.T) {
 	ctx := context.Background()
 
 	model := unique("model-tie")
-	low := insertRule(t, db, ruleSpec{patterns: []string{model}, priority: 1, expr: `{"prompt": 1}`})
-	high := insertRule(t, db, ruleSpec{patterns: []string{model}, priority: 9, expr: `{"prompt": 2}`})
+	low := insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, priority: 1, expr: `{"prompt": 1}`})
+	high := insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, priority: 9, expr: `{"prompt": 2}`})
 
 	q := singleCandidate(model, 0, 0, time.Now())
 
@@ -230,7 +233,7 @@ func TestMatchBreaksTiesWithinScope(t *testing.T) {
 	}
 
 	// 同优先级下再插一条：应当是新的那条胜出。
-	newer := insertRule(t, db, ruleSpec{patterns: []string{model}, priority: 9, expr: `{"prompt": 3}`})
+	newer := insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, priority: 9, expr: `{"prompt": 3}`})
 	got, err = s.Match(ctx, q)
 	if err != nil {
 		t.Fatalf("匹配失败: %v", err)
@@ -269,11 +272,11 @@ func TestMatchPrefersModelSpecificOverCatchAll(t *testing.T) {
 
 			var catchAll, specific int64
 			if tc.catchFirst {
-				catchAll = insertRule(t, db, ruleSpec{patterns: []string{}, expr: `{"prompt": 1}`})
-				specific = insertRule(t, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": 2}`})
+				catchAll = insertRule(t, ctx, db, ruleSpec{patterns: []string{}, expr: `{"prompt": 1}`})
+				specific = insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": 2}`})
 			} else {
-				specific = insertRule(t, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": 2}`})
-				catchAll = insertRule(t, db, ruleSpec{patterns: []string{}, expr: `{"prompt": 1}`})
+				specific = insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": 2}`})
+				catchAll = insertRule(t, ctx, db, ruleSpec{patterns: []string{}, expr: `{"prompt": 1}`})
 			}
 
 			got, err := s.Match(ctx, singleCandidate(model, 0, 0, at))
@@ -299,8 +302,8 @@ func TestMatchPriorityBeatsSpecificity(t *testing.T) {
 	ctx := context.Background()
 
 	model := unique("model-priority")
-	specific := insertRule(t, db, ruleSpec{patterns: []string{model}, priority: 1, expr: `{"prompt": 1}`})
-	catchAll := insertRule(t, db, ruleSpec{patterns: []string{}, priority: 9, expr: `{"prompt": 2}`})
+	specific := insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, priority: 1, expr: `{"prompt": 1}`})
+	catchAll := insertRule(t, ctx, db, ruleSpec{patterns: []string{}, priority: 9, expr: `{"prompt": 2}`})
 
 	got, err := s.Match(ctx, singleCandidate(model, 0, 0, time.Now()))
 	if err != nil {
@@ -321,8 +324,8 @@ func TestMatchTieBreaksByIDAmongSpecificRules(t *testing.T) {
 	ctx := context.Background()
 
 	model := unique("model-id-tie")
-	older := insertRule(t, db, ruleSpec{patterns: []string{model}, priority: 5, expr: `{"prompt": 1}`})
-	newer := insertRule(t, db, ruleSpec{patterns: []string{model}, priority: 5, expr: `{"prompt": 2}`})
+	older := insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, priority: 5, expr: `{"prompt": 1}`})
+	newer := insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, priority: 5, expr: `{"prompt": 2}`})
 
 	got, err := s.Match(ctx, singleCandidate(model, 0, 0, time.Now()))
 	if err != nil {
@@ -398,8 +401,8 @@ func TestMatchFiltersByModel(t *testing.T) {
 	// 空 patterns 的那条挂在**渠道**作用域下，不是平台作用域。这是刻意的：
 	// 平台级的「适用全部模型」一旦存在，ErrNoRule 在这个库上就再也构造不出来了，
 	// 而那条分支必须能被测到（见 TestMatchReturnsErrNoRule）。
-	anyRule := insertRule(t, db, ruleSpec{scope: "channel", channelID: ch, expr: `{"prompt": 1}`})
-	onlyRule := insertRule(t, db, ruleSpec{scope: "channel", channelID: ch, patterns: []string{only}, priority: 5, expr: `{"prompt": 2}`})
+	anyRule := insertRule(t, ctx, db, ruleSpec{scope: "channel", channelID: ch, expr: `{"prompt": 1}`})
+	onlyRule := insertRule(t, ctx, db, ruleSpec{scope: "channel", channelID: ch, patterns: []string{only}, priority: 5, expr: `{"prompt": 2}`})
 
 	query := func(model string) pipeline.RuleQuery {
 		return singleCandidate(model, ch, owner, time.Now())
@@ -450,11 +453,11 @@ func TestMatchSkipsDisabledAndOutOfWindow(t *testing.T) {
 	future := now.Add(2 * time.Hour)
 
 	model := unique("model-window")
-	live := insertRule(t, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": 1}`})
-	insertRule(t, db, ruleSpec{patterns: []string{model}, enabled: &disabled, priority: 9, expr: `{"prompt": 2}`})
-	insertRule(t, db, ruleSpec{patterns: []string{model}, from: &future, priority: 9, expr: `{"prompt": 3}`})         // 还没生效
-	insertRule(t, db, ruleSpec{patterns: []string{model}, to: &past, priority: 9, expr: `{"prompt": 4}`})             // 已过期
-	insertRule(t, db, ruleSpec{patterns: []string{model}, from: &past, to: &now, priority: 9, expr: `{"prompt": 5}`}) // 刚好在上界
+	live := insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": 1}`})
+	insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, enabled: &disabled, priority: 9, expr: `{"prompt": 2}`})
+	insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, from: &future, priority: 9, expr: `{"prompt": 3}`})         // 还没生效
+	insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, to: &past, priority: 9, expr: `{"prompt": 4}`})             // 已过期
+	insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, from: &past, to: &now, priority: 9, expr: `{"prompt": 5}`}) // 刚好在上界
 
 	got, err := s.Match(ctx, singleCandidate(model, 0, 0, now))
 	if err != nil {
@@ -518,9 +521,9 @@ func TestMatchAllPicksRulePerCandidate(t *testing.T) {
 	chB := seedChannel(t, db, ownerB)
 	chC := seedChannel(t, db, ownerC)
 
-	platform := insertRule(t, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": 1}`})
-	merchantB := insertRule(t, db, ruleSpec{scope: "merchant", ownerID: ownerB, patterns: []string{model}, expr: `{"prompt": 2}`})
-	channelA := insertRule(t, db, ruleSpec{scope: "channel", channelID: chA, patterns: []string{model}, expr: `{"prompt": 3}`})
+	platform := insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": 1}`})
+	merchantB := insertRule(t, ctx, db, ruleSpec{scope: "merchant", ownerID: ownerB, patterns: []string{model}, expr: `{"prompt": 2}`})
+	channelA := insertRule(t, ctx, db, ruleSpec{scope: "channel", channelID: chA, patterns: []string{model}, expr: `{"prompt": 3}`})
 
 	cands := []pipeline.RuleCandidate{
 		{ChannelID: chA, OwnerUserID: ownerA},
@@ -625,7 +628,7 @@ func TestMatchVersionTracksExpression(t *testing.T) {
 	before := `{"prompt": 0.00001}`
 	after := `{"prompt": 0.00002}`
 
-	id := insertRule(t, db, ruleSpec{patterns: []string{model}, expr: before})
+	id := insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, expr: before})
 	q := singleCandidate(model, 0, 0, time.Now())
 
 	first, err := s.Match(ctx, q)

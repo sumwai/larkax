@@ -933,7 +933,7 @@ func TestUpdateCanDisableRuleWithBrokenExpr(t *testing.T) {
 	model := unique("model-broken")
 
 	// 直接写进库，绕过写入路径的编译检查。
-	id := insertRule(t, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": nope}`, priority: 99})
+	id := insertRule(t, ctx, db, ruleSpec{patterns: []string{model}, expr: `{"prompt": nope}`, priority: 99})
 
 	// 读取路径**不编译**，所以这条规则照样会被选中——编译发生在求值那一步。
 	// 这正是它危险的地方：故障出现在热路径上，而不是在写入的时候。
@@ -1043,7 +1043,7 @@ func TestListReportsBrokenExprPerRow(t *testing.T) {
 	admin := NewAdmin(db)
 
 	// 直接写进库，绕过写入路径。
-	broken := insertRule(t, db, ruleSpec{expr: `{"prompt": nope}`})
+	broken := insertRule(t, t.Context(), db, ruleSpec{expr: `{"prompt": nope}`})
 	good := createRule(t, admin, CreateRequest{Scope: ScopePlatform, Name: unique("rule-good")})
 
 	infos := listAll(t, admin)
