@@ -57,26 +57,44 @@ func Reserve(req ReserveRequest) (money.Amount, error) {
 	// 存在（结束即释放），且输入侧通常不是预留里最大的一块（输出侧按 max_tokens
 	// 估，往往更大）。
 	inputPrice := money.Max(money.Max(p.Prompt, p.CacheRead), p.CacheWrite)
-	input := inputPrice.MulInt(req.InputTokens)
+	// 每一处乘法都要看 ok。mul 把「哪一项被夹住了」记进 clampErr，由函数
+	// 末尾统一拒绝——预留算不出来时**不能**交回一个夹住的数：那是一个偏小
+	// 的上界，结算会超过它、撞上 Capped，差额静默由平台承担（见
+	// Settlement.Capped）。
+	var clampErr error
+	mul := func(price money.Amount, count int64) money.Amount {
+		v, ok := money.MulIntChecked(price, count)
+		if !ok && clampErr == nil {
+			clampErr = fmt.Errorf(
+				"预留金额的某一项在相乘时放不进 int64 的最小单位表示（库里的 numeric(20, 8) 存得下，money 表示不了），算不出上界: %w",
+				money.ErrOverflow)
+		}
+		return v
+	}
+	input := mul(inputPrice, req.InputTokens)
 	// 缓存读、缓存写这两项是**在整段 prompt 之外**额外给的估计量，所以照旧各按
 	// 自己的单价再算一遍。生产里它们目前恒为 0——入口没有填 pipeline.Request.Usage，
 	// 所以上界实际由上面那一侧单独撑着。这两项加不加都不改变今天的结论；
 	// 一旦有人把估计量填起来，多算的这一点是偏保守的方向。
-	cacheRead := money.Max(p.Prompt, p.CacheRead).MulInt(req.CacheReadTokens)
-	cacheWrite := p.CacheWrite.MulInt(req.CacheWriteTokens)
+	cacheRead := mul(money.Max(p.Prompt, p.CacheRead), req.CacheReadTokens)
+	cacheWrite := mul(p.CacheWrite, req.CacheWriteTokens)
 
 	// 输出侧：按 max_tokens 估。这是预留里最大的一块，
 	// 也是「大请求冻住余额多」的来源。
 	//
 	// 用输出侧两个单价（Completion 与 Reasoning）的较大者来估：推理单价
 	// 通常更高，而预留宁可多留。
+	//
+	// max_tokens 是**调用方给的值**，没有上界校验（见 pipeline.Request.validate），
+	// 所以这一项是「不需要任何数据前提就能撞上溢出」的那一处——上面的 mul
+	// 因此不是防御性代码，它挡的就是这条。
 	outputPrice := money.Max(p.Completion, p.Reasoning)
-	output := outputPrice.MulInt(req.MaxTokens)
+	output := mul(outputPrice, req.MaxTokens)
 
-	// 推理 token：有的上游把它算在 completion 里，有的单独报。
-	// 预留按 max_tokens 那一块已经用 max(Completion, Reasoning) 覆盖了，
-	// 所以这里**不重复加**——重复加会让预留虚高，那本身无害，
-	// 但会让「预留是不是上界」这条不变量变得难以验证。
+	// 推理 token 不在这里加：输出侧按 max_tokens 估，已经用
+	// max(Completion, Reasoning) 覆盖了那一块（见下面 total 的构成）。
+	// 所以这个函数里没有单独的推理项，也就不存在「漏加一项」——
+	// 上界由输出侧那一项撑着。
 	total := input.Add(cacheRead).Add(cacheWrite).Add(output)
 
 	// 非 token 计量的部分按规则里给的单价预留**一次**。
@@ -99,13 +117,18 @@ func Reserve(req ReserveRequest) (money.Amount, error) {
 	total = money.Max(total, req.Charges.Minimum)
 	total = total.Add(req.Charges.Fixed)
 
-	// 预留本身也要能算得出来：夹住的预留是一个**偏小**的上界，于是结算
-	// 必然超过它、撞上 Capped，差额静默由平台承担（见 Settlement.Capped）。
-	// 上面每一步 Add / MulInt 都会夹住而不报错，所以这里按精确和再判一次。
+	// 两处会夹住的地方各判一次：
 	//
-	// 判据用 SumChecked 判「真实的和放不放得下」，而不是逐个中间值——
-	// 中间值溢出但真实和放得下是正常的（见 money.SumChecked）。各分项都
-	// 已被 validate 保证非负，所以也不存在正负抵消把夹住掩盖过去的情形。
+	//   - 乘法：上面每一处 mul 都记下了 clampErr（单价 × 数量放不进 int64）。
+	//     这是最要紧的一处——max_tokens 是调用方给的值、没有上界，一个请求
+	//     就能走到；而夹住的预留是一个偏小的上界。
+	//   - 求和：各分项各自放得下而合起来放不下。判据用 SumChecked 按真实和
+	//     判，而不是逐个中间值——中间值溢出但真实和放得下是正常的（见
+	//     money.SumChecked）。各分项都已被 validate 保证非负，所以也不存在
+	//     正负抵消把夹住掩盖过去的情形。
+	if clampErr != nil {
+		return money.Zero, clampErr
+	}
 	parts := []money.Amount{input, cacheRead, cacheWrite, output}
 	for _, price := range p.Units {
 		parts = append(parts, price)

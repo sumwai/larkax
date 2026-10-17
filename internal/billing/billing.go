@@ -125,6 +125,18 @@ type Breakdown struct {
 	// 有测试钉「Total = 逐项之和」——一旦不等，对账时就会出现
 	// 一笔永远找不平的差额。
 	Total money.Amount
+
+	// clamped 记录这次计算里有没有哪一项被夹住（只增不减）。
+	//
+	// 为什么记在这里而不是在下游重算一遍：夹住发生在 MulInt 那一步，而
+	// Breakdown 的字段存的就是**夹住之后**的值——下游拿这些字段去求和、
+	// 去比对，看到的都是被污染的数，分辨不出「单项自己夹住了」与「和
+	// 真的只有这么大」。判据必须长在产生它的那一步。
+	//
+	// 未导出：它是「这次算得出来吗」的内部事实，不是明细的一部分；
+	// 外部构造的 Breakdown 没有它，判据因此只管 ComputeWithCharges 的产物
+	// （那些正是要写进账的数）。
+	clamped bool
 }
 
 // ComputeWithCharges 按规则与用量算出金额明细，算上固定费用与最低消费。
@@ -143,11 +155,23 @@ type Breakdown struct {
 func ComputeWithCharges(usage Usage, prices Prices, charges Charges) Breakdown {
 	var b Breakdown
 
-	b.Prompt = prices.Prompt.MulInt(usage.PromptTokens)
-	b.Completion = prices.Completion.MulInt(usage.CompletionTokens)
-	b.CacheRead = prices.CacheRead.MulInt(usage.CacheReadTokens)
-	b.CacheWrite = prices.CacheWrite.MulInt(usage.CacheWriteTokens)
-	b.Reasoning = prices.Reasoning.MulInt(usage.ReasoningTokens)
+	// 每一次乘法都要看 ok：单价 × 用量放不进 int64 时 MulInt 会夹住，
+	// 而夹住的那个值是 Breakdown 字段的**全部**内容——下游再也分辨不出来。
+	// 所以「有没有夹住」在这里记下来（见 Breakdown.clamped），由两个返回
+	// error 的入口（Reserve 与 SettleWithCharges）拒绝问账。
+	multiply := func(price money.Amount, count int64) money.Amount {
+		v, ok := money.MulIntChecked(price, count)
+		if !ok {
+			b.clamped = true
+		}
+		return v
+	}
+
+	b.Prompt = multiply(prices.Prompt, usage.PromptTokens)
+	b.Completion = multiply(prices.Completion, usage.CompletionTokens)
+	b.CacheRead = multiply(prices.CacheRead, usage.CacheReadTokens)
+	b.CacheWrite = multiply(prices.CacheWrite, usage.CacheWriteTokens)
+	b.Reasoning = multiply(prices.Reasoning, usage.ReasoningTokens)
 
 	if len(usage.UnitCounts) > 0 {
 		b.Units = make(map[string]money.Amount, len(usage.UnitCounts))
@@ -160,7 +184,7 @@ func ComputeWithCharges(usage Usage, prices Prices, charges Charges) Breakdown {
 				// 这里跳过这一项（不放进明细），由 Validate 报出来。
 				continue
 			}
-			b.Units[name] = price.MulInt(count)
+			b.Units[name] = multiply(price, count)
 		}
 	}
 
@@ -188,9 +212,12 @@ func (b Breakdown) sum() money.Amount {
 
 // sumChecked 求所有行项的**精确**之和，并说明这个和放不放得进 money。
 //
-// 与 sum 的差别在判据：sum 逐个 Add，中间值一旦溢出就被夹住，而夹住之后
-// 即使真实的和放得下，结果也已经不等于它（见 money.SumChecked 的注释）。
-// 这里按 big.Int 精确累加，报出来的才是「真实的和真的放不下」。
+// 与 sum 的差别在判据：sum 逐个 Add，中间值一旦溢出就被夹住。这里按 big.Int
+// 精确累加，报出来的才是「真实的和真的放不下」。
+//
+// **它只看得见字段，看不见产生字段的那一步。** 各字段若在相乘时就被夹过，
+// 这里求的是夹过之后的值之和，会得出「放得下」这个假象——那一层由
+// Breakdown.clamped 记着，见 checkAmounts。
 //
 // 行项包含 MinimumAdjustment：它也是 Total 的一项，漏掉它会让校验与
 // Verify 的口径不一致。
@@ -213,22 +240,30 @@ func (b Breakdown) sumChecked() (money.Amount, bool) {
 // 仍然是平的，事后看不出来。所以判据放在两个返回 error 的入口上
 // （SettleWithCharges 与 Reserve），不改 Subtotal / sum 的签名。
 //
-// 两个条件都要：
+// 两条判据对应两处会夹住的地方，缺一不可：
 //
-//   - 精确和放不进 int64：这是真的溢出，必须拒绝；
-//   - 精确和与 Total 不等：求和途中有一步被夹住了。真实和放得下时这一条
-//     通常不成立，但把判据落在「结果等于精确和」上，比逐个推断每一步
-//     安全——负金额与正金额交替时，中间值的夹住会被后面的抵消掩盖。
+//   - clamped：某一项在**相乘**那一步就夹住了（单价 × 用量放不进 int64）。
+//     这一条只能由 ComputeWithCharges 记下来——字段已经是夹住之后的值，
+//     在这里重新看字段是看不出来的（只能得到「和就是 MaxInt64」这个假象）。
+//   - 精确和放不进 int64：**求和**超出了表示范围。真实的和比任何一项都大，
+//     所以它可能与乘积各自都放得下而合起来放不下。
+//
+// 求和这一条不必再和 Total 比对：进入这里的明细，各项都非负（用量由
+// Validate 逐项判负，单价由 expr 求值时拒掉负数，Fixed / Minimum 由
+// Charges.Validate 保证），而各项非负时逐个 Add 与精确累加只在**真实和
+// 放不下**时分岔，且那时两边都是同一个边界值——判据因此只需问精确和。
+// 混入负数时才需要「结果等不等于精确和」那一层，而那样的 Breakdown 不是
+// 本函数产出的（外部构造的 Breakdown 走 Verify，见那里的注释）。
 func (b Breakdown) checkAmounts() error {
-	total, ok := b.sumChecked()
-	if !ok {
+	if b.clamped {
+		return fmt.Errorf(
+			"计费金额的某一项在相乘时放不进 int64 的最小单位表示（库里的 numeric(20, 8) 存得下，money 表示不了），明细里的金额不是真实值: %w",
+			money.ErrOverflow)
+	}
+	if _, ok := b.sumChecked(); !ok {
 		return fmt.Errorf(
 			"计费金额之和放不进 int64 的最小单位表示（库里的 numeric(20, 8) 存得下，money 表示不了）: %w",
 			money.ErrOverflow)
-	}
-	if total.Cmp(b.Total) != 0 {
-		return fmt.Errorf("明细总额 %s 与逐项精确和 %s 不符：求和途中有一步被夹住了: %w",
-			b.Total, total, money.ErrOverflow)
 	}
 	return nil
 }
