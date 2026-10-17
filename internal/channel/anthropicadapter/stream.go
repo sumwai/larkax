@@ -7,7 +7,10 @@ import (
 	"io"
 	"strings"
 
+	"github.com/QuantumNous/new-api/relaykit/dto"
+
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/relay"
 )
 
 // Anthropic 的流式是一串**命名事件**，而不是「每片一个 choices」：
@@ -53,20 +56,26 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 			return
 		}
 		usageSent = true
-		u := channel.Usage{
-			PromptTokens:     inputTokens,
-			CompletionTokens: outputTokens,
-			CacheReadTokens:  cacheRead,
-			CacheWriteTokens: cacheWrite,
-			// Anthropic 的 output_tokens 含扩展思考的 token，而协议不单独报
-			// 推理量——这里也不填 ReasoningTokens。声明成「已含」是把这件事
-			// 如实写下来：万一以后有人把思考量填进 ReasoningTokens，
-			// 计费层不会把它在输出价上再收一遍。
-			CompletionIncludesReasoning: true,
-			Raw:                         map[string]any{"source": "claude_messages"},
-		}
-		// Anthropic 的 input_tokens 不含缓存，归一化后补上才是 OpenAI 口径。
-		u.PromptTokens += cacheRead + cacheWrite
+		// 与 fromClaudeResponse 走**同一个**换算入口：口径由 UsageSemantic
+		// 声明，「把缓存补回输入」只在 relay.UsageFromRelaykit 里发生一次。
+		//
+		// 这里曾经自己拼 channel.Usage 并自己加一遍缓存，那是同一件换算的
+		// 第三份实现——两份实现各加一次时，整段 prompt 命中缓存
+		// （input_tokens == 0）的请求会把缓存算两遍。
+		//
+		// CompletionIncludesReasoning 由 UsageFromRelaykit 声明为 true：
+		// Anthropic 的 output_tokens 含扩展思考的 token，而协议不单独报
+		// 推理量，所以这里也不填 ReasoningTokens。
+		u := relay.UsageFromRelaykit(&dto.Usage{
+			PromptTokens:     int(inputTokens),
+			CompletionTokens: int(outputTokens),
+			PromptTokensDetails: dto.InputTokenDetails{
+				CachedTokens:         int(cacheRead),
+				CachedCreationTokens: int(cacheWrite),
+			},
+			UsageSource:   dto.BillingUsageSourceClaudeMessages,
+			UsageSemantic: dto.BillingUsageSemanticAnthropic,
+		})
 		events <- channel.StreamEvent{Kind: "usage", Usage: &u}
 	}
 

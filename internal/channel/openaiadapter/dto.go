@@ -150,9 +150,11 @@ func (m openAIMessage) toRelaykit() dto.Message {
 }
 
 func (u openAIUsage) toRelaykit() *dto.Usage {
+	// 用 relaykit 自己的常量而不是字面量：这两个值是**它**的口径标识，
+	// 写死了将来它改值我们不知道。同一条约定见 internal/relay/response.go。
 	out := &dto.Usage{
-		UsageSource:   "oai_chat",
-		UsageSemantic: "openai",
+		UsageSource:   dto.BillingUsageSourceOAIChat,
+		UsageSemantic: dto.BillingUsageSemanticOpenAI,
 	}
 	if u.PromptTokens != nil {
 		out.PromptTokens = *u.PromptTokens
