@@ -324,7 +324,6 @@ type Charge struct {
 	Asset     string
 
 	Settlement billing.Settlement
-	Breakdown  billing.Breakdown
 
 	// Entries 是要写入账本的分录。它是平衡的（组内求和为零），
 	// 由 ledger 包构造并校验过。
@@ -615,7 +614,6 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 		UserID:          req.UserID,
 		Asset:           req.Asset,
 		Settlement:      settlement,
-		Breakdown:       settlement.Breakdown,
 		Entries:         entries,
 		RuleID:          rule.ID,
 		PricingExprSnap: rule.Source,
