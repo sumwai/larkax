@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -116,17 +117,79 @@ func (h *Handler) billingRequest(user User, upstream *channel.Request, requestID
 // inputTokensOf 估算请求的输入 token 数。
 //
 // 预留发生在调用上游之前，那时拿不到实测值，只能用估算（见 internal/tokens）。
-// 只估消息里的文本：工具定义与图片的 token 消耗各家口径不同，硬估出来的
-// 数字比文本部分的估算更不可信（口径见 channel.Request.PromptText）。估算
-// 偏低会让预留偏小，而结算是按预留的金额封顶的（见 pipeline.Reserve），
-// 所以这个取舍的代价是**少收**，不是超收——宁可少收也不要在用户余额上
-// 多冻一笔。
+// 口径有三块，都是上游会计入输入的部分：
+//
+//  1. **消息正文**——channel.Request.PromptText，逐字分词或估算；
+//  2. **工具定义**——PromptText 只拼 Content[].Text，工具定义整个在它外面，
+//     而在带工具的大请求里它常常比正文还大（见 tokens.ToolDefinitionInputTokens）；
+//  3. **图片**——同样在外面，按每张一个保守常数计（见 tokens.ImageInputTokens）。
+//
+// # 补这两项补的是口径，不是精度
+//
+// 结算按上游报的 usage，那份 usage **含**工具与图片；预留只算正文，于是
+// 预留 < 结算，而结算是按预留封顶的（见 pipeline.Reserve 与
+// billing.Settlement.Capped）——差额由平台承担，账目仍然是平的，只在对账时
+// 表现为「用量对不上金额」，并让 larkax_billing_capped_amount_total 变成
+// 常态噪声，而它本该只在「上游不守信」时出现。
+//
+// 所以这里**不加整体余量**：余量是把上界做松，补漏才是把上界做实。口径按
+// 实际出现的工具与图片走，两者都没有时本函数与补漏前逐字相同（有用例钉住）。
+// 加余量的实现会在那条用例上变红。
+//
+// # 为什么不按入口协议分支
+//
+// req 是**协议转换之后**的统一形状：工具是 []channel.Tool、图片是
+// ContentBlock.Type == "image"，三条 chat 形状的入口在这一层是同一套字段，
+// 各入口写法上的差异在 relay.ParseRequest 就消掉了。所以这里不需要认识任何
+// 入口协议，也就没有「四套口径」这回事。
+//
+// # 还有两处同名口径没跟上
+//
+// 它们是**另外两条路**，各自属于别的改动，不在本函数范围内，但要知道它们
+// 今天仍按旧口径算：internal/route 的 NeedsOf（用的是上下文上限的判据，
+// 偏小等于判据偏宽松）与 internal/gateway 流式中断时的
+// ObserveRequest(PromptText)（拿不到实测 usage 时的兜底，偏小等于少收）。
 //
 // 流式那条路用同一个函数：它要填进 Anthropic 的 message_start，而同一个
 // 请求在预留与响应里报出两个不同的输入量，只会让对账的人去找一个不存在的
 // 差额。
 func inputTokensOf(req *channel.Request) int64 {
-	return tokens.EstimatedTokens(req.Model, req.PromptText())
+	n := tokens.EstimatedTokens(req.Model, req.PromptText())
+	for _, tool := range req.Tools {
+		n += tokens.ToolDefinitionInputTokens(req.Model, toolDefinitionJSON(tool))
+	}
+	for _, m := range req.Messages {
+		for _, c := range m.Content {
+			// 按块的 Type 判，不看它带没带载荷：一条 image 块该计多少
+			// 与载荷大小无关（见 tokens.ImageInputTokens），而带没带载荷
+			// 这件事在适配器那一侧还有别的分支要管。
+			if c.Type == "image" {
+				n += tokens.ImageInputTokens
+			}
+		}
+	}
+	return n
+}
+
+// toolDefinitionJSON 把工具定义序列化成喂给估算的 JSON。
+//
+// 只放 name / description / schema 三个字段——channel.Tool 上就这三个，
+// 而它们正是各家的工具声明里都有的内容。外面那层包装各家写法不同，
+// 由 tokens.ToolDefinitionFrameTokens 按条数补。
+//
+// 序列化失败时退到「名字与描述」：schema 是 map[string]any，从请求体解出来的
+// 输入序列化不会失败，但**失败时不能返回空**——那等于把一个工具定义从口径里
+// 悄悄抹掉，而它恰恰是这一层要补的东西。退回去的那一份仍然非零。
+func toolDefinitionJSON(tool channel.Tool) []byte {
+	body, err := json.Marshal(struct {
+		Name        string         `json:"name"`
+		Description string         `json:"description,omitempty"`
+		Parameters  map[string]any `json:"parameters,omitempty"`
+	}{Name: tool.Name, Description: tool.Description, Parameters: tool.InputSchema})
+	if err == nil {
+		return body
+	}
+	return []byte(tool.Name + " " + tool.Description)
 }
 
 // requestIDOf 取出本次请求的关联标识，没有就生成一个。

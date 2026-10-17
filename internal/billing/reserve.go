@@ -35,8 +35,9 @@ func Reserve(req ReserveRequest) (money.Amount, error) {
 
 	// 输入侧：请求前就知道有多少 token。
 	//
-	// InputTokens 估的是**整段** prompt（见 pipeline 的 inputTokensOf），而结算时
-	// 那一段会按 prompt / cache_read / cache_write 三种单价拆开算。所以这一侧要按
+	// InputTokens 估的是**整段**输入——正文、工具定义与图片都算在内（见
+	// internal/api 的 inputTokensOf），而结算时那一段会按 prompt / cache_read /
+	// cache_write 三种单价拆开算。所以这一侧要按
 	// **三者里最贵的**那个单价估，上界才与「结算怎么拆」无关。
 	//
 	// 原来这里固定用 p.Prompt，那等于假设「缓存读、缓存写的单价都不高于输入单价」。
@@ -156,7 +157,8 @@ func Reserve(req ReserveRequest) (money.Amount, error) {
 type ReserveRequest struct {
 	Prices Prices
 
-	// InputTokens 是请求的输入 token 数。请求前由分词器算出。
+	// InputTokens 是请求的输入 token 数。请求前由分词层算出，含正文、工具定义
+	// 与图片——上游报的输入量里那三项都在（见 internal/api 的 inputTokensOf）。
 	InputTokens int64
 	// CacheReadTokens 是**在 InputTokens 之外**额外预估的缓存命中量。
 	//
