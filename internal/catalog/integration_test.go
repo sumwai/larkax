@@ -677,6 +677,57 @@ func seedModel(t *testing.T, db *sql.DB, canonical string) {
 	}
 }
 
+// ── 三态能力的断言助手 ──────────────────────────────────────────────────
+
+// declared 造一项**已声明**的能力：true 支持、false 明确不支持。
+//
+// 「没配过」是第三个状态，直接写 nil（不经过这个助手）——用例里必须能把
+// 这两者分开写出来，否则证明不了它们没被合并成一个零值。
+func declared(v bool) *bool { return &v }
+
+// sameCapabilities 按**值**比较两份三态能力。
+//
+// 不能写 `a != b`：那比的是六个指针的地址，两份内容相同的声明会因为地址
+// 不同而判不等——一条本该通过的对拍会红，而红的理由与真正要查的东西无关。
+func sameCapabilities(a, b Capabilities) bool {
+	for _, pair := range [][2]*bool{
+		{a.Reasoning, b.Reasoning}, {a.Tools, b.Tools}, {a.Vision, b.Vision},
+		{a.Audio, b.Audio}, {a.Cache, b.Cache}, {a.Batch, b.Batch},
+	} {
+		if (pair[0] == nil) != (pair[1] == nil) {
+			return false
+		}
+		if pair[0] != nil && *pair[0] != *pair[1] {
+			return false
+		}
+	}
+	return true
+}
+
+// capabilityText 把一项能力打成一句话，供断言失败时的信息用：nil 打成
+// 「未知」。要这一句是因为失败时最需要知道的正是「是没配过还是配了说不支持」
+// ——这两者在判据里处置相反。
+func capabilityText(item *bool) string {
+	switch {
+	case item == nil:
+		return "未知"
+	case *item:
+		return "支持"
+	default:
+		return "不支持"
+	}
+}
+
+// capabilitiesText 把六项一起打出来。
+func capabilitiesText(c Capabilities) string {
+	return "reasoning=" + capabilityText(c.Reasoning) +
+		" tools=" + capabilityText(c.Tools) +
+		" vision=" + capabilityText(c.Vision) +
+		" audio=" + capabilityText(c.Audio) +
+		" cache=" + capabilityText(c.Cache) +
+		" batch=" + capabilityText(c.Batch)
+}
+
 // 写进去的每一个字段都要读得回来：写入与读取对同一套列的假设是否一致，
 // 只有「写一遍再读一遍」能证明。少扫一列、多包一层 jsonb、日期差一天，
 // 都会在这里露出来。
@@ -694,8 +745,12 @@ func TestCreateModelRoundTrip(t *testing.T) {
 		ContextLimit:  200000,
 		InputLimit:    180000,
 		OutputLimit:   8192,
+		// 六项里四项显式声明（含一项 false）、两项不给：不给的那两项要走完
+		// 「不写 → NULL → 读回来是未知」这一趟，否则这条用例证明不了写入侧
+		// 没有把「没给」悄悄折成 false。
 		Capabilities: Capabilities{
-			Reasoning: true, Tools: true, Vision: false, Audio: false, Cache: true, Batch: false,
+			Reasoning: declared(true), Tools: declared(false),
+			Vision: declared(true), Cache: declared(true),
 		},
 		ModalitiesInput:  []string{"text", "image"},
 		ModalitiesOutput: []string{"text"},
@@ -731,9 +786,19 @@ func TestCreateModelRoundTrip(t *testing.T) {
 	if got.ContextLimit != 200000 || got.InputLimit != 180000 || got.OutputLimit != 8192 {
 		t.Errorf("limits = %d/%d/%d", got.ContextLimit, got.InputLimit, got.OutputLimit)
 	}
-	wantCaps := Capabilities{Reasoning: true, Tools: true, Cache: true}
-	if got.Capabilities != wantCaps {
-		t.Errorf("Capabilities = %+v，期望 %+v", got.Capabilities, wantCaps)
+	wantCaps := Capabilities{
+		Reasoning: declared(true), Tools: declared(false),
+		Vision: declared(true), Cache: declared(true),
+	}
+	if !sameCapabilities(got.Capabilities, wantCaps) {
+		t.Errorf("Capabilities = %s，期望 %s",
+			capabilitiesText(got.Capabilities), capabilitiesText(wantCaps))
+	}
+	// 没给的两项读回来应当是**未知**（nil），不是 false。这一条与上面那行
+	// 分开写：整份 struct 的比较里，某一个字段被判错也可能被别处的相等掩盖。
+	if got.Capabilities.Audio != nil || got.Capabilities.Batch != nil {
+		t.Errorf("没给的两项该是未知（NULL），得到 audio=%s batch=%s",
+			capabilityText(got.Capabilities.Audio), capabilityText(got.Capabilities.Batch))
 	}
 	if strings.Join(got.ModalitiesInput, ",") != "text,image" {
 		t.Errorf("ModalitiesInput = %v", got.ModalitiesInput)
@@ -856,7 +921,7 @@ func TestUpdateModelRoundTrip(t *testing.T) {
 
 	newDisplay := "新显示名"
 	newLimit := 2000
-	caps := Capabilities{Tools: true}
+	caps := Capabilities{Tools: declared(true)}
 	modalities := []string{"text"}
 	options := []any{map[string]any{"type": "toggle"}}
 	empty := ""
@@ -887,8 +952,9 @@ func TestUpdateModelRoundTrip(t *testing.T) {
 	if got.ContextLimit != 2000 {
 		t.Errorf("ContextLimit = %d，期望 2000", got.ContextLimit)
 	}
-	if got.Capabilities != caps {
-		t.Errorf("Capabilities = %+v，期望 %+v", got.Capabilities, caps)
+	if !sameCapabilities(got.Capabilities, caps) {
+		t.Errorf("Capabilities = %s，期望 %s",
+			capabilitiesText(got.Capabilities), capabilitiesText(caps))
 	}
 	if strings.Join(got.ModalitiesInput, ",") != "text" {
 		t.Errorf("ModalitiesInput = %v", got.ModalitiesInput)
@@ -1550,7 +1616,9 @@ func TestConstraintsRoundTrip(t *testing.T) {
 		DisplayName:   name,
 		ContextLimit:  200000,
 		OutputLimit:   8192,
-		Capabilities:  Capabilities{Tools: true, Vision: true, Reasoning: true},
+		Capabilities: Capabilities{
+			Tools: declared(true), Vision: declared(true), Reasoning: declared(false),
+		},
 	}); err != nil {
 		t.Fatalf("Create 出错: %v", err)
 	}
@@ -1559,22 +1627,40 @@ func TestConstraintsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Constraints 出错: %v", err)
 	}
-	if !got.Capabilities.Tools || !got.Capabilities.Vision || !got.Capabilities.Reasoning {
-		t.Errorf("能力 = %+v，期望三项都为真", got.Capabilities)
-	}
-	if got.Capabilities.Audio || got.Capabilities.Cache || got.Capabilities.Batch {
-		t.Errorf("没勾的三项不该为真: %+v", got.Capabilities)
+	for _, tc := range []struct {
+		name     string
+		declared *bool
+		want     string
+	}{
+		{"tools", got.Capabilities.Tools, "支持"},
+		{"vision", got.Capabilities.Vision, "支持"},
+		{"reasoning", got.Capabilities.Reasoning, "不支持"},
+		// 没勾的三项：**未知**，不是 false。这一条是这次改动之前做不到的
+		// ——那时它们在库里被 DEFAULT false 填成了「不支持」。
+		{"audio", got.Capabilities.Audio, "未知"},
+		{"cache", got.Capabilities.Cache, "未知"},
+		{"batch", got.Capabilities.Batch, "未知"},
+	} {
+		if gotState := capabilityText(tc.declared); gotState != tc.want {
+			t.Errorf("%s = %s，期望 %s", tc.name, gotState, tc.want)
+		}
 	}
 	if got.ContextLimit != 200000 || got.OutputLimit != 8192 {
 		t.Errorf("上限 = %d/%d，期望 200000/8192", got.ContextLimit, got.OutputLimit)
 	}
 }
 
-// 没填的两个上限读出来是 0 = **未知**，选路据此放行（见 internal/route 的
-// ModelProfile）。能力列相反：`NOT NULL DEFAULT false`，读出来的 false 是
-// 「不支持」——这一行的六项都是 false，而那两个上限是 0，两者在选路里的
-// 处置正好相反，这一条用例把这件事钉在库里。
-func TestConstraintsUnsetLimitsAreZero(t *testing.T) {
+// 没填的两个上限读出来是 0 = **未知**，没写过的能力列读出来是 nil = **未知**
+// ——两者在选路里的处置相同（放行），表达方式不同（0 与 nil）。这一条把两者
+// 钉在库里。
+//
+// # 这条用例在 00025 之前是反的
+//
+// 那时六个能力列是 `NOT NULL DEFAULT false`，seeded 行（只写了名字）读出来
+// 是六个 false = 「六项都不支持」。同一个 insert、同一行，迁移前后读出来
+// 是两个不同的结论——而库里那一行**一个字节都没变**。这正是这条迁移要改的
+// 东西：把「从没配过」与「配成不支持」分开。
+func TestConstraintsUnsetAreUnknown(t *testing.T) {
 	db := testDB(t)
 	name := uniqueName("model")
 	seedModel(t, db, name)
@@ -1586,8 +1672,53 @@ func TestConstraintsUnsetLimitsAreZero(t *testing.T) {
 	if got.ContextLimit != 0 || got.OutputLimit != 0 {
 		t.Errorf("没填的上限读出来 = %d/%d，期望 0/0", got.ContextLimit, got.OutputLimit)
 	}
-	if got.Capabilities.Tools || got.Capabilities.Vision || got.Capabilities.Reasoning {
-		t.Errorf("没写过能力列的行应当全是 false: %+v", got.Capabilities)
+	if !sameCapabilities(got.Capabilities, Capabilities{}) {
+		t.Errorf("没写过能力列的行应当六项都是未知，得到 %s",
+			capabilitiesText(got.Capabilities))
+	}
+}
+
+// 存量行（迁移之前写进去的 false）迁移之后仍是「明确不支持」。
+//
+// 这条迁移只有 DDL，一条 UPDATE 都没有——**不对存量做猜测**。把存量的
+// false 猜成 NULL 会让所有已经声明过「不支持」的模型重新参与判据，而那是一次
+// 静默的放行，方向正是「把请求发给一个声明做不了这件事的模型」。
+//
+// 造存量行的方式是裸 SQL 写死 false（那正是迁移之前每一行的样子），不走
+// Admin.Create——它今天总把六项一起写下去，写出来的是新写法。
+func TestExistingFalseCapabilityStaysDeclared(t *testing.T) {
+	db := testDB(t)
+	name := uniqueName("model")
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO model_catalog (canonical_name, display_name, supports_tools)
+		VALUES ($1, $1, false)`, name); err != nil {
+		t.Fatalf("插入存量行失败: %v", err)
+	}
+
+	got, err := New(db).Constraints(context.Background(), name)
+	if err != nil {
+		t.Fatalf("Constraints 出错: %v", err)
+	}
+	// 写了 false 的那一列还是 false；同一行里没写的列是 NULL。两者在同一行
+	// 上并排，正是这条迁移要维持的区分。
+	if got.Capabilities.Tools == nil || *got.Capabilities.Tools {
+		t.Errorf("存量写的 false 应当读成「不支持」，得到 %s",
+			capabilityText(got.Capabilities.Tools))
+	}
+	if got.Capabilities.Batch != nil {
+		t.Errorf("存量行里没写的列该是未知（NULL），得到 %s",
+			capabilityText(got.Capabilities.Batch))
+	}
+
+	// 管理面那条读面读到的必须是同一份结论：两处对同一套列的假设不一致时，
+	// 「larkaxctl model show 说支持、选路说不支持」就是这么来的。
+	model, err := New(db).Model(context.Background(), name)
+	if err != nil {
+		t.Fatalf("Model 出错: %v", err)
+	}
+	if !sameCapabilities(model.Capabilities, got.Capabilities) {
+		t.Errorf("两个读面对同一行的结论不同：Model=%s Constraints=%s",
+			capabilitiesText(model.Capabilities), capabilitiesText(got.Capabilities))
 	}
 }
 

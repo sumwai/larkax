@@ -919,9 +919,20 @@ func TestRecordCallIgnoresDeletedChannel(t *testing.T) {
 // 执行的：本包没有 t.Parallel，所以中间那一小段没有 deleted_at 的窗口碰不到
 // 别的用例。既有的行不受影响——down 只丢这一列，up 装回来时它是 NULL，与
 // 建表时的状态一致。
+//
+// # 回滚指名版本，不说「退回最近一次」
+//
+// 00024 之后还会有别的迁移，那时「退回最近一次」撤的是那一条，这一列根本
+// 不动——而用例会以为自己验过回滚了。所以退到哪一版写在常量上（见
+// softDeleteDownTo），而不是跟着「最新」走。
 func TestMigrateSoftDeleteRoundTrips(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
+
+	// softDeleteDownTo 是回滚的目标版本：00024 的**前一条**。goose 的 DownTo
+	// 一直退到「当前版本 <= 目标」为止，所以要去掉 00024 的效果，目标得写在
+	// 它下面那一版上。
+	const softDeleteDownTo = 23
 
 	goose.SetBaseFS(migrate.FS())
 	if err := migrate.SetDialect("postgres"); err != nil {
@@ -963,7 +974,7 @@ func TestMigrateSoftDeleteRoundTrips(t *testing.T) {
 		t.Fatalf("读当前迁移版本失败: %v", err)
 	}
 
-	if migErr := goose.DownContext(ctx, db, "."); migErr != nil {
+	if migErr := goose.DownToContext(ctx, db, ".", softDeleteDownTo); migErr != nil {
 		t.Fatalf("回滚 00024 失败: %v", migErr)
 	}
 	if columnExists() {
@@ -1006,10 +1017,11 @@ func TestMigrateSoftDeleteRoundTrips(t *testing.T) {
 
 // insertModelCatalog 插一条规范模型。
 //
-// 两个上限收 any：nil 表示库里是 NULL，也就是「未知」——与「写了 0」
-// 在读侧是同一个值（列允许为空，查询里套了 COALESCE）。
+// 三个能力与两个上限都收 any：nil 表示库里是 NULL，也就是「未知」。上限那
+// 两侧 NULL 折成 0（查询里套了 COALESCE），能力那三列 NULL 原样读成 nil
+// ——两种表达同一个意思：不参与判据（见 catalog.Capabilities）。
 func insertModelCatalog(t *testing.T, db *sql.DB, name string,
-	tools, vision, reasoning bool, contextLimit, outputLimit any) {
+	tools, vision, reasoning, contextLimit, outputLimit any) {
 	t.Helper()
 	_, err := db.ExecContext(context.Background(), `
 		INSERT INTO model_catalog
@@ -1059,12 +1071,27 @@ func TestCandidatesCarryCatalogProfile(t *testing.T) {
 	if p == nil {
 		t.Fatal("目录里有这条记录，Profile 不该是 nil")
 	}
-	if !p.Tools || p.Vision || !p.Reasoning {
-		t.Errorf("能力 = tools:%v vision:%v reasoning:%v，期望 true/false/true",
-			p.Tools, p.Vision, p.Reasoning)
+	if p.Tools == nil || !*p.Tools || p.Vision == nil || *p.Vision || p.Reasoning == nil || !*p.Reasoning {
+		t.Errorf("能力 = tools:%s vision:%s reasoning:%s，期望 支持/不支持/支持",
+			capabilityText(p.Tools), capabilityText(p.Vision), capabilityText(p.Reasoning))
 	}
 	if p.ContextLimit != 200000 || p.OutputLimit != 8192 {
 		t.Errorf("上限 = %d/%d，期望 200000/8192", p.ContextLimit, p.OutputLimit)
+	}
+}
+
+// capabilityText 把三态打成一句话，供断言失败时的信息用。
+//
+// 失败时最需要知道的正是「是没配过（nil）还是配了说不支持」——这两者在
+// 判据里处置相反，而 `%v` 打一个 *bool 出来给的是地址。
+func capabilityText(item *bool) string {
+	switch {
+	case item == nil:
+		return "未知"
+	case *item:
+		return "支持"
+	default:
+		return "不支持"
 	}
 }
 
@@ -1200,6 +1227,52 @@ func TestCatalogProfileFiltersCandidateInRoute(t *testing.T) {
 	}
 	if !strings.Contains(plan.Excluded[0].Reason, "模型目录") {
 		t.Errorf("排除理由要指向模型目录，实际 %q", plan.Excluded[0].Reason)
+	}
+}
+
+// 目录里那条记录**没配过**能力（六列都是 NULL）时，带工具的请求照样选得到它。
+//
+// 这是 #485 的核心：`larkaxctl model add` 不勾那六个开关时，库里落的是 NULL
+// 而不是 false。落成 false 的话，一条只填了名字的记录会让所有带工具的请求
+// 选不到它——哪怕那个上游其实支持工具。上一组用例钉的是另一半（写了 false
+// 就是不支持），两条并排才有意义。
+func TestUnknownCapabilityDoesNotFilterCandidate(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	insertChannel(t, db, sealer, channelSpec{model: model})
+
+	// 走写入路径且不给任何能力开关：与 `larkaxctl model add --canonical …
+	// --display …`（不带那六个标志）是同一条路——命令行那一层只把参数搬进
+	// 这个请求，判据不重写第二遍。
+	if _, err := catalog.NewAdmin(db).Create(context.Background(), catalog.CreateModelRequest{
+		CanonicalName: model,
+		DisplayName:   model,
+	}); err != nil {
+		t.Fatalf("建规范模型失败: %v", err)
+	}
+
+	got, err := New(db, sealer).Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("候选数 = %d，期望 1", len(got))
+	}
+	p := got[0].Profile
+	if p == nil {
+		t.Fatal("目录里有这条记录，Profile 不该是 nil")
+	}
+	if p.Tools != nil || p.Vision != nil || p.Reasoning != nil {
+		t.Errorf("没配过的三项该是未知（nil），得到 tools:%s vision:%s reasoning:%s",
+			capabilityText(p.Tools), capabilityText(p.Vision), capabilityText(p.Reasoning))
+	}
+
+	// 三项都用到的请求：一项都没配过，那就一项都不判——放行。
+	plan := (&route.Router{}).Select(got, model,
+		route.Needs{Tools: true, Vision: true, Reasoning: true})
+	if len(plan.Candidates) != 1 {
+		t.Errorf("没配过任何能力的模型应当接得住带工具的请求，排除原因 %+v", plan.Excluded)
 	}
 }
 

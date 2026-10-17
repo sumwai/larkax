@@ -22,7 +22,8 @@ const modelUsage = `larkaxctl model 管理模型目录里的规范模型。
                       [--vendor <厂商>] [--family <家族>]
                       [--context-limit <tokens>] [--input-limit <tokens>]
                       [--output-limit <tokens>]
-                      [--reasoning] [--tools] [--vision] [--audio] [--cache] [--batch]
+                      [--reasoning[=false]] [--tools[=false]] [--vision[=false]]
+                      [--audio[=false]] [--cache[=false]] [--batch[=false]]
                       [--modalities-input <模态,...>] [--modalities-output <模态,...>]
                       [--knowledge-cutoff <YYYY-MM-DD>] [--release-date <YYYY-MM-DD>]
   larkaxctl model list
@@ -43,6 +44,14 @@ const modelUsage = `larkaxctl model 管理模型目录里的规范模型。
 
 add 的 stdout 只有新模型的 ID，其余信息走 stderr。
 三个 limit 留空表示未知，负数会被拒绝。--display 必填，不会回落到规范名。
+
+**六个能力标志各有三态**：不给 = 未知（库里是 NULL）、给 = 支持、
+--tools=false = 明确声明不支持。三者在选路时处置不同：未知与支持放行，
+不支持会让用到那一项的请求选不到这个模型。所以 add 时没给的开关落库是 NULL
+而不是 false——那是「还没配过」，不是「配了说不支持」。
+
+**判断一条记录配没配过，看 list / show 的那一栏**：没配过的项在 list 里不列
+（六项都没配过时打 -），show 里逐项打出「未知 / 支持 / 不支持」。
 
 update **只改真的给了的那几项**，其余保持库里的值。空串与 0 是几种有含义的写法：
 --vendor '' 与 --context-limit 0 都是「把这一栏清空」（库里存 NULL），
@@ -125,12 +134,7 @@ func parseModelAdd(args []string) (catalog.CreateModelRequest, error) {
 	contextLimit := fs.Int("context-limit", 0, "上下文窗口上限（tokens），留空表示未知")
 	inputLimit := fs.Int("input-limit", 0, "输入上限（tokens），留空表示未知")
 	outputLimit := fs.Int("output-limit", 0, "输出上限（tokens），留空表示未知")
-	reasoning := fs.Bool("reasoning", false, "支持推理")
-	tools := fs.Bool("tools", false, "支持工具调用")
-	vision := fs.Bool("vision", false, "支持图片")
-	audio := fs.Bool("audio", false, "支持音频")
-	cache := fs.Bool("cache", false, "支持提示缓存")
-	batch := fs.Bool("batch", false, "支持批量接口")
+	capFlags := newCapabilityFlags(fs)
 	modalitiesIn := fs.String("modalities-input", "", "输入模态，逗号分隔")
 	modalitiesOut := fs.String("modalities-output", "", "输出模态，逗号分隔")
 	knowledgeCutoff := fs.String("knowledge-cutoff", "", "知识截止日期 YYYY-MM-DD")
@@ -160,22 +164,20 @@ func parseModelAdd(args []string) (catalog.CreateModelRequest, error) {
 		return catalog.CreateModelRequest{}, err
 	}
 
+	// 只把**给了的**开关写进请求。没给的那几项留在零值 nil 上，落库是 NULL
+	// = 未知——不是 false。「没配过」与「配了说不支持」的区分就从这一行开始，
+	// 判据是 fs.Visit 记下的清单（见 modelCapabilityFlag）。
+	markGivenCapabilityFlags(visitedFlags(fs), capFlags)
+
 	return catalog.CreateModelRequest{
-		CanonicalName: *canonical,
-		DisplayName:   *display,
-		Vendor:        *vendor,
-		Family:        *family,
-		ContextLimit:  *contextLimit,
-		InputLimit:    *inputLimit,
-		OutputLimit:   *outputLimit,
-		Capabilities: catalog.Capabilities{
-			Reasoning: *reasoning,
-			Tools:     *tools,
-			Vision:    *vision,
-			Audio:     *audio,
-			Cache:     *cache,
-			Batch:     *batch,
-		},
+		CanonicalName:    *canonical,
+		DisplayName:      *display,
+		Vendor:           *vendor,
+		Family:           *family,
+		ContextLimit:     *contextLimit,
+		InputLimit:       *inputLimit,
+		OutputLimit:      *outputLimit,
+		Capabilities:     applyCapabilityFlags(catalog.Capabilities{}, capFlags),
 		ModalitiesInput:  splitOptionalList(*modalitiesIn),
 		ModalitiesOutput: splitOptionalList(*modalitiesOut),
 		KnowledgeCutoff:  cutoff,
@@ -186,24 +188,70 @@ func parseModelAdd(args []string) (catalog.CreateModelRequest, error) {
 // modelCapabilityFlag 是一个能力标志：名字、这次解析出来的值，以及它落在
 // catalog.Capabilities 的哪一栏。
 //
-// given 在 Parse 之后由 fs.Visit 填。`--tools` 与 `--tools=false` 都算「给了」
-// ——前者打开、后者关掉——而「没提 --tools」是「别动它」。flag 包的零值分不出
-// 后两者，所以判据是 Visit 记下的清单，不是这个布尔的取值。
+// # 三态由 fs.Visit 与指针共同表达
+//
+//	没提 --tools        given=false，请求里那一栏是 nil（落库 NULL，未知）
+//	--tools             given=true，值是指向 true 的指针（落库 true，支持）
+//	--tools=false       given=true，值是指向 false 的指针（落库 false，不支持）
+//
+// flag 包的零值分不出后两者，所以判据是 Visit 记下的清单，不是那个布尔的
+// 取值。缺了 given 这一半，「--tools=false」与「没提 --tools」就落到同一个
+// 结论上——表现是「关不掉一个能力」。
 type modelCapabilityFlag struct {
 	name  string
 	value *bool
-	dst   func(*catalog.Capabilities) *bool
+	set   func(*catalog.Capabilities, *bool)
 	given bool
 }
 
-// newCapabilityFlag 注册一个能力标志。
+// capabilityFlagUsage 是一句统一的帮助文本。六个标志的语义一模一样，
+// 差别只在能力名，所以文本拼出来而不是抄六遍。
+func capabilityFlagUsage(capability string) string {
+	return capability + "：给 = 声明支持，=false = 明确不支持，不给 = 未知"
+}
+
+// newCapabilityFlags 注册六个能力标志。
 //
 // 名字只写一次：它同时是 flag 包里的标志名与下面用来查「给没给」的键。
 // 两处各写一个字符串时，写歪的那一处不会报错——那个标志会静默地永远算
 // 「没给」，而它的表现是「关不掉一个能力」。
+func newCapabilityFlags(fs *flag.FlagSet) []modelCapabilityFlag {
+	return []modelCapabilityFlag{
+		newCapabilityFlag(fs, "reasoning", capabilityFlagUsage("推理"),
+			func(c *catalog.Capabilities, v *bool) { c.Reasoning = v }),
+		newCapabilityFlag(fs, "tools", capabilityFlagUsage("工具调用"),
+			func(c *catalog.Capabilities, v *bool) { c.Tools = v }),
+		newCapabilityFlag(fs, "vision", capabilityFlagUsage("图片"),
+			func(c *catalog.Capabilities, v *bool) { c.Vision = v }),
+		newCapabilityFlag(fs, "audio", capabilityFlagUsage("音频"),
+			func(c *catalog.Capabilities, v *bool) { c.Audio = v }),
+		newCapabilityFlag(fs, "cache", capabilityFlagUsage("提示缓存"),
+			func(c *catalog.Capabilities, v *bool) { c.Cache = v }),
+		newCapabilityFlag(fs, "batch", capabilityFlagUsage("批量接口"),
+			func(c *catalog.Capabilities, v *bool) { c.Batch = v }),
+	}
+}
+
 func newCapabilityFlag(fs *flag.FlagSet, name, usage string,
-	dst func(*catalog.Capabilities) *bool) modelCapabilityFlag {
-	return modelCapabilityFlag{name: name, value: fs.Bool(name, false, usage), dst: dst}
+	set func(*catalog.Capabilities, *bool)) modelCapabilityFlag {
+	return modelCapabilityFlag{name: name, value: fs.Bool(name, false, usage), set: set}
+}
+
+// visitedFlags 列出这次真的设置过的标志名——「给了 --x=false」与「没提 --x」
+// 在这里分得开，而 flag 包的零值分不出它们。
+//
+// 必须在 Parse 之后调用：Visit 只遍历**被设置过**的标志。
+func visitedFlags(fs *flag.FlagSet) map[string]bool {
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	return given
+}
+
+// markGivenCapabilityFlags 按 visitedFlags 的结果标出哪些能力标志这次真的给了。
+func markGivenCapabilityFlags(given map[string]bool, flags []modelCapabilityFlag) {
+	for i := range flags {
+		flags[i].given = given[flags[i].name]
+	}
 }
 
 // anyCapabilityGiven 判断这六个标志里有没有给过。
@@ -218,18 +266,21 @@ func anyCapabilityGiven(flags []modelCapabilityFlag) bool {
 
 // applyCapabilityFlags 把这次给出的能力标志盖到 base 上。
 //
-// # 为什么要一个 base
+// 没给的项原样留着 base 里那一栏——add 时 base 是零值（六项都是 nil = 未知），
+// update 时 base 是库里当前那一行。
+//
+// # update 为什么要一个 base
 //
 // 写入路径对那六列是**一次全量覆盖**（见 catalog.modelUpdateSets）。所以
 // 「只给 --tools」不能拼一个只有 Tools 为真的结构体交出去——那会把另外五个
-// 能力一起抹掉，而使用者说的是「加一个能力」。调用方因此先读出当前那一行，
+// 能力一起改成未知，而使用者说的是「加一个能力」。调用方因此先读出当前那一行，
 // 把这里改完的结果整体交回去。
 func applyCapabilityFlags(base catalog.Capabilities, flags []modelCapabilityFlag) catalog.Capabilities {
 	for _, f := range flags {
 		if !f.given {
 			continue
 		}
-		*f.dst(&base) = *f.value
+		f.set(&base, f.value)
 	}
 	return base
 }
@@ -293,14 +344,7 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabil
 	modalitiesOut := fs.String("modalities-output", "", "输出模态，逗号分隔，给空串表示清空")
 	knowledgeCutoff := fs.String("knowledge-cutoff", "", "知识截止日期 YYYY-MM-DD，给空串表示清空")
 	releaseDate := fs.String("release-date", "", "发布日期 YYYY-MM-DD，给空串表示清空")
-	capFlags := []modelCapabilityFlag{
-		newCapabilityFlag(fs, "reasoning", "支持推理", func(c *catalog.Capabilities) *bool { return &c.Reasoning }),
-		newCapabilityFlag(fs, "tools", "支持工具调用", func(c *catalog.Capabilities) *bool { return &c.Tools }),
-		newCapabilityFlag(fs, "vision", "支持图片", func(c *catalog.Capabilities) *bool { return &c.Vision }),
-		newCapabilityFlag(fs, "audio", "支持音频", func(c *catalog.Capabilities) *bool { return &c.Audio }),
-		newCapabilityFlag(fs, "cache", "支持提示缓存", func(c *catalog.Capabilities) *bool { return &c.Cache }),
-		newCapabilityFlag(fs, "batch", "支持批量接口", func(c *catalog.Capabilities) *bool { return &c.Batch }),
-	}
+	capFlags := newCapabilityFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return catalog.UpdateModelRequest{}, nil, err
 	}
@@ -315,11 +359,9 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabil
 
 	// 只有**真的给了**的标志才进请求。--context-limit 0 与「没提这一项」是
 	// 两件事，而 flag 包的零值分不出它们，所以这里看 fs.Visit 记下的清单。
-	given := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
-	for i := range capFlags {
-		capFlags[i].given = given[capFlags[i].name]
-	}
+	// 能力那六个同理：--tools=false 与「没提 --tools」也必须分得开。
+	given := visitedFlags(fs)
+	markGivenCapabilityFlags(given, capFlags)
 
 	req := catalog.UpdateModelRequest{CanonicalName: *canonical}
 	changes := 0
@@ -519,7 +561,7 @@ func printModelList(w io.Writer, models []catalog.Model) {
 		_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			m.ID, m.CanonicalName, m.DisplayName, orDash(m.Vendor), orDash(m.Family),
 			limitLabel(m.ContextLimit), limitLabel(m.InputLimit), limitLabel(m.OutputLimit),
-			capabilityLabel(m.Capabilities), modalityLabel(m.ModalitiesInput, m.ModalitiesOutput))
+			capabilitySummary(m.Capabilities), modalityLabel(m.ModalitiesInput, m.ModalitiesOutput))
 	}
 	_ = tw.Flush()
 }
@@ -545,7 +587,7 @@ func printModelDetail(w io.Writer, m catalog.Model) {
 	row("上下文上限", limitLabel(m.ContextLimit))
 	row("输入上限", limitLabel(m.InputLimit))
 	row("输出上限", limitLabel(m.OutputLimit))
-	row("能力", capabilityLabel(m.Capabilities))
+	row("能力", capabilityDetail(m.Capabilities))
 	row("输入模态", joinOrDash(m.ModalitiesInput))
 	row("输出模态", joinOrDash(m.ModalitiesOutput))
 	row("知识截止", dateLabel(m.KnowledgeCutoff))
@@ -577,28 +619,71 @@ func limitLabel(limit int) string {
 	return strconv.Itoa(limit)
 }
 
-// capabilityLabel 把六个布尔打成一栏。
-func capabilityLabel(c catalog.Capabilities) string {
-	var on []string
-	for _, cap := range []struct {
-		name string
-		on   bool
-	}{
+// capabilitySummary 把六个三态能力打成一栏，用于清单。
+//
+// 只列**已声明**的项：没配过的项在这里省略，六项都没配过时打 -。清单是一张
+// 十栏的表，把六项「未知」逐条铺开会让这一栏比其余九栏加起来还宽，而它要
+// 回答的问题（这条记录配过什么）本来就只看已声明的那些。要逐项看三态用
+// show（见 capabilityDetail）。
+func capabilitySummary(c catalog.Capabilities) string {
+	var declared []string
+	for _, cap := range capabilityFields(c) {
+		if cap.declared == nil {
+			continue
+		}
+		declared = append(declared, cap.name+"="+capabilityState(cap.declared))
+	}
+	if len(declared) == 0 {
+		return "-"
+	}
+	return strings.Join(declared, " ")
+}
+
+// capabilityDetail 把六个三态能力打成一栏，用于明细。
+//
+// 六项都打，未知的也打出来：「没配过」是一个要看得见的状态——它的处置
+// （不参与选路判据）与「配了说不支持」（筛掉候选）正好相反。
+func capabilityDetail(c catalog.Capabilities) string {
+	parts := make([]string, 0, len(capabilityFields(c)))
+	for _, cap := range capabilityFields(c) {
+		parts = append(parts, cap.name+"="+capabilityState(cap.declared))
+	}
+	return strings.Join(parts, " ")
+}
+
+// capabilityField 是一项能力在输出里的样子：名字与三态值。
+type capabilityField struct {
+	name     string
+	declared *bool
+}
+
+// capabilityFields 把六个能力按固定顺序摆出来。
+//
+// 顺序写死在这里：清单与明细两处各写一遍顺序时，它们会在下一次加列时分岔。
+func capabilityFields(c catalog.Capabilities) []capabilityField {
+	return []capabilityField{
 		{"reasoning", c.Reasoning},
 		{"tools", c.Tools},
 		{"vision", c.Vision},
 		{"audio", c.Audio},
 		{"cache", c.Cache},
 		{"batch", c.Batch},
-	} {
-		if cap.on {
-			on = append(on, cap.name)
-		}
 	}
-	if len(on) == 0 {
-		return "-"
+}
+
+// capabilityState 把三态打成给人看的词。
+//
+// 打「未知」而不是 -：- 在这一栏里已经表示「这一项没出现在清单里」，
+// 两个意思用同一个记号就分不出来了。
+func capabilityState(declared *bool) string {
+	switch {
+	case declared == nil:
+		return "未知"
+	case *declared:
+		return "支持"
+	default:
+		return "不支持"
 	}
-	return strings.Join(on, ",")
 }
 
 // modalityLabel 打「输入→输出」两栏模态。
