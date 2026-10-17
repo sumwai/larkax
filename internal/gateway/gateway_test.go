@@ -1345,13 +1345,18 @@ func TestChatRecordsResponseSnapshotOnSuccess(t *testing.T) {
 		t.Fatalf("出错: %v", err)
 	}
 
-	var snaps []*Snapshot
-	waitFor(t, "响应方向的快照落库", func() bool {
-		snaps = h.snapshots.byDirection("response")
-		return len(snaps) == 1
+	// 两个方向各落一条，而它们是**各自异步写**的（见 Gateway.snapshotAsync）。
+	// 只等响应那一条、转头就数请求那一条，会在请求慢一步的那次数到 0——
+	// 所以这里等两个方向都到，再逐个断言（与 decide_test 里同一个写法）。
+	waitFor(t, "两个方向的快照都落库", func() bool {
+		return h.snapshots.count() == 2
 	})
 	if got := len(h.snapshots.byDirection("request")); got != 1 {
 		t.Errorf("请求方向的快照 = %d 条，期望 1", got)
+	}
+	snaps := h.snapshots.byDirection("response")
+	if len(snaps) != 1 {
+		t.Fatalf("响应方向的快照 = %d 条，期望 1", len(snaps))
 	}
 	snap := snaps[0]
 	if snap.UpstreamStatus == nil || *snap.UpstreamStatus != http.StatusOK {
