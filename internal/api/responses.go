@@ -226,8 +226,9 @@ func responsesOutput(id, status string, msg channel.Message) []any {
 		switch b.Type {
 		case "text":
 			text.WriteString(b.Text)
-			// 一段消息里通常只有一段正文；多段时标注取最后一段，与
-			// responsesStream 收尾时的口径一致（见 relay.attachAnnotations）。
+			// 这里取**最后**一个带标注的正文块：relay.attachAnnotations
+			// 只会把标注挂到一个块上，它是同一份数据的唯一来源。流式那条路
+			// 没有「多段」这个概念（它只有一个正文项），两者不构成同一口径。
 			if len(b.Annotations) > 0 {
 				annotations = b.Annotations
 			}
