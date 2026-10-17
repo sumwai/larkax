@@ -406,12 +406,20 @@ func (r *runtimeState) call(ctx context.Context, hook moejs.Hook, hookName strin
 
 	select {
 	case out := <-ch:
+		// 失败有**两个**来源：rt.Call 自己，以及它成功之后的 finish
+		// （出参解码）。finish 同样在跑插件代码，所以它也可能被这次调用的
+		// deadline 打断——那条中断不会经过 out.err，只看 out.err 就会漏掉
+		// 它，让一个已经被中断的 runtime 留下来继续用。两个来源用同一个判据。
+		cause := out.err
+		if cause == nil && out.finish != nil {
+			cause = out.finish.Cause
+		}
+		if isRunaway(cause) {
+			// 中断与内部错误之后这个 runtime 不再可信：中断会丢弃排队中的
+			// job（半执行的 Promise 反应、微任务）。不再复用它。
+			r.markUnusable()
+		}
 		if out.err != nil {
-			if isRunaway(out.err) {
-				// 中断与内部错误之后这个 runtime 不再可信：中断会丢弃排队中的
-				// job（半执行的 Promise 反应、微任务）。不再复用它。
-				r.markUnusable()
-			}
 			return out.val, classify(ctx, r.plugin, hookName, out.err)
 		}
 		return out.val, out.finish

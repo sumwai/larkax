@@ -69,7 +69,7 @@ func (r *Runtime) Call(ctx context.Context, hook string, in, out any) *Failure {
 	// unmarshal.go），放在 call() 返回之后做的话，那段代码既没有超时、
 	// callCtx 也已经被清空了——它既跑不完，调宿主能力时也拿不到 deadline。
 	_, failure := r.state.call(ctx, handle, hook, args, func(res moejs.Value) *Failure {
-		return r.decode(hook, res, out)
+		return r.decode(ctx, hook, res, out)
 	})
 	return failure
 }
@@ -79,7 +79,10 @@ func (r *Runtime) Call(ctx context.Context, hook string, in, out any) *Failure {
 // 它由 runtimeState.call 在**受 deadline 约束的那个 goroutine 里**调用，
 // 因为它可能执行插件代码：toJSON、getter、proxy 都会让 moejs 走
 // AppendJSON 那条路，而那条路是跑 JavaScript。
-func (r *Runtime) decode(hook string, res moejs.Value, out any) *Failure {
+//
+// ctx 是这次调用（来自调用方）的 ctx，只用来给失败分类：解码被这次调用的
+// deadline 或请求取消打断时，它与 rt.Call 被同一原因打断是同一件事。
+func (r *Runtime) decode(ctx context.Context, hook string, res moejs.Value, out any) *Failure {
 	if out == nil {
 		return nil
 	}
@@ -106,6 +109,16 @@ func (r *Runtime) decode(hook string, res moejs.Value, out any) *Failure {
 	// 出参也限字节，并且**限在解析之前**：插件可以把结果放大很多倍。
 	opts := moejs.DecodeOptions{MaxBytes: r.state.limits.MaxOutputBytes}
 	if err := r.state.rt.UnmarshalWith(res, out, opts); err != nil {
+		if isRunaway(err) {
+			// 解码同样在跑插件代码，所以它可能被这次调用的 deadline 或
+			// 请求取消打断——中断与引擎内部错误，与 rt.Call 自己遇到时
+			// 是同一件事。折成 ErrBadResult 会把「我们掐断了它」说成
+			// 「插件返回的值不符合契约」，而它一个字段都没写错。
+			//
+			// 走同一个分类器，也让「失败是不是超时」与「runtime 还能不能
+			// 用」两个判据在这条路径上重新对齐（见 runtimeState.call）。
+			return classify(ctx, r.mod.Name, hook, err)
+		}
 		kind := ErrBadResult
 		if errors.Is(err, moejs.ErrTooLarge) {
 			kind = ErrTooLarge
