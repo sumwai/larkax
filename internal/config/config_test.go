@@ -45,6 +45,8 @@ func baseEnv(extra map[string]string) map[string]string {
 	return m
 }
 
+// 两个监听地址的默认值在这里写成**字面量**。拿默认值常量去比默认值常量测的是
+// 「相对关系」：把默认值改回 ":8080"（全部网卡）用例照样通过。
 func TestLoadDefaults(t *testing.T) {
 	setEnv(t, baseEnv(nil))
 
@@ -59,11 +61,11 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Role != RoleGateway {
 		t.Errorf("Role = %q，期望 gateway", cfg.Role)
 	}
-	if cfg.HTTPAddr != ":8080" {
-		t.Errorf("HTTPAddr = %q，期望 :8080", cfg.HTTPAddr)
+	if cfg.HTTPAddr != "127.0.0.1:8080" {
+		t.Errorf("HTTPAddr = %q，期望 127.0.0.1:8080", cfg.HTTPAddr)
 	}
-	if cfg.InternalAddr != ":9090" {
-		t.Errorf("InternalAddr = %q，期望 :9090", cfg.InternalAddr)
+	if cfg.InternalAddr != "127.0.0.1:9090" {
+		t.Errorf("InternalAddr = %q，期望 127.0.0.1:9090", cfg.InternalAddr)
 	}
 	if cfg.LogLevel != "info" {
 		t.Errorf("LogLevel = %q，期望 info", cfg.LogLevel)
@@ -73,6 +75,27 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.IsProduction() {
 		t.Error("development 环境下 IsProduction() 应为 false")
+	}
+}
+
+// 显式给出的监听地址要能覆盖默认值。容器部署走的就是这条路：绑回环时端口映射
+// 进不来，那里必须能写成 ":8080"。
+func TestLoadAddrOverridesDefault(t *testing.T) {
+	setEnv(t, baseEnv(map[string]string{
+		"LARKAX_HTTP_ADDR":     ":8080",
+		"LARKAX_INTERNAL_ADDR": ":9090",
+	}))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() 出错: %v", err)
+	}
+
+	if cfg.HTTPAddr != ":8080" {
+		t.Errorf("HTTPAddr = %q，期望 :8080", cfg.HTTPAddr)
+	}
+	if cfg.InternalAddr != ":9090" {
+		t.Errorf("InternalAddr = %q，期望 :9090", cfg.InternalAddr)
 	}
 }
 

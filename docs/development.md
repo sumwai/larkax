@@ -46,28 +46,32 @@ DSN 指向的不是本机时不同步——那种 `.env` 是故意配到远端�
 验证：
 
 ```sh
-curl -i localhost:9090/healthz
-curl -i localhost:8080/v1/chat/completions
+curl -i 127.0.0.1:9090/healthz
+curl -i 127.0.0.1:8080/v1/chat/completions
 ```
 
 第一个返回 `200`，第二个返回 `405`——这条路径只接受 `POST`。推理接口本身
 已经接上了公共端口，见下文「当前能做什么」。
-另可验证数据库探针：`curl -s localhost:9090/readyz` 应含 `"postgres":"ok"`。
+另可验证数据库探针：`curl -s 127.0.0.1:9090/readyz` 应含 `"postgres":"ok"`。
 **健康检查在 `:9090`，不在 `:8080`**——公共端口的 `/` 捕获一切路径并返回 `501`。
 
-指标在同一个内部端口上，`curl -s localhost:9090/metrics` 应含
+指标在同一个内部端口上，`curl -s 127.0.0.1:9090/metrics` 应含
 `larkax_billing_capped_settlements_total 0`。指标清单与命名约定见
 [metrics.md](metrics.md)。
+
+**两个监听地址默认都只绑回环**（`127.0.0.1`），服务默认只在本机可达；要对外时
+见下文「环境变量」。
 
 **`:9090` 是个常被占的端口**：Clash / mihomo 的 external-controller 默认就是它，
 Prometheus 也是。撞上之后服务完全起不来（不是降级），所以 `make run` 在起服务前
 会先检查这两个监听地址，占用时会告诉你**是哪个**、以及**怎么换**。
 
 换的方式是把 `LARKAX_INTERNAL_ADDR`（或 `LARKAX_HTTP_ADDR`）写进 `.env`——那样
-只需改一次，不必每次都在命令行上带：
+只需改一次，不必每次都在命令行上带。主机部分照默认的 `127.0.0.1` 写，只把端口
+换成一个空闲的：
 
 ```sh
-LARKAX_INTERNAL_ADDR=":9091"
+LARKAX_INTERNAL_ADDR="127.0.0.1:8082"
 ```
 
 其余目标：
@@ -178,11 +182,14 @@ go run ./cmd/larkaxctl calendar import ./cn-2031.json
 | `LARKAX_ROLE` | `gateway` | `gateway` / `control` / `worker` |
 | `LARKAX_DB_DSN` | 无 | **必填**。PostgreSQL 连接串 |
 | `LARKAX_MASTER_KEYS` | 无 | `gateway` 与 `control` **必填**，`worker` 不需要 |
-| `LARKAX_HTTP_ADDR` | `:8080` | 业务入口监听地址 |
-| `LARKAX_INTERNAL_ADDR` | `:9090` | 内部端点监听地址 |
+| `LARKAX_HTTP_ADDR` | `127.0.0.1:8080` | 业务入口监听地址 |
+| `LARKAX_INTERNAL_ADDR` | `127.0.0.1:9090` | 内部端点监听地址 |
 | `LARKAX_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `LARKAX_ENV` | `development` | 设为 `production` 切换日志格式 |
 | `LARKAX_REDIS_DSN` | 空 | 留空表示不启用 Redis |
+
+两个监听地址默认只绑回环（`127.0.0.1`），服务因此默认只在本机可达。容器里端口
+映射不进来、或要让别的机器直接连时，显式写宽即可，例如 `LARKAX_HTTP_ADDR=":8080"`。
 
 必填项缺失时服务拒绝启动并一次列出全部问题，不会带着半截配置跑起来。
 
@@ -436,7 +443,7 @@ KEY=$(go run ./cmd/larkaxctl apikey create --user "$(go run ./cmd/larkaxctl user
 拿到的 key 打一次推理请求：
 
 ```sh
-curl -i localhost:8080/v1/chat/completions \
+curl -i 127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer $KEY" \
   -H 'Content-Type: application/json' \
   -d '{"model":"<模型名>","messages":[{"role":"user","content":"hi"}]}'
