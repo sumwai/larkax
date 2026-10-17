@@ -45,19 +45,33 @@ func withCache(rate float64, n int64) func(*Candidate) {
 	return func(c *Candidate) { c.CacheHitRate, c.SampleCount = rate, n }
 }
 
+// 下面三个助手都带 Confidence 1.0：它们造的是**一次实测**的额度状态，
+// 而实测的置信度就是 1（见 internal/quota 的 confidenceAPIQuery）。
+//
+// 这个字段不能省。零值是 0，而 0 在打分里表示「这个数不可信」，于是分数会
+// 退成中性分 0.5——助手造的「余量 3」与「余量未知」会得到同一个分，
+// 用例钉住的具体数值全部失效，且失效的方式是「值变了」而不是「报错」。
+// 要造一个不可信的状态，用 withConfidence 显式改它。
+
 // quotaLeft 造一个「有数值、单位未知」的额度状态。
 func quotaLeft(remaining float64) quota.State {
-	return quota.State{Remaining: &remaining}
+	return quota.State{Remaining: &remaining, Confidence: 1}
 }
 
 // quotaIn 造一个「有数值、单位已知」的额度状态。
 func quotaIn(remaining float64, unit string) quota.State {
-	return quota.State{Remaining: &remaining, Unit: unit}
+	return quota.State{Remaining: &remaining, Unit: unit, Confidence: 1}
 }
 
 // quotaExpiring 造一个「有数值、有到期时间」的额度状态。
 func quotaExpiring(remaining float64, at time.Time) quota.State {
-	return quota.State{Remaining: &remaining, ResetsAt: &at}
+	return quota.State{Remaining: &remaining, ResetsAt: &at, Confidence: 1}
+}
+
+// withConfidence 改掉一个额度状态的可信度。
+func withConfidence(q quota.State, c float64) quota.State {
+	q.Confidence = c
+	return q
 }
 
 // quotaObservedNoValue 造一个「观测过、却没有任何可用信息」的额度状态：
@@ -234,17 +248,40 @@ func TestQuotaPrefersScarceAndSoonExpiring(t *testing.T) {
 	}
 }
 
-// 估算的额度不如实测可信，但不该被完全排除——它仍然比「完全不知道」有用。
-func TestEstimatedQuotaIsDiscountedNotExcluded(t *testing.T) {
+// 估算的额度不如实测可信，这一条**不再由 Estimated 表达**。
+//
+// 早先这里有一个 estimateDiscount（估算值乘 0.7）。它与 Confidence 说的是
+// 同一件事：自记账的置信度上限就是 0.8、永远达不到实测的 1，「推算不如实测
+// 可信」已经被它说完了，两处一起看等于把同一件事扣两次。而且那个折扣是乘
+// 出来的，它会把「额度未知」的中性分 0.5 也压到 0.35——与「可信度低就退成
+// 中性分」正好相反。
+//
+// 所以现在 Estimated 只是一个标记（读者是插件契约），不参与本包打分：
+// 两个只有它不同的状态，分数必须逐字节相同。
+func TestEstimatedMarkerDoesNotChangeScore(t *testing.T) {
 	r := seededRouter(1)
-	measured := r.Score(candidate(1, "m", withQuota(quotaLeft(5))))
-	estimated := r.Score(candidate(2, "m", withQuota(quota.State{Remaining: ptr(5.0), Estimated: true})))
+	measured := quotaIn(5, "money")
+	flagged := measured
+	flagged.Estimated = true
 
-	if estimated >= measured {
-		t.Error("估算值应被打折")
+	a := r.Score(candidate(1, "m", withQuota(measured)))
+	b := r.Score(candidate(2, "m", withQuota(flagged)))
+	if a != b {
+		t.Errorf("Estimated 只是标记，分数应相同：未标记 %v，标成推算 %v", a, b)
 	}
-	if estimated <= 0 {
-		t.Error("估算值不该被压到零，它仍然有信息量")
+
+	// 真正决定它的是可信度：同一个数，可信度低就更靠近中性分。
+	//
+	// 余量 5 这次观测说出的分是 0.3333，**低于**中性分，所以「更靠近中性分」
+	// 在这里表现为总分变高——一个陈旧观测不再被当成「确实还剩不少」。
+	// （方向由观测落在中性分的哪一侧决定，不是「陈旧一定更低」。）
+	fresh := r.Score(candidate(3, "m", withQuota(withConfidence(measured, 0.8))))
+	stale := r.Score(candidate(4, "m", withQuota(withConfidence(measured, 0.2))))
+	if stale <= fresh {
+		t.Errorf("可信度低的那一个(%v) 应比刚探测到的(%v) 更靠近中性分", stale, fresh)
+	}
+	if stale <= 0 {
+		t.Errorf("陈旧观测不该被压到零：%v", stale)
 	}
 }
 
@@ -514,8 +551,6 @@ func TestFailedAttemptsAreRecordedForBilling(t *testing.T) {
 		t.Errorf("失败的那次尝试应被完整记录: %+v", res.Attempts[0])
 	}
 }
-
-func ptr[T any](v T) *T { return &v }
 
 // ── 流式 ────────────────────────────────────────────────────────────────
 

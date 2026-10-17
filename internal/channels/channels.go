@@ -282,6 +282,7 @@ SELECT
     h.cache_miss_tokens,
     q.remaining_estimate,
     q.unit,
+    q.confidence,
     q.probe_kind,
     q.health,
     q.resets_at,
@@ -337,8 +338,12 @@ type candidateRow struct {
 	cacheHit   int64
 	cacheMiss  int64
 
-	remaining   sql.NullString
-	unit        sql.NullString
+	remaining sql.NullString
+	unit      sql.NullString
+	// confidence 与 remaining 一起走：它说的是「这个余量有多可信」，
+	// 没有余量时它没有意义。列为 NULL 只可能来自 LEFT JOIN 没连上额度行
+	// （表上这一列是 NOT NULL DEFAULT 0）。
+	confidence  sql.NullString
 	probeKind   sql.NullString
 	quotaHealth sql.NullString
 	resetsAt    sql.NullTime
@@ -359,7 +364,8 @@ func scanCandidate(rows *sql.Rows) (candidateRow, error) {
 		&row.streak, &row.lastFailureAt,
 		&row.requests, &row.successes, &row.latencyP95,
 		&row.cost, &row.cacheHit, &row.cacheMiss,
-		&row.remaining, &row.unit, &row.probeKind, &row.quotaHealth, &row.resetsAt,
+		&row.remaining, &row.unit, &row.confidence,
+		&row.probeKind, &row.quotaHealth, &row.resetsAt,
 		&row.lastProbeAt, &row.lastErrorCode,
 	)
 	if err != nil {
@@ -515,6 +521,8 @@ func (row candidateRow) consecutiveFailures(now time.Time) int {
 // Routable（「从未观测过」与「观测过却没拿到数值」是两回事），
 // 而这两列正是本函数早先丢掉的那两列——丢掉的后果是判据在路由侧退化成
 // 「有没有数值」。
+//
+// confidence 同样要带出去（由 withValue 填），理由见那里。
 func (row candidateRow) quota() (quota.State, error) {
 	state := quota.State{
 		ChannelID:     row.id,
@@ -532,7 +540,7 @@ func (row candidateRow) quota() (quota.State, error) {
 	}
 
 	if strings.EqualFold(row.quotaHealth.String, quotaHealthDrained) {
-		return row.withValue(state, 0), nil
+		return row.withValue(state, 0)
 	}
 	if !row.remaining.Valid {
 		return state, nil
@@ -542,20 +550,40 @@ func (row candidateRow) quota() (quota.State, error) {
 		return quota.State{}, fmt.Errorf("渠道 %d 的 remaining_estimate 不是数字（%q）: %w",
 			row.id, row.remaining.String, err)
 	}
-	return row.withValue(state, remaining), nil
+	return row.withValue(state, remaining)
 }
 
-// withValue 填上「有余量」的那两列：余量本身，与它是实测还是推算。
+// withValue 填上「有余量」的那三列：余量本身、它是实测还是推算，以及这个数
+// 有多可信。
 //
 // drained 与实测值共用它，于是「推算值怎么标」只有一处答案——两条路径
-// 不该在这里分叉。它同时保证 Estimated 只在真的有余量时才有值：
-// 没有数值的状态既不是实测也不是推算。
-func (row candidateRow) withValue(state quota.State, remaining float64) quota.State {
+// 不该在这里分叉。它同时保证这三列只在真的有余量时才有值：没有数值的状态
+// 既不是实测也不是推算，可信度也无从谈起。
+//
+// # confidence 为什么必须带出去
+//
+// route 按它把额度那一项往中性分拉（见 route 的 scoreQuota）。少带它，
+// 每个候选的额度项都退成中性分——**这种失效是静默的**：候选照样排得出来，
+// 只是排法与额度完全无关，看起来和「大家额度都差不多」一模一样。
+// 本函数早先正是漏了这一列（issue #233）。
+func (row candidateRow) withValue(state quota.State, remaining float64) (quota.State, error) {
 	state.Remaining = &remaining
 	// 只有 api_query 是上游实测。自记账与「从错误里推断」都是推算，
-	// 而 route 对推算值打折（scoreQuota 的 estimateDiscount）。
+	// 插件契约按这个标记给可信度打折（见 internal/plugin 的 RouteContextFrom）。
 	state.Estimated = !isAPIQuery(row.probeKind.String)
-	return state
+
+	// confidence 为 NULL 只可能是没有额度行（LEFT JOIN 没连上）；表上这一列
+	// 是 NOT NULL DEFAULT 0。解析不了则说明这一行的类型与表定义对不上，
+	// 与 remaining_estimate 同样处置：整次调用报错，不静默当成 0。
+	if row.confidence.Valid && row.confidence.String != "" {
+		v, err := strconv.ParseFloat(row.confidence.String, 64)
+		if err != nil {
+			return quota.State{}, fmt.Errorf("渠道 %d 的 confidence 不是数字（%q）: %w",
+				row.id, row.confidence.String, err)
+		}
+		state.Confidence = v
+	}
+	return state, nil
 }
 
 // quotaHealthDrained 是「上游说这个渠道没额度了」的 quota health 取值。

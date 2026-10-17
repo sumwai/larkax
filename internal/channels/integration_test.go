@@ -184,11 +184,16 @@ func insertRollup(t *testing.T, db *sql.DB, channelID int64, bucket time.Time, r
 //
 // unit 收 any：nil 表示这一列是 NULL（「不知道按什么计」），
 // 与空字符串不是一件事。
-func insertQuota(t *testing.T, db *sql.DB, channelID int64, remaining any, unit any, probeKind, health string) {
+//
+// confidence 显式给，不吃列的默认值：默认值是 0，而 0 在打分里表示
+// 「这个数不可信」，于是漏给它的夹具造出的是**不可信**的状态——与它想
+// 表达的「一次实测」正好相反，而那种错在断言里看不出来。
+func insertQuota(t *testing.T, db *sql.DB, channelID int64, remaining any, unit any, probeKind, health string, confidence float64) {
 	t.Helper()
 	_, err := db.ExecContext(context.Background(), `
-		INSERT INTO channel_quota_state (channel_id, remaining_estimate, unit, probe_kind, health)
-		VALUES ($1, $2::numeric, $3, $4, $5)`, channelID, remaining, unit, probeKind, health)
+		INSERT INTO channel_quota_state (channel_id, remaining_estimate, unit, probe_kind, health, confidence)
+		VALUES ($1, $2::numeric, $3, $4, $5, $6::numeric)`,
+		channelID, remaining, unit, probeKind, health, confidence)
 	if err != nil {
 		t.Fatalf("插入额度失败: %v", err)
 	}
@@ -308,7 +313,7 @@ func TestCandidatesIncludesHealthAndQuota(t *testing.T) {
 	// 两个桶：成功率是两者之和，p95 取**最新**那个非空值。
 	insertRollup(t, db, id, hourBucket(1), 10, 9, 1, 300, "2.0")
 	insertRollup(t, db, id, hourBucket(0), 5, 5, 0, 200, "1.0")
-	insertQuota(t, db, id, "12.5", "money", "api_query", "healthy")
+	insertQuota(t, db, id, "12.5", "money", "api_query", "healthy", 1)
 
 	src := New(db, sealer)
 	got, err := src.Candidates(context.Background(), model)
@@ -340,6 +345,13 @@ func TestCandidatesIncludesHealthAndQuota(t *testing.T) {
 	}
 	if c.Quota.Estimated {
 		t.Error("api_query 是实测，不该标成推算值")
+	}
+	// 可信度必须一起出来：route 按它把额度那一项往中性分拉（见 route 的
+	// scoreQuota）。漏掉这一列不会报错，只会让每个候选的额度项都退成中性分
+	// ——额度这一维静默地关掉，而排序照旧排得出来。查询里少取一列、
+	// 或者少扫一个变量，都会在这里露出来。
+	if c.Quota.Confidence != 1 {
+		t.Errorf("Quota.Confidence = %v，期望 1（api_query 是实测）", c.Quota.Confidence)
 	}
 	// 单位成本 = 窗口内总额 / 请求数 = 3.0 / 15。
 	if want := 3.0 / 15.0; c.CostPerUnit != want {
@@ -470,7 +482,7 @@ func TestCandidatesNullRemainingIsUnknown(t *testing.T) {
 	model := uniqueModel()
 	id := insertChannel(t, db, sealer, channelSpec{model: model})
 
-	insertQuota(t, db, id, nil, nil, "self_accounting", "unknown")
+	insertQuota(t, db, id, nil, nil, "self_accounting", "unknown", 0.2)
 
 	src := New(db, sealer)
 	got, err := src.Candidates(context.Background(), model)
@@ -495,7 +507,7 @@ func TestCandidatesDrainedQuotaIsZero(t *testing.T) {
 	model := uniqueModel()
 	id := insertChannel(t, db, sealer, channelSpec{model: model})
 
-	insertQuota(t, db, id, nil, nil, "error_observed", "drained")
+	insertQuota(t, db, id, nil, nil, "error_observed", "drained", 0.6)
 
 	src := New(db, sealer)
 	got, err := src.Candidates(context.Background(), model)

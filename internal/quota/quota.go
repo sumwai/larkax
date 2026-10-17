@@ -69,11 +69,20 @@ type State struct {
 	Unit string
 
 	// Confidence 是 0..1 的可信度。
+	//
+	// 路由按它给额度那一项加权：分数是「这次观测说出的分」与中性分 0.5 的
+	// 凸组合，可信度越低越靠近中性分（见 internal/route 的 scoreQuota）。
+	// 所以它不是展示用的标签——改这里的衰减速度会直接改候选的排序。
 	Confidence float64
 	// Kind 是最近一次观测的方式。
 	Kind Kind
 
 	// Estimated 为 true 表示当前值来自推算而非实测。
+	//
+	// 读者是插件契约（internal/plugin 的 RouteContextFrom 按它给可信度打折）。
+	// 路由打分**不看它**：「推算不如实测可信」这件事 Confidence 已经说了
+	// （自记账的上限是 0.8，永远达不到实测的 1），两处一起看等于把同一件事
+	// 扣两次（见 internal/route 的 scoreQuota）。
 	Estimated bool
 
 	// ResetsAt 是额度重置的时刻，nil 表示不知道或不会重置。
