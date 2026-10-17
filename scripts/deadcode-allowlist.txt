@@ -28,7 +28,7 @@
 #   命令      deadcode ./cmd/larkax ./cmd/larkaxctl
 #             （扫描起点由 cmd/ 自动发现，这两个就是当前发现的全部）
 #   工具      golang.org/x/tools v0.52.0（脚本里的 PINNED_TOOLS_VERSION）
-#   条数      68，与脚本里的 MAX_ENTRIES 一致
+#   条数      60，与脚本里的 MAX_ENTRIES 一致
 #
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
@@ -75,11 +75,8 @@ internal/pricing/admin.go        | UpdateRequest.applyTo           | gap | #158 
 internal/pricing/admin.go        | UpdateRequest.changesAnything   | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/pricing/admin.go        | loadRuleForUpdate               | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/route/stream.go         | WrapStreamStarted               | gap | #245 流中断时「已经吐过字」的判定还没有接进重试路径（这一条随 #245 删掉）
-internal/snapshot/allowlist.go   | Allowlist                       | gap | #252 快照的允许表与读回入口还没有调用方
 internal/snapshot/allowlist.go   | Root.valid                      | lib | 允许表的内部判定：方向是否已知；目前只有测试在调它（New 查的是表，不是它）
-internal/snapshot/allowlist.go   | Roots                           | gap | #252 快照的允许表与读回入口还没有调用方
 internal/snapshot/allowlist.go   | isAllowKind                     | lib | 允许表的内部判定：测试用它筛出需要顶住敌对取值的条目
-internal/snapshot/redact.go      | Decode                          | gap | #252 快照的允许表与读回入口还没有调用方
 internal/tokens/count.go         | BoundsOf                        | lib | 能力查询：BoundsFor 按模型名的便捷包装；目前只有测试在调它
 internal/tokens/count.go         | RecordMeasured                  | gap | #245 上游实测 usage 那条路没有接进生产：这里只是把它包成带来源标记的计数，没有调用方
 internal/tokens/normalize.go     | CacheWriteDetail                | gap | #245 上游实测 usage 的归一那条路还没有调用方，走的是估算路径（这一条随 #245 删掉）
