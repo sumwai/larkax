@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +21,7 @@ import (
 	"github.com/sumwai/larkax/internal/api"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
+	"github.com/sumwai/larkax/internal/migrate"
 )
 
 // testDoctorKey 是打网关用的假 API Key。
@@ -56,8 +59,11 @@ func TestDoctorDatabaseCheckDoesNotCreateTheVersionTable(t *testing.T) {
 	if !strings.Contains(notes, "一条迁移都没跑过") {
 		t.Errorf("空 schema 该按「一条迁移都没跑过」报，实际 notes 是 %q", c.notes)
 	}
-	if !strings.Contains(notes, "最新的迁移版本是 21") {
-		t.Errorf("它仍然该报出二进制里的最新版本，实际 notes 是 %q", c.notes)
+	// 这个数从内嵌的迁移文件现算，不写死：写死的话每加一条迁移这条用例都会红一次，
+	// 而红的理由（版本号 +1）与它要证的事（doctor 在这个 schema 上什么都没写）
+	// 毫无关系——第一次撞上会去翻 doctor.go，翻完发现 doctor 一行没改。
+	if want := fmt.Sprintf("最新的迁移版本是 %d", latestMigrationVersion(t)); !strings.Contains(notes, want) {
+		t.Errorf("它仍然该报出二进制里的最新版本（%q），实际 notes 是 %q", want, c.notes)
 	}
 
 	var exists bool
@@ -69,6 +75,41 @@ func TestDoctorDatabaseCheckDoesNotCreateTheVersionTable(t *testing.T) {
 	if exists {
 		t.Errorf("doctor 把 %s.%s 建出来了：它承诺只读", schema, goose.TableName())
 	}
+}
+
+// latestMigrationVersion 数出内嵌迁移里最大的编号。
+//
+// 与 doctor 那边不是同一段代码：doctor 走 goose.CollectMigrations，它读文件内容、
+// 认 Up/Down 标记、按 goose 自己的命名规则筛；这里只按文件名前缀数数。所以两者
+// 可能不一致（goose 认不出的文件这里照样数得到），**别把它当成一道强判据**——
+// 这条用例真正要钉的是「版本表不在时那句 note 照样打出来」，版本号对不对是附带。
+//
+// 一条都数不出来时直接 Fatal：那说明目录名或文件命名变了，此时「数不到」与
+// 「数出来是 0」在断言里长得一样（见 LESSONS.md 第 16 条）。
+func latestMigrationVersion(t *testing.T) int {
+	t.Helper()
+	entries, err := fs.ReadDir(migrate.FS(), ".")
+	if err != nil {
+		t.Fatalf("读内嵌迁移目录失败: %v", err)
+	}
+	latest := 0
+	for _, e := range entries {
+		prefix, _, ok := strings.Cut(e.Name(), "_")
+		if !ok {
+			continue
+		}
+		n, err := strconv.Atoi(prefix)
+		if err != nil {
+			continue
+		}
+		if n > latest {
+			latest = n
+		}
+	}
+	if latest == 0 {
+		t.Fatalf("内嵌迁移目录 %v 里一条迁移都没解析出来", entries)
+	}
+	return latest
 }
 
 // openInSchema 打开一条 search_path 指向指定 schema 的连接。
