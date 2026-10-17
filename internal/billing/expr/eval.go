@@ -126,6 +126,12 @@ func (p *Program) result(rt *runtime, out any) (Result, error) {
 	// 先落到浮点，全部校验通过之后一次性转成 money.Amount。
 	// **舍入只在这一个地方发生**，之后全是整数运算——
 	// 一处舍入与另一处不一致会在对账时表现为一笔永远找不平的差额。
+	//
+	// 扫两遍，顺序由代码定死：第一遍只收单价键，第二遍才处理 units。
+	// 合成一个循环写就会让撞名判据查到一个**只填了一半**的 floats——
+	// 「查得到」还是「查不到」取决于 map 先迭代到哪个键，而 map 的迭代顺序
+	// 是随机的，于是同一条撞名规则有时报错、有时静默通过。
+	// 判据不能挂在一个随机的东西上。
 	floats := map[string]float64{}
 	units := map[string]float64{}
 
@@ -133,17 +139,25 @@ func (p *Program) result(rt *runtime, out any) (Result, error) {
 		if _, known := priceSlots[key]; !known {
 			return Result{}, fmt.Errorf("结果里有未知的键 %q；可用的键是 %s", key, slotList())
 		}
-		if key != "units" {
-			price, priceErr := asPrice(v)
-			if priceErr != nil {
-				return Result{}, fmt.Errorf("单价 %q 非法: %w", key, priceErr)
-			}
-			floats[key] = price
+		if key == "units" {
 			continue
 		}
-		m, ok := v.(map[string]any)
-		if !ok {
-			return Result{}, fmt.Errorf("units 必须是一张计量项表，当前是 %T", v)
+		price, priceErr := asPrice(v)
+		if priceErr != nil {
+			return Result{}, fmt.Errorf("单价 %q 非法: %w", key, priceErr)
+		}
+		floats[key] = price
+	}
+
+	// 第二遍：units 表。走到这里 floats 已经收全，撞名判据是确定的。
+	//
+	// units 表内部不需要同一条判据的对应物：它自己是一张 map，键名天然唯一，
+	// 「计量项名之间撞名」无从发生。哪天真把它换成键名可以重复的形态（例如
+	// 数组），这里才需要补一条。
+	if unitValue, ok := table["units"]; ok {
+		m, isTable := unitValue.(map[string]any)
+		if !isTable {
+			return Result{}, fmt.Errorf("units 必须是一张计量项表，当前是 %T", unitValue)
 		}
 		for name, raw := range m {
 			price, priceErr := asPrice(raw)
