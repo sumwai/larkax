@@ -182,10 +182,14 @@ func newPluginHarness(t *testing.T, reg *plugin.Registry, cands ...route.Candida
 		Candidates: &pluginCandidates{cands: cands},
 		// 同上：这个文件的别名覆盖来源也只求「什么都不覆盖」。
 		AliasOverrides: identityAliases{},
-		Reservations:   reservations,
-		Settlements:    settlements,
-		Executor:       exec,
-		Now:            now,
+		// 单次输出上限的全局默认值（见 gateway.Gateway.MaxOutputTokens）。
+		// 这个文件测的是插件钩子，取值给一个**远高于**夹具里 max_tokens 的数：
+		// 那条判据不该在这些用例上绊住任何东西。
+		MaxOutputTokens: 65536,
+		Reservations:    reservations,
+		Settlements:     settlements,
+		Executor:        exec,
+		Now:             now,
 	}
 
 	h := New(&fakeAuth{user: User{ID: 7}}, gw)

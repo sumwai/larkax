@@ -1578,6 +1578,7 @@ func settingsRows(overrides map[string]string) []settings.Row {
 		"capture.consent_max_window_hours": "24",
 		"quota.probe_interval_seconds":     "300",
 		"billing.default_asset":            `"CNY"`,
+		"billing.max_output_tokens":        "65536",
 		"calendar.default_region":          `"CN"`,
 		"idempotency.retention_hours":      "24",
 		"plugin.enabled":                   "false",

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -139,6 +140,38 @@ func TestBuildRefusesAssetTheLedgerCannotBook(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("错误信息 %q 里没有 %q：配错的人要能一眼看出改哪个键", err.Error(), want)
 				}
+			}
+		})
+	}
+}
+
+// 单次输出上限超出允许范围时必须在装配期被拒。
+//
+// 这一条钉的是 billing.max_output_tokens 真的被读了。它只在那条判据上生效
+// （见 gateway.checkOutputCap），而配错的表现有两种，都不是报错：0 会让这条
+// 判据整条失效（见 gateway.ErrNoOutputCap），配得太大会让「这个数还算不算
+// 一个界」变成一个没有答案的问题。两者在请求上都看不出来，所以在这里判掉。
+func TestBuildRefusesOutOfRangeMaxOutputTokens(t *testing.T) {
+	db := testDB(t)
+
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"零", `0`},
+		{"负数", `-1`},
+		{"超过上界", strconv.Itoa(maxMaxOutputTokens + 1)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := buildWithSetting(t, db, maxOutputTokensKey, tc.value)
+			if err == nil {
+				t.Fatalf("settings.%s = %s 时装配成功了——这个键没有被读",
+					maxOutputTokensKey, tc.value)
+			}
+			if !strings.Contains(err.Error(), maxOutputTokensKey) {
+				t.Errorf("错误信息 %q 里没有键名：配错的人要能一眼看出改哪个键", err.Error())
 			}
 		})
 	}
