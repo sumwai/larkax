@@ -101,7 +101,7 @@ func TestMessagesEndToEnd(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	status, body, header := postChatFull(t, public.URL+"/v1/messages", key, messagesBodyWith(model, "你是假上游"))
+	status, body, header := postChatFull(ctx, t, public.URL+"/v1/messages", key, messagesBodyWith(model, "你是假上游"))
 	if status != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
 	}
@@ -361,7 +361,7 @@ func TestMessagesCacheUsageStaysInAnthropicTerms(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	status, body := postChat(t, public.URL+"/v1/messages", key, messagesBody(model))
+	status, body := postChat(ctx, t, public.URL+"/v1/messages", key, messagesBody(model))
 	if status != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
 	}
@@ -447,7 +447,7 @@ func TestMessagesMissingMaxTokensIsRejected(t *testing.T) {
 		t.Fatalf("组装请求体失败: %v", err)
 	}
 
-	status, out := postChat(t, public.URL+"/v1/messages", key, body)
+	status, out := postChat(ctx, t, public.URL+"/v1/messages", key, body)
 	if status != http.StatusBadRequest {
 		t.Fatalf("状态码 = %d，期望 400。响应体：%s", status, out)
 	}
@@ -532,7 +532,7 @@ func TestMessagesUpstreamFailureReturnsAnthropicError(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	status, out := postChat(t, public.URL+"/v1/messages", key, messagesBody(model))
+	status, out := postChat(ctx, t, public.URL+"/v1/messages", key, messagesBody(model))
 	if status != http.StatusBadGateway {
 		t.Fatalf("状态码 = %d，期望 502（上游失败是我们与上游之间的问题）。响应体：%s", status, out)
 	}

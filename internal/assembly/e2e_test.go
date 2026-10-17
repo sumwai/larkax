@@ -136,6 +136,16 @@ func seedUser(t *testing.T, db *sql.DB, merchant bool, balance string) int64 {
 // 鉴权那一侧完全一致，自己写一遍就等于把这个口径抄成两份。
 func issueKey(t *testing.T, db *sql.DB, userID int64) string {
 	t.Helper()
+	return issueKeyWithID(t, db, userID).Plaintext
+}
+
+// issueKeyWithID 与 issueKey 相同，但把 api_keys.id 也交出来。
+//
+// 分开一个函数是因为账单上那一列要断言的是**哪一把**（id 的字面量相等），
+// 而那个 id 只有签发结果里才有——事后按明文去查表等于把「怎么定位一行」
+// 再实现一遍，而那份实现与被测的那条路无关。
+func issueKeyWithID(t *testing.T, db *sql.DB, userID int64) auth.Created {
+	t.Helper()
 
 	created, err := auth.New(db).Create(context.Background(), auth.CreateParams{
 		UserID: userID,
@@ -144,7 +154,7 @@ func issueKey(t *testing.T, db *sql.DB, userID int64) string {
 	if err != nil {
 		t.Fatalf("签发 API Key 失败: %v", err)
 	}
-	return created.Plaintext
+	return created
 }
 
 // seedChannel 插一条指向假上游的渠道，返回渠道 id。
@@ -487,9 +497,12 @@ func chatBody(model string) []byte {
 }
 
 // postChat 打一次公共入口，返回状态码与响应体。
-func postChat(t *testing.T, url, key string, body []byte) (int, []byte) {
+//
+// ctx 由调用方传进来，一路传到那条 HTTP 请求（见 postChatFull）：
+// 本函数不造 ctx，也就不会把调用方的超时挡在外面。
+func postChat(ctx context.Context, t *testing.T, url, key string, body []byte) (int, []byte) {
 	t.Helper()
-	status, out, _ := postChatFull(t, url, key, body)
+	status, out, _ := postChatFull(ctx, t, url, key, body)
 	return status, out
 }
 
@@ -497,10 +510,15 @@ func postChat(t *testing.T, url, key string, body []byte) (int, []byte) {
 //
 // 限流那一条要用 Retry-After，而它只出现在响应头里——只看状态码的话，
 // 「回 429 但没告诉客户端该等多久」与「回 429 并给了间隔」在断言里一样。
-func postChatFull(t *testing.T, url, key string, body []byte) (int, []byte, http.Header) {
+//
+// ctx 由调用方传进来，不在这里造一个 context.Background()：这一发属于哪次
+// 用例、受不受那次用例的超时约束，是调用方才知道的事（contextcheck 报的
+// 就是这一条，本仓的 clientCanceledAt 是同一个形状）。自己造一个的话，
+// 用例超时了这次请求还挂在连接上。
+func postChatFull(ctx context.Context, t *testing.T, url, key string, body []byte) (int, []byte, http.Header) {
 	t.Helper()
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("构造请求失败: %v", err)
 	}
@@ -579,7 +597,7 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	status, body := postChat(t, public.URL+"/v1/chat/completions", key, chatBody(model))
+	status, body := postChat(ctx, t, public.URL+"/v1/chat/completions", key, chatBody(model))
 	if status != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
 	}
@@ -747,6 +765,93 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	}
 }
 
+// 账单要记下这次请求用的是**哪一把** API Key。
+//
+// 这一列此前有列、有外键、有注释，却没有任何写入点：SaveReservation 的
+// 列清单里没有它，而那是这张表唯一的 INSERT。于是每一行都是 NULL，
+// 「按 API Key 查用量、成本与异常」在账本上做不了，只能退到按用户——
+// 而一个用户本来就可能有多把 key，那正是要区分它们的原因。
+//
+// 这条用例走的是**生产用的那条装配路径**（HTTP → 鉴权 → 预留 → 落库），
+// 因为这一列的值来自鉴权那一步：链上任何一层没把它传下去，库里那一格就是
+// NULL，而单看哪一层都像是写了的。
+//
+// 断言是**那把 key 的 id 字面量**，不是「非 NULL」：一个把所有请求都写成
+// 同一把 key 的实现也能过「非 NULL」，而它给出的答案同样是错的。所以这里
+// 给**同一个用户**签发两把 key，各打一次请求，各自认自己那一个 id。
+func TestBillingRequestRecordsAPIKeyID(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+
+	model := unique("e2e-model-apikey")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, "100")
+	first := issueKeyWithID(t, db, user)
+	second := issueKeyWithID(t, db, user)
+	if first.ID == second.ID {
+		t.Fatalf("两把 key 拿到了同一个 id %d，用例本身不成立", first.ID)
+	}
+
+	fake := &fakeUpstream{protocol: channel.ProtocolOpenAI, db: db, userID: user, model: model}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	cases := []struct {
+		name string
+		key  auth.Created
+	}{
+		{name: "第一把 key", key: first},
+		{name: "第二把 key", key: second},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := postChat(ctx, t, public.URL+"/v1/chat/completions", tc.key.Plaintext, chatBody(model))
+			if status != http.StatusOK {
+				t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
+			}
+
+			// 按响应里的 id 定位这次请求那一行，而不是「取最新的一行」：
+			// 后者在两次请求之间没有任何东西保证顺序，而顺序一变，用例就会
+			// 拿第一把 key 的账单去对第二把的期望。
+			var echoed struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(body, &echoed); err != nil {
+				t.Fatalf("响应不是合法 JSON: %v\n%s", err, body)
+			}
+			if echoed.ID == "" {
+				t.Fatalf("响应里没有 id，无法定位这次请求的账单：%s", body)
+			}
+
+			var apiKeyID sql.NullInt64
+			err := db.QueryRowContext(ctx,
+				`SELECT api_key_id FROM billing_requests WHERE request_id = $1`,
+				echoed.ID).Scan(&apiKeyID)
+			if err != nil {
+				t.Fatalf("查账单 %s 失败: %v", echoed.ID, err)
+			}
+			if !apiKeyID.Valid {
+				t.Fatalf("账单 %s 的 api_key_id 是 NULL，期望 %d——这一列没有写入点",
+					echoed.ID, tc.key.ID)
+			}
+			if apiKeyID.Int64 != tc.key.ID {
+				t.Errorf("账单 %s 的 api_key_id = %d，期望 %d（这次请求用的那把 key）",
+					echoed.ID, apiKeyID.Int64, tc.key.ID)
+			}
+		})
+	}
+}
+
 // 客户端不给 max_tokens 时，回给它的必须是 4xx 而不是 500。
 //
 // 预留要有输出上界才做得出来，所以缺了它这次请求确实做不成——但**漏填字段
@@ -790,7 +895,7 @@ func TestMissingMaxTokensIsRejectedBeforeUpstream(t *testing.T) {
 		t.Fatalf("组装请求体失败: %v", err)
 	}
 
-	status, out := postChat(t, public.URL+"/v1/chat/completions", key, body)
+	status, out := postChat(ctx, t, public.URL+"/v1/chat/completions", key, body)
 	if status != http.StatusBadRequest {
 		t.Fatalf("状态码 = %d，期望 400。响应体：%s", status, out)
 	}
@@ -861,7 +966,7 @@ func TestReserveCoversPricierCandidateRule(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	status, body := postChat(t, public.URL+"/v1/chat/completions", key, chatBody(model))
+	status, body := postChat(ctx, t, public.URL+"/v1/chat/completions", key, chatBody(model))
 	if status != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
 	}
@@ -936,7 +1041,7 @@ func TestUpstreamFailureReleasesReservation(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	status, body := postChat(t, public.URL+"/v1/chat/completions", key, chatBody(model))
+	status, body := postChat(ctx, t, public.URL+"/v1/chat/completions", key, chatBody(model))
 	if status != http.StatusBadGateway {
 		t.Fatalf("状态码 = %d，期望 502（上游失败是我们与上游之间的问题）。响应体：%s", status, body)
 	}
@@ -1081,14 +1186,14 @@ func TestRateLimitRPMStopsAtTheLimit(t *testing.T) {
 
 	body := chatBody(model)
 	for i := 1; i <= limit; i++ {
-		status, out := postChat(t, public.URL+"/v1/chat/completions", key, body)
+		status, out := postChat(ctx, t, public.URL+"/v1/chat/completions", key, body)
 		if status != http.StatusOK {
 			t.Fatalf("第 %d 次状态码 = %d，期望 200。响应体：%s", i, status, out)
 		}
 	}
 
 	// 第 61 次：429，并且给出重试间隔。
-	status, out, header := postChatFull(t, public.URL+"/v1/chat/completions", key, body)
+	status, out, header := postChatFull(ctx, t, public.URL+"/v1/chat/completions", key, body)
 	if status != http.StatusTooManyRequests {
 		t.Fatalf("第 %d 次状态码 = %d，期望 429。响应体：%s", limit+1, status, out)
 	}

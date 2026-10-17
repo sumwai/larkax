@@ -160,7 +160,7 @@ func TestCalendarReachesPricingRules(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	status, body := postChat(t, public.URL+"/v1/chat/completions", key, chatBody(model))
+	status, body := postChat(ctx, t, public.URL+"/v1/chat/completions", key, chatBody(model))
 	if status != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
 	}
