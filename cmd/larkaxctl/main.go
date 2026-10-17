@@ -67,6 +67,9 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl model add|list                 模型目录里的规范模型
   larkaxctl alias add|list                 模型别名（上游名 ↔ 规范名）
   larkaxctl price add|list                 计价规则
+  larkaxctl plugin list                    列出插件及其状态、代次与元数据问题
+  larkaxctl plugin publish <文件>           发布一个插件（先在沙箱里编译一遍）
+  larkaxctl plugin enable|disable <key>    启用 / 停用一个插件
   larkaxctl ledger balance|verify          读账本（余额查询、完整性校验）
   larkaxctl reconcile                      跑一轮对账（开关与口径见 settings 表）
   larkaxctl rotate                         轮换渠道凭证的主密钥（默认干跑）
@@ -123,6 +126,8 @@ func run() error {
 		return runModel(os.Args[2:])
 	case "partition":
 		return runPartition(os.Args[2:])
+	case "plugin":
+		return runPlugin(os.Args[2:])
 	case "price":
 		return runPrice(os.Args[2:])
 	case "reconcile":

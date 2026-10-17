@@ -130,19 +130,16 @@ func TestEndToEndFiveHooks(t *testing.T) {
 
 	// 宿主侧：把标准能力转成 sandbox 认识的形式。
 	//
+	// 走的是**生产那一份**拼装（host.Build），不是测试自己接的线：这里再写一份
+	// 的话，两份会各自漂移，而测试那份少一个能力时用例照样全绿——它测的是
+	// 「测试自己接的线」。
+	//
 	// 能力的**放行**由插件自己声明的 capabilities 决定（meta 里写了
 	// log/calendar/kv），调用方给的 allowed 是另一层（见 sandbox 的测试）。
 	env := host.Env{Plugin: "e2e", RequestID: "req-1", UserID: 7, KV: kv}
-	hostCaps := map[string]any{}
-	for _, c := range host.Standard(env) {
-		if !c.Available() {
-			continue
-		}
-		hostCaps[c.Name] = c.HostValue()
-	}
 	p, _ := reg.Get("e2e")
 	s, err := reg.NewSession(t.Context(), SessionRequest{CanonicalModel: "acme/vision", Protocol: "openai"},
-		sandbox.Host{Capabilities: hostCaps}, sandbox.Limits{})
+		host.Build(env), sandbox.Limits{})
 	if err != nil {
 		t.Fatalf("建会话失败: %v", err)
 	}

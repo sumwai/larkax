@@ -28,7 +28,19 @@
 #   命令      deadcode ./cmd/larkax ./cmd/larkaxctl
 #             （扫描起点由 cmd/ 自动发现，这两个就是当前发现的全部）
 #   工具      golang.org/x/tools v0.52.0（脚本里的 PINNED_TOOLS_VERSION）
-#   条数      60，与脚本里的 MAX_ENTRIES 一致
+#   条数      112，与脚本里的 MAX_ENTRIES 一致
+#
+# **条数从 60 跳到 112 的原因**——这一条要与「条目数只许减不许增」的规矩一起读。
+#
+# `internal/plugin` 这一片（#261）首次被生产代码 import，于是它**第一次进入
+# deadcode 的分析范围**：在此之前整包没人 import，它根本不在被分析的那张图里。
+# 它那 52 个契约符号（hook 调用点、会话派发、补丁应用、契约类型的解码）是这一片
+# **按边界刻意不接**的东西，全部记成 `gap | #216`，由 #262 / #263 / #264 三片
+# 逐片接上、逐片从这份清单里删掉。
+#
+# 也就是说这一跳是**结构性的**：一个包刚进入视野，而不是有人拿白名单把新出现的
+# 不可达符号按住。判据是问一句「这些符号是因为有人接了什么才变多的，还是因为
+# 有人躲了什么才变多的」——这里是前者。**#262–#264 落地时条数要跟着降回来。**
 #
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
@@ -69,6 +81,58 @@ internal/money/money.go          | MulAmount                       | lib | 金�
 internal/money/money.go          | MulFloat                        | lib | 金额库的运算面：按倍率相乘，内部走 big.Rat；目前只有测试在调它（还没有倍率这个概念）
 internal/money/money.go          | MustParse                       | lib | 金额库的构造面：解析失败即 panic；只给测试写期望值用，生产一律走 Parse
 internal/observe/metrics.go      | Counter.Value                   | lib | 只给测试与断言用：cmd/larkax 的 main_test 跨包读它（所以必须导出），删了那条断言就没了
+internal/plugin/adapter.go       | ApplyRequestPatch                | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
+internal/plugin/adapter.go       | RequestContextFrom               | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
+internal/plugin/adapter.go       | ResponseContextFrom              | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
+internal/plugin/adapter.go       | RouteContextFrom                 | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
+internal/plugin/adapter.go       | UsageContextFrom                 | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
+internal/plugin/adapter.go       | UsageFacts.ChannelUsage          | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
+internal/plugin/adapter.go       | UsageFactsFrom                   | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
+internal/plugin/adapter.go       | applyBodyToChannel               | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
+internal/plugin/adapter.go       | healthName                       | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
+internal/plugin/adapter.go       | messageText                      | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
+internal/plugin/adapter.go       | messagesToJSON                   | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
+internal/plugin/contract.go      | RequestBodyPatch.UnmarshalJSON   | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/contract.go      | RequestBodyPatch.empty           | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/contract.go      | RequestPatch.UnmarshalJSON       | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/contract.go      | ResponsePatch.UnmarshalJSON      | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/contract.go      | Result.Err                       | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/contract.go      | Result.Failed                    | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/contract.go      | RouteDecision.UnmarshalJSON      | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/contract.go      | StreamDecision.UnmarshalJSON     | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/contract.go      | UsageFacts.UnmarshalJSON         | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/contract.go      | UsageFacts.checkNonNegative      | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/contract.go      | contractFieldNames               | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/contract.go      | decodePatch                      | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/contract.go      | errNegativeUsage                 | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/contract.go      | patchOf                          | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/contract.go      | pickChannel                      | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
+internal/plugin/patch.go         | ApplyHeaderPatch                 | gap | #216 补丁的应用与校验；请求路径接上 hook 之前没有生产调用方
+internal/plugin/patch.go         | ApplyRequestBodyPatch            | gap | #216 补丁的应用与校验；请求路径接上 hook 之前没有生产调用方
+internal/plugin/patch.go         | errMaxTokensRaised               | gap | #216 补丁的应用与校验；请求路径接上 hook 之前没有生产调用方
+internal/plugin/patch.go         | errNonPositiveMaxTokens          | gap | #216 补丁的应用与校验；请求路径接上 hook 之前没有生产调用方
+internal/plugin/patch.go         | originalMaxTokens                | gap | #216 补丁的应用与校验；请求路径接上 hook 之前没有生产调用方
+internal/plugin/patch.go         | validHeaderName                  | gap | #216 补丁的应用与校验；请求路径接上 hook 之前没有生产调用方
+internal/plugin/registry.go      | Plugin.supportsModel             | gap | #216 注册表的查询与开会话；请求路径接上 hook 之前没有生产调用方
+internal/plugin/registry.go      | Publish                          | gap | #216 注册表的查询与开会话；请求路径接上 hook 之前没有生产调用方
+internal/plugin/registry.go      | Registry.Candidates              | gap | #216 注册表的查询与开会话；请求路径接上 hook 之前没有生产调用方
+internal/plugin/registry.go      | Registry.Get                     | gap | #216 注册表的查询与开会话；请求路径接上 hook 之前没有生产调用方
+internal/plugin/registry.go      | Registry.NewSession              | gap | #216 注册表的查询与开会话；请求路径接上 hook 之前没有生产调用方
+internal/plugin/sandbox/plugin.go | CompileTypeScript                | gap | #216 TypeScript 转译入口；目前只有测试在调
+internal/plugin/session.go       | MergeUsage                       | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go       | Session.Close                    | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go       | Session.Failures                 | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go       | Session.Next                     | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go       | Session.OnRequest                | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go       | Session.OnResponse               | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go       | Session.OnRoute                  | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go       | Session.OnStream                 | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go       | Session.OnUsage                  | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go       | Session.blocking                 | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go       | Session.record                   | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go       | UsageBound.check                 | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go       | UsageFacts.empty                 | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
+internal/plugin/session.go       | sortedByChannelID                | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
 internal/pricing/admin.go        | Admin.Explain                   | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/pricing/admin.go        | Admin.Update                    | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/pricing/admin.go        | UpdateRequest.applyTo           | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
