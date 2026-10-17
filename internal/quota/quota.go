@@ -84,7 +84,7 @@ type State struct {
 	//
 	// 这里早先还有 WindowKind / WindowBudget / WindowUsed 三个字段描述窗口的
 	// 形状。它们全仓没有一处赋值、也没有一处读，对应的四列已由
-	// 00013_drop_quota_window_columns.sql 从 channel_quota_state 上删掉。
+	// 00014_drop_quota_window_columns.sql 从 channel_quota_state 上删掉。
 	// 真要接按周期给量的上游时，那几列该按当时的口径重新定，而不是照着
 	// 一个从没被验证过的形状填。
 	ResetsAt *time.Time
