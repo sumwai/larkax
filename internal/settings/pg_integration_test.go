@@ -73,6 +73,34 @@ func entryFor(t *testing.T, entries []Entry, key string) Entry {
 	return Entry{}
 }
 
+// TestListReadsDescriptionColumn 钉住 List 真的读了 description 那一列，
+// 且每一个键在库里都有一句非空的说明。
+//
+// 这一列是配置说明的**唯一**来源（Registry 里没有第二份，见 settings.go 的
+// Registry 注释），而「它有没有被读出来」是唯一一件不会自己暴露的事：
+// 把这一列从 List 的 SELECT 里去掉，其余用例全绿——写入路径比对的是
+// 「写前写后一致」，两边都是空串也算一致；printSettingsList 那个用例用的是
+// 手工构造的 Entry。表现则是 settings list 的说明一行不剩，
+// 而那正是这一列存在的意义。
+//
+// 「每个键都非空」同时是删掉 Registry 那份说明的前提：库里是空的话，
+// 那个键的说明就彻底没有了。
+func TestListReadsDescriptionColumn(t *testing.T) {
+	ctx := t.Context()
+	src := NewPgSource(testDB(ctx, t))
+
+	entries := mustList(ctx, t, src)
+	if len(entries) == 0 {
+		t.Fatal("settings 表是空的，这个用例的落点没了")
+	}
+	for _, e := range entries {
+		if strings.TrimSpace(e.Description) == "" {
+			t.Errorf("settings.%s 读出来的 description 是空的："+
+				"要么 List 没读那一列，要么迁移里没给这个键写说明", e.Key)
+		}
+	}
+}
+
 // TestSetWritesAndReadsBack 是写入路径的落点：写进去，再从库里读回来，
 // 断言**每一栏都是具体值**。
 //

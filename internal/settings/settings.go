@@ -36,9 +36,8 @@ const (
 // 清单里有而库里没有的键也会被报出来。两个方向都要查——
 // 只查一边的话，写错键名会安静地生效为一个不存在的配置。
 type Spec struct {
-	Key         string
-	Kind        Kind
-	Description string
+	Key  string
+	Kind Kind
 
 	// Unwired 非空表示这个键在代码里**还没有读者**：改了它不会有任何效果。
 	// 内容是一句话说明为什么还没接上。
@@ -59,46 +58,33 @@ type Spec struct {
 //
 // 新增配置项时：先加迁移里的 INSERT，再在这里加一行。两处都要改是有意的，
 // 它保证「能读到」和「知道它是什么」不会脱节。
+//
+// 这里**没有**说明字段：一个键的说明只写在迁移里（settings.description 列），
+// 由 settings list 打出来。再在这里补一份的话，两份文本改了一处另一处不动，
+// 而改错了不会有任何反馈——那种没人读的说明比没有说明更坏。改说明就改迁移。
 var Registry = []Spec{
-	{Key: "request_snapshot.retention_days", Kind: KindInt,
-		Description: "请求结构快照的留存天数。到期按分区整块删除。"},
-	{Key: "request_snapshot.enabled", Kind: KindBool,
-		Description: "是否采集请求结构快照。"},
-	{Key: "request_snapshot.max_bytes", Kind: KindInt,
-		Description: "单条结构骨架的字节上限。"},
+	{Key: "request_snapshot.retention_days", Kind: KindInt},
+	{Key: "request_snapshot.enabled", Kind: KindBool},
+	{Key: "request_snapshot.max_bytes", Kind: KindInt},
 	{Key: "capture.consent_max_window_hours", Kind: KindInt,
-		Description: "用户授权原样采集时，单次授权的最长有效时长。",
-		Unwired:     "授权采集那条路还没实现，改了不会有任何效果"},
-	{Key: "quota.probe_interval_seconds", Kind: KindInt,
-		Description: "额度探测的默认间隔。"},
-	{Key: "billing.default_asset", Kind: KindString,
-		Description: "新用户钱包的默认资产品种。"},
-	{Key: "calendar.default_region", Kind: KindString,
-		Description: "分时计价默认使用的节假日地区。"},
-	{Key: "idempotency.retention_hours", Kind: KindInt,
-		Description: "幂等记录的留存小时数。到期由 larkaxctl idempotency cleanup 删除。"},
+		Unwired: "授权采集那条路还没实现，改了不会有任何效果"},
+	{Key: "quota.probe_interval_seconds", Kind: KindInt},
+	{Key: "billing.default_asset", Kind: KindString},
+	{Key: "calendar.default_region", Kind: KindString},
+	{Key: "idempotency.retention_hours", Kind: KindInt},
 	{Key: "plugin.enabled", Kind: KindBool,
-		Description: "是否启用插件系统。关闭时插件不注册、不执行。",
-		Unwired:     "插件系统尚未接线（#216），改了不会有任何效果"},
+		Unwired: "插件系统尚未接线（#216），改了不会有任何效果"},
 	{Key: "plugin.call_timeout_ms", Kind: KindInt,
-		Description: "单次插件 hook 调用的时限（毫秒）。",
-		Unwired:     "插件系统尚未接线（#216），改了不会有任何效果"},
+		Unwired: "插件系统尚未接线（#216），改了不会有任何效果"},
 	{Key: "plugin.memory_limit_bytes", Kind: KindInt,
-		Description: "单个插件运行时的内存上限（字节）。",
-		Unwired:     "插件系统尚未接线（#216），改了不会有任何效果"},
+		Unwired: "插件系统尚未接线（#216），改了不会有任何效果"},
 	{Key: "plugin.max_payload_bytes", Kind: KindInt,
-		Description: "插件单次调用的入参与出参字节上限。",
-		Unwired:     "插件系统尚未接线（#216），改了不会有任何效果"},
-	{Key: "reconcile.auto_repair", Kind: KindBool,
-		Description: "对账发现不一致时是否自动修正。"},
-	{Key: "reconcile.repair_mode", Kind: KindString,
-		Description: "自动修正的方向：resync_snapshot 以账本为准，adjust_ledger 以快照为准。"},
-	{Key: "reconcile.difference_account", Kind: KindString,
-		Description: "adjust_ledger 口径下修正分录的对家科目。"},
-	{Key: "reconcile.shard_size", Kind: KindInt,
-		Description: "一批比对的钱包行数上限。"},
-	{Key: "reconcile.full_scan_interval_hours", Kind: KindInt,
-		Description: "两次全量对账之间的最长间隔小时数，0 表示每次都全量。"},
+		Unwired: "插件系统尚未接线（#216），改了不会有任何效果"},
+	{Key: "reconcile.auto_repair", Kind: KindBool},
+	{Key: "reconcile.repair_mode", Kind: KindString},
+	{Key: "reconcile.difference_account", Kind: KindString},
+	{Key: "reconcile.shard_size", Kind: KindInt},
+	{Key: "reconcile.full_scan_interval_hours", Kind: KindInt},
 }
 
 // Row 是从存储层读出的一行。

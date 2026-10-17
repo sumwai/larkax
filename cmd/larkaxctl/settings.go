@@ -24,7 +24,8 @@ const settingsUsage = `larkaxctl settings 查看与修改运行期配置。
 配置项存在数据库的 settings 表里，与数据同生共死：备份恢复、换机器时它
 跟着数据一起走，不会像环境变量那样漏掉一个就整体不可用。
 
-键的定义在 internal/settings 的 Registry 里（类型与一句说明）。**未声明的
+键与类型定义在 internal/settings 的 Registry 里，每个键的说明存在库中
+settings.description 那一列（由迁移写入，list 打的就是它）。**未声明的
 键写不进去**——库里出现一个代码不认识的键，表现是配置被静默忽略，而写它的
 人当场看不到任何反馈。
 
