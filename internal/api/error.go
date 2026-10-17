@@ -43,24 +43,52 @@ type claudeError struct {
 	Message string `json:"message"`
 }
 
-// writeError 按调用协议写出一个错误响应。
+// writeError 按调用协议写出一个错误响应，机器可读的错误码由状态码推出。
 //
 // message 是**给调用方看的**：不回上游的错误原文、不回内部路径与标识。
 // 上游的错误体里可能回显请求内容，而调用方不需要它也知道该改什么；
 // 需要细节时用响应头里的请求标识去查日志。
 func writeError(w http.ResponseWriter, protocol channel.Protocol, status int, message string) {
-	kind, code := errorKind(protocol, status)
+	writeErrorCode(w, protocol, status, "", message)
+}
+
+// writeErrorCode 与 writeError 相同，但错误码由调用方给定而不是从状态码推。
+//
+// 用途是同一状态码下的几种情形**处置不同**的时候——幂等键的三条 409 就是
+// 这样：一条该换个键重发，一条该稍后重试，一条该换个新键重试。
+// 只给状态码的话客户端只能靠读 message 来分辨，而 SDK 不做那件事。
+//
+// # 码放在哪里，两套协议不一样
+//
+// 这不是可以统一的地方：
+//
+//   - OpenAI 的错误体有独立的 error.code 字段，码写在那里，type 仍然是
+//     它自己那套（见 errorKind）。
+//   - Anthropic 的错误体只有 error.type 一个机器可读的位置，所以码只能
+//     写在那里。它的官方取值集合里没有这几个码，但 SDK 按字符串分支，
+//     读得出来；写进 message 才是真的读不出来。
+func writeErrorCode(w http.ResponseWriter, protocol channel.Protocol, status int, code, message string) {
+	kind, derived := errorKind(protocol, status)
 
 	var body any
 	if protocol == channel.ProtocolAnthropic {
+		typ := code
+		if typ == "" {
+			typ = kind
+		}
 		body = claudeErrorBody{
 			Type:  "error",
-			Error: claudeError{Type: kind, Message: message},
+			Error: claudeError{Type: typ, Message: message},
 		}
 	} else {
 		out := openAIError{Message: message, Type: kind}
-		if code != "" {
+		// 调用方给的码优先，其次才是从状态码推出来的那个（凭证、体积那几条
+		// 靠它区分，见 errorKind）。
+		switch {
+		case code != "":
 			out.Code = &code
+		case derived != "":
+			out.Code = &derived
 		}
 		body = openAIErrorBody{Error: out}
 	}
@@ -71,6 +99,35 @@ func writeError(w http.ResponseWriter, protocol channel.Protocol, status int, me
 	// 被发现，不是在这里兜住。
 	raw, _ := json.Marshal(body)
 	writeJSON(w, status, raw)
+}
+
+// 幂等键的三条 409。状态码相同而处置不同，所以**码**才是契约。
+//
+// 三条的措辞都要说清「接下来该做什么」：拿到 409 的调用方多半正在重试，
+// 而不知道该换键还是该等一等的重试只会再撞一次。
+const (
+	// CodeIdempotencyKeyReused：同一个键配上了一个不同的请求体。
+	// 换一个新的键重发即可。
+	CodeIdempotencyKeyReused = "idempotency_key_reused"
+	msgIdempotencyKeyReused  = "this Idempotency-Key was already used with a different request body; " +
+		"send a different request with a new Idempotency-Key"
+
+	// CodeIdempotencyInProgress：同键的第一次请求还在跑，等待超过了这次请求
+	// 自己的超时。稍后重试同一个键即可。
+	CodeIdempotencyInProgress = "idempotency_in_progress"
+	msgIdempotencyInProgress  = "another request with this Idempotency-Key is still in progress; retry later"
+
+	// CodeIdempotencyIncomplete：同键的第一次请求没走完（上游失败、客户端
+	// 中途断开、进程没了）。它不会被重放，用同一个键再发也永远不会成功——
+	// 所以要换一个新的键。
+	CodeIdempotencyIncomplete = "idempotency_incomplete"
+	msgIdempotencyIncomplete  = "the first request with this Idempotency-Key did not complete; " +
+		"retry with a new Idempotency-Key"
+)
+
+// writeIdempotencyError 写出一条幂等键的 409。
+func writeIdempotencyError(w http.ResponseWriter, protocol channel.Protocol, code, message string) {
+	writeErrorCode(w, protocol, http.StatusConflict, code, message)
 }
 
 // HeaderRetryAfter 是限流响应里回给调用方的重试间隔头。
@@ -113,10 +170,19 @@ func retryAfterSeconds(d time.Duration) int64 {
 // 只列本入口真的会返回的状态码。多列的那些没有测试覆盖，而它们一旦与
 // 真实语义不符，会静静地误导调用方——一份「看起来很全」的映射表比
 // 一份「只覆盖实际用到」的表更容易出错。
+//
+// 唯一的例外是 409（见下面那条注释）：它现在走不到，但去掉它会让一条
+// **将来**不带码的 409 落到 api_error 上，那是错的。
 func errorKind(protocol channel.Protocol, status int) (kind, code string) {
 	if protocol == channel.ProtocolAnthropic {
 		switch status {
-		case http.StatusBadRequest, http.StatusMethodNotAllowed, http.StatusUnsupportedMediaType:
+		case http.StatusBadRequest, http.StatusMethodNotAllowed,
+			http.StatusUnsupportedMediaType, http.StatusConflict:
+			// 409 这一支当前走不到：幂等那三条 409 都带码，而 Anthropic 的
+			// 错误体只有 error.type 一个机器可读的位置，writeErrorCode 会把码
+			// 写在那里（typ = code），轮不到这里。留着它是因为映射表要保证的
+			// 是「任何走到这里的 409 都映射成 invalid_request_error」——删掉
+			// 它，一条不带码的 409 就会落到 api_error 上，而 409 是 4xx。
 			return "invalid_request_error", ""
 		case http.StatusUnauthorized:
 			return "authentication_error", ""
@@ -132,7 +198,8 @@ func errorKind(protocol channel.Protocol, status int) (kind, code string) {
 	}
 
 	switch status {
-	case http.StatusBadRequest, http.StatusMethodNotAllowed, http.StatusUnsupportedMediaType:
+	case http.StatusBadRequest, http.StatusMethodNotAllowed,
+		http.StatusUnsupportedMediaType, http.StatusConflict:
 		return "invalid_request_error", ""
 	case http.StatusUnauthorized:
 		// OpenAI 把凭证问题归在 invalid_request_error 下，靠 code 区分。

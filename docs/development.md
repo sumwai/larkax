@@ -449,6 +449,7 @@ ingress 规则下。
 | `user` | 用户：`create` |
 | `apikey` | API Key：`create` |
 | `snapshot` | 请求快照的留存清理 |
+| `idempotency` | 幂等记录的留存清理：`cleanup` / `cleanup --dry-run` |
 | `calendar` | 节假日日历数据：`import` |
 | `rotate` | 主密钥轮换 |
 | `migrate` | 迁移：`up` / `down-to` / `status` / `create` |
@@ -458,6 +459,10 @@ ingress 规则下。
 或直接 `go run ./cmd/larkaxctl` 看总览。对账的开关、口径与运行记录见
 [reconciliation.md](reconciliation.md)，日历数据的文件格式见
 [calendar-data.md](calendar-data.md)。
+
+两个端点都认请求头 `Idempotency-Key`：带上它时同一个键重复发送只执行一次，
+第一次的结果被原样重放。用法、三条 `409` 的码与留存规则见
+[idempotency.md](idempotency.md)。
 
 ## 常用检查
 

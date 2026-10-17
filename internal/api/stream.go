@@ -47,14 +47,32 @@ import (
 // 常常有中文。
 const sseContentType = "text/event-stream; charset=utf-8"
 
-// writeStreamHeaders 写出流式响应的响应头。**必须在第一个事件之前调用**。
-func writeStreamHeaders(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", sseContentType)
+// sseContentTypePrefix 是不带 charset 的那一段。
+//
+// 重放那条路要按**留档的** Content-Type 判断第一次是不是流式（见 writeReplay），
+// 而留档的值可能带别的 charset 写法，所以比的是前缀而不是整个常量。
+const sseContentTypePrefix = "text/event-stream"
+
+// streamHeaders 把流式响应那几个头写进 h。
+//
+// # 为什么单独抽出来
+//
+// 它有**两个**调用方：第一次请求（writeStreamHeaders）与重放（writeReplay）。
+// 两处各写一遍的话，以后往这里加一个头就只在新请求上生效，重放悄悄少一个——
+// 而重放少了 Cache-Control 恰恰是这几个头要防的事：一个按它行事的中间缓存
+// 能把重放出去的 SSE 缓存住，而第一次请求特意防住了这一点。
+func streamHeaders(h http.Header) {
+	h.Set("Content-Type", sseContentType)
 	// SSE 是给「一边生成一边看」用的，缓存住它就等于把它变成非流式。
-	w.Header().Set("Cache-Control", "no-cache")
+	h.Set("Cache-Control", "no-cache")
 	// 反向代理（nginx 等）默认会缓冲响应体。缓冲住 SSE 的后果与缓存相同，
 	// 而它发生在链路中间——从我们的日志和指标上都看不出来。
-	w.Header().Set("X-Accel-Buffering", "no")
+	h.Set("X-Accel-Buffering", "no")
+}
+
+// writeStreamHeaders 写出流式响应的响应头。**必须在第一个事件之前调用**。
+func writeStreamHeaders(w http.ResponseWriter) {
+	streamHeaders(w.Header())
 	w.WriteHeader(http.StatusOK)
 }
 

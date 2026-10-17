@@ -27,11 +27,13 @@ What works today:
 - The public HTTP entry: path-to-protocol dispatch, request parsing, and per-protocol
   response and error shapes
 - The request path end to end, including streaming responses
+- Request-level idempotency through the `Idempotency-Key` header, see
+  [docs/idempotency.md](docs/idempotency.md)
 - The billing engine: the expression-based pricing rules, time-of-day and tiered
   pricing, reservation and settlement
 - `larkaxctl` management commands for API keys (including per-key rate limits),
-  users, runtime settings, snapshot retention, master key rotation, calendar data,
-  and channels, models, aliases and pricing rules
+  users, runtime settings, snapshot and idempotency retention, master key rotation,
+  calendar data, and channels, models, aliases and pricing rules
 - The reconcile job that checks the wallet snapshot against the ledger
 
 Not wired yet:

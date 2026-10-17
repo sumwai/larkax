@@ -70,6 +70,7 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl reconcile                      跑一轮对账（开关与口径见 settings 表）
   larkaxctl rotate                         轮换渠道凭证的主密钥（默认干跑）
   larkaxctl snapshot cleanup               按留存期删除到期的快照分区
+  larkaxctl idempotency cleanup            按留存期删除到期的幂等记录
   larkaxctl calendar import <文件>          导入某一年的日历数据（格式见下）
   larkaxctl version                        打印版本号
 
@@ -108,6 +109,8 @@ func run() error {
 		return runCalendar(os.Args[2:])
 	case "channel":
 		return runChannel(os.Args[2:])
+	case "idempotency":
+		return runIdempotency(os.Args[2:])
 	case "migrate":
 		return runMigrate(os.Args[2:])
 	case "model":

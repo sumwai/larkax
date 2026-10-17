@@ -53,6 +53,7 @@ import (
 	"sort"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/idempotency"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -126,15 +127,27 @@ func checkProtocol(p channel.Protocol) error {
 
 // SaveReservation 落一条预留记录并冻住金额。
 //
-// 它做两件事，在同一个事务里：
+// 它做三件事，在**同一个事务**里：
 //
 //  1. 往 billing_requests 插一行（status=pending）。request_id 是唯一键，
 //     所以重复预留会被数据库挡下，而不是靠调用方自觉。
 //  2. 把 user_wallets.frozen 加上预留金额。
+//  3. req.Idempotency 非 nil 时，往 idempotency_keys 插一行。
 //
 // 冻结前要检查「可用的钱够不够」——`balance - frozen >= 预留额`。
 // 表上的 CHECK 只管两个字段各自非负，管不了这个，所以判断在 SQL 的
 // WHERE 里做：**更新影响 0 行就是余额不足**，比先查后改少一次竞态。
+//
+// # 第三件事为什么必须在这个事务里
+//
+// 幂等记录与预留必须一起成或一起不成：只记了幂等而没预留，重试会被告知
+// 「已处理」而钱没扣；只预留而没记幂等，重试就重复扣费——那正是幂等键要
+// 防的那个多收。所以它**不是**一个可以挪到调用方的步骤：任何两步之间的
+// 窗口都会落在上面两种状态之一，而它没有任何东西会报出来。
+//
+// 顺序上它排在插完 billing_requests **之后**：那样才能把刚拿到的 id 写进
+// billing_request_id，让「这个幂等键对应哪一笔预留」在库里直接读得出来。
+// 这一步失败（含键已被别人占住）会让整个事务回滚，冻住的钱一并放开。
 func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pipeline.Reservation) (int64, error) {
 	if r == nil {
 		return 0, errors.New("预留为空")
@@ -205,6 +218,17 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("写预留记录失败: %w", err)
+	}
+
+	// 幂等记录（调用方带了 Idempotency-Key 时）。见上面第 3 条：
+	// 它与预留同一个事务，所以这里返回错误会让冻住的钱一并回滚。
+	//
+	// ErrClaimed 原样往上抛（用 %w 包一层会保留它，但这里不必包）：
+	// 入口要按 errors.Is 认出它，转成「等一等再重放」而不是一次失败。
+	if req.Idempotency != nil {
+		if err := idempotency.ClaimInTx(ctx, tx, req.Idempotency, id); err != nil {
+			return 0, err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
