@@ -301,12 +301,6 @@ func (f *fakeDecisionRedactor) RedactDecisionResponse(o *DecisionOutcome) (*Snap
 	return &Snapshot{Skeleton: map[string]any{"surface": "decision"}, Version: 1}, nil
 }
 
-func (f *fakeDecisionRedactor) counts() (int, int) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.traces), len(f.outcomes)
-}
-
 func (f *fakeDecisionRedactor) firstTrace(t *testing.T) *DecisionTrace {
 	t.Helper()
 	f.mu.Lock()

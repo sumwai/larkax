@@ -119,7 +119,7 @@ func TestSystemOneEndToEndLeavesDecisionSnapshots(t *testing.T) {
 	if got := reqRow.skeleton["candidates_count"]; got == nil {
 		t.Error("请求方向没有候选数——判据的主体就没了")
 	}
-	if _, ok := reqRow.skeleton["selected"]; ok {
+	if _, present := reqRow.skeleton["selected"]; present {
 		t.Error("请求方向不该有 selected：选路之前还没有选中项")
 	}
 	selected, ok := respRow.skeleton["selected"].(map[string]any)

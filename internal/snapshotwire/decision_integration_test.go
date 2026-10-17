@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -307,7 +306,7 @@ func dumpRows(ctx context.Context, t *testing.T, db *sql.DB, requestID string) s
 		t.Fatalf("倒出行内容失败: %v", err)
 	}
 	if dumped == "" {
-		t.Fatal(fmt.Sprintf("request_id = %s 一行都没有——这一条就没跑成", requestID))
+		t.Fatalf("request_id = %s 一行都没有——这一条就没跑成", requestID)
 	}
 	return dumped
 }

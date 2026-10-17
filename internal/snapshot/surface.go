@@ -79,7 +79,9 @@ func NewFor(s Surface, root Root, opts ...Option) (*Redactor, error) {
 
 // AllowlistFor 返回某个表面某个方向的允许表。
 //
-// 返回副本，理由与 Allowlist 相同。未知表面或方向返回 nil。
+// 返回副本，理由同 exportRules：脱敏器不该有可被外部篡改的状态。
+// 未知表面或方向返回 nil，**不回落到某一档默认表**——回落的表现是
+// 「一个拼错的表面名静默地用了 chat 的规则」。
 func AllowlistFor(s Surface, root Root) []FieldRule {
 	return exportRules(surfaces[s][root])
 }

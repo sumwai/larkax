@@ -213,7 +213,7 @@ func TestPrintAllowlistsSingleSurface(t *testing.T) {
 // 回落成 chat 的后果是「一条按决策表写的字段静静按对话表处理」——
 // 命令照常退出 0，打出来的东西看着也正常。
 func TestSurfaceForRejectsUnknownName(t *testing.T) {
-	if _, err := surfaceFor("decison", snapshot.SurfaceChat); err == nil {
+	if _, err := surfaceFor("decisions", snapshot.SurfaceChat); err == nil {
 		t.Fatal("拼错的表面名应当报错，而不是回落到默认值")
 	}
 	if got, err := surfaceFor("decision", snapshot.SurfaceChat); err != nil || got != snapshot.SurfaceDecision {

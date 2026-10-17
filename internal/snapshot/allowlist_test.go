@@ -684,9 +684,6 @@ func TestExportedAllowlistView(t *testing.T) {
 	}
 	// 未知方向与未知表面都给 nil，而不是回落到某一张默认表上——
 	// 回落的表现是「一个拼错的表面名静默地用了 chat 的规则」。
-	if Allowlist(Root("不在的方向")) != nil {
-		t.Error("未知方向不该有允许表")
-	}
 	if AllowlistFor(Surface("不在的表面"), RootRequest) != nil {
 		t.Error("未知表面不该有允许表")
 	}
@@ -697,30 +694,16 @@ func TestExportedAllowlistView(t *testing.T) {
 
 // TestTableCopyIsIndependent 确认返回的视图是副本。
 func TestTableCopyIsIndependent(t *testing.T) {
-	original := Allowlist(RootRequest)[0]
+	original := AllowlistFor(SurfaceChat, RootRequest)[0]
 
-	view := Allowlist(RootRequest)
+	view := AllowlistFor(SurfaceChat, RootRequest)
 	view[0].Path = "被改坏了"
 	view[0].Note = "被改坏了"
 
-	again := Allowlist(RootRequest)
+	again := AllowlistFor(SurfaceChat, RootRequest)
 	if again[0].Path != original.Path || again[0].Note != original.Note {
 		t.Fatalf("调用方改动了返回的视图，影响到了原表：%#v / %#v", view[0], again[0])
 	}
-}
-
-// ruleList 取内部的允许表，供只关心 chat 表面的用例使用。
-//
-// 遍历「每一张表」的用例走 allTables / rulesFor（见 surface_test.go）。
-func ruleList(t *testing.T, root Root) []fieldRule {
-	t.Helper()
-	rules, ok := allowlists[root]
-	if !ok || len(rules) == 0 {
-		t.Fatalf("方向 %q 没有允许表", root)
-	}
-	out := make([]fieldRule, len(rules))
-	copy(out, rules)
-	return out
 }
 
 // TestRootValuesMatchSchema 确认方向取值与库里的 CHECK 约束一致，
