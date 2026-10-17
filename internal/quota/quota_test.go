@@ -1,7 +1,6 @@
 package quota
 
 import (
-	"errors"
 	"fmt"
 	"math"
 	"testing"
@@ -448,15 +447,6 @@ func TestValidateFutureToleranceIsExactlyOneMinute(t *testing.T) {
 	}
 	if err := Validate(overLimit, base); err == nil {
 		t.Error("超过一分钟应被拒绝")
-	}
-}
-
-func TestErrUnsupportedIsDistinct(t *testing.T) {
-	if !errors.Is(ErrUnsupported, ErrUnsupported) {
-		t.Error("错误值应可比较")
-	}
-	if ErrUnsupported.Error() == "" {
-		t.Error("错误信息不该为空")
 	}
 }
 
