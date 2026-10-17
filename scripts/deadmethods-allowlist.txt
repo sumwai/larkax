@@ -93,11 +93,8 @@ internal/ledger/account.go     | Account.ID                        | gap | #282 
 internal/money/money.go        | Amount.ClampZero                  | gap | #282 金额库的运算面：负数归零；目前只有测试在调它
 internal/money/money.go        | Amount.DivInt                     | gap | #282 金额库的运算面：按整数相除；目前只有测试在调它
 internal/money/money.go        | Amount.Units                      | gap | #282 金额库的读取面：最小单位整数；目前只有测试在调它（读库走 Parse，列是 numeric）
-internal/plugin/adapter.go     | UsageFacts.ChannelUsage           | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
 internal/plugin/contract.go    | Result.Failed                     | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
 internal/plugin/sandbox/plugin.go | Module.Hooks                   | gap | #282 只有测试在调它；hook 名单在生产里还没有读者
-internal/plugin/session.go     | Session.OnStream                  | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
-internal/plugin/session.go     | Session.OnUsage                   | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
 internal/pricing/admin.go      | Admin.Explain                     | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/route/route.go        | Router.Score                      | gap | #282 候选打分只有测试在调它（选择走的是 Select）
 internal/snapshot/redact.go    | Redactor.RedactResponseWithTransport | gap | #282 只有测试在调它（生产走的是不带传输层信息的那条路）

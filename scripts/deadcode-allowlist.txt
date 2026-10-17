@@ -107,13 +107,10 @@ internal/money/money.go          | MulAmount                       | lib | 金�
 internal/money/money.go          | MulFloat                        | lib | 金额库的运算面：按倍率相乘，内部走 big.Rat；目前只有测试在调它（还没有倍率这个概念）
 internal/money/money.go          | MustParse                       | lib | 金额库的构造面：解析失败即 panic；只给测试写期望值用，生产一律走 Parse
 internal/observe/metrics.go      | Counter.Value                   | lib | 只给测试与断言用：cmd/larkax 的 main_test 跨包读它（所以必须导出），删了那条断言就没了
-internal/plugin/adapter.go       | UsageContextFrom                 | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
 internal/plugin/patch.go         | ApplyRequestBodyPatch            | gap | #216 补丁的应用与校验；请求路径接上 hook 之前没有生产调用方
 internal/plugin/patch.go         | originalMaxTokens                | gap | #216 补丁的应用与校验；请求路径接上 hook 之前没有生产调用方
 internal/plugin/registry.go      | Publish                          | gap | #216 注册表的查询与开会话；请求路径接上 hook 之前没有生产调用方
 internal/plugin/sandbox/plugin.go | CompileTypeScript                | gap | #216 TypeScript 转译入口；目前只有测试在调
-internal/plugin/session.go       | MergeUsage                       | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
-internal/plugin/session.go       | UsageBound.check                 | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
 internal/pricing/admin.go        | Admin.Explain                   | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/pricing/admin.go        | Admin.Update                    | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/pricing/admin.go        | UpdateRequest.applyTo           | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
