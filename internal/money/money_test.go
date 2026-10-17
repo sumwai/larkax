@@ -505,6 +505,68 @@ func TestAddOverflowDetectionOnlyOnSameSign(t *testing.T) {
 	}
 }
 
+// 求和溢出时 SumChecked 要说出来，而不是交回一个夹住的数。
+//
+// 夹住的那个数是**错的**：真实的和比 MaxInt64 大，而返回的边界值比它小。
+func TestSumCheckedReportsOverflow(t *testing.T) {
+	huge := Amount{units: math.MaxInt64}
+
+	got, ok := SumChecked(huge, One)
+	if ok {
+		t.Errorf("真实和放不下时应当 ok=false，得到 %s", got)
+	}
+	// 报出来时仍返回夹住的值（这样 Sum 才是它的薄封装），但它不该被当结果用。
+	if got.Units() != math.MaxInt64 {
+		t.Errorf("溢出时应返回边界值，得到 %d", got.Units())
+	}
+
+	// 放得下时就是那个和，且 ok=true。
+	if got, ok := SumChecked(MustParse("0.1"), MustParse("0.2")); !ok || got.String() != "0.30000000" {
+		t.Errorf("SumChecked(0.1, 0.2) = %s, ok=%v，期望 0.30000000, true", got, ok)
+	}
+	if got, ok := SumChecked(); !ok || !got.IsZero() {
+		t.Errorf("空输入的 SumChecked = %s, ok=%v，期望 0.00000000, true", got, ok)
+	}
+}
+
+// SumChecked 判的是**真实的和**，不是累加过程中的中间值。
+//
+// 这是它与「逐个 Add 再看有没有溢出」的分界，也是余额那条路径不能用后者的
+// 理由：[+MaxInt64, +145, -145] 的真实和是 MaxInt64（放得下），而逐步加在
+// 第二项上就已经夹住了——那一组是一笔完全正常的余额，不该被判成溢出。
+func TestSumCheckedJudgesTheRealSumNotTheIntermediate(t *testing.T) {
+	huge := Amount{units: math.MaxInt64}
+	amounts := []Amount{huge, MustParse("145"), MustParse("-145")}
+
+	got, ok := SumChecked(amounts...)
+	if !ok {
+		t.Fatal("真实和是 MaxInt64，放得下，不该报溢出")
+	}
+	if got.Units() != math.MaxInt64 {
+		t.Errorf("SumChecked = %d，期望 %d", got.Units(), int64(math.MaxInt64))
+	}
+
+	// 逐步加给出的是一个**偏小**的数（145 元那一截被夹掉了），而且不报错。
+	stepwise := huge.Add(amounts[1]).Add(amounts[2])
+	if stepwise.Cmp(got) == 0 {
+		t.Fatal("逐步加应当与精确和不相等，否则这条用例证明不了两者的区别")
+	}
+	if stepwise.Cmp(got) > 0 {
+		t.Errorf("逐步加的结果 %s 不该大于真实和 %s", stepwise, got)
+	}
+}
+
+// Sum 与 Add 一样仍然夹住：它的调用点里有「夹住比报错好」的那些。
+func TestSumStillClamps(t *testing.T) {
+	got := Sum(Amount{units: math.MaxInt64}, One)
+	if got.IsNegative() {
+		t.Errorf("溢出不该回绕成负数: %s", got)
+	}
+	if got.Units() != math.MaxInt64 {
+		t.Errorf("溢出应夹到最大值，得到 %d", got.Units())
+	}
+}
+
 // 解析时的进位边界：小数部分进位恰好填满一个整数单位。
 //
 // 变异：把 `f >= unit` 改成 `f > unit`，恰好等于 unit 时就不会

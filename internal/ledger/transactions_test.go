@@ -33,6 +33,30 @@ func amount(t *testing.T, s string) money.Amount {
 	return a
 }
 
+// balanceOf 算一个科目的余额，并断言它算得出来。
+//
+// 「算不出来」（求和超出 money 的表示范围）由 TestBalanceOfReportsOverflow
+// 单独钉住；其余用例关心的是余额本身，所以这里把它当成用例失败，而不是让
+// 每个调用点各写一遍错误分支。
+func balanceOf(t *testing.T, entries []Entry, account Account, asset Asset) money.Amount {
+	t.Helper()
+	got, err := BalanceOf(entries, account, asset)
+	if err != nil {
+		t.Fatalf("算 %s 在 %s 上的余额失败: %v", account, asset, err)
+	}
+	return got
+}
+
+// balances 汇总一组分录，并断言它算得出来。理由与 balanceOf 相同。
+func balances(t *testing.T, entries []Entry) map[Asset]map[Account]money.Amount {
+	t.Helper()
+	got, err := Balances(entries)
+	if err != nil {
+		t.Fatalf("汇总分录失败: %v", err)
+	}
+	return got
+}
+
 // 每个构造函数产出的交易都必须自洽——这是「构造的一定平」这条性质。
 func TestConstructorsProduceBalancedTransactions(t *testing.T) {
 	txn := newTxnID(t, txnA)
@@ -359,10 +383,10 @@ func TestAdjustmentBothDirections(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := BalanceOf(add.Entries, UserAccount(42), AssetCNY); got.Cmp(amount(t, "5")) != 0 {
+	if got := balanceOf(t, add.Entries, UserAccount(42), AssetCNY); got.Cmp(amount(t, "5")) != 0 {
 		t.Errorf("加钱的调账后余额 = %s，期望 5", got)
 	}
-	if got := BalanceOf(sub.Entries, UserAccount(42), AssetCNY); got.Cmp(amount(t, "-5")) != 0 {
+	if got := balanceOf(t, sub.Entries, UserAccount(42), AssetCNY); got.Cmp(amount(t, "-5")) != 0 {
 		t.Errorf("扣钱的调账后余额 = %s，期望 -5", got)
 	}
 	for _, e := range append(append([]Entry{}, add.Entries...), sub.Entries...) {
@@ -403,11 +427,11 @@ func TestAdjustmentHonoursCounterAccount(t *testing.T) {
 	}
 
 	// 补钱（金额为正）：借用户、贷对家。对家的余额因此是负的。
-	if got := BalanceOf(up.Entries, counter, AssetCNY); got.Cmp(amount(t, "-5")) != 0 {
+	if got := balanceOf(t, up.Entries, counter, AssetCNY); got.Cmp(amount(t, "-5")) != 0 {
 		t.Errorf("加钱时对家余额 = %s，期望 -5", got)
 	}
 	// 扣钱（金额为负）：贷用户、借对家。
-	if got := BalanceOf(down.Entries, counter, AssetCNY); got.Cmp(amount(t, "5")) != 0 {
+	if got := balanceOf(t, down.Entries, counter, AssetCNY); got.Cmp(amount(t, "5")) != 0 {
 		t.Errorf("扣钱时对家余额 = %s，期望 5", got)
 	}
 	// 平台收入一个字都没动——这正是单独归集的目的。
@@ -452,7 +476,7 @@ func TestAdjustmentZeroCounterFallsBackToPlatformRevenue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("没填对家不该报错: %v", err)
 	}
-	if got := BalanceOf(tx.Entries, PlatformRevenueAccount(), AssetCNY); got.Cmp(amount(t, "-5")) != 0 {
+	if got := balanceOf(t, tx.Entries, PlatformRevenueAccount(), AssetCNY); got.Cmp(amount(t, "-5")) != 0 {
 		t.Errorf("对家余额 = %s，期望落到 platform_revenue 上的 -5", got)
 	}
 }

@@ -1,6 +1,8 @@
 package ledger
 
 import (
+	"errors"
+	"math"
 	"strings"
 	"testing"
 
@@ -390,24 +392,24 @@ func TestBalanceOfIsPureSummation(t *testing.T) {
 		{"platform_revenue", "-10", EntryRefund},
 	})
 
-	if got := BalanceOf(entries, UserAccount(42), AssetCNY); got.Cmp(amount(t, "80")) != 0 {
+	if got := balanceOf(t, entries, UserAccount(42), AssetCNY); got.Cmp(amount(t, "80")) != 0 {
 		t.Errorf("用户余额 = %s，期望 80", got)
 	}
-	if got := BalanceOf(entries, PaymentGatewayAccount("stripe"), AssetCNY); got.Cmp(amount(t, "-100")) != 0 {
+	if got := balanceOf(t, entries, PaymentGatewayAccount("stripe"), AssetCNY); got.Cmp(amount(t, "-100")) != 0 {
 		t.Errorf("通道余额 = %s，期望 -100", got)
 	}
 	// 没有分录的科目余额是零，而不是报错。
-	if got := BalanceOf(entries, UserAccount(7), AssetCNY); !got.IsZero() {
+	if got := balanceOf(t, entries, UserAccount(7), AssetCNY); !got.IsZero() {
 		t.Errorf("没有分录的科目余额 = %s，期望 0", got)
 	}
 	// 资产不匹配时也不参与。
-	if got := BalanceOf(entries, UserAccount(42), "USDT"); !got.IsZero() {
+	if got := balanceOf(t, entries, UserAccount(42), "USDT"); !got.IsZero() {
 		t.Errorf("别的资产上的余额 = %s，期望 0", got)
 	}
 }
 
 func TestBalanceOfEmptyInput(t *testing.T) {
-	if got := BalanceOf(nil, UserAccount(1), AssetCNY); !got.IsZero() {
+	if got := balanceOf(t, nil, UserAccount(1), AssetCNY); !got.IsZero() {
 		t.Errorf("空分录的余额 = %s，期望 0", got)
 	}
 }
@@ -420,7 +422,7 @@ func TestBalancesGroupsByAssetAndAccount(t *testing.T) {
 		{TxnID: txn, Account: PlatformRevenueAccount(), Asset: AssetCNY, Amount: amount(t, "-3"), EntryType: EntryAdjustment},
 	}
 
-	got := Balances(entries)
+	got := balances(t, entries)
 	if bal := got[AssetCNY][UserAccount(1)]; bal.Cmp(amount(t, "3")) != 0 {
 		t.Errorf("user:1 的余额 = %s，期望 3", bal)
 	}
@@ -430,8 +432,133 @@ func TestBalancesGroupsByAssetAndAccount(t *testing.T) {
 	if _, ok := got["USDT"]; ok {
 		t.Error("没有分录的资产不该出现在结果里")
 	}
-	if len(Balances(nil)) != 0 {
+	if len(balances(t, nil)) != 0 {
 		t.Error("空输入的汇总应当是空的")
+	}
+}
+
+// 分录之和超出 money 的表示范围时，余额算不出来——报错，而不是交回一个
+// 被夹住（因而**偏小**）的数。
+//
+// 输入就是真库上撞到的那种数据：一笔 92233720368.54775807（int64 最小单位
+// 的上限，库里合法）的入账，加一笔 145.00000001 的小额，和是
+// 92233720513.54775808——库里的 numeric(20, 8) 存得下，money 表示不了。
+//
+// 夹住的代价在这里看得很清楚：那会给出 92233720368.54775807，比真实和小
+// 145 元，而输出里没有任何迹象。偏小的余额看起来正是「少扣了钱」。
+func TestBalanceOfReportsOverflow(t *testing.T) {
+	txn := newTxnID(t, txnA)
+	entries := []Entry{
+		{TxnID: txn, Account: UserAccount(1), Asset: AssetCNY,
+			Amount: amount(t, "92233720368.54775807"), EntryType: EntryAdjustment},
+		{TxnID: txn, Account: UserAccount(1), Asset: AssetCNY,
+			Amount: amount(t, "145.00000001"), EntryType: EntryAdjustment},
+	}
+
+	got, err := BalanceOf(entries, UserAccount(1), AssetCNY)
+	if err == nil {
+		t.Fatalf("余额算不出来时应当报错，得到 %s（真实和是 92233720513.54775808）", got)
+	}
+	if !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("错误里应当能认出 money.ErrOverflow，得到 %v", err)
+	}
+	// 科目与资产都要在报错里，否则拿着这条错误查不出是哪一笔账。
+	for _, want := range []string{"user:1", "CNY", "2 条分录"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("报错里没有 %q：%v", want, err)
+		}
+	}
+	// 报错时返回的不能是一个「看起来能用」的数。
+	if !got.IsZero() {
+		t.Errorf("报错时的返回值不该被当成余额用，得到 %s", got)
+	}
+
+	// 同一组走 Balances（`ledger balance --all` 那条路）也必须报错。
+	if _, err := Balances(entries); err == nil {
+		t.Error("汇总里有一个科目算不出来时，整份汇总都该报错")
+	}
+}
+
+// 中间值溢出、真实和放得下时**不**报错——判的是真实的和。
+//
+// 它与上一条是同一条判据的两侧：误报会让一笔正常的余额查不出来，
+// 而漏报会让一个偏小的余额被当成真的。
+func TestBalanceOfKeepsTransientOverflowOutOfTheJudgement(t *testing.T) {
+	txn := newTxnID(t, txnA)
+	huge := amount(t, "92233720368.54775807")
+	entries := []Entry{
+		{TxnID: txn, Account: UserAccount(1), Asset: AssetCNY, Amount: huge, EntryType: EntryAdjustment},
+		{TxnID: txn, Account: UserAccount(1), Asset: AssetCNY, Amount: amount(t, "145"), EntryType: EntryAdjustment},
+		{TxnID: txn, Account: UserAccount(1), Asset: AssetCNY, Amount: amount(t, "-145"), EntryType: EntryAdjustment},
+	}
+
+	got, err := BalanceOf(entries, UserAccount(1), AssetCNY)
+	if err != nil {
+		t.Fatalf("真实和放得下时不该报错: %v", err)
+	}
+	if got.Cmp(huge) != 0 {
+		t.Errorf("余额 = %s，期望 %s", got, huge)
+	}
+}
+
+// 汇总里哪个科目溢出，报出来的必须是**确定的**那一个。
+//
+// map 的遍历顺序是随机的，而同一个错误的报错文本在两次运行之间不同，测试
+// 就断言不了，排查时也无法按文本去搜日志（与 sortedAssets 同一个理由）。
+func TestBalancesReportsOverflowDeterministically(t *testing.T) {
+	txn := newTxnID(t, txnA)
+	huge := amount(t, "92233720368.54775807")
+	entries := []Entry{
+		{TxnID: txn, Account: UserAccount(9), Asset: AssetCNY, Amount: huge, EntryType: EntryAdjustment},
+		{TxnID: txn, Account: UserAccount(9), Asset: AssetCNY, Amount: amount(t, "1"), EntryType: EntryAdjustment},
+		{TxnID: txn, Account: UserAccount(3), Asset: AssetCNY, Amount: huge, EntryType: EntryAdjustment},
+		{TxnID: txn, Account: UserAccount(3), Asset: AssetCNY, Amount: amount(t, "1"), EntryType: EntryAdjustment},
+	}
+
+	_, first := Balances(entries)
+	if first == nil {
+		t.Fatal("两个科目都溢出了，应当报错")
+	}
+	// 科目号小的那个先报，且要说清楚还有别的科目也溢出。
+	if !strings.Contains(first.Error(), "user:3") {
+		t.Errorf("应当先报科目号小的那个，得到 %v", first)
+	}
+	if !strings.Contains(first.Error(), "另有 1 个") {
+		t.Errorf("还有别的科目溢出时要说出来，得到 %v", first)
+	}
+	for i := 0; i < 20; i++ {
+		if _, again := Balances(entries); again == nil || again.Error() != first.Error() {
+			t.Fatalf("第 %d 次的报错文本与第一次不同：\n%v\n---\n%v", i+2, first, again)
+		}
+	}
+}
+
+// 求和的边界就在 int64 上：恰好放得下时不报错，多一个最小单位就报错。
+//
+// 用字面量而不是从别的常量算出来，否则改的是「相对关系」而不是这个边界。
+func TestBalanceOfOverflowBoundaryIsInt64(t *testing.T) {
+	txn := newTxnID(t, txnA)
+	entry := func(units int64) Entry {
+		return Entry{TxnID: txn, Account: UserAccount(1), Asset: AssetCNY,
+			Amount: money.FromUnits(units), EntryType: EntryAdjustment}
+	}
+
+	// 上界：MaxInt64 自己是一条合法的分录金额，余额就是它。
+	atMax := []Entry{entry(math.MaxInt64)}
+	if got, err := BalanceOf(atMax, UserAccount(1), AssetCNY); err != nil || got.Units() != math.MaxInt64 {
+		t.Fatalf("MaxInt64 放得下，得到 %s, err=%v", got, err)
+	}
+	if _, err := BalanceOf(append(atMax, entry(1)), UserAccount(1), AssetCNY); !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("MaxInt64 + 1 应当报溢出，得到 %v", err)
+	}
+
+	// 下界同理：MinInt64 自己放得下，再减一个最小单位就越过下界。
+	atMin := []Entry{entry(math.MinInt64)}
+	if got, err := BalanceOf(atMin, UserAccount(1), AssetCNY); err != nil || got.Units() != math.MinInt64 {
+		t.Fatalf("MinInt64 放得下，得到 %s, err=%v", got, err)
+	}
+	if _, err := BalanceOf(append(atMin, entry(-1)), UserAccount(1), AssetCNY); !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("MinInt64 - 1 应当报溢出，得到 %v", err)
 	}
 }
 
@@ -450,7 +577,7 @@ func TestConstructedTransactionBalancesToZero(t *testing.T) {
 		t.Errorf("构造出的交易应当自洽: %v", err)
 	}
 	total := money.Zero
-	for _, bal := range Balances(tx.Entries)[AssetCNY] {
+	for _, bal := range balances(t, tx.Entries)[AssetCNY] {
 		total = total.Add(bal)
 	}
 	if !total.IsZero() {
