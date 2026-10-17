@@ -49,9 +49,11 @@ import (
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/gateway"
 	"github.com/sumwai/larkax/internal/idempotency"
+	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pipeline"
+	"github.com/sumwai/larkax/internal/quota"
 	"github.com/sumwai/larkax/internal/ratelimit"
 	"github.com/sumwai/larkax/internal/route"
 	"github.com/sumwai/larkax/internal/settings"
@@ -113,8 +115,25 @@ type App struct {
 // 而竞争窗口只在启动后的头几条请求上，现场表现为偶发的告警，很难查。
 const cacheSize = 256
 
-// regionKey 是分时计价默认地区的配置键，与 settings.Registry 里的一致。
-const regionKey = "calendar.default_region"
+// 本包要读的运行期配置键。
+//
+// 写成常量而不是散落的字面量：键名写错的表现是「启动就失败」，而那样
+// 一眼看不出是拼写问题。三个都与 settings.Registry 里声明的一致。
+const (
+	// regionKey 是分时计价默认地区。
+	regionKey = "calendar.default_region"
+	// assetKey 是结算用的资产品种。
+	assetKey = "billing.default_asset"
+	// probeIntervalKey 是额度探测的默认间隔（秒）。
+	probeIntervalKey = "quota.probe_interval_seconds"
+)
+
+// maxProbeIntervalSeconds 是探测间隔的上限。
+//
+// 挡的是换算时的溢出：time.Duration 以纳秒计，秒数乘 1e9 之后会绕回一个
+// 看起来正常的数，而那条路不会报错——阈值于是变成一个谁也没配过的值。
+// 一年已经远超任何合理的探测间隔。
+const maxProbeIntervalSeconds = 365 * 24 * 60 * 60
 
 // Build 装配一次服务。
 //
@@ -148,6 +167,28 @@ func Build(cfg Config) (*App, error) {
 		return nil, fmt.Errorf("读取分时计价地区失败: %w", err)
 	}
 
+	// 结算用的资产品种。它是运行期配置，而计费层是纯编排、不读配置，
+	// 所以在这里读出来、经 api 的 Handler 填进每个请求
+	//（见 api.Handler.DefaultAsset 与 pipeline.Request.Asset）。
+	//
+	// 顺带校验它是不是账本认得出来的品种（见 ledger.Asset.Valid）。
+	// 不校验的话，配错的表现是每个请求都在结算那一步失败，而错误信息里
+	// 看不出是配置问题——「装出来的东西要么能用，要么启动就失败」这条
+	// 在这里同样成立。
+	asset, err := cfg.Settings.String(assetKey)
+	if err != nil {
+		return nil, fmt.Errorf("读取结算资产品种失败: %w", err)
+	}
+	if !ledger.Asset(asset).Valid() {
+		return nil, fmt.Errorf("settings.%s = %q 不是账本支持的资产品种：目前只认 %q",
+			assetKey, asset, ledger.AssetCNY)
+	}
+
+	staleAfter, err := quotaStaleAfter(cfg.Settings)
+	if err != nil {
+		return nil, err
+	}
+
 	calendarEnv, err := buildCalendar(cfg.DB)
 	if err != nil {
 		return nil, err
@@ -171,7 +212,7 @@ func Build(cfg Config) (*App, error) {
 		Settlements:  ledgerStore,
 		// 写入侧与读取侧共用同一个包：两边读写的列是同一批，
 		// 分开放会让「写进去的值读出来不对」这类错没有唯一的归属。
-		Recorder:  channels.NewRecorder(cfg.DB),
+		Recorder:  channels.NewRecorder(cfg.DB, staleAfter),
 		Redactor:  snapshots.Redactor(),
 		Snapshots: snapshots.Sink(),
 		Executor:  cfg.Executor,
@@ -183,6 +224,7 @@ func Build(cfg Config) (*App, error) {
 
 	handler := api.New(authenticator{store: auth.New(cfg.DB)}, gw)
 	handler.Version = cfg.Version
+	handler.DefaultAsset = asset
 	handler.Now = cfg.Now
 	handler.RateLimiter = ratelimit.New(cfg.Now)
 	// 幂等记录的读与写走同一个 Store：入口读它、落库层在预留那个事务里写它，
@@ -238,6 +280,31 @@ func (c Config) validate() error {
 		return fmt.Errorf("装配失败:\n  - %s", strings.Join(errs, "\n  - "))
 	}
 	return nil
+}
+
+// quotaStaleAfter 从 settings 读出额度探测的默认间隔，再导出「实测值开始
+// 显得陈旧」的时长（见 quota.SelfAccountingStaleAfter）。
+//
+// 那个时长决定自记账写回库里的 confidence 衰减得多快——基准越旧，写回去的
+// 数越低。它必须跟着配置走：写死的话，把探测间隔从 5 分钟改成 1 分钟，
+// 阈值一动不动，而改配置的人以为自己改了（见 internal/channels 的 Recorder）。
+//
+// 间隔配成 0 或负数时拒绝启动而不是回落到某个默认值：阈值也非正时，任何
+// 一次自记账都会立刻被判成陈旧，而它在库里与「配置生效了」长得一样。
+func quotaStaleAfter(v *settings.Values) (time.Duration, error) {
+	seconds, err := v.Int(probeIntervalKey)
+	if err != nil {
+		return 0, fmt.Errorf("读取额度探测间隔失败: %w", err)
+	}
+	if seconds > maxProbeIntervalSeconds {
+		return 0, fmt.Errorf("settings.%s = %d 秒，超出上限 %d 秒",
+			probeIntervalKey, seconds, maxProbeIntervalSeconds)
+	}
+	staleAfter, err := quota.SelfAccountingStaleAfter(time.Duration(seconds) * time.Second)
+	if err != nil {
+		return 0, fmt.Errorf("settings.%s 不合法: %w", probeIntervalKey, err)
+	}
+	return staleAfter, nil
 }
 
 // buildSnapshots 按 settings 里的开关与上限建立快照链路。

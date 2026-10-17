@@ -78,6 +78,11 @@
 不会一直按满信度参与打分。合并、衰减、封底到 0 这些语义都在 `internal/quota`，
 写入侧只负责读旧值、调用 `Merge` / `Project`、写回新值。
 
+衰减的起点是「实测值开始显得陈旧」那一刻，它由**探测间隔**导出：连着三个
+探测间隔都没拿到新的实测值，就认为探测本身出了问题。探测间隔取
+`settings` 的 `quota.probe_interval_seconds`，在装配期读出来（见
+`internal/assembly`）——所以改那个键，衰减起点跟着动。
+
 ### 余量的单位
 
 `channel_quota_state.unit` 说明 `remaining_estimate` 这个数是**什么单位**：

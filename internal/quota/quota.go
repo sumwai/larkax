@@ -147,7 +147,11 @@ const (
 //     而自记账明明已经能给出可用的估计。
 //
 // 具体规则见下面每一步的注释。
-func Merge(prev State, obs Observation, now time.Time) State {
+//
+// staleAfter 是实测值开始显得陈旧的时长，由调用方从探测间隔导出
+// （见 SelfAccountingStaleAfter）。它跟着配置走而不是写死在这里：写死的话
+// 改探测间隔对自记账的可信度毫无影响，而那条链路看上去是通的。
+func Merge(prev State, obs Observation, now time.Time, staleAfter time.Duration) State {
 	next := prev
 	next.ChannelID = prev.ChannelID
 	next.UpdatedAt = now
@@ -181,7 +185,7 @@ func Merge(prev State, obs Observation, now time.Time) State {
 		next.Remaining = obs.Remaining
 		next.Kind = obs.Kind
 		next.Estimated = true
-		next.Confidence = selfAccountingConfidence(prev.LastProbeAt, now)
+		next.Confidence = selfAccountingConfidence(prev.LastProbeAt, now, staleAfter)
 
 	case KindErrorObserved:
 		next.LastErrorCode = obs.ErrorCode
@@ -214,19 +218,39 @@ func Merge(prev State, obs Observation, now time.Time) State {
 	return next
 }
 
-// selfAccountingStaleAfter 是实测值开始显得陈旧的时间阈值。
+// staleAfterFactor 是「实测值开始显得陈旧」相对于探测间隔的倍数。
 //
-// 取 15 分钟：额度探测的默认间隔是 5 分钟（settings 里的
-// quota.probe_interval_seconds），三倍于它之后还没拿到新的实测值，
-// 说明探测本身出了问题，此时自记账的累积误差已经不小。
-const selfAccountingStaleAfter = 15 * time.Minute
+// 取三倍：连着三个探测间隔都没拿到新的实测值，说明探测本身出了问题，
+// 此时自记账的累积误差已经不小。
+const staleAfterFactor = 3
+
+// SelfAccountingStaleAfter 由探测间隔导出「实测值开始显得陈旧」的时长。
+//
+// 探测间隔是运行期配置（settings 的 quota.probe_interval_seconds，单个渠道
+// 可在 channels.setting 里覆盖，这里用那份默认值），所以阈值必须由它算出来
+// 而不是写死——写死的话，把探测间隔从 5 分钟改成 1 分钟，阈值一动不动，
+// 而改配置的人以为自己改了。
+//
+// 非正数返回错误而不回落：阈值也非正时，任何一次自记账都会立刻被判成陈旧，
+// 可信度从第一次扣减起就在衰减。那是配置写成 0 之后一个安静的行为改变，
+// 而它在库里与「配置生效了」长得一样。
+func SelfAccountingStaleAfter(probeInterval time.Duration) (time.Duration, error) {
+	if probeInterval <= 0 {
+		return 0, fmt.Errorf("额度探测间隔必须为正，得到 %v", probeInterval)
+	}
+	return staleAfterFactor * probeInterval, nil
+}
 
 // selfAccountingConfidence 给出自记账在当前情况下的可信度。
 //
 // 刚探测过时给基线（0.8），此后随时间衰减到一个下限。
 // 下限不为零是有意的：一个很旧的估计仍然比「完全不知道」有信息量，
 // 而 0 会被下游解释成「等同于未知」。
-func selfAccountingConfidence(lastProbe *time.Time, now time.Time) float64 {
+//
+// staleAfter 由 SelfAccountingStaleAfter 从探测间隔导出，必须是正数——
+// 它由装配层校验过一次（见 internal/assembly 读 quota.probe_interval_seconds
+// 的那一处），本函数不再回落。
+func selfAccountingConfidence(lastProbe *time.Time, now time.Time, staleAfter time.Duration) float64 {
 	const floor = 0.2
 	if lastProbe == nil {
 		// 从未探测过：自记账是唯一的信息来源，给基线而不衰减——
@@ -235,12 +259,12 @@ func selfAccountingConfidence(lastProbe *time.Time, now time.Time) float64 {
 	}
 
 	elapsed := now.Sub(*lastProbe)
-	if elapsed <= selfAccountingStaleAfter {
+	if elapsed <= staleAfter {
 		return confidenceSelfAccountingBase
 	}
 
 	const fadeOver = 6 * time.Hour
-	ratio := float64(elapsed-selfAccountingStaleAfter) / float64(fadeOver)
+	ratio := float64(elapsed-staleAfter) / float64(fadeOver)
 	if ratio >= 1 {
 		return floor
 	}

@@ -191,8 +191,10 @@ func printSettingsList(w io.Writer, entries []settings.Entry) {
 		// 未声明的键单独标出来：它是「服务加载不起来」的直接原因，
 		// 而它在类型那一列里只是一句话，不标出来就得靠人记得去比对 Registry。
 		kind := "未声明"
+		unwired := ""
 		if spec, ok := settings.Lookup(e.Key); ok {
 			kind = string(spec.Kind)
+			unwired = spec.Unwired
 		}
 
 		editable := "否"
@@ -209,6 +211,15 @@ func printSettingsList(w io.Writer, entries []settings.Entry) {
 			e.Key, e.Value, kind, editable, by, e.UpdatedAt.Format(time.RFC3339))
 		if e.Description != "" {
 			_, _ = fmt.Fprintf(w, "  说明：%s\n", e.Description)
+		}
+		// 还没接线的键单独一行。这一行不是修辞：没有它，改一个没人读的
+		// 键与改一个真的生效的键，在这份输出上完全一样——两边都是
+		// 「值变了、改自谁、改于何时」，而前者什么都不会发生。
+		//
+		// 它取自 Registry 而不是库里那一行 description：接不接线是代码的
+		// 事实，而接线的人改的正是 Registry 里那几行。
+		if unwired != "" {
+			_, _ = fmt.Fprintf(w, "  尚未接线：%s\n", unwired)
 		}
 	}
 }

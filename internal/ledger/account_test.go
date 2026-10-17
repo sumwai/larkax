@@ -271,15 +271,15 @@ func TestEntryTypesMatchDatabaseConstraint(t *testing.T) {
 }
 
 func TestAssetValidity(t *testing.T) {
-	if !AssetCNY.valid() {
+	if !AssetCNY.Valid() {
 		t.Error("CNY 应当是受支持的资产")
 	}
 	// 空资产**不**退回默认值：那会把一个「不知道该记哪种资产」的分录
 	// 变成一笔人民币分录，而它在账面上与正常的完全一样。
-	if Asset("").valid() {
+	if Asset("").Valid() {
 		t.Error("空资产不该通过校验")
 	}
-	if Asset("USDT").valid() {
+	if Asset("USDT").Valid() {
 		// 接加密货币时先在 Asset 里加常量，再改这里。
 		t.Error("未支持的资产不该通过校验")
 	}

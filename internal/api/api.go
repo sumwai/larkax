@@ -194,6 +194,16 @@ type Handler struct {
 	// 「所有带这个头的请求都失败」，而那比不做幂等更糟。
 	Idempotency IdempotencyStore
 
+	// DefaultAsset 是结算用的资产品种，由装配层从 settings 的
+	// billing.default_asset 读出来填上。
+	//
+	// 它在这里而不是在计费包里：那个值是**运行期配置**，而计费层是纯编排，
+	// 不连数据库也不读配置。入口是知道配置的那一层，于是由它填进请求。
+	//
+	// 留空不会得到一个默认品种——计费层拒绝空值，每个请求都会失败。
+	// 那是有意的：装配漏了一步要当场响，而不是安静地记错品种。
+	DefaultAsset string
+
 	// Now 可注入，便于测试与时间相关的字段。
 	Now func() time.Time
 }
@@ -345,7 +355,7 @@ type served struct {
 // 它返回的是**结局**而不是错误：各个失败分支已经自己把响应写出去了
 // （或者判断出没人在听），调用方需要的只是「能不能重放」。
 func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, user User, requestID string, claim *idempotency.Claim) served {
-	req := billingRequest(user, upstream, requestID, protocol)
+	req := h.billingRequest(user, upstream, requestID, protocol)
 	req.Idempotency = claim
 
 	if upstream.Stream {
