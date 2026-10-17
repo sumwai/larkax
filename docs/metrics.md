@@ -22,6 +22,7 @@ curl -s 127.0.0.1:9090/metrics
 |---|---|---|---|
 | `larkax_billing_settlements_total` | counter | `usage_source` | 按实际用量结算完成的次数。`usage_source` 取 `measured` / `tokenized` / `estimated`，即这笔账用的是实测值、本地精确计数还是启发式估算 |
 | `larkax_billing_capped_settlements_total` | counter | `protocol` | 结算金额被预留上界截住的次数，按入口协议分。`protocol` 取 `channel.Protocol` 的取值：`openai` / `anthropic` / `openai-responses` / `systemone` |
+| `larkax_billing_capped_amount_total` | counter | `protocol`, `asset` | 结算被预留上界截住的那部分**金额**，按入口协议与资产品种分。与上一条是一对：那个数次数，这个数少收了多少钱。`protocol` 同上一行；`asset` 取 `ledger.Asset` 的取值：`CNY`。**单位是最小计价单位（`money.Scale` 位定点，1e-8），不是元**——理由见下面的命名约定 |
 | `larkax_billing_unbilled_settlements_total` | counter | 无 | 未计费的结算次数：上游失败，或请求在结算之前中止 |
 | `larkax_auth_failures_total` | counter | `reason` | 认证失败被回以 401 的次数，按失败原因分。`reason` 取 `internal/auth` 的 `Reason`：`missing_credential` / `malformed_credential` / `key_not_found` / `key_disabled` / `key_revoked` / `key_inactive` / `key_expired` / `user_inactive`，外加 `unclassified` |
 
@@ -31,6 +32,17 @@ curl -s 127.0.0.1:9090/metrics
 `protocol` 的序列涨起来，就说明那一条入口的上界算错了（chat 按 `max_tokens`
 与正文估算，决策表面按 `internal/systemone` 的两个常量），差额由平台承担。
 要注意的是此时**账目仍然是平的**——对账看不出来，只有这个数能看见。
+
+**`capped_amount_total` 大于 0。** 它和 `capped_settlements_total` 是同一件事
+的两个口径：条数回答「撞了几次」，金额回答「**少收了多少钱**」。后者才是
+平台真正承担掉的那笔钱，而把同一 `protocol` 上的金额除以条数，就是「一次
+撞界平均少收多少」——只擦边与上界错得离谱，在这个比值上分得开。
+
+它的取值是**最小单位**（`money.Scale` 位定点），换算成元要除以 `1e8`：
+`0.098 元` 记成 `9800000`。同一个时间窗内，它应当等于库里
+`sum(computed_amount - reserved_amount)`（同一个差额，见下面的 SQL），
+两边对不上说明有一处漏记。`asset` 这一维现在只有一个取值，留着是因为
+少收的可能是另一种资产——那时两条序列要分开看，混在一起则两笔钱都算不清。
 
 `capped` 是**带标签**的计数器：第一次撞上界之前，它一条序列都不输出。所以
 「没有这一行」与「一次都没撞上」在输出里长得一样，不能只看它——要连着
@@ -96,7 +108,10 @@ SELECT request_id, reserved_amount, computed_amount,
   每个取值各占一条时间序列，而序列数没有上限，采集端的内存与查询开销会跟着
   请求数一起涨。要区分渠道就用渠道**类型**，要区分上游就用上游**种类**。
 - 每个指标都要有 `# HELP`，写清楚它是什么，以及什么取值算异常。
-- 时间用秒并以 `_seconds` 结尾；金额不带单位后缀时以元为单位。
+- 时间用秒并以 `_seconds` 结尾；金额不带单位后缀时以元为单位。**唯一的例外是
+  `larkax_billing_capped_amount_total`**：它按最小单位（1e-8）累加整数，因为
+  这笔金额细到一次只有几十个最小单位，浮点元在这里会丢精度，而它还要能和库里
+  `numeric(20, 8)` 的同一个差额逐分对得上。
 
 ## 加一个指标
 
