@@ -87,6 +87,35 @@ type AliasOverrideSource interface {
 // 错地方。
 var ErrNoAliasOverrideSource = errors.New("未配置别名覆盖来源：预留上界算不出覆盖之后的输出上限")
 
+// ErrNoOutputCap 表示没有配置单次输出上限的全局默认值。
+//
+// 与 ErrNoAliasOverrideSource 同一条理由：缺了它那条判据会**静默消失**——
+// 超限的请求照旧走原来的路（冻住一大笔余额，填得离谱时报成「算不出预留上界」），
+// 而「没配上限」与「上限配得很宽」在请求上完全同形。装配层因此把它当必填项。
+var ErrNoOutputCap = errors.New("未配置单次输出上限：目录里没登记输出上限的模型判不出超限")
+
+// OutputCapExceeded 表示调用方声明的 max_tokens 超过了单次输出上限。
+//
+// 它是**调用方请求本身的问题**：把这个字段改小就能成功，所以 internal/api
+// 把它映射成 400 而不是 500（见 httpStatusOfUpstream）。三个字段一路带到
+// 那句话里：只说「超限」而不说允许到多少，调用方只能猜着改。
+//
+// 用它的是一个具体的类型而不是哨兵错误，因为给调用方的那句话需要这几个数，
+// 而错误信息本身是中文的内部措辞（与仓库里其余错误一致）。
+type OutputCapExceeded struct {
+	// Model 是调用方要的那个规范模型名。
+	Model string
+	// Declared 是调用方在请求体里声明的 max_tokens。
+	Declared int64
+	// Limit 是这次请求允许声明的最大值。
+	Limit int64
+}
+
+func (e *OutputCapExceeded) Error() string {
+	return fmt.Sprintf("模型 %q 的单次输出上限是 %d，这次请求声明了 max_tokens=%d",
+		e.Model, e.Limit, e.Declared)
+}
+
 // ReservationStore 负责把预留落库、并在不计费的结局里把它放开。
 //
 // 为什么必须落库而不是留在内存里：预留与结算之间隔着一次可能数分钟的
@@ -279,6 +308,17 @@ type Gateway struct {
 	// *catalog.Catalog：两处读的是同一张表，两个实例会让「选路时用的覆盖」
 	// 与「算上界时用的覆盖」来自两次不同的读。
 	AliasOverrides AliasOverrideSource
+
+	// MaxOutputTokens 是单次输出上限的**全局默认值**（token）：模型目录里
+	// 没登记 output_limit 的模型按它判，登记了的按目录那个数判
+	//（见 checkOutputCap）。
+	//
+	// 必填且必须为正：零值不是「不限」。那样的话一个从没被填过的字段会静默
+	// 放行一切，而它与「上限配得很宽」在请求上完全同形（见 ErrNoOutputCap）。
+	//
+	// 它是**我们的**界线，不是上游的能力：上游的输出上限是上游的事，这一条
+	// 说的是我们愿意单次承担多少（一次请求最多冻住多少余额）。
+	MaxOutputTokens int64
 
 	// Redactor 与 Snapshots 可以都为空——那样就不采集快照。
 	//
@@ -803,6 +843,13 @@ func (h *handle) routedTo(p placement) {
 // 不适用的类型传进来」正是本包要避免的事。快照改由各条入口自己采——采集点
 // 跟着各自那条路的选路走（见 snapshotRequest）。
 func (g *Gateway) begin(ctx context.Context, req pipeline.Request) (*handle, error) {
+	// 单次上限的兜底值没配时直接失败，而不是跳过后面的判据：见 ErrNoOutputCap
+	// ——「判据没接上」与「这次请求没超限」在请求上长得一样，那是这一类改动
+	// 最容易留下的东西。
+	if g.MaxOutputTokens <= 0 {
+		return nil, ErrNoOutputCap
+	}
+
 	h := &handle{g: g, req: req}
 
 	// 候选必须在预留**之前**取：没有候选就没有可用的渠道，
@@ -815,6 +862,15 @@ func (g *Gateway) begin(ctx context.Context, req pipeline.Request) (*handle, err
 		return nil, route.ErrNoCandidates
 	}
 	h.candidates = cands
+
+	// 单次上限判在**预留之前**：超限的请求一分钱都不该冻。排在候选之后是因为
+	// 上限要按模型目录那条路径取（见 checkOutputCap 的 outputLimit），而候选
+	// 里带着目录声明。
+	// 变量名不复用外层那个 err：同一个块里再 `err :=` 是遮蔽，govet 的
+	// shadow 检查器会报（那个 err 在下面还要用）。
+	if capErr := g.checkOutputCap(req, cands); capErr != nil {
+		return nil, capErr
+	}
 
 	// 预留按**整个候选集**取上界：每个候选带它自己的商家，规则那一侧对
 	// 每个候选各取一条，取其中金额最大的那个（见 pipeline.Reserve）。
@@ -859,6 +915,79 @@ func (g *Gateway) begin(ctx context.Context, req pipeline.Request) (*handle, err
 	h.req = req
 
 	return h, nil
+}
+
+// checkOutputCap 判这次请求声明的输出上界有没有超过单次上限。
+//
+// # 判的是调用方声明的那个数，不是别名覆盖之后的那个数
+//
+// 别名上的 max_tokens 覆盖会**顶掉**调用方给的那个数（见 outputBound），于是
+// 「调用方填 8K、别名覆盖成 100K」这种请求有两种判法。这里判**调用方声明的
+// 那个数**，也就是说覆盖不参与这条判据。三条理由：
+//
+//   - 给调用方的那句话要能照做。超限时我们告诉他「你声明的 max_tokens 超过了
+//     允许的 N」——那是他写的字段，改小就能成功。按覆盖之后的数判的话，他收到
+//     的会是「100000 超过上限 8192」，而 100000 他从没写过：那句拒绝指向一个
+//     不存在的输入。
+//   - 覆盖是**商家配置**，配错了责任与后果都落在配置那一侧。按覆盖之后的数判
+//     的话，别名上写一个超过上限的数会让该别名下的**每一个**请求都收到 400，
+//     而调用方改请求是没用的——他做什么都通不过，只能等商家去改别名。
+//   - 与选路那条目录判据同一口径：route 比的就是调用方给的
+//     channel.Request.MaxTokens（见 route.NeedsOf），两处同进同出，不会出现
+//     「一条说超了、另一条说没超」。
+//
+// 代价要说清楚：调用方在上限之内、而别名覆盖把它抬到上限之上时，这次请求
+// **不会**在这里被拒，预留仍按覆盖之后那个数冻（见 outputBound）。那一笔多冻
+// 出来的钱是商家配置的结果，要改的是那条别名——不是把调用方的请求拒掉。
+//
+// # 两个豁免
+//
+//   - 决策那条表面（ProtocolSystemOne）：它的 MaxTokens 是我们按上游预算写的
+//     常量（见 internal/api 的 decideBillingRequest），调用方从来没有声明过它。
+//     拿一个我们自己填的数去拒调用方的请求，他不知道该改什么。
+//   - 流式：流式有中途观测点，钱的处置是随流递进冻结，与这条判据不是一回事
+//     （见 stream.go 与 #498）。
+//
+// # 非正数的 max_tokens 不在这里判
+//
+// 它落在下面那条 `req.MaxTokens <= limit` 之外（非正数一定不大于一个正的
+// limit），继续走 pipeline.Request.validate 与 billing.Reserve 那条路报
+// ErrNoUpperBound：措辞与状态码都更准（「必须为正」比「超过上限」说的是同一件
+// 事的两个方向）。
+func (g *Gateway) checkOutputCap(req pipeline.Request, cands []route.Candidate) error {
+	if req.Protocol == channel.ProtocolSystemOne || req.Streamed {
+		return nil
+	}
+	limit := g.outputLimit(cands)
+	if req.MaxTokens <= limit {
+		return nil
+	}
+	return &OutputCapExceeded{Model: req.CanonicalModel, Declared: req.MaxTokens, Limit: limit}
+}
+
+// outputLimit 是这次请求的单次输出上限：模型目录里登记了就用它，否则用全局
+// 默认值（见 Gateway.MaxOutputTokens）。
+//
+// 目录那一列是**模型级**的（同一规范名下的候选拿到同一份 Profile，见
+// route.ModelProfile），所以候选之间取值相同。取其中**最小的那个已登记值**，
+// 而不是随手取第一个：将来真改成逐候选时，这条判据会自然落到严的一侧。
+//
+// 0 表示**未知**（库里是 NULL），不是「零额度」——那与「目录里没有这个模型」
+// 一样落到全局默认值（见 route.ModelProfile 对两个上限列的处置）。
+func (g *Gateway) outputLimit(cands []route.Candidate) int64 {
+	limit := int64(0)
+	for _, c := range cands {
+		if c.Profile == nil || c.Profile.OutputLimit <= 0 {
+			continue
+		}
+		if limit == 0 || c.Profile.OutputLimit < limit {
+			limit = c.Profile.OutputLimit
+		}
+	}
+	if limit == 0 {
+		return g.MaxOutputTokens
+	}
+	return limit
 }
 
 // outputBound 算出这次请求的输出 token 上界：候选集里**覆盖之后**的

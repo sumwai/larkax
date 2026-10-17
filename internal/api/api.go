@@ -975,6 +975,9 @@ func (h *Handler) failUpstream(w http.ResponseWriter, r *http.Request, protocol 
 //     输出上界才做得出来（见 pipeline.Request.validate），而「没给上界」
 //     是请求本身的缺陷。不映射的话它会落到默认分支，表现为 500——把
 //     调用方漏填一个字段说成我们内部故障，他会去查我们而不是改请求。
+//   - max_tokens 超过单次上限（见 gateway.OutputCapExceeded）同属这一类，
+//     回 400，而且那句话说全：这次声明了多少、允许到多少。少了后一个数
+//     调用方只能猜着改，而猜错一次就是一次 400。
 //   - 上游说限流原样透出 429：调用方该退避，这个信息对他有用。
 //   - 其余上游错误一律回 502，**不**跟着上游回 400。上游说「你的请求
 //     不对」时回 400，会让调用方去改一个本来正确的请求，而真正要改的是
@@ -987,9 +990,19 @@ func (h *Handler) failUpstream(w http.ResponseWriter, r *http.Request, protocol 
 // failUpstream 在调本函数**之前**接住并显式给码（见那里的 switch）——
 // 它们的状态码与限流相同（429），光靠状态码推不出该给哪个码。
 func httpStatusOfUpstream(err error) (status int, message string) {
+	// 上限那条要连三个数一起说出来，而那几个数在错误值里，所以先取出来。
+	// 同一个包里的 ErrNoUpperBound 不需要这一步：它没有「允许到多少」可说。
+	var over *gateway.OutputCapExceeded
+
 	switch {
 	case errors.Is(err, billing.ErrNoUpperBound):
 		return http.StatusBadRequest, "max_tokens is required: the request must set a positive output token limit"
+	case errors.As(err, &over):
+		// 措辞不写「上游拒绝」也不写模型目录：这条判据是我们按运行期配置
+		// 判的，说的是调用方这个字段填得太大——他改小就能成功。
+		return http.StatusBadRequest, fmt.Sprintf(
+			"max_tokens %d exceeds the per-request output limit %d for this model; lower max_tokens and retry",
+			over.Declared, over.Limit)
 	case errors.Is(err, route.ErrNoCandidates):
 		return http.StatusServiceUnavailable, "no available upstream for the requested model"
 	case errors.Is(err, gateway.ErrNoExecutor):
