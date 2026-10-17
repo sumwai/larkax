@@ -88,31 +88,3 @@ func (r *Router) chatStreamWithPlan(ctx context.Context, exec StreamExecutor, re
 	}
 	return result, &Errors{Attempts: result.Attempts}
 }
-
-// WrapStreamStarted 把一个已经开始输出的流包起来，让调用方在后续失败时
-// 能分辨「已经吐字了」这件事。
-//
-// 用途是给上层一个统一的判断点：读到 error 事件时，如果此前已经发过
-// delta，就不该重试而是如实告诉客户端「回答被截断了」。
-//
-// 返回的第二个值表示「是否已经输出过内容」。它由本函数跟踪，
-// 而不是让调用方自己数——每个调用点都数一遍的话，漏掉一处就会
-// 产生一次不该发生的重试。
-func WrapStreamStarted(events <-chan channel.StreamEvent) (<-chan channel.StreamEvent, func() bool) {
-	out := make(chan channel.StreamEvent)
-	var started bool
-
-	go func() {
-		defer close(out)
-		for ev := range events {
-			if ev.Kind == "delta" || ev.Kind == "tool_use" {
-				started = true
-			}
-			out <- ev
-		}
-	}()
-
-	// 返回值读的是闭包里的 started。调用方在流结束之后用它判断
-	// 「这次失败发生在吐字之后吗」。
-	return out, func() bool { return started }
-}

@@ -20,20 +20,51 @@ import (
 //
 // 这是全项目最容易算错钱的地方，所以口径逐条写明。
 //
-// relaykit 的 dto.Usage 是**多来源归一化后的产物**，它同时带着三套字段：
-// PromptTokens/CompletionTokens（OpenAI 口径）、InputTokens/OutputTokens
-// （Anthropic 与 Responses 口径）、以及 PromptCacheHitTokens 等缓存明细。
-// 不同来源填充哪几个字段并不一致，所以不能挑一个字段就用。
+// # 口径由声明的字段决定，不靠数字猜
 //
-// 本项目的口径（见 channel.Usage 的注释）是 OpenAI 那套，因此：
+// relaykit 的 dto.Usage 是**多来源归一化后的产物**，它同时带着两套字段名：
+// PromptTokens/CompletionTokens 与 InputTokens/OutputTokens。同一个位置上的
+// 数字在两家口径下含义不同，所以不能挑一个字段就用。哪一套成立由
+// dto.Usage.UsageSemantic 声明——生产方（两个协议适配器）填它，这里读它。
 //
-//   - PromptTokens 取 dto.PromptTokens。
-//   - 若 PromptTokens 为 0 而 InputTokens 非 0，说明来源是 Anthropic 口径，
-//     用 InputTokens + 缓存读写还回来。Anthropic 的 input_tokens 不含缓存部分，
-//     而 OpenAI 的 prompt_tokens 含，所以补上缓存才是同一件事。
-//   - 缓存读写取 PromptTokensDetails，它同时覆盖 OpenAI 的
-//     prompt_tokens_details.cached_tokens 与 Anthropic 的 cache_read；
-//     写入侧另有 CachedCreationTokens 与 CacheWriteTokens 两个字段。
+// **不再用「PromptTokens 是不是 0」反推来源**：整段 prompt 命中缓存时
+// Anthropic 的 input_tokens 本来就是 0，而那时正是最需要判对口径的时候。
+//
+// 本项目的口径（见 channel.Usage 的注释）是 OpenAI 那套：PromptTokens
+// **含**缓存，缓存读写另立字段。各取值读哪些字段：
+//
+//	UsageSemantic   输入总量                        输出
+//	anthropic       PromptTokens + 缓存读 + 缓存写   CompletionTokens
+//	openai          PromptTokens（已含缓存）         CompletionTokens
+//	gemini          同 openai                       同 openai
+//	空 / 未知       同 openai                       同 openai
+//
+// anthropic 那一支为什么不读 InputTokens：在 relaykit 里 InputTokens 是
+// **Responses 口径**的字段，含义是「含缓存的总量」——dto.BillingUsage 的
+// canonicalClaudeUsage 写的就是 InputTokens = input + cacheRead +
+// cacheCreation。拿它当「不含缓存的输入」再加一次缓存就是重复计费。
+// 而 Claude 那个不含缓存的 input_tokens 在 relaykit 里一律落在 PromptTokens：
+// relayconvert 的 FormatClaudeResponseInfo 与 UsageFromClaudeAPIUsage 都这么填，
+// canonicalClaudeUsage 也一样（PromptTokens = claudeUsage.InputTokens，
+// 而它旁边的 InputTokens 才是总量）。所以这一支读 PromptTokens。
+//
+// 空 / 未知为什么按 openai 读：dto.Usage 的主字段名（PromptTokens /
+// CompletionTokens）就是 OpenAI 口径的，relaykit 的规范形也把 UsageSemantic
+// 设成 openai；未知取值更可能是 OpenAI 形状的扩展而不是 Anthropic 的。
+// 这仍然不是「猜」——读的是一个声明出来的字段，默认值只是「没声明时按这个
+// 格式自己的原生口径读」。缺声明这件事会留在 Raw 里（semantic_missing），
+// 事后能查出一笔用量是按声明读的还是按默认分支读的；一个数都没读到时不标，
+// 那时没有「按哪个口径读」的问题（见 rawUsage）。
+//
+// # 缓存字段
+//
+// 缓存读写只从 PromptTokensDetails 取：CachedTokens 是缓存读取，
+// CachedCreationTokens + CacheWriteTokens 是缓存写入。各生产方的这三个
+// 落点互不重叠（Anthropic 只填 CachedCreationTokens；OpenAI 兼容上游的
+// 三个字段各来自上游的一个字段名），所以没有第二条路径把同一个量再填一遍。
+//
+// # 其余字段
+//
 //   - ReasoningTokens 照抄 CompletionTokenDetails.ReasoningTokens，
 //     CompletionTokens 也照抄——而在这套口径下推理**是**输出的一部分
 //     （见下面 CompletionIncludesReasoning 处的说明）。两者在这里并不互斥，
@@ -43,19 +74,29 @@ func UsageFromRelaykit(u *dto.Usage) channel.Usage {
 		return channel.Usage{}
 	}
 
+	cacheRead := int64(u.PromptTokensDetails.CachedTokens)
+	cacheWrite := int64(u.PromptTokensDetails.CachedCreationTokens + u.PromptTokensDetails.CacheWriteTokens)
+
 	prompt := int64(u.PromptTokens)
 	completion := int64(u.CompletionTokens)
 
-	// Anthropic 口径：input_tokens 不含缓存，需要补上才与 OpenAI 口径对齐。
-	if prompt == 0 && u.InputTokens > 0 {
+	if strings.EqualFold(u.UsageSemantic, dto.BillingUsageSemanticAnthropic) {
+		// Anthropic：PromptTokens 装的是 input_tokens，**不含**缓存
+		// （缓存断点之后那部分；整段命中缓存时它就是 0）。
+		// 加上缓存读写才是与 OpenAI 口径同义的输入总量。
+		//
+		// 这一支不做「PromptTokens 为 0 就改读 InputTokens」的兜底：
+		// InputTokens 含缓存，那样兜底会在整段命中缓存时把缓存算两遍。
+		prompt += cacheRead + cacheWrite
+	} else if prompt == 0 {
+		// 非 anthropic 口径下 PromptTokens 与 InputTokens 同义（都含缓存），
+		// 后者只是前者的兜底。这一步换的是**字段名**，不是口径：
+		// relaykit 的规范形（canonicalOpenAIUsage）会把两者填成同一个数。
 		prompt = int64(u.InputTokens)
 	}
-	if completion == 0 && u.OutputTokens > 0 {
+	if completion == 0 {
 		completion = int64(u.OutputTokens)
 	}
-
-	cacheRead := int64(u.PromptTokensDetails.CachedTokens)
-	cacheWrite := int64(u.PromptTokensDetails.CachedCreationTokens + u.PromptTokensDetails.CacheWriteTokens)
 
 	if prompt == 0 && (cacheRead > 0 || cacheWrite > 0) {
 		// 来源只报了缓存部分。此时 prompt 至少等于缓存量，
@@ -64,6 +105,11 @@ func UsageFromRelaykit(u *dto.Usage) channel.Usage {
 	}
 
 	reasoning := int64(u.CompletionTokenDetails.ReasoningTokens)
+
+	// 上游整条响应没带 usage 时，上面读出来的全是 0。那与「生产方忘了声明
+	// 口径」都会走到默认分支，但只有后者值得留在账上，所以标记只在
+	// **确实读到了数字**时才打（见 rawUsage）。
+	hasCounts := prompt != 0 || completion != 0 || cacheRead != 0 || cacheWrite != 0 || reasoning != 0
 
 	return channel.Usage{
 		PromptTokens:     prompt,
@@ -83,7 +129,7 @@ func UsageFromRelaykit(u *dto.Usage) channel.Usage {
 		// 声明成「已含」在数值上是空的。
 		CompletionIncludesReasoning: true,
 		UnitCounts:                  unitCountsFromRelaykit(u),
-		Raw:                         rawUsage(u),
+		Raw:                         rawUsage(u, hasCounts),
 	}
 }
 
@@ -109,7 +155,11 @@ func unitCountsFromRelaykit(u *dto.Usage) map[string]int64 {
 //
 // 它不参与计费——这一点很重要：Raw 是我方序列化的副本，字段名可能随
 // relaykit 版本变化，把它当计费依据等于把价格绑在依赖的内部结构上。
-func rawUsage(u *dto.Usage) map[string]any {
+//
+// hasCounts 表示这次用量里确实读到了数字。它只影响 semantic_missing
+// 打不打：上游整条响应没带 usage 时也会缺声明，但那种情况没有「按哪个
+// 口径读」的问题，一起标会让这个标记读起来像生产方的疏漏。
+func rawUsage(u *dto.Usage, hasCounts bool) map[string]any {
 	out := map[string]any{
 		"prompt_tokens":     u.PromptTokens,
 		"completion_tokens": u.CompletionTokens,
@@ -120,6 +170,11 @@ func rawUsage(u *dto.Usage) map[string]any {
 	}
 	if u.UsageSemantic != "" {
 		out["semantic"] = u.UsageSemantic
+	} else if hasCounts {
+		// 生产方没有声明口径，上面按 dto.Usage 的原生口径（OpenAI）读了。
+		// 把「没声明」这件事留在账上：否则事后分不出这一笔是按声明的口径
+		// 读的，还是按默认分支读的。
+		out["semantic_missing"] = true
 	}
 	if u.BillingUsage != nil && u.BillingUsage.Estimated {
 		// 上游报的是估算值。路由与界面都要能看出这一点，
@@ -205,6 +260,16 @@ func fromClaudeResponse(r *dto.ClaudeResponse) (*channel.Response, error) {
 	out.Message.Role = "assistant"
 
 	if r.Usage != nil {
+		// 只填 Claude 协议自己的字段，口径由 UsageSemantic 声明。
+		//
+		// input_tokens 落在 PromptTokens 而不是 InputTokens：在 relaykit 里
+		// InputTokens 是 Responses 口径的「含缓存总量」，而 Claude 那个不含
+		// 缓存的 input_tokens 一律落在 PromptTokens（relayconvert 的
+		// FormatClaudeResponseInfo 与 UsageFromClaudeAPIUsage 都这么填）。
+		//
+		// **补回缓存那一步只在 UsageFromRelaykit 里发生一次**，这里不再自己加：
+		// 两处各加一次时，input_tokens 非 0 的请求看着是对的，而整段 prompt
+		// 命中缓存（input_tokens == 0）时缓存会被算两遍。
 		out.Usage = UsageFromRelaykit(&dto.Usage{
 			PromptTokens:     r.Usage.InputTokens,
 			CompletionTokens: r.Usage.OutputTokens,
@@ -214,15 +279,9 @@ func fromClaudeResponse(r *dto.ClaudeResponse) (*channel.Response, error) {
 			},
 			ClaudeCacheCreation5mTokens: r.Usage.ClaudeCacheCreation5mTokens,
 			ClaudeCacheCreation1hTokens: r.Usage.ClaudeCacheCreation1hTokens,
-			UsageSource:                 "claude_messages",
-			UsageSemantic:               "anthropic",
+			UsageSource:                 dto.BillingUsageSourceClaudeMessages,
+			UsageSemantic:               dto.BillingUsageSemanticAnthropic,
 		})
-		// Claude 的 input_tokens 不含缓存，而我们刚把它塞进了 PromptTokens。
-		// 补上缓存部分才是 OpenAI 口径，否则输入 token 会被低估。
-		//
-		// 用加法而不是让 UsageFromRelaykit 去做：那个函数不知道调用方
-		// 是从哪个协议来的，而这里知道。
-		out.Usage.PromptTokens += out.Usage.CacheReadTokens + out.Usage.CacheWriteTokens
 	}
 
 	raw, err := toRawMap(r)

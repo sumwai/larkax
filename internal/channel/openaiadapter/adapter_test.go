@@ -482,16 +482,19 @@ func TestChatHandlesVariedContentShapes(t *testing.T) {
 
 // 上游没报的用量字段必须与「报了 0」区分开。
 func TestUsageFieldPresenceDistinguishedFromZero(t *testing.T) {
-	cases := map[string]string{
-		"只报 prompt":   `{"prompt_tokens":10}`,
-		"显式零":         `{"prompt_tokens":10,"completion_tokens":0}`,
-		"带缓存明细":       `{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":4}}`,
-		"DeepSeek 写法": `{"prompt_tokens":10,"prompt_cache_hit_tokens":6}`,
-		"带推理 token":   `{"prompt_tokens":10,"completion_tokens":9,"completion_tokens_details":{"reasoning_tokens":5}}`,
+	cases := map[string]struct {
+		usage         string
+		wantCacheRead int64
+	}{
+		"只报 prompt":   {`{"prompt_tokens":10}`, 0},
+		"显式零":         {`{"prompt_tokens":10,"completion_tokens":0}`, 0},
+		"带缓存明细":       {`{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":4}}`, 4},
+		"DeepSeek 写法": {`{"prompt_tokens":10,"prompt_cache_hit_tokens":6}`, 6},
+		"带推理 token":   {`{"prompt_tokens":10,"completion_tokens":9,"completion_tokens_details":{"reasoning_tokens":5}}`, 0},
 	}
-	for name, usage := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			body := `{"model":"m","choices":[{"message":{"role":"assistant","content":"x"}}],"usage":` + usage + `}`
+			body := `{"model":"m","choices":[{"message":{"role":"assistant","content":"x"}}],"usage":` + tc.usage + `}`
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_, _ = io.WriteString(w, body)
 			}))
@@ -503,6 +506,12 @@ func TestUsageFieldPresenceDistinguishedFromZero(t *testing.T) {
 			}
 			if resp.Usage.PromptTokens != 10 {
 				t.Errorf("PromptTokens = %d", resp.Usage.PromptTokens)
+			}
+			// 缓存命中落在哪个字段名上，账上要看得出来：只报
+			// prompt_cache_hit_tokens 的上游（DeepSeek 一类）如果这一支走不到，
+			// 那几个 token 就按普通输入价计费——多收钱，而且不报错。
+			if resp.Usage.CacheReadTokens != tc.wantCacheRead {
+				t.Errorf("CacheReadTokens = %d, 期望 %d", resp.Usage.CacheReadTokens, tc.wantCacheRead)
 			}
 		})
 	}

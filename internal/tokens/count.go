@@ -82,7 +82,9 @@ func (c *Counter) CountTextEstimated(model, text string) Count {
 // tokens 为负时按 0 处理并返回错误：负 token 只可能来自解析错误，
 // 放过去会算出一笔负数消费。
 //
-// **目前只有测试在调它**：上游实测 usage 那条路还没有接进生产，生产走的是估算路径。
+// **目前没有生产调用方**：上游实测用量那两条路都没有经过它——非流式的在
+// `gateway` 里直接给 SourceMeasured，流式的由 `gateway` 的 streamUsage 给。
+// 留着它是为了让「给实测值打来源标记」这件事有个落点，接线时不必再造一个。
 func RecordMeasured(model string, tokens int64) (Count, error) {
 	if tokens < 0 {
 		return Count{}, errors.New("实测 token 数为负，疑似解析错误")
