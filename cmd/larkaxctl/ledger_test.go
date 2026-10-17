@@ -277,6 +277,58 @@ func runBalanceCmd(t *testing.T, args ...string) (string, error) {
 	return out, err
 }
 
+// 余额超出 money 的表示范围时，命令要报错，而不是打印一个偏小的数。
+//
+// 这是这条命令撞到过的现场：库里两笔的和是 92233720513.54775808，而命令
+// 打印 92233720368.54775807（夹到 MaxInt64）并退出 0——比真实和小 145 元，
+// 输出里没有任何迹象。一个会静默变小的余额比一个报错的余额坏得多：
+// 看输出的人会拿它去核对，而那个数是错的。
+func TestLedgerBalanceReportsOverflowInsteadOfClamping(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	account := ledgerAccount()
+	txn := ledger.NewTxnID()
+	insertLedgerEntries(t, db, time.Now(), []ledger.Entry{
+		adjustment(t, txn, account, "92233720368.54775807"),
+		adjustment(t, txn, account, "145.00000001"),
+	})
+	// 用完必须删掉：本包的库是全包共用的，留着这两笔会让后面每一个扫全表的
+	// 用例（`--all` 汇总、对账）都撞上这个溢出。
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM ledger_entries WHERE txn_id = $1`, string(txn)); err != nil {
+			t.Fatalf("清理用例的分录失败: %v", err)
+		}
+	})
+
+	// 单科目。
+	out, err := runBalanceCmd(t, "--account", account.String())
+	if err == nil {
+		t.Fatalf("余额算不出来时命令应当失败，实际输出 %q", out)
+	}
+	if code := exitCode(err); code != exitFailure {
+		t.Errorf("退出码 = %d，期望 %d（其他失败）", code, exitFailure)
+	}
+	// 关键的一条：不许把被夹住的那个数打出去。打出去了就是一次静默的错账，
+	// 而退出码再对也救不回来。
+	if strings.Contains(out, "92233720368.54775807") {
+		t.Errorf("不该打印被夹住的余额：%q", out)
+	}
+	if !strings.Contains(err.Error(), account.String()) {
+		t.Errorf("报错里应当指明是哪个科目：%v", err)
+	}
+
+	// 全库汇总（`--all`）同样要报错，而不是少算一个科目继续打。
+	out, err = runBalanceCmd(t, "--all")
+	if err == nil {
+		t.Fatalf("汇总里有科目算不出来时命令应当失败，实际输出 %q", out)
+	}
+	if !strings.Contains(err.Error(), account.String()) {
+		t.Errorf("报错里应当指明是哪个科目：%v", err)
+	}
+}
+
 // 余额读的是**账本**，不是快照。
 //
 // 这个用例故意只加分录、不改 user_wallets，于是账本（30）与快照（不存在）

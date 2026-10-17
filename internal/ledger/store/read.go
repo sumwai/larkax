@@ -224,6 +224,13 @@ func scanEntry(rows *sql.Rows) (ledger.Entry, string, error) {
 // （ledger.BalanceOf）。将来要提速时改的是这一处的取数方式，而不是把判据
 // 再抄一份到 SQL 里——两份判据迟早不一致，而不一致的表现是两个地方报出
 // 两个余额，且都没有报错。
+//
+// # 求和超出 money 的表示范围时报错
+//
+// 库里的金额列是 numeric(20, 8)，比 money 的 int64 宽，所以「逐条读回来的和」
+// 真的可能放不进 int64。那时报错而不是给一个夹住的数：夹住的值不等于真实和
+// （正向溢出时比真实和小），而余额偏小看起来正是「少扣了钱」（见
+// ledger.BalanceOf）。
 func (s *Store) AccountBalance(ctx context.Context, acct ledger.Account, asset ledger.Asset) (money.Amount, error) {
 	entries, unreadable, err := s.readEntries(ctx, readScope{account: &acct, asset: asset})
 	if err != nil {
@@ -236,7 +243,7 @@ func (s *Store) AccountBalance(ctx context.Context, acct ledger.Account, asset l
 		return money.Zero, fmt.Errorf("科目 %s 的余额读不出来：有 %d 行科目认不出来（%s）",
 			acct, len(unreadable), strings.Join(unreadable, "、"))
 	}
-	return ledger.BalanceOf(entries, acct, asset), nil
+	return ledger.BalanceOf(entries, acct, asset)
 }
 
 // AccountBalancesReport 是一次全库汇总的结果。
@@ -273,8 +280,16 @@ func (s *Store) AccountBalances(ctx context.Context, asset ledger.Asset) (*Accou
 	if err != nil {
 		return nil, err
 	}
+	byAccount, err := ledger.Balances(entries)
+	if err != nil {
+		// 某个科目的和超出 money 能表示的范围时整份汇总都算不出来。与读不出来的
+		// 科目不同（见 AccountBalancesReport.Unreadable）：那不是这一份汇总里的
+		// 一个洞，而是**这一列的数**已经放不进金额类型了，少算一点交出去会让
+		// 「平台收入 = 某个数」看起来像一次成功的汇总。
+		return nil, err
+	}
 	return &AccountBalancesReport{
-		ByAccount:  ledger.Balances(entries),
+		ByAccount:  byAccount,
 		Unreadable: distinctSorted(unreadable),
 	}, nil
 }

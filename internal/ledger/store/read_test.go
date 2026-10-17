@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -230,6 +231,58 @@ func TestAccountBalanceSumsEveryEntry(t *testing.T) {
 	// 上面那条断言因此分辨得出「读账本」与「读快照」两种实现。
 	if balance, _ := walletOf(t, db, userID); balance != "100.00000000" {
 		t.Fatalf("快照余额 = %s，期望还是 100.00000000——用例的前提是两者不一致", balance)
+	}
+}
+
+// 分录之和超出 money 的表示范围时，两条读路径都必须报错，而不是交回一个
+// 被夹住（因而**偏小**）的余额。
+//
+// 这两笔的金额各自合法（numeric(20, 8) 存得下 92233720368.54775807），
+// 和 92233720513.54775808 才是放不进 int64 的那个数——库里的列比 money 宽，
+// 所以这种数据真的进得来，而它是从 `wallet credit` 那条手工入账的路实测撞到的。
+//
+// 夹住的代价在这里看得很清楚：`ledger balance --account` 会打印
+// 92233720368.54775807，比真实和小 145 元，而输出里没有任何迹象。
+func TestBalanceReadPathsReportOverflowInsteadOfClamping(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	// 这个科目不建用户、不建钱包：这条路径读的是分录，与钱包快照无关。
+	acct := ledger.UserAccount(900000 + nextID())
+	txn := ledger.NewTxnID()
+	insertAt(t, db, time.Now(), []ledger.Entry{
+		adjustmentEntry(t, txn, acct, "92233720368.54775807"),
+		adjustmentEntry(t, txn, acct, "145.00000001"),
+	})
+	// 用完必须删掉。本包的库是全包共用的，留着这两笔会让后面每一个扫全表的
+	// 用例（对账、`--all` 汇总）都撞上这个溢出——那看起来像那些用例自己坏了，
+	// 而根因在几轮之前。
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM ledger_entries WHERE txn_id = $1`, string(txn)); err != nil {
+			t.Fatalf("清理用例的分录失败: %v", err)
+		}
+	})
+
+	// 单科目（`ledger balance --account`）。
+	got, err := s.AccountBalance(ctx, acct, ledger.AssetCNY)
+	if err == nil {
+		t.Fatalf("余额算不出来时应当报错，得到 %s（真实和是 92233720513.54775808）", got)
+	}
+	if !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("错误里应当能认出 money.ErrOverflow，得到 %v", err)
+	}
+	if !got.IsZero() {
+		t.Errorf("报错时的返回值不该被当成余额用，得到 %s", got)
+	}
+
+	// 全库汇总（`ledger balance --all`）。它与上一条的处置**一样**是报错：
+	// 读不出来的科目可以少算一行并说出来（见 AccountBalancesReport.Unreadable），
+	// 而「这一列的数放不进金额类型」不是某一行的问题，少算一点交出去会让
+	// 一份汇总看起来像一次成功的汇总。
+	if _, err := s.AccountBalances(ctx, ledger.AssetCNY); !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("汇总也该报出溢出，得到 %v", err)
 	}
 }
 
