@@ -756,9 +756,10 @@ func TestLogFieldValueBoundary(t *testing.T) {
 // 只限单个值是不够的：每个元素都在单值上限之内，而数组长度没有上限。
 // 十万个短字符串曾经原样进日志（实测字段渲染后 32705 字节）。
 //
-// 8192 与 32768 都是写死的：前者是 fieldTotalMaxBytes 能放下的元素个数，
-// 后者是它渲染成 JSON 之后的字节数上限——每个一字节的字符串写成 `"x",`
-// 正好四字节，所以渲染后最多是预算的四倍。
+// 8192 与 32768 都是写死的，两条都是**上界**：一字节的字符串现在也至少记
+// scalarCost，所以实际只收进 1023 个（渲染约 4 KB），离上界还有很远。
+// 紧的那两个数由 TestLogBoundsEmptyStringValues 与
+// TestLogBoundsWorstCaseRenderedBytes 钉着。
 func TestLogBoundsArrayFieldValues(t *testing.T) {
 	var buf bytes.Buffer
 	env := Env{Logger: testLogger(&buf)}
@@ -809,6 +810,138 @@ func TestLogBoundsScalarFieldValues(t *testing.T) {
 	}
 	if len(arr) == 0 {
 		t.Error("一个数字都没收进来")
+	}
+}
+
+// countFields 数一条日志里除固定键之外的字段个数。
+func countFields(entry map[string]any) int {
+	n := 0
+	for k := range entry {
+		switch k {
+		case "time", "level", "msg", "plugin", "request_id":
+		default:
+			n++
+		}
+	}
+	return n
+}
+
+// TestLogBoundsKeyBytes 钉住**键的字节**也走同一份预算。
+//
+// 键曾经一个字节都不记，也没有长度上限：一个 1 MB 的键原样进日志
+// （实测日志行 1000105 字节）。值与键都是「插件决定宿主为此花多少内存」的
+// 入口，而键还额外决定日志行的长度——只记值等于把这一维留着一个洞。
+//
+// 300 与 26 都是写死的：每个条目记 300（键）+ 8（值，一个数字）= 308 字节，
+// 8192 / 308 = 26。**这条用例就是靠这个差分辨「键记账了」与「没记账」**：
+// 只记值的话 32 个条目合计 256 字节，32 个会全进（fieldKeyMax 正好是 32，
+// 数量上限一个都拦不住）。
+func TestLogBoundsKeyBytes(t *testing.T) {
+	var buf bytes.Buffer
+	env := Env{Logger: testLogger(&buf)}
+	fn := capability(t, Standard(env), capLog).Funcs["log"]
+
+	// 键长 300 字节且互不相同（尾三位的序号），于是每个条目都真的占一份预算。
+	obj := jsEval(t, `(() => {
+		const o = {};
+		for (let i = 0; i < 32; i++) o["k".repeat(297) + ("000" + i).slice(-3)] = 1;
+		return o;
+	})()`)
+	if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
+		t.Fatalf("log 出错: %v", err)
+	}
+	if got := countFields(logEntries(t, &buf)[0]); got != 26 {
+		t.Errorf("收进了 %d 个字段，想要 26（每个条目 300 字节的键 + 8 字节的值，8192/308）", got)
+	}
+
+	// 单个键就超过整份预算时：整个条目丢掉，不截短键、也不留一个只剩键名的空壳。
+	buf.Reset()
+	obj = jsEval(t, `({["k".repeat(1000000)]: 1})`)
+	if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
+		t.Fatalf("log 出错: %v", err)
+	}
+	entries := logEntries(t, &buf)
+	if got := countFields(entries[0]); got != 0 {
+		t.Errorf("1 MB 的键放不下，却收进了 %d 个字段", got)
+	}
+	t.Logf("1 MB 的键：日志行 %d 字节", buf.Len())
+	// 1024 是写死的：修前这一行是 1000105 字节（键原样进日志）。
+	if n := buf.Len(); n > 1024 {
+		t.Errorf("日志行 %d 字节，超过 1024：键的字节没有过预算", n)
+	}
+}
+
+// TestLogBoundsEmptyStringValues 钉住**零字节的值**也要记账。
+//
+// 空字符串的字节数是 0，而 spend(0) 恒真——数组那一支只限了初始容量
+// （min(len(keys), 8192/scalarCost)），append 之后长度不受约束，于是一百万个
+// 空字符串能一个字节都不花地全进日志（实测日志行 3000106 字节、一次 log 调用
+// 在宿主侧多分配约 116 MB）。既有用例用的是 `"x"`，每个元素至少占 1 字节，
+// 正好绕开了这一支。
+//
+// 1024 与 1000 都是写死的：预算 8192 除以每个值至少记的 8 字节是 1024 个，
+// 而容器（外层对象 8 + 键 "k" 1 + 数组 8）先扣掉 17，所以实际是 1021 个；
+// 下界 1000 挡的是「记账记成了另一个量级」（例如每个值记 1024 字节，
+// 那就只收得进 8 个）——只钉上界的话，把每个值记成 8192 也照样通过。
+func TestLogBoundsEmptyStringValues(t *testing.T) {
+	var buf bytes.Buffer
+	env := Env{Logger: testLogger(&buf)}
+	fn := capability(t, Standard(env), capLog).Funcs["log"]
+
+	obj := jsEval(t, `({k: new Array(1000000).fill("")})`)
+	if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
+		t.Fatalf("log 出错: %v", err)
+	}
+	arr, ok := logEntries(t, &buf)[0]["k"].([]any)
+	if !ok {
+		t.Fatalf("k 应当是数组，实际 %T", logEntries(t, &buf)[0]["k"])
+	}
+	t.Logf("收进 %d 个空字符串，日志行 %d 字节", len(arr), buf.Len())
+	if len(arr) > 1024 {
+		t.Errorf("数组收进了 %d 个空字符串，超过 1024：零字节的值没有记账", len(arr))
+	}
+	if len(arr) < 1000 {
+		t.Errorf("数组只收进了 %d 个空字符串，记账比名义开销重太多", len(arr))
+	}
+	// 8192 是写死的：修前这一行是 3000106 字节。
+	if n := buf.Len(); n > 8192 {
+		t.Errorf("日志行 %d 字节，超过 8192", n)
+	}
+}
+
+// TestLogBoundsWorstCaseRenderedBytes 钉住**渲染口径**的那个数。
+//
+// 记账不超过 8192，但记账不等于渲染：数字记 8 字节，而最长的 float64
+// （1.7976931348623157e+308）写成 JSON 有 24 字节，加一个逗号是 25——
+// 于是整条 fields 渲染出来最多是 25 × 1021 上下（实测 24610 字节）。
+//
+// 32 KiB 是写死的：它是「这条 fields 最多多少字节」在**日志行**那一侧的答案，
+// 与记账口径的 8192 是两个数，两个都要说。
+//
+// 元素故意用最长的数字而不是 `"x"`：后者一个字节记 8 字节、渲染只有 4 字节，
+// **放大方向是反的**，钉不住上界。
+func TestLogBoundsWorstCaseRenderedBytes(t *testing.T) {
+	var buf bytes.Buffer
+	env := Env{Logger: testLogger(&buf)}
+	fn := capability(t, Standard(env), capLog).Funcs["log"]
+
+	obj := jsEval(t, `({k: Array.from({length: 1000000}, () => 1.7976931348623157e308)})`)
+	if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
+		t.Fatalf("log 出错: %v", err)
+	}
+	arr, ok := logEntries(t, &buf)[0]["k"].([]any)
+	if !ok {
+		t.Fatalf("k 应当是数组，实际 %T", logEntries(t, &buf)[0]["k"])
+	}
+	t.Logf("收进 %d 个最长数字，日志行 %d 字节", len(arr), buf.Len())
+	if len(arr) > 1024 {
+		t.Errorf("数组收进了 %d 个数字，超过 1024", len(arr))
+	}
+	if len(arr) < 1000 {
+		t.Errorf("数组只收进了 %d 个数字，记账比名义开销重太多", len(arr))
+	}
+	if n := buf.Len(); n > 32768 {
+		t.Errorf("日志行 %d 字节，超过 32768（记账 8192，渲染放大三倍上下）", n)
 	}
 }
 

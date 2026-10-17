@@ -32,9 +32,18 @@ const (
 	// fieldTotalMaxBytes 是整条 fields 转换结果的字节预算。
 	//
 	// **只限单个值不够。** fieldKeyMax 限的是对象的键数，而数组的长度没有
-	// 上限——一百万个短字符串照样能撑爆日志。预算同时管字符串的字节与每个值
-	// 本身的名义开销（见 scalarCost），于是「这条 fields 最多值多少字节」
-	// 是一个可以说出来的数。
+	// 上限——一百万个短字符串照样能撑爆日志。所以**凡是进 fields 的东西都要过
+	// spend**：字符串按自己的字节数（至少 scalarCost，见 boundedString）、
+	// 键按自己的字节数、其余每个值按 scalarCost。漏掉任何一份，「这条 fields
+	// 最多值多少字节」就不再是一个可以说出来的数。
+	//
+	// 于是**记账**不超过 8192：数组最多 1023 个元素（容器自己记 8 字节；外层
+	// 对象与键还要再扣几个，实测 1021），对象最多 fieldKeyMax 个条目。
+	//
+	// **记账不等于渲染。** 数字记 8 字节，而最长的 float64 写成 JSON 有 24 字节，
+	// 加一个逗号是 25——所以日志行的上限是 32 KiB 那一档，不是 8192（最坏情形
+	// 实测 24610 字节，见 TestLogBoundsWorstCaseRenderedBytes）。说「整条不超过
+	// 8 KiB」时说的是记账口径；两个数要一起说，否则「上限」会被读成日志行的长度。
 	fieldTotalMaxBytes = 8 << 10
 
 	// scalarCost 是每个非字符串值计入预算的名义开销。
@@ -199,12 +208,18 @@ func valueToGo(v moejs.Value, depth int, budget *fieldBudget) (any, bool) {
 // 截断标记也占预算，所以先把它留出来再切。不留的话总输出会超出预算一小段
 // （每个被截的值多出标记那么长），而「这条 fields 最多多少字节」就成了一句
 // 大约的话——上限说不准就等于没有上限。
+//
+// **每个值至少记 scalarCost。** 字符串的字节数可以是 0，而 spend(0) 恒真，
+// 于是「零字节的值」是一条不记账的路径：数组那一支只限了初始容量，append 之后
+// 长度不受约束，于是一百万个空字符串能一个字节都不花地进日志（实测日志行
+// 3000106 字节，一次 log 调用在宿主侧多分配约 116 MB）。这不是「字符串比标量
+// 贵」，而是「凡是进 fields 的东西都要过 spend」这条规则在零字节上不能有洞；
+// 标量那一支用的就是 scalarCost，这里照同一个形状办，不另发明一个常数。
 func boundedString(s string, budget *fieldBudget) (any, bool) {
-	limit := min(fieldValueMaxBytes, budget.left)
-	if len(s) <= limit {
-		budget.spend(len(s))
+	if len(s) <= fieldValueMaxBytes && budget.spend(max(len(s), scalarCost)) {
 		return s, true
 	}
+	limit := min(fieldValueMaxBytes, budget.left)
 	if limit <= len(truncatedMark) {
 		// 剩下的预算连标记都放不下。这个值整个丢掉，而不是留一个只剩标记的
 		// 空壳——那在日志里比没有这个键还难读。
@@ -263,6 +278,8 @@ func objectToGo(o *moejs.Object, depth int, budget *fieldBudget) (any, bool) {
 
 	out := make(map[string]any, min(len(keys), fieldKeyMax))
 	for _, k := range keys {
+		// 数量到顶：后面的键**不再看**。这与下面「这个条目放不下」不是同一个判据，
+		// 所以一个是 break、一个是 continue。
 		if len(out) >= fieldKeyMax {
 			break
 		}
@@ -270,13 +287,26 @@ func objectToGo(o *moejs.Object, depth int, budget *fieldBudget) (any, bool) {
 		if !ok {
 			continue
 		}
+		// OwnEnumerableStringKeys 只给字符串键与下标键，GoString 两种都覆盖
+		// （对象上写的 "0" 是下标键，字面上要还原成 "0"）。
+		name := k.GoString()
+		// **键也占日志的字节，所以也要过 spend。** 不记的话一个 1 MB 的键原样
+		// 进日志（实测日志行 1000105 字节）：值与键都是「插件决定宿主为此花多少
+		// 内存」的入口，而键还额外决定日志行的长度。
+		if !budget.spend(len(name)) {
+			// 键放不下：整个条目丢掉，与值一样——不截短键，也不记一个只剩键名的
+			// 空壳（那在日志里比没有这个键还难读）。
+			//
+			// 这里是 continue 而不是 break：放不下的是**这个键**，不是后面的键。
+			// （spend 失败会把剩余预算清零，所以后面实际上也放不进东西了；但那是
+			// spend 的性质，不是这条判据的意思——两者不该合成一个。）
+			continue
+		}
 		g, ok := valueToGo(val, depth-1, budget)
 		if !ok {
 			continue
 		}
-		// OwnEnumerableStringKeys 只给字符串键与下标键，GoString 两种都覆盖
-		// （对象上写的 "0" 是下标键，字面上要还原成 "0"）。
-		out[k.GoString()] = g
+		out[name] = g
 	}
 	return out, true
 }
