@@ -22,13 +22,19 @@ const walletUsage = `larkaxctl wallet 管理用户钱包。
 用法：
   larkaxctl wallet open --user <ID 或用户名> [--asset <资产>]
 
-open 给一个已存在的用户开通钱包，余额为 0。它不写任何分录：
-0 余额的户在账本上的形状就是「这个用户在 user 科目上没有分录」，
-与快照里的 0 自洽。带初始金额意味着这次开户同时是一次充值，
-而那属于充值入口（当前还没有），所以这里不带。
+open 给一个已存在的用户开通钱包，余额为 0。它不写任何分录：新开的户在
+账本上没有分录，这个用户在 user 科目上的分录之和为 0，与快照里的 0 自洽。
+带初始金额意味着这次开户同时是一次充值，而那属于充值入口（当前还没有），
+所以这里不带。
 
-**幂等**：钱包已经存在时什么都不做、照样退出 0，输出里写明「已存在」；
-刚建出来的写「已开通」。两者只能靠输出分辨，脚本要判断时看那一行。
+**幂等**：钱包已经存在时什么都不做、照样退出 0。两种结果都退出 0，只能靠
+输出的那一行分辨，它们逐字是：
+
+  刚建出来：已为用户 <用户名>(id=<ID>) 开通 <资产> 钱包，余额 0。
+  本来就有：用户 <用户名>(id=<ID>) 已有 <资产> 钱包，未改动。
+
+脚本要判断时匹配「开通」与「未改动」：前者只出现在刚建出来的那一行，
+后者只出现在本来就有那一行。
 
 资产默认取 settings 的 billing.default_asset（迁移里的默认值是 CNY）。
 --asset 可以显式指定，但当前只有 CNY 一种受支持的资产，写别的会被拒绝。
@@ -84,6 +90,15 @@ func runWalletOpen(args []string) error {
 		return usageErr(errors.New("缺少 --user"))
 	}
 
+	// 「给了 --asset 但值是空白」与「没给 --asset」是两件事，判据只能是
+	// 旗标出现过没有（见 providedFlags）：两者的值都是空串。`--asset "$VAR"`
+	// 而 VAR 没设时静默回落成默认资产，会让脚本拿到一个它没有指定的品种，
+	// 而资产是钱包主键的一部分——悄悄换一个品种就是悄悄开了另一个钱包。
+	if providedFlags(fs)["asset"] && strings.TrimSpace(*asset) == "" {
+		return usageErr(errors.New(
+			"--asset 不能为空：不给这个旗标才表示取 settings 的 billing.default_asset"))
+	}
+
 	// 显式给的资产在连库之前校验（与 user create / apikey create 同一条约定：
 	// 一个写错的命令不该先连上生产库再报错）。留空时只能连库之后读 settings，
 	// 那时再校验。
@@ -108,18 +123,25 @@ func runWalletOpen(args []string) error {
 			// 默认资产取自运行期配置，而不是在代码里写死第二个 CNY：
 			// 这个键的说明就是「新用户钱包的默认资产品种」，而结算用的资产
 			// 也是同一个键（入口读它），两边因此不会各说各的。
-			values, err := settings.Load(ctx, settings.NewPgSource(db))
-			if err != nil {
-				return err
+			//
+			// 这两个变量名不复用 err：上面那个 err 还在作用域里，这里再
+			// `err :=` 是遮蔽，govet 的 shadow 检查器会报（同 db.go 那一处）。
+			values, loadErr := settings.Load(ctx, settings.NewPgSource(db))
+			if loadErr != nil {
+				return loadErr
 			}
-			configured, err := values.String("billing.default_asset")
-			if err != nil {
-				return err
+			configured, assetErr := values.String("billing.default_asset")
+			if assetErr != nil {
+				return assetErr
 			}
 			assetValue = ledger.Asset(configured)
 			if !assetValue.Valid() {
+				// 先给走得通的那条路：--asset 在命令行上就能用。改配置那一句
+				// 要带上前提——这个键的 editable 是 false，只允许由迁移写入，
+				// `settings set` 会直接拒绝，不写清楚会让人白试一遍。
 				return fmt.Errorf(
-					"settings.billing.default_asset = %q 不是受支持的资产（目前只有 %s）：改那个配置，或用 --asset 指定",
+					"settings.billing.default_asset = %q 不是受支持的资产（目前只有 %s）："+
+						"用 --asset 指定一个；那个键要改得写一条迁移（它的 editable 为 false，命令行改不了）",
 					configured, ledger.AssetCNY)
 			}
 		}

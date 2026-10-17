@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
 	"testing"
+
+	"github.com/sumwai/larkax/internal/auth"
 )
 
 // 退出码是给脚本用的对外契约，所以这里逐个钉住**具体的数**，而不是拿常量
@@ -68,6 +71,35 @@ func TestExitCodeConflictIsFour(t *testing.T) {
 	}
 	if got := exitCode(err); got != 4 {
 		t.Errorf("约束冲突的退出码应当是 4，得到 %d（%v）", got, err)
+	}
+}
+
+// TestExitCodeConflictForUnknownUser 取一次「要查的那一行不存在」。
+//
+// 它与上面那条是**两个不同的来源**：上面那条是写入路径撞上约束，这条是解析
+// 路径认不出一个标识（auth.ErrUserNotFound 进了 conflictErrors）。两者共用
+// 退出码 4，而这个哨兵是全局的：`apikey` / `settings` / `snapshot` / `owner` /
+// `wallet` 几条命令的解析路径都靠它。改它的判据（把它从 conflictErrors 里拿
+// 掉、或让某个包不再返回它）会让这些命令的退出码一起从 4 退回 1，而没有任何
+// 一条路径会喊——这条用例就是那个会喊的东西。
+//
+// 挑 apikey create 钉住，是因为它是最先被外部脚本用起来的一条（拿 key 打请求
+// 的第一步），退出码静默变化最容易咬到它。
+func TestExitCodeConflictForUnknownUser(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	err := runCaptured(t, func() error {
+		return runAPIKeyCreate([]string{"--user", uniqueName("nobody")})
+	})
+	if err == nil {
+		t.Fatal("用户不存在时应当报错")
+	}
+	if !errors.Is(err, auth.ErrUserNotFound) {
+		t.Errorf("错误链里没有 auth.ErrUserNotFound：%v", err)
+	}
+	if got := exitCode(err); got != 4 {
+		t.Errorf("要查的那一行不存在时退出码应当是 4，得到 %d（%v）", got, err)
 	}
 }
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"errors"
 	"strconv"
 	"strings"
@@ -38,6 +40,11 @@ func TestWalletOpenRejectsBadArgs(t *testing.T) {
 		{"--user 只有空白", []string{"--user", "   "}, "缺少 --user"},
 		{"多出位置参数", []string{"--user", "1", "extra"}, "不接受位置参数"},
 		{"资产不认识", []string{"--user", "1", "--asset", "USDT"}, "不受支持"},
+		// 「给了 --asset 但值是空白」不是「没给」：`--asset "$VAR"` 而 VAR
+		// 没设时静默回落成默认资产，会让脚本拿到一个它没指定的品种，而品种
+		// 是钱包主键的一部分。这两条钉住它按参数错处置。
+		{"--asset 给了但为空", []string{"--user", "1", "--asset", ""}, "--asset 不能为空"},
+		{"--asset 只有空白", []string{"--user", "1", "--asset", "   "}, "--asset 不能为空"},
 	}
 
 	for _, tc := range cases {
@@ -83,6 +90,51 @@ func TestPrintOpenedWallet(t *testing.T) {
 
 // ── 以下要连库 ──────────────────────────────────────────────────────────
 
+// defaultAssetKey 是新用户钱包默认品种那一行。
+//
+// 它在迁移里的 editable 是 false，`settings set` 改不动，所以用例只能直接
+// 改库——而这条命令正好读它，改库等价于「换一个部署的默认值」。
+const defaultAssetKey = "billing.default_asset"
+
+// setSetting 直接改一行 settings，并在用例结束时还原。
+//
+// 走库而不是走 `settings set`：这个键不允许命令行改（editable=false），
+// 而这里要构造的正是「部署时写成了别的值」这个状态。
+func setSetting(t *testing.T, db *sql.DB, key, value string) {
+	t.Helper()
+	ctx := t.Context()
+
+	var before string
+	if err := db.QueryRowContext(ctx,
+		`SELECT value FROM settings WHERE key = $1`, key).Scan(&before); err != nil {
+		t.Fatalf("读 settings.%s 失败: %v", key, err)
+	}
+	t.Cleanup(func() {
+		// 用 WithoutCancel：用例结束时 ctx 已经被取消，那时再拿它去执行
+		// 还原语句会直接失败，而库会留在被改过的状态上，污染后面的用例。
+		if _, err := db.ExecContext(context.WithoutCancel(ctx),
+			`UPDATE settings SET value = $2 WHERE key = $1`, key, before); err != nil {
+			t.Errorf("还原 settings.%s 失败: %v", key, err)
+		}
+	})
+
+	if _, err := db.ExecContext(ctx,
+		`UPDATE settings SET value = $2 WHERE key = $1`, key, value); err != nil {
+		t.Fatalf("改 settings.%s 失败: %v", key, err)
+	}
+}
+
+// walletRows 数一个用户有几行钱包。
+func walletRows(t *testing.T, db *sql.DB, userID int64) int {
+	t.Helper()
+	var rows int
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT count(*) FROM user_wallets WHERE user_id = $1`, userID).Scan(&rows); err != nil {
+		t.Fatalf("数钱包行失败: %v", err)
+	}
+	return rows
+}
+
 // 开户命令走完整条链路：解析用户 → 开户 → 打印结果，且第二次是空操作。
 //
 // 它不手工插任何钱包行——这正是 #337 要求的那条路径：新用户只有这一条路
@@ -123,6 +175,59 @@ func TestWalletOpenCommand(t *testing.T) {
 	}
 	if balance != "0.00000000" || frozen != "0.00000000" {
 		t.Errorf("余额=%s 冻结=%s，期望都是 0", balance, frozen)
+	}
+}
+
+// 显式 --asset 真的压过 settings 的默认值——它正是那条错误信息推荐的逃生门。
+//
+// 只能这么测：默认值合法时（就是 CNY）两种写法开出来的都是 CNY，分不出
+// 「读了显式值」与「没读、回落成默认」。所以先把 billing.default_asset 改成
+// 一个不受支持的值，再传 --asset CNY——能成就说明显式值确实压过了配置。
+//
+// 同一轮里顺带钉住失败那一侧：默认值非法且不给 --asset 时报错、且**一行钱包
+// 都不留**（报错发生在开户之前）。
+func TestWalletOpenExplicitAssetOverridesSetting(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+	userID := createTestUser(t)
+	ref := strconv.FormatInt(userID, 10)
+
+	setSetting(t, db, defaultAssetKey, `"USDT"`)
+
+	err := runCaptured(t, func() error {
+		return runWalletOpen([]string{"--user", ref})
+	})
+	if err == nil {
+		t.Fatal("默认资产不受支持时应当报错")
+	}
+	if !strings.Contains(err.Error(), defaultAssetKey) {
+		t.Errorf("错误信息 %q 里没有点出 %s", err, defaultAssetKey)
+	}
+	if !strings.Contains(err.Error(), "--asset") {
+		t.Errorf("错误信息 %q 里没有给出 --asset 这条逃生门", err)
+	}
+	if rows := walletRows(t, db, userID); rows != 0 {
+		t.Fatalf("被拒的开户留下了 %d 行钱包", rows)
+	}
+
+	var explicitErr error
+	out, _ := captureStreams(t, func() {
+		explicitErr = runWalletOpen([]string{"--user", ref, "--asset", "CNY"})
+	})
+	if explicitErr != nil {
+		t.Fatalf("显式 --asset CNY 应当压过非法的默认值，却失败: %v", explicitErr)
+	}
+	if !strings.Contains(out, "CNY") {
+		t.Errorf("输出里没有 CNY：%q", out)
+	}
+
+	var asset string
+	if scanErr := db.QueryRowContext(t.Context(),
+		`SELECT asset FROM user_wallets WHERE user_id = $1`, userID).Scan(&asset); scanErr != nil {
+		t.Fatalf("读钱包失败: %v", scanErr)
+	}
+	if asset != "CNY" {
+		t.Errorf("开出来的品种 = %q，期望 CNY（显式值）", asset)
 	}
 }
 

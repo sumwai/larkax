@@ -411,7 +411,9 @@ var ErrInsufficientAvailable = errors.New("可用余额不足")
 
 // ErrNoWallet 表示用户没有对应的钱包行。
 //
-// 它是一条**配置/数据**问题而不是余额问题：正常流程里注册时就该建钱包。
+// 它是一条**配置/数据**问题而不是余额问题：用户该在打请求之前先开一次户
+// （当前由 `larkaxctl wallet open` 建，见 internal/ledger/store/wallet.go）。
+// 注册本身不建钱包行，`user create` 只写 users。
 var ErrNoWallet = errors.New("没有对应的钱包")
 
 // Save 落一次结算：写分录、写用量事件、解冻、扣余额，全在一个事务里。
