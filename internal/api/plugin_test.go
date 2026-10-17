@@ -179,11 +179,13 @@ func newPluginHarness(t *testing.T, reg *plugin.Registry, cands ...route.Candida
 			// 这个文件测的是插件钩子，不关心别名，所以按同名回落。
 			Aliases: identityAliases{},
 		},
-		Candidates:   &pluginCandidates{cands: cands},
-		Reservations: reservations,
-		Settlements:  settlements,
-		Executor:     exec,
-		Now:          now,
+		Candidates: &pluginCandidates{cands: cands},
+		// 同上：这个文件的别名覆盖来源也只求「什么都不覆盖」。
+		AliasOverrides: identityAliases{},
+		Reservations:   reservations,
+		Settlements:    settlements,
+		Executor:       exec,
+		Now:            now,
 	}
 
 	h := New(&fakeAuth{user: User{ID: 7}}, gw)
@@ -203,10 +205,19 @@ func newPluginHarness(t *testing.T, reg *plugin.Registry, cands ...route.Candida
 // identityAliases 是「规范名就是上游名」的别名来源，代表一条别名都没配的
 // 部署。选路要求必须接一个来源（nil 时请求直接失败），所以每个组装 Router
 // 的测试夹具都要给一个；这个文件测的是插件钩子，不关心映射怎么算。
+//
+// 它同时当预留上界那一路的来源用（见 Gateway.AliasOverrides），方法是
+// 「一个渠道都没有覆盖」。
 type identityAliases struct{}
 
-func (identityAliases) UpstreamModel(_ context.Context, _ int64, canonical string) (string, error) {
-	return canonical, nil
+func (identityAliases) Alias(_ context.Context, _ int64, canonical string) (string, map[string]any, error) {
+	return canonical, nil, nil
+}
+
+func (identityAliases) OverridesFor(_ context.Context, _ string, _ []int64) (map[int64]map[string]any, error) {
+	// 空 map 而不是 nil：两个都表示「没有渠道配了覆盖」，而 nil 会撞上
+	// nilnil 那条 linter（同 internal/gateway 的夹具）。
+	return map[int64]map[string]any{}, nil
 }
 
 func pluginCandidate(id int64, model string) route.Candidate {

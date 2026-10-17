@@ -488,6 +488,12 @@ type fakeExecutor struct {
 	// 记它而不是只看入参：规范名到上游名的翻译就发生在调用之前，而
 	// 「发出去的是什么」只有这里看得到（见 alias_test.go）。
 	sent []channel.Request
+	// sentRefs 是同一批请求的**指针**，与 sent 一一对应。
+	//
+	// 按值记的那一份证明不了「结果里交回来的是不是同一个对象」——复制一份
+	// 内容相同的也会让它相等，而那正是 Result.OutboundRequest 要挡的实现
+	// （见 alias_test.go 里那条用例）。
+	sentRefs []*channel.Request
 	// unknownTypes 模拟执行器按 Type 分派适配器：命中的类型返回
 	// channel.ErrUnknownType，与 internal/upstream 的包装方式一致。
 	// 它让「库里有一条当前二进制不认识的渠道」这件事在路由层可被复现。
@@ -497,6 +503,7 @@ type fakeExecutor struct {
 func (f *fakeExecutor) Chat(_ context.Context, ch channel.Channel, req *channel.Request) (*channel.Response, error) {
 	f.calls = append(f.calls, ch.ID)
 	f.sent = append(f.sent, *req)
+	f.sentRefs = append(f.sentRefs, req)
 	if err, ok := f.results[ch.ID]; ok && err != nil {
 		return nil, err
 	}
@@ -924,6 +931,8 @@ type fakeStreamExecutor struct {
 	events  []channel.StreamEvent
 	// sent 见 fakeExecutor.sent。
 	sent []channel.Request
+	// sentRefs 见 fakeExecutor.sentRefs。
+	sentRefs []*channel.Request
 	// 见 fakeExecutor.unknownTypes。
 	unknownTypes map[string]bool
 }
@@ -931,6 +940,7 @@ type fakeStreamExecutor struct {
 func (f *fakeStreamExecutor) ChatStream(_ context.Context, ch channel.Channel, req *channel.Request) (<-chan channel.StreamEvent, error) {
 	f.calls = append(f.calls, ch.ID)
 	f.sent = append(f.sent, *req)
+	f.sentRefs = append(f.sentRefs, req)
 	if err, ok := f.results[ch.ID]; ok && err != nil {
 		return nil, err
 	}

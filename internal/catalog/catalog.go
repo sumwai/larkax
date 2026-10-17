@@ -113,7 +113,10 @@ type Alias struct {
 	UpstreamModel string
 	CanonicalName string
 
-	// Overrides 是对上游模型名的静态覆盖，商家可配。空对象表示没配。
+	// Overrides 是商家给这条别名配的一组上游参数覆盖，空对象表示没配。
+	//
+	// 能覆盖哪些键、与调用方冲突时谁赢，判据在 internal/overrides ——
+	// 写入校验与热路径用的是同一份。
 	Overrides map[string]any
 
 	CreatedAt time.Time
@@ -123,7 +126,7 @@ type Alias struct {
 //
 // # 为什么读与写是两个类型
 //
-// 与 channels.Source / channels.Admin 同一套分工：UpstreamModel 在请求热路径上
+// 与 channels.Source / channels.Admin 同一套分工：Alias 在请求热路径上
 // （每个请求选路都要调），而写入只在运维动作里发生。分成两个类型之后，
 // 热路径拿到的那个对象**没有**写入能力——这是编译期的事实，不是一句约定。
 type Catalog struct {
@@ -133,7 +136,7 @@ type Catalog struct {
 // New 包装数据库句柄。
 func New(db *sql.DB) *Catalog { return &Catalog{db: db} }
 
-// UpstreamModel 把一个规范模型名翻成某个渠道上的上游模型名。
+// Alias 解析这个渠道上这个规范名对应的上游名，连同这条别名上配的参数覆盖。
 //
 // # 为什么查渠道级优先于平台级
 //
@@ -164,11 +167,11 @@ func New(db *sql.DB) *Catalog { return &Catalog{db: db} }
 //
 // 判据按**规范名**分，不按「这一次查不查得到」分：
 //
-//   - 这个规范名在**任何范围**下都没有别名 → 上游就叫这个名字，原样返回。
-//     大多数部署一条别名都没配（规范名与上游名逐字相同），而「查不到就报错」
-//     会把它们每一次请求都打死——那是把一个能用的部署变成完全不能用。
-//     别名表表达的是「哪些模型的上游叫法与规范名不同」，一条都没有的模型
-//     不在这个集合里。
+//   - 这个规范名在**任何范围**下都没有别名 → 上游就叫这个名字，原样返回，
+//     覆盖为空。大多数部署一条别名都没配（规范名与上游名逐字相同），而
+//     「查不到就报错」会把它们每一次请求都打死——那是把一个能用的部署变成
+//     完全不能用。别名表表达的是「哪些模型的上游叫法与规范名不同」，
+//     一条都没有的模型不在这个集合里。
 //   - 有别名，但没有一条覆盖这个渠道 → ErrAliasNotFound。
 //
 // 后一种正是**配了一半**：别名是逐渠道配的，某个渠道漏了的时候静默回落成
@@ -178,66 +181,131 @@ func New(db *sql.DB) *Catalog { return &Catalog{db: db} }
 // 两种情形各有用例钉住（见 integration_test.go）：只判「这次查不到」会让
 // 前者与后者同形，而它们在「一条都没配」与「配了一半」两个部署下的正确
 // 处置正好相反。
-func (c *Catalog) UpstreamModel(ctx context.Context, channelID int64, canonicalModel string) (string, error) {
+//
+// # 覆盖跟着命中的那一条走
+//
+// overrides 是**行**上的一个字段，所以它与上游名来自同一条别名：命中了渠道级
+// 那条就用渠道级那条的覆盖，不会回平台级那条上再凑一次。让两者各取一处的话，
+// 「名字按这家上游的叫法发出去、参数却按平台级那条配」会成为一种配得出来、
+// 但解释不通的状态。
+//
+// 它的语义（能覆盖哪些键、与调用方冲突时谁赢）不在这里，在 internal/overrides
+// ——那份判据的另外两个用户（写入校验、预留上界）也用同一份。
+func (c *Catalog) Alias(ctx context.Context, channelID int64, canonicalModel string) (string, map[string]any, error) {
 	if canonicalModel == "" {
-		return "", errors.New("规范模型名为空")
+		return "", nil, errors.New("规范模型名为空")
 	}
 
-	// 一次取回这个规范名的**全部**别名行，在 Go 里挑。
-	//
-	// 不写成「先查命中的那一行，没命中再查一次『这个规范名配过没有』」：
-	// 那样在**最常见的部署**（一条别名都没配）上要两次往返，而第二次只在
-	// 没命中时才发生——最贵的顺序恰好就是最常见的顺序。
-	//
-	// 行数是个位数：按 canonical_name 有索引，且 `(channel_id, canonical_name)`
-	// 与 `(canonical_name)` 各有一条唯一约束。整行取回来比多一次往返便宜。
-	rows, err := c.db.QueryContext(ctx, `
-		SELECT channel_id, upstream_model
-		  FROM model_aliases
-		 WHERE canonical_name = $1`, canonicalModel)
+	rows, err := c.aliasRows(ctx, canonicalModel)
 	if err != nil {
-		return "", fmt.Errorf("查询模型别名失败: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var (
-		platformUpstream string
-		havePlatform     bool
-		channelUpstream  string
-		haveChannel      bool
-		rowsSeen         int
-	)
-	for rows.Next() {
-		var rowChannelID sql.NullInt64
-		var upstream string
-		if err := rows.Scan(&rowChannelID, &upstream); err != nil {
-			return "", fmt.Errorf("读取模型别名失败: %w", err)
-		}
-		rowsSeen++
-		switch {
-		case rowChannelID.Valid && rowChannelID.Int64 == channelID:
-			channelUpstream, haveChannel = upstream, true
-		case !rowChannelID.Valid:
-			platformUpstream, havePlatform = upstream, true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("读取模型别名失败: %w", err)
+		return "", nil, err
 	}
 
 	// 渠道级优先于平台级：与旧查询的 `ORDER BY (channel_id IS NULL)` 是同一条
 	// 判据（Postgres 里 FALSE 排在 TRUE 前面）。
-	if haveChannel {
-		return channelUpstream, nil
+	if picked, matched := pickAlias(rows, channelID); matched {
+		return picked.UpstreamModel, picked.Overrides, nil
+	}
+	if len(rows) == 0 {
+		// 这个规范名一条别名都没配过：上游就叫这个名字。
+		return canonicalModel, nil, nil
+	}
+	return "", nil, fmt.Errorf("%w：渠道 %d 的 %q", ErrAliasNotFound, channelID, canonicalModel)
+}
+
+// aliasRows 取回这个规范名在**所有范围**下的别名行。
+//
+// 一次取全部、在 Go 里挑，而不是「先查命中的那一行，没命中再查一次『这个规范名
+// 配过没有』」：那样在**最常见的部署**（一条别名都没配）上要两次往返，而第二次
+// 只在没命中时才发生——最贵的顺序恰好就是最常见的顺序。
+//
+// 行数是个位数：按 canonical_name 有索引，且 `(channel_id, canonical_name)`
+// 与 `(canonical_name)` 各有一条唯一约束。整行取回来比多一次往返便宜。
+//
+// 用 aliasQuery 整行取（而不是只取用得上的几列）：列清单与 scanAlias 的假设
+// 只该有一份，而多带几列的代价是几十个字节。
+func (c *Catalog) aliasRows(ctx context.Context, canonicalModel string) ([]Alias, error) {
+	rows, err := c.db.QueryContext(ctx, aliasQuery+` WHERE a.canonical_name = $1`, canonicalModel)
+	if err != nil {
+		return nil, fmt.Errorf("查询模型别名失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := []Alias{}
+	for rows.Next() {
+		alias, err := scanAlias(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, alias)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历模型别名失败: %w", err)
+	}
+	return out, nil
+}
+
+// pickAlias 在给出的别名行里按「渠道级优先于平台级」挑一条。
+//
+// matched 为 false 表示这些行里没有一条覆盖这个渠道——调用方要能把它与
+// 「一行都没有」分开，两者的处置相反（见 Alias）。
+func pickAlias(rows []Alias, channelID int64) (Alias, bool) {
+	var platform Alias
+	havePlatform := false
+	for _, alias := range rows {
+		switch {
+		case alias.ChannelID != 0 && alias.ChannelID == channelID:
+			return alias, true
+		case alias.ChannelID == 0:
+			platform, havePlatform = alias, true
+		}
 	}
 	if havePlatform {
-		return platformUpstream, nil
+		return platform, true
 	}
-	if rowsSeen == 0 {
-		// 这个规范名一条别名都没配过：上游就叫这个名字。
-		return canonicalModel, nil
+	return Alias{}, false
+}
+
+// OverridesFor 返回这个规范名在给定渠道上各自生效的参数覆盖。
+//
+// # 它是给预留用的
+//
+// 预留发生在选路**之前**，那时只有一个候选集，而覆盖是逐渠道配的：这次请求
+// 到底会按哪个上限发出去，要等选路才知道。预留的处置是按**候选集**取上界
+// （与规则那一侧同一个口径，见 pipeline.Reserve），所以这里要的是候选集里
+// 每一个渠道各自生效的覆盖。
+//
+// 逐渠道各查一次会变成 N 次往返，所以它一次取回这个规范名的全部别名行再在
+// Go 里挑——与 Alias 走**同一条查询、同一条优先级**（pickAlias）。
+//
+// # 返回的 map 只含真有覆盖的渠道
+//
+// 没配别名、别名没覆盖这个渠道、以及覆盖是空对象，三者对调用方是同一件事：
+// 按原值走。不进 map 就表达了这个。渠道 id 传 0（平台级）的项不会出现——
+// 预留问的是「这个候选渠道上生效什么」，而 0 不是候选。
+func (c *Catalog) OverridesFor(ctx context.Context, canonicalModel string, channelIDs []int64) (map[int64]map[string]any, error) {
+	if canonicalModel == "" {
+		return nil, errors.New("规范模型名为空")
 	}
-	return "", fmt.Errorf("%w：渠道 %d 的 %q", ErrAliasNotFound, channelID, canonicalModel)
+	out := make(map[int64]map[string]any, len(channelIDs))
+	if len(channelIDs) == 0 {
+		return out, nil
+	}
+
+	rows, err := c.aliasRows(ctx, canonicalModel)
+	if err != nil {
+		return nil, err
+	}
+	for _, channelID := range channelIDs {
+		if channelID == 0 {
+			continue
+		}
+		picked, matched := pickAlias(rows, channelID)
+		if matched && len(picked.Overrides) > 0 {
+			out[channelID] = picked.Overrides
+		}
+	}
+	return out, nil
 }
 
 // Constraints 是 model_catalog 上选路要认的那几列：能力矩阵与两个上限。
@@ -372,7 +440,7 @@ func (c *Catalog) Models(ctx context.Context) ([]Model, error) {
 // Aliases 列出某个渠道配了哪些别名，按上游模型名排序。
 //
 // channelID 传 0 表示列**平台级**别名（channel_id IS NULL）——与
-// UpstreamModel 的 0 同一个含义。两个范围不会混在一条结果里：一条渠道级的
+// Alias 的 0 同一个含义。两个范围不会混在一条结果里：一条渠道级的
 // 别名说的只是「这家上游这么叫」，把它混进平台级清单会让人以为它对所有渠道
 // 生效，而那是错的。
 func (c *Catalog) Aliases(ctx context.Context, channelID int64) ([]Alias, error) {

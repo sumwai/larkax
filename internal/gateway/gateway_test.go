@@ -163,10 +163,16 @@ type fakeExecutor struct {
 	err     error
 	failFor map[int64]error
 	calls   []int64
+	// sentRefs 是交给执行器的那几份请求的**指针**。
+	//
+	// 按值记不下这一点：快照该采的是发出去的那一个对象，而不是一份内容相同
+	// 的副本，而这两者在按值比较时一样（见 snapshot_request_test.go）。
+	sentRefs []*channel.Request
 }
 
-func (f *fakeExecutor) Chat(_ context.Context, ch channel.Channel, _ *channel.Request) (*channel.Response, error) {
+func (f *fakeExecutor) Chat(_ context.Context, ch channel.Channel, req *channel.Request) (*channel.Response, error) {
 	f.calls = append(f.calls, ch.ID)
+	f.sentRefs = append(f.sentRefs, req)
 	if err, ok := f.failFor[ch.ID]; ok {
 		return nil, err
 	}
@@ -213,18 +219,22 @@ type fakeRedactor struct {
 	reqErr  error
 	respErr error
 	mu      sync.Mutex
-	redacts int
 	// responses 按顺序记下交给响应方向脱敏的每一份响应。
 	//
 	// 它钉的是「归一对不对」：流式那条路手里只有事件流，交给脱敏器的
 	// 那份 channel.Response 是网关自己拼的，拼错了不会报错，只会让快照
 	// 少一块或多一块。
 	responses []*channel.Response
+	// requests 按顺序记下交给请求方向脱敏的每一份请求。
+	//
+	// 它钉的是「采的是哪一份」：发出去的那份与调用方发来的那份不是同一个
+	// 对象（见 internal/gateway 的 snapshotRequest）。
+	requests []*channel.Request
 }
 
-func (f *fakeRedactor) Redact(*channel.Request) (*Snapshot, error) {
+func (f *fakeRedactor) Redact(req *channel.Request) (*Snapshot, error) {
 	f.mu.Lock()
-	f.redacts++
+	f.requests = append(f.requests, req)
 	f.mu.Unlock()
 	if f.reqErr != nil {
 		return nil, f.reqErr
@@ -309,8 +319,8 @@ func candidate(id int64, model string) route.Candidate {
 // 所以除了下面那条专门钉这件事的用例，其余用例都用它。
 type identityAliases struct{}
 
-func (identityAliases) UpstreamModel(_ context.Context, _ int64, canonical string) (string, error) {
-	return canonical, nil
+func (identityAliases) Alias(_ context.Context, _ int64, canonical string) (string, map[string]any, error) {
+	return canonical, nil, nil
 }
 
 // fixedAliases 不管渠道、一律把规范名翻成同一个上游名。
@@ -319,8 +329,23 @@ func (identityAliases) UpstreamModel(_ context.Context, _ int64, canonical strin
 // 不同的名字是路由层那条用例的事。
 type fixedAliases struct{ upstream string }
 
-func (f fixedAliases) UpstreamModel(_ context.Context, _ int64, _ string) (string, error) {
-	return f.upstream, nil
+func (f fixedAliases) Alias(_ context.Context, _ int64, _ string) (string, map[string]any, error) {
+	return f.upstream, nil, nil
+}
+
+// identityOverrides 是「一个渠道上都没有参数覆盖」的覆盖来源。
+//
+// 与 identityAliases 分开：那两个是 route.ModelAliases，只要求 Alias 一个
+// 方法；预留上界那一路要的是 OverridesFor（见 Gateway.AliasOverrides）。
+// 用了同一个结构体就得给两个接口各加一个方法，而两个方法各自代表的东西不同
+// ——一个是「名字怎么翻」，一个是「上限是多少」。
+type identityOverrides struct{}
+
+func (identityOverrides) OverridesFor(_ context.Context, _ string, _ []int64) (map[int64]map[string]any, error) {
+	// 空 map 而不是 nil：两个都表示「没有渠道配了覆盖」，而 nil 会让 nilnil
+	// 这条 linter 报「同时回了一个 nil error 和一个无效值」——那句话在
+	// 「一个都查不到」这个正常结论上也是对的，值得按它的建议写。
+	return map[int64]map[string]any{}, nil
 }
 
 type harness struct {
@@ -337,6 +362,12 @@ type harness struct {
 	recorder         *fakeRecorder
 	// aliases 是选路用的别名来源，默认按同名回落。
 	aliases route.ModelAliases
+	// aliasOverrides 是预留上界用的覆盖来源，默认什么也不覆盖。
+	//
+	// 与 aliases 分成两个字段而不是共用一个：它们的接口不同（一个要 Alias、
+	// 一个要 OverridesFor），而共享一个字段就得让两个假实现同时认下两件事
+	// ——那是把两个概念塞进一个类型里，正是这两条路径分开声明接口要避免的。
+	aliasOverrides AliasOverrideSource
 }
 
 func newHarness(t *testing.T, opts ...func(*harness)) *harness {
@@ -364,6 +395,7 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 		releaseFailures:  &fakeReleaseFailures{},
 		recorder:         &fakeRecorder{},
 		aliases:          identityAliases{},
+		aliasOverrides:   identityOverrides{},
 	}
 	for _, o := range opts {
 		o(h)
@@ -375,6 +407,7 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 			Programs: expr.NewCache(16),
 		},
 		Router:           &route.Router{Rand: rand.New(rand.NewSource(1)), Aliases: h.aliases},
+		AliasOverrides:   h.aliasOverrides,
 		Candidates:       h.candidates,
 		Reservations:     h.reservations,
 		Settlements:      h.settlements,
@@ -1254,23 +1287,17 @@ func TestSnapshotOptional(t *testing.T) {
 	}
 }
 
-// 请求快照在**调上游之前**采集：出错要能复现「当时发出去的是什么」。
-func TestRequestSnapshotTakenBeforeUpstream(t *testing.T) {
-	var redactsAtCall int
-	h := newHarness(t)
-	h.gw.Executor = &countingRedactExecutor{
-		inner:   h.executor,
-		redacts: func() int { return h.redactor.redacts },
-		seen:    &redactsAtCall,
-	}
-
-	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
-		t.Fatal(err)
-	}
-	if redactsAtCall != 1 {
-		t.Errorf("调上游时的脱敏次数 = %d，期望 1（快照要先采集）", redactsAtCall)
-	}
-}
+// ── 为什么这里不再有「采集在调上游之前」那条用例 ─────────────────────
+//
+// 请求快照的采集点跟着选路走，因此**在调上游之后**。原先这里钉的是「采集发生
+// 在调上游之前」（借 countingRedactExecutor 数那次调用时的脱敏次数），那时快照
+// 采的就是调用方发来的那份，所以采得早与采得对是同一件事。别名上的参数覆盖生效
+// 之后两者不再是同一件事：要记的是**发出去的那份**请求（上游名翻过、覆盖落上去
+// 了），而它只有选路之后才存在。
+//
+// 判据因此从「什么时候采」换成「采的是哪一个对象」，逐条钉在
+// snapshot_request_test.go：成功、失败、换渠道之后的最后一次尝试、一份都没发
+// 出去，以及流式那条路。这里不再留一条只钉次序的用例——次序不再是要求。
 
 // 快照要记在**发起这次请求的用户**名下。
 //
@@ -1460,22 +1487,6 @@ func TestResponseSnapshotSkippedWithoutUpstreamCall(t *testing.T) {
 	if got := len(h.snapshots.byDirection("response")); got != 0 {
 		t.Errorf("没有上游调用时不该写响应方向的快照，实际 %d 条", got)
 	}
-}
-
-type countingRedactExecutor struct {
-	inner   Executor
-	redacts func() int
-	seen    *int
-}
-
-func (c *countingRedactExecutor) Chat(ctx context.Context, ch channel.Channel, req *channel.Request) (*channel.Response, error) {
-	*c.seen = c.redacts()
-	return c.inner.Chat(ctx, ch, req)
-}
-
-func (c *countingRedactExecutor) ChatStream(ctx context.Context, ch channel.Channel, req *channel.Request) (<-chan channel.StreamEvent, error) {
-	*c.seen = c.redacts()
-	return c.inner.ChatStream(ctx, ch, req)
 }
 
 // ── 其它 ────────────────────────────────────────────────────────────────

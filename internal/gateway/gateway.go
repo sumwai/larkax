@@ -40,6 +40,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/observe"
+	"github.com/sumwai/larkax/internal/overrides"
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/route"
 	"github.com/sumwai/larkax/internal/tokens"
@@ -53,6 +54,38 @@ import (
 type CandidateSource interface {
 	Candidates(ctx context.Context, canonicalModel string) ([]route.Candidate, error)
 }
+
+// AliasOverrideSource 给出别名上配的参数覆盖。
+//
+// 声明在本包、实现在 internal/catalog——与 CandidateSource 同一个做法：
+// 本包不认识 model_aliases 那张表，只要求一个答案。
+//
+// # 它为什么在网关层
+//
+// 参数覆盖改得了 max_tokens，而那是**预留上界**的关键。预留发生在选路之前
+// （见 begin），那时还不知道会走哪个候选，所以上界要按整个候选集算——这件事
+// 只有本包做得了：route 拿得到选中的那个渠道，但它已经是预留之后了。
+//
+// # 必填
+//
+// 与 route 的别名来源同一个理由：缺了它，预留会按调用方给的 max_tokens 算
+// 上界，而别名上的覆盖可以比那个数更大——那时实际输出超过上界，结算撞上界
+// 变成少收，且没有任何地方说得出原因。所以 nil 时请求失败（见
+// ErrNoAliasOverrideSource），不退回一个「看起来能用」的默认值。
+type AliasOverrideSource interface {
+	// OverridesFor 返回这个规范名在给定渠道上各自生效的参数覆盖。
+	//
+	// 返回的 map 只含真有覆盖的渠道（见 internal/catalog 的 OverridesFor）；
+	// 没有覆盖的渠道取值时得到零值，调用方按原值算。
+	OverridesFor(ctx context.Context, canonicalModel string, channelIDs []int64) (map[int64]map[string]any, error)
+}
+
+// ErrNoAliasOverrideSource 表示没有配置别名覆盖的来源。
+//
+// 与 route.ErrNoAliasSource 分开：那是「规范名翻不出上游名」，这是「预留上界
+// 算不出覆盖之后的输出上限」，两件事要对两行装配代码，报同一句话会让人去改
+// 错地方。
+var ErrNoAliasOverrideSource = errors.New("未配置别名覆盖来源：预留上界算不出覆盖之后的输出上限")
 
 // ReservationStore 负责把预留落库、并在不计费的结局里把它放开。
 //
@@ -117,10 +150,11 @@ type CallRecorder interface {
 //
 // # 两个方向回答的不是同一件事
 //
-// **请求方向**（direction = "request"）采于 begin 之后、选路与调上游之前
-// （见 Chat 与 ChatStream 的 snapshotAsync 调用）。那时连打到哪个渠道都还
-// 不知道，所以这类行上的 UpstreamStatus 与 ErrorKind 恒为 nil——它读作
-// 「这一行不适用」，不是「上游没回状态码」。
+// **请求方向**（direction = "request"）采于选路之后、那一次上游调用有了结局
+// 之后（见 Chat 与 ChatStream 的 snapshotAsync 调用）。那类行上的
+// UpstreamStatus 与 ErrorKind 恒为 nil——它读作「这一行不适用」，不是
+// 「上游没回状态码」：这两个字段说的是**上游回来的什么**，而请求方向那一行
+// 记的是发出去的东西（见 snapshotRequest）。
 //
 // **响应方向**（direction = "response"）采于上游那次调用有了结局之后：
 // 非流式在 routeChat 返回之后、流式在那条流读完（或中断）之后。它回答
@@ -161,7 +195,8 @@ type Snapshot struct {
 	// UpstreamStatus 是这次调用**真的拿到过**的上游 HTTP 状态码，2xx 也填。
 	//
 	// nil 是唯一表示「没有上游状态码」的形态，含义有两层，且必须分开读：
-	//   - 请求方向的行永远是 nil——那时还没有上游调用（见类型注释）；
+	//   - 请求方向的行永远是 nil——这一路收不到状态码（它记的是发出去的
+	//     那份请求，见类型注释），不是「上游没回」；
 	//   - 响应方向的行上 nil 表示这次调用**一个 HTTP 响应都没拿到**：
 	//     连不上、TLS 失败、超时、DNS 失败。它不是「忘了填」，也不是
 	//     「上游回了 0 号」——HTTP 里没有 0 这个状态码。
@@ -238,6 +273,12 @@ type Gateway struct {
 	Candidates   CandidateSource
 	Reservations ReservationStore
 	Settlements  SettlementStore
+
+	// AliasOverrides 给出别名上的参数覆盖，**必填**——见
+	// ErrNoAliasOverrideSource。装配层把它与 Router.Aliases 填成同一个
+	// *catalog.Catalog：两处读的是同一张表，两个实例会让「选路时用的覆盖」
+	// 与「算上界时用的覆盖」来自两次不同的读。
+	AliasOverrides AliasOverrideSource
 
 	// Redactor 与 Snapshots 可以都为空——那样就不采集快照。
 	//
@@ -476,17 +517,24 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 	// 「预留一定被放开」这条不变量（见 handle.abort）。
 	defer res.abort(ctx)
 
-	// 请求快照在**调上游之前**采集：出错要能复现「当时发出去的是什么」。
-	// 位置在 begin 之后而不是里面，见 begin 的注释。
-	g.snapshotAsync(ctx, upstream, "request", req.UserID)
-
+	// 请求快照要等选路返回才采得到：它记的是**发出去的那一份**请求，而上游名
+	// 与别名上的参数覆盖都是逐渠道的，选路之前算不出来（见 snapshotRequest）。
 	routed, placed, err := g.routeChat(ctx, upstream, res.candidates, req.CanonicalModel, hooks)
 	// 选路一返回就把「打到了哪儿」拿到手，成功失败都一样：下面每一条
 	// 收尾路径（结算与释放）都要收它，漏传编不过（见 placement）。
 	// 它排在兜底那个 defer 之后注册，所以正常路径上先跑的是这一个。
 	defer res.finish(ctx, placed)
 
-	// 响应方向的快照在**这里**采：上游那次调用已经有了结局（成功或失败），
+	// 请求快照在这里采，用的是**真正发出去的那份请求**（见 snapshotRequest）：
+	// 选路一返回才知道上游收到了什么——上游名与别名上的参数覆盖都是逐渠道的，
+	// 在选路之前算不出来。
+	//
+	// 代价是这一行跟着那次上游调用一起晚落：上游挂住时它也不会先出现
+	// （旧位置在调上游之前采，所以那时它已经开始写了）。换来的是快照记的
+	// 确实是发出去的那份请求——旧位置记的是调用方发来的那份。
+	g.snapshotAsync(ctx, snapshotRequest(routed, upstream), "request", req.UserID)
+
+	// 响应方向的快照也在**这里**采：上游那次调用已经有了结局（成功或失败），
 	// 而插件还没碰过响应——它记录的是上游回来的那份东西。失败也要采，
 	// 那一条正是排查时最该看的。
 	var routedResp *channel.Response
@@ -752,8 +800,8 @@ func (h *handle) routedTo(p placement) {
 //
 // 早先它收一个 *channel.Request，只为在最后采一次请求快照。那条表面之外的
 // 调用方（决策，见 decide.go）没有 chat 形状的请求，而「为了采快照把一个
-// 不适用的类型传进来」正是本包要避免的事。快照改由各条入口自己采——顺序
-// 不变，仍在预留之后、调上游之前。
+// 不适用的类型传进来」正是本包要避免的事。快照改由各条入口自己采——采集点
+// 跟着各自那条路的选路走（见 snapshotRequest）。
 func (g *Gateway) begin(ctx context.Context, req pipeline.Request) (*handle, error) {
 	h := &handle{g: g, req: req}
 
@@ -776,6 +824,20 @@ func (g *Gateway) begin(ctx context.Context, req pipeline.Request) (*handle, err
 	// 的那一个重新匹配——见 finishCharge。
 	req.Candidates = ruleCandidates(cands)
 
+	// 别名上的参数覆盖**也**按候选集取上界，而且必须在预留之前——理由
+	// 见 outputBound。
+	//
+	// 注意它对**决策表面**（/v1/systemone）同样生效：那条路上游收到的请求
+	// 里根本没有 max_tokens 这个字段（见 route.ChatModel 与 decideCall），
+	// 而这里会按别名上配的覆盖去算上界，于是那笔预留可能按一个这次请求根本
+	// 不带的上界冻住余额。**不会少收**（结算按上游实际报的用量），只是可能
+	// 多冻——余额紧的时候决策请求会因此撞上「余额不足」，而原因在那条请求上
+	// 看不出来。要收窄的话，就是让决策路径不走这一段。
+	req.MaxTokens, err = g.outputBound(ctx, req, cands)
+	if err != nil {
+		return nil, err
+	}
+
 	reserved, err := g.Pipeline.Reserve(ctx, req)
 	if err != nil {
 		return nil, err
@@ -797,6 +859,70 @@ func (g *Gateway) begin(ctx context.Context, req pipeline.Request) (*handle, err
 	h.req = req
 
 	return h, nil
+}
+
+// outputBound 算出这次请求的输出 token 上界：候选集里**覆盖之后**的
+// max_tokens 的最大值。
+//
+// # 它为什么必须在这里
+//
+// 别名上的 max_tokens 覆盖会**顶掉调用方给的那个数**，而预留的输出部分正是
+// mul(输出单价, max_tokens)（见 internal/billing）。上界按调用方那个数算，
+// 而实际发出去的请求允许生成得更多时，结算会撞上预留的上界——差额被截掉，
+// 表现为**少收**，且没有任何地方说得出原因：账上那一行看起来完全正常。
+//
+// 预留发生在选路之前，那时还不知道会走哪个候选，所以与规则那一侧同一个做法：
+// 按整个候选集取最大（见 begin）。逐个候选算的收窄需要一个「预留时就知道选中
+// 谁」的次序，而那与「按候选集取」是同一条既有约定，不在本次改动里翻。
+//
+// # 取值就是覆盖之后的那个数，不拿调用方的数当下限
+//
+// 覆盖比调用方给的小时，上界跟着变小——这是对的：上界要跟着**实际发出去
+// 那份请求**走，而那份请求带的是覆盖值。保留调用方那个数当下限会让「商家把
+// 输出限制调小」反而冻住调用方更多的钱，而那是这一列本不该有的副作用。
+//
+// 这条口径与插件那条路今天的处置**不同**（插件只许把 max_tokens 调小，因为
+// 它的补丁改不到预留上界），差异是有意的：覆盖在预留之前就被读到了，所以它
+// 不需要那条约束。谁把插件补丁的边界往这边对齐之前，要先想清楚这一点。
+//
+// # 与 route 的关系
+//
+// 真正发出去的那份请求上应用的覆盖在 route 里（upstreamRequest），它用的是
+// **选中那个渠道**的覆盖——与这里的口径不同（这里只求上界）。两处都从
+// internal/overrides 取值，语义只有一份。
+func (g *Gateway) outputBound(ctx context.Context, req pipeline.Request, cands []route.Candidate) (int64, error) {
+	if g.AliasOverrides == nil {
+		return 0, ErrNoAliasOverrideSource
+	}
+
+	ids := make([]int64, 0, len(cands))
+	for _, c := range cands {
+		ids = append(ids, c.Channel.ID)
+	}
+	byChannel, err := g.AliasOverrides.OverridesFor(ctx, req.CanonicalModel, ids)
+	if err != nil {
+		return 0, fmt.Errorf("读取别名的参数覆盖失败: %w", err)
+	}
+
+	// 初值取零而不是调用方那个数：下面每个候选都会给它一个「覆盖之后」的值
+	// （没配覆盖时就是调用方那个数），所以零只在与候选集为空时取到——而那在
+	// 更前面就被拦下了（见 begin）。这个零值一旦漏出去，表现是 MaxTokens = 0
+	// 被下游拒绝，而不是一个静默的小上界。
+	// 窄化成 int 是因为覆盖那一层按 int 收（它给的是请求体里的那个数）。
+	// 今天所有入口的 max_tokens 都是从 int 来的，所以无损；32 位构建上会
+	// 截断，而截断成负数的表现是下面给出 0，请求以「算不出上界」失败——
+	// 不是静默的小上界，所以这里不做范围检查，只记一笔。
+	var bound int64
+	for _, id := range ids {
+		effective, err := overrides.EffectiveMaxTokens(int(req.MaxTokens), byChannel[id])
+		if err != nil {
+			return 0, fmt.Errorf("渠道 %d 上的别名覆盖算不出输出上界: %w", id, err)
+		}
+		if int64(effective) > bound {
+			bound = int64(effective)
+		}
+	}
+	return bound, nil
 }
 
 // finish 是 handle 的收尾。它总是被 defer 调用，负责把还没结算的那次
@@ -1103,8 +1229,9 @@ func (g *Gateway) finishCharge(ctx context.Context, h *handle, placed placement,
 // 这个分界不是随意的：
 //
 //   - **脱敏是同步的**。它是纯 CPU 计算、不查库不发请求，所以它够快，
-//     而且必须**在调上游之前**完成——否则采集到的是「调用之后」的状态，
-//     而请求快照要回答的正是「当时发出去的是什么」。
+//     而且在请求方向那次调用**回来之后**立刻做（见 snapshotRequest）——
+//     脱敏的对象是那份不变的请求副本，什么时候读都是同一个结果，但早做
+//     意味着它在响应处理之前就完成了。
 //   - **落库是异步的**。它是 I/O，可能慢、可能失败。快照是排障辅助，
 //     整条链路挂掉时计费不该受任何影响，所以它跑在独立的 goroutine 里、
 //     带自己的超时、错误只丢不报。
@@ -1137,12 +1264,39 @@ func (g *Gateway) snapshotAsync(ctx context.Context, req *channel.Request, direc
 	g.saveSnapshotAsync(ctx, snap)
 }
 
+// snapshotRequest 挑出该采进请求快照的那份请求。
+//
+// # 优先用真正发出去的那份
+//
+// 请求快照回答的是「当时发出去的是什么」，而发出去的那份与调用方发来的那份
+// **不是同一份**：上游名按选中的渠道翻过，别名上配的参数覆盖也应用上去了
+// （见 internal/route 的 upstreamRequest）。所以有它就用它。
+//
+// 在选路之前采是采不到的：覆盖逐渠道配，而那时连选哪个渠道都不知道。
+//
+// # 一份都没发出去时退回调用方那份
+//
+// routed 为 nil（候选全被筛掉，选路没跑）或者它那份是 nil（别名翻不出来、
+// context 已取消——见 route.Result.OutboundRequest）时，这一次请求压根没有
+// 「发出去的那份」。那时记录调用方发来的那份仍然有用：它就是要发的那份，
+// 而这一类失败恰恰是最需要复现的（别名配错、渠道全被摘除）。
+//
+// 退回是有判据的而不是猜的：调用方拿到的「什么都没有发出去」这个事实由
+// OutboundRequest 为 nil 表达，快照里那一行只是当时能拿到的最好证据。
+func snapshotRequest(routed *route.Result, caller *channel.Request) *channel.Request {
+	if routed != nil && routed.OutboundRequest != nil {
+		return routed.OutboundRequest
+	}
+	return caller
+}
+
 // responseSnapshotAsync 采集一条响应方向的快照。
 //
 // # 采集点与请求方向不同
 //
-// 请求方向采在调上游之前（那时还不知道会打到哪儿），响应方向采在**那次
-// 调用有了结局之后**：非流式在 routeChat 返回之后、流式在事件流读完
+// 请求方向采在**选路之后**：它记的是发出去的那份请求，而上游名与别名上的
+// 参数覆盖都是逐渠道的，选路之前算不出来（见 snapshotRequest）。响应方向采在
+// **那次调用有了结局之后**：非流式在 routeChat 返回之后、流式在事件流读完
 // （或中断）之后。它回答的是「回来的是什么」，与请求方向配对读。
 //
 // # 三个入参都可以是零值

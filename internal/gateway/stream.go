@@ -68,14 +68,23 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 		return nil, err
 	}
 
-	// 请求快照在**调上游之前**采集，与非流式那条路同一个位置与理由
-	// （见 begin 的注释）。
-	g.snapshotAsync(ctx, upstream, "request", req.UserID)
-
 	// 与 Chat 同一个位置、同一个理由：选路一返回就拿到「打到了哪儿」
 	// （见 placement）。这里尤其不能省——成功那条路的收尾在后台的
 	// pumpStream 里，而中途断流那一次走的是释放，两条路都要收这个值。
 	routed, placed, err := g.routeStream(ctx, upstream, h.candidates, req.CanonicalModel, hooks)
+
+	// 请求快照在**这里**采，与 Chat 同一个位置、同一个理由：它记的是发出去的
+	// 那份请求，而那是选路之后才知道的（见 snapshotRequest）。流式那条路上
+	// 尤其不能拿调用方那份顶替——覆盖同样在这条路上生效。
+	//
+	// 判据与非流式逐字相同，只是结果类型不同（route.StreamResult，见
+	// snapshotRequest 的注释）；代价也相同——上游挂住时这一行也跟着晚落，
+	// 见 Chat 里那段。
+	outbound := upstream
+	if routed != nil && routed.OutboundRequest != nil {
+		outbound = routed.OutboundRequest
+	}
+	g.snapshotAsync(ctx, outbound, "request", req.UserID)
 
 	// 换渠道过程中失败的那些尝试照记——无论这次路由最后成没成，
 	// 那些调用都已经发生过。成功接受的那一个不在这里记：它的结局只有
