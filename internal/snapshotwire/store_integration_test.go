@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/sumwai/larkax/internal/testdb"
 )
 
 // 集成测试需要一个真实的 PostgreSQL。
@@ -27,34 +27,11 @@ import (
 // CI 里那个环境变量一直在，并有专门的检查确认集成测试真的跑了。
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-
-	dsn := os.Getenv("LARKAX_DB_DSN")
-	if dsn == "" {
-		t.Skip("未设置 LARKAX_DB_DSN，跳过集成测试（CI 里会跑）")
-	}
-
-	handle, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("打开数据库失败: %v", err)
-	}
-	t.Cleanup(func() { _ = handle.Close() })
-
-	if pingErr := handle.PingContext(context.Background()); pingErr != nil {
-		t.Skipf("连不上数据库，跳过集成测试: %v", pingErr)
-	}
-
-	// 表必须已经存在：迁移由 larkaxctl 或测试环境准备，本包不负责建表。
-	var exists bool
-	err = handle.QueryRowContext(context.Background(),
-		`SELECT to_regclass('public.request_snapshots') IS NOT NULL`).Scan(&exists)
-	if err != nil {
-		t.Fatalf("检查快照表失败: %v", err)
-	}
-	if !exists {
-		t.Skip("request_snapshots 不存在，先跑 larkaxctl migrate up")
-	}
-	return handle
+	return testdb.Open(t)
 }
+
+// TestMain 给这个包建一个独立的库，跑完删掉（见 internal/testdb）。
+func TestMain(m *testing.M) { os.Exit(testdb.Main(m)) }
 
 // ownDay 是这条用例专用的那一天。
 //
