@@ -200,6 +200,30 @@ larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled
 - 库里本来就是 JSON 的列（渠道的 `setting`、别名的 `overrides`、快照的
   `skeleton`）原样放进去，不再包一层。
 
+### 时刻与时区
+
+**一条规矩：机器读的时刻一律 UTC，终端显示的时刻按本机时区。** 同一个瞬间
+在两个地方需要不同的写法，这不是不一致——两条路各自服务一类读者。
+
+| 路径 | 谁在用 | 怎么打 | 为什么 |
+|---|---|---|---|
+| `--format json` | 脚本、探针（`\| jq`） | `jsonTime` / `jsonTimePtr` / `jsonTimeOrNull`（`cmd/larkaxctl/format.go`），恒 `t.UTC()`、精度到纳秒 | 同一行在两台机器上必须编出**同一个**字符串，比对、缓存键、对账的一方不会去猜写它的机器在哪个时区 |
+| 终端表格 / 状态行 | 在终端里扫一眼的人 | 各命令自己的 `Format(time.RFC3339)`，按进程时区 | 「这是几点」按本机时区读才是对的 |
+| 内部观测面的 HTTP JSON | 别的程序 | `internal/api/ratelimitusage.go` 的时间栏、`internal/plugin/adapter.go` 给插件的 `resets_at`，两者恒 `.UTC()` | 同上：机器读的不能带本机时区 |
+
+**为什么这件事值得单列一节**：库里那几列是 `timestamptz`，而 pgx 交回来的
+`time.Time` 带的是**进程时区**（`time.Local`）——同一行在一台 UTC 的机器与
+一台 +08:00 的机器上，`t.Format(time.RFC3339)` 出来是两个不同的字符串。CI
+默认跑在 UTC，本地开发机也常是 UTC，于是这类偏差**不会自己冒出来**：修的是
+被发现的实例，不是这一类。
+
+所以出 JSON 的时刻只有 `jsonTime` 一条路，**别在任何一处再手工 `Format`**：
+多一处就多一处要记得带 `.UTC()` 的地方。`cmd/larkaxctl` 里这条规矩由
+`TestJSONTimeIsUTCWhateverTheProcessZone`（`format_test.go`）钉住——它在
+`TZ=Asia/Shanghai` 下会显形、在 UTC 下不会，`gates.yml` 因此单开一步在非 UTC
+时区下把受影响的包再跑一遍，并先证明那个时区真的生效了（tzdata 缺失时
+`time.Local` 会静默回落成 UTC，那样的绿是假的）。
+
 ### 哪些命令接上了
 
 **只读类**（`list` / `get` / `resolve` / `explain` / `balance` / `verify` /

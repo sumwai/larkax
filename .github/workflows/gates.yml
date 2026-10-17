@@ -193,6 +193,32 @@ jobs:
       - name: 覆盖率摘要
         run: go tool cover -func=coverage.out | tail -1
 
+      # 「机器读的时刻恒 UTC」这道门。CI runner 默认 UTC，而库里 timestamptz
+      # 经 pgx 交回来的 time.Time 带的是 time.Local——于是在一台本地恰好也是
+      # UTC 的机器上，去掉某个时刻的 .UTC() 与留着它编出**同一个**字符串，
+      # 这一步在结构上必然通过，就是个摆设。所以它自己把进程时区定成
+      # Asia/Shanghai，把这类偏差变成一次必然的失败（TZ 生效时，去掉 .UTC()
+      # 会当场变红；见 cmd/larkaxctl 的 TestJSONTimeIsUTCWhateverTheProcessZone
+      # 与 gates 的这一步是一对）。
+      #
+      # **先证明这个时区真的生效了**：tzdata 缺失时 time.Local（与 `date +%z`）
+      # 会静默回落成 UTC，而那时这一步会绿得毫无意义——「判据没跑成」与
+      # 「通过」在输出里长得一样（见 LESSONS.md 第 16 条）。
+      #
+      # 取哪几个包：机器读输出里带时刻的那几个（见 docs/cli-output.md 的
+      # 「时刻与时区」）——cmd/larkaxctl、internal/api、internal/plugin。
+      - name: 非 UTC 时区下的时刻门禁
+        env:
+          TZ: Asia/Shanghai
+        run: |
+          offset=$(date +%z)
+          echo "进程时区 = $TZ，UTC 偏移 = $offset"
+          if [ "$offset" != "+0800" ]; then
+            echo "::error::TZ=Asia/Shanghai 没有生效（date +%z = $offset）——多半是缺 tzdata，这样跑出来的绿是假的。"
+            exit 1
+          fi
+          go test -count=1 ./cmd/larkaxctl/... ./internal/api/... ./internal/plugin/...
+
       # 集成测试在拿不到 DSN 时会**跳过**，而「跳过」在输出里和「通过」
       # 长得一样。这一步让「集成测试真的跑了」可被检查——
       # 否则 CI 会在一个从没跑过集成测试的状态下报绿。

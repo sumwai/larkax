@@ -53,6 +53,8 @@ CI 目前包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-r
 导出方法调用点门禁及其自测（`check-deadmethods.sh`）、
 测试函数名门禁及其自测（`check-test-names.sh`）、
 索引与正文一致性门禁及其自测（`check-lessons-index.sh`）、
+非 UTC 时区下的时刻门禁（`TZ=Asia/Shanghai` 再跑一遍受影响的包，
+见 `docs/cli-output.md` 的「时刻与时区」）、
 契约测试（`contract/`，见下）。
 集成测试另有一道**「确认真跑了」的门禁**——它逐包显式跑依赖数据库的那些包，
 被 `t.Skip` 时报错，因为「跳过」在输出里和「通过」长得一样
