@@ -193,6 +193,13 @@ go run ./cmd/larkaxctl calendar import ./cn-2031.json
 
 必填项缺失时服务拒绝启动并一次列出全部问题，不会带着半截配置跑起来。
 
+上表是**服务**（`cmd/larkax`）的清单。运维命令（`cmd/larkaxctl`）的配置面小得多：
+它只读 `LARKAX_DB_DSN`、`LARKAX_LOG_LEVEL` 与 `LARKAX_ENV`，缺 DSN 才失败。
+`LARKAX_ROLE` 决定不了任何一条运维命令的成败——命令不属于任何角色——所以
+`larkaxctl migrate up` 在没有配角色的机器上照样能跑。真正需要主密钥的命令只有
+两个（`channel` 的写入与 `rotate`），它们自己读 `LARKAX_MASTER_KEYS`。
+两个入口见 `internal/config` 的 `Load` 与 `LoadOps`。
+
 **为什么这么少：** 环境变量必须跟着数据一起走。备份恢复或换机器时漏了一个变量，
 数据就可能不可用，而这类错误往往几周后才被发现。所以只有「连上数据库之前就必须拿到」
 的值才做成环境变量（DSN、主密钥、监听地址），其余全部放在数据库的 `settings` 表里。
@@ -412,10 +419,13 @@ go run ./cmd/larkaxctl price list
 **退出码**：`0` 成功、`1` 其他失败、`2` 命令行参数错、`3` 连不上数据库、
 `4` 约束冲突（唯一键、外键、要改的那一行不存在）。脚本按这个分派处置。
 
-渠道的写入命令需要主密钥（`LARKAX_MASTER_KEYS`）：凭证是信封加密的，只有
+需要主密钥（`LARKAX_MASTER_KEYS`）的命令只有两个：渠道的**写入**
+（`channel create` / `update`）与 `rotate`。凭证是信封加密的，只有
 `credential.Sealer` 能产出可解开的密文，直接往库里写一行 `bytea` 补不上。
-它读的是这个环境变量本身，与 `LARKAX_ROLE` 无关。`channel list` / `enable` /
-`disable` 不碰凭证，没有主密钥也能跑。
+它们读的是这个环境变量本身，与 `LARKAX_ROLE` 无关——运维命令不属于任何角色，
+把命令的成败绑到角色上，会让 `LARKAX_ROLE=worker` 时明明设好了主密钥却报
+「没有读到主密钥」。其余命令不碰凭证，没有主密钥也能跑，其中
+`channel list` / `enable` / `disable` 连密钥材料都不需要。
 
 每条子命令的完整用法见 `larkaxctl <子命令> --help`，例如
 `go run ./cmd/larkaxctl channel --help`。

@@ -288,3 +288,30 @@ func TestInternalHandlerServesHealthAndMetrics(t *testing.T) {
 		})
 	}
 }
+
+// 服务这一侧必须继续校验主密钥：gateway（角色未设置时的默认值）缺它就拒绝启动。
+//
+// 它与 config.LoadOps 是一对——运维命令的加载入口不校验角色与主密钥，而服务的
+// 入口照旧校验。这条用例钉的是**服务的入口**：把 run() 里的 config.Load 换成
+// LoadOps 会让它挂，而 internal/config 里那几条用例照不到这一处——它们测的是
+// 两个函数各自的行为，不是「谁在用哪一个」。
+//
+// 上面那条 TestTrafficRoleWithoutMasterKeyFailsToStart 测的是装配层
+// （publicHandler），绕过了配置加载；两层都要有，缺哪一层都能被改坏而不报。
+func TestServiceRefusesToStartWithoutMasterKey(t *testing.T) {
+	// 角色清掉而不是设成 gateway：默认值就是 gateway，而「不设」正是
+	// 手工部署时的情形，也是 issue #343 里出错的那一种。
+	t.Setenv("LARKAX_ROLE", "")
+	t.Setenv("LARKAX_MASTER_KEYS", "")
+	// 指向一个没有监听者的端口。配置加载失败时走不到这里；万一配置那一步
+	// 被放松了，连库失败也会让 run() 返回，用例不会挂在那里等。
+	t.Setenv("LARKAX_DB_DSN", "postgres://larkax:placeholder@127.0.0.1:1/larkax?sslmode=disable")
+
+	err := run()
+	if err == nil {
+		t.Fatal("gateway 角色缺主密钥时服务不该启动")
+	}
+	if !strings.Contains(err.Error(), "LARKAX_MASTER_KEYS") {
+		t.Errorf("错误信息应当点明缺的是主密钥: %v", err)
+	}
+}
