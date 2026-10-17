@@ -404,6 +404,68 @@ func TestSettlementWritesBackChannel(t *testing.T) {
 	}
 }
 
+// 客户端断开这件事要真的落库，而它只有这一个落点。
+//
+// 网关当场判定「客户端断的」（internal/gateway 的 pumpStream），一路带到
+// pipeline.Outcome 与 pipeline.Charge；库里留下痕迹的只有 markSettled 这一条
+// UPDATE。在它接上之前，那个信号走到 Charge 就到头了——「这个渠道是不是经常
+// 被客户端掐断」这个问题因此答不出来，而客户端断开是真实发生的事。
+//
+// 两个方向都钉：取消时要留下时刻，没取消时必须留 NULL。只钉前一半的话，
+// 把这一列写成恒有值也能通过，而那会让每一笔账单都记成「客户端断的」。
+func TestSettlementRecordsClientCancel(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+
+	for _, tc := range []struct {
+		name     string
+		canceled bool
+	}{
+		{"客户端断开的流式请求", true},
+		{"正常结束的请求", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requestID := reqID(t)
+			req := testRequest(userID, requestID)
+			if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
+				t.Fatal(err)
+			}
+
+			charge := &pipeline.Charge{
+				RequestID: requestID, UserID: userID, Asset: "CNY",
+				Entries:        consumeEntries(t, userID, "12"),
+				ClientCanceled: tc.canceled,
+			}
+			charge.Settlement.Actual = money.MustParse("12")
+
+			if err := s.Save(ctx, req, charge); err != nil {
+				t.Fatalf("结算失败: %v", err)
+			}
+
+			at := clientCanceledAt(ctx, t, db, requestID)
+			if !tc.canceled {
+				if at.Valid {
+					t.Errorf("没有取消的账单写下了 client_canceled_at = %v，期望 NULL", at.Time)
+				}
+				return
+			}
+			if !at.Valid {
+				t.Fatal("客户端取消的账单没有留下 client_canceled_at")
+			}
+			// 钉的是「它是个真实的时刻」而不只是「非空」：写死一个常量
+			// （例如纪元）也能让非空断言通过，而那一列的全部价值就在于
+			// 「什么时候断的」。界放得宽是有意的——这里只排除明显不对的值，
+			// 不要求它与测试机的钟对齐。
+			if age := time.Since(at.Time); age > time.Hour || age < -time.Minute {
+				t.Errorf("client_canceled_at = %v（距今 %v），不像刚刚写下的时刻", at.Time, age)
+			}
+		})
+	}
+}
+
 // 并发重放也只能扣一次。
 //
 // 这条与上一条不同：它压的是「幂等判断在加锁之后」这个顺序。

@@ -139,11 +139,11 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 	var id int64
 	err = a.db.QueryRowContext(ctx, `
 		INSERT INTO channels
-			(owner_user_id, name, type, base_url, credential_enc,
+			(owner_user_id, name, type, base_url, credential_enc, credential_hint,
 			 status, models, weight, priority, setting)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
 		RETURNING id`,
-		owner, name, req.Type, baseURL, envelope,
+		owner, name, req.Type, baseURL, envelope, credential.Hint(req.Credential),
 		StatusEnabled, models, weight, req.Priority, string(setting)).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("创建渠道失败: %w", err)
@@ -239,6 +239,9 @@ func (a *Admin) Update(ctx context.Context, req UpdateRequest) error {
 			return err
 		}
 		add("credential_enc", envelope)
+		// 提示与密文一起换：留着旧提示会让清单上的「末四位」指向
+		// 一把已经不在这条渠道上的凭证——界面拿它做辨识，而它认错了人。
+		add("credential_hint", credential.Hint(*req.Credential))
 	}
 
 	if len(sets) == 0 {
@@ -317,6 +320,16 @@ type ChannelInfo struct {
 	// 列出它不需要任何密钥材料，也不需要解密。
 	CredentialKeys []string
 
+	// Hint 是凭证的末四位（见 credential.Hint），供界面辨识。
+	//
+	// 它与 CredentialKeys 回答的是两个不同的问题：那一栏说「挂在哪把钥匙下」，
+	// 这一栏说「挂的是我刚发的那个凭证吗」。空表示这一行没有提示——建渠道时
+	// 没写、或凭证短到没有末四位可辨。
+	//
+	// 它**不是**凭证的一部分：库里存的仍然只有密文，这一列是明文尾部几个字符，
+	// 由写入路径在封装之前顺手取下来（密文一旦生成就再也取不到了）。
+	Hint string
+
 	// CredentialErr 说明 CredentialKeys 为什么是空的。为 nil 表示信封头部解析正常。
 	//
 	// 它记的是**结构**问题：密文被截断、被手工改过。列举不碰钥匙，
@@ -369,9 +382,16 @@ func (a *Admin) List(ctx context.Context) ([]ChannelInfo, error) {
 // credential_enc 也在里面，但只用来算 CredentialKeys，不会离开本包：
 // 解码之后它变成一串主密钥标识，密文本体到此为止。
 //
+// credential_hint 是唯一一列**明文**的凭证信息（末四位），它本来就是给界面
+// 看的，所以照原样带出去。这一条与「只存密文」不矛盾：密文仍然是唯一的
+// 凭证本体，提示是写入时顺手取下的尾部字符，解不出任何东西。
+//
 // 列名与 candidateQuery 保持同一套（models 同样用 array_to_json 转成 JSON 文本，
 // 因为 database/sql 不认 text[]）——两处对同一列的读法不一致时，
 // 症状是「写入路径存进去的值读出来不对」，而它只在某些行上出现。
+//
+// 提示只有 listQuery 取，candidateQuery 不取：候选集是推理热路径，
+// 多带一列明文尾部没有任何用处。
 const listQuery = `
 SELECT
     c.id,
@@ -385,6 +405,7 @@ SELECT
     c.priority,
     c.setting,
     c.credential_enc,
+    c.credential_hint,
     c.created_at,
     c.updated_at
   FROM channels c
@@ -396,15 +417,20 @@ func scanInfo(rows *sql.Rows) (ChannelInfo, error) {
 		modelsJSON string
 		settingRaw []byte
 		envelope   []byte
+		hint       sql.NullString
 	)
 	err := rows.Scan(
 		&info.ID, &info.OwnerUserID, &info.Name, &info.Type, &info.BaseURL,
 		&info.Status, &modelsJSON, &info.Weight, &info.Priority, &settingRaw,
-		&envelope, &info.CreatedAt, &info.UpdatedAt,
+		&envelope, &hint, &info.CreatedAt, &info.UpdatedAt,
 	)
 	if err != nil {
 		return ChannelInfo{}, fmt.Errorf("读取渠道行失败: %w", err)
 	}
+	// NULL 与空串在这里合并成同一个值：这一列没有「空提示」与「没有提示」
+	// 的区分——凭证短到不足四位时 credential.Hint 原样返回，那种串也不会是
+	// 空的（写入路径拒绝空凭证）。
+	info.Hint = hint.String
 
 	models, err := decodeModels(info.ID, modelsJSON)
 	if err != nil {

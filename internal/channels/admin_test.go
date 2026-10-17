@@ -84,6 +84,33 @@ func rawCredentialEnc(t *testing.T, db *sql.DB, id int64) []byte {
 	return enc
 }
 
+// rawCredentialHint 直接读库里的提示列，用来断言「写入侧到底存了什么」。
+func rawCredentialHint(t *testing.T, db *sql.DB, id int64) string {
+	t.Helper()
+	var hint sql.NullString
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT credential_hint FROM channels WHERE id = $1`, id).Scan(&hint); err != nil {
+		t.Fatalf("读 credential_hint 失败: %v", err)
+	}
+	return hint.String
+}
+
+// listInfo 从管理面的列举结果里挑出指定 id 的那条。
+func listInfo(t *testing.T, admin *Admin, id int64) ChannelInfo {
+	t.Helper()
+	infos, err := admin.List(context.Background())
+	if err != nil {
+		t.Fatalf("List 出错: %v", err)
+	}
+	for _, info := range infos {
+		if info.ID == id {
+			return info
+		}
+	}
+	t.Fatalf("List 里没有渠道 %d（共 %d 条）", id, len(infos))
+	return ChannelInfo{}
+}
+
 func rawOwner(t *testing.T, db *sql.DB, id int64) sql.NullInt64 {
 	t.Helper()
 	var owner sql.NullInt64
@@ -205,9 +232,76 @@ func TestCreateStoresSealedCredential(t *testing.T) {
 	}
 }
 
+// 凭证提示（末四位）要在写入路径上落库，而这是**唯一**的时机：密文一旦生成，
+// 明文就再也拿不到了，事后补不了（没有回填的可能）。
+//
+// 断言写的是具体字符。断言「长度是 4」的话，取成前四位、取成末三位都能过，
+// 而清单上显示的是另一个凭证的尾巴——它看起来同样正常，运维会照它去比对。
+func TestCreateStoresCredentialHint(t *testing.T) {
+	db := testDB(t)
+	admin := newAdmin(t, db, testSealer(t))
+	const plaintext = "test-key-AAAABBBBCCCCdddd"
+
+	req := baseRequest("ch-hint-" + itoa(nextID()))
+	req.Credential = plaintext
+	id, err := admin.Create(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Create 出错: %v", err)
+	}
+
+	if got := rawCredentialHint(t, db, id); got != "dddd" {
+		t.Errorf("credential_hint = %q，期望 dddd（明文末四位）", got)
+	}
+
+	// 管理面要读得到它。只写不读的列，界面拿不到，等于没接。
+	if got := listInfo(t, admin, id).Hint; got != "dddd" {
+		t.Errorf("List 的 Hint = %q，期望 dddd", got)
+	}
+}
+
+// 换凭证时提示要跟着换。
+//
+// 留着旧提示会让清单上的「末四位」指向一把**已经不在这条渠道上**的凭证，
+// 而界面拿它做辨识——它认错了人，比没有提示更坏。
+//
+// 另一半同样要钉：不给凭证的 update 里根本不该出现这两列（与 credential_enc
+// 同一条规则），否则重封一次会换掉数据密钥，事后答不出「凭证什么时候换过」。
+func TestUpdateRefreshesCredentialHint(t *testing.T) {
+	db := testDB(t)
+	admin := newAdmin(t, db, testSealer(t))
+
+	req := baseRequest("ch-hint-upd-" + itoa(nextID()))
+	req.Credential = "test-key-oldoldoldeeee"
+	id, err := admin.Create(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Create 出错: %v", err)
+	}
+
+	// 换凭证：提示跟着换。
+	replaced := "test-key-newnewnewffff"
+	if err := admin.Update(context.Background(), UpdateRequest{
+		ID: id, Credential: &replaced,
+	}); err != nil {
+		t.Fatalf("Update 出错: %v", err)
+	}
+	if got := rawCredentialHint(t, db, id); got != "ffff" {
+		t.Errorf("换凭证后 credential_hint = %q，期望 ffff", got)
+	}
+
+	// 不给凭证：提示与密文都不动。
+	name := "ch-hint-upd-renamed-" + itoa(nextID())
+	if err := admin.Update(context.Background(), UpdateRequest{ID: id, Name: &name}); err != nil {
+		t.Fatalf("Update 出错: %v", err)
+	}
+	if got := rawCredentialHint(t, db, id); got != "ffff" {
+		t.Errorf("没给凭证的 update 动了 credential_hint：%q，期望仍是 ffff", got)
+	}
+}
+
 // owner_user_id 传 0 是「平台自营」，库里要存 NULL 而不是 0——
 // 0 会去匹配一个不存在的用户，外键直接拒绝。
 func TestCreatePlatformChannelStoresNullOwner(t *testing.T) {
+
 	db := testDB(t)
 	sealer := testSealer(t)
 	admin := newAdmin(t, db, sealer)
@@ -400,7 +494,7 @@ func TestListReturnsNoCiphertext(t *testing.T) {
 	want := []string{
 		"ID", "OwnerUserID", "Name", "Type", "BaseURL", "Status", "Models",
 		"Weight", "Priority", "Setting", "CreatedAt", "UpdatedAt",
-		"CredentialKeys", "CredentialErr",
+		"CredentialKeys", "Hint", "CredentialErr",
 	}
 	typ := reflect.TypeOf(ChannelInfo{})
 	names := make([]string, 0, typ.NumField())

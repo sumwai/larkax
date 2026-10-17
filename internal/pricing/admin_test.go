@@ -43,6 +43,33 @@ func createRule(t *testing.T, admin *Admin, req CreateRequest) int64 {
 	return id
 }
 
+// ruleVersions 按版本号顺序读出这条规则的表达式历史。
+//
+// 只取 expr 一列：这张表承诺的就是「成交价的依据留痕」。
+func ruleVersions(t *testing.T, db *sql.DB, ruleID int64) []string {
+	t.Helper()
+
+	rows, err := db.QueryContext(context.Background(),
+		`SELECT expr FROM pricing_rule_versions WHERE rule_id = $1 ORDER BY version`, ruleID)
+	if err != nil {
+		t.Fatalf("读版本历史失败: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []string
+	for rows.Next() {
+		var expr string
+		if err := rows.Scan(&expr); err != nil {
+			t.Fatalf("读版本历史失败: %v", err)
+		}
+		out = append(out, expr)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("遍历版本历史失败: %v", err)
+	}
+	return out
+}
+
 // listAll 列举全部规则，出错就结束用例。
 func listAll(t *testing.T, admin *Admin) []RuleInfo {
 	t.Helper()
@@ -542,6 +569,66 @@ func TestUpdateExprReadsBack(t *testing.T) {
 	}
 	if got.Version == 0 {
 		t.Error("Version 应当由源码算出，不该是 0")
+	}
+}
+
+// 版本历史：建规则留第一版，改表达式再留一版。
+//
+// 钉的是**每一版的表达式本身**，不是「有几行」：只数行数的话，把每一版都写成
+// 同一个（例如都写当前值）也能过，而这张表的全部用途就是事后回答
+// 「这个价是什么时候被改成这样的」——写成同一个值等于没记。
+func TestRuleVersionsRecordExpressionHistory(t *testing.T) {
+	db := testDB(t)
+	admin := NewAdmin(db)
+	ctx := context.Background()
+
+	before := `{"prompt": 0.00001}`
+	after := `{"prompt": 0.00007}`
+	id := createRule(t, admin, CreateRequest{
+		Scope: ScopePlatform, Name: unique("rule-version"), Expr: before,
+	})
+
+	if got := ruleVersions(t, db, id); !reflect.DeepEqual(got, []string{before}) {
+		t.Fatalf("建规则后的版本历史 = %v，期望只有第一版 %q", got, before)
+	}
+
+	if err := admin.Update(ctx, UpdateRequest{ID: id, Expr: &after}); err != nil {
+		t.Fatalf("Update 出错: %v", err)
+	}
+	if got := ruleVersions(t, db, id); !reflect.DeepEqual(got, []string{before, after}) {
+		t.Errorf("改表达式后的版本历史 = %v，期望 [%q %q]", got, before, after)
+	}
+}
+
+// 表达式没变就不留版本。
+//
+// 这张表记的是**成交价的依据**：改名字、改优先级、改生效时间都不改变任何
+// 一笔已经算出来的钱。为它们插行会让版本历史里塞满「其实没变」的噪声，
+// 而它的读者正是要在差额出现时一眼看出「价是什么时候被改的」。
+//
+// 传一个与现值**相同**的表达式同样不算一次改价——判据是「值变没变」，
+// 不是「这次有没有传这个字段」。
+func TestRuleVersionsSkipUnchangedExpression(t *testing.T) {
+	db := testDB(t)
+	admin := NewAdmin(db)
+	ctx := context.Background()
+
+	expr := `{"prompt": 0.00003}`
+	id := createRule(t, admin, CreateRequest{
+		Scope: ScopePlatform, Name: unique("rule-version-skip"), Expr: expr,
+	})
+
+	name := unique("rule-version-renamed")
+	if err := admin.Update(ctx, UpdateRequest{ID: id, Name: &name}); err != nil {
+		t.Fatalf("Update 出错: %v", err)
+	}
+	same := expr
+	if err := admin.Update(ctx, UpdateRequest{ID: id, Expr: &same}); err != nil {
+		t.Fatalf("Update 出错: %v", err)
+	}
+
+	if got := ruleVersions(t, db, id); !reflect.DeepEqual(got, []string{expr}) {
+		t.Errorf("版本历史 = %v，期望仍只有第一版 %q", got, expr)
 	}
 }
 

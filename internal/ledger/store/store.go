@@ -420,6 +420,18 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request) error {
 // 重放不会把它抹掉：判据是下面 WHERE 里的 status = 'pending'，已经结算过的
 // 行影响 0 行、直接返回 false（调用方转成 ErrAlreadySettled），
 // 整条 UPDATE 都不执行。
+//
+// # 客户端取消的时刻也在这里落
+//
+// 「客户端在流式响应中途断开」这个事实由网关当场判定（internal/gateway 的
+// pumpStream），一路上带到 pipeline.Outcome.ClientCanceled 与
+// pipeline.Charge.ClientCanceled——但落库只有这一处。在它接上之前，那个
+// 信号走到 Charge 就到头了：库里没有任何痕迹，于是「这个渠道是不是经常被
+// 客户端掐断」这个问题答不出来，而客户端断开是**真实发生**的事。
+//
+// 写成 CASE 而不是两个分支：一行已经结算的记录只有两种结局——取消过，
+// 或者没有。NULL 表示没有取消，而**不是**「不知道」：没取消是一次确定的
+// 事实（这一行是在结算路径上写下的，那条路径必然知道客户端有没有走）。
 func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *pipeline.Charge) (bool, error) {
 	res, err := tx.ExecContext(ctx, `
 		UPDATE billing_requests
@@ -428,9 +440,11 @@ func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *
 		       settled_at = now(),
 		       channel_id = NULLIF($5, 0),
 		       upstream_status = NULLIF($3, 0),
-		       error_code = NULLIF($4, '')
+		       error_code = NULLIF($4, ''),
+		       client_canceled_at = CASE WHEN $6 THEN now() END
 		 WHERE request_id = $1 AND status = 'pending'`,
-		req.RequestID, charge.Settlement.Actual.String(), 0, "", req.ChannelID)
+		req.RequestID, charge.Settlement.Actual.String(), 0, "", req.ChannelID,
+		charge.ClientCanceled)
 	if err != nil {
 		return false, fmt.Errorf("标记结算失败: %w", err)
 	}

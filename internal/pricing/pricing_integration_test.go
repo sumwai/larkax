@@ -517,8 +517,10 @@ func TestMatchVersionTracksExpression(t *testing.T) {
 		t.Fatalf("规则 id = %d，期望 %d", first.ID, id)
 	}
 
-	// 直接改库里的表达式。没有触发器维护 updated_at，也没有人往
-	// pricing_rule_versions 里插行——版本号因此必须由源码本身决定。
+	// 直接改库里的表达式，**绕过管理面**。这条路径上没有任何东西维护版本：
+	// 没有触发器动 updated_at，也不会有人往 pricing_rule_versions 里插行
+	// （插行的是 Admin.Create / Admin.Update，而这里走的是裸 SQL）。
+	// 版本号因此必须由源码本身决定，而不是由「有没有人记得写版本表」决定。
 	if _, execErr := db.ExecContext(ctx,
 		`UPDATE pricing_rules SET expr = $2 WHERE id = $1`, id, after,
 	); execErr != nil {
