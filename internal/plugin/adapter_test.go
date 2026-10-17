@@ -258,6 +258,8 @@ func TestRouteCandidateCarriesExpiry(t *testing.T) {
 //
 // 后者会让插件用「优先选健康的」这类规则把一个从没跑过的渠道排到前面。
 func TestHealthNameMapping(t *testing.T) {
+	// 「有延迟样本」在 route 里是指针非 nil；nil 是「没有样本」。
+	latencySample := time.Second
 	cases := []struct {
 		name string
 		h    route.Health
@@ -266,7 +268,7 @@ func TestHealthNameMapping(t *testing.T) {
 		{"连续失败三次", route.Health{ConsecutiveFailures: 3}, "drained"},
 		{"连续失败一次", route.Health{ConsecutiveFailures: 1}, "degraded"},
 		{"成功率偏低", route.Health{SuccessRate: 0.5}, "degraded"},
-		{"成功率高且有延迟样本", route.Health{SuccessRate: 0.99, LatencyP95: time.Second}, "healthy"},
+		{"成功率高且有延迟样本", route.Health{SuccessRate: 0.99, LatencyP95: &latencySample}, "healthy"},
 		{"没有任何样本", route.Health{}, "unknown"},
 		{"成功率高但没延迟样本", route.Health{SuccessRate: 1}, "unknown"},
 	}

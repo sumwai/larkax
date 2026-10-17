@@ -265,8 +265,11 @@ func RouteContextFrom(requestID, canonicalModel string, cands []route.Candidate)
 		} else {
 			cand.Confidence = 0
 		}
-		if c.CostPerUnit > 0 {
-			cost := c.CostPerUnit
+		// 与 Remaining 同一条规矩：没有数据就不给数字。route 侧用 nil 表示
+		// 「没有观测到成本」，指针本身就可以直接交出去——不给 0，
+		// 因为 0 在插件眼里是「这个渠道免费」。
+		if c.CostPerUnit != nil {
+			cost := *c.CostPerUnit
 			cand.UpstreamCost = &cost
 		}
 		if c.Quota.ResetsAt != nil {
@@ -291,7 +294,7 @@ func healthName(h route.Health) string {
 		return "degraded"
 	case h.SuccessRate > 0 && h.SuccessRate < 0.9:
 		return "degraded"
-	case h.SuccessRate >= 0.9 && h.LatencyP95 > 0:
+	case h.SuccessRate >= 0.9 && h.LatencyP95 != nil:
 		return "healthy"
 	default:
 		// 没有样本时是「不知道」，而不是「健康」——

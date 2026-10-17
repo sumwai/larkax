@@ -38,12 +38,18 @@ func withPriority(p int) func(*Candidate)      { return func(c *Candidate) { c.P
 func withType(t string) func(*Candidate)       { return func(c *Candidate) { c.Channel.Type = t } }
 func withHealth(h Health) func(*Candidate)     { return func(c *Candidate) { c.Health = h } }
 func withQuota(q quota.State) func(*Candidate) { return func(c *Candidate) { c.Quota = q } }
-func withCost(v float64) func(*Candidate)      { return func(c *Candidate) { c.CostPerUnit = v } }
+
+// 下面三个助手造的是**有数据**的候选：它们把指针填上。
+//
+// 没有数据是默认状态（指针为 nil），不需要助手——这一点很重要：
+// 一个用例如果本来想造「未知」，却顺手写了 withCost(0)，它造的其实是
+// 「成本恰好为 0」这个完全不同的输入。
+func withCost(v float64) func(*Candidate) { return func(c *Candidate) { c.CostPerUnit = &v } }
 func withLatency(d time.Duration) func(*Candidate) {
-	return func(c *Candidate) { c.Health.LatencyP95 = d }
+	return func(c *Candidate) { c.Health.LatencyP95 = &d }
 }
 func withCache(rate float64, n int64) func(*Candidate) {
-	return func(c *Candidate) { c.CacheHitRate, c.SampleCount = rate, n }
+	return func(c *Candidate) { c.CacheHitRate, c.SampleCount = &rate, n }
 }
 
 // 下面三个助手都带 Confidence 1.0：它们造的是**一次实测**的额度状态，
@@ -211,9 +217,13 @@ func TestEqualScoresAreShuffled(t *testing.T) {
 
 // 未知成本不能被当成免费：那会让所有未知成本的渠道排在已知便宜的前面，
 // 而那是超支最容易发生的路径。
-func TestUnknownCostIsNeutralNotBest(t *testing.T) {
+//
+// 实现上「未知」不是给中性分，而是**整条剔除**（见
+// TestScoreNormalizesOverDimensionsWithData）。这条断言的是剔除之后仍然
+// 满足的结论：未知成本的候选不会排在已知便宜的前面。
+func TestUnknownCostDoesNotBeatKnownCheap(t *testing.T) {
 	r := seededRouter(1)
-	unknown := r.Score(candidate(1, "m", withCost(0)))
+	unknown := r.Score(candidate(1, "m")) // 没有成本数据
 	cheap := r.Score(candidate(2, "m", withCost(0.001)))
 	if unknown >= cheap {
 		t.Errorf("未知成本(%v) 不该高于已知便宜(%v)", unknown, cheap)
@@ -295,6 +305,158 @@ func TestLatencyAffectsScore(t *testing.T) {
 	slow := r.Score(candidate(2, "m", withLatency(20*time.Second)))
 	if fast <= slow {
 		t.Errorf("快(%v) 应高于慢(%v)", fast, slow)
+	}
+}
+
+// ── 维度的三态：没有数据 / 有数据 ────────────────────────────────────────
+//
+// 成本、延迟、缓存三维的数据来自 channel_health_rollup 的三列，而写入侧
+// 目前没有写它们。所以「没有数据」是**今天每一个候选**的状态，而下面这几条
+// 同时钉住两件事：没有数据时权重不进分母（今天的排序一字不变），
+// 有数据时权重真的生效（接线之后不会静默地什么也不发生）。
+
+// 有数据的维度按各自权重归一，没有数据的整条退出分母。
+//
+// 判据是**具体数值**，不是相对关系：把成本这一维填上，分数必须等于
+// 「健康度 + 额度 + 成本」三项按各自权重的加权平均。只断言相对关系的话，
+// 「给中性分」与「整条剔除」两种算法都能通过——它们给出不同的分数，
+// 只是序相同。
+func TestScoreNormalizesOverDimensionsWithData(t *testing.T) {
+	r := seededRouter(1)
+	w := DefaultWeights
+
+	// 健康度：成功率 0.9、无连续失败 → 0.4*0.9 + 0.6*1 = 0.96
+	// 额度：余量 5、单位已知、可信度 1、没有到期时间
+	//   → urgency = 1/6，到期那一半取中性 0.5，raw = 1/12 + 0.25 = 1/3
+	// 成本：1/(1+1) = 0.5
+	const (
+		health = 0.96
+		quota  = 1.0 / 3.0
+		cost   = 0.5
+	)
+
+	without := r.Score(candidate(1, "m", withQuota(quotaIn(5, "money"))))
+	if want := (w.Health*health + w.Quota*quota) / (w.Health + w.Quota); math.Abs(without-want) > 1e-12 {
+		t.Errorf("没有成本数据时分数 = %v，期望 %v（成本这一维不该进分母）", without, want)
+	}
+
+	with := r.Score(candidate(2, "m", withQuota(quotaIn(5, "money")), withCost(1)))
+	want := (w.Health*health + w.Quota*quota + w.Cost*cost) / (w.Health + w.Quota + w.Cost)
+	if math.Abs(with-want) > 1e-12 {
+		t.Errorf("有成本数据时分数 = %v，期望 %v（三项按权重归一）", with, want)
+	}
+}
+
+// 三列都没有数据时，排序与「改之前」逐对一致。
+//
+// 改之前的公式是五项全加、三项各得 0.5；改之后那三项整条退出分母。
+// 两个公式相差一个**正的仿射变换**（分子加同一个常数、分母同乘一个常数），
+// 所以序不变——但这是要钉住的结论，不是靠推理。
+func TestOrderingUnchangedWithoutRollupData(t *testing.T) {
+	// 旧公式：五项全加，三项各 0.5。
+	old := func(c Candidate) float64 {
+		w := DefaultWeights
+		return w.Health*scoreHealth(c.Health) +
+			w.Quota*scoreQuota(c.Quota, false) +
+			w.Cost*0.5 + w.Latency*0.5 + w.Cache*0.5
+	}
+
+	// 四个分数互不接近的候选：改前改后都排得出来，且差别远大于浮点噪声。
+	cands := []Candidate{
+		candidate(1, "m", withHealth(Health{SuccessRate: 1.0})),
+		candidate(2, "m", withHealth(Health{SuccessRate: 0.1})),
+		candidate(3, "m", withHealth(Health{SuccessRate: 0.5}), withQuota(quotaLeft(0.5))),
+		candidate(4, "m", withHealth(Health{SuccessRate: 0.9}), withQuota(quotaIn(1000, "money"))),
+	}
+
+	r := seededRouter(7)
+	for i := range cands {
+		for j := range cands {
+			if i == j {
+				continue
+			}
+			oldLess := old(cands[i]) < old(cands[j])
+			newLess := r.Score(cands[i]) < r.Score(cands[j])
+			if oldLess != newLess {
+				t.Errorf("渠道 %d 与 %d 的先后在改前改后不一致：旧 %v/%v，新 %v/%v",
+					cands[i].Channel.ID, cands[j].Channel.ID,
+					old(cands[i]), old(cands[j]), r.Score(cands[i]), r.Score(cands[j]))
+			}
+		}
+	}
+}
+
+// 成本数据一填上，便宜的那个就排前面——这就是「权重真的生效」。
+//
+// 对照那一半同样重要：把数据撤掉，两个候选必须**同分**，否则说明差别
+// 来自别处，而这条用例证明的东西就不成立了。
+func TestCostDataChangesOrdering(t *testing.T) {
+	r := seededRouter(3)
+	cheap := r.Score(candidate(1, "m", withCost(0.1)))
+	pricey := r.Score(candidate(2, "m", withCost(10)))
+	if cheap <= pricey {
+		t.Errorf("有成本数据时便宜的应更高：%v vs %v", cheap, pricey)
+	}
+	if a, b := r.Score(candidate(1, "m")), r.Score(candidate(2, "m")); a != b {
+		t.Errorf("没有成本数据时两个候选应同分：%v vs %v", a, b)
+	}
+
+	plan := r.Select([]Candidate{
+		candidate(1, "m", withCost(10)),
+		candidate(2, "m", withCost(0.1)),
+	}, "m")
+	if plan.Candidates[0].Channel.ID != 2 {
+		t.Errorf("排序应把便宜的那个放前面，实际第一个是渠道 %d", plan.Candidates[0].Channel.ID)
+	}
+}
+
+// 「三项都恰好是中性分」与「三项都没有数据」不是同一件事。
+//
+// 两个候选的健康度与额度完全一样（成功率 1.0，余量 1），差别只在成本、
+// 延迟、缓存三项：一个三项都有数据、且恰好都算出 0.5，另一个三项都没有。
+//
+//	改前：两项都给同一个常数（0.5 的中性分），于是**同分**——
+//	      「测出来是中性」与「根本没测」分不开。
+//	改后：没有数据的那个只按健康度与额度归一，有数据的那个多考三门。
+//
+// 这一条同时钉住一个**已知的取舍**：可用维度集合不同的候选，分数是各自
+// 归一的，所以严格说不可直接比较——没有数据的那个相当于少考了几门。
+// 换成「缺的按 0 计」会让缺数据变成最差，那是更坏的一侧；按全体候选的
+// 均值补缺需要看到整个候选集，而打分是逐个候选做的（见 score 的注释）。
+func TestNeutralDataIsNotTheSameAsNoData(t *testing.T) {
+	base := func(id int64) Candidate {
+		return candidate(id, "m",
+			withHealth(Health{SuccessRate: 1.0}), withQuota(quotaLeft(1)))
+	}
+
+	measured := base(1)
+	cost, rate, p95 := 1.0, 0.5, time.Second // 三项的分都恰好是 0.5
+	measured.CostPerUnit, measured.CacheHitRate, measured.SampleCount, measured.Health.LatencyP95 =
+		&cost, &rate, 100, &p95
+	none := base(2)
+
+	r := seededRouter(1)
+	if r.Score(measured) >= r.Score(none) {
+		t.Errorf("有数据（三项都中性）的 %v 应低于没有数据的 %v——"+
+			"给中性分等于让「没测过」与「测出来是中性」等价",
+			r.Score(measured), r.Score(none))
+	}
+}
+
+// 延迟与缓存两维同样：有数据就参与，没有数据就退出分母。
+func TestLatencyAndCacheDataChangeOrdering(t *testing.T) {
+	r := seededRouter(3)
+
+	fast := r.Score(candidate(1, "m", withLatency(50*time.Millisecond)))
+	slow := r.Score(candidate(2, "m", withLatency(30*time.Second)))
+	if fast <= slow {
+		t.Errorf("有延迟数据时快的应更高：%v vs %v", fast, slow)
+	}
+
+	hit := r.Score(candidate(1, "m", withCache(0.9, 100)))
+	miss := r.Score(candidate(2, "m", withCache(0.1, 100)))
+	if hit <= miss {
+		t.Errorf("有缓存数据时命中率高的应更高：%v vs %v", hit, miss)
 	}
 }
 
@@ -872,27 +1034,52 @@ func TestScoreHealthStrictlyDecreasingInFailures(t *testing.T) {
 	}
 }
 
-// 延迟恰好为 0 是「未知」，不是「最快」。
+// 没有延迟数据是「这一维不参与」，不是「最快」，也不是「中等」。
 //
-// 变异：`p95 <= 0` 改成 `< 0`，未知延迟会走反比函数得到满分类的值——
-// 一个没测过延迟的渠道会被当成最快的。
+// 变异：把 nil 判断去掉（或改成对零值 Duration 判断），没有数据的渠道会
+// 走反比函数得到满分类的值——一个没测过延迟的渠道会被当成最快的。
 func TestScoreLatencyUnknownIsNotPerfect(t *testing.T) {
-	unknown := defaultScore(t, candidate(1, "m", withLatency(0)))
+	unknown := defaultScore(t, candidate(1, "m")) // 没有延迟数据
 	veryFast := defaultScore(t, candidate(2, "m", withLatency(time.Millisecond)))
 	if unknown >= veryFast {
 		t.Errorf("未知延迟(%v) 不该高于实测极快(%v)——未知不等于最快", unknown, veryFast)
 	}
 }
 
+// 延迟**恰好为 0** 是有数据的「最快」，与「没有数据」分得开。
+//
+// 这正是三态表示的意义：改之前 0 被当成未知，于是即便写入侧某天开始写
+// 这一列，读到的 0 也仍然是一条走不通的路。
+func TestScoreLatencyZeroWithDataIsPerfect(t *testing.T) {
+	zero := defaultScore(t, candidate(1, "m", withLatency(0)))
+	unknown := defaultScore(t, candidate(2, "m"))
+	if zero <= unknown {
+		t.Errorf("实测 0ms(%v) 应高于没有数据(%v)", zero, unknown)
+	}
+}
+
 // 缓存样本数的阈值是「恰好达到即生效」。
 //
-// 变异：`sampleCount < minSamples` 改成 `<=`，恰好达到阈值的渠道
+// 变异：`sampleCount < minCacheSamples` 改成 `<=`，恰好达到阈值的渠道
 // 会被当成样本不足——而阈值本身就是为了「样本足够」而定的。
 func TestScoreCacheThresholdIsInclusiveAt20(t *testing.T) {
 	at20 := defaultScore(t, candidate(1, "m", withCache(1.0, 20)))
 	at19 := defaultScore(t, candidate(2, "m", withCache(1.0, 19)))
 	if at20 == at19 {
 		t.Errorf("样本 20 与 19 应给出不同分数（阈值恰好生效）：%v vs %v", at20, at19)
+	}
+}
+
+// 命中率**恰好为 0** 是有数据的最差分，与「没有数据」分得开。
+//
+// 变异：把 nil 判断与命中率夹取混成一条 `<= 0` 分支，一次都没命中的渠道
+// 会被当成「没有数据」而把缓存这一维整条剔除——那等于用「剔除」去奖励
+// 一个缓存表现最差的渠道。
+func TestScoreCacheZeroRateWithDataIsWorst(t *testing.T) {
+	zero := defaultScore(t, candidate(1, "m", withCache(0, 100)))
+	unknown := defaultScore(t, candidate(2, "m"))
+	if zero >= unknown {
+		t.Errorf("实测命中率 0(%v) 应低于没有数据(%v)", zero, unknown)
 	}
 }
 
@@ -956,14 +1143,24 @@ func TestScoreQuotaZeroRemainingIsFinite(t *testing.T) {
 	}
 }
 
-// 零成本是「未知」，不是「免费」——它给中性分，而不是满分。
+// 没有成本数据是「这一维不参与」，不是满分也不是中性分。
 //
-// 变异：`cost <= 0` 改成 `< 0`，成本未知的渠道会走反比函数得到满分数。
+// 变异：把 nil 判断去掉（或改成对零值 float64 判断），没有数据的渠道会走
+// 反比函数得到满分类的值——一个从没记过成本的渠道会被当成免费。
 func TestScoreCostUnknownIsNotPerfect(t *testing.T) {
-	unknown := defaultScore(t, candidate(1, "m", withCost(0)))
+	unknown := defaultScore(t, candidate(1, "m")) // 没有成本数据
 	nearlyFree := defaultScore(t, candidate(2, "m", withCost(0.000001)))
 	if unknown >= nearlyFree {
 		t.Errorf("未知成本(%v) 不该高于实测近乎免费(%v)", unknown, nearlyFree)
+	}
+}
+
+// 成本**恰好为 0** 是有数据的「免费」，给满分，与「没有数据」分得开。
+func TestScoreCostZeroWithDataIsPerfect(t *testing.T) {
+	free := defaultScore(t, candidate(1, "m", withCost(0)))
+	nearlyFree := defaultScore(t, candidate(2, "m", withCost(0.000001)))
+	if free <= nearlyFree {
+		t.Errorf("实测零成本(%v) 应高于实测近乎免费(%v)", free, nearlyFree)
 	}
 }
 

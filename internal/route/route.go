@@ -80,11 +80,16 @@ type Candidate struct {
 	Quota quota.State
 
 	// CostPerUnit 是最近观察到的单位成本，用于「成本」这一维度。
-	// 为 0 表示未知——未知不该被当成「免费」。
-	CostPerUnit float64
-	// CacheHitRate 是近期缓存命中率，0..1。为 0 且 SampleCount 为 0 表示未知。
-	CacheHitRate float64
-	// SampleCount 是上述统计的样本数。为 0 时那些比率不可信。
+	//
+	// nil 表示**没有数据**，而不是「成本为 0」：两者在选路里是不同的结论，
+	// 而用一个零值把「没有」与「是 0」合并正是本包此前那条缺陷
+	// （三列恒为 0，于是成本这一维对所有候选都是同一个常数）。
+	// 没有数据的维度不参与加权（见 score）。
+	CostPerUnit *float64
+	// CacheHitRate 是近期缓存命中率，0..1。nil 表示没有数据。
+	CacheHitRate *float64
+	// SampleCount 是上述统计的样本数。少于 minCacheSamples 时不参与打分——
+	// 一两次请求的命中率不说明任何事。
 	SampleCount int64
 }
 
@@ -102,8 +107,9 @@ type Health struct {
 	ConsecutiveFailures int
 	// SuccessRate 是近期成功率，0..1。
 	SuccessRate float64
-	// LatencyP95 是近期响应时间分位，0 表示未知。
-	LatencyP95 time.Duration
+	// LatencyP95 是近期响应时间分位。nil 表示**没有数据**——
+	// 与「分位恰好是 0」不是一件事，见 scoreLatency。
+	LatencyP95 *time.Duration
 }
 
 // Router 在候选集中选择渠道并执行请求。
@@ -157,6 +163,10 @@ var ErrNoAliasSource = errors.New("未配置别名来源：规范名到上游名
 // 做成可配置而不是写死：权重取决于这台机器要优化什么——
 // 一个成本敏感的部署与一个延迟敏感的部署不该用同一组数字。
 // 但**默认值必须存在且保守**，否则第一次部署的人无从下手。
+//
+// 权重是**相对**的，不是绝对份额：某一维没有数据时它整条退出分母，
+// 剩下的维度按各自权重归一（见 score）。所以给一个维度填 0.5 的效果，
+// 取决于同一时刻还有哪几维有数据——而不是「它占总分的 0.5/N」。
 type Weights struct {
 	// Health 是最重的一项：一个正在失败的渠道不该因为便宜而被选中。
 	Health float64
@@ -175,6 +185,17 @@ type Weights struct {
 // 健康度占大头是有意的：其余维度都是「更好或更差」，而健康度是
 // 「能用或不能用」。把它压到与其他维度同量级，会让一个正在连续失败的
 // 便宜渠道仍然被选中。
+//
+// # 这五项不是每一刻都在起作用
+//
+// 成本、延迟、缓存三维的数据来自 channel_health_rollup 的三列，而写入侧
+// 目前没有写它们（见 internal/channels 的 record.go）。所以**在今天**，
+// 每个候选都没有这三项数据，它们整条退出加权，实际参与排序的是健康度与
+// 额度两项。
+//
+// 这与「把这三项的权重写成 0」不是一回事，也是这里保留原值的理由：
+// 写 0 是承认这三维永远不会生效；保留权重则意味着**一旦有数据，它立刻
+// 按这里的数字生效**。把权重调成 0 会让接线那一天静默地什么也不发生。
 var DefaultWeights = Weights{
 	Health:  1.0,
 	Quota:   0.6,
@@ -409,6 +430,10 @@ func (r *Router) order(candidates []Candidate) []Candidate {
 // 成本与延迟的量纲差着几个数量级，直接相加会让成本完全主导结果，
 // 而那多半不是使用者的本意。
 //
+// 没有数据的维度**不参与**，而不是给一个中性分：中性分仍然会进分母，
+// 于是「这一维没有数据」会稀释其余维度的差别。剔除之后，有数据的维度
+// 按各自权重归一，分数的量纲仍是 0..1。
+//
 // 它按「所有候选的额度单位相同」来算：跨单位的判断需要看到整个候选集，
 // 而这里只有一个候选。真正排序时走的是 score（由 order 传进那个判断），
 // 所以排序结果与直接调本函数得到的分数**可能不同**——差别只在额度那一项，
@@ -421,16 +446,55 @@ func (r *Router) Score(c Candidate) float64 {
 }
 
 // score 是 Score 的内部形态：mixedUnits 由调用方给出。
+//
+// # 没有数据的维度整条剔除
+//
+// 每个维度先回答「我这一维有没有数据」：成本、延迟、缓存三项各自可能
+// 没有（见 Candidate 上的三个字段），健康度与额度则总是有意见——
+// 它们对「没观测过」给出的中性分本身就是一种判断，而不是缺失。
+//
+// 没有数据的维度连权重一起从分母里去掉，剩下的按各自权重归一。这样
+// 「权重写着在起作用、实际是常数」这件事不可能再发生：一个维度的权重
+// 只有在它真的投了票时才进分母。
+//
+// 权重非正的维度同样剔除：负权重会把「越小越好」反过来，还会让分母
+// 失去意义；0 权重本来就不该影响结果。
 func (r *Router) score(c Candidate, mixedUnits bool) float64 {
 	w := r.Weights
 	if w == (Weights{}) {
 		w = DefaultWeights
 	}
-	return w.Health*scoreHealth(c.Health) +
-		w.Quota*scoreQuota(c.Quota, mixedUnits) +
-		w.Cost*scoreCost(c.CostPerUnit) +
-		w.Latency*scoreLatency(c.Health.LatencyP95) +
-		w.Cache*scoreCache(c.CacheHitRate, c.SampleCount)
+
+	var weighted, total float64
+	add := func(weight, s float64, ok bool) {
+		if !ok || weight <= 0 {
+			return
+		}
+		weighted += weight * s
+		total += weight
+	}
+
+	// 健康度与额度总是参与：它们对「没有观测过」有自己的意见
+	// （中性分），那是判断而不是缺失。
+	add(w.Health, scoreHealth(c.Health), true)
+	add(w.Quota, scoreQuota(c.Quota, mixedUnits), true)
+
+	if s, ok := scoreCost(c.CostPerUnit); ok {
+		add(w.Cost, s, true)
+	}
+	if s, ok := scoreLatency(c.Health.LatencyP95); ok {
+		add(w.Latency, s, true)
+	}
+	if s, ok := scoreCache(c.CacheHitRate, c.SampleCount); ok {
+		add(w.Cache, s, true)
+	}
+
+	if total <= 0 {
+		// 一维都没有数据（或权重全为 0）：所有候选同分，由 tie 打散。
+		// 返回 0 而不是 NaN——NaN 进排序会让顺序变成未定义的。
+		return 0
+	}
+	return weighted / total
 }
 
 // MixedQuotaUnits 判断候选集里是不是存在多种额度单位。
@@ -610,44 +674,60 @@ func confidenceWeight(c float64) float64 {
 
 // scoreCost 把单位成本映射到 0..1，越小越好。
 //
-// 未知成本给中性分而不是满分：把「不知道多少钱」当成「免费」，
-// 会让所有未知成本的渠道排在已知便宜的前面，而那正是最容易超支的路径。
-func scoreCost(cost float64) float64 {
-	if cost <= 0 {
-		return 0.5
+// cost 为 nil 表示没有数据，ok 为假——这一维不参与加权，而不是给中性分。
+// 给中性分等于让「不知道多少钱」占掉一份权重：它既没有把未知成本的渠道
+// 排在已知便宜的前面，也稀释了其余维度的差别，而这两件事都不会报错。
+//
+// 有数据且恰好为 0 就是**免费**，给满分。这与「没有数据」是两个不同的
+// 输入，不该有同一个输出。
+func scoreCost(cost *float64) (float64, bool) {
+	if cost == nil || *cost < 0 {
+		// 负成本只可能来自坏数据（库里那一列是 numeric 且写入方算的是
+		// 总额除以请求数）。按「没有数据」处理：宁可少一维，
+		// 也不要让一个读不通的数影响排序。
+		return 0, false
 	}
 	// 1/(1+cost) 在有量纲的成本上不理想，但它的好处是**不需要知道全局范围**：
 	// 归一化需要所有候选的成本，而那要求先收集全部候选才能算一个人的分。
 	// 现在这样可以让每个候选独立打分，也便于测试。
-	return 1.0 / (1.0 + cost)
+	return 1.0 / (1.0 + *cost), true
 }
 
 // scoreLatency 把延迟映射到 0..1，越小越好。
-func scoreLatency(p95 time.Duration) float64 {
-	if p95 <= 0 {
-		return 0.5
+//
+// p95 为 nil 表示没有数据，这一维不参与加权。与 scoreCost 同一条理由：
+// 未知不是「中等」，而是「这一维没有意见」。
+func scoreLatency(p95 *time.Duration) (float64, bool) {
+	if p95 == nil || *p95 < 0 {
+		return 0, false
 	}
 	// 以秒为单位代入反比函数。1 秒以内接近满分，
 	// 10 秒时降到约 0.09——足够把慢渠道压下去，但不会压成 0。
-	return 1.0 / (1.0 + p95.Seconds())
+	return 1.0 / (1.0 + p95.Seconds()), true
 }
+
+// minCacheSamples 是缓存命中率被采信所需的最小样本数。
+//
+// 一两次请求的命中率不说明任何事，用它去影响路由会让流量在两个渠道之间
+// 无意义地摇摆。样本不足与「没有数据」同一档：这一维不参与加权。
+const minCacheSamples = 20
 
 // scoreCache 把缓存命中率映射到 0..1。
 //
-// 样本太少时给中性分：一两次请求的命中率不说明任何事，
-// 用它去影响路由会让流量在两个渠道之间无意义地摇摆。
-func scoreCache(hitRate float64, sampleCount int64) float64 {
-	const minSamples = 20
-	if sampleCount < minSamples {
-		return 0.5
+// 没有数据（hitRate 为 nil）或样本不足时 ok 为假，这一维不参与加权。
+// 有数据且样本足够时，命中率**恰好为 0** 是「一次都没命中」这个事实，
+// 给 0 分——它与「没有数据」必须分得开。
+func scoreCache(hitRate *float64, sampleCount int64) (float64, bool) {
+	if hitRate == nil || sampleCount < minCacheSamples {
+		return 0, false
 	}
-	if hitRate < 0 {
-		return 0
+	if *hitRate < 0 {
+		return 0, true
 	}
-	if hitRate > 1 {
-		return 1
+	if *hitRate > 1 {
+		return 1, true
 	}
-	return hitRate
+	return *hitRate, true
 }
 
 func (r *Router) float64() float64 {
