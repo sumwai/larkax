@@ -264,7 +264,7 @@ go run ./cmd/larkaxctl price calendar import ./cn-2031.json
 | `LARKAX_INTERNAL_ADDR` | `127.0.0.1:9090` | 内部端点监听地址 |
 | `LARKAX_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `LARKAX_ENV` | `development` | 设为 `production` 切换日志格式 |
-| `LARKAX_REDIS_DSN` | 空 | 留空表示不启用 Redis |
+| `LARKAX_REDIS_DSN` | 空 | 限流的共享计数（`redis://` / `rediss://` / `unix://`）。留空时计数在进程内，单实例正确、多实例下额度按实例数放大 |
 
 两个监听地址默认只绑回环（`127.0.0.1`），服务因此默认只在本机可达。容器里端口
 映射不进来、或要让别的机器直接连时，显式写宽即可，例如 `LARKAX_HTTP_ADDR=":8080"`。
@@ -1105,6 +1105,17 @@ go test -cover ./...
   一致；不一致时脚本会打印该装哪一版，然后拒绝运行。
 - **集成测试要数据库**：`LARKAX_DB_DSN` 没设时那些用例整包 `t.Skip`，
   而「跳过」在输出里和「通过」长得一样。起库见上文「一次跑通」。
+- **限流那几条集成测试要 Redis**：`LARKAX_REDIS_DSN` 没设时 `internal/ratelimit`
+  里那几条同样跳过，判据同上（跳过与通过长得一样）。本地跑：
+
+  ```sh
+  docker run -d --rm -p 127.0.0.1:6379:6379 redis:7-alpine
+  export LARKAX_REDIS_DSN="redis://127.0.0.1:6379/0"
+  go test ./internal/ratelimit/
+  ```
+
+  它们验的是「键真的有过期时间」「两个实例真的共用一份计数」这类**只有真存储
+  才有的性质**，拿内存替身装作不出来（替身另有一组用例，不需要 Redis）。
 - **`check-mutation.sh` 最慢**：它串行跑（固定 `workers=1`），只在改动计费、
   账本、金额时跑，见下文「变异测试」。
 

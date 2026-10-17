@@ -7,7 +7,7 @@ larkax 对一把 API Key 有**两种**限制，都按 Key 计，**互不相干**
 | 列 | `api_keys.rate_limit_rpm` | `api_keys.quota_limit` |
 | 算的是什么 | 每分钟的**请求次数** | 这把 key 累计**花掉的钱** |
 | 什么时候恢复 | 下一个分钟窗口 | **不会自己恢复** |
-| 计数放在哪 | 进程内存 | 账本（`billing_requests`） |
+| 计数放在哪 | Redis（没配或连不上时退回进程内存，见下） | 账本（`billing_requests`） |
 | 超限返回 | `429` | `429` |
 
 两者都不设时（两列都是 `NULL`）这把 key 不受任何限制。
@@ -178,9 +178,36 @@ larkaxctl apikey update --id 42 --clear-rpm
 
 ## 两条限制各自还带一个限制
 
-- **RPM 的计数在进程内。** 多实例部署时每个实例各计一份，一把 `60` RPM 的
-  key 在 N 个实例上最多能打到 `60×N` RPM。启动时会有一条 `warn` 把这件事
-  说出来。共享计数要有一个所有实例都连得上的存储，目前没有。
+- **RPM 的计数在 Redis 里**（`LARKAX_REDIS_DSN`），所有实例共用一份，所以
+  「60 RPM」说的是整个部署 60 次，不是每个实例 60 次。键是
+  `rl:<api_keys.id>:<窗口起点的 Unix 秒>`，每个键活两倍窗口（一分钟的窗口留
+  两分钟），所以它们会自己消失、不会攒起来。
+
+  三件事要知道：
+
+  - **没配 `LARKAX_REDIS_DSN`** 时计数退回进程内，那时它只在**单实例**下正确，
+    N 个实例的总放行量最高到 `N ×` 配置值。启动日志里有一条 `warn` 说这一种。
+  - **Redis 连不上时**同样退回进程内计数，判定变成近似的（放行量偏大），
+    **但请求不会失败**——共享存储出问题是平台的问题，不该让用户吃 4xx。
+    恢复是自动的，下一次判定成功起就又是精确的。
+  - **是精确还是近似**看两个数：`larkax_ratelimit_exact`（1 精确 / 0 近似）与
+    `larkax_ratelimit_store_errors_total`（失败了多少次）。见 [metrics.md](metrics.md)。
+
+  要查某个 Key 当前这一分钟用了多少，走内部监听上的只读入口：
+
+  ```sh
+  curl -s "127.0.0.1:9090/ratelimit/usage?key_id=42"
+  # {"key_id":42,"window_start":"2026-10-17T12:00:00Z",
+  #  "window_end":"2026-10-17T12:01:00Z","count":17,"exact":true}
+  ```
+
+  它**只读**：不计数、不续过期时间、不改任何状态，查多少次都不影响判定。
+  用法是拿这里的 `count` 与库里的 `rate_limit_rpm`（`larkaxctl apikey list`
+  查得到）对照——这条路径不连数据库，所以额度不进它的入参，也就不会出现
+  「同一把 key 两个额度」这种事。
+
+  改限额、清空计数、临时封禁**都不做**：那三件各自是能绕开或加重限流的权力
+  （清空计数等于临时解除限流），要单开一条并带审计。
 - **累计额度要汇总这把 key 的全部历史账单。** 索引在
   `billing_requests (api_key_id)` 上；量级很大时它是这条判定最贵的部分。
 
@@ -189,8 +216,11 @@ larkaxctl apikey update --id 42 --clear-rpm
 | 要改什么 | 改哪 |
 |---|---|
 | 两种限制各自的语义（`NULL` / `0` / 正数） | `internal/ratelimit`（RPM）与 `internal/keyquota`（额度），各只有一处 |
+| 窗口长度、键名、过期时间、热路径的存储超时 | `internal/ratelimit`（`windowLen` / `windowKey` / `keyTTL` / `storeTimeout`） |
+| 共享存储挂掉时的行为（降级还是拒请求） | `internal/ratelimit` 的 `Allow`（判定）与 `internal/assembly` 的 `buildRateLimiter`（启动那一次探测） |
 | 「累计花费」的口径（算哪段时间、哪些状态、预留算不算） | `internal/keyquota` 的 `spentSQL` |
 | 超限响应的状态码与码 | `internal/api/error.go`（`writeRateLimited` / `writeInsufficientQuota` / `writeInsufficientBalance`） |
+| 只读查询那条路径的形状 | `internal/api/ratelimitusage.go` |
 | 判定发生在请求的哪一步 | `internal/api` 的 `serve`（入口早拒绝）与 `internal/ledger/store` 的 `SaveReservation`（权威判定） |
 
 两种限制都是**两处判定、一份口径**：入口那一层在读请求体之前做一次早拒绝
