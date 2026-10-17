@@ -136,10 +136,13 @@ type Chatter interface {
 	// 返回错误只发生在**上游接受请求之前**（没有可用渠道、连不上、非 2xx），
 	// 那时还没有任何内容发给客户端，调用方可以照常回一个错误响应。
 	//
-	// 它**没有** hooks 参数：流式那条路上的挂载点（onStream，逐块决定）
-	// 还没接上。先占一个用不上的参数，会让「流式也有插件钩子」看起来
-	// 已经成立——而那正是接线最容易骗过自己的地方。
-	ChatStream(ctx context.Context, req pipeline.Request, upstream *channel.Request) (*gateway.Result, error)
+	// hooks 与 Chat 同义，而且**两个入口都要给**：选渠道这件事流式与非流式
+	// 是同一件（见 gateway.ChatStream）。只给一边，一个「把这个模型的流量钉到
+	// 某个渠道」的插件会对流式请求静默不生效——接了一半最难发现的样子。
+	//
+	// 流式那条路**独有**的挂载点（onStream，逐块决定）还没接上；onResponse
+	// 则相反，它只可能发生在非流式那条路上（见 docs/plugin-contract.md）。
+	ChatStream(ctx context.Context, req pipeline.Request, upstream *channel.Request, hooks gateway.Hooks) (*gateway.Result, error)
 }
 
 // IdempotencyStore 是幂等记录的读写口。
@@ -506,12 +509,14 @@ func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol cha
 		// 流式与非流式的差别只在拿到结果之后怎么写出：前面的检查顺序
 		//（方法、Content-Type、鉴权、请求体、解析、必要字段）完全一样。
 		//
-		// 流式那条路拿不到 onResponse：响应是边生成边发的，没有「整份响应」
-		// 这个时刻（见 docs/plugin-contract.md）。所以这里不传挂载点。
-		return h.serveStream(w, r, protocol, upstream, req)
+		// 挂载点**两个入口都要传**：onRoute 与选渠道是同一件事，流式与非流式
+		// 都要走（见 Chatter.ChatStream）。onResponse 在流式那边不会被调到
+		// ——响应是边生成边发的，没有「整份响应」这个时刻，所以它自己不检查
+		// 这一点：传下去的那个闭包本来就不会被调（见 docs/plugin-contract.md）。
+		return h.serveStream(w, r, protocol, upstream, req, h.pluginHooks(sess, requestID, upstream.Model))
 	}
 
-	res, err := h.Chatter.Chat(r.Context(), req, upstream, h.responseHooks(sess, requestID))
+	res, err := h.Chatter.Chat(r.Context(), req, upstream, h.pluginHooks(sess, requestID, upstream.Model))
 	if err != nil {
 		if errors.Is(err, idempotency.ErrClaimed) {
 			// 键被另一个并发请求抢走了。这不是失败：那次预留整个回滚了，
@@ -608,14 +613,37 @@ func (h *Handler) pluginHost(requestID string, userID int64) plugin.HostBuilder 
 	return func(p *plugin.Plugin) sandbox.Host { return h.PluginHost(p, requestID, userID) }
 }
 
-// responseHooks 把这次请求的插件会话接到编排层的 onResponse 挂载点上。
+// pluginHooks 把这次请求的插件会话接到编排层的挂载点上。
+//
+// 两个挂载点一起给，因为它们出自**同一个会话**：分两次建会话会让 onRoute 与
+// onResponse 看到两份互不相干的插件状态（KV、计数器、Failures），而插件作者
+// 眼里它们是一次请求的两步。
 //
 // sess 为 nil 时返回零值：不跑插件，与「这次请求没有插件」是同一个意思。
-func (h *Handler) responseHooks(sess *plugin.Session, requestID string) gateway.Hooks {
+// **关掉插件的行为不变是结构性的**：零值 Hooks 的两个字段都是 nil，编排层
+// 各自走那条不碰插件的分支（见 gateway.routeChat）。
+//
+// canonicalModel 由调用方给出，与插件在别的 hook 里看到的那个名字是同一个
+// （今天规范名与上游名还是同一个值，见 serveOnce）。
+func (h *Handler) pluginHooks(sess *plugin.Session, requestID, canonicalModel string) gateway.Hooks {
 	if sess == nil {
 		return gateway.Hooks{}
 	}
 	return gateway.Hooks{
+		OnRoute: func(ctx context.Context, candidates []route.Candidate) (int64, error) {
+			res := sess.OnRoute(ctx, plugin.RouteContextFrom(requestID, canonicalModel, candidates))
+			if err := res.Err(); err != nil {
+				// 阻断型插件失败：这次请求失败。非阻断的失败这里为 nil
+				// ——它已经记进 Failures()，请求按内核排序继续。
+				return 0, err
+			}
+			if res.Patch == nil {
+				// 没给决策（插件没注册这个 hook、返回 undefined、或返回值
+				// 解出来是 0）。三种都归成「不钉」，与插件出现之前一样。
+				return 0, nil
+			}
+			return res.Patch.ChannelID, nil
+		},
 		OnResponse: func(ctx context.Context, resp *channel.Response) error {
 			metadata, err := sess.ApplyResponse(ctx, requestID, resp)
 			if len(metadata) > 0 {
@@ -665,7 +693,7 @@ func (h *Handler) logPluginFailures(ctx context.Context, sess *plugin.Session, r
 // 只有**完整走完**（收到 done 且结束帧真的写出去了）才返回 complete。
 // 截断的流不能重放：重放一段半截的回答比不重放更坏，调用方会把它当成
 // 一次成功的完整回答。
-func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, req pipeline.Request) served {
+func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, req pipeline.Request, hooks gateway.Hooks) served {
 	// 渲染器要在写响应头**之前**建好：协议认不出来时还能回一个 500，
 	// 而头一旦发出去就只剩下截断一条路。
 	renderer, err := newStreamRenderer(protocol, req.RequestID, upstream.Model, h.now(), inputTokensOf(upstream))
@@ -675,7 +703,7 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, protocol c
 		return served{}
 	}
 
-	res, err := h.Chatter.ChatStream(r.Context(), req, upstream)
+	res, err := h.Chatter.ChatStream(r.Context(), req, upstream, hooks)
 	if err != nil {
 		if errors.Is(err, idempotency.ErrClaimed) {
 			// 与并发请求撞上了，理由见 serveOnce 里同一条分支。

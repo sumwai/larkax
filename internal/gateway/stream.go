@@ -45,7 +45,14 @@ import (
 // 返回错误只发生在**上游接受请求之前**（没有可用渠道、连不上、非 2xx）。
 // 那时还没有任何内容发给客户端，调用方可以照常回一个错误响应。一旦返回
 // 了事件流，之后的一切失败都只能作为流里的事件表达。
-func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream *channel.Request) (*Result, error) {
+//
+// hooks 是这次请求的插件挂载点，零值表示不跑插件（见 Hooks）。
+//
+// onRoute 在这条路上与在 Chat 上一样跑：**选渠道这件事流式与非流式是同一件**
+// ——候选集、筛选与排序都在 route 里，与响应怎么发出去无关。少了它，
+// 一个「把这个模型的流量钉到某个渠道」的插件会对流式请求静默不生效，
+// 而那正是接了一半最难发现的样子。
+func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream *channel.Request, hooks Hooks) (*Result, error) {
 	if g.Executor == nil {
 		return nil, ErrNoExecutor
 	}
@@ -55,7 +62,7 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 		return nil, err
 	}
 
-	routed, err := g.Router.ChatStream(ctx, g.Executor, upstream, h.candidates, req.CanonicalModel)
+	routed, err := g.routeStream(ctx, upstream, h.candidates, req.CanonicalModel, hooks)
 
 	// 换渠道过程中失败的那些尝试照记——无论这次路由最后成没成，
 	// 那些调用都已经发生过。成功接受的那一个不在这里记：它的结局只有
@@ -82,6 +89,23 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 	}
 	go g.pumpStream(ctx, h, res, out, routed.Events, upstream)
 	return res, nil
+}
+
+// routeStream 选路并执行一次流式请求。顺序与 routeChat 完全相同，
+// 差别只在执行器是流式的那个（见 routeChat）。
+//
+// 「已经吐字之后不能换渠道」那条边界不受钉首渠道影响：它由
+// route.chatStreamWithPlan 保证，钉住的渠道排在第一位也一样受它约束。
+func (g *Gateway) routeStream(ctx context.Context, upstream *channel.Request, candidates []route.Candidate, canonicalModel string, hooks Hooks) (*route.StreamResult, error) {
+	if hooks.OnRoute == nil {
+		return g.Router.ChatStream(ctx, g.Executor, upstream, candidates, canonicalModel)
+	}
+	plan := g.Router.Select(candidates, canonicalModel)
+	pin, err := hooks.OnRoute(ctx, plan.Candidates)
+	if err != nil {
+		return nil, err
+	}
+	return g.Router.ChatStreamPlan(ctx, g.Executor, upstream, plan, pin)
 }
 
 // pumpStream 把上游的事件流转发给调用方，并在流结束时结算。

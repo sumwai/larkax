@@ -28,7 +28,7 @@
 #   命令      deadcode ./cmd/larkax ./cmd/larkaxctl
 #             （扫描起点由 cmd/ 自动发现，这两个就是当前发现的全部）
 #   工具      golang.org/x/tools v0.52.0（脚本里的 PINNED_TOOLS_VERSION）
-#   条数      61，与脚本里的 MAX_ENTRIES 一致
+#   条数      59，与脚本里的 MAX_ENTRIES 一致
 #
 # **条数从 60 跳到 112 的原因**——这一条要与「条目数只许减不许增」的规矩一起读。
 #
@@ -51,12 +51,16 @@
 # 调到了，那一片条目随之从这份清单里删掉。剩下 61 条是 onRoute / onStream /
 # onUsage 三片（#263 / #264）与其它还没接线的构件。
 #
+# **61 之后减了 2（#263）**：`onRoute` 接上之后，`adapter.go` 的
+# `RouteContextFrom` 有了生产调用方，它下面的 `healthName` 随之可达——两条一起
+# 从清单里删掉。**onStream / onUsage 那两片（#264）还没动**，所以这次只减 2。
+#
 # ⚠️ **在这一片包上，「报告里没有」不再等于「已经接上」。** `contractFieldNames`
 # 里那句 `reflect.TypeOf` 随 #262 变成可达之后，RTA 的反射过近似生效：`internal/plugin`
 # 里凡是「运行时类型的方法」一律被判成可达，`deadcode -whylive` 对它们一律回
 # `reachable only through reflection`，没有静态调用路径。所以下面这几类符号是
-# **在报告里消失、而实际没有接线**的：`Session.OnRoute` / `Session.OnStream` /
-# `Session.OnUsage`（#263 / #264 的缺口）、`Registry.Get`、`Result.Failed`
+# **在报告里消失、而实际没有接线**的：`Session.OnStream` / `Session.OnUsage`
+# （#264 的缺口）、`Registry.Get`、`Result.Failed`
 # 一类没有生产调用方的方法。删掉它们是对的——白名单要跟的是 deadcode 的输出，
 # 不是「已知缺口」的账本（那个账本在 issue 里）——但要清楚删掉不等于接上了。
 #
@@ -103,9 +107,7 @@ internal/money/money.go          | MulAmount                       | lib | 金�
 internal/money/money.go          | MulFloat                        | lib | 金额库的运算面：按倍率相乘，内部走 big.Rat；目前只有测试在调它（还没有倍率这个概念）
 internal/money/money.go          | MustParse                       | lib | 金额库的构造面：解析失败即 panic；只给测试写期望值用，生产一律走 Parse
 internal/observe/metrics.go      | Counter.Value                   | lib | 只给测试与断言用：cmd/larkax 的 main_test 跨包读它（所以必须导出），删了那条断言就没了
-internal/plugin/adapter.go       | RouteContextFrom                 | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
 internal/plugin/adapter.go       | UsageContextFrom                 | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
-internal/plugin/adapter.go       | healthName                       | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
 internal/plugin/patch.go         | ApplyRequestBodyPatch            | gap | #216 补丁的应用与校验；请求路径接上 hook 之前没有生产调用方
 internal/plugin/patch.go         | originalMaxTokens                | gap | #216 补丁的应用与校验；请求路径接上 hook 之前没有生产调用方
 internal/plugin/registry.go      | Publish                          | gap | #216 注册表的查询与开会话；请求路径接上 hook 之前没有生产调用方

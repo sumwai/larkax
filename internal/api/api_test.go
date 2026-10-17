@@ -48,6 +48,7 @@ type fakeChatter struct {
 	streamResult *gateway.Result
 	streamErr    error
 	streamReq    pipeline.Request
+	streamHooks  gateway.Hooks
 	streamCalls  int
 }
 
@@ -59,10 +60,11 @@ func (f *fakeChatter) Chat(_ context.Context, req pipeline.Request, upstream *ch
 	return f.result, f.err
 }
 
-func (f *fakeChatter) ChatStream(_ context.Context, req pipeline.Request, upstream *channel.Request) (*gateway.Result, error) {
+func (f *fakeChatter) ChatStream(_ context.Context, req pipeline.Request, upstream *channel.Request, hooks gateway.Hooks) (*gateway.Result, error) {
 	f.streamCalls++
 	f.streamReq = req
 	f.upstream = upstream
+	f.streamHooks = hooks
 	return f.streamResult, f.streamErr
 }
 

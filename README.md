@@ -39,8 +39,8 @@ What works today:
 
 Not wired yet:
 
-- Three of the five plugin hooks — plugins are loaded from the `plugins` table at
-  startup and `onRequest` / `onResponse` run on the request path, but `onRoute`,
+- Two of the five plugin hooks — plugins are loaded from the `plugins` table at
+  startup and `onRequest` / `onRoute` / `onResponse` run on the request path, but
   `onStream` and `onUsage` have no call sites yet
 - Payments and payouts — the ledger transactions exist, the entry points do not
 - The web console (`web/`)
