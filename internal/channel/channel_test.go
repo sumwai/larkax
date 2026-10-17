@@ -28,10 +28,21 @@ var _ interface {
 type fakeAdapter struct {
 	typ      string
 	protocol Protocol
+	// endpoint 非空时**覆盖** Protocol().Endpoint()，用来造一个「声明的协议与
+	// 自述的端点对不上」的替身（见 Registry.Register 的端点自检）。留空表示
+	// 按协议推——真实适配器走的就是那条路。
+	endpoint Endpoint
 }
 
 func (f *fakeAdapter) Type() string       { return f.typ }
 func (f *fakeAdapter) Protocol() Protocol { return f.protocol }
+
+func (f *fakeAdapter) Endpoint() Endpoint {
+	if f.endpoint != "" {
+		return f.endpoint
+	}
+	return f.protocol.Endpoint()
+}
 
 func (f *fakeAdapter) Chat(context.Context, Channel, *Request) (*Response, error) {
 	return nil, ErrUnsupported

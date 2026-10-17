@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/migrate"
 	"github.com/sumwai/larkax/internal/testdb"
 )
@@ -1731,5 +1732,211 @@ func TestConstraintsMissingModel(t *testing.T) {
 
 	if !errors.Is(err, ErrModelNotFound) {
 		t.Errorf("err = %v，期望 ErrModelNotFound", err)
+	}
+}
+
+// ── 端点清单（supported_endpoints） ─────────────────────────────────────
+//
+// 这一列是三态的，三档在选路里的处置各不相同：
+//
+//	NULL（读回来是 nil）  没配过       → 放行（未知，不判）
+//	{}  （读回来是空切片） 一条都不支持 → 出局
+//	非空                  按集合判     → 候选不在里面就出局
+//
+// 所以这一组要证明的是：**写进去的三个状态都能读回成同一个状态**，而不是
+// 两个空值被折成一个。写入与读取对同一列的假设不一致时，症状正是「某一档
+// 变成了另一档」，而两档的结论相反——那种错在库里看不出来。
+
+func endpointsText(endpoints []channel.Endpoint) string {
+	if endpoints == nil {
+		return "<nil>（未知）"
+	}
+	if len(endpoints) == 0 {
+		return "{}（一条都不支持）"
+	}
+	parts := make([]string, 0, len(endpoints))
+	for _, e := range endpoints {
+		parts = append(parts, string(e))
+	}
+	return strings.Join(parts, ",")
+}
+
+func TestModelEndpointsRoundTrip(t *testing.T) {
+	db := testDB(t)
+
+	cases := []struct {
+		name   string
+		create []channel.Endpoint
+	}{
+		{"没配过", nil},
+		{"明确一条都不支持", []channel.Endpoint{}},
+		{"支持两条", []channel.Endpoint{channel.EndpointChatCompletions, channel.EndpointMessages}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			name := uniqueName("model")
+			if _, err := NewAdmin(db).Create(context.Background(), CreateModelRequest{
+				CanonicalName: name,
+				DisplayName:   name,
+				Capabilities:  Capabilities{Endpoints: tc.create},
+			}); err != nil {
+				t.Fatalf("Create 出错: %v", err)
+			}
+
+			// 两个读面都要给同一份结论：管理面（Model）与热路径（Constraints）。
+			// 只验一个的话，「larkaxctl model show 说支持、选路说不支持」这类
+			// 分叉照样溜过去。
+			model, err := New(db).Model(context.Background(), name)
+			if err != nil {
+				t.Fatalf("Model 出错: %v", err)
+			}
+			if got := endpointsText(model.Capabilities.Endpoints); got != endpointsText(tc.create) {
+				t.Errorf("Model 读回 = %s，期望 %s", got, endpointsText(tc.create))
+			}
+
+			cons, err := New(db).Constraints(context.Background(), name)
+			if err != nil {
+				t.Fatalf("Constraints 出错: %v", err)
+			}
+			if got := endpointsText(cons.Capabilities.Endpoints); got != endpointsText(tc.create) {
+				t.Errorf("Constraints 读回 = %s，期望 %s", got, endpointsText(tc.create))
+			}
+			// 「没配过」与「一条都不支持」是这一列仅有的两个空值，而它们的
+			// 结论相反——必须逐档钉住 nil 与空切片的区别。
+			if (tc.create == nil) != (cons.Capabilities.Endpoints == nil) {
+				t.Errorf("nil 与空切片被混了：写入 %s，读回 %s",
+					endpointsText(tc.create), endpointsText(cons.Capabilities.Endpoints))
+			}
+		})
+	}
+}
+
+// 改成一个空清单也是**一个值**，不是「清空这一栏」：改完要读回空切片
+// （明确一条都不支持），而它与从没配过（NULL）在选路里处置相反。
+func TestUpdateModelEndpointsRoundTrip(t *testing.T) {
+	db := testDB(t)
+	name := uniqueName("model")
+	if _, err := NewAdmin(db).Create(context.Background(), CreateModelRequest{
+		CanonicalName: name,
+		DisplayName:   name,
+		Capabilities:  Capabilities{Endpoints: []channel.Endpoint{channel.EndpointResponses}},
+	}); err != nil {
+		t.Fatalf("Create 出错: %v", err)
+	}
+
+	if err := NewAdmin(db).Update(context.Background(), UpdateModelRequest{
+		CanonicalName: name,
+		Capabilities: &Capabilities{
+			Endpoints: []channel.Endpoint{channel.EndpointChatCompletions},
+		},
+	}); err != nil {
+		t.Fatalf("Update 出错: %v", err)
+	}
+	got, err := New(db).Constraints(context.Background(), name)
+	if err != nil {
+		t.Fatalf("Constraints 出错: %v", err)
+	}
+	if endpointsText(got.Capabilities.Endpoints) != string(channel.EndpointChatCompletions) {
+		t.Errorf("改完读回 = %s，期望 %s",
+			endpointsText(got.Capabilities.Endpoints), channel.EndpointChatCompletions)
+	}
+
+	// 再改成空清单：它要落成 `{}` 而不是 NULL——两者的结论相反。
+	if err = NewAdmin(db).Update(context.Background(), UpdateModelRequest{
+		CanonicalName: name,
+		Capabilities:  &Capabilities{Endpoints: []channel.Endpoint{}},
+	}); err != nil {
+		t.Fatalf("Update 出错: %v", err)
+	}
+	got, err = New(db).Constraints(context.Background(), name)
+	if err != nil {
+		t.Fatalf("Constraints 出错: %v", err)
+	}
+	if got.Capabilities.Endpoints == nil {
+		t.Error("空清单被写成了 NULL：那会把「一条都不支持」变成「没配过」（放行）")
+	}
+	if len(got.Capabilities.Endpoints) != 0 {
+		t.Errorf("读回 = %s，期望空清单", endpointsText(got.Capabilities.Endpoints))
+	}
+}
+
+// 写侧拦非法取值：入参是 channel.Endpoint（只是 string 的别名），调用方可以
+// 塞进任意串，而它一旦进了库，读取侧只能报错——那时现场是「某条模型读不出来」，
+// 离「创建时那一项填错了」已经很远。
+func TestWriteRejectsUnknownEndpoint(t *testing.T) {
+	db := testDB(t)
+	name := uniqueName("model")
+
+	_, err := NewAdmin(db).Create(context.Background(), CreateModelRequest{
+		CanonicalName: name,
+		DisplayName:   name,
+		Capabilities:  Capabilities{Endpoints: []channel.Endpoint{"/v1/embeddings"}},
+	})
+	if err == nil {
+		t.Fatal("非法端点应当被拒绝")
+	}
+	if !strings.Contains(err.Error(), "/v1/embeddings") {
+		t.Errorf("报错里没提那个非法的取值：%v", err)
+	}
+	// 一个字段不对就整条不写：库里不该留下一行只有名字的记录，而人以为建成了。
+	if _, readErr := New(db).Model(context.Background(), name); !errors.Is(readErr, ErrModelNotFound) {
+		t.Errorf("被拒绝的 Create 不该留下任何行，Model 说: %v", readErr)
+	}
+
+	seedModel(t, db, name)
+	err = NewAdmin(db).Update(context.Background(), UpdateModelRequest{
+		CanonicalName: name,
+		Capabilities:  &Capabilities{Endpoints: []channel.Endpoint{"nope"}},
+	})
+	if err == nil {
+		t.Fatal("非法端点应当被 Update 拒绝")
+	}
+}
+
+// 手工改库塞一个非法端点串：读的时候要**报错**，而不是静默少一条。
+//
+// 静默丢一项会变成「这一行莫名少一个端点」，而它在选路里的表现是「这条渠道
+// 配好了却选不中」——没人能从现场想到是那一列里有个拼错的串。写侧会拦，所以
+// 能出现只可能是有人绕过了管理面。
+func TestReadRejectsUnknownEndpoint(t *testing.T) {
+	db := testDB(t)
+	name := uniqueName("model")
+	seedModel(t, db, name)
+
+	if _, err := db.ExecContext(context.Background(), `
+		UPDATE model_catalog
+		   SET supported_endpoints = ARRAY['/v1/chat/completions', '/v1/embeddings']
+		 WHERE canonical_name = $1`, name); err != nil {
+		t.Fatalf("改库失败: %v", err)
+	}
+
+	_, err := New(db).Constraints(context.Background(), name)
+	if err == nil {
+		t.Fatal("读到非法端点应当报错")
+	}
+	if !strings.Contains(err.Error(), "/v1/embeddings") {
+		t.Errorf("报错里没提那个非法取值：%v", err)
+	}
+
+	// 管理面那个读面走的是同一套解析，结论也要一致。
+	if _, err := New(db).Model(context.Background(), name); err == nil {
+		t.Error("Model 也应当报错，而不是把那一项丢掉")
+	}
+}
+
+// 端点那一项没配过的行（迁移之前的存量）读回来是 nil = **未知**，与
+// 「明确一条都不支持」不是一件事（见 TestModelEndpointsRoundTrip）。
+func TestEndpointsUnsetAreUnknown(t *testing.T) {
+	db := testDB(t)
+	name := uniqueName("model")
+	seedModel(t, db, name)
+
+	cons, err := New(db).Constraints(context.Background(), name)
+	if err != nil {
+		t.Fatalf("Constraints 出错: %v", err)
+	}
+	if cons.Capabilities.Endpoints != nil {
+		t.Errorf("没配过的行读出来 = %s，期望 nil",
+			endpointsText(cons.Capabilities.Endpoints))
 	}
 }

@@ -30,6 +30,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/sumwai/larkax/internal/channel"
 )
 
 // ErrAliasNotFound 表示没有从这个渠道到这个规范模型名的映射。
@@ -47,13 +49,16 @@ var ErrModelNotFound = errors.New("规范模型不存在")
 
 // Capabilities 是 model_catalog 上的能力矩阵。
 //
-// # 六个字段都是三态
+// # 这里的字段都是三态
 //
-// 每一项是一个指针，对应库里那一列的三态：
+// 上面六个能力每一项是一个指针，对应库里那一列的三态：
 //
 //	nil    未知：这一列是 NULL，从没配过。**这一项不参与任何判据**
 //	false  明确声明不支持：请求用到它时这条候选出局
 //	true   支持
+//
+// Endpoints 那一项同一套口径，只是它表达「支持哪几条」而不止「支不支持」，
+// 所以用 nil / 空切片 / 非空切片三个状态（见它的注释）。
 //
 // 「未知」必须与「不支持」分开。写入侧只有显式开关（`larkaxctl model`
 // 的 --tools 等），所以一条只填了名字的记录在库里是六个 NULL；按「不支持」
@@ -75,6 +80,32 @@ type Capabilities struct {
 	Audio     *bool
 	Cache     *bool
 	Batch     *bool
+
+	// Endpoints 是目录声明这个模型在上游哪几条端点上被服务（见
+	// channel.Endpoint）。切片而不是指针，三态写成：
+	//
+	//	nil    未知：这一列是 NULL，从没配过。**这一项不参与任何判据**
+	//	{}     明确声明一条都不支持
+	//	非空   支持这几条
+	//
+	// 与上面六个能力列同一套口径（见本类型开头的注释），「未知」照样必须与
+	// 「明确说没有」分开：按后者读会让一条只填了名字的记录选不到任何渠道。
+	// 空切片与 nil 在这里不是同一件事，所以不像 modalities 那两列那样折平。
+	//
+	// # 为什么端点属于模型而不属于渠道
+	//
+	// 一个上游同时有 /v1/chat/completions、/v1/responses、/v1/messages 三套
+	// 端点，**由模型决定走哪一套**：同一个账号下 A 模型只在 chat 那边被服务，
+	// B 模型只在 responses 那边。渠道的 type 只说明它说哪套协议（用哪个
+	// 适配器），不说明它服务哪个模型——所以「服务哪几条端点」这一条声明
+	// 挂在模型上（见迁移 00027）。
+	//
+	// # 这一列会过时
+	//
+	// 上游开一条新端点、或把某个模型挪到别的端点上，库里不会自己变；这一版
+	// 由人工经目录管理接口维护（见 Admin）。它记的是「我们知道的声明」，
+	// 不是「上游此刻的事实」。
+	Endpoints []channel.Endpoint
 }
 
 // Model 是 model_catalog 里的一条规范模型。
@@ -330,7 +361,7 @@ func (c *Catalog) OverridesFor(ctx context.Context, canonicalModel string, chann
 	return out, nil
 }
 
-// Constraints 是 model_catalog 上选路要认的那几列：能力矩阵与两个上限。
+// Constraints 是 model_catalog 上选路要认的那几列：能力矩阵、端点清单与两个上限。
 //
 // # 为什么与 Model 分开
 //
@@ -342,6 +373,7 @@ func (c *Catalog) OverridesFor(ctx context.Context, canonicalModel string, chann
 // 六个能力一起读，不做「只读判据用到的那三项」的裁剪：它们在同一行上，
 // 少读三列省不下一次往返，却会让这个结构体的字段看起来像「这个模型只有
 // 三项能力」。判据用到哪几项是**读侧**的事（见 internal/route 的 ModelProfile）。
+// 端点清单同理整条读回来，判据在那边按集合判。
 //
 // # input_limit 不在这里
 //
@@ -350,8 +382,9 @@ func (c *Catalog) OverridesFor(ctx context.Context, canonicalModel string, chann
 // 一列硬接一条假的消费，与 internal/channels 的 candidateQuery 对 failures
 // 那一列的处置同一条理由。
 type Constraints struct {
-	// Capabilities 是六个能力列，**三态**：nil 未知、false 明确不支持、
-	// true 支持（见 Capabilities）。选路只判其中三项，理由同上。
+	// Capabilities 是六个能力列加端点清单，**三态**：nil 未知、false 明确
+	// 不支持、true 支持（见 Capabilities）。选路只判其中三项能力，理由同上；
+	// Endpoints 那一项按集合判（候选的端点在不在里面）。
 	Capabilities Capabilities
 	// ContextLimit 是上下文窗口（输入 + 输出）。**0 表示未知**（库里是 NULL）。
 	ContextLimit int
@@ -386,14 +419,19 @@ func (c *Catalog) Constraints(ctx context.Context, canonicalName string) (Constr
 	}
 
 	var out Constraints
+	var endpointsRaw sql.NullString
 	err = rows.Scan(
 		&out.ContextLimit, &out.OutputLimit,
 		&out.Capabilities.Reasoning, &out.Capabilities.Tools,
 		&out.Capabilities.Vision, &out.Capabilities.Audio,
 		&out.Capabilities.Cache, &out.Capabilities.Batch,
+		&endpointsRaw,
 	)
 	if err != nil {
 		return Constraints{}, fmt.Errorf("读取规范模型行失败: %w", err)
+	}
+	if out.Capabilities.Endpoints, err = decodeEndpoints(endpointsRaw); err != nil {
+		return Constraints{}, fmt.Errorf("规范模型 %q 的 supported_endpoints 有问题: %w", canonicalName, err)
 	}
 	if err := rows.Err(); err != nil {
 		return Constraints{}, fmt.Errorf("遍历规范模型失败: %w", err)
@@ -551,6 +589,7 @@ SELECT
     m.supports_audio,
     m.supports_cache,
     m.supports_batch,
+    array_to_json(m.supported_endpoints)::text,
     array_to_json(m.modalities_input)::text,
     array_to_json(m.modalities_output)::text,
     m.reasoning_options,
@@ -568,6 +607,11 @@ SELECT
 // （NULL / false / true）一个都不能少，所以 NULL 必须原样传到 Go 侧，
 // 由 *bool 接住（见 Capabilities）。两个列族的这个差别写在 Capabilities
 // 与 Constraints 的注释里，改这张表的列时要一起看。
+//
+// supported_endpoints 与能力那六列同族，也**不套 COALESCE**：那一列的 NULL
+// 是「没配过」（不参与判据），而 `{}` 是「明确一条都不支持」（候选出局）——
+// 两者处置相反，折平了这条判据就反了。所以它走 array_to_json 转成 JSON 文本
+// 交给 sql.NullString（见 decodeEndpoints），与两个 modalities 列同一条路子。
 const constraintsQuery = `
 SELECT
     COALESCE(m.context_limit, 0),
@@ -577,7 +621,8 @@ SELECT
     m.supports_vision,
     m.supports_audio,
     m.supports_cache,
-    m.supports_batch
+    m.supports_batch,
+    array_to_json(m.supported_endpoints)::text
   FROM model_catalog m
  WHERE m.canonical_name = $1`
 
@@ -598,6 +643,7 @@ SELECT
 func scanModel(rows *sql.Rows) (Model, error) {
 	var (
 		model        Model
+		endpointsRaw sql.NullString
 		inJSON       string
 		outJSON      string
 		reasoningRaw []byte
@@ -611,7 +657,7 @@ func scanModel(rows *sql.Rows) (Model, error) {
 		&model.Capabilities.Reasoning, &model.Capabilities.Tools,
 		&model.Capabilities.Vision, &model.Capabilities.Audio,
 		&model.Capabilities.Cache, &model.Capabilities.Batch,
-		&inJSON, &outJSON, &reasoningRaw, &model.CanonicalModelID,
+		&endpointsRaw, &inJSON, &outJSON, &reasoningRaw, &model.CanonicalModelID,
 		&knowledgeCut, &releaseDate, &rawJSON, &model.UpdatedAt,
 	)
 	if err != nil {
@@ -619,6 +665,9 @@ func scanModel(rows *sql.Rows) (Model, error) {
 	}
 
 	var decodeErr error
+	if model.Capabilities.Endpoints, decodeErr = decodeEndpoints(endpointsRaw); decodeErr != nil {
+		return Model{}, fmt.Errorf("规范模型 %q 的 supported_endpoints 有问题: %w", model.CanonicalName, decodeErr)
+	}
 	if model.ModalitiesInput, decodeErr = decodeStrings(inJSON); decodeErr != nil {
 		return Model{}, fmt.Errorf("规范模型 %q 的 modalities_input 不是合法 JSON 数组: %w", model.CanonicalName, decodeErr)
 	}
@@ -675,6 +724,52 @@ func decodeStrings(raw string) ([]string, error) {
 	}
 	if out == nil {
 		out = []string{}
+	}
+	return out, nil
+}
+
+// decodeEndpoints 解 supported_endpoints 那一列（array_to_json 出来的 JSON 文本）。
+//
+// # 为什么返回 nil 而不是空切片
+//
+// 那一列可空，三种状态在选路里的处置不同：
+//
+//	NULL  未知（从没配过）→ 不参与判据，放行
+//	{}    明确一条都不支持 → 候选出局
+//	非空  支持这几条 → 候选的端点不在里面就出局
+//
+// 所以这里**不能**像 decodeStrings 那样把 NULL 折成空切片——那样「没配过」
+// 与「一条都不支持」就成了同一个值，而它们的结论正好相反（见
+// internal/route 的 ModelProfile.Endpoints）。
+//
+// # 解析不出来为什么报错而不是跳过
+//
+// 写侧（Admin）会拦掉非法取值，所以库里出现别的串只可能来自**手工改库**。
+// 静默丢一项会变成「这一行莫名少一条端点」，而那在选路里的表现是「这条渠道
+// 配好了却选不中」——没人能从现场想到是那一列里有个拼错的串。报错则直接指着
+// 那一行，与 remaining_estimate 不是数字之类的处置是同一条：类型与表定义
+// 对不上是系统性问题，不该被吞掉。
+func decodeEndpoints(raw sql.NullString) ([]channel.Endpoint, error) {
+	if !raw.Valid {
+		return nil, nil
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(raw.String), &values); err != nil {
+		return nil, fmt.Errorf("不是合法 JSON 数组: %w", err)
+	}
+	if values == nil {
+		// `[]` 解出来就是 nil 切片，而这里要的正是「空 = 一条都不支持」。
+		// 给一个非 nil 的空切片，好让这个结论与「未知」（上面那个 nil）在
+		// 调用方那里分得开。
+		values = []string{}
+	}
+	out := make([]channel.Endpoint, 0, len(values))
+	for _, value := range values {
+		endpoint, err := channel.ParseEndpoint(value)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, endpoint)
 	}
 	return out, nil
 }

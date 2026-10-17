@@ -224,15 +224,17 @@ func (s *Source) profile(ctx context.Context, canonicalName string) (*route.Mode
 	// 只带判据用得上的那几项：目录读回来的是整张能力矩阵，而 route 那边的
 	// 判据只看这三项（见 route.ModelProfile）。
 	//
-	// 三项能力是**原样搬过去的指针**，两侧的三态因此是同一份：nil 还是 nil，
-	// false 还是 false。中间不做转换是刻意的——「哪一项该按未知放行」这条
-	// 判断只该有一处（见 route.declaredUnsupported），投影里再判一次就是
-	// 第二份判据，而两份判据漂移的症状是「某条请求莫名其妙选到了不做这件事
-	// 的模型」。指针只读：两边都不写它。
+	// 三项能力与端点清单都是**原样搬过去的指针/切片**，两侧的三态因此是同一份：
+	// nil 还是 nil，false 还是 false，空切片还是空切片。中间不做转换是刻意的
+	// ——「哪一项该按未知放行」这条判断只该有一处（见 route.declaredUnsupported
+	// 与 profileRejection 的端点评据），投影里再判一次就是第二份判据，而两份
+	// 判据漂移的症状是「某条请求莫名其妙选到了不做这件事的模型」。指针与切片
+	// 都只读：两边都不写它。
 	return &route.ModelProfile{
 		Tools:        cons.Capabilities.Tools,
 		Vision:       cons.Capabilities.Vision,
 		Reasoning:    cons.Capabilities.Reasoning,
+		Endpoints:    cons.Capabilities.Endpoints,
 		ContextLimit: int64(cons.ContextLimit),
 		OutputLimit:  int64(cons.OutputLimit),
 	}, nil
@@ -572,6 +574,16 @@ func (row candidateRow) candidate(plaintext string, now time.Time) (route.Candid
 		Quota:        quotaState,
 		CostPerUnit:  cost,
 		CacheHitRate: cacheRate,
+		// 这条候选把请求发到哪条路径：由它的 type 指向的协议决定，判据在
+		// route 那边（它比对目录声明的端点清单）。这里**不读适配器实例**：
+		// 本包没有注册表，而 channel.Protocol.Endpoint 与适配器自述的
+		// Endpoint() 是同一份映射，注册表在启动时已经自检过两者一致
+		// （见 channel.Registry.Register）。
+		//
+		// 库里那个 type 当前版本的二进制不认识时算出来是空串 = 不知道，
+		// 端点判据不判它——那种候选本来就选不中（执行器报 ErrUnknownType
+		// 并换下一个）。
+		Endpoint: channel.Protocol(row.channelType).Endpoint(),
 		// SampleCount 取参与缓存统计的 token 数，而不是请求数。
 		//
 		// route 用它判断命中率可不可信（样本太少就不参与打分）。用请求数会

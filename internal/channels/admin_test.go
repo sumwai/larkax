@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/dberr"
@@ -23,10 +24,30 @@ import (
 
 // stubAdapter 是注册表里占位用的最小实现：写入路径只问「这个类型有人实现吗」，
 // 不问它怎么发请求。
-type stubAdapter struct{ typ string }
+//
+// protocol 留空表示 OpenAI——既有用例都按那个协议写的，而端点判据要按类型
+// 算出一条路径，所以这里必须能表达「这个替身说哪套协议」（见
+// TestUpdateJudgesByNewTypeWhenBothChange）。
+type stubAdapter struct {
+	typ      string
+	protocol channel.Protocol
+}
 
-func (s *stubAdapter) Type() string               { return s.typ }
-func (s *stubAdapter) Protocol() channel.Protocol { return channel.ProtocolOpenAI }
+func (s *stubAdapter) Type() string { return s.typ }
+
+func (s *stubAdapter) Protocol() channel.Protocol {
+	if s.protocol == "" {
+		return channel.ProtocolOpenAI
+	}
+	return s.protocol
+}
+
+// Endpoint 按协议推：这个替身只用来占住一个类型名，没有真实的上游路径
+// ——但注册表要求它与 Protocol 对得上（见 channel.Registry.Register）。
+func (s *stubAdapter) Endpoint() channel.Endpoint {
+	return s.Protocol().Endpoint()
+}
+
 func (s *stubAdapter) Chat(context.Context, channel.Channel, *channel.Request) (*channel.Response, error) {
 	return nil, channel.ErrUnsupported
 }
@@ -45,13 +66,36 @@ func (s *stubAdapter) Quota(context.Context, channel.Channel) (quota.State, erro
 
 // stubType 是注册表里会有的那个类型。用它而不是真实适配器的类型名：
 // 这一层测的是「类型经注册表校验」，与某个具体适配器无关。
+//
+// 它**不是**一个协议取值，所以按它算出来的端点是空串——端点判据于是不判它
+// （见下面对那两个同名常量的说明）。
 const stubType = "stub-adapter"
+
+// endpointChatType / endpointMessagesType 是两个类型名，它们与 channel.Protocol
+// 的取值**同名**（"openai" / "anthropic"）。
+//
+// 这不是巧合，而是端点判据的前提：两侧都按 channel.Protocol(<渠道 type>) 算
+// 这条渠道打哪条端点（见 channels.Source 的候选构造与 Admin.checkModelEndpoints），
+// 而 channel.Protocol 的文档写着「取值与渠道表里的 channels.type 是同一个
+// 字符串（适配器的 Type()）」。stubType 那种名字算出来是空串 = 不知道，
+// 端点判据不判它——所以要测这条判据，替身的类型名必须落在协议取值上。
+const (
+	endpointChatType     = "openai"
+	endpointMessagesType = "anthropic"
+)
 
 func testRegistry(t *testing.T) *channel.Registry {
 	t.Helper()
 	r := channel.NewRegistry()
 	if err := r.Register(&stubAdapter{typ: stubType}); err != nil {
 		t.Fatalf("注册 stub 适配器失败: %v", err)
+	}
+	// 另外两个按协议取值命名：端点判据要按类型算路径，见上面那段说明。
+	if err := r.Register(&stubAdapter{typ: endpointChatType}); err != nil {
+		t.Fatalf("注册 %q 适配器失败: %v", endpointChatType, err)
+	}
+	if err := r.Register(&stubAdapter{typ: endpointMessagesType, protocol: channel.ProtocolAnthropic}); err != nil {
+		t.Fatalf("注册 %q 适配器失败: %v", endpointMessagesType, err)
 	}
 	return r
 }
@@ -1048,4 +1092,258 @@ func readChannelRaw(t *testing.T, db *sql.DB, id int64) channelRaw {
 	row.Setting = string(set)
 	row.CredentialE = hex.EncodeToString(enc)
 	return row
+}
+
+// ── 端点判据：写入侧 ────────────────────────────────────────────────────
+//
+// 模型目录里可以声明「这个模型只在这些端点上被服务」（见
+// catalog.Capabilities 的 Endpoints）。把这样一个模型挂到一条端点数对不上
+// 的渠道上，请求会在**上游**那里失败（400 unsupported_model，从我们这边看
+// 与「模型不存在」长得一样），而那条渠道自己看不出任何问题：status 是
+// enabled、模型在 models 白名单里、别的渠道也在用同一份配置。
+//
+// 所以挡在写入侧。判据的另外两档（目录里没有这个模型、端点那一项没配过）
+// 一律放行——目录是人工维护、会过时的一份声明，按「不支持」处理会让刚接的
+// 上游一条渠道都建不出来。
+
+// seedCatalogEndpoints 在模型目录里建一条记录并声明它的端点。
+//
+// endpoints 传 nil 表示那一列留 NULL（没配过 = 未知），传空切片表示
+// `{}`（明确一条都不支持）——两者在**选路**里处置相反（前者放行、后者让任何
+// 候选出局），所以夹具必须能把它们分开写出来；在**写入**这一侧它们也分开判
+// （见 TestCreateAllowsModelsWithUnknownEndpoints 与
+// TestCreateRejectsModelDeclaredOnNoEndpoint）。
+func seedCatalogEndpoints(t *testing.T, db *sql.DB, name string, endpoints []channel.Endpoint) {
+	t.Helper()
+	if _, err := catalog.NewAdmin(db).Create(context.Background(), catalog.CreateModelRequest{
+		CanonicalName: name,
+		DisplayName:   name,
+		Capabilities:  catalog.Capabilities{Endpoints: endpoints},
+	}); err != nil {
+		t.Fatalf("建目录记录失败: %v", err)
+	}
+}
+
+// stub 渠道打的是 chat completions（见 stubAdapter），所以「对不上」的目录
+// 声明就是一条不含 /v1/chat/completions 的清单。
+func TestCreateRejectsModelOnUndeclaredEndpoint(t *testing.T) {
+	db := testDB(t)
+	admin := newAdmin(t, db, testSealer(t))
+	model := uniqueModel()
+	seedCatalogEndpoints(t, db, model, []channel.Endpoint{channel.EndpointMessages})
+
+	req := baseRequest("ch-endpoint-" + itoa(nextID()))
+	req.Type = endpointChatType
+	req.Models = []string{model}
+
+	_, err := admin.Create(context.Background(), req)
+	if err == nil {
+		t.Fatal("目录说这个模型只在另一条端点上服务，Create 应当被拒绝")
+	}
+	// 报错要同时说清四件事，否则运维拿着这句话不知道该改哪一个：
+	// 模型名、目录声明的端点、这条渠道的端点、这条渠道的 type。
+	for _, want := range []string{
+		model, string(channel.EndpointMessages), endpointChatType, string(channel.EndpointChatCompletions),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("报错里没出现 %q：%v", want, err)
+		}
+	}
+	// 一个字段不对就整条不写。
+	if n := countByName(t, db, req.Name); n != 0 {
+		t.Errorf("被拒绝的 Create 留下了 %d 行", n)
+	}
+}
+
+// `{}`（明确一条都不支持）也要拦：它不是「没配过」，而是「哪条渠道都服务
+// 不了这个模型」。把两者合成一档会让这条声明静默地什么都不做。
+func TestCreateRejectsModelDeclaredOnNoEndpoint(t *testing.T) {
+	db := testDB(t)
+	admin := newAdmin(t, db, testSealer(t))
+	model := uniqueModel()
+	seedCatalogEndpoints(t, db, model, []channel.Endpoint{})
+
+	req := baseRequest("ch-endpoint-none-" + itoa(nextID()))
+	req.Type = endpointChatType
+	req.Models = []string{model}
+
+	_, err := admin.Create(context.Background(), req)
+	if err == nil {
+		t.Fatal("目录说这个模型一条端点都不支持，Create 应当被拒绝")
+	}
+	if !strings.Contains(err.Error(), model) {
+		t.Errorf("报错里没提模型名：%v", err)
+	}
+}
+
+func TestCreateAllowsModelsWithUnknownEndpoints(t *testing.T) {
+	db := testDB(t)
+	admin := newAdmin(t, db, testSealer(t))
+
+	cases := []struct {
+		name string
+		seed func(model string)
+	}{
+		{"目录里没有这个模型", func(string) {}},
+		{"目录里端点那一项没配过", func(model string) {
+			seedCatalogEndpoints(t, db, model, nil)
+		}},
+		{"目录里声明了这条端点", func(model string) {
+			seedCatalogEndpoints(t, db, model, []channel.Endpoint{channel.EndpointChatCompletions})
+		}},
+		{"目录里声明了两条，含这条", func(model string) {
+			seedCatalogEndpoints(t, db, model, []channel.Endpoint{
+				channel.EndpointMessages, channel.EndpointChatCompletions})
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			model := uniqueModel()
+			tc.seed(model)
+
+			req := baseRequest("ch-allow-" + itoa(nextID()))
+			req.Type = endpointChatType
+			req.Models = []string{model}
+
+			if _, err := admin.Create(context.Background(), req); err != nil {
+				t.Fatalf("应当放行，得到: %v", err)
+			}
+		})
+	}
+}
+
+// 只改 models（不带 type）同样要按**库里当前那条**类型校验：把一个模型加进
+// 一条走别的端点的渠道，与建一条新渠道挂错模型是同一件事。
+func TestUpdateRejectsModelOnUndeclaredEndpoint(t *testing.T) {
+	db := testDB(t)
+	admin := newAdmin(t, db, testSealer(t))
+	model := uniqueModel()
+
+	req := baseRequest("ch-update-endpoint-" + itoa(nextID()))
+	req.Type = endpointChatType
+	req.Models = []string{model}
+	id, err := admin.Create(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Create 出错: %v", err)
+	}
+
+	// 建完之后目录里才出现这个模型，且它只在另一条端点上被服务。
+	seedCatalogEndpoints(t, db, model, []channel.Endpoint{channel.EndpointMessages})
+
+	models := []string{model, "extra-" + model}
+	err = admin.Update(context.Background(), UpdateRequest{ID: id, Models: &models})
+	if err == nil {
+		t.Fatal("只改 models 也要按当前类型校验端点")
+	}
+	for _, want := range []string{model, string(channel.EndpointMessages), endpointChatType} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("报错里没出现 %q：%v", want, err)
+		}
+	}
+
+	// 被拒绝的修改一行都不动。
+	if got := listInfo(t, admin, id).Models; !reflect.DeepEqual(got, req.Models) {
+		t.Errorf("被拒绝的 Update 改了 models：%v，期望 %v", got, req.Models)
+	}
+}
+
+// 一起改 type 与 models 时按**新的**类型判：从 anthropic（messages）换成 stub
+// （chat completions）之后，一个只在 messages 上被服务的模型就该被拦下。
+//
+// 判据用哪一侧的类型不能想当然：用库里那个旧的会把这次修改放过去，而放过去
+// 之后这条渠道就一直在往一条错端点上发请求。
+func TestUpdateJudgesByNewTypeWhenBothChange(t *testing.T) {
+	db := testDB(t)
+	admin := newAdmin(t, db, testSealer(t))
+	model := uniqueModel()
+	seedCatalogEndpoints(t, db, model, []channel.Endpoint{channel.EndpointMessages})
+
+	// 先按 anthropic 建一条：端点对得上，放行。
+	req := baseRequest("ch-update-type-" + itoa(nextID()))
+	req.Type = endpointMessagesType
+	req.Models = []string{model}
+	id, err := admin.Create(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Create 出错: %v", err)
+	}
+
+	// 换成 chat completions，模型不动——端点就对不上了。
+	newType := endpointChatType
+	models := []string{model}
+	err = admin.Update(context.Background(), UpdateRequest{ID: id, Type: &newType, Models: &models})
+	if err == nil {
+		t.Fatal("换成一个端点对不上的类型应当被拒绝")
+	}
+	for _, want := range []string{model, string(channel.EndpointChatCompletions), endpointChatType} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("报错里没出现 %q：%v", want, err)
+		}
+	}
+	// 类型也没被改掉：两列在同一个 SET 里，被拒绝时一行都不写。
+	if got := listInfo(t, admin, id).Type; got != endpointMessagesType {
+		t.Errorf("被拒绝的 Update 改了 type：%q", got)
+	}
+}
+
+// 只改 type（不给 models）同样要把**已有的那批模型**重判一遍。
+//
+// 这条渠道会把它们从一条端点整体挪到另一条上，而光看这份改动看不出模型的
+// 落点变了——它比「只改 models」更隐蔽：不需要动白名单，也不改模型的集合。
+//
+// 两臂都在：只留拒绝那一臂的话，它证明的只是「改 type 会被拒」，
+// 证明不了判的是「端点对不对」。
+func TestUpdateJudgesEndpointsWhenOnlyTypeChanges(t *testing.T) {
+	db := testDB(t)
+	admin := newAdmin(t, db, testSealer(t))
+
+	t.Run("端点对得上时放行", func(t *testing.T) {
+		model := uniqueModel()
+		seedCatalogEndpoints(t, db, model, []channel.Endpoint{
+			channel.EndpointMessages, channel.EndpointChatCompletions,
+		})
+
+		req := baseRequest("ch-type-only-ok-" + itoa(nextID()))
+		req.Type = endpointMessagesType
+		req.Models = []string{model}
+		id, err := admin.Create(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Create 出错: %v", err)
+		}
+
+		newType := endpointChatType
+		if err := admin.Update(context.Background(), UpdateRequest{ID: id, Type: &newType}); err != nil {
+			t.Fatalf("模型两条端点都支持，只改 type 应当放行: %v", err)
+		}
+		if got := listInfo(t, admin, id).Type; got != endpointChatType {
+			t.Errorf("type 没改成功：%q", got)
+		}
+	})
+
+	t.Run("端点对不上时拒绝", func(t *testing.T) {
+		model := uniqueModel()
+		seedCatalogEndpoints(t, db, model, []channel.Endpoint{channel.EndpointMessages})
+
+		req := baseRequest("ch-type-only-bad-" + itoa(nextID()))
+		req.Type = endpointMessagesType
+		req.Models = []string{model}
+		id, err := admin.Create(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Create 出错: %v", err)
+		}
+
+		newType := endpointChatType
+		err = admin.Update(context.Background(), UpdateRequest{ID: id, Type: &newType})
+		if err == nil {
+			t.Fatal("只改 type 就把已有模型挪到服务不了的端点上，应当被拒绝")
+		}
+		// 报错里要有模型名：这次的教训是「改动里根本没提这个模型」，
+		// 不说出是哪一个，读的人无从下手。
+		if !strings.Contains(err.Error(), model) {
+			t.Errorf("报错里没出现模型名 %q：%v", model, err)
+		}
+		if got := listInfo(t, admin, id).Type; got != endpointMessagesType {
+			t.Errorf("被拒绝的 Update 改了 type：%q", got)
+		}
+	})
 }

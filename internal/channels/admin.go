@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/dberr"
@@ -71,6 +73,14 @@ type Admin struct {
 	db       *sql.DB
 	sealer   *credential.Sealer
 	registry *channel.Registry
+
+	// catalog 读模型目录里那条端点的声明（见 checkModelEndpoints）。
+	//
+	// 由 NewAdmin 现建一个，与 Source 上那个是**同一个包的同一个读取面**，
+	// 只是各拿一份：两者都不持有状态，包着同一个 *sql.DB。不把它做成构造参数
+	// 是为了不改 NewAdmin 的签名——那会波及装配处（internal/assembly）与
+	// cmd/，而它们不需要知道这件事。
+	catalog *catalog.Catalog
 }
 
 // NewAdmin 包装数据库句柄、主密钥封装器与适配器注册表。
@@ -78,7 +88,7 @@ type Admin struct {
 // registry 为 nil 时创建与改类型都会报错，而不是 panic：一个拼错构造参数的
 // 管理面调用不该把进程带走。
 func NewAdmin(db *sql.DB, sealer *credential.Sealer, registry *channel.Registry) *Admin {
-	return &Admin{db: db, sealer: sealer, registry: registry}
+	return &Admin{db: db, sealer: sealer, registry: registry, catalog: catalog.New(db)}
 }
 
 // CreateRequest 是新建一条渠道所需的全部字段。
@@ -123,6 +133,11 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 	}
 	models, err := normalizeModels(req.Models)
 	if err != nil {
+		return 0, err
+	}
+	// 端点的校验排在封凭证之前：校验失败时这次调用根本没碰到明文
+	// （见下面 sealCredential 那一处的理由）。
+	if err = a.checkModelEndpoints(ctx, req.Type, models); err != nil {
 		return 0, err
 	}
 	weight, err := normalizeWeight(req.Weight)
@@ -204,6 +219,10 @@ func (a *Admin) Update(ctx context.Context, req UpdateRequest) error {
 		sets = append(sets, column+" = $"+strconv.Itoa(len(args)))
 	}
 
+	// 归一化一次模型清单：这一支要拿它写 SET，下面的端点校验也要用它算
+	// 「改完之后这条渠道挂着哪些模型」。没给 models 时保持 nil。
+	var newModels []string
+
 	if req.Name != nil {
 		name, err := normalizeName(*req.Name)
 		if err != nil {
@@ -229,7 +248,34 @@ func (a *Admin) Update(ctx context.Context, req UpdateRequest) error {
 		if err != nil {
 			return err
 		}
+		newModels = models
 		add("models", models)
+	}
+
+	// ── 端点校验 ────────────────────────────────────────────────────────
+	//
+	// Type 与 Models **任何一个**变了都要重判，因为两者各自都会改变「哪些
+	// 模型挂在这条渠道上、它往哪条路径发」：
+	//
+	//	只改 models  可能把一个这条端点服务不了的模型挂进来
+	//	只改 type    会把**已有的整批模型**从一条端点挪到另一条上
+	//
+	// 只在 Models 那一支里判会漏掉后者，而那个缺口更隐蔽——它不需要动
+	// models，光看这份改动看不出渠道的模型会落到另一条端点上。
+	//
+	// 判的是**改完之后**的值：给了就用给的，没给读库里当前那一条（见
+	// attachmentAfter）。渠道不存在或已删时跳过，让下面那条 UPDATE 去报
+	// ——它分得出「id 打错了」与「已经删了」，在这里先报一次反而少一层区分。
+	if req.Type != nil || req.Models != nil {
+		channelType, models, ok, err := a.attachmentAfter(ctx, req, newModels)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if err := a.checkModelEndpoints(ctx, channelType, models); err != nil {
+				return err
+			}
+		}
 	}
 	if req.Weight != nil {
 		weight, err := normalizeWeight(*req.Weight)
@@ -596,6 +642,135 @@ func scanInfo(rows *sql.Rows) (ChannelInfo, error) {
 // 定下来，读取侧按同一个假设解。校验失败时只报**哪个字段不对**，不回显值——
 // 凭证字段固然不能回显，其余字段也用同一套写法，免得后来把某个字段换成
 // 凭证时忘了改这一处。
+
+// attachmentAfter 给出这次修改之后这条渠道挂在哪个类型、哪些模型上。
+//
+// newModels 是调用方归一化过的新模型清单，为 nil 表示这次不改模型；类型同理
+// 取 req.Type。没给的那一项读库里当前的值——因为**两者都会单独改变**「这批
+// 模型落在哪条端点上」：只改 models 可能把服务不了的模型挂进来，只改 type
+// 会把已有的整批模型挪到另一条路径上。
+//
+// ok 为 false 表示这条渠道不存在或已删：调用方据此跳过端点校验，让随后那条
+// UPDATE 去报 ErrChannelNotFound / ErrChannelDeleted——两次报的是同一件事，
+// 而 UPDATE 那次分得出「id 打错了」与「已经删了」。
+func (a *Admin) attachmentAfter(ctx context.Context, req UpdateRequest, newModels []string) (string, []string, bool, error) {
+	var (
+		channelType string
+		modelsJSON  string
+	)
+	err := a.db.QueryRowContext(ctx,
+		`SELECT type, array_to_json(models)::text FROM channels WHERE id = $1 AND `+channelAlive,
+		req.ID).Scan(&channelType, &modelsJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil, false, nil
+	}
+	if err != nil {
+		return "", nil, false, fmt.Errorf("查渠道 %d 的类型与模型失败: %w", req.ID, err)
+	}
+	models, err := decodeModels(req.ID, modelsJSON)
+	if err != nil {
+		return "", nil, false, err
+	}
+	if req.Type != nil {
+		channelType = *req.Type
+	}
+	if newModels != nil {
+		models = newModels
+	}
+	return channelType, models, true, nil
+}
+
+// checkModelEndpoints 确认这批模型能在本条渠道的端点上被服务。
+//
+// # 它拦的是什么
+//
+// 模型目录里可以声明「这个模型只在这些端点上被服务」（见 catalog.Capabilities
+// 的 Endpoints）。把这样一个模型挂到一条端点数对不上的渠道上，请求会在
+// **上游**那里失败：400 unsupported_model，从我们这边看与「模型不存在」长得
+// 一样，而排查方向指向对方。挂错的那条渠道本身看不出任何问题——它 status 是
+// enabled、模型在 models 白名单里、别的渠道也在用同一份配置。
+//
+// 所以挡住写入侧：这是配置错误，而配置错误该在写入时说话。
+//
+// # 只在「目录里明确说了端点」且「对不上」时拒绝
+//
+//   - 目录里没有这个模型 → 放行（未知）
+//   - 端点那一项是 NULL（没配过）→ 放行（未知）
+//   - 目录里那条记录说 `{}`（明确一条都不支持）→ 拒绝：任何渠道都服务不了它
+//
+// 两条放行与「不知情就不拦」一致（同 route 的端点评据）：目录是**人工维护、
+// 会过时**的一份声明，刚接一家上游时它多半还是空的，那时按「不支持」处理会
+// 让渠道一条都建不出来。
+//
+// # 读目录失败要报错，不降级成「未知」
+//
+// 与 Source.profile 同一条理由：降级看起来更宽容，实际是把一次查询故障变成
+// 「判据静默失效」——而失效与「这个部署没配目录」在日志里分不开。这条校验
+// 与这次写入打的是同一个库，读失败说明问题不在这一条配置上。
+//
+// # 为什么走一次库
+//
+// 管理面不在请求热路径上，而 Create / Update 本来就已经在写库了；多读几行
+// （每个模型一行）不改变这条路径的量级。反过来，「写入时不查」意味着那条
+// 配置要等到第一次请求才暴露，而那时它已经挂在库上了。
+func (a *Admin) checkModelEndpoints(ctx context.Context, channelType string, models []string) error {
+	endpoint := channel.Protocol(channelType).Endpoint()
+	if endpoint == "" {
+		// 这个类型没有对应的协议（多半是个只占类型名的替身），算不出端点
+		// = 不知道，放行。
+		return nil
+	}
+	for _, model := range models {
+		declared, err := a.declaredEndpoints(ctx, model)
+		if err != nil {
+			return err
+		}
+		if declared == nil || slices.Contains(declared, endpoint) {
+			continue
+		}
+		// 这句话同时经命令行与管理面（HTTP）返回给使用者，所以措辞只能写
+		// 两个入口都成立的东西：命令名、`--参数` 写法只有命令行那边有，
+		// 管理面的调用方读到的是一个它没有的东西（见 LESSONS.md 第 39 条）。
+		// 这里只写数据本身的那些名字——模型名、端点、渠道的 type、models。
+		return fmt.Errorf("模型 %q 在目录里声明的端点是 %s，而这条渠道的类型是 %q（它把请求发到 %s）"+
+			"：往这条端点发，上游会回 unsupported_model，且从我们这边看与「模型不存在」无从分辨。"+
+			"要么给这个模型补上这条端点（改模型目录里这一条声明），要么把它从这条渠道的 models 里去掉",
+			model, endpointListText(declared), channelType, endpoint)
+	}
+	return nil
+}
+
+// declaredEndpoints 读模型目录对这个模型声明的端点清单。
+//
+// 三个取值原样交回调用方，不在这里折平：nil = 未知（放行）、空切片 = 明确
+// 一条都不支持（拒绝）、非空 = 按集合判。折平任意两个都会让「没配过」与
+// 「配了说没有」在写入侧重新合成一个值，而那正是这条三态要分开的东西。
+func (a *Admin) declaredEndpoints(ctx context.Context, model string) ([]channel.Endpoint, error) {
+	cons, err := a.catalog.Constraints(ctx, model)
+	if errors.Is(err, catalog.ErrModelNotFound) {
+		// 目录里没有这个模型：未知，放行。与 Source.profile 同一处置。
+		return nil, nil //nolint:nilnil // 见上
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读取模型 %q 的目录声明失败: %w", model, err)
+	}
+	return cons.Capabilities.Endpoints, nil
+}
+
+// endpointListText 把目录声明的那几条端点渲染成一句人话，供报错用。
+//
+// 空清单（`{}`：明确一条都不支持）单独说一句——「只在这些端点上服务：」
+// 后面空着读不出任何意思，而这一档恰恰意味着**任何渠道**都服务不了它。
+func endpointListText(endpoints []channel.Endpoint) string {
+	if len(endpoints) == 0 {
+		return "「一条都不支持」"
+	}
+	parts := make([]string, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		parts = append(parts, string(endpoint))
+	}
+	return strings.Join(parts, ", ")
+}
 
 // validateType 确认这个渠道类型有对应的适配器。
 func (a *Admin) validateType(channelType string) error {
