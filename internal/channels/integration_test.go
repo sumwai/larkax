@@ -12,6 +12,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/credential"
+	"github.com/sumwai/larkax/internal/route"
 	"github.com/sumwai/larkax/internal/testdb"
 )
 
@@ -142,6 +143,25 @@ func insertChannel(t *testing.T, db *sql.DB, sealer *credential.Sealer, spec cha
 // hourBucket 返回距今最近的那个整点桶，n 为回退的小时数。
 func hourBucket(n int) time.Time {
 	return time.Now().UTC().Truncate(time.Hour).Add(-time.Duration(n) * time.Hour)
+}
+
+// insertRollupSignals 插一行**带全部信号列**的桶。
+//
+// 与 insertRollup 分开：那三列正是选路打分的三个维度，「这个用例到底写没写
+// 它们」在调用处要一眼看得出来。收 any 是为了让「这一列是 NULL」也能表达
+// ——写入侧今天写的正是 NULL（latency）与 0（cost / cache）。
+func insertRollupSignals(t *testing.T, db *sql.DB, channelID int64, bucket time.Time,
+	requests, successes, failures int, p95, cost, cacheHit, cacheMiss any) {
+	t.Helper()
+	_, err := db.ExecContext(context.Background(), `
+		INSERT INTO channel_health_rollup
+			(channel_id, bucket, requests, successes, failures,
+			 latency_p95_ms, cost, cache_hit_tokens, cache_miss_tokens)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::numeric, $8, $9)`,
+		channelID, bucket, requests, successes, failures, p95, cost, cacheHit, cacheMiss)
+	if err != nil {
+		t.Fatalf("插入健康度失败: %v", err)
+	}
 }
 
 func insertRollup(t *testing.T, db *sql.DB, channelID int64, bucket time.Time, requests, successes, failures, p95 int, cost string) {
@@ -304,8 +324,8 @@ func TestCandidatesIncludesHealthAndQuota(t *testing.T) {
 	if want := 14.0 / 15.0; c.Health.SuccessRate != want {
 		t.Errorf("SuccessRate = %v，期望 %v", c.Health.SuccessRate, want)
 	}
-	if c.Health.LatencyP95 != 200*time.Millisecond {
-		t.Errorf("LatencyP95 = %v，期望最新的 200ms", c.Health.LatencyP95)
+	if c.Health.LatencyP95 == nil || *c.Health.LatencyP95 != 200*time.Millisecond {
+		t.Errorf("LatencyP95 = %s，期望最新的 200ms", showPtr(c.Health.LatencyP95))
 	}
 	// 最新桶里有成功，连续失败长度为 0。
 	if c.Health.ConsecutiveFailures != 0 {
@@ -330,8 +350,106 @@ func TestCandidatesIncludesHealthAndQuota(t *testing.T) {
 		t.Errorf("Quota.Confidence = %v，期望 1（api_query 是实测）", c.Quota.Confidence)
 	}
 	// 单位成本 = 窗口内总额 / 请求数 = 3.0 / 15。
-	if want := 3.0 / 15.0; c.CostPerUnit != want {
-		t.Errorf("CostPerUnit = %v，期望 %v", c.CostPerUnit, want)
+	if c.CostPerUnit == nil {
+		t.Fatal("CostPerUnit 是 nil，期望 3.0/15")
+	}
+	if want := 3.0 / 15.0; *c.CostPerUnit != want {
+		t.Errorf("CostPerUnit = %v，期望 %v", *c.CostPerUnit, want)
+	}
+}
+
+// 桶里真的写上了成本 / 延迟 / 缓存三列之后，它们必须真的影响排序。
+//
+// # 这一条钉的是「接线之后会不会生效」
+//
+// 写入侧今天不写那三列（见 record.go），所以生产里它们是 0 / NULL，
+// 打分时整条退出加权——这条路径由 route 的
+// TestOrderingUnchangedWithoutRollupData 钉住。而**接线那一天**会怎样，
+// 只有把数据真的写进桶里才证明得了：查询要把值取出来、映射要原样带出去、
+// 打分要按权重算进去、排序要跟着变。
+//
+// # 两个候选只差那三列
+//
+// 健康度与额度刻意造得一模一样（同样的请求数、成功数、没有额度行），
+// 于是「谁排前面」只可能由那三列决定。末尾那个对照把这三列抹掉，
+// 两个候选必须**同分**——否则说明差别来自别处，这条用例证明的东西就不成立。
+func TestCandidatesRollupSignalsAffectOrdering(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+
+	withData := insertChannel(t, db, sealer, channelSpec{model: model})
+	withoutData := insertChannel(t, db, sealer, channelSpec{model: model})
+
+	// 两边同一个健康度：20 次请求、2 次成功。没有额度行（未知）。
+	// 有数据的那一个：p95 50ms、20 次请求共 0.02（每次 0.001）、
+	// 缓存命中 80 / 未命中 20。
+	insertRollupSignals(t, db, withData, hourBucket(0), 20, 2, 18,
+		50, "0.02", 80, 20)
+	// 没有数据的那一个：桶在、健康度一样，而那三列就是写入侧今天的样子。
+	insertRollupSignals(t, db, withoutData, hourBucket(0), 20, 2, 18,
+		nil, "0", 0, 0)
+
+	src := New(db, sealer)
+	got, err := src.Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("候选数 = %d，期望 2", len(got))
+	}
+	byID := map[int64]route.Candidate{}
+	for _, c := range got {
+		byID[c.Channel.ID] = c
+	}
+	a, b := byID[withData], byID[withoutData]
+
+	// 读侧要原样带出三个值。少带一个，route 那一维就整条不参与，
+	// 而这件事在分数上只表现为「少了一点」，不会报错。
+	if a.CostPerUnit == nil || *a.CostPerUnit != 0.001 {
+		t.Errorf("CostPerUnit = %s，期望 0.001（0.02 / 20 次请求）", showPtr(a.CostPerUnit))
+	}
+	if a.Health.LatencyP95 == nil || *a.Health.LatencyP95 != 50*time.Millisecond {
+		t.Errorf("LatencyP95 = %s，期望 50ms", showPtr(a.Health.LatencyP95))
+	}
+	if a.CacheHitRate == nil || *a.CacheHitRate != 0.8 || a.SampleCount != 100 {
+		t.Errorf("缓存 = %s / 样本 %d，期望 0.8 / 100",
+			showPtr(a.CacheHitRate), a.SampleCount)
+	}
+
+	// 另一边必须是「没有数据」而不是「数据是 0」：0 在打分里是免费、
+	// 最快、一次都没命中，与没有数据是相反的结论。
+	if b.CostPerUnit != nil || b.Health.LatencyP95 != nil || b.CacheHitRate != nil {
+		t.Errorf("没写过那三列的渠道应是未知，实际 cost=%s latency=%s cache=%s",
+			showPtr(b.CostPerUnit), showPtr(b.Health.LatencyP95), showPtr(b.CacheHitRate))
+	}
+
+	// 除了那三项，两个候选必须完全一样，否则下面证明不了什么。
+	if a.Health.SuccessRate != b.Health.SuccessRate ||
+		a.Health.ConsecutiveFailures != b.Health.ConsecutiveFailures ||
+		a.Quota.Remaining != nil || b.Quota.Remaining != nil {
+		t.Fatalf("两个候选的健康度/额度应当一样：a=%+v b=%+v", a.Health, b.Health)
+	}
+
+	r := &route.Router{}
+	if r.Score(a) <= r.Score(b) {
+		t.Errorf("有数据的候选应更高：%v vs %v", r.Score(a), r.Score(b))
+	}
+
+	plan := r.Select(got, model)
+	if len(plan.Candidates) != 2 {
+		t.Fatalf("选路结果 %d 个，期望 2；排除原因 %+v", len(plan.Candidates), plan.Excluded)
+	}
+	if plan.Candidates[0].Channel.ID != withData {
+		t.Errorf("排序应把有数据的那个放前面，实际第一个是渠道 %d", plan.Candidates[0].Channel.ID)
+	}
+
+	// 对照：把三项抹掉，两者必须同分。
+	blank := a
+	blank.CostPerUnit, blank.CacheHitRate, blank.SampleCount, blank.Health.LatencyP95 = nil, nil, 0, nil
+	if r.Score(blank) != r.Score(b) {
+		t.Errorf("抹掉三项数据后应同分，实际 %v vs %v——差别不止来自那三列",
+			r.Score(blank), r.Score(b))
 	}
 }
 
@@ -440,8 +558,15 @@ func TestCandidatesWithoutHealthOrQuotaIsUnknown(t *testing.T) {
 		t.Fatalf("候选数 = %d，期望 1（缺少健康度不该让渠道消失）", len(got))
 	}
 	c := got[0]
-	if c.Health.SuccessRate != 0 || c.Health.LatencyP95 != 0 || c.Health.ConsecutiveFailures != 0 {
-		t.Errorf("健康度应为零值（未知），实际 %+v", c.Health)
+	if c.Health.SuccessRate != 0 || c.Health.LatencyP95 != nil || c.Health.ConsecutiveFailures != 0 {
+		t.Errorf("健康度应为零值（未知），实际 SuccessRate=%v LatencyP95=%s ConsecutiveFailures=%d",
+			c.Health.SuccessRate, showPtr(c.Health.LatencyP95), c.Health.ConsecutiveFailures)
+	}
+	// 三列没有数据时映射成 nil，而不是 0：0 在打分里是「免费」「最快」
+	// 「一次都没命中」，与「没有数据」是相反的结论。
+	if c.CostPerUnit != nil || c.CacheHitRate != nil || c.SampleCount != 0 {
+		t.Errorf("没有桶时成本与缓存都该是未知：cost=%s cache=%s samples=%d",
+			showPtr(c.CostPerUnit), showPtr(c.CacheHitRate), c.SampleCount)
 	}
 	if c.Quota.Remaining != nil {
 		t.Errorf("没有额度行时应是未知，实际 %+v", c.Quota)

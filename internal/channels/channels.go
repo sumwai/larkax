@@ -260,6 +260,40 @@ func (s *Source) logger() *slog.Logger {
 //
 // 「连续失败」取自 channels 的列而不是从桶里算：桶里没有逐次记录，
 // 桶内有过成功时那段连续长度落在 0 与 failures 之间，算不出来。
+//
+// # 成本、延迟、缓存三列不套 COALESCE
+//
+// 那三列是打分的三个维度，而**「没有数据」与「值是 0」在选路里是相反的
+// 结论**：一个没记录过成本的渠道既不该被当成免费，也不该占掉成本那一维的
+// 权重。COALESCE 把「这个窗口里一行都没有」的 NULL 抹成 0，而 cost 与两个
+// cache 列本身又是 `NOT NULL DEFAULT 0`（见 00001_init.sql）——于是「没记过」
+// 与「记了个 0」在库里就是同一个值，读侧再抹一层就更分不开。这正是「三列
+// 恒为 0、权重写着在起作用而实际是常数」那条缺陷的根因。
+//
+// 所以聚合列原样返回 NULL，由 candidateRow 用 sql.Null* 接住，
+// 再映射成 route.Candidate 上的 nil。
+//
+// 要注意这三列**不是同一种可空性**：
+//
+//   - latency_p95_ms 本来就可空，而且查询里已经用 FILTER 滤掉了空值，
+//     所以「没有样本」与「样本是 0 毫秒」在 SQL 这一层就分得开。
+//     它此前的问题只在 Go 侧：那个 NULL 被扫进一个零值 Duration。
+//   - cost 与两个 cache 列是 `NOT NULL DEFAULT 0`，所以去掉 COALESCE 只能
+//     还原「窗口里一行都没有」这一种缺失。**「有桶、但那一列从没被写过」
+//     仍然是 0**，与「真的是 0」在库上无法区分——那一层由 costPerUnit /
+//     cacheHitRate 的判据兜着（0 按「没有数据」处理，理由见那两处注释）。
+//
+// 其中 requests / successes 仍然套 COALESCE：它们的 0 是**有意义的 0**
+// （这个窗口里一次都没请求过），不是缺失。
+//
+// # failures 这一列没有读方
+//
+// 它由写入侧维护，但连续失败另有 channels.consecutive_failures 这个逐次
+// 维护的真计数（桶重建不出「连续」这个量）。成功率的分子分母是
+// successes / requests，而「没成功也没失败」（客户端断开）刻意留在分母里
+// （见 record.go 的 rollup），所以这里也不需要 failures 去还原它。
+// 留着它是为了让「有多少次是失败」在库里可查，读侧不需要它——
+// 不为消掉一列而硬接一条假的消费。
 const candidateQuery = `
 SELECT
     c.id,
@@ -295,9 +329,9 @@ SELECT
             COALESCE(SUM(r.successes), 0) AS successes,
             (ARRAY_AGG(r.latency_p95_ms ORDER BY r.bucket DESC)
                 FILTER (WHERE r.latency_p95_ms IS NOT NULL))[1] AS latency_p95_ms,
-            COALESCE(SUM(r.cost), 0) AS cost,
-            COALESCE(SUM(r.cache_hit_tokens), 0)  AS cache_hit_tokens,
-            COALESCE(SUM(r.cache_miss_tokens), 0) AS cache_miss_tokens
+            SUM(r.cost)              AS cost,
+            SUM(r.cache_hit_tokens)  AS cache_hit_tokens,
+            SUM(r.cache_miss_tokens) AS cache_miss_tokens
           FROM channel_health_rollup r
          WHERE r.channel_id = c.id
            AND r.bucket >= $2
@@ -331,12 +365,15 @@ type candidateRow struct {
 	streak        int
 	lastFailureAt sql.NullTime
 
-	requests   int64
-	successes  int64
+	requests  int64
+	successes int64
+	// latencyP95 / cost / cacheHit / cacheMiss 四列都是可空的，
+	// 而且**必须**可空：它们各自的「没有数据」与「值是 0」是相反的结论
+	// （见 candidateQuery 的注释）。用零值接住就等于把两者合并。
 	latencyP95 sql.NullInt64
-	cost       string
-	cacheHit   int64
-	cacheMiss  int64
+	cost       sql.NullString
+	cacheHit   sql.NullInt64
+	cacheMiss  sql.NullInt64
 
 	remaining sql.NullString
 	unit      sql.NullString
@@ -409,6 +446,7 @@ func (row candidateRow) candidate(plaintext string, now time.Time) (route.Candid
 	if err != nil {
 		return route.Candidate{}, err
 	}
+	cacheRate := row.cacheHitRate()
 
 	return route.Candidate{
 		Channel: channel.Channel{
@@ -426,14 +464,14 @@ func (row candidateRow) candidate(plaintext string, now time.Time) (route.Candid
 		Health:       row.health(now),
 		Quota:        quotaState,
 		CostPerUnit:  cost,
-		CacheHitRate: row.cacheHitRate(),
+		CacheHitRate: cacheRate,
 		// SampleCount 取参与缓存统计的 token 数，而不是请求数。
 		//
-		// route 用它判断命中率可不可信（样本太少就给中性分）。用请求数会
+		// route 用它判断命中率可不可信（样本太少就不参与打分）。用请求数会
 		// 判错：不报缓存明细的上游很常见，那些渠道请求数可以很多，
 		// 两个缓存计数却都是 0——请求数会让「命中率 0」看起来有依据，
 		// 于是它们被打成最低分，而事实是**没有数据**。
-		SampleCount: row.cacheHit + row.cacheMiss,
+		SampleCount: row.cacheSamples(),
 	}, nil
 }
 
@@ -441,10 +479,17 @@ func (row candidateRow) candidate(plaintext string, now time.Time) (route.Candid
 //
 // # 没有数据时给的是「未知」而不是「最差」
 //
-// 新渠道还没有任何桶，此时 SuccessRate、LatencyP95 都留零值。route 对
+// 新渠道还没有任何桶，此时 SuccessRate 留零值、LatencyP95 为 nil。route 对
 // 零值的处理就是「未知」：scoreHealth 对 SuccessRate <= 0 给中性分，
-// scoreLatency 对 p95 <= 0 给中性分。**不能反过来填一个「很差」的值**——
-// 那会让新渠道永远选不上，而它可能正是最该被试用的那个。
+// scoreLatency 对 nil 把延迟这一维整个剔除。**不能反过来填一个「很差」的
+// 值**——那会让新渠道永远选不上，而它可能正是最该被试用的那个。
+//
+// # 延迟为什么用指针而不是零值
+//
+// 「这个窗口里没有 p95 样本」与「p95 恰好是 0 毫秒」是两件事，而一个
+// time.Duration 的零值把两者合成了一个数。合掉的后果是延迟这一维永远
+// 拿不到真数据：读侧把 NULL 扫成 0，route 又把 0 当成未知，于是即便写入
+// 侧某天开始写这一列，它也仍然是一条走不通的路。
 func (row candidateRow) health(now time.Time) route.Health {
 	h := route.Health{}
 
@@ -453,7 +498,8 @@ func (row candidateRow) health(now time.Time) route.Health {
 		h.SuccessRate = float64(row.successes) / float64(row.requests)
 	}
 	if row.latencyP95.Valid {
-		h.LatencyP95 = time.Duration(row.latencyP95.Int64) * time.Millisecond
+		p95 := time.Duration(row.latencyP95.Int64) * time.Millisecond
+		h.LatencyP95 = &p95
 	}
 	h.ConsecutiveFailures = row.consecutiveFailures(now)
 	return h
@@ -592,35 +638,62 @@ const quotaHealthDrained = "drained"
 // probeKindAPIQuery 是「这个数字来自上游查询」的 probe_kind 取值。
 const probeKindAPIQuery = "api_query"
 
-// costPerUnit 取窗口内的平均每次请求成本。
+// costPerUnit 取窗口内的平均每次请求成本，没有数据时返回 nil。
 //
 // 表里只有桶的成本**总额**与请求数，没有 token 总量，所以算不出
 // 每 token 的成本；每次请求的平均成本是这里能给出的最小单位。
-// 没有请求或没有成本时返回 0，route 把它当「未知」给中性分——
-// 未知不该被当成免费。
-func (row candidateRow) costPerUnit() (float64, error) {
-	if row.requests <= 0 {
-		return 0, nil
+//
+// # 为什么 0 也算「没有数据」
+//
+// 那一列是 `numeric NOT NULL DEFAULT 0`（见 00001_init.sql），而写入侧
+// 从来没有写过它——所以「有桶、成本是 0」这个组合今天只可能表示**没记过
+// 成本**，而不是「免费」。把它当免费会让每一个没记过成本的渠道拿到成本
+// 这一维的满分，而那正是最容易超支的路径。
+//
+// 代价是：真的免费（成本确实为 0）今天无法与「没记过」区分开。这是列的
+// 可空性带来的边界，不是本函数的选择——要分清得先让那一列可空，或者让
+// 写入侧显式写下「这次没有成本数据」。在那之前，把 0 判成未知是两者中
+// 更保守的一侧。
+//
+// 返回的 nil 是**「这一维没有数据」这个合法结论**，不是「出错了但没报」——
+// 所以这里显式 nolint 而不是造一个哨兵错误让每个调用方多判一次。
+func (row candidateRow) costPerUnit() (*float64, error) {
+	if row.requests <= 0 || !row.cost.Valid {
+		return nil, nil //nolint:nilnil // 见上
 	}
-	total, err := strconv.ParseFloat(row.cost, 64)
+	total, err := strconv.ParseFloat(row.cost.String, 64)
 	if err != nil {
-		return 0, fmt.Errorf("渠道 %d 的 cost 不是数字（%q）: %w", row.id, row.cost, err)
+		return nil, fmt.Errorf("渠道 %d 的 cost 不是数字（%q）: %w", row.id, row.cost.String, err)
 	}
 	if total <= 0 {
-		return 0, nil
+		return nil, nil //nolint:nilnil // 见上
 	}
-	return total / float64(row.requests), nil
+	per := total / float64(row.requests)
+	return &per, nil
 }
 
-// cacheHitRate 取窗口内的缓存命中率。
+// cacheHitRate 取窗口内的缓存命中率，没有样本时返回 nil。
 //
-// 两个计数都是 0 时返回 0，配合 SampleCount 为 0，route 会当成「未知」给中性分。
-func (row candidateRow) cacheHitRate() float64 {
-	total := row.cacheHit + row.cacheMiss
+// 两个计数是 `bigint NOT NULL DEFAULT 0`，写入侧也没写过它们——合计为 0
+// 就表示**没有样本**（一次请求的 token 数不可能是 0 还带着缓存明细）。
+// 所以这里不需要额外判 NULL：合计为 0 与「没有数据」是同一件事。
+//
+// 命中率**恰好为 0** 只有一种来路：有样本、且一次都没命中。那时返回的是
+// 指向 0 的指针，与 nil 分得开，route 会给它 0 分而不是把这一维剔除。
+func (row candidateRow) cacheHitRate() *float64 {
+	total := row.cacheSamples()
 	if total <= 0 {
-		return 0
+		return nil
 	}
-	return float64(row.cacheHit) / float64(total)
+	rate := float64(row.cacheHit.Int64) / float64(total)
+	return &rate
+}
+
+// cacheSamples 是参与缓存统计的 token 数（命中 + 未命中）。
+//
+// 两个计数都可空（没有桶时 SUM 给 NULL），NULL 按 0 计：没有样本。
+func (row candidateRow) cacheSamples() int64 {
+	return row.cacheHit.Int64 + row.cacheMiss.Int64
 }
 
 // decodeSetting 解开 channels.setting 的 jsonb。

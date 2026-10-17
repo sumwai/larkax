@@ -126,8 +126,9 @@ func TestHealthUnknownWhenNoRollup(t *testing.T) {
 	var row candidateRow
 	got := row.health(time.Now())
 
-	if got.SuccessRate != 0 || got.LatencyP95 != 0 || got.ConsecutiveFailures != 0 {
-		t.Errorf("没有数据时应全为零值（未知），实际 %+v", got)
+	if got.SuccessRate != 0 || got.LatencyP95 != nil || got.ConsecutiveFailures != 0 {
+		t.Errorf("没有数据时应是零值（未知），实际 SuccessRate=%v LatencyP95=%s ConsecutiveFailures=%d",
+			got.SuccessRate, showPtr(got.LatencyP95), got.ConsecutiveFailures)
 	}
 }
 
@@ -143,8 +144,8 @@ func TestHealthFromRollup(t *testing.T) {
 	if got.SuccessRate != 0.8 {
 		t.Errorf("SuccessRate = %v，期望 0.8", got.SuccessRate)
 	}
-	if got.LatencyP95 != 250*time.Millisecond {
-		t.Errorf("LatencyP95 = %v，期望 250ms", got.LatencyP95)
+	if got.LatencyP95 == nil || *got.LatencyP95 != 250*time.Millisecond {
+		t.Errorf("LatencyP95 = %s，期望 250ms", showPtr(got.LatencyP95))
 	}
 }
 
@@ -463,16 +464,19 @@ func TestQuotaCarriesObservationTraces(t *testing.T) {
 // ── 成本与缓存 ──────────────────────────────────────────────────────────
 
 // 表里只有总额与请求数，所以单位成本是「每次请求的平均成本」。
-// 没有请求时是未知（0），不是免费。
+//
+// 没有请求、没有成本合计、成本合计为 0 三种情况都返回 **nil**（没有数据），
+// 而不是 0：0 在 route 眼里是「免费」，而一个从没记过成本的渠道不是免费。
 func TestCostPerUnit(t *testing.T) {
 	cases := []struct {
 		name string
 		row  candidateRow
-		want float64
+		want *float64
 	}{
-		{"没有请求", candidateRow{cost: "1.5"}, 0},
-		{"没有成本", candidateRow{requests: 10, cost: "0"}, 0},
-		{"平均值", candidateRow{requests: 10, cost: "1.5"}, 0.15},
+		{"没有请求", candidateRow{cost: sqlNullString("1.5")}, nil},
+		{"没有成本列（窗口内没有桶）", candidateRow{requests: 10}, nil},
+		{"成本合计为 0（写入侧从没写过）", candidateRow{requests: 10, cost: sqlNullString("0")}, nil},
+		{"平均值", candidateRow{requests: 10, cost: sqlNullString("1.5")}, ptr(0.15)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -480,32 +484,52 @@ func TestCostPerUnit(t *testing.T) {
 			if err != nil {
 				t.Fatalf("costPerUnit 出错: %v", err)
 			}
-			if got != tc.want {
-				t.Errorf("costPerUnit = %v，期望 %v", got, tc.want)
+			if (got == nil) != (tc.want == nil) {
+				t.Fatalf("costPerUnit = %s，期望 %s", showPtr(got), showPtr(tc.want))
+			}
+			if got != nil && *got != *tc.want {
+				t.Errorf("costPerUnit = %v，期望 %v", *got, *tc.want)
 			}
 		})
 	}
 }
 
-// 不报缓存明细的渠道两个计数都是 0：命中率与样本数都留 0，
-// route 据此给中性分，而不是把它当成「命中率 0」。
+// 成本合计不是数字是**数据问题**，要整次调用报错，不静默当成「没有数据」。
+func TestCostPerUnitRejectsNonNumeric(t *testing.T) {
+	row := candidateRow{id: 7, requests: 10, cost: sqlNullString("abc")}
+	if _, err := row.costPerUnit(); err == nil {
+		t.Error("cost 不是数字时应当报错")
+	}
+}
+
+// 不报缓存明细的渠道两个计数都是 0（或没有桶、两列都是 NULL）：
+// 命中率返回 nil，样本数为 0，route 把这一维整个剔除，
+// 而不是把它当成「命中率 0」。
 func TestCacheUnknownWhenNoTokens(t *testing.T) {
 	var row candidateRow
-	if got := row.cacheHitRate(); got != 0 {
-		t.Errorf("cacheHitRate = %v，期望 0", got)
+	if got := row.cacheHitRate(); got != nil {
+		t.Errorf("cacheHitRate = %s，期望 nil", showPtr(got))
 	}
-	if row.cacheHit+row.cacheMiss != 0 {
+	if row.cacheSamples() != 0 {
 		t.Error("没有缓存明细时样本数应为 0")
 	}
 }
 
+// 命中率**恰好为 0** 是有数据的：有样本、且一次都没命中。
+// 它必须与「没有数据」分得开，否则缓存最差的渠道会被当成「这一维不适用」。
 func TestCacheHitRate(t *testing.T) {
-	row := candidateRow{cacheHit: 75, cacheMiss: 25}
-	if got := row.cacheHitRate(); got != 0.75 {
-		t.Errorf("cacheHitRate = %v，期望 0.75", got)
+	row := candidateRow{cacheHit: sqlNullInt(75), cacheMiss: sqlNullInt(25)}
+	got := row.cacheHitRate()
+	if got == nil || *got != 0.75 {
+		t.Errorf("cacheHitRate = %s，期望 0.75", showPtr(got))
 	}
-	if row.cacheHit+row.cacheMiss != 100 {
-		t.Errorf("样本数 = %d，期望 100", row.cacheHit+row.cacheMiss)
+	if row.cacheSamples() != 100 {
+		t.Errorf("样本数 = %d，期望 100", row.cacheSamples())
+	}
+
+	none := candidateRow{cacheHit: sqlNullInt(0), cacheMiss: sqlNullInt(100)}
+	if got := none.cacheHitRate(); got == nil || *got != 0 {
+		t.Errorf("一次都没命中时 cacheHitRate = %s，期望 0（而不是 nil）", showPtr(got))
 	}
 }
 
@@ -590,8 +614,10 @@ func TestCandidateSelectable(t *testing.T) {
 	}
 }
 
-func sqlNullInt(v int64) sql.NullInt64     { return sql.NullInt64{Int64: v, Valid: true} }
-func sqlNullTime(v time.Time) sql.NullTime { return sql.NullTime{Time: v, Valid: true} }
+func sqlNullInt(v int64) sql.NullInt64      { return sql.NullInt64{Int64: v, Valid: true} }
+func sqlNullTime(v time.Time) sql.NullTime  { return sql.NullTime{Time: v, Valid: true} }
+func sqlNullString(v string) sql.NullString { return sql.NullString{String: v, Valid: true} }
+func ptr[T any](v T) *T                     { return &v }
 
 // showPtr 把一个可空值渲染成可读文本，供断言失败时打印。
 //
