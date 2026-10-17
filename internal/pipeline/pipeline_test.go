@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -920,6 +921,54 @@ func TestProgramCacheIsReused(t *testing.T) {
 	if got := p.Programs.Len(); got != 1 {
 		t.Errorf("编译缓存里有 %d 条，期望 1", got)
 	}
+}
+
+// concurrentSource 是并发安全的规则来源：每次调用返回同一批规则，
+// 不记录任何东西。
+//
+// 不复用 ruleSource：它把每次查询 append 进 queries，那个 append 自己
+// 就是一处竞争。用它测并发，报出来的会是夹具的竞争而不是被测代码的。
+type concurrentSource struct{ rules []Rule }
+
+func (s concurrentSource) MatchAll(context.Context, RuleQuery) ([]Rule, error) {
+	return s.rules, nil
+}
+
+func (s concurrentSource) Match(_ context.Context, _ RuleQuery) (Rule, error) {
+	return s.rules[0], nil
+}
+
+// 同一个 Pipeline 被并发共用时不该有数据竞争。
+//
+// Pipeline 由 gateway 单实例共用，所以 Reserve 会在多个 goroutine 上
+// 同时跑。编译缓存的**懒初始化**曾经在无锁情况下写 Programs 这个导出
+// 字段：两个 goroutine 同时进来，就是同一块内存上的无同步读写。
+//
+// 判据是 `go test -race` 报不报 DATA RACE。竞争与「金额算得对不对」
+// 是两件事——这里的断言只看调用成功，因为竞争恰恰不影响返回值。
+func TestReserveConcurrent(t *testing.T) {
+	p := &Pipeline{
+		Rules: concurrentSource{rules: []Rule{{ID: 1, Version: 1, Source: simpleRule}}},
+		Now:   func() time.Time { return fixedAt },
+	}
+
+	const callers = 2
+	// start 让两个 goroutine 尽量同时进入 Reserve：竞争要两边都走到
+	// 那一行才报得出来。
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := p.Reserve(context.Background(), baseRequest()); err != nil {
+				t.Errorf("并发预留失败: %v", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
 }
 
 // ── 变异测试补的用例 ────────────────────────────────────────────────────
