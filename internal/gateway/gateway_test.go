@@ -138,9 +138,18 @@ type fakeSettlements struct {
 	// 看这份请求才知道（见 #338）。
 	reqs []pipeline.Request
 	err  error
+	// onSave 非 nil 时在每次落库前调一次。
+	//
+	// 它让用例能观察到「结算」与别的事件（记录健康度）的先后。先后错了
+	// 不会让任何金额出错：延迟那一维只是少一个样本，而它要等下一次调用
+	// 才补进去。
+	onSave func()
 }
 
 func (f *fakeSettlements) Save(_ context.Context, req pipeline.Request, c *pipeline.Charge) error {
+	if f.onSave != nil {
+		f.onSave()
+	}
 	if f.err != nil {
 		return f.err
 	}

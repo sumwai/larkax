@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strconv"
 	"sync"
 	"testing"
@@ -21,9 +22,14 @@ type fakeRecorder struct {
 	recs []route.CallOutcome
 	// err 非空时每次记录都失败，用于验证「写健康度失败不影响请求」。
 	err error
+	// onRecord 非 nil 时在每次记录前调一次，供用例观察它与其他步骤的先后。
+	onRecord func()
 }
 
 func (f *fakeRecorder) RecordCall(_ context.Context, rec route.CallOutcome) error {
+	if f.onRecord != nil {
+		f.onRecord()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.recs = append(f.recs, rec)
@@ -229,6 +235,80 @@ func TestChatRecordsAttemptEndTime(t *testing.T) {
 	}
 }
 
+// 耗时随账单带进结算，供 usage_events.duration_ms 落库。
+//
+// # 这一条守的是接线的两头
+//
+// 延迟那一维的样本从 usage_events 按桶聚合，所以网关必须把一个正数交给
+// 结算层。漏了这一步时账单金额照旧正确、分录照旧平衡，只有延迟永远没有
+// 样本——与「这一列从来没有人写」这条缺陷长得一模一样。
+//
+// 取**最后一次尝试**的耗时：前面失败的那几次各是一次独立调用，加起来是
+// 「这次请求因为重试耽误了多久」，不是「这个渠道多快」。
+func TestChatCarriesLastAttemptDuration(t *testing.T) {
+	h := newHarness(t)
+	h.candidates.cands = []route.Candidate{
+		preferred(candidate(1, "gpt-4o")), candidate(2, "gpt-4o")}
+	h.executor.failFor = map[int64]error{1: upstreamErr(503, true)}
+
+	// 每次调用推进 100 毫秒：渠道 1 失败、渠道 2 成功，两次尝试各 100ms。
+	// 账单上要的是后一次（100ms），不是合计的 200ms。
+	tick := fixedAt
+	h.gw.Router.Now = func() time.Time {
+		tick = tick.Add(100 * time.Millisecond)
+		return tick
+	}
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+
+	charge := h.settlements.saved[0]
+	if charge.Duration != 100*time.Millisecond {
+		t.Errorf("Charge.Duration = %s，期望 100ms（最后一次尝试，不是两次之和）", charge.Duration)
+	}
+}
+
+// 健康度排在结算**之后**记：延迟与缓存两列由写入方按桶从 usage_events
+// 重算，而那一行是结算事务写的。
+//
+// # 顺序为什么能被观察到
+//
+// 两个假件共用一个队列：谁先被调用谁的标记先进。顺序反了时桶里算出来的
+// 分位数不含这一次请求——它要等下一次调用才被带进去，于是那个数永远落后
+// 一个请求。这件事在金额上完全看不出来。
+func TestChatRecordsHealthAfterSettlement(t *testing.T) {
+	h := newHarness(t)
+
+	var order []string
+	h.settlements.onSave = func() { order = append(order, "settle") }
+	h.recorder.onRecord = func() { order = append(order, "record") }
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+
+	if want := []string{"settle", "record"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("调用顺序 = %v，期望 %v（健康度要等用量事件落库之后再记）", order, want)
+	}
+}
+
+// 结算失败时健康度仍然要记：这些调用真的发生过。
+//
+// 这一次没有用量事件，缓存与延迟两列不会被重算；但成功率与连续失败的
+// 分子分母不该因为一次结算失败而少掉一次。
+func TestChatStillRecordsHealthWhenSettlementFails(t *testing.T) {
+	h := newHarness(t)
+	h.settlements.err = errors.New("写不进去")
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err == nil {
+		t.Fatal("结算失败时该返回错误")
+	}
+	if got := h.recorder.only(t).Verdict; got != route.VerdictSuccess {
+		t.Errorf("Verdict = %q，期望成功（上游那一次调用成功了）", got)
+	}
+}
+
 // ── 流式 ────────────────────────────────────────────────────────────────
 
 // 正常结束：记一次成功，用量是上游报的那个。
@@ -251,6 +331,40 @@ func TestChatStreamRecordsSuccess(t *testing.T) {
 	}
 	if rec.Usage.PromptTokens != 12 || rec.Usage.CompletionTokens != 7 {
 		t.Errorf("Usage = %+v，期望上游报的 12/7", rec.Usage)
+	}
+}
+
+// 流式的耗时覆盖**整条流**，不只到上游接受请求那一下。
+//
+// route 记的 Attempt.Duration 只量到 ChatStream 返回（响应头），而用户感知
+// 的耗时是到最后一个事件为止；一次长回答里前者可以比后者小几个数量级。
+// 这里的时钟每次读都往前走一分钟，所以「只量到响应头」会得到 0，
+// 而「量到流结束」会得到一个正数。
+func TestChatStreamDurationCoversWholeStream(t *testing.T) {
+	h := newHarness(t)
+	usage := channel.Usage{PromptTokens: 12, CompletionTokens: 7}
+	useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
+		1: {delta("你好"), {Kind: "usage", Usage: &usage}, {Kind: "done"}},
+	}})
+
+	now := fixedAt
+	h.gw.Router.Now = func() time.Time {
+		now = now.Add(time.Minute)
+		return now
+	}
+	h.gw.Now = func() time.Time { return now }
+
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	collect(t, res)
+
+	if res.Charge == nil {
+		t.Fatal("流读完时账单该已经有值")
+	}
+	if res.Charge.Duration <= 0 {
+		t.Errorf("Charge.Duration = %s，期望覆盖整条流（> 0）", res.Charge.Duration)
 	}
 }
 

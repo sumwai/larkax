@@ -278,6 +278,11 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 		upstreamResp = newStreamResponseBuilder()
 	)
 
+	// 开始泵流的时刻。它只是延迟的**兜底起点**：真正发出去的时刻取自
+	// 最后一次尝试的 StartedAt（见 streamDuration），这里兜的是脚本执行器
+	// 那种不填时间的形状。
+	start := g.now()
+
 	// 响应方向的快照在流结束时采一次。
 	//
 	// 用 defer 而不是写在循环之后：本函数有两条返回路径（「一个字没吐」与
@@ -481,7 +486,12 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 		}
 	}
 
-	g.billStream(settleCtx, h, placed, res, usage, source, clientGone)
+	// 这次调用花了多久。结算要用它（落进 usage_events.duration_ms），
+	// 下面那次健康度记录也要用它——两处必须同一个数，否则桶里聚合出来的
+	// 分位数与账本上那一行说的不是同一件事。
+	elapsed := streamDuration(res.Attempts, start, g.now())
+
+	g.billStream(settleCtx, h, placed, res, usage, source, clientGone, elapsed)
 
 	// 用量照记，即便这次算「不是渠道的失败」：客户端断开时上游已经为
 	// 输入计了费，额度自记账要跟着扣。
@@ -489,12 +499,34 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 	// 记的是**内核那份**（usage 上面可能已被插件改过）：这一路记的是这个
 	// 渠道自己消耗了什么，而插件上报的是计费口径上的说法——与非流式那条
 	// 路上 recordAttempts 取 out.Usage（插件跑之前）是同一个口径。
+	//
+	// 位置在 billStream **之后**：延迟那一维的样本来自 usage_events，
+	// 而那一行是上面那次结算写的（见 route.CallOutcome 与 channels 的
+	// rollupSignalsSQL）。
 	g.recordCall(ctx, route.CallOutcome{
 		ChannelID: res.Channel.ID,
 		At:        g.now(),
 		Verdict:   verdict,
 		Usage:     coreUsage,
 	})
+}
+
+// streamDuration 是一次流式调用的耗时。
+//
+// 起点取最后一次尝试的 StartedAt（请求真正发出去的那一刻）；它为零时
+// （测试里的脚本执行器不会填）回落到开始泵流的时刻。终点是流结束。
+//
+// 终点早于起点时返回 0（写进库里是 NULL）：那意味着时钟回拨或两个钟
+// 不是同一个来源，编一个正数出来只会让分位数里混进一个假样本。
+func streamDuration(attempts []route.Attempt, fallbackStart, end time.Time) time.Duration {
+	start := fallbackStart
+	if n := len(attempts); n > 0 && !attempts[n-1].StartedAt.IsZero() {
+		start = attempts[n-1].StartedAt
+	}
+	if end.Before(start) {
+		return 0
+	}
+	return end.Sub(start)
 }
 
 // recordFailedAttempts 记下换渠道过程中失败的那些尝试。
@@ -536,10 +568,14 @@ func streamAttempts(r *route.StreamResult) []route.Attempt {
 }
 
 // billStream 结算一次要计费的流式请求。
-func (g *Gateway) billStream(ctx context.Context, h *handle, placed placement, res *Result, usage channel.Usage, source tokens.Source, canceled bool) {
+//
+// elapsed 是这次调用从发出去到读完那条流的时间，落进 usage_events.duration_ms
+// ——渠道健康度延迟那一维的唯一样本来源（见 pipeline.Outcome.Duration）。
+func (g *Gateway) billStream(ctx context.Context, h *handle, placed placement, res *Result, usage channel.Usage, source tokens.Source, canceled bool, elapsed time.Duration) {
 	charge, err := g.finishCharge(ctx, h, placed, pipeline.Outcome{
 		Usage:       usage,
 		UsageSource: source,
+		Duration:    elapsed,
 		// ClientCanceled 只描述「客户端中途断开」这一种结局，别拿它当
 		// 「用量是估的」用：上游中途报错时用量同样是估的，但那不是客户端
 		// 断的——两者在对账与告警上是两回事（见 pipeline.Outcome 的注释）。

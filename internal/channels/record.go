@@ -37,11 +37,16 @@ import (
 //
 // # 桶里没写的列
 //
-// latency_p50_ms / latency_p95_ms / cost / cache_* 都留空。前两者要的是
-// **分位数**，而这里每次只有一个样本，把单个样本写进 p95 等于给一个错的数
-// 起了一个对的名字；后两者属于用量与上游成本的记录（另一条线）。
-// 读侧把空值映射成「没有数据」，打分时那一维整个不参与（见 channels.go 的
-// candidateQuery），所以留空是「未知」而不是「很差」。
+// latency_p50_ms / cost 留空。
+//
+//   - latency_p50_ms 没有读方：读侧只取 p95（见 candidateQuery），为它多算
+//     一个分位数只是多一次聚合并多一个没人看的数。
+//   - cost 属于「这次请求我们花了多少」那条线（upstream_costs / #163），
+//     口径还没定，这一轮不接。
+//
+// 延迟与缓存两列是**推导值**，不是逐次累加的：它们由该桶的 usage_events
+// 聚合出来（见 rollupSQL）。读侧把「一列都没写过」映射成「没有数据」，
+// 打分时那一维整个不参与，所以没流量就是未知，而不是很差。
 type Recorder struct {
 	db *sql.DB
 
@@ -162,11 +167,73 @@ ON CONFLICT (channel_id, bucket) DO UPDATE
        successes = channel_health_rollup.successes + EXCLUDED.successes,
        failures  = channel_health_rollup.failures  + EXCLUDED.failures`
 
-// rollup 把一次调用累加进小时桶。
+// rollupSignalsSQL 用一个桶的用量事件重算它那三列**推导值**。
+//
+// # 为什么是重算，不是累加
+//
+// 延迟要的是分位数，而分位数不是可累加的量：每次只有一个样本，把它写进
+// p95 等于给一个错的数起了一个对的名字。所以样本留在 usage_events 里
+// （duration_ms 一列），这里按桶把它们聚成分位数。缓存两列用同一个来源，
+// 于是三个数说的是同一批请求、同一个时刻窗口。
+//
+// 重算的代价说清楚：每记一次调用就扫一遍该渠道在当前小时里的用量行
+// （走 usage_events_channel_idx）。低流量渠道可以忽略；高流量渠道就是
+// 「每小时行数」这个量级的一次索引扫描，换来的是不用再加一张样本表、
+// 也不用在读侧维护一个跨进程的聚合状态。
+//
+// 重算是**幂等**的，这带来一个有用的性质：上一条语句成功、这一条失败时，
+// 写进去的是旧值，而该桶的下一次调用会把它们整体重算一遍——不会像累加
+// 那样永久偏离。
+//
+// # 三个口径
+//
+//   - cache_hit_tokens = SUM(cache_read_tokens)：命中缓存、直接复用的输入。
+//   - cache_miss_tokens = SUM(prompt_tokens + cache_write_tokens)：
+//     **没被缓存服务到的输入总量**。usage_events.prompt_tokens 已经是不含
+//     缓存的输入（见 billing.FromChannelUsage），缓存写入是这次新建的条目
+//     ——它既不是命中，也不在 prompt_tokens 里，漏掉它会让命中率偏高。
+//     两列相加正好是这次请求的输入总量。
+//     注意不是「cache_write 就是 miss」：单价上的写与读是两件事，这里算的
+//     是**服务方式**的比例——写入的 token 同样没有被缓存命中。
+//   - latency_p95_ms = percentile_disc(0.95)：取一个真实观测到的样本
+//     （列是 integer，离散分位不会给出一个从未出现过的毫秒数）。
+//     ordered-set 聚合会**忽略 NULL**，所以没有耗时的行不参与，也不会被
+//     当成 0 毫秒把分位数往下拉。整桶都没有样本时结果是 NULL，写回去是
+//     「没有数据」，与「一行都没写过」在读侧同一档。
+//
+// # 桶的归属
+//
+// 用量行按 created_at（落库时刻）落桶，与计数列用的 rec.At（调用结束时刻）
+// 不是同一个钟：结算发生在调用结束之后，通常同一小时，跨整点时会差一个桶。
+// 没有更近的时刻可用——usage_events 上没有「调用结束」这一列（priced_at 是
+// **受理**时刻，对长请求差得更远）。
+const rollupSignalsSQL = `
+UPDATE channel_health_rollup h
+   SET cache_hit_tokens  = a.cache_hit,
+       cache_miss_tokens = a.cache_miss,
+       latency_p95_ms    = a.latency_p95_ms
+  FROM (
+        SELECT COALESCE(SUM(u.cache_read_tokens), 0) AS cache_hit,
+               COALESCE(SUM(u.prompt_tokens + u.cache_write_tokens), 0) AS cache_miss,
+               percentile_disc(0.95) WITHIN GROUP (ORDER BY u.duration_ms) AS latency_p95_ms
+          FROM usage_events u
+         WHERE u.channel_id = $1
+           AND u.created_at >= $2
+           AND u.created_at <  $3
+       ) a
+ WHERE h.channel_id = $1
+   AND h.bucket = $2`
+
+// rollup 把一次调用累加进小时桶，并按桶重算延迟与缓存。
 //
 // 「没成功也没失败」（客户端断开）也计入 requests 而不计入另外两个：
 // 分母要诚实，而成功率的分子不该为一件与渠道无关的事记一笔。
 // 读侧对 successes = 0 的成功率给中性分，所以这不会把一个渠道打成最差。
+//
+// 两次写分两条语句：PostgreSQL 的数据修改 CTE 与外层语句用的是同一个快照，
+// 外层 UPDATE 看不到同一语句里刚插入或更新的那一行（同一行改两次也不被
+// 支持）。两条语句之间失败时计数已经落库、推导列留旧值，由该桶的下一次
+// 调用重算纠正（见 rollupSignalsSQL）。
 func (r *Recorder) rollup(ctx context.Context, rec route.CallOutcome) error {
 	var success, failure int
 	switch rec.Verdict {
@@ -184,6 +251,10 @@ func (r *Recorder) rollup(ctx context.Context, rec route.CallOutcome) error {
 		// 「选出候选」与「记下这次调用」之间被删掉时，这里拿到的是 23503；
 		// 兜底哨兵让调用方至少能把它与「库连不上」分开。
 		return dberr.ConstraintFailure(fmt.Errorf("累加渠道 %d 的健康度桶失败: %w", rec.ChannelID, err))
+	}
+
+	if _, err := r.db.ExecContext(ctx, rollupSignalsSQL, rec.ChannelID, bucket, bucket.Add(time.Hour)); err != nil {
+		return fmt.Errorf("重算渠道 %d 在 %s 这一桶的延迟与缓存失败: %w", rec.ChannelID, bucket.Format(time.RFC3339), err)
 	}
 	return nil
 }
