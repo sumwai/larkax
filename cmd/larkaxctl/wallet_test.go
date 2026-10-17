@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -279,5 +280,266 @@ func TestWalletOpenStoreMissingUserExitCode(t *testing.T) {
 	}
 	if code := exitCode(err); code != exitConflict {
 		t.Errorf("退出码 = %d，期望 %d（要写的那一行引用的用户不存在）", code, exitConflict)
+	}
+}
+
+// ── wallet credit ──────────────────────────────────────────────────────
+
+// 参数检查同样发生在**连库之前**：这些用例不需要库。
+func TestWalletCreditRejectsBadArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"没有 --user", []string{"--amount", "1", "--order", "o"}, "缺少 --user"},
+		{"--user 只有空白", []string{"--user", "  ", "--amount", "1", "--order", "o"}, "缺少 --user"},
+		{"没有 --amount", []string{"--user", "1", "--order", "o"}, "缺少 --amount"},
+		// 幂等键必填且没有默认值：给了默认值，一次「忘了写 --order」就会变成
+		// 一笔与上一次互不相干的入账，而两笔在账面上都合法。
+		{"没有 --order", []string{"--user", "1", "--amount", "1"}, "缺少 --order"},
+		{"--order 只有空白", []string{"--user", "1", "--amount", "1", "--order", "  "}, "缺少 --order"},
+		{"金额不是数字", []string{"--user", "1", "--amount", "abc", "--order", "o"}, "不是金额"},
+		{"金额为零", []string{"--user", "1", "--amount", "0", "--order", "o"}, "必须为正数"},
+		{"金额为负", []string{"--user", "1", "--amount", "-1", "--order", "o"}, "必须为正数"},
+		// 小数位比列多：money.Parse 会四舍五入，而入账金额是「敲进去多少就
+		// 记多少」的数，静默改掉最后一位会让账本与单据对不上。
+		{"小数位过多", []string{"--user", "1", "--amount", "1.000000001", "--order", "o"}, "最多 8 位小数"},
+		{"资产不认识", []string{"--user", "1", "--amount", "1", "--order", "o", "--asset", "USDT"}, "不受支持"},
+		{"--asset 给了但为空", []string{"--user", "1", "--amount", "1", "--order", "o", "--asset", ""}, "--asset 不能为空"},
+		{"--gateway 给了但为空", []string{"--user", "1", "--amount", "1", "--order", "o", "--gateway", ""}, "--gateway 不能为空"},
+		{"通道标识含冒号", []string{"--user", "1", "--amount", "1", "--order", "o", "--gateway", "bad:name"}, "不是合法的通道标识"},
+		{"通道标识含空格", []string{"--user", "1", "--amount", "1", "--order", "o", "--gateway", "bad name"}, "不是合法的通道标识"},
+		{"多出位置参数", []string{"--user", "1", "--amount", "1", "--order", "o", "extra"}, "不接受位置参数"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runWalletCredit(tc.args)
+			if err == nil {
+				t.Fatal("期望报错，却通过了")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
+			}
+			if code := exitCode(err); code != exitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", code, exitUsage)
+			}
+		})
+	}
+}
+
+// 幂等键到交易号的映射必须**稳定**，钉死到一个字面量上。
+//
+// 换掉这个映射（加盐、换哈希、改域分隔前缀）不会让任何用例变红，却会让
+// 已经入过账的幂等键算出另一个交易号——于是同一条命令重跑时会**再入一次
+// 账**，而那正是 --order 要防的事。所以这里钉住字面量：改了映射就得改这
+// 一行，而改这一行的人必须解释旧键怎么办。
+func TestTxnIDForOrderIsPinned(t *testing.T) {
+	const order = "ORD-1"
+	const want = "31a99512-14f5-8d96-81c8-05a21eb582bb"
+
+	got := txnIDForOrder(order)
+	if string(got) != want {
+		t.Errorf("txnIDForOrder(%q) = %s，期望 %s（改了映射就要说清旧幂等键怎么办）", order, got, want)
+	}
+	if txnIDForOrder(order) != got {
+		t.Error("同一个幂等键两次算出的交易号不同")
+	}
+	if txnIDForOrder("ORD-2") == got {
+		t.Error("不同的幂等键算出了同一个交易号")
+	}
+	if _, err := ledger.ParseTxnID(string(got)); err != nil {
+		t.Errorf("算出来的交易号不是合法 uuid: %v", err)
+	}
+}
+
+// walletBalance 读一个用户 CNY 钱包的快照余额。
+func walletBalance(t *testing.T, db *sql.DB, userID int64) string {
+	t.Helper()
+	var balance string
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT balance FROM user_wallets WHERE user_id = $1 AND asset = 'CNY'`,
+		userID).Scan(&balance); err != nil {
+		t.Fatalf("读钱包余额失败: %v", err)
+	}
+	return balance
+}
+
+// txnRows 读一个交易写下的分录，每条压成「科目|金额|类型|备注」。
+func txnRows(t *testing.T, db *sql.DB, txnID ledger.TxnID) []string {
+	t.Helper()
+	rows, err := db.QueryContext(t.Context(), `
+		SELECT account || '|' || amount::text || '|' || entry_type || '|' || coalesce(memo, '')
+		  FROM ledger_entries WHERE txn_id = $1 ORDER BY account`, string(txnID))
+	if err != nil {
+		t.Fatalf("读分录失败: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("扫描分录失败: %v", err)
+		}
+		out = append(out, line)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("遍历分录失败: %v", err)
+	}
+	return out
+}
+
+// 入账命令走完整条链路：开户 → 入账 → 重放 → 同键异参。
+//
+// 金额、科目、备注与余额逐条钉死：这一层动钱，而「写成功了但写反了方向」
+// 「加了两次」都不会报错。
+func TestWalletCreditCommand(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+	userID := createTestUser(t)
+	ref := strconv.FormatInt(userID, 10)
+	order := uniqueName("order")
+	txnID := txnIDForOrder(order)
+
+	// 还没开户：入账要被拒，且一条分录都不留。缺钱包行与余额不足是两件事
+	// （前者先跑 wallet open，后者要用户充值），所以判据是哨兵而不是「报错了」。
+	noWalletErr := runCaptured(t, func() error {
+		return runWalletCredit([]string{"--user", ref, "--amount", "100", "--order", order})
+	})
+	if !errors.Is(noWalletErr, store.ErrNoWallet) {
+		t.Fatalf("没有钱包时应当返回 store.ErrNoWallet，得到 %v", noWalletErr)
+	}
+	if code := exitCode(noWalletErr); code != exitConflict {
+		t.Errorf("退出码 = %d，期望 %d（要改的那一行不存在）", code, exitConflict)
+	}
+	if rows := txnRows(t, db, txnID); len(rows) != 0 {
+		t.Fatalf("被拒的入账留下了 %d 条分录：%v", len(rows), rows)
+	}
+
+	if err := runCaptured(t, func() error {
+		return runWalletOpen([]string{"--user", ref})
+	}); err != nil {
+		t.Fatalf("开户失败: %v", err)
+	}
+
+	var creditErr error
+	out, _ := captureStreams(t, func() {
+		creditErr = runWalletCredit([]string{"--user", ref, "--amount", "100", "--order", order})
+	})
+	if creditErr != nil {
+		t.Fatalf("入账失败: %v", creditErr)
+	}
+	for _, want := range []string{
+		"已入账", "id=" + ref, "100.00000000", "幂等键 " + order, string(txnID),
+		"借 " + ledger.UserAccount(userID).String(), "贷 " + ledger.PaymentGatewayAccount("manual").String(),
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("入账输出里没有 %q：\n%s", want, out)
+		}
+	}
+
+	if balance := walletBalance(t, db, userID); balance != "100.00000000" {
+		t.Errorf("余额 = %s，期望 100.00000000", balance)
+	}
+	wantRows := []string{
+		ledger.PaymentGatewayAccount("manual").String() + "|-100.00000000|topup|充值（单据 " + order + "）",
+		ledger.UserAccount(userID).String() + "|100.00000000|topup|",
+	}
+	if got := txnRows(t, db, txnID); !slices.Equal(got, wantRows) {
+		t.Errorf("分录 = %v，期望 %v", got, wantRows)
+	}
+
+	// 快照与账本两侧都是 100：入账走的是账本，快照只是跟着动。
+	authoritative, err := store.New(db).AccountBalance(
+		t.Context(), ledger.UserAccount(userID), ledger.AssetCNY)
+	if err != nil {
+		t.Fatalf("读权威余额失败: %v", err)
+	}
+	if authoritative.String() != "100.00000000" {
+		t.Errorf("账本侧余额 = %s，期望 100.00000000", authoritative)
+	}
+
+	// 重放同一条命令：退出 0，但一个字都不改，且输出必须说清是重放。
+	var replayErr error
+	replay, _ := captureStreams(t, func() {
+		replayErr = runWalletCredit([]string{"--user", ref, "--amount", "100", "--order", order})
+	})
+	if replayErr != nil {
+		t.Fatalf("重放不该报错: %v", replayErr)
+	}
+	for _, want := range []string{"已经入过账", "未改动", "幂等键 " + order} {
+		if !strings.Contains(replay, want) {
+			t.Errorf("重放输出里没有 %q：\n%s", want, replay)
+		}
+	}
+	if strings.Contains(replay, "已入账：") {
+		t.Errorf("重放不该说成「已入账」：\n%s", replay)
+	}
+	if balance := walletBalance(t, db, userID); balance != "100.00000000" {
+		t.Errorf("重放之后余额 = %s，期望仍是 100.00000000", balance)
+	}
+	if got := txnRows(t, db, txnID); !slices.Equal(got, wantRows) {
+		t.Errorf("重放之后分录 = %v，期望仍是 %v", got, wantRows)
+	}
+
+	// 同一个幂等键配不同的金额不是重放，是冲突：退出 4，一笔都不写。
+	conflictErr := runCaptured(t, func() error {
+		return runWalletCredit([]string{"--user", ref, "--amount", "50", "--order", order})
+	})
+	if !errors.Is(conflictErr, store.ErrTxnConflict) {
+		t.Fatalf("同键异参应当返回 store.ErrTxnConflict，得到 %v", conflictErr)
+	}
+	if code := exitCode(conflictErr); code != exitConflict {
+		t.Errorf("退出码 = %d，期望 %d（去看库里那笔是什么）", code, exitConflict)
+	}
+	if balance := walletBalance(t, db, userID); balance != "100.00000000" {
+		t.Errorf("冲突之后余额 = %s，期望仍是 100.00000000", balance)
+	}
+	if got := txnRows(t, db, txnID); !slices.Equal(got, wantRows) {
+		t.Errorf("冲突之后分录 = %v，期望仍是 %v", got, wantRows)
+	}
+
+	// 另一个幂等键 + 显式通道：钱加到同一个余额上，对家换一个科目。
+	secondOrder := uniqueName("order")
+	if err := runCaptured(t, func() error {
+		return runWalletCredit([]string{
+			"--user", ref, "--amount", "50", "--order", secondOrder, "--gateway", "alipay",
+		})
+	}); err != nil {
+		t.Fatalf("第二笔入账失败: %v", err)
+	}
+	if balance := walletBalance(t, db, userID); balance != "150.00000000" {
+		t.Errorf("两笔之后余额 = %s，期望 150.00000000", balance)
+	}
+	secondRows := txnRows(t, db, txnIDForOrder(secondOrder))
+	wantSecond := []string{
+		ledger.PaymentGatewayAccount("alipay").String() + "|-50.00000000|topup|充值（单据 " + secondOrder + "）",
+		ledger.UserAccount(userID).String() + "|50.00000000|topup|",
+	}
+	if !slices.Equal(secondRows, wantSecond) {
+		t.Errorf("第二笔的分录 = %v，期望 %v", secondRows, wantSecond)
+	}
+}
+
+// 用户不存在时退出码是「要查的那一行不存在」，与 wallet open 一致。
+func TestWalletCreditUnknownUserExitCode(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	err := runCaptured(t, func() error {
+		return runWalletCredit([]string{
+			"--user", uniqueName("nobody"), "--amount", "1", "--order", uniqueName("order"),
+		})
+	})
+	if err == nil {
+		t.Fatal("不存在的用户应当报错")
+	}
+	if !errors.Is(err, auth.ErrUserNotFound) {
+		t.Errorf("错误链里没有 auth.ErrUserNotFound：%v", err)
+	}
+	if code := exitCode(err); code != exitConflict {
+		t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", code, exitConflict)
 	}
 }

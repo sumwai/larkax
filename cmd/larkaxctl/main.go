@@ -58,6 +58,8 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl user create --name <用户名>     创建用户（stdout 只有新用户的 ID）
   larkaxctl wallet open --user <用户> [--asset <资产>]
                                            给用户开通钱包（余额 0）
+  larkaxctl wallet credit --user <用户> --amount <金额> --order <幂等键>
+                                           运营手工入账（写账本分录）
   larkaxctl apikey create --user <用户>     创建一把 API Key（明文只打印这一次）
   larkaxctl apikey update --id <ID>        改一把已有 API Key 的额度
   larkaxctl apikey list [--user <用户>]     列出 API Key 及其额度

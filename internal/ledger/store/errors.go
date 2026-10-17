@@ -82,6 +82,18 @@ const (
 // 退出 4、在这条写入路径上退出 1。运维脚本按退出码分派处置，两个码是两种处置。
 var ErrNoSuchUser = errors.New("用户不存在")
 
+// ErrTxnConflict 表示同一个 txn_id 已经是一笔**内容不同**的交易。
+//
+// 它与「重放」是两件事，必须分开：
+//
+//   - 内容一致的重放不是错误：调用方按幂等语义直接返回「未改动」
+//   - 内容不同说明两个不同的事件被映射到了同一个标识上。静默放过会让
+//     后一笔在账面上消失（分录没写），而账本仍然平——事后没有任何线索
+//
+// 它来自 PostTransaction 的幂等判据（见 posting.go）。命令行把它归入
+// 「要查的那一行已经存在」这一类：下一步是去看数据里现在是什么。
+var ErrTxnConflict = errors.New("交易号已存在但内容不同")
+
 // ErrConstraintViolation 是 dberr.ErrConstraintViolation 的别名。
 //
 // 判据与哨兵都搬到了 internal/dberr：它只回答「唯一键 / 外键拒绝了这次
