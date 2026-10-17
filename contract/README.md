@@ -20,17 +20,47 @@
 
 ## 覆盖范围
 
-三套协议（`openai` / `anthropic` / `openai-responses`）各跑六条；Responses
-另多一条**空 `input`** 的 400（共七条），因为它的 400 文案要点的是另一个字段：
+三套协议（`openai` / `anthropic` / `openai-responses`）各跑七条；Responses
+另多一条**空 `input`** 的 400（共八条），因为它的 400 文案要点的是另一个字段：
 
 | 用例 | 验什么 |
 |---|---|
 | 非流式 | 正文、`finish_reason` / `stop_reason` / `status`、`usage` 三项（Responses 另加两个 `*_tokens_details`） |
 | 流式 | 增量能拼起来、事件顺序、**终止条件**、用量在流里的位置 |
+| 流式·余额耗尽 | 服务端按余额切断一条流时客户端看到什么：OpenAI 与 Anthropic 抛异常、异常之前没有正常结束的迹象；Responses 收到一条 `error` 事件且没有终态事件（见下） |
 | 工具调用 | `tool_calls` / `tool_use` / `function_call` 三边的形状（`arguments` 是字符串、Anthropic 的 `input` 是对象） |
 | 客户端错误 400 | SDK 抛 `BadRequestError`，`error.type` 是 `invalid_request_error`；Responses 另有「缺 `max_output_tokens`」与「空 `input`」两条，文案分别点名这两个字段 |
 | 认证错误 401 | SDK 抛 `AuthenticationError`；OpenAI 与 Responses 的 `error.code` 是 `invalid_api_key`，Anthropic 的 `error.type` 是 `authentication_error` |
 | 上游错误 5xx | 上游回 500 时我们回 502，SDK 抛 `APIStatusError`，`error.type` 是 `api_error` |
+
+「流式·余额耗尽」那一条需要一个**真的**余额不足：假上游没法让服务端走进那条路，
+所以它配了单独一份价目（几个阈值段就把余额花光）与一条很长的流
+（见 `contract_test.go` 的 `contractDrainRule` 与 `contractDrainChunks`）。
+流短了这条用例会红在一个与它无关的原因上——上游先没词了。
+
+### 流内错误帧：三套协议在客户端那一边长得不一样
+
+响应头在第一个事件之前就发出去了，所以流开始之后的失败**只能**作为帧表达
+（见 `internal/api/stream.go`）。这条用例验的是「客户端认不认那条帧」，
+而三套协议的答案不同：
+
+| 入口 | 客户端看到什么 | 判据 |
+|---|---|---|
+| openai | 抛 `openai.APIError`，`error.message` 可读 | SDK 认的是 data 里有没有 `error` 字段 |
+| anthropic | 抛 `anthropic.APIStatusError`（状态码仍是 200） | SDK 认的是**事件名** `event: error` |
+| openai-responses | **不抛**，交给调用方一个 `ResponseErrorEvent`（`code` / `message` 可读） | 官方 Responses 协议的流内失败就是这样一个**平铺的事件**，SDK 把它当事件模型解析 |
+
+两条抛异常的用例钉的不是同一处渲染代码：两套协议的帧由 `streamErrorFrame`
+的两个分支分别写出来，一个分支写坏了只有对应的那一条会红。
+
+**Responses 那一条的第三组断言只在它这里有意义。** 「没有伪造正常结束标记」
+在 OpenAI / Anthropic 那两条上验不出来——SDK 在异常处就停止迭代了，错误帧
+**之后**还有什么帧它一概看不到。所以那两条只断言「异常之前没出现过
+`finish_reason` / `message_stop`」，而「整条帧序列里没有 `[DONE]`」由 Go 那侧
+的帧序列用例钉着（`internal/assembly` 的流式冻结用例与 `internal/api` 的
+渲染器用例）。Responses 那一条不一样：SDK 不抛异常、会一路读完，所以
+「没有 `response.completed`」这条断言真的在它那里生效——把终态事件写到错误
+事件之后，它会红（实测）。
 
 401 那条是**唯一**能验 `error.code` 的地方：OpenAI 那套形状里只有它会把
 `error.code` 填上一个具体值（`invalid_api_key`），普通的 400 给的是 `null`

@@ -254,6 +254,36 @@ type Registry struct {
 	// （见 pipeline.Outcome.UpstreamFailed）。在这一层分不出是哪一个。
 	UnbilledSettlements *Counter
 
+	// StreamUnderfrozen 是流式请求补冻时**存储写失败而放行**的次数。
+	//
+	// 流式那条路的冻结是随流递进的（见 internal/gateway 的 streamFreeze 与
+	// #498）：每产出过一个阈值段就补冻一次，而补冻那一步要写库。写失败时
+	// 那条流**不中断**——捂不住的那一侧是平台自己的问题（库在报错），不该
+	// 让用户的正常请求失败——但这次请求从此是「未充分冻结」的：之后产出的
+	// 那些 token 没有对应的冻结额，结算到它们时实际金额会超过预留额（撞
+	// Capped，差额由平台承担）。
+	//
+	// 按设计它应当一直是 0。非 0 说明库在拒绝写入，而**这一次请求的账
+	// 已经对不上预留了**——它是那件事唯一的即时信号（对账看不到它：撞上界时
+	// 两边记的是同一个被截小的数，账目仍然是平的）。
+	//
+	// 要查「是哪一次请求」，看日志：补冻失败那一刻有一条带 request_id 的告警
+	// （见 gateway 的 streamFreeze.observe）。这个数答的是「发生了多少次」，
+	// 与 CappedSettlements 和 computed_amount 的分工一样。
+	StreamUnderfrozen *Counter
+
+	// StreamBalanceExhausted 是因可用余额不足被**我们切断**的流式请求次数。
+	//
+	// 补冻够不着余额时这条流不再继续：中断就是中断，本轮不引入透支（见 #498
+	// 的「不做的事」）。调用方那一侧看到一条流内错误帧，它的文案说的是充值而
+	// 不是重试。
+	//
+	// 它取代了原先的那个形状：一条 max_tokens 填得很大、实际只产几十个 token
+	// 的流式请求，在开始之前就被按声明上界冻住而遭 429 拒掉——而拒绝率上看不出
+	// 被拒的是真没钱还是被预留冻住了（见 issue 的「后果」一节）。现在这一类
+	// 请求能跑起来，真正跑不完的那些计数在这里。
+	StreamBalanceExhausted *Counter
+
 	// AuthFailures 是认证失败被回以 401 的次数，按失败原因分。
 	//
 	// reason 的取值来自 internal/auth 的 Reason（八个取值，闭合枚举），
@@ -303,6 +333,10 @@ func NewRegistry() *Registry {
 		"protocol", "asset")
 	r.UnbilledSettlements = r.newCounter("larkax_billing_unbilled_settlements_total",
 		"未计费的结算次数：上游失败，或请求在结算之前中止。")
+	r.StreamUnderfrozen = r.newCounter("larkax_billing_stream_underfrozen_total",
+		"流式请求补冻时存储写失败而放行、因而未被充分冻结的次数。按设计应一直为 0；非 0 说明库在拒绝写入，而这次请求之后产出的 token 没有对应的冻结额，结算到它们时会撞上界（差额由平台承担，账目仍然是平的）。")
+	r.StreamBalanceExhausted = r.newCounter("larkax_billing_stream_balance_exhausted_total",
+		"因可用余额不足以补冻而被切断的流式请求次数。这一类请求在调用方那一侧看到一条流内错误帧（文案指向充值而不是重试），已产出的部分照常结算。")
 	r.AuthFailures = r.newLabeled("larkax_auth_failures_total",
 		"认证失败被回以 401 的次数，按失败原因分（取值见 internal/auth 的 Reason）。reason=\"unclassified\" 说明有一条 401 不是由 auth.Error 产生的，按设计不该出现。",
 		"reason")

@@ -39,6 +39,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -69,13 +70,39 @@ const (
 	contractReasoningTokens = 2
 )
 
-// 三个模型名的后缀。假上游按**请求里的模型名**决定回什么，
-// Python 那一侧按同一组后缀推名字，于是「三种场景」不必各起一个服务。
+// 四个模型名的后缀。假上游按**请求里的模型名**决定回什么，
+// Python 那一侧按同一组后缀推名字，于是「四种场景」不必各起一个服务。
 const (
 	contractSuffixText  = "text"
 	contractSuffixTools = "tools"
 	contractSuffixFail  = "fail"
+
+	// drain 是**余额在流的中间耗尽**那条路（见 #498 的 streamFreeze）。
+	//
+	// 它必须由真的余额不足触发：假上游没法让网关走进那条路，所以这个后缀
+	// 配的是一份把输出侧单价定得极高的规则（见 contractDrainRule），
+	// 于是一段没跑完的流就把余额花光了。
+	contractSuffixDrain = "drain"
 )
+
+// contractDrainChunks 是 drain 那条流准备的分片数。
+//
+// 要**远多于**切断点，否则「流被切断了」可能只是因为「上游先没词了」——
+// 那两种情形在客户端看到的帧序列上一模一样。切断点按规则与阈值段推出来是
+// 二三十片（见 contractDrainRule），400 片留出十倍量级的余量。
+const contractDrainChunks = 400
+
+// contractDrainRule 是 drain 模型的价目。
+//
+// 输出侧 0.5/Token：初始那一段（一个阈值段 64 个 Token）冻住 32，之后每补
+// 一段再冻 32，而契约用例的余额是 100——两三次补冻之后余额见底，流在中途
+// 被切断。取 0.5 而不是刚好够切的数，是为了让「切成几段」留出余量：
+// 切断点随本地估算的分片粒度浮动，卡在边界上的话这条用例会变得时红时绿。
+//
+// 输入侧与正文那三条用例同一个数（而且很小），于是流没被切断时那部分的账
+// 与别的用例一致。
+const contractDrainRule = `{"prompt": 0.00001, "completion": 0.5,` +
+	`"cache_read": 0.00001, "cache_write": 0.00001, "reasoning": 0.5}`
 
 // TestContractOpenAI 用官方 openai SDK 走一遍 /v1/chat/completions。
 func TestContractOpenAI(t *testing.T) {
@@ -119,10 +146,11 @@ func runContract(t *testing.T, protocol channel.Protocol) {
 
 	prefix := unique("contract-" + string(protocol))
 	fake := &contractUpstream{
-		protocol:  protocol,
-		textModel: prefix + "-" + contractSuffixText,
-		toolModel: prefix + "-" + contractSuffixTools,
-		failModel: prefix + "-" + contractSuffixFail,
+		protocol:   protocol,
+		textModel:  prefix + "-" + contractSuffixText,
+		toolModel:  prefix + "-" + contractSuffixTools,
+		failModel:  prefix + "-" + contractSuffixFail,
+		drainModel: prefix + "-" + contractSuffixDrain,
 	}
 
 	upstreamSrv := httptest.NewServer(fake.handler())
@@ -147,7 +175,22 @@ func runContract(t *testing.T, protocol channel.Protocol) {
 		seedRule(t, db, model, rule)
 	}
 
-	app := newApp(t, db, sealer)
+	// drain 那条模型名单独一条渠道与一份价目：它的输出侧单价被定得极高
+	// （见 contractDrainRule），于是余额会在流的中间耗尽。混在上面那份规则里
+	// 会把另外三条用例的账一起改掉。
+	seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL, fake.drainModel, string(protocol), 0)
+	seedRule(t, db, fake.drainModel, contractDrainRule)
+
+	// 阈值段压到 64 个 Token。
+	//
+	// 出厂的 4096 也能切，但假上游就得备几万片才够那条流跑到切断点。真正
+	// 与这条用例有关的是**段与产出量的比例**，不是段有多大——压小它既不动
+	// 另外几条用例的断言（它们只看响应的形状），也让模型名后加的这条用例
+	// 跑得起来。见 internal/gateway 的 streamFreeze。
+	app, err := buildAppWithSettings(t, db, map[string]string{streamFreezeStepKey: "64"})
+	if err != nil {
+		t.Fatalf("装配失败: %v", err)
+	}
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
@@ -223,16 +266,17 @@ func contractScript(t *testing.T) string {
 // 给它们加一个「按 model 名分支」的开关会把两种用途搅在一起。
 //
 // 这里要的是另一件事：**按请求里的模型名与 stream 标志**决定回什么，
-// 于是 Python 那一侧在一次运行里就能把五种场景都走一遍。
+// 于是 Python 那一侧在一次运行里就能把六种场景都走一遍。
 //
 // 与真实上游一样，它读请求体；但它**不校验**请求体里除了模型名与 stream
 // 之外的东西——契约测试验的是我们对外响应的形状，不是我们发出去的请求。
 type contractUpstream struct {
 	protocol channel.Protocol
 
-	textModel string
-	toolModel string
-	failModel string
+	textModel  string
+	toolModel  string
+	failModel  string
+	drainModel string
 
 	mu     sync.Mutex
 	calls  int
@@ -255,6 +299,8 @@ func (u *contractUpstream) handler() http.Handler {
 			u.writeFailure(w)
 		case u.toolModel:
 			u.writeToolCall(w, req.Stream, req.Model)
+		case u.drainModel:
+			u.writeDrain(w, req.Stream, req.Model)
 		case u.textModel:
 			u.writeText(w, req.Stream, req.Model)
 		default:
@@ -596,6 +642,126 @@ func (u *contractUpstream) anthropicTextStream(w http.ResponseWriter, model stri
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},`+
 			`"usage":{"output_tokens":%d}}`, contractCompletionTokens))
 	event("message_stop", `{"type":"message_stop"}`)
+}
+
+// ── drain：余额在流的中间耗尽 ────────────────────────────────────────
+//
+// 这一组假上游只做一件事：回一条**很长的**正文流。它与上面几组分开写，
+// 因为要验的行为不同——上面几组验「响应的形状」，这一组验的是「流被我们
+// 按余额切断时，客户端那一边看到什么」。
+//
+// 长度是判据的一部分。短了就会在余额耗尽之前正常结束，那时 Python 那一侧
+// 的「SDK 抛异常」会失败——失败的方式是对的，但原因是假上游不给力，
+// 而那与被测行为无关。所以分片数由 contractDrainChunks 定，留出余量。
+
+// writeDrain 回一条很长的流。
+func (u *contractUpstream) writeDrain(w http.ResponseWriter, stream bool, model string) {
+	if !stream {
+		// 非流式没有「流内错误帧」这回事，那条用例跑不起来。按非流式回一段
+		// 很长的正文只会把「上游没问题」与「用例写错了」搅在一起，
+		// 所以走普通正文那条路，让这个分支至少是自洽的。
+		u.writeText(w, false, model)
+		return
+	}
+	switch u.protocol {
+	case channel.ProtocolAnthropic:
+		u.anthropicDrainStream(w, model)
+	case channel.ProtocolOpenAIResponses:
+		u.responsesDrainStream(w, model)
+	default:
+		u.openAIDrainStream(w, model)
+	}
+}
+
+// contractDrainParts 给出 drain 那几条流的分片内容。
+//
+// 分片固定用正文那一片常量：它只要「非空且每片都一样大」，具体是什么不参与
+// 任何断言（判据是「收到过正文」与「被切断在哪儿」，两者都不看内容）。
+// 每片必须**远小于一个阈值段**——一片就撞穿整段时，切断点由检查窗口的粒度
+// 决定，而那测的是另一件事（见 internal/gateway 的 streamFreeze）。
+func contractDrainParts(n int) []string {
+	parts := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		parts = append(parts, contractTextPartA)
+	}
+	return parts
+}
+
+// openAIDrainStream 按 OpenAI 的顺序吐一条长流。
+//
+// 结尾那三帧（结束分片、用量分片、`[DONE]`）在正常情况下到不了——这条流会
+// 先被余额切断。留着它们是为了让「没被切断」这件事有一个明确的形状：
+// 那时 SDK 会正常迭代完，用例因此**红在「没抛异常」那一条断言上**，
+// 而不是红在一个看起来像上游坏掉的错误上。
+func (u *contractUpstream) openAIDrainStream(w http.ResponseWriter, model string) {
+	data, _ := u.sse(w)
+	name := upstreamModelName(model)
+
+	data(fmt.Sprintf(`{"id":"chatcmpl-contract","object":"chat.completion.chunk","model":%q,`+
+		`"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`, name))
+	for _, part := range contractDrainParts(contractDrainChunks) {
+		data(fmt.Sprintf(`{"id":"chatcmpl-contract","object":"chat.completion.chunk","model":%q,`+
+			`"choices":[{"index":0,"delta":{"content":%q},"finish_reason":null}]}`, name, part))
+	}
+	data(fmt.Sprintf(`{"id":"chatcmpl-contract","object":"chat.completion.chunk","model":%q,`+
+		`"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`, name))
+	data(fmt.Sprintf(`{"id":"chatcmpl-contract","object":"chat.completion.chunk","model":%q,`+
+		`"choices":[],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
+		name, contractPromptTokens, contractCompletionTokens,
+		contractPromptTokens+contractCompletionTokens))
+	data("[DONE]")
+}
+
+// anthropicDrainStream 同上一份，按 Anthropic 的顺序。
+func (u *contractUpstream) anthropicDrainStream(w http.ResponseWriter, model string) {
+	_, event := u.sse(w)
+	name := upstreamModelName(model)
+
+	event("message_start", fmt.Sprintf(
+		`{"type":"message_start","message":{"id":"msg_contract","type":"message","role":"assistant",`+
+			`"model":%q,"content":[],"usage":{"input_tokens":%d,"output_tokens":0}}}`,
+		name, contractPromptTokens))
+	event("content_block_start",
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
+	for _, part := range contractDrainParts(contractDrainChunks) {
+		event("content_block_delta", fmt.Sprintf(
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, part))
+	}
+	event("content_block_stop", `{"type":"content_block_stop","index":0}`)
+	event("message_delta", fmt.Sprintf(
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},`+
+			`"usage":{"output_tokens":%d}}`, contractCompletionTokens))
+	event("message_stop", `{"type":"message_stop"}`)
+}
+
+// responsesDrainStream 同上一份，按 Responses 的顺序。
+func (u *contractUpstream) responsesDrainStream(w http.ResponseWriter, model string) {
+	_, event := u.sse(w)
+	name := upstreamModelName(model)
+
+	event("response.created", fmt.Sprintf(
+		`{"type":"response.created","sequence_number":0,"response":%s}`,
+		contractResponsesEnvelope(name, "in_progress", "[]", "null")))
+	event("response.output_item.added",
+		`{"type":"response.output_item.added","sequence_number":1,"output_index":0,`+
+			`"item":{"type":"message","id":"msg_contract","status":"in_progress",`+
+			`"role":"assistant","content":[]}}`)
+	for _, part := range contractDrainParts(contractDrainChunks) {
+		event("response.output_text.delta", fmt.Sprintf(
+			`{"type":"response.output_text.delta","sequence_number":2,"output_index":0,`+
+				`"content_index":0,"item_id":"msg_contract","delta":%q}`, part))
+	}
+	event("response.output_text.done", fmt.Sprintf(
+		`{"type":"response.output_text.done","sequence_number":3,"output_index":0,`+
+			`"content_index":0,"item_id":"msg_contract","text":%q}`,
+		strings.Repeat(contractTextPartA, contractDrainChunks)))
+	event("response.output_item.done", fmt.Sprintf(
+		`{"type":"response.output_item.done","sequence_number":4,"output_index":0,`+
+			`"item":%s}`, contractResponsesMessageItem("completed")))
+	event("response.completed", fmt.Sprintf(
+		`{"type":"response.completed","sequence_number":5,"response":%s}`,
+		contractResponsesEnvelope(name, "completed",
+			"["+contractResponsesMessageItem("completed")+"]", contractResponsesUsage())))
 }
 
 // anthropicToolStream 吐一次工具调用：块开始时给 id 与名字，参数按

@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/route"
 )
 
@@ -176,14 +177,25 @@ func writeSSE(w io.Writer, event string, payload any) error {
 
 // streamErrorMessage 是一句**给调用方看的**流中途失败原因。
 //
-// 措辞按「已经吐过字没有」分两种，判据是 route.ErrOutputStarted（由网关
-// 在吐字之后失败时包上）。这个区分是有用的：已经吐过字时调用方手里有半截
-// 回答，他需要知道的是「这段被截断了」，而不是「服务暂时不可用」——后者
-// 会让他直接重试，而重试会把两段回答接在一起。
+// 措辞按失败的性质分三种，判据都是错误值本身：
+//
+//   - 余额耗尽（store.ErrInsufficientAvailable）：这次流是**我们**按余额切断的
+//     （见 internal/gateway 的 streamFreeze）。它要说清「回答被截断了」与「该去
+//     充值」，见 msgInsufficientBalanceStream；
+//   - 已经吐过字之后上游失败：判据是 route.ErrOutputStarted（由网关在吐字之后
+//     失败时包上）。调用方手里有半截回答，他需要知道的是「这段被截断了」，而不是
+//     「服务暂时不可用」——后者会让他直接重试，而重试会把两段回答接在一起；
+//   - 其余：上游调用失败。
+//
+// 余额那一条排在 ErrOutputStarted 之前：两者说的是两件事，而余额那个更具体
+// （它同时说清了原因与处置）。次序也符合「先看是不是我们自己断的」这个读法。
 //
 // 三套协议共用它：同一个失败在三种形状里说同一句话，形状的差别只在
 // 字段名与嵌套上（见 streamErrorFrame 与 responsesStream.errorFrame）。
 func streamErrorMessage(err error) string {
+	if errors.Is(err, store.ErrInsufficientAvailable) {
+		return msgInsufficientBalanceStream
+	}
 	if errors.Is(err, route.ErrOutputStarted) {
 		return "the response was interrupted before it finished"
 	}

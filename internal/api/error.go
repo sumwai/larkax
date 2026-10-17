@@ -171,6 +171,26 @@ const msgInsufficientQuota = "this API key has reached its spending limit; " +
 const msgInsufficientBalance = "the account balance is insufficient for this request; " +
 	"top up the wallet before retrying"
 
+// msgInsufficientBalanceStream 是**流已经开始之后**余额耗尽时的那句话。
+//
+// 与非流式那句（msgInsufficientBalance）分开，因为这次请求已经发出去了：响应头
+// 是 200，正文也已经吐了一截。调用方需要知道的是三件事，而这句话要全部说到：
+//
+//   - 这段回答**是被截断的**，不能当成完整回答用（它是这一句里最要紧的一半：
+//     答到一半的内容可能与完整的答案意思相反，而截断信号只是「帧序列里没有
+//     结束标记」，朴素的客户端不会去检查）；
+//   - 原因是账户余额，不是上游或服务故障——所以不要把这次失败记到别处去；
+//   - 该做的是充值，而不是等一会儿重试（与上面那句同一个理由：余额不会自己
+//     回来）。
+//
+// 不写「已经产出的部分会照常计费」：那是我们这边的账目细节。它写在账单里，
+// 调用方能查到，而放在错误文案里只会让这一句变长、把上面三件事挤淡。
+//
+// 它只能出现在流中途的错误帧里，所以没有对应的 writeInsufficientBalance——
+// 那时状态码与响应头早就发出去了（见本文件头的说明）。
+const msgInsufficientBalanceStream = "the account balance ran out while this response was streaming, " +
+	"so it was cut short; top up the wallet before retrying"
+
 // writeInsufficientQuota 写出一次「额度用尽」的响应。
 //
 // # 为什么不回 Retry-After

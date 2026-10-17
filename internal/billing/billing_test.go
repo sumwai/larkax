@@ -262,9 +262,9 @@ func TestEveryTokenSlotIsCharged(t *testing.T) {
 
 func TestReserveCoversWorstCase(t *testing.T) {
 	r, err := Reserve(ReserveRequest{
-		Prices:      prices(),
-		InputTokens: 1000,
-		MaxTokens:   4000,
+		Prices:       prices(),
+		InputTokens:  1000,
+		OutputTokens: 4000,
 	})
 	if err != nil {
 		t.Fatalf("出错: %v", err)
@@ -283,7 +283,7 @@ func TestReserveCoversWorstCase(t *testing.T) {
 
 // 预留必须不小于任何可能的实际金额。这条不变量是「余额不为负」的前提。
 func TestReserveNeverBelowActual(t *testing.T) {
-	req := ReserveRequest{Prices: prices(), InputTokens: 1000, MaxTokens: 1000}
+	req := ReserveRequest{Prices: prices(), InputTokens: 1000, OutputTokens: 1000}
 	reserved, err := Reserve(req)
 	if err != nil {
 		t.Fatal(err)
@@ -304,10 +304,14 @@ func TestReserveNeverBelowActual(t *testing.T) {
 	}
 }
 
-// 没有 max_tokens 就算不出上界。用典型值兜底会让结算可能超过预留，
+// 没有「要冻多少输出 token」就算不出上界。用典型值兜底会让结算可能超过预留，
 // 从而破坏「余额不为负」——那正是预留机制要避免的。
-func TestReserveRequiresMaxTokens(t *testing.T) {
-	_, err := Reserve(ReserveRequest{Prices: prices(), InputTokens: 100, MaxTokens: 0})
+//
+// 名字说的是 OutputTokens 而不是 max_tokens：那一个量在非流式那条路上**就是**
+// 声明的 max_tokens，在流式那条路上是第一段（见 ReserveRequest.OutputTokens）。
+// 用例钉的是「这个字段必须为正」，与它是怎么来的无关。
+func TestReserveRequiresOutputTokens(t *testing.T) {
+	_, err := Reserve(ReserveRequest{Prices: prices(), InputTokens: 100, OutputTokens: 0})
 	if err == nil {
 		t.Fatal("缺少 max_tokens 应报错")
 	}
@@ -318,9 +322,9 @@ func TestReserveRequiresMaxTokens(t *testing.T) {
 
 func TestReserveRejectsNegativeInputs(t *testing.T) {
 	cases := []ReserveRequest{
-		{Prices: prices(), InputTokens: -1, MaxTokens: 100},
-		{Prices: prices(), CacheReadTokens: -1, MaxTokens: 100},
-		{Prices: prices(), InputTokens: 1, MaxTokens: 100, Charges: Charges{Minimum: money.MustParse("-1")}},
+		{Prices: prices(), InputTokens: -1, OutputTokens: 100},
+		{Prices: prices(), CacheReadTokens: -1, OutputTokens: 100},
+		{Prices: prices(), InputTokens: 1, OutputTokens: 100, Charges: Charges{Minimum: money.MustParse("-1")}},
 	}
 	for i, req := range cases {
 		if _, err := Reserve(req); err == nil {
@@ -332,14 +336,14 @@ func TestReserveRejectsNegativeInputs(t *testing.T) {
 func TestReserveRejectsNegativePrices(t *testing.T) {
 	p := prices()
 	p.Prompt = money.MustParse("-0.001")
-	if _, err := Reserve(ReserveRequest{Prices: p, InputTokens: 1, MaxTokens: 100}); err == nil {
+	if _, err := Reserve(ReserveRequest{Prices: p, InputTokens: 1, OutputTokens: 100}); err == nil {
 		t.Error("负单价应被拒绝")
 	}
 }
 
 // 保底金额（固定费用、最低消费）要被算进去。
 func TestReserveHonorsMinimum(t *testing.T) {
-	base := ReserveRequest{Prices: prices(), InputTokens: 1, MaxTokens: 1}
+	base := ReserveRequest{Prices: prices(), InputTokens: 1, OutputTokens: 1}
 	plain, err := Reserve(base)
 	if err != nil {
 		t.Fatal(err)
@@ -363,7 +367,7 @@ func TestReserveUsesHigherOfCompletionAndReasoning(t *testing.T) {
 	p := prices()
 	// 让推理比输出便宜，预留应当用输出的价
 	p.Reasoning = money.MustParse("0.000001")
-	r, err := Reserve(ReserveRequest{Prices: p, MaxTokens: 1000})
+	r, err := Reserve(ReserveRequest{Prices: p, OutputTokens: 1000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,12 +381,88 @@ func TestReserveUsesHigherOfCompletionAndReasoning(t *testing.T) {
 func TestReserveIncludesOneOfEachUnit(t *testing.T) {
 	p := prices()
 	p.Units = map[string]money.Amount{"images": money.MustParse("0.5")}
-	r, err := Reserve(ReserveRequest{Prices: p, MaxTokens: 1})
+	r, err := Reserve(ReserveRequest{Prices: p, OutputTokens: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if r.Cmp(money.MustParse("0.50000800")) < 0 {
 		t.Errorf("预留应含一份计量项，得到 %s", r)
+	}
+}
+
+// ── 补冻（流式递进冻结用） ──────────────────────────────────────────────
+
+// 补冻的单价必须与预留的**输出侧**逐字相同。
+//
+// 它是「补冻与结算同源」这条口径里最容易走偏的一环：结算按实际用量把输出拆成
+// completion 与 reasoning 两个桶，而补冻只知道自己又产出了多少个 token、不知道
+// 上游会把它算进哪个桶——所以它只能取两者里贵的那个。取错（例如固定用
+// completion）时，一条按推理计价的流会在补冻上少冻一截，差额由平台吃掉，
+// 而账目仍然是平的、对账看不出来。
+func TestOutputPriceIsTheHigherOfCompletionAndReasoning(t *testing.T) {
+	p := prices() // Completion 8e-6，Reasoning 1e-5
+	if got := OutputPrice(p); got.Cmp(money.MustParse("0.00001")) != 0 {
+		t.Errorf("OutputPrice = %s，期望较高的推理价 0.00001", got)
+	}
+
+	// 反过来：推理比输出便宜时取输出价。两个方向都钉，免得实现写成「总是取
+	// Reasoning」——那种写法在上面那一条上是绿的。
+	p.Reasoning = money.MustParse("0.000001")
+	if got := OutputPrice(p); got.Cmp(money.MustParse("0.000008")) != 0 {
+		t.Errorf("OutputPrice = %s，期望较高的输出价 0.000008", got)
+	}
+}
+
+// 补冻金额 = 输出侧单价 × 又产出的 token 数，逐项与预留里那一段同口径。
+func TestReserveOutputMatchesReserveOutputSide(t *testing.T) {
+	p := prices()
+	// 一次冻满 1000 个：输入侧为 0，所以整个金额就是输出侧那一段。
+	whole, err := Reserve(ReserveRequest{Prices: p, OutputTokens: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 分成两段冻：3:7。两段之和必须**恰好**等于整段——不等就说明补冻那一侧
+	// 用了另一份价（多了或少了），而那正是「同源」要防的。
+	a, err := ReserveOutput(p, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ReserveOutput(p, 700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum := a.Add(b); sum.Cmp(whole) != 0 {
+		t.Errorf("两段补冻之和 %s ≠ 整段 %s（补冻与预留用的不是同一份价？）", sum, whole)
+	}
+}
+
+// 补冻只算输出侧那一项：固定费、最低消费、非 token 计量与输入侧都不进来。
+//
+// 这一条钉的是「按段重复加」这个错法。那些量一次请求只发生一次，初始预留里
+// 已经各算过一份；补冻时若跟着加一遍，冻结额会随段数一路长上去——而它长到
+// 超过用户的余额时，那条流会被自己冻死（中断），表现得像「用户没钱了」。
+func TestReserveOutputOnlyCountsTheOutputSide(t *testing.T) {
+	p := prices()
+	p.Units = map[string]money.Amount{"images": money.MustParse("1")}
+	got, err := ReserveOutput(p, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 100 × max(8e-6, 1e-5) = 0.001。与 Units 里那一份、与任何固定费都无关。
+	if want := money.MustParse("0.001"); got.Cmp(want) != 0 {
+		t.Errorf("补冻 = %s，期望 %s（只该有输出侧那一项）", got, want)
+	}
+}
+
+// 单价乘 token 数溢出时报错，而不是绕回一个看起来正常的数。
+//
+// 这一条与 Reserve 的溢出用例同一个理由：金额是 int64 最小单位，绕回之后
+// 可能是一个**负数**（冻负数的钱）或者一个小得离谱的正数（等于没冻）。
+func TestReserveOutputRejectsOverflow(t *testing.T) {
+	p := prices()
+	p.Completion = money.MustParse("1000000") // 1e6 元/token
+	if _, err := ReserveOutput(p, 1<<40); err == nil {
+		t.Error("溢出应报错")
 	}
 }
 
@@ -637,7 +717,7 @@ func TestMinimumAppliesToBothReserveAndSettle(t *testing.T) {
 	p := prices()
 
 	reserved, err := Reserve(ReserveRequest{
-		Prices: p, InputTokens: 1, MaxTokens: 1, Charges: charges,
+		Prices: p, InputTokens: 1, OutputTokens: 1, Charges: charges,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -725,7 +805,7 @@ func TestReserveIncludesChargesSoSettleNeverCaps(t *testing.T) {
 	charges := Charges{Fixed: money.MustParse("0.5"), Minimum: money.MustParse("1")}
 
 	reserved, err := Reserve(ReserveRequest{
-		Prices: p, InputTokens: 100, MaxTokens: 200, Charges: charges,
+		Prices: p, InputTokens: 100, OutputTokens: 200, Charges: charges,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -773,7 +853,7 @@ func TestReserveCoversCacheWrite(t *testing.T) {
 		Prices:           p,
 		InputTokens:      100,
 		CacheWriteTokens: 10000,
-		MaxTokens:        10,
+		OutputTokens:     10,
 	}
 
 	reserved, err := Reserve(req)
@@ -797,7 +877,7 @@ func TestReserveCoversCacheWrite(t *testing.T) {
 }
 
 func TestReserveRejectsNegativeCacheWrite(t *testing.T) {
-	_, err := Reserve(ReserveRequest{Prices: prices(), MaxTokens: 10, CacheWriteTokens: -1})
+	_, err := Reserve(ReserveRequest{Prices: prices(), OutputTokens: 10, CacheWriteTokens: -1})
 	if err == nil {
 		t.Error("负的缓存写入量应被拒绝")
 	}
@@ -815,7 +895,7 @@ func TestReserveEstimatesCacheReadAtHigherPrice(t *testing.T) {
 	p.CacheRead = money.MustParse("0.0000001")
 	p.CacheWrite = money.MustParse("0.0001")
 
-	req := ReserveRequest{Prices: p, CacheReadTokens: 1000, CacheWriteTokens: 1000, MaxTokens: 1}
+	req := ReserveRequest{Prices: p, CacheReadTokens: 1000, CacheWriteTokens: 1000, OutputTokens: 1}
 	reserved, err := Reserve(req)
 	if err != nil {
 		t.Fatal(err)
@@ -848,7 +928,7 @@ func TestReserveEstimatesCacheReadAtHigherPrice(t *testing.T) {
 	flipped.CacheWrite = money.Zero
 	flipped.Reasoning = money.Zero
 
-	reserved, err = Reserve(ReserveRequest{Prices: flipped, CacheReadTokens: 10, MaxTokens: 1})
+	reserved, err = Reserve(ReserveRequest{Prices: flipped, CacheReadTokens: 10, OutputTokens: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -891,7 +971,7 @@ func TestReserveCoversSplitPromptWithoutCacheEstimates(t *testing.T) {
 	p.Reasoning = money.Zero
 
 	// 生产的形状：只有 InputTokens，两个缓存估计量都是零值。
-	reserved, err := Reserve(ReserveRequest{Prices: p, InputTokens: 1000, MaxTokens: 1})
+	reserved, err := Reserve(ReserveRequest{Prices: p, InputTokens: 1000, OutputTokens: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -925,7 +1005,7 @@ func TestReserveCacheReadWithoutPriceUsesInputPrice(t *testing.T) {
 	p.Completion = money.Zero
 	p.Reasoning = money.Zero
 
-	reserved, err := Reserve(ReserveRequest{Prices: p, CacheReadTokens: 1000, MaxTokens: 1})
+	reserved, err := Reserve(ReserveRequest{Prices: p, CacheReadTokens: 1000, OutputTokens: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1201,7 +1281,7 @@ func TestReserveRejectsSingleTermOverflow(t *testing.T) {
 		t.Fatal("前提不成立：这一项应当在相乘时被夹住")
 	}
 
-	reserved, err := Reserve(ReserveRequest{Prices: p, MaxTokens: maxTokens})
+	reserved, err := Reserve(ReserveRequest{Prices: p, OutputTokens: maxTokens})
 	if err == nil {
 		t.Fatalf("预留算不出来时必须报错，得到 %s", reserved)
 	}
@@ -1226,7 +1306,7 @@ func TestReserveRejectsSumOverflow(t *testing.T) {
 		t.Fatal("前提不成立：输入侧应当放得下")
 	}
 
-	_, err := Reserve(ReserveRequest{Prices: p, InputTokens: tokens, MaxTokens: tokens})
+	_, err := Reserve(ReserveRequest{Prices: p, InputTokens: tokens, OutputTokens: tokens})
 	if err == nil {
 		t.Fatal("预留求和溢出时必须报错，而不是交回一个偏小的上界")
 	}
@@ -1238,7 +1318,7 @@ func TestReserveRejectsSumOverflow(t *testing.T) {
 // 正常量级不受影响：预留照旧、与结算对得上。
 func TestReserveAcceptsNormalAmounts(t *testing.T) {
 	reserved, err := Reserve(ReserveRequest{
-		Prices: prices(), InputTokens: 1000, MaxTokens: 500,
+		Prices: prices(), InputTokens: 1000, OutputTokens: 500,
 	})
 	if err != nil {
 		t.Fatalf("正常金额不该报错: %v", err)

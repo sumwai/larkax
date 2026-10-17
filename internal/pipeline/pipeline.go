@@ -295,6 +295,15 @@ type Reservation struct {
 	// 结果可能不是这一条（见 Settle）。
 	RuleID          int64
 	PricingExprSnap string
+	// OutputTokens 是这份预留**已经覆盖了**多少个输出 token。
+	//
+	// 非流式那条路上它等于声明的上界（一次冻满，不必再冻）；流式那条路上它是
+	// 第一段，此后每补冻一次就加上那一段——那条路上 Amount 与它同进同退，两者
+	// 是同一笔冻结的两个说法（见 internal/gateway 的 streamFreeze）。
+	//
+	// 它不参与落库：billing_requests 没有这一列。它是「还差多少才盖得住已产出
+	// 量」这个判断的输入，而账单要回答的不是这个问题。
+	OutputTokens int64
 	// RuleMatchedAt 是**受理时刻**：这次请求的价格就是按它在规则里选中的
 	// 那一档定下来的。
 	//
@@ -577,7 +586,52 @@ type Charge struct {
 // 可达——还没选路就调到这里，或者上游一个可用渠道都没有（网关在更前面
 // 就会拦下空候选，见 gateway.begin，但本函数是公开的，不能假设调用方
 // 一定拦过）。
+//
+// # 输出侧按声明的**整个**上界冻
+//
+// 这是非流式那条路的形状：调用方声明了多少就冻多少。流式那条路不这样，
+// 见 ReserveStream。
 func (p *Pipeline) Reserve(ctx context.Context, req Request) (*Reservation, error) {
+	return p.reserve(ctx, req, req.MaxTokens)
+}
+
+// ReserveStream 计算一次**流式**请求的初始预留。
+//
+// # 与非流式只差输出侧那一项
+//
+// 输出侧只按**第一段**（step 个 token，不超过声明的 max_tokens）冻，之后边
+// 转发边按本地累计的真实产出补冻（见 ReserveMore 与 #498）。输入侧一字不改：
+// 它本来就不按 max_tokens 估，而是按请求前算得出来的输入 token 数
+// （见 billing.Reserve 里输入侧那一段）。
+//
+// 要解决的是：max_tokens 是**调用方给的值**，填大是常态（不少 SDK 的默认值
+// 就很大）。按它冻满时，一个余额够付实际消耗的账户发一条 max_tokens=100K、
+// 实际只产出几十个 token 的流式请求，光预留就冻掉一大笔——单发一条就被
+// 「可用余额不足」拒掉，而拒绝的理由与真实原因被抹成同一句话。
+//
+// # 上界的性质变了，说清楚
+//
+// 非流式的预留是**整笔结算的上界**。流式的初始预留不再是：已产出那部分的
+// 上界由「初始段 + 随流补冻的那些段」共同撑着，而每一步都按同一份规则的最坏
+// 情况估（见 ReserveMore）。不变的是「余额不为负」——补冻与初始预留走**同一条**
+// 准入谓词（见 internal/ledger/store 的 AddReservation），够不着就中断这条流。
+func (p *Pipeline) ReserveStream(ctx context.Context, req Request, step int64) (*Reservation, error) {
+	if step <= 0 {
+		return nil, fmt.Errorf("%w: 递进冻结的阈值段必须为正，当前 %d", ErrNoFreezeStep, step)
+	}
+	// 第一段不超过声明的上界：max_tokens 比一个段还小时（例如 100），冻满它
+	// 就是冻满整笔请求——那种请求本来也撞不上这条要修的问题（一百个 token 的
+	// 预留拦不住任何人）。
+	return p.reserve(ctx, req, min(req.MaxTokens, step))
+}
+
+// reserve 是 Reserve 与 ReserveStream 共用的那一段，差别只有输出侧按多少
+// token 估（见上面两个函数的说明）。
+//
+// outputTokens 由调用方决定，而两条路各自的口径写在它们自己的注释里：
+// 非流式传声明的上界，流式传第一段。**它不是「可以随手传个数」的旋钮**——
+// 只许来自那两处，别处传一个更小的数就是在收窄上界。
+func (p *Pipeline) reserve(ctx context.Context, req Request, outputTokens int64) (*Reservation, error) {
 	if err := req.validate(); err != nil {
 		return nil, err
 	}
@@ -609,7 +663,7 @@ func (p *Pipeline) Reserve(ctx context.Context, req Request) (*Reservation, erro
 	// Reservation 要带走给出这个上界的那条规则——见 Reservation.RuleID。
 	var best *candidateBound
 	for _, rule := range rules {
-		bound, err := p.boundOf(rule, evalEnv, req)
+		bound, err := p.boundOf(rule, evalEnv, req, outputTokens)
 		if err != nil {
 			return nil, err
 		}
@@ -625,7 +679,10 @@ func (p *Pipeline) Reserve(ctx context.Context, req Request) (*Reservation, erro
 		Amount:          best.amount,
 		RuleID:          best.rule.ID,
 		PricingExprSnap: best.rule.Source,
-		RuleMatchedAt:   best.at,
+		// 冻住了多少个输出 token（见字段的注释）：两条路上它都是「按这个数
+		// 估出来的」，所以由这里统一填，调用方不必自己再算一遍 min。
+		OutputTokens:  outputTokens,
+		RuleMatchedAt: best.at,
 	}, nil
 }
 
@@ -643,7 +700,10 @@ type candidateBound struct {
 // 不用「按当前时刻求一次」：规则可以按时间、按缓存命中与否分档，
 // 而一次普通求值只给出其中一支的价。用那一支去预留，
 // 结算走到更贵的那一支时就会超过预留。
-func (p *Pipeline) boundOf(rule Rule, env expr.Env, req Request) (candidateBound, error) {
+//
+// outputTokens 是这次要冻的输出 token 数，由调用方按各自的口径传
+// （见 reserve 的注释）——它只影响金额，不影响规则怎么选。
+func (p *Pipeline) boundOf(rule Rule, env expr.Env, req Request, outputTokens int64) (candidateBound, error) {
 	program, err := p.programs().Get(rule.CacheKey(), rule.Source)
 	if err != nil {
 		return candidateBound{}, fmt.Errorf("%w: 规则 %d 无法编译: %w", ErrRuleBroken, rule.ID, err)
@@ -662,7 +722,7 @@ func (p *Pipeline) boundOf(rule Rule, env expr.Env, req Request) (candidateBound
 		// 上界的构成写在那里，这里只负责把两个量传进去。
 		CacheReadTokens:  req.Usage.CacheReadTokens,
 		CacheWriteTokens: req.Usage.CacheWriteTokens,
-		MaxTokens:        req.MaxTokens,
+		OutputTokens:     outputTokens,
 	})
 	if err != nil {
 		return candidateBound{}, fmt.Errorf("计算预留失败: %w", err)
@@ -670,6 +730,108 @@ func (p *Pipeline) boundOf(rule Rule, env expr.Env, req Request) (candidateBound
 
 	return candidateBound{rule: rule, amount: amount, at: worst.At}, nil
 }
+
+// ReserveMore 算出「又产出了 outputTokens 个输出 token」要追加冻结多少。
+//
+// # 单价与结算**同源**，而且必须是同一份
+//
+// 补冻的全部意义是让冻结额跟着真实敞口走。用一份与结算无关的价，冻出来的数
+// 既可能盖不住结算（撞上 Capped、平台吃掉差额），也可能过量（把 #498 要修的
+// 那个问题换个地方复发）。所以这里按**实际选中的那个渠道**取规则，查询条件与
+// 受理时刻与 Settle 里那次 Match 逐字相同——结算用的是哪条规则，补冻就用哪条。
+//
+// 不能拿 Reservation.RuleID 那条规则来算：那是**受理时给出最大金额的那条**
+// 候选规则，而结算按实际选中的渠道重新匹配，两者可能不是同一条（渠道级与
+// 商家级规则都算数，见 Reservation.RuleID 的说明）。用它会得到「补冻用一份、
+// 结算用另一份」。
+//
+// # 为什么求最坏情况而不是按当前用量求一次
+//
+// 与预留同一个理由：规则可以按用量或缓存分档，而一次普通求值只给出其中一支
+// 的价。最坏情况（每个价格位置取各支最高价）才是与「结算走哪一支」无关的上界
+// ——单价不随用量变化是本包强制的（见 expr.EvalWorstCase）。
+//
+// # 它只算输出侧那一项
+//
+// 输入侧、固定费、最低消费与非 token 计量都是一次请求只发生一次的量，初始
+// 预留里已经各算过一份。按段重复加会让预留越滚越大，而多冻的正是这条要修的
+// 东西（见 billing.ReserveOutput）。
+func (p *Pipeline) ReserveMore(ctx context.Context, req Request, reserved *Reservation, outputTokens int64) (money.Amount, error) {
+	if reserved == nil {
+		return money.Zero, errors.New("缺少预留信息：补冻必须基于一次真实的预留")
+	}
+	if reserved.RequestID != req.RequestID {
+		return money.Zero, fmt.Errorf("预留属于请求 %q，与当前的 %q 不符", reserved.RequestID, req.RequestID)
+	}
+	// 与 Settle 里那条同样的防御：受理时刻是定价基准，缺了它就只能退回读墙钟，
+	// 而那正是「一次请求的价格在受理时就定了」这条口径要消除的东西。
+	if reserved.RuleMatchedAt.IsZero() {
+		return money.Zero, errors.New("预留缺少受理时刻：补冻要按受理那一刻的档位定价")
+	}
+	if outputTokens <= 0 {
+		// 调用方只在「确实要补」时才调它。传 0 进来是一个真值错误的信号，
+		// 静默返回 0 会让「补冻了但金额是零」看起来像成功。
+		return money.Zero, fmt.Errorf("要补冻的输出 token 数必须为正，当前 %d", outputTokens)
+	}
+	if err := req.validate(); err != nil {
+		return money.Zero, err
+	}
+
+	// 候选集收窄成**实际选中的那一个渠道**，与 Settle 逐字相同：req.ChannelID
+	// 与 req.OwnerUserID 由调用方在选路之后填上（见 gateway 的 settledRequest）。
+	rule, err := p.Rules.Match(ctx, RuleQuery{
+		CanonicalModel: req.CanonicalModel,
+		Candidates: []RuleCandidate{{
+			ChannelID:   req.ChannelID,
+			OwnerUserID: req.OwnerUserID,
+		}},
+		At: reserved.RuleMatchedAt,
+	})
+	if err != nil {
+		return money.Zero, fmt.Errorf("补冻时重新取规则失败: %w", err)
+	}
+
+	program, err := p.programs().Get(rule.CacheKey(), rule.Source)
+	if err != nil {
+		return money.Zero, fmt.Errorf("%w: 规则 %d 无法编译: %w", ErrRuleBroken, rule.ID, err)
+	}
+	worst, err := program.EvalWorstCase(p.env(req.Usage, reserved.RuleMatchedAt))
+	if err != nil {
+		return money.Zero, fmt.Errorf("%w: %w", ErrRuleBroken, err)
+	}
+
+	amount, err := billing.ReserveOutput(worst.Prices, outputTokens)
+	if err != nil {
+		return money.Zero, fmt.Errorf("计算补冻金额失败: %w", err)
+	}
+	return amount, nil
+}
+
+// ErrNoFreezeStep 表示流式递进冻结的阈值段不是一个可用的数（非正数）。
+//
+// 阈值段同时是「多久检查一次」与「冻结额最多领先已产出量多少」（见
+// gateway.Gateway.StreamFreezeStep）。零值不是「不限」也不是「每次事件都查」：
+// 前者让补冻整条不发生（流式又退回按声明上界冻，或者干脆不冻），后者把数据库
+// 往返摊到每一个事件上——两种都不会报错，只会安静地跑错，所以在这里挡掉。
+var ErrNoFreezeStep = errors.New("递进冻结的阈值段不可用")
+
+// ErrInsufficientAvailable 表示「余额 − 已冻结」不够这一次冻结。
+//
+// # 它为什么在这里，而不在落库层
+//
+// 它的产生点是落库层的冻结语句（见 internal/ledger/store 的 SaveReservation
+// 与 AddReservation：更新影响 0 行就是余额不够），但**读**它的有两层：入口层
+// （把一个预留在开始之前就失败的请求回成 429，见 internal/api）与网关（流式
+// 补冻失败时据此中断这条流，见 internal/gateway/stream.go）。
+//
+// 网关不认识落库层——它只声明一个 ReservationStore 接口（见 gateway 的注释：
+// 数据面依赖网关会把整条入口链路拖进去，见 scripts/check-layering.sh）。所以
+// 这个错误值只能住在两边都认识的包：本包。落库层把它重新导出一次（值相同），
+// 两处的 errors.Is 才都成立。
+//
+// 它与 ErrRuleBroken 那一类不同：那是**我们这边**坏了（配置错误、编译不过），
+// 这个是账户状态，处置是让人去充值，不是重试。
+var ErrInsufficientAvailable = errors.New("可用余额不足")
 
 // Settle 按实际结果结算并生成账本分录。
 //

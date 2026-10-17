@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/overrides"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -131,6 +132,22 @@ func (e *OutputCapExceeded) Error() string {
 type ReservationStore interface {
 	// SaveReservation 落一条预留记录，返回它的标识。
 	SaveReservation(ctx context.Context, req pipeline.Request, r *pipeline.Reservation) (int64, error)
+	// AddReservation 给一次**已经落库**的预留追加冻结额。
+	//
+	// 它只服务于流式那条路：那条路不按声明的 max_tokens 冻满，而是边转发边
+	// 按本地累计的真实产出补冻（见 stream.go 的 streamFreeze 与 #498）。
+	// 一次补冻要把钱包的冻结额与账单行上的预留额**一起**加上——「冻了多少」
+	// 的两个读者各读一处（准入判据读钱包，释放读账单行），只加一处会破掉
+	// 对账的不变量（见实现里的说明）。
+	//
+	// 增量必须为正：非正的数在那里是一个真值错误的信号，静默当成 0 会让
+	// 「补冻了但没冻上」看起来像成功。
+	//
+	// 余额够不着时返回的错误必须满足 errors.Is(err, pipeline.ErrInsufficientAvailable)
+	// ——调用方据此切断那条流。其余错误（写库失败、钱包行不在）按「我们这边的
+	// 故障」处置：放行，把这次请求标成未充分冻结。两类错误混成一个的话，一次
+	// 入库超时会被当成「用户没钱」而切断一条本该跑完的流。
+	AddReservation(ctx context.Context, req pipeline.Request, delta money.Amount) error
 	// Release 释放一次预留。用于**不计费的结局**：上游失败、客户端中途断开。
 	//
 	// failure 是这次不计费的依据，由落库层写进账单的两列（上游状态码与
@@ -319,6 +336,24 @@ type Gateway struct {
 	// 它是**我们的**界线，不是上游的能力：上游的输出上限是上游的事，这一条
 	// 说的是我们愿意单次承担多少（一次请求最多冻住多少余额）。
 	MaxOutputTokens int64
+
+	// StreamFreezeStep 是流式请求**递进冻结**的阈值段（token）。
+	//
+	// # 它同时是两个量
+	//
+	// 流式那条路不按调用方声明的 max_tokens 冻满，而是每产出一个段就补冻一次
+	// （见 stream.go 的 streamFreeze 与 #498）。所以这个数说的是「多久检查一次
+	// 补冻」，同时就是「已冻额度最多领先已产出量多少」——调大它，数据库往返少、
+	// 冻住的余量多；调小反之。**只有一个来源**：两个旋钮迟早会被配成互相矛盾的
+	// 一对，而那种配置不报错，只是让「多久查一次」与「冻住多少」不再对得上。
+	//
+	// 流式请求必填且必须为正：零值不是「不限」——它要么让补冻整条不发生（于是
+	// 冻结额不再跟着真实敞口走），要么把数据库往返摊到每一个事件上，两种都不会
+	// 报错。非流式那条路用不到它（见 begin）。
+	//
+	// 装配期从 settings 的 billing.stream_freeze_step 读出来并校验（见
+	// internal/assembly）：0 与负数在装配那一步就被拒。
+	StreamFreezeStep int64
 
 	// Redactor 与 Snapshots 可以都为空——那样就不采集快照。
 	//
@@ -906,7 +941,27 @@ func (g *Gateway) begin(ctx context.Context, req pipeline.Request) (*handle, err
 		return nil, err
 	}
 
-	reserved, err := g.Pipeline.Reserve(ctx, req)
+	// 预留：流式按**第一段**冻，非流式按声明的整个上界冻。
+	//
+	// 收窄的只有「这次冻多少」这一个量，req.MaxTokens 本身**不动**：它表达的
+	// 是这次请求允许输出到多少，结算（pipeline.Settle 的 req.validate）与
+	// 上游那份请求都按它走。把它改成第一段等于顺手改掉了上界——而发出去的
+	// 请求与上界是两个量（见 outputBound）。
+	//
+	// 流式那条路的第一段由 pipeline.ReserveStream 取 min(max_tokens, 阈值段)：
+	// 这个 min 只许有那一处，网关照着 Reservation.OutputTokens 读回来就是
+	// 「已经冻了多少个输出 token」（见 stream.go 的 streamFreeze）。
+	var reserved *pipeline.Reservation
+	if req.Streamed {
+		// 非正的阈值段在装配期就被拒（见 assembly），这里是第二道：网关是
+		// 公开类型，测试与装配都能自己造一个。零值不是「不限」，见字段的注释。
+		if g.StreamFreezeStep <= 0 {
+			return nil, pipeline.ErrNoFreezeStep
+		}
+		reserved, err = g.Pipeline.ReserveStream(ctx, req, g.StreamFreezeStep)
+	} else {
+		reserved, err = g.Pipeline.Reserve(ctx, req)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1300,6 +1355,38 @@ func (h *handle) reportReleaseFailure(ctx context.Context, cause error) {
 	}()
 }
 
+// settledRequest 是**结算口径**的那份请求：把「这次请求实际打到了哪儿」记上，
+// 再把候选集收窄成选中的那一个渠道。
+//
+// # 它为什么是一处而不是两处
+//
+// 有两个调用点要的就**是**「结算会用的那份请求」：
+//
+//   - finishCharge：结算按实际选中的渠道匹配规则（见那里的注释）；
+//   - 流式的递进补冻（见 stream.go 的 streamFreeze）：补冻的单价必须与结算
+//     同源（见 pipeline.ReserveMore），所以它要的输入与结算逐字相同。
+//
+// 两处各拼一份的后果是「补冻用一份单价、结算用另一份」——冻出来的数既可能
+// 盖不住结算（撞上界、平台吃掉差额），也可能过量（把 #498 要修的问题换个
+// 地方复发），而两种都不会报错。
+//
+// 它顺带把 placement 记进 h.req（见 routedTo）：三条收尾路径（结算、失败结算、
+// 释放）本来就各自调一次，这里只是把第一次提前到了选路之后。
+func (h *handle) settledRequest(placed placement) pipeline.Request {
+	h.routedTo(placed)
+	req := h.req
+	// 规则按商家匹配，而商家由渠道推出来（见 ownerOf）。
+	req.OwnerUserID = ownerOf(h.candidates, req.ChannelID)
+	// 候选集收窄成选中的那一个，让这份请求自洽：上面那个字段说的是「实际选中了
+	// 谁」，而候选集若还留着整份，两者对不上。结算与补冻都不读候选集（它们各自
+	// 按收窄后的那一个渠道匹配，见 pipeline.Settle / ReserveMore）。
+	req.Candidates = []pipeline.RuleCandidate{{
+		ChannelID:   req.ChannelID,
+		OwnerUserID: req.OwnerUserID,
+	}}
+	return req
+}
+
 // finishCharge 结算一次成功的请求。
 //
 // placed 是这次请求打到了哪儿（见 placement）：成功账单行上的渠道与上游名
@@ -1324,15 +1411,10 @@ func (g *Gateway) finishCharge(ctx context.Context, h *handle, placed placement,
 	// 选中的渠道必是候选之一，而它的规则在那次取上界里算过，所以结算
 	// 不会超过预留。EvalWorstCase 取的是**一条规则内部**的最坏分支，
 	// 不跨规则；跨规则那一层由预留的「取最大」负责。
-	settleReq := h.req
-	settleReq.OwnerUserID = ownerOf(h.candidates, settleReq.ChannelID)
-	// 候选集也收窄成选中的那一个，让这份请求自洽：上面两个字段说的是
-	// 「实际选中了谁」，而候选集若还留着整份，两者对不上。结算本身不读
-	// 候选集（见 pipeline.Request），这一行是给后来读它的人留的。
-	settleReq.Candidates = []pipeline.RuleCandidate{{
-		ChannelID:   settleReq.ChannelID,
-		OwnerUserID: settleReq.OwnerUserID,
-	}}
+	//
+	// 流的递进补冻要的就是这一份（见 settledRequest）：两处拼出来的输入
+	// 必须逐字相同，否则补冻与结算各按一份规则算钱。
+	settleReq := h.settledRequest(placed)
 
 	charge, err := g.Pipeline.Settle(ctx, settleReq, h.reserved, out)
 	if err != nil {

@@ -422,6 +422,120 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 	return id, nil
 }
 
+// AddReservation 给一次**已经落库**的预留追加冻结额。
+//
+// # 它只服务于流式那条路
+//
+// 流式请求不再按调用方声明的 max_tokens 一次性冻满，而是边转发边按本地累计的
+// 真实产出补冻（见 internal/gateway 的 streamFreeze 与 #498）。一次补冻就是本函数：
+// 把钱包的 frozen 与账单行的 reserved_amount 各加上同一个数。
+//
+// # 两处必须一起加
+//
+// 「冻了多少」有**两个**读者，而它们各读一处：
+//
+//   - 钱包的 frozen：准入判据读它（本条语句的 WHERE，与 SaveReservation 逐字
+//     相同），对账的不变量也读它——`frozen == 所有 pending 行的 reserved_amount
+//     之和`（见 reconcile.go 的 readPendingReservations）；
+//   - 账单行的 reserved_amount：**释放**按它解冻（见 Release 与 Save 里的
+//     releaseFrozen），两处都从这里读。
+//
+// 只加一处就破了对账的不变量，而且破法很安静：先加 frozen 会多出一笔没有
+// 来历的冻结；先加 reserved_amount 会在释放时解冻它从未冻过的钱（frozen 变负，
+// 由表上的 CHECK 挡住，报出来的是一个看不懂的 ErrFrozenUnderflow）。所以两条
+// 语句在**同一个事务**里，要么都发生要么都不发生。
+//
+// # 准入判据复用同一条谓词，不先查后改
+//
+// `balance - frozen >= $3` 是**唯一**挡住透支的地方（见 SaveReservation 里那段
+// 注释）。补冻走的是同一条 UPDATE、同一个条件，只是金额换成了这一次的增量：
+// 换成「先 SELECT 余额再判断」会在两个并发请求之间开一个窗口，各自都看到
+// 「够」，于是两边都冻——余额被透支，而事后从数据上完全看不出来。
+//
+// # 它为什么不重复判 API Key 的额度
+//
+// SaveReservation 会判（见 keyquota.CheckInTx），这里不判，是有意的：那次判定
+// 是**准入**——「这把 key 还收不收得下这一笔」，而这次请求早就通过了。补冻是
+// 同一次请求内部的递进，按段重复判它会让一条已经在跑的流中途因为额度判据失败
+// 而断掉，而那条判据在那一刻并没有发生变化。代价说清楚：单条长输出流可以让
+// 这把 key 的累计花费越过它的额度（额度按 pending 行的 reserved_amount 求和，
+// 见 keyquota 的 spentSQL，所以下一次请求会立刻看到）。这条代价写在 #498 的
+// 报告里，不在本函数里补一个「也判一下」——那会把两种错（余额不够 / 额度不够）
+// 混进同一个返回值，而调用方对它们要做的处置完全不同。
+func (s *Store) AddReservation(ctx context.Context, req pipeline.Request, delta money.Amount) error {
+	// 非正的增量没有任何意义，而静默当成 0 会让「补冻了但没冻上」看起来像
+	// 成功——调用方据此推进它的累计量，于是钱包与账单行少冻一段，没有任何
+	// 东西会报出来。调用方只在确实要补时才调它（见 gateway 的 streamFreeze）。
+	if !delta.IsPositive() {
+		return fmt.Errorf("追加冻结额必须为正，当前 %s", delta)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	key := WalletKey{UserID: req.UserID, Asset: req.Asset}
+
+	// 加锁顺序与 SaveReservation 一致（先 key 后钱包，而这里只锁钱包）：
+	// 没有任何路径按「先钱包后 key」拿锁，所以这个顺序不会成环。
+	if lockErr := lockWallets(ctx, tx, key); lockErr != nil {
+		return lockErr
+	}
+
+	// 准入谓词与 SaveReservation 里那条**逐字相同**（只差金额的来源）。
+	// 影响 0 行就是「余额 − 已冻结」不够这一次的增量，与初始预留时是同一种
+	// 情形、同一个错误值：调用方据此中断这条流（见 gateway 的 streamFreeze）。
+	res, err := tx.ExecContext(ctx, `
+		UPDATE user_wallets
+		   SET frozen = frozen + $3::numeric, updated_at = now()
+		 WHERE user_id = $1 AND asset = $2
+		   AND balance - frozen >= $3::numeric`,
+		key.UserID, key.Asset, delta.String())
+	if err != nil {
+		return constraintFailure(fmt.Errorf("追加冻结余额失败: %w", err))
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("读取影响行数失败: %w", err)
+	}
+	if affected == 0 {
+		// 与 SaveReservation 同一处、同一套诊断：钱包行不在（ErrNoWallet）与
+		// 可用余额不够（ErrInsufficientAvailable）要分开报。
+		return diagnoseFreezeFailure(ctx, tx, key)
+	}
+
+	// 账单行的 reserved_amount 跟着加：释放按它解冻（见 Release 与
+	// releaseFrozen），不加这一笔就会在释放时少解冻一个增量。
+	//
+	// 条件是 status = 'pending'：只有还挂着的预留才谈得上追加。影响 0 行说明
+	// 这一行已经结算或已释放，而那时这块钱不该再冻——回滚整笔（下面的错误会让
+	// 事务回滚，钱包那一次 UPDATE 一并撤掉）。
+	res, err = tx.ExecContext(ctx, `
+		UPDATE billing_requests
+		   SET reserved_amount = reserved_amount + $2::numeric
+		 WHERE request_id = $1 AND status = 'pending'`,
+		req.RequestID, delta.String())
+	if err != nil {
+		return constraintFailure(fmt.Errorf("追加预留金额失败: %w", err))
+	}
+	affected, err = res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("读取影响行数失败: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf(
+			"请求 %s 的预留已经不在 pending 状态，不能追加冻结额（本该由同一次收尾处理）",
+			req.RequestID)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交追加冻结失败: %w", err)
+	}
+	return nil
+}
+
 // diagnoseFreezeFailure 在冻结失败后查出**为什么**失败。
 //
 // 「更新影响 0 行」有两种可能：没有这个钱包行，或者可用余额不足。
@@ -444,9 +558,18 @@ func diagnoseFreezeFailure(ctx context.Context, tx *sql.Tx, key WalletKey) error
 // ErrInsufficientAvailable 表示「余额 − 冻结」不够这次预留。
 //
 // 与 ErrInsufficientBalance 分开：那个是**结算**时发现扣不动
-// （说明预留机制出了问题），这个是**预留**时就不够（正常的余额不足，
-// 拒绝请求即可）。两者的处置与告警级别都不同。
-var ErrInsufficientAvailable = errors.New("可用余额不足")
+// （说明预留机制出了问题），这个是**冻结**时就不够（正常的余额不足，
+// 拒绝请求、或者切断这条流即可）。两者的处置与告警级别都不同。
+//
+// # 值与 pipeline 里那个是同一个
+//
+// 判据的读者除了本包还有两层：入口层（把一个预留在开始之前就失败的请求回成
+// 429）与网关（流式补冻够不着余额时据此中断那条流）。网关不认识本包——它只
+// 声明一个 ReservationStore 接口，所以那个值只能住在两边都认识的 pipeline
+// 里。这里重新导出一次而不是另声明一个同义的错误：`errors.Is` 靠**值**判，
+// 两个同义的哨兵会让它只在其中一侧成立，而那一侧之外的地方读到的都是「不是
+// 余额问题」——于是补冻失败被当成存储故障放行，透支就这么发生了。
+var ErrInsufficientAvailable = pipeline.ErrInsufficientAvailable
 
 // ErrNoWallet 表示用户没有对应的钱包行。
 //
