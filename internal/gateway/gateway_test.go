@@ -178,6 +178,28 @@ func (f *fakeExecutor) ChatStream(ctx context.Context, ch channel.Channel, req *
 	return out, nil
 }
 
+// cancelingExecutor 在每次调用**返回之前**取消 ctx。
+//
+// 取消放在返回之前，路由下一次转圈才会命中 ctx.Err()——那正是
+// 「已经试过一个候选之后才被取消」的窗口（预先取消的 ctx 进不去：那时
+// 一次调用都不会发生）。它对非流式与流式两条路都这样。
+type cancelingExecutor struct {
+	cancel context.CancelFunc
+	inner  *fakeExecutor
+}
+
+func (c *cancelingExecutor) Chat(ctx context.Context, ch channel.Channel, req *channel.Request) (*channel.Response, error) {
+	resp, err := c.inner.Chat(ctx, ch, req)
+	c.cancel()
+	return resp, err
+}
+
+func (c *cancelingExecutor) ChatStream(ctx context.Context, ch channel.Channel, req *channel.Request) (<-chan channel.StreamEvent, error) {
+	events, err := c.inner.ChatStream(ctx, ch, req)
+	c.cancel()
+	return events, err
+}
+
 type fakeRedactor struct {
 	reqErr  error
 	respErr error
@@ -722,6 +744,57 @@ func TestReleaseWorksWithCanceledRequestContext(t *testing.T) {
 	}
 	if err := h.reservations.releaseCtxErr[0]; err != nil {
 		t.Errorf("释放用的是已经取消的 ctx（%v）——那等于没释放", err)
+	}
+}
+
+// 客户端在**一次真实的调用之后**才断开时，释放仍要带上那次调用打到的渠道。
+//
+// 与 TestReleaseWithoutUpstreamCallCarriesNoEvidence 是同一个问题在两个结局上的
+// 答案：那一条是「一次调用都没发生」，这一条是「发生过一次」。
+//
+// 取消由执行器在返回之前触发，于是路由下一次转圈才看见 ctx 结束——预先取消
+// 的 ctx（见上一条）进不了这个窗口。两列与依据由同一份选路结果取出（见
+// placementOf），所以只要路由交回那条尝试，释放这边就一定有它。
+func TestReleaseAfterCancelKeepsAttemptedChannel(t *testing.T) {
+	h := newHarness(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.gw.Executor = &cancelingExecutor{
+		cancel: cancel,
+		inner: &fakeExecutor{failFor: map[int64]error{
+			1: &channel.ErrUpstream{StatusCode: 500, GotResponse: true, Retryable: true},
+		}},
+	}
+	// 两个候选：第一个失败后路由转圈、看见 ctx 已取消，不再试第二个。
+	h.candidates.cands = []route.Candidate{candidate(1, "gpt-4o"), candidate(2, "gpt-4o")}
+
+	if _, err := h.gw.Chat(ctx, request(), upstreamRequest(), Hooks{}); err == nil {
+		t.Fatal("ctx 已取消时不该成功")
+	}
+	if len(h.reservations.released) != 1 {
+		t.Fatalf("ctx 已取消时仍应释放预留，实际 %d 次", len(h.reservations.released))
+	}
+
+	// 那次调用真的发出去了，所以它打到的渠道与上游名都要落下来——NULL
+	// 会让这一行读成「一个候选都没选中」。
+	rel := h.reservations.released[0].req
+	if rel.ChannelID != 1 {
+		t.Errorf("释放时带的 channel_id = %d，期望刚试过的那一条（1）", rel.ChannelID)
+	}
+	if rel.UpstreamModel != "gpt-4o" {
+		t.Errorf("释放时带的 upstream_model = %q，期望 %q", rel.UpstreamModel, "gpt-4o")
+	}
+
+	// 依据（upstream_status / error_code）留空：它由**结束这次请求的那个错误**
+	// 推出来（见 upstreamEvidence），而这里是 context.Canceled——结束它的是
+	// 断开，不是上游那一次 500。这两列回答的是「为什么不计费」，写成上游 500
+	// 会让事后统计把客户端断开记到上游头上。
+	//
+	// 与上面两列的差别要说清楚：渠道与上游名记的是「打到了哪儿」，那一次
+	// 调用真的发生过；依据记的是「这一请求为什么收尾」，两者不是一回事。
+	if got := h.reservations.released[0].failure; got != nil {
+		t.Errorf("客户端断开不是上游失败，不该带依据，得到 %+v", got)
 	}
 }
 

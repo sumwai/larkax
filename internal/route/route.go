@@ -951,7 +951,13 @@ func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.R
 		if err := ctx.Err(); err != nil {
 			// 客户端断开：不再尝试剩余渠道。已经发生的尝试照常记录，
 			// 因为其中可能有已经产生费用的。
-			return nil, err
+			//
+			// 所以交回 result 而不是 nil，即使它里面一条尝试都没有：下面
+			// 每一个分支交回的也是 result（含 aliasErr 那两支），调用方
+			// 据此把「打到了哪个渠道」写进这一行的收尾。交回 nil 的话，
+			// 一个真的发出去过的请求在库里读成「一个候选都没选中」，与
+			// 「一次调用都没发生」逐列相同。
+			return result, err
 		}
 
 		attempt, aliasErr := r.upstreamRequest(ctx, req, c)
