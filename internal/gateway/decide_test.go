@@ -62,7 +62,7 @@ func decisionResponse() *systemone.Response {
 	return &systemone.Response{
 		Model:   "gpt-4o-2024",
 		Answers: map[string]systemone.Answer{"q_noul": {Type: systemone.TypeNoul, Noul: 0.75}},
-		Usage:   systemone.Usage{InputTokens: 387, OutputTokens: 72},
+		Usage:   systemone.Usage{InputTokens: 387, OutputTokens: 72, Reported: true},
 	}
 }
 
@@ -123,6 +123,27 @@ func TestDecideSucceeds(t *testing.T) {
 	if len(h.settlements.reqs) != 1 || h.settlements.reqs[0].Protocol != channel.ProtocolSystemOne {
 		t.Errorf("账单上的协议 = %q，期望 %q",
 			h.settlements.reqs[0].Protocol, channel.ProtocolSystemOne)
+	}
+}
+
+// 上游没报 usage 时，决策那条路的来源也要记成 unreported。
+//
+// 这一条与 chat 那条路同一个判据（channel.Usage.Reported），所以它同时钉住
+// 「internal/systemone 的解析没有把块在不在压平」这件事：夹具把 Reported
+// 置成 false，用量却非零——只按数字判的话这里会落成 measured。
+func TestDecideReportsUnreportedUsage(t *testing.T) {
+	d := &fakeDecider{resp: &systemone.Response{
+		Model:   "gpt-4o-2024",
+		Answers: map[string]systemone.Answer{},
+		Usage:   systemone.Usage{InputTokens: 387, OutputTokens: 72, Reported: false},
+	}}
+	h := newDecideHarness(t, d)
+
+	if _, err := h.gw.Decide(context.Background(), decisionBilling(), decision()); err != nil {
+		t.Fatalf("Decide 出错: %v", err)
+	}
+	if got := h.settlements.saved[0].UsageSource; got != tokens.SourceUnreported {
+		t.Errorf("用量来源 = %v，期望 %v（上游没有 usage 块）", got, tokens.SourceUnreported)
 	}
 }
 

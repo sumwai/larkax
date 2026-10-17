@@ -298,11 +298,11 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 			UpstreamModel: "gpt-4o-2024",
 			Usage: channel.Usage{
 				PromptTokens: 1000, CompletionTokens: 100,
-				// Raw 里的 "source" 是「上游确实报了 usage 块」的标记：
-				// 生产形状由 internal/relay 在解析到 usage 时留下它
-				// （见 usageSourceOf）。夹具少了它就等于「上游没报」，
-				// 用量来源会落成 Unreported——那是另一个场景的夹具。
-				Raw: map[string]any{"source": "test_protocol"},
+				// Reported 是「上游确实报了 usage 块」这一事实的显式位，
+				// 由 internal/relay 在解析到 usage 时填（见 usageSourceOf）。
+				// 夹具少了它就等于「上游没报」，用量来源会落成 Unreported
+				// ——那是另一个场景的夹具。
+				Reported: true,
 			},
 		}},
 		redactor:        &fakeRedactor{},
@@ -499,7 +499,8 @@ func TestUpstreamFailureReleasesReservation(t *testing.T) {
 //   - 拿到了 2xx 但响应不可用：状态码照实记（通常是 200），分类另有一档
 //   - 一个响应都没拿到（连不上）：状态码必须留空
 //     （HTTP 里没有 0 这个状态码）
-//   - 上游接受了请求却没吐字：状态码同样留空，分类是另一档
+//   - 上游接受了请求却没吐字：状态码照实记（适配器在流的第一条事件里
+//     交下了那个 2xx），分类是另一档；没有 start 事件时留空
 //   - 不是上游的失败：两列都留空（插件阻断时上游其实是好的）
 func TestUpstreamFailureCarriesEvidenceToRelease(t *testing.T) {
 	for _, tc := range []struct {
@@ -560,12 +561,21 @@ func TestUpstreamFailureCarriesEvidenceToRelease(t *testing.T) {
 		{
 			// 上游接受了请求、一个 token 都没吐就断了（流式）。它与「没拿到
 			// 响应」那两条的差别是**成因不同**：这里拿到了 2xx 响应头、
-			// 正文一个字都没有，只是这条收尾没有把具体几号带下来。
+			// 正文一个字都没有。适配器在流的第一条事件里交下了状态码，
+			// 这一档要把它照实记下来。
 			//
 			// 单独一条钉着，是因为这一支是 upstreamEvidence 里唯一一个不看
 			// ErrUpstream 的分支——把它删掉的话，这条路上的依据会整个丢掉
 			// （两列都 NULL），而库里 NULL 与「这一批恰好没有失败」长得一样。
-			name:     "上游接受请求后没吐字就断了",
+			name:       "上游接受请求后没吐字就断了",
+			fail:       &streamAbortedError{status: 200},
+			wantStatus: 200,
+			wantCode:   pipeline.ErrorUpstreamStreamAborted,
+		},
+		{
+			// 同一个结局，但事件流里没有 start 事件（例如脚本执行器）：
+			// 编不出状态码就留空，不写一个假的 200。
+			name:     "流在接受之后断了，但没带状态码",
 			fail:     errStreamAborted,
 			wantCode: pipeline.ErrorUpstreamStreamAborted,
 		},
@@ -1244,8 +1254,8 @@ func TestUsageSourceIsMeasured(t *testing.T) {
 //
 // 上游报一个全 0 的 usage 时，那几个 0 是它给的数——可以拿去跟上游对账
 // （measured）；整块不报时，零值是占位——不能对账（unreported）。
-// 这条用例把两种响应的形状并排放在一起，判据只有一个：响应体里有没有
-// usage 块（在夹具里就是 Usage.Raw 里有没有 relay 留下的 "source"）。
+// 这条用例把两种响应的形状并排放在一起，判据只有一个：Usage.Reported
+// 是不是真的——它由 relay 按「响应体里有没有 usage 块」填。
 func TestUsageSourceDistinguishesReportedZeroFromUnreported(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -1257,7 +1267,7 @@ func TestUsageSourceDistinguishesReportedZeroFromUnreported(t *testing.T) {
 			name: "上游报了 0",
 			usage: channel.Usage{
 				PromptTokens: 0, CompletionTokens: 0,
-				Raw: map[string]any{"source": "test_protocol"},
+				Reported: true,
 			},
 			want: tokens.SourceMeasured,
 		},

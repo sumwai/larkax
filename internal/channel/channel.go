@@ -265,6 +265,18 @@ type Usage struct {
 	// UnitCounts 是非 token 计量：搜索次数、图片张数、视频秒数。
 	// 键是单位名（如 "searches"、"images"），值是数量。
 	UnitCounts map[string]int64
+	// Reported 表示上游确实报了一个 usage 块。
+	//
+	// 它与「数字是不是 0」是两件事：上游可以报一个全 0 的 usage，也可以
+	// 整块不报；两种情形下上面那些字段全是零值，**逐列相同**。计费来源
+	// 要按这一位判，不按数字，也不读 Raw——Raw 是排查用的松散字段，
+	// 谁改了里面的键名都不会有人报错（见 gateway.usageSourceOf）。
+	//
+	// 由解析那一层填：internal/relay 在把上游用量折进本结构时写它，
+	// 而生产方只在确实解析到 usage 块时才走那条路。零值是「上游没报」，
+	// 也是漏填时落到的那一边——漏填的代价只是把可对账的值记成不可对账，
+	// 金额不变，方向与「宁可偏保守」一致。
+	Reported bool
 	// Raw 保留上游原样的 usage，便于事后发现口径变化。
 	// 它是排查用的，不参与计费。
 	Raw map[string]any
@@ -288,8 +300,25 @@ type Response struct {
 // 但归一化之后要传达的信息就是这几类。适配器负责把上游的分片序列
 // 翻译成这几种事件，路由层与计费层只认这里。
 type StreamEvent struct {
-	// Kind 取值：delta、tool_use、usage_input、usage、done、error。
+	// Kind 取值：start、delta、tool_use、usage_input、usage、done、error。
+	//
+	// "start" 是每条流的第一条事件，只带 StatusCode。它不是正文：
+	// 网关消费它（记下上游那次响应的状态码），**不转发给调用方**。
+	// 它存在的理由见 StatusCode。
 	Kind string
+
+	// StatusCode 在 Kind == "start" 时有效：这条流对应的那次 HTTP 响应
+	// 的状态码（适配器已经过了 CheckStatus，所以它是 2xx）。
+	//
+	// 为什么让它在事件流里走一遍：上游接受了请求、却一个字都没吐就结束
+	// （连接直接关掉、或流里只给了一个错误帧）时，网关要把那个状态码写进
+	// 账单——「拿到过响应」是这次调用真实发生过的事实（见
+	// ErrUpstream.GotResponse 与 pipeline.ErrorUpstreamStreamAborted）。
+	// 那条收尾路径手里只有事件流，状态码不出现在事件里，网关就无从知道它。
+	//
+	// 不把它塞进 error 事件：正常结束的流里没有 error 事件，而「接受了请求
+	// 却一个字没吐」恰恰可能一条事件都没有。
+	StatusCode int
 
 	// Text 是正文增量（Kind == "delta" 时有效）。
 	Text string

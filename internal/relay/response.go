@@ -130,7 +130,12 @@ func UsageFromRelaykit(u *dto.Usage) channel.Usage {
 		// 声明成「已含」在数值上是空的。
 		CompletionIncludesReasoning: true,
 		UnitCounts:                  unitCountsFromRelaykit(u),
-		Raw:                         rawUsage(u, hasCounts),
+		// 生产方只在确实解析到 usage 块时才填 UsageSource（三个适配器的
+		// toRelaykit 都只在那一支里被调用），所以这一位就是「块在不在」的
+		// 显式载体。计费来源读它，不读 Raw 里的 "source" 键——那是排查用的
+		// 松散字段，改个键名不会报错，只会把来源静默判反。
+		Reported: u.UsageSource != "",
+		Raw:      rawUsage(u, hasCounts),
 	}
 }
 

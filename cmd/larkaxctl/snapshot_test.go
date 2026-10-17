@@ -225,17 +225,76 @@ func TestPrintSnapshotsPrintsEveryRow(t *testing.T) {
 		t.Errorf("两条快照应当按 created_at 升序打：\n%s", out)
 	}
 
-	// 没记的列要显式写出来：空串与「这个值就是空的」分不开，
-	// 而「上游当时没给状态码」本身是一条信息。
-	if !strings.Contains(out, "upstream_status=<未记录>") {
-		t.Errorf("NULL 的状态码应当显式标出：\n%s", out)
+	// 请求方向的行上那两列**不适用**：采集点在选路与调上游之前，那时
+	// 没有上游状态码可记。打成 <未记录> 会被读成「该有值却漏记了」。
+	if !strings.Contains(out, "upstream_status=<不适用（请求方向快照）>") {
+		t.Errorf("请求方向的 NULL 状态码应标成不适用：\n%s", out)
 	}
-	if !strings.Contains(out, "error_kind=<未记录>") {
-		t.Errorf("NULL 的错误分类应当显式标出：\n%s", out)
+	if !strings.Contains(out, "error_kind=<不适用（请求方向快照）>") {
+		t.Errorf("请求方向的 NULL 错误分类应标成不适用：\n%s", out)
 	}
 	// 一条都没被替换时也要有一行：空清单与「这一步没跑」长得一样。
 	if !strings.Contains(out, "redacted_paths：0 条") {
 		t.Errorf("空的 redacted_paths 应当显式写出来：\n%s", out)
+	}
+}
+
+// TestPrintSnapshotResponseDirectionKeepsUnrecorded 钉住另一半：响应方向的行
+// 上，NULL 仍然是 <未记录>——那条路上这两列本该有值。
+//
+// 与上面那条合起来才说明「按方向区分」真的发生了：只钉请求方向的话，
+// 把所有 NULL 一律改成「不适用」同样能通过，而那会把响应方向真正的漏记
+// 说成「不适用」——比原来的误读更坏。
+func TestPrintSnapshotResponseDirectionKeepsUnrecorded(t *testing.T) {
+	rows := []snapshotRow{
+		{
+			ID: 1, Direction: "response", SkeletonVersion: 1, CaptureMode: "skeleton",
+			Skeleton:  map[string]any{"model": "probe-model"},
+			CreatedAt: time.Date(2026, 10, 17, 1, 2, 3, 0, time.UTC),
+		},
+	}
+
+	var buf bytes.Buffer
+	printSnapshots(&buf, "req-probe", rows)
+	out := buf.String()
+
+	for _, want := range []string{
+		"upstream_status=<未记录>",
+		"error_kind=<未记录>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("响应方向的 NULL 应保持「未记录」，输出里没有 %q：\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "不适用") {
+		t.Errorf("响应方向的行不该打「不适用」：\n%s", out)
+	}
+}
+
+// TestPrintSnapshotRequestDirectionShowsUnexpectedValue 钉住 evidenceCell 的
+// 「只改写 NULL」：请求方向的行上出现非 NULL 值，说明有写入路径绕过了
+// snapshotwire 的门，那个异常必须原样显示出来，不能被「不适用」藏掉。
+func TestPrintSnapshotRequestDirectionShowsUnexpectedValue(t *testing.T) {
+	rows := []snapshotRow{
+		{
+			ID: 1, Direction: "request", SkeletonVersion: 1, CaptureMode: "skeleton",
+			Skeleton:       map[string]any{"model": "probe-model"},
+			UpstreamStatus: sql.NullInt64{Int64: 502, Valid: true},
+			ErrorKind:      sql.NullString{String: "upstream_error", Valid: true},
+			CreatedAt:      time.Date(2026, 10, 17, 1, 2, 3, 0, time.UTC),
+		},
+	}
+
+	var buf bytes.Buffer
+	printSnapshots(&buf, "req-probe", rows)
+	out := buf.String()
+
+	if !strings.Contains(out, "upstream_status=502") ||
+		!strings.Contains(out, "error_kind=upstream_error") {
+		t.Errorf("请求方向上的非 NULL 值应当原样显示出来：\n%s", out)
+	}
+	if strings.Contains(out, "不适用") {
+		t.Errorf("有值的时候不该把它说成「不适用」：\n%s", out)
 	}
 }
 

@@ -233,6 +233,13 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 		// streamErr 是上游在流里报的错误。它决定这次调用记成渠道的失败
 		// 还是成功——上游接受请求之后中途断了，是渠道此刻不行。
 		streamErr error
+		// upstreamStatus 是这条流对应的上游 HTTP 状态码，取自适配器发出的
+		// 第一条 start 事件（见 channel.StreamEvent.StatusCode）。
+		//
+		// 它只用于一种结局：上游接受了请求、却一个字都没吐就结束。那时
+		// 事件流里可能一个 error 都没有，状态码只在这条事件里出现过；
+		// 账单上那一列要照实记下它（上游确实回了一个 2xx）。
+		upstreamStatus int
 		// clientGone 表示调用方已经断开。
 		clientGone bool
 		// terminated 表示插件要求提前结束这条流（onStream 返回 terminate，
@@ -292,6 +299,11 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 		}
 
 		switch ev.Kind {
+		case "start":
+			// 这条流的信封信息，不是正文：记下状态码，不转发给调用方
+			// （调用方看到的 SSE 里没有这一帧）。
+			upstreamStatus = ev.StatusCode
+			continue
 		case "delta":
 			started = true
 			//nolint:contextcheck // 估算不碰 ctx，理由见本函数开头
@@ -394,7 +406,7 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 			At:        g.now(),
 			Verdict:   verdict,
 		})
-		_ = h.settleAndFail(settleCtx, placed, errStreamAborted,
+		_ = h.settleAndFail(settleCtx, placed, &streamAbortedError{status: upstreamStatus},
 			pipeline.Outcome{UpstreamFailed: true})
 		h.finish(settleCtx, placed)
 		return
@@ -555,6 +567,25 @@ func streamUsage(est *tokens.StreamEstimator, measured *channel.Usage) (channel.
 // 它不交给调用方（那时响应头可能已经发出去了），只用于结算：
 // 「一个字都没产生」与「上游根本没成功返回」在计费上是同一件事。
 var errStreamAborted = errors.New("上游在流式响应开始输出之前结束")
+
+// streamAbortedError 给 errStreamAborted 带上上游那次响应的状态码。
+//
+// 适配器在流的第一条事件里交下了那个 2xx（见 channel.StreamEvent.StatusCode），
+// 而这次请求**确实拿到过响应**——「拿到过响应」是 ErrUpstream.GotResponse
+// 表达的那件事，账单上那一列要照实记下来。这次的结局由 error_code
+// （upstream_stream_aborted）表达，两列各司其职。
+//
+// status 为 0 表示这条流没有 start 事件（例如测试里的脚本执行器）：
+// 那时编不出状态码，与 errStreamAborted 单独出现时一样留空。
+type streamAbortedError struct {
+	status int
+}
+
+func (e *streamAbortedError) Error() string { return errStreamAborted.Error() }
+
+// Unwrap 让 errors.Is(err, errStreamAborted) 继续成立：所有把这次结局
+// 认成「流在接受之后断了」的调用方不必知道有没有状态码。
+func (e *streamAbortedError) Unwrap() error { return errStreamAborted }
 
 // streamSettleTimeout 是流式收尾（结算 + 释放）的时间上限。
 //

@@ -36,8 +36,9 @@ import (
 //  3. 上游在流中途报错时，已经吐出的部分被计费，剩下的部分**不假装正常结束**。
 //  4. 已经吐字之后不再换渠道——这条最容易在「加个重试」时被顺手破坏，
 //     而它的表现是客户端看到两段拼接的回答。
-//  5. 失败落在吐字之前时，账单上留下「这次为什么不计费」的依据：上游没给出
-//     状态码，所以那两列只有分类有值（见 TestStreamAbortedBeforeOutputRecordsEvidence）。
+//  5. 失败落在吐字之前时，账单上留下「这次为什么不计费」的依据：上游回过
+//     一个 2xx（照实记下），分类是「流在接受之后断了」
+//     （见 TestStreamAbortedBeforeOutputRecordsEvidence）。
 //
 // # 估算用量这件事在库里怎么读
 //
@@ -1253,11 +1254,9 @@ func TestStreamUpstreamFailureBeforeOutput(t *testing.T) {
 }
 
 // 上游接受了请求、一个 token 都没吐就断了：计费上的处置与上面那条一样
-// （不计费、预留释放），但**依据不同**——这次上游没给出过状态码。
-//
-// 响应头是 2xx，具体几号链路里没有别的地方记着，所以 upstream_status 留
-// NULL、只有分类有值。这与「非 2xx」那条路的落法不同，两条都要钉：只钉
-// 一条的话，把另一条也写成同一个状态码同样能通过，而那个数会是编出来的。
+// （不计费、预留释放），依据里的状态码则照实记——上游确实回了一个 200，
+// 「拿到过响应」这个事实成立（见 channel.ErrUpstream.GotResponse）。
+// 这次的**结局**（一个字都没产生）由 error_code 表达，两列各司其职。
 //
 // 它同时是 `upstreamEvidence` 里**唯一一个不看 ErrUpstream 的分支**，把那一支
 // 整个删掉，这条路上的依据会全部丢掉（两列都 NULL），而库里 NULL 与
@@ -1310,9 +1309,9 @@ func TestStreamAbortedBeforeOutputRecordsEvidence(t *testing.T) {
 	if bill.final.Valid && greaterThan(bill.final.String, "0") {
 		t.Errorf("final_amount = %s，期望空或零：一个字都没产生，不该计费", bill.final.String)
 	}
-	if bill.upstreamStatus.Valid {
-		t.Errorf("upstream_status = %v，期望 NULL——上游没给出过状态码，"+
-			"写 0 会让它读成「上游回了 0 号」", bill.upstreamStatus)
+	if !bill.upstreamStatus.Valid || bill.upstreamStatus.Int64 != http.StatusOK {
+		t.Errorf("upstream_status = %v，期望 %d——上游确实回过一个响应，"+
+			"丢掉它会让这一行读成「没有记录到状态码」", bill.upstreamStatus, http.StatusOK)
 	}
 	if !bill.errorCode.Valid || bill.errorCode.String != pipeline.ErrorUpstreamStreamAborted {
 		t.Errorf("error_code = %v，期望 %q", bill.errorCode, pipeline.ErrorUpstreamStreamAborted)

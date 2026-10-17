@@ -437,8 +437,10 @@ func TestChatStreamEmitsInputUsageAtMessageStart(t *testing.T) {
 	}
 
 	// 位置本身就是判据：晚于第一个内容事件到达，调用方的第一帧就用不上它了。
-	if len(kinds) == 0 || kinds[0] != "usage_input" {
-		t.Fatalf("事件序列 = %v，期望 usage_input 在最前面", kinds)
+	// 第一条是流的信封事件（start，带状态码），它不参与内容顺序——输入用量
+	// 必须紧跟在它后面、早于任何正文分片。
+	if len(kinds) < 2 || kinds[0] != "start" || kinds[1] != "usage_input" {
+		t.Fatalf("事件序列 = %v，期望 start 之后紧跟 usage_input", kinds)
 	}
 	if early == nil {
 		t.Fatal("应发出 usage_input 事件")
@@ -632,7 +634,9 @@ func TestChatStreamSkipsPingAndBlockStop(t *testing.T) {
 	var count int
 	for ev := range events {
 		count++
-		if ev.Kind != "done" && ev.Kind != "usage" {
+		// start 是这条流的信封事件（带状态码），不属于内容；这里要钉的是
+		// ping、注释行、坏 JSON 与 content_block_stop 都不变成事件。
+		if ev.Kind != "start" && ev.Kind != "done" && ev.Kind != "usage" {
 			t.Errorf("意外事件: %+v", ev)
 		}
 	}
