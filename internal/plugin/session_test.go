@@ -484,7 +484,7 @@ func TestClientCancellationIsDistinct(t *testing.T) {
 	if len(fails) != 1 {
 		t.Fatalf("该记一条失败，实际 %v", fails)
 	}
-	if !errors.Is(fails[0], sandbox.ErrClientCancelled) {
+	if !errors.Is(fails[0], sandbox.ErrClientCanceled) {
 		t.Fatalf("该认出是客户端断开，实际 kind=%v cause=%v", fails[0].Kind, fails[0].Cause)
 	}
 }

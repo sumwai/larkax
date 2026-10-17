@@ -362,8 +362,8 @@ func Test宿主函数能在调用途中看到ctx取消(t *testing.T) {
 	if f == nil {
 		t.Fatal("客户端取消应当让 Call 失败")
 	}
-	if !errors.Is(f, ErrClientCancelled) {
-		t.Errorf("Kind = %v，想要 ErrClientCancelled", f.Kind)
+	if !errors.Is(f, ErrClientCanceled) {
+		t.Errorf("Kind = %v，想要 ErrClientCanceled", f.Kind)
 	}
 	select {
 	case err := <-看到取消:

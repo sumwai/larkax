@@ -1512,7 +1512,7 @@ func TestReconcileClearsStaleRunningRun(t *testing.T) {
 // 一条不一致，下面那行 breakBalance 就是为此），而它之后主循环还要再取一批
 // 候选用户，那一次查询必然失败。这样不必靠 sleep 或超时去撞一个时刻——
 // 撞不准的用例会变成偶发失败，而偶发失败最后总是被当成噪声忽略掉。
-func TestReconcileClosesRunWhenContextCancelled(t *testing.T) {
+func TestReconcileClosesRunWhenContextCanceled(t *testing.T) {
 	db := testDB(t)
 	userID := seed(t, db, "100")
 	breakBalance(t, db, userID, "5")

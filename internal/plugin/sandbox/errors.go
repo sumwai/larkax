@@ -67,8 +67,8 @@ var (
 	// ErrRunaway 表示 runtime 已经不可信（被中断过、或引擎内部出错），
 	// 这次请求里不再调用它。
 	ErrRunaway = errors.New("插件运行时已不可用")
-	// ErrClientCancelled 表示客户端断开了。它不是插件的问题。
-	ErrClientCancelled = errors.New("客户端已断开")
+	// ErrClientCanceled 表示客户端断开了。它不是插件的问题。
+	ErrClientCanceled = errors.New("客户端已断开")
 )
 
 // 宿主能力失败的分类码。
@@ -170,7 +170,7 @@ func classify(ctx context.Context, plugin, hook string, err error) *Failure {
 		case errors.Is(err, context.Canceled), ctx.Err() != nil && errors.Is(ctx.Err(), context.Canceled):
 			// 客户端断开。先判它：请求 ctx 被取消时我们的 AfterFunc 会用同一个
 			// cause 去 Interrupt，两条路径都会走到这里。
-			f.Kind = ErrClientCancelled
+			f.Kind = ErrClientCanceled
 		case errors.Is(err, ErrHostTimeout):
 			f.Kind = ErrHostTimeout
 		default:
