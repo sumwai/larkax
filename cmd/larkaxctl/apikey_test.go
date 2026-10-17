@@ -779,19 +779,26 @@ func TestAPIKeyListJSONWithoutResultWritesNothingToStdout(t *testing.T) {
 
 // TestAPIKeyTimesAreUTCWhateverTheProcessZone 钉住「时刻一律按 UTC 打」。
 //
-// 库里那三列是 timestamptz，驱动交回来的是**带会话时区**的 time.Time：
-// 同一行在 TZ=UTC 与 TZ=Asia/Shanghai 的机器上，`t.Format(time.RFC3339)` 出来的
-// 是两个不同的字符串（`2026-01-02T03:04:05Z` 与 `2026-01-02T11:04:05+08:00`）。
-// 机器读的那一份不能这样——读它的是脚本，而脚本不会去猜写它的机器在哪个时区。
+// 库里那三列是 timestamptz，驱动交回来的是**带进程时区**的 time.Time（pgx
+// 未设 ScanLocation 时用 time.Local 构造）：同一行在 TZ=UTC 与 TZ=Asia/Shanghai
+// 的机器上，`t.Format(time.RFC3339)` 出来的是两个不同的字符串
+// （`2026-01-02T03:04:05Z` 与 `2026-01-02T11:04:05+08:00`）。机器读的那一份不能
+// 这样——读它的是脚本，而脚本不会去猜写它的机器在哪个时区。
 //
-// fixture 特地构造成东八区：断言的是**同一个瞬间的 UTC 写法**，所以把 .UTC()
-// 去掉（或换回按 location 打的写法）时这条用例当场变红。
+// fixture 的三个时刻都取**进程时区**（`instant.In(time.Local)`），与驱动交回来
+// 的那个 location 一致，所以这条用例的成败**取决于进程时区**：
+//
+//   - TZ=UTC：location 是 UTC，去掉 .UTC() 也编出同样的串 → 绿；
+//   - TZ=Asia/Shanghai：去掉 .UTC() 编出 `2026-01-02T11:04:05+08:00` → 红。
+//
+// 这一对反差是 gates.yml 的「非 UTC 时区下的时刻门禁」那一步的判据（见
+// docs/cli-output.md 的「时刻与时区」）：用固定东八区 fixture 的话它在任何
+// 时区下都会红，证明的是「这一列恒 UTC」，证明不了「这道门跑在哪个时区」。
 func TestAPIKeyTimesAreUTCWhateverTheProcessZone(t *testing.T) {
-	// 东八区的 11:04:05 就是 UTC 的 03:04:05，同一瞬间。
-	east8 := time.FixedZone("UTC+8", 8*60*60)
-	created := time.Date(2026, 1, 2, 11, 4, 5, 0, east8)
-	expires := time.Date(2027, 6, 7, 16, 9, 10, 0, east8)
-	used := time.Date(2026, 10, 17, 14, 10, 11, 0, east8)
+	// 三个同一瞬间：先按 UTC 构造，再 .In(time.Local) 换成进程时区。
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).In(time.Local)
+	expires := time.Date(2027, 6, 7, 8, 9, 10, 0, time.UTC).In(time.Local)
+	used := time.Date(2026, 10, 17, 6, 10, 11, 0, time.UTC).In(time.Local)
 
 	doc := apiKeyListDoc([]auth.Key{{
 		ID: 3, Username: "user-placeholder", Prefix: "larkax_abcd", Status: "active",

@@ -32,7 +32,14 @@ func doUsage(t *testing.T, mux *http.ServeMux, method, target string) *httptest.
 // 时间用 RFC3339 而不是 Unix 秒：看这个数的人要拿它与日志里的时间对照，
 // 而窗口起点是整分钟，读出来就该是那个分钟。
 func TestRateLimitUsageReportsWindowAndCount(t *testing.T) {
-	now := time.Date(2026, 10, 17, 12, 0, 30, 0, time.UTC)
+	// 窗口起点取那个「现在」的时刻，而在生产里它来自 time.Now()，带着
+	// **进程时区**（pgx 交回 timestamptz 时用的也是 time.Local，见 ratelimit
+	// 的 Usage）。fixture 因此取**进程时区**（`instant.In(time.Local)`）：
+	// 响应恒按 UTC 打，同一瞬间的 UTC 写法是 04:00:00Z。去掉响应里的 .UTC()
+	// 之后，TZ=UTC 下编出的是同一个串（绿）、TZ=Asia/Shanghai 下编出
+	// `2026-10-17T12:00:00+08:00`（红）——这一对反差正是 gates.yml 那道
+	// 非 UTC 时区门禁的判据（见 docs/cli-output.md 的「时刻与时区」）。
+	now := time.Date(2026, 10, 17, 4, 0, 30, 0, time.UTC).In(time.Local)
 	limiter := ratelimit.New(func() time.Time { return now })
 	limit := 2
 	limiter.Allow(7, &limit)
@@ -60,8 +67,8 @@ func TestRateLimitUsageReportsWindowAndCount(t *testing.T) {
 	if got.KeyID != 7 {
 		t.Errorf("key_id = %d，期望 7", got.KeyID)
 	}
-	if got.WindowStart != "2026-10-17T12:00:00Z" || got.WindowEnd != "2026-10-17T12:01:00Z" {
-		t.Errorf("窗口 = [%s, %s)，期望 [2026-10-17T12:00:00Z, 2026-10-17T12:01:00Z)",
+	if got.WindowStart != "2026-10-17T04:00:00Z" || got.WindowEnd != "2026-10-17T04:01:00Z" {
+		t.Errorf("窗口 = [%s, %s)，期望 [2026-10-17T04:00:00Z, 2026-10-17T04:01:00Z)",
 			got.WindowStart, got.WindowEnd)
 	}
 	if got.Count != 3 {
