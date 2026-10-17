@@ -752,6 +752,19 @@ go run ./cmd/larkaxctl apikey update --id 3 --clear-rate-limit-rpm
 互转时这个差要补上或拆掉，否则**账单金额会错而响应形状看着完全正常**。
 决策那条路（`/v1/systemone`）不走 `internal/relay`，见下节。
 
+**`openai-responses` 上游只转发正文、引用标注与工具调用**，不转发内置工具及其
+产物：`web_search_call`、`file_search_call`、`code_interpreter_call`、
+`image_generation_call` 一类的事件，以及它们的进度事件。上游发来这些时本适配器
+记一条 warn 并跳过——它们带内容，只是没有转发通道，记成「已知且不必转发」会
+让这条链路未来接上内置工具时没人知道旧事件一直在被丢。同样按这个方式处理的是
+`refusal.*` 与 `audio.*`：**拒答文案与音频都不进正文，也不进计费口径**（拒答
+本身就是一次回答，是否计费是另一件事，与这里的转发无关）。
+
+引用标注（`response.output_text.annotation.added`）是**转发**的：它是正文的脚注
+（哪一段对应哪个来源），不参与分词与计费。流式下它是独立的一帧
+（`response.output_text.annotation.added`），非流式下挂在
+`output[].content[].annotations`。
+
 要真的拿到一次 `200`，库里得先有：一个用户与钱包、一把 API Key
 （`larkaxctl apikey create --user <ID 或用户名>`）、一条指向上游的渠道、
 一条适用的计价规则。这四样现在都有管理入口——模型、渠道、别名与计价规则

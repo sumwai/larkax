@@ -175,6 +175,11 @@ type StreamDecision struct {
 //
 // 判据写成白名单而不是「不是 usage/done/error 就算内容」：将来事件类型
 // 变多时，新类型默认**不给**插件，而不是默认给——能改的比能看的少。
+//
+// 引用标注（annotation）也在白名单之外：插件今天能改的只有正文与工具参数
+// （见 StreamDecision），标注既没有可作用的对象、又描述「正文在哪引用了
+// 什么」，交给它只会让「插件看到的块」与「它改得动的东西」之间多出一样
+// 改不动的。它照旧转发给调用方，只是不经过插件。
 func isContentChunk(ev channel.StreamEvent) bool {
 	switch ev.Kind {
 	case "delta", "tool_use":
@@ -335,6 +340,12 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 			//nolint:contextcheck // 估算不碰 ctx，理由见本函数开头
 			est.ObserveDelta(ev.Text)
 			accText += ev.Text
+		case "annotation":
+			started = true
+			// 引用标注。它不是正文（不参与估算，也不进计费口径），但对调用方
+			// 是**内容**：客户端已经看见了它，就无法再假装这次调用什么都没
+			// 发生。所以按「已经吐过字」处置——那正是上面 started 的判据所要
+			// 回答的问题（能否换渠道重试）。
 		case "tool_use":
 			started = true
 			if ev.ToolCall != nil {
@@ -644,6 +655,12 @@ type streamResponseBuilder struct {
 	// toolArgs 按增量序号累计参数分片。参数在流里是分片给的，
 	// 拼齐之后才是一个 JSON 对象。
 	toolArgs map[int]*strings.Builder
+	// pendingAnnotations 是在第一段正文出现之前就到了的引用标注。
+	//
+	// 上游的先后不保证（标注可能先于它还解释的那段正文），而快照要记的是
+	// 「上游说了什么」：为一批标注凭空造一个空正文块，会让骨架里多出一项
+	// 并不存在的正文，所以先攒着，等正文块出现时再挂上去（见 observe）。
+	pendingAnnotations []map[string]any
 }
 
 func newStreamResponseBuilder() *streamResponseBuilder {
@@ -668,6 +685,7 @@ func (b *streamResponseBuilder) observe(ev channel.StreamEvent) {
 			return
 		}
 		b.blocks = append(b.blocks, channel.ContentBlock{Type: "text", Text: ev.Text})
+		b.flushPendingAnnotations()
 	case "tool_use":
 		if ev.ToolCall == nil {
 			return
@@ -688,6 +706,22 @@ func (b *streamResponseBuilder) observe(ev channel.StreamEvent) {
 			blk.ToolName = ev.ToolCall.Name
 		}
 		b.toolArgs[ev.ToolCall.Index].WriteString(ev.ToolCall.Arguments)
+	case "annotation":
+		// 引用标注。挂在最后一段正文上，与非流式那条路的
+		// relay.attachAnnotations 同一个口径：标注描述的是「正文的哪一段
+		// 引用了哪个来源」，挂在工具调用上没有意义。
+		//
+		// 还没有正文块时先攒着，等第一段正文出现再挂上去：上游可能先给标注
+		// 再给正文，而快照要记的是「上游说了什么」——为一批标注凭空造一个
+		// 空的正文块，会让骨架里多出一项并不存在的正文。
+		if len(ev.Annotations) == 0 {
+			return
+		}
+		if n := len(b.blocks); n > 0 && b.blocks[n-1].Type == "text" {
+			b.blocks[n-1].Annotations = append(b.blocks[n-1].Annotations, ev.Annotations...)
+			return
+		}
+		b.pendingAnnotations = append(b.pendingAnnotations, ev.Annotations...)
 	case "usage":
 		if ev.Usage != nil {
 			b.usage = *ev.Usage
@@ -695,6 +729,24 @@ func (b *streamResponseBuilder) observe(ev channel.StreamEvent) {
 		}
 	case "done":
 		b.finishReason = ev.FinishReason
+	}
+}
+
+// flushPendingAnnotations 把先于正文到达的标注挂到刚建好的正文块上。
+func (b *streamResponseBuilder) flushPendingAnnotations() {
+	if len(b.pendingAnnotations) == 0 {
+		return
+	}
+	// 挂到最后那个正文块上（没有就什么都不做）。
+	//
+	// 找最后一个而不是只看最后一个块：标注可能与工具调用块交错到达，
+	// 而它解释的仍然是正文（见 observe 里 "annotation" 那一支）。
+	for i := len(b.blocks) - 1; i >= 0; i-- {
+		if b.blocks[i].Type == "text" {
+			b.blocks[i].Annotations = append(b.blocks[i].Annotations, b.pendingAnnotations...)
+			b.pendingAnnotations = nil
+			return
+		}
 	}
 }
 
@@ -709,6 +761,9 @@ func (b *streamResponseBuilder) response(upstreamModel string) *channel.Response
 	if len(b.blocks) == 0 && !b.measured && b.finishReason == "" {
 		return nil
 	}
+	// 收尾时还没等来正文的标注挂到最后那个正文块上；一个正文块都没有时
+	// 就没有可挂的地方——为它造一个空正文块，骨架里会多出一项并不存在的正文。
+	b.flushPendingAnnotations()
 	for idx, buf := range b.toolArgs {
 		blk := &b.blocks[b.toolAt[idx]]
 		// 拼不成一个 JSON 对象就留空：参数可能因为断流只到了一半，

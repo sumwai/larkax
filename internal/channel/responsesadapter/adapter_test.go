@@ -1076,6 +1076,155 @@ func TestChatStreamUnknownEventIsLoggedAndIgnored(t *testing.T) {
 	}
 }
 
+// 引用标注要转发，而且要带上它自己的内容。
+//
+// 非流式那条路把 output[].content[].annotations 交给调用方，流式这条以前把它
+// 当「已知且不用转发」的噪音吞掉——同一个协议的两条路口径不一致，而用户看到
+// 的是「流式里没有引用」。这条用例钉住：标注以独立事件发出，内容原样。
+//
+// 判据落在**事件的内容**上而不是「有事件流出」：把这一支的 case 删掉，它会落进
+// 无匹配分支——那里同样不转发、且这条流里不会有一条 annotate 事件，所以
+// 「出现了一条 annotation 事件」本身就足以区分两条分支（见 LESSONS.md 第 33 条）。
+func TestChatStreamAnnotationIsForwarded(t *testing.T) {
+	logs := captureLogs(t)
+	srv := sseServer(t,
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant"}}`,
+		`data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_1","delta":"见 [1]"}`,
+		`data: {"type":"response.output_text.annotation.added","output_index":0,"item_id":"msg_1","annotation_index":0,`+
+			`"annotation":{"type":"url_citation","url":"https://example.com","start_index":0,"end_index":1}}`,
+		`data: {"type":"response.completed","response":{"id":"r1","model":"m","status":"completed","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`,
+	)
+
+	events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), &channel.Request{
+		Model: "m", Stream: true, Messages: textRequest().Messages,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var text strings.Builder
+	var annotations []map[string]any
+	sawDone := false
+	for _, ev := range collect(t, events) {
+		switch ev.Kind {
+		case "delta":
+			text.WriteString(ev.Text)
+		case "annotation":
+			annotations = append(annotations, ev.Annotations...)
+		case "done":
+			sawDone = true
+		case "error":
+			t.Fatalf("标注不该让这条流报错: %v", ev.Err)
+		}
+	}
+
+	if text.String() != "见 [1]" {
+		t.Errorf("正文 = %q，期望 %q（标注不是正文，不该混进来）", text.String(), "见 [1]")
+	}
+	if !sawDone {
+		t.Error("带标注的流同样要给结束标记")
+	}
+	if len(annotations) != 1 {
+		t.Fatalf("转发出去的标注有 %d 条，期望 1 条: %+v", len(annotations), annotations)
+	}
+	got := annotations[0]
+	if got["type"] != "url_citation" || got["url"] != "https://example.com" {
+		t.Errorf("标注内容 = %+v，期望原样带上 type 与 url", got)
+	}
+	// 标注的字段集由上游决定，我们不解释它——所以上下界那两项也要原样到。
+	if got["start_index"] != float64(0) || got["end_index"] != float64(1) {
+		t.Errorf("标注内容 = %+v，期望原样带上 start_index / end_index", got)
+	}
+	if strings.Contains(logs.String(), "未归类") {
+		t.Errorf("标注有自己的一支，不该被记成未归类：\n%s", logs.String())
+	}
+}
+
+// 拒绝文案（refusal.*）**仍然只记 warn**，不转发。
+//
+// 它带正文、用户可见，而它进不进 output_text、进不进计费口径是另一件事
+// （与标注不同：标注明确不参与计费）。这一条钉住「这一轮只补了标注，没有顺手
+// 把拒绝文案也转出去」——把 refusal.delta 加进 switch 并转发，这条用例红。
+func TestChatStreamRefusalStillOnlyWarns(t *testing.T) {
+	logs := captureLogs(t)
+	srv := sseServer(t,
+		`data: {"type":"response.output_text.delta","output_index":0,"delta":"答"}`,
+		`data: {"type":"response.refusal.delta","output_index":0,"delta":"我不能帮你做这件事"}`,
+		`data: {"type":"response.refusal.done","output_index":0,"refusal":"我不能帮你做这件事"}`,
+		`data: {"type":"response.completed","response":{"id":"r1","model":"m","status":"completed","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`,
+	)
+
+	events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), &channel.Request{
+		Model: "m", Stream: true, Messages: textRequest().Messages,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var text strings.Builder
+	for _, ev := range collect(t, events) {
+		if ev.Kind == "delta" {
+			text.WriteString(ev.Text)
+		}
+		if ev.Kind == "annotation" {
+			t.Errorf("拒绝文案不是标注，不该以 annotation 事件出现: %+v", ev.Annotations)
+		}
+	}
+	if text.String() != "答" {
+		t.Errorf("正文 = %q，期望只有 %q（拒绝文案不进正文，口径未定）", text.String(), "答")
+	}
+
+	log := logs.String()
+	for _, name := range []string{"response.refusal.delta", "response.refusal.done"} {
+		if !hasLogLine(log, "未归类", "event="+name) {
+			t.Errorf("%s 应当记一条「未归类」的 warn——这一轮没有转发它，也不能让它静默消失：\n%s", name, log)
+		}
+	}
+	if strings.Contains(log, "我不能帮你做这件事") {
+		t.Errorf("日志里不该出现事件的载荷（那就是模型的输出）：\n%s", log)
+	}
+}
+
+// 标注解析不出来时记一条 warn，且不中断流、不影响正文与用量。
+//
+// 一个坏掉的标注不该让已经吐出的正文作废；而静默丢掉它是这个包最怕的失效
+// 方式之一——所以它要有痕迹（与无匹配分支同一个形状）。
+func TestChatStreamBrokenAnnotationWarnsAndContinues(t *testing.T) {
+	logs := captureLogs(t)
+	srv := sseServer(t,
+		`data: {"type":"response.output_text.delta","output_index":0,"delta":"答"}`,
+		`data: {"type":"response.output_text.annotation.added","output_index":0,"annotation":"不是一个对象"}`,
+		`data: {"type":"response.completed","response":{"id":"r1","model":"m","status":"completed","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`,
+	)
+
+	events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), &channel.Request{
+		Model: "m", Stream: true, Messages: textRequest().Messages,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text strings.Builder
+	sawDone, sawUsage := false, false
+	for _, ev := range collect(t, events) {
+		switch ev.Kind {
+		case "delta":
+			text.WriteString(ev.Text)
+		case "annotation":
+			t.Errorf("解析不出来的标注不该转发: %+v", ev.Annotations)
+		case "usage":
+			sawUsage = true
+		case "done":
+			sawDone = true
+		}
+	}
+	if text.String() != "答" || !sawDone || !sawUsage {
+		t.Errorf("正文=%q usage=%v done=%v：一条坏标注不该改变这条流的走向", text.String(), sawUsage, sawDone)
+	}
+	if !hasLogLine(logs.String(), "引用标注解析失败", "event=response.output_text.annotation.added") {
+		t.Errorf("解析失败的标注要记一条 warn：\n%s", logs.String())
+	}
+}
+
 // incomplete 也是终态，结束原因是 length，用量照记（那些 token 已经花了）。
 func TestChatStreamIncompleteFinishReason(t *testing.T) {
 	srv := sseServer(t,

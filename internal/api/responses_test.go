@@ -442,6 +442,158 @@ func TestResponsesStreamErrorIsFlat(t *testing.T) {
 	}
 }
 
+// ── 引用标注 ──────────────────────────────────────────────────────────
+
+func streamAnnotation(url string) channel.StreamEvent {
+	return channel.StreamEvent{Kind: "annotation", Annotations: []map[string]any{{
+		"type": "url_citation", "url": url, "start_index": float64(0), "end_index": float64(2),
+	}}}
+}
+
+// 流式下标注真的要送到客户端：一条 response.output_text.annotation.added，
+// 而且它原样进收尾事件的 output[].content[].annotations。
+//
+// 这是 #389 第 2 问的核心判据。非流式那条路一直把这批标注交给调用方，流式这条
+// 以前把它们当噪音丢掉——只断言「流跑通了」证明不了它，因为丢掉标注的那条流
+// 一样跑得通、一样有正文、一样结算。
+func TestResponsesStreamForwardsAnnotations(t *testing.T) {
+	_, frames := responsesStreamRequest(t,
+		channel.StreamEvent{Kind: "delta", Text: "你好"},
+		streamAnnotation("https://example.com/a"),
+		streamAnnotation("https://example.com/b"),
+		channel.StreamEvent{Kind: "done", FinishReason: "stop"},
+	)
+
+	var annotationFrames []map[string]any
+	for i, f := range frames {
+		if f.event != "response.output_text.annotation.added" {
+			continue
+		}
+		m := f.decode(t)
+		// output_index / item_id / content_index 必须指向已经打开的那一项：
+		// 客户端按 (item, content, annotation_index) 三元组把标注拼回去。
+		if got := m["output_index"]; got != float64(0) {
+			t.Errorf("第 %d 帧的 output_index = %v，期望 0", i, got)
+		}
+		if got := m["item_id"]; got != dig(t, at(t, frames, 1).decode(t), "item", "id") {
+			t.Errorf("第 %d 帧的 item_id = %v，与 output_item.added 的 %v 不一致",
+				i, got, dig(t, at(t, frames, 1).decode(t), "item", "id"))
+		}
+		if got := m["content_index"]; got != float64(0) {
+			t.Errorf("第 %d 帧的 content_index = %v，期望 0", i, got)
+		}
+		if got := m["annotation_index"]; got != float64(len(annotationFrames)) {
+			t.Errorf("第 %d 帧的 annotation_index = %v，期望 %d（从 0 起、连续）",
+				i, got, len(annotationFrames))
+		}
+		anno, ok := m["annotation"].(map[string]any)
+		if !ok {
+			t.Fatalf("第 %d 帧的 annotation 不是对象: %v", i, m["annotation"])
+		}
+		if anno["type"] != "url_citation" {
+			t.Errorf("第 %d 帧的 annotation.type = %v，期望 url_citation", i, anno["type"])
+		}
+		annotationFrames = append(annotationFrames, m)
+	}
+	if len(annotationFrames) != 2 {
+		t.Fatalf("标注事件有 %d 条，期望 2 条", len(annotationFrames))
+	}
+	if got := dig(t, annotationFrames[0], "annotation", "url"); got != "https://example.com/a" {
+		t.Errorf("第一条标注的 url = %v", got)
+	}
+	if got := dig(t, annotationFrames[1], "annotation", "url"); got != "https://example.com/b" {
+		t.Errorf("第二条标注的 url = %v", got)
+	}
+
+	// 收尾事件的 output[] 里是同一个顺序、同一批：客户端可能整份替换掉
+	// 增量拼出来的那一份，两处不一致时它看到的是「标注变成了另一批」。
+	last := frames[len(frames)-1].decode(t)
+	got := dig(t, last, "response", "output", "0", "content", "0", "annotations")
+	list, ok := got.([]any)
+	if !ok {
+		t.Fatalf("终态的 annotations 不是数组: %v", got)
+	}
+	if len(list) != 2 {
+		t.Fatalf("终态的 annotations 有 %d 条，期望 2 条: %v", len(list), list)
+	}
+	for i, want := range []string{"https://example.com/a", "https://example.com/b"} {
+		obj, _ := list[i].(map[string]any)
+		if obj["url"] != want {
+			t.Errorf("终态第 %d 条标注的 url = %v，期望 %s", i, obj["url"], want)
+		}
+	}
+}
+
+// 标注先于正文到达时也要落到**同一个**正文项上，而不是另开一项。
+//
+// 上游的事件顺序不保证（标注可能先于它还解释的那段正文）。另开一项会让客户端
+// 看到两条 message，而其中一条只有标注没有正文。
+func TestResponsesStreamAnnotationBeforeTextKeepsOneItem(t *testing.T) {
+	_, frames := responsesStreamRequest(t,
+		streamAnnotation("https://example.com/a"),
+		channel.StreamEvent{Kind: "delta", Text: "你好"},
+		channel.StreamEvent{Kind: "done", FinishReason: "stop"},
+	)
+
+	added := 0
+	for _, f := range frames {
+		if f.event == "response.output_item.added" {
+			added++
+		}
+	}
+	if added != 1 {
+		t.Errorf("output_item.added 有 %d 帧，期望 1 帧（标注与正文是同一项）", added)
+	}
+	if frames[2].event != "response.output_text.annotation.added" {
+		t.Errorf("第 2 帧 = %q，期望标注事件在正文项打开之后", frames[2].event)
+	}
+	// annotation 事件的 output_index 与后面正文增量的一致。
+	if got := frames[2].decode(t)["output_index"]; got != float64(0) {
+		t.Errorf("标注的 output_index = %v，期望 0", got)
+	}
+	for _, f := range frames {
+		if f.event == "response.output_text.delta" {
+			if got := f.decode(t)["output_index"]; got != float64(0) {
+				t.Errorf("正文增量的 output_index = %v，期望 0（与标注同一项）", got)
+			}
+		}
+	}
+}
+
+// 非流式那条路的标注同样要落到客户端（这一条以前也不成立：relaykit 的
+// dto.Message.Annotations 在 relay.messageFromRelaykit 里被丢掉了）。
+//
+// 两条路一起钉，是因为「对齐」不能用「把另一边也弄丢」的方式达成。
+func TestResponsesNonStreamForwardsAnnotations(t *testing.T) {
+	h, _, chatter := newTestHandler()
+	res := responsesResult()
+	res.Response.Message.Content = []channel.ContentBlock{{
+		Type: "text", Text: "你好",
+		Annotations: []map[string]any{{"type": "url_citation", "url": "https://example.com/a"}},
+	}}
+	chatter.result = res
+
+	rec := post(h, PathResponses, responsesBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应体不是 JSON: %v\n%s", err, rec.Body)
+	}
+	got, ok := dig(t, body, "output", "0", "content", "0", "annotations").([]any)
+	if !ok {
+		t.Fatalf("annotations 不是数组: %v", dig(t, body, "output", "0", "content", "0", "annotations"))
+	}
+	if len(got) != 1 {
+		t.Fatalf("annotations 有 %d 条，期望 1 条: %v", len(got), got)
+	}
+	obj, _ := got[0].(map[string]any)
+	if obj["url"] != "https://example.com/a" {
+		t.Errorf("标注的 url = %v，期望 https://example.com/a", obj["url"])
+	}
+}
+
 // ── 协议与请求方向 ────────────────────────────────────────────────────
 
 func TestResponsesProtocolReachesPipeline(t *testing.T) {

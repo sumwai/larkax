@@ -218,13 +218,19 @@ func responsesCallItemID(responseID string, index int) string {
 // 空正文项比给空数组更接近它。
 func responsesOutput(id, status string, msg channel.Message) []any {
 	var (
-		text  strings.Builder
-		calls []any
+		text        strings.Builder
+		calls       []any
+		annotations []map[string]any
 	)
 	for _, b := range msg.Content {
 		switch b.Type {
 		case "text":
 			text.WriteString(b.Text)
+			// 一段消息里通常只有一段正文；多段时标注取最后一段，与
+			// responsesStream 收尾时的口径一致（见 relay.attachAnnotations）。
+			if len(b.Annotations) > 0 {
+				annotations = b.Annotations
+			}
 		case "tool_use":
 			calls = append(calls, responsesFunctionCallItem{
 				Type:      "function_call",
@@ -242,19 +248,30 @@ func responsesOutput(id, status string, msg channel.Message) []any {
 
 	out := make([]any, 0, len(calls)+1)
 	if s := text.String(); s != "" || len(calls) == 0 {
+		content := responsesContent{
+			Type: "output_text",
+			Text: s,
+		}
+		// annotations 必须是数组，不能是 null（SDK 的模型里它是必填列表）。
+		content.Annotations = annotationList(annotations)
 		out = append(out, responsesMessageItem{
-			Type:   "message",
-			ID:     id + "_msg_0",
-			Status: status,
-			Role:   "assistant",
-			Content: []responsesContent{{
-				Type:        "output_text",
-				Text:        text.String(),
-				Annotations: []any{},
-			}},
+			Type:    "message",
+			ID:      id + "_msg_0",
+			Status:  status,
+			Role:    "assistant",
+			Content: []responsesContent{content},
 		})
 	}
 	return append(out, calls...)
+}
+
+// annotationList 把标注摊成对外契约里的数组，没有时给空数组而不是 nil。
+func annotationList(annotations []map[string]any) []any {
+	out := make([]any, 0, len(annotations))
+	for _, a := range annotations {
+		out = append(out, a)
+	}
+	return out
 }
 
 // responsesStatus 把结束原因折成 Responses 的 status。
