@@ -54,6 +54,14 @@ type Counter struct {
 // Inc 把计数器加一。
 func (c *Counter) Inc() { c.v.Add(1) }
 
+// Add 把计数器加上 n。
+//
+// 唯一的用处是金额侧的计数器（见 Registry.CappedAmount）：它累加的是最小
+// 单位的整数，不是次数。入参是无符号的——负数在这里根本表达不出来，
+// 而这正是想要的：一个只增不减的计数器收到负数，回绕之后是一个巨大的
+// 值，采集端会把它读成「忽然暴涨」，排查方向就被引到上游去了。
+func (c *Counter) Add(n uint64) { c.v.Add(n) }
+
 // Value 返回当前值。它只用于测试与断言，不参与渲染之外的逻辑。
 func (c *Counter) Value() uint64 { return c.v.Load() }
 
@@ -161,6 +169,31 @@ type Registry struct {
 	// 混成一条序列时分不出是哪一条协议的上界在漏。
 	CappedSettlements *LabeledCounter
 
+	// CappedAmount 是结算被预留上界截住的那部分**金额**，按入口协议与
+	// 资产品种分，单位是 money.Scale 位定点的最小单位（1e-8 元）。
+	//
+	// 它是 CappedSettlements 的金额侧孪生：那个数回答「撞了几次」，这个数
+	// 回答「少收了多少钱」。后者才是这套系统最贵的错误——撞上界时账目仍然
+	// 是平的（两边记的是同一个被截小的数），对账永远看不出来。
+	//
+	// 按设计它应当一直是 0。差额取自 Settlement.Breakdown.Total −
+	// Settlement.Actual（撞上界时 Actual 被截成 Reserved，明细不动），
+	// 也就是落库时 computed_amount − final_amount 的同一个差。**累计值非 0
+	// 就是这段时间里平台实际承担掉的钱**。
+	//
+	// 单位用最小单位而不是浮点元：f64 元在这一套金额上会丢精度（单价细到
+	// 1e-6 元，一笔小额结算乘出来常常只有几十个最小单位），而差额要能和
+	// billing_requests 的 computed_amount − final_amount 对得上——那一列是
+	// numeric(20, 8)，同样的 Scale。浮点元会让「累计值」与「逐行相减再求和」
+	// 对不上，而这两个数正是要互相印证的两个口径。
+	//
+	// 标签取值：protocol 同 CappedSettlements（channel.Protocol 的取值集合）；
+	// asset 取结算用的资产品种，即 ledger.Asset 的取值集合——今天只有 CNY，
+	// 装配期由 ledger.Asset.Valid 挡在启动那一步，所以它也是闭合的。
+	// 分开两个标签而不是合成一个：上界算错按协议改，少收的钱按资产记，
+	// 混成一条序列时两个问题得一起拆。
+	CappedAmount *LabeledCounter
+
 	// UnbilledSettlements 是未计费的结算次数。
 	//
 	// 两个原因都走这里：上游失败，以及请求在结算之前就中止了
@@ -190,6 +223,9 @@ func NewRegistry() *Registry {
 	r.CappedSettlements = r.newLabeled("larkax_billing_capped_settlements_total",
 		"结算金额被预留上界截住的次数，按入口协议分（openai / anthropic / openai-responses / systemone）。按设计应一直为 0；某一协议持续大于 0 说明那条协议的预留上界算错了，差额由平台承担而账目仍然是平的。",
 		"protocol")
+	r.CappedAmount = r.newLabeled("larkax_billing_capped_amount_total",
+		"结算被预留上界截住的那部分金额，按入口协议与资产品种分，单位是最小计价单位（money.Scale 位定点，1e-8 元）。与 capped_settlements_total 是一对：那个数次数，这个数少收了多少钱。按设计应一直为 0；非 0 就是平台在这段时间里实际承担掉的金额，账目仍然是平的。",
+		"protocol", "asset")
 	r.UnbilledSettlements = r.newCounter("larkax_billing_unbilled_settlements_total",
 		"未计费的结算次数：上游失败，或请求在结算之前中止。")
 	r.AuthFailures = r.newLabeled("larkax_auth_failures_total",
