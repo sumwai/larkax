@@ -128,6 +128,87 @@ jobs:
       # 于是这个门禁只有一份实现，两边不会各自漂移。
       - uses: ./.github/actions/check-integration-tests
 
+  # 契约测试：用**官方 SDK** 当客户端跑一遍，两套协议各一遍。
+  #
+  # 与 go job 分开，是因为它多两个运行期依赖（Python 与两个官方 SDK）。
+  # 塞进 go job 会让「Go 测试挂了」与「Python 依赖没装」混在同一份日志里，
+  # 而这两件事的处置完全不同。
+  #
+  # 它验的是**我们对外响应的形状**——必填字段、可空字段是 null 还是省略、
+  # finish_reason 的取值集合、流式事件的顺序与终止条件、错误体的 error.type。
+  # 这几种错，仓库里的端到端用例全绿，而客户端一接就崩：那些用例用的是自己
+  # 写的假上游与自己构造的请求，证明的只是「我们的响应我们自己能解析」。
+  contract:
+    name: 契约
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: placeholder
+          POSTGRES_DB: larkax_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      LARKAX_DB_DSN: postgres://postgres:placeholder@localhost:5432/larkax_test?sslmode=disable
+      LARKAX_ROLE: worker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # 版本钉在 contract/requirements.txt 里（`==`，不是 `>=`）。
+      # 理由与 gremlins / deadcode 那两次一样：不钉版本的工具，它的结论不可比——
+      # SDK 一个大版本升级会改响应形状的解析，那时「昨天绿今天红」说明不了任何事。
+      - name: 安装契约测试依赖
+        run: pip install -r contract/requirements.txt
+
+      # 判据不能只看退出码。`-run` 匹配不到任何用例时 `go test` **照样退出 0**，
+      # 输出里只有一行 "testing: warning: no tests to run"——那与「全跑过了」
+      # 在退出码上长得一模一样（见 LESSONS.md 第 16 条）。
+      #
+      # 所以这里要一个**正向证据**：`--- PASS: TestContract...` 出现过几次。
+      # 这与 .github/actions/check-integration-tests 那道门是同一个形状，
+      # 只是它按包数、这里按用例数。
+      - name: 契约测试
+        run: |
+          set +e
+          out=$(go test -tags=contract -count=1 -v ./internal/assembly/ -run Contract 2>&1)
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+
+          passed=$(printf '%s\n' "$out" | grep -c -- '--- PASS: TestContract' || true)
+          if [ "$passed" -eq 0 ]; then
+            echo "::error::契约测试一个用例都没跑到：-run Contract 没匹配上，或者用例被跳过了。"
+            echo "::error::注意 go test 在 -run 匹配不到任何东西时**照样退出 0**，所以这里不能只看退出码。"
+            exit 1
+          fi
+
+          if printf '%s\n' "$out" | grep -q -- '--- SKIP'; then
+            echo "::error::契约测试有用例被跳过。跳过等于没测。"
+            exit 1
+          fi
+
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::契约测试有失败用例。"
+            exit "$rc"
+          fi
+
+          echo "契约测试跑了 $passed 个用例，全部通过。"
+
   redlines:
     name: 公开红线
     runs-on: ubuntu-latest
