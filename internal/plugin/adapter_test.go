@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -97,7 +98,7 @@ func TestRouteCandidateDistinguishesUnknownQuotaFromZero(t *testing.T) {
 		t.Errorf("查不到额度时可信度该是 0，实际 %v", rc.Candidates[0].Confidence)
 	}
 	if rc.Candidates[1].Remaining == nil || *rc.Candidates[1].Remaining != 0 {
-		t.Errorf("额度为零该如实给 0，实际 %v", rc.Candidates[1].Remaining)
+		t.Errorf("额度为零该如实给 0，实际 %s", showPtr(rc.Candidates[1].Remaining))
 	}
 	if rc.Candidates[2].Confidence != 0.7 {
 		t.Errorf("估算值该打折到 0.7，实际 %v", rc.Candidates[2].Confidence)
@@ -240,7 +241,7 @@ func TestRouteCandidateCarriesExpiry(t *testing.T) {
 		{Channel: channel.Channel{ID: 1}, Quota: quota.State{Remaining: ptrFloat64(5), ResetsAt: &at}},
 	})
 	if rc.Candidates[0].ResetsAt == nil || *rc.Candidates[0].ResetsAt != "2026-11-01T00:00:00Z" {
-		t.Fatalf("到期时间该给，实际 %v", rc.Candidates[0].ResetsAt)
+		t.Fatalf("到期时间该给，实际 %s", showPtr(rc.Candidates[0].ResetsAt))
 	}
 }
 
@@ -357,6 +358,18 @@ func ptrFloat64(v float64) *float64 { return &v }
 func ptrInt64(v int64) *int64 { return &v }
 
 func ptrBool(v bool) *bool { return &v }
+
+// showPtr 把一个可空值渲染成可读文本，供断言失败时打印。
+//
+// 直接 %v 一个指向基本类型的指针打出来的是地址（`0xc000...`），而报错信息
+// 本身是要给人读的——那串地址看不出实际值是什么，也就看不出这次失败是
+// 「值算错了」还是「字段根本没给」。
+func showPtr[T any](p *T) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprint(*p)
+}
 
 // 上游没报用量时给一个各项为 nil 的对象，而不是 nil 本身：
 // 插件要能区分「上游没报」与「用量是零」。

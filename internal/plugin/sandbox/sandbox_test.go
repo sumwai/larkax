@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -209,11 +210,11 @@ func Test部分字段保持零值且指针为nil(t *testing.T) {
 		t.Fatalf("调用不该失败: %v", f)
 	}
 	if out.Temperature == nil || *out.Temperature != 0.5 {
-		t.Errorf("temperature = %v，想要指针指向 0.5", out.Temperature)
+		t.Errorf("temperature = %s，想要指针指向 0.5", showPtr(out.Temperature))
 	}
 	// 给了 0：指针非 nil，指向 0。
 	if out.MaxTokens == nil || *out.MaxTokens != 0 {
-		t.Errorf("max_tokens = %v，想要指针指向 0（给了零 ≠ 没给）", out.MaxTokens)
+		t.Errorf("max_tokens = %s，想要指针指向 0（给了零 ≠ 没给）", showPtr(out.MaxTokens))
 	}
 	// 没给：指针 nil、切片 nil。
 	if out.TopP != nil {
@@ -566,7 +567,7 @@ export default {
 		t.Fatalf("调用不该失败: %v", f)
 	}
 	if syncOut.Temperature == nil || *syncOut.Temperature != 0.5 {
-		t.Errorf("同步 hook 的返回值没解出来: %v", syncOut.Temperature)
+		t.Errorf("同步 hook 的返回值没解出来: %s", showPtr(syncOut.Temperature))
 	}
 }
 
@@ -921,4 +922,16 @@ export default { onRequest() { return { ok: true }; } };
 		}()
 	}
 	wg.Wait()
+}
+
+// showPtr 把一个可空值渲染成可读文本，供断言失败时打印。
+//
+// 直接 %v 一个指向基本类型的指针打出来的是地址（`0xc000...`），而报错信息
+// 本身是要给人读的——那串地址看不出实际值是什么，也就看不出这次失败是
+// 「值算错了」还是「字段根本没给」。
+func showPtr[T any](p *T) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprint(*p)
 }

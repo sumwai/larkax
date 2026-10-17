@@ -85,8 +85,8 @@ func TestUpdateLimitsThreeStates(t *testing.T) {
 			t.Fatalf("出错: %v", err)
 		}
 		if !params.SetRateLimit || params.RateLimitRPM != nil {
-			t.Fatalf("得到 SetRateLimit=%v RateLimitRPM=%v，期望 true 与 nil",
-				params.SetRateLimit, params.RateLimitRPM)
+			t.Fatalf("得到 SetRateLimit=%v RateLimitRPM=%s，期望 true 与 nil",
+				params.SetRateLimit, showPtr(params.RateLimitRPM))
 		}
 		if params.SetQuota {
 			t.Errorf("没要求改的 quota 被标成了要改")
@@ -99,8 +99,8 @@ func TestUpdateLimitsThreeStates(t *testing.T) {
 			t.Fatalf("出错: %v", err)
 		}
 		if !params.SetRateLimit || params.RateLimitRPM == nil || *params.RateLimitRPM != 0 {
-			t.Fatalf("得到 SetRateLimit=%v RateLimitRPM=%v，期望 true 与指向 0 的指针",
-				params.SetRateLimit, params.RateLimitRPM)
+			t.Fatalf("得到 SetRateLimit=%v RateLimitRPM=%s，期望 true 与指向 0 的指针",
+				params.SetRateLimit, showPtr(params.RateLimitRPM))
 		}
 	})
 
@@ -110,7 +110,7 @@ func TestUpdateLimitsThreeStates(t *testing.T) {
 			t.Fatalf("出错: %v", err)
 		}
 		if params.RateLimitRPM == nil || *params.RateLimitRPM != 60 {
-			t.Fatalf("RateLimitRPM = %v，期望 60", params.RateLimitRPM)
+			t.Fatalf("RateLimitRPM = %s，期望 60", showPtr(params.RateLimitRPM))
 		}
 	})
 

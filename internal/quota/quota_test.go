@@ -2,6 +2,7 @@ package quota
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -10,6 +11,18 @@ import (
 var base = time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 
 func f(v float64) *float64 { return &v }
+
+// showPtr 把一个可空值渲染成可读文本，供断言失败时打印。
+//
+// 直接 %v 一个指向基本类型的指针打出来的是地址（`0xc000...`），而报错信息
+// 本身是要给人读的——那串地址看不出实际值是什么，也就看不出这次失败是
+// 「值算错了」还是「字段根本没给」。
+func showPtr[T any](p *T) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprint(*p)
+}
 
 func TestValidateAcceptsGoodObservations(t *testing.T) {
 	cases := []Observation{
@@ -80,7 +93,7 @@ func TestMergeAPIQueryOverrides(t *testing.T) {
 	next := Merge(prev, Observation{Kind: KindAPIQuery, Remaining: f(999), ObservedAt: base}, base)
 
 	if next.Remaining == nil || *next.Remaining != 999 {
-		t.Errorf("Remaining = %v，期望 999", next.Remaining)
+		t.Errorf("Remaining = %s，期望 999", showPtr(next.Remaining))
 	}
 	if next.Confidence != confidenceAPIQuery {
 		t.Errorf("Confidence = %v", next.Confidence)
@@ -107,7 +120,7 @@ func TestMergeExhaustedFromError(t *testing.T) {
 	}, base)
 
 	if next.Remaining == nil || *next.Remaining != 0 {
-		t.Errorf("Remaining = %v，期望 0", next.Remaining)
+		t.Errorf("Remaining = %s，期望 0", showPtr(next.Remaining))
 	}
 	if next.LastErrorCode != "insufficient_quota" {
 		t.Errorf("LastErrorCode = %q", next.LastErrorCode)
@@ -128,7 +141,7 @@ func TestMergeUnrelatedErrorDoesNotTouchRemaining(t *testing.T) {
 	}, base)
 
 	if next.Remaining == nil || *next.Remaining != 1000 {
-		t.Errorf("Remaining 被无关错误改动了: %v", next.Remaining)
+		t.Errorf("Remaining 被无关错误改动了: %s", showPtr(next.Remaining))
 	}
 	if next.Confidence != confidenceAPIQuery {
 		t.Errorf("无关错误不该降低可信度: %v", next.Confidence)
@@ -209,7 +222,7 @@ func TestSelfAccountingUsedWhenNoMeasure(t *testing.T) {
 	next := Merge(prev, Observation{Kind: KindSelfAccounting, Remaining: f(500), ObservedAt: base}, base)
 
 	if next.Remaining == nil || *next.Remaining != 500 {
-		t.Errorf("Remaining = %v", next.Remaining)
+		t.Errorf("Remaining = %s", showPtr(next.Remaining))
 	}
 	if !next.Estimated {
 		t.Error("应标记为估算")
@@ -250,7 +263,7 @@ func TestProjectSubtractsConsumption(t *testing.T) {
 	obs := Project(prev, 30, base)
 
 	if obs.Remaining == nil || *obs.Remaining != 70 {
-		t.Errorf("Remaining = %v，期望 70", obs.Remaining)
+		t.Errorf("Remaining = %s，期望 70", showPtr(obs.Remaining))
 	}
 	if obs.Kind != KindSelfAccounting {
 		t.Errorf("Kind = %q", obs.Kind)
@@ -267,7 +280,7 @@ func TestProjectClampsAtZero(t *testing.T) {
 	obs := Project(prev, 999, base)
 
 	if obs.Remaining == nil || *obs.Remaining != 0 {
-		t.Errorf("Remaining = %v，期望 0", obs.Remaining)
+		t.Errorf("Remaining = %s，期望 0", showPtr(obs.Remaining))
 	}
 	if !obs.Exhausted {
 		t.Error("见底应标记耗尽")
@@ -286,7 +299,7 @@ func TestProjectExhaustsExactlyToZero(t *testing.T) {
 func TestProjectUnknownStaysUnknown(t *testing.T) {
 	obs := Project(State{}, 5, base)
 	if obs.Remaining != nil {
-		t.Errorf("余量未知时应保持未知: %v", obs.Remaining)
+		t.Errorf("余量未知时应保持未知: %s", showPtr(obs.Remaining))
 	}
 }
 
@@ -298,7 +311,7 @@ func TestProjectThenMergeKeepsEstimate(t *testing.T) {
 	// 消耗 200
 	state = Merge(state, Project(state, 200, base), base)
 	if state.Remaining == nil || *state.Remaining != 800 {
-		t.Fatalf("推进后 Remaining = %v，期望 800", state.Remaining)
+		t.Fatalf("推进后 Remaining = %s，期望 800", showPtr(state.Remaining))
 	}
 
 	// 再探测，拿到实测的 750（说明自记账略偏高，这很常见）

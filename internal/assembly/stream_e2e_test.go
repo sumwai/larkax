@@ -617,7 +617,7 @@ func TestStreamChatCompletionsEndToEnd(t *testing.T) {
 
 	last := decodeChunk(t, frames[3])
 	if last.Choices[0].FinishReason == nil || *last.Choices[0].FinishReason != "stop" {
-		t.Errorf("结束分片的 finish_reason = %v，期望 stop", last.Choices[0].FinishReason)
+		t.Errorf("结束分片的 finish_reason = %s，期望 stop", showPtr(last.Choices[0].FinishReason))
 	}
 	if last.Usage == nil {
 		t.Fatal("结束分片里没有 usage——流式的用量必须在结束之前给出来")

@@ -89,7 +89,7 @@ func TestBodyPatchDistinguishesUnsetFromZero(t *testing.T) {
 		t.Fatalf("出错: %v", err)
 	}
 	if patch.Temperature == nil || *patch.Temperature != 0 {
-		t.Fatalf("temperature 应被识别为「给了 0」，实际 %v", patch.Temperature)
+		t.Fatalf("temperature 应被识别为「给了 0」，实际 %s", showPtr(patch.Temperature))
 	}
 	out, changed, err := ApplyRequestBodyPatch(map[string]any{"temperature": 0.9}, patch)
 	if err != nil {
