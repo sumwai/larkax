@@ -404,19 +404,23 @@ go run ./cmd/larkaxctl apikey update --id 3 --clear-rate-limit-rpm
 
 ## 当前能做什么
 
-**非流式推理已经接到公共端口上**：
+**推理已经接到公共端口上，流式与非流式都走通了**：
 
 | 端口 | 端点 | 现在返回 |
 |---|---|---|
-| `:8080` | `POST /v1/chat/completions`、`POST /v1/messages` | 推理；没有有效 API Key 时 `401` |
+| `:8080` | `POST /v1/chat/completions`、`POST /v1/messages` | 推理；`stream: true` 时是 SSE 流；没有有效 API Key 时 `401` |
 | `:8080` | 其余任意路径 | `501`，明确的「尚未实现」JSON |
 | `:9090` | `/healthz` | `200`，进程存活 |
 | `:9090` | `/readyz` | `200`，含 `postgres` 探针 |
 | `:9090` | `/metrics` | Prometheus 文本格式的指标，清单见 [metrics.md](metrics.md) |
 
 装配在 `internal/assembly`，由 `cmd/larkax` 调用：鉴权、候选渠道、计费两阶段、
-选路、上游协议适配、账本落库、请求快照、节假日日历都接上了。流式
-（`stream: true`）返回 `501`——那一条还没实现。
+选路、上游协议适配、账本落库、请求快照、节假日日历都接上了。
+
+两条路各有一套按协议区分的渲染器（`internal/api` 的 `serveOnce` 与 `serveStream`）：
+调用协议与上游协议可以不同，转换在 `internal/relay` 那一层做，用量口径的换算
+也在那里——Anthropic 的 `input_tokens` 不含缓存而 OpenAI 的 `prompt_tokens` 含，
+互转时这个差要补上或拆掉，否则**账单金额会错而响应形状看着完全正常**。
 
 要真的拿到一次 `200`，库里得先有：一个用户与钱包、一把 API Key
 （`larkaxctl apikey create --user <ID 或用户名>`）、一条指向上游的渠道、
