@@ -72,9 +72,9 @@ type ReservationStore interface {
 	// Release 释放一次预留。用于**不计费的结局**：上游失败、客户端中途断开。
 	//
 	// failure 是这次不计费的依据，由落库层写进账单的两列（上游状态码与
-	// 归一化后的失败分类）；nil 表示没有上游失败的依据。落库层要能接受 nil：
-	// 「结算之前就返回了」那条路（客户端断开、context 取消）走到这里时，
-	// 上游那一次调用可能压根没发生，编不出依据来。
+	// 归一化后的失败分类）；nil 表示没有「因上游失败而不计费」的依据。
+	// 落库层要能接受 nil：「结算之前就返回了」那条路（客户端断开、
+	// context 取消）走到这里时，上游那一次调用可能压根没发生，编不出依据来。
 	//
 	// 它必须是幂等的：同一次请求释放两次不该报错，也不该把冻结额减两次。
 	Release(ctx context.Context, req pipeline.Request, failure *pipeline.UpstreamFailure) error
@@ -598,9 +598,9 @@ func (h *handle) finish(ctx context.Context) {
 		// 走到这里说明在结算之前就返回了（客户端断开、context 取消等）。
 		// 按「上游失败」结算：不计费。
 		//
-		// 这条路上没有上游失败的依据：走到这里说明还没到能判定上游结局的
-		// 那一步（多半是上游那一次调用压根没发生），所以 Settle 回出来的
-		// 那份结局两列都是零值，settleFailure 会把它丢成 nil。
+		// 这条路上没有「因上游失败而不计费」的依据：走到这里说明还没到能
+		// 判定上游结局的那一步（多半是上游那一次调用压根没发生），所以
+		// Settle 回出来的那份结局两列都是零值，settleFailure 会把它丢成 nil。
 		h.settleFailure(ctx, pipeline.Outcome{UpstreamFailed: true})
 	}
 	h.release(ctx)
@@ -615,9 +615,13 @@ func (h *handle) finish(ctx context.Context) {
 // # 失败依据在这里判，不在调用点判
 //
 // 上游状态码与失败分类由 cause 推出来（见 upstreamEvidence），**调用点
-// 传进来的 Outcome 里那两项会被覆盖**。四处调用点各判一次的话，判据就有
-// 四份，而漏判的那一处表现为「这一类失败在账单上没有依据」——库里那一列
-// 是 NULL，与「这一批恰好没有失败」长得一样，没有东西会报出来。
+// 传进来的 Outcome 里那两项会被覆盖**。这个函数有五个调用点
+// （gateway.go 三处、stream.go 两处），各判一次的话判据就有五份，而漏判的
+// 那一处表现为「这一类失败在账单上没有依据」——库里那一列是 NULL，与
+// 「这一批恰好没有失败」长得一样，没有东西会报出来。
+//
+// 判据虽然只有一处，它要覆盖的是**四类失败**：上游非 2xx、连不上、
+// 流中途断、插件阻断（见 upstreamEvidence 的分支与 handle.failure 的注释）。
 func (h *handle) settleAndFail(ctx context.Context, cause error, out pipeline.Outcome) (*Result, error) {
 	h.settled = true
 	out.UpstreamStatus, out.ErrorCode = upstreamEvidence(cause)
@@ -683,7 +687,7 @@ func upstreamEvidence(err error) (status int, code string) {
 	if up.StatusCode == 0 {
 		return 0, pipeline.ErrorUpstreamNoAnswer
 	}
-	return up.StatusCode, pipeline.ErrorUpstreamRejected
+	return up.StatusCode, pipeline.ErrorUpstreamHTTPError
 }
 
 // release 把这次请求冻住的钱放开。

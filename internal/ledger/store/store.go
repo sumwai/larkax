@@ -524,8 +524,8 @@ func (s *Store) Save(ctx context.Context, req pipeline.Request, charge *pipeline
 // failure 为 nil 表示这次没有上游失败的依据：插件阻断、结算本身出错，
 // 以及「还没到结算那一步就返回了」那条路（结算之前客户端就断了、context
 // 被取消——那时上游那一次调用多半压根没发生）都是这样。两列那时留 NULL，
-// 而 **NULL 在这里不是「不知道」，是「这次没有上游失败的证据」**——与
-// client_canceled_at 同一个口径（见 markSettled 的注释）。
+// 而 **NULL 在这里不是「不知道」，是「这次不是因上游失败而不计费」**——
+// 与 client_canceled_at 的 NULL 同一个口径（见 markSettled 的注释）。
 //
 // 它与 status 写在同一条 UPDATE 里，不另起一条：分开写会有一个窗口让这一行
 // 已经是 released 而依据还没写上，而那个组合在库里读起来正是「释放了但
@@ -619,8 +619,10 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request, failure *pipe
 
 // failureColumns 把一份可空的失败依据拆成两个 SQL 参数。
 //
-// nil 与零值落成同一个 NULL，而这一步只有 Go 这一侧做得了——SQL 收到的是
-// 两个标量，它分不出「没传」与「传了个 0」。所以拆解放在这里，判据一处。
+// 拆解本身在这里，是为了让「有没有依据」的判据只有一处：调用方拿到的是
+// 两个标量，两个都空就是没有依据。顺带，nil 与零值因此落成同一个 NULL
+// ——SQL 那侧的 NULLIF 收到的已经是标量，它分不出「没传」与「传了个 0」，
+// 那一层挡不住这件事。
 func failureColumns(failure *pipeline.UpstreamFailure) (status int, code string) {
 	if failure == nil {
 		return 0, ""
@@ -692,13 +694,19 @@ func failureColumns(failure *pipeline.UpstreamFailure) (status int, code string)
 // 「这两列没有写入方」这件事被一个看起来有逻辑的表达式盖住了。
 //
 // 它们现在写在 Release 里，那是它们唯一写得进去的地方：结算这条路只在
-// **计费**时才走，而上游失败不计费——那时 pipeline.Settle 直接返回错误，
+// **计费**时才走，而因上游失败不计费——那时 pipeline.Settle 直接返回错误，
 // 这一行 UPDATE 一条都不执行。计费这一侧也确实没有值可写：上游响应里
 // 没有状态码（channel.Response 不带它），「这次是 2xx」这件事在链路里
 // 根本没有一个字段记着，编一个 200 出来就是假数据。
 //
-// 于是两列在**已结算**的行上恒为 NULL，含义是「这次没有上游失败的证据」
-// ——与 client_canceled_at 的 NULL 同一个口径（见上面那段注释）。
+// 于是两列在**已结算**的行上恒为 NULL，含义是「这次**不是因上游失败而
+// 不计费**」——与 client_canceled_at 的 NULL 同一个口径（见上面那段注释）。
+//
+// **这句话不能读成「这次没有上游失败」。** 上游吐了字之后才失败的那一次
+// 要计费（token 已经产生了，上游是算了钱的），账单就是已结算的行，两列
+// 同样是 NULL——见 stream_e2e_test.go 的 TestStreamUpstreamErrorMidStream。
+// 所以 `error_code IS NOT NULL` 不能当成「上游出过问题的请求」的判据，
+// 它答的只是「这次没向上游收钱，是不是因为上游这一侧出了事」。
 func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *pipeline.Charge) (bool, error) {
 	res, err := tx.ExecContext(ctx, `
 		UPDATE billing_requests

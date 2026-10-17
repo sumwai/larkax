@@ -1208,9 +1208,14 @@ func TestUpstreamFailureIsRecordedInBillingRequest(t *testing.T) {
 
 	// 一、成功的那几条：状态是 settled，两列留 NULL。
 	//
-	// 这两列记的是**上游失败**的证据，成功那一条没有可记的。而上游响应里
-	// 也没有状态码可用（channel.Response 不带它），所以这里写得出来的只有
-	// 一个编出来的 200。
+	// 这两列记的是「**因上游失败而不计费**」的证据，成功那一条没有可记的。
+	// 而上游响应里也没有状态码可用（channel.Response 不带它），所以这里
+	// 写得出来的只有一个编出来的 200。
+	//
+	// 注意这句话不等于「这次没有上游失败」：上游吐了字之后才失败的那一次
+	// 要计费，账单同样是 settled、两列同样是 NULL（见
+	// stream_e2e_test.go 的 TestStreamUpstreamErrorMidStream）。所以
+	// `error_code IS NOT NULL` 不是「上游出过问题的请求」的判据。
 	for i, row := range rows[:successes] {
 		if row.status != "settled" {
 			t.Errorf("第 %d 条成功请求的账单状态 = %q，期望 settled", i+1, row.status)
@@ -1221,7 +1226,7 @@ func TestUpstreamFailureIsRecordedInBillingRequest(t *testing.T) {
 		}
 	}
 
-	// 二、上游 400：状态码就是上游回的那个，分类是「上游拒绝」。
+	// 二、上游 400：状态码就是上游回的那个，分类是「上游回了个错误状态码」。
 	//
 	// 失败的那一行是 released 而不是 settled——上游失败不计费（见
 	// pipeline.Settle 的 UpstreamFailed 分支），预留被放开。
@@ -1232,9 +1237,9 @@ func TestUpstreamFailureIsRecordedInBillingRequest(t *testing.T) {
 	if !rejected.upstreamStatus.Valid || rejected.upstreamStatus.Int64 != http.StatusBadRequest {
 		t.Errorf("上游 400 那一行的 upstream_status = %v，期望 400", rejected.upstreamStatus)
 	}
-	if !rejected.errorCode.Valid || rejected.errorCode.String != pipeline.ErrorUpstreamRejected {
+	if !rejected.errorCode.Valid || rejected.errorCode.String != pipeline.ErrorUpstreamHTTPError {
 		t.Errorf("上游 400 那一行的 error_code = %v，期望 %q",
-			rejected.errorCode, pipeline.ErrorUpstreamRejected)
+			rejected.errorCode, pipeline.ErrorUpstreamHTTPError)
 	}
 
 	// 三、连不上：**没有**状态码，两列里只有分类有值。

@@ -309,7 +309,7 @@ type Outcome struct {
 	// 不计费，但仍然要落一条记录——「这个请求失败了」本身是排查的依据。
 	UpstreamFailed bool
 
-	// UpstreamStatus 与 ErrorCode 是失败时的依据，供事后核对
+	// UpstreamStatus 与 ErrorCode 是「这次为什么不计费」的依据，供事后核对
 	// 「这个错误码当时是不是真的不该计费」。
 	//
 	// 它们最后落进 billing_requests 的同名两列（见 internal/ledger/store 的
@@ -320,8 +320,14 @@ type Outcome struct {
 	//     落库成 NULL——HTTP 里没有 0 这个状态码，写 0 会读成「上游回了 0 号」。
 	//   - ErrorCode 的取值口径见下面那组常量。
 	//
-	// 不是上游的失败（插件阻断、别名没配）两列都留空：这两列记的是
-	// **上游失败**的依据，写进去会让「这一行是不是上游挂的」答错。
+	// **口径是「因上游失败而不计费」，不是「上游失败过」。** 上游吐了字之后
+	// 才失败的那一次要计费，账单是 settled，两列同样是 NULL（见
+	// stream_e2e_test.go 的 TestStreamUpstreamErrorMidStream）。所以
+	// `error_code IS NOT NULL` 不是「上游出过问题的请求」的判据——它答的是
+	// 「这次没向上游收钱，是不是因为上游这一侧出了事」。
+	//
+	// 不是上游的失败（插件阻断、别名没配）两列也留空：它们不是上游出的
+	// 事，写进去会让上面那个问题答错。
 	UpstreamStatus int
 	ErrorCode      string
 
@@ -355,12 +361,21 @@ type Outcome struct {
 // 要取原文得改 internal/channel：channel.ErrUpstream 今天只带状态码与响应体
 // 原文，错误码要从体里解出来才拿得到，而解它的是适配器。
 //
-// 取值只有下面三个，**都属于「上游这一侧出了事」**。我们这边的失败（插件
-// 阻断、别名没配、结算自己出错）不进这一列：这两列是上游失败的依据，
-// 把它们混进来，「这一行是不是上游挂的」就答错了。
+// 取值只有下面三个，**都属于「上游这一侧出了事」**，记的是「这次为什么
+// 不计费」。我们这边的失败（插件阻断、别名没配、结算自己出错）不进这一列：
+// 混进来之后，`error_code IS NOT NULL` 连「是不是上游挂的」都答不了了。
+//
+// 反过来说，**有值也只说明「这次没计费是因为上游」**，不说明「上游出过
+// 问题」——已吐字之后的上游失败要计费，它在已结算的行上是 NULL。
 const (
-	// ErrorUpstreamRejected 表示上游回了非 2xx。状态码在 UpstreamStatus 里。
-	ErrorUpstreamRejected = "upstream_rejected"
+	// ErrorUpstreamHTTPError 表示上游回了个错误状态码（非 2xx）。状态码本身
+	// 在 UpstreamStatus 里，两列成对读：`upstream_http_error` + 500。
+	//
+	// 名字不叫 rejected：那读起来像「上游拒绝了这次请求」，也就是 4xx，而这条
+	// 口径覆盖的是**任意非 2xx**——httpx.CheckStatus 把 500、503、429 一样
+	// 变成带 StatusCode 的 ErrUpstream。值会进库，而库里没有注释可读，所以
+	// 名字得自己说得清。
+	ErrorUpstreamHTTPError = "upstream_http_error"
 
 	// ErrorUpstreamNoAnswer 表示上游这一侧没给出可用的回答。它下面其实混着
 	// 好几种情形：连不上、TLS 失败、超时、响应体解不开、以及上游回了 2xx

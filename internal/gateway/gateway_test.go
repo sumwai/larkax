@@ -485,11 +485,13 @@ func TestUpstreamFailureReleasesReservation(t *testing.T) {
 // 它由释放那一步带着落库（见 handle.release）：不计费的结局不写账本，
 // 账单那一行只有这一次写入机会，而网关是唯一知道上游回了什么的那一层。
 //
-// 三种失败**分开钉**，因为它们在两列上的落法不同——只钉其中一种的话，
-// 把另外两种也写成同一个状态码同样能通过，而那两个数会是编出来的：
+// 四类失败**分开钉**，因为它们在两列上的落法不同——只钉其中一类的话，
+// 把另外几类也写成同一个状态码同样能通过，而那两个数会是编出来的：
 //
 //   - 非 2xx：状态码就是上游回的那个
-//   - 上游没给出状态码：状态码必须留空（HTTP 里没有 0 这个状态码）
+//   - 上游没给出状态码（连不上、响应解不开）：状态码必须留空
+//     （HTTP 里没有 0 这个状态码）
+//   - 上游接受了请求却没吐字：状态码同样留空，分类是另一档
 //   - 不是上游的失败：两列都留空（插件阻断时上游其实是好的）
 func TestUpstreamFailureCarriesEvidenceToRelease(t *testing.T) {
 	for _, tc := range []struct {
@@ -507,13 +509,13 @@ func TestUpstreamFailureCarriesEvidenceToRelease(t *testing.T) {
 			name:       "上游回了 400",
 			fail:       &channel.ErrUpstream{StatusCode: 400, Retryable: false},
 			wantStatus: 400,
-			wantCode:   pipeline.ErrorUpstreamRejected,
+			wantCode:   pipeline.ErrorUpstreamHTTPError,
 		},
 		{
 			name:       "上游回了 500",
 			fail:       &channel.ErrUpstream{StatusCode: 500, Retryable: true},
 			wantStatus: 500,
-			wantCode:   pipeline.ErrorUpstreamRejected,
+			wantCode:   pipeline.ErrorUpstreamHTTPError,
 		},
 		{
 			// 连不上：ErrUpstream 的 StatusCode 是零值，因为一个 HTTP 响应
@@ -529,6 +531,18 @@ func TestUpstreamFailureCarriesEvidenceToRelease(t *testing.T) {
 			name:     "上游 2xx 但体里带 error",
 			fail:     &channel.ErrUpstream{Body: "upstream said: model not found"},
 			wantCode: pipeline.ErrorUpstreamNoAnswer,
+		},
+		{
+			// 上游接受了请求、一个 token 都没吐就断了（流式）。它与上面两条
+			// 的差别是**成因不同**：那两条是「没拿到响应」，这条是拿到了
+			// 2xx 响应头、正文一个字都没有。
+			//
+			// 单独一条钉着，是因为这一支是 upstreamEvidence 里唯一一个不看
+			// ErrUpstream 的分支——把它删掉的话，这条路上的依据会整个丢掉
+			// （两列都 NULL），而库里 NULL 与「这一批恰好没有失败」长得一样。
+			name:     "上游接受请求后没吐字就断了",
+			fail:     errStreamAborted,
+			wantCode: pipeline.ErrorUpstreamStreamAborted,
 		},
 		{
 			// 插件阻断：上游那一次调用是成功的，所以这不是上游的失败，

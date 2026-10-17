@@ -803,7 +803,7 @@ func TestReleaseRecordsUpstreamFailure(t *testing.T) {
 	failure := &pipeline.UpstreamFailure{
 		RequestID: requestID,
 		Status:    http.StatusBadRequest,
-		Code:      pipeline.ErrorUpstreamRejected,
+		Code:      pipeline.ErrorUpstreamHTTPError,
 	}
 	if err := s.Release(ctx, req, failure); err != nil {
 		t.Fatalf("释放失败: %v", err)
@@ -813,8 +813,8 @@ func TestReleaseRecordsUpstreamFailure(t *testing.T) {
 	if !status.Valid || status.Int64 != http.StatusBadRequest {
 		t.Errorf("upstream_status = %v，期望 400", status)
 	}
-	if !code.Valid || code.String != pipeline.ErrorUpstreamRejected {
-		t.Errorf("error_code = %v，期望 %q", code, pipeline.ErrorUpstreamRejected)
+	if !code.Valid || code.String != pipeline.ErrorUpstreamHTTPError {
+		t.Errorf("error_code = %v，期望 %q", code, pipeline.ErrorUpstreamHTTPError)
 	}
 
 	// 重复释放是空操作（那一行已经不是 pending 了），依据不能被第二次的
@@ -827,9 +827,9 @@ func TestReleaseRecordsUpstreamFailure(t *testing.T) {
 		t.Fatalf("重复释放失败: %v", err)
 	}
 	if status, code := upstreamFailureOf(t, db, requestID); status.Int64 != http.StatusBadRequest ||
-		code.String != pipeline.ErrorUpstreamRejected {
+		code.String != pipeline.ErrorUpstreamHTTPError {
 		t.Errorf("重复释放改掉了依据：upstream_status=%v error_code=%v，期望仍是 400 / %q",
-			status, code, pipeline.ErrorUpstreamRejected)
+			status, code, pipeline.ErrorUpstreamHTTPError)
 	}
 }
 
