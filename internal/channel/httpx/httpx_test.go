@@ -281,16 +281,60 @@ func TestSafeRequestHeadersEdgeCases(t *testing.T) {
 }
 
 // 被拒的名单要排序，否则日志里同一个错两次运行顺序不同，搜不到。
+//
+// **两条出口都要覆盖**：全都放行、以及全都拒绝。后者的名单原先直接返回、
+// 没走排序那一行——而「所有自定义头都被拒」恰恰是最需要拿日志比对的情形。
+// 这个用例只喂了「至少一个头能通过」的输入，所以那条出口一直没被测到。
+//
+// 每条输入跑很多轮：名单的先后来自 map 遍历序，跑一轮撞上「恰好有序」是有
+// 可能的，跑多轮才不是靠运气。
 func TestSafeRequestHeadersRejectedIsSorted(t *testing.T) {
-	_, rejected := SafeRequestHeaders(map[string]string{
-		"X-Zeta": "1", "X-Alpha": "2", "X-Middle": "3",
-		"authorization": "4", "api-key": "5",
-	})
-	for i := 1; i < len(rejected); i++ {
-		if rejected[i-1] > rejected[i] {
-			t.Errorf("被拒名单未排序: %v", rejected)
-			break
-		}
+	cases := []struct {
+		name string
+		// custom 里的头名全部会被拒；allRejected 为 true 时一个都不通过，
+		// 用来走「全都拒绝」那条出口。
+		custom      map[string]string
+		allRejected bool
+	}{
+		{
+			name: "部分被拒（有头通过）",
+			custom: map[string]string{
+				"X-Zeta": "1", "X-Alpha": "2", "X-Middle": "3",
+				"content-type": "4", "host": "5", "user-agent": "6",
+			},
+		},
+		{
+			name: "全部被拒（一个都没通过）",
+			custom: map[string]string{
+				"content-type": "1", "host": "2", "user-agent": "3",
+				"openai-version": "4", "anthropic-beta": "5", "accept": "6",
+			},
+			allRejected: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// 跑很多轮：名单的先后来自 map 遍历序，跑一轮撞上「恰好有序」
+			// 是有可能的，跑多轮才不是靠运气。
+			for round := 0; round < 50; round++ {
+				safe, rejected := SafeRequestHeaders(tc.custom)
+				if tc.allRejected && len(safe) != 0 {
+					t.Fatalf("这一组应当全被拒，却放行了 %v", safe)
+				}
+				if !tc.allRejected && len(safe) == 0 {
+					t.Fatalf("这一组应当有头通过，却一个都没通过（那样就退化成另一条出口了）")
+				}
+				if len(rejected) < 2 {
+					t.Fatalf("这一组应当有多个被拒的头，实际 %v", rejected)
+				}
+				for i := 1; i < len(rejected); i++ {
+					if rejected[i-1] > rejected[i] {
+						t.Fatalf("第 %d 轮：被拒名单未排序: %v", round, rejected)
+					}
+				}
+			}
+		})
 	}
 }
 
