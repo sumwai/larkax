@@ -479,6 +479,64 @@ curl -i 127.0.0.1:8080/v1/chat/completions \
 
 推理接口接到公共端口上的进度见下文「当前能做什么」。
 
+## 检查这条链路通不通
+
+上面两节走完之后，「通不通」由一条命令回答：
+
+```sh
+go run ./cmd/larkaxctl doctor
+```
+
+它按顺序查六项，每一项都打出「检查了什么、结论是什么」：
+
+| # | 查什么 |
+|---|---|
+| 1 | 数据库连得上吗、迁移跑到哪一版 |
+| 2 | 有没有至少一条 enabled 且 `models` 非空的渠道 |
+| 3 | 渠道 `models` 里出现的每个名字都在 `model_catalog` 里吗 |
+| 4 | 配过别名的规范名有没有渠道接得住；可服务的规范名在每个服务它的渠道上能不能解析出上游名 |
+| 5 | 可服务的规范名在每个服务它的渠道上都有生效的计价规则吗 |
+| 6 | 有用户吗、每个用户都有钱包行吗、有没有一个钱包余额大于 0 |
+
+第 3、4、5 项回答的是同一个字符串在两个数组里对不上的问题。渠道的 `--models`
+与目录里的规范名差一个字符、或者模型建了却没加进任何渠道的白名单时，调用回
+`503 no available upstream for the requested model`——那句话不会说是哪一个
+名字不对，而 doctor 会点名是哪个渠道、哪个名字。第 6 项把「用户没有钱包行」
+这类缺口在第一次调用之前指出来，而不是让人从 `500` 往回推。
+
+**前六项只读**：不写任何一行、不建任何东西、不发网络请求。
+
+### 真打一次上游
+
+要验证到上游那一端，加 `--live`：它往公共入口发一次非流式推理请求，把状态码、
+耗时与用量打出来。它会花钱，所以默认不跑。
+
+```sh
+go run ./cmd/larkaxctl doctor --live --model claude-x --credential-env LARKAX_API_KEY
+cat key.txt | go run ./cmd/larkaxctl doctor --live --model claude-x --credential-stdin
+```
+
+| 旗标 | 含义 |
+|---|---|
+| `--model <规范名>` | 这次请求用的规范模型名，`--live` 时必填 |
+| `--endpoint chat\|messages` | 打哪个入口，默认 `chat`。`chat` 是 `POST /v1/chat/completions`（`Authorization: Bearer`），`messages` 是 `POST /v1/messages`（`x-api-key`） |
+| `--base-url <URL>` | 网关公共入口的地址，默认 `http://127.0.0.1:8080` |
+| `--credential-stdin` / `--credential-env <变量名>` | 读 API Key 的来源，二者只能给一个 |
+
+这里读的是打网关用的 **API Key**（`apikey create` 发的那把），不是渠道凭证。
+与 `channel create` 同一条约定：**凭证不能写在命令行参数里**——参数会出现在
+`ps` 的输出与 shell 历史里。
+
+### 退出码
+
+`0` 六项都通过（给了 `--live` 时那一次也成功）、`1` 有问题或某一项没跑成、
+`3` 连不上数据库。
+
+**「没跑成」与「通过」是两件事**，输出里分得开：没有可检查的对象时（例如一条
+enabled 渠道都没有，第 3 项就没有名字可查）那一项报「没跑成」而不是「通过」，
+退出码也非 0。两者在安静的终端里长得一样，是这个项目反复踩的坑
+（见 [LESSONS.md](../LESSONS.md) 第 16 条）。
+
 ## 给一把 key 设额度
 
 两列额度可以在创建时给，也可以事后调：
@@ -550,6 +608,7 @@ ingress 规则下。
 | `price` | 计价规则：`add` / `list` |
 | `user` | 用户：`create` |
 | `apikey` | API Key：`create` |
+| `doctor` | 逐项检查这条链路通不通（`--live` 才真打上游） |
 | `snapshot` | 请求快照：`cleanup` / `allowlist` / `show` / `redact` |
 | `idempotency` | 幂等记录的留存清理：`cleanup` / `cleanup --dry-run` |
 | `calendar` | 节假日日历数据：`import` |

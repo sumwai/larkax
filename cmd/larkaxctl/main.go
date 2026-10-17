@@ -64,6 +64,8 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
                                            改一个运行期配置项
   larkaxctl channel create|list|update|enable|disable
                                            渠道（创建时凭证从 stdin 或环境变量读）
+  larkaxctl doctor [--live --model <规范名> ...]
+                                           逐项检查这条链路通不通（只读；--live 才真打上游）
   larkaxctl model add|list|show|update|delete
                                            模型目录里的规范模型
   larkaxctl alias add|list|update|delete|resolve
@@ -120,6 +122,8 @@ func run() error {
 		return runCalendar(os.Args[2:])
 	case "channel":
 		return runChannel(os.Args[2:])
+	case "doctor":
+		return runDoctor(os.Args[2:])
 	case "idempotency":
 		return runIdempotency(os.Args[2:])
 	case "ledger":
