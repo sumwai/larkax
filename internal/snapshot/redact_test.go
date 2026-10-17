@@ -632,7 +632,7 @@ func TestRedactorRejectsWrongUse(t *testing.T) {
 // 绝不回落成「那就把取值留下吧」。
 func TestRedactorFailsClosedOnBrokenTable(t *testing.T) {
 	t.Run("允许表为空", func(t *testing.T) {
-		r := &Redactor{root: RootRequest, table: fieldTable{}, maxBytes: DefaultMaxBytes}
+		r := &Redactor{surface: SurfaceChat, root: RootRequest, table: fieldTable{}, maxBytes: DefaultMaxBytes}
 		_, err := r.RedactRaw(map[string]any{"model": "probe-model"})
 		if !errors.Is(err, ErrRedaction) {
 			t.Fatalf("空表应当导致丢快照: %v", err)
@@ -641,6 +641,7 @@ func TestRedactorFailsClosedOnBrokenTable(t *testing.T) {
 
 	t.Run("表里有认不出的处理方式", func(t *testing.T) {
 		r := &Redactor{
+			surface:  SurfaceChat,
 			root:     RootRequest,
 			table:    fieldTable{"model": fieldKind(200)},
 			maxBytes: DefaultMaxBytes,
@@ -655,7 +656,7 @@ func TestRedactorFailsClosedOnBrokenTable(t *testing.T) {
 	})
 
 	t.Run("字节上限未设置", func(t *testing.T) {
-		r := &Redactor{root: RootRequest, table: buildTable(requestRules)}
+		r := &Redactor{surface: SurfaceChat, root: RootRequest, table: buildTable(requestRules)}
 		_, err := r.RedactRaw(map[string]any{"model": "probe-model"})
 		if !errors.Is(err, ErrRedaction) {
 			t.Fatalf("上限未设置应当导致丢快照: %v", err)

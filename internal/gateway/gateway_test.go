@@ -324,16 +324,17 @@ func (f fixedAliases) UpstreamModel(_ context.Context, _ int64, _ string) (strin
 }
 
 type harness struct {
-	gw              *Gateway
-	rules           *fakeRules
-	candidates      *fakeCandidates
-	reservations    *fakeReservations
-	settlements     *fakeSettlements
-	executor        *fakeExecutor
-	redactor        *fakeRedactor
-	snapshots       *fakeSnapshots
-	releaseFailures *fakeReleaseFailures
-	recorder        *fakeRecorder
+	gw               *Gateway
+	rules            *fakeRules
+	candidates       *fakeCandidates
+	reservations     *fakeReservations
+	settlements      *fakeSettlements
+	executor         *fakeExecutor
+	redactor         *fakeRedactor
+	decisionRedactor *fakeDecisionRedactor
+	snapshots        *fakeSnapshots
+	releaseFailures  *fakeReleaseFailures
+	recorder         *fakeRecorder
 	// aliases 是选路用的别名来源，默认按同名回落。
 	aliases route.ModelAliases
 }
@@ -357,11 +358,12 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 				Reported: true,
 			},
 		}},
-		redactor:        &fakeRedactor{},
-		snapshots:       &fakeSnapshots{},
-		releaseFailures: &fakeReleaseFailures{},
-		recorder:        &fakeRecorder{},
-		aliases:         identityAliases{},
+		redactor:         &fakeRedactor{},
+		decisionRedactor: &fakeDecisionRedactor{},
+		snapshots:        &fakeSnapshots{},
+		releaseFailures:  &fakeReleaseFailures{},
+		recorder:         &fakeRecorder{},
+		aliases:          identityAliases{},
 	}
 	for _, o := range opts {
 		o(h)
@@ -372,16 +374,17 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 			Rules:    h.rules,
 			Programs: expr.NewCache(16),
 		},
-		Router:          &route.Router{Rand: rand.New(rand.NewSource(1)), Aliases: h.aliases},
-		Candidates:      h.candidates,
-		Reservations:    h.reservations,
-		Settlements:     h.settlements,
-		Executor:        h.executor,
-		Redactor:        h.redactor,
-		Snapshots:       h.snapshots,
-		ReleaseFailures: h.releaseFailures,
-		Recorder:        h.recorder,
-		Now:             func() time.Time { return fixedAt },
+		Router:           &route.Router{Rand: rand.New(rand.NewSource(1)), Aliases: h.aliases},
+		Candidates:       h.candidates,
+		Reservations:     h.reservations,
+		Settlements:      h.settlements,
+		Executor:         h.executor,
+		Redactor:         h.redactor,
+		DecisionRedactor: h.decisionRedactor,
+		Snapshots:        h.snapshots,
+		ReleaseFailures:  h.releaseFailures,
+		Recorder:         h.recorder,
+		Now:              func() time.Time { return fixedAt },
 	}
 	return h
 }

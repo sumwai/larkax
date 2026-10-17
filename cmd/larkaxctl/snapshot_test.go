@@ -132,28 +132,34 @@ func TestPrintAllowlistsCarriesEveryNote(t *testing.T) {
 	if len(roots) < 2 {
 		t.Fatalf("方向应当至少有两个，得到 %d 个", len(roots))
 	}
+	surfaces := snapshot.Surfaces()
+	if len(surfaces) < 2 {
+		t.Fatalf("表面应当至少有两个，得到 %d 个", len(surfaces))
+	}
 
 	var buf bytes.Buffer
-	printAllowlists(&buf, roots)
+	printAllowlists(&buf, surfaces, roots)
 	out := buf.String()
 
-	for _, root := range roots {
-		if !strings.Contains(out, "方向 "+string(root)+"：") {
-			t.Errorf("输出里没有方向 %s 的分段标题", root)
-		}
-		rules := snapshot.Allowlist(root)
-		if len(rules) == 0 {
-			t.Fatalf("方向 %s 的允许表是空的，这条命令就没有内容可打", root)
-		}
-		for _, rule := range rules {
-			if strings.TrimSpace(rule.Note) == "" {
-				t.Errorf("方向 %s 的 %s 没有 Note，用例需要更新", root, rule.Path)
-				continue
+	for _, s := range surfaces {
+		for _, root := range roots {
+			if !strings.Contains(out, "表面 "+string(s)+" 方向 "+string(root)+"：") {
+				t.Errorf("输出里没有表面 %s 方向 %s 的分段标题", s, root)
 			}
-			// 按整行比对而不是子串：一条 Note 是另一条的前缀时，
-			// 子串匹配分辨不出「后一条被截断了」。
-			if !strings.Contains(out, "    Note="+rule.Note+"\n") {
-				t.Errorf("方向 %s 的 %s 的 Note 没有完整打出来", root, rule.Path)
+			rules := snapshot.AllowlistFor(s, root)
+			if len(rules) == 0 {
+				t.Fatalf("表面 %s 方向 %s 的允许表是空的，这条命令就没有内容可打", s, root)
+			}
+			for _, rule := range rules {
+				if strings.TrimSpace(rule.Note) == "" {
+					t.Errorf("表面 %s 方向 %s 的 %s 没有 Note，用例需要更新", s, root, rule.Path)
+					continue
+				}
+				// 按整行比对而不是子串：一条 Note 是另一条的前缀时，
+				// 子串匹配分辨不出「后一条被截断了」。
+				if !strings.Contains(out, "    Note="+rule.Note+"\n") {
+					t.Errorf("表面 %s 方向 %s 的 %s 的 Note 没有完整打出来", s, root, rule.Path)
+				}
 			}
 		}
 	}
@@ -170,14 +176,52 @@ func TestPrintAllowlistsCarriesEveryNote(t *testing.T) {
 // TestPrintAllowlistsSingleDirection 确认 --direction 只打一段。
 func TestPrintAllowlistsSingleDirection(t *testing.T) {
 	var buf bytes.Buffer
-	printAllowlists(&buf, []snapshot.Root{snapshot.RootResponse})
+	printAllowlists(&buf, []snapshot.Surface{snapshot.SurfaceChat}, []snapshot.Root{snapshot.RootResponse})
 	out := buf.String()
 
-	if !strings.Contains(out, "方向 response：") {
+	if !strings.Contains(out, "表面 chat 方向 response：") {
 		t.Errorf("指定 response 时应当只打这一段：\n%s", out)
 	}
 	if strings.Contains(out, "方向 request：") {
 		t.Errorf("指定 response 时不该把 request 那一段也打出来")
+	}
+}
+
+// TestPrintAllowlistsSingleSurface 确认 --surface 只打一张表。
+//
+// 这一条要钉的是「两条表面不会互相顶掉」：分段标题里带表面名，所以
+// 「指定决策却打了两张」与「指定 chat 却打了决策那张」都会红。
+func TestPrintAllowlistsSingleSurface(t *testing.T) {
+	var buf bytes.Buffer
+	printAllowlists(&buf, []snapshot.Surface{snapshot.SurfaceDecision},
+		[]snapshot.Root{snapshot.RootRequest})
+	out := buf.String()
+
+	if !strings.Contains(out, "表面 decision 方向 request：") {
+		t.Errorf("指定 decision 时应当只打这一段：\n%s", out)
+	}
+	if strings.Contains(out, "表面 chat") {
+		t.Errorf("指定 decision 时不该把 chat 那张表也打出来")
+	}
+	if strings.Contains(out, "方向 response：") {
+		t.Errorf("指定 request 时不该把 response 那一段也打出来")
+	}
+}
+
+// TestSurfaceForRejectsUnknownName 确认拼错的表面名会被拦下。
+//
+// 回落成 chat 的后果是「一条按决策表写的字段静静按对话表处理」——
+// 命令照常退出 0，打出来的东西看着也正常。
+func TestSurfaceForRejectsUnknownName(t *testing.T) {
+	if _, err := surfaceFor("decison", snapshot.SurfaceChat); err == nil {
+		t.Fatal("拼错的表面名应当报错，而不是回落到默认值")
+	}
+	if got, err := surfaceFor("decision", snapshot.SurfaceChat); err != nil || got != snapshot.SurfaceDecision {
+		t.Fatalf("指名 decision 得到 %q / %v", got, err)
+	}
+	// 空串表示默认值：redact 不写 --surface 时走 chat。
+	if got, err := surfaceFor("", snapshot.SurfaceChat); err != nil || got != snapshot.SurfaceChat {
+		t.Fatalf("空串应当回落到传入的默认表面，得到 %q / %v", got, err)
 	}
 }
 

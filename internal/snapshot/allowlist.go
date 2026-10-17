@@ -498,12 +498,19 @@ type FieldRule struct {
 	Note string
 }
 
-// Allowlist 返回某个方向的允许表。
+// Allowlist 返回 chat 表面上某个方向的允许表。
+//
+// chat 是本包最常被用到的表面，所以它有一个不必写表面名的入口；
+// 别的表面走 AllowlistFor。
+func Allowlist(root Root) []FieldRule {
+	return AllowlistFor(SurfaceChat, root)
+}
+
+// exportRules 把内部的允许表投影成包外可见的那份视图。
 //
 // 返回副本：调用方改了结果不该影响脱敏行为，脱敏器也不该有可被外部篡改的状态。
-func Allowlist(root Root) []FieldRule {
-	src, ok := allowlists[root]
-	if !ok {
+func exportRules(src []fieldRule) []FieldRule {
+	if src == nil {
 		return nil
 	}
 	out := make([]FieldRule, len(src))

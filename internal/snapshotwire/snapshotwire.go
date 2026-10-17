@@ -73,6 +73,14 @@ type Collector struct {
 	requestRedactor  *snapshot.Redactor
 	responseRedactor *snapshot.Redactor
 
+	// 决策那条表面（见 internal/gateway 的 DecisionRedactor）的两个脱敏器。
+	//
+	// 它们与上面那两个**不复用**：允许表按线格式建，而 chat 与决策两条表面
+	// 没有任何一个字段是共用的（见 internal/snapshot 的 decision.go）。
+	// 复用一张表意味着两条表面互相污染彼此的兜底规则。
+	decisionRequestRedactor  *snapshot.Redactor
+	decisionResponseRedactor *snapshot.Redactor
+
 	// store 是落库层。**关掉采集时它也照样建**：清理存量分区只用得上它，
 	// 与「要不要写新快照」无关（见 New）。
 	store *Store
@@ -140,8 +148,23 @@ func New(cfg Config, db DB, logger *slog.Logger) (*Collector, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 决策表面同样两个方向各一个。表不同，方向取值相同——方向是落库那一列
+	// 的取值，而它只有 request / response 两个（见 internal/snapshot 的
+	// Surface 注释）。少建一个的话，那条路径会在运行期解引用 nil。
+	decReq, err := snapshot.NewFor(snapshot.SurfaceDecision, snapshot.RootRequest,
+		snapshot.WithMaxBytes(cfg.MaxBytes))
+	if err != nil {
+		return nil, err
+	}
+	decResp, err := snapshot.NewFor(snapshot.SurfaceDecision, snapshot.RootResponse,
+		snapshot.WithMaxBytes(cfg.MaxBytes))
+	if err != nil {
+		return nil, err
+	}
 	c.requestRedactor = req
 	c.responseRedactor = resp
+	c.decisionRequestRedactor = decReq
+	c.decisionResponseRedactor = decResp
 	return c, nil
 }
 
@@ -190,6 +213,18 @@ func (c *Collector) Redactor() gateway.Redactor {
 
 // Sink 返回给网关用的落库层；不采集时返回 nil。
 func (c *Collector) Sink() gateway.SnapshotSink {
+	if !c.Collecting() {
+		return nil
+	}
+	return c
+}
+
+// DecisionRedactor 返回给网关用的决策表面脱敏器；不采集时返回 nil。
+//
+// 与 Redactor 分开一个入口，是因为网关那两个字段是两个独立的接口
+// （见 gateway.DecisionRedactor）：它们任一个为 nil 都只关掉对应的那条路，
+// 而不是把两条一起关掉。返回 nil 而不是空实现的理由同 Redactor。
+func (c *Collector) DecisionRedactor() gateway.DecisionRedactor {
 	if !c.Collecting() {
 		return nil
 	}
@@ -331,8 +366,9 @@ func (c *Collector) Stats() Stats {
 // 两个断言都写在这里而不是各自的实现处：本包的存在意义就是这个适配，
 // 它不成立时应该在这一行编译失败。
 var (
-	_ gateway.Redactor     = (*Collector)(nil)
-	_ gateway.SnapshotSink = (*Collector)(nil)
+	_ gateway.Redactor         = (*Collector)(nil)
+	_ gateway.SnapshotSink     = (*Collector)(nil)
+	_ gateway.DecisionRedactor = (*Collector)(nil)
 )
 
 // loggerOrContext 取出请求链路里的日志器，没有就用本包自己的。

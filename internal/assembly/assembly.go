@@ -277,7 +277,12 @@ func Build(cfg Config) (*App, error) {
 		Recorder:  channels.NewRecorder(cfg.DB, staleAfter),
 		Redactor:  snapshots.Redactor(),
 		Snapshots: snapshots.Sink(),
-		Executor:  cfg.Executor,
+		// 决策那条表面的脱敏器与上面两个同源、不同表：两条表面的字段
+		// 没有一个共用的（见 internal/snapshot 的 decision.go）。
+		// 它与 Snapshots 各自独立地为 nil——装配层少接一个字段时的表现
+		// 应当是「这条路径不采快照」，而不是请求失败。
+		DecisionRedactor: snapshots.DecisionRedactor(),
+		Executor:         cfg.Executor,
 		// 决策那条路径与 chat 共用同一个执行器：它按渠道类型查表，
 		// 而「这个类型支不支持决策」由适配器有没有实现 systemone.Decider
 		// 决定（见 upstream.Executor.Decide）。填同一个值而不是再要一个
