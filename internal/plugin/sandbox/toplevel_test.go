@@ -26,7 +26,8 @@ import (
 // 「只有宿主能力注入之后才发作」——编译期没有注入能力，
 // 那一句被跳过，模块编译得过；请求期注入之后再求值就会挂住。
 // 这个形态本身就是真实的：插件完全可以按「能力在不在」决定做什么。
-func Test顶层死循环被调用超时拉回来(t *testing.T) {
+// 顶层死循环被调用超时拉回来。
+func TestTopLevelInfiniteLoopIsCutOffByCallTimeout(t *testing.T) {
 	const 超时 = 40 * time.Millisecond
 	m, err := Compile("p", `
 if (typeof globalThis.__larkax !== "undefined") { while (true) {} }
@@ -78,7 +79,8 @@ export default { onRequest() { return {}; } };
 // 这条钉的是「ctx 有没有真的传下去」。把 loadTopLevel 的父 ctx 换回
 // context.Background() 之后，下面这个探针会一直转到 CallTimeout（10s）才返回，
 // 于是这条用例挂——这正是它存在的意义。
-func Test顶层求值被请求ctx取消拉回来(t *testing.T) {
+// 顶层求值被请求ctx取消拉回来。
+func TestTopLevelEvaluationIsCutOffByRequestCtxCancel(t *testing.T) {
 	const 调用超时 = 10 * time.Second
 	m, err := Compile("p", `
 if (typeof globalThis.__larkax !== "undefined") { while (true) {} }
@@ -127,7 +129,8 @@ export default { onRequest() { return {}; } };
 // 「每个宿主函数自带 deadline」是宿主阻塞时唯一可靠的机制（Interrupt 对
 // 阻塞的宿主函数无效）。顶层这一段曾经拿到的是注入时那个 ctx，
 // 而调用方传 context.Background() 是最常见的写法——那时它永不结束。
-func Test顶层求值的宿主函数拿到deadline(t *testing.T) {
+// 顶层求值的宿主函数拿到deadline。
+func TestHostFuncDuringTopLevelGetsDeadline(t *testing.T) {
 	const 超时 = 300 * time.Millisecond
 	m, err := Compile("p", `
 if (typeof globalThis.__larkax !== "undefined") { globalThis.__larkax.看(); }
@@ -190,7 +193,8 @@ export default { onRequest() { return {}; } };
 // 探针形状：顶层先调一个睡 300ms、不看 ctx 的宿主函数（把超时逼出来），
 // 再调一个记录自己 ctx 的宿主函数。第二次调用的结局只有两种可能，两种都算
 // 被兜住了；**放行且 ctx 还能用**才是这条要抓的那一种。
-func Test顶层超时后残余代码的宿主调用被兜住(t *testing.T) {
+// 顶层超时后残余代码的宿主调用被兜住。
+func TestHostCallsFromLeftoverTopLevelCodeAreContained(t *testing.T) {
 	const 超时 = 50 * time.Millisecond
 	m, err := Compile("p", `
 if (typeof globalThis.__larkax !== "undefined") {
@@ -265,7 +269,8 @@ export default { onRequest() { return {}; } };
 // UnmarshalWith 会执行插件代码：值带 toJSON 时它走 AppendJSON 那条路，
 // 而那条路是跑 JavaScript。解码曾经发生在 call() 返回之后——那时
 // deadline 已经撤销、callCtx 也清空了，于是这段代码既跑不完也没有超时。
-func Test出参解码的死循环被调用超时拉回来(t *testing.T) {
+// 出参解码的死循环被调用超时拉回来。
+func TestInfiniteLoopInOutputDecodingIsCutOffByCallTimeout(t *testing.T) {
 	const 超时 = 40 * time.Millisecond
 	m, err := Compile("p", `
 export default {
@@ -307,7 +312,8 @@ export default {
 //
 // 与上一条分开：死循环钉的是「中断能不能插进去」，这条钉的是
 // 「一次很慢但会结束的解码同样受同一个预算约束」——它才是更常见的那一种。
-func Test出参解码超预算被调用超时拉回来(t *testing.T) {
+// 出参解码超预算被调用超时拉回来。
+func TestOutputDecodingOverBudgetIsCutOffByCallTimeout(t *testing.T) {
 	const (
 		超时   = 30 * time.Millisecond
 		解码耗时 = 400 * time.Millisecond
@@ -355,7 +361,8 @@ export default {
 // 解码期间调宿主能力时，宿主函数拿到的 ctx 同样要带 deadline。
 //
 // 这一条与顶层那条是一对：两段都曾经落在「没有 deadline 的窗口」里。
-func Test出参解码期间宿主函数拿到deadline(t *testing.T) {
+// 出参解码期间宿主函数拿到deadline。
+func TestHostFuncDuringOutputDecodingGetsDeadline(t *testing.T) {
 	const 超时 = 500 * time.Millisecond
 	m, err := Compile("p", `
 export default {

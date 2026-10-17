@@ -22,7 +22,8 @@ import (
 // 死循环必须被 CallTimeout 拉回来，且在时限附近返回（不是永远挂住）。
 // 这里的余量给得很宽（2 倍 + 1 秒），因为要认证的是「它确实会回来」，
 // 而不是精确的调度延迟。
-func Test死循环被调用超时拉回来(t *testing.T) {
+// 死循环被调用超时拉回来。
+func TestInfiniteLoopIsCutOffByCallTimeout(t *testing.T) {
 	const 超时 = 40 * time.Millisecond
 	m, err := Compile("p", `export default { onRequest() { while (true) {} } };`)
 	if err != nil {
@@ -60,7 +61,8 @@ func Test死循环被调用超时拉回来(t *testing.T) {
 }
 
 // 超时之后同一个 runtime 不再被使用：它的调用栈可能还在跑。
-func Test超时后的runtime不再被调用(t *testing.T) {
+// 超时后的runtime不再被调用。
+func TestRuntimeIsNotUsedAfterTimeout(t *testing.T) {
 	m, err := Compile("p", `export default { onRequest() { while (true) {} }, onUsage() { return {}; } };`)
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +88,8 @@ func Test超时后的runtime不再被调用(t *testing.T) {
 // 内存上限超了走 Interrupt 路径，**脚本的 try/catch 拦不住它**。
 // 这条用一个「catch 包住的分配循环」来钉：如果 catch 能拦住，
 // 插件就能把内存错误吃掉、照常返回结果，宿主永远不知道它超了。
-func Test内存超限时tracatch拦不住(t *testing.T) {
+// 内存超限时 try/catch 拦不住。
+func TestMemoryOverrunIsNotCatchableByTryCatch(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -140,7 +143,8 @@ export default {
 // 内存上限要真的在限额附近停下，而不是一路吃到进程 OOM。
 // 这条钉住「它确实是被内存上限挡住的」：错误信息里带上了具体上限值，
 // 而且耗时远小于调用预算。
-func Test内存上限的错误信息带上上限值(t *testing.T) {
+// 内存上限的错误信息带上上限值。
+func TestMemoryLimitErrorCarriesTheLimitValue(t *testing.T) {
 	const 上限 = 1 << 20
 	m, err := Compile("p", `
 export default {
@@ -186,7 +190,8 @@ export default {
 // 入参超过 MaxInputBytes：报 ErrTooLarge，**而且插件根本没被调用**。
 // 用一个会改模块变量的插件来断言这一点——如果插件跑过，
 // 下一次调用就能看到计数变了。
-func Test入参超限时插件完全没被调用(t *testing.T) {
+// 入参超限时插件完全没被调用。
+func TestInputOverLimitNeverCallsPlugin(t *testing.T) {
 	m, err := Compile("p", `
 let 调用次数 = 0;
 export default {
@@ -234,7 +239,8 @@ export default {
 
 // 入参的判据是「字节数 > 上限」：恰好等于上限要放行，少一个字节就拒。
 // 这条钉住比较的方向，别把边界判反。
-func Test入参字节上限的边界是严格大于(t *testing.T) {
+// 入参字节上限的边界是严格大于。
+func TestInputByteLimitBoundaryIsStrictlyGreater(t *testing.T) {
 	m, err := Compile("p", `export default { onRequest(ctx) { return { 字段数: Object.keys(ctx).length }; } };`)
 	if err != nil {
 		t.Fatal(err)
@@ -270,7 +276,8 @@ func Test入参字节上限的边界是严格大于(t *testing.T) {
 }
 
 // 无法序列化的入参同样算 ErrTooLarge（它进不了边界）。
-func Test无法序列化的入参报ErrTooLarge(t *testing.T) {
+// 无法序列化的入参报ErrTooLarge。
+func TestUnserializableInputReturnsErrTooLarge(t *testing.T) {
 	m, err := Compile("p", `export default { onRequest(ctx) { return {}; } };`)
 	if err != nil {
 		t.Fatal(err)
@@ -295,7 +302,8 @@ func Test无法序列化的入参报ErrTooLarge(t *testing.T) {
 
 // 出参超过 MaxOutputBytes：ErrTooLarge，并且**出参保持原样**——
 // 半截写入比不写更危险。
-func Test出参超限时报ErrTooLarge且不写出参(t *testing.T) {
+// 出参超限时报ErrTooLarge且不写出参。
+func TestOutputOverLimitReturnsErrTooLargeWithoutWritingOutput(t *testing.T) {
 	m, err := Compile("p", `export default { onRequest() { return { 内容: "x".repeat(4000) }; } };`)
 	if err != nil {
 		t.Fatal(err)
@@ -351,7 +359,8 @@ func Test出参超限时报ErrTooLarge且不写出参(t *testing.T) {
 // 没有它的话，插件在超时后继续查日历、写 KV，而请求那边早就返回了。
 //
 // 宿主函数写的东西全部走 channel，因为它跑在另一个 goroutine 上。
-func Test宿主函数阻塞时Interrupt无效(t *testing.T) {
+// 宿主函数阻塞时Interrupt无效。
+func TestInterruptDoesNotStopBlockedHostFunc(t *testing.T) {
 	const (
 		宿主耗时 = 200 * time.Millisecond
 		调用超时 = 50 * time.Millisecond
@@ -430,7 +439,8 @@ export default {
 // 与上一条相对：宿主函数**自己尊重 ctx** 时不会拖住调用。
 // 但它的 ctx 来自 NewRuntime（请求 ctx），不是来自 CallTimeout——
 // 见下一条测试。这里让请求 ctx 带上 deadline，宿主函数便能在预算内返回。
-func Test宿主函数尊重请求ctx时能及时返回(t *testing.T) {
+// 宿主函数尊重请求ctx时能及时返回。
+func TestHostFuncRespectingRequestCtxReturnsInTime(t *testing.T) {
 	const 宿主耗时 = 200 * time.Millisecond
 	m, err := Compile("p", `
 export default {
@@ -490,7 +500,8 @@ export default {
 // 如果这里给的是 NewRuntime 时那个 ctx，而调用方传了
 // context.Background()（最常见的写法），宿主函数就拿到一个永不结束的
 // ctx——那时没有任何一道防线，一次慢查询能把请求挂到上游超时。
-func TestCallTimeout进入宿主函数的ctx(t *testing.T) {
+// CallTimeout进入宿主函数的ctx。
+func TestCallTimeoutReachesHostFuncCtx(t *testing.T) {
 	const 调用超时 = 30 * time.Millisecond
 	m, err := Compile("p", `export default { onRequest() { globalThis.__larkax.看(); return {}; } };`)
 	if err != nil {
@@ -561,7 +572,8 @@ func TestCallTimeout进入宿主函数的ctx(t *testing.T) {
 
 // 客户端断开：ctx 被取消后 Call 返回 ErrClientCanceled，
 // 与「插件自己超时」是两种失败，排查方向完全不同。
-func Test客户端取消时返回ErrClientCanceled(t *testing.T) {
+// 客户端取消时返回ErrClientCanceled。
+func TestClientCancelReturnsErrClientCanceled(t *testing.T) {
 	m, err := Compile("p", `export default { onRequest() { while (true) {} } };`)
 	if err != nil {
 		t.Fatal(err)
@@ -609,7 +621,8 @@ func Test客户端取消时返回ErrClientCanceled(t *testing.T) {
 // 顶层写了一段忙等：ctx 已经结束，而 select 里 `ctx.Done()` 那一支是**立刻**
 // 可选的，忙等保证 `Load` 不会抢在它前面跑完。没有这一段的话，这条用例会变成
 // 「谁先到」的竞态（LESSONS 第 15 条）。
-func Test调用前ctx已取消时不建runtime(t *testing.T) {
+// 调用前ctx已取消时不建runtime。
+func TestCanceledCtxBeforeCallSkipsRuntimeCreation(t *testing.T) {
 	m, err := Compile("p", `
 if (typeof globalThis.__larkax !== "undefined") { const t = Date.now(); while (Date.now() - t < 200) {} }
 export default {
@@ -643,7 +656,8 @@ export default {
 
 // Limits 的零值与负值都当作「没设」，落到 DefaultLimits。
 // 这条钉住「忘了设限额 ≠ 没有限额」——后者是无限循环吃满 CPU 的那一种。
-func Test限额的零值与负值都落到默认值(t *testing.T) {
+// 限额的零值与负值都落到默认值。
+func TestZeroAndNegativeLimitsFallBackToDefaults(t *testing.T) {
 	for _, 输入 := range []Limits{
 		{},
 		{CallTimeout: -1, MemoryBytes: -1, MaxInputBytes: -1, MaxOutputBytes: -1},
@@ -671,7 +685,8 @@ func Test限额的零值与负值都落到默认值(t *testing.T) {
 // DefaultLimits 的取值本身就是契约：改它是一次行为变更。
 // 五秒是「一次请求的预算大部分要给上游」的结果；
 // 内存 64 MiB 相对一份请求体是宽的，但足以挡住一个吃光进程内存的循环。
-func Test默认限额的取值(t *testing.T) {
+// 默认限额的取值。
+func TestDefaultLimitsValues(t *testing.T) {
 	if DefaultLimits.CallTimeout != 5*time.Second {
 		t.Errorf("CallTimeout = %v，想要 5s", DefaultLimits.CallTimeout)
 	}

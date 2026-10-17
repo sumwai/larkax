@@ -263,6 +263,42 @@ jobs:
       - name: 分层自查
         run: bash scripts/check-layering.sh
 
+      # 函数声明的标识符只许用 ASCII：AGENTS.md 写着「代码、标识符、命令、
+      # 文件路径、必须保留原文的技术术语保持英文」。
+      #
+      # 它最初只盯测试函数名：落地时全仓有 75 个 `func Test` 的标识符带中文，
+      # 其中 71 个挤在 internal/plugin/sandbox 一个包里——「有约定、没有门」时
+      # 约定会自己长（LESSONS 第 22 条）。中文描述不丢，它挪到函数体上方一行注释。
+      # 后来判据放宽到**全部 `func` 声明**（普通 / 方法 / 泛型三种形态）：
+      # 约定说的是「标识符」，不是「测试函数名」，而留几个已知的中文标识符在
+      # 仓库里、门又照不到它们，正是这个项目不接受的那种「悬着」。
+      #
+      # 判据不能只看退出码。这道门通过时是**沉默**的，而「一个文件都没扫到」
+      # 与「干净」在输出里长得一样（LESSONS 第 16 条）。所以这里要它自己给出的
+      # 正向证据——扫了多少个文件、找到多少条声明——与上面 deadmethods 那一步
+      # 同一个形状。
+      - name: 函数名门禁
+        run: |
+          set +e
+          out=$(bash scripts/check-test-names.sh 2>&1)
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+
+          if ! printf '%s\n' "$out" | grep -qE '^扫描器跑了 [1-9][0-9]* 个 \.go 文件 / [1-9][0-9]* 个 func 声明$'; then
+            echo "::error::这道门没有给出「扫了多少」的正向证据，不能当作通过。"
+            exit 1
+          fi
+
+          if [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+
+      # 与其它扫描器同理：判据写反时它的输出与「干净」一模一样，
+      # 所以自测不是可选的（LESSONS 第 2、16、23 条）。
+      - name: 函数名门禁自测
+        run: bash scripts/check-test-names.test.sh
+
       - name: 扫描器自测
         run: bash scripts/check-redlines.test.sh
 

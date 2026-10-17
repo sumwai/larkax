@@ -20,18 +20,18 @@ import (
 //
 // 记号是一眼看得出不该外泄的串，不是像真凭证的东西：断言的是「它没出现」，
 // 用真形态的取值反而会让红线扫描器报警。
-const 宿主原文记号 = "dsn-fragment-MUST-NOT-LEAK"
+const hostRawMark = "dsn-fragment-MUST-NOT-LEAK"
 
-// 调用 跑一个宿主函数，只取错误——本文件只关心错误出口。
-func 调用(fn func(context.Context, []moejs.Value) (moejs.Value, error), args []moejs.Value) error {
+// invoke 跑一个宿主函数，只取错误——本文件只关心错误出口。
+func invoke(fn func(context.Context, []moejs.Value) (moejs.Value, error), args []moejs.Value) error {
 	_, err := fn(context.Background(), args)
 	return err
 }
 
-// 断言分类 检查一个错误：分类码正确、原文不在 Error() 里、文案非空。
+// assertClassified 检查一个错误：分类码正确、原文不在 Error() 里、文案非空。
 //
 // 原文传 nil 表示这个错误没有 Cause（校验失败那一类），此时跳过 errors.Is。
-func 断言分类(t *testing.T, err error, code string, 原文 error) {
+func assertClassified(t *testing.T, err error, code string, 原文 error) {
 	t.Helper()
 	if err == nil {
 		t.Fatal("期望报错，实际没有")
@@ -43,7 +43,7 @@ func 断言分类(t *testing.T, err error, code string, 原文 error) {
 	if ce.Code != code {
 		t.Errorf("分类码 = %q，想要 %q", ce.Code, code)
 	}
-	if strings.Contains(err.Error(), 宿主原文记号) {
+	if strings.Contains(err.Error(), hostRawMark) {
 		t.Errorf("插件会看到宿主原文: %q", err.Error())
 	}
 	if ce.Message == "" {
@@ -56,8 +56,9 @@ func 断言分类(t *testing.T, err error, code string, 原文 error) {
 }
 
 // KV 的三个函数在依赖失败时都要分类，而不是把存储层的话原样转给插件。
-func TestKV依赖错误不回显原文(t *testing.T) {
-	原文 := errors.New(宿主原文记号)
+// KV依赖错误不回显原文。
+func TestKVDependencyErrorTextIsNotEchoed(t *testing.T) {
+	原文 := errors.New(hostRawMark)
 	store := newFakeKV()
 	store.err = 原文
 	env := kvEnv(store, "p", 7)
@@ -72,7 +73,7 @@ func TestKV依赖错误不回显原文(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			断言分类(t, 调用(kvFunc(t, env, tc.name), tc.args),
+			assertClassified(t, invoke(kvFunc(t, env, tc.name), tc.args),
 				sandbox.CodeUnavailable, 原文)
 		})
 	}
@@ -80,8 +81,9 @@ func TestKV依赖错误不回显原文(t *testing.T) {
 
 // 日历的六个函数同理。它们在插件侧是同一个命名空间下的不同问题，
 // 但依赖失败的原因与处置是同一个。
-func TestCalendar依赖错误不回显原文(t *testing.T) {
-	原文 := errors.New(宿主原文记号)
+// Calendar依赖错误不回显原文。
+func TestCalendarDependencyErrorTextIsNotEchoed(t *testing.T) {
+	原文 := errors.New(hostRawMark)
 	cal := &fakeCalendar{err: 原文, peakErr: 原文}
 	env := calEnv(cal)
 
@@ -98,7 +100,7 @@ func TestCalendar依赖错误不回显原文(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			断言分类(t, 调用(capability(t, Standard(env), capCalendar).Funcs[tc.name], tc.args),
+			assertClassified(t, invoke(capability(t, Standard(env), capCalendar).Funcs[tc.name], tc.args),
 				sandbox.CodeUnavailable, 原文)
 		})
 	}
@@ -109,7 +111,8 @@ func TestCalendar依赖错误不回显原文(t *testing.T) {
 //
 // 它与依赖失败的区别在**分类码**上，而不在「能不能说清楚」上——
 // 消毒不等于把信息全丢了。
-func Test校验失败的文案保留给插件(t *testing.T) {
+// 校验失败的文案保留给插件。
+func TestValidationFailureMessageIsKeptForPlugin(t *testing.T) {
 	env := kvEnv(newFakeKV(), "p", 7)
 
 	cases := []struct {
@@ -125,8 +128,8 @@ func Test校验失败的文案保留给插件(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := 调用(kvFunc(t, env, "set"), tc.args)
-			断言分类(t, err, sandbox.CodeBadArgument, nil)
+			err := invoke(kvFunc(t, env, "set"), tc.args)
+			assertClassified(t, err, sandbox.CodeBadArgument, nil)
 
 			var ce *sandbox.CapabilityError
 			errors.As(err, &ce)
@@ -139,7 +142,8 @@ func Test校验失败的文案保留给插件(t *testing.T) {
 
 // 时间戳缺失/非整数走的是同一个出口，文案里要带上它叫什么：
 // 「时间戳 不是整数」比「第 1 个参数不是整数」有用得多。
-func Test日历参数校验的文案带参数名(t *testing.T) {
+// 日历参数校验的文案带参数名。
+func TestCalendarValidationMessageCarriesParamName(t *testing.T) {
 	env := calEnv(&fakeCalendar{})
 
 	for _, tc := range []struct {
@@ -152,8 +156,8 @@ func Test日历参数校验的文案带参数名(t *testing.T) {
 		{"地区为空", js(int64(testInstant.Unix()), ""), "地区"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := 调用(capability(t, Standard(env), capCalendar).Funcs["kind"], tc.args)
-			断言分类(t, err, sandbox.CodeBadArgument, nil)
+			err := invoke(capability(t, Standard(env), capCalendar).Funcs["kind"], tc.args)
+			assertClassified(t, err, sandbox.CodeBadArgument, nil)
 
 			var ce *sandbox.CapabilityError
 			errors.As(err, &ce)
