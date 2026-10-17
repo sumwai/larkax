@@ -51,9 +51,9 @@ func validEntryType(t EntryType) bool {
 // 目前只有测试在调它。它本来是给配置校验与界面枚举用的——两者都还没有
 // 调用方；生产里的类型校验走的是 validEntryType。
 //
-// 注意那条用例（TestEntryTypesMatchDatabaseConstraint）比对的是它自己
-// 写死的一份字面量，**没有读迁移文件**：迁移里加一个类型而这里没加，
-// 那条用例不会响。
+// 它与迁移文件里 ledger_entries.entry_type 的 CHECK 约束由
+// TestEntryTypesMatchDatabaseConstraint 逐条比对（那条用例真的读迁移文件），
+// 所以在这里加一个类型而没改迁移、或者反过来，都会让用例挂。
 func EntryTypes() []EntryType {
 	return []EntryType{
 		EntryTopup, EntryConsume, EntryRefund, EntrySettle,

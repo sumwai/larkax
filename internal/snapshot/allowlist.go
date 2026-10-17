@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"slices"
 	"sort"
 	"strings"
 )
@@ -35,13 +36,32 @@ const (
 	RootResponse Root = "response"
 )
 
+// rootValues 是全部已知方向的取值。
+//
+// # 为什么要单独声明一份
+//
+// 原来 valid() 里写的是 `r == RootRequest || r == RootResponse`——一个内联比较，
+// 没法被遍历。于是「允许表里多了一个方向、而 valid() 没跟上」这件事在测试里
+// 没有位置：用例只能拿同一组字面量去测同一组字面量，改哪一边都自洽。
+//
+// 声明成一份清单之后，valid() 认的取值可以被逐条走一遍，与 allowlists
+// （哪个方向采哪些字段）互相比对——两处都可以改，只改一处就会挂。
+// 见 TestRootValuesMatchSchema。
+//
+// 它与 allowlists 是两个问题：这里答「哪些取值是已知方向」，表答「每个方向
+// 采哪些字段」。合成一份的话，两道判据就退化成一条恒真的自证。
+var rootValues = []Root{
+	RootRequest,
+	RootResponse,
+}
+
 // valid 判断方向是否已知。
 //
 // 目前只有测试在调它。**New 不用它**：那里查的是「有没有这个方向的表」
-// （`allowlists[root]`），比「取值是不是那两个常量之一」更强——加了常量
+// （`allowlists[root]`），比「取值是不是已知方向之一」更强——加了取值
 // 却忘了写表时，valid 会说是，而查表会报错，后者才是想要的结论。
 func (r Root) valid() bool {
-	return r == RootRequest || r == RootResponse
+	return slices.Contains(rootValues, r)
 }
 
 // fieldKind 是一个白名单条目告诉脱敏器怎么处理某个字段。
@@ -549,6 +569,9 @@ func (k fieldKind) String() string {
 }
 
 // Roots 返回全部已知方向，顺序固定。
+//
+// 它取的是允许表的键（哪些方向有字段规则）；「哪些取值算已知方向」声明在
+// rootValues 里。两者由 TestRootValuesMatchSchema 互相比对——只改一处会挂。
 func Roots() []Root {
 	out := make([]Root, 0, len(allowlists))
 	for r := range allowlists {

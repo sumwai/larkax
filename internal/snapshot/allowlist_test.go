@@ -3,7 +3,7 @@ package snapshot
 import (
 	"encoding/json"
 	"fmt"
-	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -706,18 +706,48 @@ func ruleList(t *testing.T, root Root) []fieldRule {
 	return out
 }
 
-// TestRootValuesMatchSchema 确认方向取值与库里的 CHECK 约束一致。
+// TestRootValuesMatchSchema 确认方向取值与库里的 CHECK 约束一致，
+// 且「取值清单」与「允许表」这两处互相对得上。
+//
+// 原来这条断言的是 `RootRequest.valid() && RootResponse.valid() &&
+// !Root("其他").valid()`，而被测的 valid() 就是那两个常量的内联比较——两边
+// 是同一组字面量，怎么改都自洽。它漏掉的是反方向：valid() 认了一个允许表里
+// 没有的方向，那个方向会被 New 拒绝，而 valid() 说它合法。
 func TestRootValuesMatchSchema(t *testing.T) {
-	want := []Root{RootRequest, RootResponse}
-	got := Roots()
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("方向集合是 %v，期望 %v", got, want)
+	// 取值对着 request_snapshots.direction 的 CHECK 约束，所以这里钉字面量：
+	// 从常量取值等于用常量测常量，常量被改错时两边一起变，看不出来。
+	wantValues := map[Root]string{
+		RootRequest:  "request",
+		RootResponse: "response",
 	}
-	if RootRequest != "request" || RootResponse != "response" {
-		t.Fatalf("方向取值与 request_snapshots.direction 的约束不一致：%q / %q",
-			RootRequest, RootResponse)
+
+	roots := Roots()
+
+	// 允许表 → 取值清单：表里有的方向必须是已知取值，落库的字面量也要对得上。
+	for _, r := range roots {
+		if !r.valid() {
+			t.Errorf("允许表里有方向 %q，valid() 却不认它", r)
+		}
+		want, pinned := wantValues[r]
+		if !pinned {
+			t.Errorf("允许表里有方向 %q，但它的落库取值没有钉住", r)
+			continue
+		}
+		if string(r) != want {
+			t.Errorf("方向 %q 落库会写成 %q，而 request_snapshots.direction 的约束要的是 %q",
+				r, string(r), want)
+		}
 	}
-	if !RootRequest.valid() || !RootResponse.valid() || Root("其他").valid() {
-		t.Fatal("方向取值校验不对")
+
+	// 取值清单 → 允许表：valid() 认的每一个都必须有允许表，否则同一个方向
+	// 在 valid() 那里合法、在 New 那里被拒。
+	for _, r := range rootValues {
+		if !slices.Contains(roots, r) {
+			t.Errorf("valid() 认 %q，但 Roots() = %v 里没有它——允许表漏了这个方向", r, roots)
+		}
+	}
+
+	if Root("其他").valid() {
+		t.Error("未列在取值清单里的取值不该通过校验")
 	}
 }
