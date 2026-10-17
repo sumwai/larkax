@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/gateway"
@@ -311,9 +312,27 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 
 	user, err := h.Auth.Authenticate(r.Context(), r)
 	if err != nil {
-		// 具体原因不回给调用方：凭证不对、用户被停用、Key 过期在响应上
-		// 是同一种答复，区分开等于送出一个「这个 Key 存在吗」的探测器。
-		writeError(w, protocol, http.StatusUnauthorized, "invalid credentials")
+		// 两类失败必须分开（见 internal/auth 的包注释）：凭证本身的问题回
+		// 401，查询失败（连不上库、超时、脏数据）回 500。混在一起的话，
+		// 一次数据库抖动会表现为「全站密钥突然失效」——SDK 按「key 无效」
+		// 处理而**不重试**，监控上是 401 尖峰而不是 5xx 尖峰，值班的人去
+		// 查 key 而不是查库，两个方向完全相反的排查。
+		//
+		// 500 而不是 503：503 承诺「稍后重试」，而这一类里也有 quota_limit
+		// 解析不了这种永久性错误（见 internal/auth 的 lookup）。本包对
+		// 「我们这一侧坏了」也一直用 500（见 failUpstream 的默认分支），
+		// 503 在包内已经是另一个意思：这个模型没有可用上游。
+		//
+		// 区分的是状态码，不是响应体：凭证为什么不对不回给调用方——区分开
+		// 等于送出一个「这个 Key 存在吗」的探测器，而库为什么连不上同样是
+		// 我们内部的事。所以 5xx 这一支还要有一条日志，否则这类故障在生产
+		// 里只有一个状态码可看。
+		if errors.Is(err, auth.ErrUnauthenticated) {
+			writeError(w, protocol, http.StatusUnauthorized, "invalid credentials")
+			return
+		}
+		observe.FromContext(r.Context()).Error("鉴权查询失败", "err", err)
+		writeError(w, protocol, http.StatusInternalServerError, "internal error")
 		return
 	}
 

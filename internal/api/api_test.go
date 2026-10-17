@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/gateway"
@@ -258,6 +259,8 @@ func TestBodyTooLarge(t *testing.T) {
 	}
 }
 
+// 凭证本身的问题回 401。另一半在 TestAuthBackendFailureIsNotUnauthorized：
+// 两类失败分开正是这一对用例存在的理由。
 func TestUnauthorized(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -271,7 +274,8 @@ func TestUnauthorized(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h, _, chatter := newTestHandler()
-			h.Auth = &fakeAuth{err: errors.New("凭证无效")}
+			// 凭证失效在生产侧长这样（见 internal/auth）。
+			h.Auth = &fakeAuth{err: &auth.Error{Reason: auth.ReasonKeyNotFound}}
 
 			rec := post(h, tc.path, validBody)
 			if rec.Code != http.StatusUnauthorized {
@@ -281,8 +285,11 @@ func TestUnauthorized(t *testing.T) {
 				t.Error("没通过鉴权不该走到上游")
 			}
 			// 凭证为什么无效不回给调用方：区分开等于送出一个探测器。
-			if strings.Contains(rec.Body.String(), "凭证无效") {
-				t.Errorf("不该回内部错误原文: %s", rec.Body)
+			// auth.Error 的文案对所有 Reason 都是同一句，而 Reason 本身
+			// 只给日志看——两个都不该出现在响应体里。
+			if body := rec.Body.String(); strings.Contains(body, auth.ErrUnauthenticated.Error()) ||
+				strings.Contains(body, string(auth.ReasonKeyNotFound)) {
+				t.Errorf("不该回内部错误原文: %s", body)
 			}
 
 			var body struct {
@@ -295,6 +302,72 @@ func TestUnauthorized(t *testing.T) {
 			}
 			if body.Error.Type != tc.wantType {
 				t.Errorf("错误类型 = %q，期望 %q", body.Error.Type, tc.wantType)
+			}
+		})
+	}
+}
+
+// 库故障不是凭证问题，不能回 401。
+//
+// 两类失败混在一起时，一次数据库抖动在现场表现为「全站密钥突然失效」，
+// 而那个排查方向与「某把 key 真的失效了」完全相反（见 internal/auth 的包注释）。
+func TestAuthBackendFailureIsNotUnauthorized(t *testing.T) {
+	// 按生产侧的形状包一层库错误：internal/auth 的查询失败**刻意**不包成
+	// ErrUnauthenticated（见 store.go），所以这里是一个普通 error，
+	// errors.Is 判不到那个哨兵。
+	backendErr := fmt.Errorf("查询 API Key 失败: %w", errors.New("连接已断开"))
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		{name: "OpenAI 形状", path: PathChatCompletions},
+		{name: "Anthropic 形状", path: PathMessages},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs logCapture
+			adoptLogCapture(t, &logs)
+
+			h, _, chatter := newTestHandler()
+			h.Auth = &fakeAuth{err: backendErr}
+
+			rec := post(h, tc.path, validBody)
+
+			// 钉住具体状态码而不是「是不是 5xx」：这一条同时挡住两个方向的
+			// 回归——退回 401，或者悄悄换成别的 5xx 码。
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("状态码 = %d，期望 500——库故障不是凭证问题", rec.Code)
+			}
+			if chatter.calls != 0 {
+				t.Error("没通过鉴权不该走到上游")
+			}
+			// 库为什么连不上不回给调用方：写出去等于把库的可用性告诉每一个
+			// 持 key 的调用方。
+			if body := rec.Body.String(); strings.Contains(body, "连接已断开") {
+				t.Errorf("不该回内部错误原文: %s", body)
+			}
+
+			var body struct {
+				Error struct {
+					Type string `json:"type"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("响应不是 JSON: %v", err)
+			}
+			// 错误体的形状跟着状态码走，所以两套协议在这里都是 api_error，
+			// 而不是 401 那两种（invalid_request_error / authentication_error）：
+			// 按类型分支的 SDK 于是不会把它当成凭证问题。
+			if body.Error.Type != "api_error" {
+				t.Errorf("错误类型 = %q，期望 api_error", body.Error.Type)
+			}
+
+			// 状态码之外能看见这件事的只有日志。不记的话，这类故障在生产里
+			// 仍然只有一个 5xx 可看，看不出是哪一环坏的。
+			if got := logs.text(); !strings.Contains(got, "连接已断开") {
+				t.Errorf("库故障要带着 err 记日志，实际日志: %q", got)
 			}
 		})
 	}
