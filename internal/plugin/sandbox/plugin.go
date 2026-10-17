@@ -32,6 +32,11 @@ var HookNames = []string{"onRequest", "onRoute", "onStream", "onResponse", "onUs
 
 // Compile 编译、链接并**求值一次**插件源码。
 //
+// 源码按 JavaScript 读。**不收 TypeScript**：插件契约与 `larkaxctl plugin
+// publish` 都只说 JS（读文件之后直接进这里），没有一处声明 TypeScript 是
+// 支持的语言。「收不收」要先在契约里定下来，再同时改这条路径与文档；
+// 在那之前留一个没人调的 TypeScript 入口，只会让作者以为它已经生效。
+//
 // 链接这一步就把插件能导入的东西**封死**了：只有虚拟 SDK "larkax" 能解析成功，
 // 别的说明符一律失败。于是 `import fs from "node:fs"` 在编译期就过不去，
 // 而不是等到运行时才发现它拿到的是一个 undefined。
@@ -43,18 +48,6 @@ var HookNames = []string{"onRequest", "onRoute", "onStream", "onResponse", "onUs
 // 因为 Module 不可变——求值一次与求值一千次得到同样的答案。
 func Compile(name, source string) (*Module, error) {
 	mod, err := moejs.Compile(name, source)
-	if err != nil {
-		return nil, fmt.Errorf("编译插件 %s 失败: %w", name, err)
-	}
-	return link(name, mod)
-}
-
-// CompileTypeScript 与 Compile 相同，但把源码当 TypeScript 读。
-//
-// 类型语法在解析期被抹掉，所以报错位置指向 TypeScript 原文。这里只是提供入口，
-// 「收不收 TypeScript」是上层要决定的事。
-func CompileTypeScript(name, source string) (*Module, error) {
-	mod, err := moejs.CompileTS(name, source)
 	if err != nil {
 		return nil, fmt.Errorf("编译插件 %s 失败: %w", name, err)
 	}

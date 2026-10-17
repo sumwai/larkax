@@ -11,10 +11,10 @@ import (
 
 // errNonPositiveMaxTokens 是 max_tokens 非正时的错误。
 //
-// 单独一个函数而不是内联：pipeline 与 billing 在「预留上界」那一步会拒绝
-// 同一件事（max_tokens 非正）。三处的措辞与哨兵错误**并不相同**——那边是
-// 「当前 %d」+ billing.ErrNoUpperBound，这边是「收到 %d」+ ErrPatchScope——
-// 排查时别把同一件事当成两个不同的问题。
+// 单独一个函数而不是内联：pipeline 与 billing 在「预留上界」那一步也会拒绝
+// 同一件事（max_tokens 非正）。那两处的措辞与哨兵错误与本包**并不相同**——
+// 那边是「当前 %d」+ billing.ErrNoUpperBound，这边是「收到 %d」+ ErrPatchScope
+// ——排查时别把同一件事当成两个不同的问题。
 //
 // 这一层还有**另一件**关于 max_tokens 的事：只许调小（见 errMaxTokensRaised）。
 // 两者的哨兵错误相同（都是 ErrPatchScope），所以判错时不能只看 errors.Is：
@@ -43,40 +43,6 @@ func errMaxTokensRaised(original int64, hasOriginal bool, patched int64) error {
 		ErrPatchScope, original, patched)
 }
 
-// originalMaxTokens 从请求体里读出客户端的 max_tokens。
-//
-// 三种结局，调用方各有一种处置：
-//
-//   - has 为 true：读出一个数，拿它比；
-//   - has 为 false：请求体里没有这一项，也就是原请求没给上界；
-//   - 错误：有这一项但读不出来。**按「比不了」拒收**——这一层的职责是拦住
-//     抬高上界的补丁，而一个读不出来的原值证明不了补丁没有抬高它。
-//     放过去的话，把原值写成字符串就成了绕过这条规则的写法。
-//
-// patched 只用在报错文本里：读不出来时要把补丁给的值一起说出来，
-// 否则那条报错看不出插件想改成多少。
-//
-// 认 int（RequestContextFrom 放进去的就是它）与 int64，另外认 float64 的
-// 整数值：请求体一旦经 encoding/json 走过一圈，数字就是这个类型。
-func originalMaxTokens(body map[string]any, patched int64) (value int64, has bool, err error) {
-	raw, ok := body["max_tokens"]
-	if !ok || raw == nil {
-		return 0, false, nil
-	}
-	switch v := raw.(type) {
-	case int:
-		return int64(v), true, nil
-	case int64:
-		return v, true, nil
-	case float64:
-		if v == float64(int64(v)) {
-			return int64(v), true, nil
-		}
-	}
-	return 0, false, fmt.Errorf("%w: 请求体里的 max_tokens 读不出来（%T: %v），无法判断补丁给的 %d 有没有把它调大",
-		ErrPatchScope, raw, raw, patched)
-}
-
 // appliedBodyFields 是请求体补丁里**会被应用**的字段。
 //
 // 契约认得 8 个（见 RequestBodyPatch 的字段表），应用这一步只写这 3 个；
@@ -91,8 +57,8 @@ func originalMaxTokens(body map[string]any, patched int64) (value int64, has boo
 // TestBodyPatchFieldTableMatchesContract 拿两者的并集与 RequestBodyPatch
 // 的 json 标签对一遍。
 //
-// `max_tokens` 在这里，但**只许调小**（见 ApplyRequestBodyPatch 与
-// applyBodyToChannel）：把输出压短是策略插件的正当用法，而调大会把计费预留
+// `max_tokens` 在这里，但**只许调小**（见 applyBodyToChannel）：把输出压短
+// 是策略插件的正当用法，而调大会把计费预留
 // 的上界一起抬高。它在这一层有校验，只是方向只有一个——别把它当成漏了校验
 // 而顺手放开，那正好是「上界与上报值由同一方控制」那条路径。
 var appliedBodyFields = []string{
@@ -106,7 +72,7 @@ var appliedBodyFields = []string{
 // # 为什么是拒绝，而不是留在补丁里
 //
 // 这 5 个字段（messages / system / stop / tools / tool_choice）以前是「结构化的
-// 那几项留在补丁里，由调用方按自己的需要决定」，而两条应用路径都不写它们、
+// 那几项留在补丁里，由调用方按自己的需要决定」，而应用那一步既不写它们、
 // 也不返回错误：插件作者看到的是「我的插件没生效」，与字段名拼错
 // （decodePatch 报的那个错）在观测上完全一样，而那正是契约里最难查的一类静默。
 // **有意的是不应用，不是静默。**
@@ -119,10 +85,9 @@ var appliedBodyFields = []string{
 //
 // # 判据只写一份
 //
-// 两条应用路径（adapter.go 的 applyBodyToChannel 与 ApplyRequestBodyPatch）
-// 都调它，于是同一份补丁在哪条路径上都是同一个判定。分两处写的话，接线时
-// 用哪条就把洞开在哪条上——`max_tokens` 上界那条规则当初就是这么写的，
-// 这一条跟着它走。
+// 请求路径上只有 adapter.go 的 applyBodyToChannel 一条应用路径，它调这里；
+// 校验不另写一份——分两处写的话，改了其中一处、留着一处，同一个补丁就有
+// 两个判定。
 func (p *RequestBodyPatch) unappliedFields() []string {
 	if p == nil {
 		return nil
@@ -191,76 +156,6 @@ const headerPrefix = "x-larkax-"
 // 具体原因在被包住的那一层（`json: unknown field "channeId"`、
 // `max_tokens 必须为正，收到 0`），那里才说得准。
 var ErrPatchScope = errors.New("插件给的补丁不符合契约")
-
-// ApplyRequestBodyPatch 把补丁合并进请求体。
-//
-// # 只有标量字段会落地
-//
-// 会写下去的是 appliedBodyFields 那三个；`messages` / `system` / `stop` /
-// `tools` / `tool_choice` 一律拒掉（见 unappliedFields），理由在那里。
-//
-// # 合并是浅合并
-//
-// 给一个字段就整块替换它。今天会应用的三个字段都是标量，所以这一层区分还
-// 看不出来；深合并（例如只改 messages 里某一条的 content）需要一条路径语法，
-// 那是另一个契约问题——它会让「插件改了什么」变得难以从返回值看出来。
-//
-// body 为 nil 时新建一个 map。返回的是新 map，不改动入参：
-// 上游请求体可能已经被别处引用（快照），就地改会让「当时发出去的是什么」
-// 这个问题的答案随时间变化。
-func ApplyRequestBodyPatch(body map[string]any, patch *RequestBodyPatch) (map[string]any, []string, error) {
-	if patch == nil {
-		return body, nil, nil
-	}
-	// 在写下去**之前**判：拒掉的语义是**整份补丁不生效**（见 patchOf），
-	// 写了一半再报错就不是那个意思了。与 adapter.go 的 applyBodyToChannel
-	// 是同一个判定的两个落点，所以两边都调同一个函数。
-	if fields := patch.unappliedFields(); len(fields) > 0 {
-		return nil, nil, errBodyFieldsNotApplied(fields)
-	}
-	out := make(map[string]any, len(body)+len(appliedBodyFields))
-	for k, v := range body {
-		out[k] = v
-	}
-
-	var changed []string
-	set := func(field string, value any) {
-		out[field] = value
-		changed = append(changed, field)
-	}
-
-	if patch.MaxTokens != nil {
-		// max_tokens 必须为正：它是计费预留上界的关键（见 pipeline 的校验），
-		// 给一个 0 或负数会让预留算不出来。
-		if *patch.MaxTokens <= 0 {
-			return nil, nil, errNonPositiveMaxTokens(*patch.MaxTokens)
-		}
-		// 而且只许调小。原值从**入参 body**里读，那是客户端的请求；
-		// 读不出来或没有这一项都按「调大」处置，理由见 errMaxTokensRaised。
-		//
-		// 这一个比较已经把「原值缺失」也覆盖了：那时 original 是 0，而上面
-		// 刚保证补丁值 ≥ 1，所以 `> original` 必然成立。**不要再写成
-		// `!hasOriginal || ...`**——它读起来像一道独立的门，而删掉它不会
-		// 放开任何东西（实测过），那种「看起来承重其实不承重」的条件会让
-		// 下一个人对着它猜。
-		original, hasOriginal, err := originalMaxTokens(body, *patch.MaxTokens)
-		if err != nil {
-			return nil, nil, err
-		}
-		if *patch.MaxTokens > original {
-			return nil, nil, errMaxTokensRaised(original, hasOriginal, *patch.MaxTokens)
-		}
-		set("max_tokens", *patch.MaxTokens)
-	}
-	if patch.Temperature != nil {
-		set("temperature", *patch.Temperature)
-	}
-	if patch.TopP != nil {
-		set("top_p", *patch.TopP)
-	}
-	sort.Strings(changed)
-	return out, changed, nil
-}
 
 // ApplyHeaderPatch 校验并归并插件加的请求头。
 //

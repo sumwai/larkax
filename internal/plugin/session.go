@@ -83,7 +83,7 @@ func (s *Session) record(f *sandbox.Failure) bool {
 
 // OnRequest 调 onRequest。
 //
-// 返回的补丁**尚未应用**：应用由调用方做（见 ApplyRequestBodyPatch），
+// 返回的补丁**尚未应用**：应用由 ApplyRequest（见下）做，
 // 于是「插件给了什么」与「最终发出去的是什么」是两个可分别检查的东西。
 func (s *Session) OnRequest(ctx context.Context, rc RequestContext) Result[RequestPatch] {
 	if s == nil || !s.Next() || !s.Plugin.Module.Has(HookRequest) {
@@ -417,7 +417,7 @@ func (f UsageFacts) empty() bool {
 // **插件改不动**的来源：
 //
 //   - MaxOutputTokens 取客户端在请求里给的 max_tokens。插件只许把它调小
-//     （见 ApplyRequestBodyPatch 与 applyBodyToChannel），所以客户端的原值
+//     （见 applyBodyToChannel），所以客户端的原值
 //     仍是上界，而补丁之后的值不是——那是插件自己挑的。传补丁后的值进来
 //     等于把上界交回插件手里，这个类型拦不住，只能靠调用方取对。
 //
