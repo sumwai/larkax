@@ -21,17 +21,23 @@
 // 而一个 UTC 时刻换算到北京很可能已经跨过午夜，同一瞬间在两处会落进不同的
 // 日期、甚至不同的一周。因此每个入口都要地区代码，日期一律按地区时区切分。
 //
-// # 峰谷这一支今天没有生产调用方
+// # 峰谷这一支今天接不进任何地方
 //
 // 上面两句里，「某个时刻属于高峰还是低谷」这一半**今天接不进计价规则**：
 // `expr` 的 DSL 只有 `isWorkday()` / `isHoliday()` / `hour()` 这类函数，
 // 没有走 `PeakAt` 的那一支。所以规则里写不出峰谷价——不是「写了算错」，
 // 是**根本没有这个函数**（peak.go 的实现是完整且被测过的，缺的是入口）。
 //
+// 插件那一侧同样接不上：宿主日历接口里有 `Peak`，而 SDK 的 calendar 命名空间
+// 里没有对应的函数可调。于是「谁在调 `PeakAt`」今天只有一个答案——插件适配器
+// 里那个**调不到**的入口（见 internal/assembly 的 pluginCalendar）。
+//
 // 这件事**工具不会再提醒**：`PeakAt` 挂在 `*Calendar` 这个类型上，而
 // #182 把 `*Calendar` 接进 assembly 之后，这个类型进了可达图，`deadcode`
 // 就把它的方法都算成可达，于是 peak.go 里那几条**从不可达清单里消失了**。
 // 清单里没有它，读起来像「已经在用了」。见 LESSONS.md 第 22 条。
+// 提醒搬到了适配器那一条上（scripts/deadmethods-allowlist.txt 里
+// `pluginCalendar.Peak`），那一道门按调用语法数，看得见「它没有调用方」。
 //
 // 要接上它需要先定「高峰窗口从哪来」（库里还是配置里），那是一个独立决定；
 // 在那之前这一支保持现状，而这份注释是它「未接线」的唯一标记。
@@ -408,9 +414,10 @@ func reasonOf(state YearState) UnknownReason {
 // 换算之后的当地日期可能与时刻自带的 UTC 日期相差一天甚至一年，
 // 那是预期行为——账单按当地的那一天计价。
 //
-// 目前只有测试在调它：需要「按时刻判定」的两处各自做了那两步——
-// 计价引擎在自己的运行时里换算时区再把日期交给适配器（见
-// internal/billing/expr 的 dayInfo），PeakAt 也自己换算了一遍（见 peak.go）。
+// 今天有调用方：插件宿主那一条（internal/assembly 的 pluginCalendar.Day）——
+// 插件传进来的是一个时间戳，折算时区这一步得有人替它做。需要「按时刻判定」的
+// 另外两处各自做了那两步：计价引擎在自己的运行时里换算时区再把日期交给适配器
+// （见 internal/billing/expr 的 dayInfo），PeakAt 也自己换算了一遍（见 peak.go）。
 func (c *Calendar) At(ctx context.Context, region Region, instant time.Time) (DayStatus, error) {
 	loc, err := Timezone(region)
 	if err != nil {

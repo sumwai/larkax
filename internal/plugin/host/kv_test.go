@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/Calcium-Ion/moejs"
+
+	"github.com/sumwai/larkax/internal/plugin/sandbox"
 )
 
 // fakeKV 是一个按 (plugin, userID, key) 三元组存的 KV。
@@ -17,6 +19,9 @@ import (
 // 它**刻意在假实现里做命名空间隔离**：宿主函数把 plugin 与 userID 传错了，
 // 这里就查不到别的用例写进去的值，于是「隔离」这件事是可断言的，
 // 而不是靠人读代码相信它。
+//
+// Del 的布尔值与真实现同一口径（存在且没过期才算删掉了），所以这里不带 TTL：
+// 假实现里没有过期的概念，过期那一条由真实现的用例钉住（见 plugin/store）。
 type fakeKV struct {
 	data map[string]string
 	ttls map[string]time.Duration
@@ -26,7 +31,7 @@ type fakeKV struct {
 	lastOp  string
 	lastKey string
 	err     error
-	// delErr 只在 Del 上报错，用来覆盖「读成功、删失败」这条路径。
+	// delErr 只在 Del 上报错，用来覆盖「删失败」这条路径。
 	delErr error
 }
 
@@ -61,19 +66,22 @@ func (f *fakeKV) Set(ctx context.Context, plugin string, userID int64, key, valu
 	return nil
 }
 
-func (f *fakeKV) Del(ctx context.Context, plugin string, userID int64, key string) error {
+// Del 的布尔值一次回出来：删之前它在不在，由这里如实回答（真实现是一条
+// 条件 DELETE 的 RowsAffected，见 internal/plugin/store/kv.go）。
+func (f *fakeKV) Del(ctx context.Context, plugin string, userID int64, key string) (bool, error) {
 	f.calls++
 	f.lastOp, f.lastKey, f.lastCtx = "del", key, ctx
 	if f.err != nil {
-		return f.err
+		return false, f.err
 	}
 	if f.delErr != nil {
-		return f.delErr
+		return false, f.delErr
 	}
 	k := testKVKey(plugin, userID, key)
+	_, existed := f.data[k]
 	delete(f.data, k)
 	delete(f.ttls, k)
-	return nil
+	return existed, nil
 }
 
 // kvEnv 造一个只有 KV 能力的 Env。
@@ -300,9 +308,10 @@ func (r *recordingKV) Set(ctx context.Context, plugin string, userID int64, key,
 	return nil
 }
 
-func (r *recordingKV) Del(ctx context.Context, plugin string, userID int64, key string) error {
+// 回 false：这个假实现不存数据，于是「没删掉」是它的实情，而不是随手给的零值。
+func (r *recordingKV) Del(ctx context.Context, plugin string, userID int64, key string) (bool, error) {
 	r.op, r.plugin, r.userID, r.key, r.lastCtx = "del", plugin, userID, key, ctx
-	return nil
+	return false, nil
 }
 
 // TestKVRejectsBadArguments 钉住参数校验：报错且一次都不访问存储。
@@ -362,28 +371,11 @@ func TestKVStoreErrorSurfaces(t *testing.T) {
 	}
 }
 
-// TestKVDelFailsWhenStoreErrors 覆盖 del 的取-删两步里第一步就失败的路径。
-func TestKVDelFailsWhenStoreErrors(t *testing.T) {
-	sentinel := errors.New("存储不可用")
-	store := newFakeKV()
-	env := kvEnv(store, "p", 7)
-	if _, err := kvFunc(t, env, "set")(context.Background(), js("k", "v")); err != nil {
-		t.Fatalf("set 出错: %v", err)
-	}
-
-	// 让 get 失败、del 正常：确认第一步失败时不会继续删。
-	store.err = sentinel
-	_, err := kvFunc(t, env, "del")(context.Background(), js("k"))
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("错误 = %v，期望包住 %v", err, sentinel)
-	}
-	if _, ok := store.data[testKVKey("p", 7, "k")]; !ok {
-		t.Error("读失败时不该已经把键删掉了")
-	}
-}
-
-// TestKVDelFailsWhenDeleteErrors 覆盖「读到了、删失败」这条路径：
+// TestKVDelFailsWhenDeleteErrors 覆盖「删失败」这条路径：
 // 删失败必须报错，而不是带着一个「删掉了」的布尔值返回。
+//
+// 这里曾经是两条用例（先问在不在、再删），现在只有一条：del 是一次存储调用
+// （见 KVStore.Del），中间那一步没有了，于是「第一步失败」那条路径也不存在了。
 func TestKVDelFailsWhenDeleteErrors(t *testing.T) {
 	sentinel := errors.New("删除失败")
 	store := newFakeKV()
@@ -393,12 +385,83 @@ func TestKVDelFailsWhenDeleteErrors(t *testing.T) {
 	}
 	store.delErr = sentinel
 
-	_, err := kvFunc(t, env, "del")(context.Background(), js("k"))
+	got, err := kvFunc(t, env, "del")(context.Background(), js("k"))
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("错误 = %v，期望包住 %v", err, sentinel)
 	}
+	// 报错时**不能**给出一个布尔值：插件按它分支，而「删掉了」会让它以为
+	// 状态已经清干净。返回零值 false 是「没删掉」，与错误一起给不矛盾。
+	if got.AsBool() {
+		t.Error("删失败了却回了 true")
+	}
 	if _, ok := store.data[testKVKey("p", 7, "k")]; !ok {
 		t.Error("删失败了键却没了，说明假实现写错了")
+	}
+}
+
+// TestKVQuotaExceededIsDistinguishable 钉住「配额到顶」在插件那一侧是一个
+// **能分辨的**错误。
+//
+// 判据是码不同：quota_exceeded 的下一步动作是「先删掉一些旧键」，而
+// unavailable 是「存储坏了，做什么都没用」。两者压成同一个码之后，插件
+// 只能靠文案猜，而那正是这一类错误最容易变成噪音的地方。
+func TestKVQuotaExceededIsDistinguishable(t *testing.T) {
+	store := newFakeKV()
+	store.err = fmt.Errorf("%w: 键数到顶", ErrKVQuotaExceeded)
+	env := kvEnv(store, "p", 7)
+
+	_, err := kvFunc(t, env, "set")(context.Background(), js("k", "v"))
+	var capErr *sandbox.CapabilityError
+	if !errors.As(err, &capErr) {
+		t.Fatalf("错误 = %v，期望是一个 sandbox.CapabilityError", err)
+	}
+	if capErr.Code != sandbox.CodeQuotaExceeded {
+		t.Errorf("码 = %q，期望 %q", capErr.Code, sandbox.CodeQuotaExceeded)
+	}
+	// 配额到顶是**插件能处置**的状态，不是宿主依赖坏了：归到 unavailable
+	// 会让插件重启重试，而重试永远不会成功。
+	if capErr.Code == sandbox.CodeUnavailable {
+		t.Error("配额到顶被归成了「宿主不可用」")
+	}
+	// 读这一侧没有配额可言：同一个存储错误经读出去必须是 unavailable。
+	//
+	// 这里刻意让那个错误**也**包着 ErrKVQuotaExceeded（同一份 store.err），
+	// 于是这一条同时钉住两件事：判据是**码**，不是「错误链里有没有那个哨兵」
+	// ——unavailable 把依赖的原文放在 Cause 里，errors.Is 顺着 Cause 一样找得到
+	// 它（那是宿主自己的信息，插件只拿得到码与文案）。
+	_, err = kvFunc(t, env, "get")(context.Background(), js("k"))
+	var readErr *sandbox.CapabilityError
+	if !errors.As(err, &readErr) {
+		t.Fatalf("读失败的错误 = %v，期望是一个 sandbox.CapabilityError", err)
+	}
+	if readErr.Code != sandbox.CodeUnavailable {
+		t.Errorf("读失败的码 = %q，期望 %q", readErr.Code, sandbox.CodeUnavailable)
+	}
+}
+
+// TestKVSetRejectsTTLOverCap 钉住 ttlSeconds 的上界。
+//
+// 上界存在的理由在 host/kv.go 的 kvTTLMaxSeconds：过期时刻是 SQL 的
+// now() + ttl 算出来的，天文数字会让它溢出并报错，而那个错经 unavailable
+// 出去，看起来像宿主的存储坏了——其实是一个参数问题。
+func TestKVSetRejectsTTLOverCap(t *testing.T) {
+	store := newFakeKV()
+	env := kvEnv(store, "p", 7)
+
+	_, err := kvFunc(t, env, "set")(context.Background(), js("k", "v", int64(kvTTLMaxSeconds+1)))
+	if err == nil {
+		t.Fatal("ttlSeconds 超过上限应当报错")
+	}
+	if !strings.Contains(err.Error(), "上限") {
+		t.Errorf("错误 = %v，期望提到上限", err)
+	}
+	if store.calls != 0 {
+		t.Errorf("参数不合法却访问了 %d 次存储", store.calls)
+	}
+
+	// 上限本身收得下：不过期用 0 表达，而接近上限的值是合法的。
+	if _, err := kvFunc(t, env, "set")(context.Background(), js("k", "v", int64(kvTTLMaxSeconds))); err != nil {
+		t.Errorf("上限本身应当收得下: %v", err)
 	}
 }
 
