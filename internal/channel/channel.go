@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -81,20 +80,15 @@ const (
 	ProtocolSystemOne Protocol = "systemone"
 )
 
-// protocolNames 是本包认的全部协议名，已排序。
+// valid 报告它是不是本包认的协议取值。
 //
-// 它是「认哪些取值」这件事的**唯一来源**：valid 按它判，注册表那条类型名自检
-// 也按它列出候选。先前那份清单是一个 switch、报错信息里要再列一遍——抄第二份
-// 的那天就是两份开始分岔的那天，而分岔的表现是「valid 认它、报错里却不列它」。
-var protocolNames = []string{
-	string(ProtocolAnthropic),
-	string(ProtocolOpenAI),
-	string(ProtocolOpenAIResponses),
-	string(ProtocolSystemOne),
-}
-
+// 判据是「表里有没有这一行」（见 endpoint.go 的 protocolEndpoints），不另立
+// 一份清单：两份清单对不上时，认得的协议算不出端点、或算得出端点的协议不被认，
+// 两种都是静默的——前者让那条渠道绕过端点评据，后者让注册在启动时报一个
+// 看不懂的错。
 func (p Protocol) valid() bool {
-	return slices.Contains(protocolNames, string(p))
+	_, ok := protocolEndpoints[p]
+	return ok
 }
 
 // Channel 是某一次调用要用的渠道信息，由路由层从库里取出后传入适配器。

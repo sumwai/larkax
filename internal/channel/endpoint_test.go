@@ -1,32 +1,29 @@
 package channel
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// 每一个有适配器实现的协议都要给出一条端点。
+// 四个协议各配哪条端点要钉住，期望写成**字面路径**。
 //
-// 少一个的话，那个协议算出来的端点是空串——而空串在端点评据里是「不知道」，
-// 处置是**放行**。于是「新增协议时忘了给端点」不会报错，只会让这个协议下的
-// 渠道绕过端点判据：往一条这个模型并不在上面被服务的端点发请求，上游回
-// 400 unsupported_model，而现场看到的是「模型不存在」。
+// 不能写成 EndpointXxx 那些常量：常量就是表里的那个值，拿它当期望等于拿表判表
+// ——把 anthropic 与 openai 两条端点调个位置，用例照样绿，而调换之后两侧对不上
+// 的那次比对会判成另一个字符串。
 func TestProtocolEndpoint(t *testing.T) {
 	want := map[Protocol]Endpoint{
-		ProtocolOpenAI:          EndpointChatCompletions,
-		ProtocolAnthropic:       EndpointMessages,
-		ProtocolOpenAIResponses: EndpointResponses,
-		ProtocolSystemOne:       EndpointSystemOne,
+		ProtocolOpenAI:          "/v1/chat/completions",
+		ProtocolAnthropic:       "/v1/messages",
+		ProtocolOpenAIResponses: "/v1/responses",
+		ProtocolSystemOne:       "/v1/systemone",
 	}
-	// 按协议取值清单遍历，不按这张 map：map 里少写一个键，用例会一声不响地
-	// 少测一个协议（上面那条注释说的正是这件事）。
-	for _, p := range []Protocol{
-		ProtocolOpenAI, ProtocolAnthropic, ProtocolOpenAIResponses, ProtocolSystemOne,
-	} {
-		expected, ok := want[p]
-		if !ok {
-			t.Fatalf("协议 %q 没有期望的端点：这条用例要跟着新增的协议一起改", p)
-		}
+	for p, expected := range want {
 		got := p.Endpoint()
 		if got != expected {
 			t.Errorf("Protocol(%q).Endpoint() = %q，期望 %q", p, got, expected)
@@ -34,6 +31,23 @@ func TestProtocolEndpoint(t *testing.T) {
 		if !got.Valid() {
 			t.Errorf("协议 %q 算出的端点 %q 不在合法取值里", p, got)
 		}
+	}
+	// 每一行都要指向一个合法端点。表里的路径是手写的，写错一个字母时那条协议
+	// 算出来的端点谁也匹配不上——模型目录里的取值是 ParseEndpoint 解析出来的，
+	// 只能是四个合法值之一——于是那个模型在选路里永远「不在被服务的端点上」。
+	for p, e := range protocolEndpoints {
+		if !e.Valid() {
+			t.Errorf("表里 %q 配的端点 %q 不是合法取值（认的是 %s、%s、%s、%s）",
+				p, e, EndpointChatCompletions, EndpointResponses, EndpointMessages, EndpointSystemOne)
+		}
+	}
+	// 清单是从表推导的，推导写错会掉一条或重一条；它出现在报错信息里，顺序也要稳。
+	if len(protocolNames) != len(protocolEndpoints) {
+		t.Errorf("协议名清单 %v 与表（%d 行）条目数不同：清单是推导出来的，两边必须一一对上",
+			protocolNames, len(protocolEndpoints))
+	}
+	if !slices.IsSorted(protocolNames) {
+		t.Errorf("协议名清单 %v 没排序：它按这个顺序出现在报错信息里", protocolNames)
 	}
 
 	// 未知协议给空串，那是「不知道」而不是「一个叫空串的端点」：调用方
@@ -44,6 +58,88 @@ func TestProtocolEndpoint(t *testing.T) {
 	if Endpoint("").Valid() {
 		t.Error("空串不该是合法端点：它在本包的意思是「不知道」，而 Valid 说的是「是不是那几条之一」")
 	}
+}
+
+// 源码里出现的每一个 Protocol 取值都必须在表里有一行。
+//
+// 表是唯一的来源之后，这条轴只剩一个走偏的走法：**新加一个协议取值，忘了在表里
+// 给它端点**。它偏了之后是静默的——那个协议算不出端点（空串 = 不知道 = 放行），
+// 注册与选路都不会响。
+//
+// 所以这里扫一遍本包的非测试源码，而不是写一张硬编码的清单：清单少抄一个新常量时
+// 用例照样绿，而「照样绿」正是要被挡住的那件事（见 LESSONS.md 第 2、16 条）。
+func TestEveryProtocolConstantIsInTable(t *testing.T) {
+	values := protocolValuesInSource(t)
+	// 一条都没扫到时判「没跑成」而不是「都合格」：扫描器坏掉时的输出和干净
+	// 一模一样（LESSONS.md 第 16 条）。
+	if len(values) == 0 {
+		t.Fatal("一个 Protocol 取值都没扫到：多半是扫描本身坏了，而不是仓库里真的没有")
+	}
+	for name, value := range values {
+		if _, ok := protocolEndpoints[Protocol(value)]; !ok {
+			t.Errorf("%s = %q 不在 protocolEndpoints 表里：加了协议取值就要在表里给它一条端点，"+
+				"否则它算出来的端点是空串，而空串在端点评据里等于放行", name, value)
+		}
+	}
+}
+
+// protocolValuesInSource 扫本包的非测试源码，返回 `名 Protocol = "取值"` 的
+// 声明（常量与变量都收）。
+func protocolValuesInSource(t *testing.T) map[string]string {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("列源文件失败: %v", err)
+	}
+	got := map[string]string{}
+	scanned := 0
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		scanned++
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatalf("解析 %s 失败: %v", file, err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			decl, ok := n.(*ast.GenDecl)
+			if !ok || (decl.Tok != token.CONST && decl.Tok != token.VAR) {
+				return true
+			}
+			for _, spec := range decl.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				// 只看显式声明了 Protocol 类型的那几条：`Endpoint` 那几个常量
+				// 也是字符串字面量，但它们是端点不是协议。
+				if id, ok := vs.Type.(*ast.Ident); !ok || id.Name != "Protocol" {
+					continue
+				}
+				for i, name := range vs.Names {
+					if i >= len(vs.Values) {
+						break
+					}
+					lit, ok := vs.Values[i].(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						continue
+					}
+					value, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						t.Fatalf("%s 里 %s 的取值解析失败: %v", file, name.Name, err)
+					}
+					got[name.Name] = value
+				}
+			}
+			return true
+		})
+	}
+	if scanned == 0 {
+		t.Fatal("一个源文件都没扫到：多半是工作目录不对，而不是本包没有非测试文件")
+	}
+	return got
 }
 
 func TestParseEndpoint(t *testing.T) {
