@@ -26,6 +26,9 @@
 // 候选通常是几个到几十个，一次查询把所有渠道连同健康度、额度一起取回来。
 // 逐个渠道再查一遍会把「一个模型有几个候选」变成几倍的往返，
 // 而这段代码在每条请求的热路径上。
+//
+// 目录里那份模型级声明（能力、上限）另算一次查询，与候选数无关：它是
+// 按规范名查的单行，摆给这一批全部候选（见 profile）。
 package channels
 
 import (
@@ -39,6 +42,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/quota"
@@ -50,11 +54,25 @@ type Source struct {
 	db     *sql.DB
 	sealer *credential.Sealer
 
+	// catalog 读回规范模型在目录里声明的能力与上限（见 profile）。
+	// 由 New 接上，它只包着同一个 *sql.DB，没有自己的状态。
+	catalog modelCatalog
+
 	// Logger 记录被跳过的渠道（凭证解不开的那些）。为 nil 时用 slog.Default()。
 	Logger *slog.Logger
 
 	// Now 可注入，便于测试「健康数据是否过期」这类与当前时间有关的判断。
 	Now func() time.Time
+}
+
+// modelCatalog 按规范名读回目录里与选路有关的那几列。
+//
+// 声明在本包、实现在 internal/catalog：model_catalog 的读写入口只有 catalog
+// 一处（见那个包的注释），所以本包不自己写那条 SQL。而 route 不认识那张表
+// （它不碰数据库），catalog 也不认识 route——两边的形状对不上，投影就落在
+// 本包（见 profile），因为只有本包同时看得见两者。
+type modelCatalog interface {
+	Constraints(ctx context.Context, canonicalName string) (catalog.Constraints, error)
 }
 
 // New 包装一个已打开的数据库句柄与一个主密钥封装器。
@@ -63,7 +81,7 @@ type Source struct {
 // 那种情况下每个渠道都会以 ErrNoMasterKey 解不开——报错方向明确，
 // 好过在这里 panic 或者推迟到别处才发现。
 func New(db *sql.DB, sealer *credential.Sealer) *Source {
-	return &Source{db: db, sealer: sealer}
+	return &Source{db: db, sealer: sealer, catalog: catalog.New(db)}
 }
 
 // 编译期断言：它要满足 gateway 对候选来源的要求。
@@ -159,7 +177,59 @@ func (s *Source) Candidates(ctx context.Context, canonicalModel string) ([]route
 				"channel_id", f.ChannelID, "channel", f.Name, "err", f.Err)
 		}
 	}
+
+	if len(out) > 0 {
+		// 目录声明是**模型级**的：一次查询，摆给这一批全部候选（route 那边
+		// 按它逐条判）。
+		//
+		// 一个候选都没有时不查：那次请求要报的是「没有可用的渠道」，
+		// 多查一次只会多一个失败点。
+		profile, err := s.profile(ctx, canonicalModel)
+		if err != nil {
+			return nil, err
+		}
+		for i := range out {
+			out[i].Profile = profile
+		}
+	}
 	return out, nil
+}
+
+// profile 读回这个规范模型在目录里声明的能力与上限。
+//
+// # 目录里没有这条记录时返回 nil
+//
+// nil 是**未知**，是放行而不是「不支持」：一个还没采集到的模型与一个采集
+// 到了、能力列恰好全是 false 的模型，在库里长得完全不同，而「目录里没有
+// 它」恰恰是最常见的开始状态。按「不支持」处理会让整批还没进目录的模型
+// 立刻用不了（见 route.ModelProfile）。
+//
+// # 读目录失败与「没有这条记录」分开
+//
+// 前者整次取候选报错，不降级成「未知」。降级看起来更宽容，实际是把一次
+// 查询故障变成「目录判据静默失效」——而失效与「这个部署没配目录判据」在
+// 日志与响应里长得一样（同 route.ErrNoAliasSource 的那条理由：别让「没接上」
+// 与「不用这一项」同形）。这次查询与候选查询打的是同一个库，它失败说明
+// 问题不在这一条请求上。
+//
+// 上面那一节就是 `nolint:nilnil` 的理由：这个 nil 是结论，不是「出错了但没报」。
+func (s *Source) profile(ctx context.Context, canonicalName string) (*route.ModelProfile, error) {
+	cons, err := s.catalog.Constraints(ctx, canonicalName)
+	if errors.Is(err, catalog.ErrModelNotFound) {
+		return nil, nil //nolint:nilnil // 见上
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读取模型 %q 的目录声明失败: %w", canonicalName, err)
+	}
+	// 只带判据用得上的那几项：目录读回来的是整张能力矩阵，而 route 那边的
+	// 判据只看这三项（见 route.ModelProfile）。
+	return &route.ModelProfile{
+		Tools:        cons.Capabilities.Tools,
+		Vision:       cons.Capabilities.Vision,
+		Reasoning:    cons.Capabilities.Reasoning,
+		ContextLimit: int64(cons.ContextLimit),
+		OutputLimit:  int64(cons.OutputLimit),
+	}, nil
 }
 
 // ErrNoMasterKey 表示本进程没有能解开这份凭证的主密钥。

@@ -52,6 +52,14 @@ func withCache(rate float64, n int64) func(*Candidate) {
 	return func(c *Candidate) { c.CacheHitRate, c.SampleCount = &rate, n }
 }
 
+// withProfile 摆上模型目录对这条候选所服务模型的能力与上限。
+//
+// 传 nil 是**未知**（目录里没有这个模型），与「有记录、六项全 false」
+// 不是同一件事——那正是目录判据里那对相反的结论（见 ModelProfile）。
+func withProfile(p *ModelProfile) func(*Candidate) {
+	return func(c *Candidate) { c.Profile = p }
+}
+
 // 下面三个助手都带 Confidence 1.0：它们造的是**一次实测**的额度状态，
 // 而实测的置信度就是 1（见 internal/quota 的 confidenceAPIQuery）。
 //
@@ -99,7 +107,7 @@ func TestSelectFiltersByModel(t *testing.T) {
 	plan := r.Select([]Candidate{
 		candidate(1, "gpt-4o"),
 		candidate(2, "claude-sonnet"),
-	}, "gpt-4o")
+	}, "gpt-4o", Needs{})
 
 	if len(plan.Candidates) != 1 {
 		t.Fatalf("候选数为 %d，期望 1", len(plan.Candidates))
@@ -136,7 +144,7 @@ func TestConsecutiveFailuresDrainsChannel(t *testing.T) {
 	}
 
 	r := seededRouter(1)
-	plan := r.Select([]Candidate{c}, "m")
+	plan := r.Select([]Candidate{c}, "m", Needs{})
 	if len(plan.Candidates) != 0 {
 		t.Error("被挡下的渠道不该出现在候选里")
 	}
@@ -171,7 +179,7 @@ func TestPriorityBeatsScore(t *testing.T) {
 		withHealth(Health{SuccessRate: 1.0}), withCost(0.001))
 
 	r := seededRouter(1)
-	plan := r.Select([]Candidate{cheapGood, expensiveBad}, "m")
+	plan := r.Select([]Candidate{cheapGood, expensiveBad}, "m", Needs{})
 
 	if plan.Candidates[0].Channel.ID != 1 {
 		t.Errorf("priority 应当优先于分数，实际第一个是渠道 %d", plan.Candidates[0].Channel.ID)
@@ -184,7 +192,7 @@ func TestScoreOrdersWithinPriority(t *testing.T) {
 	sick := candidate(2, "m", withHealth(Health{SuccessRate: 0.1, ConsecutiveFailures: 2}))
 
 	r := seededRouter(1)
-	plan := r.Select([]Candidate{sick, healthy}, "m")
+	plan := r.Select([]Candidate{sick, healthy}, "m", Needs{})
 
 	if plan.Candidates[0].Channel.ID != 1 {
 		t.Errorf("健康度高的应先选，实际第一个是渠道 %d", plan.Candidates[0].Channel.ID)
@@ -199,7 +207,7 @@ func TestEqualScoresAreShuffled(t *testing.T) {
 	seenFirst := map[int64]int{}
 	r := seededRouter(42)
 	for i := 0; i < 300; i++ {
-		plan := r.Select(cands, "m")
+		plan := r.Select(cands, "m", Needs{})
 		if len(plan.Candidates) == 0 {
 			t.Fatal("候选不应为空")
 		}
@@ -404,7 +412,7 @@ func TestCostDataChangesOrdering(t *testing.T) {
 	plan := r.Select([]Candidate{
 		candidate(1, "m", withCost(10)),
 		candidate(2, "m", withCost(0.1)),
-	}, "m")
+	}, "m", Needs{})
 	if plan.Candidates[0].Channel.ID != 2 {
 		t.Errorf("排序应把便宜的那个放前面，实际第一个是渠道 %d", plan.Candidates[0].Channel.ID)
 	}
@@ -1287,7 +1295,7 @@ func TestShuffleUsesInjectedRand(t *testing.T) {
 	// 同一个种子跑两次，顺序必须一致
 	order := func() []int64 {
 		r := seededRouter(42)
-		plan := r.Select(cands, "m")
+		plan := r.Select(cands, "m", Needs{})
 		out := make([]int64, 0, len(plan.Candidates))
 		for _, c := range plan.Candidates {
 			out = append(out, c.Channel.ID)
