@@ -186,6 +186,53 @@ func (b Breakdown) sum() money.Amount {
 	return b.Subtotal().Add(b.Fixed).Add(b.MinimumAdjustment)
 }
 
+// sumChecked 求所有行项的**精确**之和，并说明这个和放不放得进 money。
+//
+// 与 sum 的差别在判据：sum 逐个 Add，中间值一旦溢出就被夹住，而夹住之后
+// 即使真实的和放得下，结果也已经不等于它（见 money.SumChecked 的注释）。
+// 这里按 big.Int 精确累加，报出来的才是「真实的和真的放不下」。
+//
+// 行项包含 MinimumAdjustment：它也是 Total 的一项，漏掉它会让校验与
+// Verify 的口径不一致。
+func (b Breakdown) sumChecked() (money.Amount, bool) {
+	amounts := make([]money.Amount, 0, 8+len(b.Units))
+	amounts = append(amounts,
+		b.Prompt, b.Completion, b.CacheRead, b.CacheWrite, b.Reasoning)
+	for _, v := range b.Units {
+		amounts = append(amounts, v)
+	}
+	amounts = append(amounts, b.Fixed, b.MinimumAdjustment)
+	return money.SumChecked(amounts...)
+}
+
+// checkAmounts 确认这次算出的金额没有被夹过。
+//
+// 为什么要在结算路径上查：ComputeWithCharges 的签名不带 error（它算不出来
+// 时只能交回一个夹住的数），而那个 Total 会经 SettleWithCharges 写进
+// billing_requests.computed_amount 与账本分录——夹住就是**少收**，且账目
+// 仍然是平的，事后看不出来。所以判据放在两个返回 error 的入口上
+// （SettleWithCharges 与 Reserve），不改 Subtotal / sum 的签名。
+//
+// 两个条件都要：
+//
+//   - 精确和放不进 int64：这是真的溢出，必须拒绝；
+//   - 精确和与 Total 不等：求和途中有一步被夹住了。真实和放得下时这一条
+//     通常不成立，但把判据落在「结果等于精确和」上，比逐个推断每一步
+//     安全——负金额与正金额交替时，中间值的夹住会被后面的抵消掩盖。
+func (b Breakdown) checkAmounts() error {
+	total, ok := b.sumChecked()
+	if !ok {
+		return fmt.Errorf(
+			"计费金额之和放不进 int64 的最小单位表示（库里的 numeric(20, 8) 存得下，money 表示不了）: %w",
+			money.ErrOverflow)
+	}
+	if total.Cmp(b.Total) != 0 {
+		return fmt.Errorf("明细总额 %s 与逐项精确和 %s 不符：求和途中有一步被夹住了: %w",
+			b.Total, total, money.ErrOverflow)
+	}
+	return nil
+}
+
 // Verify 校验 Total 等于逐项之和。
 //
 // 单独一个方法而不是在 Compute 里断言：外部构造的 Breakdown（例如从数据库

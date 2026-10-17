@@ -3,6 +3,7 @@ package billing
 import (
 	"errors"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/sumwai/larkax/internal/channel"
@@ -1082,5 +1083,109 @@ func TestCacheCompressionGuardWhenPromptIsZero(t *testing.T) {
 
 	if got.CacheReadTokens != 100 {
 		t.Errorf("输入为 0 时不该压回缓存量，得到 %d", got.CacheReadTokens)
+	}
+}
+
+// ── 写路径上的溢出 ──────────────────────────────────────────────────────
+
+// 各项金额之和放不进 int64 时，结算必须报错，而不是带着一个被夹住
+// （因而**偏小**）的金额往下走。
+//
+// 写路径的代价是少收：breakdown.Total 会经 SettleWithCharges 交给
+// pipeline 写进 billing_requests.computed_amount 与账本分录，而账目仍然
+// 是平的——事后只有这一个错数，没有任何迹象。
+//
+// 构造的是**真实和**放不下：两项各自被夹到 MaxInt64，精确和是两个
+// MaxInt64。逐项都夹住了而真实和放得下的情形见 TestSettleRejectsClampedTotal。
+func TestSettleRejectsAmountOverflow(t *testing.T) {
+	p := Prices{
+		Prompt:     money.One,
+		Completion: money.One,
+		Declared:   map[string]bool{"prompt": true, "completion": true},
+	}
+	actual := Usage{PromptTokens: math.MaxInt64, CompletionTokens: math.MaxInt64}
+
+	// 前提：两项确实都被夹过。不先断言这一条，下面的报错可能来自
+	// 别的原因（例如 Validate 拒绝了这个用量），用例就证不到点子上。
+	raw := ComputeWithCharges(actual, p, Charges{})
+	if raw.Prompt.Units() != math.MaxInt64 || raw.Completion.Units() != math.MaxInt64 {
+		t.Fatalf("前提不成立：Prompt = %d、Completion = %d，期望都夹到 MaxInt64",
+			raw.Prompt.Units(), raw.Completion.Units())
+	}
+	if _, ok := raw.sumChecked(); ok {
+		t.Fatal("前提不成立：两项精确和应当放不进 int64")
+	}
+
+	_, err := SettleWithCharges(actual, p, Charges{}, money.One)
+	if err == nil {
+		t.Fatalf("金额被夹住时结算必须报错，得到 Total = %s", raw.Total)
+	}
+	if !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("错误里应当能认出 money.ErrOverflow，得到 %v", err)
+	}
+}
+
+// 精确和放得下、而逐项 Add 的中间值被夹住时，也要报出来。
+//
+// 这是「结果不等于精确和」那一条判据的用例：[+MaxInt64, +145, -145] 的
+// 真实和是 MaxInt64（放得下），但累加到第二项时中间值已经溢出——夹住之后
+// 再减去 145，Total 就比真实和小了。只看「真实和放不放得下」的判据会放过
+// 它，而写进账的就是那个偏小的数。
+func TestSettleRejectsClampedTotal(t *testing.T) {
+	huge := money.FromUnits(math.MaxInt64)
+	b := Breakdown{Prompt: huge, Completion: money.FromInt(145), MinimumAdjustment: huge.Neg()}
+	b.Total = b.sum() // 夹住之后的值：不等于精确和
+
+	if _, ok := b.sumChecked(); !ok {
+		t.Fatal("前提不成立：精确和应当放得进 int64")
+	}
+	if b.Total.Cmp(huge) >= 0 {
+		t.Fatalf("前提不成立：Total = %s，应当比精确和小", b.Total)
+	}
+	err := b.checkAmounts()
+	if err == nil {
+		t.Fatal("Total 与精确和不符时必须报错")
+	}
+	if !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("错误里应当能认出 money.ErrOverflow，得到 %v", err)
+	}
+}
+
+// 正常金额不受影响：没有溢出时结算照旧。
+func TestSettleAcceptsNormalAmounts(t *testing.T) {
+	s, err := SettleWithCharges(Usage{PromptTokens: 1000}, prices(), Charges{}, money.One)
+	if err != nil {
+		t.Fatalf("正常金额不该报错: %v", err)
+	}
+	if s.Actual.String() != "0.00200000" {
+		t.Errorf("Actual = %s，期望 0.00200000", s.Actual)
+	}
+}
+
+// 预留算不出来时同样要报错：夹住的预留是一个**偏小**的上界，结算会超过它、
+// 撞上 Capped，差额静默由平台承担。
+//
+// 输入侧与输出侧各自都夹到 MaxInt64，于是四项之和溢出。
+func TestReserveRejectsAmountOverflow(t *testing.T) {
+	p := Prices{
+		Prompt:     money.One,
+		Completion: money.One,
+		Declared:   map[string]bool{"prompt": true, "completion": true},
+	}
+
+	// 前提：单独的每一项被夹住了。若单价 × 用量没夹，用例就没走到溢出。
+	input := money.One.MulInt(math.MaxInt64)
+	if input.Units() != math.MaxInt64 {
+		t.Fatalf("前提不成立：输入侧 = %d，期望被夹到 MaxInt64", input.Units())
+	}
+
+	_, err := Reserve(ReserveRequest{
+		Prices: p, InputTokens: math.MaxInt64, MaxTokens: math.MaxInt64,
+	})
+	if err == nil {
+		t.Fatal("预留金额溢出时必须报错，而不是交回一个偏小的上界")
+	}
+	if !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("错误里应当能认出 money.ErrOverflow，得到 %v", err)
 	}
 }

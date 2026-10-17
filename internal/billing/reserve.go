@@ -99,6 +99,33 @@ func Reserve(req ReserveRequest) (money.Amount, error) {
 	total = money.Max(total, req.Charges.Minimum)
 	total = total.Add(req.Charges.Fixed)
 
+	// 预留本身也要能算得出来：夹住的预留是一个**偏小**的上界，于是结算
+	// 必然超过它、撞上 Capped，差额静默由平台承担（见 Settlement.Capped）。
+	// 上面每一步 Add / MulInt 都会夹住而不报错，所以这里按精确和再判一次。
+	//
+	// 判据用 SumChecked 判「真实的和放不放得下」，而不是逐个中间值——
+	// 中间值溢出但真实和放得下是正常的（见 money.SumChecked）。各分项都
+	// 已被 validate 保证非负，所以也不存在正负抵消把夹住掩盖过去的情形。
+	parts := []money.Amount{input, cacheRead, cacheWrite, output}
+	for _, price := range p.Units {
+		parts = append(parts, price)
+	}
+	checked, ok := money.SumChecked(parts...)
+	if !ok {
+		return money.Zero, fmt.Errorf(
+			"预留金额之和放不进 int64 的最小单位表示（库里的 numeric(20, 8) 存得下，money 表示不了）: %w",
+			money.ErrOverflow)
+	}
+	// 与逐个 Add 得到的结果比对：total 还经过 Max 与 Fixed 两步，中间任何
+	// 一步夹住都会让两者不等。非负分项下这一条通常不成立，但它把「哪一步
+	// 夹住了」一并钉住。
+	floor := money.Max(checked, req.Charges.Minimum)
+	want, ok := money.SumChecked(floor, req.Charges.Fixed)
+	if !ok || want.Cmp(total) != 0 {
+		return money.Zero, fmt.Errorf(
+			"预留总额 %s 与精确和 %s 不符：求和途中有一步被夹住了: %w",
+			total, want, money.ErrOverflow)
+	}
 	return total, nil
 }
 
@@ -240,6 +267,13 @@ func SettleWithCharges(actual Usage, prices Prices, charges Charges, reserved mo
 	}
 
 	breakdown := ComputeWithCharges(actual, prices, charges)
+	// 明细的每一项都可能被 MulInt 夹住（单价 × 用量放不进 int64），而
+	// ComputeWithCharges 的签名不带 error，夹住的结果只能在这里判出来。
+	// 这个判据必须在**写账之前**跑：Total 会经 Settlement 进
+	// billing_requests.computed_amount 与账本分录，夹住就是少收。
+	if err := breakdown.checkAmounts(); err != nil {
+		return Settlement{}, err
+	}
 	actualAmount := breakdown.Total
 
 	s := Settlement{
