@@ -388,9 +388,9 @@ func TestSettleProducesChargeAndEntries(t *testing.T) {
 	if charge.Settlement.Capped {
 		t.Error("不该撞 Capped：预留是 0.002，实际 0.0014")
 	}
-	// 差额退回
-	if charge.Settlement.Delta.String() != "-0.00060000" {
-		t.Errorf("差额 = %s，期望 -0.0006", charge.Settlement.Delta)
+	// 预留 0.002，实收 0.0014，差额 0.0006 退回
+	if charge.Settlement.Reserved.String() != "0.00200000" {
+		t.Errorf("预留 = %s，期望 0.002", charge.Settlement.Reserved)
 	}
 	if len(charge.Entries) == 0 {
 		t.Fatal("应生成账本分录")

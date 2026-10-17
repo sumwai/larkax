@@ -191,23 +191,17 @@ var ErrNoUpperBound = errors.New("无法确定预留上界")
 // （见 internal/ledger/store 的 markSettled），差额就是被预留截住、由平台
 // 承担掉的那笔钱。**别把它读成「Breakdown 是没用的中间产物」**——它是这两个
 // 数里唯一那个「按用量该收多少」的答案。
+//
+// 这里**没有**「差额」字段：退回多少就是 Reserved - Actual，而这两个数都是
+// 本结构体自己的字段，任何读者都能当场减出来。再存一份同义的数，只是多出
+// 一处迟早与它们不一致的地方。落库时那次退回也不在 Go 里算——解冻走的是
+// SQL 里的 reserved_amount（见 internal/ledger/store 的 releaseFrozen）。
 type Settlement struct {
 	// Actual 是按实际用量算出的金额，**撞上上界时是 Reserved**（被截断）。
 	// 未截断的那个数在 Breakdown.Total 里。
 	Actual money.Amount
 	// Reserved 是预先冻结的金额。
 	Reserved money.Amount
-	// Delta 是 Actual - Reserved。
-	// 正数表示要再扣，负数表示要退回。
-	//
-	// 今天它恒为 0 或负数——Actual 是 min(Breakdown.Total, Reserved)，不可能
-	// 超过 Reserved（上界就是这么设计的，见 Reserve）。「要再扣」那一支是
-	// 上界被破坏之后才会有的形状，留着它是为了让那种情况下这个数仍然说得清。
-	//
-	// 本仓今天没有生产读者读它，只有测试在断言。要接一个读者之前先想清楚
-	// 它比 Breakdown.Total 与 Reserved 两个数本身多回答了什么问题——答不上来
-	// 就不要接（见 LESSONS.md 第 22 条）。
-	Delta money.Amount
 	// Breakdown 是实际用量的明细。它的 Total 是**未截断**的计算金额，
 	// 见类型注释。
 	Breakdown Breakdown
@@ -260,7 +254,6 @@ func SettleWithCharges(actual Usage, prices Prices, charges Charges, reserved mo
 	} else {
 		s.Capped = false
 	}
-	s.Delta = s.Actual.Sub(reserved)
 
 	if err := s.Breakdown.Verify(); err != nil {
 		return Settlement{}, err
