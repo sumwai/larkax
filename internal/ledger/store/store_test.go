@@ -445,22 +445,22 @@ func TestSettlementRecordsClientCancel(t *testing.T) {
 				t.Fatalf("结算失败: %v", err)
 			}
 
-			at := clientCancelledAt(t, db, requestID)
+			at := clientCanceledAt(ctx, t, db, requestID)
 			if !tc.canceled {
 				if at.Valid {
-					t.Errorf("没有取消的账单写下了 client_cancelled_at = %v，期望 NULL", at.Time)
+					t.Errorf("没有取消的账单写下了 client_canceled_at = %v，期望 NULL", at.Time)
 				}
 				return
 			}
 			if !at.Valid {
-				t.Fatal("客户端取消的账单没有留下 client_cancelled_at")
+				t.Fatal("客户端取消的账单没有留下 client_canceled_at")
 			}
 			// 钉的是「它是个真实的时刻」而不只是「非空」：写死一个常量
 			// （例如纪元）也能让非空断言通过，而那一列的全部价值就在于
 			// 「什么时候断的」。界放得宽是有意的——这里只排除明显不对的值，
 			// 不要求它与测试机的钟对齐。
 			if age := time.Since(at.Time); age > time.Hour || age < -time.Minute {
-				t.Errorf("client_cancelled_at = %v（距今 %v），不像刚刚写下的时刻", at.Time, age)
+				t.Errorf("client_canceled_at = %v（距今 %v），不像刚刚写下的时刻", at.Time, age)
 			}
 		})
 	}

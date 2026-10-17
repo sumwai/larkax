@@ -441,7 +441,7 @@ func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *
 		       channel_id = NULLIF($5, 0),
 		       upstream_status = NULLIF($3, 0),
 		       error_code = NULLIF($4, ''),
-		       client_cancelled_at = CASE WHEN $6 THEN now() END
+		       client_canceled_at = CASE WHEN $6 THEN now() END
 		 WHERE request_id = $1 AND status = 'pending'`,
 		req.RequestID, charge.Settlement.Actual.String(), 0, "", req.ChannelID,
 		charge.ClientCanceled)

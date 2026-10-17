@@ -463,10 +463,10 @@ func TestSettleClientCancelStillBills(t *testing.T) {
 		t.Errorf("用量来源 = %v，应标明是估算", charge.UsageSource)
 	}
 	// 「客户端断的」这件事本身也要跟着账单走：它是
-	// billing_requests.client_cancelled_at 的唯一来源，而那一列是事后回答
+	// billing_requests.client_canceled_at 的唯一来源，而那一列是事后回答
 	// 「这个渠道是不是经常被客户端掐断」的依据。
 	if !charge.ClientCanceled {
-		t.Error("客户端取消没落进账单：client_cancelled_at 会永远是 NULL")
+		t.Error("客户端取消没落进账单：client_canceled_at 会永远是 NULL")
 	}
 }
 
@@ -490,7 +490,7 @@ func TestSettleUpstreamSuccessIsNotClientCanceled(t *testing.T) {
 		t.Fatalf("正常结算失败: %v", err)
 	}
 	if charge.ClientCanceled {
-		t.Error("上游正常返回被标成了客户端取消：client_cancelled_at 会被写成非 NULL")
+		t.Error("上游正常返回被标成了客户端取消：client_canceled_at 会被写成非 NULL")
 	}
 }
 

@@ -235,7 +235,7 @@ func TestChatStreamClientDisconnectIsBilled(t *testing.T) {
 	// 三层（pumpStream → Outcome → Charge），任何一层漏掉它，库里那一列
 	// 就永远是 NULL，而这条链上的每一层单看都像是写了的。
 	if len(h.settlements.saved) == 1 && !h.settlements.saved[0].ClientCanceled {
-		t.Error("结算落库的账单没带上「客户端取消」：client_cancelled_at 会永远是 NULL")
+		t.Error("结算落库的账单没带上「客户端取消」：client_canceled_at 会永远是 NULL")
 	}
 }
 

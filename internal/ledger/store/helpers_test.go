@@ -203,15 +203,19 @@ func channelOf(t *testing.T, db *sql.DB, requestID string) sql.NullInt64 {
 	return id
 }
 
-// clientCancelledAt 读账单上「客户端断开」那一刻。
+// clientCanceledAt 读账单上「客户端断开」那一刻。
 //
 // 返回 NULL 有两种来历，这一列分不开也不该分：没取消（结算路径必然知道），
 // 或者这一行还没结算过（那时它根本没被写过）。
-func clientCancelledAt(t *testing.T, db *sql.DB, requestID string) sql.NullTime {
+//
+// ctx 由调用方传进来，不在这里造一个 context.Background()：这一读属于哪次
+// 用例、受不受那次用例的超时约束，是调用方才知道的事（contextcheck 报的
+// 就是这一条）。自己造一个的话，用例超时了这次查询还挂在库里。
+func clientCanceledAt(ctx context.Context, t *testing.T, db *sql.DB, requestID string) sql.NullTime {
 	t.Helper()
 	var at sql.NullTime
-	qerr := db.QueryRowContext(context.Background(),
-		`SELECT client_cancelled_at FROM billing_requests WHERE request_id = $1`,
+	qerr := db.QueryRowContext(ctx,
+		`SELECT client_canceled_at FROM billing_requests WHERE request_id = $1`,
 		requestID).Scan(&at)
 	if qerr != nil {
 		t.Fatalf("读账单的客户端取消时刻失败: %v", qerr)
