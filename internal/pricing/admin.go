@@ -117,6 +117,9 @@ type CreateRequest struct {
 // 不包含任何在用模型的规则，都是合法的（前者是按计划生效，后者可能是先
 // 配好再上模型）。但**形状上**匹配不上的组合会被拒——例如 merchant 作用域
 // 不给 owner，那种规则无论等到什么时候都不会生效，见 validateRule。
+//
+// 规则与它的第一版历史在**同一个事务**里落：只落了规则而没落版本，表现为
+// 「这条规则的版本历史从第二版开始」，而差额出现时正好要用第一版对照。
 func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 	rule, err := req.normalize()
 	if err != nil {
@@ -129,8 +132,15 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 		return 0, err
 	}
 
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("开始事务失败: %w", err)
+	}
+	// 提交之后这里的 Rollback 返回 ErrTxDone，无害。
+	defer func() { _ = tx.Rollback() }()
+
 	var id int64
-	err = a.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO pricing_rules
 			(scope, owner_user_id, channel_id, name, model_patterns, expr, priority,
 			 enabled, effective_from, effective_to, created_by)
@@ -142,6 +152,18 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 		nullableID(rule.CreatedBy)).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("创建计价规则失败: %w", err)
+	}
+
+	// 第一版的改动人就是建它的人：取值来源是 CreateRequest.CreatedBy，
+	// 不需要调用方额外提供任何东西。它今天多半落成 NULL——CLI 的 price add
+	// 不带操作人——但那是「没有人可记」，与「记了一个没做过这件事的人」
+	// 是两回事，所以这里不兜一个编出来的值。
+	if err = insertRuleVersion(ctx, tx, id, rule.Expr, rule.CreatedBy); err != nil {
+		return 0, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return 0, fmt.Errorf("提交创建失败: %w", err)
 	}
 	return id, nil
 }
@@ -293,8 +315,57 @@ func (a *Admin) Update(ctx context.Context, req UpdateRequest) error {
 		req.ID); err != nil {
 		return fmt.Errorf("修改计价规则失败: %w", err)
 	}
+
+	// 表达式变了才留一版。这张表记的是**成交价的依据**（expr）：改名字、
+	// 改优先级、改生效时间都不改变任何一笔已经算出来的钱，为它们插一行会
+	// 让版本历史里塞满「表达式其实没变」的噪声，而它的读者正是要在差额
+	// 出现时一眼看出「价是什么时候被改的」。
+	//
+	// **那个读者今天还不存在**：这张表目前只有写入方，没有读取方（版本历史
+	// 属于管理面，尚未开建）。先写后读是刻意的——历史一旦没记就补不回来，
+	// 而「某笔差额是哪次改价造成的」只能在当时那一刻记下来。
+	//
+	// 判据用的是这一行**改之前**的值（current 是上面 FOR UPDATE 读出来的），
+	// 不是「这次有没有传 Expr」：传了一个与现值相同的表达式不算一次改价。
+	if merged.Expr != current.Expr {
+		// UpdateRequest 里没有「谁改的」这一项，所以这里的 changed_by 是 NULL。
+		// 编一个值（例如写 0 或写规则的 created_by）会让审计读到一个**没做过
+		// 这件事的人**，而审计里一条错的归属比一条空的归属坏得多。
+		if err = insertRuleVersion(ctx, tx, req.ID, merged.Expr, 0); err != nil {
+			return err
+		}
+	}
+
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("提交修改失败: %w", err)
+	}
+	return nil
+}
+
+// insertRuleVersion 给一条规则留一版表达式历史，供事后回答
+// 「这个价是什么时候被改成这样的」。
+//
+// # 版本号取 max + 1，不取 count
+//
+// 版本号是审计里会被引用的一个数（「这一笔是按 v3 算的」），所以它必须
+// 单调、不重号。count 会在删掉中间某一版之后撞上已有号，而
+// UNIQUE(rule_id, version) 会把那次写入整个拒掉——表现为「改价改不动了」。
+//
+// 并发安全靠调用方：两个写入路径都在事务里，Update 那一侧还先对
+// pricing_rules 的这一行取了 FOR UPDATE，所以同一规则的两次改版是串行的。
+//
+// changedBy 为 0 表示没有操作人可记，落库成 NULL（见 Update 里的说明）。
+//
+// 它**不写 expr 以外的字段**：这张表只承诺「成交价的依据留痕」，
+// 规则的名字、优先级、生效时间不在其中——那些改动不改变任何一笔钱。
+func insertRuleVersion(ctx context.Context, tx *sql.Tx, ruleID int64, expr string, changedBy int64) error {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO pricing_rule_versions (rule_id, version, expr, changed_by)
+		SELECT $1, COALESCE(MAX(version), 0) + 1, $2, $3
+		  FROM pricing_rule_versions
+		 WHERE rule_id = $1`,
+		ruleID, expr, nullableID(changedBy)); err != nil {
+		return fmt.Errorf("记录计价规则版本失败: %w", err)
 	}
 	return nil
 }

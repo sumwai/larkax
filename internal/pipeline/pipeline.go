@@ -305,6 +305,14 @@ type Charge struct {
 	UsageSource tokens.Source
 	Usage       billing.Usage
 
+	// ClientCanceled 为 true 表示这次请求是客户端在流式响应中途断开的。
+	//
+	// 落进 billing_requests.client_canceled_at（见 internal/ledger/store
+	// 的 markSettled）。它与 UsageSource 描述的是**两件事**：客户端断开时
+	// 用量确实是估的，但上游中途报错时用量同样是估的，而那不是客户端断的
+	// ——两者在对账与告警上是两回事（见 Outcome.ClientCanceled 的注释）。
+	ClientCanceled bool
+
 	// Tier 是规则记下的档位名，供账单解释「为什么按这一档算」。
 	Tier string
 	// PricedAt 是这次求值用的时刻，它记的是**受理时刻**
@@ -587,6 +595,7 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 		PricingExprSnap: rule.Source,
 		UsageSource:     out.UsageSource,
 		Usage:           usage,
+		ClientCanceled:  out.ClientCanceled,
 		Tier:            val.Tier,
 		// val.At 是这次求值用的时刻，也就是受理时刻（见 env）。
 		PricedAt: val.At,

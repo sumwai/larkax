@@ -462,6 +462,36 @@ func TestSettleClientCancelStillBills(t *testing.T) {
 	if charge.UsageSource != tokens.SourceEstimated {
 		t.Errorf("用量来源 = %v，应标明是估算", charge.UsageSource)
 	}
+	// 「客户端断的」这件事本身也要跟着账单走：它是
+	// billing_requests.client_canceled_at 的唯一来源，而那一列是事后回答
+	// 「这个渠道是不是经常被客户端掐断」的依据。
+	if !charge.ClientCanceled {
+		t.Error("客户端取消没落进账单：client_canceled_at 会永远是 NULL")
+	}
+}
+
+// 上游正常返回的结算**不能**标成客户端取消。
+//
+// 两个方向都要钉：只钉「取消时为真」的话，把这一列写成恒真也能通过，
+// 而恒真会让每一笔账单都记上「客户端断的」——按渠道统计掐断率时，
+// 一个健康的渠道看起来像是最差的那个。
+func TestSettleUpstreamSuccessIsNotClientCanceled(t *testing.T) {
+	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}
+	p := newPipeline(t, src)
+
+	req := baseRequest()
+	res, _ := p.Reserve(context.Background(), req)
+
+	charge, err := p.Settle(context.Background(), req, res, Outcome{
+		Usage:       channel.Usage{PromptTokens: 1000, CompletionTokens: 50},
+		UsageSource: tokens.SourceMeasured,
+	})
+	if err != nil {
+		t.Fatalf("正常结算失败: %v", err)
+	}
+	if charge.ClientCanceled {
+		t.Error("上游正常返回被标成了客户端取消：client_canceled_at 会被写成非 NULL")
+	}
 }
 
 // 结算必须基于一次真实的预留。

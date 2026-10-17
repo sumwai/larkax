@@ -291,6 +291,11 @@ func (s *Source) MatchAll(ctx context.Context, q pipeline.RuleQuery) ([]pipeline
 // 数据但版本没变」，而内容哈希把版本**定义**成源码的函数：源码变了，
 // 键就一定变，与谁用什么方式写进去的无关。
 //
+// 这两处现在都有写入方了（Admin.Create / Admin.Update 会插版本行并维护
+// updated_at，见 admin.go），但那**不改变这个结论**：义务仍然是义务，
+// 绕过管理面的写入——一条裸 SQL 的运维修复、将来某条迁移——照样会让它们
+// 落后于源码，而那种写入恰恰是最需要缓存不失效的时候。
+//
 // 碰撞（两份不同的源码得到同一个哈希）在这个用途下无害：它只会让两条
 // 规则共用一份编译产物，而那正是「表达式相同」时该发生的事。
 func versionOf(expr string) int64 {
