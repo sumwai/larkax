@@ -839,14 +839,20 @@ func (h *handle) settleFailure(ctx context.Context, out pipeline.Outcome) {
 //   - 一个响应都没拿到（连不上、TLS 失败、超时）：状态码留空，分类是
 //     「上游没给出可用的回答」。**不写 0**：HTTP 里没有 0 这个状态码，
 //     写 0 会读成「上游回了 0 号」，而 0 是「没有这回事」
-//   - 上游接受了请求却一个字都没吐（流式）：这条收尾只留下 errStreamAborted
-//     这个哨兵，没有把适配器知道的 2xx 具体几号带下来，所以状态码留空——
-//     编一个 200 出来就是假数据
+//   - 上游接受了请求却一个字都没吐（流式）：适配器在流的第一条事件里
+//     交下了那个 2xx，状态码照实记；分类是「流在接受之后断了」。这次的
+//     **结局**由分类表达，状态码表达「上游回过什么」——两列各司其职。
 //
 // 其余错误（插件阻断、别名没配、结算自己出错）返回空值：两列记的是上游
 // 失败的依据，把它们写进去会让「这一行是不是上游挂的」答错。
 func upstreamEvidence(err error) (status int, code string) {
 	if errors.Is(err, errStreamAborted) {
+		// 有状态码就记（streamAbortedError），没有就留空（裸哨兵）：
+		// 后者的 status 是 0，编一个 200 出来就是假数据。
+		var aborted *streamAbortedError
+		if errors.As(err, &aborted) && aborted.status > 0 {
+			return aborted.status, pipeline.ErrorUpstreamStreamAborted
+		}
 		return 0, pipeline.ErrorUpstreamStreamAborted
 	}
 
@@ -1079,33 +1085,24 @@ func usageOf(resp *channel.Response) channel.Usage {
 // 上游可以报一个全 0 的 usage（字段都在，值都是 0），也可以整块不报。
 // 两种情形下 usageOf 拿到的都是零值，**逐列相同**；而读账的人会把后者
 // 读成「这个模型的用量全是 0」。真正的区别只有一处：响应体里有没有
-// 那个块。
-//
-// # 这一事实今天只剩一个落点
-//
-// 它在解析那条路上被压平了：channel.Usage 是一组值字段，没有「在不在」
-// 这一位。唯一还留着它的是 relay 写进 Usage.Raw 的 "source" 键——它只在
-// 生产方（适配器）确实解析到 usage 块时才写（见 internal/relay/response.go
-// 的 rawUsage）。三个 chat 适配器都走那一条，所以这里读它。
+// 那个块，而这一事实由 channel.Usage.Reported 显式给出。
 //
 // 不拿「用量等于零」反推：那会把上游报的 0 读成「没报」，方向正好反了
 // ——本函数存在的理由就是不让这两件事混在一起。
 //
-// 判据宁严勿宽：拿不准（没有标记）时记 Unreported，而不是声称实测。
-// 把一个没报的 0 记成实测，正是要消除的那一种；反过来，把一个实测值
-// 误记成「没报」只是让一组本来能对账的数落进不可对账那一档，金额不变。
+// 也不读 Usage.Raw：那个字段的注释写着「排查用，不参与计费」，里面的
+// 键名由 relay 与适配器约定着填。拿它当判据时，谁改了键名或新适配器
+// 忘了填，这里不会报错，只会把来源静默判反。Reported 是计费路径上的
+// 一等字段，漏填会落成 false（保守那一侧）。
 //
-// 边界：这条判据依赖 relay 的 "source" 标记，而它不是计费契约的一部分
-// （channel.Usage.Raw 的注释写着「排查用」）。要让它成为一等的字段，
-// 得在 channel.Usage 上加一位——那是另一个包的改动，本轮不动。
+// 判据宁严勿宽：拿不准（Reported 为 false）时记 Unreported，而不是声称
+// 实测。把一个没报的 0 记成实测，正是要消除的那一种；反过来，把一个实测值
+// 误记成「没报」只是让一组本来能对账的数落进不可对账那一档，金额不变。
 func usageSourceOf(resp *channel.Response) tokens.Source {
-	if resp == nil {
+	if resp == nil || !resp.Usage.Reported {
 		return tokens.SourceUnreported
 	}
-	if src, _ := resp.Usage.Raw["source"].(string); src != "" {
-		return tokens.SourceMeasured
-	}
-	return tokens.SourceUnreported
+	return tokens.SourceMeasured
 }
 
 // ownerOf 从候选里找出某个渠道的商家。

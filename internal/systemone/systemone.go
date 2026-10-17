@@ -180,6 +180,16 @@ type Answer struct {
 type Usage struct {
 	InputTokens  int64
 	OutputTokens int64
+
+	// Reported 表示上游的响应体里确实有 usage 块。
+	//
+	// 它与「两个数字是不是 0」是两件事：上游可以报一个全 0 的 usage，
+	// 也可以整块不报；两种情形下上面两个字段一模一样。计费来源按这一位
+	// 判，不按数字（见 gateway.usageSourceOf）。
+	//
+	// 零值是「没报」，也是漏填时落到的那一边——那只会让可对账的用量
+	// 记成不可对账，金额不变，方向是保守的。
+	Reported bool
 }
 
 // ChannelUsage 把这条表面的用量折进统一口径。
@@ -189,10 +199,13 @@ type Usage struct {
 // 那是「推理单独报出」的意思，而这里推理量恒为 0，两种读法结果相同。
 // 把它写成 true 会变成一句**没有依据**的声明（我们没有把推理算进 output
 // 的证据），而那句话在别的口径下会让计费少收。
+//
+// Reported 原样带过去：它是「上游报没报」这件事，不该在这一层丢掉。
 func (u Usage) ChannelUsage() channel.Usage {
 	return channel.Usage{
 		PromptTokens:     u.InputTokens,
 		CompletionTokens: u.OutputTokens,
+		Reported:         u.Reported,
 	}
 }
 
@@ -333,10 +346,13 @@ type wireQuestion struct {
 }
 
 // wireResponse 是响应的线格式。
+//
+// Usage 是指针：解析时的「有没有这个键」是计费要用的一个事实（见
+// Usage.Reported），而值字段会把它与「报了一个全 0」压成同一种形状。
 type wireResponse struct {
 	Model   string                `json:"model"`
 	Answers map[string]wireAnswer `json:"answers"`
-	Usage   wireUsage             `json:"usage"`
+	Usage   *wireUsage            `json:"usage"`
 }
 
 // wireAnswer 是一道答案的线格式。
@@ -543,10 +559,14 @@ func ParseResponse(body []byte) (*Response, error) {
 	out := &Response{
 		Model:   wire.Model,
 		Answers: make(map[string]Answer, len(wire.Answers)),
-		Usage: Usage{
+	}
+	if wire.Usage != nil {
+		// 指针非 nil 就是「上游报了这个块」，哪怕两个数都是 0。
+		out.Usage = Usage{
 			InputTokens:  wire.Usage.InputTokens,
 			OutputTokens: wire.Usage.OutputTokens,
-		},
+			Reported:     true,
+		}
 	}
 	for id, wa := range wire.Answers {
 		out.Answers[id] = Answer{
@@ -578,7 +598,11 @@ func EncodeResponse(resp *Response) ([]byte, error) {
 	wire := wireResponse{
 		Model:   resp.Model,
 		Answers: make(map[string]wireAnswer, len(resp.Answers)),
-		Usage: wireUsage{
+		// 线格式与今天一致：usage 总是出现。Reported 是**内部计费**用的
+		// 事实，不改变我们回给调用方的形状——把「上游没报」变成「我们回
+		// 一个没有 usage 的响应」会让这条表面的对外契约跟着变，而那不在
+		// 这一次改动里。
+		Usage: &wireUsage{
 			InputTokens:  resp.Usage.InputTokens,
 			OutputTokens: resp.Usage.OutputTokens,
 		},

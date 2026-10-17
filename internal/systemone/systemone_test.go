@@ -201,6 +201,34 @@ func TestUsageMapsToPromptAndCompletion(t *testing.T) {
 	}
 }
 
+// 「上游报了一个全 0 的 usage」与「上游整块没报」要分得开。
+//
+// 两种响应的两个数字完全相同，区别只在响应体里有没有那个块。它决定计费
+// 来源（measured 还是 unreported），所以解析时不能把这一位压平。
+func TestParseResponseReportsUsagePresence(t *testing.T) {
+	withBlock, err := ParseResponse([]byte(
+		`{"model":"m","answers":{},"usage":{"input_tokens":0,"output_tokens":0}}`))
+	if err != nil {
+		t.Fatalf("ParseResponse 出错: %v", err)
+	}
+	if !withBlock.Usage.Reported {
+		t.Error("响应体里有 usage 块时 Reported 应为 true，哪怕是全 0")
+	}
+
+	withoutBlock, err := ParseResponse([]byte(`{"model":"m","answers":{}}`))
+	if err != nil {
+		t.Fatalf("ParseResponse 出错: %v", err)
+	}
+	if withoutBlock.Usage.Reported {
+		t.Error("响应体里没有 usage 块时 Reported 应为 false")
+	}
+
+	// 这一位要活着折进计费口径：丢掉它，gateway 只能又一次按数字猜。
+	if !withBlock.Usage.ChannelUsage().Reported {
+		t.Error("ChannelUsage 丢了 Reported")
+	}
+}
+
 // 响应的三种答案形状都要能解出来，且各带各的字段。
 func TestParseResponseKeepsAnswerShapes(t *testing.T) {
 	body := []byte(`{

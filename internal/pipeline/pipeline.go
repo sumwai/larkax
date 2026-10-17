@@ -412,9 +412,10 @@ const (
 	ErrorUpstreamNoAnswer = "upstream_no_answer"
 
 	// ErrorUpstreamStreamAborted 表示上游接受了请求，但一个 token 都没吐就
-	// 结束了（流式）。它发生在响应头之后：适配器其实拿得到那个 2xx 状态码，
-	// 但网关的这条收尾路径只留下这个哨兵、没有把具体几号带下来，所以
-	// UpstreamStatus 是 0（落库成 NULL）。
+	// 结束了（流式）。它发生在响应头之后：适配器拿得到那个 2xx，并由流的
+	// 第一条事件把它交下来，所以 UpstreamStatus 记的是那个真实状态码——
+	// 「拿到过响应」这个事实成立。这次的**结局**（一个字都没产生）由本分类
+	// 表达，两列各司其职。
 	ErrorUpstreamStreamAborted = "upstream_stream_aborted"
 )
 

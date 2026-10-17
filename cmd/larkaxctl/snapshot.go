@@ -602,6 +602,14 @@ func printSnapshots(w io.Writer, requestID string, rows []snapshotRow) {
 // 哪个方向、什么时候落的、上游当时什么状态、有没有报错。这些都在列上，
 // 不在骨架里，而骨架本身不解释自己。
 //
+// # upstream_status 与 error_kind 按方向读
+//
+// 这两列只对**响应方向**的快照有意义：请求方向的行采于选路与调上游之前，
+// 那时连会打到哪个渠道都不知道（见 #384 的结论与 docs/development.md）。
+// 把它们的 NULL 打成 <未记录>，读起来正是「应该有值但没记下来」——
+// 与本条要消除的那个误读一模一样。所以请求方向的行打成「不适用」，
+// 响应方向的行才打 <未记录>。
+//
 // # 为什么截断必须显式说出来
 //
 // 被降级成摘要层的骨架与一份完整的骨架在肉眼下长得一样，而前者会让人以为
@@ -612,8 +620,8 @@ func printSnapshot(w io.Writer, seq int, row snapshotRow) {
 	_, _ = fmt.Fprintf(w, "  created_at=%s\n", row.CreatedAt.UTC().Format(time.RFC3339Nano))
 	_, _ = fmt.Fprintf(w, "  skeleton_version=%d\n", row.SkeletonVersion)
 	_, _ = fmt.Fprintf(w, "  capture_mode=%s\n", row.CaptureMode)
-	_, _ = fmt.Fprintf(w, "  upstream_status=%s\n", nullableInt(row.UpstreamStatus))
-	_, _ = fmt.Fprintf(w, "  error_kind=%s\n", nullableText(row.ErrorKind))
+	_, _ = fmt.Fprintf(w, "  upstream_status=%s\n", evidenceCell(row.Direction, nullableInt(row.UpstreamStatus)))
+	_, _ = fmt.Fprintf(w, "  error_kind=%s\n", evidenceCell(row.Direction, nullableText(row.ErrorKind)))
 	_, _ = fmt.Fprintf(w, "  skeleton_truncated=%t\n", row.Truncated)
 	printRedactedPaths(w, "  ", row.RedactedPaths)
 
@@ -657,7 +665,7 @@ func printRedactedPaths(w io.Writer, indent string, paths []string) {
 // 而「上游当时没给状态码」本身是一条信息。
 func nullableInt(v sql.NullInt64) string {
 	if !v.Valid {
-		return "<未记录>"
+		return nullableUnrecorded
 	}
 	return strconv.FormatInt(v.Int64, 10)
 }
@@ -665,9 +673,37 @@ func nullableInt(v sql.NullInt64) string {
 // nullableText 把可空的文本列渲染成文本。
 func nullableText(v sql.NullString) string {
 	if !v.Valid {
-		return "<未记录>"
+		return nullableUnrecorded
 	}
 	return v.String
+}
+
+const (
+	// nullableUnrecorded 是可空列没有值时的渲染文本。
+	//
+	// 它读作「应该有值，但没记下来」——这对响应方向的行是对的，
+	// 对请求方向的行不对（那两个值在那条路上本来就不适用，见 evidenceCell）。
+	nullableUnrecorded = "<未记录>"
+
+	// notApplicableOnRequest 是 upstream_status / error_kind 在请求方向行上的
+	// 渲染文本。
+	//
+	// 这两列是给响应方向快照准备的：请求方向的采集点在选路与调上游之前，
+	// 那时没有上游状态码可记（见 #384 的结论与 docs/development.md）。
+	// 打成 <未记录> 会让读命令的人以为漏记了。
+	notApplicableOnRequest = "<不适用（请求方向快照）>"
+)
+
+// evidenceCell 按快照方向渲染「上游证据」那一列（upstream_status / error_kind）。
+//
+// 只改写 NULL：请求方向的行上这两列不适用，而响应方向的行上没记就是没记。
+// 非 NULL 的值照常显示，哪怕它出现在请求方向的行上——那说明有写入路径绕过了
+// internal/snapshotwire 的门，把一个异常藏起来比显示出来更坏。
+func evidenceCell(direction, value string) string {
+	if direction == string(snapshot.RootRequest) && value == nullableUnrecorded {
+		return notApplicableOnRequest
+	}
+	return value
 }
 
 // runSnapshotCleanup 删除到期分区。

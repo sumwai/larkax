@@ -27,7 +27,8 @@ import (
 //
 // 流式那条路不同：来源由事件流与入口一起决定，缺 usage 时落 estimated
 // （见 internal/gateway 的 Result.Estimated 与 stream.go）。决策那条路
-// （Decide）仍然记实测，理由见 decide.go 里那一行。
+// （Decide）与 chat 共用同一条判据——看上游报没报 usage 块（usageSourceOf
+// 读 channel.Usage.Reported），所以它也不再无条件记实测。
 var ErrUnknownUsageSource = errors.New("未知的用量来源")
 
 // insertUsageEventSQL 写一行用量事件。
