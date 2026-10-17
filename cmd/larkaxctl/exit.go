@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 
+	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -61,15 +62,19 @@ func dbErr(err error) error {
 	return &codedError{code: exitDBUnreach, err: err}
 }
 
-// conflictErrors 是各包的写入路径撞上数据约束时返回的哨兵错误。
+// conflictErrors 是各包的写入与解析路径撞上数据约束时返回的哨兵错误。
 //
 // 集中列在这里，是为了让命令那一层只管把包的错误原样返回——「这个错误算不算
 // 冲突」是分类问题，不是每个子命令各自判断一遍的问题（各判断一遍时，
 // 漏掉一个的表现是它悄悄退回 exitFailure，而 1 与 4 在脚本里是两种处置）。
 //
-// 两类都算冲突：撞上唯一键 / 外键，以及要改的那一行不在库里。后者的下一步
-// 动作与前者的性质相同——都是「先去看数据里现在是什么」。
+// 两类都算冲突：撞上唯一键 / 外键，以及要改或要查的那一行不在库里。后者的
+// 下一步动作与前者的性质相同——都是「先去看数据里现在是什么」。「要查的」
+// 那一类来自**解析**路径（例如 auth.ResolveUser 认不出一个标识），它与写入
+// 路径共用同一个哨兵，所以这里两类并列而不是只列写入。
 var conflictErrors = []error{
+	auth.ErrUserNotFound,
+
 	channels.ErrChannelNotFound,
 
 	catalog.ErrModelExists,

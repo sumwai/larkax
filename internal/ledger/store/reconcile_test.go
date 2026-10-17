@@ -513,7 +513,7 @@ func TestReconcileReportsMissingWallet(t *testing.T) {
 }
 
 // 只有预留、没有钱包行：同样是缺钱包行，但 Detail 要指出缺的是哪一侧
-// ——查的地方完全不同（注册流程 vs 预留落了而钱包被删）。
+// ——查的地方完全不同（还没开过户 vs 预留落了而钱包被删）。
 func TestReconcileReportsWalletMissingForReservationOnly(t *testing.T) {
 	db := testDB(t)
 	s := New(db)
@@ -765,7 +765,7 @@ func TestReconcileReportsZeroUserAccount(t *testing.T) {
 }
 
 // 「有 pending 预留、既没有钱包行也没有账本分录」的用户整体在候选集之外
-// ——而注册流程漏建钱包的用户恰好是这个形状。WalletMissing 那条分支存在的
+// ——而还没开过户的用户恰好是这个形状。WalletMissing 那条分支存在的
 // 意义正是把他报出来，所以候选集必须带上未结算预留这一侧。
 func TestReconcileReportsWalletMissingForReservationWithoutOtherSides(t *testing.T) {
 	db := testDB(t)
