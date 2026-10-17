@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/relay"
 )
 
@@ -17,6 +18,7 @@ import (
 //	response.output_item.added                 → 一个输出项开始（message / reasoning / function_call）
 //	response.output_text.delta                 → 正文增量
 //	response.reasoning_summary_text.delta      → 思考摘要增量
+//	response.reasoning.delta                   → 思考增量（上游在用的另一个名字）
 //	response.function_call_arguments.delta     → 工具参数增量
 //	response.output_item.done                  → 该输出项结束
 //	response.completed / response.incomplete   → 终态，**用量跟着它一起来**
@@ -81,6 +83,52 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 		textSent = make(map[int]bool)
 	)
 
+	// log 是本请求的日志器：进程级日志器加上 context 里的请求标识。
+	// 取一次即可——FromContext 每次都会按 context 重建一个带字段的日志器。
+	log := observe.FromContext(ctx)
+
+	// noted 记住这条流里已经记过日志的事件名。
+	//
+	// 有的上游每个 token 发一个同类事件（思考增量就是这样），逐条打会把日志
+	// 淹掉，而这一行要说明的只是「这条流里出现过这个事件」。同类只记一次。
+	noted := make(map[string]bool)
+
+	// noteOnce 与 warnOnce 记一次「上游发了一个我们不转发的事件」，同类只记
+	// 一次。三处会走到它们上面：思考那一支、无匹配分支里的已知事件、无匹配分支
+	// 里的未归类事件——**三处各带一句自己的话**，因为它们是三件事，而排查的人
+	// 与写用例的人都要能把它们分开（见 TestChatStreamReasoningEventsAreRecognized
+	// 与 TestChatStreamUnknownEventIsLoggedAndIgnored）。
+	//
+	// 为什么无匹配分支必须留下痕迹：静默忽略最坏的后果是上游把正文放进一个我们
+	// 不认识的事件名里，我们一字不发、也一字不记——reasoning.delta 就是这种形状，
+	// 只是那一次它恰好不含正文（见下面那个 case）。
+	//
+	// 已知与未归类分开记：已知的（ignorableResponsesEvents）记 debug，它是正常流
+	// 的一部分，默认级别下不该出现；未归类的记 warn，它可能是上游新增的事件，也
+	// 可能含正文，而「正文被静默丢掉」正是这个包最怕的失效方式。
+	//
+	// 两者都**不中断流**，也都不转发它的 delta：不认识的 delta 里可能是思考
+	// 内容，转发等于把中间产物当正文发给客户端——那是另一类、更贵的错。而中断
+	// 流更坏：已经吐出去的正文收不回来，一个陌生的事件名还会让上层把这次调用
+	// 当成「上游坏了」去换渠道重试，于是客户端收到两段拼接的回答。
+	//
+	// 只记事件名、不记载荷：载荷里是模型的输出（可能就是用户的正文），而这里
+	// 要回答的问题只是「哪个事件没被处理」。
+	noteOnce := func(eventType, msg string) {
+		if noted[eventType] {
+			return
+		}
+		noted[eventType] = true
+		log.Debug(msg, "event", eventType)
+	}
+	warnOnce := func(eventType, msg string) {
+		if noted[eventType] {
+			return
+		}
+		noted[eventType] = true
+		log.Warn(msg, "event", eventType)
+	}
+
 	// sendText 在没发过增量、且这一项还没发过时，把它的正文补成一个 delta。
 	//
 	// 判据与 relaykit 的 terminalOutputChunks 同源（hadSentText 为假时才从
@@ -143,11 +191,22 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 				events <- channel.StreamEvent{Kind: "delta", Text: ev.Delta}
 			}
 
-		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		case "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done",
+			"response.reasoning_text.delta", "response.reasoning_text.done",
+			// 上游在用的另外两个名字。它们不在 OpenAI 的 Responses 事件表里
+			// （表里是上面四个），但实测会发——落到无匹配分支时行为上「碰巧
+			// 对」，而碰巧对不是分支在管：哪天有人把无匹配分支改成「未知事件
+			// 即报错」，这条流立刻就断。
+			"response.reasoning.delta", "response.reasoning.done":
 			// 思考内容不进正文事件：它是模型的中间产物，与用户可见的回答
 			// 是两件事（与 chat 的 reasoning_content、Anthropic 的
 			// thinking_delta 同一处置）。需要它的一方读终态事件里的
 			// response.output——那里有完整的摘要。
+			//
+			// 这一支与无匹配分支都不转发内容，**行为上分不出来**，所以这里
+			// 也记一条 debug：认得的事件与未归类的事件在日志里必须能分开
+			//（见 noteOnce）。
+			noteOnce(ev.Type, "跳过思考类流式事件（不进正文）")
 
 		case "response.output_item.added":
 			// 工具调用的名字与 id 在这里给出，参数要到后面的增量里才来
@@ -261,6 +320,15 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 				},
 			}
 			return
+
+		default:
+			// 本适配器没有分类的事件：可能是新协议里新增的事件，也可能含
+			// 正文。记下来，但既不转发也不中断流（理由见 noteOnce）。
+			if _, known := ignorableResponsesEvents[ev.Type]; known {
+				noteOnce(ev.Type, "跳过已知且不必转发的流式事件")
+			} else {
+				warnOnce(ev.Type, "流里出现未归类的事件，内容已忽略")
+			}
 		}
 	}
 
@@ -277,6 +345,41 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 	// 连接直接关闭而没有终态事件：不补 done，也不补 usage。
 	// 缺了结束标记是「上游行为不符合协议」，如实反映比伪造一个正常结束更好——
 	// 伪造会让「流被截断」看起来像「模型答完了」。
+}
+
+// ignorableResponsesEvents 是**已知、且忽略它不会丢内容**的流式事件。
+//
+// 判据是「忽略它会不会丢内容」，而不是「它有没有用」：这张表只决定无匹配分支
+// 里那条日志的级别（见 pump 里的 noteOnce），转发与否由 switch 决定——表里的事件
+// 也**不是**「本适配器支持的事件」清单。
+//
+// 名字照 OpenAI 的 Responses 事件表枚举（openapi 里 ResponseStreamEvent 的
+// 全部成员）。进表的是两类：
+//
+//   - 生命周期：一次响应的开始与排队。它们不带内容。
+//   - 结构：正文已经随 response.output_text.delta 给出；一个增量都不发的上游
+//     由 output_item.done 与终态事件里的 response.output 兜底补发（那两条兜底
+//     各有用例）。这里再发一遍会让客户端看到两遍正文，而「看到两遍」比「看到
+//     空回答」更像模型的问题，更难查。
+//
+// 思考类的那几个名字不在表里：它们在 switch 里有自己的 case，永远走不到
+// 无匹配分支。
+//
+// **故意不进表的**：refusal.*、audio.* / output_audio.*、
+// output_text.annotation.added，以及内置工具的产物事件
+// （code_interpreter_call_code.*、image_generation_call.partial_image 一类）。
+// 它们确实带内容，只是本适配器没有转发它们的通道；把它们记成「已知且不必
+// 转发」是假话，而它们走到无匹配分支会记一条 warn——那正是我们希望有人看见
+// 的信号。内置工具的**进度**事件（web_search_call.in_progress 一类）同理：
+// 本适配器不转发内置工具，真见到它们说明有我们没预期的链路。
+var ignorableResponsesEvents = map[string]bool{
+	"response.created":     true,
+	"response.in_progress": true,
+	"response.queued":      true,
+
+	"response.content_part.added": true,
+	"response.content_part.done":  true,
+	"response.output_text.done":   true,
 }
 
 // itemKey 是这次事件指的那个输出项的两个键。
