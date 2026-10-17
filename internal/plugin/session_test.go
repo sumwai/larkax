@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
 )
 
@@ -439,6 +440,60 @@ func TestOnUsageReasoningScopeAloneIsAReport(t *testing.T) {
 	}
 }
 
+// 上界取的是**实际发出去的那份请求**上的 max_tokens，不是入口层手上那份
+// （见 UsageBound 与 usageBoundOf）。
+//
+// 两个数的差来自别名上的参数覆盖：它逐渠道配、在选路之后才应用到发出去的那份
+// 请求上，而入口层交给 ApplyRequest 的那份是调用方原样发来的。这条用例把两份
+// 数分开给（64 与 4096），报一个落在中间的值——按发出去那份判是界内，按入口
+// 那份判是越界，而两次请求都不会报错。
+func TestApplyUsageBoundComesFromTheOutboundRequest(t *testing.T) {
+	s := sessionFor(t, minimalMeta, `onUsage(){ return { completionTokens: 100 }; }`,
+		sandbox.Host{}, sandbox.Limits{})
+	if _, err := s.ApplyRequest(t.Context(), "r1", &channel.Request{MaxTokens: 64}, "m", "openai"); err != nil {
+		t.Fatalf("onRequest 出错: %v", err)
+	}
+
+	got, err := s.ApplyUsage(t.Context(), "r1", "openai", channel.Usage{PromptTokens: 10},
+		&channel.Request{MaxTokens: 4096})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if got.CompletionTokens != 100 {
+		t.Errorf("输出 token = %d，期望 100（上界该取发出去那份的 4096，不是入口那份的 64）", got.CompletionTokens)
+	}
+	if fs := s.Failures(); len(fs) != 0 {
+		t.Errorf("界内的上报不该记失败，实际 %v", fs)
+	}
+	// 内核那份里没报的项保留着——合并是叠加而不是替换。
+	if got.PromptTokens != 10 {
+		t.Errorf("输入 token = %d，期望 10（插件没报这一项）", got.PromptTokens)
+	}
+}
+
+// 一次都没发出去时（入口交回 nil）读不出有效值，于是任何正数上报都算越界。
+//
+// 方向必须是拒收：把「读不出上界」当成「不设上界」，会让漏传一个参数变成
+// 关掉整道检查（见 UsageBound）。
+func TestApplyUsageWithoutOutboundRejectsReport(t *testing.T) {
+	s := sessionFor(t, minimalMeta, `onUsage(){ return { completionTokens: 100 }; }`,
+		sandbox.Host{}, sandbox.Limits{})
+
+	got, err := s.ApplyUsage(t.Context(), "r1", "openai", channel.Usage{CompletionTokens: 5}, nil)
+	if err != nil {
+		// 非阻断型插件不上报错误，只记一次失败——这里显式钉住这一点：
+		// 让一次上报被丢掉去改变请求的结果，方向正好反了。
+		t.Fatalf("非阻断型插件的越界上报不该让请求失败，实际 %v", err)
+	}
+	if got.CompletionTokens != 5 {
+		t.Errorf("输出 token = %d，期望 5（整份丢掉，按内核那份算）", got.CompletionTokens)
+	}
+	// 丢掉必须看得见：否则它表现为「插件报了但没生效」。
+	if fs := s.Failures(); len(fs) != 1 || !errors.Is(fs[0].Kind, ErrUsageAboveBound) {
+		t.Errorf("该记一条越界失败，实际 %v", fs)
+	}
+}
+
 // 口径跟着数量一起合并：插件没声明时保留内核的，声明了就以插件为准。
 func TestMergeUsageCarriesReasoningScope(t *testing.T) {
 	// 上界取得比上报值大：这条测的是口径的合并，越界那条有自己的用例。
@@ -515,7 +570,7 @@ func TestMergeUsageKeepsCoreForUnreportedFields(t *testing.T) {
 //
 // 上界必须来自插件改不动的地方（见 UsageBound）：插件既能把上界抬高、
 // 又能照着抬高后的上界报用量时，报多少就收多少。这条钉住「拒收」这一半，
-// 「上界从哪来」那一半钉在 max_tokens 只许调小那条用例上。
+// 「上界从哪儿读」那一半钉在 TestApplyUsageBoundComesFromTheOutboundRequest 上。
 func TestMergeUsageRejectsReportAboveBound(t *testing.T) {
 	n := func(v int64) *int64 { return &v }
 	core := UsageFacts{PromptTokens: n(10), CompletionTokens: n(20)}

@@ -148,7 +148,28 @@ type pluginHarness struct {
 // cands 不给时只有一个候选。要测「插件选的渠道与内核会选的不是同一个」时，
 // 必须给两个以上，且顺序由 priority 定死（见 route.order 的第 1 条规则：
 // priority 是硬性排序键，不受打分与随机打散影响）。
+//
+// 别名来源固定成「同名回落、什么都不覆盖」：多数用例不关心别名。要配覆盖的
+// 用 newPluginHarnessWith（见 plugin_stream_test.go 的上界用例）。
 func newPluginHarness(t *testing.T, reg *plugin.Registry, cands ...route.Candidate) *pluginHarness {
+	t.Helper()
+	return newPluginHarnessWith(t, reg, identityAliases{}, cands...)
+}
+
+// pluginAliases 是夹具用的别名来源：既按渠道把规范名翻成上游名（route 用它
+// 把覆盖应用到**实际发出去的那份**请求上），也给出逐渠道的覆盖（gateway 用它
+// 算预留上界）。
+//
+// 两个方法必须由**同一份**配置回答：生产里装配层把 Router.Aliases 与
+// Gateway.AliasOverrides 填成同一个 *catalog.Catalog。分成两个来源时，
+// 「选路用的覆盖」与「算上界用的覆盖」来自两次不同的读。
+type pluginAliases interface {
+	route.ModelAliases
+	gateway.AliasOverrideSource
+}
+
+// newPluginHarnessWith 与 newPluginHarness 同一件事，只是换掉别名来源。
+func newPluginHarnessWith(t *testing.T, reg *plugin.Registry, aliases pluginAliases, cands ...route.Candidate) *pluginHarness {
 	t.Helper()
 
 	if len(cands) == 0 {
@@ -176,12 +197,10 @@ func newPluginHarness(t *testing.T, reg *plugin.Registry, cands ...route.Candida
 		},
 		Router: &route.Router{
 			Rand: rand.New(rand.NewSource(1)), Now: now,
-			// 这个文件测的是插件钩子，不关心别名，所以按同名回落。
-			Aliases: identityAliases{},
+			Aliases: aliases,
 		},
-		Candidates: &pluginCandidates{cands: cands},
-		// 同上：这个文件的别名覆盖来源也只求「什么都不覆盖」。
-		AliasOverrides: identityAliases{},
+		Candidates:     &pluginCandidates{cands: cands},
+		AliasOverrides: aliases,
 		// 单次输出上限的全局默认值（见 gateway.Gateway.MaxOutputTokens）。
 		// 这个文件测的是插件钩子，取值给一个**远高于**夹具里 max_tokens 的数：
 		// 那条判据不该在这些用例上绊住任何东西。

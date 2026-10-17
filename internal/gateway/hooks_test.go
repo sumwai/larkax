@@ -475,7 +475,7 @@ func TestOnUsageReportIsWhatGetsBilled(t *testing.T) {
 	t.Run("插件报了别的数", func(t *testing.T) {
 		h := newHarness(t)
 		res, err := h.gw.Chat(t.Context(), request(), upstreamRequest(), Hooks{
-			OnUsage: func(_ context.Context, core channel.Usage) (channel.Usage, error) {
+			OnUsage: func(_ context.Context, core channel.Usage, _ *channel.Request) (channel.Usage, error) {
 				// 插件那侧做的是同一件事：在内核那份上覆盖它报了的项
 				// （见 plugin.Session.ApplyUsage）。
 				if core.CompletionTokens != 100 {
@@ -507,7 +507,7 @@ func TestBlockingOnUsageFailureFailsTheRequest(t *testing.T) {
 
 	hookErr := errors.New("插件声明为阻断型，它的 onUsage 失败")
 	res, err := h.gw.Chat(t.Context(), request(), upstreamRequest(), Hooks{
-		OnUsage: func(context.Context, channel.Usage) (channel.Usage, error) {
+		OnUsage: func(context.Context, channel.Usage, *channel.Request) (channel.Usage, error) {
 			return channel.Usage{}, hookErr
 		},
 	})
@@ -538,7 +538,7 @@ func TestOnUsageOnStreamPathIsBilled(t *testing.T) {
 
 	const reported = 250
 	res, err := h.gw.ChatStream(t.Context(), request(), upstreamRequest(), Hooks{
-		OnUsage: func(_ context.Context, core channel.Usage) (channel.Usage, error) {
+		OnUsage: func(_ context.Context, core channel.Usage, _ *channel.Request) (channel.Usage, error) {
 			if core.CompletionTokens != 7 {
 				t.Errorf("交给插件的内核用量 = %d，期望 7（流里的实测值）", core.CompletionTokens)
 			}
@@ -578,7 +578,7 @@ func TestBlockingOnUsageFailureOnStreamStillBills(t *testing.T) {
 	}})
 
 	res, err := h.gw.ChatStream(t.Context(), request(), upstreamRequest(), Hooks{
-		OnUsage: func(context.Context, channel.Usage) (channel.Usage, error) {
+		OnUsage: func(context.Context, channel.Usage, *channel.Request) (channel.Usage, error) {
 			return channel.Usage{}, errors.New("插件声明为阻断型，它的 onUsage 失败")
 		},
 	})

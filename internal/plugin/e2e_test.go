@@ -248,7 +248,8 @@ func TestEndToEndFiveHooks(t *testing.T) {
 		t.Fatalf("用量没被上报，实际 %+v", uuRes.Patch)
 	}
 	core := *UsageFactsFrom(channel.Usage{PromptTokens: 10, CompletionTokens: 20})
-	// 上界取客户端请求里的 max_tokens（补丁之前的那个），见 UsageBound。
+	// 上界取这次请求实际发出的那份请求上的 max_tokens（见 UsageBound），
+	// 这里直接给一个——这条测的是合并语义，上界从哪儿读有自己的用例。
 	merged, mergeErr := MergeUsage(core, uuRes.Patch, UsageBound{MaxOutputTokens: 256})
 	if mergeErr != nil {
 		t.Fatalf("合并用量失败: %v", mergeErr)

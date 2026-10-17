@@ -31,8 +31,8 @@ func errNonPositiveMaxTokens(v int64) error {
 // 没有上界——报多少收多少。压短输出是策略插件的正当用法，抬高不是。
 //
 // hasOriginal 为 false 表示原请求根本没给 max_tokens。那算**新增**一个上界，
-// 与调大是同一件事：上界从无到有仍然由插件决定，而「上界从哪来」正是
-// 这条规则要管的东西（见 UsageBound）。能读到原值时两个数都打进文本里，
+// 与调大是同一件事：上界从无到有仍然由插件决定，而「上界不能由上报方自己
+// 抬起来」正是这条规则要管的东西（见 UsageBound）。能读到原值时两个数都打进文本里，
 // 因为「只许调小」这句话本身不告诉你原来是多少。
 func errMaxTokensRaised(original int64, hasOriginal bool, patched int64) error {
 	if !hasOriginal {

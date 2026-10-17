@@ -80,6 +80,11 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 	// 判据与非流式逐字相同，只是结果类型不同（route.StreamResult，见
 	// snapshotRequest 的注释）；代价也相同——上游挂住时这一行也跟着晚落，
 	// 见 Chat 里那段。
+	// 这里的 outbound 与下面交给 pumpStream 的那个**不是同一个东西**，别把它
+	// 们合成一个：这一份要「采得到东西」，所以一次都没发出去时退回调用方那份
+	// （判据见 snapshotRequest，与非流式逐字相同）；交给 onUsage 的那一份必须
+	// 保持 nil——它说的是「这次请求压根没发出去」这个事实，插件上报的那道上界
+	// 读不出值就该拒收（见 Hooks.OnUsage 与 plugin.UsageBound）。
 	outbound := upstream
 	if routed != nil && routed.OutboundRequest != nil {
 		outbound = routed.OutboundRequest
@@ -115,7 +120,10 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 		UpstreamModel: routed.UpstreamModel,
 		Attempts:      routed.Attempts,
 	}
-	go g.pumpStream(ctx, h, placed, res, out, routed.Events, upstream, hooks)
+	// 交给 pumpStream 的是**上面那个 outbound 没有退回的那一份**：这里已经是
+	// 成功那条路（err 为 nil，尝试真的发出去过），所以它非 nil；而万一将来有
+	// 一条路让它成为 nil，onUsage 拿到的就该是「没有有效上界」而不是调用方那份。
+	go g.pumpStream(ctx, h, placed, res, out, routed.Events, upstream, routed.OutboundRequest, hooks)
 	return res, nil
 }
 
@@ -205,7 +213,11 @@ func isContentChunk(ev channel.StreamEvent) bool {
 //
 // out 单独传而不是用 res.Events：那个字段是只收的（<-chan），写不了也关不了，
 // 而这里要做的正是这两件事。
-func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, res *Result, out chan channel.StreamEvent, events <-chan channel.StreamEvent, upstream *channel.Request, hooks Hooks) {
+//
+// upstream 是**调用方发来的**那份（估算器按它的模型与正文取值），outbound 是
+// 实际发出去的那份（口径见 Hooks.OnUsage）——两者不是同一个对象，也不该合成
+// 一个：覆盖改了 max_tokens 而不改正文，哪一处该读哪一份是固定的。
+func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, res *Result, out chan channel.StreamEvent, events <-chan channel.StreamEvent, upstream, outbound *channel.Request, hooks Hooks) {
 	// 关流放在最后：它一旦执行，调用方就会读到 Charge / Estimated，
 	// 而那两个字段在下面才写好。
 	defer close(out)
@@ -479,7 +491,7 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 	// 排在结算之后就一点用都没有——请求成功、响应正确、日志里插件也跑了，
 	// 只有那笔钱是按内核的估算收的。
 	if hooks.OnUsage != nil {
-		merged, hookErr := hooks.OnUsage(settleCtx, usage)
+		merged, hookErr := hooks.OnUsage(settleCtx, usage, outbound)
 		if hookErr != nil {
 			// 阻断型插件失败。这里**不改变控制流**：整个回答已经送到调用方
 			// 手里了，没有「让这次请求失败」这个对象；而按不计费结算等于把
