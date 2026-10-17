@@ -81,7 +81,9 @@ func (r *Router) chatStreamWithPlan(ctx context.Context, exec StreamExecutor, re
 	result := &StreamResult{}
 	for _, c := range plan.Candidates {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			// 与非流式那条路同一个处置：已经发生的尝试照常带回去，
+			// 因为其中可能有已经产生费用的（见 chatWithPlan）。
+			return result, err
 		}
 
 		attempt, aliasErr := r.upstreamRequest(ctx, req, c)

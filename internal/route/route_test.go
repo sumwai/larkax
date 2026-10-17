@@ -770,6 +770,69 @@ func TestChatNoCandidates(t *testing.T) {
 	}
 }
 
+// cancelingExecutor 在第一次调用**返回之前**取消 ctx。
+//
+// 取消放在返回之前，路由下一次转圈才会命中 ctx.Err()——那正是
+// 「已经试过一个候选之后才被取消」的窗口。预先取消的 ctx（见
+// TestChatStopsOnContextCancel）进不了这个窗口：那时一次调用都不会发生。
+//
+// 两条路都实现，流式那条用它钉同一个窗口（见
+// TestChatStreamCancelAfterAttemptKeepsWhatWasTried）。返回的是一个可重试
+// 错误：不可重试的话路由在第一次尝试之后就直接返回了，走不到下一圈的
+// ctx 检查。
+type cancelingExecutor struct {
+	cancel context.CancelFunc
+	calls  []int64
+}
+
+func (c *cancelingExecutor) Chat(_ context.Context, ch channel.Channel, _ *channel.Request) (*channel.Response, error) {
+	c.calls = append(c.calls, ch.ID)
+	c.cancel()
+	return nil, retryableErr()
+}
+
+func (c *cancelingExecutor) ChatStream(_ context.Context, ch channel.Channel, _ *channel.Request) (<-chan channel.StreamEvent, error) {
+	c.calls = append(c.calls, ch.ID)
+	c.cancel()
+	return nil, retryableErr()
+}
+
+// 客户端在**已经试过一个候选之后**断开时，那次尝试仍要交回调用方。
+//
+// 那条尝试真的发出去过（可能已经产生了费用），所以调用方要按它记渠道
+// 健康度、写这一行的收尾。交回 nil 的话，`placementOf(nil)` 是零值，
+// 这一行在库里落成 channel_id = NULL / upstream_model = NULL——与
+// 「一个候选都没选中」逐列相同。
+func TestChatCancelAfterAttemptKeepsWhatWasTried(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	exec := &cancelingExecutor{cancel: cancel}
+	r := seededRouter(1)
+
+	res, err := r.Chat(ctx, exec, &channel.Request{Model: "m"},
+		[]Candidate{candidate(1, "m", withPriority(10)), candidate(2, "m", withPriority(1))}, "m")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("应返回 context 错误，得到 %v", err)
+	}
+	if len(exec.calls) != 1 {
+		t.Errorf("取消之后不该再试下一个候选，实际 %v", exec.calls)
+	}
+	if res == nil {
+		t.Fatal("取消发生在一次真实调用之后，不能交回 nil")
+	}
+	if res.Channel.ID != 1 {
+		t.Errorf("交回的渠道 = %d，期望刚试过的那一条（1）", res.Channel.ID)
+	}
+	if res.UpstreamModel != "m" {
+		t.Errorf("交回的上游名 = %q，期望 %q", res.UpstreamModel, "m")
+	}
+	if len(res.Attempts) != 1 {
+		t.Fatalf("尝试数 = %d，期望 1", len(res.Attempts))
+	}
+	if res.Attempts[0].ChannelID != 1 || res.Attempts[0].Err == nil {
+		t.Errorf("失败的那次尝试应被完整记录: %+v", res.Attempts[0])
+	}
+}
+
 // 客户端断开时不再尝试剩余渠道：已经没有人等着这个响应了。
 func TestChatStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -778,13 +841,25 @@ func TestChatStopsOnContextCancel(t *testing.T) {
 	exec := &fakeExecutor{results: map[int64]error{1: retryableErr()}}
 	r := seededRouter(1)
 
-	_, err := r.Chat(ctx, exec, &channel.Request{Model: "m"},
+	res, err := r.Chat(ctx, exec, &channel.Request{Model: "m"},
 		[]Candidate{candidate(1, "m"), candidate(2, "m")}, "m")
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("应返回 context 错误，得到 %v", err)
 	}
 	if len(exec.calls) != 0 {
 		t.Errorf("已取消的 context 不该发起调用，实际 %v", exec.calls)
+	}
+	// 交回的结果非 nil 但没有渠道：一次调用都没发生过，没有「打到了哪儿」
+	// 可记。它与「试过一次之后才取消」（见
+	// TestChatCancelAfterAttemptKeepsWhatWasTried）是两个结局。
+	if res == nil {
+		t.Fatal("交回的结果应为非 nil 的空结果")
+	}
+	if res.Channel.ID != 0 || res.UpstreamModel != "" {
+		t.Errorf("一次调用都没发生，结果里不该有渠道: %+v", res)
+	}
+	if len(res.Attempts) != 0 {
+		t.Errorf("一次调用都没发生，尝试记录应为空: %+v", res.Attempts)
 	}
 }
 
@@ -987,6 +1062,44 @@ func TestChatStreamCommitsOnceEventsReturned(t *testing.T) {
 	}
 	if !sawErr {
 		t.Error("中途错误应透出")
+	}
+}
+
+// 与非流式那条路同一个窗口、同一个结局：试过一个候选之后才断开，
+// 那次尝试仍要交回调用方（见 TestChatCancelAfterAttemptKeepsWhatWasTried）。
+//
+// 流式这条路另外钉住 Events 为 nil：取消之后没有可交给调用方的事件流，
+// 交回一个空 channel 会让调用方以为请求成功了。
+func TestChatStreamCancelAfterAttemptKeepsWhatWasTried(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	exec := &cancelingExecutor{cancel: cancel}
+	r := seededRouter(1)
+
+	res, err := r.ChatStream(ctx, exec, &channel.Request{Model: "m", Stream: true},
+		[]Candidate{candidate(1, "m", withPriority(10)), candidate(2, "m", withPriority(1))}, "m")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("应返回 context 错误，得到 %v", err)
+	}
+	if len(exec.calls) != 1 {
+		t.Errorf("取消之后不该再试下一个候选，实际 %v", exec.calls)
+	}
+	if res == nil {
+		t.Fatal("取消发生在一次真实调用之后，不能交回 nil")
+	}
+	if res.Channel.ID != 1 {
+		t.Errorf("交回的渠道 = %d，期望刚试过的那一条（1）", res.Channel.ID)
+	}
+	if res.UpstreamModel != "m" {
+		t.Errorf("交回的上游名 = %q，期望 %q", res.UpstreamModel, "m")
+	}
+	if len(res.Attempts) != 1 {
+		t.Fatalf("尝试数 = %d，期望 1", len(res.Attempts))
+	}
+	if res.Attempts[0].ChannelID != 1 || res.Attempts[0].Err == nil {
+		t.Errorf("失败的那次尝试应被完整记录: %+v", res.Attempts[0])
+	}
+	if res.Events != nil {
+		t.Error("上游没有接受请求，不该交回事件流")
 	}
 }
 
