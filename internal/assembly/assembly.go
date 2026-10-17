@@ -92,6 +92,13 @@ type Config struct {
 	// Rules 是计价规则的来源，由调用方构造。
 	Rules pipeline.RuleSource
 
+	// RedisDSN 是共享计数（限流）用的 Redis 连接串，来自 LARKAX_REDIS_DSN。
+	//
+	// 空表示这个部署不启用 Redis：限流退回进程内计数，也就是只有单实例
+	// 正确。解析不了的值会让 Build 失败（那是配置错误），而解析得了但连不上
+	// 只会降级（那是故障）——两者的处置不同，见 buildRateLimiter。
+	RedisDSN string
+
 	// Now 可注入，便于测试时间相关的逻辑。为 nil 时用 time.Now。
 	Now func() time.Time
 }
@@ -128,6 +135,42 @@ type App struct {
 	// sandbox.Limits：让调用方自己去读那四个键的话，两份映射迟早不一致，
 	// 而那种不一致的表现是「插件跑在另一套限额下」——不报错，只是行为不同。
 	PluginLimits sandbox.Limits
+
+	// RateLimiter 是按 key 的 RPM 限流器。
+	//
+	// 导出它有两个用处，都在**内部监听**那一侧：只读的用量查询
+	// （RegisterInternalOps），以及进程退出时释放共享存储的连接池（Close）。
+	// 它**不**该被公共入口之外的东西拿去改行为——这条路径上只有读。
+	//
+	// 为 nil 时表示这个 App 没有限流器（worker 角色：它不接推理流量）。
+	RateLimiter *ratelimit.Limiter
+}
+
+// RegisterInternalOps 把本包在**内部监听**上的只读端点挂到 mux 上。
+//
+// 由 cmd/larkax 在装内部端口时调用。为什么不是本包自己起一个 mux：那些端点
+// 要与 /healthz、/readyz、/metrics 共用同一个监听，而监听怎么起、绑在哪个
+// 地址上属于命令行的职责（见 cmd/larkax 的 newInternalHandler）。
+//
+// 没有限流器时什么都不挂：worker 角色不接推理流量，它答不出用量（它连
+// 限流器都没有）。挂一个「永远说不清」的端点比不挂更坏——它会让查询的人
+// 以为那个实例上就是 0。
+func (a *App) RegisterInternalOps(mux *http.ServeMux) {
+	if a.RateLimiter == nil {
+		return
+	}
+	api.RegisterRateLimitUsage(mux, a.RateLimiter)
+}
+
+// Close 释放装配期建立的连接池。
+//
+// 今天只有限流器的共享存储那一个。它没有排空语义（没有在途的写要等），
+// 所以进程退出时调一次就够。
+func (a *App) Close() error {
+	if a.RateLimiter == nil {
+		return nil
+	}
+	return a.RateLimiter.Close()
 }
 
 // pluginLoadTimeout 是启动期读 plugins 表的时间上限。
@@ -367,7 +410,16 @@ func Build(cfg Config) (*App, error) {
 	handler.Version = cfg.Version
 	handler.DefaultAsset = asset
 	handler.Now = cfg.Now
-	handler.RateLimiter = ratelimit.New(cfg.Now)
+	// 限流的计数放在哪，由 LARKAX_REDIS_DSN 决定；三种形态各有一条启动日志。
+	//
+	// 这件事必须说出来。「设了额度」与「真的限住了」在配置、响应码和请求
+	// 日志上都一模一样，唯一能把它们分开的就是这句话——而默认沉默的话，
+	// 一个按 60 RPM 配了容量、实际被打到 120 RPM 的部署没有任何提示。
+	limiter, err := buildRateLimiter(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+	handler.RateLimiter = limiter
 	// 额度这道早拒绝与账本共用同一个 Store：它读的是 billing_requests，
 	// 而那正是账本存储管的表。权威判定在预留那个事务里（见 api.QuotaChecker），
 	// 两处共用 internal/keyquota 里同一份口径。
@@ -393,22 +445,74 @@ func Build(cfg Config) (*App, error) {
 	// 只有「读 / 写回结局」这三个方法（见 api.IdempotencyStore）。
 	handler.Idempotency = idempotency.New(cfg.DB)
 
-	// 限流按 key 的额度生效了，但计数在**进程内**：多实例部署时每个实例
-	// 各计一份，一把 60 RPM 的 key 在 N 个实例上最多能打到 60×N RPM。
-	//
-	// 这件事必须说出来。「设了额度」与「真的限住了」在配置、响应码和请求
-	// 日志上都一模一样，唯一能把它们分开的就是这句话——而默认沉默的话，
-	// 一个按 60 RPM 配了容量、实际被打到 120 RPM 的部署没有任何提示。
-	// 共享计数要有一个所有实例都连得上的存储，那是另一件事。
-	logger.Warn("RPM 限流按进程内计数：多实例部署时各实例独立计数，额度不共享")
-
 	return &App{
 		Public:       observe.Middleware(handler),
 		Gateway:      gw,
 		Snapshots:    snapshots,
 		Plugins:      plugins,
 		PluginLimits: pluginLimits,
+		RateLimiter:  limiter,
 	}, nil
+}
+
+// redisProbeTimeout 是启动期那一次探活的时间上限。
+//
+// 它在启动路径上，而一个黑洞地址（连不上也不拒绝）会让这一行一直等下去：
+// 取一个「运维能接受启动慢两秒」的量级，而不是热路径那个几十毫秒。
+const redisProbeTimeout = 2 * time.Second
+
+// buildRateLimiter 装出 RPM 限流器，并把「计数放在哪」写进启动日志。
+//
+// # 三种形态，三条不同的日志
+//
+//	配了 LARKAX_REDIS_DSN、且探活通过 → 精确：所有实例共用一份计数
+//	配了、但连不上                   → 近似：退回进程内计数，之后自动重试
+//	没配                             → 近似：只有进程内计数，单实例正确
+//
+// 三种都要说话，而且措辞不同：这一层最坏的情形不是「限流没生效」，是
+// 「看起来生效了」。
+//
+// # 连不上为什么不拒绝启动
+//
+// 这与「装出来的东西要么能用，要么启动就失败」不冲突。拒绝启动换来的是
+// **整个数据面不可用**，而这一类要保的恰恰是「共享存储挂了不能影响正常用户」
+// （见 internal/ratelimit 的降级那一段）：连不上 Redis 的实例仍然能正确服务
+// 请求，只是那一分钟里拦得松一点。把它拦在启动之外，代价的方向反了。
+//
+// 探活只是为了让日志说真话——不探的话只能写「配了 Redis」，而「配了」与
+// 「能用」正是这里要说清的两件事。
+func buildRateLimiter(cfg Config, logger *slog.Logger) (*ratelimit.Limiter, error) {
+	// 探活用 Background 而不是某个请求的 context：此刻还没有请求。
+	//
+	// 两档都要探。不探的话，那个「精确还是近似」的信号要等到第一个请求才
+	// 出现，而「还没来过请求」与「这个实例上根本没接限流器」在 /metrics 上
+	// 都没有这一行——两件事在那上面长得一样。
+	ctx, cancel := context.WithTimeout(context.Background(), redisProbeTimeout)
+	defer cancel()
+
+	if cfg.RedisDSN == "" {
+		limiter := ratelimit.New(cfg.Now)
+		logger.Warn("RPM 限流的计数在进程内：没有配置 LARKAX_REDIS_DSN，" +
+			"多实例部署时各实例独立计数、额度不共享（总放行量最高到配置值 × 实例数）")
+		// 没有共享存储时这一次探测不会失败（它只把信号记成近似），所以
+		// 不接它的返回值。
+		_ = limiter.Probe(ctx)
+		return limiter, nil
+	}
+
+	store, err := ratelimit.OpenRedis(cfg.RedisDSN)
+	if err != nil {
+		return nil, fmt.Errorf("构造 RPM 限流器的共享计数失败: %w", err)
+	}
+	limiter := ratelimit.New(cfg.Now, ratelimit.WithStore(store))
+
+	if err := limiter.Probe(ctx); err != nil {
+		logger.Warn("RPM 限流的共享计数当前连不上，暂时按进程内计数（判定偏松，请求不受影响）",
+			"err", err)
+		return limiter, nil
+	}
+	logger.Info("RPM 限流的计数在共享存储里：各实例共用一份，放行总量按配置值生效")
+	return limiter, nil
 }
 
 // buildPlugins 按 settings 里的开关加载插件。
@@ -786,3 +890,9 @@ var _ gateway.AliasOverrideSource = (*catalog.Catalog)(nil)
 // 同上，写在装配层：api 不该 import 具体实现，而「两边对得上」必须有人检查
 // ——放在这里，Allow 的签名一改就在改的那一次编译失败。
 var _ api.RateLimiter = (*ratelimit.Limiter)(nil)
+
+// 编译期断言：限流实现要满足那条只读查询对它的要求（见 RegisterInternalOps）。
+//
+// 与上一条同一个理由：那个接口由 api 声明（它不该 import 具体实现），
+// 所以「实现接得上」只能在装配层检查。
+var _ api.RateLimitUsageSource = (*ratelimit.Limiter)(nil)
