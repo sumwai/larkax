@@ -604,9 +604,10 @@ func printCreatedChannel(stdout, stderr io.Writer, id int64, primaryKeyID string
 // 只在 --all 下出现，因为默认清单里每一行都是零值，空列只是把噪音铺满每一行。
 func printChannelList(w io.Writer, infos []channels.ChannelInfo, withDeleted bool) {
 	if len(infos) == 0 {
-		// 明确打一句，而不是什么都不输出：「还没有渠道」与「命令因为某个
+		// 明确打一句，而不是什么都不输出：「暂无渠道」与「命令因为某个
 		// 原因没跑起来」在安静的终端里长得一样（见 LESSONS.md 第 16 条）。
-		_, _ = fmt.Fprintln(w, "还没有渠道。")
+		// 带上添加的命令：空清单是「还没配」，读者下一步的动作就写在那一句里。
+		_, _ = fmt.Fprintln(w, "暂无渠道。可使用 larkaxctl channel create 添加。")
 		return
 	}
 

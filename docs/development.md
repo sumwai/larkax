@@ -739,6 +739,34 @@ go run ./cmd/larkaxctl doctor
 
 **前六项只读**：不写任何一行、不建任何东西、不发网络请求。
 
+### 输出的形状
+
+默认每项一行，末尾一行汇总：
+
+```text
+larkaxctl doctor：逐项检查「配好的链路能不能接一次请求」。
+
+  ✓ 数据库    连接正常（迁移 v23）
+  ✓ 渠道      enabled 且 models 非空的渠道 1 条
+  ✗ 模型目录  渠道 1（channel-a）的 models 里有 "model-x"，但目录里没有这个名字
+  ! 别名      没有可服务的规范名
+  ! 计价规则  没有可服务的规范名
+  ✗ 钱包      用户 1（alice）没有钱包行
+  - 上游连通  没跑：加 --live 才会真打一次上游（会花钱、要凭证）
+
+  doctor: 2 项异常, 2 项跳过, 2 项通过 (运行 -v 查看细节)
+```
+
+行首是状态符：`✓` 通过、`✗` 不通过、`!` 没跑成、`-` 没跑。加 `-v`（或
+`--verbose`）时，每项还会跟一段缩进的细节：检查范围、读到的数、别名与计价规则
+的表、每条问题的完整原文（「多半是拼写差了一个字符」这一类）。
+
+**细节一条都没删，只是默认不打。** 一次全通过的运行原先要刷三十多行，而其中
+没有一行需要动作。
+
+其余命令的输出约定（颜色什么时候出现、表格怎么对齐、空清单怎么说、加一个新的
+检查项或新的清单要照什么形状写）见 [docs/cli-output.md](cli-output.md)。
+
 ### 真打一次上游
 
 要验证到上游那一端，加 `--live`：它往公共入口发一次非流式推理请求，把状态码、
@@ -755,6 +783,7 @@ cat key.txt | go run ./cmd/larkaxctl doctor --live --model claude-x --credential
 | `--endpoint chat\|messages\|responses` | 打哪个入口，默认 `chat`。`chat` 是 `POST /v1/chat/completions`（`Authorization: Bearer`），`messages` 是 `POST /v1/messages`（`x-api-key`），`responses` 是 `POST /v1/responses`（`Authorization: Bearer`） |
 | `--base-url <URL>` | 网关公共入口的地址，默认 `http://127.0.0.1:8080` |
 | `--credential-stdin` / `--credential-env <变量名>` | 读 API Key 的来源，二者只能给一个 |
+| `-v` / `--verbose` | 每一项多打一段细节，默认不打 |
 
 这里读的是打网关用的 **API Key**（`apikey create` 发的那把），不是渠道凭证。
 与 `channel create` 同一条约定：**凭证不能写在命令行参数里**——参数会出现在

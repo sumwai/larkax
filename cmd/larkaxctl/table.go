@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"strings"
+	"unicode/utf8"
 )
 
 // columnGap 是相邻两栏之间的空格数。
@@ -115,6 +116,10 @@ func (tw *tableWriter) columnWidths() []int {
 
 // displayWidth 返回 s 在终端里占的列数：东亚宽与全角字符记 2，其余记 1。
 //
+// **样式码不占列**：整段 ANSI 转义序列按 0 算（见 ansiSeqLen）。上色之后栏宽
+// 仍然对得上，就是靠这一条——`\x1b[1m` 有 4 个字节、0 列，把它算进去会让
+// 所有带样式的栏一起往右错开。
+//
 // 只判**东亚宽（W）与全角（F）**这两类，不引 golang.org/x/text/width：那要
 // 一整张 Unicode 宽度表，而这里需要的只是「汉字、假名、谚文与全角标点占两列」
 // 这一条，它覆盖了本包会打出来的全部标签。
@@ -131,10 +136,34 @@ func (tw *tableWriter) columnWidths() []int {
 // 绝大多数终端与字体按一列渲染——取多数的那一侧。
 func displayWidth(s string) int {
 	n := 0
-	for _, r := range s {
+	for i := 0; i < len(s); {
+		if s[i] == escByte {
+			i += ansiSeqLen(s[i:])
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
 		n += runeWidth(r)
+		i += size
 	}
 	return n
+}
+
+// ansiSeqLen 返回 s 开头那条 ANSI 转义序列占的字节数。
+//
+// 只认 CSI（`ESC [ 参数 终结字节`，终结字节在 0x40–0x7E）：本包自己产生的
+// 只有 SGR 这一类。认不出形状时返回 1——只跳过那个 ESC，后面的字节按普通
+// 字符算：宁可把一栏算宽一点（那一栏会宽出来，一眼看得见），也不要把一条
+// 不认识的序列整个吞掉，那会让**后面每一栏**的宽度都算少。
+func ansiSeqLen(s string) int {
+	if len(s) < 2 || s[1] != '[' {
+		return 1
+	}
+	for i := 2; i < len(s); i++ {
+		if s[i] >= 0x40 && s[i] <= 0x7E {
+			return i + 1
+		}
+	}
+	return 1
 }
 
 // runeWidth 返回一个字符的显示列数。
