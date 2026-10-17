@@ -2,14 +2,17 @@ package httpx
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/observe"
 )
 
 func TestEndpointJoining(t *testing.T) {
@@ -288,5 +291,120 @@ func TestSafeRequestHeadersRejectedIsSorted(t *testing.T) {
 			t.Errorf("被拒名单未排序: %v", rejected)
 			break
 		}
+	}
+}
+
+// ── 自定义头的落地 ──────────────────────────────────────────────────────
+
+// captureLogs 把进程日志器换成写进缓冲区的测试日志器（debug 级），返回那个
+// 缓冲区。
+//
+// 日志器是**进程级**的（observe.FromContext 取的就是 slog.Default()），所以
+// 用完必须还原。本包的用例都不并行跑（没有 t.Parallel），换默认日志器因此
+// 是安全的。
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(observe.NewLoggerWithWriter(&buf, "debug", "text", false))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+func newHeaderTestRequest(t *testing.T) *http.Request {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"https://api.example.com/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatalf("构造请求失败: %v", err)
+	}
+	return req
+}
+
+// 放行的头要真的落到请求上，被拒的头一个都不许落上去——**即使请求上原本
+// 已经有那个头**。
+//
+// 后一半是这条路径的全部意义：适配器先设鉴权头、再调这里，顺序反了（或
+// 过滤失效）就是一条越权路径——插件能冒充别的渠道身份。
+func TestApplyCustomHeadersSetsSafeAndDropsReserved(t *testing.T) {
+	req := newHeaderTestRequest(t)
+	req.Header.Set("Authorization", "Bearer placeholder-credential")
+
+	ApplyCustomHeaders(req, &channel.Request{Headers: map[string]string{
+		"X-Custom-Tenant": "t1",
+		"Authorization":   "Bearer 冒充的凭证",
+		"X-API-KEY":       "冒充的钥匙",
+	}})
+
+	if got := req.Header.Get("X-Custom-Tenant"); got != "t1" {
+		t.Errorf("放行的自定义头没落到请求上，实际 %q", got)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer placeholder-credential" {
+		t.Errorf("鉴权头被覆盖了，实际 %q", got)
+	}
+	if got := req.Header.Get("X-Api-Key"); got != "" {
+		t.Errorf("被拒的头不该落到请求上，实际 %q", got)
+	}
+}
+
+// 被拒的头要**留下痕迹**，而且只记名字不记值。
+//
+// 静默丢弃是不行的：插件作者写了一个被拒的头却没有任何反馈，会以为是上游
+// 不支持它。反过来，值可能含敏感内容，日志里出现它等于把密钥抄进日志。
+func TestApplyCustomHeadersLogsRejectedNames(t *testing.T) {
+	buf := captureLogs(t)
+	req := newHeaderTestRequest(t)
+
+	ApplyCustomHeaders(req, &channel.Request{Headers: map[string]string{
+		"X-Ok":          "fine",
+		"Authorization": "Bearer 冒充的凭证",
+		"api-key":       "冒充的钥匙",
+	}})
+
+	logged := buf.String()
+	if !strings.Contains(logged, "自定义请求头被拒") {
+		t.Errorf("被拒的头没留下痕迹: %q", logged)
+	}
+	if !strings.Contains(logged, "level=WARN") {
+		t.Errorf("这条日志该是 warn 级: %q", logged)
+	}
+	for _, name := range []string{"Authorization", "api-key"} {
+		if !strings.Contains(logged, name) {
+			t.Errorf("日志里没有头名 %q: %q", name, logged)
+		}
+	}
+	if strings.Contains(logged, "冒充") {
+		t.Errorf("日志里带上了头的**值**: %q", logged)
+	}
+}
+
+// 一个头都没被拒时不打日志：这条路径上「有自定义头」是常态，每次都记一条
+// warn 会把真正的告警淹掉。
+func TestApplyCustomHeadersSilentWhenNothingRejected(t *testing.T) {
+	buf := captureLogs(t)
+	req := newHeaderTestRequest(t)
+
+	ApplyCustomHeaders(req, &channel.Request{Headers: map[string]string{"X-Ok": "fine"}})
+
+	if got := buf.String(); got != "" {
+		t.Errorf("没有头被拒却打了日志: %q", got)
+	}
+	if got := req.Header.Get("X-Ok"); got != "fine" {
+		t.Errorf("放行的头没落到请求上，实际 %q", got)
+	}
+}
+
+// 载体是 nil 时什么都不做，而不是 panic：这条路径上的调用方未必保证非 nil。
+func TestApplyCustomHeadersNilRequest(t *testing.T) {
+	buf := captureLogs(t)
+	req := newHeaderTestRequest(t)
+
+	ApplyCustomHeaders(req, nil)
+
+	if got := len(req.Header); got != 0 {
+		t.Errorf("nil 载体不该设任何头，实际 %v", req.Header)
+	}
+	if got := buf.String(); got != "" {
+		t.Errorf("nil 载体不该打日志: %q", got)
 	}
 }
