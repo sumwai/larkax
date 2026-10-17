@@ -140,6 +140,9 @@ func (r *Registry) Get(key string) (*Plugin, bool) {
 //
 // 上传路径与试运行路径都用它，于是「界面上说能用」与「线上真能用」
 // 走的是同一段代码——两份校验迟早会不一致。
+//
+// 注册名必须由调用方给出（reg.Key）：这个入口的用途是「按这个名字装一个插件」，
+// 名字由谁定是调用方的事。源码里已经写了自己 key 的那条路走 CompileSource。
 func Compile(reg Registration) (*Plugin, error) {
 	if strings.TrimSpace(reg.Key) == "" {
 		return nil, ErrMetaMissingKey
@@ -148,28 +151,58 @@ func Compile(reg Registration) (*Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	meta, err := parseMeta(mod.Meta())
+	p, err := fromModule(mod, reg.Priority)
 	if err != nil {
 		return nil, err
 	}
-	if meta.Key != reg.Key {
-		return nil, fmt.Errorf("注册名 %q 与元数据里的 key %q 不一致", reg.Key, meta.Key)
+	if p.Key != reg.Key {
+		return nil, fmt.Errorf("注册名 %q 与元数据里的 key %q 不一致", reg.Key, p.Key)
+	}
+	return p, nil
+}
+
+// CompileSource 编译一段源码，注册名取自源码里声明的 meta.key。
+//
+// 上传路径用它：插件已经在源码里写了一遍自己的 key，命令行不必再写第二遍，
+// 而写两遍就会出现「两处不一致」这种只能靠人记住的错误。name 只进错误信息
+// （通常是文件名），不是注册名。
+func CompileSource(name, source string, priority int) (*Plugin, error) {
+	mod, err := sandbox.Compile(name, source)
+	if err != nil {
+		return nil, err
+	}
+	return fromModule(mod, priority)
+}
+
+// fromModule 是两条编译路径共用的尾巴：读元数据、校验、收窄能力。
+//
+// 抽出来是为了让 Compile 与 CompileSource 只差「注册名从哪来」这一步，
+// 校验与能力收窄只有一处实现。
+func fromModule(mod *sandbox.Module, priority int) (*Plugin, error) {
+	meta, err := ParseMeta(mod.Meta())
+	if err != nil {
+		return nil, err
 	}
 	caps, err := narrowCapabilities(meta.Capabilities)
 	if err != nil {
 		return nil, err
 	}
 	return &Plugin{
-		Key:          reg.Key,
-		Priority:     reg.Priority,
+		Key:          meta.Key,
+		Priority:     priority,
 		Meta:         meta,
 		Module:       mod,
 		Capabilities: caps,
 	}, nil
 }
 
-// parseMeta 把 JS 里的 meta 对象翻成 Meta 并校验。
-func parseMeta(raw map[string]any) (Meta, error) {
+// ParseMeta 把 JS 里的 meta 对象翻成 Meta 并校验。
+//
+// 导出它是给**读库**的那条路用的：`plugins.meta` 存的是发布时那份声明的快照，
+// 而快照可以坏（列被手工改过、更早的版本写进去的形状不一样）。管理面要能
+// 把「这一行的 meta 有问题」报出来而不是崩掉，用的必须是与编译期同一份校验
+// ——两份校验迟早会不一致，而那时界面上说没问题、线上一加载就失败。
+func ParseMeta(raw map[string]any) (Meta, error) {
 	if raw == nil {
 		return Meta{}, fmt.Errorf("%w: 插件必须在源码里 `export const meta`", ErrMetaMissingKey)
 	}
@@ -242,14 +275,29 @@ func narrowCapabilities(requested []string) ([]string, error) {
 // 这是「编译全部通过才发布」的落点：全部 Compile 成功才返回新表，
 // 任一个失败就返回错误、旧表照旧。于是线上不会出现半批插件生效的状态——
 // 而「一半生效」在界面上看起来与「全都生效」一样。
+//
+// 上传路径用它（一个编译不过的插件不许进库）。启动路径用 PublishPartial：
+// 那里已经有了一批插件，一个坏的不该让服务起不来。
 func Publish(regs []Registration) (*Registry, error) {
-	next := Empty()
+	compiled := make([]*Plugin, 0, len(regs))
 	for _, reg := range regs {
 		p, err := Compile(reg)
 		if err != nil {
 			// 错误里带上 key：一批十几个插件里只报「元数据不合法」没法排查。
 			return nil, fmt.Errorf("插件 %s 无法注册: %w", reg.Key, err)
 		}
+		compiled = append(compiled, p)
+	}
+	return assemble(compiled)
+}
+
+// assemble 把已经编译好的插件装成一份注册表。
+//
+// 它是 Publish 与 PublishPartial 共用的那一步：重复检测与排序只写一遍，
+// 于是「两条路径选出来的插件顺序一样」不需要靠两边各自记得。
+func assemble(compiled []*Plugin) (*Registry, error) {
+	next := Empty()
+	for _, p := range compiled {
 		if _, dup := next.index[p.Key]; dup {
 			return nil, fmt.Errorf("插件 %s 注册了两次", p.Key)
 		}

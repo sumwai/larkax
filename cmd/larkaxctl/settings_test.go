@@ -78,9 +78,17 @@ func TestPrintSettingsList(t *testing.T) {
 	var buf bytes.Buffer
 	printSettingsList(&buf, []settings.Entry{
 		{
+			// 接线正常的键：plugin.enabled 现在真的被读了（见 internal/plugin
+			// 的 LoadConfig 与 internal/assembly 那几条装配用例），所以它
+			// 不该再带「尚未接线」那一行。
 			Key: "plugin.enabled", Value: []byte(`false`),
 			Description: "是否启用插件系统。", Editable: true,
 			UpdatedBy: &by, UpdatedAt: at,
+		},
+		{
+			Key: "capture.consent_max_window_hours", Value: []byte(`24`),
+			Description: "授权采集的最长窗口。", Editable: true,
+			UpdatedAt: at,
 		},
 		{
 			Key: "billing.default_asset", Value: []byte(`"CNY"`),
@@ -96,10 +104,11 @@ func TestPrintSettingsList(t *testing.T) {
 	})
 
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
-	// 一行表头；plugin.enabled 三行（元数据、说明、尚未接线）；
+	// 一行表头；plugin.enabled 两行（元数据、说明）；
+	// capture.consent_max_window_hours 三行（元数据、说明、尚未接线）；
 	// billing.default_asset 两行；typo.key 一行（没说明，也不是未接线的键）。
-	if len(lines) != 1+3+2+1 {
-		t.Fatalf("打印了 %d 行，期望 7 行：\n%s", len(lines), buf.String())
+	if len(lines) != 1+2+3+2+1 {
+		t.Fatalf("打印了 %d 行，期望 9 行：\n%s", len(lines), buf.String())
 	}
 
 	if !strings.Contains(lines[0], "jsonb 原文") {
@@ -117,6 +126,10 @@ func TestPrintSettingsList(t *testing.T) {
 	if !strings.Contains(lines[2], "说明：是否启用插件系统。") {
 		t.Errorf("第二行没有说明：%q", lines[2])
 	}
+	// 接线正常的键不该带上那一行：否则「标出来了」就不再是一个信号。
+	if strings.Contains(strings.Join(lines[1:3], "\n"), "尚未接线") {
+		t.Errorf("已接线的键被标成了未接线：\n%s", strings.Join(lines[1:3], "\n"))
+	}
 
 	// 还没有读者的键要在清单里当场说出来。这一行取自 Registry（见
 	// settings.Spec.Unwired），所以它是一道真的门：谁把 Unwired 清空了，
@@ -124,15 +137,16 @@ func TestPrintSettingsList(t *testing.T) {
 	//
 	// 断言写死字面量，不拿 Registry 里的值当期望：那等于让被测对象给自己
 	// 出题，把文案改掉也照样通过。
-	if !strings.Contains(lines[3], "尚未接线") {
-		t.Errorf("未接线的键没有被标出来：%q", lines[3])
+	// 未接线的键占三行：元数据、说明、尚未接线。
+	if !strings.Contains(lines[5], "尚未接线") {
+		t.Errorf("未接线的键没有被标出来：%q", lines[5])
 	}
-	if !strings.Contains(lines[3], "插件系统尚未接线（#216），改了不会有任何效果") {
-		t.Errorf("未接线那一行没有说清后果：%q", lines[3])
+	if !strings.Contains(lines[5], "授权采集那条路还没实现，改了不会有任何效果") {
+		t.Errorf("未接线那一行没有说清后果：%q", lines[5])
 	}
 
 	// 字符串配置的值带引号：这就是它在 jsonb 里的样子。
-	second := lines[4]
+	second := lines[6]
 	for _, want := range []string{
 		`billing.default_asset = "CNY"`, "[string]", "可改 否", "改自 -",
 	} {
@@ -140,12 +154,11 @@ func TestPrintSettingsList(t *testing.T) {
 			t.Errorf("第三行里没有 %q：\n%s", want, second)
 		}
 	}
-	// 接线正常的键不该带上那一行：否则「标出来了」就不再是一个信号。
-	if strings.Contains(strings.Join(lines[4:6], "\n"), "尚未接线") {
-		t.Errorf("已接线的键被标成了未接线：\n%s", strings.Join(lines[4:6], "\n"))
+	if strings.Contains(strings.Join(lines[6:8], "\n"), "尚未接线") {
+		t.Errorf("已接线的键被标成了未接线：\n%s", strings.Join(lines[6:8], "\n"))
 	}
 
-	third := lines[6]
+	third := lines[8]
 	if !strings.Contains(third, "typo.key = 1") || !strings.Contains(third, "[未声明]") {
 		t.Errorf("未声明的键没有被标出来：%q", third)
 	}
@@ -164,18 +177,19 @@ func TestPrintSettingsList(t *testing.T) {
 // 期望值写死字面量，不取 Registry 里的文案：那等于让被测对象给自己出题。
 func TestPrintSettingsSetResult(t *testing.T) {
 	var unwired bytes.Buffer
-	printSettingsSetResult(&unwired, "plugin.enabled", []byte("true"), "ops", 7)
-	wantUnwired := "已写入 settings.plugin.enabled = true 改自 ops(id=7)\n" +
-		"  尚未接线：插件系统尚未接线（#216），改了不会有任何效果\n"
+	printSettingsSetResult(&unwired, "capture.consent_max_window_hours", []byte("24"), "ops", 7)
+	wantUnwired := "已写入 settings.capture.consent_max_window_hours = 24 改自 ops(id=7)\n" +
+		"  尚未接线：授权采集那条路还没实现，改了不会有任何效果\n"
 	if got := unwired.String(); got != wantUnwired {
 		t.Errorf("未接线的键，输出 =\n%q\n期望\n%q", got, wantUnwired)
 	}
 
-	// 对照组用一个确实接上了线的键（见 internal/assembly 那几条用例：
-	// 配错它会让装配失败，所以它是真的被读了）。
+	// 对照组用一个确实接上了线的键。plugin.enabled 与另外三个 plugin.* 键
+	// 是刚接上的那一批：internal/assembly 的装配用例钉着「配错会让装配失败」，
+	// 所以它们是真的被读了。
 	var wired bytes.Buffer
-	printSettingsSetResult(&wired, "billing.default_asset", []byte(`"CNY"`), "ops", 7)
-	wantWired := "已写入 settings.billing.default_asset = \"CNY\" 改自 ops(id=7)\n"
+	printSettingsSetResult(&wired, "plugin.enabled", []byte("true"), "ops", 7)
+	wantWired := "已写入 settings.plugin.enabled = true 改自 ops(id=7)\n"
 	if got := wired.String(); got != wantWired {
 		t.Errorf("已接线的键，输出 =\n%q\n期望\n%q", got, wantWired)
 	}

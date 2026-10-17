@@ -6,6 +6,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
+	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
 	"github.com/sumwai/larkax/internal/pricing"
 )
 
@@ -79,6 +80,8 @@ var conflictErrors = []error{
 	catalog.ErrChannelNotFound,
 
 	pricing.ErrRuleNotFound,
+
+	pluginstore.ErrPluginNotFound,
 }
 
 // noChangeErrors 是「这次调用没提到任何要改的字段」。
