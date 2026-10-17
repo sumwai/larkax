@@ -1,8 +1,6 @@
 package assembly
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -16,32 +14,35 @@ import (
 //
 // # 为什么另起一组
 //
-// 既有三组用例各自只覆盖了「调用协议 = 上游协议」那一半：
+// 既有用例各自只覆盖了「调用协议 = 上游协议」那一半：
 //
-//	/v1/chat/completions + openai 渠道   → e2e_test.go
-//	/v1/messages         + anthropic 渠道 → messages_e2e_test.go
+//	e2e_test.go           /v1/chat/completions + openai 渠道（非流式）
+//	messages_e2e_test.go  /v1/messages         + anthropic 渠道（非流式，另有一条流式）
+//	stream_e2e_test.go    两条入口各自配同协议的渠道（流式）
 //
 // 剩下两种组合走的是**协议转换**那条路，而这条路上最容易错的不是字段名，
 // 是**用量口径**：
 //
 //	Anthropic 的 input_tokens **不含**缓存，OpenAI 的 prompt_tokens **含**。
 //
-// 同协议那两组用例里，上游报什么就记什么，口径差不会被碰到；跨协议时这个差
+// 同协议那些用例里，上游报什么就记什么，口径差不会被碰到；跨协议时这个差
 // 必须在一侧补上、在另一侧拆掉，而**拆错了的表现是账单金额对不上，响应形状
 // 看起来完全正常**。所以下面每一条用例的断言都落到**具体金额**上，而不只是
 // 形状上——形状对而钱错，是这套系统里最贵的那类故障。
 //
-// # 四张用例的矩阵
+// # 五条用例的矩阵
 //
-//	调用协议             上游渠道    缓存  上游说的结束原因   调用方该看到
-//	/v1/messages         openai      无    stop              end_turn
-//	/v1/messages         openai      5     length            max_tokens
-//	/v1/chat/completions anthropic   无    end_turn          stop
-//	/v1/chat/completions anthropic   5     max_tokens        length
+//	调用协议             上游渠道    上游报的缓存  上游说的结束原因  调用方该看到
+//	/v1/messages         openai      无            stop              end_turn
+//	/v1/messages         openai      读 5          length            max_tokens
+//	/v1/chat/completions anthropic   无            end_turn          stop
+//	/v1/chat/completions anthropic   读 5          max_tokens        length
+//	/v1/chat/completions anthropic   读 5 + 写 3   end_turn          stop
 //
-// 结束原因那两列用的是**非默认**的值：拿默认值去测，一个把结束原因写死成
-// 默认值的实现照样能过，而两家词汇不同正是要测的东西之一（见 fakeUpstream
-// 的 finishReason）。
+// 结束原因那一列覆盖了四个值：前四条各走一个映射，把两家词汇的四个映射都走了一遍
+// e2e；第五条与第三条同值（`end_turn` → `stop`），它加的是缓存写入那一侧。
+// 其中 `length` 与 `max_tokens` 是**非默认**的：拿各协议最常见的那一个去测，
+// 一个把结束原因写死成默认值的实现照样能过（见 fakeUpstream 的 finishReason）。
 //
 // 假上游与既有几组共用同一个 fakeUpstream：渠道声明的类型决定我们往上发哪套
 // 协议，而「调用协议 ≠ 上游协议」正是这一组要测的东西。另起一个假上游早晚会
@@ -72,15 +73,21 @@ func chatBodyWithSystem(model, system string) []byte {
 	return body
 }
 
-// textOf 取出一个 content 字段里的文本。
+// textOf 取出一个正文字段的文本，字段不在时返回空串。
 //
-// OpenAI 的 content 可能是字符串，也可能是内容块数组——两种都是合法写法。
-// 断言因此落在**文本**上而不是形态上：形态是编码选择，把它写进断言会让一次
-// 等价的编码改动变成假失败，而真正要防的是「那条消息根本没传过去」。
+// 两家都可能把它写成两种形态：一个字符串，或者一组正文块。OpenAI 的
+// `message.content` 与 Anthropic 的顶层 `system` 都允许——所以这一个函数
+// 两处都用。断言因此落在**文本**上而不是形态上：形态是编码选择，把它写进
+// 断言会让一次等价的编码改动变成假失败，而真正要防的是「那段文本根本没传过去」。
+//
+// 字段不在（nil）返回空串而不是当场失败：调用方拿它比对的都是非空字面量，
+// 空串一样会让断言挂，而挂的时候报出来的「这里是空的」比一句类型抱怨更贴题。
 func textOf(t *testing.T, v any) string {
 	t.Helper()
 
 	switch s := v.(type) {
+	case nil:
+		return ""
 	case string:
 		return s
 	case []any:
@@ -88,14 +95,14 @@ func textOf(t *testing.T, v any) string {
 		for _, item := range s {
 			block, ok := item.(map[string]any)
 			if !ok {
-				t.Fatalf("content 里的元素是 %T，期望一个内容块", item)
+				t.Fatalf("正文块是 %T，期望一个对象", item)
 			}
 			text, _ := block["text"].(string)
 			out.WriteString(text)
 		}
 		return out.String()
 	default:
-		t.Fatalf("content 是 %T，期望字符串或内容块数组", v)
+		t.Fatalf("正文是 %T，期望字符串或正文块数组", v)
 		return ""
 	}
 }
@@ -110,22 +117,6 @@ func showPtr(p *string) string {
 		return "<nil>"
 	}
 	return *p
-}
-
-// billProtocol 取这次账单记下的**调用协议**。
-//
-// 它与上游协议是两件事：账单记的是调用方说的那套。跨协议的用例里两者不同，
-// 所以这一列正好是「事后按协议归因时归到哪一侧」的判据——记成上游那一侧的话，
-// 「Anthropic 入口的用量口径」这类统计会把两种组合混在一起。
-func billProtocol(t *testing.T, db *sql.DB, billID int64) string {
-	t.Helper()
-
-	var protocol string
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT protocol FROM billing_requests WHERE id = $1`, billID).Scan(&protocol); err != nil {
-		t.Fatalf("查账单协议失败: %v", err)
-	}
-	return protocol
 }
 
 // ── /v1/messages → openai 渠道 ────────────────────────────────────────
@@ -222,9 +213,12 @@ func TestMessagesWithOpenAIUpstreamEndToEnd(t *testing.T) {
 	if !bill.channelID.Valid || bill.channelID.Int64 != channelID {
 		t.Errorf("账单的 channel_id = %v，期望 %d（这次请求实际走的那个 openai 渠道）", bill.channelID, channelID)
 	}
-	if got := billProtocol(t, db, bill.id); got != string(channel.ProtocolAnthropic) {
-		t.Errorf("账单的 protocol = %q，期望 %q（记的是**调用方**说的那套，不是上游的 openai）",
-			got, channel.ProtocolAnthropic)
+	// 账单记的是**调用方**说的那套协议，不是上游那套。跨协议时两者不同，
+	// 这一列是事后按协议归因时的唯一依据——记成上游那一侧的话，
+	// 「Anthropic 入口的用量口径」这类统计会把两种组合混在一起。
+	if bill.protocol != string(channel.ProtocolAnthropic) {
+		t.Errorf("账单的 protocol = %q，期望 %q（记的是调用方说的那套，不是上游的 openai）",
+			bill.protocol, channel.ProtocolAnthropic)
 	}
 	assertWallet(t, db, user, "99.99967", "0")
 
@@ -299,11 +293,14 @@ func TestMessagesWithOpenAIUpstreamEndToEnd(t *testing.T) {
 // 缓存那一项的单价特意取**非零**：取 0 的话，上面每一处漏算缓存都会得到同一个
 // 数（0.00033），断言就分不出「算对了」与「缓存根本没参与」。
 //
-// 0.00034 与三种错法都能分开：
+// 0.00034 与三种错法都能分开（三个数都实测过，见 report-210.md）：
 //
-//	0.00033  缓存整个丢了（没从 prompt_tokens 里拆出来，或拆了没计价）
-//	0.00038  缓存算了两次（prompt 仍按 17 计，缓存那 5 个又计一遍）
-//	0.00039  同上，且缓存只计了没拆
+//	0.00033  缓存没参与计价：输入按 12 算，缓存那一档是 0
+//	0.00038  缓存没从 prompt 里拆出去：那 5 个 token 只按输入单价收了一遍。
+//	         拆漏时单列的缓存费还会被 billing.go 的钳位压回 0（三项之和超过
+//	         PromptTokens 时它先把缓存那两项压回去），于是「拆漏了」与
+//	         「压根没认出来」落到同一个数
+//	0.00039  那 5 个 token 被收了两遍：既留在 prompt 那一档里，又按 cache_read 单列
 func TestMessagesWithOpenAIUpstreamCacheUsage(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
@@ -383,7 +380,8 @@ func TestMessagesWithOpenAIUpstreamCacheUsage(t *testing.T) {
 	}
 	if !sameDecimal(bill.final.String, "0.00034") {
 		t.Errorf("结算金额 = %s，期望 0.00034（12 × 0.00001 + 7 × 0.00003 + 5 × 0.000002）；"+
-			"0.00033 说明缓存没参与计价，0.00038 说明缓存被算进了输入那一档", bill.final.String)
+			"0.00033 说明缓存没参与计价，0.00038 说明缓存没被拆出去（只按输入单价收了一遍），"+
+			"0.00039 说明那 5 个 token 被收了两遍", bill.final.String)
 	}
 	if greaterThan(bill.final.String, bill.reserved) {
 		t.Errorf("预留 %s 小于结算 %s——预留按最坏情况算，是结算的上界", bill.reserved, bill.final.String)
@@ -489,9 +487,9 @@ func TestChatCompletionsWithAnthropicUpstreamEndToEnd(t *testing.T) {
 	if !bill.channelID.Valid || bill.channelID.Int64 != channelID {
 		t.Errorf("账单的 channel_id = %v，期望 %d（这次请求实际走的那个 anthropic 渠道）", bill.channelID, channelID)
 	}
-	if got := billProtocol(t, db, bill.id); got != string(channel.ProtocolOpenAI) {
-		t.Errorf("账单的 protocol = %q，期望 %q（记的是**调用方**说的那套，不是上游的 anthropic）",
-			got, channel.ProtocolOpenAI)
+	if bill.protocol != string(channel.ProtocolOpenAI) {
+		t.Errorf("账单的 protocol = %q，期望 %q（记的是调用方说的那套，不是上游的 anthropic）",
+			bill.protocol, channel.ProtocolOpenAI)
 	}
 	assertWallet(t, db, user, "99.99967", "0")
 
@@ -520,7 +518,7 @@ func TestChatCompletionsWithAnthropicUpstreamEndToEnd(t *testing.T) {
 			sent.MaxTokens)
 	}
 	// OpenAI 的 system 是 messages 里的一条，Anthropic 那边是**顶层字段**。
-	if got := systemText(t, sent.System); got != "你是假上游" {
+	if got := textOf(t, sent.System); got != "你是假上游" {
 		t.Errorf("上游收到的 system = %q，期望 %q（OpenAI 的 system 消息要搬成 Anthropic 的顶层字段）",
 			got, "你是假上游")
 	}

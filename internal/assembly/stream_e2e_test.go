@@ -435,6 +435,9 @@ type billingRow struct {
 	final     sql.NullString
 	channelID sql.NullInt64
 	streamed  bool
+	// protocol 是这次请求的**调用协议**（由入口按路径决定），不是上游协议。
+	// 跨协议的用例里两者不同，而这一列是事后按协议归因时的唯一依据。
+	protocol string
 }
 
 // billingOf 取这个用户最近一行账单。没有行时第二个返回值为 false。
@@ -443,11 +446,12 @@ func billingOf(t *testing.T, db *sql.DB, userID int64) (billingRow, bool) {
 
 	var b billingRow
 	err := db.QueryRowContext(context.Background(), `
-		SELECT id, request_id, status, reserved_amount::text, final_amount::text, channel_id, streamed
+		SELECT id, request_id, status, reserved_amount::text, final_amount::text,
+		       channel_id, streamed, protocol
 		  FROM billing_requests
 		 WHERE user_id = $1
 		 ORDER BY id DESC LIMIT 1`, userID,
-	).Scan(&b.id, &b.requestID, &b.status, &b.reserved, &b.final, &b.channelID, &b.streamed)
+	).Scan(&b.id, &b.requestID, &b.status, &b.reserved, &b.final, &b.channelID, &b.streamed, &b.protocol)
 	if err == sql.ErrNoRows {
 		return billingRow{}, false
 	}

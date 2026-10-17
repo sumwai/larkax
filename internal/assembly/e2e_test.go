@@ -292,6 +292,17 @@ func (f *fakeUpstream) handler() http.Handler {
 	})
 }
 
+// upstreamModelName 返回假上游在响应体里**回报**的模型名。
+//
+// 它故意与请求里的模型名不同：真实上游回报的名字经常不是调用方要的那一个
+// （别名、版本后缀、上游自己的路由）。两边用同一个字符串时，「响应里报给
+// 调用方的是哪一个」就分不出来——把响应体的 model 换成上游回报的那个，
+// 用例照样全绿。加上这个后缀，那条断言才真的钉得住东西。
+//
+// UpstreamModel 只被插件与快照消费，不参与计价（计价按渠道 + 规范模型名），
+// 所以改它不影响这些用例里的金额。
+func (f *fakeUpstream) upstreamModelName() string { return f.model + "-upstream" }
+
 // stopReason 返回这次响应报的结束原因。
 //
 // 没显式指定时用本协议最常见的那一个。指定值由用例给，且**按上游协议的词汇**
@@ -334,7 +345,7 @@ func (f *fakeUpstream) successBody() map[string]any {
 			"id":            "msg-placeholder",
 			"type":          "message",
 			"role":          "assistant",
-			"model":         f.model,
+			"model":         f.upstreamModelName(),
 			"content":       []any{map[string]any{"type": "text", "text": "你好，我是假上游"}},
 			"stop_reason":   f.stopReason(),
 			"stop_sequence": nil,
@@ -359,7 +370,7 @@ func (f *fakeUpstream) successBody() map[string]any {
 		"id":      "chatcmpl-placeholder",
 		"object":  "chat.completion",
 		"created": 1700000000,
-		"model":   f.model,
+		"model":   f.upstreamModelName(),
 		"choices": []any{map[string]any{
 			"index":         0,
 			"message":       map[string]any{"role": "assistant", "content": "你好，我是假上游"},
