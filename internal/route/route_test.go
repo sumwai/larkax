@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -338,6 +339,27 @@ func (f *fakeExecutor) Chat(_ context.Context, ch channel.Channel, req *channel.
 func retryableErr() error { return &channel.ErrUpstream{StatusCode: 500, Retryable: true} }
 func permanentErr() error { return &channel.ErrUpstream{StatusCode: 401, Retryable: false} }
 func plainErr() error     { return errors.New("随便一个错") }
+
+// 决策那条表面递进来的请求由本包合成（见 ChatModel），而它只含一个模型名：
+// 「本包除 Model 之外不读载体的别的字段」这条前提就建立在这上面。
+//
+// 判据是**执行器收到的那一份**，不是内部某个字段——整份请求除 Model 之外
+// 必须全是零值。哪天 ChatModel 开始填别的字段，或者 upstreamRequest 开始往
+// attempt 上补字段，这里会红；而那时决策路径读到的会是那些零值，不会报错。
+func TestChatModelSendsBareCarrier(t *testing.T) {
+	exec := &fakeExecutor{results: map[int64]error{}, resp: &channel.Response{UpstreamModel: "m"}}
+	r := seededRouter(1)
+
+	if _, err := r.ChatModel(context.Background(), exec, "m", []Candidate{candidate(1, "m")}); err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if len(exec.sent) != 1 {
+		t.Fatalf("执行器被调用 %d 次，期望 1", len(exec.sent))
+	}
+	if got, want := exec.sent[0], (channel.Request{Model: "m"}); !reflect.DeepEqual(got, want) {
+		t.Errorf("载体不该带 Model 之外的字段：实际 %+v，期望 %+v", got, want)
+	}
+}
 
 func TestChatSucceedsOnFirstCandidate(t *testing.T) {
 	exec := &fakeExecutor{results: map[int64]error{}, resp: &channel.Response{UpstreamModel: "m"}}

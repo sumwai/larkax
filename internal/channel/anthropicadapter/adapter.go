@@ -20,12 +20,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channel/httpx"
-	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/quota"
 	"github.com/sumwai/larkax/internal/relay"
 )
@@ -238,7 +236,7 @@ func (a *Adapter) do(ctx context.Context, ch channel.Channel, body []byte, req *
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream, application/json")
 	a.setHeaders(httpReq, ch)
-	applyCustomHeaders(httpReq, req)
+	httpx.ApplyCustomHeaders(httpReq, req)
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
@@ -255,23 +253,4 @@ func (a *Adapter) do(ctx context.Context, ch channel.Channel, body []byte, req *
 func (a *Adapter) setHeaders(req *http.Request, ch channel.Channel) {
 	req.Header.Set("x-api-key", ch.Credential)
 	req.Header.Set("anthropic-version", AnthropicVersion)
-}
-
-// applyCustomHeaders 把自定义头附加到请求上。
-//
-// 与 openaiadapter 里那个同源：鉴权头与协议头由 httpx.SafeRequestHeaders
-// 滤掉，被拒的头记名字不记值。放在适配器这一道而不只在插件层——
-// 插件层的白名单写错时，这里是最后一道。
-func applyCustomHeaders(httpReq *http.Request, req *channel.Request) {
-	if req == nil {
-		return
-	}
-	safe, rejected := httpx.SafeRequestHeaders(req.Headers)
-	for name, value := range safe {
-		httpReq.Header.Set(name, value)
-	}
-	if len(rejected) > 0 {
-		observe.FromContext(httpReq.Context()).Warn("自定义请求头被拒",
-			"headers", strings.Join(rejected, ","))
-	}
 }

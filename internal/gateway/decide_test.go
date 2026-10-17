@@ -220,33 +220,6 @@ func TestDecideWithoutExecutor(t *testing.T) {
 	}
 }
 
-// 载体是给选路层用的：它只该带一个模型名。填上 chat 形状的字段说明
-// route 那边的行为变了，这条路径的前提不再成立——那时要**响亮地失败**，
-// 而不是带着一个空的 messages 往下走。
-func TestCarrierIntact(t *testing.T) {
-	if err := carrierIntact(carrierRequest("gpt-4o")); err != nil {
-		t.Errorf("干净的载体被拒了: %v", err)
-	}
-
-	cases := map[string]*channel.Request{
-		"没有模型名":  {},
-		"带了消息":   {Model: "m", Messages: []channel.Message{{Role: "user"}}},
-		"带了工具":   {Model: "m", Tools: []channel.Tool{{Name: "t"}}},
-		"要了流式":   {Model: "m", Stream: true},
-		"带了上界":   {Model: "m", MaxTokens: 100},
-		"带了温度":   {Model: "m", Temperature: new(float64)},
-		"带了扩展":   {Model: "m", Extra: map[string]any{"k": "v"}},
-		"带了自定义头": {Model: "m", Headers: map[string]string{"x-a": "b"}},
-	}
-	for name, carrier := range cases {
-		t.Run(name, func(t *testing.T) {
-			if err := carrierIntact(carrier); err == nil {
-				t.Error("期望报错")
-			}
-		})
-	}
-}
-
 // 决策这条路径**不采请求快照**（脱敏器的允许表按 channel.Request 的形状建）。
 // 这一条钉住「不采」是有意的：哪天有人把快照接上，这条用例会红，
 // 那时要一并把 state/questions 的脱敏规则想清楚。

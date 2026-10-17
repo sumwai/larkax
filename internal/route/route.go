@@ -792,6 +792,27 @@ func capabilityMismatch(err error) bool {
 	return errors.Is(err, channel.ErrUnknownType) || errors.Is(err, channel.ErrUnsupported)
 }
 
+// ChatModel 按一个规范模型名执行一次选路，请求由本包自己合成。
+//
+// # 它为什么存在
+//
+// 决策那条表面（见 internal/gateway 的 Decide）没有 chat 形状的请求：它要的
+// 只是「按这个规范名选一个渠道、按渠道翻出上游名、发出去」。走 Chat 的话，
+// 调用方得自己造一个 channel.Request 当**载体**递进来，于是「本包除 Model
+// 之外不读载体的别的字段」成了一条跨包的口头约定——它只写在调用方的注释里，
+// 改本包的人看不见。
+//
+// 合成搬进本包之后，那条约定变成这里就能读到的事实：载体是本函数造的一个
+// 只含 Model 的结构体字面量，而它唯一的读者是 upstreamRequest（它只做
+// `attempt := *req; attempt.Model = 上游名`）。
+//
+// **改 upstreamRequest、让它开始读 req 的别的字段之前，先看这条路径。**
+// 这条路径递进来的载体除 Model 之外全是零值，读到的会是零值本身，而且不会
+// 报错。chat 那条路径的载体是真请求，读错了至少读到的还是真数据；这里不是。
+func (r *Router) ChatModel(ctx context.Context, exec Executor, canonicalModel string, candidates []Candidate) (*Result, error) {
+	return r.Chat(ctx, exec, &channel.Request{Model: canonicalModel}, candidates, canonicalModel)
+}
+
 // Chat 按选路结果依次尝试，直到成功或用尽候选。
 //
 // 重试的边界由 worthNextCandidate 决定：429、5xx、网络层失败换下一个；
