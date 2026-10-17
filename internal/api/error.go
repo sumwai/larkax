@@ -141,13 +141,20 @@ func writeIdempotencyError(w http.ResponseWriter, protocol channel.Protocol, cod
 	writeErrorCode(w, protocol, http.StatusConflict, code, message)
 }
 
-// CodeInsufficientQuota 是这把 API Key 的累计花费已经用完了它的额度上限时的错误码。
+// CodeInsufficientQuota 是「这个账户现在没法再花这笔钱」的错误码。
+//
+// 它有两个来源，两者给出**同一个**状态码与码：
+//
+//   - 这把 API Key 的累计花费用完了它的额度上限（见 writeInsufficientQuota）；
+//   - 用户钱包的可用余额不够这次预留（见 writeInsufficientBalance）。
+//
+// 共用一套码是刻意的：两者都是**账户状态**而不是服务故障，调用方只该写
+// 一个分支。它们的差别在文案，因为该做的事不一样（改 key 的额度 / 充值）。
 //
 // 它与限流共用 429，但**不是同一件事**，所以码必须分开给：
 //
 //   - 限流是「这一秒打得太快」——窗口会过去，等一会儿重发就对了；
-//   - 额度是「这把 key 累计花够了」——等多久都不会变，要改的是那把 key 的
-//     额度，或者换一把 key。
+//   - 额度或余额是「现在花不了」——等多久都不会变。
 //
 // 状态码相同而处置相反，正是 writeErrorCode 存在的理由（见它的注释）：
 // 只给状态码的话，SDK 只能靠读 message 来分辨，而 SDK 不做那件事。
@@ -155,6 +162,14 @@ const CodeInsufficientQuota = "insufficient_quota"
 
 const msgInsufficientQuota = "this API key has reached its spending limit; " +
 	"raise the limit on this key or use a different key"
+
+// msgInsufficientBalance 是钱包可用余额不够这次预留时的那句话。
+//
+// 它与 msgInsufficientQuota 共用状态码与码，但**不能共用文案**：那句说的是
+// 「改这把 key 的额度，或者换一把 key」，而余额不足时这两件事都不解决问题
+// ——要做的只有充值。码是给 SDK 分支用的，文案是给人读的。
+const msgInsufficientBalance = "the account balance is insufficient for this request; " +
+	"top up the wallet before retrying"
 
 // writeInsufficientQuota 写出一次「额度用尽」的响应。
 //
@@ -174,6 +189,18 @@ const msgInsufficientQuota = "this API key has reached its spending limit; " +
 // 是「现在别发了」这个语义的通用落点，两套协议都认。
 func writeInsufficientQuota(w http.ResponseWriter, protocol channel.Protocol) {
 	writeErrorCode(w, protocol, http.StatusTooManyRequests, CodeInsufficientQuota, msgInsufficientQuota)
+}
+
+// writeInsufficientBalance 写出一次「钱包可用余额不足」的响应。
+//
+// 它与 writeInsufficientQuota 同形（429 + insufficient_quota、没有
+// Retry-After），只有 message 不同——理由见 msgInsufficientBalance。
+//
+// 不给 Retry-After 的理由与额度那一条逐字相同：余额不会因为等一会儿就回来，
+// 回一个等待时间等于让客户端在一个不会变的状态上反复重试。充值之后即刻生效，
+// 那是「有人做了事」而不是「等到某个时刻」。
+func writeInsufficientBalance(w http.ResponseWriter, protocol channel.Protocol) {
+	writeErrorCode(w, protocol, http.StatusTooManyRequests, CodeInsufficientQuota, msgInsufficientBalance)
 }
 
 // HeaderRetryAfter 是限流响应里回给调用方的重试间隔头。

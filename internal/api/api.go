@@ -44,6 +44,7 @@ import (
 	"github.com/sumwai/larkax/internal/gateway"
 	"github.com/sumwai/larkax/internal/idempotency"
 	"github.com/sumwai/larkax/internal/keyquota"
+	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -922,15 +923,32 @@ func drainStream(events <-chan channel.StreamEvent) {
 func (h *Handler) failUpstream(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, err error) {
 	log := observe.FromContext(r.Context())
 
-	// 额度用尽要单独接住：它是唯一一个**状态码推不出码**的情形。
+	// 账户状态要单独接住：它们是**状态码推不出码**的情形。
 	//
-	// 它与限流共用 429，但处置相反——限流等一会儿就对了，额度等多久都不会
-	// 变——所以码必须显式给出（见 writeInsufficientQuota）。走下面那条按
-	// 状态码推形状的路，调用方只会看到一个光秃秃的 429，然后照限流那样退避
-	// 重试，而它永远不会成功。
-	if errors.Is(err, keyquota.ErrExceeded) {
+	// 两个分支共用 429 与 insufficient_quota，但处置相反——限流等一会儿
+	// 就对了，而额度用尽与余额不足等多久都不会变——所以码必须显式给出
+	// （见 writeInsufficientQuota / writeInsufficientBalance）。走下面那条
+	// 按状态码推形状的路，调用方只会看到一个光秃秃的 429，然后照限流那样
+	// 退避重试，而它永远不会成功。
+	//
+	// 按 Key 的额度排在余额之前是有意的：两者同时成立时（key 花完了、
+	// 钱包也空了），先说更靠前的那个限制——它才是这次请求被拒的直接原因，
+	// 而调高 key 额度之后下面的余额限制会立刻接手。
+	switch {
+	case errors.Is(err, keyquota.ErrExceeded):
 		log.Warn("请求超出该 Key 的额度上限", "err", err)
 		writeInsufficientQuota(w, protocol)
+		return
+	case errors.Is(err, store.ErrInsufficientAvailable):
+		// 预留时「余额 − 冻结」不够。它是用户账户的状态，不是我们的故障：
+		// 落在默认分支会回 500，调用方据此去查我们，而该做的是充值。
+		//
+		// 只认 ErrInsufficientAvailable（预留），**不认**
+		// ErrInsufficientBalance（结算时扣款让余额变负）：后者是账本内部
+		// 不变量出问题的信号，不是「现在没钱了」，它的处置仍走下面那条
+		// 映射（今天是 500）。
+		log.Warn("用户可用余额不足", "err", err)
+		writeInsufficientBalance(w, protocol)
 		return
 	}
 
@@ -964,6 +982,10 @@ func (h *Handler) failUpstream(w http.ResponseWriter, r *http.Request, protocol 
 //   - 认不出来的错误回 500：它们来自候选来源、预留、账本这些我们自己的
 //     环节。把它们当成 502 会把我们的故障说成上游的故障，调用方据此去
 //     联系上游就找错了人。
+//
+// 两个「调用方账户的状态」不在这里：额度用尽与预留时余额不足都由
+// failUpstream 在调本函数**之前**接住并显式给码（见那里的 switch）——
+// 它们的状态码与限流相同（429），光靠状态码推不出该给哪个码。
 func httpStatusOfUpstream(err error) (status int, message string) {
 	switch {
 	case errors.Is(err, billing.ErrNoUpperBound):
