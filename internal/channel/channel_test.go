@@ -6,7 +6,23 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/sumwai/larkax/internal/quota"
 )
+
+// Adapter.Quota() 的返回类型必须是 quota.State。
+//
+// 写成编译期断言而不是运行期检查：签名换成别的类型（或退回一个本包自己的
+// 快照类型）之后是构建失败，而不是某条用例报一句看不懂的错。
+//
+// 为什么值得钉：额度状态是路由与监控共用的一个东西，本包再声明一个只会
+// 变成它的**有损投影**——投影里没有 last_probe_at / last_error_code，
+// 而正是这两列让 quota.State.Routable 能区分「从未观测过」（可用）与
+// 「观测过却没拿到数值」（排除）。判据退化不会让任何东西报错，只会让
+// 一批渠道静默地不再被选中。
+var _ interface {
+	Quota(context.Context, Channel) (quota.State, error)
+} = Adapter(nil)
 
 // fakeAdapter 是注册表测试用的最小实现。
 type fakeAdapter struct {
@@ -29,8 +45,8 @@ func (f *fakeAdapter) ListModels(context.Context, Channel) ([]string, error) {
 	return nil, ErrUnsupported
 }
 
-func (f *fakeAdapter) Quota(context.Context, Channel) (Quota, error) {
-	return Quota{}, ErrUnsupported
+func (f *fakeAdapter) Quota(context.Context, Channel) (quota.State, error) {
+	return quota.State{}, ErrUnsupported
 }
 
 func mustRegister(t *testing.T, r *Registry, typ string, p Protocol) {
