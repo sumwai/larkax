@@ -76,36 +76,33 @@ func WithMaxBytes(n int) Option {
 // 它持有的是编译后的允许表，本身没有可变状态：一次调用与下一次调用之间不共享
 // 工具引用编号，因此同一个实例可以被多个请求并发使用。
 type Redactor struct {
+	// surface 是这套允许表服务的线格式。它与 root 是两条正交的轴：
+	// 同一个方向在不同表面上字段完全不同（见 Surface 的注释）。
+	surface  Surface
 	root     Root
 	table    fieldTable
 	maxBytes int
 }
 
-// New 建立一个脱敏器。
+// New 建立一个 chat 表面的脱敏器。
 //
-// 未知方向与「表本身有问题」（重复路径、空路径、空 Note、对具体头写了放行规则）
-// 都在这里返回错误。把这些检查放在构造期而不是脱敏期：表写错的代价本该是启动时
-// 一次明确的失败，而在脱敏期暴露会表现为「每条请求的骨架都没了」，
-// 排查方向与真正的原因隔着一层。
+// 实现落在 NewFor：允许表现在是「表面 × 方向」两维，而 chat 只是其中一个
+// 表面。这里保留这个入口是因为 chat 那两条路是本包最常被用到的形态，
+// 调用方不必为它写一个恒定的表面名。
 func New(root Root, opts ...Option) (*Redactor, error) {
-	rules, ok := allowlists[root]
-	if !ok {
-		return nil, redactionError("", "未知的快照方向 %q", root)
-	}
-	if err := validateRules(rules); err != nil {
-		return nil, err
-	}
-	r := &Redactor{root: root, table: buildTable(rules), maxBytes: DefaultMaxBytes}
-	for _, opt := range opts {
-		if err := opt(r); err != nil {
-			return nil, redactionError("", "选项无效: %v", err)
-		}
-	}
-	return r, nil
+	return NewFor(SurfaceChat, root, opts...)
 }
 
 // Root 返回这个脱敏器服务的方向，可直接落进 request_snapshots.direction。
 func (r *Redactor) Root() Root { return r.root }
+
+// Surface 返回这个脱敏器服务的那套线格式。
+//
+// 方向只有 request / response 两个，而两条表面共用它们（见 Surface 的注释），
+// 所以「这个脱敏器按哪张表走」只有它能回答。命令行打印一次脱敏的结果时要带上
+// 它：同一段报文在两个表面上会得到两份不同的骨架，不写明表面就不知道
+// 屏幕上那一份是哪张表的产物。
+func (r *Redactor) Surface() Surface { return r.surface }
 
 // MaxBytes 返回当前的骨架字节上限。
 func (r *Redactor) MaxBytes() int { return r.maxBytes }

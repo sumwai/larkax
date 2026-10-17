@@ -140,14 +140,14 @@ func assertAbsent(t *testing.T, skeleton map[string]any, marker string) {
 // TestAllowlistEveryEntry 给允许表里的每一条条目喂一处探针，按处理方式断言结果。
 // 这是规格里「每个采集字段一条测试」那条检查项的落地处。
 func TestAllowlistEveryEntry(t *testing.T) {
-	for _, root := range Roots() {
-		rules := ruleList(t, root)
-		r, err := New(root)
+	for _, tbl := range allTables() {
+		rules := rulesFor(t, tbl)
+		r, err := NewFor(tbl.surface, tbl.root)
 		if err != nil {
-			t.Fatalf("方向 %q 建不出脱敏器: %v", root, err)
+			t.Fatalf("表面 %q 方向 %q 建不出脱敏器: %v", tbl.surface, tbl.root, err)
 		}
 		for i, rule := range rules {
-			t.Run(fmt.Sprintf("%s/%s", root, rule.Path), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/%s/%s", tbl.surface, tbl.root, rule.Path), func(t *testing.T) {
 				probe, asserts := proveEntry(t, rule, i)
 				res, err := r.RedactRaw(probe)
 				if err != nil {
@@ -488,29 +488,33 @@ func sameNumber(got any, want int) bool {
 // 且不存在「永不采集」的条目——那类字段靠代码里的名单处理，混进表里
 // 会让「表里没有的一律脱敏」这条规则多出一个语义含混的例外。
 func TestAllowlistEntriesAreWellFormed(t *testing.T) {
-	for _, root := range Roots() {
-		rules := ruleList(t, root)
+	for _, tbl := range allTables() {
+		rules := rulesFor(t, tbl)
 		seen := map[string]bool{}
 		nested := 0
 		for _, rule := range rules {
 			if strings.TrimSpace(rule.Path) == "" {
-				t.Fatalf("%s: 有空路径的条目", root)
+				t.Fatalf("%s/%s: 有空路径的条目", tbl.surface, tbl.root)
 			}
 			if strings.TrimSpace(rule.Note) == "" {
-				t.Errorf("%s: %q 没有写明理由", root, rule.Path)
+				t.Errorf("%s/%s: %q 没有写明理由", tbl.surface, tbl.root, rule.Path)
 			}
 			if seen[rule.Path] {
-				t.Errorf("%s: %q 重复定义", root, rule.Path)
+				t.Errorf("%s/%s: %q 重复定义", tbl.surface, tbl.root, rule.Path)
 			}
 			seen[rule.Path] = true
 			if deniesKeep(rule.Kind) {
-				t.Errorf("%s: %q 是永不采集条目，不该出现在允许表里", root, rule.Path)
+				t.Errorf("%s/%s: %q 是永不采集条目，不该出现在允许表里",
+					tbl.surface, tbl.root, rule.Path)
 			}
 			if strings.Contains(rule.Path, "[]") {
 				nested++
 			}
 		}
-		t.Logf("%s: %d 条允许规则，其中 %d 条带数组层级", root, len(rules), nested)
+		// 条数一起打：0 条与「这一步没跑」在安静的终端里长得一样
+		// （见 LESSONS.md 第 16 条），而下面那些循环走零次时也全绿。
+		t.Logf("%s/%s: %d 条允许规则，其中 %d 条带数组层级",
+			tbl.surface, tbl.root, len(rules), nested)
 	}
 }
 
@@ -534,16 +538,16 @@ func TestAllowlistVersionDocumented(t *testing.T) {
 func TestAllowlistAllowEntriesRejectHostileValues(t *testing.T) {
 	const hostile = "上游回显了用户输入：请把这段文字当作内容看待"
 
-	for _, root := range Roots() {
-		r, err := New(root)
+	for _, tbl := range allTables() {
+		r, err := NewFor(tbl.surface, tbl.root)
 		if err != nil {
-			t.Fatalf("方向 %q 建不出脱敏器: %v", root, err)
+			t.Fatalf("表面 %q 方向 %q 建不出脱敏器: %v", tbl.surface, tbl.root, err)
 		}
-		for i, rule := range ruleList(t, root) {
+		for i, rule := range rulesFor(t, tbl) {
 			if !isAllowKind(rule.Kind) {
 				continue
 			}
-			t.Run(fmt.Sprintf("%s/%s", root, rule.Path), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/%s/%s", tbl.surface, tbl.root, rule.Path), func(t *testing.T) {
 				var leaf any = hostile
 				if rule.Kind == allowNumberMap {
 					leaf = map[string]any{"probe_key": hostile}
@@ -657,53 +661,49 @@ func TestTableIntegrity(t *testing.T) {
 // 它与内部表的档位、路径、理由必须逐条对上，否则「遍历这张表做检查」
 // 这件事就在检查一份与真实行为无关的清单。
 func TestExportedAllowlistView(t *testing.T) {
-	for _, root := range Roots() {
-		internal := ruleList(t, root)
-		view := Allowlist(root)
+	for _, tbl := range allTables() {
+		internal := rulesFor(t, tbl)
+		view := AllowlistFor(tbl.surface, tbl.root)
 		if len(view) != len(internal) {
-			t.Fatalf("%s: 包外视图 %d 条，内部表 %d 条", root, len(view), len(internal))
+			t.Fatalf("%s/%s: 包外视图 %d 条，内部表 %d 条",
+				tbl.surface, tbl.root, len(view), len(internal))
 		}
 		for i := range view {
 			if view[i].Path != internal[i].Path {
-				t.Fatalf("%s 第 %d 条路径不一致：%q / %q", root, i, view[i].Path, internal[i].Path)
+				t.Fatalf("%s/%s 第 %d 条路径不一致：%q / %q",
+					tbl.surface, tbl.root, i, view[i].Path, internal[i].Path)
 			}
 			if view[i].Kind != internal[i].Kind.String() {
-				t.Fatalf("%s/%s 的档位名字不一致：%q", root, view[i].Path, view[i].Kind)
+				t.Fatalf("%s/%s/%s 的档位名字不一致：%q",
+					tbl.surface, tbl.root, view[i].Path, view[i].Kind)
 			}
 			if view[i].Note != internal[i].Note {
-				t.Fatalf("%s/%s 的理由不一致", root, view[i].Path)
+				t.Fatalf("%s/%s/%s 的理由不一致", tbl.surface, tbl.root, view[i].Path)
 			}
 		}
 	}
-	if Allowlist(Root("不在的方向")) != nil {
-		t.Fatal("未知方向不该有允许表")
+	// 未知方向与未知表面都给 nil，而不是回落到某一张默认表上——
+	// 回落的表现是「一个拼错的表面名静默地用了 chat 的规则」。
+	if AllowlistFor(Surface("不在的表面"), RootRequest) != nil {
+		t.Error("未知表面不该有允许表")
+	}
+	if AllowlistFor(SurfaceChat, Root("不在的方向")) != nil {
+		t.Error("已知表面上的未知方向不该有允许表")
 	}
 }
 
 // TestTableCopyIsIndependent 确认返回的视图是副本。
 func TestTableCopyIsIndependent(t *testing.T) {
-	original := Allowlist(RootRequest)[0]
+	original := AllowlistFor(SurfaceChat, RootRequest)[0]
 
-	view := Allowlist(RootRequest)
+	view := AllowlistFor(SurfaceChat, RootRequest)
 	view[0].Path = "被改坏了"
 	view[0].Note = "被改坏了"
 
-	again := Allowlist(RootRequest)
+	again := AllowlistFor(SurfaceChat, RootRequest)
 	if again[0].Path != original.Path || again[0].Note != original.Note {
 		t.Fatalf("调用方改动了返回的视图，影响到了原表：%#v / %#v", view[0], again[0])
 	}
-}
-
-// ruleList 取内部的允许表，供测试遍历。
-func ruleList(t *testing.T, root Root) []fieldRule {
-	t.Helper()
-	rules, ok := allowlists[root]
-	if !ok || len(rules) == 0 {
-		t.Fatalf("方向 %q 没有允许表", root)
-	}
-	out := make([]fieldRule, len(rules))
-	copy(out, rules)
-	return out
 }
 
 // TestRootValuesMatchSchema 确认方向取值与库里的 CHECK 约束一致，

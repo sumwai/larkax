@@ -42,17 +42,78 @@ larkax 保留每个请求的**结构**，不保留**内容**。
 
 开启后采集到的内容会标记为「用户授权采集」，可以单独筛出来审计。
 
-## 决策接口目前不采快照
+## 决策接口的留存范围
 
-`/v1/systemone`（见 [development.md](development.md)）这条路径**一条快照都不采**，
-所以它请求里的 `state` 与 `answers` 既不落库也不脱敏——**不是漏了规则，是这条
-链路还没接上**。
+`/v1/systemone`（见 [development.md](development.md)）这条路径**也留存，但只留
+判据**：它记的是「这次决策有多少候选、各自什么状态、最后选中了谁、试过谁、
+每一步为什么不成」，而不是它问了什么、模型答了什么。
 
-原因是脱敏器的允许表按 `channel.Request` / `channel.Response` 的形状建（见
-`internal/snapshot` 的允许表），而这条表面不共用那个类型，它的请求体也没有可以
-挂上去的根。接上它之前要先把这两件事想清楚：`state` 里装的是用户原文（与提示词
-同一类内容），`answers` 里装的是模型判断的结果。在那之前，这条路径上的请求内容
-既不留存、也不在「不保留内容」这条保证的覆盖范围内。
+这条表面上的内容——请求里的 `state` 与 `questions`、响应里的 `answers`——
+**不经过脱敏器**：它们根本不会被摊进快照的输入，所以不存在「脱敏规则写漏了
+一个字段」这类风险。这是刻意的取舍：`state` 里装的是用户原文（与提示词同一类），
+`answers` 里装的是模型判断的结果。
+
+一条决策请求落**两行**（与对话请求一样），方向分别是 `request` 与 `response`：
+
+- `request` 方向记**选路之前**手上的候选集合与它们的判据；
+- `response` 方向记**选路之后**的结局：选中的渠道与上游名、每一次尝试的结果
+  （是否值得换下一个渠道、失败分类、上游状态码、耗时），以及同一份候选集合
+  上哪几个被选中、哪几个被淘汰。
+
+**怎么区分这两条表面。** `request_snapshots.direction` 只有 `request` 与
+`response` 两个取值，决策请求与对话请求落在相同的两个方向里。区分它们的是
+骨架里的 `surface` 字段：对话是 `chat`，决策是 `decision`。
+
+**这条表面记下来的全部字段**（这张清单**逐个对得上代码里的允许表**，
+由 `internal/snapshot` 的 `TestDecisionAllowlistDocumented` 钉住：
+清单里少一个、多一个、写错一个都会让那条用例变红。所以它就是准确的答案，
+而不是一份会过期的说明）：
+
+```text
+surface                        这一行是哪条表面产出的：chat 还是 decision
+model                          调用方要的那个规范模型名
+candidates_count               候选数
+candidates                     候选集合
+candidates[].channel_id        候选渠道的 id，也是与账单对上的那个数
+candidates[].priority          排序的第一判据：数值大者先试
+candidates[].weight            同优先级内的分流比例
+candidates[].consecutive_failures  连续失败次数
+candidates[].success_rate      近期成功率
+candidates[].latency_p95_ms    近期响应时间分位（毫秒）
+candidates[].quota_unit        余量的单位
+candidates[].quota_remaining   剩余量
+candidates[].quota_confidence  这个余量有多可信
+candidates[].quota_kind        余量的来源：实测 / 自记账 / 错误观测
+candidates[].cost_per_unit     最近观察到的单位成本
+candidates[].cache_hit_rate    近期缓存命中率
+candidates[].sample_count      上面两条统计的样本数
+selected                       实际选中并发出去的那一个（只有成功时才有）
+selected.channel_id            选中的渠道，与账单上的 channel_id 是同一个数
+selected.upstream_model        这次实际发出去的上游模型名
+candidates[].selected          这一段候选是不是被选中的那个
+attempts                       按顺序记下每一次尝试，含最后成功的那次
+attempts[].channel_id          这一次试的是哪个渠道
+attempts[].succeeded           这一次成没成
+attempts[].retryable           这次的失败是否值得换下一个渠道
+attempts[].upstream_status     这次拿到的上游 HTTP 状态码
+attempts[].error_kind          这次的失败分类
+attempts[].duration_ms         这一次耗了多久
+```
+
+最后六项与 `selected` 三段只出现在 `response` 方向的行上；`candidates[].selected`
+同样只在 `response` 方向出现。其余每一项在两个方向的行上都有。
+
+没有数据的项**整个字段不出现**，而不是写成 0：「没有成本数据」与「成本是 0」
+在选路里是两个不同的结论，快照把两者记成一样，下一次排查就得重新踩一遍。
+
+**各维分数本身不在留存范围内。** 路由只给出加权后的总分，拆不开。
+留下的是上面这些输入——它们才是「为什么选了它」能被人复核的部分。
+
+**已知的偏差。** 决策这条表面回给我们的响应里没有 HTTP 状态码，所以一个
+**成功**的决策请求在快照表上 `upstream_status` 与 `error_kind` 两列是 NULL。
+这两列在响应方向的行上通常读作「一个 HTTP 响应都没拿到」，而这里不是那个意思；
+每一次尝试的状态码记在骨架的 `attempts[].upstream_status` 里。
+
 
 ## 不在这份保证范围内的东西
 

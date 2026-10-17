@@ -32,12 +32,13 @@ const snapshotUsage = `larkaxctl snapshot 维护与查看请求结构快照。
 用法：
   larkaxctl snapshot cleanup               按 settings 里的留存期删除到期分区
   larkaxctl snapshot cleanup --dry-run     只列出会被删除的分区，不删
-  larkaxctl snapshot allowlist [--direction request|response]
+  larkaxctl snapshot allowlist [--direction request|response] [--surface chat|decision]
         打印允许表：哪些字段放行、哪些替换成占位、每一行为什么这么定
   larkaxctl snapshot show <request_id> --actor <用户 ID 或用户名> --reason <文本>
         [--direction request|response]
         读出一条请求存下来的结构快照
-  larkaxctl snapshot redact --direction request|response [--max-bytes <字节数>]
+  larkaxctl snapshot redact --direction request|response [--surface chat|decision]
+        [--max-bytes <字节数>]
         从标准输入读一段 JSON 报文，按允许表脱敏，骨架打到标准输出
 
 留存期取自 settings 表的 request_snapshot.retention_days，
@@ -127,6 +128,31 @@ func snapshotRootsFor(direction string) ([]snapshot.Root, error) {
 	return nil, fmt.Errorf("方向 %q 不认识（可选：%s）", direction, strings.Join(names, "、"))
 }
 
+// surfaceFor 把 --surface 的取值翻成一个已知表面。
+//
+// 取值从 snapshot.Surfaces() 里找，而不是在这里再列一遍 chat / decision：
+// 允许表加了新表面时这里跟着就能用；手抄一份的表现是「表里有的表面，
+// 命令行说它不认识」。
+//
+// 空串表示「默认的那个」：allowlist 打印全部，redact 用 chat——
+// 「不写就是对话那条路」是使用者的默认预期，而决策那条路是一次明确的指定。
+func surfaceFor(name string, fallback snapshot.Surface) (snapshot.Surface, error) {
+	all := snapshot.Surfaces()
+	if name == "" {
+		return fallback, nil
+	}
+	for _, s := range all {
+		if string(s) == name {
+			return s, nil
+		}
+	}
+	names := make([]string, 0, len(all))
+	for _, s := range all {
+		names = append(names, string(s))
+	}
+	return "", fmt.Errorf("表面 %q 不认识（可选：%s）", name, strings.Join(names, "、"))
+}
+
 // runSnapshotAllowlist 打印允许表。
 //
 // 它不连库、不读配置：允许表是代码里的数据，而这条命令的用途正是
@@ -135,6 +161,7 @@ func runSnapshotAllowlist(args []string) error {
 	fs := flag.NewFlagSet("snapshot allowlist", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, snapshotUsage) }
 	direction := fs.String("direction", "", "只打某个方向（request / response），不填则两个方向都打")
+	surfaceName := fs.String("surface", "", "只打某个表面（chat / decision），不填则每个表面都打")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -146,33 +173,48 @@ func runSnapshotAllowlist(args []string) error {
 	if err != nil {
 		return usageErr(err)
 	}
-	printAllowlists(os.Stdout, roots)
+	// 不填 --surface 时逐张表都打：只打一张的话，「有没有决策那张表」这件事
+	// 就变成要看帮助文本才知道的事，而这条命令的用途正是回答那个问题。
+	surface, err := surfaceFor(*surfaceName, "")
+	if err != nil {
+		return usageErr(err)
+	}
+	surfaces := snapshot.Surfaces()
+	if surface != "" {
+		surfaces = []snapshot.Surface{surface}
+	}
+	printAllowlists(os.Stdout, surfaces, roots)
 	return nil
 }
 
-// printAllowlists 打印一组方向的允许表。
+// printAllowlists 打印一组表面 × 方向的允许表。
 //
 // Note 必须完整打出来，这一条命令存在的理由就是它。允许表本身在源码里，
 // 能读源码的人不需要这条命令；而「为什么这一行放行、为什么那一行脱敏」
 // 正是使用者问「你们到底存了我什么」时唯一能回答他的东西。
 // 省略或截断它，这条命令就退化成一个字段名清单。
 //
-// 走 snapshot.Allowlist 而不是去读包内的 allowlists：它返回的是**副本**
+// 走 snapshot.AllowlistFor 而不是去读包内的表：它返回的是**副本**
 // （见那个函数的注释），所以打印它不会影响脱敏行为——这一点让这条命令
 // 可以放心地在任何地方跑，包括生产库旁边。
-func printAllowlists(w io.Writer, roots []snapshot.Root) {
-	for i, root := range roots {
+func printAllowlists(w io.Writer, surfaces []snapshot.Surface, roots []snapshot.Root) {
+	for i, s := range surfaces {
 		if i > 0 {
 			_, _ = fmt.Fprintln(w)
 		}
-		rules := snapshot.Allowlist(root)
-		// 条数一起打：0 条与「这一步没跑」在安静的终端里长得一样
-		// （见 LESSONS.md 第 16 条）。
-		_, _ = fmt.Fprintf(w, "方向 %s：%d 条\n", root, len(rules))
-		for _, rule := range rules {
-			_, _ = fmt.Fprintf(w, "  Path=%s Kind=%s UpstreamValue=%t\n",
-				rule.Path, rule.Kind, rule.UpstreamValue)
-			_, _ = fmt.Fprintf(w, "    Note=%s\n", rule.Note)
+		for j, root := range roots {
+			if j > 0 {
+				_, _ = fmt.Fprintln(w)
+			}
+			rules := snapshot.AllowlistFor(s, root)
+			// 条数一起打：0 条与「这一步没跑」在安静的终端里长得一样
+			// （见 LESSONS.md 第 16 条）。
+			_, _ = fmt.Fprintf(w, "表面 %s 方向 %s：%d 条\n", s, root, len(rules))
+			for _, rule := range rules {
+				_, _ = fmt.Fprintf(w, "  Path=%s Kind=%s UpstreamValue=%t\n",
+					rule.Path, rule.Kind, rule.UpstreamValue)
+				_, _ = fmt.Fprintf(w, "    Note=%s\n", rule.Note)
+			}
 		}
 	}
 }
@@ -185,6 +227,7 @@ func runSnapshotRedact(args []string) error {
 	fs := flag.NewFlagSet("snapshot redact", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, snapshotUsage) }
 	direction := fs.String("direction", "", "报文的方向：request 或 response（必填）")
+	surfaceName := fs.String("surface", "", "报文的表面：chat（默认）或 decision")
 	maxBytes := fs.Int("max-bytes", snapshot.DefaultMaxBytes,
 		"骨架的字节上限，超过就降级为摘要层")
 	if err := fs.Parse(args); err != nil {
@@ -208,7 +251,11 @@ func runSnapshotRedact(args []string) error {
 	if err != nil {
 		return usageErr(err)
 	}
-	redactor, err := snapshot.New(roots[0], snapshot.WithMaxBytes(*maxBytes))
+	surface, err := surfaceFor(*surfaceName, snapshot.SurfaceChat)
+	if err != nil {
+		return usageErr(err)
+	}
+	redactor, err := snapshot.NewFor(surface, roots[0], snapshot.WithMaxBytes(*maxBytes))
 	if err != nil {
 		// 走到这里说明允许表本身有问题（重复路径、空 Note 之类），
 		// 那不是参数错，是这份代码或这个二进制有问题。
@@ -262,8 +309,8 @@ func readBoundedInput(r io.Reader, limit int64) ([]byte, error) {
 // 而线上那个上限来自 settings——把它一起打出来，读的人才能判断那一行
 // truncated 说的到底是不是他关心的那件事。
 func printRedaction(out, info io.Writer, redactor *snapshot.Redactor, res *snapshot.Result) error {
-	_, _ = fmt.Fprintf(info, "方向=%s 骨架版本=%d 字节上限=%d 被截断=%t\n",
-		redactor.Root(), res.Version, redactor.MaxBytes(), res.Truncated)
+	_, _ = fmt.Fprintf(info, "表面=%s 方向=%s 骨架版本=%d 字节上限=%d 被截断=%t\n",
+		redactor.Surface(), redactor.Root(), res.Version, redactor.MaxBytes(), res.Truncated)
 	if res.Truncated {
 		_, _ = fmt.Fprintln(info,
 			"注意：骨架超限，已降级成摘要层（只留顶层标量），逐条消息与工具定义的细节都丢了。")

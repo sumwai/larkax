@@ -69,10 +69,14 @@ func (g *Gateway) Decide(ctx context.Context, req pipeline.Request, decision *sy
 	// 那时还没有「打到了哪儿」可记（见 handle.abort）。
 	defer h.abort(ctx)
 
-	// 这条路径**不采请求快照**：脱敏器的允许表按 channel.Request 的形状建
-	// （见 internal/snapshot 的 allowlist.go），这条表面没有对应的根。
-	// 快照是排障辅助、可以整条丢，所以缺了它不影响计费；接上它需要在
-	// gateway 与 snapshotwire 之间再加一层按通用 map 脱敏的接口，那是另一片。
+	// 请求方向的快照在**选路之前**采集，与 Chat 同一个位置、同一个理由：
+	// 它要回答的是「当时手上有什么」，而候选集合在选路之后就只剩「试过哪些」。
+	// 这条表面记的是**判据**不是内容——state 与 questions 进不到这里，
+	// 见 DecisionTrace 的注释。
+	g.decisionSnapshotAsync(ctx, &DecisionTrace{
+		Model:      req.CanonicalModel,
+		Candidates: decisionCandidatesOf(h.candidates),
+	}, req.UserID)
 
 	call := &decideCall{exec: g.Decider, req: decision}
 	routed, placed, err := g.routeDecide(ctx, call, req.CanonicalModel, h.candidates)
@@ -80,6 +84,10 @@ func (g *Gateway) Decide(ctx context.Context, req pipeline.Request, decision *sy
 	// 下面每一条收尾路径都要收它（见 placement）。它排在兜底之后注册，
 	// 所以正常路径上先跑的是这一个。
 	defer h.finish(ctx, placed)
+
+	// 响应方向的快照也在这里采：选路一返回，这次调用就有了结局，
+	// 成功失败都要采（失败那条记的正是降级经过了哪几步）。
+	g.decisionSnapshotResponse(ctx, decisionOutcomeOf(routed, err, h.candidates, req.CanonicalModel), req.UserID)
 	if err != nil {
 		// 与 Chat 同一处置：健康度先记（失败的调用正是它要记的那些），
 		// 再走一次结算得出「不计费」的结论，预留由 defer 的 finish 释放。
