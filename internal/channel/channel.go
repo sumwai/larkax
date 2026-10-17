@@ -226,6 +226,18 @@ type ContentBlock struct {
 	ImageURL       string
 	ImageBase64    string
 	ImageMediaType string
+
+	// Annotations 是**引用标注**，只对 text 块有意义：模型在正文里引用了
+	// 外部来源时，上游会另外给一批标注（哪一段对应哪个 URL），客户端按它
+	// 渲染脚注或高亮。
+	//
+	// 保持原样（map 而不是本项目另立一套形状）：标注的字段集是上游协议的
+	// 一部分（type、url、start_index、end_index，以及各家自己加的），而
+	// 我们既不解释也不改写它们，只负责送到调用方。另起一个结构体等于凭空
+	// 造出第二套口径，而两套迟早会分岔。
+	//
+	// 它不是正文：不参与分词，也不进计费口径。
+	Annotations []map[string]any
 }
 
 // Tool 是一个工具定义。
@@ -329,7 +341,7 @@ type Response struct {
 // 但归一化之后要传达的信息就是这几类。适配器负责把上游的分片序列
 // 翻译成这几种事件，路由层与计费层只认这里。
 type StreamEvent struct {
-	// Kind 取值：start、delta、tool_use、usage_input、usage、done、error。
+	// Kind 取值：start、delta、annotation、tool_use、usage_input、usage、done、error。
 	//
 	// "start" 是每条流的第一条事件，只带 StatusCode。它不是正文：
 	// 网关消费它（记下上游那次响应的状态码），**不转发给调用方**。
@@ -351,6 +363,19 @@ type StreamEvent struct {
 
 	// Text 是正文增量（Kind == "delta" 时有效）。
 	Text string
+
+	// Annotations 在 Kind == "annotation" 时非空：模型在已经吐出的正文里
+	// 引用了外部来源，这一条事件给出一批标注。
+	//
+	// 它是一条**独立**的事件，而不是挂在 delta 上：上游把标注单独报（正文
+	// 流到一半才出现引用），而挂进某一条 delta 会让「客户端的正文分片里
+	// 突然多出一批标注」与「上游真的在那一刻给了」混为一谈。转发时它被
+	// 渲染成调用协议自己的标注事件。
+	//
+	// 第一次让调用方看见标注的时刻，可能早于第一次看见对应正文的时刻
+	// （上游的顺序不保证），渲染层要按自己的状态处理，而不是假定它一定落在
+	// 某一帧正文之后。
+	Annotations []map[string]any
 
 	// 工具调用增量。
 	ToolCall *ToolCallDelta

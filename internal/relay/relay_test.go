@@ -557,6 +557,86 @@ func TestResponseFromResponses(t *testing.T) {
 	}
 }
 
+// 响应方向的引用标注要落到正文块上，不能丢。
+//
+// 非流式那条路以前把它丢了：relaykit 的 Responses→Chat 转换把上游
+// content[].annotations 折成 dto.Message.Annotations，而 messageFromRelaykit
+// 只读 Role / Content / ToolCalls，于是「非流式有标注」这件事在两个入口上都
+// 不成立。这条用例钉住转换层——流式那条另有用例（见 responsesadapter 与 api）。
+func TestResponseAnnotationsReachContentBlock(t *testing.T) {
+	src := &dto.OpenAIResponsesResponse{
+		ID: "resp-1",
+		Output: []dto.ResponsesOutput{{
+			Type: "message",
+			Role: "assistant",
+			Content: []dto.ResponsesOutputContent{{
+				Type: "output_text",
+				Text: "你好",
+				Annotations: []any{map[string]any{
+					"type": "url_citation", "url": "https://example.com/a",
+				}},
+			}},
+		}},
+	}
+	got, err := ResponseFromRelaykit(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Message.Content) != 1 {
+		t.Fatalf("内容块 = %d 块，期望 1 块: %+v", len(got.Message.Content), got.Message.Content)
+	}
+	block := got.Message.Content[0]
+	if block.Type != "text" || block.Text != "你好" {
+		t.Fatalf("内容块 = %+v，期望一段正文", block)
+	}
+	if len(block.Annotations) != 1 {
+		t.Fatalf("标注 = %d 条，期望 1 条: %+v", len(block.Annotations), block.Annotations)
+	}
+	// 形状照 relaykit 的转换结果断言，不是照上游那一份：它把 url_citation
+	// 折成了 {"type":"url_citation","url_citation":{…}}（chat 那套非官方扩展
+	// 的形状，见 relayconvert 的 responseAnnotationToChat）。这里钉的是
+	// 「标注到了正文块上」，而**到的是 relaykit 认的那个形状**——按上游的
+	// 扁平形状断言会对着一个真实链路里不存在的中间态。
+	if got := block.Annotations[0]["type"]; got != "url_citation" {
+		t.Errorf("标注的 type = %v，期望 url_citation", got)
+	}
+	citation, ok := block.Annotations[0]["url_citation"].(map[string]any)
+	if !ok {
+		t.Fatalf("标注里没有 url_citation 对象: %+v", block.Annotations[0])
+	}
+	if citation["url"] != "https://example.com/a" {
+		t.Errorf("引用的 url = %v，期望 https://example.com/a", citation["url"])
+	}
+}
+
+// 没有正文块时不凭空造一个去装标注。
+//
+// 纯工具调用的回答里没有正文，标注也就没有可挂的地方——补一个空正文块会让
+// 客户端看到一条并不存在的 assistant 消息。
+func TestResponseAnnotationsNeedATextBlock(t *testing.T) {
+	src := &dto.OpenAIResponsesResponse{
+		ID: "resp-1",
+		Output: []dto.ResponsesOutput{{
+			Type: "message",
+			Role: "assistant",
+			Content: []dto.ResponsesOutputContent{{
+				Type:        "output_text",
+				Text:        "",
+				Annotations: []any{map[string]any{"type": "url_citation"}},
+			}},
+		}},
+	}
+	got, err := ResponseFromRelaykit(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range got.Message.Content {
+		if len(b.Annotations) != 0 {
+			t.Errorf("没有正文时标注不该挂到 %q 块上: %+v", b.Type, b.Annotations)
+		}
+	}
+}
+
 // status=incomplete 是「停在了长度上限上」，不是失败：结束原因折成 length。
 func TestResponseFromResponsesIncomplete(t *testing.T) {
 	src := &dto.OpenAIResponsesResponse{

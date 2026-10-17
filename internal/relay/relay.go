@@ -573,7 +573,55 @@ func messageFromRelaykit(m dto.Message) (channel.Message, error) {
 			Text:      text,
 		}}
 	}
+
+	// 标注排在 tool_result 的改写**之后**：那一支会把内容整个换掉（结果消息
+	// 只剩一个块），挂在上面的标注会跟着消失。先挂后换是本文件里最容易写反
+	// 的一处顺序。
+	attachAnnotations(&out, m.Annotations)
 	return out, nil
+}
+
+// attachAnnotations 把引用标注挂到正文块上，没有标注时什么都不做。
+//
+// 标注只属于正文：它描述的是「正文的哪一段引用了哪个来源」，挂在工具调用或
+// 图片块上没有意义。而 relaykit 的 dto.Message.Annotations 是**整条消息一份**
+// （它的形状就是从上游 content[].annotations 折过来的，已经丢掉了「属于哪一段」
+// 这个信息），所以这里能给出的只是「这条消息有这批标注」。
+//
+// 挑第一个正文块，而且只挑**带文字**的那一个：空正文块（上游只给了标注、正文
+// 还没到，或者纯工具调用）不接它——那会让「标注挂在哪一段上」随上游的分片
+// 方式漂移。没有这样的块时就不挂（见函数末尾）。
+//
+// 解析不出来就返回：标注的字段集由上游决定，我们不解释它；一个不是对象的
+// 元素谈不上「一条标注」，丢掉它比让整条响应失败更接近原意——这与工具参数
+// 解析失败时的处置同一条理由（见上面的 tool_use 分支）。
+func attachAnnotations(out *channel.Message, raw json.RawMessage) {
+	if len(raw) == 0 {
+		return
+	}
+	var items []any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return
+	}
+	annotations := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		obj, ok := item.(map[string]any)
+		if !ok || len(obj) == 0 {
+			continue
+		}
+		annotations = append(annotations, obj)
+	}
+	if len(annotations) == 0 {
+		return
+	}
+	for i := range out.Content {
+		if out.Content[i].Type == "text" && out.Content[i].Text != "" {
+			out.Content[i].Annotations = annotations
+			return
+		}
+	}
+	// 没有带文字的正文块（纯工具调用的回答）：标注没有可挂的地方。不补一个
+	// 空正文块去装它——那会让客户端看到一个并不存在的正文项。
 }
 
 func fromImageBlock(block map[string]any) channel.ContentBlock {
