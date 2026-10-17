@@ -56,8 +56,10 @@ func (s *PgSource) Load(ctx context.Context) ([]Row, error) {
 // （还带说明、可改性、谁在什么时候改的）。把两者合成一个类型，读取路径
 // 就得为四列它不用的数据付出代价，而 List 那条查询是管理面的、跑得很少。
 type Entry struct {
-	Key         string
-	Value       []byte // jsonb 原文
+	Key   string
+	Value []byte // jsonb 原文
+	// Description 是库里那一列的原文，也是配置说明的唯一来源——迁移写下它，
+	// 写入路径不碰它（见 write.go 的「为什么不动 description 列」）。
 	Description string
 	Editable    bool
 	// UpdatedBy 是上一次写入的 users.id。nil 表示没有记录——迁移或手工 SQL
