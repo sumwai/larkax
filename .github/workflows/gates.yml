@@ -48,8 +48,22 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # 限流的计数落在 Redis 上，所以这个 job 里它是一份**必需品**而不是可选件：
+      # 缺了它，那几个集成用例会 t.Skip，而「跳过」在输出里与「通过」长得一样
+      # （见 LESSONS.md 第 16 条）。要它的理由与 postgres 逐字相同，所以两道都在
+      # 这里、由 .github/actions/check-integration-tests 判「真的跑了」。
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       LARKAX_DB_DSN: postgres://postgres:placeholder@localhost:5432/larkax_test?sslmode=disable
+      LARKAX_REDIS_DSN: redis://localhost:6379/0
       LARKAX_ROLE: worker
     steps:
       - uses: actions/checkout@v4

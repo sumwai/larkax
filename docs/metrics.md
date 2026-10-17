@@ -25,6 +25,8 @@ curl -s 127.0.0.1:9090/metrics
 | `larkax_billing_capped_amount_total` | counter | `protocol`, `asset` | 结算被预留上界截住的那部分**金额**，按入口协议与资产品种分。与上一条是一对：那个数次数，这个数少收了多少钱。`protocol` 同上一行；`asset` 取 `ledger.Asset` 的取值：`CNY`。**单位是最小计价单位（`money.Scale` 位定点，1e-8），不是元**——理由见下面的命名约定 |
 | `larkax_billing_unbilled_settlements_total` | counter | 无 | 未计费的结算次数：上游失败，或请求在结算之前中止 |
 | `larkax_auth_failures_total` | counter | `reason` | 认证失败被回以 401 的次数，按失败原因分。`reason` 取 `internal/auth` 的 `Reason`：`missing_credential` / `malformed_credential` / `key_not_found` / `key_disabled` / `key_revoked` / `key_inactive` / `key_expired` / `user_inactive`，外加 `unclassified` |
+| `larkax_ratelimit_exact` | gauge | 无 | RPM 限流的计数**当前**是否取自共享存储：`1` 精确（计数在 Redis 里，各实例共用一份，放行总量不超过配置值），`0` 近似（退回进程内计数，各实例各算各的，放行量偏大）。**没设置过就不输出**，所以「没有这一行」表示这个实例上没接限流器（worker 角色） |
+| `larkax_ratelimit_store_errors_total` | counter | 无 | 共享计数存储（Redis）调用失败的次数。每发生一次，就有一个判定退回进程内计数——也就是上面那个仪表变成 `0` 的原因 |
 
 ## 怎么读
 
@@ -80,6 +82,21 @@ SELECT request_id, reserved_amount, computed_amount,
 **`settlements_total{usage_source="estimated"}` 上涨。** 这笔账是按估算的用量
 收的，误差范围见 `internal/tokens` 的 `ErrorBounds`。它不该成为常态。
 
+**`ratelimit_exact` 是 0。** RPM 限流的计数退回了进程内，那一刻判定是近似的
+（各实例各算各的，放行量偏大）。**它单独看分不出两种情形，要连着
+`ratelimit_store_errors_total` 一起读**：
+
+- 仪表一直 0、那个计数器**不涨** → 这个部署本来就没配共享存储
+  （`LARKAX_REDIS_DSN` 为空，配置如此）。单实例下完全正确；多实例下总放行量
+  最高到「配置值 × 实例数」。启动日志里有一条 `warn` 说这一种。
+- 仪表翻成 0 且那个计数器**在涨** → 配了 Redis 但连不上（故障）。请求不受
+  影响（降级是有意的方向，见 [limits.md](limits.md)），但额度会松。
+  恢复之后仪表自己变回 1，不需要重启。
+
+**`ratelimit_exact` 这一行不存在。** 这个实例上没接限流器：worker 角色不接
+推理流量，也就不按 key 计数。一个「永远是 0」的仪表在这里会把「没接」说成
+「近似」，所以它没被设置过时整族不输出（见下面那条约定）。
+
 **`auth_failures_total{reason="key_expired"}` 与 `{reason="key_not_found"}` 要分开看。**
 用户报「我的 key 不能用了」时，这两种情况指向的排查动作完全相反：前者是这把 key
 到期了（续期或换一把），后者是库里根本没有这个哈希（发错了 key，或者客户端的
@@ -102,11 +119,18 @@ SELECT request_id, reserved_amount, computed_amount,
 
 ## 命名与标签约定
 
-- 名字以 `larkax_` 开头，之后是子系统（`billing`、`upstream`、`ledger`……），
-  计数器以 `_total` 结尾。
+- 名字以 `larkax_` 开头，之后是子系统（`billing`、`upstream`、`ledger`……）。
+  **计数器以 `_total` 结尾，仪表不带这个后缀**：`_total` 在 Prometheus 的
+  约定里就是「只增不减」，一个可升可降的数带上它，采集端按名字推断类型、
+  再拿 `rate()` 去算就会得出没有意义的结论。
+- **计数器只增不减，仪表可升可降**，分成两个类型（`Counter` 与 `Gauge`）
+  而不是一个带 `Set` 的计数器：一个只增的数被谁 `Set` 回去，是这里最坏的
+  一类 bug（曲线忽然回头，而「一直在涨」是看它的人唯一的判据）。
 - **标签值必须来自有限集合。** 用户 id、渠道 id、请求 id、模型名一律不做标签：
   每个取值各占一条时间序列，而序列数没有上限，采集端的内存与查询开销会跟着
   请求数一起涨。要区分渠道就用渠道**类型**，要区分上游就用上游**种类**。
+  这也是为什么「某个 key 的用量」不在指标里，而在
+  `/ratelimit/usage?key_id=…` 那条只读查询上（见 [limits.md](limits.md)）。
 - 每个指标都要有 `# HELP`，写清楚它是什么，以及什么取值算异常。
 - 时间用秒并以 `_seconds` 结尾；金额不带单位后缀时以元为单位。**唯一的例外是
   `larkax_billing_capped_amount_total`**：它按最小单位（1e-8）累加整数，因为
@@ -122,18 +146,22 @@ SELECT request_id, reserved_amount, computed_amount,
    ```go
    r.XxxTotal = r.newCounter("larkax_xxx_total", "说明")
    r.YyyTotal = r.newLabeled("larkax_yyy_total", "说明", "kind")
+   r.Zzz = r.newGauge("larkax_zzz", "说明")
    ```
 
 2. 在 `Registry` 上加对应的导出字段。**不要只声明字段、忘了登记**：那样它安静地
    不输出，与「根本没接上」长得一模一样（`TestEveryDeclaredCounterIsRegistered`
    会拦住这种写法）。
 3. 在增量点调用 `observe.Metrics.XxxTotal.Inc()`（带标签的用
-   `observe.Metrics.YyyTotal.With("值").Inc()`）。
+   `observe.Metrics.YyyTotal.With("值").Inc()`，仪表用 `.Set(n)`）。
 
 增量点**只加一行**：不要为了计数去改被计数的逻辑，也不要在计数器里做判断。
 标签值一律用常量或有限枚举，不要从请求里取。
 
 不带标签的计数器总是输出，包括值为 0 的时候——「一直是 0」本身就是要看的那个值。
-带标签的计数器在第一次自增之前没有任何序列，整族不输出。
+带标签的计数器在第一次自增之前没有任何序列，整族不输出。**仪表按第三套：
+没被 `Set` 过就不输出**——仪表上的 0 往往是一个有意义的取值（限流那个 0 是
+「近似」），所以「没设置过」必须与「值就是 0」分得开，否则一个没接仪表的进程
+会输出一行 0，看起来与「接上了、当前是 0」一模一样。
 
 最后更新上面那张清单表：它是这份文档里唯一会被采集端依赖的部分。

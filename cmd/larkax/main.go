@@ -118,8 +118,25 @@ func run() error {
 	}
 	logger.Info("配置已加载", "keys", strings.Join(values.Keys(), ","))
 
-	// 内部端点（健康检查与指标）与控制台分端口暴露：
+	// 内部端点（健康检查、指标、限流用量的只读查询）与控制台分端口暴露：
 	// 它们面向编排系统与抓取器，不应与业务入口共用同一个监听地址。
+	//
+	// 它在公共入口装好之后才建，因为其中那条查询要读的是限流器的状态，
+	// 而限流器由装配层建（见 newInternalHandler 的第二个参数）。
+	app, err := publicHandler(ctx, cfg, handle, values, logger)
+	if err != nil {
+		return err
+	}
+	// 共享计数的连接池在进程退出时释放。这里没有在途的写要等，关一次就够；
+	// 位置与数据库连接池那一处相同，都在 run 的收尾上。
+	defer func() { _ = app.Close() }()
+
+	publicSrv := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           app.Public,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
 	internalSrv := &http.Server{
 		Addr: cfg.InternalAddr,
 		Handler: newInternalHandler([]observe.ReadinessCheck{
@@ -129,36 +146,35 @@ func run() error {
 					return handle.PingContext(ctx)
 				},
 			},
-		}),
+		}, app),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	servers := []namedServer{{name: "internal", srv: internalSrv}}
-
-	public, err := publicHandler(ctx, cfg, handle, values, logger)
-	if err != nil {
-		return err
+	servers := []namedServer{
+		{name: "internal", srv: internalSrv},
+		{name: "public", srv: publicSrv},
 	}
-	publicSrv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           public,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	servers = append(servers, namedServer{name: "public", srv: publicSrv})
 
 	return serveUntilSignal(ctx, logger, shutdownTimeout, servers)
 }
 
-// newInternalHandler 装配内部监听端口的 handler：健康检查与指标。
+// newInternalHandler 装配内部监听端口的 handler：健康检查、指标，以及那条
+// 只读的限流用量查询。
 //
 // 抽成函数是为了让测试拿到**生产用的那一份**装配。写一份只给测试用的
 // 装配，测到的就只是那份替身，而「指标端点到底挂在哪个监听上」正是最该
 // 被钉住的性质之一——挂错了不会 404（公共端口的路径是全捕获的），
-// 只会安静地从另一个端口回一份 501。
-func newInternalHandler(checks []observe.ReadinessCheck) http.Handler {
+// 只会安静地从另一个端口回一份 501。限流用量那条同理，而且它更敏感：
+// 挂到公共端口上等于把内部状态交给每一个能发推理请求的人。
+//
+// app 可以为 nil（测试、以及 worker 角色）：那时限流那条路径不注册。
+func newInternalHandler(checks []observe.ReadinessCheck, app *assembly.App) http.Handler {
 	mux := http.NewServeMux()
 	observe.RegisterHealthHandlers(mux, checks)
 	observe.RegisterMetricsHandler(mux)
+	if app != nil {
+		app.RegisterInternalOps(mux)
+	}
 	return mux
 }
 
@@ -169,6 +185,11 @@ func newInternalHandler(checks []observe.ReadinessCheck) http.Handler {
 // 连库、监听端口——都不是命令行的职责。这里只负责把环境里的东西读出来
 // 交给它。
 //
+// 它返回整个 App 而不是只返回那个 handler：内部端口上有一条只读查询要读
+// 限流器的状态（见 newInternalHandler），而限流器装在 App 里。worker 角色
+// 只带回一个占位 handler，其余字段都是零值——它没有限流器，那条查询在它
+// 身上也不该存在。
+//
 // 注意它捕获一切路径，包括 /healthz。健康检查要配到 internal 端口；
 // 配到这里的实例会拿到 501 并被编排系统摘除。上了负载均衡后这是真实的
 // 误配陷阱，所以健康检查只注册在 internalMux 上。
@@ -177,7 +198,7 @@ func newInternalHandler(checks []observe.ReadinessCheck) http.Handler {
 // 监听端口，所以这个位置就等于「端口可用之前」。预热放在这里而不是
 // run 里，是因为 worker 角色在上面就返回了——它不接推理流量，也不该付
 // 这份启动成本。
-func publicHandler(ctx context.Context, cfg *config.Config, handle *sql.DB, values *settings.Values, logger *slog.Logger) (http.Handler, error) {
+func publicHandler(ctx context.Context, cfg *config.Config, handle *sql.DB, values *settings.Values, logger *slog.Logger) (*assembly.App, error) {
 	// 公共端口的形状由**角色**决定，而不是从「有没有主密钥」反推角色。
 	// 两者今天恰好等价，但把判据写成角色本身，才不会在改动 NeedsMasterKey
 	// 或增删角色时静默地换掉某个角色的行为。
@@ -185,7 +206,10 @@ func publicHandler(ctx context.Context, cfg *config.Config, handle *sql.DB, valu
 		// worker 解不开任何渠道凭证，因而装不出候选来源。它本来就不承接推理
 		// 流量，所以公共端口保持占位响应——回一个明确的 501 比让整个进程起不来
 		// 更贴合这个角色，也让部署验证仍然能确认「端口通、TLS 通、负载均衡转发通」。
-		return workerPlaceholder(), nil
+		//
+		// 也没有限流器：它不接推理流量，就没有请求要按 key 计数。这同时意味着
+		// 这个实例上没有那条只读查询（见 newInternalHandler）。
+		return &assembly.App{Public: workerPlaceholder()}, nil
 	}
 
 	if len(cfg.MasterKeys) == 0 {
@@ -222,6 +246,9 @@ func publicHandler(ctx context.Context, cfg *config.Config, handle *sql.DB, valu
 		Version:  version,
 		Executor: executor,
 		Rules:    pricing.New(handle),
+		// 共享计数（限流）用的 Redis。留空表示这个部署不启用它，那时限流
+		// 只在单实例下正确——装配层会打一条 warn 把这件事说出来。
+		RedisDSN: cfg.RedisDSN,
 	})
 	if err != nil {
 		return nil, err
@@ -229,7 +256,7 @@ func publicHandler(ctx context.Context, cfg *config.Config, handle *sql.DB, valu
 	// 计数器由装配层建好（它没有第二种实现），这里只是拿到它并预热。
 	warmVocab(ctx, app.Gateway.Counter, logger)
 	logger.Info("公共入口已装配", "snapshots", app.Snapshots.Collecting())
-	return app.Public, nil
+	return app, nil
 }
 
 // warmVocab 预热分词词表，把词表加载的成本从第一个请求挪到启动期。

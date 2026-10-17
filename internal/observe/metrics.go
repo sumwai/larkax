@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 )
 
-// 本文件是这套服务的最小指标面：手写的计数器，按 Prometheus 的文本格式暴露。
+// 本文件是这套服务的最小指标面：手写的计数器与仪表，按 Prometheus 的文本格式暴露。
 //
 // # 为什么不引一个指标库
 //
@@ -65,6 +65,49 @@ func (c *Counter) Add(n uint64) { c.v.Add(n) }
 // Value 返回当前值。它只用于测试与断言，不参与渲染之外的逻辑。
 func (c *Counter) Value() uint64 { return c.v.Load() }
 
+// Gauge 是一个可升可降的即时值。
+//
+// 与 Counter 分成两个类型，而不是给 Counter 加一个 Set：一个只增不减的数
+// 被谁 Set 回去是这里最坏的一类 bug（曲线忽然回头，而「一直涨」正是看它
+// 的人唯一的判据），分成两个类型之后那种写法根本表达不出来。
+//
+// 它**只在被设置过之后才输出**，与不带标签的计数器「总是输出、包括 0」
+// 的做法相反。理由是这里的 0 是一个有意义的取值（见 Registry.RateLimitExact），
+// 于是「没被设置过」必须与「值就是 0」分得开——分不开时，一个没有接入仪表
+// 的进程会输出一行 0，看起来与「接入了、当前是 0」一模一样，而那正是这个包
+// 要防的那种「安静地不输出」。
+type Gauge struct {
+	name string
+	// set 记录它有没有被设置过。用原子而不是普通 bool：Set 在请求路径上。
+	set atomic.Bool
+	v   atomic.Int64
+}
+
+// Set 把仪表设成 v。
+func (g *Gauge) Set(v int64) {
+	g.v.Store(v)
+	g.set.Store(true)
+}
+
+// Add 把仪表加上 n（n 可以为负）。
+func (g *Gauge) Add(n int64) {
+	// 顺序是「先加、再标记」。反过来的话，读的人会看到一个已经标记成
+	// 「设置过」、值却还是初值的仪表——那个 0 会被当成一次真实读数。
+	g.v.Add(n)
+	g.set.Store(true)
+}
+
+// Value 返回当前值。它只用于测试与断言，不参与渲染之外的逻辑。
+func (g *Gauge) Value() int64 { return g.v.Load() }
+
+// Set 过没有。没设置过时整族不输出。
+func (g *Gauge) samples() []sample {
+	if !g.set.Load() {
+		return nil
+	}
+	return []sample{{value: strconv.FormatInt(g.v.Load(), 10)}}
+}
+
 // LabeledCounter 是一族按标签区分的计数器。
 //
 // **标签值必须来自有限集合。** 用户 id、渠道 id、请求 id、模型名都不能
@@ -108,7 +151,10 @@ func (c *LabeledCounter) samples() []sample {
 
 	out := make([]sample, 0, len(c.series))
 	for key, ct := range c.series {
-		out = append(out, sample{labels: c.renderLabels(key), value: ct.v.Load()})
+		out = append(out, sample{
+			labels: c.renderLabels(key),
+			value:  strconv.FormatUint(ct.v.Load(), 10),
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].labels < out[j].labels })
 	return out
@@ -132,16 +178,24 @@ func (c *LabeledCounter) renderLabels(key string) string {
 	return b.String()
 }
 
-// sample 是一条待渲染的样本：一组标签值，加一个数值。
+// sample 是一条待渲染的样本：一组标签值，加一个已经格式化好的数值。
 type sample struct {
 	// labels 是渲染好的 {k="v"}；没有标签时为空串。
 	labels string
-	value  uint64
+	// value 是**已经格式化好的**数值文本。
+	//
+	// 存字符串而不是 uint64：这个包里现在既有只增不减的计数器（无符号），
+	// 也有可升可降的仪表（有符号）。存成无符号的话，仪表上的 -1 会被渲染成
+	// 一个巨大的正整数，那是一条看起来正常、含义完全相反的序列；而存成一个
+	// 有符号数则会把这个取舍推给计数器（它上亿的数要经过一次可能变号的转换）。
+	// 格式化只在渲染时发生一次，两边都不必猜对方是什么类型。
+	value string
 }
 
-// family 是注册表里的一条指标：名字、说明，以及怎么取它当前的样本。
+// family 是注册表里的一条指标：名字、类型、说明，以及怎么取它当前的样本。
 type family struct {
 	name    string
+	typ     string // Prometheus 的类型名：counter 或 gauge
 	help    string
 	samples func() []sample
 }
@@ -211,6 +265,27 @@ type Registry struct {
 	// 代价是「是哪一把 key」答不了，那要靠报障的人给前缀去库里定位。
 	AuthFailures *LabeledCounter
 
+	// RateLimitExact 是「RPM 限流的计数当前取自共享存储」这个信号：
+	// 1 表示精确（计数在 Redis 里，各实例共用一份，放行量等于配置值），
+	// 0 表示近似（退回进程内计数，各实例各算各的，放行量偏大）。
+	//
+	// 它是一个**仪表**而不是计数器：这个问题的答案是「现在是什么」，
+	// 而不是「发生过几次」——计数器答不了「现在」，而采集端拿 rate()
+	// 去推的次数阈值在没有流量的窗口里会断掉。
+	//
+	// 它不区分「配置里就没写共享存储」与「配了但连不上」：那两件事由
+	// RateLimitStoreErrors 分开（前者那个计数器不涨）。两个数要连着读。
+	RateLimitExact *Gauge
+
+	// RateLimitStoreErrors 是共享计数存储（Redis）调用失败的次数。
+	//
+	// 每一次因为存储不可用而退回进程内计数的判定记一次。它与
+	// RateLimitExact 是一对：仪表回答「现在准不准」，这个数回答「有没有
+	// 在失败、失败了多少次」。**仪表是 0 而它一直不动**，说明这个部署
+	// 本来就没配共享存储（配置如此）；**两者同时在动**说明配了但连不上
+	// （故障）——排查方向完全不同。
+	RateLimitStoreErrors *Counter
+
 	families []family
 }
 
@@ -231,6 +306,10 @@ func NewRegistry() *Registry {
 	r.AuthFailures = r.newLabeled("larkax_auth_failures_total",
 		"认证失败被回以 401 的次数，按失败原因分（取值见 internal/auth 的 Reason）。reason=\"unclassified\" 说明有一条 401 不是由 auth.Error 产生的，按设计不该出现。",
 		"reason")
+	r.RateLimitExact = r.newGauge("larkax_ratelimit_exact",
+		"RPM 限流的计数当前是否取自共享存储：1 表示精确（计数在 Redis 里，各实例共用一份，放行总量不超过配置值），0 表示近似（退回进程内计数，各实例各算各的，放行量偏大）。配置里没写共享存储时它一直是 0，且 store_errors 不涨；配了但连不上时两者同时在动。只有设置过之后才输出：这行不存在表示这个实例上根本没接限流器（例如 worker 角色）。")
+	r.RateLimitStoreErrors = r.newCounter("larkax_ratelimit_store_errors_total",
+		"共享计数存储（Redis）调用失败的次数。每发生一次就有一个判定退回进程内计数，也就是上面那个仪表变成 0 的原因。")
 	return r
 }
 
@@ -238,16 +317,29 @@ func (r *Registry) newCounter(name, help string) *Counter {
 	c := &Counter{name: name}
 	r.families = append(r.families, family{
 		name:    name,
+		typ:     "counter",
 		help:    help,
-		samples: func() []sample { return []sample{{value: c.v.Load()}} },
+		samples: func() []sample { return []sample{{value: strconv.FormatUint(c.v.Load(), 10)}} },
 	})
 	return c
+}
+
+func (r *Registry) newGauge(name, help string) *Gauge {
+	g := &Gauge{name: name}
+	r.families = append(r.families, family{
+		name:    name,
+		typ:     "gauge",
+		help:    help,
+		samples: g.samples,
+	})
+	return g
 }
 
 func (r *Registry) newLabeled(name, help string, labels ...string) *LabeledCounter {
 	c := &LabeledCounter{name: name, labels: labels, series: map[string]*Counter{}}
 	r.families = append(r.families, family{
 		name:    name,
+		typ:     "counter",
 		help:    help,
 		samples: c.samples,
 	})
@@ -262,22 +354,22 @@ const ContentTypeMetrics = "text/plain; version=0.0.4; charset=utf-8"
 
 // Render 按 Prometheus 文本格式写出全部指标。
 //
-// 没有任何序列的指标整族不输出：带标签的计数器在第一次自增之前没有取值，
+// 一条序列都没有的指标整族不输出：带标签的计数器在第一次自增之前没有取值，
 // 凭空输出一行 0 会让人以为它已经接上了。不带标签的计数器则总是输出，
 // 包括 0——「一直是 0」本身就是要看的那个值（见 docs/metrics.md）。
+// 仪表按它自己那一套：没被设置过就不输出（见 Gauge）。
 func (r *Registry) Render(w io.Writer) error {
 	for _, f := range r.families {
 		samples := f.samples()
 		if len(samples) == 0 {
 			continue
 		}
-		if _, err := fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n",
-			f.name, escapeHelp(f.help), f.name); err != nil {
+		if _, err := fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n",
+			f.name, escapeHelp(f.help), f.name, f.typ); err != nil {
 			return err
 		}
 		for _, s := range samples {
-			if _, err := fmt.Fprintf(w, "%s%s %s\n",
-				f.name, s.labels, strconv.FormatUint(s.value, 10)); err != nil {
+			if _, err := fmt.Fprintf(w, "%s%s %s\n", f.name, s.labels, s.value); err != nil {
 				return err
 			}
 		}

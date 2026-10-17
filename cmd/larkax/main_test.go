@@ -14,21 +14,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/internal/api"
+	"github.com/sumwai/larkax/internal/assembly"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pipeline"
+	"github.com/sumwai/larkax/internal/ratelimit"
 	"github.com/sumwai/larkax/internal/tokens"
 )
 
 // worker 角色的公共端口是占位响应，而不是装配失败：它本来就不承接推理流量，
 // 而起不来的进程连「端口通、TLS 通、负载均衡转发通」都验证不了。
 func TestWorkerRoleServesPlaceholder(t *testing.T) {
-	h, err := publicHandler(context.Background(), &config.Config{Role: config.RoleWorker}, nil, nil, nil)
+	app, err := publicHandler(context.Background(), &config.Config{Role: config.RoleWorker}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("worker 角色不该装配失败: %v", err)
 	}
+	h := app.Public
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/chat/completions", nil)
@@ -50,9 +54,9 @@ func TestWorkerRoleServesPlaceholder(t *testing.T) {
 func TestTrafficRoleWithoutMasterKeyFailsToStart(t *testing.T) {
 	for _, role := range []config.Role{config.RoleGateway, config.RoleControl} {
 		t.Run(string(role), func(t *testing.T) {
-			h, err := publicHandler(context.Background(), &config.Config{Role: role}, nil, nil, nil)
+			app, err := publicHandler(context.Background(), &config.Config{Role: role}, nil, nil, nil)
 			if err == nil {
-				t.Fatalf("%s 角色缺主密钥时应当装配失败，实际拿到 %T", role, h)
+				t.Fatalf("%s 角色缺主密钥时应当装配失败，实际拿到 %v", role, app)
 			}
 			if !strings.Contains(err.Error(), "主密钥") {
 				t.Errorf("错误信息应当说明缺的是主密钥: %v", err)
@@ -163,7 +167,7 @@ func settleOutcome() pipeline.Outcome {
 func scrape(t *testing.T) []string {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	newInternalHandler(nil).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", nil))
+	newInternalHandler(nil, nil).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("抓 /metrics 得到状态码 %d，期望 200；正文:\n%s", rec.Code, rec.Body.String())
 	}
@@ -282,7 +286,7 @@ func TestMetricsEndpointIsNotOnPublicHandler(t *testing.T) {
 
 // 健康检查与指标共用同一个内部 handler，抽函数时不能只搬走其中一个。
 func TestInternalHandlerServesHealthAndMetrics(t *testing.T) {
-	handler := newInternalHandler(nil)
+	handler := newInternalHandler(nil, nil)
 
 	for _, path := range []string{"/healthz", "/readyz", "/metrics"} {
 		t.Run(path, func(t *testing.T) {
@@ -292,6 +296,47 @@ func TestInternalHandlerServesHealthAndMetrics(t *testing.T) {
 				t.Errorf("%s 状态码 = %d，期望 200", path, rec.Code)
 			}
 		})
+	}
+}
+
+// 限流用量的只读查询挂在内部端口上，而且**只在**内部端口上。
+//
+// 这条挂错不会 404——公共端口是路径全捕获的，它只会安静地从另一个端口
+// 回一份 501（与 /metrics 同一个陷阱），而这条比 /metrics 更敏感：它答的是
+// 「某个 Key 这一分钟用了多少」，挂错了等于把它交给每一个能发推理请求的人。
+//
+// 两半都在这一条里：内部端口要 200，公共端口要 501。
+func TestRateLimitUsageIsOnInternalHandlerOnly(t *testing.T) {
+	limiter := ratelimit.New(func() time.Time { return time.Date(2026, 10, 17, 12, 0, 30, 0, time.UTC) })
+	rpm := 5
+	limiter.Allow(7, &rpm)
+
+	app := &assembly.App{RateLimiter: limiter}
+	handler := newInternalHandler(nil, app)
+
+	target := api.PathRateLimitUsage + "?key_id=7"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("内部端口上 %s 的状态码 = %d，期望 200；正文:\n%s", target, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"count":1`) {
+		t.Errorf("响应体里没有用量:\n%s", rec.Body.String())
+	}
+
+	// 公共端口：worker 角色那一份就够（它是公共端口的形状），判据是 501。
+	rec = httptest.NewRecorder()
+	workerPlaceholder().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil))
+	if rec.Code != http.StatusNotImplemented {
+		t.Errorf("公共端口上 %s 的状态码 = %d，期望 501", target, rec.Code)
+	}
+
+	// 没有限流器的实例（worker 角色）：这条路径不注册。回 404 而不是回一个
+	// 「永远是 0」的答案——后者会让查询的人以为那个实例上确实没被打过。
+	rec = httptest.NewRecorder()
+	newInternalHandler(nil, nil).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("没有限流器时 %s 的状态码 = %d，期望 404", target, rec.Code)
 	}
 }
 

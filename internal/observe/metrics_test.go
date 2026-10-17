@@ -194,12 +194,28 @@ func TestRegistryMetricNamesFollowConvention(t *testing.T) {
 	}
 
 	seen := map[string]bool{}
+	types := map[string]int{}
 	for _, f := range r.families {
 		if !strings.HasPrefix(f.name, "larkax_") {
 			t.Errorf("指标名 %q 没有 larkax_ 前缀", f.name)
 		}
-		if !strings.HasSuffix(f.name, "_total") {
-			t.Errorf("计数器 %q 没有 _total 后缀", f.name)
+		// 后缀与类型绑在一起：计数器以 _total 结尾，仪表**不**以它结尾。
+		// 两者混起来时，采集端按名字推断类型会得到错的（`_total` 在
+		// Prometheus 的约定里就是「只增不减」），而一个可升可降的数被当成
+		// 计数器，rate() 与 increase() 会给出没有意义的结论。
+		switch f.typ {
+		case "counter":
+			types["counter"]++
+			if !strings.HasSuffix(f.name, "_total") {
+				t.Errorf("计数器 %q 没有 _total 后缀", f.name)
+			}
+		case "gauge":
+			types["gauge"]++
+			if strings.HasSuffix(f.name, "_total") {
+				t.Errorf("仪表 %q 带了 _total 后缀：那个后缀在 Prometheus 的约定里是「只增不减」", f.name)
+			}
+		default:
+			t.Errorf("指标 %q 的类型是 %q，本包只声明 counter 与 gauge", f.name, f.typ)
 		}
 		if seen[f.name] {
 			t.Errorf("指标名 %q 重复了", f.name)
@@ -208,6 +224,48 @@ func TestRegistryMetricNamesFollowConvention(t *testing.T) {
 		if f.help == "" {
 			t.Errorf("指标 %q 没有说明", f.name)
 		}
+	}
+	// 两种类型都要扫到：只声明计数器时上面的 gauge 分支一次都没执行，
+	// 而「一条都没扫到」与「扫到的全对」在输出上长得一样（见 LESSONS.md 第 16 条）。
+	if types["counter"] == 0 || types["gauge"] == 0 {
+		t.Errorf("扫到 counter %d 条、gauge %d 条，两种类型都应当有", types["counter"], types["gauge"])
+	}
+}
+
+// 仪表在渲染上有两条与计数器不同的性质，都要钉住。
+//
+// 一是类型行写 gauge：写错时采集端会把它当计数器，而对一个可升可降的数
+// 用 rate() 得出的结论没有意义。二是**没设置过就整族不输出**——与不带标签的
+// 计数器「总是输出、包括 0」相反，因为这里的 0 是一个有意义的取值
+// （限流那个仪表上 0 表示「近似」），于是「没接上」与「值是 0」必须分得开。
+func TestGaugeRendersOnlyAfterBeingSet(t *testing.T) {
+	r := &Registry{}
+	g := r.newGauge("test_level", "仪表说明")
+
+	if got := render(t, r); strings.Contains(got, "test_level") {
+		t.Errorf("没设置过的仪表被输出了：\n%s", got)
+	}
+
+	g.Set(0)
+	want := "# HELP test_level 仪表说明\n# TYPE test_level gauge\ntest_level 0\n"
+	if got := render(t, r); got != want {
+		t.Errorf("设置成 0 之后渲染结果不符\n得到:\n%s\n期望:\n%s", got, want)
+	}
+
+	// 负值要按有符号渲染。把它当成无符号时 -1 会渲染成 18446744073709551615，
+	// 那是一条看起来完全正常、含义正相反的序列。
+	g.Set(-1)
+	if got := render(t, r); !strings.Contains(got, "test_level -1\n") {
+		t.Errorf("负值没有按有符号渲染：\n%s", got)
+	}
+
+	// Add 也算设置过：先把值加上去、再标记，读的人不会看到「标记了但值是初值」。
+	r2 := &Registry{}
+	g2 := r2.newGauge("test_delta", "说明")
+	g2.Add(5)
+	g2.Add(-2)
+	if got := render(t, r2); !strings.Contains(got, "test_delta 3\n") {
+		t.Errorf("Add 之后渲染结果里没有 test_delta 3：\n%s", got)
 	}
 }
 
@@ -238,6 +296,12 @@ func TestEveryDeclaredCounterIsRegistered(t *testing.T) {
 			fields++
 			if !registered[c.name] {
 				t.Errorf("字段 %s 的计数器 %q 没有登记进注册表，它不会被输出",
+					rv.Type().Field(i).Name, c.name)
+			}
+		case *Gauge:
+			fields++
+			if !registered[c.name] {
+				t.Errorf("字段 %s 的仪表 %q 没有登记进注册表，它不会被输出",
 					rv.Type().Field(i).Name, c.name)
 			}
 		}
