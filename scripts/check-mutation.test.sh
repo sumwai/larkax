@@ -22,6 +22,13 @@
 #
 # 改动 check-mutation.sh 后跑：
 #   bash scripts/check-mutation.test.sh
+#
+# 退出码：
+#   0  全部用例跑成
+#   1  有用例测出来是坏的
+#   2  有用例**没测成**——例如没能观察到锁被持有。它与 1 分开，是因为
+#      「这次没测成」与「锁真的坏了」的处置完全不同：前者重跑一次即可，
+#      后者要改代码。两者混在一起时，输出会看起来像后者（LESSONS 第 16 条）。
 
 set -uo pipefail
 
@@ -32,6 +39,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 pass=0
 fail=0
+untested=0
 
 # 脚本里钉住的版本：自测不写死它，否则改一处要动两处。
 PINNED=$(grep -m1 '^PINNED_GREMLINS_VERSION=' "$SCRIPT" | cut -d'"' -f2)
@@ -45,6 +53,8 @@ last_out="$tmp/last.txt"
 
 ok()   { pass=$((pass + 1)); }
 bad()  { echo "✗ $1"; fail=$((fail + 1)); }
+# 「没测成」不是「测出来是坏的」：它只说明这一次的判据不成立。
+not_tested() { echo "⊘ $1"; untested=$((untested + 1)); }
 
 # ── 夹具：gremlins 的 `unleash --help` ────────────────────────────────────
 #
@@ -163,13 +173,22 @@ EOF
   chmod +x "$path"
 }
 
-# 跑得慢的桩件：用来在第一个实例持锁期间发第二个实例。
-make_gremlins_slow() {
-  local path="$1" secs="$2"
+# 持锁直到用例放行的桩件：用来在第一个实例持锁期间发第二个实例。
+#
+# 持锁窗口由 $RELEASE_FILE 控制，而**不是一个猜出来的秒数**：负载高时
+# fork/exec 会被推迟，靠 sleep 赌窗口在机器忙的时候会让第二个实例撞上已经
+# 释放的锁，于是用例假红。带一个 60 秒兜底，避免用例意外退出后留下孤儿进程。
+make_gremlins_blocking() {
+  local path="$1"
   {
     stub_head
-    cat <<EOF
-sleep $secs
+    cat <<'EOF'
+# 桩件：一直持着锁，直到用例创建 $RELEASE_FILE 放行
+i=0
+while [ ! -e "$RELEASE_FILE" ] && [ "$i" -lt 600 ]; do
+  sleep 0.1
+  i=$((i + 1))
+done
 echo "Killed: 5, Lived: 2, Not covered: 1"
 echo "Timed out: 0, Not viable: 0, Skipped: 0"
 echo "Test efficacy: 71.43%"
@@ -215,6 +234,37 @@ run() {
 }
 
 dump() { sed 's/^/    | /' "$last_out" | tail -6; }
+
+# wait_lock_held <第一个实例的日志> <它的 PID> <最多等多少拍，每拍 0.1s>
+#
+# 判据是「**真的观察到**锁被持有」，不是「等了多久」。返回：
+#   0  观察到了，可以往下走
+#   2  没观察到（超时，或第一个实例在此之前就退出了）——这次没测成，
+#      不能据此判断锁是好是坏
+#
+# 观察的是持锁方自己打的那行「已拿到锁」，**不是从外面用 flock 去探**：
+# 探锁本身要抢同一把锁，负载高时探测方反而先拿到，被测实例自己被判
+# 「另一个实例正在跑」——那会把「没测成」伪装成「锁坏了」，正是本条要修的东西。
+#
+# 只等固定时长而不记结果，是本条用例原先会反的原因：负载高时第一个实例的
+# fork/exec 被推迟到等待窗口之后，窗口耗尽后第二个实例反而先拿到锁，于是
+# 「第二个拒绝了」与「第一个跑完了」两个断言同时颠倒，看起来像锁坏了。
+wait_lock_held() {
+  local log="$1" pid="$2" max="$3" waited=0
+  while [ "$waited" -lt "$max" ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "没测成：第一个实例（PID $pid）在拿到锁之前就退出了。"
+      return 2
+    fi
+    if grep -q '已拿到锁' "$log" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  echo "没测成：等了 $((max * 100)) 毫秒，没有观察到锁被持有。"
+  return 2
+}
 
 # ── 桩件 ──────────────────────────────────────────────────────────────────
 
@@ -310,38 +360,79 @@ grep -q '认不出' "$last_out" || bad "无法解析的输出 —— 应报出�
 # 9. 两个实例同时跑：第二个必须拒绝执行。
 #    并行会让超时判据失真（两个实例各自固定 workers=1，机器上照样是 2 个 go test），
 #    同一份代码会给出两个不同的分数——所以这里宁可拒绝，也不一起跑。
+#
+#    **这条只在机器负载高时会反**：第一个实例的 fork/exec 被推迟到等待窗口之后，
+#    第二个实例反而先拿到锁，于是两个断言同时颠倒，看起来像「锁坏了」。所以：
+#      - 等的是「真的观察到锁被持有」（wait_lock_held），不是猜一个时长；
+#      - 观察不到就报「没测成」（退出码 2），而不是继续往下让断言互相颠倒；
+#      - 第一个实例的持锁期由 RELEASE_FILE 控制，第二个实例的发射时点因此
+#        不依赖 sleep 的长短。
+#    第二个实例用一个快桩件：锁若真的坏了，它跑完就退出，用例不会卡在慢桩件上。
 stub_par="$tmp/gremlins-par"
-make_gremlins_slow "$stub_par" 2
+stub_par_fast="$tmp/gremlins-par-fast"
+make_gremlins_blocking "$stub_par"
+make_gremlins "$stub_par_fast" 5 2 0 "71.43%"
 lock_par="$tmp/lock-par"
+release_par="$tmp/par-release"
+rm -f "$release_par"
 out_par1="$tmp/par1.txt"
 out_par2="$tmp/par2.txt"
 (
-  LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_par" GREMLINS_VERSION="$PINNED" LOCK_FILE="$lock_par" \
+  RELEASE_FILE="$release_par" LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_par" GREMLINS_VERSION="$PINNED" LOCK_FILE="$lock_par" \
     bash "$SCRIPT" internal/money >"$out_par1" 2>&1
 ) &
 bg=$!
-# 等锁真的被持有（文件出现不等于锁已拿到），再发第二个实例
-waited=0
-while [ "$waited" -lt 60 ]; do
-  if command -v flock >/dev/null 2>&1; then
-    flock -n "$lock_par" true 2>/dev/null || break   # 拿不到 = 已经有人持着
+if wait_lock_held "$out_par1" "$bg" 60; then
+  LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_par_fast" GREMLINS_VERSION="$PINNED" LOCK_FILE="$lock_par" \
+    bash "$SCRIPT" internal/money >"$out_par2" 2>&1
+  rc2=$?
+  : > "$release_par"        # 放行第一个实例
+  wait "$bg"
+  rc1=$?
+  if [ "$rc2" -eq 3 ]; then ok; else bad "第二个实例 —— 应拒绝执行（退出码 3），实际 $rc2"; sed 's/^/    | /' "$out_par2" | tail -6; fi
+  grep -q '另一个实例正在跑' "$out_par2" || bad "第二个实例 —— 应说明是「另一个实例正在跑」"
+  grep -q '失真' "$out_par2" || bad "第二个实例 —— 应说明并行会让超时判据失真"
+  # 先发的那个照常跑完：锁只挡并发的第二个，不影响正常的那个
+  if [ "$rc1" -eq 0 ]; then ok; else bad "第一个实例 —— 应正常跑完，实际 $rc1"; sed 's/^/    | /' "$out_par1" | tail -6; fi
+else
+  # 没观察到锁被持有：这次没测成。先把第一个实例放行并收掉，再单独记一笔。
+  : > "$release_par"
+  wait "$bg"
+  rc1=$?
+  not_tested "两个实例抢锁 —— 没能观察到锁被持有（第一个实例退出码 $rc1）。这次没测成，不能据此判断锁是好是坏。"
+fi
+
+# 9b. 观察不到锁时的两条分支本身也要钉住：一条守不住它的用例，
+#     会把「没测成」重新混回「锁坏了」（LESSONS 第 23 条）。
+#     (a) 后台进程还活着但从不碰锁 → 等满窗口后报没测成；
+#     (b) 后台进程提前退出 → 立刻报没测成。
+sleep 5 & never=$!
+: > "$tmp/log-never"
+if wait_lock_held "$tmp/log-never" "$never" 3 >"$last_out" 2>&1; then
+  bad "没观察到锁（进程还在）—— 应报没测成，实际返回 0"
+else
+  rc=$?
+  if [ "$rc" -eq 2 ] && grep -q '没测成' "$last_out"; then
+    ok
   else
-    [ -e "$lock_par.d" ] && break
+    bad "没观察到锁（进程还在）—— 应返回 2 并说明没测成，实际 $rc"
   fi
-  sleep 0.1
-  waited=$((waited + 1))
-done
-sleep 0.2
-LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_par" GREMLINS_VERSION="$PINNED" LOCK_FILE="$lock_par" \
-  bash "$SCRIPT" internal/money >"$out_par2" 2>&1
-rc2=$?
-wait "$bg"
-rc1=$?
-if [ "$rc2" -eq 3 ]; then ok; else bad "第二个实例 —— 应拒绝执行（退出码 3），实际 $rc2"; sed 's/^/    | /' "$out_par2" | tail -6; fi
-grep -q '另一个实例正在跑' "$out_par2" || bad "第二个实例 —— 应说明是「另一个实例正在跑」"
-grep -q '失真' "$out_par2" || bad "第二个实例 —— 应说明并行会让超时判据失真"
-# 先发的那个照常跑完：锁只挡并发的第二个，不影响正常的那个
-if [ "$rc1" -eq 0 ]; then ok; else bad "第一个实例 —— 应正常跑完，实际 $rc1"; sed 's/^/    | /' "$out_par1" | tail -6; fi
+fi
+kill "$never" 2>/dev/null
+wait "$never" 2>/dev/null
+( exit 1 ) & dead=$!
+wait "$dead" 2>/dev/null       # 先回收，确保 kill -0 看到的是「已退出」而不是僵尸
+if wait_lock_held "$tmp/log-dead" "$dead" 3 >"$last_out" 2>&1; then
+  bad "第一个实例提前退出 —— 应报没测成，实际返回 0"
+else
+  rc=$?
+  if [ "$rc" -eq 2 ] && grep -q '在拿到锁之前就退出' "$last_out"; then
+    ok
+  else
+    bad "第一个实例提前退出 —— 应返回 2 并说明它已经退出，实际 $rc"
+  fi
+fi
+wait "$dead" 2>/dev/null
 
 # 10. gremlins 不在 PATH：要给出安装提示，而不是别的错误。
 #     用一个确定不存在的名字，避免依赖运行环境里有没有装 gremlins。
@@ -554,5 +645,6 @@ grep -q 'default true' "$last_out" || bad "一个默认变异器都没有 ——
 # ── 结果 ──────────────────────────────────────────────────────────────────
 
 echo
-echo "通过 $pass，失败 $fail"
+echo "通过 $pass，失败 $fail，没测成 $untested"
 [ "$fail" -eq 0 ] || exit 1
+[ "$untested" -eq 0 ] || exit 2
