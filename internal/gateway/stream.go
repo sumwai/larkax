@@ -123,7 +123,8 @@ func (g *Gateway) routeStream(ctx context.Context, upstream *channel.Request, ca
 		res, err := g.Router.ChatStream(ctx, g.Executor, upstream, candidates, canonicalModel)
 		return res, streamPlacementOf(res), err
 	}
-	plan := g.Router.Select(candidates, canonicalModel)
+	// 与 routeChat 同一处、同一个理由：这条路上本层自己筛。
+	plan := g.Router.Select(candidates, canonicalModel, route.NeedsOf(upstream))
 	pin, err := hooks.OnRoute(ctx, plan.Candidates)
 	if err != nil {
 		return nil, placement{}, err

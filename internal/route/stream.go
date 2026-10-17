@@ -58,7 +58,7 @@ var ErrOutputStarted = errors.New("流已开始输出，不能换渠道")
 // 而上游可能已经为这些 token 计了费。以「上游是否接受请求」为界，
 // 边界清晰且不产生已计费却被丢弃的数据。
 func (r *Router) ChatStream(ctx context.Context, exec StreamExecutor, req *channel.Request, candidates []Candidate, canonicalModel string) (*StreamResult, error) {
-	return r.ChatStreamPlan(ctx, exec, req, r.Select(candidates, canonicalModel), 0)
+	return r.ChatStreamPlan(ctx, exec, req, r.Select(candidates, canonicalModel, NeedsOf(req)), 0)
 }
 
 // ChatStreamPlan 是流式那条路上的 ChatPlan：按一份已经算好的选路结果执行，
@@ -75,7 +75,7 @@ func (r *Router) ChatStreamPlan(ctx context.Context, exec StreamExecutor, req *c
 
 func (r *Router) chatStreamWithPlan(ctx context.Context, exec StreamExecutor, req *channel.Request, plan Plan) (*StreamResult, error) {
 	if len(plan.Candidates) == 0 {
-		return nil, &Errors{}
+		return nil, plan.emptyError()
 	}
 
 	result := &StreamResult{}

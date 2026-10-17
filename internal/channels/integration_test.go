@@ -4,14 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/pressly/goose/v3"
 
+	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/migrate"
@@ -439,7 +442,7 @@ func TestCandidatesRollupSignalsAffectOrdering(t *testing.T) {
 		t.Errorf("有数据的候选应更高：%v vs %v", r.Score(a), r.Score(b))
 	}
 
-	plan := r.Select(got, model)
+	plan := r.Select(got, model, route.Needs{})
 	if len(plan.Candidates) != 2 {
 		t.Fatalf("选路结果 %d 个，期望 2；排除原因 %+v", len(plan.Candidates), plan.Excluded)
 	}
@@ -992,5 +995,279 @@ func TestMigrateSoftDeleteRoundTrips(t *testing.T) {
 	}
 	if up != before {
 		t.Errorf("往返之后的版本 = %d，期望回到 %d", up, before)
+	}
+}
+
+// ── 目录判据 ────────────────────────────────────────────────────────────
+//
+// 选路要按模型目录声明的能力与上限筛候选（见 route.Candidate.Profile）。
+// 这一组用例钉的是**那份数据真的从库里出来了**，以及它与「没有这条记录」
+// 分得开——后者是放行，前者才是判据。
+
+// insertModelCatalog 插一条规范模型。
+//
+// 两个上限收 any：nil 表示库里是 NULL，也就是「未知」——与「写了 0」
+// 在读侧是同一个值（列允许为空，查询里套了 COALESCE）。
+func insertModelCatalog(t *testing.T, db *sql.DB, name string,
+	tools, vision, reasoning bool, contextLimit, outputLimit any) {
+	t.Helper()
+	_, err := db.ExecContext(context.Background(), `
+		INSERT INTO model_catalog
+			(canonical_name, display_name, supports_tools, supports_vision,
+			 supports_reasoning, context_limit, output_limit)
+		VALUES ($1, $1, $2, $3, $4, $5, $6)`,
+		name, tools, vision, reasoning, contextLimit, outputLimit)
+	if err != nil {
+		t.Fatalf("插入规范模型失败: %v", err)
+	}
+}
+
+// fakeCatalog 记下读目录的次数，并可以造出「读不出来」与「没有这条记录」。
+// 正常路径转给真实现，所以它证明的仍然是真库上跑出来的结果。
+type fakeCatalog struct {
+	inner  modelCatalog
+	calls  int
+	models []string
+	err    error
+}
+
+func (f *fakeCatalog) Constraints(ctx context.Context, canonicalName string) (catalog.Constraints, error) {
+	f.calls++
+	f.models = append(f.models, canonicalName)
+	if f.err != nil {
+		return catalog.Constraints{}, f.err
+	}
+	return f.inner.Constraints(ctx, canonicalName)
+}
+
+func TestCandidatesCarryCatalogProfile(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	insertChannel(t, db, sealer, channelSpec{model: model})
+	insertModelCatalog(t, db, model, true, false, true, 200000, 8192)
+
+	got, err := New(db, sealer).Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("候选数 = %d，期望 1", len(got))
+	}
+
+	p := got[0].Profile
+	if p == nil {
+		t.Fatal("目录里有这条记录，Profile 不该是 nil")
+	}
+	if !p.Tools || p.Vision || !p.Reasoning {
+		t.Errorf("能力 = tools:%v vision:%v reasoning:%v，期望 true/false/true",
+			p.Tools, p.Vision, p.Reasoning)
+	}
+	if p.ContextLimit != 200000 || p.OutputLimit != 8192 {
+		t.Errorf("上限 = %d/%d，期望 200000/8192", p.ContextLimit, p.OutputLimit)
+	}
+}
+
+// 目录里没有这个模型 = 未知 = 放行，而不是「什么都不支持」。
+//
+// 这是最常见的开始状态：渠道先接上了，采集还没跑到。按「不支持」处理会让
+// 整批模型在那一刻用不了。
+func TestCandidatesWithoutCatalogRowAreUnknown(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	insertChannel(t, db, sealer, channelSpec{model: model})
+
+	got, err := New(db, sealer).Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("候选数 = %d，期望 1", len(got))
+	}
+	if got[0].Profile != nil {
+		t.Errorf("目录里没有这条记录时 Profile 应是 nil，实际 %+v", got[0].Profile)
+	}
+}
+
+// 读目录失败时整次报错，不降级成「未知」——降级会让一次查询故障看起来
+// 与「这个部署没有目录判据」一模一样。
+func TestCandidatesFailWhenCatalogReadFails(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	insertChannel(t, db, sealer, channelSpec{model: model})
+
+	src := New(db, sealer)
+	src.catalog = &fakeCatalog{inner: src.catalog, err: errors.New("库挂了")}
+
+	got, err := src.Candidates(context.Background(), model)
+	if err == nil {
+		t.Fatal("读目录失败时应报错")
+	}
+	if got != nil {
+		t.Errorf("报错时不该交回候选: %+v", got)
+	}
+	if !strings.Contains(err.Error(), model) {
+		t.Errorf("错误里要带上模型名，实际 %v", err)
+	}
+}
+
+// 「没有这条记录」是数据层的一个正常答案，不是错误：它整条链路上都要
+// 变成 nil（未知）而不是向上冒。
+func TestCandidatesTreatMissingModelAsUnknown(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	insertChannel(t, db, sealer, channelSpec{model: model})
+
+	src := New(db, sealer)
+	src.catalog = &fakeCatalog{inner: src.catalog,
+		err: fmt.Errorf("%w：%q", catalog.ErrModelNotFound, model)}
+
+	got, err := src.Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if len(got) != 1 || got[0].Profile != nil {
+		t.Errorf("候选 = %+v，期望一条、Profile 为 nil", got)
+	}
+}
+
+// 目录声明是模型级的：一次取候选只读它一次，与候选数无关；一个候选都没有
+// 时压根不读。
+//
+// 这条路径在每条请求上：多出来的往返必须是有界的，而下界是零。
+func TestCandidatesReadCatalogOncePerCall(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	insertChannel(t, db, sealer, channelSpec{model: model, extraModels: []string{"x-" + model}})
+	insertChannel(t, db, sealer, channelSpec{model: model})
+	insertModelCatalog(t, db, model, true, true, true, nil, nil)
+
+	src := New(db, sealer)
+	fake := &fakeCatalog{inner: src.catalog}
+	src.catalog = fake
+
+	got, err := src.Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("候选数 = %d，期望 2", len(got))
+	}
+	if fake.calls != 1 {
+		t.Errorf("两个候选时读了 %d 次目录，期望 1 次", fake.calls)
+	}
+
+	// 没有候选的模型：这次请求接下来要报「没有可用的渠道」，多读一次
+	// 只会多一个失败点。
+	if _, err := src.Candidates(context.Background(), uniqueModel()); err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	if fake.calls != 1 {
+		t.Errorf("没有候选时也读了目录（共 %d 次），期望仍是 1 次", fake.calls)
+	}
+}
+
+// 从库到选路的整条链：目录说这个模型不支持工具，带工具的请求就选不到它，
+// 而且理由是「模型目录」。
+func TestCatalogProfileFiltersCandidateInRoute(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	insertChannel(t, db, sealer, channelSpec{model: model})
+	insertModelCatalog(t, db, model, false, false, false, 1000, nil)
+
+	got, err := New(db, sealer).Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+
+	r := &route.Router{}
+	// 不带工具的请求照旧可走：筛的是「这次请求要什么」，不是「这个模型不好」。
+	if plan := r.Select(got, model, route.Needs{}); len(plan.Candidates) != 1 {
+		t.Errorf("不带工具时应当能选到，排除原因 %+v", plan.Excluded)
+	}
+
+	plan := r.Select(got, model, route.Needs{Tools: true, InputTokens: 900, MaxOutputTokens: 200})
+	if len(plan.Candidates) != 0 {
+		t.Fatalf("带工具的请求不该选到它，实际 %d 个候选", len(plan.Candidates))
+	}
+	if len(plan.Excluded) != 1 || !plan.Excluded[0].Unsupported {
+		t.Fatalf("排除记录 = %+v，期望一条目录判据", plan.Excluded)
+	}
+	if !strings.Contains(plan.Excluded[0].Reason, "模型目录") {
+		t.Errorf("排除理由要指向模型目录，实际 %q", plan.Excluded[0].Reason)
+	}
+}
+
+// BenchmarkCandidatePath 量热路径上这次改动加了多少：目录声明那条查询。
+//
+// 它不是 CI 的一部分（`go test` 默认不跑基准），改动这条路径时手动跑：
+//
+//	go test -run XXX -bench BenchmarkCandidatePath -benchtime 200x ./internal/channels/
+func BenchmarkCandidatePath(b *testing.B) {
+	db := testdb.Open(b)
+	key := make([]byte, config.KeySize)
+	for i := range key {
+		key[i] = 0x42
+	}
+	sealer, err := credential.NewSealer([]config.MasterKey{{ID: "bench", Key: key}})
+	if err != nil {
+		b.Fatalf("构造 Sealer 失败: %v", err)
+	}
+
+	model := "bench-" + itoa(nextID())
+	insertChannelB(b, db, sealer, model)
+	insertModelCatalogB(b, db, model)
+
+	src := New(db, sealer)
+	ctx := context.Background()
+
+	b.Run("取候选（含目录声明）", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if _, err := src.Candidates(ctx, model); err != nil {
+				b.Fatalf("Candidates 出错: %v", err)
+			}
+		}
+	})
+	b.Run("目录声明", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if _, err := src.catalog.Constraints(ctx, model); err != nil {
+				b.Fatalf("Constraints 出错: %v", err)
+			}
+		}
+	})
+}
+
+func insertChannelB(b *testing.B, db *sql.DB, sealer *credential.Sealer, model string) {
+	b.Helper()
+	sealed, err := sealer.Seal([]byte("test-key-placeholder"))
+	if err != nil {
+		b.Fatalf("封装凭证失败: %v", err)
+	}
+	_, err = db.ExecContext(context.Background(), `
+		INSERT INTO channels
+			(owner_user_id, name, type, base_url, credential_enc,
+			 status, models, weight, priority, setting)
+		VALUES (NULL, $1, 'openai-compatible', 'https://api.example.com/v1', $2,
+		        'enabled', $3, 1, 0, '{}'::jsonb)`,
+		"bench-"+itoa(nextID()), sealed, []string{model})
+	if err != nil {
+		b.Fatalf("插入渠道失败: %v", err)
+	}
+}
+
+func insertModelCatalogB(b *testing.B, db *sql.DB, model string) {
+	b.Helper()
+	_, err := db.ExecContext(context.Background(), `
+		INSERT INTO model_catalog
+			(canonical_name, display_name, supports_tools, supports_vision,
+			 supports_reasoning, context_limit, output_limit)
+		VALUES ($1, $1, true, true, true, 200000, 8192)`, model)
+	if err != nil {
+		b.Fatalf("插入规范模型失败: %v", err)
 	}
 }

@@ -36,7 +36,7 @@ func TestChatPlanPinsChannelToFront(t *testing.T) {
 
 	pinned := &fakeExecutor{results: map[int64]error{}, resp: &channel.Response{UpstreamModel: "m"}}
 	r := seededRouter(1)
-	plan := r.Select(cands, "m")
+	plan := r.Select(cands, "m", Needs{})
 	res, err := r.ChatPlan(context.Background(), pinned, req(), plan, 2)
 	if err != nil {
 		t.Fatalf("出错: %v", err)
@@ -55,7 +55,7 @@ func TestChatPlanZeroPinKeepsKernelOrder(t *testing.T) {
 	r := seededRouter(1)
 
 	exec := &fakeExecutor{results: map[int64]error{}, resp: &channel.Response{UpstreamModel: "m"}}
-	if _, err := r.ChatPlan(context.Background(), exec, req(), r.Select(cands, "m"), 0); err != nil {
+	if _, err := r.ChatPlan(context.Background(), exec, req(), r.Select(cands, "m", Needs{}), 0); err != nil {
 		t.Fatalf("出错: %v", err)
 	}
 	if len(exec.calls) != 1 || exec.calls[0] != 1 {
@@ -79,7 +79,7 @@ func TestChatPlanPinnedChannelStillFailsOver(t *testing.T) {
 	}
 	r := seededRouter(1)
 
-	res, err := r.ChatPlan(context.Background(), exec, req(), r.Select(cands, "m"), 3)
+	res, err := r.ChatPlan(context.Background(), exec, req(), r.Select(cands, "m", Needs{}), 3)
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestChatPlanPinOutsideCandidatesLeavesOrderAlone(t *testing.T) {
 	r := seededRouter(1)
 
 	exec := &fakeExecutor{results: map[int64]error{}, resp: &channel.Response{UpstreamModel: "m"}}
-	res, err := r.ChatPlan(context.Background(), exec, req(), r.Select(cands, "m"), 99)
+	res, err := r.ChatPlan(context.Background(), exec, req(), r.Select(cands, "m", Needs{}), 99)
 	if err != nil {
 		t.Fatalf("候选集之外的 pin 不该让请求失败: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestChatPlanCannotPinAnExcludedCandidate(t *testing.T) {
 		candidate(2, "m", withPriority(10), withQuota(quotaLeft(0))),
 	}
 	r := seededRouter(1)
-	plan := r.Select(cands, "m")
+	plan := r.Select(cands, "m", Needs{})
 	if len(plan.Candidates) != 1 || plan.Candidates[0].Channel.ID != 1 {
 		t.Fatalf("夹具不对：额度耗尽的 2 号该被筛掉，plan = %+v", plan.Candidates)
 	}
@@ -193,7 +193,7 @@ func TestChatStreamPlanPinsChannelToFront(t *testing.T) {
 	}
 
 	pinned := &fakeStreamExecutor{results: map[int64]error{}}
-	res, err := r.ChatStreamPlan(context.Background(), pinned, req(), r.Select(cands, "m"), 2)
+	res, err := r.ChatStreamPlan(context.Background(), pinned, req(), r.Select(cands, "m", Needs{}), 2)
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}

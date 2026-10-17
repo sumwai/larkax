@@ -601,7 +601,10 @@ func (g *Gateway) routeChat(ctx context.Context, upstream *channel.Request, cand
 		res, err := g.Router.Chat(ctx, g.Executor, upstream, candidates, canonicalModel)
 		return res, placementOf(res), err
 	}
-	plan := g.Router.Select(candidates, canonicalModel)
+	// 这条路上本层自己筛（不走 Router.Chat），所以判据要显式给一遍：
+	// 与另一条路上的 route.Chat 用的是同一个 NeedsOf，插件看到的就是
+	// 内核会执行的那一份候选。
+	plan := g.Router.Select(candidates, canonicalModel, route.NeedsOf(upstream))
 	pin, err := hooks.OnRoute(ctx, plan.Candidates)
 	if err != nil {
 		// 阻断型插件失败：这次请求失败。一个候选都没试过，也没有任何

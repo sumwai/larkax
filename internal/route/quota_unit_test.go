@@ -236,7 +236,7 @@ func TestSelectNoLongerTreatsStaleQuotaAsFresh(t *testing.T) {
 			justProbed := candidate(1, "m", withQuota(withConfidence(tc.q, fresh)))
 			longAgo := candidate(2, "m", withQuota(withConfidence(tc.q, stale)))
 
-			plan := seededRouter(1).Select([]Candidate{longAgo, justProbed}, "m")
+			plan := seededRouter(1).Select([]Candidate{longAgo, justProbed}, "m", Needs{})
 			if len(plan.Candidates) != 2 {
 				t.Fatalf("候选数 = %d，期望 2——降权不是排除", len(plan.Candidates))
 			}
@@ -315,7 +315,7 @@ func TestSelectIgnoresQuotaAcrossUnits(t *testing.T) {
 		withCost(1),
 		withQuota(quotaIn(0.1, "money")))
 
-	plan := seededRouter(1).Select([]Candidate{expensive, cheap}, "m")
+	plan := seededRouter(1).Select([]Candidate{expensive, cheap}, "m", Needs{})
 	if len(plan.Candidates) != 2 {
 		t.Fatalf("候选数 = %d，期望 2", len(plan.Candidates))
 	}
@@ -332,7 +332,7 @@ func TestSelectComparesQuotaWithinSameUnit(t *testing.T) {
 	scarce := candidate(1, "m", withQuota(quotaIn(0.1, "money")))
 	plenty := candidate(2, "m", withQuota(quotaIn(10_000, "money")))
 
-	plan := seededRouter(1).Select([]Candidate{plenty, scarce}, "m")
+	plan := seededRouter(1).Select([]Candidate{plenty, scarce}, "m", Needs{})
 	if got := plan.Candidates[0].Channel.ID; got != 1 {
 		t.Errorf("排在第一的是渠道 %d，期望 1（同单位时余量少的先选）", got)
 	}
@@ -396,7 +396,7 @@ func TestSelectExcludesObservedWithoutValue(t *testing.T) {
 	observed := candidate(1, "m", withQuota(quotaObservedNoValue()))
 	healthy := candidate(2, "m", withQuota(quotaLeft(100)))
 
-	plan := seededRouter(1).Select([]Candidate{observed, healthy}, "m")
+	plan := seededRouter(1).Select([]Candidate{observed, healthy}, "m", Needs{})
 	if len(plan.Candidates) != 1 || plan.Candidates[0].Channel.ID != 2 {
 		t.Fatalf("候选集 = %v，期望只剩渠道 2", plan.Candidates)
 	}
@@ -413,7 +413,7 @@ func TestSelectKeepsNeverObservedQuota(t *testing.T) {
 	never := candidate(1, "m", withQuota(quota.State{}))
 	money := candidate(2, "m", withQuota(quotaIn(10, "money")))
 
-	plan := seededRouter(1).Select([]Candidate{never, money}, "m")
+	plan := seededRouter(1).Select([]Candidate{never, money}, "m", Needs{})
 	if len(plan.Candidates) != 2 {
 		t.Fatalf("候选数 = %d，期望 2——查不到额度不等于没有额度", len(plan.Candidates))
 	}

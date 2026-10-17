@@ -1371,3 +1371,70 @@ func TestDeleteModelWhenUnreferenced(t *testing.T) {
 		t.Errorf("err = %v，期望 ErrModelNotFound", err)
 	}
 }
+
+// ── 选路判据的读面 ──────────────────────────────────────────────────────
+
+// 热路径那条读面：能力矩阵与目录里判上限用的那两列。
+//
+// 用写入面（Admin.Create）造数据再读回来：两处对同一套列的假设是否一致，
+// 只有「写一遍再读一遍」能证明。
+func TestConstraintsRoundTrip(t *testing.T) {
+	db := testDB(t)
+	name := uniqueName("model")
+	if _, err := NewAdmin(db).Create(context.Background(), CreateModelRequest{
+		CanonicalName: name,
+		DisplayName:   name,
+		ContextLimit:  200000,
+		OutputLimit:   8192,
+		Capabilities:  Capabilities{Tools: true, Vision: true, Reasoning: true},
+	}); err != nil {
+		t.Fatalf("Create 出错: %v", err)
+	}
+
+	got, err := New(db).Constraints(context.Background(), name)
+	if err != nil {
+		t.Fatalf("Constraints 出错: %v", err)
+	}
+	if !got.Capabilities.Tools || !got.Capabilities.Vision || !got.Capabilities.Reasoning {
+		t.Errorf("能力 = %+v，期望三项都为真", got.Capabilities)
+	}
+	if got.Capabilities.Audio || got.Capabilities.Cache || got.Capabilities.Batch {
+		t.Errorf("没勾的三项不该为真: %+v", got.Capabilities)
+	}
+	if got.ContextLimit != 200000 || got.OutputLimit != 8192 {
+		t.Errorf("上限 = %d/%d，期望 200000/8192", got.ContextLimit, got.OutputLimit)
+	}
+}
+
+// 没填的两个上限读出来是 0 = **未知**，选路据此放行（见 internal/route 的
+// ModelProfile）。能力列相反：`NOT NULL DEFAULT false`，读出来的 false 是
+// 「不支持」——这一行的六项都是 false，而那两个上限是 0，两者在选路里的
+// 处置正好相反，这一条用例把这件事钉在库里。
+func TestConstraintsUnsetLimitsAreZero(t *testing.T) {
+	db := testDB(t)
+	name := uniqueName("model")
+	seedModel(t, db, name)
+
+	got, err := New(db).Constraints(context.Background(), name)
+	if err != nil {
+		t.Fatalf("Constraints 出错: %v", err)
+	}
+	if got.ContextLimit != 0 || got.OutputLimit != 0 {
+		t.Errorf("没填的上限读出来 = %d/%d，期望 0/0", got.ContextLimit, got.OutputLimit)
+	}
+	if got.Capabilities.Tools || got.Capabilities.Vision || got.Capabilities.Reasoning {
+		t.Errorf("没写过能力列的行应当全是 false: %+v", got.Capabilities)
+	}
+}
+
+// 目录里没有这个模型：ErrModelNotFound，与「查询失败」分开——调用方对前者
+// 放行、对后者报错（见 internal/channels 的 profile）。
+func TestConstraintsMissingModel(t *testing.T) {
+	db := testDB(t)
+
+	_, err := New(db).Constraints(context.Background(), uniqueName("model"))
+
+	if !errors.Is(err, ErrModelNotFound) {
+		t.Errorf("err = %v，期望 ErrModelNotFound", err)
+	}
+}
