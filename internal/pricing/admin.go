@@ -155,7 +155,7 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 	}
 
 	// 第一版的改动人就是建它的人：取值来源是 CreateRequest.CreatedBy，
-	// 不需要调用方额外提供任何东西。它今天多半落成 NULL——CLI 的 price add
+	// 不需要调用方额外提供任何东西。它今天多半落成 NULL——CLI 的 price create
 	// 不带操作人——但那是「没有人可记」，与「记了一个没做过这件事的人」
 	// 是两回事，所以这里不兜一个编出来的值。
 	if err = insertRuleVersion(ctx, tx, id, rule.Expr, rule.CreatedBy); err != nil {

@@ -1712,7 +1712,7 @@ func TestExistingFalseCapabilityStaysDeclared(t *testing.T) {
 	}
 
 	// 管理面那条读面读到的必须是同一份结论：两处对同一套列的假设不一致时，
-	// 「larkaxctl model show 说支持、选路说不支持」就是这么来的。
+	// 「larkaxctl model get 说支持、选路说不支持」就是这么来的。
 	model, err := New(db).Model(context.Background(), name)
 	if err != nil {
 		t.Fatalf("Model 出错: %v", err)
