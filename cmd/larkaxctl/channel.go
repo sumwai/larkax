@@ -635,22 +635,31 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo, withDeleted boo
 	}
 
 	tw := newTableWriter(w)
+	p := newPalette(w)
 	if withDeleted {
-		_, _ = fmt.Fprintln(tw, "ID\t状态\t类型\t名称\t上游地址\t模型\t归属\t权重\t优先级\t凭证\t已删")
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			p.bold("ID"), p.bold("状态"), p.bold("类型"), p.bold("名称"),
+			p.bold("上游地址"), p.bold("模型"), p.bold("归属"), p.bold("权重"),
+			p.bold("优先级"), p.bold("凭证"), p.bold("已删"))
 	} else {
-		_, _ = fmt.Fprintln(tw, "ID\t状态\t类型\t名称\t上游地址\t模型\t归属\t权重\t优先级\t凭证")
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			p.bold("ID"), p.bold("状态"), p.bold("类型"), p.bold("名称"),
+			p.bold("上游地址"), p.bold("模型"), p.bold("归属"), p.bold("权重"),
+			p.bold("优先级"), p.bold("凭证"))
 	}
 	for _, info := range infos {
 		if withDeleted {
-			_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
-				info.ID, info.Status, info.Type, info.Name, info.BaseURL,
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
+				p.bold(strconv.FormatInt(info.ID, 10)), info.Status, info.Type, p.bold(info.Name),
+				info.BaseURL,
 				strings.Join(info.Models, ","), ownerLabel(info.OwnerUserID),
 				info.Weight, info.Priority, credentialKeysLabel(info),
-				deletedLabel(info))
+				p.dim(deletedLabel(info)))
 			continue
 		}
-		_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
-			info.ID, info.Status, info.Type, info.Name, info.BaseURL,
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
+			p.bold(strconv.FormatInt(info.ID, 10)), info.Status, info.Type, p.bold(info.Name),
+			info.BaseURL,
 			strings.Join(info.Models, ","), ownerLabel(info.OwnerUserID),
 			info.Weight, info.Priority, credentialKeysLabel(info))
 	}
