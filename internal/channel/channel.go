@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -80,12 +81,20 @@ const (
 	ProtocolSystemOne Protocol = "systemone"
 )
 
+// protocolNames 是本包认的全部协议名，已排序。
+//
+// 它是「认哪些取值」这件事的**唯一来源**：valid 按它判，注册表那条类型名自检
+// 也按它列出候选。先前那份清单是一个 switch、报错信息里要再列一遍——抄第二份
+// 的那天就是两份开始分岔的那天，而分岔的表现是「valid 认它、报错里却不列它」。
+var protocolNames = []string{
+	string(ProtocolAnthropic),
+	string(ProtocolOpenAI),
+	string(ProtocolOpenAIResponses),
+	string(ProtocolSystemOne),
+}
+
 func (p Protocol) valid() bool {
-	switch p {
-	case ProtocolOpenAI, ProtocolAnthropic, ProtocolOpenAIResponses, ProtocolSystemOne:
-		return true
-	}
-	return false
+	return slices.Contains(protocolNames, string(p))
 }
 
 // Channel 是某一次调用要用的渠道信息，由路由层从库里取出后传入适配器。
@@ -576,6 +585,23 @@ func (r *Registry) Register(a Adapter) error {
 	}
 	if !a.Protocol().valid() {
 		return fmt.Errorf("适配器 %q 声明的协议 %q 未知", t, a.Protocol())
+	}
+	// 类型名的自检：它必须**就是**一个协议名。
+	//
+	// 渠道表里的 type 存的就是适配器的 Type()，而 internal/channels 没有注册表
+	// ——它只读库，把那一列**当枚举**查 Protocol.Endpoint 算出这条渠道打哪条
+	// 端点。这条路径成立的前提是「Type() 与协议名同名」；不满足时算出来是空串，
+	// 而空串在端点评据里的意思是「不知道」= **放行**。症状因此是静默的：没有
+	// 报错、没有日志，只是那条渠道上的模型不再被端点筛，于是「往模型不被服务的
+	// 端点发、上游回 400 unsupported_model」这件事又回到只能等真打一次才发现。
+	//
+	// 它同时是 Protocol 注释里那条约定的执行点：「取值与渠道表里的 channels.type
+	// 是同一个字符串（适配器的 Type()）」。
+	if !Protocol(t).valid() {
+		return fmt.Errorf("适配器类型 %q 不是一个协议名：按它查协议得到空串（本包认的只有 %s），"+
+			"而选路是拿渠道表里的 type 算出这条渠道打哪条端点的——空串 = 不知道，"+
+			"端点评据会对这条渠道整体失效，且不报错。这个适配器声明的协议是 %q，类型名要与它同名",
+			t, strings.Join(protocolNames, "、"), a.Protocol())
 	}
 	// 端点的自检：协议决定适配器打哪条路径（Protocol.Endpoint），而适配器
 	// 自述的端点必须与它一致。抄错的表现是静默的——选路按声明的协议算出
