@@ -241,10 +241,14 @@ func SafeRequestHeaders(custom map[string]string) (map[string]string, []string) 
 		out[name] = value
 	}
 
+	// 排序在两条出口**之前**：rejected 的先后来自 map 遍历序，同一份配置
+	// 两次运行可能不同，而它要进日志（见函数注释）。原先排序写在下面那条
+	// 出口之后，于是「所有自定义头都被拒」时走的是另一条出口、拿到的是
+	// 未排序的名单——那正是最需要靠日志比对的情形。
+	sort.Strings(rejected)
 	if len(out) == 0 {
 		return nil, rejected
 	}
-	sort.Strings(rejected)
 	return out, rejected
 }
 
