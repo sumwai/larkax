@@ -243,10 +243,7 @@ func (r *Rotator) Apply(ctx context.Context, progress func(RotateProgress)) (*Ro
 	}
 
 	report := &RotateReport{PrimaryKeyID: r.sealer.PrimaryKeyID()}
-	var (
-		lastID int64
-		done   int64
-	)
+	var lastID int64
 	for {
 		result, batchErr := r.applyBatch(ctx, lock.conn, lastID)
 		if batchErr != nil {
@@ -263,7 +260,11 @@ func (r *Rotator) Apply(ctx context.Context, progress func(RotateProgress)) (*Ro
 		report.Concurrent = append(report.Concurrent, result.concurrent...)
 
 		lastID = result.lastID
-		done += int64(result.rows)
+		// Done 是**累计**处理过的行数，与 report.Scanned 是同一个量。
+		// 早先这里另有一个 done 累加器，在同一个循环体里与 report.Scanned
+		// 各加一次 result.rows，中间没有任何语句能改动它——两者必须永远
+		// 相等，却没有任何东西保证这一点。进度条要的就是这个量本身，
+		// 不是它的第二份副本。
 		if progress != nil {
 			progress(RotateProgress{
 				LastID:     lastID,
@@ -272,7 +273,7 @@ func (r *Rotator) Apply(ctx context.Context, progress func(RotateProgress)) (*Ro
 				Current:    result.current,
 				Concurrent: len(result.concurrent),
 				Failed:     len(result.problems),
-				Done:       done,
+				Done:       report.Scanned,
 				Total:      total,
 			})
 		}

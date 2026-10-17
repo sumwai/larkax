@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -128,17 +129,40 @@ func assertLine(t *testing.T, lines []string, want string) {
 	t.Errorf("指标里没有这一行: %q\n实际输出:\n%s", want, strings.Join(lines, "\n"))
 }
 
+// settlementCounts 是这一条用例关心的三个计数的取值。
+type settlementCounts struct {
+	capped   uint64
+	unbilled uint64
+	measured uint64
+}
+
+// snapshotSettlementCounts 读一遍**本进程那一份**全局注册表。
+//
+// pipeline 的增量点写死 observe.Metrics，/metrics 端点渲染的也是它，
+// 所以这条用例只能用这一份。读 With 会顺带把序列建出来（值为 0），
+// 但那条序列本来就会被下面这几次结算建出来，不改变被测的行为。
+func snapshotSettlementCounts() settlementCounts {
+	return settlementCounts{
+		capped:   observe.Metrics.CappedSettlements.Value(),
+		unbilled: observe.Metrics.UnbilledSettlements.Value(),
+		measured: observe.Metrics.Settlements.With("measured").Value(),
+	}
+}
+
 // 这一条钉的是**整条链**：真实的生产增量点（pipeline.Settle）→ 计数器 →
 // 内部监听上的 /metrics 输出。
 //
 // 只断言「响应里有 larkax_ 开头的行」是不够的：那样把计数器改成不自增、
 // 把标签名拼错、把端点挂到别的监听上，用例都照样通过——而这几件事正是
 // 这一轮要防的（一个一直是 0 的计数器与一个根本没接的计数器长得一样）。
+//
+// 断言落在**增量**上而不是绝对值。计数器是进程级的全局状态，而这条用例
+// 不是它唯一的写入者：`-count=2` 的第二轮、以及将来任何一条也走 Settle
+// 的用例，都会把起点抬起来。绝对值断言于是变成「这个进程里跑过几次」的
+// 函数——要么随机变红，要么得配一句「先确认起点是 0」把自己限定成只能跑
+// 一次，而那句守卫挂掉时指向的是「别的用例动过计数器」，不是被测的那条链。
 func TestMetricsEndpointReportsRealSettlementCounts(t *testing.T) {
-	// 计数器是进程级的全局状态。先确认起点是 0，失败时能一眼看出原因。
-	if got := observe.Metrics.CappedSettlements.Value(); got != 0 {
-		t.Fatalf("这个用例假定计数器从 0 开始，现在是 %d——别的用例动过全局计数器了", got)
-	}
+	before := snapshotSettlementCounts()
 
 	p := &pipeline.Pipeline{Rules: stubRules{}}
 	// 预留只有 1 个最小单位，而按规则算出来是 0.001 元——必然撞上上界。
@@ -166,12 +190,14 @@ func TestMetricsEndpointReportsRealSettlementCounts(t *testing.T) {
 		t.Fatal("上游失败时 Settle 应当返回错误")
 	}
 
+	// 3 次正常结算各撞一次预留上界，各记一次用量来源；1 次上游失败不计费，
+	// 但要留下一个数。这些增量是这条用例真正要钉的东西。
 	lines := scrape(t)
 	for _, want := range []string{
 		"# TYPE larkax_billing_capped_settlements_total counter",
-		"larkax_billing_capped_settlements_total 3",
-		"larkax_billing_unbilled_settlements_total 1",
-		`larkax_billing_settlements_total{usage_source="measured"} 3`,
+		fmt.Sprintf("larkax_billing_capped_settlements_total %d", before.capped+3),
+		fmt.Sprintf("larkax_billing_unbilled_settlements_total %d", before.unbilled+1),
+		fmt.Sprintf(`larkax_billing_settlements_total{usage_source="measured"} %d`, before.measured+3),
 	} {
 		assertLine(t, lines, want)
 	}

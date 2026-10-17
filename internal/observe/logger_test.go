@@ -153,19 +153,25 @@ func TestReadyzOKWithoutChecks(t *testing.T) {
 }
 
 func TestReadyzReflectsCheckResults(t *testing.T) {
+	// wantChecks 是 checks 这个映射**完整**的期望内容，按检查项的名字索引。
+	//
+	// 写成整张表而不是「某一项的明细」：按名字挑一项来断言的话，那个名字
+	// 必须是这个 case 里真实存在的检查项，否则断言一次都不会执行——而
+	// 一次都没执行的断言与「通过了」在输出里长得一样（见 LESSONS 第 16 条）。
+	// 整张表还顺带钉住了成功分支写进去的那个字面量。
 	cases := []struct {
 		name       string
 		checks     []ReadinessCheck
 		wantCode   int
 		wantReady  bool
-		wantDetail string
+		wantChecks map[string]string
 	}{
 		{
 			name:       "全部通过",
 			checks:     []ReadinessCheck{{Name: "db", Check: func(context.Context) error { return nil }}},
 			wantCode:   http.StatusOK,
 			wantReady:  true,
-			wantDetail: "ok",
+			wantChecks: map[string]string{"db": "ok"},
 		},
 		{
 			name: "其中一个失败",
@@ -175,7 +181,7 @@ func TestReadyzReflectsCheckResults(t *testing.T) {
 			},
 			wantCode:   http.StatusServiceUnavailable,
 			wantReady:  false,
-			wantDetail: "probe failed",
+			wantChecks: map[string]string{"db": "ok", "redis": "probe failed"},
 		},
 	}
 
@@ -201,10 +207,13 @@ func TestReadyzReflectsCheckResults(t *testing.T) {
 			if body.Ready != tc.wantReady {
 				t.Errorf("ready = %v，期望 %v", body.Ready, tc.wantReady)
 			}
-			for _, c := range tc.checks {
-				if c.Name == "redis" && body.Checks["redis"] != tc.wantDetail {
-					t.Errorf("checks.redis = %q，期望 %q", body.Checks["redis"], tc.wantDetail)
+			for name, want := range tc.wantChecks {
+				if got := body.Checks[name]; got != want {
+					t.Errorf("checks.%s = %q，期望 %q", name, got, want)
 				}
+			}
+			if len(body.Checks) != len(tc.wantChecks) {
+				t.Errorf("checks 有 %d 项，期望 %d 项：%v", len(body.Checks), len(tc.wantChecks), body.Checks)
 			}
 		})
 	}

@@ -492,16 +492,6 @@ func TestCleanupDeletesOnlyExpiredRecords(t *testing.T) {
 		}
 	}
 
-	// 先把「此刻已经过期的行」数出来——必须在把本用例那一条拨回去**之前**数，
-	// 否则它自己会被算进去。数出来是为了让「删掉 1 条」这条断言在一个
-	// 被别的运行用过的库上仍然精确：那些行也会被这次 Cleanup 删掉。
-	var preExisting int64
-	if err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM idempotency_keys WHERE created_at < now() - interval '24 hours'`,
-	).Scan(&preExisting); err != nil {
-		t.Fatalf("统计已过期的行失败: %v", err)
-	}
-
 	// 留存按 created_at 算（见 Cleanup 的注释），所以拨的是这一列。
 	if _, err := db.ExecContext(ctx, `
 		UPDATE idempotency_keys SET created_at = now() - interval '48 hours'
@@ -513,9 +503,18 @@ func TestCleanupDeletesOnlyExpiredRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cleanup 失败: %v", err)
 	}
-	if deleted != preExisting+1 {
-		t.Errorf("删除 %d 条，期望 %d（本次清理前已过期的 %d 条 + 本用例拨到 48 小时前的那 1 条）",
-			deleted, preExisting+1, preExisting)
+	// 判据收窄到**本用例自己造的那两行**，不数全库。
+	//
+	// Cleanup 返回的是全库删掉的条数，而库是共用的：cmd/larkaxctl 的用例
+	// 也会真删一次，两个包在 `go test ./...` 里并行跑在同一个 DSN 上。拿
+	// 「清理前数出来的全库到期行数 + 1」做等式，中间任何一次并发清理都会
+	// 把左边改小，用例于是随机变红——而红的是它自己（见 LESSONS.md 第 26 条：
+	// 断言不许对着全库共享的表做全局计数）。
+	//
+	// 下限仍然是有内容的：「到期的一条都没删」会让它挂，而那种情况下
+	// 下面两条 Lookup 也一起挂。
+	if deleted < 1 {
+		t.Errorf("Cleanup 报删除 %d 条，本用例拨到 48 小时前的那 1 条至少该被删掉", deleted)
 	}
 
 	if _, err := s.Lookup(ctx, keyID, oldKey); !errors.Is(err, ErrNotFound) {
