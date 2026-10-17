@@ -22,6 +22,27 @@ const (
 	fieldKeyMax   = 32
 	fieldDepthMax = 4
 
+	// fieldValueMaxBytes 是**单个字符串值**的字节上限。
+	//
+	// 键的个数有 fieldKeyMax 管着，值的长度一直没人管：一个 200 KB 的字符串
+	// 会原样进日志（实测 204891 字节）。日志的留存期与传播范围远大于插件本身，
+	// 所以「插件决定宿主为此花多少内存」这件事在值这一维上同样不能成立。
+	fieldValueMaxBytes = 1024
+
+	// fieldTotalMaxBytes 是整条 fields 转换结果的字节预算。
+	//
+	// **只限单个值不够。** fieldKeyMax 限的是对象的键数，而数组的长度没有
+	// 上限——一百万个短字符串照样能撑爆日志。预算同时管字符串的字节与每个值
+	// 本身的名义开销（见 scalarCost），于是「这条 fields 最多值多少字节」
+	// 是一个可以说出来的数。
+	fieldTotalMaxBytes = 8 << 10
+
+	// scalarCost 是每个非字符串值计入预算的名义开销。
+	//
+	// 数字与布尔本身很小，但它们在日志里各自占一个位置，而数组长度无上限。
+	// 不记账的话「一百万个数字」这条路径就没有任何一道界。
+	scalarCost = 8
+
 	// truncatedMark 标在被截断的 message 末尾。截断不标注的话，
 	// 读的人会以为插件只打印了这么多。
 	truncatedMark = "…(已截断)"
@@ -122,29 +143,49 @@ func safeFields(args []moejs.Value, i int) (fields map[string]any, ok bool) {
 	if !argObject(args, i) {
 		return nil, false
 	}
-	v, _ := valueToGo(args[i], fieldDepthMax)
+	budget := fieldBudget{left: fieldTotalMaxBytes}
+	v, _ := valueToGo(args[i], fieldDepthMax, &budget)
 	// 顶层不是一个对象时 v 是别的类型，断言失败即「忽略它」。
 	fields, ok = v.(map[string]any)
 	return fields, ok
 }
 
-// valueToGo 把 JS 值翻成 Go 值。ok 为 false 表示这个值转不出来。
-func valueToGo(v moejs.Value, depth int) (any, bool) {
+// fieldBudget 是转换 fields 时的字节预算。
+//
+// 字符串值按自己的字节数记账，其余每个值按 scalarCost 记账。预算用尽之后
+// valueToGo 一律返回「转不出来」，于是剩下的部分被丢掉——**丢掉而不是
+// 截成一个更短的日志**：一条被截过的 fields 在日志里读起来和完整的一样，
+// 而「这里少了几个字段」这件事没人看得出来。
+type fieldBudget struct{ left int }
+
+// spend 扣掉 n 字节。返回 false 表示预算不够，调用方应当丢掉这个值。
+func (b *fieldBudget) spend(n int) bool {
+	if b.left < n {
+		b.left = 0
+		return false
+	}
+	b.left -= n
+	return true
+}
+
+// valueToGo 把 JS 值翻成 Go 值。ok 为 false 表示这个值转不出来
+// （转不出来、或者预算已经不够）。
+func valueToGo(v moejs.Value, depth int, budget *fieldBudget) (any, bool) {
 	switch {
 	case v.IsNull(), v.IsUndefined():
-		return nil, true
+		return nil, budget.spend(scalarCost)
 	case v.IsBool():
-		return v.AsBool(), true
+		return v.AsBool(), budget.spend(scalarCost)
 	case v.IsNumber():
-		return v.AsNumber(), true
+		return v.AsNumber(), budget.spend(scalarCost)
 	case v.IsString():
-		return v.AsString().GoString(), true
+		return boundedString(v.AsString().GoString(), budget)
 	case v.IsBigInt(), v.IsSymbol():
 		// 这两个没有 JSON 对应物：BigInt 直接当数字记会悄悄丢精度，
 		// symbol 的调试名字也不是它的身份。宁可不记。
 		return nil, false
 	case v.IsObject():
-		return objectToGo(v.AsObject(), depth)
+		return objectToGo(v.AsObject(), depth, budget)
 	default:
 		// hole 之类的引擎内部值。它不会到达插件，moejs 也没有导出构造它的
 		// 函数，所以这一支在测试里覆盖不到——留着是为了「认不出来的就当读不出来」
@@ -153,9 +194,38 @@ func valueToGo(v moejs.Value, depth int) (any, bool) {
 	}
 }
 
+// boundedString 把一个字符串截到「单值上限」与「剩余预算」之中更小的那个。
+//
+// 截断标记也占预算，所以先把它留出来再切。不留的话总输出会超出预算一小段
+// （每个被截的值多出标记那么长），而「这条 fields 最多多少字节」就成了一句
+// 大约的话——上限说不准就等于没有上限。
+func boundedString(s string, budget *fieldBudget) (any, bool) {
+	limit := min(fieldValueMaxBytes, budget.left)
+	if len(s) <= limit {
+		budget.spend(len(s))
+		return s, true
+	}
+	if limit <= len(truncatedMark) {
+		// 剩下的预算连标记都放不下。这个值整个丢掉，而不是留一个只剩标记的
+		// 空壳——那在日志里比没有这个键还难读。
+		return nil, false
+	}
+	cut := limit - len(truncatedMark)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	out := s[:cut] + truncatedMark
+	budget.spend(len(out))
+	return out, true
+}
+
 // objectToGo 把 JS 对象或数组翻成 map[string]any / []any。
-func objectToGo(o *moejs.Object, depth int) (any, bool) {
+func objectToGo(o *moejs.Object, depth int, budget *fieldBudget) (any, bool) {
 	if depth <= 0 || o.IsCallable() {
+		return nil, false
+	}
+	// 容器本身也占一个位置：一个空对象在日志里同样是两个字节。
+	if !budget.spend(scalarCost) {
 		return nil, false
 	}
 	keys := o.OwnEnumerableStringKeys()
@@ -172,7 +242,7 @@ func objectToGo(o *moejs.Object, depth int) (any, bool) {
 			if !ok {
 				continue
 			}
-			g, ok := valueToGo(elem, depth-1)
+			g, ok := valueToGo(elem, depth-1, budget)
 			if !ok {
 				continue
 			}
@@ -190,7 +260,7 @@ func objectToGo(o *moejs.Object, depth int) (any, bool) {
 		if !ok {
 			continue
 		}
-		g, ok := valueToGo(val, depth-1)
+		g, ok := valueToGo(val, depth-1, budget)
 		if !ok {
 			continue
 		}

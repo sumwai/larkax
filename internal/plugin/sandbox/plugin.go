@@ -99,10 +99,14 @@ const inspectTimeout = 2 * time.Second
 
 // inspect 求值一次模块顶层，读出 meta 与导出的 hook 名。
 //
-// **求值用的是临时 runtime，而且没有注入任何宿主能力**：
-// 顶层代码在插件契约里只该声明常量，不该做别的事；没注入能力意味着
-// 即使它写了 `log("...")` 也只会拿到「能力未启用」，
-// 而不是在编译期就往某个用户的命名空间里写东西。
+// **这一次求值用的是临时 runtime，而且没有注入任何宿主能力**：
+// 编译期拿不到用户身份，也不该往任何人的命名空间里写东西，所以这里
+// 即使插件写了 `log("...")` 也只会拿到「能力未启用」。
+//
+// 注意范围：这句话说的是**编译期这一次**求值。请求期的 NewRuntime 会把
+// 能力注入之后再求值顶层（KV 要按用户命名空间隔离，只能每请求注一遍），
+// 所以请求期的顶层代码**能**调宿主能力——它受的是 CallTimeout 的约束，
+// 而不是「拿不到能力」。别把这两处混为一谈。
 func (m *Module) inspect(parent context.Context) error {
 	// 没有默认导出时先把它挑出来：逐个 hook 去查只会得到「找不到 onRequest」，
 	// 而真正的问题是「你没有 export default」。
@@ -274,7 +278,12 @@ func (m *Module) NewRuntime(ctx context.Context, host Host, allowed []string, li
 	if err := rs.inject(ctx, host, allowedSet(allowed)); err != nil {
 		return nil, err
 	}
-	if err := rs.rt.Load(m.mod); err != nil {
+	// 顶层求值**也在限额之内**。它同样是插件代码：写一个死循环就能让这次
+	// 请求永远挂在这里，而 CallTimeout 只覆盖 Call。注入在它之前是有意的
+	// ——顶层能调宿主能力（见 loadTopLevel 的注释），代价由 deadline 兜住。
+	if err := rs.loadTopLevel(ctx, m.mod); err != nil {
+		// 顶层没跑完的 runtime 不再可信：它的调用栈可能还在跑。
+		rs.markUnusable()
 		return nil, fmt.Errorf("求值插件 %s 失败: %w", m.Name, err)
 	}
 	return &Runtime{state: rs, mod: m}, nil

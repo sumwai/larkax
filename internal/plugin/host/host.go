@@ -133,6 +133,32 @@ type KVStore interface {
 	Del(ctx context.Context, plugin string, userID int64, key string) error
 }
 
+// badArgument 构造一个「插件给的参数不合法」的错误。
+//
+// 它属于**可以跨到插件侧**的那一类：文案里除了插件自己给的值没有别的东西，
+// 而那些值插件本来就拿得到。所以文案要写清楚是哪个参数、收到了什么——
+// 只说一句「参数不合法」会让插件作者只能靠猜。
+func badArgument(format string, a ...any) error {
+	return &sandbox.CapabilityError{
+		Code:    sandbox.CodeBadArgument,
+		Message: fmt.Sprintf(format, a...),
+	}
+}
+
+// unavailable 构造一个「宿主依赖不可用」的错误。
+//
+// 依赖的错误原文（连接串、驱动细节、上游地址）既对插件无用，又不该离开宿主，
+// 所以这里给一个固定的分类文案，原文放在 Cause 里——由 sandbox 的 wrapFunc
+// 交给 Host.OnError 进宿主日志。**这一层不要用 fmt.Errorf("%w", err) 包依赖
+// 错误**：那样原文就成了插件能 catch 到的 message。
+func unavailable(message string, err error) error {
+	return &sandbox.CapabilityError{
+		Code:    sandbox.CodeUnavailable,
+		Message: message,
+		Cause:   err,
+	}
+}
+
 // hostFunc 把一段实现包成 sandbox.HostFunc，并在进门处统一检查 ctx。
 //
 // 「每个宿主函数自带 deadline」放在这里实现，就不会有哪个函数漏掉这一步。
@@ -149,6 +175,14 @@ func hostFunc(fn func(ctx context.Context, args []moejs.Value) (moejs.Value, err
 //
 // 已经结束的 ctx 上不要再做任何工作：moejs 的 Interrupt 在宿主函数阻塞时
 // 无效，晚一步返回只是让上游多等一会儿。
+//
+// 返回的是**未分类**的错误，分类交给 sandbox 的 wrapFunc 那一处（它认
+// ErrHostTimeout 与 context.Canceled）。这样「ctx 已结束」这件事只有一处
+// 决定插件看到哪个码——在这一层自己拼一个的话，wrapFunc 进门那一次判断
+// 会给出另一个码，同一种情形于是有两个答案，而插件正是按码分支的。
+//
+// 错误里也**不带 ctx 的 cause 原文**：cause 由上层给出，可能带渠道名之类
+// 的东西。原文经 wrapFunc 进宿主日志，插件那一侧只有固定文案。
 func expired(ctx context.Context) error {
 	cause := context.Cause(ctx)
 	if cause == nil {
@@ -173,32 +207,33 @@ func argString(args []moejs.Value, i int) string {
 	return args[i].String()
 }
 
-// argInt64 从 JS 参数里取一个整数。
+// argInt64 从 JS 参数里取一个整数。label 是它叫什么，只用于报错——
+// 「时间戳不是整数」比「第 1 个参数不是整数」有用得多。
 //
 // JS 没有整数类型，1.5 的 String() 是 "1.5"，所以这里解析而不是断言。
 // 取不到就报错——**不静默按 0 处理**：时间戳猜错会让一整天按错的日子计价，
 // 而那在账上看不出来。
-func argInt64(args []moejs.Value, i int) (int64, error) {
+func argInt64(args []moejs.Value, i int, label string) (int64, error) {
 	if i >= len(args) || args[i].IsUndefined() || args[i].IsNull() {
-		return 0, errors.New("参数缺失")
+		return 0, badArgument("%s 缺失", label)
 	}
 	s := args[i].String()
 	if s == "" {
-		return 0, errors.New("参数为空")
+		return 0, badArgument("%s 为空", label)
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("参数不是整数: %q", s)
+		return 0, badArgument("%s 不是整数: %q", label, s)
 	}
 	return n, nil
 }
 
 // argInt64Or 取一个可缺省的整数：缺参数、undefined、null 都落到 fallback。
-func argInt64Or(args []moejs.Value, i int, fallback int64) (int64, error) {
+func argInt64Or(args []moejs.Value, i int, label string, fallback int64) (int64, error) {
 	if i >= len(args) || args[i].IsUndefined() || args[i].IsNull() {
 		return fallback, nil
 	}
-	return argInt64(args, i)
+	return argInt64(args, i, label)
 }
 
 // argObject 判断某个位置是不是一个普通对象（不是 null、不是函数）。

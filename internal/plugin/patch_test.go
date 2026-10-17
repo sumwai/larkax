@@ -193,6 +193,33 @@ func TestHeaderPatchReportsRejected(t *testing.T) {
 	}
 }
 
+// 值里的控制字符与换行是同一类问题，只挡 CR/LF 会漏掉一半。
+//
+// 被漏掉的那些会一路走到 net/http 才报错，那时它表现为**上游失败**——
+// 可能触发换渠道重试，而真正的原因是插件写了一个坏头。
+// 同时钉住反面：HTAB 是 RFC 7230 允许的，别把它一起拒了。
+func TestHeaderPatchRejectsControlCharsInValue(t *testing.T) {
+	got, rejected := ApplyHeaderPatch(nil, map[string]string{
+		"x-larkax-nul": "a\x00b",
+		"x-larkax-vt":  "a\x0bb",
+		"x-larkax-del": "a\x7fb",
+		"x-larkax-tab": "a\tb",
+		"x-larkax-ok":  "a b",
+	})
+	if len(rejected) != 3 {
+		t.Errorf("带控制字符的三个头都该被拒，实际被拒 %v", rejected)
+	}
+	if got["x-larkax-tab"] != "a\tb" {
+		t.Errorf("HTAB 是 RFC 允许的，不该被拒: %v", got)
+	}
+	if got["x-larkax-ok"] != "a b" {
+		t.Errorf("普通值不该被拒: %v", got)
+	}
+	if len(got) != 2 {
+		t.Errorf("只该放行两个，实际 %v", got)
+	}
+}
+
 // 已有的头保留，补丁只做叠加。基准为 nil 时不 panic 且返回 nil。
 func TestHeaderPatchMergesOntoBase(t *testing.T) {
 	base := map[string]string{"X-Larkax-Host": "宿主写的"}
