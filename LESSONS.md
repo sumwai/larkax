@@ -49,3 +49,4 @@
 | [31](lessons/31-struct-field-no-gate.md) | 结构体字段的死活，三道门都照不到——而「有没有读者」不是判据 | 判断一个结构体字段能不能删时 | 活 |
 | [32](lessons/32-shared-function-two-contracts.md) | 共用函数的判据改了，另一条调用路径还钉着旧行为 | 改一个函数的判据（不只是实现）之前 | 活 |
 | [33](lessons/33-fixture-shape-not-pinned.md) | 夹具按想象造，真实形状不同——而「行为碰巧一致」不会让任何人发现 | 写「不认识就忽略」这类处置的用例、按文档造夹具时 | 活 |
+| [34](lessons/34-gate-is-not-overlap.md) | 并发用例只加闸门，不保证 goroutine 真的重叠 | 写并发/竞态用例时 | 活 |
