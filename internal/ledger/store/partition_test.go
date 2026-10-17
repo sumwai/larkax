@@ -26,8 +26,18 @@ var (
 	ensureMonth   = time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
 	writeMonth    = time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC)
 	rolloverMonth = time.Date(2027, 7, 1, 0, 0, 0, 0, time.UTC)
-	blockedMonth  = time.Date(2027, 8, 1, 0, 0, 0, 0, time.UTC)
 	duplicateMon  = time.Date(2027, 9, 1, 0, 0, 0, 0, time.UTC)
+
+	// blockedMonth 是「被兜底分区挡着、分区建不出来」的那个月。
+	//
+	// 刻意取一个**明确的过去时刻**，而不是未来：往兜底分区塞一行就会让那个月
+	// 的分区再也建不出来（实测 SQLSTATE 23514），拿未来月份去堵，等于给那个月
+	// 留下一块永久的路障——将来谁想建它都会撞上，而现场只会说「兜底分区非空」。
+	// 过去月份本来就没有分区、也没有人会去建，堵在那里不影响任何东西。
+	//
+	// 它同时把这条用例的行与并发写入的行分开：别的用例写的行落的是当月，
+	// 这里的断言只认 2020-01 那一行。
+	blockedMonth = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 )
 
 // ── 纯函数：不碰库 ──────────────────────────────────────────────────────
@@ -239,11 +249,83 @@ func usageEventPartitionCount(ctx context.Context, t *testing.T, db *sql.DB) int
 	return n - 1
 }
 
+// currentUsageEventPartition 是「真正的当月分区」的名字。
+func currentUsageEventPartition() string {
+	return UsageEventPartitionName(time.Now().UTC())
+}
+
+// dropRefusal 是「这个分区名能不能删」的判据，不合法时给出理由。
+//
+// # 绝不许删当月分区
+//
+// 删掉它之后，到它被建回来之前的那一段窗口里，**任何并发的写入都会落进
+// usage_events_default**——而 `go test ./...` 是把包并行跑起来的，那些写入
+// 来自别的包。兜底分区一旦有行，当月分区就再也建不回来（实测 SQLSTATE
+// 23514），于是这一次 run 里**后面所有**碰分区的用例都会挂，包括别的包的。
+//
+// 这不是假设：`cmd/larkaxctl` 的 partition 用例曾经删过当月分区，门禁就挂在
+// 那里，而报出来的是 `internal/ledger/store` 的用例失败——现场离原因很远。
+//
+// 要测「把缺的分区建出来」请用一个**未来**的月份：它一定没有分区（没人会
+// 预建到那么远），而删掉它不产生任何副作用。
+//
+// 判据与动作分开：`t.Fatal` 本身没法在不弄挂用例的情况下断言，而「什么名字
+// 该被拒」可以——见 TestDropRefusalRejectsOnlyCurrentMonth。
+func dropRefusal(name string) error {
+	if name == currentUsageEventPartition() {
+		return fmt.Errorf("不许删当月分区 %s：删掉它的窗口里并发的写入会落进 %s，"+
+			"而兜底分区一有行当月分区就再也建不回来（SQLSTATE 23514）——"+
+			"那会毁掉这次 run 里后面所有碰分区的用例；改用一个未来的月份",
+			name, UsageEventDefaultPartition)
+	}
+	return nil
+}
+
+// dropUsageEventPartition 删掉一个测试造出来的分区。
 func dropUsageEventPartition(ctx context.Context, t *testing.T, db *sql.DB, name string) {
 	t.Helper()
+	// 判据在 DDL 之前：拦住之后当月分区必须原封不动。
+	if err := dropRefusal(name); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS "+name); err != nil {
 		t.Fatalf("清理分区 %s 失败: %v", name, err)
 	}
+}
+
+// partitionStateLockKey 是「正在动 usage_events 分区全局状态」的跨进程互斥键。
+//
+// # 为什么需要它
+//
+// `go test ./...` 把包并行跑起来，而分区的状态是**全库共享**的。一个包往兜底
+// 分区里塞行（为了造出「建不出分区」），另一个包正好在断言兜底分区为空——
+// 两边各自都对，撞在一起就是一次假的失败。
+//
+// 键值是任取的常量，只要 `internal/ledger/store` 与 `cmd/larkaxctl` 两处用
+// **同一个**。改了这里要连那边一起改，否则锁形同虚设。
+const partitionStateLockKey = 247001
+
+// lockPartitionState 拿一把跨进程的排它锁，直到用例结束。
+//
+// 用 session 级的 advisory lock 绑在一条独占连接上：连接一关锁就自动释放，
+// 所以用例中途挂掉也不会把锁留在库里，下一个用例照样能跑。
+func lockPartitionState(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("取一条独占连接失败: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", partitionStateLockKey); err != nil {
+		_ = conn.Close()
+		t.Fatalf("拿分区状态锁失败: %v", err)
+	}
+	// 用 WithoutCancel 而不是 Background：清理由用例的 ctx 派生（保留它的值），
+	// 但用例结束时那个 ctx 可能已经被取消，而解锁必须发得出去。
+	t.Cleanup(func() {
+		_, _ = conn.ExecContext(context.WithoutCancel(ctx),
+			"SELECT pg_advisory_unlock($1)", partitionStateLockKey)
+		_ = conn.Close()
+	})
 }
 
 // countInDefault 数兜底分区里有几行属于这次请求。
@@ -351,6 +433,31 @@ func TestPartitionAlreadyExistsMatchesPostgres(t *testing.T) {
 	}
 }
 
+// 护栏本身要被钉住：只有当月分区该被拒。
+//
+// 没有这条用例，`dropRefusal` 里那道判断只是「写在 helper 里」，不是「被证明
+// 在工作」（LESSONS.md 第 23 条）。反向的一半同样要紧——判据写宽了（例如把
+// 所有分区都拒掉），那些真要删分区的用例会一起挂，而现场看起来像别的问题。
+func TestDropRefusalRejectsOnlyCurrentMonth(t *testing.T) {
+	if err := dropRefusal(currentUsageEventPartition()); err == nil {
+		t.Error("护栏没拦住「删当月分区」——那道判断没在工作")
+	}
+
+	allowed := []struct {
+		name string
+		at   time.Time
+	}{
+		{"未来月份", ensureMonth},
+		{"过去月份", blockedMonth},
+	}
+	for _, tc := range allowed {
+		if err := dropRefusal(UsageEventPartitionName(tc.at)); err != nil {
+			t.Errorf("%s（%s）应当放行，实际被拒: %v",
+				tc.name, UsageEventPartitionName(tc.at), err)
+		}
+	}
+}
+
 // settleOnce 走一遍完整的「预留 → 结算」，返回这次请求的 id 与结算的错误。
 func settleOnce(ctx context.Context, t *testing.T, db *sql.DB, s *Store, userID int64) (string, error) {
 	t.Helper()
@@ -359,7 +466,11 @@ func settleOnce(ctx context.Context, t *testing.T, db *sql.DB, s *Store, userID 
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
 		t.Fatalf("预留失败: %v", err)
 	}
-	charge := billedCharge(t, userID, requestID, "12", tokens.SourceTokenized,
+	// 分录的 billing_request_id 传 0（落成 NULL）：`SaveReservation` 会建
+	// `billing_requests` 那一行，但这里只拿得到 `pipeline.Request`，拿不到它的 id，
+	// 而这条用例要断言的是分区落点，不是分录与账单的关联。同一条口径见
+	// `read_test.go` 里那一处传 0 的调用。
+	charge := billedCharge(t, userID, requestID, 0, "12", tokens.SourceTokenized,
 		time.Date(2026, 10, 17, 9, 30, 0, 0, time.UTC))
 	return requestID, s.Save(ctx, req, charge)
 }
@@ -454,6 +565,7 @@ func TestSaveUsageEventPartitionCacheSkipsRepeatedDDL(t *testing.T) {
 func TestSaveSettlesWhenPartitionEnsureFails(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
+	lockPartitionState(ctx, t, db)
 
 	name := UsageEventPartitionName(blockedMonth)
 	dropUsageEventPartition(ctx, t, db, name)
@@ -509,6 +621,7 @@ func TestSaveSettlesWhenPartitionEnsureFails(t *testing.T) {
 func TestSaveRetriesPartitionEnsureAfterFailure(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
+	lockPartitionState(ctx, t, db)
 
 	name := UsageEventPartitionName(blockedMonth)
 	dropUsageEventPartition(ctx, t, db, name)

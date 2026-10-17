@@ -176,6 +176,27 @@ func runPartitionCheck(args []string) error {
 		return err
 	}
 
+	problems := partitionProblems(missing, usageDefaultRows, snapshotDefaultRows)
+
+	printPartitionSpan(from, months)
+	printMissingPartitions(missing)
+	fmt.Printf("兜底分区 %s：%d 行\n", store.UsageEventDefaultPartition, usageDefaultRows)
+	fmt.Printf("兜底分区 %s：%d 行\n", snapshotwire.DefaultPartition, snapshotDefaultRows)
+
+	if len(problems) > 0 {
+		return fmt.Errorf("usage_events 月分区体检不通过：%s", strings.Join(problems, "；"))
+	}
+	return nil
+}
+
+// partitionProblems 把三项检查的结果折成一张问题清单，空清单表示体检通过。
+//
+// 折成纯函数是为了让判据能**逐项**测。三项里有两项要靠往兜底分区里真的写行
+// 才造得出来，而 `request_snapshots_default` 那一项不能那么造：那张表的行数
+// 是**全库共享**的状态，而 `internal/snapshotwire` 自己的集成测试断言它是空
+// 的（见 TestPartitionProblemsFlagsEachCondition 的说明）。判据与取值分开之
+// 后，这一层不必连库就能把三种条件各测一遍。
+func partitionProblems(missing []string, usageDefaultRows, snapshotDefaultRows int64) []string {
 	var problems []string
 	if len(missing) > 0 {
 		problems = append(problems, fmt.Sprintf("usage_events 缺 %d 个月分区", len(missing)))
@@ -188,16 +209,7 @@ func runPartitionCheck(args []string) error {
 		problems = append(problems, fmt.Sprintf("兜底分区 %s 有 %d 行",
 			snapshotwire.DefaultPartition, snapshotDefaultRows))
 	}
-
-	printPartitionSpan(from, months)
-	printMissingPartitions(missing)
-	fmt.Printf("兜底分区 %s：%d 行\n", store.UsageEventDefaultPartition, usageDefaultRows)
-	fmt.Printf("兜底分区 %s：%d 行\n", snapshotwire.DefaultPartition, snapshotDefaultRows)
-
-	if len(problems) > 0 {
-		return fmt.Errorf("usage_events 月分区体检不通过：%s", strings.Join(problems, "；"))
-	}
-	return nil
+	return problems
 }
 
 // printPartitionSpan 打印这次体检 / 预建覆盖的月份区间。

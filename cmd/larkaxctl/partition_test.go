@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +147,108 @@ func countTableRows(ctx context.Context, t *testing.T, db *sql.DB, table string)
 	return n
 }
 
+// relationExists 用 to_regclass 判断一个关系在不在。
+func relationExists(ctx context.Context, t *testing.T, db *sql.DB, name string) bool {
+	t.Helper()
+	var got sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT to_regclass($1)::text`, name).Scan(&got); err != nil {
+		t.Fatalf("查关系 %s 是否存在失败: %v", name, err)
+	}
+	return got.Valid && got.String != ""
+}
+
+// currentUsageEventPartition 是「真正的当月分区」的名字。
+func currentUsageEventPartition() string {
+	return store.UsageEventPartitionName(time.Now().UTC())
+}
+
+// dropRefusal 是「这个分区名能不能删」的判据，不合法时给出理由。
+//
+// # 绝不许删当月分区
+//
+// 删掉它之后，到它被建回来之前的那一段窗口里，**任何并发的写入都会落进
+// usage_events_default**——而 `go test ./...` 是把包并行跑起来的，那些写入
+// 来自别的包。兜底分区一旦有行，当月分区就再也建不回来（实测 SQLSTATE
+// 23514），于是这一次 run 里**后面所有**碰分区的用例都会挂。
+//
+// 这道坑真的踩过：这条用例原本删的就是当月分区，门禁挂在这里，而报出来的
+// 却是 `internal/ledger/store` 的用例失败——现场离原因很远。
+//
+// 判据与动作分开：`t.Fatal` 本身没法在不弄挂用例的情况下断言，而「什么名字
+// 该被拒」可以——见 TestDropRefusalRejectsOnlyCurrentMonth。
+func dropRefusal(name string) error {
+	if name == currentUsageEventPartition() {
+		return fmt.Errorf("不许删当月分区 %s：删掉它的窗口里并发的写入会落进 %s，"+
+			"而兜底分区一有行当月分区就再也建不回来（SQLSTATE 23514）——"+
+			"那会毁掉这次 run 里后面所有碰分区的用例；改用一个未来的月份",
+			name, store.UsageEventDefaultPartition)
+	}
+	return nil
+}
+
+// dropUsageEventPartition 删掉一个测试造出来的分区。
+func dropUsageEventPartition(ctx context.Context, t *testing.T, db *sql.DB, name string) {
+	t.Helper()
+	// 判据在 DDL 之前：拦住之后那个分区必须原封不动。
+	if err := dropRefusal(name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS "+name); err != nil {
+		t.Fatalf("清理分区 %s 失败: %v", name, err)
+	}
+}
+
+// partitionStateLockKey 是「正在动 usage_events 分区全局状态」的跨进程互斥键。
+//
+// # 为什么需要它
+//
+// `go test ./...` 把包并行跑起来，而分区的状态是**全库共享**的。一个包往兜底
+// 分区里塞行（为了造出「建不出分区」），另一个包正好在断言兜底分区为空——
+// 两边各自都对，撞在一起就是一次假的失败。
+//
+// 键值是任取的常量，只要 `internal/ledger/store` 与 `cmd/larkaxctl` 两处用
+// **同一个**。改了这里要连那边一起改，否则锁形同虚设。
+const partitionStateLockKey = 247001
+
+// lockPartitionState 拿一把跨进程的排它锁，直到用例结束。
+//
+// 用 session 级的 advisory lock 绑在一条独占连接上：连接一关锁就自动释放，
+// 所以用例中途挂掉也不会把锁留在库里，下一个用例照样能跑。
+func lockPartitionState(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("取一条独占连接失败: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", partitionStateLockKey); err != nil {
+		_ = conn.Close()
+		t.Fatalf("拿分区状态锁失败: %v", err)
+	}
+	// 用 WithoutCancel 而不是 Background：清理由用例的 ctx 派生（保留它的值），
+	// 但用例结束时那个 ctx 可能已经被取消，而解锁必须发得出去。
+	t.Cleanup(func() {
+		_, _ = conn.ExecContext(context.WithoutCancel(ctx),
+			"SELECT pg_advisory_unlock($1)", partitionStateLockKey)
+		_ = conn.Close()
+	})
+}
+
+// 护栏本身要被钉住：只有当月分区该被拒。
+//
+// 没有这条用例，`dropRefusal` 里那道判断只是「写在 helper 里」，不是「被证明
+// 在工作」（LESSONS.md 第 23 条）。反向的一半同样要紧——判据写宽了（例如把
+// 所有分区都拒掉），真要删分区的用例会一起挂，而现场看起来像别的问题。
+func TestDropRefusalRejectsOnlyCurrentMonth(t *testing.T) {
+	if err := dropRefusal(currentUsageEventPartition()); err == nil {
+		t.Error("护栏没拦住「删当月分区」——那道判断没在工作")
+	}
+
+	future := store.UsageEventPartitionName(time.Now().UTC().AddDate(0, 2, 0))
+	if err := dropRefusal(future); err != nil {
+		t.Errorf("未来月份 %s 应当放行，实际被拒: %v", future, err)
+	}
+}
+
 // ensureCurrentMonthPartition 先把当月分区补上。
 //
 // 几条 check 用例都需要「缺分区」这一项不成立，才能保证它们失败的原因是
@@ -191,6 +294,7 @@ func TestPartitionCheckFailsWhenUsageDefaultPartitionHasRows(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 	ctx := context.Background()
+	lockPartitionState(ctx, t, db)
 	ensureCurrentMonthPartition(t)
 
 	// 挑一个没有分区的月份，PostgreSQL 才会把它路由到兜底分区。
@@ -222,46 +326,68 @@ func TestPartitionCheckFailsWhenUsageDefaultPartitionHasRows(t *testing.T) {
 	if !strings.Contains(err.Error(), store.UsageEventDefaultPartition) {
 		t.Errorf("错误信息里应当带上表名，实际为 %q", err)
 	}
+
+	// 两张兜底分区互不串味：这一条只让 usage 那张有行，快照那张必须仍读作
+	// 0 行。判据那一层由 TestPartitionProblemsFlagsEachCondition 钉住，这一
+	// 句钉的是**取值**——两处把表名接错的话，会在这里现形（一个数被用了两遍
+	// 时，快照那一行会跟着变成 1）。
+	if !strings.Contains(out, snapshotwire.DefaultPartition+"：0 行") {
+		t.Errorf("快照兜底分区应当仍读作 0 行，实际输出为 %q", out)
+	}
 }
 
-// request_snapshots_default 非空同样是非零退出。
+// 三项检查各自都能单独把体检判成不通过。
 //
-// 它的注释写着「必须告警其非空：落进来的数据没有到期日，留存承诺对它不成立」。
-// 两张表的处置不同（一张写入侧补建、一张靠预建任务），但「非空即告警」是同一条。
-func TestPartitionCheckFailsWhenSnapshotDefaultPartitionHasRows(t *testing.T) {
-	db := testDB(t)
-	setupEnv(t)
-	ctx := context.Background()
-	ensureCurrentMonthPartition(t)
+// # 为什么这一条不连库
+//
+// `request_snapshots_default` 非空这一项**没法**用「往库里真写一行」来造：
+// 那张表的行数是全库共享的，而 `internal/snapshotwire` 的集成测试断言它是
+// 空的（`TestIntegrationInsertLandsInDayPartition`：兜底分区有行就说明有写入
+// 绕过了补建）。`go test ./...` 把包并行跑起来，于是「我塞一行」与「它数一遍」
+// 会撞在一起——两边各自都对，撞在一起就是一次假的失败。
+//
+// 这是同一个坑的另一种形状：上一条是**删**共享状态踩到别人，这一条是**写**
+// 共享状态踩到别人。所以判据从取值里拆了出来（见 partitionProblems），这一层
+// 不必连库就能把三种条件各测一遍。
+//
+// 代价是「countRows 取的是哪张表」不由这条用例钉住。它由另外两条钉：
+// TestPartitionCheckPassesWhenClean 断言输出里两张表的名字与行数都在，
+// TestPartitionCheckFailsWhenUsageDefaultPartitionHasRows 断言 usage 那张
+// 非空时快照那张仍读作 0 行——两处接错表都会在那两条上现形。
+func TestPartitionProblemsFlagsEachCondition(t *testing.T) {
+	missing := []string{"usage_events_2026_12"}
 
-	blocker := uniqueName("partition-check-snapshot")
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO request_snapshots (request_id, user_id, direction, skeleton, created_at)
-		VALUES ($1, 1, 'request', '{}'::jsonb, $2)`,
-		blocker, time.Date(2030, 1, 15, 3, 0, 0, 0, time.UTC)); err != nil {
-		t.Fatalf("往快照兜底分区插一行失败: %v", err)
+	cases := []struct {
+		name         string
+		missing      []string
+		usageRows    int64
+		snapshotRows int64
+		wantProblem  bool
+		wantTable    string // 出问题时该在清单里出现的表名；空表示只要求「没问题」
+	}{
+		{"都正常", nil, 0, 0, false, ""},
+		{"缺月分区", missing, 0, 0, true, ""},
+		{"usage 兜底分区非空", nil, 3, 0, true, store.UsageEventDefaultPartition},
+		{"快照兜底分区非空", nil, 0, 7, true, snapshotwire.DefaultPartition},
+		{"三项都不满足", missing, 1, 2, true, store.UsageEventDefaultPartition},
 	}
-	t.Cleanup(func() {
-		_, _ = db.ExecContext(context.Background(),
-			`DELETE FROM `+snapshotwire.DefaultPartition+` WHERE request_id = $1`, blocker)
-	})
-	if n := countTableRows(ctx, t, db, snapshotwire.DefaultPartition); n != 1 {
-		t.Fatalf("%s 里有 %d 行，期望 1；这条用例的前提不成立",
-			snapshotwire.DefaultPartition, n)
-	}
-
-	var err error
-	out, _ := captureStreams(t, func() {
-		err = runPartitionCheck([]string{"--months", "1"})
-	})
-	if err == nil {
-		t.Fatal("快照兜底分区非空时应当非零退出")
-	}
-	if !strings.Contains(out, snapshotwire.DefaultPartition) {
-		t.Errorf("输出里应当带上表名 %s，实际为 %q", snapshotwire.DefaultPartition, out)
-	}
-	if !strings.Contains(err.Error(), snapshotwire.DefaultPartition) {
-		t.Errorf("错误信息里应当带上表名，实际为 %q", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := partitionProblems(tc.missing, tc.usageRows, tc.snapshotRows)
+			if tc.wantProblem != (len(got) > 0) {
+				t.Fatalf("问题清单为 %v，期望「有问题=%v」", got, tc.wantProblem)
+			}
+			if tc.wantTable != "" {
+				joined := strings.Join(got, "；")
+				if !strings.Contains(joined, tc.wantTable) {
+					t.Errorf("清单里应当带上表名 %s，实际为 %q", tc.wantTable, joined)
+				}
+			}
+			// 「三项都不满足」要三项都在，不能只报第一项。
+			if tc.name == "三项都不满足" && len(got) != 3 {
+				t.Errorf("三项都不满足时应当报 3 条，实际 %d 条：%v", len(got), got)
+			}
+		})
 	}
 }
 
@@ -272,6 +398,10 @@ func TestPartitionCheckPassesWhenClean(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 	ctx := context.Background()
+	// 这条用例断言的是「两个兜底分区都是空的」这个**全局**状态，而并发的包
+	// 会往兜底分区里塞行造它们自己的现场。锁把「动分区状态」与「读分区状态」
+	// 分开，否则它会偶发地因为别人的行而失败。
+	lockPartitionState(ctx, t, db)
 	ensureCurrentMonthPartition(t)
 
 	// 前提：两个兜底分区都是空的。不空的话这条用例会因为别的用例留下的数据
@@ -297,32 +427,34 @@ func TestPartitionCheckPassesWhenClean(t *testing.T) {
 
 // ensure 打印它真正建出来的分区名，第二次跑则明说没建任何东西。
 //
-// 用当月：这条用例要断言「建出来之后真的存在」，而挑一个远期的月份会把
-// 分区留在库里，给别的用例添麻烦。当月的分区本来就会存在。
+// # 删的是未来月份，不是当月
+//
+// 这条用例要先造出一个「缺的分区」才能验预建。**那个分区不能是当月**：
+// 删掉当月的窗口里，并发的写入（`go test ./...` 把包并行跑起来）会落进
+// `usage_events_default`，而兜底分区一有行，当月分区就再也建不回来
+// （实测 SQLSTATE 23514）——那会毁掉这一次 run 里后面所有碰分区的用例，
+// 包括别的包的。这道坑踩过一次，`dropUsageEventPartition` 里留了护栏。
+//
+// 用「当月 +2」：--months 3 会把它建出来，而它离得够远，没有任何并发写入
+// 会落到那里，删掉它也不影响当月。
 func TestPartitionEnsureReportsWhatItCreated(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 	ctx := context.Background()
+	lockPartitionState(ctx, t, db)
 
-	// 先保证它存在，再把它删掉——这样第一次 ensure 一定有东西可建。
-	ensureCurrentMonthPartition(t)
-	month := store.UsageEventPartitionName(time.Now().UTC())
-	if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS "+month); err != nil {
-		t.Fatalf("删掉当月分区失败: %v", err)
+	// 先把「当月 +2」建出来——它可能本来就不存在（种子只铺了固定的两个月）。
+	if err := runCaptured(t, func() error {
+		return runPartitionEnsure([]string{"--months", "3"})
+	}); err != nil {
+		t.Fatalf("先把三个月铺出来失败: %v", err)
 	}
-	// 无论用例怎么结束，当月分区都要回到存在状态：它后面还有别的用例要写
-	// 用量事件，而缺了它那些行会落进兜底分区。
-	t.Cleanup(func() {
-		if err := runCaptured(t, func() error {
-			return runPartitionEnsure([]string{"--months", "1"})
-		}); err != nil {
-			t.Errorf("恢复当月分区失败: %v", err)
-		}
-	})
+	month := store.UsageEventPartitionName(time.Now().UTC().AddDate(0, 2, 0))
+	dropUsageEventPartition(ctx, t, db, month)
 
 	var err error
 	out, _ := captureStreams(t, func() {
-		err = runPartitionEnsure([]string{"--months", "1"})
+		err = runPartitionEnsure([]string{"--months", "3"})
 	})
 	if err != nil {
 		t.Fatalf("ensure 失败: %v", err)
@@ -330,10 +462,13 @@ func TestPartitionEnsureReportsWhatItCreated(t *testing.T) {
 	if !strings.Contains(out, month) {
 		t.Errorf("输出里应当列出真正建出来的分区 %s，实际为 %q", month, out)
 	}
+	if !relationExists(ctx, t, db, month) {
+		t.Errorf("%s 在 ensure 之后仍然不存在", month)
+	}
 
 	// 第二次：没有缺失的分区，输出必须与「没跑成」分得开。
 	out, _ = captureStreams(t, func() {
-		err = runPartitionEnsure([]string{"--months", "1"})
+		err = runPartitionEnsure([]string{"--months", "3"})
 	})
 	if err != nil {
 		t.Fatalf("第二次 ensure 失败: %v", err)
