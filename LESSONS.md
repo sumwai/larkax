@@ -55,3 +55,4 @@
 | [37](lessons/37-migration-down-names-the-latest.md) | 用「退最近一次迁移」验回滚的用例，会被下一条迁移悄悄换掉对象 | 写「回滚最近一次」的用例、往仓库里加迁移时 | 活 |
 | [38](lessons/38-migration-number-allocated-upfront.md) | 迁移编号靠「先发后写」，扫盘面看不见已分配但未落盘的号 | 往仓库里加迁移、同时有多条分支要加迁移时 | 活 |
 | [39](lessons/39-wording-floor-of-shared-strings.md) | 一个字符串被两个入口共用时，措辞下限由最窄的那个入口决定 | 写一句会经多个入口返回给使用者的话（错误、提示）时 | 活 |
+| [40](lessons/40-spec-says-intent-not-state.md) | 任务书写的是意图不是现状，建对象之前先核对库 | 写迁移建表/建索引/加列、按任务书去建一个可能已经存在的东西时 | 活 |
