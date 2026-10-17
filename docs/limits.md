@@ -156,19 +156,23 @@ SDK 的错误解析器，见 `internal/api/error.go`），所以两处的码放�
 
 ```sh
 # 建一把 key，同时设两种额度
-larkaxctl apikey create --user alice --rate-limit-rpm 60 --quota-limit 100
+larkaxctl apikey create --user alice --rpm 60 --quota 100
 
 # 改一把已有 key 的额度（按 id 定位，见 larkaxctl apikey list）
-larkaxctl apikey update --id 42 --quota-limit 200
-larkaxctl apikey update --id 42 --rate-limit-rpm 120
+larkaxctl apikey update --id 42 --quota 200
+larkaxctl apikey update --id 42 --rpm 120
 
 # 取消其中一项（写回 NULL）
-larkaxctl apikey update --id 42 --clear-quota-limit
-larkaxctl apikey update --id 42 --clear-rate-limit-rpm
+larkaxctl apikey update --id 42 --clear-quota
+larkaxctl apikey update --id 42 --clear-rpm
 ```
 
-`--quota-limit` 最多 8 位小数。负数一律拒绝：写下 `-60` 的人几乎总是想写
+`--quota` 最多 8 位小数。负数一律拒绝：写下 `-60` 的人几乎总是想写
 `60`，让他当场改掉比让它变成一个静默的封禁好。
+
+改名之前的写法（`--rate-limit-rpm`、`--quota-limit`、`--clear-rate-limit-rpm`、
+`--clear-quota-limit`）仍然可用，完整清单在 `larkaxctl apikey --help` 末尾的
+「别名」一段。
 
 改完之后**下一个请求就生效**，不需要重启任何东西。
 

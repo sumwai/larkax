@@ -112,7 +112,7 @@ func runUserCreate(args []string) error {
 		return err
 	}
 
-	printCreatedUser(os.Stdout, os.Stderr, created)
+	printCreatedUser(humanStdout(), humanStderr(), created)
 	return nil
 }
 

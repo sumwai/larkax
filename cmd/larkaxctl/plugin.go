@@ -94,7 +94,7 @@ func runPluginList(args []string) error {
 		if jsonOutput() {
 			return emitJSON(os.Stdout, pluginListDoc(rows), nil)
 		}
-		printPluginList(os.Stdout, rows)
+		printPluginList(humanStdout(), rows)
 		return nil
 	})
 }
@@ -252,10 +252,10 @@ func runPluginPublish(args []string) error {
 	if res.Overwritten {
 		action = "已覆盖（同一版本重新发布）"
 	}
-	fmt.Printf("插件 %s %s，版本 %s，第 %d 代，状态 %s。重启后生效。\n",
+	_, _ = fmt.Fprintf(humanStdout(), "插件 %s %s，版本 %s，第 %d 代，状态 %s。重启后生效。\n",
 		res.Key, action, res.Version, res.Generation, res.Status)
 	if res.Status != pluginstore.StatusActive {
-		fmt.Printf("它还没有生效：%s 不参与注册，用 `larkaxctl plugin enable %s` 启用。\n",
+		_, _ = fmt.Fprintf(humanStdout(), "它还没有生效：%s 不参与注册，用 `larkaxctl plugin enable %s` 启用。\n",
 			pluginstore.StatusPending, res.Key)
 	}
 	return nil
@@ -388,7 +388,7 @@ func runPluginSetEnabled(args []string, enable bool) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("插件 %s %s。重启后生效。\n", key, done)
+		_, _ = fmt.Fprintf(humanStdout(), "插件 %s %s。重启后生效。\n", key, done)
 		return nil
 	})
 }

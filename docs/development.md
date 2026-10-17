@@ -459,6 +459,14 @@ go run ./cmd/larkaxctl migrate up
 旧路径同样仍然可用，`larkaxctl --help` 末尾与各条命令的 `--help` 里都写着。
 下面用的都是新写法。
 
+最常用的几个选项还各有一个**单字母简写**：`-u`（`--user`）、`-m`（`--model`）、
+`-o`（`--format`）、`-v`（`--verbose`）、`-q`（`--quiet`）。就这五个，其余参数
+一律要写全（`--channel`、`--rate-limit-rpm` 这类限额与作用域写短了容易看错）。
+简写与旧名一样列在 `--help` 末尾，用法行里只有规范名。
+
+**`-v` 不是版本号**：打版本是 `-V` 或 `--version`。这一点与多数命令行工具相反，
+原因是 `-v` 在这里留给了详细模式。
+
 **一、把规范模型加进目录。** 规范名是选路与计费共用的键，不能带空白字符：
 
 ```sh
@@ -740,7 +748,7 @@ go run ./cmd/larkaxctl wallet create --user alice
 `insufficient_quota`，见 [limits.md](limits.md) 的「钱包余额不足」一节）。给它入一笔：
 
 ```sh
-go run ./cmd/larkaxctl wallet credit --user alice --amount 100 --idempotency-key ORD-20261017-1
+go run ./cmd/larkaxctl wallet credit --user alice --amount 100 --ref ORD-20261017-1
 ```
 
 它走账本：写一组 `topup` 分录（借 `user:<ID>`、贷 `payment_gateway:<来源>`），
@@ -751,11 +759,11 @@ go run ./cmd/larkaxctl wallet credit --user alice --amount 100 --idempotency-key
 |---|---|---|---|
 | `--user` | 是 | — | 用户 ID 或用户名 |
 | `--amount` | 是 | — | 正数，最多 8 位小数（末尾的 0 不算位数） |
-| `--idempotency-key` | 是 | — | 幂等键，没有默认值 |
+| `--ref` | 是 | — | 这笔入账对应的外部单据号，同时是幂等键，没有默认值 |
 | `--asset` | 否 | settings 的 `billing.default_asset`（`CNY`） | 当前只有 `CNY` 一种 |
 | `--gateway` | 否 | `manual` | 钱的来源，进 `payment_gateway:<来源>` 科目；来源名归一成小写 |
 
-`--idempotency-key` 被确定性地映射成这次交易的 `txn_id`，所以同一条命令重跑两次只入账
+`--ref` 被确定性地映射成这次交易的 `txn_id`，所以同一条命令重跑两次只入账
 一次：第二次输出「已经入过账，本次未改动」并退出 0。同一个键配不同的金额、
 用户或通道不是重放而是冲突——退出 4，一笔都不写。
 
@@ -866,8 +874,9 @@ cat key.txt | go run ./cmd/larkaxctl doctor --live --model claude-x --credential
 | `--model <规范名>` | 这次请求用的规范模型名，`--live` 时必填 |
 | `--endpoint chat\|messages\|responses` | 打哪个入口，默认 `chat`。`chat` 是 `POST /v1/chat/completions`（`Authorization: Bearer`），`messages` 是 `POST /v1/messages`（`x-api-key`），`responses` 是 `POST /v1/responses`（`Authorization: Bearer`） |
 | `--base-url <URL>` | 网关公共入口的地址，默认 `http://127.0.0.1:8080` |
-| `--credential-stdin` / `--credential-env <变量名>` | 读 API Key 的来源，二者只能给一个 |
-| `-v` / `--verbose` | 每一项多打一段细节，默认不打 |
+| `--credential-stdin` / `--credential-env <变量名>` | 读 API Key 的来源，二者只能给一个（`--stdin` / `--env` 是同一个选项的简写） |
+| `-v` / `--verbose` | 每一项多打一段细节，默认不打。**全局选项**，写在子命令前或后都认；目前只有 `doctor` 用它 |
+| `-q` / `--quiet` | 压掉「给人看」那一档的全部输出，只留退出码（致命错误与 `-o json` 不受影响，见 [cli-output.md](cli-output.md)） |
 
 这里读的是打网关用的 **API Key**（`apikey create` 发的那把），不是渠道凭证。
 与 `channel create` 同一条约定：**凭证不能写在命令行参数里**——参数会出现在
@@ -888,24 +897,24 @@ enabled 渠道都没有，第 3 项就没有名字可查）那一项报「没跑
 两列额度可以在创建时给，也可以事后调：
 
 ```sh
-go run ./cmd/larkaxctl apikey create --user alice --rate-limit-rpm 60 --quota-limit 12.34
+go run ./cmd/larkaxctl apikey create --user alice --rpm 60 --quota 12.34
 go run ./cmd/larkaxctl apikey list                       # id、前缀、用户、备注、状态、每分钟、额度、创建、过期、最近使用
-go run ./cmd/larkaxctl apikey update --id 3 --rate-limit-rpm 120
-go run ./cmd/larkaxctl apikey update --id 3 --clear-rate-limit-rpm
+go run ./cmd/larkaxctl apikey update --id 3 --rpm 120
+go run ./cmd/larkaxctl apikey update --id 3 --clear-rpm
 ```
 
 | 旗标 | 含义 |
 |---|---|
-| `--rate-limit-rpm <整数>` | 每分钟请求额度 |
-| `--quota-limit <金额>` | 这把 key 累计可花费的金额上限，单位是该用户钱包的资产品种 |
-| `--clear-rate-limit-rpm` / `--clear-quota-limit` | 写回 NULL（继承用户默认） |
+| `--rpm <整数>` | 每分钟请求额度 |
+| `--quota <金额>` | 这把 key 累计可花费的金额上限，单位是该用户钱包的资产品种 |
+| `--clear-rpm` / `--clear-quota` | 写回 NULL（继承用户默认） |
 
 **`0` 与不填不是一回事**：`0` 是一个都不放行，NULL 是继承用户默认
 （`users` 表上目前没有这样一个默认值，所以等价于不限）。
 `update` 不给某个旗标表示「这一项不改」，与清空也不同。
-负数一律拒绝。
+负数一律拒绝。这两项**不开简写**：它们是限额，写短了容易看错也容易按错。
 
-`--quota-limit` 这一列目前只有写入路径，**没有读侧**——它记下了额度，
+`--quota` 这一列目前只有写入路径，**没有读侧**——它记下了额度，
 但还没有任何地方拿它去拦请求。
 
 ## 当前能做什么

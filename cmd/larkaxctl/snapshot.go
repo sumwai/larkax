@@ -189,7 +189,7 @@ func runSnapshotAllowlist(args []string) error {
 	if jsonOutput() {
 		return emitJSON(os.Stdout, allowlistDoc(surfaces, roots), nil)
 	}
-	printAllowlists(os.Stdout, surfaces, roots)
+	printAllowlists(humanStdout(), surfaces, roots)
 	return nil
 }
 
@@ -330,7 +330,7 @@ func runSnapshotRedact(args []string) error {
 	if err != nil {
 		return fmt.Errorf("脱敏失败: %w", err)
 	}
-	return printRedaction(os.Stdout, os.Stderr, redactor, res)
+	return printRedaction(humanStdout(), humanStderr(), redactor, res)
 }
 
 // readBoundedInput 把 r 整个读进内存，超过 limit 字节就报错。
@@ -548,7 +548,7 @@ func runSnapshotGet(args []string) error {
 		if jsonOutput() {
 			return emitJSON(os.Stdout, snapshotsDoc(req.RequestID, rows), nil)
 		}
-		printSnapshots(os.Stdout, req.RequestID, rows)
+		printSnapshots(humanStdout(), req.RequestID, rows)
 		return nil
 	})
 }
@@ -905,7 +905,7 @@ func runSnapshotCleanup(args []string) error {
 	// 采集关掉时清理照旧执行：已有的分区还要按留存期清掉，
 	// 「关掉」承诺的是不再写入新的，而不是把旧的留到永远。
 	// 打不打提示由 printCleanupHint 自己判（采集开着时一个字都不打）。
-	printCleanupHint(os.Stderr, snapCfg)
+	printCleanupHint(humanStderr(), snapCfg)
 
 	collector, err := snapshotwire.New(snapCfg, snapshotwire.Wrap(db), nil)
 	if err != nil {
@@ -958,10 +958,10 @@ func printCleanupHint(w io.Writer, cfg snapshotwire.Config) {
 func printPartitions(verb string, names []string, retentionDays int, at time.Time) {
 	if len(names) == 0 {
 		cutoff := snapshotwire.RetentionCutoff(retentionDays, at)
-		fmt.Printf("%s：0 个（留存期 %d 天，到期线 %s；没有到期的分区）\n",
+		_, _ = fmt.Fprintf(humanStdout(), "%s：0 个（留存期 %d 天，到期线 %s；没有到期的分区）\n",
 			verb, retentionDays, cutoff.Format("2006-01-02"))
 		return
 	}
-	fmt.Printf("%s %d 个分区：\n", verb, len(names))
-	fmt.Println("  " + strings.Join(names, "\n  "))
+	_, _ = fmt.Fprintf(humanStdout(), "%s %d 个分区：\n", verb, len(names))
+	_, _ = fmt.Fprintln(humanStdout(), "  "+strings.Join(names, "\n  "))
 }

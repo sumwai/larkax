@@ -24,7 +24,7 @@ const modelUsage = `larkaxctl model 管理模型目录里的规范模型。
                          [--output-limit <tokens>]
                          [--reasoning[=false]] [--tools[=false]] [--vision[=false]]
                          [--audio[=false]] [--cache[=false]] [--batch[=false]]
-                         [--modalities-input <模态,...>] [--modalities-output <模态,...>]
+                         [--input-modalities <模态,...>] [--output-modalities <模态,...>]
                          [--knowledge-cutoff <YYYY-MM-DD>] [--release-date <YYYY-MM-DD>]
   larkaxctl model list
   larkaxctl model get --model <规范名>
@@ -34,7 +34,7 @@ const modelUsage = `larkaxctl model 管理模型目录里的规范模型。
                          [--output-limit <tokens>]
                          [--reasoning[=false]] [--tools[=false]] [--vision[=false]]
                          [--audio[=false]] [--cache[=false]] [--batch[=false]]
-                         [--modalities-input <模态,...>] [--modalities-output <模态,...>]
+                         [--input-modalities <模态,...>] [--output-modalities <模态,...>]
                          [--knowledge-cutoff <YYYY-MM-DD>] [--release-date <YYYY-MM-DD>]
   larkaxctl model delete --model <规范名>
 
@@ -55,7 +55,7 @@ create 的 stdout 只有新模型的 ID，其余信息走 stderr。
 
 update **只改真的给了的那几项**，其余保持库里的值。空串与 0 是几种有含义的写法：
 --vendor '' 与 --context-limit 0 都是「把这一栏清空」（库里存 NULL），
---knowledge-cutoff '' 与 --release-date '' 同理，--modalities-input '' 表示
+--knowledge-cutoff '' 与 --release-date '' 同理，--input-modalities '' 表示
 这个模型没有这类模态。--display 清不掉——那一栏非空，它正是给人看的那一栏。
 
 六个能力标志**成组**写入（写入路径对那六列是一次全量覆盖），所以给了其中任何
@@ -73,6 +73,24 @@ reasoning_options 与 raw 是采集来的原始元信息，命令行不写它们
 **旧名仍可用**：model add 与 model show 分别等同于 model create 与
 model get，--canonical 等同于 --model。它们保留是为了不让已经在跑的脚本与
 部署流程坏掉，行为与新名字逐字相同；新写的命令请用新名字。
+
+# 别名
+
+下面几个写法仍然可用，只是不再是正式写法（用法行里只写规范名）：
+
+  -m <规范名>              同 --model，create / get / update / delete 都认
+  --canonical <规范名>     同 --model
+  --ctx <tokens>           同 --context-limit
+  --in <tokens>            同 --input-limit
+  --out <tokens>           同 --output-limit
+  --im <模态,...>          同 --input-modalities
+  --om <模态,...>          同 --output-modalities
+  --modalities-input       同 --input-modalities
+  --modalities-output      同 --output-modalities
+
+**六个能力标志（--reasoning 那六个）不开简写**：它们各有三态（不给 = 未知、
+给 = 支持、=false = 明确不支持），缩成一个字母之后「没给」与「给了 false」
+更容易看混，而这两件事在选路上的处置相反。--ctx / --in / --out / --im / --om 是纯粹的两三个词缩成一节，没有第二种读法。
 `
 
 func runModel(args []string) error {
@@ -128,7 +146,7 @@ func runModelCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	printCreatedModel(os.Stdout, os.Stderr, id, req.CanonicalName)
+	printCreatedModel(humanStdout(), humanStderr(), id, req.CanonicalName)
 	return nil
 }
 
@@ -136,15 +154,21 @@ func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
 	fs := flag.NewFlagSet("model create", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, modelUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "", "规范模型名，选路与计费共用的键")
+	stringAlias(fs, canonical, "m", sameAs("model"))
 	display := fs.String("display", "", "给人看的展示名")
 	vendor := fs.String("vendor", "", "厂商")
 	family := fs.String("family", "", "家族")
 	contextLimit := fs.Int("context-limit", 0, "上下文窗口上限（tokens），留空表示未知")
+	intAlias(fs, contextLimit, "ctx", sameAs("context-limit"))
 	inputLimit := fs.Int("input-limit", 0, "输入上限（tokens），留空表示未知")
+	intAlias(fs, inputLimit, "in", sameAs("input-limit"))
 	outputLimit := fs.Int("output-limit", 0, "输出上限（tokens），留空表示未知")
+	intAlias(fs, outputLimit, "out", sameAs("output-limit"))
 	capFlags := newCapabilityFlags(fs)
-	modalitiesIn := fs.String("modalities-input", "", "输入模态，逗号分隔")
-	modalitiesOut := fs.String("modalities-output", "", "输出模态，逗号分隔")
+	modalitiesIn := legacyStringFlag(fs, "input-modalities", "modalities-input", "", "输入模态，逗号分隔")
+	stringAlias(fs, modalitiesIn, "im", sameAs("input-modalities"))
+	modalitiesOut := legacyStringFlag(fs, "output-modalities", "modalities-output", "", "输出模态，逗号分隔")
+	stringAlias(fs, modalitiesOut, "om", sameAs("output-modalities"))
 	knowledgeCutoff := fs.String("knowledge-cutoff", "", "知识截止日期 YYYY-MM-DD")
 	releaseDate := fs.String("release-date", "", "发布日期 YYYY-MM-DD")
 	if err := fs.Parse(args); err != nil {
@@ -334,7 +358,7 @@ func runModelUpdate(args []string) error {
 	if err := catalog.NewAdmin(db).Update(ctx, req); err != nil {
 		return err
 	}
-	fmt.Printf("已更新规范模型 %s。\n", req.CanonicalName)
+	_, _ = fmt.Fprintf(humanStdout(), "已更新规范模型 %s。\n", req.CanonicalName)
 	return nil
 }
 
@@ -342,18 +366,34 @@ func runModelUpdate(args []string) error {
 //
 // 除了请求本身，它还把六个能力标志单独交出去：那六个要跟库里当前的值合并
 // （见 applyCapabilityFlags），而合并要连库，参数解析必须在连库之前完成。
+// 这几项各有别名，判「这次给没给」时要把别名一起查（见 flagGiven）。
+// 漏掉一种的表现是「`--ctx 0` 被当成没提过这一项」，也就是清空静默失效。
+var (
+	contextLimitFlagNames  = []string{"context-limit", "ctx"}
+	inputLimitFlagNames    = []string{"input-limit", "in"}
+	outputLimitFlagNames   = []string{"output-limit", "out"}
+	modalitiesInFlagNames  = []string{"input-modalities", "modalities-input", "im"}
+	modalitiesOutFlagNames = []string{"output-modalities", "modalities-output", "om"}
+)
+
 func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabilityFlag, error) {
 	fs := flag.NewFlagSet("model update", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, modelUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "", "要改的规范模型名（它本身不可改）")
+	stringAlias(fs, canonical, "m", sameAs("model"))
 	display := fs.String("display", "", "展示名")
 	vendor := fs.String("vendor", "", "厂商，给空串表示清空")
 	family := fs.String("family", "", "家族，给空串表示清空")
 	contextLimit := fs.Int("context-limit", 0, "上下文窗口上限，0 表示未知（清空）")
+	intAlias(fs, contextLimit, "ctx", sameAs("context-limit"))
 	inputLimit := fs.Int("input-limit", 0, "输入上限，0 表示未知（清空）")
+	intAlias(fs, inputLimit, "in", sameAs("input-limit"))
 	outputLimit := fs.Int("output-limit", 0, "输出上限，0 表示未知（清空）")
-	modalitiesIn := fs.String("modalities-input", "", "输入模态，逗号分隔，给空串表示清空")
-	modalitiesOut := fs.String("modalities-output", "", "输出模态，逗号分隔，给空串表示清空")
+	intAlias(fs, outputLimit, "out", sameAs("output-limit"))
+	modalitiesIn := legacyStringFlag(fs, "input-modalities", "modalities-input", "", "输入模态，逗号分隔，给空串表示清空")
+	stringAlias(fs, modalitiesIn, "im", sameAs("input-modalities"))
+	modalitiesOut := legacyStringFlag(fs, "output-modalities", "modalities-output", "", "输出模态，逗号分隔，给空串表示清空")
+	stringAlias(fs, modalitiesOut, "om", sameAs("output-modalities"))
 	knowledgeCutoff := fs.String("knowledge-cutoff", "", "知识截止日期 YYYY-MM-DD，给空串表示清空")
 	releaseDate := fs.String("release-date", "", "发布日期 YYYY-MM-DD，给空串表示清空")
 	capFlags := newCapabilityFlags(fs)
@@ -372,6 +412,10 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabil
 	// 只有**真的给了**的标志才进请求。--context-limit 0 与「没提这一项」是
 	// 两件事，而 flag 包的零值分不出它们，所以这里看 fs.Visit 记下的清单。
 	// 能力那六个同理：--tools=false 与「没提 --tools」也必须分得开。
+	//
+	// 有别名的那几项要连别名一起查（见 flagGiven）：fs.Visit 记的是**实际
+	// 写出来的那个名字**，只查规范名的表现是 `--ctx 0` 被当成「没提这一项」，
+	// 于是清空静默失效——命令报了成功，库里那一栏没动。
 	given := visitedFlags(fs)
 	markGivenCapabilityFlags(given, capFlags)
 
@@ -389,24 +433,24 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabil
 		req.Family = family
 		changes++
 	}
-	if given["context-limit"] {
+	if flagGiven(given, contextLimitFlagNames...) {
 		req.ContextLimit = contextLimit
 		changes++
 	}
-	if given["input-limit"] {
+	if flagGiven(given, inputLimitFlagNames...) {
 		req.InputLimit = inputLimit
 		changes++
 	}
-	if given["output-limit"] {
+	if flagGiven(given, outputLimitFlagNames...) {
 		req.OutputLimit = outputLimit
 		changes++
 	}
-	if given["modalities-input"] {
+	if flagGiven(given, modalitiesInFlagNames...) {
 		list := splitOptionalList(*modalitiesIn)
 		req.ModalitiesInput = &list
 		changes++
 	}
-	if given["modalities-output"] {
+	if flagGiven(given, modalitiesOutFlagNames...) {
 		list := splitOptionalList(*modalitiesOut)
 		req.ModalitiesOutput = &list
 		changes++
@@ -435,7 +479,7 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabil
 		return catalog.UpdateModelRequest{}, nil, errors.New(
 			"update 至少要改一项：给出 --display / --vendor / --family / " +
 				"--context-limit / --input-limit / --output-limit / 六个能力标志 / " +
-				"--modalities-input / --modalities-output / --knowledge-cutoff / --release-date 之一")
+				"--input-modalities / --output-modalities / --knowledge-cutoff / --release-date 之一")
 	}
 
 	return req, capFlags, nil
@@ -454,6 +498,7 @@ func runModelDelete(args []string) error {
 	fs := flag.NewFlagSet("model delete", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, modelUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "", "要删的规范模型名")
+	stringAlias(fs, canonical, "m", sameAs("model"))
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -481,7 +526,7 @@ func runModelDelete(args []string) error {
 	if err := catalog.NewAdmin(db).Delete(ctx, *canonical); err != nil {
 		return err
 	}
-	fmt.Printf("已删除规范模型 %s。\n", *canonical)
+	_, _ = fmt.Fprintf(humanStdout(), "已删除规范模型 %s。\n", *canonical)
 	return nil
 }
 
@@ -494,6 +539,7 @@ func runModelGet(args []string) error {
 	fs := flag.NewFlagSet("model get", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, modelUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "", "要看的规范模型名")
+	stringAlias(fs, canonical, "m", sameAs("model"))
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -525,7 +571,7 @@ func runModelGet(args []string) error {
 	if jsonOutput() {
 		return emitJSON(os.Stdout, modelGetDoc(model), nil)
 	}
-	printModelDetail(os.Stdout, model)
+	printModelDetail(humanStdout(), model)
 	return nil
 }
 
@@ -558,7 +604,7 @@ func runModelList(args []string) error {
 	if jsonOutput() {
 		return emitJSON(os.Stdout, modelListDoc(models), nil)
 	}
-	printModelList(os.Stdout, models)
+	printModelList(humanStdout(), models)
 	return nil
 }
 

@@ -296,10 +296,14 @@ func TestWalletCreditRejectsBadArgs(t *testing.T) {
 		{"没有 --user", []string{"--amount", "1", "--idempotency-key", "o"}, "缺少 --user"},
 		{"--user 只有空白", []string{"--user", "  ", "--amount", "1", "--idempotency-key", "o"}, "缺少 --user"},
 		{"没有 --amount", []string{"--user", "1", "--idempotency-key", "o"}, "缺少 --amount"},
-		// 幂等键必填且没有默认值：给了默认值，一次「忘了写 --idempotency-key」就会变成
+		// 外部单据号必填且没有默认值：给了默认值，一次「忘了写 --ref」就会变成
 		// 一笔与上一次互不相干的入账，而两笔在账面上都合法。
-		{"没有 --idempotency-key", []string{"--user", "1", "--amount", "1"}, "缺少 --idempotency-key"},
-		{"--idempotency-key 只有空白", []string{"--user", "1", "--amount", "1", "--idempotency-key", "  "}, "缺少 --idempotency-key"},
+		//
+		// 这两条用**规范名**写，写不出键名的那条错误说的也是规范名，所以两处
+		// 对得上；下面那些用 --idempotency-key 的走的是同一条路（别名），
+		// 顺带证明它仍然可用。
+		{"没有 --ref", []string{"--user", "1", "--amount", "1"}, "缺少 --ref"},
+		{"--ref 只有空白", []string{"--user", "1", "--amount", "1", "--ref", "  "}, "缺少 --ref"},
 		// 控制字符：键既算交易号又进备注，而备注会把 \r\n\t 换成空格——
 		// `ORD\nX` 与 `ORD X` 因此是两笔各自合法、备注却一模一样的入账。
 		{"--idempotency-key 含换行", []string{"--user", "1", "--amount", "1", "--idempotency-key", "ORD\nX"}, "控制字符"},

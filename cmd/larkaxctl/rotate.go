@@ -145,7 +145,7 @@ func runRotatePlan(ctx context.Context, rotator *channels.Rotator) error {
 	if err != nil {
 		return err
 	}
-	printRotateReport(os.Stdout, report)
+	printRotateReport(humanStdout(), report)
 	return nil
 }
 
@@ -154,18 +154,18 @@ func runRotatePlan(ctx context.Context, rotator *channels.Rotator) error {
 // 它先打一句备份提示再动手：这条命令改的是全库的凭证密文，
 // 而「先备份」是唯一一个出了事还能回头的动作。
 func runRotateApply(ctx context.Context, rotator *channels.Rotator) error {
-	_, _ = fmt.Fprintln(os.Stderr, "提示：本命令会改写 channels.credential_enc，开始前请确认已经备份。")
+	_, _ = fmt.Fprintln(humanStderr(), "提示：本命令会改写 channels.credential_enc，开始前请确认已经备份。")
 
-	report, err := rotator.Apply(ctx, rotateProgressPrinter(os.Stdout))
-	printRotateReport(os.Stdout, report)
+	report, err := rotator.Apply(ctx, rotateProgressPrinter(humanStdout()))
+	printRotateReport(humanStdout(), report)
 	if report != nil && len(report.Problems) > 0 {
-		_, _ = fmt.Fprintf(os.Stderr, "有 %d 行没能轮换，见上面的清单：它们要么密文坏了、要么缺一把主密钥，再跑一次也还是这样。\n",
+		_, _ = fmt.Fprintf(humanStderr(), "有 %d 行没能轮换，见上面的清单：它们要么密文坏了、要么缺一把主密钥，再跑一次也还是这样。\n",
 			len(report.Problems))
 	}
 	if err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintln(os.Stdout, "跑 larkaxctl secret rotate --verify 确认全库都补上了，再退役旧主密钥。")
+	_, _ = fmt.Fprintln(humanStdout(), "跑 larkaxctl secret rotate --verify 确认全库都补上了，再退役旧主密钥。")
 	return nil
 }
 
@@ -178,12 +178,12 @@ func runRotateVerify(ctx context.Context, rotator *channels.Rotator) error {
 	if err != nil {
 		return err
 	}
-	printVerifyReport(os.Stdout, report)
+	printVerifyReport(humanStdout(), report)
 	if !report.OK() {
 		return fmt.Errorf("有 %d 行不含当前主密钥 %q：现在还不能退役旧主密钥（见上面的清单）",
 			len(report.Missing), report.PrimaryKeyID)
 	}
-	_, _ = fmt.Fprintf(os.Stdout, "全库每一行都含当前主密钥 %q，可以退役旧主密钥了。\n", report.PrimaryKeyID)
+	_, _ = fmt.Fprintf(humanStdout(), "全库每一行都含当前主密钥 %q，可以退役旧主密钥了。\n", report.PrimaryKeyID)
 	return nil
 }
 

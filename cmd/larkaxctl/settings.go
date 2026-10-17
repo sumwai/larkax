@@ -100,7 +100,7 @@ func runSettingsList(args []string) error {
 		}
 		// 表先打出来。json 那一档在这里什么都不打，它打的是下面那份文档。
 		if !jsonOutput() {
-			printSettingsList(os.Stdout, entries)
+			printSettingsList(humanStdout(), entries)
 		}
 
 		// 列完之后再让 Load 校验一遍。它跑的是**服务启动时那一份**校验
@@ -115,7 +115,7 @@ func runSettingsList(args []string) error {
 			// 警告走 stderr，两档都是：stdout 是给管道下游的
 			// （`larkaxctl settings list -o json | jq`），混进一行提示就会让
 			// jq 报错——而它报的那句话离原因很远。
-			fmt.Fprintf(os.Stderr, "警告：这套配置服务加载不起来——%v\n", loadErr)
+			_, _ = fmt.Fprintf(humanStderr(), "警告：这套配置服务加载不起来——%v\n", loadErr)
 		}
 
 		if jsonOutput() {
@@ -189,7 +189,7 @@ func runSettingsSet(args []string) error {
 			return err
 		}
 
-		printSettingsSetResult(os.Stderr, key, value, actor.Username, actor.ID)
+		printSettingsSetResult(humanStderr(), key, value, actor.Username, actor.ID)
 		return nil
 	})
 }
