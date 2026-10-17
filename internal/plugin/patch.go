@@ -53,11 +53,26 @@ var patchableBodyFields = []string{
 // 这一层的行为不需要改。
 const headerPrefix = "x-larkax-"
 
-// ErrPatchScope 表示插件改了一个它不该改的东西。
+// ErrPatchScope 表示插件给的补丁不符合契约。
 //
-// 与「改错了值」分开：越界是**契约违规**，要在上传期或首次运行时就被看见，
+// 三种情形共用这一个哨兵：
+//
+//   - 字段根本不存在，名字拼错了（`channeId`）——由各补丁类型的 UnmarshalJSON
+//     报出，见 decodePatch；
+//   - 字段存在，但插件不许改（请求体里的 `model`）；
+//   - 字段对而值不能用（`max_tokens` 非正）。
+//
+// 它们在实现上是同一件事：**这份补丁不能原样收下**，而作者要做的动作也一样，
+// 都是回去改插件。分成三个哨兵只会让同一类错误有三个名字，
+// 调用方要同时判三个才算判全。
+//
+// 与「插件跑挂了」分开：这是**契约违规**，要在上传期或首次运行时就被看见，
 // 而不是当成一次普通的插件失败悄悄丢掉。
-var ErrPatchScope = errors.New("插件试图修改超出权限的字段")
+//
+// 报错文本是三者的上界，所以它只说「不符合契约」而不说具体哪一条：
+// 具体原因在被包住的那一层（`json: unknown field "channeId"`、
+// `max_tokens 必须为正，收到 0`），那里才说得准。
+var ErrPatchScope = errors.New("插件给的补丁不符合契约")
 
 // ApplyRequestBodyPatch 把补丁合并进请求体。
 //
