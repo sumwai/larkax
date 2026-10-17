@@ -239,11 +239,31 @@ func ReasoningExceedsCompletion(u channel.Usage) bool {
 // 运维改一条配置就能修好，所以让结算失败是合适的处置。上游报的数自相矛盾
 // 属于另一类，见 ReasoningExceedsCompletion。
 func Validate(usage Usage, prices Prices) error {
-	if usage.TotalTokens() < 0 {
-		// 负用量只可能来自解析错误（例如把带符号整数读反）。
-		// 放过去会算出一笔负数消费，即「上游付钱给用户」。
-		return fmt.Errorf("用量为负: %d", usage.TotalTokens())
+	// 五个 token 字段与它们在规则里的键名。下面两处判据（逐项判负、
+	// 逐项判单价漏写）共用这张表，免得将来加一个字段时只补了其中一处。
+	fields := []struct {
+		name  string
+		count int64
+	}{
+		{"prompt", usage.PromptTokens},
+		{"completion", usage.CompletionTokens},
+		{"cache_read", usage.CacheReadTokens},
+		{"cache_write", usage.CacheWriteTokens},
+		{"reasoning", usage.ReasoningTokens},
 	}
+
+	// 负用量**逐项**判，而不是判五项之和。
+	//
+	// 负用量只可能来自解析错误（例如把带符号整数读反）。放过去会算出一笔
+	// 负数消费，即「上游付钱给用户」。判和看不出来：单项为负、被另一项的正值
+	// 抵消时和为 0 或为正，与「完全没用 token」分不出来。
+	// 口径与 internal/billing/expr 的 validateUsage 一致——那里一直是逐项的。
+	for _, f := range fields {
+		if f.count < 0 {
+			return fmt.Errorf("用量为负: %s = %d", f.name, f.count)
+		}
+	}
+
 	for name, count := range usage.UnitCounts {
 		if count < 0 {
 			return fmt.Errorf("计量项 %q 的数量为负: %d", name, count)
@@ -255,18 +275,9 @@ func Validate(usage Usage, prices Prices) error {
 	// token 单价同样不能漏。判据是「规则有没有写过这个键」，而不是「单价是不是
 	// 0」——显式写 0 是「这一项免费」，正当；没写则落到零值，结果一样是 0 元，
 	// 两者在 money.Amount 上分不出来，所以靠 Prices.Declared 区分。
-	for _, t := range []struct {
-		name  string
-		count int64
-	}{
-		{"prompt", usage.PromptTokens},
-		{"completion", usage.CompletionTokens},
-		{"cache_read", usage.CacheReadTokens},
-		{"cache_write", usage.CacheWriteTokens},
-		{"reasoning", usage.ReasoningTokens},
-	} {
-		if t.count > 0 && !prices.Declared[t.name] {
-			return fmt.Errorf("%w: %q（规则里没写这个单价；要免费就显式写 0）", ErrMissingPrice, t.name)
+	for _, f := range fields {
+		if f.count > 0 && !prices.Declared[f.name] {
+			return fmt.Errorf("%w: %q（规则里没写这个单价；要免费就显式写 0）", ErrMissingPrice, f.name)
 		}
 	}
 	return nil
