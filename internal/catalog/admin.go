@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/overrides"
 )
 
@@ -140,6 +141,8 @@ type CreateModelRequest struct {
 	// Capabilities 是三态能力矩阵（见 Capabilities）：nil 落库为 NULL =
 	// 未知。零值就是「一项都没配」，所以新建时不给任何一个开关，
 	// 库里就是六个 NULL——不是六个 false。
+	//
+	// Endpoints 那一项同一套口径：nil 落 NULL、空切片落 `{}`、非空落那几条。
 	Capabilities Capabilities
 
 	ModalitiesInput  []string
@@ -185,6 +188,10 @@ func (a *Admin) Create(ctx context.Context, req CreateModelRequest) (int64, erro
 	if err != nil {
 		return 0, err
 	}
+	endpoints, err := endpointValues("capabilities.endpoints", req.Capabilities.Endpoints)
+	if err != nil {
+		return 0, err
+	}
 
 	var id int64
 	err = a.db.QueryRowContext(ctx, `
@@ -194,11 +201,13 @@ func (a *Admin) Create(ctx context.Context, req CreateModelRequest) (int64, erro
 			 supports_reasoning, supports_tools, supports_vision,
 			 supports_audio, supports_cache, supports_batch,
 			 modalities_input, modalities_output, reasoning_options,
-			 canonical_model_id, knowledge_cutoff, release_date, raw)
+			 canonical_model_id, knowledge_cutoff, release_date, raw,
+			 supported_endpoints)
 		VALUES ($1, $2, $3, $4, $5, $6, $7,
 		        $8, $9, $10, $11, $12, $13,
 		        $14, $15, $16::jsonb,
-		        $17, $18::date, $19::date, $20::jsonb)
+		        $17, $18::date, $19::date, $20::jsonb,
+		        $21)
 		RETURNING id`,
 		name, display, textOrNull(req.Vendor), textOrNull(req.Family),
 		contextLimit, inputLimit, outputLimit,
@@ -207,7 +216,7 @@ func (a *Admin) Create(ctx context.Context, req CreateModelRequest) (int64, erro
 		nonNilStrings(req.ModalitiesInput), nonNilStrings(req.ModalitiesOutput),
 		string(reasoning), textOrNull(req.CanonicalModelID),
 		dateOrNull(req.KnowledgeCutoff), dateOrNull(req.ReleaseDate),
-		string(raw)).Scan(&id)
+		string(raw), endpoints).Scan(&id)
 	if err != nil {
 		return 0, createModelError(name, err)
 	}
@@ -360,6 +369,17 @@ func modelUpdateSets(req UpdateModelRequest) ([]string, []any, error) {
 		add("supports_audio", req.Capabilities.Audio)
 		add("supports_cache", req.Capabilities.Cache)
 		add("supports_batch", req.Capabilities.Batch)
+		// 端点清单跟着能力那一组一起写：它与那六列是同一行上的同一组声明
+		// （见 Capabilities），分成两个开关的话「只改能力」会静默把端点清空
+		// ——端点被清空等于放行，那是**放宽**，不会有人来报错。
+		//
+		// 因此调用方要「只改一项」时得先读出当前那一行再合并，与那六列同一条
+		// 规矩（`larkaxctl model update` 就是这么做的）。
+		endpoints, err := endpointValues("capabilities.endpoints", req.Capabilities.Endpoints)
+		if err != nil {
+			return nil, nil, err
+		}
+		add("supported_endpoints", endpoints)
 	}
 	if req.ModalitiesInput != nil {
 		add("modalities_input", nonNilStrings(*req.ModalitiesInput))
@@ -897,6 +917,40 @@ func nonNilStrings(value []string) []string {
 		return []string{}
 	}
 	return value
+}
+
+// endpointValues 把一组端点编成可以交给驱动的值。
+//
+// # 三态一个都不能少
+//
+//	nil   落 NULL = 未知（这一项不参与选路判据）
+//	{}    落 `{}` = 明确一条都不支持
+//	非空  落那几条
+//
+// 所以 nil 不折成空切片——supported_endpoints 与 modalities 那两列不同，
+// 它可空，而 NULL 与 `{}` 在选路里的结论正好相反（见 Capabilities.Endpoints）。
+//
+// # 为什么每一项都要过一遍解析
+//
+// 入参是 []channel.Endpoint，而它只是 string 的别名：调用方可以 `Endpoint(x)`
+// 塞进任意串。校验放在这里、与读取侧的 decodeEndpoints 共用一套判据——两侧
+// 各判各的时，症状是「写进去的值读不出来」，而那要等到有人真的读那一行才发现。
+//
+// 返回的 nil 是**这一列的合法取值**（SQL NULL），不是「出错了但没报」——
+// 所以这里显式 nolint，与 normalizeLimit 同一条理由。
+func endpointValues(field string, values []channel.Endpoint) (any, error) {
+	if values == nil {
+		return nil, nil //nolint:nilnil // 见上
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		endpoint, err := channel.ParseEndpoint(string(value))
+		if err != nil {
+			return nil, fmt.Errorf("%s 里有一项不是合法的端点：%w", field, err)
+		}
+		out = append(out, string(endpoint))
+	}
+	return out, nil
 }
 
 // encodeJSONObject 把 map 编成 jsonb 的文本形式。

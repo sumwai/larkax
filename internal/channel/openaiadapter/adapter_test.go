@@ -34,6 +34,19 @@ func TestTypeAndProtocol(t *testing.T) {
 	if a.Protocol() != channel.ProtocolOpenAI {
 		t.Errorf("Protocol() = %q", a.Protocol())
 	}
+
+	// 端点那一栏：适配器自述的路径要与它声明的协议算出来的那条一致（注册表
+	// 启动时也自检这一条，见 channel.Registry.Register），而**类型名必须落在
+	// 协议取值上**——选路按渠道的 type 算这条渠道打哪条端点
+	// （channel.Protocol(<type>).Endpoint()，见 internal/channels），两者不同名
+	// 时算出来是空串（= 不知道 = 放行），这条渠道的端点判据会静默失效。
+	if got := a.Endpoint(); got != channel.EndpointChatCompletions {
+		t.Errorf("Endpoint() = %q，期望 %q", got, channel.EndpointChatCompletions)
+	}
+	if got := channel.Protocol(Type).Endpoint(); got != a.Endpoint() {
+		t.Errorf("channel.Protocol(%q).Endpoint() = %q，与适配器自述的 %q 不一致："+
+			"Type() 必须与它说的协议取值同名", Type, got, a.Endpoint())
+	}
 }
 
 func TestChatSuccess(t *testing.T) {

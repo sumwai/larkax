@@ -423,6 +423,20 @@ type Adapter interface {
 	// Protocol 返回它说哪套协议。
 	Protocol() Protocol
 
+	// Endpoint 返回这套适配器把请求发到哪条路径。
+	//
+	// 它与 Protocol 一一对应（见 Protocol.Endpoint），注册表拿它做自检：两者
+	// 对不上说明适配器抄错了——声明 openai 却往 responses 那条路径发。
+	//
+	// 为什么要它而不是从别处推：选路要判「这个模型的目录声明里有没有这条
+	// 端点」，而那条端点必须与**适配器真正发出去的路径**是同一个东西。
+	// 让选路去猜（按协议族再写一份映射）就是第二份判据，它一旦与适配器漂移，
+	// 表现是「选中的渠道配好了却打不通」，而那与上游真的不支持这件事长得一样。
+	//
+	// 实现返回的必须是本包的那几个常量之一，而且要**用在发请求那一处**：
+	// 路径写字面量、这里另说一个常量的话，两者可以各自改而自检看不出来。
+	Endpoint() Endpoint
+
 	// Chat 发起一次非流式请求。
 	Chat(ctx context.Context, ch Channel, req *Request) (*Response, error)
 
@@ -562,6 +576,14 @@ func (r *Registry) Register(a Adapter) error {
 	}
 	if !a.Protocol().valid() {
 		return fmt.Errorf("适配器 %q 声明的协议 %q 未知", t, a.Protocol())
+	}
+	// 端点的自检：协议决定适配器打哪条路径（Protocol.Endpoint），而适配器
+	// 自述的端点必须与它一致。抄错的表现是静默的——选路按声明的协议算出
+	// 端点去比对目录，而请求实际发去了另一条路径，于是那次比对判了个别的
+	// 东西；上游那边则是 404 或 400，看不出是我们配错了。
+	if want := a.Protocol().Endpoint(); a.Endpoint() != want {
+		return fmt.Errorf("适配器 %q 声明的协议是 %q（那条适配器应当打 %q），但它说自己的端点是 %q",
+			t, a.Protocol(), want, a.Endpoint())
 	}
 
 	r.mu.Lock()

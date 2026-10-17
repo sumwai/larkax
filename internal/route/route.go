@@ -28,7 +28,9 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
@@ -107,15 +109,33 @@ type Candidate struct {
 	// 两边缺一个都判不出来。候选的来源（internal/channels）读目录、把这份
 	// 数据摆进来，本包只按它判。
 	Profile *ModelProfile
+
+	// Endpoint 是这条候选把请求发到哪条路径，由渠道 type 指向的协议决定
+	// （channel.Protocol.Endpoint()）。空串 = 未知，不判。
+	//
+	// # 为什么在候选上而不在请求上
+	//
+	// 一条请求走哪条端点**不是请求的属性**：同一份 chat 形状的请求可以发给
+	// 一家说 chat 的上游，也可以发给另一家说 responses 的上游，差别在渠道。
+	// 所以它是候选的属性，由候选的来源（internal/channels）按渠道 type 算好
+	// 摆进来，判据只在这里用它（见 Needs 与 profileRejection）。
+	//
+	// 空串只有一种来路：库里那个 type 当前版本的二进制不认识。那种候选本来
+	// 就选不中（执行器会报 ErrUnknownType），所以这里不拿一条拿不准的判据
+	// 再挡它一次——「不知道」站在放行这一侧。
+	Endpoint channel.Endpoint
 }
 
 // ModelProfile 是模型目录对一个规范模型声明的能力与上限。
 //
-// # 判据只看三项能力与两个上限
+// # 判据只看三项能力、一份端点清单与两个上限
 //
 // 目录里的能力矩阵有六列，这里只带判据用得上的三项：请求里能观察到、
 // 而模型可能不支持的。audio / cache / batch 没有对应的请求信号（请求里
 // 看不出「这次要用缓存」），带上它们只是让这个结构体看起来像那张表。
+//
+// 端点清单是**另一类**判据：它不来自请求（见 Endpoints），而来自这条候选
+// 往哪条路径发。两者放在一起是因为它们都挂在同一条目录记录上。
 //
 // # 三项都是三态，未知与「不支持」的处置相反
 //
@@ -140,6 +160,19 @@ type ModelProfile struct {
 	Vision    *bool
 	Reasoning *bool
 
+	// Endpoints 是目录声明这个模型在上游哪几条端点上被服务。
+	// nil = 未知，不判；非 nil 时按集合判——候选那条端点不在里面就出局。
+	//
+	// 三态与上面三项同一套口径，只是这里用切片表达「未知」：
+	//
+	//	nil    未知：这一列是 NULL，从没配过。**这一项不参与判据**，放行
+	//	{}     明确声明一条都不支持：任何候选都出局
+	//	非空   候选的端点不在里面就出局
+	//
+	// 「未知」与「一条都不支持」必须分开，理由同上：把 nil 读成空集合会让
+	// 一条只填了名字的记录选不到任何候选，而那个上游其实服务着这个模型。
+	Endpoints []channel.Endpoint
+
 	// ContextLimit 是上下文窗口（输入 + 输出）。0 表示未知，不判。
 	ContextLimit int64
 	// OutputLimit 是单次输出的上限。0 表示未知，不判。
@@ -150,6 +183,10 @@ type ModelProfile struct {
 //
 // 它只装「能从请求本身读出来、且目录里有对应声明」的那几项：用到哪些能力、
 // 要花多少 token。余额、区域、合规之类不在其中——那些不是模型目录能回答的。
+//
+// **端点也不在其中**：一条请求走哪条路径不是它的属性（同一份 chat 形状的
+// 请求可以发给说 chat 的上游，也可以发给说 responses 的上游），它由候选
+// 决定（见 Candidate.Endpoint 与 profileRejection）。
 type Needs struct {
 	// Tools 表示这次请求带工具：有工具定义，或消息里有工具调用/结果块。
 	Tools bool
@@ -209,9 +246,15 @@ func NeedsOf(req *channel.Request) Needs {
 
 // profileRejection 说明这条候选为什么接不住这次请求，空串表示放行。
 //
-// 能力与上限两类判据的处置相同（这条候选出局），所以在这里合成一个函数，
-// 由 Select 记进 Exclusion——分成两处判会让「为什么没选那个渠道」在排查时
-// 要读两个地方，而它们记的是同一份 Profile 上的结论。
+// 能力、端点与上限三类判据的处置相同（这条候选出局），所以在这里合成一个
+// 函数，由 Select 记进 Exclusion——分成几处判会让「为什么没选那个渠道」在
+// 排查时要读几个地方，而它们记的是同一份 Profile 上的结论。
+//
+// 判据的先后是：能力（请求要不要用）→ 端点（往哪条路径发）→ 上限（装不装
+// 得下）。一条候选只记**第一个**命中的理由，所以顺序决定了现场看到哪一条。
+// 端点排在能力之后是因为它更接近「这条渠道根本不该试」：能力那一栏说的是
+// 「这个模型做不做得了这件事」，调参数或许能绕过；端点不对则怎么改请求都
+// 没用——换一条候选才行。
 func (c Candidate) profileRejection(needs Needs) string {
 	p := c.Profile
 	if p == nil {
@@ -225,6 +268,38 @@ func (c Candidate) profileRejection(needs Needs) string {
 		return "模型目录里不支持图片"
 	case needs.Reasoning && declaredUnsupported(p.Reasoning):
 		return "模型目录里不支持推理"
+	}
+
+	// 端点：目录说这个模型在哪几条端点上被服务，而这条候选把请求发到
+	// 另一条上去——上游会回 400 unsupported_model，从我们这边看与「模型
+	// 不存在」长得一样，且只有真打一次才发现。所以挡在选路这一层。
+	//
+	// # 三个状态，只有「一条都不支持」与「不在这里面」出局
+	//
+	//   nil   未知（没配过）：**不参与判据**，放行
+	//   {}    明确一条都不支持：任何候选都出局
+	//   非空  候选的端点不在里面就出局
+	//
+	// 判据写在 `p.Endpoints != nil` 上而不是 `len(p.Endpoints) > 0` 上：
+	// 后者会把「明确一条都不支持」也判成未知，而它与声明的语义正好相反
+	// ——那是 #485 修过的同一类形状（把「没配过」与「配了说没有」合成一个
+	// 零值）。有了这一档，`{}` 才是一种**能用的语法**：把一个模型暂时从
+	// 所有渠道上摘下来，改一处声明就够，不必逐个渠道去动 models 白名单。
+	//
+	// # 另一个「不知道」也放行
+	//
+	// 候选的端点为空串（库里那个 type 当前版本的二进制不认识）时不判。
+	// 理由与三项能力的 declaredUnsupported 同一条：判据要站在放行这一侧。
+	// 那种候选本来就选不中——执行器会报 ErrUnknownType 并换下一个。
+	if p.Endpoints != nil && c.Endpoint != "" && !slices.Contains(p.Endpoints, c.Endpoint) {
+		if len(p.Endpoints) == 0 {
+			// `{}`：明确一条都不支持。它没有清单可列，所以单独说一句——
+			// 「只在这些端点上服务：」后面空着的话，读的人会以为那句话
+			// 没打完，而这一档的结论是「任何候选都选不中」。
+			return fmt.Sprintf("模型目录里这个模型一条端点都不支持；这条候选走的是 %s", c.Endpoint)
+		}
+		return fmt.Sprintf("模型目录里只在这些端点上服务：%s；这条候选走的是 %s",
+			joinEndpoints(p.Endpoints), c.Endpoint)
 	}
 
 	// 上限：只有目录里填了数（> 0）时才判。0 是未知（库里是 NULL），不判
@@ -250,6 +325,18 @@ func (c Candidate) profileRejection(needs Needs) string {
 // 而那正是这条三态要修掉的东西（见 ModelProfile 与 #485）。
 func declaredUnsupported(declared *bool) bool {
 	return declared != nil && !*declared
+}
+
+// joinEndpoints 把目录声明的那几条端点拼成一句供排查用的话。
+//
+// 取值本身就是路径，用逗号分隔而不是顿号：它们是 ASCII 的 URL 片段，与中文
+// 顿号混排读起来像两个词粘在一起。
+func joinEndpoints(endpoints []channel.Endpoint) string {
+	parts := make([]string, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		parts = append(parts, string(endpoint))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // Health 是渠道的健康度。
@@ -508,11 +595,11 @@ func (p Plan) pinFirst(channelID int64) Plan {
 //
 // # 判据的先后
 //
-// 硬性条件（Eligible）→ 渠道是否声明支持这个模型 → 模型目录声明的能力与
-// 上限（needs 对 Profile）→ 运行状态（健康度、额度）。前两条是渠道级的配置，
-// 中间那条是模型级的声明，最后一条是「现在怎么样」——一条候选只记**第一个**
-// 命中的理由，所以顺序决定了排查时看到的是哪一条：先看到「这条配置本身
-// 就不该进来」，再看到「它此刻不可用」。
+// 硬性条件（Eligible）→ 渠道是否声明支持这个模型 → 模型目录声明的能力、
+// 端点与上限（needs 与 Candidate.Endpoint 对 Profile）→ 运行状态（健康度、
+// 额度）。前两条是渠道级的配置，中间那条是模型级的声明，最后一条是「现在
+// 怎么样」——一条候选只记**第一个**命中的理由，所以顺序决定了排查时看到的
+// 是哪一条：先看到「这条配置本身就不该进来」，再看到「它此刻不可用」。
 //
 // needs 是这次请求对上游的要求（见 NeedsOf）。它由调用方给而不是在这里算：
 // 同一个请求在插件那条路上也要被同一套判据筛（见 ChatPlan），而那一步由

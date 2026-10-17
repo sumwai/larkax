@@ -330,6 +330,10 @@ type fakeAdapter struct {
 
 func (f *fakeAdapter) Type() string               { return f.typ }
 func (f *fakeAdapter) Protocol() channel.Protocol { return f.protocol }
+
+// Endpoint 按协议推：这个替身不做协议转换，也就没有第二条路径可声明，
+// 而注册表要求自述的端点与 Protocol 对得上（见 channel.Registry.Register）。
+func (f *fakeAdapter) Endpoint() channel.Endpoint { return f.protocol.Endpoint() }
 func (f *fakeAdapter) Chat(context.Context, channel.Channel, *channel.Request) (*channel.Response, error) {
 	return &channel.Response{}, nil
 }
