@@ -13,8 +13,15 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/plugin"
+	"github.com/sumwai/larkax/internal/plugin/sandbox"
 	"github.com/sumwai/larkax/internal/testdb"
 )
+
+// allCaps 是宿主认识的全部能力名。
+//
+// 下面这几个加载用例测的是「读表、编译、发布」，不是能力收窄——按这次装配
+// 提供了什么收窄那一条另有用例（见 TestLoadRegistryNarrowsByProvided）。
+func allCaps() []string { return sandbox.CapabilityNames() }
 
 // testDB 连上集成测试用的库，连不上就跳过。
 //
@@ -114,7 +121,7 @@ func TestLoadRegistryLoadsActivePlugins(t *testing.T) {
 	insertPlugin(t, db, a, "1.0.0", StatusActive, 0)
 	insertPlugin(t, db, b, "1.0.0", StatusActive, 0)
 
-	reg, err := New(db).LoadRegistry(ctx, discardLogger())
+	reg, err := New(db).LoadRegistry(ctx, discardLogger(), allCaps())
 	if err != nil {
 		t.Fatalf("加载失败: %v", err)
 	}
@@ -122,6 +129,58 @@ func TestLoadRegistryLoadsActivePlugins(t *testing.T) {
 		if _, ok := reg.Get(key); !ok {
 			t.Errorf("插件 %s 该被装上，实际不在注册表里", key)
 		}
+	}
+}
+
+// kvAskingSource 是一段申请了 kv 的源码，用来测「允许集由调用方给的那一份决定」。
+func kvAskingSource(key string) string {
+	return fmt.Sprintf(`
+import { definePlugin } from "larkax";
+export const meta = { key: %q, version: "1.0.0", apiVersion: 1, capabilities: ["kv"] };
+export default definePlugin({ onUsage() { return { promptTokens: 1 }; } });
+`, key)
+}
+
+// 判据：加载器按**调用方给的**那份能力清单收窄，它自己不认识任何能力名。
+//
+// 这是「两份清单同源」在存储这一层的落点：清单只有一处算得出来（宿主那一侧，
+// 按这次装配接上了什么算），本包把它传下去就是了。这里给一份只有 log 的清单，
+// 申请 kv 的插件就进不来；给上 kv，同一行数据就上线。
+//
+// 少了「给上 kv 就上线」那一半，一个什么都不发布的实现也能过。
+func TestLoadRegistryNarrowsByProvided(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	key := uniqueKey("load-kv")
+	insertPluginRaw(t, db, key, "1.0.0", StatusActive, 0,
+		goodMeta(key, "1.0.0"), kvAskingSource(key))
+
+	var log bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&log, nil))
+
+	reg, err := New(db).LoadRegistry(ctx, logger, []string{sandbox.CapabilityLog})
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if _, ok := reg.Get(key); ok {
+		t.Error("这份装配没提供 kv，申请 kv 的插件不该上线——它该在注册期就失败")
+	}
+	// 跳过是安静的：日志里不点名的话，线上看到的就是「我那个插件没生效」。
+	if !strings.Contains(log.String(), key) {
+		t.Errorf("跳过的插件该在日志里被点名:\n%s", log.String())
+	}
+
+	reg, err = New(db).LoadRegistry(ctx, discardLogger(),
+		[]string{sandbox.CapabilityLog, sandbox.CapabilityKV})
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	p, ok := reg.Get(key)
+	if !ok {
+		t.Fatal("清单里提供了 kv，这个插件该上线")
+	}
+	if len(p.Capabilities) != 1 || p.Capabilities[0] != sandbox.CapabilityKV {
+		t.Errorf("生效的能力 = %v，期望 [%s]", p.Capabilities, sandbox.CapabilityKV)
 	}
 }
 
@@ -248,7 +307,7 @@ func TestLoadRegistrySkipsBrokenPlugin(t *testing.T) {
 	var log bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&log, nil))
 
-	reg, err := New(db).LoadRegistry(ctx, logger)
+	reg, err := New(db).LoadRegistry(ctx, logger, allCaps())
 	if err != nil {
 		t.Fatalf("一个坏插件不该让加载整体失败: %v", err)
 	}
@@ -281,7 +340,7 @@ func TestLoadRegistryReportsLoaderFailureNotPluginFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err = New(db).LoadRegistry(ctx, discardLogger())
+	_, err = New(db).LoadRegistry(ctx, discardLogger(), allCaps())
 	if err == nil {
 		t.Fatal("连不上库时该报错")
 	}

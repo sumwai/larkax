@@ -78,6 +78,12 @@ var (
 const (
 	// CodeBadArgument 表示插件给的参数不合法。
 	CodeBadArgument = "bad_argument"
+	// CodeQuotaExceeded 表示这次写入会越过宿主给这个插件的配额。
+	//
+	// 与 CodeBadArgument 分开：参数本身没有错，换一个参数也还是写不进去——
+	// 插件该做的动作是**先删掉一些旧键**，或者接受这次写失败。与
+	// CodeUnavailable 分开：宿主是好的，是这份配额到顶了，重试没有意义。
+	CodeQuotaExceeded = "quota_exceeded"
 	// CodeUnavailable 表示宿主依赖不可用（存储、日历数据源等）。
 	CodeUnavailable = "unavailable"
 	// CodeTimeout 表示这次调用的预算已经用尽。

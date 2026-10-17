@@ -23,10 +23,14 @@ package plugin
 // 之前就返回——两条路于是各有各的文案，不会混成一句「加载插件失败」。
 //
 // onSkip 为 nil 时静默跳过（只有测试会这么用；生产路径一律传一个记日志的）。
-func PublishPartial(regs []Registration, onSkip func(Registration, error)) (*Registry, error) {
+//
+// provided 是这次装配真的提供的能力名，交给 CompileWith（见那个函数的注释）：
+// 「插件坏了」那一档里因此包含「它申请了这份装配没有的能力」——那是注册期就该
+// 失败的一类，而不是注册成功、运行期拿到 undefined。
+func PublishPartial(regs []Registration, provided []string, onSkip func(Registration, error)) (*Registry, error) {
 	compiled := make([]*Plugin, 0, len(regs))
 	for _, reg := range regs {
-		p, err := Compile(reg)
+		p, err := CompileWith(reg, provided)
 		if err != nil {
 			if onSkip != nil {
 				onSkip(reg, err)

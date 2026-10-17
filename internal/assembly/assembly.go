@@ -271,12 +271,24 @@ func Build(cfg Config) (*App, error) {
 			maxOutputTokensKey, maxOutputTokens, minMaxOutputTokens, maxMaxOutputTokens)
 	}
 
-	calendarEnv, err := buildCalendar(cfg.DB)
+	cal, calendarEnv, err := buildCalendar(cfg.DB)
 	if err != nil {
 		return nil, err
 	}
 
-	plugins, pluginLimits, err := buildPlugins(cfg, logger)
+	// 插件那一路的宿主能力。日历与计价那一路共用同一个 *calendar.Calendar
+	// （它不带请求状态，见 buildCalendar 的注释），KV 是插件专有的。
+	//
+	// **这份 wiring 是「允许申请哪些能力」的唯一来源**（见它的 provided）：
+	// 注册校验不再读一份手写的清单，而是问这里真的接上了什么。
+	wiring := pluginWiring{
+		logger:   logger,
+		now:      cfg.Now,
+		calendar: pluginCalendar{cal: cal, peak: pluginPeakSchedule},
+		kv:       pluginstore.NewKV(cfg.DB),
+	}
+
+	plugins, pluginLimits, err := buildPlugins(cfg, logger, wiring)
 	if err != nil {
 		return nil, err
 	}
@@ -362,27 +374,18 @@ func Build(cfg Config) (*App, error) {
 	handler.Quota = ledgerStore
 	// 插件链路：注册表与限额来自启动期（见 buildPlugins），宿主能力按请求
 	// 现拼。三者一起给，缺一个的后果不同——注册表为 nil 时插件根本不跑
-	// （与关掉开关同形），宿主构造为 nil 时插件拿不到 log/calendar/kv。
+	// （与关掉开关同形），宿主构造为 nil 时插件拿不到任何宿主能力。
 	//
 	// 限额为零值**不是**「没有上限」，也不是立刻超时：`sandbox.Limits.normalize`
 	// 会把零与负数当成「没设」，补成 `DefaultLimits`（5s 调用上限、64MB 内存）。
 	// 也就是说 settings 里那四个键都没配时，插件跑在默认限额下——**能跑**。
 	//
-	// 宿主能力里的日历与 KV 这一版**都没有接**：KV 还没有生产实现
-	// （只有插件树里的测试桩），日历要先有一个 host.CalendarSource 适配
-	// internal/calendar——两件事各自是另一片。没接的能力不注入，插件侧
-	// 收到的是「能力未启用」而不是一个永远失败的空壳（见 host.Build）。
+	// 日历与 KV 这一版都接上了（见 wiring）：接上之后插件不再需要自己折算时区，
+	// 也有了自己的持久化存储；接不上时那两项能力**不注入**，而「能不能注入」
+	// 与「注册时允许申请哪些」读的是同一份 wiring（见 pluginWiring.provided）。
 	handler.Plugins = plugins
 	handler.PluginLimits = pluginLimits
-	handler.PluginHost = func(p *plugin.Plugin, requestID string, userID int64) sandbox.Host {
-		return host.Build(host.Env{
-			Logger:    logger,
-			Plugin:    p.Key,
-			RequestID: requestID,
-			UserID:    userID,
-			Now:       cfg.Now,
-		})
-	}
+	handler.PluginHost = wiring.host
 	// 幂等记录的读与写走同一个 Store：入口读它、落库层在预留那个事务里写它，
 	// 两边读写的列是同一批（见 internal/idempotency 的包注释）。
 	//
@@ -410,6 +413,12 @@ func Build(cfg Config) (*App, error) {
 
 // buildPlugins 按 settings 里的开关加载插件。
 //
+// # 去哪张表、装了哪些能力
+//
+// wiring 一路传到 store.LoadRegistry 与装配出来的宿主构造：注册时按它**真的
+// 提供**的能力收窄（见 pluginWiring.provided），请求期按它注入。两处读同一份，
+// 于是不会出现「申请到了、运行期是 undefined」。
+//
 // # 关掉时不读另外三个键
 //
 // plugin.enabled 为 false 时**不构造注册表，也不去读另外三个键**（见
@@ -424,7 +433,7 @@ func Build(cfg Config) (*App, error) {
 // 与「一个坏插件」不同：读表失败（连接断了、表不在）说明这一份配置整体不可信，
 // 装出来的服务会带着一个空注册表跑，而「插件全都没跑」与「没有插件」在日志里
 // 长得一样。所以那一种在这里直接失败。
-func buildPlugins(cfg Config, logger *slog.Logger) (*plugin.Registry, sandbox.Limits, error) {
+func buildPlugins(cfg Config, logger *slog.Logger, wiring pluginWiring) (*plugin.Registry, sandbox.Limits, error) {
 	pluginCfg, err := plugin.LoadConfig(cfg.Settings)
 	if err != nil {
 		return nil, sandbox.Limits{}, fmt.Errorf("读取插件配置失败: %w", err)
@@ -436,11 +445,136 @@ func buildPlugins(cfg Config, logger *slog.Logger) (*plugin.Registry, sandbox.Li
 	ctx, cancel := context.WithTimeout(context.Background(), pluginLoadTimeout)
 	defer cancel()
 
-	registry, err := pluginstore.New(cfg.DB).LoadRegistry(ctx, logger)
+	registry, err := pluginstore.New(cfg.DB).LoadRegistry(ctx, logger, wiring.provided())
 	if err != nil {
 		return nil, sandbox.Limits{}, fmt.Errorf("加载插件失败: %w", err)
 	}
 	return registry, pluginCfg.Limits, nil
+}
+
+// pluginWiring 是这次装配**给插件链路接上的东西**。
+//
+// # 它为什么是一个结构体，而不是几个参数
+//
+// 三个用处读的是同一份东西：注册期算「允许申请哪些能力」、请求期拼宿主能力、
+// 以及将来那句「这次装配给了什么」的自述。分开传的话，同一个 nil 判断会在
+// 三处各写一遍，而漏掉的那一处不报错——表现为「注册时说有 kv，运行期拿到
+// undefined」，也就是这一片要修的那个坑。
+//
+// # 字段可空，「空」是有意义的
+//
+// calendar / kv 为 nil 表示这次装配没接那一项：它既不出现在允许集里（于是
+// 申请它的插件注册失败），也不注入（于是运行期不会有一个永远失败的空壳）。
+// 生产路径上两者都非 nil（Build 里现造），而**测试与将来的部分装配**正是
+// 靠给一个 nil 的字段来构造「宿主没提供某个能力」那一种情形。
+type pluginWiring struct {
+	logger   *slog.Logger
+	now      func() time.Time
+	calendar host.CalendarSource
+	kv       host.KVStore
+}
+
+// 编译期钉不住「这个签名与 api.Handler 那个字段一致」——方法值这一层由
+// `handler.PluginHost = wiring.host` 那一行管：签名漂了那里直接编译不过。
+
+// provided 返回这套装配**真的能提供**的能力名，按字典序。
+//
+// **这是允许集的唯一来源。** 判据在 host.Available 里，与请求期注入读的是
+// 同一张定义表：能申请的与能提供的从此同源，而不是两份各自维护的清单
+// （那两份曾经让它申请 kv 注册成功、运行期拿到 undefined）。
+//
+// 只把三个字段里非 nil 的那些交出去：Env 里其余字段（Plugin / RequestID /
+// UserID）是请求期才有的，判定不看它们，见 host.Available 的注释。
+func (w pluginWiring) provided() []string {
+	return host.Available(host.Env{Calendar: w.calendar, KV: w.kv})
+}
+
+// host 按请求构造插件看到的宿主能力。
+//
+// 插件 key 由注册表选中之后回填（见 plugin.HostBuilder）；一块接的日历与 KV
+// 是进程级的对象，可以并发共享（见 buildCalendar 的注释与 store.KV）。
+func (w pluginWiring) host(p *plugin.Plugin, requestID string, userID int64) sandbox.Host {
+	return host.Build(host.Env{
+		Logger:    w.logger,
+		Plugin:    p.Key,
+		RequestID: requestID,
+		UserID:    userID,
+		Calendar:  w.calendar,
+		KV:        w.kv,
+		Now:       w.now,
+	})
+}
+
+// pluginCalendar 把 internal/calendar 的判定接到 host.CalendarSource 上。
+//
+// # 为什么适配器在这一层
+//
+// host 那个接口是窄接口（不 import internal/calendar，理由见 host.CalendarSource），
+// 于是把两边连起来是装配的事：只有这一层同时知道「日历库怎么判」与「宿主函数
+// 要什么形状」。
+//
+// # 它调的是什么
+//
+//   - Day 走 calendar.Calendar.At：按地区时区把时刻折成当地日期、再查那一天的
+//     判定。当地钟点与星期从同一个时区的时刻取（JS 的 getDay() 是 0=周日，
+//     time.Weekday 也是 0=周日，直接转）。
+//   - Peak 走 calendar.Calendar.PeakAt，窗口取自下面那个排班常量。
+type pluginCalendar struct {
+	cal  *calendar.Calendar
+	peak calendar.PeakSchedule
+}
+
+var _ host.CalendarSource = pluginCalendar{}
+
+// pluginPeakSchedule 是插件 calendar 能力用的高峰排班：**空的**。
+//
+// 空不是「还没写」，而是这份部署此刻的真实答案：高峰窗口从哪来（库里还是配置
+// 里）还没有定（见 internal/calendar 的包注释与 docs/calendar-data.md），所以
+// 这里没有任何窗口可传。空排班在 calendar.PeakAt 里的语义是明确的：已知的
+// 日子里一律 off_peak，日子未知时 unknown——不会凭星期几猜一天。
+//
+// 将来定了「高峰窗口从哪来」，改的是这一个值（或者由装配从配置里读），而不是
+// 在适配器里重写一遍判定。
+var pluginPeakSchedule = calendar.PeakSchedule{}
+
+// Day 判定某个时刻落在哪一天、那天是工作日还是休息日。
+func (a pluginCalendar) Day(ctx context.Context, region string, instant time.Time) (host.DayInfo, error) {
+	// 地区名由插件给出，日历库按它查表并给出时区：认不出这个地区时它会报错，
+	// 而这里原样往上传——插件侧收到「能力不可用」比收到一个猜出来的判定好。
+	st, err := a.cal.At(ctx, calendar.Region(region), instant)
+	if err != nil {
+		return host.DayInfo{}, err
+	}
+	loc, err := calendar.Timezone(calendar.Region(region))
+	if err != nil {
+		return host.DayInfo{}, err
+	}
+	local := instant.In(loc)
+	return host.DayInfo{
+		// Kind 直接取自日历库的三态判定，于是 host 那一侧那三个字面量
+		// （workday / rest_day / unknown）与 internal/calendar 的取值对不上时，
+		// 这里不会静默降级——它们本来就是同一份字符串。
+		Kind:          string(st.Kind),
+		Name:          st.Name,
+		MakeupWorkday: st.MakeupWorkday,
+		LocalHour:     local.Hour(),
+		LocalWeekday:  int(local.Weekday()),
+	}, nil
+}
+
+// Peak 判定某个时刻是高峰还是低谷。
+//
+// 返回值就是 calendar.PeakKind 的取值：peak / off_peak / unknown（三态，
+// 未知不会被压成低谷）。**当前没有插件能调到它**：SDK 的 calendar 命名空间里
+// 没有 peak 这个函数（见 internal/plugin/sandbox 的 sdkSource），接上它要先定
+// 「高峰窗口从哪来」——那是一条独立的决定（见 pluginPeakSchedule 与本文件在
+// scripts/deadmethods-allowlist.txt 里的那一条）。
+func (a pluginCalendar) Peak(ctx context.Context, region string, instant time.Time) (string, error) {
+	st, err := a.cal.PeakAt(ctx, calendar.Region(region), instant, a.peak)
+	if err != nil {
+		return "", err
+	}
+	return string(st.Peak), nil
 }
 
 // validate 把「装不出能用的服务」这件事一次报全。
@@ -552,16 +686,23 @@ func buildSnapshots(cfg Config, logger *slog.Logger) (*snapshotwire.Collector, e
 // 重启起不来，而那时未必有任何规则用得到下一年的数据。缺数据要等到规则真的
 // 调用 isWorkday() 时才暴露，那时报出的错误会说明这是配置缺口而非服务故障
 // （见 internal/billing/calendaradapter）。
-func buildCalendar(db *sql.DB) (*calendaradapter.Adapter, error) {
+//
+// # 为什么把 *calendar.Calendar 也交出去
+//
+// 它有两个消费者：计价那一半走 calendaradapter（上面那条路），插件那一半走
+// pluginCalendar（宿主能力的窄接口）。两者共用同一个对象是有意的——它不带
+// 请求状态，也**顺手让「两个消费者按不同口径折算时区」这件事不可能发生**：
+// 同一个时刻在两条路径上落到同一天。
+func buildCalendar(db *sql.DB) (*calendar.Calendar, *calendaradapter.Adapter, error) {
 	cal, err := calendar.New(calendarstore.NewSource(db))
 	if err != nil {
-		return nil, fmt.Errorf("构造日历失败: %w", err)
+		return nil, nil, fmt.Errorf("构造日历失败: %w", err)
 	}
 	adapter, err := calendaradapter.New(cal)
 	if err != nil {
-		return nil, fmt.Errorf("构造日历适配器失败: %w", err)
+		return nil, nil, fmt.Errorf("构造日历适配器失败: %w", err)
 	}
-	return adapter, nil
+	return cal, adapter, nil
 }
 
 // authenticator 把 auth.Store 适配成公共入口要的那份接口。

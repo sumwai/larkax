@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"time"
 
@@ -33,12 +34,15 @@ import (
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
 )
 
-// 能力名。它们必须与 sandbox 的虚拟 SDK 里用的名字一致，
-// 否则插件调用会得到「能力未启用」。
+// 能力名。它们是 sandbox 那份虚拟 SDK 里用的名字（见 sandbox.CapabilityNames），
+// 也是插件 `import { log, calendar, kv } from "larkax"` 拿到的那三样东西。
+//
+// 取自 sandbox 的常量而不是在这里再写一遍字面量：两处对不上时编译器不会报错，
+// 只会让插件调用拿到「能力未启用」。
 const (
-	capLog      = "log"
-	capCalendar = "calendar"
-	capKV       = "kv"
+	capLog      = sandbox.CapabilityLog
+	capCalendar = sandbox.CapabilityCalendar
+	capKV       = sandbox.CapabilityKV
 )
 
 // Env 是宿主能力需要的宿主侧依赖。每个字段都是窄接口或可空。
@@ -94,16 +98,68 @@ func (c Capability) HostValue() any {
 	return out
 }
 
+// definition 是一项标准能力的定义：名字、这套依赖下能不能提供、函数表。
+//
+// # 为什么是「一张表」而不是两处清单
+//
+// 请求期注入哪些能力（Standard 的 Available）与注册期允许申请哪些能力
+// （Available 返回的名单）读的是同一份定义，于是「能申请的」与「能提供的」
+// 不会各自漂移。分开维护过一次的代价是：插件申请 kv 注册成功、
+// 运行期 `globalThis.__larkax.kv` 是 undefined，插件拿到的是 JS 的 TypeError，
+// 与宿主承诺的「能力未启用」不是一回事。
+type definition struct {
+	name      string
+	available func(Env) bool
+	funcs     func(Env) map[string]sandbox.HostFunc
+}
+
+// standardDefinitions 返回标准能力的定义表。
+//
+// 三项都是「读或写插件的私有空间」，没有一项扩大权限：log 写结构化日志、
+// calendar 读日历、kv 读写插件按用户隔离的私有存储。网络与文件系统不在这张表里，
+// 也不在任何一张表里——宿主没有实现它们（见包注释）。
+func standardDefinitions() []definition {
+	return []definition{
+		{capLog, func(Env) bool { return true }, logFuncs},
+		{capCalendar, func(env Env) bool { return env.Calendar != nil }, calendarFuncs},
+		{capKV, func(env Env) bool { return env.KV != nil }, kvFuncs},
+	}
+}
+
 // Standard 返回全部标准能力。上层按插件声明的能力白名单挑选。
 //
 // 挑中的能力若 Available() 为 false 就不注入：插件侧于是收到「能力未启用」，
 // 而不是一个永远失败的空壳。
 func Standard(env Env) []Capability {
-	return []Capability{
-		{Name: capLog, Available: func() bool { return true }, Funcs: logFuncs(env)},
-		{Name: capCalendar, Available: func() bool { return env.Calendar != nil }, Funcs: calendarFuncs(env)},
-		{Name: capKV, Available: func() bool { return env.KV != nil }, Funcs: kvFuncs(env)},
+	defs := standardDefinitions()
+	out := make([]Capability, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, Capability{
+			Name:      d.name,
+			Available: func() bool { return d.available(env) },
+			Funcs:     d.funcs(env),
+		})
 	}
+	return out
+}
+
+// Available 返回这套依赖下**真的能提供**的能力名，按字典序。
+//
+// 装配期用它算注册校验的「允许集」（见 internal/plugin 的 CompileWith）：
+// 判据与请求期注入的能力读的是同一张定义表，两份清单从此同源。
+//
+// 传进来的 Env 只用到 Calendar 与 KV 两个字段非空与否——Plugin、RequestID、
+// UserID 是请求期才有的，这里不看也不该看（见 Build 的注释）。日志能力永远在，
+// 它不依赖任何外部东西，注入它也就没有失败可言。
+func Available(env Env) []string {
+	var out []string
+	for _, d := range standardDefinitions() {
+		if d.available(env) {
+			out = append(out, d.name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // CalendarSource 是日历能力的宿主侧依赖。它刻意是窄接口而不是直接依赖
@@ -127,11 +183,51 @@ type DayInfo struct {
 }
 
 // KVStore 是插件私有 KV 的宿主侧依赖。
+//
+// # 隔离只到用户这一层
+//
+// 每个方法都带 plugin 与 userID，实现按 (plugin, userID, key) 三段隔离。
+// **没有插件级的共享命名空间**，而且不该有：KV 是插件唯一的存储（它不能访问
+// 网络、不能读写文件），也就成了唯一可能让数据从一个用户流向另一个用户的地方；
+// 多开一层共享就是凭空造出第一个这样的出口。将来真需要跨用户共享，应该做成
+// **单独一个能力名**（例如 kv_shared），而不是同一个 kv 里的一层——那样它会
+// 出现在插件的 capabilities 里、可审计，也能单独被拒绝。
 type KVStore interface {
 	Get(ctx context.Context, plugin string, userID int64, key string) (string, bool, error)
 	Set(ctx context.Context, plugin string, userID int64, key, value string, ttl time.Duration) error
-	Del(ctx context.Context, plugin string, userID int64, key string) error
+	// Del 删一个键，返回**是否真的删掉了**（删之前它存在，且还没过期）。
+	//
+	// 早先它只回错误码，于是宿主函数要「先问在不在、再删」，而两次调用之间不是
+	// 原子的：并发的两次 del 会都报 true。结果由实现一次回之后，插件看到的那个
+	// 布尔值才是准的，也少一次往返（见 kv.go 的 kvDel）。
+	//
+	// 已经过期的键算「不存在」：删它回 false（它本来就查不到）。
+	Del(ctx context.Context, plugin string, userID int64, key string) (bool, error)
 }
+
+// 每个 (plugin, userID) 的累计上限：键数与键值加起来的字节数。
+//
+// 单次上限（键 ≤ 512 字节、值 ≤ 64 KiB，见 kv.go）挡不住「写一万个键」这种用法，
+// 而 KV 是**共享资源**：一个插件写进去的字节数会影响同一张表上所有人的成本。
+// 两个数都是硬约束，越过时写入被拒、插件拿到 quota_exceeded（见 kvWriteError）。
+//
+// 取值是一处权衡之后的**选择**，不是推出来的：1 MiB 放得下一个用户在该插件下的
+// 摘要、偏好与游标这类状态，而后端不至于被一个插件把盘占掉。它是这个包的常量
+// 而不是配置项——加一个配置项要先进 settings 表与它自己的一串校验，而这件事
+// 现在没有那个需要（真要调，改这里的两个数并在用例里跟着改）。
+const (
+	// KVMaxKeys 是键数上限。
+	KVMaxKeys = 1024
+	// KVMaxBytes 是键与值一共占的字节数上限。
+	KVMaxBytes = 1 << 20
+)
+
+// ErrKVQuotaExceeded 表示这次写入会让 (plugin, userID) 的累计用量越过限额。
+//
+// 由 KVStore 的实现返回，宿主函数据此给出 quota_exceeded 那个码——**这一层不自己
+// 数**：键数与总字节是存储里的事实，在宿主函数里数要先读一遍，而那又是两次调用
+// 之间不原子的一件事（同一个键的两次写会各自看到「还没到顶」）。
+var ErrKVQuotaExceeded = errors.New("插件 KV 的配额已用尽")
 
 // badArgument 构造一个「插件给的参数不合法」的错误。
 //

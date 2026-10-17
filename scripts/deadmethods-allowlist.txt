@@ -106,16 +106,22 @@
 # `channel.Adapter` 的契约面，它的 `ListModels` / `Quota` 回 `ErrUnsupported`
 # （这条表面不提供这两项能力）。同样是接口方法必须在、而生产里没有调用方。
 #
+# 26 之后减了 1（#325）：`Calendar.At` 有了生产调用点——插件宿主那一侧的适配器
+# 按时刻判定（`internal/assembly` 的 `pluginCalendar.Day` 真的调它）。
+# 同一批里 `Calendar.PeakAt` 也删掉了：它那条的理由写的是「没有生产调用方」，
+# 而适配器的 `Peak` 就是它的调用方。**提醒没有消失，只是搬了地方**——搬到了
+# 新加的 `pluginCalendar.Peak` 上（那一道门按调用语法数，而 `Peak` 确实没有
+# 调用方：SDK 的 calendar 命名空间里没有 peak 函数可调）。于是净减 1。
+#
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES_DEFAULT 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
+internal/assembly/assembly.go  | pluginCalendar.Peak               | lib | 接口要求实现，而插件 SDK 的 calendar 命名空间没有 peak 函数可调（宿主日历接口里有 Peak）；接上 peak 时删掉这一条
 internal/billing/billing.go    | Usage.IsEmpty                     | gap | #267 与那条「非流式的 billing_path 分不开『上游没报 usage』与『上游报了 0』」是同一处缺口的两面；那一处修的时候用它兑现，语义不许提前动
 internal/billing/expr/compile.go | Cache.GetWithGlobals            | gap | #278 注入常量 Globals 那条链路没有生产入口；它是 CompileWithGlobals 唯一的调用点，掩蔽沿调用链传到了那个自由函数
-internal/calendar/calendar.go  | Calendar.At                       | lib | 日历库的判定入口：按地区时区把时刻折成当地日期再查；目前只有测试在调它（计价与 PeakAt 各自做了那两步）
 internal/calendar/calendar.go  | Date.IsWeekend                    | lib | 日历库的纯星期规则，给调用方做回退策略用；目前只有测试在调它（本包不把它当判定结果）
 internal/calendar/memory.go    | MemorySource.AddDay               | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.SetDefaultRange      | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.SetYearState         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
-internal/calendar/peak.go      | Calendar.PeakAt                   | gap | #205 峰谷计价没有生产调用方（接线之后 deadcode 也不再提醒它）
 internal/channel/anthropicadapter/adapter.go | Adapter.ListModels   | lib | channel.Adapter 的契约面：接口方法由各适配器实现；生产里还没有拉取上游模型列表的入口，目前只有测试在调它
 internal/channel/anthropicadapter/adapter.go | Adapter.Quota        | lib | channel.Adapter 的契约面：接口方法由各适配器实现；额度查询还没接线，目前只有测试在调它
 internal/channel/openaiadapter/adapter.go | Adapter.ListModels      | lib | channel.Adapter 的契约面：接口方法由各适配器实现；生产里还没有拉取上游模型列表的入口，目前只有测试在调它

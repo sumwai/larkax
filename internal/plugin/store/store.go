@@ -1,4 +1,4 @@
-// Package store 读写插件的两张表：plugins 与 plugin_activations。
+// Package store 读写插件的三张表：plugins、plugin_activations 与 plugin_kv。
 //
 // # 为什么是子包，而不是放进 internal/plugin
 //
@@ -11,16 +11,20 @@
 // 仓库里同样的分法还有 internal/ledger/store 与 internal/calendar/store：
 // 逻辑一个包、它落库的那一半一个子包。
 //
-// # 两张表各管什么
+// # 各表管什么
 //
 //	plugins             源码、元数据快照、代次，以及**参与注册与否**（status）
 //	plugin_activations  按作用域的启用记录，priority 只在这里
+//	plugin_kv           插件的私有存储，按 (plugin_key, user_id, key) 隔离（见 kv.go）
 //
 // 所以「一个插件跑不跑」只有一个答案：plugins.status。让 plugin_activations
 // 的 enabled 也能关掉它的话，就会出现「界面上是启用的、实际没跑」这种状态，
 // 而两个开关不一致时没有任何一处会报错。本包只从那张表读 priority
 // （platform 作用域），enabled 与 user / channel 两个作用域留给按用户、
 // 按渠道启用的那一步——那是请求路径上的事。
+//
+// plugin_kv 的表结构**不是本包建的**：它随插件那批表一起在 00003 里建好，
+// 这里是它的第一个使用者（早先它一直空着，因为 kv 能力没有宿主实现）。
 package store
 
 import (
@@ -73,12 +77,20 @@ func New(db *sql.DB) *Store { return &Store{db: db} }
 
 // LoadRegistry 读表、编译、发布，返回一份可用的注册表。
 //
+// # provided 从调用方来
+//
+// 它是**这次装配真的提供**的能力名（见 host.Available）。这个包连的是库，
+// 不知道宿主接上了哪些能力，所以它不自己算——也不该有一份自己的猜测：
+// 「能申请的」与「能提供的」两份清单各自维护过一次，代价是插件申请 kv
+// 注册成功、运行期拿到 undefined。判据只有一处，就是宿主那一边算出来的那份。
+//
 // # 两条错误路径必须分得开
 //
 //   - **读表失败**（连接断了、SQL 错了、表不存在）→ 本函数返回错误，文案以
 //     「读取 plugins 表失败」开头。这是**加载器坏了**，处置是看库、看网络。
 //   - **单个插件编译不过** → 跳过，交给 logger 记一条 ERROR，错误里带着 key。
-//     这是**插件坏了**，处置是修那个插件。函数照样返回一份可用的注册表。
+//     这是**插件坏了**（源码不对、或者申请了这份装配没有的能力），处置是修那个
+//     插件。函数照样返回一份可用的注册表。
 //
 // 两者混成一句「加载插件失败」的话，运维手上只有一个起不来的进程和一句
 // 无从下手的错——而它们的下一步动作完全不同。
@@ -87,7 +99,7 @@ func New(db *sql.DB) *Store { return &Store{db: db} }
 //
 // 先读完整批、编译完整批，最后一次性换表（见 plugin.PublishPartial）。
 // 不会出现「读到一半的注册表」被请求用上。
-func (s *Store) LoadRegistry(ctx context.Context, logger *slog.Logger) (*plugin.Registry, error) {
+func (s *Store) LoadRegistry(ctx context.Context, logger *slog.Logger, provided []string) (*plugin.Registry, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -103,9 +115,9 @@ func (s *Store) LoadRegistry(ctx context.Context, logger *slog.Logger) (*plugin.
 	// 只会让人以为可以。整批的时间由调用方在本函数外面兜住。
 	//
 	//nolint:contextcheck // 理由见上
-	reg, err := plugin.PublishPartial(regs, func(r plugin.Registration, cause error) {
+	reg, err := plugin.PublishPartial(regs, provided, func(r plugin.Registration, cause error) {
 		skipped++
-		logger.Error("插件编译失败，已跳过（其余插件照常上线）",
+		logger.Error("插件未能上线，已跳过（其余插件照常上线）",
 			"plugin", r.Key, "原因", cause)
 	})
 	if err != nil {
