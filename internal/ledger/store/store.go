@@ -177,9 +177,13 @@ func checkAPIKey(id int64) error {
 
 // checkProtocol 检查这次请求的协议是不是入口真实存在的那两种。
 //
-// 只认两套：调用方的入口只有这两条路径，已注册的适配器也只有这两个
-// （见 channel.Protocol）。列上写着「openai / anthropic」是注释，不是约束——
-// 约束在这里，也在 channel.Protocol 的取值集合里，两处指的是同一份定义。
+// 只认两套：**调用方的入口只有这两条路径**（见 channel.Protocol）。
+//
+// 已注册的适配器有几个与这里无关：这个字段记的是**入口**协议，不是渠道说的
+// 协议。接一个新的上游协议不会让这里多一个合法取值，只有多一条入口路径才会。
+//
+// 列上写着「openai / anthropic」是注释，不是约束——约束在这里，也在
+// channel.Protocol 的取值集合里，两处指的是同一份定义。
 func checkProtocol(p channel.Protocol) error {
 	switch p {
 	case channel.ProtocolOpenAI, channel.ProtocolAnthropic:

@@ -2,6 +2,7 @@ package responsesadapter
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
@@ -242,6 +243,48 @@ func (o responsesOutput) arguments() string {
 		return kitutil.JsonRawMessageToString(o.Input)
 	}
 	return kitutil.JsonRawMessageToString(o.Arguments)
+}
+
+// outputText 取出一组输出项里的正文。
+//
+// 用途是流式那条兜底：上游一个 output_text.delta 都不发、正文只在
+// output_item.done 或终态事件的 response.output 里给时，把它补成 delta。
+//
+// 两遍判据与 relaykit 的 ExtractOutputTextFromResponses 一致：先认 message
+// 项里 role 为空或 assistant、且内容 type=output_text 的（官方形状）；一个
+// 都没有时退而取任何非空 text——有的兼容层不写 content 的 type，而「一个字
+// 都不发」正是这条兜底要修的东西，这里不该因为它少写一个字段就再犯一次。
+//
+// 只读 message 项：reasoning 的摘要不在 content 里（它在 summary 里），
+// 而工具调用的参数不是正文。role 的过滤只加在第一遍——第二遍是「官方形状
+// 一个都没认出来」之后的兜底，那时再按 role 挑等于把最后一条路也堵上。
+func outputText(items []responsesOutput) string {
+	var sb strings.Builder
+	for _, item := range items {
+		if item.Type != "message" {
+			continue
+		}
+		if item.Role != "" && item.Role != "assistant" {
+			continue
+		}
+		for _, c := range item.Content {
+			if c.Type == "output_text" && c.Text != "" {
+				sb.WriteString(c.Text)
+			}
+		}
+	}
+	if sb.Len() > 0 {
+		return sb.String()
+	}
+	for _, item := range items {
+		if item.Type != "message" {
+			continue
+		}
+		for _, c := range item.Content {
+			sb.WriteString(c.Text)
+		}
+	}
+	return sb.String()
 }
 
 // isToolCallItem 判断一个输出项是不是由客户端执行的工具调用。

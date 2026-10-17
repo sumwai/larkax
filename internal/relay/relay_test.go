@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -1296,6 +1297,70 @@ func TestParseRequestRejectsBadInput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := ParseRequest(context.Background(), tc.protocol, []byte(tc.body)); err == nil {
 				t.Error("应当报错")
+			}
+		})
+	}
+}
+
+// 非 function 的工具声明必须在解析层拒掉。
+//
+// 不拒的表现是**静默改写**：channel.Tool 没有承载工具类型的字段，于是
+// {"type":"mcp"} 与 {"type":"web_search"} 都会被变成同一个
+// {"parameters":null,"type":"function"}（名字还被 omitempty 掉）。上游收到
+// 一个我们伪造的、谁都认不出的工具；而远端 MCP 在上游一律 400——错误信息
+// 指向的是我们发出去的请求，排查方向会落到对方身上。
+//
+// 三档判据各有用例：显式 function 放行、**缺省 type 放行**、其余拒绝。
+// 中间那一档最容易被下一个人「顺手统一掉」，所以它单独占一条：省略 type 的
+// 客户端今天能用，拒掉它是把一个能用的形状改坏，不是为了修 bug。
+func TestParseRequestRejectsNonFunctionTools(t *testing.T) {
+	cases := []struct {
+		name string
+		// tools 是请求体里 tools 字段的原文。
+		tools string
+		// wantErrType 非空表示应当报错，且错误里要出现这个类型名。
+		wantErrType string
+	}{
+		{
+			name:        "远端 MCP",
+			tools:       `[{"type":"mcp","server_label":"x","server_url":"https://mcp.example.com"}]`,
+			wantErrType: "mcp",
+		},
+		{name: "内置工具", tools: `[{"type":"web_search"}]`, wantErrType: "web_search"},
+		{name: "自定义工具类型", tools: `[{"type":"custom","name":"f"}]`, wantErrType: "custom"},
+		{
+			name:  "显式 function 是最常见的那条路",
+			tools: `[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]`,
+		},
+		{
+			name:  "缺省 type 按 function 用",
+			tools: `[{"function":{"name":"lookup","parameters":{"type":"object"}}}]`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":` + tc.tools + `}`
+			req, err := ParseRequest(context.Background(), channel.ProtocolOpenAI, []byte(body))
+
+			if tc.wantErrType != "" {
+				if err == nil {
+					t.Fatalf("应当报错，否则它会被静默改写成 function 工具：%+v", req.Tools)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrType) {
+					t.Errorf("错误里要带上收到的类型 %q，否则调用方不知道改哪里：%v", tc.wantErrType, err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("不该报错: %v", err)
+			}
+			if len(req.Tools) != 1 || req.Tools[0].Name != "lookup" {
+				t.Fatalf("工具 = %+v，期望一个叫 lookup 的工具", req.Tools)
+			}
+			if _, ok := req.Tools[0].InputSchema["type"]; !ok {
+				t.Errorf("schema 要原样留下，否则上游收到一个没有参数的工具：%+v", req.Tools[0].InputSchema)
 			}
 		})
 	}

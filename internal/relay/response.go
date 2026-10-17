@@ -26,7 +26,7 @@ import (
 // relaykit 的 dto.Usage 是**多来源归一化后的产物**，它同时带着两套字段名：
 // PromptTokens/CompletionTokens 与 InputTokens/OutputTokens。同一个位置上的
 // 数字在两家口径下含义不同，所以不能挑一个字段就用。哪一套成立由
-// dto.Usage.UsageSemantic 声明——生产方（两个协议适配器）填它，这里读它。
+// dto.Usage.UsageSemantic 声明——生产方（各协议适配器）填它，这里读它。
 //
 // **不再用「PromptTokens 是不是 0」反推来源**：整段 prompt 命中缓存时
 // Anthropic 的 input_tokens 本来就是 0，而那时正是最需要判对口径的时候。

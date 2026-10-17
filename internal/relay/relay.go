@@ -13,9 +13,10 @@
 // 代价是每个请求多一次类型转换。那点开销换来的是：升级 relaykit 只改这一个
 // 文件，以及管道里所有类型都有本项目的注释可读。
 //
-// 直接 import relaykit 的只允许三个包：本包，以及两个协议适配器——后者要拿
-// relaykit 的 dto 类型才能与它对接。允许清单写在 scripts/check-layering.sh 里，
-// 由 CI 检查。其余包若需要 relaykit 的类型，说明这里缺一个转换函数。
+// 直接 import relaykit 的只允许本包与各协议适配器——后者要拿 relaykit 的
+// dto 类型才能与它对接。允许清单写在 scripts/check-layering.sh 里，由 CI
+// 检查，每接一个协议就多一个包。其余包若需要 relaykit 的类型，说明这里缺
+// 一个转换函数。
 package relay
 
 import (
@@ -355,6 +356,9 @@ func FromRelaykitRequest(ctx context.Context, target channel.Protocol, src any) 
 	}
 
 	for _, t := range openaiReq.Tools {
+		if err := checkToolType(t.Type); err != nil {
+			return nil, err
+		}
 		schema, _ := t.Function.Parameters.(map[string]any)
 		out.Tools = append(out.Tools, channel.Tool{
 			Name:        t.Function.Name,
@@ -363,6 +367,37 @@ func FromRelaykitRequest(ctx context.Context, target channel.Protocol, src any) 
 		})
 	}
 	return out, nil
+}
+
+// checkToolType 判断一条工具声明能不能被转发。
+//
+// 判据分三档，三档的理由不同，**不要顺手统一成一条**：
+//
+//   - `function`（显式声明）：放行。这是最常见的那条路。
+//   - 空串：放行，按 function 处理。OpenAI 的 spec 里 type 是必填，但今天
+//     省略它的客户端是能用的——解出来是空串，下面的循环读 t.Function.*
+//     照常工作。拒掉它是把一个能用的形状改坏，不是为了修 bug。
+//   - 其余任何非空取值：拒绝，错误里带上那个类型。
+//
+// 第三档为什么是「不等于 function」而不是「等于 mcp」：channel.Tool 今天
+// 只有名字、描述与 schema，**没有承载工具类型的字段**，所以任何非 function
+// 的声明都送不出去。而送不出去时的表现是静默改写——下面构造的 channel.Tool
+// 再经 ToRelaykit 出来，一律是 {"type":"function"}，名字还可能被 omitempty
+// 掉。客户端发 {"type":"mcp",…} 或 {"type":"web_search"} 时，上游收到的是
+// 一个我们伪造出来的、谁都认不出的工具。远端 MCP 尤其糟：它表现为一个上游
+// 400，而原因在我们发出去的请求里，排查方向会指向对方。只拦 mcp 会让内置
+// 工具走同一条静默改写的路，而静默改写比拒绝更坏——拒绝至少指向正确方向。
+//
+// 将来 channel.Tool 加了类型字段、内置工具能真正转发时，这条判据要收窄成
+// 「仍然送不出去的那些」（届时 mcp 是其中之一）。relaykit 的
+// ChatCompletionsRequestToResponsesRequest 对未知 type 是「原样保留形状」
+// 地转发，所以收窄之后内置工具能过去；但**远端 MCP 仍然要拦**——它在服务端
+// 执行，而这条链路只做协议转换。
+func checkToolType(toolType string) error {
+	if toolType == "" || toolType == "function" {
+		return nil
+	}
+	return fmt.Errorf("工具声明的类型是 %q，本项目只能转发 function 类型的工具", toolType)
 }
 
 func messageFromRelaykit(m dto.Message) (channel.Message, error) {

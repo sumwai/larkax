@@ -93,6 +93,7 @@ internal/channel/                 adapter interface, registry, unified request/r
 internal/channel/anthropicadapter/  Anthropic Messages upstream
 internal/channel/httpx/           HTTP details shared by adapters
 internal/channel/openaiadapter/   OpenAI Chat Completions upstream
+internal/channel/responsesadapter/  OpenAI Responses upstream
 internal/channels/                candidates out of the database, call outcomes back in
 internal/config/                  startup configuration (environment variables)
 internal/credential/              envelope encryption for channel credentials

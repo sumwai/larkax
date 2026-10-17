@@ -67,7 +67,36 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 		finishReason string
 		// tools 分配工具调用的下标，并记住谁的参数已经发过。
 		tools = newToolIndexer()
+		// textDeltaSeen 表示上游发过正文增量，补发那条兜底因此不再需要。
+		textDeltaSeen bool
+		// textSent 记住哪些输出项的正文已经发过，键是它在 output[] 里的下标。
+		//
+		// 为什么按项记而不是一个全局布尔：有的上游一个增量都不发，正文只在
+		// output_item.done 或终态事件的 response.output 里给。一个全局布尔
+		// 会让「一个响应里有多个 message 项」时后面的项被静默丢掉——而这条
+		// 兜底要修的正是静默丢内容。
+		//
+		// 为什么用下标而不是 item id：id 在有的兼容层里缺，而 output_index
+		// 是这类事件的必填字段，两处都能拿到同一个数。
+		textSent = make(map[int]bool)
 	)
+
+	// sendText 在没发过增量、且这一项还没发过时，把它的正文补成一个 delta。
+	//
+	// 判据与 relaykit 的 terminalOutputChunks 同源（hadSentText 为假时才从
+	// response.output 取正文）：增量已经把正文给全了，再补一遍客户端会看到
+	// 两遍，而「看到两遍」比「看到空回答」更容易被当成模型的问题。
+	sendText := func(index int, item *responsesOutput) {
+		if item == nil || item.Type != "message" || textDeltaSeen || textSent[index] {
+			return
+		}
+		text := outputText([]responsesOutput{*item})
+		if text == "" {
+			return
+		}
+		textSent[index] = true
+		events <- channel.StreamEvent{Kind: "delta", Text: text}
+	}
 
 	for scanner.Scan() {
 		if ctx.Err() != nil {
@@ -110,6 +139,7 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 		switch ev.Type {
 		case "response.output_text.delta":
 			if ev.Delta != "" {
+				textDeltaSeen = true
 				events <- channel.StreamEvent{Kind: "delta", Text: ev.Delta}
 			}
 
@@ -180,7 +210,7 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 			}
 
 		case "response.output_item.done":
-			// 兜底：有的上游一个参数增量都不发，把完整参数放在这一项里。
+			// 兜底一：有的上游一个参数增量都不发，把完整参数放在这一项里。
 			if ev.Item != nil && isToolCallItem(ev.Item.Type) {
 				slot := tools.slotFor(ev.itemKey())
 				if args := ev.Item.arguments(); args != "" && !slot.argsSent {
@@ -191,10 +221,26 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 					}}
 				}
 			}
+			// 兜底二：正文同理。有的上游只发 output_item.added / .done，
+			// 一个 response.output_text.delta 都不发——那时客户端拿到空回答，
+			// 而用量按实测结算，用户为空回答付钱。工具参数有这道兜底而正文
+			// 没有，是同一份代码里两处不一致。
+			//
+			// 没有 output_index 就不发：下标是「这一项发过没有」的键，缺了它
+			// 就没法保证终态那一次不重复发。终态按 output[] 的位置遍历，
+			// 那一支会接住它。
+			if ev.OutputIndex != nil {
+				sendText(*ev.OutputIndex, ev.Item)
+			}
 
 		case "response.completed", "response.incomplete", "response.done":
 			// 终态。用量**只在**这里给，所以它决定这次结算的依据。
 			if ev.Response != nil {
+				// 兜底：正文只在 response.output 里给（一个增量都没有）时补发。
+				// 放在 usage 之前，让调用方先拿到正文再看到用量。
+				for i := range ev.Response.Output {
+					sendText(i, &ev.Response.Output[i])
+				}
 				if ev.Response.Usage != nil {
 					u := relay.UsageFromRelaykit(ev.Response.Usage.toRelaykit())
 					events <- channel.StreamEvent{Kind: "usage", Usage: &u}

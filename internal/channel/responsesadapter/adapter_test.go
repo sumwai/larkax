@@ -263,6 +263,41 @@ func TestChatUsageFeedsBillingItems(t *testing.T) {
 	}
 }
 
+// 整段 prompt 全命中缓存：input_tokens 与 cached_tokens **相等**。
+//
+// 这是 issue 点名的那一处，也是最容易错的一处——缓存要从输入里拆出去，
+// 而全命中时拆完输入恰好是 0，看起来像「上游没报输入」。真到账上就是
+// 「输入不计费、只计缓存」，而响应形状完全正常。
+//
+// 缓存数取与输入**相等**的字面量，而不是随便取一个比它小的数：后者只能
+// 证明「缓存被拆出去了」，证明不了「全拆之后输入那一项是 0 而不是负数或
+// 原值」——那正是这条用例要钉的边界。
+func TestChatUsageFullyCachedPrompt(t *testing.T) {
+	srv, _, _ := captureServer(t, http.StatusOK, `{
+		"id":"resp_1","model":"m","status":"completed","output":[],
+		"usage":{"input_tokens":9000,"output_tokens":12,"total_tokens":9012,
+			"input_tokens_details":{"cached_tokens":9000},
+			"output_tokens_details":{"reasoning_tokens":0}}
+	}`)
+
+	resp, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), textRequest())
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	u := resp.Usage
+	if u.PromptTokens != 9000 || u.CacheReadTokens != 9000 {
+		t.Errorf("用量 = %+v，期望输入 9000 且其中 9000 命中缓存", u)
+	}
+	if u.CacheWriteTokens != 0 || u.ReasoningTokens != 0 {
+		t.Errorf("上游没报这两项，落到账上就该是 0：%+v", u)
+	}
+
+	got := billing.FromChannelUsage(u)
+	if got.PromptTokens != 0 || got.CacheReadTokens != 9000 || got.CompletionTokens != 12 {
+		t.Errorf("计费口径 = %+v，期望普通输入为 0、缓存读 9000、输出 12", got)
+	}
+}
+
 // 有些上游在 HTTP 200 里塞一个 error 对象。只看状态码会把它当成正常响应，
 // 于是「上游失败了」在账上表现为「成功但用量为零」。
 func TestChatDetectsEmbeddedError(t *testing.T) {
@@ -355,9 +390,12 @@ func TestChatToolCallContent(t *testing.T) {
 
 // 远端 MCP 工具上游一律 400，而错误信息指向我们发出去的请求。
 //
-// 这条判据今天**走不到**（channel.Tool 没有工具类型，编码出来的工具一律是
-// function），所以直接调它——留着它是为了「以后有人把原始 tools 透传过来」
-// 那一刻。测不到它等于它没被证明在工作（见 LESSONS.md 第 23 条）。
+// 这条判据今天**走不到**：真正的拦阻在解析层（relay.checkToolType），非
+// function 的声明在入口就被拒了。它活过来的那天是「channel.Tool 加了类型
+// 字段、内置工具能转发」之后——那时解析层收窄，MCP 声明会真的到这里。
+//
+// 所以直接调它：它是发出去之前的最后一道，测不到它就等于它没被证明在工作
+// （见 LESSONS.md 第 23 条）。它只拦 mcp 是刻意的——内置工具本该转发。
 func TestCheckNoRemoteMCPTools(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -494,6 +532,102 @@ func TestChatStreamHappyPath(t *testing.T) {
 	}
 	if !sawDone || finish != "stop" {
 		t.Errorf("done=%v finish=%q", sawDone, finish)
+	}
+}
+
+// 有的上游一个 response.output_text.delta 都不发，正文只在
+// output_item.done 或终态事件的 response.output 里给。不补发的话客户端
+// 拿到空回答，而用量按实测结算——用户为空回答付钱。
+//
+// 同一份代码里工具参数本来就有这道兜底（output_item.done 里的 arguments），
+// 正文没有，这条用例把两处拉齐。补发必须**恰好一次**：发两遍会让客户端看到
+// 重复的正文，而「看到两遍」比「看到空回答」更容易被当成模型的问题。
+func TestChatStreamTextOnlyInOutputItems(t *testing.T) {
+	const msgItem = `{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"完整回答"}]}`
+	const usage = `"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}`
+
+	cases := []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{
+			name: "正文只在 output_item.done 里",
+			lines: []string{
+				`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant"}}`,
+				`data: {"type":"response.output_item.done","output_index":0,"item":` + msgItem + `}`,
+				`data: {"type":"response.completed","response":{"id":"r1","model":"m","status":"completed",` + usage + `}}`,
+			},
+			want: "完整回答",
+		},
+		{
+			name: "正文只在终态事件的 response.output 里",
+			lines: []string{
+				`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant"}}`,
+				`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant"}}`,
+				`data: {"type":"response.completed","response":{"id":"r1","model":"m","status":"completed","output":[` + msgItem + `],` + usage + `}}`,
+			},
+			want: "完整回答",
+		},
+		{
+			name: "两处都给：只发一遍",
+			lines: []string{
+				`data: {"type":"response.output_item.done","output_index":0,"item":` + msgItem + `}`,
+				`data: {"type":"response.completed","response":{"id":"r1","model":"m","status":"completed","output":[` + msgItem + `],` + usage + `}}`,
+			},
+			want: "完整回答",
+		},
+		{
+			name: "发过增量就不再从终态补：不能变成两遍",
+			lines: []string{
+				`data: {"type":"response.output_text.delta","output_index":0,"delta":"完整"}`,
+				`data: {"type":"response.output_text.delta","output_index":0,"delta":"回答"}`,
+				`data: {"type":"response.completed","response":{"id":"r1","model":"m","status":"completed","output":[` + msgItem + `],` + usage + `}}`,
+			},
+			want: "完整回答",
+		},
+		{
+			name: "两个 message 项都没有增量：两项都要发",
+			lines: []string{
+				`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"第一段"}]}}`,
+				`data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg_2","role":"assistant","content":[{"type":"output_text","text":"第二段"}]}}`,
+				`data: {"type":"response.completed","response":{"id":"r1","model":"m","status":"completed",` + usage + `}}`,
+			},
+			want: "第一段第二段",
+		},
+		{
+			name: "终态之前连接就断了：done 里已经拿到的正文照发",
+			lines: []string{
+				`data: {"type":"response.output_item.done","output_index":0,"item":` + msgItem + `}`,
+			},
+			want: "完整回答",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := sseServer(t, tc.lines...)
+			events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), &channel.Request{
+				Model: "m", Stream: true, Messages: textRequest().Messages,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var text strings.Builder
+			deltas := 0
+			for _, ev := range collect(t, events) {
+				if ev.Kind == "delta" {
+					deltas++
+					text.WriteString(ev.Text)
+				}
+			}
+			if deltas == 0 {
+				t.Fatal("一个 delta 都没有：客户端会拿到空回答")
+			}
+			if text.String() != tc.want {
+				t.Errorf("正文 = %q，期望 %q", text.String(), tc.want)
+			}
+		})
 	}
 }
 
@@ -771,6 +905,10 @@ func TestChatStreamTruncatedHasNoDoneOrUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 「没有 done、没有 usage」这两条断言，在**一条事件都不发**时也成立。
+	// 所以必须同时钉住「已经吐出去的内容照发」——否则这个用例守不住任何
+	// 东西，而它想守的是「截断时正文仍然要给客户端」。
+	text := ""
 	for _, ev := range collect(t, events) {
 		if ev.Kind == "done" {
 			t.Error("缺少终态事件时不应伪造 done")
@@ -778,6 +916,12 @@ func TestChatStreamTruncatedHasNoDoneOrUsage(t *testing.T) {
 		if ev.Kind == "usage" {
 			t.Error("没有终态事件就没有用量，不该伪造一个")
 		}
+		if ev.Kind == "delta" {
+			text += ev.Text
+		}
+	}
+	if text != "半截" {
+		t.Errorf("截断前已经收到的正文 = %q，期望「半截」——一条事件都不发时上面两条断言也会通过", text)
 	}
 }
 

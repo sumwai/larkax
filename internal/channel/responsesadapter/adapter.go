@@ -251,11 +251,17 @@ func (a *Adapter) encodeRequest(ctx context.Context, req *channel.Request, strea
 // 排查方向会落到对方身上，而原因在这一侧。所以在发出去之前报错，
 // 错误里带上原因。
 //
-// 这条判据今天在适配器这一侧**打不着**：channel.Tool 只有名字、描述与
-// schema，没有工具类型，于是 relay.ToRelaykit 出来的工具一律是 function。
-// 它在这里是最后一道——客户端请求里的 tools 是原始 JSON，真正该拦的是
-// 解析那一层（说 Responses 的入口），那里能看到 type 字段。留着它是因为
-// 「以后有人把原始 tools 透传过来」正是这条路径最容易被改坏的地方。
+// **这条判据今天打不着，别把它当成 MCP 已经拦住了。** 真正的拦阻在解析层
+// （relay.checkToolType）：channel.Tool 只有名字、描述与 schema，没有承载
+// 工具类型的字段，所以任何非 function 的声明在入口就被拒了，走不到这里。
+//
+// 它什么时候会活过来：channel.Tool 加了类型字段、内置工具（web_search 一类）
+// 能真正转发的那一天。届时解析层那条判据要收窄成「仍然送不出去的那些」，
+// 而 mcp 仍是其中之一——relaykit 的转换器对未知 type 是「原样保留形状」地
+// 转发，所以收窄之后 MCP 声明会真的到达这里，这条判据接住它。
+//
+// 留着它是因为它是**发出去之前的最后一道**：那时唯一还看得见工具类型的地方
+// 就是这里。它只拦 mcp 而不拦别的，也是刻意的——内置工具本该转发。
 func checkNoRemoteMCPTools(tools json.RawMessage) error {
 	if len(tools) == 0 {
 		return nil
