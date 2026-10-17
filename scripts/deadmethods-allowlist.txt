@@ -30,7 +30,7 @@
 #   命令      scripts/check-deadmethods.sh
 #             （扫描起点由 cmd/ 自动发现，当前是 ./cmd/larkax 与 ./cmd/larkaxctl）
 #   工具      go（版本随 go.mod；判据是脚本里嵌的那份 AST 扫描器）
-#   条数      43，与脚本里的 MAX_ENTRIES_DEFAULT 一致
+#   条数      41，与脚本里的 MAX_ENTRIES_DEFAULT 一致
 #
 # # 这份清单与 scripts/deadcode-allowlist.txt 的关系
 #
@@ -61,6 +61,10 @@
 # 44 之后减了 1（#263）：`Session.OnRoute` 随 onRoute 接进请求路径而有了生产调用点
 # （`internal/api` 的 `pluginHooks` 里那个闭包）。`Session.OnStream` / `Session.OnUsage`
 # 还在（#264 的缺口）。
+#
+# 43 之后减了 2（#259）：`Counter.Prepare` / `Counter.Loaded` 随启动预热接线而有了
+# 生产调用点（`cmd/larkax` 的 `warmVocab` 调 `Prepare`，它自己读 `Loaded` 打日志）。
+# 这两个是**真的接上了**，不是被分析器的近似判成可达。
 #
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES_DEFAULT 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
@@ -104,6 +108,4 @@ internal/tokens/count.go       | Counter.CountTextEstimated        | gap | #282 
 internal/tokens/stream.go      | StreamEstimator.HasMeasured       | gap | #282 与 ObserveMeasured 同一组：这个入口没有接进 gateway，目前只有测试在调它
 internal/tokens/stream.go      | StreamEstimator.ObserveMeasured   | gap | #282 这个入口没有生产调用方：它收的是一个总数，而流里的 usage 分着输入与输出两个数
 internal/tokens/stream.go      | Usage.RequiresReview              | gap | #282 估算复核的判据，没有生产调用方：本包不持有告警通道
-internal/tokens/tokens.go      | Counter.Loaded                    | lib | 能力查询：本机能精确计数的编码集合；目前只有测试在调它（与 Prepare / AvailableEncodings 一组）
-internal/tokens/tokens.go      | Counter.Prepare                   | gap | #259 启动预热没有生产调用方：不预热时第一次精确计数要多付约 40ms
 internal/tokens/tokens.go      | Source.IsExact                    | gap | #282 对账判据，目前只有测试在调它：对账面还没有入口

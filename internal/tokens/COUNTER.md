@@ -25,9 +25,12 @@
 ```go
 c := tokens.NewCounter()
 // 服务启动时调一次。返回值是每种编码的加载耗时，用来回答
-// 「那 40ms 是启动时花的还是第一个请求时花的」。
+// 「那 25ms 是启动时花的还是第一个请求时花的」。
+// 失败不是致命的：不预热只是慢，不是不能用。
 durations, err := c.Prepare(context.Background())
-slog.Info("词表已加载", "耗时", durations, "可精确计数", tokens.AvailableEncodings())
+// durations 是每种编码各花了多久，c.Loaded() 是实际解开了哪几种。
+slog.Info("词表已加载", "耗时", durations, "已加载", c.Loaded())
+slog.Info("本机能精确计数", "encodings", tokens.AvailableEncodings())
 
 // 单段文本
 n, _ := c.CountText(ctx, model, text)
@@ -121,14 +124,19 @@ Anthropic 的 `cache_creation` 还有 5m / 1h 拆分，它们**已经包含在**
 - 词表以 Go 字符串常量的形式编译进二进制（o200k 约 7.9MB、cl100k 约
   3.9MB 的源码），进程启动时它们只是映射进来的页，不计入堆。
 - 真正占堆的是 `tokenizer.Get` 时惰性构建的 map：实测 o200k 约 7MB 堆、
-  首次构建约 40ms；cl100k 约 3.5MB、约 15ms。
+  首次构建约 25ms；cl100k 约 3.4MB、约 9ms。
 - 所以「启动就解 16MB」不会发生，但**二进制体积**会固定增加约 16MB。
   对一个服务可接受（一次构建，分发时多 16MB），对 CLI 子命令不划算——
   这就是不把它放进 `NewCounter` 的原因。
 
-生产环境在启动阶段调一次 `Prepare`，让那 40ms 不落在第一个用户请求上。
-`Loaded()` 与 `Prepare` 的返回值（每种编码的加载耗时）用来在启动日志里
-回答「到底是启动时解的还是第一个请求解的」。
+`Prepare` 预解 `encodingForModel` **值域里的全部编码**（o200k、cl100k、r50k，
+合计约 43ms、常驻 +21.3MB），其余编码按需惰性加载。为什么是这个集合、
+每种各要多少代价，见 `vocab.go` 里 `preparedCodecs` 的注释。
+
+生产侧由 `cmd/larkax` 在**监听端口之前**调一次 `Prepare`（见那里的
+`warmVocab`），让那 25ms 不落在第一个用户请求上。失败只记日志：
+不预热只是慢，不是不能用。`Loaded()` 与 `Prepare` 的返回值（每种编码的
+加载耗时）一起打进启动日志，回答「到底是启动时解的还是第一个请求解的」。
 
 ## 估算式
 
