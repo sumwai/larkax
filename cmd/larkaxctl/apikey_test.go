@@ -307,9 +307,15 @@ func TestPrintCreatedKeyShowsInheritedLimits(t *testing.T) {
 }
 
 // TestPrintKeyList 钉住每一栏的取值，尤其是两列额度的 NULL 与「还没用过」。
+//
+// 三个时刻各给一个**互不相同**的值：断言写成整段 `创建=<时刻>` 之后，
+// 把某一栏接成另一个时刻（例如把「创建」打成 last_used_at）会当场挂掉。
+// 只断言「行里出现了一个日期」是分辨不出来的——那正是这一栏最容易出的错。
 func TestPrintKeyList(t *testing.T) {
 	rpm := 60
 	quota := money.MustParse("12.34")
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	expires := time.Date(2027, 6, 7, 8, 9, 10, 0, time.UTC)
 	used := time.Date(2026, 10, 17, 6, 10, 0, 0, time.UTC)
 
 	var buf bytes.Buffer
@@ -317,11 +323,13 @@ func TestPrintKeyList(t *testing.T) {
 		{
 			ID: 3, UserID: 7, Username: "user-placeholder", Name: "限额的",
 			Prefix: "larkax_abcd", Status: "active",
-			RateLimitRPM: &rpm, QuotaLimit: &quota, LastUsedAt: &used,
+			RateLimitRPM: &rpm, QuotaLimit: &quota,
+			CreatedAt: created, ExpiresAt: &expires, LastUsedAt: &used,
 		},
 		{
 			ID: 4, UserID: 7, Username: "user-placeholder",
 			Prefix: "larkax_efgh", Status: "revoked",
+			CreatedAt: created,
 		},
 	})
 
@@ -333,7 +341,8 @@ func TestPrintKeyList(t *testing.T) {
 	first := lines[0]
 	for _, want := range []string{
 		"id=3", "prefix=larkax_abcd", "用户=user-placeholder(id=7)", "备注=限额的",
-		"状态=active", "每分钟=60", "额度=12.34000000", "过期=不过期",
+		"状态=active", "每分钟=60", "额度=12.34000000",
+		"创建=2026-01-02T03:04:05Z", "过期=2027-06-07T08:09:10Z",
 		"最近使用=2026-10-17T06:10:00Z",
 	} {
 		if !strings.Contains(first, want) {
@@ -343,7 +352,8 @@ func TestPrintKeyList(t *testing.T) {
 
 	second := lines[1]
 	for _, want := range []string{
-		"id=4", "备注=-", "状态=revoked", "每分钟=继承", "额度=继承", "最近使用=从未",
+		"id=4", "备注=-", "状态=revoked", "每分钟=继承", "额度=继承",
+		"创建=2026-01-02T03:04:05Z", "过期=不过期", "最近使用=从未",
 	} {
 		if !strings.Contains(second, want) {
 			t.Errorf("第二行里没有 %q：\n%s", want, second)

@@ -14,11 +14,17 @@
 --   - quota_probes 是探测结果指定的落点：channel_quota_state 的 probe_kind
 --     取值里有两个指向它，表注释写明的用途（探针历史，用于回溯与对账）
 --     是接上之后要兑现的承诺。删掉它，那条路落地时要自己再定一张表的形状。
---   - last_error_code / last_error_at 有**活着的读者**：channels 的
---     candidateQuery 会 SELECT 它们，route 按 quota.State.Routable 用它们
---     区分「从没观测过」与「观测过却没拿到数值」——后者要排除该渠道
---     （见 docs/channel-health.md 的「余量未知有两种」一节）。
---     删掉这两列等于把那一半读侧判据一起删掉。
+--   - last_error_code 有**活着的读者**：channels 的 candidateQuery 会
+--     SELECT 它，route 按 quota.State.Routable 用它区分「从没观测过」与
+--     「观测过却没拿到数值」——后者要排除该渠道（见 docs/channel-health.md
+--     的「余量未知有两种」一节）。删掉它等于把那一半读侧判据一起删掉。
+--   - last_error_at 不一样：它今天**两头都没有**。库里那一列还没有写入方
+--     （见下面的 COMMENT），candidateQuery 的 SELECT 列表里也没有它；
+--     内存里的 quota.State.LastErrorAt 虽然会被 quota.Merge 在
+--     KindErrorObserved 分支设、在 KindAPIQuery 分支清，但没有任何消费方
+--     ——Routable 只看 LastProbeAt 与 LastErrorCode。留着它是因为它与
+--     last_error_code 是同一次观测的两半，单独删一个会让那条路落地时
+--     再补一次 DDL。**别照着「读侧已经写好」去理解它。**
 --
 -- 也**不接上**，因为接线前有一个必须先回答的问题：一次 429 会让
 -- Merge 的 KindErrorObserved 分支设上 LastErrorCode，而它只在 KindAPIQuery
