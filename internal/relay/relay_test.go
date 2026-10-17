@@ -708,11 +708,14 @@ func TestUsageMarksEstimated(t *testing.T) {
 	}
 }
 
-// 「上游报没报 usage」在归一化之后只剩 Raw 里的 "source" 一个落点。
+// 「上游报没报 usage」归一化之后有两个落点：计费读的 Reported，与排查读的
+// Raw["source"]。
 //
-// internal/gateway 的 usageSourceOf 靠它把「上游报了 0」与「压根没报」
-// 分开（两者用量逐列相同），所以这个键的出现条件要钉住：**适配器解析到了
-// usage 块**（给了 UsageSource）才写，没给就不写。
+// internal/gateway 的 usageSourceOf 靠 Reported 把「上游报了 0」与「压根没报」
+// 分开（两者用量逐列相同），所以它的出现条件要钉住：**适配器解析到了 usage
+// 块**（给了 UsageSource）才是 true，没给就是 false。Raw 里那个键只是排查用的
+// 副本，两者必须同进同退——但判据在 Reported 上，删掉/改名 Raw 不会让来源
+// 静默翻面。
 //
 // 这里不验「适配器什么时候给 UsageSource」——那是各适配器自己的用例；
 // 这条只管归一化这一层不会把两者写成同一种形状。
@@ -725,9 +728,23 @@ func TestUsageRawCarriesSourceMarker(t *testing.T) {
 		t.Errorf("报过 usage 时 Raw[source] = %v，期望 openai_chat", reported.Raw["source"])
 	}
 
+	// Reported 才是计费来源的判据（见 gateway.usageSourceOf）；Raw 里的
+	// source 只是排查用的副本，两者必须同时成立、同时缺席。
+	if !reported.Reported {
+		t.Error("报过 usage 时 Reported 应为 true")
+	}
+
 	absent := UsageFromRelaykit(&dto.Usage{})
 	if _, ok := absent.Raw["source"]; ok {
 		t.Errorf("没报 usage 时 Raw 不该有 source: %+v", absent.Raw)
+	}
+	if absent.Reported {
+		t.Error("没报 usage 时 Reported 应为 false")
+	}
+
+	// nil 与「零值 dto.Usage」是同一件事：上游整块没报。
+	if (UsageFromRelaykit(nil)).Reported {
+		t.Error("usage 为 nil 时 Reported 应为 false")
 	}
 }
 

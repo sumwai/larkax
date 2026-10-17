@@ -148,6 +148,10 @@ func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, events 
 	defer close(events)
 	defer func() { _ = resp.Body.Close() }()
 	defer httpx.Drain(resp.Body)
+	// 第一条事件带上流的状态码：这条流可能一个正文分片、一个结束标记都没有
+	// 就结束，那时它是网关知道「上游回过一个响应」的唯一途径（见
+	// channel.StreamEvent.StatusCode）。
+	events <- channel.StreamEvent{Kind: "start", StatusCode: resp.StatusCode}
 	a.pump(ctx, resp.StatusCode, resp.Body, events)
 }
 

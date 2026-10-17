@@ -8,7 +8,6 @@ import (
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/route"
 	"github.com/sumwai/larkax/internal/systemone"
-	"github.com/sumwai/larkax/internal/tokens"
 )
 
 // DecideExecutor 是调上游决策接口的能力，由适配器组合而成。
@@ -90,14 +89,11 @@ func (g *Gateway) Decide(ctx context.Context, req pipeline.Request, decision *sy
 
 	out := pipeline.Outcome{
 		Usage: usageOf(routed.Response),
-		// 用量来自上游的响应体。这条表面上**没有**「上游报没报」这一位：
-		// systemone.Usage 是值字段，解析时就把「块在不在」压平了。所以这里
-		// 只能记实测——与非流式 chat 那条路不同，那里能问 usageSourceOf。
-		//
-		// 代价说清楚：一个不报 usage 的决策上游会落成「实测 0」，与非流式
-		// 修好之前是同一种形状。要补得先在 internal/systemone 的解析里留下
-		// 那一事实。
-		UsageSource: tokens.SourceMeasured,
+		// 来源按「上游报没报 usage 块」判，与 chat 那条路同一个入口
+		// （见 usageSourceOf）：systemone.Usage 的 Reported 由解析那一层填，
+		// 再经 ChannelUsage 折进这里。一个不报 usage 的决策上游因此落成
+		// Unreported，而不是「实测 0」。
+		UsageSource: usageSourceOf(routed.Response),
 	}
 	g.recordAttempts(ctx, routed.Attempts, &out.Usage)
 
