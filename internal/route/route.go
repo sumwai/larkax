@@ -64,11 +64,18 @@ type Candidate struct {
 	// LastErrorCode 两个字段。少带一个，判据就退化成「有没有数值」，
 	// 而那是本包早先自己重写的那一遍（见 issue #204）。
 	//
-	// 读侧只填本包用得上的列（Remaining / Unit / Estimated / ResetsAt /
+	// 读侧只填本包用得上的列（Remaining / Unit / Confidence / ResetsAt /
 	// Kind / LastProbeAt / LastErrorCode）；窗口那几列不填，本包不看它们。
 	//
 	// 余量只在**同一单位**下与其他候选可比（见 scoreQuota）：Remaining 是
-	// 裸数字，Unit 说明它按什么计。
+	// 裸数字，Unit 说明它按什么计，Confidence 说明这个数有多可信——本包按
+	// 后者把分数往中性分拉，所以它必须由读侧填上，否则每个候选都退成
+	// 「没有意见」，额度这一维等于关掉。
+	//
+	// Estimated **不在**上面那张单子里：本包不再看它。它想说的「这个数是
+	// 推算的」，Confidence 已经说了（自记账的置信度上限就是 0.8，永远达不到
+	// 实测的 1），两处一起看等于把同一件事扣两次。它的读者只剩插件契约
+	// 那一处（见 internal/plugin 的 RouteContextFrom）。
 	Quota quota.State
 
 	// CostPerUnit 是最近观察到的单位成本，用于「成本」这一维度。
@@ -421,6 +428,29 @@ func scoreHealth(h Health) float64 {
 // 为什么不归一化折算：那需要一个「1 元值多少 token」的假设，而那个假设
 // 没有依据——把它写进代码等于把一个错换成另一个错，还多了一处没人能验证
 // 的换算。**单位相同就可以比**，那时 1/(1+x) 的语义是明确的。
+//
+// # 可信度是权重，不是闸门
+//
+// 这个数有多可信由 State.Confidence 说明：实测是 1，自记账按距上次实测的
+// 时长从 0.8 衰减到 0.2，从错误里推断是 0.6（见 internal/quota）。这里把它
+// 当**权重**：算出来的分是「这次观测说出的分」与中性分 0.5 的凸组合，
+// 可信度越低越靠近中性分。
+//
+// 为什么不按阈值排除：按间隔自动探测上游的调度器**还没有实现**，一次陈旧的
+// 观测可能永远不会被刷新，排除等于让一个渠道因为一个没人会再看的旧数字
+// 永久不可用。降权保留了「它仍然可能被选中」，只是不再因为一个陈旧数字被
+// 优先或被排斥。
+//
+// 为什么退到 0.5 而不是别的档：0.5 就是上面那道兜底里「额度未知」的分。
+// 可信度低意味着**没有意见**，与「不知道」是同一件事，不该为它另立一档。
+//
+// 两处刻意不参与加权：
+//
+//   - **见底**（Usable 为假）给 0。它是事实而不是偏好，与它有多可信无关；
+//     而且这一档的处置在 DrainReason（判断）里，本函数只是把那个判断映射成
+//     分数。让低可信度把「已经用完了」抬回中性，等于让一个旧数字重新放行
+//     一个见底的渠道。
+//   - **没有数值**与**跨单位**本来就是中性分，往中性分靠是它自己。
 func scoreQuota(q quota.State, mixedUnits bool) float64 {
 	if !q.Usable() {
 		return 0
@@ -455,15 +485,35 @@ func scoreQuota(q quota.State, mixedUnits bool) float64 {
 		}
 	}
 
-	// 估算值打折：它不如实测可信，路由不该完全同等对待。
-	// 打折不等于排除——估算仍然比「完全不知道」有用。
-	const estimateDiscount = 0.7
-	weight := 1.0
-	if q.Estimated {
-		weight = estimateDiscount
-	}
+	// 这次观测说出的分：紧迫度与到期各占一半。
+	raw := 0.5*urgency + 0.5*expiry
 
-	return weight * (0.5*urgency + 0.5*expiry)
+	// 再按可信度把它往中性分拉。写成凸组合而不是 0.5 + c*(raw-0.5)，
+	// 是为了让两个端点**精确**落在 raw 与 0.5 上：后者在 raw 很小时
+	// （例如余量 1000、十天后再到期，raw 约 0.2）会因两次舍入差最后一个
+	// ulp，而「实测值的行为一字不变」是这条判据的硬要求。
+	const neutral = 0.5
+	c := confidenceWeight(q.Confidence)
+	return raw*c + neutral*(1-c)
+}
+
+// confidenceWeight 把 State.Confidence 收进 0..1。
+//
+// 越界的值只可能来自本包之外（库里的列有 CHECK 0..1，quota.Merge 写的是
+// 三个常量）。仍然要收：大于 1 会让一个候选拿到比实测还高的分，负值会把
+// 「分数向中性分靠拢」反过来——余量多的反而更该先用。
+func confidenceWeight(c float64) float64 {
+	switch {
+	case c <= 0:
+		// 零值也走这里。State 的零值 Confidence 是 0，于是「没填可信度」
+		// 与「可信度为 0」是同一个结果：退成中性分。这是有意的——一个
+		// 不知道有多可信的数，不该比一个已知不可信的数更受优待。
+		return 0
+	case c >= 1:
+		return 1
+	default:
+		return c
+	}
 }
 
 // scoreCost 把单位成本映射到 0..1，越小越好。

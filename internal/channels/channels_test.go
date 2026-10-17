@@ -280,7 +280,63 @@ func TestQuotaCarriesUnit(t *testing.T) {
 	}
 }
 
-// 自记账与「从错误里推断」都是推算，route 会对它们打折。
+// 可信度要原样带出去，因为它决定 route 怎么给这一项打分。
+//
+// 这一列早先没有进 State（issue #233）。漏掉的后果不是报错，而是 route 那边
+// 每个候选的额度项都退成中性分——排序照旧排得出来，只是与额度无关。
+func TestQuotaCarriesConfidence(t *testing.T) {
+	row := candidateRow{
+		remaining:  sql.NullString{String: "12.5", Valid: true},
+		probeKind:  sql.NullString{String: "self_accounting", Valid: true},
+		confidence: sql.NullString{String: "0.40", Valid: true},
+	}
+	q, err := row.quota()
+	if err != nil {
+		t.Fatalf("quota 出错: %v", err)
+	}
+	// numeric(3,2) 落库时是 "0.40"，读回来是 0.4。
+	if q.Confidence != 0.4 {
+		t.Errorf("Confidence = %v，期望 0.4", q.Confidence)
+	}
+
+	// 没有数值就没有可信度可言：置信度描述的是「这个余量有多可信」。
+	// 额度行为 NULL 时（LEFT JOIN 没连上）不该凭空带出一个 0 之外的值，
+	// 但也不该让整行读失败。
+	noValue := candidateRow{
+		probeKind:  sql.NullString{String: "api_query", Valid: true},
+		confidence: sql.NullString{String: "1.00", Valid: true},
+	}
+	q, err = noValue.quota()
+	if err != nil {
+		t.Fatalf("quota 出错: %v", err)
+	}
+	if q.Remaining != nil {
+		t.Fatalf("Remaining = %v，期望 nil", q.Remaining)
+	}
+	if q.Confidence != 0 {
+		t.Errorf("没有余量时 Confidence = %v，期望 0（可信度跟着余量走）", q.Confidence)
+	}
+}
+
+// confidence 不是数字说明这一行的类型与表定义对不上（列是 numeric(3,2)
+// NOT NULL），与 remaining_estimate 同样处置：报错，不静默当成 0。
+// 静默的后果是那个渠道的额度项悄悄变成「不可信」，而库里那一行看起来正常。
+func TestQuotaRejectsMalformedConfidence(t *testing.T) {
+	row := candidateRow{
+		remaining:  sql.NullString{String: "12.5", Valid: true},
+		confidence: sql.NullString{String: "不是数字", Valid: true},
+	}
+	if _, err := row.quota(); err == nil {
+		t.Fatal("confidence 不是数字时应当报错")
+	}
+}
+
+// 自记账与「从错误里推断」都是推算，插件契约会对它们打折。
+//
+// 注意这条判据与 internal/quota 的 Merge 对同一情形**不一致**：那边
+// error_observed 带数值时置 Estimated = false，这边按 probe_kind 推出 true，
+// 而 Estimated 并不落库（表里没有这一列），所以同一个状态在内存里与从库里
+// 读回来会不一样。本包以库里那一列为准；两处要统一是另一件事。
 func TestQuotaSelfAccountingIsEstimated(t *testing.T) {
 	for _, kind := range []string{"self_accounting", "error_observed"} {
 		t.Run(kind, func(t *testing.T) {

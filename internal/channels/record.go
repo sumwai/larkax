@@ -376,8 +376,10 @@ func consumedTokens(u channel.Usage) int64 {
 
 // isAPIQuery 判断一个 probe_kind 是不是上游实测。
 //
-// 与读侧的 knownQuota 共用同一个判据：只有 api_query 是实测，其余
-// （自记账、从错误推断）都是推算，route 对推算值打折。
+// 与读侧的 candidateRow.withValue 共用同一个判据：只有 api_query 是实测，
+// 其余（自记账、从错误推断）都是推算。它填的是 State.Estimated，读者是插件
+// 契约（见 internal/plugin 的 RouteContextFrom）；路由打分**不看**这个标记，
+// 它按 Confidence 加权（见 internal/route 的 scoreQuota）。
 func isAPIQuery(probeKind string) bool {
 	return probeKind == probeKindAPIQuery
 }

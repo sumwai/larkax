@@ -374,7 +374,7 @@ func TestRecordCallSelfAccountsAgainstBaseline(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
-	insertQuota(t, db, id, "1000", "tokens", "api_query", "healthy")
+	insertQuota(t, db, id, "1000", "tokens", "api_query", "healthy", 1)
 
 	r := NewRecorder(db, testStaleAfter)
 	at := time.Now().UTC()
@@ -493,7 +493,7 @@ func TestRecordCallSelfAccountingClampsAtZero(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
-	insertQuota(t, db, id, "100", "tokens", "api_query", "healthy")
+	insertQuota(t, db, id, "100", "tokens", "api_query", "healthy", 1)
 
 	r := NewRecorder(db, testStaleAfter)
 	err := r.RecordCall(context.Background(), route.CallOutcome{
@@ -538,7 +538,7 @@ func TestRecordCallSelfAccountingNeedsBaseline(t *testing.T) {
 	//
 	// 单位故意给成 tokens：给成别的单位的话，挡住这次写入的是**单位**
 	// 那道判断，这条用例就测不到「没有基准」这一条了。
-	insertQuota(t, db, id, nil, "tokens", "self_accounting", "unknown")
+	insertQuota(t, db, id, nil, "tokens", "self_accounting", "unknown", 0.2)
 	if err := r.RecordCall(context.Background(), call); err != nil {
 		t.Fatalf("记录失败: %v", err)
 	}
@@ -567,7 +567,7 @@ func TestRecordCallSelfAccountingSkipsForeignUnit(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
-			insertQuota(t, db, id, "100", tc.unit, "api_query", "healthy")
+			insertQuota(t, db, id, "100", tc.unit, "api_query", "healthy", 1)
 
 			err := r.RecordCall(context.Background(), route.CallOutcome{
 				ChannelID: id,
@@ -595,7 +595,7 @@ func TestRecordCallSelfAccountingOnlyWithUsage(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
-	insertQuota(t, db, id, "1000", "tokens", "api_query", "healthy")
+	insertQuota(t, db, id, "1000", "tokens", "api_query", "healthy", 1)
 
 	r := NewRecorder(db, testStaleAfter)
 	at := time.Now().UTC()
@@ -632,7 +632,7 @@ func TestRecordCallRejectsFutureObservation(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
-	insertQuota(t, db, id, "1000", "tokens", "api_query", "healthy")
+	insertQuota(t, db, id, "1000", "tokens", "api_query", "healthy", 1)
 
 	r := NewRecorder(db, testStaleAfter)
 	err := r.RecordCall(context.Background(), route.CallOutcome{
