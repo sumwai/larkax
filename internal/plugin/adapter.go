@@ -110,16 +110,29 @@ func ApplyRequestPatch(req *channel.Request, patch *RequestPatch) (rejected []st
 
 // applyBodyToChannel 把补丁里的字段写回统一请求。
 //
-// messages / tools / tool_choice 这三项**不往 channel.Request 上写**：
-// 它们在上游请求体里是结构化数据，而 channel.Request 用的是自己的类型
-// （[]Message、[]Tool）。从插件的 JSON 视图反解回那些类型需要一份
-// 「JSON → 结构化消息」的解析器，而那份解析器的每一条规则都是一个新的
-// 契约面（插件能不能改 tool_use 的 id？能不能插一条 system 消息？）。
+// # 能改的只有三个标量
 //
-// 所以当前只应用**标量字段**：max_tokens、temperature、top_p。
-// 结构化的那几项留在补丁里，由调用方按自己的需要决定——这是有意留的口子，
-// 而不是漏掉了。
+// 写下去的是 `max_tokens`、`temperature`、`top_p`（见 appliedBodyFields）。
+// `messages` / `system` / `stop` / `tools` / `tool_choice` 这 5 个**一律拒绝**，
+// 由 unappliedFields 判定，理由也写在那里：它们在上游请求体里是结构化数据，
+// 而 channel.Request 用的是自己的类型（[]Message、[]Tool），从插件的 JSON
+// 视图反解回那些类型需要一份「JSON → 结构化消息」的解析器，而那份解析器的
+// 每条规则都是一个新的契约面（插件能不能改 tool_use 的 id？能不能插一条
+// system 消息？）。那是权限边界，要单独拍板。
+//
+// **有意的是不应用，不是静默。** 这段注释早先写的是「结构化的那几项留在补丁里，
+// 由调用方按自己的需要决定——这是有意留的口子」，而两条应用路径都不写它们、
+// 也不报错：作者看到的是「我的插件没生效」，与字段名拼错一模一样。现在给了
+// 这几个字段就返回 ErrPatchScope，与「写了契约之外的字段」同一个处置。
+//
+// 判定在**写下去之前**：走到错误那一支时 req 一个字段都没被改过，
+// 于是「整份补丁不生效」是这里唯一可能的结局（见 Session.ApplyRequest）。
 func applyBodyToChannel(req *channel.Request, body *RequestBodyPatch) error {
+	// 与 patch.go 的 ApplyRequestBodyPatch 调同一个判据：两条应用路径对同一份
+	// 补丁必须给出同一个判定，只拦一条的话，接线时用哪条就把洞开在哪条上。
+	if fields := body.unappliedFields(); len(fields) > 0 {
+		return errBodyFieldsNotApplied(fields)
+	}
 	if body.MaxTokens != nil {
 		if *body.MaxTokens <= 0 {
 			return errNonPositiveMaxTokens(*body.MaxTokens)

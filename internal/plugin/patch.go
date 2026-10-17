@@ -77,31 +77,82 @@ func originalMaxTokens(body map[string]any, patched int64) (value int64, has boo
 		ErrPatchScope, raw, raw, patched)
 }
 
-// patchableBodyFields 是插件能改的请求体字段。
+// appliedBodyFields 是请求体补丁里**会被应用**的字段。
 //
-// 这张表是**唯一**的字段白名单：不在里面的字段插件改不了，因为它根本
-// 进不了 RequestBodyPatch 的结构（见它的 UnmarshalJSON）。
+// 契约认得 8 个（见 RequestBodyPatch 的字段表），应用这一步只写这 3 个；
+// 另外 5 个一律拒绝，见 unappliedFields。
 //
 // 为什么不做的更宽松（允许改任意 JSON 字段）：请求体里有 `model` 与 `stream`，
 // 前者决定价格、后者决定「已吐字之后还能不能换渠道」这条硬约束。
 // 一张白名单比「记得过滤那两个字段」可靠。
 //
-// 这张表**不是**按协议分的：`stop` 与 `stop_sequences` 是两套协议里同一个
-// 意思的不同写法，而插件只看得到一种。当前采用契约里的字段名（`stop`）。
+// 这份清单也用在报错文本里（「会应用的只有 …」），所以它必须与
+// unappliedFields 的判定拼得回完整的契约字段表——
+// TestBodyPatchFieldTableMatchesContract 拿两者的并集与 RequestBodyPatch
+// 的 json 标签对一遍。
 //
-// `max_tokens` 留在表里，但**只许调小**（见 ApplyRequestBodyPatch 与
+// `max_tokens` 在这里，但**只许调小**（见 ApplyRequestBodyPatch 与
 // applyBodyToChannel）：把输出压短是策略插件的正当用法，而调大会把计费预留
 // 的上界一起抬高。它在这一层有校验，只是方向只有一个——别把它当成漏了校验
 // 而顺手放开，那正好是「上界与上报值由同一方控制」那条路径。
-var patchableBodyFields = []string{
-	"messages",
-	"system",
+var appliedBodyFields = []string{
 	"max_tokens",
 	"temperature",
 	"top_p",
-	"stop",
-	"tools",
-	"tool_choice",
+}
+
+// unappliedFields 返回补丁里给了、而应用这一步**不会写下去**的字段名，按契约顺序。
+//
+// # 为什么是拒绝，而不是留在补丁里
+//
+// 这 5 个字段（messages / system / stop / tools / tool_choice）以前是「结构化的
+// 那几项留在补丁里，由调用方按自己的需要决定」，而两条应用路径都不写它们、
+// 也不返回错误：插件作者看到的是「我的插件没生效」，与字段名拼错
+// （decodePatch 报的那个错）在观测上完全一样，而那正是契约里最难查的一类静默。
+// **有意的是不应用，不是静默。**
+//
+// 不应用的理由：它们在上游请求体里是结构化数据，而 channel.Request 用的是
+// 自己的类型（[]Message、[]Tool）。从插件的 JSON 视图反解回那些类型需要一份
+// 「JSON → 结构化消息」的解析器，而那份解析器的每一条规则都是一个新的契约面
+// （插件能不能改 tool_use 的 id？能不能插一条 system 消息？）。那是权限边界，
+// 要单独拍板，不属于「补丁能改什么」这一条。
+//
+// # 判据只写一份
+//
+// 两条应用路径（adapter.go 的 applyBodyToChannel 与 ApplyRequestBodyPatch）
+// 都调它，于是同一份补丁在哪条路径上都是同一个判定。分两处写的话，接线时
+// 用哪条就把洞开在哪条上——`max_tokens` 上界那条规则当初就是这么写的，
+// 这一条跟着它走。
+func (p *RequestBodyPatch) unappliedFields() []string {
+	if p == nil {
+		return nil
+	}
+	var out []string
+	for _, item := range []struct {
+		name  string
+		given bool
+	}{
+		{"messages", p.Messages != nil},
+		{"system", p.System != nil},
+		{"stop", p.Stop != nil},
+		{"tools", p.Tools != nil},
+		{"tool_choice", p.ToolChoice != nil},
+	} {
+		if item.given {
+			out = append(out, item.name)
+		}
+	}
+	return out
+}
+
+// errBodyFieldsNotApplied 是补丁里出现「认得但不应用」的字段时的错误。
+//
+// 报错**点出是哪几个字段**：只说「补丁不符合契约」的话，作者手上那份补丁里
+// 有 8 个字段可选，他得逐个试。字段名按契约顺序列出（不是排过序的），
+// 与 RequestBodyPatch 的字段表、与文档里的那一节是同一个顺序。
+func errBodyFieldsNotApplied(fields []string) error {
+	return fmt.Errorf("%w: 请求体补丁里的 %s 不会被应用（会应用的只有 %s），请把它们从补丁里去掉",
+		ErrPatchScope, strings.Join(fields, "、"), strings.Join(appliedBodyFields, "、"))
 }
 
 // headerPrefix 是插件能加的请求头的名字前缀。
@@ -120,16 +171,18 @@ const headerPrefix = "x-larkax-"
 
 // ErrPatchScope 表示插件给的补丁不符合契约。
 //
-// 三种情形共用这一个哨兵：
+// 四种情形共用这一个哨兵：
 //
 //   - 字段根本不存在，名字拼错了（`channeId`）——由各补丁类型的 UnmarshalJSON
 //     报出，见 decodePatch；
 //   - 字段存在，但插件不许改（请求体里的 `model`）；
-//   - 字段对而值不能用（`max_tokens` 非正）。
+//   - 字段对而值不能用（`max_tokens` 非正）；
+//   - 字段与值都合法，但应用这一步不写它（`messages` 等 5 个，见
+//     unappliedFields）。
 //
 // 它们在实现上是同一件事：**这份补丁不能原样收下**，而作者要做的动作也一样，
-// 都是回去改插件。分成三个哨兵只会让同一类错误有三个名字，
-// 调用方要同时判三个才算判全。
+// 都是回去改插件。分成四个哨兵只会让同一类错误有四个名字，
+// 调用方要同时判四个才算判全。
 //
 // 与「插件跑挂了」分开：这是**契约违规**，要在上传期或首次运行时就被看见，
 // 而不是当成一次普通的插件失败悄悄丢掉。
@@ -141,9 +194,16 @@ var ErrPatchScope = errors.New("插件给的补丁不符合契约")
 
 // ApplyRequestBodyPatch 把补丁合并进请求体。
 //
-// 合并是**浅合并**：给一个字段就整块替换它。深合并（例如只改 messages 里
-// 某一条的 content）需要一条路径语法，那是另一个契约问题——它会让
-// 「插件改了什么」变得难以从返回值看出来。
+// # 只有标量字段会落地
+//
+// 会写下去的是 appliedBodyFields 那三个；`messages` / `system` / `stop` /
+// `tools` / `tool_choice` 一律拒掉（见 unappliedFields），理由在那里。
+//
+// # 合并是浅合并
+//
+// 给一个字段就整块替换它。今天会应用的三个字段都是标量，所以这一层区分还
+// 看不出来；深合并（例如只改 messages 里某一条的 content）需要一条路径语法，
+// 那是另一个契约问题——它会让「插件改了什么」变得难以从返回值看出来。
 //
 // body 为 nil 时新建一个 map。返回的是新 map，不改动入参：
 // 上游请求体可能已经被别处引用（快照），就地改会让「当时发出去的是什么」
@@ -152,7 +212,13 @@ func ApplyRequestBodyPatch(body map[string]any, patch *RequestBodyPatch) (map[st
 	if patch == nil {
 		return body, nil, nil
 	}
-	out := make(map[string]any, len(body)+len(patchableBodyFields))
+	// 在写下去**之前**判：拒掉的语义是**整份补丁不生效**（见 patchOf），
+	// 写了一半再报错就不是那个意思了。与 adapter.go 的 applyBodyToChannel
+	// 是同一个判定的两个落点，所以两边都调同一个函数。
+	if fields := patch.unappliedFields(); len(fields) > 0 {
+		return nil, nil, errBodyFieldsNotApplied(fields)
+	}
+	out := make(map[string]any, len(body)+len(appliedBodyFields))
 	for k, v := range body {
 		out[k] = v
 	}
@@ -163,12 +229,6 @@ func ApplyRequestBodyPatch(body map[string]any, patch *RequestBodyPatch) (map[st
 		changed = append(changed, field)
 	}
 
-	if patch.Messages != nil {
-		set("messages", patch.Messages)
-	}
-	if patch.System != nil {
-		set("system", *patch.System)
-	}
 	if patch.MaxTokens != nil {
 		// max_tokens 必须为正：它是计费预留上界的关键（见 pipeline 的校验），
 		// 给一个 0 或负数会让预留算不出来。
@@ -197,15 +257,6 @@ func ApplyRequestBodyPatch(body map[string]any, patch *RequestBodyPatch) (map[st
 	}
 	if patch.TopP != nil {
 		set("top_p", *patch.TopP)
-	}
-	if patch.Stop != nil {
-		set("stop", patch.Stop)
-	}
-	if patch.Tools != nil {
-		set("tools", patch.Tools)
-	}
-	if patch.ToolChoice != nil {
-		set("tool_choice", patch.ToolChoice)
 	}
 	sort.Strings(changed)
 	return out, changed, nil
