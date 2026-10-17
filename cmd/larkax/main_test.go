@@ -5,10 +5,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -313,5 +315,216 @@ func TestServiceRefusesToStartWithoutMasterKey(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "LARKAX_MASTER_KEYS") {
 		t.Errorf("错误信息应当点明缺的是主密钥: %v", err)
+	}
+}
+
+// syncBuffer 是并发安全的日志落点。
+//
+// 下面那条用例让服务在后台 goroutine 里打日志、自己在前台读，而 bytes.Buffer
+// 并发读写会踩坏数据（CI 带 -race 跑，这里会直接报出来）。日志是那条用例的
+// 判据本身，所以它不能被读坏。
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+// Write 收下一条日志。
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+// String 取当前已经落下的全部日志。
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// listenTCP 绑一个本地地址，供用例自己占端口 / 借端口。
+//
+// 走 ListenConfig 而不是 net.Listen：noctx 检查器要求带 context（它只用于
+// 解析地址，不影响返回的监听器）。调用方自己决定绑不上时怎么报，所以这里
+// 只把错误交出去。
+func listenTCP(addr string) (net.Listener, error) {
+	var lc net.ListenConfig
+	return lc.Listen(context.Background(), "tcp", addr)
+}
+
+// busyAddr 返回一个**已经被占住**的地址，并在用例结束时放开。
+//
+// 拿它去监听必定失败，而且是真实的那种失败（内核说 address already in use），
+// 不是造出来的假错误——「绑不上时会怎样」正是这几条用例要测的东西。
+func busyAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := listenTCP("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("占端口失败: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln.Addr().String()
+}
+
+// freeAddr 返回一个**当前空闲的具体地址**。
+//
+// :0 给不出这个地址——内核分配完的端口只存在于监听器里，调用方拿不到，
+// 而下面几条用例需要「一个必定绑得上、且事后能再去连它」的具体地址。
+// 从放开到用例再绑上之间有理论上的争抢窗口，但真被抢走时用例会直接报
+// 「监听失败」，不会静默地测错东西。
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := listenTCP("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("借端口失败: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("放开借来的端口失败: %v", err)
+	}
+	return addr
+}
+
+// waitForLog 等到日志里出现 want 为止。
+//
+// 不等的话，「连不上」既可能是日志说了假话、也可能只是服务还没轮到跑，
+// 两者分不开——而这一条用例要断言的恰恰是前者。
+func waitForLog(t *testing.T, logs *syncBuffer, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(logs.String(), want) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("等了 5s 也没等到日志 %q:\n%s", want, logs.String())
+}
+
+// 两个地址都绑不上时，**两条原因都要出现**。
+//
+// 只报第一条是这个 bug 的另一半：另一条错误留在没人读的 channel 里，于是
+// 「另一个为什么也没起来」要再改一次端口、再跑一次才知道。这里刻意让两个
+// 端口都被占，断言的就是「一次说清两条」。
+func TestServeUntilSignalReportsEveryBindFailure(t *testing.T) {
+	first, second := busyAddr(t), busyAddr(t)
+
+	var logs bytes.Buffer
+	err := serveUntilSignal(context.Background(), slog.New(slog.NewTextHandler(&logs, nil)), time.Second, []namedServer{
+		{name: "internal", srv: &http.Server{Addr: first}},
+		{name: "public", srv: &http.Server{Addr: second}},
+	})
+	if err == nil {
+		t.Fatal("两个地址都绑不上时应当启动失败")
+	}
+	for _, name := range []string{"internal", "public"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("错误里缺 %s 那一条——只报第一条就是这个形状: %v", name, err)
+		}
+	}
+	// 一条都没绑上，日志里就不该有「开始监听」。
+	if strings.Contains(logs.String(), "开始监听") {
+		t.Errorf("绑不上时不该打「开始监听」: %s", logs.String())
+	}
+}
+
+// 一个绑不上、另一个绑得上时：整体退出，且**不留下一个半死的监听器**。
+//
+// 半死的判据不是「返回了错误」（那是设计），而是「已经绑上的那个端口有没有
+// 被放开」——没放开的话，一个端口在听、另一个没起来，而进程正在退出；
+// 端口要等到进程真的消失才归还。
+//
+// 两种排列都跑：绑不上的排在前或在后，已经绑上的那些都该被关掉。
+func TestServeUntilSignalReleasesBoundListenerWhenAnotherFails(t *testing.T) {
+	for _, failingFirst := range []bool{true, false} {
+		name := "failing-second"
+		if failingFirst {
+			name = "failing-first"
+		}
+		t.Run(name, func(t *testing.T) {
+			busy, free := busyAddr(t), freeAddr(t)
+			busyServer := namedServer{name: "internal", srv: &http.Server{Addr: busy}}
+			freeServer := namedServer{name: "public", srv: &http.Server{Addr: free}}
+			servers := []namedServer{freeServer, busyServer}
+			if failingFirst {
+				servers = []namedServer{busyServer, freeServer}
+			}
+
+			var logs bytes.Buffer
+			err := serveUntilSignal(context.Background(), slog.New(slog.NewTextHandler(&logs, nil)), time.Second, servers)
+			if err == nil {
+				t.Fatal("有一个地址绑不上时应当启动失败，而不是带着半个端口继续跑")
+			}
+			if !strings.Contains(err.Error(), "internal 监听失败") {
+				t.Errorf("错误里应当点名绑不上的那一个: %v", err)
+			}
+			if strings.Contains(err.Error(), "public 监听失败") {
+				t.Errorf("绑成功的那一个不该被报成失败: %v", err)
+			}
+			if strings.Contains(logs.String(), "开始监听") {
+				t.Errorf("有一个地址没绑上时不该打「开始监听」: %s", logs.String())
+			}
+
+			ln, err := listenTCP(free)
+			if err != nil {
+				t.Fatalf("绑成功过的端口在返回之后仍被占着，说明留下了一个半死的监听器: %v", err)
+			}
+			_ = ln.Close()
+		})
+	}
+}
+
+// 「开始监听」这行日志的全部价值在于它是「已经在听」的证据，所以这里不满足于
+// 断言日志里出现过这句话，而是**拿它当凭据去连**：它出现之后，那个端口必须
+// 真的能服务。绑上了却没交给 Serve（或者把监听器交错了）会在这里挂——端口
+// 连得上，但没人应答。
+//
+// 它管的是这条性质的正向那一半。「绑不上时不许打这行」是反向的那一半，由上面
+// 两条用例钉住：那条路上连不上是必然的，所以只有「不打日志」才是可判定的。
+func TestServeUntilSignalServesThePortItClaims(t *testing.T) {
+	addr := freeAddr(t)
+	var logs syncBuffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- serveUntilSignal(ctx, logger, 5*time.Second, []namedServer{{
+			name: "public",
+			srv: &http.Server{
+				Addr: addr,
+				Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusNoContent)
+				}),
+			},
+		}})
+	}()
+
+	waitForLog(t, &logs, "开始监听")
+
+	reqCtx, reqCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer reqCancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, "http://"+addr+"/", nil)
+	if err != nil {
+		t.Fatalf("构造请求失败: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("日志说 %s 已经在听，实际连不上: %v", addr, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("状态码 = %d，期望 204", resp.StatusCode)
+	}
+
+	// 退出信号那条路顺带走一遍：它同时证明上面那个监听器是被 Serve 接管的
+	// （没接管的话 Shutdown 会因为「没有监听器」而立刻返回，看起来一样绿）。
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("收到退出信号后应当正常排空: %v", err)
+	}
+	if !strings.Contains(logs.String(), "已退出") {
+		t.Errorf("排空之后应当留下「已退出」: %s", logs.String())
 	}
 }

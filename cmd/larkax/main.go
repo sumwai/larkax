@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -311,19 +312,80 @@ type namedServer struct {
 // 到点强行关闭会让正在生成的长回复断在半截。超时值的取舍是
 // 「不能让旧实例永远不退」与「不能截断进行中的流」之间的折中。
 //
-// 已知取舍：某个监听器起不来时直接返回错误，不会去排空其余监听器。
-// 此时进程随即退出，已建立的连接是被切断而非排空的。理由是「监听器起不来」
-// 属于启动期错误，此刻还没有真实流量值得保护——启动失败就快速失败。
+// # 启动期：先绑上，说清了，再服务
+//
+// 绑定从各个监听器自己的 goroutine 里提到了这里，**顺序做完、一次收齐**，
+// 然后才开始服务。换来的是两件事：
+//
+//   - 「开始监听」只在**所有**地址都绑上之后才打，于是它出现就是「这些端口
+//     都在听」的正向证据。以前它打的是「我打算绑这个地址」——端口被占时
+//     照样出现，排查「服务到底有没有起来」时它是**反向**的证据。
+//   - 两个地址都起不来时（例如两个端口都被占），返回的错误里两条原因都在。
+//     以前每个 goroutine 各绑各的、收到第一条就返回，第二条留在没人读的
+//     channel 里，于是「另一个为什么也没起来」要再改一次端口、再跑一次才知道。
+//
+// 已知取舍：**有一个地址绑不上就整体退出**，已经绑上的那些直接关闭，不做排空
+// （它们还没开始 Serve，也没有在途请求可排）。理由是「监听器起不来」属于启动期
+// 错误，此刻还没有真实流量值得保护——启动失败就快速失败；而让一半端口在听的
+// 进程更糟：它会按另一半的结果被编排系统收流量。
+//
+// 服务起来之后，Serve 出错仍然是「收到第一条就返回」：进程随即退出，其余
+// 监听器跟着一起消失，它们的错误没有第二个读者。这一点与启动期不同——运行时
+// 没有「等一会儿就能收齐」的窗口。
 func serveUntilSignal(ctx context.Context, logger *slog.Logger, shutdownTimeout time.Duration, servers []namedServer) error {
-	errCh := make(chan error, len(servers))
+	// 绑不上的先记下来、继续绑下一个，而不是就地返回：「另一个为什么也没起来」
+	// 正是这条路径要一次答完的问题。
+	listeners := make([]net.Listener, 0, len(servers))
+	failures := make([]error, 0, len(servers))
+	// 走 ListenConfig 而不是 net.Listen（noctx 要求带 context）。这里的 ctx
+	// 只用于解析地址，**不影响返回的监听器**（见它的文档），所以收到退出信号
+	// 不会顺手把已经绑好的端口关掉——那是下面 Shutdown 的活。
+	var lc net.ListenConfig
 
 	for _, ns := range servers {
-		go func(ns namedServer) {
-			logger.Info("开始监听", "server", ns.name, "addr", ns.srv.Addr)
-			if err := ns.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				errCh <- fmt.Errorf("%s 监听失败: %w", ns.name, err)
+		addr := ns.srv.Addr
+		if addr == "" {
+			// 与 http.Server.ListenAndServe 的默认值一致。自己绑就得自己认这条
+			// 默认值，否则空地址会静默地从一个固定端口变成一个随机端口。
+			addr = ":http"
+		}
+		ln, err := lc.Listen(ctx, "tcp", addr)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("%s 监听失败: %w", ns.name, err))
+			continue
+		}
+		listeners = append(listeners, ln)
+	}
+	if len(failures) > 0 {
+		// 已经绑上的一个都不留：留着就是一个「半死」的进程——一个端口在听、
+		// 另一个没起来，而进程马上就要退出。
+		for _, ln := range listeners {
+			_ = ln.Close()
+		}
+		// 拼成单行而不是 errors.Join：后者的错误文本是换行拼起来的，而这条要进
+		// stderr（见 main），单行更好读——与 ledger/store、catalog 里那两处同。
+		msgs := make([]string, 0, len(failures))
+		for _, err := range failures {
+			msgs = append(msgs, err.Error())
+		}
+		return fmt.Errorf("%d 个监听器起不来: %s", len(failures), strings.Join(msgs, "; "))
+	}
+
+	errCh := make(chan error, len(servers))
+
+	// 走到这里说明一个都没绑失败，listeners 与 servers 一一对应。
+	for i, ns := range servers {
+		ln := listeners[i]
+		// 报的是**实际绑上**的地址，而不是配置里的那一个：这一行要当证据用，
+		// 就不能是「我打算绑哪儿」。两者在正常配置下相同，只有 :0 那种写法不同。
+		logger.Info("开始监听", "server", ns.name, "addr", ln.Addr())
+		go func(ns namedServer, ln net.Listener) {
+			// Serve 拿的是上面那个已经绑好的监听器，而不是让 Server 自己去绑：
+			// 绑定的结果与「开始监听」这行日志必须是同一个动作的产物。
+			if err := ns.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("%s 服务中断: %w", ns.name, err)
 			}
-		}(ns)
+		}(ns, ln)
 	}
 
 	select {
