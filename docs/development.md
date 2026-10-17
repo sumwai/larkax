@@ -442,6 +442,12 @@ create` / `update` 给了 `--setting` 时）打到 stderr 上，`channel list` �
 适配器实现之后，这两处提示会一起消失（判据是 `internal/channel` 里的
 `SettingReadByAdapters`，由同包的用例盯着它与代码是否一致）。
 
+`--owner` 把渠道记在某个用户名下（留空表示平台自营）。它**只写
+`channels.owner_user_id`，不做权限检查**：任何存在的用户都可以被写成归属，
+而这个用户是不是 `merchant` 没有一处代码会看（见下文「用户的角色」）。
+归属是分账的依据——商家作用域的计价规则按它匹配，结算时
+`req.OwnerUserID` 跟着渠道走进账本，而不是「他有没有资格」的判据。
+
 **三、配别名：这家上游对同一个模型叫什么名字。**
 
 ```sh
@@ -543,6 +549,21 @@ KEY=$(go run ./cmd/larkaxctl apikey create --user "$(go run ./cmd/larkaxctl user
 `user create` 还有 `--email` 与 `--role`（`user`、`merchant`、`admin`，默认 `user`）。
 用户名唯一且大小写不敏感，重名会直接报错——**它不会改到已有的那个用户**，
 所以这条命令不能拿来「给已有用户补点什么」。
+
+### 用户的角色（今天只是记下来）
+
+三个角色都是用户，`merchant` 与 `admin` 落成 `users.is_merchant` /
+`users.is_admin` 两个布尔标记（`admin` 同时打上两个）。**全仓没有生产代码
+读这两个标记**，所以：
+
+- `--role merchant` **不会**让这个用户多出什么权限，`--role admin` 也**不会**
+  让他能进管理接口。管理面还不存在。
+- `channel create --owner <用户>` 不检查那个人是不是 `merchant`：归属只决定
+  分账记到谁的账上，不决定「有没有资格」。
+- 角色改不了。`user create` 只建新用户，重名直接报错，没有「改角色」的命令。
+
+这两个标记是给管理面的鉴权**预留**的（#158）。在那条路接上之前，把 `--role`
+当成一条备注，而不是一条访问控制。
 
 ### 开户：新用户需要一行钱包
 
