@@ -67,6 +67,61 @@ func TestToolDefinitionInputTokensEmptyKeepsFrame(t *testing.T) {
 	}
 }
 
+// ── 历史消息里的 tool_use ────────────────────────────────────────────
+
+// 短键、枚举值多的参数：与工具定义那一类同形，结果同样由**按字节的地板**决定。
+func TestToolUseInputTokensFloorLiftsShortKeyArguments(t *testing.T) {
+	block := []byte(`{"id":"call_1","name":"set_mode","input":{"auto":true,"balanced":true,` +
+		`"fast":true,"hybrid":true,"legacy":true,"manual":true,"slow":true,"strict":true}}`)
+
+	if got, want := len(block), 151; got != want {
+		t.Fatalf("夹具长度 = %d，期望 %d（改夹具就要重算下面的数）", got, want)
+	}
+	// 12 是每块的包装（ToolUseReserveFrameTokens），53 是地板 ceil(0.35 × 151)。
+	if got, want := int(ToolUseInputTokens("m-1", block)), 65; got != want {
+		t.Errorf("ToolUseInputTokens = %d，期望 %d", got, want)
+	}
+	// 地板确实赢了，否则这条用例测的是另一条路。
+	if est := EstimatedTokens("m-1", string(block)); est >= 53 {
+		t.Errorf("启发式估算 = %d，不再低于地板 53——这条用例已经测不到地板", est)
+	}
+}
+
+// 长文本参数：这一侧由启发式估算决定（它比地板高），地板仍要参与比较。
+func TestToolUseInputTokensKeepsLongArguments(t *testing.T) {
+	block := []byte(`{"id":"call_1","name":"set_mode","input":{"note":"` +
+		strings.Repeat("Set the operating mode now. ", 20) + `"}}`)
+
+	if got, want := len(block), 613; got != want {
+		t.Fatalf("夹具长度 = %d，期望 %d（改夹具就要重算下面的数）", got, want)
+	}
+	// 252 是启发式估算，地板 ceil(0.35 × 613) = 215 低于它。
+	if got, want := int(ToolUseInputTokens("m-1", block)), 264; got != want {
+		t.Errorf("ToolUseInputTokens = %d，期望 %d", got, want)
+	}
+	if est := EstimatedTokens("m-1", string(block)); est <= 215 {
+		t.Errorf("启发式估算 = %d，不再高于地板 215——这条用例已经测不到启发式那一侧", est)
+	}
+}
+
+// 没有参数（工具不带参数）时仍留着包装开销：上游照样要为 id 与 name 计 token。
+func TestToolUseInputTokensEmptyKeepsFrame(t *testing.T) {
+	if got := ToolUseInputTokens("m-1", nil); got != int64(ToolUseReserveFrameTokens) {
+		t.Errorf("空参数 = %d，期望只有包装开销 %d", got, ToolUseReserveFrameTokens)
+	}
+	// 包装开销本身也钉一次：它被顺手改掉时这里要知道。
+	if ToolUseReserveFrameTokens != 12 {
+		t.Errorf("ToolUseReserveFrameTokens = %d，期望 12", ToolUseReserveFrameTokens)
+	}
+	// **两条路刻意不是同一个数**：流式中断那条路拿它去计费（估高=凭空费用），
+	// 预留拿它去冻余额（估低=差额由平台承担），方向相反。谁把两者「统一」成
+	// 一个数，就必然让其中一边吃错方向——这条断言就是为了让那一次改动红。
+	if ToolUseReserveFrameTokens <= ToolCallFrameTokens {
+		t.Errorf("预留侧的包装开销 %d 不大于计费侧的下界 %d，两者已经不是一贯的保守方向",
+			ToolUseReserveFrameTokens, ToolCallFrameTokens)
+	}
+}
+
 // ── 图片 ────────────────────────────────────────────────────────────
 
 // 这个数是一个常数，所以断言只能是被钉住的字面量。它的依据（两家在
