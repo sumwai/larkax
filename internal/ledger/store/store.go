@@ -3,6 +3,10 @@
 // 它把 internal/ledger 造出来的分录落库，并同步维护 user_wallets 里的
 // **余额快照**。这是唯一同时知道「账本」与「钱包」两个概念的地方。
 //
+// 一次结算落的是**两条只追加的底稿**，在同一个事务里：ledger_entries（动了
+// 多少钱）与 usage_events（那笔钱是按什么用量、哪个时刻算出来的，见
+// usage_event.go）。钱包余额是从它们推出来的快照。
+//
 // # 权威与快照
 //
 // 账本是权威，钱包余额是它的**具体化物**——一个读优化。余额可以随时由
@@ -51,6 +55,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/idempotency"
@@ -146,6 +151,31 @@ func checkProtocol(p channel.Protocol) error {
 		return fmt.Errorf("%w：%q，只有 %q 与 %q 两种",
 			ErrUnknownProtocol, string(p), channel.ProtocolOpenAI, channel.ProtocolAnthropic)
 	}
+}
+
+// ErrMissingPricedAt 表示调用方没有在 pipeline.Charge 上设置 PricedAt。
+//
+// 与 ErrMissingProtocol 同一个形状，代价还更大一些：usage_events.priced_at
+// 是「事后复算按哪一刻的档位算的价」**唯一**的落点（见 pipeline.Charge
+// 的注释——价格按受理时刻定，拿结算时刻去复算会算出另一个档位的价，而两个价
+// 看起来都合理，靠账单本身分不出来）。
+//
+// 它的零值落库是公元 1 年：不报错，事后也看不出那一行是「当时就是按这一刻
+// 算的」还是「漏设了」。分辨这两者只有写进去的那一刻还做得到，所以分辨放在
+// 这里。
+//
+// 生产路径不会撞上它：pipeline.Settle 一定填这个字段（取自受理时刻，见
+// pipeline 的 env）。它挡的是手工构造 Charge 的调用方与测试夹具——那种行
+// 是库里不可能出现的数据。
+var ErrMissingPricedAt = errors.New(
+	"缺少受理时刻：调用方没有设置 pipeline.Charge.PricedAt（它由 pipeline.Settle 填）")
+
+// checkPricedAt 检查这次结算有没有带上「价格是按哪一刻定的」。
+func checkPricedAt(at time.Time) error {
+	if at.IsZero() {
+		return ErrMissingPricedAt
+	}
+	return nil
 }
 
 // SaveReservation 落一条预留记录并冻住金额。
@@ -299,7 +329,7 @@ var ErrInsufficientAvailable = errors.New("可用余额不足")
 // 它是一条**配置/数据**问题而不是余额问题：正常流程里注册时就该建钱包。
 var ErrNoWallet = errors.New("没有对应的钱包")
 
-// Save 落一次结算：写分录、解冻、扣余额，全在一个事务里。
+// Save 落一次结算：写分录、写用量事件、解冻、扣余额，全在一个事务里。
 //
 // # 幂等
 //
@@ -308,9 +338,38 @@ var ErrNoWallet = errors.New("没有对应的钱包")
 //
 // 这不是可选的：上游超时、进程重启、队列重投都会让同一次结算到达两次，
 // 而重复扣费是用户立刻能发现的错，也是事后最难解释的那类。
+//
+// # 用量事件为什么必须在这一个事务里
+//
+// 账本分录与 usage_events 是**同一件事的两面**：分录说动了多少钱，用量事件
+// 说那笔钱是按什么用量算出来的。分成两次写就会出现「有分录、没有用量」的
+// 行，而对账正是拿这两边对——一边缺失时，对出来的差额没有来历，查的人只能
+// 猜。同一个事务还顺带解决幂等：重放整笔回滚，不会多出一行用量。
+//
+// 它**不是**一次额外的数据库往返：这次结算本来就开着事务、要写若干条分录，
+// 多一条 INSERT 只多一次同一条连接上的语句，不新开连接、不新起 goroutine、
+// 不多一次提交；它失败时走的路与分录写失败完全相同——回滚整笔、把错误交给
+// 调用方（网关那一侧本来就是「结算落库失败必须报出来」）。真去另起一条异步
+// 链路反而两头不落好：既丢了原子性，又让「写入静默丢失」成为可能——而这张表
+// 是财务底稿，丢了没人会来问。
+//
+// # 它挂在热路径上吗
+//
+// Save 本身就在请求路径的同步段上：网关在把响应交回调用方之前调它
+// （见 internal/gateway 的 finishCharge，非流式与流式两条路共用）。所以
+// 「不要挂进热路径的同步段」这条约束，在这里落成的不是「异步写」，而是
+// **不在这条路径上加新的等待**——用量事件跟着已经开着的那次事务走，不新开
+// 连接、不新起 goroutine、不另查一次库。这与快照那条链路的取舍不同：快照是
+// 排障辅助，可以异步、可以丢（见 internal/gateway 的 snapshotAsync）；用量
+// 事件是账的一部分，必须与分录同生共死。
 func (s *Store) Save(ctx context.Context, req pipeline.Request, charge *pipeline.Charge) error {
 	if charge == nil {
 		return errors.New("账单为空")
+	}
+	// 在开事务、写任何东西**之前**挡下：漏设受理时刻时这次结算一个副作用
+	// 都不该留下。位置与 SaveReservation 的 checkProtocol / checkAPIKey 一致。
+	if err := checkPricedAt(charge.PricedAt); err != nil {
+		return err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -336,6 +395,12 @@ func (s *Store) Save(ctx context.Context, req pipeline.Request, charge *pipeline
 	}
 
 	if err := insertEntries(ctx, tx, charge.Entries); err != nil {
+		return err
+	}
+	// 用量事件紧跟着分录写：两条都是只追加的底稿，而钱包余额是从它们推出来的
+	// 快照。顺序照「先底稿、后快照」——中途失败时回滚掉的是整组，不是快照单独
+	// 跑在前面。
+	if err := insertUsageEvent(ctx, tx, req, charge); err != nil {
 		return err
 	}
 	if err := applyToWallets(ctx, tx, charge.Entries); err != nil {

@@ -317,9 +317,10 @@ type Charge struct {
 
 	// UsageSource 与 Usage 是这次结算依据的用量与它的来源。
 	//
-	// 它们**目前不落库**：usage_events 表建好了，但全仓没有写入方
-	// （与 snapshot_access_log 同一种状态，见 LESSONS.md 第 22 条）。
-	// 所以「供对账」说的是那张表接上之后的用途，不是今天的事实。
+	// 它们由落库层写进 usage_events（见 internal/ledger/store 的 Save）：
+	// 账本分录只说动了多少钱，这张表说那笔钱是按什么用量算出来的，
+	// 对账要拿这两边对。来源决定 billing_path 那一列——本地计出来的数
+	// 不能记成实测值，理由见 tokens.Source.IsExact。
 	UsageSource tokens.Source
 	Usage       billing.Usage
 
@@ -339,10 +340,12 @@ type Charge struct {
 	// 档位的价——两个价看起来都合理，差别只在用的是哪一刻，所以靠账单
 	// 本身分不出来。
 	//
-	// **下面三个字段目前只在内存里。** 结算的调用方不把它们写进任何表
-	// （账本那一侧只写 billing_requests 与 ledger_entries），全仓也还没有
-	// 复算入口。所以它们描述的是「将来复算时不必再查一次日历」这个用途，
-	// 不是今天已有的链路——今天连落库那一步都不存在。
+	// **下面三个字段里只有 PricedAt 会落库。** 它落进 usage_events.priced_at
+	// （见 internal/ledger/store 的 Save），那是「这笔钱是按哪一刻的档位算的」
+	// 唯一的落点——复算入口本身还没写，但复算要的输入从这一刻起留痕了。
+	// LocalHour 与 IsOffDay 目前仍只在内存里：结算路径从不填它们（见下），
+	// 落库层因此把对应的两列写成 NULL——「不知道」——而不是把零值写成
+	// 「当地 0 点、不是休息日」。
 	PricedAt time.Time
 	// LocalHour 与 IsOffDay 是同一次求值里用到的分时依据，为复算预留。
 	//

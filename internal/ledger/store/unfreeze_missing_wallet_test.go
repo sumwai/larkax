@@ -81,7 +81,8 @@ func TestSettleRefusesMissingWallet(t *testing.T) {
 	entries := walletlessEntries(t, "10")
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
-		Entries: entries,
+		PricedAt: pricedAt(),
+		Entries:  entries,
 	}
 	charge.Settlement.Actual = money.MustParse("10")
 

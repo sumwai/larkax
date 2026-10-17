@@ -246,6 +246,14 @@ func ledgerBalance(t *testing.T, db *sql.DB, userID int64) money.Amount {
 	return amt
 }
 
+// pricedAt 是测试里给 Charge.PricedAt 用的受理时刻。
+//
+// 它必须**非零**：落库层拒绝漏设（见 ErrMissingPricedAt），而零值落库是
+// 公元 1 年——生产里这个值一定来自受理时刻（pipeline.Reserve 取 p.now()，
+// Settle 复用它），所以零值造出来的是库不可能出现的数据。理由与本包里
+// reservation() 给 RuleMatchedAt 填 time.Now() 是同一条。
+func pricedAt() time.Time { return time.Now() }
+
 // consumeEntries 造一组「一次消费」的分录：用户扣钱、平台收入增加。
 //
 // 用它而不是 ledger.Consume 是因为后者要商户分成等参数，
