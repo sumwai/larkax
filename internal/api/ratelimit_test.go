@@ -2,11 +2,11 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ratelimit"
 )
 
@@ -135,8 +135,9 @@ func TestAllowedRequestProceeds(t *testing.T) {
 // 判据是「限流器一次都没被调用」：它要是被调了，一个没有凭证的请求就能
 // 把某个 key 的额度打满——而它连是哪把 key 都还不知道。
 func TestUnauthenticatedRequestIsNotCounted(t *testing.T) {
-	h, auth, _ := newTestHandler()
-	auth.err = errors.New("凭证无效")
+	h, authn, _ := newTestHandler()
+	// 凭证本身的问题，形状与生产侧一致（见 internal/auth）。
+	authn.err = &auth.Error{Reason: auth.ReasonMissingCredential}
 	limiter := &fakeLimiter{allowed: true}
 	h.RateLimiter = limiter
 
