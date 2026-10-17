@@ -209,6 +209,9 @@ If 5432 is already taken, `make run PG_PORT=55432` — the DSN line follows, so 
 no need to delete `.env` first.
 
 The service serves the inference API on `:8080` and `/healthz` and `/readyz` on `:9090`.
+Both listen addresses default to loopback (`127.0.0.1:8080` and `127.0.0.1:9090`), so
+nothing outside the host can reach them. Set `LARKAX_HTTP_ADDR` / `LARKAX_INTERNAL_ADDR`
+explicitly to widen the bind — for example `:8080` in a container.
 A deployment running the `worker` role does not serve inference traffic and answers `501`
 on the public port by design — the response names the role, so a misconfigured deployment
 is obvious rather than mysterious. Building alone is not enough to run it — see

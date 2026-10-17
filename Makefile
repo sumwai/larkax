@@ -124,11 +124,14 @@ migrate: init
 #
 # 读的是加载 .env 之后的值，所以写在 .env 里的覆盖也算数。放在 up 之前：
 # 端口不通就没必要先把数据库拉起来。
+#
+# 下面的兜底值与 internal/config 的默认值保持一致（这里只取冒号后面那段端口，
+# 但两处写得不一样会让人以为默认值不同）。
 check-ports: init
 	@set -a; . ./$(ENV_FILE); set +a; \
 	busy=0; \
-	for spec in "公共入口 $${LARKAX_HTTP_ADDR:-:8080} LARKAX_HTTP_ADDR" \
-	            "内部端点 $${LARKAX_INTERNAL_ADDR:-:9090} LARKAX_INTERNAL_ADDR"; do \
+	for spec in "公共入口 $${LARKAX_HTTP_ADDR:-127.0.0.1:8080} LARKAX_HTTP_ADDR" \
+	            "内部端点 $${LARKAX_INTERNAL_ADDR:-127.0.0.1:9090} LARKAX_INTERNAL_ADDR"; do \
 	  set -- $$spec; \
 	  port=$${2##*:}; \
 	  if ss -ltn 2>/dev/null | awk '{print $$4}' | grep -qE "[:.]$$port$$"; then \
@@ -137,9 +140,9 @@ check-ports: init
 	  fi; \
 	done; \
 	if [ "$$busy" = 1 ]; then \
-	  echo "监听地址被占了，服务起不来。用上面点到的那个变量换一个端口，例如:"; \
-	  echo "  LARKAX_HTTP_ADDR=:8081 make run"; \
-	  echo "  LARKAX_INTERNAL_ADDR=:9091 make run"; \
+	  echo "监听地址被占了，服务起不来。用上面点到的那个变量换一个空闲端口（主机部分照写 127.0.0.1），例如:"; \
+	  echo "  LARKAX_HTTP_ADDR=127.0.0.1:8081 make run"; \
+	  echo "  LARKAX_INTERNAL_ADDR=127.0.0.1:8082 make run"; \
 	  echo "也可以写进 $(ENV_FILE)，那样只需改一次。"; \
 	  exit 1; \
 	fi

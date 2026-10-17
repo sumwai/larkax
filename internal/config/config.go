@@ -112,10 +112,12 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		Env:          env("LARKAX_ENV", "development"),
-		Role:         Role(env("LARKAX_ROLE", string(RoleGateway))),
-		HTTPAddr:     env("LARKAX_HTTP_ADDR", ":8080"),
-		InternalAddr: env("LARKAX_INTERNAL_ADDR", ":9090"),
+		Env:  env("LARKAX_ENV", "development"),
+		Role: Role(env("LARKAX_ROLE", string(RoleGateway))),
+		// 两个监听地址默认只绑回环：内部端点（/healthz、/readyz、/metrics）与业务入口
+		// 共用这套默认值，而它们都不需要对外。要对外时显式写，例如容器里写 ":8080"。
+		HTTPAddr:     env("LARKAX_HTTP_ADDR", "127.0.0.1:8080"),
+		InternalAddr: env("LARKAX_INTERNAL_ADDR", "127.0.0.1:9090"),
 		LogLevel:     env("LARKAX_LOG_LEVEL", "info"),
 		DBDSN:        os.Getenv("LARKAX_DB_DSN"),
 		RedisDSN:     os.Getenv("LARKAX_REDIS_DSN"),
