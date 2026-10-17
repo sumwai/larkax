@@ -82,7 +82,9 @@ var conflictErrors = []error{
 	// 兜底的约束冲突：store 的写路径认不出具体含义的唯一键 / 外键都归到它。
 	// 上面那个具名哨兵比它精确（errors.Is 能直接问出「是用户不存在」），
 	// 但**只有被逐个认出来的约束**才有具名哨兵——枚举迟早漏，而退出码表
-	// 把外键与唯一键整体算作约束冲突。两条都列，判分类时具名的先命中。
+	// 把外键与唯一键整体算作约束冲突。**这里两条的先后没有语义**：本函数对
+	// 每一项都返回同一个 exitConflict，谁先被 errors.Is 命中结果一样。
+	// 需要区分具体含义的调用方按具名哨兵判断。
 	store.ErrConstraintViolation,
 
 	channels.ErrChannelNotFound,
