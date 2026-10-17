@@ -818,6 +818,32 @@ func TestDoctorEndpointPathsMatchAPI(t *testing.T) {
 	}
 }
 
+// TestDoctorLiveSignalsMatchAPI 钉住归因用的五个值与 internal/api 是同一份。
+//
+// 与上面那条同一个形状：doctor 照抄了这几个字符串（本包不 import
+// internal/api，见 doctor.go 的注释），抄错的表现是归因整段走偏——例如把
+// insufficient_quota 抄成别的，或者两句 message 抄漏一个词，于是「额度/
+// 余额」那两条永远认不出来，全都**悄悄**落到保守的兜底上（那看起来像一次
+// 正常的「认不出来」，而不是一次错），而 doctor 自己的归因用例仍然全绿：
+// 它们钉的是 doctor 那份副本。这两句就是为此导出的。
+func TestDoctorLiveSignalsMatchAPI(t *testing.T) {
+	if doctorHeaderVersion != api.HeaderVersion {
+		t.Errorf("版本头 = %q，internal/api 里是 %q", doctorHeaderVersion, api.HeaderVersion)
+	}
+	if doctorHeaderRetryAfter != api.HeaderRetryAfter {
+		t.Errorf("Retry-After 头 = %q，internal/api 里是 %q", doctorHeaderRetryAfter, api.HeaderRetryAfter)
+	}
+	if doctorCodeInsufficientQuota != api.CodeInsufficientQuota {
+		t.Errorf("额度码 = %q，internal/api 里是 %q", doctorCodeInsufficientQuota, api.CodeInsufficientQuota)
+	}
+	if doctorMsgInsufficientQuota != api.MsgInsufficientQuota {
+		t.Errorf("额度那句 message = %q，internal/api 里是 %q", doctorMsgInsufficientQuota, api.MsgInsufficientQuota)
+	}
+	if doctorMsgInsufficientBalance != api.MsgInsufficientBalance {
+		t.Errorf("余额那句 message = %q，internal/api 里是 %q", doctorMsgInsufficientBalance, api.MsgInsufficientBalance)
+	}
+}
+
 // TestDoctorLiveSendsRequestAndPrintsResult 钉住「它真的发了请求、并把结果
 // 打出来了」。
 //
@@ -1184,6 +1210,11 @@ func TestDoctorLiveReportsUpstreamRejection(t *testing.T) {
 // 这是 issue #381 那次事故的教训：doctor 只打了「结果：400」，而 400 既可能
 // 是网关入口拒的、也可能是上游拒的，两者的排查方向相反。用假网关按
 // internal/api 的 httpStatusOfUpstream 那套状态码头造出来。
+//
+// 429 + insufficient_quota 这一格还要再分开两个来源（#472）：按 Key 的额度
+// 用尽与钱包余额不足共用这个码，只有 message 分得开，而两者的下一步相反
+// （改 key 的额度 / 充值）。所以这里三条用例——两个来源各一条，再加一条
+// message 认不出来时按码说保守话的。
 func TestDoctorLiveAttributesRejection(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -1191,7 +1222,7 @@ func TestDoctorLiveAttributesRejection(t *testing.T) {
 		headers map[string]string
 		body    string
 		want    string
-		notWant string
+		notWant []string
 	}{
 		{
 			name:   "入口拒绝：缺 max_tokens",
@@ -1201,7 +1232,7 @@ func TestDoctorLiveAttributesRejection(t *testing.T) {
 			},
 			body:    `{"error":{"message":"max_tokens is required: the request must set a positive output token limit","type":"invalid_request_error"}}`,
 			want:    "在网关入口就被拒了",
-			notWant: "上游那一次调用失败",
+			notWant: []string{"上游那一次调用失败"},
 		},
 		{
 			name:   "入口拒绝：没有可用上游",
@@ -1211,7 +1242,7 @@ func TestDoctorLiveAttributesRejection(t *testing.T) {
 			},
 			body:    `{"error":{"message":"no available upstream for the requested model","type":"server_error"}}`,
 			want:    "在网关入口就被拒了",
-			notWant: "上游那一次调用失败",
+			notWant: []string{"上游那一次调用失败"},
 		},
 		{
 			name:   "上游失败：网关回 502",
@@ -1221,7 +1252,7 @@ func TestDoctorLiveAttributesRejection(t *testing.T) {
 			},
 			body:    `{"error":{"message":"upstream call failed","type":"upstream_error"}}`,
 			want:    "上游那一次调用失败",
-			notWant: "在网关入口就被拒了",
+			notWant: []string{"在网关入口就被拒了"},
 		},
 		{
 			name:   "我们自己的限流：429 带 Retry-After",
@@ -1232,17 +1263,47 @@ func TestDoctorLiveAttributesRejection(t *testing.T) {
 			},
 			body:    `{"error":{"message":"rate limit exceeded for this API key, retry later","type":"rate_limit_error"}}`,
 			want:    "按 Key 限流",
-			notWant: "上游在限流",
+			notWant: []string{"上游在限流"},
 		},
 		{
-			name:   "额度用尽：429 带 insufficient_quota",
+			// 429 + insufficient_quota 的第一个来源：按 Key 的累计额度用尽。
+			// 判据是我们自己那句 message，不是码。
+			name:   "额度用尽：429 带 insufficient_quota 与额度那句 message",
 			status: http.StatusTooManyRequests,
 			headers: map[string]string{
 				doctorHeaderVersion: "v0.1.0-test",
 			},
-			body:    `{"error":{"message":"this API key has reached its spending limit","type":"rate_limit_error","code":"insufficient_quota"}}`,
+			body:    `{"error":{"message":"this API key has reached its spending limit; raise the limit on this key or use a different key","type":"rate_limit_error","code":"insufficient_quota"}}`,
 			want:    "额度用尽",
-			notWant: "上游在限流",
+			notWant: []string{"上游在限流", "余额不够"},
+		},
+		{
+			// 同一个码的第二个来源：钱包可用余额不够这次预留。这一条是
+			// issue #472 的正题——按码归因会把这一种说成「Key 的额度用尽」，
+			// 让人去查 key 的额度，而该做的是充值。
+			name:   "余额不足：429 带 insufficient_quota 与余额那句 message",
+			status: http.StatusTooManyRequests,
+			headers: map[string]string{
+				doctorHeaderVersion: "v0.1.0-test",
+			},
+			body: `{"error":{"message":"the account balance is insufficient for this request; ` +
+				`top up the wallet before retrying","type":"rate_limit_error","code":"insufficient_quota"}}`,
+			want: "余额不够这次预留",
+			// 不能再说成「这把 API Key 的额度用尽了」——那正是这个 issue
+			// 要修的那句指错人。也不能说成上游在限流。
+			notWant: []string{"API Key 的额度用尽", "上游在限流"},
+		},
+		{
+			// 码认出来了、message 不在我们认识的那两句里：这时不能往任何
+			// 一个方向猜，要说成「账户状态类拒绝」并让对方去看 message。
+			name:   "认不出 message：只按码说保守的那一句",
+			status: http.StatusTooManyRequests,
+			headers: map[string]string{
+				doctorHeaderVersion: "v0.1.0-test",
+			},
+			body:    `{"error":{"message":"an account state we have no wording for yet","type":"rate_limit_error","code":"insufficient_quota"}}`,
+			want:    "账户状态类拒绝",
+			notWant: []string{"API Key 的额度用尽", "余额不够", "上游在限流"},
 		},
 		{
 			name:   "上游限流：429 不带我们那两个标记",
@@ -1252,7 +1313,7 @@ func TestDoctorLiveAttributesRejection(t *testing.T) {
 			},
 			body:    `{"error":{"message":"upstream is rate limited, retry later","type":"rate_limit_error"}}`,
 			want:    "上游在限流",
-			notWant: "在网关入口就被拒了",
+			notWant: []string{"在网关入口就被拒了"},
 		},
 		{
 			name:   "不是网关回的：没有版本头",
@@ -1261,7 +1322,7 @@ func TestDoctorLiveAttributesRejection(t *testing.T) {
 			want:   "不是 larkax 网关回的",
 			// 没有版本头时不能咬着「是我们拒的」不放——那会把一次地址
 			// 配错说成一次配置问题。
-			notWant: "在网关入口就被拒了",
+			notWant: []string{"在网关入口就被拒了"},
 		},
 	}
 
@@ -1292,8 +1353,10 @@ func TestDoctorLiveAttributesRejection(t *testing.T) {
 			if !strings.Contains(out, tc.want) {
 				t.Errorf("归因该含 %q：\n%s", tc.want, out)
 			}
-			if strings.Contains(out, tc.notWant) {
-				t.Errorf("归因不该含 %q：\n%s", tc.notWant, out)
+			for _, bad := range tc.notWant {
+				if strings.Contains(out, bad) {
+					t.Errorf("归因不该含 %q：\n%s", bad, out)
+				}
 			}
 
 			// 归因还必须在**默认那一行**上（不看 -v 也读得到）：#381 那次
@@ -1303,8 +1366,10 @@ func TestDoctorLiveAttributesRejection(t *testing.T) {
 			if !strings.Contains(plain.String(), tc.want) {
 				t.Errorf("默认那一行里就该有归因 %q：\n%s", tc.want, plain.String())
 			}
-			if strings.Contains(plain.String(), tc.notWant) {
-				t.Errorf("默认那一行不该含 %q：\n%s", tc.notWant, plain.String())
+			for _, bad := range tc.notWant {
+				if strings.Contains(plain.String(), bad) {
+					t.Errorf("默认那一行不该含 %q：\n%s", bad, plain.String())
+				}
 			}
 		})
 	}

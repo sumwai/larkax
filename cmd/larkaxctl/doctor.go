@@ -175,10 +175,12 @@ const (
 // 一个能连的地址。让使用者显式给出比在这里替他猜一个更可靠。
 const doctorDefaultBaseURL = "http://127.0.0.1:8080"
 
-// 判「这次失败是谁拒的」用的三个机器可读信号。
+// 判「这次失败是谁拒的」用的那几个值。
 //
 // 值与 internal/api 的 HeaderVersion / HeaderRetryAfter / CodeInsufficientQuota
-// 是同一个，doctor_test.go 里有用例钉住。本包不 import internal/api：那会把
+// 以及下面两句 message（那个包里的 MsgInsufficientQuota / MsgInsufficientBalance）
+// 是同一份。这五个值全部由 doctor_test.go 的 TestDoctorLiveSignalsMatchAPI
+// 逐字钉住——照抄一份而不是直接引用，是因为本包不 import internal/api：那会把
 // 整个入口层（含 gateway）拖进运维命令的二进制里，而这里要的只是几个字符串
 // ——与上面三条路径同一个理由。
 //
@@ -192,10 +194,27 @@ const doctorDefaultBaseURL = "http://127.0.0.1:8080"
 //     上有个反代自己回了 5xx）。那时按状态码归因会把一次「地址配错了」
 //     说成上游的问题。X-Larkax-Version 是每个公共响应都带的头
 //     （见 internal/api.Handler.ServeHTTP），没有它就不是我们回的。
+//
+// insufficient_quota 还要再分一层：它**有两个来源**，共用同一个状态码与码
+// （刻意的，见 internal/api.CodeInsufficientQuota 的注释）——按 Key 的累计
+// 额度用尽，或者用户钱包的可用余额不够这次预留。码只回答「被拒了」，回答
+// 「谁拒的」的是 message（见 internal/api 的 writeInsufficientQuota /
+// writeInsufficientBalance）。两个来源要做的下一步相反（改 key 的额度 /
+// 充值），所以归因必须先认 message、再拿码兜底（见 attribution）。
 const (
 	doctorHeaderVersion         = "X-Larkax-Version"
 	doctorHeaderRetryAfter      = "Retry-After"
 	doctorCodeInsufficientQuota = "insufficient_quota"
+
+	// 与 internal/api 的 MsgInsufficientQuota / MsgInsufficientBalance 逐字
+	// 相同（那边已导出），由 TestDoctorLiveSignalsMatchAPI 钉住。两边任一
+	// 改了词，doctor 会认不出来（落到 attribution 那条保守的兜底），而那条
+	// 用例会红——不钉的话这里会**悄悄**退化成「账户状态类拒绝」，正是 #472
+	// 要修的那种指错人以静默的方式复活。
+	doctorMsgInsufficientQuota = "this API key has reached its spending limit; " +
+		"raise the limit on this key or use a different key"
+	doctorMsgInsufficientBalance = "the account balance is insufficient for this request; " +
+		"top up the wallet before retrying"
 )
 
 // doctorHTTPClient 是真打上游用的客户端。
@@ -1464,7 +1483,8 @@ type doctorResponsesInput struct {
 // Error.Code 与 Error.Type 是同一个机器可读位置的两种写法：OpenAI 的码在
 // error.code，Anthropic 的码在 error.type（见 internal/api 的 writeErrorCode）。
 // doctor 只用它认一个值——insufficient_quota，而那个码恰恰是两套协议都在
-// 各自那个位置给的（见 internal/api 的 writeInsufficientQuota）。
+// 各自那个位置给的（见 internal/api 的 writeInsufficientQuota）。但那个码
+// 分不开它的两个来源，所以归因还读 Error.Message（见 attribution）。
 type doctorLiveResponse struct {
 	Model string `json:"model"`
 	Usage struct {
@@ -1786,6 +1806,11 @@ func liveDetail(l doctorLive) []string {
 // 长得一样，而两者的排查方向完全相反——一个要改自己的请求或配置，
 // 一个要去看上游。doctor 原先只打「结果：400」，于是有人朝上游找，
 // 而问题是它自己发出的请求缺了一个字段（见 issue #381）。
+//
+// 「是我们拒的」这一层里还要分清是**哪一种**拒绝：429 + insufficient_quota
+// 有两个来源，处置相反（改 key 的额度 / 充值），码分不开、message 分得开。
+// 所以这一层先按 message 精确认，认不出来再按码说一句更保守的话——认不出
+// 不等于可以往一个方向猜（见那两条分支上的注释）。
 func (l doctorLive) attribution() string {
 	if !l.fromGateway() {
 		return "这个响应不是 larkax 网关回的（没有 " + doctorHeaderVersion +
@@ -1794,12 +1819,27 @@ func (l doctorLive) attribution() string {
 	if l.rejectedByUs() {
 		reason := "在网关入口就被拒了，请求没有出网关，不是上游"
 		switch {
+		// 先按我们自己那句 message 认「谁拒的」，认不出来再按码兜底。
+		// 429 + insufficient_quota 有两个来源（按 Key 的额度用尽 / 钱包
+		// 可用余额不足），码分不开、message 分得开（见上面那个 const 块的
+		// 注释）——只按码归因会把第二种说成第一种，让人去查 key 的额度，
+		// 而该做的是充值。
+		case l.errMsg == doctorMsgInsufficientQuota:
+			reason = "是这把 API Key 的额度用尽了（" + doctorCodeInsufficientQuota +
+				"），要改的是这把 key 的额度或换一把 key；请求没有出网关，不是上游"
+		case l.errMsg == doctorMsgInsufficientBalance:
+			reason = "是这个账户的钱包可用余额不够这次预留（" + doctorCodeInsufficientQuota +
+				"），要充值；请求没有出网关，不是上游"
 		case l.status == http.StatusTooManyRequests && l.retryAfter != "":
 			reason = "是我们自己的按 Key 限流（带 " + doctorHeaderRetryAfter +
 				" 头），请求没有出网关，不是上游"
 		case l.status == http.StatusTooManyRequests && l.errCode == doctorCodeInsufficientQuota:
-			reason = "是这把 API Key 的额度用尽了（" + doctorCodeInsufficientQuota +
-				"），请求没有出网关，不是上游"
+			// 码认出来了、message 却不在我们认识的那两句里（文案换过词、
+			// 或者将来又多了一个来源）。这时**不猜**：说成「账户状态类拒绝」
+			// 并让对方去看那句 message，比按码断言「是 Key 的额度」更保守
+			// ——后者正是这个 issue 要修的那种指错人。
+			reason = "是账户状态类拒绝（" + doctorCodeInsufficientQuota +
+				"），具体是额度还是余额看上面那句 message；请求没有出网关，不是上游"
 		}
 		if l.errMsg != "" {
 			reason += "；上面那句错误是我们自己写的"

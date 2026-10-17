@@ -160,15 +160,21 @@ func writeIdempotencyError(w http.ResponseWriter, protocol channel.Protocol, cod
 // 只给状态码的话，SDK 只能靠读 message 来分辨，而 SDK 不做那件事。
 const CodeInsufficientQuota = "insufficient_quota"
 
-const msgInsufficientQuota = "this API key has reached its spending limit; " +
+// MsgInsufficientQuota 是「这把 API Key 的累计额度用尽」时那句 message。
+//
+// 它与 MsgInsufficientBalance 共用状态码与码，只有文案不同：两者的处置相反
+// （改 key 的额度 / 充值），而码分不开这两个来源，能分开的是这里的文案
+// （见 CodeInsufficientQuota 的注释）。导出是为了让别的包（例如 larkaxctl
+// doctor 的归因）能逐字钉住它，而不是各抄一份、迟早分叉。
+const MsgInsufficientQuota = "this API key has reached its spending limit; " +
 	"raise the limit on this key or use a different key"
 
-// msgInsufficientBalance 是钱包可用余额不够这次预留时的那句话。
+// MsgInsufficientBalance 是钱包可用余额不够这次预留时的那句话。
 //
-// 它与 msgInsufficientQuota 共用状态码与码，但**不能共用文案**：那句说的是
+// 它与 MsgInsufficientQuota 共用状态码与码，但**不能共用文案**：那句说的是
 // 「改这把 key 的额度，或者换一把 key」，而余额不足时这两件事都不解决问题
 // ——要做的只有充值。码是给 SDK 分支用的，文案是给人读的。
-const msgInsufficientBalance = "the account balance is insufficient for this request; " +
+const MsgInsufficientBalance = "the account balance is insufficient for this request; " +
 	"top up the wallet before retrying"
 
 // writeInsufficientQuota 写出一次「额度用尽」的响应。
@@ -188,19 +194,19 @@ const msgInsufficientBalance = "the account balance is insufficient for this req
 // 状态码取 429 而不是 402：402 在各家 SDK 里普遍没有对应的处理分支，而 429
 // 是「现在别发了」这个语义的通用落点，两套协议都认。
 func writeInsufficientQuota(w http.ResponseWriter, protocol channel.Protocol) {
-	writeErrorCode(w, protocol, http.StatusTooManyRequests, CodeInsufficientQuota, msgInsufficientQuota)
+	writeErrorCode(w, protocol, http.StatusTooManyRequests, CodeInsufficientQuota, MsgInsufficientQuota)
 }
 
 // writeInsufficientBalance 写出一次「钱包可用余额不足」的响应。
 //
 // 它与 writeInsufficientQuota 同形（429 + insufficient_quota、没有
-// Retry-After），只有 message 不同——理由见 msgInsufficientBalance。
+// Retry-After），只有 message 不同——理由见 MsgInsufficientBalance。
 //
 // 不给 Retry-After 的理由与额度那一条逐字相同：余额不会因为等一会儿就回来，
 // 回一个等待时间等于让客户端在一个不会变的状态上反复重试。充值之后即刻生效，
 // 那是「有人做了事」而不是「等到某个时刻」。
 func writeInsufficientBalance(w http.ResponseWriter, protocol channel.Protocol) {
-	writeErrorCode(w, protocol, http.StatusTooManyRequests, CodeInsufficientQuota, msgInsufficientBalance)
+	writeErrorCode(w, protocol, http.StatusTooManyRequests, CodeInsufficientQuota, MsgInsufficientBalance)
 }
 
 // HeaderRetryAfter 是限流响应里回给调用方的重试间隔头。
