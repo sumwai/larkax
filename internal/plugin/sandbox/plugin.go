@@ -99,10 +99,14 @@ const inspectTimeout = 2 * time.Second
 
 // inspect 求值一次模块顶层，读出 meta 与导出的 hook 名。
 //
-// **求值用的是临时 runtime，而且没有注入任何宿主能力**：
-// 顶层代码在插件契约里只该声明常量，不该做别的事；没注入能力意味着
-// 即使它写了 `log("...")` 也只会拿到「能力未启用」，
-// 而不是在编译期就往某个用户的命名空间里写东西。
+// **这一次求值用的是临时 runtime，而且没有注入任何宿主能力**：
+// 编译期拿不到用户身份，也不该往任何人的命名空间里写东西，所以这里
+// 即使插件写了 `log("...")` 也只会拿到「能力未启用」。
+//
+// 注意范围：这句话说的是**编译期这一次**求值。请求期的 NewRuntime 会把
+// 能力注入之后再求值顶层（KV 要按用户命名空间隔离，只能每请求注一遍），
+// 所以请求期的顶层代码**能**调宿主能力——它受的是 CallTimeout 的约束，
+// 而不是「拿不到能力」。别把这两处混为一谈。
 func (m *Module) inspect(parent context.Context) error {
 	// 没有默认导出时先把它挑出来：逐个 hook 去查只会得到「找不到 onRequest」，
 	// 而真正的问题是「你没有 export default」。
@@ -120,7 +124,7 @@ func (m *Module) inspect(parent context.Context) error {
 
 	// Load 与 Has 都可能因为有宿主函数卡住而不返回（这里没有注入宿主函数，
 	// 但顶层仍然可以写一个很慢的循环），所以这里也按「不阻塞地等」处理。
-	if err := loadWithin(ctx, rt, m.mod, inspectTimeout); err != nil {
+	if err := loadWithin(ctx, rt, m.mod, inspectTimeout, nil); err != nil {
 		// 顶层失败的**原因分类要看得到**：上传期最常见的两种错法是
 		// 「顶层就吃掉几十兆」与「顶层死循环」，而它们的处置不同
 		// （前者要作者删代码，后者要作者把重活挪进 hook）。
@@ -129,10 +133,19 @@ func (m *Module) inspect(parent context.Context) error {
 		return fmt.Errorf("%w: 求值插件 %s 的顶层失败: %w", f.Kind, m.Name, err)
 	}
 
+	// 下面这一段（读 meta、问 hook）**同样在跑插件代码**：meta 可以是一个
+	// 带 getter 的对象，hook 可以是一个取值器，两者都能写死循环。
+	// 它跑在调用方 goroutine 上，不在 loadWithin 的 select 里，界来自
+	// **上面那个 AfterFunc 还武装着**——inspectTimeout 到点时它 Interrupt，
+	// 而纯 JS 的循环会被打断（实测：meta 里写 `toJSON(){while(true){}}`，
+	// Compile 在 2.004s 返回）。宿主函数在这里面不存在（这一路没注入能力），
+	// 所以「宿主阻塞时 Interrupt 无效」那条边界够不到它。
+	//
+	// 界既然来自 AfterFunc，失败文案就得按它来分（见 afterLoad）。
 	if v, ok := rt.Export("meta"); ok {
 		var meta map[string]any
 		if err := rt.Unmarshal(v, &meta); err != nil {
-			return fmt.Errorf("插件 %s 的 meta 不是一个对象: %w", m.Name, err)
+			return m.afterLoad(ctx, fmt.Errorf("插件 %s 的 meta 不是一个对象: %w", m.Name, err))
 		}
 		// meta 是 null 时 rt.Export 给的是 null 值，而 null 解进一个 map
 		// 会被当成「一个空对象」（json.Unmarshal 的语义）。那样「没有 meta」
@@ -154,7 +167,7 @@ func (m *Module) inspect(parent context.Context) error {
 		}
 		ok, err := rt.Has(h)
 		if err != nil {
-			return fmt.Errorf("插件 %s 的 %s 无法解析: %w", m.Name, name, err)
+			return m.afterLoad(ctx, fmt.Errorf("插件 %s 的 %s 无法解析: %w", m.Name, name, err))
 		}
 		if ok {
 			m.hooks = append(m.hooks, name)
@@ -169,14 +182,38 @@ func (m *Module) inspect(parent context.Context) error {
 	return nil
 }
 
+// afterLoad 给「Load 之后那一段」的失败分类。那一段的界从哪来，见 inspect。
+//
+// 被 AfterFunc 拉回来时错误文本是「interrupted: 求值插件 X 的顶层超过 2s」，
+// 而外层的包装会把它读成「meta 不是一个对象」或「hook 无法解析」——
+// 真正的原因是超时，两者在上传期的处置不同：前者要作者改 meta，
+// 后者要作者把重活挪进 hook。
+func (m *Module) afterLoad(ctx context.Context, err error) error {
+	if ctx.Err() == nil {
+		return err
+	}
+	return fmt.Errorf("%w: 求值插件 %s 的顶层超过 %v", ErrCallTimeout, m.Name, inspectTimeout)
+}
+
 // loadWithin 求值模块顶层，但**不无限等它**。
 //
 // 与调用路径上的 invoke 同理：moejs 的 Runtime 必须单 goroutine 独占，
 // 一个卡住的顶层会占住那个 goroutine，唯一能做的就是把 runtime 与
 // goroutine 一起抛弃。超时之后这个 runtime 不再被碰。
-func loadWithin(ctx context.Context, rt *moejs.Runtime, mod *moejs.Module, timeout time.Duration) error {
+//
+// run 在**跑 Load 的那个 goroutine 里**执行，收到的是这次求值的 ctx。
+// 需要把这次求值的 ctx 挂到 runtime 上的调用方用它——挂的位置不是随便定的：
+// 超时返回之后 Load 还在那个 goroutine 里跑，而残余的插件代码随后会调宿主
+// 能力；挂在调用方 goroutine 上的话，那时 ctx 已经被清掉，宿主函数就落到
+// 「没有 deadline 的 fallback」上（见 loadTopLevel 的注释）。
+//
+// 这个位置**只对请求期那条路径有意义**，编译期的 inspect 不挂 ctx，传 nil。
+func loadWithin(ctx context.Context, rt *moejs.Runtime, mod *moejs.Module, timeout time.Duration, run func(context.Context) error) error {
+	if run == nil {
+		run = func(context.Context) error { return rt.Load(mod) }
+	}
 	done := make(chan error, 1)
-	go func() { done <- rt.Load(mod) }()
+	go func() { done <- run(ctx) }()
 
 	select {
 	case err := <-done:
@@ -274,7 +311,12 @@ func (m *Module) NewRuntime(ctx context.Context, host Host, allowed []string, li
 	if err := rs.inject(ctx, host, allowedSet(allowed)); err != nil {
 		return nil, err
 	}
-	if err := rs.rt.Load(m.mod); err != nil {
+	// 顶层求值**也在限额之内**。它同样是插件代码：写一个死循环就能让这次
+	// 请求永远挂在这里，而 CallTimeout 只覆盖 Call。注入在它之前是有意的
+	// ——顶层能调宿主能力（见 loadTopLevel 的注释），代价由 deadline 兜住。
+	if err := rs.loadTopLevel(ctx, m.mod); err != nil {
+		// 顶层没跑完的 runtime 不再可信：它的调用栈可能还在跑。
+		rs.markUnusable()
 		return nil, fmt.Errorf("求值插件 %s 失败: %w", m.Name, err)
 	}
 	return &Runtime{state: rs, mod: m}, nil

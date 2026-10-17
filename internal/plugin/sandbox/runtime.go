@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -14,7 +15,15 @@ import (
 // 三项都有默认值（见 DefaultLimits），因为「没设限额」与「限额很宽」
 // 在运行时的表现完全一样，而前者是无限循环吃满 CPU 的那一种。
 type Limits struct {
-	// CallTimeout 是单次 hook 调用的上限。
+	// CallTimeout 是单次 hook 调用**与请求期顶层求值**的上限。
+	//
+	// 两处共用一个值，因为两处都在跑插件代码：顶层可以写一个死循环，
+	// 也可以调宿主能力，它同样必须被兜住（见 loadTopLevel）。
+	//
+	// 代价是**调紧它会连顶层一起掐掉**，而且失败点不在某次 hook 上：
+	// 顶层跑不完就没有 runtime，整个请求变成「没有插件」而不是「这个 hook 失败」。
+	// 默认 5s 下这是宽的——实测一个「干实事」的插件（顶层两千次循环、
+	// 两百次宿主调用、50 KB 出参）顶层只用几百微秒。
 	CallTimeout time.Duration
 	// MemoryBytes 是这个 runtime 的 JS 分配上限。<= 0 表示不设。
 	MemoryBytes int64
@@ -76,7 +85,10 @@ type Host struct {
 	Capabilities map[string]any
 
 	// OnError 让宿主记录能力自身的失败（例如 KV 查询报错）。
-	// 为 nil 时错误只通过返回值传给插件。
+	//
+	// 收到的是**原始错误**：插件那一侧只拿得到分类后的固定文案
+	// （见 CapabilityError），所以排查依赖这一份。为 nil 时原文被丢弃，
+	// 插件侧仍然只看到固定文案。
 	OnError func(name string, err error)
 }
 
@@ -146,6 +158,58 @@ func newRuntime(plugin string, limits Limits) *runtimeState {
 	}
 }
 
+// loadTopLevel 在 CallTimeout 之内求值模块顶层。
+//
+// **顶层也是插件代码**：它可以写一个死循环，也可以在顶层调宿主能力
+// （能力在它之前就注入了）。所以这一段必须和 Call 一样有 deadline 与
+// Interrupt，否则一次请求会挂在这里，而 CallTimeout 管不到它。
+//
+// ctx 是调用方（NewRuntime）传进来的那个，**原样往下传**：请求已经结束
+// 就没有必要再花时间求值顶层。这让 NewRuntime 多出一种「请求已取消所以
+// 没建起来」的失败，那是刻意的——继续跑一段没人要的结果才是更坏的选择。
+//
+// 顶层会调宿主能力，所以这一段同样要把 callCtx 挂出去：不挂的话宿主函数
+// 拿到的 ctx 没有 deadline，而「宿主函数自带 deadline」正是宿主阻塞时
+// 唯一可靠的机制（Interrupt 对阻塞的宿主函数无效）。
+func (r *runtimeState) loadTopLevel(ctx context.Context, mod *moejs.Module) error {
+	timeout := r.limits.CallTimeout
+	tctx, cancel := context.WithTimeoutCause(ctx, timeout,
+		fmt.Errorf("%w: 求值插件 %s 的顶层超过 %v", ErrCallTimeout, r.plugin, timeout))
+	defer cancel()
+
+	// loadWithin 会在超时与 ctx 结束时 Interrupt，并把这个 runtime 与
+	// 跑着它的 goroutine 一起抛弃——调用方拿到错误之后不会再碰它。
+	return loadWithin(tctx, r.rt, mod, timeout, func(ctx context.Context) error {
+		return r.evalTopLevel(ctx, mod)
+	})
+}
+
+// evalTopLevel 求值模块顶层，并在**同一段里**把这次求值的 ctx 挂到 runtime 上、
+// 返回前清掉。它由 loadWithin 在跑 Load 的那个 goroutine 里调起。
+//
+// 挂与清的位置就是这条路径的关键，所以它与「求值」写在一个函数里、拿同一个
+// ctx 参数：写在调用方 goroutine 上的 defer 会在超时返回的那一刻就清掉，
+// 而那时 Load 还在另一个 goroutine 里跑。它随后调的宿主函数于是落到 hostCtx
+// 的 fallback 分支上，拿到注入时那个请求 ctx——调用方传 context.Background()
+// 时那个 ctx 永不结束，于是「顶层超时之后残余的插件代码」既跑不完，也收不到
+// 「该收手了」的信号：限额之外执行插件代码。Interrupt 拦不住它（它只在引擎的
+// 检查点生效，而调一个原生函数不是检查点）。这与 call 里那个构造是同一个。
+func (r *runtimeState) evalTopLevel(ctx context.Context, mod *moejs.Module) error {
+	captured := ctx
+	r.callCtx.Store(&captured)
+	// 上一句挂的是**这次求值自己的 ctx**，分析器也认了它（同一函数里那一行没报）。
+	// 这一句传的是 nil，意思是「这个槽现在是空的」，它不是一个 ctx——而
+	// contextcheck 的判据是「一个 ctx 类型的值进入了一个不传播调用方 ctx 的函数」，
+	// 它对**任何**从 ctx 参数不可达的 ctx 类型实参都会报，不看那个值是 nil。
+	// atomic.Pointer[context.Context] 的清空值就是 nil，所以「清空这个槽」这件事
+	// 无论写成什么样都会踩到它；绕开它只有改字段的表示（把 ctx 装进一个结构体、
+	// 换成加锁的字段、或 atomic.Value 加一个哨兵），那几种都只是不让这个类型判据
+	// 看见它，还会把一次无锁读换成带锁读、或改掉「空槽」的表示——那是把问题藏
+	// 起来，不是修它。call 里那一行是同一处构造，压着同一条。
+	defer r.callCtx.Store(nil) //nolint:contextcheck // 见上：清空槽的 nil 不是「外来的 ctx」
+	return r.rt.Load(mod)
+}
+
 // inject 注入宿主能力。
 //
 // 白名单而不是黑名单：不在 allowed 里的名字不注入。这样后面加了新能力
@@ -196,7 +260,10 @@ func wrapFunc(r *runtimeState, ctx context.Context, name string, impl any, onErr
 		// 能力表写错了。返回一个总是报错的函数，而不是 panic——
 		// panic 会变成 *InternalError，把整个 runtime 一起拖下水。
 		return moejs.NativeFunc(func(_ *moejs.Realm, _ moejs.Value, _ []moejs.Value) (moejs.Value, error) {
-			return moejs.Undefined(), fmt.Errorf("宿主能力 %s 不是一个函数", name)
+			return moejs.Undefined(), &CapabilityError{
+				Code:    CodeMisconfigured,
+				Message: fmt.Sprintf("宿主能力 %s 不是一个函数", name),
+			}
 		})
 	}
 	return moejs.NativeFunc(func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
@@ -207,38 +274,81 @@ func wrapFunc(r *runtimeState, ctx context.Context, name string, impl any, onErr
 		// 于是宿主函数拿到的是一个真的会结束的 ctx，它的 I/O 也能跟着结束。
 		callCtx := r.hostCtx(ctx)
 		if cause := context.Cause(callCtx); cause != nil {
-			if onError != nil {
-				// 报给宿主：这次能力调用被拒绝了，而原因不是能力本身出错。
-				// 不报的话，一次超时里的所有能力调用都静默消失，
-				// 排查时看不出「插件到底调没调它」。
-				onError(name, cause)
-			}
-			return moejs.Undefined(), cause
+			// 这次能力调用被拒绝了，而原因不是能力本身出错。报给宿主：
+			// 不报的话，一次超时里的所有能力调用都静默消失，
+			// 排查时看不出「插件到底调没调它」。
+			//
+			// ctx 的 cause 由上层给出（可能带渠道名之类），所以它同样
+			// 不能原文跨到插件侧，走的是与别的失败同一条消毒路径。
+			return moejs.Undefined(), r.report(name, cause, onError)
 		}
 		val, err := fn(callCtx, args)
 		if err != nil {
-			if onError != nil {
-				onError(name, err)
-			}
-			return moejs.Undefined(), err
+			return moejs.Undefined(), r.report(name, err, onError)
 		}
 		return val, nil
 	})
 }
 
-// call 在 runtime 上调用一次 hook。
+// report 把宿主函数的一次失败折成插件侧的安全形态，并把**原文**交给宿主日志。
+//
+// 这里是宿主与插件之间唯一的错误出口，所以「什么能跨过去」只在这里定。
+// 宿主函数返回的不是 *CapabilityError 的错误一律折成一句固定文案
+// （默认拒绝）：插件 catch 到的 message 因此不可能带上宿主的连接串、
+// 驱动细节或上游地址，而原文仍然留在宿主这一侧的日志里。
+func (r *runtimeState) report(name string, err error, onError func(string, error)) error {
+	safe := pluginFacing(err)
+	if onError != nil {
+		raw := err
+		if safe.Cause != nil {
+			raw = safe.Cause
+		}
+		onError(name, raw)
+	}
+	return safe
+}
+
+// pluginFacing 把一个错误折成跨到插件侧的安全形态。
+//
+// 已经是 *CapabilityError 的原样返回（宿主显式分过类了）；其余按 ctx 的
+// 结束原因分到超时 / 取消两档，再不然就是未分类。**没有任何一条分支会
+// 把 err 的文本带过去**——只有文案是固定的时候才允许跨这条边界。
+func pluginFacing(err error) *CapabilityError {
+	var ce *CapabilityError
+	if errors.As(err, &ce) {
+		return ce
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return &CapabilityError{Code: CodeCanceled, Message: "请求已结束", Cause: err}
+	case errors.Is(err, context.DeadlineExceeded),
+		errors.Is(err, ErrCallTimeout),
+		errors.Is(err, ErrHostTimeout):
+		return &CapabilityError{Code: CodeTimeout, Message: "宿主能力超时", Cause: err}
+	default:
+		return &CapabilityError{Code: CodeUnclassified, Message: "宿主能力执行失败", Cause: err}
+	}
+}
+
+// call 在 runtime 上调用一次 hook，并在同一个 deadline 之内跑完 finish。
 //
 // hookName 是给错误与日志用的**干净名字**（"onRequest"），不是 moejs 的
 // Hook.Name()——后者是解析路径（"default.onRequest"），把它写进日志会让人
 // 以为插件里有一个叫 default 的东西。
 //
+// finish 收下 hook 的返回值，做调用方还要做的那一步（解码出参），返回它的
+// 失败或 nil。**它必须在这个 goroutine 里跑**：那一步同样可能执行插件代码，
+// 放到外面就等于把一段插件代码挪出了限额。finish 卡住时走的是与 Call 卡住
+// 完全相同的那条超时路径。
+//
 // 返回的 value 在 Failure 非空时无意义。
-func (r *runtimeState) call(ctx context.Context, hook moejs.Hook, hookName string, args []moejs.Value) (moejs.Value, *Failure) {
+func (r *runtimeState) call(ctx context.Context, hook moejs.Hook, hookName string, args []moejs.Value, finish func(moejs.Value) *Failure) (moejs.Value, *Failure) {
 	timeout := r.limits.CallTimeout
 
 	type outcome struct {
-		val moejs.Value
-		err error
+		val    moejs.Value
+		err    error
+		finish *Failure
 	}
 	// 缓冲为 1：超时路径返回之后那个 goroutine 仍可能写入，不缓冲就会
 	// 永久阻塞它——那是一个 goroutine 泄漏，而且是最难发现的那种。
@@ -285,17 +395,26 @@ func (r *runtimeState) call(ctx context.Context, hook moejs.Hook, hookName strin
 		defer stop()
 
 		val, err := r.rt.Call(hook, args...)
-		ch <- outcome{val: val, err: err}
+		var f *Failure
+		if err == nil && finish != nil {
+			// 调用成功才解码：失败时的返回值没有意义，而解码本身
+			// 可能执行插件代码，不该白跑一趟。
+			f = finish(val)
+		}
+		ch <- outcome{val: val, err: err, finish: f}
 	}()
 
 	select {
 	case out := <-ch:
-		if out.err != nil && isRunaway(out.err) {
-			// 中断与内部错误之后这个 runtime 不再可信：中断会丢弃排队中的
-			// job（半执行的 Promise 反应、微任务）。不再复用它。
-			r.markUnusable()
+		if out.err != nil {
+			if isRunaway(out.err) {
+				// 中断与内部错误之后这个 runtime 不再可信：中断会丢弃排队中的
+				// job（半执行的 Promise 反应、微任务）。不再复用它。
+				r.markUnusable()
+			}
+			return out.val, classify(ctx, r.plugin, hookName, out.err)
 		}
-		return out.val, classify(ctx, r.plugin, hookName, out.err)
+		return out.val, out.finish
 
 	case <-time.After(timeout):
 		// Call 没能在时限内返回。两种可能：插件在 JS 里死循环而 Interrupt

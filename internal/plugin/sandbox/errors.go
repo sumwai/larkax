@@ -71,6 +71,55 @@ var (
 	ErrClientCancelled = errors.New("客户端已断开")
 )
 
+// 宿主能力失败的分类码。
+//
+// 插件 `catch` 到的 `e.message` 就是「码: 文案」，所以这些码是插件能看见的
+// 东西——改一个码等于改一次插件契约。
+const (
+	// CodeBadArgument 表示插件给的参数不合法。
+	CodeBadArgument = "bad_argument"
+	// CodeUnavailable 表示宿主依赖不可用（存储、日历数据源等）。
+	CodeUnavailable = "unavailable"
+	// CodeTimeout 表示这次调用的预算已经用尽。
+	CodeTimeout = "host_timeout"
+	// CodeCanceled 表示请求已经结束。
+	CodeCanceled = "canceled"
+	// CodeMisconfigured 表示宿主能力表配错了（某个成员不是函数）。
+	CodeMisconfigured = "misconfigured"
+	// CodeUnclassified 表示宿主函数返回了一个没有分类的错误。
+	//
+	// 出现它说明有一处漏了标注：宿主函数的错误必须显式说明自己属于哪一类
+	// （见 internal/plugin/host 的两个构造器），否则一律落到这一档，
+	// 原文只进宿主日志。默认拒绝，而不是默认放行。
+	CodeUnclassified = "capability_failed"
+)
+
+// CapabilityError 是宿主能力失败时**跨到插件侧**的错误形态。
+//
+// 插件能看到的一切只由 Code 与 Message 组成。Cause 是宿主侧的真实错误——
+// 它可能带连接串、驱动细节、上游地址——**不参与 Error()**，所以不会跨过
+// 这条边界；它只经 Host.OnError 进宿主日志。
+//
+// 这条边界只有一处：runtime.go 的 wrapFunc。宿主函数返回的任何不是
+// *CapabilityError 的错误都在那里被折成固定文案。
+type CapabilityError struct {
+	// Code 是稳定的分类码，见上面那组常量。
+	Code string
+	// Message 是固定文案，不含任何宿主侧数据。
+	//
+	// 它**可以**含插件自己给的值（例如「参数不是整数: "昨天"」）：
+	// 那些值插件本来就拿得到，写进文案只是让报错说清是哪个参数。
+	Message string
+	// Cause 是宿主侧的真实错误，只给宿主日志与 errors.Is/As 用。
+	Cause error
+}
+
+func (e *CapabilityError) Error() string { return e.Code + ": " + e.Message }
+
+// Unwrap 让 errors.Is/As 穿到 Cause，于是「这次失败是不是超时」这类判断
+// 在宿主侧照旧成立。它不影响插件侧：那边只拿得到 Error() 的文本。
+func (e *CapabilityError) Unwrap() error { return e.Cause }
+
 // Failure 是一次插件调用的失败，带上「是哪一种」。
 //
 // 带上 Hook 与 Plugin 是因为日志里只有一句「插件失败」时，

@@ -600,10 +600,18 @@ func Test客户端取消时返回ErrClientCancelled(t *testing.T) {
 	}
 }
 
-// ctx 在调用**之前**就取消了：Call 同样返回 ErrClientCancelled，
-// 而且不该先把插件跑起来再发现。
-func Test调用前ctx已取消时返回ErrClientCancelled(t *testing.T) {
+// ctx 在**建 runtime 之前**就取消了：NewRuntime 直接失败，插件代码一次都不跑。
+//
+// 这条与上面那条是一对：上面是「跑到一半客户端断开」，这里是「请求早就没了」。
+// 顶层求值也在限额之内、用的是同一个 ctx（见 loadTopLevel），所以这种情形在
+// 更早的一步就被发现——比「先把顶层跑起来、到 Call 才发现」更省事。
+//
+// 顶层写了一段忙等：ctx 已经结束，而 select 里 `ctx.Done()` 那一支是**立刻**
+// 可选的，忙等保证 `Load` 不会抢在它前面跑完。没有这一段的话，这条用例会变成
+// 「谁先到」的竞态（LESSONS 第 15 条）。
+func Test调用前ctx已取消时不建runtime(t *testing.T) {
 	m, err := Compile("p", `
+if (typeof globalThis.__larkax !== "undefined") { const t = Date.now(); while (Date.now() - t < 200) {} }
 export default {
   onRequest() { globalThis.__larkax.不该被调到(); return {}; },
 };
@@ -621,24 +629,15 @@ export default {
 		}),
 	}}
 	rt, err := m.NewRuntime(ctx, host, []string{"不该被调到"}, Limits{})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		rt.Close()
+		t.Fatal("ctx 已取消时不该建出 runtime")
 	}
-	defer rt.Close()
-
-	var out map[string]any
-	f := rt.Call(ctx, "onRequest", map[string]any{"a": 1}, &out)
-	if f == nil {
-		t.Fatal("ctx 已取消时应当返回失败")
-	}
-	if !errors.Is(f, ErrClientCancelled) {
-		t.Errorf("Kind = %v，想要 ErrClientCancelled", f.Kind)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("错误 = %v，想要包住 context.Canceled", err)
 	}
 	if got := 调到.Load(); got != 0 {
 		t.Errorf("ctx 已取消，宿主函数却被调了 %d 次", got)
-	}
-	if len(out) != 0 {
-		t.Errorf("失败时不该写出参: %v", out)
 	}
 }
 
