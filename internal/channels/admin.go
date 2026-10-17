@@ -38,6 +38,16 @@ var ErrChannelNotFound = errors.New("渠道不存在")
 // 结构体」看起来像一次成功的修改。
 var ErrNoChanges = errors.New("没有要改的字段")
 
+// ErrChannelDeleted 表示这条渠道已经被软删，不能再改。
+//
+// 与 ErrChannelNotFound 分开，是因为两者的下一步动作不同：那一条是 id 写错了
+// （重新列一遍拿现存的 id），这一条是「行还在，但它已经不在使用中」——
+// 要重新启用一条已删的渠道，是一个尚未提供的动作，不是改 id 能解决的。
+//
+// 写路径（Update / SetStatus）撞上它时**一行都不改**：静默改一行用户看不见的
+// 数据，会让「我已经删掉它了」与「它又被改回来了」在库里分不出来。
+var ErrChannelDeleted = errors.New("渠道已删除")
+
 // Admin 是渠道的管理面：创建、修改、列举、启停。
 //
 // 它不在请求热路径上，也不改变 Source.Candidates 的行为——两者读的是同一套列，
@@ -257,8 +267,10 @@ func (a *Admin) Update(ctx context.Context, req UpdateRequest) error {
 	sets = append(sets, "updated_at = now()")
 	args = append(args, req.ID)
 
+	// 已删的渠道不许改：条件里带上 channelAlive，于是「行不在」与「行已删」
+	// 都会让这条 UPDATE 影响 0 行，下面的 explainNoRow 把它们分开报。
 	query := "UPDATE channels SET " + strings.Join(sets, ", ") +
-		" WHERE id = $" + strconv.Itoa(len(args))
+		" WHERE id = $" + strconv.Itoa(len(args)) + " AND " + channelAlive
 	res, err := a.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("修改渠道失败: %w", err)
@@ -268,9 +280,35 @@ func (a *Admin) Update(ctx context.Context, req UpdateRequest) error {
 		return fmt.Errorf("确认修改结果失败: %w", err)
 	}
 	if affected == 0 {
-		return fmt.Errorf("%w：id %d", ErrChannelNotFound, req.ID)
+		return a.explainNoRow(ctx, req.ID)
 	}
 	return nil
+}
+
+// explainNoRow 把「这次的 UPDATE 一行都没匹配上」翻译成具体的那一种。
+//
+// Update 与 SetStatus 的 WHERE 都带 channelAlive，0 行因此有两种含义：
+// 没有这个 id，或者这个 id 已经被软删。它们的退出码也不同（一个走「要改的
+// 那一行不存在」，一个是别的失败），所以不能统一报 ErrChannelNotFound。
+//
+// 只在 0 行时才多一条查询：正常路径一次往返，与不带这个条件时一样。
+func (a *Admin) explainNoRow(ctx context.Context, id int64) error {
+	var deleted bool
+	err := a.db.QueryRowContext(ctx,
+		`SELECT deleted_at IS NOT NULL FROM channels WHERE id = $1`, id).Scan(&deleted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w：id %d", ErrChannelNotFound, id)
+	}
+	if err != nil {
+		return fmt.Errorf("查渠道 %d 的删除状态失败: %w", id, err)
+	}
+	if deleted {
+		return fmt.Errorf("%w：id %d（用 larkaxctl channel list --all 可以看到已删的渠道）",
+			ErrChannelDeleted, id)
+	}
+	// 行还在、没删，却没被 WHERE 匹配上：两次语句之间它刚被删掉。
+	// 与「已经删了」是同一个事实，只是晚了一步。
+	return fmt.Errorf("%w：id %d", ErrChannelDeleted, id)
 }
 
 // SetStatus 启用或停用一条渠道。
@@ -286,7 +324,7 @@ func (a *Admin) SetStatus(ctx context.Context, id int64, status string) error {
 	}
 
 	res, err := a.db.ExecContext(ctx,
-		`UPDATE channels SET status = $2, updated_at = now() WHERE id = $1`, id, status)
+		`UPDATE channels SET status = $2, updated_at = now() WHERE id = $1 AND `+channelAlive, id, status)
 	if err != nil {
 		return fmt.Errorf("设置渠道状态失败: %w", err)
 	}
@@ -295,9 +333,71 @@ func (a *Admin) SetStatus(ctx context.Context, id int64, status string) error {
 		return fmt.Errorf("确认设置结果失败: %w", err)
 	}
 	if affected == 0 {
-		return fmt.Errorf("%w：id %d", ErrChannelNotFound, id)
+		return a.explainNoRow(ctx, id)
 	}
 	return nil
+}
+
+// SoftDelete 把一条渠道标记为已删除，返回它是不是**这次才**删掉的。
+//
+// 已删的再删一次不是错误（返回 false）：删除是幂等的，脚本因此可以重复执行。
+// 这与「id 不存在」不同——那一条仍然报 ErrChannelNotFound，因为 id 写错时
+// 幂等会让一次打错的调用看起来像成功。
+//
+// # 它不删任何从属的行
+//
+// 七条外键是 ON DELETE CASCADE，真删会带走额度状态、健康汇总、别名、计价
+// 规则、上游成本与插件激活；billing_requests.channel_id 没有 ON DELETE，
+// 真删直接撞外键。软删让这些历史行继续认得这条渠道——对账与快照的可追溯性
+// 靠的正是它。所以这里只改两列：
+//
+//   - deleted_at 置 now()，这一列是删除状态的**唯一**判据；
+//   - status 顺带置成 disabled。它不是第二份判据，是给漏网读路径的兜底：
+//     选路要求 status = 'enabled'，于是即便某处忘了带 channelAlive，被删的
+//     渠道也选不中。它也让 channels_status_idx 不再为这行留位置。
+//
+// 凭证密文不动：作废的凭证留在备份里是已知代价（见本 issue 的取舍），而
+// 清空它会让「这条渠道当时用的是什么凭证」在对账时无从查起。
+//
+// # 直接写 now() 而不是收一个时刻参数
+//
+// 删除时刻要能与库里别的时间比较（`deleted_at IS NULL` 只看有没有值，
+// 但清单要把它打出来）。由数据库给时刻，就与 created_at / updated_at 同一
+// 个时钟，不会出现应用与数据库时区不一致导致「删除早于创建」的行。
+func (a *Admin) SoftDelete(ctx context.Context, id int64) (bool, error) {
+	if id <= 0 {
+		return false, errors.New("渠道 id 无效")
+	}
+
+	res, err := a.db.ExecContext(ctx, `
+		UPDATE channels
+		   SET deleted_at = now(), status = $2, updated_at = now()
+		 WHERE id = $1 AND `+channelAlive,
+		id, StatusDisabled)
+	if err != nil {
+		return false, fmt.Errorf("删除渠道失败: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("确认删除结果失败: %w", err)
+	}
+	if affected == 1 {
+		return true, nil
+	}
+
+	// 0 行：要么没有这个 id，要么它已经删了。两者要分开报——前者是打错了
+	// id，后者是幂等。
+	var exists bool
+	err = a.db.QueryRowContext(ctx, `SELECT deleted_at IS NOT NULL FROM channels WHERE id = $1`, id).
+		Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("%w：id %d", ErrChannelNotFound, id)
+	}
+	if err != nil {
+		return false, fmt.Errorf("查渠道 %d 的删除状态失败: %w", id, err)
+	}
+	// 行在，且上面那条带 channelAlive 的 UPDATE 没匹配上：它已经删了。
+	return false, nil
 }
 
 // ChannelInfo 是管理面看到的一条渠道。**它不含密文，也不含明文凭证。**
@@ -340,9 +440,19 @@ type ChannelInfo struct {
 	// 它记的是**结构**问题：密文被截断、被手工改过。列举不碰钥匙，
 	// 所以「解不开」在这里根本不会发生。
 	CredentialErr error
+
+	// DeletedAt 是这条渠道被软删的时刻，零值表示没删。
+	//
+	// 只有 ListAll（--all）看得见非零值：默认清单按软删过滤，所以那里的
+	// 每一行都是零值。它是清单上「已删」那一栏的唯一依据——把已删的行
+	// 与「停用」的行混在一起列出来，人分不出哪一行还能恢复使用。
+	DeletedAt time.Time
 }
 
-// List 列出全部渠道，按 id 排序。
+// List 列出**没有软删**的渠道，按 id 排序。
+//
+// 已删的渠道只在运维明确要看的时候出现（见 ListAll）：它们仍然是历史行
+// （billing_requests / usage_events 引用着），但不再代表任何可用的配置。
 //
 // # 一行密文坏了不影响别的行
 //
@@ -361,7 +471,25 @@ type ChannelInfo struct {
 // 表定义写进去的；credential_enc 是 bytea，没有任何约束拦得住一行垃圾，
 // 而它坏掉只影响它自己那一栏。
 func (a *Admin) List(ctx context.Context) ([]ChannelInfo, error) {
-	rows, err := a.db.QueryContext(ctx, listQuery)
+	return a.list(ctx, false)
+}
+
+// ListAll 与 List 相同，但**含已删的渠道**（larkaxctl 的 list --all）。
+//
+// 它给的是同一个形状的结果，已删的行在 DeletedAt 上非零——调用方据此标出
+// 它们，而不是靠「status 是不是 disabled」猜：停用是运维的临时决定，删除
+// 是另一件事。
+func (a *Admin) ListAll(ctx context.Context) ([]ChannelInfo, error) {
+	return a.list(ctx, true)
+}
+
+func (a *Admin) list(ctx context.Context, includeDeleted bool) ([]ChannelInfo, error) {
+	query := listQuery
+	if !includeDeleted {
+		query += "\n WHERE c." + channelAlive
+	}
+	query += "\n ORDER BY c.id"
+	rows, err := a.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("查询渠道失败: %w", err)
 	}
@@ -412,9 +540,9 @@ SELECT
     c.credential_enc,
     c.credential_hint,
     c.created_at,
-    c.updated_at
-  FROM channels c
- ORDER BY c.id`
+    c.updated_at,
+    c.deleted_at
+  FROM channels c`
 
 func scanInfo(rows *sql.Rows) (ChannelInfo, error) {
 	var (
@@ -423,15 +551,18 @@ func scanInfo(rows *sql.Rows) (ChannelInfo, error) {
 		settingRaw []byte
 		envelope   []byte
 		hint       sql.NullString
+		deletedAt  sql.NullTime
 	)
 	err := rows.Scan(
 		&info.ID, &info.OwnerUserID, &info.Name, &info.Type, &info.BaseURL,
 		&info.Status, &modelsJSON, &info.Weight, &info.Priority, &settingRaw,
-		&envelope, &hint, &info.CreatedAt, &info.UpdatedAt,
+		&envelope, &hint, &info.CreatedAt, &info.UpdatedAt, &deletedAt,
 	)
 	if err != nil {
 		return ChannelInfo{}, fmt.Errorf("读取渠道行失败: %w", err)
 	}
+	// NULL 折成零值时间：Go 侧只问「删了没」，见 ChannelInfo.DeletedAt。
+	info.DeletedAt = deletedAt.Time
 	// NULL 与空串在这里合并成同一个值：这一列没有「空提示」与「没有提示」
 	// 的区分——凭证短到不足四位时 credential.Hint 原样返回，那种串也不会是
 	// 空的（写入路径拒绝空凭证）。

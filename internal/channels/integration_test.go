@@ -10,8 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pressly/goose/v3"
+
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/credential"
+	"github.com/sumwai/larkax/internal/migrate"
 	"github.com/sumwai/larkax/internal/route"
 	"github.com/sumwai/larkax/internal/testdb"
 )
@@ -719,5 +722,275 @@ func TestCandidatesRejectsEmptyModel(t *testing.T) {
 	src := New(nil, nil)
 	if _, err := src.Candidates(context.Background(), ""); err == nil {
 		t.Error("空模型名应报错")
+	}
+}
+
+// ── 软删 ────────────────────────────────────────────────────────────────
+//
+// 软删之后，**每一条读 channels 的路径**都不能再看见那一行。这一组用例按读点
+// 逐条钉住，而不是只钉「清单里看不到」：漏掉一处不会报错，只会让一条已删的
+// 渠道继续参与选路、继续出现在管理面或继续被轮换统计进去。
+//
+// 每一条自建自己的夹具（模型名带本次运行的唯一后缀），所以它们之间不共享状态。
+
+// softDeleteRow 把一行标记成已删，并顺手把 status 置成 disabled
+// （与 channels.Admin.SoftDelete 同一个口径：后者是生产里唯一的删除入口，
+// 这里直接写库是为了让夹具不依赖管理面）。
+func softDeleteRow(t *testing.T, db *sql.DB, id int64) {
+	t.Helper()
+	_, err := db.ExecContext(context.Background(),
+		`UPDATE channels SET deleted_at = now(), status = 'disabled' WHERE id = $1`, id)
+	if err != nil {
+		t.Fatalf("软删渠道 %d 失败: %v", id, err)
+	}
+}
+
+// softDeleteKeepingEnabled 只置 deleted_at，不动 status。
+//
+// 生产里的删除入口（channels.Admin.SoftDelete）会同时把 status 改成 disabled，
+// 于是选路那条 `status = 'enabled'` 顺带也挡住了已删的行——两条判据都在时，
+// 少写哪一条都看不出来。这个夹具把 status 留在 enabled，让 channelAlive 成为
+// 唯一挡得住它的东西（schema 允许这个状态：status 与 deleted_at 是两个独立的列）。
+func softDeleteKeepingEnabled(t *testing.T, db *sql.DB, id int64) {
+	t.Helper()
+	_, err := db.ExecContext(context.Background(),
+		`UPDATE channels SET deleted_at = now() WHERE id = $1`, id)
+	if err != nil {
+		t.Fatalf("软删渠道 %d 失败: %v", id, err)
+	}
+}
+
+// 读点一：选路。已删的渠道不进候选集。
+//
+// 两个已删的夹具停的状态不同：deleted 是删除路径留下的样子（deleted_at 有值
+// 且 status = disabled），deletedEnabled 是只有 deleted_at 有值。后者专门钉住
+// candidateQuery 里的 channelAlive——去掉那一句，它会以候选身份冒出来。
+func TestCandidatesSkipsDeletedChannel(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+
+	deleted := insertChannel(t, db, sealer, channelSpec{model: model})
+	deletedEnabled := insertChannel(t, db, sealer, channelSpec{model: model})
+	live := insertChannel(t, db, sealer, channelSpec{model: model})
+	softDeleteRow(t, db, deleted)
+	softDeleteKeepingEnabled(t, db, deletedEnabled)
+
+	got, err := New(db, sealer).Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("候选数 = %d，期望 1（两个已删的都不该进来）", len(got))
+	}
+	if got[0].Channel.ID != live {
+		t.Errorf("候选是渠道 %d，期望 %d", got[0].Channel.ID, live)
+	}
+}
+
+// 读点二：管理面清单。默认看不见，ListAll（--all）看得见且带上删除时刻。
+func TestListHidesDeletedChannelUnlessAll(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	admin := newAdmin(t, db, sealer)
+	model := uniqueModel()
+
+	id := insertChannel(t, db, sealer, channelSpec{model: model})
+	// 走生产里那个删除入口，不是直接写库：这一组要钉的正是「删掉之后清单
+	// 怎么表现」，夹具自己拼一遍 deleted_at 的话，删除入口本身改坏了它照样通过。
+	if _, err := admin.SoftDelete(context.Background(), id); err != nil {
+		t.Fatalf("删除渠道 %d 失败: %v", id, err)
+	}
+
+	infos, err := admin.List(context.Background())
+	if err != nil {
+		t.Fatalf("List 出错: %v", err)
+	}
+	for _, info := range infos {
+		if info.ID == id {
+			t.Fatalf("默认清单里出现了已删的渠道 %d", id)
+		}
+	}
+
+	// 每一条都要是零值：默认清单里不该有非零的 DeletedAt。
+	for _, info := range infos {
+		if !info.DeletedAt.IsZero() {
+			t.Errorf("默认清单里出现了已删的行：%+v", info)
+		}
+	}
+
+	all, err := admin.ListAll(context.Background())
+	if err != nil {
+		t.Fatalf("ListAll 出错: %v", err)
+	}
+	var found *ChannelInfo
+	for i := range all {
+		if all[i].ID == id {
+			found = &all[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("ListAll 里没有已删的渠道 %d", id)
+	}
+	if found.DeletedAt.IsZero() {
+		t.Error("ListAll 里已删的行 DeletedAt 是零值")
+	}
+	// 删除时把状态一并置成 disabled：那是给漏网读路径的兜底。
+	if found.Status != StatusDisabled {
+		t.Errorf("已删渠道的 status = %q，期望 %q", found.Status, StatusDisabled)
+	}
+}
+
+// 读点三：凭证轮换。已删的行不扫、也不要求它含当前主密钥。
+func TestRotateSkipsDeletedChannels(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+
+	deleted := insertChannel(t, db, sealer, channelSpec{
+		model: model, credential: []byte{0x99}, // 解析不了的信封
+	})
+	live := insertChannel(t, db, sealer, channelSpec{model: model})
+	softDeleteRow(t, db, deleted)
+
+	rot := NewRotator(db, sealer)
+	plan, err := rot.Plan(context.Background())
+	if err != nil {
+		t.Fatalf("Plan 出错: %v", err)
+	}
+	for _, p := range plan.Problems {
+		if p.ID == deleted {
+			t.Errorf("已删的渠道 %d 不该出现在轮换问题清单里：%v", deleted, p.Err)
+		}
+	}
+
+	verify, err := rot.Verify(context.Background())
+	if err != nil {
+		t.Fatalf("Verify 出错: %v", err)
+	}
+	for _, m := range verify.Missing {
+		if m.ID == deleted {
+			t.Errorf("已删的渠道 %d 不该让 Verify 判成「漏网」", deleted)
+		}
+		if m.ID == live {
+			t.Errorf("在用的渠道 %d 不该缺席：%v", live, m.Err)
+		}
+	}
+}
+
+// 读点四：健康汇总的写入侧。一次调用记到一条已删的渠道上时，不该再给它的
+// 连续失败计数加一——那行数字最后会被谁读？没有读者了，但它会一直涨。
+func TestRecordCallIgnoresDeletedChannel(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+
+	id := insertChannel(t, db, sealer, channelSpec{model: model, status: "disabled"})
+	softDeleteRow(t, db, id)
+
+	rec := NewRecorder(db, time.Minute)
+	err := rec.RecordCall(context.Background(), route.CallOutcome{
+		ChannelID: id,
+		At:        time.Now(),
+		Verdict:   route.VerdictFailure,
+	})
+	if err != nil {
+		t.Fatalf("RecordCall 出错: %v", err)
+	}
+
+	var streak int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT consecutive_failures FROM channels WHERE id = $1`, id).Scan(&streak); err != nil {
+		t.Fatalf("读回连续失败计数失败: %v", err)
+	}
+	if streak != 0 {
+		t.Errorf("已删渠道的连续失败计数 = %d，期望 0（不该再给它记）", streak)
+	}
+}
+
+// 迁移 up → down → up 往返：00024 加的那一列与它的部分索引都要能被干净地
+// 退回去再装回来。
+//
+// 它跑在本包自己的测试库上（internal/testdb 按包路径建的那个），而且是**顺序**
+// 执行的：本包没有 t.Parallel，所以中间那一小段没有 deleted_at 的窗口碰不到
+// 别的用例。既有的行不受影响——down 只丢这一列，up 装回来时它是 NULL，与
+// 建表时的状态一致。
+func TestMigrateSoftDeleteRoundTrips(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	goose.SetBaseFS(migrate.FS())
+	if err := migrate.SetDialect("postgres"); err != nil {
+		t.Fatalf("设置方言失败: %v", err)
+	}
+
+	columnExists := func() bool {
+		t.Helper()
+		var exists bool
+		if err := db.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				 WHERE table_name = 'channels' AND column_name = 'deleted_at')`).Scan(&exists); err != nil {
+			t.Fatalf("查列是否存在失败: %v", err)
+		}
+		return exists
+	}
+	indexExists := func() bool {
+		t.Helper()
+		var exists bool
+		if err := db.QueryRowContext(ctx,
+			`SELECT to_regclass('channels_live_idx') IS NOT NULL`).Scan(&exists); err != nil {
+			t.Fatalf("查索引是否存在失败: %v", err)
+		}
+		return exists
+	}
+
+	// 正向证据：开始之前那一列必须在，否则下面的 down 什么都没撤、而 up 也
+	// 看不出装回来了什么（LESSONS.md 第 16 条）。
+	if !columnExists() {
+		t.Fatal("迁移之后 channels 没有 deleted_at 列：up 这一侧就没成立")
+	}
+	if !indexExists() {
+		t.Fatal("迁移之后没有 channels_live_idx 索引")
+	}
+
+	before, err := goose.GetDBVersionContext(ctx, db)
+	if err != nil {
+		t.Fatalf("读当前迁移版本失败: %v", err)
+	}
+
+	if migErr := goose.DownContext(ctx, db, "."); migErr != nil {
+		t.Fatalf("回滚 00024 失败: %v", migErr)
+	}
+	if columnExists() {
+		t.Error("回滚之后 deleted_at 列还在")
+	}
+	if indexExists() {
+		t.Error("回滚之后 channels_live_idx 索引还在")
+	}
+	down, err := goose.GetDBVersionContext(ctx, db)
+	if err != nil {
+		t.Fatalf("读回滚之后的版本失败: %v", err)
+	}
+	if down >= before {
+		t.Errorf("回滚之后版本 = %d，期望小于 %d", down, before)
+	}
+
+	if migErr := goose.UpContext(ctx, db, "."); migErr != nil {
+		t.Fatalf("重新前进失败: %v", migErr)
+	}
+	if !columnExists() {
+		t.Error("重新前进之后 deleted_at 列没有回来")
+	}
+	if !indexExists() {
+		t.Error("重新前进之后 channels_live_idx 索引没有回来")
+	}
+	up, err := goose.GetDBVersionContext(ctx, db)
+	if err != nil {
+		t.Fatalf("读重新前进之后的版本失败: %v", err)
+	}
+	if up != before {
+		t.Errorf("往返之后的版本 = %d，期望回到 %d", up, before)
 	}
 }

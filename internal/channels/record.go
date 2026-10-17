@@ -140,9 +140,13 @@ UPDATE channels
        last_failure_at = CASE WHEN $2 THEN NULL
                               WHEN $3 THEN $4
                               ELSE last_failure_at END
- WHERE id = $1`
+ WHERE id = $1 AND ` + channelAlive
 
 // streak 更新连续失败计数，返回这一行是否还在。
+//
+// 已软删的行按「不在了」处理：它的计数不再有读者（选路看不见这条渠道），
+// 而一行数字继续涨会让「它删除时是什么状态」这个事实在库里被改写。
+// 返回 false 让 RecordCall 到此为止，后面的 rollup 也就不会写进去。
 func (r *Recorder) streak(ctx context.Context, rec route.CallOutcome, reset, increment bool) (bool, error) {
 	res, err := r.db.ExecContext(ctx, streakSQL, rec.ChannelID, reset, increment, rec.At)
 	if err != nil {
