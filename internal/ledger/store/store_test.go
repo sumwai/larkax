@@ -487,7 +487,7 @@ func TestSettlementWritesBackChannel(t *testing.T) {
 	ctx := context.Background()
 
 	userID := seed(t, db, "100")
-	channelID := seedChannel(t, db)
+	channelID := seedChannel(t, ctx, db)
 	requestID := reqID(t)
 
 	// 预留：渠道未知。testRequest 不带 ChannelID，与生产同一条路。
@@ -855,7 +855,7 @@ func TestReleaseRecordsChannelAndModel(t *testing.T) {
 	req := testRequest(ctx, t, db, userID, requestID)
 	// 选路之后才知道的那两样东西，由网关在释放之前填上
 	// （见 internal/gateway 的 handle.routedTo）。
-	req.ChannelID = seedChannel(t, db)
+	req.ChannelID = seedChannel(t, ctx, db)
 
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
 		t.Fatal(err)

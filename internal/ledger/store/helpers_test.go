@@ -136,10 +136,10 @@ func itoa(v int64) string { return strconv.FormatInt(v, 10) }
 //
 // billing_requests.channel_id 有外键指向 channels，所以「这一列写没写对」
 // 只能在一个真有渠道行的世界里断言。
-func seedChannel(t *testing.T, db *sql.DB) int64 {
+func seedChannel(t *testing.T, ctx context.Context, db *sql.DB) int64 {
 	t.Helper()
 	var id int64
-	if err := db.QueryRowContext(context.Background(), `
+	if err := db.QueryRowContext(ctx, `
 		INSERT INTO channels (name, type, base_url, credential_enc, status, models)
 		VALUES ($1, 'openai', 'https://api.example.com', '\x00'::bytea, 'enabled', ARRAY['gpt-4o'])
 		RETURNING id`, "ch"+itoa(nextID())).Scan(&id); err != nil {

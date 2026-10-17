@@ -128,7 +128,7 @@ func TestSaveWritesUsageEvent(t *testing.T) {
 	ctx := context.Background()
 
 	userID := seed(t, db, "100")
-	channelID := seedChannel(t, db)
+	channelID := seedChannel(t, ctx, db)
 	requestID := reqID(t)
 
 	// 预留：渠道未知，与生产同一条路（预留发生在选路之前）。
@@ -230,11 +230,12 @@ func TestSaveWritesUsageEvent(t *testing.T) {
 		}
 	}
 
-	// unit_prices 也在「这一轮不写」那一档里，但它是 NOT NULL DEFAULT '{}'，
-	// 进不了上面那个循环：它的表现是**空对象**，而空对象与「这次确实没有单价」
-	// 在库里长得一样。按空对象断言，同样是为了让「哪天接上」必须显式改这一处。
+	// unit_prices 不在「NULL」那一档里，因为它是 NOT NULL DEFAULT '{}'：这个
+	// 夹具（billedCharge）没有给单价，落库层因此写空对象。空对象现在的含义是
+	// **这次结算没有单价可记**，不是「这一列没人填」——有单价的那一支由
+	// usage_event_prices_test.go 的一组用例逐键钉住。
 	if string(got.UnitPrices) != "{}" {
-		t.Errorf("unit_prices = %s，期望 {}——这一列这一轮不写", got.UnitPrices)
+		t.Errorf("unit_prices = %s，期望 {}——这个夹具没有给单价", got.UnitPrices)
 	}
 }
 
@@ -267,7 +268,7 @@ func TestSaveWritesUsageEventDuration(t *testing.T) {
 			ctx := context.Background()
 
 			userID := seed(t, db, "100")
-			channelID := seedChannel(t, db)
+			channelID := seedChannel(t, ctx, db)
 			requestID := reqID(t)
 
 			req := testRequest(ctx, t, db, userID, requestID)
@@ -513,7 +514,7 @@ func TestSaveUsageEventUnreportedUsage(t *testing.T) {
 	ctx := context.Background()
 
 	userID := seed(t, db, "100")
-	channelID := seedChannel(t, db)
+	channelID := seedChannel(t, ctx, db)
 	requestID := reqID(t)
 
 	req := testRequest(ctx, t, db, userID, requestID)

@@ -73,6 +73,12 @@ const (
 	// AccountUpstreamCost 是付给上游的成本，也包括支付通道的手续费。
 	// 与平台收入分开记，是为了让「这一单赚了多少」可以逐单算出来，
 	// 而不是靠两边的汇总相减。
+	//
+	// **但今天记进来的只有支付通道的手续费那一半**（EntryTopup，见
+	// entryDirections）：上游 API 的成本还没有来源，结算只构造「用户被扣了
+	// 多少」这一侧，把付给上游多少留给了另一个环节（见 pipeline.entries 与
+	// pipeline.Outcome.UpstreamCost）。所以「这一单赚了多少」现在只读得出
+	// 收入侧，毛利算不出来。
 	AccountUpstreamCost AccountType = "upstream_cost"
 	// AccountPaymentGateway 是通道替我们持有的钱。充值时是负的
 	// （我们有钱在通道那里），打款出去时变正（通道替我们垫了钱），
