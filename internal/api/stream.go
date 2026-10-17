@@ -106,7 +106,7 @@ func newStreamRenderer(protocol channel.Protocol, id, model string, now time.Tim
 			id:         id,
 			model:      model,
 			input:      inputTokens,
-			openIndex:  -1,
+			textIndex:  -1,
 			toolBlocks: map[int]int{},
 		}, nil
 	default:
@@ -345,6 +345,31 @@ func (s *openAIStream) usageJSON() *openAIUsage {
 // 发出的是一条新的流，两者对不上。正文块按下标递增分配，工具调用按上游的
 // 分片下标映射到我们分配的块上（同一个工具调用的分片必须落到同一个块里，
 // 否则客户端会看到好几个半截的工具调用）。
+//
+// # 正文块与工具块的开合规则不一样
+//
+// 正文没有下标：一个 delta 就是「当前这一段正文又长了」，所以正文块开着时
+// 又来一段正文，就是同一块在增长。工具调用的分片则**带着上游给的下标，而且
+// 可以交错**（OpenAI 允许多个 tool_calls[].index 交替出现，见
+// internal/channel/openaiadapter）。两条规则因此必须分开：
+//
+//   - 打开工具块时关掉开着的正文块：那一段正文已经说完了，它的 stop 该在
+//     工具块之前写出去，让它在最终 content 数组里占住自己的位置。
+//   - 打开正文块时**不**关工具块：工具块一关，它后面那个分片就落在自己的
+//     stop 之后了——那正是这个渲染器要防的事。
+//
+// 也就是说工具块一旦打开就开到流末尾，多个工具块可以同时开着。两个官方 SDK
+// 都接得住这一点：它们的累加器都是「content_block_start 往 content 数组里
+// 追加，content_block_delta 与 content_block_stop 按帧里的 index 取块」，
+// 所以同时开着不影响拼出来的结果；而**重开同一个下标**会让最终消息里多出
+// 一个同 id 的空 tool_use 块，客户端会拿它再调一次工具。协议文档也是按
+// 「index 就是它在最终 content 数组里的位置」描述的，所以宁可让块同时开着，
+// 也不能让一个下标出现两次。
+//
+// 顺带一提，「等流末尾再关」不只是取舍的结果，也是这里唯一能做的：统一事件
+// 流里没有「块结束了」这件事（anthropicadapter 把上游的 content_block_stop
+// 丢掉了，openaiadapter 那边 OpenAI 压根不发），所以渲染器根本收不到「这个
+// 工具调用说完了」的信号。
 type anthropicStream struct {
 	id    string
 	model string
@@ -356,10 +381,11 @@ type anthropicStream struct {
 
 	// nextIndex 是下一个块的分配下标。
 	nextIndex int
-	// openIndex 是当前打开的块，-1 表示没有。
-	openIndex int
-	// textOpen 表示当前打开的是正文块。
-	textOpen bool
+	// textIndex 是当前打开的正文块下标，-1 表示没有正文块开着。
+	textIndex int
+	// openToolBlocks 是当前开着的工具块下标，按打开顺序排列（关的时候也按
+	// 这个顺序）。它只在流末尾清空：见上面「正文块与工具块的开合规则不一样」。
+	openToolBlocks []int
 	// toolBlocks 把上游的工具调用下标映射到本流里分配的块下标。
 	toolBlocks map[int]int
 }
@@ -449,7 +475,7 @@ func (s *anthropicStream) event(w io.Writer, ev channel.StreamEvent) error {
 		if err := s.openTextBlock(w); err != nil {
 			return err
 		}
-		delta := claudeTextDelta{Type: "content_block_delta", Index: s.openIndex}
+		delta := claudeTextDelta{Type: "content_block_delta", Index: s.textIndex}
 		delta.Delta.Type = "text_delta"
 		delta.Delta.Text = ev.Text
 		return writeSSE(w, "content_block_delta", delta)
@@ -492,7 +518,13 @@ func (s *anthropicStream) event(w io.Writer, ev channel.StreamEvent) error {
 }
 
 func (s *anthropicStream) finish(w io.Writer) error {
-	if err := s.closeBlock(w); err != nil {
+	// 关的顺序不影响客户端（它按 index 找块），但按下标从小到大更顺眼：与
+	// 最终 content 数组的顺序一致。同时开着的时候正文块的下标总是最大的
+	// （打开工具块会先关掉正文块再分配自己的下标），所以先关工具块。
+	if err := s.closeToolBlocks(w); err != nil {
+		return err
+	}
+	if err := s.closeTextBlock(w); err != nil {
 		return err
 	}
 
@@ -517,18 +549,16 @@ func (s *anthropicStream) finish(w io.Writer) error {
 //
 // 每次打开都分配一个新下标，哪怕前面开过正文块：工具调用之后的正文是
 // **另一块**，复用下标会让客户端把两段正文当成同一段在增长。
+//
+// 这里不关工具块：理由见结构体上「正文块与工具块的开合规则不一样」。
 func (s *anthropicStream) openTextBlock(w io.Writer) error {
-	if s.textOpen {
+	if s.textIndex >= 0 {
 		return nil
 	}
-	if err := s.closeBlock(w); err != nil {
-		return err
-	}
-	s.openIndex = s.allocate()
-	s.textOpen = true
+	s.textIndex = s.allocate()
 	return writeSSE(w, "content_block_start", claudeBlockStart{
 		Type:         "content_block_start",
-		Index:        s.openIndex,
+		Index:        s.textIndex,
 		ContentBlock: claudeTextBlock{Type: "text", Text: ""},
 	})
 }
@@ -536,14 +566,18 @@ func (s *anthropicStream) openTextBlock(w io.Writer) error {
 // openToolBlock 打开（或复用）一次工具调用对应的块，返回块下标。
 func (s *anthropicStream) openToolBlock(w io.Writer, tc *channel.ToolCallDelta) (int, error) {
 	if index, ok := s.toolBlocks[tc.Index]; ok {
+		// 复用：这个工具调用的块已经开着。工具块只在流末尾关，所以它一定
+		// 还开着——分片直接续在它后面，不必重开（重开会多出一个同 id 的
+		// 空块，见结构体上的说明）。
 		return index, nil
 	}
-	if err := s.closeBlock(w); err != nil {
+	// 新的工具调用：它开在正文块之后，先把那一段正文关掉。
+	if err := s.closeTextBlock(w); err != nil {
 		return 0, err
 	}
 	index := s.allocate()
 	s.toolBlocks[tc.Index] = index
-	s.openIndex = index
+	s.openToolBlocks = append(s.openToolBlocks, index)
 	err := writeSSE(w, "content_block_start", claudeBlockStart{
 		Type:  "content_block_start",
 		Index: index,
@@ -561,14 +595,33 @@ func (s *anthropicStream) openToolBlock(w io.Writer, tc *channel.ToolCallDelta) 
 	return index, nil
 }
 
-// closeBlock 关掉当前打开的块，没有则什么都不做。
-func (s *anthropicStream) closeBlock(w io.Writer) error {
-	if s.openIndex < 0 {
+// closeTextBlock 关掉开着的正文块，没有则什么都不做。
+func (s *anthropicStream) closeTextBlock(w io.Writer) error {
+	if s.textIndex < 0 {
 		return nil
 	}
-	index := s.openIndex
-	s.openIndex = -1
-	s.textOpen = false
+	index := s.textIndex
+	s.textIndex = -1
+	return writeBlockStop(w, index)
+}
+
+// closeToolBlocks 关掉所有开着的工具块，没有则什么都不做。
+//
+// 只在流末尾调用：中途关掉其中任何一个，它后面那些分片就落在自己的 stop
+// 之后了——那正是这个渲染器要防的事。
+func (s *anthropicStream) closeToolBlocks(w io.Writer) error {
+	open := s.openToolBlocks
+	s.openToolBlocks = nil
+	for _, index := range open {
+		if err := writeBlockStop(w, index); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeBlockStop 写一帧 content_block_stop。
+func writeBlockStop(w io.Writer, index int) error {
 	return writeSSE(w, "content_block_stop", claudeBlockStop{Type: "content_block_stop", Index: index})
 }
 
