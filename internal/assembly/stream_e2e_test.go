@@ -18,6 +18,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/credential"
+	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/tokens"
 )
 
@@ -27,7 +28,7 @@ import (
 // 与非流式那一组（e2e_test.go）同一个约定：走的是生产装配路径，假上游是本地
 // httptest，断言必须回到库里看钱。
 //
-// # 这一组要证明的四件事
+// # 这一组要证明的五件事
 //
 //  1. 两套协议的帧形状各自正确，且结尾的标记（[DONE] / message_stop）真的到了
 //     客户端手里。
@@ -35,6 +36,8 @@ import (
 //  3. 上游在流中途报错时，已经吐出的部分被计费，剩下的部分**不假装正常结束**。
 //  4. 已经吐字之后不再换渠道——这条最容易在「加个重试」时被顺手破坏，
 //     而它的表现是客户端看到两段拼接的回答。
+//  5. 失败落在吐字之前时，账单上留下「这次为什么不计费」的依据：上游没给出
+//     状态码，所以那两列只有分类有值（见 TestStreamAbortedBeforeOutputRecordsEvidence）。
 //
 // # 估算用量这件事在库里怎么读
 //
@@ -515,6 +518,15 @@ type billingRow struct {
 	// upstreamModel 可空：预留那一行还没选路，这一列本来就是空的（见 #338）。
 	canonicalModel string
 	upstreamModel  sql.NullString
+
+	// upstreamStatus 与 errorCode 是「这次为什么没计费」的依据（见 #362）。
+	//
+	// 两列都可空，而 NULL 在这里是**正常取值**：它表示这一行没有上游失败的
+	// 证据，不是「没读到」。所以断言要连着 Valid 一起判——只判 String 的话
+	// 「写了个 0 / 空串进去」与「留了 NULL」在用例里长得一样，而前者会让
+	// 「上游回了 0 号」与「没有这回事」在库里分不开。
+	upstreamStatus sql.NullInt64
+	errorCode      sql.NullString
 }
 
 // billingOf 取这个用户最近一行账单。没有行时第二个返回值为 false。
@@ -525,12 +537,13 @@ func billingOf(t *testing.T, db *sql.DB, userID int64) (billingRow, bool) {
 	err := db.QueryRowContext(context.Background(), `
 		SELECT id, request_id, status, reserved_amount::text, final_amount::text,
 		       computed_amount::text, channel_id, streamed, protocol,
-		       canonical_model, upstream_model
+		       canonical_model, upstream_model, upstream_status, error_code
 		  FROM billing_requests
 		 WHERE user_id = $1
 		 ORDER BY id DESC LIMIT 1`, userID,
 	).Scan(&b.id, &b.requestID, &b.status, &b.reserved, &b.final, &b.computed,
-		&b.channelID, &b.streamed, &b.protocol, &b.canonicalModel, &b.upstreamModel)
+		&b.channelID, &b.streamed, &b.protocol, &b.canonicalModel, &b.upstreamModel,
+		&b.upstreamStatus, &b.errorCode)
 	if err == sql.ErrNoRows {
 		return billingRow{}, false
 	}
@@ -1237,6 +1250,75 @@ func TestStreamUpstreamFailureBeforeOutput(t *testing.T) {
 	assertWallet(t, db, user, balance, "0")
 	assertNoLedgerEntry(t, db, user)
 	assertReservedBeforeUpstream(t, fake)
+}
+
+// 上游接受了请求、一个 token 都没吐就断了：计费上的处置与上面那条一样
+// （不计费、预留释放），但**依据不同**——这次上游没给出过状态码。
+//
+// 响应头是 2xx，具体几号链路里没有别的地方记着，所以 upstream_status 留
+// NULL、只有分类有值。这与「非 2xx」那条路的落法不同，两条都要钉：只钉
+// 一条的话，把另一条也写成同一个状态码同样能通过，而那个数会是编出来的。
+//
+// 它同时是 `upstreamEvidence` 里**唯一一个不看 ErrUpstream 的分支**，把那一支
+// 整个删掉，这条路上的依据会全部丢掉（两列都 NULL），而库里 NULL 与
+// 「这一批恰好没有失败」长得一样——正是这次改动要修的那类缺陷。
+func TestStreamAbortedBeforeOutputRecordsEvidence(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+
+	const balance = "100"
+	model := unique("e2e-stream-abort")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, balance)
+	key := issueKey(t, db, user)
+
+	// 200 + SSE 头，一个正文分片都没有，然后一个错误帧就结束。
+	fake := &streamUpstream{
+		protocol:  channel.ProtocolOpenAI,
+		model:     model,
+		failAfter: 1,
+		db:        db,
+		userID:    user,
+	}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	resp, cancel := openStream(t, public.URL+"/v1/chat/completions", key, streamBody(model))
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（断在响应头之后，状态码已经改不了了）", resp.StatusCode)
+	}
+
+	// 一个字都没吐出来，所以调用方那边不该出现 [DONE]——那是「正常结束」的
+	// 标记，而这次不是。
+	for _, f := range readFrames(t, resp.Body, 0) {
+		if f.data == "[DONE]" {
+			t.Fatal("上游一个字都没吐，却给了调用方一个 [DONE]")
+		}
+	}
+
+	bill := waitForBillingStatus(t, db, user, "released")
+	if bill.final.Valid && greaterThan(bill.final.String, "0") {
+		t.Errorf("final_amount = %s，期望空或零：一个字都没产生，不该计费", bill.final.String)
+	}
+	if bill.upstreamStatus.Valid {
+		t.Errorf("upstream_status = %v，期望 NULL——上游没给出过状态码，"+
+			"写 0 会让它读成「上游回了 0 号」", bill.upstreamStatus)
+	}
+	if !bill.errorCode.Valid || bill.errorCode.String != pipeline.ErrorUpstreamStreamAborted {
+		t.Errorf("error_code = %v，期望 %q", bill.errorCode, pipeline.ErrorUpstreamStreamAborted)
+	}
+	assertWallet(t, db, user, balance, "0")
+	assertNoLedgerEntry(t, db, user)
 }
 
 // 估算口径与预留口径必须一致到「同一个数」。

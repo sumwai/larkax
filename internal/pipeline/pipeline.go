@@ -309,8 +309,25 @@ type Outcome struct {
 	// 不计费，但仍然要落一条记录——「这个请求失败了」本身是排查的依据。
 	UpstreamFailed bool
 
-	// UpstreamStatus 与 ErrorCode 是失败时的依据，供事后核对
+	// UpstreamStatus 与 ErrorCode 是「这次为什么不计费」的依据，供事后核对
 	// 「这个错误码当时是不是真的不该计费」。
+	//
+	// 它们最后落进 billing_requests 的同名两列（见 internal/ledger/store 的
+	// Release——不计费的结局只有那一条写库的路）。两者都只在**上游这一侧**
+	// 的失败上有值：
+	//
+	//   - UpstreamStatus 是上游那次 HTTP 响应的状态码。上游没给出状态码时是 0，
+	//     落库成 NULL——HTTP 里没有 0 这个状态码，写 0 会读成「上游回了 0 号」。
+	//   - ErrorCode 的取值口径见下面那组常量。
+	//
+	// **口径是「因上游失败而不计费」，不是「上游失败过」。** 上游吐了字之后
+	// 才失败的那一次要计费，账单是 settled，两列同样是 NULL（见
+	// stream_e2e_test.go 的 TestStreamUpstreamErrorMidStream）。所以
+	// `error_code IS NOT NULL` 不是「上游出过问题的请求」的判据——它答的是
+	// 「这次没向上游收钱，是不是因为上游这一侧出了事」。
+	//
+	// 不是上游的失败（插件阻断、别名没配）两列也留空：它们不是上游出的
+	// 事，写进去会让上面那个问题答错。
 	UpstreamStatus int
 	ErrorCode      string
 
@@ -332,6 +349,52 @@ type Outcome struct {
 	// UpstreamCost 是上游侧的成本，供对账。
 	UpstreamCost money.Amount
 }
+
+// Outcome.ErrorCode 的取值。它们是**我们自己归一化过的分类**，不是上游错误
+// 码的原文。
+//
+// 为什么不用原文：各家上游对同一件事叫的名字不一样，而这一列的用途是事后
+// 统计「哪类失败最常见」——按原文统计时，两个名字会把同一件事算成两件，
+// 三个部署之间也拼不起来。上游自己那个机器可读的数字没有丢：它在
+// UpstreamStatus 里。两列合起来既看得出「哪一类」，也看得出「上游说的几号」。
+//
+// 要取原文得改 internal/channel：channel.ErrUpstream 今天只带状态码与响应体
+// 原文，错误码要从体里解出来才拿得到，而解它的是适配器。
+//
+// 取值只有下面三个，**都属于「上游这一侧出了事」**，记的是「这次为什么
+// 不计费」。我们这边的失败（插件阻断、别名没配、结算自己出错）不进这一列：
+// 混进来之后，`error_code IS NOT NULL` 连「是不是上游挂的」都答不了了。
+//
+// 反过来说，**有值也只说明「这次没计费是因为上游」**，不说明「上游出过
+// 问题」——已吐字之后的上游失败要计费，它在已结算的行上是 NULL。
+const (
+	// ErrorUpstreamHTTPError 表示上游回了个错误状态码（非 2xx）。状态码本身
+	// 在 UpstreamStatus 里，两列成对读：`upstream_http_error` + 500。
+	//
+	// 名字不叫 rejected：那读起来像「上游拒绝了这次请求」，也就是 4xx，而这条
+	// 口径覆盖的是**任意非 2xx**——httpx.CheckStatus 把 500、503、429 一样
+	// 变成带 StatusCode 的 ErrUpstream。值会进库，而库里没有注释可读，所以
+	// 名字得自己说得清。
+	ErrorUpstreamHTTPError = "upstream_http_error"
+
+	// ErrorUpstreamNoAnswer 表示上游这一侧没给出可用的回答。它下面其实混着
+	// 好几种情形：连不上、TLS 失败、超时、响应体解不开、以及上游回了 2xx
+	// 但把错误写在体里（见适配器的 extractEmbeddedError）。
+	//
+	// 它们合成一档，是因为**在这一层分不开**：channel.ErrUpstream 只带状态码
+	// 与响应体原文，上面几种的状态码都是 0，体在「解不开」时也拿不到。要拆开
+	// 得让适配器把「拿到过响应吗」记进 ErrUpstream——那要改 internal/channel，
+	// 不在这次改动的范围内。宁可给一档诚实的粗分类，也不要按猜的拆细。
+	//
+	// 此时 UpstreamStatus 是 0（落库成 NULL）：上游没有给出过一个状态码，
+	// 编一个出来比留空更坏。
+	ErrorUpstreamNoAnswer = "upstream_no_answer"
+
+	// ErrorUpstreamStreamAborted 表示上游接受了请求，但一个 token 都没吐就
+	// 结束了（流式）。它发生在响应头之后，所以状态码拿不到——那时只知道它是
+	// 2xx，具体是几号没有别的地方记着，UpstreamStatus 因此也是 0。
+	ErrorUpstreamStreamAborted = "upstream_stream_aborted"
+)
 
 // Charge 是结算的结果，调用方据此写账本。
 type Charge struct {
@@ -756,6 +819,11 @@ var ErrRuleBroken = errors.New("计价规则不可用")
 //
 // 它是**返回值**而不是普通错误：调用方需要区分「计费过程出错了」
 // 与「这次本来就不该计费」，前者要告警，后者是正常结局。
+//
+// 它同时是这次失败的**依据**（Status 与 Code 取自 Outcome 的同名字段）。
+// 不计费的结局不写账本，调用方要留下这份依据，只能从它这里拿——
+// 落点是 billing_requests 的 upstream_status 与 error_code（见
+// internal/gateway 的 handle.release 与 internal/ledger/store 的 Release）。
 type UpstreamFailure struct {
 	RequestID string
 	Status    int

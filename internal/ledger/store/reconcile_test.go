@@ -447,7 +447,7 @@ func TestReconcileAcceptsReleasedReservation(t *testing.T) {
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, req.RequestID, "30", "CNY")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Release(ctx, req); err != nil {
+	if err := s.Release(ctx, req, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1040,7 +1040,7 @@ func TestReconcileKeepsReportingStaleReservationUntilReleased(t *testing.T) {
 	}
 
 	// 放开之后它必须从清单里消失，否则告警会永远响着。
-	if err := s.Release(ctx, testRequest(ctx, t, db, userID, requestID)); err != nil {
+	if err := s.Release(ctx, testRequest(ctx, t, db, userID, requestID), nil); err != nil {
 		t.Fatal(err)
 	}
 	report = reconcile(t, db, cfg)

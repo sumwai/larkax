@@ -90,7 +90,7 @@ func (f *pluginReservations) SaveReservation(_ context.Context, _ pipeline.Reque
 	return int64(len(f.saved)), nil
 }
 
-func (f *pluginReservations) Release(_ context.Context, req pipeline.Request) error {
+func (f *pluginReservations) Release(_ context.Context, req pipeline.Request, _ *pipeline.UpstreamFailure) error {
 	f.released = append(f.released, req)
 	return nil
 }

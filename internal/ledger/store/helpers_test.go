@@ -225,6 +225,27 @@ func upstreamModelOf(t *testing.T, db *sql.DB, requestID string) sql.NullString 
 	return model
 }
 
+// upstreamFailureOf 读一条账单上「上游失败的依据」那两列。
+//
+// 两个都返回可空类型：它们恒为 NULL 是**正常**的一种取值（这一行没有上游
+// 失败的证据），而不是「没读到」。用例要分辨的是「NULL」与「写了个 0 /
+// 空串进去」——后者是落库层的写法出了问题，而按 string 读回来时两者长得
+// 一模一样（见 Release 里 NULLIF 那一步的注释）。
+func upstreamFailureOf(t *testing.T, db *sql.DB, requestID string) (sql.NullInt64, sql.NullString) {
+	t.Helper()
+	var (
+		status sql.NullInt64
+		code   sql.NullString
+	)
+	qerr := db.QueryRowContext(context.Background(),
+		`SELECT upstream_status, error_code FROM billing_requests WHERE request_id = $1`,
+		requestID).Scan(&status, &code)
+	if qerr != nil {
+		t.Fatalf("读账单的上游失败依据失败: %v", qerr)
+	}
+	return status, code
+}
+
 // clientCanceledAt 读账单上「客户端断开」那一刻。
 //
 // 返回 NULL 有两种来历，这一列分不开也不该分：没取消（结算路径必然知道），

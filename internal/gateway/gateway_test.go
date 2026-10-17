@@ -56,12 +56,21 @@ func (f *fakeCandidates) Candidates(context.Context, string) ([]route.Candidate,
 	return f.cands, f.err
 }
 
+// releaseCall 是一次释放：释放的是哪次请求，带着什么失败依据。
+//
+// 两者放在同一条记录里而不是两个并列的切片：它们说的是同一次释放，
+// 分成两份之后「第 i 个对应第 i 个」这条约定只活在读的人脑子里。
+type releaseCall struct {
+	req     pipeline.Request
+	failure *pipeline.UpstreamFailure
+}
+
 type fakeReservations struct {
 	saved []*pipeline.Reservation
 	err   error
 	next  int64
 
-	released []pipeline.Request
+	released []releaseCall
 	// releaseCtxErr 记下每次释放时传进来的 ctx 是不是已经不可用。
 	//
 	// 这一条必须被钉住：客户端断开时请求的 ctx 已经 Done，用那个 ctx
@@ -79,12 +88,12 @@ func (f *fakeReservations) SaveReservation(_ context.Context, _ pipeline.Request
 	return f.next, nil
 }
 
-func (f *fakeReservations) Release(ctx context.Context, req pipeline.Request) error {
+func (f *fakeReservations) Release(ctx context.Context, req pipeline.Request, failure *pipeline.UpstreamFailure) error {
 	f.releaseCtxErr = append(f.releaseCtxErr, ctx.Err())
 	if f.releaseErr != nil {
 		return f.releaseErr
 	}
-	f.released = append(f.released, req)
+	f.released = append(f.released, releaseCall{req: req, failure: failure})
 	return nil
 }
 
@@ -462,12 +471,145 @@ func TestUpstreamFailureReleasesReservation(t *testing.T) {
 	if len(h.reservations.released) != 1 {
 		t.Fatalf("上游失败应释放预留一次，实际 %d 次", len(h.reservations.released))
 	}
-	if got := h.reservations.released[0].RequestID; got != "req-1" {
+	if got := h.reservations.released[0].req.RequestID; got != "req-1" {
 		t.Errorf("释放的是 %q，期望 req-1", got)
 	}
 	// 释放的是**落过库的那次预留**：没落过库就没有可释放的东西。
 	if len(h.reservations.saved) != 1 {
 		t.Errorf("预留落库 %d 次，期望 1 次", len(h.reservations.saved))
+	}
+}
+
+// 上游失败时，账单要拿到「上游回了什么、为什么不计费」这份依据。
+//
+// 它由释放那一步带着落库（见 handle.release）：不计费的结局不写账本，
+// 账单那一行只有这一次写入机会，而网关是唯一知道上游回了什么的那一层。
+//
+// 四类失败**分开钉**，因为它们在两列上的落法不同——只钉其中一类的话，
+// 把另外几类也写成同一个状态码同样能通过，而那两个数会是编出来的：
+//
+//   - 非 2xx：状态码就是上游回的那个
+//   - 上游没给出状态码（连不上、响应解不开）：状态码必须留空
+//     （HTTP 里没有 0 这个状态码）
+//   - 上游接受了请求却没吐字：状态码同样留空，分类是另一档
+//   - 不是上游的失败：两列都留空（插件阻断时上游其实是好的）
+func TestUpstreamFailureCarriesEvidenceToRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// fail 是执行器回的错误，也就是这次请求的失败成因。
+		fail error
+		// hook 非空时改由插件阻断，执行器那一次调用是成功的。
+		hook bool
+		// wantStatus 与 wantCode 是期望落库的两列；wantNone 表示两列都该留空。
+		wantStatus int
+		wantCode   string
+		wantNone   bool
+	}{
+		{
+			name:       "上游回了 400",
+			fail:       &channel.ErrUpstream{StatusCode: 400, Retryable: false},
+			wantStatus: 400,
+			wantCode:   pipeline.ErrorUpstreamHTTPError,
+		},
+		{
+			name:       "上游回了 500",
+			fail:       &channel.ErrUpstream{StatusCode: 500, Retryable: true},
+			wantStatus: 500,
+			wantCode:   pipeline.ErrorUpstreamHTTPError,
+		},
+		{
+			// 连不上：ErrUpstream 的 StatusCode 是零值，因为一个 HTTP 响应
+			// 都没有过。这一条与上面两条的差别正是「0 该不该写进库里」。
+			name:     "连接根本没建立",
+			fail:     &channel.ErrUpstream{Retryable: true, Err: errors.New("connection refused")},
+			wantCode: pipeline.ErrorUpstreamNoAnswer,
+		},
+		{
+			// 上游回了 2xx，却把错误写在体里（适配器的 extractEmbeddedError）。
+			// 状态码同样是零值，所以它与「连不上」落进同一档——这一层分不出
+			// 两者，用例把这件事钉下来，免得下一个人以为漏了一种。
+			name:     "上游 2xx 但体里带 error",
+			fail:     &channel.ErrUpstream{Body: "upstream said: model not found"},
+			wantCode: pipeline.ErrorUpstreamNoAnswer,
+		},
+		{
+			// 上游接受了请求、一个 token 都没吐就断了（流式）。它与上面两条
+			// 的差别是**成因不同**：那两条是「没拿到响应」，这条是拿到了
+			// 2xx 响应头、正文一个字都没有。
+			//
+			// 单独一条钉着，是因为这一支是 upstreamEvidence 里唯一一个不看
+			// ErrUpstream 的分支——把它删掉的话，这条路上的依据会整个丢掉
+			// （两列都 NULL），而库里 NULL 与「这一批恰好没有失败」长得一样。
+			name:     "上游接受请求后没吐字就断了",
+			fail:     errStreamAborted,
+			wantCode: pipeline.ErrorUpstreamStreamAborted,
+		},
+		{
+			// 插件阻断：上游那一次调用是成功的，所以这不是上游的失败，
+			// 两列都该留空。写成「上游失败」会让事后统计把插件的拦截
+			// 记到上游头上。
+			name:     "插件阻断",
+			hook:     true,
+			wantNone: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			hooks := Hooks{}
+			if tc.hook {
+				hooks.OnResponse = func(context.Context, *channel.Response) error {
+					return errors.New("插件阻断")
+				}
+			} else {
+				h.executor.failFor = map[int64]error{1: tc.fail}
+			}
+
+			if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), hooks); err == nil {
+				t.Fatal("这次请求应当失败")
+			}
+			if len(h.reservations.released) != 1 {
+				t.Fatalf("不计费的结局应释放预留一次，实际 %d 次", len(h.reservations.released))
+			}
+
+			got := h.reservations.released[0].failure
+			if tc.wantNone {
+				if got != nil {
+					t.Fatalf("这次失败不是上游造成的，不该带依据，得到 %+v", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("上游失败应当带着依据去释放，实际没有")
+			}
+			if got.Status != tc.wantStatus {
+				t.Errorf("upstream_status = %d，期望 %d", got.Status, tc.wantStatus)
+			}
+			if got.Code != tc.wantCode {
+				t.Errorf("error_code = %q，期望 %q", got.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
+// 结算之前就返回（客户端断开、ctx 取消）时没有上游失败的依据。
+//
+// 这条路上上游那一次调用可能压根没发生（路由看见 ctx 已经 Done 就返回了），
+// 所以「上游回了什么」没有答案。写一个默认值进去会让「没有这回事」与
+// 「上游回了某个码」在库里长得一样。
+func TestReleaseWithoutUpstreamCallCarriesNoEvidence(t *testing.T) {
+	h := newHarness(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := h.gw.Chat(ctx, request(), upstreamRequest(), Hooks{}); err == nil {
+		t.Fatal("ctx 已取消时不该成功")
+	}
+	if len(h.reservations.released) != 1 {
+		t.Fatalf("应释放预留一次，实际 %d 次", len(h.reservations.released))
+	}
+	if got := h.reservations.released[0].failure; got != nil {
+		t.Errorf("上游根本没被调用，不该带依据，得到 %+v", got)
 	}
 }
 
@@ -537,7 +679,7 @@ func TestSuccessWithoutSettlementStoreReleasesReservation(t *testing.T) {
 	if len(h.reservations.released) != 1 {
 		t.Fatalf("没有结算落库层时成功路径也必须释放预留，实际 %d 次", len(h.reservations.released))
 	}
-	if got := h.reservations.released[0].RequestID; got != "req-1" {
+	if got := h.reservations.released[0].req.RequestID; got != "req-1" {
 		t.Errorf("释放的应是本次请求，实际 %q", got)
 	}
 }
