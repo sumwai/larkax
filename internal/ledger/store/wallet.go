@@ -58,10 +58,13 @@ func (s *Store) OpenWallet(ctx context.Context, userID int64, asset ledger.Asset
 		ON CONFLICT (user_id, asset) DO NOTHING`,
 		userID, string(asset))
 	if err != nil {
+		// 具名的先判：这一条外键的含义是确定的，调用方可以直接问出
+		// 「是用户不存在」。兜底的通用哨兵也挂在链上，于是「是不是约束
+		// 冲突」只有一个判据。
 		if isMissingUserViolation(err) {
-			return false, missingUserError(err, userID)
+			return false, constraintFailure(missingUserError(err, userID))
 		}
-		return false, fmt.Errorf("开通钱包失败: %w", err)
+		return false, constraintFailure(fmt.Errorf("开通钱包失败: %w", err))
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {

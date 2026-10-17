@@ -355,7 +355,7 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 		   AND balance - frozen >= $3::numeric`,
 		key.UserID, key.Asset, r.Amount.String())
 	if err != nil {
-		return 0, fmt.Errorf("冻结余额失败: %w", err)
+		return 0, constraintFailure(fmt.Errorf("冻结余额失败: %w", err))
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
@@ -391,7 +391,10 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 		req.APIKeyID,
 	).Scan(&id)
 	if err != nil {
-		return 0, fmt.Errorf("写预留记录失败: %w", err)
+		// 这条 INSERT 有四条外键（users / api_keys / channels / pricing_rules）
+		// 与一条唯一键（request_id）。认得出是哪一条由驱动错误上的约束名回答，
+		// 这里只负责把它们都归成「约束冲突」。
+		return 0, constraintFailure(fmt.Errorf("写预留记录失败: %w", err))
 	}
 
 	// 幂等记录（调用方带了 Idempotency-Key 时）。见上面第 3 条：
@@ -401,7 +404,10 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 	// 入口要按 errors.Is 认出它，转成「等一等再重放」而不是一次失败。
 	if req.Idempotency != nil {
 		if err := idempotency.ClaimInTx(ctx, tx, req.Idempotency, id); err != nil {
-			return 0, err
+			// 幂等记录也有两条外键（api_keys / billing_requests）。它自己的
+			// 撞键走 ON CONFLICT DO NOTHING，不会以 23505 冒上来，所以这里
+			// 兜的是外键。
+			return 0, constraintFailure(err)
 		}
 	}
 
@@ -666,7 +672,9 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request, failure *pipe
 		       upstream_model = NULLIF($5, '')
 		 WHERE id = $1`,
 		id, failureStatus, failureCode, req.ChannelID, req.UpstreamModel); err != nil {
-		return fmt.Errorf("标记释放失败: %w", err)
+		// channel_id 有外键指向 channels：选中的渠道在释放之前被删掉时，
+		// 这条 UPDATE 会以 23503 冒上来。
+		return constraintFailure(fmt.Errorf("标记释放失败: %w", err))
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -780,7 +788,8 @@ func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *
 		charge.ClientCanceled, charge.Settlement.Breakdown.Total.String(),
 		req.UpstreamModel)
 	if err != nil {
-		return false, fmt.Errorf("标记结算失败: %w", err)
+		// 与 Release 同一条外键：channel_id → channels(id)。
+		return false, constraintFailure(fmt.Errorf("标记结算失败: %w", err))
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
@@ -801,7 +810,7 @@ func insertEntries(ctx context.Context, tx *sql.Tx, entries []ledger.Entry) erro
 			string(e.EntryType), int64OrZero(e.BillingRequestID), int64OrZero(e.PayoutID),
 			e.Memo)
 		if err != nil {
-			return fmt.Errorf("写分录失败（科目 %s）: %w", e.Account, err)
+			return constraintFailure(fmt.Errorf("写分录失败（科目 %s）: %w", e.Account, err))
 		}
 	}
 	return nil
@@ -854,7 +863,7 @@ func applyToWallets(ctx context.Context, tx *sql.Tx, entries []ledger.Entry) err
 			   AND balance + $3::numeric >= 0`,
 			key.UserID, key.Asset, delta.String())
 		if err != nil {
-			return fmt.Errorf("更新余额失败: %w", err)
+			return constraintFailure(fmt.Errorf("更新余额失败: %w", err))
 		}
 		affected, err := res.RowsAffected()
 		if err != nil {

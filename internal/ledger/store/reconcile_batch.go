@@ -391,7 +391,7 @@ func resyncBalance(ctx context.Context, tx *sql.Tx, key userAsset, target money.
 		 WHERE user_id = $1 AND asset = $2`,
 		key.userID, key.asset, target.String())
 	if err != nil {
-		return fmt.Errorf("修正余额失败: %w", err)
+		return constraintFailure(fmt.Errorf("修正余额失败: %w", err))
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
@@ -419,7 +419,7 @@ func repairFrozen(ctx context.Context, tx *sql.Tx, cfg ReconcileConfig, f *Findi
 		 WHERE user_id = $1 AND asset = $2`,
 		key.userID, key.asset, f.Ledger.String())
 	if err != nil {
-		return fmt.Errorf("修正冻结额失败: %w", err)
+		return constraintFailure(fmt.Errorf("修正冻结额失败: %w", err))
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {

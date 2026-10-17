@@ -642,7 +642,7 @@ func (s *Store) beginReconcileRun(ctx context.Context, startedAt, watermark time
 		 WHERE status = 'running'
 		   AND started_at < now() - make_interval(secs => $1)`,
 		int64(staleRunAfter.Seconds())); err != nil {
-		return 0, fmt.Errorf("清理未跑完的对账记录失败: %w", err)
+		return 0, constraintFailure(fmt.Errorf("清理未跑完的对账记录失败: %w", err))
 	}
 
 	var id int64
@@ -650,7 +650,7 @@ func (s *Store) beginReconcileRun(ctx context.Context, startedAt, watermark time
 		INSERT INTO reconcile_runs (started_at, watermark, full_scan, status)
 		VALUES ($1, $2, $3, 'running')
 		RETURNING id`, startedAt, watermark, full).Scan(&id); err != nil {
-		return 0, fmt.Errorf("写对账运行记录失败: %w", err)
+		return 0, constraintFailure(fmt.Errorf("写对账运行记录失败: %w", err))
 	}
 	return id, nil
 }
@@ -686,7 +686,7 @@ func (s *Store) finishReconcileRun(ctx context.Context, r *Report, cause error) 
 		r.RunID, r.CheckedWallets, r.BalanceMismatches(), r.FrozenMismatches(),
 		r.Repaired(), r.MalformedAccounts(), r.StaleReservations(), status, msg)
 	if err != nil {
-		return fmt.Errorf("写对账结果失败: %w", err)
+		return constraintFailure(fmt.Errorf("写对账结果失败: %w", err))
 	}
 	return nil
 }
@@ -817,7 +817,8 @@ func (s *Store) persistFindings(ctx context.Context, report *Report) error {
 			f.Scope(), string(f.Kind), f.UserID, f.Asset,
 			f.Snapshot.String(), f.Ledger.String(),
 			f.Unrepairable, f.Detail, report.RunID); err != nil {
-			return fmt.Errorf("记下未消除的不一致失败: %w", err)
+			// last_run_id 有外键指向上一句刚插进去的 reconcile_runs 行。
+			return constraintFailure(fmt.Errorf("记下未消除的不一致失败: %w", err))
 		}
 	}
 
@@ -841,7 +842,7 @@ func (s *Store) persistFindings(ctx context.Context, report *Report) error {
 			SELECT 1 FROM unnest($1::text[], $2::text[]) AS seen(scope, kind)
 			 WHERE seen.scope = f.scope AND seen.kind = f.kind)`,
 		scopes, kinds, report.StartedAt); err != nil {
-		return fmt.Errorf("清理已解决的不一致失败: %w", err)
+		return constraintFailure(fmt.Errorf("清理已解决的不一致失败: %w", err))
 	}
 
 	if err := tx.Commit(); err != nil {
