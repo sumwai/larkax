@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channels"
 )
 
@@ -392,4 +393,103 @@ func without(args []string, name string) []string {
 		out = append(out, args[i])
 	}
 	return out
+}
+
+// TestChannelSettingPrintsUnreadNote 钉住「给了 --setting 时那句话真的打出来了」。
+//
+// 这是 #360 在管理面上的落点：setting 写得到、读得到，而没有任何东西按它
+// 做判断。从命令行看，「配了但不生效」与「配了就生效」长得一模一样——两边
+// 都成功、清单里都有那一行。所以不生效这件事必须在**写入的那一刻**说出来。
+//
+// 四条判据，缺一条这句话都会以某种方式失效：
+//
+//  1. 给了 --setting 时提示出现（create 与 update 两条写入路径都要）；
+//  2. 它走 stderr——stdout 上那一行（create 是 ID）要能被脚本直接接走；
+//  3. 没给 --setting 时不出现，否则它很快变成所有输出里的背景音；
+//  4. list 把带着 setting 的行点出来——否则事后核对配置时完全看不出来。
+//
+// 声明改成「已经有适配器读它」之后，这四条按相反方向判（提示必须消失），
+// 而不是跳过：跳过在输出里和通过一样，而那句提示消失本身正是要钉住的事。
+func TestChannelSettingPrintsUnreadNote(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	// 空串表示适配器已经开始读 setting：那时提示**不该**再出现。
+	note := channel.SettingUnreadNote()
+	wantNote := func(t *testing.T, got, what string) {
+		t.Helper()
+		if note == "" {
+			if strings.Contains(got, "注意：") || strings.Contains(got, "配了 setting") {
+				t.Errorf("%s：setting 已经有读者，提示却还在打：\n%s", what, got)
+			}
+			return
+		}
+		if !strings.Contains(got, note) {
+			t.Errorf("%s：提示没打出来：\n%s", what, got)
+		}
+	}
+
+	// 一、create 给了 --setting。
+	const settingJSON = `{"supports_optional_param":true}`
+	withStdin(t, testSecret)
+	stdout, stderr := captureStreams(t, func() {
+		if err := runChannelCreate([]string{
+			"--name", uniqueName("channel"), "--type", testChanType,
+			"--base-url", testBaseURL, "--models", uniqueName("model"),
+			"--credential-stdin", "--setting", settingJSON,
+		}); err != nil {
+			t.Fatalf("create 失败: %v", err)
+		}
+	})
+	wantNote(t, stderr, "create 给了 --setting")
+	if note != "" && strings.Contains(stdout, note) {
+		t.Errorf("提示混进了 stdout，那条链就断了：\n%s", stdout)
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(stdout), 10, 64)
+	if err != nil {
+		t.Fatalf("stdout 应当只有渠道 ID，得到 %q（%v）", stdout, err)
+	}
+
+	// 写进去的键仍然照原样落库：提示说的是「没有读者」，不是「不存」。
+	idArg := strconv.FormatInt(id, 10)
+	if got := findChannel(t, db, id).Setting; got["supports_optional_param"] != true {
+		t.Errorf("setting = %v，期望原样落库", got)
+	}
+
+	// 二、update 给了 --setting。
+	_, stderr = captureStreams(t, func() {
+		if updateErr := runChannelUpdate([]string{
+			"--id", idArg, "--setting", `{"supports_optional_param":false}`,
+		}); updateErr != nil {
+			t.Fatalf("update 失败: %v", updateErr)
+		}
+	})
+	wantNote(t, stderr, "update 给了 --setting")
+
+	// 三、update 没给 --setting 时不打。
+	_, stderr = captureStreams(t, func() {
+		if updateErr := runChannelUpdate([]string{"--id", idArg, "--priority", "7"}); updateErr != nil {
+			t.Fatalf("update 失败: %v", updateErr)
+		}
+	})
+	if strings.Contains(stderr, "注意：") {
+		t.Errorf("没碰 setting 的那次 update 不该打这句：\n%s", stderr)
+	}
+
+	// 四、list 点出带着 setting 的渠道。清单里有别的用例建的渠道，
+	// 所以判据是「这条渠道的 ID 出现在那句话里」，不是整份输出相等。
+	listOut, _ := captureStreams(t, func() {
+		if listErr := runChannelList(nil); listErr != nil {
+			t.Fatalf("list 失败: %v", listErr)
+		}
+	})
+	if note == "" {
+		if strings.Contains(listOut, "配了 setting") {
+			t.Errorf("setting 已经有读者，list 却还在点出它：\n%s", listOut)
+		}
+		return
+	}
+	if !strings.Contains(listOut, "配了 setting") || !strings.Contains(listOut, idArg) {
+		t.Errorf("list 没有点出渠道 %s 配了 setting：\n%s", idArg, listOut)
+	}
 }

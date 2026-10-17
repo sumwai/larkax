@@ -698,6 +698,10 @@ func (row candidateRow) cacheSamples() int64 {
 
 // decodeSetting 解开 channels.setting 的 jsonb。
 //
+// 解出来的 map 原样交给 Channel.Setting：**本包不解释任何键**，键由该渠道
+// type 指向的适配器认（见 channel.Channel.Setting）。今天没有任何适配器读它，
+// 所以这里正确解出来的值也不会影响请求路径。
+//
 // 列是 NOT NULL DEFAULT '{}'，所以正常总是有值的；长度为零时给一个空 map
 // 而不是报错——那说明这一行是别的手段写进去的，不值得让整个候选集取不出来。
 func decodeSetting(raw []byte) (map[string]any, error) {
