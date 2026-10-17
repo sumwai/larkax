@@ -10,7 +10,7 @@ import (
 	"github.com/sumwai/larkax/internal/channel"
 )
 
-// 端到端：**调用协议 ≠ 上游协议**的那两种组合。
+// 端到端：**调用协议 ≠ 上游协议**的那些组合。
 //
 // # 为什么另起一组
 //
@@ -47,6 +47,21 @@ import (
 // 假上游与既有几组共用同一个 fakeUpstream：渠道声明的类型决定我们往上发哪套
 // 协议，而「调用协议 ≠ 上游协议」正是这一组要测的东西。另起一个假上游早晚会
 // 与这一个分叉，而分叉的那一份不会报错。
+//
+// # /v1/responses 那一半
+//
+// Responses 入口接上之后又多四条组合（见文件末尾那一节）：
+//
+//	调用协议             上游渠道
+//	/v1/responses        openai
+//	/v1/responses        anthropic
+//	/v1/chat/completions openai-responses
+//	/v1/messages         openai-responses
+//
+// 理由与上面五条相同：同协议的 e2e 里请求体几乎原样转发，中间那层转换没被压到。
+// **金额与上面那几条不同**，但原因不是「协议影响计费」，而是 Responses 上游会
+// 多报一项 `reasoning_tokens`：本项目的规则把它从输出里拆出来单独定价
+// （见 responsesRule），所以两条指向 Responses 上游的用例期望 0.00039。
 //
 // # 没有 LARKAX_DB_DSN 时跳过
 //
@@ -736,4 +751,602 @@ func TestChatCompletionsWithAnthropicUpstreamCacheWriteUsage(t *testing.T) {
 	}
 	assertNotCapped(t, bill)
 	assertWallet(t, db, user, "99.999648", "0")
+}
+
+// ── /v1/responses 与两个既有上游 ───────────────────────────────────────
+
+// 调用方说 Responses，上游说 OpenAI Chat。
+//
+// 两段转换都要有判据：请求那一半（Responses 的 input/instructions 变成 chat 的
+// messages/max_tokens）只能从假上游收到的东西上看，响应那一半（chat 的
+// choices/finish_reason 变成 Responses 的 output[]/status）只能从调用方收到的
+// 东西上看。同协议的 e2e 两半几乎都原样转发，压不到这条链。
+func TestResponsesWithOpenAIUpstreamEndToEnd(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+
+	const balance = "100"
+	model := unique("e2e-model-responses-to-openai")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, balance)
+	key := issueKey(t, db, user)
+
+	fake := &fakeUpstream{protocol: channel.ProtocolOpenAI, db: db, userID: user, model: model}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	channelID := seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL, model, "openai", 0)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	status, body := postChat(t.Context(), t, public.URL+"/v1/responses", key,
+		responsesBodyWith(model, "你是假上游"))
+	if status != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
+	}
+
+	// 一、响应按**调用协议**（Responses）给。
+	var got struct {
+		Object string `json:"object"`
+		Status string `json:"status"`
+		Model  string `json:"model"`
+		Output []struct {
+			Type    string `json:"type"`
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		Usage struct {
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+			TotalTokens  int64 `json:"total_tokens"`
+		} `json:"usage"`
+		// 另外两套协议的标记字段，用来验证没有混进别的形状。
+		Choices []any   `json:"choices"`
+		Type    *string `json:"type"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v\n%s", err, body)
+	}
+	if got.Object != "response" {
+		t.Errorf("object = %q，期望 response（调用方说的是 Responses）", got.Object)
+	}
+	if got.Status != "completed" {
+		t.Errorf("status = %q，期望 completed（上游报的是 OpenAI 的 stop）", got.Status)
+	}
+	if got.Model != model {
+		t.Errorf("model = %q，期望 %q（报给调用方的是他要的那个名字）", got.Model, model)
+	}
+	if len(got.Output) != 1 || got.Output[0].Type != "message" ||
+		len(got.Output[0].Content) != 1 ||
+		got.Output[0].Content[0].Type != "output_text" ||
+		got.Output[0].Content[0].Text != "你好，我是假上游" {
+		t.Errorf("output = %+v，期望一项正文消息（chat 的 choices 要转成 Responses 的 output[]）", got.Output)
+	}
+	if got.Usage.InputTokens != 12 || got.Usage.OutputTokens != 7 || got.Usage.TotalTokens != 19 {
+		t.Errorf("usage = %+v，期望上游报的 12/7/19", got.Usage)
+	}
+	if got.Choices != nil || got.Type != nil {
+		t.Errorf("响应体里混进了别的协议形状的字段（choices=%v type=%s）——调用方说的是 Responses",
+			got.Choices, showPtr(got.Type))
+	}
+
+	// 二、钱：12 × 0.00001 + 7 × 0.00003 = 0.00033。协议不影响计费口径，
+	// 所以这个数与另外几条非缓存用例是同一个数。
+	bill, ok := billingOf(t, db, user)
+	if !ok {
+		t.Fatal("没有账单行——请求成功了钱却没记")
+	}
+	if bill.status != "settled" {
+		t.Errorf("账单状态 = %q，期望 settled", bill.status)
+	}
+	if !sameDecimal(bill.final.String, "0.00033") {
+		t.Errorf("结算金额 = %s，期望 0.00033（12 × 0.00001 + 7 × 0.00003）", bill.final.String)
+	}
+	assertNotCapped(t, bill)
+	if !bill.channelID.Valid || bill.channelID.Int64 != channelID {
+		t.Errorf("账单的 channel_id = %v，期望 %d（这次请求实际走的那个 openai 渠道）",
+			bill.channelID, channelID)
+	}
+	// 账单记的是**调用方**说的那套协议，不是上游那套。
+	if bill.protocol != string(channel.ProtocolOpenAIResponses) {
+		t.Errorf("账单的 protocol = %q，期望 %q（调用方走的是 /v1/responses，上游才是 openai）",
+			bill.protocol, channel.ProtocolOpenAIResponses)
+	}
+	assertWallet(t, db, user, "99.99967", "0")
+
+	// 三、上游收到的是 **OpenAI Chat 形状**的请求体。这是这条路径上唯一能
+	// 证明「Responses 的请求体真的被转换了」的地方。
+	bodies := fake.sentBodies()
+	if len(bodies) != 1 {
+		t.Fatalf("假上游被调用 %d 次，期望 1 次", len(bodies))
+	}
+	var sent struct {
+		Model     string `json:"model"`
+		MaxTokens int64  `json:"max_tokens"`
+		System    any    `json:"system"`
+		Messages  []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"messages"`
+		// Responses 那套的字段不该出现在这里。
+		Input           []any  `json:"input"`
+		MaxOutputTokens *int64 `json:"max_output_tokens"`
+	}
+	if err := json.Unmarshal(bodies[0], &sent); err != nil {
+		t.Fatalf("上游收到的请求体不是合法 JSON: %v\n%s", err, bodies[0])
+	}
+	if sent.Model != model {
+		t.Errorf("上游收到的 model = %q，期望 %q", sent.Model, model)
+	}
+	// Responses 的 max_output_tokens 到了 chat 上游要改叫 max_tokens。
+	if sent.MaxTokens != 64 {
+		t.Errorf("上游收到的 max_tokens = %d，期望 64（Responses 的 max_output_tokens 要转成 chat 的字段）",
+			sent.MaxTokens)
+	}
+	// Responses 的顶层 instructions 到了 chat 上游是 messages 里的第一条 system。
+	if len(sent.Messages) != 2 {
+		t.Fatalf("上游收到的 messages 有 %d 条，期望 2 条（system + 用户消息）：%+v",
+			len(sent.Messages), sent.Messages)
+	}
+	if sent.Messages[0].Role != "system" || textOf(t, sent.Messages[0].Content) != "你是假上游" {
+		t.Errorf("上游收到的第一条消息 = %+v，期望 Responses 的 instructions 被搬成第一条 system 消息",
+			sent.Messages[0])
+	}
+	if sent.Messages[1].Role != "user" || textOf(t, sent.Messages[1].Content) != "你好" {
+		t.Errorf("上游收到的第二条消息 = %+v，期望那条用户消息", sent.Messages[1])
+	}
+	if sent.System != nil || sent.Input != nil || sent.MaxOutputTokens != nil {
+		t.Errorf("上游收到的请求体里混进了 Responses 形状的字段（system=%v input=%v max_output_tokens=%v）",
+			sent.System, sent.Input, sent.MaxOutputTokens)
+	}
+	if paths := fake.sentPaths(); len(paths) != 1 || paths[0] != "/v1/chat/completions" {
+		t.Errorf("上游收到的路径 = %v，期望 [/v1/chat/completions]（OpenAI 上游的端点）", paths)
+	}
+}
+
+// 调用方说 Responses，上游说 Anthropic Messages。
+//
+// 与上一条对称：这次 instructions 要搬到 Anthropic 的**顶层 system**，而正文
+// 与用法要按 Responses 的形状回来。
+func TestResponsesWithAnthropicUpstreamEndToEnd(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+
+	const balance = "100"
+	model := unique("e2e-model-responses-to-anthropic")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, balance)
+	key := issueKey(t, db, user)
+
+	fake := &fakeUpstream{protocol: channel.ProtocolAnthropic, db: db, userID: user, model: model}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	channelID := seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL, model, "anthropic", 0)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	status, body := postChat(t.Context(), t, public.URL+"/v1/responses", key,
+		responsesBodyWith(model, "你是假上游"))
+	if status != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
+	}
+
+	// 一、响应仍按 Responses 的形状给。上游说的是另一套，这中间隔着两次转换。
+	var got struct {
+		Object string `json:"object"`
+		Status string `json:"status"`
+		Model  string `json:"model"`
+		Output []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		Usage struct {
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+			TotalTokens  int64 `json:"total_tokens"`
+		} `json:"usage"`
+		Choices []any   `json:"choices"`
+		Type    *string `json:"type"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v\n%s", err, body)
+	}
+	if got.Object != "response" || got.Status != "completed" {
+		t.Errorf("object/status = %q/%q，期望 response/completed（上游报的是 Anthropic 的 end_turn）",
+			got.Object, got.Status)
+	}
+	if got.Model != model {
+		t.Errorf("model = %q，期望 %q", got.Model, model)
+	}
+	if len(got.Output) != 1 || got.Output[0].Type != "message" ||
+		len(got.Output[0].Content) != 1 ||
+		got.Output[0].Content[0].Type != "output_text" ||
+		got.Output[0].Content[0].Text != "你好，我是假上游" {
+		t.Errorf("output = %+v，期望一项正文消息（Anthropic 的 content[] 要转成 Responses 的 output[]）", got.Output)
+	}
+	if got.Usage.InputTokens != 12 || got.Usage.OutputTokens != 7 {
+		t.Errorf("usage = %+v，期望上游报的 12/7", got.Usage)
+	}
+	if got.Choices != nil || got.Type != nil {
+		t.Errorf("响应体里混进了别的协议形状的字段（choices=%v type=%s）",
+			got.Choices, showPtr(got.Type))
+	}
+
+	// 二、钱：与上一条同一个数——协议不影响计费口径。
+	bill, ok := billingOf(t, db, user)
+	if !ok {
+		t.Fatal("没有账单行——请求成功了钱却没记")
+	}
+	if bill.status != "settled" {
+		t.Errorf("账单状态 = %q，期望 settled", bill.status)
+	}
+	if !sameDecimal(bill.final.String, "0.00033") {
+		t.Errorf("结算金额 = %s，期望 0.00033（12 × 0.00001 + 7 × 0.00003）", bill.final.String)
+	}
+	assertNotCapped(t, bill)
+	if !bill.channelID.Valid || bill.channelID.Int64 != channelID {
+		t.Errorf("账单的 channel_id = %v，期望 %d（这次请求实际走的那个 anthropic 渠道）",
+			bill.channelID, channelID)
+	}
+	if bill.protocol != string(channel.ProtocolOpenAIResponses) {
+		t.Errorf("账单的 protocol = %q，期望 %q（调用方走的是 /v1/responses，上游才是 anthropic）",
+			bill.protocol, channel.ProtocolOpenAIResponses)
+	}
+	assertWallet(t, db, user, "99.99967", "0")
+
+	// 三、上游收到的是 **Anthropic 形状**的请求体。
+	bodies := fake.sentBodies()
+	if len(bodies) != 1 {
+		t.Fatalf("假上游被调用 %d 次，期望 1 次", len(bodies))
+	}
+	var sent struct {
+		Model     string `json:"model"`
+		MaxTokens int64  `json:"max_tokens"`
+		System    any    `json:"system"`
+		Messages  []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"messages"`
+		Input           []any  `json:"input"`
+		MaxOutputTokens *int64 `json:"max_output_tokens"`
+	}
+	if err := json.Unmarshal(bodies[0], &sent); err != nil {
+		t.Fatalf("上游收到的请求体不是合法 JSON: %v\n%s", err, bodies[0])
+	}
+	if sent.Model != model {
+		t.Errorf("上游收到的 model = %q，期望 %q", sent.Model, model)
+	}
+	if sent.MaxTokens != 64 {
+		t.Errorf("上游收到的 max_tokens = %d，期望 64（Responses 的 max_output_tokens 要转成 Anthropic 的字段）",
+			sent.MaxTokens)
+	}
+	// Responses 的 instructions 到了 Anthropic 上游是**顶层 system**。
+	if got := textOf(t, sent.System); got != "你是假上游" {
+		t.Errorf("上游收到的 system = %q，期望 %q（Responses 的 instructions 要搬成 Anthropic 的顶层字段）",
+			got, "你是假上游")
+	}
+	if len(sent.Messages) != 1 || sent.Messages[0].Role != "user" ||
+		textOf(t, sent.Messages[0].Content) != "你好" {
+		t.Errorf("上游收到的 messages = %+v，期望只剩那条用户消息", sent.Messages)
+	}
+	if sent.Input != nil || sent.MaxOutputTokens != nil {
+		t.Errorf("上游收到的请求体里混进了 Responses 形状的字段（input=%v max_output_tokens=%v）",
+			sent.Input, sent.MaxOutputTokens)
+	}
+	if paths := fake.sentPaths(); len(paths) != 1 || paths[0] != "/v1/messages" {
+		t.Errorf("上游收到的路径 = %v，期望 [/v1/messages]（Anthropic 上游的端点）", paths)
+	}
+}
+
+// ── 两条既有入口与 Responses 上游 ──────────────────────────────────────
+
+// 调用方说 OpenAI Chat，上游说 Responses。
+//
+// Responses 上游会多报一项 `reasoning_tokens`。本项目的用量口径是 OpenAI 的：
+// completion_tokens **含**推理，而计费把它拆出来单独定价（见 responsesRule）。
+// 所以这条用例同时钉住两件事：转换把推理量带进了内部用量，而回给 chat 调用方
+// 的输出量仍是**含**推理的那个数。
+func TestChatCompletionsWithResponsesUpstreamEndToEnd(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+
+	const balance = "100"
+	model := unique("e2e-model-chat-to-responses")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, balance)
+	key := issueKey(t, db, user)
+
+	fake := &fakeUpstream{protocol: channel.ProtocolOpenAIResponses, db: db, userID: user, model: model}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	channelID := seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL, model, "openai-responses", 0)
+	// 推理那一项必须显式写出来：用量里有规则未定价的计量项时结算会直接报错。
+	seedRule(t, db, model, responsesRule)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	status, body := postChat(t.Context(), t, public.URL+"/v1/chat/completions", key,
+		chatBodyWithSystem(model, "你是假上游"))
+	if status != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
+	}
+
+	// 一、响应按**调用协议**（OpenAI Chat）给。
+	var got struct {
+		Object  string `json:"object"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct {
+				Content *string `json:"content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int64 `json:"prompt_tokens"`
+			CompletionTokens int64 `json:"completion_tokens"`
+			TotalTokens      int64 `json:"total_tokens"`
+		} `json:"usage"`
+		// Responses 形状的标记字段。
+		Output []any   `json:"output"`
+		Status *string `json:"status"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v\n%s", err, body)
+	}
+	if got.Object != "chat.completion" {
+		t.Errorf("object = %q，期望 chat.completion（调用方说的是 chat）", got.Object)
+	}
+	if got.Model != model {
+		t.Errorf("model = %q，期望 %q", got.Model, model)
+	}
+	if len(got.Choices) != 1 || got.Choices[0].Message.Content == nil ||
+		*got.Choices[0].Message.Content != "你好，我是假上游" {
+		t.Errorf("choices = %+v，期望一项带正文的回复（Responses 的 output[] 要转成 choices）", got.Choices)
+	}
+	// 上游报的 status 是 completed，调用方要看到 chat 词汇里的 stop。
+	if len(got.Choices) != 1 || got.Choices[0].FinishReason != "stop" {
+		t.Errorf("finish_reason = %+v，期望 stop（上游报的是 Responses 的 status=completed）", got.Choices)
+	}
+	// completion_tokens 含推理量：7 而不是 4。拆出来是计费那一侧的事，
+	// 回给 OpenAI 调用方的时候仍要按它的定义给。
+	if got.Usage.PromptTokens != 12 || got.Usage.CompletionTokens != 7 || got.Usage.TotalTokens != 19 {
+		t.Errorf("usage = %+v，期望 12/7/19（completion 含那 3 个推理 token）", got.Usage)
+	}
+	if got.Output != nil || got.Status != nil {
+		t.Errorf("响应体里混进了 Responses 形状的字段（output=%v status=%s）",
+			got.Output, showPtr(got.Status))
+	}
+
+	// 二、钱：推理那 3 个 token 从输出里拆出来、按 reasoning 单价算。
+	bill, ok := billingOf(t, db, user)
+	if !ok {
+		t.Fatal("没有账单行——请求成功了钱却没记")
+	}
+	if bill.status != "settled" {
+		t.Errorf("账单状态 = %q，期望 settled", bill.status)
+	}
+	if !sameDecimal(bill.final.String, responsesAmount) {
+		t.Errorf("结算金额 = %s，期望 %s（12 × 0.00001 + 4 × 0.00003 + 3 × 0.00005）；"+
+			"0.00033 说明推理量没被读到", bill.final.String, responsesAmount)
+	}
+	assertNotCapped(t, bill)
+	if !bill.channelID.Valid || bill.channelID.Int64 != channelID {
+		t.Errorf("账单的 channel_id = %v，期望 %d（这次请求实际走的那个 Responses 渠道）",
+			bill.channelID, channelID)
+	}
+	if bill.protocol != string(channel.ProtocolOpenAI) {
+		t.Errorf("账单的 protocol = %q，期望 %q（调用方走的是 /v1/chat/completions，上游才是 Responses）",
+			bill.protocol, channel.ProtocolOpenAI)
+	}
+	assertWallet(t, db, user, "99.99961", "0")
+
+	// 三、上游收到的是 **Responses 形状**的请求体。
+	bodies := fake.sentBodies()
+	if len(bodies) != 1 {
+		t.Fatalf("假上游被调用 %d 次，期望 1 次", len(bodies))
+	}
+	var sent struct {
+		Model           string `json:"model"`
+		Instructions    any    `json:"instructions"`
+		MaxOutputTokens int64  `json:"max_output_tokens"`
+		Input           []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"input"`
+		// chat 那套的字段不该出现在这里。
+		Messages  []any  `json:"messages"`
+		MaxTokens *int64 `json:"max_tokens"`
+	}
+	if err := json.Unmarshal(bodies[0], &sent); err != nil {
+		t.Fatalf("上游收到的请求体不是合法 JSON: %v\n%s", err, bodies[0])
+	}
+	if sent.Model != model {
+		t.Errorf("上游收到的 model = %q，期望 %q", sent.Model, model)
+	}
+	// chat 的 max_tokens 到了 Responses 上游要改叫 max_output_tokens。
+	if sent.MaxOutputTokens != 64 {
+		t.Errorf("上游收到的 max_output_tokens = %d，期望 64（chat 的 max_tokens 要转成 Responses 的字段）",
+			sent.MaxOutputTokens)
+	}
+	// chat 的 system 消息到了 Responses 上游是**顶层 instructions**。
+	if got := textOf(t, sent.Instructions); got != "你是假上游" {
+		t.Errorf("上游收到的 instructions = %q，期望 %q（chat 的 system 消息要搬成顶层字段）",
+			got, "你是假上游")
+	}
+	if len(sent.Input) != 1 || sent.Input[0].Role != "user" ||
+		textOf(t, sent.Input[0].Content) != "你好" {
+		t.Errorf("上游收到的 input = %+v，期望只剩那条用户消息", sent.Input)
+	}
+	if sent.Messages != nil || sent.MaxTokens != nil {
+		t.Errorf("上游收到的请求体里混进了 chat 形状的字段（messages=%v max_tokens=%v）",
+			sent.Messages, sent.MaxTokens)
+	}
+	if paths := fake.sentPaths(); len(paths) != 1 || paths[0] != "/v1/responses" {
+		t.Errorf("上游收到的路径 = %v，期望 [/v1/responses]（Responses 上游的端点）", paths)
+	}
+}
+
+// 调用方说 Anthropic Messages，上游说 Responses。
+//
+// 与上一条对称，但有两处不同：system 从 Anthropic 的顶层字段走出去、到
+// Responses 那边仍是顶层 instructions；回给调用方的用量是 Anthropic 口径的
+// input/output 两项。
+func TestMessagesWithResponsesUpstreamEndToEnd(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+
+	const balance = "100"
+	model := unique("e2e-model-messages-to-responses")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, balance)
+	key := issueKey(t, db, user)
+
+	fake := &fakeUpstream{protocol: channel.ProtocolOpenAIResponses, db: db, userID: user, model: model}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	channelID := seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL, model, "openai-responses", 0)
+	seedRule(t, db, model, responsesRule)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	status, body := postChat(t.Context(), t, public.URL+"/v1/messages", key,
+		messagesBodyWith(model, "你是假上游"))
+	if status != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
+	}
+
+	// 一、响应按**调用协议**（Anthropic）给。
+	var got struct {
+		Type       string  `json:"type"`
+		Role       string  `json:"role"`
+		Model      string  `json:"model"`
+		StopReason *string `json:"stop_reason"`
+		Content    []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		Usage struct {
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+		} `json:"usage"`
+		// 另外两套协议的标记字段。
+		Object  *string `json:"object"`
+		Output  []any   `json:"output"`
+		Choices []any   `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v\n%s", err, body)
+	}
+	if got.Type != "message" || got.Role != "assistant" {
+		t.Errorf("type/role = %q/%q，期望 message/assistant", got.Type, got.Role)
+	}
+	if got.Model != model {
+		t.Errorf("model = %q，期望 %q", got.Model, model)
+	}
+	if got.StopReason == nil || *got.StopReason != "end_turn" {
+		t.Errorf("stop_reason = %s，期望 end_turn（上游报的是 Responses 的 status=completed）",
+			showPtr(got.StopReason))
+	}
+	if len(got.Content) != 1 || got.Content[0].Type != "text" || got.Content[0].Text != "你好，我是假上游" {
+		t.Errorf("content = %+v，期望一个带正文的 text 块（Responses 的 output[] 要转成 content[]）",
+			got.Content)
+	}
+	// Anthropic 的 output_tokens 含推理（它没有单独的推理项），所以是 7。
+	if got.Usage.InputTokens != 12 || got.Usage.OutputTokens != 7 {
+		t.Errorf("usage = %+v，期望 12/7", got.Usage)
+	}
+	if got.Object != nil || got.Output != nil || got.Choices != nil {
+		t.Errorf("响应体里混进了别的协议形状的字段（object=%s output=%v choices=%v）",
+			showPtr(got.Object), got.Output, got.Choices)
+	}
+
+	// 二、钱：与上一条同一个数。
+	bill, ok := billingOf(t, db, user)
+	if !ok {
+		t.Fatal("没有账单行——请求成功了钱却没记")
+	}
+	if bill.status != "settled" {
+		t.Errorf("账单状态 = %q，期望 settled", bill.status)
+	}
+	if !sameDecimal(bill.final.String, responsesAmount) {
+		t.Errorf("结算金额 = %s，期望 %s（12 × 0.00001 + 4 × 0.00003 + 3 × 0.00005）",
+			bill.final.String, responsesAmount)
+	}
+	assertNotCapped(t, bill)
+	if !bill.channelID.Valid || bill.channelID.Int64 != channelID {
+		t.Errorf("账单的 channel_id = %v，期望 %d", bill.channelID, channelID)
+	}
+	if bill.protocol != string(channel.ProtocolAnthropic) {
+		t.Errorf("账单的 protocol = %q，期望 %q（调用方走的是 /v1/messages，上游才是 Responses）",
+			bill.protocol, channel.ProtocolAnthropic)
+	}
+	assertWallet(t, db, user, "99.99961", "0")
+
+	// 三、上游收到的是 **Responses 形状**的请求体。
+	bodies := fake.sentBodies()
+	if len(bodies) != 1 {
+		t.Fatalf("假上游被调用 %d 次，期望 1 次", len(bodies))
+	}
+	var sent struct {
+		Model           string `json:"model"`
+		Instructions    any    `json:"instructions"`
+		MaxOutputTokens int64  `json:"max_output_tokens"`
+		Input           []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"input"`
+		// Anthropic 那套的字段不该出现在这里。
+		System    any    `json:"system"`
+		Messages  []any  `json:"messages"`
+		MaxTokens *int64 `json:"max_tokens"`
+	}
+	if err := json.Unmarshal(bodies[0], &sent); err != nil {
+		t.Fatalf("上游收到的请求体不是合法 JSON: %v\n%s", err, bodies[0])
+	}
+	if sent.Model != model {
+		t.Errorf("上游收到的 model = %q，期望 %q", sent.Model, model)
+	}
+	if sent.MaxOutputTokens != 64 {
+		t.Errorf("上游收到的 max_output_tokens = %d，期望 64（Anthropic 的 max_tokens 要转成 Responses 的字段）",
+			sent.MaxOutputTokens)
+	}
+	// Anthropic 的顶层 system 到了 Responses 上游还是**顶层 instructions**。
+	if got := textOf(t, sent.Instructions); got != "你是假上游" {
+		t.Errorf("上游收到的 instructions = %q，期望 %q（Anthropic 的 system 要搬成 Responses 的 instructions）",
+			got, "你是假上游")
+	}
+	if len(sent.Input) != 1 || sent.Input[0].Role != "user" ||
+		textOf(t, sent.Input[0].Content) != "你好" {
+		t.Errorf("上游收到的 input = %+v，期望只剩那条用户消息", sent.Input)
+	}
+	if sent.System != nil || sent.Messages != nil || sent.MaxTokens != nil {
+		t.Errorf("上游收到的请求体里混进了 Anthropic/chat 形状的字段（system=%v messages=%v max_tokens=%v）",
+			sent.System, sent.Messages, sent.MaxTokens)
+	}
+	if paths := fake.sentPaths(); len(paths) != 1 || paths[0] != "/v1/responses" {
+		t.Errorf("上游收到的路径 = %v，期望 [/v1/responses]", paths)
+	}
 }

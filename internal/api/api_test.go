@@ -502,6 +502,74 @@ func TestInvalidBody(t *testing.T) {
 	}
 }
 
+// 请求里一条消息都没有时，400 的措辞要点名**调用方自己那套协议里的字段**。
+//
+// 判据是转换之后的形状（channel.Request.Messages），三条入口共用；措辞却不能
+// 共用：/v1/responses 的调用方发的是顶层 input，收到「messages is required」
+// 会去改一个它从来没写过的字段。所以这里同时对 Responses 断言「不该出现
+// messages」——只断言「出现 input」的话，一句同时提到两个字段的文案照样能过。
+func TestEmptyRequestBodyWordingFollowsEntryProtocol(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		body string
+		// want 是文案里必须点到的字段名。
+		want string
+		// avoid 是文案里不该出现的字段名，空串表示不判。
+		avoid string
+	}{
+		{
+			name: "chat",
+			path: PathChatCompletions,
+			body: `{"model":"m-1","messages":[]}`,
+			want: "messages",
+		},
+		{
+			name: "messages",
+			path: PathMessages,
+			body: `{"model":"m-1","max_tokens":16,"messages":[]}`,
+			want: "messages",
+		},
+		{
+			name:  "responses",
+			path:  PathResponses,
+			body:  `{"model":"m-1","input":[],"max_output_tokens":16}`,
+			want:  "input",
+			avoid: "messages",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, chatter := newTestHandler()
+			rec := post(h, tc.path, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("状态码 = %d，期望 400（响应体 %s）", rec.Code, rec.Body)
+			}
+			if chatter.calls != 0 {
+				t.Error("没有消息的请求不该走到上游")
+			}
+
+			var body struct {
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("响应不是 JSON: %v", err)
+			}
+			if !strings.Contains(body.Error.Message, tc.want) {
+				t.Errorf("文案 = %q，期望提到 %q（这是调用方自己那套协议里的字段）",
+					body.Error.Message, tc.want)
+			}
+			if tc.avoid != "" && strings.Contains(body.Error.Message, tc.avoid) {
+				t.Errorf("文案 = %q，不该提到 %q（这条入口没有这个字段）",
+					body.Error.Message, tc.avoid)
+			}
+		})
+	}
+}
+
 // 请求里的 stream 决定走哪条路，而**不能**被静默降级：流式请求若被当成
 // 非流式发出去，调用方会拿到一个普通 JSON 体而它按 SSE 去解——失败在
 // 客户端表现为「解析不了响应」，与服务端真正的原因隔了一层。
