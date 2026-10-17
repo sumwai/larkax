@@ -232,8 +232,9 @@ func TestModelDetailColumnsLineUp(t *testing.T) {
 
 // TestModelListColumnsLineUp 钉住 `model list` 那张最宽的表：十栏全都要对齐。
 //
-// 表头全是中文、数据行全是 ASCII，所以它同时钉住两件事：中文表头不把数据行
-// 挤歪，以及多栏时每一栏的起点都算对。
+// 表头全是中文，数据行里只有能力那一栏含中文（「tools=支持」那样的三态），
+// 所以它同时钉住两件事：中文与 ASCII 混排时每一栏的起点都算对，以及多栏时
+// 也一样。
 func TestModelListColumnsLineUp(t *testing.T) {
 	var buf bytes.Buffer
 	printModelList(&buf, []catalog.Model{{
@@ -242,20 +243,21 @@ func TestModelListColumnsLineUp(t *testing.T) {
 		DisplayName:      "示例模型",
 		Family:           "example",
 		ContextLimit:     200000,
-		Capabilities:     catalog.Capabilities{Tools: true, Vision: true},
+		Capabilities:     catalog.Capabilities{Tools: declared(true), Vision: declared(true)},
 		ModalitiesInput:  []string{"text"},
 		ModalitiesOutput: []string{"text"},
 		UpdatedAt:        time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC),
 	}})
 
 	header := []string{"ID", "规范名", "展示名", "厂商", "家族", "上下文", "输入", "输出", "能力", "模态"}
-	row := []string{"7", "claude-x", "示例模型", "-", "example", "200000", "-", "-", "tools,vision", "text→text"}
+	row := []string{"7", "claude-x", "示例模型", "-", "example", "200000", "-", "-",
+		"tools=支持 vision=支持", "text→text"}
 
 	// 每一栏的起点：栏宽取「表头与数据行里较宽的那个」+ 两列间距。
 	// 第二栏的起点 4 来自 `ID`/`7`（2 列），第三栏的 14 来自 `claude-x`（8 列）……
-	// 最后一个 73 是末栏 `模态` 的起点——它自己不补空格，但起点要对。
+	// 最后一个 83 是末栏 `模态` 的起点——它自己不补空格，但起点要对。
 	assertColumnStarts(t, buf.String(), [][]string{header[:9], row[:9]},
-		[]int{0, 4, 14, 24, 30, 39, 47, 53, 59, 73})
+		[]int{0, 4, 14, 24, 30, 39, 47, 53, 59, 83})
 }
 
 // TestTableWriterKeepsEmptyAndShortLists 钉住没有数据行时的输出。

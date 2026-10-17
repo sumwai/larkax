@@ -96,7 +96,8 @@ type Candidate struct {
 
 	// Profile 是模型目录对**这个候选所服务的规范模型**声明的能力与上限
 	// （见 ModelProfile）。nil 表示目录里没有这个模型的记录：未知，不做
-	// 目录判据。
+	// 目录判据。有记录而某一项没配过时，那一项**也是**未知——两种情形都
+	// 放行，区别只在依据是什么。
 	//
 	// # 为什么它挂在这里
 	//
@@ -116,21 +117,28 @@ type Candidate struct {
 // 而模型可能不支持的。audio / cache / batch 没有对应的请求信号（请求里
 // 看不出「这次要用缓存」），带上它们只是让这个结构体看起来像那张表。
 //
-// # 未知与「不支持」是两件事，处置相反
+// # 三项都是三态，未知与「不支持」的处置相反
 //
-//   - 能力列是 `NOT NULL DEFAULT false`，「没写进目录」与「写了不支持」在
-//     读侧分不开（见 internal/catalog 的 Capabilities）。所以**有记录就按
-//     记录判**：false 就是不支持。
-//   - 两个上限列允许为 NULL，读出来是 0（见 internal/catalog 的
-//     Constraints）。0 一律按**未知**放行。
+// 每一项是 `*bool`，与目录里那六列的三态一一对应（见 internal/catalog 的
+// Capabilities）：
 //
-// nil 的 ModelProfile 覆盖第一种情形里剩下的一半：目录里压根没有这个模型的
-// 记录时不做任何判据（见 Candidate.Profile）。
+//	nil    未知：**这一项不参与判据**，放行
+//	true   声明支持：放行
+//	false  声明不支持：请求用到它时这条候选出局
+//
+// 「没配过」不等于「配了说不支持」。写入侧只有显式开关，所以一条只填了
+// 名字的记录在库里是 NULL——按 false 处理会让带工具的请求从此选不到它，
+// 哪怕那个上游其实支持工具（见 #485）。
+//
+// 两个上限列同一个口径，只是那里用 0 表示未知（见 Constraints）。
+//
+// nil 的 ModelProfile 覆盖目录里压根没有这个模型的情形：那时没有任何依据，
+// 一律放行（见 Candidate.Profile）。
 type ModelProfile struct {
-	// Tools / Vision / Reasoning 是目录声明的三项能力。
-	Tools     bool
-	Vision    bool
-	Reasoning bool
+	// Tools / Vision / Reasoning 是目录声明的三项能力。nil = 未知，不判。
+	Tools     *bool
+	Vision    *bool
+	Reasoning *bool
 
 	// ContextLimit 是上下文窗口（输入 + 输出）。0 表示未知，不判。
 	ContextLimit int64
@@ -211,11 +219,11 @@ func (c Candidate) profileRejection(needs Needs) string {
 	}
 
 	switch {
-	case needs.Tools && !p.Tools:
+	case needs.Tools && declaredUnsupported(p.Tools):
 		return "模型目录里不支持工具调用"
-	case needs.Vision && !p.Vision:
+	case needs.Vision && declaredUnsupported(p.Vision):
 		return "模型目录里不支持图片"
-	case needs.Reasoning && !p.Reasoning:
+	case needs.Reasoning && declaredUnsupported(p.Reasoning):
 		return "模型目录里不支持推理"
 	}
 
@@ -232,6 +240,16 @@ func (c Candidate) profileRejection(needs Needs) string {
 			p.ContextLimit, needs.InputTokens, needs.MaxOutputTokens)
 	}
 	return ""
+}
+
+// declaredUnsupported 判断一项能力是不是**被明确声明为不支持**。
+//
+// 只有 false 算：nil（没配过）与 true（支持）都放行。判据写成「明确说不」
+// 而不是「不是明确说支持」，是为了让那个没配过的默认状态站在放行这一侧
+// ——把 nil 当成不支持会让一条只填了名字的记录选不到任何带工具的请求，
+// 而那正是这条三态要修掉的东西（见 ModelProfile 与 #485）。
+func declaredUnsupported(declared *bool) bool {
+	return declared != nil && !*declared
 }
 
 // Health 是渠道的健康度。

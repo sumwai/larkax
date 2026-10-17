@@ -15,6 +15,9 @@ import (
 // 判据的输入有两半：候选上的 Profile（模型级声明）与这次请求的 Needs。
 // 两半缺一个都不成——只有 Profile 会判不出「这次请求到底用没用到」，
 // 只有 Needs 则无从知道模型支持什么。
+//
+// 能力那一栏是三态，「没配过」与「配了说不支持」处置相反：前者放行、
+// 后者出局。所以这一组里两种情形各有用例，而且都能写出来（declared）。
 
 func toolRequest() *channel.Request {
 	return &channel.Request{
@@ -32,11 +35,17 @@ func TestSelectRejectsCandidatesMissingDeclaredCapability(t *testing.T) {
 		needs   Needs
 		want    string
 	}{
-		{"请求带工具而目录说没有", &ModelProfile{}, Needs{Tools: true}, "不支持工具调用"},
-		{"请求带图片而目录说没有", &ModelProfile{}, Needs{Vision: true}, "不支持图片"},
-		{"请求要推理而目录说没有", &ModelProfile{}, Needs{Reasoning: true}, "不支持推理"},
-		{"目录说支持工具", &ModelProfile{Tools: true}, Needs{Tools: true}, ""},
+		{"请求带工具而目录说不支持", &ModelProfile{Tools: declared(false)}, Needs{Tools: true}, "不支持工具调用"},
+		{"请求带图片而目录说不支持", &ModelProfile{Vision: declared(false)}, Needs{Vision: true}, "不支持图片"},
+		{"请求要推理而目录说不支持", &ModelProfile{Reasoning: declared(false)}, Needs{Reasoning: true}, "不支持推理"},
+		{"目录说支持工具", &ModelProfile{Tools: declared(true)}, Needs{Tools: true}, ""},
 		{"请求没用到任何能力", &ModelProfile{}, Needs{}, ""},
+		// 「有记录、但这一项没配过」= 未知，放行；「有记录、写了 false」
+		// = 不支持，出局。这两条并排摆着：把 nil 当 false 处理会让一条只填了
+		// 名字的记录选不到所有带工具的请求，而那正是本条要修掉的缺陷（#485）。
+		{"目录里那一项没配过", &ModelProfile{}, Needs{Tools: true, Vision: true, Reasoning: true}, ""},
+		{"一项不支持、另一项没配过",
+			&ModelProfile{Tools: declared(false)}, Needs{Tools: true, Vision: true}, "不支持工具调用"},
 		// 目录里没有这个模型的记录：未知，一律放行。这一条与上面几条的
 		// 差别是**没有依据**，而不是「依据说可以」。
 		{"目录里没有这个模型", nil, Needs{Tools: true, Vision: true, Reasoning: true}, ""},
@@ -67,8 +76,8 @@ func TestSelectRejectsCandidatesMissingDeclaredCapability(t *testing.T) {
 // ── 目录判据：上限 ──────────────────────────────────────────────────────
 //
 // 两个上限列允许为空（读出来是 0），**0 是未知而不是零额度**——一次采集
-// 失败不该让整批模型用不了，所以 0 一律放行。这与能力列的 false 不同：
-// 那几列 NOT NULL，false 是一个真实的值（见 ModelProfile）。
+// 失败不该让整批模型用不了，所以 0 一律放行。能力那三项同一个口径，只是
+// 那里用 nil 表示未知（布尔列没有多余的取值可用，见 ModelProfile）。
 
 func TestSelectRejectsOverLimitOnlyWhenDeclared(t *testing.T) {
 	cases := []struct {
@@ -124,7 +133,7 @@ func TestSelectRejectsOverLimitOnlyWhenDeclared(t *testing.T) {
 func TestChatReportsProfileRejectionWithoutCallingUpstream(t *testing.T) {
 	r := seededRouter(1)
 	exec := &fakeExecutor{results: map[int64]error{}}
-	cands := []Candidate{candidate(1, "m", withProfile(&ModelProfile{}))}
+	cands := []Candidate{candidate(1, "m", withProfile(&ModelProfile{Tools: declared(false)}))}
 
 	res, err := r.Chat(context.Background(), exec, toolRequest(), cands, "m")
 
@@ -159,7 +168,7 @@ func TestChatReportsProfileRejectionWithoutCallingUpstream(t *testing.T) {
 func TestChatStreamReportsProfileRejection(t *testing.T) {
 	r := seededRouter(1)
 	exec := &fakeStreamExecutor{results: map[int64]error{}}
-	cands := []Candidate{candidate(1, "m", withProfile(&ModelProfile{Vision: false}))}
+	cands := []Candidate{candidate(1, "m", withProfile(&ModelProfile{Vision: declared(false)}))}
 	req := toolRequest()
 	req.Messages[0].Content = append(req.Messages[0].Content,
 		channel.ContentBlock{Type: "image", ImageURL: "https://example.com/a.png"})
@@ -182,8 +191,8 @@ func TestChatSkipsProfileRejectedCandidate(t *testing.T) {
 	r := seededRouter(1)
 	exec := &fakeExecutor{results: map[int64]error{}}
 	cands := []Candidate{
-		candidate(1, "m", withPriority(10), withProfile(&ModelProfile{Tools: false})),
-		candidate(2, "m", withPriority(1), withProfile(&ModelProfile{Tools: true})),
+		candidate(1, "m", withPriority(10), withProfile(&ModelProfile{Tools: declared(false)})),
+		candidate(2, "m", withPriority(1), withProfile(&ModelProfile{Tools: declared(true)})),
 	}
 
 	res, err := r.Chat(context.Background(), exec, toolRequest(), cands, "m")
@@ -205,7 +214,7 @@ func TestChatKeepsGenericMessageWhenOtherReasonsExist(t *testing.T) {
 	r := seededRouter(1)
 	exec := &fakeExecutor{results: map[int64]error{}}
 	cands := []Candidate{
-		candidate(1, "m", withProfile(&ModelProfile{})),
+		candidate(1, "m", withProfile(&ModelProfile{Tools: declared(false)})),
 		candidate(2, "m", withQuota(quotaLeft(0))),
 	}
 

@@ -59,7 +59,7 @@ func TestModelAddThenList(t *testing.T) {
 			"--canonical", canonical, "--display", display,
 			"--vendor", "example-vendor", "--family", "example-family",
 			"--context-limit", "200000", "--output-limit", "64000",
-			"--tools", "--vision",
+			"--tools", "--vision", "--cache=false",
 			"--modalities-input", "text,image", "--modalities-output", "text",
 			"--knowledge-cutoff", "2026-01-31",
 		}); err != nil {
@@ -91,11 +91,12 @@ func TestModelAddThenList(t *testing.T) {
 	if got.InputLimit != 0 {
 		t.Errorf("没填的输入上限应当是 0（未知），得到 %d", got.InputLimit)
 	}
-	if !got.Capabilities.Tools || !got.Capabilities.Vision {
-		t.Errorf("tools/vision 应当为真：%+v", got.Capabilities)
-	}
-	if got.Capabilities.Reasoning || got.Capabilities.Audio || got.Capabilities.Cache || got.Capabilities.Batch {
-		t.Errorf("没给的能力不该为真：%+v", got.Capabilities)
+	// 给了的开关落成「支持」/「不支持」，没给的落成**未知**（库里 NULL），
+	// 不是 false。这一行是这次改动的核心：`model add` 不勾的开关不能变成
+	// 「明确不支持」——那会让带工具的请求选不到一条刚建好的记录（见 #485）。
+	want := "reasoning=未知 tools=支持 vision=支持 audio=未知 cache=不支持 batch=未知"
+	if gotState := declaredText(got.Capabilities); gotState != want {
+		t.Errorf("能力 = %s，期望 %s", gotState, want)
 	}
 	if len(got.ModalitiesInput) != 2 || got.ModalitiesInput[0] != "text" || got.ModalitiesInput[1] != "image" {
 		t.Errorf("输入模态 = %v", got.ModalitiesInput)
@@ -109,10 +110,17 @@ func TestModelAddThenList(t *testing.T) {
 			t.Fatalf("list 失败: %v", listErr)
 		}
 	})
-	for _, want := range []string{canonical, display, "example-vendor", "tools,vision", "text,image→text"} {
+	for _, want := range []string{canonical, display, "example-vendor",
+		"tools=支持 vision=支持 cache=不支持", "text,image→text"} {
 		if !strings.Contains(listOut, want) {
 			t.Errorf("清单里没有 %q：\n%s", want, listOut)
 		}
+	}
+	// 清单那一栏只列已声明的项：没配过的打不出来，六项都没配过时打 -。
+	// 「未知」这个词只该出现在 show 里——清单里铺六项会把这一栏撑得比其余
+	// 九栏加起来还宽（见 capabilitySummary）。
+	if strings.Contains(listOut, "未知") {
+		t.Errorf("清单不该打出「未知」：\n%s", listOut)
 	}
 }
 
@@ -169,18 +177,19 @@ func TestModelUpdateMergesCapabilities(t *testing.T) {
 		}
 	})
 
-	// 只给 --reasoning：另外三个能力原样留着。
+	// 只给 --reasoning：另外三个能力原样留着，而没配过的两项**仍是未知**
+	// ——不是被这次全量覆盖折成 false。
 	_, _ = captureStreams(t, func() {
 		if err := runModelUpdate([]string{"--canonical", canonical, "--reasoning"}); err != nil {
 			t.Fatalf("update 失败: %v", err)
 		}
 	})
-	want := catalog.Capabilities{Reasoning: true, Tools: true, Vision: true, Cache: true}
-	if got := readModel(t, db, canonical).Capabilities; got != want {
-		t.Errorf("能力 = %+v，期望 %+v：只给 --reasoning 不该动另外三个", got, want)
+	want := "reasoning=支持 tools=支持 vision=支持 audio=未知 cache=支持 batch=未知"
+	if got := declaredText(readModel(t, db, canonical).Capabilities); got != want {
+		t.Errorf("能力 = %s，期望 %s：只给 --reasoning 不该动另外五个", got, want)
 	}
 
-	// --tools=false 关掉一个：其余四个不动。
+	// --tools=false 关掉一个：其余五个不动。
 	//
 	// 这一条同时钉住另一件事：`--tools=false` 与「没提 --tools」必须分得开，
 	// 而 flag 包的零值分不出它们——判据是 fs.Visit 记下的清单。判据写错时，
@@ -190,9 +199,9 @@ func TestModelUpdateMergesCapabilities(t *testing.T) {
 			t.Fatalf("update --tools=false 失败: %v", err)
 		}
 	})
-	want = catalog.Capabilities{Reasoning: true, Vision: true, Cache: true}
-	if got := readModel(t, db, canonical).Capabilities; got != want {
-		t.Errorf("能力 = %+v，期望 %+v：--tools=false 应当只关掉 tools", got, want)
+	want = "reasoning=支持 tools=不支持 vision=支持 audio=未知 cache=支持 batch=未知"
+	if got := declaredText(readModel(t, db, canonical).Capabilities); got != want {
+		t.Errorf("能力 = %s，期望 %s：--tools=false 应当只关掉 tools", got, want)
 	}
 }
 
@@ -260,7 +269,7 @@ func TestModelShow(t *testing.T) {
 		if err := runModelAdd([]string{
 			"--canonical", canonical, "--display", "展示名",
 			"--vendor", "example-vendor", "--context-limit", "200000",
-			"--tools", "--knowledge-cutoff", "2026-01-31",
+			"--tools", "--vision=false", "--knowledge-cutoff", "2026-01-31",
 		}); err != nil {
 			t.Fatalf("add 失败: %v", err)
 		}
@@ -274,10 +283,18 @@ func TestModelShow(t *testing.T) {
 	})
 	for _, want := range []string{
 		strconv.FormatInt(id, 10), canonical, "展示名", "example-vendor",
-		"200000", "tools", "2026-01-31",
+		"200000", "2026-01-31",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("show 的输出里没有 %q：\n%s", want, out)
+		}
+	}
+	// 能力那一栏逐项打三态，六项都打出来。三种状态在这一份输出里齐了：
+	// tools 支持、vision 不支持、其余四项未知。少了「未知」这一档，一份
+	// 只填了名字的记录看起来就和「六项都不支持」一样（见 capabilityDetail）。
+	for _, want := range []string{"tools=支持", "vision=不支持", "reasoning=未知", "batch=未知"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("show 的能力那一栏里没有 %q：\n%s", want, out)
 		}
 	}
 	// 没填的那几栏打的是「-」而不是 0：打 0 会让人以为那是一个量出来的上限。
@@ -386,6 +403,37 @@ func readModel(t *testing.T, db *sql.DB, canonical string) catalog.Model {
 		t.Fatalf("读回模型 %q 失败: %v", canonical, err)
 	}
 	return model
+}
+
+// declared 造一项**已声明**的能力：true 支持、false 明确不支持。
+//
+// 「没配过」是第三个状态，直接写 nil（不经过这个助手）——用例里必须能把
+// 这三态分开写出来，否则证明不了它们没被合并成一个零值（见 #485）。
+func declared(v bool) *bool { return &v }
+
+// declaredText 把六项三态打成一行（顺序固定），供用例按值比较。
+//
+// 不能拿这份 struct 直接 `!=`：它装的是指针，那比的是**地址**，两份内容
+// 相同的声明会因为地址不同而判不等。也不能拿渲染函数（capabilityDetail）
+// 比：那是被测代码的一部分，它错了断言会跟着一起错。所以这份小渲染写在
+// 用例里，当独立的那把尺子。
+func declaredText(c catalog.Capabilities) string {
+	state := func(item *bool) string {
+		switch {
+		case item == nil:
+			return "未知"
+		case *item:
+			return "支持"
+		default:
+			return "不支持"
+		}
+	}
+	return "reasoning=" + state(c.Reasoning) +
+		" tools=" + state(c.Tools) +
+		" vision=" + state(c.Vision) +
+		" audio=" + state(c.Audio) +
+		" cache=" + state(c.Cache) +
+		" batch=" + state(c.Batch)
 }
 
 // TestModelAddRejectsDuplicateCanonical 钉住重复的规范名。

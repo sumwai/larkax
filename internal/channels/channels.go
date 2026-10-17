@@ -199,10 +199,10 @@ func (s *Source) Candidates(ctx context.Context, canonicalModel string) ([]route
 //
 // # 目录里没有这条记录时返回 nil
 //
-// nil 是**未知**，是放行而不是「不支持」：一个还没采集到的模型与一个采集
-// 到了、能力列恰好全是 false 的模型，在库里长得完全不同，而「目录里没有
-// 它」恰恰是最常见的开始状态。按「不支持」处理会让整批还没进目录的模型
-// 立刻用不了（见 route.ModelProfile）。
+// nil 是**未知**，是放行而不是「不支持」：一个还没进目录的模型与一个进去
+// 了、但某一项能力没配过的模型，处置相同（都放行），而「目录里没有它」
+// 恰恰是最常见的开始状态。按「不支持」处理会让整批还没进目录的模型立刻
+// 用不了（见 route.ModelProfile）。
 //
 // # 读目录失败与「没有这条记录」分开
 //
@@ -223,6 +223,12 @@ func (s *Source) profile(ctx context.Context, canonicalName string) (*route.Mode
 	}
 	// 只带判据用得上的那几项：目录读回来的是整张能力矩阵，而 route 那边的
 	// 判据只看这三项（见 route.ModelProfile）。
+	//
+	// 三项能力是**原样搬过去的指针**，两侧的三态因此是同一份：nil 还是 nil，
+	// false 还是 false。中间不做转换是刻意的——「哪一项该按未知放行」这条
+	// 判断只该有一处（见 route.declaredUnsupported），投影里再判一次就是
+	// 第二份判据，而两份判据漂移的症状是「某条请求莫名其妙选到了不做这件事
+	// 的模型」。指针只读：两边都不写它。
 	return &route.ModelProfile{
 		Tools:        cons.Capabilities.Tools,
 		Vision:       cons.Capabilities.Vision,

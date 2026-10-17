@@ -137,6 +137,9 @@ type CreateModelRequest struct {
 	InputLimit   int
 	OutputLimit  int
 
+	// Capabilities 是三态能力矩阵（见 Capabilities）：nil 落库为 NULL =
+	// 未知。零值就是「一项都没配」，所以新建时不给任何一个开关，
+	// 库里就是六个 NULL——不是六个 false。
 	Capabilities Capabilities
 
 	ModalitiesInput  []string
@@ -216,8 +219,12 @@ func (a *Admin) Create(ctx context.Context, req CreateModelRequest) (int64, erro
 // 每个字段都是指针：nil 表示「不改这一项」，非 nil 表示「改成这个值」。
 // 指针指向**零值**表示把这一项清空（落 NULL 或空数组）——表上这些列的 NULL
 // 与零值本来就是同一个意思（见 Model 的注释），所以不需要第三种状态来表达
-// 「清空」。唯一的例外是 Capabilities 那六个布尔：它们 NOT NULL，false 是
-// 一个真实的值，不是「没有」。
+// 「清空」。
+//
+// Capabilities 这一项的形状与别的不同：它自己就是「给不给」的开关，而它
+// 指向的那六项各自是三态（nil 落 NULL = 未知）。一次修改会**整体覆盖**那
+// 六列（见 modelUpdateSets），所以调用方要「只改其中一项」时得先读出当前那
+// 一行再合并——`larkaxctl model update` 就是这么做的（见 cmd/larkaxctl）。
 type UpdateModelRequest struct {
 	// CanonicalName 定位要改的那一行，**它本身不可改**，见 Admin 的注释。
 	CanonicalName string
@@ -344,6 +351,9 @@ func modelUpdateSets(req UpdateModelRequest) ([]string, []any, error) {
 		add("output_limit", limit)
 	}
 	if req.Capabilities != nil {
+		// 六项原样交出去：每项是 *bool，nil 由驱动落成 NULL（= 未知），
+		// false/true 落成那一列的真值（见 Capabilities）。这里不替调用方
+		// 把 nil 折成 false——那正是这条三态要区分的东西。
 		add("supports_reasoning", req.Capabilities.Reasoning)
 		add("supports_tools", req.Capabilities.Tools)
 		add("supports_vision", req.Capabilities.Vision)
