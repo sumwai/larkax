@@ -244,6 +244,47 @@ func TestRedisUsageDoesNotTouchAnything(t *testing.T) {
 	}
 }
 
+// TestRedisTwoStepLeavesKeyWithoutExpiry 是这条改动要堵的那条缝的红证。
+//
+// 分两步发（先 INCR、再 EXPIRE）时，两条命令之间有一道缝：进程死在中间，
+// 或者第二条命令失败——无论哪种，INCR 已经落库、EXPIRE 没落库，于是留下一个
+// **TTL = -1 的键**。它记的是这个窗口的次数、键名带窗口起点所以不会再被读到，
+// 但**永远占着内存**。
+//
+// 这里用直连客户端**手工造出**那个状态（只发 INCR、不发 EXPIRE，等价于进程
+// 死在第二条之前），断言 TTL = -1；再让 RedisStore.Incr 走一次（一次原子 EVAL）
+// 断言 TTL > 0。两个结果并排放在一条用例里，那个缝是不是真的存在、新的实现有
+// 没有把它堵上，就有了内生的对照，而不是靠一次手工的红证。
+func TestRedisTwoStepLeavesKeyWithoutExpiry(t *testing.T) {
+	f := newRedisFixture(t)
+	ctx := context.Background()
+	keyID := freshKeyID()
+
+	// 第一步：只有 INCR，没有 EXPIRE——就是「INCR 成功而 EXPIRE 失败」留下的状态。
+	split := keyPrefix(keyID) + "split"
+	if err := f.client.Incr(ctx, split).Err(); err != nil {
+		t.Fatalf("手工 INCR 失败: %v", err)
+	}
+	t.Cleanup(func() { _ = f.client.Del(context.Background(), split).Err() })
+	if ttl, err := f.client.TTL(ctx, split).Result(); err != nil {
+		t.Fatalf("读 TTL 失败: %v", err)
+	} else if ttl != -1 {
+		t.Fatalf("两步法留下的键 TTL = %v，期望 -1（没有过期时间）——这条红证的前提变了", ttl)
+	}
+
+	// 第二步：一次原子 EVAL，同样的起点，键带着过期时间。缝被堵上之后，
+	// 「INCR 落了库而 EXPIRE 没落」这个中间态不存在了。
+	atomic := keyPrefix(keyID) + "atomic"
+	if _, err := f.store.Incr(ctx, atomic); err != nil {
+		t.Fatalf("原子 Incr 失败: %v", err)
+	}
+	if ttl, err := f.client.TTL(ctx, atomic).Result(); err != nil {
+		t.Fatalf("读 TTL 失败: %v", err)
+	} else if ttl <= 0 {
+		t.Errorf("原子计数留下的键 TTL = %v，期望 > 0——缝没堵上", ttl)
+	}
+}
+
 // TestRedisUnreachableDegradesWithoutFailing 是判据里那条「降级可用」。
 //
 // 这里用的是一个**真的连不上**的地址（127.0.0.1:1 不监听任何东西）：走的是

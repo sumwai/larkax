@@ -3,55 +3,51 @@ package ratelimit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
-// fakeCmds 是 redisCmds 的替身：每条命令返回一个预先摆好的结果，并记下被
-// 调用过什么。
+// fakeCmds 是 redisCmds 的替身：每条命令返回一个预先摆好的结果，并记下
+// 被调用过什么。
 //
-// 为什么需要它：真实 Redis 上没法只让 INCR 成功、EXPIRE 失败，而那条路径
-// 恰恰是这一层最要命的失败（INCR 成功而 EXPIRE 没成功会留下一个没有过期
-// 时间的键）。把命令集抽成一个窄接口就是为了这个。
+// 它只有一条能执行计数的命令——Eval。加一与续期现在是同一次 EVAL 里的两步，
+// 替身没必要、也没法分别模拟：这个形状本身就是断言的一部分（热路径每次判定
+// 只发一条命令，见 TestRedisStoreIncrIsOneRoundTrip）。
+//
+// 之所以还要一个替身：真实 Redis 上没法稳定地造出「存储命令失败」这条路径，
+// 而它恰恰是这里最需要被钉住的失败。
 type fakeCmds struct {
-	incrN     int64
-	incrErr   error
-	expireErr error
-	getVal    int64
-	getErr    error
-	pingErr   error
-	delErr    error
+	evalN   int64
+	evalErr error
+	getVal  int64
+	getErr  error
+	pingErr error
 
-	incrKeys   []string
-	expireKeys []string
-	expires    []time.Duration
-	dels       []string
-	// delCtxErr 是 Del 被调用时它那个 context 的状态——补偿必须用一个新
-	// context，因为 EXPIRE 失败最常见的原因正是原来那个已经到点了。
-	delCtxErr error
+	// calls 是**所有**命令被调用的次数。它量的是热路径的往返数：一次判定
+	// 只能让它加一（或者失败时也不加第二条）。
+	calls int
+
+	// evalKeys / evalArgs 记下 EVAL 每次收到的键与参数，用来钉键名与过期秒数。
+	evalKeys []string
+	evalArgs []string
 }
 
-func (f *fakeCmds) Incr(_ context.Context, key string) *redis.IntCmd {
-	f.incrKeys = append(f.incrKeys, key)
-	return redis.NewIntResult(f.incrN, f.incrErr)
+func (f *fakeCmds) Eval(_ context.Context, _ string, keys []string, args ...any) *redis.Cmd {
+	f.calls++
+	f.evalKeys = append(f.evalKeys, keys...)
+	if len(args) > 0 {
+		f.evalArgs = append(f.evalArgs, fmt.Sprint(args[0]))
+	}
+	return redis.NewCmdResult(f.evalN, f.evalErr)
 }
 
-func (f *fakeCmds) Expire(_ context.Context, key string, d time.Duration) *redis.BoolCmd {
-	f.expireKeys = append(f.expireKeys, key)
-	f.expires = append(f.expires, d)
-	return redis.NewBoolResult(f.expireErr == nil, f.expireErr)
-}
-
-func (f *fakeCmds) Del(ctx context.Context, keys ...string) *redis.IntCmd {
-	f.delCtxErr = ctx.Err()
-	f.dels = append(f.dels, keys...)
-	return redis.NewIntResult(int64(len(keys)), f.delErr)
-}
-
-func (f *fakeCmds) Get(_ context.Context, key string) *redis.StringCmd {
+func (f *fakeCmds) Get(_ context.Context, _ string) *redis.StringCmd {
+	f.calls++
 	if f.getErr != nil {
 		return redis.NewStringResult("", f.getErr)
 	}
@@ -59,6 +55,7 @@ func (f *fakeCmds) Get(_ context.Context, key string) *redis.StringCmd {
 }
 
 func (f *fakeCmds) Ping(context.Context) *redis.StatusCmd {
+	f.calls++
 	if f.pingErr != nil {
 		return redis.NewStatusResult("", f.pingErr)
 	}
@@ -92,17 +89,58 @@ func TestWindowKeyFormat(t *testing.T) {
 	}
 }
 
-// TestRedisStoreIncrRenewsExpiryEveryTime 钉住「每次调用都续 EXPIRE」。
+// TestRedisStoreIncrIsOneRoundTrip 钉住热路径的往返数：一次判定一条命令。
 //
-// 续的是两倍窗口（见 keyTTL）。只在第一次写的时候设一次的话，一个在
-// 第一次调用上把过期时间设丢了的键会活到永远——而这正是下一条用例的事。
+// 改之前是两条（INCR 与 EXPIRE），它们之间那两条缝（进程死在中间、第二条失败
+// 留下没有过期时间的键）由合并成一次 EVAL 堵上。这条用例是原先
+// TestRedisStoreDeletesKeyWhenExpireFails 的等价替换：那条用例保护的是「INCR
+// 成功而 EXPIRE 失败」这个中间态，而它现在**不可能出现**了——不再是两条命令。
+// 于是判据换成「就是一次原子命令」：正常一次，失败一次，两次都只发一条。
+//
+// 一次判定只发一条命令，也是 #191 给这条热路径定的预算（1–2 个往返）里更省
+// 的那一侧。
+func TestRedisStoreIncrIsOneRoundTrip(t *testing.T) {
+	cmds := &fakeCmds{evalN: 1}
+	store := &RedisStore{cmds: cmds}
+	key := "rl:7:1792238400"
+
+	if _, err := store.Incr(context.Background(), key); err != nil {
+		t.Fatalf("Incr 失败: %v", err)
+	}
+	if cmds.calls != 1 {
+		t.Errorf("一次判定发了 %d 条命令，期望 1", cmds.calls)
+	}
+	if len(cmds.evalKeys) != 1 || cmds.evalKeys[0] != key {
+		t.Errorf("EVAL 的键 = %v，期望恰好 %q", cmds.evalKeys, key)
+	}
+
+	// 失败也只有一个往返：EVAL 报错时不再有第二条命令，更没有补偿删除——
+	// 原子性保证失败时计数没有落库，存储里没有任何要清理的残留。
+	cmds.evalErr = errors.New("存储不可用")
+	if _, err := store.Incr(context.Background(), key); err == nil {
+		t.Fatal("EVAL 失败时应当返回错误")
+	}
+	if cmds.calls != 2 {
+		t.Errorf("第二次判定累计发了 %d 条命令，期望 2（失败也不加发第二条）", cmds.calls)
+	}
+}
+
+// TestRedisStoreIncrRenewsExpiryEveryTime 钉住「每次调用都续过期」。
+//
+// 续的是两倍窗口（见 keyTTL）。只在第一次写的时候设一次的话，一个持续被用的
+// 键会在第一次写入之后的两倍窗口处准时消失——键的寿命就与第一次写入挂钩，
+// 而不是与最后一次使用挂钩。
+//
+// 续期现在是 EVAL 脚本里的一步，替身看不到单独的 EXPIRE——所以这条用例钉两件
+// 事：每次调用都把「键」与「两倍窗口的秒数」交给那一次 EVAL；以及脚本里确实
+// 有无条件的 EXPIRE。秒数用**字面量** 120（别拿常量测常量：改成 keyTTL 就会红）。
 func TestRedisStoreIncrRenewsExpiryEveryTime(t *testing.T) {
-	cmds := &fakeCmds{incrN: 1}
+	cmds := &fakeCmds{evalN: 1}
 	store := &RedisStore{cmds: cmds}
 	key := "rl:7:1792238400"
 
 	for i := int64(1); i <= 3; i++ {
-		cmds.incrN = i
+		cmds.evalN = i
 		n, err := store.Incr(context.Background(), key)
 		if err != nil {
 			t.Fatalf("第 %d 次 Incr 失败: %v", i, err)
@@ -112,106 +150,66 @@ func TestRedisStoreIncrRenewsExpiryEveryTime(t *testing.T) {
 		}
 	}
 
-	if len(cmds.expires) != 3 {
-		t.Fatalf("EXPIRE 发了 %d 次，期望 3（每次调用都续）", len(cmds.expires))
+	if len(cmds.evalKeys) != 3 {
+		t.Fatalf("EVAL 发了 %d 次，期望 3（每次调用都续）", len(cmds.evalKeys))
 	}
-	for i, d := range cmds.expires {
-		if d != keyTTL {
-			t.Errorf("第 %d 次 EXPIRE 的时长 = %v，期望 %v（两倍窗口）", i+1, d, keyTTL)
-		}
-	}
-	for _, k := range cmds.expireKeys {
+	for i, k := range cmds.evalKeys {
 		if k != key {
-			t.Errorf("EXPIRE 打在键 %q 上，期望 %q", k, key)
+			t.Errorf("第 %d 次 EVAL 打在键 %q 上，期望 %q", i+1, k, key)
 		}
 	}
-	if len(cmds.dels) != 0 {
-		t.Errorf("一切正常时不该删键，实际删了 %v", cmds.dels)
+	for i, arg := range cmds.evalArgs {
+		if arg != "120" {
+			t.Errorf("第 %d 次 EVAL 的过期参数 = %q，期望 %q（两倍窗口 120 秒）", i+1, arg, "120")
+		}
+	}
+	// 脚本里必须真的带了 EXPIRE，否则「续期」只发生在注释里。
+	if !strings.Contains(incrScript, "EXPIRE") {
+		t.Errorf("EVAL 脚本里没有 EXPIRE：续期不会发生\n%s", incrScript)
 	}
 }
 
 // TestRedisStoreIncrFailureLeavesNothingToClean 钉住 INCR 自己失败时的处置。
 //
-// 这时计数没有加上去（命令整个失败），所以既不该续 EXPIRE 也不该补偿删除：
-// 多删一次等于把一个可能存在的、别人正在用的键抹掉。
+// EVAL 失败时计数没有落库（原子性：两条命令一条都没生效），所以既不该续
+// 也不该补偿删除——多删一次等于把一个可能存在的、别人正在用的键抹掉。
+// 判据是「一共只发了一条命令」。
 func TestRedisStoreIncrFailureLeavesNothingToClean(t *testing.T) {
-	cmds := &fakeCmds{incrErr: errors.New("连不上")}
+	cmds := &fakeCmds{evalErr: errors.New("连不上")}
 	store := &RedisStore{cmds: cmds}
 
 	if _, err := store.Incr(context.Background(), "rl:1:1"); err == nil {
-		t.Fatal("INCR 失败时应当返回错误")
+		t.Fatal("EVAL 失败时应当返回错误")
 	}
-	if len(cmds.expires) != 0 || len(cmds.dels) != 0 {
-		t.Errorf("INCR 失败后不该再有别的命令：EXPIRE %d 次、DEL %v", len(cmds.expires), cmds.dels)
-	}
-}
-
-// TestRedisStoreDeletesKeyWhenExpireFails 钉住这一层最要命的那条失败。
-//
-// INCR 成功、EXPIRE 失败 → 留下一个**没有过期时间**的键。用例钉三件事：
-//
-//   - 错误要报上去（调用方据此降级，而不是拿一个可疑的数去拒人）；
-//   - 那个键要被**删掉**（不是留着等它自己消失——它不会）；
-//   - 删除用的必须是一个新的 context（EXPIRE 失败最常见的原因是原来那个
-//     已经到点了，复用它等于让这次补偿也发不出去）。
-func TestRedisStoreDeletesKeyWhenExpireFails(t *testing.T) {
-	cmds := &fakeCmds{incrN: 1, expireErr: errors.New("EXPIRE 失败")}
-	store := &RedisStore{cmds: cmds}
-	key := "rl:7:1792238400"
-
-	if _, err := store.Incr(context.Background(), key); err == nil {
-		t.Fatal("EXPIRE 失败时 Incr 应当返回错误：调用方要据此降级")
-	}
-	if len(cmds.dels) != 1 || cmds.dels[0] != key {
-		t.Fatalf("补偿删除的是 %v，期望恰好删掉 %q", cmds.dels, key)
-	}
-	if cmds.delCtxErr != nil {
-		t.Errorf("补偿用的 context 已经不可用（%v）：它必须新起一个，否则这条补救根本发不出去", cmds.delCtxErr)
-	}
-
-	// 超时（context 已到点）之后再走一遍：删除仍然要发生。这一条与上面那条
-	// 分开，是因为「EXPIRE 失败」与「context 超时」在真实场景里常常同时出现，
-	// 而错就错在复用同一个 context 上。
-	expired, cancel := context.WithCancel(context.Background())
-	cancel()
-	cmds2 := &fakeCmds{incrN: 1, expireErr: context.DeadlineExceeded}
-	store2 := &RedisStore{cmds: cmds2}
-	if _, err := store2.Incr(expired, key); err == nil {
-		t.Fatal("EXPIRE 失败时 Incr 应当返回错误")
-	}
-	if len(cmds2.dels) != 1 {
-		t.Fatalf("context 已超时时补偿删除发生了 %d 次，期望 1", len(cmds2.dels))
-	}
-	if cmds2.delCtxErr != nil {
-		t.Errorf("补偿用的 context 不可用（%v）", cmds2.delCtxErr)
+	if cmds.calls != 1 {
+		t.Errorf("失败时发了 %d 条命令，期望 1（原子计数失败后没有第二条命令）", cmds.calls)
 	}
 }
 
-// TestLimiterDegradesWhenExpireFails 把「EXPIRE 失败」接到判定那一层。
+// TestLimiterDegradesWhenStoreFails 把「存储命令失败」接到判定那一层。
 //
 // 单看存储那一条还不够：这里要证明的是，那次失败**不会**变成一次基于可疑
-// 计数的拒绝，而那个键也不会被留在存储里没有过期时间。
-func TestLimiterDegradesWhenExpireFails(t *testing.T) {
-	cmds := &fakeCmds{incrN: 99, expireErr: errors.New("EXPIRE 失败")}
+// 计数的拒绝。EVAL 是原子的，所以失败时计数根本没落库，也就没有那个「INCR
+// 成功而 EXPIRE 失败的中间态」需要清理（原先的用例名是 …WhenExpireFails，
+// 现在失败点收拢到一次 EVAL 上，改名叫 …WhenStoreFails）。
+func TestLimiterDegradesWhenStoreFails(t *testing.T) {
+	cmds := &fakeCmds{evalN: 99, evalErr: errors.New("存储不可用")}
 	c := &clock{at: base}
 	l, reg := newTestLimiter(c, WithStore(&RedisStore{cmds: cmds}))
 
-	// 共享存储里的计数是 99，远超额度 1——但那个数是不可信的（它可能不是
-	// 一个完整的计数），所以这一次判定不能拿它去拒人。
+	// 存储本会报 99（远超额度 1），但那一次 EVAL 没成功——这个数不可信，
+	// 所以这一次判定不能拿它去拒人。
 	allowed, _ := l.Allow(7, rpm(1))
 	if !allowed {
-		t.Error("EXPIRE 失败后按那个可疑的计数拒了请求：这时应当降级，而不是拒绝")
+		t.Error("存储失败后按那个可疑的计数拒了请求：这时应当降级，而不是拒绝")
 	}
 	if v := reg.RateLimitExact.Value(); v != 0 {
 		t.Errorf("信号 = %d，期望 0（近似）", v)
 	}
-	if len(cmds.dels) != 1 {
-		t.Errorf("补偿删除发生了 %d 次，期望 1：那个没有过期时间的键不能被留下", len(cmds.dels))
-	}
 
 	// 存储恢复正常：下一次判定又是精确的，而这一次用的是存储里那个数。
-	cmds.expireErr = nil
-	cmds.incrN = 100
+	cmds.evalErr = nil
+	cmds.evalN = 100
 	if allowed, _ := l.Allow(7, rpm(200)); !allowed {
 		t.Error("存储恢复后按 100 次、额度 200 应当放行")
 	}
@@ -246,7 +244,7 @@ func TestRedisStoreGetPassesThroughRealErrors(t *testing.T) {
 
 // 编译期断言：替身与真客户端一样满足 RedisStore 需要的那几条命令。
 //
-// 少了这一条，替身与真实现分岔（比如 Del 的签名变了）时用例照样通过，
+// 少了这一条，替身与真实现分岔（比如 Eval 的签名变了）时用例照样通过，
 // 而「测过了」说的就只是那份替身。
 var (
 	_ redisCmds = (*fakeCmds)(nil)
