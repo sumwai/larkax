@@ -438,6 +438,126 @@ func TestSettleCarriesOutcomeDuration(t *testing.T) {
 	}
 }
 
+// 五项 token 单价各给一个不同的价，再加一个非 token 计量项。
+//
+// 五项都不一样，是为了让「抄串了哪一项」在断言里看得出来；非 token 那一项
+// 走的是另一条路（Prices.Units），单独一个价才能证明它也被搬过来了。
+const fiveSlotRule = `{"prompt": 0.000001, "completion": 0.000002, ` +
+	`"cache_read": 0.0000001, "cache_write": 0.00000125, "reasoning": 0.000004, ` +
+	`"units": {"searches": 0.01}}`
+
+// 单价从这次求值的结果搬到 Charge：它是 usage_events.unit_prices 唯一的来源。
+//
+// # 为什么这一条值得单独钉
+//
+// 单价与金额无关，漏搬不会让任何计费用例变红：账单金额照旧正确、分录照旧
+// 平衡，只是「这笔钱是按什么单价算出来的」事后无从查起——正是
+// TestSettleCarriesOutcomeDuration 那一条的形状（少一个字段，而所有金额类
+// 断言都不动）。
+//
+// 只写规则**显式写过**的那几项也一并钉住（Declared）：没写的槽位单价是零值，
+// 而「写了 0」（这一项免费）与「没写」在 money.Amount 上分不出来，落库层靠
+// Declared 区分（见 Charge.Prices 与 insertUsageEventSQL）。
+func TestSettleCarriesPricesFromEvaluation(t *testing.T) {
+	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: fiveSlotRule}}
+	p := newPipeline(t, src)
+
+	req := baseRequest()
+	res, err := p.Reserve(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	charge, err := p.Settle(context.Background(), req, res, Outcome{
+		Usage: channel.Usage{
+			PromptTokens:     1000,
+			CompletionTokens: 200,
+			CacheReadTokens:  10,
+			CacheWriteTokens: 20,
+			ReasoningTokens:  5,
+			UnitCounts:       map[string]int64{"searches": 2},
+		},
+		UsageSource: tokens.SourceMeasured,
+	})
+	if err != nil {
+		t.Fatalf("结算出错: %v", err)
+	}
+
+	// 逐项比字面量，不拿 Breakdown 反推：反推要除、要猜零用量那一项，
+	// 而这条路径要的是「求值给出的价原样到了这里」。
+	for _, tc := range []struct {
+		slot string
+		got  string
+		want string
+	}{
+		{"prompt", charge.Prices.Prompt.String(), "0.00000100"},
+		{"completion", charge.Prices.Completion.String(), "0.00000200"},
+		{"cache_read", charge.Prices.CacheRead.String(), "0.00000010"},
+		{"cache_write", charge.Prices.CacheWrite.String(), "0.00000125"},
+		{"reasoning", charge.Prices.Reasoning.String(), "0.00000400"},
+		{"units.searches", charge.Prices.Units["searches"].String(), "0.01000000"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("Prices[%s] = %s，期望 %s", tc.slot, tc.got, tc.want)
+		}
+	}
+
+	// 这五项规则都写过，所以五个槽位都该是「声明过」的。落库层据此决定把哪些
+	// 键写进 unit_prices——少一个声明就少一个键，而账上看起来像「当时没给这
+	// 个价」。
+	for _, slot := range billing.TokenSlots {
+		if !charge.Prices.Declared[slot.Name] {
+			t.Errorf("槽位 %q 没有被标成「规则写过」——它的单价不会进 unit_prices", slot.Name)
+		}
+	}
+}
+
+// 撞上预留上界的结算：单价不受影响，它本来就是价格侧的数。
+//
+// # 这一条防的是什么
+//
+// SettleWithCharges 撞上界时把 Settlement.Actual 截成预留额，而 Breakdown 留
+// 的是截之前的金额（有意如此，见 internal/billing 的 TestSettleCapsOvershoot）。
+// 于是同一次结算里出现两个金额，而**都不该变成单价**：从金额反推出来的价会
+// 随 Actual 一起被截，复算时算出的金额小于 cost，看起来却像个正常的价。
+//
+// 这里把三个数摆在一起：Actual 是被预留截住之后的值（等于 Reserved），
+// Breakdown.Prompt 是没截的 0.1，而 Prices.Prompt 是规则给的 0.000001
+// （与两者都不是一回事）。
+func TestSettleUnitPricesAreUnaffectedByCappedSettlement(t *testing.T) {
+	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: fiveSlotRule}}
+	p := newPipeline(t, src)
+
+	res, err := p.Reserve(context.Background(), baseRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 上游报 100000 个输入 token，按 1e-6 算是 0.1——远超按最坏情况算出的预留。
+	capped := baseRequest()
+	charge, err := p.Settle(context.Background(), capped, res, Outcome{
+		Usage:       channel.Usage{PromptTokens: 100_000},
+		UsageSource: tokens.SourceMeasured,
+	})
+	if err != nil {
+		t.Fatalf("结算出错: %v", err)
+	}
+
+	if !charge.Settlement.Capped {
+		t.Fatalf("这次结算没有撞上界（按用量算是 %s，预留 %s）——用例的前提不成立",
+			charge.Settlement.Breakdown.Total, charge.Settlement.Reserved)
+	}
+	// 截住的意思是「按预留收」，所以 Actual 与 Reserved 是同一个数。不写死
+	// 那个字面量：它是 Reserve 的最坏情况算术，由另一条用例管。
+	if got := charge.Settlement.Actual; got.Cmp(charge.Settlement.Reserved) != 0 {
+		t.Errorf("Actual = %s，期望等于预留 %s——撞上界时按预留收", got, charge.Settlement.Reserved)
+	}
+	if got := charge.Settlement.Breakdown.Prompt.String(); got != "0.10000000" {
+		t.Errorf("Breakdown.Prompt = %s，期望 0.1（明细留的是截之前的金额）", got)
+	}
+	if got := charge.Prices.Prompt.String(); got != "0.00000100" {
+		t.Errorf("Prices.Prompt = %s，期望 0.000001（规则给的单价，与上面两个金额都不是一回事）", got)
+	}
+}
+
 // 分录必须平衡：组内求和为零。这是账本的核心不变量。
 func TestSettleEntriesBalance(t *testing.T) {
 	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}

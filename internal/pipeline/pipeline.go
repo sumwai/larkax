@@ -362,6 +362,14 @@ type Outcome struct {
 	UsageSource tokens.Source
 
 	// UpstreamCost 是上游侧的成本，供对账。
+	//
+	// **今天没有来源。** 口径还没定——是让适配器按自己的计价口径算，还是从
+	// 上游响应的用量字段折算——所以全仓库没有一处给它赋值：结算只构造
+	// 「用户被扣了多少」这一侧（见 entries），上游成本与商家分成那一半留给
+	// 另一个环节。落库层因此把对应的那一列写成 NULL（见 internal/ledger/store
+	// 的 upstream_cost 那一节）。
+	//
+	// 别拿这次收的钱顶上：那是售价，混起来毛利永远是零，而账目仍然是平的。
 	UpstreamCost money.Amount
 
 	// Duration 是这次上游调用**实际花了多久**，只用于统计，不参与金额计算。
@@ -454,6 +462,24 @@ type Charge struct {
 	// 不能记成实测值，理由见 tokens.Source.IsExact。
 	UsageSource tokens.Source
 	Usage       billing.Usage
+
+	// Prices 是这次结算**按哪些单价算的**，由 Settle 从求值结果搬过来。
+	//
+	// 它唯一的下游是 usage_events.unit_prices（见 internal/ledger/store 的
+	// insertUsageEvent）：账本只记动了多少钱，而「那笔钱是按什么单价乘出来的」
+	// 只有这一处留痕。取的是**价格侧**，不是 Settlement.Breakdown——
+	// 后者是金额（单价 × 用量），撞上界时还被有意留成截之前的值（见
+	// billing.SettleWithCharges），拿金额去反推单价要除、要猜零用量那一项。
+	//
+	// 这是**结算实测到的那一组价**，不是预留用的上界（Reserve 走
+	// EvalWorstCase，逐槽取各分支最高价）：两者在分档规则下本来就不是一组
+	// 数，而账单要解释的是前者。
+	//
+	// 只由 Settle 填。别的调用方（测试直接构造 Charge）留零值，落库层据此
+	// 写空对象。落库时也不是五项照抄：只有 Declared 标过的那几项会进 unit_prices
+	// ——「写了 0」（这一项免费）与「没写」（规则漏了）在 money.Amount 上分不
+	// 出来，详见 insertUsageEventSQL 里 unit_prices 那一节。
+	Prices billing.Prices
 
 	// ClientCanceled 为 true 表示这次请求是客户端在流式响应中途断开的。
 	//
@@ -746,7 +772,12 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 		PricingExprSnap: rule.Source,
 		UsageSource:     out.UsageSource,
 		Usage:           usage,
-		ClientCanceled:  out.ClientCanceled,
+		// 单价从这次求值的结果原样搬过来，是 usage_events.unit_prices 唯一的
+		// 来源。取 val.Prices（这次结算**按哪一组价**算的），不取
+		// settlement.Breakdown：后者是金额（单价 × 用量），撞上界时还留着
+		// 截之前的值。理由与边界见 Charge.Prices 的注释。
+		Prices:         val.Prices,
+		ClientCanceled: out.ClientCanceled,
 		// 耗时与金额无关，原样带过去：它只在落库时变成 usage_events 的一列，
 		// 延迟那一维的输入就从那里按桶聚出来。
 		Duration: out.Duration,
