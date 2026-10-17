@@ -10,10 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
-
-	"github.com/sumwai/larkax/internal/migrate"
+	"github.com/sumwai/larkax/internal/testdb"
 )
 
 // 集成测试需要一个真实的 PostgreSQL。
@@ -32,32 +29,11 @@ import (
 // CI 里那个环境变量一直在，所以这个跳过的分支不会掩盖问题。
 func testDB(ctx context.Context, t *testing.T) *sql.DB {
 	t.Helper()
-
-	dsn := os.Getenv("LARKAX_DB_DSN")
-	if dsn == "" {
-		t.Skip("未设置 LARKAX_DB_DSN，跳过集成测试（CI 里会跑）")
-	}
-
-	handle, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("打开数据库失败: %v", err)
-	}
-	t.Cleanup(func() { _ = handle.Close() })
-
-	if err := handle.PingContext(ctx); err != nil {
-		t.Skipf("连不上数据库，跳过集成测试: %v", err)
-	}
-
-	// goose 自己记录版本，重复调用是幂等的。
-	goose.SetBaseFS(migrate.FS())
-	if err := migrate.SetDialect("postgres"); err != nil {
-		t.Fatalf("设置方言失败: %v", err)
-	}
-	if err := goose.UpContext(ctx, handle, "."); err != nil {
-		t.Fatalf("应用迁移失败: %v", err)
-	}
-	return handle
+	return testdb.OpenContext(ctx, t)
 }
+
+// TestMain 给这个包建一个独立的库，跑完删掉（见 internal/testdb）。
+func TestMain(m *testing.M) { os.Exit(testdb.Main(m)) }
 
 // entryFor 从一份清单里取出一行。找不到就报错，而不是返回零值——
 // 零值会让「键不见了」表现为「值不对」，排查方向整个偏掉。
