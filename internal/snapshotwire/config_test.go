@@ -37,6 +37,7 @@ func settingsRows(overrides map[string]string) []settings.Row {
 		"quota.probe_interval_seconds":       `300`,
 		"billing.default_asset":              `"CNY"`,
 		"calendar.default_region":            `"CN"`,
+		"idempotency.retention_hours":        `24`,
 		"plugin.enabled":                     `false`,
 		"plugin.call_timeout_ms":             `5000`,
 		"plugin.memory_limit_bytes":          `67108864`,

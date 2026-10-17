@@ -33,6 +33,7 @@ import (
 	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/billing/expr"
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/idempotency"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/observe"
@@ -136,6 +137,10 @@ type Pipeline struct {
 //
 // 它只带**计费需要知道的东西**，不带你调上游要用的参数——
 // 那些与计费无关，混进来会让「改一个上游参数」看起来像「改了计费」。
+//
+// 唯一的例外是几个「这次请求在持久化那一侧是谁」的字段（RequestID、
+// BillingRequestID、Protocol、Streamed、Idempotency）：它们不参与任何金额
+// 计算，但落库层要靠它们把这一行写对。理由与取舍各自写在字段上。
 type Request struct {
 	// RequestID 是幂等键。同一次请求重复计费必须只扣一次。
 	RequestID string
@@ -189,6 +194,21 @@ type Request struct {
 	// 取值只有 channel.ProtocolOpenAI 与 channel.ProtocolAnthropic 两种；
 	// 落库层拒绝其他取值（含空值），见 internal/ledger/store 的 SaveReservation。
 	Protocol channel.Protocol
+
+	// Idempotency 是这次请求的幂等声明，由入口按请求头 Idempotency-Key 设置；
+	// nil 表示调用方没带这个头，那时落库层不写幂等记录。
+	//
+	// # 它为什么在这里
+	//
+	// 幂等记录必须与预留写在**同一个事务**里（只记了幂等而没预留，重试会
+	// 被告知「已处理」而钱没扣；只预留而没记幂等，重试就重复扣费），而
+	// 预留由落库层写。声明跟着请求一起走到那里，就不必再给 SaveReservation
+	// 加一个参数、也不必让编排层转手一次——那条链上每多一个环节，
+	// 就多一个「有人忘了往下传」的位置，而漏传的表现是幂等静默失效。
+	//
+	// 它和 RequestID 一样属于「一次请求在持久化那一侧的身份」，
+	// 不是计费口径：它不参与任何金额的计算。
+	Idempotency *idempotency.Claim
 }
 
 // Reservation 是预留的结果，调用方需要把它落库。

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/idempotency"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -194,6 +195,82 @@ func TestDuplicateReservationRejected(t *testing.T) {
 	_, err := s.SaveReservation(ctx, testRequest(userID, requestID), reservation(t, userID, requestID, "10", "CNY"))
 	if err == nil {
 		t.Fatal("重复的 request_id 应当被唯一键挡下")
+	}
+}
+
+// 撞键的那次预留**整个回滚**：一分钱没冻，也没多出一行账单。
+//
+// # 这是「幂等记录与预留同一个事务」唯一能从外面看见的一面
+//
+// 把幂等记录挪到预留提交之后单独写，绝大多数行为**完全一样**——同键照样
+// 只扣一次钱、照样重放。区别只在这一个窗口：撞键的请求先把钱冻住、再发现
+// 自己没抢到键。两者不在一个事务里，那笔冻结就留下来了。
+//
+// 而它没有任何东西会报出来：账单停在 pending、余额与账本两边都自洽、
+// 对账只看那两样。用户看到的是「额度莫名少了一笔」，直到某个超时把它解冻，
+// 或者永远不解冻。
+//
+// # 为什么不用「余额不足」那条路来证明
+//
+// 那条路（余额 0 的用户）在两种写法下表现相同：预留插不进去就返回了，
+// 根本走不到写幂等记录那一步。它能证明「记录没留下来」，但证不了
+// 「两者在同一个事务里」——这正是这个用例存在的理由。
+func TestClaimConflictRollsBackReservation(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	apiKeyID := seedAPIKey(t, db, userID)
+	claim := &idempotency.Claim{
+		APIKeyID: apiKeyID,
+		Key:      "claim-rollback-" + itoa(nextID()),
+		Hash:     [32]byte{0x11},
+	}
+
+	// 第一次：正常占住这个键。
+	firstID := reqID(t)
+	firstReq := testRequest(userID, firstID)
+	firstReq.Idempotency = claim
+	firstReservationID, err := s.SaveReservation(ctx, firstReq, reservation(t, userID, firstID, "10", "CNY"))
+	if err != nil {
+		t.Fatalf("第一次预留失败: %v", err)
+	}
+	_, frozenBefore := walletOf(t, db, userID)
+
+	// 第二次：同一个键、另一次请求。它会先把钱冻住，再在写幂等记录时
+	// 发现键已被占住。
+	secondID := reqID(t)
+	secondReq := testRequest(userID, secondID)
+	secondReq.Idempotency = claim
+	// 错误单独接一个名字，不遮蔽上面那个 err：遮蔽掉的话，这一行之后
+	// 任何一处用到「第一次那个 err」都会静默地读到这一个。
+	_, claimErr := s.SaveReservation(ctx, secondReq, reservation(t, userID, secondID, "10", "CNY"))
+	if !errors.Is(claimErr, idempotency.ErrClaimed) {
+		t.Fatalf("第二次预留的错误 = %v，期望 ErrClaimed——它是竞态信号，不是失败", claimErr)
+	}
+
+	if _, frozenAfter := walletOf(t, db, userID); frozenAfter != frozenBefore {
+		t.Errorf("撞键后冻结额 = %s，期望仍为 %s——那次预留没有回滚，这笔钱白白冻着，"+
+			"而账单停在 pending、账本与余额两边自洽，没有任何东西会报出来",
+			frozenAfter, frozenBefore)
+	}
+	if n := countRequests(t, db, secondID); n != 0 {
+		t.Errorf("撞键的请求留下了 %d 行账单，期望 0 行", n)
+	}
+
+	// 键仍然指着第一次那次预留：撞键的请求没能把它改指向自己。
+	rec, err := idempotency.New(db).Lookup(ctx, apiKeyID, claim.Key)
+	if err != nil {
+		t.Fatalf("读幂等记录失败: %v", err)
+	}
+	if rec.BillingRequestID != firstReservationID {
+		t.Errorf("幂等记录指向的预留 = %d，期望 %d（第一次那次）",
+			rec.BillingRequestID, firstReservationID)
+	}
+	if rec.State != idempotency.StateInProgress {
+		t.Errorf("撞键后记录状态 = %q，期望仍是 %q——撞键的那次什么都没做成",
+			rec.State, idempotency.StateInProgress)
 	}
 }
 
