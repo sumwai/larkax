@@ -490,7 +490,19 @@ type Hooks struct {
 	//
 	// 出错时**返回的用量整个忽略**（两条路都一样）：让一个出错的决策方决定
 	// 金额，方向正好反了——它多半交回来的就是零值。
-	OnUsage func(ctx context.Context, usage channel.Usage) (channel.Usage, error)
+	//
+	// # outbound 是这次请求实际发出去的那份
+	//
+	// 它与 route.Result.OutboundRequest / route.StreamResult.OutboundRequest
+	// 同一个口径：最后一次尝试真的交出去的那个请求对象（含别名上应用过的
+	// 参数覆盖），一次都没发出去时是 nil。两条路给的都是**没退回**的那一份
+	// ——退回调用方那份是采快照用的（见 snapshotRequest），不是这里。
+	//
+	// 它在这里交出去，是因为「这次调用真的允许生成多少」这件事只有网关在
+	// 这一刻答得出来：入口层手上那份是调用方原样发来的，覆盖还没应用；而那
+	// 份请求要等选路之后才存在。用量与它一起给，调用方就不必再去别处拼一份
+	// ——拼第二份就是第二处，两处迟早不一致。
+	OnUsage func(ctx context.Context, usage channel.Usage, outbound *channel.Request) (channel.Usage, error)
 }
 
 // ErrNoExecutor 表示没有配置调上游的能力。
@@ -636,7 +648,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 	// 计费口径上的说法。两者不一致时，以谁为准是插件契约里明确划过的：
 	// 上报只改计费，不改上游实际发生了什么。
 	if hooks.OnUsage != nil {
-		usage, hookErr := hooks.OnUsage(ctx, out.Usage)
+		usage, hookErr := hooks.OnUsage(ctx, out.Usage, routed.OutboundRequest)
 		if hookErr != nil {
 			// 阻断型插件失败：这次请求失败。与非流式那条路上的 onResponse
 			// 同一个处置——响应还没发出去，所以「失败」有可表达的对象。

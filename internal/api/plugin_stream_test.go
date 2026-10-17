@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -18,8 +20,9 @@ import (
 // 断在任何一段上，调用方看到的都是一条**正常的流**与一份**正常的账单**。
 
 // streamBody1000 与 streamBody 只差 max_tokens：onUsage 上报的用量要过
-// 「客户端给的 max_tokens」那道输出上界（见 plugin.UsageBound），上界比
-// 上报值小的时候一次合法上报也会被拒——那会把用例的判据变成上界而不是接线。
+// 「这次请求实际发出的那份 max_tokens」那道输出上界（见 plugin.UsageBound），
+// 上界比上报值小的时候一次合法上报也会被拒——那会把用例的判据变成上界而不是
+// 接线。
 const streamBody1000 = `{"model":"m-1","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":1000}`
 
 // ── onStream ──────────────────────────────────────────────────────────
@@ -171,58 +174,161 @@ func TestOnUsageStreamReportIsWhatGetsBilled(t *testing.T) {
 	})
 }
 
-// UsageBound.MaxOutputTokens 必须是**客户端原始的** max_tokens，即 onRequest
-// 补丁**之前**的那个值。
+// pluginOverrides 按渠道给出别名上的参数覆盖，代表商家在这些渠道上配了覆盖。
 //
-// # 为什么这一条最要紧
-//
-// 上界与上报值由同一方控制时，两者一起放大就等于没有上界（见 UsageBound）。
-// 补丁之后的值是**插件自己挑的**，把它当上界等于把这道检查交回插件手里：
-// 插件把 max_tokens 调到 10、再照着自己的口径报一个数，报多少这道检查都点头。
-//
-// 这个坑的形状很特别——**两个方向都不会报错**。传补丁前的值，一次越界上报
-// 被拒、账单退回内核的值；传补丁后的值，一次合法上报被拒、账单同样退回内核
-// 的值。两次请求都是 200，日志里都只有一条「上报被拒」，差别只在**哪一次**
-// 被拒上。所以判据必须用字面量把「哪一份上报被接受了」钉住，不能只断言
-// 「出过一条拒绝」。
-func TestUsageBoundIsTheClientsOriginalMaxTokens(t *testing.T) {
-	// 客户端给 1000，插件把它调到 10——于是两个候选上界之间差了 100 倍，
-	// 而上报值 100 正好落在中间：按客户端那个值判是界内，按补丁后的值判是越界。
-	const body = `{"model":"m-1","messages":[{"role":"user","content":"hi"}],"max_tokens":1000}`
-	const patch = `onRequest(){ return { body: { max_tokens: 10 } }; }, `
+// 它同时当两条路的来源用：route 用它把覆盖应用到**实际发出去的那份**请求上，
+// gateway 用它算预留上界（见 Gateway.AliasOverrides）。生产里这两处填的是
+// 同一个 *catalog.Catalog，用例里也得是同一份——分成两份时，「发出去的那个
+// 数」与「预留那个数」会来自两次不同的读。
+type pluginOverrides map[int64]map[string]any
 
-	t.Run("落在两个上界之间：按客户端的值判，接受", func(t *testing.T) {
-		h := newPluginHarness(t, pluginRegistry(t, "",
-			patch+`onUsage(){ return { completionTokens: 100 }; }`))
+func (o pluginOverrides) Alias(_ context.Context, channelID int64, canonical string) (string, map[string]any, error) {
+	return canonical, o[channelID], nil
+}
 
-		rec := post(h.handler, PathChatCompletions, body)
-		if rec.Code != http.StatusOK {
+func (o pluginOverrides) OverridesFor(_ context.Context, _ string, channelIDs []int64) (map[int64]map[string]any, error) {
+	out := map[int64]map[string]any{}
+	for _, id := range channelIDs {
+		if v, ok := o[id]; ok {
+			out[id] = v
+		}
+	}
+	return out, nil
+}
+
+// 给插件上报用量划的那条上界取自**这次请求实际发出的那份** max_tokens。
+//
+// # 为什么不是调用方原样发来的那个数
+//
+// 别名上的参数覆盖（`model_aliases.overrides`）会把 `max_tokens` 顶大，而它是
+// 逐渠道配的、在选路之后才应用到发出去的那份请求上（见 route.upstreamRequest），
+// 比调用方那份晚得多。拿调用方的数当上界时，这种请求里插件报一个合法、但大于
+// 调用方原值的用量会被**整份丢掉**：请求 200、响应正确、账单退回内核的用量
+// ——插件那一侧看到的是一次静默失败，与「插件没被调用」长得一样。
+//
+// # 为什么也不是插件挑的那个数
+//
+// 上界与上报值由同一方控制时，两者一起放大就等于没有上界（见
+// plugin.UsageBound）。所以上界只在**发出去的那份请求**上读一次，而插件把它
+// 抬高这条路是堵住的：补丁只许把 `max_tokens` 调小（见 patch.go），调大被拒时
+// 整份补丁都不生效，于是插件只能把这条线往下改。能把它抬高的只有商家配的
+// 别名覆盖——那是配置，不是上报方。
+//
+// # 判据为什么落在结算的用量上
+//
+// 两个方向都不会报错：传调用方原值，一次合法上报被拒、账单退回内核那份；传
+// 发出去那份，一次越界上报被拒、账单同样退回内核那份。两次请求都是 200，
+// 日志里都只有一条「上报被拒」，差别只在**哪一次**被拒上。所以断言必须是
+// 字面量，而且要先断言「覆盖真的应用到了交出去的那份请求上」——少了那个前提，
+// 用例会红在一个看不出原因的地方。
+func TestUsageBoundFollowsTheSentRequest(t *testing.T) {
+	const (
+		clientMaxTokens = 64
+		overridden      = 4096
+		reported        = 100
+	)
+	const clientBody = `{"model":"m-1","messages":[{"role":"user","content":"hi"}],"max_tokens":64}`
+	const clientStreamBody = `{"model":"m-1","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":64}`
+	send := func(t *testing.T, h *pluginHarness, body string) {
+		t.Helper()
+		if rec := post(h.handler, PathChatCompletions, body); rec.Code != http.StatusOK {
 			t.Fatalf("状态码 = %d，响应体 %s", rec.Code, rec.Body)
 		}
-		if got := h.executor.reqs[0].MaxTokens; got != 10 {
-			t.Fatalf("上游收到的 max_tokens = %d，期望 10（补丁要先生效，否则这条用例测的不是上界）", got)
+	}
+	sentMaxTokens := func(t *testing.T, h *pluginHarness) int64 {
+		t.Helper()
+		if len(h.executor.reqs) != 1 {
+			t.Fatalf("上游被调用 %d 次，期望 1 次", len(h.executor.reqs))
 		}
+		return int64(h.executor.reqs[0].MaxTokens)
+	}
+	billed := func(t *testing.T, h *pluginHarness) int64 {
+		t.Helper()
 		if len(h.settlements.saved) != 1 {
 			t.Fatalf("结算落库 %d 次，期望 1 次", len(h.settlements.saved))
 		}
-		// 100 而不是内核的 5：只有把补丁**之前**的 1000 当上界，这份上报才进得来。
-		// 传补丁后的 10 时这里是 5——用例会红，而请求仍然是 200。
-		if got := h.settlements.saved[0].Usage.CompletionTokens; got != 100 {
-			t.Errorf("输出 token = %d，期望 100（上界该是客户端原始的 max_tokens=1000，"+
-				"不是插件补丁之后的 10；是 5 就说明上界被交回插件手里了）", got)
+		return h.settlements.saved[0].Usage.CompletionTokens
+	}
+	reporting := func(n int) string {
+		return fmt.Sprintf(`onUsage(){ return { completionTokens: %d }; }`, n)
+	}
+	// 调用方给 64、别名覆盖成 4096：两个候选上界之间差 64 倍，而上报值 100
+	// 正好落在中间——按发出去那份判是界内，按调用方原值判是越界。
+	overriding := pluginOverrides{1: {"max_tokens": overridden}}
+
+	t.Run("别名把上界顶大：介于两者之间的上报被接受", func(t *testing.T) {
+		h := newPluginHarnessWith(t, pluginRegistry(t, "", reporting(reported)), overriding)
+		send(t, h, clientBody)
+
+		if got := sentMaxTokens(t, h); got != overridden {
+			t.Fatalf("上游收到的 max_tokens = %d，期望 %d（别名覆盖要先生效，否则这条用例测的不是上界）", got, overridden)
+		}
+		// 100 而不是内核那份 5：只有把发出去那份的 4096 当上界，这份上报才进得来。
+		// 按调用方原值 64 判时这里是 5——请求仍然是 200。
+		if got := billed(t, h); got != reported {
+			t.Errorf("输出 token = %d，期望 %d（上界该取实际发出那份的 max_tokens=%d，不是调用方原值 %d；"+
+				"是 5 就说明上界读得太早）", got, reported, overridden, clientMaxTokens)
 		}
 	})
 
-	t.Run("超过客户端的值：拒绝，退回内核的用量", func(t *testing.T) {
-		h := newPluginHarness(t, pluginRegistry(t, "",
-			patch+`onUsage(){ return { completionTokens: 2000 }; }`))
-
-		rec := post(h.handler, PathChatCompletions, body)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("非阻断型插件的越界上报不该让请求失败，状态码 = %d，响应体 %s", rec.Code, rec.Body)
+	// 流式那条路上这个值走的是另一段接线（网关把发出去的那份请求带进后台的
+	// 收尾 goroutine），所以两条路各钉一遍：只钉一条时，另一条上插件静默失效。
+	t.Run("流式那条路上同样按发出去的那份判", func(t *testing.T) {
+		h := newPluginHarnessWith(t, pluginRegistry(t, "", reporting(reported)), overriding)
+		h.executor.stream = []channel.StreamEvent{
+			{Kind: "delta", Text: "一"},
+			{Kind: "usage", Usage: &channel.Usage{PromptTokens: 10, CompletionTokens: 5}},
+			{Kind: "done"},
 		}
-		if got := h.settlements.saved[0].Usage.CompletionTokens; got != 5 {
+		send(t, h, clientStreamBody)
+
+		if got := sentMaxTokens(t, h); got != overridden {
+			t.Fatalf("上游收到的 max_tokens = %d，期望 %d", got, overridden)
+		}
+		if got := billed(t, h); got != reported {
+			t.Errorf("输出 token = %d，期望 %d（流式那条路上的上界同样是发出去那份）", got, reported)
+		}
+	})
+
+	t.Run("超过有效值：整份丢掉，按内核的用量计费", func(t *testing.T) {
+		h := newPluginHarnessWith(t, pluginRegistry(t, "", reporting(overridden+1)), overriding)
+		send(t, h, clientBody)
+
+		if got := billed(t, h); got != 5 {
 			t.Errorf("输出 token = %d，期望 5（越界的上报整份丢掉，按内核的值计费）", got)
+		}
+	})
+
+	// 上界绝不取自插件挑的那个数：插件想把 `max_tokens` 往上调来给自己争一个
+	// 更大的上界时，补丁被拒（见 patch.go 的 errMaxTokensRaised）、整份不生效，
+	// 于是发出去的仍是调用方那个 64——报 100 照样越界。
+	t.Run("插件把 max_tokens 往上调：补丁被拒，上界不动", func(t *testing.T) {
+		h := newPluginHarness(t, pluginRegistry(t, "",
+			`onRequest(){ return { body: { max_tokens: 999999 } }; }, `+reporting(reported)))
+		send(t, h, clientBody)
+
+		if got := sentMaxTokens(t, h); got != clientMaxTokens {
+			t.Fatalf("上游收到的 max_tokens = %d，期望 %d（调大的补丁该整份不生效）", got, clientMaxTokens)
+		}
+		if got := billed(t, h); got != 5 {
+			t.Errorf("输出 token = %d，期望 5（上界没被插件抬高，这份上报仍越界）", got)
+		}
+	})
+
+	// 反过来那一半：补丁把 `max_tokens` 调小之后，上界跟着**发出去的那份**变小，
+	// 于是报一个大于它的数会被拒。这条是口径的直接后果，不是漏了——上界要跟发
+	// 出去的那份一致，而那一份带的就是调小后的值。越界只丢上报，账单退回内核
+	// 的用量，不会少收。
+	t.Run("补丁把 max_tokens 调小：上界跟着变小", func(t *testing.T) {
+		h := newPluginHarness(t, pluginRegistry(t, "",
+			`onRequest(){ return { body: { max_tokens: 10 } }; }, `+reporting(reported)))
+		send(t, h, `{"model":"m-1","messages":[{"role":"user","content":"hi"}],"max_tokens":1000}`)
+
+		if got := sentMaxTokens(t, h); got != 10 {
+			t.Fatalf("上游收到的 max_tokens = %d，期望 10", got)
+		}
+		if got := billed(t, h); got != 5 {
+			t.Errorf("输出 token = %d，期望 5（上界是发出去那份的 10，报 100 越界）", got)
 		}
 	})
 }

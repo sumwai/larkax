@@ -777,11 +777,15 @@ func (h *Handler) pluginHooks(sess *plugin.Session, requestID, canonicalModel st
 			}
 			return err
 		},
-		OnUsage: func(ctx context.Context, usage channel.Usage) (channel.Usage, error) {
+		OnUsage: func(ctx context.Context, usage channel.Usage, outbound *channel.Request) (channel.Usage, error) {
 			// 合并这一步在插件包里（见 plugin.Session.ApplyUsage）：一次
 			// 越界的上报会被整份丢掉，而丢掉必须记进会话才看得见——那两个
 			// 方法未导出，在包外接不出来。
-			return sess.ApplyUsage(ctx, requestID, string(protocol), usage)
+			//
+			// outbound 是**实际发出去的那份请求**，插件上报用量的上界从它上面
+			// 读（见 plugin.UsageBound）：别名把 max_tokens 顶大之后，上界要
+			// 跟着走，而覆盖是逐渠道配的、到这里才定得下来。
+			return sess.ApplyUsage(ctx, requestID, string(protocol), usage, outbound)
 		},
 	}
 }
