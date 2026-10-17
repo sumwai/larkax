@@ -58,6 +58,8 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl user create --name <用户名>     创建用户（stdout 只有新用户的 ID）
   larkaxctl wallet open --user <用户> [--asset <资产>]
                                            给用户开通钱包（余额 0）
+  larkaxctl wallet credit --user <用户> --amount <金额> --order <幂等键>
+                                           运营手工入账（写账本分录）
   larkaxctl apikey create --user <用户>     创建一把 API Key（明文只打印这一次）
   larkaxctl apikey update --id <ID>        改一把已有 API Key 的额度
   larkaxctl apikey list [--user <用户>]     列出 API Key 及其额度
@@ -95,7 +97,8 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   1  其他失败
   2  命令行参数错（缺字段、取值解析不了、标志组合不对）
   3  连不上数据库
-  4  约束冲突（唯一键、外键、要改或要查的那一行不存在）
+  4  约束冲突（唯一键、外键、要改或要查的那一行不存在；
+     同一幂等键已经对应另一笔入账）
 
 写入路径自己校验出来的参数问题（作用域与归属的组合、表达式编译不过、
 渠道类型不认识）归入 1，不是 2。
