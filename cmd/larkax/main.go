@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pricing"
 	"github.com/sumwai/larkax/internal/settings"
+	"github.com/sumwai/larkax/internal/tokens"
 	"github.com/sumwai/larkax/internal/upstream"
 )
 
@@ -132,7 +134,7 @@ func run() error {
 
 	servers := []namedServer{{name: "internal", srv: internalSrv}}
 
-	public, err := publicHandler(cfg, handle, values, logger)
+	public, err := publicHandler(ctx, cfg, handle, values, logger)
 	if err != nil {
 		return err
 	}
@@ -169,7 +171,12 @@ func newInternalHandler(checks []observe.ReadinessCheck) http.Handler {
 // 注意它捕获一切路径，包括 /healthz。健康检查要配到 internal 端口；
 // 配到这里的实例会拿到 501 并被编排系统摘除。上了负载均衡后这是真实的
 // 误配陷阱，所以健康检查只注册在 internalMux 上。
-func publicHandler(cfg *config.Config, handle *sql.DB, values *settings.Values, logger *slog.Logger) (http.Handler, error) {
+//
+// 它在返回之前把词表预热掉（见 warmVocab）：调用方拿到 handler 之后才去
+// 监听端口，所以这个位置就等于「端口可用之前」。预热放在这里而不是
+// run 里，是因为 worker 角色在上面就返回了——它不接推理流量，也不该付
+// 这份启动成本。
+func publicHandler(ctx context.Context, cfg *config.Config, handle *sql.DB, values *settings.Values, logger *slog.Logger) (http.Handler, error) {
 	// 公共端口的形状由**角色**决定，而不是从「有没有主密钥」反推角色。
 	// 两者今天恰好等价，但把判据写成角色本身，才不会在改动 NeedsMasterKey
 	// 或增删角色时静默地换掉某个角色的行为。
@@ -205,6 +212,7 @@ func publicHandler(cfg *config.Config, handle *sql.DB, values *settings.Values, 
 	// 在日志里长得一样，而前者的现场是每个请求都报未知渠道类型。
 	logger.Info("上游适配器已注册", "types", strings.Join(executor.Types(), ","))
 
+	//nolint:contextcheck // 这个 ctx 是给下面 warmVocab 的：Build 有意不收 context（见 assembly 里 pluginLoadTimeout 的注释）
 	app, err := assembly.Build(assembly.Config{
 		DB:       handle,
 		Sealer:   sealer,
@@ -217,8 +225,58 @@ func publicHandler(cfg *config.Config, handle *sql.DB, values *settings.Values, 
 	if err != nil {
 		return nil, err
 	}
+	// 计数器由装配层建好（它没有第二种实现），这里只是拿到它并预热。
+	warmVocab(ctx, app.Gateway.Counter, logger)
 	logger.Info("公共入口已装配", "snapshots", app.Snapshots.Collecting())
 	return app.Public, nil
+}
+
+// warmVocab 预热分词词表，把词表加载的成本从第一个请求挪到启动期。
+//
+// # 为什么放在监听端口之前
+//
+// 词表是惰性加载的（见 tokens.NewCounter）：不预热时，第一次走到精确计数
+// 那条路要多花约 25ms，而那一次恰好是某个用户第一次调用某个模型——落在
+// 最不该慢的那一次上。两种放法都有代价：放前面，端口晚约 43ms 可用；
+// 放后面（起个 goroutine），则「预热还没完就有请求进来」时那个请求会在
+// tokens 的互斥锁上等到加载结束，成本原样推回给用户，只是窗口小了几十
+// 毫秒。只有放前面能保证「没有任何请求为词表加载付过时间」，所以选前面。
+//
+// # 为什么失败只记日志
+//
+// 不预热只是慢，不是不能用：词表会惰性加载，计数结果一样，只是那一次请求
+// 多花约 25ms。把它升级成启动失败，等于用「实例起不来」去换「第一个请求
+// 慢一点」——代价的方向反了。所以这里只记一条日志，让「这台机器上预热没
+// 成功」在启动日志里留下痕迹，而不是安静地退化。
+//
+// # 为什么不写进 assembly.Build
+//
+// Build 的契约是「要么能用，要么启动就失败」（见它的包注释），而这一步
+// 恰恰**不能**失败；Build 也没有 context（理由见它里面 pluginLoadTimeout
+// 的注释），而 Prepare 需要一个放弃点（见它的注释）。启动期的取舍与日志
+// 本来就属于 cmd/larkax：放在这里，与「开始监听」在同一条时间线上，
+// 顺序一眼可见。
+func warmVocab(ctx context.Context, counter *tokens.Counter, logger *slog.Logger) {
+	durations, err := counter.Prepare(ctx)
+	if err != nil {
+		logger.Warn("词表预热失败，退到首次使用时惰性加载", "err", err)
+		return
+	}
+	// 逐种编码的耗时，排序后打：日志里 map 的顺序不固定，同一个部署两次
+	// 启动打出来的两行会不一样，而这类日志正是拿来前后对比的。
+	parts := make([]string, 0, len(durations))
+	for enc, d := range durations {
+		parts = append(parts, fmt.Sprintf("%s=%s", enc, d.Round(time.Millisecond)))
+	}
+	sort.Strings(parts)
+	// 两个字段是同一个结论的两次独立观测：durations 是 Prepare 自己记的
+	// 加载耗时，encodings 是词表集合的实际内容。只打「预热完成」的话，
+	// 「一种都没解开」与「都解开了」在日志里长得一样；而两者若哪天真对不上
+	// （Prepare 说加载了、集合里没有），这一行会把它摆出来。
+	logger.Info("词表已预热",
+		"encodings", strings.Join(counter.Loaded(), ","),
+		"durations", strings.Join(parts, " "),
+	)
 }
 
 // workerPlaceholder 是 worker 角色的公共端口占位响应。
