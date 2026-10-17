@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -240,6 +241,103 @@ func (c *logCapture) text() string {
 	return c.buf.String()
 }
 
+// ── 次序的观测点 ──────────────────────────────────────────────────────
+//
+// 「写回结局」与「写出响应」谁在前，从最终状态上看不出来：happy path 上
+// 无论哪一步先做，记录最后都是 completed、响应最后都是 200。要分辨次序，
+// 就得让两件事各自留下**带次序**的痕迹——下面这一对桩写同一份事件日志，
+// 日志里谁先谁后就是被测的那个次序。
+//
+// 这与「让写回失败、看响应有没有发出去」是两条独立的判据：那条看的是后果，
+// 这条看的是次序本身。
+
+const (
+	// eventOutcome 是「写回结局」这件事在日志里的名字。
+	eventOutcome = "写回结局"
+	// eventResponse 是「响应开始发出去」这件事在日志里的名字。
+	eventResponse = "写出响应"
+)
+
+// eventLog 是一串带次序的事件。
+type eventLog struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (l *eventLog) add(e string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = append(l.events, e)
+}
+
+func (l *eventLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.events...)
+}
+
+// orderWriter 把「响应开始发出去」记进事件日志。
+//
+// 只记**第一次**写：一次响应写多少帧与次序无关，而流式那条路会写很多次，
+// 每次都记的话日志会长到看不出先后。
+type orderWriter struct {
+	log    *eventLog
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func newOrderWriter(log *eventLog) *orderWriter {
+	return &orderWriter{log: log, header: http.Header{}}
+}
+
+func (w *orderWriter) Header() http.Header { return w.header }
+
+func (w *orderWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+		w.log.add(eventResponse)
+	}
+}
+
+func (w *orderWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.body.Write(p)
+}
+
+// Flush 让流式那条路能跑起来：serveStream 每一帧之后都 flush，
+// 缺了它首帧会被判成写失败，测到的就不是次序而是别的东西。
+func (w *orderWriter) Flush() {}
+
+// orderingStore 在 fakeIdem 之上，把「写回结局」记进同一份事件日志。
+type orderingStore struct {
+	*fakeIdem
+	log *eventLog
+}
+
+func (s *orderingStore) Complete(ctx context.Context, apiKeyID int64, key string, status int, contentType string, body []byte) error {
+	s.log.add(eventOutcome)
+	return s.fakeIdem.Complete(ctx, apiKeyID, key, status, contentType, body)
+}
+
+func (s *orderingStore) Fail(ctx context.Context, apiKeyID int64, key string) error {
+	s.log.add(eventOutcome)
+	return s.fakeIdem.Fail(ctx, apiKeyID, key)
+}
+
+// postIdemTo 与 postIdem 相同，但把响应写进调用方给的 ResponseWriter。
+//
+// 次序那两条用例要的不是 httptest 的 recorder，而是一个会在写出的那一刻
+// 记一笔的 ResponseWriter。
+func postIdemTo(h *Handler, w http.ResponseWriter, path, body, idemKey string) {
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(idempotency.HeaderName, idemKey)
+	h.ServeHTTP(w, req)
+}
+
 // 没有这个头时，幂等那一层一步都不该被碰。
 //
 // 这是「行为完全不变」在入口这一层的证据：不查库、不写记录、请求上也
@@ -470,6 +568,19 @@ func TestIdempotentStoresRenderedResponse(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200", rec.Code)
 	}
+	// 响应本身一个字都不该变。这里先钉住**发出去的那一份**（状态码、两个
+	// 响应头、响应体），下面再钉住**留档的那一份**；两条一起才说明留档的
+	// 就是发出去的那份——只查留档那份的话，它自己与自己对得上就够了。
+	if got := rec.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
+		t.Errorf("Content-Type = %q，期望 application/json; charset=utf-8", got)
+	}
+	if got := rec.Header().Get(HeaderVersion); got != "v0.1.0-test" {
+		t.Errorf("%s = %q，期望 v0.1.0-test——响应头是入口在分派之前写上的，"+
+			"攒住响应那一步不能把它弄丢", HeaderVersion, got)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"chat.completion"`)) {
+		t.Errorf("响应体不是那份成功响应：%s", rec.Body)
+	}
 	// 声明必须跟着请求走到落库层：少了它，幂等记录与预留就写不到一个事务里。
 	if chatter.req.Idempotency == nil {
 		t.Fatal("请求上没有幂等声明——落库层不会写幂等记录")
@@ -552,22 +663,38 @@ func TestIdempotentMissingRecordDoesNotLogWriteFailure(t *testing.T) {
 	}
 }
 
-// 记录在、但真的写不进去时**仍然**要打那条 ERROR。
+// 记录在、但真的写不进去时：响应**不发出去**，改回 500，并且仍然要打那条 ERROR。
 //
-// 与上一条配对：只有两条都在，才能说明这里做的是「把两种 0 行分开」，
-// 而不是「把告警关掉」。这条里记录停在 in_progress（写失败的就是它），
-// 而那正是那条日志存在的全部理由——同键的下一次请求会一直等到自己的
-// 超时才拿到 409，真正的原因只在这条日志里。
-func TestIdempotentWriteFailureStillLogs(t *testing.T) {
-	h, store, _ := idemHandler()
+// # 这一条同时钉住两件事
+//
+//   - **次序的后果**：正因为写回排在响应之前，这时才有得选。把次序改回去
+//     （先发响应、再写回），这里拿到的就是 200——一个 ResponseRecorder 上
+//     写不出两个状态码，所以这个差别在响应上是看得见的。
+//   - **那条告警还在**：它是「记录停在 in_progress」唯一的信号，降级成 Debug
+//     与删掉它在现场是同一件事（默认级别下没人看得见）。
+//
+// 代价要说清楚：这一次上游真的调过、钱也真的扣了，而调用方拿不到答案。
+// 换来的是「收到成功」与「记录说成功」不再能各说各话——另一个选择是照常发
+// 响应、只记日志，那会留下「调用方手里是 200、记录里说还在跑」这种状态。
+func TestIdempotentWriteFailureWithholdsResponse(t *testing.T) {
+	h, store, chatter := idemHandler()
 	store.writeErr = errors.New("placeholder: 数据库写不进去")
 
 	logs := &logCapture{}
 	ctx := observe.WithLogger(context.Background(), logs.logger())
 
 	rec := postIdemCtx(ctx, h, PathChatCompletions, validBody, "key-write-fail")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("状态码 = %d，期望 200（写库失败改不了已经发出去的响应）。响应体：%s", rec.Code, rec.Body)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("状态码 = %d，期望 500——结局没写回时那份响应不该发出去。响应体：%s",
+			rec.Code, rec.Body)
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(`"chat.completion"`)) {
+		t.Errorf("发出去的还是上游那份成功响应——它本该被扣住：%s", rec.Body)
+	}
+	// 上游确实被调过：这不是「请求没跑」，是「跑完了但结局没记下」。
+	if chatter.calls != 1 {
+		t.Errorf("上游被调用了 %d 次，期望 1 次", chatter.calls)
 	}
 
 	got := logs.text()
@@ -580,6 +707,96 @@ func TestIdempotentWriteFailureStillLogs(t *testing.T) {
 	}
 	if !strings.Contains(got, "key-write-fail") {
 		t.Errorf("那条日志里没有键名——排查时它是唯一的入口\n日志：%s", got)
+	}
+}
+
+// 非流式那条路上，结局写在响应**之前**。
+//
+// # 为什么必须让两件事各自留痕
+//
+// 只断言「记录最后是 completed、响应是 200」的用例，两种写法都能过：把写回
+// 挪到响应之后，happy path 的最终状态一模一样。所以这里让写回与写出写同一份
+// 事件日志，断言的是**次序本身**。
+func TestIdempotentWritesOutcomeBeforeResponse(t *testing.T) {
+	h, store, _ := idemHandler()
+	log := &eventLog{}
+	h.Idempotency = &orderingStore{fakeIdem: store, log: log}
+
+	w := newOrderWriter(log)
+	postIdemTo(h, w, PathChatCompletions, validBody, "key-order")
+
+	// 前提先查：两件事都真的发生过。少任何一件，下面那条断言都可能因为
+	// 「日志里只有一项」而以另一种方式成立。
+	if len(store.completed()) != 1 {
+		t.Fatalf("写回被调用了 %d 次，期望 1 次——没写回就没有次序可言", len(store.completed()))
+	}
+	if w.status == 0 {
+		t.Fatal("一个字节都没写出去——没写出响应也没有次序可言")
+	}
+
+	if got := log.snapshot(); !slices.Equal(got, []string{eventOutcome, eventResponse}) {
+		t.Errorf("事件次序 = %v，期望 [%s %s]——结局要写在响应之前，"+
+			"否则「调用方手里是 200」与「记录里说还在跑」可以同时成立",
+			got, eventOutcome, eventResponse)
+	}
+	if w.status != http.StatusOK {
+		t.Errorf("状态码 = %d，期望 200——排序不该改变响应本身", w.status)
+	}
+	if !bytes.Contains(w.body.Bytes(), []byte(`"chat.completion"`)) {
+		t.Errorf("发出去的不是那份成功响应：%q", w.body.Bytes())
+	}
+}
+
+// 流式那条路上次序**相反**：响应先出去，结局后写回。
+//
+// 它是上一条的对照，钉的是「流式那条路一行都没改」：流式的结局要等流收到
+// 结束事件才知道，而响应是边生成边发的，没有「还没发出去」这个时刻。
+// 把它的处置改成非流式那样（攒住再发），这条会挂。
+func TestStreamWritesOutcomeAfterResponse(t *testing.T) {
+	h, store, chatter := idemHandler()
+	log := &eventLog{}
+	h.Idempotency = &orderingStore{fakeIdem: store, log: log}
+	chatter.streamResult = &gateway.Result{Events: streamOf(
+		channel.StreamEvent{Kind: "delta", Text: "你好"},
+		channel.StreamEvent{Kind: "done"},
+	)}
+
+	w := newOrderWriter(log)
+	postIdemTo(h, w, PathChatCompletions, streamBody, "key-stream-order")
+
+	if len(store.completed()) != 1 {
+		t.Fatalf("写回被调用了 %d 次，期望 1 次", len(store.completed()))
+	}
+	if got := log.snapshot(); !slices.Equal(got, []string{eventResponse, eventOutcome}) {
+		t.Errorf("事件次序 = %v，期望 [%s %s]——流式的响应边生成边发，"+
+			"结局只能等流结束之后才写回", got, eventResponse, eventOutcome)
+	}
+	if w.status != http.StatusOK {
+		t.Errorf("状态码 = %d，期望 200", w.status)
+	}
+	if !bytes.Contains(w.body.Bytes(), []byte("data: [DONE]")) {
+		t.Errorf("流没写完：%q", w.body.Bytes())
+	}
+}
+
+// 流式那条路上写回失败**照旧**把响应发出去：没有「扣住」这个选项。
+//
+// 与 TestIdempotentWriteFailureWithholdsResponse 配对：两条一起才说明处置是
+// 按「响应还在不在手里」分的，而不是「所有路径都改成 500」。
+func TestStreamWriteFailureStillSendsResponse(t *testing.T) {
+	h, store, chatter := idemHandler()
+	store.writeErr = errors.New("placeholder: 数据库写不进去")
+	chatter.streamResult = &gateway.Result{Events: streamOf(
+		channel.StreamEvent{Kind: "delta", Text: "你好"},
+		channel.StreamEvent{Kind: "done"},
+	)}
+
+	rec := postIdem(t, h, PathChatCompletions, streamBody, "key-stream-write-fail")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200——帧已经发出去了，改不了状态码。响应体：%s", rec.Code, rec.Body)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("data: [DONE]")) {
+		t.Errorf("流没写完：%q", rec.Body.Bytes())
 	}
 }
 
