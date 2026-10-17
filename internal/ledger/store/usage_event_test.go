@@ -447,7 +447,7 @@ func TestSaveRejectsMissingPricedAt(t *testing.T) {
 //
 // # 为什么 measured 与 estimated 之外还要看 estimator
 //
-// billing_path 只有三档（表上有 CHECK），回答的是「能不能拿去跟上游对账」；
+// billing_path 只有两档（表上有 CHECK），回答的是「能不能拿去跟上游对账」；
 // 「它是怎么来的」由 estimator 说。tokenized 与 estimated 都落 estimated 那一档，
 // 但一个能说明是本地词表数的、一个是启发式估的——两列缺一，事后就分不出
 // 「这次是准的」还是「这次差得多」。
@@ -476,7 +476,7 @@ func TestBillingPathOf(t *testing.T) {
 		}
 	}
 
-	// 未知来源要报错，而不是落一个表上 CHECK 挡得下的值：那一列只有三档，
+	// 未知来源要报错，而不是落一个表上 CHECK 挡得下的值：那一列只有两档，
 	// 表会拦下它，但拦下来的是一句「violates check constraint」。
 	if _, _, err := billingPathOf(tokens.Source(9)); !errors.Is(err, ErrUnknownUsageSource) {
 		t.Errorf("未知来源应当返回 ErrUnknownUsageSource，得到 %v", err)
