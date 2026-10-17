@@ -294,7 +294,11 @@ export default {
 	if f == nil {
 		t.Fatalf("解码死循环应当返回失败，实际出参 = %v", out)
 	}
-	if !errors.Is(f, ErrCallTimeout) {
+	// 判 Kind 而不是用 errors.Is(f, ...)：后者会顺着 Failure.Unwrap 穿到
+	// Cause，而中断错误的 Cause 正好带着超时值——于是一个被折成
+	// ErrBadResult 的失败也能让它通过（这条用例曾经就这样漏掉了
+	// 「解码被中断」那一支）。
+	if !errors.Is(f.Kind, ErrCallTimeout) {
 		t.Errorf("Kind = %v，想要 ErrCallTimeout", f.Kind)
 	}
 	if 花了 < 超时 {
@@ -305,6 +309,59 @@ export default {
 	}
 	if !rt.Unusable() {
 		t.Error("超时之后 runtime 应当是不可用的")
+	}
+}
+
+// 解码被中断时，失败要分类成调用超时，runtime 要变成不可用——两条都要。
+//
+// 上一条靠负载才偶发撞上这一支：这次调用的 deadline（在 call 的 goroutine
+// 里）与 select 上的 time.After 是两条独立的时钟，谁先到不确定。这一条把它
+// 变成确定的：toJSON 里调一个宿主函数，函数在**解码途中**置上中断，于是
+// rt.Call 已经成功返回，中断只可能落在解码上。
+//
+// 两个判据在这条路径上曾经分岔：decode 把中断折成 ErrBadResult（「插件返回
+// 的值不符合契约」），而 call 只按 out.err 判 runaway，看不到 finish 里的
+// 中断。于是「这次调用超时了」成立，runtime 却还是可用的。
+// 解码期间的中断被分类成调用超时，且 runtime 不可用。
+func TestInterruptDuringOutputDecodingMarksRuntimeUnusable(t *testing.T) {
+	m, err := Compile("p", `
+export default {
+  onRequest() { return { text: "ok", toJSON() {
+    globalThis.__larkax.打断();
+    return { text: "ok" };
+  } }; },
+};
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var rt *Runtime
+	host := Host{Capabilities: map[string]any{
+		"打断": HostFunc(func(context.Context, []moejs.Value) (moejs.Value, error) {
+			// 在这里置中断：宿主函数由 toJSON 调起，所以它落在解码里，
+			// 而不是 rt.Call 里。
+			rt.state.rt.Interrupt(ErrCallTimeout)
+			return moejs.Undefined(), nil
+		}),
+	}}
+	rt, err = m.NewRuntime(context.Background(), host, []string{"打断"}, Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+
+	var out map[string]any
+	f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, &out)
+
+	if f == nil {
+		t.Fatalf("解码被中断应当返回失败，实际出参 = %v", out)
+	}
+	if !errors.Is(f.Kind, ErrCallTimeout) {
+		t.Errorf("Kind = %v，想要 ErrCallTimeout（解码被中断不是我掐断的，不是插件写错了）", f.Kind)
+	}
+	if !rt.Unusable() {
+		t.Error("解码被中断之后 runtime 应当是不可用的")
 	}
 }
 
