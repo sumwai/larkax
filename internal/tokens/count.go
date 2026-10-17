@@ -7,7 +7,6 @@ package tokens
 
 import (
 	"context"
-	"errors"
 )
 
 // CountText 计数一段文本。
@@ -71,25 +70,6 @@ func (c *Counter) CountTextEstimated(model, text string) Count {
 		Source: SourceEstimated,
 		Model:  model,
 	}
-}
-
-// RecordMeasured 把上游给的实测值包成计数结果。
-//
-// 它不是「计数」而是「记账」：上游的 usage 已经是权威数字，本包要做的
-// 只是给它打上正确的来源标记。放在这里是因为来源标记属于本包的职责——
-// 让调用方自己构造 Count 就等于把「别忘了标来源」交给每个调用点。
-//
-// tokens 为负时按 0 处理并返回错误：负 token 只可能来自解析错误，
-// 放过去会算出一笔负数消费。
-//
-// **目前没有生产调用方**：上游实测用量那两条路都没有经过它——非流式的在
-// `gateway` 里直接给 SourceMeasured，流式的由 `gateway` 的 streamUsage 给。
-// 留着它是为了让「给实测值打来源标记」这件事有个落点，接线时不必再造一个。
-func RecordMeasured(model string, tokens int64) (Count, error) {
-	if tokens < 0 {
-		return Count{}, errors.New("实测 token 数为负，疑似解析错误")
-	}
-	return Count{Tokens: tokens, Source: SourceMeasured, Model: model}, nil
 }
 
 // estimateRounded 把浮点估算取整。

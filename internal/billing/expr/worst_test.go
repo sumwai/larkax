@@ -44,7 +44,7 @@ var worstUsage = []billing.Usage{
 //
 // 用 billing 的真接口而不是在这里重算一遍：这条测试要证明的正是
 // 「上界足以让结算不撞 Capped」，而撞不撞是 Reserve/Settle 的判断。
-func settle(t *testing.T, p *Program, env Env, maxTokens int64) {
+func settle(t *testing.T, p *Program, source string, env Env, maxTokens int64) {
 	t.Helper()
 
 	// 这条测试只核对**单价**构成的上界，所以把非 token 计量的数量压到 1。
@@ -101,7 +101,7 @@ func settle(t *testing.T, p *Program, env Env, maxTokens int64) {
 	if s.Capped {
 		// Capped 本该是「上界算错了」的信号，不该在正常用量下出现。
 		t.Fatalf("结算撞上 Capped：用量 %+v，预留 %s，实际 %s\n规则: %s",
-			probe.Usage, s.Reserved, s.Actual, p.Source())
+			probe.Usage, s.Reserved, s.Actual, source)
 	}
 	if err := s.Breakdown.Verify(); err != nil {
 		t.Fatalf("明细不自洽: %v", err)
@@ -203,7 +203,7 @@ func TestWorstCaseCoversActual(t *testing.T) {
 						continue
 					}
 					t.Run(ruleName+"/"+timeName, func(t *testing.T) {
-						settle(t, p, env, mt)
+						settle(t, p, source, env, mt)
 					})
 				}
 			}

@@ -25,13 +25,17 @@ package tokens
 //
 // # 保守方向
 //
-// 估算偏高（理由见包注释）。此外还有三条额外的保守约定：
+// 估算偏高（理由见包注释）。此外还有两条额外的保守约定：
 //
 //  1. 每条已开始的消息按其框架开销计费，不因为它「看起来是空的」而跳过。
 //  2. 分片到达但不完整的工具调用参数，按**已收到的片段**算，而不是丢弃。
 //     丢弃会让一次中途断开的工具调用完全不计费——而工具调用恰恰是长输出
 //     场景，也就是金额最大的那一类。
-//  3. 流里若已经带过 usage，一律用实测值（实测永远优先）。
+//
+// 流里已经带过 usage 时**不经过本类型**：实测值优先那条判据由调用方持有
+// （见 internal/gateway/stream.go 的 streamUsage），因为流里的 usage 分着
+// 输入与输出、还带缓存与推理的明细，而本类型的 Count 只有一个总数——
+// 压成一个数之后计费再也拆不回来。本类型只负责「拿不到实测值」那一半。
 
 import (
 	"context"
@@ -94,10 +98,7 @@ const ToolCallFrameTokens = 6
 //	        est.ObserveToolCall(ev.ToolCall.ID, ev.ToolCall.Name, ev.ToolCall.Arguments)
 //	    }
 //	}
-//	est.ObserveDone()
 //	u := est.Result()            // 无论正常结束还是中途断开
-//
-// 上游在流里带了实测用量时，用 ObserveMeasured 覆盖估算（覆盖而不是相加）。
 //
 // **不是并发安全的**：一条流只有一个消费者。要跨 goroutine 用，
 // 由调用方自己加锁——本类型不内置锁，因为流式路径上每个事件都加锁
@@ -120,11 +121,6 @@ type StreamEstimator struct {
 	toolArgs int64
 	// toolCalls 是已开始的工具调用个数。
 	toolCalls int
-
-	// measured 是流里带过的实测用量。非 nil 时它是权威值。
-	measured *Count
-	// measuredComplete 表示这次流已经正常结束（收到 done 事件）。
-	measuredComplete bool
 }
 
 // NewStreamEstimator 构造累加器。model 决定用哪套词表与标定表。
@@ -207,63 +203,15 @@ func (e *StreamEstimator) ObserveToolCall(id, name, args string) {
 	}
 }
 
-// ObserveMeasured 用上游给的实测用量覆盖估算。
+// Result 返回最终的用量结论。
 //
-// **覆盖而不是相加**：实测值本身就是整次请求的用量，与累加值相加会把
-// 输入算两遍。这是本文件里最容易写错的一处——写错的表现是「流里带 usage
-// 的请求，输入翻倍」，而它不会触发任何错误，只会让账单变高。
-//
-// **目前没有生产调用方**：`gateway` 只调了 ObserveDone，实测覆盖那条路还没接上。
-// 这不等于流式用量是估的——`gateway` 在流里读到 usage 时直接用那个数，
-// 只是没经过本函数（见 internal/gateway/stream.go 的 streamUsage）。
-func (e *StreamEstimator) ObserveMeasured(m Count) {
-	if e == nil {
-		return
-	}
-	cp := m
-	cp.Source = SourceMeasured
-	if cp.Model == "" {
-		cp.Model = e.model
-	}
-	e.measured = &cp
-}
-
-// ObserveDone 标记这次流正常结束。
-//
-// 「正常结束」与「用量是实测的」是两件事：上游可能在正常结束时分片里
-// 仍然不带 usage。Complete 只在两者同时成立时才为 true。
-func (e *StreamEstimator) ObserveDone() {
-	if e == nil {
-		return
-	}
-	e.measuredComplete = true
-}
-
-// HasMeasured 表示流里是否已经带过实测用量。
-//
-// 目前没有生产调用方：与 ObserveMeasured 是同一组，实测覆盖那条路还没接上。
-func (e *StreamEstimator) HasMeasured() bool { return e != nil && e.measured != nil }
-
-// Result 返回最终的用量结论。三种结局，按可信度从高到低：
-//
-//  1. 流里带过 usage → 用实测值（Source = measured），Complete = true。
-//  2. 没带 usage，但收到了内容 → 全部本地算（tokenized 或 estimated），
-//     Complete = false。这是最常见的中断场景，也是本类型存在的理由。
-//  3. 什么都没收到 → 输入仍然要计费（上游可能已经读了 prompt），
-//     输出记 0。
+// 无论流是正常结束、中途断开，还是上游报错被截断，都在这里收口：本类型
+// 只服务「拿不到上游实测 usage」那一半，所以结论永远是本地算的——来源由
+// Output.Source 如实标出（有词表是 tokenized，没有是 estimated）。
+// 上游报过 usage 的情形不经过本类型（见文件头）。
 func (e *StreamEstimator) Result() Usage {
 	if e == nil {
 		return Usage{}
-	}
-
-	if e.measured != nil {
-		return Usage{
-			Input:    Count{Tokens: e.measured.Tokens, Source: SourceMeasured, Model: e.model},
-			Output:   Count{Tokens: 0, Source: SourceMeasured, Model: e.model},
-			Model:    e.model,
-			Complete: e.measuredComplete,
-			Note:     "流里带过 usage，输入输出均以后者为准",
-		}
 	}
 
 	out := Usage{
@@ -273,9 +221,8 @@ func (e *StreamEstimator) Result() Usage {
 			Source: e.outputSource,
 			Model:  e.model,
 		},
-		Model:    e.model,
-		Complete: false,
-		Note:     "流里没有 usage，用量为本地计算",
+		Model: e.model,
+		Note:  "流里没有 usage，用量为本地计算",
 	}
 	if !e.requestObserved {
 		out.Note += "；调用方未提供输入内容，输入计为 0（这不是「没有输入」）"
@@ -312,20 +259,15 @@ func (e *StreamEstimator) mergeOutputSource(s Source) {
 
 // Usage 是一次调用的用量结论。
 //
-// 分成 Input / Output 两个 Count 而不是混成一个：两者的来源常常不同
-// （输入是本地算的，输出来自流里的实测 usage），混在一起会把来源信息
-// 压成最保守的那一个，于是看不出「到底哪一部分是估的」。
+// 分成 Input / Output 两个 Count 而不是混成一个：两者的**算出来的时机与
+// 依据不同**（输入由 ObserveRequest 一次性给出，输出是逐片累加的，而累加
+// 过程中最不可信的那一段决定整体的来源），混在一起会把来源信息压成最保守
+// 的那一个，于是看不出「到底哪一部分是估的」。
 type Usage struct {
 	Input  Count
 	Output Count
 	// Model 是本次调用实际使用的模型。
 	Model string
-	// Complete 为 true 表示这次流的结局是「正常结束**且**输出侧是实测值」。
-	// 为 false 表示输出侧是本地算的（客户端断开、上游报错、流被截断，
-	// 或上游正常结束但没带 usage）。
-	//
-	// 它是调用方最该看的字段：false 意味着这笔账要按估算处理。
-	Complete bool
 	// Note 是给运维看的一句话说明。不参与计费，只是让「为什么这个数是
 	// 估的」在日志里有个答案——没有它，排查时只能看到一堆 estimated。
 	Note string
@@ -333,24 +275,3 @@ type Usage struct {
 
 // Total 返回输入与输出的合计，来源取两者中较不可信的那个。
 func (u Usage) Total() Count { return u.Input.Add(u.Output) }
-
-// ReviewThresholdTokens 是需要人工复核的估算量阈值。
-//
-// 取 1000：按典型定价（每百万 token 几元到几十元），1000 token 的偏差在
-// 分币级别，一万以上才进入元级别。阈值调低会让「需要复核」的告警变成噪音，
-// 而一个每次都报的告警第三次就没人看了。
-const ReviewThresholdTokens = 1000
-
-// RequiresReview 表示这笔用量是否值得人工看一眼。
-//
-// 判据是「输出侧是估算值且量不小」：小额估算（几个 token）不值得复核，
-// 而大额估算意味着账单可能有可观偏差。
-//
-// 让调用方自己决定「要不要上报」而不是本包直接告警：本包不持有告警通道，
-// 也不该持有。
-//
-// **目前没有生产调用方**：告警通道那一头还没有写，所以这个判据暂时没人问。
-func (u Usage) RequiresReview() bool {
-	return !u.Complete && u.Output.Source == SourceEstimated &&
-		u.Total().Tokens >= ReviewThresholdTokens
-}

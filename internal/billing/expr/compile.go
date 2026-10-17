@@ -73,10 +73,6 @@ func (e *CompileError) Unwrap() error { return e.Err }
 // 求值期的可变状态全在每次 Eval 新建的 runtime 里（见 runtime.env）。
 // 包内有一条 -race 测试让多个 goroutine 同时求值同一份 Program。
 type Program struct {
-	// source 是原始源码。保留它有两个用处：错误信息里能指回规则，
-	// 以及账单要能解释「当时用的是哪条规则」——一份可读的源码
-	// 比一个函数指针更能满足这一点。
-	source string
 	// prog 是普通求值的字节码。
 	prog *vm.Program
 	// worst 是「所有分支取最高价」版本的字节码（见 EvalWorstCase）。
@@ -87,12 +83,7 @@ type Program struct {
 	// 若只看实际命中的那一支，「未命中的分支写错了键」会一直躲过校验，
 	// 直到某天订单真的走进那一支才炸。按并集校验把这个错误提前到编译期。
 	keys map[string]struct{}
-	// branches 是三元分支的个数，用于展示与诊断。
-	branches int
 }
-
-// Source 返回原始表达式源码。
-func (p *Program) Source() string { return p.source }
 
 // Keys 返回结果里出现过的键，已排序。用于展示与诊断。
 func (p *Program) Keys() []string {
@@ -103,9 +94,6 @@ func (p *Program) Keys() []string {
 	sort.Strings(out)
 	return out
 }
-
-// BranchCount 返回三元分支的个数。
-func (p *Program) BranchCount() int { return p.branches }
 
 // Compile 编译一条计价规则。
 //
@@ -180,11 +168,9 @@ func compile(source string, globals map[string]any) (*Program, error) {
 	}
 
 	return &Program{
-		source:   source,
-		prog:     prog,
-		worst:    worst,
-		keys:     sh.keys,
-		branches: sh.branches,
+		prog:  prog,
+		worst: worst,
+		keys:  sh.keys,
 	}, nil
 }
 
@@ -320,8 +306,6 @@ var blockedBuiltins = map[string]struct{}{
 type shape struct {
 	// keys 是所有三元分支里出现过的键的并集。
 	keys map[string]struct{}
-	// branches 是三元分支个数。
-	branches int
 }
 
 // inspectShape 检查求值结果是不是「一组单价」，并收集键。
@@ -420,7 +404,6 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 		return nil
 
 	case *ast.ConditionalNode:
-		sh.branches++
 		// 条件子树整棵都在条件位置：`p > 0 && len > 100` 的两个比较都在里面，
 		// 而其中用量变量只能作条件——这个位置正是它们唯一合法的去处。
 		// 它同时是**值位置**（root 清掉）：条件求值出来是布尔值，
@@ -599,7 +582,6 @@ func walkUnits(node ast.Node, sh *shape) error {
 		return nil
 
 	case *ast.ConditionalNode:
-		sh.branches++
 		if err := walkShape(n.Cond, sh, condPos(pos{})); err != nil {
 			return err
 		}
@@ -900,16 +882,6 @@ func (c *Cache) GetWithGlobals(key, source string, globals map[string]any) (*Pro
 	elem := c.order.pushFront(full)
 	c.items[full] = &cacheEntry{key: full, prog: prog, elem: elem}
 	return prog, nil
-}
-
-// Invalidate 丢掉一个键的缓存。规则被停用或删除时调用。
-func (c *Cache) Invalidate(key string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if e, ok := c.items[key]; ok {
-		c.order.remove(e.elem)
-		delete(c.items, key)
-	}
 }
 
 // Len 返回当前缓存的条目数。
