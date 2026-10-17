@@ -114,9 +114,9 @@ type App struct {
 	// Plugins 是启动时从 plugins 表加载出来的注册表，plugin.enabled 为
 	// false 时为 nil。
 	//
-	// 它已经挂在请求路径上：`onRequest` 与 `onResponse` 两个挂载点接在
-	// 入口与网关里（见 internal/api 的 runRequestHook 与 gateway.Hooks）。
-	// 其余三个 hook（onRoute / onStream / onUsage）**还没有调用点**，
+	// 它已经挂在请求路径上：`onRequest` / `onRoute` / `onResponse` 三个挂载点
+	// 接在入口与网关里（见 internal/api 的 runRequestHook 与 gateway.Hooks）。
+	// 其余两个 hook（onStream / onUsage）**还没有调用点**，
 	// 所以声明了它们的插件这次不会被调到。
 	Plugins *plugin.Registry
 

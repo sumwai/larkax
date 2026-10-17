@@ -102,14 +102,20 @@ func (f *pluginSettlements) Save(_ context.Context, _ pipeline.Request, c *pipel
 	return nil
 }
 
-// pluginExecutor 回一份固定的上游响应，并记下它**实际收到**的请求。
+// pluginExecutor 回一份固定的上游响应，并记下它**实际收到**的请求与渠道。
+//
+// 渠道也要记：onRoute 的决策**是否生效**只看得到这一个量。请求 200、
+// 响应正确、账单也对，而插件选的渠道被丢掉——那是「插件选了一个渠道、
+// 请求发去了另一个」，从响应、日志和账上都看不出来。
 type pluginExecutor struct {
-	reqs []*channel.Request
-	resp *channel.Response
+	reqs     []*channel.Request
+	channels []int64
+	resp     *channel.Response
 }
 
-func (f *pluginExecutor) Chat(_ context.Context, _ channel.Channel, req *channel.Request) (*channel.Response, error) {
+func (f *pluginExecutor) Chat(_ context.Context, ch channel.Channel, req *channel.Request) (*channel.Response, error) {
 	f.reqs = append(f.reqs, req)
+	f.channels = append(f.channels, ch.ID)
 	return f.resp, nil
 }
 
@@ -134,8 +140,16 @@ type pluginHarness struct {
 
 // newPluginHarness 把入口接到一个真的 gateway 上。reg 为 nil 表示插件系统
 // 没接上——那也是一种要测的状态（行为与插件出现之前完全一样）。
-func newPluginHarness(t *testing.T, reg *plugin.Registry) *pluginHarness {
+//
+// cands 不给时只有一个候选。要测「插件选的渠道与内核会选的不是同一个」时，
+// 必须给两个以上，且顺序由 priority 定死（见 route.order 的第 1 条规则：
+// priority 是硬性排序键，不受打分与随机打散影响）。
+func newPluginHarness(t *testing.T, reg *plugin.Registry, cands ...route.Candidate) *pluginHarness {
 	t.Helper()
+
+	if len(cands) == 0 {
+		cands = []route.Candidate{pluginCandidate(1, "m-1")}
+	}
 
 	exec := &pluginExecutor{resp: &channel.Response{
 		UpstreamModel: "m-1-20250101",
@@ -157,7 +171,7 @@ func newPluginHarness(t *testing.T, reg *plugin.Registry) *pluginHarness {
 			Now:      now,
 		},
 		Router:       &route.Router{Rand: rand.New(rand.NewSource(1)), Now: now},
-		Candidates:   &pluginCandidates{cands: []route.Candidate{pluginCandidate(1, "m-1")}},
+		Candidates:   &pluginCandidates{cands: cands},
 		Reservations: reservations,
 		Settlements:  settlements,
 		Executor:     exec,
@@ -190,13 +204,19 @@ func pluginCandidate(id int64, model string) route.Candidate {
 	}
 }
 
-// pluginRegistry 注册一个插件。hooks 是原样插进 definePlugin 的 JS 片段。
-func pluginRegistry(t *testing.T, hooks string) *plugin.Registry {
+// pluginRegistry 注册一个插件。hooks 是原样插进 definePlugin 的 JS 片段，
+// meta 是原样插进 meta 字面量的片段（要 `blocking: true` 之类的开关时用它，
+// 它自带开头的逗号）。
+//
+// prelude 原样插在模块顶层（import 之后、meta 之前），用于声明跨 hook 共享
+// 的模块级状态——会话与运行时一对一，所以那份状态是「同一个会话」的探针。
+func pluginRegistry(t *testing.T, meta, hooks string, prelude ...string) *plugin.Registry {
 	t.Helper()
 	reg, err := plugin.Publish([]plugin.Registration{{
 		Key: "p1",
 		Source: "import { definePlugin } from \"larkax\";\n" +
-			"export const meta = { key: \"p1\", apiVersion: 1 };\n" +
+			strings.Join(prelude, "") +
+			"export const meta = { key: \"p1\", apiVersion: 1" + meta + " };\n" +
 			"export default definePlugin({" + hooks + "});\n",
 	}})
 	if err != nil {
@@ -220,7 +240,7 @@ func TestOnRequestShrinksReservation(t *testing.T) {
 	// 1000 × 0.000002 = 0.002，即 200000 个最小单位；
 	// 10 × 0.000002 = 0.00002，即 2000 个。
 	t.Run("插件把 max_tokens 调小", func(t *testing.T) {
-		h := newPluginHarness(t, pluginRegistry(t,
+		h := newPluginHarness(t, pluginRegistry(t, "",
 			`onRequest(){ return { body: { max_tokens: 10 } }; }`))
 
 		rec := post(h.handler, PathChatCompletions, body)
@@ -247,7 +267,7 @@ func TestOnRequestShrinksReservation(t *testing.T) {
 	// 对照组：插件没给补丁时上界是客户端给的那个数。没有这一组，上面那条
 	// 断言在「预留恒等于 2000」这种错法下也是绿的。
 	t.Run("插件没给补丁", func(t *testing.T) {
-		h := newPluginHarness(t, pluginRegistry(t, `onRequest(){ return; }`))
+		h := newPluginHarness(t, pluginRegistry(t, "", `onRequest(){ return; }`))
 
 		rec := post(h.handler, PathChatCompletions, body)
 		if rec.Code != http.StatusOK {
@@ -290,7 +310,7 @@ func TestOnRequestPatchDoesNotStackAcrossRetry(t *testing.T) {
 
 	// 变换式补丁：按**当时读到的**值减一。读到的值每轮都对时它给出 999，
 	// 而叠加时第二轮的输入已经是 999、结果变成 998。
-	h := newPluginHarness(t, pluginRegistry(t,
+	h := newPluginHarness(t, pluginRegistry(t, "",
 		`onRequest(ctx){ return { body: { max_tokens: ctx.body.max_tokens - 1 } }; }`))
 
 	// 第一次预留落库时键已被并发请求占住（落库层回 ErrClaimed），那一次
@@ -374,7 +394,7 @@ func TestNoMatchingPlugin(t *testing.T) {
 
 // 插件改的正文要落到**发给调用方的那份响应**上。
 func TestOnResponsePatchReachesCaller(t *testing.T) {
-	h := newPluginHarness(t, pluginRegistry(t,
+	h := newPluginHarness(t, pluginRegistry(t, "",
 		`onResponse(){ return { text: "改写后的回答" }; }`))
 
 	rec := post(h.handler, PathChatCompletions, validBody)
@@ -431,7 +451,7 @@ func TestBlockingOnResponseFailsRequestWithoutCharge(t *testing.T) {
 // 非阻断型插件的 onResponse 失败时请求照常成功：这是契约里
 // 「插件出错不能让请求失败，除非显式声明为阻断型」的落点。
 func TestNonBlockingOnResponseFailureKeepsRequest(t *testing.T) {
-	h := newPluginHarness(t, pluginRegistry(t,
+	h := newPluginHarness(t, pluginRegistry(t, "",
 		`onResponse(){ throw new Error("我自己挂了"); }`))
 
 	rec := post(h.handler, PathChatCompletions, validBody)
@@ -513,7 +533,7 @@ func TestStreamingRequestRunsOnRequestButNotOnResponse(t *testing.T) {
 		cap := &logCapture{}
 		adoptLogCapture(t, cap)
 
-		h := newPluginHarness(t, pluginRegistry(t, hooks))
+		h := newPluginHarness(t, pluginRegistry(t, "", hooks))
 		rec := post(h.handler, PathChatCompletions,
 			`{"model":"m-1","messages":[{"role":"user","content":"hi"}],"max_tokens":1000}`)
 		if rec.Code != http.StatusOK {
@@ -530,7 +550,7 @@ func TestStreamingRequestRunsOnRequestButNotOnResponse(t *testing.T) {
 		cap := &logCapture{}
 		adoptLogCapture(t, cap)
 
-		h := newPluginHarness(t, pluginRegistry(t, hooks))
+		h := newPluginHarness(t, pluginRegistry(t, "", hooks))
 		rec := post(h.handler, PathChatCompletions, streamBody)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("状态码 = %d，响应体 %s", rec.Code, rec.Body)
@@ -555,7 +575,7 @@ func TestStreamingRequestRunsOnRequestButNotOnResponse(t *testing.T) {
 // 与前面几条不同，这一条只到 channel.Request 为止——请求头怎么变成上游的
 // HTTP 头是适配器的事，不在这条链路上。
 func TestOnRequestHeadersReachUpstreamRequest(t *testing.T) {
-	h := newPluginHarness(t, pluginRegistry(t,
+	h := newPluginHarness(t, pluginRegistry(t, "",
 		`onRequest(){ return { headers: { "x-larkax-tenant": "t7" } }; }`))
 
 	rec := post(h.handler, PathChatCompletions, validBody)

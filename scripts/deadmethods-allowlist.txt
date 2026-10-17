@@ -30,7 +30,7 @@
 #   命令      scripts/check-deadmethods.sh
 #             （扫描起点由 cmd/ 自动发现，当前是 ./cmd/larkax 与 ./cmd/larkaxctl）
 #   工具      go（版本随 go.mod；判据是脚本里嵌的那份 AST 扫描器）
-#   条数      44，与脚本里的 MAX_ENTRIES_DEFAULT 一致
+#   条数      43，与脚本里的 MAX_ENTRIES_DEFAULT 一致
 #
 # # 这份清单与 scripts/deadcode-allowlist.txt 的关系
 #
@@ -57,6 +57,10 @@
 # `Session.OnResponse`、`Session.Failures` 随请求侧的 hook 接上而有了生产调用点。
 # 注意这与 scripts/deadcode-allowlist.txt 那边的情形不同——这四条是**真的接上了**，
 # 不是被分析器的近似判成可达（这道门按语法数调用点，没有那类盲区）。
+#
+# 44 之后减了 1（#263）：`Session.OnRoute` 随 onRoute 接进请求路径而有了生产调用点
+# （`internal/api` 的 `pluginHooks` 里那个闭包）。`Session.OnStream` / `Session.OnUsage`
+# 还在（#264 的缺口）。
 #
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES_DEFAULT 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
@@ -88,7 +92,6 @@ internal/money/money.go        | Amount.Units                      | gap | #282 
 internal/plugin/adapter.go     | UsageFacts.ChannelUsage           | gap | #216 relay 的类型与插件契约类型之间的转换；hook 调用点接上之前没有生产调用方
 internal/plugin/contract.go    | Result.Failed                     | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
 internal/plugin/sandbox/plugin.go | Module.Hooks                   | gap | #282 只有测试在调它；hook 名单在生产里还没有读者
-internal/plugin/session.go     | Session.OnRoute                   | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
 internal/plugin/session.go     | Session.OnStream                  | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
 internal/plugin/session.go     | Session.OnUsage                   | gap | #216 一次请求内的会话与 hook 派发；请求路径接上 hook 之前没有生产调用方
 internal/pricing/admin.go      | Admin.Explain                     | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口

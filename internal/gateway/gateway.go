@@ -233,11 +233,39 @@ type Executor interface {
 // 而 Gateway 是长驻对象、被所有请求共用。挂在字段上就等于让并发请求共用
 // 一个会话——那是数据竞争，而且是那种只在有插件时出现的竞争。
 //
-// # 为什么 ChatStream 没有它
+// # ChatStream 为什么也收它
 //
-// 流式那条路上的挂载点是 onStream（逐块决定），它还没接上。这里不先占一个
-// 用不上的参数：一个收下不用的参数会让「流式也有插件钩子」看起来已经成立。
+// onRoute 与 onResponse 不一样：onResponse 只可能发生在非流式那条路上
+// （流式是边生成边发的，没有「整份响应」这个时刻），而 onRoute 与选渠道是
+// 同一件事，两条路都要走。只给非流式入口挂上，插件会对一半请求静默不生效
+// ——那件事从响应、日志和账上都看不出来。
+//
+// 流式那条路上**独有**的挂载点是 onStream（逐块决定），它还没接上。
 type Hooks struct {
+	// OnRoute 在候选**筛完之后、执行之前**调用一次，返回要钉在尝试顺序
+	// 第一位的渠道。
+	//
+	// # 它拿到的是筛过的那一份，而且就是被执行的那一份
+	//
+	// 传进去的 candidates 与 route 接下来要执行的是同一个 route.Plan
+	// （见 route.ChatPlan）。这件事有两个后果，都是要的：
+	//
+	//   - 决策者拿不到一个已经耗尽额度、被摘除或配置不全的渠道去选；
+	//   - 它选的渠道一定在执行的那份候选里，于是「它选了一个渠道，请求却
+	//     发去了另一个」这种静默分叉不可能发生。
+	//
+	// # 返回值
+	//
+	// 0 表示不决策，沿用内核排出来的顺序；非 0 表示把那个渠道钉在第一位，
+	// 其余候选保持原顺序跟在后面（钉住 ≠ 只用它：它失败照旧换下一个）。
+	//
+	// 返回错误表示**决策方声明了阻断**（插件契约里的 meta.blocking）：
+	// 这次请求失败。走的是与上游失败同一条路——一个候选都没试，不计费。
+	//
+	// 候选集**之外的渠道**轮不到这里处置：决策方在给出它之前就该挡下
+	// （见 internal/plugin 的 pickChannel），因为那一侧才看得到「候选集是什么」。
+	OnRoute func(ctx context.Context, candidates []route.Candidate) (int64, error)
+
 	// OnResponse 在非流式响应拿到之后、结算之前调用。
 	//
 	// 返回错误表示插件声明了阻断：**这次请求失败**。契约里唯一的阻断旋钮是
@@ -302,7 +330,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 	}
 	defer res.finish(ctx)
 
-	routed, err := g.Router.Chat(ctx, g.Executor, upstream, res.candidates, req.CanonicalModel)
+	routed, err := g.routeChat(ctx, upstream, res.candidates, req.CanonicalModel, hooks)
 	if err != nil {
 		// 没有可用的渠道，或者全部失败。**不计费**。
 		//
@@ -351,6 +379,37 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 		Charge:   charge,
 		Attempts: routed.Attempts,
 	}, nil
+}
+
+// routeChat 选路并执行一次非流式请求。
+//
+// 有插件挂载点时走的是两步：**先筛**（Select），把筛过的候选交给插件，
+// 再拿它给的渠道去执行（ChatPlan）。这两步必须由 route 自己做——本包
+// 复现一遍筛选就是第二份实现，两份迟早不一致（见 route.ChatPlan）。
+//
+// 没有挂载点时走的还是原来那一条路（Chat），一步到位。这个分支不是优化：
+// 插件默认是关的，绝大多数部署永远走这一条，让它与插件系统出现之前
+// 逐字相同，是「插件关着时行为不变」最省事的证明方式。
+//
+// # 交给插件的顺序不是这里的顺序
+//
+// 插件拿到的候选集**按 channelId 重排过**（`internal/plugin` 的
+// `sortedByChannelID`，排的是副本），所以它那边的 `candidates[0]` 不是内核
+// 评分最高的那个。这一层不依赖两份顺序一致：插件给回来的只是一个 channelId，
+// 由 ChatPlan 按 ID 在**内核自己那份** plan 上找（见 route.Plan.pinFirst）。
+// 反过来说，任何「插件看到的下标 == 内核的下标」的假设都不成立。
+func (g *Gateway) routeChat(ctx context.Context, upstream *channel.Request, candidates []route.Candidate, canonicalModel string, hooks Hooks) (*route.Result, error) {
+	if hooks.OnRoute == nil {
+		return g.Router.Chat(ctx, g.Executor, upstream, candidates, canonicalModel)
+	}
+	plan := g.Router.Select(candidates, canonicalModel)
+	pin, err := hooks.OnRoute(ctx, plan.Candidates)
+	if err != nil {
+		// 阻断型插件失败：这次请求失败。一个候选都没试过，也没有任何
+		// 上游调用发生过，所以不计费（调用方按「上游失败」处置）。
+		return nil, err
+	}
+	return g.Router.ChatPlan(ctx, g.Executor, upstream, plan, pin)
 }
 
 // handle 是内部的一次请求状态。

@@ -118,7 +118,7 @@ func TestChatStreamBillsMeasuredUsage(t *testing.T) {
 		1: {delta("你好"), {Kind: "usage", Usage: &usage}, {Kind: "done", FinishReason: "stop"}},
 	}})
 
-	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestChatStreamEstimatesWhenUpstreamOmitsUsage(t *testing.T) {
 		1: {delta("你好"), {Kind: "done", FinishReason: "stop"}},
 	}})
 
-	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestChatStreamClientDisconnectIsBilled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	res, err := h.gw.ChatStream(ctx, request(), upstreamRequest())
+	res, err := h.gw.ChatStream(ctx, request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestChatStreamDoesNotFailoverAfterOutputStarted(t *testing.T) {
 		2: {delta("另一段"), {Kind: "done"}},
 	}})
 
-	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("上游已接受请求时不该返回错误（那时响应头可能已经发出去了）: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestChatStreamUpstreamErrorBeforeOutputIsNotBilled(t *testing.T) {
 		1: {{Kind: "error", Err: errors.New("上游在首片之前断开")}},
 	}})
 
-	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestChatStreamTruncatedWithoutDoneIsBilled(t *testing.T) {
 		1: {delta("半句")}, // 没有 done
 	}})
 
-	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestChatStreamPreAcceptFailureReturnsError(t *testing.T) {
 		1: &channel.ErrUpstream{StatusCode: 503, Retryable: true},
 	}})
 
-	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err == nil {
 		t.Fatal("全部候选失败应返回错误")
 	}
@@ -393,7 +393,7 @@ func TestChatStreamFailsOverBeforeAccept(t *testing.T) {
 		},
 	})
 
-	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("应换渠道成功: %v", err)
 	}
@@ -422,7 +422,7 @@ func TestChatStreamNoCandidatesDoesNotReserve(t *testing.T) {
 	h := newHarness(t)
 	h.candidates.cands = nil
 
-	_, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest())
+	_, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
 	if !errors.Is(err, route.ErrNoCandidates) {
 		t.Errorf("期望 ErrNoCandidates，得到 %v", err)
 	}
@@ -437,7 +437,7 @@ func TestChatStreamNoExecutor(t *testing.T) {
 	h := newHarness(t)
 	h.gw.Executor = nil
 
-	if _, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest()); !errors.Is(err, ErrNoExecutor) {
+	if _, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{}); !errors.Is(err, ErrNoExecutor) {
 		t.Errorf("期望 ErrNoExecutor，得到 %v", err)
 	}
 }
@@ -453,7 +453,7 @@ func TestChatStreamSettlementFailureReleases(t *testing.T) {
 		1: {{Kind: "done", FinishReason: "stop"}},
 	}})
 
-	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatalf("结算失败发生在流开始之后，不能作为返回值交出去: %v", err)
 	}
@@ -477,7 +477,7 @@ func TestChatStreamSettlesBeforeClosingEvents(t *testing.T) {
 		1: {delta("好"), {Kind: "done", FinishReason: "stop"}},
 	}})
 
-	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +502,7 @@ func TestChatStreamSnapshotTakenBeforeUpstream(t *testing.T) {
 		seen:    &redactsAtCall,
 	}
 
-	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest())
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,7 +567,7 @@ func TestChatStreamEstimatesWholeRequestInput(t *testing.T) {
 		},
 	}
 
-	res, err := h.gw.ChatStream(ctx, request(), upstream)
+	res, err := h.gw.ChatStream(ctx, request(), upstream, Hooks{})
 	if err != nil {
 		t.Fatal(err)
 	}

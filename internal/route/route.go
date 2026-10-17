@@ -217,6 +217,58 @@ type Exclusion struct {
 	Reason    string
 }
 
+// pinFirst 返回一份把 channelID 那个候选提到最前的副本。
+//
+// # 为什么是「提到最前」而不是「只留它」
+//
+// 钉住的只是一个**顺序**：它失败了照旧换下一个，剩下的候选一个不少。
+// 只留它等于把「优先用这个」变成「只能用这个」，而那个决定不该由一个
+// 只看到候选集、看不到上游结果的调用方来做。
+//
+// # 找不到时为什么原样返回而不是报错
+//
+// 传进来的 channelID 不在候选集里只有一种来源：调用方把**另一份** plan
+// 交给了决策者。它不是一个能在这里判对错的错——本函数看不到决策者那一侧，
+// 也就分不出「调用方传错了 plan」与「这个渠道本来就不该被选中」。
+// 而「插件选了候选集之外的渠道」在决策者那一侧就已经被挡下并记成一次失败
+// （见 internal/plugin 的 pickChannel），走不到这里。
+//
+// 所以这里选的是**不改变任何东西**：顺序照旧，请求照常发出去。反过来
+// （报错、或把整个候选集清空）会让一次调用方的传参失误变成一次请求失败。
+//
+// # 不改动入参
+//
+// 返回的是新切片：plan 还可能被调用方拿着（它要把 Excluded 记进观测），
+// 就地排序会静默改掉那边看到的东西。同 internal/plugin 的 sortedByChannelID。
+//
+// # 按 channelId 找，不按下标
+//
+// 决策者看到的那份候选集与这里的这份**顺序不同**：交给它之前按 channelId
+// 重排过（见 internal/plugin 的 sortedByChannelID）。所以它只能给出一个
+// channelId，下标在两边不可比——`pinChannelID` 是 ID 而不是位置，正是为此。
+func (p Plan) pinFirst(channelID int64) Plan {
+	if channelID == 0 {
+		return p
+	}
+	idx := -1
+	for i, c := range p.Candidates {
+		if c.Channel.ID == channelID {
+			idx = i
+			break
+		}
+	}
+	if idx <= 0 {
+		// -1：不在候选集里；0：本来就在最前。两种都不必动。
+		return p
+	}
+	out := make([]Candidate, 0, len(p.Candidates))
+	out = append(out, p.Candidates[idx])
+	out = append(out, p.Candidates[:idx]...)
+	out = append(out, p.Candidates[idx+1:]...)
+	p.Candidates = out
+	return p
+}
+
 // Select 按模型筛出候选并排序。
 //
 // 返回 Plan 而不是单个候选人：换渠道重试是调用方驱动的，它需要知道
@@ -638,9 +690,38 @@ func worthNextCandidate(err error) bool {
 // 重试的边界由 worthNextCandidate 决定：429、5xx、网络层失败换下一个；
 // 400、401 这类换渠道也是同一个错，重试只会把费用与延迟乘以候选数。
 // 唯一的例外是 ErrUnknownType——见 worthNextCandidate。
+//
+// 它是「筛 + 排 + 执行」一步到位的形态。要在这两步之间插一件事（今天只有
+// 插件）的调用方走 ChatPlan。
 func (r *Router) Chat(ctx context.Context, exec Executor, req *channel.Request, candidates []Candidate, canonicalModel string) (*Result, error) {
-	plan := r.Select(candidates, canonicalModel)
-	return r.chatWithPlan(ctx, exec, req, plan)
+	return r.ChatPlan(ctx, exec, req, r.Select(candidates, canonicalModel), 0)
+}
+
+// ChatPlan 按一份**已经算好的**选路结果执行，并把 pinChannelID 钉在第一位。
+//
+// # 它为什么存在
+//
+// 选路要分两步做：先由 Select 筛出候选，再把「筛过的候选」交给一个外部
+// 决策者，最后才执行它给出的顺序。中间那一步**必须在包外发生**——
+// internal/plugin 已经 import 本包（见它的 adapter.go），本包反向 import
+// 它就成环。
+//
+// 没有这个入口时，包外的调用方只有两条错路：自己重写一遍 Eligible /
+// DrainReason 的筛选（那是第二份实现，两份迟早不一致），或者把筛选结果
+// 丢掉、重新走一次 Chat（那样决策者看到的候选与真正执行的不是同一个东西，
+// 而两者分叉的表现是「它选了一个渠道，请求却发去了另一个」）。
+//
+// # pinChannelID 的语义
+//
+// 0 表示不钉，顺序与 Select 排出来的完全一致；非 0 时把那个候选提到最前，
+// 其余候选保持原顺序跟在后面（它失败了照旧换下一个，见 pinFirst）。
+//
+// **调用方应当把同一个 plan 先交给决策者、再拿回来执行**：那样「决策者看到
+// 的候选」与「被执行的候选」是同一份，这一点由调用约定保证，本方法不重复
+// 校验——决策者那一侧已经挡下了候选集之外的决策（见 internal/plugin 的
+// pickChannel），而本方法看不到那一侧的上下文。
+func (r *Router) ChatPlan(ctx context.Context, exec Executor, req *channel.Request, plan Plan, pinChannelID int64) (*Result, error) {
+	return r.chatWithPlan(ctx, exec, req, plan.pinFirst(pinChannelID))
 }
 
 func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.Request, plan Plan) (*Result, error) {
