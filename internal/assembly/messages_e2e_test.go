@@ -186,17 +186,20 @@ func TestMessagesEndToEnd(t *testing.T) {
 		status_      string
 		reserved     string
 		final        string
+		computed     sql.NullString
 		billChannel  sql.NullInt64
 		ruleID       sql.NullInt64
 		exprSnapshot sql.NullString
 	)
 	err := db.QueryRowContext(ctx, `
 		SELECT id, request_id, status, reserved_amount::text, final_amount::text,
+		       computed_amount::text,
 		       channel_id, pricing_rule_id, pricing_expr_snapshot
 		  FROM billing_requests
 		 WHERE user_id = $1
 		 ORDER BY id DESC LIMIT 1`, user,
-	).Scan(&billID, &requestID, &status_, &reserved, &final, &billChannel, &ruleID, &exprSnapshot)
+	).Scan(&billID, &requestID, &status_, &reserved, &final, &computed,
+		&billChannel, &ruleID, &exprSnapshot)
 	if err != nil {
 		t.Fatalf("查账单失败: %v", err)
 	}
@@ -207,9 +210,7 @@ func TestMessagesEndToEnd(t *testing.T) {
 	if !sameDecimal(final, "0.00033") {
 		t.Errorf("结算金额 = %s，期望 0.00033（12 × 0.00001 + 7 × 0.00003）", final)
 	}
-	if !sameDecimal(reserved, "0.00033") && !greaterThan(reserved, final) {
-		t.Errorf("预留 %s 应当不小于结算 %s——预留按最坏情况算，是结算的上界", reserved, final)
-	}
+	assertNotCapped(t, billingRow{requestID: requestID, reserved: reserved, computed: computed})
 	if !ruleID.Valid || ruleID.Int64 != rule {
 		t.Errorf("pricing_rule_id = %v，期望 %d（账单要能回答按哪条规则算的）", ruleID, rule)
 	}
