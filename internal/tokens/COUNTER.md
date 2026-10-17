@@ -96,18 +96,27 @@ Anthropic 的 `cache_creation` 还有 5m / 1h 拆分，它们**已经包含在**
 本来就是 `channel.Usage`，它比 `Count` 宽。让调用方自己构造 `Count`
 只在「确实只有一个数」时才是对的，而那种上游今天不存在。
 
-### 输入侧的非正文部分：工具定义与图片
+### 输入侧的非正文部分：工具定义、图片与历史里的工具调用参数
 
-上游报的输入量**含**工具定义与图片，而正文口径（`channel.Request.PromptText`，
-只拼 `Content[].Text`）两者都不含。要在请求发出前估一个输入量，这两项必须各自
-补上——预留是**上界**，漏一项就是「预留 < 结算」，差额由平台承担。两个入口：
+上游报的输入量**含**这三项，而正文口径（`channel.Request.PromptText`，
+只拼 `Content[].Text`）一项都不含。要在请求发出前估一个输入量，它们必须各自
+补上——预留是**上界**，漏一项就是「预留 < 结算」，差额由平台承担。三个入口：
 
 | 函数 / 常量 | 估的是什么 | 依据 |
 |---|---|---|
-| `ToolDefinitionInputTokens(model, json)` | 一条工具定义 | JSON 序列化后的字节：启发式估算与 `0.35 token/字节` 的地板取较大者，再加 `ToolDefinitionFrameTokens`（8）的包装 |
+| `ToolDefinitionInputTokens(model, json)` | 一条工具定义 | JSON 序列化后的字节：启发式估算与 `0.35 token/字节` 的地板取较大者，再加 `ToolDefinitionReserveFrameTokens`（26）的包装 |
 | `ImageInputTokens` | 一张图片 | 两家公开公式在 1024×1024 上的较大者：Anthropic `w×h/750 ≈ 1398`、OpenAI `85 + 170×tile = 765` |
+| `ToolUseInputTokens(model, json)` | 历史消息里**一块** `tool_use` 的参数 | 与工具定义同一条式子（按字节估 + 包装），包装项是 `ToolUseReserveFrameTokens`（12） |
 
-两者的方向都是**偏保守**（宁可多冻），理由与包注释里那条一致。两条已知边界，
+这一栏的三个包装常数**都不是**计费侧那两个（`ToolDefinitionFrameTokens` = 8、
+`ToolCallFrameTokens` = 6，见 `stream.go`）：那边是拿不到实测值时**向用户计费**的
+下界，估高了就是一笔凭空费用；这边是**冻余额**，估低的代价由平台承担。同一个包装
+在两条路上代价方向相反，所以刻意不是同一个数。
+
+`ToolUseInputTokens` 那一项**随轮数增长**：多轮工具调用的会话里，每一轮调用的参数
+都会随后续请求重复出现在历史里，不是常数。
+
+三者的方向都是**偏保守**（宁可多冻），理由与包注释里那条一致。两条已知边界，
 别当成 bug：
 
 - **比 1024×1024 更大的图片仍然会低估**（Anthropic 在 1568×1568 上是 3277）。
@@ -115,9 +124,9 @@ Anthropic 的 `cache_creation` 还有 5m / 1h 拆分，它们**已经包含在**
   对应关系很差（同分辨率的 PNG 与 JPEG 能差十倍），所以只能取常数，不造假分档。
 - **图标级的小图会多冻一点**，那部分只在请求期间存在（预留结束即释放）。
 
-它们**不是**给整体估算加的余量：按实际出现的工具与图片计，两者都没有时口径与
-没有这两个数时逐字相同。改这两个数先看 `internal/api` 的 `inputTokensOf`——
-那是今天唯一的消费者（预留），值被钉在 `payload_test.go` 与
+它们**不是**给整体估算加的余量：按实际出现的那几项计，一项都没有时口径与没有
+这几个数时逐字相同。改这几个数先看 `internal/api` 的 `inputTokensOf`——那是今天
+唯一的消费者（预留），值被钉在 `payload_test.go` 与
 `internal/api/input_tokens_test.go` 里。
 
 ## 怎么改
