@@ -188,6 +188,7 @@ Review 不只看代码逻辑。让 agent **扮演对项目一无所知的 review
 | 开发中踩过的坑（按条，含「什么时候读」） | [LESSONS.md](LESSONS.md) 索引 → [lessons/](lessons/) 正文 |
 | 本地开发环境搭建 | [docs/development.md](docs/development.md) |
 | 测试与 lint 的具体命令 | 本文件的「Lint」一节 |
+| 新开 issue、写 PR 描述的格式 | [.github/ISSUE_TEMPLATE/](.github/ISSUE_TEMPLATE/) 与 [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) |
 | 发布流程的操作细节 | [docs/versioning.md](docs/versioning.md) |
 | 技术栈选型 | 本文件的「代码约定」一节 |
 
