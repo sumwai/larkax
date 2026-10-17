@@ -16,6 +16,12 @@
 // 两个加载入口，面向两类调用方：Load 给服务进程，LoadOps 给运维命令
 // （cmd/larkaxctl）。两者的差别不只是「读哪些变量」，而是**校验哪些项**——
 // 运维命令不属于任何角色，所以角色与主密钥的校验不适用于它。
+//
+// 两个入口在读取环境变量之前都会先试着加载 .env 文件（见 dotenv.go），
+// 且**系统环境变量优先**：.env 只填补尚未设置的键，绝不覆盖已有的。
+// 加载发生在两个入口内部而不是它们的调用方，是为了让「.env 生效」这件事
+// 与「谁在调」无关——今天有几十处调用点，漏掉一处的表现是那条命令
+// 安静地用了另一份配置。
 package config
 
 import (
@@ -110,6 +116,11 @@ const UnsetMasterKeyID = "default"
 // 解析失败一律报错而不回落到默认值。静默回落会让「配置写错了」表现为
 // 「行为跟预期不一样」，排查成本远高于启动时直接失败。
 func Load() (*Config, error) {
+	// .env 先在读取之前填好，两个入口共用同一次加载（见 dotenv.go）。
+	if err := ensureEnvLoaded(); err != nil {
+		return nil, err
+	}
+
 	var errs []string
 	fail := func(format string, args ...any) {
 		errs = append(errs, fmt.Sprintf(format, args...))
@@ -195,6 +206,13 @@ func (c *OpsConfig) IsProduction() bool { return c.Env == "production" }
 // Load 一行没动，它该报的错一条不少：gateway / control 缺主密钥就拒绝启动，
 // 那是数据面的防线，与这里放宽的是两件事。
 func LoadOps() (*OpsConfig, error) {
+	// 与 Load 走**同一次** .env 加载（sync.Once 在 dotenv.go 里）。
+	// 两个入口各加载一次的话，第二次是静默无效的，而「哪一次算数」
+	// 取决于调用顺序。
+	if err := ensureEnvLoaded(); err != nil {
+		return nil, err
+	}
+
 	cfg := &OpsConfig{
 		Env:      env("LARKAX_ENV", "development"),
 		LogLevel: env("LARKAX_LOG_LEVEL", "info"),

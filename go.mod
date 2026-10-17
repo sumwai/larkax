@@ -7,7 +7,9 @@ require (
 	github.com/QuantumNous/new-api/relaykit v0.3.4
 	github.com/expr-lang/expr v1.17.8
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/joho/godotenv v1.5.1
 	github.com/pressly/goose/v3 v3.29.0
+	github.com/tiktoken-go/tokenizer v0.8.1
 )
 
 require (
@@ -23,7 +25,6 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
-	github.com/tiktoken-go/tokenizer v0.8.1 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
