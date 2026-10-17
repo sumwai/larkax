@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/sumwai/larkax/internal/channel"
@@ -75,8 +74,7 @@ func (g *Gateway) Decide(ctx context.Context, req pipeline.Request, decision *sy
 	// gateway 与 snapshotwire 之间再加一层按通用 map 脱敏的接口，那是另一片。
 
 	call := &decideCall{exec: g.Decider, req: decision}
-	routed, err := g.Router.Chat(ctx, call, carrierRequest(req.CanonicalModel),
-		h.candidates, req.CanonicalModel)
+	routed, err := g.Router.ChatModel(ctx, call, req.CanonicalModel, h.candidates)
 	// 与 Chat 同一个位置、同一个理由：选路一返回就把「打到了哪儿」记进
 	// h.req，失败那条路才写得进账单（见 handle.routedTo）。
 	if routed != nil {
@@ -136,12 +134,11 @@ type decideCall struct {
 	response *systemone.Response
 }
 
-// Chat 执行一次决策调用。req 是选路层给的**载体**，见 carrierRequest。
+// Chat 执行一次决策调用。
+//
+// carrier 是选路层自己合成的**载体**（见 route.Router.ChatModel）：除 Model
+// 之外全是零值，而本方法也只读 Model。
 func (c *decideCall) Chat(ctx context.Context, ch channel.Channel, carrier *channel.Request) (*channel.Response, error) {
-	if err := carrierIntact(carrier); err != nil {
-		return nil, err
-	}
-
 	attempt := *c.req
 	// 载体里的 Model 是路由层按**这个渠道**翻好的上游名（见
 	// route.upstreamRequest）。决策请求自己的 Model 在入口那一侧是规范名，
@@ -168,43 +165,4 @@ func (c *decideCall) Chat(ctx context.Context, ch channel.Channel, carrier *chan
 		UpstreamModel: resp.Model,
 		Usage:         resp.Usage.ChannelUsage(),
 	}, nil
-}
-
-// carrierRequest 是给选路层用的**载体**请求。
-//
-// 选路层要的是「规范模型名」这一个值：它按它筛候选、按渠道翻上游名，再把
-// 翻好的名字交给执行器（见 route.chatWithPlan）。决策这条表面没有 chat 形状
-// 的请求，所以载体里只填 Model，其余留零值。
-//
-// # 这是一处跨包的依赖，必须写下来
-//
-// 「route 除 Model 之外不读载体里的别的字段」是这条路径成立的前提，而它是
-// **另一包实现里的性质**，不是签名上的约定。route 哪天开始读 Messages
-// （例如为了估 token），这条路径会走偏。钉住它的是 carrierIntact——它把
-// 「载体被填上了别的字段」变成一次**响亮的失败**而不是一次静默发错。
-//
-// 所以：**改 route 的 upstreamRequest / chatWithPlan 之前，先看这条路径。**
-func carrierRequest(canonicalModel string) *channel.Request {
-	return &channel.Request{Model: canonicalModel}
-}
-
-// carrierIntact 检查载体里除 Model 之外没有被填上别的字段。
-//
-// 它守的是上一条注释里那处依赖。route 只做 `attempt := *req;
-// attempt.Model = 上游名`，所以正常路径上这个检查永远通过；它一旦不通过，
-// 说明 route 那边开始往载体里写别的东西了，而这条决策路径的前提不再成立。
-//
-// 报错而不是继续：继续的话，决策请求会带着一个空的 messages 往下走，
-// 而那条路上的失败点离真正的原因隔着好几层。
-func carrierIntact(carrier *channel.Request) error {
-	if carrier == nil || carrier.Model == "" {
-		return errors.New("选路层没有给出上游模型名：决策路径的载体请求是空的")
-	}
-	if len(carrier.Messages) > 0 || len(carrier.Tools) > 0 || carrier.Stream ||
-		carrier.MaxTokens != 0 || carrier.Temperature != nil || carrier.TopP != nil ||
-		carrier.ReasoningEffort != "" || len(carrier.Extra) > 0 || len(carrier.Headers) > 0 {
-		return errors.New("选路层往载体请求里填了 chat 形状的字段：" +
-			"决策路径的前提（route 只读 Model）不再成立，见 carrierRequest 的注释")
-	}
-	return nil
 }

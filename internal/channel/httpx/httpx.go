@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/observe"
 )
 
 // Client 是适配器应当使用的 HTTP 客户端。
@@ -245,6 +246,32 @@ func SafeRequestHeaders(custom map[string]string) (map[string]string, []string) 
 	}
 	sort.Strings(rejected)
 	return out, rejected
+}
+
+// ApplyCustomHeaders 把渠道请求里的自定义头附加到 HTTP 请求上。
+//
+// 鉴权头与协议头由 SafeRequestHeaders 滤掉，而**被拒的头会被记下来**而不是
+// 静默丢弃：插件作者写了一个被拒的头却没有任何反馈，会以为是上游不支持它。
+//
+// 三套协议共用这一份，而不是每个适配器各留一份：接下一个协议时再抄一遍，
+// 某天「某个头只对某一家要带」的改动就只会落在其中一份上，另外两份不会跟着
+// 变，而那时没有任何东西会提示这一点。
+//
+// 调用点仍在适配器那一层，而不只在插件层：插件层的白名单写错时，这里是最后
+// 一道。「插件能覆盖 Authorization」意味着它能冒充别的渠道身份。
+func ApplyCustomHeaders(httpReq *http.Request, req *channel.Request) {
+	if req == nil {
+		return
+	}
+	safe, rejected := SafeRequestHeaders(req.Headers)
+	for name, value := range safe {
+		httpReq.Header.Set(name, value)
+	}
+	if len(rejected) > 0 {
+		// 只记名字不记值：值可能含敏感内容，而这里需要的只是「谁被拒了」。
+		observe.FromContext(httpReq.Context()).Warn("自定义请求头被拒",
+			"headers", strings.Join(rejected, ","))
+	}
 }
 
 func isReservedHeader(lower string) bool {

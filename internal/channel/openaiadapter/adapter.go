@@ -14,14 +14,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channel/httpx"
-	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/quota"
 	"github.com/sumwai/larkax/internal/relay"
 )
@@ -221,7 +219,7 @@ func (a *Adapter) do(ctx context.Context, ch channel.Channel, body []byte, req *
 	// 而那是用户立刻能感觉到的差别。
 	httpReq.Header.Set("Accept", "text/event-stream, application/json")
 	a.setHeaders(httpReq, ch)
-	applyCustomHeaders(httpReq, req)
+	httpx.ApplyCustomHeaders(httpReq, req)
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
@@ -234,29 +232,6 @@ func (a *Adapter) do(ctx context.Context, ch channel.Channel, body []byte, req *
 
 func (a *Adapter) setHeaders(req *http.Request, ch channel.Channel) {
 	req.Header.Set("Authorization", "Bearer "+ch.Credential)
-}
-
-// applyCustomHeaders 把自定义头附加到请求上。
-//
-// 鉴权头与协议头由 httpx.SafeRequestHeaders 滤掉，而**被拒的头会被记下来**
-// 而不是静默丢弃：插件作者写了一个被拒的头却没有任何反馈，会以为是
-// 上游不支持它。
-//
-// 放在适配器这一道而不只在插件层：插件层的白名单写错时，这里是最后一道。
-// 「插件能覆盖 Authorization」意味着它能冒充别的渠道身份。
-func applyCustomHeaders(httpReq *http.Request, req *channel.Request) {
-	if req == nil {
-		return
-	}
-	safe, rejected := httpx.SafeRequestHeaders(req.Headers)
-	for name, value := range safe {
-		httpReq.Header.Set(name, value)
-	}
-	if len(rejected) > 0 {
-		// 只记名字不记值：值可能含敏感内容，而这里需要的只是「谁被拒了」。
-		observe.FromContext(httpReq.Context()).Warn("自定义请求头被拒",
-			"headers", strings.Join(rejected, ","))
-	}
 }
 
 // extractEmbeddedError 检查 200 响应体里是否藏着错误对象。
