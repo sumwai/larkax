@@ -48,6 +48,7 @@ CI 目前包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-r
 （`check-layering.sh`）、红线扫描及其自测、变异测试脚本的自测、
 不可达符号门禁及其自测（`check-deadcode.sh`）、
 整包没人 import 的门禁及其自测（`check-unimported.sh`）、
+导出方法调用点门禁及其自测（`check-deadmethods.sh`）、
 契约测试（`contract/`，见下）。
 集成测试另有一道**「确认真跑了」的门禁**——它逐包显式跑依赖数据库的那些包，
 被 `t.Skip` 时报错，因为「跳过」在输出里和「通过」长得一样
@@ -222,6 +223,7 @@ bash scripts/check-redlines.sh      # 公开红线：密钥、私有主机、本
 bash scripts/check-layering.sh      # 分层约定：谁 import 谁
 bash scripts/check-deadcode.sh      # 不可达符号：可达的包内部有没有没人调的函数
 bash scripts/check-unimported.sh    # 整包没人 import：包本身有没有接上
+bash scripts/check-deadmethods.sh   # 导出方法有没有调用点（上面两道门都照不到）
 scripts/check-mutation.sh           # 变异测试（改动计费/账本时）
 ```
 
@@ -240,6 +242,19 @@ scripts/check-mutation.sh           # 变异测试（改动计费/账本时）
 `deadcode` 照不到这一类，因为它只分析从入口可达的包。白名单是
 `scripts/unimported-allowlist.txt`，口径与上面那份一致：新出现的直接失败，
 已经接上的只提示「可以删了」，条目数只许减不许增。
+
+`scripts/check-deadmethods.sh` 是**第三类**，只依赖 `go`：一个导出方法在
+「入口可达的、非测试的」文件里有没有出现过调用语法。`deadcode` 照不到这一类——
+它底下的 RTA 把「任何 runtime type 的导出方法」整体当成可达（反射可能调到），
+而且掩蔽会沿调用链传下去：一个被掩蔽的方法如果是某个自由函数唯一的调用方，
+那个函数也从清单里消失。本仓不用反射，所以这一类要单独有一道门。
+判据走 Go 的 AST 而不是文本匹配（注释与字符串里的 `.Name(` 不算调用点），
+白名单是 `scripts/deadmethods-allowlist.txt`，口径与上面两份一致。
+
+它有两个**已知的边界**，写在脚本与白名单的开头，别当成 bug：按方法名判，
+所以同名方法会互相掩护（假阴性）；`f := x.Name` 这种方法值语法与字段访问
+无法区分，取严的一侧（假阳性）。它与 `deadcode` 的白名单**不共享条目**——
+判据不同，同一个符号可能在两边各记一条，也可能只在一处出现。
 
 **只被测试 import 的包算「没人 import」。** 测试自己就能构造调用方，
 所以「只有测试在调」与「生产在调」在覆盖率上长得一样

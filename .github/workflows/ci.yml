@@ -106,6 +106,42 @@ jobs:
       - name: 整包没人 import 门禁自测
         run: bash scripts/check-unimported.test.sh
 
+      # 前两道门都看不见的一类：**导出方法有没有调用点**。
+      # deadcode 底下的 RTA 会把「任何 runtime type 的导出方法」整体当成可达
+      # （反射可能调到），于是这一整类都在它的盲区里，而且掩蔽还会沿调用链传下去
+      # ——一个被掩蔽的方法如果是某个自由函数唯一的调用方，那个函数也一起消失。
+      # 本仓不用反射，所以这一类必须单独有一道门（scripts/check-deadmethods.sh，
+      # 只依赖 go，白名单见 scripts/deadmethods-allowlist.txt）。
+      - name: 导出方法调用点门禁
+        run: |
+          set +e
+          out=$(bash scripts/check-deadmethods.sh 2>&1)
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+
+          # 这道门通过时是**沉默**的，而「什么都没输出」与「什么都没检查」长得一样。
+          # 判据是它自己打出的正向证据：扫了几个文件、比了多少条。
+          # 只看退出码不够——扫描范围变成零个包时它照样会走到「全部命中白名单」。
+          if ! printf '%s\n' "$out" | grep -qE '^扫描器跑了 [1-9][0-9]* 个文件 / [1-9][0-9]* 个导出方法声明'; then
+            echo "::error::这道门没有给出「扫了多少」的正向证据，不能当作通过。"
+            exit 1
+          fi
+          if ! printf '%s\n' "$out" | grep -qE '^白名单 .* —— [1-9][0-9]* 条 / 上限 [0-9]+$'; then
+            echo "::error::白名单一条都没读进来，比对的是半份清单。"
+            exit 1
+          fi
+
+          if [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+
+      # 这道门的判据一半在脚本里、一半在脚本内嵌的那份 AST 扫描器里，
+      # 而**两半坏掉时都不会响**：一个符号都扫不出来时屏幕上就是
+      # 「全部命中白名单」。所以自测不是可选的（LESSONS 第 2、16、23 条）。
+      - name: 导出方法调用点门禁自测
+        run: bash scripts/check-deadmethods.test.sh
+
       # 先迁移再跑测试：把库推到已知状态，也让「迁移能应用」这件事
       # 在测试用到它之前就被验证过。
       - name: 迁移可应用且可回滚
