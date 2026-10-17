@@ -54,6 +54,7 @@ import (
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/plugin"
+	"github.com/sumwai/larkax/internal/plugin/host"
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
 	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
 	"github.com/sumwai/larkax/internal/quota"
@@ -113,9 +114,10 @@ type App struct {
 	// Plugins 是启动时从 plugins 表加载出来的注册表，plugin.enabled 为
 	// false 时为 nil。
 	//
-	// **本版还没有接调用点**：它不挂在请求路径上，所以 plugin.enabled=true
-	// 也不会改变任何一个请求的行为。加载器与限额先备好，接线的活是后面的
-	// 那几片（见 docs/plugin-contract.md）。
+	// 它已经挂在请求路径上：`onRequest` 与 `onResponse` 两个挂载点接在
+	// 入口与网关里（见 internal/api 的 runRequestHook 与 gateway.Hooks）。
+	// 其余三个 hook（onRoute / onStream / onUsage）**还没有调用点**，
+	// 所以声明了它们的插件这次不会被调到。
 	Plugins *plugin.Registry
 
 	// PluginLimits 是插件每次调用的限额，来自 settings 表。
@@ -274,6 +276,29 @@ func Build(cfg Config) (*App, error) {
 	// 而那正是账本存储管的表。权威判定在预留那个事务里（见 api.QuotaChecker），
 	// 两处共用 internal/keyquota 里同一份口径。
 	handler.Quota = ledgerStore
+	// 插件链路：注册表与限额来自启动期（见 buildPlugins），宿主能力按请求
+	// 现拼。三者一起给，缺一个的后果不同——注册表为 nil 时插件根本不跑
+	// （与关掉开关同形），宿主构造为 nil 时插件拿不到 log/calendar/kv。
+	//
+	// 限额为零值**不是**「没有上限」，也不是立刻超时：`sandbox.Limits.normalize`
+	// 会把零与负数当成「没设」，补成 `DefaultLimits`（5s 调用上限、64MB 内存）。
+	// 也就是说 settings 里那四个键都没配时，插件跑在默认限额下——**能跑**。
+	//
+	// 宿主能力里的日历与 KV 这一版**都没有接**：KV 还没有生产实现
+	// （只有插件树里的测试桩），日历要先有一个 host.CalendarSource 适配
+	// internal/calendar——两件事各自是另一片。没接的能力不注入，插件侧
+	// 收到的是「能力未启用」而不是一个永远失败的空壳（见 host.Build）。
+	handler.Plugins = plugins
+	handler.PluginLimits = pluginLimits
+	handler.PluginHost = func(p *plugin.Plugin, requestID string, userID int64) sandbox.Host {
+		return host.Build(host.Env{
+			Logger:    logger,
+			Plugin:    p.Key,
+			RequestID: requestID,
+			UserID:    userID,
+			Now:       cfg.Now,
+		})
+	}
 	// 幂等记录的读与写走同一个 Store：入口读它、落库层在预留那个事务里写它，
 	// 两边读写的列是同一批（见 internal/idempotency 的包注释）。
 	//

@@ -39,6 +39,7 @@ type fakeChatter struct {
 	err      error
 	req      pipeline.Request
 	upstream *channel.Request
+	hooks    gateway.Hooks
 	calls    int
 
 	// 流式那一侧单独一份计数与结果：两条路走的是同一个接口的两个方法，
@@ -50,10 +51,11 @@ type fakeChatter struct {
 	streamCalls  int
 }
 
-func (f *fakeChatter) Chat(_ context.Context, req pipeline.Request, upstream *channel.Request) (*gateway.Result, error) {
+func (f *fakeChatter) Chat(_ context.Context, req pipeline.Request, upstream *channel.Request, hooks gateway.Hooks) (*gateway.Result, error) {
 	f.calls++
 	f.req = req
 	f.upstream = upstream
+	f.hooks = hooks
 	return f.result, f.err
 }
 

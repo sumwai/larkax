@@ -544,7 +544,7 @@ grep -q '只许减不许增' "$last_out" || bad "条目数超过上限 —— �
 # 18. 上限是个具名常量，自测把它钉住。
 #     往上调必须同时改这一处，于是那是一次会被 review 看到的 diff。
 #     关掉一批缺口之后，把脚本里的常量与这里的字面量一起往下调。
-if [ "$declared" = "48" ]; then ok; else bad "MAX_ENTRIES_DEFAULT 被改成了 $declared（自测钉住的是 48）"; fi
+if [ "$declared" = "44" ]; then ok; else bad "MAX_ENTRIES_DEFAULT 被改成了 $declared（自测钉住的是 44）"; fi
 
 # 19. go 不在 PATH：退出码 2，并说清是没跑成。
 #     用一个确定不存在的名字，避免依赖运行环境里有没有装 go。

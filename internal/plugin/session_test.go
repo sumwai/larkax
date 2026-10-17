@@ -11,10 +11,15 @@ import (
 )
 
 // sessionFor 编译一个插件并建好会话。hooks 与 meta 是原样插入的 JS 片段。
-func sessionFor(t *testing.T, meta, hooks string, host sandbox.Host, limits sandbox.Limits) *Session {
+//
+// 宿主能力包成 HostBuilder 是为了对上生产那一侧的形状（NewSession 要在
+// 选中插件之后才建宿主，见 HostBuilder）。用例自己不关心插件 key，
+// 所以这里原样返回传进来的那份。
+func sessionFor(t *testing.T, meta, hooks string, h sandbox.Host, limits sandbox.Limits) *Session {
 	t.Helper()
 	reg := mustPublish(t, Registration{Key: "p1", Source: src(meta, hooks)})
-	s, err := reg.NewSession(t.Context(), SessionRequest{CanonicalModel: "m", Protocol: "openai"}, host, limits)
+	s, err := reg.NewSession(t.Context(), SessionRequest{CanonicalModel: "m", Protocol: "openai"},
+		func(*Plugin) sandbox.Host { return h }, limits)
 	if err != nil {
 		t.Fatalf("建会话失败: %v", err)
 	}

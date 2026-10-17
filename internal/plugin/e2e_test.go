@@ -139,7 +139,7 @@ func TestEndToEndFiveHooks(t *testing.T) {
 	env := host.Env{Plugin: "e2e", RequestID: "req-1", UserID: 7, KV: kv}
 	p, _ := reg.Get("e2e")
 	s, err := reg.NewSession(t.Context(), SessionRequest{CanonicalModel: "acme/vision", Protocol: "openai"},
-		host.Build(env), sandbox.Limits{})
+		func(*Plugin) sandbox.Host { return host.Build(env) }, sandbox.Limits{})
 	if err != nil {
 		t.Fatalf("建会话失败: %v", err)
 	}
@@ -292,8 +292,10 @@ export default definePlugin({
 	reg := mustPublish(t, Registration{Key: "cap", Source: src})
 	// Capabilities 里给了 kv，但 allowed 是空的——这一层没放行。
 	s, err := reg.NewSession(t.Context(), SessionRequest{CanonicalModel: "m", Protocol: "openai"},
-		sandbox.Host{Capabilities: map[string]any{"kv": map[string]any{"get": sandbox.HostFunc(
-			func(context.Context, []moejs.Value) (moejs.Value, error) { return moejs.Null(), nil })}}},
+		func(*Plugin) sandbox.Host {
+			return sandbox.Host{Capabilities: map[string]any{"kv": map[string]any{"get": sandbox.HostFunc(
+				func(context.Context, []moejs.Value) (moejs.Value, error) { return moejs.Null(), nil })}}}
+		},
 		sandbox.Limits{})
 	if err != nil {
 		t.Fatalf("建会话失败: %v", err)

@@ -11,6 +11,7 @@ import (
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/idempotency"
 	"github.com/sumwai/larkax/internal/observe"
+	"github.com/sumwai/larkax/internal/relay"
 )
 
 // 幂等键那条路的全部逻辑。
@@ -61,7 +62,9 @@ const idempotencyWriteTimeout = 5 * time.Second
 //
 // 三种走向：命中一条可以重放的记录 → 原样再发一遍；命中一条不能重放的
 // 记录 → 一条 409；没有记录 → 走原路径，并把这次响应留一份供后续重放。
-func (h *Handler) serveIdempotent(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, user User, requestID, key string) {
+// body 是这次请求的原始字节。撞键重试时要拿它**重新解析**一份请求出来
+// （理由见循环里 attempt 那段注释），所以它得一路传进来。
+func (h *Handler) serveIdempotent(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, body []byte, user User, requestID, key string) {
 	if err := idempotency.ValidateKey(key); err != nil {
 		// 键本身不合法是调用方的错，当场可诊断。放过去的话，一个超长的键
 		// 会进唯一索引，而代价由别人的库承担。
@@ -78,6 +81,17 @@ func (h *Handler) serveIdempotent(w http.ResponseWriter, r *http.Request, protoc
 		return
 	}
 	claim := &idempotency.Claim{APIKeyID: user.KeyID, Key: key, Hash: hash}
+
+	// attempt 是这一轮交给 serveOnce 的请求。
+	//
+	// 它必须**每一轮都是一份新的**：serveOnce 会把这份请求交给插件**就地**改
+	// （补丁直接写在 channel.Request 上，见 runRequestHook），拿同一个对象
+	// 重进一次，变换式的补丁就会叠加——「把 max_tokens 减 1」跑两轮就是减 2。
+	//
+	// 重解析是这里唯一能保证「深」的做法：channel.Request 里有切片、两个 map，
+	// 还有 map[string]any 的 Extra，浅拷贝会让两轮的补丁落在同一块底层数据上。
+	// 代价可以忽略——这条路径只在「键被并发请求抢走」时才走第二遍。
+	attempt := upstream
 
 	for {
 		if h.resolveExisting(w, r, protocol, claim) {
@@ -97,12 +111,24 @@ func (h *Handler) serveIdempotent(w http.ResponseWriter, r *http.Request, protoc
 			sink = held
 		}
 
-		res := h.serveOnce(sink, r, protocol, upstream, user, requestID, claim)
+		res := h.serveOnce(sink, r, protocol, attempt, user, requestID, claim)
 
 		if res.claimed {
 			// 在「查完」与「建立记录」之间被另一个并发请求抢走了。这不是
 			// 错误：那次预留整个回滚了，一分钱没冻、上游一次没调。
 			//
+			// 先取一份**没被改过**的请求再重试：上一轮已经把它交给插件改过了
+			// （见 attempt 的注释）。
+			fresh, parseErr := relay.ParseRequest(r.Context(), protocol, body)
+			if parseErr != nil {
+				// 同一份 body 上一轮解析得出来，这一轮不该解不出来。真走到这里
+				// 说明有别的东西动过 body，那比回一个 500 更值得留一笔。
+				observe.FromContext(r.Context()).Error("重试时重解析请求失败", "err", parseErr)
+				writeError(w, protocol, http.StatusInternalServerError, "internal error")
+				return
+			}
+			attempt = fresh
+
 			// 等一小会儿再查一次——下一次循环会按那条记录的状态处置。
 			// 不先等一下就直接重试，会在这个极短的窗口里空转。
 			if !waitForRetry(r.Context(), idempotencyPollInterval) {
