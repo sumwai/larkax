@@ -382,6 +382,120 @@ func TestChatStreamUsageIsNotOverwrittenByLaterPartial(t *testing.T) {
 	}
 }
 
+// 输入的用量在 message_start 就到了，所以适配器在那里**另外**发一个
+// usage_input：调用方对外发的第一帧里填的就是它，而完整的用量要到流末尾才有。
+//
+// 单独发而不是并进后面那个 usage：它只有输入、没有输出，被当成完整的会把
+// 输出算成 0（见 channel.StreamEvent 的 Usage）。
+func TestChatStreamEmitsInputUsageAtMessageStart(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, line := range []string{
+			`event: message_start`,
+			`data: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":30}}}`,
+			``,
+			`event: content_block_delta`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"你"}}`,
+			``,
+			`event: message_delta`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":25}}`,
+			``,
+			`event: message_stop`,
+			`data: {"type":"message_stop"}`,
+			``,
+		} {
+			_, _ = io.WriteString(w, line+"\n")
+		}
+	}))
+	defer srv.Close()
+
+	events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), &channel.Request{Model: "m", Stream: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var kinds []string
+	var early, full *channel.Usage
+	for ev := range events {
+		kinds = append(kinds, ev.Kind)
+		switch ev.Kind {
+		case "usage_input":
+			u := *ev.Usage
+			early = &u
+		case "usage":
+			u := *ev.Usage
+			full = &u
+		}
+	}
+
+	// 位置本身就是判据：晚于第一个内容事件到达，调用方的第一帧就用不上它了。
+	if len(kinds) == 0 || kinds[0] != "usage_input" {
+		t.Fatalf("事件序列 = %v，期望 usage_input 在最前面", kinds)
+	}
+	if early == nil {
+		t.Fatal("应发出 usage_input 事件")
+	}
+	// 与末尾那个完整用量同一口径：输入 100 + 读缓存 30。
+	if early.PromptTokens != 130 {
+		t.Errorf("usage_input 的 PromptTokens = %d，期望 130（与完整用量同一口径）", early.PromptTokens)
+	}
+	if early.CompletionTokens != 0 {
+		t.Errorf("usage_input 的 CompletionTokens = %d，期望 0（那时输出还没产生）", early.CompletionTokens)
+	}
+	if full == nil || full.PromptTokens != 130 || full.CompletionTokens != 25 {
+		t.Errorf("完整用量 = %+v，期望输入 130、输出 25", full)
+	}
+}
+
+// 上游在自己的 message_start 里没报输入用量时**不发** usage_input。
+//
+// 0 的含义是「这一帧没带」，不是「输入真的是 0」：把它发出去，调用方会拿这个
+// 0 去填第一帧——那比本地估算还差。
+func TestChatStreamWithoutInputUsageEmitsNoEarlyUsage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, line := range []string{
+			`event: message_start`,
+			`data: {"type":"message_start","message":{"id":"msg-1","usage":{"output_tokens":1}}}`,
+			``,
+			`event: message_delta`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":77,"output_tokens":25}}`,
+			``,
+			`event: message_stop`,
+			`data: {"type":"message_stop"}`,
+			``,
+		} {
+			_, _ = io.WriteString(w, line+"\n")
+		}
+	}))
+	defer srv.Close()
+
+	events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), &channel.Request{Model: "m", Stream: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var early *channel.Usage
+	var full *channel.Usage
+	for ev := range events {
+		switch ev.Kind {
+		case "usage_input":
+			u := *ev.Usage
+			early = &u
+		case "usage":
+			u := *ev.Usage
+			full = &u
+		}
+	}
+
+	if early != nil {
+		t.Errorf("message_start 没报输入用量时不该发 usage_input，得到 %+v", early)
+	}
+	// 输入在后面的 message_delta 里才到，完整用量照发——这条只是「没提前发」，
+	// 不是「不发」。
+	if full == nil || full.PromptTokens != 77 || full.CompletionTokens != 25 {
+		t.Errorf("完整用量 = %+v，期望输入 77、输出 25", full)
+	}
+}
+
 // 工具调用分两处给出：名字与 id 在 content_block_start，参数在后续 delta 里。
 func TestChatStreamToolUseAssembly(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -258,7 +258,7 @@ type Response struct {
 // 但归一化之后要传达的信息就是这几类。适配器负责把上游的分片序列
 // 翻译成这几种事件，路由层与计费层只认这里。
 type StreamEvent struct {
-	// Kind 取值：delta、tool_use、usage、done、error。
+	// Kind 取值：delta、tool_use、usage_input、usage、done、error。
 	Kind string
 
 	// Text 是正文增量（Kind == "delta" 时有效）。
@@ -267,8 +267,17 @@ type StreamEvent struct {
 	// 工具调用增量。
 	ToolCall *ToolCallDelta
 
-	// Usage 只在部分上游的最后一个分片里出现。
+	// Usage 在 Kind == "usage" 与 "usage_input" 时有效。
 	// 为 nil 表示这一片没带用量，计费层需要自己累计或估算。
+	//
+	// 两个 Kind 给的是同一件事的两个时刻，**用途不同**：
+	//
+	//   - "usage" 是这次调用的完整用量，**结算以它为准**。
+	//   - "usage_input" 是输入侧已经确定的那一部分（输出还没产生）。它的用处
+	//     是让调用方在流的最前面就能报出输入用量：Anthropic 的 message_start
+	//     里填的就是它，而等到流末尾那个完整用量才报，第一帧就只能填本地估算，
+	//     估算偏低——只读第一帧的客户端读到的是那个偏低的数，还不报错。
+	//     **它不是结算依据**：只有输入、没有输出，当成完整的会把输出算成 0。
 	Usage *Usage
 
 	// FinishReason 在末尾事件里给出。

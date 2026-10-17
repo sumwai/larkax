@@ -830,11 +830,12 @@ func TestStreamMessagesEndToEnd(t *testing.T) {
 	if got := dig(t, start, "message", "model"); got != model {
 		t.Errorf("message_start 的 model = %v，期望 %q", got, model)
 	}
-	// input_tokens 是**本地估算**：上游的实测用量要到流末尾才拿得到。
-	// 「你好」两个字在未知族的估算表上是 3，这个数写死是为了让改动估算表时
-	// 有人会来看一眼这一行（同口径的估算见 tokens.EstimatedTokens）。
-	if got := dig(t, start, "message", "usage", "input_tokens"); got != float64(3) {
-		t.Errorf("message_start 的 input_tokens = %v，期望 3（本地估算）", got)
+	// input_tokens 是**上游报的真值**，不是本地估算：上游在自己的
+	// message_start 里就给了它，而那一帧是流的第一帧。本地估算（「你好」
+	// 两个字在未知族的估算表上是 3）会偏低，而只读 message_start 的客户端
+	// 读到的就是那个偏低的数（见 #256）。
+	if got := dig(t, start, "message", "usage", "input_tokens"); got != float64(12) {
+		t.Errorf("message_start 的 input_tokens = %v，期望 12（上游报的真值）", got)
 	}
 	if got := dig(t, decodeFrame(t, frames[2]), "delta", "text"); got != "你好" {
 		t.Errorf("第一片正文 = %v，期望 你好", got)
@@ -870,6 +871,77 @@ func TestStreamMessagesEndToEnd(t *testing.T) {
 	}
 	assertWallet(t, db, user, "99.99967", "0")
 	assertConsumeEntry(t, db, bill.id, user, "0.00033")
+}
+
+// 跨协议那条路的**首帧延迟**：调用方说 Anthropic，上游说 OpenAI，而上游的用量
+// 在结束分片里——所以第一帧不能等用量。等下去整个流就变成「等一会儿一次性返回」，
+// 比报一个偏低的估算更坏（见 internal/api 的 anthropicStream.writeStart）。
+//
+// 判据是**上游还挂着的时候客户端已经收到第一帧**：假上游吐完两片就挂住，谁都不去
+// 关它，只有第一帧真的发出来了这里才读得到。读满三帧这件事本身就是证据——与
+// TestStreamClientDisconnectIsBilled 同一条判据。
+//
+// 读不到时不要挂到整轮超时：看门狗十秒后掐断请求，断言报出来的是「一帧都没收到」。
+func TestStreamMessagesFirstFrameBeforeUpstreamFinishes(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+
+	const balance = "100"
+	model := unique("e2e-stream-first-frame")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, balance)
+	key := issueKey(t, db, user)
+
+	// 上游说 OpenAI：它的用量在结束分片里，流的前面**没有**输入用量可给。
+	fake := &streamUpstream{
+		protocol: channel.ProtocolOpenAI,
+		model:    model,
+		chunks:   []string{"第一片", "第二片"},
+		usage:    &channel.Usage{PromptTokens: 12, CompletionTokens: 7},
+		hang:     true,
+		db:       db,
+		userID:   user,
+	}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL, model, "openai", 0)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	resp, cancel := openStream(t, public.URL+"/v1/messages", key, anthropicStreamBody(model))
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("状态码 = %d，期望 200。响应体：%s", resp.StatusCode, body)
+	}
+	watchdog := time.AfterFunc(10*time.Second, cancel)
+	defer watchdog.Stop()
+
+	frames := readFrames(t, resp.Body, 3)
+	if len(frames) != 3 {
+		t.Fatalf("上游还挂着时只收到 %d 帧，期望 3 帧（第一帧被推迟到流末尾了？）", len(frames))
+	}
+	if frames[0].event != "message_start" {
+		t.Errorf("第 0 帧的事件名 = %q，期望 message_start（它必须是第一帧）", frames[0].event)
+	}
+	// 这条路上没有更早的输入用量可给，填的是本地估算（「你好」两个字在未知族的
+	// 估算表上是 3）。真值那条路在同协议用例 TestStreamMessagesEndToEnd 里。
+	if got := dig(t, decodeFrame(t, frames[0]), "message", "usage", "input_tokens"); got != float64(3) {
+		t.Errorf("message_start 的 input_tokens = %v，期望 3（本地估算）", got)
+	}
+	if frames[1].event != "content_block_start" || frames[2].event != "content_block_delta" {
+		t.Errorf("前两帧之后的帧序 = %q、%q，期望 content_block_start、content_block_delta",
+			frames[1].event, frames[2].event)
+	}
+	if got := dig(t, decodeFrame(t, frames[2]), "delta", "text"); got != "第一片" {
+		t.Errorf("第一片正文 = %v，期望 第一片", got)
+	}
 }
 
 // 客户端在流中途断开：已经产生的部分**要计费**，用量是本地估算的。
