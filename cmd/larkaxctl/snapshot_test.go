@@ -17,16 +17,32 @@ import (
 	"github.com/sumwai/larkax/internal/snapshotwire"
 )
 
-// 一个都没删时也要有明确输出。
+// cleanupAt 是清理类用例的固定时刻。
 //
-// 「没有到期分区」与「命令没跑成」在安静的终端里长得一样（LESSONS.md 第 16 条），
+// 到期线由「留存期 + 当前时刻」算出来，时间不固定的话断言里那个日期就会随
+// 运行日漂移——而漂移的断言迟早会被人改成「只要含 0 个就行」。
+var cleanupAt = time.Date(2026, 10, 16, 15, 30, 0, 0, time.UTC)
+
+// 一个都没删时也要有明确输出，而且那行输出要带上判据。
+//
+// 「没有到期的分区」与「命令没跑成」在安静的终端里长得一样（LESSONS.md 第 16 条），
 // 所以这里断言的是**有一行输出**，而不只是「没报错」。
+//
+// 但「没有到期分区」这句话本身还不够：它与「根本没查」也长得一样，而这条命令
+// 曾经正是「说自己在清理、实际一步都没走，输出的那行字却完全正常」。所以留存期
+// 与到期线这两个判据必须一起打出来——「查过了、确实没有」才是可以核对的。
 func TestPrintPartitionsEmptyIsExplicit(t *testing.T) {
 	out := captureStdout(t, func() {
-		printPartitions("已删除", nil)
+		printPartitions("已删除", nil, 30, cleanupAt)
 	})
 	if !strings.Contains(out, "0 个") {
 		t.Errorf("空清单的输出应说明是 0 个，实际为 %q", out)
+	}
+	if !strings.Contains(out, "留存期 30 天") {
+		t.Errorf("空清单的输出应带上这次用的留存期，实际为 %q", out)
+	}
+	if !strings.Contains(out, "2026-09-16") {
+		t.Errorf("空清单的输出应带上到期线（留存 30 天、当天 10-16 → 09-16），实际为 %q", out)
 	}
 	if strings.TrimSpace(out) == "" {
 		t.Error("空清单不该什么都不输出")
@@ -36,7 +52,7 @@ func TestPrintPartitionsEmptyIsExplicit(t *testing.T) {
 func TestPrintPartitionsListsEveryName(t *testing.T) {
 	names := []string{"request_snapshots_2026_09_01", "request_snapshots_2026_09_02"}
 	out := captureStdout(t, func() {
-		printPartitions("将删除", names)
+		printPartitions("将删除", names, 30, cleanupAt)
 	})
 	for _, n := range names {
 		if !strings.Contains(out, n) {
@@ -45,6 +61,26 @@ func TestPrintPartitionsListsEveryName(t *testing.T) {
 	}
 	if !strings.Contains(out, "2") {
 		t.Errorf("输出里应当给出条数，实际为 %q", out)
+	}
+}
+
+// 采集关闭时的提示语必须与行为一致：它说「仍按留存期清理」，而清理真的会跑
+// （见 snapshotwire 的 TestCleanupRunsWhenCollectingDisabled）。
+//
+// 采集开着时一个字都不打：一条常驻的提示会让人不再读它，而那时它也没说什么。
+func TestPrintCleanupHintOnlyWhenCollectingDisabled(t *testing.T) {
+	var on, off bytes.Buffer
+	printCleanupHint(&on, snapshotwire.Config{Enabled: true, RetentionDays: 30})
+	if on.Len() != 0 {
+		t.Errorf("采集开着时不该打提示，实际为 %q", on.String())
+	}
+
+	printCleanupHint(&off, snapshotwire.Config{Enabled: false, RetentionDays: 7})
+	if !strings.Contains(off.String(), "采集已关闭") {
+		t.Errorf("采集关着时应说明这一点，实际为 %q", off.String())
+	}
+	if !strings.Contains(off.String(), "7 天") {
+		t.Errorf("提示里应带上留存期，实际为 %q", off.String())
 	}
 }
 

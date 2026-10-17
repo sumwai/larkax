@@ -26,23 +26,30 @@ func newCollector(t *testing.T, cfg Config, db DB) *Collector {
 	return c
 }
 
-// 关掉开关时返回 nil，而不是一个「什么都不做」的空实现：
+// 关掉采集时返回 nil，而不是一个「什么都不做」的空实现：
 // 网关对 nil 的处理是根本不采集，对空实现的处理是采集一条空快照再落库。
-func TestDisabledCollectorReturnsNil(t *testing.T) {
-	c := newCollector(t, Config{Enabled: false}, &fakeDB{})
-	if c.Enabled() {
-		t.Error("关掉开关时 Enabled 应为 false")
+//
+// 这条钉的是「不写」，不是「什么都不做」——清理照样跑，见
+// TestCleanupRunsWhenCollectingDisabled。
+func TestDisabledCollectorDoesNotCapture(t *testing.T) {
+	db := &fakeDB{}
+	c := newCollector(t, Config{Enabled: false, RetentionDays: 30}, db)
+	if c.Collecting() {
+		t.Error("关掉采集时 Collecting 应为 false")
 	}
 	if c.Redactor() != nil {
-		t.Error("关掉开关时 Redactor 应为 nil")
+		t.Error("关掉采集时 Redactor 应为 nil")
 	}
 	if c.Sink() != nil {
-		t.Error("关掉开关时 Sink 应为 nil")
+		t.Error("关掉采集时 Sink 应为 nil")
 	}
 
 	// 即使有人硬塞一条进来，也不该写库。
 	if err := c.Save(context.Background(), newSnap()); err != nil {
-		t.Errorf("关掉开关时 Save 不该报错: %v", err)
+		t.Errorf("关掉采集时 Save 不该报错: %v", err)
+	}
+	if db.execCount() != 0 {
+		t.Errorf("关掉采集时不该产生任何 SQL，实际 %d 条", db.execCount())
 	}
 }
 
@@ -253,16 +260,53 @@ func TestCollectorDropExpiredUsesConfiguredRetention(t *testing.T) {
 	}
 }
 
-func TestDropExpiredDisabledCollectorIsNoop(t *testing.T) {
-	db := &fakeDB{rows: &fakeRows{names: []string{"request_snapshots_2020_01_01"}}}
-	c := newCollector(t, Config{Enabled: false}, db)
+// 关掉采集**不**关掉清理：写新快照与清存量是两件事。
+//
+// 把两者绑在同一个谓词上的后果，是「关掉采集」这个动作顺带废掉了留存承诺——
+// 而关掉采集的动机通常正是「不想让快照再涨」，那时存量分区反而更需要被清掉。
+// 而那种失效是静默的：命令照样打印「已删除：0 个」并退出 0。
+//
+// 这条用例的前身（TestDropExpiredDisabledCollectorIsNoop）断言的是它的反面：
+// 关掉采集时 DropExpired 一个分区都不许删、一条 DDL 都不许执行。它把缺陷本身
+// 钉住了。改判据之前先确认原来那条钉的是哪一件事——同一个文件里
+// TestDisabledCollectorDoesNotCapture 钉的是「不写新快照」，那一条是对的。
+func TestCleanupRunsWhenCollectingDisabled(t *testing.T) {
+	cfg := Config{Enabled: false, RetentionDays: 3}
+	db := &fakeDB{rows: &fakeRows{names: []string{
+		"request_snapshots_2026_10_10",
+		"request_snapshots_2026_10_15",
+		"request_snapshots_default",
+	}}}
+	c := newCollector(t, cfg, db)
+
+	// 前提：采集确实是关着的。不成立的话下面断言的东西就不是这条用例要说的。
+	if c.Collecting() || c.Sink() != nil {
+		t.Fatal("这条用例的前提是采集关着")
+	}
 
 	dropped, err := c.DropExpired(context.Background(), testDay)
-	if err != nil || len(dropped) != 0 {
-		t.Errorf("关掉采集时不该删分区，实际 %v / %v", dropped, err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if db.execCount() != 0 {
-		t.Error("关掉采集时不该执行任何 DDL")
+	if len(dropped) != 1 || dropped[0] != "request_snapshots_2026_10_10" {
+		t.Errorf("删除清单 = %v，期望只含 2026_10_10（留存 3 天）", dropped)
+	}
+	// 判据是**真的执行了 DROP**，不是返回值里有个名字：只说删了、没删，
+	// 正是这条链路原来的失败方式。
+	if db.execCount() != 1 {
+		t.Fatalf("Exec 次数 = %d，期望 1（DROP 掉那个到期分区）", db.execCount())
+	}
+	if got := db.lastExec(); got != "DROP TABLE IF EXISTS request_snapshots_2026_10_10" {
+		t.Errorf("执行的语句 = %q，期望 DROP 掉 2026_10_10", got)
+	}
+
+	// 演练走同一条路，采集关着也要照实列出来。
+	listed, err := c.ExpiredPartitions(context.Background(), testDay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0] != dropped[0] {
+		t.Errorf("演练清单 = %v，实际删除 %v", listed, dropped)
 	}
 }
 

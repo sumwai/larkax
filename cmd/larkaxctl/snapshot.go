@@ -703,11 +703,10 @@ func runSnapshotCleanup(args []string) error {
 		return err
 	}
 
-	if !snapCfg.Enabled {
-		// 关掉采集时仍然清理：已有的分区还要按留存期清掉，
-		// 「关掉」承诺的是不再写入新的，而不是把旧的留到永远。
-		fmt.Fprintln(os.Stderr, "提示：快照采集已关闭，本次只清理存量分区。")
-	}
+	// 采集关掉时清理照旧执行：已有的分区还要按留存期清掉，
+	// 「关掉」承诺的是不再写入新的，而不是把旧的留到永远。
+	// 打不打提示由 printCleanupHint 自己判（采集开着时一个字都不打）。
+	printCleanupHint(os.Stderr, snapCfg)
 
 	collector, err := snapshotwire.New(snapCfg, snapshotwire.Wrap(db), nil)
 	if err != nil {
@@ -720,7 +719,7 @@ func runSnapshotCleanup(args []string) error {
 		if listErr != nil {
 			return listErr
 		}
-		printPartitions("将删除", expired)
+		printPartitions("将删除", expired, snapCfg.RetentionDays, at)
 		return nil
 	}
 
@@ -728,18 +727,40 @@ func runSnapshotCleanup(args []string) error {
 	if err != nil {
 		return err
 	}
-	printPartitions("已删除", dropped)
+	printPartitions("已删除", dropped, snapCfg.RetentionDays, at)
 	return nil
+}
+
+// printCleanupHint 说明这次清理是在采集关闭的情况下跑的。
+//
+// 单独一个函数是为了让它能被断言：这句提示的职责是把这次命令的前提说清楚，
+// 而它曾经说过一件做不到的事——「本次只清理存量分区」，实现上却一步都没走，
+// 因为「要不要写新快照」与「要不要清理存量」当时是同一个开关。
+// 提示语与行为一致这件事，得有一条用例看着。
+func printCleanupHint(w io.Writer, cfg snapshotwire.Config) {
+	if cfg.Enabled {
+		return
+	}
+	_, _ = fmt.Fprintf(w,
+		"提示：快照采集已关闭，不再写入新快照；本次仍按留存期 %d 天清理存量分区。\n",
+		cfg.RetentionDays)
 }
 
 // printPartitions 打印分区名清单。
 //
 // 一个都没删时也打印一行明确的说明，而不是什么都不输出：
-// 「没有到期分区」与「命令因为某个原因没跑起来」在安静的终端里长得一样
+// 「没有到期的分区」与「命令因为某个原因没跑起来」在安静的终端里长得一样
 // （见 LESSONS.md 第 16 条）。
-func printPartitions(verb string, names []string) {
+//
+// 那句说明里带上留存期与到期线，也就是这次清理用到的两个判据。只写一句
+// 「没有到期分区」是不够的：它与「根本没查」还是分不开，而这条命令曾经正是
+// 「说自己在清理、实际一步都没走，输出却完全正常」。把判据打出来，
+// 「查过了、确实没有」才是可以核对的。
+func printPartitions(verb string, names []string, retentionDays int, at time.Time) {
 	if len(names) == 0 {
-		fmt.Printf("%s：0 个（没有到期分区）\n", verb)
+		cutoff := snapshotwire.RetentionCutoff(retentionDays, at)
+		fmt.Printf("%s：0 个（留存期 %d 天，到期线 %s；没有到期的分区）\n",
+			verb, retentionDays, cutoff.Format("2006-01-02"))
 		return
 	}
 	fmt.Printf("%s %d 个分区：\n", verb, len(names))
