@@ -64,36 +64,6 @@ func messagesBodyWith(model, system string) []byte {
 	return out
 }
 
-// systemText 从上游请求体的 system 字段里取出文本。
-//
-// Anthropic 允许两种写法：一个字符串，或者一组正文块。这里断言的是**内容**：
-// 用哪种写法是编码选择，把它写进断言会让一次等价的编码改动变成假失败，
-// 而真正要防的是「system 根本没传到上游」。
-func systemText(t *testing.T, v any) string {
-	t.Helper()
-
-	switch s := v.(type) {
-	case nil:
-		return ""
-	case string:
-		return s
-	case []any:
-		var out strings.Builder
-		for _, item := range s {
-			block, ok := item.(map[string]any)
-			if !ok {
-				t.Fatalf("system 里的元素是 %T，期望一个正文块", item)
-			}
-			text, _ := block["text"].(string)
-			out.WriteString(text)
-		}
-		return out.String()
-	default:
-		t.Fatalf("system 是 %T，期望字符串或正文块数组", v)
-		return ""
-	}
-}
-
 // ── 用例 ──────────────────────────────────────────────────────────────
 
 // 成功路径：一次非流式的 Anthropic 请求跑通，响应按 Anthropic 的形状给，
@@ -187,7 +157,7 @@ func TestMessagesEndToEnd(t *testing.T) {
 		t.Errorf("content = %+v，期望一个带正文的 text 块", got.Content)
 	}
 	if got.StopReason == nil || *got.StopReason != "end_turn" {
-		t.Errorf("stop_reason = %v，期望 end_turn", got.StopReason)
+		t.Errorf("stop_reason = %s，期望 end_turn", showPtr(got.StopReason))
 	}
 	// stop_sequence 恒为 null 但字段要在：缺了它有些客户端会当成字段丢失。
 	// 判据是**键在不在**，不是它的值——所以拿原始 map 看，而不是看解出来的
@@ -205,7 +175,8 @@ func TestMessagesEndToEnd(t *testing.T) {
 		t.Errorf("usage = %+v，期望上游报的 12/7", got.Usage)
 	}
 	if got.Object != nil || got.Choices != nil {
-		t.Errorf("响应体里混进了 OpenAI 形状的字段（object=%v choices=%v）——两套协议各是一份独立的结构体", got.Object, got.Choices)
+		t.Errorf("响应体里混进了 OpenAI 形状的字段（object=%s choices=%v）——两套协议各是一份独立的结构体",
+			showPtr(got.Object), got.Choices)
 	}
 
 	// 二、钱。12 × 0.00001 + 7 × 0.00003 = 0.00033000，与 OpenAI 那条路同一个数。
@@ -322,7 +293,7 @@ func TestMessagesEndToEnd(t *testing.T) {
 	// system 是 Anthropic 与 OpenAI 在请求体上最明显的结构差异：这边是顶层
 	// 字段，那边是 messages 里的一条。转换时丢掉它，模型的行为就变了，
 	// 而调用方从响应上完全看不出来。
-	if got := systemText(t, sent.System); got != "你是假上游" {
+	if got := textOf(t, sent.System); got != "你是假上游" {
 		t.Errorf("上游收到的 system = %q，期望 %q（Anthropic 的 system 是顶层字段，转换时不能丢）", got, "你是假上游")
 	}
 	if len(sent.Messages) != 1 || sent.Messages[0].Role != "user" {
@@ -506,7 +477,8 @@ func TestMessagesMissingMaxTokensIsRejected(t *testing.T) {
 	}
 	// param / code 是 OpenAI 错误体的字段。它们出现在这里说明写错了形状。
 	if got.Error.Param != nil || got.Error.Code != nil {
-		t.Errorf("错误体里出现了 OpenAI 才有的字段（param=%v code=%v）", got.Error.Param, got.Error.Code)
+		t.Errorf("错误体里出现了 OpenAI 才有的字段（param=%s code=%s）",
+			showPtr(got.Error.Param), showPtr(got.Error.Code))
 	}
 
 	// 请求在预留那一步就被挡下了，上游一次都不该被调用。
@@ -592,8 +564,8 @@ func TestMessagesUpstreamFailureReturnsAnthropicError(t *testing.T) {
 		t.Errorf("错误体回显了上游的错误原文：%s", out)
 	}
 	if got.Error.Param != nil || got.Error.Code != nil {
-		t.Errorf("错误体里出现了 OpenAI 才有的字段（param=%v code=%v）——形状按调用协议给，这里该是 Anthropic 那份",
-			got.Error.Param, got.Error.Code)
+		t.Errorf("错误体里出现了 OpenAI 才有的字段（param=%s code=%s）——形状按调用协议给，这里该是 Anthropic 那份",
+			showPtr(got.Error.Param), showPtr(got.Error.Code))
 	}
 
 	// 二、钱：冻结额必须回到零，余额一分没动。
