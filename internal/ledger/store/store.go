@@ -54,7 +54,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
@@ -68,10 +70,46 @@ import (
 // Store 是账本与钱包的持久化。
 type Store struct {
 	db *sql.DB
+
+	// logger 是结算路径上「不值得让结算失败、但必须有人看见」的出口。
+	// nil 表示用 slog.Default()。
+	logger *slog.Logger
+
+	// now 是写入侧补建分区时用的时钟。nil 表示 time.Now。
+	//
+	// 它**只**影响「补哪个月的分区」这一件事：用量事件的 created_at 取的是
+	// 库上的 now()（见 usage_event.go 里那一列的注释），不经过这里。所以
+	// 换掉它不会让落库的时刻跟着变——两边刻意分开，是为了让用例能确定性地
+	// 指向某个月，而不必去改系统时钟。
+	now func() time.Time
+
+	// usagePartition 记录本进程已经确认过「哪个月的 usage_events 分区存在」。
+	//
+	// 记到月而不是一个 bool：跨月之后必须重新确认一次，否则新月份的第一笔
+	// 结算会落进兜底分区——而那条路是静默的。
+	partMu      sync.Mutex
+	partMonth   string
+	partEnsured bool
 }
 
 // New 包装一个已打开的数据库句柄。
 func New(db *sql.DB) *Store { return &Store{db: db} }
+
+// log 返回本实例的日志出口，没设过就用进程的默认 logger。
+func (s *Store) log() *slog.Logger {
+	if s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
+}
+
+// nowUTC 返回写入侧补建分区时的当前时刻，统一 UTC。
+func (s *Store) nowUTC() time.Time {
+	if s.now != nil {
+		return s.now().UTC()
+	}
+	return time.Now().UTC()
+}
 
 // 编译期断言：它要满足网关对预留与结算落库的要求。
 //
@@ -392,6 +430,10 @@ func (s *Store) Save(ctx context.Context, req pipeline.Request, charge *pipeline
 	if err := checkPricedAt(charge.PricedAt); err != nil {
 		return err
 	}
+	// 用量事件按月分区，而分区不会自己长出来——没有这一步，种子覆盖的月份
+	// 过完之后每一行都落进兜底分区，静默地。位置在 BeginTx **之前**，
+	// 理由见 ensureUsageEventPartition 的注释。
+	s.ensureUsageEventPartition(ctx)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
