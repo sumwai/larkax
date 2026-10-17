@@ -3,6 +3,7 @@ package snapshotwire
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -55,22 +56,99 @@ func testDB(t *testing.T) *sql.DB {
 	return handle
 }
 
-// 写入的行必须真的落在当天分区里，而不是兜底分区。
+// ownDay 是这条用例专用的那一天。
+//
+// 取一个**未来**的日期，而不是「真正的当天」：未来那天一定没有分区（没人预建
+// 到那么远），删掉它也不影响任何别的进程。判据是问一句「这个窗口里别的进程
+// 会不会往它里面写」——不会。
+//
+// 按当天写用例就等于删当天分区，而分区是全库共享的状态：`go test ./...` 把包
+// 并行跑在同一个库上，别的包刚写的行会跟着被删掉，而在那段窗口里写进来的行会
+// 落进兜底分区（见 LESSONS.md 第 26 条）。取正午而不是零点，是为了让「属于哪
+// 一天」不受边界口径影响。
+var ownDay = time.Date(2037, 6, 15, 12, 0, 0, 0, time.UTC)
+
+// currentSnapshotPartition 是「真正的当天分区」的名字。
+func currentSnapshotPartition() string {
+	return PartitionName(time.Now().UTC())
+}
+
+// dropRefusal 是「这个分区名能不能删」的判据，不合法时给出理由。
+//
+// # 绝不许删当天分区
+//
+// 删掉它之后、它被建回来之前的那一段窗口里：别的包刚写的快照会跟着被删掉
+// （它们按 request_id 查不到自己那一条，报出来的是它们的失败），而并发的写入
+// 会落进 request_snapshots_default——那里的行没有到期日，留存承诺对它不成立；
+// 兜底分区一有当天范围内的行，当天分区就再也建不回来（SQLSTATE 23514）。
+//
+// 判据与动作分开：`t.Fatal` 本身没法在不弄挂用例的情况下断言，而「什么名字该
+// 被拒」可以——见 TestDropRefusalRejectsOnlyCurrentDay。
+func dropRefusal(name string) error {
+	if name == currentSnapshotPartition() {
+		return fmt.Errorf("不许删当天分区 %s：删掉它的窗口里别的包刚写的快照会跟着"+
+			"被删掉，而并发的写入会落进 %s——那里的行没有到期日，留存承诺对它不成立；"+
+			"改用一个别人碰不到的日期",
+			name, DefaultPartition)
+	}
+	return nil
+}
+
+// dropRequestSnapshotPartition 删掉一个测试造出来的分区。
+func dropRequestSnapshotPartition(ctx context.Context, t *testing.T, db *sql.DB, name string) {
+	t.Helper()
+	// 判据在 DDL 之前：拦住之后当天分区必须原封不动。
+	if err := dropRefusal(name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS "+name); err != nil {
+		t.Fatalf("清理分区 %s 失败: %v", name, err)
+	}
+}
+
+// 护栏本身要有判据：传当天分区进去必须被拒。
+//
+// 不连库：判的是那个纯函数，所以没设 LARKAX_DB_DSN 时这条也会跑。
+func TestDropRefusalRejectsOnlyCurrentDay(t *testing.T) {
+	if err := dropRefusal(currentSnapshotPartition()); err == nil {
+		t.Error("护栏没拦住「删当天分区」——那道判断没在工作")
+	}
+
+	allowed := []struct {
+		name string
+		at   time.Time
+	}{
+		{"合成的未来日期", ownDay},
+		{"昨天", time.Now().UTC().AddDate(0, 0, -1)},
+	}
+	for _, tc := range allowed {
+		if err := dropRefusal(PartitionName(tc.at)); err != nil {
+			t.Errorf("%s（%s）应当放行，实际被拒: %v",
+				tc.name, PartitionName(tc.at), err)
+		}
+	}
+}
+
+// 写入的行必须真的落在它自己那一天的分区里，而不是兜底分区。
 //
 // 这是整条留存承诺的落点：落进兜底分区的行没有到期日，清理永远删不掉它。
+//
+// 用例把写入指向 ownDay（一个合成的未来日期），并删掉那一天的分区，让补建
+// 这一步真的被执行一次。删掉的那张分区只属于本用例，所以它不依赖「别人此刻
+// 在不在动当天的分区」这个前提——原来按当天写，断言的东西与它真正依赖的东西
+// 是两回事（见 LESSONS.md 第 26 条）。
 func TestIntegrationInsertLandsInDayPartition(t *testing.T) {
 	handle := testDB(t)
 	store := NewStore(Wrap(handle), quietLogger())
+	store.now = func() time.Time { return ownDay }
 	ctx := context.Background()
 
-	// 清掉今天的分区，让补建这一步真的被执行一次。
-	day := PartitionName(time.Now().UTC())
-	if _, err := handle.ExecContext(ctx, "DROP TABLE IF EXISTS "+day); err != nil {
-		t.Fatalf("预清理分区失败: %v", err)
-	}
-	// 退出时也清掉，避免污染后续运行。
+	// 清掉这一天自己的分区，让补建这一步真的被执行一次。
+	day := PartitionName(ownDay)
+	dropRequestSnapshotPartition(ctx, t, handle, day)
+	// 退出时也清掉：这个分区只属于本用例。
 	t.Cleanup(func() {
-		_, _ = handle.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+day)
+		dropRequestSnapshotPartition(context.Background(), t, handle, day)
 	})
 
 	requestID := "wire-it-" + time.Now().UTC().Format("20060102150405.000000000")
@@ -92,14 +170,21 @@ func TestIntegrationInsertLandsInDayPartition(t *testing.T) {
 		t.Errorf("落进了 %q，期望 %q；落进兜底分区意味着留存期对它不成立", landed, day)
 	}
 
-	// 兜底分区必须仍然为空——它是告警项，不该被正常写入填满。
+	// 兜底分区里不许有这一行。
+	//
+	// 判据按 request_id 收窄到本用例写进去的那一行，不是整张兜底分区的行数：
+	// 兜底分区是全库共享的，别的进程在同一个库里跑，全局计数会把它们的行算到
+	// 这条用例头上。收窄之后它钉住的是「补建真的生效了，这一行没有绕过它掉进
+	// 兜底分区」——也就是 `landed` 那句话在告警自己的口径上的复述（兜底分区
+	// 非空即告警），留着它，失败信息才会指向告警而不是一个内部分区名。
 	var fallback int
 	if err := handle.QueryRowContext(ctx,
-		`SELECT count(*) FROM request_snapshots_default`).Scan(&fallback); err != nil {
+		`SELECT count(*) FROM `+DefaultPartition+` WHERE request_id = $1`,
+		requestID).Scan(&fallback); err != nil {
 		t.Fatalf("查询兜底分区失败: %v", err)
 	}
 	if fallback != 0 {
-		t.Errorf("兜底分区有 %d 行，说明有写入绕过了补建", fallback)
+		t.Errorf("兜底分区里有 %d 行属于这次写入，说明它绕过了补建", fallback)
 	}
 }
 
@@ -109,14 +194,17 @@ func TestIntegrationDropExpiredDropsRealPartitions(t *testing.T) {
 	store := NewStore(Wrap(handle), quietLogger())
 	ctx := context.Background()
 
-	// 造两个自己的分区：一个明显过期，一个在留存窗口内。
-	// 名字带上固定前缀后面的日期，形状必须与 PartitionName 一致。
+	// 造两个自己的分区：一个明显过期，一个在留存窗口内。名字一律由
+	// PartitionName 产出，形状就不必再对一遍。
+	//
+	// 「窗口内」那个取 15 天前，而不是「昨天」：昨天那张分区是迁移铺下的**种子
+	// 分区**，它不属于本用例——用例删掉它、`t.Cleanup` 再删一次，它在这一轮里
+	// 就再也回不来了（见 LESSONS.md 第 26 条）。15 天前稳稳落在 30 天的窗口内，
+	// 又是别人碰不到的。
 	expired := "request_snapshots_1999_01_01"
-	fresh := "request_snapshots_" + time.Now().UTC().AddDate(0, 0, -1).Format("2006_01_02")
+	fresh := PartitionName(time.Now().UTC().AddDate(0, 0, -15))
 	for _, name := range []string{expired, fresh} {
-		if _, err := handle.ExecContext(ctx, "DROP TABLE IF EXISTS "+name); err != nil {
-			t.Fatalf("预清理 %s 失败: %v", name, err)
-		}
+		dropRequestSnapshotPartition(ctx, t, handle, name)
 		from, to := partitionBounds(t, name)
 		stmt := "CREATE TABLE " + name + " PARTITION OF request_snapshots " +
 			"FOR VALUES FROM ('" + from + "') TO ('" + to + "')"
@@ -126,7 +214,7 @@ func TestIntegrationDropExpiredDropsRealPartitions(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, name := range []string{expired, fresh} {
-			_, _ = handle.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+name)
+			dropRequestSnapshotPartition(context.Background(), t, handle, name)
 		}
 	})
 
@@ -170,9 +258,7 @@ func TestIntegrationDryRunMatchesRealDrop(t *testing.T) {
 	ctx := context.Background()
 
 	expired := "request_snapshots_1999_03_03"
-	if _, err := handle.ExecContext(ctx, "DROP TABLE IF EXISTS "+expired); err != nil {
-		t.Fatalf("预清理失败: %v", err)
-	}
+	dropRequestSnapshotPartition(ctx, t, handle, expired)
 	from, to := partitionBounds(t, expired)
 	if _, err := handle.ExecContext(ctx,
 		"CREATE TABLE "+expired+" PARTITION OF request_snapshots FOR VALUES FROM ('"+
@@ -180,7 +266,7 @@ func TestIntegrationDryRunMatchesRealDrop(t *testing.T) {
 		t.Fatalf("造到期分区失败: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = handle.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+expired)
+		dropRequestSnapshotPartition(context.Background(), t, handle, expired)
 	})
 
 	at := time.Now().UTC()

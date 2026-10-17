@@ -341,10 +341,9 @@ func TestPartitionCheckFailsWhenUsageDefaultPartitionHasRows(t *testing.T) {
 // # 为什么这一条不连库
 //
 // `request_snapshots_default` 非空这一项**没法**用「往库里真写一行」来造：
-// 那张表的行数是全库共享的，而 `internal/snapshotwire` 的集成测试断言它是
-// 空的（`TestIntegrationInsertLandsInDayPartition`：兜底分区有行就说明有写入
-// 绕过了补建）。`go test ./...` 把包并行跑起来，于是「我塞一行」与「它数一遍」
-// 会撞在一起——两边各自都对，撞在一起就是一次假的失败。
+// 那张表的行数是全库共享的，本包的 TestPartitionCheckPassesWhenClean 断言它
+// 是空的——而 `partition check` 的输出是一份全局读数，任何一条用例留下的行都
+// 会变成后面每一条用例的假失败。
 //
 // 这是同一个坑的另一种形状：上一条是**删**共享状态踩到别人，这一条是**写**
 // 共享状态踩到别人。所以判据从取值里拆了出来（见 partitionProblems），这一层
