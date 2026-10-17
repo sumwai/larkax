@@ -218,6 +218,13 @@ jobs:
       # 所以这里要一个**正向证据**：`--- PASS: TestContract...` 出现过几次。
       # 这与 .github/actions/check-integration-tests 那道门是同一个形状，
       # 只是它按包数、这里按用例数。
+      # `go vet` 默认**不看** build tag 后面的文件，所以带 `contract` 标签的那一份
+      # 在 `go` job 的 `go vet ./...` 里是看不见的——它要单独带 `-tags` 跑一遍
+      # （AGENTS.md 的 Lint 一节写着这条命令）。放在契约测试**之前**：vet 挂了
+      # 说明这一份根本没编译过，那时再跑用例只会得到一堆无关的失败。
+      - name: 契约测试的 vet
+        run: go vet -tags=contract ./internal/assembly/
+
       - name: 契约测试
         run: |
           set +e
