@@ -517,7 +517,25 @@ go run ./cmd/larkaxctl price list
 ```
 
 `channel list` **不打印凭证密文**，只打印它挂在哪些主密钥下（那不需要任何
-密钥材料）。`price list` 按裁决次序排列，排第一的那条就是会被选中的那条。
+密钥材料）。默认只列**还在用**的渠道，`channel list --all` 把已删除的也列出来，
+多一栏「已删」记着删除时刻。`price list` 按裁决次序排列，排第一的那条就是会被
+选中的那条。
+
+**删一条渠道是软删**：`channel delete --id <渠道 ID>` 把 `channels.deleted_at`
+置上时刻，并把状态改成 `disabled`。
+
+```sh
+go run ./cmd/larkaxctl channel delete --id 7
+```
+
+行本身留着——`billing_requests` 与 `usage_events` 仍按 `channel_id` 引用它，
+真删会让对账与快照追溯不到历史。删掉之后：
+
+- 那个渠道不再进候选集，也不再出现在 `channel list` 的默认输出里（`--all` 才看得见）；
+- `channel update` / `enable` / `disable` 对它会**明确报错**，而不是改一行你看不见的数据；
+- 凭证密文与从属的行都不动，所以 `rotate` 与健康度统计都会跳过它。
+
+删除是幂等的：重复删同一条不是错误，第二次打印「已经是删除状态」。
 
 **退出码**：`0` 成功、`1` 其他失败、`2` 命令行参数错、`3` 连不上数据库、
 `4` 约束冲突（唯一键、外键、要改或要查的那一行不存在；`wallet credit` 的
@@ -531,7 +549,7 @@ go run ./cmd/larkaxctl price list
 它们读的是这个环境变量本身，与 `LARKAX_ROLE` 无关——运维命令不属于任何角色，
 把命令的成败绑到角色上，会让 `LARKAX_ROLE=worker` 时明明设好了主密钥却报
 「没有读到主密钥」。其余命令不碰凭证，没有主密钥也能跑，其中
-`channel list` / `enable` / `disable` 连密钥材料都不需要。
+`channel list` / `enable` / `disable` / `delete` 连密钥材料都不需要。
 
 每条子命令的完整用法见 `larkaxctl <子命令> --help`，例如
 `go run ./cmd/larkaxctl channel --help`。
@@ -792,7 +810,7 @@ ingress 规则下。
 
 | 子命令 | 做什么 |
 |---|---|
-| `channel` | 上游渠道：`create` / `list` / `update` / `enable` / `disable` |
+| `channel` | 上游渠道：`create` / `list`（`--all` 含已删）/ `update` / `enable` / `disable` / `delete`（软删） |
 | `model` | 模型目录：`add` / `list` / `show` / `update` / `delete` |
 | `alias` | 规范模型名到上游模型名的映射：`add` / `list` / `update` / `delete` / `resolve` |
 | `price` | 计价规则：`add` / `list` / `update` / `explain` |

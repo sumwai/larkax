@@ -66,7 +66,7 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
   larkaxctl settings list                  列出全部运行期配置及其说明
   larkaxctl settings set --key <键> --value <值> --by <用户>
                                            改一个运行期配置项
-  larkaxctl channel create|list|update|enable|disable
+  larkaxctl channel create|list|update|enable|disable|delete
                                            渠道（创建时凭证从 stdin 或环境变量读）
   larkaxctl doctor [--live --model <规范名> ...]
                                            逐项检查这条链路通不通（只读；--live 才真打上游）

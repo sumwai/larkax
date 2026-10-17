@@ -28,7 +28,7 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
                            (--credential-stdin | --credential-env <变量名>)
                            [--owner <用户 ID 或用户名>] [--weight <权重>]
                            [--priority <优先级>] [--setting <JSON 对象>]
-  larkaxctl channel list
+  larkaxctl channel list [--all]
   larkaxctl channel update --id <渠道 ID>
                            [--name <名称>] [--type <类型>] [--base-url <URL>]
                            [--models <模型名,...>] [--weight <权重>]
@@ -36,6 +36,7 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
                            [--credential-stdin | --credential-env <变量名>]
   larkaxctl channel enable --id <渠道 ID>
   larkaxctl channel disable --id <渠道 ID>
+  larkaxctl channel delete --id <渠道 ID>
 
 **明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。**
 命令行参数会出现在 ps 的输出与 shell 历史里，凭证到了那里就等于交给了
@@ -56,6 +57,12 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
 
 create 的 stdout 只有新渠道的 ID，其余信息走 stderr。
 list **不打印凭证密文**，只打印它挂在哪些主密钥下（那不需要任何密钥材料）。
+list 默认不列已删的渠道，--all 才列，并在「已删」那一栏标出删除时刻。
+
+delete 是**软删**：置 deleted_at 并把状态改成 disabled，行与它的凭证密文都留在
+库里。历史账单（billing_requests / usage_events）仍然按 channel_id 引用它，所以
+删除之后那些记录照样认得这条渠道。已删的渠道不能再 update / enable / disable，
+再删一次不报错（打印「已经是删除状态」）。
 
 渠道类型必须是已注册的适配器类型；类型写错时错误信息会列出已知的类型。
 --models 至少要有一个：读取路径把 models 当白名单用，空数组的渠道永远选不中。
@@ -94,6 +101,8 @@ func runChannel(args []string) error {
 		return runChannelSetStatus(rest, channels.StatusEnabled)
 	case "disable":
 		return runChannelSetStatus(rest, channels.StatusDisabled)
+	case "delete":
+		return runChannelDelete(rest)
 	case "help", "-h", "--help":
 		fmt.Print(channelUsage)
 		return nil
@@ -349,6 +358,7 @@ func printSettingUnreadNote(w io.Writer) {
 func runChannelList(args []string) error {
 	fs := flag.NewFlagSet("channel list", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, channelUsage) }
+	all := fs.Bool("all", false, "含已删除的渠道，并在「已删」一栏标出删除时刻")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -370,11 +380,17 @@ func runChannelList(args []string) error {
 
 	// 列举既不封装凭证也不校验渠道类型，所以既不需要主密钥也不需要适配器
 	// 注册表：一台只读的机器（比如没有主密钥的运维跳板）也能核对配置。
-	infos, err := channels.NewAdmin(db, nil, nil).List(ctx)
+	admin := channels.NewAdmin(db, nil, nil)
+	var infos []channels.ChannelInfo
+	if *all {
+		infos, err = admin.ListAll(ctx)
+	} else {
+		infos, err = admin.List(ctx)
+	}
 	if err != nil {
 		return err
 	}
-	printChannelList(os.Stdout, infos)
+	printChannelList(os.Stdout, infos, *all)
 	return nil
 }
 
@@ -415,6 +431,56 @@ func runChannelSetStatus(args []string, status string) error {
 		return err
 	}
 	fmt.Printf("渠道 %d %s。\n", *id, done)
+	return nil
+}
+
+// runChannelDelete 软删一条渠道。
+//
+// 它不需要主密钥也不需要适配器注册表：删除只改 deleted_at 与 status 两列，
+// 不碰凭证密文（密文留着是为了让历史行仍能解释自己）。
+//
+// 两条输出口径：
+//   - 这次真的删掉了 → 「已删除渠道 N。」；
+//   - 它已经是删除状态 → 「渠道 N 已经是删除状态。」，退出码 0。
+//
+// 第二条不是错误：删除是幂等的，脚本重跑一次不该失败。而 id 不存在仍然报错
+// （ErrChannelNotFound）——那说明调用方拿错了 id，报成功会让它以为删对了。
+func runChannelDelete(args []string) error {
+	fs := flag.NewFlagSet("channel delete", flag.ContinueOnError)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, channelUsage) }
+	id := fs.Int64("id", 0, "要删的渠道 ID")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("delete 不接受位置参数，得到 %q：要删的渠道用 --id 指定", fs.Arg(0)))
+	}
+	if *id <= 0 {
+		fs.Usage()
+		return usageErr(errors.New("缺少 --id（要删的渠道 ID）"))
+	}
+
+	cfg, err := config.LoadOps()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
+	defer cancel()
+	db, err := openDB(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+
+	deleted, err := channels.NewAdmin(db, nil, nil).SoftDelete(ctx, *id)
+	if err != nil {
+		return err
+	}
+	if deleted {
+		fmt.Printf("已删除渠道 %d。\n", *id)
+		return nil
+	}
+	fmt.Printf("渠道 %d 已经是删除状态。\n", *id)
 	return nil
 }
 
@@ -533,7 +599,10 @@ func printCreatedChannel(stdout, stderr io.Writer, id int64, primaryKeyID string
 // **它不打印凭证密文，也不可能打印**：ChannelInfo 里根本没有密文那一栏，
 // 只有「这份密文挂在哪些主密钥下」（见 channels.ChannelInfo 的注释）。
 // 列举的目的是核对配置，不是把密钥搬来搬去。
-func printChannelList(w io.Writer, infos []channels.ChannelInfo) {
+//
+// withDeleted 为真时（list --all）多打一栏「已删」，值为删除时刻；那一栏
+// 只在 --all 下出现，因为默认清单里每一行都是零值，空列只是把噪音铺满每一行。
+func printChannelList(w io.Writer, infos []channels.ChannelInfo, withDeleted bool) {
 	if len(infos) == 0 {
 		// 明确打一句，而不是什么都不输出：「还没有渠道」与「命令因为某个
 		// 原因没跑起来」在安静的终端里长得一样（见 LESSONS.md 第 16 条）。
@@ -542,8 +611,20 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo) {
 	}
 
 	tw := newTableWriter(w)
-	_, _ = fmt.Fprintln(tw, "ID\t状态\t类型\t名称\t上游地址\t模型\t归属\t权重\t优先级\t凭证")
+	if withDeleted {
+		_, _ = fmt.Fprintln(tw, "ID\t状态\t类型\t名称\t上游地址\t模型\t归属\t权重\t优先级\t凭证\t已删")
+	} else {
+		_, _ = fmt.Fprintln(tw, "ID\t状态\t类型\t名称\t上游地址\t模型\t归属\t权重\t优先级\t凭证")
+	}
 	for _, info := range infos {
+		if withDeleted {
+			_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
+				info.ID, info.Status, info.Type, info.Name, info.BaseURL,
+				strings.Join(info.Models, ","), ownerLabel(info.OwnerUserID),
+				info.Weight, info.Priority, credentialKeysLabel(info),
+				deletedLabel(info))
+			continue
+		}
 		_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
 			info.ID, info.Status, info.Type, info.Name, info.BaseURL,
 			strings.Join(info.Models, ","), ownerLabel(info.OwnerUserID),
@@ -557,6 +638,19 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo) {
 		if info.CredentialErr != nil {
 			_, _ = fmt.Fprintf(w, "渠道 %d 的凭证密文不合法：%v\n", info.ID, info.CredentialErr)
 		}
+	}
+
+	// 已删的行单独点一句：它们的 status 也是 disabled（删除时一并置的），
+	// 而「停用」是运维的临时决定、随时能启用回来；两者只看状态那一栏分不出来。
+	var deletedRows []string
+	for _, info := range infos {
+		if !info.DeletedAt.IsZero() {
+			deletedRows = append(deletedRows, strconv.FormatInt(info.ID, 10))
+		}
+	}
+	if len(deletedRows) > 0 {
+		_, _ = fmt.Fprintf(w, "渠道 %s 已删除：它们不再参与选路，也不能 update / enable / disable。\n",
+			strings.Join(deletedRows, "、"))
 	}
 
 	// 带着 setting 的行单独点出来：那一栏在库里、在这张清单上都与一个生效的
@@ -575,6 +669,18 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo) {
 			_, _ = fmt.Fprintf(w, "渠道 %s 配了 setting：%s。\n", strings.Join(rows, "、"), note)
 		}
 	}
+}
+
+// deletedLabel 是 list --all 里「已删」那一栏。
+//
+// 没删的行留空，打一个占位符会让每一行都有东西、而读者要逐行分辨哪个占位符
+// 表示「没有」；已删的行给出删除时刻，因为「什么时候删的」是事后核对时唯一
+// 能把它与历史账单对上的一条线索。
+func deletedLabel(info channels.ChannelInfo) string {
+	if info.DeletedAt.IsZero() {
+		return ""
+	}
+	return info.DeletedAt.UTC().Format(time.RFC3339)
 }
 
 // credentialKeysLabel 是清单里的「凭证」那一栏。

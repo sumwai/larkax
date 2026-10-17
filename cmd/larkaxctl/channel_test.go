@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channels"
@@ -491,5 +492,188 @@ func TestChannelSettingPrintsUnreadNote(t *testing.T) {
 	}
 	if !strings.Contains(listOut, "配了 setting") || !strings.Contains(listOut, idArg) {
 		t.Errorf("list 没有点出渠道 %s 配了 setting：\n%s", idArg, listOut)
+	}
+}
+
+// ── 软删 ────────────────────────────────────────────────────────────────
+
+// containsID 判断清单里有没有**这个 id 那一行**。
+//
+// 不能直接用 strings.Contains：清单里还有别的用例建的渠道，而删除时刻
+// （RFC3339）里的数字、别的渠道的 id 都可能碰巧包含这个子串——一个只在
+// 累积了一定量数据之后才红的断言，比没有更坏。
+func containsID(listOut string, id int64) bool {
+	want := strconv.FormatInt(id, 10)
+	for _, line := range strings.Split(listOut, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == want {
+			return true
+		}
+	}
+	return false
+}
+
+// createTestChannel 用命令行建一条渠道，返回它的 ID。
+func createTestChannel(t *testing.T, name, model string) int64 {
+	t.Helper()
+	withStdin(t, testSecret)
+	stdout, _ := captureStreams(t, func() {
+		if err := runChannelCreate([]string{
+			"--name", name, "--type", testChanType, "--base-url", testBaseURL,
+			"--models", model, "--credential-stdin",
+		}); err != nil {
+			t.Fatalf("create 失败: %v", err)
+		}
+	})
+	id, err := strconv.ParseInt(strings.TrimSpace(stdout), 10, 64)
+	if err != nil {
+		t.Fatalf("stdout 不是渠道 ID：%q（%v）", stdout, err)
+	}
+	return id
+}
+
+// TestChannelDeleteSoftDeletes 钉住 delete 的四条契约：
+//
+//  1. 删掉之后 list 不含它，list --all 含它且「已删」那栏有值；
+//  2. 再删一次不报错，打印「已经是删除状态」，退出码 0；
+//  3. 删一个不存在的 id 报错，退出码走「要改的那一行不存在」；
+//  4. 行还在库里（软删不是 DELETE），密文也还在。
+func TestChannelDeleteSoftDeletes(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	id := createTestChannel(t, uniqueName("channel"), uniqueName("model"))
+	idArg := strconv.FormatInt(id, 10)
+
+	out, _ := captureStreams(t, func() {
+		if err := runChannelDelete([]string{"--id", idArg}); err != nil {
+			t.Fatalf("delete 失败: %v", err)
+		}
+	})
+	if !strings.Contains(out, "已删除渠道 "+idArg) {
+		t.Errorf("delete 的输出不对：\n%s", out)
+	}
+
+	// 一、默认清单不含它，--all 含它并标出删除时刻。
+	listOut, _ := captureStreams(t, func() {
+		if err := runChannelList(nil); err != nil {
+			t.Fatalf("list 失败: %v", err)
+		}
+	})
+	if containsID(listOut, id) {
+		t.Errorf("默认清单里出现了已删的渠道 %d：\n%s", id, listOut)
+	}
+	if strings.Contains(listOut, "已删") {
+		t.Errorf("默认清单不该有「已删」那一栏：\n%s", listOut)
+	}
+
+	allOut, _ := captureStreams(t, func() {
+		if err := runChannelList([]string{"--all"}); err != nil {
+			t.Fatalf("list --all 失败: %v", err)
+		}
+	})
+	if !strings.Contains(allOut, "已删") {
+		t.Errorf("list --all 缺少「已删」那一栏：\n%s", allOut)
+	}
+	if !containsID(allOut, id) {
+		t.Errorf("list --all 里没有已删的渠道 %d：\n%s", id, allOut)
+	}
+	if !strings.Contains(allOut, "渠道 "+idArg+" 已删除") {
+		t.Errorf("list --all 没有点出 %s 已删除：\n%s", idArg, allOut)
+	}
+
+	// 这一行的「已删」栏必须是时刻，不是空：删除时刻是事后与历史账单对上的
+	// 唯一线索。
+	var deletedAt sql.NullTime
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT deleted_at FROM channels WHERE id = $1`, id).Scan(&deletedAt); err != nil {
+		t.Fatalf("读回 deleted_at 失败: %v", err)
+	}
+	if !deletedAt.Valid {
+		t.Fatal("deleted_at 是 NULL：软删没有落库")
+	}
+	if !strings.Contains(allOut, deletedAt.Time.UTC().Format(time.RFC3339)) {
+		t.Errorf("list --all 的「已删」栏里没有删除时刻 %s：\n%s",
+			deletedAt.Time.UTC().Format(time.RFC3339), allOut)
+	}
+
+	// 四、行与密文都还在。
+	if len(channelEnvelope(t, db, id)) == 0 {
+		t.Error("删除不该清掉凭证密文：历史账单还要能解释自己")
+	}
+
+	// 二、再删一次是幂等的。
+	out, _ = captureStreams(t, func() {
+		if err := runChannelDelete([]string{"--id", idArg}); err != nil {
+			t.Fatalf("再删一次不该报错（幂等），得到 %v", err)
+		}
+	})
+	if !strings.Contains(out, "已经是删除状态") {
+		t.Errorf("重复删除的输出不对：\n%s", out)
+	}
+
+	// 三、不存在的 id 仍然报错，退出码走「要改的那一行不存在」。
+	err := runCaptured(t, func() error {
+		return runChannelDelete([]string{"--id", "999999999"})
+	})
+	if !errors.Is(err, channels.ErrChannelNotFound) {
+		t.Fatalf("删不存在的 id 应当报 ErrChannelNotFound，得到 %v", err)
+	}
+	if got := exitCode(err); got != exitConflict {
+		t.Errorf("删不存在的 id 的退出码 = %d，期望 %d", got, exitConflict)
+	}
+}
+
+// TestChannelWriteCommandsRejectDeleted 钉住命令行这一层对已删渠道的拒绝：
+// update / enable / disable 都要报 ErrChannelDeleted，而不是静默改一行。
+func TestChannelWriteCommandsRejectDeleted(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	id := createTestChannel(t, uniqueName("channel"), uniqueName("model"))
+	idArg := strconv.FormatInt(id, 10)
+	if err := runCaptured(t, func() error {
+		return runChannelDelete([]string{"--id", idArg})
+	}); err != nil {
+		t.Fatalf("delete 失败: %v", err)
+	}
+
+	var before time.Time
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT updated_at FROM channels WHERE id = $1`, id).Scan(&before); err != nil {
+		t.Fatalf("读回 updated_at 失败: %v", err)
+	}
+
+	cases := map[string][]string{
+		"update":  {"--id", idArg, "--priority", "9"},
+		"enable":  {"--id", idArg},
+		"disable": {"--id", idArg},
+	}
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			var err error
+			_, _ = captureStreams(t, func() {
+				switch name {
+				case "update":
+					err = runChannelUpdate(args)
+				case "enable":
+					err = runChannelSetStatus(args, channels.StatusEnabled)
+				case "disable":
+					err = runChannelSetStatus(args, channels.StatusDisabled)
+				}
+			})
+			if !errors.Is(err, channels.ErrChannelDeleted) {
+				t.Fatalf("err = %v，期望 ErrChannelDeleted", err)
+			}
+		})
+	}
+
+	var after time.Time
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT updated_at FROM channels WHERE id = $1`, id).Scan(&after); err != nil {
+		t.Fatalf("读回 updated_at 失败: %v", err)
+	}
+	if !after.Equal(before) {
+		t.Errorf("已删渠道的 updated_at 从 %s 变成了 %s：有写路径改动了它", before, after)
 	}
 }

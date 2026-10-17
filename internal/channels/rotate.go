@@ -531,9 +531,13 @@ func rotateLockHeld(ctx context.Context, db *sql.DB) bool {
 //
 // 数出来的值与实际扫过的行数可能差一点（轮换期间有人新建渠道），
 // 所以它只出现在进度里，不参与任何判断。
+//
+// 已软删的行不计入：扫描（rotateBatchQuery）也跳过它们，两处必须同一个口径，
+// 否则进度会在 100% 之前停住——一个看起来像卡死的正常状态。
 func countChannels(ctx context.Context, conn *sql.Conn) (int64, error) {
 	var total int64
-	if countErr := conn.QueryRowContext(ctx, `SELECT count(*) FROM channels`).Scan(&total); countErr != nil {
+	if countErr := conn.QueryRowContext(ctx,
+		`SELECT count(*) FROM channels WHERE `+channelAlive).Scan(&total); countErr != nil {
 		return 0, fmt.Errorf("统计渠道数失败: %w", countErr)
 	}
 	return total, nil
@@ -603,7 +607,13 @@ func keysOf(envelope []byte) []string {
 // 用 keyset 分页（id > 上一批的最后一个）而不是 OFFSET：轮换会改写前面的行，
 // OFFSET 的分页边界随写而漂移，会漏掉或重复某些行。按 id 前进则不会——
 // 每一行要么在本批被处理，要么在更早的批次里处理过。
-const rotateBatchQuery = `SELECT id, credential_enc FROM channels WHERE id > $1 ORDER BY id LIMIT $2`
+//
+// 跳过已软删的行：那些渠道不再使用，给它们的密文补新主密钥没有意义，而
+// Verify 的判据是「全库每一行都含当前主密钥」——两边口径不一致时，一份已经
+// 干净的库会永远 Verify 不通过。这与删除动作不清空密文不矛盾：密文留着是为了
+// 查历史，不是为了「还有一天会用到」。
+const rotateBatchQuery = `SELECT id, credential_enc FROM channels WHERE id > $1 AND ` +
+	channelAlive + ` ORDER BY id LIMIT $2`
 
 // rotateUpdateQuery 写回补过副本的密文。
 //

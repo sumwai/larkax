@@ -237,6 +237,27 @@ func (s *Source) decrypt(envelope []byte) (string, error) {
 	return string(plaintext), nil
 }
 
+// channelAlive 是「这一行渠道没有软删」这条判据的**唯一**一处字面量。
+//
+// channels.deleted_at 非 NULL 表示它被 larkaxctl channel delete 删掉了。
+// 软删之后从属的行都还在（七条外键是 ON DELETE CASCADE，真删会带走它们），
+// 所以「这条渠道还算不算数」不再能从「行在不在」读出来——它必须由每一条
+// 读 channels 的查询自己带上。
+//
+// # 为什么是片段而不是 View / RLS
+//
+// View 或 RLS 会把「管理面 --all 看得见已删的行」这条例外变成另一套读法，
+// 而例外一旦藏在 schema 层，「谁看得见已删的行」就不再能从调用点读出来；
+// 何况本仓的测试都是对着表写 SQL 的，View 会让夹具与生产走两条路。
+//
+// # 加一个新读点时要做什么
+//
+// 把这条片段拼进 WHERE。漏掉它不会报错：一条已删的渠道会继续参与选路、
+// 出现在清单上，而它的 status 同时被删除动作置成了 disabled——选路那一侧
+// 有 status 兜底，别处没有。所以清单、轮换、健康汇总、别名列举这些按 id 取
+// 行的路径要各自钉住这条（见 integration_test.go 的软删用例）。
+const channelAlive = `deleted_at IS NULL`
+
 func (s *Source) now() time.Time {
 	if s.Now != nil {
 		return s.Now()
@@ -348,6 +369,7 @@ SELECT
   LEFT JOIN channel_quota_state q ON q.channel_id = c.id
  WHERE c.status = 'enabled'
    AND c.models @> ARRAY[$1]::text[]
+   AND c.` + channelAlive + `
  ORDER BY c.id`
 
 // candidateRow 是查询结果的一行。
