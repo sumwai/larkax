@@ -1,10 +1,12 @@
 package responsesadapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/observe"
 )
 
 func testChannel(baseURL string) channel.Channel {
@@ -87,6 +90,23 @@ func collect(t *testing.T, events <-chan channel.StreamEvent) []channel.StreamEv
 		out = append(out, ev)
 	}
 	return out
+}
+
+// captureLogs 把进程日志器换成写进缓冲区的测试日志器（debug 级），返回那个
+// 缓冲区。
+//
+// 日志器是**进程级**的（observe.FromContext 取的就是 slog.Default()），所以用完
+// 必须还原。本包的用例都不并行跑（没有 t.Parallel），换默认日志器因此是安全的。
+//
+// 用例靠它把「适配器认得这个事件」变成可观察的：认得的事件记 debug、未归类的
+// 记 warn，而两者都不转发内容——只看正文是分不出来的。
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(observe.NewLoggerWithWriter(&buf, "debug", "text", false))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
 
 func TestTypeAndProtocol(t *testing.T) {
@@ -204,6 +224,46 @@ func TestChatSuccess(t *testing.T) {
 	}
 }
 
+// 真上游的非流式形状：思考正文在 output[].content[].reasoning_text 里，而
+// summary 是**空数组**；而且 reasoning 项排在 message 项**之后**。
+//
+// 夹具原来造的是 summary[].summary_text 且 reasoning 在前，适配器两种都取对了
+// ——但那是碰巧一致：没有任何用例证明过「换一种形状它还取对」。这条用例把真形状
+// 钉住，顺序也一并钉住（正文按 type 挑，不是按位置挑）。
+func TestChatRealShapeReasoningAfterMessage(t *testing.T) {
+	srv, _, _ := captureServer(t, http.StatusOK, `{
+		"id":"resp_1","model":"m","status":"completed",
+		"output":[
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"答案"}]},
+			{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"思考内容"}]}
+		],
+		"usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14,
+			"input_tokens_details":{"cached_tokens":6}}
+	}`)
+
+	resp, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), textRequest())
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if len(resp.Message.Content) != 1 || resp.Message.Content[0].Text != "答案" {
+		t.Errorf("内容 = %+v（reasoning 项排在 message 之后也一样不是可见输出）", resp.Message.Content)
+	}
+	if resp.FinishReason != "stop" {
+		t.Errorf("FinishReason = %q", resp.FinishReason)
+	}
+
+	// 正面钉住「夹具这个形状真的被解析了」：思考正文落在 Raw 里，说明适配器读的
+	// 是 content[].reasoning_text 而不是 summary[]。缺了这条，上面那条断言在
+	// 「reasoning 项整条没解析出来」时也会通过——那样这条用例就没在测真形状。
+	raw, err := json.Marshal(resp.Raw)
+	if err != nil {
+		t.Fatalf("序列化 Raw 失败: %v", err)
+	}
+	if !strings.Contains(string(raw), "reasoning_text") || !strings.Contains(string(raw), "思考内容") {
+		t.Errorf("夹具里的 reasoning_text 没被解析出来，这条用例就没在测真形状：%s", raw)
+	}
+}
+
 // 用量里最要紧的一处：缓存与推理嵌在 details 里，而 chat 那边是
 // prompt_tokens_details / completion_tokens_details。接错了账单金额会错，
 // **而响应形状看着完全正常**——所以这里用字面量逐个钉住。
@@ -295,6 +355,34 @@ func TestChatUsageFullyCachedPrompt(t *testing.T) {
 	got := billing.FromChannelUsage(u)
 	if got.PromptTokens != 0 || got.CacheReadTokens != 9000 || got.CompletionTokens != 12 {
 		t.Errorf("计费口径 = %+v，期望普通输入为 0、缓存读 9000、输出 12", got)
+	}
+}
+
+// 真上游的 input_tokens_details **只有** cached_tokens，从不发
+// cache_write_tokens。
+//
+// 上面那几条用例都带了这个字段，钉的是「字段在时怎么读」；这一条钉「字段不在
+// 就是 0」。两者混了的话，账单上会多出一笔并不存在的缓存写入——而响应形状、
+// 甚至缓存读那一项都完全正常，只有金额不对。
+func TestChatUsageRealShapeWithoutCacheWrite(t *testing.T) {
+	srv, _, _ := captureServer(t, http.StatusOK, `{
+		"id":"resp_1","model":"m","status":"completed","output":[],
+		"usage":{"input_tokens":100,"output_tokens":40,"total_tokens":140,
+			"input_tokens_details":{"cached_tokens":30},
+			"output_tokens_details":{"reasoning_tokens":25}}
+	}`)
+
+	resp, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), textRequest())
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if resp.Usage.CacheWriteTokens != 0 {
+		t.Errorf("CacheWriteTokens = %d（上游没报这个字段，落到账上就该是 0）", resp.Usage.CacheWriteTokens)
+	}
+	got := billing.FromChannelUsage(resp.Usage)
+	// 100 = 30 缓存读 + 70 普通输入；缓存写入那一项应当是 0。
+	if got.PromptTokens != 70 || got.CacheReadTokens != 30 || got.CacheWriteTokens != 0 {
+		t.Errorf("计费口径 = %+v，期望普通输入 70、缓存读 30、缓存写 0", got)
 	}
 }
 
@@ -795,13 +883,97 @@ func TestChatStreamCustomToolCall(t *testing.T) {
 	}
 }
 
+// reasoningEventNames 是适配器认得并决定不转发的思考类事件名。
+//
+// 前四个来自 OpenAI 的 Responses 事件表（openapi 里 ResponseStreamEvent 的
+// ResponseReasoningSummaryText/Text 两个 delta 与两个 done）；后两个是上游在用的
+// 名字，不在那张表里。
+var reasoningEventNames = []string{
+	"response.reasoning_summary_text.delta",
+	"response.reasoning_summary_text.done",
+	"response.reasoning_text.delta",
+	"response.reasoning_text.done",
+	"response.reasoning.delta",
+	"response.reasoning.done",
+}
+
 // 思考摘要不进正文事件：它是模型的中间产物，与用户可见的回答是两件事。
+// 六个名字逐个走一遍，每个都配一次真实载荷。
 func TestChatStreamSkipsReasoningDeltas(t *testing.T) {
-	srv := sseServer(t,
-		`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"先想"}`,
+	for _, name := range reasoningEventNames {
+		t.Run(name, func(t *testing.T) {
+			srv := sseServer(t,
+				`data: {"type":"`+name+`","output_index":0,"delta":"先想"}`,
+				`data: {"type":"response.output_text.delta","output_index":1,"delta":"答案"}`,
+				`data: {"type":"response.completed","response":{"id":"r1","model":"m","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`,
+			)
+
+			events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), &channel.Request{
+				Model: "m", Stream: true, Messages: textRequest().Messages,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var text strings.Builder
+			for _, ev := range collect(t, events) {
+				if ev.Kind == "delta" {
+					text.WriteString(ev.Text)
+				}
+			}
+			if text.String() != "答案" {
+				t.Errorf("文本 = %q", text.String())
+			}
+		})
+	}
+}
+
+// hasLogLine 判断日志里有没有一行同时含这些片段。
+//
+// 逐行而不是全文匹配：slog 把一条日志写在一行上，而这里要问的正是「某个事件名
+// 与某句话出现在**同一条**日志里」——全文匹配会把「A 出现在这一行、B 出现在另
+// 一行」也算命中。
+func hasLogLine(logs string, parts ...string) bool {
+	for _, line := range strings.Split(logs, "\n") {
+		matched := true
+		for _, part := range parts {
+			if !strings.Contains(line, part) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+// 上面那条用例只说明「思考内容没进正文」——而适配器**什么都不做**时它也成立，
+// 所以它证明不了「适配器认得这个名字」。这条用例钉的是认得：思考那一支、无匹配
+// 分支里的已知事件、无匹配分支里的未归类事件**三处都不转发内容**，只有日志能把
+// 它们分开，所以这里按日志钉。
+//
+// 为什么值得钉：上游发的是 response.reasoning.delta / .done，而适配器认的名字里
+// 原本没有它们，它们落到无匹配分支，行为上「碰巧对」。碰巧对不是分支在管——哪天
+// 有人把无匹配分支改成「未知事件即报错」，这条流立刻就断；反过来，如果上游把正文
+// 放进这个事件名，我们会静默丢掉正文，而日志里一个字都没有。
+//
+// 判据取「那条日志得是思考这一支的」，而不是「日志里有这个事件名」：后者在名字
+// 只留在 ignorableResponsesEvents 表里、case 被人删掉时照样通过。
+func TestChatStreamReasoningEventsAreRecognized(t *testing.T) {
+	logs := captureLogs(t)
+
+	lines := []string{
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant"}}`,
+	}
+	for _, name := range reasoningEventNames {
+		lines = append(lines, `data: {"type":"`+name+`","output_index":0,"delta":"思考"}`)
+	}
+	lines = append(lines,
 		`data: {"type":"response.output_text.delta","output_index":1,"delta":"答案"}`,
 		`data: {"type":"response.completed","response":{"id":"r1","model":"m","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`,
 	)
+	srv := sseServer(t, lines...)
 
 	events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), &channel.Request{
 		Model: "m", Stream: true, Messages: textRequest().Messages,
@@ -817,6 +989,72 @@ func TestChatStreamSkipsReasoningDeltas(t *testing.T) {
 	}
 	if text.String() != "答案" {
 		t.Errorf("文本 = %q", text.String())
+	}
+
+	for _, name := range reasoningEventNames {
+		if !hasLogLine(logs.String(), "跳过思考类流式事件", "event="+name) {
+			t.Errorf("日志里没有「%s 落进思考那一支」：\n%s", name, logs.String())
+		}
+	}
+	if strings.Contains(logs.String(), "level=WARN") {
+		t.Errorf("有事件被记成「未归类」：\n%s", logs.String())
+	}
+}
+
+// 未归类的事件必须留下痕迹，且不改变流的走向。
+//
+// 今天的行为是「无匹配分支静默忽略」：真出了丢正文的事，日志里一个字都没有。
+// 这条用例钉三件事：记一条 warn（只记事件名）、不转发它的 delta、不中断流——
+// 已经吐出去的正文收不回来，而一个陌生的事件名不该让整条回答失败（失败在上层
+// 看起来是「上游坏了」，会去换渠道重试，于是客户端收到两段拼接的回答）。
+func TestChatStreamUnknownEventIsLoggedAndIgnored(t *testing.T) {
+	logs := captureLogs(t)
+	srv := sseServer(t,
+		`data: {"type":"response.output_text.delta","output_index":0,"delta":"答"}`,
+		`data: {"type":"response.some_future_event","output_index":0,"delta":"未知内容"}`,
+		`data: {"type":"response.some_future_event","output_index":0,"delta":"又一段"}`,
+		`data: {"type":"response.completed","response":{"id":"r1","model":"m","status":"completed","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`,
+	)
+
+	events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), &channel.Request{
+		Model: "m", Stream: true, Messages: textRequest().Messages,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text strings.Builder
+	sawUsage, sawDone := false, false
+	for _, ev := range collect(t, events) {
+		switch ev.Kind {
+		case "delta":
+			text.WriteString(ev.Text)
+		case "usage":
+			sawUsage = true
+		case "done":
+			sawDone = true
+		case "error":
+			t.Fatalf("陌生的事件名不该让这条流报错: %v", ev.Err)
+		}
+	}
+	if text.String() != "答" {
+		t.Errorf("正文 = %q：未归类事件的 delta 不该转发（它可能就是思考内容）", text.String())
+	}
+	if !sawUsage || !sawDone {
+		t.Errorf("usage=%v done=%v：一个陌生的事件名不该让这条流失去用量与结束标记", sawUsage, sawDone)
+	}
+
+	log := logs.String()
+	if !hasLogLine(log, "未归类", "event=response.some_future_event") {
+		t.Errorf("未归类的事件要记一条 warn：\n%s", log)
+	}
+	if hasLogLine(log, "跳过已知", "event=response.some_future_event") {
+		t.Errorf("这个事件名不在已知表里，不该被记成「已知且不必转发」：\n%s", log)
+	}
+	if n := strings.Count(log, "response.some_future_event"); n != 1 {
+		t.Errorf("同类事件只记一次（逐条打会被每个 token 一个的事件淹掉），实际 %d 次：\n%s", n, log)
+	}
+	if strings.Contains(log, "未知内容") {
+		t.Errorf("日志里不该出现事件的载荷——那可能就是用户的正文：\n%s", log)
 	}
 }
 
