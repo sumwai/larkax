@@ -475,8 +475,13 @@ KEY=$(go run ./cmd/larkaxctl apikey create --user "$(go run ./cmd/larkaxctl user
 curl -i 127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer $KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"<模型名>","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"<模型名>","messages":[{"role":"user","content":"hi"}],"max_tokens":1024}'
 ```
+
+`max_tokens` 是**必填**的，虽然 OpenAI 协议里它可选：预留必须有上界，而预留上界
+由它算出来（见 `billing.ErrNoUpperBound`）。漏了它会在请求出网关之前就回 400
+`max_tokens is required`，错误里不会提到这是本地网关的要求。写 `stream: true`
+则走 SSE，其余字段照旧。
 
 推理接口接到公共端口上的进度见下文「当前能做什么」。
 

@@ -486,6 +486,48 @@ func TestDoctorLiveMessagesUsesAnthropicHeaders(t *testing.T) {
 	}
 }
 
+// TestDoctorLiveChatPayloadCarriesMaxTokens 钉住 chat 入口的请求体里带一个
+// 正的 max_tokens。
+//
+// OpenAI 的 chat completions 里 max_tokens 是**可选**的，所以「照着协议拼一个
+// 最小请求体」正好会漏掉它——doctor 曾经就是这么漏的。而 larkax 的网关按它算
+// 预留上界（pipeline.Request.validate → billing.ErrNoUpperBound），缺了会在请求
+// 出网关之前就回 400「max_tokens is required」，看上去却像上游的问题。
+//
+// 判据是**发出去的 JSON**（假上游收到的 body）里的那个字段，而不是
+// doctorChatRequest.MaxTokens 与 doctorLiveMaxTokens 相等——后者测的是同一个
+// 常量，把字段从结构体上去掉也照样过。
+func TestDoctorLiveChatPayloadCarriesMaxTokens(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"cmpl-1","object":"chat.completion","model":"claude-x",`+
+			`"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":11}}`)
+	}))
+	defer srv.Close()
+
+	got := runDoctorLive(context.Background(), doctorOptions{
+		live: true, model: "claude-x", endpoint: doctorEndpointChat,
+		baseURL: srv.URL, key: testDoctorKey,
+	})
+	if !got.ok() {
+		t.Fatalf("这次调用该算通过，得到 status=%d err=%v", got.status, got.sendErr)
+	}
+
+	raw, ok := gotBody["max_tokens"]
+	if !ok {
+		t.Fatalf("chat 入口的请求体里没有 max_tokens，网关会在请求出网关之前就 400：%v", gotBody)
+	}
+	limit, ok := raw.(float64)
+	if !ok {
+		t.Fatalf("max_tokens 不是数字：%v（%T）", raw, raw)
+	}
+	if limit <= 0 {
+		t.Errorf("max_tokens = %v，网关要求它为正", limit)
+	}
+}
+
 // TestDoctorLiveReportsUpstreamRejection 钉住非 2xx 时把错误说明打出来。
 func TestDoctorLiveReportsUpstreamRejection(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
