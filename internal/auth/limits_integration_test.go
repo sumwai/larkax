@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -65,6 +66,18 @@ func assertLimits(ctx context.Context, t *testing.T, db *sql.DB, keyID int64, wa
 }
 
 func strPtr(s string) *string { return &s }
+
+// showPtr 把一个可空值渲染成可读文本，供断言失败时打印。
+//
+// 直接 %v 一个指向基本类型的指针打出来的是地址（`0xc000...`），而报错信息
+// 本身是要给人读的——那串地址看不出实际值是什么，也就看不出这次失败是
+// 「值算错了」还是「字段根本没给」。
+func showPtr[T any](p *T) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprint(*p)
+}
 
 // TestCreateWritesLimits 是 #175 的落点：建 key 时把两列真的写进去。
 //
@@ -238,7 +251,7 @@ func TestListKeys(t *testing.T) {
 		t.Errorf("prefix = %q，期望 %q", got.Prefix, first.Prefix)
 	}
 	if got.RateLimitRPM == nil || *got.RateLimitRPM != 30 {
-		t.Errorf("rate_limit_rpm = %v，期望 30", got.RateLimitRPM)
+		t.Errorf("rate_limit_rpm = %s，期望 30", showPtr(got.RateLimitRPM))
 	}
 	if got.QuotaLimit == nil || got.QuotaLimit.String() != "1.50000000" {
 		t.Errorf("quota_limit = %v，期望 1.50000000", got.QuotaLimit)
@@ -255,8 +268,8 @@ func TestListKeys(t *testing.T) {
 		t.Fatalf("列表里没有 id=%d", second.ID)
 	}
 	if plain.RateLimitRPM != nil || plain.QuotaLimit != nil {
-		t.Errorf("没限额的那把应当是两列 NULL，得到 rpm=%v quota=%v",
-			plain.RateLimitRPM, plain.QuotaLimit)
+		t.Errorf("没限额的那把应当是两列 NULL，得到 rpm=%s quota=%v",
+			showPtr(plain.RateLimitRPM), plain.QuotaLimit)
 	}
 }
 

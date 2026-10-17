@@ -40,10 +40,10 @@ func TestOnRequestReturnsPatch(t *testing.T) {
 		t.Fatal("该返回补丁")
 	}
 	if patch.Body.Temperature == nil || *patch.Body.Temperature != 0.1 {
-		t.Errorf("temperature = %v", patch.Body.Temperature)
+		t.Errorf("temperature = %s", showPtr(patch.Body.Temperature))
 	}
 	if patch.Body.MaxTokens == nil || *patch.Body.MaxTokens != 64 {
-		t.Errorf("max_tokens = %v", patch.Body.MaxTokens)
+		t.Errorf("max_tokens = %s", showPtr(patch.Body.MaxTokens))
 	}
 	if patch.Headers["x-larkax-tenant"] != "t7" {
 		t.Errorf("headers = %v", patch.Headers)
@@ -300,7 +300,7 @@ func TestOnStreamDecision(t *testing.T) {
 			t.Errorf("index %d: drop=%v terminate=%v，期望 %v/%v", tc.index, d.Drop, d.Terminate, tc.drop, tc.terminate)
 		}
 		if (d.Replace != nil) != tc.hasRepl {
-			t.Errorf("index %d: replace=%v，期望有值=%v", tc.index, d.Replace, tc.hasRepl)
+			t.Errorf("index %d: replace=%s，期望有值=%v", tc.index, showPtr(d.Replace), tc.hasRepl)
 		}
 		if tc.hasRepl && *d.Replace != tc.replace {
 			t.Errorf("index %d: replace=%q", tc.index, *d.Replace)
@@ -415,11 +415,11 @@ func TestMergeUsageCarriesReasoningScope(t *testing.T) {
 	// 插件只报数量时，内核那份口径不能丢——它是重建回协议层用量时的依据。
 	core := UsageFacts{CompletionTokens: ptrInt64(100), CompletionIncludesReasoning: ptrBool(true)}
 	if got := MergeUsage(core, &UsageFacts{CompletionTokens: ptrInt64(120)}); got.CompletionIncludesReasoning == nil || !*got.CompletionIncludesReasoning {
-		t.Errorf("插件没声明口径，该保留内核的 true，实际 %v", got.CompletionIncludesReasoning)
+		t.Errorf("插件没声明口径，该保留内核的 true，实际 %s", showPtr(got.CompletionIncludesReasoning))
 	}
 	// 插件声明了就覆盖内核的。
 	if got := MergeUsage(core, &UsageFacts{CompletionIncludesReasoning: ptrBool(false)}); got.CompletionIncludesReasoning == nil || *got.CompletionIncludesReasoning {
-		t.Errorf("插件声明为 false，该覆盖内核的 true，实际 %v", got.CompletionIncludesReasoning)
+		t.Errorf("插件声明为 false，该覆盖内核的 true，实际 %s", showPtr(got.CompletionIncludesReasoning))
 	}
 	// 不改动入参。
 	if core.CompletionIncludesReasoning == nil || !*core.CompletionIncludesReasoning {

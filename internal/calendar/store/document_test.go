@@ -12,6 +12,18 @@ import (
 
 func boolPtr(v bool) *bool { return &v }
 
+// showPtr 把一个可空值渲染成可读文本，供断言失败时打印。
+//
+// 直接 %v 一个指向基本类型的指针打出来的是地址（`0xc000...`），而报错信息
+// 本身是要给人读的——那串地址看不出实际值是什么，也就看不出这次失败是
+// 「值算错了」还是「字段根本没给」。
+func showPtr[T any](p *T) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprint(*p)
+}
+
 // yearDays 独立地列出某年的每一天。
 //
 // **刻意不复用生产代码里的 daysOfYear**：两者共用一段循环时，一段写错的循环
@@ -123,7 +135,7 @@ func TestParseDocumentRoundTrip(t *testing.T) {
 		t.Errorf("source_paper_urls = %v", got.SourcePaperURLs)
 	}
 	if got.SourcesAgree == nil || !*got.SourcesAgree {
-		t.Errorf("sources_agree = %v，期望 true", got.SourcesAgree)
+		t.Errorf("sources_agree = %s，期望 true", showPtr(got.SourcesAgree))
 	}
 	if len(got.Days) != len(want.Days) {
 		t.Fatalf("解出 %d 天，期望 %d 天", len(got.Days), len(want.Days))
@@ -192,7 +204,7 @@ func TestParseDocumentPinsEveryKeyName(t *testing.T) {
 	}
 	// 指针字段：写 false 与不写是两回事，这里写的是 false，所以指针必须非 nil。
 	if doc.SourcesAgree == nil || *doc.SourcesAgree {
-		t.Errorf("sources_agree = %v，期望 false 而不是「没写」", doc.SourcesAgree)
+		t.Errorf("sources_agree = %s，期望 false 而不是「没写」", showPtr(doc.SourcesAgree))
 	}
 	if doc.LastError != "上一次同步失败的原因" {
 		t.Errorf("last_error = %q", doc.LastError)

@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -11,6 +12,18 @@ import (
 )
 
 func ptr[T any](v T) *T { return &v }
+
+// showPtr 把一个可空值渲染成可读文本，供断言失败时打印。
+//
+// 直接 %v 一个指向基本类型的指针打出来的是地址（`0xc000...`），而报错信息
+// 本身是要给人读的——那串地址看不出实际值是什么，也就看不出这次失败是
+// 「值算错了」还是「字段根本没给」。
+func showPtr[T any](p *T) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprint(*p)
+}
 
 func TestToRelaykitBasicFields(t *testing.T) {
 	req := &channel.Request{
@@ -32,14 +45,14 @@ func TestToRelaykitBasicFields(t *testing.T) {
 		t.Errorf("Model = %q", out.Model)
 	}
 	if out.MaxTokens == nil || *out.MaxTokens != 1024 {
-		t.Errorf("MaxTokens = %v", out.MaxTokens)
+		t.Errorf("MaxTokens = %s", showPtr(out.MaxTokens))
 	}
 	// Temperature 为 0 是合法取值，必须原样传出去而不是被当成「未设置」
 	if out.Temperature == nil || *out.Temperature != 0 {
-		t.Errorf("Temperature = %v，期望 0（指针非空）", out.Temperature)
+		t.Errorf("Temperature = %s，期望 0（指针非空）", showPtr(out.Temperature))
 	}
 	if out.TopP == nil || *out.TopP != 0.9 {
-		t.Errorf("TopP = %v", out.TopP)
+		t.Errorf("TopP = %s", showPtr(out.TopP))
 	}
 	if out.ReasoningEffort != "high" {
 		t.Errorf("ReasoningEffort = %q", out.ReasoningEffort)
@@ -254,10 +267,10 @@ func TestExtrasAreWhitelisted(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out.TopK == nil || *out.TopK != 5 {
-		t.Errorf("TopK = %v", out.TopK)
+		t.Errorf("TopK = %s", showPtr(out.TopK))
 	}
 	if out.ParallelTooCalls == nil || !*out.ParallelTooCalls {
-		t.Errorf("ParallelTooCalls = %v", out.ParallelTooCalls)
+		t.Errorf("ParallelTooCalls = %s", showPtr(out.ParallelTooCalls))
 	}
 	// 白名单之外的一律忽略：不能被 Extra 覆盖语义
 	if len(out.Messages) != 0 {
@@ -778,10 +791,10 @@ func TestRequestRoundTrip(t *testing.T) {
 		t.Errorf("基本字段丢失: %+v", back)
 	}
 	if back.Temperature == nil || *back.Temperature != 0.7 {
-		t.Errorf("Temperature = %v", back.Temperature)
+		t.Errorf("Temperature = %s", showPtr(back.Temperature))
 	}
 	if back.TopP == nil || *back.TopP != 0.95 {
-		t.Errorf("TopP = %v", back.TopP)
+		t.Errorf("TopP = %s", showPtr(back.TopP))
 	}
 	if back.ReasoningEffort != "high" {
 		t.Errorf("ReasoningEffort = %q", back.ReasoningEffort)

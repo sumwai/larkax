@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -99,7 +100,7 @@ func TestSetWritesAndReadsBack(t *testing.T) {
 		t.Errorf("value = %s，期望 7", got.Value)
 	}
 	if got.UpdatedBy == nil || *got.UpdatedBy != 4242 {
-		t.Errorf("updated_by = %v，期望 4242", got.UpdatedBy)
+		t.Errorf("updated_by = %s，期望 4242", showPtr(got.UpdatedBy))
 	}
 	if !got.UpdatedAt.After(before.UpdatedAt) {
 		t.Errorf("updated_at = %v，没有晚于写入前的 %v", got.UpdatedAt, before.UpdatedAt)
@@ -231,4 +232,16 @@ func mustList(ctx context.Context, t *testing.T, src *PgSource) []Entry {
 		t.Fatalf("List 失败: %v", err)
 	}
 	return entries
+}
+
+// showPtr 把一个可空值渲染成可读文本，供断言失败时打印。
+//
+// 直接 %v 一个指向基本类型的指针打出来的是地址（`0xc000...`），而报错信息
+// 本身是要给人读的——那串地址看不出实际值是什么，也就看不出这次失败是
+// 「值算错了」还是「字段根本没给」。
+func showPtr[T any](p *T) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprint(*p)
 }
