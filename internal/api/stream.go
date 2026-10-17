@@ -301,6 +301,18 @@ func (s *openAIStream) event(w io.Writer, ev channel.StreamEvent) error {
 		}
 		return s.chunk(w, openAIStreamDelta{ToolCalls: []openAIStreamToolCall{tc}}, nil)
 
+	case "annotation":
+		// 引用标注。chat completions 的流式分片里**没有**它的位置：
+		// 这套协议没有对应的官方事件，而 relaykit 的 dto 里那个
+		// delta.annotations 是非官方扩展，我们不往对外的帧里放它
+		//（那会是一次契约变更，见 docs/versioning.md）。
+		//
+		// 写成显式的空分支而不是让它落到 switch 外面：少这一支时行为完全
+		// 相同（默认什么都不做），而读这段的人分不出「漏了」与「决定不转」。
+		// Responses 入口那一份会把它渲染成 response.output_text.annotation.added
+		//（见 responsesStream.emitAnnotations）。
+		return nil
+
 	case "usage":
 		if ev.Usage != nil {
 			u := *ev.Usage
@@ -576,6 +588,17 @@ func (s *anthropicStream) event(w io.Writer, ev channel.StreamEvent) error {
 		// （见 channel.StreamEvent 的 Usage）。
 		return nil
 
+	case "annotation":
+		// 引用标注。Anthropic 的对应物是 content_block_delta 里的
+		// citations_delta，而那条形状要挂在**哪一个正文块**上、以及
+		// citation 的字段怎么映射，都是另一次契约变更（见 docs/versioning.md）。
+		// 今天只把 Responses 入口那一条补上：它与非流式那条路是同一个协议，
+		// 而 chat 与 Anthropic 两侧没有「非流式已经有、流式丢了」这个缺口。
+		//
+		// 写成显式的空分支而不是让它落到 switch 外面：见 openAIStream.event
+		// 里同一个位置的说明。
+		return nil
+
 	case "usage":
 		if ev.Usage != nil {
 			u := *ev.Usage
@@ -766,6 +789,14 @@ type responsesStream struct {
 	textIndex int
 	text      strings.Builder
 
+	// annotations 是这条流里已经转出去的引用标注，按下标顺序。
+	//
+	// 它是收尾事件里 output[].content[].annotations 的来源：增量事件与最终
+	// 那一份必须同序同内容，否则客户端按 annotation_index 拼出来的结果与
+	// 收尾时整份替换掉的结果对不上。与非流式那条路（response.go 的
+	// responsesOutput）是同一个口径。
+	annotations []map[string]any
+
 	// tools 把上游给的工具调用下标映射到本流里的一项。
 	tools map[int]*responsesStreamTool
 
@@ -807,6 +838,11 @@ type responsesEvent struct {
 	// （模型答了个空串、工具没有参数），省掉字段与给空串在严格实现里不等价。
 	Text      *string `json:"text,omitempty"`
 	Arguments *string `json:"arguments,omitempty"`
+	// 引用标注（response.output_text.annotation.added）。Annotation 是标注
+	// 本身，AnnotationIndex 是它在这一项的标注列表里的下标——客户端按它
+	// 把标注拼回最终 output[] 的那一项（收尾事件里那份是本流的权威列表）。
+	Annotation      map[string]any `json:"annotation,omitempty"`
+	AnnotationIndex *int           `json:"annotation_index,omitempty"`
 	// 错误事件（平铺，没有 error 外层，见 errorFrame）。
 	Code    string  `json:"code,omitempty"`
 	Message string  `json:"message,omitempty"`
@@ -846,6 +882,9 @@ func (s *responsesStream) event(w io.Writer, ev channel.StreamEvent) error {
 			ItemID:       responsesMessageItemID(s.id),
 			Delta:        ev.Text,
 		})
+
+	case "annotation":
+		return s.emitAnnotations(w, ev.Annotations)
 
 	case "tool_use":
 		if ev.ToolCall == nil {
@@ -900,6 +939,43 @@ func (s *responsesStream) errorFrame(w io.Writer, err error) error {
 		Code:    "server_error",
 		Message: streamErrorMessage(err),
 	})
+}
+
+// emitAnnotations 把一批引用标注渲染成 response.output_text.annotation.added。
+//
+// 每一项一条事件，下标是它在本流标注列表里的位置（从 0 起、连续）。这个列表
+// 也原样进收尾事件的 output[]——客户端按 collection 语义把增量拼成最终那一份，
+// 两处必须是同一个顺序、同一批内容（与非流式的 output[].content[].annotations
+// 也是同一批）。
+//
+// 标注到达时正文项可能还没打开（上游只保证「标注属于这一项」，不保证先有
+// 哪怕一个正文增量）。这里先把项打开：事件里的 output_index / item_id 必须
+// 指向一个已经存在、且与 item.added 里那个一致的项，客户端才能把它挂上去。
+func (s *responsesStream) emitAnnotations(w io.Writer, annotations []map[string]any) error {
+	if len(annotations) == 0 {
+		return nil
+	}
+	if err := s.openText(w); err != nil {
+		return err
+	}
+	index := s.textIndex
+	for _, annotation := range annotations {
+		if len(annotation) == 0 {
+			continue
+		}
+		annotationIndex := len(s.annotations)
+		s.annotations = append(s.annotations, annotation)
+		if err := s.emit(w, "response.output_text.annotation.added", responsesEvent{
+			OutputIndex:     &index,
+			ContentIndex:    intPtr(0),
+			ItemID:          responsesMessageItemID(s.id),
+			Annotation:      annotation,
+			AnnotationIndex: intPtr(annotationIndex),
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // openText 打开正文项，已经开着就什么都不做。
@@ -1045,7 +1121,7 @@ func (s *responsesStream) messageItem(status string) responsesMessageItem {
 		Content: []responsesContent{{
 			Type:        "output_text",
 			Text:        s.text.String(),
-			Annotations: []any{},
+			Annotations: annotationList(s.annotations),
 		}},
 	}
 }

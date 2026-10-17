@@ -55,6 +55,11 @@ type responsesStreamEvent struct {
 	Error       *responsesError `json:"error"`
 	// Message 是兜底的错误文案：有的兼容层在 error 之外还平铺一个 message。
 	Message string `json:"message"`
+	// Annotation 是引用标注本身，只在 output_text.annotation.added 里给。
+	// 用 RawMessage 接住再解成一串字段：标注的字段集由上游决定（type 之外
+	// 各家还会加 url / start_index / end_index 等），而我们的表示也是原样的
+	// map（见 channel.StreamEvent.Annotations）。
+	Annotation json.RawMessage `json:"annotation"`
 }
 
 // pump 读取 SSE 流并翻译成统一事件。
@@ -101,7 +106,8 @@ func (a *Adapter) pump(ctx context.Context, status int, body io.Reader, events c
 	// 一次。三处会走到它们上面：思考那一支、无匹配分支里的已知事件、无匹配分支
 	// 里的未归类事件——**三处各带一句自己的话**，因为它们是三件事，而排查的人
 	// 与写用例的人都要能把它们分开（见 TestChatStreamReasoningEventsAreRecognized
-	// 与 TestChatStreamUnknownEventIsLoggedAndIgnored）。
+	// 与 TestChatStreamUnknownEventIsLoggedAndIgnored）。引用标注那一支另有
+	// 一种用法：标注解析失败时记一条 warn（见 response.output_text.annotation.added）。
 	//
 	// 为什么无匹配分支必须留下痕迹：静默忽略最坏的后果是上游把正文放进一个我们
 	// 不认识的事件名里，我们一字不发、也一字不记——reasoning.delta 就是这种形状，
@@ -211,6 +217,20 @@ func (a *Adapter) pump(ctx context.Context, status int, body io.Reader, events c
 			// 也记一条 debug：认得的事件与未归类的事件在日志里必须能分开
 			//（见 noteOnce）。
 			noteOnce(ev.Type, "跳过思考类流式事件（不进正文）")
+
+		case "response.output_text.annotation.added":
+			// 引用标注。非流式那条路把它放进 output[].content[].annotations
+			// 交给调用方，这里同样要转出去——两条路口径不一致本身就是缺陷
+			//（见 internal/relay 的 fromResponsesResponse 与
+			// internal/api 的 responsesStream）。
+			//
+			// 解析失败不中断流：一条标注坏掉不该让已经吐出的正文作废，
+			// 而丢弃它是静默的——所以记一条 warn，与无匹配分支同一个形状。
+			if annotation, ok := ev.annotation(); ok {
+				events <- channel.StreamEvent{Kind: "annotation", Annotations: []map[string]any{annotation}}
+			} else if len(ev.Annotation) > 0 {
+				warnOnce(ev.Type, "引用标注解析失败，内容已忽略")
+			}
 
 		case "response.output_item.added":
 			// 工具调用的名字与 id 在这里给出，参数要到后面的增量里才来
@@ -374,15 +394,15 @@ func (a *Adapter) pump(ctx context.Context, status int, body io.Reader, events c
 //     空回答」更像模型的问题，更难查。
 //
 // 思考类的那几个名字不在表里：它们在 switch 里有自己的 case，永远走不到
-// 无匹配分支。
+// 无匹配分支。引用标注同理：output_text.annotation.added 有自己的 case，
+// 它带内容，而且**要转发**（见那一支）。
 //
-// **故意不进表的**：refusal.*、audio.* / output_audio.*、
-// output_text.annotation.added，以及内置工具的产物事件
-// （code_interpreter_call_code.*、image_generation_call.partial_image 一类）。
-// 它们确实带内容，只是本适配器没有转发它们的通道；把它们记成「已知且不必
-// 转发」是假话，而它们走到无匹配分支会记一条 warn——那正是我们希望有人看见
-// 的信号。内置工具的**进度**事件（web_search_call.in_progress 一类）同理：
-// 本适配器不转发内置工具，真见到它们说明有我们没预期的链路。
+// **故意不进表的**：refusal.*、audio.* / output_audio.*，以及内置工具的产物
+// 事件（code_interpreter_call_code.*、image_generation_call.partial_image
+// 一类）。它们确实带内容，只是本适配器没有转发它们的通道；把它们记成
+// 「已知且不必转发」是假话，而它们走到无匹配分支会记一条 warn——那正是我们
+// 希望有人看见的信号。内置工具的**进度**事件（web_search_call.in_progress
+// 一类）同理：本适配器不转发内置工具，真见到它们说明有我们没预期的链路。
 var ignorableResponsesEvents = map[string]bool{
 	"response.created":     true,
 	"response.in_progress": true,
@@ -404,6 +424,22 @@ func (ev responsesStreamEvent) itemKey() (itemID string, outputIndex *int) {
 		itemID = ev.Item.ID
 	}
 	return itemID, ev.OutputIndex
+}
+
+// annotation 取出这条事件里的引用标注。
+//
+// ok 为 false 有三种情况：事件里没有 annotation 字段、它不是 JSON 对象、
+// 或者它是个空对象。三者在处置上相同（没有可转发的东西），而调用方据
+// len(Annotation) 区分「本来就是空的」与「给了但解析不出来」。
+func (ev responsesStreamEvent) annotation() (map[string]any, bool) {
+	if len(ev.Annotation) == 0 {
+		return nil, false
+	}
+	var out map[string]any
+	if err := json.Unmarshal(ev.Annotation, &out); err != nil || len(out) == 0 {
+		return nil, false
+	}
+	return out, true
 }
 
 // errorText 取出这次错误事件的文案。
