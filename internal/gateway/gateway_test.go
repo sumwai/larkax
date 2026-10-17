@@ -485,11 +485,12 @@ func TestUpstreamFailureReleasesReservation(t *testing.T) {
 // 它由释放那一步带着落库（见 handle.release）：不计费的结局不写账本，
 // 账单那一行只有这一次写入机会，而网关是唯一知道上游回了什么的那一层。
 //
-// 四类失败**分开钉**，因为它们在两列上的落法不同——只钉其中一类的话，
+// 五类失败**分开钉**，因为它们在两列上的落法不同——只钉其中一类的话，
 // 把另外几类也写成同一个状态码同样能通过，而那两个数会是编出来的：
 //
 //   - 非 2xx：状态码就是上游回的那个
-//   - 上游没给出状态码（连不上、响应解不开）：状态码必须留空
+//   - 拿到了 2xx 但响应不可用：状态码照实记（通常是 200），分类另有一档
+//   - 一个响应都没拿到（连不上）：状态码必须留空
 //     （HTTP 里没有 0 这个状态码）
 //   - 上游接受了请求却没吐字：状态码同样留空，分类是另一档
 //   - 不是上游的失败：两列都留空（插件阻断时上游其实是好的）
@@ -507,13 +508,13 @@ func TestUpstreamFailureCarriesEvidenceToRelease(t *testing.T) {
 	}{
 		{
 			name:       "上游回了 400",
-			fail:       &channel.ErrUpstream{StatusCode: 400, Retryable: false},
+			fail:       &channel.ErrUpstream{StatusCode: 400, GotResponse: true, Retryable: false},
 			wantStatus: 400,
 			wantCode:   pipeline.ErrorUpstreamHTTPError,
 		},
 		{
 			name:       "上游回了 500",
-			fail:       &channel.ErrUpstream{StatusCode: 500, Retryable: true},
+			fail:       &channel.ErrUpstream{StatusCode: 500, GotResponse: true, Retryable: true},
 			wantStatus: 500,
 			wantCode:   pipeline.ErrorUpstreamHTTPError,
 		},
@@ -525,17 +526,34 @@ func TestUpstreamFailureCarriesEvidenceToRelease(t *testing.T) {
 			wantCode: pipeline.ErrorUpstreamNoAnswer,
 		},
 		{
-			// 上游回了 2xx，却把错误写在体里（适配器的 extractEmbeddedError）。
-			// 状态码同样是零值，所以它与「连不上」落进同一档——这一层分不出
-			// 两者，用例把这件事钉下来，免得下一个人以为漏了一种。
-			name:     "上游 2xx 但体里带 error",
-			fail:     &channel.ErrUpstream{Body: "upstream said: model not found"},
+			// 网络错误也可能带上一点文本（例如底层读错误）。**有 Body 不等于
+			// 拿到过响应**：分类只看 GotResponse，不看 Body 有没有内容。
+			// 这一条钉的正是「不从 Body 反推」。
+			name:     "网络错误带了说明文本也不算拿到响应",
+			fail:     &channel.ErrUpstream{Retryable: true, Body: "read: connection reset by peer", Err: errors.New("read: connection reset by peer")},
 			wantCode: pipeline.ErrorUpstreamNoAnswer,
 		},
 		{
-			// 上游接受了请求、一个 token 都没吐就断了（流式）。它与上面两条
-			// 的差别是**成因不同**：那两条是「没拿到响应」，这条是拿到了
-			// 2xx 响应头、正文一个字都没有。
+			// 上游回了 2xx，却把错误写在体里（适配器的 extractEmbeddedError）。
+			// 这是一个**拿到过响应**的失败：状态码 200 是真的，要照实记下来，
+			// 分类是「响应不可用」而不是「没拿到回答」。
+			name:       "上游 2xx 但体里带 error",
+			fail:       &channel.ErrUpstream{StatusCode: 200, GotResponse: true, Body: "upstream said: model not found"},
+			wantStatus: 200,
+			wantCode:   pipeline.ErrorUpstreamUnusableResponse,
+		},
+		{
+			// 同一个「拿到了但用不了」的分支的另一半：体根本解不开。与上一条
+			// 归在同一档，因为它们对下游是同一件事——响应到了，但不是回答。
+			name:       "上游 2xx 但响应体解不开",
+			fail:       &channel.ErrUpstream{StatusCode: 200, GotResponse: true, Retryable: true, Err: errors.New("invalid character")},
+			wantStatus: 200,
+			wantCode:   pipeline.ErrorUpstreamUnusableResponse,
+		},
+		{
+			// 上游接受了请求、一个 token 都没吐就断了（流式）。它与「没拿到
+			// 响应」那两条的差别是**成因不同**：这里拿到了 2xx 响应头、
+			// 正文一个字都没有，只是这条收尾没有把具体几号带下来。
 			//
 			// 单独一条钉着，是因为这一支是 upstreamEvidence 里唯一一个不看
 			// ErrUpstream 的分支——把它删掉的话，这条路上的依据会整个丢掉

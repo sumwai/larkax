@@ -23,7 +23,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/sumwai/larkax/internal/quota"
 )
@@ -391,20 +390,45 @@ var ErrUnsupported = errors.New("该上游不支持这项能力")
 // 保留状态码与响应体片段，因为「上游说 429，重试要等多久」与
 // 「上游说 401，钥匙坏了」要做的处置完全不同。
 type ErrUpstream struct {
+	// StatusCode 是上游那次 HTTP 响应的状态码；没拿到响应时是 0。
+	//
+	// 拿到过响应就照实填，**包括 2xx**：上游回 200 却把错误写在响应体里时，
+	// 200 是这次调用真实发生过的事实，丢掉它会让下游读成「没有记录到状态码」。
 	StatusCode int
+	// GotResponse 表示这次失败**拿到过上游的 HTTP 响应**吗。
+	//
+	// 它把「连不上 / TLS 失败 / 超时」（false）与「拿到了响应、但体里是错误
+	// 或者体根本解不开」（true）分开。这个事实以前只能从 Body 是否为空反推，
+	// 而 Body 有没有内容取决于上游写没写、适配器截没截——那是另一个包的隐式
+	// 约定，谁哪天给网络错误也塞上 Body，下游的分类就静默翻面。
+	//
+	// 不变量：GotResponse 为 true 时 StatusCode 必须大于 0（拿到了响应就
+	// 一定有一个状态码）。构造点都必须同时设这两个字段。
+	GotResponse bool
 	// Body 是上游响应体的**截断副本**。上游的错误信息里可能回显请求内容，
 	// 所以写入日志前要按需再截一次。
 	Body string
 	// Retryable 由适配器判断：网络层错误、429、5xx 可重试；
 	// 400、401、403 重试多少次都一样。
 	Retryable bool
-	// RetryAfter 来自上游的 Retry-After 头，没有则为 0。
-	RetryAfter time.Duration
 	// Err 是底层错误，可能为 nil。
 	Err error
+
+	// # 这里为什么没有 Retry-After
+	//
+	// 它曾经有一个 RetryAfter 字段，由 httpx.CheckStatus 从响应头解析，
+	// 而全仓库没有任何读取点。退避在这条路径上没有落点：internal/route
+	// 遇到可重试的失败是「换下一个候选」，不是「等一等同一个上游」。
+	// 它真正的落点是对外响应上的 Retry-After，而那要先把「上游限流该回几号」
+	// 定下来——那是另一批要一起定的对外契约。定下来之前留一个没人读的字段，
+	// 只会让下一个人以为退避已经接上了。
 }
 
 func (e *ErrUpstream) Error() string {
+	if e.StatusCode >= 200 && e.StatusCode < 300 {
+		// 2xx 只可能是「拿到了响应但用不了」：非 2xx 会走下面那条。
+		return fmt.Sprintf("上游返回 %d，但响应不可用", e.StatusCode)
+	}
 	if e.StatusCode > 0 {
 		return fmt.Sprintf("上游返回 %d", e.StatusCode)
 	}

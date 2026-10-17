@@ -114,6 +114,21 @@ type CallRecorder interface {
 //
 // 字段与 request_snapshots 表对应。本包只负责把脱敏器与方向、
 // 请求标识组装起来，不做脱敏本身。
+//
+// # 这里为什么没有 upstream_status
+//
+// 今天只采**请求方向**（direction = "request"）：采集点在 begin 之后、
+// 选路与调上游之前（见 Chat 与 ChatStream 的 snapshotAsync 调用），那时
+// 连打到哪个渠道都还不知道，更不会有上游状态码。
+//
+// 所以 request_snapshots.upstream_status 在这些行上恒为 NULL，**它读作
+// 「这一行不适用」，不是「上游没回状态码」**。列本身是为响应方向的快照
+// 准备的（见 internal/snapshot 的响应侧允许表），而响应方向的采集链路
+// 还没接上。同一次请求的上游结局记在 billing_requests 上，那才是权威值
+// （见 internal/ledger/store 的 Release）。
+//
+// 不要把两表的 upstream_status 对齐：请求快照回答「发出去的是什么」，
+// 账单回答「结果是什么」，它们本就取自请求生命周期的不同时刻。
 type Snapshot struct {
 	RequestID string
 	// UserID 是**发起这次请求的用户**，不是渠道所属的商家。
@@ -807,17 +822,24 @@ func (h *handle) settleFailure(ctx context.Context, out pipeline.Outcome) {
 // channel.ErrUpstream（适配器造它、路由层原样带回，见 route.Errors.Unwrap
 // ——它给的是**结束这次请求**的那一次尝试的错误，也正是调用方看到的那个）。
 //
-// 三种情形分开写，因为它们在两列上的落法不同：
+// # 「拿到过响应吗」是显式的事实
 //
-//   - 非 2xx：状态码就是上游回的那个，分类是「上游拒绝」
-//   - 上游没给出状态码：状态码留空，分类是「上游没给出可用的回答」。
-//     **不写 0**：HTTP 里没有 0 这个状态码，写 0 会读成「上游回了 0 号」，
-//     而 0 是「没有这回事」
-//   - 上游接受了请求却一个字都没吐（流式）：状态码同样拿不到——那时只知道
-//     它是 2xx，具体几号没有别的地方记着，编一个 200 出来就是假数据
+// 它取自 ErrUpstream.GotResponse，**不从 Body 反推**：响应体有没有内容取决于
+// 上游写没写、适配器截没截，它答不了这个问题。谁哪天给网络错误也塞上一个
+// Body，按 Body 判的话分类就会静默翻面。
 //
-// 第二档里其实混着「连不上」与「响应解不开」两种情形，在这一层分不开
-// （见 pipeline.ErrorUpstreamNoAnswer 的注释）。要拆开得改 internal/channel。
+// 四种情形分开写，因为它们在两列上的落法不同：
+//
+//   - 非 2xx：状态码就是上游回的那个，分类是「上游回了错误状态码」
+//   - 拿到了 2xx，但体里是错误 / 体解不开：状态码**照实记**（通常是 200），
+//     分类是「上游的响应不可用」。这里不能把状态码丢掉——200 是这次调用
+//     真实发生过的事实，丢掉会让库里那一行读成「没有记录到状态码」。
+//   - 一个响应都没拿到（连不上、TLS 失败、超时）：状态码留空，分类是
+//     「上游没给出可用的回答」。**不写 0**：HTTP 里没有 0 这个状态码，
+//     写 0 会读成「上游回了 0 号」，而 0 是「没有这回事」
+//   - 上游接受了请求却一个字都没吐（流式）：这条收尾只留下 errStreamAborted
+//     这个哨兵，没有把适配器知道的 2xx 具体几号带下来，所以状态码留空——
+//     编一个 200 出来就是假数据
 //
 // 其余错误（插件阻断、别名没配、结算自己出错）返回空值：两列记的是上游
 // 失败的依据，把它们写进去会让「这一行是不是上游挂的」答错。
@@ -830,8 +852,17 @@ func upstreamEvidence(err error) (status int, code string) {
 	if !errors.As(err, &up) {
 		return 0, ""
 	}
-	if up.StatusCode == 0 {
+	if !up.GotResponse {
 		return 0, pipeline.ErrorUpstreamNoAnswer
+	}
+	if up.StatusCode <= 0 {
+		// 说了拿到响应却没给状态码，是构造方的 bug（见 ErrUpstream.GotResponse
+		// 的不变量）。归到「没拿到可用的回答」而不是编一个状态码：这是唯一
+		// 不会往库里写假数据的落法。
+		return 0, pipeline.ErrorUpstreamNoAnswer
+	}
+	if up.StatusCode >= 200 && up.StatusCode < 300 {
+		return up.StatusCode, pipeline.ErrorUpstreamUnusableResponse
 	}
 	return up.StatusCode, pipeline.ErrorUpstreamHTTPError
 }

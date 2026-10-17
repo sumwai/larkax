@@ -251,6 +251,15 @@ func TestInsertWritesAllColumns(t *testing.T) {
 	if !strings.Contains(db.execs[1], "INSERT INTO request_snapshots") {
 		t.Errorf("第二次 Exec 应当是插入，实际为 %q", db.execs[1])
 	}
+	// 这两列**故意不写**：当前只采请求方向的快照，写入发生在调上游之前，
+	// 那时上游结局还没发生。NULL 在这些行上读作「这一行不适用」，不是
+	// 「上游没回状态码」；同一次请求的上游结局记在 billing_requests 上。
+	// 哪天真接了响应方向的采集，这条断言会先失败，提醒改的人把语义一起改。
+	for _, col := range []string{"upstream_status", "error_kind"} {
+		if strings.Contains(db.execs[1], col) {
+			t.Errorf("请求快照的插入不该写 %s（它取自调上游之前，结局还没发生）: %q", col, db.execs[1])
+		}
+	}
 
 	args := db.lastArgs()
 	// 插入的列顺序：request_id, user_id, direction, skeleton_version,

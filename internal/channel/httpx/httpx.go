@@ -1,7 +1,7 @@
 // Package httpx 是上游适配器共用的 HTTP 细节。
 //
 // 这些逻辑与「说哪套协议」无关：URL 拼接、状态码到可重试的映射、
-// Retry-After 的两种合法形式、响应体的排空与关闭。各适配器各写一份的话，
+// 响应体的排空与关闭。各适配器各写一份的话，
 // **两份「可重试判断」迟早会不一致**——一处认为 429 可重试、另一处不认为，
 // 表现为「同一类失败在不同渠道上行为不同」，极难排查。
 //
@@ -90,16 +90,24 @@ func versionPrefix(path string) string {
 // 响应体截断后保留在结构体里：上游的错误信息可能与请求内容有关，
 // 上层排查时需要，但 Error() 不带出来——错误会进日志，
 // 而日志的去向比密钥本身更难控制。
+//
+// # 这里为什么不解析 Retry-After
+//
+// 它曾经解析过，写进 ErrUpstream.RetryAfter，而那个字段零个读取点。
+// 退避在这条路径上没有落点：internal/route 遇到可重试的失败是「换下一个
+// 候选」，不是「等一等同一个上游」。它真正的落点是对外响应上的 Retry-After，
+// 而那要先把「上游限流该回几号」定下来——那是另一批要一起定的对外契约。
+// 所以这里不解析：留一个没人读的解析结果，只会让下一个人以为退避接上了。
 func CheckStatus(resp *http.Response) error {
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return nil
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, MaxErrorBody))
 	return &channel.ErrUpstream{
-		StatusCode: resp.StatusCode,
-		Body:       string(body),
-		Retryable:  RetryableStatus(resp.StatusCode),
-		RetryAfter: ParseRetryAfter(resp.Header.Get("Retry-After")),
+		StatusCode:  resp.StatusCode,
+		GotResponse: true,
+		Body:        string(body),
+		Retryable:   RetryableStatus(resp.StatusCode),
 	}
 }
 
@@ -116,26 +124,6 @@ func RetryableStatus(code int) bool {
 		return true
 	}
 	return code >= 500
-}
-
-// ParseRetryAfter 解析 Retry-After 头。
-//
-// 它有两种合法形式：秒数、或 HTTP 日期。只认一种的实现会在另一种上
-// 静默退化为「不等待就重试」，那正好会加剧限流。
-func ParseRetryAfter(v string) time.Duration {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return 0
-	}
-	if d, err := time.ParseDuration(v + "s"); err == nil && d > 0 {
-		return d
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		if d := time.Until(t); d > 0 {
-			return d
-		}
-	}
-	return 0
 }
 
 // Drain 读掉响应体里剩余的内容。

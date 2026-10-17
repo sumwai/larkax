@@ -58,7 +58,11 @@ type responsesStreamEvent struct {
 }
 
 // pump 读取 SSE 流并翻译成统一事件。
-func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channel.StreamEvent) {
+//
+// status 是这条流对应响应的状态码（调用方已经过了 CheckStatus，所以它是
+// 2xx）。流里的错误都发生在**响应头之后**，所以它们都是「拿到过响应」的
+// 失败——把它带进错误里，下游才不用猜。
+func (a *Adapter) pump(ctx context.Context, status int, body io.Reader, events chan<- channel.StreamEvent) {
 	scanner := bufio.NewScanner(body)
 	// 单个事件可能很大：长文本的一次性增量、或一整段工具参数。
 	// 默认的 64KB 上限会把合法响应判为读取失败。
@@ -313,7 +317,9 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 			events <- channel.StreamEvent{
 				Kind: "error",
 				Err: &channel.ErrUpstream{
-					Body: ev.errorText(),
+					StatusCode:  status,
+					GotResponse: true,
+					Body:        ev.errorText(),
 					// 流已经开始，报错之后没有重试的余地——重试意味着客户端
 					// 会看到两段拼接的回答。已经吐出的部分照记费用。
 					Retryable: false,
@@ -337,7 +343,12 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 		// 两者对调用方是同一件事——流没有正常结束。
 		events <- channel.StreamEvent{
 			Kind: "error",
-			Err:  &channel.ErrUpstream{Err: err, Retryable: false},
+			Err: &channel.ErrUpstream{
+				StatusCode:  status,
+				GotResponse: true,
+				Err:         err,
+				Retryable:   false,
+			},
 		}
 		return
 	}

@@ -22,7 +22,11 @@ import (
 //   - 上游可能在流中途插入一个 error 对象
 //
 // 因此本函数不假设任何字段一定存在，而是逐帧判断。
-func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channel.StreamEvent) {
+//
+// status 是这条流对应响应的状态码（调用方已经过了 CheckStatus，所以它是
+// 2xx）。流里的错误都发生在**响应头之后**，所以它们都是「拿到过响应」的
+// 失败——把它带进错误里，下游才不用猜。
+func (a *Adapter) pump(ctx context.Context, status int, body io.Reader, events chan<- channel.StreamEvent) {
 	scanner := bufio.NewScanner(body)
 	// 单个分片可能很大（长文本的一次性增量、或 base64 图片）。
 	// 默认的 64KB 上限会让合法的响应被判为「读取失败」。
@@ -71,7 +75,9 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 			events <- channel.StreamEvent{
 				Kind: "error",
 				Err: &channel.ErrUpstream{
-					Body: chunk.Error.Message,
+					StatusCode:  status,
+					GotResponse: true,
+					Body:        chunk.Error.Message,
 					// 流已经开始了，报错之后没有「重试」的余地——
 					// 重试意味着客户端会看到两段拼接的回答。
 					Retryable: false,
@@ -112,7 +118,12 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 		// 两者对调用方是同一件事——流没有正常结束。
 		events <- channel.StreamEvent{
 			Kind: "error",
-			Err:  &channel.ErrUpstream{Err: err, Retryable: false},
+			Err: &channel.ErrUpstream{
+				StatusCode:  status,
+				GotResponse: true,
+				Err:         err,
+				Retryable:   false,
+			},
 		}
 		return
 	}
