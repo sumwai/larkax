@@ -126,21 +126,25 @@ var legacyCommands = []command{
 	{name: "calendar", run: runCalendar},
 }
 
-// lookupCommand 按名字找出顶层命令的处理函数。
-func lookupCommand(name string) (func([]string) error, bool) {
+// lookupCommand 按名字找出顶层命令的条目。
+//
+// 返回整个条目而不是只返回处理函数：条目上还有 `summary` 与 `help`，
+// 而 `larkaxctl help <命令>` 要的正是后者——只返回处理函数的话，取帮助正文
+// 就得再走一遍同一张表，两处遍历迟早会漂。
+func lookupCommand(name string) (command, bool) {
 	for _, g := range commandGroups {
 		for _, c := range g.commands {
 			if c.name == name {
-				return c.run, true
+				return c, true
 			}
 		}
 	}
 	for _, c := range legacyCommands {
 		if c.name == name {
-			return c.run, true
+			return c, true
 		}
 	}
-	return nil, false
+	return command{}, false
 }
 
 // usage 是根帮助页。
@@ -179,73 +183,25 @@ func buildUsage() string {
 }
 
 // usageNotes 是根帮助页上不随命令清单变化的那几段。
+//
+// 只留「跑命令的人当下要的」：全局选项、短选项、退出码与去向。查找规则、
+// 取舍与边界那类解释性的长句在 docs/cli-reference.md，这里不再留第二份。
+//
+// 行数、每行宽度与「不含子命令参数」几条都有用例钉着，见 usage_test.go。
 const usageNotes = `
-二级动作、参数与详情各在自己的 --help 里：larkaxctl <命令> --help，
-例如 larkaxctl channel --help、larkaxctl ledger --help。
-搬过家的那几条命令的旧路径仍然可用（reconcile、rotate、idempotency cleanup、
-calendar import），各条命令的 --help 末尾写着它们：那些写法只是不再是正式写法。
-日历数据文件的格式与约束见：larkaxctl price calendar --help。
-
 全局选项（写在子命令前后都认）：
-  --env-file <路径>                        指定要加载的 .env 文件。不给时从当前目录
-                                           往上找，不越过 git 仓库根，用最近的那一份。
-                                           两种情况都只填补尚未设置的环境变量，
-                                           系统环境变量优先。见 internal/config。
-  --format <table|json>                    输出的读者是谁。默认 table：面向终端的
-                                           表格与状态符。json：stdout 只有一份
-                                           JSON，提示与警告走 stderr，给管道下游
-                                           的 jq 与探针用。-o json 是它的简写。
-                                           -o 与 --format 一样，写在子命令前后都认。
-                                           取值不合法时报参数错，不静默回落成表格。
-                                           目前接上的是读类子命令，清单见
-                                           docs/cli-output.md 的「机器可读输出」。
-  --verbose                                打细节。-v 是它的简写。目前接上的是
-                                           doctor（每项多打一段检查范围、读到的数、
-                                           表，以及每条问题的完整原文）；其余命令
-                                           接受它、输出不变。
-  --quiet                                  压掉全部「给人看」的输出：-q 是它的简写。
-                                           成功时一声不吭，只在出错时说话，给脚本
-                                           与守护调用用。--format json 那一份不受
-                                           影响（脚本要的正是它），致命错误也不受
-                                           影响（那一句由本程序打到 stderr）。
-                                           与 --verbose 不能同时给。
+  --env-file <路径>       指定要加载的 .env 文件（默认从当前目录往上找到仓库根）
+  --format <table|json>   输出格式：table 给终端，json 给管道下游（-o 是它的简写）
+  --verbose               打细节，目前 doctor 用得上（-v 是它的简写）
+  --quiet                 压掉给人看的输出，只在出错时说话（-q 是它的简写）
 
-短选项（白名单，就下面这六个，其余的选项一律写全名）：
-  -u  --user        -m  --model       -o  --format
-  -v  --verbose     -q  --quiet       -V  --version
+短选项：-u --user、-m --model、-o --format、-v --verbose、-q --quiet、-V --version（其余写全名）
 
--o 是行业惯例（kubectl、gh），-u / -m 是天天要写的那两个实体（Key 的归属人、
-模型名），-v / -q / -V 是三个不带值的开关（写错了也写不坏什么）。**安全、财务
-与边界参数不开短选项**——上游渠道、凭证来源、外部单据号、速率上限、生效截止
-这几类，写短了容易看错也容易按错，它们要的是把全名完整写出来。根页面上不列
-这些名字（列了就成了「根页面写着子命令的参数」，见 usage_test.go 那条用例），
-各条命令自己的 --help 里有。
+退出码：0 成功，1 其他失败，2 命令行参数错，3 连不上数据库，4 约束冲突。
 
-**-V 打版本、-v 是详细模式**，与多数工具相反：版本号是偶尔才问一次的，详细模式
-是天天要补一个的，-v 给后者。
-
-上面两条约束（短选项只有这六个、-V 与 -v 的分工）都各有用例钉着
-（见 short_flags_test.go）。
-
-退出码：
-  0  成功
-  1  其他失败
-  2  命令行参数错（缺字段、取值解析不了、标志组合不对）
-  3  连不上数据库
-  4  约束冲突（唯一键、外键、要改或要查的那一行不存在；
-     同一幂等键已经对应另一笔入账）
-
-写入路径自己校验出来的参数问题（作用域与归属的组合、表达式编译不过、
-渠道类型不认识）归入 1，不是 2。
-
-环境变量：运维命令只读 LARKAX_DB_DSN、LARKAX_ENV 与 LARKAX_LOG_LEVEL，
-LARKAX_ROLE 与它无关。需要主密钥的命令（channel 的写入、secret rotate）另读
-LARKAX_MASTER_KEYS。见 internal/config 的 LoadOps。
-
-.env 文件：不进环境变量、只用 .env 里的值也可以。默认从当前目录往上找
-（不越过 git 仓库根），要指定另一份就加 --env-file。两种来源都只填补
-尚未设置的环境变量——已经导出的环境变量优先。
-
+每条命令的详细用法：larkaxctl help <命令>。
+全局约定、.env 查找规则与退出码边界见 docs/cli-reference.md。
+机器可读输出（--format json）的契约见 docs/cli-output.md。
 `
 
 // migrateUsage 是 migrate 子命令的帮助。
@@ -333,22 +289,42 @@ func run() error {
 		fmt.Fprint(os.Stderr, usage)
 		return usageErr(errors.New("缺少子命令"))
 	}
+	return dispatch(args)
+}
 
+// dispatch 按第一个参数分派子命令。全局选项在调用之前已经摘掉（见 run）。
+//
+// 单独拆出来是为了**能被用例调到**：run 自己从 os.Args 取参数，而
+// 「根帮助页指的那条去向真的走得通」这件事（`larkaxctl help <命令>`）
+// 要有一个不经进程的参数入口才测得了。
+func dispatch(args []string) error {
 	name, rest := args[0], args[1:]
 	switch name {
 	case "help", "-h", "--help":
-		fmt.Print(usage)
+		// `larkaxctl help <命令>` 打那条命令自己的帮助正文，不给名字时打根帮助页。
+		// 根帮助页的末行指的就是这个写法——**指针指向的必须真的能用**，否则
+		// 它比不写更坏：人照着敲一次，得到的是刚才那一页。
+		if len(rest) == 0 {
+			fmt.Print(usage)
+			return nil
+		}
+		c, ok := lookupCommand(rest[0])
+		if !ok {
+			fmt.Fprint(os.Stderr, usage)
+			return usageErr(fmt.Errorf("未知子命令 %q", rest[0]))
+		}
+		fmt.Print(c.help)
 		return nil
 	case "-V", "--version":
 		name, rest = "version", nil
 	}
 
-	run, ok := lookupCommand(name)
+	c, ok := lookupCommand(name)
 	if !ok {
 		fmt.Fprint(os.Stderr, usage)
 		return usageErr(fmt.Errorf("未知子命令 %q", name))
 	}
-	return run(rest)
+	return c.run(rest)
 }
 
 // runVersion 打印版本号与编译元数据。

@@ -50,6 +50,7 @@ Not wired yet:
   [docs/metrics.md](docs/metrics.md)
 
 See [docs/development.md](docs/development.md) for how to build and run it.
+The `larkaxctl` command reference is in [docs/cli-reference.md](docs/cli-reference.md).
 The reconciliation job is documented in [docs/reconciliation.md](docs/reconciliation.md),
 the calendar data behind peak/off-peak pricing in [docs/calendar-data.md](docs/calendar-data.md),
 the health and quota signals in [docs/channel-health.md](docs/channel-health.md),
@@ -211,12 +212,11 @@ its freshly cloned state.
 If 5432 is already taken, `make run PG_PORT=55432` — the DSN line follows, so there is
 no need to delete `.env` first.
 
-The service and `larkaxctl` read `.env` themselves — they look in the working directory
-and up to the git repository root, and use the first one they find — so there is no need
-to export it by hand before `go run ./cmd/larkaxctl ...`. `--env-file <path>` selects a
-different file. Either way, variables already set in the environment always win: the file
-only fills in what is not set, which is what keeps an injected production environment
-safe from a stray development `.env`.
+The service and `larkaxctl` read `.env` themselves — variables already set in the
+environment always win, so there is no need to export it by hand before
+`go run ./cmd/larkaxctl ...`; `--env-file <path>` selects a different file. The lookup
+rules and the rest of the global conventions are in
+[docs/cli-reference.md](docs/cli-reference.md).
 
 The service serves the inference API on `:8080` and `/healthz` and `/readyz` on `:9090`.
 Both listen addresses default to loopback (`127.0.0.1:8080` and `127.0.0.1:9090`), so
