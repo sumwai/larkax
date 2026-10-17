@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -239,6 +240,40 @@ func TestRedisStoreGetPassesThroughRealErrors(t *testing.T) {
 	store := &RedisStore{cmds: &fakeCmds{getErr: errors.New("连不上")}}
 	if _, _, err := store.Get(context.Background(), "rl:1:1"); err == nil {
 		t.Fatal("存储出错时 Get 应当返回错误")
+	}
+}
+
+// TestOpenRedisFromManyGoroutines 钉住「库的 Logger 只被接一次」。
+//
+// go-redis 的 Logger 是**包级**变量，而读它的是库自己的 goroutine（拨号失败后的
+// 诊断路径）。原先是每调一次 OpenRedis 就写一次，那是一次数据竞争——而它**在门禁
+// 的口径下照不到**（`-count=1`，一个进程里通常只构造一次）。
+//
+// 这条例用**并发写**把它变成必然的失败：没有同步的话，几个 goroutine 同时写同一个
+// 包级变量，`-race` 一定报出来。跑它必须带 `-race`（`go test -race ./internal/ratelimit/`）。
+//
+// DSN 指向一个不通的地址是有意的：只解析、只造客户端，不发命令——库的连接是懒的，
+// 所以这条例不需要一个真的 Redis。
+func TestOpenRedisFromManyGoroutines(t *testing.T) {
+	const n = 8
+	stores := make([]*RedisStore, n)
+	errs := make([]error, n)
+
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stores[i], errs[i] = OpenRedis("redis://127.0.0.1:1/0")
+		}()
+	}
+	wg.Wait()
+
+	for i := range n {
+		if errs[i] != nil {
+			t.Fatalf("第 %d 次 OpenRedis 失败: %v", i, errs[i])
+		}
+		_ = stores[i].Close()
 	}
 }
 
