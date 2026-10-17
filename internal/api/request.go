@@ -49,14 +49,31 @@ type rejection struct {
 // 只检查「无论如何都做不成」的两种：没有模型名、没有消息。其余的参数由
 // 上游判断——各家支持的范围不同，在这里按我们的猜测拒收，会把上游支持的
 // 请求挡在门外。
-func checkRequest(req *channel.Request) *rejection {
+//
+// protocol 是**调用方走的入口**，不参与判据（判据是转换之后的
+// channel.Request.Messages，三条入口共用），只决定措辞该点哪个字段——见
+// emptyRequestMessage。
+func checkRequest(req *channel.Request, protocol channel.Protocol) *rejection {
 	if req.Model == "" {
 		return &rejection{status: http.StatusBadRequest, message: "model is required"}
 	}
 	if len(req.Messages) == 0 {
-		return &rejection{status: http.StatusBadRequest, message: "messages is required"}
+		return &rejection{status: http.StatusBadRequest, message: emptyRequestMessage(protocol)}
 	}
 	return nil
+}
+
+// emptyRequestMessage 是「请求里一条消息都没有」时给调用方的措辞。
+//
+// 判据在三条入口上是同一个（转换之后没有消息），但**字段名是各协议自己的**：
+// /v1/chat/completions 与 /v1/messages 的调用方发的是 messages，而
+// /v1/responses 的调用方发的是顶层 input——后者收到「messages is required」
+// 会去改一个它从来没写过的字段。
+func emptyRequestMessage(protocol channel.Protocol) string {
+	if protocol == channel.ProtocolOpenAIResponses {
+		return "input is required"
+	}
+	return "messages is required"
 }
 
 // billingRequest 组装计费侧要的那份请求。

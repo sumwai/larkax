@@ -364,7 +364,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 		writeError(w, protocol, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if rejected := checkRequest(upstream); rejected != nil {
+	if rejected := checkRequest(upstream, protocol); rejected != nil {
 		writeError(w, protocol, rejected.status, rejected.message)
 		return
 	}

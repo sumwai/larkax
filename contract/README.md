@@ -20,14 +20,15 @@
 
 ## 覆盖范围
 
-三套协议（`openai` / `anthropic` / `openai-responses`）各跑六条：
+三套协议（`openai` / `anthropic` / `openai-responses`）各跑六条；Responses
+另多一条**空 `input`** 的 400（共七条），因为它的 400 文案要点的是另一个字段：
 
 | 用例 | 验什么 |
 |---|---|
 | 非流式 | 正文、`finish_reason` / `stop_reason` / `status`、`usage` 三项（Responses 另加两个 `*_tokens_details`） |
 | 流式 | 增量能拼起来、事件顺序、**终止条件**、用量在流里的位置 |
 | 工具调用 | `tool_calls` / `tool_use` / `function_call` 三边的形状（`arguments` 是字符串、Anthropic 的 `input` 是对象） |
-| 客户端错误 400 | SDK 抛 `BadRequestError`，`error.type` 是 `invalid_request_error` |
+| 客户端错误 400 | SDK 抛 `BadRequestError`，`error.type` 是 `invalid_request_error`；Responses 另有「缺 `max_output_tokens`」与「空 `input`」两条，文案分别点名这两个字段 |
 | 认证错误 401 | SDK 抛 `AuthenticationError`；OpenAI 与 Responses 的 `error.code` 是 `invalid_api_key`，Anthropic 的 `error.type` 是 `authentication_error` |
 | 上游错误 5xx | 上游回 500 时我们回 502，SDK 抛 `APIStatusError`，`error.type` 是 `api_error` |
 
@@ -171,8 +172,13 @@ usage 为准**的客户端读到的是对的；**只读 `message_start` 的客�
 **`max_output_tokens` 在本项目是必填的。** 官方 API 里它可选，这里不行——
 预留要有输出上界才做得出来（见 `internal/api` 的 `httpStatusOfUpstream` 与
 `billing.ErrNoUpperBound`）。不给它回 400，`error.message` 里点名 `max_tokens`。
-契约测试那条「客户端错误 400」用的就是这个触发方式：Responses 的请求体里没有
-`messages`，空 `input` 会被 SDK 在客户端就挡下来，根本发不出去。
+契约测试那条「客户端错误 400」用的就是这个触发方式。
+
+另一条 400 是**空 `input`**：判据（转换之后一条消息都没有）三条入口共用，
+但文案必须点名调用方自己那套协议里的字段。Responses 的调用方发的是顶层
+`input`，收到「messages is required」会去改一个它没写过的字段。所以
+Responses 那一条断言 `message` 里出现 `input`、且**不出现** `messages`。
+`input=[]` 会被 SDK 原样发出去（它不拦空列表），这条因此仍走 SDK 的对象模型。
 
 **有状态的字段被拒（400），不是被丢弃。** `previous_response_id` /
 `conversation` / `context_management` 会让输入里含**上游持有的历史**，
