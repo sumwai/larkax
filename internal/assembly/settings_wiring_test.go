@@ -38,21 +38,49 @@ import (
 // 返回装配的错误。装配成功时返回 nil——那是这些用例里的**失败**情形。
 func buildWithSetting(t *testing.T, db *sql.DB, key, value string) error {
 	t.Helper()
+	return buildWithSettings(t, db, map[string]string{key: value})
+}
+
+// buildWithSettings 是上面那个的多键版本。
+//
+// 一次改一个键不够用：插件的开关用例要同时摆出「开关关着」与「另外三个键
+// 是坏的」两种状态，而那正是它要证明的事——关着的时候后面那三个键根本
+// 不该被读。分成两次装配就证明不了，因为中间那次装配里开关是开着的。
+func buildWithSettings(t *testing.T, db *sql.DB, overrides map[string]string) error {
+	t.Helper()
+	_, err := buildAppWithSettings(t, db, overrides)
+	return err
+}
+
+// buildAppWithSettings 同上，但把装配好的 App 也交出来。
+//
+// 要看的除了「起不起得来」还有「起来之后装上了什么」——插件的开关用例
+// 两头都要：关着时注册表该是 nil，开着时该真有插件在里面。
+func buildAppWithSettings(t *testing.T, db *sql.DB, overrides map[string]string) (*App, error) {
+	t.Helper()
 	ctx := context.Background()
 
-	var before string
-	if err := db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = $1`, key).Scan(&before); err != nil {
-		t.Fatalf("读 settings.%s 失败: %v", key, err)
+	before := make(map[string]string, len(overrides))
+	for key := range overrides {
+		var v string
+		if err := db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = $1`, key).Scan(&v); err != nil {
+			t.Fatalf("读 settings.%s 失败: %v", key, err)
+		}
+		before[key] = v
 	}
 	t.Cleanup(func() {
-		if _, err := db.ExecContext(context.WithoutCancel(ctx),
-			`UPDATE settings SET value = $2 WHERE key = $1`, key, before); err != nil {
-			t.Errorf("还原 settings.%s 失败: %v", key, err)
+		for key, v := range before {
+			if _, err := db.ExecContext(context.WithoutCancel(ctx),
+				`UPDATE settings SET value = $2 WHERE key = $1`, key, v); err != nil {
+				t.Errorf("还原 settings.%s 失败: %v", key, err)
+			}
 		}
 	})
-	if _, err := db.ExecContext(ctx,
-		`UPDATE settings SET value = $2 WHERE key = $1`, key, value); err != nil {
-		t.Fatalf("改 settings.%s 失败: %v", key, err)
+	for key, value := range overrides {
+		if _, err := db.ExecContext(ctx,
+			`UPDATE settings SET value = $2 WHERE key = $1`, key, value); err != nil {
+			t.Fatalf("改 settings.%s 失败: %v", key, err)
+		}
 	}
 
 	values, err := settings.Load(ctx, settings.NewPgSource(db))
@@ -60,7 +88,7 @@ func buildWithSetting(t *testing.T, db *sql.DB, key, value string) error {
 		// 值本身不合法（类型不对、JSON 写坏了）时 Load 就会拒绝。
 		// 那也是一种「装配起不来」，但它证明的是 settings 那一侧的校验，
 		// 不是这里要看的接线，所以单独报出来，别混进断言里。
-		return err
+		return nil, err
 	}
 
 	executor, err := upstream.New(10 * time.Second)
@@ -68,7 +96,7 @@ func buildWithSetting(t *testing.T, db *sql.DB, key, value string) error {
 		t.Fatalf("构造上游执行器失败: %v", err)
 	}
 
-	_, err = Build(Config{
+	return Build(Config{
 		DB:       db,
 		Sealer:   testSealer(t),
 		Settings: values,
@@ -77,7 +105,6 @@ func buildWithSetting(t *testing.T, db *sql.DB, key, value string) error {
 		Executor: executor,
 		Rules:    pricing.New(db),
 	})
-	return err
 }
 
 // 账本记不了的资产品种必须在装配期被拒。

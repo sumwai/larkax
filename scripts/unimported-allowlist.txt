@@ -26,10 +26,8 @@
 #   命令      scripts/check-unimported.sh
 #             （入口由 cmd/ 自动发现，当前是 ./cmd/larkax 与 ./cmd/larkaxctl）
 #   工具      go（版本随 go.mod；go list 的包枚举口径由它决定）
-#   条数      3，与脚本里的 MAX_ENTRIES 一致
+#   条数      1，与脚本里的 MAX_ENTRIES_DEFAULT 一致
 #
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
-internal/plugin         | gap | #216 插件系统尚未接线：全仓没有一处 import 它
-internal/plugin/host    | gap | #216 同属插件系统：宿主能力（日志 / 日历 / KV），只被插件树内部与测试 import
-internal/plugin/sandbox | gap | #216 同属插件系统：moejs 封装与限额，只被插件树内部与测试 import
+internal/plugin/host    | gap | #216 宿主能力的组装（host.Build）目前只有插件树自己的用例在调，生产侧还没有调用点

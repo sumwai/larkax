@@ -88,9 +88,10 @@
 #
 # # 环境变量
 #
-# 这两个是给 scripts/check-unimported.test.sh 注入桩件用的，CI 与本地都不该设：
-#   GO        可执行文件，默认 go
-#   WHITELIST 白名单路径，默认 scripts/unimported-allowlist.txt
+# 这三个是给 scripts/check-unimported.test.sh 注入桩件用的，CI 与本地都不该设：
+#   GO          可执行文件，默认 go
+#   WHITELIST   白名单路径，默认 scripts/unimported-allowlist.txt
+#   MAX_ENTRIES 条目数上限，默认 MAX_ENTRIES_DEFAULT（见下）
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -101,7 +102,13 @@ cd "$(dirname "$0")/.."
 #
 # 关掉一批缺口之后把它往下调。不调不会报错，但那样它就不再是当前存量的快照，
 # 中间那一段差额可以被人无声地用掉。
-MAX_ENTRIES=3
+#
+# 取值走 MAX_ENTRIES_DEFAULT 而不是直接写 MAX_ENTRIES：自测的比较用例用的是
+# 自己造的小白名单，条数与真实存量无关，所以它们要能把这个上限顶开——否则
+# 真实上限降到比夹具还小时，那些用例会全部挂在「超过上限」上，而它们要测的
+# 是比对逻辑。上限本身由自测的第 4、5、18 条钉住：那三条按下面这个默认值跑。
+MAX_ENTRIES_DEFAULT=1
+MAX_ENTRIES="${MAX_ENTRIES:-$MAX_ENTRIES_DEFAULT}"
 
 # 扫描起点的根目录。里面的 main 包自动发现，见下面的 discover_main_packages。
 SCAN_ROOT="cmd"

@@ -34,12 +34,23 @@ bad() {
   fail=$((fail + 1))
 }
 
-# 脚本里钉住的上限：自测不写死它，否则改一处要动两处。
-declared=$(grep -m1 '^MAX_ENTRIES=' "$SCRIPT" | cut -d= -f2)
+# 脚本里钉住的默认上限：自测不写死它，否则改一处要动两处。
+#
+# 读的是 MAX_ENTRIES_DEFAULT 而不是 MAX_ENTRIES：后者可以被环境变量顶开
+# （见下），而这里要的是脚本自己声明的那个数。
+declared=$(grep -m1 '^MAX_ENTRIES_DEFAULT=' "$SCRIPT" | cut -d= -f2)
 if [ -z "$declared" ]; then
-  echo "✗ 读不出 $SCRIPT 里的 MAX_ENTRIES"
+  echo "✗ 读不出 $SCRIPT 里的 MAX_ENTRIES_DEFAULT"
   exit 1
 fi
+
+# 比较类用例用的上限。
+#
+# 它们比的是「差集与白名单对不对得上」，与真实存量有几条无关，而夹具是自己
+# 造的两条。真实上限降到 1 之后，这两条会先挂在「超过上限」上——那是夹具与
+# 真实存量撞车，不是被测逻辑坏了。所以这些用例把上限顶开，上限本身留给
+# 第 4、5、18 条去钉（那三条按脚本声明的默认值跑）。
+CAP_WIDE=100
 
 # ── 桩件 ──────────────────────────────────────────────────────────────────
 
@@ -68,6 +79,13 @@ make_go() {
 # 退出码由调用者立刻取走：$? 必须在下一句就读。
 run() {
   local stub="$1" wl="$2"
+  GO="$stub" WHITELIST="$wl" MAX_ENTRIES="$CAP_WIDE" bash "$SCRIPT" >"$last_out" 2>&1
+}
+
+# run_at_cap <桩件> <白名单>
+# 与 run 相同，但上限取脚本声明的默认值——给「上限本身」那几条用例用。
+run_at_cap() {
+  local stub="$1" wl="$2"
   GO="$stub" WHITELIST="$wl" bash "$SCRIPT" >"$last_out" 2>&1
 }
 
@@ -89,7 +107,8 @@ make_fake_repo() {
 # run_in_repo <仓库根> <桩件> <白名单>
 run_in_repo() {
   local repo="$1" stub="$2" wl="$3"
-  GO="$stub" WHITELIST="$wl" bash "$repo/scripts/check-unimported.sh" >"$last_out" 2>&1
+  GO="$stub" WHITELIST="$wl" MAX_ENTRIES="$CAP_WIDE" \
+    bash "$repo/scripts/check-unimported.sh" >"$last_out" 2>&1
 }
 
 # ── 夹具 ──────────────────────────────────────────────────────────────────
@@ -216,7 +235,8 @@ while [ "$i" -le "$declared" ]; do
 done
 stub_over="$tmp/go-over"
 make_go "$stub_over" "$mod_ok" "$deps_ok" "$pkgs_over"
-run "$stub_over" "$wl_over"
+# 这一条测的正是上限本身，所以不能顶开它。
+run_at_cap "$stub_over" "$wl_over"
 rc=$?
 if [ "$rc" -eq 1 ]; then ok; else bad "条目数超过上限（$declared + 1）—— 应失败（退出码 1），实际 $rc"; fi
 grep -q '超过上限' "$last_out" || bad "条目数超过上限 —— 要说清是这个原因"
@@ -225,11 +245,12 @@ grep -q '只许减不许增' "$last_out" || bad "条目数超过上限 —— �
 # 5. 上限是个具名常量，自测把它钉住。
 #    往上调必须同时改这一处，于是那是一次会被 review 看到的 diff。
 #    关掉一批缺口之后，把脚本里的常量与这里的字面量一起往下调。
-if [ "$declared" = "3" ]; then ok; else bad "MAX_ENTRIES 被改成了 $declared（自测钉住的是 3）"; fi
+if [ "$declared" = "1" ]; then ok; else bad "MAX_ENTRIES_DEFAULT 被改成了 $declared（自测钉住的是 1）"; fi
 
 # 6. go 不在 PATH：退出码 2，并说清是没跑成。
 #    用一个确定不存在的名字，避免依赖运行环境里有没有装 go。
-GO="go-not-installed-$$" WHITELIST="$wl_ok" bash "$SCRIPT" >"$last_out" 2>&1
+GO="go-not-installed-$$" WHITELIST="$wl_ok" MAX_ENTRIES="$CAP_WIDE" \
+  bash "$SCRIPT" >"$last_out" 2>&1
 rc=$?
 if [ "$rc" -eq 2 ]; then ok; else bad "go 不在 PATH —— 应报「没跑成」（退出码 2），实际 $rc"; fi
 grep -q '找不到' "$last_out" || bad "go 不在 PATH —— 要说清找不到的是哪个可执行文件"
@@ -426,7 +447,8 @@ mod_real_file="$tmp/mod-real.txt"
 printf '%s\n' "$mod_real" >"$mod_real_file"
 stub_real="$tmp/go-real"
 make_go "$stub_real" "$mod_real_file" "$real_deps" "$real_pkgs"
-run "$stub_real" "$REAL_WHITELIST"
+# 按默认上限跑：这一条同时验「真实白名单的条目数没超上限」。
+run_at_cap "$stub_real" "$REAL_WHITELIST"
 rc=$?
 if [ "$rc" -eq 0 ]; then ok; else bad "签入的白名单 —— 应通过，实际退出码 $rc"; fi
 real_count=$(awk '/^[[:space:]]*#/ { next } /^[[:space:]]*$/ { next } { n++ } END { print n + 0 }' "$REAL_WHITELIST")

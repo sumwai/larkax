@@ -53,6 +53,9 @@ import (
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pipeline"
+	"github.com/sumwai/larkax/internal/plugin"
+	"github.com/sumwai/larkax/internal/plugin/sandbox"
+	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
 	"github.com/sumwai/larkax/internal/quota"
 	"github.com/sumwai/larkax/internal/ratelimit"
 	"github.com/sumwai/larkax/internal/route"
@@ -106,7 +109,29 @@ type App struct {
 	// Snapshots 是快照链路。导出它的理由与 Gateway 相同：它带着写入与
 	// 丢弃的计数，而「一条快照都没写进去」与「没有请求」在日志里长得一样。
 	Snapshots *snapshotwire.Collector
+
+	// Plugins 是启动时从 plugins 表加载出来的注册表，plugin.enabled 为
+	// false 时为 nil。
+	//
+	// **本版还没有接调用点**：它不挂在请求路径上，所以 plugin.enabled=true
+	// 也不会改变任何一个请求的行为。加载器与限额先备好，接线的活是后面的
+	// 那几片（见 docs/plugin-contract.md）。
+	Plugins *plugin.Registry
+
+	// PluginLimits 是插件每次调用的限额，来自 settings 表。
+	//
+	// 它与 Plugins 一起导出，是为了让接线那一片**只有一处**把配置翻成
+	// sandbox.Limits：让调用方自己去读那四个键的话，两份映射迟早不一致，
+	// 而那种不一致的表现是「插件跑在另一套限额下」——不报错，只是行为不同。
+	PluginLimits sandbox.Limits
 }
+
+// pluginLoadTimeout 是启动期读 plugins 表的时间上限。
+//
+// Build 没有 context（它做的是装配，不是请求），而启动期的读表不该无限等：
+// 一个连不上的库会让进程停在那里不报错，现场看起来像「服务起来了但什么都不接」
+// ——那比启动失败难查得多。
+const pluginLoadTimeout = 30 * time.Second
 
 // cacheSize 是计价表达式编译缓存的容量。
 //
@@ -207,6 +232,11 @@ func Build(cfg Config) (*App, error) {
 		return nil, err
 	}
 
+	plugins, pluginLimits, err := buildPlugins(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+
 	// 账本存储同时满足预留与结算两个接口。它的方法名与签名与 gateway
 	// 声明的逐字一致，所以这里没有适配器——那正是两边刻意对齐的地方。
 	ledgerStore := store.New(cfg.DB)
@@ -261,10 +291,47 @@ func Build(cfg Config) (*App, error) {
 	logger.Warn("RPM 限流按进程内计数：多实例部署时各实例独立计数，额度不共享")
 
 	return &App{
-		Public:    observe.Middleware(handler),
-		Gateway:   gw,
-		Snapshots: snapshots,
+		Public:       observe.Middleware(handler),
+		Gateway:      gw,
+		Snapshots:    snapshots,
+		Plugins:      plugins,
+		PluginLimits: pluginLimits,
 	}, nil
+}
+
+// buildPlugins 按 settings 里的开关加载插件。
+//
+// # 关掉时不读另外三个键
+//
+// plugin.enabled 为 false 时**不构造注册表，也不去读另外三个键**（见
+// plugin.LoadConfig）：没开的功能不该因为一个坏配置把启动搞挂。判据是
+// 「enabled=false 时把一个非法值配进 call_timeout_ms，服务照样起得来」——
+// 那是唯一一个把「读了」与「没读」分开的观测量（见 settings_wiring_test.go）。
+//
+// 同一条理由在 internal/snapshotwire 也用过一次：那里是关掉时连留存期都不校验。
+//
+// # 加载失败是启动失败
+//
+// 与「一个坏插件」不同：读表失败（连接断了、表不在）说明这一份配置整体不可信，
+// 装出来的服务会带着一个空注册表跑，而「插件全都没跑」与「没有插件」在日志里
+// 长得一样。所以那一种在这里直接失败。
+func buildPlugins(cfg Config, logger *slog.Logger) (*plugin.Registry, sandbox.Limits, error) {
+	pluginCfg, err := plugin.LoadConfig(cfg.Settings)
+	if err != nil {
+		return nil, sandbox.Limits{}, fmt.Errorf("读取插件配置失败: %w", err)
+	}
+	if !pluginCfg.Enabled {
+		return nil, pluginCfg.Limits, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), pluginLoadTimeout)
+	defer cancel()
+
+	registry, err := pluginstore.New(cfg.DB).LoadRegistry(ctx, logger)
+	if err != nil {
+		return nil, sandbox.Limits{}, fmt.Errorf("加载插件失败: %w", err)
+	}
+	return registry, pluginCfg.Limits, nil
 }
 
 // validate 把「装不出能用的服务」这件事一次报全。
