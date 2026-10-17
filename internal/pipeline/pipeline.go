@@ -146,6 +146,20 @@ type Request struct {
 	RequestID string
 	UserID    int64
 
+	// APIKeyID 是这次请求用的那把 API Key（api_keys.id），落进
+	// billing_requests.api_key_id。
+	//
+	// 与 UserID 不是一回事：一个用户可以有多个 key，而按 key 归因用量、
+	// 排查「是哪把 key 在异常调用」只能靠这一列——退到按用户的话，同一个
+	// 用户名下的几把 key 就分不开了，而那正是要区分它们的原因。
+	//
+	// 由**入口**设置：鉴权那一步解析出用的是哪把 key（见 internal/auth 的
+	// User.KeyID），计费这一层看不出请求带的是哪把。落库层拒绝 0
+	// （见 internal/ledger/store 的 ErrMissingAPIKey）：这一列的历史行
+	// 本来就是空的，于是「漏设」与「历史行」在库里长得一样，
+	// 而写进去的那一刻是这两者唯一还分得清的地方。
+	APIKeyID int64
+
 	CanonicalModel string
 
 	// Candidates 是这次请求**可能**选中的渠道集合，供预留取上界。

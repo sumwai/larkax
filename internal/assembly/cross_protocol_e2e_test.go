@@ -147,7 +147,7 @@ func TestMessagesWithOpenAIUpstreamEndToEnd(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	status, body := postChat(t, public.URL+"/v1/messages", key, messagesBodyWith(model, "你是假上游"))
+	status, body := postChat(t.Context(), t, public.URL+"/v1/messages", key, messagesBodyWith(model, "你是假上游"))
 	if status != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
 	}
@@ -335,7 +335,7 @@ func TestMessagesWithOpenAIUpstreamCacheUsage(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	status, body := postChat(t, public.URL+"/v1/messages", key, messagesBody(model))
+	status, body := postChat(t.Context(), t, public.URL+"/v1/messages", key, messagesBody(model))
 	if status != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
 	}
@@ -417,7 +417,7 @@ func TestChatCompletionsWithAnthropicUpstreamEndToEnd(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	status, body := postChat(t, public.URL+"/v1/chat/completions", key, chatBodyWithSystem(model, "你是假上游"))
+	status, body := postChat(t.Context(), t, public.URL+"/v1/chat/completions", key, chatBodyWithSystem(model, "你是假上游"))
 	if status != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
 	}
@@ -580,7 +580,7 @@ func TestChatCompletionsWithAnthropicUpstreamCacheUsage(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	status, body := postChat(t, public.URL+"/v1/chat/completions", key, chatBody(model))
+	status, body := postChat(t.Context(), t, public.URL+"/v1/chat/completions", key, chatBody(model))
 	if status != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
 	}
@@ -695,7 +695,7 @@ func TestChatCompletionsWithAnthropicUpstreamCacheWriteUsage(t *testing.T) {
 	public := httptest.NewServer(app.Public)
 	t.Cleanup(public.Close)
 
-	status, body := postChat(t, public.URL+"/v1/chat/completions", key, chatBody(model))
+	status, body := postChat(t.Context(), t, public.URL+"/v1/chat/completions", key, chatBody(model))
 	if status != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
 	}

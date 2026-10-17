@@ -108,6 +108,29 @@ var ErrMissingProtocol = errors.New(
 // 的值**。前者的修法是补一处调用点，后者要查的是赋值处从哪拿到的这个值。
 var ErrUnknownProtocol = errors.New("协议标识不是已知的入口协议")
 
+// ErrMissingAPIKey 表示调用方没有在 pipeline.Request 上设置 APIKeyID。
+//
+// 与 ErrMissingProtocol 同一个形状，但理由要多一层：billing_requests.api_key_id
+// **可空**，而且这一列的历史行本来就是空的（补上写入点之前每一行都是 NULL，
+// 见 internal/migrate/sql/00017_api_key_id_comment.sql 的列注释）。于是
+// 「调用方漏了赋值」与「这是补写入点之前的行」在库里长得一模一样——事后按
+// key 归因用量时，那一行既不属于任何一把 key，也不像缺了什么。
+//
+// 分辨这两者只有写进去的那一刻还做得到，所以分辨放在这里：新行一律有值，
+// 列上的可空留给历史。
+var ErrMissingAPIKey = errors.New(
+	"缺少 API Key 标识：调用方没有设置 pipeline.Request.APIKeyID（它由入口从鉴权结果里取）")
+
+// checkAPIKey 检查调用方给没给这次请求用的那把 API Key。
+//
+// 0 是「没设置」而不是一把 key：api_keys.id 是 bigserial，从 1 起。
+func checkAPIKey(id int64) error {
+	if id <= 0 {
+		return ErrMissingAPIKey
+	}
+	return nil
+}
+
 // checkProtocol 检查这次请求的协议是不是入口真实存在的那两种。
 //
 // 只认两套：调用方的入口只有这两条路径，已注册的适配器也只有这两个
@@ -159,6 +182,10 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 	if err := checkProtocol(req.Protocol); err != nil {
 		return 0, err
 	}
+	// 同一位置、同一个理由：漏了哪把 key 时也不该留下任何副作用。
+	if err := checkAPIKey(req.APIKeyID); err != nil {
+		return 0, err
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -200,10 +227,10 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 	var id int64
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO billing_requests
-			(request_id, user_id, channel_id, canonical_model, protocol,
+			(request_id, user_id, api_key_id, channel_id, canonical_model, protocol,
 			 streamed, reserved_amount, reserved_asset, status,
 			 pricing_rule_id, pricing_expr_snapshot, started_at)
-		VALUES ($1, $2, NULLIF($3, 0), $4, $5, $11, $6::numeric, $7, 'pending',
+		VALUES ($1, $2, $12, NULLIF($3, 0), $4, $5, $11, $6::numeric, $7, 'pending',
 		        NULLIF($8, 0), NULLIF($9, ''), $10)
 		RETURNING id`,
 		// 协议由入口设置（见 pipeline.Request.Protocol）。这里**不填默认值**：
@@ -215,6 +242,10 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 		// 这一层看不出请求的形状，也就不该替它填一个默认值——写死 false
 		// 会让每条流式账单都记成非流式，而那张表正是事后区分两条路的依据。
 		req.Streamed,
+		// 用的是哪把 API Key 同样由入口给出（见 pipeline.Request.APIKeyID）。
+		// 这里**不加 NULLIF**：checkAPIKey 已经挡下了 0，真放一个 0 进来会撞
+		// 上 api_keys 的外键——两层都出声，好过一层静默写 NULL。
+		req.APIKeyID,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("写预留记录失败: %w", err)
