@@ -51,3 +51,4 @@
 | [33](lessons/33-fixture-shape-not-pinned.md) | 夹具按想象造，真实形状不同——而「行为碰巧一致」不会让任何人发现 | 写「不认识就忽略」这类处置的用例、按文档造夹具时 | 活 |
 | [34](lessons/34-gate-is-not-overlap.md) | 并发用例只加闸门，不保证 goroutine 真的重叠 | 写并发/竞态用例时 | 活 |
 | [35](lessons/35-hardcoded-maximum.md) | 用例里写死的「当前最大值」，会在它增长时无理由地红 | 断言里要写一个由仓库自身增长的数时 | 活 |
+| [36](lessons/36-test-entry-in-production-file.md) | 给用例留的入口写在生产文件里，deadcode 判它没人调 | 为用例加一个包装、为测试抽一段共用逻辑时 | 活 |
