@@ -263,6 +263,10 @@ const compileHook = "compile"
 const inspectMemoryLimit = 8 << 20
 
 // Hooks 返回插件导出的 hook 名，按字母序。
+//
+// 目前只有测试在调它：生产里逐个问的是 Has（「这个插件导出了某个 hook 吗」），
+// 还没有哪一处要枚举全部 hook 名。留着是因为「这个插件到底导出了哪些 hook」
+// 是自省该回答的问题，而这份名单是编译期求值出来的，不需要重算。
 func (m *Module) Hooks() []string { return append([]string(nil), m.hooks...) }
 
 // Has 判断插件是否导出了某个 hook。

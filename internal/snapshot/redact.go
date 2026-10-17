@@ -155,6 +155,11 @@ type Transport struct {
 }
 
 // RedactResponseWithTransport 脱敏响应，并把传输层信息并进骨架。
+//
+// 目前只有测试在调它：采集传输层信息（状态码、x-ratelimit-* 这一组响应头）
+// 这件事被推迟了，生产的采集链路走的是不带传输层的那条（见
+// snapshotwire.Collector.RedactResponse 的注释）。留在这里是因为它连同
+// Transport 类型一起，是额度监控接上时要用的那一块。
 func (r *Redactor) RedactResponseWithTransport(resp *channel.Response, tr Transport) (*Result, error) {
 	if resp == nil {
 		return nil, redactionError("", "响应为 nil")
@@ -289,18 +294,6 @@ func (r *Redactor) RedactResponse(resp *channel.Response) (*Result, error) {
 		return nil, redactionError("", "脱敏器是 %q 方向，不能处理响应", r.root)
 	}
 	return r.RedactRaw(responseToMap(resp))
-}
-
-// SkeletonJSON 返回骨架的 JSON 编码。
-func (res *Result) SkeletonJSON() ([]byte, error) {
-	if res == nil {
-		return nil, redactionError("", "结果为空")
-	}
-	raw, err := json.Marshal(res.Skeleton)
-	if err != nil {
-		return nil, redactionError("", "骨架无法序列化（%T）", err)
-	}
-	return raw, nil
 }
 
 // applyBudget 在骨架超限时降级为摘要层，仍然超限则报错。

@@ -225,17 +225,6 @@ func RedactDSN(dsn string) string {
 	return strings.Join(fields, " ")
 }
 
-// PrimaryMasterKey 返回用于包装新数据密钥的那一把——列表中的第一把。
-//
-// 返回 ok 而不是直接索引：未配置主密钥是 worker 角色的正常状态，
-// 调用方需要能区分「没有」和「有」，而不是撞上越界 panic。
-func (c *Config) PrimaryMasterKey() (MasterKey, bool) {
-	if len(c.MasterKeys) == 0 {
-		return MasterKey{}, false
-	}
-	return c.MasterKeys[0], true
-}
-
 // MasterKeysFromEnv 解析环境变量里的主密钥，**与角色无关**。
 //
 // Load 只在需要主密钥的角色上用它（worker 不解析），但「要不要主密钥」这件事

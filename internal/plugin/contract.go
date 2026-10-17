@@ -537,10 +537,6 @@ type Result[T any] struct {
 	Blocked bool
 }
 
-// Failed 表示这次调用出错了。非阻断的失败也返回 true——
-// 「出错了但请求继续」与「没出错」在观测上必须能分开。
-func (r Result[T]) Failed() bool { return r.Failure != nil }
-
 // Err 在阻断型失败时给出请求该失败的原因，其余情况返回 nil。
 //
 // 调用方统一用 `if res.Err() != nil` 判「这次要不要中止」，

@@ -137,6 +137,9 @@ func (d Date) Weekday() time.Weekday {
 // 它是纯星期规则，不看任何数据。数据缺失时调用方可以拿它实现回退
 // （例如「公告未发布时按周末低谷」），但那属于调用方的策略——
 // 本包不会把这条规则悄悄当成判定结果，因为调休补班恰恰能推翻它。
+//
+// 目前只有测试在调它：还没有哪一处按周末做回退（PeakAt 明确不套用这条规则，
+// 见 peak.go）。留着是为了让回退策略有现成的判据可用，而不是各自重写一遍。
 func (d Date) IsWeekend() bool {
 	wd := d.Weekday()
 	return wd == time.Saturday || wd == time.Sunday
@@ -389,6 +392,10 @@ func reasonOf(state YearState) UnknownReason {
 // 时刻先换算到地区时区再取日期：这就是「不依赖进程本地时区」的落点。
 // 换算之后的当地日期可能与时刻自带的 UTC 日期相差一天甚至一年，
 // 那是预期行为——账单按当地的那一天计价。
+//
+// 目前只有测试在调它：需要「按时刻判定」的两处各自做了那两步——
+// 计价引擎在自己的运行时里换算时区再把日期交给适配器（见
+// internal/billing/expr 的 dayInfo），PeakAt 也自己换算了一遍（见 peak.go）。
 func (c *Calendar) At(ctx context.Context, region Region, instant time.Time) (DayStatus, error) {
 	loc, err := Timezone(region)
 	if err != nil {
