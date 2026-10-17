@@ -73,6 +73,11 @@
 # 41 之后减了 3（#264）：`Session.OnStream` / `Session.OnUsage` / `UsageFacts.ChannelUsage`
 # 随 `onStream` / `onUsage` 接进请求路径而有了生产调用点。
 #
+# 32 之后减了 4（#282 第二批）：四条「删掉」的（`Config.PrimaryMasterKey` /
+# `Result.Failed` / `Result.SkeletonJSON` / `Collector.RetentionDays`）从清单里消失；
+# 同批另有 14 条从 `gap` 改判成 `lib`——**条数没变**，但类型栏变了，
+# 那 14 条是库构件与契约面，理由栏一律写明「目前只有测试在调它」。
+#
 # 38 之后减了 6（#282）：`Cache.Invalidate` / `Program.BranchCount` / `Program.Source` /
 # `StreamEstimator.HasMeasured` / `StreamEstimator.ObserveMeasured` / `Usage.RequiresReview`
 # 逐条核过调用点之后删掉——前三条注释里那条路不存在或与调用方自己的输入冗余，
@@ -83,8 +88,8 @@
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
 internal/billing/billing.go    | Usage.IsEmpty                     | gap | #267 与那条「非流式的 billing_path 分不开『上游没报 usage』与『上游报了 0』」是同一处缺口的两面；那一处修的时候用它兑现，语义不许提前动
 internal/billing/expr/compile.go | Cache.GetWithGlobals            | gap | #278 注入常量 Globals 那条链路没有生产入口；它是 CompileWithGlobals 唯一的调用点，掩蔽沿调用链传到了那个自由函数
-internal/calendar/calendar.go  | Calendar.At                       | gap | #282 按时刻判定当天状态；目前只有测试在调它
-internal/calendar/calendar.go  | Date.IsWeekend                    | gap | #282 只有测试在调它（判定走的是 Weekday / Kind，不经这一处）
+internal/calendar/calendar.go  | Calendar.At                       | lib | 日历库的判定入口：按地区时区把时刻折成当地日期再查；目前只有测试在调它（计价与 PeakAt 各自做了那两步）
+internal/calendar/calendar.go  | Date.IsWeekend                    | lib | 日历库的纯星期规则，给调用方做回退策略用；目前只有测试在调它（本包不把它当判定结果）
 internal/calendar/memory.go    | MemorySource.AddDay               | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.SetDefaultRange      | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.SetYearState         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
@@ -94,22 +99,18 @@ internal/catalog/admin.go      | Admin.DeleteAlias                 | gap | #158 
 internal/catalog/admin.go      | Admin.UpdateAlias                 | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
 internal/catalog/catalog.go    | Catalog.Model                     | gap | #158 管理面的写入路径用它读回来核对，那个入口还没有
 internal/catalog/catalog.go    | Catalog.UpstreamModel             | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/channel/anthropicadapter/adapter.go | Adapter.ListModels   | gap | #282 channel.Adapter 的接口方法，生产里没有调用点（还没有拉取上游模型列表的入口）
-internal/channel/anthropicadapter/adapter.go | Adapter.Quota        | gap | #282 channel.Adapter 的接口方法，生产里没有调用点（额度查询还没接线）
-internal/channel/openaiadapter/adapter.go | Adapter.ListModels      | gap | #282 channel.Adapter 的接口方法，生产里没有调用点（还没有拉取上游模型列表的入口）
-internal/channel/openaiadapter/adapter.go | Adapter.Quota           | gap | #282 channel.Adapter 的接口方法，生产里没有调用点（额度查询还没接线）
-internal/config/config.go      | Config.PrimaryMasterKey           | gap | #282 只有测试在调它；生产读主密钥走的是装配处直接取列表，不经这一处
-internal/ledger/account.go     | Account.ID                        | gap | #282 只有测试在调它（孪生的 UserID 在生产里用到）
-internal/money/money.go        | Amount.ClampZero                  | gap | #282 金额库的运算面：负数归零；目前只有测试在调它
-internal/money/money.go        | Amount.DivInt                     | gap | #282 金额库的运算面：按整数相除；目前只有测试在调它
-internal/money/money.go        | Amount.Units                      | gap | #282 金额库的读取面：最小单位整数；目前只有测试在调它（读库走 Parse，列是 numeric）
-internal/plugin/contract.go    | Result.Failed                     | gap | #216 契约类型的解码与校验；只有 adapter 与测试在调
-internal/plugin/sandbox/plugin.go | Module.Hooks                   | gap | #282 只有测试在调它；hook 名单在生产里还没有读者
+internal/channel/anthropicadapter/adapter.go | Adapter.ListModels   | lib | channel.Adapter 的契约面：接口方法由两个适配器实现；生产里还没有拉取上游模型列表的入口，目前只有测试在调它
+internal/channel/anthropicadapter/adapter.go | Adapter.Quota        | lib | channel.Adapter 的契约面：接口方法由两个适配器实现；额度查询还没接线，目前只有测试在调它
+internal/channel/openaiadapter/adapter.go | Adapter.ListModels      | lib | channel.Adapter 的契约面：接口方法由两个适配器实现；生产里还没有拉取上游模型列表的入口，目前只有测试在调它
+internal/channel/openaiadapter/adapter.go | Adapter.Quota           | lib | channel.Adapter 的契约面：接口方法由两个适配器实现；额度查询还没接线，目前只有测试在调它
+internal/ledger/account.go     | Account.ID                        | lib | 科目类型的读取面：取后缀而不解释它（与 Type、UserID 成对）；生产走 Type 与 UserID，目前只有测试在调它
+internal/money/money.go        | Amount.ClampZero                  | lib | 金额库的运算面：负数归零；目前只有测试在调它
+internal/money/money.go        | Amount.DivInt                     | lib | 金额库的运算面：按整数相除；目前只有测试在调它
+internal/money/money.go        | Amount.Units                      | lib | 金额库的读取面：最小单位整数；目前只有测试在调它（读库走 Parse，列是 numeric）
+internal/plugin/sandbox/plugin.go | Module.Hooks                   | lib | 插件模块的自省出口：枚举编译期读出来的 hook 名单；生产只逐个问 Has，目前只有测试在调它
 internal/pricing/admin.go      | Admin.Explain                     | gap | #158 管理面只接了新增与列表，改 / 删 / 查看还没有入口
-internal/route/route.go        | Router.Score                      | gap | #282 候选打分只有测试在调它（选择走的是 Select）
-internal/snapshot/redact.go    | Redactor.RedactResponseWithTransport | gap | #282 只有测试在调它（生产走的是不带传输层信息的那条路）
-internal/snapshot/redact.go    | Result.SkeletonJSON               | gap | #282 只有测试在调它
-internal/snapshotwire/snapshotwire.go | Collector.RetentionDays    | gap | #282 只有测试在调它
-internal/snapshotwire/snapshotwire.go | Collector.Stats            | gap | #282 丢弃与失败的计数只有测试在读它
+internal/route/route.go        | Router.Score                      | lib | 路由库的解释出口：单个候选的分数（score 是私有的）；生产排序走 order，目前只有测试在调它
+internal/snapshot/redact.go    | Redactor.RedactResponseWithTransport | lib | 脱敏库的入口：把传输层信息并进骨架；采集传输层这件事被推迟了，目前只有测试在调它
+internal/snapshotwire/snapshotwire.go | Collector.Stats            | lib | 这条链路的观测出口：丢弃与失败的计数；指标那一头还没有写，目前只有测试在读它
 internal/tokens/count.go       | Counter.CountTextEstimated        | gap | #282 强制走估算路径的入口，目前只有测试在调它
 internal/tokens/tokens.go      | Source.IsExact                    | gap | #282 对账判据，目前只有测试在调它：对账面还没有入口

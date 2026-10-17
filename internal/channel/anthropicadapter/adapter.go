@@ -139,6 +139,9 @@ func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, events 
 }
 
 // ListModels 查询上游可用模型。
+//
+// 目前只有测试在调它：channel.Adapter 的接口方法，生产里还没有拉取上游
+// 模型列表的入口（渠道支持哪些模型由渠道自己的配置给出）。
 func (a *Adapter) ListModels(ctx context.Context, ch channel.Channel) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, httpx.Endpoint(ch.BaseURL, "/v1/models"), nil)
 	if err != nil {
@@ -179,6 +182,8 @@ func (a *Adapter) ListModels(ctx context.Context, ch channel.Channel) ([]string,
 //
 // Messages 协议里没有查额度的端点，与 OpenAI 一侧同理：
 // 猜一个路径会让 404 被当成「额度查不到」，从而让自记账永远接不上。
+//
+// 目前只有测试在调它：channel.Adapter 的接口方法，额度查询还没接线。
 func (a *Adapter) Quota(context.Context, channel.Channel) (quota.State, error) {
 	return quota.State{}, channel.ErrUnsupported
 }

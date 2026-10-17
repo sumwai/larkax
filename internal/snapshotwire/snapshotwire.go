@@ -152,9 +152,6 @@ func New(cfg Config, db DB, logger *slog.Logger) (*Collector, error) {
 // 关掉采集之后旧分区照样要按留存期删掉。
 func (c *Collector) Collecting() bool { return c.collecting }
 
-// RetentionDays 返回配置的留存天数。
-func (c *Collector) RetentionDays() int { return c.retentionDays }
-
 // DropExpired 按留存期删除到期分区。
 //
 // 它不在请求路径上：由运维命令或后台任务调用（见 cmd/larkaxctl 的
@@ -305,6 +302,10 @@ type Stats struct {
 }
 
 // Stats 返回当前计数。
+//
+// 目前只有测试在读它：指标那一头还没有写（本仓的指标面是 internal/observe
+// 的计数器，按调用点自增，还没有 snapshot 这一族）。它是这条链路唯一能把
+// 「丢掉了多少条」与「没有请求」分开的出口，所以留着而不是删掉三个计数。
 func (c *Collector) Stats() Stats {
 	return Stats{Written: c.written.Load(), Dropped: c.dropped.Load(), Failed: c.failed.Load()}
 }

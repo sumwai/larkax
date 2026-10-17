@@ -287,41 +287,6 @@ func TestDecodeKeyAcceptsCommonEncodings(t *testing.T) {
 	}
 }
 
-// PrimaryMasterKey 取列表第一把，用于包装新生成的数据密钥。
-func TestPrimaryMasterKey(t *testing.T) {
-	setEnv(t, baseEnv(map[string]string{
-		"LARKAX_MASTER_KEYS": "new:" + validKeyB64() + ",old:" + validKeyB64(),
-	}))
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() 出错: %v", err)
-	}
-	primary, ok := cfg.PrimaryMasterKey()
-	if !ok {
-		t.Fatal("配置了主密钥却报告没有")
-	}
-	if primary.ID != "new" {
-		t.Errorf("PrimaryMasterKey().ID = %q，期望 new", primary.ID)
-	}
-}
-
-// worker 角色没有主密钥是正常状态，取值时不应 panic。
-func TestPrimaryMasterKeyAbsent(t *testing.T) {
-	setEnv(t, map[string]string{
-		"LARKAX_DB_DSN": "postgres://user:placeholder@localhost:5432/larkax",
-		"LARKAX_ROLE":   "worker",
-	})
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() 出错: %v", err)
-	}
-	if _, ok := cfg.PrimaryMasterKey(); ok {
-		t.Error("未配置主密钥时应报告没有")
-	}
-}
-
 // 多个问题应一次性全部报出，而不是修一个发现一个。
 func TestLoadReportsAllErrorsAtOnce(t *testing.T) {
 	setEnv(t, map[string]string{

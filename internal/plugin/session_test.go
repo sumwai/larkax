@@ -106,7 +106,7 @@ func TestOnRequestOutOfScopeIsBlockingWhenDeclared(t *testing.T) {
 func TestOnRequestWithoutPatch(t *testing.T) {
 	s := sessionFor(t, minimalMeta, `onRequest(){ return; }`, sandbox.Host{}, sandbox.Limits{})
 	res := s.OnRequest(t.Context(), RequestContext{RequestID: "r1"})
-	if res.Failed() || res.Patch != nil {
+	if res.Failure != nil || res.Patch != nil {
 		t.Fatalf("res=%+v，期望「没有补丁、没有错误」", res)
 	}
 }
@@ -115,7 +115,7 @@ func TestOnRequestWithoutPatch(t *testing.T) {
 func TestOnRequestEmptyPatchNormalized(t *testing.T) {
 	s := sessionFor(t, minimalMeta, `onRequest(){ return { body: {} }; }`, sandbox.Host{}, sandbox.Limits{})
 	res := s.OnRequest(t.Context(), RequestContext{RequestID: "r1"})
-	if res.Failed() || res.Patch != nil {
+	if res.Failure != nil || res.Patch != nil {
 		t.Fatalf("res=%+v，期望归一成没有补丁", res)
 	}
 }
@@ -206,7 +206,7 @@ func TestTimeoutStopsLaterHooks(t *testing.T) {
 		t.Fatal("超时之后 runtime 该被判为不可用")
 	}
 	res := s.OnUsage(t.Context(), UsageContext{RequestID: "r1"})
-	if res.Failed() || res.Patch != nil {
+	if res.Failure != nil || res.Patch != nil {
 		t.Fatalf("超时之后的 hook 该直接跳过，实际 %+v", res)
 	}
 }
@@ -292,7 +292,7 @@ func TestOnRouteOutsideCandidatesIsBlockingWhenDeclared(t *testing.T) {
 func TestOnRouteZeroMeansNoDecision(t *testing.T) {
 	s := sessionFor(t, minimalMeta, `onRoute(){ return {}; }`, sandbox.Host{}, sandbox.Limits{})
 	res := s.OnRoute(t.Context(), RouteContext{RequestID: "r1", Candidates: []RouteCandidate{{ChannelID: 7}}})
-	if res.Failed() || res.Patch != nil {
+	if res.Failure != nil || res.Patch != nil {
 		t.Fatalf("res=%+v，期望「没有决策」", res)
 	}
 }
@@ -387,7 +387,7 @@ func TestOnResponsePatch(t *testing.T) {
 func TestOnResponseEmptyPatchNormalized(t *testing.T) {
 	s := sessionFor(t, minimalMeta, `onResponse(){ return {}; }`, sandbox.Host{}, sandbox.Limits{})
 	res := s.OnResponse(t.Context(), ResponseContext{RequestID: "r1"})
-	if res.Failed() || res.Patch != nil {
+	if res.Failure != nil || res.Patch != nil {
 		t.Fatalf("res=%+v", res)
 	}
 }
@@ -419,7 +419,7 @@ func TestOnUsageReportsCountsOnly(t *testing.T) {
 func TestOnUsageEmptyIsNoReport(t *testing.T) {
 	s := sessionFor(t, minimalMeta, `onUsage(){ return {}; }`, sandbox.Host{}, sandbox.Limits{})
 	res := s.OnUsage(t.Context(), UsageContext{RequestID: "r1"})
-	if res.Failed() || res.Patch != nil {
+	if res.Failure != nil || res.Patch != nil {
 		t.Fatalf("res=%+v，期望「没有上报」", res)
 	}
 }
@@ -431,7 +431,7 @@ func TestOnUsageEmptyIsNoReport(t *testing.T) {
 func TestOnUsageReasoningScopeAloneIsAReport(t *testing.T) {
 	s := sessionFor(t, minimalMeta, `onUsage(){ return { completionIncludesReasoning: true }; }`, sandbox.Host{}, sandbox.Limits{})
 	res := s.OnUsage(t.Context(), UsageContext{RequestID: "r1"})
-	if res.Failed() {
+	if res.Failure != nil {
 		t.Fatalf("不该失败: %v", res.Failure)
 	}
 	if res.Patch == nil || res.Patch.CompletionIncludesReasoning == nil || !*res.Patch.CompletionIncludesReasoning {

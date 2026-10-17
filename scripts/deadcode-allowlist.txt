@@ -66,11 +66,14 @@
 # ⚠️ **在这一片包上，「报告里没有」不再等于「已经接上」。** `contractFieldNames`
 # 里那句 `reflect.TypeOf` 随 #262 变成可达之后，RTA 的反射过近似生效：`internal/plugin`
 # 里凡是「运行时类型的方法」一律被判成可达，`deadcode -whylive` 对它们一律回
-# `reachable only through reflection`，没有静态调用路径。所以下面这几类符号是
+# `reachable only through reflection`，没有静态调用路径。所以有一类符号是
 # **在报告里消失、而实际没有接线**的：`Session.OnStream` / `Session.OnUsage`
-# （#264 的缺口）、`Registry.Get`、`Result.Failed`
-# 一类没有生产调用方的方法。删掉它们是对的——白名单要跟的是 deadcode 的输出，
-# 不是「已知缺口」的账本（那个账本在 issue 里）——但要清楚删掉不等于接上了。
+# （#264 的缺口）、`Registry.Get` 一类没有生产调用方的方法。
+# 删掉它们是对的——白名单要跟的是 deadcode 的输出，不是「已知缺口」的账本
+#（那个账本在 issue 里）——但要清楚删掉不等于接上了。
+#
+# **举例子别用已经被删掉的符号**：这一段原先点的是 `Result.Failed`，
+# 而它随 #282 的第二批真的删掉了，注释里就留下一个不存在的方法。
 #
 # 判据：`deadcode -whylive` 对某条回 `reachable only through reflection` 时，
 # 「它可达」是分析器的近似，不是有人调了它。这与「有门与没门在输出上长得一样」

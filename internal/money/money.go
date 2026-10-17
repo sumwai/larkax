@@ -290,6 +290,8 @@ func MulFloat(a Amount, factor float64) Amount {
 
 // DivInt 除以一个整数。零除返回零而不是 panic——
 // 它来自「数量为 0」这类平凡情况，不该让进程挂掉。
+//
+// 目前只有测试在调它：金额库的运算面，这一档还没有生产调用方。
 func (a Amount) DivInt(n int64) Amount {
 	if n == 0 {
 		return Zero
@@ -372,6 +374,8 @@ func Max(a, b Amount) Amount {
 }
 
 // ClampZero 把负值夹到零。用于「不该为负但可能算成负」的中间结果。
+//
+// 目前只有测试在调它：金额库的运算面，这一档还没有生产调用方。
 func (a Amount) ClampZero() Amount {
 	if a.units < 0 {
 		return Zero
