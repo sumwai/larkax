@@ -19,7 +19,8 @@ import (
 
 // 语法错误必须在编译期被拒，而且错误里要带文件与行列——
 // 插件作者拿到「编译失败」而不知道哪一行时，只能靠猜。
-func Test语法错误报出文件与行列(t *testing.T) {
+// 语法错误报出文件与行列。
+func TestSyntaxErrorReportsFileLineAndColumn(t *testing.T) {
 	_, err := Compile("bad.js", "export default {\n  onRequest(x { return 1; }\n};\n")
 	if err == nil {
 		t.Fatal("语法错误的源码应该编译失败")
@@ -42,7 +43,8 @@ func Test语法错误报出文件与行列(t *testing.T) {
 // 插件只能从虚拟 SDK "larkax" 导入。`node:fs` 这种说明符必须在**链接期**就被
 // resolver 拒掉，而不是等运行时拿到一个 undefined。
 // 这条钉住「关掉文件系统与网络」是在编译期完成的。
-func Test只放行虚拟SDK的导入(t *testing.T) {
+// 只放行虚拟SDK的导入。
+func TestOnlyVirtualSDKImportsAreAllowed(t *testing.T) {
 	_, err := Compile("imp.js", "import fs from \"node:fs\";\nexport default { onRequest() {} };\n")
 	if err == nil {
 		t.Fatal("从 node:fs 导入应当失败")
@@ -66,7 +68,8 @@ func Test只放行虚拟SDK的导入(t *testing.T) {
 }
 
 // 虚拟 SDK 本身必须能导入，否则插件写什么都编译不过。
-func Test导入虚拟SDK成功(t *testing.T) {
+// 导入虚拟SDK成功。
+func TestImportingVirtualSDKSucceeds(t *testing.T) {
 	src := "import { definePlugin } from \"larkax\";\nexport default definePlugin({ onRequest() {} });\n"
 	m, err := Compile("ok.js", src)
 	if err != nil {
@@ -79,7 +82,8 @@ func Test导入虚拟SDK成功(t *testing.T) {
 
 // SDK 的导出就是插件的**契约面**：能力清单变了，这里会先动。
 // 多出名字意味着插件多了一条宿主没想到的路。
-func Test虚拟SDK的导出面(t *testing.T) {
+// 虚拟SDK的导出面。
+func TestVirtualSDKExportSurface(t *testing.T) {
 	sm, err := sdk()
 	if err != nil {
 		t.Fatalf("虚拟 SDK 应当能编译: %v", err)
@@ -98,7 +102,8 @@ func Test虚拟SDK的导出面(t *testing.T) {
 
 // 没有 export default 时要报出专门的那一种错误，而不是「找不到 onRequest」——
 // 后者会把插件作者引到错误的方向上去。
-func Test没有默认导出报ErrNoDefaultExport(t *testing.T) {
+// 没有默认导出报ErrNoDefaultExport。
+func TestMissingDefaultExportReturnsErrNoDefaultExport(t *testing.T) {
 	_, err := Compile("p", "export const meta = { name: \"x\" };\n")
 	if err == nil {
 		t.Fatal("没有 export default 应当编译失败")
@@ -110,7 +115,8 @@ func Test没有默认导出报ErrNoDefaultExport(t *testing.T) {
 
 // 有 export default 但一个 hook 都没导出，同样要失败：
 // 这种插件会被注册、每次请求跑一遍、然后什么都不做，没人看得出来。
-func Test有默认导出但没有hook时报错(t *testing.T) {
+// 有默认导出但没有hook时报错。
+func TestDefaultExportWithoutHooksIsAnError(t *testing.T) {
 	_, err := Compile("p", "export default { wat() {} };\n")
 	if err == nil {
 		t.Fatal("一个 hook 都没有应当编译失败")
@@ -123,7 +129,8 @@ func Test有默认导出但没有hook时报错(t *testing.T) {
 // export default 存在但不是对象（数字、null、函数）时，
 // 它的成员一个都不是函数，等价于「没有 hook」。
 // 这条钉住这类插件不会被误判成「合法但什么都不做」。
-func Test默认导出不是对象时也按没有hook处理(t *testing.T) {
+// 默认导出不是对象时也按没有hook处理。
+func TestNonObjectDefaultExportCountsAsNoHooks(t *testing.T) {
 	for _, src := range []string{
 		"export default 42;",
 		"export default null;",
@@ -142,7 +149,8 @@ func Test默认导出不是对象时也按没有hook处理(t *testing.T) {
 
 // hook 名来自真实的求值（rt.Has），不是「成员键存在」。
 // 注意 moejs 的 Hook() 对任何成员名都解析成功，所以编译期就用它做判据会出错。
-func TestHook名的判定来自实际求值(t *testing.T) {
+// Hook名的判定来自实际求值。
+func TestHookNamesComeFromActualEvaluation(t *testing.T) {
 	m, err := Compile("p", "export default { onUsage() {}, onRequest: 42 };\n")
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +169,8 @@ func TestHook名的判定来自实际求值(t *testing.T) {
 
 // Hooks() 与 Has() 必须一致，且返回的切片是副本——
 // 调用方改它不该改到 Module 自己的状态。
-func TestHooks与Has一致且返回副本(t *testing.T) {
+// Hooks与Has一致且返回副本。
+func TestHooksAgreesWithHasAndReturnsACopy(t *testing.T) {
 	m, err := Compile("p", "export default { onUsage() {}, onStream() {} };\n")
 	if err != nil {
 		t.Fatal(err)
@@ -189,7 +198,8 @@ func TestHooks与Has一致且返回副本(t *testing.T) {
 // 插件只返回部分字段时，没返回的字段必须保持零值，指针字段保持 nil——
 // 这是「没给」与「给了零」的唯一区分方式。
 // 上游靠它决定「要不要动这次请求的参数」，把没给当成给了零会静默改掉默认值。
-func Test部分字段保持零值且指针为nil(t *testing.T) {
+// 部分字段保持零值且指针为nil。
+func TestOmittedFieldsStayZeroAndPointersStayNil(t *testing.T) {
 	m, err := Compile("p", "export default { onRequest() { return { temperature: 0.5, max_tokens: 0 }; } };\n")
 	if err != nil {
 		t.Fatal(err)
@@ -228,7 +238,8 @@ func Test部分字段保持零值且指针为nil(t *testing.T) {
 
 // 显式返回 null 与「没返回」都落到指针 nil——这是同一件事：
 // 两者在 JSON 语义上都是「这里没有值」。
-func Test返回null与没返回都得到nil指针(t *testing.T) {
+// 返回null与没返回都得到nil指针。
+func TestReturningNullAndNothingBothYieldNilPointer(t *testing.T) {
 	m, err := Compile("p", "export default { onRequest() { return { temperature: null }; } };\n")
 	if err != nil {
 		t.Fatal(err)
@@ -257,7 +268,8 @@ func Test返回null与没返回都得到nil指针(t *testing.T) {
 // 插件什么都不返回（undefined / null / 空 return）是合法的：
 // 大多数 hook 只在自己的条件下才给出补丁。
 // 这条同时钉住「out 完全不被改动」——半截写入比不写更危险。
-func Test什么都不返回时不改动出参(t *testing.T) {
+// 什么都不返回时不改动出参。
+func TestReturningNothingLeavesOutUntouched(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() { return; },
@@ -294,7 +306,8 @@ export default {
 
 // 插件返回的值解不进出参结构体时是**契约违规**，与「插件抛异常」不是一回事：
 // 前者说明插件理解错了返回值形状，上层的处置不同。
-func Test返回值类型不符是契约违规(t *testing.T) {
+// 返回值类型不符是契约违规。
+func TestWrongReturnTypeIsAContractViolation(t *testing.T) {
 	m, err := Compile("p", "export default { onRequest() { return { max_tokens: \"不是数字\" }; } };\n")
 	if err != nil {
 		t.Fatal(err)
@@ -327,7 +340,8 @@ func Test返回值类型不符是契约违规(t *testing.T) {
 }
 
 // 插件抛异常与返回坏值是两种失败，靠 errors.Is 分得开。
-func Test插件抛异常是另一种失败(t *testing.T) {
+// 插件抛异常是另一种失败。
+func TestPluginThrowIsADistinctFailure(t *testing.T) {
 	m, err := Compile("p", "export default { onRequest() { throw new TypeError(\"炸了\"); } };\n")
 	if err != nil {
 		t.Fatal(err)
@@ -359,7 +373,8 @@ func Test插件抛异常是另一种失败(t *testing.T) {
 
 // 没导出的 hook 与不存在的名字都返回 nil：这是「插件不关心这个环节」，
 // 不是失败。上层因此可以无脑地对五个 hook 各调一次。
-func Test没导出的hook返回nil而不是失败(t *testing.T) {
+// 没导出的hook返回nil而不是失败。
+func TestUnimplementedHookReturnsNilNotFailure(t *testing.T) {
 	m, err := Compile("p", "export default { onUsage() { return {}; } };\n")
 	if err != nil {
 		t.Fatal(err)
@@ -393,7 +408,8 @@ func Test没导出的hook返回nil而不是失败(t *testing.T) {
 // 默认全局里不能有网络、文件、进程、定时器、终端。
 // 这条是硬约束：多一个名字就多一条插件能绕开宿主的路。
 // 「有 Date」是刻意的（日历类插件要用它），所以不在这里断言它不存在。
-func Test默认全局没有危险的名字(t *testing.T) {
+// 默认全局没有危险的名字。
+func TestDefaultGlobalsHaveNoDangerousNames(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -430,7 +446,8 @@ export default {
 
 // 有 Date 是刻意的：日历类能力要按本地时间判断，插件自己也要能读时间。
 // 单独钉一条，免得将来有人为了「更严的沙箱」把它一起关掉。
-func Test默认全局有Date(t *testing.T) {
+// 默认全局有Date。
+func TestDefaultGlobalsHaveDate(t *testing.T) {
 	m, err := Compile("p", `export default { onRequest() { return { d: typeof Date, n: typeof Date.now }; } };`)
 	if err != nil {
 		t.Fatal(err)
@@ -453,7 +470,8 @@ func Test默认全局有Date(t *testing.T) {
 // import.meta 是一个**空对象**，既没有 url 也没有别的字段。
 // 宿主没给 Options.Importer，所以任何一个 url 都是空的。
 // 这条钉住「插件拿 import.meta 读不出任何东西」，别让人以为它能带信息进来。
-func TestImportMeta是空对象(t *testing.T) {
+// ImportMeta是空对象。
+func TestImportMetaIsAnEmptyObject(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -489,10 +507,11 @@ export default {
 	}
 }
 
-// 静态 import 在链接期被 resolver 挡住（见 Test只放行虚拟SDK的导入），
+// 静态 import 在链接期被 resolver 挡住（见 TestOnlyVirtualSDKImportsAreAllowed），
 // 动态 import() 走的是另一条路：Options.Importer 没设时，**任何** specifier
 // 都被拒——包括虚拟 SDK 自己。这条钉住「动态导入不是绕过静态检查的口子」。
-func Test动态import任何说明符都被拒(t *testing.T) {
+// 动态import任何说明符都被拒。
+func TestDynamicImportRejectsEverySpecifier(t *testing.T) {
 	for _, spec := range []string{`"node:fs"`, `"larkax"`} {
 		// 结果记在模块变量里：async hook 的返回值会被解成空对象，
 		// 而 .then 的回调在 Call 返回前就跑了（moejs 会把 job 跑完）。
@@ -530,7 +549,8 @@ export default { onRequest() { return { 结果: 结果 }; } };
 //
 // 契约里顶层 await 与异步 hook 都不支持，所以这里直接拒绝，
 // 而不是等那个 Promise 落地（宿主不驱动 job 队列，等也等不到）。
-func Test异步hook被显式拒绝(t *testing.T) {
+// 异步hook被显式拒绝。
+func TestAsyncHookIsRejectedExplicitly(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   async onRequest() { return { temperature: 0.5 }; },
@@ -575,7 +595,8 @@ export default {
 // DisableDynamicCode 让 eval 与 Function 构造器直接抛 EvalError。
 // 插件源码在编译期就解析完了，运行时不需要动态生成代码；
 // 关掉它意味着插件不能靠拼字符串绕过任何东西。
-func TestEval与Function构造器被关掉(t *testing.T) {
+// Eval与Function构造器被关掉。
+func TestEvalAndFunctionConstructorAreDisabled(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -610,7 +631,8 @@ export default {
 // 内建原型被深度冻结并跨 runtime 共享，写它抛 TypeError。
 // 更要紧的是第二个 runtime 看到的原型是**干净的**：
 // 冻结把「一个插件污染所有插件」这条路堵死了。
-func Test内建原型被冻结且跨runtime保持干净(t *testing.T) {
+// 内建原型被冻结且跨runtime保持干净。
+func TestBuiltinPrototypesAreFrozenAndStayCleanAcrossRuntimes(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -653,7 +675,8 @@ export default {
 // 插件不该有任何渠道密钥。这一层根本不往插件里放密钥，
 // 所以这里断言的是「能力面里没有任何形如密钥的名字」——
 // 上层如果哪天往 Host.Capabilities 里塞了一个 credential，这条会先响。
-func Test能力面里没有任何形如密钥的名字(t *testing.T) {
+// 能力面里没有任何形如密钥的名字。
+func TestCapabilitySurfaceHasNoSecretLikeNames(t *testing.T) {
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -715,7 +738,8 @@ export default {
 
 // Compile 求值一次模块顶层，把 export const meta 读成 map[string]any。
 // 嵌套的数组与对象也要读出来，否则上层拿到的是一半信息。
-func TestMeta读出嵌套结构(t *testing.T) {
+// Meta读出嵌套结构。
+func TestMetaReadsNestedStructure(t *testing.T) {
 	m, err := Compile("p", `
 export const meta = {
   name: "示例",
@@ -766,7 +790,8 @@ export default { onRequest() {} };
 
 // 没有 export const meta 时返回 nil，不是错误：
 // 「meta 必需」是上层要决定的事，这一层只如实回答有没有。
-func Test没有meta时返回nil(t *testing.T) {
+// 没有meta时返回nil。
+func TestMissingMetaReturnsNil(t *testing.T) {
 	m, err := Compile("p", "export default { onRequest() {} };\n")
 	if err != nil {
 		t.Fatal(err)
@@ -778,7 +803,8 @@ func Test没有meta时返回nil(t *testing.T) {
 
 // meta 不是对象时是编译错误。这里要把三种形态分开：
 // 字符串/数字/数组都不行，而 null 与 undefined 等价于「没有 meta」。
-func TestMeta不是对象时报错(t *testing.T) {
+// Meta不是对象时报错。
+func TestNonObjectMetaIsAnError(t *testing.T) {
 	for _, src := range []string{`"就是个字符串"`, `42`, `[1, 2]`, `true`} {
 		_, err := Compile("p", "export const meta = "+src+";\nexport default { onRequest() {} };\n")
 		if err == nil {
@@ -812,7 +838,8 @@ func TestMeta不是对象时报错(t *testing.T) {
 // 这条是全包最慢的一条：要等满 inspectTimeout（界是常量，没法从外面调短）。
 // 它值这个时间——「界还在不在」正是它要钉的东西：去掉那个 AfterFunc，
 // Compile 就不会在这个窗口内返回了。
-func TestMeta里的死循环报的是超时而不是形状错(t *testing.T) {
+// Meta里的死循环报的是超时而不是形状错。
+func TestInfiniteLoopInMetaReportsTimeoutNotShapeError(t *testing.T) {
 	type 结果 struct {
 		m   *Module
 		err error
@@ -852,7 +879,8 @@ export default { onRequest() { return {}; } };
 // Meta 只返回编译期读出来的快照，不执行任何 hook。
 // 用一个「被调用就抛异常」的 hook 来钉：Compile 之后 Meta 照样能读到值，
 // 而且新 runtime 里的计数器仍是 0，说明 hook 一次都没跑过。
-func Test读Meta不执行任何hook(t *testing.T) {
+// 读Meta不执行任何hook。
+func TestReadingMetaRunsNoHooks(t *testing.T) {
 	m, err := Compile("p", `
 let 调用次数 = 0;
 export const meta = { name: "x" };
@@ -888,7 +916,8 @@ export default {
 // Module 是不可变的：一份 Module 被多个 goroutine 各自 NewRuntime 并 Call，
 // 结果各自正确。Runtime 才是必须独占的那个。
 // 配 -race 跑，这条才真正有价值。
-func TestModule可被多个goroutine并发使用(t *testing.T) {
+// Module可被多个goroutine并发使用。
+func TestModuleIsSafeForConcurrentGoroutines(t *testing.T) {
 	m, err := Compile("p", `
 import { definePlugin } from "larkax";
 export default definePlugin({
@@ -940,7 +969,8 @@ export default definePlugin({
 }
 
 // Meta 与 Compile 也是并发安全的：Module 里缓存的是不可变快照。
-func TestMeta与NewRuntime可并发调用(t *testing.T) {
+// Meta与NewRuntime可并发调用。
+func TestMetaAndNewRuntimeAreSafeToCallConcurrently(t *testing.T) {
 	m, err := Compile("p", `
 export const meta = { name: "并发" };
 export default { onRequest() { return { ok: true }; } };
