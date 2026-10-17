@@ -23,9 +23,6 @@ type Charges struct {
 	Minimum money.Amount
 }
 
-// IsZero 判断是否没有任何一次性费用。
-func (c Charges) IsZero() bool { return c.Fixed.IsZero() && c.Minimum.IsZero() }
-
 // Validate 检查一次性费用是否合法。
 func (c Charges) Validate() error {
 	if c.Fixed.IsNegative() {

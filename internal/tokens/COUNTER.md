@@ -44,24 +44,22 @@ for ev := range events {
         est.ObserveDelta(ev.Text)
     case "tool_use":
         est.ObserveToolCall(ev.ToolCall.ID, ev.ToolCall.Name, ev.ToolCall.Arguments)
-    case "usage":
-        est.ObserveMeasured(tokens.Count{Tokens: ev.Usage.PromptTokens + ev.Usage.CompletionTokens})
-    case "done":
-        est.ObserveDone()
     }
 }
 u := est.Result()
-if u.RequiresReview() {
-    // 输出侧是估算值且量不小，值得人工看一眼
-}
 ```
 
 流式调用必须走 `StreamEstimator`：**上游的 usage 只在最后一个分片里返回**，
 客户端中途断开时那一片永远不会到达，而费用已经产生。
 
-`Result()` 返回的 `Usage` 有 `Complete` 字段：为 `false` 表示输出侧是本地
-算的（断开、报错、或上游结束但没带 usage），这笔账要按估算处理。
-`RequiresReview()` 进一步筛出「估算值且量不小」的那些。
+它只负责「拿不到上游实测 usage」那一半。上游在流里报了 usage 时不经过它：
+实测值优先那条判据由调用方持有（`internal/gateway/stream.go` 的 `streamUsage`），
+因为流里的 usage 分着输入与输出、还带缓存与推理的明细，而 `Count` 只有一个
+总数——压成一个数之后计费再也拆不回来。
+
+`Result()` 返回的 `Usage` 把输入与输出分成两个 `Count`：两者的来源可以不同
+（输入由 `ObserveRequest` 一次性给出，输出是逐片累加的），而累加过程中最不
+可信的那一段决定输出侧整体的来源。`Usage.Total()` 取两者中较不可信的那个。
 
 不需要维持一个累加器、只想问「这段文本大概多少 token」时，用
 `EstimatedTokens(model, text)` 或 `CountTextEstimated`。后者强制走估算，
@@ -92,11 +90,11 @@ Anthropic 的 `cache_creation` 还有 5m / 1h 拆分，它们**已经包含在**
 把它们放进 `UnitCounts`（`cache_write_5m` / `cache_write_1h`）而不是
 `PromptTokens`。
 
-上游已经给了权威数字（usage 字段、或 `count_tokens` 端点）时用
-`RecordMeasured`：它只负责打对来源标记。让调用方自己构造 `Count`
-等于把「别忘了标来源」交给每个调用点。**目前生产还没有走到它**——
-非流式与流式那两条路都在 `gateway` 里直接给 `SourceMeasured`，
-见 `internal/tokens/count.go` 上 `RecordMeasured` 的注释。
+上游已经给了权威数字（usage 字段、或 `count_tokens` 端点）时，来源标记由
+**拿到那个数字的那一层**打：本包不给它做一个「包成 `Count`」的入口——
+上游报的用量不是一个总数（见上文「缓存口径归一在哪」），而调用方手上
+本来就是 `channel.Usage`，它比 `Count` 宽。让调用方自己构造 `Count`
+只在「确实只有一个数」时才是对的，而那种上游今天不存在。
 
 ## 怎么改
 
@@ -254,8 +252,8 @@ Anthropic 不公开词表，本包拿不到任何可用于标定的真值。已�
 本包**只做计数与估算**，不做这些：
 
 - **不发网络请求**。Claude 那唯一精确的途径是上游的
-  `POST /v1/messages/count_tokens`，那由调用方发起，拿到结果后用
-  `RecordMeasured` 记录。本包不持有凭证也不该持有。
+  `POST /v1/messages/count_tokens`，那由调用方发起，拿到结果后自己标上
+  `SourceMeasured`。本包不持有凭证也不该持有。
 - **不算钱**。价格表与公式在 `internal/billing`。
 - **不碰数据库**。谁持久化这些数字由调用方决定。
 

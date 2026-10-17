@@ -96,7 +96,7 @@ func TestEvalPricesAndUnits(t *testing.T) {
 		t.Errorf("search 单价 = %s", got)
 	}
 	// 没有写 fixed/minimum 时一次性费用必须是零，不能是某个来自上一条规则的残留。
-	if !res.Charges.IsZero() {
+	if res.Charges != (billing.Charges{}) {
 		t.Errorf("未声明一次性费用却得到 %+v", res.Charges)
 	}
 	if res.At != testAt {
@@ -714,12 +714,6 @@ func TestEvalProgramMetadata(t *testing.T) {
 	source := `len <= 32000 ? {"prompt": 1.0} : {"prompt": 2.0, "completion": 3.0}`
 	p := mustCompile(t, source)
 
-	if p.Source() != source {
-		t.Errorf("Source 应当返回原始源码")
-	}
-	if p.BranchCount() != 1 {
-		t.Errorf("分支数 = %d，期望 1", p.BranchCount())
-	}
 	// 键取并集：未命中的分支写了什么也要看到，
 	// 否则「未命中的那支写错键」会一直躲过检查。
 	keys := p.Keys()

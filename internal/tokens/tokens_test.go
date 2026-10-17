@@ -254,21 +254,6 @@ func TestCountAddTakesLessTrustedSource(t *testing.T) {
 	}
 }
 
-func TestRecordMeasured(t *testing.T) {
-	// 上游实测值是权威数字，本包只负责打对来源标记——
-	// 让调用方自己构造 Count 等于把「别忘了标来源」交给每个调用点。
-	got, err := RecordMeasured("gpt-4o", 42)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Source != SourceMeasured || got.Tokens != 42 {
-		t.Errorf("RecordMeasured = %+v", got)
-	}
-	if _, err := RecordMeasured("gpt-4o", -1); err == nil {
-		t.Error("负的实测值应报错")
-	}
-}
-
 func TestSourceIsExact(t *testing.T) {
 	if !SourceMeasured.IsExact() {
 		t.Error("实测值应可与上游对账")

@@ -748,9 +748,6 @@ func TestChargesRejectNegative(t *testing.T) {
 	if err := (Charges{Minimum: money.MustParse("-1")}).Validate(); err == nil {
 		t.Error("负最低消费应被拒绝")
 	}
-	if !(Charges{}).IsZero() {
-		t.Error("零值应为空")
-	}
 }
 
 // 不传一次性费用时，行为必须与之前完全一致。
