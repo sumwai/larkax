@@ -212,56 +212,6 @@ func TestEstimateWithinBounds(t *testing.T) {
 	}
 }
 
-// TestNormalizeCacheAccountingDoubleBilling 用真实的 relaykit 转换路径
-// 复现各家的 usage，确认归一后不会重复计费。
-//
-// 这是本包最容易出、也最难发现的一类错误：口径写反不报错，
-// 只让账单悄悄变高。
-func TestNormalizeCacheAccountingDoesNotDoubleBill(t *testing.T) {
-	// 同一个逻辑请求，两家按各自的口径上报。归一之后**总量必须一致**。
-	// 这是这套归一函数的全部意义所在：口径写反了不会报错，
-	// 只会让某一家的账单悄悄变高。
-	//
-	// 请求的真实构成：非缓存输入 1000，命中缓存 8000。
-	//
-	// Anthropic 分开报：input_tokens 不含缓存。
-	anthropic, err := Normalize(RawUsage{
-		Upstream:             UpstreamAnthropic,
-		InputTokens:          i64(1000),
-		CacheReadInputTokens: i64(8000),
-		OutputTokens:         i64(200),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// OpenAI 报总量：prompt_tokens 已含缓存。
-	openai, err := Normalize(RawUsage{
-		Upstream:         UpstreamOpenAI,
-		PromptTokens:     i64(9000),
-		CachedTokens:     i64(8000),
-		CompletionTokens: i64(200),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if anthropic.PromptTokens != openai.PromptTokens {
-		t.Errorf("归一后输入总量不一致: Anthropic %d, OpenAI %d（应为同一个数）",
-			anthropic.PromptTokens, openai.PromptTokens)
-	}
-	if anthropic.CacheReadTokens != openai.CacheReadTokens {
-		t.Errorf("缓存读取不一致: %d vs %d", anthropic.CacheReadTokens, openai.CacheReadTokens)
-	}
-	if anthropic.PromptTokens != 9000 {
-		t.Errorf("输入 = %d, 期望 9000", anthropic.PromptTokens)
-	}
-	// 非缓存输入也要一致，它是缓存单价与普通单价的分界。
-	const anthropicNonCached = 1000
-	if oa := openai.PromptTokens - openai.CacheReadTokens; oa != anthropicNonCached {
-		t.Errorf("非缓存输入不一致: %d vs %d", anthropicNonCached, oa)
-	}
-}
-
 // TestEstimateJSONIsNotWildlyOff 用几个真实的请求体回看估算式。
 // 这类输入（工具定义、参数）在 agent 场景里占比很高。
 func TestEstimateJSONIsNotWildlyOff(t *testing.T) {
@@ -351,7 +301,6 @@ func TestStreamEstimatorModelPropagates(t *testing.T) {
 var (
 	_ fmt.Stringer = Source(0)
 	_ fmt.Stringer = Count{}
-	_ fmt.Stringer = Upstream(0)
 )
 
 func TestCountStringIncludesSource(t *testing.T) {

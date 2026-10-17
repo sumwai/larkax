@@ -570,6 +570,239 @@ func TestUsageCacheCreationSplit(t *testing.T) {
 	}
 }
 
+// 没有 5m/1h 拆分时 UnitCounts 应当是 nil 而不是空 map：空 map 会被
+// 序列化成 {}，在账上看起来像「报了拆分但每一项都是 0」。
+func TestUsageUnitCountsNilWithoutSplit(t *testing.T) {
+	got := UsageFromRelaykit(&dto.Usage{PromptTokens: 1})
+	if got.UnitCounts != nil {
+		t.Errorf("没有 5m/1h 拆分时 UnitCounts 应为 nil, 得到 %v", got.UnitCounts)
+	}
+}
+
+// 口径由**声明出来的** UsageSemantic 决定，不由数字反推。
+//
+// 五条各一个取值。同一个逻辑请求（非缓存输入 1000、命中缓存 8000、输出 200）
+// 按两家口径各报一次，归一之后必须落到同一组数——这是这套换算的全部意义
+// 所在：口径写反了不会报错，只会让某一家的账单悄悄变高。
+//
+// 五个取值里 anthropic 是唯一需要补缓存的；openai / gemini / 空 / 未知
+// 走同一条路（默认分支），各自单列一行是为了把「这几个取值都归到
+// 「已含缓存」那一类」这件事写成断言，而不是留在注释里。
+func TestUsageSemanticDecidesCacheAccounting(t *testing.T) {
+	cases := []struct {
+		name      string
+		semantic  string
+		usage     *dto.Usage
+		wantProm  int64
+		wantRead  int64
+		wantWrite int64
+	}{
+		{
+			name:     "openai：prompt_tokens 已含缓存，不能再加",
+			semantic: dto.BillingUsageSemanticOpenAI,
+			usage: &dto.Usage{
+				PromptTokens:        9000,
+				CompletionTokens:    200,
+				PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 8000},
+			},
+			wantProm: 9000, wantRead: 8000, wantWrite: 0,
+		},
+		{
+			name:     "anthropic：PromptTokens 是 input_tokens，不含缓存，要补回来",
+			semantic: dto.BillingUsageSemanticAnthropic,
+			usage: &dto.Usage{
+				PromptTokens:        1000,
+				CompletionTokens:    200,
+				PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 8000},
+			},
+			wantProm: 9000, wantRead: 8000, wantWrite: 0,
+		},
+		{
+			name:     "gemini：relaykit 折成这一形状时 prompt 已含 cachedContent",
+			semantic: dto.BillingUsageSemanticGemini,
+			usage: &dto.Usage{
+				PromptTokens:        9000,
+				CompletionTokens:    200,
+				PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 8000},
+			},
+			wantProm: 9000, wantRead: 8000, wantWrite: 0,
+		},
+		{
+			name:     "未声明：按 dto.Usage 的原生口径（OpenAI）读",
+			semantic: "",
+			usage: &dto.Usage{
+				PromptTokens:        9000,
+				CompletionTokens:    200,
+				PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 8000},
+			},
+			wantProm: 9000, wantRead: 8000, wantWrite: 0,
+		},
+		{
+			name:     "未知取值：同未声明，原值留在 Raw 里",
+			semantic: "bedrock",
+			usage: &dto.Usage{
+				PromptTokens:        9000,
+				CompletionTokens:    200,
+				PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 8000},
+			},
+			wantProm: 9000, wantRead: 8000, wantWrite: 0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.usage.UsageSemantic = tc.semantic
+			got := UsageFromRelaykit(tc.usage)
+			if got.PromptTokens != tc.wantProm {
+				t.Errorf("PromptTokens = %d，期望 %d", got.PromptTokens, tc.wantProm)
+			}
+			if got.CompletionTokens != 200 {
+				t.Errorf("CompletionTokens = %d，期望 200", got.CompletionTokens)
+			}
+			if got.CacheReadTokens != tc.wantRead || got.CacheWriteTokens != tc.wantWrite {
+				t.Errorf("缓存明细 = 读 %d / 写 %d，期望 读 %d / 写 %d",
+					got.CacheReadTokens, got.CacheWriteTokens, tc.wantRead, tc.wantWrite)
+			}
+			// 非缓存输入是缓存单价与普通单价的分界，两边都要落在 1000。
+			if nonCached := got.PromptTokens - got.CacheReadTokens - got.CacheWriteTokens; nonCached != 1000 {
+				t.Errorf("非缓存输入 = %d，期望 1000", nonCached)
+			}
+		})
+	}
+}
+
+// Anthropic 口径的缓存写入也分列，两个字段都要进 CacheWriteTokens，
+// 且都算进输入总量。
+func TestUsageAnthropicCacheWriteCounts(t *testing.T) {
+	got := UsageFromRelaykit(&dto.Usage{
+		PromptTokens:        1000,
+		PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 100, CachedCreationTokens: 200},
+		UsageSemantic:       dto.BillingUsageSemanticAnthropic,
+	})
+	if got.PromptTokens != 1300 {
+		t.Errorf("PromptTokens = %d，期望 1300（1000 + 100 + 200）", got.PromptTokens)
+	}
+	if got.CacheReadTokens != 100 || got.CacheWriteTokens != 200 {
+		t.Errorf("缓存明细 = 读 %d / 写 %d，期望 100 / 200", got.CacheReadTokens, got.CacheWriteTokens)
+	}
+}
+
+// 整段 prompt 命中缓存：Anthropic 的 input_tokens 就是 0。
+//
+// 这条**必须走 ResponseFromRelaykit**而不是直接调 UsageFromRelaykit：
+// 缺陷长在「调用方与被调用方各加一次缓存」的缝里，直接调后者会绕过
+// 调用方那次加法，两条用例各自都绿而缝还在（LESSONS.md 第 24 条）。
+func TestUsageAnthropicAllCachedPrompt(t *testing.T) {
+	src := &dto.ClaudeResponse{
+		Model: "m",
+		Usage: &dto.ClaudeUsage{
+			InputTokens:              0,
+			OutputTokens:             20,
+			CacheReadInputTokens:     30,
+			CacheCreationInputTokens: 10,
+		},
+	}
+	got, err := ResponseFromRelaykit(src)
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	if got.Usage.PromptTokens != 40 {
+		t.Errorf("PromptTokens = %d，期望 40（缓存读 30 + 缓存写 10，只加一次）",
+			got.Usage.PromptTokens)
+	}
+	if got.Usage.CacheReadTokens != 30 || got.Usage.CacheWriteTokens != 10 {
+		t.Errorf("缓存明细 = 读 %d / 写 %d，期望 30 / 10",
+			got.Usage.CacheReadTokens, got.Usage.CacheWriteTokens)
+	}
+	if got.Usage.CompletionTokens != 20 {
+		t.Errorf("CompletionTokens = %d，期望 20", got.Usage.CompletionTokens)
+	}
+}
+
+// 未声明口径时按 dto.Usage 的原生口径（OpenAI）读——但这件事要留在 Raw 里，
+// 否则事后分不出一笔用量是按声明的口径读的，还是按默认分支读的。
+func TestUsageSemanticMissingIsVisible(t *testing.T) {
+	got := UsageFromRelaykit(&dto.Usage{PromptTokens: 7})
+	if got.Raw["semantic_missing"] != true {
+		t.Errorf("未声明口径应在 Raw 里留痕: %+v", got.Raw)
+	}
+	if _, ok := got.Raw["semantic"]; ok {
+		t.Errorf("未声明口径时不该凭空写一个 semantic: %+v", got.Raw)
+	}
+}
+
+// 上游整条响应没带 usage 时也会缺声明，但那不是生产方的疏漏：
+// 一个数都没读到，就不存在「按哪个口径读」的问题。
+//
+// 两种缺声明都要能走到底，所以这条与上一条成对——只留一条的话，
+// 门槛写成「恒不打」或「恒打」都能通过。
+func TestUsageSemanticMissingNeedsCounts(t *testing.T) {
+	got := UsageFromRelaykit(&dto.Usage{})
+	if got.Raw["semantic_missing"] != nil {
+		t.Errorf("一个数都没读到，不该标 semantic_missing: %+v", got.Raw)
+	}
+	if got.PromptTokens != 0 || got.CompletionTokens != 0 {
+		t.Errorf("空用量应读成 0: %+v", got)
+	}
+}
+
+// 未知取值照 openai 读，而原值留在 Raw 里。
+//
+// 带上缓存是为了让分支可观测：按 openai 读是 7，误按 anthropic 读会是 10。
+func TestUsageUnknownSemanticIsVisible(t *testing.T) {
+	got := UsageFromRelaykit(&dto.Usage{
+		PromptTokens:        7,
+		PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 3},
+		UsageSemantic:       "bedrock",
+	})
+	if got.PromptTokens != 7 {
+		t.Errorf("PromptTokens = %d，期望 7（未知取值不该按 anthropic 补缓存）", got.PromptTokens)
+	}
+	if got.Raw["semantic"] != "bedrock" {
+		t.Errorf("未知取值应留在 Raw 里: %+v", got.Raw)
+	}
+	if _, ok := got.Raw["semantic_missing"]; ok {
+		t.Errorf("声明了取值（哪怕是未知的）就不该标 missing: %+v", got.Raw)
+	}
+}
+
+// 同一个逻辑请求按两家口径各报一次，归一之后必须落到同一组数。
+func TestUsageDialectsAgreeOnSameRequest(t *testing.T) {
+	// 真实构成：非缓存输入 1000、命中缓存 8000、输出 200。
+	anthropic := UsageFromRelaykit(&dto.Usage{
+		PromptTokens:        1000, // Anthropic 的 input_tokens 不含缓存
+		CompletionTokens:    200,
+		PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 8000},
+		UsageSemantic:       dto.BillingUsageSemanticAnthropic,
+	})
+	openai := UsageFromRelaykit(&dto.Usage{
+		PromptTokens:        9000, // OpenAI 的 prompt_tokens 已含缓存
+		CompletionTokens:    200,
+		PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 8000},
+		UsageSemantic:       dto.BillingUsageSemanticOpenAI,
+	})
+
+	if anthropic.PromptTokens != openai.PromptTokens {
+		t.Errorf("归一后输入总量不一致: Anthropic %d, OpenAI %d（应为同一个数）",
+			anthropic.PromptTokens, openai.PromptTokens)
+	}
+	if anthropic.PromptTokens != 9000 {
+		t.Errorf("输入 = %d, 期望 9000", anthropic.PromptTokens)
+	}
+	if anthropic.CacheReadTokens != openai.CacheReadTokens {
+		t.Errorf("缓存读取不一致: %d vs %d", anthropic.CacheReadTokens, openai.CacheReadTokens)
+	}
+	if anthropic.CompletionTokens != openai.CompletionTokens {
+		t.Errorf("输出不一致: %d vs %d", anthropic.CompletionTokens, openai.CompletionTokens)
+	}
+	// 非缓存输入也要一致，它是缓存单价与普通单价的分界。
+	for name, u := range map[string]channel.Usage{"anthropic": anthropic, "openai": openai} {
+		if nonCached := u.PromptTokens - u.CacheReadTokens - u.CacheWriteTokens; nonCached != 1000 {
+			t.Errorf("%s 的非缓存输入 = %d, 期望 1000", name, nonCached)
+		}
+	}
+}
+
 // ── 反向：relaykit → 本项目 ──────────────────────────────────────────────
 
 func TestFromRelaykitOpenAIRequest(t *testing.T) {

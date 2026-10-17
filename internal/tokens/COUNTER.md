@@ -65,27 +65,35 @@ if u.RequiresReview() {
 用途是上游换了词表而我们还没跟上时——一个基于过期词表的「精确」数字
 比明说是估算更危险。
 
-### 缓存口径归一
+### 缓存口径归一在哪
 
-`tokens.Normalize` 把各家上报的 usage 归一到 `channel.Usage`
-（`PromptTokens` **含**缓存，缓存明细另立字段）。三家口径互不相容：
+**不在本包。** 上游 usage → `channel.Usage`（`PromptTokens` **含**缓存，
+缓存明细另立字段）的换算只有一处实现：`internal/relay` 的
+`UsageFromRelaykit`。本包只做「一段文本有多少 token」，不认上游报的字段名。
 
-| 上游 | 输入总量 | 缓存字段 |
+三家口径互不相容，而写错的后果是重复计费或漏计：
+
+| 上游 / `UsageSemantic` | 输入总量 | 缓存字段 |
 |---|---|---|
-| OpenAI | `prompt_tokens`（**已含**缓存） | `prompt_tokens_details.cached_tokens` 是它的子集 |
-| Anthropic | `input_tokens` + `cache_read` + `cache_creation` | 分列，`input_tokens` **不含**缓存 |
-| DeepSeek | `prompt_cache_hit_tokens` + `prompt_cache_miss_tokens` | 分列 |
+| OpenAI（`openai`） | `prompt_tokens`（**已含**缓存） | `prompt_tokens_details.cached_tokens` 是它的子集 |
+| DeepSeek 一类（也走 `openai`） | 同上 | 只报 `prompt_cache_hit_tokens`，适配器把它填进 `cached_tokens` |
+| Anthropic（`anthropic`） | `input_tokens` + `cache_read` + `cache_creation` | 分列，`input_tokens` **不含**缓存 |
+| Gemini（`gemini`） | 同 OpenAI | 同 OpenAI；relaykit 侧的口径，本项目暂无适配器 |
 
-把 Anthropic 的缓存当成「额外的量」加两次、或把 OpenAI 的缓存再加一遍，
-都会重复计费，而它不会报错。`normalize_test.go` 里逐条固定了这三个口径。
+哪一家成立由上游声明的 `dto.Usage.UsageSemantic` 决定，不由数字反推——
+整段 prompt 命中缓存时 Anthropic 的 `input_tokens` 就是 0。逐条口径与
+依据写在 `UsageFromRelaykit` 的注释里。
 
 Anthropic 的 `cache_creation` 还有 5m / 1h 拆分，它们**已经包含在**
-`cache_creation_input_tokens` 里，只影响单价、不进总量——所以走
-`CacheWriteDetail` 而不是 `Normalize`。
+`cache_creation_input_tokens` 里，只影响单价、不进总量——`UsageFromRelaykit`
+把它们放进 `UnitCounts`（`cache_write_5m` / `cache_write_1h`）而不是
+`PromptTokens`。
 
 上游已经给了权威数字（usage 字段、或 `count_tokens` 端点）时用
 `RecordMeasured`：它只负责打对来源标记。让调用方自己构造 `Count`
-等于把「别忘了标来源」交给每个调用点。
+等于把「别忘了标来源」交给每个调用点。**目前生产还没有走到它**——
+非流式与流式那两条路都在 `gateway` 里直接给 `SourceMeasured`，
+见 `internal/tokens/count.go` 上 `RecordMeasured` 的注释。
 
 ## 怎么改
 

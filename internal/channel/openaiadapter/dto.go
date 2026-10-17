@@ -150,9 +150,11 @@ func (m openAIMessage) toRelaykit() dto.Message {
 }
 
 func (u openAIUsage) toRelaykit() *dto.Usage {
+	// 用 relaykit 自己的常量而不是字面量：这两个值是**它**的口径标识，
+	// 写死了将来它改值我们不知道。同一条约定见 internal/relay/response.go。
 	out := &dto.Usage{
-		UsageSource:   "oai_chat",
-		UsageSemantic: "openai",
+		UsageSource:   dto.BillingUsageSourceOAIChat,
+		UsageSemantic: dto.BillingUsageSemanticOpenAI,
 	}
 	if u.PromptTokens != nil {
 		out.PromptTokens = *u.PromptTokens
@@ -168,12 +170,15 @@ func (u openAIUsage) toRelaykit() *dto.Usage {
 	if u.PromptCacheHitTokens != nil {
 		out.PromptCacheHitTokens = *u.PromptCacheHitTokens
 	}
+	// 回退这一支必须在 PromptTokensDetails != nil **之外**：只报
+	// prompt_cache_hit_tokens 的上游连 prompt_tokens_details 都不发，
+	// 写在里面等于永远走不到，那几个 token 会按普通输入价计费。
+	if d := u.PromptTokensDetails; d != nil && d.CachedTokens != nil {
+		out.PromptTokensDetails.CachedTokens = *d.CachedTokens
+	} else if u.PromptCacheHitTokens != nil {
+		out.PromptTokensDetails.CachedTokens = *u.PromptCacheHitTokens
+	}
 	if d := u.PromptTokensDetails; d != nil {
-		if d.CachedTokens != nil {
-			out.PromptTokensDetails.CachedTokens = *d.CachedTokens
-		} else if u.PromptCacheHitTokens != nil {
-			out.PromptTokensDetails.CachedTokens = *u.PromptCacheHitTokens
-		}
 		if d.CachedCreationTokens != nil {
 			out.PromptTokensDetails.CachedCreationTokens = *d.CachedCreationTokens
 		}

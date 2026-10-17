@@ -685,66 +685,6 @@ func TestChatStreamCommitsOnceEventsReturned(t *testing.T) {
 	}
 }
 
-// WrapStreamStarted 让调用方能判断「失败发生在吐字之后吗」。
-// 这个判断不该由每个调用点自己数——漏掉一处就会产生一次不该发生的重试。
-func TestWrapStreamStartedTracksOutput(t *testing.T) {
-	cases := []struct {
-		name    string
-		events  []channel.StreamEvent
-		started bool
-	}{
-		{"只有 done", []channel.StreamEvent{{Kind: "done"}}, false},
-		{"只有 usage", []channel.StreamEvent{{Kind: "usage"}}, false},
-		{"有 delta", []channel.StreamEvent{{Kind: "delta", Text: "x"}}, true},
-		{"有 tool_use", []channel.StreamEvent{{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{}}}, true},
-		{"先 delta 后 error", []channel.StreamEvent{
-			{Kind: "delta", Text: "x"},
-			{Kind: "error", Err: errors.New("断了")},
-		}, true},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			in := make(chan channel.StreamEvent, len(tc.events))
-			for _, ev := range tc.events {
-				in <- ev
-			}
-			close(in)
-
-			out, started := WrapStreamStarted(in)
-			for range out {
-			}
-			if got := started(); got != tc.started {
-				t.Errorf("started() = %v，期望 %v", got, tc.started)
-			}
-		})
-	}
-}
-
-// 包一层不该丢掉任何事件，也不该改变顺序。
-func TestWrapStreamStartedPassesEventsThrough(t *testing.T) {
-	in := make(chan channel.StreamEvent, 3)
-	want := []string{"delta", "usage", "done"}
-	for _, k := range want {
-		in <- channel.StreamEvent{Kind: k}
-	}
-	close(in)
-
-	out, _ := WrapStreamStarted(in)
-	var got []string
-	for ev := range out {
-		got = append(got, ev.Kind)
-	}
-	if len(got) != len(want) {
-		t.Fatalf("事件数 = %d，期望 %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("第 %d 个事件 = %q，期望 %q", i, got[i], want[i])
-		}
-	}
-}
-
 // ── 变异测试补的用例 ────────────────────────────────────────────────────
 //
 // 来自变异测试（gremlins unleash）：`internal/route` 的 Test efficacy 是

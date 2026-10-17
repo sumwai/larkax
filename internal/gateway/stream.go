@@ -123,6 +123,16 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 		measured *channel.Usage
 		// started 表示已经向客户端吐过内容。它决定中途失败是「换个渠道
 		// 重来」还是「如实告诉客户端被截断」。
+		//
+		// 判据（delta 与 tool_use 都算「已经吐过字」）**只有这一处**：
+		// 本文件是唯一消费路由事件流的地方，而它本来就在这个 for/switch 里
+		// 做别的事（累加估算、记 measured、判 done），判据留在这里不需要
+		// 多一层通道与 goroutine。
+		//
+		// 将来若出现第二个消费点，要抽的是**一个共享的谓词函数**
+		// （「这个事件算不算已经吐字」），不是包一层通道——包一层只是把
+		// 「每个调用点都数一遍」换成「每个调用点都包一层」，
+		// 漏一处的后果一模一样。
 		started bool
 		// done 表示上游给了结束标记（[DONE] / message_stop）。
 		done bool

@@ -5,21 +5,9 @@ import (
 	"testing"
 )
 
-func TestUpstreamStringDefaultBranch(t *testing.T) {
-	if got := Upstream(9).String(); got == "" {
-		t.Error("未知 Upstream 的 String 不该返回空串")
-	}
-}
-
 func TestSourceStringDefaultBranch(t *testing.T) {
 	if got := Source(9).String(); got == "" {
 		t.Error("未知 Source 的 String 不该返回空串")
-	}
-}
-
-func TestCacheWriteDetailEmpty(t *testing.T) {
-	if got := CacheWriteDetail(RawUsage{Upstream: UpstreamAnthropic}); got != nil {
-		t.Errorf("没有 5m/1h 拆分时应返回 nil, 得到 %v", got)
 	}
 }
 
