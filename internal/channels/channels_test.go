@@ -377,7 +377,7 @@ func TestQuotaDrainedWithNullRemainingIsZero(t *testing.T) {
 	}
 
 	// 这条映射存在的唯一目的就是让 route 排除它，所以直接断言结果。
-	if reason := (&route.Candidate{Quota: q}).DrainReason(); reason == "" {
+	if _, reason := (&route.Candidate{Quota: q}).DrainReason(); reason == "" {
 		t.Error("drained 的渠道应被 DrainReason 排除")
 	}
 }
@@ -398,7 +398,7 @@ func TestQuotaOtherHealthsKeepRemaining(t *testing.T) {
 			if q.Remaining == nil || *q.Remaining != 4 {
 				t.Errorf("quota = %+v，期望有值且为 4", q)
 			}
-			if reason := (&route.Candidate{Quota: q}).DrainReason(); reason != "" {
+			if _, reason := (&route.Candidate{Quota: q}).DrainReason(); reason != "" {
 				t.Errorf("health=%q 不该被排除：%s", health, reason)
 			}
 		})
@@ -457,7 +457,7 @@ func TestQuotaCarriesObservationTraces(t *testing.T) {
 
 	// 这一行在 route 眼里是不可路由的：观测过，却没有可用信息。
 	// 直接断言结果，因为「带出这两列」的唯一目的就是这个。
-	if reason := (&route.Candidate{Quota: q}).DrainReason(); reason == "" {
+	if _, reason := (&route.Candidate{Quota: q}).DrainReason(); reason == "" {
 		t.Error("观测过却没有数值的渠道应被 DrainReason 排除")
 	}
 }

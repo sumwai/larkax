@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sumwai/larkax/internal/route"
@@ -26,7 +27,7 @@ type DecisionRedactor interface {
 	// RedactDecisionResponse 脱敏一次决策请求的**结局**。
 	//
 	// 它记的是「实际选了什么、为什么」：选中的渠道与上游名、每一次尝试的
-	// 结果、以及候选集合本身（哪几个没被选中）。
+	// 结果、候选集合本身（哪几个没被选中），以及被选路筛掉的那几个与原因。
 	RedactDecisionResponse(o *DecisionOutcome) (*Snapshot, error)
 }
 
@@ -47,16 +48,21 @@ type DecisionTrace struct {
 	Model string
 	// Candidates 是预留之前取到的候选集合，与 begin 交给选路的是同一份。
 	//
-	// 它必须是**这一份**：选路之后能拿到的是「试过哪些」，而筛掉的那些
-	// 为什么不在候选里（优先级、健康度、额度）只有这一份答得出来。
+	// 它必须是**这一份**：选路之后能拿到的是「试过哪些」，而「当时一共配了
+	// 几个候选」只有这一份答得出来——被筛掉的是哪些、为什么，记在结果那一侧
+	// （见 DecisionOutcome.Excluded），两边的计数对照才说得出「几个里筛掉了
+	// 几个」。
 	Candidates []DecisionCandidate
 }
 
 // DecisionOutcome 是一次决策请求的结局。
 //
-// 三个部分缺一不可：选中的是谁、试过谁、以及候选集合本身。少了候选集合，
-// 「为什么不是另外那个渠道」就要去 join 请求方向那一行才答得出来——
-// 而排障时最容易被漏掉的一步正是「还有第二行」。
+// 四个部分缺一不可：选中的是谁、试过谁、候选集合本身，以及**被筛掉的那几个
+// 与为什么**。少了候选集合，「为什么不是另外那个渠道」就要去 join 请求方向
+// 那一行才答得出来——而排障时最容易被漏掉的一步正是「还有第二行」；少了排除
+// 记录，**那两个没发出去的候选为什么不在候选里**就答不出来——从 Candidates 与
+// Attempts 的差额只看得出「有两/三个没被用」，看不出它们是选路筛掉的还是
+// 压根没轮到（见 DecisionOutcome.Excluded）。
 type DecisionOutcome struct {
 	// Model 与请求方向是同一个规范模型名。
 	//
@@ -81,6 +87,18 @@ type DecisionOutcome struct {
 
 	// Attempts 按顺序记下每一次尝试，含最后成功的那次（见 route.Result.Attempts）。
 	Attempts []DecisionAttempt
+
+	// Excluded 是被选路筛掉的候选与原因（见 route.Result.Excluded）。
+	//
+	// 它补上的是候选集合与尝试列表之间的那一段：Candidates 记的是**选路之前**
+	// 有几个候选，Attempts 记的是**真的发出去过**哪几个，而前者里没被发出去的
+	// 那些**为什么**不在候选里，从前没有任何一处说得出来。
+	//
+	// 它不是一份穷尽的划分：差额里还可能有「没轮到就被提前放弃」的候选——
+	// 别名翻不出来、客户端断开、不可重试的失败后仍有未试候选（见
+	// route.Chat 的三条提前返回）。那几支不在 Excluded 里，Attempts 也照不到
+	// 它们（除了 `retryable=false` 那一支）。
+	Excluded []DecisionExclusion
 
 	// UpstreamStatus 与 ErrorKind 是整次请求以失败告终时的上游证据，
 	// 与响应快照的那两列同源（同样出自 upstreamEvidence）。
@@ -180,6 +198,71 @@ type DecisionAttempt struct {
 	Duration time.Duration
 }
 
+// DecisionExclusion 是一条被选路筛掉的候选的**判据**。
+//
+// # 它为什么不是 DecisionCandidate
+//
+// 被筛掉的候选没有「现在是什么状态」可言：它连打分都没进，Priority /
+// Weight / 健康度 / 额度那一组输入这次一件都没用上。把两者合成一个类型，就得
+// 让每一段候选回答「我是被筛掉的还是被选的」，而那个布尔答错了的表现是一段
+// 看不出问题的现场。
+//
+// # 字段为什么只有两格
+//
+// ChannelID 是身份，Code 是那句枚举词（见 route.Exclusion.Code）。**渠道名
+// 不上这条路**：它与 DecisionCandidate 同一条判据——那个类型里也没有名字，
+// 于是「凭证与商家可读的名字进不了骨架」在编译期就成立。
+//
+// 它的名字跟着 route.Exclusion.Code 走，而**不叫** Reason：那两个词在
+// route.Exclusion 上指的是相反的东西（Reason 是给人看的那句话，Code 是分类），
+// 同一个类型里叫反了，读的人会把留痕里的那一格当成原文。
+type DecisionExclusion struct {
+	ChannelID int64
+	// Code 是机器可读的排除分类，取值见 route.ExclusionCode。
+	//
+	// 不是那句给人看的话：那句话里带着模型名与数值（见 route.Exclusion.Reason），
+	// 是一段自由文本，落进留痕只会被当成内容脱敏成一个占位符。
+	Code string
+}
+
+// decisionExclusionsOf 把路由的排除记录摊成判据足迹。
+//
+// 与 decisionCandidatesOf 同一个做法、同一个理由：字段逐个写出来，于是
+// 「哪些字段可能进骨架」在这一行一行上，而不是散在几个调用点。
+func decisionExclusionsOf(excluded []route.Exclusion) []DecisionExclusion {
+	out := make([]DecisionExclusion, 0, len(excluded))
+	for _, e := range excluded {
+		out = append(out, DecisionExclusion{
+			ChannelID: e.ChannelID,
+			Code:      string(e.Code),
+		})
+	}
+	return out
+}
+
+// excludedOf 取出这次选路筛掉了哪些候选。
+//
+// # 两个来源
+//
+// 有结果时读结果上的那一份。**一个候选都没剩下时没有结果**：选路在这一步
+// 就返回了错误，而那份 Plan 不进 Result——所以被筛掉的那些只在 route.Errors
+// 上（见 route.Errors.Excluded）。少了这一支，「三个候选一个都没用上」这条
+// 最该被看见的记录恰好是唯一看不见的。
+//
+// err 为 nil 而结果也为 nil 的组合不会出现（选路要么给结果要么给错误），
+// 这里不为此多写一个分支：真出现时返回空清单，留痕照落，与「没有排除」
+// 逐列相同——那是这条链路可以接受的降级。
+func excludedOf(r *route.Result, err error) []route.Exclusion {
+	if r != nil {
+		return r.Excluded
+	}
+	var re *route.Errors
+	if errors.As(err, &re) {
+		return re.Excluded
+	}
+	return nil
+}
+
 // decisionAttemptsOf 把路由的尝试列表摊成判据足迹。
 //
 // # Err 本身不带出去
@@ -218,6 +301,7 @@ func decisionOutcomeOf(r *route.Result, err error, candidates []route.Candidate,
 		Model:      model,
 		Candidates: decisionCandidatesOf(candidates),
 		Attempts:   decisionAttemptsOf(attemptsOf(r)),
+		Excluded:   decisionExclusionsOf(excludedOf(r, err)),
 	}
 	if err == nil && r != nil {
 		out.Succeeded = true

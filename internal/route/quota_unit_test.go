@@ -357,7 +357,7 @@ func TestDrainReasonQuotaNotUsable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := candidate(1, "m", withQuota(tc.q))
-			if reason := c.DrainReason(); reason != "额度已耗尽" {
+			if _, reason := c.DrainReason(); reason != "额度已耗尽" {
 				t.Errorf("DrainReason = %q，期望「额度已耗尽」", reason)
 			}
 		})
@@ -371,19 +371,19 @@ func TestDrainReasonQuotaNotUsable(t *testing.T) {
 // 有损投影（只有一个 Known 布尔），两者在它眼里长得一样。
 func TestDrainReasonDistinguishesNeverObservedFromObservedWithoutValue(t *testing.T) {
 	never := candidate(1, "m", withQuota(quota.State{}))
-	if reason := never.DrainReason(); reason != "" {
+	if _, reason := never.DrainReason(); reason != "" {
 		t.Errorf("从未观测过不该被挡下，实际原因: %q", reason)
 	}
 
 	observed := candidate(2, "m", withQuota(quotaObservedNoValue()))
-	if reason := observed.DrainReason(); reason != "额度观测过但没有可用信息" {
+	if _, reason := observed.DrainReason(); reason != "额度观测过但没有可用信息" {
 		t.Errorf("观测过却没有数值应当被挡下，实际原因: %q", reason)
 	}
 
 	// 同一个判据的另一半：从错误里看到的信号也算「观测过」。
 	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	errored := candidate(3, "m", withQuota(quota.State{LastErrorCode: "402", LastErrorAt: &at}))
-	if reason := errored.DrainReason(); reason != "额度观测过但没有可用信息" {
+	if _, reason := errored.DrainReason(); reason != "额度观测过但没有可用信息" {
 		t.Errorf("有错误码却没有数值应当被挡下，实际原因: %q", reason)
 	}
 }

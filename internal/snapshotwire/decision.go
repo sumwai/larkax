@@ -68,6 +68,8 @@ func decisionRequestMap(t *gateway.DecisionTrace) map[string]any {
 //
 // 它比请求方向多两部分：selected（只有成功时才有）与每段候选上的 selected
 // 布尔。两者一起才回答得了「为什么是它」——只看选中项看不出还有谁在争。
+//
+// 被排除的候选是第三部分（见 decisionExclusionsOf），它只在这一条上。
 func decisionResponseMap(o *gateway.DecisionOutcome) map[string]any {
 	m := map[string]any{
 		"surface":          surfaceDecision,
@@ -76,6 +78,20 @@ func decisionResponseMap(o *gateway.DecisionOutcome) map[string]any {
 		"attempts":         decisionAttemptsOf(o.Attempts),
 	}
 	putEnumWord(m, "model", o.Model)
+	// 一个候选都没被筛掉时**这两个键都不写**：那时这一行与加这条留痕之前
+	// 逐字相同，而「多一个空数组」也算变——排障的人是拿着两份快照对比的，
+	// 凭空多出来的 `"excluded": []` 会让人以为「这次有过排除，只是没记下」。
+	//
+	// excluded_count 与 excluded 一起写、一起不写，而不是像 candidates_count
+	// 那样常驻：candidates_count 说的是「当时有几个候选」，那是一个永远成立
+	// 的事实；零个排除不是一个事实，它是「没有这件事」。它的用途在另一个
+	// 场合——骨架超限降级成摘要层时留下的只有顶层标量（见 snapshot 的
+	// topScalars），那时 excluded 整段会消失，而「3 个候选里有 1 个被筛掉」
+	// 这件事必须还看得见。
+	if n := len(o.Excluded); n > 0 {
+		m["excluded_count"] = n
+		m["excluded"] = decisionExclusionsOf(o.Excluded)
+	}
 	if o.Succeeded {
 		if selected := decisionSelectedOf(o); selected != nil {
 			m["selected"] = selected
@@ -139,6 +155,29 @@ func decisionCandidatesOf(cands []gateway.DecisionCandidate, selectedID int64, w
 		if c.CacheHitRate != nil {
 			m["cache_hit_rate"] = *c.CacheHitRate
 		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// decisionExclusionsOf 把被筛掉的候选摊成骨架里的数组。
+//
+// 只有两格：身份与分类。与 decisionCandidatesOf 同一条判据——**没有摊进这个
+// map 的东西，脱敏器连看一眼的机会都没有**，所以渠道名、上游地址这些不摆上来
+// 比摆上来再指望某一档脱敏挡住它可靠。
+//
+// 分类那一格的键叫 code：它跟着 route.Exclusion.Code 与
+// gateway.DecisionExclusion.Code 走，而不是 route.Exclusion.Reason——那个词在
+// route 那边指给人看的那句话，两处叫反了读的人会把这一格当成原文。
+//
+// 取值走枚举词那一档（见 putEnumWord）：它是 route 里那几个常量之一，
+// 本来就是 ASCII 词；万一哪天有人把一句自由文本塞进这个位置，取值检查会让它
+// 退成占位符而不是原样落库。
+func decisionExclusionsOf(excluded []gateway.DecisionExclusion) []any {
+	out := make([]any, 0, len(excluded))
+	for _, e := range excluded {
+		m := map[string]any{"channel_id": e.ChannelID}
+		putEnumWord(m, "code", e.Code)
 		out = append(out, m)
 	}
 	return out
