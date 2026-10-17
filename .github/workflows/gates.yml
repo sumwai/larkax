@@ -286,6 +286,12 @@ jobs:
       - name: 分层自查
         run: bash scripts/check-layering.sh
 
+      # 与其它扫描器同理：判据写反、某个守卫没接上、扫描范围变成空时，
+      # 它的输出与「干净」一模一样，所以自测不是可选的
+      #（LESSONS.md 第 2、16、23 条）。它只用 bash + coreutils + 一个假的 go。
+      - name: 分层自查自测
+        run: bash scripts/check-layering.test.sh
+
       # LESSONS.md 是索引、正文在 lessons/ 下，两者的一致性原先只靠手工验——
       # 而它是本项目反复出现的那种形状：有实现、没有门（LESSONS.md 第 22 条）。
       # 不一致的表现是「索引里点进去是 404」，或者更坏：点进去是**另一条**

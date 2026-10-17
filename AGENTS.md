@@ -46,9 +46,9 @@ GitHub Flow：`main` 受保护，只能通过 PR 合入。
 ```
 
 CI 目前包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`）、
-覆盖率摘要、迁移 up→down→up 往返（真 PostgreSQL）、分层自查
-（`check-layering.sh`）、红线扫描及其自测、变异测试脚本的自测、
-不可达符号门禁及其自测（`check-deadcode.sh`）、
+覆盖率摘要、迁移 up→down→up 往返（真 PostgreSQL）、分层自查及其自测
+（`check-layering.sh` / `check-layering.test.sh`）、红线扫描及其自测、
+变异测试脚本的自测、不可达符号门禁及其自测（`check-deadcode.sh`）、
 整包没人 import 的门禁及其自测（`check-unimported.sh`）、
 导出方法调用点门禁及其自测（`check-deadmethods.sh`）、
 测试函数名门禁及其自测（`check-test-names.sh`）、
@@ -245,7 +245,7 @@ scripts/check-mutation.sh           # 变异测试（改动计费/账本时）
 `scripts/check-redlines.sh --all` 扫全树而不是暂存区。**改了哪个脚本就跑它自己的
 自测**：`scripts/check-redlines.test.sh`、`check-deadcode.test.sh`、
 `check-unimported.test.sh`、`check-deadmethods.test.sh`、`check-test-names.test.sh`、
-`check-mutation.test.sh`（`check-layering.sh` 没有自测）。扫描器坏掉时的输出和
+`check-layering.test.sh`、`check-mutation.test.sh`。扫描器坏掉时的输出和
 「干净」一模一样，没有自测就无法证明它还在工作（见 [LESSONS.md](LESSONS.md)
 第 2、7 条）。
 
