@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -308,9 +309,11 @@ func TestPrintCreatedKeyShowsInheritedLimits(t *testing.T) {
 
 // TestPrintKeyList 钉住每一栏的取值，尤其是两列额度的 NULL 与「还没用过」。
 //
-// 三个时刻各给一个**互不相同**的值：断言写成整段 `创建=<时刻>` 之后，
-// 把某一栏接成另一个时刻（例如把「创建」打成 last_used_at）会当场挂掉。
-// 只断言「行里出现了一个日期」是分辨不出来的——那正是这一栏最容易出的错。
+// 三个时刻各给一个**互不相同**的值：断言写成整段比对之后，把某一栏接成另一个
+// 时刻（例如把「创建」打成 last_used_at）会当场挂掉。只断言「行里出现了一个
+// 日期」是分辨不出来的——那正是这一栏最容易出的错。
+//
+// 表头也算一行：清单是指着列读的，列错位比取值错更难发现。
 func TestPrintKeyList(t *testing.T) {
 	rpm := 60
 	quota := money.MustParse("12.34")
@@ -334,29 +337,63 @@ func TestPrintKeyList(t *testing.T) {
 	})
 
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("打印了 %d 行，期望 2 行：\n%s", len(lines), buf.String())
+	if len(lines) != 3 {
+		t.Fatalf("打印了 %d 行（含表头），期望 3 行：\n%s", len(lines), buf.String())
 	}
 
-	first := lines[0]
+	header := lines[0]
+	for _, want := range []string{"ID", "KEY 前缀", "所属用户", "备注", "状态",
+		"每分钟", "额度", "创建", "过期", "最近使用"} {
+		if !strings.Contains(header, want) {
+			t.Errorf("表头里没有 %q：\n%s", want, header)
+		}
+	}
+
+	first := lines[1]
 	for _, want := range []string{
-		"id=3", "prefix=larkax_abcd", "用户=user-placeholder(id=7)", "备注=限额的",
-		"状态=active", "每分钟=60", "额度=12.34000000",
-		"创建=2026-01-02T03:04:05Z", "过期=2027-06-07T08:09:10Z",
-		"最近使用=2026-10-17T06:10:00Z",
+		"3", "larkax_abcd", "user-placeholder", "限额的",
+		"active", "60", "12.34000000",
+		// 三个时刻截到分钟，且三个值互不相同：接错栏会当场挂。
+		"01-02 03:04", "06-07 08:09", "10-17 06:10",
 	} {
 		if !strings.Contains(first, want) {
 			t.Errorf("第一行里没有 %q：\n%s", want, first)
 		}
 	}
+	// id 单独一列，所以用户那一栏不再附 `(id: 7)`：重复一遍会把这一栏撑宽一倍。
+	if strings.Contains(first, "(id:") || strings.Contains(first, "id=7") {
+		t.Errorf("用户那一栏不该再附 id：\n%s", first)
+	}
+	// 整条 RFC3339 不该出现在清单里：那是这一栏被撑宽的来源。
+	if strings.Contains(first, "T03:04:05Z") || strings.Contains(first, "+00:00") {
+		t.Errorf("时刻该截到分钟，不该是 RFC3339：\n%s", first)
+	}
 
-	second := lines[1]
+	second := lines[2]
 	for _, want := range []string{
-		"id=4", "备注=-", "状态=revoked", "每分钟=继承", "额度=继承",
-		"创建=2026-01-02T03:04:05Z", "过期=不过期", "最近使用=从未",
+		"4", "larkax_efgh", "-", "revoked", "继承", "继承",
+		"01-02 03:04", "不过期", "从未",
 	} {
 		if !strings.Contains(second, want) {
 			t.Errorf("第二行里没有 %q：\n%s", want, second)
+		}
+	}
+
+	// 一行一把、栏位对齐：表头与两行的同一栏必须从同一**显示列**开始。
+	// 用 table_test.go 里那套折算（不复用被测的 displayWidth，见那里的说明）。
+	wantStarts := columnStarts(t, lines[0], []string{
+		"ID", "KEY 前缀", "所属用户", "备注", "状态", "每分钟", "额度", "创建", "过期"})
+	for i, row := range []struct {
+		cells []string
+	}{
+		{[]string{"3", "larkax_abcd", "user-placeholder", "限额的", "active",
+			"60", "12.34000000", "01-02 03:04", "06-07 08:09"}},
+		{[]string{"4", "larkax_efgh", "user-placeholder", "-", "revoked",
+			"继承", "继承", "01-02 03:04", "不过期"}},
+	} {
+		line := lines[i+1]
+		if got := columnStarts(t, line, row.cells); !slices.Equal(got, wantStarts) {
+			t.Errorf("第 %d 行的栏起点 = %v，表头是 %v：\n%s", i+1, got, wantStarts, line)
 		}
 	}
 }
@@ -364,7 +401,7 @@ func TestPrintKeyList(t *testing.T) {
 func TestPrintKeyListEmpty(t *testing.T) {
 	var buf bytes.Buffer
 	printKeyList(&buf, nil)
-	if got, want := buf.String(), "没有 API Key。\n"; got != want {
+	if got, want := buf.String(), "暂无 API Key。可使用 larkaxctl apikey create 添加。\n"; got != want {
 		t.Errorf("空清单 = %q，期望 %q", got, want)
 	}
 }

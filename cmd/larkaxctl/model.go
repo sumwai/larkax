@@ -509,7 +509,7 @@ func printCreatedModel(stdout, stderr io.Writer, id int64, canonicalName string)
 // printModelList 打印目录里的规范模型。
 func printModelList(w io.Writer, models []catalog.Model) {
 	if len(models) == 0 {
-		_, _ = fmt.Fprintln(w, "目录里还没有模型。")
+		_, _ = fmt.Fprintln(w, "暂无模型。可使用 larkaxctl model add 添加。")
 		return
 	}
 

@@ -38,6 +38,13 @@ const doctorUsage = `larkaxctl doctor 逐项检查「配好的链路能不能接
                    [--base-url <URL>] (--credential-stdin | --credential-env <变量名>)
         额外真打一次上游
 
+  larkaxctl doctor -v
+        每项多打一段细节：检查范围、读到的数、表，以及每条问题的完整原文
+
+输出默认每项一行：状态符、标题、一句结论。状态符 ✓ 通过、✗ 不通过、
+! 没跑成、- 没跑（这一项不在本次范围内，例如没开 --live）。最后一行是
+汇总。**细节一条都没删，只是默认不打**：加 -v 就跟着各自那一行缩进打出来。
+
 它按顺序回答六个问题，每一项都给出「检查了什么、结论是什么」：
 
   1. 数据库    连得上吗、迁移跑到哪一版
@@ -201,6 +208,7 @@ const (
 // 全仓库唯一读它的地方是发请求时设置请求头。
 type doctorOptions struct {
 	live     bool
+	verbose  bool
 	model    string
 	endpoint string
 	baseURL  string
@@ -233,7 +241,7 @@ func runDoctor(args []string) error {
 		rep = collectDoctorReport(ctx, db, opts)
 	}
 
-	printDoctorReport(os.Stdout, rep)
+	printDoctorReport(os.Stdout, rep, opts.verbose)
 	return rep.exitErr(dbErr)
 }
 
@@ -245,6 +253,10 @@ func parseDoctorOptions(args []string) (doctorOptions, error) {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, doctorUsage) }
 	live := fs.Bool("live", false, "真打一次上游（会花钱、要凭证）")
+	// -v 与 --verbose 是同一个开关的两个写法。两个都注册：脚本里习惯写
+	// --verbose，手敲时 -v 更短，而不必去记这一版支持哪个。
+	verbose := fs.Bool("v", false, "把每一项的细节也打出来")
+	fs.BoolVar(verbose, "verbose", false, "同 -v")
 	model := fs.String("model", "", "真打上游时用的规范模型名")
 	endpoint := fs.String("endpoint", doctorEndpointChat, "真打上游打哪个入口：chat、messages 或 responses")
 	baseURL := fs.String("base-url", doctorDefaultBaseURL, "网关公共入口的地址")
@@ -257,7 +269,7 @@ func parseDoctorOptions(args []string) (doctorOptions, error) {
 		return doctorOptions{}, fmt.Errorf("doctor 不接受位置参数，得到 %q", fs.Arg(0))
 	}
 
-	opts := doctorOptions{live: *live, endpoint: *endpoint, baseURL: *baseURL}
+	opts := doctorOptions{live: *live, verbose: *verbose, endpoint: *endpoint, baseURL: *baseURL}
 
 	if !*live {
 		// 只有 --live 才用得上这些标志。静默忽略它们会让「我给了 --model
@@ -348,13 +360,43 @@ func (s doctorStatus) label() string {
 //
 // findings 与 skip 是两种不同的坏消息，分开存是为了让输出能把它们说清楚：
 // findings 是「查了，有问题」，skip 是「没查成」。两者都让退出码非 0。
+//
+// ok 是「通过时那一句」，由各项自己填：结论里那个数（迁移版本、几个可用渠道、
+// 几组能解析出上游名）只有查的人知道，从 notes 里反推是猜。
 type doctorCheck struct {
 	title    string
 	subject  string
+	ok       string
 	notes    []string
-	findings []string
+	findings []doctorProblem
 	skip     string
 	table    *doctorTable
+}
+
+// doctorProblem 是一项检查里的一条问题。
+//
+// 拆成两截是为了让默认输出只有一行：
+//
+//   - headline 说清「哪个对象、坏在哪里」，进默认那一行的结论；
+//   - detail 是后果与排查方向（「多半是拼写差了一个字符」这一类），只在 -v
+//     时打出来。
+//
+// 两截都不许删。默认那一眼要的是对象与根因；一次没查对时，人仍然需要下面
+// 那句「为什么会这样、接下来该怎么办」。
+type doctorProblem struct {
+	headline string
+	detail   string
+}
+
+// String 把两截拼回一整句（headline：detail）。
+//
+// -v 的输出与「只关心说了什么」的地方（用例）都走这里：拆开存是为了输出，
+// 不是为了让人去记「哪半句在哪一栏」。
+func (p doctorProblem) String() string {
+	if p.detail == "" {
+		return p.headline
+	}
+	return p.headline + "：" + p.detail
 }
 
 // status 给出这一项的结论。有问题时以「不通过」为准——一个具体的问题比
@@ -373,6 +415,88 @@ func (c doctorCheck) status() doctorStatus {
 type doctorTable struct {
 	header []string
 	rows   [][]string
+}
+
+// glyph 把结论折成默认输出里的那个状态符。
+func (c doctorCheck) glyph() glyphKind {
+	switch c.status() {
+	case doctorFailed:
+		return glyphFail
+	case doctorSkipped:
+		return glyphSkip
+	default:
+		return glyphPass
+	}
+}
+
+// conclusion 是默认输出里跟在标题后面的那一句。
+//
+// 四档各说各的：
+//
+//   - 通过：这一项查到了什么（ok 里那句）；
+//   - 不通过：**第一条**问题（headline），另有几条折成一句指向 -v——一条问题
+//     一行会让一次坏掉的运行刷屏，而一屏里最先要看的是「坏了哪几处」；
+//   - 没跑成：skip 里那句原文。句首不再加「跳过（…）」：状态符已经是 `!`，
+//     再包一层只会把括号套起来（「跳过（连不上数据库（同第 1 项））」）。
+func (c doctorCheck) conclusion() string {
+	switch c.status() {
+	case doctorFailed:
+		line := c.findings[0].headline
+		if extra := len(c.findings) - 1; extra > 0 {
+			line += fmt.Sprintf("（另有 %d 条，用 -v 看）", extra)
+		}
+		return line
+	case doctorSkipped:
+		return c.skip
+	default:
+		if c.ok != "" {
+			return c.ok
+		}
+		return "通过"
+	}
+}
+
+// detailLines 是 -v 时缩进打出来的那几行。
+//
+// 这是原先默认输出里的那一整段：检查范围、读到的数、表、每一条问题的完整
+// 原文、没跑成的原因。默认只留一行之后它一条都没丢，只是挪到了要的时候才看。
+func (c doctorCheck) detailLines() []string {
+	var lines []string
+	lines = append(lines, "检查："+c.subject)
+	lines = append(lines, c.notes...)
+	lines = append(lines, c.table.lines()...)
+	for i, problem := range c.findings {
+		if i == doctorMaxListed {
+			lines = append(lines, fmt.Sprintf("问题：……另有 %d 条同类问题没有列出",
+				len(c.findings)-doctorMaxListed))
+			break
+		}
+		lines = append(lines, "问题："+problem.String())
+	}
+	if c.skip != "" {
+		lines = append(lines, "没跑成："+c.skip)
+	}
+	// 结论在这一行末尾再打一遍：细节展开时它可能与那一行的标题隔了十几行，
+	// 而在 -v 里读的人要的正是「这一堆说明之后到底算过没过」。
+	return append(lines, "结论："+c.status().label())
+}
+
+// lines 把这张表渲染成若干行，已经按显示宽度对齐（见 table.go）。
+//
+// 返回切片而不是直接写出去：调用方要把它们缩进着挂到某一项下面，而缩进加在
+// 每一行上，对齐仍然由 tableWriter 自己算。
+func (t *doctorTable) lines() []string {
+	if t == nil || len(t.rows) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	tw := newTableWriter(&sb)
+	_, _ = fmt.Fprintln(tw, strings.Join(t.header, "\t"))
+	for _, row := range t.rows {
+		_, _ = fmt.Fprintln(tw, strings.Join(row, "\t"))
+	}
+	_ = tw.Flush()
+	return strings.Split(strings.TrimRight(sb.String(), "\n"), "\n")
 }
 
 // doctorReport 是六项只读检查的结果，加上可选的那一次真打上游。
@@ -614,8 +738,10 @@ func checkDoctorDatabase(ctx context.Context, db *sql.DB) doctorCheck {
 	}
 	if !exists {
 		c.notes = append(c.notes, fmt.Sprintf("库里没有 %s 表：一条迁移都没跑过", goose.TableName()))
-		c.findings = append(c.findings,
-			"迁移一条都没跑：先跑 larkaxctl migrate up，否则下面五项查不到任何东西")
+		c.findings = append(c.findings, doctorProblem{
+			headline: "迁移一条都没跑",
+			detail:   "先跑 larkaxctl migrate up，否则下面五项查不到任何东西",
+		})
 		return c
 	}
 
@@ -631,15 +757,24 @@ func checkDoctorDatabase(ctx context.Context, db *sql.DB) doctorCheck {
 	c.notes = append(c.notes, fmt.Sprintf("库里的迁移版本是 %d", version))
 
 	if latestErr != nil {
+		// 版本读不出来，但连接是好的：这一项算通过（连得上），只是没法回答
+		// 「跑到哪一版了」。结论里如实说这一半，而不是一句笼统的「通过」。
+		c.ok = "连接正常，但读不出二进制里的迁移清单"
 		return c
 	}
 	switch {
 	case version < latest:
-		c.findings = append(c.findings, fmt.Sprintf(
-			"迁移没跑完：库里是 %d，二进制里已经有 %d——跑 larkaxctl migrate up", version, latest))
+		c.findings = append(c.findings, doctorProblem{
+			headline: fmt.Sprintf("迁移没跑完（库里是 %d，二进制里已经有 %d）", version, latest),
+			detail:   "跑 larkaxctl migrate up",
+		})
 	case version > latest:
-		c.findings = append(c.findings, fmt.Sprintf(
-			"库里的版本 %d 比这个二进制里的 %d 还新：部署的二进制比库旧，先确认版本", version, latest))
+		c.findings = append(c.findings, doctorProblem{
+			headline: fmt.Sprintf("库里的迁移版本 %d 比这个二进制里的 %d 还新", version, latest),
+			detail:   "部署的二进制比库旧，先确认版本",
+		})
+	default:
+		c.ok = fmt.Sprintf("连接正常（迁移 v%d）", version)
 	}
 	return c
 }
@@ -688,9 +823,11 @@ func checkDoctorChannels(in doctorChainInput) doctorCheck {
 		}
 		enabled++
 		if len(ch.Models) == 0 {
-			c.findings = append(c.findings, fmt.Sprintf(
-				"渠道 %d（%s）是 enabled，但 models 是空的：读取路径把 models 当白名单用，"+
-					"这条渠道永远选不中", ch.ID, ch.Name))
+			c.findings = append(c.findings, doctorProblem{
+				headline: fmt.Sprintf("渠道 %d（%s）是 enabled，但 models 是空的", ch.ID, ch.Name),
+				detail: "读取路径把 models 当白名单用，" +
+					"这条渠道永远选不中",
+			})
 			continue
 		}
 		usable++
@@ -698,9 +835,12 @@ func checkDoctorChannels(in doctorChainInput) doctorCheck {
 	c.notes = append(c.notes, fmt.Sprintf("enabled 的 %d 条，其中 models 非空的 %d 条", enabled, usable))
 
 	if enabled == 0 {
-		c.findings = append(c.findings,
-			"没有任何 enabled 的渠道：请求会回 503「no available upstream for the requested model」")
+		c.findings = append(c.findings, doctorProblem{
+			headline: "没有任何 enabled 的渠道",
+			detail:   "请求会回 503「no available upstream for the requested model」",
+		})
 	}
+	c.ok = fmt.Sprintf("enabled 且 models 非空的渠道 %d 条", usable)
 	return c
 }
 
@@ -711,7 +851,11 @@ func checkDoctorCatalog(in doctorChainInput) doctorCheck {
 
 	referenced := referencedDoctorModels(in)
 	if len(referenced) == 0 {
-		c.skip = "没有 enabled 且 models 非空的渠道可查（见上面「渠道」那一项）"
+		// 结论只留「没有可查的名字」，原因进 notes（-v 才打）：默认那一行要
+		// 回答的是「这一项为什么没结论」，展开讲是哪一项导致的不该占那一行。
+		c.skip = "没有可查的名字"
+		c.notes = append(c.notes,
+			"一个名字都取不到：没有 enabled 且 models 非空的渠道（见上面「渠道」那一项）")
 		return c
 	}
 	c.notes = append(c.notes,
@@ -721,11 +865,14 @@ func checkDoctorCatalog(in doctorChainInput) doctorCheck {
 		if in.catalogSet[name] {
 			continue
 		}
-		c.findings = append(c.findings, fmt.Sprintf(
-			"%s 的 models 里有 %q，但目录里没有这个名字：这次调用会回 503「no available "+
-				"upstream for the requested model」。多半是拼写差了一个字符，或者那条模型已经被删掉了",
-			doctorChannelsListing(in.channels, name), name))
+		c.findings = append(c.findings, doctorProblem{
+			headline: fmt.Sprintf("%s 的 models 里有 %q，但目录里没有这个名字",
+				doctorChannelsListing(in.channels, name), name),
+			detail: "这次调用会回 503「no available upstream for the requested model」。" +
+				"多半是拼写差了一个字符，或者那条模型已经被删掉了",
+		})
 	}
+	c.ok = fmt.Sprintf("%d 个名字都在目录里", len(referenced))
 	return c
 }
 
@@ -812,9 +959,12 @@ func checkDoctorAliasAndPricing(ctx context.Context, db *sql.DB, in doctorChainI
 	aliasCheck.findings = append(aliasCheck.findings, doctorAliasReachability(in.aliases, servable)...)
 
 	if len(pairs) == 0 {
-		reason := "没有可服务的规范名（enabled 渠道的 models 与目录的交集是空的，见上面「渠道」与「模型目录」两项）"
-		aliasCheck.skip = reason
-		priceCheck.skip = reason
+		reason := "没有可服务的规范名"
+		why := "可服务的规范名一个都没有：enabled 渠道的 models 与目录的交集是空的" +
+			"（见上面「渠道」与「模型目录」两项）"
+		aliasCheck.skip, priceCheck.skip = reason, reason
+		aliasCheck.notes = append(aliasCheck.notes, why)
+		priceCheck.notes = append(priceCheck.notes, why)
 		return aliasCheck, priceCheck
 	}
 
@@ -863,10 +1013,12 @@ func checkDoctorAliasAndPricing(ctx context.Context, db *sql.DB, in doctorChainI
 			switch {
 			case p.upstreamErr != nil:
 				upstream, verdict = "（解析不出）", "别名没覆盖这个渠道"
-				aliasCheck.findings = append(aliasCheck.findings, fmt.Sprintf(
-					"「%s」在渠道 %d（%s）上解析不出上游名：这个规范名配过别名，但没有一条覆盖这个"+
-						"渠道，这次调用会回 500。补一条渠道级别名、或加一条平台级别名即可",
-					p.model, p.channelID, p.channelName))
+				aliasCheck.findings = append(aliasCheck.findings, doctorProblem{
+					headline: fmt.Sprintf("「%s」在渠道 %d（%s）上解析不出上游名",
+						p.model, p.channelID, p.channelName),
+					detail: "这个规范名配过别名，但没有一条覆盖这个渠道，这次调用会回 500。" +
+						"补一条渠道级别名、或加一条平台级别名即可",
+				})
 			case p.upstream != p.model:
 				verdict = "有别名，按它翻译"
 			}
@@ -878,10 +1030,12 @@ func checkDoctorAliasAndPricing(ctx context.Context, db *sql.DB, in doctorChainI
 			rule, verdict := fmt.Sprintf("%d（%s）", p.ruleID, p.ruleName), "有生效的规则"
 			if p.ruleErr != nil {
 				rule, verdict = "（没有）", "没有适用的规则"
-				priceCheck.findings = append(priceCheck.findings, fmt.Sprintf(
-					"「%s」在渠道 %d（%s）上没有生效的计价规则：这次调用会失败，而不是按零价放行。"+
+				priceCheck.findings = append(priceCheck.findings, doctorProblem{
+					headline: fmt.Sprintf("「%s」在渠道 %d（%s）上没有生效的计价规则",
+						p.model, p.channelID, p.channelName),
+					detail: "这次调用会失败，而不是按零价放行。" +
 						"补一条规则，或者让某条规则的 --models 留空当兜底",
-					p.model, p.channelID, p.channelName))
+				})
 			}
 			priceCheck.table.rows = append(priceCheck.table.rows,
 				[]string{p.model, doctorChannelLabel(p.channelID, p.channelName), rule, verdict})
@@ -890,6 +1044,12 @@ func checkDoctorAliasAndPricing(ctx context.Context, db *sql.DB, in doctorChainI
 
 	aliasCheck.skip = doctorPairFatalSkip(pairs, func(p doctorPair) error { return p.upstreamFatal }, "别名解析")
 	priceCheck.skip = doctorPairFatalSkip(pairs, func(p doctorPair) error { return p.ruleFatal }, "计价规则")
+	if aliasCheck.skip == "" {
+		aliasCheck.ok = fmt.Sprintf("%d 组都能解析出上游名", len(aliasCheck.table.rows))
+	}
+	if priceCheck.skip == "" {
+		priceCheck.ok = fmt.Sprintf("%d 组都有生效的计价规则", len(priceCheck.table.rows))
+	}
 	return aliasCheck, priceCheck
 }
 
@@ -948,16 +1108,18 @@ func doctorPairs(in doctorChainInput) []doctorPair {
 // 排查方向指向选路而不是配置。
 //
 // servable 是「有 enabled 渠道服务、且名字在目录里」的那些规范名。
-func doctorAliasReachability(aliases []catalog.Alias, servable map[string]bool) []string {
-	var findings []string
+func doctorAliasReachability(aliases []catalog.Alias, servable map[string]bool) []doctorProblem {
+	var findings []doctorProblem
 	for _, name := range doctorAliasNames(aliases) {
 		if servable[name] {
 			continue
 		}
-		findings = append(findings, fmt.Sprintf(
-			"「%s」配过别名（%s），但没有任何 enabled 渠道的 models 里包含它：这次调用会回 "+
-				"503「no available upstream for the requested model」。别名表与渠道白名单各看一半都对，合起来不对",
-			name, doctorAliasScopes(aliases, name)))
+		findings = append(findings, doctorProblem{
+			headline: fmt.Sprintf("「%s」配过别名（%s），但没有任何 enabled 渠道的 models 里包含它",
+				name, doctorAliasScopes(aliases, name)),
+			detail: "这次调用会回 503「no available upstream for the requested model」。" +
+				"别名表与渠道白名单各看一半都对，合起来不对",
+		})
 	}
 	return findings
 }
@@ -1027,8 +1189,10 @@ func checkDoctorWallets(in doctorChainInput) doctorCheck {
 	c := doctorCheck{title: "钱包", subject: doctorSubjectWallet}
 
 	if len(in.users) == 0 {
-		c.findings = append(c.findings,
-			"还没有用户：没有任何一把 API Key 能挂上去，请求会回 401")
+		c.findings = append(c.findings, doctorProblem{
+			headline: "还没有用户",
+			detail:   "没有任何一把 API Key 能挂上去，请求会回 401",
+		})
 		return c
 	}
 
@@ -1048,13 +1212,18 @@ func checkDoctorWallets(in doctorChainInput) doctorCheck {
 		len(in.users), wallets, funded))
 
 	for _, who := range missing {
-		c.findings = append(c.findings,
-			who+"没有钱包行：它第一次调用会在预留那一步失败（500）")
+		c.findings = append(c.findings, doctorProblem{
+			headline: who + "没有钱包行",
+			detail:   "它第一次调用会在预留那一步失败（500）",
+		})
 	}
 	if wallets > 0 && funded == 0 {
-		c.findings = append(c.findings, fmt.Sprintf(
-			"%d 个钱包行的余额都是 0：调用会在预留那一步因余额不足失败（500）", wallets))
+		c.findings = append(c.findings, doctorProblem{
+			headline: fmt.Sprintf("%d 个钱包行的余额都是 0", wallets),
+			detail:   "调用会在预留那一步因余额不足失败（500）",
+		})
 	}
+	c.ok = fmt.Sprintf("用户 %d 个都有钱包行，其中 %d 个余额大于 0", len(in.users), funded)
 	return c
 }
 
@@ -1408,97 +1577,150 @@ func runDoctorLive(ctx context.Context, opts doctorOptions) doctorLive {
 
 // ── 输出 ────────────────────────────────────────────────────────────────
 
-func printDoctorReport(w io.Writer, rep doctorReport) {
+// doctorLine 是默认输出里的一行：状态符、标题、一句结论，外加 -v 才打的细节。
+//
+// 先收成切片再打，是因为标题那一栏要按**最宽的那个**补空格，而宽度得等所有行
+// 到齐才知道（与 tableWriter 同一个理由，见 table.go）。
+type doctorLine struct {
+	kind       glyphKind
+	title      string
+	conclusion string
+	detail     []string
+}
+
+// printDoctorReport 打一份体检报告。
+//
+// 默认每项一行：`状态符 标题 结论`。细节（检查范围、读到的数、表、每条问题的
+// 完整原文）只在 verbose 时缩进跟在那一行之后。
+//
+// 收敛掉的不是信息量，是**默认那一屏**：一次全通过的运行原先要刷三十多行，
+// 而其中没有一行需要动作。原来的长句一条都没删，只是挪到了 -v。
+func printDoctorReport(w io.Writer, rep doctorReport, verbose bool) {
+	p := newPalette(w)
 	_, _ = fmt.Fprintln(w, "larkaxctl doctor：逐项检查「配好的链路能不能接一次请求」。")
 	_, _ = fmt.Fprintln(w)
 
-	checks := rep.checks()
-	for i, c := range checks {
-		printDoctorCheck(w, i+1, len(checks), c)
+	lines := doctorLines(rep)
+	width := 0
+	for _, l := range lines {
+		if n := displayWidth(l.title); n > width {
+			width = n
+		}
 	}
-	printDoctorLive(w, rep.live)
+	for _, l := range lines {
+		_, _ = fmt.Fprintf(w, "  %s %s  %s\n",
+			p.glyph(l.kind), p.title(l.kind, padRight(l.title, width)),
+			p.conclusion(l.kind, l.conclusion))
+		if !verbose {
+			continue
+		}
+		for _, line := range l.detail {
+			_, _ = fmt.Fprintf(w, "      %s\n", p.dim(line))
+		}
+	}
 
 	passed, failed, skipped := rep.counts()
-	_, _ = fmt.Fprintf(w, "汇总：通过 %d 项、不通过 %d 项、没跑成 %d 项\n", passed, failed, skipped)
-	_, _ = fmt.Fprintln(w, "真打上游不在这六项里：它要 --live 才跑，结论在它自己那一节（失败时退出码同样非 0）。")
+	_, _ = fmt.Fprintf(w, "\n  doctor: %d 项异常, %d 项跳过, %d 项通过 (运行 -v 查看细节)\n",
+		failed, skipped, passed)
 }
 
-func printDoctorCheck(w io.Writer, index, total int, c doctorCheck) {
-	_, _ = fmt.Fprintf(w, "[%d/%d] %s\n", index, total, c.title)
-	_, _ = fmt.Fprintf(w, "  检查：%s\n", c.subject)
-	for _, note := range c.notes {
-		_, _ = fmt.Fprintf(w, "  %s\n", note)
+// doctorLines 把报告折成默认输出的那几行。
+func doctorLines(rep doctorReport) []doctorLine {
+	checks := rep.checks()
+	lines := make([]doctorLine, 0, len(checks)+1)
+	for _, c := range checks {
+		lines = append(lines, doctorLine{
+			kind:       c.glyph(),
+			title:      c.title,
+			conclusion: c.conclusion(),
+			detail:     c.detailLines(),
+		})
 	}
-	printDoctorTable(w, c.table)
-	for i, finding := range c.findings {
-		if i == doctorMaxListed {
-			_, _ = fmt.Fprintf(w, "  问题：……另有 %d 条同类问题没有列出\n", len(c.findings)-doctorMaxListed)
-			break
-		}
-		_, _ = fmt.Fprintf(w, "  问题：%s\n", finding)
-	}
-	if c.skip != "" {
-		_, _ = fmt.Fprintf(w, "  没跑成：%s\n", c.skip)
-	}
-	_, _ = fmt.Fprintf(w, "  结论：%s\n", c.status().label())
-	_, _ = fmt.Fprintln(w)
+	return append(lines, doctorLiveLine(rep.live))
 }
 
-// printDoctorTable 把一项检查的表打出来。
+// printDoctorLive 打真打上游那一行（verbose 时连细节）。
 //
-// 整体缩进两格：它挂在某一项下面，与那一项的说明文字平级会让人分不清哪几行
-// 是表、哪几行是结论。缩进加在第一栏上，所以对齐仍然由 tableWriter 按显示
-// 宽度算（见 table.go）。
-func printDoctorTable(w io.Writer, t *doctorTable) {
-	if t == nil || len(t.rows) == 0 {
+// 单独留一个入口是给用例用的：那一项的几条分支（没开 --live、请求发不出去、
+// 成功、被谁拒了）各要一份输出，而整份报告要连库才跑得起来。
+func printDoctorLive(w io.Writer, l doctorLive, verbose bool) {
+	p := newPalette(w)
+	line := doctorLiveLine(l)
+	_, _ = fmt.Fprintf(w, "  %s %s  %s\n",
+		p.glyph(line.kind), p.title(line.kind, line.title),
+		p.conclusion(line.kind, line.conclusion))
+	if !verbose {
 		return
 	}
-	tw := newTableWriter(w)
-	_, _ = fmt.Fprintf(tw, "    %s\n", strings.Join(t.header, "\t"))
-	for _, row := range t.rows {
-		_, _ = fmt.Fprintf(tw, "    %s\n", strings.Join(row, "\t"))
+	for _, detail := range line.detail {
+		_, _ = fmt.Fprintf(w, "      %s\n", p.dim(detail))
 	}
-	_ = tw.Flush()
 }
 
-func printDoctorLive(w io.Writer, l doctorLive) {
-	_, _ = fmt.Fprintln(w, "[真打上游]")
-	if !l.enabled {
-		_, _ = fmt.Fprintln(w, "  没跑：要加 --live 才会跑，它会真的发一次请求到上游，会花钱、要凭证")
-		_, _ = fmt.Fprintln(w)
-		return
-	}
-
-	_, _ = fmt.Fprintf(w, "  入口：POST %s\n", l.url)
-	_, _ = fmt.Fprintf(w, "  模型：%s\n", l.model)
-
+// doctorLiveLine 把真打上游那一次折成一行。
+func doctorLiveLine(l doctorLive) doctorLine {
+	line := doctorLine{title: "上游连通", detail: liveDetail(l)}
 	switch {
+	case !l.enabled:
+		line.kind = glyphNone
+		line.conclusion = "没跑：加 --live 才会真打一次上游（会花钱、要凭证）"
+
 	case l.sendErr != nil:
-		_, _ = fmt.Fprintf(w, "  结论：不通过——请求没发出去：%v\n", l.sendErr)
+		// 「没发出去」与「发出去了、上游回了失败」是两件事，现场完全不同
+		// （一个是地址/网络，一个是链路配置），所以结论里也是两句话。
+		line.kind = glyphFail
+		line.conclusion = fmt.Sprintf("请求没发出去：%v", l.sendErr)
 
 	case l.ok():
-		_, _ = fmt.Fprintf(w, "  结果：%d，耗时 %s", l.status, l.elapsed.Round(time.Millisecond))
-		if l.respModel != "" {
-			_, _ = fmt.Fprintf(w, "，响应里的模型是 %s", l.respModel)
-		}
-		if l.usage != "" {
-			_, _ = fmt.Fprintf(w, "，用量 %s", l.usage)
-		}
-		_, _ = fmt.Fprintln(w)
-		_, _ = fmt.Fprintln(w, "  结论：通过")
+		line.kind = glyphPass
+		line.conclusion = liveOKLabel(l)
 
 	default:
-		_, _ = fmt.Fprintf(w, "  结果：%d，耗时 %s\n", l.status, l.elapsed.Round(time.Millisecond))
-		if l.errMsg != "" {
-			_, _ = fmt.Fprintf(w, "  错误：%s\n", l.errMsg)
-		}
-		if l.preview != "" {
-			_, _ = fmt.Fprintf(w, "  响应体：%s\n", l.preview)
-		}
-		_, _ = fmt.Fprintf(w, "  谁拒的：%s\n", l.attribution())
-		_, _ = fmt.Fprintln(w, "  结论：不通过")
+		line.kind = glyphFail
+		// 归因那一句（谁拒的）就是这一项的根因，所以它进默认那一行：
+		// #381 那次事故里缺的正是这一句，而它在 -v 里等于没打。
+		line.conclusion = l.attribution()
 	}
-	_, _ = fmt.Fprintln(w)
+	return line
+}
+
+// liveOKLabel 是那一次调用成功时的结论：状态码、耗时、响应模型与用量。
+func liveOKLabel(l doctorLive) string {
+	label := fmt.Sprintf("通过（%d，耗时 %s", l.status, l.elapsed.Round(time.Millisecond))
+	if l.respModel != "" {
+		label += "，响应里的模型是 " + l.respModel
+	}
+	if l.usage != "" {
+		label += "，用量 " + l.usage
+	}
+	return label + "）"
+}
+
+// liveDetail 是 -v 时真打上游那一行的细节。
+func liveDetail(l doctorLive) []string {
+	if !l.enabled {
+		return []string{
+			"没跑：要加 --live 才会跑，它会真的发一次请求到上游，会花钱、要凭证。",
+			"真打上游不在这六项里：它的结论在上一行，失败时退出码同样非 0。",
+		}
+	}
+
+	lines := []string{"入口：POST " + l.url, "模型：" + l.model}
+	if l.sendErr != nil {
+		return append(lines, fmt.Sprintf("结论：不通过——请求没发出去：%v", l.sendErr))
+	}
+
+	lines = append(lines, fmt.Sprintf("结果：%d，耗时 %s", l.status, l.elapsed.Round(time.Millisecond)))
+	if l.errMsg != "" {
+		lines = append(lines, "错误："+l.errMsg)
+	}
+	if l.preview != "" {
+		lines = append(lines, "响应体："+l.preview)
+	}
+	if l.ok() {
+		return append(lines, "结论：通过")
+	}
+	return append(lines, "谁拒的："+l.attribution(), "结论：不通过")
 }
 
 // attribution 说明这次失败是谁拒的。

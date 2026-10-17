@@ -206,12 +206,13 @@ func TestPrintPluginListFlagsBadMeta(t *testing.T) {
 
 // 空清单要说一句话，而不是什么都不输出。
 //
-// 「还没有插件」与「命令因为某个原因没跑起来」在安静的终端里长得一样
-// （见 LESSONS.md 第 16 条）。
+// 「暂无插件」与「命令因为某个原因没跑起来」在安静的终端里长得一样
+// （见 LESSONS.md 第 16 条）。文案与其余清单命令统一：见 style_test.go 的
+// TestEmptyListMessages。
 func TestPrintPluginListEmpty(t *testing.T) {
 	var buf bytes.Buffer
 	printPluginList(&buf, nil)
-	if got, want := buf.String(), "还没有插件。\n"; got != want {
+	if got, want := buf.String(), "暂无插件。可使用 larkaxctl plugin publish 添加。\n"; got != want {
 		t.Errorf("空清单 = %q，期望 %q", got, want)
 	}
 }

@@ -101,9 +101,9 @@ func runPluginList(args []string) error {
 // 对应关系要记。给人看的说明在 --help 里。
 func printPluginList(w io.Writer, rows []pluginstore.Row) {
 	if len(rows) == 0 {
-		// 明确打一句，而不是什么都不输出：「还没有插件」与「命令因为某个
+		// 明确打一句，而不是什么都不输出：「暂无插件」与「命令因为某个
 		// 原因没跑起来」在安静的终端里长得一样（见 LESSONS.md 第 16 条）。
-		_, _ = fmt.Fprintln(w, "还没有插件。")
+		_, _ = fmt.Fprintln(w, "暂无插件。可使用 larkaxctl plugin publish 添加。")
 		return
 	}
 

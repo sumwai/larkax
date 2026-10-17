@@ -440,25 +440,42 @@ func printUpdatedLimits(w io.Writer, id int64, p auth.LimitParams) {
 
 // printKeyList 打印 key 清单。
 //
-// 每把一行、键=值的形式，与 printCreatedKey 同一套：可 grep，也能直接
-// 看出哪一栏是空的。NULL 打成「继承」而不是留空——留空与「这一栏不存在」
-// 长得一样，而这一列恰恰是「没设过」的意思。
+// 一张固定列宽的表格代替原先那条 150 字符的键=值长行：字段一多，长行在窄
+// 终端里会自己折行，而折出来的几行与下一把 key 的行分不开——清单最要紧的
+// 「一行一把」就那么没了。
 //
-// 三个时刻（创建、过期、最近使用）连着排：按时间先后读下来正好是一把 key 的
-// 一生，所以创建时刻排在另外两个之前。
+// 三处取舍：
+//
+//   - 用户那一栏只打用户名。原先还附一个 `(id: x)`，而 id 已经单独一列，
+//     重复一遍会把这一栏撑宽一倍。
+//   - 三个时刻截到分钟（见 formatStampShort）。这一栏回答的是「哪一把最近
+//     用过」，秒与年份在绝大多数行里带来的信息不抵它占的宽度。
+//   - 三个时刻（创建、过期、最近使用）连着排：按时间先后读下来正好是一把
+//     key 的一生，所以创建时刻排在另外两个之前。
+//
+// NULL 打成「继承」而不是留空——留空与「这一栏不存在」长得一样，而这一列
+// 恰恰是「没设过」的意思。
 func printKeyList(w io.Writer, keys []auth.Key) {
+	p := newPalette(w)
 	if len(keys) == 0 {
-		_, _ = fmt.Fprintln(w, "没有 API Key。")
+		_, _ = fmt.Fprintln(w, "暂无 API Key。可使用 larkaxctl apikey create 添加。")
 		return
 	}
 
+	tw := newTableWriter(w)
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		p.bold("ID"), p.bold("KEY 前缀"), p.bold("所属用户"), p.bold("备注"), p.bold("状态"),
+		p.bold("每分钟"), p.bold("额度"), p.bold("创建"), p.bold("过期"), p.bold("最近使用"))
 	for _, k := range keys {
-		_, _ = fmt.Fprintf(w, "id=%d prefix=%s 用户=%s(id=%d) 备注=%s 状态=%s 每分钟=%s 额度=%s 创建=%s 过期=%s 最近使用=%s\n",
-			k.ID, k.Prefix, k.Username, k.UserID, orDash(k.Name), k.Status,
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			p.bold(strconv.FormatInt(k.ID, 10)), p.bold(k.Prefix),
+			k.Username, orDash(k.Name), k.Status,
 			formatRPM(k.RateLimitRPM), formatQuota(k.QuotaLimit),
-			formatTimeValue(k.CreatedAt),
-			formatTime(k.ExpiresAt, "不过期"), formatTime(k.LastUsedAt, "从未"))
+			p.dim(formatStampShort(k.CreatedAt)),
+			p.dim(formatTimeShort(k.ExpiresAt, "不过期")),
+			p.dim(formatTimeShort(k.LastUsedAt, "从未")))
 	}
+	_ = tw.Flush()
 }
 
 func formatRPM(v *int) string {
@@ -490,4 +507,24 @@ func formatTime(v *time.Time, empty string) string {
 // 另一处会安静地留着旧样子。
 func formatTimeValue(t time.Time) string {
 	return t.Format(time.RFC3339)
+}
+
+// stampLayout 是清单里的时刻布局：月-日 时:分。
+//
+// 截到分钟，且不带年份：清单要回答的是「哪一把最近用过」，而整条 RFC3339
+// （2026-10-17T14:59:09+08:00）会把一栏撑到 25 列，秒与年份在几乎所有行里
+// 都一样。要精确到秒或要跨年比对时看单个实体的回显（它仍然打 RFC3339）。
+const stampLayout = "01-02 15:04"
+
+// formatStampShort 把必然有值的时刻截到分钟。
+func formatStampShort(t time.Time) string {
+	return t.Format(stampLayout)
+}
+
+// formatTimeShort 与 formatTime 同义，只是把时刻截到分钟。
+func formatTimeShort(v *time.Time, empty string) string {
+	if v == nil {
+		return empty
+	}
+	return formatStampShort(*v)
 }
