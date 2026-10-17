@@ -7,7 +7,8 @@ description: >-
   包清单只在这里列一次，CI 与 release 调的是同一份检查：两份拷贝漂移的话，
   漂移的那一份会安静地变弱，而「安静地变弱」正是这一步要防的东西。
 
-  调用方需要提供 LARKAX_DB_DSN（以及能连上的库），并已 checkout。
+  调用方需要提供 LARKAX_DB_DSN 与 LARKAX_REDIS_DSN（以及能连上的库与实例），
+  并已 checkout。
 
 runs:
   using: composite
@@ -18,11 +19,12 @@ runs:
         set +e
         failed=0
         total=0
-        # 包清单要与「哪些包真的会连库」保持一致。判据是测试里有
-        # `t.Skip(...)` 且条件是 LARKAX_DB_DSN：加了一个这样的包而忘了往
-        # 这里补，它就会静默跳过，而这道门不会报——正是它要防的那件事。
-        # 找一遍：grep -rl LARKAX_DB_DSN --include='*_test.go' .
-        for pkg in ./internal/ledger/store/ ./internal/channels/ ./internal/catalog/ ./internal/auth/ ./internal/snapshotwire/ ./internal/pricing/ ./internal/assembly/ ./internal/calendar/store/ ./internal/settings/ ./internal/idempotency/ ./internal/plugin/store/ ./cmd/larkaxctl/; do
+        # 包清单要与「哪些包真的会连库或连 Redis」保持一致。判据是测试里有
+        # `t.Skip(...)` 且条件是 LARKAX_DB_DSN 或 LARKAX_REDIS_DSN：加了一个
+        # 这样的包而忘了往这里补，它就会静默跳过，而这道门不会报——正是它要防的
+        # 那件事。找一遍：
+        #   grep -rl 'LARKAX_DB_DSN\|LARKAX_REDIS_DSN' --include='*_test.go' .
+        for pkg in ./internal/ledger/store/ ./internal/channels/ ./internal/catalog/ ./internal/auth/ ./internal/snapshotwire/ ./internal/pricing/ ./internal/assembly/ ./internal/ratelimit/ ./internal/calendar/store/ ./internal/settings/ ./internal/idempotency/ ./internal/plugin/store/ ./cmd/larkaxctl/; do
           out=$(go test -count=1 -v "$pkg" 2>&1)
           rc=$?
           show() { printf '%s\n' "$out" | tail -30; }
