@@ -295,6 +295,13 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, res *Result, out ch
 				u := *ev.Usage
 				measured = &u
 			}
+		case "usage_input":
+			// 输入侧的用量先到了。**这里什么都不做，是有意的**：它只有输入、
+			// 没有输出，当成实测用量会把输出算成 0，而这条流很可能还在正常
+			// 生成。结算等上面那个完整的 "usage"（见 channel.StreamEvent）。
+			//
+			// 写成一个显式的空分支而不是让它落到 switch 外面：这个 switch 是
+			// 计费口径唯一的落点，读者要能一眼看出这个新事件**被看过了**。
 		case "done":
 			done = true
 		case "error":

@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -265,8 +267,9 @@ func TestAnthropicStreamFrames(t *testing.T) {
 	if got := dig(t, start, "message", "role"); got != "assistant" {
 		t.Errorf("role = %v，期望 assistant", got)
 	}
-	// message_start 里的输入量是本地估算（预留用的那个数）：上游的实测用量
-	// 要到流末尾才拿得到，而这一帧必须在最前面。
+	// message_start 里的输入量是本地估算：这条流里**没有** usage_input
+	// （上游没在流的最前面报输入用量），而第一个事件——那个内容帧——一到，
+	// 这一帧就必须写出去，等不了后面那个 usage（见 anthropicStream.writeStart）。
 	wantInput := float64(tokens.EstimatedTokens("m-1", "hi"))
 	if got := dig(t, start, "message", "usage", "input_tokens"); got != wantInput {
 		t.Errorf("message_start 的 input_tokens = %v，期望 %v", got, wantInput)
@@ -592,6 +595,137 @@ func TestAnthropicStreamTextBetweenToolFragments(t *testing.T) {
 	}
 	if textIndex < 0 || textDeltaIndex != textIndex {
 		t.Errorf("正文分片的下标 = %d，期望落在正文块 %d 上", textDeltaIndex, textIndex)
+	}
+}
+
+// ── 第一帧的输入用量 ──────────────────────────────────────────────────
+
+// 上游在流的最前面报了输入用量时，message_start 里给的是**真值**，不是估算。
+//
+// 断言钉在**客户端读到的数**上：帧从 HTTP 响应里按 SSE 解出来，读的就是
+// message_start.message.usage.input_tokens 那一个字段——只读第一帧的客户端
+// （成本统计、用量面板、限流预算）读到的正是它。「我们内部把某个字段填对了」
+// 是另一个维度，那个维度对而客户端读到错数，正是这条缺陷本来的样子。
+//
+// 真值 12 与估算值（「hi」两个字在未知族估算表上是 1）不同，所以这条断言
+// 分辨得出用的是哪一个（见 LESSONS 第 23 条）。
+func TestAnthropicStreamStartUsesUpstreamInputTokens(t *testing.T) {
+	// 缓存那一份也要跟着走：message_delta 里的 input_tokens 是「输入总量减去
+	// 缓存」（见 claudeUsageOf），第一帧走的必须是**同一个**换算——各写一份的
+	// 话，两帧会对同一个请求报出两个不同的输入量，而对账的人会去找一个不存在的
+	// 差额。42 与 30 就是为这件事选的：减完是 12，与上游报的 input_tokens 同口径。
+	early := channel.Usage{PromptTokens: 42, CacheReadTokens: 30}
+	final := channel.Usage{PromptTokens: 42, CompletionTokens: 7, CacheReadTokens: 30}
+	_, frames := streamRequest(t, PathMessages,
+		channel.StreamEvent{Kind: "usage_input", Usage: &early},
+		channel.StreamEvent{Kind: "delta", Text: "你好"},
+		channel.StreamEvent{Kind: "usage", Usage: &final},
+		channel.StreamEvent{Kind: "done", FinishReason: "end_turn"},
+	)
+
+	start := at(t, frames, 0)
+	if start.event != "message_start" {
+		t.Fatalf("第 0 帧的事件名 = %q，期望 message_start", start.event)
+	}
+	startMsg := start.decode(t)
+	if got := dig(t, startMsg, "message", "usage", "input_tokens"); got != float64(12) {
+		t.Errorf("message_start 的 input_tokens = %v，期望 12（上游报的真值：输入 42 减缓存 30）", got)
+	}
+	if got := dig(t, startMsg, "message", "usage", "cache_read_input_tokens"); got != float64(30) {
+		t.Errorf("message_start 的 cache_read_input_tokens = %v，期望 30", got)
+	}
+
+	// 收尾帧里的输入量必须与第一帧一致。
+	end := at(t, frames, 4).decode(t)
+	if got := dig(t, end, "usage", "input_tokens"); got != float64(12) {
+		t.Errorf("message_delta 的 input_tokens = %v，期望 12（与第一帧同一个数）", got)
+	}
+	if got := dig(t, end, "usage", "output_tokens"); got != float64(7) {
+		t.Errorf("message_delta 的 output_tokens = %v，期望 7", got)
+	}
+}
+
+// 上游只发一个完整用量、而它就在最前面时，同样用真值：判据是「第一个事件里
+// 有没有输入用量」，不是「那个事件叫什么」。
+func TestAnthropicStreamStartUsesUsageWhenItComesFirst(t *testing.T) {
+	usage := channel.Usage{PromptTokens: 12, CompletionTokens: 7}
+	_, frames := streamRequest(t, PathMessages,
+		channel.StreamEvent{Kind: "usage", Usage: &usage},
+		channel.StreamEvent{Kind: "done", FinishReason: "end_turn"},
+	)
+
+	if got := dig(t, at(t, frames, 0).decode(t), "message", "usage", "input_tokens"); got != float64(12) {
+		t.Errorf("message_start 的 input_tokens = %v，期望 12（第一个事件就是完整用量）", got)
+	}
+}
+
+// 跨协议那条路（上游是 OpenAI）的流里**没有**早期的输入用量，而第一帧不能
+// 因此等到流末尾：等下去整个流就变成「等一会儿一次性返回」，比报一个偏低的
+// 估算更坏。所以第一个内容帧一到，就用估算把第一帧写出去。
+//
+// 这条用例用的是**真的 HTTP 服务端**，不像上面几条那样用 ResponseRecorder：
+// recorder 是**整个响应攒完**才交出来的，帧的到达时刻在它上面看不出来——而这里
+// 要钉的恰恰是时刻。判据是「流还开着，第一帧已经到了」：事件通道喂完第一个内容
+// 事件就挂住（不关），第一帧仍然读得到。
+func TestAnthropicStreamFirstFrameArrivesWhileStreamIsOpen(t *testing.T) {
+	h, _, chatter := newTestHandler()
+
+	events := make(chan channel.StreamEvent)
+	release := make(chan struct{})
+	chatter.streamResult = &gateway.Result{Events: events}
+	go func() {
+		events <- channel.StreamEvent{Kind: "delta", Text: "你好"}
+		// 上游还在生成：通道既不关也不再发。第一帧要是被推迟到流末尾，
+		// 下面那次读就会读到超时。
+		<-release
+		close(events)
+	}()
+	// LIFO：先放行事件通道（处理函数才走得完），再关服务端。
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	defer close(release)
+
+	// 超时定得短：第一帧被推迟时这里读到的是**超时**，而不是空手挂住——
+	// 挂住要等 go test 的整轮超时，报出来的现场不如这一条清楚。
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+		srv.URL+PathMessages, strings.NewReader(streamBody))
+	if err != nil {
+		t.Fatalf("构造请求失败: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("发流式请求失败: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// 读满**第一帧**（读到分隔空行为止）就停：此刻流还开着，这一帧却已经在
+	// 客户端手里了。
+	var lines []string
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		if line := scanner.Text(); line != "" {
+			lines = append(lines, line)
+			continue
+		}
+		break
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("读第一帧失败（超时说明第一帧被推迟到流末尾了）: %v", err)
+	}
+	frames := parseFrames(t, strings.Join(lines, "\n"))
+	if len(frames) != 1 {
+		t.Fatalf("只读到 %d 帧，期望第一帧 message_start：%+v", len(frames), lines)
+	}
+	if frames[0].event != "message_start" {
+		t.Fatalf("第 0 帧的事件名 = %q，期望 message_start", frames[0].event)
+	}
+	// 这条路上没有更早的输入用量可给，填的是本地估算——这一条钉的是「没等」，
+	// 数值上的真值那条路在 TestAnthropicStreamStartUsesUpstreamInputTokens 里。
+	wantInput := float64(tokens.EstimatedTokens("m-1", "hi"))
+	if got := dig(t, frames[0].decode(t), "message", "usage", "input_tokens"); got != wantInput {
+		t.Errorf("message_start 的 input_tokens = %v，期望 %v（本地估算）", got, wantInput)
 	}
 }
 

@@ -417,26 +417,21 @@ def anthropic_stream(ctx: Ctx) -> str:
     check("message_delta 里的 usage.output_tokens", output_tokens, COMPLETION_TOKENS)
     check("message_delta.delta.stop_reason", stop_reason, "end_turn")
 
-    # 已知偏差，**不是**「断言放宽了」：message_start 里的 input_tokens 是
-    # 一个**估算值**，不是上游报的真值（实测这里 3，真值 12）。
+    # 断言钉在**那个数**上，不是「是个正数」。
     #
-    # 原因是时序：那一帧必须在我们读到上游的用量之前就写出去——上游的用量
-    # 在它自己的 message_stop 才攒齐（见 internal/channel/anthropicadapter
-    # 的 emitUsage），而我们的 message_start 是流的第一帧，不能等。
-    # Anthropic 的 SDK 把 message_start.message.usage.input_tokens 标成必填，
-    # 所以那里必须放一个数，放的就是请求进来时按分词估出来的那个
-    # （internal/api 的 inputTokensOf）。
+    # 这里曾经写的是 `> 0`，注释把它说成「已知偏差，不是放宽断言」——那个宽
+    # 断言对「估算 3」与「真值 12」一视同仁，于是这条偏差在契约测试里长期
+    # 看不见（打印里露得出来，断言看不见）。**一个够宽的断言会把缺陷一直放过去**，
+    # 这与「跳过」在输出里和「通过」长得一样是同一类问题（见 LESSONS 第 16、23 条）。
     #
-    # 真值在 message_delta 里，上面已经断言。所以「以最后一个 usage 为准」的
-    # 客户端读到的是对的；**只读 message_start 的客户端会读到错数**——
-    # 这一点写进了 README 的「已知偏差」，也写进了交付报告。
-    check_true(
-        f"message_start 里的 usage.input_tokens 应当是正的估算值，得到 {start_input_tokens!r}",
-        isinstance(start_input_tokens, int) and start_input_tokens > 0,
-    )
+    # Anthropic 上游的第一帧就是 message_start 且带 usage.input_tokens，渲染器
+    # 在第一个事件到达时才写这一帧，所以这里拿到的就是上游报的值。跨协议那条路
+    # （OpenAI 上游）仍是估算——它的用量在结束分片里，第一帧不能等；那条路由
+    # internal/assembly 的流式 e2e 钉着，见 contract/README.md 的「已知偏差」。
+    check("message_start 里的 usage.input_tokens", start_input_tokens, PROMPT_TOKENS)
 
     return (f"{len(seen)} 个事件，末事件={seen[-1]}；"
-            f"input_tokens 估算 {start_input_tokens} → 真值 {delta_input_tokens}")
+            f"input_tokens 首帧 {start_input_tokens} → message_delta {delta_input_tokens}")
 
 
 def anthropic_tool_call(ctx: Ctx) -> str:

@@ -27,6 +27,11 @@ import (
 // 用量跨**两个**事件：输入在 message_start，输出在 message_delta。
 // 只读其中一个会得到「有输入没输出」或反之，而两者都是算钱的依据——
 // 所以这里跨事件累计，直到 message_stop 才发出完整的用量。
+//
+// 输入侧例外：它在 message_start 就确定了，所以那一帧到达时**另外**发一个
+// usage_input 事件。它不是结算依据（只有输入，没有输出），用处是让调用方
+// 在流的最前面就能报出输入用量——那个数在 message_start 里就要填，
+// 而完整的用量要到流末尾才有（见 channel.StreamEvent 的 Usage）。
 
 // pump 读取 SSE 流并翻译成统一事件。
 func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channel.StreamEvent) {
@@ -51,22 +56,24 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 	// 所以下面的分派优先用载荷里的 type。
 	var eventName string
 
-	emitUsage := func() {
-		if usageSent {
-			return
-		}
-		usageSent = true
-		// 与 fromClaudeResponse 走**同一个**换算入口：口径由 UsageSemantic
-		// 声明，「把缓存补回输入」只在 relay.UsageFromRelaykit 里发生一次。
-		//
-		// 这里曾经自己拼 channel.Usage 并自己加一遍缓存，那是同一件换算的
-		// 第三份实现——两份实现各加一次时，整段 prompt 命中缓存
-		// （input_tokens == 0）的请求会把缓存算两遍。
-		//
-		// CompletionIncludesReasoning 由 UsageFromRelaykit 声明为 true：
-		// Anthropic 的 output_tokens 含扩展思考的 token，而协议不单独报
-		// 推理量，所以这里也不填 ReasoningTokens。
-		u := relay.UsageFromRelaykit(&dto.Usage{
+	// usageOf 把**此刻**累计到的数字换算成统一用量。
+	//
+	// 输入与输出是两个时刻给的（message_start / message_delta），所以同一件换算
+	// 要用两次：一次在输入刚确定时（输出那部分是 0），一次在流末尾。抽出来是
+	// 为了让两次走**同一个**入口——各写一份的话，以后改口径只会改到其中一处。
+	//
+	// 与 fromClaudeResponse 也走同一个换算入口：口径由 UsageSemantic 声明，
+	// 「把缓存补回输入」只在 relay.UsageFromRelaykit 里发生一次。
+	//
+	// 这里曾经自己拼 channel.Usage 并自己加一遍缓存，那是同一件换算的
+	// 第三份实现——两份实现各加一次时，整段 prompt 命中缓存
+	// （input_tokens == 0）的请求会把缓存算两遍。
+	//
+	// CompletionIncludesReasoning 由 UsageFromRelaykit 声明为 true：
+	// Anthropic 的 output_tokens 含扩展思考的 token，而协议不单独报
+	// 推理量，所以这里也不填 ReasoningTokens。
+	usageOf := func() channel.Usage {
+		return relay.UsageFromRelaykit(&dto.Usage{
 			PromptTokens:     int(inputTokens),
 			CompletionTokens: int(outputTokens),
 			PromptTokensDetails: dto.InputTokenDetails{
@@ -76,6 +83,14 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 			UsageSource:   dto.BillingUsageSourceClaudeMessages,
 			UsageSemantic: dto.BillingUsageSemanticAnthropic,
 		})
+	}
+
+	emitUsage := func() {
+		if usageSent {
+			return
+		}
+		usageSent = true
+		u := usageOf()
 		events <- channel.StreamEvent{Kind: "usage", Usage: &u}
 	}
 
@@ -134,6 +149,21 @@ func (a *Adapter) pump(ctx context.Context, body io.Reader, events chan<- channe
 		case "message_start":
 			if msg, ok := raw["message"].(map[string]any); ok {
 				readUsage(msg["usage"], &inputTokens, &outputTokens, &cacheRead, &cacheWrite)
+			}
+			// 输入的用量在这里就确定了，**先单独发一次**：我们对外发的第一帧
+			// （Anthropic 的 message_start）里填的就是它，而等到流末尾那个完整
+			// 用量才发的话，那一帧只能填本地估算——估算偏低，而只读第一帧的
+			// 客户端会把它当成真的（见 internal/api 的 writeStart）。
+			//
+			// 走的是另一个 Kind，不是 "usage"：它只有输入、没有输出，被当成
+			// 完整的用量会把输出算成 0（见 channel.StreamEvent 的 Usage）。
+			//
+			// 判据是 inputTokens > 0：readUsage 只在字段存在且为正时才覆盖，
+			// 所以 0 的含义是「上游这一帧没报输入量」——那时不发，让调用方
+			// 回落到本地估算，而不是拿一个 0 当真值。
+			if inputTokens > 0 {
+				u := usageOf()
+				events <- channel.StreamEvent{Kind: "usage_input", Usage: &u}
 			}
 
 		case "content_block_delta":
