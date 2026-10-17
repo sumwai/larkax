@@ -77,13 +77,17 @@ func TestAccountBalanceSumsEveryEntry(t *testing.T) {
 	// 再来一笔消费：用户 -30、平台收入 +30。走 insertEntries（写路径用的
 	// 就是它），而不是另拼一句 INSERT——读回来的东西要与生产写进去的一样。
 	//
+	// 分录不关联账单（billID 传 0）：这个用例的世界里没有 billing_requests
+	// 行，生产也给不出一个不存在的 id。要断言「按账单找分录」的用例自己
+	// 把预留拿到的 id 传进来（见 consumeEntries 的注释）。
+	//
 	// 变量名不复用 err：每次重新声明都会让读代码的人停下来判断「看到的是
 	// 哪个 err」，而多一个名字的成本是零。
 	tx, beginErr := db.BeginTx(ctx, nil)
 	if beginErr != nil {
 		t.Fatalf("开事务失败: %v", beginErr)
 	}
-	if writeErr := insertEntries(ctx, tx, consumeEntries(t, userID, "30")); writeErr != nil {
+	if writeErr := insertEntries(ctx, tx, consumeEntries(t, userID, "30", 0)); writeErr != nil {
 		t.Fatalf("写消费分录失败: %v", writeErr)
 	}
 	if commitErr := tx.Commit(); commitErr != nil {

@@ -18,8 +18,15 @@ import (
 // 注意它挡不住「漏了赋值」：tokens.Source 的零值**就是** SourceMeasured，
 // 而 measured 是合法取值（非流式的用量只可能来自上游响应体），两者在这一层
 // 分不开。一个漏设的来源因此会落成「实测值」——那正是最不该凭空声称的一档。
-// 分辨它只能在生产那一侧：网关按入口路径决定这个字段（见 internal/gateway
-// 的 Result.Estimated）。
+//
+// 而生产那一侧**也分不开**，至少非流式这条路不行：internal/gateway 的 Chat
+// 无条件写 tokens.SourceMeasured，而上游响应体里没有 usage 块时 usageOf
+// 返回零值。于是落库那一行是 billing_path='measured'、estimator=NULL、cost=0、
+// prompt_tokens=0、completion_tokens=0——**与「上游确实报了 0 token」逐列
+// 相同**，读这一行的人会把「上游压根没报」读成「上游报了 0」。
+//
+// 流式那条路不同：来源由事件流与入口一起决定，缺 usage 时落 estimated
+// （见 internal/gateway 的 Result.Estimated 与 stream.go）。
 var ErrUnknownUsageSource = errors.New("未知的用量来源")
 
 // insertUsageEventSQL 写一行用量事件。
@@ -53,6 +60,35 @@ var ErrUnknownUsageSource = errors.New("未知的用量来源")
 // 上游成本的**口径还没定**（适配器按自己的计价口径算，还是从上游响应的用量
 // 字段折算），而填一个猜出来的数比不填更糟——见 issue #163 的第 2 条。
 // 这一列留给那一半。
+//
+// # unit_prices 为什么不写
+//
+// 这一列**不在这条 INSERT 的列表里**，于是取库上的默认值 `'{}'`。
+// 它比可空的那几列更难发现：落库之后看起来像「这次没有单价」，而实际是
+// 「这一列这一轮不填」——两种含义在那一列上长得一样，而它是 NOT NULL，
+// 连「没写」这个信号都没有。
+//
+// 这次结算按哪些单价算的，要复算得回到 billing_requests 的 pricing_rule_id
+// 与 pricing_expr_snapshot：那是求值当时的规则快照，比事后补一份单价更接近
+// 事实。等真要在这里落单价时，先看下面这一条。
+//
+// # Capped 时 Settlement.Breakdown.Total 没有被截
+//
+// billing.SettleWithCharges 撞上预留上界时把 Settlement.Actual 截成预留额，
+// 而 Breakdown 留的是**截之前**的金额——这是有意的，有用例钉住
+// （internal/billing 的 TestSettleCapsOvershoot：「明细仍要保留未截断的金额，
+// 供排查超了多少」）。所以 Capped 时 Actual 与 Breakdown.Total **本来就不等**，
+// 而 cost 这一列取的是 Actual。
+//
+// 后果：哪天有人从 Breakdown 去填 unit_prices，那一行的 cost 会与明细对不上
+// （明细算出来的总额大于 cost）。要填得先决定填哪一侧，而不是顺手取一个。
+//
+// # duration_ms 为什么不写
+//
+// 与 unit_prices 同一个形状：它也不在上面那条 INSERT 的列表里，于是落成
+// NULL。这一列是「这次请求花了多久」，而 pipeline.Charge 上没有承载它的
+// 字段——耗时只有网关量得到，而它今天没把那个数带进结算。这一轮不写，
+// 等那条路接上再说。
 const insertUsageEventSQL = `
 	INSERT INTO usage_events (
 		request_id, user_id, channel_id, canonical_model,
@@ -115,7 +151,8 @@ func insertUsageEvent(ctx context.Context, tx *sql.Tx, req pipeline.Request, cha
 		estimator,
 		// 收的钱取 Settlement.Actual（按实际用量算出的金额），不是预留额：
 		// 对账要问的是「这笔用量该收多少」，而预留只是上界。撞上上界被截住
-		// 时（Capped）Actual 是截住后的值，与分录里扣的钱一致。
+		// 时（Capped）Actual 是截住后的值，与分录里扣的钱一致——而那一档下
+		// 它与 Breakdown.Total 不相等，见 insertUsageEventSQL 的注释。
 		charge.Settlement.Actual.String(),
 		charge.Asset,
 		charge.PricedAt,

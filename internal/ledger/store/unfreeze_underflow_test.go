@@ -169,8 +169,9 @@ func TestSettleRefusesFrozenUnderflow(t *testing.T) {
 	requestID := reqID(t)
 	req := testRequest(ctx, t, db, userID, requestID)
 
-	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY")); err != nil {
-		t.Fatalf("预留失败: %v", err)
+	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+	if reserveErr != nil {
+		t.Fatalf("预留失败: %v", reserveErr)
 	}
 
 	// 制造分歧：frozen(10) < 预留之和(30)
@@ -179,7 +180,7 @@ func TestSettleRefusesFrozenUnderflow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	assertFrozenUnderflow(t, s.Save(ctx, req, settledCharge(t, userID, requestID, "10")))
+	assertFrozenUnderflow(t, s.Save(ctx, req, settledCharge(t, userID, requestID, billID, "10")))
 
 	// 回滚：余额没扣、冻结额没动、账本里没有这次结算的分录。
 	balance, frozen := walletOf(t, db, userID)
@@ -206,7 +207,9 @@ func TestSettleRefusesFrozenUnderflow(t *testing.T) {
 
 // settledCharge 造一次「扣掉 amount」的结算，形状与生产路径一致：
 // 一组平衡的分录，外加 Settlement.Actual。
-func settledCharge(t *testing.T, userID int64, requestID, amount string) *pipeline.Charge {
+//
+// billID 原样传给分录，理由见 consumeEntries。
+func settledCharge(t *testing.T, userID int64, requestID string, billID int64, amount string) *pipeline.Charge {
 	t.Helper()
 	amt, err := money.Parse(amount)
 	if err != nil {
@@ -215,7 +218,7 @@ func settledCharge(t *testing.T, userID int64, requestID, amount string) *pipeli
 	charge := &pipeline.Charge{
 		RequestID: requestID, UserID: userID, Asset: "CNY",
 		PricedAt: pricedAt(),
-		Entries:  consumeEntries(t, userID, amount),
+		Entries:  consumeEntries(t, userID, amount, billID),
 	}
 	charge.Settlement.Actual = amt
 	return charge

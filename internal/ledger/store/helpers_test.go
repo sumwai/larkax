@@ -258,7 +258,17 @@ func pricedAt() time.Time { return time.Now() }
 //
 // 用它而不是 ledger.Consume 是因为后者要商户分成等参数，
 // 而本包的测试关心的是**持久化**而不是分录怎么造。
-func consumeEntries(t *testing.T, userID int64, amount string) []ledger.Entry {
+//
+// billID 是这组分录关联的 billing_requests.id，0 表示不关联（落库成 NULL）。
+// 口径与 ledger.Consume 的 ConsumeParams.BillingRequestID 一致（`> 0` 才写），
+// 而生产路径上它**一定非零**：网关在 begin 里把预留拿到的 id 写进
+// pipeline.Request.BillingRequestID，pipeline.Settle 再原样带进分录。
+//
+// 所以传 0 是在造生产造不出来的数据，而这件事在这张表上有实际后果：
+// billing_request_id 是「这次请求动了哪些钱」唯一的线索（见 ledger.Entry
+// 的注释），而那一列是 NULL 时按它查**恒为空**——回滚有没有发生都看不出
+// 区别。这正是 TestUsageEventFailureRollsBackSettlement 曾经的问题。
+func consumeEntries(t *testing.T, userID int64, amount string, billID int64) []ledger.Entry {
 	t.Helper()
 	amt, err := money.Parse(amount)
 	if err != nil {
@@ -274,5 +284,13 @@ func consumeEntries(t *testing.T, userID int64, amount string) []ledger.Entry {
 		TxnID: txn, Account: ledger.PlatformRevenueAccount(), Asset: ledger.AssetCNY,
 		Amount: amt, EntryType: ledger.EntryConsume,
 	}
-	return []ledger.Entry{user, platform}
+	entries := []ledger.Entry{user, platform}
+
+	if billID > 0 {
+		id := billID
+		for i := range entries {
+			entries[i].BillingRequestID = &id
+		}
+	}
+	return entries
 }
