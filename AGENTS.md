@@ -49,6 +49,7 @@ CI 目前包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-r
 不可达符号门禁及其自测（`check-deadcode.sh`）、
 整包没人 import 的门禁及其自测（`check-unimported.sh`）、
 导出方法调用点门禁及其自测（`check-deadmethods.sh`）、
+测试函数名门禁及其自测（`check-test-names.sh`）、
 契约测试（`contract/`，见下）。
 集成测试另有一道**「确认真跑了」的门禁**——它逐包显式跑依赖数据库的那些包，
 被 `t.Skip` 时报错，因为「跳过」在输出里和「通过」长得一样
@@ -224,6 +225,7 @@ bash scripts/check-layering.sh      # 分层约定：谁 import 谁
 bash scripts/check-deadcode.sh      # 不可达符号：可达的包内部有没有没人调的函数
 bash scripts/check-unimported.sh    # 整包没人 import：包本身有没有接上
 bash scripts/check-deadmethods.sh   # 导出方法有没有调用点（上面两道门都照不到）
+bash scripts/check-test-names.sh    # Go 顶层函数声明的名字必须是 ASCII
 scripts/check-mutation.sh           # 变异测试（改动计费/账本时）
 ```
 
@@ -255,6 +257,19 @@ scripts/check-mutation.sh           # 变异测试（改动计费/账本时）
 所以同名方法会互相掩护（假阴性）；`f := x.Name` 这种方法值语法与字段访问
 无法区分，取严的一侧（假阳性）。它与 `deadcode` 的白名单**不共享条目**——
 判据不同，同一个符号可能在两边各记一条，也可能只在一处出现。
+
+`scripts/check-test-names.sh` 管的是「标识符保持英文」这条约定：**Go 顶层
+`func` 声明的名字**只许由 `[A-Za-z0-9_]` 组成。判的是**名字那个标识符**，
+不是「整行含中文」——后者会把中文在函数体、字符串或形参名上的行全部误报
+（实测全仓 5 处命中，5 处都是误报）。三种声明形态都认：普通函数、方法
+（跳过接收者）、泛型函数（名字截到 `[` 之前）。退出码分三档：0 通过、
+1 命中、2 **没跑成**（一个文件都没扫到、一条 `func` 都没有、或者解析不出名字）
+——第 2 档与第 1 档分开，是因为「没跑成」在输出里和「干净」长得一样
+（见 [LESSONS.md](LESSONS.md) 第 16 条）。
+
+它的**已知边界**写在脚本头注释里，各有自测钉着：函数体内的局部变量、形参、
+包级 `const` / `var` / `type` 名不判；非 Go 文件不判。这条约定的动机是
+`go test -run` 的正则与 CI 失败行里的可读性，那些名字不出现在这两处。
 
 **只被测试 import 的包算「没人 import」。** 测试自己就能构造调用方，
 所以「只有测试在调」与「生产在调」在覆盖率上长得一样
