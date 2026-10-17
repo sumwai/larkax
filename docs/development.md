@@ -96,8 +96,10 @@ LARKAX_INTERNAL_ADDR="127.0.0.1:8082"
 `make test` 会先起依赖并加载 `.env`——集成测试拿不到 `LARKAX_DB_DSN` 时会**跳过**，
 而「跳过」在输出里和「通过」长得一样。
 
-`.env.example` 可以直接被 shell 读取，所以 `make` 用 `set -a && . ./.env && set +a`
-加载它。**服务本身不读 `.env` 文件**，只读环境变量；用 direnv 或别的工具加载也行。
+`.env.example` 可以直接被 shell 读取（引号、`export` 前缀、行尾注释都认），
+所以 `make` 用 `set -a && . ./.env && set +a` 加载它。**服务与 `larkaxctl` 自己
+也读 `.env`**（见下文「环境变量」），所以 `go run` 之前不必再手工导出一遍；
+用 direnv 或别的工具加载也不会打架——环境变量优先。
 
 ## 请求快照
 
@@ -261,15 +263,28 @@ go run ./cmd/larkaxctl calendar import ./cn-2031.json
 
 必填项缺失时服务拒绝启动并一次列出全部问题，不会带着半截配置跑起来。
 
-**直接在 shell 里跑运维命令时，先加载 `.env`。** 服务与 `larkaxctl` 都只读
-环境变量，不读 `.env` 文件；`make` 的目标（`make run` / `migrate` / `test`）
-已经替你加载。手敲 `go run ./cmd/larkaxctl ...` 之前先：
+**`.env` 由程序自己读，不必先导出成环境变量。** 服务（`cmd/larkax`）与
+`larkaxctl` 在读取配置之前都会先找一份 `.env`：从当前工作目录往上找，
+**找到第一个就用，不越过 git 仓库根**；整条祖先链上没有仓库时只看当前目录。
+所以 `go run ./cmd/larkaxctl migrate up` 在仓库根或仓库里任何一个子目录下
+都能直接跑，不必记得先 `set -a && . ./.env && set +a`。
+
+**系统环境变量优先**：`.env` 只填补**尚未设置**的变量，绝不覆盖已经有的。
+生产容器把配置注入成环境变量，覆盖它就等于生产连上开发库。
+
+文件不存在时静默跳过——环境变量仍然是一条完整的配置路径，容器里就不需要
+`.env`。要指定另一份文件时用全局选项 `--env-file`（写在子命令前后都认）：
 
 ```sh
-set -a && . ./.env && set +a
+go run ./cmd/larkaxctl --env-file .env.staging wallet open --user alice
 ```
 
-否则第一条命令就会报 `LARKAX_DB_DSN 未设置`。
+指明的文件不存在会报错（退出码 2），不会安静地用自动找到的那一份。
+
+`.env` 的语法与 shell 一致（引号、`export` 前缀、行尾注释都认），
+`.env.example` 可以直接被 shell 读取，所以 `make` 仍然用
+`set -a && . ./.env && set +a` 加载它。两套机制并存不会打架：先导出的
+环境变量优先，程序自己读的那一份只填补没导出的键。
 
 上表是**服务**（`cmd/larkax`）的清单。运维命令（`cmd/larkaxctl`）的配置面小得多：
 它只读 `LARKAX_DB_DSN`、`LARKAX_LOG_LEVEL` 与 `LARKAX_ENV`，缺 DSN 才失败。
@@ -420,8 +435,8 @@ go run ./cmd/larkaxctl migrate up
 下面四条命令按顺序跑完，就有了一条能接请求的链路。示例里的上游是假的
 （`https://api.example.com/v1`），换成你自己的即可。
 
-这些命令直接用 `go run`，所以先按上文「环境变量」加载 `.env`：
-`set -a && . ./.env && set +a`。`larkaxctl` 只读环境变量，不读 `.env` 文件。
+这些命令直接用 `go run` 即可：`larkaxctl` 自己会读 `.env`（见上文
+「环境变量」），不必先手工导出。
 
 **一、把规范模型加进目录。** 规范名是选路与计费共用的键，不能带空白字符：
 

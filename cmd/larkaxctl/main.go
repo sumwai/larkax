@@ -92,6 +92,12 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
 子命令的详细用法：larkaxctl <子命令> --help，例如 larkaxctl channel --help。
 日历数据文件的格式与约束见：larkaxctl calendar --help
 
+全局选项：
+  --env-file <路径>                        指定要加载的 .env 文件。不给时从当前目录
+                                           往上找，不越过 git 仓库根，用最近的那一份。
+                                           两种情况都只填补尚未设置的环境变量，
+                                           系统环境变量优先。见 internal/config。
+
 退出码：
   0  成功
   1  其他失败
@@ -107,54 +113,71 @@ const usage = `larkaxctl 是 larkax 的运维命令行。
 LARKAX_ROLE 与它无关。需要主密钥的命令（channel 的写入、rotate）另读
 LARKAX_MASTER_KEYS。见 internal/config 的 LoadOps。
 
+.env 文件：不进环境变量、只用 .env 里的值也可以。默认从当前目录往上找
+（不越过 git 仓库根），要指定另一份就加 --env-file。两种来源都只填补
+尚未设置的环境变量——已经导出的环境变量优先。
+
 `
 
 // migrationsDir 是迁移文件所在目录，相对于仓库根目录。
 const migrationsDir = "internal/migrate/sql"
 
 func run() error {
-	if len(os.Args) < 2 {
+	// 全局选项先摘出来，再分派子命令：它必须在**任何**子命令之前生效，
+	// 因为每条子命令一进去就加载配置，而配置可能就来自这个文件。
+	envFile, args, err := takeEnvFileFlag(os.Args[1:])
+	if err != nil {
+		return err
+	}
+	if envFile != "" {
+		if envErr := config.UseEnvFile(envFile); envErr != nil {
+			// 归到参数错：文件路径是命令行给的，找不到它要改的是命令。
+			return usageErr(envErr)
+		}
+	}
+
+	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usage)
 		return usageErr(errors.New("缺少子命令"))
 	}
 
-	switch os.Args[1] {
+	switch args[0] {
 	case "alias":
-		return runAlias(os.Args[2:])
+		return runAlias(args[1:])
 	case "apikey":
-		return runAPIKey(os.Args[2:])
+		return runAPIKey(args[1:])
 	case "calendar":
-		return runCalendar(os.Args[2:])
+		return runCalendar(args[1:])
 	case "channel":
-		return runChannel(os.Args[2:])
+		return runChannel(args[1:])
 	case "doctor":
-		return runDoctor(os.Args[2:])
+		return runDoctor(args[1:])
 	case "idempotency":
-		return runIdempotency(os.Args[2:])
+		return runIdempotency(args[1:])
 	case "ledger":
-		return runLedger(os.Args[2:])
+		return runLedger(args[1:])
 	case "migrate":
-		return runMigrate(os.Args[2:])
+		return runMigrate(args[1:])
 	case "model":
-		return runModel(os.Args[2:])
+		return runModel(args[1:])
 	case "partition":
-		return runPartition(os.Args[2:])
+		return runPartition(args[1:])
 	case "plugin":
-		return runPlugin(os.Args[2:])
+		return runPlugin(args[1:])
 	case "price":
-		return runPrice(os.Args[2:])
+		return runPrice(args[1:])
 	case "reconcile":
-		return runReconcile(os.Args[2:])
+		return runReconcile(args[1:])
 	case "rotate":
-		return runRotate(os.Args[2:])
+		return runRotate(args[1:])
 	case "settings":
-		return runSettings(os.Args[2:])
+		return runSettings(args[1:])
 	case "snapshot":
-		return runSnapshot(os.Args[2:])
+		return runSnapshot(args[1:])
 	case "user":
-		return runUser(os.Args[2:])
+		return runUser(args[1:])
 	case "wallet":
-		return runWallet(os.Args[2:])
+		return runWallet(args[1:])
 	case "version", "-v", "--version":
 		fmt.Println(version)
 		return nil
@@ -163,8 +186,67 @@ func run() error {
 		return nil
 	default:
 		fmt.Fprint(os.Stderr, usage)
-		return usageErr(fmt.Errorf("未知子命令 %q", os.Args[1]))
+		return usageErr(fmt.Errorf("未知子命令 %q", args[0]))
 	}
+}
+
+// isEnvFileFlag 判断一个参数名是不是全局选项 --env-file。
+//
+// 单横线一并认：本仓其余选项由 flag 包解析，而 flag 同时接受 -name 与
+// --name；只有全局选项不认的话，`larkaxctl -env-file x doctor` 会以
+// 「未知子命令」收场——那不是使用者能自己看明白的错。
+func isEnvFileFlag(name string) bool {
+	return name == "--env-file" || name == "-env-file"
+}
+
+// takeEnvFileFlag 从参数里摘出全局选项 --env-file，返回它的取值与剩下的参数。
+//
+// # 为什么在最外层摘，而不是给每条子命令各接一个同名选项
+//
+// 全局选项写在子命令**前后**都该能用：
+//
+//	larkaxctl --env-file .env.staging doctor
+//	larkaxctl doctor --env-file .env.staging
+//
+// 后者尤其重要——人补一个选项时习惯写在最后，而这本该是最自然的写法，却会被
+// 子命令自己的 flag 集当成「flag provided but not defined」。摘掉再分派，
+// 二十来条子命令不必各加一遍同一个选项，也不会因为漏掉一条而只有那条命令
+// 认不出这个选项。
+//
+// 代价是这个字面量在**子命令的参数区里**也会被摘走。它没有第二种含义，
+// 而把它当普通参数传下去的场景（用 --expr 之类传一段以它开头的文本）不值得
+// 为它多开一条规则。
+//
+// 认 `--env-file <路径>` 与 `--env-file=<路径>` 两种写法，与 flag 包一致。
+// 出现多次时取最后一个：同样与 flag 包「后写的赢」一致。
+func takeEnvFileFlag(args []string) (string, []string, error) {
+	var envFile string
+	rest := make([]string, 0, len(args))
+
+	for i := 0; i < len(args); i++ {
+		name, value, hasValue := strings.Cut(args[i], "=")
+		if !isEnvFileFlag(name) {
+			rest = append(rest, args[i])
+			continue
+		}
+
+		if !hasValue {
+			if i+1 >= len(args) {
+				return "", nil, usageErr(fmt.Errorf("%s 后面要跟文件路径", name))
+			}
+			i++
+			value = args[i]
+		}
+		if value == "" {
+			// 空路径不当作「没给」：`--env-file=` 与 `--env-file ""` 都是
+			// 明确给了、但给错了。当成没给的话，它会安静地用自动找到的那一份，
+			// 而那与使用者的意图正好相反。
+			return "", nil, usageErr(fmt.Errorf("%s 的路径不能为空", name))
+		}
+		envFile = value
+	}
+
+	return envFile, rest, nil
 }
 
 // runReconcile 跑一轮对账任务。
