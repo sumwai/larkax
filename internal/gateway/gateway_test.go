@@ -13,6 +13,7 @@ import (
 	"github.com/sumwai/larkax/internal/billing/expr"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/route"
 	"github.com/sumwai/larkax/internal/tokens"
@@ -1796,6 +1797,20 @@ func TestNowFallsBackToRealClock(t *testing.T) {
 func TestRequestIDOfWithoutValue(t *testing.T) {
 	if got := requestIDOf(context.Background()); got != "" {
 		t.Errorf("没有值时 = %q，期望空串", got)
+	}
+}
+
+// requestIDOf：观测层放进 context 的标识，这里取到的就是它。
+//
+// 断言的是**那一个具体的值**，不是「非空」：取值恒为空串的实现下两者都红，
+// 而红在一起时分不出是「取错了另一个键」还是「压根取不到」。要钉的正是前一种
+// ——两个同名的键类型各在一处，中间那座桥有没有接上，只有具体的值答得了。
+func TestRequestIDOfTakesObserveValue(t *testing.T) {
+	const id = "req-2f8a1c9d"
+
+	ctx := observe.WithRequestID(context.Background(), observe.RequestID(id))
+	if got := requestIDOf(ctx); got != id {
+		t.Errorf("requestIDOf = %q，期望 %q", got, id)
 	}
 }
 

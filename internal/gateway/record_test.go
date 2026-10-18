@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/route"
 )
 
@@ -330,6 +332,58 @@ func TestRecordLogsWriteFailureOnlyWhenItFails(t *testing.T) {
 			t.Errorf("写健康度失败时没有日志，实际：%q", got)
 		}
 	})
+}
+
+// 写健康度失败那条日志里的请求标识，是 context 里那一个。
+//
+// 日志器那一栏由观测层从 context 附上来（见 observe.FromContext），所以判据落在
+// **输出**上：多出来的一个空 request_id 会把真值盖掉（日志里同名键后者胜），而
+// 排查的人读到的只有输出。只断言「出现」的话，那一栏是空的那一份挡不住。
+//
+// 两种格式各看一遍：生产上落的是 JSON（见 observe 的 defaultFormat），
+// 而文本格式下这一行的毛病只是多出一栏，读起来比 JSON 里更明显。
+func TestRecordLogCarriesRequestID(t *testing.T) {
+	const (
+		wants = "写渠道健康度失败"
+		id    = "req-2f8a1c9d"
+	)
+
+	for _, f := range []struct {
+		name          string
+		format        string
+		field, wantID string
+	}{
+		{name: "文本", format: "text", field: "request_id=", wantID: id},
+		{name: "JSON", format: "json", field: `"request_id":`, wantID: `"` + id + `"`},
+	} {
+		t.Run(f.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.recorder.err = errors.New("库写不进去")
+
+			logs := &logBuffer{}
+			original := slog.Default()
+			t.Cleanup(func() { slog.SetDefault(original) })
+			observe.AdoptAsDefault(observe.NewLoggerWithWriter(
+				logs, "debug", f.format, f.format == "json"))
+
+			ctx := observe.WithRequestID(context.Background(), observe.RequestID(id))
+			if _, err := h.gw.Chat(ctx, request(), upstreamRequest(), Hooks{}); err != nil {
+				t.Fatalf("写健康度失败不该让请求失败: %v", err)
+			}
+
+			got := logs.text()
+			if !strings.Contains(got, wants) {
+				t.Fatalf("没有那条日志，实际：%s", got)
+			}
+			// 零个与两个都要红：零个是标识没接上，两个是旧的那一栏还在手写。
+			if n := strings.Count(got, f.field); n != 1 {
+				t.Errorf("日志里 request_id 栏 %d 个，期望 1 个，实际：%s", n, got)
+			}
+			if !strings.Contains(got, f.field+f.wantID) {
+				t.Errorf("日志里没有 %s%s，实际：%s", f.field, f.wantID, got)
+			}
+		})
+	}
 }
 
 // 没接写入方时一切照常：它是可选接线，缺了不该 panic。
