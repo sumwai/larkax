@@ -106,7 +106,8 @@ NOT NULL，空串就是它的「没有」。
 # 权限
 
 这四个子命令都不需要 LARKAX_MASTER_KEYS：它们不碰渠道凭证，也就不碰
-信封加密。主密钥是 rotate 与 channels 那一组的事。
+信封加密。主密钥是 secret rotate、channel 的写入与 plugin 的 delete / kv set /
+kv delete 那三条的事。
 
 # 别名
 

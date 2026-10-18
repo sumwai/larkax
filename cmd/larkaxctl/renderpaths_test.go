@@ -55,7 +55,8 @@ var statusRenderPaths = []string{
 var tableRenderPaths = []string{
 	"doctorTable.lines", // doctor -v 的逐项明细
 	"printAliasList",
-	"printAllowlists",          // snapshot allowlist
+	"printAllowlists", // snapshot allowlist
+	"printCalendarList",
 	"printChannelDetail",       // channel get
 	"printChannelHealthDetail", // channel health --id 的读数
 	"printChannelHealthHours",  // channel health --id 的逐小时明细
@@ -67,12 +68,15 @@ var tableRenderPaths = []string{
 	"printLedgerBalances", // ledger balance --all
 	"printModelDetail",
 	"printModelList",
+	"printPluginDetail",  // plugin get
+	"printPluginKVEntry", // plugin kv get
 	"printPluginList",
 	"printRuleTable",
-	"printUserDetail", // user get
-	"printUserList",   // user list
-	"printUserUpdate", // user update 的改动回显：一栏一行，与 get 那一片同一个形状
-	"printWalletList", // wallet list
+	"printSettingsDetail", // settings get
+	"printUserDetail",     // user get
+	"printUserList",       // user list
+	"printUserUpdate",     // user update 的改动回显：一栏一行，与 get 那一片同一个形状
+	"printWalletList",     // wallet list
 }
 
 // emptyListPaths 是清单空状态文案的调用点。
@@ -83,6 +87,7 @@ var tableRenderPaths = []string{
 var emptyListPaths = []string{
 	"checkDoctorWallets", // doctor 的钱包体检：一个用户都没有
 	"printAliasList",
+	"printCalendarList",
 	"printChannelHealthList", // channel health：一条渠道都没有
 	"printChannelList",
 	"printConsentList", // consent list

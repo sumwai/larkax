@@ -563,12 +563,48 @@ func TestWriteEchoesAppearOnlyOnStderr(t *testing.T) {
 					return runPlugin([]string{"disable", fx.pluginKey})
 				})
 			}},
+		// 下面三条改库，回显同样只走 stderr。卸载用的是另起的一个插件：
+		// 删掉 fx.pluginKey 之后，后面两条 kv 就没有插件可用了。
+		{command: "plugin", what: "delete", marker: "已删除插件", stdout: stdoutEmpty,
+			run: func(t *testing.T, _ *streamFixture) (string, string) {
+				key := uniqueName("echo-doomed-plugin")
+				path := writePluginFile(t, "doomed.js", pluginSource(key, "1.0.0", 0))
+				mustStream(t, func() error { return runPlugin([]string{"publish", path}) })
+				return mustStream(t, func() error { return runPlugin([]string{"delete", key}) })
+			}},
+		{command: "plugin", what: "kv set", marker: "已写入插件", stdout: stdoutEmpty,
+			run: func(t *testing.T, fx *streamFixture) (string, string) {
+				return mustStream(t, func() error {
+					return runPlugin([]string{
+						"kv", "set", "--plugin", fx.pluginKey, "--user", id(fx.userID),
+						"--key", "echo", "--value", "v",
+					})
+				})
+			}},
+		// 这一条的 marker 与卸载那条不同：两条回显的开头本来就该分开
+		// （一个删插件、一个只删键），marker 跟着分开才测得出那件事。
+		{command: "plugin", what: "kv delete", marker: "的键 echo-doomed", stdout: stdoutEmpty,
+			run: func(t *testing.T, fx *streamFixture) (string, string) {
+				// 先写一个再删：删一个不存在的键本身是失败（退出码 4）。
+				mustStream(t, func() error {
+					return runPlugin([]string{
+						"kv", "set", "--plugin", fx.pluginKey, "--user", id(fx.userID),
+						"--key", "echo-doomed", "--value", "v",
+					})
+				})
+				return mustStream(t, func() error {
+					return runPlugin([]string{
+						"kv", "delete", "--plugin", fx.pluginKey, "--user", id(fx.userID),
+						"--key", "echo-doomed",
+					})
+				})
+			}},
 	}
 
 	// 条数写成判据：少了说明某条写命令没人看着了，而「回显又跑回 stdout」正是
 	// 那样溜进来的。
-	if len(cases) != 22 {
-		t.Fatalf("这张表里 %d 条写命令，期望 22 条", len(cases))
+	if len(cases) != 25 {
+		t.Fatalf("这张表里 %d 条写命令，期望 25 条", len(cases))
 	}
 
 	for _, tc := range cases {

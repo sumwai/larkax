@@ -348,9 +348,11 @@ go run ./cmd/larkaxctl --env-file .env.staging wallet create --user alice
 上表是**服务**（`cmd/larkax`）的清单。运维命令（`cmd/larkaxctl`）的配置面小得多：
 它只读 `LARKAX_DB_DSN`、`LARKAX_LOG_LEVEL` 与 `LARKAX_ENV`，缺 DSN 才失败。
 `LARKAX_ROLE` 决定不了任何一条运维命令的成败——命令不属于任何角色——所以
-`larkaxctl migrate up` 在没有配角色的机器上照样能跑。真正需要主密钥的命令只有
-两个（`channel` 的写入与 `secret rotate`），它们自己读 `LARKAX_MASTER_KEYS`。
-两个入口见 `internal/config` 的 `Load` 与 `LoadOps`。
+`larkaxctl migrate up` 在没有配角色的机器上照样能跑。读这个变量的是这几组命令：
+`channel create` / `channel update`（写凭证）、`secret rotate`、以及
+`plugin delete` / `plugin kv set` / `plugin kv delete`（删插件、或动它的私有存储）
+——它们自己读 `LARKAX_MASTER_KEYS`。两个入口见 `internal/config` 的 `Load` 与
+`LoadOps`。
 
 **为什么这么少：** 环境变量必须跟着数据一起走。备份恢复或换机器时漏了一个变量，
 数据就可能不可用，而这类错误往往几周后才被发现。所以只有「连上数据库之前就必须拿到」
@@ -779,13 +781,19 @@ go run ./cmd/larkaxctl channel delete --id 7
 「要查的那一行」指解析一个标识时它不在库里（例如 `--user` 给了一个不存在的
 用户名），它的下一步与撞唯一键一样：先去看数据里现在是什么。
 
-需要主密钥（`LARKAX_MASTER_KEYS`）的命令只有两个：渠道的**写入**
-（`channel create` / `update`）与 `secret rotate`。凭证是信封加密的，只有
-`credential.Sealer` 能产出可解开的密文，直接往库里写一行 `bytea` 补不上。
+需要主密钥（`LARKAX_MASTER_KEYS`）的是这几组命令：渠道的**写入**
+（`channel create` / `update`）、`plugin delete` / `plugin kv set` /
+`plugin kv delete`、以及 `secret rotate`。它们要它的缘由不是同一个：渠道那几条与
+`secret rotate` 都要**写凭证**——凭证是信封加密的，只有 `credential.Sealer` 能产出
+可解开的密文，直接往库里写一行 `bytea` 补不上；`plugin` 那三条不对任何东西解密，
+要的是「跑它的机器带着运维凭证」——把一条删数据的入口开在只有库口令的机器上，
+等于把「能不能删」交给连接串。**别把它读成「凡改库都要」**：`settings set`、
+`apikey create`、`user create`、`wallet credit` 都改库，都不读它。
 它们读的是这个环境变量本身，与 `LARKAX_ROLE` 无关——运维命令不属于任何角色，
 把命令的成败绑到角色上，会让 `LARKAX_ROLE=worker` 时明明设好了主密钥却报
-「没有读到主密钥」。其余命令不碰凭证，没有主密钥也能跑，其中
-`channel list` / `enable` / `disable` / `delete` 连密钥材料都不需要。
+「没有读到主密钥」。其余命令没有主密钥也能跑，其中
+`channel list` / `enable` / `disable` / `delete` 与 `plugin list` / `get` /
+`kv get` 连密钥材料都不需要。
 
 每条子命令的完整用法见 `larkaxctl <子命令> --help`，例如
 `go run ./cmd/larkaxctl channel --help`。

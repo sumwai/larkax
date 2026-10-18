@@ -426,6 +426,7 @@ var subGroupHelpCases = []subGroupHelpCase{
 	{"price calendar", priceCalendarShortUsage, priceCalendarUsage, []string{"price", "calendar", "help"}},
 	{"maintenance idempotency", maintenanceIdempotencyShortUsage, maintenanceIdempotencyUsage,
 		[]string{"maintenance", "idempotency", "help"}},
+	{"plugin kv", pluginKVShortUsage, pluginKVUsage, []string{"plugin", "kv", "help"}},
 }
 
 // TestSubGroupHelpKeepsTheSameShape 断言二级命令组的帮助与一级命令同一套规矩：
@@ -466,7 +467,7 @@ func TestSubcommandHelpHasNoDesignRationale(t *testing.T) {
 	}
 }
 
-// helpTextsForGate 是这几道门管辖的全部文本：一级命令的短版与长版，加上三个
+// helpTextsForGate 是这几道门管辖的全部文本：一级命令的短版与长版，加上每个
 // 二级命令组的短版与长版。
 //
 // 抽成一份是因为「管哪些文本」这件事本身就是判据的一部分：另写几份清单的话，
