@@ -75,10 +75,67 @@ func TestParseRejectsGarbage(t *testing.T) {
 	}
 }
 
+// 幅值超出能表示的范围时报 ErrOverflow，断言的是**那个错误值**
+// （errors.Is），不是「有没有出错」：把 ErrOverflow 换成别的错，下面每一条
+// 都要跟着红。
+//
+// 两端各留一条紧挨着的界外，判据才真的落在边界上：正侧上界是 MaxInt64 个
+// 最小单位（String 印 92233720368.54775807），负侧上界是 2^63
+// （印 -92233720368.54775808）。负侧比正侧多那一格，就是这里要守住的东西。
 func TestParseRejectsOverflow(t *testing.T) {
 	// 远超 int64/10^8 的整数元
 	if _, err := Parse("999999999999999999999"); !errors.Is(err, ErrOverflow) {
 		t.Errorf("应报 ErrOverflow，得到 %v", err)
+	}
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"正侧上界的下一格", "92233720368.54775808"},
+		{"负侧上界的下一格", "-92233720368.54775809"},
+		{"四舍五入之后越过正侧上界", "92233720368.547758075"},
+		// 整数部分是 MaxInt64 元、小数又进位：幅值远在范围之外，而拦下它的是
+		// **乘积之前**那条前置判据——没有它，`whole*unit` 会先在 uint64 里回绕，
+		// 后面那道按幅值的比较就用在一个已经被改坏的值上了。
+		{"整数部分顶在上界、小数又进位", "9223372036854775807.999999999"},
+		// 下面两格钉的是**进位之后**那道 `magnitude > limit`：整数部分自己还在
+		// 范围内，前面那条按幅值的前置判据放它过去，把它拦下来的是进位把幅值推过
+		// 上界之后的那一次比较。少了那一次比较，正侧这一格会回绕成负值、负侧这一格
+		// 会回绕成正的，两版都静默返回。
+		{"进位让整数部分越过正侧上界", "92233720368.999999999"},
+		{"同上，负侧", "-92233720368.999999999"},
+		// 上面那格的孪生：整数部分贴下界时，拦下它的是**乘积之前**那条前置判据——
+		// 没有它，`whole*unit` 会先在 uint64 里回绕成 0，进位再补一个 unit 又正好
+		// 回到 0，同样静默返回零。
+		{"负侧的孪生输入：整数部分贴下界、小数还要进位", "-9223372036854775807.999999999"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Parse(tc.in)
+			if !errors.Is(err, ErrOverflow) {
+				t.Fatalf("Parse(%q) = %s，err = %v，期望 ErrOverflow", tc.in, got.String(), err)
+			}
+			if !got.IsZero() {
+				t.Fatalf("报溢出时返回的应是零，得到 %s", got.String())
+			}
+		})
+	}
+}
+
+// 四舍五入可以正好落到负侧上界那一格，而那一格是可表示的。
+//
+// 这一条与上面「越过正侧上界」的那条是一对：同一句取整，正侧越界、负侧刚好
+// 抵达，差的就是负侧多出来的那一格。
+func TestParseRoundingReachesMinInt64(t *testing.T) {
+	got, err := Parse("-92233720368.547758075")
+	if err != nil {
+		t.Fatalf("Parse 出错: %v", err)
+	}
+	if got.Units() != math.MinInt64 {
+		t.Fatalf("Units() = %d，期望 %d", got.Units(), int64(math.MinInt64))
+	}
+	if want := "-92233720368.54775808"; got.String() != want {
+		t.Fatalf("String() = %q，期望 %q", got.String(), want)
 	}
 }
 
@@ -305,11 +362,18 @@ func TestStringOfMinInt64(t *testing.T) {
 		t.Fatalf("解析回的最小单位数是 %d，期望 %d", magnitude, uint64(1)<<63)
 	}
 
-	// 已知边界：Parse 读不回这一串。它按「整数部分 × unit + 小数部分」累加，
-	// 幅值 2^63 已越过 MaxInt64，于是报 ErrOverflow。这是 Parse 的输入范围问题，
-	// 与 String 的兜底是两件事——这里把它钉住，将来有人扩 Parse 的范围时这条会说话。
-	if _, err := Parse(got); !errors.Is(err, ErrOverflow) {
-		t.Fatalf("Parse(%q) 应报 ErrOverflow，得到 %v", got, err)
+	// 这一串必须还能被 Parse 读回来：负侧的门槛按幅值到 2^63，
+	// 而不是与正侧一起卡在 MaxInt64 上。卡在 MaxInt64 的话，这里会是
+	// ErrOverflow——类型自己印出来的串自己读不回，而那个值完全合法。
+	back, err := Parse(got)
+	if err != nil {
+		t.Fatalf("Parse(%q) 出错: %v", got, err)
+	}
+	if back.Units() != math.MinInt64 {
+		t.Fatalf("Parse(%q).Units() = %d，期望 %d", got, back.Units(), int64(math.MinInt64))
+	}
+	if again := FromUnits(math.MinInt64).String(); again != got {
+		t.Fatalf("FromUnits(MinInt64).String() = %q，期望 %q", again, got)
 	}
 }
 
@@ -327,9 +391,8 @@ func TestSumCheckedToMinInt64String(t *testing.T) {
 	}
 }
 
-// String 与 Parse 在其余边界上的往返不变。
-//
-// 上面两处改的是最小值的兜底，这一条确认兜底之外的值一个都没动。
+// String 与 Parse 在边界上互为逆运算：两端都进表——正侧上界是 MaxInt64，
+// 负侧上界是 MinInt64，后一格要到 Parse 的门槛按符号分之后才读得回来。
 func TestStringParseRoundTripBoundaries(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -341,6 +404,7 @@ func TestStringParseRoundTripBoundaries(t *testing.T) {
 		{"普通正数", 12345678901, "123.45678901"},
 		{"普通负数", -12345678901, "-123.45678901"},
 		{"MaxInt64", math.MaxInt64, "92233720368.54775807"},
+		{"MinInt64", math.MinInt64, "-92233720368.54775808"},
 		{"-MaxInt64", -math.MaxInt64, "-92233720368.54775807"},
 	}
 	for _, tc := range cases {
