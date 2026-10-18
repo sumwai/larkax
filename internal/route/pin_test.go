@@ -168,6 +168,16 @@ func TestPlanPinFirstDoesNotMutateInput(t *testing.T) {
 }
 
 // 已经在最前的候选被钉住时，plan 原样返回（连切片都不必重建）。
+//
+// 变异：`if idx <= 0` 改成 `< 0`。这一处是**等价变异**：`idx == 0` 时下面
+// 那段重建只是把同一份列表重新拼了一遍——`[Candidates[0]]` 接上
+// `Candidates[:0]`（空的）再接上 `Candidates[1:]`，逐项、个数、顺序都与
+// 入参相同，所以「本来就在最前」这一格上两版交回的候选列表一模一样。
+//
+// 这一格分不开的是**切片本身**：原版把入参那个切片原样交回，变异版交回
+// 一个新建的（元素相同、cap 不同）。本仓没有读切片身份或 cap 的地方，
+// 而且两种写法都满足 pinFirst 的契约「不改动入参」——所以没有任何输入
+// 能让两版在**可观察的行为**上分开。（同类：容量提示变异。）
 func TestPlanPinFirstOnLeadingCandidateIsNoop(t *testing.T) {
 	plan := Plan{Candidates: []Candidate{candidate(1, "m"), candidate(2, "m")}}
 	if got := plan.pinFirst(1); got.Candidates[0].Channel.ID != 1 || len(got.Candidates) != 2 {
