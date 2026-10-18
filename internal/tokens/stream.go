@@ -119,8 +119,6 @@ type StreamEstimator struct {
 	outputSource Source
 	// toolArgs 是已累计的工具参数 token 数。
 	toolArgs int64
-	// toolCalls 是已开始的工具调用个数。
-	toolCalls int
 }
 
 // NewStreamEstimator 构造累加器。model 决定用哪套词表与标定表。
@@ -188,7 +186,6 @@ func (e *StreamEstimator) ObserveToolCall(id, name, args string) {
 		return
 	}
 	if args != "" || id != "" || name != "" {
-		e.toolCalls++
 		e.toolArgs += int64(ToolCallFrameTokens)
 	}
 	if id != "" || name != "" {
