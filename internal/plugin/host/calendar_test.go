@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/Calcium-Ion/moejs"
+
+	"github.com/sumwai/larkax/internal/calendar"
+	"github.com/sumwai/larkax/internal/plugin/sandbox"
 )
 
 // fakeCalendar 是一个可编排的日历数据源。
@@ -20,6 +23,10 @@ type fakeCalendar struct {
 	lastCtx context.Context
 	lastReg string
 	lastAt  time.Time
+
+	// window 是 Peak 收到的窗口串。它记下来是因为**窗口是插件给的那一个**：
+	// 宿主自己换一个窗口的时候，判定结果看上去仍然是个判定结果。
+	window string
 
 	// info 是 Day 的返回值；err 非空时 Day 直接报错。
 	info DayInfo
@@ -38,9 +45,9 @@ func (f *fakeCalendar) Day(ctx context.Context, region string, instant time.Time
 	return f.info, nil
 }
 
-func (f *fakeCalendar) Peak(ctx context.Context, region string, instant time.Time) (string, error) {
+func (f *fakeCalendar) Peak(ctx context.Context, region string, instant time.Time, window string) (string, error) {
 	f.calls++
-	f.lastCtx, f.lastReg, f.lastAt = ctx, region, instant
+	f.lastCtx, f.lastReg, f.lastAt, f.window = ctx, region, instant, window
 	return f.peak, f.peakErr
 }
 
@@ -279,6 +286,8 @@ func TestCalendarRejectsBadArguments(t *testing.T) {
 		{"holidayName ts 是小数", "holidayName", js("1.5", "CN"), "时间戳"},
 		{"hourIn region 缺失", "hourIn", nil, "地区"},
 		{"weekdayIn region 空串", "weekdayIn", js(""), "地区"},
+		{"peak ts 缺失", "peak", js("", "CN", "08:00-22:00"), "时间戳"},
+		{"peak region 缺失", "peak", js(int64(1700000000), nil, "08:00-22:00"), "地区"},
 	}
 
 	for _, tc := range cases {
@@ -300,6 +309,87 @@ func TestCalendarRejectsBadArguments(t *testing.T) {
 	}
 }
 
+// TestPeakReturnsTheLevelAsIs：peak 把三态**原样**回给插件，一个也不改。
+//
+// 与 kind 同一条口径：unknown 是独立状态，压成 off_peak 就是替插件按低谷
+// 猜了一次——插件按这个值决定上报什么用量、走哪条渠道。要说后果，它封住的
+// 是插件在这一维上的上界：那几天真落在高峰上时，插件也只会按低谷那一档算，
+// 而账上看不出来。
+func TestPeakReturnsTheLevelAsIs(t *testing.T) {
+	cases := []struct {
+		name string
+		peak string
+		want string
+	}{
+		{"高峰", kindPeak, "peak"},
+		{"低谷", kindOffPeak, "off_peak"},
+		{"判不出来", kindUnknown, "unknown"},
+		{"契约外的取值也如实说不知道", "半峰", "unknown"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cal := &fakeCalendar{peak: tc.peak}
+			fn := capability(t, Standard(calEnv(cal)), capCalendar).Funcs["peak"]
+
+			got, err := fn(context.Background(), js(int64(testInstant.Unix()), "CN", "08:00-22:00"))
+			if err != nil {
+				t.Fatalf("peak 出错: %v", err)
+			}
+			if got.String() != tc.want {
+				t.Errorf("peak = %q，期望 %q", got.String(), tc.want)
+			}
+		})
+	}
+}
+
+// TestPeakWindowTravelsWithTheCall：数据源拿到的是**插件给的那个窗口**，
+// 宿主不替它换一个。
+//
+// 宿主自己拿一个默认窗口去判的话，插件写「08:00-22:00」而宿主按别的段算，
+// 返回的仍然是一个看着像结果的档位：错的是价，而账上看不出。
+func TestPeakWindowTravelsWithTheCall(t *testing.T) {
+	for _, window := range []string{"08:00-22:00", "22:00-08:00", "00:00-00:00"} {
+		t.Run(window, func(t *testing.T) {
+			cal := &fakeCalendar{peak: kindPeak}
+			fn := capability(t, Standard(calEnv(cal)), capCalendar).Funcs["peak"]
+
+			if _, err := fn(context.Background(), js(int64(testInstant.Unix()), "CN", window)); err != nil {
+				t.Fatalf("peak 出错: %v", err)
+			}
+			if cal.window != window {
+				t.Errorf("数据源收到的窗口 = %q，期望插件给的 %q", cal.window, window)
+			}
+			if cal.lastReg != "CN" || !cal.lastAt.Equal(testInstant) {
+				t.Errorf("地区/时刻 = %q/%v，期望 CN/%v", cal.lastReg, cal.lastAt, testInstant)
+			}
+		})
+	}
+}
+
+// TestPeakIllegalWindowIsBadArgument：写法不合法的那条路上，
+// **报 bad_argument 回插件，并且一次都不去查日历**。
+//
+// 不校验就下传的话，`25:00-26:00` 这类串在判定里只会变成「不落在任何一段
+// 里」，也就是静默的 off_peak：插件看不出自己写错了，这条路算出来的钱会一直
+// 按低谷那一档走。
+func TestPeakIllegalWindowIsBadArgument(t *testing.T) {
+	for _, window := range []string{"25:00-26:00", "8:5-9:00", "08:00", "08:00-", "", "上午九点到十点"} {
+		t.Run(window, func(t *testing.T) {
+			cal := &fakeCalendar{peak: kindOffPeak}
+			fn := capability(t, Standard(calEnv(cal)), capCalendar).Funcs["peak"]
+
+			err := invoke(fn, js(int64(testInstant.Unix()), "CN", window))
+			assertClassified(t, err, sandbox.CodeBadArgument, nil)
+			if !strings.Contains(err.Error(), window) {
+				t.Errorf("错误 = %v，期望把插件给的那个串回显出来", err)
+			}
+			if cal.calls != 0 {
+				t.Errorf("窗口写法不合法却查了 %d 次日历", cal.calls)
+			}
+		})
+	}
+}
+
 // TestCalendarSourceErrorSurfaces 确认数据源报错时如实往上抛，
 // 而不是回落成某个判定结果。
 func TestCalendarSourceErrorSurfaces(t *testing.T) {
@@ -314,14 +404,49 @@ func TestCalendarSourceErrorSurfaces(t *testing.T) {
 		{"holidayName", js(int64(testInstant.Unix()), "CN")},
 		{"hourIn", js("CN")},
 		{"weekdayIn", js("CN")},
+		{"peak", js(int64(testInstant.Unix()), "CN", "08:00-22:00")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cal := &fakeCalendar{err: sentinel}
+			cal := &fakeCalendar{err: sentinel, peakErr: sentinel}
 			impl := capability(t, Standard(calEnv(cal)), capCalendar).Funcs[tc.name]
 
 			_, err := impl(context.Background(), tc.args)
 			if !errors.Is(err, sentinel) {
 				t.Fatalf("错误 = %v，期望包住 %v", err, sentinel)
+			}
+		})
+	}
+}
+
+// TestCalendarLiteralsMatchCalendarPackage 把本包手写的几个取值与
+// internal/calendar 的常量对一遍。
+//
+// 本包**生产代码**刻意不 import internal/calendar（见 host.go 的 CalendarSource：
+// 那里的接口是窄的，好让那个包的结果类型自己演进），代价是两套字符串对不上时
+// 编译器不会出声：`kindFn` 与 `peakFn` 会把对不上的取值当成契约外的值，按
+// default 静默降级成 unknown——插件拿到一个「合法」的档位，而那个档位是错的。
+//
+// 所以这一条用例替编译器看着它们。它是本包唯一 import 那个包的地方，而且只比
+// 字符串、不绑它的类型：那边改一个取值这里要红，这里改一个那边也要红。
+func TestCalendarLiteralsMatchCalendarPackage(t *testing.T) {
+	cases := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"工作日", kindWorkday, string(calendar.DayWorkday)},
+		{"休息日", kindRestDay, string(calendar.DayRestDay)},
+		{"未知的一天", kindUnknown, string(calendar.DayUnknown)},
+		{"高峰", kindPeak, string(calendar.PeakKindPeak)},
+		{"低谷", kindOffPeak, string(calendar.PeakKindOffPeak)},
+		// 「未知」在那边有两个常量（日与峰谷各一个），本包只写了一个字面量
+		// 给两处用（见 calendar.go 那段注释），所以两个都要对得上。
+		{"未知的峰谷", kindUnknown, string(calendar.PeakKindUnknown)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Errorf("本包用的 %q 与 internal/calendar 的 %q 对不上", tc.got, tc.want)
 			}
 		})
 	}

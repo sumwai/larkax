@@ -443,7 +443,7 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 			// 与 tier 要求档位名是字面量同一条理由：运行期才知道的窗口
 			// 没法在规则被保存时给人看。
 			// 这一遍解析里包含「全天段不能与其他段并列」，那一条是为了钱
-			// 上移到这里来的——预留那一步不跑求值（见 parsePeakWindows）。
+			// 上移到这里来的——预留那一步不跑求值（见 ParsePeakWindows）。
 			if len(n.Arguments) != 1 {
 				return fmt.Errorf("isPeak 需要一个参数（高峰时段，例如 \"08:00-22:00\"），当前 %d 个", len(n.Arguments))
 			}
@@ -451,7 +451,11 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 			if err != nil {
 				return fmt.Errorf("isPeak 的高峰时段必须是字符串字面量，当前是 %T", n.Arguments[0])
 			}
-			if _, err := parsePeakWindows(literal); err != nil {
+			if _, err := ParsePeakWindows(literal); err != nil {
+				// 写法错就报写法错，不裹一层 ErrCalendarRequired：那句话说的是
+				// 「日历这一头没接上，或者那一天的数据查不到」，而这里错的是
+				// 规则自己写的那个串，要改的是它。裹上去之后写规则的人看到的
+				// 第一句是「日历不可用」，矛头指向了数据那一侧。
 				return err
 			}
 			return nil

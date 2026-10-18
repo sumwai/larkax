@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -73,6 +74,41 @@ export default definePlugin({
 });
 `
 
+// 一个只用 calendar 的插件：同一个时刻问两个窗口，再问一个写法不对的窗口。
+//
+// 三个答案通过请求头带回来（补丁里唯一能把字符串带出插件的地方），
+// 于是断言读的就是插件真的拿到的东西，而不是测试自己算的。
+const e2ePeakPlugin = `
+import { definePlugin, calendar } from "larkax";
+
+export const meta = {
+  key: "peak",
+  name: "峰谷样例",
+  apiVersion: 1,
+  capabilities: ["calendar"],
+};
+
+export default definePlugin({
+  onRequest() {
+    // 同一个时刻、两个窗口：档位跟着窗口走，不跟着时刻走。
+    const 白天 = calendar.peak(1955412000, "CN", "08:00-22:00");
+    const 夜班 = calendar.peak(1955412000, "CN", "22:00-08:00");
+    // 写法不合法时必须抛错。静默回一个 off_peak 的话，插件看不出自己
+    // 写错了，这条路算出来的钱会一直按低谷那一档走。
+    let 非法 = "没有报错";
+    try { calendar.peak(1955412000, "CN", "25:00-26:00"); }
+    catch (e) { 非法 = String(e && e.message); }
+    return {
+      headers: {
+        "x-larkax-peak-day": 白天,
+        "x-larkax-peak-night": 夜班,
+        "x-larkax-peak-bad": 非法,
+      },
+    };
+  },
+});
+`
+
 // fakeKV 是一个内存版 KV，按 (plugin, user) 隔离。
 //
 // 它自己实现隔离而不是靠调用方拼键：真实实现按主键三段隔离，
@@ -120,6 +156,100 @@ func itoa(n int64) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// 端到端：插件写下的高峰窗口真的到了宿主，宿主的答案真的回了插件。
+//
+// 这条走的是与上面那条同一条链路（注册 → 建会话 → host.Build → SDK → JS），
+// 只是把用到的能力换成 calendar 的 peak。要证明的是三件事，每一件都只在
+// 整条链路上才看得见：
+//
+//  1. **窗口随调用走**：同一个时刻换一个窗口，档位跟着换。宿主自己拿一个
+//     排班去算的实现也能返回一个看着像结果的档位，而按它算出来的钱是错的。
+//  2. **写法不合法时插件拿到错误**，不是一个静默的 off_peak——后者会让这条
+//     路算出来的钱一直按低谷那一档走，而账上看不出异常。
+//  3. **非法窗口一次都没有下传到日历**。
+func TestEndToEndCalendarPeak(t *testing.T) {
+	reg := mustPublish(t, Registration{Key: "peak", Source: e2ePeakPlugin})
+
+	cal := &peakStub{levels: map[string]string{
+		"08:00-22:00": "peak",
+		"22:00-08:00": "off_peak",
+	}}
+	env := host.Env{Plugin: "peak", RequestID: "req-1", UserID: 7, Calendar: cal}
+
+	s, err := reg.NewSession(t.Context(), SessionRequest{CanonicalModel: "m", Protocol: "openai"},
+		func(*Plugin) sandbox.Host { return host.Build(env) }, sandbox.Limits{})
+	if err != nil {
+		t.Fatalf("建会话失败: %v", err)
+	}
+	defer s.Close()
+
+	req := &channel.Request{Model: "m"}
+	res := s.OnRequest(t.Context(), RequestContextFrom("req-1", req, "m", "openai"))
+	if err := res.Err(); err != nil {
+		t.Fatalf("onRequest 失败: %v", err)
+	}
+	if res.Patch == nil {
+		t.Fatal("onRequest 该给出补丁")
+	}
+	if _, err := ApplyRequestPatch(req, res.Patch); err != nil {
+		t.Fatalf("应用补丁失败: %v", err)
+	}
+
+	// 同一个时刻，两个窗口，两个档位。
+	if got := req.Headers["x-larkax-peak-day"]; got != "peak" {
+		t.Errorf("白天窗口下的档位 = %q，期望 peak", got)
+	}
+	if got := req.Headers["x-larkax-peak-night"]; got != "off_peak" {
+		t.Errorf("夜班窗口下的档位 = %q，期望 off_peak", got)
+	}
+
+	// 非法窗口：插件拿到的是一个错误，而不是一个档位。
+	bad := req.Headers["x-larkax-peak-bad"]
+	if bad == "没有报错" {
+		t.Fatal("非法窗口不该静默给出一个档位——那样价会一直按那个档位收")
+	}
+	if !strings.Contains(bad, sandbox.CodeBadArgument) {
+		t.Errorf("插件看到的错误 = %q，期望带分类码 %s（插件要能据此分支）", bad, sandbox.CodeBadArgument)
+	}
+	if !strings.Contains(bad, "写法不合法") {
+		t.Errorf("插件看到的错误 = %q，期望说清是窗口写法的问题", bad)
+	}
+
+	// 而它没有下传到日历：宿主只被问过两次，都是那两个合法的窗口。
+	if len(cal.windows) != 2 || cal.windows[0] != "08:00-22:00" || cal.windows[1] != "22:00-08:00" {
+		t.Errorf("日历收到的窗口 = %v，期望只有那两个合法窗口", cal.windows)
+	}
+
+	// 插件自己接住了那个错误，所以整条链路不算失败。
+	if fails := s.Failures(); len(fails) != 0 {
+		t.Fatalf("插件 catch 住的错误不该算失败，实际 %v", fails)
+	}
+}
+
+// peakStub 是一个按窗口串查表的日历数据源。
+//
+// 它**不做判定**：判定的正确性由 internal/calendar 与 internal/assembly 的
+// 用例管（那两处用的是真实现与真数据）。这条链路上要证明的是「窗口到了宿主、
+// 答案回了插件」，所以这里按窗口查表回答，并记下每一次收到的窗口。
+// 查不到就报错而不是猜一个档位——与生产实现同一个处置。
+type peakStub struct {
+	levels  map[string]string // 窗口串 → 档位
+	windows []string          // 按调用顺序记下收到的窗口
+}
+
+func (s *peakStub) Day(context.Context, string, time.Time) (host.DayInfo, error) {
+	return host.DayInfo{Kind: "workday"}, nil
+}
+
+func (s *peakStub) Peak(_ context.Context, _ string, _ time.Time, window string) (string, error) {
+	s.windows = append(s.windows, window)
+	level, ok := s.levels[window]
+	if !ok {
+		return "", fmt.Errorf("没登记过的窗口 %q", window)
+	}
+	return level, nil
 }
 
 // 端到端：一个插件在五个 hook 上依次给出补丁，每个补丁都真的落到内核类型上。
