@@ -93,6 +93,13 @@
 # 后三条被 gateway 的两条实测路取代。同批的 `Usage.IsEmpty` **保留**，
 # 理由栏从 `#282` 改挂 `#267`（语义与那条缺口是同一处，不许提前动）。
 #
+# 之后又有两条从 `gap` 改判 `lib`——**不是缺口消失了，是「缺口」这个类型不成立了**：
+# 它们挂的 #267 / #278 都已关闭，而两条的处置都不是「接线」。`Usage.IsEmpty`：那一处
+# 缺口最后落在网关侧的 `usageSourceOf`（`tokens.SourceUnreported`）上，没有用它，
+# 「修的时候用它兑现」那个前提作废。`Cache.GetWithGlobals`：#278 选的就是「显式标注为
+# 未接线」，注释已经写在那个方法上。**gap 是「有一条 issue 在跟」，issue 一关就不再是
+# gap**——留在 gap 里只会让下一个人点进一个已关闭的条目。
+#
 # 22 之后一共加了 4，来自两批**结构性**的增加，不是有人拿白名单把新出现的
 # 符号按住——判据是问一句「这些符号是因为有人接了什么才变多的，还是因为
 # 有人躲了什么才变多的」，两批都是前者（与 scripts/deadcode-allowlist.txt
@@ -134,8 +141,8 @@
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES_DEFAULT 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
 internal/assembly/assembly.go  | pluginCalendar.Peak               | lib | 接口要求实现，而插件 SDK 的 calendar 命名空间没有 peak 函数可调（宿主日历接口里有 Peak）；接上 peak 时删掉这一条
-internal/billing/billing.go    | Usage.IsEmpty                     | gap | #267 与那条「非流式的 billing_path 分不开『上游没报 usage』与『上游报了 0』」是同一处缺口的两面；那一处修的时候用它兑现，语义不许提前动
-internal/billing/expr/compile.go | Cache.GetWithGlobals            | gap | #278 注入常量 Globals 那条链路没有生产入口；它是 CompileWithGlobals 唯一的调用点，掩蔽沿调用链传到了那个自由函数
+internal/billing/billing.go    | Usage.IsEmpty                     | lib | 公开类型的判断方法，本包用例拿它当断言助手；#267 的修法落在网关侧的 usageSourceOf（tokens.SourceUnreported）上，没有用它——「修的时候用它兑现」那个前提已经作废，语义与理由见 billing.go 上它的注释
+internal/billing/expr/compile.go | Cache.GetWithGlobals            | lib | #278 的处置就是「显式标注为未接线」，注释写在 compile.go 的 GetWithGlobals 上；它是 CompileWithGlobals 唯一的调用点，掩蔽沿调用链传到了那个自由函数，所以两条的处境一起记在理由里
 internal/calendar/calendar.go  | Date.IsWeekend                    | lib | 日历库的纯星期规则，给调用方做回退策略用；目前只有测试在调它（本包不把它当判定结果）
 internal/calendar/memory.go    | MemorySource.AddDay               | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.SetDefaultRange      | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
