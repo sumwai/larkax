@@ -149,6 +149,39 @@ func TestMemorySourceDefaultRangeRejectsBadInput(t *testing.T) {
 	}
 }
 
+// 起点等于终点是合法的一格：区间是闭区间，一格也能铺。
+//
+// 变异把 `end.cmp(start) < 0` 改成 `<= 0` 时，这一格会按「起点晚于终点」
+// 被拒——而它一点都不晚。上面那条用例只喂了真正反过来的日期，看不出这个
+// 差别。
+func TestMemorySourceDefaultRangeSingleDay(t *testing.T) {
+	day := d(2026, time.January, 5)
+	m := NewMemorySource()
+	if err := m.SetDefaultRange(RegionCN, day, day, allWorkdays); err != nil {
+		t.Fatalf("起点等于终点的区间应当被接受，实际报错: %v", err)
+	}
+
+	row, exists, err := m.LookupDay(context.Background(), RegionCN, day)
+	if err != nil {
+		t.Fatalf("LookupDay 出错: %v", err)
+	}
+	if !exists {
+		t.Fatal("单日区间里的那一天应当查得到")
+	}
+	if row.Date != day {
+		t.Errorf("默认行的日期 = %s，期望 %s", row.Date, day)
+	}
+	if row.OffDay || row.MakeupWorkday {
+		t.Errorf("allWorkdays 铺出来的行应当是工作日，实际为 %+v", row)
+	}
+	// 区间只有一格，前后两天都不该被铺上。
+	for _, out := range []Date{d(2026, time.January, 4), d(2026, time.January, 6)} {
+		if _, exists, _ := m.LookupDay(context.Background(), RegionCN, out); exists {
+			t.Errorf("%s 落在单日区间之外，不该返回数据行", out)
+		}
+	}
+}
+
 // 单独登记的行优先于默认区间，且与两者设置的先后无关。
 func TestMemorySourceExplicitDayWinsOverDefault(t *testing.T) {
 	holiday := d(2026, time.January, 1)

@@ -395,25 +395,29 @@ func TestPeakAtPropagatesSourceError(t *testing.T) {
 
 // 跨零点段的显示要标出来，否则 22:00-02:00 看起来像写反了。
 //
-// 变异：`EndMinute <= StartMinute` 改成 `<`，恰好相等（全天段）会被
-// 标成「次日」——而全天段不是跨零点。
+// 全天段（两端相等）也标「次日」：它是跨满一整天，从当天起点走到次日同一个
+// 钟点（见 NewPeakWindow）。变异把 `EndMinute <= StartMinute` 改成 `<` 时，
+// 全天段会显示成 `00:00-00:00`，读起来像一段长度为零的区间。
+//
+// 断言整个字符串而不是「含有某个分隔符」：`00:00-次日00:00` 里同样含有一个
+// `-`，只查包含的话两版都过。
 func TestPeakWindowStringMarksOvernight(t *testing.T) {
 	cases := []struct {
 		start, end int
-		wantSep    string
+		want       string
 		why        string
 	}{
-		{9 * 60, 18 * 60, "-", "同日内"},
-		{22 * 60, 2 * 60, "-次日", "跨零点"},
-		{0, 0, "-", "全天段不是跨零点"},
+		{9 * 60, 18 * 60, "09:00-18:00", "同日内"},
+		{22 * 60, 2 * 60, "22:00-次日02:00", "跨零点"},
+		{0, 0, "00:00-次日00:00", "全天段跨满一整天"},
 	}
 	for _, tc := range cases {
 		w, err := NewPeakWindow(tc.start, tc.end)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.why, err)
 		}
-		if !strings.Contains(w.String(), tc.wantSep) {
-			t.Errorf("%s（%d-%d）：%q 里缺少 %q", tc.why, tc.start, tc.end, w.String(), tc.wantSep)
+		if got := w.String(); got != tc.want {
+			t.Errorf("%s（%d-%d）：String() = %q，期望 %q", tc.why, tc.start, tc.end, got, tc.want)
 		}
 	}
 }
@@ -423,6 +427,12 @@ func TestPeakWindowStringMarksOvernight(t *testing.T) {
 // 变异：`m >= w.StartMinute && m < w.EndMinute` 里的 `<` 改成 `<=`，
 // 结束那一分钟会被算进去——而区间是**前闭后开**的，否则相邻两段的
 // 交界处会被算两次。
+//
+// 跨零点那一支的入口 `EndMinute > StartMinute` 改成 `>=` 是**等价**的：
+// `fullDay()` 在它之前就把两端相等的情形拦掉、直接返回 true 了，走到这一行
+// 时两端一定不等，于是 `>=` 与 `>` 判的是同一批输入。这道前置守卫正是两支的
+// 分界——`String()` 里那个 `<=` 前面没有它，所以那一支不等价（见
+// TestPeakWindowStringMarksOvernight）。
 func TestPeakWindowContainsMinuteBoundaries(t *testing.T) {
 	// 同日内 09:00-18:00
 	w, _ := NewPeakWindow(9*60, 18*60)

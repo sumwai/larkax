@@ -92,6 +92,13 @@ func TestDateValid(t *testing.T) {
 		{d(2026, 13, 1), false},
 		{d(2026, time.January, 0), false},
 		{d(0, time.January, 1), false},
+		// 年份的合法范围是 [1, 9999]（store 那份文件的表头校验用的是同一段
+		// 范围），所以两端都要有：恰好 1 年与 9999 年的日期成立，10000 年
+		// 不成立。把 `< 1`、`> 9999` 改成 `<= 1`、`>= 9999` 的变异就落在
+		// 这两天上——它们会被判成非法，而这两年的日历都排得出来。
+		{d(1, time.January, 1), true},
+		{d(9999, time.December, 31), true},
+		{d(10000, time.January, 1), false},
 	}
 	for _, tc := range cases {
 		if got := tc.in.Valid(); got != tc.want {
