@@ -305,12 +305,16 @@ func TestValidateRejects(t *testing.T) {
 		{"pending 带 days", pendingWithDays, "days"},
 		{"pending 带 source", pendingWithSource, "source"},
 		{"少了一天", missingOneDay, "没有数据"},
-		{"同一天出现两次", duplicated, "两次"},
-		{"没有 off_day", noOffDay, "off_day"},
-		{"既放假又补班", contradictory, "矛盾"},
-		{"日期格式不对", badFormat, "YYYY-MM-DD"},
-		{"日期不成立", impossible, "2031-02-30"},
-		{"年外超过一年", farAway, "相邻"},
+		// 下面五条把「第几天」与日期一起写进 want：这五处报错都用 i+1 把
+		// 下标换算成给人看的序号，把那个 `+` 换成 `-` 之后，报错仍是一条
+		// 看着正常的消息，只是指向了另一天。只查「有没有提到 off_day」
+		// 这类词是看不出这个差别的。
+		{"同一天出现两次", duplicated, "第 366 天 2031-01-01 在文件里出现了两次"},
+		{"没有 off_day", noOffDay, "第 4 天 2031-01-04 没有 off_day"},
+		{"既放假又补班", contradictory, "第 4 天 2031-01-04 既放假又标成调休补班日"},
+		{"日期格式不对", badFormat, `第 4 天: 日期 "2031-1-05" 不是 YYYY-MM-DD 格式`},
+		{"日期不成立", impossible, `第 4 天: 日期 "2031-02-30" 不是 YYYY-MM-DD 格式`},
+		{"年外超过一年", farAway, "第 4 天 2035-01-05 不属于 2031 年"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -334,6 +338,55 @@ func TestValidateRejects(t *testing.T) {
 		if err := doc.validate(); err != nil {
 			t.Errorf("status=%s 的文档应当通过校验，实际为 %v", doc.Status, err)
 		}
+	}
+}
+
+// 年份的两端 [1, 9999] 各自都要能过。
+//
+// 变异把表头校验里的 `< 1`、`> 9999` 改成 `<= 1`、`>= 9999` 时，1 年与
+// 9999 年的文件会被判成非法——而这两年都能排出一整本日历，上面那条用例里的
+// 「年份为 0」与「年份超出公历」两格都挡不住它（那两格两版都会拒）。
+func TestValidateAcceptsBoundaryYears(t *testing.T) {
+	for _, year := range []int{1, 9999} {
+		if err := syncedDoc(year).validate(); err != nil {
+			t.Errorf("%d 年的文件应当通过校验，实际为 %v", year, err)
+		}
+	}
+}
+
+// 缺行时报出来的「例如」列表：只缺一天就写那一天，缺得多就列三个再缀一个
+// 省略号。
+//
+// 变异把 `i == shown` 改成 `!=` 时，第一个缺失日就会被换成省略号——报错里
+// 只剩一个「…」，而这条消息正是拿去定位缺了哪几天的。
+func TestMissingDaysErrorListsUpToThreeDates(t *testing.T) {
+	const year = 2031
+
+	// 只缺最后一天：那一天直接写出来，不该有省略号。
+	oneMissing := syncedDoc(year)
+	oneMissing.Days = oneMissing.Days[:len(oneMissing.Days)-1]
+	err := oneMissing.validate()
+	if err == nil {
+		t.Fatal("缺行的 synced 文档应当被拒绝")
+	}
+	wantOne := "但 2031 年的 1 天没有数据（例如 2031-12-31）"
+	if !strings.Contains(err.Error(), wantOne) {
+		t.Errorf("报错里应当有 %q，实际为 %v", wantOne, err)
+	}
+	if strings.Contains(err.Error(), "…") {
+		t.Errorf("只缺一天时不该出现省略号：%v", err)
+	}
+
+	// 缺前五天：列出头三个缺失日，再缀一个省略号。
+	manyMissing := syncedDoc(year)
+	manyMissing.Days = manyMissing.Days[5:]
+	err = manyMissing.validate()
+	if err == nil {
+		t.Fatal("缺行的 synced 文档应当被拒绝")
+	}
+	wantMany := "但 2031 年的 5 天没有数据（例如 2031-01-01、2031-01-02、2031-01-03、…）"
+	if !strings.Contains(err.Error(), wantMany) {
+		t.Errorf("报错里应当有 %q，实际为 %v", wantMany, err)
 	}
 }
 
