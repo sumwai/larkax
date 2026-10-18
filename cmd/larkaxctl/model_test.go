@@ -397,13 +397,9 @@ func TestModelEndpointsFlagRejectsUnknownValue(t *testing.T) {
 		}},
 	}
 
-	// 四种取值从 channel 包的常量取，不在用例里重抄一份路径字面量。
-	valid := []channel.Endpoint{
-		channel.EndpointChatCompletions,
-		channel.EndpointResponses,
-		channel.EndpointMessages,
-		channel.EndpointSystemOne,
-	}
+	// 取值清单从 channel 包那份取，不在用例里再抄一遍——抄的那一份在清单变动
+	// 之后不会跟着变，于是这条用例会替**漏改的那一处**开绿灯。
+	valid := channel.EndpointValues
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -441,8 +437,37 @@ func TestModelUsageListsEveryEndpointValue(t *testing.T) {
 	}
 }
 
-// TestModelEndpointDetailThreeStates 钉住端点那一栏给人看的三态。
+// TestModelUsageEndpointListIsDerived 判用法文本里那一串取值是不是**从清单派生**的。
 //
+// 与上一条的分工：上一条判「那几条取值都出现在文本里」——手抄一遍也能过，而它
+// 留着正好：清单本身不该由用例替它说话（那份清单在 internal/channel，那边有
+// 用例判它与常量声明一一对上）。这一条判的是那一串**就是清单本身**：独占一行、
+// 逐项、按顺序、不多不少。
+//
+// 顺序与条数都要判：「都在里面」判不出「顺序变了」与「多列了一条」，而那两种
+// 正是两份清单分岔时最先出现的形状。
+func TestModelUsageEndpointListIsDerived(t *testing.T) {
+	// 清单**独占一行**：夹在长句里会被折行与相邻的字搅在一起，而它正是使用者
+	// 要照着抄的那一串。
+	onOwnLine := false
+	for _, line := range strings.Split(modelUsage, "\n") {
+		if strings.TrimSpace(line) == channel.EndpointValueList {
+			onOwnLine = true
+		}
+	}
+	if !onOwnLine {
+		t.Errorf("用法文本里没有一行正好是清单 %q", channel.EndpointValueList)
+	}
+
+	// 每一条取值在整段用法文本里**只出现一次**：多出来的那一次就是别处又抄了
+	// 一遍，而那一份不会跟着清单变。
+	for _, e := range channel.EndpointValues {
+		if n := strings.Count(modelUsage, string(e)); n != 1 {
+			t.Errorf("用法文本里 %s 出现了 %d 次，期望 1 次——别处又列了一遍取值", e, n)
+		}
+	}
+}
+
 // 三种状态必须打得能分辨：「没配过」不参与选路判据，「明确一条都不支持」
 // 筛掉所有候选。都打成 - 或都打成空，使用者就分不出自己手上这一条是哪种。
 func TestModelEndpointDetailThreeStates(t *testing.T) {
