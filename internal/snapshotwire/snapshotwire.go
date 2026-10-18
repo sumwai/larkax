@@ -66,12 +66,51 @@ const maxConcurrentWrites = 8
 // 前者说明上限或流量需要调整，后者说明存储有问题。
 var ErrCapacityExceeded = errors.New("快照并发写已满，本条被丢弃")
 
+// ConsentSource 回答「这次请求此刻有没有有效的原样采集授权」。
+//
+// # 它只回答这一个问题
+//
+// 授权记录本身（capture_consents 表：范围、同意文案与版本、到期与撤销）
+// 不归这一层管，这一层只要一个是/否。这么分是为了让判定**关不上时朝安全
+// 那边倒**：查不到、说不清、出错，实现都应当返回 false——那时落下来的是
+// 骨架，而不是原文。
+//
+// # 为什么 ctx 一起给它
+//
+// 它可能要查一次库，而这是请求路径上的调用：客户端走掉时那次查库不该接着等。
+//
+// # 为什么 userID 与 requestID 分开给
+//
+// 两者对应授权记录上的两种范围：按一段时间（看 user_id）与按单条请求
+// （看 user_id + request_id）。哪个匹配得上由实现判，这一层不拼条件——
+// 拼在这里的话，表上的 shape 约束与判定就会各说各话。
+type ConsentSource interface {
+	AllowsRawCapture(ctx context.Context, userID int64, requestID string) bool
+}
+
+// NoConsentSource 是「这条链路上永远不存在有效授权」。
+//
+// 它是**如实**的实现，不是占位：一个没有授权入口的部署就是这个形状，
+// 每一条落下来的都是骨架。
+//
+// 装配层今天接的就是它——授权记录的写入与查询（capture_consents 的读写、
+// `larkaxctl consent` 子命令）属于下一步，那一步接上之前，「有没有授权」
+// 在代码里没有第二个答案。
+type NoConsentSource struct{}
+
+// AllowsRawCapture 永远回答「没有」。
+func (NoConsentSource) AllowsRawCapture(context.Context, int64, string) bool { return false }
+
 // Collector 是快照链路的装配结果：两个方向的脱敏器 + 一个落库层。
 //
 // 它同时实现 gateway.Redactor 与 gateway.SnapshotSink。
 type Collector struct {
 	requestRedactor  *snapshot.Redactor
 	responseRedactor *snapshot.Redactor
+
+	// consent 判「这一次要不要留原文」。**不接受 nil**（见 New）：
+	// 它在请求路径上被调用，nil 会在那里 panic。
+	consent ConsentSource
 
 	// 决策那条表面（见 internal/gateway 的 DecisionRedactor）的两个脱敏器。
 	//
@@ -125,12 +164,22 @@ type Collector struct {
 //
 // max_bytes 非法（非正）时返回错误而不回落到默认值：上限配错会导致
 // 每条骨架都降级成摘要层，静默回落会让这种配置错误永远不显形。
-func New(cfg Config, db DB, logger *slog.Logger) (*Collector, error) {
+//
+// # consent 不接受 nil
+//
+// 它在请求路径上被调用，nil 会在那里 panic——那既不是「不采集」也不是
+// 「不授权」，是一次故障。没有授权入口时传 NoConsentSource：那是**一个
+// 答案**（永远没有授权），与「忘了接」不是同一件事，而两者的后果也不同。
+func New(cfg Config, db DB, consent ConsentSource, logger *slog.Logger) (*Collector, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if consent == nil {
+		return nil, errors.New("授权来源为 nil：没有授权入口时传 NoConsentSource")
+	}
 	c := &Collector{
 		logger:        logger,
+		consent:       consent,
 		sem:           make(chan struct{}, maxConcurrentWrites),
 		store:         NewStore(db, logger),
 		collecting:    cfg.Enabled,
@@ -232,16 +281,32 @@ func (c *Collector) DecisionRedactor() gateway.DecisionRedactor {
 }
 
 // Redact 脱敏一次请求。
-func (c *Collector) Redact(req *channel.Request) (*gateway.Snapshot, error) {
+//
+// # 两种正文
+//
+// 有有效授权时返回**原文**（落库时 capture_mode = full_consented），
+// 否则返回骨架（默认那一档）。判在这里而不是网关那一侧：网关不认识授权
+// 记录，而这一层已经拿着配置与库；判定要查库，所以它拿到 ctx。
+//
+// 判据只有这一个入口，两个方向共用它——「同一个用户、同一次请求，请求方向
+// 留了原文而响应方向没留」这种分裂不该发生，而两处各判一次就会发生。
+func (c *Collector) Redact(ctx context.Context, req *channel.Request, id gateway.CaptureIdentity) (*gateway.Snapshot, error) {
+	raw := c.rawCaptureAllowed(ctx, id)
+	mode := captureModeFor(raw)
+	if raw {
+		res, err := c.requestRedactor.RedactRequestVerbatim(req)
+		return toSnapshot(res, err, mode)
+	}
 	res, err := c.requestRedactor.RedactRequest(req)
-	return toSnapshot(res, err)
+	return toSnapshot(res, err, mode)
 }
 
 // RedactResponse 脱敏一次响应。
 //
 // 注意它只有归一化字段那部分：上游原样返回的 Response.Raw 与 Usage.Raw
 // 不在其中，见 snapshot.RedactResponse 的注释。要采集它们需要单独传
-// RedactRaw，而那是一个需要单独决定的问题。
+// RedactRaw，而那是一个需要单独决定的问题。「原样采集那一档」也一样——
+// 它指的是归一化字段里的内容不被替换，不是上游字节的副本。
 //
 // # resp 为 nil 时返回空骨架
 //
@@ -250,23 +315,52 @@ func (c *Collector) Redact(req *channel.Request) (*gateway.Snapshot, error) {
 // 它的内容是 upstream_status 与 error_kind 两列，不是骨架（见
 // gateway.Redactor 的接口注释）。
 //
+// 采集档照记：那一行的正文是空的，但「这一次是开着授权的」仍然是事实，
+// 读的人要能把它与「没授权可开」分开。
+//
 // 这里不把 nil 交给 snapshot.Redactor：那个包把 nil 读作调用方的 bug，
 // 而在这里它是一个正常结局。
-func (c *Collector) RedactResponse(resp *channel.Response) (*gateway.Snapshot, error) {
+func (c *Collector) RedactResponse(ctx context.Context, resp *channel.Response, id gateway.CaptureIdentity) (*gateway.Snapshot, error) {
+	raw := c.rawCaptureAllowed(ctx, id)
+	mode := captureModeFor(raw)
 	if resp == nil {
 		return &gateway.Snapshot{
-			Skeleton: map[string]any{},
-			Version:  snapshot.SkeletonVersion,
+			Skeleton:    map[string]any{},
+			Version:     snapshot.SkeletonVersion,
+			CaptureMode: mode,
 		}, nil
 	}
+	if raw {
+		res, err := c.responseRedactor.RedactResponseVerbatim(resp)
+		return toSnapshot(res, err, mode)
+	}
 	res, err := c.responseRedactor.RedactResponse(resp)
-	return toSnapshot(res, err)
+	return toSnapshot(res, err, mode)
+}
+
+// rawCaptureAllowed 判这一次要不要留原文。
+//
+// 授权来源是装配进来的一个接口，本包不判它内部怎么算（见 ConsentSource）。
+func (c *Collector) rawCaptureAllowed(ctx context.Context, id gateway.CaptureIdentity) bool {
+	return c.consent.AllowsRawCapture(ctx, id.UserID, id.RequestID)
+}
+
+// captureModeFor 把判定结果落成落库用的取值。
+//
+// 两个取值与表上的 CHECK 一致（见 store.go 的两个常量）。
+func captureModeFor(raw bool) string {
+	if raw {
+		return captureModeFullConsented
+	}
+	return captureModeSkeleton
 }
 
 // toSnapshot 把脱敏结果转成网关的快照类型。
 //
-// 只搬脱敏产出，不碰 request_id / user_id / direction 三个字段：
-// 那些属于「这条快照属于谁」，由调用方（网关）填——脱敏器不知道也不该知道。
+// 只搬脱敏产出与采集档，不碰 request_id / user_id / direction 三个字段：
+// 那些属于「这条快照属于谁」，由调用方（网关）填——脱敏器不写它们
+// （它按这些字段判过授权，但那与「写进这一行」是两件事，见
+// gateway.CaptureIdentity）。
 //
 // # 丢弃的计数为什么在这里
 //
@@ -281,7 +375,7 @@ func (c *Collector) RedactResponse(resp *channel.Response) (*gateway.Snapshot, e
 // （快照链路挂掉不该影响请求），于是「上限配小了」在 /metrics 与日志里都
 // 看不见，而现场是「快照表里这一段时间是空的」——那看起来与「没有请求」
 // 一模一样。
-func toSnapshot(res *snapshot.Result, err error) (*gateway.Snapshot, error) {
+func toSnapshot(res *snapshot.Result, err error, mode string) (*gateway.Snapshot, error) {
 	if err != nil {
 		if errors.Is(err, snapshot.ErrTooLarge) {
 			observe.Metrics.SnapshotOversized.Inc()
@@ -293,6 +387,7 @@ func toSnapshot(res *snapshot.Result, err error) (*gateway.Snapshot, error) {
 		RedactedPaths: res.Redacted,
 		Truncated:     res.Truncated,
 		Version:       res.Version,
+		CaptureMode:   mode,
 	}, nil
 }
 

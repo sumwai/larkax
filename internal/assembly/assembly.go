@@ -802,7 +802,13 @@ func buildSnapshots(cfg Config, logger *slog.Logger) (*snapshotwire.Collector, e
 	}
 	// PgDB 那层适配是必须的：snapshotwire 为了让分区名筛选可测，把
 	// QueryContext 的返回类型收窄成了它自己的 Rows 接口。
-	collector, err := snapshotwire.New(snapCfg, snapshotwire.Wrap(cfg.DB), logger)
+	//
+	// 授权来源今天接的是「永远没有授权」：授权记录的写入与查询（谁、什么
+	// 范围、同意文案与版本）还没有实现，所以采集侧落下来的每一条都是骨架。
+	// 那一步接上时改的是这一处——判定与落库那条路已经在了（见
+	// snapshotwire.NoConsentSource）。
+	collector, err := snapshotwire.New(snapCfg, snapshotwire.Wrap(cfg.DB),
+		snapshotwire.NoConsentSource{}, logger)
 	if err != nil {
 		return nil, fmt.Errorf("建立快照链路失败: %w", err)
 	}

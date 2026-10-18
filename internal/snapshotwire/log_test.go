@@ -32,7 +32,7 @@ func TestNilLoggerFallsBackToDefault(t *testing.T) {
 		t.Fatalf("Insert 出错: %v", err)
 	}
 
-	c, err := New(testConfig(), &fakeDB{}, nil)
+	c, err := New(testConfig(), &fakeDB{}, NoConsentSource{}, nil)
 	if err != nil {
 		t.Fatalf("建链路出错: %v", err)
 	}
@@ -81,7 +81,8 @@ func TestPartitionDDLFailureIsLogged(t *testing.T) {
 // 请求标识要跟着日志走：这条链路就是给排障用的，日志拼不上等于白记。
 func TestLogCarriesRequestTagWhenPresent(t *testing.T) {
 	logger, buf := captureLogger()
-	c, err := New(testConfig(), &fakeDB{execErr: errors.New("库挂了")}, logger)
+	c, err := New(testConfig(), &fakeDB{execErr: errors.New("库挂了")},
+		NoConsentSource{}, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

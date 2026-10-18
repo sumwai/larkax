@@ -100,11 +100,23 @@ const insertSQL = `
 		upstream_status, error_kind, created_at
 	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
 
-// captureModeSkeleton 是默认采集模式。
+// 两个采集模式。取值与表上的 CHECK 约束一致（见 00001_init.sql 的
+// capture_mode 列）。
 //
-// 取值与表上的 CHECK 约束一致。用户授权原样采集（full_consented）是另一条
-// 链路的事，要带同意记录与自动到期，不在这里。
-const captureModeSkeleton = "skeleton"
+// captureModeSkeleton 是默认那一档，也是**拿不准时**的那一档：它不落原文。
+// captureModeFullConsented 只在用户明确授权时用——那一行里 skeleton 列装的
+// 是原文而不是骨架（见 internal/gateway 的 Snapshot.Skeleton）。
+const (
+	captureModeSkeleton      = "skeleton"
+	captureModeFullConsented = "full_consented"
+)
+
+// CaptureModeIsRaw 表示这一档采下来的是**原文**，不是骨架。
+//
+// 给读侧用（cmd/larkaxctl 的 snapshot get）：两种正文在终端上长得一模一样
+// （都是一段 JSON），而读法完全不同——一份是脱敏后的结构，另一份是用户原文。
+// 取值只在这里定义一处，读侧按这个判据分岔，别自己再写一份字面量。
+func CaptureModeIsRaw(mode string) bool { return mode == captureModeFullConsented }
 
 // Insert 写一条快照。
 //
@@ -167,12 +179,26 @@ func (s *Store) Insert(ctx context.Context, snap *gateway.Snapshot) error {
 		errorKind = *snap.ErrorKind
 	}
 
+	// 空串按默认那一档落库，而不是把它当错误：Snapshot 有几个构造点
+	// （脱敏器之外，测试里也直接拼），空值在那里表示「没特别说明」。
+	// 而两个取值里只有 skeleton 是不落原文的那个，所以回落方向只能是它——
+	// 反过来（认不出就留原文）会让一个空字段变成泄露。
+	mode := snap.CaptureMode
+	if mode == "" {
+		mode = captureModeSkeleton
+	}
+	if mode != captureModeSkeleton && mode != captureModeFullConsented {
+		// 落到这里说明有别的写入方自己造了取值，而表上的 CHECK 会拒收它。
+		// 在写之前报出来：报错里带得上那个词，而 CHECK 的报错只说得清是哪一列。
+		return fmt.Errorf("未知的采集模式 %q", mode)
+	}
+
 	_, err = s.db.ExecContext(ctx, insertSQL,
 		snap.RequestID,
 		snap.UserID,
 		snap.Direction,
 		snap.Version,
-		captureModeSkeleton,
+		mode,
 		skeleton,
 		snap.Truncated,
 		paths,

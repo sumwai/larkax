@@ -234,14 +234,24 @@ type Snapshot struct {
 	UserID int64
 	// Direction 取值 request / response。
 	Direction string
-	// Skeleton 是脱敏后的骨架。它是**结构**而不是内容。
+	// Skeleton 是这条快照的正文。**它的形态由 CaptureMode 决定**：
+	// skeleton 模式下是脱敏后的骨架（结构而不是内容），full_consented
+	// 模式下是用户原文。读它的人必须先看 CaptureMode。
 	Skeleton map[string]any
 	// RedactedPaths 是被替换掉的字段路径，供确认白名单有没有漏放行项。
+	// full_consented 模式下必然为空——那一档一个字段都没替换。
 	RedactedPaths []string
-	// Truncated 表示骨架超限后降级成了摘要层。
+	// Truncated 表示正文超限后降级成了摘要层。
 	Truncated bool
 	// Version 是骨架格式版本。
 	Version int
+	// CaptureMode 是这条快照按哪一档采的，取值与 request_snapshots.capture_mode
+	// 的 CHECK 一致（skeleton / full_consented）；空串表示默认那一档。
+	//
+	// 它由脱敏那一侧（internal/snapshotwire）填，本包只搬运：这一档取决于
+	// 「这次请求此刻有没有有效的原样采集授权」，而那个判定在脱敏那一刻做
+	// （见 Redactor 的接口注释）。本包不判它——判定要查库，而那是数据面的事。
+	CaptureMode string
 
 	// UpstreamStatus 是这次调用**真的拿到过**的上游 HTTP 状态码，2xx 也填。
 	//
@@ -303,19 +313,50 @@ type ReleaseFailure struct {
 	Err error
 }
 
-// Redactor 把请求或响应变成骨架。
+// CaptureIdentity 是「这次请求是谁发的」，原样采集的授权判定要它。
+//
+// # 它只用于判定，不写进快照
+//
+// 一条快照属于谁仍由本包在脱敏**之后**补（见 snapshotAsync）。脱敏器不决定
+// 归属这条理由没有变——但它现在必须**知道**归属，因为「要不要留原文」正是
+// 按人授权的：授权记在 user_id（+ 某个 request_id 或一段窗口）上。
+//
+// # 两个字段都可能是零值
+//
+// 那时判定必须落到「不采集」：拿不到身份就不留原文，方向只能是这一个。
+// 特别是 RequestID——本包今天取到的请求标识**永远是空串**（网关读的是自己
+// 的 context 键，而标识是观测层放进另一个键的，两者的关系见 internal/snapshotwire
+// 的 requestIDOr），所以「按单条请求授权的那个范围」在采集侧今天匹配不上。
+// 那是一条已知缺陷、不在本档修复；留在这里是为了让接上它的那一天只改一处。
+type CaptureIdentity struct {
+	UserID    int64
+	RequestID string
+}
+
+// Redactor 把请求或响应变成一条快照的正文。
 //
 // 它由 internal/snapshotwire 适配 internal/snapshot 实现。抽成接口是为了让
 // 本包不依赖那个包的具体类型——那些类型会随白名单演进变化，而顺序不该跟着变。
+//
+// # 它按身份决定「留骨架还是留原文」
+//
+// 正文有两种形态（见 Snapshot.CaptureMode）：默认那一档是脱敏后的骨架，
+// 另一档是用户明确授权后的原文。判定要看授权记录，所以两个方法都收
+// CaptureIdentity——这正是把身份挪到脱敏**之前**的原因：脱敏怎么写取决于
+// 这次判定，落库之后再挑就晚了（那时原文已经被丢掉）。
 type Redactor interface {
-	Redact(req *channel.Request) (*Snapshot, error)
+	// Redact 脱敏一次请求。
+	//
+	// ctx 是这次请求的 context：判定可能要查一次库，客户端走掉时那次查库
+	// 不必接着等。
+	Redact(ctx context.Context, req *channel.Request, id CaptureIdentity) (*Snapshot, error)
 	// RedactResponse 脱敏一次上游响应。
 	//
 	// resp 为 nil 表示这次调用**没有可脱敏的响应体**（连不上、超时，或者
 	// 上游回了非 2xx、正文没有归一化成 channel.Response）。那时实现应当
 	// 返回一条空骨架而不是错误：这一行仍然要落下来，它的内容是
 	// UpstreamStatus 与 ErrorKind 两列，而不是骨架。
-	RedactResponse(resp *channel.Response) (*Snapshot, error)
+	RedactResponse(ctx context.Context, resp *channel.Response, id CaptureIdentity) (*Snapshot, error)
 }
 
 // Gateway 是一次请求的编排。
@@ -1489,22 +1530,25 @@ func (g *Gateway) finishCharge(ctx context.Context, h *handle, placed placement,
 //
 // # 归属由本包填
 //
-// request_id / user_id / direction 说的是「这条快照属于谁」，脱敏器不知道
-// 也不该知道（见 internal/snapshotwire 的 toSnapshot），所以三个字段在这里
-// 补齐。userID 必须是**发起这次请求的用户**，见 Snapshot.UserID 的注释。
+// request_id / user_id / direction 说的是「这条快照属于谁」，脱敏器不写它
+// （见 internal/snapshotwire 的 toSnapshot），所以三个字段在这里补齐。
+// 而脱敏器现在**知道**归属——它按归属判「留骨架还是留原文」，判完就不再管
+// 这三个字段（见 CaptureIdentity）。userID 必须是**发起这次请求的用户**，
+// 见 Snapshot.UserID 的注释。
 func (g *Gateway) snapshotAsync(ctx context.Context, req *channel.Request, direction string, userID int64) {
 	if g.Redactor == nil || g.Snapshots == nil || req == nil {
 		return
 	}
 
-	snap, err := g.Redactor.Redact(req)
+	id := CaptureIdentity{UserID: userID, RequestID: requestIDOf(ctx)}
+	snap, err := g.Redactor.Redact(ctx, req, id)
 	if err != nil {
 		// 脱敏失败就丢快照——绝不回落成存原文。
 		// 这里同步返回而不是在 goroutine 里判断：失败是**确定性**的，
 		// 让它跑一趟后台再丢弃是白费。
 		return
 	}
-	snap.RequestID = requestIDOf(ctx)
+	snap.RequestID = id.RequestID
 	snap.UserID = userID
 	snap.Direction = direction
 
@@ -1562,11 +1606,12 @@ func (g *Gateway) responseSnapshotAsync(ctx context.Context, resp *channel.Respo
 		return
 	}
 
-	snap, err := g.Redactor.RedactResponse(resp)
+	id := CaptureIdentity{UserID: userID, RequestID: requestIDOf(ctx)}
+	snap, err := g.Redactor.RedactResponse(ctx, resp, id)
 	if err != nil {
 		return
 	}
-	snap.RequestID = requestIDOf(ctx)
+	snap.RequestID = id.RequestID
 	snap.UserID = userID
 	snap.Direction = "response"
 	snap.UpstreamStatus = status

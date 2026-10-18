@@ -377,6 +377,59 @@ func TestPrintSnapshotMarksTruncation(t *testing.T) {
 	}
 }
 
+// TestPrintSnapshotLabelsAuthorizedRawBody 钉住两档正文的标题与降级附注各说各的。
+//
+// 两种正文在终端上都是「一段 JSON」，而读法完全不同：默认那一档是脱敏后的
+// 结构（内容已经换成占位描述符），另一档是用户原文。标题不分开的话，
+// 「这份是不是原文」就只能靠上面 capture_mode 那一行自己看出来，而它离正文
+// 隔着好几行——读的人正好会略过那几行。
+//
+// **两档一起判**：只判「原文那一档标了原文」的话，一个恒打「原文」的实现也能过，
+// 而它把脱敏结构说成用户原文，读的人会按原文对待它、把里面的占位符读成
+// 「上游就发了这些」。
+//
+// 降级那一句也要分开说：授权采集的用途就是看原文，而一份被降级成摘要层的
+// 原文里内容已经丢了——它**不是**完整原文，这件事比骨架降级更该说重一句。
+func TestPrintSnapshotLabelsAuthorizedRawBody(t *testing.T) {
+	rows := []snapshotRow{
+		{ID: 1, Direction: "request", SkeletonVersion: 1, CaptureMode: "full_consented",
+			Skeleton:  map[string]any{"messages": []any{map[string]any{"content": "原样留下的提示词"}}},
+			CreatedAt: time.Date(2026, 10, 17, 1, 2, 3, 0, time.UTC)},
+		{ID: 2, Direction: "request", SkeletonVersion: 1, CaptureMode: "full_consented",
+			Truncated: true, Skeleton: map[string]any{"model": "probe-model"},
+			CreatedAt: time.Date(2026, 10, 17, 1, 2, 4, 0, time.UTC)},
+		{ID: 3, Direction: "request", SkeletonVersion: 1, CaptureMode: "skeleton",
+			Truncated: true, Skeleton: map[string]any{"model": "probe-model"},
+			CreatedAt: time.Date(2026, 10, 17, 1, 2, 5, 0, time.UTC)},
+	}
+
+	var buf, note bytes.Buffer
+	printSnapshots(&buf, &note, "req-probe", rows)
+	out := buf.String()
+
+	// 授权采集的两条都要标成原文（第 2 条虽是原文，但已被降级）。
+	if got := strings.Count(out, "原文（用户已授权原样采集）:"); got != 2 {
+		t.Errorf("授权采集的两条都该标成原文，实际标了 %d 条：\n%s", got, out)
+	}
+	// 默认那一档照旧标 skeleton：标题跟着采集档走，而不是恒打一个。
+	if !strings.Contains(out, "  skeleton:") {
+		t.Errorf("脱敏那一档的标题仍是 skeleton：\n%s", out)
+	}
+	if !strings.Contains(out, "原样留下的提示词") {
+		t.Errorf("正文本身要原样打出来：\n%s", out)
+	}
+
+	// 降级附注分两句：原文那条说「不是完整原文」，骨架那条说「与完整骨架
+	// 长得一样」（第 2、3 条各是一句）。合并成一句会把「内容已经丢了」
+	// 读成「本来就没留下」。
+	if !strings.Contains(note.String(), "不是完整原文") {
+		t.Errorf("授权采集的原文被降级时要说明它不是完整原文：\n%s", note.String())
+	}
+	if got := strings.Count(note.String(), "降级成摘要层"); got != 2 {
+		t.Errorf("两条被截断的都要有降级说明，实际 %d 条：\n%s", got, note.String())
+	}
+}
+
 // TestPrintSnapshotSkeletonIsStable 钉住「同一个库两次跑出来逐行相同」。
 //
 // 骨架是 map，直接 fmt 打印的键序是随机的；走 json.Marshal 才有稳定输出，

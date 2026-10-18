@@ -880,22 +880,44 @@ func printSnapshot(out, note io.Writer, seq int, row snapshotRow) {
 	_, _ = fmt.Fprintf(out, "  skeleton_truncated=%t\n", row.Truncated)
 	printRedactedPaths(out, "  ", row.RedactedPaths)
 
+	// 正文的标题按采集档分岔：两档在终端上都是「一段 JSON」，而读法完全不同
+	// ——默认那一档是脱敏后的结构（内容已经被替换成占位描述符），另一档是
+	// 用户原文。同一个标题会让「这份是不是原文」只能靠 capture_mode 那一行
+	// 自己看出来，而它离正文有好几行。
+	//
+	// 判据只取一次：下面「降级了」那两句附注也要按同一档分岔，两处各判一遍
+	// 迟早会出现「标题说原文、附注说骨架」。
+	rawCapture := snapshotwire.CaptureModeIsRaw(row.CaptureMode)
+	bodyLabel := "skeleton"
+	if rawCapture {
+		bodyLabel = "原文（用户已授权原样采集）"
+	}
+
 	if row.Truncated {
-		_, _ = fmt.Fprintln(note,
-			"注意：这条骨架被降级成摘要层了——超限时只留顶层标量，逐条消息与工具定义的细节都丢了。")
-		_, _ = fmt.Fprintln(note,
-			"      它与一份完整的骨架在肉眼下长得一样，别把「这里只有这些」读成「上游只发了这些」。")
+		if rawCapture {
+			// 原文被降级比骨架被降级更该说重一句：授权采集的用途就是看原文，
+			// 而这一份里的内容已经被摘要层丢掉了——它**不是**完整的原文。
+			_, _ = fmt.Fprintln(note,
+				"注意：这条是授权采集的原文，但它超限被降级成摘要层了——逐条消息的内容都丢了。")
+			_, _ = fmt.Fprintln(note,
+				"      授权采集就是为了看原文，所以这一份不是完整原文；要完整的得调大 request_snapshot.max_bytes 之后重发一次。")
+		} else {
+			_, _ = fmt.Fprintln(note,
+				"注意：这条骨架被降级成摘要层了——超限时只留顶层标量，逐条消息与工具定义的细节都丢了。")
+			_, _ = fmt.Fprintln(note,
+				"      它与一份完整的骨架在肉眼下长得一样，别把「这里只有这些」读成「上游只发了这些」。")
+		}
 	}
 
 	raw, err := json.MarshalIndent(row.Skeleton, "    ", "  ")
 	if err != nil {
-		// 骨架是从 jsonb 里解出来的，正常情况下序列化不了是不可能的。
+		// 正文是从 jsonb 里解出来的，正常情况下序列化不了是不可能的。
 		// 不 panic：这条命令的价值在于把库里那条读出来，一格读不出来
 		// 不该把整条命令带走。
-		_, _ = fmt.Fprintf(out, "  skeleton：无法序列化（%v）\n", err)
+		_, _ = fmt.Fprintf(out, "  %s：无法序列化（%v）\n", bodyLabel, err)
 		return
 	}
-	_, _ = fmt.Fprintf(out, "  skeleton:\n    %s\n", raw)
+	_, _ = fmt.Fprintf(out, "  %s:\n    %s\n", bodyLabel, raw)
 }
 
 // printRedactedPaths 打印被替换掉的路径清单。
@@ -1007,7 +1029,10 @@ func runSnapshotCleanup(args []string) error {
 	// 打不打提示由 printCleanupHint 自己判（采集开着时一个字都不打）。
 	printCleanupHint(humanStderr(), snapCfg)
 
-	collector, err := snapshotwire.New(snapCfg, snapshotwire.Wrap(db), nil)
+	// 授权来源在这一条命令上用不到：清理只删分区，一条也不采。传「永远没有
+	// 授权」而不是 nil——nil 是「忘了接」，而这一个是一个明确的答案。
+	collector, err := snapshotwire.New(snapCfg, snapshotwire.Wrap(db),
+		snapshotwire.NoConsentSource{}, nil)
 	if err != nil {
 		return err
 	}
