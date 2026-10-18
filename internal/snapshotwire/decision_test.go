@@ -149,6 +149,70 @@ func TestDecisionResponseWithoutSelectionHasNoSelectedBlock(t *testing.T) {
 	}
 }
 
+// 选中段只在**两个字段都缺**时整段不写；只缺其中一个时留下另一个。
+//
+// 变异（gremlins，`if o.SelectedChannelID == 0 && o.UpstreamModel == ""` 这一行上
+// 三条：第一个 `==` 改成 `!=`、`&&` 改成 `||`、第二个 `==` 改成 `!=`）：
+// 三条分道的地方都在「两个字段都缺」与「只缺其中一个」这两类格子上——
+// 第一个 `==` 与第二个 `==` 被改之后，两个都缺时会走进函数、交回一个**空对象**
+// （键在、里面什么都没有）；`&&` 改成 `||` 之后，只要缺一个就整段不写。
+// 而现有用例恰好绕开了这两类格子：上面那条没有置 Succeeded（这一段只在成功时走），
+// 置了 Succeeded 的那几条两个字段又都填了。于是三条都活着。
+//
+// 每一格都断言**键集合**与值：缺的那一个键整个不写，而不是写一个零值进去
+// （理由见 decisionSelectedOf 的注释）。键集合与「值是 0」在断言里很容易写成
+// 同一个样子，而它们说的是两件事。
+func TestDecisionSelectedBlockNeedsBothFieldsMissing(t *testing.T) {
+	cases := []struct {
+		name  string
+		id    int64
+		model string
+	}{
+		{"两个都缺", 0, ""},
+		{"只有渠道", 5, ""},
+		{"只有模型", 0, "vendor/probe"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := decisionResponseMap(&gateway.DecisionOutcome{
+				Model:             "probe-model",
+				Candidates:        []gateway.DecisionCandidate{fullDecisionCandidate(7)},
+				Succeeded:         true,
+				SelectedChannelID: tc.id,
+				UpstreamModel:     tc.model,
+			})
+			got, ok := m["selected"]
+			if tc.id == 0 && tc.model == "" {
+				if ok {
+					t.Fatalf("两个字段都缺时不该有 selected 段：%#v", got)
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("只缺一个字段时应当留下 selected 段")
+			}
+			sel, isMap := got.(map[string]any)
+			if !isMap {
+				t.Fatalf("selected = %#v，期望一个对象", got)
+			}
+			var want []string
+			if tc.id != 0 {
+				want = append(want, "channel_id")
+				if sel["channel_id"] != tc.id {
+					t.Errorf("channel_id = %#v，期望 %d", sel["channel_id"], tc.id)
+				}
+			}
+			if tc.model != "" {
+				want = append(want, "upstream_model")
+				if sel["upstream_model"] != tc.model {
+					t.Errorf("upstream_model = %#v，期望 %q", sel["upstream_model"], tc.model)
+				}
+			}
+			assertKeys(t, sel, want...)
+		})
+	}
+}
+
 // 没有数据的项**整个键不写**，与「是 0」分开。
 //
 // 写成 0 会把「这个渠道没有成本数据」读成「它的成本是 0」——那正是路由那一侧
