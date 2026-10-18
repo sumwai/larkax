@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -552,6 +553,83 @@ func IsRetryable(err error) bool {
 		return up.Retryable
 	}
 	return false
+}
+
+// IsEmbeddedErrorRetryable 判断**2xx 响应体里内嵌的那个错误对象**该不该换渠道重试。
+//
+// 上游把错误写在 200 的响应体里时，状态码那一侧的判据（httpx.RetryableStatus）
+// 用不上：200 不是失败码，而这次调用其实失败了。所以这里另判一次，判据按
+// HTTP 语义写——**上游这一侧暂时答不上来**的（限流、过载、超时、它自己内部
+// 出错）值得换一个渠道再试；**这次请求本身不对**的（参数、鉴权、权限、找不到、
+// 请求体过大）换到哪都一样，只会把费用与延迟乘以候选渠道数。
+//
+// 「可重试」在这套代码里有两个下游：路由层据此换下一个候选，渠道健康度据此把
+// 这次失败算在这个渠道头上（见 IsRetryable）。上游限流时它确实该被算上——那正是
+// 「这个渠道此刻不行」的意思。
+//
+// # 两个字段都要看
+//
+// type 与 code 是各家对同一件事的两种写法，而且不保证填的是哪一个：Anthropic
+// 把分类写在 type 里（"rate_limit_error"），OpenAI 兼容上游常常写在 code 里、
+// type 那边写的是别的（429 的响应体里形如 `"type": "requests"` 配
+// `"code": "rate_limit_exceeded"`）。只看其中一个，同一个 429 语义就会因为走
+// 哪条入口而分岔。
+//
+// # 匹配是子串加归一，不是枚举
+//
+// 这两个字段里写的不是枚举值，而是 "RateLimitError"、"rate_limit_exceeded"
+// 这类带前后缀、大小写不一的写法，也有上游直接把状态码填进去（`"code": 429`）。
+// 所以先把分隔符与大小写归一（见 normalizeErrorField），再做子串匹配：把每种
+// 写法列成枚举，等于赌上游不改写法。**数字形态的那几个状态码例外**——它们要求
+// 整个字段就是那个数，否则 `15003` 里的 "500" 也会被当成 5xx。
+//
+// 认不出来的一律返回 false，方向与 IsRetryable 一致：把不可重试的错当成
+// 可重试，会在每个候选渠道上重复一次注定失败的调用；反过来只是少一次本可
+// 成功的尝试，用户重试一次即可。
+func IsEmbeddedErrorRetryable(typeName, code string) bool {
+	for _, field := range []string{normalizeErrorField(typeName), normalizeErrorField(code)} {
+		if field == "" {
+			continue
+		}
+		if slices.Contains(retryableEmbeddedStatusCodes, field) {
+			return true
+		}
+		for _, marker := range retryableEmbeddedMarkers {
+			if strings.Contains(field, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// retryableEmbeddedMarkers 是「上游这一侧暂时答不上来」在 type / code 里的各种
+// 写法，**都按 normalizeErrorField 归一过**（小写、去分隔符）。
+//
+// 三类：限流、过载、超时，加上上游自己内部出错——最后那一种多半也是暂时的，
+// 与下面那组状态码说的是同一件事。
+var retryableEmbeddedMarkers = []string{
+	// 限流
+	"ratelimit", "toomanyrequests", "throttl",
+	// 过载
+	"overload", "capacity",
+	// 超时
+	"timeout", "timedout", "deadline",
+	// 上游自身出错
+	"servererror", "internalerror", "apierror", "unavailable", "temporarily",
+}
+
+// retryableEmbeddedStatusCodes 是上游把状态码直接填进 code 里的那几种写法，
+// 按**整个字段**比对（理由见 IsEmbeddedErrorRetryable）：429 是限流，529 是
+// 上游报过载用的那个非标准码，其余四个是 5xx。
+var retryableEmbeddedStatusCodes = []string{"429", "500", "502", "503", "504", "529"}
+
+// normalizeErrorField 把上游写在 type / code 里的那个词归一成可做子串匹配的
+// 形状：转小写，去掉下划线、连字符与空格——这三样在上游的写法里是同一个
+// 分隔符，rate_limit_error / rate-limit-error / Rate Limit Error 说的是同一件
+// 事。
+func normalizeErrorField(s string) string {
+	return strings.NewReplacer("_", "", "-", "", " ", "").Replace(strings.ToLower(s))
 }
 
 // Registry 是适配器的注册表。
