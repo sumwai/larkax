@@ -221,8 +221,14 @@ func (a Amount) IsPositive() bool { return a.units > 0 }
 // 没人能处置的失败。
 func (a Amount) Add(b Amount) Amount {
 	sum := a.units + b.units
-	// 溢出检测：同号相加的结果必然同号，否则溢出了
-	if (a.units > 0 && b.units > 0 && sum < 0) || (a.units < 0 && b.units < 0 && sum > 0) {
+	// 溢出检测：判据要同时看**操作数**与**结果**，只看结果的符号会漏掉
+	// MinInt64 + MinInt64——它回绕出来的和恰好是 0，既不大于 0 也不小于 0，
+	// 于是「同号相加结果必然同号」这句话在这一格上不成立，一笔巨额欠款
+	// 会被算成零。下面这一对条件对任何两个有符号 int64 都成立：
+	// b 为正时和变小、b 为负时和变大，都只可能是回绕（b 为 0 时两条都不成立）。
+	if (b.units > 0 && sum < a.units) || (b.units < 0 && sum > a.units) {
+		// 走到这里必然是同号相加：b 为正而回绕，真实的和大于 MaxInt64，
+		// 那只能是 a 也为正（b 为负时同理）。
 		return Amount{units: clampInt64Sign(sum, a.units)}
 	}
 	return Amount{units: sum}
@@ -413,9 +419,10 @@ func clampFromBig(v *big.Int) int64 {
 
 // clampInt64Sign 把溢出后的和夹到 int64 边界。
 //
-// 方向由 sign 决定：同号相加溢出时，结果的符号就是两个加数的符号，
-// 正数溢出取 MaxInt64、负数溢出取 MinInt64。v 只用来表明「这里有一个
-// 溢出后的值」，具体数值不可信，所以不参与判断。
+// 方向由 sign 决定：同号相加溢出时，**真实的和**的符号就是两个加数的符号，
+// 正数溢出取 MaxInt64、负数溢出取 MinInt64。说「真实的和」不是绕口：
+// 回绕出来的那个值恰恰是符号会骗人的那个（`MinInt64 + MinInt64` 回绕成 0）。
+// v 只用来表明「这里有一个溢出后的值」，具体数值不可信，所以不参与判断。
 func clampInt64Sign(_ int64, sign int64) int64 {
 	if sign > 0 {
 		return math.MaxInt64
