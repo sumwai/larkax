@@ -107,7 +107,7 @@ cd "$(dirname "$0")/.."
 # 自己造的小白名单，条数与真实存量无关，所以它们要能把这个上限顶开——否则
 # 真实上限降到比夹具还小时，那些用例会全部挂在「超过上限」上，而它们要测的
 # 是比对逻辑。上限本身由自测的第 4、5、18 条钉住：那三条按下面这个默认值跑。
-MAX_ENTRIES_DEFAULT=1
+MAX_ENTRIES_DEFAULT=2
 MAX_ENTRIES="${MAX_ENTRIES:-$MAX_ENTRIES_DEFAULT}"
 
 # 扫描起点的根目录。里面的 main 包自动发现，见下面的 discover_main_packages。

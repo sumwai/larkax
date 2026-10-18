@@ -1,0 +1,17 @@
+.TH LARKAXCTL\-MIGRATE 1 "" "larkax" "larkaxctl\-migrate"
+.ds AD l
+.ad l
+.nh
+.SH NAME
+larkaxctl\-migrate \- 数\:据\:库\:版\:本\:迁\:移\:（up、down、status、version）
+.SH SYNOPSIS
+.B larkaxctl migrate
+.RI [ 选\:项 ]
+.br
+二\:级\:动\:作\:与\:参\:数\:见 \fBlarkaxctl migrate \-\-help\fR（短\:版）\:与 \fBlarkaxctl help migrate\fR（长\:版）。
+.PP
+数\:据\:库\:版\:本\:迁\:移。\fBcreate\fR 只\:写\:文\:件、\:不\:碰\:数\:据\:库，\:其\:余\:各\:条\:都\:要\:连\:库。
+.PP
+\fBup\-to\fR / \fBdown\-to\fR 是\:一\:步\:一\:步\:走\:到\:目\:标\:版\:本\:的，\:不\:调\:用 \fBgoose\fR 自\:带\:的\:同\:名\:命\:令：\:实\:测\:它\:们\:会\:停\:在\:目\:标\:版\:本\:的\:相\:邻\:位\:置\:（从 v2 执\:行 \fBdown\-to 0\fR 只\:退\:到 v1），\:差\:一\:位\:的\:表\:现\:比\:不\:支\:持\:更\:危\:险。
+.SH SEE ALSO
+.BR larkaxctl (1)
