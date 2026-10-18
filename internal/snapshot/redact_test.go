@@ -1671,10 +1671,11 @@ func TestErrorBlockCodeMustLookLikeEnum(t *testing.T) {
 
 // schema 递归的深度上限：第 maxSchemaDepth 层仍然展开，再下一层才换成形状。
 //
-// 变异（三处）：
+// 变异（五处）：
 //   - `depth > maxSchemaDepth` 的 `>` 翻成 `>=`：第 maxSchemaDepth 层就被截断；
-//   - 两处 `depth+1` 翻成 `depth-1`（schemaKey 的未知键分支与 namedSchemas）：
-//     深度不再增长，上限永远走不到，整条链被完整展开。
+//   - 四处 `depth+1` 翻成 `depth-1`（schemaKey 的未知键分支与 namedSchemas、
+//     数组元素那一支、`items` 那一支）：深度不再增长，上限永远走不到，整条链
+//     被完整展开。四条链各走一条，缺哪一条就漏掉哪一处。
 func TestSchemaDepthBoundary(t *testing.T) {
 	w := &walker{redactor: mustNew(t, RootRequest), refs: newToolRefs()}
 
@@ -1727,6 +1728,48 @@ func TestSchemaDepthBoundary(t *testing.T) {
 	if shape, ok := leaf.(map[string]any); !ok || shape["_t"] != "object" || shape["redacted"] != true {
 		t.Errorf("properties 链在第 %d 层之后应当被截断，实际 %#v", maxSchemaDepth+1, leaf)
 	}
+
+	// 数组元素那一支与 `items` 那一支各自再加一条链：这两处也是 `depth+1`，
+	// 而只走 properties 与未知键的话，「换个容器深度就不再增长」看不出来。
+	walkChain := func(leaf any, next func(any) (any, bool), what string) {
+		for i := 0; i <= maxSchemaDepth+1; i++ {
+			if shape, ok := leaf.(map[string]any); ok && shape["redacted"] == true {
+				return
+			}
+			v, hasNext := next(leaf)
+			if !hasNext {
+				t.Errorf("%s 在第 %d 层就到底了，没有在上限处截断：%#v", what, i, leaf)
+				return
+			}
+			leaf = v
+		}
+		t.Errorf("%s 走了 %d 层仍然是容器，深度上限没管住：%#v", what, maxSchemaDepth+2, leaf)
+	}
+
+	var arr any = "s"
+	for i := 0; i < maxSchemaDepth+3; i++ {
+		arr = []any{arr}
+	}
+	walkChain(w.schema(arr, "", 0), func(v any) (any, bool) {
+		a, ok := v.([]any)
+		if !ok || len(a) != 1 {
+			return nil, false
+		}
+		return a[0], true
+	}, "数组链")
+
+	var items any = map[string]any{"type": "string"}
+	for i := 0; i < maxSchemaDepth+3; i++ {
+		items = map[string]any{"items": items}
+	}
+	walkChain(w.schema(items, "", 0), func(v any) (any, bool) {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		next, has := m["items"]
+		return next, has
+	}, "items 链")
 }
 
 // 全是凭证头时什么都不留，连 _hashed 这个键都不出现。
@@ -2076,5 +2119,41 @@ func TestUsageToMapOmitsEmptyUnitCounts(t *testing.T) {
 	}
 	if units["tokens"] != int64(3) || units["images"] != int64(1) {
 		t.Errorf("unit_counts = %#v", units)
+	}
+}
+
+// asInt64 的浮点那一档：整数值的浮点放行，带小数的拒掉。
+//
+// 变异（`redact.go:724` 同一行两条）：
+//   - `t != math.Trunc(t)` 翻成 `==`：`2.0` 这种整数值的浮点被判成「有小数」，
+//     allowUint 那一格从放行变形状描述符；
+//   - 同一行的 `||` 翻成 `&&`：`1.5` 不再被拒，被截断成 `1` 放行出去。
+//
+// `1.5` 这一格只能从 Go 侧进来：包里解 JSON 用了 UseNumber，JSON 的数字是
+// json.Number；只有直接交给 RedactRaw 的 Go 值才会是 float64。所以两条路都测。
+func TestAsInt64RejectsFractionalFloat(t *testing.T) {
+	if n, ok := asInt64(2.0); !ok || n != 2 {
+		t.Errorf("asInt64(2.0) = %d/%v，期望 2/true", n, ok)
+	}
+	if n, ok := asInt64(1.5); ok {
+		t.Errorf("asInt64(1.5) = %d/%v，期望被拒", n, ok)
+	}
+
+	// seed 是 allowUint 那一档，走一遍真实那条路。
+	r := mustNew(t, RootRequest)
+	res, err := r.RedactRaw(map[string]any{"seed": 2.0})
+	if err != nil {
+		t.Fatalf("脱敏失败: %v", err)
+	}
+	if res.Skeleton["seed"] != int64(2) {
+		t.Errorf("seed=2.0 是整数，应当放行成 2，实际 %#v", res.Skeleton["seed"])
+	}
+
+	res, err = r.RedactRaw(map[string]any{"seed": 1.5})
+	if err != nil {
+		t.Fatalf("脱敏失败: %v", err)
+	}
+	if _, ok := res.Skeleton["seed"].(map[string]any); !ok {
+		t.Errorf("seed=1.5 不是整数，应当换成形状描述符，实际 %#v", res.Skeleton["seed"])
 	}
 }

@@ -321,3 +321,44 @@ func TestIsEnumWordBoundaries(t *testing.T) {
 		t.Error("含非 ASCII 字符的取值不是枚举词")
 	}
 }
+
+// ── #700：NOT COVERED 那一列里藏着的缺口 ────────────────────────────────
+//
+// gremlins 按覆盖挑变异点，判成「未覆盖」的位置它根本不跑；而这一列不进
+// efficacy 的分母，于是缺口安静地待在里面。下面两组把字符集那几条边界喂满。
+
+// base64 字符集那三段区间，六个边界各要一个取值：少了恰好哪个字符
+// （`'A'` `'Z'` `'z'` `'0'` `'9'`），落在字符集里的东西就被判成不是 base64。
+// `||` 链里哪一支不可达同理（`'-'` `'_'`）。
+//
+// 变异：`placeholder.go:177` 与 `:178` 上那 8 条。这几处被 gremlins 判成
+// 「未覆盖」而从没跑过，现有用例也只喂过 `"abcd"` / `"QUJD"` / `"abc!"`。
+func TestBase64CharsetBoundaries(t *testing.T) {
+	for _, s := range []string{"A", "Z", "a", "z", "0", "9", "+", "/", "-", "_"} {
+		if !isBase64Text(s) {
+			t.Errorf("isBase64Text(%q) = false，期望 true：它在 base64 字符集里", s)
+		}
+	}
+	for _, s := range []string{"!", " ", "=", "中文"} {
+		if isBase64Text(s) {
+			t.Errorf("isBase64Text(%q) = true，期望 false：它不在字符集里", s)
+		}
+	}
+}
+
+// 枚举词的字符集同理：少了恰好哪个边界字符，`isEnumWord` 就把正常的枚举
+// 取值（`"z"`、`"A"` 这种）判成「像回显的用户内容」而拒掉。
+//
+// 变异：`placeholder.go:216` 的三条边界 `r <= 'z'` / `r >= 'A'` / `r <= 'Z'`。
+func TestEnumWordCharsetBoundaries(t *testing.T) {
+	for _, s := range []string{"a", "z", "A", "Z", "0", "9", "_", "-", ".", "/", ":"} {
+		if !isEnumWord(s) {
+			t.Errorf("isEnumWord(%q) = false，期望 true：它在枚举词的字符集里", s)
+		}
+	}
+	for _, s := range []string{"!", " ", "@", "中"} {
+		if isEnumWord(s) {
+			t.Errorf("isEnumWord(%q) = true，期望 false：它不在字符集里", s)
+		}
+	}
+}
