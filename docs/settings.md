@@ -37,10 +37,12 @@ larkaxctl settings set --key plugin.enabled --value true --by alice
 - **有四个键不接受这条路径的修改**（`settings.editable` 为 `false`，改错后果严重，
   只允许由迁移写入）：`billing.default_asset`、`calendar.default_region`、
   `reconcile.repair_mode`、`reconcile.difference_account`。命令会报错并指出是哪一个。
-- 标着「未接线」的键写得进去，但改了没有任何效果（见下表的 `capture.*`）。
+- 标着「未接线」的键写得进去，但改了没有任何效果。今天一个都没有：最后一个
+  （`capture.consent_max_window_hours`）的读者是 `larkaxctl consent grant`。
 
-**什么时候生效**：下表里除 `reconcile.*` 与 `idempotency.retention_hours` 之外，
-都是**装配期读一次**——改完要重启服务。那两个是每轮/每次读的，改完下一次就生效。
+**什么时候生效**：下表里除 `reconcile.*`、`idempotency.retention_hours` 与
+`capture.consent_max_window_hours` 之外，都是**装配期读一次**——改完要重启服务。
+那三个是每轮 / 每次读的，改完下一次就生效。
 
 ## 请求快照
 
@@ -50,13 +52,13 @@ larkaxctl settings set --key plugin.enabled --value true --by alice
 |---|---|---|---|---|
 | `request_snapshot.enabled` | bool | `true` | `true` / `false` | 是否采集。关掉后不脱敏、不写新快照；**存量分区的清理照旧执行**，它不看这个开关 |
 | `request_snapshot.retention_days` | int | `30` | 正数（天） | 快照分区到期整块 `DROP` 的天数。**关掉采集也照旧生效**——存量分区按它算到期线，所以它必须为正，否则清理会把刚写进去的分区当天删掉 |
-| `request_snapshot.max_bytes` | int | `65536` | 开启时为正数 | 单条骨架的字节上限，超限降级成只保留顶层标量的摘要层；摘要层仍超限时整条丢弃。只在采集开启时校验 |
+| `request_snapshot.max_bytes` | int | `65536` | 开启时为正数 | 单条快照正文的字节上限。骨架与授权后原样留下的正文吃的是同一个上限；超限降级成只保留顶层标量的摘要层，摘要层仍超限时整条丢弃。只在采集开启时校验 |
 
 ## 授权采集
 
 | 键 | 类型 | 默认值 | 取值 | 影响 |
 |---|---|---|---|---|
-| `capture.consent_max_window_hours` | int | `24` | — | **未接线**：授权原样采集那条路还没实现，这个键在代码里没有读者，改了不会有任何效果 |
+| `capture.consent_max_window_hours` | int | `24` | 正数（小时） | 一次原样采集授权能开多长。`larkaxctl consent grant` 超过它就报错拒绝，不夹到上限：`single_request` 比的是此刻到 `--expires-at`，`time_window` 比的是 `--from` 到 `--to` 的长度 |
 
 ## 额度探测
 

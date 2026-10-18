@@ -114,10 +114,14 @@ func TestPrintSettingsList(t *testing.T) {
 
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 	// 一行表头；plugin.enabled 两行（元数据、说明）；
-	// capture.consent_max_window_hours 三行（元数据、说明、尚未接线）；
-	// billing.default_asset 两行；typo.key 一行（没说明，也不是未接线的键）。
-	if len(lines) != 1+2+3+2+1 {
-		t.Fatalf("打印了 %d 行，期望 9 行：\n%s", len(lines), buf.String())
+	// capture.consent_max_window_hours 两行；billing.default_asset 两行；
+	// typo.key 一行（没说明，也不是未接线的键）。
+	//
+	// capture.consent_max_window_hours 曾经占三行，第三行是「尚未接线」。
+	// 它的读者接上之后（consent grant 拿它当申请时长上限）那一行不该再出现，
+	// 下面有一条断言钉着这件事。
+	if len(lines) != 1+2+2+2+1 {
+		t.Fatalf("打印了 %d 行，期望 8 行：\n%s", len(lines), buf.String())
 	}
 
 	if !strings.Contains(lines[0], "jsonb 原文") {
@@ -140,22 +144,15 @@ func TestPrintSettingsList(t *testing.T) {
 		t.Errorf("已接线的键被标成了未接线：\n%s", strings.Join(lines[1:3], "\n"))
 	}
 
-	// 还没有读者的键要在清单里当场说出来。这一行取自 Registry（见
-	// settings.Spec.Unwired），所以它是一道真的门：谁把 Unwired 清空了，
-	// 这条就挂——而清空正意味着「接上了」或「标错了」，两种都该看一眼。
-	//
-	// 断言写死字面量，不拿 Registry 里的值当期望：那等于让被测对象给自己
-	// 出题，把文案改掉也照样通过。
-	// 未接线的键占三行：元数据、说明、尚未接线。
-	if !strings.Contains(lines[5], "尚未接线") {
-		t.Errorf("未接线的键没有被标出来：%q", lines[5])
-	}
-	if !strings.Contains(lines[5], "授权采集那条路还没实现，改了不会有任何效果") {
-		t.Errorf("未接线那一行没有说清后果：%q", lines[5])
+	// 这个键的读者已经接上了（consent grant 拿它当申请时长上限），所以它
+	// 在这里只有两行：那一行「尚未接线」必须消失。它取自 Registry
+	// （见 settings.Spec.Unwired），谁把 Unwired 留着或写错，这条就挂。
+	if got := strings.Join(lines[3:5], "\n"); strings.Contains(got, "尚未接线") {
+		t.Errorf("已经接线的键被标成了未接线：\n%s", got)
 	}
 
 	// 字符串配置的值带引号：这就是它在 jsonb 里的样子。
-	second := lines[6]
+	second := lines[5]
 	for _, want := range []string{
 		`billing.default_asset = "CNY"`, "[string]", "可改 否", "改自 -",
 	} {
@@ -163,11 +160,11 @@ func TestPrintSettingsList(t *testing.T) {
 			t.Errorf("第三行里没有 %q：\n%s", want, second)
 		}
 	}
-	if strings.Contains(strings.Join(lines[6:8], "\n"), "尚未接线") {
+	if strings.Contains(strings.Join(lines[5:7], "\n"), "尚未接线") {
 		t.Errorf("已接线的键被标成了未接线：\n%s", strings.Join(lines[6:8], "\n"))
 	}
 
-	third := lines[8]
+	third := lines[7]
 	if !strings.Contains(third, "typo.key = 1") || !strings.Contains(third, "[未声明]") {
 		t.Errorf("未声明的键没有被标出来：%q", third)
 	}
@@ -194,23 +191,44 @@ func TestPrintSettingsList(t *testing.T) {
 // 「标出来了」就不再是一个信号。
 //
 // 期望值写死字面量，不取 Registry 里的文案：那等于让被测对象给自己出题。
+//
+// # 那条说明今天没有键可挂
+//
+// Registry 里已经一个未接线的键都没有了（capture.consent_max_window_hours 是
+// 最后一个，它的读者是 consent grant）。所以这一条**临时**往 Registry 里加一个
+// 带 Unwired 的探针键，跑完还原：它钉的是「标了未接线就要说出来」这条约定，
+// 而这条约定不该因为此刻没有键挂它就没人在看着。
 func TestPrintSettingsSetResult(t *testing.T) {
+	saved := settings.Registry
+	settings.Registry = append(append([]settings.Spec{}, saved...), settings.Spec{
+		Key: "probe.unwired", Kind: settings.KindInt,
+		Unwired: "授权采集那条路还没实现，改了不会有任何效果",
+	})
+	defer func() { settings.Registry = saved }()
+
 	var unwired bytes.Buffer
-	printSettingsSetResult(&unwired, "capture.consent_max_window_hours", []byte("24"), "ops")
-	wantUnwired := "已写入 settings.capture.consent_max_window_hours = 24 改自 ops\n" +
+	printSettingsSetResult(&unwired, "probe.unwired", []byte("24"), "ops")
+	wantUnwired := "已写入 settings.probe.unwired = 24 改自 ops\n" +
 		"  尚未接线：授权采集那条路还没实现，改了不会有任何效果\n"
 	if got := unwired.String(); got != wantUnwired {
 		t.Errorf("未接线的键，输出 =\n%q\n期望\n%q", got, wantUnwired)
 	}
 
-	// 对照组用一个确实接上了线的键。plugin.enabled 与另外三个 plugin.* 键
-	// 是刚接上的那一批：internal/assembly 的装配用例钉着「配错会让装配失败」，
-	// 所以它们是真的被读了。
+	// 对照组是两个确实接上了线的键。plugin.enabled 与另外三个 plugin.* 键是
+	// 早先接上的那一批（internal/assembly 的装配用例钉着「配错会让装配失败」）；
+	// capture.consent_max_window_hours 是刚接上的这一个。
 	var wired bytes.Buffer
 	printSettingsSetResult(&wired, "plugin.enabled", []byte("true"), "ops")
 	wantWired := "已写入 settings.plugin.enabled = true 改自 ops\n"
 	if got := wired.String(); got != wantWired {
 		t.Errorf("已接线的键，输出 =\n%q\n期望\n%q", got, wantWired)
+	}
+
+	var capture bytes.Buffer
+	printSettingsSetResult(&capture, "capture.consent_max_window_hours", []byte("24"), "ops")
+	wantCapture := "已写入 settings.capture.consent_max_window_hours = 24 改自 ops\n"
+	if got := capture.String(); got != wantCapture {
+		t.Errorf("接上线的 capture.consent_max_window_hours，输出 =\n%q\n期望\n%q", got, wantCapture)
 	}
 
 	if unwired.String() == wired.String() {
@@ -243,8 +261,7 @@ func TestSettingsListDocIsMachineReadable(t *testing.T) {
 			UpdatedBy: &by, UpdatedAt: at,
 		},
 		{
-			// 还没接线的键：Registry 里那句说明要跟着这一条走，不能只出现在
-			// 终端里——脚本问的正是「哪几个键改了不会有任何效果」。
+			// 已经接线的整数键：unwired 要给 null，值走 JSON 数字。
 			Key: "capture.consent_max_window_hours", Value: []byte(`24`),
 			Description: "授权采集的最长窗口。", Editable: true, UpdatedAt: at,
 		},
@@ -326,10 +343,9 @@ func TestSettingsListDocIsMachineReadable(t *testing.T) {
 	if v, ok := got.Settings[1].Value.(float64); !ok || v != 24 {
 		t.Errorf("capture.consent_max_window_hours 的值 = %#v，想要 24", got.Settings[1].Value)
 	}
-	if v := got.Settings[1].Unwired; v == nil {
-		t.Error("未接线的键要给那句说明，得到 null")
-	} else if want := "授权采集那条路还没实现，改了不会有任何效果"; *v != want {
-		t.Errorf("未接线那句话 = %q，想要 %q", *v, want)
+	// 它的读者是 consent grant（申请时长上限），所以 unwired 必须是 null。
+	if v := got.Settings[1].Unwired; v != nil {
+		t.Errorf("已接线的键 unwired = %q，想要 null", *v)
 	}
 
 	// 字符串配置：解出来是 Go 字符串 "CNY"，而不是带引号的 `"CNY"` 字面量。

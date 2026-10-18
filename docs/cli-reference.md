@@ -497,6 +497,39 @@ ID 解析，否则按用户名解析。
 `request` 与 `response` 各有一张允许表，所以 `redact` 必须指明方向；`allowlist` 与
 `get` 不填时两个方向都处理。旧名 `snapshot show` 等同于 `snapshot get`。
 
+#### `consent`
+
+原样采集请求正文的授权。`grant` 开一条授权，`list` 看现有的，`revoke` 撤销。
+
+两个范围二选一，字段不能混着给：`single_request` 只对 `--request-id` 那一次请求生效，
+到 `--expires-at` 为止；`time_window` 对 `--from` 到 `--to` 之间的全部请求生效。时间窗
+那一档的到期时间就是 `--to`，不另设参数——同一件事有两个来源时，命令行那个会悄悄赢。
+
+`grant` 必须带 `--agree`。不带时它只把同意文案打出来、什么都不写：`capture_consents`
+的 `consent_text` 与 `consent_version` 两列是拿来做合规举证的，落库之前操作者得先看见
+自己同意的是什么。文案是 `internal/snapshotwire` 里的常量，改文案就要把版本号加一；
+旧记录里留着的仍是当时那一份。
+
+申请时长有上限：`settings` 的 `capture.consent_max_window_hours`。`single_request` 比的是
+从此刻到 `--expires-at`，`time_window` 比的是两端的长度。超过上限**报错拒绝**，不夹到
+上限——夹一下会让申请的那段时长看起来生效了，而实际生效的更短，等它到期时人已经不在
+看着它了。错误里同时给出上限与申请值。
+
+`list` 不带 `--user` 时列出全部用户的授权，含已经撤销与过期的那些：这一栏回答的是
+「谁开过、开的是什么范围」，而不是「此刻哪几条还有效」。状态那一栏是显示口径，由撤销、
+到期与时间窗三件事算出来。`-u` 是 `grant` 与 `list` 上 `--user` 的简写（见上面的
+「短选项」）；`revoke` 的位置参数是授权 ID，它没有简写。
+
+撤销、到期、时间窗没开始或已经过去，这四种情况在**读取的那一刻**重新校验：判定发生在
+脱敏那一刻（`internal/gateway` 通过 `snapshotwire` 的 `ConsentSource` 问一次），每次都查
+一次库，没有缓存。撤销要立刻生效，靠的就是这一点——缓存期内撤销过的授权仍在放行原文，
+而那个窗口有多长取决于缓存，不取决于撤销这个动作。查库失败时按「没有授权」处理，落下来
+的是骨架。
+
+没有有效授权时采集侧落下来的就是脱敏骨架（`capture_mode = skeleton`），有授权的那一段
+是原文（`full_consented`）。读原文那条路是 `snapshot get`，它自己写访问日志。按 API key
+授权这一档不做：采集那一刻拿不到 key id，`capture_consents.api_key_id` 这一列留空。
+
 #### `plugin`
 
 动态插件系统管理。插件的 key 与版本写在源码里（`export const meta`），所以

@@ -68,11 +68,15 @@ func TestLoadAndRead(t *testing.T) {
 func TestUnwiredKeysAreDeclared(t *testing.T) {
 	// 与 Registry 里的 Unwired 逐字对应。改这里之前先确认对应的那条线
 	// 真的接上了（或真的还没接）。
+	//
 	// 四个 plugin.* 曾经在这份清单里，接线之后删掉了——它们的读者在
 	// internal/plugin 的 LoadConfig，装配用例钉着「配错会让装配失败」。
-	want := map[string]string{
-		"capture.consent_max_window_hours": "授权采集那条路还没实现，改了不会有任何效果",
-	}
+	// capture.consent_max_window_hours 是最后一个，它的读者是
+	// `larkaxctl consent grant`（申请时长上限），所以这份清单今天是空的。
+	//
+	// 空清单不等于这道门没用了：下面那两圈仍然在跑——谁新标一个未接线的键，
+	// 就得先把它写进这里，否则第二圈当场报出来。
+	want := map[string]string{}
 
 	got := map[string]string{}
 	for _, s := range Registry {

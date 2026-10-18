@@ -12,6 +12,7 @@ import (
 	"github.com/sumwai/larkax/internal/pipeline"
 	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
 	"github.com/sumwai/larkax/internal/pricing"
+	"github.com/sumwai/larkax/internal/snapshotwire"
 )
 
 // 退出码。运维脚本按它分派处置，所以这几个数是对外契约的一部分，
@@ -168,6 +169,10 @@ var conflictErrors = []error{
 	pipeline.ErrNoRule,
 
 	pluginstore.ErrPluginNotFound,
+
+	// 要撤销的那条授权不在库里，或者已经撤销过。它与上面那些是同一个形状
+	// （要改的那一行不在），只是缺的那一行在 capture_consents 里。
+	snapshotwire.ErrConsentNotFound,
 
 	// 读路径上的「要读的那一条不在」：snapshot get 一条都没读到。它与上面
 	// 那些写入路径的哨兵是同一个形状，只是发生在**读**的一侧，所以它由命令
