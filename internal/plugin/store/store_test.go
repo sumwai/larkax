@@ -324,8 +324,19 @@ func (f *fakeExec) ExecContext(_ context.Context, _ string, args ...any) (sql.Re
 	if f.failOn == len(f.writes) {
 		return nil, errors.New("库连不上了")
 	}
-	return nil, nil
+	return fakeResult{}, nil
 }
+
+// fakeResult 是写回那一步用不到的返回值。
+//
+// *sql.DB.ExecContext 必须交回一个 sql.Result，而 recordLoadResults 只看错误。
+// 给一个零值实现而不是 `return nil, nil`：nil 错误配一个无效的值是 golangci-lint
+// 的 nilnil 咬的那一种写法，而它在这里没有要表达的语义——「写成功了，但我拿不到
+// 结果」这个让步是接口形状逼出来的，不是这一处的意思。
+type fakeResult struct{}
+
+func (fakeResult) LastInsertId() (int64, error) { return 0, nil }
+func (fakeResult) RowsAffected() (int64, error) { return 0, nil }
 
 // 判据：写回的实参对得上（成功的那一条把原文写成 NULL，目标行是刚读的那一行）。
 func TestRecordLoadResultsWritesBothOutcomes(t *testing.T) {
@@ -921,6 +932,13 @@ func TestListReportsRunningLatestAttemptAndLoadResult(t *testing.T) {
 // 夹具让**取中的那一行**（版本名大的那一行，见 pickedOrder）编译不过：它被跳过，
 // 另一行是好的。于是三件事同时可判：只有它被写回、另一行三列仍是 NULL，而它的
 // status 一个字没动。
+//
+// # 这一条为什么得在真库上跑
+//
+// 本机没有库时整个包 skip，而「跳过」与「通过」在输出里长得一模一样（见
+// LESSONS.md 第 16 条）：这一条第一次真的连上库时就是红的，红在断言里那句手抄的
+// 错误原文——引擎报的是「Unexpected end of input」，而当时断言等的是
+// 「Unexpected token」。所以现在原文从同一个入口取（见下面那一句），措辞不写死。
 func TestLoadRegistrySameGenerationWritesBackOneRow(t *testing.T) {
 	db := testDB(t)
 	key := uniqueKey("tie")
@@ -947,8 +965,15 @@ func TestLoadRegistrySameGenerationWritesBackOneRow(t *testing.T) {
 	if !picked.lastLoadResult.Valid || picked.lastLoadResult.String != LoadResultFailed {
 		t.Errorf("被跳过的那一行该写回 failed：%+v", picked.lastLoadResult)
 	}
-	if !picked.lastLoadError.Valid || !strings.Contains(picked.lastLoadError.String, "Unexpected token") {
-		t.Errorf("被跳过的那一行该带上错误原文：%+v", picked.lastLoadError)
+	// 原文从**同一个入口**取：拿同一份源码走一遍 CompileWith，它给出的那一句就是
+	// 加载器交给写回的那一句。这一栏钉的是「写回的就是编译给出的那一句」，不是那个
+	// 版本的引擎把语法错说成什么。
+	_, compileErr := plugin.CompileWith(plugin.Registration{Key: key, Source: brokenSource}, allCaps())
+	if compileErr == nil {
+		t.Fatal("夹具坏了：这份源码该编译不过")
+	}
+	if !picked.lastLoadError.Valid || picked.lastLoadError.String != compileErr.Error() {
+		t.Errorf("写回的原文 = %+v，想要编译给出的那一句 %q", picked.lastLoadError, compileErr.Error())
 	}
 	if !picked.lastLoadAt.Valid {
 		t.Error("写回该带上那一刻的时刻（没有时刻就分不出是哪一次启动写下的）")
