@@ -79,6 +79,34 @@ func hasKind(r *Report, userID int64, kind FindingKind) bool {
 	return false
 }
 
+// countFindings 数出某一类不一致有几条。
+//
+// 与 Report 上那几个方法分开，而且必须分开：reconcile_runs 里那几列就是拿
+// 它们写进去的（见 finishReconcileRun），所以「落库的条数对不对」这个问题的
+// 期望值不能取同一个方法——两边一起被改坏时恒等，报表歪了也看不出来。
+func countFindings(r *Report, kind FindingKind) int {
+	n := 0
+	for _, f := range r.Findings {
+		if f.Kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
+// countRepairedFindings 数出被修好的有几条。
+//
+// 理由与 countFindings 相同：Report.Repaired 既是数法也是落库的来源。
+func countRepairedFindings(r *Report) int {
+	n := 0
+	for _, f := range r.Findings {
+		if f.Repaired {
+			n++
+		}
+	}
+	return n
+}
+
 // malformedOf 挑出某个**科目原文**的畸形科目报告。
 //
 // 畸形科目没有 UserID（它归不到任何人头上），所以不能按用户找；
@@ -580,6 +608,24 @@ func TestReconcileReportsMalformedAccount(t *testing.T) {
 		t.Fatalf("畸形的 user 科目应当被报出来，报告里的类别有 %v", kindsOf(report))
 	}
 
+	// 这个条数要落进运行记录：畸形科目是那笔钱唯一的去处，混进
+	// balance_mismatches 等于把它藏起来。期望值从 Findings 现数——那一列就是
+	// 拿 report 的方法写进去的（见 finishReconcileRun），两边比等于自己跟
+	// 自己比。不写字面量，是因为库里还留着别的用例插进去的坏科目，这一轮数
+	// 出来的条数会跟着变。
+	var malformedCount int
+	if err := db.QueryRowContext(ctx,
+		`SELECT malformed_accounts FROM reconcile_runs WHERE id = $1`, report.RunID).
+		Scan(&malformedCount); err != nil {
+		t.Fatal(err)
+	}
+	if want := countFindings(report, FindingMalformedAccount); malformedCount != want {
+		t.Errorf("落库的畸形科目数 = %d，Findings 里数出 %d", malformedCount, want)
+	}
+	if malformedCount == 0 {
+		t.Error("报了畸形科目就该在运行记录上留个非零的数")
+	}
+
 	// 反证：删掉之后它必须消失。不然上面那条断言可能只是撞上了别的
 	// 用例留下的坏科目，而刚插进去的那条其实没被看见。
 	if _, err := db.ExecContext(ctx,
@@ -969,8 +1015,10 @@ func TestReconcileReportsStalePendingReservation(t *testing.T) {
 		Scan(&staleCount); err != nil {
 		t.Fatal(err)
 	}
-	if staleCount != report.StaleReservations() {
-		t.Errorf("落库的陈旧预留条数 = %d，报告里是 %d", staleCount, report.StaleReservations())
+	// 期望值从这一轮的 Findings 现数，不取 report.StaleReservations()：那一列
+	// 就是拿它写进去的（见 finishReconcileRun），两边比等于自己跟自己比。
+	if want := countFindings(report, FindingStaleReservation); staleCount != want {
+		t.Errorf("落库的陈旧预留条数 = %d，Findings 里数出 %d", staleCount, want)
 	}
 	if staleCount == 0 {
 		t.Error("报了就该记进运行记录")
@@ -1364,6 +1412,42 @@ func TestReconcileShardsThroughAllUsers(t *testing.T) {
 
 // ── 运行记录 ────────────────────────────────────────────────────────────
 
+// 报告里那几个条数：数与验分开。
+//
+// 它们都会落进 reconcile_runs 的列（见 finishReconcileRun），而运维就是看
+// 那几列判断账本还对不对。此前每一条断言都拿库里的值与写这个值的方法比：
+// 方法被改坏时两边一起变，恒等，`n++` 写成 `n--` 也照样通过。这一条用手工
+// 搭的一份报告与字面量比，期望值不与数法共用一句话。
+//
+// 畸形科目不在这张表里：它的计数不走「遍历 Findings」这一步，而是顺着扫描
+// 逐个加（见 reconcileMalformedAccounts），所以要到真的扫出一个畸形科目才
+// 动得了——那一格在 TestReconcileReportsMalformedAccount 里。
+func TestReportCountsComeFromFindings(t *testing.T) {
+	r := &Report{Findings: []Finding{
+		{Kind: FindingBalanceMismatch, Repaired: true},
+		{Kind: FindingBalanceMismatch},
+		{Kind: FindingFrozenMismatch, Repaired: true},
+		{Kind: FindingStaleReservation},
+		{Kind: FindingStaleReservation},
+		{Kind: FindingMalformedAccount},
+	}}
+
+	for _, tc := range []struct {
+		name string
+		got  int
+		want int
+	}{
+		{"余额不一致", r.BalanceMismatches(), 2},
+		{"冻结不一致", r.FrozenMismatches(), 1},
+		{"陈旧预留", r.StaleReservations(), 2},
+		{"被修好的", r.Repaired(), 2},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %d，期望 %d", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
 func TestReconcileRunRecordsOutcome(t *testing.T) {
 	db := testDB(t)
 	userID := seed(t, db, "100")
@@ -1400,13 +1484,30 @@ func TestReconcileRunRecordsOutcome(t *testing.T) {
 	if checked == 0 {
 		t.Error("比对行数应当非零")
 	}
-	if balMismatch == 0 {
-		t.Error("余额不一致的条数应当记进运行记录")
+	// 下面每一格的期望值都从这一轮的 report.Findings 现数，不取 Report 上那
+	// 几个方法：那几列就是拿它们写进去的（见 finishReconcileRun），两边比
+	// 等于自己跟自己比。
+	wantBal := countFindings(report, FindingBalanceMismatch)
+	if wantBal == 0 {
+		t.Fatal("夹具动过一个用户的余额，这一轮应当报出余额不一致")
 	}
-	if malformedCount != report.MalformedAccounts() {
-		// 畸形科目单独一列，而它**不**计入 balance_mismatches：那笔钱
-		// 归不到任何用户头上，与「某个用户的余额对不上」是两件事。
-		t.Errorf("畸形科目数 = %d，报告里是 %d", malformedCount, report.MalformedAccounts())
+	if balMismatch != wantBal {
+		t.Errorf("落库的余额不一致条数 = %d，Findings 里数出 %d", balMismatch, wantBal)
+	}
+	// 这一轮被直接改过的只有余额，冻结那一侧没动：Findings 里不该有冻结那
+	// 一类，落库的那一列也该是 0。把余额差算进冻结列里，报表上就成了
+	// 「钱冻错了」。
+	if wantFrozen := countFindings(report, FindingFrozenMismatch); frozenMismatch != wantFrozen {
+		t.Errorf("落库的冻结不一致条数 = %d，Findings 里数出 %d", frozenMismatch, wantFrozen)
+	}
+	// 畸形科目单独一列，而它**不**计入 balance_mismatches：那笔钱归不到
+	// 任何用户头上，与「某个用户的余额对不上」是两件事。
+	if wantMalformed := countFindings(report, FindingMalformedAccount); malformedCount != wantMalformed {
+		t.Errorf("落库的畸形科目数 = %d，Findings 里数出 %d", malformedCount, wantMalformed)
+	}
+	// 这一轮只报告不修（见 noRepair），所以一条都没动手。
+	if wantRepaired := countRepairedFindings(report); repaired != wantRepaired {
+		t.Errorf("落库的 repaired = %d，Findings 里数出 %d", repaired, wantRepaired)
 	}
 	if watermark == "" {
 		t.Error("起点必须落库，否则下一轮无从增量")
@@ -1416,8 +1517,9 @@ func TestReconcileRunRecordsOutcome(t *testing.T) {
 // 「修了几条」要真的落库：只看 balance_mismatches 数不出这一轮动过手，
 // 而「发现了 3 条、修了 3 条」与「发现了 3 条、一条都没修」是两种处境。
 //
-// 断言盯的是**这个用户**那一条，不是 report.Repaired() 的总数：同一个测试
-// 库上可能同时跑着别的进程（变异测试就是并行的），总数会被它们影响。
+// 期望值从这一轮的 Findings 现数，既不用 report.Repaired() 也不用字面量：
+// 前者就是写那一列的来源，两边比等于自己跟自己比；而同一个测试库上可能同时
+// 跑着别的进程（变异测试就是并行的），总数不该由用例写死。
 func TestReconcileRunRecordsRepairedCount(t *testing.T) {
 	db := testDB(t)
 	userID := seed(t, db, "100")
@@ -1433,8 +1535,8 @@ func TestReconcileRunRecordsRepairedCount(t *testing.T) {
 		`SELECT repaired FROM reconcile_runs WHERE id = $1`, report.RunID).Scan(&repaired); err != nil {
 		t.Fatal(err)
 	}
-	if repaired != report.Repaired() {
-		t.Errorf("落库的 repaired = %d，报告里是 %d", repaired, report.Repaired())
+	if want := countRepairedFindings(report); repaired != want {
+		t.Errorf("落库的 repaired = %d，Findings 里数出 %d", repaired, want)
 	}
 	if repaired == 0 {
 		t.Error("修了东西就该有非零的 repaired")
