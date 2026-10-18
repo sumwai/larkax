@@ -362,6 +362,12 @@ func TestVerifyErrorIsDeterministic(t *testing.T) {
 
 // sortedAssets 是「报错文本稳定」的实现手段。它按字典序返回键，
 // 与 map 的随机遍历顺序无关——接第二种资产之后不平的报错才仍然可比。
+//
+// 这一句上的 `<` 改成 `<=` 是**等价变异**（balance.go:146:56，
+// CONDITIONALS_BOUNDARY）：比较器只在 i、j 指**不同**元素时被调用，而
+// keys 的每一项都来自 map 的键，不可能有两个相等的键；Asset 是 string，
+// 不同的键必然是不同的字符串。`<` 与 `<=` 只在两侧相等时给出不同答案，
+// 而那个格子在这里到不了——不是「没测到」，是构造上不存在。
 func TestSortedAssetsIsDeterministic(t *testing.T) {
 	m := map[Asset]money.Amount{"USDT": money.One, AssetCNY: money.One}
 	for i := 0; i < 20; i++ {
@@ -512,6 +518,15 @@ func TestBalanceOfKeepsTransientOverflowOutOfTheJudgement(t *testing.T) {
 //
 // map 的遍历顺序是随机的，而同一个错误的报错文本在两次运行之间不同，测试
 // 就断言不了，排查时也无法按文本去搜日志（与 sortedAssets 同一个理由）。
+//
+// 排序里那一句 `overflowed[i].account.String() < overflowed[j].account.String()`
+// 上的 `<` 改成 `<=` 也是**等价变异**（balance.go:105:42，CONDITIONALS_BOUNDARY）：
+// overflowed 的每一项来自两层 `range map`，所以「资产 + 科目」这一对是唯一的；
+// 而走到那一句的前提是两侧**资产相同**（资产不同时上一句已经 return 了），
+// 于是一对不同的元素必然是**不同**的科目。Account 只有一个字段，String() 就把
+// 原文返回，不同的科目给出的字符串必然不同——`<` 与 `<=` 分不开的那个「相等」
+// 格子到不了。两个科目号不同、科目类型也不同的形状（例如 user:3 与
+// merchant_payable:3）同理，字符串本身就不同。
 func TestBalancesReportsOverflowDeterministically(t *testing.T) {
 	txn := newTxnID(t, txnA)
 	huge := amount(t, "92233720368.54775807")
