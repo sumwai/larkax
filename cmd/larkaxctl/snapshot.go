@@ -34,16 +34,18 @@ var snapshotHelp = helpText{short: snapshotShortUsage, long: snapshotUsage}
 const snapshotShortUsage = `larkaxctl snapshot 维护与查看请求结构快照。
 
 用法：
-  larkaxctl snapshot cleanup [--dry-run]
-        按 settings 里的留存期删除到期分区
+  larkaxctl snapshot cleanup [--dry-run]   按 settings 里的留存期删除到期分区
   larkaxctl snapshot allowlist [--direction request|response] [--surface chat|decision]
         打印允许表：哪些字段放行、哪些替换成占位
   larkaxctl snapshot get <request_id> --actor <用户 ID 或用户名> --reason <文本>
         读出一条请求存下来的结构快照
+  larkaxctl snapshot access-log [--request-id <id>] [--user <用户 ID 或用户名>]
+        [--from <时刻>] [--to <时刻>] [--limit <条数>]
+        列出访问记录：谁在什么时候读了哪一条快照
   larkaxctl snapshot redact --direction request|response
         从标准输入读一段 JSON 报文，按允许表脱敏
 
-get 的 --actor 与 --reason 都是必填，读一次就写一行访问日志。
+get 的 --actor 与 --reason 都是必填，读一次就写一行访问日志；access-log 把那些行读回来。
 redact 的骨架走 stdout，方向、字节上限与那句提醒走 stderr。
 
 更细的边界：larkaxctl help snapshot。
@@ -60,6 +62,9 @@ const snapshotUsage = `larkaxctl snapshot 维护与查看请求结构快照。
   larkaxctl snapshot get <request_id> --actor <用户 ID 或用户名> --reason <文本>
         [--direction request|response]
         读出一条请求存下来的结构快照
+  larkaxctl snapshot access-log [--request-id <id>] [--user <用户 ID 或用户名>]
+        [--from <时刻>] [--to <时刻>] [--limit <条数>]
+        列出访问记录：谁在什么时候读了哪一条快照
   larkaxctl snapshot redact --direction request|response [--surface chat|decision]
         [--max-bytes <字节数>]
         从标准输入读一段 JSON 报文，按允许表脱敏，骨架打到标准输出
@@ -81,6 +86,17 @@ get 的 --actor 与 --reason 都是必填。读一条别人的请求结构是读
 同一个 request_id 可能有多行（请求与响应各一行，重试也可能各一行），
 get 全部按 created_at 升序打出来。只取一行会让「这次请求还有另一半」看不见。
 request_id 一条都没读到的时候非零退出，并且不写访问日志：没读到东西不算一次访问。
+
+access-log 把 get 写下的那些行读回来：谁、什么时候、以什么理由读了哪一条快照。
+它按 request_id、读取者（--user 收用户 ID 或用户名）与时间窗筛，三者可以一起给，
+也可以一个都不给（那就是最近的那些）。--user 筛的是**读快照的那个人**，不是快照属于
+谁：这张表记的是读取动作，快照属于谁是快照那一侧的事。理由那一栏是 get 的 --reason
+原文；系统自己写的行没有理由，那一栏打一个短横。
+
+access-log 也是管理员动作：跑得起 larkaxctl 的人本来就能连上这个库，所以这条命令
+不额外要求别的授权，也不带角色参数——与 get 把读取者记成 admin 是同一条口径。
+窗口是左闭右开的（--from 含、--to 不含，时刻按 UTC 算），--limit 默认 50、0 表示
+不限；被截住时末行会说明只打了多少条。
 
 redact 看到的结果不是库里那条快照。它把一段报文交给脱敏器，回答的是
 「这段报文会长成什么样」；库里那条骨架来自**解析之后**的请求/响应，
@@ -120,6 +136,8 @@ func runSnapshot(args []string) error {
 		return runSnapshotAllowlist(rest)
 	case "get", "show":
 		return runSnapshotGet(rest)
+	case "access-log":
+		return runSnapshotAccessLog(rest)
 	case "redact":
 		return runSnapshotRedact(rest)
 	case "-h", "--help":
@@ -985,6 +1003,277 @@ func errorKindCell(direction string, v sql.NullString) string {
 		return notApplicableOnRequest
 	}
 	return noUpstreamError
+}
+
+// snapshotAccessLogDefaultLimit 是 access-log 默认打几行。
+//
+// 这张表只追加，每一次 `snapshot get` 都写一行，不给上限时一次就是整表读回来；
+// 看的人要的通常只是最近那一段。被截住时末行会说明，所以默认值不会让人把一份
+// 截过的清单当成完整的。
+const snapshotAccessLogDefaultLimit = 50
+
+// snapshotAccessLogFilter 描述一次访问记录的读取范围。零值表示三个筛选条件
+// 都不给、不限条数。
+type snapshotAccessLogFilter struct {
+	// RequestID 为空表示不限请求。
+	RequestID string
+	// ActorUserID 为 nil 表示不限读取者。
+	ActorUserID *int64
+	// From 是窗口起点（含），零值表示不限。
+	From time.Time
+	// To 是窗口终点（**不含**），零值表示不限。
+	To time.Time
+	// Limit 是一次最多读几行，0 表示不限。与其余清单一样多读一行判「后面还有没有」。
+	Limit int
+}
+
+// snapshotAccessRow 是 snapshot_access_log 里读出来的一行。
+//
+// ActorUserID 可空：actor_kind 为 system 的那些行没有用户（表上该列可空）。
+// Reason 可空：系统自己写的行没有理由，而人手读一次的理由是必填的（见
+// runSnapshotGet）。
+type snapshotAccessRow struct {
+	ID          int64
+	SnapshotID  int64
+	RequestID   string
+	ActorUserID sql.NullInt64
+	ActorKind   string
+	Reason      sql.NullString
+	AccessedAt  time.Time
+}
+
+// runSnapshotAccessLog 列出快照的访问记录。
+//
+// 它读的就是 `snapshot get` 写下的那张表：写入那一侧在 readSnapshotsWithAudit
+// （读快照与记日志在同一个事务里，所以日志里的每一行都对应一次真的读过）。
+// 只写不读的话，「谁把快照读走了」这个问题在命令行上回答不了。
+func runSnapshotAccessLog(args []string) error {
+	fs := flag.NewFlagSet("snapshot access-log", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
+	requestID := fs.String("request-id", "", "")
+	user := fs.String("user", "", "")
+	stringAlias(fs, user, "u")
+	from := fs.String("from", "", "")
+	to := fs.String("to", "", "")
+	limit := fs.Int("limit", snapshotAccessLogDefaultLimit, "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf(
+			"snapshot access-log 不接受位置参数，得到 %q：按请求筛用 --request-id", fs.Arg(0)))
+	}
+
+	fromAt, err := parseLedgerTime("--from", *from)
+	if err != nil {
+		return usageErr(err)
+	}
+	toAt, err := parseLedgerTime("--to", *to)
+	if err != nil {
+		return usageErr(err)
+	}
+	if !fromAt.IsZero() && !toAt.IsZero() && !fromAt.Before(toAt) {
+		return usageErr(fmt.Errorf(
+			"--from 必须早于 --to（区间左闭右开），得到 %s 与 %s",
+			fromAt.Format(time.RFC3339), toAt.Format(time.RFC3339)))
+	}
+	if *limit < 0 {
+		return usageErr(fmt.Errorf("--limit 不能为负，得到 %d（0 表示不限）", *limit))
+	}
+
+	return withDB(snapshotReadTimeout, func(ctx context.Context, db *sql.DB) error {
+		authStore := auth.New(db)
+		filter := snapshotAccessLogFilter{
+			RequestID: strings.TrimSpace(*requestID),
+			From:      fromAt,
+			To:        toAt,
+			Limit:     *limit,
+		}
+		if *user != "" {
+			// 与 get 的 --actor 走同一个解析：两种写法（ID / 用户名）停在同一处。
+			actor, err := authStore.ResolveUser(ctx, *user)
+			if err != nil {
+				return err
+			}
+			filter.ActorUserID = &actor.ID
+		}
+
+		rows, more, err := readSnapshotAccessLog(ctx, db, filter)
+		if err != nil {
+			return err
+		}
+		names, err := userNames(ctx, authStore)
+		if err != nil {
+			return err
+		}
+
+		if jsonOutput() {
+			return emitJSON(os.Stdout, snapshotAccessLogDoc(rows, names, more, filter), nil)
+		}
+		printSnapshotAccessLog(humanStdout(), rows, names, more)
+		return nil
+	})
+}
+
+// readSnapshotAccessLog 读一页访问记录，新的在前。
+//
+// 排序补一个 id 是为了稳定：同一次 get 打出的多行、以及同一微秒写下的两行，只按
+// accessed_at 排时两次读出来的顺序可以不同。
+//
+// 谓词一律按「调用方给了什么条件」现编（与 ledger/store 的只读查询同一条）：
+// 写成 `($1 IS NULL OR request_id = $1)` 会把「这次有没有这个条件」搬进 SQL，
+// 而一个恒真的分支足以让查询放弃走索引。
+func readSnapshotAccessLog(ctx context.Context, db *sql.DB,
+	f snapshotAccessLogFilter) ([]snapshotAccessRow, bool, error) {
+	var (
+		conds []string
+		args  []any
+	)
+	param := func(v any) string {
+		args = append(args, v)
+		return "$" + strconv.Itoa(len(args))
+	}
+	if f.RequestID != "" {
+		conds = append(conds, "request_id = "+param(f.RequestID))
+	}
+	if f.ActorUserID != nil {
+		conds = append(conds, "actor_user_id = "+param(*f.ActorUserID))
+	}
+	if !f.From.IsZero() {
+		conds = append(conds, "accessed_at >= "+param(f.From))
+	}
+	if !f.To.IsZero() {
+		conds = append(conds, "accessed_at < "+param(f.To))
+	}
+
+	query := `SELECT id, snapshot_id, request_id, actor_user_id, actor_kind, reason, accessed_at
+	            FROM snapshot_access_log`
+	if len(conds) > 0 {
+		query += " WHERE " + strings.Join(conds, " AND ")
+	}
+	query += " ORDER BY accessed_at DESC, id DESC"
+	if f.Limit > 0 {
+		query += " LIMIT " + strconv.Itoa(f.Limit+1)
+	}
+
+	result, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("查询快照访问记录失败: %w", err)
+	}
+	defer func() { _ = result.Close() }()
+
+	var rows []snapshotAccessRow
+	for result.Next() {
+		var row snapshotAccessRow
+		if err := result.Scan(&row.ID, &row.SnapshotID, &row.RequestID,
+			&row.ActorUserID, &row.ActorKind, &row.Reason, &row.AccessedAt); err != nil {
+			return nil, false, fmt.Errorf("读快照访问记录失败: %w", err)
+		}
+		rows = append(rows, row)
+	}
+	if err := result.Err(); err != nil {
+		return nil, false, fmt.Errorf("读快照访问记录失败: %w", err)
+	}
+
+	if f.Limit > 0 && len(rows) > f.Limit {
+		return rows[:f.Limit], true, nil
+	}
+	return rows, false, nil
+}
+
+// printSnapshotAccessLog 打一张访问记录清单。
+//
+// 空清单也说一句话：一行都不打时，「这个范围内没人读过快照」与「命令没跑成」在
+// 安静的终端里长得一样（见 LESSONS.md 第 16 条）。这一句不套 style.go 的
+// emptyListNote——访问记录由 get 写出来，没有「添加」这个动作。
+func printSnapshotAccessLog(w io.Writer, rows []snapshotAccessRow,
+	names map[int64]string, more bool) {
+	if len(rows) == 0 {
+		_, _ = fmt.Fprintln(w, "这个范围内没有快照访问记录。")
+		return
+	}
+
+	tw := newTableWriter(w)
+	p := newPalette(w)
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		p.bold("时刻"), p.bold("request_id"), p.bold("快照 ID"), p.bold("用户 ID"),
+		p.bold("用户名"), p.bold("身份"), p.bold("理由"))
+	for _, r := range rows {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			p.dim(r.AccessedAt.Format(longStampLayout)), p.bold(r.RequestID),
+			strconv.FormatInt(r.SnapshotID, 10), actorIDCell(r.ActorUserID),
+			names[r.ActorUserID.Int64], r.ActorKind, reasonCell(r.Reason))
+	}
+	_ = tw.Flush()
+	printTruncatedListNote(w, more, len(rows))
+}
+
+// actorIDCell 打读取者的用户 ID，系统自己写的那一行没有用户。
+//
+// 没有用户时打 `-`，不打 0：0 不是一个合法的用户 ID，打出来会被读成「一个编号为 0
+// 的用户读了它」。进 JSON 时那一栏是 null（见 snapshotAccessLogDoc）。
+func actorIDCell(v sql.NullInt64) string {
+	if !v.Valid {
+		return "-"
+	}
+	return strconv.FormatInt(v.Int64, 10)
+}
+
+// reasonCell 打理由那一栏，没有理由时打 `-`。
+func reasonCell(v sql.NullString) string {
+	if !v.Valid || v.String == "" {
+		return "-"
+	}
+	return v.String
+}
+
+// snapshotAccessLogDoc 组装 snapshot access-log 的机器可读输出。
+//
+// 理由原文照打（它是使用者写下的那句话），读取者的用户 ID 没有就是 null。
+func snapshotAccessLogDoc(rows []snapshotAccessRow, names map[int64]string,
+	more bool, f snapshotAccessLogFilter) map[string]any {
+	summary := map[string]any{
+		"total":     len(rows),
+		"limit":     f.Limit,
+		"truncated": more,
+		// 这次筛的是什么，与其余清单的机器可读档一样带出来：一份只有总数的清单
+		// 说不清这几十条是哪一段、哪一个请求的。
+		"request_id": nullableString(f.RequestID),
+		"from":       jsonTimeOrNull(f.From),
+		"to":         jsonTimeOrNull(f.To),
+	}
+	if f.ActorUserID != nil {
+		summary["user_id"] = *f.ActorUserID
+	} else {
+		summary["user_id"] = nil
+	}
+
+	entries := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		entries = append(entries, map[string]any{
+			"id":            r.ID,
+			"snapshot_id":   r.SnapshotID,
+			"request_id":    r.RequestID,
+			"actor_user_id": jsonNullInt64(r.ActorUserID),
+			"username":      nullableString(names[r.ActorUserID.Int64]),
+			"actor_kind":    r.ActorKind,
+			"reason":        nullableString(r.Reason.String),
+			"accessed_at":   jsonTime(r.AccessedAt),
+		})
+	}
+
+	doc := jsonDoc(jsonOK)
+	doc["summary"] = summary
+	doc["accesses"] = entries
+	return doc
+}
+
+// jsonNullInt64 打一个可空 bigint，没有就是 null。
+func jsonNullInt64(v sql.NullInt64) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.Int64
 }
 
 // runSnapshotCleanup 删除到期分区。

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -329,6 +330,17 @@ func jsonDate(d *time.Time) any {
 		return nil
 	}
 	return d.Format("2006-01-02")
+}
+
+// nullTimeToPtr 把 database/sql 的可空时刻翻成指针，没有就是 nil。
+//
+// 库里可空的时刻列读进来大多是 sql.NullTime，而这一层其余几个助手按
+// *time.Time 表达「没有值」（见 jsonTimePtr），所以在这一处转一次。
+func nullTimeToPtr(t sql.NullTime) *time.Time {
+	if !t.Valid {
+		return nil
+	}
+	return &t.Time
 }
 
 // jsonObject 打一个原始 JSON 对象。

@@ -1117,13 +1117,14 @@ ingress 规则下。
 | `price` | 计价规则：`create` / `list` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `list`） |
 | `user` | 用户：`create` / `list` / `get` / `update` |
 | `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录）/ `list` |
+| `usage` | 用量与计费（只读）：`events`（用量事件）/ `requests`（每次请求的预留与结算） |
 | `apikey` | API Key：`create` / `update` / `get` / `list`；`update` 兼改状态、备注与过期时间 |
-| `ledger` | 账本：`balance` / `verify`（两条都只读）与 `reconcile`（对账，会写运行记录） |
+| `ledger` | 账本：`balance` / `verify` / `runs`（三条都只读：余额、逐笔校验、对账的历史运行）与 `reconcile`（对账，会写运行记录） |
 | `settings` | 运行期配置：`list` / `get` / `set` |
 | `plugin` | 插件：`list` / `get` / `publish` / `enable` / `disable` / `delete`；插件私有的键值存储：`kv`（`get` / `set` / `delete`） |
 | `partition` | `usage_events` 月分区：`ensure` / `check` |
 | `doctor` | 逐项检查这条链路通不通（`--live` 才真打上游） |
-| `snapshot` | 请求快照：`cleanup` / `allowlist` / `get` / `redact` |
+| `snapshot` | 请求快照：`cleanup` / `allowlist` / `get` / `access-log`（只读的访问记录）/ `redact` |
 | `consent` | 原样采集请求正文的授权：`grant` / `list` / `revoke` |
 | `secret` | 主密钥轮换：`rotate` |
 | `maintenance` | 运行期数据的留存清理：`idempotency`（`--dry-run` 只数不删） |
