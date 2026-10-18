@@ -447,3 +447,22 @@ func emptyListNote(entity, action string) string {
 	}
 	return fmt.Sprintf(emptyListNoteFmt, entity, action)
 }
+
+// longStampLayout 是清单里时刻那一栏的**带年份**写法。
+//
+// 与 stampLayout（apikey.go，`01-02 15:04`）差一个年份。清单里默认省掉年份是
+// 为了不把一栏撑宽（见 docs/cli-output.md 的「加一个清单命令」），但那几类数据
+// 的跨度以天计；用量事件按月分区、对账运行记录长期留存，省掉年份之后
+// 「10-31 23:00」是哪一年要靠上下文猜。
+const longStampLayout = "2006-01-02 15:04"
+
+// truncatedListNote 是清单被 --limit 截住时补的那一句。
+//
+// 理由与空状态那一句同源：一份**少了后文**的清单与一份完整的清单在屏幕上长得
+// 一样，而看的人会照第一份下结论（见 LESSONS.md 第 16 条）。所以被截住时要在
+// 同一份输出里说出来，并且给出两条能拿到后文的下一步——它收在 style.go 而不是
+// 各命令自己拼，与 emptyListNote 是同一条：同类清单说同一句话。
+func truncatedListNote(shown int) string {
+	return fmt.Sprintf(
+		"（以上是最近 %d 条，更早的没打出来：把 --limit 调大，或用筛选条件缩小范围）", shown)
+}

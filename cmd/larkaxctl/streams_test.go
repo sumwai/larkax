@@ -254,10 +254,21 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 				})
 			}},
 
+		{command: "usage", what: "events 空清单",
+			run: func() error {
+				return runUsage([]string{"events", "--user", id(emptyUserID)})
+			}},
+		{command: "usage", what: "requests 空清单",
+			run: func() error {
+				return runUsage([]string{"requests", "--user", id(emptyUserID)})
+			}},
+
 		{command: "ledger", what: "balance --all",
 			run: func() error { return runLedger([]string{"balance", "--all"}) }},
 		{command: "ledger", what: "reconcile", reportOnly: true,
 			run: func() error { return runLedger([]string{"reconcile"}) }},
+		{command: "ledger", what: "runs",
+			run: func() error { return runLedger([]string{"runs"}) }},
 
 		{command: "migrate", what: "status",
 			run: func() error { return runMigrate([]string{"status"}) }},
@@ -282,6 +293,10 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 				return runSnapshot([]string{
 					"get", fx.requestID, "--actor", id(fx.userID), "--reason", "门禁用例",
 				})
+			}},
+		{command: "snapshot", what: "access-log",
+			run: func() error {
+				return runSnapshot([]string{"access-log", "--request-id", fx.requestID})
 			}},
 		{command: "snapshot", what: "redact",
 			run: func() error {
