@@ -1204,6 +1204,7 @@ bash scripts/check-unimported.sh    # 整包没人 import：包本身有没有�
 bash scripts/check-deadmethods.sh   # 导出方法有没有调用点（上面两道门都照不到）
 bash scripts/check-test-names.sh    # Go 顶层函数声明的名字必须是 ASCII
 bash scripts/check-lessons-index.sh # LESSONS.md 的索引与 lessons/ 下的正文对得上
+bash scripts/check-docs-index.sh    # docs/README.md 的分组表、development.md 的 TOC 与正文对得上
 scripts/check-mutation.sh           # 变异测试（改动计费/账本时），见下文
 
 # 契约测试：用官方 SDK 当客户端验我们对外响应的形状。要先装 Python 依赖，
@@ -1217,7 +1218,8 @@ go vet -tags=contract ./internal/assembly/
 
 **改了哪个脚本就跑它自己的自测**：`scripts/check-redlines.test.sh`、
 `check-deadcode.test.sh`、`check-unimported.test.sh`、`check-deadmethods.test.sh`、
-`check-test-names.test.sh`、`check-layering.test.sh`、`check-mutation.test.sh`。
+`check-test-names.test.sh`、`check-layering.test.sh`、`check-mutation.test.sh`、
+`check-lessons-index.test.sh`、`check-docs-index.test.sh`。
 扫描器坏掉时的输出和「干净」一模一样，没有自测就无法证明它还在工作
 （见 [LESSONS.md](../LESSONS.md) 第 2、7 条）。
 
@@ -1264,6 +1266,17 @@ go vet -tags=contract ./internal/assembly/
 `lessons/` 一个文件都没扫到）的输出和「全部对得上」一模一样。所以它每次都打印
 「解析出多少行索引 / 扫到多少个文件」，任一为 0 就判「没跑成」（退出码 2），
 而不是报通过（见 [LESSONS.md](../LESSONS.md) 第 16 条），自测也照第 2、23 条一并跑。
+
+`scripts/check-docs-index.sh` 管的是 `docs/` 下那两处索引与正文的一致性：
+[README.md](README.md) 的「想做 X → 看 Y」分组表 ↔ `docs/` 下的文件，以及
+`development.md` 顶部的 TOC ↔ 文中那些标题。判据三条：每一份文档都在索引里
+（正文 → 索引）；索引里每条指向本目录 `.md` 的链接都有对应的文件（索引 → 正文）；
+TOC 的每个锚点在文中都有对应标题。前两条是一对，只留一条时另一类错照样漏：
+新写的文档没进索引、或者索引里链了一份已经不存在的文档，两种都是「点进去 404」。
+它同样只依赖 bash 与 coreutils，所以也放在那个 job 里。
+
+哪些标题该进 TOC 是取舍；索引分组的措辞好不好、指向仓库别处的链接（`../…`）
+有没有写错，都不在它里面——这些在脚本开头的「已知边界」里逐条写着，不是漏判。
 
 `scripts/check-test-names.sh` 管的是「标识符保持英文」这条约定：**Go 顶层
 `func` 声明的名字**只许由 `[A-Za-z0-9_]` 组成。判的是**名字那个标识符**，
@@ -1367,7 +1380,8 @@ CI 包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`�
 及其自测（`check-deadcode.sh`）、整包没人 import 的门禁及其自测
 （`check-unimported.sh`）、导出方法调用点门禁及其自测（`check-deadmethods.sh`）、
 测试函数名门禁及其自测（`check-test-names.sh`）、索引与正文一致性门禁及其自测
-（`check-lessons-index.sh`）、非 UTC 时区下的时刻门禁（`TZ=Asia/Shanghai` 再跑一遍
+（`check-lessons-index.sh`）、文档索引与正文一致性门禁及其自测
+（`check-docs-index.sh`）、非 UTC 时区下的时刻门禁（`TZ=Asia/Shanghai` 再跑一遍
 受影响的包，见 [cli-output.md](cli-output.md) 的「时刻与时区」）、契约测试（见下）。
 
 **变异测试不在 CI 里跑**（CI 跑的是它自己的自测），它只在本地按需跑；

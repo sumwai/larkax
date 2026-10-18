@@ -219,7 +219,18 @@ while IFS= read -r f; do
 done <<<"$files"
 LC_ALL=C sort -u -o "$file_uniq" "$file_uniq"
 
-comm -13 "$index_uniq" "$file_uniq" >"$tmpdir/unlisted"
+# comm 也要按字节比：上面两处 sort 是 LC_ALL=C，comm 的判断必须与它们同一套。
+# 不一致时它会一边抱怨 `not in sorted order`、一边把**两侧都有**的文件报成
+# 「在索引里没有一行」——凭空多出来的一条幻影，而幻影与真发现长得一样。
+# （本机 locale 是 en_US.UTF-8、`-` 与 `.` 不参与主级比较时就会这样。）
+#
+# **这一行没有自测覆盖，是有意的。** 夹具里造不出那个形状：触发它要一对
+# 「C 序与主级序不一致」的文件名（`07-a-zz.md` / `07-az.md` 这种），而那要同号；
+# 编号唯一正是这道门的规矩。`comm` 也不是见到乱序就发作——它要两侧的元素被
+# **交叉**比到，两侧是同一批名字时它逐个对上、什么都不说。为一行环境变量在夹具
+# 里塞一对同号文件，人工痕迹比它钉住的东西还大；CI 里 `LANG` 基本是 C，这一行
+# 在那边本来也不会发作。
+LC_ALL=C comm -13 "$index_uniq" "$file_uniq" >"$tmpdir/unlisted"
 while IFS= read -r b; do
   [ -n "$b" ] || continue
   printf '判据 2 · lessons/%s 在索引里没有一行\n' "$b" >>"$tmpdir/bad"
