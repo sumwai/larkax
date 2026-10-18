@@ -236,6 +236,8 @@ func TestConflictSentinelsExitFour(t *testing.T) {
 		{"pricing.ErrRuleNotFound", pricing.ErrRuleNotFound},
 		{"pipeline.ErrNoRule", pipeline.ErrNoRule},
 		{"pluginstore.ErrPluginNotFound", pluginstore.ErrPluginNotFound},
+		{"errSettingsNotFound", errSettingsNotFound},
+		{"errPluginKVKeyNotFound", errPluginKVKeyNotFound},
 		{"snapshot.ErrSnapshotNotFound", errSnapshotNotFound},
 	}
 

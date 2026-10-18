@@ -25,8 +25,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sumwai/larkax/internal/calendar"
 )
@@ -101,6 +103,80 @@ func (s *Source) YearState(ctx context.Context, region calendar.Region, year int
 		return calendar.YearUnknown, fmt.Errorf("%s %d 年: %w", region, year, err)
 	}
 	return state, nil
+}
+
+// Year 是 calendar_years 里的一行：某地区某一年的同步状态。
+//
+// 字段与列一一对应，只多不少：这是给运维核对用的（「哪一年灌过、什么时候灌的、
+// 双源对得上吗」），而它们要看的正是库里那一行现在是什么。
+type Year struct {
+	Region string
+	Year   int
+	// Status 是那一列的**原文**，不翻成 calendar.YearState。
+	//
+	// 清单要回答的是「库里现在是什么」，而翻一遍之后，一个约束外的值（约束被摘
+	// 掉过、或者手工 SQL 写过）会让整张清单报错——那正是最需要看到清单的时候。
+	// 判定那一条路另有 parseYearState 把关，两件事不必共用一套处置。
+	Status string
+	// DayCount 是这一年写下的数据行数（status 不是 synced 时是 0）。
+	DayCount int
+	// SourcePaperURLs 是公告原文地址，空表示没有。
+	SourcePaperURLs []string
+	// SourcesAgree 是双源交叉校验的结果。nil 表示没得比（那一列可空）。
+	SourcesAgree *bool
+	// LastError 是同步失败的原因，status 为 degraded 时有意义。
+	LastError string
+	// SyncedAt 是这一行写下的时刻。
+	SyncedAt time.Time
+}
+
+// List 列出导入过的年份，同地区内按年份**从新到旧**。
+//
+// 倒序是因为问得最多的一句是「今年、明年的日历灌了没有」，而这两个总在末尾——
+// 正序排列时它们被十几年的历史压在下面。同一年只可能有一行（主键是
+// (region, year)），所以这个顺序里没有并列。
+func (s *Source) List(ctx context.Context) ([]Year, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT region, year, status, day_count, array_to_json(source_paper_urls)::text,
+		       sources_agree, last_error, synced_at
+		  FROM calendar_years
+		 ORDER BY region, year DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("查询日历年份失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	// 从空切片起：一年都没有是正常结果（还没导入过），不是「没有值」。
+	out := []Year{}
+	for rows.Next() {
+		var (
+			y        Year
+			agree    sql.NullBool
+			lastErr  sql.NullString
+			papersJS string
+		)
+		if err := rows.Scan(&y.Region, &y.Year, &y.Status, &y.DayCount, &papersJS,
+			&agree, &lastErr, &y.SyncedAt); err != nil {
+			return nil, fmt.Errorf("读取日历年份行失败: %w", err)
+		}
+		// text[] 走 array_to_json 转成 JSON 文本再解（与 internal/catalog 同一
+		// 条）：pgx 的 database/sql 那一层把数组原样给成一个字符串，直接扫进
+		// []string 会报 unsupported Scan。
+		y.SourcePaperURLs = []string{}
+		if err := json.Unmarshal([]byte(papersJS), &y.SourcePaperURLs); err != nil {
+			return nil, fmt.Errorf("解析 %s %d 年的公告地址失败: %w", y.Region, y.Year, err)
+		}
+		if agree.Valid {
+			v := agree.Bool
+			y.SourcesAgree = &v
+		}
+		y.LastError = lastErr.String
+		out = append(out, y)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历日历年份失败: %w", err)
+	}
+	return out, nil
 }
 
 // parseYearState 把 calendar_years.status 的文本翻成 calendar 的取值。

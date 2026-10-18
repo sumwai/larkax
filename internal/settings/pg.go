@@ -106,6 +106,39 @@ func (s *PgSource) List(ctx context.Context) ([]Entry, error) {
 	return out, nil
 }
 
+// Get 读一行配置及其元数据。行不在时回 found = false。
+//
+// # 为什么不是拿 List 筛一行
+//
+// 「库里没有这个键」与「清单是空的」在调用方要做的下一步不同：前者要先看键名
+// 有没有写错、或者那条迁移跑没跑，后者是「还没配过」。合成一条路径的话，
+// 调用方还得自己分辨这两种——而它手上只有一份长度为零的清单。
+//
+// 行不在**不是错误**：这一层只回答「有没有」，报不报错由命令那一层决定
+// （`settings get` 按「那一行不存在」给退出码 4）。
+func (s *PgSource) Get(ctx context.Context, key string) (Entry, bool, error) {
+	var (
+		e         Entry
+		updatedBy sql.NullInt64
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT key, value, description, editable, updated_by, updated_at
+		  FROM settings
+		 WHERE key = $1`, key).Scan(&e.Key, &e.Value, &e.Description, &e.Editable,
+		&updatedBy, &e.UpdatedAt)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return Entry{}, false, nil
+	case err != nil:
+		return Entry{}, false, fmt.Errorf("查询 settings.%s 失败: %w", key, err)
+	}
+	if updatedBy.Valid {
+		id := updatedBy.Int64
+		e.UpdatedBy = &id
+	}
+	return e, true, nil
+}
+
 // Set 改写一个配置项的值。
 //
 // # 为什么把 editable 写进 WHERE 而不是先查后写

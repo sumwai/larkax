@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/sumwai/larkax/internal/dberr"
 	"github.com/sumwai/larkax/internal/plugin"
@@ -140,8 +141,9 @@ func (s *Store) LoadRegistry(ctx context.Context, logger *slog.Logger, provided 
 
 // Active 读出参与注册的插件。
 //
-// 每个 key 只取**代次最高**的那一行：同一个 key 可以有多行（版本不同），
-// 发布一次代次加一，而当前生效的只有最高的一代。
+// 每个 key 只取**状态为 active 且代次最高**的那一行：同一个 key 可以有多行
+// （版本不同），发布一次代次加一，而参与注册的只有被 enable 过的那一代——
+// 新发布的版本状态是 pending，要 Enable 一次才生效。
 func (s *Store) Active(ctx context.Context) ([]plugin.Registration, error) {
 	const query = `
 		SELECT DISTINCT ON (p.key) p.key, p.source,
@@ -225,6 +227,76 @@ func (s *Store) List(ctx context.Context) ([]Row, error) {
 		return nil, fmt.Errorf("遍历插件失败: %w", err)
 	}
 	return out, nil
+}
+
+// Detail 是管理面看到的单插件详情：最新一代那一行，加上「这一行是哪来的」。
+//
+// 嵌 Row 而不是另起一份字段：详情与清单说的是同一个东西，各写一遍字段名之后
+// 两条读路径会漂（清单多一栏、详情少一栏），而它们本该一起变。
+type Detail struct {
+	Row
+	// CreatedBy 是写下这一行的人（users.id）。nil 表示没有记录——那一列可空，
+	// 迁移或手工 SQL 写下的行就是 NULL。
+	CreatedBy *int64
+	// CreatedAt 是这一行写下的时刻。
+	CreatedAt time.Time
+	// Versions 是这个 key 下的行数（含这一行）。同一个 key 可以有多代：
+	// 换 version 发布是多一行，同 (key, version) 重发是原地加代次。
+	Versions int64
+}
+
+// Get 读一个插件 key 最新的一代。
+//
+// # 给的是哪一行
+//
+// 代次最高的那一行，也就是**最新发布**的那一代。它与**加载器实际跑的那一行**
+// 不是同一件事：加载器走 Active，只在同一个 key 里取状态为 active 的一行。
+// 发布了新版本还没 Enable 时，这里给的是那一版新行（状态 pending），而跑着的
+// 仍是上一代——要问「现在生效的是哪一版」，得看这一行自己的状态。
+//
+// 更老的代次是历史，要列全就去看 List——那条清单按代次降序列，正适合回答
+// 「之前发过哪几版」。
+//
+// # 为什么不是 List 加一个筛选
+//
+// List 把每一代都读回来再筛，代价是照行数涨的；而这里要的是一行。更实际的理由
+// 是**语义**：Get 查不到要报「插件不存在」（ErrPluginNotFound），而 List 的
+// 空结果是一个正常的空清单。两者的下一步动作不同，合成一条路径就得在调用方
+// 再判一次「是清单为空还是 key 写错了」。
+func (s *Store) Get(ctx context.Context, key string) (Detail, error) {
+	const query = `
+		SELECT p.key, p.version, p.name, p.status, p.generation,
+		       COALESCE((SELECT MAX(a.priority) FROM plugin_activations a
+		                  WHERE a.plugin_key = p.key AND a.scope = 'platform'), 0),
+		       p.meta, p.created_by, p.created_at,
+		       (SELECT count(*) FROM plugins c WHERE c.key = p.key)
+		  FROM plugins p
+		 WHERE p.key = $1
+		 ORDER BY p.generation DESC
+		 LIMIT 1`
+
+	var (
+		d         Detail
+		meta      []byte
+		createdBy sql.NullInt64
+	)
+	err := s.db.QueryRowContext(ctx, query, key).Scan(
+		&d.Key, &d.Version, &d.Name, &d.Status, &d.Generation, &d.Priority,
+		&meta, &createdBy, &d.CreatedAt, &d.Versions)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// 与 Enable / Disable 共用同一个哨兵：三条命令问的都是「这个 key 在库里
+		// 有没有行」，答案一样时下一步也一样（先跑 plugin list 看现在有什么）。
+		return Detail{}, fmt.Errorf("%w: %s", ErrPluginNotFound, key)
+	case err != nil:
+		return Detail{}, fmt.Errorf("查询插件 %s 失败: %w", key, err)
+	}
+	if createdBy.Valid {
+		id := createdBy.Int64
+		d.CreatedBy = &id
+	}
+	d.MetaProblem = metaProblem(d.Key, meta)
+	return d, nil
 }
 
 // metaProblem 判断库里那份 meta 快照有没有问题，没问题返回空串。
@@ -429,6 +501,102 @@ func (s *Store) Disable(ctx context.Context, key string) (int64, error) {
 		return 0, fmt.Errorf("停用插件 %s 失败: %w", key, err)
 	}
 	return affectedOrNotFound(res, key)
+}
+
+// Deleted 汇总一次卸载实际删掉了什么。
+//
+// 与 Result 同一条理由：它是这条命令的**正向证据**。「什么都没删」与「删干净了」
+// 在安静的终端里长得一样（见 LESSONS.md 第 16 条），而这几个数正是「删的到底是
+// 这一个插件的那几行」与「连别人的东西一起扫掉了」之间的区别。
+type Deleted struct {
+	Key string
+	// Versions 是 plugins 里删掉的行数——同一个 key 的每一代。
+	Versions int64
+	// Activations 是 plugin_activations 里删掉的行数。
+	Activations int64
+	// KVKeys 是 plugin_kv 里删掉的键数。
+	KVKeys int64
+}
+
+// Delete 把一个插件从库里彻底删掉：每一代、它的启用记录、以及它私有的 KV。
+//
+// # 为什么是硬删，而不是像渠道那样软删
+//
+// 渠道必须软删：历史账单按 channel_id 引用它，删了行之后那些记录就认不出这条
+// 渠道了（见 docs/cli-reference.md 的 channel 一节）。**插件没有这条路**——没有
+// 任何一张表按插件引用它，读它的只有加载器（按 key 与 status 读）与插件自己的
+// KV。留一行 deleted 标记下来，唯一的后果是加载器与清单都得再学一遍「这一行
+// 不算数」，而那个「不算数」的判断还不止一处。
+//
+// # 为什么连 plugin_kv 一起删
+//
+// 那张表的主键是 (plugin_key, user_id, key)，**没有外键指着 plugins**。插件没了
+// 之后，它里面那些行没有第二条路径能碰到：Get 与 Del 要键名，而键名是插件自己
+// 写的；Set 只在同一个命名空间里清过期的行，而没有人会再往这个命名空间里写。
+// 留着它们就是留一堆谁也看不见、谁也清不掉的垃圾——而「库里出现一个程序不认识
+// 的东西」正是这个仓库反复防的那一类。
+//
+// 代价要说清楚：这些行删掉就没了，而本版**没有导出它们的入口**。所以命令的
+// 帮助与 docs/cli-reference.md 里都写着这一条。
+//
+// # 为什么在一个事务里
+//
+// 三张表删一半会留下「插件没了、启用记录还在」或者「插件没了、私有存储还在」
+// 这类状态，而它们都不报错。同一个事务里删完，要么都在要么都不在。
+func (s *Store) Delete(ctx context.Context, key string) (Deleted, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Deleted{}, fmt.Errorf("开启事务失败: %w", err)
+	}
+	// 提交成功后这次 Rollback 是空操作；失败路径上它负责收尾。
+	defer func() { _ = tx.Rollback() }()
+
+	// 先删 plugins。删不到行说明这个 key 在库里没有东西，那就一行都不要动：
+	// 继续往下删的话，一个拼错的 key 会把另一个插件的启用记录或 KV 扫掉
+	// （那两张表按 plugin_key 存，与 plugins 之间没有外键拦着）。
+	res, err := tx.ExecContext(ctx, `DELETE FROM plugins WHERE key = $1`, key)
+	if err != nil {
+		return Deleted{}, fmt.Errorf("删除插件 %s 失败: %w", key, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return Deleted{}, fmt.Errorf("确认插件 %s 的删除结果失败: %w", key, err)
+	}
+	if affected == 0 {
+		return Deleted{}, fmt.Errorf("%w: %s", ErrPluginNotFound, key)
+	}
+	out := Deleted{Key: key, Versions: affected}
+
+	if out.Activations, err = deleteByKey(ctx, tx, `plugin_activations`, key,
+		"启用记录"); err != nil {
+		return Deleted{}, err
+	}
+	if out.KVKeys, err = deleteByKey(ctx, tx, `plugin_kv`, key, "私有存储"); err != nil {
+		return Deleted{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Deleted{}, fmt.Errorf("提交插件 %s 的删除失败: %w", key, err)
+	}
+	return out, nil
+}
+
+// deleteByKey 删掉一张按 plugin_key 索引的表里属于这个插件的行。
+//
+// 表名由调用方给字面量、拼进 SQL：这两张表的名字是这里的常量，不是外部输入，
+// 而写成参数（$1）在 PostgreSQL 里根本不行——表名不是值。写成一个小函数是为了
+// 两处调用（plugins 那一处除外）的报错措辞与行数确认只有一份。
+func deleteByKey(ctx context.Context, tx *sql.Tx, table, key, what string) (int64, error) {
+	//nolint // 表名是调用点写的字面量，不是外部输入
+	res, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE plugin_key = $1`, key)
+	if err != nil {
+		return 0, fmt.Errorf("删除插件 %s 的%s失败: %w", key, what, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("确认插件 %s 的%s删除结果失败: %w", key, what, err)
+	}
+	return affected, nil
 }
 
 // affectedOrNotFound 一行都没改到时返回 ErrPluginNotFound。

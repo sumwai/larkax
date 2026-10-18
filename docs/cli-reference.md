@@ -27,7 +27,7 @@
 | `LARKAX_DB_DSN` | 数据库连接串 |
 | `LARKAX_ENV` | 环境名 |
 | `LARKAX_LOG_LEVEL` | 日志级别 |
-| `LARKAX_MASTER_KEYS` | 主密钥。只有需要它的命令才读：`channel` 的写入、`secret rotate` |
+| `LARKAX_MASTER_KEYS` | 主密钥。只有这几组命令读它：`channel create` / `update`（写凭证）、`secret rotate`、`plugin delete` / `kv set` / `kv delete`（删插件、或动它的私有存储） |
 
 `LARKAX_ROLE` 与运维命令无关。命令行自身的配置加载见 `internal/config` 的 `LoadOps`。
 
@@ -171,6 +171,12 @@
 
 密钥类配置不放这里（明文落盘并进备份），它们走 `channels` 表的信封加密。这条由
 上面的白名单保证：写入只认 `Registry` 里声明过的键。
+
+`get` 看一个配置项：值打的是 `settings.value` 的 jsonb 原文（字符串带引号，布尔
+与整数不带），类型与「接没接线」取自 `Registry`。库里没有这一行时按「要查的那一行
+不存在」返回 4，并区分两种缺法：`Registry` 里声明过却缺了行，多半是写它的迁移
+没跑到；`Registry` 里也没有，多半是键名写错。
+`-o json` 下 `setting` 条目与 `list` 里那一条逐字段相同。
 
 #### `version`
 
@@ -351,7 +357,15 @@
 `pending`（公告尚未发布）、`conflict`、`degraded` 三种状态只记年份状态，不带
 `days` 也不带 `source`——那一年还没有定论，写进去的数据行会被当成确定的判定使用。
 
-旧路径 `larkaxctl calendar import <文件>` 仍然可用。
+`list` 列出导入过的年份：地区、年份、状态、天数、双源校验结果与写下的时刻，同地区
+内按年份从新到旧。**没有导入过的年份不会出现**——它没有写 `calendar_years`，也就
+没有「未导入」这一行可列；判定时这样的年份按未知处理。`status` 打的是库里那一列的
+原文，同步失败的原因单独排在表后一行一条，公告原文地址只在 `-v` 下打。
+`-o json` 下清单在 `calendars` 里，键名用库里的列名。
+`sources_agree` 为 `null` 表示那一年没有第二个源可比。
+
+旧路径 `larkaxctl calendar import <文件>` 仍然可用。`list` 只挂在 `price` 下面，
+旧路径没有这一条。
 
 ### 权限与财务 (Access & Ledger)
 
@@ -413,7 +427,8 @@
 #### `apikey`
 
 API Key 访问密钥、状态与额度管理。这四个子命令都不需要 `LARKAX_MASTER_KEYS`：它们不碰
-渠道凭证，也就不碰信封加密（主密钥是 `secret rotate` 与 `channels` 那一组的事）。
+渠道凭证，也就不碰信封加密（主密钥是 `secret rotate`、`channel` 的写入与 `plugin` 的
+`delete` / `kv set` / `kv delete` 那三条的事）。
 
 **明文只打印这一次**：库里存的是 SHA-256 哈希，它不可逆，丢了没有任何办法取回，
 只能重建一把。所以明文单独打到 stdout，其余信息打到 stderr——`larkaxctl apikey
@@ -675,6 +690,28 @@ ID 解析，否则按用户名解析。
 
 **本版没有热更新**：`publish` / `enable` / `disable` 都只改库，跑着的进程要重启才会
 重新加载。key 在库里没有对应行时按「约束冲突」返回 4。
+
+`get` 看一个插件：打的是**最新发布的那一代**（代次最高的那一行），并说出这个 key
+下还有几个更老的版本——不说的话，「只有一个版本」与「有好几个、你看到的是最上面
+那个」在这份输出上一样。它与**跑着的那一代**不是同一行：加载器只在同一个 key 里取
+状态为 `active` 的一行，所以发布了新版本还没 `enable` 时，`get` 打的是那一版新的
+（`pending`），实际跑的仍是上一代。`-o json` 下 `plugin` 条目在 `list` 的字段之外
+多三栏：`versions`、`created_at`、`created_by`。
+
+`delete` 是硬删除：插件行、它的启用记录与 `plugin_kv` 里属于它的键一起删掉，不可
+逆，也没有导出。`plugin_kv` 没有指向 `plugins` 的外键，不在这里一起清的话，那些行
+会永远留在库里而没有任何命令看得见它们。回显在 stderr 上，三样数量各报一次。
+
+`plugin kv` 是插件私有键值存储（`plugin_kv` 表）的三个动词：`get` / `set` /
+`delete`。一个键的身份是三段——插件、用户、键，三条命令都要给全 `--plugin` 与
+`--user`。**过期的键按不存在处置**：`get` 与 `delete` 都说没有这个键（退出码 4），
+而过期的行仍留在表里，由下一次 `set` 顺手清掉。`set` 的 `--ttl` 只认 Go 的时长
+写法（`1h30m`、`45s`），不给或给 0 表示不过期，负数被拒。写入不对值做任何解析：
+它是插件的私有数据。
+
+**只读的那几条不要主密钥**（`list` / `get` / `kv get`）；`delete` 与 `kv set` /
+`kv delete` 要求 `LARKAX_MASTER_KEYS` 在场，`publish` 不在内——它不 seal 任何
+东西。命令本身不做解密，这一条要的是「这台机器带着运维凭证」。
 
 ## 搬过家的命令
 

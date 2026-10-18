@@ -830,8 +830,10 @@ func channelWriteAdmin(db *sql.DB) (*channels.Admin, *credential.Sealer, error) 
 // LARKAX_ROLE=worker 时 channel create 因为一个与本次操作无关的变量而失败。
 //
 // 这条判断是**通则**，不是这一处的特例：运维命令一律走 config.LoadOps
-// （它的配置面里没有角色与主密钥），需要主密钥的命令调这里——写渠道与轮换
-// 都走这一个函数。反过来，服务那一侧照旧走 config.Load，gateway / control
+// （它的配置面里没有角色与主密钥）。要**封装凭证**的命令走这里——写渠道与
+// 轮换都用它构造 sealer；只要「这台机器带着运维凭证」而不解密的那几条
+// （plugin delete 与 plugin kv set / delete）只调 config.MasterKeysFromEnv
+// 探一下，不必构造 sealer。反过来，服务那一侧照旧走 config.Load，gateway / control
 // 缺主密钥仍然拒绝启动。
 func masterKeySealer() (*credential.Sealer, error) {
 	keys, err := config.MasterKeysFromEnv()

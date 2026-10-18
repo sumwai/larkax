@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/internal/auth"
+	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/plugin"
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
 	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
@@ -24,12 +27,18 @@ const pluginShortUsage = `larkaxctl plugin 管理插件。
 
 用法：
   larkaxctl plugin list
+  larkaxctl plugin get <key>
   larkaxctl plugin publish <文件> [--key <键>] [--priority <整数>]
   larkaxctl plugin enable <key>
   larkaxctl plugin disable <key>
+  larkaxctl plugin delete <key>
+  larkaxctl plugin kv get --plugin <key> --user <用户> --key <键>
+  larkaxctl plugin kv set --plugin <key> --user <用户> --key <键> --value <值> [--ttl <时长>]
+  larkaxctl plugin kv delete --plugin <key> --user <用户> --key <键>
 
 publish 先在沙箱里编译一遍再落库，编译不过的不进库。同一个 (key, version)
-重复发布是覆盖；换版本要改源码里的 meta.version，并 enable 一次。
+重复发布是覆盖；换版本要改源码里的 meta.version，并 enable 一次。delete 把
+插件删干净：每一代、启用记录，连同它私有的存储一起。
 
 更细的边界：larkaxctl help plugin。
 `
@@ -39,9 +48,14 @@ const pluginUsage = `larkaxctl plugin 管理插件。
 
 用法：
   larkaxctl plugin list
+  larkaxctl plugin get <key>
   larkaxctl plugin publish <文件> [--key <键>] [--priority <整数>]
   larkaxctl plugin enable <key>
   larkaxctl plugin disable <key>
+  larkaxctl plugin delete <key>
+  larkaxctl plugin kv get --plugin <key> --user <用户> --key <键>
+  larkaxctl plugin kv set --plugin <key> --user <用户> --key <键> --value <值> [--ttl <时长>]
+  larkaxctl plugin kv delete --plugin <key> --user <用户> --key <键>
 
 插件的 key 与版本写在源码里（export const meta），所以 publish 默认不要求
 --key；只有想让注册名与源码里声明的不一致时才需要它——那种情况下两条路会
@@ -54,13 +68,87 @@ publish **先在沙箱里编译一遍再落库**：编译不过的命令以非�
 （generation）加一，启用状态保持原值。换版本请改源码里的 meta.version，那会
 插入一行新代次，状态是 pending，要 enable 才生效。
 
-**本版没有热更新**：publish / enable / disable 都只改库，跑着的进程要重启
-才会重新加载。
+get 看的是**最新发布的那一代**（代次最高的那一行），并说出这个 key 下还有几个
+更老的版本。它与**跑着的那一代**不是同一行：加载器只在同一个 key 里取状态为
+active 的一行，所以发布了新版本还没 enable 时，get 打的是那一版新的（pending），
+实际跑的仍是上一代——看状态那一栏分得清。
+
+delete 是**硬删**：这个 key 在 plugins 里的每一代、plugin_activations 里属于它
+的启用记录，以及 plugin_kv 里它私有的键，在一个事务里一起删掉。插件不像渠道
+那样有历史数据按 id 引着它（没有别的东西引用 plugins），所以留一行删除标记下来
+只会让每一条读路径都得再学一遍「这一行不算数」。
+
+**删掉的私有存储找不回来**：本版没有导出 plugin_kv 的入口，而那张表在插件没了
+之后没有第二条路径能碰到（读与删都要键名，而键名是插件自己写的）。删之前先
+想清楚。
+
+kv 那一组照宿主给插件的能力铺：get / set / delete，分别对应宿主接口的读、写、
+删。每个键按**插件 + 用户**两段隔离，所以三条命令都要给 --user——同名的键在不
+同用户下是两个键。--ttl 只认 Go 的时长写法（1h30m、30s），不给或给 0 表示不过期，
+负数会被拒（0 已经表达了「不过期」，负数再表达一次只会让两条路各说各话）。
+
+**只读的那几条不要主密钥**：list / get / kv get 在只有库口令的机器上也跑得起来。
+delete 与 kv 的 set / delete 会改库，要求 LARKAX_MASTER_KEYS 在场——命令不做
+解密，这一条要的是「这台机器带着运维凭证」。
+
+**本版没有热更新**：publish / enable / disable / delete 都只改库，跑着的进程要
+重启才会重新加载。
 
 退出码与其余子命令一致；key 在库里没有对应行时按「约束冲突」返回 4。
 
 更细的约定见 docs/cli-reference.md 的「plugin」一节。
 `
+
+// pluginKVShortUsage 是 plugin kv 的短版：参数写错与 `plugin kv -h` 时打的那一份。
+//
+// 单独一份而不是复用 pluginShortUsage：这一组的参数全是旗标，打回 plugin 那一屏
+// 会把真正要看的三条用法挤走。
+const pluginKVShortUsage = `larkaxctl plugin kv 读写插件私有的键值存储（plugin_kv 表）。
+
+用法：
+  larkaxctl plugin kv get --plugin <key> --user <用户> --key <键>
+  larkaxctl plugin kv set --plugin <key> --user <用户> --key <键> --value <值> [--ttl <时长>]
+  larkaxctl plugin kv delete --plugin <key> --user <用户> --key <键>
+
+键按插件 + 用户两段隔离。get 与 delete 只认没过期的键：一个已经过期的键按
+「不存在」处置。--user 收 ID 或用户名。
+
+更细的边界：larkaxctl plugin kv help。
+`
+
+// pluginKVUsage 是 plugin kv 的长版：`plugin kv help` 与 `plugin kv --help`。
+const pluginKVUsage = `larkaxctl plugin kv 读写插件私有的键值存储（plugin_kv 表）。
+
+用法：
+  larkaxctl plugin kv get --plugin <key> --user <用户> --key <键>
+  larkaxctl plugin kv set --plugin <key> --user <用户> --key <键> --value <值> [--ttl <时长>]
+  larkaxctl plugin kv delete --plugin <key> --user <用户> --key <键>
+
+表的主键是 (plugin_key, user_id, key)，所以一个键的身份是**三段**：换一个插件、
+换一个用户，同名的键都是另一个键。三条命令因此都要给全 --plugin 与 --user。
+
+--user 收 users.id 或用户名，与其余命令同一个解析路径（认不出来时报「用户不
+存在」）。
+
+**过期的键按不存在处置**：get 说「没有这个键」，delete 也说「没有可见的键」。
+过期由数据库的 now() 判（不是进程时钟），ttl 到期之后那些行还躺在表里，只是谁也
+看不见——它们由下一次 set 顺手清掉。
+
+--ttl 只认 Go 的时长写法：1h30m、45s、1h。不给或给 0 表示**不过期**，负数会被拒
+——0 已经表达了不过期，让负数再表达一次只会多出一条要记的规则。--value 按明文
+给，不做解析：它是插件的私有数据，宿主没有立场猜它的类型。
+
+**在命令行上替插件写私有存储是一件要克制的事**：这里写进去的键与插件自己写的
+没有区别，插件读到的是一个它没写过的值。它的用处是看插件存了什么、把一个坏键
+删掉、以及在排障时摆一个值进去。
+
+删除是不可逆的，而且**没有导出入口**：删之前先 get 看一眼。
+
+更细的约定见 docs/cli-reference.md 的「plugin」一节。
+`
+
+// pluginKVHelp 是 plugin kv 的两版帮助文本（见 helpText）。
+var pluginKVHelp = helpText{short: pluginKVShortUsage, long: pluginKVUsage}
 
 // pluginTimeout 是插件命令连库与写库的时间上限。
 //
@@ -79,12 +167,18 @@ func runPlugin(args []string) error {
 	switch action {
 	case "list":
 		return runPluginList(rest)
+	case "get":
+		return runPluginGet(rest)
 	case "publish":
 		return runPluginPublish(rest)
 	case "enable":
 		return runPluginSetEnabled(rest, true)
 	case "disable":
 		return runPluginSetEnabled(rest, false)
+	case "delete":
+		return runPluginDelete(rest)
+	case "kv":
+		return runPluginKV(rest)
 	case "-h", "--help":
 		printUsage(os.Stdout, pluginShortUsage)
 		return nil
@@ -189,6 +283,115 @@ func pluginEntry(row pluginstore.Row) map[string]any {
 		// 跳过它，都会让最需要看清单的那一刻看不到东西。
 		"meta_problem": nullableString(row.MetaProblem),
 	}
+}
+
+// runPluginGet 看单个插件的详情。
+//
+// 只读，所以**不要主密钥**（与 list 同一条）：它不改任何东西，而多要一份密钥
+// 材料只会让查看这一个动作在只有库口令的机器上跑不起来。
+func runPluginGet(args []string) error {
+	fs := flag.NewFlagSet("plugin get", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() != 1 {
+		return usageErr(fmt.Errorf("get 需要一个插件 key，得到 %d 个参数", fs.NArg()))
+	}
+	key := strings.TrimSpace(fs.Arg(0))
+	if key == "" {
+		return usageErr(errors.New("get 的插件 key 不能为空"))
+	}
+
+	return withDB(pluginTimeout, func(ctx context.Context, db *sql.DB) error {
+		d, err := pluginstore.New(db).Get(ctx, key)
+		if err != nil {
+			return err
+		}
+		// 与 list 同一条约定：JSON 是另一条渲染路径，不是把上面那张表转成 JSON
+		// （见 format.go 开头）。
+		if jsonOutput() {
+			return emitJSON(os.Stdout, pluginGetDoc(d), nil)
+		}
+		printPluginDetail(humanStdout(), d)
+		return nil
+	})
+}
+
+// printPluginDetail 打出单个插件的详情。
+//
+// 一栏一行（与 apikey get、model detail 同一个形状）：详情不是清单，没有「一行
+// 一个实体」要维持，把字段挤成横向的表反而让最长的那个值（名称、时刻）把整张
+// 表撑开。
+//
+// 表头用中文，与这两句说明一致：这里打的是**给人看的**一页，而库里的列名
+// （key / version / …）已经在清单那张表上出现过一次了——那一处要的是与 psql、
+// 与迁移文件对得上，这一处要的是读得顺。
+func printPluginDetail(w io.Writer, d pluginstore.Detail) {
+	tw := newTableWriter(w)
+	p := newPalette(w)
+	row := func(label, value string) {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+	}
+	row("KEY", d.Key)
+	row("版本", d.Version)
+	row("状态", d.Status)
+	row("代次", strconv.FormatInt(d.Generation, 10))
+	row("优先级", strconv.Itoa(d.Priority))
+	row("名称", d.Name)
+	// 时刻按完整 RFC3339 打（见 printKeyDetail 同一条）：清单才需要截到分钟，
+	// 一条实体的回显是要拿去对时间线的。
+	row("写入", formatTimeValue(d.CreatedAt))
+	row("写自", pluginCreatedBy(d.CreatedBy))
+	_ = tw.Flush()
+
+	if d.MetaProblem != "" {
+		_, _ = fmt.Fprintf(w, "这个插件的 meta 有问题：%s\n", d.MetaProblem)
+	}
+	if d.Versions > 1 {
+		// 只打最新的一代，所以这里必须说清「还有别的」：不说的话，「这个插件
+		// 只有一行」与「它有好几代、你看到的只是最上面那一个」在这份输出上一样。
+		_, _ = fmt.Fprintf(w, "这个 key 下还有 %d 个更老的版本：larkaxctl plugin list 列得全。\n",
+			d.Versions-1)
+	}
+}
+
+// pluginCreatedBy 打「这一行是谁写下的」。
+//
+// 只有 users.id 可打：plugins.created_by 存的是那个 ID，而这里不再多查一次
+// users 表——一个不在清单上的字段把它变成一次连表，而要看用户名的人有 user get。
+// 没有记录时打 `-`，不是空：空栏与「这一栏不存在」长得一样。
+func pluginCreatedBy(id *int64) string {
+	if id == nil {
+		return "-"
+	}
+	return strconv.FormatInt(*id, 10)
+}
+
+// pluginGetDoc 组装 plugin get 的机器可读输出。
+//
+// 条目形状**逐字段**借用 list 的 pluginEntry，再补上详情才有的三栏：同一份数据
+// 的两条读路径给出两套字段名时，对读它的脚本来说那就是两件事（与 apikey get
+// 同一条理由）。这三栏是**加**不是换——list 里问不出来的正是「这一行是谁、什么
+// 时候写的」与「这个 key 下有几行」。
+func pluginGetDoc(d pluginstore.Detail) map[string]any {
+	doc := jsonDoc(jsonOK)
+
+	entry := pluginEntry(d.Row)
+	entry["versions"] = d.Versions
+	// 走 jsonTime（恒 UTC、完整精度），不走表格那一档的 formatTimeValue：库里
+	// 交回来的是带会话时区的时刻，直接打出来同一行在两台机器上不一样。
+	entry["created_at"] = jsonTime(d.CreatedAt)
+	// nil 是「没有记录」——那一列可空，迁移或手工 SQL 写下的行就是 NULL，
+	// 与「写自用户 0」不是一回事。
+	var createdBy any
+	if d.CreatedBy != nil {
+		createdBy = *d.CreatedBy
+	}
+	entry["created_by"] = createdBy
+
+	doc["plugin"] = entry
+	return doc
 }
 
 func runPluginPublish(args []string) error {
@@ -370,6 +573,365 @@ func isBoolFlag(fs *flag.FlagSet, name string) bool {
 	}
 	b, ok := f.Value.(interface{ IsBoolFlag() bool })
 	return ok && b.IsBoolFlag()
+}
+
+// errPluginKVKeyNotFound 表示要读或要删的那个键不在。
+//
+// 由命令自己造，而不是从存储层拿：KV 的读与删把「不存在」与「已经过期」归成
+// 同一个答案（回 false，见 kv.go 的 Get），所以那一层没有、也不该有一个表示
+// 「找不到」的错误值——它的调用方（插件）看到的都是 null。命令行这一档要给出
+// 一个退出码，于是这个判断落在这里（与 snapshot get 的 errSnapshotNotFound
+// 同一个形状）。
+var errPluginKVKeyNotFound = errors.New("插件 KV 里没有这个键")
+
+// requireMasterKey 要求这台机器带着主密钥。
+//
+// 卸载插件与写插件私有的存储都是**改库**的动作，与渠道写入同一档：要求
+// LARKAX_MASTER_KEYS 在场。命令本身不解密任何东西——这一层要的是「跑它的人
+// 手里有运维凭证」，而不是那几把钥匙的字节；把一条破坏性的入口开在一个只有
+// 库口令的机器上，等于把「能不能删」交给连接串。
+//
+// 边界与只读那几条一样明确：list / get / kv get 不要它。排查时手上往往只有
+// 库口令，而那时正是要看清单的时候。
+//
+// publish 也不走这里：它不 seal 任何东西，而这一层要的不是「会封装」而是
+// 「带着运维凭证」——把它挂在 publish 上只会让发布多一道与它无关的门。
+func requireMasterKey() error {
+	if _, err := config.MasterKeysFromEnv(); err != nil {
+		return fmt.Errorf("读取主密钥失败（LARKAX_MASTER_KEYS）: %w", err)
+	}
+	return nil
+}
+
+// runPluginDelete 把一个插件从库里删干净。
+//
+// 它是要主密钥的那三条之一（见 requireMasterKey）：删的是数据，而这一层要的是
+// 「这台机器带着运维凭证」——**不是「凡写类都要」**，publish 与 settings set
+// 同样是写类，都不读它。
+func runPluginDelete(args []string) error {
+	// 在**函数体第一行**拦下来，早于连库：这条命令会删插件与它的私有存储，
+	// 做完再报不支持就成了一次静默的删除（见 format.go）。
+	if err := jsonUnsupported("plugin delete"); err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet("plugin delete", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() != 1 {
+		return usageErr(fmt.Errorf("delete 需要一个插件 key，得到 %d 个参数", fs.NArg()))
+	}
+	key := strings.TrimSpace(fs.Arg(0))
+	if key == "" {
+		return usageErr(errors.New("delete 的插件 key 不能为空"))
+	}
+
+	if err := requireMasterKey(); err != nil {
+		return err
+	}
+	return withDB(pluginTimeout, func(ctx context.Context, db *sql.DB) error {
+		res, err := pluginstore.New(db).Delete(ctx, key)
+		if err != nil {
+			return err
+		}
+		printPluginDeleteResult(humanStderr(), res)
+		return nil
+	})
+}
+
+// printPluginDeleteResult 打印一次卸载的结果。
+//
+// 打字面量而不是「已删除插件。」：这一次删掉的东西有三样，而「新建的插件看起
+// 来还在」与「连它的私有存储一起清了」在处理上是两件事——后者没有撤销键。
+// 只复述一句「已删除」的话，把 KV 一起删掉这件事在输出上完全看不出来。
+//
+// 抽成函数是为了有一条不连库也能跑的判据：删除本身要连库，而「这一行里有没有
+// 说出删掉了几样东西」正是要钉住的东西（与 printSettingsSetResult 同一个理由）。
+func printPluginDeleteResult(w io.Writer, r pluginstore.Deleted) {
+	_, _ = fmt.Fprintf(w, "已删除插件 %s：%d 个版本、%d 条启用记录、%d 个私有存储的键。重启后生效。\n",
+		r.Key, r.Versions, r.Activations, r.KVKeys)
+}
+
+// ── plugin kv：插件私有的键值存储 ──────────────────────────────────────
+
+// runPluginKV 处理 plugin 下的 kv 子命令。
+func runPluginKV(args []string) error {
+	if len(args) == 0 {
+		printUsage(os.Stderr, pluginKVShortUsage)
+		return usageErr(errors.New("plugin kv 需要子命令"))
+	}
+	action, rest := args[0], args[1:]
+
+	switch action {
+	case "get":
+		return runPluginKVGet(rest)
+	case "set":
+		return runPluginKVSet(rest)
+	case "delete":
+		return runPluginKVDelete(rest)
+	case "help":
+		printUsage(os.Stdout, pluginKVHelp.long)
+		return nil
+	case "-h", "--help":
+		printUsage(os.Stdout, pluginKVHelp.short)
+		return nil
+	default:
+		printUsage(os.Stderr, pluginKVShortUsage)
+		return usageErr(fmt.Errorf("未知的 plugin kv 子命令 %q", action))
+	}
+}
+
+// kvTarget 是 kv 三条命令共用的那三段身份：插件、用户、键。
+//
+// 三段都走旗标，收成一个结构再校验：三条命令的参数一模一样，各写一遍解析就会
+// 各漏各的必填项（漏掉 --user 的那一条会把别人的键读出来看，而它在输出上与正常
+// 那一次完全一样）。
+type kvTarget struct {
+	plugin string
+	user   string
+	key    string
+	userID int64
+}
+
+// parseKVTarget 解析 kv 三条命令共用的旗标，并做**连库之前**的那一半校验。
+//
+// 理由与 settings set 那一段相同（见那边的注释）：Go 的 flag 包遇到第一个非旗标
+// 参数就停止解析，而 `plugin kv get --plugin p --user u --key k` 这种写法里三个
+// 值都是旗标，形状就统一了；另外键名与用户名都可能以减号开头（排障时插一个
+// `-1` 进去），走旗标才不会被当成另一个开关。
+func parseKVTarget(verb string, args []string) (kvTarget, error) {
+	fs := flag.NewFlagSet("plugin kv "+verb, flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, pluginKVShortUsage) }
+	plugin := fs.String("plugin", "", "")
+	user := fs.String("user", "", "")
+	stringAlias(fs, user, "u")
+	key := fs.String("key", "", "")
+	if err := fs.Parse(args); err != nil {
+		return kvTarget{}, usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return kvTarget{}, usageErr(fmt.Errorf(
+			"%s 不接受位置参数，得到 %q：插件用 --plugin、用户用 --user、键用 --key",
+			verb, fs.Arg(0)))
+	}
+
+	t := kvTarget{plugin: strings.TrimSpace(*plugin), user: *user, key: *key}
+	if t.plugin == "" {
+		return kvTarget{}, usageErr(errors.New("缺少 --plugin：这是哪个插件的键"))
+	}
+	if t.user == "" {
+		return kvTarget{}, usageErr(errors.New("缺少 --user：这个键是哪个用户的"))
+	}
+	if t.key == "" {
+		return kvTarget{}, usageErr(errors.New("缺少 --key：要看、要写还是要删哪一个键"))
+	}
+	return t, nil
+}
+
+// resolveKVTarget 解析用户、确认插件在库里，把 userID 补进 target。
+//
+// 先解析用户（auth.ResolveUser），与 settings set 的 --by 同一条路：users 表上
+// 认不出来的标识在这里就报「用户不存在」（退出码 4），而不是落到 KV 上查不到行、
+// 报成「没有这个键」——那会把「人写错了」说成「数据不在」。
+//
+// 再确认插件在库里：plugin_kv **没有外键指着 plugins**，所以给一个不存在的插件
+// 写键不会报错，只会留下一行谁也读不到、谁也清不掉的数据（读与删都要键名，而
+// 那个键名属于一个不存在的插件）。这一步让 `--plugin` 写错当场失败，而不是
+// 往库里塞一行垃圾。读也照同一个理由查一遍：插件不在时「没有这个键」是一句
+// 误导的话，它真正该说的是「这个插件在库里没有行」。
+func resolveKVTarget(ctx context.Context, db *sql.DB, t kvTarget) (kvTarget, error) {
+	actor, err := auth.New(db).ResolveUser(ctx, t.user)
+	if err != nil {
+		return kvTarget{}, fmt.Errorf("解析 --user 失败: %w", err)
+	}
+	t.userID = actor.ID
+
+	if _, err := pluginstore.New(db).Get(ctx, t.plugin); err != nil {
+		return kvTarget{}, err
+	}
+	return t, nil
+}
+
+func runPluginKVGet(args []string) error {
+	target, err := parseKVTarget("get", args)
+	if err != nil {
+		return err
+	}
+
+	return withDB(pluginTimeout, func(ctx context.Context, db *sql.DB) error {
+		resolved, err := resolveKVTarget(ctx, db, target)
+		if err != nil {
+			return err
+		}
+		value, found, err := pluginstore.NewKV(db).Get(ctx, resolved.plugin, resolved.userID, resolved.key)
+		if err != nil {
+			return err
+		}
+		if !found {
+			// 过期与不存在归成同一句话：存储层就是这么给的（见 kv.go 的 Get），
+			// 而在这条命令的输出上分辨它们也分辨不出来——表里那一行还在，但它
+			// 已经不算数了。
+			return fmt.Errorf("%w：插件 %s 的用户 %s 名下没有键 %q（也可能它已经过期）",
+				errPluginKVKeyNotFound, resolved.plugin, resolved.user, resolved.key)
+		}
+		if jsonOutput() {
+			return emitJSON(os.Stdout, pluginKVGetDoc(resolved, value), nil)
+		}
+		printPluginKVEntry(humanStdout(), resolved, value)
+		return nil
+	})
+}
+
+// printPluginKVEntry 打出一个键。
+//
+// 三段身份一栏一行（与 plugin get 同一个形状）；**值排在表外**：它是插件自己写
+// 进去的任意文本，换行与制表符都可能带（写 JSON 时最常见），塞进单元格会顶出
+// 一行、多出一栏。命令不改写它，原样打出来。
+func printPluginKVEntry(w io.Writer, target kvTarget, value string) {
+	tw := newTableWriter(w)
+	p := newPalette(w)
+	row := func(label, value string) {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+	}
+	row("插件", target.plugin)
+	row("用户", target.user)
+	row("键", target.key)
+	_ = tw.Flush()
+
+	// 值排在表外、原样打：它是插件自己写进去的任意文本，换行与制表符都可能带
+	// （写 JSON 时最常见），塞进单元格会顶出一行、多出一栏。这一段不缩进、也不
+	// 按列对齐——它不是一个字段，是那段数据本身。
+	_, _ = fmt.Fprintf(w, "值：%s\n", value)
+}
+
+// pluginKVGetDoc 组装 plugin kv get 的机器可读输出。
+//
+// 三段身份按**给进来的写法**打（用户是名字或 ID 的原文），而不是解析出来的
+// users.id：这两条读路径要回答的是「我查的是哪一个键」，照抄一次输入最不容易
+// 读错。要那个 ID 的话它在 users 表上，user get 打的就是它。
+func pluginKVGetDoc(target kvTarget, value string) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["entry"] = map[string]any{
+		"plugin": target.plugin,
+		"user":   target.user,
+		"key":    target.key,
+		"value":  value,
+	}
+	return doc
+}
+
+func runPluginKVSet(args []string) error {
+	// 在**函数体第一行**拦下来，早于 flag 解析、更早于连库：这条命令会往
+	// plugin_kv 里写一行，做完再报不支持就成了一次没人知道的写入（见 format.go）。
+	if err := jsonUnsupported("plugin kv set"); err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet("plugin kv set", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, pluginKVShortUsage) }
+	plugin := fs.String("plugin", "", "")
+	user := fs.String("user", "", "")
+	stringAlias(fs, user, "u")
+	key := fs.String("key", "", "")
+	value := fs.String("value", "", "")
+	ttl := fs.Duration("ttl", 0, "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("set 不接受位置参数，得到 %q：值用 --value 给", fs.Arg(0)))
+	}
+
+	target := kvTarget{plugin: strings.TrimSpace(*plugin), user: *user, key: *key}
+	if target.plugin == "" {
+		return usageErr(errors.New("缺少 --plugin：这是哪个插件的键"))
+	}
+	if target.user == "" {
+		return usageErr(errors.New("缺少 --user：这个键是哪个用户的"))
+	}
+	if target.key == "" {
+		return usageErr(errors.New("缺少 --key：要写哪一个键"))
+	}
+	// 负数直接拒，不按「不过期」处置：0 已经表达了不过期，让 -1 再表达一次
+	// 只会多出一条要记的规则，而写 `--ttl -1` 的人多半是想写一个很短的时长、
+	// 手滑多打了一个减号。
+	if *ttl < 0 {
+		return usageErr(fmt.Errorf("--ttl 不接受负数（得到 %s）：不给或给 0 就是不过期", *ttl))
+	}
+
+	if err := requireMasterKey(); err != nil {
+		return err
+	}
+	return withDB(pluginTimeout, func(ctx context.Context, db *sql.DB) error {
+		resolved, err := resolveKVTarget(ctx, db, target)
+		if err != nil {
+			return err
+		}
+		if err := pluginstore.NewKV(db).Set(ctx, resolved.plugin, resolved.userID, resolved.key,
+			*value, *ttl); err != nil {
+			return err
+		}
+		printPluginKVSetResult(humanStderr(), resolved, *ttl, len(*value))
+		return nil
+	})
+}
+
+// printPluginKVSetResult 打印一次写入。
+//
+// 字节数打出来（不是值的长度）：插件自己的配额按**字节**算（见 host.KVMaxBytes），
+// 而中文键值在「字符数」与「字节数」上差三倍——只报一个字符数的话，配额报错时
+// 人对不上账。
+//
+// 过期时刻打的是**输入的那个时长**而不是算出来的时刻：算出来的那一刻由数据库
+// 的 now() 决定（见 kv.go），命令这一侧没有那个时钟，照着本机时钟编一个时刻出来
+// 会与库里那一行不一致。
+func printPluginKVSetResult(w io.Writer, target kvTarget, ttl time.Duration, bytes int) {
+	expiry := "不过期"
+	if ttl > 0 {
+		expiry = ttl.String() + " 后过期"
+	}
+	_, _ = fmt.Fprintf(w, "已写入插件 %s 的键 %s（用户 %s，%s，%d 字节）。\n",
+		target.plugin, target.key, target.user, expiry, bytes)
+}
+
+func runPluginKVDelete(args []string) error {
+	// 与其余写类同一条：函数体第一行拦下 json 档。
+	if err := jsonUnsupported("plugin kv delete"); err != nil {
+		return err
+	}
+
+	target, err := parseKVTarget("delete", args)
+	if err != nil {
+		return err
+	}
+
+	if err := requireMasterKey(); err != nil {
+		return err
+	}
+	return withDB(pluginTimeout, func(ctx context.Context, db *sql.DB) error {
+		resolved, err := resolveKVTarget(ctx, db, target)
+		if err != nil {
+			return err
+		}
+		deleted, err := pluginstore.NewKV(db).Del(ctx, resolved.plugin, resolved.userID, resolved.key)
+		if err != nil {
+			return err
+		}
+		if !deleted {
+			// 与 kv get 用同一个哨兵：这一条的下一步动作与那一条完全一样——先
+			// 看这个键在不在。删一个不存在的键报成成功，会让脚本把「我删掉了」
+			// 记下来，而库里那一行可能正被别人重新写进去。
+			return fmt.Errorf("%w：插件 %s 的用户 %s 名下没有可见的键 %q（也可能它已经过期）",
+				errPluginKVKeyNotFound, resolved.plugin, resolved.user, resolved.key)
+		}
+		// 开头不写「已删除插件」：那是卸载那条命令的回显开头，两条读起来
+		// 像是同一件事。这一条删的是一个键，插件还在。
+		_, _ = fmt.Fprintf(humanStderr(), "已删除 %s 的键 %s（用户 %s）。\n",
+			resolved.plugin, resolved.key, resolved.user)
+		return nil
+	})
 }
 
 func runPluginSetEnabled(args []string, enable bool) error {
