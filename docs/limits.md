@@ -255,6 +255,20 @@ larkaxctl apikey update --id 42 --clear-rpm
 8 MiB 内存，更不该走到预留那一步——那会先把余额冻住，再为一个早就该拒的请求
 去解冻。**多模态请求（正文里带 base64 图片）是最容易撞上它的一类。**
 
+## 上游响应头超时（不按 Key 算）
+
+还有一条时限，同样只看请求本身：**上游必须在 10 分钟内回响应头**
+（`cmd/larkax` 的 `upstreamTimeout`，是常量、不是配置项）。超了，这一次尝试就
+算失败，调用方拿到 `502` 与 `upstream call failed`。它会被当成可重试的失败——
+路由会换下一个渠道再试一次，所以候选有几个，最坏情况就要等几个 10 分钟。
+
+它只管「多久拿不到响应头」，**不给整次调用设时限**：流式响应会长期占用连接，
+整体超时会在长回复中途把连接掐断。所以**一个已经开始吐字的流没有时长上限**——
+它一直开着，直到上游结束、或调用方自己断开。
+
+理由与请求体上限那条一样：上游卡住时不能让请求永远不返回，而调用方要能算出
+自己的客户端超时该设多少。
+
 ## 改它的时候
 
 | 要改什么 | 改哪 |
@@ -266,6 +280,7 @@ larkaxctl apikey update --id 42 --clear-rpm
 | 超限响应的状态码与码 | `internal/api/error.go`（`writeRateLimited` / `writeInsufficientQuota` / `writeInsufficientBalance`） |
 | 只读查询那条路径的形状 | `internal/api/ratelimitusage.go` |
 | 判定发生在请求的哪一步 | `internal/api` 的 `serve`（入口早拒绝）与 `internal/ledger/store` 的 `SaveReservation`（权威判定） |
+| 上游响应头超时的时长 | `cmd/larkax` 的 `upstreamTimeout` |
 
 两种限制都是**两处判定、一份口径**：入口那一层在读请求体之前做一次早拒绝
 （省掉一次预留事务与最多 8 MiB 的请求体读入），真正的判定在预留那个事务里
