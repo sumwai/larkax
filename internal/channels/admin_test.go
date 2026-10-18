@@ -423,6 +423,8 @@ func TestCreateRejectsInvalidFields(t *testing.T) {
 		{"base_url 没有 scheme", func(r *CreateRequest) { r.BaseURL = "api.example.com/v1" }},
 		{"base_url 不是 http", func(r *CreateRequest) { r.BaseURL = "ftp://api.example.com/v1" }},
 		{"base_url 没有主机名", func(r *CreateRequest) { r.BaseURL = "https:///v1" }},
+		{"base_url 带 query", func(r *CreateRequest) { r.BaseURL = "https://api.example.com/v1?tenant=abc" }},
+		{"base_url 带 fragment", func(r *CreateRequest) { r.BaseURL = "https://api.example.com/v1#frag" }},
 		{"weight 为负", func(r *CreateRequest) { r.Weight = -1 }},
 	}
 
@@ -443,6 +445,56 @@ func TestCreateRejectsInvalidFields(t *testing.T) {
 				t.Errorf("被拒的请求留下了 %d 行", n)
 			}
 		})
+	}
+}
+
+// TestNormalizeBaseURLJudgesQueryAndFragment 把「带 query / fragment 的地址一律拒」
+// 钉在判据本身上。它不碰库，所以在没有 DSN 的机器上也真的跑（不是 SKIP）。
+//
+// 为什么要拒：httpx.Endpoint 是字符串拼接，只看结尾斜杠，看不见 `?` 与 `#`——
+// 端点路径会被接到 query 后面，拼出来的地址指着另一个地方。而它是**安静的**坏：
+// 配置写错的人要等到请求失败（或者请求成功、打的却不是那个端点）才知道。所以
+// 挡在写入侧。错误文本必须点出是哪一部分不合法：「非法 URL」那句话对改配置的人
+// 没有用，他手里的地址看着挺正常。
+func TestNormalizeBaseURLJudgesQueryAndFragment(t *testing.T) {
+	rejected := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"query", "https://api.example.com/v1?tenant=abc", "不能带 query"},
+		{"空的 query", "https://api.example.com/v1?", "不能带 query"},
+		{"fragment", "https://api.example.com/v1#frag", "不能带 fragment"},
+		{"空的 fragment", "https://api.example.com/v1#", "不能带 fragment"},
+	}
+	for _, tc := range rejected {
+		t.Run("拒 "+tc.name, func(t *testing.T) {
+			if _, err := NormalizeBaseURL(tc.raw); err == nil {
+				t.Fatalf("%q 应当被拒", tc.raw)
+			} else if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("错误 %q 里没有点出 %q", err.Error(), tc.want)
+			}
+		})
+	}
+
+	// 护栏：正常写法一条都不许被拒。没有这一臂的话，「一律拒掉」也能让上面那条过。
+	accepted := []string{
+		"https://api.example.com/v1",
+		"https://api.example.com/v1/",         // 结尾带斜杠
+		"https://api.example.com",             // 没有路径
+		"https://api.example.com:8443/v1",     // 带端口
+		"http://127.0.0.1:8080",               // http、本机地址
+		"https://api.example.com/v1/tenant-a", // 路径里有连字符
+	}
+	for _, raw := range accepted {
+		got, err := NormalizeBaseURL(raw)
+		if err != nil {
+			t.Errorf("%q 不该被拒: %v", raw, err)
+			continue
+		}
+		if got != raw {
+			t.Errorf("NormalizeBaseURL(%q) = %q，期望原样返回", raw, got)
+		}
 	}
 }
 
@@ -861,6 +913,44 @@ func TestUpdateRejectsUnregisteredType(t *testing.T) {
 		if info.ID == id && info.Type != stubType {
 			t.Errorf("被拒的修改还是改了库：type = %q", info.Type)
 		}
+	}
+}
+
+// 改 base_url 走的是同一条判据，所以在写入路径上也拒一次：绕过命令行的调用方
+// （脚本、将来的管理面）同样写不进一个会被拼坏的地址。
+//
+// 判据本身的形状由 TestNormalizeBaseURLJudgesQueryAndFragment 钉住，这里盯的是
+// **落库这一侧**：拒绝之后库里那一列一个字节都没动——「报错了但已经写进去了」
+// 是这类校验最坏的失败方式。
+func TestUpdateRejectsBaseURLWithQueryOrFragment(t *testing.T) {
+	db := testDB(t)
+	admin := newAdmin(t, db, testSealer(t))
+
+	req := baseRequest("ch-badbase-" + itoa(nextID()))
+	id, err := admin.Create(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Create 出错: %v", err)
+	}
+
+	for _, bad := range []string{
+		"https://api.example.com/v1?tenant=abc",
+		"https://api.example.com/v1#frag",
+	} {
+		t.Run(bad, func(t *testing.T) {
+			value := bad
+			if err := admin.Update(context.Background(), UpdateRequest{ID: id, BaseURL: &value}); err == nil {
+				t.Fatalf("%q 应当被拒", bad)
+			}
+
+			var got string
+			if err := db.QueryRowContext(context.Background(),
+				`SELECT base_url FROM channels WHERE id = $1`, id).Scan(&got); err != nil {
+				t.Fatalf("读 base_url 失败: %v", err)
+			}
+			if got != req.BaseURL {
+				t.Errorf("被拒的修改还是改了库：base_url = %q，期望 %q", got, req.BaseURL)
+			}
+		})
 	}
 }
 
