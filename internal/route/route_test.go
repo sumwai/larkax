@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/rand"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -194,6 +195,13 @@ func TestPriorityBeatsScore(t *testing.T) {
 }
 
 // 同 priority 内分数高的排前面。
+// 同 priority 内，分数高的先选。
+//
+// 变异：`group[i].score > group[j].score` 改成 `>=`。这一处是**等价变异**，
+// 理由是它上面那道守卫：这一行只有 `group[i].score != group[j].score` 为真
+// 时才会走到，而 `>` 与 `>=` 只在两个分数**相等**时分岔——那一格已经被
+// 上面的 `!=` 挡掉了。两边都是 NaN 时 `!=` 为真、两个比较符又都为假，
+// 同样不分岔。所以没有任何输入能让两版给出不同的顺序。
 func TestScoreOrdersWithinPriority(t *testing.T) {
 	healthy := candidate(1, "m", withHealth(Health{SuccessRate: 1.0}))
 	sick := candidate(2, "m", withHealth(Health{SuccessRate: 0.1, ConsecutiveFailures: 2}))
@@ -755,6 +763,35 @@ func TestChatAllUnsupportedSaysUnsupported(t *testing.T) {
 	}
 }
 
+// unsupportedOnly 的判据是「一个候选都没剩，**并且**排除全部来自模型目录」。
+//
+// 变异：`if len(p.Candidates) > 0 || len(p.Excluded) == 0` 改成 `&&`。
+// 两支分开判：
+//
+//   - `len(p.Excluded) == 0` 那一半在生产那条路上**分不开**：另一个条件挡在
+//     前面（emptyError 只在 len(Candidates) == 0 时被调用，见 chatWithPlan 与
+//     chatStreamWithPlan 两处同样的守卫），变异版在这一格上多返回一个 true，
+//     而 emptyError 据此构造的是 `&Errors{Unsupported: len(p.Excluded), …}`
+//     ——那时 Excluded 是空的，Unsupported 就是 0，与原版的 `&Errors{Excluded:
+//     nil}` 逐字段相同。两个函数交回的东西一样，「返回 true 还是 false」
+//     这一步在调用方那里被抹平了。
+//   - `len(p.Candidates) > 0` 那一半是**判据本身**：还有候选在，就不能说
+//     「都不支持这次请求」。它今天只有直接调这个函数才走得到（生产那条路
+//     进来时候选已经是空的），但这个格子上能给出输入、能分开两版，按缺口的
+//     规矩补一条。
+func TestPlanUnsupportedOnlyNeedsNoCandidates(t *testing.T) {
+	p := Plan{
+		Candidates: []Candidate{candidate(1, "m")},
+		Excluded:   []Exclusion{{ChannelID: 2, Unsupported: true}},
+	}
+	if p.unsupportedOnly() {
+		t.Error("还有候选在，不能说「都不支持这次请求」")
+	}
+	if (Plan{}).unsupportedOnly() {
+		t.Error("没有候选也没有排除时，不能说「都不支持这次请求」")
+	}
+}
+
 // 提前放弃时**不能说「全部 N 个候选都失败」**：还有候选没试过。
 //
 // 那句话把一次提前放弃说成了「都试过了」，看日志的人据此去查上游，而真正
@@ -814,6 +851,30 @@ func TestChatExhaustsAllCandidates(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "3") {
 		t.Errorf("错误信息应说明试了几个: %s", err.Error())
+	}
+}
+
+// Unwrap 在「一个都没试、也不是目录判据挡掉」时给出 nil。
+//
+// 变异：`if e.Unsupported > 0` 改成 `>= 0`。只在 Unsupported 正好是 0 那一格
+// 分岔：原版返回 nil，变异版返回 channel.ErrUnsupported——于是一次「没有可用
+// 的渠道」（额度、健康度、渠道没声明支持这个模型）会被上层认成「上游不支持
+// 这项能力」，两种处置完全不同（前者要改配置，后者要查上游/目录）。
+//
+// 这一格不需要构造什么：Unsupported 只由 emptyError 在「全部排除都来自模型
+// 目录」时置成非零，其余几支构造出来的 Errors 里它就是 0。
+func TestUnwrapIsNilWhenUnsupportedIsZero(t *testing.T) {
+	if got := (&Errors{}).Unwrap(); got != nil {
+		t.Errorf("Unsupported 为 0 时 Unwrap = %v，期望 nil", got)
+	}
+	if got := (&Errors{Unsupported: 1}).Unwrap(); !errors.Is(got, channel.ErrUnsupported) {
+		t.Errorf("Unsupported 为 1 时 Unwrap = %v，期望 channel.ErrUnsupported", got)
+	}
+
+	// 直接走 emptyError 的另一支：排除的是额度，不是目录判据。
+	err := Plan{Excluded: []Exclusion{{ChannelID: 2, Code: CodeQuota}}}.emptyError()
+	if errors.Is(err, channel.ErrUnsupported) {
+		t.Errorf("额度耗尽被认成了「上游不支持这项能力」: %v", err)
 	}
 }
 
@@ -1022,6 +1083,12 @@ func TestChatStreamFailsOverBeforeOutput(t *testing.T) {
 }
 
 // 不可重试的错误立刻返回，不换渠道。
+//
+// 变异：`Untried: len(plan.Candidates) - len(result.Attempts)` 改成 `+`。
+// 非流式那条路上同一个表达式被 TestChatErrorNamesUntriedCandidates 杀掉了
+// （那里断言「还有 1 个候选没试」），流式这一份此前没有任何用例断言过个数，
+// 于是它活了下来——而这一行是流式那条路上「还有几个候选没试」的唯一来源。
+// 两个候选、试了一个，说的必须是 1 个。
 func TestChatStreamStopsOnPermanentError(t *testing.T) {
 	exec := &fakeStreamExecutor{results: map[int64]error{1: permanentErr(), 2: permanentErr()}}
 	r := seededRouter(1)
@@ -1033,6 +1100,9 @@ func TestChatStreamStopsOnPermanentError(t *testing.T) {
 	}
 	if len(exec.calls) != 1 {
 		t.Errorf("不可重试的错误不该继续尝试，实际 %v", exec.calls)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "还有 1 个候选没试") {
+		t.Errorf("错误文本应点出还有 1 个候选没试: %s", msg)
 	}
 }
 
@@ -1248,9 +1318,15 @@ func TestScoreCacheThresholdIsInclusiveAt20(t *testing.T) {
 
 // 命中率**恰好为 0** 是有数据的最差分，与「没有数据」分得开。
 //
-// 变异：把 nil 判断与命中率夹取混成一条 `<= 0` 分支，一次都没命中的渠道
-// 会被当成「没有数据」而把缓存这一维整条剔除——那等于用「剔除」去奖励
-// 一个缓存表现最差的渠道。
+// 这两格要是并成一条（例如把 nil 判断与夹取写成 `hitRate <= 0`），一次都
+// 没命中的渠道会被当成「没有数据」而把缓存这一维整条剔除——那等于用
+// 「剔除」去奖励一个缓存表现最差的渠道。
+//
+// 变异：`*hitRate < 0` 改成 `<=`。这一处是**等价变异**：命中率正好是 0
+// 那一格上，变异版返回 `0, true`，原版跳过这一支、落到函数末尾的
+// `return *hitRate, true`，给出的也是 `0, true`——相等那一格两版返回的是
+// 同一个值，没有任何输入能让两版分开。（`hitRate` 为 nil 那一支在更上面，
+// 两版都走同一条，与这一处无关。）
 func TestScoreCacheZeroRateWithDataIsWorst(t *testing.T) {
 	zero := defaultScore(t, candidate(1, "m", withCache(0, 100)))
 	unknown := defaultScore(t, candidate(2, "m"))
@@ -1261,8 +1337,10 @@ func TestScoreCacheZeroRateWithDataIsWorst(t *testing.T) {
 
 // 命中率超出 [0,1] 要被夹住，而不是产生越界分数。
 //
-// 变异：`hitRate < 0` 或 `hitRate > 1` 被改成别的，越界值会直接进分数，
-// 而 2.0 的命中率能让一个渠道的分数超过满分。
+// 变异：`hitRate > 1` 改成 `>=`。这一处是**等价变异**：命中率正好是 1
+// 那一格上，变异版返回 `1, true`，原版跳过这一支、落到末尾的
+// `return *hitRate, true`，给出的也是 `1, true`——相等那一格两版同值。
+// 下面两条断言走的是 5.0 与 -1.0，本来就在夹取那一侧。
 func TestScoreCacheClampsOutOfRange(t *testing.T) {
 	max := defaultScore(t, candidate(1, "m", withCache(1.0, 100)))
 	over := defaultScore(t, candidate(2, "m", withCache(5.0, 100)))
@@ -1365,5 +1443,137 @@ func TestShuffleUsesInjectedRand(t *testing.T) {
 		if a[i] != b[i] {
 			t.Fatalf("同一个种子两次结果不同：%v vs %v", a, b)
 		}
+	}
+}
+
+// 同分之间的先后由 tie 决定，而 tie 的比较必须是**严格**的。
+//
+// 同一个比较器的两支分开判（见 order 里那个 sort.SliceStable）：
+//
+//   - `group[i].tie < group[j].tie` 改成 `>=`：方向反过来，tie 大的排前面。
+//     下面第一段用一串**递减**的随机键固定住「tie 小的先选」。
+//   - 改成 `<=`：tie 相等时两版不同。相等时 less 对 (i,j) 与 (j,i) 都返回
+//     真，比较器不再是严格弱序，稳定排序给出的顺序变成未定义——本机上
+//     三个同 tie 的候选被倒成 [3 2 1]。下面第二段固定住「同 tie 保持
+//     入参顺序」这个契约。
+//
+// 判据本身（同分要被打散、且由注入的源驱动）由 TestEqualScoresAreShuffled
+// 与 TestShuffleUsesInjectedRand 覆盖；这一条钉的是比较符的方向与严格性。
+func TestTieKeyOrdersEqualScores(t *testing.T) {
+	trio := []Candidate{candidate(1, "m"), candidate(2, "m"), candidate(3, "m")}
+
+	// 递减的键：候选 1 拿最大、3 拿最小，升序排出来就是反过来。
+	desc := &Router{Rand: rand.New(&seqSource{seq: []int64{3 << 60, 2 << 60, 1 << 60}})}
+	if got := selectedIDs(desc, trio); !slices.Equal(got, []int64{3, 2, 1}) {
+		t.Errorf("tie 递减时顺序 = %v，期望 [3 2 1]（tie 小的先选）", got)
+	}
+
+	// 全等的键：tie 分不开，稳定排序必须保持入参顺序。
+	same := &Router{Rand: rand.New(constSource{})}
+	if got := selectedIDs(same, trio); !slices.Equal(got, []int64{1, 2, 3}) {
+		t.Errorf("tie 全等时顺序 = %v，期望 [1 2 3]（同 tie 保持入参顺序）", got)
+	}
+}
+
+// seqSource 依次给出给定的随机键。
+//
+// 用它而不是 rand.NewSource(seed)：tie 的大小关系由用例直接给定，期望顺序
+// 就不依赖 rand 内部把 Int63 变成 float64 的细节（那个转换是单调的，
+// 递减的 Int63 序列一定是递减的 tie）。
+type seqSource struct {
+	seq []int64
+	i   int
+}
+
+func (s *seqSource) Int63() int64 { v := s.seq[s.i%len(s.seq)]; s.i++; return v }
+func (s *seqSource) Seed(int64)   { s.i = 0 }
+
+// constSource 每次给出同一个键：所有 tie 相等。
+type constSource struct{}
+
+func (constSource) Int63() int64 { return 1 << 62 }
+func (constSource) Seed(int64)   {}
+
+func selectedIDs(r *Router, cands []Candidate) []int64 {
+	plan := r.Select(cands, "m", Needs{})
+	out := make([]int64, 0, len(plan.Candidates))
+	for _, c := range plan.Candidates {
+		out = append(out, c.Channel.ID)
+	}
+	return out
+}
+
+// 非正的权重必须**整条剔除**：负权重会把「越小越好」反过来，还会让分母
+// 失去意义；0 权重本来就不该影响结果。
+//
+// 变异：`if !ok || weight <= 0` 改成 `&&`。两支要分开判：
+//
+//   - `!ok` 那一半是**死的**——四处 add 的调用点传的都是字面量 true（见
+//     score 里那五行），没有哪次会给 false，所以它取反与否都不改变行为。
+//   - `weight <= 0` 那一半是活的：这一改之后守卫永远不生效（`false && …`
+//     恒为假）。负权重那一维会真的进分母，于是同样的候选算出另一个分；
+//     下面第一行就走在那一格上——原版 0.5（只算额度那一维），变异版 0。
+//   - `<= 0` 改成 `< 0` 是**另一个**变异体，它只影响 0 权重那一格，见
+//     TestScoreZeroWeightIgnoresNonFiniteValue。
+func TestScoreDropsNonPositiveWeightDimensions(t *testing.T) {
+	// 健康度权重为负、额度为正：负的那一维剔除之后只剩额度，
+	// 而额度没有数据 → 中性 0.5。
+	r := &Router{Weights: Weights{Health: -1, Quota: 0.6}}
+	if got, want := r.Score(candidate(1, "m")), 0.5; got != want {
+		t.Errorf("负权重那一维没被剔除: 分数 = %v, 期望 %v", got, want)
+	}
+
+	// 权重为 0 的那一维同样不影响结果：与「不给它权重」等价。
+	zero := &Router{Weights: Weights{Health: 0, Quota: 0.6}}
+	if got := zero.Score(candidate(1, "m")); got != 0.5 {
+		t.Errorf("0 权重那一维影响了结果: 分数 = %v, 期望 0.5", got)
+	}
+
+	// 全是非正权重（一维都不参与）那一格见
+	// TestScoreWithoutAnyDimensionIsZeroNotNaN：那里连 `total <= 0` 一起判。
+}
+
+// 0 权重的维度不该影响结果，哪怕它那一项读到的不是有限数。
+//
+// 变异：`weight <= 0` 改成 `< 0`。这一处只在权重**正好为 0** 那一格分岔，
+// 而那一格上加的是 `0 × s` 与 `0`：s 有限时两版同值（所以这也是它一直
+// 存活的原因——原来那批用例造的都是有限值），s 是 NaN 时 `0 × NaN` 是
+// NaN，整个分数被一个权重为 0 的维度毒掉。下面这一格给出两个具体的数：
+// 原版 0.96（只看健康度），变异版 NaN。
+func TestScoreZeroWeightIgnoresNonFiniteValue(t *testing.T) {
+	r := &Router{Weights: Weights{Health: 1, Cost: 0}}
+	nan := math.NaN()
+
+	got := r.Score(candidate(1, "m", withCost(nan)))
+	if math.IsNaN(got) {
+		t.Fatalf("成本权重为 0，NaN 却进了分数")
+	}
+	if want := 0.96; got != want {
+		t.Errorf("分数 = %v, 期望 %v（只有健康度那一维）", got, want)
+	}
+	// 同一张权重配上有限的成本给出同一个数：上面那个结论与「算出来正好
+	// 是 0.96」无关，是由「0 权重那一维整条不进分母」给出的。
+	if got, want := r.Score(candidate(2, "m", withCost(0.5))), 0.96; got != want {
+		t.Errorf("权重为 0 的成本影响了两版之外的分数: %v vs %v", got, want)
+	}
+}
+
+// 一个维度都没有数据（或权重全为非正）时，分数是 **0** 而不是 NaN。
+//
+// 变异：`if total <= 0` 改成 `< 0`。只在 total 正好为 0 那一格分岔：
+// 变异版会去算 `weighted / total`，而那时两个数都是 0，得到 NaN。
+// NaN 进排序会让顺序变成未定义的（见那行注释），所以这一格必须给出 0。
+//
+// 走这一格要用「非零但全为非正」的权重：全零会被当成「没配」而回落到
+// DefaultWeights（见 TestZeroWeightsFallsBackToDefaults），而任何一个
+// 正权重都会让分母大于 0。
+func TestScoreWithoutAnyDimensionIsZeroNotNaN(t *testing.T) {
+	r := &Router{Weights: Weights{Health: -1}}
+	got := r.Score(candidate(1, "m"))
+	if math.IsNaN(got) {
+		t.Fatal("一维都没有数据时分数是 NaN——NaN 进排序会让顺序未定义")
+	}
+	if got != 0 {
+		t.Errorf("分数 = %v, 期望 0", got)
 	}
 }
