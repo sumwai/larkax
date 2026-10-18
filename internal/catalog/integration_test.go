@@ -85,6 +85,17 @@ func insertChannel(t *testing.T, db *sql.DB, model string) int64 {
 	return id
 }
 
+// softDeleteChannel 把一条渠道标成已删，写的是 internal/channels 的 SoftDelete
+// 同两列：deleted_at 是删除状态的唯一判据，status 顺带置成 disabled、是给漏网
+// 读路径的兜底。那个包 import 本包，测试里 import 它会成环，所以这里直接改库。
+func softDeleteChannel(t *testing.T, db *sql.DB, id int64) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE channels SET deleted_at = now(), status = 'disabled' WHERE id = $1`, id); err != nil {
+		t.Fatalf("软删渠道失败: %v", err)
+	}
+}
+
 // insertAlias 插一条别名。channelID 传 nil 表示平台级别名。
 func insertAlias(t *testing.T, db *sql.DB, channelID any, upstream, canonical string) {
 	t.Helper()
@@ -240,6 +251,32 @@ func TestAliasIgnoresOtherChannels(t *testing.T) {
 	_, _, err := New(db).Alias(context.Background(), mine, model)
 	if !errors.Is(err, ErrAliasNotFound) {
 		t.Errorf("err = %v，期望 ErrAliasNotFound", err)
+	}
+}
+
+// 已软删渠道留下的别名行不算「配过别名」——上一条的镜像。
+//
+// 删渠道是软删，渠道级别的别名行不跟着走，于是「这个规范名配过别名」这句话会
+// 变成假的：有行、却没有一条覆盖当前渠道，落在 ErrAliasNotFound 上——整个规范名
+// 的每个请求回 500，而 `alias list` 不带 --channel 只列平台级，人看到的是
+// 「暂无别名」。判据要与渠道那一侧对齐：那条渠道已经不在，它的行不该说话。
+//
+// 上一条（别的渠道**还活着**）钉的是同一条判据的另一侧：那里必须继续报错。
+func TestAliasIgnoresDeletedChannelsAlias(t *testing.T) {
+	db := testDB(t)
+	model := uniqueName("model")
+	mine := insertChannel(t, db, model)
+	gone := insertChannel(t, db, uniqueName("model"))
+	seedModel(t, db, model)
+	insertAlias(t, db, gone, "gone-"+model, model)
+	softDeleteChannel(t, db, gone)
+
+	got, _, err := New(db).Alias(context.Background(), mine, model)
+	if err != nil {
+		t.Fatalf("已删渠道的别名行不该算「配过别名」: %v", err)
+	}
+	if got != model {
+		t.Errorf("Alias = %q，期望按同名返回 %q", got, model)
 	}
 }
 
