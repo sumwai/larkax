@@ -194,6 +194,10 @@ type runtime struct {
 	// 以及当地那一天在日历上的属性。它懒解析一次，之后挂在这次求值的
 	// runtime 上，同一次求值里谁再问都是这一份。
 	//
+	// 那一份日历属性有两个来路：isWorkday() / isHoliday() 走的是 DayInfo，
+	// 而 isPeak() 那条路是随判定一起回来的（见 resolveLocal 与 adoptPeakDay）。
+	// 两条路认的是同一天的那一行，所以谁先答都是同一件事。
+	//
 	// 缓存它有两个用处。一是同一次求值只查一次日历：isWorkday() 被调两次时
 	// 原先查两次，而两次之间日历被改过的话，同一笔请求的两个判据会给出两个
 	// 答案。二是落库的 local_hour / is_off_day 与规则当时判的**是同一份值**——
@@ -317,18 +321,27 @@ func (rt *runtime) env(u usageView) map[string]any {
 				// 而万一真到了这里，报「写法不成立」比报「日历不可用」更贴。
 				return false, err
 			}
-			// 窗口按**当地**零点起算，所以判峰谷之前先要有「当地」这一份：
-			// 用哪个时区、那一刻是几点、当地是哪一天。复算那两列
-			// （local_hour / is_off_day）取的也正是这一份（见 Result.LocalTime）。
-			// 在这里解析而不是等结算那一侧补，是因为「At 折成当地哪一天」这一步
-			// 只有求值这一处做得了——在别处重写一遍就是把一条计费判据抄成两份。
+			// 窗口按**当地**零点起算，而实现方判峰谷本来就要先落到当地那一天、
+			// 问出它是不是休息日——所以那一天的属性随判定一起回来，这里直接拿它
+			// 填上本次求值的当地口径（见 adoptPeakDay）。复算那两列
+			// （local_hour / is_off_day）取的正是这一份（见 Result.LocalTime），
+			// 于是它与这次判定是同一个变量，而不必再查一次同一天的那一行。
 			//
-			// 它排在 window 解析之后：写法错要报「写法不成立」（见上），
-			// 这个先后次序不因为这里多一步而改变。
-			if _, localErr := rt.resolveLocal(); localErr != nil {
+			// Peak 排在 window 解析之后：写法错要报「写法不成立」（见上），
+			// 这个次序与改动前一样。
+			//
+			// 「地区不认识」与「这不是一天的数据」谁先报，则由实现方定：
+			// 适配器那条路是 PeakAt 先解析时区、再查那一天（见 internal/calendar
+			// 的 PeakAt），所以坏地区先报——求值那侧不再替它保证这个次序，
+			// 因为折时区那一步已经挪到判定之后了（见 adoptPeakDay）。
+			verdict, peakErr := rt.calendar.Peak(rt.region, rt.at, windows)
+			if peakErr != nil {
+				return false, peakErr
+			}
+			if localErr := rt.adoptPeakDay(verdict.Day); localErr != nil {
 				return false, localErr
 			}
-			return rt.calendar.Peak(rt.region, rt.at, windows)
+			return verdict.IsPeak, nil
 		},
 
 		// __worst 只在最坏情况求值时被引用（编译期由 worstPatcher 注入）。
@@ -359,7 +372,7 @@ func (rt *runtime) raise(old, fresh float64) float64 {
 
 // dayInfo 取本次求值的「当地日」在日历上的属性。
 //
-// 折时区、取日期那几步在 resolveLocal 里：它与落库的 local_hour / is_off_day
+// 折时区、取日期那几步在 localClock 里：它与落库的 local_hour / is_off_day
 // 共用同一份解析结果，所以规则判出来的那一天与写进库的那一天必然是同一个。
 func (rt *runtime) dayInfo() (DayInfo, error) {
 	b, err := rt.resolveLocal()
@@ -372,12 +385,17 @@ func (rt *runtime) dayInfo() (DayInfo, error) {
 // resolveLocal 解析本次求值的「当地」口径：地区时区、那个时刻的当地钟点、
 // 当地的那一天，以及那一天在日历上的属性。
 //
-// 四步都在 Go 侧完成，规则作者只写 isWorkday()：
+// 前三步是折时区（见 localClock），第四步在 Go 侧走完，规则作者只写
+// isWorkday()：
 //
 //  1. 时区取自 Calendar.TimeZone(Region)——「当地几点」是地区属性；
 //  2. 用该时区把 At 折成当地的钟点与年月日；
 //  3. 把当地那一天做成一个零点的日期；
 //  4. 查 Calendar.DayInfo(Region, 那一天)。
+//
+// 第四步只有这条路走。isPeak() 那条路上，那一天的属性是随判定一起回来的
+// （见 adoptPeakDay）：判峰谷本来就要先知道那一天是不是休息日，实现方手上
+// 已经有这一份，再查一遍就是同一天的两行。
 //
 // 为什么地区与时区分开：它们回答不同的问题。地区决定「那边的日历怎么排」，
 // 时区决定「现在几点」。让规则写 isWorkday("Asia/Shanghai") 会逼作者记住
@@ -394,26 +412,71 @@ func (rt *runtime) resolveLocal() (localBasis, error) {
 	if rt.local != nil {
 		return *rt.local, nil
 	}
-	if err := rt.requireCalendar(); err != nil {
-		return localBasis{}, err
-	}
-	tz, err := rt.calendar.TimeZone(rt.region)
+	hour, day, err := rt.localClock()
 	if err != nil {
 		return localBasis{}, err
 	}
-	loc, err := loadLocation(tz)
-	if err != nil {
-		return localBasis{}, err
-	}
-	local := rt.at.In(loc)
-	day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.UTC)
 	info, err := rt.calendar.DayInfo(rt.region, day)
 	if err != nil {
 		return localBasis{}, err
 	}
-	b := localBasis{hour: local.Hour(), info: info}
-	rt.local = &b
-	return b, nil
+	rt.keepLocal(hour, info)
+	return *rt.local, nil
+}
+
+// adoptPeakDay 用日历判峰谷时一并带回来的那一天，填上本次求值的当地口径。
+//
+// 钟点仍要自己折（时区取自 Calendar.TimeZone，那一问不查日历数据），而日历
+// 属性直接用实现方给的那一份——它正是这次判定所依据的那一天，于是
+// Result.LocalTime 与规则判的那一档出自同一个变量，而不是两次查询凑出来的
+// 两个数（见 Result.LocalTime）。
+//
+// 已经有解析结果时不动它：同一次求值里的当地口径只有一份。所以
+// `isWorkday() && isPeak(...)` 这样先问日历属性的规则，那一次 Peak 仍然要查，
+// 因为判定本身就得查；反过来先问 isPeak() 的规则，isWorkday() 会直接命中
+// 这一份，省掉 DayInfo 那一次。
+func (rt *runtime) adoptPeakDay(info DayInfo) error {
+	if rt.local != nil {
+		return nil
+	}
+	hour, _, err := rt.localClock()
+	if err != nil {
+		return err
+	}
+	rt.keepLocal(hour, info)
+	return nil
+}
+
+// localClock 把 Env.At 折成地区时区下的当地钟点与当地那一天。
+//
+// 这一步只问 Calendar.TimeZone：那是地区属性，不查日历数据。折出来的那一天
+// 给 DayInfo 那条路用；isPeak 那条路上那一天随判定回来了，所以只取钟点
+// （见 adoptPeakDay）。
+//
+// 两条路都从这里折，是为了让「哪一天」不可能不一样：一处折错一天，写进库的
+// is_off_day 就与判档用的那一天错开，而库里看不出这一点。
+func (rt *runtime) localClock() (int, time.Time, error) {
+	if err := rt.requireCalendar(); err != nil {
+		return 0, time.Time{}, err
+	}
+	tz, err := rt.calendar.TimeZone(rt.region)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	loc, err := loadLocation(tz)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	local := rt.at.In(loc)
+	day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.UTC)
+	return local.Hour(), day, nil
+}
+
+// keepLocal 记下这次求值的当地口径：钟点加那一天的日历属性。
+//
+// 只由上面两条路调用，各自已经把两半凑齐（一份查回来，一份随判定带回来）。
+func (rt *runtime) keepLocal(hour int, info DayInfo) {
+	rt.local = &localBasis{hour: hour, info: info}
 }
 
 // requireCalendar 检查规则要用日历时的两个前提。

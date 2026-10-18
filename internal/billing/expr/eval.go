@@ -17,9 +17,11 @@ import (
 // LocalTime 是求值用到的「当地」口径：地区时区下的那个钟点，与那一天在日历上
 // 算不算休息日。
 //
-// 两个值出自**同一次**解析（见 runtime.resolveLocal）：钟点由时区折出来，
-// 日历属性由同一个时区折出来的那一天查出来。也就是说，它们与规则里
-// isPeak() / isWorkday() 判的是同一份依据，而不是结算那一侧另算一遍凑出来的。
+// 两个值出自**同一份**解析：钟点由地区时区折出来，日历属性取自当地那一天
+// ——问 isWorkday() / isHoliday() 的规则走 DayInfo，问 isPeak() 的规则用判定
+// 一并带回来的那一份（见 runtime.resolveLocal 与 runtime.adoptPeakDay）。
+// 也就是说，它们与规则里 isPeak() / isWorkday() 判的是同一份依据，而不是
+// 结算那一侧另算一遍凑出来的。
 type LocalTime struct {
 	// Hour 是 Env.Region 的时区下 Env.At 是几点（0–23）。
 	//

@@ -86,10 +86,88 @@ func TestEvalReportsLocalBasisForPeakRule(t *testing.T) {
 		t.Errorf("当地钟点 = %d，期望 17（那一分钟正是传去判峰谷的当地钟点）",
 			res.LocalTime.Hour)
 	}
-	// 这一天的休息日属性来自同一份解析：规则没问它，但它是同一件事的另一半，
+	// 这一天的休息日属性随判定一起回来：规则没问它，但它是同一件事的另一半，
 	// 与钟点一起落库（2026-10-16 在夹具里是普通工作日）。
 	if res.LocalTime.OffDay {
 		t.Error("OffDay = true，但这一天是工作日")
+	}
+}
+
+// 只问峰谷的规则每次求值只查**一次**日历，而落库要的那两格仍然按判定依据的
+// 那一天填。
+//
+// 判峰谷本来就要先落到当地那一天、问出它是不是休息日，所以那一天的属性随判定
+// 一起回来（见 PeakVerdict），求值直接拿它填当地口径——不再为
+// local_hour / is_off_day 查第二遍同一天的那一行。
+//
+// 变异两处都能被这条看出来：把 adoptPeakDay 换回「先 resolveLocal 再 Peak」，
+// 查询数会变成 2；把带回来的 Day 丢掉（拿零值顶上），OffDay 会翻成 false。
+func TestEvalPeakRuleQueriesCalendarOnce(t *testing.T) {
+	cal := newTestCalendar()
+	cal.peakMinutes = map[int]bool{17*60 + 30: true}
+
+	p := mustCompile(t, `{"prompt": isPeak("08:00-22:00") ? 0.0000030 : 0.0000010}`)
+	// 2026-10-17 09:30 UTC = 北京时间 17:30，周六——夹具里这一天是休息日。
+	// 特意挑一个休息日：于是「那一天是从判定里带回来的」与「掉成了零值」
+	// 在断言上分得开（工作日两种做法都是 false）。
+	at := time.Date(2026, 10, 17, 9, 30, 0, 0, time.UTC)
+	res, err := p.Eval(Env{At: at, Region: "CN", Calendar: cal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Prices.Prompt.String(); got != "0.00000300" {
+		t.Fatalf("单价 = %s，期望高峰那一档的 0.00000300", got)
+	}
+	if got := cal.calendarCalls(); got != 1 {
+		t.Errorf("一次求值查了 %d 次日历，期望 1 次——判定那一次就把当地口径"+
+			"带回来了，不该为那两格再查一遍", got)
+	}
+	if res.LocalTime == nil {
+		t.Fatal("规则用了 isPeak()，当地口径却是 nil——这一格正是「当时当地几点」")
+	}
+	if res.LocalTime.Hour != 17 {
+		t.Errorf("当地钟点 = %d，期望 17", res.LocalTime.Hour)
+	}
+	if !res.LocalTime.OffDay {
+		t.Error("OffDay = false，但这次判定依据的那一天（10-17，周六）在夹具里是" +
+			"休息日——它随判定一起回来，丢了就说明没跟着判定走")
+	}
+}
+
+// 反过来先问峰谷的规则也只查一次：Peak 已经把那一天带回来了，后问的
+// isWorkday() 直接命中这一份（见 adoptPeakDay），不必自己再查一遍。
+//
+// 与上一条是同一件事的两面：上一条钉「不为落库那两格再查一次」，这一条钉
+// 「后问的那个函数蹭上前面已经查回来的那一份」。
+func TestEvalPeakThenWorkdayQueriesCalendarOnce(t *testing.T) {
+	cal := newTestCalendar()
+	cal.peakMinutes = map[int]bool{17*60 + 30: true}
+
+	p := mustCompile(t, `isPeak("08:00-22:00") && isWorkday()
+		? tier("peak_workday", {"prompt": 0.0000030})
+		: tier("other", {"prompt": 0.0000010})`)
+	res, err := p.Eval(Env{At: testAt, Region: "CN", Calendar: cal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 当地 17:30 在窗口里，2026-10-16 又是工作日——两支都成立才走第一支。
+	if res.Tier != "peak_workday" {
+		t.Fatalf("档位 = %q，期望 peak_workday（当地 17:30 在窗口里，且是工作日）",
+			res.Tier)
+	}
+	if got := cal.calendarCalls(); got != 1 {
+		t.Errorf("一次求值查了 %d 次日历，期望 1 次——isWorkday() 命中的是判定"+
+			"带回来的那一份", got)
+	}
+	if res.LocalTime == nil {
+		t.Fatal("规则用了 isPeak() 与 isWorkday()，当地口径却是 nil")
+	}
+	if res.LocalTime.Hour != 17 {
+		t.Errorf("当地钟点 = %d，期望 17", res.LocalTime.Hour)
+	}
+	if res.LocalTime.OffDay {
+		t.Error("OffDay = true，但这一天是工作日——这一格与 isWorkday() 当时" +
+			"判的是同一份依据")
 	}
 }
 
@@ -166,9 +244,9 @@ func TestEvalResolvesLocalBasisOncePerEvaluation(t *testing.T) {
 	if got := res.Prices.Prompt.String(); got != "1.00000000" {
 		t.Fatalf("单价 = %s，期望 1.0（工作日且非节假日）", got)
 	}
-	if cal.dayCalls != 1 {
+	if got := cal.calendarCalls(); got != 1 {
 		t.Errorf("一次求值查了 %d 次日历，期望 1 次——"+
-			"同一个当地日在一次求值里只有一个答案", cal.dayCalls)
+			"同一个当地日在一次求值里只有一个答案", got)
 	}
 	if res.LocalTime == nil || res.LocalTime.OffDay {
 		t.Errorf("当地口径 = %+v，期望「不是休息日」", res.LocalTime)

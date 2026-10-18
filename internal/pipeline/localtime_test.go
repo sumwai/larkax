@@ -23,13 +23,15 @@ import (
 //
 // 判定的实现在 internal/calendar 里测（窗口怎么算、跨零点算到哪一天），
 // 这里只要一个能答的日历：本条用例问的是「峰谷那一档的当地口径有没有传下来」。
+//
+// Day 留零值（不是休息日）：这条用例的规则不判休息日，只看钟点。
 type peakCalendar struct {
 	*fakeCalendar
 	peak bool
 }
 
-func (c *peakCalendar) Peak(string, time.Time, []expr.PeakWindow) (bool, error) {
-	return c.peak, nil
+func (c *peakCalendar) Peak(string, time.Time, []expr.PeakWindow) (expr.PeakVerdict, error) {
+	return expr.PeakVerdict{IsPeak: c.peak}, nil
 }
 
 // 当地口径取的是**受理那一刻**的那次求值，不是结算那一刻重算的。
