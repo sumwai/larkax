@@ -31,6 +31,7 @@ const priceShortUsage = `larkaxctl price 管理计价规则。
   larkaxctl price disable <规则 ID>
   larkaxctl price explain --model <规范模型名> [--user <ID 或用户名>] [--at <…>]
   larkaxctl price calendar import <文件>
+  larkaxctl price calendar list
 
 作用域决定哪两栏 id 有效；五个计价项（prompt、completion、cache_read、
 cache_write、reasoning）在规则里缺一个，用到它的请求就会整个失败。
@@ -62,6 +63,8 @@ const priceUsage = `larkaxctl price 管理计价规则。
   larkaxctl price calendar import <文件>
         导入某一年的日历数据（分时计价要用它判断哪天是休息日，
         文件格式见 larkaxctl price calendar --help）
+  larkaxctl price calendar list
+        列出导入过的年份、状态与天数
 
 作用域决定哪两栏 id 有效：platform 两栏都留空；merchant 必须给 --user；
 channel 必须给 --channel。写了读取路径不看的那一栏会被拒绝。
