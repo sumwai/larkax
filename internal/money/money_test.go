@@ -217,20 +217,39 @@ func TestDivInt(t *testing.T) {
 
 // 溢出时返回边界值而不是回绕。回绕会把一个天文数字变成看起来正常的
 // 负数金额，那比一个明显离谱的值更危险。
+//
+// 两侧都断言**具体的值**：负半原先只判「不是正数」，而 `MinInt64 + MinInt64`
+// 回绕出来的恰好是 0——0 既不是正数也不是负数，于是「不是正数」放它过去，
+// 这一格就这样漏了整整一轮（见 TestAddOfTwoMinInt64ClampsToMinInt64）。
 func TestOverflowClampsNotWraps(t *testing.T) {
 	huge := Amount{units: math.MaxInt64}
-	got := huge.Add(huge)
-	if got.IsNegative() {
-		t.Errorf("溢出不该回绕成负数: %s", got.String())
-	}
-	if got.Units() != math.MaxInt64 {
-		t.Errorf("溢出应夹到最大值，得到 %d", got.Units())
+	if got := huge.Add(huge); got.Units() != math.MaxInt64 {
+		t.Errorf("正向溢出应夹到最大值，得到 %d（%s）", got.Units(), got.String())
 	}
 
 	small := Amount{units: math.MinInt64}
-	got = small.Add(small)
-	if got.IsPositive() {
-		t.Errorf("负向溢出不该回绕成正数: %s", got.String())
+	if got := small.Add(small); got.Units() != math.MinInt64 {
+		t.Errorf("负向溢出应夹到最小值，得到 %d（%s）", got.Units(), got.String())
+	}
+}
+
+// 两个下界相加必须夹住，而不是回绕成 0。
+//
+// 这一格是「只看结果的符号」那一版判据漏掉的：`MinInt64 + MinInt64` 回绕出来的
+// 和恰好是 0，既不大于 0 也不小于 0，于是「同号相加结果必然同号，否则溢出」
+// 放它过去——一笔巨额欠款被算成零。断言的是具体的值：只断言「不是正数」的话，
+// 0 与 MinInt64 都能通过，这一格就是那样漏过去的。
+func TestAddOfTwoMinInt64ClampsToMinInt64(t *testing.T) {
+	min := Amount{units: math.MinInt64}
+	if got := min.Add(min); got.Units() != math.MinInt64 {
+		t.Fatalf("MinInt64 + MinInt64 = %d（%s），期望 %s（夹到下界）",
+			got.Units(), got.String(), min)
+	}
+
+	// 交换操作数：判据按 b 的符号分支，这一格走的是另一支（b 为负、和变大）。
+	if got := FromUnits(-1).Add(min); got.Units() != math.MinInt64 {
+		t.Fatalf("-1 加 MinInt64 = %d（%s），期望 %s（夹到下界）",
+			got.Units(), got.String(), min)
 	}
 }
 
@@ -575,8 +594,19 @@ func TestParseInt64Boundary(t *testing.T) {
 
 // 加法的溢出检测：同号相加才可能溢出，异号相加永远不会。
 //
-// 变异：把 `a.units > 0 && b.units > 0` 里的某个 `>` 改掉，
-// 异号相加（结果必然在范围内）会被误判为溢出。
+// 这一条钉的是异号那一侧：判据按 b 的符号分支，异号时两条都不成立，和原样返回
+// ——`MaxInt64 + (-MaxInt64+1)` 就是 1 个单位，不是任何边界值。同号那一侧的边界
+// （尤其是 `MinInt64 + MinInt64`）由 TestAddOfTwoMinInt64ClampsToMinInt64 与
+// TestAddAgreesWithSumCheckedOnEveryBoundary 钉。
+//
+// 判据 `(b.units > 0 && sum < a.units) || (b.units < 0 && sum > a.units)` 上
+// 有四条等价变异（gremlins CONDITIONALS_BOUNDARY，把某一处比较符的边界挪一格），
+// 理由都是「那一格的相等情形到不了」：
+//
+//   - `b.units > 0` 改成 `>= 0`、`b.units < 0` 改成 `<= 0`：多出来的是 b == 0，
+//     而那时 sum 就是 a，两条里的 `sum < a` / `sum > a` 都不成立；
+//   - `sum < a.units` 改成 `<=`、`sum > a.units` 改成 `>=`：多出来的是 sum == a，
+//     它等价于 b == 0（int64 相加不引入别的偏差），而两支都要求 b 不为 0。
 func TestAddOverflowDetectionOnlyOnSameSign(t *testing.T) {
 	// 异号相加：不可能溢出，即便两边都很大
 	big1 := Amount{units: math.MaxInt64}
@@ -591,6 +621,57 @@ func TestAddOverflowDetectionOnlyOnSameSign(t *testing.T) {
 	sum := huge.Add(huge)
 	if sum.IsNegative() {
 		t.Errorf("同号溢出应夹住而不是回绕，得到 %s", sum)
+	}
+}
+
+// Add 与 SumChecked 对同一对输入必须给出同一个答案。
+//
+// # 为什么这是一条独立的判据
+//
+// Add 的注释把「夹住的边界值不等于真实和、调用方从返回值上看不出被夹过」这件事
+// 交代给了调用方，也就是说两条路都在、由调用方按场景挑。那它们对同一对输入就不能
+// 各说各话：一条说「放不下」（SumChecked 报 ok=false），另一条却给出一个看起来
+// 正常的数——这一格原来正是这样（Add 给 0，SumChecked 给 MinInt64）。
+//
+// 所以这里比的是两个函数的**一致性**，而不是一串记下来的期望值：将来任一侧再被
+// 改坏、或者回绕换了个花样，这条都会说话。表里只挑边界上那几个值 + 两个溢出方向
+// 各一对，不铺成一张大输入表——铺开了也证明不了「下一个回绕花样」。
+//
+// `92233720368.54775807` 就是 MaxInt64 个单位，`-92233720368.54775808` 是 MinInt64。
+func TestAddAgreesWithSumCheckedOnEveryBoundary(t *testing.T) {
+	max, min := Amount{units: math.MaxInt64}, Amount{units: math.MinInt64}
+	// 一个**最小单位**（1e-8 元），不是 One（One 是 1 元）。
+	plusUnit, minusUnit := Amount{units: 1}, Amount{units: -1}
+	cases := []struct {
+		name    string
+		a, b    Amount
+		want    string
+		clamped bool // SumChecked 是否应当报 ok=false
+	}{
+		{"正向溢出：两个上界", max, max, "92233720368.54775807", true},
+		{"正向溢出：上界再加一个最小单位", max, plusUnit, "92233720368.54775807", true},
+		{"负向溢出：两个下界", min, min, "-92233720368.54775808", true},
+		{"负向溢出：下界再减一个最小单位", min, minusUnit, "-92233720368.54775808", true},
+		{"下界加一个最小单位：放得下", min, plusUnit, "-92233720368.54775807", false},
+		{"上界减一个最小单位：放得下", max, minusUnit, "92233720368.54775806", false},
+		{"两端相加：放得下", max, min, "-0.00000001", false},
+		{"上界加「比下界多一个单位」：和为 1 个最小单位", max, Amount{units: -math.MaxInt64 + 1}, "0.00000001", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sum, ok := SumChecked(tc.a, tc.b)
+			if ok == tc.clamped {
+				t.Fatalf("夹具的前提不成立：SumChecked 对 %s 与 %s 报 ok=%v（%s）",
+					tc.a, tc.b, ok, sum)
+			}
+			if got := sum.String(); got != tc.want {
+				t.Errorf("SumChecked(%s, %s) = %s，期望 %s", tc.a, tc.b, got, tc.want)
+			}
+			if got := tc.a.Add(tc.b).String(); got != tc.want {
+				t.Errorf("Add(%s, %s) = %s，期望 %s——两条路对同一对输入给出了不同的答案",
+					tc.a, tc.b, got, tc.want)
+			}
+		})
 	}
 }
 
