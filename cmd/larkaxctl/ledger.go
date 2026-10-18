@@ -17,7 +17,25 @@ import (
 	"github.com/sumwai/larkax/internal/money"
 )
 
-// ledgerUsage 是 ledger 子命令的帮助。
+// ledgerHelp 是 ledger 的两版帮助文本（见 helpText）。
+var ledgerHelp = helpText{short: ledgerShortUsage, long: ledgerUsage}
+
+// ledgerShortUsage 是 ledger 的短版：`-h` / `--help` 与参数写错时打的那一份。
+const ledgerShortUsage = `larkaxctl ledger 管财务账本：读余额、校验分录，以及跑一轮对账。
+
+用法：
+  larkaxctl ledger balance --account <科目> [--asset <资产>]
+  larkaxctl ledger balance --all [--asset <资产>]
+  larkaxctl ledger verify [--from <时刻>] [--to <时刻>] [--max-txns <笔数>]
+  larkaxctl ledger reconcile
+
+balance 与 verify 只读；reconcile 会写库，口径来自 settings 表。
+balance 打的是从分录现算的权威值，不是 user_wallets 里的那个快照。
+
+更细的边界：larkaxctl help ledger。
+`
+
+// ledgerUsage 是 ledger 的长版：`larkaxctl help ledger` 与 `ledger help`。
 //
 // balance 与 verify 只读这件事写在第一行：这两条命令出现在事故现场（余额对
 // 不上、导入之后要复核），而那时候最要紧的一件事是**不要**再动账本。reconcile
@@ -34,10 +52,8 @@ const ledgerUsage = `larkaxctl ledger 管财务账本：读余额、校验分录
   larkaxctl ledger reconcile
         跑一轮对账（开关与口径见 settings 表）
 
-balance 与 verify 只读：不改任何一行、不写任何快照，任何写入都走各自的写入
-路径，这里不提供。reconcile 不是只读的：它往 reconcile_runs 记一行，并在
-settings 的 reconcile.auto_repair 为真时按口径修差额——要不要动手由那个开关
-决定，命令行上不带参数，于是「线上跑的是哪一套口径」只有一个答案（库里的值）。
+balance 与 verify 只读：不改任何一行、不写任何快照。reconcile 不是只读的：它往
+reconcile_runs 记一行，并在 settings 的 reconcile.auto_repair 为真时按口径修差额。
 
 balance 打出来的余额是从分录**现算**的权威值，不是 user_wallets 里那个快照。
 两者是否一致由 reconcile 比对，它还会把差额归集到 reconcile_difference；
@@ -46,18 +62,20 @@ balance 只回答「账本上是多少」。
 科目按账本的写法给，例如 user:42、merchant_payable:7、payout:3、
 payment_gateway:<通道名>、platform_revenue、upstream_cost、reconcile_difference。
 
-资产默认 CNY（目前只有这一种，见 internal/ledger 的 Asset）。
+资产默认 CNY（目前只有这一种）。
 
 时刻用 RFC3339（2026-10-17T00:00:00Z）或只写日期（2026-10-17，按 UTC 零点算）。
 区间左闭右开：--from 含、--to 不含。
 
 verify 的范围按「在这个区间里出现过的交易」圈定，而每一笔交易都会**整笔**
-读回来校验：只按行过滤会把横跨区间边界的交易切两半，而半笔可能看起来是平的。
+读回来校验。
 
 退出码见 larkaxctl --help。verify 发现不合法、或区间里一条分录都没有时是 1；
 reconcile 发现不一致时也是 1。
 
 旧路径：larkaxctl reconcile 仍然可用，与 larkaxctl ledger reconcile 逐字相同。
+
+更细的约定见 docs/cli-reference.md 的「ledger」一节。
 `
 
 // ledgerReadTimeout 是余额查询的时间上限。
@@ -75,7 +93,7 @@ const ledgerVerifyTimeout = 30 * time.Minute
 // runLedger 处理 ledger 子命令。
 func runLedger(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, ledgerUsage)
+		printUsage(os.Stderr, ledgerShortUsage)
 		return usageErr(errors.New("ledger 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -89,11 +107,11 @@ func runLedger(args []string) error {
 		// 对账原先是一个顶层命令（larkaxctl reconcile），#475 把它收进账本域：
 		// 它比的是账本与快照，属于同一个域。旧路径留着，接的是同一个函数。
 		return runReconcile(rest)
-	case "help", "-h", "--help":
-		fmt.Print(ledgerUsage)
+	case "-h", "--help":
+		printUsage(os.Stdout, ledgerShortUsage)
 		return nil
 	default:
-		fmt.Fprint(os.Stderr, ledgerUsage)
+		printUsage(os.Stderr, ledgerShortUsage)
 		return usageErr(fmt.Errorf("未知的 ledger 子命令 %q", action))
 	}
 }
@@ -105,7 +123,7 @@ func runLedger(args []string) error {
 // 打出一份全库汇总，看起来像一次成功的查询。
 func runLedgerBalance(args []string) error {
 	fs := flag.NewFlagSet("ledger balance", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, ledgerUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, ledgerShortUsage) }
 	account := fs.String("account", "", "要查的科目，例如 user:42")
 	all := fs.Bool("all", false, "按科目汇总全库")
 	asset := fs.String("asset", string(ledger.AssetCNY), "资产种类")
@@ -217,7 +235,7 @@ func printLedgerBalances(w io.Writer, asset ledger.Asset, report *store.AccountB
 // runLedgerVerify 校验账本完整性。
 func runLedgerVerify(args []string) error {
 	fs := flag.NewFlagSet("ledger verify", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, ledgerUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, ledgerShortUsage) }
 	from := fs.String("from", "", "区间起点（含），RFC3339 或 2006-01-02")
 	to := fs.String("to", "", "区间终点（不含）")
 	maxTxns := fs.Int("max-txns", 0, "最多校验多少笔交易，0 表示不限")

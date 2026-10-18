@@ -16,40 +16,49 @@ import (
 	"github.com/sumwai/larkax/internal/settings"
 )
 
+// settingsHelp 是 settings 的两版帮助文本（见 helpText）。
+var settingsHelp = helpText{short: settingsShortUsage, long: settingsUsage}
+
+// settingsShortUsage 是 settings 的短版：`-h` / `--help` 与参数写错时打的那一份。
+const settingsShortUsage = `larkaxctl settings 查看与修改运行期配置。
+
+用法：
+  larkaxctl settings list
+  larkaxctl settings set --key <键> --value <值> --by <用户 ID 或用户名>
+
+未声明的键写不进去；--by 必填，每次改动都要记名。值按明文给，整数写数字、
+布尔只认 true / false、字符串不用加引号。
+
+更细的边界：larkaxctl help settings。
+`
+
+// settingsUsage 是 settings 的长版：`larkaxctl help settings` 与 `settings help`。
 const settingsUsage = `larkaxctl settings 查看与修改运行期配置。
 
 用法：
   larkaxctl settings list
   larkaxctl settings set --key <键> --value <值> --by <用户 ID 或用户名>
 
-配置项存在数据库的 settings 表里，与数据同生共死：备份恢复、换机器时它
-跟着数据一起走，不会像环境变量那样漏掉一个就整体不可用。
-
-键与类型定义在 internal/settings 的 Registry 里，每个键的说明存在库中
-settings.description 那一列（由迁移写入，list 打的就是它）。**未声明的
-键写不进去**——库里出现一个代码不认识的键，表现是配置被静默忽略，而写它的
-人当场看不到任何反馈。
-
 set 的值按明文给，不用写成 JSON：
 
   larkaxctl settings set --key request_snapshot.retention_days --value 7 --by ops
   larkaxctl settings set --key plugin.enabled --value true --by ops
-  larkaxctl settings set --key reconcile.auto_repair --value false --by ops
 
 整数直接写数字，布尔只认 true / false，字符串直接写、不用加引号。
+
+未声明的键写不进去：库里出现一个程序不认识的键，表现是配置被静默忽略，
+而写它的人当场看不到任何反馈。
 
 --by 必填。settings.updated_by 记的是谁改的配置，而一条不记名的写入等于
 没有审计——允许留空的话，最省事的用法就是永远不填。
 
-有些键不接受这条路径的修改（settings.editable 为 false）：它们改错会造成
-严重后果，只允许由迁移写入。命令会报错并指出是哪一个。
-
-另有一些键**写得进去、但改了不会有任何效果**：代码里还没有读它们的路径
-（Registry 里标了 Unwired 的那几个）。命令照常写入，并在输出里指出这一点——
-不指出来的话，它与一个真的生效的键在这条命令的输出上完全一样。
+有些键不接受这条路径的修改（settings.editable 为 false），只允许由迁移写入，
+命令会报错并指出是哪一个。另有一些键**写得进去、但改了不会有任何效果**：
+命令照常写入，并在输出里指出这一点。
 
 密钥类配置不放这里（明文落盘并进备份），它们走 channels 表的信封加密。
-这条由上面的白名单保证：写入只认 Registry 里声明过的键。
+
+更细的约定见 docs/cli-reference.md 的「settings」一节。
 `
 
 // settingsTimeout 是这两条命令连库的时间上限。
@@ -61,7 +70,7 @@ const settingsTimeout = 30 * time.Second
 
 func runSettings(args []string) error {
 	fs := flag.NewFlagSet("settings", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, settingsUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, settingsShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -87,7 +96,7 @@ func runSettings(args []string) error {
 
 func runSettingsList(args []string) error {
 	fs := flag.NewFlagSet("settings list", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, settingsUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, settingsShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -153,7 +162,7 @@ func runSettingsSet(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("settings set", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, settingsUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, settingsShortUsage) }
 	keyFlag := fs.String("key", "", "要改的配置键，例如 plugin.enabled")
 	valueFlag := fs.String("value", "", "新的值，按明文给（不用写成 JSON）")
 	by := fs.String("by", "", "改这个配置的用户：用户 ID 或用户名（必填）")

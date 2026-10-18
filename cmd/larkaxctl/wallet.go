@@ -20,6 +20,24 @@ import (
 	"github.com/sumwai/larkax/internal/settings"
 )
 
+// walletHelp 是 wallet 的两版帮助文本（见 helpText）。
+var walletHelp = helpText{short: walletShortUsage, long: walletUsage}
+
+// walletShortUsage 是 wallet 的短版：`-h` / `--help` 与参数写错时打的那一份。
+const walletShortUsage = `larkaxctl wallet 管理用户钱包。
+
+用法：
+  larkaxctl wallet create --user <ID 或用户名> [--asset <资产>]
+  larkaxctl wallet credit --user <ID 或用户名> --amount <金额> --ref <外部单据号>
+                          [--asset <资产>] [--gateway <来源>]
+
+--ref 必填，它同时是幂等键：同一条命令重跑两次只入账一次，换单号才是另一笔。
+钱包必须已经存在（先 create）；这两条命令都不需要 LARKAX_MASTER_KEYS。
+
+更细的边界：larkaxctl help wallet。
+`
+
+// walletUsage 是 wallet 的长版：`larkaxctl help wallet` 与 `wallet help`。
 const walletUsage = `larkaxctl wallet 管理用户钱包。
 
 用法：
@@ -29,7 +47,6 @@ const walletUsage = `larkaxctl wallet 管理用户钱包。
 
 create 给一个已存在的用户开通钱包，余额为 0。它不写任何分录：新开的户在
 账本上没有分录，这个用户在 user 科目上的分录之和为 0，与快照里的 0 自洽。
-带初始金额意味着这次开户同时是一次充值，而那属于充值入口——用 credit。
 
 **幂等**：钱包已经存在时什么都不做、照样退出 0。两种结果都退出 0，只能靠
 输出的那一行分辨，它们逐字是：
@@ -42,7 +59,6 @@ create 给一个已存在的用户开通钱包，余额为 0。它不写任何�
 
 credit 是运营手工入账：走账本写一组 topup 分录（借 user:<ID>、贷
 payment_gateway:<来源>），并在同一个事务里更新 user_wallets.balance。
-它不绕过账本直接改余额——那样会让钱包快照与分录对不上，下一轮对账会报。
 
 --ref 是这笔入账对应的**外部单据号**（银行流水号、支付通道的单号），它同时是
 幂等键：**必填且没有默认值**。它被确定性地映射成这次交易的 txn_id，于是同一条
@@ -87,6 +103,8 @@ LARKAX_MASTER_KEYS。
   --idempotency-key     同 --ref。它是这一项上一版的正式写法，已经发布过，
                         删掉就是破坏脚本
   --order               同 --ref（更早的那一版口语化写法）
+
+更细的约定见 docs/cli-reference.md 的「wallet」一节。
 `
 
 // walletTimeout 是这条命令连库与写库的时间上限。
@@ -106,7 +124,7 @@ const manualGateway = "manual"
 // runWallet 处理 wallet 子命令。
 func runWallet(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, walletUsage)
+		printUsage(os.Stderr, walletShortUsage)
 		return usageErr(errors.New("wallet 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -116,11 +134,11 @@ func runWallet(args []string) error {
 		return runWalletCreate(rest)
 	case "credit":
 		return runWalletCredit(rest)
-	case "help", "-h", "--help":
-		fmt.Print(walletUsage)
+	case "-h", "--help":
+		printUsage(os.Stdout, walletShortUsage)
 		return nil
 	default:
-		fmt.Fprint(os.Stderr, walletUsage)
+		printUsage(os.Stderr, walletShortUsage)
 		return usageErr(fmt.Errorf("未知的 wallet 子命令 %q", action))
 	}
 }
@@ -132,7 +150,7 @@ func runWalletCreate(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("wallet create", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, walletUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
 	user := fs.String("user", "", "钱包归属的用户：用户 ID 或用户名")
 	stringAlias(fs, user, "u", sameAs("user"))
 	asset := fs.String("asset", "", "资产品种；留空表示取 settings 的 billing.default_asset")
@@ -185,7 +203,7 @@ func runWalletCredit(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("wallet credit", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, walletUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
 	user := fs.String("user", "", "入账的用户：用户 ID 或用户名")
 	stringAlias(fs, user, "u", sameAs("user"))
 	amount := fs.String("amount", "", "入账金额，必须为正")
