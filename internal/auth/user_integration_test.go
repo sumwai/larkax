@@ -496,10 +496,10 @@ func TestUpdateUserClearsTextColumnsToNull(t *testing.T) {
 	}
 
 	var emailIsNull, displayIsNull bool
-	if err := db.QueryRowContext(ctx,
+	if scanErr := db.QueryRowContext(ctx,
 		`SELECT email IS NULL, display_name IS NULL FROM users WHERE id = $1`, created.ID,
-	).Scan(&emailIsNull, &displayIsNull); err != nil {
-		t.Fatalf("直接查库失败: %v", err)
+	).Scan(&emailIsNull, &displayIsNull); scanErr != nil {
+		t.Fatalf("直接查库失败: %v", scanErr)
 	}
 	if !emailIsNull || !displayIsNull {
 		t.Errorf("清空要落成 NULL，实际 email IS NULL=%v、display_name IS NULL=%v",
@@ -602,20 +602,20 @@ func TestUpdateUserResolvesLikeTheOtherPaths(t *testing.T) {
 
 	// 找不到：与读侧共用同一个哨兵。
 	status := UserStatusBanned
-	if _, err := store.UpdateUser(ctx, uniqueUsername(), UpdateUserParams{Status: &status}); !errors.Is(err, ErrUserNotFound) {
-		t.Errorf("改一个不存在的用户得到 %v，想要 ErrUserNotFound", err)
+	if _, updateErr := store.UpdateUser(ctx, uniqueUsername(), UpdateUserParams{Status: &status}); !errors.Is(updateErr, ErrUserNotFound) {
+		t.Errorf("改一个不存在的用户得到 %v，想要 ErrUserNotFound", updateErr)
 	}
 
 	// 标识为空是调用方的错，不是「找不到」——两者混在一句话里，脚本会把一次
 	// 参数错当成「那个人没了」。
-	if _, err := store.UpdateUser(ctx, "  ", UpdateUserParams{Status: &status}); err == nil {
+	if _, updateErr := store.UpdateUser(ctx, "  ", UpdateUserParams{Status: &status}); updateErr == nil {
 		t.Error("空标识应当报错，却通过了")
 	}
 
 	// 状态取值不认识：报错，而且那一列不动。CHECK 约束也会挡住它，但那时
 	// 调用方拿到的是一句驱动原文。
 	bogus := "frozen"
-	if _, err := store.UpdateUser(ctx, created.Username, UpdateUserParams{Status: &bogus}); err == nil {
+	if _, updateErr := store.UpdateUser(ctx, created.Username, UpdateUserParams{Status: &bogus}); updateErr == nil {
 		t.Fatal("不认识的状态应当报错，却通过了")
 	}
 	back, err := store.UserByRef(ctx, created.Username)
