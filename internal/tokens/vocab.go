@@ -294,7 +294,9 @@ func (v *vocabSet) loaded() []string {
 // p50k/p50k_edit 能加载，但不在任何一条 encodingRule 里，所以本包不预先
 // 加载它们；r50k 在值域里，因而会被预解。
 //
-// 目前只有 AvailableEncodings 在调它，而那个也还没有生产调用方（见它的注释）。
+// 调用方是 AvailableEncodings，而生产里的出口是 Counter.VocabReady——
+// 就绪检查拿这份清单逐项真的加载一次，于是「清单比真实能力大」会被探针
+// 当场报出来，而不是等到某次计数悄悄退回估算。
 // TestAvailableEncodingsActuallyLoad 逐项真的调一次 tokenizer.Get，所以依赖
 // 换了支持范围时这里会有一条用例失败，而不是悄悄失真。
 func loadableEncodings() []tokenizer.Encoding {

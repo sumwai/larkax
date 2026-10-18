@@ -121,7 +121,8 @@ const captureModeSkeleton = "skeleton"
 //
 // 落库失败不重试也不 panic：调用方（网关）不等结果，这条链路的任何失败
 // 都不该影响请求与计费。重试留给「值不值得为一条排障数据再试一次」的判断，
-// 而那需要先有丢弃与失败的计数（见 Collector.Stats）。
+// 而那需要先有丢弃与失败的计数——它今天有了：一边是本实例的计数
+// （见 Collector.Stats），一边是指标族 larkax_snapshot_failed_total。
 func (s *Store) Insert(ctx context.Context, snap *gateway.Snapshot) error {
 	if snap == nil {
 		return errors.New("快照为空")

@@ -91,7 +91,9 @@ curl -i 127.0.0.1:8080/v1/chat/completions
 
 第一个返回 `200`，第二个返回 `405`——这条路径只接受 `POST`。推理接口本身
 已经接上了公共端口，见下文「当前能做什么」。
-另可验证数据库探针：`curl -s 127.0.0.1:9090/readyz` 应含 `"postgres":"ok"`。
+另可验证两项就绪探针：`curl -s 127.0.0.1:9090/readyz` 应含 `"postgres":"ok"`
+（连得上库）与 `"tokens":"ok"`（本机支持的每一种分词词表都加载得出来，没预热
+或没解出来时报不就绪）。
 **健康检查在 `:9090`，不在 `:8080`**——公共端口的 `/` 捕获一切路径并返回 `501`。
 
 指标在同一个内部端口上，`curl -s 127.0.0.1:9090/metrics` 应含
@@ -1044,7 +1046,7 @@ go run ./cmd/larkaxctl apikey update --id 3 --clear-rpm
 | `:8080` | `POST /v1/systemone` | 决策调用，见下节；**从不流式**，带了 `stream: true` 回 `400` |
 | `:8080` | 其余任意路径 | `501`，明确的「尚未实现」JSON |
 | `:9090` | `/healthz` | `200`，进程存活 |
-| `:9090` | `/readyz` | `200`，含 `postgres` 探针 |
+| `:9090` | `/readyz` | `200`，含 `postgres` 与 `tokens` 两项探针（worker 角色只有 `postgres`：它没装计数器） |
 | `:9090` | `/metrics` | Prometheus 文本格式的指标，清单见 [metrics.md](metrics.md) |
 
 装配在 `internal/assembly`，由 `cmd/larkax` 调用：鉴权、候选渠道、计费两阶段、

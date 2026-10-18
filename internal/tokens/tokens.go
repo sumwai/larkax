@@ -36,7 +36,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/tiktoken-go/tokenizer"
 )
 
 // Source 说明一个 token 数是怎么来的。
@@ -277,10 +280,8 @@ func (c *Counter) Loaded() []string {
 // 与 Loaded 的区别：这个是能力上限，那个是当前状态。要回答「这台机器支持到
 // 什么程度」用前者，要回答「那一次启动解开了哪些、各花了多久」用后者。
 //
-// **目前只有测试在调它。** 同一组的另外两个已经接上了（cmd/larkax 的
-// warmVocab 调 Prepare 与 Loaded），而它还没有——内部端口的就绪检查今天
-// 只报 postgres 的连通性（见 cmd/larkax 的 newInternalHandler）。接线之前
-// 别把它当成已经在跑的东西。
+// 生产里的调用方是 Counter.VocabReady——就绪检查拿它逐项真的加载一次，
+// 于是「清单比真实能力大」这种失真会在探针上现形，而不是只活在测试里。
 func AvailableEncodings() []string {
 	encodings := loadableEncodings()
 	out := make([]string, 0, len(encodings))
@@ -288,4 +289,53 @@ func AvailableEncodings() []string {
 		out = append(out, string(enc))
 	}
 	return out
+}
+
+// VocabReady 探一次「本机支持的编码是不是真的都能加载」，供 /readyz 使用。
+//
+// # 为什么值得占一条就绪探针
+//
+// 词表没预热、或者加载失败时，请求**照样进来**：CountText 拿不到词表就退回
+// 估算（见 count.go），计费与限流用的数量级于是悄悄变粗，而这条链路上没有
+// 任何一处报错。那正是就绪检查该回答的问题——进程活着，但计数这一半能力
+// 不在。放到 /readyz 而不是留个日志：不就绪会被摘掉，而日志里的一句话不会。
+//
+// # 判据是能力上限，不是「这次解开了哪几种」
+//
+// 探的是 AvailableEncodings 里的每一种能不能真的加载出来，而不是 Loaded()
+// 当前有几项：后者由时间决定，冷启动到第一次请求之间本来就是空的，
+// 拿它做判据会让一个完全正常的实例长期不就绪。反过来，逐项真的加载一次
+// 才能发现「依赖换了支持范围、而清单没跟着改」这一类失真——那时清单说的
+// 能力比真实能力大，而清单的用途恰恰是回答「这台机器支持到什么程度」。
+//
+// # 副作用是预热
+//
+// 探针通过之后，这几种编码都在内存里了，计数路径不再有惰性加载的那一次
+// 停顿。启动预热成功时这里是缓存命中（见 Prepare）；预热失败时每次探测都会
+// 重试那一种，于是它能自己恢复，而不是一直停在启动时的那次失败上。
+//
+// 失败时返回的错误逐项说明哪一种加载不出来：就绪检查的输出会被人读，
+// 只说「词表不可用」的话，看的人还得自己去猜是哪一种。
+func (c *Counter) VocabReady(ctx context.Context) error {
+	if c == nil || c.vocab == nil {
+		return errors.New("Counter 未初始化，请用 NewCounter 构造")
+	}
+
+	var missing []string
+	for _, name := range AvailableEncodings() {
+		// 加载本身是纯 CPU 计算、不可中断，所以放弃点只能落在两次加载之间：
+		// 就绪检查带超时（见 cmd/larkax 的 readyzTimeout），超时之后继续
+		// 一种一种解下去没有意义——那个探针已经不再等这个结论了。
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := c.vocab.codecFor(tokenizer.Encoding(name)); err != nil {
+			missing = append(missing, fmt.Sprintf("%s（%v）", name, err))
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("本机支持的编码里有 %d 种加载不出来，精确计数对它们不可用: %s",
+			len(missing), strings.Join(missing, "；"))
+	}
+	return nil
 }

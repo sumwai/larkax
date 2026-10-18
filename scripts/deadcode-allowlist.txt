@@ -135,7 +135,5 @@ internal/observe/metrics.go      | Counter.Value                   | lib | 只�
 internal/plugin/registry.go      | Publish                          | lib | 批量上传的 all-or-nothing 发布：今天没有生产调用方（启动走 PublishPartial、上传逐条 Compile），只有测试在调它
 internal/snapshot/allowlist.go   | Root.valid                      | lib | 允许表的内部判定：方向是否已知；目前只有测试在调它（New 查的是表，不是它）
 internal/snapshot/allowlist.go   | isAllowKind                     | lib | 允许表的内部判定：测试用它筛出需要顶住敌对取值的条目
-internal/tokens/count.go         | BoundsOf                        | lib | 能力查询：BoundsFor 按模型名的便捷包装；目前只有测试在调它
-internal/tokens/tokens.go        | AvailableEncodings              | lib | 能力查询：本机能精确计数的编码集合；目前只有测试在调它（同一组的 Prepare / Loaded 已随启动预热接线，它自己还没有——就绪检查今天只报 postgres）
-internal/tokens/tokens.go        | BoundsFor                       | lib | 能力查询：某个族的估算误差范围；目前只有测试在调它
-internal/tokens/vocab.go         | loadableEncodings               | lib | 能力查询：第三方词表支持哪些编码；只被 AvailableEncodings 调用，那个也还没有生产调用方
+internal/tokens/count.go         | BoundsOf                        | lib | 能力查询：BoundsFor 按模型名的便捷包装；没有生产调用方——它是给「这次估算有多不可信」用的，而今天没有任何一处会因为估算就不干活（估算照常结算，来源记在 usage_source 上）
+internal/tokens/tokens.go        | BoundsFor                       | lib | 能力查询：某个族的估算误差范围；没有生产调用方，理由同 BoundsOf。接线的时机是「估算成为常态」或「要做降级决策」，不是现在——先接一次没人读的数只会多一处要维护的调用

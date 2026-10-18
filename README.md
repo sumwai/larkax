@@ -58,7 +58,7 @@ Leave `make run` in that shell and use a second one for the rest.
 ```sh
 # 2. Three answers that together mean "up".
 curl -i 127.0.0.1:9090/healthz                # 200
-curl -s 127.0.0.1:9090/readyz                 # {"checks":{"postgres":"ok"},"ready":true}
+curl -s 127.0.0.1:9090/readyz                 # {"checks":{"postgres":"ok","tokens":"ok"},"ready":true}
 curl -i 127.0.0.1:8080/v1/chat/completions    # 405 — the inference paths are POST
 
 # 3. The upstream credential, and the model ids your upstream actually serves.

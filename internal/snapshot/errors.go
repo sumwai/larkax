@@ -17,6 +17,14 @@ import (
 // 长度与引用编号（`T1`、`T2`），没有任何一处写入上游或客户端传来的字符串。
 var ErrRedaction = errors.New("快照脱敏失败")
 
+// ErrTooLarge 是「骨架连降级后的摘要层都超过字节上限」这一条丢弃理由的标记。
+//
+// 它自身就带着 ErrRedaction（见上面那个变量）：调用方「拿到任何错误就丢整条
+// 快照」这一条不变。多一个标记是为了让**丢弃的原因**可判——上限配错与一次
+// 可能的泄露要查的地方完全不同，而两者的现场都只是「这条快照没了」。
+// internal/snapshotwire 据此把这一类单独计数（见 observe 的 snapshot_oversized）。
+var ErrTooLarge = fmt.Errorf("%w: 骨架连摘要层都超过字节上限，丢弃快照", ErrRedaction)
+
 // redactionError 用 %w 包装 ErrRedaction，保留「哪一步失败、为什么」。
 //
 // 错误信息里只带字段路径与类型名，不带取值：脱敏器的错误会进日志，

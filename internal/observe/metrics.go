@@ -332,6 +332,45 @@ type Registry struct {
 	// （见 docs/metrics.md 的「怎么读」一段）。
 	RateLimitStoreErrors *Counter
 
+	// SnapshotWritten 是成功落库的请求快照条数。
+	//
+	// 它是下面三条的分母：单独看「丢了多少条」答不出「这次是流量大、上限小，
+	// 还是存储坏了」——三个数一起看才有比例可言。
+	//
+	// 采集开关关掉时它一直是 0，而那时另外三条也都是 0（整条链路没有运行），
+	// 所以「四个数全 0」与「库表里一条快照都没有」是同一个结论。
+	SnapshotWritten *Counter
+
+	// SnapshotDropped 是并发写入已满而**就地丢弃**的快照条数。
+	//
+	// 丢弃是既定行为，不是故障：过载时排队等候的代价是占着内存里的骨架，
+	// 并与计费路径争同一批数据库连接（见 internal/snapshotwire 的 Save）。
+	// 所以它大于 0 只说明上限或流量需要调整，而**请求与计费都不受影响**。
+	//
+	// 要与 SnapshotFailed 一起读：只有这一条在涨说明流量或上限的问题，
+	// 两条同时涨则先查存储。
+	SnapshotDropped *Counter
+
+	// SnapshotFailed 是落库失败的快照条数。
+	//
+	// 大于 0 说明存储侧在报错。这一条链路的失败是**静默**的：没有任何调用方
+	// 会因为一条快照没写进去而失败，网关连返回的错误都不看（快照挂掉不该影响
+	// 请求与计费）。所以这个数是它唯一的信号。
+	SnapshotFailed *Counter
+
+	// SnapshotOversized 是脱敏阶段因骨架超过字节上限、连摘要层也装不下而
+	// **整条丢弃**的快照条数。
+	//
+	// 与另外两条丢弃分开：那两条发生在落库那一侧（并发满、写库失败），
+	// 这一条发生在脱敏那一侧，且它按设计说明的是**上限配错了**
+	// （request_snapshot.max_bytes 被配成了很小的值）——而不是流量或存储。
+	// 超限时先降级成只留顶层标量的摘要层，摘表层仍然装不下才走到这里
+	// （见 internal/snapshot 的 applyBudget 与 docs/request-retention.md）。
+	//
+	// 降级（Truncated）**不单独计数**：它是超过上限时的既定处置，且逐条记在
+	// request_snapshots.skeleton_truncated 上，要看是哪几条可以直接查表。
+	SnapshotOversized *Counter
+
 	families []family
 }
 
@@ -360,6 +399,14 @@ func NewRegistry() *Registry {
 		"RPM 限流的计数当前是否取自共享存储：1 表示精确（计数在 Redis 里，各实例共用一份，放行总量不超过配置值），0 表示近似（退回进程内计数，各实例各算各的，放行量偏大）。配置里没写共享存储时它一直是 0，且 store_errors 一直是 0；配了但连不上时它是 0 而 store_errors 大于 0——那个数按取值读，别按增速读：探活那一次失败之后它可能就不再涨了。只有设置过之后才输出：这行不存在表示这个实例上根本没接限流器（例如 worker 角色）。")
 	r.RateLimitStoreErrors = r.newCounter("larkax_ratelimit_store_errors_total",
 		"共享计数存储（Redis）调用失败的次数：启动期那一次探活失败记一次，之后每一次因为存储不可用而退回进程内计数的判定再各记一次。它是上面那个仪表变成 0 的原因，也是「配了但连不上」与「没配」分得开的那一半——按取值读（是 0 就是没配），不要按增速读：探活那一次之后它可能就不再涨了。")
+	r.SnapshotWritten = r.newCounter("larkax_snapshot_written_total",
+		"成功落库的请求快照条数。它是 dropped / failed / oversized 三条的分母：只看丢弃数答不出「这次是流量大还是存储坏了」。采集开关关掉时四个数都是 0。")
+	r.SnapshotDropped = r.newCounter("larkax_snapshot_dropped_total",
+		"并发写入已满而就地丢弃的请求快照条数（不排队等候，见 docs/request-retention.md）。按设计可以大于 0：它涨说明上限或流量需要调整，而请求与计费都不受影响。要与 snapshot_failed_total 一起读——只有它涨是容量问题，两个一起涨则先查存储。")
+	r.SnapshotFailed = r.newCounter("larkax_snapshot_failed_total",
+		"落库失败的请求快照条数。大于 0 说明存储侧在报错。这条链路的失败是静默的：没有任何调用方会因为一条快照没写进去而失败，网关连返回的错误都不看——所以这个数是它唯一的信号。")
+	r.SnapshotOversized = r.newCounter("larkax_snapshot_oversized_total",
+		"脱敏阶段因骨架超过字节上限、连摘要层也装不下而整条丢弃的条数。它按设计说明 request_snapshot.max_bytes 配得太小（先降级成摘要层，仍然装不下才丢），与并发满、写库失败那两条分开：那两条在落库侧，这一条在脱敏侧。降级本身不单独计数，逐条记在 request_snapshots.skeleton_truncated 上。")
 	return r
 }
 

@@ -267,8 +267,25 @@ func (c *Collector) RedactResponse(resp *channel.Response) (*gateway.Snapshot, e
 //
 // 只搬脱敏产出，不碰 request_id / user_id / direction 三个字段：
 // 那些属于「这条快照属于谁」，由调用方（网关）填——脱敏器不知道也不该知道。
+//
+// # 丢弃的计数为什么在这里
+//
+// 四个脱敏入口（两个方向 × 两条表面）都从这里出去，所以计数放在这一处就
+// 不会有哪条表面漏记——decision.go 那两个入口也走它。
+//
+// 计数的是「连降级后的摘要层都装不下、整条被丢掉」这一种（ErrTooLarge），
+// 而不是所有脱敏失败：其余失败各有各的原因（类型不认识、值没脱干净），
+// 把它们并进同一个数会让「上限配错了」这件事在指标上失去形状。
+//
+// 必须有人记它：调用方（网关）拿到错误就直接返回，既不记日志也不上报
+// （快照链路挂掉不该影响请求），于是「上限配小了」在 /metrics 与日志里都
+// 看不见，而现场是「快照表里这一段时间是空的」——那看起来与「没有请求」
+// 一模一样。
 func toSnapshot(res *snapshot.Result, err error) (*gateway.Snapshot, error) {
 	if err != nil {
+		if errors.Is(err, snapshot.ErrTooLarge) {
+			observe.Metrics.SnapshotOversized.Inc()
+		}
 		return nil, err
 	}
 	return &gateway.Snapshot{
@@ -319,6 +336,7 @@ func (c *Collector) Save(ctx context.Context, snap *gateway.Snapshot) error {
 	case c.sem <- struct{}{}:
 	default:
 		c.dropped.Add(1)
+		observe.Metrics.SnapshotDropped.Inc()
 		c.loggerOrContext(ctx).Warn("快照并发已满，丢弃",
 			"request_id", local.RequestID,
 			"direction", local.Direction,
@@ -331,6 +349,7 @@ func (c *Collector) Save(ctx context.Context, snap *gateway.Snapshot) error {
 
 	if err := c.store.Insert(ctx, &local); err != nil {
 		c.failed.Add(1)
+		observe.Metrics.SnapshotFailed.Inc()
 		c.loggerOrContext(ctx).Error("快照落库失败",
 			"request_id", local.RequestID,
 			"direction", local.Direction,
@@ -339,13 +358,15 @@ func (c *Collector) Save(ctx context.Context, snap *gateway.Snapshot) error {
 		return err
 	}
 	c.written.Add(1)
+	observe.Metrics.SnapshotWritten.Inc()
 	return nil
 }
 
-// Stats 是这条链路的计数，供测试与指标使用。
+// Stats 是这条链路的计数，供测试与装配层的用例使用。
 //
 // 有了它，「一条都没写进去」与「没有请求」才分得开：只看日志的话，
-// 两者都是没有输出。
+// 两者都是没有输出。生产里的出口是 /metrics 上那一族（observe 的
+// snapshot_written / dropped / failed / oversized），见下面 Stats 的注释。
 type Stats struct {
 	Written int64
 	Dropped int64
@@ -354,9 +375,17 @@ type Stats struct {
 
 // Stats 返回当前计数。
 //
-// 目前只有测试在读它：指标那一头还没有写（本仓的指标面是 internal/observe
-// 的计数器，按调用点自增，还没有 snapshot 这一族）。它是这条链路唯一能把
-// 「丢掉了多少条」与「没有请求」分开的出口，所以留着而不是删掉三个计数。
+// 它是这个 Collector **自己**的计数，与 /metrics 上那一族（observe 的
+// snapshot_*）是同一批事件的两份口径，不能合成一份：
+//
+//   - 指标是进程级的累计，跨实例不可分；而这里要回答的是「**这一个**
+//     Collector 写了多少」——装配层的端到端用例靠它等一条快照落库，用全局
+//     计数器会把别的用例写进去的数也算进来。
+//   - 指标按调用点自增，进不了测试里的中间状态；而这里随时读得到。
+//
+// 两边的自增点在同一处（Save 与两个 Redact 方法），所以不存在「一边涨了
+// 一边没涨」的漂移——若哪天真要合并，合并的方向是把这份计数删掉、测试改用
+// 一个自己 NewRegistry 造的注册表，而不是让指标去读它。
 func (c *Collector) Stats() Stats {
 	return Stats{Written: c.written.Load(), Dropped: c.dropped.Load(), Failed: c.failed.Load()}
 }

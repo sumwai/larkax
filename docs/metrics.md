@@ -29,6 +29,10 @@ curl -s 127.0.0.1:9090/metrics
 | `larkax_auth_failures_total` | counter | `reason` | 认证失败被回以 401 的次数，按失败原因分。`reason` 取 `internal/auth` 的 `Reason`：`missing_credential` / `malformed_credential` / `key_not_found` / `key_disabled` / `key_revoked` / `key_inactive` / `key_expired` / `user_inactive`，外加 `unclassified` |
 | `larkax_ratelimit_exact` | gauge | 无 | RPM 限流的计数**当前**是否取自共享存储：`1` 精确（计数在 Redis 里，各实例共用一份，放行总量不超过配置值），`0` 近似（退回进程内计数，各实例各算各的，放行量偏大）。**没设置过就不输出**，所以「没有这一行」表示这个实例上没接限流器（worker 角色） |
 | `larkax_ratelimit_store_errors_total` | counter | 无 | 共享计数存储（Redis）调用失败的次数，**含启动期那一次探活**。有请求之后，每一次因为存储不可用而退回进程内计数的判定再各记一次——它是上面那个仪表变成 `0` 的原因，也是「配了但连不上」与「没配」分得开的那一半 |
+| `larkax_snapshot_written_total` | counter | 无 | 成功落库的请求快照条数。它是下面三条的分母：只看丢弃数答不出「这次是流量大、上限小，还是存储坏了」。采集开关关掉时四个数都是 0 |
+| `larkax_snapshot_dropped_total` | counter | 无 | 并发写入已满而**就地丢弃**的快照条数（不排队等候，见 [request-retention.md](request-retention.md)）。按设计可以大于 0：它涨说明上限或流量需要调整，而请求与计费都不受影响 |
+| `larkax_snapshot_failed_total` | counter | 无 | 落库失败的快照条数。大于 0 说明存储侧在报错 |
+| `larkax_snapshot_oversized_total` | counter | 无 | 脱敏阶段因骨架超过字节上限、连降级后的摘要层也装不下而**整条丢弃**的快照条数。按设计说明 `request_snapshot.max_bytes` 配得太小，而不是流量或存储的问题 |
 
 ## 怎么读
 
@@ -143,6 +147,31 @@ usage 块，用量按零值占位（不是上游说的 0），于是这次结算
 无界集合），而这条路径上又没有日志可查。所以那个问题要靠报障的人给出 key 前缀，
 再去 `api_keys.key_prefix` 里定位。
 
+**快照那四条要连着读，`written` 是分母。** 丢弃与失败都只有在这一条链路上
+能看见：快照落不进去不影响任何一次请求与任何一笔账，网关连返回的错误都不看，
+所以没有任何一次请求会因为快照丢了而失败——现场就只是「这段时间的表是空的」，
+而它与「这段时间没有请求」长得一样。四条的自增点都在 `internal/snapshotwire`
+（落库那两条在 `Save`，脱敏那一条在 `toSnapshot`），采集侧的取舍见
+[request-retention.md](request-retention.md)。
+
+- 只有 `snapshot_dropped_total` 在涨 → 并发写的上限或流量的问题。被丢掉的
+  那条**不重试也不排队**（过载时排队要占着内存里的骨架，还要与计费争同一批
+  数据库连接），所以这个数是「有多少条排障数据没留下」，不是「丢了多少条以后
+  会补回来」。
+- 只有 `snapshot_failed_total` 在涨 → 存储侧在报错。这条是**静默**的那一类，
+  排查要走日志里的那几条 `快照落库失败`（按 `request_id` 对得上）。
+- 只有 `snapshot_oversized_total` 在涨 → 上限配错了：
+  `request_snapshot.max_bytes` 小到连降级后的摘要层都装不下。它要查的是配置，
+  不是流量也不是存储，所以与上面两条的处置完全不同。
+- 三条都不涨而 `written` 也不涨 → 这个部署根本没在采集（开关关着）。
+  四个数全 0 是那一种情况的样子，而不是「采集正常、什么都没丢」。
+
+**`snapshot_oversized_total` 涨了，降级那一条不跟着涨。** 超限时先把骨架降级成
+只留顶层标量的摘要层，降级**不单独计数**——它是既定处置，而且逐条记在
+`request_snapshots.skeleton_truncated` 上，要看是哪几条直接查表。所以这个计数器
+数的是「降级也没救回来、整条被丢掉的那些」：它大于 0 就说明留存里缺的是整条记录，
+而不是缺字段。
+
 ## 命名与标签约定
 
 - 名字以 `larkax_` 开头，之后是子系统（`billing`、`upstream`、`ledger`……）。
@@ -183,6 +212,13 @@ usage 块，用量按零值占位（不是上游说的 0），于是这次结算
 
 增量点**只加一行**：不要为了计数去改被计数的逻辑，也不要在计数器里做判断。
 标签值一律用常量或有限枚举，不要从请求里取。
+
+唯一的例外是「同一件事有几种结局、每种各记一个数」：那时「这一次算哪一种」
+本身是指标定义的一部分（快照那一族就是四种——落库成功、并发满丢弃、写失败、
+脱敏超限）。这种判断要落在几条路径的**汇合点**上（那一族的超限计数在
+`internal/snapshotwire` 的 `toSnapshot` 里，四个脱敏入口都走它），而不是在
+每个分支里各写一遍——分叉的那一份迟早会漏掉一条路径，而漏记的表现是
+「这一种从来没发生过」。
 
 不带标签的计数器总是输出，包括值为 0 的时候——「一直是 0」本身就是要看的那个值。
 带标签的计数器在第一次自增之前没有任何序列，整族不输出。**仪表按第三套：
