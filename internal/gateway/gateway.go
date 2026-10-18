@@ -1711,15 +1711,48 @@ func ruleCandidates(cands []route.Candidate) []pipeline.RuleCandidate {
 // 它必须在成功请求的结算**之后**调用：延迟与缓存两列由写入方按桶从
 // usage_events 重算，而那一行是结算事务写的（见 route.CallOutcome）。
 // 失败的请求没有用量事件，也就不涉及这个顺序。
+//
+// # 请求 ctx 已经结束时，失败的尝试记成「不归因」
+//
+// 客户端点停止、LB 空闲超时、客户端自己超时，都会让请求 ctx 在调用中途
+// 结束。那种失败不记在渠道头上：连续失败计数既不加一也不清零。
+//
+// 判据与 channelAtFault 是同一条——「换一个渠道会不会不一样」——而客户端
+// 断开时不会。这里必须看 ctx，不能看错误的形态：internal/channel 下的四个
+// 适配器都把 ctx 取消包成一个可重试的上游错误（见 openaiadapter、
+// anthropicadapter、responsesadapter、systemoneadapter 各自调上游的那一处），
+// 而 IsRetryable 为真的错误正是 channelAtFault 判为渠道故障的那一类。少了
+// 这一道，一个健康渠道会在客户端反复放弃的几分钟里攒够连续失败三次，然后
+// 按 streakCooldown 被摘掉十五分钟。
+//
+// 流式那条路早就是这么判的（见 pumpStream 的 clientGone）：两条路对同一件
+// 事不该给出相反的答案。
+//
+// 成功的那一次不在改判之列：上游确实服务了这次请求，取消发生在它回来之后
+// ——流式那边同样是「流正常走完之后调用方才断开」（clientGone 要求流没走完），
+// 不算客户端断开。改判它还会连用量一起丢掉，而那份用量是额度自记账的依据。
+//
+// 代价说清楚：取消之前那几次失败也一并落成「不归因」，即使它们是渠道自己的
+// 问题。不按时间分辨是因为我们手里没有「ctx 是什么时候结束的」这个时刻
+// （Attempt 只有开始与时长），猜错的方向是把一次取消重新记成渠道故障——那
+// 正是这一道要消除的东西。丢掉的那几次方向是**不摘渠道**，与三次参数错摘掉
+// 一个健康渠道相比是轻的那一侧（见 channelAtFault）。
 func (g *Gateway) recordAttempts(ctx context.Context, attempts []route.Attempt, usage *channel.Usage) {
 	if g.Recorder == nil || len(attempts) == 0 {
 		return
 	}
+	// 取一次就够：它是这一次请求的同一个事实。循环里每次重读的话，一次运行
+	// 中途结束的 ctx 会让同一次请求里的两次尝试按两套判据记。
+	canceled := ctx.Err() != nil
 	for _, a := range attempts {
+		verdict := verdictOf(a.Err)
+		if canceled && a.Err != nil {
+			verdict = route.VerdictUnattributed
+		}
 		rec := route.CallOutcome{
 			ChannelID: a.ChannelID,
 			At:        attemptTime(a, g.now()),
-			Verdict:   verdictOf(a.Err),
+			Verdict:   verdict,
 		}
 		if a.Err == nil && usage != nil {
 			rec.Usage = *usage
