@@ -1111,19 +1111,20 @@ ingress 规则下。
 
 | 子命令 | 做什么 |
 |---|---|
-| `channel` | 上游渠道：`create` / `list`（`--all` 含已删）/ `update` / `enable` / `disable` / `delete`（软删） |
+| `channel` | 上游渠道：`create` / `list`（`--all` 含已删）/ `get`（单条详情）/ `health`（健康与窗口内的用量）/ `update` / `enable` / `disable` / `delete`（软删）/ `restore`（`delete` 的逆操作） |
 | `model` | 模型目录：`create` / `list` / `get` / `update` / `delete` |
 | `alias` | 规范模型名到上游模型名的映射：`create` / `list` / `update` / `delete` / `resolve` |
-| `price` | 计价规则：`create` / `list` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`price calendar import` |
-| `user` | 用户：`create` |
-| `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录） |
+| `price` | 计价规则：`create` / `list` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `list`） |
+| `user` | 用户：`create` / `list` / `get` / `update` |
+| `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录）/ `list` |
 | `apikey` | API Key：`create` / `update` / `get` / `list`；`update` 兼改状态、备注与过期时间 |
 | `ledger` | 账本：`balance` / `verify`（两条都只读）与 `reconcile`（对账，会写运行记录） |
-| `settings` | 运行期配置：`list` / `set` |
-| `plugin` | 插件：`list` / `publish` / `enable` / `disable` |
+| `settings` | 运行期配置：`list` / `get` / `set` |
+| `plugin` | 插件：`list` / `get` / `publish` / `enable` / `disable` / `delete`；插件私有的键值存储：`kv`（`get` / `set` / `delete`） |
 | `partition` | `usage_events` 月分区：`ensure` / `check` |
 | `doctor` | 逐项检查这条链路通不通（`--live` 才真打上游） |
 | `snapshot` | 请求快照：`cleanup` / `allowlist` / `get` / `redact` |
+| `consent` | 原样采集请求正文的授权：`grant` / `list` / `revoke` |
 | `secret` | 主密钥轮换：`rotate` |
 | `maintenance` | 运行期数据的留存清理：`idempotency`（`--dry-run` 只数不删） |
 | `migrate` | 迁移：`up` / `down` / `down-to` / `up-to` / `status` / `version` / `create` |
