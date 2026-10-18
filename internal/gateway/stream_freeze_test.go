@@ -185,6 +185,11 @@ func TestChatStreamFreezesOnlyTheFirstSegmentUpFront(t *testing.T) {
 //
 // 按段对齐是必须的：不对齐的话每个事件都会算出一个新的目标值，补冻就从
 // 「每段一次」退化成「每个事件一次」，一次几 token 的流会打出上百次数据库往返。
+//
+// 变异记录：pending 里两条守卫上的边界变异是**等价变异**，不必为它们写用例
+// ——`if want > f.max` 改成 `>=` 时，相等那一步赋的还是 f.max 本身；`if want <=
+// f.reserved.OutputTokens` 改成 `<` 时，相等那一步会走到
+// `want - f.reserved.OutputTokens`，算出来同样是 0。
 func TestChatStreamTopsUpByWholeSegments(t *testing.T) {
 	h := newHarness(t, withStreamFreezeStep(freezeStep))
 	useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
@@ -503,6 +508,10 @@ func TestChatStreamKeepsGoingWhenTopUpWriteFails(t *testing.T) {
 // 零值不是「不限」也不是「每次事件都查」：前者让补冻整条不发生（流式又退回按
 // 声明上界冻），后者把数据库往返摊到每一个事件上。两种都不会报错，只会安静地
 // 跑错——所以它必须在开始之前就失败（见 Gateway.StreamFreezeStep）。
+//
+// 变异记录：begin 里那条 `g.StreamFreezeStep <= 0` 改成 `< 0` 是**等价变异**
+// ——同一次请求接着会被 pipeline.ReserveStream 用同一个 ErrNoFreezeStep 挡下，
+// 本用例的断言分不出是哪一层拒的（网关这道是公开类型上的第二道防线）。
 func TestChatStreamRejectsMissingFreezeStep(t *testing.T) {
 	h := newHarness(t, withStreamFreezeStep(0))
 	exec := useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
@@ -577,5 +586,69 @@ func TestChatStreamRejectsInvalidMaxTokensBeforeStreaming(t *testing.T) {
 	}
 	if calls := exec.calledChannels(); len(calls) != 0 {
 		t.Errorf("拒绝发生在调上游之前，实际打了渠道 %v", calls)
+	}
+}
+
+// ── 判据本身：已产出量的口径与段的对齐 ──────────────────────────────────
+
+// 已产出量取**估算量与上游实测量里大的那一侧**。
+//
+// 这里逐格钉住 produced 的判据。既有的流式用例全用增量推进（一个 usage 事件
+// 都不发），而发 usage 的那些走的都是非流式请求——那条路上补冻的目标值被声明
+// 的上界夹住、逐次算出来都是 0，produced 取多少根本不影响结果。所以「取大的
+// 那一侧」这句话在此之前没有任何用例钉过。
+//
+// 反过来（取小的那一侧）的错法是静默的：冻结额会落后于真实产出，结算时实际
+// 金额超过预留额、撞上 Capped，差额由平台承担，而账目仍然是平的——对账看不
+// 出来，只有那个计数器会说。
+//
+// 变异记录：同一行上 `>` 改成 `>=` 是**等价变异**（相等时赋的就是 n 自己，
+// 值不变），不必为它写用例。
+func TestStreamFreezeProducedTakesTheLargerSide(t *testing.T) {
+	f := &streamFreeze{}
+	est := tokens.NewStreamEstimator(nil, "gpt-4o")
+	est.ObserveDelta(chunk(200))
+	estimated := est.Result().Output.Tokens
+	if estimated <= 3 {
+		t.Fatalf("夹具的估算量只有 %d 个 token，用例的前提不成立", estimated)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		measured *channel.Usage
+		want     int64
+	}{
+		{"实测更小：以本地估算为准", &channel.Usage{CompletionTokens: 3}, estimated},
+		{"实测更大：以上游报的为准", &channel.Usage{CompletionTokens: estimated + 100}, estimated + 100},
+		{"还没有实测：以本地估算为准", nil, estimated},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := f.produced(est, tc.measured); got != tc.want {
+				t.Errorf("produced = %d 个 token，期望 %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// roundUpTo 把已产出量向上对齐到段的整数倍，三个点各有各的意思。
+//
+// 「还差一个」与「正好落在边界上」都该只对到段本身，越过边界一个才是下一段的
+// 起点。这条边界就是「多冻一段」的分界线：多进一段等于把用户的钱白占住，而少
+// 冻一头会撞上 Capped——这套设计的两头都在这一个数上。
+//
+// 变异记录：`if n <= 0` 改成 `< 0` 是**等价变异**——n 为 0 时会去算
+// ((0+step-1)/step)*step，而 step 为正时那个整除的商也是 0，两条路同值。
+func TestRoundUpToSegmentBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		n    int64
+		want int64
+	}{
+		{freezeStep - 1, freezeStep},
+		{freezeStep, freezeStep},
+		{freezeStep + 1, 2 * freezeStep},
+	} {
+		if got := roundUpTo(tc.n, freezeStep); got != tc.want {
+			t.Errorf("roundUpTo(%d, %d) = %d，期望 %d", tc.n, freezeStep, got, tc.want)
+		}
 	}
 }
