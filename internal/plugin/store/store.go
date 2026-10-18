@@ -168,9 +168,10 @@ func (s *Store) LoadRegistry(ctx context.Context, logger *slog.Logger, provided 
 
 // loadRecord 是一次加载对**一行**的结果，准备写回 plugins 的那三列。
 //
-// 身份用 (key, version) 而不是 (key, generation)：覆盖发布让代次原地加一，同一个
-// key 里两行可以撞到同一个代次上（见 pickedOrder），而 version 在同一个 key 里
-// 唯一（UNIQUE (key, version)）——按它写才落得准那一行。
+// 身份用 (key, version) 而不是 (key, generation)：代次在同一个 key 里不唯一，而
+// version 唯一（UNIQUE (key, version)）——按它写才落得准那一行。代次之所以不唯一，
+// 是因为 #754 之前写下的行里两行可能撞在同一个代次上（那时覆盖发布把代次原地加一，
+// 见 pickedOrder）。
 type loadRecord struct {
 	key     string
 	version string
@@ -199,8 +200,8 @@ func loadRecords(rows []activeRow, skipped map[string]error) []loadRecord {
 // recordLoadResultSQL 写回一行。WHERE 落在 (key, version) 上：那就是刚读的那一行
 // 的身份，写回因此不必再拼一遍「取中哪一行」那条判据（见 activeRow）。
 //
-// 用 version 而不是 generation：代次会撞车（见 pickedOrder），按代次写会连另一个
-// 版本的行一起改掉。
+// 用 version 而不是 generation：代次在同一个 key 里不唯一（早先写下的行会并列，
+// 见 pickedOrder），按代次写会连另一个版本的行一起改掉。
 //
 // 时刻取库里的 now() 而不是 Go 那边的时钟：这一列要与库里的其它时刻比先后，
 // 而进程的时钟与库的时钟未必是同一个。
@@ -258,17 +259,21 @@ func nullableText(s string) any {
 // 查询里的别名。
 //
 // 排序键是**两段**，第二段不能省：代次高的排前面，代次撞车时按版本名定胜负。
-// 代次会撞车是真的——覆盖发布时它是原地加一（见 Publish），所以同一个 key 里
-// A(gen 0)、B(gen 1)，之后再发一次 A，A 也成了 gen 1，两行并排。version 在同一个
-// key 里唯一（UNIQUE (key, version)），拿它收尾就定得下一行。
+// 代次撞车只剩两处来路，且都不在当前这条写路径上：**#754 之前**写下的行（那时覆盖
+// 发布把代次原地加一，同一个 key 里 A(gen 0)、B(gen 1)，之后再发一次 A，A 也成了
+// gen 1，两行并排），以及手工改库的行。库里的旧行不搬，所以这一档还得留着。
 //
 // 代次撞车时「谁更新」已经无从判断了——覆盖发布不另记时刻——所以这一档只求**定得
-// 下来**：按版本名收尾。撞车是覆盖发布的副产物，一个版本只发布一次的库里不会有。
+// 下来**：按版本名收尾。version 在同一个 key 里唯一（UNIQUE (key, version)），拿它
+// 收尾就定得下一行。
 //
 // 四处共用它：读表那一处（activeRows）、两处管理面查询（runningJoin、Get），以及
 // Enable 抬哪一代。它们必须选出**同一行**——写回落在加载器读的那一行上，管理面报的
 // 也得是那一行，enable 抬的还得是那一行；各自写一遍排序的话，撞车时可能各选一行，
 // 而库里看不出任何异常。
+//
+// 「最新一次尝试」那一栏（Row.Latest）不在共用之列：它问的是「这一行的代次是不是最高
+// 的」，并列时两行都如实为真，不在这条排序键上收尾（见 Row.Latest）。
 func pickedOrder(alias string) string {
 	return alias + ".generation DESC, " + alias + ".version DESC"
 }
@@ -331,7 +336,8 @@ func (s *Store) activeRows(ctx context.Context) ([]activeRow, error) {
 // 一个数字认不出那是哪一版。
 type Generation struct {
 	Version string
-	// Number 是 generation 那一列的值：同一个 key 里每发布一次加一。
+	// Number 是 generation 那一列的值：同一个 key 里每发布一次取当前最大代次加一，
+	// 覆盖也是（见 Publish）。
 	Number int64
 }
 
@@ -370,11 +376,16 @@ type Row struct {
 	// 只有手工改库的行有值。加载期没装成的原因不在这里，见 RunningLoad。
 	CompileError string
 	// Latest 表示这一行是这个 key 里代次最高的那一行，也就是**最新一次尝试**。
-	// 一个 key 只发布过一代时，这一行既是取中的那一代，也是它的最新一次尝试。
+	// 发布取的是这个 key 的最大代次加一（见 Publish），所以代次最高的那一行就是
+	// 最后发布的那一次（一个 key 只发布过一代时，它同时也是取中的那一代）。
+	//
+	// 早先写下的行里代次可能并列（见 pickedOrder）：那时这一栏两行都为真，因为它答的
+	// 只是「这一行的代次是不是最高的」，谁更晚在那些行上已经无从判断。定下唯一一行的
+	// 判据在 pickedOrder 那一侧：加载器与 Get 都用它，两边在任何数据上给的都是同一行。
 	Latest bool
 	// Running 是同一个 key 里**加载器取中的那一代**：状态为 active 且代次最高的
-	// 那一行。这个 key 现在一代都没跑时是 nil（每一代都是 pending / disabled /
-	// failed 是正常状态）。
+	// 那一行（并列时按版本名收尾，见 pickedOrder）。这个 key 现在一代都没跑时是 nil
+	// （每一代都是 pending / disabled / failed 是正常状态）。
 	//
 	// 取中不等于装上了：上一次真的装上没有看 RunningLoad，而被跳过时加载器不会
 	// 退回更老的那一代——那时这个 key 哪一代都没在跑。
@@ -407,11 +418,11 @@ type Row struct {
 
 // IsRunning 问这一行是不是加载器取中的那一行。
 //
-// 比的是 (代次, 版本名) 两样：代次**不唯一**——覆盖发布时它是原地加一（见
-// Publish），所以 A(gen 0)、B(gen 1) 之后再发一次 A，A 也成了 gen 1，同一个 key
-// 里两行撞在同一个代次上。只比代次会把两行都说成取中的那一行，而加载器只读一行。
-// 加上版本名就定得下来：同一个 key 里 version 唯一（UNIQUE (key, version)），
-// 而这正是 pickedOrder 那条排序键。
+// 比的是 (代次, 版本名) 两样：代次**不唯一**，同一个 key 里两行可能撞在同一个代次上。
+// 那是 #754 之前写下的行：那时覆盖发布把代次原地加一，A(gen 0)、B(gen 1) 之后再发
+// 一次 A，A 也成了 gen 1（见 pickedOrder）。只比代次会把两行都说成取中的那一行，而
+// 加载器只读一行。加上版本名就定得下来——同一个 key 里 version 唯一
+// （UNIQUE (key, version)），而这正是 pickedOrder 那条排序键。
 //
 // 取中不等于装着——真的装上没有看 RunningLoad。
 func (r Row) IsRunning() bool {
@@ -539,8 +550,9 @@ type Detail struct {
 	CreatedBy *int64
 	// CreatedAt 是这一行写下的时刻。
 	CreatedAt time.Time
-	// Versions 是这个 key 下的行数（含这一行）。同一个 key 可以有多代：
-	// 换 version 发布是多一行，同 (key, version) 重发是原地加代次。
+	// Versions 是这个 key 下的行数（含这一行）。同一个 key 可以有多代：换 version
+	// 发布是多一行，同 (key, version) 重发是覆盖，代次取这个 key 的最大代次加一
+	// （见 Publish）。
 	Versions int64
 }
 
@@ -675,16 +687,36 @@ type Result struct {
 	Status string
 }
 
+// publishLockSQL 按 key 拿一把发布用的锁。
+//
+// advisory lock 的键空间是全局的：账本按交易号取锁，插件 KV 按「插件名 : 用户 id」
+// 取锁。这里给自己的键带一个前缀，与那两处**不容易**撞上——前缀只是字符串，不保证
+// 分开：KV 那边的插件名叫 `plugin`、用户 id 又正好是这里的 key 时，两边算出来是同一个
+// 键，于是共用一把锁（真撞上也只是多等一次，两条路各自仍然是对的）。
+//
+// 事务级：随 commit / rollback 一起释放，不必手工解锁（同 ledger 的 PostTransaction
+// 与 kv.go 里那一把）。
+const publishLockSQL = `SELECT pg_advisory_xact_lock(hashtextextended('plugin:' || $1::text, 0))`
+
 // Publish 落一条插件。
 //
 // # 同一个 (key, version) 重复发布是「覆盖」，不是「拒绝」
 //
-// 覆盖会换掉 source / meta / name，代次加一，**状态保持原值**。
+// 覆盖会换掉 source / meta / name，**状态保持原值**，代次取这个 key 的
+// MAX(generation) + 1：覆盖 = 成为最新的一代。
 //
 //   - 为什么不拒绝：作者改一个笔误（注释、常量）不该先升 version，否则
 //     version 会变成「发布次数」而不是「版本」；而 version 写在源码的 meta 里，
 //     升它要改源码——多一步，而且容易忘。
-//   - 为什么代次加一而不是就地静默改：`generation` 那一列的存在正说明同一个
+//   - 为什么取整个 key 的最大代次加一，而不是这一行自己的加一：加载器、Get 与清单里
+//     「最新一次尝试」那一栏问的都是「**最后一次发布**的是哪一行」，而代次今天就是
+//     那个问题的答案（取代次最高的那一行）。原地加一让这个答案与「最后一次发布」
+//     错开：同一个 key 里 A(gen 0)、B(gen 1)，重发 A 之后 A 也成了 1，与 B 并列——
+//     而「改好源码重发一次」这条路此时可能装不上，因为并列时取中哪一行由
+//     pickedOrder 收尾，未必是刚发的这一行；命令行上看不出来。取最大代次加一之后，
+//     「代次最高」与「最后发布」重新是同一件事，并列也不再从这条路产生：同一个 key
+//     里每次发布都取到一个新的最大值。库里的旧行不搬，pickedOrder 那一档还得留着。
+//   - 为什么另加一代而不是就地静默改：`generation` 那一列的存在正说明同一个
 //     key 会被反复发布，每一代都是可追溯的一步。库里的行只有一行（UNIQUE
 //     (key, version) 拦着），所以旧源码不留存——要回退就重新发布一次旧源码。
 //   - 为什么状态保持原值：已启用的插件不该因为「改了个错别字」就下线。
@@ -693,6 +725,19 @@ type Result struct {
 //
 // **本片没有热更新**：覆盖之后库里是新源码，而跑着的进程里还是旧的，要重启
 // 才生效。命令行的输出会把「重启后生效」写出来。
+//
+// # 并发
+//
+// 事务开头给这个 key 上一条事务级 advisory lock（见 publishLockSQL），同一个 key
+// 的两条发布因此依次进行——**不会各读到同一个最大代次，然后各写一次**。
+//
+// 锁挂在 key 上，而不是靠约束或行锁：
+//
+//   - `(key, generation)` 上**没有**唯一约束（见 00001_init.sql，那里只有
+//     UNIQUE (key, version)），约束拦不住两条覆盖撞回同一个代次；
+//   - 只锁要改的那一行也挡不住：覆盖要读的是**整个 key** 的最大代次，而这个 key 里
+//     还有别的版本，那几行同时也在被别人覆盖；
+//   - 空 key 的首次发布没有行可锁，行锁覆盖不到它，而两条并发的首发会取到同一个代次。
 //
 // 两处写入（plugins 与 plugin_activations）在同一个事务里：优先级写不进去时
 // 源码也不该落库，否则库里会出现一个「发布了但优先级不是你要的」的插件。
@@ -704,6 +749,12 @@ func (s *Store) Publish(ctx context.Context, pub Publication) (Result, error) {
 	// 提交成功后这次 Rollback 是空操作；失败路径上它负责收尾。
 	defer func() { _ = tx.Rollback() }()
 
+	// 先上锁，再读现有行：读与写之间因此没有窗口（同 ledger 的 PostTransaction
+	// 按 txn_id 上锁）。
+	if _, lockErr := tx.ExecContext(ctx, publishLockSQL, pub.Key); lockErr != nil {
+		return Result{}, fmt.Errorf("锁定插件 %s 失败: %w", pub.Key, lockErr)
+	}
+
 	res := Result{Key: pub.Key, Version: pub.Version}
 
 	var existingID int64
@@ -713,24 +764,28 @@ func (s *Store) Publish(ctx context.Context, pub Publication) (Result, error) {
 		pub.Key, pub.Version).Scan(&existingID, &existingStatus)
 	switch {
 	case err == nil:
-		// 同一代（同 key 同 version）已经在了：覆盖它。
+		// 同一代（同 key 同 version）已经在了：覆盖它，代次取整个 key 的最大值加一。
 		res.Overwritten = true
 		res.Status = existingStatus
-		if _, execErr := tx.ExecContext(ctx,
-			`UPDATE plugins
-			    SET name = $2, source = $3, meta = $4::jsonb, generation = generation + 1
-			  WHERE id = $1`,
-			existingID, pub.Name, pub.Source, string(pub.Meta)); execErr != nil {
-			return Result{}, fmt.Errorf("覆盖插件 %s 失败: %w", pub.Key, execErr)
-		}
 		if scanErr := tx.QueryRowContext(ctx,
-			`SELECT generation FROM plugins WHERE id = $1`, existingID).Scan(&res.Generation); scanErr != nil {
-			return Result{}, fmt.Errorf("读取插件 %s 的新代次失败: %w", pub.Key, scanErr)
+			`UPDATE plugins
+			    SET name = $2, source = $3, meta = $4::jsonb,
+			        generation = (SELECT COALESCE(MAX(m.generation), -1) + 1
+			                        FROM plugins m WHERE m.key = $5)
+			  WHERE id = $1
+			RETURNING generation`,
+			existingID, pub.Name, pub.Source, string(pub.Meta), pub.Key).Scan(&res.Generation); scanErr != nil {
+			// 上面那次 SELECT 到这次 UPDATE 之间，这一行可能被删掉了（delete 与
+			// publish 同时进行时）：UPDATE 一行都没改到，RETURNING 于是没有行。
+			return Result{}, fmt.Errorf("覆盖插件 %s 失败: %w", pub.Key, scanErr)
 		}
 
 	case errors.Is(err, sql.ErrNoRows):
 		// 新的版本：插入一行新代次。状态交给列默认值（pending）——
 		// 发布了不等于启用了，启用是 enable 那个动词的事。
+		//
+		// 代次同样取该 key 的最大值加一（与覆盖那条路同一判据）；上面那把 key 上的
+		// 锁让这个子查询读到的是稳定的一份。
 		res.Status = StatusPending
 		if scanErr := tx.QueryRowContext(ctx,
 			`INSERT INTO plugins (key, version, name, source, meta, generation)
@@ -795,9 +850,9 @@ func setPriority(ctx context.Context, tx *sql.Tx, key string, priority int) erro
 // 代次最高的那一行）。反过来，Disable 必须把**每一代**都按下去——只按最高的
 // 那一行的话，加载器会落到上一代上，表现为「停用了，但它换了个版本继续跑」。
 //
-// 排序键与「取中哪一行」那几处共用（见 pickedOrder）：代次撞车时（覆盖发布的
-// 副产物）只按代次排是任意的，可能抬起一行而加载器读的是另一行——那一次 enable
-// 看起来成功了，跑的却还是原来那一代。
+// 排序键与「取中哪一行」那几处共用（见 pickedOrder）：早先写下的行里代次可能并列
+// （那时覆盖发布把代次原地加一），只按代次排是任意的，可能抬起一行而加载器读的是
+// 另一行——那一次 enable 看起来成功了，跑的却还是原来那一代。
 func (s *Store) Enable(ctx context.Context, key string) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE plugins SET status = $2

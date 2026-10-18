@@ -720,9 +720,10 @@ ID 解析，否则按用户名解析。
 
 `publish` **先在沙箱里编译一遍再落库**：一个编译不过的插件不许进库，否则加载器每次
 启动都要处理它。同一个 `(key, version)` 重复发布是**覆盖**：源码、元数据、名称换
-新，代次（`generation`）加一，启用状态保持原值——改一个笔误不该让已启用的插件下
-线。换版本请改源码里的 `meta.version`，那会插入一行新代次，状态是 `pending`，要
-`enable` 才生效。
+新，代次（`generation`）取这个 key 当前最大的代次加一，启用状态保持原值——改一个
+笔误不该让已启用的插件下线。覆盖会让这一版排到最前：它本来是 `active` 的话，下次
+启动加载的就是它。换版本请改源码里的 `meta.version`，那会插入一行新代次（同样取
+最大值加一），状态是 `pending`，要 `enable` 才生效。
 
 **本版没有热更新**：`publish` / `enable` / `disable` 都只改库，跑着的进程要重启才会
 重新加载。key 在库里没有对应行时按「约束冲突」返回 4。
@@ -766,19 +767,23 @@ ID 解析，否则按用户名解析。
 照样会再试一次——插件没装成时，先把源码或这次的装配调好再重启，不必重新发布。
 
 `-o json` 下 `plugin` 条目在 `list` 的字段之外多三栏：`versions`、`created_at`、
-`created_by`。两个命令的条目都带另外四栏：`latest`（这一条是不是最新一次尝试；代次
-撞车时可能不止一条）、`running_generation`（这个 key 取中的那一代，形如
-`{"version": …, "generation": …}`，没有时是 `null`）、`running_load`（那一次加载的
-结果 `{result, error, at}`，`error` 装上了是 `null`，`at` 在那一行没有记下时刻时是
-`null`——手工改库的行可以只填结果那一列，见迁移 00034；还没有加载记录时整个是
-`null`）、`compile_error`（发布期编译不过的原文，没有时是 `null`；它只可能在手工改库
-的行上有值）。
+`created_by`。两个命令的条目都带另外四栏：`latest`（这一条是不是最新一次尝试，
+也就是代次最高的那一行——覆盖取的是最大代次加一，所以它就是最后发布的那一次；
+早先写下的行里两行可能同代次，那时不止一条为真——那种并列就是当时覆盖发布把代次
+原地加一留下的）、`running_generation`（这个 key 取中的那一代，
+形如 `{"version": …, "generation": …}`，没有时是 `null`）、
+`running_load`（那一次加载的结果 `{result, error, at}`，`error` 装上了是 `null`，
+`at` 在那一行没有记下时刻时是 `null`——手工改库的行可以只填结果那一列，见迁移 00034；
+还没有加载记录时整个是 `null`）、`compile_error`（发布期编译不过的原文，
+没有时是 `null`；只有手工改库的行会有值）。
 
-取中不等于在跑，而 `running_generation` 与 `running_load` 是**按 key 给**的：同一个
-key 的每一条带着同一份，所以脚本要判的是**这一条自己**是不是取中的那一条——`version`
-与 `generation` 都与 `running_generation` 相等（代次会撞车：覆盖发布时它原地加一，
-只比代次会在同一个 key 里撞出两行来）。是取中的那一条时，`running_load` 为 `null`
-是 `还没试`、`result` 是 `ok` 是 `是`、是 `failed` 是 `否`（原文在 `error`）；
+取中不等于在跑，而 `running_generation` 与 `running_load` 是**按 key 给**的：
+同一个 key 的每一条带着同一份，脚本要判的是**这一条自己**是不是取中的那一条——
+`version` 与 `generation` 都与 `running_generation` 相等（代次会撞车：
+早先写下的行里两行可能同代次，那时只比代次就会在同一个 key 里撞出两行来——
+那种并列是当时覆盖发布把代次原地加一留下的）。是取中的那一条时，
+`running_load` 为 `null` 是 `还没试`、
+`result` 是 `ok` 是 `是`、是 `failed` 是 `否`（原文在 `error`）；
 不是取中的那一条时是 `否`，与它自己那份 `running_load` 无关。
 
 `delete` 是硬删除：插件行、它的启用记录与 `plugin_kv` 里属于它的键一起删掉，不可
