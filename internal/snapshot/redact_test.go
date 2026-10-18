@@ -1755,8 +1755,9 @@ func TestHeadersAllDeniedKeepsNothing(t *testing.T) {
 // 变异：比较器 `<` 翻成 `>=`：顺序变成降序，钉死的那份期望对不上。
 //
 // 同一位置的边界变异（`<` 翻成 `<=`）是**等价变异**：两者只在两个元素相等时
-// 给出不同答案，而元素是头名的短哈希——两个头名只有小写后相同才会得到相同的
-// 哈希，那时两个元素是同一个字符串，交换它们不改变输出。
+// 给出不同答案，而元素是头名的短哈希（sha256 前 4 字节的 hex，不做大小写
+// 归一，相等意味着两个头名的哈希撞上了）。两个相等的字符串谁在前面从输出里
+// 看不出来，交换它们不改变这一列。
 func TestHeaderHashesAreSorted(t *testing.T) {
 	w := &walker{redactor: mustNew(t, RootRequest), refs: newToolRefs()}
 	got, ok := w.headers(map[string]string{

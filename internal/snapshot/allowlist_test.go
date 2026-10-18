@@ -834,15 +834,22 @@ func TestTrimIndexStripsArraySuffix(t *testing.T) {
 
 // lastSegment 的输入只有「表里那条路径」——而表里的路径没有一条以 `.` 开头。
 //
-// 变异：循环边界从 `i >= 0` 翻成 `i > 0`，只在下标 0 处那个字符是 `.` 时才
-// 分得开（那时它会返回 `.role` 而不是 `role`）。做这件事的输入只有「表里
-// 写着一条以 `.` 开头的路径」，而下面这遍遍历确认四个方向都没有这种写法。
-// 将来有人真写了，这条会红：那时要么改表，要么把这条等价判据重新审一遍。
+// 变异：循环边界从 `i >= 0` 翻成 `i > 0`。两版只在下标 0 处那个字符是 `.`
+// 时分开（那时它返回 `.role` 而不是 `role`），而**表层走不到那一格**：能做
+// 这件事的输入只有「表里写着一条以 `.` 开头的路径」，下面这遍遍历确认四个
+// 方向都没有这种写法。这不是「没有输入能区分」，所以那一格的行为在下面
+// 直接调用里钉住，表层的前提由这遍遍历守着。
 func TestRulePathsHaveNoLeadingDot(t *testing.T) {
+	// 以 `.` 开头的路径表层走不到，但这一格的行为要钉住：
+	// 循环边界翻成 `i > 0` 之后这一句会返回 ".role"。
+	if got := lastSegment(".role"); got != "role" {
+		t.Errorf("lastSegment(%q) = %q，期望 %q", ".role", got, "role")
+	}
+
 	for _, tbl := range allTables() {
 		for _, r := range rulesFor(t, tbl) {
 			if strings.HasPrefix(r.Path, ".") {
-				t.Errorf("%s/%s: 路径 %q 以 . 开头——lastSegment 的等价判据要重审",
+				t.Errorf("%s/%s: 路径 %q 以 . 开头——lastSegment 的边界判据要重审",
 					tbl.surface, tbl.root, r.Path)
 			}
 		}
