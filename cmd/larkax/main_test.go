@@ -19,6 +19,7 @@ import (
 	"github.com/sumwai/larkax/internal/assembly"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/config"
+	"github.com/sumwai/larkax/internal/gateway"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -355,6 +356,62 @@ func TestInternalHandlerServesHealthAndMetrics(t *testing.T) {
 				t.Errorf("%s 状态码 = %d，期望 200", path, rec.Code)
 			}
 		})
+	}
+}
+
+// 就绪检查的清单：postgres 那一项总是在，词表那一项只在真的装了计数器时加。
+//
+// # 为什么这条要在命令行这一层测
+//
+// 探针有没有接上，判据是「生产的清单里有它」——接线写在 run 里，那一段要连库
+// 才跑得起来。所以清单被抽成了 readinessChecks：测得到的是**同一份**清单，
+// 而不是照着抄一份出来测。抄一份的话，「线上到底探了什么」仍然没人回答。
+//
+// # 为什么词表那一项是有条件的
+//
+// worker 角色的 App 是零值，那种实例上没有计数器、也没预热过词表。无条件加上
+// 会让一个按设计就该长这样的实例永远不就绪——而编排系统据此把它摘掉。
+func TestReadinessChecksFollowTheWiring(t *testing.T) {
+	names := func(checks []observe.ReadinessCheck) []string {
+		out := make([]string, 0, len(checks))
+		for _, c := range checks {
+			out = append(out, c.Name)
+		}
+		return out
+	}
+
+	for _, tc := range []struct {
+		what string
+		app  *assembly.App
+		want []string
+	}{
+		// 测试与 worker 角色传进来的就是 nil（见 newInternalHandler）。
+		{"没有装配层的实例", nil, []string{"postgres"}},
+		{"worker 角色的零值 App", &assembly.App{Public: workerPlaceholder()}, []string{"postgres"}},
+		{"有网关但没计数器", &assembly.App{Gateway: &gateway.Gateway{}}, []string{"postgres"}},
+		{
+			"装好了网关与计数器",
+			&assembly.App{Gateway: &gateway.Gateway{Counter: tokens.NewCounter()}},
+			[]string{"postgres", "tokens"},
+		},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			if got := names(readinessChecks(nil, tc.app)); !slices.Equal(got, tc.want) {
+				t.Errorf("就绪检查 = %v，期望 %v", got, tc.want)
+			}
+		})
+	}
+
+	// 加进来的那一项要真的**通过**：挂一个永远报错的探针，效果是把每个实例
+	// 都摘掉——而它在「清单里有 tokens」这条断言上看起来是完全正确的。
+	app := &assembly.App{Gateway: &gateway.Gateway{Counter: tokens.NewCounter()}}
+	for _, c := range readinessChecks(nil, app) {
+		if c.Name != "tokens" {
+			continue
+		}
+		if err := c.Check(context.Background()); err != nil {
+			t.Errorf("词表探针应当通过，实际 %v", err)
+		}
 	}
 }
 

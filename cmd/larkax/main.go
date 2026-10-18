@@ -138,15 +138,8 @@ func run() error {
 	}
 
 	internalSrv := &http.Server{
-		Addr: cfg.InternalAddr,
-		Handler: newInternalHandler([]observe.ReadinessCheck{
-			{
-				Name: "postgres",
-				Check: func(ctx context.Context) error {
-					return handle.PingContext(ctx)
-				},
-			},
-		}, app),
+		Addr:              cfg.InternalAddr,
+		Handler:           newInternalHandler(readinessChecks(handle, app), app),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -156,6 +149,51 @@ func run() error {
 	}
 
 	return serveUntilSignal(ctx, logger, shutdownTimeout, servers)
+}
+
+// readinessChecks 汇总内部端口就绪检查要报的那几项。
+//
+// 抽成函数的理由与下面的 newInternalHandler 相同：这是**生产用的那一份**
+// 清单，测试要能直接看它有几项、各叫什么名字，而不是自己照着抄一遍——
+// 抄出来的那一份被测到时，「线上到底探了什么」仍然没有人回答。
+//
+// # postgres 那一项
+//
+// 只探连通性。它是进程能不能干活的下界：连不上库时几乎每条路径都会失败，
+// 而这种实例留在负载均衡后面只会让请求失败得更慢。
+//
+// # 词表那一项为什么是有条件的
+//
+// 它只在真的装了计数器时才加。worker 角色的 App 是零值（见 publicHandler），
+// 那种实例既不接推理流量、也没有预热过词表，无条件加上的话它会永远报不就绪——
+// 而它本来是一个完全正常、按设计就该长这样的实例。
+//
+// 之所以要探：词表没预热或加载失败时请求照样进来，计数悄悄退回估算
+// （见 tokens.Counter.VocabReady），链路上没有一处报错。这种事只有就绪检查
+// 能说出来——不就绪会被摘掉，而日志里的一句话不会。
+func readinessChecks(handle *sql.DB, app *assembly.App) []observe.ReadinessCheck {
+	checks := []observe.ReadinessCheck{
+		{
+			Name: "postgres",
+			Check: func(ctx context.Context) error {
+				return handle.PingContext(ctx)
+			},
+		},
+	}
+	if app != nil && app.Gateway != nil && app.Gateway.Counter != nil {
+		counter := app.Gateway.Counter
+		checks = append(checks, observe.ReadinessCheck{
+			Name: "tokens",
+			// 包一层闭包而不是直接把方法值交出去：与上面 postgres 那一项同形，
+			// 而且**那是一次真的调用**——方法值只是取了个函数，仓库里那道
+			// 「导出方法没有调用点」的门（check-deadmethods.sh）按调用点名字
+			// 扫，取方法值它看不见。
+			Check: func(ctx context.Context) error {
+				return counter.VocabReady(ctx)
+			},
+		})
+	}
+	return checks
 }
 
 // newInternalHandler 装配内部监听端口的 handler：健康检查、指标，以及那条

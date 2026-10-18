@@ -321,8 +321,7 @@ func (r *Redactor) applyBudget(res *Result) error {
 		return redactionError("", "摘要层无法序列化（%T）", err)
 	}
 	if size > r.maxBytes {
-		return redactionError("", "摘要层仍然超过字节上限 %d（实际 %d），丢弃快照",
-			r.maxBytes, size)
+		return fmt.Errorf("%w（上限 %d 字节，实际 %d 字节）", ErrTooLarge, r.maxBytes, size)
 	}
 	return nil
 }

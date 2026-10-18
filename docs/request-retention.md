@@ -135,7 +135,9 @@ excluded[].code                为什么被筛掉：ineligible（配置不全）
 `request_snapshot.max_bytes`（默认 64 KiB）约束：超限时降级成只留顶层标量的摘要层，
 那时 `excluded` 整段连同 `candidates`、`attempts` 一起消失，留下的是
 `excluded_count` 与 `candidates_count` 两个标量——「几个候选里筛掉了几个」这件事
-仍然读得出来。摘要层仍然超限时整条快照被丢弃。
+仍然读得出来。摘要层仍然超限时整条快照被丢弃——这一类有计数
+（`larkax_snapshot_oversized_total`，见 [metrics.md](metrics.md)）：整条丢掉是
+静默的，而现场只是「这张表里这一段时间是空的」，与「这段时间没有请求」长得一样。
 
 没有数据的项**整个字段不出现**，而不是写成 0：「没有成本数据」与「成本是 0」
 在选路里是两个不同的结论，快照把两者记成一样，下一次排查就得重新踩一遍。
