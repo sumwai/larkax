@@ -808,7 +808,8 @@ KEY=$(go run ./cmd/larkaxctl apikey create --user "$(go run ./cmd/larkaxctl user
 
 `user create` 还有 `--email` 与 `--role`（`user`、`merchant`、`admin`，默认 `user`）。
 用户名唯一且大小写不敏感，重名会直接报错——**它不会改到已有的那个用户**，
-所以这条命令不能拿来「给已有用户补点什么」。
+所以这条命令不能拿来「给已有用户补点什么」；那件事走 `user update`（只改显式给出
+的字段，改了什么按「旧值 → 新值」打到 stdout）。
 
 ### 用户的角色（今天只是记下来）
 
@@ -820,7 +821,11 @@ KEY=$(go run ./cmd/larkaxctl apikey create --user "$(go run ./cmd/larkaxctl user
   让他能进管理接口。管理面还不存在。
 - `channel create --user <用户>` 不检查那个人是不是 `merchant`：归属只决定
   分账记到谁的账上，不决定「有没有资格」。
-- 角色改不了。`user create` 只建新用户，重名直接报错，没有「改角色」的命令。
+- 角色能改，但改的也只是这两个标记：`user update` 的 `--merchant` / `--no-merchant` /
+  `--admin` / `--no-admin`（`--admin` 同时打上两个，`--no-admin` 不动 `merchant`）。
+  `--no-merchant` 不能单独打在 `admin` 上——那样会留下一行「读出来是 admin、`merchant`
+  却是假」的数据，当场报参数错；先 `--no-admin`，或者两个一起给，一步落到普通用户。
+  `user create` 仍然只建新用户，重名直接报错。
 
 这两个标记是给管理面的鉴权**预留**的（#158）。在那条路接上之前，把 `--role`
 当成一条备注，而不是一条访问控制。
