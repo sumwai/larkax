@@ -6,15 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // 本文件是 users 表的**写入**路径：建一个用户，以及「角色」这个称呼到
-// 表上两个布尔标记的对应关系。
+// 表上两个布尔标记的对应关系；同样的表也有**读**路径（列用户、按标识读一个），
+// 它们与写入路径落在同一个文件里，因为两者共用角色称呼与标记之间那一套映射
+// （见 Role.flags 与 roleOf）——分到两个文件里，这套映射就会长成两份。
 //
 // 它与 store.go 的分工按**表**来分，不按操作来分：store.go 管 api_keys
-// 的鉴权与创建，这里管 users 的创建。两边共用 User 与同一个 *sql.DB，
+// 的鉴权与创建，这里管 users 的创建与读取。两边共用 User 与同一个 *sql.DB，
 // 所以拆文件只是为了让改动落在不重叠的地方，不是拆包。
 
 // PostgreSQL 唯一约束冲突的错误码，以及 users 表上两个唯一约束的名字。
@@ -193,4 +196,219 @@ func createUserFailure(err error, username, email string) error {
 		}
 	}
 	return fmt.Errorf("写入用户失败: %w", err)
+}
+
+// ── 读侧 ────────────────────────────────────────────────────────────────
+//
+// 下面这一半与上面的写入路径服务同一张表上同一批列。分不开的两处是**角色**：
+// `--role` 怎么写成两个标记（Role.flags）与两个标记怎么读回一个称呼（roleOf）
+// 是同一套映射的两半，它们必须一起改，所以放在同一个文件里。
+
+// 用户状态，与迁移里 users.status 的 CHECK 约束一致。
+const (
+	// UserStatusActive 是正常状态：key 有效时就能调推理、能被计费。
+	UserStatusActive = "active"
+	// UserStatusSuspended 是暂停：他手里的 key 全部失效（见 store.go 的 lookup），
+	// 但行还在、数据都留着，恢复只要把这一列改回去。
+	UserStatusSuspended = "suspended"
+	// UserStatusBanned 是封禁。它与暂停在今天的行为**完全一样**（都是
+	// lookup 里那个 `!= active` 判据），分开只因为记录下来的原因不同：
+	// 「临时停一下」与「不许再用」是两件事，而写进库里的东西要能区分它们。
+	UserStatusBanned = "banned"
+)
+
+// UserStatuses 是三个用户状态，按 正常 → 暂停 → 封禁 排。
+//
+// 单开一个函数而不是在判据与报错信息里各写三遍：漏掉一处时，报错会说
+// 「只认 active、suspended」，而 banned 其实也认——一句说错了自己边界的
+// 错误信息比没有更坏。
+func UserStatuses() []string {
+	return []string{UserStatusActive, UserStatusSuspended, UserStatusBanned}
+}
+
+// ParseUserStatus 校验一个用户状态的取值。
+//
+// 取值不认识时**当场报错**，不静默回落成「不筛」。回落的那一面很坏：
+// 一个写错的 --status 会让筛选少一层，命令照样退出 0，打出来的却是全部
+// 用户，看起来像「原来这么多人是这个状态」。
+func ParseUserStatus(s string) (string, error) {
+	for _, known := range UserStatuses() {
+		if s == known {
+			return s, nil
+		}
+	}
+	return "", fmt.Errorf("未知的用户状态 %q：只认 %s", s, strings.Join(UserStatuses(), "、"))
+}
+
+// roleOf 把 users 表上那两个标记反推成一个角色称呼。
+//
+// 它是 Role.flags 在**读侧**的另一半：那一处按称呼写标记，这里按标记读称呼。
+//
+// 先看 is_admin：迁移里写着 admin 天然也是 merchant，所以一行只写了 is_admin
+// 没写 is_merchant 的数据（只能由手改库产生）仍然算 admin。读侧给不出角色时，
+// 命令行那一栏就只能空着，而空着与「这一栏没填」在输出里分不出来。
+func roleOf(isMerchant, isAdmin bool) Role {
+	switch {
+	case isAdmin:
+		return RoleAdmin
+	case isMerchant:
+		return RoleMerchant
+	default:
+		return RoleUser
+	}
+}
+
+// rolePredicate 把一个角色称呼折成「要挑哪些行」的两个标记条件。
+//
+// 它是 roleOf 的另一半，两者必须描述同一套映射：一个按标记读称呼，一个按称呼
+// 挑标记。不一致的表现是清单里明明打着一个 admin，`--role admin` 却筛不出它。
+//
+// 返回的两个条件可以为 nil，nil 表示「这一列不参与筛选」。不能只返回一对 bool：
+// merchant 的意思是「is_merchant 为真**且** is_admin 为假」，一个 bool 说不出来。
+func rolePredicate(r Role) (isMerchant, isAdmin *bool) {
+	yes, no := true, false
+	switch r {
+	case RoleAdmin:
+		// 不要求 is_merchant 为真，理由见 roleOf。
+		return nil, &yes
+	case RoleMerchant:
+		return &yes, &no
+	default:
+		return &no, &no
+	}
+}
+
+// UserInfo 是一个用户在**读侧**的字段。
+//
+// 与 CreateUserParams 是两件事：那个是「要写成什么」，这个是「库里现在是什么」，
+// 所以它带着 status、created_at 这些命令行写不了、只能读的列。
+type UserInfo struct {
+	// ID 是 users.id。
+	ID int64
+	// Username 是 users.username。
+	Username string
+	// Email 为空串表示这一列是 NULL：不填邮箱的用户存的是 NULL 而不是空串
+	// （见 CreateUser），所以在这一侧「空串」只可能是「没填」。
+	Email string
+	// Status 取 UserStatuses 里的一个。
+	Status string
+	// Role 由 is_merchant / is_admin 两列反推（见 roleOf）。
+	Role Role
+	// DisplayName 为空串表示这一列是 NULL。
+	DisplayName string
+	// CreatedAt 与 UpdatedAt 是 users 表上那两列。
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// ListUsersFilter 是 ListUsers 的筛选条件。
+//
+// 两个字段各自「为空 = 不按它筛」：不给筛选条件与「筛一个空集」是两件事，
+// 所以这里不用零值表示「一行都不要」。
+type ListUsersFilter struct {
+	// Status 为 "" 表示不按状态筛。
+	Status string
+	// Role 为 nil 表示不按角色筛。
+	Role *Role
+}
+
+// userInfoColumns 是读侧要的那几列，ListUsers 与 UserByRef 共用。
+//
+// 两列可空文本在 SQL 里就折成空串：读侧只有「填了」与「没填」两种状态，而
+// sql.NullString 那种「第三态」传出去以后每个调用点都要再判一次，判漏的
+// 那一处会把 NULL 打成 `<nil>` 打给使用者看。
+//
+// is_merchant / is_admin 读的是**原始标记**，折成称呼的事只在 roleOf 里做一次。
+const userInfoColumns = `id, username, COALESCE(email, ''), status,
+	       is_merchant, is_admin, COALESCE(display_name, ''), created_at, updated_at`
+
+// ListUsers 列出用户，按 id 排序。
+//
+// 与 ListKeys 同一条约定：标识先由命令行解析、校验成具体取值再查，这里收的是
+// 已经校验过的条件——两处各校验一遍的话，将来「--status 接受简写」这类改动
+// 就得改两遍，而漏掉一处不会报错。
+func (s *Store) ListUsers(ctx context.Context, f ListUsersFilter) ([]UserInfo, error) {
+	var (
+		status     *string
+		isMerchant *bool
+		isAdmin    *bool
+	)
+	if f.Status != "" {
+		status = &f.Status
+	}
+	if f.Role != nil {
+		isMerchant, isAdmin = rolePredicate(*f.Role)
+	}
+
+	// 三个条件都写成「为 NULL 就不过滤」，与 ListKeys 的
+	// `$1::bigint IS NULL OR ...` 同一个写法：一条语句覆盖全部组合，
+	// 而不是按有没有筛选拼字符串——拼出来的 SQL 每个分支都要各自看一遍。
+	const query = `
+		SELECT ` + userInfoColumns + `
+		  FROM users
+		 WHERE ($1::text IS NULL OR status = $1)
+		   AND ($2::boolean IS NULL OR is_merchant = $2)
+		   AND ($3::boolean IS NULL OR is_admin = $3)
+		 ORDER BY id`
+
+	rows, err := s.db.QueryContext(ctx, query, status, isMerchant, isAdmin)
+	if err != nil {
+		return nil, fmt.Errorf("查询用户清单失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []UserInfo
+	for rows.Next() {
+		info, err := scanUserInfo(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, info)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历用户行失败: %w", err)
+	}
+	return out, nil
+}
+
+// UserByRef 按「用户 ID 或用户名」读一个用户的全部读侧字段。
+//
+// 标识怎么解释与 ResolveUser 共用一处（见 userRefWhere），所以 `user get 12345`
+// 与 `apikey create --user 12345` 认的是同一个人。
+func (s *Store) UserByRef(ctx context.Context, ref string) (UserInfo, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return UserInfo{}, errors.New("用户标识为空")
+	}
+
+	where, arg := userRefWhere(ref)
+	info, err := scanUserInfo(s.db.QueryRowContext(ctx,
+		`SELECT `+userInfoColumns+` FROM users WHERE `+where, arg).Scan)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return UserInfo{}, fmt.Errorf("%w: %q", ErrUserNotFound, ref)
+	}
+	if err != nil {
+		return UserInfo{}, fmt.Errorf("查询用户失败: %w", err)
+	}
+	return info, nil
+}
+
+// scanUserInfo 把一行用户读成 UserInfo。
+//
+// 收一个 scan 函数而不是 *sql.Rows，是因为 ListUsers 与 UserByRef 拿到的
+// 是两个不同的东西（*sql.Rows 与 *sql.Row），而它们的 Scan 方法是同一个形状。
+// 两处各扫一遍的话，下面是九列、手工对齐，漏一列的表现是后面所有列都串位。
+func scanUserInfo(scan func(...any) error) (UserInfo, error) {
+	var (
+		info       UserInfo
+		isMerchant bool
+		isAdmin    bool
+	)
+	if err := scan(&info.ID, &info.Username, &info.Email, &info.Status,
+		&isMerchant, &isAdmin, &info.DisplayName, &info.CreatedAt, &info.UpdatedAt); err != nil {
+		return UserInfo{}, err
+	}
+	info.Role = roleOf(isMerchant, isAdmin)
+	return info, nil
 }

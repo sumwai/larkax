@@ -411,3 +411,107 @@ func TestSortWalletKeysPutsAssetSecond(t *testing.T) {
 // 穷举印证（把两支抄进一个临时模块跑，不在仓库里）：字母表取 {1A,1B,2A,2B}、
 // 长度 0..6 的全部 5461 个输入（含重复键与任意初始次序），逐一排序比对，
 // 第二支改 `<=` 后输出不同的输入 0 个。
+
+// 读侧那一组：按 id、按资产排，两个金额列读的是快照本身。
+func TestWalletsReadsSnapshotsInOrder(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	lower := seedBareUser(t, db)
+	upper := seedBareUser(t, db)
+	if lower > upper {
+		lower, upper = upper, lower
+	}
+	for _, id := range []int64{lower, upper} {
+		if _, err := s.OpenWallet(ctx, id, ledger.AssetCNY); err != nil {
+			t.Fatalf("开户失败: %v", err)
+		}
+	}
+	// 非零的两个值：开户写下去的都是 0，拿 0 去断言分不出「读了那一列」与
+	// 「零值恰好也是 0」。
+	if _, err := db.ExecContext(ctx,
+		`UPDATE user_wallets SET balance = '12.34', frozen = '0.5' WHERE user_id = $1`,
+		lower); err != nil {
+		t.Fatalf("造余额失败: %v", err)
+	}
+
+	// 筛一个用户：只剩那一行，两个金额就是刚写下去的。
+	one, err := s.Wallets(ctx, &lower)
+	if err != nil {
+		t.Fatalf("Wallets(筛一个用户) 失败: %v", err)
+	}
+	if len(one) != 1 {
+		t.Fatalf("筛一个用户得到 %d 行，想要 1 行：%+v", len(one), one)
+	}
+	got := one[0]
+	if got.UserID != lower || got.Asset != ledger.AssetCNY {
+		t.Errorf("这一行是 (%d, %s)，想要 (%d, %s)", got.UserID, got.Asset, lower, ledger.AssetCNY)
+	}
+	if got.Balance.String() != "12.34000000" || got.Frozen.String() != "0.50000000" {
+		t.Errorf("余额=%s 冻结=%s，想要 12.34000000 / 0.50000000",
+			got.Balance, got.Frozen)
+	}
+
+	// 不筛：本用例那两行都在，且整份清单按 (user_id, asset) 不减。
+	all, err := s.Wallets(ctx, nil)
+	if err != nil {
+		t.Fatalf("Wallets(不筛) 失败: %v", err)
+	}
+	if len(all) < 2 {
+		t.Fatalf("不筛时至少有本用例的两行，得到 %d 行", len(all))
+	}
+
+	atLower, atUpper := -1, -1
+	for i, w := range all {
+		switch w.UserID {
+		case lower:
+			atLower = i
+		case upper:
+			atUpper = i
+		}
+		if i > 0 {
+			prev := all[i-1]
+			if prev.UserID > w.UserID || (prev.UserID == w.UserID && prev.Asset > w.Asset) {
+				t.Errorf("第 %d 行 (%d, %s) 排在前一行 (%d, %s) 之后",
+					i, w.UserID, w.Asset, prev.UserID, prev.Asset)
+			}
+		}
+	}
+	if atLower < 0 || atUpper < 0 {
+		t.Fatalf("不筛时少了一行：lower=%d upper=%d\n%+v", atLower, atUpper, all)
+	}
+	// 两个 id 一大一小，大的那个必须排在后面：这一条把「按 id 排」钉住，
+	// 而不是只钉「两行都在」——不排序时它们也可能碰巧是这个顺序，
+	// 而上面那条逐对检查才是在管这件事，这里补的是与用户直接相关的那一句。
+	if atLower > atUpper {
+		t.Errorf("id=%d 的第 %d 行排在 id=%d 的第 %d 行之后，顺序不对",
+			lower, atLower, upper, atUpper)
+	}
+}
+
+// 余额读不出来时**报错**，不给一个夹住的数。
+//
+// 列是 numeric(20, 8)，比 money 的 int64 宽：999999999999.99999999 是这一列
+// 装得下、而定点数装不下的值。夹住它的话，余额偏小看起来正是「少扣了钱」，
+// 而那是最难查的一类。
+func TestWalletsRejectsUnreadableBalance(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seedBareUser(t, db)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO user_wallets (user_id, asset, balance, frozen)
+		VALUES ($1, 'CNY', 999999999999.99999999, 0)`, userID); err != nil {
+		t.Fatalf("造一行超范围的余额失败: %v", err)
+	}
+
+	wallets, err := s.Wallets(ctx, &userID)
+	if err == nil {
+		t.Fatalf("余额读不出来时应当报错，得到 %d 行：%+v", len(wallets), wallets)
+	}
+	if !strings.Contains(err.Error(), "余额") {
+		t.Errorf("错误信息 %q 里没有点出是哪一列", err.Error())
+	}
+}

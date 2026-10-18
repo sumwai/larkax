@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/sumwai/larkax/internal/ledger"
+	"github.com/sumwai/larkax/internal/money"
 )
 
 // OpenWallet 给一个用户开通钱包，返回这次是否真的建了一行。
@@ -71,4 +72,71 @@ func (s *Store) OpenWallet(ctx context.Context, userID int64, asset ledger.Asset
 		return false, fmt.Errorf("读取影响行数失败: %w", err)
 	}
 	return affected > 0, nil
+}
+
+// Wallet 是一个用户钱包的**读侧**快照。
+//
+// 它读的是 user_wallets 那两列本身（快照值），不是从 ledger_entries 现算的
+// 权威值：两者在正常情况下相等，对账任务负责校验（见 reconcile.go）。要
+// 「账本上是多少」用 AccountBalance，要「库里那一行现在写着多少」用这里。
+type Wallet struct {
+	// UserID 是 user_wallets.user_id。
+	UserID int64
+	// Asset 是资产品种，钱包主键的另一半。
+	Asset ledger.Asset
+	// Balance 是可用余额快照。
+	Balance money.Amount
+	// Frozen 是为在飞的请求冻结住的那部分，它不包含在 Balance 里。
+	Frozen money.Amount
+}
+
+// Wallets 列钱包快照，按 user_id、asset 排序。
+//
+// userID 为 nil 时列全部用户的钱包。与 ListKeys 同一条约定：标识先由命令行
+// 解析成具体 id 再查。
+//
+// # 这里不 JOIN users
+//
+// 用户名属于 users 表，是 auth 那一侧的事：本包至今一处都不读 users
+// （对账按分片拿到的 id 走）。为了一栏展示在这里加一条跨表的 JOIN，等于把
+// 「谁是用户」这件事复制一份到账本包的 SQL 里，而它将来还要跟着
+// users 的变化改。调用方要名字就自己按 user_id 去 auth 那边取。
+func (s *Store) Wallets(ctx context.Context, userID *int64) ([]Wallet, error) {
+	const query = `
+		SELECT user_id, asset, balance::text, frozen::text
+		  FROM user_wallets
+		 WHERE $1::bigint IS NULL OR user_id = $1
+		 ORDER BY user_id, asset`
+
+	rows, err := s.db.QueryContext(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("查询钱包清单失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Wallet
+	for rows.Next() {
+		var (
+			w              Wallet
+			balance, froze string
+		)
+		if scanErr := rows.Scan(&w.UserID, &w.Asset, &balance, &froze); scanErr != nil {
+			return nil, fmt.Errorf("读钱包行失败: %w", scanErr)
+		}
+		// 金额列是 numeric，没有能直接扫进定点数类型的驱动类型，所以按
+		// 十进制文本读回来再解析（与 reconcile_batch.go 的 readWallets 同一写法）。
+		if w.Balance, err = money.Parse(balance); err != nil {
+			return nil, fmt.Errorf("解析用户 %d 的 %s 余额 %q 失败: %w",
+				w.UserID, w.Asset, balance, err)
+		}
+		if w.Frozen, err = money.Parse(froze); err != nil {
+			return nil, fmt.Errorf("解析用户 %d 的 %s 冻结额 %q 失败: %w",
+				w.UserID, w.Asset, froze, err)
+		}
+		out = append(out, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历钱包行失败: %w", err)
+	}
+	return out, nil
 }
