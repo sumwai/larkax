@@ -12,6 +12,7 @@ package httpx
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -22,6 +23,31 @@ import (
 	"github.com/sumwai/larkax/internal/observe"
 )
 
+// 上游连接这一段的两条时限，以及空闲连接的探测间隔。
+//
+// 只有 ResponseHeaderTimeout 是不够的，它从**请求写出去之后**才开始计：
+// DNS 解析卡住、TCP 连不上、TLS 握手不返回，这三种它一个都不管。
+// 这三段里最坏的是黑洞上游——SYN 发出去被丢掉，内核按自己的节奏重发，
+// 那期间这个候选一声不响。放弃的时机由内核定，Linux 默认重试六次、
+// 两分钟出头，调用方等到的是分钟级的停顿。
+// 上限的取值因此按同一件事来定：正常建连几百毫秒（跨洲链路也是这个量级），
+// 黑洞那边是两分钟——取在一两个数量级之上的余量。
+const (
+	// dialTimeout 覆盖 DNS 解析与 TCP 建连两段。
+	//
+	// 五秒的余地给的是冷 resolver 上偶尔要一两秒的解析：把一段解析慢但可用的
+	// 上游判成失败，比多等几秒更亏——候选之间本来就会失败转移，慢的那一个
+	// 让下一条请求去试。反过来黑洞那边从两分钟压到五秒，
+	// 「换下一个候选」因此还来得及。
+	dialTimeout = 5 * time.Second
+	// tlsHandshakeTimeout 只管握手一把：TCP 已经建好，握手只有一到两个往返，
+	// 所以它比拨号更短。三秒还没握完，对端基本就是不通了，不是慢。
+	tlsHandshakeTimeout = 3 * time.Second
+	// keepAlive 与 http.DefaultTransport 一致：空闲连接上按这个间隔发探测包，
+	// 让中间设备上的连接状态不至于悄悄失效。
+	keepAlive = 30 * time.Second
+)
+
 // Client 是适配器应当使用的 HTTP 客户端。
 //
 // 集中构造而不是各处 http.DefaultClient：默认客户端没有超时，
@@ -29,9 +55,20 @@ import (
 //
 // ResponseHeaderTimeout 而不是整体 Timeout：流式响应会长期占用连接，
 // 整体超时会在长回复中途把连接掐断。超时只该管「多久拿不到响应头」。
+//
+// 响应头之前的那两段另外设限（见上面的常量）：拨号与 TLS 握手都是
+// 「对面通不通」的判断，卡住时没有可读的输出，只能等时限把它停下。
+//
+// 代理读环境变量（HTTP_PROXY / HTTPS_PROXY / NO_PROXY）：零值时 Go 不报错，
+// 而是静默直连——声明了代理的部署会从错误的出口出去，而这一点在日志里
+// 看不出来（请求确实发得出去）。回环地址与 NO_PROXY 命中的不上代理，
+// 那是 net/http 的行为，不是这里的判断。
 func Client(responseHeaderTimeout time.Duration) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: dialTimeout, KeepAlive: keepAlive}).DialContext,
+			TLSHandshakeTimeout:   tlsHandshakeTimeout,
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   16,
 			IdleConnTimeout:       90 * time.Second,

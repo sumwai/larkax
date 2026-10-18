@@ -255,6 +255,29 @@ larkaxctl apikey update --id 42 --clear-rpm
 8 MiB 内存，更不该走到预留那一步——那会先把余额冻住，再为一个早就该拒的请求
 去解冻。**多模态请求（正文里带 base64 图片）是最容易撞上它的一类。**
 
+## 上游连接超时（不按 Key 算）
+
+一次上游请求要经过四段等待，前一段走完才进下一段。本节讲前面两段，
+后两段见「上游响应头超时（不按 Key 算）」那一节。
+
+| 等的是哪一段 | 上限 | 谁定 |
+|---|---|---|
+| DNS 解析 + TCP 建连 | `5s` | `internal/channel/httpx` 的 `dialTimeout` |
+| TLS 握手 | `3s` | 同上的 `tlsHandshakeTimeout` |
+| 上游回响应头 | `10m` | 见「上游响应头超时（不按 Key 算）」 |
+| 响应的正文（含流式） | 不设上限 | 同上 |
+
+前两段等的不是数据，是「对面到底通不通」，取值按的是同一件事：正常建连只要
+几百毫秒（跨洲链路也是这个量级），而一条通路黑掉时（SYN 发出去被丢掉，既不应答
+也不拒绝），内核要重发六次才放弃、Linux 默认下两分钟出头，期间一声不响。
+`5s` 与 `3s` 把最坏情况从分钟级压到秒级；代价是偶尔把一段很慢但可用的上游判成
+失败，而那比一个黑洞候选把整条请求拖住划算——换下一个候选本来就是这条路径的
+失败处置。TLS 那一段比拨号短，是因为它只等握手的一到两个往返，TCP 那时已经建好了。
+
+**代理读环境变量**：`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`，配了就走代理、
+没配就直连；回环地址一律不走代理（net/http 的行为，不是我们的判断）。这一条
+漏掉时的表现值得写下来：**零值不是「没有代理」而是静默直连**——请求照样发得
+出去，只是从错误的出口出去，日志里看不出任何异常。
 ## 上游响应头超时（不按 Key 算）
 
 还有一条时限，同样只看请求本身：**上游必须在 10 分钟内回响应头**
@@ -279,6 +302,7 @@ larkaxctl apikey update --id 42 --clear-rpm
 | 「累计花费」的口径（算哪段时间、哪些状态、预留算不算） | `internal/keyquota` 的 `spentSQL` |
 | 超限响应的状态码与码 | `internal/api/error.go`（`writeRateLimited` / `writeInsufficientQuota` / `writeInsufficientBalance`） |
 | 只读查询那条路径的形状 | `internal/api/ratelimitusage.go` |
+| 上游连接那两段的时限与代理环境变量 | `internal/channel/httpx` 的 `Client`（`dialTimeout` / `tlsHandshakeTimeout` / `Proxy`） |
 | 判定发生在请求的哪一步 | `internal/api` 的 `serve`（入口早拒绝）与 `internal/ledger/store` 的 `SaveReservation`（权威判定） |
 | 上游响应头超时的时长 | `cmd/larkax` 的 `upstreamTimeout` |
 

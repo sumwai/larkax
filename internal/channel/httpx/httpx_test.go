@@ -6,7 +6,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -126,6 +130,210 @@ func TestClientConfiguresTimeout(t *testing.T) {
 	if tr.ResponseHeaderTimeout != 7*time.Second {
 		t.Errorf("ResponseHeaderTimeout = %v", tr.ResponseHeaderTimeout)
 	}
+}
+
+// ── 响应头之前的那两段时限 ──────────────────────────────────────────────
+
+// blackholeAddr 是一个黑洞地址：SYN 发出去既没有应答也没有 RST，
+// 于是一路等到内核自己的重试结束。
+//
+// 192.0.2.0/24 是 RFC 5737 留给文档与示例的网段，任何主机都不会用它，
+// 端口取 81 同理（那个网段上不会有服务，取 81 只是免得与 80 上的约定俗成混淆）。
+// 用这个地址的用例会先确认它确实是黑洞——失败必须是**超时**，不能是立刻被拒，
+// 换了网络环境而它被路由到别处时，那一条会先报出来，而不是让用例假绿。
+const blackholeAddr = "192.0.2.1:81"
+
+// 拨号必须受 Transport 自己的时限约束，DNS 卡住与 TCP 连不上都算在这一段里。
+//
+// 直接调 Transport 上的 DialContext，而不是发一次完整的请求：拨黑洞地址的
+// 完整请求要先过代理判断，本机环境变量里如果配了代理、而黑洞地址又不在
+// NO_PROXY 里，请求会被代理接走，这个用例就成了什么都没证明。直接调拨号
+// 与代理无关。
+//
+// 没有拨号函数时它是 nil：读成 nil 会让本用例 panic，而 panic 说不清
+// 少了哪一条，所以先判 nil 并明说。
+func TestClientBoundsDial(t *testing.T) {
+	c := Client(10 * time.Minute)
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport 类型为 %T", c.Transport)
+	}
+	dial := tr.DialContext
+	if dial == nil {
+		t.Fatal("Transport 没有 DialContext：走的是默认拨号，黑洞地址上要等到内核 SYN 重试结束（两分钟出头）")
+	}
+
+	// 本用例另外给自己设一个上限：拨号若真的没有时限，这一条会在 30 秒处
+	// 失败，而不是把整个 go test 拖到它自己超时。
+	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout+30*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	conn, err := dial(ctx, "tcp", blackholeAddr)
+	elapsed := time.Since(start)
+	if conn != nil {
+		_ = conn.Close()
+	}
+
+	if err == nil {
+		t.Fatalf("%s 居然连上了，这个用例的前提（那里没人应答）在本机不成立", blackholeAddr)
+	}
+	var nerr net.Error
+	if !errors.As(err, &nerr) || !nerr.Timeout() {
+		t.Fatalf("%s 的失败不是超时而是 %v：本机不把这个地址当黑洞（可能立刻回了不可达），"+
+			"这个用例因此证明不了时限", blackholeAddr, err)
+	}
+	if elapsed > dialTimeout+2*time.Second {
+		t.Errorf("拨号等了 %v 才失败，超过 dialTimeout(%v)：这个候选会把整条请求路径拖住",
+			elapsed, dialTimeout)
+	}
+}
+
+// TLS 握手也要有时限：一个愿意建 TCP 但不说话的上游，能把请求挂在握手上
+// ——ResponseHeaderTimeout 从请求写出去之后才起算，管不到它前面这一段。
+//
+// 假上游在回环地址上，所以这个用例与代理环境变量无关（net/http 对回环地址
+// 一律不上代理）。
+func TestClientBoundsTLSHandshake(t *testing.T) {
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听失败: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	// 接住连接就不管了：不回 ServerHello，也不关，握手因此永远完不成。
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		accepted <- conn
+	}()
+	t.Cleanup(func() {
+		select {
+		case conn := <-accepted:
+			_ = conn.Close()
+		default:
+		}
+	})
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+		"https://"+ln.Addr().String()+"/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatalf("构造请求失败: %v", err)
+	}
+
+	c := Client(10 * time.Minute)
+	// 去程用 https：那一侧才走 TLS 握手。共享的 Client 与整体 Timeout 无关，
+	// 所以这里只可能被握手的时限收场。
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		resp, err := c.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		done <- err
+	}()
+
+	// 真到「没有时限」那一版，这个 goroutine 会一直挂着——那正是要证明的东西，
+	// 测试进程结束时它会跟着消失，所以不做额外收尾。
+	bound := tlsHandshakeTimeout + 5*time.Second
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("对一个不说话的上游居然拿到了响应")
+		}
+		if elapsed := time.Since(start); elapsed > tlsHandshakeTimeout+2*time.Second {
+			t.Errorf("握手在 %v 处才失败，超过 TLSHandshakeTimeout(%v)：像是别处的时限让它失败的",
+				elapsed, tlsHandshakeTimeout)
+		}
+	case <-time.After(bound):
+		t.Fatalf("TLS 握手没有时限：等了 %v 还没返回（上游不回 ServerHello 时这一段会一直挂着）", bound)
+	}
+}
+
+// ── 代理环境变量 ────────────────────────────────────────────────────────
+
+// proxyHelperEnv 标记「现在跑的是子进程那一半」。
+const proxyHelperEnv = "LARKAX_TEST_HTTPX_PROXY_HELPER"
+
+// 代理必须读环境变量：零值时 Go 不报错，而是静默直连——声明了代理的部署
+// 会从错误的出口出去，而这一点在日志里看不出来（请求确实发得出去）。
+//
+// 断言走子进程：net/http 把 ProxyFromEnvironment 的结果**缓存**在进程级的
+// sync.Once 里，本进程里 t.Setenv 之后再发请求，读到的仍是缓存下来的那份
+// 环境，于是断言会恒绿。子进程带着设好的 HTTP_PROXY 重新起一次，
+// 它读到的才是这一份。
+func TestClientHonoursProxyFromEnvironment(t *testing.T) {
+	if os.Getenv(proxyHelperEnv) == "1" {
+		proxyProbeRequest(t)
+		return
+	}
+
+	// 假代理：回一条只有代理会回的响应体。直连时请求到不了这里
+	// （api.example.com 解析不出来），所以「拿到了这条响应体」就等于
+	// 「请求走了代理」。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 经代理的 HTTP 请求，请求行里是绝对 URI，r.URL 因此带主机名。
+		_, _ = io.WriteString(w, proxyResponseMark+r.URL.String())
+	}))
+	defer srv.Close()
+
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestClientHonoursProxyFromEnvironment$")
+	cmd.Env = append(withoutProxyEnv(os.Environ()),
+		proxyHelperEnv+"=1",
+		"HTTP_PROXY="+srv.URL,
+		"http_proxy="+srv.URL,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("子进程里请求没走代理（%v）:\n%s", err, out)
+	}
+}
+
+// proxyResponseMark 是假代理回的响应体开头，子进程据此判断请求经过了谁。
+const proxyResponseMark = "via-proxy "
+
+// proxyProbeRequest 是子进程里跑的那一半：在设好 HTTP_PROXY 的环境里发一次请求。
+func proxyProbeRequest(t *testing.T) {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+		"http://api.example.com/v1/models", nil)
+	if err != nil {
+		t.Fatalf("构造请求失败: %v", err)
+	}
+	resp, err := Client(10 * time.Second).Do(req)
+	if err != nil {
+		t.Fatalf("请求失败，像是没读 HTTP_PROXY 而直连了 api.example.com: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("读响应体失败: %v", err)
+	}
+	if !strings.HasPrefix(string(body), proxyResponseMark) {
+		t.Fatalf("请求没经过代理，响应体为 %q", body)
+	}
+}
+
+// withoutProxyEnv 去掉继承来的代理相关变量，免得本机的 NO_PROXY 把子进程里
+// 那个假代理绕过。
+func withoutProxyEnv(env []string) []string {
+	drop := map[string]bool{
+		"HTTP_PROXY": true, "http_proxy": true,
+		"NO_PROXY": true, "no_proxy": true,
+	}
+	var out []string
+	for _, kv := range env {
+		if name, _, ok := strings.Cut(kv, "="); ok && drop[name] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // 排空之后再关闭：留着未读数据会让连接无法复用。
