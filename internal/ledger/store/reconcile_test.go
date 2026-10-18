@@ -1513,6 +1513,65 @@ func TestReconcileFallsBackToFullScan(t *testing.T) {
 	}
 }
 
+// 距上次全量**恰好等于** FullScanInterval 时要全量——这是那一行比较符的边界。
+//
+// # 为什么边界要单独钉
+//
+// 间隔的语义是「两次全量之间最长隔多久」（见 SettingFullScanIntervalHours 的
+// 说明），所以到了间隔那一刻就该扫。写成 `>` 的话，恰好到点的那一轮仍然是
+// 增量，而它下一轮会不会全量要看这一轮跑了多久——中间那段时间里「两边都早就
+// 错着」的不一致继续看不见，而这类不一致只有全量能发现。上面那条
+// TestReconcileFallsBackToFullScan 用 1 纳秒的间隔跑，离边界很远，`>` 与 `>=`
+// 在那里没有分别。
+//
+// 两侧都断言：差恰好等于间隔时是全量，还差一纳秒时是增量。只钉一侧的话，
+// 把这一支写成恒真（永远全量）也能过。
+//
+// 时钟是**传进去的**，不取 now()：要的正是「差恰好等于间隔」这个点。
+// 上一轮那一行的时间戳放到未来，理由与 breakBalanceAhead 相同——lastDone 与
+// lastFull 取的是全表里最晚的那两条，放到未来才不会踩到别的用例刚写下的行
+// （变异测试会另起一遍 `go test`）。跑完把这一行删掉，后面的用例看不见它。
+func TestReconcileStartFullScanBoundary(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	interval := 24 * time.Hour
+	stamp := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Millisecond)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO reconcile_runs (started_at, watermark, full_scan, status)
+		VALUES ($1, $1, true, 'done')`, stamp); err != nil {
+		t.Fatalf("造上一轮的全量记录失败: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(ctx, `DELETE FROM reconcile_runs WHERE started_at = $1`, stamp)
+	})
+
+	cfg := noRepair()
+	cfg.FullScanInterval = interval
+
+	// 恰好到点：全量。顺带钉住起点仍是上一轮的**开始**时刻，不是这一轮的。
+	watermark, full, err := s.reconcileStart(ctx, stamp.Add(interval), cfg)
+	if err != nil {
+		t.Fatalf("算起点失败: %v", err)
+	}
+	if !full {
+		t.Error("距上次全量恰好等于间隔时必须全量——不然到点的那一轮会一直往后拖")
+	}
+	if !watermark.Equal(stamp) {
+		t.Errorf("起点 = %v，期望上一轮的开始时刻 %v", watermark, stamp)
+	}
+
+	// 还差一纳秒：仍然是增量。
+	if _, full, err = s.reconcileStart(
+		ctx, stamp.Add(interval-time.Nanosecond), cfg); err != nil {
+		t.Fatalf("算起点失败: %v", err)
+	}
+	if full {
+		t.Error("没到间隔时不该全量")
+	}
+}
+
 // 分片：分片大小小于待比对的用户数时，循环要把所有分片都走完。
 //
 // 用增量跑而不是全量：库里的用户会随每次跑测试累积，而全量 +
@@ -1554,6 +1613,101 @@ func TestReconcileShardsThroughAllUsers(t *testing.T) {
 }
 
 // ── 运行记录 ────────────────────────────────────────────────────────────
+
+// 结局那一步自己失败时，Reconcile 必须把错误交出去。
+//
+// 这一支（reconcile.go 尾部 `s.finishReconcileRun(ctx, report, nil)` 后面的
+// `err != nil`）此前被当成「防御性分支，没有输入造得出它来——别为它编一条用例」。
+// 造得出：给 reconcile_runs 挂一个 BEFORE UPDATE 触发器就能让那次 UPDATE 失败，
+// 而且是**确定性的**，不必真把连接弄断。
+//
+// 为什么不用取消 ctx：那一步刻意用 context.WithoutCancel + 自己的超时写
+// （见 finishReconcileRun 的注释），为的就是在调用方的 ctx 已经失效时仍写得进去。
+// 取消 ctx 走到的是**另一条**路（reconcileAll 返错，那一支本来就不看
+// finish 的错误，见 TestReconcileClosesRunWhenContextCanceled），对它无效。
+//
+// 触发器只拦 status = 'done' 的那一次 UPDATE：一轮对账会碰 reconcile_runs 三处
+// ——beginReconcileRun 先把僵死的 'running' 标成 'failed'、再插一行 'running'，
+// 最后 finishReconcileRun 把它改成 'done'。只拦最后那一次，于是「结局写不回去」
+// 是这一轮唯一的失败点，前面该查的、该报的都照常发生。
+func TestReconcileReportsFailureToWriteRunOutcome(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	blockRunOutcomeWrite(t, db)
+
+	report, err := New(db).Reconcile(ctx, noRepair(), nil)
+	if err == nil {
+		t.Fatal("结局写不回去时这一轮应当报错，而不是当成跑完了")
+	}
+	if report == nil {
+		t.Fatal("失败也要返回已经查出来的部分")
+	}
+
+	// 那一行停在 'running'：这是 finishReconcileRun 的注释里写下的收尾
+	// ——与硬崩同一种结果，由下一轮的 stale 清理（staleRunAfter 之后）捞走。
+	// 写不回去就是写不回去，别在这里另找一个「看起来结掉了」的写法。
+	var (
+		status string
+		closed bool
+	)
+	if err := db.QueryRowContext(ctx, `
+		SELECT status, finished_at IS NOT NULL
+		  FROM reconcile_runs WHERE id = $1`, report.RunID).Scan(&status, &closed); err != nil {
+		t.Fatal(err)
+	}
+	if status != "running" || closed {
+		t.Errorf("运行记录 status = %q、finished_at 已写 = %v，期望仍是一行没结掉的 running",
+			status, closed)
+	}
+}
+
+// blockRunOutcomeWrite 让「把这一轮的结局写进 reconcile_runs」那一次 UPDATE 失败。
+//
+// 用触发器而不是把连接弄断：注入的失败要**确定性**，且只落在这一个点上，否则
+// 用例测的是网络而不是这条分支。
+//
+// 收尾走 t.Cleanup（本来就在动 schema 的 partition_test.go 也这么收）：库是同包
+// 用例共用的，触发器留下来会让后面每一条对账用例都失败。开头先卸一次，是为了
+// 上一次跑崩留下的那一份。
+func blockRunOutcomeWrite(t *testing.T, db *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+
+	dropRunOutcomeWriteTrigger(ctx, t, db)
+	if _, err := db.ExecContext(ctx, `
+		CREATE FUNCTION reconcile_runs_block_outcome() RETURNS trigger
+		LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NEW.status = 'done' THEN
+				RAISE EXCEPTION '注入的失败：结局写不回去';
+			END IF;
+			RETURN NEW;
+		END
+		$$`); err != nil {
+		t.Fatalf("建触发器函数失败: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		CREATE TRIGGER reconcile_runs_block_outcome
+			BEFORE UPDATE ON reconcile_runs
+			FOR EACH ROW EXECUTE FUNCTION reconcile_runs_block_outcome()`); err != nil {
+		t.Fatalf("挂触发器失败: %v", err)
+	}
+
+	t.Cleanup(func() { dropRunOutcomeWriteTrigger(context.Background(), t, db) })
+}
+
+func dropRunOutcomeWriteTrigger(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.ExecContext(ctx,
+		`DROP TRIGGER IF EXISTS reconcile_runs_block_outcome ON reconcile_runs`); err != nil {
+		t.Fatalf("卸触发器失败: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`DROP FUNCTION IF EXISTS reconcile_runs_block_outcome()`); err != nil {
+		t.Fatalf("删触发器函数失败: %v", err)
+	}
+}
 
 // 报告里那几个条数：数与验分开。
 //

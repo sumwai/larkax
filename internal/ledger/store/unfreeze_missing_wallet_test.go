@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/sumwai/larkax/internal/ledger"
@@ -92,6 +93,19 @@ func TestSettleRefusesMissingWallet(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNoWallet) {
 		t.Errorf("期望 ErrNoWallet，得到 %v", err)
+	}
+
+	// 错误里要说得清**哪个用户、哪种资产**：调用方手里只有 request_id，
+	// 而排障先要看的就是这两样。它们由回查预留记录得来（unfreezeSubject），
+	// 而这次回查**成功**——预留记录还在，只是钱包行被删了。
+	//
+	// 这一句钉住的是回查成功那一步：变异版（把回查后面那个 `err != nil` 取反）
+	// 回查成功时反而说「回查预留记录失败: <nil>」，一句看着像诊断、却把成功报成
+	// 失败的假诊断，而用户与资产两段值都没了。
+	//
+	// 只断言这两段**值**，不照抄整句：措辞可以改，值丢了才该红。
+	if msg := err.Error(); !strings.Contains(msg, itoa(userID)) || !strings.Contains(msg, "CNY") {
+		t.Errorf("错误信息 %q 里没有指认是哪个用户、哪种资产", msg)
 	}
 
 	// 回滚：预留仍 pending

@@ -237,6 +237,18 @@ func settledCharge(t *testing.T, userID int64, requestID string, billID int64, a
 // 手搓 PgError 而不是去真库上造：两个条件是**与**的关系，要分开验就得能单独
 // 控制每一个字段，而真库上造得出的组合只有「这一条 CHECK 冲突」一种。
 // 与 wallet_missing_user_test.go 的 TestMissingUserViolationIsNarrow 同构。
+//
+// 那条 `err != nil` 取反的变异（gremlins CONDITIONALS_NEGATION，store.go 的
+// unfreezeSubject 里回查预留那条 SELECT 后面）**不是**等价变异——这里曾经写着
+// 「它只改错误文本的措辞、没有任何判据读它」，那是把「当前没断言」当成了
+// 「分不开」。它翻的是**走哪一支**，不是措辞：回查成功时（凡是走到这条错误路径
+// 的，预留记录都还在，这次回查不会失败）变异版返回的是「请求 X 的预留（回查预留
+// 记录失败: <nil>）」，一句看着像诊断、却把成功报成失败的假诊断，认用户与资产的
+// 那两段值一并丢掉。
+//
+// 杀它的用例不需要造什么怪输入：unfreeze_missing_wallet_test.go 的
+// TestSettleRefusesMissingWallet 本来就跑在这条路上（预留 → 删钱包行 → 结算），
+// 只是断言里没读那两段值。补上之后变异即红。
 func TestFrozenUnderflowIsNarrow(t *testing.T) {
 	const subject = "用户 1 的 CNY 预留（10）"
 	// rule_scope_owner 是迁移里另一条**有名字**的 CHECK，名字照抄自
