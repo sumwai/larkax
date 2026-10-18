@@ -28,7 +28,7 @@ curl -s 127.0.0.1:9090/metrics
 | `larkax_billing_stream_balance_exhausted_total` | counter | 无 | 因可用余额不足被**我们切断**的流式请求次数。调用方收到一条流内错误帧，它的文案说的是充值而不是重试（见 [limits.md](limits.md)）。替代了原先「按声明上界冻满而遭 429 拒掉」的那个形状 |
 | `larkax_auth_failures_total` | counter | `reason` | 认证失败被回以 401 的次数，按失败原因分。`reason` 取 `internal/auth` 的 `Reason`：`missing_credential` / `malformed_credential` / `key_not_found` / `key_disabled` / `key_revoked` / `key_inactive` / `key_expired` / `user_inactive`，外加 `unclassified` |
 | `larkax_ratelimit_exact` | gauge | 无 | RPM 限流的计数**当前**是否取自共享存储：`1` 精确（计数在 Redis 里，各实例共用一份，放行总量不超过配置值），`0` 近似（退回进程内计数，各实例各算各的，放行量偏大）。**没设置过就不输出**，所以「没有这一行」表示这个实例上没接限流器（worker 角色） |
-| `larkax_ratelimit_store_errors_total` | counter | 无 | 共享计数存储（Redis）调用失败的次数。每发生一次，就有一个判定退回进程内计数——也就是上面那个仪表变成 `0` 的原因 |
+| `larkax_ratelimit_store_errors_total` | counter | 无 | 共享计数存储（Redis）调用失败的次数，**含启动期那一次探活**。有请求之后，每一次因为存储不可用而退回进程内计数的判定再各记一次——它是上面那个仪表变成 `0` 的原因，也是「配了但连不上」与「没配」分得开的那一半 |
 
 ## 怎么读
 
@@ -100,12 +100,18 @@ SELECT request_id, reserved_amount, computed_amount,
 （各实例各算各的，放行量偏大）。**它单独看分不出两种情形，要连着
 `ratelimit_store_errors_total` 一起读**：
 
-- 仪表一直 0、那个计数器**不涨** → 这个部署本来就没配共享存储
+- 仪表是 0、那个计数器**是 0** → 这个部署本来就没配共享存储
   （`LARKAX_REDIS_DSN` 为空，配置如此）。单实例下完全正确；多实例下总放行量
   最高到「配置值 × 实例数」。启动日志里有一条 `warn` 说这一种。
-- 仪表翻成 0 且那个计数器**在涨** → 配了 Redis 但连不上（故障）。请求不受
+- 仪表是 0、那个计数器**大于 0** → 配了 Redis 但连不上（故障）。请求不受
   影响（降级是有意的方向，见 [limits.md](limits.md)），但额度会松。
   恢复之后仪表自己变回 1，不需要重启。
+
+读的是那个计数器的**取值**，不是它的增速。启动期那一次探活失败也记一次，
+所以「配了、连不上、还没来过请求」这个实例的计数器是 1，而它只涨过那一次：
+按增速读会把它读成「没配」，正好是这条判断要分开的那一种。
+探活那一次也得记：还没有请求时，进程里只有它留下过「配了但连不上」的痕迹。
+有请求之后每一次降级也各记一次，所以它一直是 0 只可能是没配。
 
 **`ratelimit_exact` 这一行不存在。** 这个实例上没接限流器：worker 角色不接
 推理流量，也就不按 key 计数。一个「永远是 0」的仪表在这里会把「没接」说成
