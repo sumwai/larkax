@@ -956,7 +956,7 @@ func (h *Handler) failUpstream(w http.ResponseWriter, r *http.Request, protocol 
 		return
 	}
 
-	status, message := httpStatusOfUpstream(err)
+	status, code, message := httpStatusOfUpstream(err)
 	if status >= http.StatusInternalServerError {
 		// 5xx 意味着「不是调用方的错」，这类故障必须有人能看到。
 		// 措辞不写「上游失败」：5xx 里也有账本、候选来源这些我们自己的环节。
@@ -967,12 +967,12 @@ func (h *Handler) failUpstream(w http.ResponseWriter, r *http.Request, protocol 
 		// 会被记成上游的问题，看日志的人会朝上游找。是谁拒的由 err 自己说。
 		log.Warn("请求被拒绝", "err", err, "status", status)
 	}
-	writeError(w, protocol, status, message)
+	writeErrorCode(w, protocol, status, code, message)
 }
 
-// httpStatusOfUpstream 把一个上游调用错误映射成给调用方的状态码与一句话。
+// httpStatusOfUpstream 把一个上游调用错误映射成给调用方的状态码、错误码与一句话。
 //
-// 原则是「谁的错回谁的错」：
+// 状态码的原则是「谁的错回谁的错」：
 //
 //   - 没有可用渠道是**我们的**问题（渠道挂了或没配），回 503。
 //   - 缺 max_tokens 是**调用方的**问题，回 400 并点名这个字段。预留要有
@@ -990,45 +990,97 @@ func (h *Handler) failUpstream(w http.ResponseWriter, r *http.Request, protocol 
 //     环节。把它们当成 502 会把我们的故障说成上游的故障，调用方据此去
 //     联系上游就找错了人。
 //
+// # 码把「我配错了」与「上游答了但不是我要的」分开
+//
+// 状态码分不开这两类：本地一条候选都用不上与上游回了个错误，都落在 502 上
+// （前者是 5xx 里最靠近「我们这一侧没接上」的那一个）。所以**本地判定的失败
+// 各给一个码**，上游那一侧沿用 upstream_http_error（与账单、快照同一套词汇，
+// 见 pipeline.ErrorUpstreamHTTPError）：
+//
+//   - CodeNoCandidateChannel：本地判据把候选全挡了，一次上游调用都没发生
+//     ——要改的是模型目录声明或渠道配置；
+//   - CodeChannelTypeUnsupported：候选发出去过，但每一条的渠道类型都做不了
+//     这次请求的协议——要换的是一条类型对的渠道；
+//   - upstream_http_error：真上游回了错误（含限流那一档）——请求本身可能是
+//     对的，改的是请求或上游。
+//
+// 三类各有一句话（见下面那组常量），而不是共用一句「upstream call failed」：
+// 那句只说明「失败了」，调用方据此无法分支，只能开单问人。
+//
 // 两个「调用方账户的状态」不在这里：额度用尽与预留时余额不足都由
 // failUpstream 在调本函数**之前**接住并显式给码（见那里的 switch）——
 // 它们的状态码与限流相同（429），光靠状态码推不出该给哪个码。
-func httpStatusOfUpstream(err error) (status int, message string) {
+func httpStatusOfUpstream(err error) (status int, code, message string) {
 	// 上限那条要连三个数一起说出来，而那几个数在错误值里，所以先取出来。
 	// 同一个包里的 ErrNoUpperBound 不需要这一步：它没有「允许到多少」可说。
 	var over *gateway.OutputCapExceeded
 
 	switch {
 	case errors.Is(err, billing.ErrNoUpperBound):
-		return http.StatusBadRequest, "max_tokens is required: the request must set a positive output token limit"
+		return http.StatusBadRequest, "", "max_tokens is required: the request must set a positive output token limit"
 	case errors.As(err, &over):
 		// 措辞不写「上游拒绝」也不写模型目录：这条判据是我们按运行期配置
 		// 判的，说的是调用方这个字段填得太大——他改小就能成功。
-		return http.StatusBadRequest, fmt.Sprintf(
+		return http.StatusBadRequest, "", fmt.Sprintf(
 			"max_tokens %d exceeds the per-request output limit %d for this model; lower max_tokens and retry",
 			over.Declared, over.Limit)
 	case errors.Is(err, route.ErrNoCandidates):
-		return http.StatusServiceUnavailable, "no available upstream for the requested model"
+		// 这个模型一条渠道都没挂上。同属「本地一条候选都用不上」那一档
+		// （见 CodeNoCandidateChannel）：一个上游调用都没发生。
+		return http.StatusServiceUnavailable, CodeNoCandidateChannel, msgNoCandidateChannel
 	case errors.Is(err, gateway.ErrNoExecutor):
-		return http.StatusNotImplemented, "no upstream executor is configured"
+		return http.StatusNotImplemented, "", "no upstream executor is configured"
 	}
 
 	var up *channel.ErrUpstream
 	switch {
 	case errors.As(err, &up) && up.StatusCode == http.StatusTooManyRequests:
-		return http.StatusTooManyRequests, "upstream is rate limited, retry later"
+		// 码与其余上游错误同一个：同为 429，上游限流与**我们自己**的限流处置
+		// 相反，靠码才分得开该找谁（我们这边那一条不带码）。
+		//
+		// 这是一处刻意的偏差，两套协议各落在哪写在这里：OpenAI 那侧 `error.code`
+		// 从 null 变成 upstream_http_error，`error.type` 仍是 429 推出来的
+		// rate_limit_error；Anthropic 那侧只有 error.type 一个位置放得下码，
+		// 于是 `rate_limit_error` 在它这里不再出现。状态码不变（还是 429），
+		// 按状态码归类的 SDK 不受影响。
+		return http.StatusTooManyRequests, pipeline.ErrorUpstreamHTTPError,
+			"upstream is rate limited, retry later"
 	case errors.As(err, &up):
-		return http.StatusBadGateway, "upstream call failed"
+		return http.StatusBadGateway, pipeline.ErrorUpstreamHTTPError, "upstream call failed"
 	}
 
-	// 候选都失败了，而最后一个错误不是上游错误（例如上游不支持这个协议）。
-	// 这一条要排在 ErrUpstream 之后：最后一次尝试是限流时，那个信息比
-	// 「全都失败了」更有用。
+	// 候选都失败了，而最后一个错误不是上游错误。这一条要排在 ErrUpstream 之后：
+	// 最后一次尝试是限流时，那个信息比「全都失败了」更有用。
+	//
+	// 三支的分界是**上游调用发生过没有**，以及失败是不是「这条候选做不了这件
+	// 事」——判据都在 route 那边（见 NoUpstreamCall 与 AllAttemptsUnsupported），
+	// 这里只把结论翻译成码与话。
 	var allFailed *route.Errors
-	if errors.As(err, &allFailed) {
-		return http.StatusBadGateway, "upstream call failed"
+	switch {
+	case errors.As(err, &allFailed) && allFailed.NoUpstreamCall():
+		return http.StatusBadGateway, CodeNoCandidateChannel, noCandidateLeftMessage(allFailed)
+	case errors.As(err, &allFailed) && allFailed.AllAttemptsUnsupported():
+		return http.StatusBadGateway, CodeChannelTypeUnsupported, msgChannelTypeUnsupported
+	case errors.As(err, &allFailed):
+		// 认得出的上游错误在前面那一支就返回了，走到这里说明最后一个错误不是
+		// 上游那一侧的（例如插件阻断、账本写不进去）。码留空：给 upstream_http_error
+		// 会把我们自己这一侧的失败标成上游的，调用方照那个码去查上游就找错了人。
+		return http.StatusBadGateway, "", "upstream call failed"
 	}
-	return http.StatusInternalServerError, "internal error"
+	return http.StatusInternalServerError, "", "internal error"
+}
+
+// noCandidateLeftMessage 说清「一个候选都不剩」是**怎么**不剩的。
+//
+// 分两种：被模型目录的声明挡掉（能力、端点、上限），与被运行状态挡掉
+// （健康度、额度）。前者的判据是 Unsupported 大于零——那是目录判据的计数
+// （见 route.Exclusion.Unsupported），与日志里那句「N 个候选渠道都不支持
+// 这次请求」取的是同一个判据；两种的处置不同，所以话也不共用一句。
+func noCandidateLeftMessage(e *route.Errors) string {
+	if e.Unsupported > 0 {
+		return msgNoCandidateProfile
+	}
+	return msgNoCandidateDrained
 }
 
 func (h *Handler) now() time.Time {

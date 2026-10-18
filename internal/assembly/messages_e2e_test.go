@@ -538,8 +538,11 @@ func TestMessagesUpstreamFailureReturnsAnthropicError(t *testing.T) {
 		t.Fatalf("状态码 = %d，期望 502（上游失败是我们与上游之间的问题）。响应体：%s", status, out)
 	}
 
-	// 一、错误体是 Anthropic 形状：顶层 type=error，错误类型 api_error
-	//（502 落到 errorKind 的默认分支），且**不回上游的错误原文**。
+	// 一、错误体是 Anthropic 形状：顶层 type=error，且**不回上游的错误原文**。
+	// 错误类型这一栏在 Anthropic 那套里就是放码的位置（它没有 error.code，见
+	// writeErrorCode），所以这一条断言的是**码**：上游那一档是
+	// upstream_http_error。状态码 502 单独推出来的类型是 api_error，给出码时
+	// 以码为准——两个名字指同一档，而有名字的那个才能被 SDK 用来分支。
 	var got struct {
 		Type  string `json:"type"`
 		Error struct {
@@ -555,8 +558,8 @@ func TestMessagesUpstreamFailureReturnsAnthropicError(t *testing.T) {
 	if got.Type != "error" {
 		t.Errorf("顶层的 type = %q，期望 error", got.Type)
 	}
-	if got.Error.Type != "api_error" {
-		t.Errorf("错误类型 = %q，期望 api_error", got.Error.Type)
+	if got.Error.Type != "upstream_http_error" {
+		t.Errorf("错误类型 = %q，期望 upstream_http_error（Anthropic 那套只有这一栏放得下码）", got.Error.Type)
 	}
 	if got.Error.Message == "" {
 		t.Error("错误体没有 message")
@@ -611,6 +614,72 @@ func TestMessagesUpstreamFailureReturnsAnthropicError(t *testing.T) {
 
 	// 五、失败不写分录。
 	assertNoLedgerEntry(t, db, user)
+}
+
+// 上游**限流**（429）走 Anthropic 入口时，`error.type` 是码 `upstream_http_error`
+// ——不是 429 推出来的 `rate_limit_error`。
+//
+// 为什么单独一条：429 这一档里，「状态码推出来的类型」与「我们给的码」说的是
+// 两件相反的事——前者听起来像「等一下再来」，后者说的是「这条上游不行」，而 429
+// 又是最容易被按状态码当成「稍后重试」的一个。上面那条 500 的用例证明不了这里：
+// 500 推出来的 `api_error` 与码本来就不同名，走哪一支都看不出差别，429 这一条才
+// 看得出「给码时以码为准」——Anthropic 那套只有 `error.type` 一个位置放码（见
+// writeErrorCode 的 `typ := code`）。
+//
+// OpenAI 那一侧的对应断言在 internal/api 的单测里（TestUpstreamErrorStatus 的
+// 「上游限流」那一行：`error.code` 由 `null` 变成 `upstream_http_error`，
+// `error.type` 仍是 429 推出来的 `rate_limit_error`），这里只走 Anthropic 这份形状。
+func TestMessagesUpstreamRateLimitReturnsTheCode(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+
+	model := unique("e2e-model-messages-429")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, "100")
+	key := issueKey(t, db, user)
+
+	fake := &fakeUpstream{
+		protocol: channel.ProtocolAnthropic,
+		db:       db,
+		userID:   user,
+		model:    model,
+	}
+	fake.fail.Store(true)
+	fake.failStatus.Store(http.StatusTooManyRequests)
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL, model, "anthropic", 0)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	// 状态码原样透出上游的 429：调用方该退避，这个信息对他有用。
+	status, out := postChat(ctx, t, public.URL+"/v1/messages", key, messagesBody(model))
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("状态码 = %d，期望 429（上游限流原样透出）。响应体：%s", status, out)
+	}
+
+	var got struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v\n%s", err, out)
+	}
+	if got.Error.Type != "upstream_http_error" {
+		t.Errorf("error.type = %q，期望 upstream_http_error——这一栏放的是码，不是 429 推出来的 rate_limit_error", got.Error.Type)
+	}
+	if got.Error.Message == "" {
+		t.Error("错误体没有 message")
+	}
 }
 
 // 流中途失败时，Anthropic 那条路给出的是**带事件名的错误帧**，且已吐出的

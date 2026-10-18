@@ -199,6 +199,10 @@ go run ./cmd/larkaxctl snapshot cleanup             # 执行删除
   `upstream_stream_aborted`、`upstream_stream_truncated`）。NULL 表示没有
   上游失败可归：正常结束、客户端断开、插件阻断。
 
+这一列比响应体上的同名码**窄**：响应体那一侧，`upstream_http_error` 盖住两档——
+「上游回了非 2xx」与「一个响应都没拿到」；这一列把两档分开记，因为排查与对账要
+回答的问题正是「这次请求到底有没有到上游」（见 [api.md](api.md) 的码表）。
+
 五个取值的分界线是**这次调用有没有真的产生 token**：
 
 - `upstream_stream_aborted`：上游接受了请求、一个字都没吐就结束了。没有用量，
@@ -555,9 +559,11 @@ go run ./cmd/larkaxctl model create --model claude-x --display '示例模型' \
 **目录里的能力与上限在选路时生效。** `--tools` / `--vision` / `--reasoning`
 声明的是「这个模型能做这件事」：请求用到某项能力、而目录声明**不支持**时，这个
 模型下的候选全部落选。两个上限同理——请求的输入加输出超过 `--context-limit`、
-或输出超过 `--output-limit` 时落选。一个候选都不剩时**一个上游调用都不会发出去**，
-调用方拿到 `502` 与 `upstream call failed`；为什么一个都不剩只在**服务端日志**里，
-那一行点名了原因（形如「N 个候选渠道都不支持这次请求：…」）。判据里的输入 token 数是
+或输出超过 `--output-limit` 时落选。一个候选都不剩时回 HTTP 502，**一次上游
+调用都不会发出去**。这件事有两句话：响应体里给调用方的那句带
+`no_candidate_channel` 码，日志里那句是「N 个候选渠道都不支持这次请求」
+——两边说的是同一件事，只是话说给不同的人（见 [api.md](api.md) 的
+「错误体的形状」一节）。判据里的输入 token 数是
 **只按正文估算**的那个量（`channel.Request.PromptText`），不含工具定义、图片与历史里的
 tool_use 参数。它与**预留**已经不是同一个口径——预留把那几项算了进去（见
 `internal/api` 的 `inputTokensOf`）。方向是判据偏宽松：这个数偏小只会少挡几个其实接得住的请求，

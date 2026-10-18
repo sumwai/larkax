@@ -1293,6 +1293,26 @@ func (e *Errors) Unwrap() error {
 // ErrNoCandidates 表示没有可用候选。
 var ErrNoCandidates = errors.New("没有可用的渠道")
 
+// NoUpstreamCall 报告这次失败里**一次上游调用都没发生**：候选要么压根没有，
+// 要么全被本地判据挡在门外（见 Errors 的两支）。
+//
+// 它是给调用方那一侧分类用的（见 internal/api 的 httpStatusOfUpstream）：
+// 这一档的处置是改配置——重试多少次都不会变——与「试过了、上游说不行」
+// 是两件事。判据是 Attempts 为空而不是 Unsupported 大于零：运行状态
+// （健康度、额度）挡下的候选同样一次都没试过。
+func (e *Errors) NoUpstreamCall() bool {
+	return len(e.Attempts) == 0
+}
+
+// AllAttemptsUnsupported 报告**每一条试过的候选**都是「做不了这件事」
+// （ErrUnsupported 或 ErrUnknownType），而且至少试过一条。
+//
+// 判据与 Error 的措辞共用 allCapabilityMismatch：两处各判一次的话，
+// 「都说自己不支持」这句话与调用方据此分的那一档会各说各的。
+func (e *Errors) AllAttemptsUnsupported() bool {
+	return len(e.Attempts) > 0 && allCapabilityMismatch(e.Attempts)
+}
+
 // Executor 是真正执行请求的东西。抽成接口是为了让路由逻辑能脱离 HTTP 测试，
 // 也为了让「重试到第几个为止」这类规则可以被单测覆盖。
 type Executor interface {
