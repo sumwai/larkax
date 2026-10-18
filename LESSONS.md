@@ -58,3 +58,4 @@
 | [40](lessons/40-spec-says-intent-not-state.md) | 任务书写的是意图不是现状，建对象之前先核对库 | 写迁移建表/建索引/加列、按任务书去建一个可能已经存在的东西时 | 活 |
 | [41](lessons/41-same-name-masking-can-be-removed-elsewhere.md) | 同名掩护可以被一次与它无关的重构拿掉，门禁在 main 上才红 | 门禁突然冒出一条旧符号、改共用输出函数的名字时 | 活 |
 | [42](lessons/42-design-context-does-not-belong-in-source.md) | 设计上下文（需求来源、讨论过程、「本轮范围」）会被顺手夹带进源码，而它读起来像一条正常的注释；脚本只判得了「面向使用者的文本」那一半 | 写注释、文档、帮助文本，或派 review agent 时 | 活 |
+| [43](lessons/43-equivalence-claim-needs-distinguishing-input.md) | 变异存活的分诊：把「我想不出用例」当成「没有输入能区分」；同一比较器的两支共用一句理由 | 判变异存活、写等价标注、派分诊或评审任务时 | 活 |
