@@ -618,20 +618,35 @@ func TestVerifyTxnIDErrorIsWrapped(t *testing.T) {
 
 // ── 更多参数守卫 ────────────────────────────────────────────────────────
 
+// 只有一侧为负也要在这一句上被拒——判据是 `||`，两侧各是一半。
+//
+// 变异：把 `||` 改成 `&&`（变异体 transactions.go:186:34，INVERT_LOGICAL）。
+// 只一侧为负时那句守卫不再拒，交易会被构造出来、再被自检的「不平」拦下——
+// 负的那一项不会记进分录，差额恰好等于它，所以和不为零。**结果仍然报错**，
+// 断言里得认出「都不能为负」才分得出来：变异版报的是「分录之和为
+// 1.00000000，应为 0」，那读起来像我们算错了，而不是调用方传了负数。
 func TestConsumeRejectsNegativeShareOrCost(t *testing.T) {
 	txn := newTxnID(t, txnA)
 	base := ConsumeParams{TxnID: txn, UserID: 1, Amount: amount(t, "10"), Asset: AssetCNY, MerchantID: 7}
 
 	negShare := base
 	negShare.MerchantShare = amount(t, "-1")
-	if _, err := Consume(negShare); err == nil {
-		t.Error("负的分成应当被拒")
+	_, err := Consume(negShare)
+	if err == nil {
+		t.Fatal("负的分成应当被拒")
+	}
+	if !strings.Contains(err.Error(), "都不能为负") {
+		t.Errorf("只有分成为负时应当报「都不能为负」，得到 %v", err)
 	}
 
 	negCost := base
 	negCost.UpstreamCost = amount(t, "-1")
-	if _, err := Consume(negCost); err == nil {
-		t.Error("负的上游成本应当被拒")
+	_, err = Consume(negCost)
+	if err == nil {
+		t.Fatal("负的上游成本应当被拒")
+	}
+	if !strings.Contains(err.Error(), "都不能为负") {
+		t.Errorf("只有上游成本为负时应当报「都不能为负」，得到 %v", err)
 	}
 }
 
@@ -651,11 +666,31 @@ func TestRefundRejectsInconsistentParams(t *testing.T) {
 	}); err == nil {
 		t.Error("冲回金额超过退款额应当被拒")
 	}
-	// 负的分成。
-	if _, err := Refund(RefundParams{
+	// 负的分成：只有一侧为负也要在这一句上被拒。
+	//
+	// 变异：把 Refund 里的 `||` 改成 `&&`（变异体 transactions.go:268:34，
+	// INVERT_LOGICAL）。只一侧为负时那句守卫不再拒，交易被构造出来、再被自检
+	// 的「不平」拦下（理由与 TestConsumeRejectsNegativeShareOrCost 里那段相同，
+	// 两侧的判据是分开写的两处，改一处不影响另一处）。
+	_, err := Refund(RefundParams{
 		TxnID: txn, UserID: 1, Amount: amount(t, "10"), Asset: AssetCNY, MerchantShare: amount(t, "-1"),
-	}); err == nil {
-		t.Error("负的分成应当被拒")
+	})
+	if err == nil {
+		t.Fatal("负的分成应当被拒")
+	}
+	if !strings.Contains(err.Error(), "都不能为负") {
+		t.Errorf("只有分成为负时应当报「都不能为负」，得到 %v", err)
+	}
+
+	// 另一半：只有上游成本为负。这一半原先一格都没有。
+	_, err = Refund(RefundParams{
+		TxnID: txn, UserID: 1, Amount: amount(t, "10"), Asset: AssetCNY, UpstreamCost: amount(t, "-1"),
+	})
+	if err == nil {
+		t.Fatal("负的上游成本应当被拒")
+	}
+	if !strings.Contains(err.Error(), "都不能为负") {
+		t.Errorf("只有上游成本为负时应当报「都不能为负」，得到 %v", err)
 	}
 }
 
@@ -743,25 +778,90 @@ func TestTopupGatewayFeeExactlyEqualAmount(t *testing.T) {
 
 // 用户 id 为 0 必须被拒——它是「没传」的表现，而不是一个合法的 id。
 //
-// 它挡不住哪一个变异：把 `UserID <= 0` 改成 `< 0` 之后，0 会被放行到分录层，
-// 而 `ParseAccount("user:0")` 照样把它拦下（0 号用户不存在，见 account.go 的
-// 「为什么 0 不算读得出」），Consume 仍然报错。两边差的只是报错文本：原样是
-// 「用户 id 非法: 0」，变异版是「构造的 consume 交易不自洽: 科目 "user:0"
-// 的用户 id 不是规范写法…」。所以这条用例证明的是「0 被拒」这个结果，而不是
-// `UserID <= 0` 这句判据——要连判据一起管住，断言里得认出那句文案。
+// 断言里要认出「用户 id 非法: 0」这句文案——**连插值出来的那个数一起认**：
+// 只认「用户 id 非法」的话，把 `%d` 换成别的（或插错一个数）仍然绿。把
+// `UserID <= 0` 改成 `< 0`（变异体 transactions.go:183:14，CONDITIONALS_BOUNDARY）
+// 之后，0 会被放行到分录层，再由 `ParseAccount("user:0")` 拦下（0 号用户不存在，
+// 见 account.go 的「为什么 0 不算读得出」）——**结果同样是报错**，所以只判
+// `err != nil` 的用例照样绿。两版的差别在文案，而这两句话指的是**两类故障**：
+// 原样是「调用方漏填」，变异版读起来像「我们构造出了一组不自洽的分录」。
+//
+// 说「两类」只是分清这两句各自在说什么，**不是说账本这一层今天会按类型分成两种
+// 响应**：这一层没有任何按类型分的机制——包内没有对应哨兵（只有 ErrInvalidTxnID），
+// `internal/pipeline` 把 `Consume` 的错一律包成「构造账本分录失败: %w」，
+// CLI 的 `usageErr` 也不认这两句。
 func TestConsumeRejectsZeroUserID(t *testing.T) {
 	p := ConsumeParams{
 		TxnID: NewTxnID(), UserID: 0, Asset: AssetCNY,
 		Amount: money.MustParse("1"),
 	}
-	if _, err := Consume(p); err == nil {
-		t.Error("用户 id 为 0 应被拒绝")
+	_, err := Consume(p)
+	if err == nil {
+		t.Fatal("用户 id 为 0 应被拒绝")
+	}
+	if !strings.Contains(err.Error(), "用户 id 非法: 0") {
+		t.Errorf("0 应当由构造函数那句守卫拒（文案里连插值出来的 0 一起认），而不是拖到分录层；得到 %v", err)
 	}
 	if _, err := Consume(ConsumeParams{
 		TxnID: NewTxnID(), UserID: -1, Asset: AssetCNY,
 		Amount: money.MustParse("1"),
 	}); err == nil {
 		t.Error("负的用户 id 应被拒绝")
+	}
+}
+
+// Topup 侧的同一条守卫也要认出那句文案。
+//
+// 变异：transactions.go:92:14（CONDITIONALS_BOUNDARY）。0 被放行之后仍会被分录层
+// 拦下（`user:0` 不是规范写法），所以「被拒」这个结果两版一样，差的是文案与故障
+// 类别（见上一条用例的注释）。三个构造函数各写一句守卫，改一处不影响另外两处，
+// 所以每一处都要单独钉。
+func TestTopupRejectsZeroUserIDAtTheGuard(t *testing.T) {
+	_, err := Topup(TopupParams{
+		TxnID: NewTxnID(), UserID: 0, Amount: money.MustParse("1"), Asset: AssetCNY,
+		Gateway: "placeholder-gateway",
+	})
+	if err == nil {
+		t.Fatal("用户 id 为 0 应被拒绝")
+	}
+	if !strings.Contains(err.Error(), "用户 id 非法: 0") {
+		t.Errorf("0 应当由构造函数那句守卫拒（文案里连插值出来的 0 一起认），而不是拖到分录层；得到 %v", err)
+	}
+}
+
+// 退款侧同一条守卫（变异体 transactions.go:265:14），理由与上面两条相同。
+func TestRefundRejectsZeroUserIDAtTheGuard(t *testing.T) {
+	_, err := Refund(RefundParams{
+		TxnID: NewTxnID(), UserID: 0, Amount: money.MustParse("1"), Asset: AssetCNY,
+	})
+	if err == nil {
+		t.Fatal("用户 id 为 0 应被拒绝")
+	}
+	if !strings.Contains(err.Error(), "用户 id 非法: 0") {
+		t.Errorf("0 应当由构造函数那句守卫拒（文案里连插值出来的 0 一起认），而不是拖到分录层；得到 %v", err)
+	}
+}
+
+// 没给计费请求时，Consume 不该往分录上挂「关联到 0」。
+//
+// 变异：把 Consume 里的 `if p.BillingRequestID > 0` 改成 `>= 0`（变异体
+// transactions.go:210:24，CONDITIONALS_BOUNDARY）。BillingRequestID 是零值时
+// （绝大多数调用都这样）每条分录都会拿到 `&0`，而整笔交易**仍然自洽、照样返回**
+// ——`nil` 与 `&0` 在这一层不是一回事：落到库里是 NULL 与一个指向
+// billing_requests 的 0，后者追不出任何一次请求。退款侧同一条判据的两半在
+// TestRefundAttachesBillingRequest 里都有，消费侧原先只判了「给了的时候挂上」。
+func TestConsumeWithoutBillingRequestLeavesItUnset(t *testing.T) {
+	tx, err := Consume(ConsumeParams{
+		TxnID: NewTxnID(), UserID: 1, Amount: money.MustParse("1"), Asset: AssetCNY,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range tx.Entries {
+		if e.BillingRequestID != nil {
+			t.Errorf("没给计费请求时分录 %s 不该挂上 billing_request_id，得到 %d",
+				e.Account, *e.BillingRequestID)
+		}
 	}
 }
 
