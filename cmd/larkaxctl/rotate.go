@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -87,16 +86,17 @@ func runRotate(args []string) error {
 	verify := fs.Bool("verify", false, "只验证每一行是否都含当前主密钥，不写库")
 	batchSize := fs.Int("batch-size", channels.DefaultRotateBatch, "每批处理的行数")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("secret rotate 不接受位置参数，得到 %q：模式用 --apply 或 --verify 指定", fs.Arg(0))
+		return usageErr(fmt.Errorf(
+			"secret rotate 不接受位置参数，得到 %q：模式用 --apply 或 --verify 指定", fs.Arg(0)))
 	}
 	if *apply && *verify {
-		return errors.New("--apply 与 --verify 不能同时用：一个改写密文，一个只读")
+		return usageErr(errors.New("--apply 与 --verify 不能同时用：一个改写密文，一个只读"))
 	}
 	if *batchSize <= 0 {
-		return fmt.Errorf("--batch-size 必须是正整数，当前为 %d", *batchSize)
+		return usageErr(fmt.Errorf("--batch-size 必须是正整数，当前为 %d", *batchSize))
 	}
 
 	cfg, err := config.LoadOps()
@@ -112,19 +112,16 @@ func runRotate(args []string) error {
 		return err
 	}
 
-	db, err := sql.Open("pgx", cfg.DBDSN)
-	if err != nil {
-		return fmt.Errorf("打开数据库连接失败: %w", err)
-	}
-	defer func() { _ = db.Close() }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), rotateTimeout)
 	defer cancel()
-	// 变量名不复用 err：这里的每一次重新声明都会让后面读代码的人停下来
-	// 判断「看到的是哪个 err」，而包一层名字的成本是零。
-	if pingErr := db.PingContext(ctx); pingErr != nil {
-		return fmt.Errorf("连接数据库失败: %w", pingErr)
+	// 走 openDB 而不是自己 sql.Open + Ping：打开与探活失败时的处置相同
+	// （都归 exitDBUnreach），各写一遍的表现是同一类失败在两条命令上给出
+	// 不同的退出码，而脚本对它们的处置是不一样的。
+	db, err := openDB(ctx, cfg)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = db.Close() }()
 
 	rotator := channels.NewRotator(db, sealer)
 	rotator.BatchSize = *batchSize
@@ -179,11 +176,20 @@ func runRotateVerify(ctx context.Context, rotator *channels.Rotator) error {
 		return err
 	}
 	printVerifyReport(humanStdout(), report)
-	if !report.OK() {
-		return fmt.Errorf("有 %d 行不含当前主密钥 %q：现在还不能退役旧主密钥（见上面的清单）",
-			len(report.Missing), report.PrimaryKeyID)
+	return rotateVerifyErr(report)
+}
+
+// rotateVerifyErr 把一次验证的结论折成退出码。
+//
+// 结论已经在 printVerifyReport 打出来的那一行状态与清单里了，所以它标成
+// reportedErr：main 不再补打一行 `larkaxctl: …`——那一行与清单说的是同一
+// 件事，而退出码照旧非零，给盯它的调度器。
+func rotateVerifyErr(report *channels.VerifyReport) error {
+	if report == nil || report.OK() {
+		return nil
 	}
-	return nil
+	return reportedErr(fmt.Errorf("有 %d 行不含当前主密钥 %q：现在还不能退役旧主密钥（见上面的清单）",
+		len(report.Missing), report.PrimaryKeyID))
 }
 
 // printRotateReport 打一次干跑或轮换的结果。

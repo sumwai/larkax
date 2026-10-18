@@ -44,7 +44,7 @@ func runUser(args []string) error {
 	fs := flag.NewFlagSet("user", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, userUsage) }
 	if err := fs.Parse(args); err != nil {
-		return err
+		return usageErr(err)
 	}
 
 	rest := fs.Args()
@@ -83,7 +83,7 @@ func runUserCreate(args []string) error {
 	// 一个写错的命令不该先连上生产库再报错，而「连上库之后才发现参数不对」
 	// 还有一个更坏的可能——它没报错。
 	if strings.TrimSpace(*name) == "" {
-		fs.Usage()
+		// 不打整段用法：人已经会用这条命令了，只是漏了一个必填项。
 		return usageErr(errors.New("缺少 --name"))
 	}
 	parsedRole, err := auth.ParseRole(*role)

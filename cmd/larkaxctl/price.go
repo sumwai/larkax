@@ -202,15 +202,12 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, string, error) {
 	}
 
 	if strings.TrimSpace(*scope) == "" {
-		fs.Usage()
 		return pricing.CreateRequest{}, "", errors.New("缺少 --scope（platform / merchant / channel）")
 	}
 	if strings.TrimSpace(*name) == "" {
-		fs.Usage()
 		return pricing.CreateRequest{}, "", errors.New("缺少 --name")
 	}
 	if strings.TrimSpace(*expression) == "" {
-		fs.Usage()
 		return pricing.CreateRequest{}, "", errors.New("缺少 --expr")
 	}
 	if *channelID < 0 {
@@ -318,7 +315,6 @@ func runPriceSetEnabled(args []string, enable bool) error {
 		return usageErr(err)
 	}
 	if fs.NArg() != 1 {
-		fs.Usage()
 		return usageErr(fmt.Errorf(
 			"%s 需要一个规则 ID，得到 %d 个参数：用法 larkaxctl price %s <规则 ID>",
 			verb, fs.NArg(), verb))
@@ -384,15 +380,12 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 			"update 不接受位置参数，得到 %q：要改的规则用 --id 指定", fs.Arg(0))
 	}
 	if *id <= 0 {
-		fs.Usage()
 		return pricing.UpdateRequest{}, "", errors.New("缺少 --id（要改的规则 ID）")
 	}
 	if *enable && *disable {
-		fs.Usage()
 		return pricing.UpdateRequest{}, "", errors.New("--enable 与 --disable 只能给一个")
 	}
 	if *clearEffectiveTo && *effectiveTo != "" {
-		fs.Usage()
 		return pricing.UpdateRequest{}, "", errors.New(
 			"--clear-effective-to 与 --effective-to 只能给一个：前者是清成不过期，" +
 				"后者是改成某个时刻")
@@ -409,7 +402,6 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 	// 而 0 在这里是有含义的（改成不挂商家）——静默地按 0 处理会把
 	// 「我本来想挂某个商家」变成一条平台价，而那条规则照样匹配得上。
 	if flagGiven(given, userFlagNames...) && strings.TrimSpace(*owner) == "" {
-		fs.Usage()
 		return pricing.UpdateRequest{}, "", errors.New(
 			"--user 不能是空串（多半是变量没展开）：要改成不挂商家写 --user 0")
 	}
@@ -440,7 +432,6 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 	}
 	if given["expr"] {
 		if strings.TrimSpace(*expression) == "" {
-			fs.Usage()
 			return pricing.UpdateRequest{}, "", errors.New(
 				"--expr 不能为空（表上那一栏非空）：要停用这条规则用 price disable")
 		}
@@ -456,7 +447,6 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 	// 而它看起来像一次成功的修改。
 	if flagGiven(given, effectiveFromFlagNames...) {
 		if strings.TrimSpace(*effectiveFrom) == "" {
-			fs.Usage()
 			return pricing.UpdateRequest{}, "", errors.New(
 				"--effective-from 不能为空（表上那一栏非空）：这一栏清不掉")
 		}
@@ -469,7 +459,6 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 	}
 	if flagGiven(given, effectiveToFlagNames...) {
 		if strings.TrimSpace(*effectiveTo) == "" {
-			fs.Usage()
 			return pricing.UpdateRequest{}, "", errors.New(
 				"--effective-to 不能为空：要清成不过期用 --clear-effective-to")
 		}
@@ -497,7 +486,6 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 		changes++
 	}
 	if changes == 0 {
-		fs.Usage()
 		return pricing.UpdateRequest{}, "", errors.New(
 			"update 至少要改一项：给出 --scope / --name / --user / --channel / " +
 				"--models / --expr / --priority / --effective-from / --effective-to / " +
@@ -525,7 +513,6 @@ func runPriceExplain(args []string) error {
 			"explain 不接受位置参数，得到 %q：模型用 --model 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*model) == "" {
-		fs.Usage()
 		return usageErr(errors.New("缺少 --model（这次请求的规范模型名）"))
 	}
 	if *channelID < 0 {

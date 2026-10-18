@@ -63,13 +63,15 @@ func runSettings(args []string) error {
 	fs := flag.NewFlagSet("settings", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, settingsUsage) }
 	if err := fs.Parse(args); err != nil {
-		return err
+		return usageErr(err)
 	}
 
 	rest := fs.Args()
 	if len(rest) == 0 {
+		// 缺子命令才打整段用法：这时人还没开始用，用法正是他要的。写错一个
+		// 值的那些分支不打——用法会把他真正要看的那一句挤走。
 		fs.Usage()
-		return errors.New("settings 需要子命令")
+		return usageErr(errors.New("settings 需要子命令"))
 	}
 	action, rest := rest[0], rest[1:]
 
@@ -79,7 +81,7 @@ func runSettings(args []string) error {
 	case "set":
 		return runSettingsSet(rest)
 	default:
-		return fmt.Errorf("未知的 settings 子命令 %q", action)
+		return usageErr(fmt.Errorf("未知的 settings 子命令 %q", action))
 	}
 }
 
@@ -87,10 +89,10 @@ func runSettingsList(args []string) error {
 	fs := flag.NewFlagSet("settings list", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, settingsUsage) }
 	if err := fs.Parse(args); err != nil {
-		return err
+		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0))
+		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
 	return withSettingsDB(func(ctx context.Context, _ *sql.DB, src *settings.PgSource) error {
@@ -150,24 +152,22 @@ func runSettingsSet(args []string) error {
 	valueFlag := fs.String("value", "", "新的值，按明文给（不用写成 JSON）")
 	by := fs.String("by", "", "改这个配置的用户：用户 ID 或用户名（必填）")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return usageErr(err)
 	}
 
 	// 参数检查全部发生在连库之前（与 apikey / user 同一条约定）：
 	// 一个写错的命令不该先连上生产库再报错，而「连上库之后才发现参数不对」
 	// 还有一个更坏的可能——它没报错。
 	if fs.NArg() > 0 {
-		return fmt.Errorf("set 不接受位置参数，得到 %q：键用 --key、值用 --value", fs.Arg(0))
+		return usageErr(fmt.Errorf("set 不接受位置参数，得到 %q：键用 --key、值用 --value", fs.Arg(0)))
 	}
 	key, plain := *keyFlag, *valueFlag
 
 	if key == "" {
-		fs.Usage()
-		return errors.New("缺少 --key：要改哪一个配置项")
+		return usageErr(errors.New("缺少 --key：要改哪一个配置项"))
 	}
 	if *by == "" {
-		fs.Usage()
-		return errors.New("缺少 --by：这条命令要记下是谁改的配置")
+		return usageErr(errors.New("缺少 --by：这条命令要记下是谁改的配置"))
 	}
 
 	// 键名与值的类型都在这里就校验掉（见 settings.EncodeValue）。

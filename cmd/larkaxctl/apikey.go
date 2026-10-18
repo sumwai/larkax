@@ -85,7 +85,7 @@ func runAPIKey(args []string) error {
 	fs := flag.NewFlagSet("apikey", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, apiKeyUsage) }
 	if err := fs.Parse(args); err != nil {
-		return err
+		return usageErr(err)
 	}
 
 	rest := fs.Args()
@@ -130,7 +130,8 @@ func runAPIKeyCreate(args []string) error {
 		return usageErr(fmt.Errorf("create 不接受位置参数，得到 %q：用户用 --user 指定", fs.Arg(0)))
 	}
 	if *user == "" {
-		fs.Usage()
+		// 不打整段用法：人已经会用这条命令了，只是漏了一个必填项。用法留给
+		// 「还没有开始用」的那几处（缺子命令 / 未知子命令 / flag 解析失败）。
 		return usageErr(errors.New("缺少 --user"))
 	}
 
@@ -154,7 +155,7 @@ func runAPIKeyCreate(args []string) error {
 
 	limits, err := parseLimits(fs, *rpm, *quota)
 	if err != nil {
-		return err
+		return usageErr(err)
 	}
 
 	return withDB(apiKeyTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -198,26 +199,25 @@ func runAPIKeyUpdate(args []string) error {
 	clearQuota := fs.Bool("clear-quota", false, "把金额上限清空（写回 NULL）")
 	boolAlias(fs, clearQuota, "clear-quota-limit", legacyNote("clear-quota"))
 	if err := fs.Parse(args); err != nil {
-		return err
+		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("update 不接受位置参数，得到 %q：要改哪一把 key 用 --id 指定", fs.Arg(0))
+		return usageErr(fmt.Errorf("update 不接受位置参数，得到 %q：要改哪一把 key 用 --id 指定", fs.Arg(0)))
 	}
 
 	seen := providedFlags(fs)
 	if *id <= 0 {
-		fs.Usage()
-		return errors.New("缺少 --id：要改哪一把 key")
+		return usageErr(errors.New("缺少 --id：要改哪一把 key"))
 	}
 
 	params, err := updateLimits(seen,
 		limitFlag{value: *rpm, clear: *clearRPM},
 		limitFlag{value: *quota, clear: *clearQuota})
 	if err != nil {
-		// 不在这里打一遍 usage：这几条错误（负数、小数位过多、两个旗标
-		// 打架）都在信息里点了名，而「缺 --id」那条已经打过了。
-		// 与 create / user 一样，usage 只在缺必填项时打。
-		return err
+		// 这几条错误（负数、小数位过多、两个旗标打架）都在信息里点了名，
+		// 已经够看懂，不再附带整段用法——与 create / user 一样，用法只在
+		// 「还没开始用」时打。
+		return usageErr(err)
 	}
 
 	return withDB(apiKeyTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -235,10 +235,10 @@ func runAPIKeyList(args []string) error {
 	user := fs.String("user", "", "只看这个用户的 key：用户 ID 或用户名；留空表示全部")
 	stringAlias(fs, user, "u", sameAs("user"))
 	if err := fs.Parse(args); err != nil {
-		return err
+		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("list 不接受位置参数，得到 %q：按用户过滤用 --user", fs.Arg(0))
+		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q：按用户过滤用 --user", fs.Arg(0)))
 	}
 
 	return withDB(apiKeyTimeout, func(ctx context.Context, db *sql.DB) error {
