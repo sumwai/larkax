@@ -266,8 +266,8 @@ func TestPluginOutputsShowLoadResultBesideSelectedGeneration(t *testing.T) {
 			Key: "idle", Version: "5.0.0", Status: pluginstore.StatusPending, Generation: 0,
 			Name: "没启用", Latest: true,
 		}, {
-			// 两代同代次（覆盖发布的副产物）：取中的是按版本名定下来的那一行，而
-			// 「取中的那一行」只能有一行。
+			// 两代同代次（#754 之前写下的行：那时覆盖发布把代次原地加一，旧行不搬）：
+			// 取中的是按版本名定下来的那一行，而「取中的那一行」只能有一行。
 			Key: "twice", Version: "7.0.0", Status: pluginstore.StatusActive, Generation: 1,
 			Name: "两代", Latest: true,
 			Running:     &pluginstore.Generation{Version: "7.0.0", Number: 1},
@@ -515,7 +515,8 @@ type pluginEntryDoc struct {
 //
 // 两份判断都不能少：running_generation 与 running_load 都按 key 给，同一个 key 的
 // 每一条带着同一份，所以要判的是**这一条自己**是不是取中的那一条——version 与
-// generation 都比（代次会撞车，只比代次会在同一个 key 里撞出两行来）。
+// generation 都比（代次会撞车：早先写下的行里两行可能同代次，那是覆盖发布把代次
+// 原地加一留下的，只比代次会在同一个 key 里撞出两行来）。
 func runningFromDoc(run *pluginGenerationDoc, version string, generation int64, load *pluginLoadDoc) string {
 	if run == nil || run.Version != version || run.Generation != generation {
 		return "否"
