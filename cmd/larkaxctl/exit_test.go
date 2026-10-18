@@ -42,6 +42,26 @@ func TestExitCodeUsageIsTwo(t *testing.T) {
 	}
 }
 
+// TestExitCodeUsageForIDRefUsername 钉住绕过命令行那层时的分类。
+//
+// `user create` 自己也在连库之前挡了一遍（见 user_test.go 的
+// TestUserCreateRejectsBadFlags），所以这里喂的是**包直接返回的那个哨兵**：
+// 别的调用方（将来的管理接口、导入脚本）拿到的是它，而从包直接上来的错误只有
+// 在 usageErrors 里登记过才有退出码 2——漏登记的那一天它会安静地退回 1，
+// 而 1 与 2 在脚本里是两种处置。
+func TestExitCodeUsageForIDRefUsername(t *testing.T) {
+	if got := exitCode(auth.ErrUsernameIsIDRef); got != exitUsage {
+		t.Errorf("auth.ErrUsernameIsIDRef 的退出码应当是 %d，得到 %d", exitUsage, got)
+	}
+
+	// 包返回的是包了一层的那一个（ValidateNewUsername 用 %w 接上原因），
+	// 链上仍然要认得出。
+	wrapped := fmt.Errorf("建用户失败: %w", auth.ErrUsernameIsIDRef)
+	if got := exitCode(wrapped); got != exitUsage {
+		t.Errorf("包了一层之后仍应当是 %d，得到 %d", exitUsage, got)
+	}
+}
+
 // TestExitCodeDBUnreachableIsThree 取一次连不上库。
 //
 // 指向一个没有监听者的端口：这一条不需要真库，正是它要测的那种失败。

@@ -500,6 +500,23 @@ func TestResolveUser(t *testing.T) {
 		}
 	})
 
+	t.Run("纯数字的写法一律按 ID", func(t *testing.T) {
+		// 「哪些名字建不得」的判据就是这一条（见 ValidateNewUsername），所以
+		// 这里在**真的解析路径**上钉一遍：同一个 ID 的几种数的写法必须都认到
+		// 同一个人。ID 由序列给、值不可预知，于是比的是「几种写法指向同一个人」，
+		// 而不是某个写死的 ID。
+		id := fmt.Sprint(owner.ID)
+		for _, ref := range []string{id, " " + id + " ", "+" + id} {
+			got, err := store.ResolveUser(t.Context(), ref)
+			if err != nil {
+				t.Fatalf("ResolveUser(%q) 报错: %v", ref, err)
+			}
+			if got != owner {
+				t.Errorf("ResolveUser(%q) 解析到 %+v，期望按 ID 解析到 %+v", ref, got, owner)
+			}
+		}
+	})
+
 	t.Run("空标识", func(t *testing.T) {
 		if _, err := store.ResolveUser(t.Context(), "  "); err == nil {
 			t.Fatal("空标识没有报错")
