@@ -133,8 +133,10 @@ var conflictErrors = []error{
 	// users 表上那两个唯一键：建用户与 `user update` 都把它们认出来了
 	// （见 internal/auth 的 usersUniqueFailure），而退出码表把唯一键整体算作
 	// 约束冲突——不登记的话这两条会悄悄退回 1，与表里那一行不符。
-	// 与下面那条兜底哨兵覆盖的范围重叠：认出来时更精确（消息里带那个值），
-	// 这里只决定退出码。
+	//
+	// 下面那条兜底哨兵**接不住它们**：它只覆盖套过 dberr.ConstraintFailure 的
+	// 写路径，而 internal/auth 这两处没套（它自己按约束名分得更细，消息里带撞上
+	// 的那个值）。所以这两条是「不登记就真的接不住」，不是与兜底重复的冗余项。
 	auth.ErrUsernameTaken,
 	auth.ErrEmailTaken,
 	// 「要查的那一行不在」在写入路径上的对应物：解析完用户之后、插入钱包之前

@@ -177,9 +177,21 @@ func TestParseUserStatus(t *testing.T) {
 		}
 	}
 
+	// 两头空白也认，与 ParseRole 同一口径（那边有 "  admin  " 那一条）：两个解析
+	// 函数各一种规矩时，同一份配置里 --role 与 --status 的容忍度就不一样。
+	for _, s := range []string{"  active  ", "\tsuspended\n"} {
+		got, err := ParseUserStatus(s)
+		if err != nil {
+			t.Errorf("%q 应当被接受（去掉两头空白）: %v", s, err)
+		}
+		if got != strings.TrimSpace(s) {
+			t.Errorf("%q 解析成了 %q，期望去掉空白后的取值", s, got)
+		}
+	}
+
 	// 空串也不认：命令行的「没给这个筛选项」由调用方判空，不靠这里回落——
 	// 回落的表现是一个空取值被当成「不过滤」，而它读起来像一次成功的筛选。
-	for _, bad := range []string{"", "Active", "frozen", " active"} {
+	for _, bad := range []string{"", "  ", "Active", "frozen", "banned!", "banned x"} {
 		if _, err := ParseUserStatus(bad); err == nil {
 			t.Errorf("%q 应当被拒绝", bad)
 		}

@@ -326,7 +326,9 @@ func TestListUsersAndUserByRef(t *testing.T) {
 		}
 	}
 
-	// 按状态筛。状态没有写入命令，直接改库造出第二个取值。
+	// 按状态筛。这一栏要有至少两个取值，直接用 SQL 造：`user update --status`
+	// 也能做到，但那会把这条用例的成败挂在另一条命令上——它自己的用例在
+	// user update 那一组，红的时候才分得清是谁坏了。
 	if _, execErr := db.ExecContext(ctx,
 		`UPDATE users SET status = $1 WHERE id = $2`,
 		UserStatusBanned, byRole[RoleUser].ID); execErr != nil {

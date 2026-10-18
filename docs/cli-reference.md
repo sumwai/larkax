@@ -335,9 +335,17 @@
 与 `--no-merchant` 把 `is_merchant` 置真 / 置假；`--admin` 把 `is_admin` 置真
 **并且**把 `is_merchant` 一起置真（`admin` 天然也是 `merchant`，与 `create --role
 admin` 落的是同一种数据），`--no-admin` 只把 `is_admin` 置假、`merchant` 不动。
+两个文本列的取值两头空白会被去掉（`create` 的 `--email` 同一口径），去掉之后是空串
+就清回 `NULL`；`--status` 也是先去两头空白再比对，但空串仍然不认。
 
 所以下面三组是互相打架的输入，**当场报参数错、不挑一个落库**：`--merchant` 与
 `--no-merchant`、`--admin` 与 `--no-admin`、`--admin` 与 `--no-merchant`。
+
+还有一条挡的是改完**那一行**而不是输入本身：`--no-merchant` 打在 `admin` 上同样
+当场报参数错。它只把 `is_merchant` 置假，留下的那一行**读出来仍然是 `admin`**
+（这一档按 `is_admin` 读，见上），于是回显里角色那一栏没变、屏幕上只剩首行，看起来
+像什么都没做。出路是先 `--no-admin`（`is_admin` 置假、`merchant` 不动），再决定
+要不要关 merchant。
 
 改完把**真的变了**的字段按「旧值 → 新值」逐行打到 stdout，首行是「已改用户
 <用户名>」。两栏都是库里的值：旧值取自改之前读的那一行，新值取自那条 `UPDATE`

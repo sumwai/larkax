@@ -253,13 +253,19 @@ func UserStatuses() []string {
 
 // ParseUserStatus 校验一个用户状态的取值。
 //
+// 两头空白先去掉，与 ParseRole 同一口径：取值是给人敲的，多一个空格不该判成不
+// 认识，而两处不一致的表现是同一条命令上两种规矩（`--role " user "` 通过、
+// `--status " active "` 报错）。校验走去掉空白之后那个串，报错里仍打调用方给的
+// 原文——他该看到自己敲进去的东西。
+//
 // 取值不认识时**当场报错**，不静默回落成「不筛」。回落的那一面很坏：
 // 一个写错的 --status 会让筛选少一层，命令照样退出 0，打出来的却是全部
 // 用户，看起来像「原来这么多人是这个状态」。
 func ParseUserStatus(s string) (string, error) {
+	trimmed := strings.TrimSpace(s)
 	for _, known := range UserStatuses() {
-		if s == known {
-			return s, nil
+		if trimmed == known {
+			return known, nil
 		}
 	}
 	return "", fmt.Errorf("未知的用户状态 %q：只认 %s", s, strings.Join(UserStatuses(), "、"))
@@ -270,8 +276,9 @@ func ParseUserStatus(s string) (string, error) {
 // 它是 Role.Flags 在**读侧**的另一半：那一处按称呼写标记，这里按标记读称呼。
 //
 // 先看 is_admin：迁移里写着 admin 天然也是 merchant，所以一行只写了 is_admin
-// 没写 is_merchant 的数据（只能由手改库产生）仍然算 admin。读侧给不出角色时，
-// 命令行那一栏就只能空着，而空着与「这一栏没填」在输出里分不出来。
+// 没写 is_merchant 的数据仍然算 admin。**造得出这样一行的路有两条**：直接改库，
+// 以及绕过命令行直接调 UpdateUser——它按列写，不替调用方补那条不变式。读侧给不出
+// 角色时，命令行那一栏就只能空着，而空着与「这一栏没填」在输出里分不出来。
 func roleOf(isMerchant, isAdmin bool) Role {
 	switch {
 	case isAdmin:
@@ -306,7 +313,9 @@ func rolePredicate(r Role) (isMerchant, isAdmin *bool) {
 // UserInfo 是一个用户在**读侧**的字段。
 //
 // 与 CreateUserParams 是两件事：那个是「要写成什么」，这个是「库里现在是什么」，
-// 所以它带着 status、created_at 这些命令行写不了、只能读的列。
+// 所以它带着 created_at / updated_at 这两个时刻——它们由库自己维护，命令行写不了，
+// 只有读侧看得见（status 与两个角色标记都另有写入路径，见 UpdateUserParams 与
+// Role.Flags）。
 type UserInfo struct {
 	// ID 是 users.id。
 	ID int64

@@ -71,8 +71,8 @@ list 按 id 从小到大列出用户，一栏一个字段：ID、用户名、状
             是两个不同的取值）。
 
 状态是鉴权时真正被检查的那一列（suspended 与 banned 都让他手里的 key 全部失效），
-**改它只有下面 update 这一条路**：在库里直接改也一样生效，但那样既没有校验也
-没有回显，事后说不清是谁改的。
+**命令行上改它只有下面 update 这一条路**：直接改库也一样生效，但那样既没有校验
+也没有回显，事后说不清是谁改的。
 
 get 按 ID 或用户名读一个用户的全部字段：除上面那几栏，还有展示名、创建时间与
 更新时间。标识怎么解释与别的命令一致：纯数字按 ID，否则按用户名。
@@ -92,11 +92,19 @@ update 只改**显式给出**的字段，一个都没给就报参数错（不做
 当场报参数错、不挑一个落库：--merchant 与 --no-merchant、--admin 与 --no-admin、
 --admin 与 --no-merchant（理由同上：--admin 会把 merchant 一起置真）。
 
+另有一条挡的不是输入，而是改完**那一行**读出来是什么：--no-merchant 打在 admin
+上同样当场报参数错。它只把 is_merchant 置假，而这一档是按 is_admin 读的，那一行
+读出来仍然是 admin——回显里角色那一栏没变，屏幕上只剩首行，看起来像什么都没做。
+出路是先 --no-admin（is_admin 置假、merchant 不动），再决定要不要关 merchant。
+
 改完把**真的变了**的字段按「旧值 → 新值」逐行打到 stdout，首行是「已改用户
 <用户名>」。旧值取自改之前读的那一行，新值取自写语句 RETURNING 回来的那一行，
 所以两栏是同一条语句前后的两次读数；给出的旗标没带来变化时（例如对本来就是
 merchant 的用户再 --merchant），那一行不会出现。用户不存在时报「找不到用户」
 并退出 4；邮箱撞上别的用户时报「邮箱已被占用」并带上那个值，也退出 4。
+
+--email 与 --display-name 的取值两头空白会被去掉，去掉之后是空串就清回 NULL；
+--status 也是先去两头空白再比对，但空串不认。
 
 四条命令都只碰 users 表（不碰渠道凭证），都不需要 LARKAX_MASTER_KEYS。
 
@@ -340,6 +348,18 @@ func runUserUpdate(args []string) error {
 		if err != nil {
 			return err
 		}
+
+		// 这一条校验**做不到「连库之前」**，是这份文件里唯一的一条：它说的是
+		// 「改完之后那一行会不会变成一个反例」，而那要看库里现在是什么。上面那
+		// 三组挡的是输入本身，这一条挡的是结果——--no-merchant 打在 admin 上只把
+		// is_merchant 置假，留下 (is_merchant=false, is_admin=true)，而 roleOf 仍
+		// 把那一行读成 admin：真改了库的那一次在回显里看起来像什么都没做。
+		if isMerchant, isAdmin := userUpdateResultMarkers(before.Role, params); isAdmin && !isMerchant {
+			return usageErr(errors.New(
+				"--no-merchant 会把 admin 的 is_merchant 置假，而 admin 天然也是 merchant：" +
+					"先把 --no-admin 给它（is_admin=false，merchant 不动），再决定 merchant 要不要关"))
+		}
+
 		after, err := store.UpdateUser(ctx, *user, params)
 		if err != nil {
 			return err
@@ -441,6 +461,27 @@ func userUpdateParams(seen map[string]bool, f userUpdateFlags) (auth.UpdateUserP
 			"--display-name、--merchant / --no-merchant、--admin / --no-admin 指定")
 	}
 	return p, nil
+}
+
+// userUpdateResultMarkers 算出这次改动之后那两个标记会是什么。
+//
+// 没提到的列按**折出来的称呼**推：读侧给的是 Role，而 roleOf 先看 is_admin，所以
+// (merchant=false, admin=true) 与 (true, true) 都读成 admin。admin 这一档上称呼
+// 与标记本来就是绑定的（Role.Flags 只按称呼写一次），所以「称呼是 admin」一律当
+// merchant 也为真——那正是正常写法的结果（建与改都从那一处取）。
+//
+// runUserUpdate 里那条「改完之后不能是一个反例」的校验就靠它算：只看读回来的
+// 那一行与这次给的参数，不与库打交道，所以能单独走一遍。
+func userUpdateResultMarkers(before auth.Role, p auth.UpdateUserParams) (isMerchant, isAdmin bool) {
+	isMerchant = before == auth.RoleMerchant || before == auth.RoleAdmin
+	isAdmin = before == auth.RoleAdmin
+	if p.IsMerchant != nil {
+		isMerchant = *p.IsMerchant
+	}
+	if p.IsAdmin != nil {
+		isAdmin = *p.IsAdmin
+	}
+	return isMerchant, isAdmin
 }
 
 // printUserList 打一张用户清单。

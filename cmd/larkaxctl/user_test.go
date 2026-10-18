@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -228,8 +229,8 @@ func TestUserListRoleFilterMatchesTheRoleColumn(t *testing.T) {
 
 // TestUserListStatusFilterSelectsOnlyThatStatus 钉住 --status 真的接在 SQL 上。
 //
-// 状态没有写入命令（这一侧只能读），所以直接用 SQL 把两个用户改成不同的状态：
-// 这是唯一能让「筛 active」与「筛 banned」分开的造法。
+// 夹具直接用 SQL 把两个用户改成不同的状态，不走 `user update --status`：这条用例
+// 测的是筛，夹具借道另一条命令时，红的那一次分不清是筛坏了还是改坏了。
 func TestUserListStatusFilterSelectsOnlyThatStatus(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
@@ -505,6 +506,10 @@ func TestUserUpdateParamsMapsFlagsToColumns(t *testing.T) {
 		{"--merchant 之后撤 admin", []string{"merchant", "no-admin"},
 			userUpdateFlags{merchant: true, noAdmin: true}, "is_merchant=true is_admin=false"},
 		{"--status", []string{"status"}, userUpdateFlags{status: "banned"}, `status="banned"`},
+		// 状态两头空白会被去掉，取值本身照旧要认识——与 --role 同一口径
+		// （ParseRole 也 trim，那边有 "  admin  " 一条用例）。
+		{"--status 两头空白", []string{"status"}, userUpdateFlags{status: " banned "},
+			`status="banned"`},
 		// 空串是**清空**，不是「没给」：两者取值都是空串，只有 seen 分得开。
 		{"--display-name 空串", []string{"display-name"},
 			userUpdateFlags{displayName: ""}, `display_name=""`},
@@ -749,6 +754,30 @@ func TestUserUpdateEmailConflictIsAConflict(t *testing.T) {
 	}
 }
 
+// userMarkersRow 是命令行这一侧要问的那三格：两个角色标记与 updated_at。
+type userMarkersRow struct {
+	isMerchant bool
+	isAdmin    bool
+	updatedAt  time.Time
+}
+
+// readUserMarkers 直接读那一行，不走 `user get`。
+//
+// 那个命令只给折回来的称呼，而 roleOf 先看 is_admin：(merchant=false, admin=true)
+// 与 (true, true) 在它眼里都是 admin——「只动了哪一列」在这一侧看不出来，只有
+// 按列读回来才分得清。
+func readUserMarkers(t *testing.T, db *sql.DB, id int64) userMarkersRow {
+	t.Helper()
+
+	var row userMarkersRow
+	if scanErr := db.QueryRowContext(t.Context(),
+		`SELECT is_merchant, is_admin, updated_at FROM users WHERE id = $1`, id,
+	).Scan(&row.isMerchant, &row.isAdmin, &row.updatedAt); scanErr != nil {
+		t.Fatalf("读角色标记失败: %v", scanErr)
+	}
+	return row
+}
+
 // TestUserUpdateMarkersLandOnTheRightColumns 钉住四条标记旗标落进哪几列。
 //
 // 断言必须问库，不能只看 `user get` 的角色栏：roleOf 先看 is_admin，所以
@@ -762,18 +791,10 @@ func TestUserUpdateMarkersLandOnTheRightColumns(t *testing.T) {
 	name := uniqueName("update-role")
 	id := createUserWithRole(t, name, "", "user")
 
-	markers := func() (isMerchant, isAdmin bool) {
-		t.Helper()
-		if err := db.QueryRowContext(t.Context(),
-			`SELECT is_merchant, is_admin FROM users WHERE id = $1`, id,
-		).Scan(&isMerchant, &isAdmin); err != nil {
-			t.Fatalf("读角色标记失败: %v", err)
-		}
-		return isMerchant, isAdmin
-	}
-
 	// 每一步都从**上一步留下的那一行**起步，所以后两条的顺序不是随意的：
-	// --no-admin 只有从一个真 admin 出发才证明得了「merchant 不动」。
+	// --no-admin 只有从一个真 admin 出发才证明得了「merchant 不动」，而它之后
+	// 那一条 --no-merchant 又是「结果不能是反例」那条校验的正面判据——
+	// is_admin 已经置假的一行，关 merchant 要能过，不然那道校验就把好数据也挡了。
 	steps := []struct {
 		args                    []string
 		wantMerchant, wantAdmin bool
@@ -789,10 +810,123 @@ func TestUserUpdateMarkersLandOnTheRightColumns(t *testing.T) {
 		if r := runOnce(t, runUser, args); r.err != nil {
 			t.Fatalf("%v 失败: %v\nstderr:\n%s", step.args, r.err, r.stderr)
 		}
-		if m, a := markers(); m != step.wantMerchant || a != step.wantAdmin {
+		got := readUserMarkers(t, db, id)
+		if got.isMerchant != step.wantMerchant || got.isAdmin != step.wantAdmin {
 			t.Errorf("%v 之后库里是 (merchant=%v, admin=%v)，期望 (%v, %v)",
-				step.args, m, a, step.wantMerchant, step.wantAdmin)
+				step.args, got.isMerchant, got.isAdmin, step.wantMerchant, step.wantAdmin)
 		}
+	}
+}
+
+// TestUserUpdateResultMarkersReadThroughTheRole 钉住「改完之后那两个标记是什么」
+// 这一步的算法（不连库）。
+//
+// 它是那条「结果不能是反例」校验的被测部分：**没提到的列**按读回来的称呼推，
+// 而 roleOf 先看 is_admin——所以一个真 admin 上单给 --no-merchant，算出来是
+// (false, true)，正是要拒的那一格。反过来，序列从 --no-admin 走过来时
+// （is_admin 已假）同样的旗标就该放行——这四格一起，钉住了它既没漏判也没一刀切。
+func TestUserUpdateResultMarkersReadThroughTheRole(t *testing.T) {
+	yes, no := true, false
+
+	cases := []struct {
+		name                    string
+		before                  auth.Role
+		params                  auth.UpdateUserParams
+		wantMerchant, wantAdmin bool
+	}{
+		{"user 上什么都不给", auth.RoleUser, auth.UpdateUserParams{}, false, false},
+		{"admin 上什么都不给", auth.RoleAdmin, auth.UpdateUserParams{}, true, true},
+		{"merchant 上什么都不给", auth.RoleMerchant, auth.UpdateUserParams{}, true, false},
+		// 要拒的那一格：admin 的 merchant 被单独置假。
+		{"admin 上关 merchant", auth.RoleAdmin,
+			auth.UpdateUserParams{IsMerchant: &no}, false, true},
+		// 放行的相邻那一格：先把 admin 撤了，merchant 那一列不动，仍是真。
+		{"admin 上撤 admin", auth.RoleAdmin,
+			auth.UpdateUserParams{IsAdmin: &no}, true, false},
+		// 撤完 admin 之后关 merchant：这一行读出来已经是 merchant，关得下去。
+		{"merchant 上关 merchant", auth.RoleMerchant,
+			auth.UpdateUserParams{IsMerchant: &no}, false, false},
+		{"user 上升 merchant", auth.RoleUser,
+			auth.UpdateUserParams{IsMerchant: &yes}, true, false},
+		{"user 上升 admin（两列一起）", auth.RoleUser,
+			auth.UpdateUserParams{IsMerchant: &yes, IsAdmin: &yes}, true, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isMerchant, isAdmin := userUpdateResultMarkers(tc.before, tc.params)
+			if isMerchant != tc.wantMerchant || isAdmin != tc.wantAdmin {
+				t.Errorf("算出来是 (merchant=%v, admin=%v)，期望 (%v, %v)",
+					isMerchant, isAdmin, tc.wantMerchant, tc.wantAdmin)
+			}
+		})
+	}
+}
+
+// TestUserUpdateNoMerchantOnAdminIsRefused 钉住这条校验，以及它拒的方式。
+//
+// 三组矛盾输入挡的是**输入**，这一条挡的是**结果**：admin 的 is_merchant 被单独
+// 置假之后，库里留下 (merchant=false, admin=true) 而 roleOf 仍把它读成 admin——
+// 于是那次真改了库的调用在回显里一片空白，看起来像什么都没做。
+//
+// 所以判据不只是「报错」，还有「那一行一个字都没动」：两次读回来对比，连
+// updated_at 一起比——它是「这一行被写过」的痕迹，比两个标记更宽，万一哪天变成
+// 「命令报了错、写还是写了」，两个标记未必碰巧不变，这个时间戳一定会动。
+func TestUserUpdateNoMerchantOnAdminIsRefused(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	name := uniqueName("update-demote")
+	id := createUserWithRole(t, name, "", "user")
+
+	// 先升成 admin：反例只有从一个真 admin 出发才造得出来。
+	if r := runOnce(t, runUser, []string{"update", "--user", name, "--admin"}); r.err != nil {
+		t.Fatalf("升成 admin 失败: %v\nstderr:\n%s", r.err, r.stderr)
+	}
+	before := readUserMarkers(t, db, id)
+	if !before.isMerchant || !before.isAdmin {
+		t.Fatalf("升完之后库里是 (merchant=%v, admin=%v)，想要 (true, true)",
+			before.isMerchant, before.isAdmin)
+	}
+
+	r := runOnce(t, runUser, []string{"update", "--user", name, "--no-merchant"})
+	if r.err == nil {
+		t.Fatal("--no-merchant 打在 admin 上应当报错，却通过了")
+	}
+	if code := exitCode(r.err); code != exitUsage {
+		t.Errorf("退出码 = %d，想要 %d（这是参数错，重发一次就能成）", code, exitUsage)
+	}
+	// 文案要把出路说出来：只讲「矛盾」的话，手上这条命令还是不知道该怎么发。
+	for _, want := range []string{"--no-merchant", "--no-admin"} {
+		if !strings.Contains(r.err.Error(), want) {
+			t.Errorf("报错里要提到 %s：%v", want, r.err)
+		}
+	}
+	if r.stdout != "" {
+		t.Errorf("被拒的那次不该有回显，stdout 实际是 %q", r.stdout)
+	}
+
+	after := readUserMarkers(t, db, id)
+	if after.isMerchant != before.isMerchant || after.isAdmin != before.isAdmin {
+		t.Errorf("被拒之后那两个标记变了：(merchant=%v, admin=%v) → (merchant=%v, admin=%v)",
+			before.isMerchant, before.isAdmin, after.isMerchant, after.isAdmin)
+	}
+	if !after.updatedAt.Equal(before.updatedAt) {
+		t.Errorf("被拒的那次不该写库，updated_at 却动了：%v → %v",
+			before.updatedAt, after.updatedAt)
+	}
+
+	// 出路真的走得通：先撤 admin，再关 merchant。
+	if ok := runOnce(t, runUser, []string{"update", "--user", name, "--no-admin"}); ok.err != nil {
+		t.Fatalf("--no-admin 应当通过: %v\nstderr:\n%s", ok.err, ok.stderr)
+	}
+	if ok := runOnce(t, runUser, []string{"update", "--user", name, "--no-merchant"}); ok.err != nil {
+		t.Fatalf("撤完 admin 之后 --no-merchant 应当通过: %v\nstderr:\n%s", ok.err, ok.stderr)
+	}
+	final := readUserMarkers(t, db, id)
+	if final.isMerchant || final.isAdmin {
+		t.Errorf("两步之后应当是 (merchant=false, admin=false)，实际 (merchant=%v, admin=%v)",
+			final.isMerchant, final.isAdmin)
 	}
 }
 
