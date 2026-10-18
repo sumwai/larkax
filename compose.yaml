@@ -6,7 +6,8 @@
 # 起法用 `docker compose up -d --wait`（需要 compose v2.1+）：
 # 它靠下面的 healthcheck 等到库真能接受连接，直接 up -d 接迁移会 race。
 #
-# Redis 暂时不起：LARKAX_REDIS_DSN 留空表示不启用，代码也只把它当配置项，
+# Redis 暂时不起：本地单实例开发用不到。LARKAX_REDIS_DSN 留空时共享计数退回
+# 进程内，单实例下是精确的；多实例要共用一份计数才需要它，见 docs/limits.md。
 # 起一个没人连的容器只是噪音。
 
 services:

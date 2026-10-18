@@ -74,6 +74,12 @@ SDK 的错误解析器，见 `internal/api/error.go`），所以两处的码放�
 | RPM | 有，单位秒，指向当前窗口结束 | **等这么久再重发**，同一个请求重发就会成功 |
 | 这把 Key 的累计额度用尽 | **没有** | **不要重发**。等多久都不会变——要改的是这把 key 的额度，或者换一把 key |
 | 钱包可用余额不足 | **没有** | **不要重发**。要改的是钱——充值，之后下一个请求就生效（见下） |
+| 上游限流（不是我们拒的） | **没有** | **可以重发**，通常换一条渠道就过去了。文案是 `upstream is rate limited, retry later` |
+
+第四行与前两行**处置相反**，而它在响应里长得几乎一样：同样是 `429`、同样
+`error.type` 是 `rate_limit_error`、同样 `error.code` 是 `null`，区别只在文案。
+所以「见到 429 就退避」与「见到 429 就放弃」两种写法都会在它上面错——要么白等，
+要么放掉一个重发就能成的请求。
 
 额度与余额那两条不回这个头是刻意的：回一个等待时间等于告诉客户端「照做就行」，
 而它照做之后必然再撞一次。不给这个头，客户端就只能去看响应体——而这两个来源
@@ -137,9 +143,10 @@ SDK 的错误解析器，见 `internal/api/error.go`），所以两处的码放�
   递进补冻（见 `internal/pipeline` 的 `ReserveStream`），于是正在跑的那一笔
   更贴近实际会扣的，但它仍是一条上界，随时可能随流变大。
   `max_tokens` 本身还有一条单次上限：非流式请求超过它会先被那条判据拒掉
-  （回 `400`，见 [max-tokens.md](max-tokens.md)），轮不到这一条；流式不受
-  这条判据约束——它有中途观测点，钱的处置是随流递进冻结（见
-  [metrics.md](metrics.md) 的 `stream_balance_exhausted_total`）。
+  （回 `400`，见 [max-tokens.md](max-tokens.md)），轮不到这一条；**流式与
+  `/v1/systemone`（决策表面）不受这条判据约束**——流式有中途观测点，钱的处置
+  是随流递进冻结（见 [metrics.md](metrics.md) 的
+  `stream_balance_exhausted_total`），决策表面的上界取自我们自己的两个常量。
 - **只算已结算与正在跑的。** 上游失败、被释放、被退款的那些请求没有从用户
   身上扣走钱，不计入。
 - **卡住的请求会一直占着额度。** 一笔预留如果因为进程被杀而没有结算也没有
@@ -222,14 +229,36 @@ larkaxctl apikey update --id 42 --clear-rpm
 
   改限额、清空计数、临时封禁**都不做**：那三件各自是能绕开或加重限流的权力
   （清空计数等于临时解除限流），要单开一条并带审计。
+
+  **本网关不返回 `x-ratelimit-*` 系列响应头**（`X-RateLimit-Limit-Requests` /
+  `-Remaining-Requests` / `-Reset-Requests` 那一套）。限流信息只在**被拒**时给：
+  `429` 加上面那个 `Retry-After`。按 OpenAI 的惯例写完自限速、然后发现始终读不到
+  这几个头的人，这一句就是答案——它们不会被返回，不是配错了。
+
 - **累计额度要汇总这把 key 的全部历史账单。** 索引在
   `billing_requests (api_key_id)` 上；量级很大时它是这条判定最贵的部分。
+
+## 请求体上限（不按 Key 算）
+
+上面几条按 Key 计，这一条只看请求本身：**请求体最大 8 MiB**，不是配置项
+（`internal/api` 的 `maxRequestBodyBytes`）。超出回：
+
+| 调用协议 | 状态码 | 码放在哪 | 取值 |
+|---|---|---|---|
+| OpenAI / OpenAI Responses | `413` | `error.code` | `request_too_large` |
+| Anthropic | `413` | `error.type` | `request_too_large` |
+
+文案是 `request body exceeds 8388608 bytes`。
+
+这条限制在**解析请求体之前**生效。这是有意的：超限的请求不该让我们为它读进
+8 MiB 内存，更不该走到预留那一步——那会先把余额冻住，再为一个早就该拒的请求
+去解冻。**多模态请求（正文里带 base64 图片）是最容易撞上它的一类。**
 
 ## 改它的时候
 
 | 要改什么 | 改哪 |
 |---|---|
-| 两种限制各自的语义（`NULL` / `0` / 正数） | `internal/ratelimit`（RPM）与 `internal/keyquota`（额度），各只有一处 |
+| 两种限制各自的语义（`NULL` / `0` / 正数） | `internal/ratelimit`（RPM）与 `internal/keyquota`（额度），各只有一份判据（落点有两处，见下） |
 | 窗口长度、键名、过期时间、热路径的存储超时 | `internal/ratelimit`（`windowLen` / `windowKey` / `keyTTL` / `storeTimeout`） |
 | 共享存储挂掉时的行为（降级还是拒请求） | `internal/ratelimit` 的 `Allow`（判定）与 `internal/assembly` 的 `buildRateLimiter`（启动那一次探测） |
 | 「累计花费」的口径（算哪段时间、哪些状态、预留算不算） | `internal/keyquota` 的 `spentSQL` |

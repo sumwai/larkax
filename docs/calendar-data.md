@@ -135,9 +135,16 @@ go run ./cmd/larkaxctl price calendar import <文件>
 - **启动时不检查。** 缺数据不会让服务拒绝启动——日历数据是逐年补的，未来年份
   查不到是正常状态。
 
-`year_pending`（公告未发布）与 `row_missing`（标着已同步却没有这一天的行）
-都会让请求失败，但它们的成因写在错误信息里，因为下一步动作不一样：前者等公告，
-后者去看同步任务。
+成因一共六个（`internal/calendar` 的 `UnknownReason`）：`year_pending`（公告未
+发布）、`year_degraded`（公告已公布但同步失败）、`year_conflict`（两个数据源不
+一致）、`year_unknown`（库里没有这一年的记录）、`row_missing`（年份标着已同步，
+这一天却没有记录）、`row_inconsistent`（记录自相矛盾，例如既放假又标成补班日）。
+**六个都会出现在调用方看到的错误信息里**，撞上一个不认识的成因码时来这里对。
+
+分界线是「要不要有人去看一眼」：`year_pending` 是**正常状态**，调用方按保守策略
+继续即可；其余五个都要人去查同步任务与公告的状态，其中 `row_missing` 与
+`row_inconsistent` 是数据本身不完整或矛盾——猜任何一边都可能让一整天的价格算错，
+所以判成未知而不是按工作日放行。
 
 ## 怎么查现在有什么
 
