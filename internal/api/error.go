@@ -209,6 +209,16 @@ const msgNoCandidateDrained = "no candidate channel is available for this reques
 // 而被本地状态挡掉的候选不在里面——额度与健康度走 Excluded。于是「有候选被状态
 // 挡掉、剩下的都类型不符」也落进这一档，说成「每一条候选」就是在承诺判据没保证
 // 的事。调用方要的是「换一条类型对的渠道」，多说的那部分不改变这个结论。
+//
+// **类型不认识也算这一档**：渠道类型不在当前版本的适配器清单里时也落进来（回滚
+// 之后最容易出现——库里有一条配置，跑着的这个二进制不认识它），错误链里包着的是
+// channel.ErrUnknownType，与 ErrUnsupported 在链上分得开（见 internal/upstream 的
+// Executor.adapter）；两种情况共用一个码，因为调用方要做的是同一件事——换一条
+// 类型对的渠道。
+//
+// 那句 each was rejected 说的是「这条候选没成」，不是「这个类型设计上不做这件事」：
+// 「类型不认识」是部署留下的痕迹，不是渠道的性质，单为它分一个码只会多出一条没人
+// 能照做的分支。
 const msgChannelTypeUnsupported = "no candidate channel type that was tried can serve this protocol: " +
 	"each was rejected because its channel type cannot serve this request"
 

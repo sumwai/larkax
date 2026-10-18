@@ -619,14 +619,16 @@ func TestMessagesUpstreamFailureReturnsAnthropicError(t *testing.T) {
 // 上游**限流**（429）走 Anthropic 入口时，`error.type` 是码 `upstream_http_error`
 // ——不是 429 推出来的 `rate_limit_error`。
 //
-// 为什么单独一条：429 是唯一一个「状态码推出来的类型」与「我们给的码」指向
-// **不同处置**的档（前者听起来像「等一下再来」，后者说的是「这条上游不行」），
-// 而 Anthropic 那套只有 `error.type` 一个位置放码（见 writeErrorCode 的 `typ := code`）。
-// 上面那条 500 的用例证明不了这里：500 推出来的 `api_error` 与码本来就不同名，
-// 走哪一支都看不出差别；429 这一条才钉住「给码时以码为准」。
+// 为什么单独一条：429 这一档里，「状态码推出来的类型」与「我们给的码」说的是
+// 两件相反的事——前者听起来像「等一下再来」，后者说的是「这条上游不行」，而 429
+// 又是最容易被按状态码当成「稍后重试」的一个。上面那条 500 的用例证明不了这里：
+// 500 推出来的 `api_error` 与码本来就不同名，走哪一支都看不出差别，429 这一条才
+// 看得出「给码时以码为准」——Anthropic 那套只有 `error.type` 一个位置放码（见
+// writeErrorCode 的 `typ := code`）。
 //
-// OpenAI 那一侧的对应断言在 internal/api 的单测里（`error.code` 变、
-// `error.type` 仍是 `rate_limit_error`），这里只走 Anthropic 这份形状。
+// OpenAI 那一侧的对应断言在 internal/api 的单测里（TestUpstreamErrorStatus 的
+// 「上游限流」那一行：`error.code` 由 `null` 变成 `upstream_http_error`，
+// `error.type` 仍是 429 推出来的 `rate_limit_error`），这里只走 Anthropic 这份形状。
 func TestMessagesUpstreamRateLimitReturnsTheCode(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)

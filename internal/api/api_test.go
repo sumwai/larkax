@@ -826,25 +826,33 @@ func TestUpstreamErrorStatus(t *testing.T) {
 		// wantCode 是 error.code（OpenAI 形状）与 error.type（Anthropic 形状，
 		// 见 writeErrorCode）。空串表示「推不出来」，落成 null。
 		wantCode string
+		// wantType 是 error.type。它由**状态码**推出来（见 errorKind），我们给了
+		// 码也不改——两栏各管一头：码是给这几种情形分支用的，type 是 SDK 粗分
+		// 「改请求 / 换凭证 / 稍后重试」用的。429 那一行两栏的值不同（码是
+		// upstream_http_error，type 仍是 rate_limit_error），只看一栏会以为另一栏
+		// 也跟着变了，所以这一列每一行都填：没填与填错在输出里长得一样。
+		wantType string
 	}{
 		{name: "没有可用渠道", err: route.ErrNoCandidates, want: http.StatusServiceUnavailable,
-			wantCode: CodeNoCandidateChannel},
+			wantCode: CodeNoCandidateChannel, wantType: "api_error"},
 		{name: "一个候选都不剩", err: &route.Errors{Unsupported: 1,
 			Excluded: []route.Exclusion{{Unsupported: true}}}, want: http.StatusBadGateway,
-			wantCode: CodeNoCandidateChannel},
+			wantCode: CodeNoCandidateChannel, wantType: "api_error"},
 		{name: "候选都被运行状态挡了", err: &route.Errors{
 			Excluded: []route.Exclusion{{Code: route.CodeQuota}}}, want: http.StatusBadGateway,
-			wantCode: CodeNoCandidateChannel},
+			wantCode: CodeNoCandidateChannel, wantType: "api_error"},
 		{name: "渠道类型做不了这次协议", err: &route.Errors{Attempts: []route.Attempt{
 			{Err: fmt.Errorf("渠道 1: %w", channel.ErrUnsupported)}}}, want: http.StatusBadGateway,
-			wantCode: CodeChannelTypeUnsupported},
-		{name: "没有执行器", err: gateway.ErrNoExecutor, want: http.StatusNotImplemented},
+			wantCode: CodeChannelTypeUnsupported, wantType: "api_error"},
+		{name: "没有执行器", err: gateway.ErrNoExecutor, want: http.StatusNotImplemented,
+			wantType: "not_implemented"},
 		{
 			name: "缺 max_tokens",
 			// 与 pipeline.Request.validate 一样包一层：判据要能穿过这层包装，
 			// 否则它只在测试里成立。
-			err:  fmt.Errorf("%w: max_tokens 必须为正，当前 %d", billing.ErrNoUpperBound, 0),
-			want: http.StatusBadRequest,
+			err:      fmt.Errorf("%w: max_tokens 必须为正，当前 %d", billing.ErrNoUpperBound, 0),
+			want:     http.StatusBadRequest,
+			wantType: "invalid_request_error",
 		},
 		{
 			name: "上游限流",
@@ -853,6 +861,10 @@ func TestUpstreamErrorStatus(t *testing.T) {
 			// 码与其余上游错误同一个：429 里既有上游说的，也有我们自己限的
 			// （后者不带码），靠它才分得开该找谁。
 			wantCode: pipeline.ErrorUpstreamHTTPError,
+			// type 仍是 429 推出来的那一个：变的是码，这一栏没变。Anthropic 那侧
+			// 只有 error.type 一个位置放码，所以那一侧连 type 也跟着变
+			// （见 internal/assembly 的 TestMessagesUpstreamRateLimitReturnsTheCode）。
+			wantType: "rate_limit_error",
 		},
 		{
 			name: "上游说请求不对",
@@ -860,12 +872,14 @@ func TestUpstreamErrorStatus(t *testing.T) {
 			// 不跟着上游回 400：那会让调用方去改一个本来正确的请求。
 			want:     http.StatusBadGateway,
 			wantCode: pipeline.ErrorUpstreamHTTPError,
+			wantType: "api_error",
 		},
 		{
 			name:     "上游挂了",
 			err:      &channel.ErrUpstream{StatusCode: http.StatusBadGateway},
 			want:     http.StatusBadGateway,
 			wantCode: pipeline.ErrorUpstreamHTTPError,
+			wantType: "api_error",
 		},
 		{
 			// 试过、但不是「做不了这件事」：最后一个错误不是上游那一侧的。
@@ -873,9 +887,11 @@ func TestUpstreamErrorStatus(t *testing.T) {
 			name: "所有候选都失败",
 			err: &route.Errors{Attempts: []route.Attempt{
 				{Err: errors.New("账本写不进去")}}},
-			want: http.StatusBadGateway,
+			want:     http.StatusBadGateway,
+			wantType: "api_error",
 		},
-		{name: "认不出来的错误", err: errors.New("账本写不进去"), want: http.StatusInternalServerError},
+		{name: "认不出来的错误", err: errors.New("账本写不进去"),
+			want: http.StatusInternalServerError, wantType: "api_error"},
 	}
 
 	for _, tc := range cases {
@@ -895,6 +911,7 @@ func TestUpstreamErrorStatus(t *testing.T) {
 			var body struct {
 				Error struct {
 					Message string  `json:"message"`
+					Type    string  `json:"type"`
 					Code    *string `json:"code"`
 				} `json:"error"`
 			}
@@ -907,6 +924,10 @@ func TestUpstreamErrorStatus(t *testing.T) {
 			}
 			if got != tc.wantCode {
 				t.Errorf("error.code = %q，期望 %q", got, tc.wantCode)
+			}
+			// 给码不改 type：两栏各管一头（见上面 wantType 的注释）。
+			if body.Error.Type != tc.wantType {
+				t.Errorf("error.type = %q，期望 %q", body.Error.Type, tc.wantType)
 			}
 			if body.Error.Message == "" {
 				t.Error("message 是空的：调用方据此判断下一步，不能空着")
