@@ -1377,6 +1377,35 @@ func TestSnapshotOptional(t *testing.T) {
 // snapshot_request_test.go：成功、失败、换渠道之后的最后一次尝试、一份都没发
 // 出去，以及流式那条路。这里不再留一条只钉次序的用例——次序不再是要求。
 
+// 只接了脱敏器、没接落库层：脱敏这一步都不该走。
+//
+// 两个方向各有一条守卫（见 snapshotAsync 与 responseSnapshotAsync），而它们
+// 此前只在「一个都没接」的装配下被走过。判据是脱敏器有没有被调用，而不是
+// 「有没有落库」——两种装配都不落库，差别在守卫让不让往下走：往下走的那条路
+// 会去调一个 nil 落库层，而那发生在后台 goroutine 里，不会让请求失败，只会
+// 让测试进程崩掉。
+//
+// 脱敏器故意配成会报错的：守卫万一失效，报出来的是下面的断言，而不是一次
+// panic——后者还得回头看才知道是哪一处。
+func TestSnapshotSkippedWithoutStore(t *testing.T) {
+	h := newHarness(t)
+	h.gw.Snapshots = nil
+	h.redactor.reqErr = errors.New("没接落库层时不该脱敏")
+	h.redactor.respErr = errors.New("没接落库层时不该脱敏")
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	// 脱敏是同步的（只有落库在后台，见 snapshotAsync），所以两个方向的清单
+	// 在 Chat 返回时已经有了结论。
+	if got := len(h.redactor.requests); got != 0 {
+		t.Errorf("请求方向脱敏 %d 次，期望 0（没接落库层）", got)
+	}
+	if got := len(h.redactor.responseBodies()); got != 0 {
+		t.Errorf("响应方向脱敏 %d 次，期望 0（没接落库层）", got)
+	}
+}
+
 // 快照要记在**发起这次请求的用户**名下。
 //
 // 这一列没有外键，填 0 或者填成别人都插得进去、不报错——所以「调用没报错」
@@ -1545,6 +1574,43 @@ func TestNonStreamUnusableResponseClassifiedSameOnBothSides(t *testing.T) {
 	if snap.ErrorKind == nil || *snap.ErrorKind != pipeline.ErrorUpstreamUnusableResponse {
 		t.Errorf("快照的 error_kind = %s，期望 %q（与账单同一个值）",
 			kindOf(snap.ErrorKind), pipeline.ErrorUpstreamUnusableResponse)
+	}
+}
+
+// 上游回来的状态码落在哪一档：2xx 与非 2xx 的分界在比较符上。
+//
+// 300 是重定向——它既不是「上游给了一个可用的回答」，也不是「上游没给出回答」。
+// 今天它落在「上游回了错误状态码」那一档，与 4xx / 5xx 同一档；钱的处置不受
+// 影响（两档都不计费），差别在快照与指标里记的是哪个结论。把这一档写下来，
+// 将来谁挪动那个比较符，先看到的是一条红用例，而不是几张对不上的报表。
+//
+// 分类写成字面量而不是拿 pipeline 的常量来比：它是要落进快照、被人按字面读的
+// 取值，改了就该有一条红用例。
+func TestUpstreamEvidenceStatusBuckets(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		wantStatus int
+		wantKind   string
+	}{
+		{"200 拿到了响应但不可用", http.StatusOK, http.StatusOK, "upstream_unusable_response"},
+		{"299 仍是 2xx", 299, 299, "upstream_unusable_response"},
+		{"300 重定向：按非 2xx 记", http.StatusMultipleChoices, http.StatusMultipleChoices, "upstream_http_error"},
+		{"404 上游回的错误码", http.StatusNotFound, http.StatusNotFound, "upstream_http_error"},
+		{"500 也是", http.StatusInternalServerError, http.StatusInternalServerError, "upstream_http_error"},
+		{"拿到响应却没给状态码：归到没拿到", 0, 0, "upstream_no_answer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, kind := upstreamEvidence(&channel.ErrUpstream{
+				StatusCode: tc.status, GotResponse: true,
+			})
+			if status != tc.wantStatus {
+				t.Errorf("status = %d，期望 %d", status, tc.wantStatus)
+			}
+			if kind != tc.wantKind {
+				t.Errorf("分类 = %q，期望 %q", kind, tc.wantKind)
+			}
+		})
 	}
 }
 

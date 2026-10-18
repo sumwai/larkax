@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -205,6 +206,42 @@ func TestRecordFailureDoesNotBreakRequest(t *testing.T) {
 	if res.Charge == nil {
 		t.Error("请求该照常结算")
 	}
+}
+
+// 写健康度失败要留一条错误日志，写成功时一个字都不写。
+//
+// 两个方向都要看：只断言失败那一侧时，把条件写反（成功的时候刷失败、失败的
+// 时候闭嘴）不会被发现，而那条日志正好把排查的人引到反方向去。
+//
+// 两格断的都是那句话本身，而不是「有没有错误级日志」：这句话是写不进去时
+// 唯一被人读到的东西，改了措辞就该有红用例。
+func TestRecordLogsWriteFailureOnlyWhenItFails(t *testing.T) {
+	const wants = "写渠道健康度失败"
+
+	t.Run("写得进去：没有日志", func(t *testing.T) {
+		h := newHarness(t)
+		logs := adoptLogs(t)
+
+		if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
+			t.Fatalf("出错: %v", err)
+		}
+		if got := logs.text(); strings.Contains(got, wants) {
+			t.Errorf("写健康度成功了却报失败，日志：%s", got)
+		}
+	})
+
+	t.Run("写不进去：有一条日志，请求照常成功", func(t *testing.T) {
+		h := newHarness(t)
+		h.recorder.err = errors.New("库写不进去")
+		logs := adoptLogs(t)
+
+		if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
+			t.Fatalf("写健康度失败不该让请求失败: %v", err)
+		}
+		if got := logs.text(); !strings.Contains(got, wants) {
+			t.Errorf("写健康度失败时没有日志，实际：%q", got)
+		}
+	})
 }
 
 // 没接写入方时一切照常：它是可选接线，缺了不该 panic。
