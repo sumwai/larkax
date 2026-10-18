@@ -34,7 +34,10 @@ func (c *Collector) RedactDecisionRequest(t *gateway.DecisionTrace) (*gateway.Sn
 		return nil, errors.New("决策足迹为空")
 	}
 	res, err := c.decisionRequestRedactor.RedactRaw(decisionRequestMap(t))
-	return toSnapshot(res, err)
+	// 决策这条表面永远是默认那一档：它的骨架里本来就没有内容（见
+	// decisionRequestMap 的注释），原样采集对它无从谈起。所以这里不看
+	// 授权——查一次库去问一件不适用的事，只会把判定点散成两处。
+	return toSnapshot(res, err, captureModeSkeleton)
 }
 
 // RedactDecisionResponse 脱敏一次决策请求的结局。
@@ -43,7 +46,7 @@ func (c *Collector) RedactDecisionResponse(o *gateway.DecisionOutcome) (*gateway
 		return nil, errors.New("决策结局为空")
 	}
 	res, err := c.decisionResponseRedactor.RedactRaw(decisionResponseMap(o))
-	return toSnapshot(res, err)
+	return toSnapshot(res, err, captureModeSkeleton)
 }
 
 // decisionRequestMap 摊出请求方向的判据。

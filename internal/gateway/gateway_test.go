@@ -279,11 +279,18 @@ type fakeRedactor struct {
 	// 它钉的是「采的是哪一份」：发出去的那份与调用方发来的那份不是同一个
 	// 对象（见 internal/gateway 的 snapshotRequest）。
 	requests []*channel.Request
+	// identities 按顺序记下与上面几份请求配着交出去的身份。
+	//
+	// 它钉的是「判定拿得到身份」：脱敏器按身份决定留骨架还是留原文，身份
+	// 传空了不会报错，只会让授权永远匹配不上——那正是默认不采集这个方向，
+	// 所以它错得很安静。两条路各记一次（请求方向与响应方向各判一次）。
+	identities []CaptureIdentity
 }
 
-func (f *fakeRedactor) Redact(req *channel.Request) (*Snapshot, error) {
+func (f *fakeRedactor) Redact(_ context.Context, req *channel.Request, id CaptureIdentity) (*Snapshot, error) {
 	f.mu.Lock()
 	f.requests = append(f.requests, req)
+	f.identities = append(f.identities, id)
 	f.mu.Unlock()
 	if f.reqErr != nil {
 		return nil, f.reqErr
@@ -291,14 +298,22 @@ func (f *fakeRedactor) Redact(req *channel.Request) (*Snapshot, error) {
 	return &Snapshot{Skeleton: map[string]any{"model": "placeholder"}}, nil
 }
 
-func (f *fakeRedactor) RedactResponse(resp *channel.Response) (*Snapshot, error) {
+func (f *fakeRedactor) RedactResponse(_ context.Context, resp *channel.Response, id CaptureIdentity) (*Snapshot, error) {
 	f.mu.Lock()
 	f.responses = append(f.responses, resp)
+	f.identities = append(f.identities, id)
 	f.mu.Unlock()
 	if f.respErr != nil {
 		return nil, f.respErr
 	}
 	return &Snapshot{}, nil
+}
+
+// seenIdentities 返回交给脱敏器的身份清单。
+func (f *fakeRedactor) seenIdentities() []CaptureIdentity {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]CaptureIdentity(nil), f.identities...)
 }
 
 // responseBodies 返回交给响应方向脱敏的响应体清单。
@@ -1427,6 +1442,42 @@ func TestRequestSnapshotRecordsRequestingUser(t *testing.T) {
 	if snaps[0].UserID != req.UserID {
 		t.Errorf("快照的 user_id = %d，期望 %d（发起这次请求的用户）",
 			snaps[0].UserID, req.UserID)
+	}
+}
+
+// 脱敏器要拿到「这次请求是谁发的」——判据是身份真的传到了它手上。
+//
+// # 为什么这条值得单独钉
+//
+// 身份传成零值不会让任何东西报错：它只让授权匹配不上，而「匹配不上」正是
+// 默认不采集那个方向，看起来完全正常。等到有人开了授权却发现原文没留下时，
+// 现场已经离这里很远了。
+//
+// 两个方向各判一次（脱敏器要分别决定这一行留什么），所以两次都要带身份。
+// 请求标识按真实装配的做法放进 context——用观测层那个键，也就是 requestIDOf
+// 唯一读得到的那个。
+func TestSnapshotPassesIdentityToRedactor(t *testing.T) {
+	h := newHarness(t)
+	req := request()
+	ctx := observe.WithRequestID(context.Background(), observe.RequestID("trace-1"))
+
+	if _, err := h.gw.Chat(ctx, req, upstreamRequest(), Hooks{}); err != nil {
+		t.Fatal(err)
+	}
+
+	ids := h.redactor.seenIdentities()
+	if len(ids) != 2 {
+		t.Fatalf("交给脱敏器的身份有 %d 份，期望 2 份（两个方向各判一次）", len(ids))
+	}
+	for i, id := range ids {
+		if id.UserID != req.UserID {
+			t.Errorf("第 %d 次判定拿到的 user_id = %d，期望 %d",
+				i+1, id.UserID, req.UserID)
+		}
+		if id.RequestID != "trace-1" {
+			t.Errorf("第 %d 次判定拿到的 request_id = %q，期望 %q",
+				i+1, id.RequestID, "trace-1")
+		}
 	}
 }
 
