@@ -401,6 +401,9 @@ create --user alice > key.txt` 保存下来的文件里只有明文，不会混�
 两个额度**不开简写**：它们是限额，写短了容易看错也容易按错。`apikey` 下唯一的简写
 是 `-u`（`--user` 的别名，`create` 与 `list` 认它）。
 
+旧名 `--rate-limit-rpm` 等同于 `--rpm`，`--clear-rate-limit-rpm` 等同于 `--clear-rpm`；
+`--quota-limit` 等同于 `--quota`，`--clear-quota-limit` 等同于 `--clear-quota`。
+
 #### `wallet`
 
 用户钱包账户与入账管理。`create` 与 `credit` 都只写 `user_wallets` 与
@@ -441,6 +444,9 @@ ID 解析，否则按用户名解析。
 `ledger balance --account user:<ID>` 给，两者是否一致由 `reconcile` 比对。
 冻结额是为在飞的请求预扣住的那部分，它**不包含**在余额里。机器可读那一档
 （`--format json`）把两个金额打成定点小数字符串，用户 ID 打成数字。
+
+旧名 `wallet open` 等同于 `wallet create`，
+`--idempotency-key` 与 `--order` 都等同于 `--ref`。
 
 #### `ledger`
 
