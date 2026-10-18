@@ -48,16 +48,21 @@ var ErrUnknownUsageSource = errors.New("未知的用量来源")
 // internal/snapshotwire 写入前先确认分区是同一个理由。事件时刻由
 // priced_at 那一列单独承载，两个时刻分得开。
 //
-// # local_hour / is_off_day 为什么写 NULL
+// # local_hour / is_off_day 写什么
 //
-// 它们是「这次求值用了哪个时区、算的是哪一天」，而求值那一侧今天不报这两个
-// 值，Charge 上对应的两个字段**结算路径从不填**（理由见 pipeline.Charge
-// 的注释：时区由规则作者逐次给出，填一个 Env.Region 的时区会得到一个看起来
-// 权威、却可能与规则实际用的那个不同的数）。
+// 写这次求值**实际用到**的「当地」口径：地区时区的钟点与那一天算不算休息日，
+// 取自 Charge.LocalTime——它由 Settle 从同一次求值的结果搬过来，与这一行的
+// 单价、金额出自同一个 expr.Result。所以这两格与规则当时判的那一档是同一个
+// 值，事后拿它们复算得出当时的价；而在落库层或结算层按 Region 重算一遍的话，
+// 那两格会是一个**看起来权威、却与规则实际用的那个可能不同**的数。
 //
-// 所以这里写 NULL——「不知道」——而不是把 Charge 上的零值写成 0 与 false。
-// 后者在库里长得像「求值算出来就是当地 0 点、不是休息日」，而它照样算得出数
-// 来，照它对账会得到一个错的结论。列本身可空，正是为这种情形留的。
+// 规则没有用到当地口径（isWorkday / isHoliday / isPeak 一个都没走）时
+// Charge.LocalTime 为 nil，这里写 NULL——「不知道」，而不是把零值写成 0 与
+// false。后者在库里长得像「求值算出来就是当地 0 点、不是休息日」，而它照样
+// 算得出数来，照它对账会得到一个错的结论。列本身可空，正是为这种情形留的。
+//
+// 什么算「用到」由 expr.Result.LocalTime 定义，这里不重判一遍：两处各判一份
+// 的表现是「求值说用了、落库说没用」这种谁也看不出错的组合。
 //
 // # upstream_cost 为什么不写
 //
@@ -120,10 +125,13 @@ var ErrUnknownUsageSource = errors.New("未知的用量来源")
 // 来的分位数往下拉，而那条渠道的延迟分因此在库里读作「很快」——没有任何
 // 东西会报出来。NULL 在读侧是「没有样本」，聚合时被 FILTER 掉。
 //
-// duration_ms 是 integer 列，$17 传的是 Go 的 int64 毫秒数。这里**不加**
+// duration_ms 是 integer 列，$19 传的是 Go 的 int64 毫秒数。这里**不加**
 // 类型标注：裸 0 与 $3 那处不同——它与列宽一致（integer），而 $3 是 bigint，
 // 不加标注会被推成 int4。超过 int32 的耗时（约 24 天）会在数据库这一侧
 // 报溢出，不会静默截断。
+//
+// local_hour / is_off_day 两列的参数位同理不加标注：小整数与布尔按列宽
+// 传过去即可，「没有值」由 Go 那一侧的 nil 表达（见下面那两个变量）。
 //
 // NULLIF($3, 0::bigint) 里的类型标注是必要的：channel_id 列为 bigint，
 // 裸 0 会把 $3 推成 int4（见 store.go 的 SaveReservation）。
@@ -137,7 +145,7 @@ const insertUsageEventSQL = `
 		$1, $2, NULLIF($3, 0::bigint), $4,
 		$5, $6, $7, $8,
 		$9, $10::jsonb, $11::jsonb, $12, NULLIF($13, ''),
-		$14::numeric, $15, $16, NULL, NULL, NULLIF($17, 0)
+		$14::numeric, $15, $16, $17, $18, NULLIF($19, 0)
 	)`
 
 // insertUsageEvent 写一行用量事件：这次结算**按什么用量**算出来的。
@@ -176,6 +184,15 @@ func insertUsageEvent(ctx context.Context, tx *sql.Tx, req pipeline.Request, cha
 	}
 
 	usage := charge.Usage
+
+	// 当地口径那两列：取值与「有没有值」都由 Charge.LocalTime 决定，理由见
+	// insertUsageEventSQL 的「local_hour / is_off_day 写什么」一节。nil 时
+	// 两个参数都是 nil，写下去就是 NULL。
+	var localHour, isOffDay any
+	if lt := charge.LocalTime; lt != nil {
+		localHour, isOffDay = lt.Hour, lt.OffDay
+	}
+
 	if _, err := tx.ExecContext(ctx, insertUsageEventSQL,
 		charge.RequestID,
 		charge.UserID,
@@ -199,6 +216,10 @@ func insertUsageEvent(ctx context.Context, tx *sql.Tx, req pipeline.Request, cha
 		charge.Settlement.Actual.String(),
 		charge.Asset,
 		charge.PricedAt,
+		// 当地钟点与「那一天算不算休息日」：这次求值用到的两个值，
+		// 由 Settle 从同一次求值的结果搬过来（见 Charge.LocalTime）。
+		localHour,
+		isOffDay,
 		durationMS(charge.Duration),
 	); err != nil {
 		// 这张表今天没有外键（user_id 与 channel_id 都是裸 bigint），
