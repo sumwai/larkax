@@ -107,6 +107,53 @@ func TestExitCodeConflictForUnknownUser(t *testing.T) {
 	}
 }
 
+// TestExitCodeConflictForTakenUsernameAndEmail 走真库把 users 表上那两个具名
+// 哨兵各跑一遍，断言命令给出的退出码是 4。
+//
+// 它们与上面那条通用约束冲突是两回事：具名的那两个是 internal/auth 在写用户
+// 那一段**换出来**的——它认得出撞的是用户名还是邮箱，往外抛的就只剩它自己，
+// 兜底哨兵不在错误链里。所以「命令这条路真的走到 4」只有真库上跑一遍才证明
+// 得了：拿哨兵直接喂 exitCode（见下面那条通用约束冲突）只证明得了它被登记进
+// conflictErrors，证明不了写路径交出来的就是它。
+func TestExitCodeConflictForTakenUsernameAndEmail(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	name := uniqueName("taken")
+	email := name + "@example.com"
+	if err := runCaptured(t, func() error {
+		return runUserCreate([]string{"--name", name, "--email", email})
+	}); err != nil {
+		t.Fatalf("第一次建用户应当成功，得到 %v", err)
+	}
+
+	cases := []struct {
+		name string
+		want error
+		args []string
+	}{
+		{"撞用户名", auth.ErrUsernameTaken, []string{"--name", name}},
+		// 换一个名字、邮箱与上一个相同：撞的是 users_email_key，另一个哨兵。
+		{"撞邮箱", auth.ErrEmailTaken,
+			[]string{"--name", uniqueName("other"), "--email", email}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runCaptured(t, func() error { return runUserCreate(tc.args) })
+			if err == nil {
+				t.Fatal("重名或重邮箱时应当报错，却通过了")
+			}
+			if !errors.Is(err, tc.want) {
+				t.Errorf("错误链里没有 %v：%v", tc.want, err)
+			}
+			if got := exitCode(err); got != 4 {
+				t.Errorf("撞唯一键的退出码应当是 4，得到 %d（%v）", got, err)
+			}
+		})
+	}
+}
+
 // TestExitCodeConflictForGenericConstraint 钉住兜底哨兵也落 4。
 //
 // 这个哨兵覆盖的是**没被逐个认出来**的唯一键与外键。它不经过哪条具体命令
