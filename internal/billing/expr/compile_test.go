@@ -245,18 +245,38 @@ func TestCompileIsPeakWindowMustBeALiteral(t *testing.T) {
 
 	// 写法错的窗口。每一条都点出一种写法：缺小时、不是钟点、分钟不是两位、
 	// 只有一个时刻、参数个数不对。
-	for _, source := range []string{
-		`{"prompt": isPeak("8-22") ? 1.0 : 2.0}`,
-		`{"prompt": isPeak("25:00-26:00") ? 1.0 : 2.0}`,
-		`{"prompt": isPeak("08:60-09:00") ? 1.0 : 2.0}`,
-		`{"prompt": isPeak("8:5-9:00") ? 1.0 : 2.0}`,
-		`{"prompt": isPeak("08:00") ? 1.0 : 2.0}`,
-		`{"prompt": isPeak("08:00-22:00,") ? 1.0 : 2.0}`,
-		`{"prompt": isPeak() ? 1.0 : 2.0}`,
-		`{"prompt": isPeak("08:00-22:00", "23:00-23:30") ? 1.0 : 2.0}`,
+	//
+	// syntax 那一栏说的是「这条错是不是高峰窗口写法的错」：参数个数不对时
+	// 窗口根本没被解析到，那是另一类，不要求 ErrPeakWindowSyntax。
+	for _, tc := range []struct {
+		source string
+		syntax bool
+	}{
+		{`{"prompt": isPeak("8-22") ? 1.0 : 2.0}`, true},
+		{`{"prompt": isPeak("25:00-26:00") ? 1.0 : 2.0}`, true},
+		{`{"prompt": isPeak("08:60-09:00") ? 1.0 : 2.0}`, true},
+		{`{"prompt": isPeak("8:5-9:00") ? 1.0 : 2.0}`, true},
+		{`{"prompt": isPeak("08:00") ? 1.0 : 2.0}`, true},
+		{`{"prompt": isPeak("08:00-22:00,") ? 1.0 : 2.0}`, true},
+		{`{"prompt": isPeak() ? 1.0 : 2.0}`, false},
+		{`{"prompt": isPeak("08:00-22:00", "23:00-23:30") ? 1.0 : 2.0}`, false},
 	} {
-		if _, err := Compile(source); err == nil {
-			t.Errorf("%q 应当编不过", source)
+		_, err := Compile(tc.source)
+		if err == nil {
+			t.Errorf("%q 应当编不过", tc.source)
+			continue
+		}
+		if !tc.syntax {
+			continue
+		}
+		// 分类也要对：写法错是写法错，不是「日历不可用」。后一句说的是
+		// 日历这一头没接上或数据查不到，处置在部署与数据那一侧；写错一个
+		// 串的人照那句话去查，方向是反的（见 ErrPeakWindowSyntax）。
+		if !errors.Is(err, ErrPeakWindowSyntax) {
+			t.Errorf("%q 的错误 = %v，期望能被 errors.Is 认成 ErrPeakWindowSyntax", tc.source, err)
+		}
+		if errors.Is(err, ErrCalendarRequired) {
+			t.Errorf("%q 的写法错被裹成了 ErrCalendarRequired: %v", tc.source, err)
 		}
 	}
 }
@@ -281,8 +301,13 @@ func TestCompileRejectsFullDayWindowAlongsideOthers(t *testing.T) {
 	if !strings.Contains(err.Error(), "全天") {
 		t.Errorf("错误信息应当说清那是全天时段: %v", err)
 	}
-	if !errors.Is(err, ErrCalendarRequired) {
-		t.Errorf("期望 ErrCalendarRequired，得到 %v", err)
+	if !errors.Is(err, ErrPeakWindowSyntax) {
+		t.Errorf("期望 ErrPeakWindowSyntax（写法错），得到 %v", err)
+	}
+	// 而它不是「日历不可用」：这一条错要改的是规则自己那个串，不是去查日历
+	// 那一头的部署与数据（见 ErrPeakWindowSyntax）。
+	if errors.Is(err, ErrCalendarRequired) {
+		t.Errorf("写法错不该被算成 ErrCalendarRequired: %v", err)
 	}
 
 	if _, err := Compile(`{"prompt": isPeak("00:00-00:00") ? 1.0 : 2.0}`); err != nil {

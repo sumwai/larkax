@@ -191,7 +191,7 @@ func TestCapabilityHostValueIsMapOfAny(t *testing.T) {
 func TestSDKNamesMatchCapabilityNames(t *testing.T) {
 	want := map[string][]string{
 		capLog:      {"log"},
-		capCalendar: {"isOffDay", "isMakeupWorkday", "holidayName", "kind", "hourIn", "weekdayIn"},
+		capCalendar: {"isOffDay", "isMakeupWorkday", "holidayName", "kind", "peak", "hourIn", "weekdayIn"},
 		capKV:       {"get", "set", "del"},
 	}
 	caps := Standard(Env{Calendar: &fakeCalendar{}, KV: newFakeKV()})
@@ -233,6 +233,7 @@ func TestHostFuncStopsOnExpiredContext(t *testing.T) {
 		{"calendar.weekdayIn", capCalendar, "weekdayIn", js("CN"), sandbox.ErrHostTimeout},
 		{"calendar.isOffDay", capCalendar, "isOffDay", js(int64(1700000000), "CN"), sandbox.ErrHostTimeout},
 		{"calendar.holidayName", capCalendar, "holidayName", js(int64(1700000000), "CN"), sandbox.ErrHostTimeout},
+		{"calendar.peak", capCalendar, "peak", js(int64(1700000000), "CN", "08:00-22:00"), sandbox.ErrHostTimeout},
 	}
 
 	for _, tc := range cases {

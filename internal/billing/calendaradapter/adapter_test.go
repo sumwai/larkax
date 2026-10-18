@@ -472,7 +472,7 @@ func TestPeakWindowEndpointsAreHalfOpen(t *testing.T) {
 // 全天段与其他段并列时不成立——这条校验在适配器与日历那一层都还在。
 //
 // 规则走不到这里：窗口的写法在保存规则时就判过一遍（见 expr 的
-// parsePeakWindows 与 compile 的那条用例），全天段并列的规则编不过。这一条
+// ParsePeakWindows 与 compile 的那条用例），全天段并列的规则编不过。这一条
 // 直接调适配器，为的是另一件事：这两个入口不止服务规则（测试与夹具直接构造
 // 排班），转换那一段的防线不该因为规则挡在前面就被拆掉。
 func TestPeakRejectsFullDayWindowAlongsideOthers(t *testing.T) {

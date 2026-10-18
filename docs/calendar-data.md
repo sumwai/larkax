@@ -20,11 +20,11 @@ go run ./cmd/larkaxctl price calendar import <文件>
 `isWorkday()`、`isHoliday()` 查的就是它。接线本身**不读数据、也不做校验**：
 库里是空的照常启动，见下文「没有数据的那一年会怎样」。
 
-## 峰谷那一半：规则里写得出，插件里还写不出
+## 峰谷那一半：规则里写得出，插件里也写得出
 
-上面那句「某个时刻算不算高峰」今天有两条路，一条通、一条不通。
+上面那句「某个时刻算不算高峰」今天有两条路，两条都通，而且判定的那一半是同一份。
 
-**规则里通。** 高峰时段由规则自己声明，写成 `isPeak("08:00-22:00")`——与
+**规则里。** 高峰时段由规则自己声明，写成 `isPeak("08:00-22:00")`——与
 `hour(tz)` 的时区同一类：峰谷是定价口径，不由地区推断，同一地区的两个渠道
 可以有各自的峰谷。窗口串与地区、时刻一起交给 `internal/calendar/peak.go` 的
 `PeakAt` 判定（经 `internal/billing/calendaradapter`）。多段用逗号分开，段内
@@ -44,10 +44,17 @@ isPeak("08:00-12:00,14:00-18:00") ? {"prompt": 2.0} : {"prompt": 1.0}
 于是这种规则会「存得进库、预留成功、结算时才炸」，而流式路上那一炸只留一行
 日志、随后释放预扣——客户端正常收完，一分钱不收。
 
-**插件里不通。** 宿主日历接口里有 `Peak`，而插件 SDK 的 calendar 命名空间里
-没有对应的函数可调，所以插件写不出峰谷价。要接上它得先定「插件的窗口从哪来」
-——规则那一半的答案（窗口随规则走）用不到插件上，那是一条独立的决定，见
-`internal/assembly` 的 `pluginPeakSchedule`。
+**插件里也通。** 插件把窗口写在调用上，写成
+`calendar.peak(ts, region, "08:00-22:00")`。写法与规则里那个串同形，
+解析用的是同一个函数（`internal/billing/expr` 的 `ParsePeakWindows`），
+判定同样走 `internal/calendar/peak.go` 的 `PeakAt`，所以两边不会各认一套
+写法。参数、返回的三个取值、写法错时报什么，见
+[plugin-contract.md](plugin-contract.md) 的「`calendar` 的语义」。
+
+两边于是是同一个答案：**高峰窗口不从全局设置或渠道配置里隐式取，
+随调用走**——规则写在规则里，插件写在调用里。它之所以与时区不同、
+没有一个按地区给的默认值，原因就在这里：同一地区的两个渠道可以有各自的
+峰谷，一个默认值只会让「这条价按哪个窗口算」变得说不清。
 
 **这件事工具不会提醒。** `PeakAt` 挂在 `*Calendar` 这个类型上，而把
 `*Calendar` 接进 assembly 之后，这个类型进了可达图，`deadcode` 就把它的方法
@@ -57,9 +64,9 @@ isPeak("08:00-12:00,14:00-18:00") ? {"prompt": 2.0} : {"prompt": 1.0}
 插件那一侧的提醒同样不在工具里。`pluginCalendar.Peak` 曾经挂在
 `scripts/deadmethods-allowlist.txt` 上，而规则侧接上 `isPeak()` 之后，`expr` 里
 出现了一个同名的 `Peak` 调用点；那道门按方法名数调用点，于是那一条被掩护掉、
-当作陈旧条目删掉了（与 `catalog.Admin.Update` 同一处境）。所以「插件写不出峰谷价」
-这句话今天由代码注释承担：`internal/assembly` 的 `pluginCalendar.Peak` 与
-`pluginPeakSchedule`、`internal/calendar` 的包注释，以及本节。
+当作陈旧条目删掉了（与 `catalog.Admin.Update` 同一处境）。它今天**真的被调到了**
+（插件 SDK 的 `peak` → 宿主 `peakFn` → `CalendarSource.Peak`），但那道门并不会
+因此多看见什么：下次 SDK 里少掉一个函数时，它照样不出声。
 
 ## 文件格式
 
