@@ -126,7 +126,7 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 	if err = a.validateType(req.Type); err != nil {
 		return 0, err
 	}
-	baseURL, err := normalizeBaseURL(req.BaseURL)
+	baseURL, err := NormalizeBaseURL(req.BaseURL)
 	if err != nil {
 		return 0, err
 	}
@@ -236,7 +236,7 @@ func (a *Admin) Update(ctx context.Context, req UpdateRequest) error {
 		add("type", *req.Type)
 	}
 	if req.BaseURL != nil {
-		baseURL, err := normalizeBaseURL(*req.BaseURL)
+		baseURL, err := NormalizeBaseURL(*req.BaseURL)
 		if err != nil {
 			return err
 		}
@@ -756,12 +756,33 @@ func normalizeName(name string) (string, error) {
 	return name, nil
 }
 
-// normalizeBaseURL 校验上游地址。
+// NormalizeBaseURL 校验上游地址。
 //
 // 只认 http/https：没有 scheme 的地址会一路走到 httpx.Endpoint，在那里拼出
 // 一个说不清哪里错的 URL（见那个函数的注释），报错时离「配置写错了」已经很远，
 // 而排查要从几百个渠道里找出是哪一个。
-func normalizeBaseURL(raw string) (string, error) {
+//
+// # 为什么导出
+//
+// 命令行在**连库之前**要跑一遍同一个判据：一个写着坏地址的命令不该先连上生产库
+// 再报错，而参数错该给的是参数错的退出码（见 cmd/larkaxctl/exit.go 的 usageErr）。
+// 写入路径自己也调它，所以绕过命令行的调用方（将来的管理面、脚本）同样写不进坏
+// 地址——两处共用这一个实现，判据不会漂移。同一条路上的先例见 auth.ParseRole
+// 与 settings.EncodeValue。
+//
+// # query 与 fragment 一律拒
+//
+// httpx.Endpoint 是**字符串拼接**：它只看结尾斜杠，看不见 `?` 与 `#`（见那个
+// 函数的注释）。于是
+//
+//	https://api.example.com/v1?tenant=abc + /v1/chat/completions
+//	  → https://api.example.com/v1?tenant=abc/v1/chat/completions
+//
+// 端点路径被接到 query 后面，请求打到的地方根本不是模型接口；`#` 之后的部分
+// 则压根不发给上游。两种都是**安静的坏配置**——配置写错的人要等到请求失败（或者
+// 更糟：请求成功了，但打的不是那个端点）才知道，那时离写下它已经很远。所以在
+// 写入侧挡住，并且说清是哪一部分不合法。
+func NormalizeBaseURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", errors.New("base_url 不能为空")
@@ -775,6 +796,22 @@ func normalizeBaseURL(raw string) (string, error) {
 	}
 	if parsed.Host == "" {
 		return "", errors.New("base_url 里没有主机名")
+	}
+	// ForceQuery 也要判：`…/v1?` 这种问号后面什么都没有的写法在 RawQuery 上是
+	// 空串，拼出来的地址照样是坏的（`…/v1?/v1/chat/completions`）。
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return "", errors.New(
+			"base_url 不能带 query（`?` 起的那一段）：端点路径会被接在 query 后面，" +
+				"拼出来的地址是坏的。上游地址写到路径为止")
+	}
+	// 判 fragment 要比 query 多看一处原文：`…/v1#` 这种**空的** fragment 在
+	// net/url 里 Fragment 与 RawFragment 都是空串，连 String() 都把那个 `#` 丢掉，
+	// 除了「原文以 `#` 收尾」没有别的信号。`#` 不在收尾时 Fragment 必定非空，
+	// 两个条件是互补的，不是重复判一次。
+	if parsed.Fragment != "" || strings.HasSuffix(raw, "#") {
+		return "", errors.New(
+			"base_url 不能带 fragment（`#` 起的那一段）：端点路径会被接在它后面，" +
+				"而 `#` 之后的部分不会发给上游。上游地址写到路径为止")
 	}
 	return raw, nil
 }

@@ -88,6 +88,103 @@ func TestChannelUpdateRejectsBadFlags(t *testing.T) {
 	}
 }
 
+// TestChannelBaseURLQueryOrFragmentIsRejected 钉住「带 query / fragment 的地址在
+// 配置期就被拒」，create 与 update 两条写入路径都要。
+//
+// 为什么必须拒：拼接点是字符串拼接，端点路径会被接到 query 后面（`#` 之后的部分
+// 干脆不发给上游），而它是**安静的**坏——配置写错的人要等到请求失败、或者请求
+// 成功却打到了别处，才知道。
+//
+// 它跑在连库之前的那一层，于是三条判据同时成立：退出码是参数错（2）、报错里点出
+// 是哪一部分不合法、而且这条用例在没有 DSN 的机器上也真的跑（碰库的用例在本地是
+// 跳过的，而「跳过」在输出里和「通过」长得一样）。
+func TestChannelBaseURLQueryOrFragmentIsRejected(t *testing.T) {
+	rejected := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"query", "https://api.example.com/v1?tenant=abc", "不能带 query"},
+		{"空的 query", "https://api.example.com/v1?", "不能带 query"},
+		{"fragment", "https://api.example.com/v1#frag", "不能带 fragment"},
+		{"空的 fragment", "https://api.example.com/v1#", "不能带 fragment"},
+	}
+
+	for _, tc := range rejected {
+		t.Run("create/"+tc.name, func(t *testing.T) {
+			err := runCaptured(t, func() error {
+				return runChannelCreate([]string{
+					"--name", "c1", "--type", testChanType, "--base-url", tc.raw,
+					"--models", "m1", "--credential-stdin",
+				})
+			})
+			assertUsageRefusal(t, err, tc.raw, tc.want)
+		})
+		t.Run("update/"+tc.name, func(t *testing.T) {
+			err := runCaptured(t, func() error {
+				return runChannelUpdate([]string{"--id", "1", "--base-url", tc.raw})
+			})
+			assertUsageRefusal(t, err, tc.raw, tc.want)
+		})
+	}
+}
+
+// TestChannelBaseURLNormalFormsParseThrough 是上面那条的护栏：正常的写法一条都不许
+// 被拒（含路径、含端口、结尾带不带斜杠都算）。没有这一臂的话，「一律拒掉」也能让
+// 上面那条通过。
+//
+// 判据落在**解析函数**上而不是整条命令上：解析之后命令就去连库了，而「连不上库」
+// 的报错会把它盖过去——那样这条用例证明的只是「本机没有库」。
+func TestChannelBaseURLNormalFormsParseThrough(t *testing.T) {
+	// 凭证走环境变量而不是标准输入：标准输入是个一次性的读口，这条用例里
+	// 每一次 parse 都要读一遍。
+	const envName = "LARKAX_TEST_CHANNEL_CREDENTIAL"
+	t.Setenv(envName, testSecret)
+
+	accepted := []string{
+		"https://api.example.com/v1",
+		"https://api.example.com/v1/",         // 结尾带斜杠
+		"https://api.example.com",             // 没有路径
+		"https://api.example.com:8443/v1",     // 带端口
+		"http://127.0.0.1:8080",               // http、本机地址
+		"https://api.example.com/v1/tenant-a", // 路径里有连字符
+	}
+	for _, raw := range accepted {
+		createReq, _, err := parseChannelCreate([]string{
+			"--name", "c1", "--type", testChanType, "--base-url", raw,
+			"--models", "m1", "--credential-env", envName,
+		})
+		if err != nil {
+			t.Errorf("create 不该拒 %q: %v", raw, err)
+		} else if createReq.BaseURL != raw {
+			t.Errorf("create 的 base_url = %q，期望 %q", createReq.BaseURL, raw)
+		}
+
+		updateReq, err := parseChannelUpdate([]string{"--id", "1", "--base-url", raw})
+		if err != nil {
+			t.Errorf("update 不该拒 %q: %v", raw, err)
+			continue
+		}
+		if updateReq.BaseURL == nil || *updateReq.BaseURL != raw {
+			t.Errorf("update 的 base_url = %v，期望 %q", updateReq.BaseURL, raw)
+		}
+	}
+}
+
+// assertUsageRefusal 断言一条命令以「参数错」被拒，且报错里点出了是哪一段。
+func assertUsageRefusal(t *testing.T, err error, raw, want string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%q 应当被拒", raw)
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("错误 %q 里没有点出 %q", err.Error(), want)
+	}
+	if got := exitCode(err); got != exitUsage {
+		t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+	}
+}
+
 // TestChannelCredentialIsNotACommandLineArgument 钉住「凭证不进 argv」。
 //
 // 命令行参数会出现在 ps 的输出与 shell 历史里，所以这条命令**没有**一条从

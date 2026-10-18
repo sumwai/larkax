@@ -240,6 +240,13 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	if strings.TrimSpace(*baseURL) == "" {
 		return channels.CreateRequest{}, "", errors.New("缺少 --base-url")
 	}
+	// 地址的写法在这里先过一遍（下面 update 那条路同理）：判据与写入路径共用
+	// 同一个实现，区别只在**什么时候**报——写错地址是参数错，该走退出码 2、
+	// 且不该为了知道地址写错了先连一次库。
+	normalizedBaseURL, err := channels.NormalizeBaseURL(*baseURL)
+	if err != nil {
+		return channels.CreateRequest{}, "", err
+	}
 	if strings.TrimSpace(*models) == "" {
 		return channels.CreateRequest{}, "", errors.New("缺少 --models（至少一个规范模型名）")
 	}
@@ -255,7 +262,7 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	return channels.CreateRequest{
 		Name:       *name,
 		Type:       *channelType,
-		BaseURL:    *baseURL,
+		BaseURL:    normalizedBaseURL,
 		Credential: *plaintext,
 		Models:     splitList(*models),
 		Weight:     *weight,
@@ -310,7 +317,13 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 		changes++
 	}
 	if given["base-url"] {
-		req.BaseURL = baseURL
+		// 与 create 同一条：地址的写法在连库之前判，判据与写入路径共用
+		// channels.NormalizeBaseURL。
+		normalized, err := channels.NormalizeBaseURL(*baseURL)
+		if err != nil {
+			return channels.UpdateRequest{}, err
+		}
+		req.BaseURL = &normalized
 		changes++
 	}
 	if given["models"] {
