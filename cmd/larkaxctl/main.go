@@ -35,19 +35,35 @@ func main() {
 	if err == nil {
 		return
 	}
-	// 要帮助不是失败：flag 在 -h / --help 时返回 ErrHelp，而那时用法已经
-	// 打印过了。把它当错误会让 `larkaxctl channel -h` 在脚本里看起来像
-	// 一次失败，还多打一行「flag: help requested」。
-	if helpRequested(err) {
-		return
+	if code := exitWithFailure(err); code != exitOK {
+		os.Exit(code)
 	}
-	// 报告已经说清了的失败（体检类命令的结论）不再补打一行：那一行与报告
-	// 说的是同一件事，而它的形状（`larkaxctl: …`）读起来像一次崩溃。退出码
-	// 照旧非零，调度器按它分派。
+}
+
+// exitWithFailure 是一次失败在进程出口上的全部处置，返回该用的退出码。
+//
+// 它抽出来不是为了「少写两行」：**main 在用例里调不到**，而
+// 「同一件事只报一次」这条判据横跨命令与这一层——命令那一半看得见，
+// 这一半（`larkaxctl: …` 那一行）看不见。只测命令那一半，两处都打的那种
+// 缺陷就仍然只靠人眼（见 streams_test.go 的同一事实那条用例）。
+//
+// 三个分支与它们各自的理由：
+//
+//   - **要帮助不是失败**：flag 在 -h / --help 时返回 ErrHelp，而那时用法已经
+//     打印过了。把它当错误会让 `larkaxctl channel -h` 在脚本里看起来像
+//     一次失败，还多打一行「flag: help requested」。
+//   - **报告已经说清了的失败**（体检类命令的结论）不再补打一行：那一行与报告
+//     说的是同一件事，而它的形状（`larkaxctl: …`）读起来像一次崩溃。退出码
+//     照旧非零，调度器按它分派。
+//   - 其余的在 stderr 上打一行 `larkaxctl: <错误>`，退出码由 exitCode 分类。
+func exitWithFailure(err error) int {
+	if helpRequested(err) {
+		return exitOK
+	}
 	if !reportedOnly(err) {
 		fmt.Fprintf(os.Stderr, "larkaxctl: %v\n", err)
 	}
-	os.Exit(exitCode(err))
+	return exitCode(err)
 }
 
 // command 是顶层命令空间里的一个条目。

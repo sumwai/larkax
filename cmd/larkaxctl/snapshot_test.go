@@ -247,8 +247,8 @@ func TestPrintSnapshotsPrintsEveryRow(t *testing.T) {
 		},
 	}
 
-	var buf bytes.Buffer
-	printSnapshots(&buf, "req-probe", rows)
+	var buf, note bytes.Buffer
+	printSnapshots(&buf, &note, "req-probe", rows)
 	out := buf.String()
 
 	if !strings.Contains(out, "2 条快照") {
@@ -300,8 +300,8 @@ func TestPrintSnapshotResponseDirectionExplainsNulls(t *testing.T) {
 		},
 	}
 
-	var buf bytes.Buffer
-	printSnapshots(&buf, "req-probe", rows)
+	var buf, note bytes.Buffer
+	printSnapshots(&buf, &note, "req-probe", rows)
 	out := buf.String()
 
 	for _, want := range []string{
@@ -334,8 +334,8 @@ func TestPrintSnapshotRequestDirectionShowsUnexpectedValue(t *testing.T) {
 		},
 	}
 
-	var buf bytes.Buffer
-	printSnapshots(&buf, "req-probe", rows)
+	var buf, note bytes.Buffer
+	printSnapshots(&buf, &note, "req-probe", rows)
 	out := buf.String()
 
 	if !strings.Contains(out, "upstream_status=502") ||
@@ -352,6 +352,9 @@ func TestPrintSnapshotRequestDirectionShowsUnexpectedValue(t *testing.T) {
 // 一份被降级成摘要层的骨架与一份完整的骨架在肉眼下长得一样，而前者会让人
 // 以为「上游就是只发了这些」。所以这一行必须出现，且只在真的截断时出现——
 // 每次都打等于每次都读不到。
+//
+// 它走**附注那一档**（stderr）：它是「这一行该怎么读」的说明，不是快照本身，
+// 而 stdout 上那份要能接给 jq。所以这里对两个流分别断言。
 func TestPrintSnapshotMarksTruncation(t *testing.T) {
 	rows := []snapshotRow{
 		{ID: 1, Direction: "request", Skeleton: map[string]any{"model": "probe-model"}},
@@ -359,12 +362,15 @@ func TestPrintSnapshotMarksTruncation(t *testing.T) {
 			Skeleton: map[string]any{"_truncated": true}},
 	}
 
-	var buf bytes.Buffer
-	printSnapshots(&buf, "req-probe", rows)
+	var buf, note bytes.Buffer
+	printSnapshots(&buf, &note, "req-probe", rows)
 	out := buf.String()
 
-	if got := strings.Count(out, "降级成摘要层"); got != 1 {
-		t.Errorf("说明应当只出现在被截断的那一条上，实际出现 %d 次：\n%s", got, out)
+	if got := strings.Count(note.String(), "降级成摘要层"); got != 1 {
+		t.Errorf("说明应当只出现在被截断的那一条上，实际出现 %d 次：\n%s", got, note.String())
+	}
+	if strings.Contains(out, "降级成摘要层") {
+		t.Errorf("说明不该混进 stdout——那一份是快照本身：\n%s", out)
 	}
 	if !strings.Contains(out, "skeleton_truncated=true") {
 		t.Errorf("截断标志本身也要打出来：\n%s", out)
@@ -385,9 +391,9 @@ func TestPrintSnapshotSkeletonIsStable(t *testing.T) {
 		CreatedAt: time.Date(2026, 10, 17, 1, 2, 3, 0, time.UTC),
 	}
 
-	var first, second bytes.Buffer
-	printSnapshots(&first, "req-probe", []snapshotRow{row})
-	printSnapshots(&second, "req-probe", []snapshotRow{row})
+	var first, second, firstNote, secondNote bytes.Buffer
+	printSnapshots(&first, &firstNote, "req-probe", []snapshotRow{row})
+	printSnapshots(&second, &secondNote, "req-probe", []snapshotRow{row})
 	if first.String() != second.String() {
 		t.Errorf("同一个骨架两次渲染不一样：\n%s\n---\n%s", first.String(), second.String())
 	}
@@ -523,7 +529,11 @@ func TestSnapshotRedactRejectsBadArgs(t *testing.T) {
 // TestRunSnapshotRedactPrintsSkeleton 是 redact 那条命令的判据。
 //
 // 三件事一起钉：用户内容不落进骨架、stdout 只有骨架本身（能直接接给 jq）、
-// 以及条件与那句提醒都在 stderr 上。
+// 以及方向、字节上限这些条件与条件的后果都在 stderr 上。
+//
+// 「这不是库里那条快照」那句只在 -v 下打（见 printRedaction）：它在每一次运行里
+// 都会出现，而每次都出现的那句解释读第二遍就没有信息了。所以它在这条用例里
+// 按两档判——默认那一档**不许有**，-v 那一档必须有。
 func TestRunSnapshotRedactPrintsSkeleton(t *testing.T) {
 	const secret = "这段提示词不该出现在骨架里"
 	body := fmt.Sprintf(`{"model":"probe-model","stream":true,
@@ -558,10 +568,24 @@ func TestRunSnapshotRedactPrintsSkeleton(t *testing.T) {
 			t.Errorf("stderr 里没有 %q：\n%s", want, info)
 		}
 	}
-	// 「这不是库里那条快照」必须说出来：两者在内容层面结论一致，
-	// 但字段集合不同，而看起来像同一个东西正是它会误导人的地方。
-	if !strings.Contains(info, "不是库里那条快照") {
-		t.Errorf("stderr 里没有说明这一条不是库里那条快照：\n%s", info)
+	// 默认那一档不打那句解释。
+	if strings.Contains(info, "不是库里那条快照") {
+		t.Errorf("那句解释只在 -v 下打，默认输出里不该有：\n%s", info)
+	}
+
+	// -v 那一档：这个产物与库里那条快照字段集合不同，看起来像同一个东西
+	// 正是它会误导人的地方，所以要问的时候答得出来。
+	withOSStdin(t, body)
+	var verboseErr error
+	withVerbose(t, true)
+	_, verboseInfo := captureStreams(t, func() {
+		verboseErr = runSnapshotRedact([]string{"--direction", "request"})
+	})
+	if verboseErr != nil {
+		t.Fatalf("redact -v 失败: %v", verboseErr)
+	}
+	if !strings.Contains(verboseInfo, "不是库里那条快照") {
+		t.Errorf("-v 下要说明这一条不是库里那条快照：\n%s", verboseInfo)
 	}
 }
 
@@ -857,7 +881,7 @@ func TestSnapshotGetWritesAccessLog(t *testing.T) {
 
 	const reason = "排查一次 500"
 	var runErr error
-	out, _ := captureStreams(t, func() {
+	out, note := captureStreams(t, func() {
 		runErr = runSnapshotGet([]string{
 			requestID, "--actor", username, "--reason", reason,
 		})
@@ -872,11 +896,19 @@ func TestSnapshotGetWritesAccessLog(t *testing.T) {
 		"direction=request", "direction=response",
 		"upstream_status=500", "error_kind=upstream_error",
 		"messages[0].content[0].text",
-		"skeleton_truncated=true", "降级成摘要层",
+		"skeleton_truncated=true",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("输出里没有 %q：\n%s", want, out)
 		}
+	}
+	// 「降级成摘要层」是那一行的**附注**，走 stderr：它在下面那条清单里，
+	// 与「这一行被截断了」是同一件事的两种说法，混在表格里会被 `| head` 接走。
+	if !strings.Contains(note, "降级成摘要层") {
+		t.Errorf("截断那句附注该走 stderr：\n%s", note)
+	}
+	if strings.Contains(out, "降级成摘要层") {
+		t.Errorf("截断那句附注混进了 stdout：\n%s", out)
 	}
 
 	// 访问日志：读了几行就写几行，字段都要对。

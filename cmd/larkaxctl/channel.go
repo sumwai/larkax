@@ -361,7 +361,10 @@ func runChannelUpdate(args []string) error {
 	if err := admin.Update(ctx, req); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(humanStdout(), "已更新渠道 %d。\n", req.ID)
+	// 写成功的回显走 stderr：stdout 只放能被下游脚本接走的值，而这条命令要改的
+	// 那一条是调用方自己用 --id 指定的，没有一个新值要给出去
+	// （见 docs/cli-output.md 的「提示与警告」）。
+	_, _ = fmt.Fprintf(humanStderr(), "已更新渠道 %d。\n", req.ID)
 	if req.Setting != nil && len(*req.Setting) > 0 {
 		printSettingUnreadNote(humanStderr())
 	}
@@ -375,8 +378,9 @@ func runChannelUpdate(args []string) error {
 // 的话没人会读，而它在库里、在清单上看起来都与一个生效的配置一模一样
 // （见 #360）。
 //
-// 走 stderr，与 create 的其余信息同一处：stdout 只放能被下一段脚本接走的
-// 那个值（create 是 ID，update 是一行结果），一句提示混进去会把它弄脏。
+// 走 stderr，与 create 的其余信息同一处：stdout 只放能被下一段脚本接走的值。
+// create 与 update 都没有新值要给出去（create 那个 ID 走 stdout 单独一行），
+// 所以两条命令的「已…」都只在 stderr 上出现一次。
 //
 // 措辞与「什么时候会变」取自 channel.SettingUnreadNote，不在这里另写一份：
 // 那段说明属于 channel 包（键归适配器解释是那条契约的一部分），而两处各写
@@ -471,7 +475,7 @@ func runChannelSetStatus(args []string, status string) error {
 	if err := channels.NewAdmin(db, nil, nil).SetStatus(ctx, *id, status); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(humanStdout(), "渠道 %d %s。\n", *id, done)
+	_, _ = fmt.Fprintf(humanStderr(), "渠道 %d %s。\n", *id, done)
 	return nil
 }
 
@@ -521,10 +525,10 @@ func runChannelDelete(args []string) error {
 		return err
 	}
 	if deleted {
-		_, _ = fmt.Fprintf(humanStdout(), "已删除渠道 %d。\n", *id)
+		_, _ = fmt.Fprintf(humanStderr(), "已删除渠道 %d。\n", *id)
 		return nil
 	}
-	_, _ = fmt.Fprintf(humanStdout(), "渠道 %d 已经是删除状态。\n", *id)
+	_, _ = fmt.Fprintf(humanStderr(), "渠道 %d 已经是删除状态。\n", *id)
 	return nil
 }
 

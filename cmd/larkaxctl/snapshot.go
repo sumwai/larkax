@@ -354,7 +354,7 @@ func runSnapshotRedact(args []string) error {
 	if err != nil {
 		return internalErr(fmt.Errorf("脱敏失败: %w", err))
 	}
-	return printRedaction(humanStdout(), humanStderr(), redactor, res)
+	return printRedaction(humanStdout(), humanStderr(), redactor, res, verboseOutput)
 }
 
 // readBoundedInput 把 r 整个读进内存，超过 limit 字节就报错。
@@ -385,7 +385,14 @@ func readBoundedInput(r io.Reader, limit int64) ([]byte, error) {
 // 这些是「读这个产物时的条件」，不是产物的一部分。截断与否取决于字节上限，
 // 而线上那个上限来自 settings——把它一起打出来，读的人才能判断那一行
 // truncated 说的到底是不是他关心的那件事。
-func printRedaction(out, info io.Writer, redactor *snapshot.Redactor, res *snapshot.Result) error {
+//
+// 「这是脱敏器对这段报文的结果、不是库里那条快照」只在 verbose 下打：它在
+// **每一次**运行里都会出现，而每次都出现的那句解释读第二遍就没有信息了
+// （见 docs/cli-output.md 的「提示与警告」）。要问「库里那条长什么样」的人
+// 加 -v。
+func printRedaction(out, info io.Writer, redactor *snapshot.Redactor, res *snapshot.Result,
+	verbose bool,
+) error {
 	_, _ = fmt.Fprintf(info, "表面=%s 方向=%s 骨架版本=%d 字节上限=%d 被截断=%t\n",
 		redactor.Surface(), redactor.Root(), res.Version, redactor.MaxBytes(), res.Truncated)
 	if res.Truncated {
@@ -401,8 +408,10 @@ func printRedaction(out, info io.Writer, redactor *snapshot.Redactor, res *snaps
 	_, _ = fmt.Fprintf(out, "%s\n", raw)
 
 	printRedactedPaths(info, "", res.Redacted)
-	_, _ = fmt.Fprintln(info, "注意：这是脱敏器对这段报文的结果，不是库里那条快照——")
-	_, _ = fmt.Fprintln(info, "      库里那条来自解析之后的请求/响应，字段集合与这里不完全一样。")
+	if verbose {
+		_, _ = fmt.Fprintln(info, "注意：这是脱敏器对这段报文的结果，不是库里那条快照——")
+		_, _ = fmt.Fprintln(info, "      库里那条来自解析之后的请求/响应，字段集合与这里不完全一样。")
+	}
 	return nil
 }
 
@@ -569,7 +578,7 @@ func runSnapshotGet(args []string) error {
 		if jsonOutput() {
 			return emitJSON(os.Stdout, snapshotsDoc(req.RequestID, rows), nil)
 		}
-		printSnapshots(humanStdout(), req.RequestID, rows)
+		printSnapshots(humanStdout(), humanStderr(), req.RequestID, rows)
 		return nil
 	})
 }
@@ -790,11 +799,14 @@ func decodeSkeleton(raw []byte) (map[string]any, error) {
 	return out, nil
 }
 
-// printSnapshots 把读回来的快照打到 w。
-func printSnapshots(w io.Writer, requestID string, rows []snapshotRow) {
-	_, _ = fmt.Fprintf(w, "请求 %s：%d 条快照\n", requestID, len(rows))
+// printSnapshots 把读回来的快照打到 out，附注（哪几条被降级了）打到 note。
+//
+// 两个流分开的理由与 printSnapshot 同一条：那几句是「这一行该怎么读」的
+// 附注，不是快照本身，而 stdout 上那份是要能接给 jq 的。
+func printSnapshots(out, note io.Writer, requestID string, rows []snapshotRow) {
+	_, _ = fmt.Fprintf(out, "请求 %s：%d 条快照\n", requestID, len(rows))
 	for i, row := range rows {
-		printSnapshot(w, i+1, row)
+		printSnapshot(out, note, i+1, row)
 	}
 }
 
@@ -822,30 +834,33 @@ func printSnapshots(w io.Writer, requestID string, rows []snapshotRow) {
 // 被降级成摘要层的骨架与一份完整的骨架在肉眼下长得一样，而前者会让人以为
 // 「上游就是只发了这些」。这一行不是排版，是这个数字唯一的出口。
 //
+// 它走 note（stderr）而不是 out：它是「这一行该怎么读」的附注，只在条件成立
+// （这一条真的降级了）时出现；而 out 上那份是快照本身，要能接给 jq。
+//
 // # 为什么这几行不改成表格
 //
 // 这段输出的主体是一段 JSON 骨架（见下面 skeleton 那几行），它进不了任何一张表。
 // 而上面那几栏本来就已经是「一栏一行」，不存在这一节要治的那个形态——超长单行
 // 键值拼接。所以这里按清单那一条约定只做**视觉重心**：方向是这条快照的身份，
 // 加粗；时刻置灰。
-func printSnapshot(w io.Writer, seq int, row snapshotRow) {
-	p := newPalette(w)
-	_, _ = fmt.Fprintf(w, "\n第 %d 条\n", seq)
-	_, _ = fmt.Fprintf(w, "  direction=%s\n", p.bold(row.Direction))
-	_, _ = fmt.Fprintf(w, "  created_at=%s\n",
+func printSnapshot(out, note io.Writer, seq int, row snapshotRow) {
+	p := newPalette(out)
+	_, _ = fmt.Fprintf(out, "\n第 %d 条\n", seq)
+	_, _ = fmt.Fprintf(out, "  direction=%s\n", p.bold(row.Direction))
+	_, _ = fmt.Fprintf(out, "  created_at=%s\n",
 		p.dim(row.CreatedAt.UTC().Format(time.RFC3339Nano)))
-	_, _ = fmt.Fprintf(w, "  skeleton_version=%d\n", row.SkeletonVersion)
-	_, _ = fmt.Fprintf(w, "  capture_mode=%s\n", row.CaptureMode)
-	_, _ = fmt.Fprintf(w, "  upstream_status=%s\n", upstreamStatusCell(row.Direction, row.UpstreamStatus))
-	_, _ = fmt.Fprintf(w, "  error_kind=%s\n", errorKindCell(row.Direction, row.ErrorKind))
-	_, _ = fmt.Fprintf(w, "  skeleton_truncated=%t\n", row.Truncated)
-	printRedactedPaths(w, "  ", row.RedactedPaths)
+	_, _ = fmt.Fprintf(out, "  skeleton_version=%d\n", row.SkeletonVersion)
+	_, _ = fmt.Fprintf(out, "  capture_mode=%s\n", row.CaptureMode)
+	_, _ = fmt.Fprintf(out, "  upstream_status=%s\n", upstreamStatusCell(row.Direction, row.UpstreamStatus))
+	_, _ = fmt.Fprintf(out, "  error_kind=%s\n", errorKindCell(row.Direction, row.ErrorKind))
+	_, _ = fmt.Fprintf(out, "  skeleton_truncated=%t\n", row.Truncated)
+	printRedactedPaths(out, "  ", row.RedactedPaths)
 
 	if row.Truncated {
-		_, _ = fmt.Fprintln(w,
-			"  注意：这条骨架被降级成摘要层了——超限时只留顶层标量，逐条消息与工具定义的细节都丢了。")
-		_, _ = fmt.Fprintln(w,
-			"        它与一份完整的骨架在肉眼下长得一样，别把「这里只有这些」读成「上游只发了这些」。")
+		_, _ = fmt.Fprintln(note,
+			"注意：这条骨架被降级成摘要层了——超限时只留顶层标量，逐条消息与工具定义的细节都丢了。")
+		_, _ = fmt.Fprintln(note,
+			"      它与一份完整的骨架在肉眼下长得一样，别把「这里只有这些」读成「上游只发了这些」。")
 	}
 
 	raw, err := json.MarshalIndent(row.Skeleton, "    ", "  ")
@@ -853,10 +868,10 @@ func printSnapshot(w io.Writer, seq int, row snapshotRow) {
 		// 骨架是从 jsonb 里解出来的，正常情况下序列化不了是不可能的。
 		// 不 panic：这条命令的价值在于把库里那条读出来，一格读不出来
 		// 不该把整条命令带走。
-		_, _ = fmt.Fprintf(w, "  skeleton：无法序列化（%v）\n", err)
+		_, _ = fmt.Fprintf(out, "  skeleton：无法序列化（%v）\n", err)
 		return
 	}
-	_, _ = fmt.Fprintf(w, "  skeleton:\n    %s\n", raw)
+	_, _ = fmt.Fprintf(out, "  skeleton:\n    %s\n", raw)
 }
 
 // printRedactedPaths 打印被替换掉的路径清单。

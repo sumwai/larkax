@@ -346,7 +346,7 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 			printSettingsList(w, []settings.Entry{{
 				Key: "billing.default_asset", Value: []byte(`"CNY"`),
 				Editable: true, UpdatedAt: at,
-			}})
+			}}, false)
 		}},
 		// 下面三条是这一轮补上的清单路径：原先只有渠道、模型、插件、计价规则、
 		// 别名、配置这几条，余额汇总与允许表是「本来就在打清单、只是没走表格」，
@@ -365,7 +365,7 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 			printAllowlists(w, snapshot.Surfaces(), snapshot.Roots())
 		}},
 		{"快照详情", func(w io.Writer) {
-			printSnapshot(w, 1, snapshotRow{
+			printSnapshot(w, io.Discard, 1, snapshotRow{
 				Direction: "response", CreatedAt: at, SkeletonVersion: 2,
 				CaptureMode: "full", Skeleton: map[string]any{"model": "model-x"},
 			})

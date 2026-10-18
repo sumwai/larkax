@@ -277,7 +277,7 @@ func runPriceUpdate(args []string) error {
 	if err := pricing.NewAdmin(db).Update(ctx, req); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(humanStdout(), "已更新计价规则 %d。\n", req.ID)
+	_, _ = fmt.Fprintf(humanStderr(), "已更新计价规则 %d。\n", req.ID)
 	return nil
 }
 
@@ -334,7 +334,7 @@ func runPriceSetEnabled(args []string, enable bool) error {
 		}); err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(humanStdout(), "计价规则 %d %s。\n", id, done)
+		_, _ = fmt.Fprintf(humanStderr(), "计价规则 %d %s。\n", id, done)
 		return nil
 	})
 }
