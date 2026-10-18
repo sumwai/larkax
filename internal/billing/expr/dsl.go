@@ -190,8 +190,25 @@ type runtime struct {
 	// 而账单要回答的正是「当时命中了哪一档」。
 	tierName string
 
+	// local 是本次求值解析出来的「当地」口径（地区时区、当地钟点、当地那
+	// 一天的日历属性），懒解析、解析一次就挂在这次求值的 runtime 上。
+	//
+	// 缓存它有两个用处。一是同一次求值只查一次日历：isWorkday() 被调两次时
+	// 原先查两次，而两次之间日历被改过的话，同一笔请求的两个判据会给出两个
+	// 答案。二是落库的 local_hour / is_off_day 与规则当时判的**是同一份值**——
+	// 同一个变量流下去的两条路（见 Result.LocalTime），而不是两处各算一遍。
+	local *localBasis
+
 	fixedAmount   float64
 	minimumAmount float64
+}
+
+// localBasis 是「当地」口径解析出来的一组值。
+type localBasis struct {
+	// hour 是 Env.At 在地区时区下的钟点（0–23）。
+	hour int
+	// info 是当地那一天在日历上的属性。
+	info DayInfo
 }
 
 // env 构造这一次求值传给 expr 的环境映射。
@@ -299,6 +316,17 @@ func (rt *runtime) env(u usageView) map[string]any {
 				// 而万一真到了这里，报「写法不成立」比报「日历不可用」更贴。
 				return false, err
 			}
+			// 峰谷量在哪个钟表上，要有一份写得清的当地依据：窗口按**当地**
+			// 零点起算，而复算那两列（local_hour / is_off_day）取的正是这一份
+			// （见 Result.LocalTime）。在这里解析而不是等结算那一侧补，是因为
+			// 「At 折成当地哪一天」这一步只有求值这一处做得了——在别处重写
+			// 一遍就是把一条计费判据抄成两份。
+			//
+			// 它排在 window 解析之后：写法错要报「写法不成立」（见上），
+			// 这个先后次序不因为这里多一步而改变。
+			if _, localErr := rt.resolveLocal(); localErr != nil {
+				return false, localErr
+			}
 			return rt.calendar.Peak(rt.region, rt.at, windows)
 		},
 
@@ -328,33 +356,63 @@ func (rt *runtime) raise(old, fresh float64) float64 {
 	return math.Max(old, fresh)
 }
 
-// dayInfo 取 Env.At 在 Env.Region 下的日历日，再去查日历。
+// dayInfo 取本次求值的「当地日」在日历上的属性。
 //
-// 三件事都在 Go 侧完成，规则作者只写 isWorkday()：
+// 折时区、取日期那几步在 resolveLocal 里：它与落库的 local_hour / is_off_day
+// 共用同一份解析结果，所以规则判出来的那一天与写进库的那一天必然是同一个。
+func (rt *runtime) dayInfo() (DayInfo, error) {
+	b, err := rt.resolveLocal()
+	if err != nil {
+		return DayInfo{}, err
+	}
+	return b.info, nil
+}
+
+// resolveLocal 解析本次求值的「当地」口径：地区时区、那个时刻的当地钟点、
+// 当地的那一天，以及那一天在日历上的属性。
+//
+// 四步都在 Go 侧完成，规则作者只写 isWorkday()：
 //
 //  1. 时区取自 Calendar.TimeZone(Region)——「当地几点」是地区属性；
-//  2. 用该时区把 At 折成当地的年月日，做成一个零点的日期；
-//  3. 查 Calendar.DayInfo(Region, 那一天)。
+//  2. 用该时区把 At 折成当地的钟点与年月日；
+//  3. 把当地那一天做成一个零点的日期；
+//  4. 查 Calendar.DayInfo(Region, 那一天)。
 //
 // 为什么地区与时区分开：它们回答不同的问题。地区决定「那边的日历怎么排」，
 // 时区决定「现在几点」。让规则写 isWorkday("Asia/Shanghai") 会逼作者记住
 // 「上海对应 CN」；让作者自己写地区则连「这个地区用哪个时区」都得他知道，
 // 而那正是 Calendar 能回答的。
-func (rt *runtime) dayInfo() (DayInfo, error) {
+//
+// # 只解析一次，结果挂在这次求值的 runtime 上
+//
+// 一次求值里 isWorkday / isHoliday / isPeak 可能问的是同一件事。解析结果缓存
+// 在 rt.local 上，于是同一次求值只查一次日历，而回传给结算、最终落进
+// usage_events.local_hour / is_off_day 的那两个值就是这里解析出来的这一份
+// （见 Result.LocalTime）——复算要能看出当时那一档是怎么选出来的。
+func (rt *runtime) resolveLocal() (localBasis, error) {
+	if rt.local != nil {
+		return *rt.local, nil
+	}
 	if err := rt.requireCalendar(); err != nil {
-		return DayInfo{}, err
+		return localBasis{}, err
 	}
 	tz, err := rt.calendar.TimeZone(rt.region)
 	if err != nil {
-		return DayInfo{}, err
+		return localBasis{}, err
 	}
 	loc, err := loadLocation(tz)
 	if err != nil {
-		return DayInfo{}, err
+		return localBasis{}, err
 	}
 	local := rt.at.In(loc)
 	day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.UTC)
-	return rt.calendar.DayInfo(rt.region, day)
+	info, err := rt.calendar.DayInfo(rt.region, day)
+	if err != nil {
+		return localBasis{}, err
+	}
+	b := localBasis{hour: local.Hour(), info: info}
+	rt.local = &b
+	return b, nil
 }
 
 // requireCalendar 检查规则要用日历时的两个前提。
