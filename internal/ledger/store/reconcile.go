@@ -576,10 +576,17 @@ func (s *Store) Reconcile(ctx context.Context, cfg ReconcileConfig, alert Alert)
 		_ = s.finishReconcileRun(ctx, report, err)
 		return report, err
 	}
-	// 这一支是防御性的：这条路走到这里时 cause 为 nil，status 只会写成
-	// 'done'，与 reconcile_runs 表上的 CHECK 不冲突，运行记录那一行也刚
-	// 由 beginReconcileRun 插进去。唯一能让它返错的是那次 UPDATE 自己失败
-	// （连接断了之类），而那不是任何输入能造出来的形状——别为它编一条用例。
+	// 这一支是防御性的：走到这里时 cause 为 nil，status 只会写成 'done'，
+	// 与 reconcile_runs 表上的 CHECK 不冲突，运行记录那一行也刚由
+	// beginReconcileRun 插进去。能让它返错的只有那次 UPDATE 自己失败。
+	//
+	// 「只有库那边写不进去才会返错」**不等于**「造不出用例来」：那次 UPDATE
+	// 失败是**数据库侧**的故障（连接断了、写被拒），不是应用层的输入，所以
+	// 造它要从库那一侧下手，而那是造得出来的——见 reconcile_test.go 的
+	// TestReconcileReportsFailureToWriteRunOutcome，它挂一个
+	// `BEFORE UPDATE … RAISE EXCEPTION` 的触发器把这一支逼出来。
+	// 别再用「没有输入分得出它」当作不写用例的理由：返错与不返错之间差的是
+	// 这一轮到底成没成（(report, err) 与 (report, nil)）。
 	if err := s.finishReconcileRun(ctx, report, nil); err != nil {
 		return report, err
 	}

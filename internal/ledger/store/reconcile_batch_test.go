@@ -20,6 +20,11 @@ import (
 // 以及与资产无关的那一侧，都要能被看出来。`{3, CNY}` 同时出现在两份 map 里，
 // 期望值里它只算一次——取并集时漏掉去重也会让这条用例红。
 //
+// 两条等价变异（gremlins CONDITIONALS_BOUNDARY，把 unionKeys 那个比较器里两处
+// `<` 改成 `<=`）：第一支只在两个 user_id 不等时进得来、第二支只在它们相等时
+// 进得来，而键来自 map（同一用户的 asset 互不相同），两侧永远不等——`<` 与
+// `<=` 逐点相同，没有输入分得出这两版。
+//
 // 这一条不需要数据库：unionKeys 只碰传进来的三份 map。
 func TestUnionKeysOrdersDeterministically(t *testing.T) {
 	wallets := map[userAsset]walletSnapshot{
