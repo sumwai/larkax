@@ -1,6 +1,9 @@
 # larkax 文档索引
 
-本目录的文档面向**参与开发的人**，全部是中文。[README](../README.md) 是英文的，
+本目录的文档全部是中文。其中四份是**调用方契约**，写给接这个服务的人，
+只是目前没有英文版：[limits.md](limits.md)、[max-tokens.md](max-tokens.md)、
+[idempotency.md](idempotency.md)、[versioning.md](versioning.md)，就在下面
+「接调用方」那一组里。其余面向**参与开发的人**。[README](../README.md) 是英文的，
 它自带一条从克隆到一次真实调用的最短路径（Quickstart），只想把服务跑起来的人
 不必读这里。
 

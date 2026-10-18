@@ -14,10 +14,24 @@ health, latency, cost, and quota; usage is metered and billed per request.
 
 From a clone to a real completion. It needs an upstream account of your own —
 larkax ships no upstream, and `https://api.example.com/v1` below is a placeholder
-you replace with yours. The last step is a real `200` from a real model.
+you replace with yours. Step 6 is a real `200` from a real model; step 7 says which
+link is missing when it is not.
 
 Prerequisites: Go 1.26 or newer, Docker with `docker compose` v2.1 or newer,
 `make`, and `openssl` (`make` generates the master key with it).
+
+Three ports have to be free, each with a variable that moves it:
+
+| what | default | change it with |
+|---|---|---|
+| the inference API | `8080` | `LARKAX_HTTP_ADDR` |
+| health and metrics | `9090` | `LARKAX_INTERNAL_ADDR` |
+| the PostgreSQL container | `5432` | `PG_PORT` |
+
+`make run` pre-checks the first two only, so a busy `5432` gets past it and fails
+later, inside `docker compose up`, with a different bind error. The two HTTP
+defaults are `127.0.0.1:8080` and `127.0.0.1:9090`; those variables take a full
+`host:port`, as in `LARKAX_HTTP_ADDR=127.0.0.1:8081 make run`.
 
 **The command output is Chinese today.** The commands, the exit codes and the
 printed values are stable; the prose around them is not translated yet.
@@ -36,10 +50,8 @@ It ends with a line naming the public address:
 time=2026-10-18T10:00:00.000+08:00 level=INFO msg=开始监听 server=public addr=127.0.0.1:8080
 ```
 
-Everything below assumes the default ports — `8080` for the inference API, `9090`
-for health and metrics. If either is taken, `make run` stops before starting and
-names the variable to change (`LARKAX_HTTP_ADDR=127.0.0.1:8081 make run`); the
-ports in the commands below then have to change with it.
+Everything below assumes the default ports, `8080` and `9090`; if either one
+changes, the ports in the commands below have to change with it.
 
 Leave `make run` in that shell and use a second one for the rest.
 
@@ -49,19 +61,25 @@ curl -i 127.0.0.1:9090/healthz                # 200
 curl -s 127.0.0.1:9090/readyz                 # {"checks":{"postgres":"ok"},"ready":true}
 curl -i 127.0.0.1:8080/v1/chat/completions    # 405 — the inference paths are POST
 
-# 3. Which model ids does your upstream actually serve? Step 4 needs one of those
-#    ids; the name on the vendor's page is often not it.
-curl -s https://api.example.com/v1/models -H "Authorization: Bearer $UPSTREAM_KEY"
+# 3. The upstream credential, and the model ids your upstream actually serves.
+#    The credential is the API key from your account on the vendor's side; it goes
+#    to `~/upstream-key.txt`, outside the clone (a credential inside the working
+#    tree can be committed by accident), and step 4 reads it from there. Step 4
+#    also needs one of the ids below; the vendor's page name is often not it.
+printf '%s\n' '<your-upstream-key>' > ~/upstream-key.txt
+curl -s https://api.example.com/v1/models \
+  -H "Authorization: Bearer $(cat ~/upstream-key.txt)"
 
 # 4. A canonical model, a channel to the upstream, the alias mapping one to the
 #    other, and a price. The canonical name is the key routing and billing both use,
 #    and it is what the request body sends.
+#    `--context-limit` comes from step 3: the upstream model's `context_window`.
 go run ./cmd/larkaxctl model create --model claude-x --display 'Example model' \
   --vendor example --context-limit 200000 --tools --vision
 
 # Credentials never go on the command line — they would land in `ps` and in shell
 # history — so they come from a file or from the environment.
-cat upstream-key.txt | go run ./cmd/larkaxctl channel create \
+cat ~/upstream-key.txt | go run ./cmd/larkaxctl channel create \
   --name my-upstream --type openai --base-url https://api.example.com/v1 \
   --models claude-x --credential-stdin
 
@@ -115,15 +133,23 @@ go run ./cmd/larkaxctl doctor
 #    --live. The wallet check passes only after step 5 credited it.
 ```
 
-`503 no available upstream for the requested model` is the answer when the names do
-not line up. It does not say which name was wrong; `larkaxctl doctor` does — it
-names the channel and the name, at whichever of its checks 3, 4 and 5 is failing.
+When the names do not line up, which answer you get depends on which link is
+missing, and the answer never says which name was wrong — `larkaxctl doctor` does,
+and it names both the channel and the name. A model no channel serves is check 3
+there, and the request gets `503 no available upstream for the requested model`.
+A missing alias is check 4 and a missing price rule is check 5; both come back
+as `500 internal error`: from the request's side they are our configuration.
+
 That command also answers "did my money move": the credit and the cost are both
 ledger entries, and `larkaxctl ledger balance --account user:1` reads them back.
+The `1` is the user id that `user create` printed in step 5 — the first user in a
+fresh database.
 
-The same chain at length, and every other document under `docs/`, is Chinese —
-those are written for contributors. [docs/development.md](docs/development.md) is
-the entry point, and [docs/README.md](docs/README.md) indexes the rest.
+The same chain at length, and everything else under `docs/`, is Chinese. Four of
+those documents are written for callers rather than contributors — `limits.md`,
+`max-tokens.md`, `idempotency.md` and `versioning.md` — and there is no English
+version of them yet. [docs/development.md](docs/development.md) is the entry point
+for contributors; [docs/README.md](docs/README.md) indexes the whole directory.
 
 ## Status
 
