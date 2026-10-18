@@ -532,6 +532,45 @@ else
   ok
 fi
 
+# 16b. 一个包的结果不可信，**不该把其余包的存活清单一起吃掉**（#566）。
+#
+#      清单说的是所有包，而「这一包不可信」说的是一个包。
+#      清单若排在那个判定之后，一个包的坏结果就会把其余所有包的清单一起吃掉。
+#      实测一轮全量：store 那一包整包超时之后，屏幕上只剩一个 ⚠ 和汇总表，
+#      而其余 11 个包两百余条存活一条都没打印出来——那一轮独占机器跑了一小时。
+#
+#      桩件看包名作答。store 那一包故意超时超限，money 那一包照常吐一条存活——
+#      这样一次运行里就同时有「不可信的包」与「有存活的好包」。
+stub_mixed="$tmp/gremlins-mixed"
+{
+  stub_head
+  cat <<'EOF'
+case "$*" in
+  *ledger/store*)
+    echo "Killed: 3, Lived: 1, Not covered: 9"
+    echo "Timed out: 282, Not viable: 0, Skipped: 0"
+    echo "Test efficacy: 75.00%"
+    ;;
+  *)
+    echo " LIVED CONDITIONALS_BOUNDARY at money.go:103:8"
+    echo "Killed: 8, Lived: 1, Not covered: 3"
+    echo "Timed out: 0, Not viable: 0, Skipped: 0"
+    echo "Test efficacy: 88.89%"
+    ;;
+esac
+EOF
+} > "$stub_mixed"
+chmod +x "$stub_mixed"
+run "$stub_mixed" "$tmp/lock16b" money ledger/store
+rc=$?
+# 判定本身没变：结果不可信仍然要失败、要被看见。
+if [ "$rc" -eq 1 ]; then ok; else bad "有包不可信 —— 应失败，实际退出码 $rc"; dump; fi
+grep -q '不可信' "$last_out" || bad "有包不可信 —— 要报出是这个原因"
+# 而清单照打：好包那一条是这一轮唯一的产出，丢了就只能重跑。
+grep -q '存活的变异' "$last_out" || bad "有包不可信 —— 存活清单仍然要打印（#566）"
+grep -q 'internal/money  CONDITIONALS_BOUNDARY at money.go:103:8' "$last_out" \
+  || bad "有包不可信 —— 好包那一条存活要出现在清单里"
+
 # ── 「这把尺子」：版本与变异器集合 ────────────────────────────────────────
 #
 # 这一组是本轮补上的。理由：efficacy 的分母是变异体数，而分母由 gremlins 的
