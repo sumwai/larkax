@@ -193,7 +193,7 @@ func TestObserveRequestUsesContextBackground(t *testing.T) {
 
 // ObserveRequest 的三个参数**各自**都要算进去。
 //
-// 变异：`messages > 0`（157 行）与 `tools > 0`（160 行）两处，`>` 改成 `>=`
+// 变异：`messages > 0`（155 行）与 `tools > 0`（158 行）两处，`>` 改成 `>=`
 // 都是**等价变异**：两版只在计数正好为 0 那一格分岔，而那一格加的是
 // `0 × 框架费`，本来就是 0，加与不加同值。这两处杀不掉，理由在值上，
 // 不是「想不到输入」。
@@ -258,9 +258,6 @@ func TestObserveRequestCountsEachParameterSeparately(t *testing.T) {
 //     第二个 `||` 那一版不计。
 //   - 第二个 `if` 的 `||` 改成 `&&`：只给其中一个时，id 与 name 拼起来
 //     那一份正文整段不计（框架费照旧）。
-//
-// 另有一处同段的 `e.toolCalls++` 改成 `--` 是**等价变异**：那个字段全仓
-// 一个读点都没有（只有这一行在写），反着走也看不出来。
 func TestObserveToolCallCountsPartialInput(t *testing.T) {
 	const model = "claude-placeholder"
 	// 框架费是常量，正文那份走估算（这里传 nil 计数器）——两段都是具体的数。
