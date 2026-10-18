@@ -15,6 +15,28 @@ import (
 	"github.com/sumwai/larkax/internal/config"
 )
 
+// modelHelp 是 model 的两版帮助文本（见 helpText）。
+var modelHelp = helpText{short: modelShortUsage, long: modelUsage}
+
+// modelShortUsage 是 model 的短版：`-h` / `--help` 与参数写错时打的那一份。
+const modelShortUsage = `larkaxctl model 管理模型目录里的规范模型。
+
+用法：
+  larkaxctl model create --model <规范名> --display <展示名> [字段见下]
+  larkaxctl model list
+  larkaxctl model get --model <规范名>
+  larkaxctl model update --model <规范名> [与 create 相同的字段]
+  larkaxctl model delete --model <规范名>
+
+create / update 的字段：--vendor、--family、三个 limit、六个能力标志
+（--reasoning … --batch，各有三态）、--input-modalities 等。
+
+规范名是选路与计费共用的键，建了就不能改；delete 只在无人引用时允许。
+
+更细的边界：larkaxctl help model。
+`
+
+// modelUsage 是 model 的长版：`larkaxctl help model` 与 `model help`。
 const modelUsage = `larkaxctl model 管理模型目录里的规范模型。
 
 用法：
@@ -47,8 +69,7 @@ create 的 stdout 只有新模型的 ID，其余信息走 stderr。
 
 **六个能力标志各有三态**：不给 = 未知（库里是 NULL）、给 = 支持、
 --tools=false = 明确声明不支持。三者在选路时处置不同：未知与支持放行，
-不支持会让用到那一项的请求选不到这个模型。所以 create 时没给的开关落库是 NULL
-而不是 false——那是「还没配过」，不是「配了说不支持」。
+不支持会让用到那一项的请求选不到这个模型。
 
 **判断一条记录配没配过，看 list / get 的那一栏**：没配过的项在 list 里不列
 （六项都没配过时打 -），get 里逐项打出「未知 / 支持 / 不支持」。
@@ -90,12 +111,15 @@ model get，--canonical 等同于 --model。它们保留是为了不让已经在
 
 **六个能力标志（--reasoning 那六个）不开简写**：它们各有三态（不给 = 未知、
 给 = 支持、=false = 明确不支持），缩成一个字母之后「没给」与「给了 false」
-更容易看混，而这两件事在选路上的处置相反。--ctx / --in / --out / --im / --om 是纯粹的两三个词缩成一节，没有第二种读法。
+更容易看混，而这两件事在选路上的处置相反。--ctx / --in / --out / --im / --om
+是纯粹的两三个词缩成一节，没有第二种读法。
+
+更细的约定见 docs/cli-reference.md 的「model」一节。
 `
 
 func runModel(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, modelUsage)
+		printUsage(os.Stderr, modelShortUsage)
 		return usageErr(errors.New("model 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -111,11 +135,11 @@ func runModel(args []string) error {
 		return runModelUpdate(rest)
 	case "delete":
 		return runModelDelete(rest)
-	case "help", "-h", "--help":
-		fmt.Print(modelUsage)
+	case "-h", "--help":
+		printUsage(os.Stdout, modelShortUsage)
 		return nil
 	default:
-		fmt.Fprint(os.Stderr, modelUsage)
+		printUsage(os.Stderr, modelShortUsage)
 		return usageErr(fmt.Errorf("未知的 model 子命令 %q", action))
 	}
 }
@@ -152,7 +176,7 @@ func runModelCreate(args []string) error {
 
 func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
 	fs := flag.NewFlagSet("model create", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, modelUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "", "规范模型名，选路与计费共用的键")
 	stringAlias(fs, canonical, "m", sameAs("model"))
 	display := fs.String("display", "", "给人看的展示名")
@@ -376,7 +400,7 @@ var (
 
 func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabilityFlag, error) {
 	fs := flag.NewFlagSet("model update", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, modelUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "", "要改的规范模型名（它本身不可改）")
 	stringAlias(fs, canonical, "m", sameAs("model"))
 	display := fs.String("display", "", "展示名")
@@ -492,7 +516,7 @@ func runModelDelete(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("model delete", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, modelUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "", "要删的规范模型名")
 	stringAlias(fs, canonical, "m", sameAs("model"))
 	if err := fs.Parse(args); err != nil {
@@ -532,7 +556,7 @@ func runModelDelete(args []string) error {
 // 能证明，而这里正是那个读回来的一端。
 func runModelGet(args []string) error {
 	fs := flag.NewFlagSet("model get", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, modelUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "", "要看的规范模型名")
 	stringAlias(fs, canonical, "m", sameAs("model"))
 	if err := fs.Parse(args); err != nil {
@@ -571,7 +595,7 @@ func runModelGet(args []string) error {
 
 func runModelList(args []string) error {
 	fs := flag.NewFlagSet("model list", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, modelUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}

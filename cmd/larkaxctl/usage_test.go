@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -155,7 +158,7 @@ func TestCommandNamesAreUnique(t *testing.T) {
 }
 
 // TestEveryFirstLevelCommandHasSomethingToSay 断言每条一级命令都有两句话：
-// 根页面上的那一句，以及它自己的 --help 正文。
+// 根页面上的那一句，以及它自己的帮助正文。
 //
 // 漏掉的是新加一条命令时最容易被忘的那一件：注册表里能跑（run 有值）、
 // 页面上有一行（summary 有值），一敲 `larkaxctl <新命令> --help` 却什么都
@@ -166,14 +169,14 @@ func TestEveryFirstLevelCommandHasSomethingToSay(t *testing.T) {
 			if strings.TrimSpace(c.summary) == "" {
 				t.Errorf("%s（%s 组）在根页面上没有说明", c.name, g.title)
 			}
-			if strings.TrimSpace(c.help) == "" {
-				t.Errorf("%s 没有 --help 正文", c.name)
+			if strings.TrimSpace(c.help.long) == "" {
+				t.Errorf("%s 没有帮助正文", c.name)
 				continue
 			}
 			// 第一行要点出它自己是谁：一份没头没尾的用法文本，多半是从别处
 			// 抄来忘了改的。
-			if first := strings.SplitN(c.help, "\n", 2)[0]; !strings.Contains(first, "larkaxctl "+c.name) {
-				t.Errorf("%s 的 --help 第一行没有点出这条命令：%q", c.name, first)
+			if first := strings.SplitN(c.help.long, "\n", 2)[0]; !strings.Contains(first, "larkaxctl "+c.name) {
+				t.Errorf("%s 的帮助正文第一行没有点出这条命令：%q", c.name, first)
 			}
 		}
 	}
@@ -300,11 +303,252 @@ func TestRootUsagePointerTargetsWork(t *testing.T) {
 		if err != nil {
 			t.Fatalf("larkaxctl help %s 出错: %v（stderr=%q）", name, err, stderr)
 		}
-		if !strings.Contains(stdout, c.help) {
+		if !strings.Contains(stdout, c.help.long) {
 			t.Errorf("larkaxctl help %s 没打出那条命令的帮助正文，stdout=%q", name, stdout)
 		}
 		if strings.TrimSpace(stdout) == strings.TrimSpace(usage) {
 			t.Errorf("larkaxctl help %s 打的是根帮助页——指针指向了自己", name)
+		}
+	}
+}
+
+// ── 子命令帮助：两版各自要守的东西 ──────────────────────────────────────
+//
+// 一条命令的帮助原先只有一份：`-h` 打的就是那一整份，doctor 77 行、price 84 行，
+// 其中过半是设计说明。现在按**要帮助的方式**分成两版——短版回答「有哪些动作、
+// 参数怎么给」，长版再把边界说完，设计说明则搬去 docs/cli-reference.md。
+//
+// 这一组用例钉的正是「分开了，而且各自守住了本分」：预算（短版一屏之内）、
+// 首行（点出自己是谁）、指针（短版要指向长版）、两级可达（两种写法都打长版），
+// 以及两版都不给用户看设计理由。分开之后**悄悄退回一份**是最省事的走法：新加
+// 一条命令时把长版复制给短版，谁也看不出来。
+
+// shortUsageMaxLines 是短版的行数上限：一屏之内。
+const shortUsageMaxLines = 18
+
+// checkShortUsage 检查一份短版该有的三件事：非空、一屏之内、首行点出自己是谁。
+//
+// 抽出来是因为一级命令与三个二级命令组共用同一套判据——两处各写一遍的话，
+// 其中一处松掉在输出上看不出来。
+func checkShortUsage(t *testing.T, what, name, short string) {
+	t.Helper()
+
+	if strings.TrimSpace(short) == "" {
+		t.Fatalf("%s 没有短版：`-h` 会什么都打不出来", what)
+	}
+	lines := strings.Split(strings.TrimSpace(short), "\n")
+	if len(lines) > shortUsageMaxLines {
+		t.Errorf("%s 的短版 %d 行，超过一屏的 %d 行", what, len(lines), shortUsageMaxLines)
+	}
+	if !strings.Contains(lines[0], "larkaxctl "+name) {
+		t.Errorf("%s 的短版首行没有点出这条命令：%q", what, lines[0])
+	}
+}
+
+// TestSubcommandShortUsageFitsOneScreen 断言每条一级命令的短版非空、首行点出
+// 自己是谁、不超过 18 行，并且没有退化成与长版逐字相同的一份。
+func TestSubcommandShortUsageFitsOneScreen(t *testing.T) {
+	for _, g := range commandGroups {
+		for _, c := range g.commands {
+			t.Run(c.name, func(t *testing.T) {
+				checkShortUsage(t, c.name, c.name, c.help.short)
+
+				if strings.TrimSpace(c.help.short) == strings.TrimSpace(c.help.long) {
+					t.Errorf("%s 的长版与短版逐字相同：分层没有发生", c.name)
+				}
+			})
+		}
+	}
+}
+
+// TestSubcommandShortUsagePointsToLongVersion 断言每条短版都给出了长版的去向：
+// 一份摘要的最后一行如果说不出「其余的在哪」，读的人只能猜。
+func TestSubcommandShortUsagePointsToLongVersion(t *testing.T) {
+	for _, g := range commandGroups {
+		for _, c := range g.commands {
+			if pointer := "larkaxctl help " + c.name; !strings.Contains(c.help.short, pointer) {
+				t.Errorf("%s 的短版没有指向长版（应含 %q）", c.name, pointer)
+			}
+		}
+	}
+}
+
+// TestSubcommandHelpHasTwoLevels 断言两级都走得通，且走的是各自该走的那一版：
+//
+//   - `larkaxctl help <命令>` 与 `<命令> help` 打长版；
+//   - `-h` / `--help` 打短版。
+//
+// 分开两条路而不是只比注册表里那两份文本，是因为「哪条路给哪一版」是分派与
+// 各命令的参数解析合起来决定的：注册表里两份都在，路上却可能两个写法都打短版。
+func TestSubcommandHelpHasTwoLevels(t *testing.T) {
+	for _, g := range commandGroups {
+		for _, c := range g.commands {
+			t.Run(c.name, func(t *testing.T) {
+				for _, args := range [][]string{{"help", c.name}, {c.name, "help"}} {
+					var err error
+					stdout, stderr := captureStreams(t, func() { err = dispatch(args) })
+					if err != nil {
+						t.Fatalf("%v 出错: %v（stderr=%q）", args, err, stderr)
+					}
+					if !strings.Contains(stdout, c.help.long) {
+						t.Errorf("%v 打的不是长版，stdout=%q", args, stdout)
+					}
+				}
+
+				var err error
+				stdout, stderr := captureStreams(t, func() { err = c.run([]string{"--help"}) })
+				if err != nil && !helpRequested(err) {
+					t.Fatalf("%s --help 报错了: %v", c.name, err)
+				}
+				if out := stdout + stderr; !strings.Contains(out, c.help.short) {
+					t.Errorf("%s --help 打的不是短版：stdout=%q stderr=%q", c.name, stdout, stderr)
+				}
+			})
+		}
+	}
+}
+
+// subGroupHelpCase 是三个「命令组下的命令组」：它们的帮助比一级命令低一层，
+// 但读者分不出这个差别——`price calendar --help` 与 `price --help` 是同一种
+// 请求。所以它们同样分两版，同样受预算与指针的约束。
+//
+// 指针那一栏写成三级的写法（`… rotate help`），因为它**真的走得通**：一级命令的
+// `help` 在分派那一处收掉，二级的在自己那层收。指向一条走不通的写法比不写更坏。
+type subGroupHelpCase struct {
+	what    string
+	short   string
+	long    string
+	pointer []string
+}
+
+var subGroupHelpCases = []subGroupHelpCase{
+	{"secret rotate", rotateShortUsage, rotateUsage, []string{"secret", "rotate", "help"}},
+	{"price calendar", priceCalendarShortUsage, priceCalendarUsage, []string{"price", "calendar", "help"}},
+	{"maintenance idempotency", maintenanceIdempotencyShortUsage, maintenanceIdempotencyUsage,
+		[]string{"maintenance", "idempotency", "help"}},
+}
+
+// TestSubGroupHelpKeepsTheSameShape 断言二级命令组的帮助与一级命令同一套规矩：
+// 短版一屏之内、首行点出自己是谁，`<那一组> help` 打出长版。
+func TestSubGroupHelpKeepsTheSameShape(t *testing.T) {
+	for _, tc := range subGroupHelpCases {
+		t.Run(tc.what, func(t *testing.T) {
+			checkShortUsage(t, tc.what, tc.what, tc.short)
+
+			if strings.TrimSpace(tc.short) == strings.TrimSpace(tc.long) {
+				t.Errorf("%s 的长版与短版逐字相同：分层没有发生", tc.what)
+			}
+
+			var err error
+			stdout, stderr := captureStreams(t, func() { err = dispatch(tc.pointer) })
+			if err != nil {
+				t.Fatalf("%v 出错: %v（stderr=%q）——短版指的这条路走不通", tc.pointer, err, stderr)
+			}
+			if !strings.Contains(stdout, tc.long) {
+				t.Errorf("%v 打的不是长版，stdout=%q", tc.pointer, stdout)
+			}
+		})
+	}
+}
+
+// TestSubcommandHelpHasNoDesignRationale 断言两版帮助都不含设计理由标记词。
+//
+// 词表与根帮助页共用一份（见 rootUsageDesignReasonMarkers）：某个字段为什么必填、
+// 别家工具怎么做这类话，对跑命令的人当下没用；它们的家是 docs/cli-reference.md。
+// 短版里出现它们说明这一版又长回去了，长版里出现说明说明文字没搬走。
+func TestSubcommandHelpHasNoDesignRationale(t *testing.T) {
+	for _, tc := range helpTextsForGate() {
+		for _, marker := range rootUsageDesignReasonMarkers {
+			if strings.Contains(tc.text, marker) {
+				t.Errorf("%s 出现了设计理由标记词 %q", tc.what, marker)
+			}
+		}
+	}
+}
+
+// helpTextsForGate 是这几道门管辖的全部文本：一级命令的短版与长版，加上三个
+// 二级命令组的短版与长版。
+//
+// 抽成一份是因为「管哪些文本」这件事本身就是判据的一部分：另写几份清单的话，
+// 新加一条命令或一个命令组时，漏掉的那一份不会报错，只会安静地少管一段文本。
+func helpTextsForGate() []struct{ what, text string } {
+	var texts []struct{ what, text string }
+	for _, g := range commandGroups {
+		for _, c := range g.commands {
+			texts = append(texts,
+				struct{ what, text string }{c.name + " 的短版", c.help.short},
+				struct{ what, text string }{c.name + " 的长版", c.help.long},
+			)
+		}
+	}
+	for _, tc := range subGroupHelpCases {
+		texts = append(texts,
+			struct{ what, text string }{tc.what + " 的短版", tc.short},
+			struct{ what, text string }{tc.what + " 的长版", tc.long},
+		)
+	}
+	return texts
+}
+
+// docPointerRE 认长版末尾那条去向：`docs/cli-reference.md 的「xxx」一节`。
+var docPointerRE = regexp.MustCompile(`docs/cli-reference\.md 的「([^」]+)」一节`)
+
+// TestHelpPointersTargetRealDocSections 钉住长版末尾那条去向真的落在文档里。
+//
+// 帮助里写着「更细的约定见 docs/cli-reference.md 的「doctor」一节」，而那一节的名字
+// 是手抄进帮助文本的：文档里改了标题、或者抄错一个词，指针就指向空气——比不写更坏，
+// 因为照它去找的人会以为自己找错了地方。
+func TestHelpPointersTargetRealDocSections(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "cli-reference.md"))
+	if err != nil {
+		t.Fatalf("读不到 docs/cli-reference.md：%v", err)
+	}
+	doc := string(raw)
+
+	checked := 0
+	for _, tc := range helpTextsForGate() {
+		if !strings.HasSuffix(tc.what, "的长版") {
+			continue
+		}
+		m := docPointerRE.FindStringSubmatch(tc.text)
+		if m == nil {
+			t.Errorf("%s 末尾没有给出去向（应写「见 docs/cli-reference.md 的「<节名>」一节」）", tc.what)
+			continue
+		}
+		if section := m[1]; !strings.Contains(doc, "#### `"+section+"`") {
+			t.Errorf("%s 指向文档里的「%s」一节，而文档里没有这一节", tc.what, section)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("一条去向都没检查到：这一条会安静地通过，所以先在这里拦住")
+	}
+}
+
+// TestQuietDoesNotSuppressHelp 钉住既有行为：`-q` 压的是「给人看」那一档的
+// 输出，而帮助是使用者主动要的，短版长版都照打。
+//
+// 这一条容易在收口时丢掉：帮助文本一旦改走 humanStdout()，`larkaxctl -q help
+// doctor` 就会安静地什么都不打——而那正是最需要它的人（脚本作者）会遇到的情形。
+func TestQuietDoesNotSuppressHelp(t *testing.T) {
+	quietOutput = true
+	t.Cleanup(func() { quietOutput = false })
+
+	for _, tc := range []struct {
+		what     string
+		args     []string
+		contains string
+	}{
+		{"长版", []string{"help", "channel"}, channelUsage},
+		{"短版", []string{"channel", "--help"}, channelShortUsage},
+	} {
+		var err error
+		stdout, stderr := captureStreams(t, func() { err = dispatch(tc.args) })
+		if err != nil && !helpRequested(err) {
+			t.Fatalf("%v 报错了: %v", tc.args, err)
+		}
+		if out := stdout + stderr; !strings.Contains(out, tc.contains) {
+			t.Errorf("--quiet 把 %s 帮助压掉了：stdout=%q stderr=%q", tc.what, stdout, stderr)
 		}
 	}
 }

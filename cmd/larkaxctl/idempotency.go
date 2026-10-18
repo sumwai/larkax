@@ -14,7 +14,27 @@ import (
 	"github.com/sumwai/larkax/internal/settings"
 )
 
-// maintenanceIdempotencyUsage 是 maintenance idempotency 子命令的帮助。
+// maintenanceIdempotencyHelp 是 maintenance idempotency 的两版帮助文本（见 helpText）。
+var maintenanceIdempotencyHelp = helpText{
+	short: maintenanceIdempotencyShortUsage,
+	long:  maintenanceIdempotencyUsage,
+}
+
+// maintenanceIdempotencyShortUsage 是 maintenance idempotency 的短版：
+// `-h` / `--help` 与参数写错时打的那一份。
+const maintenanceIdempotencyShortUsage = `larkaxctl maintenance idempotency 按留存期清理请求级幂等记录。
+
+用法：
+  larkaxctl maintenance idempotency               按 settings 里的留存期删除到期的记录
+  larkaxctl maintenance idempotency --dry-run     只数一遍会被删除的条数，不删
+
+留存期取自 settings 表的 idempotency.retention_hours，不在命令行上另设参数。
+
+更细的边界：larkaxctl maintenance idempotency help。
+`
+
+// maintenanceIdempotencyUsage 是 maintenance idempotency 的长版：
+// `maintenance idempotency help`（旧写法 `idempotency cleanup help` 也走这一份）。
 //
 // 它原先是一个顶层命令组（larkaxctl idempotency cleanup）的帮助，#475 把它
 // 收进维护域：删的是到期数据，与「幂等」这个概念本身无关。旧路径仍然可用
@@ -31,6 +51,8 @@ const maintenanceIdempotencyUsage = `larkaxctl maintenance idempotency 按留存
 
 旧路径：larkaxctl idempotency cleanup 仍然可用，与 larkaxctl maintenance idempotency
 逐字相同。
+
+更细的约定见 docs/cli-reference.md 的「maintenance idempotency」一节。
 `
 
 // runIdempotency 处理顶层的 idempotency 子命令。
@@ -40,7 +62,7 @@ const maintenanceIdempotencyUsage = `larkaxctl maintenance idempotency 按留存
 // 的那一套，所以新旧两条路径的输出逐字相同。
 func runIdempotency(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, maintenanceIdempotencyUsage)
+		printUsage(os.Stderr, maintenanceIdempotencyShortUsage)
 		return usageErr(errors.New("idempotency 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -48,11 +70,14 @@ func runIdempotency(args []string) error {
 	switch action {
 	case "cleanup":
 		return runIdempotencyCleanup(rest)
-	case "help", "-h", "--help":
-		fmt.Print(maintenanceIdempotencyUsage)
+	case "help":
+		printUsage(os.Stdout, maintenanceIdempotencyUsage)
+		return nil
+	case "-h", "--help":
+		printUsage(os.Stdout, maintenanceIdempotencyShortUsage)
 		return nil
 	default:
-		fmt.Fprint(os.Stderr, maintenanceIdempotencyUsage)
+		printUsage(os.Stderr, maintenanceIdempotencyShortUsage)
 		return usageErr(fmt.Errorf("未知的 idempotency 子命令 %q", action))
 	}
 }
@@ -79,8 +104,15 @@ func runIdempotencyCleanup(args []string) error {
 		return err
 	}
 
+	// `maintenance idempotency help`（以及旧写法 `idempotency cleanup help`）
+	// 给长版；`-h` / `--help` 归下面的 flag 解析，给短版。
+	if len(args) > 0 && args[0] == "help" {
+		printUsage(os.Stdout, maintenanceIdempotencyUsage)
+		return nil
+	}
+
 	fs := flag.NewFlagSet("maintenance idempotency", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, maintenanceIdempotencyUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, maintenanceIdempotencyShortUsage) }
 	dryRun := fs.Bool("dry-run", false, "只数一遍会被删除的条数，不执行删除")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)

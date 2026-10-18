@@ -16,7 +16,24 @@ import (
 	"github.com/sumwai/larkax/internal/snapshotwire"
 )
 
-// partitionUsage 是 partition 子命令的帮助。
+// partitionHelp 是 partition 的两版帮助文本（见 helpText）。
+var partitionHelp = helpText{short: partitionShortUsage, long: partitionUsage}
+
+// partitionShortUsage 是 partition 的短版：`-h` / `--help` 与参数写错时打的那一份。
+const partitionShortUsage = `larkaxctl partition 维护 usage_events 的月分区。
+
+用法：
+  larkaxctl partition ensure [--months N]   建出缺失的月分区
+  larkaxctl partition check  [--months N]   只读体检，有问题时非零退出
+
+分区不会自己长出来：没有预建时，用量事件会落进兜底分区，而那里的行会挡着
+那个月的分区建不出来。--months 默认 3，它决定的是提前量。
+
+更细的边界：larkaxctl help partition。
+`
+
+// partitionUsage 是 partition 的长版：`larkaxctl help partition` 与
+// `partition help`。
 const partitionUsage = `larkaxctl partition 维护 usage_events 的月分区。
 
 用法：
@@ -36,10 +53,10 @@ ensure 与 check 是给外部调度器用的：命令的退出码就是告警信
 保证当月，预建任务停摆超过一个月，下一个月的分区就不存在了；给 3 留出两个月
 的缓冲，代价只是多几张空表。
 
-check 只读，它不建任何东西。写入路径自己会保证当月分区存在（见
-internal/ledger/store 的 ensureUsageEventPartition），所以 check 报出「缺月
-分区」说明预建任务漏跑了，而不是写入路径坏了——这两件事的处置不同，所以
-check 不去替 ensure 把分区补上。
+check 只读，它不建任何东西：写入路径自己会保证当月分区存在，所以 check 报出
+「缺月分区」说明预建任务漏跑了，而不是写入路径坏了。它不去替 ensure 把分区补上。
+
+更细的约定见 docs/cli-reference.md 的「partition」一节。
 `
 
 // partitionMonthsDefault 是 --months 的默认值。
@@ -57,7 +74,7 @@ const partitionTimeout = 2 * time.Minute
 // runPartition 处理 partition 子命令。
 func runPartition(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, partitionUsage)
+		printUsage(os.Stderr, partitionShortUsage)
 		return usageErr(errors.New("partition 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -67,11 +84,11 @@ func runPartition(args []string) error {
 		return runPartitionEnsure(rest)
 	case "check":
 		return runPartitionCheck(rest)
-	case "help", "-h", "--help":
-		fmt.Print(partitionUsage)
+	case "-h", "--help":
+		printUsage(os.Stdout, partitionShortUsage)
 		return nil
 	default:
-		fmt.Fprint(os.Stderr, partitionUsage)
+		printUsage(os.Stderr, partitionShortUsage)
 		return usageErr(fmt.Errorf("未知的 partition 子命令 %q", action))
 	}
 }
@@ -83,7 +100,7 @@ func runPartition(args []string) error {
 // 不是同一件事，退出码也该不同（见 exit.go）。
 func parsePartitionMonths(args []string, name string) (int, error) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, partitionUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, partitionShortUsage) }
 	months := fs.Int("months", partitionMonthsDefault, "从当月起算的月份数（含当月）")
 	if err := fs.Parse(args); err != nil {
 		return 0, usageErr(err)

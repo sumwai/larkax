@@ -15,6 +15,27 @@ import (
 	"github.com/sumwai/larkax/internal/config"
 )
 
+// aliasHelp 是 alias 的两版帮助文本（见 helpText）。
+var aliasHelp = helpText{short: aliasShortUsage, long: aliasUsage}
+
+// aliasShortUsage 是 alias 的短版：`-h` / `--help` 与参数写错时打的那一份。
+const aliasShortUsage = `larkaxctl alias 管理模型别名：一个上游模型名对应一个规范名。
+
+用法：
+  larkaxctl alias create --model <规范名> --upstream <上游模型名>
+                         [--channel <渠道 ID>] [--overrides <JSON 对象>]
+  larkaxctl alias list [--channel <渠道 ID>] [--model <规范名>]
+  larkaxctl alias update --id <别名 ID> [--upstream <上游模型名>] [--overrides <…>]
+  larkaxctl alias delete --id <别名 ID>
+  larkaxctl alias resolve --model <规范名> [--channel <渠道 ID>]
+
+不带 --channel 的别名是平台级、带的是渠道级，渠道级盖过平台级。同一个规范名
+在每个范围里最多只能有一个上游名；update 不能改渠道范围与规范名。
+
+更细的边界：larkaxctl help alias。
+`
+
+// aliasUsage 是 alias 的长版：`larkaxctl help alias` 与 `alias help`。
 const aliasUsage = `larkaxctl alias 管理模型别名。
 
 别名说的是「某家上游对同一个模型叫什么名字」：一个上游模型名对应一个规范名。
@@ -30,7 +51,7 @@ const aliasUsage = `larkaxctl alias 管理模型别名。
 
 不带 --channel 的别名是**平台级**，对所有渠道生效；带 --channel 的是渠道级，
 只对那个渠道生效，并盖过同一条平台级别名。同一个规范名在每个范围里最多
-只能有一个上游名——两个上游名指向同一个规范名时，选路无从取舍。
+只能有一个上游名——两个上游名指向同一个规范名时，选路分不出该用哪一个。
 
 list 默认列平台级别名；--channel <ID> 列那个渠道的渠道级别名；
 --model <名称> 列出这个规范名在**所有范围**下对应的上游名（两种范围一起）。
@@ -44,10 +65,8 @@ messages、tools、stream），要么根本不是这个请求的参数。与调�
 调用方**给了**的采样参数以调用方为准，没给的取覆盖值；max_tokens 反过来，
 一律以覆盖值为准。
 
-update 按 --id 定位，**渠道范围与规范名都不可改**：改渠道范围是换了一条别名，
-改规范名等于把这条别名改挂到另一个计费键上，而那样同一次请求的选路与计费会
-指向两个不同的模型。要改就删掉重建，两次改动各自看得见。--overrides '' 表示
-清空这一栏。
+update 按 --id 定位，**渠道范围与规范名都不可改**：要改就删掉重建，两次改动
+各自看得见。--overrides '' 表示清空这一栏。
 
 resolve 回答的是选路那个问题：**这个规范名在这个渠道上实际会发给上游什么
 名字**。它走的是请求热路径上同一条查询，所以渠道级别名盖过平台级那条这件事
@@ -68,12 +87,14 @@ resolve 回答的是选路那个问题：**这个规范名在这个渠道上实�
 
 **--channel 不开简写**：-c 在别的命令行里既可能是 channel 也可能是 config、
 count，而这条命令上挑错渠道范围的后果是别名挂到另一个渠道上——那类错误要等到
-某次请求选路上游时才会现形。这个约束有用例钉着（见 short_flags_test.go）。
+某次请求选路上游时才会现形。
+
+更细的约定见 docs/cli-reference.md 的「alias」一节。
 `
 
 func runAlias(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, aliasUsage)
+		printUsage(os.Stderr, aliasShortUsage)
 		return usageErr(errors.New("alias 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -89,11 +110,11 @@ func runAlias(args []string) error {
 		return runAliasDelete(rest)
 	case "resolve":
 		return runAliasResolve(rest)
-	case "help", "-h", "--help":
-		fmt.Print(aliasUsage)
+	case "-h", "--help":
+		printUsage(os.Stdout, aliasShortUsage)
 		return nil
 	default:
-		fmt.Fprint(os.Stderr, aliasUsage)
+		printUsage(os.Stderr, aliasShortUsage)
 		return usageErr(fmt.Errorf("未知的 alias 子命令 %q", action))
 	}
 }
@@ -130,7 +151,7 @@ func runAliasCreate(args []string) error {
 
 func parseAliasCreate(args []string) (catalog.CreateAliasRequest, error) {
 	fs := flag.NewFlagSet("alias create", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, aliasUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "", "规范模型名，必须已经在目录里")
 	stringAlias(fs, canonical, "m", sameAs("model"))
 	upstream := fs.String("upstream", "", "这家上游对这个模型的叫法")
@@ -169,7 +190,7 @@ func parseAliasCreate(args []string) (catalog.CreateAliasRequest, error) {
 
 func runAliasList(args []string) error {
 	fs := flag.NewFlagSet("alias list", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, aliasUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示平台级别名")
 	canonical := legacyStringFlag(fs, "model", "canonical", "", "按规范名列，两种范围一起列出")
 	stringAlias(fs, canonical, "m", sameAs("model"))
@@ -255,7 +276,7 @@ func runAliasUpdate(args []string) error {
 // 把它们做成标志再拒绝，比根本没有这两个标志更容易让人以为改得动。
 func parseAliasUpdate(args []string) (catalog.UpdateAliasRequest, error) {
 	fs := flag.NewFlagSet("alias update", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, aliasUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
 	id := fs.Int64("id", 0, "要改的别名 ID")
 	upstream := fs.String("upstream", "", "这家上游对这个模型的叫法")
 	overrides := fs.String("overrides", "", "上游请求参数的覆盖，JSON 对象（只允许 temperature / top_p / max_tokens），给空串表示清空")
@@ -303,7 +324,7 @@ func runAliasDelete(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("alias delete", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, aliasUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
 	id := fs.Int64("id", 0, "要删的别名 ID")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -342,7 +363,7 @@ func runAliasDelete(args []string) error {
 // 「同一次请求，选路与计费用了两个上游名」，而账单看上去完全正常。
 func runAliasResolve(args []string) error {
 	fs := flag.NewFlagSet("alias resolve", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, aliasUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "", "规范模型名")
 	stringAlias(fs, canonical, "m", sameAs("model"))
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示不针对具体渠道（只看平台级那条）")

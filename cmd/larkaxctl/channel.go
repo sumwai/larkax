@@ -20,6 +20,29 @@ import (
 	"github.com/sumwai/larkax/internal/upstream"
 )
 
+// channelHelp 是 channel 的两版帮助文本（见 helpText）。
+var channelHelp = helpText{short: channelShortUsage, long: channelUsage}
+
+// channelShortUsage 是 channel 的短版：`-h` / `--help` 与参数写错时打的那一份。
+const channelShortUsage = `larkaxctl channel 管理上游渠道。
+
+用法：
+  larkaxctl channel create --name <名称> --type <类型> --base-url <URL>
+                           --models <模型名,...>
+                           (--credential-stdin | --credential-env <变量名>)
+  larkaxctl channel list [--all]
+  larkaxctl channel update --id <渠道 ID> [字段与 create 相同，另可换凭证]
+  larkaxctl channel enable --id <渠道 ID>
+  larkaxctl channel disable --id <渠道 ID>
+  larkaxctl channel delete --id <渠道 ID>
+
+明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。
+create 的 stdout 只有新渠道的 ID；delete 是软删，行与凭证都留在库里。
+
+更细的边界：larkaxctl help channel。
+`
+
+// channelUsage 是 channel 的长版：`larkaxctl help channel` 与 `channel help`。
 const channelUsage = `larkaxctl channel 管理上游渠道。
 
 用法：
@@ -38,9 +61,8 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel disable --id <渠道 ID>
   larkaxctl channel delete --id <渠道 ID>
 
-**明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。**
-命令行参数会出现在 ps 的输出与 shell 历史里，凭证到了那里就等于交给了
-同机的其他进程和任何一个能翻历史的人。
+**明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。**命令行参数会
+出现在 ps 的输出与 shell 历史里。
 
   --credential-stdin        从标准输入读到文件结束（末尾的换行会被去掉）
   --credential-env <变量名> 从名为 <变量名> 的环境变量读
@@ -60,21 +82,19 @@ list **不打印凭证密文**，只打印它挂在哪些主密钥下（那不�
 list 默认不列已删的渠道，--all 才列，并在「已删」那一栏标出删除时刻。
 
 delete 是**软删**：置 deleted_at 并把状态改成 disabled，行与它的凭证密文都留在
-库里。历史账单（billing_requests / usage_events）仍然按 channel_id 引用它，所以
-删除之后那些记录照样认得这条渠道。已删的渠道不能再 update / enable / disable，
-再删一次不报错（打印「已经是删除状态」）。
+库里。历史账单（billing_requests / usage_events）仍然按 channel_id 引用它。
+已删的渠道不能再 update / enable / disable，再删一次不报错（打印「已经是删除
+状态」）。
 
 渠道类型必须是已注册的适配器类型；类型写错时错误信息会列出已知的类型。
 --models 至少要有一个：读取路径把 models 当白名单用，空数组的渠道永远选不中。
 每个模型还要能被这条渠道服务：模型目录里可以声明一个模型只在某几条端点上被
 服务，而渠道的 type 决定它把请求发到哪一条。两者对不上时 create / update 会被
-拒绝，并说出「模型在目录里声明的端点」与「这条渠道打的端点」各是什么——配错时
-现场是上游回 400，而那句话看不出是我们这边配的。目录里没有这个模型、或者那一项
-没配过时不拦：目录是人工维护、会过时的一份声明，按「不支持」处理会让新接的上游
-一条渠道都建不出来。
+拒绝，并说出「模型在目录里声明的端点」与「这条渠道打的端点」各是什么。目录里
+没有这个模型、或者那一项没配过时不拦。
 --setting 是渠道私有配置（自由形态的 JSON 对象），键由该渠道 type 指向的
 适配器解释，选路层不认，管理面也不校验键名。**当前没有任何适配器读它**，
-所以给了 --setting 时命令会把这一点说出来，见 internal/channel 的 Setting。
+所以给了 --setting 时命令会把这一点说出来。
 
 **选项的旧名仍可用**：--owner 等同于 --user。它保留是为了不让已经在跑的脚本
 与部署流程坏掉，行为一致；新写的命令请用 --user。
@@ -92,7 +112,9 @@ delete 是**软删**：置 deleted_at 并把状态改成 disabled，行与它的
 
 **--channel 不存在、--type / --base-url / --model… 也都不开简写**：这条命令上
 挑错的是「凭证写给哪条渠道」，而 -c 这类单字母在别的命令行里既可能是
-channel 也可能是 config。纯长参数那一条有用例钉着（见 short_flags_test.go）。
+channel 也可能是 config。纯长参数那一条有用例钉着。
+
+更细的约定见 docs/cli-reference.md 的「channel」一节。
 `
 
 // channelTimeout 是渠道命令连库与写库的时间上限。
@@ -109,7 +131,7 @@ var credentialInput io.Reader = os.Stdin
 
 func runChannel(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, channelUsage)
+		printUsage(os.Stderr, channelShortUsage)
 		return usageErr(errors.New("channel 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -127,11 +149,11 @@ func runChannel(args []string) error {
 		return runChannelSetStatus(rest, channels.StatusDisabled)
 	case "delete":
 		return runChannelDelete(rest)
-	case "help", "-h", "--help":
-		fmt.Print(channelUsage)
+	case "-h", "--help":
+		printUsage(os.Stdout, channelShortUsage)
 		return nil
 	default:
-		fmt.Fprint(os.Stderr, channelUsage)
+		printUsage(os.Stderr, channelShortUsage)
 		return usageErr(fmt.Errorf("未知的 channel 子命令 %q", action))
 	}
 }
@@ -184,7 +206,7 @@ func runChannelCreate(args []string) error {
 // 必须在连库之前完成。所以这里只做「有没有给、给了什么」，解析留给调用方。
 func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	fs := flag.NewFlagSet("channel create", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, channelUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	name := fs.String("name", "", "渠道名")
 	channelType := fs.String("type", "", "适配器类型")
 	baseURL := fs.String("base-url", "", "上游地址，必须以 http:// 或 https:// 开头")
@@ -248,7 +270,7 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 // 见 channels.UpdateRequest。要换归属是另一件事，不该混在一次「改配置」里。
 func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	fs := flag.NewFlagSet("channel update", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, channelUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "要改的渠道 ID")
 	name := fs.String("name", "", "渠道名")
 	channelType := fs.String("type", "", "适配器类型")
@@ -395,7 +417,7 @@ func printSettingUnreadNote(w io.Writer) {
 
 func runChannelList(args []string) error {
 	fs := flag.NewFlagSet("channel list", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, channelUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	all := fs.Bool("all", false, "含已删除的渠道，并在「已删」一栏标出删除时刻")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -447,7 +469,7 @@ func runChannelSetStatus(args []string, status string) error {
 	}
 
 	fs := flag.NewFlagSet("channel "+verb, flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, channelUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "渠道 ID")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -496,7 +518,7 @@ func runChannelDelete(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("channel delete", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, channelUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "要删的渠道 ID")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)

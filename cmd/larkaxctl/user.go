@@ -14,6 +14,21 @@ import (
 	"github.com/sumwai/larkax/internal/config"
 )
 
+// userHelp 是 user 的两版帮助文本（见 helpText）。
+var userHelp = helpText{short: userShortUsage, long: userUsage}
+
+// userShortUsage 是 user 的短版：`-h` / `--help` 与参数写错时打的那一份。
+const userShortUsage = `larkaxctl user 管理用户。
+
+用法：
+  larkaxctl user create --name <用户名> [--email <邮箱>] [--role <角色>]
+
+create 只把新用户的 ID 打到 stdout；用户名已被占用时直接报错，不改已有的用户。
+
+更细的边界：larkaxctl help user。
+`
+
+// userUsage 是 user 的长版：`larkaxctl help user` 与 `user help`。
 const userUsage = `larkaxctl user 管理用户。
 
 用法：
@@ -21,16 +36,16 @@ const userUsage = `larkaxctl user 管理用户。
 
 create 建一个新用户，只把新用户的 ID 打到 stdout。
 
-角色取 user、merchant、admin 之一，默认 user。三者都是用户，
-merchant 与 admin 只是 users 表上的标记（admin 同时也是 merchant）。
+角色取 user、merchant、admin 之一，默认 user。三者都是用户，merchant 与 admin
+只是 users 表上的标记（admin 同时也是 merchant）。
 
-**角色今天只是记下来，不改任何一处行为**：全仓没有代码读那两个标记，
-所以 --role merchant 不会让这个用户多出什么权限，--role admin 也不代表
-他能进管理接口（管理面还没做）。它们留给管理面的鉴权用，接上之前别把它
+**角色今天只是记下来，不改任何一处行为**：在后端的鉴权接上之前，--role merchant
+不会让这个用户多出什么权限，--role admin 也不代表他能进管理接口。别把 --role
 当成一条访问控制。
 
 **不做幂等**：用户名已被占用时直接报错，不会改到已有的那个用户。
 
+更细的约定见 docs/cli-reference.md 的「user」一节。
 `
 
 // userTimeout 是这条命令连库与写库的时间上限。
@@ -42,7 +57,7 @@ const userTimeout = 30 * time.Second
 
 func runUser(args []string) error {
 	fs := flag.NewFlagSet("user", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, userUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -68,7 +83,7 @@ func runUserCreate(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("user create", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, userUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
 	name := fs.String("name", "", "用户名，唯一（大小写不敏感）")
 	email := fs.String("email", "", "邮箱，留空表示不填")
 	role := fs.String("role", string(auth.RoleUser), "角色：user、merchant、admin")
