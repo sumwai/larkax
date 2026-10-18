@@ -55,11 +55,22 @@ const (
 	StatusDisabled = "disabled"
 	// StatusFailed 是编译失败。
 	//
-	// **本包没有任何一处写它**：publish 拒绝编译不过的插件（一个坏插件不许
-	// 进库），而加载器遇到坏插件只跳过并记日志，不回写库——启动路径上一个
-	// 只读的加载器更安全，多实例部署时也不会几个实例同时改同一行。
-	// 它留给「把加载期的失败写回库、让管理界面看得见」那一步。
+	// **包里每一条写路径都不写它**：publish 拒绝编译不过的插件（一个坏插件
+	// 不许进库），加载器遇到坏插件只跳过——它把「这次没装上」写进 last_load_result
+	// 那三列，status 一个字都不动（见 LoadRegistry）。所以库里出现这个状态只有
+	// 一种来路：手工改库，或者将来另加的写入方。管理面那两句说明也不再挂在它
+	// 上面：加载期那一栏才是（见 Row 的 RunningLoad）。
 	StatusFailed = "failed"
+)
+
+// plugins.last_load_result 的取值，与迁移里的 CHECK 约束逐字一致
+// （同上面那几条 status：写一个约束不认的值会在写入时报错，而那看起来像
+// 「命令行坏了」，不像「结果名写错了」）。
+const (
+	// LoadResultOK 是这一代上一次被加载时装上了。
+	LoadResultOK = "ok"
+	// LoadResultFailed 是上一次尝试跳过了它，原因在 last_load_error 里。
+	LoadResultFailed = "failed"
 )
 
 // ErrPluginNotFound 表示要改的那个 key 在库里没有对应的行。
@@ -96,6 +107,13 @@ func New(db *sql.DB) *Store { return &Store{db: db} }
 // 两者混成一句「加载插件失败」的话，运维手上只有一个起不来的进程和一句
 // 无从下手的错——而它们的下一步动作完全不同。
 //
+// # 写回加载的结果
+//
+// 读到的每一行都刷一遍 last_load_result / last_load_error / last_load_at
+// （见 recordLoadResults）：装上了写 ok，被跳过的写 failed 加错误原文。
+// 那三列只是**这一次尝试**的记录，status 与启用记录一个字都不动，所以跳过的
+// 插件下次启动照样会再试一次——「改好源码重启」这条路因此是通的。
+//
 // # 原子
 //
 // 先读完整批、编译完整批，最后一次性换表（见 plugin.PublishPartial）。
@@ -104,12 +122,18 @@ func (s *Store) LoadRegistry(ctx context.Context, logger *slog.Logger, provided 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	regs, err := s.Active(ctx)
+	rows, err := s.activeRows(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("读取 plugins 表失败: %w", err)
 	}
+	regs := make([]plugin.Registration, 0, len(rows))
+	for _, r := range rows {
+		regs = append(regs, r.reg)
+	}
 
-	skipped := 0
+	// 按 key 记下跳过的原因，而不是只记个数：加载完要写回库，而那一列记的是
+	// **哪一个**插件没装上、为什么（见 loadRecords）。
+	skipped := map[string]error{}
 	// 编译一段源码不需要 ctx，也不该收一个：编译期的时限由沙箱自己给
 	// （sandbox 的 inspectTimeout，见那边的注释——它存在正是因为调用方
 	// 通常只给 context.Background()）。把一个 ctx 传下去不会中断编译，
@@ -117,13 +141,16 @@ func (s *Store) LoadRegistry(ctx context.Context, logger *slog.Logger, provided 
 	//
 	//nolint:contextcheck // 理由见上
 	reg, err := plugin.PublishPartial(regs, provided, func(r plugin.Registration, cause error) {
-		skipped++
+		skipped[r.Key] = cause
 		logger.Error("插件未能上线，已跳过（其余插件照常上线）",
 			"plugin", r.Key, "原因", cause)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("发布插件注册表失败: %w", err)
 	}
+	// 写回放在发布之后：注册表已经换过表了，这一步只影响管理面上那一栏，
+	// 所以它出问题不该把已经可用的注册表一起丢掉。
+	recordLoadResults(ctx, s.db, logger, loadRecords(rows, skipped))
 
 	// 计数与 key 清单是这一条的正向证据：装上 0 个与「加载器根本没读表」
 	// 在日志里长得一样（见 LESSONS.md 第 16 条）。
@@ -135,23 +162,146 @@ func (s *Store) LoadRegistry(ctx context.Context, logger *slog.Logger, provided 
 	for _, p := range reg.Plugins() {
 		keys = append(keys, p.Key)
 	}
-	logger.Info("插件已加载", "已启用", reg.Len(), "已跳过", skipped, "插件", strings.Join(keys, "、"))
+	logger.Info("插件已加载", "已启用", reg.Len(), "已跳过", len(skipped), "插件", strings.Join(keys, "、"))
 	return reg, nil
 }
 
-// Active 读出参与注册的插件。
+// loadRecord 是一次加载对**一行**的结果，准备写回 plugins 的那三列。
 //
-// 每个 key 只取**状态为 active 且代次最高**的那一行：同一个 key 可以有多行
+// 身份用 (key, version) 而不是 (key, generation)：覆盖发布让代次原地加一，同一个
+// key 里两行可以撞到同一个代次上（见 pickedOrder），而 version 在同一个 key 里
+// 唯一（UNIQUE (key, version)）——按它写才落得准那一行。
+type loadRecord struct {
+	key     string
+	version string
+	result  string
+	// errorText 是失败时的错误原文，装上了就是空串（写回时折成 NULL）。
+	errorText string
+}
+
+// loadRecords 整理出「刚读的这些行各自装上了没有」，供写回用。
+//
+// skipped 是 PublishPartial 跳掉的那些（key → 原因）。按 key 查而不是按下标对：
+// 跳过的那些不进注册表，两边的下标对不上。
+func loadRecords(rows []activeRow, skipped map[string]error) []loadRecord {
+	out := make([]loadRecord, 0, len(rows))
+	for _, r := range rows {
+		rec := loadRecord{key: r.reg.Key, version: r.version, result: LoadResultOK}
+		if cause, ok := skipped[r.reg.Key]; ok {
+			rec.result = LoadResultFailed
+			rec.errorText = cause.Error()
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// recordLoadResultSQL 写回一行。WHERE 落在 (key, version) 上：那就是刚读的那一行
+// 的身份，写回因此不必再拼一遍「取中哪一行」那条判据（见 activeRow）。
+//
+// 用 version 而不是 generation：代次会撞车（见 pickedOrder），按代次写会连另一个
+// 版本的行一起改掉。
+//
+// 时刻取库里的 now() 而不是 Go 那边的时钟：这一列要与库里的其它时刻比先后，
+// 而进程的时钟与库的时钟未必是同一个。
+const recordLoadResultSQL = `
+	UPDATE plugins
+	   SET last_load_result = $3, last_load_error = $4, last_load_at = now()
+	 WHERE key = $1 AND version = $2`
+
+// execer 是写回加载结果用到的那一点 SQL 能力。
+//
+// 收一个窄接口而不是 *sql.DB：那条「写不进去也不拖垮启动」的纪律要能在没有库的
+// 情况下钉住（见 store_test.go 里的假实现），而 *sql.DB、*sql.Tx 都满足它。
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// recordLoadResults 把这一次加载的结果写回 plugins 的三列。
+//
+// # 两条纪律
+//
+//   - **写不进去只记日志，没有返回值**：插件是可选增强（plugin.enabled 默认是
+//     false）。为了给管理面上那一栏留一份记录，让整个服务起不来，代价与它带来的
+//     信息不成比例。所以这里不外传错误，也不给调用方一个可以失败的返回值。
+//   - **多实例各自写、最后一次赢**：这里存的是「最近一次尝试」，不是所有权状态。
+//     两个实例同时启动时，库里留下的是后写的那个——它不比另一个更正确，只是
+//     更近，而这正是这一栏要说的事。
+//
+// 一条一条写而不是拼一条多行的 SQL：要写的行数与启用的插件数同阶（手工发布，
+// 量很小），而一条一条写让失败的行能被单独点名。
+func recordLoadResults(ctx context.Context, ex execer, logger *slog.Logger, recs []loadRecord) {
+	for _, rec := range recs {
+		_, err := ex.ExecContext(ctx, recordLoadResultSQL,
+			rec.key, rec.version, rec.result, nullableText(rec.errorText))
+		if err != nil {
+			// 文案点名「不影响插件运行」：看得见的那半是管理面上少了一栏记录，
+			// 而读到这条日志的人最先担心的是「插件是不是没装上」。
+			logger.Error("写回插件加载结果失败（只影响管理面上的记录，不影响插件运行）",
+				"plugin", rec.key, "version", rec.version, "原因", err)
+		}
+	}
+}
+
+// nullableText 把空串折成 NULL。
+//
+// 与那几条读路径上的 nullableString 是同一个判据的反面：那一列可空，而空串在
+// 这里不表示「错误原文是空字符串」，表示「这一次没失败」。
+func nullableText(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// pickedOrder 给出「同一个 key 里取中哪一行」的排序键，alias 是 plugins 在那个
+// 查询里的别名。
+//
+// 排序键是**两段**，第二段不能省：代次高的排前面，代次撞车时按版本名定胜负。
+// 代次会撞车是真的——覆盖发布时它是原地加一（见 Publish），所以同一个 key 里
+// A(gen 0)、B(gen 1)，之后再发一次 A，A 也成了 gen 1，两行并排。version 在同一个
+// key 里唯一（UNIQUE (key, version)），拿它收尾就定得下一行。
+//
+// 代次撞车时「谁更新」已经无从判断了——覆盖发布不另记时刻——所以这一档只求**定得
+// 下来**：按版本名收尾。撞车是覆盖发布的副产物，一个版本只发布一次的库里不会有。
+//
+// 四处共用它：读表那一处（activeRows）、两处管理面查询（runningJoin、Get），以及
+// Enable 抬哪一代。它们必须选出**同一行**——写回落在加载器读的那一行上，管理面报的
+// 也得是那一行，enable 抬的还得是那一行；各自写一遍排序的话，撞车时可能各选一行，
+// 而库里看不出任何异常。
+func pickedOrder(alias string) string {
+	return alias + ".generation DESC, " + alias + ".version DESC"
+}
+
+// activeRow 是加载器读出来的一行：注册要用的那几样，外加它在 plugins 上是哪一行。
+//
+// version 也带着，因为加载完要把结果**写回**（见 recordLoadResults）：写回要指名
+// 道姓地落在「刚读的是哪一行」上，而 (key, version) 正是那一行的身份。让写回自己
+// 再拼一遍「取中哪一行」那条判据的话，两份判据会各自漂移，而漂移的那一份会把结果
+// 写到另一行上——库里看不出任何异常，管理面上那一栏从此说的不是加载器刚做的事。
+type activeRow struct {
+	reg     plugin.Registration
+	version string
+}
+
+// activeRows 读出参与注册的行：加载器装配时读的就是这一份。
+//
+// 每个 key 只取**状态为 active 且取中**的那一行：同一个 key 可以有多行
 // （版本不同），发布一次代次加一，而参与注册的只有被 enable 过的那一代——
 // 新发布的版本状态是 pending，要 Enable 一次才生效。
-func (s *Store) Active(ctx context.Context) ([]plugin.Registration, error) {
-	const query = `
-		SELECT DISTINCT ON (p.key) p.key, p.source,
+//
+// 「取中哪一行」这条判据在两处出现：这里与 runningJoin（管理面报的）。两处必须
+// 选出同一行，所以排序键共用 pickedOrder——各自写一遍的话，代次撞车时两边可能
+// 各选一行，而写回落在加载器读的那一行上，管理面说的却会是另一行。（判据本身
+// 仍有第二份，改动时两处要一起改；测试里有一条同代次两行的用例守着这一点。）
+func (s *Store) activeRows(ctx context.Context) ([]activeRow, error) {
+	query := `
+		SELECT DISTINCT ON (p.key) p.key, p.source, p.version,
 		       COALESCE((SELECT MAX(a.priority) FROM plugin_activations a
 		                  WHERE a.plugin_key = p.key AND a.scope = 'platform'), 0)
 		FROM plugins p
 		WHERE p.status = $1
-		ORDER BY p.key, p.generation DESC`
+		ORDER BY p.key, ` + pickedOrder("p")
 
 	rows, err := s.db.QueryContext(ctx, query, StatusActive)
 	if err != nil {
@@ -161,19 +311,50 @@ func (s *Store) Active(ctx context.Context) ([]plugin.Registration, error) {
 
 	// 从空切片开始而不是 nil：一个插件都没有是正常结果（还没发布），
 	// 不是「没有值」。
-	out := []plugin.Registration{}
+	out := []activeRow{}
 	for rows.Next() {
-		var reg plugin.Registration
-		if err := rows.Scan(&reg.Key, &reg.Source, &reg.Priority); err != nil {
+		var r activeRow
+		if err := rows.Scan(&r.reg.Key, &r.reg.Source, &r.version, &r.reg.Priority); err != nil {
 			return nil, fmt.Errorf("读取插件行失败: %w", err)
 		}
-		out = append(out, reg)
+		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("遍历插件失败: %w", err)
 	}
 	return out, nil
 }
+
+// Generation 是库里的一个代次：版本名与它在 generation 那一列上的值。
+//
+// 两样都要：代次是加载器比大小的依据（同一个 key 里取最大的那一行），而人看到
+// 一个数字认不出那是哪一版。
+type Generation struct {
+	Version string
+	// Number 是 generation 那一列的值：同一个 key 里每发布一次加一。
+	Number int64
+}
+
+// LoadAttempt 是**加载期**那一次尝试的结果：加载器有没有把这一代装上。
+//
+// 三样一起给，因为它们来自同一次写（见迁移 00034）：结果、失败时的原文、以及
+// 那一次的时刻。它与 compile_error 说的是两件事——那一列记的是**发布期**编译
+// 不过，而发布根本不收编译不过的插件，所以只有手工改库的行有值。
+type LoadAttempt struct {
+	// Result 是 LoadResultOK 或 LoadResultFailed。
+	Result string
+	// Error 是没装成时的错误原文（编译错，或者它申请了这次装配没提供的能力）。
+	// 装上了就是空串。
+	Error string
+	// At 是那一次尝试的时刻，取自库里的时钟。
+	//
+	// 可能是零值——手工改库的行只填了结果那一列时就是。渲染要按「没有时刻」处理
+	// 它（见 cmd/larkaxctl 里那两处），不要直接打出来。
+	At time.Time
+}
+
+// Failed 问这一次尝试有没有装成。
+func (a LoadAttempt) Failed() bool { return a.Result == LoadResultFailed }
 
 // Row 是管理面看到的一行。
 type Row struct {
@@ -184,6 +365,36 @@ type Row struct {
 	Generation int64
 	// Priority 是 platform 作用域那条启用记录的优先级，没有记录时为 0。
 	Priority int
+	// CompileError 是**发布期**编译不过留下的错误原文（plugins.compile_error）。
+	// 没失败过时是空串——那一列可空，而 publish 拒绝编译不过的插件，所以今天
+	// 只有手工改库的行有值。加载期没装成的原因不在这里，见 RunningLoad。
+	CompileError string
+	// Latest 表示这一行是这个 key 里代次最高的那一行，也就是**最新一次尝试**。
+	// 一个 key 只发布过一代时，这一行既是取中的那一代，也是它的最新一次尝试。
+	Latest bool
+	// Running 是同一个 key 里**加载器取中的那一代**：状态为 active 且代次最高的
+	// 那一行。这个 key 现在一代都没跑时是 nil（每一代都是 pending / disabled /
+	// failed 是正常状态）。
+	//
+	// 取中不等于装上了：上一次真的装上没有看 RunningLoad，而被跳过时加载器不会
+	// 退回更老的那一代——那时这个 key 哪一代都没在跑。
+	//
+	// 它按 **key** 算，所以同一个 key 的几代带着同一个值——与 Priority 一样，
+	// 它是这一行所属那个 key 的属性。这一行自己是不是取中的那一代，问 IsRunning。
+	Running *Generation
+	// RunningLoad 是**取中的那一代**上一次被加载时装上了没有：库里
+	// last_load_result / last_load_error / last_load_at 三列的合体。
+	//
+	// 它跟着 Running 走，所以也是按 key 给的：那三列是加载器写在**它读的那一行**
+	// 上的，而它读的正是这一代。这个 key 没有取中的一代时是 nil；「取中的这一代
+	// 还没被加载过」（三列都是 NULL）同样给 nil——这里分不出来，而读的那一侧分得
+	// 出来：Running 为空是「没有取中的一代」，不为空而这是 nil 是「取中了但还没
+	// 试过」（见 cmd/larkaxctl 里「在跑」那一栏的分档）。
+	//
+	// 之所以不从这一行自己的列上读：加载器写的是它读的那一行，而清单里最新那一行
+	// 未必是它（发布了没 enable 时就不是）。失败的那一条记录因此只挂在取中的那一代
+	// 上，从这里读才读得到。
+	RunningLoad *LoadAttempt
 	// MetaProblem 是这一行的 meta 快照有什么问题，没问题时为空串。
 	//
 	// 为什么是**一行一栏**而不是整次报错：库里有**一行**坏数据时整个清单一条都
@@ -194,15 +405,63 @@ type Row struct {
 	MetaProblem string
 }
 
+// IsRunning 问这一行是不是加载器取中的那一行。
+//
+// 比的是 (代次, 版本名) 两样：代次**不唯一**——覆盖发布时它是原地加一（见
+// Publish），所以 A(gen 0)、B(gen 1) 之后再发一次 A，A 也成了 gen 1，同一个 key
+// 里两行撞在同一个代次上。只比代次会把两行都说成取中的那一行，而加载器只读一行。
+// 加上版本名就定得下来：同一个 key 里 version 唯一（UNIQUE (key, version)），
+// 而这正是 pickedOrder 那条排序键。
+//
+// 取中不等于装着——真的装上没有看 RunningLoad。
+func (r Row) IsRunning() bool {
+	return r.Running != nil && r.Running.Number == r.Generation && r.Running.Version == r.Version
+}
+
+// runningJoin 摘出「这个 key 取中的是哪一代」以及那一代上次加载的结果，
+// 供 List 与 Get 共用。
+//
+// 写成一段共用的 SQL 而不是两处各写一遍：这一处与读表那一处（见 activeRows）报的
+// 必须是同一行，而两边的判据只要有一边漂了，管理面就会报出一个根本没在跑的代次。
+// 「取中哪一行」那条判据因此两处共用同一条排序键（pickedOrder）——判据本身仍有第二
+// 份（WHERE 那两句），改动时两处要一起改，测试里有一条同代次两行的用例守着。
+//
+// LEFT JOIN 而不是 INNER：没有取中的一代的 key 也要出现在清单里，那时右边整片
+// 是 NULL——「哪一代都没启用」是一个要看得见的状态，不是一行要丢掉的记录。
+//
+// 加载期那三列跟着这一代一起摘出来，而不是从 p 上读：它们是加载器写在它读的那
+// 一行上的，而最新那一行未必是它。
+//
+// 是函数而不是常量，只因为排序键要经 pickedOrder 拼（别名是子查询里的 a）。
+func runningJoin() string {
+	return `
+	LEFT JOIN LATERAL (
+		SELECT a.version, a.generation,
+		       a.last_load_result, a.last_load_error, a.last_load_at
+		  FROM plugins a
+		 WHERE a.key = p.key AND a.status = 'active'
+		 ORDER BY ` + pickedOrder("a") + `
+		 LIMIT 1
+	) r ON true`
+}
+
 // List 列出全部插件行，按 key、再按代次降序。
+//
+// 每一行都带上「这个 key 取中的是哪一代、它上一次装上没有」（见 runningJoin）与
+// 「这一行是不是最新一次尝试」：清单要回答的是「库里有什么」与「其中哪一代真的
+// 装着」，而这几件事的判据都不在这一行自己的列上——status 只说了这一代参不参与
+// 注册，一个 key 里可以有好几代都是 active，而加载结果写在加载器读的那一行上。
 func (s *Store) List(ctx context.Context) ([]Row, error) {
-	const query = `
+	query := `
 		SELECT p.key, p.version, p.name, p.status, p.generation,
 		       COALESCE((SELECT MAX(a.priority) FROM plugin_activations a
 		                  WHERE a.plugin_key = p.key AND a.scope = 'platform'), 0),
-		       p.meta
-		FROM plugins p
-		ORDER BY p.key, p.generation DESC`
+		       p.meta, p.compile_error,
+		       p.generation = (SELECT MAX(m.generation) FROM plugins m WHERE m.key = p.key),
+		       r.version, r.generation,
+		       r.last_load_result, r.last_load_error, r.last_load_at
+		FROM plugins p` + runningJoin() + `
+		ORDER BY p.key, ` + pickedOrder("p")
 
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
@@ -213,13 +472,23 @@ func (s *Store) List(ctx context.Context) ([]Row, error) {
 	out := []Row{}
 	for rows.Next() {
 		var (
-			row  Row
-			meta []byte
+			row         Row
+			meta        []byte
+			compileErr  sql.NullString
+			runVersion  sql.NullString
+			runGeneratn sql.NullInt64
+			runResult   sql.NullString
+			runErrText  sql.NullString
+			runAt       sql.NullTime
 		)
 		if err := rows.Scan(&row.Key, &row.Version, &row.Name, &row.Status,
-			&row.Generation, &row.Priority, &meta); err != nil {
+			&row.Generation, &row.Priority, &meta, &compileErr, &row.Latest,
+			&runVersion, &runGeneratn, &runResult, &runErrText, &runAt); err != nil {
 			return nil, fmt.Errorf("读取插件行失败: %w", err)
 		}
+		row.CompileError = compileErr.String
+		row.Running = generationOrNil(runVersion, runGeneratn)
+		row.RunningLoad = loadAttemptFrom(runResult, runErrText, runAt)
 		row.MetaProblem = metaProblem(row.Key, meta)
 		out = append(out, row)
 	}
@@ -229,10 +498,40 @@ func (s *Store) List(ctx context.Context) ([]Row, error) {
 	return out, nil
 }
 
+// generationOrNil 把 LEFT JOIN 出来的两列拼成一个「取中的那一代」，没有时是 nil。
+//
+// 两列一起判而不是只看代次：没有取中的一代时右边整片是 NULL，而代次 0 是一个
+// 合法的值（第一次发布），拿零值当「没有」会把第一代说成没被取中。
+func generationOrNil(version sql.NullString, number sql.NullInt64) *Generation {
+	if !version.Valid || !number.Valid {
+		return nil
+	}
+	return &Generation{Version: version.String, Number: number.Int64}
+}
+
+// loadAttemptFrom 把 LEFT JOIN 出来的三列拼成一次加载，没有记录时是 nil。
+//
+// 只看结果那一列：三列是加载器同一次写下来的（见 recordLoadResults），结果为空
+// 就是这一代还没被加载过——没有取中的一代时右边整片是 NULL。
+//
+// At 可能是零值：三列由加载器一次写入，但手工改库的行可以只填其中一列，那时结果
+// 有值而时刻没有；写回失败也会留下一片 NULL（见迁移里那一段）。这里照实给出零值，
+// 由渲染那一步说「没有时刻」——在这里补一个假时刻，「0001-01-01」这种看着像真
+// 数据的值就会出现在管理面上。
+func loadAttemptFrom(result, errText sql.NullString, at sql.NullTime) *LoadAttempt {
+	if !result.Valid {
+		return nil
+	}
+	return &LoadAttempt{Result: result.String, Error: errText.String, At: at.Time}
+}
+
 // Detail 是管理面看到的单插件详情：最新一代那一行，加上「这一行是哪来的」。
 //
 // 嵌 Row 而不是另起一份字段：详情与清单说的是同一个东西，各写一遍字段名之后
-// 两条读路径会漂（清单多一栏、详情少一栏），而它们本该一起变。
+// 两条读路径会漂（清单多一栏、详情少一栏），而它们本该一起变。Row 上那几样
+// 也跟着过来：这一行**就是**最新一次尝试（Latest 恒为真），而 Running 与
+// RunningLoad 正是「取中的是哪一代、它上次装上了没有」的答案——这一页比清单更
+// 需要它们。
 type Detail struct {
 	Row
 	// CreatedBy 是写下这一行的人（users.id）。nil 表示没有记录——那一列可空，
@@ -250,9 +549,9 @@ type Detail struct {
 // # 给的是哪一行
 //
 // 代次最高的那一行，也就是**最新发布**的那一代。它与**加载器实际跑的那一行**
-// 不是同一件事：加载器走 Active，只在同一个 key 里取状态为 active 的一行。
-// 发布了新版本还没 Enable 时，这里给的是那一版新行（状态 pending），而跑着的
-// 仍是上一代——要问「现在生效的是哪一版」，得看这一行自己的状态。
+// 不是同一件事：加载器走 activeRows，只在同一个 key 里取状态为 active 且代次最高的
+// 那一行。发布了新版本还没 Enable 时，这里给的是那一版新行（状态 pending），
+// 而跑着的仍是上一代——所以这一行带着 Row.Running，两个问题一次答完。
 //
 // 更老的代次是历史，要列全就去看 List——那条清单按代次降序列，正适合回答
 // 「之前发过哪几版」。
@@ -264,25 +563,34 @@ type Detail struct {
 // 空结果是一个正常的空清单。两者的下一步动作不同，合成一条路径就得在调用方
 // 再判一次「是清单为空还是 key 写错了」。
 func (s *Store) Get(ctx context.Context, key string) (Detail, error) {
-	const query = `
+	query := `
 		SELECT p.key, p.version, p.name, p.status, p.generation,
 		       COALESCE((SELECT MAX(a.priority) FROM plugin_activations a
 		                  WHERE a.plugin_key = p.key AND a.scope = 'platform'), 0),
 		       p.meta, p.created_by, p.created_at,
-		       (SELECT count(*) FROM plugins c WHERE c.key = p.key)
-		  FROM plugins p
+		       (SELECT count(*) FROM plugins c WHERE c.key = p.key),
+		       p.compile_error, r.version, r.generation,
+		       r.last_load_result, r.last_load_error, r.last_load_at
+		FROM plugins p` + runningJoin() + `
 		 WHERE p.key = $1
-		 ORDER BY p.generation DESC
+		 ORDER BY ` + pickedOrder("p") + `
 		 LIMIT 1`
 
 	var (
-		d         Detail
-		meta      []byte
-		createdBy sql.NullInt64
+		d           Detail
+		meta        []byte
+		createdBy   sql.NullInt64
+		compileErr  sql.NullString
+		runVersion  sql.NullString
+		runGeneratn sql.NullInt64
+		runResult   sql.NullString
+		runErrText  sql.NullString
+		runAt       sql.NullTime
 	)
 	err := s.db.QueryRowContext(ctx, query, key).Scan(
 		&d.Key, &d.Version, &d.Name, &d.Status, &d.Generation, &d.Priority,
-		&meta, &createdBy, &d.CreatedAt, &d.Versions)
+		&meta, &createdBy, &d.CreatedAt, &d.Versions,
+		&compileErr, &runVersion, &runGeneratn, &runResult, &runErrText, &runAt)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		// 与 Enable / Disable 共用同一个哨兵：三条命令问的都是「这个 key 在库里
@@ -295,6 +603,12 @@ func (s *Store) Get(ctx context.Context, key string) (Detail, error) {
 		id := createdBy.Int64
 		d.CreatedBy = &id
 	}
+	d.CompileError = compileErr.String
+	// 这一行就是这个 key 里代次最高的那一行（上面 ORDER BY … LIMIT 1），所以它
+	// 一定是「最新一次尝试」。
+	d.Latest = true
+	d.Running = generationOrNil(runVersion, runGeneratn)
+	d.RunningLoad = loadAttemptFrom(runResult, runErrText, runAt)
 	d.MetaProblem = metaProblem(d.Key, meta)
 	return d, nil
 }
@@ -480,11 +794,15 @@ func setPriority(ctx context.Context, tx *sql.Tx, key string, priority int) erro
 // 只抬最高的一代：更老的代次躺着不动，它们永远选不中（加载器每个 key 只取
 // 代次最高的那一行）。反过来，Disable 必须把**每一代**都按下去——只按最高的
 // 那一行的话，加载器会落到上一代上，表现为「停用了，但它换了个版本继续跑」。
+//
+// 排序键与「取中哪一行」那几处共用（见 pickedOrder）：代次撞车时（覆盖发布的
+// 副产物）只按代次排是任意的，可能抬起一行而加载器读的是另一行——那一次 enable
+// 看起来成功了，跑的却还是原来那一代。
 func (s *Store) Enable(ctx context.Context, key string) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE plugins SET status = $2
 		  WHERE id = (SELECT id FROM plugins WHERE key = $1
-		               ORDER BY generation DESC LIMIT 1)`,
+		               ORDER BY `+pickedOrder("plugins")+` LIMIT 1)`,
 		key, StatusActive)
 	if err != nil {
 		return 0, fmt.Errorf("启用插件 %s 失败: %w", key, err)

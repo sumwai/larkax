@@ -69,9 +69,36 @@ publish **先在沙箱里编译一遍再落库**：编译不过的命令以非�
 插入一行新代次，状态是 pending，要 enable 才生效。
 
 get 看的是**最新发布的那一代**（代次最高的那一行），并说出这个 key 下还有几个
-更老的版本。它与**跑着的那一代**不是同一行：加载器只在同一个 key 里取状态为
-active 的一行，所以发布了新版本还没 enable 时，get 打的是那一版新的（pending），
-实际跑的仍是上一代——看状态那一栏分得清。
+更老的版本。它与**跑着的那一代**不是同一行：加载器在同一个 key 里取的是状态为
+active 且代次最高的那一行，所以发布了新版本还没 enable 时，get 打的是那一版新的
+（pending），实际跑的仍是上一代——它的代次与版本在「在跑」那一行上。
+
+「在跑」那一栏答「这一刻装着的到底是不是这一代」，取值是 / 否 / 还没试三档，而
+「否」与「还没试」各有两种来路。取中的正是这一代、上一次加载也装上了才写「是」；
+取中的正是这一代、上一次加载跳过了它写「否」，原文在表后那一句里；取中的正是这
+一代、却还没有加载记录写「还没试」——取中了不等于装上了。不是取中的那一代写「否」：
+同一个 key 里至多一行是取中的那一代。它与 status 不是一回事——enable 新版本时旧
+的那一行不会被按下去，于是一个 key 下可能有好几代都写着 active，而取中的只有一行。
+
+加载器每启动一次都重新读一遍参与注册的行，并把这一次的结果写回库里
+（last_load_result 那一栏）：装上了是 ok、被跳过的是 failed，连同当时的错误原文
+与时刻。两个命令都把它打出来——list 的「上次加载」写在取中的那一代那一行上，
+「装上了 / 没装成」是它的两个值，其余各行是「-」，失败时表后逐条给出原文；get 有
+「上次加载」一行，失败时再在表后打一句原文。它是**加载期**的结果，与 publish 那
+一步无关：publish 根本不收编译不过的插件，所以「发布了却没上线」只有这一栏说得
+出来。
+
+「上次加载」还没有记录（list 上是「-」）时，下一步分两条路：加载器整条链路与
+plugin.enabled 一起装配，这个设置关着时它根本不读 plugins 表，重启多少次都不会
+留下记录，先把设置打开；开着时才是「发布或启用之后还没重启过」，重启一次就有了。
+
+**取中的那一代被跳过时，这个 key 什么都不在跑**：加载器在一个 key 里只取一代，
+跳过它不会退回更老的那一代。list 那一行的「在跑」因此写着「否」，紧跟的
+「上次加载」写着「没装成」，表后那一句把原因原文打出来。
+
+跳过**不改任何状态**，也不改启用记录：那一代的 status 仍是 active，下次启动照样
+会再试一次。所以插件没装成时，先把源码或这次的装配调好，再重启一次，不必重新
+发布。
 
 delete 是**硬删**：这个 key 在 plugins 里的每一代、plugin_activations 里属于它
 的启用记录，以及 plugin_kv 里它私有的键，在一个事务里一起删掉。插件不像渠道
@@ -215,9 +242,21 @@ func runPluginList(args []string) error {
 
 // printPluginList 打出插件清单。
 //
-// 表头用**库里的列名**（key / version / status / generation），不翻译：
+// 表头前几栏用**库里的列名**（key / version / status / generation），不翻译：
 // 这些名字在 psql 里、在迁移文件里、在这里是同一个东西，翻译一遍就多一层
 // 对应关系要记。给人看的说明在 --help 里。
+//
+// 最后两栏是**算出来的**，库里没有这两列。前一个「在跑」答「这一刻真的装着的是
+// 哪一代」，取值是 / 否 / 还没试（四档见 runningMark）：同一个 key 里至多一行是
+// 「是」，而取中的那一代被跳过时一行都不是——加载器不会退回更老的那一代。它的
+// 答案与 status 那一栏不一样：enable 新版本时旧的那一行不会被按下去，于是一个
+// key 下可能有好几代都写着 active。两栏都排在库里那几栏之后，不混进它们中间。
+//
+// 紧随其后的「上次加载」是**加载期**的结果（库里的 last_load_result 那三列，
+// 由加载器每次启动时写）：上面那一栏答「取的是哪一代」，它答「上一次启动装上了
+// 没有」。它只写在取中的那一代那一行上，其余的行是 `-`——那份记录按 key 给，
+// 打在别的行上会被读成「这一代被加载过」。两栏要一起读：被跳过的那一代状态仍是
+// active，只有这一栏说得出来。
 func printPluginList(w io.Writer, rows []pluginstore.Row) {
 	if len(rows) == 0 {
 		// 明确打一句，而不是什么都不输出：「暂无插件」与「命令因为某个
@@ -228,12 +267,13 @@ func printPluginList(w io.Writer, rows []pluginstore.Row) {
 
 	tw := newTableWriter(w)
 	p := newPalette(w)
-	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 		p.bold("KEY"), p.bold("VERSION"), p.bold("STATUS"), p.bold("GENERATION"),
-		p.bold("PRIORITY"), p.bold("NAME"))
+		p.bold("PRIORITY"), p.bold("NAME"), p.bold("在跑"), p.bold("上次加载"))
 	for _, row := range rows {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\n",
-			p.bold(row.Key), row.Version, row.Status, row.Generation, row.Priority, row.Name)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n",
+			p.bold(row.Key), row.Version, row.Status, row.Generation, row.Priority, row.Name,
+			runningMark(row), loadMark(row))
 	}
 	_ = tw.Flush()
 
@@ -246,6 +286,126 @@ func printPluginList(w io.Writer, rows []pluginstore.Row) {
 			_, _ = fmt.Fprintf(w, "插件 %s 的 meta 有问题：%s\n", row.Key, row.MetaProblem)
 		}
 	}
+
+	// 上一次加载没装成的插件逐条说明：库里那一栏只说了一个「没装成」，而原因是
+	// 加载器交回来的原文，除了这里没有第二条路能读到它（日志里那一条是同一次
+	// 失败的另一个副本，不是同一条路）。
+	//
+	// 「现在哪一代都没在跑」这半句不是修饰：加载器跳过一代之后**不会**退回更老的
+	// 那一代（见 internal/plugin 的 PublishPartial），所以这个 key 这一刻什么都不
+	// 在跑——不说这一句，读者会以为老的那一代还顶着。
+	//
+	// 打的是**取中的那一代**：加载器读的就是它，结果也写在它上面。所以同一个
+	// key 只在这里说明一次，而不是每一代都重复一遍。
+	for _, row := range rows {
+		if !row.IsRunning() || !loadFailed(row.RunningLoad) {
+			continue
+		}
+		_, _ = fmt.Fprintf(w, "插件 %s 的第 %d 代（%s）没装成，现在这个 key 哪一代都没在跑：%s（%s）\n",
+			row.Key, row.Generation, row.Version,
+			loadErrorText(row.RunningLoad.Error), loadTime(row.RunningLoad))
+	}
+}
+
+// runningMark 说这一代现在是不是真的装着。
+//
+// 四档、三种取值（与 docs/cli-reference.md 的「plugin」一节、重生成的 man 页
+// 同一套）：
+//
+//   - 取中的那一代、上一次加载也装上了 → 是；
+//   - 取中的那一代、上一次加载跳过了它 → 否（原文在表后那一句里）；
+//   - 取中的那一代、还没有加载记录 → 还没试。**这一档不能并进「是」**：三列是
+//     加载器写下来的，它还没写过（发布或启用之后还没重启过；plugin.enabled 关着
+//     时它根本不读表），而「取中了」与「装上了」是两件事；
+//   - 不是取中的那一代（含这个 key 哪一代都没取中）→ 否。
+//
+// 打「是」与「否」而不是打勾打叉：清单里每一行都有一个值，而勾与叉在中文表格里
+// 更像两行之间的一条注释，读起来要先分辨「有符号的那一行才算」。
+//
+// 「还没试」是在说这一行**还没有被加载器试过**，不是在说它失败了：真失败了的那一档
+// 在表后带着错误原文，这一档没有。
+func runningMark(row pluginstore.Row) string {
+	switch {
+	case !row.IsRunning():
+		return "否"
+	case row.RunningLoad == nil:
+		return "还没试"
+	case row.RunningLoad.Failed():
+		return "否"
+	default:
+		return "是"
+	}
+}
+
+// loadMark 打「这一代上一次被加载时装上了没有」。
+//
+// 只打在加载器取中的那一代上：加载结果按 key 给（见 Row.RunningLoad），打在别的
+// 行上会被读成「这一代被加载过、没装成」。取中的那一代还没有加载记录时也打 `-`：
+// 与「这是别的代」是同一个符号，两种情形都是「这一行没有加载结果」，分得开的是
+// 「在跑」那一栏——那里写着「还没试」还是「否」。
+func loadMark(row pluginstore.Row) string {
+	switch {
+	case !row.IsRunning() || row.RunningLoad == nil:
+		return "-"
+	case row.RunningLoad.Failed():
+		return "没装成"
+	default:
+		return "装上了"
+	}
+}
+
+// loadFailed 问上一次加载有没有把这一代跳掉。没有记录（还没试过）不算失败：
+// 那一条走的是「还没试」那一档，见 runningMark。
+func loadFailed(a *pluginstore.LoadAttempt) bool {
+	return a != nil && a.Failed()
+}
+
+// loadErrorText 给出「没装成」后面的那半句。
+//
+// 空着时不留白也不省掉这半句：那一列记的是加载器交回来的错误原文，而一个真正的
+// 失败总该有话说——真为空只可能是手工改库的行，或者将来换了一个写入方。读者看到
+// 一句没有原因的「没装成」会以为是自己没看见：说清「库里没留下」，他才知道下一步
+// 不是去看命令行的别的角落，而是去看日志里加载器那一条。
+func loadErrorText(errText string) string {
+	if errText == "" {
+		return "库里没有留下错误原文"
+	}
+	return errText
+}
+
+// loadResultText 打「取中的那一代上一次加载」的结果。
+//
+// 没有记录时也不留白，但**不说「重启一次再看」这一句**：这一栏为空有两种来路，而
+// 它们的下一步不一样。加载器整条链路与 plugin.enabled 一起装配，这个设置关着时它
+// 根本不读 plugins 表，重启多少次都不会留下记录；开着时才轮到「发布或启用之后还
+// 没重启过」那一句。把两条路一起写出来，比让他照着一条不对的下一步再试一遍有用。
+//
+// 这个 key 没有取中的一代时是另一回事：没东西可试，所以那一句说的是不适用。
+func loadResultText(g *pluginstore.Generation, a *pluginstore.LoadAttempt) string {
+	switch {
+	case g == nil:
+		return "不适用：这个 key 里没有取中的一代（见「在跑」那一栏）"
+	case a == nil:
+		return "没有记录：加载器还没试过它——发布或启用之后还没重启过，或者 plugin.enabled " +
+			"是关着的（那时加载器不读表，重启也不会有记录）"
+	case a.Failed():
+		return fmt.Sprintf("没装成（%s）", loadTime(a))
+	default:
+		return fmt.Sprintf("装上了（%s）", loadTime(a))
+	}
+}
+
+// loadTime 打加载那一次的时刻。
+//
+// At 可能是零值：三列由加载器一次写入，而手工改库的行可以只填结果那一列（见
+// store.LoadAttempt.At）。打 0001-01-01T00:00:00Z 会像一个真时刻——读者会以为加载
+// 发生在那个时间点上，而它不是；留空又会像「这一栏没值」。说一句「没有记下时刻」，
+// 读者才知道要看的是别处（日志里那一条）。
+func loadTime(a *pluginstore.LoadAttempt) string {
+	if a == nil || a.At.IsZero() {
+		return "没有记下时刻"
+	}
+	return formatTimeValue(a.At)
 }
 
 // pluginListDoc 组装 plugin list 的机器可读输出。
@@ -271,6 +431,21 @@ func pluginListDoc(rows []pluginstore.Row) map[string]any {
 // meta_problem 是那一行的 meta 快照有什么问题，没问题时是 null：它在表格那一档
 // 折成表后的一行说明，在这里必须落进**这一条自己**——脚本问的是「哪几个插件的
 // meta 有问题」，而表后那几行是给人读的。
+//
+// 后四栏与表格那一档最后那一栏、以及表后那几句说明是同一件事的两半，只是这里
+// 要机器读得出来：
+//
+//   - latest 说这一条是不是最新一次尝试（代次最高的那一行）；
+//   - running_generation 说这个 key 里加载器取中的那一代，没有时是 null。
+//     它按 key 给，所以同一个 key 的每一条带着同一个值（priority 也是这么给的）。
+//     取中不等于装着：要读成「这一代真的在跑」，还得看下一条的 result 是 ok——
+//     取中却被跳过时，这个 key 哪一代都没在跑；
+//   - running_load 说取中的那一代上一次被加载时装上了没有：{result, error, at}，
+//     result 是 ok / failed，error 是失败时的原文（装上了是 null），这一代还
+//     没有加载记录时整个是 null。它也跟着 key 走，理由同上一条；
+//   - compile_error 是**发布期**编译不过留下的原文，没有时是 null（空串读起来
+//     像一个值，见 nullableString）。它只可能在手工改库的行上有值——publish
+//     不收编译不过的插件；加载期没装上的原因在 running_load.error 里。
 func pluginEntry(row pluginstore.Row) map[string]any {
 	return map[string]any{
 		"key":        row.Key,
@@ -281,7 +456,36 @@ func pluginEntry(row pluginstore.Row) map[string]any {
 		"name":       row.Name,
 		// 坏掉的那一行照样在清单里（见 printPluginList 的注释）：整次报错或
 		// 跳过它，都会让最需要看清单的那一刻看不到东西。
-		"meta_problem": nullableString(row.MetaProblem),
+		"meta_problem":       nullableString(row.MetaProblem),
+		"compile_error":      nullableString(row.CompileError),
+		"latest":             row.Latest,
+		"running_generation": generationOrNull(row.Running),
+		"running_load":       loadAttemptOrNull(row.RunningLoad),
+	}
+}
+
+// generationOrNull 把一个代次编成 JSON：没在跑的一代给 null。
+func generationOrNull(g *pluginstore.Generation) any {
+	if g == nil {
+		return nil
+	}
+	return map[string]any{"version": g.Version, "generation": g.Number}
+}
+
+// loadAttemptOrNull 把一次加载期尝试编成 JSON：没有记录时给 null。
+//
+// 三栏一起给、一起为 null，因为它们来自同一次写：结果、失败时的原文、那一次的
+// 时刻。error 用 nullableString 折空串——「装上了」不是「错误原文是空字符串」；
+// at 在零值时是 null 而不是 0001-01-01（见 jsonTimeOrNull）：那一列可由手工改库的
+// 行只填一半，而一个看着像真时刻的值会被脚本拿去做时间线。
+func loadAttemptOrNull(a *pluginstore.LoadAttempt) any {
+	if a == nil {
+		return nil
+	}
+	return map[string]any{
+		"result": a.Result,
+		"error":  nullableString(a.Error),
+		"at":     jsonTimeOrNull(a.At),
 	}
 }
 
@@ -343,10 +547,51 @@ func printPluginDetail(w io.Writer, d pluginstore.Detail) {
 	// 一条实体的回显是要拿去对时间线的。
 	row("写入", formatTimeValue(d.CreatedAt))
 	row("写自", pluginCreatedBy(d.CreatedBy))
+	// 「在跑」是上面那几栏答不了的一件事：上面说的是最新一代，而加载器取的是
+	// 状态为 active 且代次最高的那一行，两者在发布了没 enable 时并不是同一行。
+	// 答不出来时给一句「没有」，不留空——空栏与「这一栏不存在」长得一样。
+	//
+	// 四档与 list 那一栏同一套（见 runningMark）；这里写成句子，所以「取中但
+	// 没装成」「取中但还没有记录」分得开，而「这个 key 哪一代都没在跑」也不与它们
+	// 混在一起。取中却被跳过时把取的是哪一代一起写出来：那一刻这个 key 什么都不在
+	// 跑（加载器跳过之后不会退回更老的那一代），而用户从「没有」两个字上看不出它是
+	// 「没启用」还是「装了没成」。
+	switch {
+	case d.Running == nil:
+		row("在跑", "没有：这个 key 里哪一代都没在跑")
+	case loadFailed(d.RunningLoad):
+		row("在跑", fmt.Sprintf("没有：取的是第 %d 代（%s），上一次加载没装成",
+			d.Running.Number, d.Running.Version))
+	case d.RunningLoad == nil:
+		row("在跑", fmt.Sprintf("没有：取的是第 %d 代（%s），但它还没有加载记录",
+			d.Running.Number, d.Running.Version))
+	default:
+		row("在跑", fmt.Sprintf("第 %d 代（%s）", d.Running.Number, d.Running.Version))
+	}
+	// 「上次加载」说的是**加载期**那一次尝试（库里的 last_load_result 那三列），
+	// 与上面那几栏不是同一件事：上面说「库里有什么、谁在跑」，这一栏说「上一次
+	// 启动读表时，取中的那一代装上了没有」。失败的原因原文排在表外（见下），
+	// 所以这里只给结果与时刻。
+	//
+	// 与 list 那一栏同一个名字（栏头也是「上次加载」）：同一件事两个名字，读者
+	// 会以为清单与详情说的不是同一列。
+	row("上次加载", loadResultText(d.Running, d.RunningLoad))
 	_ = tw.Flush()
 
 	if d.MetaProblem != "" {
 		_, _ = fmt.Fprintf(w, "这个插件的 meta 有问题：%s\n", d.MetaProblem)
+	}
+	// 加载期没装成的原因排在表外，与 plugin kv 的值同一条理由：它是引擎交回来的
+	// 任意文本，换行与制表符都可能带，塞进单元格会顶出一行、多出一栏。上面那一行
+	// 写着「没装成」时，这里给的是为什么——原文只在库里那一列上，除了这一句没有
+	// 第二条路能读到它。
+	//
+	// 点名代次：这一页打的那一行是最新发布的一代，而没装成的是加载器取中的那一代
+	// （在跑那一栏里），两者在发布了没 enable 时并不是同一行。取中一代才会有加载
+	// 记录，所以这里 d.Running 一定有值。
+	if loadFailed(d.RunningLoad) {
+		_, _ = fmt.Fprintf(w, "第 %d 代（%s）上次加载没装成：%s\n",
+			d.Running.Number, d.Running.Version, loadErrorText(d.RunningLoad.Error))
 	}
 	if d.Versions > 1 {
 		// 只打最新的一代，所以这里必须说清「还有别的」：不说的话，「这个插件

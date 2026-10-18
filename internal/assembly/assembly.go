@@ -173,7 +173,14 @@ func (a *App) Close() error {
 	return a.RateLimiter.Close()
 }
 
-// pluginLoadTimeout 是启动期读 plugins 表的时间上限。
+// pluginLoadTimeout 是启动期问 plugins 表的时间上限，读与写共用一个。
+//
+// 写回这一次加载的结果（store 的 recordLoadResults）走同一个 ctx：它是同一次
+// 启动期装配的后半截——加载器读完表才知道该写什么。另起一个 ctx 只会多出一个
+// 「写回能比读表多等多久」的参数，而两个上限要按同一件事定：这个库现在能不能用。
+//
+// 超时落在读那一步是启动失败（见 buildPlugins 的注释）；落在写回那一步只记日志，
+// 已经装好的注册表不受影响——那是这一片与读表那一处有意的不同。
 //
 // Build 没有 context（它做的是装配，不是请求），而启动期的读表不该无限等：
 // 一个连不上的库会让进程停在那里不报错，现场看起来像「服务起来了但什么都不接」
