@@ -442,7 +442,7 @@ func TestDecisionSnapshotRecordsDegradationPerAttempt(t *testing.T) {
 // 没轮到就被提前放弃的（选路那一步之外的事）。
 //
 // 分类钉成字面量而不是拿 route 的常量来比：这条记录是给排障的人读的，
-// 取值改了就是一次对外的行为变化，用例该跟着变红（见 AGENTS.md 的
+// 取值改了就是一次对外的行为变化，用例该跟着变红（见 docs/development.md 的
 // 「用常量测常量等于没测」）。
 func TestDecisionSnapshotRecordsExcludedCandidates(t *testing.T) {
 	d := &fakeDecider{resp: decisionResponse()}

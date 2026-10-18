@@ -18,7 +18,7 @@
 # 而那会让「这个包需要多大系数」变成一个随机器负载变化的假属性。
 # 固定串行之后，系数才回到它的本意——容纳「变异体比原代码慢」的那种包。
 #
-# 代价是慢。但变异测试不是每次提交都跑的东西（见 AGENTS.md），
+# 代价是慢。但变异测试不是每次提交都跑的东西（见 docs/development.md），
 # 慢而可信比快而误导好。
 #
 # # 为什么同一时刻只允许一个实例
@@ -85,7 +85,8 @@
 # **变异体数就是 efficacy 的分母，而分母由变异器集合决定。** 换一个 gremlins
 # 版本 → 换一批变异器 → 同一个包的 efficacy 从 84% 变成 91%，而代码一行没动。
 # 而「分母变了」在输出里与「代码改好了」长得一模一样：两行都干净、都像结论，
-# 没有一个字说这两次不是同一把尺子。（AGENTS.md 那张表的数字尤其如此——它旁边
+# 没有一个字说这两次不是同一把尺子。（docs/development.md「各包的现状」那张表
+# 的数字尤其如此——它旁边
 # 写着的条件里就有「版本」与「启用的变异器集合」这两项，靠人记得填。）
 #
 # 所以这里做两件事。
@@ -107,8 +108,8 @@
 #
 # ## 二、每次运行打一行「这把尺子是什么」
 #
-# 版本 + 变异器集合 + 已显式打开的开关 + workers + 系数。这样**粘进 AGENTS.md
-# 那张表的数字自带条件**，不依赖人记得在旁边补一句。
+# 版本 + 变异器集合 + 已显式打开的开关 + workers + 系数。这样**粘进
+# docs/development.md「各包的现状」那张表的数字自带条件**，不依赖人记得在旁边补一句。
 #
 # 集合是**探测来的，不是写死一份常量**：写死的那份会在升版本时与工具脱钩，
 # 而脱钩之后打出来的那一行仍然长得像结论——那正是这一行要防的事
@@ -122,7 +123,7 @@
 #
 # **版本常量与安装方式必须一致**：安装提示里的 `@版本` 由 PINNED_GREMLINS_VERSION
 # 拼出来，不写第二遍。注意本仓**没有** CI job 装 gremlins——变异测试只在发布时
-# 本地跑（见 AGENTS.md），CI 跑的是本脚本的自测（用桩件、不调真 gremlins）。
+# 本地跑（见 docs/development.md），CI 跑的是本脚本的自测（用桩件、不调真 gremlins）。
 # 将来若加了这样的 job，它的 `go install` 版本必须与这里一致，
 # 与 deadcode 那条同理（见 .github/workflows/gates.yml 里装 deadcode 的那一步）。
 #
@@ -179,7 +180,7 @@ echo "已拿到锁：$LOCK_FILE"
 # 等于没有这道门（LESSONS 第 16 条）。
 
 # 钉住的 gremlins 版本。换它 = 换变异器集合 = 换 efficacy 的分母，
-# 所以 AGENTS.md 那张表的数字必须连同这一版一起读（理由见文件开头）。
+# 所以 docs/development.md「各包的现状」那张表的数字必须连同这一版一起读（理由见文件开头）。
 # **安装方式要与它一致**：下面所有提示文案都由它拼出来，不写第二遍。
 PINNED_GREMLINS_VERSION="v0.6.0"
 
@@ -283,7 +284,7 @@ if [ "$default_mutators" -eq 0 ]; then
   exit 1
 fi
 
-# 「这把尺子是什么」：粘进 AGENTS.md 那张表的数字自带条件，不依赖人记得补。
+# 「这把尺子是什么」：粘进 docs/development.md「各包的现状」那张表的数字自带条件，不依赖人记得补。
 extra_desc=""
 for f in "${EXTRA_MUTATOR_FLAGS[@]}"; do extra_desc="$extra_desc $f 已开"; done
 echo "这把尺子：gremlins ${got_version} / 变异器集合 ${enabled_mutators} /${extra_desc} / workers=${WORKERS} / 系数 ${COEF}"
@@ -293,7 +294,7 @@ echo "这把尺子：gremlins ${got_version} / 变异器集合 ${enabled_mutator
 if [ -z "${LARKAX_DB_DSN:-}" ]; then
   echo "没有 LARKAX_DB_DSN，本次未执行。"
   echo "internal/ledger/store 的集成测试会整包被 t.Skip，那一包等于没测。"
-  echo "本地起库的办法见 AGENTS.md 的「Lint」一节。"
+  echo "本地起库的办法见 docs/development.md 的「每个包一个测试库」一节。"
   exit 1
 fi
 
@@ -330,7 +331,7 @@ checked=0
 printf '%-20s %8s %7s %8s  %s\n' "包" "killed" "存活" "超时" "efficacy"
 printf '%s\n' "──────────────────────────────────────────────────────────────"
 
-# 存活清单。收尾时打出来——AGENTS.md 要求「对存活的变异逐个判断」，
+# 存活清单。收尾时打出来——docs/development.md 要求「对存活的变异逐个判断」，
 # 而只打一个计数的话那句话没法执行：数得出来，看不了。
 SURVIVORS=$(mktemp -t check-mutation-survivors.XXXXXX)
 # 这条 trap 会盖掉上面退化锁路径设的那一条，所以两条要一起写在这里。
@@ -420,7 +421,7 @@ if [ "$failed" -ne 0 ]; then
 fi
 echo "全部跑成。"
 
-# 存活清单打出来。AGENTS.md 写着「对存活的变异逐个判断，只有等价变异与
+# 存活清单打出来。docs/development.md 写着「对存活的变异逐个判断，只有等价变异与
 # 不可达分支可以放过」——**只打计数时那句话没法执行**：看不了就判不了，
 # 于是「逐个判断」实际退化成「看一个百分比」。清单本身是判据的一部分。
 #

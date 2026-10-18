@@ -244,7 +244,9 @@ in [NOTICE](NOTICE), along with attribution for other dependencies.
 
 ## Contributing
 
-See [AGENTS.md](AGENTS.md) for development conventions, the workflow, and the rules
-this repository follows. Before starting work, read the [LESSONS.md](LESSONS.md)
+See [AGENTS.md](AGENTS.md) for this repository's conventions and rules, and
+[`.claude/skills/larkax-workflow/SKILL.md`](.claude/skills/larkax-workflow/SKILL.md)
+for the development workflow — roles, how work is handed off, and the
+issue → PR → merge path. Before starting work, read the [LESSONS.md](LESSONS.md)
 index and open the entries it points at in [`lessons/`](lessons/) — they record
 problems already encountered and how they were resolved.
