@@ -112,8 +112,17 @@ type helpText struct {
 //
 // w 收 os.Stdout / os.Stderr 本身，不是 humanStdout()：`-q` 压的是「给人看」那一
 // 档的输出，而帮助是使用者主动要的，不该被它压掉。
+//
+// 上色在这一处做，不在那几十个调用点各做一遍：只给**结构**上色（段标题与组标题
+// 加粗、命令名与选项名加粗、说明与指针行置灰），规则见 style.go 的 paintHelp。
+// `--format json` 是个例外——它压掉上色：那一档是给管道下游的纯文本，混进控制码
+// 只会让下游多剥一层壳。`-q` 不在例外里：帮助照打、照上色。
 func printUsage(w io.Writer, text string) {
-	_, _ = fmt.Fprint(w, text)
+	p := newPalette(w)
+	if jsonOutput() {
+		p = palette{}
+	}
+	_, _ = fmt.Fprint(w, p.paintHelp(text))
 }
 
 // commandGroup 是根帮助页上的一个业务领域分组。

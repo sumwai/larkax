@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"go/ast"
+	"go/token"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -243,6 +246,363 @@ func TestEmptyListMessages(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ── 帮助文本上色 ────────────────────────────────────────────────────────
+
+// helpTextRounding 把样式码换成看得见的记号，报错时能一眼看出是哪一段被上了色。
+//
+// 只用在断言失败的输出里：期望值仍然写字面量（`\x1b[1m` 直接写），不引这个函数。
+func helpTextRounding(s string) string {
+	s = strings.ReplaceAll(s, "\x1b[1m", "«加粗»")
+	s = strings.ReplaceAll(s, "\x1b[2m", "«置灰»")
+	return strings.ReplaceAll(s, "\x1b[0m", "«/»")
+}
+
+// helpTextsForStyling 收齐包内全部帮助文本：根帮助页，加上每个 `*Usage` 常量。
+//
+// 按**常量名**扫而不是逐条罗列：帮助文本有四十来份，罗列的那一份与新加一条命令
+// 时漏掉的那一份都看不出来（与 renderpaths_test.go 里那张豁免表同一个口径）。
+// 扫常量而不是扫今天能走到的那几处调用点，比后者严：文本是包级的，将来多一条
+// 打印路径不会绕过这几条用例。
+//
+// 顺带扫进来几个不像帮助正文的 `…Usage`（例如某个 flag 的用法说明那一行）：
+// 判据对它们同样成立，留着不影响什么。
+func helpTextsForStyling(t *testing.T) []struct{ what, text string } {
+	t.Helper()
+
+	var texts []struct{ what, text string }
+	forEachNonTestFile(t, func(_ string, file *ast.File) {
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				values, ok := spec.(*ast.ValueSpec)
+				if !ok || !namesEndWith(values.Names, "Usage") {
+					continue
+				}
+				name := values.Names[0].Name
+				for _, v := range values.Values {
+					ast.Inspect(v, func(n ast.Node) bool {
+						lit, ok := n.(*ast.BasicLit)
+						if !ok || lit.Kind != token.STRING {
+							return true
+						}
+						value, err := strconv.Unquote(lit.Value)
+						if err != nil {
+							return true
+						}
+						texts = append(texts, struct{ what, text string }{name, value})
+						return true
+					})
+				}
+			}
+		}
+	})
+
+	// 条数写死：这份清单是好几条用例的覆盖面，少了十几条时它们全都还在跑，
+	// 只是不再覆盖那些文本——那在输出里和通过长得一样。
+	if len(texts) < 30 {
+		t.Fatalf("只扫到 %d 份帮助文本，期望三十份以上：扫描器坏了，或者口径变了——两种都不算通过", len(texts))
+	}
+	// 根帮助页是**渲染出来的**（buildUsage），不在常量里，单独收一份。
+	return append(texts, struct{ what, text string }{"根帮助页", usage})
+}
+
+// TestHelpTextStylesWithoutChangingContent 是这一组里最要紧的一条：上色那一档
+// 必须真的上了色，而**剥掉样式码之后与不上色那一档逐字相同**。
+//
+// 后半句是 issue 里点名的判据，它比「每一栏的起点列不变」更严：连行尾空格、
+// 空行、示例里的花括号一起比了——上色只许插样式码，一个字符都不许增删。
+//
+// 反过来也要防：某个文本没接上 palette 时只比「两档相同」是绿的，所以上色那
+// 一档同时断言出现了样式码。
+func TestHelpTextStylesWithoutChangingContent(t *testing.T) {
+	for _, tc := range helpTextsForStyling(t) {
+		t.Run(tc.what, func(t *testing.T) {
+			withTerminal(t, false)
+			colorEnv(t)
+			var plain bytes.Buffer
+			printUsage(&plain, tc.text)
+
+			withTerminal(t, true)
+			var styled bytes.Buffer
+			printUsage(&styled, tc.text)
+
+			if !strings.Contains(styled.String(), "\x1b[") {
+				t.Fatalf("这一份没上色：它没走 palette\n%s", styled.String())
+			}
+			if got, want := stripSGR(styled.String()), plain.String(); got != want {
+				t.Errorf("剥掉样式码之后与不上色那一档不同：\n得到 %s\n期望 %s",
+					helpTextRounding(got), helpTextRounding(want))
+			}
+			if plain.String() != tc.text {
+				t.Errorf("不上色那一档改了原文：\n得到 %q\n期望 %q", plain.String(), tc.text)
+			}
+		})
+	}
+}
+
+// TestHelpColoursStructureOnly 钉住「哪些东西被上色」。
+//
+// 期望值写死成字面量（`\x1b[1m` 直接写在断言里），不引 palette 的常量、也不拿
+// 被测实现算一遍：那样改坏了也照样通过（见 LESSONS.md 第 21 条）。
+//
+// 两份样本各管一半：version 的短版管段标题、首行、两栏行与指针行；根帮助页管
+// 组标题、`全局选项…` 那一段的标题与命令清单——后者是**渲染出来的**（buildUsage
+// 拼的），与前者的形状不同。
+func TestHelpColoursStructureOnly(t *testing.T) {
+	withTerminal(t, true)
+	colorEnv(t)
+
+	var short bytes.Buffer
+	printUsage(&short, versionShortUsage)
+
+	for _, want := range []string{
+		"\x1b[1m用法：\x1b[0m",                                  // 段标题：整行加粗
+		"\x1b[1mlarkaxctl version\x1b[0m",                    // 首行里的命令名
+		"\x1b[2m 打印版本号与编译元数据。\x1b[0m",                        // 首行里的那句话
+		"\x1b[1mlarkaxctl version -o json\x1b[0m",            // 两栏行的名字栏（用法）
+		"\x1b[2m打成 {\"ok\":true,\"version\":\"...\"}\x1b[0m", // 它的说明栏
+		"\x1b[2m更细的边界：larkaxctl help version。\x1b[0m",        // 指针行：整行置灰
+	} {
+		if !strings.Contains(short.String(), want) {
+			t.Errorf("version 短版里没有 %q：\n%s", want, helpTextRounding(short.String()))
+		}
+	}
+	// 说明文字不许加粗：加粗的是这一页的**结构**（命令名、段标题），不是
+	// 「这句话重要」。少一条这样的反向断言，一个「整页加粗」的实现照样通过。
+	if strings.Contains(short.String(), "\x1b[1m 打印版本号") {
+		t.Errorf("说明文字被加粗了：\n%s", helpTextRounding(short.String()))
+	}
+	if strings.Contains(short.String(), "\x1b[2m用法：") {
+		t.Errorf("段标题被置灰了：\n%s", helpTextRounding(short.String()))
+	}
+
+	var root bytes.Buffer
+	printUsage(&root, usage)
+	for _, want := range []string{
+		"\x1b[1m核心与诊断 (Core & Diagnostics)：\x1b[0m", // 组标题
+		"\x1b[1mdoctor\x1b[0m",                         // 清单里的命令名
+		"\x1b[2m系统健康与链路连通性体检\x1b[0m",                   // 它后面那一句话
+		"\x1b[1m全局选项（写在子命令前后都认）：\x1b[0m",               // usageNotes 里的段标题
+		"\x1b[1m--env-file <路径>\x1b[0m",                // 全局选项的名字栏
+		"\x1b[2m每条命令的详细用法：larkaxctl help <命令>。\x1b[0m", // 指针行
+	} {
+		if !strings.Contains(root.String(), want) {
+			t.Errorf("根帮助页里没有 %q：\n%s", want, helpTextRounding(root.String()))
+		}
+	}
+}
+
+// TestHelpLineJudgement 把逐行判据的几种边角钉死。
+//
+// 上面那条用例证明「上色不改内容」，这条证明**哪一段**被上了色。表里的输入都是
+// 还能认出出处的最小片段：段标题引出的是缩进块还是顶格正文、名字栏里含宽字符时
+// 说明栏落在哪一列、以及两种「宁可不上色」的续行（说明里换行下来的选项名、
+// 示例里的 JSON）。续行那两条是回归：加粗它们会让半句话从一段置灰的说明里跳
+// 出来，或者把示例里的花括号一起调暗。
+func TestHelpLineJudgement(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want string
+	}{
+		{"空行与末尾的空行原样", "\n\n", "\n\n"},
+		{"只有空格的行原样", "  \n", "  \n"},
+		{"段标题引出一块缩进的内容：整行加粗",
+			"用法：\n  larkaxctl version\n",
+			"\x1b[1m用法：\x1b[0m\n  \x1b[1mlarkaxctl version\x1b[0m\n"},
+		{"以冒号结尾但后面是顶格正文：当说明文字置灰",
+			"下面两个写法仍然可用：\n\n顶格的正文\n",
+			"\x1b[2m下面两个写法仍然可用：\x1b[0m\n\n\x1b[2m顶格的正文\x1b[0m\n"},
+		{"首行：命令名加粗，那句话置灰",
+			"larkaxctl version 打印版本号。\n",
+			"\x1b[1mlarkaxctl version\x1b[0m\x1b[2m 打印版本号。\x1b[0m\n"},
+		{"选项写在命令名前：整行置灰（不是一个命令名）",
+			"larkaxctl -q help doctor\n",
+			"\x1b[2mlarkaxctl -q help doctor\x1b[0m\n"},
+		{"两栏行：说明栏按显示列补到原来那一列",
+			"  a   b\n",
+			"  \x1b[1ma\x1b[0m   \x1b[2mb\x1b[0m\n"},
+		{"名字栏含宽字符时也补到同一列",
+			"  模型  展示\n",
+			"  \x1b[1m模型\x1b[0m  \x1b[2m展示\x1b[0m\n"},
+		{"说明的续行原样（哪怕它以一个选项名开头）",
+			"  说明的续行\n                     --env-file 要的是 .env 文件的路径。\n",
+			"  说明的续行\n                     --env-file 要的是 .env 文件的路径。\n"},
+		{"示例里的 JSON 原样", "  \"region\": \"CN\",\n", "  \"region\": \"CN\",\n"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withTerminal(t, true)
+			colorEnv(t)
+
+			var buf bytes.Buffer
+			printUsage(&buf, tc.text)
+			if got := buf.String(); got != tc.want {
+				t.Errorf("上色后 =\n%s\n期望 =\n%s", helpTextRounding(got), helpTextRounding(tc.want))
+			}
+		})
+	}
+}
+
+// TestHelpTextHasNoStyleWhenColourIsOff 钉住四种「一个 `\x1b` 都没有」的情形。
+//
+// 四种里有三种在 palette 那一层判（非终端、NO_COLOR 非空、TERM=dumb，见 style.go
+// 的 newPalette），一种在 printUsage 那一层判（`--format json`：给管道下游的是
+// 纯文本）。三条 palette 的判据终端判断被注入成「是终端」，所以它们只要失效就
+// 当场现形——而在真实终端里失效时，人只会觉得「怎么又有颜色了」，不会去报 bug。
+//
+// 断言的是输出里没有 `\x1b`，不是「palette.on 是 false」：开关对了而某一处调用点
+// 自己拼了一段转义序列，后者照样绿。顺带钉住「不上色不等于不输出」。
+func TestHelpTextHasNoStyleWhenColourIsOff(t *testing.T) {
+	cases := []struct {
+		name  string
+		apply func(t *testing.T)
+	}{
+		{"输出不是终端", func(t *testing.T) {
+			withTerminal(t, false)
+			colorEnv(t)
+		}},
+		{"NO_COLOR 非空", func(t *testing.T) {
+			withTerminal(t, true)
+			colorEnv(t, "NO_COLOR", "1")
+		}},
+		{"TERM=dumb", func(t *testing.T) {
+			withTerminal(t, true)
+			colorEnv(t, "TERM", "dumb")
+		}},
+		{"--format json", func(t *testing.T) {
+			withTerminal(t, true)
+			colorEnv(t)
+			outputFormat = formatJSON
+			t.Cleanup(func() { outputFormat = formatTable })
+		}},
+	}
+
+	texts := helpTextsForStyling(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.apply(t)
+			for _, one := range texts {
+				var buf bytes.Buffer
+				printUsage(&buf, one.text)
+				if strings.Contains(buf.String(), "\x1b") {
+					t.Errorf("%s：%s 里出现了转义序列：\n%q", tc.name, one.what, buf.String())
+				}
+				if buf.String() != one.text {
+					t.Errorf("%s：%s 的输出与原文不同：\n得到 %q\n期望 %q",
+						tc.name, one.what, buf.String(), one.text)
+				}
+			}
+		})
+	}
+}
+
+// TestHelpPathsAreColouredAndAgree 钉住三条打帮助的路都上色，且 `-h` 与
+// `--help` 的行为一致。
+//
+// 三条路各有各的出口（`-h` / `--help` 走各命令自己的 flag 集、`larkaxctl help
+// <命令>` 走分派），而它们都要经过 printUsage 这一个出口——这一条钉的就是
+// 「都经过了」。`-h` 与 `--help` 逐字节比：flag 包把两者当同一个写法，自己接
+// `-h` 的命令（version 就是）得跟上，不然脚本里两个写法给出不同的输出。
+//
+// `--quiet` 那一档在两个写法上都过一遍：它压的是「给人看」那一档的输出，而
+// 帮助是使用者主动要的，照打、照上色。
+func TestHelpPathsAreColouredAndAgree(t *testing.T) {
+	withTerminal(t, true)
+	colorEnv(t)
+
+	// 根帮助页也有一条路：`larkaxctl help` 不给命令名。
+	var rootOut, rootErr string
+	if err := runQuietly(t, []string{"help"}, &rootOut, &rootErr); err != nil {
+		t.Fatalf("larkaxctl help 出错: %v", err)
+	}
+	if !strings.Contains(rootOut, "\x1b[") || stripSGR(rootOut) != usage {
+		t.Errorf("larkaxctl help 打的根帮助页没上色或内容变了：\n%s", helpTextRounding(rootOut))
+	}
+
+	for _, g := range commandGroups {
+		for _, c := range g.commands {
+			t.Run(c.name, func(t *testing.T) {
+				dashH, dashHErr := helpOf(t, c, "-h")
+				longH, longHErr := helpOf(t, c, "--help")
+				if dashH != longH || dashHErr != longHErr {
+					t.Errorf("-h 与 --help 的输出不同：\n-h 得到 %q / %q\n--help 得到 %q / %q",
+						dashH, dashHErr, longH, longHErr)
+				}
+				if !strings.Contains(dashH+dashHErr, "\x1b[") {
+					t.Errorf("%s -h 没上色：\n%s", c.name, helpTextRounding(dashH+dashHErr))
+				}
+				if out := stripSGR(dashH + dashHErr); !strings.Contains(out, c.help.short) {
+					t.Errorf("%s -h 打的不是短版：\n%s", c.name, out)
+				}
+
+				var stdout, stderr string
+				if err := runQuietly(t, []string{"help", c.name}, &stdout, &stderr); err != nil {
+					t.Fatalf("larkaxctl help %s 出错: %v（stderr=%q）", c.name, err, stderr)
+				}
+				if !strings.Contains(stdout, "\x1b[") {
+					t.Errorf("larkaxctl help %s 没上色：\n%s", c.name, helpTextRounding(stdout))
+				}
+				if out := stripSGR(stdout); !strings.Contains(out, c.help.long) {
+					t.Errorf("larkaxctl help %s 打的不是长版：\n%s", c.name, out)
+				}
+			})
+		}
+	}
+}
+
+// TestQuietStillColoursHelp 钉住 `-q` 那一档：帮助照打、照上色。
+//
+// 「照打」由 usage_test.go 的 TestQuietDoesNotSuppressHelp 钉着，那一半很容易在
+// 收口时丢掉（帮助一改走 humanStdout()，`larkaxctl -q help doctor` 就会安静地
+// 什么都不打）。这一半钉的是别把 -q 顺手接进上色的判据里。
+func TestQuietStillColoursHelp(t *testing.T) {
+	withTerminal(t, true)
+	colorEnv(t)
+
+	quietOutput = true
+	t.Cleanup(func() { quietOutput = false })
+
+	var stdout, stderr string
+	if err := runQuietly(t, []string{"help", "channel"}, &stdout, &stderr); err != nil {
+		t.Fatalf("larkaxctl -q help channel 出错: %v", err)
+	}
+	if !strings.Contains(stdout, "\x1b[") {
+		t.Errorf("-q 之下帮助没上色：\n%s", helpTextRounding(stdout))
+	}
+	if out := stripSGR(stdout); !strings.Contains(out, channelUsage) {
+		t.Errorf("-q 之下帮助没打全：\n%s", out)
+	}
+}
+
+// helpOf 跑一条命令的 `-h` / `--help`，返回它打出来的两股输出。
+func helpOf(t *testing.T, c command, flag string) (string, string) {
+	t.Helper()
+
+	var err error
+	stdout, stderr := captureStreams(t, func() { err = c.run([]string{flag}) })
+	// flag 解析到 -h / --help 时返回 ErrHelp，而那时用法已经打过了：那不是失败，
+	// main 也照这个判据收尾（见 helpRequested）。
+	if err != nil && !helpRequested(err) {
+		t.Fatalf("%s %s 报错了: %v", c.name, flag, err)
+	}
+	return stdout, stderr
+}
+
+// runQuietly 跑一次 dispatch，把两股输出收回来。
+func runQuietly(t *testing.T, args []string, stdout, stderr *string) error {
+	t.Helper()
+
+	var err error
+	out, errOut := captureStreams(t, func() { err = dispatch(args) })
+	*stdout, *stderr = out, errOut
+	return err
 }
 
 // ── 用例自己的宽度折算 ──────────────────────────────────────────────────

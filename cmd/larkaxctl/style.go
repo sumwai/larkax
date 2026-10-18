@@ -189,6 +189,170 @@ func padRight(s string, width int) string {
 	return s
 }
 
+// ── 帮助文本上色 ────────────────────────────────────────────────────────
+
+// paintHelp 给一份帮助文本上色：只加样式码，一个字符都不增删。
+//
+// # 为什么是「逐行插样式码」而不是「渲染时拼」
+//
+// 帮助文本是四十来个手写的常量（`*Usage`），里面没有结构信息可用。所以判据
+// 一律取**形状**，而形状判对了也只做一件事：在原本那几段的**外面**套上样式码。
+// 于是「把样式码剥掉之后与不上色那一份逐字相同」是构造上成立的，不是拼出来的
+// ——那一列也就不会因为上色而错位。
+//
+// # 三条形状判据
+//
+//   - **段标题与组标题**：顶格、以「：」结尾，且它后面第一个非空行是缩进的。
+//     后半条不能省：说明文字里也有以冒号结尾的长句（「文件是一个 JSON 对象，
+//     只认下面这些字段（键名写错会直接报错）：」），只按冒号结尾认会把一整句
+//     话突出来；加上后半条就分得开——那一句后面是顶格的示例，不是缩进块。
+//     组标题（`核心与诊断 (Core & Diagnostics)：`）由同一条判据覆盖，不必再
+//     查注册表：它引出的正是紧跟着的那串命令。
+//   - **两栏行**：缩进的行里，两个及以上空格分出的两栏是「名字栏 + 说明栏」。
+//     两个而不是一个：名字栏自己含单空格（`larkaxctl migrate down-to <版本>`），
+//     按一个空格切会把命令名切开。名字栏加粗、说明栏置灰。
+//   - **其余**：顶格的是说明文字与指针行，整行置灰；缩进而以 `larkaxctl` 开头的
+//     是用法那一栏（这一行没有说明），整行加粗；再其余（说明的续行、换行下来的
+//     选项、示例里那段 JSON）原样不动——它们已经是背景了，置灰反而会把示例里的
+//     花括号也一起调暗。
+//
+// 已知落在判据之外的一处：`--credential-env <变量名> 从名为 <变量名> 的环境变量
+// 读` 那一行与它上面那一栏之间只隔**一个**空格（名字栏比上一行长），于是它按
+// 「其余」处理、不加粗。它没有被上错色，只是没上色；要让它也成一行，得把那一栏
+// 的空格补齐——那是改帮助文本的排版，与这一条不是一件事，没有混在一起做。
+func (p palette) paintHelp(text string) string {
+	if !p.on {
+		// 不上色那一档逐字返回原文：它是「重定向、NO_COLOR、TERM=dumb、
+		// --format json」四条判据共同的结果（见 newPalette 与 printUsage）。
+		return text
+	}
+
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = p.paintHelpLine(line, nextNonBlankIsIndented(lines, i))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// paintHelpLine 上色一行。nextIndented 是「它后面第一个非空行缩进吗」，
+// 只有段标题那一条判据用得到它。
+func (p palette) paintHelpLine(line string, nextIndented bool) string {
+	indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
+	body := line[len(indent):]
+	if body == "" {
+		return line
+	}
+
+	if indent == "" {
+		if strings.HasSuffix(body, "：") && nextIndented {
+			return p.bold(body)
+		}
+		if head, rest, ok := helpCommandPrefix(body); ok {
+			return p.bold(head) + p.dim(rest)
+		}
+		return p.dim(body)
+	}
+
+	if name, desc, col, ok := splitHelpRow(body); ok {
+		// 说明栏补到原文里那一列。补空格走 padRight（按 displayWidth 算）而不是
+		// 照抄原文那几个空格：名字栏里若含宽字符，字节数与列数不是一回事，
+		// 按字节补会把说明栏往后推。
+		return indent + padRight(p.bold(name), col) + p.dim(desc)
+	}
+	if helpInvocationRow(body) {
+		return indent + p.bold(body)
+	}
+	return line
+}
+
+// nextNonBlankIsIndented 报告第 i 行之后第一个非空行是不是缩进的。
+func nextNonBlankIsIndented(lines []string, i int) bool {
+	for _, line := range lines[i+1:] {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		return strings.HasPrefix(line, " ")
+	}
+	return false
+}
+
+// helpCommandPrefix 把「larkaxctl <命令>」那一段从一行里切出来。
+//
+// 认的是**命令名的形状**（小写字母开头，其余是小写字母、数字、连字符），不是
+// 注册表：帮助的打印路径挂在 `commandGroups` 上（每条命令的 run 都在那里），
+// 而注册表又要用到那几十条命令的处理函数——从注册表那一头查名字，会让命令组
+// 的初始化反过来依赖 printUsage。**Go 的初始化环分析是穿过函数体的**，查一下
+// 就编译不过。
+//
+// 形状判据在这里够用，而且落在同一批行上：整行以 `larkaxctl` 开头的本来就是
+// 每份帮助的首行，以及说明里插的那句 `larkaxctl price calendar import <文件>`；
+// `larkaxctl 是 larkax 的运维命令行。` 里的下一个词是中文，认不出来，整行置灰。
+func helpCommandPrefix(body string) (head, rest string, ok bool) {
+	after, found := strings.CutPrefix(body, "larkaxctl ")
+	if !found {
+		return "", "", false
+	}
+	name := after
+	if i := strings.IndexByte(after, ' '); i >= 0 {
+		name = after[:i]
+	}
+	if !isCommandNameShape(name) {
+		return "", "", false
+	}
+	return "larkaxctl " + name, after[len(name):], true
+}
+
+// isCommandNameShape 报告一个词是不是命令名的形状：小写字母开头，后面只跟
+// 小写字母、数字与连字符。
+func isCommandNameShape(word string) bool {
+	for i := 0; i < len(word); i++ {
+		c := word[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case i > 0 && c >= '0' && c <= '9':
+		case i > 0 && c == '-':
+		default:
+			return false
+		}
+	}
+	return word != ""
+}
+
+// splitHelpRow 把一行缩进的两栏切成名字栏与说明栏，col 是说明栏的起点列。
+//
+// col 取的是原文里名字栏与那一串空格的**显示宽度**：它就是要补到的列，
+// 调用点拿它交给 padRight。
+func splitHelpRow(body string) (name, desc string, col int, ok bool) {
+	// 从 1 起：body 已经去掉行首缩进，第 0 列不可能是栏间空格。
+	for i := 1; i+1 < len(body); i++ {
+		if body[i] != ' ' || body[i+1] != ' ' {
+			continue
+		}
+		j := i
+		for j < len(body) && body[j] == ' ' {
+			j++
+		}
+		if j == len(body) {
+			// 行尾的一串空格后面没有说明栏，这一行不是两栏行。
+			return "", "", 0, false
+		}
+		return body[:i], body[j:], displayWidth(body[:j]), true
+	}
+	return "", "", 0, false
+}
+
+// helpInvocationRow 报告一行缩进的一栏文字是不是一条用法行（这一行没有说明）。
+//
+// 只有 `larkaxctl` 开头的那一种：用法行里没有说明的（`larkaxctl alias delete
+// --id <别名 ID>`）与多行用法的续行各是一行，它们都是**命令名**，加粗。
+//
+// 按开头那一个字符认，`-`、`[`、`(` 开头的**不**算：说明的续行里也会在换行处
+// 以一个选项名起头（doctor 的帮助里就有一句 `--env-file 要的是 …`），加粗它
+// 会让半句话从一段置灰的说明里跳出来。换行下来的选项保持原样，宁可少加粗一处。
+func helpInvocationRow(body string) bool {
+	return strings.HasPrefix(body, "larkaxctl ")
+}
+
 // ── 诊断体检类命令的单行状态 ────────────────────────────────────────────
 
 // statusLine 是诊断体检类命令默认输出里的一行：状态符、标题、一句结论，
