@@ -82,6 +82,13 @@ func (a Amount) Units() int64 { return a.units }
 //
 // 超过 Scale 位的小数被**四舍五入**，不是截断：截断会让一批小额扣费
 // 系统性地偏向用户，累积起来是一笔真实的差额。
+//
+// 能读进来的幅值范围与 Amount 能表示的范围相同：正侧到 MaxInt64，
+// 负侧多一格——MinInt64 的幅值是 2^63，比 MaxInt64 大 1。String 印出来的
+// "-92233720368.54775808" 就是这一格，Parse 必须读得回来，否则「类型印出来
+// 的串，类型自己读不回」：任何把金额当文本绕一圈的路径（命令行输入、运维
+// 粘贴、日志里抄回去）都会在这里报一个值本身完全合法的溢出。这个值不只人
+// 造得出，Add 在负向溢出时夹到的正是 MinInt64（见 clampInt64Sign）。
 func Parse(s string) (Amount, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -115,6 +122,11 @@ func Parse(s string) (Amount, error) {
 
 	// 补齐或截断到 Scale 位
 	frac := fracPart
+	// 进位落到整数部分时不在 int64 的 whole 上加：whole == MaxInt64 那一格
+	// 加一会回绕成负值，下面按幅值的那道判据就再也拦不住它——回绕出来的负值
+	// 不大于那个商，而它的乘积又恰好是 0，于是一个远超范围的金额会静默变成零。
+	// 这一格留到幅值那里加，幅值是 uint64，加多少都不会回绕。
+	carryToWhole := false
 	if len(frac) > Scale {
 		// 四舍五入：看被丢掉的第一位
 		roundUp := frac[Scale] >= '5'
@@ -124,16 +136,8 @@ func Parse(s string) (Amount, error) {
 			f, _ := parseInt64(frac)
 			f++
 			if f >= unit {
-				// 整数部分已经顶在上界上时，这一次进位就再也放不下了：**先拦住它**。
-				// 放它过去的话 whole++ 会把 MaxInt64 回绕成 MinInt64，而下面那道
-				// 门槛用的正是回绕之后的值——MinInt64 当然不大于门槛，于是判据在
-				// 值已经被改坏之后才用，一个远比上界大的金额被静默算成 0。
-				// 0 在金额里是「一切正常」的那个数（免单、零用量），不是错误信号。
-				if whole == math.MaxInt64 {
-					return Zero, ErrOverflow
-				}
-				whole++
 				f -= unit
+				carryToWhole = true
 			}
 			frac = fmt.Sprintf("%0*d", Scale, f)
 		}
@@ -143,15 +147,34 @@ func Parse(s string) (Amount, error) {
 	}
 
 	fracUnits, _ := parseInt64(frac)
-	// whole*unit + fracUnits 都可能溢出
-	if whole > (math.MaxInt64-fracUnits)/unit {
+	// 幅值的上界按符号分：正侧到 MaxInt64，负侧到 2^63（MinInt64 的幅值）。
+	// whole*unit + fracUnits 会溢出，所以与原来同一条判据——先除再比——
+	// 只是搬到 uint64 里算，好把负侧那一格容纳进来。
+	limit := uint64(math.MaxInt64)
+	if neg {
+		limit = uint64(math.MaxInt64) + 1
+	}
+	if uint64(whole) > (limit-uint64(fracUnits))/uint64(unit) {
 		return Zero, ErrOverflow
 	}
-	units := whole*unit + fracUnits
-	if neg {
-		units = -units
+	magnitude := uint64(whole)*uint64(unit) + uint64(fracUnits)
+	if carryToWhole {
+		// 进位落到整数部分，是「多一个整单位」，不是多一个最小单位：
+		// 上面把小数部分减掉了一个 unit，这里加回来。
+		magnitude += uint64(unit)
 	}
-	return Amount{units: units}, nil
+	if magnitude > limit {
+		return Zero, ErrOverflow
+	}
+	if !neg {
+		return Amount{units: int64(magnitude)}, nil
+	}
+	if magnitude == uint64(math.MaxInt64)+1 {
+		// 只有这一格的幅值放不进 int64（-int64(magnitude) 会回绕成自己），
+		// 它对应的值就是 MinInt64。
+		return Amount{units: math.MinInt64}, nil
+	}
+	return Amount{units: -int64(magnitude)}, nil
 }
 
 func parseInt64(s string) (int64, error) {
