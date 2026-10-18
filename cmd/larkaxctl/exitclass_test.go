@@ -102,6 +102,9 @@ func parseCases() []parseCase {
 		{"apikey list 位置参数多余", func() error { return runAPIKeyList([]string{"extra"}) }, false, apikeyHint},
 
 		{"user create 缺 --name", func() error { return runUserCreate(nil) }, false, userHint},
+		{"user create --name 是纯数字", func() error {
+			return runUserCreate([]string{"--name", "123"})
+		}, false, userHint},
 
 		{"migrate create 缺名称", func() error { return runMigrate([]string{"create"}) }, false, migrateHint},
 		{"migrate 未知子命令", func() error { return runMigrate([]string{"bogus"}) }, false, migrateHint},

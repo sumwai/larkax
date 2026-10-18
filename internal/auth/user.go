@@ -38,17 +38,56 @@ const (
 	usersEmailUnique    = "users_email_key"
 )
 
-// 唯一约束冲突的分类错误。
+// 建用户时「这个名字不能用」的两类判断：撞上唯一约束，以及名字的形状不行。
 //
-// 它们与「库连不上」必须分得开：前者是使用者改个名字就能继续的错误，
-// 后者是环境问题。两者混在一条消息里，第一次建库的人会去改用户名，
-// 而真正的问题是 DSN 写错了。
+// 第三类（写入本身失败，例如连不上库）没有哨兵，原样包一层上抛，见
+// createUserFailure。
+//
+// 前两类必须分得开：它们都是「改个名字就能继续」的错误，而第三类是环境问题。
+// 混在一条消息里，第一次建库的人会去改用户名，而真正的问题是 DSN 写错了。
 var (
 	// ErrUsernameTaken 表示这个用户名已经有人用了。
 	ErrUsernameTaken = errors.New("用户名已被占用")
 	// ErrEmailTaken 表示这个邮箱已经挂在另一个用户上。
 	ErrEmailTaken = errors.New("邮箱已被占用")
+	// ErrUsernameIsIDRef 表示这个用户名会被 `--user` 按 ID 解释（整串是一个十进制
+	// 整数），于是落库之后按名字读不回来。
+	//
+	// 与上面两个分开放：它们说的是「这个名字被占了」，下一步是换一个名字；
+	// 这一条说的是「这个形状的名字不能用」，下一步同样是换一个名字，但它与库里
+	// 现在有什么无关。单独一个哨兵是为了让命令行把它归到「参数错」（退出码 2），
+	// 与 ErrNoChanges 同一档——重发一次就能过。
+	//
+	// 措辞只说十进制整数，不说「一个数」：`1.0`、`1e3`、`0x10` 与 `1_0` 在
+	// strconv 那一套里都不是整数（见 userRefIsID），它们是名字。
+	ErrUsernameIsIDRef = errors.New("用户名不能整个是一个十进制整数")
 )
+
+// ValidateNewUsername 校验一个**要建**的用户名。
+//
+// 今天只有一条：不能是 `--user` 会按 ID 解释的写法。名字进库之后怎么解释由
+// userRefWhere 决定，而它把这类串一律当 ID——那样一个名字建得出来、读不回来：
+// `user get` 与 `user update` 都够不着它，只能改库。拦在建的时候，是为了不让
+// 这样一行落进库里。
+//
+// 判据与 userRefWhere 共用 userRefIsID，两边认的是同一批串；有一条用例钉住这
+// 条一致性（见 TestValidateNewUsernameAgreesWithUserRefWhere）。两处各判一遍的
+// 症状很隐蔽：写入路径放过去一个名字，解析路径读不回来，而两边各自的用例都绿。
+//
+// 比的是**去掉两头空白之后**的名字，与 CreateUser 落库的那个值一致（它先去空白
+// 再插）：`--name " 123 "` 存进去的是 `123`，那正是读不回来的那一个。
+//
+// 它管不到库里已经有的行——那些纯数字的用户名本来就够不着，改解释规则是另一件
+// 事（见 ResolveUser）。改名的路也不存在：`user update` 不收 `--name`，
+// UpdateUserParams 里也没有这一列。
+func ValidateNewUsername(name string) error {
+	trimmed := strings.TrimSpace(name)
+	if _, ok := userRefIsID(trimmed); ok {
+		return fmt.Errorf("%w：%q 会被 --user 按 ID 解释，"+
+			"建出来之后 user get 与 user update 都找不到它", ErrUsernameIsIDRef, trimmed)
+	}
+	return nil
+}
 
 // Role 是用户角色的称呼。
 //
@@ -135,6 +174,8 @@ func (r Role) Flags() (isMerchant, isAdmin bool) {
 // CreateUserParams 描述要创建的一个用户。
 type CreateUserParams struct {
 	// Username 是用户名，唯一（citext，大小写不敏感）。必填。
+	// 不能整个是一个十进制整数：那样一个名字会被 `--user` 按 ID 解释，建出来就再也
+	// 按名字读不回来（见 ValidateNewUsername）。
 	Username string
 	// Email 为空表示不填。填了就唯一（同样大小写不敏感）。
 	Email string
@@ -153,15 +194,23 @@ type CreateUserParams struct {
 // 比报错危险得多：用户名是人的标识，改掉它意味着**另一个人的**
 // 归属、账单与渠道可能被悄悄挪走，而命令的退出码还是 0。
 //
-// # 错误分两类
+// # 错误分三类
 //
 //   - errors.Is(err, ErrUsernameTaken) / ErrEmailTaken：名字被占了，
 //     换个名字就能继续，是使用者能处理的
+//   - errors.Is(err, ErrUsernameIsIDRef)：这个名字的形状不能用（整串是一个十进制
+//     整数），同样换个名字就能继续——它不连库就判得出来
 //   - 其它：写入失败（连不上库、约束之外的错误），要人去查
 func (s *Store) CreateUser(ctx context.Context, p CreateUserParams) (User, error) {
 	username := strings.TrimSpace(p.Username)
 	if username == "" {
 		return User{}, errors.New("用户名不能为空")
+	}
+	// 与「空用户名」同一条：这些校验在**自己这里**就挡住，不靠命令行那层拦着
+	// （见 ValidateNewUsername 与 user_test.go 的 TestCreateUserRejectsEmptyInput）。
+	// 落库之前挡住才拦得下这样一个用户——写进去之后它就在库里了。
+	if err := ValidateNewUsername(username); err != nil {
+		return User{}, err
 	}
 	if !p.Role.valid() {
 		return User{}, fmt.Errorf("未知的角色 %q", p.Role)

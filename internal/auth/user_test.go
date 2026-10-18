@@ -197,3 +197,130 @@ func TestParseUserStatus(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateNewUsernameRejectsOnlyIDRefs 钉住「哪些名字建不得」的两侧。
+//
+// 判据不是「看起来像数字」，而是「`--user` 会把它按 ID 解释」。所以 `007` 与
+// `+7` 一起拒（strconv 那一套十进制认它们），而 `1a` / `a1` 只是名字里有数字，
+// 按名字读得回来，照收。
+func TestValidateNewUsernameRejectsOnlyIDRefs(t *testing.T) {
+	rejected := []string{
+		"123", "007", "0",
+		// 正负号也在 strconv 那套十进制里，于是 `user get --user +7` 同样按 ID 走。
+		"+7", "-7",
+		// int64 的两端仍然是一个数；再出去一位就不是了（见下面 accepted）。
+		"9223372036854775807", "-9223372036854775808",
+		// 两头空白先去掉：落库的是 `123`，那正是读不回来的那一个。
+		" 123 ",
+	}
+	for _, name := range rejected {
+		err := ValidateNewUsername(name)
+		if err == nil {
+			t.Errorf("ValidateNewUsername(%q) 通过了，期望报错", name)
+			continue
+		}
+		if !errors.Is(err, ErrUsernameIsIDRef) {
+			t.Errorf("ValidateNewUsername(%q) = %v，期望 ErrUsernameIsIDRef", name, err)
+		}
+		// 报错要说清**为什么**，不是一句「名字不合法」：这个名字 `--user` 找不回来。
+		if !strings.Contains(err.Error(), "--user") {
+			t.Errorf("ValidateNewUsername(%q) 的报错没说清原因：%v", name, err)
+		}
+	}
+
+	accepted := []string{
+		"1a", "a1", "a", "a b", "123a456",
+		// 不是 strconv 那套十进制：下划线、进制前缀、小数点、科学计数法都算名字。
+		"1_0", "0x10", "1.0", "1e3",
+		// 全角数字不是十进制数字。
+		"١٢٣",
+		// 走出 int64 的那两串两边都落回用户名（见 userRefIsID）。
+		"9223372036854775808", "-9223372036854775809",
+		// 收侧也要看 trim：去掉空白之后是 `1a`，那是个名字。
+		" 1a ",
+		// 只有空白（以及空串）在这里通过：名字为空由各自的调用方拦
+		// （CreateUser 报「用户名不能为空」，命令行报「缺少 --name」），
+		// 这一条判的是形状。
+		"", "  ", "\t",
+	}
+	for _, name := range accepted {
+		if err := ValidateNewUsername(name); err != nil {
+			t.Errorf("ValidateNewUsername(%q) 报错了，期望通过：%v", name, err)
+		}
+	}
+}
+
+// TestValidateNewUsernameAgreesWithUserRefWhere 钉住这两处认的是同一批串。
+//
+// 「哪些名字建不得」与「一个标识怎么解释」是同一个判据的两半：前者的判据正是
+// 「userRefWhere 会不会把它当成 ID」。两处各写一份 strconv.ParseInt 时，写入
+// 路径放过去一个纯数字的名字、解析路径又把它读成 ID，而两边各自的用例都绿——
+// 症状要等到有人 `user get` 一个刚建出来的用户才会现形。
+//
+// 比的是**去掉两头空白之后**的串：三条解析路径都先 trim 再调 userRefWhere
+// （见各自的 strings.TrimSpace），而 CreateUser 落库的也是 trim 之后的名字，
+// 所以两边看的是同一个值。
+func TestValidateNewUsernameAgreesWithUserRefWhere(t *testing.T) {
+	names := []string{
+		"123", "007", "0", "+7", "-7", " 123 ",
+		"9223372036854775807", "-9223372036854775808",
+		"9223372036854775808", "-9223372036854775809",
+		"1a", "a1", "a", "a b", "123a456", "1_0", "0x10", "1.0", "1e3", "١٢٣",
+		" 1a ", "", "  ", "\t",
+	}
+
+	for _, name := range names {
+		ref := strings.TrimSpace(name)
+		where, arg := userRefWhere(ref, 1)
+
+		if strings.HasPrefix(where, "id = ") {
+			if err := ValidateNewUsername(name); err == nil {
+				t.Errorf("%q 会被 userRefWhere 按 ID 解释（%s），ValidateNewUsername "+
+					"却放过了它：这样一个名字建出来就够不着了", name, where)
+			}
+			continue
+		}
+
+		if err := ValidateNewUsername(name); err != nil {
+			t.Errorf("%q 在 userRefWhere 那里是用户名（%s），ValidateNewUsername "+
+				"却拒了：%v", name, where, err)
+			continue
+		}
+		// 按用户名查的那一支，谓词的实参必须是这个名字本身：实参拼错了，
+		// `user get` 查的是另一个串，而两条路都「成功」。
+		if got, ok := arg.(string); !ok || got != ref {
+			t.Errorf("userRefWhere(%q) 的用户名支实参 = %#v，期望 %q", name, arg, ref)
+		}
+	}
+}
+
+// TestCreateUserRejectsIDRefUsername 钉住包自己那一层也拦得住。
+//
+// CreateUser 是导出方法，别的调用方（将来的 HTTP 管理接口、导入脚本）也会走它，
+// 所以「这样一个名字建不得」必须在**它自己**这里挡住，而不是只靠命令行拦着。
+// 命令行那层挡不挡是另一条用例（见 cmd/larkaxctl 的 TestUserCreateRejectsBadFlags）。
+//
+// 用 New(nil)：这条校验在连库之前，所以 nil 句柄走不到。它要是往下走了一步，
+// 这次调用会以 panic 收场，而不是安静地通过——下面那个 recover 就是把「收场」
+// 翻成一句能读的失败。
+//
+// **两条防线都留着**：recover 让校验缺席时红的是这条用例自己（而不是「整包挂了」
+// ——nil 解引用会结束整个测试进程，同包别的用例连跑都没跑），而它排在本文件最后
+// 一条，是给「连库之前」这句话留一条独立的证据：同文件前面那两条纯函数用例先跑完、
+// 各自报出自己的红，不必等这一条不再 panic。
+func TestCreateUserRejectsIDRefUsername(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("校验缺席：nil 句柄走到了连库那一步（panic: %v）", r)
+		}
+	}()
+
+	s := New(nil)
+
+	for _, name := range []string{"123", "007", " 123 "} {
+		_, err := s.CreateUser(t.Context(), CreateUserParams{Username: name, Role: RoleUser})
+		if !errors.Is(err, ErrUsernameIsIDRef) {
+			t.Errorf("CreateUser(%q) 的错误 = %v，期望 ErrUsernameIsIDRef", name, err)
+		}
+	}
+}
