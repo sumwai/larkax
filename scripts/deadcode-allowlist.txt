@@ -131,7 +131,6 @@ internal/money/money.go          | Min                             | lib | 金�
 internal/money/money.go          | MulAmount                       | lib | 金额库的运算面：两个金额相乘；目前只有测试在调它（计价规则里没有金额相乘）
 internal/money/money.go          | MulFloat                        | lib | 金额库的运算面：按倍率相乘，内部走 big.Rat；目前只有测试在调它（还没有倍率这个概念）
 internal/money/money.go          | MustParse                       | lib | 金额库的构造面：解析失败即 panic；只给测试写期望值用，生产一律走 Parse
-internal/observe/metrics.go      | Counter.Value                   | lib | 只给测试与断言用：cmd/larkax 的 main_test 跨包读它（所以必须导出），删了那条断言就没了
 internal/plugin/registry.go      | Publish                          | lib | 批量上传的 all-or-nothing 发布：今天没有生产调用方（启动走 PublishPartial、上传逐条 Compile），只有测试在调它
 internal/snapshot/allowlist.go   | Root.valid                      | lib | 允许表的内部判定：方向是否已知；目前只有测试在调它（New 查的是表，不是它）
 internal/snapshot/allowlist.go   | isAllowKind                     | lib | 允许表的内部判定：测试用它筛出需要顶住敌对取值的条目
