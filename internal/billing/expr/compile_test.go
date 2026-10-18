@@ -164,6 +164,57 @@ func TestCompileShapeErrors(t *testing.T) {
 	}
 }
 
+// TestCompileShapeErrorsByPosition 逐个位置走过形状检查的报错路径。
+//
+// 上面那条用例问的是「这条规则报的是不是形状错」，这一条问的是「这几个位置上
+// 的错到底有没有人来报」。两者的区别在变异测试里看得见：形状检查里那几处
+// `if err := walk…; err != nil { return err }`，把 `!=` 改成 `==` 之后，
+// 下面五个位置一条都杀不掉——每个位置上「写错了的规则」都没有用例走过。
+// 作为对照，内置函数的参数那条是被走过的（`float(p)` 那条用例），所以它杀得掉；
+// 缺的正是**用户级函数**（`fixed` / `minimum` / `hour` 这些）与计量项表那几处。
+//
+// 漏掉一条的后果不是「少报一次错」：变异之后那个守卫要么把错吞掉、要么提前
+// `return nil` 跳过后面的检查，于是写错的规则编得过，问题被推到求值那一步，
+// 而那里的报错不指向写法。
+//
+// 每条都点明它落在哪个位置——位置才是它们的区别，报出来的错并不一样。
+func TestCompileShapeErrorsByPosition(t *testing.T) {
+	cases := []struct {
+		position string
+		source   string
+		globals  map[string]any // nil 表示用 Compile，非 nil 用 CompileWithGlobals
+	}{
+		// 用户级函数的参数。位置与内置函数的参数是同一处（`函数参数`），
+		// 但走的是 CallNode 那一段——已有用例只喂过内置函数。
+		{"用户级函数的参数", `{"prompt": fixed(p)}`, nil},
+		// 规则根位置的裸标识符：`plan` 是注入常量，值合法，但落在根位置
+		// 意味着结果不是一张单价表。
+		{"规则根位置的裸标识符", `len <= 1 ? {"prompt": 1.0} : plan`, map[string]any{"plan": 1.0}},
+		// 计量项表里的值：单价不该依赖用了多少。
+		{"units 表里的裸用量变量", `{"prompt": 1.0, "units": {"img": p}}`, nil},
+		// 按条件选出的 units：两支都得是计量项表，一支是数就是量纲错。
+		{"units 条件式的真支", `{"prompt": 1.0, "units": len > 0 ? 1.5 : {"img": 0.01}}`, nil},
+		{"units 条件式的假支", `{"prompt": 1.0, "units": len > 0 ? {"img": 0.01} : 1.5}`, nil},
+	}
+	for _, tc := range cases {
+		var err error
+		if tc.globals == nil {
+			_, err = Compile(tc.source)
+		} else {
+			_, err = CompileWithGlobals(tc.source, tc.globals)
+		}
+		var ce *CompileError
+		if !errors.As(err, &ce) {
+			t.Errorf("%s：%q 应当被形状检查拦下，得到 %v", tc.position, tc.source, err)
+			continue
+		}
+		if ce.Reason != ReasonShape {
+			t.Errorf("%s：%q 的原因 = %s，期望 %s（%v）",
+				tc.position, tc.source, ce.Reason, ReasonShape, ce.Err)
+		}
+	}
+}
+
 // TestCompileIsPeakWindowMustBeALiteral 验证高峰时段必须写成字面量，
 // 而且写法当场就解析一遍。
 //
