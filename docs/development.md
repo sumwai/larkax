@@ -199,6 +199,10 @@ go run ./cmd/larkaxctl snapshot cleanup             # 执行删除
   `upstream_stream_aborted`、`upstream_stream_truncated`）。NULL 表示没有
   上游失败可归：正常结束、客户端断开、插件阻断。
 
+这一列比响应体上的同名码**窄**：响应体那一侧，`upstream_http_error` 盖住两档——
+「上游回了非 2xx」与「一个响应都没拿到」；这一列把两档分开记，因为排查与对账要
+回答的问题正是「这次请求到底有没有到上游」（见 [api.md](api.md) 的码表）。
+
 五个取值的分界线是**这次调用有没有真的产生 token**：
 
 - `upstream_stream_aborted`：上游接受了请求、一个字都没吐就结束了。没有用量，

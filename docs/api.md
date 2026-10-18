@@ -127,7 +127,12 @@ POST 路径，**没有** `GET /v1/models`、`GET /v1/models/{id}`、`/v1/embeddi
 |---|---|---|---|
 | `no_candidate_channel` | `503` / `502` | `503`：这个模型一条渠道都没挂上。`502`：候选有，但全被本地判据挡在门外（能力、上限、健康度、额度），**一次上游调用都没发生** | 改渠道配置或模型目录声明；重试多少次都是同一个结果 |
 | `channel_type_unsupported` | `502` | **试过的**候选都不支持这条协议：每条都是被渠道类型挡下的。被本地状态（额度、健康度）挡掉的候选不在这句话的范围里 | 换一条类型对的渠道 |
-| `upstream_http_error` | `502` / `429` | 上游那一侧失败：真的回了非 2xx，或者**没答上来**（连不上、TLS 握手失败、响应头超时——上游可能根本没收到这次请求，这一条码分不出这两种）；`429` 那一档是上游限流——OpenAI 那侧 `error.type` 仍是 `rate_limit_error`、变的是 `error.code`（原来是 `null`），Anthropic 那侧码落在 `error.type`，所以 `rate_limit_error` 在它这里不再出现 | `429` 与「没答上来」都可以退避重试；其余看 `message` 与日志：改请求，或者换上游 |
+| `upstream_http_error` | `502` / `429` | 上游那一侧失败：真的回了非 2xx，或者**没答上来**（连不上、TLS 握手失败、响应头超时——上游可能根本没收到这次请求，这一条码分不出这两种）；`429` 那一档是上游限流——OpenAI 那侧 `error.type` 仍是 `rate_limit_error`、变的是 `error.code`（原来是 `null`），Anthropic 那侧码落在 `error.type`，所以 `rate_limit_error` 在它这里不再出现 | `429` 与「没答上来」都可以退避重试；其余看 `message` 与日志：改请求，或者换上游。**名字是规范名、上游却回「模型不存在」时，缺的是 alias**（见 [README](../README.md) 里 `doctor` 那一段） |
+
+同一个码在账本那一侧是**窄**的：开了请求快照的部署里，`upstream_status` 那一格记的是
+这次调用真的拿到过的状态码，一个响应都没拿到时它是空的；`error_kind` 那一格则记
+`upstream_no_answer`。响应体回答不了「上游到底收没收到这次请求」，账本回答得了。
+两列的读法见 [development.md](development.md) 的「快照的两个方向与上游证据两列」一节。
 
 **我们这一侧**的失败也是 `502`，它就是状态码表里那第四种起因：候选都失败了，
 而最后一个错误不是上游那一侧的（插件阻断、账本写不进去）。这一种**不给码**
@@ -211,11 +216,11 @@ the account balance ran out while this response was streaming, so it was cut sho
 - **OpenAI 的用量合并在结束分片里**，而官方是在它之后另发一个 `choices` 为空的
   分片。分开写会让按 `choices[0]` 取值的朴素客户端读到空数组而崩；合并则是多一个
   它们不认识的字段——后者是更安全的偏差。
-- **流式与同协议的非流式 5xx 用了不同的错误类型**：流式帧里是 `server_error`
-  （Anthropic 那一侧是 `api_error`），非流式的 `error.type` 是 `api_error`——而
-  Anthropic 那一栏放的是码 `upstream_http_error`（它没有 `error.code`，见上面那张
-  表）。这是现状，统一它属于对外契约变更，按 [versioning.md](versioning.md) 的
-  版本策略走。
+- **流式与同协议的非流式 5xx 用了不同的错误类型**：OpenAI 与 Responses 那两套里，
+  流式帧是 `server_error`；非流式的 `error.type` 是 `api_error`。Anthropic 那侧
+  流式帧是 `api_error`，非流式那一栏放的是码 `upstream_http_error`
+  （那套协议没有 `error.code`，见上面那张表）。这是现状，统一它属于对外契约变更，按
+  [versioning.md](versioning.md) 的版本策略走。
 - **引用标注（citation / annotation）只在 Responses 这条路上有事件**
   （`response.output_text.annotation.added`）。chat 与 Anthropic 两侧都不转它：
   chat completions 的分片里没有它的位置（那会是 relaykit 的 dto 扩字段，一次
