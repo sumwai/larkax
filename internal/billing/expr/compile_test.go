@@ -67,6 +67,11 @@ func TestCompileAcceptsExactlyAtSourceLimit(t *testing.T) {
 // 层数由括号与最外层那对花括号一起数：外层 `{` 自己占一层，所以括号给到
 // maxNesting-1 对时正好压在上限上。上限之内与上限之上只差一层，
 // 也就是一对括号——比较符挪一格，一条本来合法的规则会开始报「嵌套过深」。
+//
+// 变异：这一格对应的是 `maxDepth > maxNesting` 那条判据；同一段里还有一处
+// `if depth > maxDepth { maxDepth = depth }`（记运行中的最大深度），
+// 它的 `>` 改成 `>=` 是**等价变异**：边界那一格（depth 正好等于 maxDepth）
+// 赋的还是同一个数，没有哪一组输入能让两版不同，抓不到。
 func TestCompileAcceptsExactlyAtNestingLimit(t *testing.T) {
 	at := `{"prompt": ` + strings.Repeat("(", maxNesting-1) + "1.0" +
 		strings.Repeat(")", maxNesting-1) + `}`
@@ -408,6 +413,18 @@ func TestCacheIsBounded(t *testing.T) {
 // compile 每次都新造一个 Program，所以「非 nil」这个断言任何情况下都是绿的
 // ——淘汰方向写反、热点被丢掉，它都看不出来。只有同键命中的**同一个指针**
 // 才说明那一份还在缓存里。
+//
+// 变异：命中缓存那条路上会调 `moveToFront`，它的 `if e == nil || l.head == e`
+// 改成 `&&` 是等价变异，而两支的理由不一样，分开判：
+//
+//   - `e == nil` 那一支**没有可到达的输入**：全仓只有 Get 与 GetWithGlobals
+//     命中缓存的那几处调它（传进去的都是刚从 `c.items[…]` 里取出来的元素），
+//     不会是 nil。
+//   - `l.head == e` 那一支（命中的正好是队首）把队首摘下来、再推回队首，
+//     得到的还是同一条链表：元素、顺序、head 与 tail 全都不变——只有一个
+//     元素那一格也一样（`remove` 之后 head/tail 都空，再推回去又都指向它）。
+//
+// 所以这一条与 `e == nil` 那一半都不能靠「它不一样」来杀。
 func TestCacheKeepsHotEntries(t *testing.T) {
 	c := NewCache(16)
 	const src = `{"prompt": 0.0000015}`
@@ -485,6 +502,49 @@ func TestCacheDropsTheOldestBatch(t *testing.T) {
 		if p := cacheProg(t, c, key, src); p == progs[i] {
 			t.Errorf("k%d 还在缓存里：该被淘汰的是队尾那两条", i)
 		}
+	}
+}
+
+// TestCacheBoundsTinyCapacity 把小容量下那两处「不足就取 1」的钳位用具体的值固定下来。
+//
+// 容量 0 与容量 1 都是容量 1 的缓存；淘汰时算出来的 `max/8` 也要从 0 钳到 1
+// ——两处都钳住，缓存才有上限：不钳的话容量 0 的缓存一条都不淘汰，
+// 商家改一万次规则就攒一万条。
+//
+// 两处的**边界那一格都是等价变异**，抓不到，而理由各自成立：
+//
+//   - `max < 1` 改成 `max <= 1`：max 正好是 1 时进分支把 max 赋成 1，
+//     写的还是同一个数（容量提示 `make(map, 1)` 也一模一样）。
+//   - `drop < 1` 改成 `drop <= 1`：max 是 8 时 `8/8` 正好是 1，进分支赋 1，
+//     同一个数。
+//
+// 要说「加上哪一组输入会让两版不同」——没有：两处赋值都写在「算出来的正好
+// 就是要赋的那个值」那一格上，换分支不改值。下面两条仍然把这一格的具体数
+// 固定下来（容量 8 时一次淘汰 1 条正是 max/8 的那一格），改写法时它会红。
+func TestCacheBoundsTinyCapacity(t *testing.T) {
+	// 容量 0 被钳到 1：放一批不同的规则之后只剩一条，不随插入次数增长。
+	c := NewCache(0)
+	for i := 0; i < 8; i++ {
+		cacheProg(t, c, "k"+itoa(i)+"@v1", `{"prompt": 1.0}`)
+		if c.Len() > 1 {
+			t.Fatalf("第 %d 次插入后有 %d 条，容量 1 的缓存不该超过 1 条", i, c.Len())
+		}
+	}
+	if c.Len() != 1 {
+		t.Errorf("插入 8 条不同规则之后有 %d 条，期望 1", c.Len())
+	}
+
+	// 容量 8：一次淘汰 8/8 = 1 条，满员后插一条再放进一条，仍是 8 条。
+	c8 := NewCache(8)
+	for i := 0; i < 8; i++ {
+		cacheProg(t, c8, "k"+itoa(i)+"@v1", `{"prompt": 1.0}`)
+	}
+	if c8.Len() != 8 {
+		t.Fatalf("塞满后应当有 8 条，得到 %d", c8.Len())
+	}
+	cacheProg(t, c8, "k-new@v1", `{"prompt": 1.0}`)
+	if got := c8.Len(); got != 8 {
+		t.Errorf("满员后插入一条之后有 %d 条，期望 8（一次淘汰 1 条再放进 1 条）", got)
 	}
 }
 

@@ -3,6 +3,7 @@ package expr
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -183,6 +184,11 @@ func TestEvalRecordsExplicitZeroAsDeclared(t *testing.T) {
 // 要么单价写到了别的字段上（SetPrice 指错）。
 //
 // 每个槽位给不同的价：写错字段时不会碰巧相等。
+//
+// 变异：`priceSlots` 那份表在建的时候写的是
+// `len(billing.TokenSlots)+len(nonTokenPriceSlots)`，它的 `+` 改成 `-`
+// 只动 map 的**容量提示**（5 + 3 与 5 - 3），键与值一个都不变。
+// 没有哪一组输入能让两版不同，所以那一条是等价变异，抓不到。
 func TestEveryTokenSlotComesFromBilling(t *testing.T) {
 	parts := make([]string, 0, len(billing.TokenSlots))
 	want := make(map[string]money.Amount, len(billing.TokenSlots))
@@ -422,6 +428,33 @@ func TestEvalIsPeakParsesWindows(t *testing.T) {
 		{StartMinute: 8 * 60, EndMinute: 12 * 60},
 		// 22:00 到次日 02:00：终点小于起点。
 		{StartMinute: 22 * 60, EndMinute: 2 * 60},
+	})
+}
+
+// TestPeakWindowKeepsBothEndsOfTheDay 把窗口串两头边界上那一格固定下来：
+// 一天之内的钟点**包含** 00:00 与 23:59，而分钟数要折成从零点起算的那个数。
+//
+// 这条拿一天的两端当输入，把同一个表达式里的两支分开判：
+//
+//   - `h > 23` 改成 `>= 23`、`m > 59` 改成 `>= 59`：`23:59` 会被当成
+//     「不是一天之内的钟点」，这一条在编译或求值时报错（两个入口都校验写法）。
+//   - `h < 0` 改成 `<= 0`、`m < 0` 改成 `<= 0`：正好是零点的那一格被当成越界。
+//   - `h*60 + m` 的 `+` 改成 `-` 不报错，但 `23:59` 折成 1321 而不是 1439——
+//     落在下面那段等值断言上。
+//
+// 断言写成两个字面量而不是 `23*60+59` 这种算式：算式与被测的那一行是同一个
+// 写法，`+` 改成 `-` 时两边一起变，用例照样通过。
+func TestPeakWindowKeepsBothEndsOfTheDay(t *testing.T) {
+	cal := newTestCalendar()
+	cal.peakMinutes = map[int]bool{}
+	p := mustCompile(t, `{"prompt": isPeak("23:59-00:00, 00:00-23:59") ? 1.0 : 2.0}`)
+	if _, err := p.Eval(Env{At: testAt, Region: "CN", Calendar: cal}); err != nil {
+		t.Fatal(err)
+	}
+
+	checkWindows(t, cal.saw[0].windows, []PeakWindow{
+		{StartMinute: 1439, EndMinute: 0}, // 23:59 到当天结束（次日零点）
+		{StartMinute: 0, EndMinute: 1439}, // 从零点到 23:59
 	})
 }
 
@@ -1002,6 +1035,10 @@ func TestEvalTierOnWholeTable(t *testing.T) {
 }
 
 // TestEvalProgramMetadata 验证 Program 的元信息。
+//
+// 变异：`keysOf` 建那个并集时写的是 `len(p.keys)+len(table)`，它的 `+`
+// 改成 `-` 同样只动容量提示（差为负时运行时按 0 处理，不会 panic），
+// 键的并集与排序都不受影响——没有哪一组输入能让两版不同，等价变异。
 func TestEvalProgramMetadata(t *testing.T) {
 	source := `len <= 32000 ? {"prompt": 1.0} : {"prompt": 2.0, "completion": 3.0}`
 	p := mustCompile(t, source)
@@ -1101,5 +1138,40 @@ func TestEvalMoneyAmountsAreExact(t *testing.T) {
 		if b.Total.Cmp(first) != 0 {
 			t.Fatalf("第 %d 次求值得到 %s，第一次是 %s", i, b.Total, first)
 		}
+	}
+}
+
+// amountFrom 把算好的浮点价折成定点金额，它的兜底守卫两支要分开判。
+//
+// 变异：`!finite(v) || v < 0` 的 `||` 改成 `&&`——只有「既不是有限数、
+// 又是负数」才走守卫，于是负的单价一路走到 money.Parse，而**它认负号**：
+// amountFrom(-1.5) 会返回 -1.50000000 而不是零。负数单价就是「上游倒付钱
+// 给用户」，这一支本是拦它的那一处。下面第一条断言在这一处红。
+//
+// 另一半**分不开**：非有限值格式化成 "+Inf" / "-Inf" / "NaN" 之后一样过不了
+// money.Parse（里面含非数字字符），两版都落到 `return money.Zero`。
+// 说不出哪一组输入能让两版不同，所以那一半是等价变异——下面那段 Inf / NaN 的
+// 断言钉的是**行为**（非有限值一律折成零），不是杀变异体的证据：把 `!finite(v)`
+// 那一半整个删掉，它们照样绿，因为解析失败那一支自己也 `return money.Zero`。
+//
+// 变异：`v < 0` 改成 `v <= 0`——边界那一格（正好 0）被守卫拦下返回 Zero，
+// 不拦则 money.Parse("0") 得到 Amount{units: 0}。money.Amount 只有 units
+// 一个字段，零只有一种表示，两版连 String() 都一样，所以这一条也是等价变异。
+func TestAmountFromRejectsNegativePrice(t *testing.T) {
+	if got := amountFrom(-1.5); got.Cmp(money.Zero) != 0 {
+		t.Errorf("负数单价应当折成零，得到 %s", got)
+	}
+	for _, v := range []float64{math.Inf(1), math.Inf(-1), math.NaN()} {
+		if got := amountFrom(v); got.Cmp(money.Zero) != 0 {
+			t.Errorf("amountFrom(%v) 应当折成零，得到 %s", v, got)
+		}
+	}
+	// 零也折成零：上面 `v <= 0` 那一段说的那一格。
+	if got := amountFrom(0); got.Cmp(money.Zero) != 0 {
+		t.Errorf("amountFrom(0) 应当折成零，得到 %s", got)
+	}
+	// 正常值照旧折成定点数：别把守卫写成「一律返回零」。
+	if got := amountFrom(0.0000015); got.String() != "0.00000150" {
+		t.Errorf("amountFrom(0.0000015) = %s，期望 0.00000150", got)
 	}
 }

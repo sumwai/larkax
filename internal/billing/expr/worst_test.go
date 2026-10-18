@@ -281,6 +281,11 @@ func TestWorstCaseIsNotJustOneBranch(t *testing.T) {
 //
 // 一支给了 units 而另一支没有时，上界必须带上 units——
 // 否则结算时按另一支算出了这笔费用，预留里却没有，就撞 Capped。
+//
+// 变异：`worstTable` 建那张合并表时写的是 `len(a)+len(b)`，它的 `+` 改成 `-`
+// 只动 map 的容量提示（负的提示由运行时按 0 处理，不会 panic），
+// 键的并集与取值一个都不变——没有哪一组输入能让两版不同，所以那一条是
+// 等价变异，抓不到。
 func TestWorstCaseCoversUnitsOnEitherBranch(t *testing.T) {
 	p := mustCompile(t, `units["img"] > 0
 		? {"prompt": 0.0000015, "units": {"img": 0.02}}
@@ -432,6 +437,46 @@ func TestWorstCaseDropsConditions(t *testing.T) {
 	}
 	if got := worst.Prices.Prompt.String(); got != "0.00000400" {
 		t.Errorf("上界 = %s，期望 0.00000400", got)
+	}
+}
+
+// TestWorstPairRejectsNilOnEitherSide 固定住 `__worst` 收到 nil 时报的是哪一句。
+//
+// **这一支从规则源码走不到**：规则里没有 nil / null 字面量，`__worst` 的两个
+// 入参只能来自字面量本身或注入的常量，而注入常量的类型在编译期按样本值定下
+// （nil 会得到「类型 <nil> 不受支持」）。所以整包变异跑下来这一条是存活的：
+// 规则那条路上没有能分开两版的输入，分得开它的只有「直接把 nil 递给这个函数」。
+//
+// 为什么要单独写一条：nil、形状不一致、不是数值是三种不同的写错方式，报出来的
+// 那句话是规则作者唯一的线索——按「形状不一致」或「必须是数值」报，会把人
+// 引到另一处去找。
+//
+// 变异：`a == nil || b == nil` 的 `||` 改成 `&&`——只有两边同时是 nil 才走
+// 这一支，于是：（nil, 2.0）报「参数必须是数值或单价表，当前是 <nil> 与 float64」，
+// （nil, 表）报「两个分支形状不一致」。两个方向都要试，只试一侧的用例证明不了
+// 另一侧也在守卫里。（nil, nil）两版相同——单靠它杀不掉。
+func TestWorstPairRejectsNilOnEitherSide(t *testing.T) {
+	table := map[string]any{"prompt": 1.0}
+	cases := []struct {
+		name string
+		a, b any
+	}{
+		{"左边是 nil、右边是数值", nil, 2.0},
+		{"右边是 nil、左边是数值", 2.0, nil},
+		{"左边是 nil、右边是单价表", nil, table},
+		{"右边是 nil、左边是单价表", table, nil},
+		{"两边都是 nil", nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := worstPair(tc.a, tc.b)
+			if err == nil {
+				t.Fatalf("worstPair(%v, %v) 应当报错，得到 %v", tc.a, tc.b, got)
+			}
+			if !strings.Contains(err.Error(), "不能是 nil") {
+				t.Errorf("错误 = %q，期望指出 nil 是写错的那一处", err)
+			}
+		})
 	}
 }
 
