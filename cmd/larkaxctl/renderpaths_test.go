@@ -57,6 +57,7 @@ var tableRenderPaths = []string{
 	"printAliasList",
 	"printAllowlists", // snapshot allowlist
 	"printChannelList",
+	"printConsentList", // consent list
 	"printKeyList",
 	"printLedgerBalances", // ledger balance --all
 	"printModelDetail",
@@ -74,6 +75,7 @@ var emptyListPaths = []string{
 	"checkDoctorWallets", // doctor 的钱包体检：一个用户都没有
 	"printAliasList",
 	"printChannelList",
+	"printConsentList", // consent list
 	"printKeyList",
 	"printModelList",
 	"printPluginList",
