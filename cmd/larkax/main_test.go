@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -45,6 +46,64 @@ func TestWorkerRoleServesPlaceholder(t *testing.T) {
 	// 看到它的人会去查功能，而真正的问题是部署把 worker 摆在了公共端口上。
 	if !strings.Contains(rec.Body.String(), "worker") {
 		t.Errorf("占位响应应当点名角色: %s", rec.Body)
+	}
+}
+
+// worker 那个 501 的错误体形状由 internal/api 给出，这一层只剩文案。
+//
+// 判据是 OpenAI 形状的四个字段都在：error.type / error.message / error.code /
+// error.param。手写一份字面量时最容易漏掉的是后两个——它们在这条路径上恒为
+// null，而 OpenAI 的形状里它们总在（见 internal/api 的 openAIError），
+// 少写一次有些客户端就会当成字段丢了。上面那条用例判的是状态码与「点名了角色」，
+// 判不出这个。
+//
+// 取值与 internal/api 的 errorKind 同源：501 → not_implemented。那个包用
+// error_test.go 的用例逐字钉住这个取值，两处合起来才是「形状在两处一致」。
+func TestWorkerPlaceholderBodyIsOpenAIShape(t *testing.T) {
+	rec := httptest.NewRecorder()
+	workerPlaceholder().ServeHTTP(rec, httptest.NewRequestWithContext(
+		context.Background(), http.MethodPost, "/v1/chat/completions", nil))
+
+	if got := rec.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
+		t.Errorf("Content-Type = %q", got)
+	}
+	if got := rec.Header().Get(api.HeaderVersion); got != version {
+		t.Errorf("%s = %q，期望 %q", api.HeaderVersion, got, version)
+	}
+
+	var body struct {
+		Error struct {
+			Message string          `json:"message"`
+			Type    string          `json:"type"`
+			Param   json.RawMessage `json:"param"`
+			Code    json.RawMessage `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("501 的正文不是 JSON: %v\n%s", err, rec.Body)
+	}
+	if body.Error.Type != "not_implemented" {
+		t.Errorf("error.type = %q，期望 not_implemented", body.Error.Type)
+	}
+	if body.Error.Message == "" {
+		t.Error("error.message 是空的：这条 501 要自己说清来由")
+	}
+	// RawMessage 为 nil 表示字段**不在**正文里，为 `null` 才是「在场且为 null」。
+	// 两种在调用方那里解析出来都是空，而在契约上是两件事：形状里写着有这个字段。
+	for _, f := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"error.param", body.Error.Param},
+		{"error.code", body.Error.Code},
+	} {
+		switch string(f.raw) {
+		case "null":
+		case "":
+			t.Errorf("%s 不在正文里；OpenAI 的形状里这个字段总在，值为 null", f.name)
+		default:
+			t.Errorf("%s = %s，期望 null", f.name, f.raw)
+		}
 	}
 }
 
