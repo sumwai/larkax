@@ -129,8 +129,10 @@
 `--endpoint` 选打哪个入口：`chat` 是 `POST /v1/chat/completions`
 （`Authorization: Bearer`），`messages` 是 `POST /v1/messages`（`x-api-key`），
 `responses` 是 `POST /v1/responses`（`Authorization: Bearer`）。`--base-url`
-默认 `http://127.0.0.1:8080`，与主服务 `LARKAX_HTTP_ADDR` 的默认值一致；网关不在
-本机时要显式给。
+不给时按本次配置里的 `LARKAX_HTTP_ADDR`（含 `.env` 里的那一份）拼出网关地址，
+与主服务听在哪儿是同一个来源：那个变量写着 `127.0.0.1:8081` 就打成
+`http://127.0.0.1:8081`；写成 `:8080` 这类不写主机的「所有网卡」时按
+`127.0.0.1` 打。网关不在本机、或者要打的是另一台，就显式给。
 
 #### `settings`
 

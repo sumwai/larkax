@@ -18,6 +18,6 @@ larkaxctl\-doctor \- 系\:统\:健\:康\:与\:链\:路\:连\:通\:性\:体\:检
 .PP
 \fB\-\-live\fR 要\:花\:钱、\:要\:凭\:证，\:默\:认\:不\:跑。\fB凭\:证\:不\:能\:写\:在\:命\:令\:行\:参\:数\:里\fR：\:参\:数\:会\:出\:现\:在\fBps\fR 的\:输\:出\:与 shell 历\:史\:里，\:凭\:证\:到\:了\:那\:里\:就\:等\:于\:交\:给\:了\:同\:机\:的\:其\:他\:进\:程\:和\:任\:何\:一\:个\:能\:翻\:历\:史\:的\:人。\:所\:以\:只\:能\:从\:标\:准\:输\:入\:或\:环\:境\:变\:量\:读，\:与 \fBchannel create\fR 同\:一\:个\:做\:法。\:这\:里\:读\:的\:是\:打\:网\:关\:用\:的 \fBAPI Key\fR（\fBapikey create\fR 发\:的\:那\:把），\:不\:是\:渠\:道\:凭\:证。
 .PP
-\fB\-\-endpoint\fR 选\:打\:哪\:个\:入\:口：\fBchat\fR 是 \fBPOST /v1/chat/completions\fR（\fBAuthorization: Bearer\fR），\fBmessages\fR 是 \fBPOST /v1/messages\fR（\fBx\-api\-key\fR），\fBresponses\fR 是 \fBPOST /v1/responses\fR（\fBAuthorization: Bearer\fR）。\fB\-\-base\-url\fR默\:认 \fBhttp://127\&.0\&.0\&.1:8080\fR，\:与\:主\:服\:务 \fBLARKAX_HTTP_ADDR\fR 的\:默\:认\:值\:一\:致；\:网\:关\:不\:在\:本\:机\:时\:要\:显\:式\:给。
+\fB\-\-endpoint\fR 选\:打\:哪\:个\:入\:口：\fBchat\fR 是 \fBPOST /v1/chat/completions\fR（\fBAuthorization: Bearer\fR），\fBmessages\fR 是 \fBPOST /v1/messages\fR（\fBx\-api\-key\fR），\fBresponses\fR 是 \fBPOST /v1/responses\fR（\fBAuthorization: Bearer\fR）。\fB\-\-base\-url\fR不\:给\:时\:按\:本\:次\:配\:置\:里\:的 \fBLARKAX_HTTP_ADDR\fR（含 \fB\&.env\fR 里\:的\:那\:一\:份）\:拼\:出\:网\:关\:地\:址，\:与\:主\:服\:务\:听\:在\:哪\:儿\:是\:同\:一\:个\:来\:源：\:那\:个\:变\:量\:写\:着 \fB127\&.0\&.0\&.1:8081\fR 就\:打\:成\fBhttp://127\&.0\&.0\&.1:8081\fR；\:写\:成 \fB:8080\fR 这\:类\:不\:写\:主\:机\:的\:「所\:有\:网\:卡」\:时\:按\fB127\&.0\&.0\&.1\fR 打。\:网\:关\:不\:在\:本\:机、\:或\:者\:要\:打\:的\:是\:另\:一\:台，\:就\:显\:式\:给。
 .SH SEE ALSO
 .BR larkaxctl (1)

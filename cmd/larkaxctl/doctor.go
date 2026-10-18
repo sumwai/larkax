@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -103,8 +104,10 @@ const doctorUsage = `larkaxctl doctor 逐项检查「配好的链路能不能接
 --model 是这次请求要用的**规范模型名**（第 3 项建的那个）。--endpoint 选打哪个
 入口：chat 是 POST /v1/chat/completions（Authorization: Bearer），messages 是
 POST /v1/messages（x-api-key），responses 是 POST /v1/responses
-（Authorization: Bearer）。--base-url 默认 http://127.0.0.1:8080，与主服务
-LARKAX_HTTP_ADDR 的默认值一致；网关不在本机时要显式给。
+（Authorization: Bearer）。--base-url 不给时按本次配置里的 LARKAX_HTTP_ADDR 拼
+网关地址：那个变量写着 127.0.0.1:8081 就打成 http://127.0.0.1:8081；写成
+「:8080」这类不写主机的「所有网卡」时按 127.0.0.1 打。网关不在本机、或者要打的
+是另一台，就显式给。
 
 退出码：0 表示六项都通过（--live 给了的话那一次也成功）、1 表示有问题或某一项
 没跑成、3 表示连不上数据库。**「没跑成」与「通过」是两件事**：没有可检查的
@@ -194,11 +197,56 @@ const (
 	doctorPathResponses = "/v1/responses"
 )
 
-// doctorDefaultBaseURL 与主服务 LARKAX_HTTP_ADDR 的默认值一致。
+// doctorLoopbackHost 是监听地址写成「所有网卡」时，替它去连的那一个主机。
 //
-// 不读那个环境变量：它是**监听**地址，可能写成「所有网卡」那一种，而那不是
-// 一个能连的地址。让使用者显式给出比在这里替他猜一个更可靠。
-const doctorDefaultBaseURL = "http://127.0.0.1:8080"
+// 监听地址有三种写法：`127.0.0.1:8080`（指定主机）、`:8080`（不写主机，示例里
+// 用的是这一种）、以及把主机写成 `0.0.0.0` 或 `::` 的「所有网卡」。后两种都不是
+// 能连的地址，而 doctor 与网关通常跑在同一台机器上，环回是这里面最短的那条路。
+// 取 127.0.0.1 而不是 localhost：后者要先解析一次名字，还可能落到 ::1 上，而
+// 服务未必听在那一侧。
+const doctorLoopbackHost = "127.0.0.1"
+
+// doctorBaseURLFromListenAddr 把主服务的监听地址拼成一个能连的网关地址。
+//
+// 监听地址本身合不合法由服务启动那一步负责——它监不起来就起不来。这里只管
+// 「能监听、却不能直接拿去请求」的那几种写法，见上面那个常量。
+func doctorBaseURLFromListenAddr(listenAddr string) (string, error) {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err == nil && port == "" {
+		err = errors.New("没有端口")
+	}
+	if err != nil {
+		return "", fmt.Errorf("从 LARKAX_HTTP_ADDR（%q）读不出主机与端口，"+
+			"给不出 --base-url 的默认值（%v）；显式给一个 --base-url 就能接着跑",
+			listenAddr, err)
+	}
+	switch host {
+	case "", "0.0.0.0", "::":
+		host = doctorLoopbackHost
+	}
+	return "http://" + net.JoinHostPort(host, port), nil
+}
+
+// resolveDoctorBaseURL 定下这次要打的网关地址。
+//
+// 显式给了 --base-url 就以它为准（parseDoctorOptions 已经校验过、去过尾斜杠）。
+// 没给时按**这一次跑的时候解析出来的配置**拼：主服务听在哪个地址上，doctor 就
+// 往哪里打。默认值写死一个端口时，在 .env 里改过 LARKAX_HTTP_ADDR 的人拿到的
+// 是一次「连不上」，而那句话读起来像服务没起来——这条命令本来是用来回答
+// 「服务能不能用」的，不该反过来让人先猜地址。
+//
+// 调用点在连库之前：地址不对与库连不上是两件事，而前者先说更省事。
+func resolveDoctorBaseURL(opts *doctorOptions, ops *config.OpsConfig) error {
+	if !opts.live || opts.baseURLGiven {
+		return nil
+	}
+	base, err := doctorBaseURLFromListenAddr(ops.HTTPAddr)
+	if err != nil {
+		return err
+	}
+	opts.baseURL = base
+	return nil
+}
 
 // 判「这次失败是谁拒的」用的那几个值。
 //
@@ -276,7 +324,11 @@ type doctorOptions struct {
 	model    string
 	endpoint string
 	baseURL  string
-	key      string
+	// baseURLGiven 是「--base-url 显式给过」。没给时 baseURL 先留空，等
+	// runDoctor 读到配置再补上（见 resolveDoctorBaseURL）：默认值来自本次
+	// 解析出来的监听地址，而那份配置要到参数校验之后才读得到。
+	baseURLGiven bool
+	key          string
 }
 
 func runDoctor(args []string) error {
@@ -287,6 +339,9 @@ func runDoctor(args []string) error {
 
 	cfg, err := config.LoadOps()
 	if err != nil {
+		return err
+	}
+	if err := resolveDoctorBaseURL(&opts, cfg); err != nil {
 		return err
 	}
 
@@ -342,7 +397,9 @@ func parseDoctorOptions(args []string) (doctorOptions, error) {
 	model := fs.String("model", "", "")
 	stringAlias(fs, model, "m")
 	endpoint := fs.String("endpoint", doctorEndpointChat, "")
-	baseURL := fs.String("base-url", doctorDefaultBaseURL, "")
+	// 默认值留空：它跟着本次解析出来的监听地址走，而那份配置要等参数校验完
+	// 才读得到（见 resolveDoctorBaseURL）。--live 没给时这一项本来也用不上。
+	baseURL := fs.String("base-url", "", "")
 	credentialStdin := fs.Bool("credential-stdin", false, "")
 	boolAlias(fs, credentialStdin, "stdin")
 	credentialEnv := fs.String("credential-env", "", "")
@@ -354,17 +411,20 @@ func parseDoctorOptions(args []string) (doctorOptions, error) {
 		return doctorOptions{}, fmt.Errorf("doctor 不接受位置参数，得到 %q", fs.Arg(0))
 	}
 
-	opts := doctorOptions{live: *live, endpoint: *endpoint, baseURL: *baseURL}
+	opts := doctorOptions{live: *live, endpoint: *endpoint}
+
+	// 哪几个标志是显式给的。下面两处都要问这件事：--live 才认的那几个，
+	// 以及 --base-url 要不要按配置补默认值。
+	//
+	// 判据要连别名一起看（见 flagGiven）：写 `-m x` 或 `--env FOO` 时
+	// Visit 记的是 "m" / "env"，只查规范名的表现是这几条**静默放行**，
+	// 而那恰好是下面那一段要拦的东西。
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 
 	if !*live {
 		// 只有 --live 才用得上这些标志。静默忽略它们会让「我给了 --model
 		// 但它没生效」看起来像一次成功的检查——而那正是这一项要防的东西。
-		//
-		// 判据要连别名一起看（见 flagGiven）：写 `-m x` 或 `--env FOO` 时
-		// Visit 记的是 "m" / "env"，只查规范名的表现是这几条**静默放行**，
-		// 而那恰好是这一段要拦的东西。
-		given := map[string]bool{}
-		fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 		for _, group := range [][]string{
 			modelFlagNames,
 			{"endpoint"},
@@ -391,10 +451,12 @@ func parseDoctorOptions(args []string) (doctorOptions, error) {
 	}
 	opts.endpoint = spec.name
 
-	if baseErr := validateDoctorBaseURL(*baseURL); baseErr != nil {
-		return doctorOptions{}, baseErr
+	if flagGiven(given, "base-url") {
+		if baseErr := validateDoctorBaseURL(*baseURL); baseErr != nil {
+			return doctorOptions{}, baseErr
+		}
+		opts.baseURL, opts.baseURLGiven = strings.TrimRight(*baseURL, "/"), true
 	}
-	opts.baseURL = strings.TrimRight(*baseURL, "/")
 
 	key, err := readCredential(*credentialStdin, *credentialEnv, true)
 	if err != nil {
