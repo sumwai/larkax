@@ -12,9 +12,8 @@
 //
 // # 只用标准库
 //
-// 渲染这件事不值得引一个依赖：本仓只有 5 个直接依赖，立场是明确拒绝渲染库
-// （见 AGENTS.md 的「代码约定」与 go.mod）。这里要的 roff 是一小片宏，花在
-// 认识它上面的时间远少于多一个依赖要付的代价。
+// 渲染这件事不值得引一个依赖：本仓的直接依赖本来就少（见 go.mod），而这里要的
+// roff 是一小片宏，花在认识它上面的时间远少于多一个依赖要付的代价。
 //
 // # 标题文字取自源文件
 //
@@ -290,6 +289,11 @@ func splitSection(name string) (command, action string) {
 }
 
 // summaryOf 给报错信息用：块的头部一小段。
+//
+// 切的是**字符**而不是字节：这一段多半是中文，逐字节切会把最后一个字切成半个，
+// 于是报错文本自己不是合法 UTF-8，终端上打出来是一串乱码——要给人指路的那句话
+// 反倒成了最难读的一句（同一个坑，见 document.go 里 roffInline 的那段注释）。
+// 四十这个数取的是字符数，中英文都读得过去。
 func summaryOf(blk Block) string {
 	var s string
 	switch t := blk.(type) {
@@ -302,8 +306,8 @@ func summaryOf(blk Block) string {
 	case Heading:
 		s = t.Text
 	}
-	if len(s) > 40 {
-		s = s[:40] + "…"
+	if r := []rune(s); len(r) > 40 {
+		s = string(r[:40]) + "…"
 	}
 	return s
 }
