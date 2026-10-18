@@ -96,7 +96,11 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 			StatusCode:  resp.StatusCode,
 			GotResponse: true,
 			Body:        parsed.errorMessage(),
-			Retryable:   isRetryableErrorType(parsed.errorType()),
+			// 该不该换渠道重试由共享的那一处判（见
+			// channel.IsEmbeddedErrorRetryable）：Anthropic 把分类放在 type 上，
+			// 这个错误对象里没有 code，所以第二个参数是空串。同一个限流语义不该
+			// 因为走哪条入口而判得不一样。
+			Retryable: channel.IsEmbeddedErrorRetryable(parsed.errorType(), ""),
 		}
 	}
 

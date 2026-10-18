@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -297,6 +298,25 @@ func extractEmbeddedError(raw json.RawMessage, status int) error {
 		StatusCode:  status,
 		GotResponse: true,
 		Body:        probe.Error.Message,
-		Retryable:   false,
+		// 该不该换渠道重试由共享的那一处判（type 与 code 两个字段都看，见
+		// channel.IsEmbeddedErrorRetryable）：同一个限流语义不该因为走哪条
+		// 入口而判得不一样。
+		Retryable: channel.IsEmbeddedErrorRetryable(probe.Error.Type, embeddedCodeText(probe.Error.Code)),
 	}
+}
+
+// embeddedCodeText 把内嵌错误里的 code 取成文本。
+//
+// 判据只做文本匹配，而这个字段上游有填字符串的（"rate_limit_exceeded"），
+// 也有填数字的（`"code": 429`）——后一种不取成文本就会把「上游说了限流」
+// 丢掉，而那正是要认出来的那一类。取不出来的给空串：判据对空串的看法是
+// 「这个字段没说什么」。
+func embeddedCodeText(code any) string {
+	switch v := code.(type) {
+	case string:
+		return v
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	}
+	return ""
 }

@@ -122,7 +122,12 @@ func (r responsesResponse) upstreamError(status int) error {
 			StatusCode:  status,
 			GotResponse: true,
 			Body:        r.Error.Message,
-			Retryable:   false,
+			// 该不该换渠道重试由共享的那一处判（type 与 code 两个字段都看，
+			// 见 channel.IsEmbeddedErrorRetryable）。上面那个 status 说的是
+			// 「这一次失败了」，答不了「是不是上游这一侧暂时答不上来」：
+			// 拿它当判据，限流会被当成这次请求的错——既不换下一个候选，
+			// 也不记这个渠道的失败。
+			Retryable: channel.IsEmbeddedErrorRetryable(r.Error.Type, r.Error.Code),
 		}
 	}
 	if strings.EqualFold(rawString(r.Status), "failed") {
@@ -130,7 +135,9 @@ func (r responsesResponse) upstreamError(status int) error {
 			StatusCode:  status,
 			GotResponse: true,
 			Err:         errors.New("上游把这次响应标记为 failed"),
-			Retryable:   false,
+			// 这个分支上没有 type / code 可判：上游只说这次失败了，没说是什么
+			// 事。默认按不可重试处置，方向与 channel.IsRetryable 一致。
+			Retryable: false,
 		}
 	}
 	return nil

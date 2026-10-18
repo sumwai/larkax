@@ -139,22 +139,3 @@ func (r claudeResponse) errorMessage() string {
 	}
 	return "上游返回错误"
 }
-
-// isRetryableErrorType 按 Anthropic 的错误分类判断是否值得换渠道重试。
-//
-// 分三类：
-//   - overloaded_error：上游过载，换一个渠道可能成功 → 可重试
-//   - rate_limit_error：限流，同上 → 可重试
-//   - 其余（invalid_request_error、authentication_error、permission_error、
-//     not_found_error、request_too_large）：重试多少次结果一样，
-//     换渠道也是同一个错，只会把费用与延迟乘以候选渠道数
-//
-// 未知类型按不可重试处理：默认方向与 channel.IsRetryable 一致——
-// 宁可少一次本可成功的尝试，也不要在每个候选渠道上重复注定失败的调用。
-func isRetryableErrorType(t string) bool {
-	switch t {
-	case "overloaded_error", "rate_limit_error", "api_error":
-		return true
-	}
-	return false
-}

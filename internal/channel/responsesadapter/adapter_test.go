@@ -432,6 +432,27 @@ func TestChatIgnoresNullError(t *testing.T) {
 	}
 }
 
+// 200 里的错误对象是**限流**形态时，这次失败值得换渠道重试。
+//
+// 这条用的是 Responses 真实的失败形状：`status: "failed"` 带一个 error 对象。
+// 该不该换渠道再试判在 error 的 type / code 上——`status` 只说明「这一次失败
+// 了」，答不了「是不是上游这一侧暂时答不上来」。判成不可重试的后果有两条
+// （见 internal/gateway 的 channelAtFault）：路由层不换下一个候选，一次本可
+// 成功的请求直接失败；这个渠道也不记失败，正在限流的它照旧拿流量。
+func TestChatEmbeddedRateLimitIsRetryable(t *testing.T) {
+	srv, _, _ := captureServer(t, http.StatusOK,
+		`{"id":"r1","model":"m","status":"failed",`+
+			`"error":{"code":"rate_limit_exceeded","message":"Rate limit reached"},"output":[]}`)
+
+	_, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), textRequest())
+	if err == nil {
+		t.Fatal("200 里的 error 对象应当被识别")
+	}
+	if !channel.IsRetryable(err) {
+		t.Error("限流是上游这一侧暂时答不上来，换一个渠道可能成功，应当可重试")
+	}
+}
+
 // status=failed 是 Responses 自己的失败终态，与 incomplete 不同：
 // 后者是「停在了长度上限上」，那是一次正常结束，照常计费。
 func TestChatStatusFailedIsError(t *testing.T) {
@@ -442,8 +463,18 @@ func TestChatStatusFailedIsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("status=failed 应当报错")
 	}
-	if channel.IsRetryable(err) {
-		t.Error("上游明确说这次失败了，换渠道重试不该由适配器判断为可重试")
+	// 这一条里的 error.code 是 server_error：上游这一侧自己出错了，换一个渠道
+	// 可能成功，所以**可重试**。「上游明确说这次失败了」不等于「不可重试」——
+	// 不可重试指的是「换到别的渠道也是同一个错」（参数、鉴权那一类），而判据
+	// 在 error 的 type / code 上（见 channel.IsEmbeddedErrorRetryable）。
+	//
+	// 这里原先断言的是反方向，而当时那个 false 并不是「看过 server_error 之后
+	// 判它不该重试」：这一家对**所有**内嵌错误一律给 false，压根没看 error 的
+	// type / code。所以那条断言的覆盖面其实是「一律不可重试」，而这个形状
+	// （failed 带一个 error 对象）正是 Responses 的失败终态——照它判，限流也
+	// 永远记成不可重试：既不换下一个候选，也不记这个渠道正在限流。
+	if !channel.IsRetryable(err) {
+		t.Error("server_error 是上游这一侧出的错，应当可重试")
 	}
 	// 这一条与上面那条同路：拿到了响应，状态码 200 要带出去。
 	var up *channel.ErrUpstream
