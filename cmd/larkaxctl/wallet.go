@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,9 +31,11 @@ const walletShortUsage = `larkaxctl wallet 管理用户钱包。
   larkaxctl wallet create --user <ID 或用户名> [--asset <资产>]
   larkaxctl wallet credit --user <ID 或用户名> --amount <金额> --ref <外部单据号>
                           [--asset <资产>] [--gateway <来源>]
+  larkaxctl wallet list [--user <ID 或用户名>]
 
+list 只读：列出用户 ID、用户名、资产、余额与冻结。
 --ref 必填，它同时是幂等键：同一条命令重跑两次只入账一次，换单号才是另一笔。
-钱包必须已经存在（先 create）；这两条命令都不需要 LARKAX_MASTER_KEYS。
+钱包必须已经存在（先 create）；这三条命令都不需要 LARKAX_MASTER_KEYS。
 
 更细的边界：larkaxctl help wallet。
 `
@@ -44,6 +47,7 @@ const walletUsage = `larkaxctl wallet 管理用户钱包。
   larkaxctl wallet create --user <ID 或用户名> [--asset <资产>]
   larkaxctl wallet credit --user <ID 或用户名> --amount <金额> --ref <外部单据号>
                           [--asset <资产>] [--gateway <来源>]
+  larkaxctl wallet list [--user <ID 或用户名>]
 
 create 给一个已存在的用户开通钱包，余额为 0。它不写任何分录：新开的户在
 账本上没有分录，这个用户在 user 科目上的分录之和为 0，与快照里的 0 自洽。
@@ -88,8 +92,20 @@ manual 是同一个科目。当前不接支付通道的回调，所以来源是�
 「找不到用户」并退出 4——那条错误来自解析用户这一步，与「用户存在但没有
 钱包行」是两件事。
 
-这两条命令只写 user_wallets 与 ledger_entries，不碰 users，也不需要
+create 与 credit 只写 user_wallets 与 ledger_entries，不碰 users，也不需要
 LARKAX_MASTER_KEYS。
+
+list 是只读的那一条：列出钱包与它的**余额快照**（user_wallets.balance 与
+user_wallets.frozen），一栏一个字段：用户 ID、用户名、资产、余额、冻结。
+不带 --user 时列出全部钱包，带的时候只列那一个用户；用户不存在时报「找不到用户」
+并退出 4，与「用户存在但还没有钱包」是两件事（后者列出来是空的）。
+
+余额那一栏是**快照值**，不是从分录现算的权威值。两者在正常情况下相等，差异由
+对账任务比对；要「账本上是多少」用 larkaxctl ledger balance --account user:<ID>。
+钱包主键是（用户，资产），所以同一个用户有两种资产时会出现两行。
+
+冻结额是给在飞的请求预扣住的那部分，它**不包含**在余额里——「这个用户还能花
+多少」看余额，「有多少正被占着」看冻结额。
 
 **旧名仍可用**：wallet open 等同于 wallet create，--idempotency-key 与 --order
 都等同于 --ref，-u 是 --user 的简写。它们保留是为了不让已经在跑的脚本与部署
@@ -99,7 +115,7 @@ LARKAX_MASTER_KEYS。
 
 下面几个写法仍然可用，只是不再是正式写法（用法行里只写规范名）：
 
-  -u <ID 或用户名>      同 --user，create 与 credit 都认
+  -u <ID 或用户名>      同 --user，create、credit 与 list 都认
   --idempotency-key     同 --ref。它是这一项上一版的正式写法，已经发布过，
                         删掉就是破坏脚本
   --order               同 --ref（更早的那一版口语化写法）
@@ -134,6 +150,8 @@ func runWallet(args []string) error {
 		return runWalletCreate(rest)
 	case "credit":
 		return runWalletCredit(rest)
+	case "list":
+		return runWalletList(rest)
 	case "-h", "--help":
 		printUsage(os.Stdout, walletShortUsage)
 		return nil
@@ -507,4 +525,142 @@ func printCreditedWallet(w io.Writer, owner auth.User, txn ledger.Transaction,
 		}
 		_, _ = fmt.Fprintln(w, line)
 	}
+}
+
+// walletRow 是一条钱包记录的展示形态：账本那几列加上从 users 取来的用户名。
+//
+// 收成一个结构体而不是把两个来源分别传给两条渲染路径：用户名与钱包列在两张表
+// 上，而「哪一行的用户叫什么」只该解析一次——两条渲染路径各查一次的话，同一份
+// 清单在表格与 JSON 里可能对不上号。
+type walletRow struct {
+	UserID   int64
+	Username string
+	Asset    ledger.Asset
+	Balance  money.Amount
+	Frozen   money.Amount
+}
+
+// runWalletList 列出钱包与余额快照。
+func runWalletList(args []string) error {
+	fs := flag.NewFlagSet("wallet list", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
+	user := fs.String("user", "", "")
+	stringAlias(fs, user, "u")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q：按用户过滤用 --user", fs.Arg(0)))
+	}
+
+	return withDB(walletTimeout, func(ctx context.Context, db *sql.DB) error {
+		// 变量叫 authStore 而不是 store：本文件顶部那个 `store` 是账本包的名字
+		// （create 与 credit 都走 store.New）。在这里把包名遮掉，读的人会以为
+		// 下面那些 store.xxx 都是同一侧的。
+		authStore := auth.New(db)
+
+		// --user 先解析成 ID 再查：让「按用户名查不到」与「按 ID 查不到」都停在
+		// 同一步（与 apikey list 同一条约定）。
+		var userID *int64
+		if *user != "" {
+			owner, err := authStore.ResolveUser(ctx, *user)
+			if err != nil {
+				return err
+			}
+			userID = &owner.ID
+		}
+
+		snapshots, err := store.New(db).Wallets(ctx, userID)
+		if err != nil {
+			return fmt.Errorf("列出钱包失败: %w", err)
+		}
+
+		names, err := userNames(ctx, authStore)
+		if err != nil {
+			return err
+		}
+
+		rows := make([]walletRow, 0, len(snapshots))
+		for _, w := range snapshots {
+			rows = append(rows, walletRow{
+				UserID:   w.UserID,
+				Username: names[w.UserID],
+				Asset:    w.Asset,
+				Balance:  w.Balance,
+				Frozen:   w.Frozen,
+			})
+		}
+
+		// JSON 是另一条渲染路径，不是把上面那张表转成 JSON（见 format.go 开头）。
+		if jsonOutput() {
+			return emitJSON(os.Stdout, walletListDoc(rows), nil)
+		}
+		printWalletList(humanStdout(), rows)
+		return nil
+	})
+}
+
+// userNames 取「用户 id → 用户名」，供清单里那一栏用。
+//
+// 单独查一次而不是在账本那条 SQL 里 JOIN users：用户名属于 auth 那一侧
+// （见 ledger/store 的 Wallets）。它**每次都读整张 users**，给了 --user 也一样
+// ——筛的是钱包那一侧，这一栏只是按 id 把名字补上，没有「筛了就只读一行」这
+// 回事。users 是一张小表，换来的是「谁是用户」只有一处定义。
+func userNames(ctx context.Context, store *auth.Store) (map[int64]string, error) {
+	users, err := store.ListUsers(ctx, auth.ListUsersFilter{})
+	if err != nil {
+		return nil, fmt.Errorf("列出用户失败: %w", err)
+	}
+	names := make(map[int64]string, len(users))
+	for _, u := range users {
+		names[u.ID] = u.Username
+	}
+	return names, nil
+}
+
+// printWalletList 打一张钱包清单。
+//
+// 用户 ID 与用户名各占一栏：ID 是别的命令要接过去的那个值
+// （`ledger balance --account user:<ID>`），所以它得在清单里看得见，而不是
+// 要人再回头去 user list 里查一次。
+func printWalletList(w io.Writer, rows []walletRow) {
+	if len(rows) == 0 {
+		_, _ = fmt.Fprintln(w, emptyListNote("钱包", "wallet create"))
+		return
+	}
+
+	tw := newTableWriter(w)
+	p := newPalette(w)
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+		p.bold("用户 ID"), p.bold("用户名"), p.bold("资产"), p.bold("余额"), p.bold("冻结"))
+	for _, r := range rows {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			p.bold(strconv.FormatInt(r.UserID, 10)), p.bold(r.Username),
+			string(r.Asset), r.Balance.String(), r.Frozen.String())
+	}
+	_ = tw.Flush()
+}
+
+// walletListDoc 组装 wallet list 的机器可读输出。
+//
+// 与 printWalletList 是同一份数据的另一条渲染路径：那一档把金额按定点小数打给
+// 人看，这一档打**字符串**——金额过一遍 float64 会丢精度（见 format.go 的
+// jsonAmount）。
+func walletListDoc(rows []walletRow) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["summary"] = map[string]any{"total": len(rows)}
+
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	entries := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		entries = append(entries, map[string]any{
+			"user_id":  r.UserID,
+			"username": nullableString(r.Username),
+			"asset":    string(r.Asset),
+			"balance":  jsonAmount(r.Balance),
+			"frozen":   jsonAmount(r.Frozen),
+		})
+	}
+	doc["wallets"] = entries
+	return doc
 }
