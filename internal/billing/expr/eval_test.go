@@ -634,6 +634,42 @@ func TestEvalGlobals(t *testing.T) {
 	}
 }
 
+// 注入常量的类型不受支持时，要在**校验**这一步就被拒掉。
+//
+// # 这一格为什么用类型，而不是用保留名
+//
+// 保留名有两道判据同时挡：env.go 的 globalType 一次，eval.go 往运行期环境
+// 填值时又一次（理由见那里的注释：编译产物可能来自缓存）。所以拿保留名当
+// 夹具，把 globalType 那一处改坏也照样报 ErrGlobalsInvalid，用例一直绿——
+// 它证明不了自己声称的那件事。「类型不受支持」只有校验这一处看得见。
+//
+// 放过的后果：那个值会被原样塞进运行期环境交给 vm.Run。一个不在支持类型里
+// 的 Go 值到不了规则那一侧——要么在求值中途以与规则无关的形状炸（读的人
+// 会去查规则，而规则没写错），要么静默按零值参与计价。
+//
+// 变异：`if _, err := globalType(name, v); err != nil` 改成 `err == nil`。
+func TestEvalRejectsUnsupportedGlobalType(t *testing.T) {
+	p := mustCompile(t, `{"prompt": 0.0000015}`)
+
+	// int32 不在这份支持清单里（globalType 只放行 string、int/int64、float64、
+	// bool、[]string、time.Time），而名字不撞保留名——只有校验这一处会拒它。
+	_, err := p.Eval(Env{At: testAt, Globals: map[string]any{"plan": int32(3)}})
+	if !errors.Is(err, ErrGlobalsInvalid) {
+		t.Fatalf("类型不受支持的注入常量应当报 ErrGlobalsInvalid，得到 %v", err)
+	}
+	if !strings.Contains(err.Error(), "plan") || !strings.Contains(err.Error(), "int32") {
+		t.Errorf("报错要指出是哪个常量、什么类型，得到 %v", err)
+	}
+
+	// 保留名这一格在求值时同样要挡住——它杀不掉任何一条单独的变异（两处
+	// 各挡一次），留着是为了钉住行为：注入常量不能盖住保留名，否则规则的
+	// 含义会随调用方的数据而变，而规则源码看起来没变。
+	_, err = p.Eval(Env{At: testAt, Globals: map[string]any{"p": 1}})
+	if !errors.Is(err, ErrGlobalsInvalid) {
+		t.Fatalf("注入常量占用保留名 p 应当报 ErrGlobalsInvalid，得到 %v", err)
+	}
+}
+
 // TestEvalConcurrent 用 -race 验证「编译一次、并发求值多次」。
 //
 // 这条测试是包内最要紧的并发保障：编译产物必须无状态，
@@ -856,6 +892,40 @@ func TestEvalRejectsIncompleteEnv(t *testing.T) {
 	}
 	if _, err := p2.Eval(Env{At: testAt, Region: "", Calendar: newTestCalendar()}); err == nil {
 		t.Error("没有 Region 时应当报错")
+	}
+}
+
+// 计量项数量为 0 是合法输入：它既不表示「没填」，也不是负数。
+//
+// 0 很常见——某个计量项这次没产出（`{"img": 0}`），或者按规则算出来正好是 0。
+// 把 0 与负数一起挡掉，拒的是**合法请求**，而错误信息说「数量为负」，
+// 调用方看不出自己哪里错。
+//
+// 判据只有这一处（env.go 的 validateUsage），所以这一格钉的就是它。
+//
+// 变异：`n < 0` 改成 `n <= 0`。
+func TestEvalAcceptsZeroUnitCount(t *testing.T) {
+	p := mustCompile(t, `{"prompt": units["img"] > 0 ? 1.0 : 2.0}`)
+
+	res, err := p.Eval(Env{At: testAt,
+		Usage: billing.Usage{UnitCounts: map[string]int64{"img": 0}}})
+	if err != nil {
+		t.Fatalf("数量为 0 的计量项是合法输入，不该被拒: %v", err)
+	}
+	// 要的是「取到 0」而不是「被拒」：0 走的是没有图片的那一支。
+	if got := res.Prices.Prompt.String(); got != "2.00000000" {
+		t.Errorf("prompt = %s，期望走「没有图片」那一支的 2.0", got)
+	}
+}
+
+// 负数仍然是非法：上面那一格的另一侧，0 放行不等于整条判据可以去掉。
+func TestEvalRejectsNegativeUnitCount(t *testing.T) {
+	p := mustCompile(t, `{"prompt": units["img"] > 0 ? 1.0 : 2.0}`)
+
+	_, err := p.Eval(Env{At: testAt,
+		Usage: billing.Usage{UnitCounts: map[string]int64{"img": -1}}})
+	if !errors.Is(err, ErrEnvIncomplete) {
+		t.Fatalf("数量为负应当报 ErrEnvIncomplete，得到 %v", err)
 	}
 }
 
