@@ -26,14 +26,20 @@
 #   命令      scripts/check-unimported.sh
 #             （入口由 cmd/ 自动发现，当前是 ./cmd/larkax 与 ./cmd/larkaxctl）
 #   工具      go（版本随 go.mod；go list 的包枚举口径由它决定）
-#   条数      1，与脚本里的 MAX_ENTRIES_DEFAULT 一致
+#   条数      2，与脚本里的 MAX_ENTRIES_DEFAULT 一致
 #
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
 
+internal/manpage | lib | 只被测试 import 的手页生成器：命令注册表在 cmd/larkaxctl 的 package main 里，别的包引不到，所以由那个包的 man_test.go 驱动；它不会被生产代码 import（终态），产物提交在 man/man1/
 internal/testdb | lib | 只被测试 import 的夹具包：给每个连库的测试包建一个独立的库
 
-# 上面这条是这份清单里**唯一**该常驻的形状：测试夹具包永远不会被生产代码
-# import，所以它不可能「接线」——把它从清单里删掉只有一种做法，就是让生产
-# 代码去 import 测试夹具，那是更坏的事（见 LESSONS.md 第 22 条）。
-# 它不挂 issue：没有缺口要跟，它是一个终态。
+# 上面两条是这份清单里该常驻的形状：**不可能接线、也不该接线**的那些。
+#
+#   - 测试夹具包（internal/testdb）永远不会被生产代码 import，把它从清单里删掉
+#     只有一种做法：让生产代码去 import 测试夹具，那是更坏的事。
+#   - 手页生成器（internal/manpage）只被 cmd/larkaxctl 的一条测试驱动，因为
+#     命令注册表住在那个包的 package main 里（它同时带着分派用的 run 字段），
+#     别的包引不到；把它搬成可导入的包要连注册表与分派一起搬，代价远大于收益。
+#
+# 两条都不挂 issue：没有缺口要跟，它们是终态（见 LESSONS.md 第 22 条）。

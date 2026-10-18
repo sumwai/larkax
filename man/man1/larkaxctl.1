@@ -1,0 +1,247 @@
+.TH LARKAXCTL 1 "" "larkax" "larkaxctl"
+.ds AD l
+.ad l
+.nh
+.SH NAME
+larkaxctl \- larkax 的\:运\:维\:命\:令\:行
+.SH SYNOPSIS
+.B larkaxctl
+.I 命\:令
+.RI [ 选\:项 ]
+.br
+每\:条\:命\:令\:的\:二\:级\:动\:作\:与\:参\:数\:见 \fBlarkaxctl <命\:令> \-\-help\fR。
+.SH DESCRIPTION
+\fBlarkaxctl\fR 是 larkax 的\:运\:维\:命\:令\:行。\:根\:帮\:助\:页\:（\fBlarkaxctl \-\-help\fR）\:只\:列\:一\:级\:命\:令\:与\:当\:下\:要\:用\:的\:那\:几\:行；\:本\:文\:件\:写\:全\:局\:约\:定、\:退\:出\:码\:边\:界\:与\:各\:命\:令\:的\:完\:整\:说\:明。
+.PP
+每\:条\:命\:令\:有\:两\:版\:帮\:助：\fBlarkaxctl <命\:令> \-\-help\fR（也\:认 \fB\-h\fR）\:给\:一\:屏\:摘\:要，\fBlarkaxctl help <命\:令>\fR 与 \fBlarkaxctl <命\:令> help\fR 给\:展\:开\:的\:那\:一\:份。
+.PP
+这\:份\:参\:考\:同\:时\:有 man 版，\:页\:与\:页\:之\:间\:互\:相\:引\:用：\:在\:源\:码\:树\:里\:翻\:是 \fBMANPATH="$PWD/man"man larkaxctl\-channel\fR（\fBman\fR 只\:认 \fBMANPATH\fR 下\:的 \fBman1/\fR 这\:类\:子\:目\:录，\:所\:以\:指\:到 \fBman/\fR 那\:一\:层），\:装\:好\:之\:后\:就\:是 \fBman larkaxctl\-channel\fR。\:它\:们\:由\:命\:令\:注\:册\:表\:与\:本\:文\:件\:生\:成\:（见 development\&.md 的\:「每\:道\:门\:在\:挡\:什\:么」），\:不\:手\:工\:改。
+.SH 全\:局\:约\:定
+这\:几\:条\:对\:所\:有\:命\:令\:生\:效，\:写\:在\:子\:命\:令\:的\:前\:面\:或\:后\:面\:都\:认。
+.SS 环\:境\:变\:量
+.PP
+运\:维\:命\:令\:只\:读\:下\:面\:这\:几\:个\:环\:境\:变\:量：
+.TP
+.B LARKAX_DB_DSN
+数\:据\:库\:连\:接\:串
+.TP
+.B LARKAX_ENV
+环\:境\:名
+.TP
+.B LARKAX_LOG_LEVEL
+日\:志\:级\:别
+.TP
+.B LARKAX_MASTER_KEYS
+主\:密\:钥。\:只\:有\:需\:要\:它\:的\:命\:令\:才\:读：\fBchannel\fR 的\:写\:入、\fBsecret rotate\fR
+.PP
+\fBLARKAX_ROLE\fR 与\:运\:维\:命\:令\:无\:关。\:命\:令\:行\:自\:身\:的\:配\:置\:加\:载\:见 \fBinternal/config\fR 的 \fBLoadOps\fR。
+.SS \fB\&.env\fR 与 \fB\-\-env\-file\fR
+.PP
+\fB\&.env\fR 文\:件\:的\:取\:值\:规\:则：
+.IP \(bu 2
+不\:给 \fB\-\-env\-file\fR 时，\:从\:当\:前\:目\:录\:往\:上\:找，\fB不\:越\:过 git 仓\:库\:根\fR，\:用\:最\:近\:的\:那\:一\:份。
+.IP \(bu 2
+\fB\-\-env\-file <路\:径>\fR 指\:定\:另\:一\:份\:文\:件。
+.IP \(bu 2
+两\:种\:来\:源\:都\fB只\:填\:补\:尚\:未\:设\:置\:的\:环\:境\:变\:量\fR：\:已\:经\:在\:环\:境\:里\:导\:出\:的\:变\:量\:优\:先，\fB\&.env\fR补\:不\:上\:它。\:所\:以\:一\:份\:注\:入\:的\:生\:产\:环\:境\:不\:会\:被\:误\:带\:的\:开\:发 \fB\&.env\fR 覆\:盖。
+.PP
+只\:用 \fB\&.env\fR、\:不\:在\:环\:境\:里\:导\:出\:任\:何\:变\:量\:也\:可\:以。
+.SS 退\:出\:码
+.TP
+.B 0
+成\:功
+.TP
+.B 1
+其\:他\:失\:败
+.TP
+.B 2
+命\:令\:行\:参\:数\:错\:（缺\:字\:段、\:取\:值\:解\:析\:不\:了、\:标\:志\:组\:合\:不\:对）
+.TP
+.B 3
+连\:不\:上\:数\:据\:库
+.TP
+.B 4
+约\:束\:冲\:突\:（唯\:一\:键、\:外\:键、\:要\:改\:或\:要\:查\:的\:那\:一\:行\:不\:存\:在；\:同\:一\:幂\:等\:键\:已\:经\:对\:应\:另\:一\:笔\:入\:账）
+.PP
+\fB1 与 2 的\:分\:界\:在\:「谁\:校\:验\:出\:来\:的」。\fR 命\:令\:行\:解\:析\:阶\:段\:就\:能\:判\:定\:的\:参\:数\:错\:归 \fB2\fR；\fB写\:入\:路\:径\:自\:己\:校\:验\:出\:来\:的\fR参\:数\:问\:题——作\:用\:域\:与\:归\:属\:的\:组\:合、\:表\:达\:式\:编\:译\:不\:过、\:渠\:道\:类\:型\:不\:认\:识——归 \fB1\fR。\:脚\:本\:按\:这\:两\:档\:分\:派\:时\:按\:这\:条\:线\:切。
+.PP
+上\:面\:这\:几\:个\:数\:是\:命\:令\:行\:的\:对\:外\:契\:约。\:按\fB触\:发\:条\:件\fR分\:的\:完\:整\:一\:张\:表\:（多\:出\:「体\:检\:结\:论」\:那\:一\:档 D，\:它\:不\:打\:第\:二\:行、\:退\:出\:码\:照\:旧\:非\:零）\:见 cli\-output\&.md 的\:「退\:出\:码」\:一\:节。
+.SS 短\:选\:项
+.PP
+短\:选\:项\:固\:定\:为\:下\:面\:六\:个，\:其\:余\:选\:项\:一\:律\:写\:全\:名：
+.TP
+.B \-u
+\fB\-\-user\fR
+.TP
+.B \-m
+\fB\-\-model\fR
+.TP
+.B \-o
+\fB\-\-format\fR
+.TP
+.B \-v
+\fB\-\-verbose\fR
+.TP
+.B \-q
+\fB\-\-quiet\fR
+.TP
+.B \-V
+\fB\-\-version\fR
+.PP
+\fB\-V 打\:版\:本\:号，\-v 是\:详\:细\:模\:式。\fR 另\:外\:两\:条\:成\:对\:出\:现\:的\:约\:定：\fB\-o\fR 与 \fB\-\-format\fR一\:样，\:写\:在\:子\:命\:令\:前\:后\:都\:认；\fB\-\-verbose\fR 与 \fB\-\-quiet\fR 不\:能\:同\:时\:给，\:两\:个\:一\:起\:给\:是\:参\:数\:错。
+.PP
+安\:全、\:财\:务\:与\:边\:界\:类\:的\:选\:项\fB不\:开\:短\:选\:项\fR，\:必\:须\:写\:全\:名：\:上\:游\:渠\:道、\:凭\:证\:来\:源、\:外\:部\:单\:据\:号、\:速\:率\:上\:限、\:生\:效\:截\:止\:这\:几\:类。\:它\:们\:写\:短\:了\:容\:易\:看\:错\:也\:容\:易\:按\:错。
+.SS 机\:器\:可\:读\:输\:出
+.PP
+\fB\-\-format json\fR 把 stdout 收\:成\:一\:份 JSON，\:提\:示\:与\:警\:告\:走 stderr，\:给\:管\:道\:下\:游\:的 \fBjq\fR与\:探\:针\:用。\:取\:值\:不\:合\:法\:时\:报\:参\:数\:错，\:不\:静\:默\:回\:落\:成\:表\:格。\:完\:整\:契\:约——状\:态\:符、\:上\:色\:条\:件、\:表\:格\:对\:齐、\:时\:刻\:与\:时\:区——见 cli\-output\&.md。
+.SH 按\:命\:令
+每\:条\:一\:级\:命\:令\:的\:二\:级\:动\:作\:与\:参\:数\:在\:它\:自\:己\:的\:帮\:助\:里。\:帮\:助\:分\:两\:版：
+.IP \(bu 2
+\fBlarkaxctl <命\:令> \-\-help\fR（也\:认 \fB\-h\fR）\:打\fB短\:版\fR：\:有\:哪\:些\:动\:作、\:参\:数\:怎\:么\:给，\:外\:加\:一\:两\:条\:最\:关\:键\:的\:边\:界，\:一\:屏\:之\:内。
+.IP \(bu 2
+\fBlarkaxctl help <命\:令>\fR 与 \fBlarkaxctl <命\:令> help\fR 打\fB长\:版\fR：\:短\:版\:之\:外\:再\:把\:其\:余\:边\:界\:说\:完。
+.PP
+\fB设\:计\:说\:明\:不\:在\:这\:两\:版\:里\fR，\:它\:在\:下\:面\:各\:节：\:某\:个\:字\:段\:为\:什\:么\:必\:填、\:这\:一\:步\:为\:什\:么\:不\:可\:逆、\:别\:家\:工\:具\:怎\:么\:做，\:这\:些\:对\:跑\:命\:令\:的\:人\:当\:下\:没\:用，\:而\:写\:在\:帮\:助\:里\:的\:话\:每\:次\:敲\:错\:参\:数\:都\:要\:被\:念\:一\:遍。
+.PP
+下\:面\:按\:根\:帮\:助\:页\:的\:分\:组\:逐\:条\:列\:出。
+.SS 核\:心\:与\:诊\:断 (Core & Diagnostics)
+.TP
+.B doctor
+.br
+系\:统\:健\:康\:与\:链\:路\:连\:通\:性\:体\:检
+.br
+.BR larkaxctl\-doctor (1)
+.TP
+.B settings
+.br
+运\:行\:期\:动\:态\:配\:置\:项\:管\:理\:（settings 表）
+.br
+.BR larkaxctl\-settings (1)
+.TP
+.B version
+.br
+打\:印\:版\:本\:号\:与\:编\:译\:元\:数\:据
+.br
+.BR larkaxctl\-version (1)
+.SS 路\:由\:与\:模\:型\:配\:置 (Routing & Models)
+.TP
+.B channel
+.br
+上\:游\:渠\:道\:管\:理\:（网\:关、\:凭\:证、\:关\:联\:模\:型）
+.br
+.BR larkaxctl\-channel (1)
+.TP
+.B model
+.br
+规\:范\:模\:型\:目\:录\:（catalog 基\:础\:定\:义）
+.br
+.BR larkaxctl\-model (1)
+.TP
+.B alias
+.br
+模\:型\:别\:名\:映\:射\:（上\:游\:模\:型\:名 ↔ 规\:范\:名）
+.br
+.BR larkaxctl\-alias (1)
+.TP
+.B price
+.br
+模\:型\:计\:价\:规\:则\:与\:日\:历\:管\:理\:（含 calendar 子\:命\:令）
+.br
+.BR larkaxctl\-price (1)
+.SS 权\:限\:与\:财\:务 (Access & Ledger)
+.TP
+.B user
+.br
+系\:统\:用\:户\:管\:理\:（创\:建\:用\:户）
+.br
+.BR larkaxctl\-user (1)
+.TP
+.B apikey
+.br
+API Key 访\:问\:密\:钥\:与\:额\:度\:管\:理
+.br
+.BR larkaxctl\-apikey (1)
+.TP
+.B wallet
+.br
+用\:户\:钱\:包\:账\:户\:与\:入\:账\:管\:理
+.br
+.BR larkaxctl\-wallet (1)
+.TP
+.B ledger
+.br
+财\:务\:账\:本\:管\:理\:（余\:额\:查\:询、\:分\:录\:校\:验、\:对\:账）
+.br
+.BR larkaxctl\-ledger (1)
+.SS 系\:统\:与\:数\:据\:维\:护 (Maintenance & Data)
+.TP
+.B migrate
+.br
+数\:据\:库\:版\:本\:迁\:移\:（up、down、status、version）
+.br
+.BR larkaxctl\-migrate (1)
+.TP
+.B partition
+.br
+数\:据\:库\:月\:度\:分\:区\:维\:护\:（check、ensure）
+.br
+.BR larkaxctl\-partition (1)
+.TP
+.B secret
+.br
+安\:全\:凭\:证\:与\:主\:密\:钥\:维\:护\:（rotate 密\:钥\:轮\:换）
+.br
+.BR larkaxctl\-secret (1)
+.TP
+.B maintenance
+.br
+数\:据\:留\:存\:与\:过\:期\:清\:理\:（idempotency 幂\:等\:记\:录）
+.br
+.BR larkaxctl\-maintenance (1)
+.TP
+.B snapshot
+.br
+请\:求\:结\:构\:快\:照\:管\:理\:（cleanup、allowlist、get、redact）
+.br
+.BR larkaxctl\-snapshot (1)
+.TP
+.B plugin
+.br
+动\:态\:插\:件\:系\:统\:管\:理\:（list、publish、enable、disable）
+.br
+.BR larkaxctl\-plugin (1)
+.SH 搬\:过\:家\:的\:命\:令
+下\:面\:这\:几\:条\:命\:令\:搬\:过\:位\:置，\:旧\:路\:径\fB仍\:然\:可\:用\fR，\:各\:条\:命\:令\:的 \fB\-\-help\fR 末\:尾\:也\:写\:着\:它\:们：
+.TP
+.B reconcile
+\fBledger reconcile\fR
+.TP
+.B rotate
+\fBsecret rotate\fR
+.TP
+.B idempotency cleanup
+\fBmaintenance idempotency\fR
+.TP
+.B calendar import
+\fBprice calendar import\fR
+.PP
+旧\:路\:径\:不\:进\:根\:帮\:助\:页，\:根\:帮\:助\:页\:只\:列\:正\:式\:写\:法。
+.SH SEE ALSO
+.BR larkaxctl\-doctor (1),
+.BR larkaxctl\-settings (1),
+.BR larkaxctl\-version (1),
+.BR larkaxctl\-channel (1),
+.BR larkaxctl\-model (1),
+.BR larkaxctl\-alias (1),
+.BR larkaxctl\-price (1),
+.BR larkaxctl\-user (1),
+.BR larkaxctl\-apikey (1),
+.BR larkaxctl\-wallet (1),
+.BR larkaxctl\-ledger (1),
+.BR larkaxctl\-migrate (1),
+.BR larkaxctl\-partition (1),
+.BR larkaxctl\-secret (1),
+.BR larkaxctl\-maintenance (1),
+.BR larkaxctl\-snapshot (1),
+.BR larkaxctl\-plugin (1),
+.BR larkaxctl (1)
