@@ -197,8 +197,12 @@ test: init up
 	@set -a; . ./$(ENV_FILE); set +a; go test ./...
 
 # 发布产物：与 .github/workflows/release.yml 的「构建」与「打包」两步同一套，
-# 只是这里只打 linux/amd64 一个架构——发布时才两个架构都打。发布流程能在这里演练，出问题时不必
-# 先推一个 tag 去试；改了这个目标或那一步，另一处要跟着改。
+# 只是这里只打 linux/amd64 一个架构——发布时才两个都打。发布流程能在这里演练，
+# 出问题时不必先推一个 tag 去试；改了这个目标或那一步，另一处要跟着改。
+#
+# 这个目标只在 linux/amd64 上跑得动，两处原因：版本校验那一步会把刚打出来的
+# amd64 二进制**真执行**一次（见下），别的主机连不起来；tar 用的是 GNU 的那几个
+# 选项（`--sort=name`、`--mtime=@0`），macOS 自带的 bsdtar 不认。
 #
 # tarball 里的手页取仓库里**已提交**的那一份（`man/man1/*.1`），不在这里跑生成器
 # （理由同 release.yml 那一步）：手页是产物，它与源文件的一致性由
@@ -211,6 +215,9 @@ test: init up
 # 之前）→ 打包 → 删掉裸二进制 → 算校验和。发布物只有 tarball 一条安装路径，
 # 校验和才盖得住发出去的东西。
 #
+# 开头那句 `rm -rf dist` 连本地放在 dist/ 里的别的东西一起删；dist/ 在
+# .gitignore 里，删它不脏树，但别把要留着的东西放在那儿。
+#
 # 跑完之后 dist/ 里就是发布那份资产清单：一个 tarball 与 SHA256SUMS——发布那一步
 # 发的是 `dist/*`，本地看到的与线上的一致。
 VERSION ?= dev
@@ -219,6 +226,7 @@ dist:
 	@rm -rf dist
 	@mkdir -p dist
 	@set -e; \
+	umask 022; \
 	for pair in "larkax:./cmd/larkax" "larkaxctl:./cmd/larkaxctl"; do \
 	  name=$${pair%%:*}; pkg=$${pair#*:}; \
 	  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
@@ -229,16 +237,18 @@ dist:
 	  echo "版本注入失败：二进制自称 $$(dist/larkax_linux_amd64 --version)，期望 $(VERSION)"; \
 	  exit 1; \
 	fi; \
-	stage=$$(mktemp -d); \
-	trap 'rm -rf "$$stage"' EXIT; \
+	root=$$(mktemp -d); \
+	trap 'rm -rf "$$root"' EXIT; \
+	stage="$$root/larkax_$(VERSION)_linux_amd64"; \
+	mkdir -p "$$stage/man/man1"; \
 	cp dist/larkax_linux_amd64 "$$stage/larkax"; \
 	cp dist/larkaxctl_linux_amd64 "$$stage/larkaxctl"; \
 	chmod 0755 "$$stage/larkax" "$$stage/larkaxctl"; \
 	cp LICENSE README.md "$$stage/"; \
-	mkdir -p "$$stage/man/man1"; \
 	cp man/man1/*.1 "$$stage/man/man1/"; \
 	tar -czf "dist/larkax_$(VERSION)_linux_amd64.tar.gz" \
-	  --sort=name --owner=0 --group=0 --numeric-owner -C "$$stage" .; \
+	  --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+	  -C "$$root" "larkax_$(VERSION)_linux_amd64"; \
 	rm -f dist/larkax_linux_amd64 dist/larkaxctl_linux_amd64; \
 	cd dist && sha256sum *.tar.gz > SHA256SUMS; \
 	echo "已打出 dist/larkax_$(VERSION)_linux_amd64.tar.gz"
