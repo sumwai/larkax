@@ -20,8 +20,10 @@ import (
 
 	"github.com/sumwai/larkax/internal/api"
 	"github.com/sumwai/larkax/internal/catalog"
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/migrate"
+	"github.com/sumwai/larkax/internal/upstream"
 )
 
 // testDoctorKey 是打网关用的假 API Key。
@@ -208,7 +210,7 @@ func TestDoctorCatalogFlagsChannelModelMismatch(t *testing.T) {
 			{ID: 9, Name: "other", Status: channels.StatusEnabled, Models: []string{"claude-xx"}},
 			{ID: 8, Name: "disabled", Status: channels.StatusDisabled, Models: []string{"claude-xx"}},
 		},
-		catalogSet: map[string]bool{"claude-x": true},
+		catalogEndpoints: map[string][]channel.Endpoint{"claude-x": nil},
 	}
 
 	got := checkDoctorCatalog(in)
@@ -228,13 +230,132 @@ func TestDoctorCatalogFlagsChannelModelMismatch(t *testing.T) {
 // 它会让一次什么都没查的运行看起来像一次查过且没问题的运行
 // （见 LESSONS.md 第 16 条）。
 func TestDoctorCatalogSkipsWithoutChannels(t *testing.T) {
-	got := checkDoctorCatalog(doctorChainInput{catalogSet: map[string]bool{}})
+	got := checkDoctorCatalog(doctorChainInput{catalogEndpoints: map[string][]channel.Endpoint{}})
 	if got.skip == "" {
 		t.Fatal("没有可查的对象时第 3 项应当报「没跑成」，而不是什么都不说")
 	}
 	if got.status() != doctorSkipped {
 		t.Errorf("结论应当是没跑成，得到 %s", got.status().label())
 	}
+}
+
+// TestDoctorCatalogFlagsEndpointMismatch 钉住第 3 项的第二个判据：
+// 名字在目录里、但它声明的端点与这条渠道打的那条对不上。
+//
+// 它与写入侧建渠道时的校验判的是同一件事（见 internal/channels/endpoints.go
+// 的 EndpointFit），所以报错要点名渠道、模型名，并把**两个端点**都说出来——
+// 只说「对不上」等于让人去猜是哪一个词对不上。
+func TestDoctorCatalogFlagsEndpointMismatch(t *testing.T) {
+	in := doctorChainInput{
+		channels: []channels.ChannelInfo{
+			// openai 打 /v1/chat/completions，而下面这个模型只声明 /v1/messages。
+			{ID: 7, Name: "my-upstream", Status: channels.StatusEnabled,
+				Type: "openai", Models: []string{"claude-x"}},
+		},
+		catalogEndpoints: map[string][]channel.Endpoint{
+			"claude-x": {channel.EndpointMessages},
+		},
+	}
+
+	got := checkDoctorCatalog(in)
+	if got.status() != doctorFailed {
+		t.Fatalf("端点对不上时结论应当是不通过，得到 %s：%q",
+			got.status().label(), findingsText(got.findings))
+	}
+	assertContainsFragments(t, got.findings,
+		"渠道 7（my-upstream）",
+		`"claude-x"`,
+		string(channel.EndpointMessages),
+		string(channel.EndpointChatCompletions),
+		"unsupported_model")
+}
+
+// TestDoctorCatalogAllowsEndpointForUnknownOrMatching 是上一条的对照：
+// 声明的端点含这条渠道那条、那一项没配过（nil）、渠道类型算不出端点，三档都不报。
+//
+// 三档放行与写入侧一致——目录是人工维护、会过时的一份声明，按「不支持」处理
+// 会让刚接的上游一条渠道都建不出来。少任何一臂，上一条证明的都只是「报了」，
+// 证明不了判的是「端点对不对」。
+func TestDoctorCatalogAllowsEndpointForUnknownOrMatching(t *testing.T) {
+	base := func(declared []channel.Endpoint, typ string) doctorChainInput {
+		return doctorChainInput{
+			channels: []channels.ChannelInfo{
+				{ID: 1, Name: "c", Status: channels.StatusEnabled, Type: typ, Models: []string{"m"}},
+			},
+			catalogEndpoints: map[string][]channel.Endpoint{"m": declared},
+		}
+	}
+
+	cases := []struct {
+		name string
+		in   doctorChainInput
+	}{
+		{"声明里含这条端点", base([]channel.Endpoint{channel.EndpointChatCompletions}, "openai")},
+		{"端点那一项没配过", base(nil, "openai")},
+		{"渠道类型算不出端点", base([]channel.Endpoint{channel.EndpointMessages}, "")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := doctorEndpointFindings(tc.in); len(got) != 0 {
+				t.Errorf("这一档应当放行，得到 %q", got)
+			}
+		})
+	}
+}
+
+// TestDoctorEndpointFindingMatchesEveryRegisteredType 让 doctor 的结论在**每个**
+// 已注册的渠道类型上都与那张表对上。
+//
+// 它是「别在 CLI 里抄一份对照表」的钉子：doctor 走的是 channels.EndpointFitFor
+// （「渠道类型 → 端点」那张表的唯一入口）。在 CLI 里另写一份 switch、尤其只抄了
+// 常见的那几个类型时，没抄到的类型上这里会红。期望值从 channel.Protocol
+// （写入侧同一张表）算，不从 doctor 的实现算。
+func TestDoctorEndpointFindingMatchesEveryRegisteredType(t *testing.T) {
+	registry, err := upstream.Registry()
+	if err != nil {
+		t.Fatalf("装配适配器注册表失败: %v", err)
+	}
+	types := registry.Types()
+	if len(types) == 0 {
+		t.Fatal("一个渠道类型都没注册：这条用例什么都没查")
+	}
+	for _, typ := range types {
+		t.Run(typ, func(t *testing.T) {
+			own := channel.Protocol(typ).Endpoint()
+			if own == "" {
+				t.Fatalf("类型 %q 算不出端点，用例的前提不成立", typ)
+			}
+			in := doctorChainInput{
+				channels: []channels.ChannelInfo{
+					{ID: 1, Name: "c", Status: channels.StatusEnabled, Type: typ, Models: []string{"m"}},
+				},
+				catalogEndpoints: map[string][]channel.Endpoint{"m": {otherEndpoint(own)}},
+			}
+			if got := doctorEndpointFindings(in); len(got) == 0 {
+				t.Errorf("类型 %q 打 %s，模型只声明 %s，doctor 应当报出来",
+					typ, own, otherEndpoint(own))
+			}
+
+			// 反过来：声明里含这条端点时一条都不该报。
+			in.catalogEndpoints["m"] = []channel.Endpoint{own}
+			if got := doctorEndpointFindings(in); len(got) != 0 {
+				t.Errorf("类型 %q 打 %s，模型也声明了它，doctor 不该报：%q", typ, own, got)
+			}
+		})
+	}
+}
+
+// otherEndpoint 给一个与 own 不同的端点取值，用来造「一定对不上」的声明。
+func otherEndpoint(own channel.Endpoint) channel.Endpoint {
+	for _, e := range []channel.Endpoint{
+		channel.EndpointChatCompletions, channel.EndpointResponses,
+		channel.EndpointMessages, channel.EndpointSystemOne,
+	} {
+		if e != own {
+			return e
+		}
+	}
+	return ""
 }
 
 // ── 第 4 项：别名 ───────────────────────────────────────────────────────
@@ -275,7 +396,7 @@ func TestDoctorAliasAndPricingSkipWithoutServableModels(t *testing.T) {
 		channels: []channels.ChannelInfo{
 			{ID: 1, Name: "c", Status: channels.StatusEnabled, Models: []string{"not-in-catalog"}},
 		},
-		catalogSet: map[string]bool{"claude-x": true},
+		catalogEndpoints: map[string][]channel.Endpoint{"claude-x": nil},
 	})
 
 	for _, c := range []doctorCheck{alias, price} {

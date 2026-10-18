@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -692,6 +691,10 @@ func (a *Admin) attachmentAfter(ctx context.Context, req UpdateRequest, newModel
 //
 // 所以挡住写入侧：这是配置错误，而配置错误该在写入时说话。
 //
+// 判据与措辞都收在 endpoints.go 的 EndpointFit 上，doctor 排查时按**同一份**
+// 判（同样的三档、同一张「渠道类型 → 端点」表）——两处各写一份的症状是
+// 「建的时候放行、doctor 报错」，比不校验更坏。
+//
 // # 只在「目录里明确说了端点」且「对不上」时拒绝
 //
 //   - 目录里没有这个模型 → 放行（未知）
@@ -714,62 +717,22 @@ func (a *Admin) attachmentAfter(ctx context.Context, req UpdateRequest, newModel
 // （每个模型一行）不改变这条路径的量级。反过来，「写入时不查」意味着那条
 // 配置要等到第一次请求才暴露，而那时它已经挂在库上了。
 func (a *Admin) checkModelEndpoints(ctx context.Context, channelType string, models []string) error {
-	endpoint := channel.Protocol(channelType).Endpoint()
-	if endpoint == "" {
-		// 这个类型没有对应的协议（多半是个只占类型名的替身），算不出端点
-		// = 不知道，放行。
-		return nil
-	}
 	for _, model := range models {
-		declared, err := a.declaredEndpoints(ctx, model)
+		declared, err := DeclaredEndpoints(ctx, a.catalog, model)
 		if err != nil {
 			return err
 		}
-		if declared == nil || slices.Contains(declared, endpoint) {
+		fit := EndpointFitFor(channelType, declared)
+		if !fit.Mismatch() {
 			continue
 		}
-		// 这句话同时经命令行与管理面（HTTP）返回给使用者，所以措辞只能写
-		// 两个入口都成立的东西：命令名、`--参数` 写法只有命令行那边有，
-		// 管理面的调用方读到的是一个它没有的东西（见 LESSONS.md 第 39 条）。
-		// 这里只写数据本身的那些名字——模型名、端点、渠道的 type、models。
-		return fmt.Errorf("模型 %q 在目录里声明的端点是 %s，而这条渠道的类型是 %q（它把请求发到 %s）"+
-			"：往这条端点发，上游会回 unsupported_model，且从我们这边看与「模型不存在」无从分辨。"+
-			"要么给这个模型补上这条端点（改模型目录里这一条声明），要么把它从这条渠道的 models 里去掉",
-			model, endpointListText(declared), channelType, endpoint)
+		// 判据（EndpointFit.Mismatch）与措辞（Summary/Reason）都从同一处来：
+		// 它们与 doctor 报的是同一件事（见 internal/channels/endpoints.go）。
+		// 这里只补主语「模型 "m"」，与 doctor 那半句拼的是同一截正文，所以
+		// 两处不会各说一个版本。
+		return fmt.Errorf("模型 %q %s：%s", model, fit.Summary(), fit.Reason())
 	}
 	return nil
-}
-
-// declaredEndpoints 读模型目录对这个模型声明的端点清单。
-//
-// 三个取值原样交回调用方，不在这里折平：nil = 未知（放行）、空切片 = 明确
-// 一条都不支持（拒绝）、非空 = 按集合判。折平任意两个都会让「没配过」与
-// 「配了说没有」在写入侧重新合成一个值，而那正是这条三态要分开的东西。
-func (a *Admin) declaredEndpoints(ctx context.Context, model string) ([]channel.Endpoint, error) {
-	cons, err := a.catalog.Constraints(ctx, model)
-	if errors.Is(err, catalog.ErrModelNotFound) {
-		// 目录里没有这个模型：未知，放行。与 Source.profile 同一处置。
-		return nil, nil //nolint:nilnil // 见上
-	}
-	if err != nil {
-		return nil, fmt.Errorf("读取模型 %q 的目录声明失败: %w", model, err)
-	}
-	return cons.Capabilities.Endpoints, nil
-}
-
-// endpointListText 把目录声明的那几条端点渲染成一句人话，供报错用。
-//
-// 空清单（`{}`：明确一条都不支持）单独说一句——「只在这些端点上服务：」
-// 后面空着读不出任何意思，而这一档恰恰意味着**任何渠道**都服务不了它。
-func endpointListText(endpoints []channel.Endpoint) string {
-	if len(endpoints) == 0 {
-		return "「一条都不支持」"
-	}
-	parts := make([]string, 0, len(endpoints))
-	for _, endpoint := range endpoints {
-		parts = append(parts, string(endpoint))
-	}
-	return strings.Join(parts, ", ")
 }
 
 // validateType 确认这个渠道类型有对应的适配器。

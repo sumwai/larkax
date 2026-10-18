@@ -21,6 +21,7 @@ import (
 	"github.com/pressly/goose/v3"
 
 	"github.com/sumwai/larkax/internal/catalog"
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/migrate"
@@ -53,7 +54,8 @@ const doctorUsage = `larkaxctl doctor 逐项检查「配好的链路能不能接
 
   1. 数据库    连得上吗、迁移跑到哪一版
   2. 渠道      有没有至少一条 enabled 且 models 非空的渠道
-  3. 模型目录  渠道 models 里出现的每个名字都在 model_catalog 里吗
+  3. 模型目录  渠道 models 里出现的每个名字都在 model_catalog 里吗、且目录声明
+               的端点含这条渠道打的那条端点吗
   4. 别名      配过别名的规范名有没有渠道接得住；可服务的规范名在每个服务它的
                渠道上能不能解析出上游名
   5. 计价规则  可服务的规范名在每个服务它的渠道上都有生效的规则吗
@@ -62,8 +64,11 @@ const doctorUsage = `larkaxctl doctor 逐项检查「配好的链路能不能接
 第 3、4、5 项回答的是同一个字符串在两个数组里对不上的问题：渠道的 --models
 与目录里的规范名差一个字符，或者模型建了却没加进任何渠道的白名单——那时调用
 回 503「no available upstream for the requested model」，而那句话不会说是
-哪一个名字不对。第 6 项把「用户没有钱包行」这类缺口在第一次调用之前指出来，
-而不是让人从 500 往回推。
+哪一个名字不对。第 3 项还多判一层：名字在目录里、但它声明的端点与这条渠道打的
+那条对不上（模型目录里可以声明一个模型只在某几条端点上被服务，而渠道的 type
+决定它打哪条）——那时请求会打到一条服务不了的端点上，上游回 400
+unsupported_model，从我们这边看与「模型不存在」无从分辨。第 6 项把「用户没有
+钱包行」这类缺口在第一次调用之前指出来，而不是让人从 500 往回推。
 
 **前六项只读**：不写任何一行、不建任何东西、不发网络请求。第七项要花钱、
 要凭证，默认不跑。
@@ -230,7 +235,7 @@ var doctorHTTPClient = &http.Client{Timeout: doctorLiveTimeout}
 const (
 	doctorSubjectDatabase = "连得上、迁移跑到哪一版"
 	doctorSubjectChannel  = "有没有至少一条 enabled 且 models 非空的渠道"
-	doctorSubjectCatalog  = "enabled 渠道的 models 里出现的每个名字都在 model_catalog 里吗"
+	doctorSubjectCatalog  = "enabled 渠道的 models 里出现的每个名字都在 model_catalog 里、且目录声明的端点含这条渠道打的那条端点吗"
 	doctorSubjectAlias    = "配过别名的规范名有没有渠道接得住；可服务的规范名在每个服务它的渠道上能不能解析出上游名"
 	doctorSubjectPricing  = "可服务的规范名在每个服务它的渠道上都有生效的计价规则吗"
 	doctorSubjectWallet   = "有用户吗、每个用户都有钱包行吗、有没有一个钱包余额大于 0"
@@ -737,9 +742,22 @@ func collectDoctorReport(ctx context.Context, db *sql.DB, opts doctorOptions) do
 type doctorChainInput struct {
 	channels     []channels.ChannelInfo
 	catalogNames []string
-	catalogSet   map[string]bool
-	aliases      []catalog.Alias
-	users        []doctorUser
+	// catalogEndpoints 是「规范名 → 目录声明的端点」，键的**存在**表示这个名字
+	// 在目录里（值可能是 nil，那是「在目录里、但端点那一项没配过」）。这一栏让
+	// 第 3 项既能判「名字在不在目录里」，又能按 channels 那份判据判端点（见
+	// checkDoctorCatalog）。
+	catalogEndpoints map[string][]channel.Endpoint
+	aliases          []catalog.Alias
+	users            []doctorUser
+}
+
+// inCatalog 报告这个规范名在不在模型目录里。
+//
+// 按键的存在判，不按值：值可能是 nil（在目录里、但端点那一项没配过），
+// 那是「这一个名字已知」而不是「不在目录里」。
+func (in doctorChainInput) inCatalog(name string) bool {
+	_, ok := in.catalogEndpoints[name]
+	return ok
 }
 
 // doctorUser 是一个用户与它的钱包状态。
@@ -767,9 +785,9 @@ func gatherDoctorChain(ctx context.Context, db *sql.DB) (doctorChainInput, error
 	if err != nil {
 		return in, err
 	}
-	in.catalogSet = make(map[string]bool, len(models))
+	in.catalogEndpoints = make(map[string][]channel.Endpoint, len(models))
 	for _, m := range models {
-		in.catalogSet[m.CanonicalName] = true
+		in.catalogEndpoints[m.CanonicalName] = m.Capabilities.Endpoints
 		in.catalogNames = append(in.catalogNames, m.CanonicalName)
 	}
 	slices.Sort(in.catalogNames)
@@ -972,6 +990,14 @@ func checkDoctorChannels(in doctorChainInput) doctorCheck {
 
 // ── 第 3 项：模型目录 ───────────────────────────────────────────────────
 
+// checkDoctorCatalog 判「enabled 渠道的 models 与模型目录对得上吗」。
+//
+// 两问：名字在不在目录里（第一段），以及——名字在目录里的那些——它声明的端点
+// 含不含这条渠道打的那条端点（第二段，见 doctorEndpointFindings）。
+//
+// 第二问的判据是 channels.EndpointFitFor，与写入侧建渠道时用的是**同一份**
+// （见 internal/channels/endpoints.go）：doctor 是排查入口，它说的与建渠道时
+// 说的必须是同一件事，两处各写一份会漂移。
 func checkDoctorCatalog(in doctorChainInput) doctorCheck {
 	c := doctorCheck{title: "模型目录", subject: doctorSubjectCatalog}
 
@@ -988,7 +1014,7 @@ func checkDoctorCatalog(in doctorChainInput) doctorCheck {
 		fmt.Sprintf("范围：%d 个名字（enabled 渠道的 models 去重后）", len(referenced)))
 
 	for _, name := range referenced {
-		if in.catalogSet[name] {
+		if in.inCatalog(name) {
 			continue
 		}
 		c.findings = append(c.findings, doctorProblem{
@@ -998,8 +1024,53 @@ func checkDoctorCatalog(in doctorChainInput) doctorCheck {
 				"多半是拼写差了一个字符，或者那条模型已经被删掉了",
 		})
 	}
-	c.ok = fmt.Sprintf("%d 个名字都在目录里", len(referenced))
+
+	// 名字在目录里的那些再判端点。它按「渠道 × 模型」判而不是按名字判：同一个
+	// 模型挂在不同 type 的渠道上结论可能不同（渠道的 type 决定它打哪条端点）。
+	c.findings = append(c.findings, doctorEndpointFindings(in)...)
+
+	c.ok = fmt.Sprintf("%d 个名字都在目录里，端点没有对不上的", len(referenced))
 	return c
+}
+
+// doctorEndpointFindings 报出「这条渠道打的那条端点服务不了这个模型」的组合。
+//
+// 判据是 channels 那一份（EndpointFitFor / Mismatch），与写入侧同源。
+//
+// 单位是「渠道 × 模型」而不是名字：同一个模型挂在不同 type 的渠道上，结论可能
+// 不同。只报**明确**对不上的——目录里没有这个模型、那一项没配过、或渠道类型
+// 算不出端点，都是「不知道」，与写入侧一样放行；名字不在目录里的那些由上面
+// 一段报出，这里跳过（catalogEndpoints 里没有它们的键）。
+func doctorEndpointFindings(in doctorChainInput) []doctorProblem {
+	var findings []doctorProblem
+	for _, ch := range in.channels {
+		if ch.Status != channels.StatusEnabled {
+			continue
+		}
+		// 同一个渠道里同一个名字出现两次时只报一次（models 是库里的数组，
+		// 写入路径不去重）：重复的一行只会把「有几处配错了」数大。
+		seen := map[string]bool{}
+		for _, name := range ch.Models {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			declared, known := in.catalogEndpoints[name]
+			if !known {
+				continue
+			}
+			fit := channels.EndpointFitFor(ch.Type, declared)
+			if !fit.Mismatch() {
+				continue
+			}
+			findings = append(findings, doctorProblem{
+				headline: fmt.Sprintf("渠道 %s 的 models 里有 %q：%s",
+					doctorChannelLabel(ch.ID, ch.Name), name, fit.Summary()),
+				detail: fit.Reason(),
+			})
+		}
+	}
+	return findings
 }
 
 // referencedDoctorModels 是 enabled 渠道的 models 里出现过的名字，去重后排序。
@@ -1209,7 +1280,7 @@ func doctorPairs(in doctorChainInput) []doctorPair {
 		}
 		seen := map[string]bool{}
 		for _, name := range ch.Models {
-			if seen[name] || !in.catalogSet[name] {
+			if seen[name] || !in.inCatalog(name) {
 				continue
 			}
 			seen[name] = true
