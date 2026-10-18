@@ -127,7 +127,8 @@ type DecisionOutcome struct {
 type DecisionCandidate struct {
 	// ChannelID 是候选身份，也是与账单对上的那个数。
 	ChannelID int64
-	// Priority 数值大者先试；Weight 是同优先级内的分流比例。
+	// Priority 数值大者先试。Weight 不参与排序——它记在这一段里，是为了
+	// 让「当时渠道上配的是什么」可查（见 route.Candidate.Weight）。
 	Priority int
 	Weight   int
 
@@ -203,7 +204,7 @@ type DecisionAttempt struct {
 // # 它为什么不是 DecisionCandidate
 //
 // 被筛掉的候选没有「现在是什么状态」可言：它连打分都没进，Priority /
-// Weight / 健康度 / 额度那一组输入这次一件都没用上。把两者合成一个类型，就得
+// 健康度 / 额度那一组输入对它一件都没用上。把两者合成一个类型，就得
 // 让每一段候选回答「我是被筛掉的还是被选的」，而那个布尔答错了的表现是一段
 // 看不出问题的现场。
 //

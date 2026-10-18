@@ -801,11 +801,13 @@ func normalizeModels(models []string) ([]string, error) {
 	return out, nil
 }
 
-// normalizeWeight 校验分流权重。
+// normalizeWeight 校验渠道权重。
 //
-// 表默认值是 1，route 也把 <= 0 当成 1（见 route.Candidate.Weight）。与其存一个
-// 0 让读取侧去解释，不如在这里就落成 1：库里的值与它的实际含义一致，
-// 看库的人不必再去翻代码。
+// 表默认值是 1。这里把 0 落成 1，而不是把 0 存进库：今天没有哪个读取方会
+// 用到这一列（Weight 不参与排序，见 route.Candidate.Weight），库里留着一个
+// 「有含义但没人读」的值，只会让看库的人多翻一处代码。
+//
+// 负值直接拒绝：它多半是调用方算错了，静默落成 1 会把那个错误藏进库里。
 func normalizeWeight(weight int) (int, error) {
 	if weight < 0 {
 		return 0, errors.New("weight 不能为负数")

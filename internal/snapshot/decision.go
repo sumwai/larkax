@@ -63,7 +63,7 @@ var decisionCandidateFields = []fieldRule{
 	{Path: "candidates[].priority", Kind: allowUint,
 		Note: "排序的第一判据：数值大者先试。负值会被降级成描述符（表里按非负整数放行）——那本来就是个不该出现的取值"},
 	{Path: "candidates[].weight", Kind: allowUint,
-		Note: "同优先级内的分流比例；<= 0 视为 1，所以 0 是一个正常取值"},
+		Note: "渠道上配的权重。它不参与排序（排序走 priority 与分数），记进快照是为了让「当时配的是什么」可查；0 是数据，负数按内容处理"},
 	{Path: "candidates[].consecutive_failures", Kind: allowUint,
 		Note: "健康度里权重最高的一维：连续失败次数决定这个渠道该不该被跳过"},
 	{Path: "candidates[].success_rate", Kind: allowFloat,
