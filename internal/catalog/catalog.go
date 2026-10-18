@@ -235,6 +235,17 @@ func New(db *sql.DB) *Catalog { return &Catalog{db: db} }
 // 前者与后者同形，而它们在「一条都没配」与「配了一半」两个部署下的正确
 // 处置正好相反。
 //
+// # 已软删渠道留下的行不算「配过」
+//
+// `channel delete` 只把 `channels.deleted_at` 置上，**渠道级别的别名行不跟着走**
+// （internal/channels 里没有一处碰 model_aliases）。这话成立**只因为删除是软的**：
+// `model_aliases_channel_fk` 是 `ON DELETE CASCADE`（迁移 `00001_init.sql`），
+// 真删掉一行 channels，别名会跟着走。那些行属于一条已经不在的渠道，
+// 把它们算进「配过别名」，落在上面第二种情形上：整个规范名的每个请求回 500，
+// 而 `alias list` 不带 `--channel` 只列平台级，人看到的是「暂无别名」——
+// 配置界面上一条都没有，线上全 500。所以判据与渠道那一侧对齐：只算还活着的
+// 渠道的行（见 aliasRows）。
+//
 // # 覆盖跟着命中的那一条走
 //
 // overrides 是**行**上的一个字段，所以它与上游名来自同一条别名：命中了渠道级
@@ -266,7 +277,8 @@ func (c *Catalog) Alias(ctx context.Context, channelID int64, canonicalModel str
 	return "", nil, fmt.Errorf("%w：渠道 %d 的 %q", ErrAliasNotFound, channelID, canonicalModel)
 }
 
-// aliasRows 取回这个规范名在**所有范围**下的别名行。
+// aliasRows 取回这个规范名**还作数**的全部别名行：两种范围都算，但渠道级的那
+// 一部分只算渠道还活着的（见 aliasQueryLive）。
 //
 // 一次取全部、在 Go 里挑，而不是「先查命中的那一行，没命中再查一次『这个规范名
 // 配过没有』」：那样在**最常见的部署**（一条别名都没配）上要两次往返，而第二次
@@ -278,7 +290,9 @@ func (c *Catalog) Alias(ctx context.Context, channelID int64, canonicalModel str
 // 用 aliasQuery 整行取（而不是只取用得上的几列）：列清单与 scanAlias 的假设
 // 只该有一份，而多带几列的代价是几十个字节。
 func (c *Catalog) aliasRows(ctx context.Context, canonicalModel string) ([]Alias, error) {
-	rows, err := c.db.QueryContext(ctx, aliasQuery+` WHERE a.canonical_name = $1`, canonicalModel)
+	rows, err := c.db.QueryContext(ctx, aliasQueryLive+`
+ WHERE a.canonical_name = $1
+   AND (a.channel_id IS NULL OR c.deleted_at IS NULL)`, canonicalModel)
 	if err != nil {
 		return nil, fmt.Errorf("查询模型别名失败: %w", err)
 	}
@@ -639,6 +653,15 @@ SELECT
     a.overrides,
     a.created_at
   FROM model_aliases a`
+
+// aliasQueryLive 在 aliasQuery 之后接上与渠道那一侧对齐的 join，供热路径判
+// 「这条渠道级的别名还作不作数」（见 aliasRows 与 Alias 的那一节）。
+//
+// 谓词不复用 internal/channels 的 `channelAlive`：那个包 import 本包，反过来
+// import 会成环。两处说的是同一件事（`deleted_at IS NULL`）。
+const aliasQueryLive = aliasQuery + `
+  LEFT JOIN channels c
+         ON c.id = a.channel_id`
 
 func scanModel(rows *sql.Rows) (Model, error) {
 	var (
