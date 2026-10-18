@@ -877,18 +877,40 @@ func streamDuration(attempts []route.Attempt, fallbackStart, end time.Time) time
 //
 // 与 recordAttempts 分开而不是加一个开关：两边的规则本来就不同，
 // 一个记全部（非流式的成败在调用返回时就定了），一个只记失败的。
+//
+// # 请求 ctx 已经结束时，这里记的失败一律「不归因」
+//
+// 客户端在「换过一两个渠道、还没开始读流」这段窗口里断开时，这几条尝试不该
+// 记在渠道头上：适配器把 ctx 取消包成的同样是一个可重试的上游错误（见
+// recordAttempts 里同一道守卫，那是这条窗口的非流式那一半），只按错误的形态
+// 判就会记成渠道故障，连续失败三次之后按 streakCooldown 摘掉一个健康渠道。
+//
+// 判据与代价不在本函数里另写一套，见 recordAttempts 的那一段：两条路问的是
+// 同一个事实——ctx 已经结束，就是客户端不再要这份回答了——两份说辞迟早会
+// 分岔。
+//
+// 它与 pumpStream 的 clientGone 是两个落点：那个管读完流之后的最终结局，
+// 这个管还没开始读流就已经失败掉的那几次尝试。
 func (g *Gateway) recordFailedAttempts(ctx context.Context, attempts []route.Attempt) {
 	if g.Recorder == nil {
 		return
 	}
+	// 取一次就够：这是同一次请求的同一个事实。
+	canceled := ctx.Err() != nil
 	for _, a := range attempts {
 		if a.Err == nil {
 			continue
 		}
+		verdict := verdictOf(a.Err)
+		// a.Err == nil 已经在上面 continue 掉了（这里记的都是失败），
+		// 所以只看 ctx 就够。
+		if canceled {
+			verdict = route.VerdictUnattributed
+		}
 		g.recordCall(ctx, route.CallOutcome{
 			ChannelID: a.ChannelID,
 			At:        attemptTime(a, g.now()),
-			Verdict:   verdictOf(a.Err),
+			Verdict:   verdict,
 		})
 	}
 }
