@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/internal/migrate"
 	"github.com/sumwai/larkax/internal/plugin"
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
 	"github.com/sumwai/larkax/internal/testdb"
@@ -108,6 +111,40 @@ func insertPluginRaw(t *testing.T, db *sql.DB, key, version, status string,
 	}
 }
 
+// insertFailedPlugin 造一行「编译失败」，并带上错误原文。
+//
+// 分开一个入口而不是让 insertPluginRaw 多一个参数：**没有哪条命令会写下这一行**
+// （publish 拒绝编译不过的插件，而加载器只把「没装成」写进 last_load_result
+// 那三列，status 与 compile_error 都不动），所以它是「手工改库」在用例里唯一的
+// 样子，而它要的列与那一个入口其余调用点完全不同。
+func insertFailedPlugin(t *testing.T, db *sql.DB, key, version string, generation int64, compileErr string) {
+	t.Helper()
+
+	_, err := db.ExecContext(context.Background(),
+		`INSERT INTO plugins (key, version, name, source, meta, status, generation, compile_error)
+		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)`,
+		key, version, "测试插件", brokenSource, goodMeta(key, version), StatusFailed, generation, compileErr)
+	if err != nil {
+		t.Fatalf("插入编译失败的行失败: %v", err)
+	}
+}
+
+// markLoad 手工写下加载期那一次的结果，指名道姓落在 (key, version) 那一行上。
+//
+// 用的是加载器写回时那一条 SQL（见 recordLoadResultSQL）：用例要造的是「库里已经
+// 是这个状态」，而走一遍加载只造得出这次装配给出的那一种结果，读侧那一半要靠
+// 别的状态才测得到。共用同一条语句，夹具也就不会与写回那一侧各写各的。
+//
+// 传版本名而不是代次，理由与写回那一侧同一条：代次会撞车，按它写会改到两行。
+func markLoad(t *testing.T, db *sql.DB, key, version, result, errText string) {
+	t.Helper()
+
+	if _, err := db.ExecContext(context.Background(), recordLoadResultSQL,
+		key, version, result, nullableText(errText)); err != nil {
+		t.Fatalf("写下加载结果失败: %v", err)
+	}
+}
+
 // ── 加载 ──────────────────────────────────────────────────────────────
 
 // 判据：加载器真的把插件装上去了。
@@ -184,14 +221,189 @@ func TestLoadRegistryNarrowsByProvided(t *testing.T) {
 	}
 }
 
+// 判据：加载完把这一次的结果写回库——跳过的那一代写「没装成」，连同错误原文。
+//
+// 四件事一起钉住：
+//
+//   - 结果、原文、时刻都落了库（没时刻就分不出是哪一次启动写下的）；
+//   - **status 一个字都没动**：跳过不改状态，所以下次启动照样会再试一次。把它
+//     写成 failed 会让「这次装配没提供这个能力」看起来像一个永久的事实；
+//   - compile_error 也不动，那是发布期那一列；
+//   - 再加载一次、这次装配给上了 kv，同一行刷成 ok 且错误原文清回 NULL——
+//     留着上一次的原文，读的人会以为这一次也失败了。
+func TestLoadRegistryWritesBackAndClearsLoadResult(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	key := uniqueKey("load-back")
+	insertPluginRaw(t, db, key, "1.0.0", StatusActive, 0, goodMeta(key, "1.0.0"), kvAskingSource(key))
+
+	// 这一次装配没有 kv：这个插件在注册期就被跳过。
+	if _, err := New(db).LoadRegistry(ctx, discardLogger(), []string{sandbox.CapabilityLog}); err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+
+	row := rowsFor(t, db, key)[0]
+	if row.lastLoadResult.String != LoadResultFailed {
+		t.Errorf("没装成该写下 %s，实际是 %q", LoadResultFailed, row.lastLoadResult.String)
+	}
+	if !strings.Contains(row.lastLoadError.String, "能力") {
+		t.Errorf("错误原文该落在库里（它说的是这一次为什么没装成）：%q", row.lastLoadError.String)
+	}
+	if !row.lastLoadAt.Valid {
+		t.Error("加载结果该带着时刻")
+	}
+	if row.status != StatusActive {
+		t.Errorf("跳过不改状态：该仍是 %s，实际 %s", StatusActive, row.status)
+	}
+	if row.compileError.Valid {
+		t.Errorf("发布期那一列不该被加载器动：%q", row.compileError.String)
+	}
+
+	// 再启动一次，这一次装配提供了 kv：结果刷成 ok，原文清掉。
+	if _, err := New(db).LoadRegistry(ctx, discardLogger(), allCaps()); err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+
+	row = rowsFor(t, db, key)[0]
+	if row.lastLoadResult.String != LoadResultOK {
+		t.Errorf("装上了该写下 %s，实际是 %q", LoadResultOK, row.lastLoadResult.String)
+	}
+	if row.lastLoadError.Valid {
+		t.Errorf("装上了之后错误原文该回到 NULL，实际是 %q", row.lastLoadError.String)
+	}
+	if row.status != StatusActive {
+		t.Errorf("写回结果不该改状态：该仍是 %s，实际 %s", StatusActive, row.status)
+	}
+}
+
+// 判据：写回那一步把「谁装上了、谁被跳过」翻对，且按 key 查而不是按下标对。
+//
+// 不连库：这一段是纯判断，跳过的那几个不进注册表，两边下标对不上——写错的表现是
+// 把错误原文安到另一个插件头上，而库里看不出异常。
+func TestLoadRecordsMarksSkippedRowsByKey(t *testing.T) {
+	rows := []activeRow{
+		{reg: plugin.Registration{Key: "ok-one"}, version: "1.0.0"},
+		{reg: plugin.Registration{Key: "broken"}, version: "2.0.0"},
+		{reg: plugin.Registration{Key: "ok-two"}, version: "3.0.0"},
+	}
+	recs := loadRecords(rows, map[string]error{"broken": errors.New("申请了未开放的能力: kv")})
+
+	if len(recs) != len(rows) {
+		t.Fatalf("写回的条数 = %d，想要 %d（每一行都要有结果）", len(recs), len(rows))
+	}
+	for i, rec := range recs {
+		if rec.key != rows[i].reg.Key || rec.version != rows[i].version {
+			t.Errorf("第 %d 条写的不是它读到的那一行：%+v", i, rec)
+		}
+		wantResult := LoadResultOK
+		if rec.key == "broken" {
+			wantResult = LoadResultFailed
+		}
+		if rec.result != wantResult {
+			t.Errorf("%s 的结果 = %q，想要 %q", rec.key, rec.result, wantResult)
+		}
+	}
+	if recs[1].errorText == "" {
+		t.Error("被跳过的那一条要带上错误原文，否则管理面上只有「没装成」三个字")
+	}
+	for _, i := range []int{0, 2} {
+		if recs[i].errorText != "" {
+			t.Errorf("装上了的那一条不该带原文：%q", recs[i].errorText)
+		}
+	}
+}
+
+// fakeExec 记下每一次写回，并按 failOn 决定那一次报不报错（从 1 数，0 表示都成功）。
+type fakeExec struct {
+	writes [][]any
+	failOn int
+}
+
+func (f *fakeExec) ExecContext(_ context.Context, _ string, args ...any) (sql.Result, error) {
+	f.writes = append(f.writes, args)
+	if f.failOn == len(f.writes) {
+		return nil, errors.New("库连不上了")
+	}
+	return nil, nil
+}
+
+// 判据：写回的实参对得上（成功的那一条把原文写成 NULL，目标行是刚读的那一行）。
+func TestRecordLoadResultsWritesBothOutcomes(t *testing.T) {
+	ex := &fakeExec{}
+	recs := []loadRecord{
+		{key: "a", version: "1.0.0", result: LoadResultOK},
+		{key: "b", version: "3.0.0", result: LoadResultFailed, errorText: "申请了未开放的能力: kv"},
+	}
+
+	recordLoadResults(context.Background(), ex, discardLogger(), recs)
+
+	if len(ex.writes) != len(recs) {
+		t.Fatalf("写了 %d 次，想要 %d 次", len(ex.writes), len(recs))
+	}
+	// 目标行是 (key, version)：写回落在刚读的那一行上，不必再拼一遍「取中哪一行」
+	// 那条判据。用版本名而不是代次，是因为代次会撞车（见 recordLoadResultSQL）。
+	if got := ex.writes[1]; got[0] != "b" || got[1] != "3.0.0" {
+		t.Errorf("第二条写的不是 (b, 3.0.0)：%v", got)
+	}
+	// 装上了那一条把错误原文写成 NULL，不是空串：那一列的空串读起来像一个值。
+	if got := ex.writes[0][3]; got != nil {
+		t.Errorf("装上了的错误原文该是 NULL，实际 %#v", got)
+	}
+	if got := ex.writes[1][3]; got != "申请了未开放的能力: kv" {
+		t.Errorf("没装成那一条该带上原文，实际 %#v", got)
+	}
+}
+
+// 判据：一条写不进去不拖垮其余的，而且只记日志。
+//
+// 这一条钉的是启动路径上那条纪律——插件是可选增强，管理面上少一栏记录不该让服务
+// 起不来。recordLoadResults 没有返回值，所以「不外传错误」这件事在签名上就成立，
+// 这里钉的是它的另一半：失败之后还接着写，并且点名是哪一个插件。
+func TestRecordLoadResultsLogsFailureAndKeepsGoing(t *testing.T) {
+	var log bytes.Buffer
+	ex := &fakeExec{failOn: 1}
+	recs := []loadRecord{
+		{key: "first", version: "1.0.0", result: LoadResultOK},
+		{key: "second", version: "1.0.0", result: LoadResultOK},
+	}
+
+	recordLoadResults(context.Background(), ex, slog.New(slog.NewTextHandler(&log, nil)), recs)
+
+	if len(ex.writes) != len(recs) {
+		t.Errorf("第一条写失败之后该接着写剩下的：写了 %d 次，想要 %d 次", len(ex.writes), len(recs))
+	}
+	if !strings.Contains(log.String(), "first") {
+		t.Errorf("写回失败该在日志里点名是哪一个插件：\n%s", log.String())
+	}
+	if strings.Contains(log.String(), "second") {
+		t.Errorf("没失败的那一条不该被点名：\n%s", log.String())
+	}
+}
+
+// activeRegs 读一遍参与注册的行（见 Store.activeRows），只取用例关心的那几样。
+//
+// 用例要的是「哪些 key 会被装上、带着什么优先级」，而写回加载结果那一步要的版本名
+// 在这里没有用——包内直接借 activeRows，就不必为测试留着一条只被测试调用的
+// 导出方法。
+func activeRegs(t *testing.T, s *Store) []plugin.Registration {
+	t.Helper()
+	rows, err := s.activeRows(context.Background())
+	if err != nil {
+		t.Fatalf("读表失败: %v", err)
+	}
+	out := make([]plugin.Registration, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.reg)
+	}
+	return out
+}
+
 // 只有 status='active' 参与注册：另外三种状态都不上。
 //
 // 这一条钉的是「status 是唯一的开关」——把 WHERE 去掉、或者把 disabled
 // 也放进来，它立刻挂。
 func TestActiveReadsOnlyActivePlugins(t *testing.T) {
 	db := testDB(t)
-	ctx := context.Background()
-
 	active := uniqueKey("st-active")
 	pending := uniqueKey("st-pending")
 	disabled := uniqueKey("st-disabled")
@@ -201,10 +413,7 @@ func TestActiveReadsOnlyActivePlugins(t *testing.T) {
 	insertPlugin(t, db, disabled, "1.0.0", StatusDisabled, 0)
 	insertPlugin(t, db, failed, "1.0.0", StatusFailed, 0)
 
-	regs, err := New(db).Active(ctx)
-	if err != nil {
-		t.Fatalf("读表失败: %v", err)
-	}
+	regs := activeRegs(t, New(db))
 	got := map[string]bool{}
 	for _, r := range regs {
 		got[r.Key] = true
@@ -225,16 +434,11 @@ func TestActiveReadsOnlyActivePlugins(t *testing.T) {
 // 取错（例如取最低的一代）在库里看不出任何异常——两个版本都是 active。
 func TestActivePicksHighestGeneration(t *testing.T) {
 	db := testDB(t)
-	ctx := context.Background()
-
 	key := uniqueKey("gen")
 	insertPlugin(t, db, key, "1.0.0", StatusActive, 0)
 	insertPlugin(t, db, key, "2.0.0", StatusActive, 1)
 
-	regs, err := New(db).Active(ctx)
-	if err != nil {
-		t.Fatalf("读表失败: %v", err)
-	}
+	regs := activeRegs(t, New(db))
 	var found int
 	for _, r := range regs {
 		if r.Key != key {
@@ -272,10 +476,7 @@ func TestActiveReadsPlatformPriority(t *testing.T) {
 		t.Fatalf("插入渠道级启用记录失败: %v", err)
 	}
 
-	regs, err := New(db).Active(ctx)
-	if err != nil {
-		t.Fatalf("读表失败: %v", err)
-	}
+	regs := activeRegs(t, New(db))
 	got := map[string]int{}
 	for _, r := range regs {
 		got[r.Key] = r.Priority
@@ -503,10 +704,7 @@ func TestDisableStopsEveryGeneration(t *testing.T) {
 	if _, err := s.Enable(ctx, key); err != nil {
 		t.Fatalf("启用失败: %v", err)
 	}
-	regs, err := s.Active(ctx)
-	if err != nil {
-		t.Fatalf("读表失败: %v", err)
-	}
+	regs := activeRegs(t, s)
 	if !hasKey(regs, key) {
 		t.Fatal("启用之后该参与注册")
 	}
@@ -514,10 +712,7 @@ func TestDisableStopsEveryGeneration(t *testing.T) {
 	if _, disableErr := s.Disable(ctx, key); disableErr != nil {
 		t.Fatalf("停用失败: %v", disableErr)
 	}
-	regs, err = s.Active(ctx)
-	if err != nil {
-		t.Fatalf("读表失败: %v", err)
-	}
+	regs = activeRegs(t, s)
 	if hasKey(regs, key) {
 		t.Error("停用之后不该再参与注册")
 	}
@@ -591,18 +786,320 @@ func TestListFlagsBadMeta(t *testing.T) {
 	}
 }
 
+// 判据：「在跑的是哪一代」「最新一次尝试是哪一代」「上一次加载装上了没有」是三个
+// 问题，清单各答各的——前两个从 status 与代次算出来，第三个读那三列。
+//
+// 六种落在 key 上的状态各造一个，因为它们在**同一个 key** 上给出的答案不一样：
+//
+//   - 一代 active、没有加载记录：取中的是它，也是最新一次尝试，加载那一栏空着；
+//   - 一代 active、上一次加载是 ok：同上，另外说得出装上了、什么时候装的；
+//   - 两代 active：取中的只有代次最高的那一代。这一格是 status 答不出来的那个
+//     ——enable 新版本时旧的那一行不会被按下去，两行都写着 active。旧的那一代
+//     身上留着它当年被加载的结果，而读出来的必须是**取中那一代**的（空）；
+//   - 一代 active、上一次加载被跳过：结果与错误原文都读得出来，而它的 status
+//     仍是 active——跳过不改状态，下次启动还会再试；
+//   - active + 手工写下的 failed：取中的是 active 的旧代，最新一次尝试是 failed
+//     的那一代，它还带着发布期那一列；
+//   - 只有 pending：一代都没在跑（Running 是 nil，不是「代次 0」）。
+func TestListReportsRunningLatestAttemptAndLoadResult(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	single := uniqueKey("run-one")
+	loaded := uniqueKey("run-loaded")
+	twoActive := uniqueKey("run-two")
+	skipped := uniqueKey("run-skipped")
+	failed := uniqueKey("run-failed")
+	pending := uniqueKey("run-pending")
+
+	insertPlugin(t, db, single, "1.0.0", StatusActive, 0)
+	insertPlugin(t, db, loaded, "1.0.0", StatusActive, 0)
+	markLoad(t, db, loaded, "1.0.0", LoadResultOK, "")
+	insertPlugin(t, db, twoActive, "1.0.0", StatusActive, 0)
+	insertPlugin(t, db, twoActive, "2.0.0", StatusActive, 1)
+	// 旧的那一代身上留一条**它当年**被加载的结果：读清单时取中的已经不是它了。
+	markLoad(t, db, twoActive, "1.0.0", LoadResultFailed, "上一次装配没提供 kv")
+	insertPlugin(t, db, skipped, "1.0.0", StatusActive, 0)
+	markLoad(t, db, skipped, "1.0.0", LoadResultFailed, "源码编译不过：Unexpected token }")
+	insertPlugin(t, db, failed, "1.0.0", StatusActive, 0)
+	insertFailedPlugin(t, db, failed, "2.0.0", 1, "源码编译不过：Unexpected token }")
+	insertPlugin(t, db, pending, "1.0.0", StatusPending, 0)
+
+	rows, err := New(db).List(ctx)
+	if err != nil {
+		t.Fatalf("列清单失败: %v", err)
+	}
+	got := map[string]Row{}
+	for _, row := range rows {
+		got[row.Key+" "+row.Version] = row
+	}
+
+	if r := got[single+" 1.0.0"]; !r.IsRunning() || !r.Latest {
+		t.Errorf("只有一代 active 时，它既在跑又是最新一次尝试：%+v", r)
+	}
+	if r := got[single+" 1.0.0"]; r.RunningLoad != nil {
+		t.Errorf("从没被加载过的一代不该有加载结果：%+v", r.RunningLoad)
+	}
+
+	// 装上了：结果不是「没装成」，时刻也读得出来（没有时刻就分不出是哪一次启动）。
+	if r := got[loaded+" 1.0.0"]; r.RunningLoad == nil || r.RunningLoad.Failed() {
+		t.Errorf("上一次加载装上了：%+v", r.RunningLoad)
+	} else if r.RunningLoad.At.IsZero() {
+		t.Error("加载结果该带着那一刻的时刻")
+	}
+
+	// 两代都 active：在跑的是代次最高的那一行，另一行只是 active。
+	if r := got[twoActive+" 2.0.0"]; !r.IsRunning() || !r.Latest {
+		t.Errorf("两代都 active 时，代次最高的那一行在跑：%+v", r)
+	}
+	if r := got[twoActive+" 1.0.0"]; r.IsRunning() {
+		t.Errorf("两代都 active 时只能有一行在跑，1.0.0 不该是它：%+v", r)
+	}
+	// 加载那几列按**取中的那一代**给，不是按这一行自己的：旧代身上那条记录
+	// 说的是「它当年被跳过」，而这一刻取中的是新一代、还没有记录——两行都该是空。
+	for _, v := range []string{"1.0.0", "2.0.0"} {
+		if r := got[twoActive+" "+v]; r.RunningLoad != nil {
+			t.Errorf("取中的是没被加载过的新一代，%s 这一行不该报出旧代的加载结果：%+v",
+				v, r.RunningLoad)
+		}
+	}
+
+	// 取中的那一代上一次被跳过：结果与原文都读得出来，代次与版本指着它。
+	r := got[skipped+" 1.0.0"]
+	if !r.IsRunning() || r.RunningLoad == nil || !r.RunningLoad.Failed() {
+		t.Fatalf("取中的那一代上一次加载没装成：%+v", r)
+	}
+	if !strings.Contains(r.RunningLoad.Error, "Unexpected token") {
+		t.Errorf("错误原文没有读出来：%q", r.RunningLoad.Error)
+	}
+	if r.RunningLoad.At.IsZero() {
+		t.Error("加载结果该带着那一刻的时刻")
+	}
+	// 跳过不改状态：它还是参与注册的那一代，下次启动照样会再试。
+	if r.Status != StatusActive {
+		t.Errorf("跳过一次之后 status 仍是 %s，实际 %s", StatusActive, r.Status)
+	}
+
+	// active + failed：两个问题各有各的答案，且发布期那一列读得出来。
+	old := got[failed+" 1.0.0"]
+	if !old.IsRunning() || old.Latest {
+		t.Errorf("active 的旧代该在跑、且不是最新一次尝试：%+v", old)
+	}
+	newest := got[failed+" 2.0.0"]
+	if newest.IsRunning() || !newest.Latest {
+		t.Errorf("failed 的那一代是最新一次尝试，但不该在跑：%+v", newest)
+	}
+	if !strings.Contains(newest.CompileError, "Unexpected token") {
+		t.Errorf("compile_error 没有读出来：%q", newest.CompileError)
+	}
+	// 「在跑的那一代」按 key 给，所以同一个 key 的每一行带的是同一个值。
+	want := &Generation{Version: "1.0.0", Number: 0}
+	if old.Running == nil || *old.Running != *want {
+		t.Errorf("在跑的那一代 = %+v，想要 %+v", old.Running, want)
+	}
+	if newest.Running == nil || *newest.Running != *want {
+		t.Errorf("同一个 key 的每一行该带着同一个在跑代次：%+v", newest.Running)
+	}
+
+	if r := got[pending+" 1.0.0"]; r.Running != nil || r.IsRunning() || r.RunningLoad != nil {
+		t.Errorf("没有一代 active 时不该报出在跑的一代，也不该有加载结果（代次 0 是合法值，不能拿它当「没有」）：%+v", r)
+	}
+}
+
+// 判据：同一个 key 里两行撞在同一个代次上时，「取中的是哪一行」三处指的是同一行，
+// 而写回只落在加载器读的那一行上。
+//
+// 代次撞车是覆盖发布的副产物：A(1.0.0) 发布后代次是 0，B(2.0.0) 发布时拿 1，再把
+// A 重发一次，A 也变成 1（原地加一，见 Publish）。于是同一个 key 里两行同代次，
+// 而只按代次比大小的写法在三处各错一次：
+//
+//   - 读表那一处（activeRows）与管理面那一处（runningJoin）各写一份排序，就会各选
+//     一行——写回落在加载器读的那一行上，而清单报的是另一行，库里看不出异常；
+//   - IsRunning 只比代次时两行都说自己在跑，而加载器只读一行；
+//   - 写回按 (key, generation) 定位时一条 UPDATE 改掉两行，另一行凭空多出一条记录。
+//
+// 夹具让**取中的那一行**（版本名大的那一行，见 pickedOrder）编译不过：它被跳过，
+// 另一行是好的。于是三件事同时可判：只有它被写回、另一行三列仍是 NULL，而它的
+// status 一个字没动。
+func TestLoadRegistrySameGenerationWritesBackOneRow(t *testing.T) {
+	db := testDB(t)
+	key := uniqueKey("tie")
+	insertPluginRaw(t, db, key, "2.0.0", StatusActive, 1, goodMeta(key, "2.0.0"), brokenSource)
+	insertPlugin(t, db, key, "1.0.0", StatusActive, 1)
+
+	reg, err := New(db).LoadRegistry(context.Background(), discardLogger(), allCaps())
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	// 取中的那一代被跳过时不会退回另一代（见 PublishPartial）：这个 key 什么都不在跑。
+	if _, ok := reg.Get(key); ok {
+		t.Error("取中的那一代被跳过之后，这个 key 不该有插件在跑")
+	}
+
+	byVersion := map[string]pluginRow{}
+	for _, r := range rowsFor(t, db, key) {
+		byVersion[r.version] = r
+	}
+	if len(byVersion) != 2 {
+		t.Fatalf("这个 key 该有两行，实际 %d 行", len(byVersion))
+	}
+	picked := byVersion["2.0.0"]
+	if !picked.lastLoadResult.Valid || picked.lastLoadResult.String != LoadResultFailed {
+		t.Errorf("被跳过的那一行该写回 failed：%+v", picked.lastLoadResult)
+	}
+	if !picked.lastLoadError.Valid || !strings.Contains(picked.lastLoadError.String, "Unexpected token") {
+		t.Errorf("被跳过的那一行该带上错误原文：%+v", picked.lastLoadError)
+	}
+	if !picked.lastLoadAt.Valid {
+		t.Error("写回该带上那一刻的时刻（没有时刻就分不出是哪一次启动写下的）")
+	}
+	if picked.status != StatusActive {
+		t.Errorf("跳过不改状态：status 仍是 %s，实际 %s", StatusActive, picked.status)
+	}
+	other := byVersion["1.0.0"]
+	if other.lastLoadResult.Valid || other.lastLoadError.Valid || other.lastLoadAt.Valid {
+		t.Errorf("写回只该落在加载器读的那一行上，另一行三列都该是 NULL：%+v", other)
+	}
+
+	// 管理面那一处：同一个 key 里恰好一行是「取中的那一行」，而它是加载器读的那一行。
+	rows, err := New(db).List(context.Background())
+	if err != nil {
+		t.Fatalf("列清单失败: %v", err)
+	}
+	var running []Row
+	for _, r := range rows {
+		if r.Key == key && r.IsRunning() {
+			running = append(running, r)
+		}
+	}
+	if len(running) != 1 || running[0].Version != "2.0.0" || running[0].Generation != 1 {
+		t.Fatalf("同一个 key 里该恰好一行是取中的那一行（2.0.0 / 1），实际 %d 行：%+v",
+			len(running), running)
+	}
+	if running[0].RunningLoad == nil || !running[0].RunningLoad.Failed() {
+		t.Errorf("取中的那一行该带着它那一次加载的结果：%+v", running[0].RunningLoad)
+	}
+}
+
+// 判据：两个常量与迁移里那条 CHECK 说的是同一套字面量。
+//
+// 这两个常量是列上那个约束在 Go 这一侧的对应物（见迁移 00034）：库那一侧写不进第三
+// 个值，而读的那一侧靠它们比对。把两边的值互换（ok 与 failed 对调），别的用例全都
+// 照过——它们只用常量互相对照，一处也没有与迁移对过话，而库里的含义整个反了：装上
+// 的记录会被读成「没装成」。
+//
+// 期望串按常量的**顺序**拼出来，再从内嵌的那份迁移里读一遍（migrate.FS，跑起来的
+// 就是那一份）：改 CHECK 而没改常量、改常量而没改 CHECK、或者把两个常量对调，都在
+// 这里挂。
+func TestLoadResultConstantsMatchMigrationCheck(t *testing.T) {
+	b, err := fs.ReadFile(migrate.FS(), "00034_plugin_last_load_result.sql")
+	if err != nil {
+		t.Fatalf("读迁移文件失败: %v", err)
+	}
+	want := fmt.Sprintf("CHECK (last_load_result IN ('%s', '%s'))", LoadResultOK, LoadResultFailed)
+	if !strings.Contains(strings.Join(strings.Fields(string(b)), " "), want) {
+		t.Errorf("迁移里那条 CHECK 与常量对不上，想要 %q", want)
+	}
+}
+
+// Get 给的是最新一次尝试那一行，另外说出取中的是哪一代、它上一次装上没有。
+//
+// 与 List 分开：这一条走的是另一段 SQL（那一份没有逐行的那一栏，只有一行），
+// 而三个问题的答案都落在同一个 Detail 上。
+//
+// 加载那一栏最值得在这里钉住：这一页打的是**最新发布**的那一行，而加载器写的是
+// **取中**的那一代——发布了没 enable 时两者不是同一行，那一栏得从取中的那一代读。
+func TestGetReportsRunningAndLoadResultBesideTheNewestOne(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	key := uniqueKey("get-run")
+	insertPlugin(t, db, key, "1.0.0", StatusActive, 0)
+	insertFailedPlugin(t, db, key, "2.0.0", 1, "源码编译不过：Unexpected token }")
+
+	d, err := New(db).Get(ctx, key)
+	if err != nil {
+		t.Fatalf("看详情失败: %v", err)
+	}
+	if d.Version != "2.0.0" || d.Status != StatusFailed || !d.Latest {
+		t.Errorf("详情该给最新的那一代（2.0.0 / failed / latest）：%+v", d.Row)
+	}
+	if !strings.Contains(d.CompileError, "Unexpected token") {
+		t.Errorf("compile_error 没有读出来：%q", d.CompileError)
+	}
+	if d.IsRunning() {
+		t.Error("最新一次尝试没有上线，它不该是「取中的那一代」")
+	}
+	if want := (&Generation{Version: "1.0.0", Number: 0}); d.Running == nil || *d.Running != *want {
+		t.Errorf("取中的那一代 = %+v，想要 %+v", d.Running, want)
+	}
+	if d.RunningLoad != nil {
+		t.Errorf("这两行都没有加载记录：%+v", d.RunningLoad)
+	}
+	if d.Versions != 2 {
+		t.Errorf("versions = %d，想要 2", d.Versions)
+	}
+
+	// 取中的那一代被跳过、而详情打的是另一行：加载结果要从取中的那一代读出来。
+	skipped := uniqueKey("get-skipped")
+	insertPlugin(t, db, skipped, "1.0.0", StatusActive, 0)
+	insertPlugin(t, db, skipped, "2.0.0", StatusPending, 1)
+	markLoad(t, db, skipped, "1.0.0", LoadResultFailed, "源码编译不过：Unexpected token }")
+
+	d, err = New(db).Get(ctx, skipped)
+	if err != nil {
+		t.Fatalf("看详情失败: %v", err)
+	}
+	if d.Version != "2.0.0" || d.IsRunning() {
+		t.Errorf("详情给的是还没 enable 的那一版：%+v", d.Row)
+	}
+	if want := (&Generation{Version: "1.0.0", Number: 0}); d.Running == nil || *d.Running != *want {
+		t.Errorf("取中的那一代 = %+v，想要 %+v", d.Running, want)
+	}
+	if d.RunningLoad == nil || !d.RunningLoad.Failed() {
+		t.Fatalf("取中的那一代上一次没装成，这一栏该读得出来：%+v", d.RunningLoad)
+	}
+	if !strings.Contains(d.RunningLoad.Error, "Unexpected token") {
+		t.Errorf("错误原文没有读出来：%q", d.RunningLoad.Error)
+	}
+	if d.RunningLoad.At.IsZero() {
+		t.Error("加载结果该带着那一刻的时刻")
+	}
+
+	// 一代都没跑时是 nil：这一格与「代次 0」分得开（见 List 那条用例）。
+	onlyPending := uniqueKey("get-pending")
+	insertPlugin(t, db, onlyPending, "1.0.0", StatusPending, 0)
+	d, err = New(db).Get(ctx, onlyPending)
+	if err != nil {
+		t.Fatalf("看详情失败: %v", err)
+	}
+	if d.Running != nil || d.RunningLoad != nil {
+		t.Errorf("pending 的插件既没有取中的一代，也没有加载结果：%+v / %+v", d.Running, d.RunningLoad)
+	}
+}
+
 // ── 助手 ──────────────────────────────────────────────────────────────
 
 type pluginRow struct {
 	version string
 	status  string
 	source  string
+	// 加载期那三列（见迁移 00034），加上发布期那一列：写回那一侧要断言的是
+	// 「哪几列动了、哪几列没动」，所以都读回来。没被加载过时三列都是 NULL。
+	lastLoadResult sql.NullString
+	lastLoadError  sql.NullString
+	lastLoadAt     sql.NullTime
+	compileError   sql.NullString
 }
 
+// 排序键带上 version：代次会撞车（覆盖发布的副产物），只按代次排的话两行的先后
+// 由库决定，用例里就会随机。
 func rowsFor(t *testing.T, db *sql.DB, key string) []pluginRow {
 	t.Helper()
 	rows, err := db.QueryContext(context.Background(),
-		`SELECT version, status, source FROM plugins WHERE key = $1 ORDER BY generation`, key)
+		`SELECT version, status, source,
+		        last_load_result, last_load_error, last_load_at, compile_error
+		   FROM plugins WHERE key = $1 ORDER BY generation, version`, key)
 	if err != nil {
 		t.Fatalf("查插件行失败: %v", err)
 	}
@@ -611,7 +1108,8 @@ func rowsFor(t *testing.T, db *sql.DB, key string) []pluginRow {
 	var out []pluginRow
 	for rows.Next() {
 		var r pluginRow
-		if err := rows.Scan(&r.version, &r.status, &r.source); err != nil {
+		if err := rows.Scan(&r.version, &r.status, &r.source,
+			&r.lastLoadResult, &r.lastLoadError, &r.lastLoadAt, &r.compileError); err != nil {
 			t.Fatalf("读插件行失败: %v", err)
 		}
 		out = append(out, r)

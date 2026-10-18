@@ -220,6 +220,316 @@ func TestPrintPluginListEmpty(t *testing.T) {
 	}
 }
 
+// 判据：「在跑」那一栏按四档算，而文本、json 与文档里的推导式说的是同一套。
+//
+// 四档各造一个 key（见 docs/cli-reference.md 的「plugin」一节那张表）：
+//
+//   - 取中的那一代、上一次加载装上了 → 是 / 装上了；
+//   - 取中的那一代、上一次加载跳过了它 → 否 / 没装成，原文在表后；
+//   - 取中的那一代、还没有加载记录 → **还没试**。这一档与「是」混起来最贵：三列由
+//     加载器写下来，它还没写过，而「取中」不等于「装过」；
+//   - 这个 key 没有取中的一代 → 否（代次 0 也是合法值，不能拿它当「没有」）。
+//
+// 另外三个 key 各钉一件事：两代同代次时只有取中的那一行是「是」（代次会撞车，
+// 见 store.IsRunning）；手工改库的行结果有值而时刻没有，打的不能是零值时刻；同一个
+// key 的旧代身上不显示取中那一代的加载结果。
+//
+// 这一条测的是**渲染**：库那一半（Row 上那几个字段从哪几列来）在
+// internal/plugin/store 的集成用例里。
+func TestPluginOutputsShowLoadResultBesideSelectedGeneration(t *testing.T) {
+	const loadErr = "申请了未开放的能力: kv"
+	at := time.Date(2026, 10, 19, 3, 4, 5, 0, time.UTC)
+
+	// 加载结果按 key 给：取中的那一代被跳过之后，这个 key 的每一行都带着它。
+	demoPicked := &pluginstore.Generation{Version: "2.0.0", Number: 1}
+	demoLoad := &pluginstore.LoadAttempt{Result: pluginstore.LoadResultFailed, Error: loadErr, At: at}
+	newest := pluginstore.Row{
+		Key: "demo", Version: "2.0.0", Status: pluginstore.StatusActive, Generation: 1,
+		Name: "演示", Latest: true, Running: demoPicked, RunningLoad: demoLoad,
+	}
+	rows := []pluginstore.Row{
+		newest,
+		{
+			// 同一个 key 的旧一代：它不显示取中那一代的加载结果。
+			Key: "demo", Version: "1.0.0", Status: pluginstore.StatusActive, Generation: 0,
+			Name: "演示", Running: demoPicked, RunningLoad: demoLoad,
+		}, {
+			Key: "fine", Version: "3.0.0", Status: pluginstore.StatusActive, Generation: 0,
+			Name: "顺利", Latest: true,
+			Running:     &pluginstore.Generation{Version: "3.0.0", Number: 0},
+			RunningLoad: &pluginstore.LoadAttempt{Result: pluginstore.LoadResultOK, At: at},
+		}, {
+			Key: "quiet", Version: "4.0.0", Status: pluginstore.StatusActive, Generation: 0,
+			Name: "还没轮到", Latest: true,
+			Running: &pluginstore.Generation{Version: "4.0.0", Number: 0},
+		}, {
+			Key: "idle", Version: "5.0.0", Status: pluginstore.StatusPending, Generation: 0,
+			Name: "没启用", Latest: true,
+		}, {
+			// 两代同代次（覆盖发布的副产物）：取中的是按版本名定下来的那一行，而
+			// 「取中的那一行」只能有一行。
+			Key: "twice", Version: "7.0.0", Status: pluginstore.StatusActive, Generation: 1,
+			Name: "两代", Latest: true,
+			Running:     &pluginstore.Generation{Version: "7.0.0", Number: 1},
+			RunningLoad: &pluginstore.LoadAttempt{Result: pluginstore.LoadResultOK, At: at},
+		}, {
+			Key: "twice", Version: "6.0.0", Status: pluginstore.StatusActive, Generation: 1,
+			Name: "两代", Latest: true,
+			Running:     &pluginstore.Generation{Version: "7.0.0", Number: 1},
+			RunningLoad: &pluginstore.LoadAttempt{Result: pluginstore.LoadResultOK, At: at},
+		}, {
+			// 手工改库的行：结果那一列有值而时刻没有。
+			Key: "stale", Version: "8.0.0", Status: pluginstore.StatusActive, Generation: 0,
+			Name: "没有时刻", Latest: true,
+			Running:     &pluginstore.Generation{Version: "8.0.0", Number: 0},
+			RunningLoad: &pluginstore.LoadAttempt{Result: pluginstore.LoadResultFailed, Error: loadErr},
+		},
+	}
+
+	// 每一行该看到的那两栏。八行恰好把四档走过一遍。
+	wantMarks := map[string][2]string{
+		"demo 2.0.0":  {"否", "没装成"},
+		"demo 1.0.0":  {"否", "-"},
+		"fine 3.0.0":  {"是", "装上了"},
+		"quiet 4.0.0": {"还没试", "-"},
+		"idle 5.0.0":  {"否", "-"},
+		"twice 7.0.0": {"是", "装上了"},
+		"twice 6.0.0": {"否", "-"},
+		"stale 8.0.0": {"否", "没装成"},
+	}
+
+	// ── list：两栏 + 表后那两句原文 ──
+	var list bytes.Buffer
+	printPluginList(&list, rows)
+	listOut := list.String()
+
+	head := strings.Split(listOut, "\n")[0]
+	for _, col := range []string{"在跑", "上次加载"} {
+		if !strings.Contains(head, col) {
+			t.Errorf("清单的表头该有「%s」那一栏：%q", col, head)
+		}
+	}
+	// 表格按 key + 版本取最后两栏，不按下标：多一栏、少一栏时这里会漏掉，而漏掉
+	// 会被下面那条「每一行都要出现」抓住。表后那几句说明的字段数正好也是八个，
+	// 所以只认夹具里那些 key。
+	gotMarks := map[string][2]string{}
+	for _, line := range strings.Split(listOut, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 8 {
+			continue
+		}
+		mark := fields[0] + " " + fields[1]
+		if _, ok := wantMarks[mark]; !ok {
+			continue
+		}
+		gotMarks[mark] = [2]string{fields[6], fields[7]}
+	}
+	for mark, want := range wantMarks {
+		got, ok := gotMarks[mark]
+		if !ok {
+			t.Errorf("清单里没有 %s 那一行（或者它不再是八栏）", mark)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s 的最后两栏 = %v，想要 %v", mark, got, want)
+		}
+	}
+
+	// 表后逐条给出原文与时刻：失败的那两行各一句，装上了、还没试过、没启用的都不打。
+	wantNote := "插件 demo 的第 1 代（2.0.0）没装成，现在这个 key 哪一代都没在跑：" +
+		loadErr + "（2026-10-19T03:04:05Z）"
+	if row := lineEndingWith(t, listOut, "插件 demo"); row != wantNote {
+		t.Errorf("表后那一句 = %q，想要 %q", row, wantNote)
+	}
+	// 手工改库的行没有时刻：打「0001-01-01T00:00:00Z」会像一个真时刻。
+	wantStale := "插件 stale 的第 0 代（8.0.0）没装成，现在这个 key 哪一代都没在跑：" +
+		loadErr + "（没有记下时刻）"
+	if row := lineEndingWith(t, listOut, "插件 stale"); row != wantStale {
+		t.Errorf("没有时刻的那一句 = %q，想要 %q", row, wantStale)
+	}
+	for _, marker := range []string{"插件 fine", "插件 quiet", "插件 idle", "插件 twice"} {
+		if strings.Contains(listOut, marker) {
+			t.Errorf("没有失败的 key 不该被说明（%s）：\n%s", marker, listOut)
+		}
+	}
+
+	// ── get：四档各打一遍 ──
+	detail := func(d pluginstore.Detail) string {
+		var buf bytes.Buffer
+		printPluginDetail(&buf, d)
+		return buf.String()
+	}
+	// 「上次加载」那一栏按标签在行首找：同一个页面里还有别的行带着「加载」两个字。
+	loadRow := func(t *testing.T, out string) string {
+		t.Helper()
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "上次加载") {
+				return strings.TrimRight(line, " ")
+			}
+		}
+		t.Fatalf("详情里没有「上次加载」那一行：\n%s", out)
+		return ""
+	}
+
+	getOut := detail(pluginstore.Detail{Row: newest, CreatedAt: at, Versions: 2})
+	if row := lineEndingWith(t, getOut, "在跑"); !strings.HasSuffix(row, "没有：取的是第 1 代（2.0.0），上一次加载没装成") {
+		t.Errorf("「在跑」那一行 = %q，该说清取中但没装成", row)
+	}
+	if row := loadRow(t, getOut); !strings.HasSuffix(row, "没装成（2026-10-19T03:04:05Z）") {
+		t.Errorf("「上次加载」那一行 = %q，该带上结果与时刻", row)
+	}
+	wantGetNote := "第 1 代（2.0.0）上次加载没装成：" + loadErr
+	if row := lineEndingWith(t, getOut, "上次加载没装成："); row != wantGetNote {
+		t.Errorf("表后那一句 = %q，想要 %q", row, wantGetNote)
+	}
+
+	// 取中但还没有加载记录：说成「还没试」，并给两条来路各自的下一步——这个设置
+	// 关着时加载器不读表，重启多少次都不会有记录。
+	quietOut := detail(pluginstore.Detail{Row: rows[3], CreatedAt: at, Versions: 1})
+	if row := lineEndingWith(t, quietOut, "在跑"); !strings.HasSuffix(row, "没有：取的是第 0 代（4.0.0），但它还没有加载记录") {
+		t.Errorf("「在跑」那一行 = %q，该说清取中但还没试过", row)
+	}
+	if row := loadRow(t, quietOut); !strings.HasSuffix(row,
+		"没有记录：加载器还没试过它——发布或启用之后还没重启过，或者 plugin.enabled 是关着的"+
+			"（那时加载器不读表，重启也不会有记录）") {
+		t.Errorf("「上次加载」那一行 = %q，该把两条来路分开说", row)
+	}
+	if strings.Contains(quietOut, "上次加载没装成") {
+		t.Errorf("还没试过的不该被说成没装成：\n%s", quietOut)
+	}
+
+	// 这个 key 哪一代都没取中：两栏各说一句，不是留白。
+	idleOut := detail(pluginstore.Detail{Row: rows[4], CreatedAt: at, Versions: 1})
+	if row := lineEndingWith(t, idleOut, "在跑"); !strings.HasSuffix(row, "没有：这个 key 里哪一代都没在跑") {
+		t.Errorf("「在跑」那一行 = %q，该说清没有取中的一代", row)
+	}
+	if row := loadRow(t, idleOut); !strings.HasSuffix(row, "不适用：这个 key 里没有取中的一代（见「在跑」那一栏）") {
+		t.Errorf("「上次加载」那一行 = %q，该说清没东西可试", row)
+	}
+
+	// 手工改库的行：结果有值而时刻没有。
+	staleOut := detail(pluginstore.Detail{Row: rows[7], CreatedAt: at, Versions: 1})
+	if row := loadRow(t, staleOut); !strings.HasSuffix(row, "没装成（没有记下时刻）") {
+		t.Errorf("没有时刻的那一行 = %q，不该打零值时刻", row)
+	}
+	if strings.Contains(staleOut, "0001-01-01") {
+		t.Errorf("零值时刻不该出现在输出里：\n%s", staleOut)
+	}
+
+	// ── 文本那一栏与 json 那几栏是同一套 ──
+	var listDoc struct {
+		Plugins []pluginEntryDoc `json:"plugins"`
+	}
+	decodeDoc(t, pluginListDoc(rows), &listDoc)
+	if len(listDoc.Plugins) != len(rows) {
+		t.Fatalf("清单编出来 %d 条，想要 %d 条", len(listDoc.Plugins), len(rows))
+	}
+	// 按文档里那条推导式从 json 算一遍，再与表格那一栏比：两边分开算，改了任一边
+	// 而另一边没跟上都会红。这一条是「四处同一套」在测试里的落点。
+	for _, entry := range listDoc.Plugins {
+		mark := entry.Key + " " + entry.Version
+		want, ok := wantMarks[mark]
+		if !ok {
+			t.Fatalf("json 里多了一条 %s", mark)
+		}
+		if got := runningFromDoc(entry.RunningGeneration, entry.Version, entry.Generation, entry.RunningLoad); got != want[0] {
+			t.Errorf("%s 的 json 推出「%s」，表格那一栏是「%s」", mark, got, want[0])
+		}
+	}
+	// 具体那几栏也点一遍：推导式对得上，字段本身还得是原来那几样。
+	entryFor := func(mark string) pluginEntryDoc {
+		for _, entry := range listDoc.Plugins {
+			if entry.Key+" "+entry.Version == mark {
+				return entry
+			}
+		}
+		t.Fatalf("json 里没有 %s", mark)
+		return pluginEntryDoc{}
+	}
+	if got := entryFor("demo 2.0.0"); got.RunningGeneration == nil ||
+		got.RunningGeneration.Version != "2.0.0" || got.RunningGeneration.Generation != 1 {
+		t.Errorf("这一条要说得出取中的是哪一代：%+v", got.RunningGeneration)
+	}
+	if got := entryFor("demo 2.0.0"); got.RunningLoad == nil ||
+		got.RunningLoad.Result != pluginstore.LoadResultFailed ||
+		got.RunningLoad.Error != loadErr || got.RunningLoad.At != "2026-10-19T03:04:05Z" {
+		t.Errorf("这一条要说得出那一次加载的结果与原文：%+v", got.RunningLoad)
+	}
+	if got := entryFor("fine 3.0.0"); got.RunningLoad == nil || got.RunningLoad.Result != pluginstore.LoadResultOK ||
+		got.RunningLoad.Error != "" {
+		t.Errorf("装上了那一条的原文该是空串（编成 null）：%+v", got.RunningLoad)
+	}
+	if got := entryFor("quiet 4.0.0"); got.RunningLoad != nil {
+		t.Errorf("还没被加载过的那一条该是 null：%+v", got.RunningLoad)
+	}
+	if got := entryFor("idle 5.0.0"); got.RunningGeneration != nil {
+		t.Errorf("没有取中的一代时该是 null：%+v", got.RunningGeneration)
+	}
+	// 手工改库的行没有时刻：json 那一栏也是 null，不是 0001-01-01。
+	if got := entryFor("stale 8.0.0"); got.RunningLoad == nil || got.RunningLoad.At != "" {
+		t.Errorf("没有时刻时 at 该是 null：%+v", got.RunningLoad)
+	}
+
+	var getDoc struct {
+		Plugin pluginEntryDoc `json:"plugin"`
+	}
+	decodeDoc(t, pluginGetDoc(pluginstore.Detail{Row: newest, CreatedAt: at, Versions: 2}), &getDoc)
+	if getDoc.Plugin.RunningLoad == nil || getDoc.Plugin.RunningLoad.Result != pluginstore.LoadResultFailed {
+		t.Errorf("详情那一条该带上 running_load：%+v", getDoc.Plugin.RunningLoad)
+	}
+	if getDoc.Plugin.RunningGeneration == nil || getDoc.Plugin.RunningGeneration.Version != "2.0.0" {
+		t.Errorf("详情那一条要说得出取中的是哪一代：%+v", getDoc.Plugin.RunningGeneration)
+	}
+}
+
+// pluginEntryDoc / pluginGenerationDoc / pluginLoadDoc 是 json 档在测试里的形状。
+//
+// 具名而不是就地声明：推导式那一条要拿着它们与表格比，而两处要用同一个类型。
+type pluginGenerationDoc struct {
+	Version    string `json:"version"`
+	Generation int64  `json:"generation"`
+}
+
+type pluginLoadDoc struct {
+	Result string `json:"result"`
+	Error  string `json:"error"`
+	At     string `json:"at"`
+}
+
+type pluginEntryDoc struct {
+	Key               string               `json:"key"`
+	Version           string               `json:"version"`
+	Generation        int64                `json:"generation"`
+	Status            string               `json:"status"`
+	Latest            bool                 `json:"latest"`
+	CompileError      *string              `json:"compile_error"`
+	RunningGeneration *pluginGenerationDoc `json:"running_generation"`
+	RunningLoad       *pluginLoadDoc       `json:"running_load"`
+}
+
+// runningFromDoc 按 docs/cli-reference.md 里那条推导式算出 json 这一条是哪一档。
+//
+// 照抄一遍那条规则，是为了让「文本档与 json 档是同一套」变成一条能挂的断言：两边
+// 分开算、再比一次，改了任一边而另一边没跟上都会红。规则本身写在文档里，这里不
+// 另立一份口径——它要是变了，这条用例与文档一起改。
+//
+// 两份判断都不能少：running_generation 与 running_load 都按 key 给，同一个 key 的
+// 每一条带着同一份，所以要判的是**这一条自己**是不是取中的那一条——version 与
+// generation 都比（代次会撞车，只比代次会在同一个 key 里撞出两行来）。
+func runningFromDoc(run *pluginGenerationDoc, version string, generation int64, load *pluginLoadDoc) string {
+	if run == nil || run.Version != version || run.Generation != generation {
+		return "否"
+	}
+	switch {
+	case load == nil:
+		return "还没试"
+	case load.Result == "failed":
+		return "否"
+	default:
+		return "是"
+	}
+}
+
 // ── 真库上的那几条 ────────────────────────────────────────────────────
 
 // 发布 → 清单 → 启用 → 停用，走一遍完整的手工流程。
@@ -510,6 +820,7 @@ func TestPluginListDocIsMachineReadable(t *testing.T) {
 		}
 		assertDocKeys(t, entry, []string{
 			"key", "version", "status", "generation", "priority", "name", "meta_problem",
+			"compile_error", "latest", "running_generation", "running_load",
 		})
 	}
 	if strings.Contains(string(raw), "插件 good 的 meta 有问题") {
