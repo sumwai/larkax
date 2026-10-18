@@ -65,6 +65,14 @@ func TestParseAccountRejects(t *testing.T) {
 		"user_id:1",              // 下划线写法看似合法，实际不是科目
 		" user:1",                // 前后空白
 		"user:1 ",                //
+		// 字符集对每个大类是同一套，而上面几条都写在 user 上：user 的非法
+		// 写法后面还有一道「写法是否规范」会报错，别的大类没有那一道——
+		// 下面几条走的正是别的大类，挡住它们的只有这一层判断。
+		"merchant_payable:1 2",    // 空格
+		"merchant_payable:a!b",    // 标点
+		"merchant_payable:a\x00b", // NUL：写进日志与对账输出会把它截断
+		"merchant_payable:aé",     // 多字节
+		"payment_gateway:a/b",     // 斜杠
 	}
 	for _, s := range bad {
 		if _, err := ParseAccount(s); err == nil {
@@ -133,6 +141,12 @@ func TestUserIDFromAccount(t *testing.T) {
 		{"user:abc", 0, false},
 		{"user:", 0, false},
 		{"user:+", 0, false},
+		// 重复的正号：`TrimPrefix` 只去掉一个，剩下那个还会被 ParseInt 当成符号，
+		// 于是 `user:++1` 会被读成用户 1。这种写法写不进账本（写路径只放行规范
+		// 写法），只有被人直接改库才会有——而对账一旦把它读成用户 1，就会把这份
+		// 谁都不属于的钱算进用户 1 的权威余额，再据此去改他的钱包。
+		{"user:++1", 0, false},
+		{"user:++9", 0, false},
 		{"user:1:2", 0, false},
 		{"user :42", 0, false},                 // 分隔符前多一个空格
 		{"user: 42", 0, false},                 // 后缀前多一个空格
