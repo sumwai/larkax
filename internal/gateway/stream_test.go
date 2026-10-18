@@ -525,6 +525,94 @@ func TestChatStreamSettlementFailureReleases(t *testing.T) {
 	}
 }
 
+// ── 收尾的预算从哪一刻开始算 ────────────────────────────────────────────
+
+// withSettleTimeout 把收尾的预算压到毫秒级（见 Gateway.SettleTimeout）。
+//
+// 不压的话，「一条跑得比收尾预算久的流」要真等十秒才走得到收尾。这条用例验的
+// 是**预算从哪一刻开始算**，与那个数本身多大无关，所以形状不变、时间省掉。
+func withSettleTimeout(d time.Duration) func(*harness) {
+	return func(h *harness) { h.settleTimeout = d }
+}
+
+// 跑得比收尾预算久的流**照样记账**：那段预算从收尾那一刻开始算，不是从流的
+// 第一片开始算。
+//
+// 这是 #529 的形状。预算从流的开头算起时，一条跑过十秒的流（LLM 的流跑过十秒
+// 是常态）在收尾时拿到的是一份早就过期的 ctx，结算与落库一并失败，于是按既有
+// 规则把预留释放掉——钱一分没收，而调用方看到的是一次正常结束的流、日志里只有
+// 一行，对账时表现为余额与用量对不上。
+//
+// 夹具里 hold 的那段等待，就是真实世界里上游在两个分片之间慢慢吐的那段时间：
+// 对「这一次收尾」来说两者是同一件事——泵流的那个 goroutine 活过了预算才走到
+// 收尾那一段。
+func TestChatStreamSettlesAfterStreamOutlivesTheBudget(t *testing.T) {
+	const budget = 100 * time.Millisecond
+	h := newHarness(t, withSettleTimeout(budget))
+
+	hold := make(chan struct{})
+	useStreamExecutor(h, &scriptedExecutor{
+		script: map[int64][]channel.StreamEvent{
+			1: {delta("半句"), {Kind: "done", FinishReason: "stop"}},
+		},
+		hold: map[int64]chan struct{}{1: hold},
+	})
+
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 让这条流活过收尾的预算，再放它走到收尾。
+	//
+	// 睡的是固定时长，但它只会**变长**（机器忙的时候），而这条用例要的正是
+	// 「流比预算久」——方向对得上，不会偶发失败。
+	time.Sleep(3 * budget)
+	close(hold)
+	collect(t, res)
+
+	// 账要记上：结算落库成功，而预留**不**释放（冻着的钱由结算那一步处置）。
+	if res.Charge == nil {
+		t.Fatal("流正常结束了就该交出账单，实际没有——收尾那一步拿到的 ctx 已经过期")
+	}
+	if len(h.settlements.saved) != 1 {
+		t.Errorf("结算落库 %d 次，期望 1", len(h.settlements.saved))
+	}
+	if len(h.reservations.released) != 0 {
+		t.Errorf("结算成功就不该释放预留，实际释放 %d 次", len(h.reservations.released))
+	}
+}
+
+// 收尾预算那个旋钮的三支：零值走常量、正数走注入、负数也走常量。
+//
+// 形状照 TestNowFallsBackToRealClock：那一条管的是「注入被移除时没人拦得住」，
+// 这一条同理。上面那条长流用例只钉住**deadline 从哪一刻开始算**，把
+// newHarness 里那行 wiring 删掉它照样绿（预算回到十秒的常量，300ms 的流过不了期）；
+// 而「注入真的被读到了」要这一条来钉。
+//
+// 三支各有各的红法：删掉 wiring → 第二条变红；把 settleTimeout 的 `> 0` 改成
+// `>= 0` → 第一条变红。负数那一支只是跟着正数走同一个判据（`> 0` 挡住 0 与负数），
+// 不给它单独的语义——它不是会出现的输入，只是「旋钮怎么读」这件事的一个边界。
+func TestSettleTimeoutFallsBackToTheConstant(t *testing.T) {
+	cases := []struct {
+		name     string
+		injected time.Duration
+		want     time.Duration
+	}{
+		{"没有注入", 0, streamSettleTimeout},
+		{"注入了正数", 3 * time.Second, 3 * time.Second},
+		{"注入了负数", -time.Second, streamSettleTimeout},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t, withSettleTimeout(c.injected))
+			if got := h.gw.settleTimeout(); got != c.want {
+				t.Errorf("settleTimeout() = %v，期望 %v", got, c.want)
+			}
+		})
+	}
+}
+
 // ── 与调用方的约定 ──────────────────────────────────────────────────────
 
 // 结算在事件流关闭**之前**完成：调用方读完流就不必再等一个信号，

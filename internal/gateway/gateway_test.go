@@ -187,7 +187,14 @@ type fakeSettlements struct {
 	onSave func()
 }
 
-func (f *fakeSettlements) Save(_ context.Context, req pipeline.Request, c *pipeline.Charge) error {
+func (f *fakeSettlements) Save(ctx context.Context, req pipeline.Request, c *pipeline.Charge) error {
+	// 与真实落库层同形：过期的 ctx 让这次写失败（驱动层就是这么报的）。
+	//
+	// 少了这一条，夹具比真实存储层宽容，「收尾的预算已经过期」那条路就测不
+	// 出来——而那正是 #529：失败的方向是释放，钱一分没收却什么都不报。
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if f.onSave != nil {
 		f.onSave()
 	}
@@ -424,6 +431,13 @@ type harness struct {
 	// 不该把它们的行为改掉。要钉递进冻结自己的用例把段压到 max_tokens 以下
 	// （见 stream_test.go 的 withStreamFreezeStep）。
 	streamFreezeStep int64
+
+	// settleTimeout 是流式收尾的预算（见 Gateway.SettleTimeout）。
+	//
+	// 零值是**默认值**：表示用 streamSettleTimeout 那个常量。要验「一条跑得比
+	// 收尾预算久的流」的用例才把它压到毫秒级（见 stream_test.go 的
+	// withSettleTimeout）——不压的话那条用例要真等十秒才走得到收尾。
+	settleTimeout time.Duration
 }
 
 func newHarness(t *testing.T, opts ...func(*harness)) *harness {
@@ -470,6 +484,8 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 		MaxOutputTokens: h.maxOutputTokens,
 		// 流式递进冻结的阈值段，见 harness.streamFreezeStep。
 		StreamFreezeStep: h.streamFreezeStep,
+		// 流式收尾的预算，见 harness.settleTimeout。
+		SettleTimeout:    h.settleTimeout,
 		Candidates:       h.candidates,
 		Reservations:     h.reservations,
 		Settlements:      h.settlements,
