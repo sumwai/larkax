@@ -102,8 +102,21 @@ MANPATH=larkax_v0.1.0_linux_amd64/man man larkaxctl-channel
 `sha256sum -c --ignore-missing SHA256SUMS`：只下自己那个架构时，`--ignore-missing`
 跳过另一行，不会因为一个「No such file or directory」而以非零退出。
 
-要在本地演练这一套，用 `make dist VERSION=v0.1.0`（只在 linux/amd64 上跑得动，
-理由见 Makefile 的 `dist` 目标）。
+**打包只有一份配方**：`Makefile` 的 `dist` 目标。CI 调的也是它，发布那一步只留
+CI 自己的东西（`setup-go`、`gh release create`）：
+
+```sh
+make dist VERSION=v0.1.0 ARCHS="amd64 arm64"   # 发布时走的就是这一条
+make dist VERSION=v0.1.0                       # 本地演练：默认只打 amd64
+```
+
+`make dist` 会把刚构建出来的二进制**真执行**一次，比对它自称的版本是否就是那个
+tag——二进制自称 `dev` 这件事，只有用户报问题时才会被发现。跑不起来的架构
+（不是本机架构）不静默跳过，而是打印一句「跳过执行校验（架构不同）」：静默跳过
+与「校验通过」在日志里长得一样（`LESSONS.md` 第 16 条）。本机架构按
+`go env GOHOSTARCH` 判定，所以在 amd64 主机上发布时，验的是 amd64 那一份。
+
+配方用的是 GNU tar 的那几个选项，macOS 自带的 bsdtar 不认。
 
 ## 版本号出现在哪里
 
