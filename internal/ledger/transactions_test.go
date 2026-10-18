@@ -743,8 +743,12 @@ func TestTopupGatewayFeeExactlyEqualAmount(t *testing.T) {
 
 // 用户 id 为 0 必须被拒——它是「没传」的表现，而不是一个合法的 id。
 //
-// 变异：把 `UserID <= 0` 改成 `< 0`，0 就被放行，
-// 于是会产生一条挂在「用户 0」名下的分录，而那个用户不存在。
+// 它挡不住哪一个变异：把 `UserID <= 0` 改成 `< 0` 之后，0 会被放行到分录层，
+// 而 `ParseAccount("user:0")` 照样把它拦下（0 号用户不存在，见 account.go 的
+// 「为什么 0 不算读得出」），Consume 仍然报错。两边差的只是报错文本：原样是
+// 「用户 id 非法: 0」，变异版是「构造的 consume 交易不自洽: 科目 "user:0"
+// 的用户 id 不是规范写法…」。所以这条用例证明的是「0 被拒」这个结果，而不是
+// `UserID <= 0` 这句判据——要连判据一起管住，断言里得认出那句文案。
 func TestConsumeRejectsZeroUserID(t *testing.T) {
 	p := ConsumeParams{
 		TxnID: NewTxnID(), UserID: 0, Asset: AssetCNY,
