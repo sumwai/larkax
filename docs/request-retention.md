@@ -89,7 +89,7 @@ candidates_count               候选数
 candidates                     候选集合
 candidates[].channel_id        候选渠道的 id，也是与账单对上的那个数
 candidates[].priority          排序的第一判据：数值大者先试
-candidates[].weight            同优先级内的分流比例
+candidates[].weight            渠道上配的权重；不参与排序，只被记下来
 candidates[].consecutive_failures  连续失败次数
 candidates[].success_rate      近期成功率
 candidates[].latency_p95_ms    近期响应时间分位（毫秒）
