@@ -1116,8 +1116,12 @@ func TestValidateAllowsZeroUnitCount(t *testing.T) {
 
 // 缓存量恰好等于输入量时，非缓存输入应当是 0 而不是负数。
 //
-// 变异：`nonCached < 0` 改成 `<= 0`，恰好相等时会被当成「不一致」
-// 而触发压回逻辑，虽然结果相同，但分支走向不同。
+// 变异：`nonCached < 0` 改成 `<= 0` 是**等价变异**——边界那一格
+// （nonCached 正好是 0）进分支之后做的正是 `nonCached = 0`，赋的还是它本来
+// 就有的那个值。要说「加上哪一组输入会让两版不同」：没有。
+//
+// 这条断言杀不掉上面那一条，但杀得掉方向写反的那些（`<` 改成 `>=` 之类）：
+// 那时负数会漏出去，非缓存输入是 -10 而不是 0。
 func TestNonCachedExactlyZero(t *testing.T) {
 	got := FromChannelUsage(channel.Usage{PromptTokens: 300, CacheReadTokens: 300})
 	if got.PromptTokens != 0 {
@@ -1131,7 +1135,16 @@ func TestNonCachedExactlyZero(t *testing.T) {
 
 // 缓存总量恰好不超过输入时，不该触发压回。
 //
-// 变异：`total > u.PromptTokens` 改成 `>=`，恰好相等时也会压。
+// 这段压回逻辑里有三处边界，都是**等价变异**，理由各不相同，分开判：
+//
+//   - `total > u.PromptTokens` 改成 `>=`：恰好相等那一格算出的 over 是 0，
+//     接着 cut = min64(0, cacheWrite) = 0，减掉的是一个零，结果一个数不变。
+//   - `over > 0` 改成 `over >= 0`：进分支时 over 也已经是 0（缓存写正好把
+//     超出的量吃完那一格），cut = min64(0, cacheRead) = 0，同样是零增量。
+//   - `min64` 与 `max64` 自身的边界见 TestMin64AndMax64AtEqualArguments。
+//
+// 说不出「加上哪一组输入会让两版不同」，所以它们是等价变异；下面第二段照样
+// 把 over 归零那一格的具体数固定下来——它是上面第二条变异的边界。
 func TestCacheCompressionBoundary(t *testing.T) {
 	// 100 输入 = 60 缓存读 + 40 缓存写，恰好相等
 	got := FromChannelUsage(channel.Usage{
@@ -1139,6 +1152,15 @@ func TestCacheCompressionBoundary(t *testing.T) {
 	})
 	if got.PromptTokens != 0 || got.CacheReadTokens != 60 || got.CacheWriteTokens != 40 {
 		t.Errorf("恰好相等时不该压回: %+v", got)
+	}
+
+	// 超出的量正好由缓存写吃完：写完 over 归零，第二段压回（缓存读那一支）
+	// 进到 `over > 0` 的边界格上。
+	got = FromChannelUsage(channel.Usage{
+		PromptTokens: 100, CacheReadTokens: 50, CacheWriteTokens: 60,
+	})
+	if got.PromptTokens != 0 || got.CacheReadTokens != 50 || got.CacheWriteTokens != 50 {
+		t.Errorf("超出的 10 该只由缓存写承担: %+v", got)
 	}
 
 	// 超出一份就该压
@@ -1156,10 +1178,43 @@ func TestCacheCompressionBoundary(t *testing.T) {
 	}
 }
 
+// min64 与 max64 在两侧相等那一格上是等价变异：两个分支返回的是同一个值。
+//
+// 变异：min64 的 `a < b` 改成 `a <= b`、max64 的 `a > b` 改成 `a >= b`——
+// 边界那一格（a == b）换了个分支走，而两支返回的数是同一个。要说「加上哪一组
+// 输入会让两版不同」：得造一组「a == b 而两支返回不同」的输入，这组输入不存在，
+// 所以抓不到。
+//
+// 这一格在计费里真的会出现：缓存量恰好不超过输入量时，压回那一步的
+// `min64(over, cacheWrite)` 两侧就相等（见 TestCacheCompressionBoundary）。
+// 顺手把两侧不等的方向也固定住：`<` 改成 `>=`（方向反了）在这里现形。
+func TestMin64AndMax64AtEqualArguments(t *testing.T) {
+	if got := min64(5, 5); got != 5 {
+		t.Errorf("min64(5, 5) = %d，期望 5", got)
+	}
+	if got := max64(5, 5); got != 5 {
+		t.Errorf("max64(5, 5) = %d，期望 5", got)
+	}
+	if got := min64(3, 7); got != 3 {
+		t.Errorf("min64(3, 7) = %d，期望 3", got)
+	}
+	if got := max64(3, 7); got != 7 {
+		t.Errorf("max64(3, 7) = %d，期望 7", got)
+	}
+}
+
 // 最低消费恰好等于按量金额时不该补差。
 //
-// 变异：`subtotal.Cmp(minimum) >= 0` 改成 `>`，恰好相等时也会补差，
-// 而补差金额为 0——不产生错误结果，但会多出一条零金额的行项。
+// 变异：`subtotal.Cmp(minimum) >= 0` 改成 `>` 是**等价变异**：恰好相等那一格
+// 补出来的差是 `minimum.Sub(subtotal)`，也就是 money.Amount{units: 0}——
+// 那个类型只有 units 一个字段，零只有一种表示，写进去与不写是同一个值。
+// 校验用的求和里 MinimumAdjustment 本来就在（它不看是不是零），所以也不会
+// 因此多出一项。说不出「加上哪一组输入会让两版不同」，所以抓不到。
+//
+// 这条断言杀得掉方向写反的那些：`>=` 改成 `<` 时，按量金额**高于**最低消费的
+// 那一格反而会补出一笔负数（`minimum.Sub(subtotal)` 为负），那一格由
+// TestMinimumNotAppliedAboveThreshold 钉着；低于最低消费的那一格则不再补差，
+// 另有用例钉着。（这里的夹具两边恰好相等，方向反了也补出 0，所以它单独杀不掉。）
 func TestMinimumExactlyEqualSubtotal(t *testing.T) {
 	usage := Usage{CompletionTokens: 1000} // 0.008
 	p := prices()
