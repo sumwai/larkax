@@ -403,12 +403,19 @@ func TestCacheIsBounded(t *testing.T) {
 }
 
 // TestCacheKeepsHotEntries 验证淘汰方向是对的：常用的规则留在缓存里。
+//
+// 判据是**同不同一份产物**，不是「拿不拿得到产物」：未命中会重新编译，而
+// compile 每次都新造一个 Program，所以「非 nil」这个断言任何情况下都是绿的
+// ——淘汰方向写反、热点被丢掉，它都看不出来。只有同键命中的**同一个指针**
+// 才说明那一份还在缓存里。
 func TestCacheKeepsHotEntries(t *testing.T) {
 	c := NewCache(16)
+	const src = `{"prompt": 0.0000015}`
 
-	// 先放一条「热点」规则。
+	// 先放一条「热点」规则，留下它那份产物——后面拿指针跟它比。
 	hot := "hot@v1"
-	if _, err := c.Get(hot, `{"prompt": 0.0000015}`); err != nil {
+	hotProg, err := c.Get(hot, src)
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -418,19 +425,66 @@ func TestCacheKeepsHotEntries(t *testing.T) {
 			t.Fatal(err)
 		}
 		// 每次插入前后都碰一下热点，把它保持在队首附近。
-		if _, err := c.Get(hot, `{"prompt": 0.0000015}`); err != nil {
+		if _, err := c.Get(hot, src); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	// 热点应当仍在缓存里：它的键能直接命中，
-	// 而一次性的规则早被淘汰掉了。
-	p, err := c.Get(hot, `{"prompt": 0.0000015}`)
-	if err != nil {
-		t.Fatal(err)
+	// 热点应当还是**原来那一份**：指针变了说明中间被淘汰过一次，
+	// 这一份是重新编出来的，而「重新编得出来一份」在缓存完全没生效时也成立。
+	if again := cacheProg(t, c, hot, src); again != hotProg {
+		t.Error("热点规则被淘汰过：同键拿到的是重新编译的一份产物（指针不同）")
 	}
-	if p == nil {
-		t.Fatal("热点规则被淘汰了")
+}
+
+// TestCacheDropsTheOldestBatch 把淘汰的另外两件事也用具体的值固定下来：
+// **淘汰哪几条**与**一次淘汰几条**。
+//
+// 上面那条说得清的只有「热点还在」，而热点每次命中都被挪到队首，于是无论
+// 一次淘汰 1 条还是把整个缓存清空，它都留得下来。一次淘汰几条因此只能看
+// Len() 的具体值：本用例取 max = 16，也就是 drop = 16/8 = 2，满员后
+// 插一条新的应当剩 16 - 2 + 1 = 15 条（淘汰比例是实现的约定，见 evictLocked
+// 的注释，改它就要连这条一起改）。
+//
+// 「淘汰哪几条」要一次**使用顺序与插入顺序不一致**的命中才分得出来：塞满之后
+// 先碰一下最旧的那条，它就该到队首去，于是被丢掉的必须是紧随其后的两条。
+func TestCacheDropsTheOldestBatch(t *testing.T) {
+	const max = 16
+	const src = `{"prompt": 0.0000015}`
+	c := NewCache(max)
+
+	// 依次塞满。pushFront 之下 k0 是队尾（最旧），k15 是队首（最新）。
+	progs := make([]*Program, max)
+	for i := range progs {
+		progs[i] = cacheProg(t, c, "cold-"+itoa(i)+"@v1", src)
+	}
+
+	// 碰一下最旧的那条：它从此在队首，这一轮不该被淘汰。
+	cacheProg(t, c, "cold-0@v1", src)
+
+	// 满员时插一条新的：淘汰一批，再放进这一条。
+	cacheProg(t, c, "cold-new@v1", src)
+
+	// 一次淘汰几条：多一条少一条都在这一行上现形。
+	if got, want := c.Len(), max-max/8+1; got != want {
+		t.Errorf("满员后插入一条之后有 %d 条，期望 %d（一次淘汰 max/8 = %d 条）",
+			got, want, max/8)
+	}
+
+	// 刚碰过的 k0 必须在，指针不变才是「还在缓存里」。
+	if p := cacheProg(t, c, "cold-0@v1", src); p != progs[0] {
+		t.Error("刚碰过的 k0 被淘汰了：淘汰没有按使用顺序从队尾开始")
+	}
+	// 排在它后面的 k3 也在。k3 被丢掉只可能是淘汰的条数多于 max/8。
+	if p := cacheProg(t, c, "cold-3@v1", src); p != progs[3] {
+		t.Error("k3 被淘汰了：一次淘汰的条数多于 max/8")
+	}
+	// 而队尾那两条（k1、k2）正是该被丢掉的，它们现在得重新编译。
+	for _, i := range []int{1, 2} {
+		key := "cold-" + itoa(i) + "@v1"
+		if p := cacheProg(t, c, key, src); p == progs[i] {
+			t.Errorf("k%d 还在缓存里：该被淘汰的是队尾那两条", i)
+		}
 	}
 }
 
@@ -513,6 +567,20 @@ func TestCacheConcurrent(t *testing.T) {
 }
 
 // --- 辅助 ---
+
+// cacheProg 从缓存里取一份编译产物，取不到就当场断掉。
+//
+// 缓存那几条用例要比的是**指针**（同一份产物 = 命中），所以这里把 err 就地
+// 处理掉，只把 *Program 交回去；每次调用都是真实的一次 Get，会照常把命中的
+// 条目挪到队首，用例的注释里要按这一点读顺序。
+func cacheProg(t *testing.T, c *Cache, key, source string) *Program {
+	t.Helper()
+	p, err := c.Get(key, source)
+	if err != nil {
+		t.Fatalf("取 %q 的编译产物失败: %v", key, err)
+	}
+	return p
+}
 
 func compileErr(t *testing.T, source string) *CompileError {
 	t.Helper()
