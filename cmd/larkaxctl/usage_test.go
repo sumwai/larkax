@@ -222,3 +222,89 @@ func TestLegacyCommandsStayOutOfRootUsage(t *testing.T) {
 		}
 	}
 }
+
+// ── 根帮助页：一屏之内、不给用户看设计理由 ──────────────────────────────
+//
+// 上面那组用例管的是「页面上写着哪些命令」，这一组管的是**页面本身有多长、
+// 写的是什么口吻**。根页面原先 96 行，其中约 40 行是「为什么这么设计」的长句；
+// 它们对跑命令的人没用，却挡在命令清单后面。挪进 docs/cli-reference.md 之后
+// 会**悄悄爬回来**——新加一个选项时，最省事的写法就是顺手在这里补一句理由——
+// 所以行数与口吻各要一道门钉着。
+
+// TestRootUsageFitsOneScreen 断言根帮助页去掉末尾空行后不超过 45 行，且每行
+// 显示宽度不超过 100 列。
+//
+// 宽度用 displayWidth（见 table.go）量，不用 len：中文、全角标点与 ANSI 转义
+// 序列按字节数算都会偏，而偏的方向（把一行看得比实际窄）正好放过真正超宽的
+// 那一行。
+func TestRootUsageFitsOneScreen(t *testing.T) {
+	const maxLines, maxWidth = 45, 100
+
+	lines := strings.Split(strings.TrimRight(usage, "\n"), "\n")
+	if len(lines) > maxLines {
+		t.Errorf("根帮助页 %d 行，超过一屏的 %d 行", len(lines), maxLines)
+	}
+	for i, line := range lines {
+		if w := displayWidth(line); w > maxWidth {
+			t.Errorf("第 %d 行宽 %d 列，超过 %d：%q", i+1, w, maxWidth, line)
+		}
+	}
+}
+
+// rootUsageDesignReasonMarkers 是「设计理由」的标记词：根帮助页上出现它们，
+// 就说明某段「为什么这么设计」的说明又爬回了用户面前。
+//
+// 判据取词而不是整句：理由换个句式就能绕过去，而这些词在「是什么 / 怎么用」的
+// 口吻里本来就用不上（「见 internal/xxx」「见 xxx_test.go」是两个内部的落脚点，
+// 同样不该出现在给用户的页面上）。
+var rootUsageDesignReasonMarkers = []string{
+	"行业惯例", "惯例", "取舍", "理由是", "为什么", "因为",
+	"多数工具", "internal/", "test.go",
+}
+
+// TestRootUsageHasNoDesignRationale 断言根帮助页不含设计理由。
+//
+// 反例是把「-o 是行业惯例（kubectl、gh）」这类句子搬回根页面：它是写这套程序的
+// 人关心的取舍，不是跑命令的人当下要的东西，归 docs/cli-reference.md。
+func TestRootUsageHasNoDesignRationale(t *testing.T) {
+	for _, marker := range rootUsageDesignReasonMarkers {
+		if strings.Contains(usage, marker) {
+			t.Errorf("根帮助页出现了设计理由标记词 %q", marker)
+		}
+	}
+}
+
+// TestRootUsagePointsToReference 断言根帮助页末尾给出了去向：查一条命令用
+// larkaxctl help <命令>，更细的约定在 docs/cli-reference.md。
+func TestRootUsagePointsToReference(t *testing.T) {
+	for _, want := range []string{"larkaxctl help", "docs/cli-reference.md"} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("根帮助页没有给出 %q 这条去向", want)
+		}
+	}
+}
+
+// TestRootUsagePointerTargetsWork 钉住「根帮助页给的那条去向真的走得通」。
+//
+// 指针指向一个不存在的写法比不写更坏：人照着敲一次，得到的是刚才那一页，
+// 而他会以为自己敲错了。所以 `larkaxctl help <命令>` 必须打出**那条命令**的
+// 帮助正文，而不是根帮助页。
+func TestRootUsagePointerTargetsWork(t *testing.T) {
+	for _, name := range []string{"doctor", "channel", "price"} {
+		c, ok := lookupCommand(name)
+		if !ok {
+			t.Fatalf("命令 %q 不在注册表里，用例的前提就不成立", name)
+		}
+		var err error
+		stdout, stderr := captureStreams(t, func() { err = dispatch([]string{"help", name}) })
+		if err != nil {
+			t.Fatalf("larkaxctl help %s 出错: %v（stderr=%q）", name, err, stderr)
+		}
+		if !strings.Contains(stdout, c.help) {
+			t.Errorf("larkaxctl help %s 没打出那条命令的帮助正文，stdout=%q", name, stdout)
+		}
+		if strings.TrimSpace(stdout) == strings.TrimSpace(usage) {
+			t.Errorf("larkaxctl help %s 打的是根帮助页——指针指向了自己", name)
+		}
+	}
+}
