@@ -315,3 +315,43 @@ func TestRedisUnreachableDegradesWithoutFailing(t *testing.T) {
 		t.Error("连不上时查询不该说自己是精确的")
 	}
 }
+
+// TestRedisUnreachableProbeDiffersFromNoStore 把「配了但连不上」与「没配」
+// 的分辨接到一个**真的连不上**的地址上：走真实的客户端、真实的连接失败，
+// 断言启动期那一次探活读出来的信号与没有共享存储时不同。
+//
+// 它不需要 LARKAX_REDIS_DSN——要的恰恰是「有连接串、但连不上」。替身里那个
+// 开关（见 memStore）在这里证明不了什么：它自己定义「失败」长什么样，而这条
+// 用例要问的是真实客户端的连接失败会不会被记下来。
+func TestRedisUnreachableProbeDiffersFromNoStore(t *testing.T) {
+	store, err := OpenRedis("redis://127.0.0.1:1/0")
+	if err != nil {
+		t.Fatalf("构造共享计数失败: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+
+	configured, configuredReg := newTestLimiter(&clock{at: base}, WithStore(store))
+	if err := configured.Probe(ctx); err == nil {
+		t.Fatal("连不上的地址探活应当报错")
+	}
+
+	bare, bareReg := newTestLimiter(&clock{at: base})
+	if err := bare.Probe(ctx); err != nil {
+		t.Fatalf("没有共享存储时探活不该失败: %v", err)
+	}
+
+	configuredSignal := readSignal(t, configuredReg)
+	bareSignal := readSignal(t, bareReg)
+	if configuredSignal == bareSignal {
+		t.Errorf("配了但连不上与没配读出来是同一个信号 %s：这两种状态在 /metrics 上分不开", configuredSignal)
+	}
+	// 两个仪表都是 0（都退回进程内计数），把它们分开的是存储失败那个计数器。
+	if configuredSignal.gauge != 0 || bareSignal.gauge != 0 {
+		t.Errorf("仪表 = %d / %d，期望都是 0（近似）", configuredSignal.gauge, bareSignal.gauge)
+	}
+	if bareSignal.errors != 0 {
+		t.Errorf("没配时存储失败计数 = %d，期望 0（没有哪一次调用失败过）", bareSignal.errors)
+	}
+}

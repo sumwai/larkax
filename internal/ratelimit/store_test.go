@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -113,21 +115,68 @@ func newTestLimiter(c *clock, opts ...Option) (*Limiter, *observe.Registry) {
 	return l, reg
 }
 
-// exactSignal 读「现在是精确还是近似」这个信号。
-//
-// 第二个返回值是「那个仪表输出了没有」——没设置过时整族不输出，而
-// 「没输出」与「值是 0」是两件事（见 observe.Gauge）。判据走渲染结果而不是
-// 内部字段：字段在包里、测试够得着，但「输出了没有」才是这个信号对外的样子。
+// exactSignal 读「现在是精确还是近似」这个信号：它的值，以及那一行输出了没有。
 func exactSignal(t *testing.T, reg *observe.Registry) (int64, bool) {
+	t.Helper()
+	c := readSignal(t, reg)
+	return c.gauge, c.present
+}
+
+// signalCombo 是限流状态在 /metrics 上的样子：仪表的值与它输出了没有，
+// 以及存储调用失败的次数。
+type signalCombo struct {
+	gauge   int64
+	present bool
+	errors  int64
+}
+
+// String 把组合打出来，失败时能一眼看出是哪两种状态撞在了一起。
+func (c signalCombo) String() string {
+	if !c.present {
+		return fmt.Sprintf("(仪表没输出, 存储失败 %d 次)", c.errors)
+	}
+	return fmt.Sprintf("(仪表 %d, 存储失败 %d 次)", c.gauge, c.errors)
+}
+
+// readSignal 渲染一份指标，读出这两个数。
+//
+// 判据走渲染结果而不是结构体字段：字段在包里、测试够得着，但「那一行输出了
+// 没有」才是这个信号对外的样子（见 observe.Gauge），而这两个指标是要被连着
+// 读的，读的人手里也只有 /metrics 的文本。
+func readSignal(t *testing.T, reg *observe.Registry) signalCombo {
 	t.Helper()
 	var buf bytes.Buffer
 	if err := reg.Render(&buf); err != nil {
 		t.Fatalf("渲染指标失败: %v", err)
 	}
-	if !strings.Contains(buf.String(), "larkax_ratelimit_exact ") {
-		return 0, false
+	var c signalCombo
+	rendered := buf.String()
+	c.gauge, c.present = sampleValue(t, rendered, "larkax_ratelimit_exact")
+	var ok bool
+	c.errors, ok = sampleValue(t, rendered, "larkax_ratelimit_store_errors_total")
+	if !ok {
+		// 不带标签的计数器总是输出，包括值为 0 的时候（见 docs/metrics.md）。
+		// 这里不能把「那一行不在」读成 0：那正是这个包一路在防的那种分不开。
+		t.Fatal("渲染结果里没有 larkax_ratelimit_store_errors_total 那一行")
 	}
-	return reg.RateLimitExact.Value(), true
+	return c
+}
+
+// sampleValue 从渲染结果里取某个指标的值，第二个返回值是「这一行在不在」。
+func sampleValue(t *testing.T, rendered, name string) (int64, bool) {
+	t.Helper()
+	for _, line := range strings.Split(rendered, "\n") {
+		rest, ok := strings.CutPrefix(line, name+" ")
+		if !ok {
+			continue
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(rest), 10, 64)
+		if err != nil {
+			t.Fatalf("指标 %s 的值 %q 读不出整数: %v", name, rest, err)
+		}
+		return n, true
+	}
+	return 0, false
 }
 
 // TestSharedStoreStopsTwoInstancesAtTheLimit 是两个实例共用一份计数的核心断言。
@@ -302,10 +351,11 @@ func TestProbeSetsTheSignalWithoutTraffic(t *testing.T) {
 	if v, _ := exactSignal(t, reg); v != 0 {
 		t.Errorf("探活失败之后信号 = %d，期望 0", v)
 	}
-	// 探活失败不计进「判定退回进程内计数」那个数：它说的是判定，而这一次
-	// 还没有请求。
-	if got := reg.RateLimitStoreErrors.Value(); got != 0 {
-		t.Errorf("探活失败把存储错误计数加到了 %d，期望 0（那是判定的计数）", got)
+	// 探活那一次失败要计进「存储调用失败」那个数：启动期还没有请求，它是
+	// 「配了但连不上」在这个进程里留下的唯一痕迹，而这两种状态要给运维
+	// 两行不同的数（见 TestThreeStatesReadApartWithoutTraffic）。
+	if got := reg.RateLimitStoreErrors.Value(); got != 1 {
+		t.Errorf("探活失败之后存储失败计数 = %d，期望 1", got)
 	}
 
 	// 没有共享存储的部署：探活永远成功，而信号是近似。
@@ -315,6 +365,65 @@ func TestProbeSetsTheSignalWithoutTraffic(t *testing.T) {
 	}
 	if v, _ := exactSignal(t, bareReg); v != 0 {
 		t.Errorf("没有共享存储时信号 = %d，期望 0（近似）", v)
+	}
+}
+
+// TestThreeStatesReadApartWithoutTraffic 要求三种状态在 /metrics 上两两分得开，
+// 而且**在还没来过任何请求的时候就分得开**。
+//
+// 三种状态是：没配共享存储、配了但连不上、配了且能用。前两种的仪表都是
+// 「近似」（0），所以分开它们只能靠存储调用失败的次数；探活那一次失败也要
+// 计进去，否则启动期这两种状态给出完全相同的两行——而 docs/metrics.md 教
+// 运维按这两行分辨这两件事，读出来正好是让人不去查的那一种。
+func TestThreeStatesReadApartWithoutTraffic(t *testing.T) {
+	// 没配：没有共享存储，探活只把信号记成近似。
+	noStore, noStoreReg := newTestLimiter(&clock{at: base})
+	if err := noStore.Probe(context.Background()); err != nil {
+		t.Fatalf("没有共享存储时探活不该失败: %v", err)
+	}
+
+	// 配了但连不上。
+	down := newMemStore()
+	down.setDown(true)
+	unreachable, unreachableReg := newTestLimiter(&clock{at: base}, WithStore(down))
+	if err := unreachable.Probe(context.Background()); err == nil {
+		t.Fatal("存储不可用时探活应当报错")
+	}
+
+	// 配了且能用。
+	usable, usableReg := newTestLimiter(&clock{at: base}, WithStore(newMemStore()))
+	if err := usable.Probe(context.Background()); err != nil {
+		t.Fatalf("探活失败: %v", err)
+	}
+
+	cases := []struct {
+		state string
+		reg   *observe.Registry
+		want  signalCombo
+	}{
+		{"没配共享存储", noStoreReg, signalCombo{gauge: 0, present: true, errors: 0}},
+		{"配了但连不上", unreachableReg, signalCombo{gauge: 0, present: true, errors: 1}},
+		{"配了且能用", usableReg, signalCombo{gauge: 1, present: true, errors: 0}},
+	}
+
+	got := make([]signalCombo, len(cases))
+	for i, c := range cases {
+		got[i] = readSignal(t, c.reg)
+		if got[i] != c.want {
+			t.Errorf("%s 读出来是 %s，期望 %s", c.state, got[i], c.want)
+		}
+	}
+
+	// 两两分得开。这一条与上面那组期望值互为印证：上面那组说的是「每个状态
+	// 读出来是什么」，这里说的是「任意两个不重样」——后者才是运维实际依赖的
+	// 性质，而它也正是这次要修的那件事（原先前两种读出来一模一样）。
+	for i := range cases {
+		for j := i + 1; j < len(cases); j++ {
+			if got[i] == got[j] {
+				t.Errorf("%s 与 %s 在 /metrics 上给出同一个信号 %s：这两种状态分不开",
+					cases[i].state, cases[j].state, got[i])
+			}
+		}
 	}
 }
 
