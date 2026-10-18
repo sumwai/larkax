@@ -266,3 +266,58 @@ func renderAny(v any) string {
 	walk(v)
 	return sb.String()
 }
+
+// ── #675：整包变异存活条目的判据 ─────────────────────────────────────────
+
+// decodedLen 只在认得出 base64 时给解码长度，其余退回编码长度。
+//
+// 变异（同一处两条）：
+//   - `trimmed != "" && isBase64Text(trimmed)` 的 `&&` 翻成 `||`：含标点的
+//     普通文本（不是 base64）也会走解码长度，`abc!` 报 3 而不是 4；
+//   - isBase64Text 的循环边界 `<` 翻成 `>=`：循环一次都不走、函数恒为 true，
+//     同样把非 base64 的取值当成 base64 解码。
+//
+// 两条都要一个「看着是文本、但落在 base64 字符集外」的取值才分得开；
+// `QUJD` 这种真 base64 两版答案一样。
+func TestDecodedLenOnlyForBase64(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"", 0},
+		{"QUJD", 3},  // 4 个编码字符 → 3 字节
+		{"abcd", 3},  // 同上，字符集内即可
+		{"abc!", 4},  // `!` 不在字符集里：退回编码长度
+		{"====", 4},  // 全是填充：认不出，退回编码长度
+		{"a b c", 5}, // 空格不在字符集里
+	}
+	for _, tc := range cases {
+		if got := decodedLen(tc.in); got != tc.want {
+			t.Errorf("decodedLen(%q) = %d，期望 %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+// isEnumWord 的三条拒绝理由各钉在边界上：空串、超长、非 UTF-8。
+//
+// 变异（同一行上三条）：
+//   - 第一个 `||` 翻成 `&&`：`s == ""` 那一格丢了，空串会一路走到循环末尾
+//     返回 true——空的 code 于是被当成枚举词写进骨架；
+//   - `len(s) > 64` 翻成 `>= 64`：恰好 64 个字符的枚举词被拒；
+//   - 第二个 `||` 翻成 `&&`：只有「超长**且**非法 UTF-8」才拒，超过 64 个
+//     字符的正常枚举词照样放行。
+func TestIsEnumWordBoundaries(t *testing.T) {
+	if isEnumWord("") {
+		t.Error("空串不是枚举词")
+	}
+	if !isEnumWord(strings.Repeat("a", 64)) {
+		t.Error("64 个字符仍在长度上限之内")
+	}
+	if isEnumWord(strings.Repeat("a", 65)) {
+		t.Error("超过 64 个字符不再是枚举词")
+	}
+	// 非 ASCII 的内容（哪怕不到 64 个字符）也不放行
+	if isEnumWord("用户的名字") {
+		t.Error("含非 ASCII 字符的取值不是枚举词")
+	}
+}
