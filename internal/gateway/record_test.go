@@ -572,6 +572,43 @@ func TestChatStreamRecordsOnlyPreAcceptFailures(t *testing.T) {
 	}
 }
 
+// 客户端在「换过渠道、还没开始读流」这段窗口里断开：那几次失败的尝试
+// **不是渠道的失败**，记成「不归因」——连续失败计数既不加一也不清零。
+//
+// 它与上面那条的差别只有一处，而这一处正是缺陷本身：上游那一次失败被适配器
+// 包成 ErrUpstream{Retryable: true}，而 ctx 取消就是这么包出来的，形态与 503
+// 一样，只按错误的形态判就会记成渠道故障。
+//
+// 最终结局那一支由 pumpStream 判（见 TestChatStreamRecordsClientDisconnectAsUnattributed）：
+// 那个管读完流之后，这个管还没开始读流就已经失败掉的那几次尝试。
+func TestChatStreamRecordsPreAcceptFailureOnDisconnectAsUnattributed(t *testing.T) {
+	h := newHarness(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// 取消由执行器在返回之前触发（见 cancelingExecutor）：预先取消的 ctx
+	// 一次调用都不会发生，也就没有尝试可记——这个窗口正是「调用期间断开」。
+	h.gw.Executor = &cancelingExecutor{
+		cancel: cancel,
+		inner:  &fakeExecutor{failFor: map[int64]error{1: upstreamErr(503, true)}},
+	}
+
+	if _, err := h.gw.ChatStream(ctx, request(), upstreamRequest(), Hooks{}); err == nil {
+		t.Fatal("ctx 已取消时不该成功")
+	}
+
+	// 连续失败计数由结局推出来（见 internal/channels 的 streakChange）：
+	// 只有 VerdictFailure 加一。所以这一条同时就是「计数没有增加」。
+	rec := h.recorder.only(t)
+	if rec.ChannelID != 1 {
+		t.Fatalf("ChannelID = %d，期望 1", rec.ChannelID)
+	}
+	if rec.Verdict != route.VerdictUnattributed {
+		t.Fatalf("Verdict = %q，期望不归因（是客户端断的，换一个渠道不会有任何不同）",
+			rec.Verdict)
+	}
+}
+
 // 全部候选都在接受请求之前失败：只记失败的那些，一条不多。
 func TestChatStreamAllPreAcceptFailuresRecorded(t *testing.T) {
 	h := newHarness(t)
