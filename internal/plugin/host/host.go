@@ -169,8 +169,14 @@ type CalendarSource interface {
 	// Day 判定某个时刻落在哪一天、那天是工作日还是休息日。
 	// 返回的 Kind 取值 "workday" / "rest_day" / "unknown"。
 	Day(ctx context.Context, region string, instant time.Time) (DayInfo, error)
-	// Peak 判定某个时刻是高峰还是低谷。默认排班由实现决定。
-	Peak(ctx context.Context, region string, instant time.Time) (string, error)
+	// Peak 判定某个时刻是高峰还是低谷。高峰窗口由**调用方**给出
+	// （window 是插件写的那个串，写法与规则的 `isPeak("08:00-22:00")` 同形），
+	// 返回 "peak" / "off_peak" / "unknown" 三态之一。
+	//
+	// 窗口随调用走，而不是由实现自己决定：峰谷是定价口径，不由地区推断。
+	// 写法由调用方先校验（见 calendar.go 的 checkPeakWindow），实现拿到的串
+	// 因此是合法的——它仍然可以自己再判一次，不该假设。
+	Peak(ctx context.Context, region string, instant time.Time, window string) (string, error)
 }
 
 // DayInfo 是一次日历判定的结果。

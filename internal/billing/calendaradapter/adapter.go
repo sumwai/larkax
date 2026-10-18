@@ -109,7 +109,7 @@ func (a *Adapter) DayInfo(region string, day time.Time) (expr.DayInfo, error) {
 // # 窗口的形状在这里再校验一次
 //
 // 规则的窗口在**保存规则**时就判过（见 internal/billing/expr 的
-// parsePeakWindows），所以从规则走下来的窗口都是合法的。这里仍然走 calendar
+// ParsePeakWindows），所以从规则走下来的窗口都是合法的。这里仍然走 calendar
 // 那两个构造函数、让它们再判一次：它们的入口不止规则一条（插件适配器与夹具
 // 都直接构造排班），少判一次换不来什么。
 //

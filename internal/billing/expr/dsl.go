@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -287,8 +288,15 @@ func (rt *runtime) env(u usageView) map[string]any {
 			if err := rt.requireCalendar(); err != nil {
 				return false, err
 			}
-			windows, err := parsePeakWindows(peakWindows)
+			windows, err := ParsePeakWindows(peakWindows)
 			if err != nil {
+				// 写法错原样往上抛，不裹 ErrCalendarRequired——与编译期那一处
+				// 同一条口径（见 ParsePeakWindows 的「两个调用方」一节）。
+				//
+				// 这一处**今天到不了**：窗口必须是字面量，而字面量在编译期
+				// 已经解析过一遍（见 compile.go 的 isPeak 那一支），所以能跑到
+				// 这里的串都是合法的。留着它是因为求值不只编译期一条入口，
+				// 而万一真到了这里，报「写法不成立」比报「日历不可用」更贴。
 				return false, err
 			}
 			return rt.calendar.Peak(rt.region, rt.at, windows)
@@ -363,7 +371,38 @@ func (rt *runtime) requireCalendar() error {
 	return nil
 }
 
-// parsePeakWindows 把规则里写的高峰时段折成时段表。
+// ErrPeakWindowSyntax 表示高峰窗口串的**写法**不对。
+//
+// 它与 ErrCalendarRequired 分开：写法是调用方给的那个串本身有问题
+// （`"25:00-26:00"`、`"8:5-9:00"`），处置是改那个串；ErrCalendarRequired 是
+// 日历这一头没接上、或者那一天判不出来，处置在部署与数据那一侧。两者的处置
+// 不同，所以规则那两条路上都不再把写法错裹成 ErrCalendarRequired——裹上去的
+// 后果是写规则的人看到的第一句是「日历不可用」，矛头指向数据那一侧，而他要改
+// 的其实是自己写的那一串。
+//
+// 插件宿主那一侧也要按这个分寸分类：插件写错窗口是 bad_argument，该改的是插件
+// 自己的代码（见 internal/plugin/host 的 peakFn）。
+var ErrPeakWindowSyntax = errors.New("高峰时段写法不成立")
+
+// PeakWindowSyntaxError 是写法不成立时的错误，带一句照着能改的原因。
+//
+// 做成类型而不是只用 sentinel：那句原因要单独拿出来用——插件宿主把它放进
+// bad_argument 的文案里（见 internal/plugin/host 的 checkPeakWindow），而它
+// 不该连着「高峰时段写法不成立」这个分类前缀一起说给插件听；规则那一侧照旧
+// 整条打印。取原因用 errors.As，不切字符串。
+type PeakWindowSyntaxError struct {
+	Reason string
+}
+
+func (e *PeakWindowSyntaxError) Error() string {
+	return ErrPeakWindowSyntax.Error() + ": " + e.Reason
+}
+
+// Is 让分类认得出这个错误：errors.Is(err, ErrPeakWindowSyntax) 成立，
+// 认分类的调用方不必知道原因那一截长什么样。
+func (e *PeakWindowSyntaxError) Is(target error) bool { return target == ErrPeakWindowSyntax }
+
+// ParsePeakWindows 把高峰时段串折成时段表。
 //
 // 写法是 `HH:MM-HH:MM`，多段用逗号分开（`"08:00-12:00,14:00-18:00"`），
 // 段内允许跨零点（`"22:00-02:00"`，见 PeakWindow）。
@@ -372,7 +411,18 @@ func (rt *runtime) requireCalendar() error {
 // 「高峰 8:00–22:00」的表长得一样，抄错的机会最小。
 //
 // 这里判的是**写法**：几段、每段两头是不是一个合法的时钟时刻，以及全天段
-// 不许与其他段并列。段与段重叠是允许的（见 PeakSchedule）。
+// 不许与其他段并列。段与段重叠是允许的（见 PeakSchedule）。写法不对时包的是
+// ErrPeakWindowSyntax。
+//
+// # 两个调用方，约定一件事
+//
+// 规则那一条路（求值里的 `isPeak` 与保存规则时的编译期检查）与插件宿主那一条
+// 路（见 internal/plugin/host 的 peakFn）都调本函数，**写法错原样往上报**：
+// 本函数给出的错已经说清是哪个串、哪里不成（`高峰时段写法不成立: …`），调用方
+// 再裹一层只会把这句话推到第二句去。规则那两侧因此都不包 ErrCalendarRequired，
+// 插件那一侧按 bad_argument 分类。导出也是为了这两条路共用同一份解析——两侧
+// 各写一份的话，规则里存得进去的写法与插件里被接受的写法会慢慢分叉，而分叉的
+// 表现是同一句话在一处算高峰、在另一处算低谷。
 //
 // # 全天段并列为什么在这里判，而不留给日历
 //
@@ -385,17 +435,15 @@ func (rt *runtime) requireCalendar() error {
 //
 // 日历那边那条校验留着：它的入口不只规则一条（插件适配器与测试都直接构造
 // 排班），少判一次换不来什么。
-//
-// 写法不对时包的是 ErrCalendarRequired，与 hour(tz) 遇到解不开的时区名同一类：
-// 都是「规则里那个与日历有关的参数用不了」，处置方式也相同（改规则）。
-func parsePeakWindows(s string) ([]PeakWindow, error) {
+func ParsePeakWindows(s string) ([]PeakWindow, error) {
 	segments := strings.Split(s, ",")
 	out := make([]PeakWindow, 0, len(segments))
 	for i, segment := range segments {
 		segment = strings.TrimSpace(segment)
 		start, end, ok := strings.Cut(segment, "-")
 		if !ok {
-			return nil, fmt.Errorf("%w: 高峰时段 %q 应当写成「08:00-22:00」", ErrCalendarRequired, segment)
+			return nil, &PeakWindowSyntaxError{
+				Reason: fmt.Sprintf("高峰时段 %q 应当写成「08:00-22:00」", segment)}
 		}
 		startMinute, err := parseClock(strings.TrimSpace(start))
 		if err != nil {
@@ -409,9 +457,10 @@ func parsePeakWindows(s string) ([]PeakWindow, error) {
 		// 不成立：并列的那几段完全被盖住，写的人多半是把「全天」当成了
 		// 段之间的分隔符，或者只是想写一个 24 小时的窗口。
 		if len(segments) > 1 && startMinute == endMinute {
-			return nil, fmt.Errorf("%w: 高峰时段里的第 %d 段 %q 是全天时段，不能与其他段并列"+
-				"（整天算高峰不必用窗口：把那条价格直接写成规则即可）",
-				ErrCalendarRequired, i+1, segment)
+			return nil, &PeakWindowSyntaxError{Reason: fmt.Sprintf(
+				"高峰时段里的第 %d 段 %q 是全天时段，不能与其他段并列"+
+					"（整天算高峰不必用窗口：把那条价格写成不带窗口的形式即可）",
+				i+1, segment)}
 		}
 		out = append(out, PeakWindow{StartMinute: startMinute, EndMinute: endMinute})
 	}
@@ -426,22 +475,22 @@ func parsePeakWindows(s string) ([]PeakWindow, error) {
 func parseClock(s string) (int, error) {
 	hour, minute, ok := strings.Cut(s, ":")
 	if !ok {
-		return 0, fmt.Errorf("%w: 高峰时段里的时刻 %q 应当写成「08:00」", ErrCalendarRequired, s)
+		return 0, &PeakWindowSyntaxError{Reason: fmt.Sprintf("高峰时段里的时刻 %q 应当写成「08:00」", s)}
 	}
 	h, err := strconv.Atoi(hour)
 	if err != nil {
-		return 0, fmt.Errorf("%w: 高峰时段里的时刻 %q 读不出小时", ErrCalendarRequired, s)
+		return 0, &PeakWindowSyntaxError{Reason: fmt.Sprintf("高峰时段里的时刻 %q 读不出小时", s)}
 	}
 	// 分必须是两位：`8:5` 读不出作者想写的是 08:05 还是别的东西。
 	if len(minute) != 2 {
-		return 0, fmt.Errorf("%w: 高峰时段里的时刻 %q 的分钟要写成两位（08:05）", ErrCalendarRequired, s)
+		return 0, &PeakWindowSyntaxError{Reason: fmt.Sprintf("高峰时段里的时刻 %q 的分钟要写成两位（08:05）", s)}
 	}
 	m, err := strconv.Atoi(minute)
 	if err != nil {
-		return 0, fmt.Errorf("%w: 高峰时段里的时刻 %q 读不出分钟", ErrCalendarRequired, s)
+		return 0, &PeakWindowSyntaxError{Reason: fmt.Sprintf("高峰时段里的时刻 %q 读不出分钟", s)}
 	}
 	if h < 0 || h > 23 || m < 0 || m > 59 {
-		return 0, fmt.Errorf("%w: 高峰时段里的时刻 %q 不是一天之内的钟点", ErrCalendarRequired, s)
+		return 0, &PeakWindowSyntaxError{Reason: fmt.Sprintf("高峰时段里的时刻 %q 不是一天之内的钟点", s)}
 	}
 	return h*60 + m, nil
 }

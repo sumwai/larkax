@@ -128,6 +128,9 @@ var ErrEnvIncomplete = errors.New("求值的输入不完整")
 var ErrGlobalsInvalid = errors.New("注入常量非法")
 
 // ErrCalendarRequired 表示规则要用日历，但 Env 没给 Calendar，或日历查不到数据。
+//
+// 高峰窗口的**写法**错不是它（那一类见 ErrPeakWindowSyntax）：这里说的是
+// 日历这一头不可用，处置在部署与数据那一侧；写法错要改的是规则自己那个串。
 var ErrCalendarRequired = errors.New("日历不可用")
 
 // validate 检查求值必需的外部输入是否齐备。

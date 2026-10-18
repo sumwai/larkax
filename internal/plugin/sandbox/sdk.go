@@ -101,6 +101,9 @@ export const calendar = {
   kind(ts, region) {
     return capability("calendar").kind(ts, region);
   },
+  peak(ts, region, window) {
+    return capability("calendar").peak(ts, region, window);
+  },
   hourIn(region) {
     return capability("calendar").hourIn(region);
   },

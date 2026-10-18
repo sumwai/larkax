@@ -366,7 +366,7 @@ func Build(cfg Config) (*App, error) {
 	wiring := pluginWiring{
 		logger:   logger,
 		now:      cfg.Now,
-		calendar: pluginCalendar{cal: cal, peak: pluginPeakSchedule},
+		calendar: pluginCalendar{cal: cal},
 		kv:       pluginstore.NewKV(cfg.DB),
 	}
 
@@ -667,28 +667,13 @@ func (w pluginWiring) host(p *plugin.Plugin, requestID string, userID int64) san
 //   - Day 走 calendar.Calendar.At：按地区时区把时刻折成当地日期、再查那一天的
 //     判定。当地钟点与星期从同一个时区的时刻取（JS 的 getDay() 是 0=周日，
 //     time.Weekday 也是 0=周日，直接转）。
-//   - Peak 走 calendar.Calendar.PeakAt，窗口取自下面那个排班常量。
+//   - Peak 走 calendar.Calendar.PeakAt，高峰窗口来自插件这次调用给出的那个串
+//     （见下面 Peak 的注释）。
 type pluginCalendar struct {
-	cal  *calendar.Calendar
-	peak calendar.PeakSchedule
+	cal *calendar.Calendar
 }
 
 var _ host.CalendarSource = pluginCalendar{}
-
-// pluginPeakSchedule 是插件 calendar 能力用的高峰排班：**空的**。
-//
-// 空不是「还没写」，而是这份部署此刻的真实答案：插件的窗口从哪来还没有定。
-// **规则那一半已经定了**——窗口写在规则自己身上（`isPeak("08:00-22:00")`，
-// 见 internal/billing/calendaradapter 与 expr.Calendar 的 Peak）；而插件这一半
-// 不同：插件调的是宿主给的能力，写不出自己的窗口参数（SDK 的 calendar 命名空间
-// 里没有 peak 函数），窗口只能由宿主决定，那个决定还没做。
-//
-// 于是这里没有任何窗口可传。空排班在 calendar.PeakAt 里的语义是明确的：已知的
-// 日子里一律 off_peak，日子未知时 unknown——不会凭星期几猜一天。
-//
-// 将来定了插件的高峰窗口从哪来，改的是这一个值（或者由装配从配置里读），而不是
-// 在适配器里重写一遍判定。
-var pluginPeakSchedule = calendar.PeakSchedule{}
 
 // Day 判定某个时刻落在哪一天、那天是工作日还是休息日。
 func (a pluginCalendar) Day(ctx context.Context, region string, instant time.Time) (host.DayInfo, error) {
@@ -718,13 +703,36 @@ func (a pluginCalendar) Day(ctx context.Context, region string, instant time.Tim
 // Peak 判定某个时刻是高峰还是低谷。
 //
 // 返回值就是 calendar.PeakKind 的取值：peak / off_peak / unknown（三态，
-// 未知不会被压成低谷）。**当前没有插件能调到它**：SDK 的 calendar 命名空间里
-// 没有 peak 这个函数（见 internal/plugin/sandbox 的 sdkSource），接上它要先定
-// 「插件的高峰窗口从哪来」——规则那一半已经定了（窗口随规则走），插件这一半
-// 还没有，那是一条独立的决定（见 pluginPeakSchedule 与本文件在
-// scripts/deadmethods-allowlist.txt 里的那一条）。
-func (a pluginCalendar) Peak(ctx context.Context, region string, instant time.Time) (string, error) {
-	st, err := a.cal.PeakAt(ctx, calendar.Region(region), instant, a.peak)
+// 未知不会被压成低谷）。
+//
+// **高峰窗口来自调用方**（插件这次调用给出的那个串，写法与规则里的
+// `isPeak("08:00-22:00")` 同形）：峰谷是计价口径里的一项，不由地区推断，所以
+// 窗口跟着调用走——规则写在规则里，插件写在调用里。宿主那一层先校验过写法
+// （见 internal/plugin/host 的 peakFn），这里仍然解析一遍并走 calendar 的那两个
+// 构造函数：它们的入口不只插件一条，而且**判定必须只有一份**——规则那一半与
+// 插件这一半的峰谷语义要是两份实现，同一天会出现两个价。
+//
+// 休息日整天算高峰留给调用方组合（插件自己调 isOffDay 与 peak 拼），所以
+// RestDayAllPeak 恒为 false，与 internal/billing/calendaradapter 同一条口径。
+func (a pluginCalendar) Peak(ctx context.Context, region string, instant time.Time, window string) (string, error) {
+	parsed, err := expr.ParsePeakWindows(window)
+	if err != nil {
+		// 写法不合法，原样往上报：这里不换成一个猜出来的档位，也不吞掉。
+		return "", err
+	}
+	windows := make([]calendar.PeakWindow, 0, len(parsed))
+	for _, w := range parsed {
+		pw, winErr := calendar.NewPeakWindow(w.StartMinute, w.EndMinute)
+		if winErr != nil {
+			return "", winErr
+		}
+		windows = append(windows, pw)
+	}
+	schedule, err := calendar.NewPeakSchedule(false, windows...)
+	if err != nil {
+		return "", err
+	}
+	st, err := a.cal.PeakAt(ctx, calendar.Region(region), instant, schedule)
 	if err != nil {
 		return "", err
 	}

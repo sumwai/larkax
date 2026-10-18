@@ -128,7 +128,7 @@ func TestPluginCalendarDayUsesDatabase(t *testing.T) {
 	const holidayName = "测试节假日"
 	seedCalendarDay(t, db, holiday, holidayName, true)
 
-	src := pluginCalendar{cal: testCalendar(t, db), peak: pluginPeakSchedule}
+	src := pluginCalendar{cal: testCalendar(t, db)}
 
 	// 北京时间的上午十点：换算过去仍落在同一天。
 	instant := holiday.Add(2 * time.Hour)
@@ -168,47 +168,55 @@ func TestPluginCalendarDayUsesDatabase(t *testing.T) {
 
 // Peak 是**真实现**：它调的是 calendar.PeakAt，三个取值都从判定里出来。
 //
-// 它今天没有插件能调到（SDK 的 calendar 命名空间里没有 peak 函数），所以
-// 这条用例是它唯一的调用点——这也是 scripts/deadmethods-allowlist.txt 里
-// `pluginCalendar.Peak` 那一条要写清「它为什么留着」的原因：规则那一半已经
-// 接上（窗口随规则走），挡在这里的是插件侧没有 peak 可调。
+// # 窗口是调用方给的那一个
+//
+// 峰谷是定价口径（同一地区的两个渠道可以有各自的峰谷），所以窗口随调用走：
+// 插件把它写在 `peak(ts, region, "08:00-22:00")` 里。这条用例的重点因此是
+// **换了窗口结果就跟着换**——一个把窗口丢掉、自己按某种写死的排班判的实现
+// 也能过「不是 nil」「返回了一个档位」那类断言，而那种实现算出来的价是错的，
+// 账上看不出来。
 func TestPluginCalendarPeakDelegatesToCalendar(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 
 	holiday := time.Date(2031, 2, 3, 0, 0, 0, 0, time.UTC)
 	seedCalendarDay(t, db, holiday, "测试节假日", true)
-	cal := testCalendar(t, db)
+	src := pluginCalendar{cal: testCalendar(t, db)}
 
-	// 上午十点（北京）与晚上十一点（北京），同一天。
+	// 上午十点与晚上十一点（北京），同一天。
 	morning, evening := holiday.Add(2*time.Hour), holiday.Add(15*time.Hour)
 
-	// 一、生产那一份排班是空的：高峰窗口从哪来还没定（见 pluginPeakSchedule），
-	// 于是已知的日子一律 off_peak，不会凭「今天是休息日」猜成高峰。
-	prod := pluginCalendar{cal: cal, peak: pluginPeakSchedule}
-	if got, err := prod.Peak(ctx, calendarRegion, morning); err != nil || got != "off_peak" {
-		t.Errorf("生产排班下 Peak(上午十点) = (%q, %v)，期望 off_peak", got, err)
-	}
+	const dayShift, nightShift = "08:00-22:00", "22:00-08:00"
 
-	// 二、给一份带窗口的排班，判定的三段就都能看见。这一条证明适配器把窗口
-	// **传下去了**，而不是自己按某种规则算了一个答案。
-	schedule, err := calendar.NewPeakSchedule(false,
-		calendar.PeakWindow{StartMinute: 8 * 60, EndMinute: 22 * 60})
-	if err != nil {
-		t.Fatalf("构造排班失败: %v", err)
-	}
-	windowed := pluginCalendar{cal: cal, peak: schedule}
-
-	if got, err := windowed.Peak(ctx, calendarRegion, morning); err != nil || got != "peak" {
+	if got, err := src.Peak(ctx, calendarRegion, morning, dayShift); err != nil || got != "peak" {
 		t.Errorf("上午十点落在 [08:00, 22:00) 里，Peak = (%q, %v)，期望 peak", got, err)
 	}
-	if got, err := windowed.Peak(ctx, calendarRegion, evening); err != nil || got != "off_peak" {
-		t.Errorf("晚上十一点在窗口之外，Peak = (%q, %v)，期望 off_peak", got, err)
+	if got, err := src.Peak(ctx, calendarRegion, evening, dayShift); err != nil || got != "off_peak" {
+		t.Errorf("晚上十一点在 [08:00, 22:00) 之外，Peak = (%q, %v)，期望 off_peak", got, err)
 	}
+
+	// 同一对时刻，换成跨零点的夜班窗口：两个答案各自翻过来。这一对才是
+	// 「窗口传下去了」的证据——只断言一个方向的话，一个写死白天窗口的实现
+	// 也照样过。
+	if got, err := src.Peak(ctx, calendarRegion, morning, nightShift); err != nil || got != "off_peak" {
+		t.Errorf("夜班窗口下上午十点 Peak = (%q, %v)，期望 off_peak", got, err)
+	}
+	if got, err := src.Peak(ctx, calendarRegion, evening, nightShift); err != nil || got != "peak" {
+		t.Errorf("夜班窗口下晚上十一点 Peak = (%q, %v)，期望 peak", got, err)
+	}
+
 	// 日子未知时判定为 unknown：不套用「周末算低谷」之类的星期五规则。
+	// 换窗口也改不了这一条——那一档不是时段问题。
 	missing := time.Date(2031, 3, 5, 2, 0, 0, 0, time.UTC)
-	if got, err := windowed.Peak(ctx, calendarRegion, missing); err != nil || got != "unknown" {
+	if got, err := src.Peak(ctx, calendarRegion, missing, dayShift); err != nil || got != "unknown" {
 		t.Errorf("缺数据的那一天 Peak = (%q, %v)，期望 unknown", got, err)
+	}
+
+	// 写法不合法时**原样往上报**，不换成一个猜出来的档位：吞掉它的话，
+	// 插件那一侧看到的是一句静默的 off_peak，这条路算出来的钱会一直按低谷
+	// 那一档走。
+	if _, err := src.Peak(ctx, calendarRegion, morning, "25:00-26:00"); err == nil {
+		t.Error("写法不合法的高峰窗口该报错，而不是给一个档位")
 	}
 }
 
