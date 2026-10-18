@@ -797,9 +797,11 @@ type cacheEntry struct {
 //
 // 用自己写的而不是 container/list：只需要「移到头部」「摘掉尾部」两个操作，
 // 而 container/list 的值是 any，每次操作都要一次接口断言与装箱。
+//
+// **它不自己维护长度**：条目数只有 `items` 一个权威来源（见 Cache.Len）。
+// 顺序表再记一份的话，那一份没有任何读点，而读代码的人会以为存在第二份真相。
 type entryList struct {
 	head, tail *listElement
-	len        int
 }
 
 type listElement struct {
@@ -906,6 +908,8 @@ func (c *Cache) GetWithGlobals(key, source string, globals map[string]any) (*Pro
 }
 
 // Len 返回当前缓存的条目数。
+//
+// 长度以 `items` 为准——顺序表不自己维护长度（见 entryList 的注释）。
 func (c *Cache) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -946,7 +950,6 @@ func (l *entryList) pushFront(key string) *listElement {
 	if l.tail == nil {
 		l.tail = e
 	}
-	l.len++
 	return e
 }
 
@@ -963,7 +966,6 @@ func (l *entryList) moveToFront(e *listElement) {
 	if l.tail == nil {
 		l.tail = e
 	}
-	l.len++
 }
 
 func (l *entryList) remove(e *listElement) {
@@ -981,7 +983,6 @@ func (l *entryList) remove(e *listElement) {
 		l.tail = e.prev
 	}
 	e.prev, e.next = nil, nil
-	l.len--
 }
 
 // globalsSignature 把 globals 的名字与类型折成一个稳定的字符串，用于缓存键。
