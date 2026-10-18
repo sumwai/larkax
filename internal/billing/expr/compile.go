@@ -436,7 +436,28 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 			// 它外面的位置原样穿过第一个参数，所以 cond 也跟着穿过去。
 			return walkShape(n.Arguments[1], sh, at)
 		}
-		// fixed/minimum/hour/isWorkday/isHoliday 返回数值，位置不变。
+		if ident, ok := n.Callee.(*ast.IdentifierNode); ok && ident.Value == "isPeak" {
+			// 高峰时段必须是字面量，而且当场解析一遍：它是这条规则固定的一部分，
+			// 写错了不该等到某一次计价才发现——规则入库时会走 Compile
+			// （见 internal/pricing 的 admin），于是错写法在保存时就报出来。
+			// 与 tier 要求档位名是字面量同一条理由：运行期才知道的窗口
+			// 没法在规则被保存时给人看。
+			// 这一遍解析里包含「全天段不能与其他段并列」，那一条是为了钱
+			// 上移到这里来的——预留那一步不跑求值（见 parsePeakWindows）。
+			if len(n.Arguments) != 1 {
+				return fmt.Errorf("isPeak 需要一个参数（高峰时段，例如 \"08:00-22:00\"），当前 %d 个", len(n.Arguments))
+			}
+			literal, err := stringKey(n.Arguments[0])
+			if err != nil {
+				return fmt.Errorf("isPeak 的高峰时段必须是字符串字面量，当前是 %T", n.Arguments[0])
+			}
+			if _, err := parsePeakWindows(literal); err != nil {
+				return err
+			}
+			return nil
+		}
+		// fixed/minimum/hour/isWorkday/isHoliday/isPeak 返回数值或布尔，
+		// 位置不变。
 		// 参数本身不参与结果形状，但里面不该有单价表——
 		// 规则作者不会那么写，真写了也一定是把 units 放错了地方。
 		//

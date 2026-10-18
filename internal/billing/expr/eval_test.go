@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -17,10 +18,27 @@ var testAt = time.Date(2026, 10, 16, 9, 30, 0, 0, time.UTC)
 // testCalendar 是一个照着 calendar_days 表形状写的假日历。
 //
 // 它证明 Calendar 抽象是对的：求值完全脱离数据库。
+//
+// 峰谷那一半同样只查写死的表（peakMinutes），**不自己算窗口**：窗口怎么算、
+// 跨零点怎么算的判定在 internal/calendar 里测（那边的 PeakAt）。这一层要证明的
+// 是：规则里写的窗口、地区、时刻原样传到了日历上，而日历的答案决定用哪一档价。
+// 所以它把收到的入参记在 saw 里，供用例断言。
 type testCalendar struct {
 	tz    map[string]string
 	days  map[string]DayInfo
 	fails bool
+
+	// peakMinutes 是这一天里算高峰的当地分钟数。
+	peakMinutes map[int]bool
+	// saw 记下 Peak 收到的入参。
+	saw []peakCall
+}
+
+// peakCall 是一次 Peak 调用的入参。
+type peakCall struct {
+	region  string
+	instant time.Time
+	windows []PeakWindow
 }
 
 func (c *testCalendar) TimeZone(region string) (string, error) {
@@ -35,11 +53,35 @@ func (c *testCalendar) TimeZone(region string) (string, error) {
 }
 
 func (c *testCalendar) DayInfo(region string, day time.Time) (DayInfo, error) {
+	if c.fails {
+		return DayInfo{}, ErrCalendarRequired
+	}
 	info, ok := c.days[region+"|"+day.Format("2006-01-02")]
 	if !ok {
 		return DayInfo{}, ErrCalendarRequired
 	}
 	return info, nil
+}
+
+func (c *testCalendar) Peak(region string, instant time.Time, windows []PeakWindow) (bool, error) {
+	c.saw = append(c.saw, peakCall{region: region, instant: instant, windows: windows})
+	if c.fails {
+		return false, ErrCalendarRequired
+	}
+	loc, err := time.LoadLocation(c.tz[region])
+	if err != nil {
+		return false, ErrCalendarRequired
+	}
+	at := instant.In(loc)
+
+	// 这一天不在表里就是「未知」——与 DayInfo 同一个信号（真实实现里那是
+	// DayUnknown，由适配器折成 ErrCalendarRequired）。判不出来时报同一个错，
+	// 不回答 false：false 是「按低谷算」这个具体的判断。
+	day := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC)
+	if _, ok := c.days[region+"|"+day.Format("2006-01-02")]; !ok {
+		return false, fmt.Errorf("%w: 这一天的高峰与否判不出来", ErrCalendarRequired)
+	}
+	return c.peakMinutes[at.Hour()*60+at.Minute()], nil
 }
 
 func newTestCalendar() *testCalendar {
@@ -278,6 +320,146 @@ func TestEvalCalendar(t *testing.T) {
 	}
 	if res3.Prices.Prompt.String() != "1.00000000" {
 		t.Errorf("周六应当是「非工作日且非节假日」，两者之和应为 1: %s", res3.Prices.Prompt)
+	}
+}
+
+// checkWindows 逐段比对规则里写的窗口解析成了什么。
+//
+// 逐段比而不是整个切片一起比：差一段、差一分钟时，报出来的那一行会写明是第几段、
+// 期望多少、实际多少——那一行就是排查要的全部信息。
+func checkWindows(t *testing.T, got, want []PeakWindow) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("解析出 %d 段窗口 %+v，期望 %d 段 %+v", len(got), got, len(want), want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("第 %d 段窗口 = %+v，期望 %+v", i+1, got[i], w)
+		}
+	}
+}
+
+// TestEvalIsPeak 钉住 isPeak() 的两端：规则里写的高峰时段原样传到日历上，
+// 而日历给出的答案决定用哪一档价。
+//
+// 判定本身（窗口怎么算、跨零点算到哪一天）在 internal/calendar 里测；这里要
+// 证明的是接得上——传下去的是哪三样东西、答案怎么变成价。三样缺一样，
+// 判定就会在别处悄悄错：窗口少了它按别的时段算，地区错了它按别的日历算，
+// 时刻错了它按别的钟点算。
+func TestEvalIsPeak(t *testing.T) {
+	// testAt 是北京时间 10 月 16 日 17:30，下面让这一分钟算高峰。
+	cal := newTestCalendar()
+	cal.peakMinutes = map[int]bool{17*60 + 30: true}
+
+	p := mustCompile(t, `{"prompt": isPeak("08:00-22:00") ? 0.0000030 : 0.0000010}`)
+	res, err := p.Eval(Env{At: testAt, Region: "CN", Calendar: cal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Prices.Prompt.String(); got != "0.00000300" {
+		t.Errorf("高峰时段里的单价 = %s，期望 0.00000300", got)
+	}
+
+	if len(cal.saw) != 1 {
+		t.Fatalf("日历收到 %d 次峰谷判定，期望 1 次", len(cal.saw))
+	}
+	call := cal.saw[0]
+	if call.region != "CN" {
+		t.Errorf("传给日历的地区 = %q，期望 CN（它来自 Env.Region，不由规则声明）", call.region)
+	}
+	if !call.instant.Equal(testAt) {
+		t.Errorf("传给日历的时刻 = %v，期望 %v（求值时刻，不是墙钟）", call.instant, testAt)
+	}
+	checkWindows(t, call.windows, []PeakWindow{{StartMinute: 8 * 60, EndMinute: 22 * 60}})
+
+	// 同一份日历、同一时刻，只把它认的高峰分钟换掉：价跟着换档。
+	// 这一半是必要的——一条永远走高峰档的规则也能通过上面那个断言。
+	cal.peakMinutes = map[int]bool{}
+	res, err = p.Eval(Env{At: testAt, Region: "CN", Calendar: cal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Prices.Prompt.String(); got != "0.00000100" {
+		t.Errorf("高峰时段之外的单价 = %s，期望 0.00000100", got)
+	}
+}
+
+// TestEvalIsPeakParsesWindows 钉住窗口串的写法：多段用逗号分开，
+// 跨零点由「终点小于起点」表达。
+//
+// 解析结果走日历收到的入参来看——分钟数是规则与日历之间唯一的约定，
+// 而它是这里唯一能证伪的地方（日历那边只看到两个整数）。
+func TestEvalIsPeakParsesWindows(t *testing.T) {
+	cal := newTestCalendar()
+	cal.peakMinutes = map[int]bool{}
+	p := mustCompile(t, `{"prompt": isPeak(" 08:00-12:00 , 22:00-02:00 ") ? 1.0 : 2.0}`)
+	if _, err := p.Eval(Env{At: testAt, Region: "CN", Calendar: cal}); err != nil {
+		t.Fatal(err)
+	}
+
+	checkWindows(t, cal.saw[0].windows, []PeakWindow{
+		{StartMinute: 8 * 60, EndMinute: 12 * 60},
+		// 22:00 到次日 02:00：终点小于起点。
+		{StartMinute: 22 * 60, EndMinute: 2 * 60},
+	})
+}
+
+// TestEvalIsPeakUnknownDayFails 钉住 unknown 的口径：**报错，不猜**。
+//
+// 放假安排还没公布的那一天，峰谷也判不出来（PeakAt 的三态里那个 unknown）。
+// 处置与 isWorkday() 是同一条：它们报的必须是同一个错。回落成 false 会在
+// 春节期间按低谷价收费，而账单看上去完全正常——账错得看不出来是最坏的一种。
+func TestEvalIsPeakUnknownDayFails(t *testing.T) {
+	// 这一天没有日历数据：isWorkday() 与 isPeak() 都判不出来。
+	cal := newTestCalendar()
+	delete(cal.days, "CN|2026-10-16")
+
+	p := mustCompile(t, `{"prompt": isPeak("08:00-22:00") ? 0.0000030 : 0.0000010}`)
+	res, err := p.Eval(Env{At: testAt, Region: "CN", Calendar: cal})
+	if err == nil {
+		t.Fatalf("日历判不出峰谷时按某一档算了价: %+v", res.Prices)
+	}
+	if !errors.Is(err, ErrCalendarRequired) {
+		t.Errorf("峰谷判不出来时报的是 %v，期望 ErrCalendarRequired", err)
+	}
+
+	// 同一份日历上 isWorkday() 报同一个错：两条口径不一致的话，
+	// 规则作者会以为「峰谷那一条特别容易出错」，而实际是同一件事。
+	pw := mustCompile(t, `{"prompt": isWorkday() ? 0.0000030 : 0.0000010}`)
+	_, werr := pw.Eval(Env{At: testAt, Region: "CN", Calendar: cal})
+	if werr == nil {
+		t.Fatal("同一天 isWorkday() 也该判不出来")
+	}
+	if !errors.Is(werr, ErrCalendarRequired) {
+		t.Errorf("isWorkday() 报的是 %v，期望 ErrCalendarRequired", werr)
+	}
+}
+
+// TestEvalIsPeakWorstCaseCoversBothBranches 钉住最坏情况那一侧。
+//
+// 预留是上界：峰谷这一档的规则必须让两支都被覆盖到，否则一笔高峰请求按
+// 低谷预留，结算时撞上 Capped——而 Capped 本该是「上界算错了」的信号。
+func TestEvalIsPeakWorstCaseCoversBothBranches(t *testing.T) {
+	cal := newTestCalendar() // 17:30 不在 08:00–12:00 里：普通求值走低谷档
+	p := mustCompile(t, `isPeak("08:00-12:00")
+		? tier("peak", {"prompt": 0.0000030})
+		: tier("off_peak", {"prompt": 0.0000010})`)
+
+	env := Env{Usage: billing.Usage{PromptTokens: 1}, At: testAt, Region: "CN", Calendar: cal}
+	actual, err := p.Eval(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := actual.Prices.Prompt.String(); got != "0.00000100" {
+		t.Errorf("低谷档的单价 = %s，期望 0.00000100", got)
+	}
+
+	worst, err := p.EvalWorstCase(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := worst.Prices.Prompt.String(); got != "0.00000300" {
+		t.Errorf("上界 = %s，期望高峰那一档 0.00000300", got)
 	}
 }
 

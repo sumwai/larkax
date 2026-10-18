@@ -10,12 +10,16 @@ import (
 // ErrInvalidPeakWindow 表示高峰时段配置不成立。
 var ErrInvalidPeakWindow = errors.New("高峰时段配置不成立")
 
-// 本文件的一切**今天接不进任何地方**：规则能调用的函数里没有一个走 PeakAt，
-// 所以峰谷价在规则里写不出来；插件那一侧也没有对应函数可调（宿主日历接口里
-// 有 Peak，而 SDK 的 calendar 命名空间里没有它）。要接上它得先定「高峰窗口
-// 从哪来」。
+// 本文件的判定今天有两条路，一条通、一条不通：
 //
-// 唯一的调用点是插件适配器里那个调不到的入口（见 internal/assembly 的
+//   - **规则里通**：`isPeak("08:00-22:00")` 把窗口写在规则自己身上（见
+//     internal/billing/expr 的 Peak 与 internal/billing/calendaradapter），
+//     窗口串在这里折成 PeakWindow / PeakSchedule，判定走 PeakAt。
+//   - **插件里不通**：宿主日历接口里有 Peak，而 SDK 的 calendar 命名空间里
+//     没有对应函数可调。要接上它得先定「插件的高峰窗口从哪来」——规则那一半
+//     已经定了（窗口随规则走），插件这一半还没有。
+//
+// 唯一的调用点因此是插件适配器里那个**调不到**的入口（见 internal/assembly 的
 // pluginCalendar.Peak）——`PeakAt` 因此**不在** deadmethods 的清单里：那道门
 // 按调用语法数，而它确实有一个调用点。提醒在哪，见包注释那一节。
 //
@@ -168,8 +172,12 @@ type PeakStatus struct {
 //     放假安排还没公布，而那几天里可能有调休、也可能有连休，
 //     用星期猜一天的答案正是本包要避免的事；
 //  3. 休息日且 RestDayAllPeak → 高峰；
-//  4. 否则看时刻是否落在某段高峰时段里。跨零点的段按**当地日期**判：
-//     22:00–02:00 在当天 22:00 之后成立，在次日 02:00 之前也成立。
+//  4. 否则看时刻是否落在某段高峰时段里。跨零点的段按**时刻当地那一天**判：
+//     22:00–02:00 在当天 22:00 之后成立，在次日 02:00 之前也成立——后一半
+//     用的仍是时刻自己那一天的日期，不回头查窗口开始那一天。所以跨年的那一夜
+//     两个端点各自查各自的年份：当地 12-31 23:00 查 12-31，次年 01-01 01:00
+//     查 01-01，而后者在公告未发布时会因 year_unknown 报错——这是对的，那一
+//     时刻的价钱确实还不知道。
 func (c *Calendar) PeakAt(ctx context.Context, region Region, instant time.Time, s PeakSchedule) (PeakStatus, error) {
 	if err := s.Validate(); err != nil {
 		return PeakStatus{}, err
