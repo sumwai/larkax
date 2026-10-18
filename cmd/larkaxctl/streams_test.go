@@ -92,7 +92,11 @@ func TestSuccessPathsPrintNoPrompts(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.command+"/"+tc.what, func(t *testing.T) {
 			stdout, stderr, err := runStream(t, tc.run)
-			if err != nil && !(tc.reportOnly && reportedOnly(err)) {
+			// 失败分两类：真失败，与「体检不通过」——后者的结论已经打在那份
+			// 报告里了，非零退出是设计的一部分（见 exit.go 的 reportedErr）。
+			// 写成具名的一步：摊成一个德摩根表达式就没法读了。
+			concluded := tc.reportOnly && reportedOnly(err)
+			if err != nil && !concluded {
 				t.Fatalf("这条命令没走成功路径：%v\nstderr:\n%s", err, stderr)
 			}
 

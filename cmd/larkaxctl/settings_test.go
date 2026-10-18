@@ -512,12 +512,12 @@ func TestSettingsListJSONKeepsValidationWarningOffStdout(t *testing.T) {
 	})
 
 	withFormat(t, formatJSON)
-	var err error
-	stdout, stderr := captureStreams(t, func() { err = runSettingsList(nil) })
-	if err == nil {
+	var runErr error
+	stdout, stderr := captureStreams(t, func() { runErr = runSettingsList(nil) })
+	if runErr == nil {
 		t.Fatal("配置加载不起来时命令应当以非零退出码收尾")
 	}
-	if code := exitCode(err); code != exitFailure {
+	if code := exitCode(runErr); code != exitFailure {
 		t.Errorf("退出码 = %d，想要 %d（其他失败）", code, exitFailure)
 	}
 	assertOnlyJSON(t, stdout)
@@ -543,8 +543,8 @@ func TestSettingsListJSONKeepsValidationWarningOffStdout(t *testing.T) {
 	if stderr != "" {
 		t.Errorf("这一档的 stderr 应当是空的，那句话走错误出口：%q", stderr)
 	}
-	if !strings.Contains(err.Error(), "这套配置服务加载不起来") {
-		t.Errorf("返回的错误要带上「加载不起来」，实际是 %v", err)
+	if !strings.Contains(runErr.Error(), "这套配置服务加载不起来") {
+		t.Errorf("返回的错误要带上「加载不起来」，实际是 %v", runErr)
 	}
 
 	// 那一行自己要在清单里，且 kind 是 null——它是「服务加载不起来」的直接
