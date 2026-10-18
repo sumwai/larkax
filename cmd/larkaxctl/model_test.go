@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sumwai/larkax/internal/catalog"
+	"github.com/sumwai/larkax/internal/channel"
 )
 
 // TestModelCreateRejectsBadFlags 走的是不碰数据库的那几条路径。
@@ -260,6 +262,216 @@ func TestModelUpdateClearsFields(t *testing.T) {
 	}
 }
 
+// TestModelEndpointsFlagThreeStates 钉住 --endpoints 的三态（create 这一侧）。
+//
+// 这一栏上「没配过」与「明确一条都不支持」的结论相反：前者不参与选路判据，
+// 后者筛掉所有候选。而 flag 包的零值分不出「没给这一项」与「给了空串」——
+// 判据是 fs.Visit 记下的清单，判据写错时表现是「清空静默失效」。
+func TestModelEndpointsFlagThreeStates(t *testing.T) {
+	// 没给：这一栏留在零值 nil 上，写入路径落 NULL。
+	req, err := parseModelCreate([]string{"--model", "m1", "--display", "展示名"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Capabilities.Endpoints != nil {
+		t.Errorf("没给 --endpoints 时不该写这一栏，得到 %v", req.Capabilities.Endpoints)
+	}
+
+	// 给了空串：明确一条都不支持，落空切片——不是 nil。
+	req, err = parseModelCreate([]string{"--model", "m1", "--display", "展示名", "--endpoints", ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Capabilities.Endpoints == nil {
+		t.Error("--endpoints '' 是「明确一条都不支持」，应当落空切片而不是 nil")
+	}
+	if len(req.Capabilities.Endpoints) != 0 {
+		t.Errorf("--endpoints '' 应当是空清单，得到 %v", req.Capabilities.Endpoints)
+	}
+
+	// 给了路径：按给的顺序留着。
+	req, err = parseModelCreate([]string{
+		"--model", "m1", "--display", "展示名",
+		"--endpoints", "/v1/messages," + string(channel.EndpointResponses),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []channel.Endpoint{channel.EndpointMessages, channel.EndpointResponses}
+	if !reflect.DeepEqual(req.Capabilities.Endpoints, want) {
+		t.Errorf("端点 = %v，期望 %v", req.Capabilities.Endpoints, want)
+	}
+
+	// 取值写错：在连库之前就报错（这条路径不需要库）。
+	if _, err := parseModelCreate([]string{
+		"--model", "m1", "--display", "展示名", "--endpoints", "/v1/embeddings",
+	}); err == nil {
+		t.Error("写错的端点取值应当被拒")
+	}
+}
+
+// TestModelUpdateEndpointsThreeStates 钉住 --endpoints 在 update 这一侧的三态，
+// 以及它与六个能力**同组**这件事。
+//
+// 写入路径对这一组是一次全量覆盖（见 catalog.modelUpdateSets），所以命令
+// 只给其中一项时必须先读出当前那一行再合并。合并这一步在这里直接测：
+// 「只给 --endpoints」不能把六个能力抹掉，「只给 --tools」也不能把端点抹掉。
+func TestModelUpdateEndpointsThreeStates(t *testing.T) {
+	base := catalog.Capabilities{
+		Tools:     declared(true),
+		Endpoints: []channel.Endpoint{channel.EndpointMessages},
+	}
+
+	// 没给这一项：这一组没被动过，整组不写。
+	_, edit, err := parseModelUpdate([]string{"--model", "m1", "--display", "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edit.given() {
+		t.Error("只给了 --display 时，能力那一组不该算被动过")
+	}
+
+	// 给了路径：端点换成新的，六个能力原样留着。
+	_, edit, err = parseModelUpdate([]string{
+		"--model", "m1", "--endpoints", string(channel.EndpointResponses) + ",/v1/chat/completions",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !edit.given() {
+		t.Error("给了 --endpoints 就该算动过这一组")
+	}
+	merged := edit.apply(base)
+	want := []channel.Endpoint{channel.EndpointResponses, channel.EndpointChatCompletions}
+	if !reflect.DeepEqual(merged.Endpoints, want) {
+		t.Errorf("端点 = %v，期望 %v", merged.Endpoints, want)
+	}
+	if merged.Tools == nil || !*merged.Tools {
+		t.Error("只给 --endpoints 不该动六个能力")
+	}
+
+	// 给了六个能力里的一个：端点原样留着。
+	_, edit, err = parseModelUpdate([]string{"--model", "m1", "--tools=false"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged = edit.apply(base)
+	if !reflect.DeepEqual(merged.Endpoints, base.Endpoints) {
+		t.Errorf("只给 --tools 时端点应当原样留着，得到 %v", merged.Endpoints)
+	}
+	if merged.Tools == nil || *merged.Tools {
+		t.Error("--tools=false 应当把 tools 置成不支持")
+	}
+
+	// 给了空串：明确一条都不支持——空切片，不是「不改这一栏」。
+	_, edit, err = parseModelUpdate([]string{"--model", "m1", "--endpoints", ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged = edit.apply(base)
+	if merged.Endpoints == nil {
+		t.Error("--endpoints '' 应当落成空切片，而不是把库里那一栏留着")
+	}
+	if len(merged.Endpoints) != 0 {
+		t.Errorf("--endpoints '' 应当是空清单，得到 %v", merged.Endpoints)
+	}
+}
+
+// TestModelEndpointsFlagRejectsUnknownValue 钉住写错取值时的那条报错。
+//
+// 取值只有四种，报错里要把它们列全：这一栏没有「尽量读一个能用的值」这一说
+// （见 channel.ParseEndpoint），而写错的人需要当场看到该写什么。两个写命令
+// 都要如此——它们各自解析一次，漏一处的那一边就变成「静默地不生效」。
+func TestModelEndpointsFlagRejectsUnknownValue(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func() error
+	}{
+		{"create", func() error {
+			return runModelCreate([]string{
+				"--model", "m1", "--display", "展示名", "--endpoints", "/v1/embeddings",
+			})
+		}},
+		{"update", func() error {
+			return runModelUpdate([]string{"--model", "m1", "--endpoints", "/v1/embeddings"})
+		}},
+	}
+
+	// 四种取值从 channel 包的常量取，不在用例里重抄一份路径字面量。
+	valid := []channel.Endpoint{
+		channel.EndpointChatCompletions,
+		channel.EndpointResponses,
+		channel.EndpointMessages,
+		channel.EndpointSystemOne,
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runCaptured(t, tc.run)
+			if err == nil {
+				t.Fatal("写错的端点取值应当报错")
+			}
+			for _, endpoint := range valid {
+				if !strings.Contains(err.Error(), string(endpoint)) {
+					t.Errorf("报错里应当列出 %s，得到 %v", endpoint, err)
+				}
+			}
+			if got := exitCode(err); got != exitUsage {
+				t.Errorf("退出码应当是 %d（参数错），得到 %d", exitUsage, got)
+			}
+		})
+	}
+}
+
+// TestModelUsageListsEveryEndpointValue 钉住用法文本里列了那四种取值。
+//
+// 命令的用法文本是使用者查「--endpoints 能写什么」的地方（另一处是解析失败
+// 的那条报错，那句由 channel.ParseEndpoint 拼）。文本里少列一条，写的人就
+// 只能靠试。
+func TestModelUsageListsEveryEndpointValue(t *testing.T) {
+	for _, endpoint := range []channel.Endpoint{
+		channel.EndpointChatCompletions,
+		channel.EndpointResponses,
+		channel.EndpointMessages,
+		channel.EndpointSystemOne,
+	} {
+		if !strings.Contains(modelUsage, string(endpoint)) {
+			t.Errorf("model 的用法文本里没有列出端点取值 %s", endpoint)
+		}
+	}
+}
+
+// TestModelEndpointDetailThreeStates 钉住端点那一栏给人看的三态。
+//
+// 三种状态必须打得能分辨：「没配过」不参与选路判据，「明确一条都不支持」
+// 筛掉所有候选。都打成 - 或都打成空，使用者就分不出自己手上这一条是哪种。
+func TestModelEndpointDetailThreeStates(t *testing.T) {
+	cases := []struct {
+		name      string
+		endpoints []channel.Endpoint
+		want      string
+	}{
+		{"没配过", nil, "未知"},
+		{"明确一条都不支持", []channel.Endpoint{}, "无（明确一条都不支持）"},
+		{
+			"支持两条",
+			[]channel.Endpoint{channel.EndpointMessages, channel.EndpointResponses},
+			"/v1/messages,/v1/responses",
+		},
+	}
+	seen := map[string]bool{}
+	for _, tc := range cases {
+		if got := endpointDetail(tc.endpoints); got != tc.want {
+			t.Errorf("%s：端点那一栏 = %q，期望 %q", tc.name, got, tc.want)
+		}
+		// 哨兵：三态打出来的词必须互不相同，否则「分得开」这条就没了。
+		if seen[tc.want] {
+			t.Errorf("三态里有两态打成了同一个词 %q", tc.want)
+		}
+		seen[tc.want] = true
+	}
+}
+
 // TestModelGet 钉住 show 打出来的那一份。
 func TestModelGet(t *testing.T) {
 	db := testDB(t)
@@ -271,6 +483,7 @@ func TestModelGet(t *testing.T) {
 			"--model", canonical, "--display", "展示名",
 			"--vendor", "example-vendor", "--context-limit", "200000",
 			"--tools", "--vision=false", "--knowledge-cutoff", "2026-01-31",
+			"--endpoints", string(channel.EndpointChatCompletions),
 		}); err != nil {
 			t.Fatalf("add 失败: %v", err)
 		}
@@ -298,9 +511,98 @@ func TestModelGet(t *testing.T) {
 			t.Errorf("show 的能力那一栏里没有 %q：\n%s", want, out)
 		}
 	}
+	// 端点那一栏同理：声明过的端点要看得到，这是命令里唯一能看到它的地方
+	// （list 那张表不列它）。
+	if want := string(channel.EndpointChatCompletions); !strings.Contains(out, want) {
+		t.Errorf("show 的输出里应当有声明过的端点 %s：\n%s", want, out)
+	}
 	// 没填的那几栏打的是「-」而不是 0：打 0 会让人以为那是一个量出来的上限。
 	if !strings.Contains(out, "输入上限") {
 		t.Errorf("show 的输出里应当有「输入上限」那一行：\n%s", out)
+	}
+}
+
+// TestModelUpdateEndpoints 钉住端点那一栏的读写往返，以及它与六个能力
+// **同组**这件事。
+//
+// 命令行这一层只把字符串变成结构，所以「设进去了」只能由「写进去再读出来」
+// 证明（与 TestModelCreateThenList 同一条理由）。三件事一起钉：
+// 只改端点不动六个能力、只改能力不动端点、空串落成「明确一条都不支持」
+// 而不是「没配过」——最后这一条正是这一列的三态里最容易写丢的一档。
+func TestModelUpdateEndpoints(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	canonical := uniqueName("model")
+	_, _ = captureStreams(t, func() {
+		if err := runModelCreate([]string{
+			"--model", canonical, "--display", "展示名",
+			"--tools", "--endpoints", string(channel.EndpointChatCompletions),
+		}); err != nil {
+			t.Fatalf("create 失败: %v", err)
+		}
+	})
+
+	got := readModel(t, db, canonical).Capabilities
+	if !reflect.DeepEqual(got.Endpoints, []channel.Endpoint{channel.EndpointChatCompletions}) {
+		t.Errorf("create 之后端点 = %v，期望 [/v1/chat/completions]", got.Endpoints)
+	}
+
+	// 只改端点：六个能力原样留着。
+	_, _ = captureStreams(t, func() {
+		if err := runModelUpdate([]string{
+			"--model", canonical,
+			"--endpoints", "/v1/responses,/v1/messages",
+		}); err != nil {
+			t.Fatalf("update --endpoints 失败: %v", err)
+		}
+	})
+	got = readModel(t, db, canonical).Capabilities
+	wantEndpoints := []channel.Endpoint{channel.EndpointResponses, channel.EndpointMessages}
+	if !reflect.DeepEqual(got.Endpoints, wantEndpoints) {
+		t.Errorf("端点 = %v，期望 %v", got.Endpoints, wantEndpoints)
+	}
+	if got.Tools == nil || !*got.Tools {
+		t.Error("只改端点不该动六个能力，tools 却变了")
+	}
+
+	// 只改能力：端点原样留着。
+	_, _ = captureStreams(t, func() {
+		if err := runModelUpdate([]string{"--model", canonical, "--reasoning"}); err != nil {
+			t.Fatalf("update --reasoning 失败: %v", err)
+		}
+	})
+	got = readModel(t, db, canonical).Capabilities
+	if !reflect.DeepEqual(got.Endpoints, wantEndpoints) {
+		t.Errorf("只改能力时端点应当原样留着，得到 %v，期望 %v", got.Endpoints, wantEndpoints)
+	}
+	if got.Reasoning == nil || !*got.Reasoning {
+		t.Error("--reasoning 应当被写上")
+	}
+
+	// 空串：明确一条都不支持。读回来必须是空清单而不是 nil——nil 是
+	// 「没配过」，两者在选路里的结论相反（见 catalog.Capabilities.Endpoints）。
+	_, _ = captureStreams(t, func() {
+		if err := runModelUpdate([]string{"--model", canonical, "--endpoints", ""}); err != nil {
+			t.Fatalf("update --endpoints '' 失败: %v", err)
+		}
+	})
+	got = readModel(t, db, canonical).Capabilities
+	if got.Endpoints == nil {
+		t.Error("--endpoints '' 落库应当是空数组（明确一条都不支持），读回来却是 nil（没配过）")
+	}
+	if len(got.Endpoints) != 0 {
+		t.Errorf("--endpoints '' 之后端点 = %v，期望空清单", got.Endpoints)
+	}
+
+	// 那一栏真的读得出来才算数：端点是端点，不是被折成「没配过」。
+	out, _ := captureStreams(t, func() {
+		if err := runModelGet([]string{"--model", canonical}); err != nil {
+			t.Fatalf("show 失败: %v", err)
+		}
+	})
+	if !strings.Contains(out, "端点") || !strings.Contains(out, "无（明确一条都不支持）") {
+		t.Errorf("show 的输出里端点那一栏应当是「无（明确一条都不支持）」：\n%s", out)
 	}
 }
 
@@ -577,6 +879,34 @@ func TestModelGetDocIsMachineReadable(t *testing.T) {
 		assertJSONField(t, model, "knowledge_cutoff", nil)
 		assertJSONField(t, model, "release_date", nil)
 		assertJSONField(t, model, "canonical_model_id", nil)
+	})
+
+	t.Run("端点那一栏的三态打得开", func(t *testing.T) {
+		// 这一列可空，而 NULL（没配过）与 `[]`（明确一条都不支持）在选路里
+		// 结论相反，所以 JSON 里也不能都折成空数组——与能力那六个三态同一条
+		// 理由（见 nullableEndpoints）。
+		cases := []struct {
+			name      string
+			endpoints []channel.Endpoint
+			want      any
+		}{
+			{"没配过", nil, nil},
+			{"明确一条都不支持", []channel.Endpoint{}, []any{}},
+			{
+				"支持两条",
+				[]channel.Endpoint{channel.EndpointMessages, channel.EndpointResponses},
+				[]any{"/v1/messages", "/v1/responses"},
+			},
+		}
+		for _, tc := range cases {
+			m := catalog.Model{
+				ID: 23, CanonicalName: "m3", DisplayName: "模型三",
+				Capabilities: catalog.Capabilities{Endpoints: tc.endpoints},
+				UpdatedAt:    time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+			}
+			model := jsonObjectField(t, jsonRoundTrip(t, modelGetDoc(m)), "model")
+			assertJSONField(t, model, "endpoints", tc.want)
+		}
 	})
 }
 
