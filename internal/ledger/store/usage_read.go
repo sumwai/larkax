@@ -175,9 +175,9 @@ type BillingRequestFilter struct {
 
 // BillingRequestRow 是一条计费请求里读出来的列。
 //
-// FinalAmount 与 SettledAt 都可空：只有 settled 的那些行才有值。用 sql.Null*
-// 而不是零值表示「没有」——一笔真实结算出来的 0 元与「还没结算」是两件事，
-// 而它们在零值上长得一样。
+// FinalAmount 与 SettledAt 可空：只有 settled 的那些行才有值。PricingRuleID 也可空：
+// 请求没有落到任何规则上时它写不进去。用 sql.Null* 而不是零值表示「没有」——一笔
+// 真实结算出来的 0 元与「还没结算」是两件事，而它们在零值上长得一样。
 type BillingRequestRow struct {
 	ID             int64
 	RequestID      string
@@ -193,6 +193,11 @@ type BillingRequestRow struct {
 	ErrorCode      sql.NullString
 	StartedAt      time.Time
 	SettledAt      sql.NullTime
+	// PricingRuleID 是定这一单价的那条规则（schema 里是 billing_requests.pricing_rule_id）。
+	// 规则事后可变，而账单要能回答「当时按哪条规则算的」，所以它跟着请求一起读回来。
+	// 写它的是预留路径（store.go 的 SaveReservation）：没有落到任何规则上时那里
+	// 把 0 落成 NULL。
+	PricingRuleID sql.NullInt64
 }
 
 // BillingRequestPage 是一页计费请求，More 的含义同 UsageEventPage。
@@ -203,11 +208,12 @@ type BillingRequestPage struct {
 
 // billingRequestColumns 是读一条计费请求要选的列，顺序与下面的 Scan 一致。
 //
-// final_amount 保持它自己的可空形态（::text 之后仍是 NULL），调用方按
-// sql.NullString 读出来；reserved_amount 是 NOT NULL，直接 ::text 再解析。
+// 这三列的取法各写一次，其余按原样扫：final_amount 取 ::text 之后仍是 NULL，按
+// sql.NullString 读出来；pricing_rule_id 是可空 bigint，按 sql.NullInt64 读；
+// reserved_amount 是 NOT NULL，直接 ::text 再解析。
 const billingRequestColumns = `id, request_id, user_id, canonical_model, upstream_model,
 	protocol, streamed, reserved_amount::text, final_amount::text, reserved_asset,
-	status, error_code, started_at, settled_at`
+	status, error_code, started_at, settled_at, pricing_rule_id`
 
 // BillingRequests 读一页计费请求，新的在前。
 //
@@ -257,7 +263,7 @@ func (s *Store) BillingRequests(ctx context.Context, f BillingRequestFilter) (Bi
 		if err := rows.Scan(&row.ID, &row.RequestID, &row.UserID, &row.CanonicalModel,
 			&row.UpstreamModel, &row.Protocol, &row.Streamed, &reservedAmountRaw,
 			&row.FinalAmount, &row.Asset, &row.Status, &row.ErrorCode,
-			&row.StartedAt, &row.SettledAt); err != nil {
+			&row.StartedAt, &row.SettledAt, &row.PricingRuleID); err != nil {
 			return BillingRequestPage{}, fmt.Errorf("读计费请求失败: %w", err)
 		}
 		// 与 UsageEvents 同一条：金额列取 ::text 再过 money.Parse。money.Amount
