@@ -40,6 +40,15 @@ func TestUserCreateRejectsBadFlags(t *testing.T) {
 		// 连库之前就挡下来。两个都拦：不带空白的，与去掉空白之后是纯数字的。
 		{"--name 是纯数字", []string{"--name", "123"}, "--user"},
 		{"--name 去掉空白后是纯数字", []string{"--name", " 007 "}, "--user"},
+		// 邮箱的写法也在连库之前判（见 auth.ValidateEmail）。写错的邮箱落库之后
+		// 按它发信发不到，而撞上唯一约束的是别人那一格——这一列大小写不敏感，
+		// 同一个人的两种写法只容得下一个。
+		{"--email 不成邮箱", []string{"--name", "alice", "--email", "not-an-email"},
+			"不是一个邮箱地址"},
+		{"--email 域名没有点", []string{"--name", "alice", "--email", "alice@gmail"},
+			"域名里要有一个点"},
+		{"--email 去掉空白后仍不成邮箱", []string{"--name", "alice", "--email", "  not-an-email  "},
+			`"not-an-email"`},
 	}
 
 	for _, tc := range cases {
@@ -87,6 +96,68 @@ func TestUserCreateRejectsNumericNameLeavesNoRow(t *testing.T) {
 	}
 	if rows != 0 {
 		t.Errorf("被拒的那一次在库里留了 %d 行 %q", rows, numeric)
+	}
+}
+
+// TestUserCreateWithEmptyEmailStoresNULL 钉住「空邮箱不是格式错」。
+//
+// 这一列「没填」在库里的样子是 NULL，而 --email "" 与 --email "   " 都是那个意思。
+// 判成格式错的话，使用者只好编一个邮箱出来；而落成空串更坏——空串在 citext 里是
+// 一个具体的值，唯一约束只容得下一个，第二个不填邮箱的人会撞上第一个。
+func TestUserCreateWithEmptyEmailStoresNULL(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+
+	for _, email := range []string{"", "   "} {
+		name := uniqueName("nomail")
+		r := runOnce(t, runUserCreate, []string{"--name", name, "--email", email})
+		if r.err != nil {
+			t.Fatalf("--email %q 应当通过（空表示不填），却报错: %v", email, r.err)
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(r.stdout), 10, 64)
+		if err != nil {
+			t.Fatalf("stdout 不是用户 ID：%q（%v）", r.stdout, err)
+		}
+
+		var got sql.NullString
+		if err := db.QueryRowContext(t.Context(),
+			`SELECT email FROM users WHERE id = $1`, id).Scan(&got); err != nil {
+			t.Fatalf("查库失败: %v", err)
+		}
+		if got.Valid {
+			t.Errorf("--email %q 在库里落成了 %q，期望 NULL", email, got.String)
+		}
+	}
+}
+
+// TestUserCreateRejectsBadEmailLeavesNoRow 过真命令、连真库。
+//
+// 与纯数字名字那一条同一个形状：命令报参数错（退出码 2），以及库里**没有多出
+// 一行**。只断言报错不够——先写库再报错的实现同样会打出那句话，而那一行已经
+// 躺在库里了。
+func TestUserCreateRejectsBadEmailLeavesNoRow(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+	name := uniqueName("badmail")
+
+	r := runOnce(t, runUserCreate, []string{"--name", name, "--email", "not-an-email"})
+	if r.err == nil {
+		t.Fatal("写错的邮箱应当报错")
+	}
+	if code := exitCode(r.err); code != exitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错那一档）：%v", code, exitUsage, r.err)
+	}
+	if !strings.Contains(r.err.Error(), "不是一个邮箱地址") {
+		t.Errorf("报错没说清原因：%v", r.err)
+	}
+
+	var rows int
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT count(*) FROM users WHERE username = $1`, name).Scan(&rows); err != nil {
+		t.Fatalf("查库失败: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("被拒的那一次在库里留了 %d 行 %q", rows, name)
 	}
 }
 
@@ -619,6 +690,10 @@ func TestUserUpdateParamsMapsFlagsToColumns(t *testing.T) {
 		{"--display-name 空串", []string{"display-name"},
 			userUpdateFlags{displayName: ""}, `display_name=""`},
 		{"--email 空串", []string{"email"}, userUpdateFlags{email: ""}, `email=""`},
+		// 只有空白的邮箱同样是清空，不是格式错（判据两头空白先去掉，见
+		// auth.ValidateEmail）：它要在折旗标这一步就活下来，落成 NULL 的是下一
+		// 步（auth 的 addText）。
+		{"--email 只有空白", []string{"email"}, userUpdateFlags{email: "   "}, `email="   "`},
 	}
 
 	for _, tc := range cases {
@@ -700,6 +775,9 @@ func TestUserUpdateRejectsBadFlags(t *testing.T) {
 		{"--admin 与 --no-merchant", []string{"--user", "alice", "--admin", "--no-merchant"},
 			"--admin 与 --no-merchant 矛盾"},
 		{"--status 不认识", []string{"--user", "alice", "--status", "frozen"}, "未知的用户状态"},
+		// 邮箱的写法同一条约定：连库之前判，报参数错（见 auth.ValidateEmail）。
+		{"--email 不成邮箱", []string{"--user", "alice", "--email", "not-an-email"},
+			"不是一个邮箱地址"},
 	}
 
 	for _, tc := range cases {
@@ -716,6 +794,56 @@ func TestUserUpdateRejectsBadFlags(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestUserUpdateRejectsBadEmailLeavesTheRowUntouched 过真命令、连真库。
+//
+// 「那一行一个字都不变」要看两列：邮箱没被换成那个写错的值，updated_at 也没动
+// ——写语句里每次都带 `updated_at = now()`（见 auth.UpdateUser），所以「参数错
+// 报了出来，而那一行还是被写了一次」的实现会在这里现形。
+func TestUserUpdateRejectsBadEmailLeavesTheRowUntouched(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+
+	name := uniqueName("badmail-update")
+	id := createUserWithRole(t, name, name+"@example.com", string(auth.RoleUser))
+
+	before := readUserEmail(t, db, id)
+
+	r := runOnce(t, runUserUpdate, []string{"--user", name, "--email", "not-an-email"})
+	if r.err == nil {
+		t.Fatal("写错的邮箱应当报错")
+	}
+	if code := exitCode(r.err); code != exitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错那一档）：%v", code, exitUsage, r.err)
+	}
+	if !strings.Contains(r.err.Error(), "不是一个邮箱地址") {
+		t.Errorf("报错没说清原因：%v", r.err)
+	}
+
+	after := readUserEmail(t, db, id)
+	if after.email != before.email || !after.updatedAt.Equal(before.updatedAt) {
+		t.Errorf("被拒的那一次改动了那一行：邮箱 %v → %v，更新时间 %v → %v",
+			before.email, after.email, before.updatedAt, after.updatedAt)
+	}
+}
+
+// userEmail 是这次改动会碰到的那两列：邮箱本身，以及「这一行最后一次被改是
+// 什么时候」。两者一起看，才拦得住「语句没生效但确实跑了一次」的那种实现。
+type userEmail struct {
+	email     sql.NullString
+	updatedAt time.Time
+}
+
+func readUserEmail(t *testing.T, db *sql.DB, id int64) userEmail {
+	t.Helper()
+	var got userEmail
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT email, updated_at FROM users WHERE id = $1`, id).
+		Scan(&got.email, &got.updatedAt); err != nil {
+		t.Fatalf("查库失败: %v", err)
+	}
+	return got
 }
 
 // user update 也在 json 模式下**连库之前**被拦下（同 apikey 那一组）。

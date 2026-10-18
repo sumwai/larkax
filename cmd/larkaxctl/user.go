@@ -31,6 +31,7 @@ const userShortUsage = `larkaxctl user 管理用户。
                         [--admin|--no-admin]
 
 create 只把新用户的 ID 打到 stdout；用户名已被占用时直接报错，不改已有的用户。
+用户名的形状与邮箱的格式都在连库之前判一遍，不合格报参数错。
 list 与 get 只读；update 只改显式给出的字段，改了什么打到 stdout。这四条都不碰
 渠道凭证，也都不需要 LARKAX_MASTER_KEYS。
 
@@ -66,6 +67,25 @@ create 建一个新用户，只把新用户的 ID 打到 stdout。
 user get 与 user update 都按 ID 去找它。名字里带一个非数字字符即可
 （1a、a1 都收，1.0、1e3 这类也不是整数）。
 
+邮箱的写法也判，收的是**地址本身**那一种，五条：一个 @、@ 两边都不为空；
+域名里有一个点；两半都不以点开头或结尾、也不出现连着两个点；域名里用点分开的
+每一段都不以连字符开头或结尾；字符都在允许之列——本地部分只收字母、数字与一组
+常见符号（非 ASCII 的字母与数字也收），域名只收字母、数字、连字符与点，完整的
+那一组写在报错里。
+
+user+tag@example.com、first.last@example.com、a@b.example.com 都收；
+not-an-email、@example.com、first@second@example.com、a b@example.com、
+a@example.com.、a@example（域名没有点）、a@-b.example.com 都报参数错。带显示名、
+注释或引号的写法（Bob <bob@example.com>、bob@example.com (comment)）也报错——
+这一列存的是地址，不是一封信的收件人那一栏。
+
+非 ASCII 那一条是有代价的：这一列的大小写不敏感只覆盖 ASCII 的字母，全角的 Ａ 与
+半角的 A、西里尔文的同形字与拉丁字母都是**两个不同的值**，同一个人写两遍会并存成
+两条。
+
+**空邮箱不是格式错**：create 的 --email 给空串是不填这一列（库里是 NULL），
+update 的 --email 给空串是把它清回 NULL（见下面 update）。
+
 list 按 id 从小到大列出用户，一栏一个字段：ID、用户名、状态、角色、邮箱。
 
 两个筛选项都可以同时给，也可以都不给（不给就是列全部）：
@@ -86,7 +106,8 @@ get 按 ID 或用户名读一个用户的全部字段：除上面那几栏，还
 update 只改**显式给出**的字段，一个都没给就报参数错（不做静默空操作）：
 
   --status       取 active、suspended、banned 之一。
-  --email        新邮箱。给空串表示清掉这一列（写回 NULL），不是写成一个空串。
+  --email        新邮箱，写法要过上面那条格式校验。给空串表示清掉这一列
+                 （写回 NULL），不是写成一个空串，也不是格式错。
   --display-name 新展示名。空串同上，表示清掉。
   --merchant     把 is_merchant 置真。
   --no-merchant  把 is_merchant 置假（admin 上不能单独给，见下）。
@@ -185,6 +206,13 @@ func runUserCreate(args []string) error {
 	}
 	parsedRole, err := auth.ParseRole(*role)
 	if err != nil {
+		return usageErr(err)
+	}
+	// 邮箱的形状同样在连库之前判（判据在 auth，见 auth.ValidateEmail）。空串是
+	// 「不填这一列」，不是格式错——判据放行它，这里也就不必分两种写法。
+	// 复用上面那个 err（这里不 `:=`）：新起一个会把外层这个名字遮掉，而外层那个
+	// 紧接着还要读（下面 cfg 那一处），遮出的是同一个名字的两个作用域。
+	if err = auth.ValidateEmail(*email); err != nil {
 		return usageErr(err)
 	}
 
@@ -431,6 +459,12 @@ func userUpdateParams(seen map[string]bool, f userUpdateFlags) (auth.UpdateUserP
 		p.Status = &parsed
 	}
 	if seen["email"] {
+		// 取值不是一个邮箱地址就当场报错（判据在 auth，见 ValidateEmail），
+		// 不落库：这一列上还有唯一约束，一个写错的邮箱会占掉别人的那一格。
+		// 空串过这一关——它是「清掉这一列」，由下面折成 NULL。
+		if err := auth.ValidateEmail(f.email); err != nil {
+			return p, err
+		}
 		p.Email = &f.email
 	}
 	if seen["display-name"] {
