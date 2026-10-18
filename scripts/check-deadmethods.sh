@@ -48,6 +48,11 @@
 # 代价：只被当作方法值传递（`f := x.Name`，不带括号）的方法会被误报。本仓目前
 # 没有这种写法，自测里钉住了这个取舍。
 #
+# 撞上它时**换写法，不加白名单条目**：接线时一律把方法包一层闭包、按调用点写
+# （`Check: func(ctx context.Context) error { return c.VocabReady(ctx) }`），
+# 于是那处接线本身就有了调用语法，扫描器看得见。为一条**写法**问题加白名单条目
+# 是一条永久豁免：条目只许减不许增，而加了之后没人会再回头看它。
+#
 # **看不见跨包的接口调用。** 调用方在别的模块里时（标准库经接口回调的方法都是
 # 这样：errors.Is 调 Unwrap、encoding/json 调 UnmarshalJSON、fmt 调 GoString、
 # log/slog 调 LogValue），文本扫描看不到调用点。这类是**结构性**假阳性，不是
@@ -438,7 +443,9 @@ func collectDecls(f *ast.File, rel string, out *[]decl) {
 //
 // 只看 `CallExpr`，不看所有 `SelectorExpr`：后者会把字段访问（`f.Units`）
 // 与注释里的调用示例一起算成调用点，而这两类恰恰是这道门要穿透的东西。
-// 代价是「只被当作方法值传递」（`f := x.Name`，不带括号）的方法会被误报。
+// 代价是「只被当作方法值传递」（`f := x.Name`，不带括号）的方法会被误报；
+// 撞上它的处置见文件开头「边界（假阳性 / 假阴性）」那一节——换写法，
+// 不是加白名单条目。
 func collectCalls(f *ast.File, called map[string]bool) {
 	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -678,6 +685,9 @@ if [ -n "$new" ]; then
     echo "   $k"
   done <<<"$new"
   echo "  （加进白名单就要同时把 MAX_ENTRIES 往上调，那是一个会被 review 看到的动作）"
+  echo "  （也可能是它只被当作方法值传递：接线处写成 Check: c.VocabReady"
+  echo "    这种不带括号的形式，扫描器看不见。"
+  echo "    包一层闭包按调用点写即可，不要为它加白名单条目）"
 fi
 
 # 陈旧条目只提示，不改退出码——见文件开头「白名单」那一节。
