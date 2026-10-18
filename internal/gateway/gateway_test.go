@@ -684,6 +684,13 @@ func TestUpstreamFailureReleasesReservation(t *testing.T) {
 //   - 上游接受了请求却没吐字：状态码照实记（适配器在流的第一条事件里
 //     交下了那个 2xx），分类是另一档；没有 start 事件时留空
 //   - 不是上游的失败：两列都留空（插件阻断时上游其实是好的）
+//
+// 变异记录：上面那两条「接受之后没吐字」的行一起把 `aborted.status > 0` 的边界
+// 钉住了——那是 upstreamEvidence 里唯一一处看 streamAbortedError 自己的状态的
+// 判断。改成 `>= 0` 是**等价变异**：多出来的一格是状态码为 0，而把它照实写出去
+// 得到的正是 (0, ErrorUpstreamStreamAborted)，与下面那一支回落时逐值相同；
+// 状态码为负数时 `>= 0` 同样为假，两版都走回落支。唯一分得开的是**这一支有没有
+// 被走**，而那不改变返回值。
 func TestUpstreamFailureCarriesEvidenceToRelease(t *testing.T) {
 	for _, tc := range []struct {
 		name string

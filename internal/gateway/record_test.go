@@ -387,6 +387,15 @@ func TestRecordLogCarriesRequestID(t *testing.T) {
 }
 
 // 没接写入方时一切照常：它是可选接线，缺了不该 panic。
+//
+// 变异记录：recordAttempts 那条 `g.Recorder == nil || len(attempts) == 0` 改成
+// `&&` 是**等价变异**，两半各有一条理由：
+//
+//   - Recorder 为 nil 时，循环里唯一会碰它的 recordCall 自己就有一条同样的守卫
+//     （见 gateway.go 的 recordCall），照样什么都不写；循环里其余的事
+//     （verdictOf、attemptTime 与 g.now()）都是纯函数，now() 也是 nil-safe。
+//     也就是说那条守卫的第二半是**双保险**，去掉它不会多出一件可观测的事。
+//   - attempts 为空那一半：守卫放行之后循环体一次都不执行，同样什么都不做。
 func TestRecordOptional(t *testing.T) {
 	h := newHarness(t)
 	h.gw.Recorder = nil
