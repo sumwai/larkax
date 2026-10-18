@@ -314,6 +314,67 @@ func TestUpdateKeyLeavesLimitsAloneWhenOnlyMetaChanges(t *testing.T) {
 	assertLimits(ctx, t, db, created.ID, strPtr("45"), strPtr("7.25000000"))
 }
 
+// TestUpdateKeyKeepsTheRightOwner 钉住那条 UPDATE 的连接条件。
+//
+// 语句是 `UPDATE api_keys … FROM users …`，两表靠 `u.id = k.user_id` 连起来。
+// 这个条件一旦写松（比如只留 `WHERE k.id = $1`），两表就成了叉积：被改的那一
+// 行仍然只有一行、`RETURNING` 也只回一行，但交回来的 username 会变成**另一个
+// 用户**的名字——实测取到的是 users 里扫到的头一行。而 `QueryRowContext` 对多
+// 出来的行静默取第一行，所以症状是「回显报了别人的属主」，不是报错。库里那一行
+// 其实没被写坏，坏的是命令告诉运维的那句话，只断言「改成功」看不出来。
+//
+// 安排上有一处是刻意的：建两个用户，改**后建的**那一个的 key。叉积取到的是头
+// 一行（先建的那个），被改的若是头一行，这个错误就正好看不出来——实测过：改先
+// 建的那把时，写松的语句照样交回正确的用户名，用例是绿的。
+func TestUpdateKeyKeepsTheRightOwner(t *testing.T) {
+	ctx := t.Context()
+	db := testDB(ctx, t)
+	store := New(db)
+
+	alice := newUser(ctx, t, db, userStatusActive)
+	bob := newUser(ctx, t, db, userStatusActive)
+
+	hers, err := store.Create(ctx, CreateParams{UserID: alice.ID, Name: "alice 的"})
+	if err != nil {
+		t.Fatalf("建 key 失败: %v", err)
+	}
+	his, err := store.Create(ctx, CreateParams{UserID: bob.ID, Name: "bob 的"})
+	if err != nil {
+		t.Fatalf("建 key 失败: %v", err)
+	}
+
+	got, err := store.UpdateKey(ctx, his.ID, KeyParams{SetStatus: true, Status: keyStatusRevoked})
+	if err != nil {
+		t.Fatalf("吊销失败: %v", err)
+	}
+
+	if got.ID != his.ID {
+		t.Errorf("交回的 id = %d，期望 %d", got.ID, his.ID)
+	}
+	if got.UserID != bob.ID {
+		t.Errorf("交回的 user_id = %d，期望 %d", got.UserID, bob.ID)
+	}
+	if got.Username != bob.Username {
+		t.Errorf("交回的 username = %q，期望 %q："+
+			"那条语句的连接条件写松了，两表成了叉积，username 取到了另一个用户"+
+			"（alice 是 %q）", got.Username, bob.Username, alice.Username)
+	}
+
+	// 另一个用户的那把必须原样：改错了行与报错了名字是两件事，两件都要挡。
+	untouched, err := store.GetKey(ctx, hers.ID)
+	if err != nil {
+		t.Fatalf("读另一把 key 失败: %v", err)
+	}
+	if untouched.UserID != alice.ID || untouched.Username != alice.Username {
+		t.Errorf("另一把的属主被动过了：id=%d username=%q，期望 id=%d username=%q",
+			untouched.UserID, untouched.Username, alice.ID, alice.Username)
+	}
+	if untouched.Status != keyStatusActive || untouched.Name != "alice 的" {
+		t.Errorf("另一把被动过了：status=%q name=%q，期望 %q / %q",
+			untouched.Status, untouched.Name, keyStatusActive, "alice 的")
+	}
+}
+
 // TestUpdateKeyRejectsNonPositiveID 钉住 id 的检查在连库之前发生。
 //
 // 0 与负数在库里不可能有一行（id 是 bigserial），放它进查询只会得到一句
