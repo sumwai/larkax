@@ -97,6 +97,12 @@
 # 「它可达」是分析器的近似，不是有人调了它。这与「有门与没门在输出上长得一样」
 # 是同一个形状（见 LESSONS 第 22 条）。
 #
+# **gap 挂的 issue 一旦关闭，条目就成了死链。** `peak.go` 那两条原先挂 #205，
+# 而 #205 只做了「把它标记成未接线」（包注释 + 文件头 + docs），**真的接进 DSL
+# 那一步没做**——接线改挂 #542。将来再有 gap 的 issue 关闭时，先问一句
+# 「缺口是在那条 issue 里兑现了，还是被留在原地了」：兑现了就删条目，
+# 留在原地就换一条活的跟踪 issue，别让它指向一个关掉的条目。
+#
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
 internal/calendar/calendar.go    | Date.cmp                        | lib | 只被内存实现调用，而内存实现是测试夹具（见 memory.go 那几条）
@@ -107,8 +113,8 @@ internal/calendar/memory.go    | MemorySource.SetDefaultRange   | lib | 测试�
 internal/calendar/memory.go    | MemorySource.SetYearState      | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.YearState         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | NewMemorySource                | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
-internal/calendar/peak.go        | NewPeakSchedule                | gap | #205 峰谷计价没有生产调用方（接线之后 deadcode 也不再提醒它）
-internal/calendar/peak.go        | NewPeakWindow                  | gap | #205 峰谷计价没有生产调用方（接线之后 deadcode 也不再提醒它）
+internal/calendar/peak.go        | NewPeakSchedule                | gap | #542 峰谷计价没有生产调用方：规则 DSL 里还没有一个走 PeakAt 的函数（原挂 #205，那条只做了「标记成未接线」，接线这一步没做）
+internal/calendar/peak.go        | NewPeakWindow                  | gap | #542 峰谷计价没有生产调用方：规则 DSL 里还没有一个走 PeakAt 的函数（原挂 #205，那条只做了「标记成未接线」，接线这一步没做）
 internal/channel/httpx/httpx.go  | DrainAndClose                   | lib | HTTP 收尾辅助，给拿不到 *http.Response 的调用点用；目前只有测试在调它
 internal/ledger/account.go       | PayoutAccount                   | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
 internal/ledger/entry.go         | Entry.withPayout                | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
