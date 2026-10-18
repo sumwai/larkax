@@ -209,9 +209,10 @@ func checkProtocol(p channel.Protocol) error {
 // ErrMissingPricedAt 表示调用方没有在 pipeline.Charge 上设置 PricedAt。
 //
 // 与 ErrMissingProtocol 同一个形状，代价还更大一些：usage_events.priced_at
-// 是「事后复算按哪一刻的档位算的价」**唯一**的落点（见 pipeline.Charge
-// 的注释——价格按受理时刻定，拿结算时刻去复算会算出另一个档位的价，而两个价
-// 看起来都合理，靠账单本身分不出来）。
+// 是「这笔钱按哪一刻算的」唯一的落点——同一行的 local_hour 与 is_off_day 记的是
+// 那一刻的当地钟点与那一天算不算休息日，三者出自同一次求值（见 pipeline.Charge
+// 的注释）。价格按受理时刻定，拿结算时刻去复算会算出另一个档位的价，而两个价
+// 看起来都合理，靠账单本身分不出来。
 //
 // 它的零值落库是公元 1 年：不报错，事后也看不出那一行是「当时就是按这一刻
 // 算的」还是「漏设了」。分辨这两者只有写进去的那一刻还做得到，所以分辨放在

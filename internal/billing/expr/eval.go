@@ -14,6 +14,27 @@ import (
 	"github.com/sumwai/larkax/internal/money"
 )
 
+// LocalTime 是求值用到的「当地」口径：地区时区下的那个钟点，与那一天在日历上
+// 算不算休息日。
+//
+// 两个值出自**同一次**解析（见 runtime.resolveLocal）：钟点由时区折出来，
+// 日历属性由同一个时区折出来的那一天查出来。也就是说，它们与规则里
+// isPeak() / isWorkday() 判的是同一份依据，而不是结算那一侧另算一遍凑出来的。
+type LocalTime struct {
+	// Hour 是 Env.Region 的时区下 Env.At 是几点（0–23）。
+	//
+	// 它是这次求值解析「当地」时算出来的那个钟点，而这份解析是 isWorkday() /
+	// isHoliday() / isPeak() 共用的：只问 isWorkday() 的规则一样会填这一格，
+	// 不是只有峰谷那条路才有值。isPeak 的窗口按当地零点起算（见 PeakWindow），
+	// 所以这一格也是「当时当地几点」——复算一笔分时单子缺的输入。
+	Hour int
+	// OffDay 是当地那一天在日历上算不算休息日。
+	//
+	// 它是 isWorkday() 的相反数：周末与法定节假日都是休息日，调休补班日
+	// 不是（见 DayInfo.OffDay）。
+	OffDay bool
+}
+
 // Result 是一次求值的结果。
 //
 // 它只装单价与一次性费用，不装金额：单价乘用量由 billing.ComputeWithCharges
@@ -35,6 +56,30 @@ type Result struct {
 	// 写进 usage_events.priced_at（见 internal/ledger/store 的 Save）。
 	// 于是「当时按哪一刻算的价」事后读得出来，不必再猜。
 	At time.Time
+	// LocalTime 是这次求值用到的「当地」口径：Env.Region 的时区下 Env.At
+	// 是几点，以及那一天在日历上算不算休息日。
+	//
+	// 回传它是为复算：usage_events.local_hour / is_off_day 两列取的就是它
+	// （见 internal/ledger/store 的 insertUsageEvent）。那两列**必须**来自
+	// 求值自己——在结算或落库那一侧按 Env.Region 重算一遍，等于把一条计费
+	// 判据抄成两份，而两份迟早会不一致。
+	//
+	// # 什么时候有值
+	//
+	// 规则用到**地区**这一套口径时非 nil——isWorkday() / isHoliday() /
+	// isPeak() 里任意一个被求值过。其余情形为 nil，落库层写 NULL——
+	// 「不知道」，而不是把零值写成「当地 0 点、不是休息日」。
+	//
+	// hour(tz) 不算：它的时区由规则作者逐次给出，问的是那一个钟表，与地区的
+	// 日历不是一套口径；而那个时区名随规则源码落在
+	// billing_requests.pricing_expr_snapshot 里，复算拿它与 At 就够。给这类
+	// 规则填一个地区的钟点，会得到一个看起来权威、却与规则实际用的那个不同
+	// 的数——那比留空更糟。
+	//
+	// 最坏情况求值时恒为 nil：那一侧把条件整个换成 __worst（两支都求值，
+	// 条件不求），这几个函数根本不会被调到——与 Tier 留空同源
+	// （见 EvalWorstCase），而预留那一次的结果本来也不落库。
+	LocalTime *LocalTime
 	// Keys 是这条规则可能给出的键，已排序。
 	//
 	// 它是编译期收集到的并集**加上**本次结果里出现的键：
@@ -122,6 +167,11 @@ func (p *Program) result(rt *runtime, out any) (Result, error) {
 	}
 
 	res := Result{At: rt.at, Tier: rt.tierName}
+	// 这两个值只取**已经解析出来的**那一份，不在这里补解析：没解析过就说明
+	// 规则没用地区那一套口径，这两格没有值可写（见 Result.LocalTime）。
+	if rt.local != nil {
+		res.LocalTime = &LocalTime{Hour: rt.local.hour, OffDay: rt.local.info.OffDay}
+	}
 
 	// 先落到浮点，全部校验通过之后一次性转成 money.Amount。
 	// **舍入只在这一个地方发生**，之后全是整数运算——

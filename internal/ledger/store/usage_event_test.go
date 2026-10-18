@@ -209,10 +209,12 @@ func TestSaveWritesUsageEvent(t *testing.T) {
 		t.Errorf("priced_at = %s，期望 %s（受理时刻）", got.PricedAt, acceptAt)
 	}
 
-	// 下面这几列这一轮**故意**留空，理由各自写在 insertUsageEvent 上：
-	// 求值那一侧今天不报「用了哪个时区、算的是哪一天」，上游成本的口径也还
-	// 没定（issue #163 的第 2 条）。断言 NULL 是为了让「哪天接上」必须显式
-	// 改这一处，而不是悄悄多出一个看起来权威的值。
+	// 下面这几列在这个夹具上应当是 NULL，理由各自写在 insertUsageEvent 上：
+	// 这个夹具的 Charge 没带当地口径（LocalTime 为 nil），上游成本的口径也还
+	// 没定（issue #163 的第 2 条）。断言 NULL 是为了让「拿零值顶上」这种改法
+	// 必须显式改这一处——那种值在库里长得像「求值算出来就是当地 0 点、
+	// 不是休息日」，而它照样算得出数来。当地口径**有值**的那一支由
+	// TestSaveWritesLocalBasis 钉住。
 	for _, tc := range []struct {
 		column string
 		isNull bool
@@ -226,7 +228,7 @@ func TestSaveWritesUsageEvent(t *testing.T) {
 		{"duration_ms", !got.DurationMS.Valid},
 	} {
 		if !tc.isNull {
-			t.Errorf("%s 有值，期望 NULL——这一列这一轮不写", tc.column)
+			t.Errorf("%s 有值，期望 NULL——这个夹具没有给它值", tc.column)
 		}
 	}
 

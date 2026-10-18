@@ -33,6 +33,10 @@ type testCalendar struct {
 	peakMinutes map[int]bool
 	// saw 记下 Peak 收到的入参。
 	saw []peakCall
+	// dayCalls 数 DayInfo 被查了几次。求值把「当地日」的那一份解析缓存下来，
+	// 所以同一次求值里无论问几遍都只该是一次数——用例拿它钉住这件事
+	// （见 localtime_test.go）。
+	dayCalls int
 }
 
 // peakCall 是一次 Peak 调用的入参。
@@ -54,6 +58,7 @@ func (c *testCalendar) TimeZone(region string) (string, error) {
 }
 
 func (c *testCalendar) DayInfo(region string, day time.Time) (DayInfo, error) {
+	c.dayCalls++
 	if c.fails {
 		return DayInfo{}, ErrCalendarRequired
 	}

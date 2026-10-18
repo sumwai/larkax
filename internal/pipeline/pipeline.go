@@ -562,32 +562,27 @@ type Charge struct {
 	// 档位的价——两个价看起来都合理，差别只在用的是哪一刻，所以靠账单
 	// 本身分不出来。
 	//
-	// **下面三个字段里只有 PricedAt 会落库。** 它落进 usage_events.priced_at
-	// （见 internal/ledger/store 的 Save），那是「这笔钱是按哪一刻的档位算的」
-	// 唯一的落点——复算入口本身还没写，但复算要的输入从这一刻起留痕了。
-	// LocalHour 与 IsOffDay 目前仍只在内存里：结算路径从不填它们（见下），
-	// 落库层因此把对应的两列写成 NULL——「不知道」——而不是把零值写成
-	// 「当地 0 点、不是休息日」。
+	// 它与下面的 LocalTime 一起落进 usage_events（priced_at 与
+	// local_hour / is_off_day，见 internal/ledger/store 的 Save）：「这笔钱
+	// 是按哪一刻、哪一档算的」事后读得出来，不必再猜。复算入口本身还没写，
+	// 但复算要的输入从这一刻起留痕了。
 	PricedAt time.Time
-	// LocalHour 与 IsOffDay 是同一次求值里用到的分时依据，为复算预留。
+	// LocalTime 是这次求值用到的「当地」口径：地区时区的钟点与那一天算不算
+	// 休息日，为复算预留。
 	//
-	// 它们与 PricedAt 描述的是**同一次求值**，所以三个字段必须取自同一个
-	// 时刻：把结算时刻的钟点配上受理时刻的 PricedAt，是一个从未发生过的
-	// 组合，而它照样算得出数来——照它对账会得到一个错的结论，且看不出错。
+	// 它与 PricedAt 描述的是**同一次求值**，取值也来自同一次求值的结果：
+	// Settle 从 val.LocalTime 搬过来，与 Prices、Tier、PricedAt 出自同一个
+	// expr.Result。所以「写进库的当地钟点」与「规则里 isPeak / isWorkday
+	// 当时判的那一档」是同一个值，而不是在这里按 Region 另算一遍凑出来的
+	// ——「At 折成当地哪一天」这一步在 expr 的求值运行时里，在这里重写一遍
+	// 等于把一条计费判据抄成两份，而两份迟早会不一致。把结算时刻的钟点配上
+	// 受理时刻的 PricedAt 同理：那是一个从未发生过的组合，而它照样算得出
+	// 数来，照它对账会得到一个错的结论，且看不出错。
 	//
-	// 结算路径**从不填这两个字段**（保持零值）：
-	//
-	//   - 「当地钟点」在规则里不是唯一的值——hour(tz) 的时区由规则作者
-	//     逐次给出，同一条规则里可以出现多个时区，也可以一次都不问钟点。
-	//     按 Env.Region 的时区填一个上去，会得到一个看起来权威、却可能
-	//     与规则实际用的那个不同的数，那比留空更糟。
-	//   - IsOffDay 由 Env.Region 与日历唯一确定，但「At 折成当地哪一天」
-	//     这一步在 expr 的求值运行时里。在这里重写一遍等于把一条计费判据
-	//     抄成两份，而两份迟早会不一致。
-	//
-	// 要填它们，得先让求值把「用了哪个时区、算的是哪一天」报回来。
-	LocalHour int
-	IsOffDay  bool
+	// 规则没有用到地区那一套口径（isWorkday / isHoliday / isPeak 一个都没走）
+	// 时为 nil，落库层写 NULL——「不知道」，而不是把零值写成「当地 0 点、
+	// 不是休息日」（那种值同样算得出数来）。判据在 expr.Result.LocalTime 上。
+	LocalTime *expr.LocalTime
 }
 
 // Reserve 计算并返回这次请求的预留。
@@ -1015,6 +1010,11 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 		Tier:     val.Tier,
 		// val.At 是这次求值用的时刻，也就是受理时刻（见 env）。
 		PricedAt: val.At,
+		// 当地那两个值同样从这次求值原样搬过来：写进 usage_events 的两格
+		// （local_hour / is_off_day）因此与上面那组价、那个档位出自同一次
+		// 求值，而不是结算这一侧按 Region 重算的。规则没用上地区那一套时
+		// 是 nil，落库层写 NULL——理由见 Charge.LocalTime。
+		LocalTime: val.LocalTime,
 	}, nil
 }
 
