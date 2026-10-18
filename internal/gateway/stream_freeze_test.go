@@ -514,7 +514,7 @@ func TestChatStreamKeepsGoingWhenTopUpWriteFails(t *testing.T) {
 // （ErrNoFreezeStep），所以只比哨兵的话分不出是哪一层拒的；分得开的是**拒在哪
 // 一层**：网关这一层把哨兵原样抛出，下面那层会在它外面包一句「当前 0」。
 //
-// 所以这条用例连错误值一起比。它钉的是「第二道防线自己就拒了，而没把这一步交给
+// 所以这条用例连错误的文本一起比。它钉的是「第二道防线自己就拒了，而没把这一步交给
 // 下游」——网关是公开类型，装配之外还有人能造它出来，这道防线不生效时，拒绝
 // 发生在哪一层就没人说得出。
 func TestChatStreamRejectsMissingFreezeStep(t *testing.T) {
@@ -524,7 +524,12 @@ func TestChatStreamRejectsMissingFreezeStep(t *testing.T) {
 	}})
 
 	_, err := h.gw.ChatStream(context.Background(), freezeRequest(), upstreamRequest(), Hooks{})
-	if err != pipeline.ErrNoFreezeStep {
+	if !errors.Is(err, pipeline.ErrNoFreezeStep) {
+		t.Fatalf("err = %v，期望拒的是 %v 这一族", err, pipeline.ErrNoFreezeStep)
+	}
+	// 分得开「拒在哪一层」的是错误的文本，不是 errors.Is——下面那层在哨兵外面
+	// 包了「当前 0」之后，errors.Is 照样为真，只有文本变了。
+	if err.Error() != pipeline.ErrNoFreezeStep.Error() {
 		t.Fatalf("err = %v，期望网关这一层原样抛出的 %v（不是下面那层包过的）",
 			err, pipeline.ErrNoFreezeStep)
 	}
