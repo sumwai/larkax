@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -453,4 +454,382 @@ func createUserWithRole(t *testing.T, name, email, role string) int64 {
 		t.Fatalf("stdout 不是用户 ID：%q（%v）", stdout, err)
 	}
 	return id
+}
+
+// ── user update ────────────────────────────────────────────────────────
+
+// describeParams 把折出来的参数渲染成一行，用作出错时的对照。
+//
+// 不用 %+v：那几个字段都是指针，格式化出来是地址——地址对不上时看不出差的是哪
+// 一格，更看不出差在「没给」（nil）还是「给了假」。
+func describeParams(p auth.UpdateUserParams) string {
+	var parts []string
+	text := func(label string, v *string) {
+		if v != nil {
+			parts = append(parts, fmt.Sprintf("%s=%q", label, *v))
+		}
+	}
+	flag := func(label string, v *bool) {
+		if v != nil {
+			parts = append(parts, fmt.Sprintf("%s=%v", label, *v))
+		}
+	}
+	text("status", p.Status)
+	text("email", p.Email)
+	text("display_name", p.DisplayName)
+	flag("is_merchant", p.IsMerchant)
+	flag("is_admin", p.IsAdmin)
+	return strings.Join(parts, " ")
+}
+
+// TestUserUpdateParamsMapsFlagsToColumns 是四条标记旗标的判据。
+//
+// 它不碰数据库：折旗标这一步在连库之前，也正是「一个要改的字段都没给」与那三组
+// 矛盾输入要当场报错的地方。逐格钉的是**指针的 nil**，不是布尔值——「没给这一列」
+// 必须落成 nil，落成 false 就等于每次 update 都顺手把那一列改掉。
+func TestUserUpdateParamsMapsFlagsToColumns(t *testing.T) {
+	cases := []struct {
+		name  string
+		seen  []string
+		flags userUpdateFlags
+		want  string
+	}{
+		{"--merchant", []string{"merchant"}, userUpdateFlags{merchant: true}, "is_merchant=true"},
+		{"--no-merchant", []string{"no-merchant"}, userUpdateFlags{noMerchant: true}, "is_merchant=false"},
+		// admin 天然也是 merchant：这一条是两列，取值取自 auth 的 Role.Flags。
+		{"--admin", []string{"admin"}, userUpdateFlags{admin: true}, "is_merchant=true is_admin=true"},
+		// --no-admin 只动 is_admin：merchant 那一栏根本不出现。
+		{"--no-admin", []string{"no-admin"}, userUpdateFlags{noAdmin: true}, "is_admin=false"},
+		{"--admin 与 --merchant 一起给（同一个意思）", []string{"admin", "merchant"},
+			userUpdateFlags{admin: true, merchant: true}, "is_merchant=true is_admin=true"},
+		{"--merchant 之后撤 admin", []string{"merchant", "no-admin"},
+			userUpdateFlags{merchant: true, noAdmin: true}, "is_merchant=true is_admin=false"},
+		{"--status", []string{"status"}, userUpdateFlags{status: "banned"}, `status="banned"`},
+		// 空串是**清空**，不是「没给」：两者取值都是空串，只有 seen 分得开。
+		{"--display-name 空串", []string{"display-name"},
+			userUpdateFlags{displayName: ""}, `display_name=""`},
+		{"--email 空串", []string{"email"}, userUpdateFlags{email: ""}, `email=""`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			seen := map[string]bool{}
+			for _, name := range tc.seen {
+				seen[name] = true
+			}
+
+			got, err := userUpdateParams(seen, tc.flags)
+			if err != nil {
+				t.Fatalf("应当通过，却报错: %v", err)
+			}
+			if rendered := describeParams(got); rendered != tc.want {
+				t.Errorf("折出来的列 = %q，期望 %q", rendered, tc.want)
+			}
+		})
+	}
+}
+
+// TestUserUpdateParamsRejectsContradictions 钉住三组互相打架的输入。
+//
+// 挑一个落库比报错省事，但那样命令照样退出 0，而库里那一行是不是想要的样子只能
+// 再读一遍才知道——「改身份」这类操作不该有这种结果。
+func TestUserUpdateParamsRejectsContradictions(t *testing.T) {
+	cases := []struct {
+		name  string
+		seen  []string
+		flags userUpdateFlags
+		want  string
+	}{
+		{"--merchant 与 --no-merchant", []string{"merchant", "no-merchant"},
+			userUpdateFlags{merchant: true, noMerchant: true}, "--merchant 与 --no-merchant"},
+		{"--admin 与 --no-admin", []string{"admin", "no-admin"},
+			userUpdateFlags{admin: true, noAdmin: true}, "--admin 与 --no-admin"},
+		// 这一组是「--admin 连 merchant 一起写」的另一面：一个要置真、一个要置假。
+		{"--admin 与 --no-merchant", []string{"admin", "no-merchant"},
+			userUpdateFlags{admin: true, noMerchant: true}, "--admin 与 --no-merchant 矛盾"},
+		{"一个字段都没给", nil, userUpdateFlags{}, "一个要改的字段都没给"},
+		{"--status 不认识", []string{"status"}, userUpdateFlags{status: "frozen"}, "未知的用户状态"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			seen := map[string]bool{}
+			for _, name := range tc.seen {
+				seen[name] = true
+			}
+
+			_, err := userUpdateParams(seen, tc.flags)
+			if err == nil {
+				t.Fatalf("应当报错，却通过了")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("错误信息 %q 里没有 %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// TestUserUpdateRejectsBadFlags 走的是**不碰数据库**的那几条路径。
+//
+// 与 create 同一条约定：参数检查必须发生在连库之前。这里连 DSN 都没设，
+// 所以「先连库再报错」的实现会以另一种失败收场（连不上库），而不是这些文案。
+func TestUserUpdateRejectsBadFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"没有 --user", []string{"--display-name", "x"}, "缺少 --user"},
+		{"--user 只有空白", []string{"--user", "   ", "--display-name", "x"}, "缺少 --user"},
+		{"一个字段都没给", []string{"--user", "alice"}, "一个要改的字段都没给"},
+		{"多出位置参数", []string{"--user", "alice", "extra", "--display-name", "x"}, "不接受位置参数"},
+		{"--merchant 与 --no-merchant", []string{"--user", "alice", "--merchant", "--no-merchant"},
+			"--merchant 与 --no-merchant"},
+		{"--admin 与 --no-admin", []string{"--user", "alice", "--admin", "--no-admin"},
+			"--admin 与 --no-admin"},
+		{"--admin 与 --no-merchant", []string{"--user", "alice", "--admin", "--no-merchant"},
+			"--admin 与 --no-merchant 矛盾"},
+		{"--status 不认识", []string{"--user", "alice", "--status", "frozen"}, "未知的用户状态"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runUserUpdate(tc.args)
+			if err == nil {
+				t.Fatalf("应当报错，却通过了")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("错误信息 %q 里没有 %q", err.Error(), tc.want)
+			}
+			if code := exitCode(err); code != exitUsage {
+				t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+			}
+		})
+	}
+}
+
+// user update 也在 json 模式下**连库之前**被拦下（同 apikey 那一组）。
+//
+// 钉的是顺序而不是那句话本身：DSN 指向一个没人听的端口，于是「先连库、再报不
+// 支持」的实现在这里会拿到一句「连接数据库失败」（退出码 3），而不是「还不支持
+// --format json」（退出码 2）——而写类命令上先做后报，意味着库里那一行已经改了。
+func TestUserUpdateRejectsJSONFormatBeforeTouchingTheDB(t *testing.T) {
+	withFormat(t, formatJSON)
+	t.Setenv("LARKAX_DB_DSN", "postgres://larkax:placeholder@127.0.0.1:1/larkax?sslmode=disable")
+
+	var err error
+	stdout, _ := captureStreams(t, func() {
+		err = runUserUpdate([]string{"--user", "1", "--display-name", "x"})
+	})
+	if err == nil {
+		t.Fatal("json 模式下应当把还没接上的写类命令拦下来")
+	}
+	if !strings.Contains(err.Error(), "不支持 --format json") {
+		t.Fatalf("错误信息 %q 里没有「不支持 --format json」——是不是先连库了", err.Error())
+	}
+	if !strings.Contains(err.Error(), "user update") {
+		t.Errorf("错误信息里要点名是哪条命令：%v", err)
+	}
+	if code := exitCode(err); code != exitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+	}
+	if stdout != "" {
+		t.Errorf("被拦下时 stdout 应当为空，得到 %q", stdout)
+	}
+}
+
+// TestUserUpdateEchoesTheDiff 钉住回显的形状。
+//
+// 首行点出改的是谁，之后一行一个**真的变了**的字段，「旧值 → 新值」。打这个
+// 而不是一句「已更新」：改身份这一类操作的下一步常常是核对，只给终点时核对的人
+// 只能自己再读一遍，而那时起点已经没了。
+func TestUserUpdateEchoesTheDiff(t *testing.T) {
+	setupEnv(t)
+
+	name := uniqueName("update")
+	id := createUserWithRole(t, name, name+"@example.com", "user")
+
+	r := runOnce(t, runUser, []string{"update", "--user", name, "--display-name", "改过的名字"})
+	if r.err != nil {
+		t.Fatalf("update 失败: %v\nstderr:\n%s", r.err, r.stderr)
+	}
+	if !strings.HasPrefix(r.stdout, "已改用户 "+name+"\n") {
+		t.Errorf("首行应当是「已改用户 %s」，实际：\n%s", name, r.stdout)
+	}
+	// 改之前那一行没有展示名（库里是 NULL），所以旧值那一栏是 `-`——与
+	// `user get` 那一侧同一套占位符。
+	if !strings.Contains(r.stdout, "展示名") || !strings.Contains(r.stdout, "- → 改过的名字") {
+		t.Errorf("没打出展示名那一格的变化：\n%s", r.stdout)
+	}
+	// 没变的字段不打：它们既不是这次改动的结果，要看当前状态用 user get。
+	for _, unwanted := range []string{"状态", "角色", "邮箱"} {
+		if strings.Contains(r.stdout, unwanted) {
+			t.Errorf("没变的 %s 也进了回显：\n%s", unwanted, r.stdout)
+		}
+	}
+
+	get := runOnce(t, runUser, []string{"get", "--user", strconv.FormatInt(id, 10)})
+	if get.err != nil {
+		t.Fatalf("get 失败: %v", get.err)
+	}
+	if !strings.Contains(get.stdout, "改过的名字") {
+		t.Errorf("库里的展示名没改成：\n%s", get.stdout)
+	}
+}
+
+// TestUserUpdateSameValuePrintsOnlyTheLeadLine 钉住「没变就不打」。
+//
+// 第二遍给同一个值：命令仍然成功（它不是幂等命令，只是这一次没有字段真的变），
+// 而 stdout 上只剩首行——回显说的是「库里的值变了」，不是「我请求过」。
+func TestUserUpdateSameValuePrintsOnlyTheLeadLine(t *testing.T) {
+	setupEnv(t)
+
+	name := uniqueName("update-noop")
+	createUserWithRole(t, name, "", "user")
+
+	for i := 1; i <= 2; i++ {
+		r := runOnce(t, runUser, []string{"update", "--user", name, "--display-name", "同一个名字"})
+		if r.err != nil {
+			t.Fatalf("第 %d 次 update 失败: %v\nstderr:\n%s", i, r.err, r.stderr)
+		}
+		wantArrow := i == 1
+		if strings.Contains(r.stdout, "→") != wantArrow {
+			t.Errorf("第 %d 次的回显不对（第 1 次应当有一格变化，第 2 次不该有）：\n%s",
+				i, r.stdout)
+		}
+	}
+}
+
+// TestUserUpdateMissingUserIsAConflict 钉住「要改的那一行不在」的退出码。
+//
+// 与读那一侧同一个哨兵、同一个码：脚本按码分派时，「换一个标识或先建用户」与
+// 「去看这次的报错本身」是两种处置。
+func TestUserUpdateMissingUserIsAConflict(t *testing.T) {
+	setupEnv(t)
+
+	r := runOnce(t, runUser, []string{"update", "--user", uniqueName("nobody"), "--display-name", "x"})
+	if r.err == nil {
+		t.Fatal("改一个不存在的用户应当报错")
+	}
+	if !errors.Is(r.err, auth.ErrUserNotFound) {
+		t.Errorf("错误 %v 不是 ErrUserNotFound", r.err)
+	}
+	if code := exitCode(r.err); code != exitConflict {
+		t.Errorf("退出码 = %d，想要 %d", code, exitConflict)
+	}
+}
+
+// TestUserUpdateEmailConflictIsAConflict 钉住撞唯一键那一档的退出码与文案。
+//
+// 退出码表把唯一键算作 4；错误信息里要带上撞上的那个值——否则使用者只知道
+// 「邮箱被占了」，不知道被谁占了。
+func TestUserUpdateEmailConflictIsAConflict(t *testing.T) {
+	setupEnv(t)
+
+	taken := uniqueName("taken") + "@example.com"
+	createUserWithRole(t, uniqueName("update-owner"), taken, "user")
+	name := uniqueName("update-victim")
+	createUserWithRole(t, name, "", "user")
+
+	r := runOnce(t, runUser, []string{"update", "--user", name, "--email", taken})
+	if r.err == nil {
+		t.Fatal("撞上别人的邮箱应当报错")
+	}
+	if !errors.Is(r.err, auth.ErrEmailTaken) {
+		t.Errorf("错误 %v 不是 ErrEmailTaken", r.err)
+	}
+	if !strings.Contains(r.err.Error(), taken) {
+		t.Errorf("错误信息里要带上撞上的那个值（%q）：%v", taken, r.err)
+	}
+	if code := exitCode(r.err); code != exitConflict {
+		t.Errorf("退出码 = %d，想要 %d", code, exitConflict)
+	}
+	if r.stdout != "" {
+		t.Errorf("失败时 stdout 应当为空，得到 %q", r.stdout)
+	}
+}
+
+// TestUserUpdateMarkersLandOnTheRightColumns 钉住四条标记旗标落进哪几列。
+//
+// 断言必须问库，不能只看 `user get` 的角色栏：roleOf 先看 is_admin，所以
+// `--admin` 只写了 is_admin 的话折出来同样是 admin——「两列都写了」在命令行这
+// 一侧看不出来，而它正是「改出来的 admin 与建出来的 admin 是同一种数据」那条
+// 不变式。
+func TestUserUpdateMarkersLandOnTheRightColumns(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	name := uniqueName("update-role")
+	id := createUserWithRole(t, name, "", "user")
+
+	markers := func() (isMerchant, isAdmin bool) {
+		t.Helper()
+		if err := db.QueryRowContext(t.Context(),
+			`SELECT is_merchant, is_admin FROM users WHERE id = $1`, id,
+		).Scan(&isMerchant, &isAdmin); err != nil {
+			t.Fatalf("读角色标记失败: %v", err)
+		}
+		return isMerchant, isAdmin
+	}
+
+	// 每一步都从**上一步留下的那一行**起步，所以后两条的顺序不是随意的：
+	// --no-admin 只有从一个真 admin 出发才证明得了「merchant 不动」。
+	steps := []struct {
+		args                    []string
+		wantMerchant, wantAdmin bool
+	}{
+		{[]string{"--admin"}, true, true},
+		{[]string{"--no-admin"}, true, false},
+		{[]string{"--no-merchant"}, false, false},
+		{[]string{"--merchant"}, true, false},
+	}
+
+	for _, step := range steps {
+		args := append([]string{"update", "--user", name}, step.args...)
+		if r := runOnce(t, runUser, args); r.err != nil {
+			t.Fatalf("%v 失败: %v\nstderr:\n%s", step.args, r.err, r.stderr)
+		}
+		if m, a := markers(); m != step.wantMerchant || a != step.wantAdmin {
+			t.Errorf("%v 之后库里是 (merchant=%v, admin=%v)，期望 (%v, %v)",
+				step.args, m, a, step.wantMerchant, step.wantAdmin)
+		}
+	}
+}
+
+// TestPrintUserUpdateShowsOnlyRealChanges 钉住渲染这一半（不连库）。
+//
+// 两条判据：变了的那几格按「旧值 → 新值」打出来，没变的一格都不打；空值那一栏
+// 走 `-`（与 user get 同一套占位符）——不然「清空了」与「本来就是空的」在输出里
+// 分不出来，而它们的意思正相反。
+func TestPrintUserUpdateShowsOnlyRealChanges(t *testing.T) {
+	before := auth.UserInfo{
+		ID: 7, Username: "alice", Email: "old@example.com",
+		Status: auth.UserStatusActive, Role: auth.RoleUser,
+	}
+	after := before
+	after.Email = ""               // 清成 NULL
+	after.DisplayName = "新的展示名"    // 从没填到填上
+	after.Role = auth.RoleMerchant // 标记变了
+
+	var buf bytes.Buffer
+	printUserUpdate(&buf, before, after)
+	got := buf.String()
+
+	// 首行先打：它在渲染器的缓冲之外，打在后面就会排到表后面去。
+	if !strings.HasPrefix(got, "已改用户 alice\n") {
+		t.Errorf("首行应当是「已改用户 alice」，实际：\n%s", got)
+	}
+	for _, want := range []string{
+		"邮箱", "old@example.com → -",
+		"展示名", "- → 新的展示名",
+		"角色", "user → merchant",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("回显里没有 %q：\n%s", want, got)
+		}
+	}
+	// 状态两行都一样，所以这一栏一次都不该出现。
+	if strings.Contains(got, "状态") {
+		t.Errorf("没变的状态也进了回显：\n%s", got)
+	}
 }

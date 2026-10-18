@@ -130,6 +130,13 @@ var conflictErrors = []error{
 	// 而那一行不在。读与写共用这一个哨兵，所以两条子命令给出同一个退出码
 	// ——按 id 找不到时，下一步都是先跑 apikey list 看库里现在有什么。
 	auth.ErrKeyNotFound,
+	// users 表上那两个唯一键：建用户与 `user update` 都把它们认出来了
+	// （见 internal/auth 的 usersUniqueFailure），而退出码表把唯一键整体算作
+	// 约束冲突——不登记的话这两条会悄悄退回 1，与表里那一行不符。
+	// 与下面那条兜底哨兵覆盖的范围重叠：认出来时更精确（消息里带那个值），
+	// 这里只决定退出码。
+	auth.ErrUsernameTaken,
+	auth.ErrEmailTaken,
 	// 「要查的那一行不在」在写入路径上的对应物：解析完用户之后、插入钱包之前
 	// 用户被删，store 那边由外键挡下并返回它（见 store.ErrNoSuchUser）。它与
 	// auth.ErrUserNotFound 是同一个事实的两条路径，共用一个退出码。
@@ -186,11 +193,12 @@ var conflictErrors = []error{
 
 // noChangeErrors 是「这次调用没提到任何要改的字段」。
 //
-// 它是参数问题：命令里少写了一个字段，重发一次就能成。三个包各有一个
+// 它是参数问题：命令里少写了一个字段，重发一次就能成。四个包各有一个
 // 同名的哨兵，值不同，所以逐个列出。
 var noChangeErrors = []error{
 	channels.ErrNoChanges,
 	catalog.ErrNoChanges,
+	auth.ErrNoChanges,
 	pricing.ErrNoChanges,
 }
 

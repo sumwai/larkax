@@ -21,7 +21,7 @@ func TestParseRole(t *testing.T) {
 	}{
 		{"user", RoleUser, false, false},
 		{"merchant", RoleMerchant, true, false},
-		// admin 同时也落上 merchant（见 Role.flags 的注释）。这两列今天没有
+		// admin 同时也落上 merchant（见 Role.Flags 的注释）。这两列今天没有
 		// 读方，所以这条断言钉的是「落库的值」，不是任何权限行为。
 		{"admin", RoleAdmin, true, true},
 		{"  admin  ", RoleAdmin, true, true},
@@ -36,7 +36,7 @@ func TestParseRole(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("ParseRole(%q) = %q，期望 %q", tc.in, got, tc.want)
 			}
-			isMerchant, isAdmin := got.flags()
+			isMerchant, isAdmin := got.Flags()
 			if isMerchant != tc.isMerchant || isAdmin != tc.isAdmin {
 				t.Errorf("%q 的标记 = (merchant=%v, admin=%v)，期望 (%v, %v)",
 					got, isMerchant, isAdmin, tc.isMerchant, tc.isAdmin)

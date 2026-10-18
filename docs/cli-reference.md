@@ -304,7 +304,7 @@
 
 #### `user`
 
-系统用户管理（创建与查询）。`create` 只把新用户的 ID 打到 stdout。
+系统用户管理（创建、查询与修改）。`create` 只把新用户的 ID 打到 stdout。
 
 角色取 `user`、`merchant`、`admin` 之一，默认 `user`。三者都是用户，
 `merchant` 与 `admin` 只是 `users` 表上的标记（`admin` 同时也是 `merchant`）。
@@ -322,13 +322,31 @@
 的用户，`--role admin` 列的是 `admin`。取值不认识时报参数错并退出 2，不回落成
 「不筛」。
 
-**状态今天没有任何命令能改**：`suspended` 与 `banned` 都会让他手里的 key 全部
-失效（见 `internal/auth` 的鉴权判据），但把它写回去要直接改库。这一侧只读。
+**状态只有 `update` 能改**：`suspended` 与 `banned` 都会让他手里的 key 全部失效
+（见 `internal/auth` 的鉴权判据），把它写回去走 `user update --status`——在库里
+直接改也一样生效，但那样既没有取值校验也没有回显，事后说不清是谁改的。
 
 `get` 按 ID 或用户名读一个用户的全部字段：除清单那五栏，还有展示名、创建时间与
 更新时间。标识怎么解释与别的命令一致：纯数字按 ID，否则按用户名。找不到时退出 4。
 
-两条查询命令都不需要 `LARKAX_MASTER_KEYS`，也不改任何一行。
+`update` 只改**显式给出**的字段，一个都没给就报参数错并退出 2（不做静默空操作）。
+每一条旗标说的都是它自己那一列变成什么：`--status` 取三个状态之一；`--email` 与
+`--display-name` 给空串表示把这一列清回 `NULL`（不是写成一个空串）；`--merchant`
+与 `--no-merchant` 把 `is_merchant` 置真 / 置假；`--admin` 把 `is_admin` 置真
+**并且**把 `is_merchant` 一起置真（`admin` 天然也是 `merchant`，与 `create --role
+admin` 落的是同一种数据），`--no-admin` 只把 `is_admin` 置假、`merchant` 不动。
+
+所以下面三组是互相打架的输入，**当场报参数错、不挑一个落库**：`--merchant` 与
+`--no-merchant`、`--admin` 与 `--no-admin`、`--admin` 与 `--no-merchant`。
+
+改完把**真的变了**的字段按「旧值 → 新值」逐行打到 stdout，首行是「已改用户
+<用户名>」。两栏都是库里的值：旧值取自改之前读的那一行，新值取自那条 `UPDATE`
+的 `RETURNING`。给出的旗标没带来变化时（例如对本来就是 `merchant` 的用户再
+`--merchant`）那一行不出现，所以打出来的行与这次的改动是同一件事。用户不存在时
+退出 4；邮箱撞上别的用户时报「邮箱已被占用」并带上那个值，也退出 4。
+
+四条命令都不需要 `LARKAX_MASTER_KEYS`（它们不碰渠道凭证）；`list` 与 `get` 不改
+任何一行。
 
 #### `apikey`
 
