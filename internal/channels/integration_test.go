@@ -157,16 +157,19 @@ func hourBucket(n int) time.Time {
 //
 // 与 insertRollup 分开：那三列正是选路打分的三个维度，「这个用例到底写没写
 // 它们」在调用处要一眼看得出来。收 any 是为了让「这一列是 NULL」也能表达
-// ——写入侧今天写的正是 NULL（latency）与 0（cost / cache）。
+// ——延迟两列在「整桶没有耗时样本」时正是 NULL（见 record.go 的 rollupSignalsSQL）。
+//
+// 两个延迟分位数一起给：写入侧两列出自同一条语句、同一个样本集，同一桶里
+// 要么都有值、要么都是 NULL；分开给的话夹具能造出写入侧写不出来的行。
 func insertRollupSignals(ctx context.Context, t *testing.T, db *sql.DB, channelID int64, bucket time.Time,
-	requests, successes, failures int, p95, cost, cacheHit, cacheMiss any) {
+	requests, successes, failures int, p50, p95, cost, cacheHit, cacheMiss any) {
 	t.Helper()
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO channel_health_rollup
 			(channel_id, bucket, requests, successes, failures,
-			 latency_p95_ms, cost, cache_hit_tokens, cache_miss_tokens)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::numeric, $8, $9)`,
-		channelID, bucket, requests, successes, failures, p95, cost, cacheHit, cacheMiss)
+			 latency_p50_ms, latency_p95_ms, cost, cache_hit_tokens, cache_miss_tokens)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9, $10)`,
+		channelID, bucket, requests, successes, failures, p50, p95, cost, cacheHit, cacheMiss)
 	if err != nil {
 		t.Fatalf("插入健康度失败: %v", err)
 	}
@@ -391,12 +394,13 @@ func TestCandidatesRollupSignalsAffectOrdering(t *testing.T) {
 
 	// 两边同一个健康度：20 次请求、2 次成功。没有额度行（未知）。
 	// 有数据的那一个：p95 50ms、20 次请求共 0.02（每次 0.001）、
-	// 缓存命中 80 / 未命中 20。
+	// 缓存命中 80 / 未命中 20。选路读的是 p95，p50 按写入侧的样子成对给上。
 	insertRollupSignals(t.Context(), t, db, withData, hourBucket(0), 20, 2, 18,
-		50, "0.02", 80, 20)
-	// 没有数据的那一个：桶在、健康度一样，而那三列就是写入侧今天的样子。
+		20, 50, "0.02", 80, 20)
+	// 没有数据的那一个：桶在、健康度一样，而延迟与缓存那几列就是「一条样本
+	// 都没有」的样子。
 	insertRollupSignals(t.Context(), t, db, withoutData, hourBucket(0), 20, 2, 18,
-		nil, "0", 0, 0)
+		nil, nil, "0", 0, 0)
 
 	src := New(db, sealer)
 	got, err := src.Candidates(context.Background(), model)
@@ -1461,8 +1465,9 @@ func TestHealthReadsWindowAndSignals(t *testing.T) {
 	// 两行相隔 30 小时的桶：窗口一收，旧的那一行就不该再进汇总。
 	// 缓存 token 两桶给不同的值：汇总里读到的是不是**窗口内那几桶之和**，
 	// 靠它们分得出来（分位数那一栏做不到这件事，它取的是最近一个非空桶）。
-	insertRollupSignals(ctx, t, db, id, hourBucket(1), 10, 9, 1, 200, "1.50000000", 300, 700)
-	insertRollupSignals(ctx, t, db, id, hourBucket(30), 100, 50, 50, 900, "9.00000000", 1000, 1000)
+	// 延迟两列按写入侧的样子成对给：同一桶里同时有值，且 p50 < p95。
+	insertRollupSignals(ctx, t, db, id, hourBucket(1), 10, 9, 1, 120, 200, "1.50000000", 300, 700)
+	insertRollupSignals(ctx, t, db, id, hourBucket(30), 100, 50, 50, 400, 900, "9.00000000", 1000, 1000)
 	insertQuota(t, db, id, "12.5", "tokens", "api_query", "degraded", 0.9)
 	probeAt := hourBucket(2)
 	seedProbeAt(t, db, id, probeAt)
@@ -1486,13 +1491,19 @@ func TestHealthReadsWindowAndSignals(t *testing.T) {
 		if rate == nil || *rate != 0.1 {
 			t.Errorf("失败率 = %v，期望 0.1", rate)
 		}
-		// 分位数取最近一个非空桶（那一桶是 200），不是最差的那一个（900）。
-		if got.LatencyP95ms == nil || *got.LatencyP95ms != 200 {
-			t.Errorf("p95 = %v，期望最近那一桶的 200", got.LatencyP95ms)
+		// 分位数取最近一个非空桶（那一桶是 120 / 200），不是最差的那一个（400 / 900）。
+		if got.LatencyP50ms == nil || *got.LatencyP50ms != 120 {
+			t.Errorf("p50 = %s，期望最近那一桶的 120", showPtr(got.LatencyP50ms))
 		}
-		// p50 今天没有任何写入方，所以它必须是「没有样本」而不是 0。
-		if got.LatencyP50ms != nil {
-			t.Errorf("p50 = %v，期望没有样本（那一列从来没被写过）", *got.LatencyP50ms)
+		if got.LatencyP95ms == nil || *got.LatencyP95ms != 200 {
+			t.Errorf("p95 = %s，期望最近那一桶的 200", showPtr(got.LatencyP95ms))
+		}
+		// 两个分位数出自同一个桶、同一个样本集：中位数不可能大于 95 分位。
+		// 这一行同时钉住 p50 有写入方——它接上写入方之前，这里断言的是
+		// 「p50 必须是 nil」，于是谁把那一列接上都会先撞在这条用例上。
+		if got.LatencyP50ms != nil && got.LatencyP95ms != nil && *got.LatencyP50ms > *got.LatencyP95ms {
+			t.Errorf("p50 = %d 大于 p95 = %d，两个分位数写反了",
+				*got.LatencyP50ms, *got.LatencyP95ms)
 		}
 		if got.Cost == nil || *got.Cost != "1.50000000" {
 			t.Errorf("成本 = %v，期望 1.50000000", got.Cost)
@@ -1536,6 +1547,17 @@ func TestHealthReadsWindowAndSignals(t *testing.T) {
 		if !buckets[0].Bucket.After(buckets[1].Bucket) {
 			t.Errorf("明细没有按时刻倒序：%v 在 %v 之前", buckets[0].Bucket, buckets[1].Bucket)
 		}
+		// 每一行各自的分位数都是**那一桶自己的**数，不是汇总行的。
+		if buckets[0].LatencyP50ms == nil || *buckets[0].LatencyP50ms != 120 ||
+			buckets[0].LatencyP95ms == nil || *buckets[0].LatencyP95ms != 200 {
+			t.Errorf("最近那一行的分位数 = %s / %s，期望 120 / 200",
+				showPtr(buckets[0].LatencyP50ms), showPtr(buckets[0].LatencyP95ms))
+		}
+		if buckets[1].LatencyP50ms == nil || *buckets[1].LatencyP50ms != 400 ||
+			buckets[1].LatencyP95ms == nil || *buckets[1].LatencyP95ms != 900 {
+			t.Errorf("旧的那一行的分位数 = %s / %s，期望 400 / 900",
+				showPtr(buckets[1].LatencyP50ms), showPtr(buckets[1].LatencyP95ms))
+		}
 	})
 
 	t.Run("没有额度状态行的渠道是未知，不是最差", func(t *testing.T) {
@@ -1557,8 +1579,9 @@ func TestHealthReadsWindowAndSignals(t *testing.T) {
 		if rate := got.FailureRate(); rate != nil {
 			t.Errorf("没有请求时失败率应当是 nil，得到 %v", *rate)
 		}
-		if got.LatencyP95ms != nil || got.Cost != nil {
-			t.Errorf("没有桶时 p95 与成本都应当是 nil，得到 %v / %v", got.LatencyP95ms, got.Cost)
+		if got.LatencyP50ms != nil || got.LatencyP95ms != nil || got.Cost != nil {
+			t.Errorf("没有桶时两个分位数与成本都应当是 nil，得到 %v / %v / %v",
+				showPtr(got.LatencyP50ms), showPtr(got.LatencyP95ms), showPtr(got.Cost))
 		}
 		// 缓存 token 没有「没有数据」那一档：没有桶时是 0，与选路侧读 0 的口径一致。
 		if got.CacheHitTokens != 0 || got.CacheMissTokens != 0 {
@@ -1567,6 +1590,66 @@ func TestHealthReadsWindowAndSignals(t *testing.T) {
 		}
 		if len(buckets) != 0 {
 			t.Errorf("没有桶时明细应当是空的，得到 %d 行", len(buckets))
+		}
+	})
+
+	t.Run("延迟那一列的 - 只出现在真的没有样本的桶上", func(t *testing.T) {
+		// 有请求、有桶，但那一小时一条耗时样本都没有：两个分位数都读作
+		// 「没有数据」。跑过流量的桶会读出分位数（见上面那条用例），于是
+		// 「-」与「这一列没人接」这两件事在读侧分得开。
+		noSamples := insertChannel(ctx, t, db, sealer, channelSpec{model: uniqueModel()})
+		insertRollupSignals(ctx, t, db, noSamples, hourBucket(1), 7, 7, 0, nil, nil, "0", 0, 0)
+
+		// 对照：同一张表、同一个窗口，只有它那一桶有样本。少了它，读侧
+		// 「整列都返回 nil」也会让上面那条通过。
+		withSamples := insertChannel(ctx, t, db, sealer, channelSpec{model: uniqueModel()})
+		insertRollupSignals(ctx, t, db, withSamples, hourBucket(1), 7, 7, 0, 15, 30, "0", 40, 60)
+
+		got, _, err := admin.HealthOne(ctx, noSamples, time.Now().Add(-24*time.Hour))
+		if err != nil {
+			t.Fatalf("HealthOne 失败: %v", err)
+		}
+		if got.Requests != 7 {
+			t.Errorf("请求数 = %d，期望 7（没有样本不等于没有请求）", got.Requests)
+		}
+		if got.LatencyP50ms != nil || got.LatencyP95ms != nil {
+			t.Errorf("没有耗时样本时两个分位数都应当是 nil，得到 %v / %v",
+				showPtr(got.LatencyP50ms), showPtr(got.LatencyP95ms))
+		}
+
+		control, _, err := admin.HealthOne(ctx, withSamples, time.Now().Add(-24*time.Hour))
+		if err != nil {
+			t.Fatalf("HealthOne 失败: %v", err)
+		}
+		if control.LatencyP50ms == nil || *control.LatencyP50ms != 15 {
+			t.Errorf("有样本时 p50 = %s，期望 15", showPtr(control.LatencyP50ms))
+		}
+		if control.LatencyP95ms == nil || *control.LatencyP95ms != 30 {
+			t.Errorf("有样本时 p95 = %s，期望 30", showPtr(control.LatencyP95ms))
+		}
+	})
+
+	t.Run("两列各自取自己最近一个有值的桶", func(t *testing.T) {
+		// 这一列接上写入方之前留下的旧桶：p95 有值、p50 是 NULL。读侧对两列
+		// 各取**自己**最近一个非空桶（见 health.go 的 healthFrom），所以 p50
+		// 退到更早的那一小时，而不是跟着最近那一桶一起变成 -。
+		//
+		// 新写的桶里两列同时有值（见 record.go 的 rollupSignalsSQL），能造出
+		// 这种行的只有旧数据——但它在每个已有流量的库里都存在，而「退到更早
+		// 那一桶」正是这条命令对 `--window` 的既有承诺。
+		legacy := insertChannel(ctx, t, db, sealer, channelSpec{model: uniqueModel()})
+		insertRollupSignals(ctx, t, db, legacy, hourBucket(1), 3, 3, 0, nil, 80, "0", 0, 0)
+		insertRollupSignals(ctx, t, db, legacy, hourBucket(3), 4, 4, 0, 25, 60, "0", 0, 0)
+
+		got, _, err := admin.HealthOne(ctx, legacy, time.Now().Add(-24*time.Hour))
+		if err != nil {
+			t.Fatalf("HealthOne 失败: %v", err)
+		}
+		if got.LatencyP50ms == nil || *got.LatencyP50ms != 25 {
+			t.Errorf("p50 = %s，期望退到更早那一桶的 25", showPtr(got.LatencyP50ms))
+		}
+		if got.LatencyP95ms == nil || *got.LatencyP95ms != 80 {
+			t.Errorf("p95 = %s，期望最近那一桶的 80", showPtr(got.LatencyP95ms))
 		}
 	})
 

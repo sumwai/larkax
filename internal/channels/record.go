@@ -37,15 +37,11 @@ import (
 //
 // # 桶里没写的列
 //
-// latency_p50_ms / cost 留空。
+// cost 留空：它属于「这次请求我们花了多少」那条线（upstream_costs / #163），
+// 口径还没定，这一轮不接。
 //
-//   - latency_p50_ms 没有读方：读侧只取 p95（见 candidateQuery），为它多算
-//     一个分位数只是多一次聚合并多一个没人看的数。
-//   - cost 属于「这次请求我们花了多少」那条线（upstream_costs / #163），
-//     口径还没定，这一轮不接。
-//
-// 延迟与缓存两列是**推导值**，不是逐次累加的：它们由该桶的 usage_events
-// 聚合出来（见 rollupSQL）。读侧把「一列都没写过」映射成「没有数据」，
+// 延迟与缓存那四列是**推导值**，不是逐次累加的：它们由该桶的 usage_events
+// 聚合出来（见 rollupSignalsSQL）。读侧把「一列都没写过」映射成「没有数据」，
 // 打分时那一维整个不参与，所以没流量就是未知，而不是很差。
 type Recorder struct {
 	db *sql.DB
@@ -199,11 +195,18 @@ ON CONFLICT (channel_id, bucket) DO UPDATE
 //     两列相加正好是这次请求的输入总量。
 //     注意不是「cache_write 就是 miss」：单价上的写与读是两件事，这里算的
 //     是**服务方式**的比例——写入的 token 同样没有被缓存命中。
-//   - latency_p95_ms = percentile_disc(0.95)：取一个真实观测到的样本
-//     （列是 integer，离散分位不会给出一个从未出现过的毫秒数）。
+//   - latency_p50_ms = percentile_disc(0.5)、latency_p95_ms = percentile_disc(0.95)：
+//     同一个样本集里的两个百分位，各取一个真实观测到的样本（列是 integer，
+//     离散分位不会给出一个从未出现过的毫秒数）。两列由同一条语句、同一个
+//     窗口算出，所以 p50 不可能大于 p95；同一桶里两列要么都有值、要么都是
+//     NULL——分位数取的是同一批非空样本。
 //     ordered-set 聚合会**忽略 NULL**，所以没有耗时的行不参与，也不会被
 //     当成 0 毫秒把分位数往下拉。整桶都没有样本时结果是 NULL，写回去是
 //     「没有数据」，与「一行都没写过」在读侧同一档。
+//
+// 两个分位数都有人读：选路只看 p95（见 candidateQuery），而 `channel health`
+// 把两列一起打出来——同一个窗口里，中位数与 95 分位分开看才知道这个渠道是
+// 整体慢，还是只有少数几条在拖尾。
 //
 // # 桶的归属
 //
@@ -215,10 +218,12 @@ const rollupSignalsSQL = `
 UPDATE channel_health_rollup h
    SET cache_hit_tokens  = a.cache_hit,
        cache_miss_tokens = a.cache_miss,
+       latency_p50_ms    = a.latency_p50_ms,
        latency_p95_ms    = a.latency_p95_ms
   FROM (
         SELECT COALESCE(SUM(u.cache_read_tokens), 0) AS cache_hit,
                COALESCE(SUM(u.prompt_tokens + u.cache_write_tokens), 0) AS cache_miss,
+               percentile_disc(0.5) WITHIN GROUP (ORDER BY u.duration_ms) AS latency_p50_ms,
                percentile_disc(0.95) WITHIN GROUP (ORDER BY u.duration_ms) AS latency_p95_ms
           FROM usage_events u
          WHERE u.channel_id = $1
