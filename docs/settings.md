@@ -64,7 +64,7 @@ larkaxctl settings set --key plugin.enabled --value true --by alice
 
 | 键 | 类型 | 默认值 | 取值 | 影响 |
 |---|---|---|---|---|
-| `quota.probe_interval_seconds` | int | `300` | `1`–`31536000` | 额度探测的默认间隔，单个渠道可在 `channels.setting` 里覆盖。额度可信度的**衰减起点由它导出**：连着三个间隔都没拿到新的实测值，就认为探测本身出了问题。越界时服务拒绝启动 |
+| `quota.probe_interval_seconds` | int | `300` | `1`–`31536000` | 额度探测的默认间隔，**所有渠道共用这一个值**——没有按渠道覆盖的入口（`channels.setting` 这一列今天不被这一项读）。额度可信度的**衰减起点由它导出**：连着三个间隔都没拿到新的实测值，就认为探测本身出了问题。越界时服务拒绝启动 |
 
 ## 计费
 
