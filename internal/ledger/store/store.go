@@ -903,9 +903,10 @@ func failureColumns(failure *pipeline.UpstreamFailure) (status int, code string)
 // pipeline.Outcome 的 UpstreamStatus 与 ErrorCode，它由 Settle 搬进
 // Charge）。于是**已计费的行**上有了唯一一种写得出来的依据——
 // upstream_stream_truncated，也就是「上游吐过字之后静默把连接掐断」：那一次
-// 回答照常计费，而客户端看到的是一次正常结束，账单是唯一能说明
-// 「这次回答只写了一半」的地方（快照有留存期，见 docs/request-retention.md）。
-// 这条 UPDATE 因此也写这两列了。
+// 回答照常计费，而它没有错误帧，调用方要靠「帧序列里没有结束标记」自己发现
+// 被截短了（见 docs/api.md 的「没有结束标记就是被截断」一节）。按账单核对金额
+// 的人看不到它，账单是唯一能说明「这次回答只写了一半」的地方（快照有留存期，
+// 见 docs/request-retention.md）。这条 UPDATE 因此也写这两列了。
 //
 // 零值与空串落成 NULL 的口径与 Release 逐字一致：正常结束、客户端断开、插件
 // 终止都不带依据，写进来的是零值，NULLIF 把它们折成 NULL。那里的 NULL 含义是
@@ -916,8 +917,8 @@ func failureColumns(failure *pipeline.UpstreamFailure) (status int, code string)
 // 要计费（token 已经产生了，上游是算了钱的），账单就是已结算的行，两列同样
 // 是 NULL——见 stream_e2e_test.go 的 TestStreamUpstreamErrorMidStream。所以
 // `error_code IS NOT NULL` 不能当成「上游出过问题的请求」的判据；在已计费的
-// 行上它答的是「钱收了，但回答是不是只写了一半」，在不计费的行上答的才是
-// 「这次没向上游收钱，是不是因为上游这一侧出了事」。
+// 行上它答的是「钱收了，回答是不是在调用方不知情的情况下被截短」，在不计费
+// 的行上答的才是「这次没向上游收钱，是不是因为上游这一侧出了事」。
 func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *pipeline.Charge) (bool, error) {
 	// channel_id 是 bigint，NULLIF 的实参标成 bigint（理由见 SaveReservation）。
 	res, err := tx.ExecContext(ctx, `

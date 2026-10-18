@@ -541,8 +541,9 @@ type billingRow struct {
 	//
 	// 两列在计费与不计费两种行上**都可能有值**，各自答的问题不同：不计费的
 	// 行上答「这次没向上游收钱，是不是因为上游这一侧出了事」（唯一写它的是
-	// store.Release），计费的行上答「钱收了，回答是不是只写了一半」（唯一
-	// 写它的是 markSettled，取值只有 upstream_stream_truncated 一种，见
+	// store.Release）；计费的行上答
+	// 「钱收了，回答是不是在调用方不知情的情况下被截短」（唯一写它的是
+	// markSettled，取值只有 upstream_stream_truncated 一种，见
 	// pipeline.Outcome）。
 	upstreamStatus sql.NullInt64
 	errorCode      sql.NullString
@@ -1158,8 +1159,8 @@ func TestStreamUpstreamErrorMidStream(t *testing.T) {
 	//
 	// 这是有意不写的（见 gateway 的 billedStreamEvidence）：错误帧当时就送到
 	// 调用方手里了，「这次没写完」他当场就知道——真正需要账单替调用方说话的
-	// 只有静默截断那一种（那一次调用方看到的是一次正常结束）。把报错也写进去，
-	// 「账单上有值」就不再等于「这里有一件只有账单知道的事」。
+	// 只有静默截断那一种（那一次没有错误帧，要靠帧序列里没有结束标记才发现）。
+	// 把报错也写进去，「账单上有值」就不再等于「这里有一件只有账单知道的事」。
 	if bill.upstreamStatus.Valid || bill.errorCode.Valid {
 		t.Errorf("流中途报错的两列应当是 NULL，得到 %v / %v",
 			bill.upstreamStatus, bill.errorCode)

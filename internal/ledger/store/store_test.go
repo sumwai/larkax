@@ -946,7 +946,7 @@ func TestReleaseWithoutEvidenceWritesNull(t *testing.T) {
 //
 // 两条路上这两列答的问题不同（见 pipeline.Outcome）：不计费的行上答的是
 // 「这次没向上游收钱，是不是因为上游这一侧出了事」，计费的行上答的是
-// 「钱收了，回答是不是只写了一半」——后者的取值只有
+// 「钱收了，回答是不是在调用方不知情的情况下被截短」——后者的取值只有
 // upstream_stream_truncated 一种。
 //
 // 改动之前这里断言的是「已结算的行恒为 NULL」：那是接线前的事实，不是规矩，

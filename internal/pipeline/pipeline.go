@@ -348,14 +348,16 @@ type Outcome struct {
 	//
 	// 上游吐了字之后出的问题不改变计费（token 已经产生，上游算了钱），而其中
 	// 只有**静默截断**（ErrorUpstreamStreamTruncated）会记在账单上：那一次
-	// 客户端看到的是一次正常结束，账单是唯一能说明「这次回答只写了一半」的
-	// 地方，而快照有留存期（见 docs/request-retention.md）。上游在流里报错的
-	// 那一次，客户端当场就拿到错误帧了，账单不必再讲一遍——它的两列留 NULL
-	// （见 stream_e2e_test.go 的 TestStreamUpstreamErrorMidStream）。
+	// **没有错误帧**，调用方要靠「帧序列里没有结束标记」自己发现被截短了
+	// （见 docs/api.md 的「没有结束标记就是被截断」一节）。按账单核对金额的人
+	// 看不到它，账单因此是唯一能说明「这次回答只写了一半」的地方，而快照又有
+	// 留存期（见 docs/request-retention.md）。上游在流里报错的那一次，调用方
+	// 当场就拿到错误帧了，账单不必再讲一遍——它的两列留 NULL（见
+	// stream_e2e_test.go 的 TestStreamUpstreamErrorMidStream）。
 	//
 	// 所以 `error_code IS NOT NULL` 仍然不是「上游出过问题的请求」的判据，
 	// 而且它在两种行上答的是两个问题：计费的行上答的是
-	// 「钱收了，但回答是不是只写了一半」，不计费的行上答的是
+	// 「钱收了，回答是不是在调用方不知情的情况下被截短」，不计费的行上答的是
 	// 「这次没向上游收钱，是不是因为上游这一侧出了事」。两种读法都得连着
 	// status 一起看。
 	//
@@ -419,11 +421,12 @@ type Outcome struct {
 // 阻断、别名没配、结算自己出错）不进这一列：混进来之后，
 // `error_code IS NOT NULL` 连「是不是上游挂的」都答不了了。
 //
-// 这一列今天只在**不计费**的行上有值（前四个记的就是「这次为什么没计费」），
-// 第五个（ErrorUpstreamStreamTruncated）是给**已计费**的行准备的：上游吐了字
-// 之后把连接掐断，那些 token 已经花了钱。接上之后，`error_code IS NOT NULL`
-// 就既不等价于「这次没向上游收钱」，也不等价于「上游没挂」——要回答钱的问题
-// 得连着 status 一起读。
+// 这一列有两处落点。**不计费**的行上是前四个（记的是「这次为什么没计费」），
+// 它们由不计费那一侧的落点写入（见 internal/ledger/store 的 Release）；
+// **已计费**的行上只有第五个（ErrorUpstreamStreamTruncated）：上游吐了字之后
+// 把连接掐断，那些 token 已经花了钱。所以 `error_code IS NOT NULL` 既不等价
+// 于「这次没向上游收钱」，也不等价于「上游没挂」——要回答钱的问题得连着
+// status 一起读。
 const (
 	// ErrorUpstreamHTTPError 表示上游回了个错误状态码（非 2xx）。状态码本身
 	// 在 UpstreamStatus 里，两列成对读：`upstream_http_error` + 500。

@@ -213,7 +213,7 @@ type CallRecorder interface {
 // upstreamEvidence、streamResponseEvidence 与 pipeline 的那组常量），但两列
 // 回答的问题不同：快照的 ErrorKind 答的是「这次响应怎么了」，不看计不计费；
 // 账单上的 error_code 在两种行上答两个问题——计费的行上它答的是
-// 「钱收了，回答是不是只写了一半」，不计费的行上答的是
+// 「钱收了，回答是不是在调用方不知情的情况下被截短」，不计费的行上答的是
 // 「这次没向上游收钱，是不是因为上游这一侧出了事」（见 pipeline.Outcome）。
 // 两列出现分歧时，以账单为准的是「钱为什么没扣」，以快照为准的是
 // 「上游当时回了什么」。
@@ -263,7 +263,8 @@ type Snapshot struct {
 	// 一切不是上游那一侧出的错。两列的关系见类型注释。
 	//
 	// 取值与账单**同源**：同一个事件在两表上必须给同一个词，所以判据只有
-	// 一处（streamResponseEvidence / upstreamEvidence），两边各推一次的话，
+	// 一处——快照侧是 streamResponseEvidence / upstreamEvidence，账单侧那条
+	// 经 billedStreamEvidence 落到同一个 streamTruncated。两边各推一次的话，
 	// 「快照说 A、账单说 B」会静默地发生——那正是 #461 修掉的形状。
 	ErrorKind *string
 }
@@ -1301,10 +1302,12 @@ func upstreamEvidence(err error) (status int, code string) {
 
 // release 把这次请求冻住的钱放开。
 //
-// 它同时是**上游失败依据唯一的落库点**：不计费的结局不写账本，账单那一行
-// 上「上游回了什么、为什么不计费」两列只有这一次写入机会（见 h.failure）。
-// 把依据挂在这里而不是另开一次写库，是因为这一行本来就只有这一条 UPDATE
-// ——两次写之间会有一个「已经 released 但没有理由」的窗口。
+// 它是不计费那一侧**唯一的上游失败依据落点**：不计费的结局不写账本，账单
+// 那一行上「上游回了什么、为什么不计费」两列只有这一次写入机会（见
+// h.failure）。计费那一侧另有自己的落点（静默截断经 markSettled 写入，见
+// internal/ledger/store）。把依据挂在这里而不是另开一次写库，是因为这一行
+// 本来就只有这一条 UPDATE——两次写之间会有一个「已经 released 但没有理由」
+// 的窗口。
 //
 // # 它为什么不跟着请求的 ctx 走
 //
