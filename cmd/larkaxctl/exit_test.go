@@ -62,6 +62,25 @@ func TestExitCodeUsageForIDRefUsername(t *testing.T) {
 	}
 }
 
+// TestExitCodeUsageForInvalidEmail 钉住同一个形状在邮箱上的那一份。
+//
+// 与上一条同理：`user create` 与 `user update` 各自在连库之前也挡了一遍，而别的
+// 调用方（将来的管理接口、导入脚本）拿到的是包直接返回的那个哨兵——不登记的话
+// 它会安静地退回 1，而 1 与 2 在脚本里是两种处置（重发一次就能过，还是要去看
+// 环境）。
+func TestExitCodeUsageForInvalidEmail(t *testing.T) {
+	if got := exitCode(auth.ErrInvalidEmail); got != exitUsage {
+		t.Errorf("auth.ErrInvalidEmail 的退出码应当是 %d，得到 %d", exitUsage, got)
+	}
+
+	// 包返回的是包了一层的那一个（ValidateEmail 用 %w 接上「哪里不对」那一句），
+	// 链上仍然要认得出。
+	wrapped := fmt.Errorf("建用户失败: %w", auth.ErrInvalidEmail)
+	if got := exitCode(wrapped); got != exitUsage {
+		t.Errorf("包了一层之后仍应当是 %d，得到 %d", exitUsage, got)
+	}
+}
+
 // TestExitCodeDBUnreachableIsThree 取一次连不上库。
 //
 // 指向一个没有监听者的端口：这一条不需要真库，正是它要测的那种失败。

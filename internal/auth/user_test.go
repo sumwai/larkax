@@ -294,6 +294,154 @@ func TestValidateNewUsernameAgreesWithUserRefWhere(t *testing.T) {
 	}
 }
 
+// TestValidateEmailReasonsDoNotOverlap 钉住「每句只在它真正不成立时才报」。
+//
+// 上面那张表问的是「该出现的那一句在不在」，这一条问的是「不该出现的那几句在不在」。
+// 拒绝的理由是分开的五句（见 ValidateEmail）：一句里捎带上别的条件，被拒的人就会
+// 去改一处根本没写错的地方——`alice@gmail` 那种漏了半截的写法最容易读到这个。
+func TestValidateEmailReasonsDoNotOverlap(t *testing.T) {
+	cases := []struct {
+		email   string
+		want    string
+		notWant []string
+	}{
+		// 没有 @：不该提域名里的点与连字符。
+		{"not-an-email", "@ 应当恰好一个",
+			[]string{"域名里要有一个点", "连字符", "以点开头"}},
+		// 域名少一个点：不该提点的摆法与连字符。
+		{"a@example", "域名里要有一个点", []string{"连着两个点", "不能以点开头", "连字符"}},
+		// 点摆在两头：域名里有点，不该反过来提「要有一个点」。
+		{"a@b.", "不能以点开头或结尾", []string{"要有一个点", "连字符"}},
+		// 连字符摆在段的两头：点这一路全对，不该提点。
+		{"a@-b.example.com", "不能以连字符开头或结尾",
+			[]string{"要有一个点", "以点开头", "连着两个点"}},
+	}
+
+	for _, tc := range cases {
+		err := ValidateEmail(tc.email)
+		if err == nil {
+			t.Errorf("ValidateEmail(%q) 通过了，期望报错", tc.email)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("ValidateEmail(%q) 的报错里没有 %q：%v", tc.email, tc.want, err)
+		}
+		for _, extra := range tc.notWant {
+			if strings.Contains(err.Error(), extra) {
+				t.Errorf("ValidateEmail(%q) 的报错里捎带了 %q，那不是它这一处的问题：%v",
+					tc.email, extra, err)
+			}
+		}
+	}
+}
+
+// nbsp 是 U+00A0，不断行空格。
+//
+// 按码点拼出来，不在源码里直接写那个字符：它印出来与普通空格看不出差别，摆在用例
+// 里读的人无从判断那是空格还是 NBSP——而下面那条要钉的正是「夹在地址里的 NBSP 也
+// 要拒」。写成反斜杠转义同样不行：多写一个反斜杠就变成「地址里夹一个反斜杠」，
+// 用例照样绿，覆盖却没了。
+const nbsp = string(rune(0x00A0))
+
+// TestValidateEmail 钉住「哪些串收、哪些拒」的两侧。
+//
+// 两侧都逐字列出来，不写成「看起来像邮箱的都收」。拒的那一张还带着**报错里必须
+// 出现的那一句**：拒绝的理由分五句（见 ValidateEmail），写错哪一句都会让使用者
+// 对着一条根本不是他碰坏了的判据改。
+func TestValidateEmail(t *testing.T) {
+	accepted := []string{
+		// 常见形态。
+		"a@example.com", "a@b.c.d", "user+tag@example.com", "first.last@example.com",
+		"A.B@Example.COM", "a@b-c.example.com",
+		// 本地部分里的这些符号标准里都允许，而一张自己列的字符表容易漏掉其中一个。
+		"o'brien@example.com", "a_b@example.com", "a!b@example.com",
+		// 非 ASCII 的字母与数字也收：本地化的域名与本地部分是真实存在的写法。
+		"用户@例え.jp",
+		// 两头空白先去掉再判，落库的也是去掉空白之后的那个值。
+		"  a@example.com  ", "\ta@example.com\n",
+		// 空串与只有空白的串通过：这一列「没填」在库里的样子是 NULL，由调用方
+		// 按那个落库（见 ValidateEmail）。
+		"", "   ",
+	}
+	for _, email := range accepted {
+		if err := ValidateEmail(email); err != nil {
+			t.Errorf("ValidateEmail(%q) 报错了，期望通过：%v", email, err)
+		}
+	}
+
+	rejected := []struct {
+		email string
+		why   string // 报错里必须出现的那一句
+	}{
+		{"not-an-email", "@ 应当恰好一个"},
+		{"@b.com", "@ 应当恰好一个"},
+		{"a@", "@ 应当恰好一个"},
+		{"first@second@example.com", "@ 应当恰好一个"},
+		// 字符表之外的字符。空白（含去掉两头之后中间还剩的）也在这一条里，
+		// 因为空格与制表符本来就不在表里。
+		{"a b@example.com", "不该出现在地址里的字符"},
+		{"a@b c.com", "不该出现在地址里的字符"},
+		{"a\tb@example.com", "不该出现在地址里的字符"},
+		// U+00A0 那种不断行空格。它印出来与普通空格看不出差别，所以按码点拼出来
+		// （见 nbsp）：直接在源码里写那个字符的话，那一格看起来就是个空格，读的人
+		// 认不出它是不是真的 NBSP——而这条要钉的正是「夹在地址里也要拒」。
+		{"a@b" + nbsp + "c.com", "不该出现在地址里的字符"},
+		{"a,b@example.com", "不该出现在地址里的字符"},
+		{"a@b,c.com", "不该出现在地址里的字符"},
+		{"a;b@example.com", "不该出现在地址里的字符"},
+		{"a@b:c.com", "不该出现在地址里的字符"},
+		{"a@b/c.com", "不该出现在地址里的字符"},
+		{"a@[127.0.0.1]", "不该出现在地址里的字符"},
+		// 带了别的东西的写法：这一列存的是地址本身。
+		{"Bob <bob@example.com>", "不该出现在地址里的字符"},
+		{"<bob@example.com>", "不该出现在地址里的字符"},
+		{"bob@example.com (comment)", "不该出现在地址里的字符"},
+		{`"quoted"@example.com`, "不该出现在地址里的字符"},
+		{`"a b"@example.com`, "不该出现在地址里的字符"},
+		// 点号。
+		{"a@b", "域名里要有一个点"},
+		{"a@b.", "不能以点开头或结尾"},
+		{"a@.b", "不能以点开头或结尾"},
+		{".alice@example.com", "不能以点开头或结尾"},
+		{"alice.@example.com", "不能以点开头或结尾"},
+		{"a@b..c", "不能连着两个点"},
+		{"a..b@example.com", "不能连着两个点"},
+		// 连字符的摆放：每一段不能以它开头或结尾（段中间收，见上面那一张）。
+		{"a@-b.example.com", "不能以连字符开头或结尾"},
+		{"a@b-.example.com", "不能以连字符开头或结尾"},
+		{"a@example.com-", "不能以连字符开头或结尾"},
+	}
+	for _, tc := range rejected {
+		err := ValidateEmail(tc.email)
+		if err == nil {
+			t.Errorf("ValidateEmail(%q) 通过了，期望报错", tc.email)
+			continue
+		}
+		if !errors.Is(err, ErrInvalidEmail) {
+			t.Errorf("ValidateEmail(%q) = %v，期望 ErrInvalidEmail", tc.email, err)
+		}
+		if !strings.Contains(err.Error(), tc.why) {
+			t.Errorf("ValidateEmail(%q) 的报错里没有 %q：%v", tc.email, tc.why, err)
+		}
+	}
+
+	// 报错里要把允许的那一组符号逐个列出来：帮助文本与 docs/cli-reference.md 的
+	// user 一节都省掉了逐个符号，两处都写着「完整的那一组写在报错里」，指的是这里。
+	// 这里写成字面量而不是引 emailLocalSymbols：这一条要挡的正是「实现里那张表改了、
+	// 帮助与文档没跟上」，从常量取的话两边一起变就永远绿。
+	const symbols = "!#$%&'*+-/=?^_`{|}~"
+	if err := ValidateEmail("a,b@example.com"); err == nil ||
+		!strings.Contains(err.Error(), symbols) {
+		t.Errorf("拒一个字符表之外的字符时，报错里要逐个列出允许的那些符号：%v", err)
+	}
+
+	// 报的是去掉两头空白之后的那个串：判据看的是它，人照着改的也是它。
+	if err := ValidateEmail("  not-an-email  "); err == nil ||
+		!strings.Contains(err.Error(), `"not-an-email"`) {
+		t.Errorf("报错里应当引出去掉空白之后的那个串，得到 %v", err)
+	}
+}
+
 // TestCreateUserRejectsIDRefUsername 钉住包自己那一层也拦得住。
 //
 // CreateUser 是导出方法，别的调用方（将来的 HTTP 管理接口、导入脚本）也会走它，
@@ -305,9 +453,9 @@ func TestValidateNewUsernameAgreesWithUserRefWhere(t *testing.T) {
 // 翻成一句能读的失败。
 //
 // **两条防线都留着**：recover 让校验缺席时红的是这条用例自己（而不是「整包挂了」
-// ——nil 解引用会结束整个测试进程，同包别的用例连跑都没跑），而它排在本文件最后
-// 一条，是给「连库之前」这句话留一条独立的证据：同文件前面那两条纯函数用例先跑完、
-// 各自报出自己的红，不必等这一条不再 panic。
+// ——nil 解引用会结束整个测试进程，同包别的用例连跑都没跑），而三条要走 nil 句柄的
+// 用例排在本文件最后，是给「连库之前」这句话留一条独立的证据：前面那几条纯函数
+// 用例先跑完、各自报出自己的红，不必等它们不再 panic。
 func TestCreateUserRejectsIDRefUsername(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -321,6 +469,73 @@ func TestCreateUserRejectsIDRefUsername(t *testing.T) {
 		_, err := s.CreateUser(t.Context(), CreateUserParams{Username: name, Role: RoleUser})
 		if !errors.Is(err, ErrUsernameIsIDRef) {
 			t.Errorf("CreateUser(%q) 的错误 = %v，期望 ErrUsernameIsIDRef", name, err)
+		}
+	}
+}
+
+// TestCreateUserRejectsBadEmail 钉住建用户的路上也判邮箱的形状。
+//
+// 与上面那条同一条理由：CreateUser 是导出方法，别的调用方（将来的 HTTP 管理
+// 接口、导入脚本）也会走它，所以判据不能只长在命令行那一层。同样是 New(nil)——
+// 校验在连库之前，nil 句柄走不到；往下走了一步就会以 panic 收场。
+func TestCreateUserRejectsBadEmail(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("校验缺席：nil 句柄走到了连库那一步（panic: %v）", r)
+		}
+	}()
+
+	s := New(nil)
+
+	for _, email := range []string{"not-an-email", "a@b", "  a b@example.com  "} {
+		_, err := s.CreateUser(t.Context(), CreateUserParams{
+			Username: "alice", Email: email, Role: RoleUser,
+		})
+		if !errors.Is(err, ErrInvalidEmail) {
+			t.Errorf("CreateUser(email=%q) 的错误 = %v，期望 ErrInvalidEmail", email, err)
+		}
+	}
+}
+
+// TestUpdateUserRejectsBadEmail 钉住改这一列时也在落库之前判。
+//
+// UpdateUser 同样是导出方法。它先把要改的列折成 SET 片段与参数、折得出来才碰库，
+// 所以 New(nil) 上走一遍就够了：判据在折的那一步，不在写的那一步。
+func TestUpdateUserRejectsBadEmail(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("校验缺席：nil 句柄走到了连库那一步（panic: %v）", r)
+		}
+	}()
+
+	s := New(nil)
+
+	_, err := s.UpdateUser(t.Context(), "alice",
+		UpdateUserParams{Email: strPtr("not-an-email")})
+	if !errors.Is(err, ErrInvalidEmail) {
+		t.Errorf("UpdateUser 的错误 = %v，期望 ErrInvalidEmail", err)
+	}
+}
+
+// TestUpdateUserEmptyEmailMeansNULL 钉住空串与只有空白的串都不算格式错。
+//
+// 落库那一头由 TestUpdateUserClearsTextColumnsToNull 在真库上回答（读回来是 NULL
+// 而不是空串）；这一条问的是**校验放不放它过去**，所以直接调 userUpdateSets、
+// 不碰库，也好在没有 DSN 的机器上照样跑。给空串却在写之前报格式错，使用者的
+// 出路就只剩改库一条，而这一列的「清掉」本来就该由这条命令表达。
+func TestUpdateUserEmptyEmailMeansNULL(t *testing.T) {
+	for _, email := range []string{"", "   ", "\t"} {
+		sets, args, err := userUpdateSets(UpdateUserParams{Email: strPtr(email)})
+		if err != nil {
+			t.Errorf("userUpdateSets(email=%q) 报错: %v", email, err)
+			continue
+		}
+		if len(sets) != 1 || sets[0] != "email = $1" {
+			t.Errorf("userUpdateSets(email=%q) 的 SET = %v，期望只动 email 一列", email, sets)
+			continue
+		}
+		if len(args) != 1 || args[0] != nil {
+			t.Errorf("userUpdateSets(email=%q) 的参数 = %#v，期望一个 nil（落成 NULL）", email, args)
 		}
 	}
 }
