@@ -31,14 +31,16 @@ const channelShortUsage = `larkaxctl channel 管理上游渠道。
                            --models <模型名,...>
                            (--credential-stdin | --credential-env <变量名>)
   larkaxctl channel list [--all]
+  larkaxctl channel get --id <渠道 ID>
+  larkaxctl channel health [--id <渠道 ID>] [--since <时长或时刻>] [--all]
   larkaxctl channel update --id <渠道 ID> [字段与 create 相同，另可换凭证]
   larkaxctl channel enable --id <渠道 ID>
   larkaxctl channel disable --id <渠道 ID>
   larkaxctl channel delete --id <渠道 ID>
+  larkaxctl channel restore --id <渠道 ID>
 
 明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。
-create 的 stdout 只有新渠道的 ID；delete 是软删，行与凭证都留在库里。
-
+create 的 stdout 只有新渠道的 ID；delete 是软删，restore 是它的逆操作。
 更细的边界：larkaxctl help channel。
 `
 
@@ -52,6 +54,8 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
                            [--user <用户 ID 或用户名>] [--weight <权重>]
                            [--priority <优先级>] [--setting <JSON 对象>]
   larkaxctl channel list [--all]
+  larkaxctl channel get --id <渠道 ID>
+  larkaxctl channel health [--id <渠道 ID>] [--since <时长或时刻>] [--all]
   larkaxctl channel update --id <渠道 ID>
                            [--name <名称>] [--type <类型>] [--base-url <URL>]
                            [--models <模型名,...>] [--weight <权重>]
@@ -60,6 +64,7 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel enable --id <渠道 ID>
   larkaxctl channel disable --id <渠道 ID>
   larkaxctl channel delete --id <渠道 ID>
+  larkaxctl channel restore --id <渠道 ID>
 
 **明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。**命令行参数会
 出现在 ps 的输出与 shell 历史里。
@@ -81,10 +86,43 @@ create 的 stdout 只有新渠道的 ID，其余信息走 stderr。
 list **不打印凭证密文**，只打印它挂在哪些主密钥下（那不需要任何密钥材料）。
 list 默认不列已删的渠道，--all 才列，并在「已删」那一栏标出删除时刻。
 
+get 打一条渠道的全部配置，一栏一行。它与 list 的分工是形状上的：list 一张表，
+get 一条一行。**已软删的渠道 get 也打得出来**，并在「已删」那一栏标出它——行还
+在库里，单条读取的目的是核对配置。
+
+health 打渠道的健康。health 那一栏是 channel_quota_state.health 的取值
+（healthy / degraded / drained / unknown），请求数、失败数、失败率、p50、p95、
+成本与缓存命中 / 未命中（以 token 计，口径与选路读的那两列相同）来自
+channel_health_rollup 在窗口里的那些小时桶。窗口由 --since 给：
+
+  --since 24h                     从 24 小时前到现在（默认）
+  --since 90m                     从 90 分钟前到现在
+  --since 2026-10-17T00:00:00Z    从这个时刻到现在
+
+默认打一张按渠道汇总的表：上面那些列都在，**成功数只在 --id 的详情里打**。
+带 --id 时改打那一条渠道的详情，并把它在这个窗口里的**逐小时**明细一起列出来。
+默认不列已软删的渠道，--all 才带上；带 --id 时那一条已删的也照打
+（--all 只影响清单要不要变长）。
+
+分位数每一列各取窗口内**自己**最近一个有值的桶，不是整个窗口的分位数——分位数
+不可累加，p50 与 p95 因此可能来自不同的小时。汇总行里的请求数是整个窗口的合计，
+要逐小时看就用 --id。
+
+成本那一列今天还没有写入方，恒显示 -：它说的是「没人记过账」，不是「免费」。
+
+缓存命中 / 未命中也是窗口内各小时之和（未命中算的是 prompt + 缓存写入）。
+0 表示这段时间一个缓存 token 都没有：那两列与成本不同，它们有真的写入方，
+所以 0 是正常读数而不是「没人记过账」。
+
 delete 是**软删**：置 deleted_at 并把状态改成 disabled，行与它的凭证密文都留在
 库里。历史账单（billing_requests / usage_events）仍然按 channel_id 引用它。
 已删的渠道不能再 update / enable / disable，再删一次不报错（打印「已经是删除
 状态」）。
+
+restore 是 delete 的逆操作：清掉 deleted_at、把状态置回 enabled，并把这条渠道的
+健康结论置回 unknown——它上一次的结论是**软删之前**的，不能直接沿用，恢复之后
+报 unknown 的意思是「现在好不好还没人说得出来」。没有处于删除状态的渠道再
+restore 一次不报错（打印「没有处于删除状态」）。
 
 渠道类型必须是已注册的适配器类型；类型写错时错误信息会列出已知的类型。
 --models 至少要有一个：读取路径把 models 当白名单用，空数组的渠道永远选不中。
@@ -141,6 +179,10 @@ func runChannel(args []string) error {
 		return runChannelCreate(rest)
 	case "list":
 		return runChannelList(rest)
+	case "get":
+		return runChannelGet(rest)
+	case "health":
+		return runChannelHealth(rest)
 	case "update":
 		return runChannelUpdate(rest)
 	case "enable":
@@ -149,6 +191,8 @@ func runChannel(args []string) error {
 		return runChannelSetStatus(rest, channels.StatusDisabled)
 	case "delete":
 		return runChannelDelete(rest)
+	case "restore":
+		return runChannelRestore(rest)
 	case "-h", "--help":
 		printUsage(os.Stdout, channelShortUsage)
 		return nil
@@ -567,6 +611,203 @@ func runChannelDelete(args []string) error {
 	return nil
 }
 
+// runChannelGet 打一条渠道的全部配置。
+//
+// 它与 list 的差别只在形状：list 一张表，get 一栏一行。**已软删的渠道也打得出来**
+// 并由那一栏标出——行还在库里，单条读取的目的是核对配置，藏起来反而让人打不开。
+func runChannelGet(args []string) error {
+	fs := flag.NewFlagSet("channel get", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	id := fs.Int64("id", 0, "要看的渠道 ID")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("get 不接受位置参数，得到 %q：要看哪条渠道用 --id 指定", fs.Arg(0)))
+	}
+	if *id <= 0 {
+		return usageErr(errors.New("缺少 --id（要看的渠道 ID）"))
+	}
+
+	cfg, err := config.LoadOps()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
+	defer cancel()
+	db, err := openDB(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+
+	// 与 list 同一条：单条详情既不封装凭证也不校验渠道类型，所以不需要主密钥，
+	// 也不需要适配器注册表。
+	info, err := channels.NewAdmin(db, nil, nil).Get(ctx, *id)
+	if err != nil {
+		return err
+	}
+	if jsonOutput() {
+		return emitJSON(os.Stdout, channelGetDoc(info), nil)
+	}
+	printChannelDetail(humanStdout(), info)
+	return nil
+}
+
+// channelHealthWindow 是 health 的默认窗口。
+//
+// 它取 24 小时，与选路那个窗口（internal/channels 的 healthWindow）是同一个数，
+// 但**不是同一个判据**：那一个决定「这条渠道最近够不够好、还选不选它」，这一个
+// 决定「这张汇总表默认看多久」。两处各取各的，改一处不会悄悄改另一处的含义。
+const channelHealthWindow = 24 * time.Hour
+
+// parseSince 把 --since 的取值翻成窗口起点。
+//
+// 两种写法：一段时长（`24h`、`90m`，Go 的 time.ParseDuration 那一套），相对此刻；
+// 或一个 RFC3339 时刻。空串是默认窗口。
+//
+// 时长必须为正，时刻不得晚于此刻：窗口的终点是现在，起点跑到终点之后就不再是一个
+// 窗口了。放它过去的表现是一张全是 0 的表，而那与「这段时间它没被调用过」在输出上
+// 一模一样——两者要处置的事情完全不同。
+func parseSince(raw string) (time.Time, error) {
+	if strings.TrimSpace(raw) == "" {
+		return time.Now().Add(-channelHealthWindow), nil
+	}
+	if d, err := time.ParseDuration(raw); err == nil {
+		if d <= 0 {
+			return time.Time{}, fmt.Errorf("--since 的时长必须为正，得到 %q", raw)
+		}
+		return time.Now().Add(-d), nil
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf(
+			"--since 既不是一段时长（如 24h、90m）也不是一个 RFC3339 时刻（如 2026-10-17T00:00:00Z）：%q",
+			raw)
+	}
+	if t.After(time.Now()) {
+		return time.Time{}, fmt.Errorf(
+			"--since 给的时刻 %s 在将来：窗口的终点是现在", raw)
+	}
+	return t, nil
+}
+
+// runChannelHealth 打窗口内的渠道健康。
+func runChannelHealth(args []string) error {
+	fs := flag.NewFlagSet("channel health", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	id := fs.Int64("id", 0, "只看这一条渠道（渠道 ID）")
+	since := fs.String("since", "", "窗口起点：一段时长或一个 RFC3339 时刻")
+	all := fs.Bool("all", false, "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("health 不接受位置参数，得到 %q：要看哪一条渠道用 --id 指定", fs.Arg(0)))
+	}
+	if *id < 0 {
+		return usageErr(errors.New("--id 必须是正数（渠道 ID）"))
+	}
+	windowStart, err := parseSince(*since)
+	if err != nil {
+		return usageErr(err)
+	}
+
+	cfg, err := config.LoadOps()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
+	defer cancel()
+	db, err := openDB(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+
+	// 与 list 同一条：健康读数既不封装凭证也不解密，所以不需要主密钥。
+	admin := channels.NewAdmin(db, nil, nil)
+
+	if *id > 0 {
+		one, buckets, healthErr := admin.HealthOne(ctx, *id, windowStart)
+		if healthErr != nil {
+			return healthErr
+		}
+		if jsonOutput() {
+			return emitJSON(os.Stdout,
+				channelHealthDoc([]channels.ChannelHealth{one}, windowStart, false, buckets, true), nil)
+		}
+		printChannelHealthDetail(humanStdout(), one)
+		printChannelHealthHours(humanStdout(), buckets)
+		return nil
+	}
+
+	rows, err := admin.Health(ctx, windowStart, *all)
+	if err != nil {
+		return err
+	}
+	if jsonOutput() {
+		return emitJSON(os.Stdout, channelHealthDoc(rows, windowStart, *all, nil, false), nil)
+	}
+	printChannelHealthList(humanStdout(), rows, *all)
+	return nil
+}
+
+// runChannelRestore 把一条软删的渠道恢复回可用。
+//
+// 它**不需要主密钥**：恢复只清 deleted_at、把状态置回 enabled、把健康结论置回
+// unknown，一处都不碰凭证密文。这与 delete / enable / disable 是同一条判据
+// （见 internal/channels 的 Restore），而恢复正是 delete 的逆操作，所以三者的
+// 环境要求也就该一样。
+func runChannelRestore(args []string) error {
+	if err := jsonUnsupported("channel restore"); err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet("channel restore", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	id := fs.Int64("id", 0, "要恢复的渠道 ID")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("restore 不接受位置参数，得到 %q：要恢复的渠道用 --id 指定", fs.Arg(0)))
+	}
+	if *id <= 0 {
+		return usageErr(errors.New("缺少 --id（要恢复的渠道 ID）"))
+	}
+
+	cfg, err := config.LoadOps()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
+	defer cancel()
+	db, err := openDB(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+
+	restored, err := channels.NewAdmin(db, nil, nil).Restore(ctx, *id)
+	if err != nil {
+		return err
+	}
+	if !restored {
+		// 与 delete 的「已经是删除状态」配成一对：两条命令都幂等，重跑一次
+		// 不该失败，而回显要说清这一次什么都没改。
+		_, _ = fmt.Fprintf(humanStderr(), "渠道 %d 没有处于删除状态。\n", *id)
+		return nil
+	}
+	// 健康结论回落这件事**必须当场说**：恢复之后的第一次 health 会报 unknown，
+	// 而 unknown 与「这条渠道没问题」在只看一眼时很容易被读成一回事。这一句
+	// 只在真的恢复了的时候打——没恢复的那一次没有任何结论被改写。
+	_, _ = fmt.Fprintf(humanStderr(),
+		"已恢复渠道 %d。它的健康结论已回落为 %s：上一次的结论是软删之前的，不能直接沿用。\n",
+		*id, channels.HealthUnknown)
+	return nil
+}
+
 // channelWriteAdmin 装配渠道管理面的写入侧：主密钥用来封装凭证，
 // 适配器注册表用来校验渠道类型。
 func channelWriteAdmin(db *sql.DB) (*channels.Admin, *credential.Sealer, error) {
@@ -741,10 +982,7 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo, withDeleted boo
 			deletedRows = append(deletedRows, strconv.FormatInt(info.ID, 10))
 		}
 	}
-	if len(deletedRows) > 0 {
-		_, _ = fmt.Fprintf(w, "渠道 %s 已删除：它们不再参与选路，也不能 update / enable / disable。\n",
-			strings.Join(deletedRows, "、"))
-	}
+	printDeletedChannelsNote(w, deletedRows)
 
 	// 带着 setting 的行单独点出来：那一栏在库里、在这张清单上都与一个生效的
 	// 配置没有区别，而今天没有任何适配器读它（见 #360）。不新开一列是同一条
@@ -823,16 +1061,352 @@ func channelEntry(info channels.ChannelInfo) map[string]any {
 	}
 }
 
+// printChannelDetail 打一条渠道的详情：一栏一行。
+//
+// 与 printChannelList 是同一份数据的另一种排版（一栏一行 vs 一张表），与
+// user / apikey / model 的 get 是同一个形状。
+func printChannelDetail(w io.Writer, info channels.ChannelInfo) {
+	tw := newTableWriter(w)
+	p := newPalette(w)
+	row := func(label, value string) {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+	}
+	row("ID", strconv.FormatInt(info.ID, 10))
+	row("名称", info.Name)
+	row("状态", info.Status)
+	row("类型", info.Type)
+	row("上游地址", info.BaseURL)
+	row("模型", strings.Join(info.Models, ","))
+	row("归属", ownerLabel(info.OwnerUserID))
+	row("权重", strconv.Itoa(info.Weight))
+	row("优先级", strconv.Itoa(info.Priority))
+	row("凭证", credentialKeysLabel(info))
+	row("setting", settingLabel(info.Setting))
+	row("创建时间", p.dim(info.CreatedAt.Format(time.RFC3339)))
+	row("更新时间", p.dim(info.UpdatedAt.Format(time.RFC3339)))
+	// 「已删」整行只在真删了的时候出现：单条详情只有一行，打一个空的已删栏
+	// 除了让人多找一次「哪儿写着我删没删」没有别的用处（与 list 那一栏不同，
+	// 那里一列空值要能逐行分辨）。
+	if !info.DeletedAt.IsZero() {
+		row("已删", p.dim(deletedAtLabel(info.DeletedAt)))
+	}
+	_ = tw.Flush()
+
+	if info.CredentialErr != nil {
+		_, _ = fmt.Fprintf(w, "渠道 %d 的凭证密文不合法：%v\n", info.ID, info.CredentialErr)
+	}
+}
+
+// settingLabel 打渠道私有配置。
+//
+// 空对象打 `{}` 而不是 `-`：库里那一列是 NOT NULL DEFAULT '{}'，「没有额外配置」
+// 本身就是一个确定的值，与「这一栏没读出来」是两回事。
+func settingLabel(setting map[string]any) string {
+	if len(setting) == 0 {
+		return "{}"
+	}
+	raw, err := json.Marshal(setting)
+	if err != nil {
+		return "（不是可序列化的 JSON 对象）"
+	}
+	return string(raw)
+}
+
+// printChannelHealthList 打按渠道汇总的健康表。
+//
+// withDeleted 与 list --all 那一栏同义：默认清单里每一行都是零值，那一列只是把
+// 噪音铺满每一行。
+func printChannelHealthList(w io.Writer, rows []channels.ChannelHealth, withDeleted bool) {
+	if len(rows) == 0 {
+		// 与 list 共用同一句：空清单与「命令没跑起来」在安静的终端里长得一样
+		// （见 LESSONS.md 第 16 条），而这里的下一步动作也确实是建一条渠道。
+		_, _ = fmt.Fprintln(w, emptyListNote("渠道", "channel create"))
+		return
+	}
+
+	tw := newTableWriter(w)
+	p := newPalette(w)
+	headers := []string{"ID", "名称", "health", "最近探测", "请求数", "失败数", "失败率",
+		"缓存命中", "缓存未命中", "p50", "p95", "成本"}
+	if withDeleted {
+		headers = append(headers, "已删")
+	}
+	bolded := make([]string, len(headers))
+	for i, h := range headers {
+		bolded[i] = p.bold(h)
+	}
+	_, _ = fmt.Fprintln(tw, strings.Join(bolded, "\t"))
+
+	for _, h := range rows {
+		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%d\t%d\t%s\t%d\t%d\t%s\t%s\t%s",
+			p.bold(strconv.FormatInt(h.ID, 10)), p.bold(h.Name), h.Health,
+			p.dim(probeLabel(h.LastProbeAt)),
+			h.Requests, h.Failures, rateLabel(h.FailureRate()),
+			h.CacheHitTokens, h.CacheMissTokens,
+			latencyLabel(h.LatencyP50ms), latencyLabel(h.LatencyP95ms), costLabel(h.Cost))
+		if withDeleted {
+			line += "\t" + p.dim(deletedAtLabel(h.DeletedAt))
+		}
+		_, _ = fmt.Fprintln(tw, line)
+	}
+	_ = tw.Flush()
+
+	// 与 list 同一句：已删的行不该只靠一个状态字去认，下一步该敲哪条命令也
+	// 写在同一句里。
+	var deleted []string
+	for _, h := range rows {
+		if !h.DeletedAt.IsZero() {
+			deleted = append(deleted, strconv.FormatInt(h.ID, 10))
+		}
+	}
+	printDeletedChannelsNote(w, deleted)
+}
+
+// printChannelHealthDetail 打一条渠道的健康详情：一栏一行。
+//
+// 与汇总表同一份数据、另一种排版。健康那一栏与几个计数在这里是逐项列出来的，
+// 因为 --id 这一档的读者问的是「这条渠道怎么了」，而不是「哪条渠道最差」。
+func printChannelHealthDetail(w io.Writer, h channels.ChannelHealth) {
+	tw := newTableWriter(w)
+	p := newPalette(w)
+	row := func(label, value string) {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+	}
+	row("ID", strconv.FormatInt(h.ID, 10))
+	row("名称", h.Name)
+	row("health", h.Health)
+	row("最近探测", probeLabel(h.LastProbeAt))
+	row("请求数", strconv.FormatInt(h.Requests, 10))
+	row("成功数", strconv.FormatInt(h.Successes, 10))
+	row("失败数", strconv.FormatInt(h.Failures, 10))
+	row("失败率", rateLabel(h.FailureRate()))
+	row("缓存命中", strconv.FormatInt(h.CacheHitTokens, 10))
+	row("缓存未命中", strconv.FormatInt(h.CacheMissTokens, 10))
+	row("p50", latencyLabel(h.LatencyP50ms))
+	row("p95", latencyLabel(h.LatencyP95ms))
+	row("成本", costLabel(h.Cost))
+	if !h.DeletedAt.IsZero() {
+		row("已删", p.dim(deletedAtLabel(h.DeletedAt)))
+	}
+	_ = tw.Flush()
+}
+
+// printChannelHealthHours 打一条渠道在这个窗口里的逐小时明细。
+//
+// 最近的一小时在最上面：这条命令回答的是「它最近怎么了」。
+//
+// 分位数在这里是**每个桶自己的值**，不跨桶合并。汇总行里每一列取的是它自己最近
+// 一个有值的那一桶，所以最上面那一行的 p50 / p95 通常与汇总行一致（除非最近那一桶
+// 在某一列上没有样本，那一列就落到更早的一桶）。
+func printChannelHealthHours(w io.Writer, buckets []channels.HealthBucket) {
+	if len(buckets) == 0 {
+		// 这一句**不套**空清单那一句：这里缺的不是「还没有渠道」这个可以添加的
+		// 东西，而是「这段时间它没被调用过」这个结论，给不出下一步命令。
+		_, _ = fmt.Fprintln(w, "窗口内没有逐小时的数据：这段时间它一次都没被调用过。")
+		return
+	}
+
+	tw := newTableWriter(w)
+	p := newPalette(w)
+	headers := []string{"小时", "请求数", "成功数", "失败数", "缓存命中", "缓存未命中", "p50", "p95", "成本"}
+	bolded := make([]string, len(headers))
+	for i, h := range headers {
+		bolded[i] = p.bold(h)
+	}
+	_, _ = fmt.Fprintln(tw, strings.Join(bolded, "\t"))
+
+	for _, b := range buckets {
+		_, _ = fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%s\n",
+			p.dim(b.Bucket.Format(time.RFC3339)), b.Requests, b.Successes, b.Failures,
+			b.CacheHitTokens, b.CacheMissTokens,
+			latencyLabel(b.LatencyP50ms), latencyLabel(b.LatencyP95ms), costLabel(b.Cost))
+	}
+	_ = tw.Flush()
+}
+
+// probeLabel 打最近一次额度探测的时刻。
+//
+// 没探测过打「从未」而不是 `-`：这张表里的 `-` 已经表示「这个窗口里没有数据」
+// （没有失败、没有样本、没有成本），而「从来没探测过这条渠道」是另一件具体的事，
+// 值一个自己的词。
+func probeLabel(at *time.Time) string {
+	if at == nil {
+		return "从未"
+	}
+	return at.Format(time.RFC3339)
+}
+
+// rateLabel 打失败率。
+//
+// 窗口里没有请求时打 `-`：0/0 不是一个百分数，而打 `0.0%` 会与「请求过很多次、
+// 一次都没失败」长得一样——那两件事的下一步动作正相反。
+func rateLabel(rate *float64) string {
+	if rate == nil {
+		return "-"
+	}
+	return strconv.FormatFloat(*rate*100, 'f', 1, 64) + "%"
+}
+
+// latencyLabel 打分位数。
+//
+// nil 是「这个窗口里没有样本」，与「样本是 0 毫秒」分开：后者是一条很可疑的读数，
+// 而前者只是没数据。用零值接住 nil 会让一条没有任何样本的渠道看起来快得离谱。
+func latencyLabel(ms *int) string {
+	if ms == nil {
+		return "-"
+	}
+	return strconv.Itoa(*ms) + "ms"
+}
+
+// costLabel 打窗口内的成本合计。
+//
+// nil 是「没有数据」（见 channels.ChannelHealth.Cost）：那一列今天没有生产写入方，
+// 而一个 `0.00000000` 会被读成「这段窗口里没花钱」，事实是**没人记过账**。
+func costLabel(cost *string) string {
+	if cost == nil {
+		return "-"
+	}
+	return *cost
+}
+
+// printDeletedChannelsNote 点出清单里已删的那几行。
+//
+// 它们的 status 也是 disabled（删除时一并置的），而「停用」是运维的临时决定、
+// 随时能启用回来；两者只看状态那一栏分不出来。list 与 health 共用这一句，
+// 于是「怎么把它弄回来」这个下一步只有一处答案。
+//
+// 收的是 ID 清单而不是某一种行类型：两个调用方的行类型不同，而这一句要说的事情
+// 只用到 ID。
+func printDeletedChannelsNote(w io.Writer, deleted []string) {
+	if len(deleted) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "渠道 %s 已删除：它们不再参与选路，也不能 update / enable / disable；"+
+		"用 larkaxctl channel restore 可以恢复回来。\n", strings.Join(deleted, "、"))
+}
+
+// channelGetDoc 组装 channel get 的机器可读输出。
+func channelGetDoc(info channels.ChannelInfo) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["channel"] = channelDetailEntry(info)
+	return doc
+}
+
+// channelDetailEntry 打一条渠道的详情：在清单那几栏之上多给创建与更新时刻。
+func channelDetailEntry(info channels.ChannelInfo) map[string]any {
+	entry := channelEntry(info)
+	entry["created_at"] = jsonTime(info.CreatedAt)
+	entry["updated_at"] = jsonTime(info.UpdatedAt)
+	return entry
+}
+
+// channelHealthDoc 组装 channel health 的机器可读输出。
+//
+// since 是这次的窗口起点，它进 summary：不给的话 `"requests": 12` 说不清是哪段
+// 时间里的 12，而这一档正是给脚本读的。
+//
+// detail 为真时（--id）多给一份逐小时明细。两条路共用同一个顶层形状（channels
+// 数组，--id 那一档恰好一个元素），于是 `jq '.channels[]'` 在两种调用下都成立。
+func channelHealthDoc(rows []channels.ChannelHealth, since time.Time, withDeleted bool,
+	buckets []channels.HealthBucket, detail bool) map[string]any {
+	doc := jsonDoc(jsonOK)
+
+	summary := map[string]any{"total": len(rows), "since": jsonTime(since)}
+	if withDeleted {
+		deleted := 0
+		for _, h := range rows {
+			if !h.DeletedAt.IsZero() {
+				deleted++
+			}
+		}
+		summary["deleted"] = deleted
+	}
+	if detail {
+		summary["buckets"] = len(buckets)
+	}
+	doc["summary"] = summary
+
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	entries := make([]map[string]any, 0, len(rows))
+	for _, h := range rows {
+		entries = append(entries, healthEntry(h))
+	}
+	doc["channels"] = entries
+
+	if detail {
+		bs := make([]map[string]any, 0, len(buckets))
+		for _, b := range buckets {
+			bs = append(bs, healthBucketEntry(b))
+		}
+		doc["buckets"] = bs
+	}
+	return doc
+}
+
+// healthEntry 打一条渠道的健康读数：表格那几栏对应的原始值。
+//
+// 缓存那两个 token 数是**数字**而不是 null：与 requests 同一档，0 表示窗口里没有
+// 样本（见 channels.ChannelHealth 上那两个字段）。
+func healthEntry(h channels.ChannelHealth) map[string]any {
+	return map[string]any{
+		"id":                h.ID,
+		"name":              h.Name,
+		"health":            h.Health,
+		"last_probe_at":     jsonTimePtr(h.LastProbeAt),
+		"requests":          h.Requests,
+		"successes":         h.Successes,
+		"failures":          h.Failures,
+		"failure_rate":      jsonOpt(h.FailureRate()),
+		"cache_hit_tokens":  h.CacheHitTokens,
+		"cache_miss_tokens": h.CacheMissTokens,
+		"latency_p50_ms":    jsonOpt(h.LatencyP50ms),
+		"latency_p95_ms":    jsonOpt(h.LatencyP95ms),
+		"cost":              jsonOpt(h.Cost),
+		"deleted_at":        jsonTimeOrNull(h.DeletedAt),
+	}
+}
+
+// healthBucketEntry 打逐小时明细里的一行。
+func healthBucketEntry(b channels.HealthBucket) map[string]any {
+	return map[string]any{
+		"bucket":            jsonTime(b.Bucket),
+		"requests":          b.Requests,
+		"successes":         b.Successes,
+		"failures":          b.Failures,
+		"cache_hit_tokens":  b.CacheHitTokens,
+		"cache_miss_tokens": b.CacheMissTokens,
+		"latency_p50_ms":    jsonOpt(b.LatencyP50ms),
+		"latency_p95_ms":    jsonOpt(b.LatencyP95ms),
+		"cost":              jsonOpt(b.Cost),
+	}
+}
+
+// jsonOpt 把「可能没有值的指针」翻成 JSON：nil 是 null，否则是它指着的那个值。
+//
+// 表格那一档的 `-` 与「从未」一个都不进 JSON：`"latency_p95_ms": "-"` 会让按数字
+// 解析它的一方拿到一个解析不了的值（见 docs/cli-output.md 的「值的约定」）。
+func jsonOpt[T any](v *T) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
 // deletedLabel 是 list --all 里「已删」那一栏。
 //
 // 没删的行留空，打一个占位符会让每一行都有东西、而读者要逐行分辨哪个占位符
 // 表示「没有」；已删的行给出删除时刻，因为「什么时候删的」是事后核对时唯一
 // 能把它与历史账单对上的一条线索。
 func deletedLabel(info channels.ChannelInfo) string {
-	if info.DeletedAt.IsZero() {
+	return deletedAtLabel(info.DeletedAt)
+}
+
+// deletedAtLabel 把一个删除时刻打成那一栏里的值：零值（没删）留空。
+func deletedAtLabel(at time.Time) string {
+	if at.IsZero() {
 		return ""
 	}
-	return info.DeletedAt.UTC().Format(time.RFC3339)
+	return at.UTC().Format(time.RFC3339)
 }
 
 // credentialKeysLabel 是清单里的「凭证」那一栏。

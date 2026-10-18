@@ -666,6 +666,21 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		Status: "enabled", Models: []string{"model-x"}, Weight: 1, Priority: 1,
 		CredentialKeys: []string{"k1"}, CreatedAt: at, UpdatedAt: at,
 	}
+	// 健康那三张表的样本：一栏都不留空，于是「打不打得出」与「空值怎么排」两件事
+	// 在这条用例里都看得到（后者的判据在 channel_test.go 的字段用例里）。
+	healthP50, healthP95 := 80, 240
+	healthCost := "1.50000000"
+	healthRow := channels.ChannelHealth{
+		ID: 1, Name: "示例渠道", Health: "degraded", LastProbeAt: &at,
+		Requests: 40, Successes: 39, Failures: 1,
+		CacheHitTokens: 300, CacheMissTokens: 700,
+		LatencyP50ms: &healthP50, LatencyP95ms: &healthP95, Cost: &healthCost,
+	}
+	healthBucket := channels.HealthBucket{
+		Bucket: at, Requests: 40, Successes: 39, Failures: 1,
+		CacheHitTokens: 300, CacheMissTokens: 700,
+		LatencyP95ms: &healthP95, Cost: &healthCost,
+	}
 	rules := []pricing.RuleInfo{{
 		ID: 1, Scope: "platform", Name: "示例规则", ModelPatterns: []string{"model-x"},
 		Expr: "input * 1", Priority: 1, EffectiveFrom: at, Enabled: true,
@@ -681,6 +696,18 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		}},
 		{"渠道清单 --all", func(w io.Writer) {
 			printChannelList(w, []channels.ChannelInfo{channel}, true)
+		}},
+		{"渠道详情", func(w io.Writer) {
+			printChannelDetail(w, channel)
+		}},
+		{"渠道健康汇总", func(w io.Writer) {
+			printChannelHealthList(w, []channels.ChannelHealth{healthRow}, false)
+		}},
+		{"渠道健康详情", func(w io.Writer) {
+			printChannelHealthDetail(w, healthRow)
+		}},
+		{"渠道健康逐小时", func(w io.Writer) {
+			printChannelHealthHours(w, []channels.HealthBucket{healthBucket})
 		}},
 		{"模型清单", func(w io.Writer) {
 			printModelList(w, []catalog.Model{{
@@ -742,8 +769,8 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		}},
 	}
 
-	if len(cases) != 13 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 13 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 17 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 17 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {

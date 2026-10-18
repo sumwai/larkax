@@ -42,8 +42,8 @@ var ErrNoChanges = errors.New("没有要改的字段")
 // ErrChannelDeleted 表示这条渠道已经被软删，不能再改。
 //
 // 与 ErrChannelNotFound 分开，是因为两者的下一步动作不同：那一条是 id 写错了
-// （重新列一遍拿现存的 id），这一条是「行还在，但它已经不在使用中」——
-// 要重新启用一条已删的渠道，是一个尚未提供的动作，不是改 id 能解决的。
+// （重新列一遍拿现存的 id），这一条是「行还在，但它已经不在使用中」——要把它
+// 变回可用得走 Restore，不是改 id 能解决的。
 //
 // 写路径（Update / SetStatus）撞上它时**一行都不改**：静默改一行用户看不见的
 // 数据，会让「我已经删掉它了」与「它又被改回来了」在库里分不出来。
@@ -348,8 +348,8 @@ func (a *Admin) explainNoRow(ctx context.Context, id int64) error {
 		return fmt.Errorf("查渠道 %d 的删除状态失败: %w", id, err)
 	}
 	if deleted {
-		return fmt.Errorf("%w：id %d（用 larkaxctl channel list --all 可以看到已删的渠道）",
-			ErrChannelDeleted, id)
+		return fmt.Errorf("%w：id %d（用 larkaxctl channel list --all 可以看到已删的渠道，"+
+			"用 larkaxctl channel restore 可以把它恢复回来）", ErrChannelDeleted, id)
 	}
 	// 行还在、没删，却没被 WHERE 匹配上：两次语句之间它刚被删掉。
 	// 与「已经删了」是同一个事实，只是晚了一步。
@@ -443,6 +443,121 @@ func (a *Admin) SoftDelete(ctx context.Context, id int64) (bool, error) {
 	}
 	// 行在，且上面那条带 channelAlive 的 UPDATE 没匹配上：它已经删了。
 	return false, nil
+}
+
+// Get 读一条渠道的详情，**已软删的也读**。
+//
+// # 为什么已删的也读得出来
+//
+// 清单（List）默认不列已删的渠道，那个开关管的是「清单要不要变长」。按 id 读一条
+// 是另一件事：行还在库里，而单条读取的目的是核对配置——藏起来只会让人打不开，
+// 逼他去翻 --all 或者直接看库。已删与否由返回值的 DeletedAt 说出来，调用方据此
+// 在输出里标出它。
+//
+// 写路径对已删渠道的处置不照这条走，而且彼此不同：Update / SetStatus 撞上已删的
+// 渠道要拒绝，理由是「不静默改一行用户看不见的数据」（见 ErrChannelDeleted）；
+// Restore 恰恰相反，它是唯一**接受**已删渠道的写路径——把 deleted_at 清掉正是它
+// 的职责。
+func (a *Admin) Get(ctx context.Context, id int64) (ChannelInfo, error) {
+	if id <= 0 {
+		return ChannelInfo{}, errors.New("渠道 id 无效")
+	}
+	row := a.db.QueryRowContext(ctx, listQuery+"\n WHERE c.id = $1", id)
+	info, err := scanInfo(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		// 与「改不动」分开：这里要答的是「有没有这一行」，没有就是 id 写错了。
+		return ChannelInfo{}, fmt.Errorf("%w：id %d", ErrChannelNotFound, id)
+	}
+	if err != nil {
+		return ChannelInfo{}, err
+	}
+	return info, nil
+}
+
+// Restore 把一条软删的渠道恢复回可用，返回它是不是**这次才**恢复的。
+//
+// 它是 SoftDelete 的逆操作，写三处：
+//
+//   - deleted_at 置回 NULL，这一列是删除状态的唯一判据；
+//   - status 置成 enabled。删除时那一列被改成了 disabled 当兜底（见 SoftDelete），
+//     所以「删之前是不是运维主动停用过」在库里已经不存在了，还原不回来。恢复
+//     成 disabled 的渠道会出现在清单上却选不中——那正是这类「看起来好了、实际
+//     没好」的错，所以这里给的是 enabled，也就是「恢复回可用」的字面意思。
+//   - channel_quota_state.health 置回 unknown。它上一次的结论是**软删之前**的，
+//     直接沿用等于把一段已经过去的历史当成现在的判断；而这条渠道在删除期间没有
+//     任何流量，谁都无法说它现在好不好。没有额度状态行时什么都不写——没有行本来
+//     就读作 unknown，补一行空状态只是一次没有信息量的写。
+//
+// 连续失败计数（channels.consecutive_failures / last_failure_at）不动。那个计数
+// 自带冷却期：读取侧对「最后一次失败早于 15 分钟」的行按 0 处理（见
+// streakCooldown），而软删到恢复之间几乎一定超过 15 分钟，所以恢复后它自动不算数。
+//
+// # 已经没被删的再恢复一次不是错误
+//
+// 返回 false 表示这一行本来就没删，与「id 不存在」不同：后者仍然报
+// ErrChannelNotFound，因为 id 写错时幂等会让一次打错的调用看起来像成功。这与
+// SoftDelete 的口径一致。
+func (a *Admin) Restore(ctx context.Context, id int64) (bool, error) {
+	if id <= 0 {
+		return false, errors.New("渠道 id 无效")
+	}
+
+	// 两处写在一个事务里：恢复一半（渠道回来了、健康结论还是软删前那个
+	// drained）留下的正是这条改动要消除的那种状态——库上看起来恢复了，
+	// 而选路会照旧摘掉它。
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("开启恢复渠道事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE channels
+		   SET deleted_at = NULL, status = $2, updated_at = now()
+		 WHERE id = $1 AND deleted_at IS NOT NULL`,
+		id, StatusEnabled)
+	if err != nil {
+		return false, fmt.Errorf("恢复渠道失败: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("确认恢复结果失败: %w", err)
+	}
+	if affected == 0 {
+		// 0 行：要么没有这个 id，要么它本来就没删。先回滚，再分开报——两次
+		// 查询报的是同一件事，而这里分得出「id 打错了」与「本来就是可用的」。
+		_ = tx.Rollback()
+		return false, a.explainNotDeleted(ctx, id)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE channel_quota_state SET health = $2, updated_at = now() WHERE channel_id = $1`,
+		id, HealthUnknown); err != nil {
+		return false, fmt.Errorf("把渠道 %d 的健康结论置回 %s 失败: %w", id, HealthUnknown, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("提交恢复渠道失败: %w", err)
+	}
+	return true, nil
+}
+
+// explainNotDeleted 把「这次 UPDATE 一行都没匹配上」翻译成具体的那一种。
+//
+// 与 explainNoRow 是同一件事的另一侧：那一处的 WHERE 带 channelAlive，0 行意味着
+// 「不存在」或「已删」；这里的 WHERE 要求 deleted_at 非空，0 行意味着「不存在」或
+// 「没删」。两种都不该统一报一个错——前者要重新拿 id，后者是一条正常的幂等调用。
+func (a *Admin) explainNotDeleted(ctx context.Context, id int64) error {
+	var deleted bool
+	err := a.db.QueryRowContext(ctx,
+		`SELECT deleted_at IS NOT NULL FROM channels WHERE id = $1`, id).Scan(&deleted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w：id %d", ErrChannelNotFound, id)
+	}
+	if err != nil {
+		return fmt.Errorf("查渠道 %d 的删除状态失败: %w", id, err)
+	}
+	// 行在、没删：这次恢复是一次幂等重跑，不是失败。
+	return nil
 }
 
 // ChannelInfo 是管理面看到的一条渠道。**它不含密文，也不含明文凭证。**
@@ -589,7 +704,13 @@ SELECT
     c.deleted_at
   FROM channels c`
 
-func scanInfo(rows *sql.Rows) (ChannelInfo, error) {
+// rowScanner 是 *sql.Rows 与 *sql.Row 共用的那一小段：两者都只有一个 Scan，
+// 于是同一段解码能同时给「列一批」与「按 id 取一行」用。
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanInfo(rows rowScanner) (ChannelInfo, error) {
 	var (
 		info       ChannelInfo
 		modelsJSON string

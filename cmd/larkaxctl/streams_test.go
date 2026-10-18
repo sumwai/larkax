@@ -447,6 +447,23 @@ func TestWriteEchoesAppearOnlyOnStderr(t *testing.T) {
 					return runChannel([]string{"delete", "--id", id(victim)})
 				})
 			}},
+		{command: "channel", what: "restore", marker: "已恢复渠道", stdout: stdoutEmpty,
+			run: func(t *testing.T, fx *streamFixture) (string, string) {
+				withStdin(t, testSecret)
+				created, _ := mustStream(t, func() error {
+					return runChannel([]string{
+						"create", "--name", uniqueName("echo-revived-channel"), "--type", testChanType,
+						"--base-url", testBaseURL, "--models", fx.modelName, "--credential-stdin",
+					})
+				})
+				victim := idFromStdout(t, "渠道", created)
+				mustStream(t, func() error {
+					return runChannel([]string{"delete", "--id", id(victim)})
+				})
+				return mustStream(t, func() error {
+					return runChannel([]string{"restore", "--id", id(victim)})
+				})
+			}},
 
 		{command: "model", what: "create", marker: "已加入规范模型", stdout: stdoutID,
 			run: func(t *testing.T, _ *streamFixture) (string, string) {
@@ -550,8 +567,8 @@ func TestWriteEchoesAppearOnlyOnStderr(t *testing.T) {
 
 	// 条数写成判据：少了说明某条写命令没人看着了，而「回显又跑回 stdout」正是
 	// 那样溜进来的。
-	if len(cases) != 21 {
-		t.Fatalf("这张表里 %d 条写命令，期望 21 条", len(cases))
+	if len(cases) != 22 {
+		t.Fatalf("这张表里 %d 条写命令，期望 22 条", len(cases))
 	}
 
 	for _, tc := range cases {

@@ -103,7 +103,7 @@ func insertUsageEvent(t *testing.T, db *sql.DB, channelID int64, at time.Time,
 func TestRecordCallMaintainsStreak(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
-	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 	r := NewRecorder(db, testStaleAfter)
 	at := time.Now().UTC()
 
@@ -140,7 +140,7 @@ func TestRecordCallStreakIsVisibleToCandidates(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	id := insertChannel(t, db, sealer, channelSpec{model: model})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 	r := NewRecorder(db, testStaleAfter)
 	at := time.Now().UTC()
 
@@ -171,7 +171,7 @@ func TestRecordCallStreakExpiresForCandidates(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	id := insertChannel(t, db, sealer, channelSpec{model: model})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 	r := NewRecorder(db, testStaleAfter)
 
 	// 失败发生在 16 分钟前：冷却期（15 分钟）已经过了。
@@ -230,7 +230,7 @@ func TestRecordCallMissingChannelIsNoop(t *testing.T) {
 func TestRecordCallRejectsUnknownVerdict(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
-	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 	r := NewRecorder(db, testStaleAfter)
 	at := time.Now().UTC()
 
@@ -258,7 +258,7 @@ func TestRecordCallRejectsUnknownVerdict(t *testing.T) {
 func TestRecordCallAccumulatesRollupBucket(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
-	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 	r := NewRecorder(db, testStaleAfter)
 	at := time.Now().UTC()
 	bucket := at.Truncate(time.Hour)
@@ -309,7 +309,7 @@ func TestRecordCallAggregatesCacheFromUsageEvents(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	id := insertChannel(t, db, sealer, channelSpec{model: model})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 	r := NewRecorder(db, testStaleAfter)
 
 	// 桶归属看的是 usage_events.created_at，所以两个时刻要落在同一个小时里。
@@ -365,7 +365,7 @@ func TestRecordCallAggregatesCacheFromUsageEvents(t *testing.T) {
 func TestRecordCallWithoutUsageLeavesCacheAtZero(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
-	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 	r := NewRecorder(db, testStaleAfter)
 
 	// 一次失败调用：没有用量事件（上游没有回执）。
@@ -397,7 +397,7 @@ func TestRecordCallAggregatesLatencyP95(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	id := insertChannel(t, db, sealer, channelSpec{model: model})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 	r := NewRecorder(db, testStaleAfter)
 
 	at := time.Now().UTC().Truncate(time.Hour).Add(20 * time.Minute)
@@ -445,7 +445,7 @@ func TestRecordCallAggregatesLatencyP95(t *testing.T) {
 func TestRecordCallLatencyIgnoresNullSamples(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
-	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 	r := NewRecorder(db, testStaleAfter)
 
 	at := time.Now().UTC().Truncate(time.Hour).Add(30 * time.Minute)
@@ -478,7 +478,7 @@ func TestRecordCallLatencyIgnoresNullSamples(t *testing.T) {
 func TestRecordCallSignalsArePerBucket(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
-	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 	r := NewRecorder(db, testStaleAfter)
 
 	current := time.Now().UTC().Truncate(time.Hour).Add(40 * time.Minute)
@@ -507,7 +507,7 @@ func TestRecordCallSignalsArePerBucket(t *testing.T) {
 func TestRecordCallUnattributedDoesNotTouchStreak(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
-	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 	r := NewRecorder(db, testStaleAfter)
 	at := time.Now().UTC()
 
@@ -531,7 +531,7 @@ func TestRecordCallUnattributedDoesNotTouchStreak(t *testing.T) {
 func TestRecordCallBucketsByHour(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
-	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 	r := NewRecorder(db, testStaleAfter)
 
 	// 两个小时之前与现在。用整点减去一小时，避开「正好卡在整点」的边界。
@@ -618,7 +618,7 @@ func quotaRowCount(t *testing.T, db *sql.DB, channelID int64) int {
 func TestRecordCallSelfAccountsAgainstBaseline(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
-	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 	insertQuota(t, db, id, "1000", "tokens", "api_query", "healthy", 1)
 
 	r := NewRecorder(db, testStaleAfter)
@@ -705,7 +705,7 @@ func TestRecordCallStaleThresholdComesFromConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db := testDB(t)
 			sealer := testSealer(t)
-			id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+			id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 			insertProbedQuota(t, db, id, probeAgo)
 
 			r := NewRecorder(db, tc.staleAfter)
@@ -737,7 +737,7 @@ func TestRecordCallStaleThresholdComesFromConfig(t *testing.T) {
 func TestRecordCallSelfAccountingClampsAtZero(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
-	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 	insertQuota(t, db, id, "100", "tokens", "api_query", "healthy", 1)
 
 	r := NewRecorder(db, testStaleAfter)
@@ -762,7 +762,7 @@ func TestRecordCallSelfAccountingClampsAtZero(t *testing.T) {
 func TestRecordCallSelfAccountingNeedsBaseline(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
-	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 
 	r := NewRecorder(db, testStaleAfter)
 	call := route.CallOutcome{
@@ -811,7 +811,7 @@ func TestRecordCallSelfAccountingSkipsForeignUnit(t *testing.T) {
 		{"单位未知", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+			id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 			insertQuota(t, db, id, "100", tc.unit, "api_query", "healthy", 1)
 
 			err := r.RecordCall(context.Background(), route.CallOutcome{
@@ -839,7 +839,7 @@ func TestRecordCallSelfAccountingSkipsForeignUnit(t *testing.T) {
 func TestRecordCallSelfAccountingOnlyWithUsage(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
-	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 	insertQuota(t, db, id, "1000", "tokens", "api_query", "healthy", 1)
 
 	r := NewRecorder(db, testStaleAfter)
@@ -876,7 +876,7 @@ func TestRecordCallSelfAccountingOnlyWithUsage(t *testing.T) {
 func TestRecordCallRejectsFutureObservation(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
-	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 	insertQuota(t, db, id, "1000", "tokens", "api_query", "healthy", 1)
 
 	r := NewRecorder(db, testStaleAfter)

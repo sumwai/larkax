@@ -55,7 +55,11 @@ var statusRenderPaths = []string{
 var tableRenderPaths = []string{
 	"doctorTable.lines", // doctor -v 的逐项明细
 	"printAliasList",
-	"printAllowlists", // snapshot allowlist
+	"printAllowlists",          // snapshot allowlist
+	"printChannelDetail",       // channel get
+	"printChannelHealthDetail", // channel health --id 的读数
+	"printChannelHealthHours",  // channel health --id 的逐小时明细
+	"printChannelHealthList",   // channel health 的汇总表
 	"printChannelList",
 	"printConsentList", // consent list
 	"printKeyDetail",   // apikey get
@@ -79,6 +83,7 @@ var tableRenderPaths = []string{
 var emptyListPaths = []string{
 	"checkDoctorWallets", // doctor 的钱包体检：一个用户都没有
 	"printAliasList",
+	"printChannelHealthList", // channel health：一条渠道都没有
 	"printChannelList",
 	"printConsentList", // consent list
 	"printKeyList",
