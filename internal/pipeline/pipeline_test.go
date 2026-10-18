@@ -325,8 +325,8 @@ func TestReserveTakesMaxNotFirstCandidate(t *testing.T) {
 // PricingExprSnap）——同一笔请求记下的定价依据换成了另一条，事后按 RuleID
 // 回溯「这笔钱按哪条规则估的」会指到没参与定价的那一条上。
 //
-// 上面两条用例的规则金额都不同（0.001 / 0.002 / 5e-6），走到这个比较器时
-// 两支都取「严格大于」那一侧，相等那一格从没被走到过。
+// 上面两条用例里参与比较的金额都两两不同（`0.002` 与 `2`；`0.001`/`0.002`/`0.005`），
+// 走到这个比较器时两支都取「严格大于」那一侧，相等那一格从没被走到过。
 func TestReserveKeepsFirstRuleWhenUpperBoundsTie(t *testing.T) {
 	// 两条规则价一样、ID 不同：金额分不出高下，分得出高下的是顺序。
 	first := Rule{ID: 31, Version: 1, Source: `{"prompt": 0.001, "completion": 0.002}`}

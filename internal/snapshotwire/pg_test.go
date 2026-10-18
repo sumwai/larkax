@@ -26,7 +26,7 @@ func TestPgDBQueryContextReportsErrorFromClosedHandle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造句柄失败: %v", err)
 	}
-	if err := db.Close(); err != nil {
+	if err = db.Close(); err != nil {
 		t.Fatalf("关闭句柄失败: %v", err)
 	}
 
