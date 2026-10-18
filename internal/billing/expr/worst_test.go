@@ -316,6 +316,31 @@ func TestWorstCaseCoversUnitsOnEitherBranch(t *testing.T) {
 	}
 }
 
+// TestWorstCaseCoversTheWiderBranch 验证一侧的键比另一侧多时，多出来的那些照样进上界。
+//
+// 并集的容量按两支的键数之和预留，那只是**容量提示**：写小了顶多多扩容一次，
+// 两支键数不等时并集的内容一项不少。这条用例给的是「真分支只有 img、
+// 假分支多一个 search」——键只在一侧出现的那条路要走到，而现有那两条用例
+// 两侧键数相同，绕开了这个形状。
+func TestWorstCaseCoversTheWiderBranch(t *testing.T) {
+	p := mustCompile(t, `len <= 1
+		? {"prompt": 0.0000015, "units": {"img": 0.02}}
+		: {"prompt": 0.0000015, "units": {"img": 0.02, "search": 0.01}}`)
+
+	worst, err := p.EvalWorstCase(Env{Usage: billing.Usage{PromptTokens: 100}, At: testAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 只在假分支出现的 search 也要进上界：命中的那一支未必更贵，
+	// 而上界要覆盖每一支。
+	if got := worst.Prices.Units["search"].String(); got != "0.01000000" {
+		t.Errorf("上界里的 search = %s，期望 0.01000000（整组：%v）", got, worst.Prices.Units)
+	}
+	if got := worst.Prices.Units["img"].String(); got != "0.02000000" {
+		t.Errorf("上界里的 img = %s，期望 0.02000000", got)
+	}
+}
+
 // TestWorstCaseCoversFixedAndMinimum 验证一次性费用也取上界。
 func TestWorstCaseCoversFixedAndMinimum(t *testing.T) {
 	p := mustCompile(t, `{

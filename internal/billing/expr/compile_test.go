@@ -39,6 +39,49 @@ func TestCompileScaleLimits(t *testing.T) {
 	}
 }
 
+// TestCompileAcceptsExactlyAtSourceLimit 验证源码长度上限那一格算通过。
+//
+// 上限是「超过才拒」：恰好压在上限上的规则与上限之下的规则没有区别，
+// 区别只在多一个字节的时候。没有用例看着这一格的话，比较符挪一格也
+// 不会有人发现——一条正好 4096 字节的规则会开始报「源码超限」，
+// 而那条报错看起来完全正常。
+func TestCompileAcceptsExactlyAtSourceLimit(t *testing.T) {
+	at := `{"prompt": 1.0` + strings.Repeat(" ", maxSourceBytes-len(`{"prompt": 1.0`)-1) + `}`
+	if len(at) != maxSourceBytes {
+		t.Fatalf("夹具不在上限上：%d 字节，上限 %d", len(at), maxSourceBytes)
+	}
+	if _, err := Compile(at); err != nil {
+		t.Errorf("恰好 %d 字节的规则应当编得过，得到 %v", maxSourceBytes, err)
+	}
+
+	// 多一个字节就该拒，而且拒在长度这一关而不是语法。
+	err := compileErr(t, at+" ")
+	if err.Reason != ReasonScale {
+		t.Errorf("多一个字节的原因 = %s，期望 %s", err.Reason, ReasonScale)
+	}
+}
+
+// TestCompileAcceptsExactlyAtNestingLimit 验证嵌套深度到上限那一格算通过。
+//
+// 层数由括号与最外层那对花括号一起数：外层 `{` 自己占一层，所以括号给到
+// maxNesting-1 对时正好压在上限上。上限之内与上限之上只差一层，
+// 也就是一对括号——比较符挪一格，一条本来合法的规则会开始报「嵌套过深」。
+func TestCompileAcceptsExactlyAtNestingLimit(t *testing.T) {
+	at := `{"prompt": ` + strings.Repeat("(", maxNesting-1) + "1.0" +
+		strings.Repeat(")", maxNesting-1) + `}`
+	if _, err := Compile(at); err != nil {
+		t.Errorf("嵌套 %d 层（上限）的规则应当编得过，得到 %v", maxNesting, err)
+	}
+
+	// 多一层就该拒。
+	over := `{"prompt": ` + strings.Repeat("(", maxNesting) + "1.0" +
+		strings.Repeat(")", maxNesting) + `}`
+	err := compileErr(t, over)
+	if err.Reason != ReasonScale {
+		t.Errorf("嵌套 %d 层的原因 = %s，期望 %s", maxNesting+1, err.Reason, ReasonScale)
+	}
+}
+
 // TestCompileNestingIsCheckedBeforeParsing 说明深度检查为什么按字符扫。
 //
 // expr 的解析器是递归下降的，几千层括号会把递归压到把 goroutine 的栈打穿。
