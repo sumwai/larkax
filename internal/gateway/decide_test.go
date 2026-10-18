@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -428,6 +429,28 @@ func TestDecisionSnapshotRecordsDegradationPerAttempt(t *testing.T) {
 	}
 	if outcome.SelectedChannelID != 2 {
 		t.Errorf("选中的渠道 = %d，期望 2", outcome.SelectedChannelID)
+	}
+}
+
+// 一次尝试的耗时原样进足迹，负数才归零。
+//
+// 归零那一步管的是时钟回拨：负的耗时经「非负整数」那一档会变成一个脱敏
+// 描述符，一条时钟抖动换来一行噪音。只断言负的那一格时，把比较符写反——正的
+// 也压成 0——不会被发现，而那让延迟这一列等于没有：账单上记着花了多久，足迹
+// 里却永远是零。
+func TestDecisionAttemptDurationKeepsPositive(t *testing.T) {
+	out := decisionAttemptsOf([]route.Attempt{
+		{ChannelID: 1, Duration: 1200 * time.Millisecond},
+		{ChannelID: 2, Err: errors.New("上游在首片之前断开"), Retryable: true, Duration: -time.Second},
+	})
+	if len(out) != 2 {
+		t.Fatalf("足迹 %d 条，期望 2", len(out))
+	}
+	if got := out[0].Duration; got != 1200*time.Millisecond {
+		t.Errorf("耗时 = %s，期望 1.2s（原样带出去，不归零）", got)
+	}
+	if got := out[1].Duration; got != 0 {
+		t.Errorf("负耗时 = %s，期望 0（时钟回拨不写成负数）", got)
 	}
 }
 

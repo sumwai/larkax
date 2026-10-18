@@ -1087,6 +1087,96 @@ func TestStreamTruncatedAfterOutputClassifiedAndBilled(t *testing.T) {
 	}
 }
 
+// 吐过字之后上游在流里报错：分类按那个错误推，不按「截断」。
+//
+// 与上一条只差一个错误帧，而两件事在库里的说法不同：「流被截断」说的是
+// 上游没给结束标记就断了，「上游回了错误」说的是它明确报了一个错。状态码
+// 取错误帧里带的那个——它是上游那一刻真的回过的码，start 事件里的 200
+// 只是接受请求时的信封。
+func TestStreamErrorFrameAfterOutputClassifiedUpstreamError(t *testing.T) {
+	h := newHarness(t)
+	useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
+		1: {
+			{Kind: "start", StatusCode: http.StatusOK},
+			delta("半句"),
+			{Kind: "error", Err: &channel.ErrUpstream{
+				StatusCode: http.StatusBadGateway, GotResponse: true,
+			}},
+		},
+	}})
+
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
+	if err != nil {
+		t.Fatalf("上游已接受请求时不该返回错误: %v", err)
+	}
+	collect(t, res)
+
+	// 吐过字就有 token 产生，照常计费。
+	if res.Charge == nil || len(h.settlements.saved) != 1 {
+		t.Fatalf("已经吐出来的部分要计费：Charge=%v，落库 %d 条", res.Charge, len(h.settlements.saved))
+	}
+
+	var snaps []*Snapshot
+	waitFor(t, "响应方向的快照落库", func() bool {
+		snaps = h.snapshots.byDirection("response")
+		return len(snaps) == 1
+	})
+	// 分类写成字面量而不是拿 pipeline 的常量来比：它是要落进快照、被人
+	// 按字面读的取值，改了就该有一条红用例。
+	if snaps[0].ErrorKind == nil || *snaps[0].ErrorKind != "upstream_http_error" {
+		t.Errorf("快照的 error_kind = %s，期望 %q（上游报了错，不是静默截断）",
+			kindOf(snaps[0].ErrorKind), "upstream_http_error")
+	}
+	if got := statusOf(snaps[0].UpstreamStatus); got != strconv.Itoa(http.StatusBadGateway) {
+		t.Errorf("upstream_status = %s，期望 %d（错误帧里带的那个码）",
+			got, http.StatusBadGateway)
+	}
+}
+
+// 上游接受了请求、给了结束标记、什么都没吐：这一条快照仍然要写。
+//
+// 不采集的条件是**三者全空**，它说的是「这次请求根本没走到上游」（见
+// responseSnapshotAsync 的注释）。这一条里状态码在——上游接受了请求，只是
+// 没有内容、也没有结束原因——所以该有一行记着它。把那个条件放宽一格，这一类
+// 会被整个丢掉，而它是「上游接受了请求、然后什么都没给」的唯一记录。
+func TestStreamEmptyContentWithStatusStillRecordsResponse(t *testing.T) {
+	h := newHarness(t)
+	useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
+		1: {
+			{Kind: "start", StatusCode: http.StatusOK},
+			{Kind: "done"},
+		},
+	}})
+
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	collect(t, res)
+
+	// 脱敏是同步的（只有落库在后台，见 responseSnapshotAsync），所以这里
+	// 不必等：少交一份就是少交一份。
+	bodies := h.redactor.responseBodies()
+	if len(bodies) != 1 {
+		t.Fatalf("交给脱敏器的响应 = %d 份，期望 1（三者不全空就该采）", len(bodies))
+	}
+	if bodies[0] != nil {
+		t.Errorf("没有内容的流应当交 nil 响应体，实际 %#v", bodies[0])
+	}
+
+	var snaps []*Snapshot
+	waitFor(t, "响应方向的快照落库", func() bool {
+		snaps = h.snapshots.byDirection("response")
+		return len(snaps) == 1
+	})
+	if got := statusOf(snaps[0].UpstreamStatus); got != strconv.Itoa(http.StatusOK) {
+		t.Errorf("upstream_status = %s，期望 %d（start 事件里带的那个）", got, http.StatusOK)
+	}
+	if snaps[0].ErrorKind != nil {
+		t.Errorf("没有内容但正常结束，不该有分类，实际 %s", kindOf(snaps[0].ErrorKind))
+	}
+}
+
 // 正常结束（有 done、没报错）两表都没有分类。
 //
 // 它与截断那条只差一个 done——把判据写成「没报错就算截断」时，这条会红。
@@ -1122,6 +1212,39 @@ func TestStreamNormalEndHasNoClassification(t *testing.T) {
 	}
 }
 
+// 攒着的标注挂到「最后一个正文块」上，而最后一个块不一定是正文。
+//
+// 事件流里块与块之间只由工具调用分隔，于是正文、工具调用、标注可能依次到达：
+// 标注落地时最后一块是工具调用，它要往回找到正文那一块。这一条就是让那个往回
+// 找的循环真的走一轮——此前每一条用例里最后一块都是正文，第一次判断就返回了。
+func TestStreamResponseBuilderAttachesAnnotationBehindToolCall(t *testing.T) {
+	b := newStreamResponseBuilder()
+	b.observe(delta("正文在这里"))
+	b.observe(channel.StreamEvent{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{
+		Index: 0, ID: "call_1", Name: "lookup", Arguments: "{}",
+	}})
+	b.observe(channel.StreamEvent{Kind: "annotation", Annotations: []map[string]any{
+		{"type": "url_citation", "url": "https://example.com/behind"},
+	}})
+
+	// 收尾时冲洗一次：标注还没挂出去，落点是正文那一块。
+	resp := b.response("gpt-4o-2024")
+	if resp == nil {
+		t.Fatal("有正文与工具调用时该归一出一份响应")
+	}
+	if len(resp.Message.Content) != 2 {
+		t.Fatalf("内容块 = %d 个，期望 2（正文 + 工具调用）", len(resp.Message.Content))
+	}
+	text := resp.Message.Content[0]
+	if text.Type != "text" || len(text.Annotations) != 1 {
+		t.Errorf("第一个块 = %+v，期望正文块带着那一条标注", text)
+	}
+	// 标注说的是「正文引用了哪个来源」，挂到工具调用块上等于是另一件事。
+	if got := resp.Message.Content[1]; len(got.Annotations) != 0 {
+		t.Errorf("第二个块 = %+v，期望工具调用块上没有标注", got)
+	}
+}
+
 // streamResponseEvidence 把 started / done / ours 的每一格各归哪一档。
 //
 // 写成一张表是为了让每一格都有一句话，而不是只钉住走过的那几条路。此前缺的
@@ -1152,6 +1275,85 @@ func TestStreamResponseEvidenceClasses(t *testing.T) {
 	}
 }
 
+// 上游在流里报错时快照那两列取什么。
+//
+// 与上面那张表分开：那张每一行都传一个 nil 的错误，说的是 started / done /
+// ours 三个布尔把结论拨到哪一档。这一张固定「吐过字之后上游报错」，按错误帧
+// 带没带状态码分成两格，再加一格「没有错误帧」作对照。带没带决定状态码用谁
+// 的：错误里那个是上游真的回过的码，start 事件里的那个只是接受请求时的信封。
+func TestStreamResponseEvidenceFromErrorFrame(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		streamErr  error
+		wantStatus int
+		wantKind   string
+	}{
+		{
+			"错误帧带了状态码：用它",
+			&channel.ErrUpstream{StatusCode: http.StatusBadGateway, GotResponse: true},
+			http.StatusBadGateway, "upstream_http_error",
+		},
+		{
+			"错误帧没带状态码：退回 start 事件那个",
+			&channel.ErrUpstream{GotResponse: true},
+			http.StatusOK, "upstream_no_answer",
+		},
+		{
+			"没有错误帧：吐过字之后静默结束算截断",
+			nil,
+			http.StatusOK, "upstream_stream_truncated",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, kind := streamResponseEvidence(http.StatusOK, tc.streamErr, true, false, false)
+			if status != tc.wantStatus {
+				t.Errorf("status = %d，期望 %d", status, tc.wantStatus)
+			}
+			if kind != tc.wantKind {
+				t.Errorf("error_kind = %q，期望 %q", kind, tc.wantKind)
+			}
+		})
+	}
+}
+
+// 一次流式调用的耗时从哪儿起算。
+//
+// 起点是最后一次尝试真正发出去的那一刻；适配器没给这个时刻时，退回开始泵流
+// 的那一个。退回这一步不能省：拿一个零值时刻去减，算出来的是「从公元元年
+// 到现在」，而它会经账单落进 usage_events.duration_ms，延迟那一列的分位数
+// 从此混进一个假样本。
+func TestStreamDurationStartPoint(t *testing.T) {
+	fallback := fixedAt.Add(-10 * time.Second)
+	for _, tc := range []struct {
+		name     string
+		attempts []route.Attempt
+		want     time.Duration
+	}{
+		{
+			"适配器给了发出时刻：从它起算",
+			[]route.Attempt{{ChannelID: 1, StartedAt: fixedAt.Add(-2 * time.Second)}},
+			2 * time.Second,
+		},
+		{
+			"最后一次尝试没给时刻：退回泵流的起点",
+			[]route.Attempt{{ChannelID: 1}},
+			10 * time.Second,
+		},
+		{"一次尝试都没有：退回泵流的起点", nil, 10 * time.Second},
+		{
+			"结束时刻早于起点：归零，不编一个正数出来",
+			[]route.Attempt{{ChannelID: 1, StartedAt: fixedAt.Add(time.Second)}},
+			0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := streamDuration(tc.attempts, fallback, fixedAt); got != tc.want {
+				t.Errorf("耗时 = %s，期望 %s", got, tc.want)
+			}
+		})
+	}
+}
+
 // kindOf 把快照的分类打成能读的形态。
 //
 // ErrorKind 是 *string，直接 %v 打出来的是地址——失败信息里出现一串
@@ -1162,4 +1364,15 @@ func kindOf(kind *string) string {
 		return "<nil>"
 	}
 	return strconv.Quote(*kind)
+}
+
+// statusOf 把快照里那个可空的状态码打成能读的形态。
+//
+// 理由与 kindOf 相同：那个字段是 *int，直接 %v 打出来的是地址，而失败信息里
+// 出现一串 0xc000... 时，看的人得自己回去读代码才知道是哪个值。
+func statusOf(status *int) string {
+	if status == nil {
+		return "<nil>"
+	}
+	return strconv.Itoa(*status)
 }
