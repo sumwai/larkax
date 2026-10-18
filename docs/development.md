@@ -823,6 +823,8 @@ KEY=$(go run ./cmd/larkaxctl apikey create --user "$(go run ./cmd/larkaxctl user
   分账记到谁的账上，不决定「有没有资格」。
 - 角色能改，但改的也只是这两个标记：`user update` 的 `--merchant` / `--no-merchant` /
   `--admin` / `--no-admin`（`--admin` 同时打上两个，`--no-admin` 不动 `merchant`）。
+  `--no-merchant` 不能单独打在 `admin` 上——那样会留下一行「读出来是 admin、`merchant`
+  却是假」的数据，当场报参数错；先 `--no-admin`，或者两个一起给，一步落到普通用户。
   `user create` 仍然只建新用户，重名直接报错。
 
 这两个标记是给管理面的鉴权**预留**的（#158）。在那条路接上之前，把 `--role`

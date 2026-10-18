@@ -821,10 +821,10 @@ func TestUserUpdateMarkersLandOnTheRightColumns(t *testing.T) {
 // TestUserUpdateResultMarkersReadThroughTheRole 钉住「改完之后那两个标记是什么」
 // 这一步的算法（不连库）。
 //
-// 它是那条「结果不能是反例」校验的被测部分：**没提到的列**按读回来的称呼推，
+// 它是那条「结果不能是反例」的校验要算的那一步：**没提到的列**按读回来的称呼推，
 // 而 roleOf 先看 is_admin——所以一个真 admin 上单给 --no-merchant，算出来是
-// (false, true)，正是要拒的那一格。反过来，序列从 --no-admin 走过来时
-// （is_admin 已假）同样的旗标就该放行——这四格一起，钉住了它既没漏判也没一刀切。
+// (false, true)，正是要拒的那一格。反过来，从 --no-admin 那一侧走过来的每一格
+// （单独撤称呼、两个一起给）都该放行——两边的格一起，钉住了它既没漏判也没一刀切。
 func TestUserUpdateResultMarkersReadThroughTheRole(t *testing.T) {
 	yes, no := true, false
 
@@ -846,6 +846,10 @@ func TestUserUpdateResultMarkersReadThroughTheRole(t *testing.T) {
 		// 撤完 admin 之后关 merchant：这一行读出来已经是 merchant，关得下去。
 		{"merchant 上关 merchant", auth.RoleMerchant,
 			auth.UpdateUserParams{IsMerchant: &no}, false, false},
+		// 报错文案给的两条出路之一：一条命令一步落到普通用户——两个标记一起改，
+		// 算出来 is_admin 已经是假，所以不落进要拒的那一格。
+		{"admin 上一步落到普通用户", auth.RoleAdmin,
+			auth.UpdateUserParams{IsMerchant: &no, IsAdmin: &no}, false, false},
 		{"user 上升 merchant", auth.RoleUser,
 			auth.UpdateUserParams{IsMerchant: &yes}, true, false},
 		{"user 上升 admin（两列一起）", auth.RoleUser,
@@ -897,9 +901,10 @@ func TestUserUpdateNoMerchantOnAdminIsRefused(t *testing.T) {
 		t.Errorf("退出码 = %d，想要 %d（这是参数错，重发一次就能成）", code, exitUsage)
 	}
 	// 文案要把出路说出来：只讲「矛盾」的话，手上这条命令还是不知道该怎么发。
-	for _, want := range []string{"--no-merchant", "--no-admin"} {
+	// 两条路都要在：分两次发（先撤称呼），或者两个旗标一起给。
+	for _, want := range []string{"--no-merchant", "先 --no-admin", "--no-admin --no-merchant"} {
 		if !strings.Contains(r.err.Error(), want) {
-			t.Errorf("报错里要提到 %s：%v", want, r.err)
+			t.Errorf("报错里要提到 %q：%v", want, r.err)
 		}
 	}
 	if r.stdout != "" {
@@ -916,7 +921,7 @@ func TestUserUpdateNoMerchantOnAdminIsRefused(t *testing.T) {
 			before.updatedAt, after.updatedAt)
 	}
 
-	// 出路真的走得通：先撤 admin，再关 merchant。
+	// 出路之一真的走得通：先撤 admin，再关 merchant。
 	if ok := runOnce(t, runUser, []string{"update", "--user", name, "--no-admin"}); ok.err != nil {
 		t.Fatalf("--no-admin 应当通过: %v\nstderr:\n%s", ok.err, ok.stderr)
 	}
@@ -927,6 +932,21 @@ func TestUserUpdateNoMerchantOnAdminIsRefused(t *testing.T) {
 	if final.isMerchant || final.isAdmin {
 		t.Errorf("两步之后应当是 (merchant=false, admin=false)，实际 (merchant=%v, admin=%v)",
 			final.isMerchant, final.isAdmin)
+	}
+
+	// 出路之二：另一个 admin 上一条命令两个旗标一起给。守卫算的是结果，所以它
+	// 不该把这条命令也挡掉——挡掉的话文案里给的这条路就成了空话。
+	oneStep := uniqueName("update-demote-onestep")
+	oneStepID := createUserWithRole(t, oneStep, "", "admin")
+	got := runOnce(t, runUser,
+		[]string{"update", "--user", oneStep, "--no-admin", "--no-merchant"})
+	if got.err != nil {
+		t.Fatalf("--no-admin --no-merchant 一步应当通过: %v\nstderr:\n%s", got.err, got.stderr)
+	}
+	oneStepAfter := readUserMarkers(t, db, oneStepID)
+	if oneStepAfter.isMerchant || oneStepAfter.isAdmin {
+		t.Errorf("一步之后应当是 (merchant=false, admin=false)，实际 (merchant=%v, admin=%v)",
+			oneStepAfter.isMerchant, oneStepAfter.isAdmin)
 	}
 }
 

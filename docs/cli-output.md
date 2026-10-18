@@ -249,7 +249,7 @@ larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled
 
 | 触发条件 | 形状 | 流 | 退出码 | 接管道的一方看到 |
 |---|---|---|---|---|
-| **A 用户输入错**（参数名、取值、必填缺失、标志组合、flag 解析失败） | `larkaxctl: <msg>` | stderr | **2** | stdout 空 |
+| **A 用户输入错**（参数名、取值、必填缺失、标志组合（含读过库里那一行才判得出的那种）、flag 解析失败） | `larkaxctl: <msg>` | stderr | **2** | stdout 空 |
 | **B1 连不上库** | `larkaxctl: <msg>` | stderr | **3** | stdout 空 |
 | **B2 约束冲突 / 那一行不存在**（撞唯一键、撞外键、要改或要查的那一行不在） | `larkaxctl: <msg>` | stderr | **4** | stdout 空 |
 | **B3 其它环境**（文件读不动、权限、配置值不合法） | `larkaxctl: <msg>` | stderr | **1** | stdout 空 |

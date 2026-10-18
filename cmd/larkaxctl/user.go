@@ -83,7 +83,7 @@ update 只改**显式给出**的字段，一个都没给就报参数错（不做
   --email        新邮箱。给空串表示清掉这一列（写回 NULL），不是写成一个空串。
   --display-name 新展示名。空串同上，表示清掉。
   --merchant     把 is_merchant 置真。
-  --no-merchant  把 is_merchant 置假。
+  --no-merchant  把 is_merchant 置假（admin 上不能单独给，见下）。
   --admin        把 is_admin 置真，**并且**把 is_merchant 一起置真：admin 天然
                  也是 merchant（见上面角色那一节）。
   --no-admin     只把 is_admin 置假，merchant 不动。
@@ -95,7 +95,8 @@ update 只改**显式给出**的字段，一个都没给就报参数错（不做
 另有一条挡的不是输入，而是改完**那一行**读出来是什么：--no-merchant 打在 admin
 上同样当场报参数错。它只把 is_merchant 置假，而这一档是按 is_admin 读的，那一行
 读出来仍然是 admin——回显里角色那一栏没变，屏幕上只剩首行，看起来像什么都没做。
-出路是先 --no-admin（is_admin 置假、merchant 不动），再决定要不要关 merchant。
+出路有两条，一条命令都不必分两次发：先 --no-admin（is_admin 置假、merchant 不动），
+或者 --no-admin --no-merchant 一起给，一步落到普通用户。
 
 改完把**真的变了**的字段按「旧值 → 新值」逐行打到 stdout，首行是「已改用户
 <用户名>」。旧值取自改之前读的那一行，新值取自写语句 RETURNING 回来的那一行，
@@ -357,7 +358,8 @@ func runUserUpdate(args []string) error {
 		if isMerchant, isAdmin := userUpdateResultMarkers(before.Role, params); isAdmin && !isMerchant {
 			return usageErr(errors.New(
 				"--no-merchant 会把 admin 的 is_merchant 置假，而 admin 天然也是 merchant：" +
-					"先把 --no-admin 给它（is_admin=false，merchant 不动），再决定 merchant 要不要关"))
+					"先 --no-admin（is_admin 置假、merchant 不动），" +
+					"或 --no-admin --no-merchant 一起给（一步落到普通用户）"))
 		}
 
 		after, err := store.UpdateUser(ctx, *user, params)

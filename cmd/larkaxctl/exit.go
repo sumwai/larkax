@@ -63,8 +63,13 @@ func (e *codedError) Unwrap() error { return e.err }
 
 // usageErr 把一个参数错误标成 exitUsage。
 //
-// 用法是「解析与校验参数的那一段返回什么，就把它包一层」。校验全部发生在
-// 连库之前，所以这一层能标的一定是参数问题，不必去猜错误的来源。
+// 用法是「解析与校验参数的那一段返回什么，就把它包一层」。判的都是「这条命令本身
+// 对不对」：改一下命令重发就能过，所以这一层能标的一定是参数问题，不必去猜错误的
+// 来源。
+//
+// **校验不都在连库之前**：`user update` 那条「--no-merchant 打在 admin 上」要读过
+// 库里那一行才判得出（见 docs/cli-reference.md 的退出码一节，`2` 的第三类）。它
+// 仍然是参数错——错在命令不在数据，补救动作是改命令重发，与解析阶段那几类一样。
 func usageErr(err error) error {
 	if err == nil {
 		return nil
