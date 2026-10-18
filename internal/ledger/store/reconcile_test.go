@@ -504,6 +504,94 @@ func TestReconcileRepairsFrozen(t *testing.T) {
 	}
 }
 
+// 未结算预留之和为负时，这一条标成不可修，**整轮照跑**。
+//
+// # 为什么必须有这一格
+//
+// 负的和意味着冻结额该被改成负数。改下去的后果有两层：钱包上的
+// wallet_non_negative 会直接拒掉这次 UPDATE，于是报错顺着
+// compareAndRepair → reconcileUsers → Reconcile 一路上去，把**整轮**对账
+// 带成 failed——同一批里别的用户那条本来能修的不一致也一起不修了；
+// 而若哪天那个 CHECK 被去掉，负的冻结额就真的写进去了，那时
+// 「可用 = 余额 − 冻结」会比余额还大。
+//
+// 所以判据必须是「这一条不修」，而不是「修不了就报错」。
+func TestReconcileRefusesNegativePendingSum(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+	userID := seed(t, db, "100")
+
+	// 先造一条正常的预留：冻结 30、预留 30，两边本来是平的。
+	req := testRequest(ctx, t, db, userID, reqID(t))
+	res := reservation(t, userID, req.RequestID, "30", "CNY")
+	// started_at 留默认的「刚刚」，免得这条又被算成陈旧预留。
+	if _, err := s.SaveReservation(ctx, req, res); err != nil {
+		t.Fatal(err)
+	}
+	// 再把金额改成负的。reserved_amount 那一列上没有 CHECK，所以改得进去
+	// ——正是这一点让「预留之和为负」真的可达。
+	if _, err := db.ExecContext(ctx,
+		`UPDATE billing_requests SET reserved_amount = -30 WHERE request_id = $1`,
+		req.RequestID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 同一批里再放一个**能修**的冻结不一致：这一条挡住的只是不可修的那一条，
+	// 不是整轮不做。没有它的话，「干脆整轮跳过冻结修正」也能让上面那条过。
+	otherID := seed(t, db, "100")
+	if _, err := db.ExecContext(ctx,
+		`UPDATE user_wallets SET frozen = 50 WHERE user_id = $1`, otherID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 自动修正是打开的：不可修的那一条必须自己挡住，而不是撞上 CHECK。
+	report := reconcile(t, db, withResyncRepair())
+
+	f := kindOf(t, report, userID, FindingFrozenMismatch)
+	if f.Unrepairable == "" {
+		t.Error("预留之和为负是修不了的，这一条必须标成不可修")
+	}
+	if f.Repaired {
+		t.Error("不可修的不一致不该被标成已修正")
+	}
+	if _, frozen := walletOf(t, db, userID); frozen != "30.00000000" {
+		t.Errorf("冻结额 = %s，期望原样 30——被改成负数会让可用大于余额", frozen)
+	}
+
+	if !kindOf(t, report, otherID, FindingFrozenMismatch).Repaired {
+		t.Error("可修的那一条要在同一轮里照修，不能被这一条带得整轮不做")
+	}
+	if _, frozen := walletOf(t, db, otherID); frozen != "0.00000000" {
+		t.Errorf("另一个用户的冻结额 = %s，期望被修正成 0", frozen)
+	}
+}
+
+// 不可修的条目根本不去碰库：判据要发生在任何一次往返**之前**。
+//
+// 传 nil 当 *sql.Tx——真去改库的话这里会 panic。这条用例因此同时钉住两件事：
+// Unrepairable 非空时不修，以及这个判断在任何一次往返之前。它不需要
+// LARKAX_DB_DSN（同 TestPartitionMonthsValidatedBeforeTouchingDB）。
+//
+// 与上一条的分工：上一条看的是最终行为（标不可修、整轮不报错），
+// 这条看的是那一格判断本身；上一条要连库，这条不要。
+func TestRepairFrozenTouchesNothingWhenUnrepairable(t *testing.T) {
+	f := Finding{
+		Kind:         FindingFrozenMismatch,
+		Ledger:       money.MustParse("-30"),
+		Snapshot:     money.MustParse("30"),
+		Unrepairable: "未结算预留之和为负",
+	}
+	key := userAsset{userID: 1, asset: "CNY"}
+
+	if err := repairFrozen(context.Background(), nil, withResyncRepair(), &f, key); err != nil {
+		t.Fatalf("不可修的条目应当直接返回，得到 %v", err)
+	}
+	if f.Repaired {
+		t.Error("不可修的条目不该被标成已修正")
+	}
+}
+
 // ── 缺钱包行与畸形科目 ──────────────────────────────────────────────────
 
 // 有分录却没有钱包行：报出来，且**不新建**。
@@ -643,6 +731,61 @@ func TestReconcileReportsMalformedAccount(t *testing.T) {
 		// 畸形科目属于别人（甚至不属于任何用户），不该把正常用户带成
 		// 一条假的余额不一致。
 		t.Error("正常用户不该因为别人的畸形科目被报成不一致")
+	}
+}
+
+// 已经记下的畸形科目，要在没人动它的情况下被下一轮增量带回来。
+//
+// # 这条钉的是「凭什么还看得见它」
+//
+// 增量查询只看上次起点之后新增的行，而一条早就存在、又没人处理的畸形科目
+// 不会再新增——它之所以还在这一轮的 Findings 里，靠的是把已记未消除的那些
+// 科目名一起查回来。少了那一步，Findings 里就没有它，而 persistFindings
+// 会把「这一轮没报出来的」当成「已经解决了」而删掉那一行：告警响一轮就
+// 永久安静，而那笔钱还挂在那里等着有人认领。那比不告警更糟——它看起来像
+// 已经处理过了。
+//
+// 与 TestReconcileReportsMalformedAccount 的分工：那条管「第一次被看见」，
+// 它跑第二轮之前先把坏科目**删掉**；这条一个字节都不动。
+func TestReconcileCarriesMalformedAccountIntoIncrementalRound(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	// 科目名每次都不同，理由与 TestReconcileReportsMalformedAccount 相同。
+	account := fmt.Sprintf("user :%d", nextID())
+	scope := malformedScopePrefix + account
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(ctx, `DELETE FROM ledger_entries WHERE account = $1`, account)
+		_, _ = db.ExecContext(ctx, `DELETE FROM reconcile_findings WHERE scope = $1`, scope)
+	})
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO ledger_entries (txn_id, account, asset, amount, entry_type)
+		VALUES (gen_random_uuid(), $1, 'CNY', 5, 'adjustment')`, account); err != nil {
+		t.Fatal(err)
+	}
+
+	// 第一轮是全量：发现它，并落进 reconcile_findings。
+	malformedOf(t, reconcile(t, db, noRepair()), account)
+
+	// 第二轮是增量，而这个畸形科目一个字节都没动过：它的 created_at 早于
+	// 这一轮的起点，只有把已记下的科目名带回来才查得到。
+	cfg := noRepair()
+	cfg.FullScanInterval = 24 * time.Hour
+	again := reconcile(t, db, cfg)
+	if again.FullScan {
+		t.Fatal("这一轮该是增量")
+	}
+	malformedOf(t, again, account)
+
+	// 还没消除的不一致必须留在清单里：那一行被删掉，告警就永远停了。
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM reconcile_findings WHERE scope = $1 AND kind = $2`,
+		scope, string(FindingMalformedAccount)).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("还没消除的不一致必须留在 reconcile_findings 里（期望 1 行），实际 %d 行", n)
 	}
 }
 
@@ -1803,6 +1946,24 @@ func TestConfigRejectsNegativeShardSize(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), SettingShardSize) {
 		t.Errorf("报错要指出是哪个键：%v", err)
+	}
+}
+
+// 零是写明的合法值：它的含义是「用默认值」，不是「分片大小为 0」。
+//
+// 另一半在 TestConfigRejectsNegativeShardSize 里：负数要挡住，零要放行。
+// `shard < 0` 与 `shard <= 0` 的差别全落在这一格上——后者把「没填」也当成
+// 填错了，而它报的错与负数那条一模一样，读的人只会以为自己填的是负数。
+func TestConfigAcceptsZeroShardSizeAsDefault(t *testing.T) {
+	cfg, err := ConfigFromSettings(loadValues(t, map[string]string{
+		SettingShardSize: "0",
+	}))
+	if err != nil {
+		t.Fatalf("0 是合法值（含义是用默认值），报错说明判据把零与负数一起挡住了: %v", err)
+	}
+	if cfg.ShardSize != defaultShardSize {
+		t.Errorf("分片大小 = %d，期望默认值 %d——零要落到默认值上，而不是原样传下去",
+			cfg.ShardSize, defaultShardSize)
 	}
 }
 
