@@ -675,6 +675,13 @@ func (s *Store) finishReconcileRun(ctx context.Context, r *Report, cause error) 
 	if cause != nil {
 		status, msg = "failed", cause.Error()
 	}
+	// 这几个条数是运行记录上那几列的全部来源（balance_mismatches /
+	// frozen_mismatches / repaired / malformed_accounts / stale_reservations）：
+	// 它们由 Report 上那几个方法算出来（见 Repaired 与 countOf）。
+	//
+	// 所以判定「落库的条数对不对」时期望值不能取同一个方法：方法被改坏时两边
+	// 一起变，恒等，而这一列在报表上就是错的，却没有任何一处会红。用例那边
+	// 自己遍历 Findings 数一遍（见 reconcile_test.go 的 countFindings）。
 	_, err := s.db.ExecContext(writeCtx, `
 		UPDATE reconcile_runs
 		   SET finished_at = now(), checked_wallets = $2,
