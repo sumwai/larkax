@@ -57,7 +57,7 @@ func usageEventsModels(t *testing.T, args ...string) []string {
 	if r.err != nil {
 		t.Fatalf("usage events %v 失败: %v\nstderr:\n%s", args, r.err, r.stderr)
 	}
-	return tableModels(r.stdout)
+	return tableModels(t, r.stdout)
 }
 
 // usageModelField 是模型那一栏在数据行里的**空白字段**下标，不是栏号。
@@ -66,7 +66,19 @@ func usageEventsModels(t *testing.T, args ...string) []string {
 // 「时刻」那一栏自带一个空格（`2026-10-20 10:00`），按空白切开占两项。栏的布局
 // 见 usage.go 的 printUsageEvents（10 栏，模型是第 4 栏），于是模型落在下标 4 上：
 // 0 与 1 是时刻的两项，2 是用户 ID，3 是用户名。
+//
+// 这个下标有个前提：**它左边每一栏都非空**。空白栏会被 strings.Fields 整个吃掉，
+// 右边的下标于是整体左移（用户名那一栏空着时，下标 4 会取到输入 token 数）。
+// 用例里的用户都由 createTestUser 造出来、一定带用户名，所以今天触发不到；
+// tableModels 用 usageRowFields 兜着这一条——认行不按项数，但项数对不上就报错，
+// 免得将来某个夹具把某一栏造空之后，这里安静地取错值。
 const usageModelField = 4
+
+// usageRowFields 是 usage events 数据行按空白切开的项数（10 栏，其中「时刻」占 2 项）。
+//
+// 它不参与认行（那是 usageRowClock 的事），只是一条一致性判据：项数对不上说明
+// usageModelField 那个下标的前提不成立了，与其取错值，不如当场报出来。
+const usageRowFields = 11
 
 // usageRowClock 认出表格里的**数据行**：它们都以「时刻」那一栏开头。
 //
@@ -79,15 +91,20 @@ var usageRowClock = regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2} `)
 //
 // 这一组用例造出来的模型名都是 uniqueName 的唯一值，所以拿到的都是能一眼对上的
 // 名字，不必解析列宽。
-func tableModels(out string) []string {
+func tableModels(t *testing.T, out string) []string {
+	t.Helper()
+
 	var models []string
 	for _, line := range strings.Split(out, "\n") {
 		if !usageRowClock.MatchString(line) {
 			continue
 		}
-		if fields := strings.Fields(line); len(fields) > usageModelField {
-			models = append(models, fields[usageModelField])
+		fields := strings.Fields(line)
+		if len(fields) != usageRowFields {
+			t.Fatalf("usage events 的数据行该切出 %d 项（见 usageRowFields），实际 %d 项：%q",
+				usageRowFields, len(fields), line)
 		}
+		models = append(models, fields[usageModelField])
 	}
 	return models
 }
@@ -403,7 +420,7 @@ func TestUsageLimitSaysHowManyItDropped(t *testing.T) {
 	// 由行数推——多读一行才分得开。这一格写错时，一份已经读完的清单会劝人再去
 	// 调大 --limit。
 	r = runOnce(t, runUsage, append([]string{"events", "--limit", "3"}, window...))
-	if got := len(tableModels(r.stdout)); got != 3 {
+	if got := len(tableModels(t, r.stdout)); got != 3 {
 		t.Fatalf("--limit 3 打了 %d 行，想要 3 行：\n%s", got, r.stdout)
 	}
 	if strings.Contains(r.stdout, "更早的没打出来") {
