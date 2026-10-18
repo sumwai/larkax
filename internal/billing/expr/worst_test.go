@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -431,6 +432,23 @@ func TestWorstCaseDropsConditions(t *testing.T) {
 	}
 	if got := worst.Prices.Prompt.String(); got != "0.00000400" {
 		t.Errorf("上界 = %s，期望 0.00000400", got)
+	}
+}
+
+// TestWorstCaseRejectsNonNumericBranch 验证一支不是数值时上界算不出来，而不是照另一支算。
+//
+// 最坏情况求值把条件丢掉、两支都要过一遍，所以它读到的形状不受「哪一支会命中」
+// 影响——规则里一支写成了字符串时，这里就该报错。
+// 若只校验其中一支不是数值，上界会静默地取另一支的数：那是一个偏小的上界，
+// 结算越过它就会撞上 Capped，差额由平台承担。
+func TestWorstCaseRejectsNonNumericBranch(t *testing.T) {
+	p := mustCompile(t, `{"prompt": len <= 1 ? "x" : 2.0}`)
+	worst, err := p.EvalWorstCase(Env{Usage: billing.Usage{}, At: testAt})
+	if err == nil {
+		t.Fatalf("一支不是数值时应当报错，实际算出 prompt = %s", worst.Prices.Prompt)
+	}
+	if !strings.Contains(err.Error(), "__worst 的参数必须是数值或单价表") {
+		t.Errorf("错误信息应当说清是 __worst 收到的东西不对，得到: %v", err)
 	}
 }
 
