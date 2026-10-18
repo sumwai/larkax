@@ -58,6 +58,7 @@ var tableRenderPaths = []string{
 	"printAllowlists", // snapshot allowlist
 	"printChannelList",
 	"printConsentList", // consent list
+	"printKeyDetail",   // apikey get
 	"printKeyList",
 	"printLedgerBalances", // ledger balance --all
 	"printModelDetail",

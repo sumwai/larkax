@@ -691,6 +691,12 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		{"模型详情", func(w io.Writer) {
 			printModelDetail(w, catalog.Model{ID: 7, CanonicalName: "claude-x", UpdatedAt: at})
 		}},
+		{"key 详情", func(w io.Writer) {
+			printKeyDetail(w, auth.Key{
+				ID: 3, Username: "user-placeholder", Prefix: "larkax_abcd",
+				Name: "ops", Status: "active", CreatedAt: at,
+			})
+		}},
 		{"插件清单", func(w io.Writer) {
 			printPluginList(w, []pluginstore.Row{{
 				Key: "demo", Version: "1.0.0", Name: "示例插件",
@@ -736,8 +742,8 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		}},
 	}
 
-	if len(cases) != 12 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 12 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 13 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 13 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {

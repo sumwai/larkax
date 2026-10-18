@@ -1104,7 +1104,7 @@ ingress 规则下。
 | `price` | 计价规则：`create` / `list` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`price calendar import` |
 | `user` | 用户：`create` |
 | `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录） |
-| `apikey` | API Key：`create` / `update` / `list` |
+| `apikey` | API Key：`create` / `update` / `get` / `list`；`update` 兼改状态、备注与过期时间 |
 | `ledger` | 账本：`balance` / `verify`（两条都只读）与 `reconcile`（对账，会写运行记录） |
 | `settings` | 运行期配置：`list` / `set` |
 | `plugin` | 插件：`list` / `publish` / `enable` / `disable` |
