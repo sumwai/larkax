@@ -163,9 +163,9 @@ func runSettingsSet(args []string) error {
 
 	fs := flag.NewFlagSet("settings set", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, settingsShortUsage) }
-	keyFlag := fs.String("key", "", "要改的配置键，例如 plugin.enabled")
-	valueFlag := fs.String("value", "", "新的值，按明文给（不用写成 JSON）")
-	by := fs.String("by", "", "改这个配置的用户：用户 ID 或用户名（必填）")
+	keyFlag := fs.String("key", "", "")
+	valueFlag := fs.String("value", "", "")
+	by := fs.String("by", "", "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}

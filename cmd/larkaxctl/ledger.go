@@ -124,9 +124,9 @@ func runLedger(args []string) error {
 func runLedgerBalance(args []string) error {
 	fs := flag.NewFlagSet("ledger balance", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, ledgerShortUsage) }
-	account := fs.String("account", "", "要查的科目，例如 user:42")
-	all := fs.Bool("all", false, "按科目汇总全库")
-	asset := fs.String("asset", string(ledger.AssetCNY), "资产种类")
+	account := fs.String("account", "", "")
+	all := fs.Bool("all", false, "")
+	asset := fs.String("asset", string(ledger.AssetCNY), "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -236,9 +236,9 @@ func printLedgerBalances(w io.Writer, asset ledger.Asset, report *store.AccountB
 func runLedgerVerify(args []string) error {
 	fs := flag.NewFlagSet("ledger verify", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, ledgerShortUsage) }
-	from := fs.String("from", "", "区间起点（含），RFC3339 或 2006-01-02")
-	to := fs.String("to", "", "区间终点（不含）")
-	maxTxns := fs.Int("max-txns", 0, "最多校验多少笔交易，0 表示不限")
+	from := fs.String("from", "", "")
+	to := fs.String("to", "", "")
+	maxTxns := fs.Int("max-txns", 0, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}

@@ -101,7 +101,7 @@ func runPartition(args []string) error {
 func parsePartitionMonths(args []string, name string) (int, error) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, partitionShortUsage) }
-	months := fs.Int("months", partitionMonthsDefault, "从当月起算的月份数（含当月）")
+	months := fs.Int("months", partitionMonthsDefault, "")
 	if err := fs.Parse(args); err != nil {
 		return 0, usageErr(err)
 	}

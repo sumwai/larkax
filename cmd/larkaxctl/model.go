@@ -188,25 +188,25 @@ func runModelCreate(args []string) error {
 func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
 	fs := flag.NewFlagSet("model create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "", "规范模型名，选路与计费共用的键")
+	canonical := legacyStringFlag(fs, "model", "canonical", "", "")
 	stringAlias(fs, canonical, "m", sameAs("model"))
-	display := fs.String("display", "", "给人看的展示名")
-	vendor := fs.String("vendor", "", "厂商")
-	family := fs.String("family", "", "家族")
-	contextLimit := fs.Int("context-limit", 0, "上下文窗口上限（tokens），留空表示未知")
+	display := fs.String("display", "", "")
+	vendor := fs.String("vendor", "", "")
+	family := fs.String("family", "", "")
+	contextLimit := fs.Int("context-limit", 0, "")
 	intAlias(fs, contextLimit, "ctx", sameAs("context-limit"))
-	inputLimit := fs.Int("input-limit", 0, "输入上限（tokens），留空表示未知")
+	inputLimit := fs.Int("input-limit", 0, "")
 	intAlias(fs, inputLimit, "in", sameAs("input-limit"))
-	outputLimit := fs.Int("output-limit", 0, "输出上限（tokens），留空表示未知")
+	outputLimit := fs.Int("output-limit", 0, "")
 	intAlias(fs, outputLimit, "out", sameAs("output-limit"))
 	capFlags := newCapabilityFlags(fs)
 	endpoints := fs.String("endpoints", "", endpointFlagUsage)
-	modalitiesIn := legacyStringFlag(fs, "input-modalities", "modalities-input", "", "输入模态，逗号分隔")
+	modalitiesIn := legacyStringFlag(fs, "input-modalities", "modalities-input", "", "")
 	stringAlias(fs, modalitiesIn, "im", sameAs("input-modalities"))
-	modalitiesOut := legacyStringFlag(fs, "output-modalities", "modalities-output", "", "输出模态，逗号分隔")
+	modalitiesOut := legacyStringFlag(fs, "output-modalities", "modalities-output", "", "")
 	stringAlias(fs, modalitiesOut, "om", sameAs("output-modalities"))
-	knowledgeCutoff := fs.String("knowledge-cutoff", "", "知识截止日期 YYYY-MM-DD")
-	releaseDate := fs.String("release-date", "", "发布日期 YYYY-MM-DD")
+	knowledgeCutoff := fs.String("knowledge-cutoff", "", "")
+	releaseDate := fs.String("release-date", "", "")
 	if err := fs.Parse(args); err != nil {
 		return catalog.CreateModelRequest{}, err
 	}
@@ -471,23 +471,23 @@ var (
 func parseModelUpdate(args []string) (catalog.UpdateModelRequest, capabilityEdit, error) {
 	fs := flag.NewFlagSet("model update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "", "要改的规范模型名（它本身不可改）")
+	canonical := legacyStringFlag(fs, "model", "canonical", "", "")
 	stringAlias(fs, canonical, "m", sameAs("model"))
-	display := fs.String("display", "", "展示名")
-	vendor := fs.String("vendor", "", "厂商，给空串表示清空")
-	family := fs.String("family", "", "家族，给空串表示清空")
-	contextLimit := fs.Int("context-limit", 0, "上下文窗口上限，0 表示未知（清空）")
+	display := fs.String("display", "", "")
+	vendor := fs.String("vendor", "", "")
+	family := fs.String("family", "", "")
+	contextLimit := fs.Int("context-limit", 0, "")
 	intAlias(fs, contextLimit, "ctx", sameAs("context-limit"))
-	inputLimit := fs.Int("input-limit", 0, "输入上限，0 表示未知（清空）")
+	inputLimit := fs.Int("input-limit", 0, "")
 	intAlias(fs, inputLimit, "in", sameAs("input-limit"))
-	outputLimit := fs.Int("output-limit", 0, "输出上限，0 表示未知（清空）")
+	outputLimit := fs.Int("output-limit", 0, "")
 	intAlias(fs, outputLimit, "out", sameAs("output-limit"))
-	modalitiesIn := legacyStringFlag(fs, "input-modalities", "modalities-input", "", "输入模态，逗号分隔，给空串表示清空")
+	modalitiesIn := legacyStringFlag(fs, "input-modalities", "modalities-input", "", "")
 	stringAlias(fs, modalitiesIn, "im", sameAs("input-modalities"))
-	modalitiesOut := legacyStringFlag(fs, "output-modalities", "modalities-output", "", "输出模态，逗号分隔，给空串表示清空")
+	modalitiesOut := legacyStringFlag(fs, "output-modalities", "modalities-output", "", "")
 	stringAlias(fs, modalitiesOut, "om", sameAs("output-modalities"))
-	knowledgeCutoff := fs.String("knowledge-cutoff", "", "知识截止日期 YYYY-MM-DD，给空串表示清空")
-	releaseDate := fs.String("release-date", "", "发布日期 YYYY-MM-DD，给空串表示清空")
+	knowledgeCutoff := fs.String("knowledge-cutoff", "", "")
+	releaseDate := fs.String("release-date", "", "")
 	capFlags := newCapabilityFlags(fs)
 	endpoints := fs.String("endpoints", "", endpointFlagUsage)
 	if err := fs.Parse(args); err != nil {
@@ -595,7 +595,7 @@ func runModelDelete(args []string) error {
 
 	fs := flag.NewFlagSet("model delete", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "", "要删的规范模型名")
+	canonical := legacyStringFlag(fs, "model", "canonical", "", "")
 	stringAlias(fs, canonical, "m", sameAs("model"))
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -635,7 +635,7 @@ func runModelDelete(args []string) error {
 func runModelGet(args []string) error {
 	fs := flag.NewFlagSet("model get", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "", "要看的规范模型名")
+	canonical := legacyStringFlag(fs, "model", "canonical", "", "")
 	stringAlias(fs, canonical, "m", sameAs("model"))
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
