@@ -456,16 +456,17 @@ go run ./cmd/larkaxctl migrate up
 同一批还搬了几条命令的位置：对账 `reconcile` → `ledger reconcile`、主密钥轮换
 `rotate` → `secret rotate`、幂等记录清理 `idempotency cleanup` →
 `maintenance idempotency`、日历导入 `calendar import` → `price calendar import`。
-旧路径同样仍然可用，`larkaxctl --help` 末尾与各条命令的 `--help` 里都写着。
+旧路径同样仍然可用，各条命令的 `--help` 里写着（见
+[docs/cli-reference.md](cli-reference.md)）。
 下面用的都是新写法。
 
 最常用的几个选项还各有一个**单字母简写**：`-u`（`--user`）、`-m`（`--model`）、
-`-o`（`--format`）、`-v`（`--verbose`）、`-q`（`--quiet`）。就这五个，其余参数
-一律要写全（`--channel`、`--rate-limit-rpm` 这类限额与作用域写短了容易看错）。
-简写与旧名一样列在 `--help` 末尾，用法行里只有规范名。
+`-o`（`--format`）、`-v`（`--verbose`）、`-q`（`--quiet`）、`-V`（`--version`）。
+就这六个，其余参数一律要写全（`--channel`、`--rate-limit-rpm` 这类限额与作用域
+写短了容易看错）。简写与旧名一样列在 `--help` 末尾，用法行里只有规范名；完整
+约定见 [docs/cli-reference.md](cli-reference.md)。
 
-**`-v` 不是版本号**：打版本是 `-V` 或 `--version`。这一点与多数命令行工具相反，
-原因是 `-v` 在这里留给了详细模式。
+**`-v` 不是版本号**：打版本是 `-V` 或 `--version`。
 
 **一、把规范模型加进目录。** 规范名是选路与计费共用的键，不能带空白字符：
 
