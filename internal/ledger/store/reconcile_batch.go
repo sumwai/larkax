@@ -328,9 +328,12 @@ func compareAndRepair(
 				Kind: FindingFrozenMismatch, Snapshot: snapshot.frozen, Ledger: pendingSum,
 			}
 			if pendingSum.IsNegative() {
-				// 预留金额有 CHECK 保证非负，所以负的和只可能来自数据被
-				// 直接改过。修正它等于把冻结额设成一个负数，那会让
-				// 「可用 = 余额 − 冻结」大于余额。
+				// 预留金额那一列上**没有** CHECK（见 00001_init.sql 的
+				// billing_requests.reserved_amount），所以负的和写得进去：
+				// 它可能来自数据被直接改过，也可能来自写路径算错。
+				// 修正它等于把冻结额设成一个负数，那既会让
+				// 「可用 = 余额 − 冻结」大于余额，也会撞上钱包那一侧的
+				// wallet_non_negative，把整轮对账带成失败。
 				f.Unrepairable = "未结算预留之和为负"
 			}
 			if err := repairFrozen(ctx, tx, cfg, &f, key); err != nil {
