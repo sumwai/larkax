@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 这一组是「提示也一样」那条规格的判据：错误只在用户输入出错时出现，提示也只在
@@ -286,6 +287,18 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 			run: func() error {
 				withOSStdin(t, `{"model":"`+fx.modelName+`","messages":[{"role":"user","content":"m"}]}`)
 				return runSnapshot([]string{"redact", "--direction", "request"})
+			}},
+
+		{command: "consent", what: "grant",
+			// 这条成功路径上 stderr 里有整段同意文案，而它不是附注：它是操作者
+			// 要同意的那件事本身，写在 os.Stderr 上是为了让 -q 压不掉它（压掉就
+			// 成了「没看见也同意过」）。门扫的是「提示：」那三个前缀，文案里没有。
+			run: func() error {
+				return runConsent([]string{
+					"grant", "--user", id(fx.userID), "--scope", "single_request",
+					"--request-id", fx.requestID, "--expires-at", rfc3339(2 * time.Hour),
+					"--agree",
+				})
 			}},
 
 		{command: "plugin", what: "list",

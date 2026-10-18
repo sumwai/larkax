@@ -811,12 +811,11 @@ func buildSnapshots(cfg Config, logger *slog.Logger) (*snapshotwire.Collector, e
 	// PgDB 那层适配是必须的：snapshotwire 为了让分区名筛选可测，把
 	// QueryContext 的返回类型收窄成了它自己的 Rows 接口。
 	//
-	// 授权来源今天接的是「永远没有授权」：授权记录的写入与查询（谁、什么
-	// 范围、同意文案与版本）还没有实现，所以采集侧落下来的每一条都是骨架。
-	// 那一步接上时改的是这一处——判定与落库那条路已经在了（见
-	// snapshotwire.NoConsentSource）。
+	// 授权来源查的是 capture_consents 表（见 snapshotwire.DBConsentSource）：
+	// 判定发生在脱敏那一刻，且每次判定都重新查一次——撤销要立刻生效，靠的
+	// 就是读的那一刻再问一次库。写授权那条路是 `larkaxctl consent grant`。
 	collector, err := snapshotwire.New(snapCfg, snapshotwire.Wrap(cfg.DB),
-		snapshotwire.NoConsentSource{}, logger)
+		snapshotwire.NewDBConsentSource(snapshotwire.Wrap(cfg.DB), logger), logger)
 	if err != nil {
 		return nil, fmt.Errorf("建立快照链路失败: %w", err)
 	}

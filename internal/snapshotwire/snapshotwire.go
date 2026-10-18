@@ -90,12 +90,13 @@ type ConsentSource interface {
 
 // NoConsentSource 是「这条链路上永远不存在有效授权」。
 //
-// 它是**如实**的实现，不是占位：一个没有授权入口的部署就是这个形状，
+// 它是**如实**的实现，不是占位：一条没有授权入口的链路就是这个形状，
 // 每一条落下来的都是骨架。
 //
-// 装配层今天接的就是它——授权记录的写入与查询（capture_consents 的读写、
-// `larkaxctl consent` 子命令）属于下一步，那一步接上之前，「有没有授权」
-// 在代码里没有第二个答案。
+// 今天用它的是 `larkaxctl snapshot cleanup`（那条路只删分区、一条也不采，
+// 所以没有「这次请求有没有授权」可问）。**请求链路已经不用它了**：装配层接的
+// 是查 capture_consents 的那一个来源，授权记录由 `larkaxctl consent grant` 写
+// （见 internal/assembly 的 buildSnapshots 与 consent.go 的 DBConsentSource）。
 type NoConsentSource struct{}
 
 // AllowsRawCapture 永远回答「没有」。
