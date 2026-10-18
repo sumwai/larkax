@@ -282,6 +282,174 @@ func TestEvalFailsOnUnknownCalendarDay(t *testing.T) {
 	}
 }
 
+// ── 峰谷：规则声明的窗口 ────────────────────────────────────────────────
+
+// 端到端：一条按峰谷分档的规则，窗口由规则自己声明。
+//
+// 这里走的是**真日历**：窗口串解析成分钟数之后，判定由 internal/calendar 的
+// PeakAt 做。所以这条用例同时证明了「两边接得上」与「算出来的价与手算一致」——
+// 工作日 09:00 落在 08:00–22:00 里按高峰收，12:00 不在窗口里按低谷收。
+func TestPeakWindowsDecideThePrice(t *testing.T) {
+	a := adapt(t, workdaySource(t))
+	prog, err := expr.Compile(`isPeak("08:00-12:00,14:00-18:00")
+		? {"prompt": 2.0}
+		: {"prompt": 1.0}`)
+	if err != nil {
+		t.Fatalf("编译出错: %v", err)
+	}
+
+	// 2026-01-05 是周一，北京时间 = UTC+8。
+	for _, tc := range []struct {
+		name  string
+		hour  int
+		price string
+	}{
+		{"上午高峰（窗口内）", 9, "2.00000000"},
+		{"午休（第一段之后、第二段之前）", 13, "1.00000000"},
+		{"下午高峰（第二段内）", 15, "2.00000000"},
+		{"晚间（窗口之外）", 20, "1.00000000"},
+	} {
+		at := time.Date(2026, 1, 5, tc.hour-8, 0, 0, 0, time.UTC)
+		res, err := prog.Eval(expr.Env{
+			Usage:    billing.Usage{PromptTokens: 100},
+			At:       at,
+			Region:   "CN",
+			Calendar: a,
+		})
+		if err != nil {
+			t.Fatalf("%s: 求值出错: %v", tc.name, err)
+		}
+		if got := res.Prices.Prompt.String(); got != tc.price {
+			t.Errorf("%s（北京时间 %d:00）单价 = %s，期望 %s", tc.name, tc.hour, got, tc.price)
+		}
+	}
+}
+
+// 跨零点的窗口：`22:00-02:00` 指的是当天 22:00 到次日 02:00。
+//
+// 这一条放在这一层而不是 expr 里：分号两边的含义要由**判定**来兑现，
+// 而判定在日历那边。写出 22:00 到 02:00 两个整数只是形状对。
+func TestPeakWindowAcrossMidnight(t *testing.T) {
+	a := adapt(t, workdaySource(t))
+	prog, err := expr.Compile(`isPeak("22:00-02:00") ? {"prompt": 2.0} : {"prompt": 1.0}`)
+	if err != nil {
+		t.Fatalf("编译出错: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		hour  int
+		price string
+	}{
+		{"当天 23:00（窗口内）", 23, "2.00000000"},
+		{"次日 01:00（窗口内）", 25, "2.00000000"},
+		{"当天 21:00（窗口之前）", 21, "1.00000000"},
+		{"次日 03:00（窗口之后）", 27, "1.00000000"},
+	} {
+		// UTC 的小时数 = 北京时间 - 8；超过 24 的落到次日。
+		at := time.Date(2026, 1, 5, tc.hour-8, 0, 0, 0, time.UTC)
+		res, err := prog.Eval(expr.Env{
+			Usage:    billing.Usage{PromptTokens: 100},
+			At:       at,
+			Region:   "CN",
+			Calendar: a,
+		})
+		if err != nil {
+			t.Fatalf("%s: 求值出错: %v", tc.name, err)
+		}
+		if got := res.Prices.Prompt.String(); got != tc.price {
+			t.Errorf("%s 单价 = %s，期望 %s", tc.name, got, tc.price)
+		}
+	}
+}
+
+// 休息日整天算不算高峰由规则组合出来：接口上没有那个开关（见 expr.Calendar
+// 的 Peak）。`!isWorkday() || isPeak(...)` 就是「周末全天高峰」的写法。
+//
+// 周六 10:00 落在窗口里、20:00 不在——两个都要按高峰收，因为那一天整天算高峰。
+func TestPeakOnRestDayIsComposedByTheRule(t *testing.T) {
+	a := adapt(t, workdaySource(t))
+	prog, err := expr.Compile(`(!isWorkday() || isPeak("08:00-12:00"))
+		? {"prompt": 2.0}
+		: {"prompt": 1.0}`)
+	if err != nil {
+		t.Fatalf("编译出错: %v", err)
+	}
+
+	// 2026-01-10 是周六。
+	for _, hour := range []int{10, 20} {
+		at := time.Date(2026, 1, 10, hour-8, 0, 0, 0, time.UTC)
+		res, err := prog.Eval(expr.Env{
+			Usage:    billing.Usage{PromptTokens: 100},
+			At:       at,
+			Region:   "CN",
+			Calendar: a,
+		})
+		if err != nil {
+			t.Fatalf("周六 %d:00 求值出错: %v", hour, err)
+		}
+		if got := res.Prices.Prompt.String(); got != "2.00000000" {
+			t.Errorf("周六 %d:00（北京时间）单价 = %s，期望整天算高峰的 2", hour, got)
+		}
+	}
+}
+
+// 日历判不出峰谷时，**求值必须失败**——与 isWorkday() 同一条口径。
+//
+// PeakAt 给出的是三态，unknown 表示「那一天是不是休息日还没查清」。这里
+// 断言的是**报了哪一个错**：静默按低谷算会在春节期间按低谷价收费，
+// 而账单看上去完全正常。
+func TestEvalIsPeakFailsOnUnknownDay(t *testing.T) {
+	src := calendar.NewMemorySource()
+	src.SetYearState(calendar.RegionCN, 2026, calendar.YearPending)
+	a := adapt(t, src)
+
+	prog, err := expr.Compile(`isPeak("08:00-22:00") ? {"prompt": 2.0} : {"prompt": 1.0}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = prog.Eval(expr.Env{
+		Usage:    billing.Usage{PromptTokens: 100},
+		At:       monday,
+		Region:   "CN",
+		Calendar: a,
+	})
+	if err == nil {
+		t.Fatal("日历数据不可用时峰谷必须算不出来，不能按某一档算价")
+	}
+	if !errors.Is(err, expr.ErrCalendarRequired) {
+		t.Errorf("期望 ErrCalendarRequired，得到 %v", err)
+	}
+	// 措辞与 isWorkday() 那条一模一样：同一个原因不该有两句解释。
+	if !strings.Contains(err.Error(), "配置缺口") {
+		t.Errorf("错误信息应当说明这是配置缺口: %v", err)
+	}
+	if !strings.Contains(err.Error(), string(calendar.ReasonYearPending)) {
+		t.Errorf("错误信息应带上成因: %v", err)
+	}
+}
+
+// 时段本身不成立时也报错：全天段不能与其他段并列（见 PeakSchedule.Validate）。
+//
+// 这条错误来自日历的排班校验，而规则里写得出它——写法合法、排班语义不合法，
+// 所以它只能在求值时发现，不能在编译期。
+func TestPeakRejectsFullDayWindowAlongsideOthers(t *testing.T) {
+	a := adapt(t, workdaySource(t))
+	prog, err := expr.Compile(`isPeak("00:00-00:00,08:00-12:00") ? {"prompt": 2.0} : {"prompt": 1.0}`)
+	if err != nil {
+		t.Fatalf("编译出错: %v", err)
+	}
+	if _, err := prog.Eval(expr.Env{
+		Usage:    billing.Usage{PromptTokens: 100},
+		At:       monday,
+		Region:   "CN",
+		Calendar: a,
+	}); err == nil {
+		t.Error("全天段与其他段并列的排班应当报错")
+	}
+}
+
 // 最坏情况求值同样要能接上适配器——它跑的也是同一份环境。
 func TestEvalWorstCaseWithAdapter(t *testing.T) {
 	a := adapt(t, workdaySource(t))

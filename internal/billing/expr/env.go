@@ -78,6 +78,32 @@ type Calendar interface {
 	// day 是当天零点，表示「当地的那一天」——时区换算由调用方做完，
 	// 实现方只按日期查表，不必关心时区。
 	DayInfo(region string, day time.Time) (DayInfo, error)
+
+	// Peak 判定某地区某个时刻算不算高峰。
+	//
+	// windows 是这条规则认的高峰时段，和 hour(tz) 的时区一样由**规则**给出
+	// （见 runtime.env 的 isPeak）：窗口决定「按哪一档计价」，是定价口径，
+	// 所以写规则的人自己声明，而不是从 Region 推断——同一个地区的两个渠道
+	// 可以有各自的峰谷。
+	//
+	// **判不出来时返回错误，不答 false**：与 DayInfo 同一条口径，那边是
+	// 未知直接报错。答 false 会在春节期间按低谷价收费，而账单看上去完全正常。
+	//
+	// 休息日整天算不算高峰**不在这个接口上**：那是规则用 isWorkday() 组合
+	// 出来的事（`!isWorkday() || isPeak("08:00-22:00")`），不必再多一个开关。
+	Peak(region string, instant time.Time, windows []PeakWindow) (bool, error)
+}
+
+// PeakWindow 是一段高峰时段：一天之内的 [StartMinute, EndMinute)，
+// 从当地零点起算，左闭右开。
+//
+// 与 DayInfo 一样，它是 expr 侧的形状，实现方负责翻译成自己那一侧的类型
+// （见 internal/billing/calendaradapter）。跨零点的段写成 EndMinute <
+// StartMinute；两端相等表示全天。两种写法都要由实现方按同一套语义解释——
+// 规则里写 `22:00-02:00` 的人指的是「当天 22:00 到次日 02:00」。
+type PeakWindow struct {
+	StartMinute int
+	EndMinute   int
 }
 
 // DayInfo 是一个日历日的属性，字段与 calendar_days 表对应。

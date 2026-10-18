@@ -170,7 +170,8 @@ func TestPluginCalendarDayUsesDatabase(t *testing.T) {
 //
 // 它今天没有插件能调到（SDK 的 calendar 命名空间里没有 peak 函数），所以
 // 这条用例是它唯一的调用点——这也是 scripts/deadmethods-allowlist.txt 里
-// `pluginCalendar.Peak` 那一条要写清「接上 peak 时删掉它」的原因。
+// `pluginCalendar.Peak` 那一条要写清「它为什么留着」的原因：规则那一半已经
+// 接上（窗口随规则走），挡在这里的是插件侧没有 peak 可调。
 func TestPluginCalendarPeakDelegatesToCalendar(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()

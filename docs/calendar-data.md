@@ -20,23 +20,44 @@ go run ./cmd/larkaxctl price calendar import <文件>
 `isWorkday()`、`isHoliday()` 查的就是它。接线本身**不读数据、也不做校验**：
 库里是空的照常启动，见下文「没有数据的那一年会怎样」。
 
-## 峰谷那一半今天接不上
+## 峰谷那一半：规则里写得出，插件里还写不出
 
-上面那句「某个时刻算不算高峰」目前**只在库里与代码里成立，规则里写不出来**。
+上面那句「某个时刻算不算高峰」今天有两条路，一条通、一条不通。
 
-`internal/calendar/peak.go` 的 `PeakAt` / `PeakWindow` / `PeakSchedule` 是完整的、
-被测过的，但规则能调用的函数只有 `isWorkday()` / `isHoliday()` / `holidayName()` /
-`hour()` 这些——**没有一个走 `PeakAt`**。所以在规则里写峰谷价不是「写错」，
-是**没有这个函数**。要接上它得先定「高峰窗口从哪来」（库里还是配置里），
-那是一个独立决定。
+**规则里通。** 高峰时段由规则自己声明，写成 `isPeak("08:00-22:00")`——与
+`hour(tz)` 的时区同一类：峰谷是定价口径，不由地区推断，同一地区的两个渠道
+可以有各自的峰谷。窗口串与地区、时刻一起交给 `internal/calendar/peak.go` 的
+`PeakAt` 判定（经 `internal/billing/calendaradapter`）。多段用逗号分开，段内
+允许跨零点：
 
-**这一条不会再被工具提醒。** `PeakAt` 挂在 `*Calendar` 这个类型上，而把
+```
+isPeak("08:00-12:00,14:00-18:00") ? {"prompt": 2.0} : {"prompt": 1.0}
+(!isWorkday() || isPeak("08:00-12:00")) ? {"prompt": 2.0} : {"prompt": 1.0}
+```
+
+第二行的写法是「休息日整天算高峰」：接口上没有那个开关，用两条判定组合出来。
+
+窗口的**写法**在保存规则时就解析一遍，`"25:00-26:00"`、`"8:5-9:00"` 这类当场报错；
+而「全天段不能与其他段并列」属于排班语义，由日历在求值时判——那时报的是
+`ErrCalendarRequired`，与「这一天的日历还没有数据」同一类，处置方式也一样
+（改规则，或者等数据补齐）。
+
+**插件里不通。** 宿主日历接口里有 `Peak`，而插件 SDK 的 calendar 命名空间里
+没有对应的函数可调，所以插件写不出峰谷价。要接上它得先定「插件的窗口从哪来」
+——规则那一半的答案（窗口随规则走）用不到插件上，那是一条独立的决定，见
+`internal/assembly` 的 `pluginPeakSchedule`。
+
+**这件事工具不会提醒。** `PeakAt` 挂在 `*Calendar` 这个类型上，而把
 `*Calendar` 接进 assembly 之后，这个类型进了可达图，`deadcode` 就把它的方法
 都算成可达，于是 `peak.go` 里那几条**从不可达清单里掉了出去**。清单里没有它，
 读起来像「已经在用了」——见 [LESSONS.md](../LESSONS.md) 第 22 条。
 
-在那之前，`internal/calendar` 的包注释是这一支「未接线」的唯一标记。改了那一块
-代码、或者要往规则里加峰谷价时，先把那条标记一起改掉。
+插件那一侧的提醒同样不在工具里。`pluginCalendar.Peak` 曾经挂在
+`scripts/deadmethods-allowlist.txt` 上，而规则侧接上 `isPeak()` 之后，`expr` 里
+出现了一个同名的 `Peak` 调用点；那道门按方法名数调用点，于是那一条被掩护掉、
+当作陈旧条目删掉了（与 `catalog.Admin.Update` 同一处境）。所以「插件写不出峰谷价」
+这句话今天由代码注释承担：`internal/assembly` 的 `pluginCalendar.Peak` 与
+`pluginPeakSchedule`、`internal/calendar` 的包注释，以及本节。
 
 ## 文件格式
 
@@ -131,7 +152,7 @@ go run ./cmd/larkaxctl price calendar import <文件>
 两条边界：
 
 - **没有规则用到日历时，日历缺数据完全无害。** 判断只在规则真的调用
-  `isWorkday()`、`holidayName()` 这些函数时才发生。
+  `isWorkday()`、`isHoliday()`、`isPeak()` 这些函数时才发生。
 - **启动时不检查。** 缺数据不会让服务拒绝启动——日历数据是逐年补的，未来年份
   查不到是正常状态。
 

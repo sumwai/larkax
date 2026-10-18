@@ -116,9 +116,21 @@
 # 26 之后减了 1（#325）：`Calendar.At` 有了生产调用点——插件宿主那一侧的适配器
 # 按时刻判定（`internal/assembly` 的 `pluginCalendar.Day` 真的调它）。
 # 同一批里 `Calendar.PeakAt` 也删掉了：它那条的理由写的是「没有生产调用方」，
-# 而适配器的 `Peak` 就是它的调用方。**提醒没有消失，只是搬了地方**——搬到了
-# 新加的 `pluginCalendar.Peak` 上（那一道门按调用语法数，而 `Peak` 确实没有
-# 调用方：SDK 的 calendar 命名空间里没有 peak 函数可调）。于是净减 1。
+# 而适配器的 `Peak` 就是它的调用方。提醒当时搬到了新加的 `pluginCalendar.Peak`
+# 上（那一道门按调用语法数，而 `Peak` 确实没有调用方：SDK 的 calendar 命名空间
+# 里没有 peak 函数可调）。于是净减 1。
+#
+# **25 之后减了 1（#542）**：`pluginCalendar.Peak` 那一条也删掉了，但**不是有人
+# 接上了插件那一半的峰谷**——它跟上面说的 `catalog.Admin.Update` 是同一个处境：
+# 被同名掩护。规则 DSL 加 `isPeak()` 时，`internal/billing/expr/dsl.go` 里出现了
+# 一个 `rt.calendar.Peak(...)` 调用点，名字就叫 `Peak`（那是 `expr.Calendar` 上
+# 的方法，与插件那个 `Peak` 无关），这道门按方法名数调用点，于是「没有插件调得到」
+# 的那一个从「没有调用点的导出方法」里被划掉了。删它照的是这道门自己的判据——
+# 跟工具的输出，不跟缺口的账本（`catalog.Admin.Update` 就是先例，那一条今天两边
+# 都不在）。**提醒因此没有留在任何一道门里**，改由这几处代码注释承担：
+# `internal/assembly` 的 `pluginCalendar.Peak` 与 `pluginPeakSchedule`、
+# `internal/calendar` 的包注释、docs/calendar-data.md。下次看到 `Peak` 这个名字
+# 在别处冒出来，先想一下被它掩护的是哪一条。
 #
 # 条数**没变**的那一批（25）：一进一出，`redisLogAdapter.Printf` 进来、
 # `Amount.Units` 出去。
@@ -140,7 +152,6 @@
 #
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES_DEFAULT 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
-internal/assembly/assembly.go  | pluginCalendar.Peak               | lib | 接口要求实现，而插件 SDK 的 calendar 命名空间没有 peak 函数可调（宿主日历接口里有 Peak）；接上 peak 时删掉这一条
 internal/billing/billing.go    | Usage.IsEmpty                     | lib | 公开类型的判断方法，本包用例拿它当断言助手；#267 的修法落在网关侧的 usageSourceOf（tokens.SourceUnreported）上，没有用它——「修的时候用它兑现」那个前提已经作废，语义与理由见 billing.go 上它的注释
 internal/billing/expr/compile.go | Cache.GetWithGlobals            | lib | #278 的处置就是「显式标注为未接线」，注释写在 compile.go 的 GetWithGlobals 上；它是 CompileWithGlobals 唯一的调用点，掩蔽沿调用链传到了那个自由函数，所以两条的处境一起记在理由里
 internal/calendar/calendar.go  | Date.IsWeekend                    | lib | 日历库的纯星期规则，给调用方做回退策略用；目前只有测试在调它（本包不把它当判定结果）

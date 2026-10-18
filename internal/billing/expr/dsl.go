@@ -3,6 +3,8 @@ package expr
 import (
 	"fmt"
 	"math"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sumwai/larkax/internal/billing"
@@ -97,11 +99,14 @@ var reservedNames = func() map[string]struct{} {
 // 做类型检查，运行期由 runtime.env 给出真正带状态的闭包（见那里的说明）。
 // 两处用同一份签名，是为了让「编译期通过、求值时才炸」没有发生的机会。
 //
-// 三个时间函数的分工见 runtime.env 的实现：
+// 时间函数的取数方式见 runtime.env 的实现：
 //
-//	hour(tz)     时区只决定「现在几点」，由规则显式给出
-//	isWorkday()  地区来自 Env.Region，日历与时区由 Env.Calendar 提供
-//	isHoliday()  同上
+//	hour(tz)             时区只决定「现在几点」，由规则显式给出
+//	isWorkday()          地区来自 Env.Region，日历与时区由 Env.Calendar 提供
+//	isHoliday()          同上
+//	isPeak("08:00-22:00")  同上，另外**高峰时段也由规则给出**：
+//	                     峰谷是定价口径，与 hour 的时区同一类，所以不由
+//	                     Region 推断——同一地区的两个渠道可以有各自的峰谷
 //
 // tier/fixed/minimum 除了走副作用通道，**返回值也照常参与表达式**：
 // 三者都把入参原样返回——tier 返回规则作者在调用里给的那张表（它只记下
@@ -124,6 +129,9 @@ var funcSchemas = map[string]any{
 		return false, nil
 	},
 	"isHoliday": func() (bool, error) {
+		return false, nil
+	},
+	"isPeak": func(_ string) (bool, error) {
 		return false, nil
 	},
 }
@@ -269,6 +277,22 @@ func (rt *runtime) env(u usageView) map[string]any {
 			// 而覆盖顺序只能靠写规则的人记住。
 			return info.HolidayName != "", nil
 		},
+		"isPeak": func(peakWindows string) (bool, error) {
+			// 窗口、地区、时刻三件事一起交给日历：窗口由**规则**给出，
+			// 地区与时刻来自 Env（见 Env.Calendar 的 Peak）。
+			//
+			// 判不出来的那一天由实现方报错，这里既不接住那个错误、
+			// 也不拿 false 顶上去：false 是一个具体的判断（「按低谷算」），
+			// 用它代理未知会在春节期间按低谷价收费，而账单上完全看不出来。
+			if err := rt.requireCalendar(); err != nil {
+				return false, err
+			}
+			windows, err := parsePeakWindows(peakWindows)
+			if err != nil {
+				return false, err
+			}
+			return rt.calendar.Peak(rt.region, rt.at, windows)
+		},
 
 		// __worst 只在最坏情况求值时被引用（编译期由 worstPatcher 注入）。
 		// 普通求值的字节码里不会有它，放进来是为了让两种求值共用一份环境，
@@ -309,11 +333,8 @@ func (rt *runtime) raise(old, fresh float64) float64 {
 // 「上海对应 CN」；让作者自己写地区则连「这个地区用哪个时区」都得他知道，
 // 而那正是 Calendar 能回答的。
 func (rt *runtime) dayInfo() (DayInfo, error) {
-	if rt.calendar == nil {
-		return DayInfo{}, fmt.Errorf("%w: 规则要用日历，但 Env.Calendar 为空", ErrCalendarRequired)
-	}
-	if rt.region == "" {
-		return DayInfo{}, fmt.Errorf("%w: Env.Region 为空", ErrCalendarRequired)
+	if err := rt.requireCalendar(); err != nil {
+		return DayInfo{}, err
 	}
 	tz, err := rt.calendar.TimeZone(rt.region)
 	if err != nil {
@@ -326,6 +347,84 @@ func (rt *runtime) dayInfo() (DayInfo, error) {
 	local := rt.at.In(loc)
 	day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.UTC)
 	return rt.calendar.DayInfo(rt.region, day)
+}
+
+// requireCalendar 检查规则要用日历时的两个前提。
+//
+// 两处都查而不是让实现方去报：一条规则里漏了地区或日历，报出来的那句话
+// 要说清缺的是哪一样，而实现方拿到的只是「地区为空」这个事实。
+func (rt *runtime) requireCalendar() error {
+	if rt.calendar == nil {
+		return fmt.Errorf("%w: 规则要用日历，但 Env.Calendar 为空", ErrCalendarRequired)
+	}
+	if rt.region == "" {
+		return fmt.Errorf("%w: Env.Region 为空", ErrCalendarRequired)
+	}
+	return nil
+}
+
+// parsePeakWindows 把规则里写的高峰时段折成时段表。
+//
+// 写法是 `HH:MM-HH:MM`，多段用逗号分开（`"08:00-12:00,14:00-18:00"`），
+// 段内允许跨零点（`"22:00-02:00"`，见 PeakWindow）。
+//
+// **用 HH:MM 而不是分钟数**：规则是给人写的，`"08:00-22:00"` 与上游那张写着
+// 「高峰 8:00–22:00」的表长得一样，抄错的机会最小。
+//
+// 这里判的是**写法**：几段、每段两头是不是一个合法的时钟时刻。段与段能不能
+// 并存（全天段不许与其他段并列）由日历那边判——那是排班语义，在这里再写一遍
+// 就成了两份会各自漂移的规矩。
+//
+// 写法不对时包的是 ErrCalendarRequired，与 hour(tz) 遇到解不开的时区名同一类：
+// 都是「规则里那个与日历有关的参数用不了」，处置方式也相同（改规则）。
+func parsePeakWindows(s string) ([]PeakWindow, error) {
+	segments := strings.Split(s, ",")
+	out := make([]PeakWindow, 0, len(segments))
+	for _, segment := range segments {
+		segment = strings.TrimSpace(segment)
+		start, end, ok := strings.Cut(segment, "-")
+		if !ok {
+			return nil, fmt.Errorf("%w: 高峰时段 %q 应当写成「08:00-22:00」", ErrCalendarRequired, segment)
+		}
+		startMinute, err := parseClock(strings.TrimSpace(start))
+		if err != nil {
+			return nil, err
+		}
+		endMinute, err := parseClock(strings.TrimSpace(end))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, PeakWindow{StartMinute: startMinute, EndMinute: endMinute})
+	}
+	return out, nil
+}
+
+// parseClock 把 HH:MM 折成从当天零点起算的分钟数。
+//
+// 这里认的是钟表的写法：0–23 时、0–59 分，所以 `"25:00"` 与 `"08:60"` 都在
+// 这里被挡住，不会变成一个别的时刻。日历那边也校验一遍自己的取值范围——
+// 它的入口不只规则一条。
+func parseClock(s string) (int, error) {
+	hour, minute, ok := strings.Cut(s, ":")
+	if !ok {
+		return 0, fmt.Errorf("%w: 高峰时段里的时刻 %q 应当写成「08:00」", ErrCalendarRequired, s)
+	}
+	h, err := strconv.Atoi(hour)
+	if err != nil {
+		return 0, fmt.Errorf("%w: 高峰时段里的时刻 %q 读不出小时", ErrCalendarRequired, s)
+	}
+	// 分必须是两位：`8:5` 读不出作者想写的是 08:05 还是别的东西。
+	if len(minute) != 2 {
+		return 0, fmt.Errorf("%w: 高峰时段里的时刻 %q 的分钟要写成两位（08:05）", ErrCalendarRequired, s)
+	}
+	m, err := strconv.Atoi(minute)
+	if err != nil {
+		return 0, fmt.Errorf("%w: 高峰时段里的时刻 %q 读不出分钟", ErrCalendarRequired, s)
+	}
+	if h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, fmt.Errorf("%w: 高峰时段里的时刻 %q 不是一天之内的钟点", ErrCalendarRequired, s)
+	}
+	return h*60 + m, nil
 }
 
 // usageView 是用量在求值期间的形态。

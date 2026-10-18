@@ -10,12 +10,16 @@ import (
 // ErrInvalidPeakWindow 表示高峰时段配置不成立。
 var ErrInvalidPeakWindow = errors.New("高峰时段配置不成立")
 
-// 本文件的一切**今天接不进任何地方**：规则能调用的函数里没有一个走 PeakAt，
-// 所以峰谷价在规则里写不出来；插件那一侧也没有对应函数可调（宿主日历接口里
-// 有 Peak，而 SDK 的 calendar 命名空间里没有它）。要接上它得先定「高峰窗口
-// 从哪来」。
+// 本文件的判定今天有两条路，一条通、一条不通：
 //
-// 唯一的调用点是插件适配器里那个调不到的入口（见 internal/assembly 的
+//   - **规则里通**：`isPeak("08:00-22:00")` 把窗口写在规则自己身上（见
+//     internal/billing/expr 的 Peak 与 internal/billing/calendaradapter），
+//     窗口串在这里折成 PeakWindow / PeakSchedule，判定走 PeakAt。
+//   - **插件里不通**：宿主日历接口里有 Peak，而 SDK 的 calendar 命名空间里
+//     没有对应函数可调。要接上它得先定「插件的高峰窗口从哪来」——规则那一半
+//     已经定了（窗口随规则走），插件这一半还没有。
+//
+// 唯一的调用点因此是插件适配器里那个**调不到**的入口（见 internal/assembly 的
 // pluginCalendar.Peak）——`PeakAt` 因此**不在** deadmethods 的清单里：那道门
 // 按调用语法数，而它确实有一个调用点。提醒在哪，见包注释那一节。
 //

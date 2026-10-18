@@ -120,6 +120,47 @@ func TestCompileShapeErrors(t *testing.T) {
 	}
 }
 
+// TestCompileIsPeakWindowMustBeALiteral 验证高峰时段必须写成字面量，
+// 而且写法当场就解析一遍。
+//
+// 规则入库时会走 Compile（见 internal/pricing 的 admin），所以这两条在
+// **保存规则**时就会报出来。放到求值时才发现的话，一条写错窗口的规则会先在
+// 库里躺一段时间，然后让每一次用到它的计价失败。
+func TestCompileIsPeakWindowMustBeALiteral(t *testing.T) {
+	// 字面量，以及会被折成字面量的常量拼接。
+	for _, source := range []string{
+		`{"prompt": isPeak("08:00-22:00") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("08:00-12:00,22:00-02:00") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("08:00" + "-22:00") ? 1.0 : 2.0}`,
+	} {
+		if _, err := Compile(source); err != nil {
+			t.Errorf("%q 应当编得过: %v", source, err)
+		}
+	}
+
+	// 运行期才知道的窗口：与 tier 的档位名同一条理由，规则保存时没法给人看。
+	if _, err := Compile(`{"prompt": isPeak(region) ? 1.0 : 2.0}`); err == nil {
+		t.Error("运行期才知道的高峰时段应当被拒绝")
+	}
+
+	// 写法错的窗口。每一条都点出一种写法：缺小时、不是钟点、分钟不是两位、
+	// 只有一个时刻、参数个数不对。
+	for _, source := range []string{
+		`{"prompt": isPeak("8-22") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("25:00-26:00") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("08:60-09:00") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("8:5-9:00") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("08:00") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("08:00-22:00,") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak() ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("08:00-22:00", "23:00-23:30") ? 1.0 : 2.0}`,
+	} {
+		if _, err := Compile(source); err == nil {
+			t.Errorf("%q 应当编不过", source)
+		}
+	}
+}
+
 // TestCompileNestedTier 验证 tier 可以嵌在别的表达式里。
 func TestCompileNestedTier(t *testing.T) {
 	cases := []string{
