@@ -259,6 +259,7 @@ internal/idempotency/             the Idempotency-Key header: run a repeated req
 internal/keyquota/                whether a key's cumulative spend has passed its limit
 internal/ledger/                  double-entry bookkeeping: construct and verify entries
 internal/ledger/store/            persisting ledger entries, wallets and reservations
+internal/manpage/                 renders the man pages from the CLI registry and docs/cli-reference.md
 internal/migrate/                 embedded migrations (internal/migrate/sql/)
 internal/money/                   fixed-point money; the only place rounding happens
 internal/observe/                 logging, request IDs, health and readiness endpoints
