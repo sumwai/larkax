@@ -101,7 +101,7 @@ func TestRotatePlanDoesNotWrite(t *testing.T) {
 	rotator := NewRotator(db, newRotateSealer(t, newKey, oldKey))
 
 	ids := insertRotateRows(t, db, oldSealer, 3)
-	badID := insertChannel(t.Context(), t, db, oldSealer, channelSpec{
+	badID := insertChannel(ctx, t, db, oldSealer, channelSpec{
 		model:      uniqueModel(),
 		credential: []byte("not-an-envelope"),
 	})
@@ -247,7 +247,7 @@ func TestRotateApplyReportsBadEnvelopePerRow(t *testing.T) {
 	rotator := NewRotator(db, newRotateSealer(t, newKey, oldKey))
 
 	ids := insertRotateRows(t, db, oldSealer, 2)
-	badID := insertChannel(t.Context(), t, db, oldSealer, channelSpec{
+	badID := insertChannel(ctx, t, db, oldSealer, channelSpec{
 		model:      uniqueModel(),
 		credential: []byte("not-an-envelope"),
 	})

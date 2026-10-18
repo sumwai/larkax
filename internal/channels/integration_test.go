@@ -1457,12 +1457,12 @@ func TestHealthReadsWindowAndSignals(t *testing.T) {
 	ctx := context.Background()
 	admin := NewAdmin(db, nil, nil)
 
-	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(ctx, t, db, sealer, channelSpec{model: uniqueModel()})
 	// 两行相隔 30 小时的桶：窗口一收，旧的那一行就不该再进汇总。
 	// 缓存 token 两桶给不同的值：汇总里读到的是不是**窗口内那几桶之和**，
 	// 靠它们分得出来（分位数那一栏做不到这件事，它取的是最近一个非空桶）。
-	insertRollupSignals(t.Context(), t, db, id, hourBucket(1), 10, 9, 1, 200, "1.50000000", 300, 700)
-	insertRollupSignals(t.Context(), t, db, id, hourBucket(30), 100, 50, 50, 900, "9.00000000", 1000, 1000)
+	insertRollupSignals(ctx, t, db, id, hourBucket(1), 10, 9, 1, 200, "1.50000000", 300, 700)
+	insertRollupSignals(ctx, t, db, id, hourBucket(30), 100, 50, 50, 900, "9.00000000", 1000, 1000)
 	insertQuota(t, db, id, "12.5", "tokens", "api_query", "degraded", 0.9)
 	probeAt := hourBucket(2)
 	seedProbeAt(t, db, id, probeAt)
@@ -1539,7 +1539,7 @@ func TestHealthReadsWindowAndSignals(t *testing.T) {
 	})
 
 	t.Run("没有额度状态行的渠道是未知，不是最差", func(t *testing.T) {
-		bare := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
+		bare := insertChannel(ctx, t, db, sealer, channelSpec{model: uniqueModel()})
 		got, buckets, err := admin.HealthOne(ctx, bare, time.Now().Add(-24*time.Hour))
 		if err != nil {
 			t.Fatalf("HealthOne 失败: %v", err)
@@ -1573,8 +1573,8 @@ func TestHealthReadsWindowAndSignals(t *testing.T) {
 	t.Run("成本那一列的 0 读作没有数据", func(t *testing.T) {
 		// 那一列是 NOT NULL DEFAULT 0 且今天没有生产写入方，于是「有桶、成本是 0」
 		// 只可能表示没记过账。把它当免费会让每一行都显示一个凭空的零成本。
-		zero := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
-		insertRollup(t.Context(), t, db, zero, hourBucket(1), 5, 5, 0, 120, "0.00000000")
+		zero := insertChannel(ctx, t, db, sealer, channelSpec{model: uniqueModel()})
+		insertRollup(ctx, t, db, zero, hourBucket(1), 5, 5, 0, 120, "0.00000000")
 
 		got, _, err := admin.HealthOne(ctx, zero, time.Now().Add(-24*time.Hour))
 		if err != nil {
@@ -1604,8 +1604,8 @@ func TestHealthHidesDeletedUnlessAll(t *testing.T) {
 	admin := NewAdmin(db, nil, nil)
 	since := time.Now().Add(-24 * time.Hour)
 
-	alive := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
-	deleted := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
+	alive := insertChannel(ctx, t, db, sealer, channelSpec{model: uniqueModel()})
+	deleted := insertChannel(ctx, t, db, sealer, channelSpec{model: uniqueModel()})
 	softDeleteRow(t, db, deleted)
 
 	contains := func(rows []ChannelHealth, id int64) bool {
@@ -1653,7 +1653,7 @@ func TestRestoreBringsChannelBack(t *testing.T) {
 	ctx := context.Background()
 	admin := NewAdmin(db, nil, nil)
 
-	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(ctx, t, db, sealer, channelSpec{model: uniqueModel()})
 	// 造一个**不是** unknown 的结论：一条本来就是 unknown 的渠道被恢复之后还是
 	// unknown，那样「回落成 unknown」这条断言什么都没钉住。
 	insertQuota(t, db, id, "5", "tokens", "api_query", "drained", 0.9)
