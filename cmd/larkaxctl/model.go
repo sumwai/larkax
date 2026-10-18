@@ -38,7 +38,11 @@ create / update 的字段：--vendor、--family、三个 limit、六个能力标
 `
 
 // modelUsage 是 model 的长版：`larkaxctl help model` 与 `model help`。
-const modelUsage = `larkaxctl model 管理模型目录里的规范模型。
+//
+// 它不是常量：端点那一串取值由 internal/channel 的清单拼进来（见
+// channel.EndpointValueList）。这里手抄一遍的话，加一种端点时它会留着老的那几条
+// ——而「用法文本里少列一条」没有任何东西会报出来，写的人只能靠试。
+var modelUsage = `larkaxctl model 管理模型目录里的规范模型。
 
 用法：
   larkaxctl model create --model <规范名> --display <展示名>
@@ -78,11 +82,14 @@ create 的 stdout 只有新模型的 ID，其余信息走 stderr。
 （六项都没配过时打 -），get 里逐项打出「未知 / 支持 / 不支持」。端点清单只在
 get 里打，list 那张表不列它。
 
-**--endpoints 收的是端点路径**，逗号分隔，取值只有 /v1/chat/completions、
-/v1/responses、/v1/messages、/v1/systemone 四种；写别的当场报错，并把
-这四种列出来。它与能力那六项是同一组声明，三态也同一套：不给 = 未知（这一项
-不参与选路判据）、给空串 = 明确声明一条都不支持、给路径 = 支持这几条。
-「未知」与「明确没有」在这里的结论相反——后者会让所有候选都落选。
+**--endpoints 收的是端点路径**，逗号分隔，取值只有下面几条
+（写别的当场报错，并把可选项原样列出来）：
+
+  ` + channel.EndpointValueList + `
+
+它与能力那六项是同一组声明，三态也同一套：不给 = 未知（这一项不参与选路判据）、
+给空串 = 明确声明一条都不支持、给路径 = 支持这几条。「未知」与「明确没有」在这里
+的结论相反——后者会让所有候选都落选。
 
 update **只改真的给了的那几项**，其余保持库里的值。空串与 0 是几种有含义的写法：
 --vendor '' 与 --context-limit 0 都是「把这一栏清空」（库里存 NULL），
@@ -379,7 +386,7 @@ type capabilityEdit struct {
 
 // newCapabilityEdit 按 fs.Visit 记下的清单，把这次给过的能力那一组收起来。
 //
-// 取值当场解析：写错的端点要在连库之前报出来，而报错里列全了那四种取值
+// 取值当场解析：写错的端点要在连库之前报出来，而报错里把可选项列全了
 // （见 parseEndpointsFlag）。
 func newCapabilityEdit(given map[string]bool, flags []modelCapabilityFlag, endpointsRaw string) (capabilityEdit, error) {
 	edit := capabilityEdit{flags: flags, endpointsGiven: given["endpoints"]}
@@ -1007,8 +1014,9 @@ func joinOrDash(values []string) string {
 
 // endpointFlagUsage 是 --endpoints 的标志说明。
 //
-// 四种取值列在命令的用法文本里（见 modelUsage），不在这里再抄一遍：本包覆写了
+// 取值那一串列在命令的用法文本里（见 modelUsage），不在这里再抄一遍：本包覆写了
 // FlagSet.Usage，这一句不会自己打印出来，它是给读代码的人看的，抄两份只会分岔。
+// 用法文本与解析失败的报错取自同一份清单（channel.EndpointValueList）。
 const endpointFlagUsage = "上游端点清单，逗号分隔；不给 = 未知，给空串 = 明确一条都不支持"
 
 // parseEndpointsFlag 解析 --endpoints 的值。

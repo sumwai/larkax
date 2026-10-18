@@ -3,6 +3,7 @@ package channel
 import (
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // Endpoint 是一次上游请求打到哪条路径。
@@ -34,6 +35,10 @@ type Endpoint string
 //
 // 常量名带 Endpoint 前缀而不是叫 ChatCompletions：这四个取值会与协议名一起
 // 出现在调用点上，没有前缀时 `channel.Responses` 读不出它说的是协议还是路径。
+//
+// 这里是取值的**声明处**：加一种端点在这一块里加，然后加进下面的 EndpointValues
+// ——「认哪些」「提示里列哪些」都从那份清单算（漏加会被
+// TestEveryEndpointConstantIsInValues 挡住）。
 const (
 	EndpointChatCompletions Endpoint = "/v1/chat/completions"
 	EndpointResponses       Endpoint = "/v1/responses"
@@ -41,17 +46,56 @@ const (
 	EndpointSystemOne       Endpoint = "/v1/systemone"
 )
 
+// EndpointValues 是本包认的全部端点取值，顺序就是它该出现在提示里的顺序。
+//
+// # 为什么它是一份导出的清单
+//
+// 「有哪几种端点」这件事本包要说三处：认哪些（Valid）、解析失败时报出可选项
+// （ParseEndpoint）、命令行的用法文本（cmd/larkaxctl 的 --endpoints）。三处
+// 各写一遍时它们会各错各的：用法文本少列一条，写的人就只能靠试；报错里少列
+// 一条，看到的人只能对着半句提示猜。收成这一份之后，加一种端点只有这里要改，
+// 另外两处跟着它走。
+//
+// 导出而不是只在本包用：用法文本在另一个包里拼（见 EndpointValueList），
+// 而「两处措辞各写各的」正是这件事要治的病。
+//
+// # 顺序沿用原先那两处写着的那个
+//
+// 四个取值的先后来自报错与用法文本原来各自列的顺序（chat、responses、messages、
+// systemone），不改成字母序：它两个出口都是给人读的句子，而句子里的顺序要稳定
+// ——同一份配置在两次运行里给出顺序不同的提示，读日志的人会以为中间有什么变了。
+//
+// # 调用方只读它
+//
+// 改动这一份（换顺序、删一条）会让 Valid 与提示各说一套：那份文本是启动时按
+// 当时的清单算好的，之后不再跟着这份切片走。
+var EndpointValues = []Endpoint{
+	EndpointChatCompletions,
+	EndpointResponses,
+	EndpointMessages,
+	EndpointSystemOne,
+}
+
+// EndpointValueList 是 EndpointValues 的文本形式，中文顿号分隔。
+//
+// 报错与用法文本都用它，于是两处的取值那一串逐字相同，只差前后那半句话。
+// 它由清单算出来而不是另写一份字面量：手写的那一份在清单变动之后不会跟着变，
+// 而「提示里列的还是老的那几条」没有任何东西会报出来——它看起来完全正常。
+var EndpointValueList = func() string {
+	values := make([]string, 0, len(EndpointValues))
+	for _, e := range EndpointValues {
+		values = append(values, string(e))
+	}
+	return strings.Join(values, "、")
+}()
+
 // Valid 报告它是不是上面这几个取值之一。
 //
 // 它是「外部输入」那道门的判据：库里的 supported_endpoints 是人工/采集写进去的
 // 一段文本，读到别的串时调用方要能分辨「这一项是错的」与「这一项没配过」。
 // 后者是空 endpoints（nil 切片），不是空串——空串在这套取值里不合法。
 func (e Endpoint) Valid() bool {
-	switch e {
-	case EndpointChatCompletions, EndpointResponses, EndpointMessages, EndpointSystemOne:
-		return true
-	}
-	return false
+	return slices.Contains(EndpointValues, e)
 }
 
 // ParseEndpoint 把一个字符串解析成一个端点取值。
@@ -62,11 +106,16 @@ func (e Endpoint) Valid() bool {
 // 必须分开：前者的处置是放行（不知道就别拦），后者是这一行数据有问题。
 // 把非法串折成空串会让它在选路里表现成「未知」，于是「这一行写错了」变成
 // 「这一行没配过」——一条拼错的端点声明从此静默不生效。
+//
+// # 列出来的取值从清单派生
+//
+// 报错里那一串由 EndpointValueList 给（见 EndpointValues），命令行的用法文本
+// 用同一份：两处各写一遍时，加一种端点只会改到其中一处，而「提示里少一条」
+// 没有任何东西会报出来。
 func ParseEndpoint(raw string) (Endpoint, error) {
 	e := Endpoint(raw)
 	if !e.Valid() {
-		return "", fmt.Errorf("未知的上游端点 %q（取值只能是 %s、%s、%s、%s）",
-			raw, EndpointChatCompletions, EndpointResponses, EndpointMessages, EndpointSystemOne)
+		return "", fmt.Errorf("未知的上游端点 %q（取值只能是 %s）", raw, EndpointValueList)
 	}
 	return e, nil
 }
