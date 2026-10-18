@@ -69,7 +69,7 @@ POST 路径，**没有** `GET /v1/models`、`GET /v1/models/{id}`、`/v1/embeddi
 | `429` | 这个 Key 的 RPM 用满 / 这个 Key 的累计额度用尽 / 用户钱包可用余额不足 / **上游**限流 | 前三条是网关，第四条是上游 | 四个来源的处置**两两相反**，见 [limits.md](limits.md) |
 | `500` | 我们这一侧坏了（账本、候选来源、鉴权查询失败、认不出来的错误） | 网关 | 上报，附 `X-Request-Id` |
 | `501` | 路径不在上面那四条里；这个构建没接推理（例如 `worker` 角色）；没配上游执行器 | 网关 | 换路径或改部署 |
-| `502` | 上游调用失败（上游 5xx、协议不匹配、所有候选都失败） | 上游的问题，由我们转述 | 可以重发 |
+| `502` | 上游调用失败，底下有三种起因：上游回了非 2xx / 候选全被本地判据挡在门外 / 候选的渠道类型不支持这条协议 | 上游那一类由我们转述，另两类是网关判的 | 按 `error.code` 分，见下文那张码表——**不是每一种都能重发** |
 | `503` | `no available upstream for the requested model` | 网关 | 这个词底下**没有可用渠道**。它不点名是哪个名字不对，`larkaxctl doctor` 会，见 [development.md](development.md) |
 
 两条刻意的口径：
@@ -105,15 +105,18 @@ POST 路径，**没有** `GET /v1/models`、`GET /v1/models/{id}`、`/v1/embeddi
 
 **OpenAI 那套要按 `error.code` 分支，Anthropic 那套要按 `error.type` 分支。**
 同一个失败在两套里落在不同字段上，这是两家协议的差别，不是我们的选择。
+**我们自己给的码也照这条走**：Anthropic 那套只有 `error.type` 一个机器可读的
+位置，码就写在那里、把推出来的类型名顶掉——幂等的三条 409、额度那两条 429、
+上游失败那几档都是这样。
 
 `type` / `error.type` 由状态码推出来，调用方据此粗分「改请求 / 换凭证 / 稍后重试」：
 
 | 状态码 | OpenAI 的 `type` | OpenAI 的 `code` | Anthropic 的 `error.type` |
 |---|---|---|---|
-| `400` / `405` / `415` / `409` | `invalid_request_error` | 推不出来时为 `null`（幂等那三条会给具体的码） | `invalid_request_error` |
+| `400` / `405` / `415` / `409` | `invalid_request_error` | 推不出来时为 `null`（幂等那三条会给具体的码） | `invalid_request_error`（幂等那三条这一栏放的是码） |
 | `401` | `invalid_request_error` | `invalid_api_key` | `authentication_error` |
 | `413` | `invalid_request_error` | `request_too_large` | `request_too_large` |
-| `429` | `rate_limit_error` | 推不出来时为 `null`（额度那两条会给 `insufficient_quota`） | `rate_limit_error` |
+| `429` | `rate_limit_error` | 推不出来时为 `null`（额度那两条给 `insufficient_quota`，上游限流给 `upstream_http_error`） | `rate_limit_error`（额度那两条与上游限流这一栏放的是码） |
 | `501` | `not_implemented` | 推不出来时为 `null` | `not_implemented` |
 | 其余 | `api_error` | 推不出来时为 `null` | `api_error` |
 
@@ -123,8 +126,8 @@ POST 路径，**没有** `GET /v1/models`、`GET /v1/models/{id}`、`/v1/embeddi
 | `error.code` | 状态码 | 什么时候给 | 调用方该做什么 |
 |---|---|---|---|
 | `no_candidate_channel` | `503` / `502` | `503`：这个模型一条渠道都没挂上。`502`：候选有，但全被本地判据挡在门外（能力、上限、健康度、额度），**一次上游调用都没发生** | 改渠道配置或模型目录声明；重试多少次都是同一个结果 |
-| `channel_type_unsupported` | `502` | 候选试过了，但每一条的渠道类型都做不了这次请求的协议 | 换一条类型对的渠道 |
-| `upstream_http_error` | `502` / `429` | 上游真的回了非 2xx；`429` 那一档是上游限流（`type` 仍是 `rate_limit_error`） | `429` 退避重试；其余看 `message` 与日志：改请求，或者换上游 |
+| `channel_type_unsupported` | `502` | **试过的**候选都不支持这条协议：每条都是被渠道类型挡下的。被本地状态（额度、健康度）挡掉的候选不在这句话的范围里 | 换一条类型对的渠道 |
+| `upstream_http_error` | `502` / `429` | 上游真的回了非 2xx；`429` 那一档是上游限流——OpenAI 那侧 `error.type` 仍是 `rate_limit_error`、变的是 `error.code`（原来是 `null`），Anthropic 那侧码落在 `error.type`，所以 `rate_limit_error` 在它这里不再出现 | `429` 退避重试；其余看 `message` 与日志：改请求，或者换上游 |
 
 候选都失败、而最后一个错误来自我们这一侧（插件阻断、账本写不进去）时也是 502，
 但**不给码**——把它标成上游那一侧的失败，调用方会照码去查上游，而该查的是我们。

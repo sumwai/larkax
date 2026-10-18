@@ -199,13 +199,18 @@ const msgNoCandidateProfile = "no candidate channel supports this request: " +
 const msgNoCandidateDrained = "no candidate channel is available for this request: " +
 	"every candidate for this model is unhealthy or out of quota"
 
-// msgChannelTypeUnsupported 是「候选的渠道类型做不了这次请求的协议」时的那句话。
+// msgChannelTypeUnsupported 是「试过的候选都做不了这次请求的协议」时的那句话。
 //
 // 档是 CodeChannelTypeUnsupported（见它的注释）。它要和 msgNoCandidateProfile
 // 分得开：那句说「一次都没试过」，这句说「试过了、是类型不对」——处置前者是
 // 改目录声明，后者是换一条类型对的渠道。
-const msgChannelTypeUnsupported = "no candidate channel type supports this protocol: " +
-	"every candidate for this model was tried and rejected because its channel type cannot serve this request"
+//
+// **范围词只限「试过的」**：判据是 Attempts（见 route.Errors.AllAttemptsUnsupported），
+// 而被本地状态挡掉的候选不在里面——额度与健康度走 Excluded。于是「有候选被状态
+// 挡掉、剩下的都类型不符」也落进这一档，说成「每一条候选」就是在承诺判据没保证
+// 的事。调用方要的是「换一条类型对的渠道」，多说的那部分不改变这个结论。
+const msgChannelTypeUnsupported = "no candidate channel type that was tried can serve this protocol: " +
+	"each was rejected because its channel type cannot serve this request"
 
 // CodeInsufficientQuota 是「这个账户现在没法再花这笔钱」的错误码。
 //
@@ -307,8 +312,9 @@ const HeaderRetryAfter = "Retry-After"
 // 整数秒是各家 SDK 都直接解析的那种。至少 1 秒——写 0 会让客户端立刻重试，
 // 而它必然还在同一个窗口里，白白多一次往返。
 //
-// 错误体仍然按调用协议给形状（429 → rate_limit_error，见 errorKind），
-// 所以这一条不需要各协议各写一份。
+// 错误体仍然按调用协议给形状（429 推出来的类型是 rate_limit_error，见 errorKind），
+// 所以这一条不需要各协议各写一份：它不带码，Anthropic 那一栏也就仍是推出来的
+// 类型名；带码的那几条（额度、余额、上游限流）会把它顶掉。
 func writeRateLimited(w http.ResponseWriter, protocol channel.Protocol, retryAfter time.Duration) {
 	w.Header().Set(HeaderRetryAfter, strconv.FormatInt(retryAfterSeconds(retryAfter), 10))
 	writeError(w, protocol, http.StatusTooManyRequests,

@@ -98,8 +98,10 @@ func TestUpstreamFailureClassesReachTheCaller(t *testing.T) {
 			name:  "渠道类型做不了这次协议",
 			model: typeModel,
 			code:  "channel_type_unsupported",
-			message: "no candidate channel type supports this protocol: " +
-				"every candidate for this model was tried and rejected because its channel type cannot serve this request",
+			// 范围词只限**试过的**候选：被本地状态（额度、健康度）挡掉的候选
+			// 不在 Attempts 里，判据保证不了「每一条候选」。
+			message: "no candidate channel type that was tried can serve this protocol: " +
+				"each was rejected because its channel type cannot serve this request",
 		},
 		{
 			name:    "上游回了 400",

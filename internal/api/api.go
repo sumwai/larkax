@@ -1035,8 +1035,14 @@ func httpStatusOfUpstream(err error) (status int, code, message string) {
 	var up *channel.ErrUpstream
 	switch {
 	case errors.As(err, &up) && up.StatusCode == http.StatusTooManyRequests:
-		// 码与其余上游错误同一个：上游限流与**我们自己**的限流都是 429 与
-		// rate_limit_error，靠码才分得开该找谁（我们这边那一条不带码）。
+		// 码与其余上游错误同一个：同为 429，上游限流与**我们自己**的限流处置
+		// 相反，靠码才分得开该找谁（我们这边那一条不带码）。
+		//
+		// 这是一处刻意的偏差，两套协议各落在哪写在这里：OpenAI 那侧 `error.code`
+		// 从 null 变成 upstream_http_error，`error.type` 仍是 429 推出来的
+		// rate_limit_error；Anthropic 那侧只有 error.type 一个位置放得下码，
+		// 于是 `rate_limit_error` 在它这里不再出现。状态码不变（还是 429），
+		// 按状态码归类的 SDK 不受影响。
 		return http.StatusTooManyRequests, pipeline.ErrorUpstreamHTTPError,
 			"upstream is rate limited, retry later"
 	case errors.As(err, &up):

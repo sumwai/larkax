@@ -616,6 +616,70 @@ func TestMessagesUpstreamFailureReturnsAnthropicError(t *testing.T) {
 	assertNoLedgerEntry(t, db, user)
 }
 
+// 上游**限流**（429）走 Anthropic 入口时，`error.type` 是码 `upstream_http_error`
+// ——不是 429 推出来的 `rate_limit_error`。
+//
+// 为什么单独一条：429 是唯一一个「状态码推出来的类型」与「我们给的码」指向
+// **不同处置**的档（前者听起来像「等一下再来」，后者说的是「这条上游不行」），
+// 而 Anthropic 那套只有 `error.type` 一个位置放码（见 writeErrorCode 的 `typ := code`）。
+// 上面那条 500 的用例证明不了这里：500 推出来的 `api_error` 与码本来就不同名，
+// 走哪一支都看不出差别；429 这一条才钉住「给码时以码为准」。
+//
+// OpenAI 那一侧的对应断言在 internal/api 的单测里（`error.code` 变、
+// `error.type` 仍是 `rate_limit_error`），这里只走 Anthropic 这份形状。
+func TestMessagesUpstreamRateLimitReturnsTheCode(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+
+	model := unique("e2e-model-messages-429")
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, "100")
+	key := issueKey(t, db, user)
+
+	fake := &fakeUpstream{
+		protocol: channel.ProtocolAnthropic,
+		db:       db,
+		userID:   user,
+		model:    model,
+	}
+	fake.fail.Store(true)
+	fake.failStatus.Store(http.StatusTooManyRequests)
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL, model, "anthropic", 0)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	// 状态码原样透出上游的 429：调用方该退避，这个信息对他有用。
+	status, out := postChat(ctx, t, public.URL+"/v1/messages", key, messagesBody(model))
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("状态码 = %d，期望 429（上游限流原样透出）。响应体：%s", status, out)
+	}
+
+	var got struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v\n%s", err, out)
+	}
+	if got.Error.Type != "upstream_http_error" {
+		t.Errorf("error.type = %q，期望 upstream_http_error——这一栏放的是码，不是 429 推出来的 rate_limit_error", got.Error.Type)
+	}
+	if got.Error.Message == "" {
+		t.Error("错误体没有 message")
+	}
+}
+
 // 流中途失败时，Anthropic 那条路给出的是**带事件名的错误帧**，且已吐出的
 // 部分被计费。
 //

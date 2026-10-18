@@ -944,7 +944,13 @@ def responses_auth_error(ctx: Ctx) -> str:
 
 
 def responses_upstream_error(ctx: Ctx) -> str:
-    """上游错误：假上游回 500，我们对外回 502。"""
+    """上游错误：假上游回 500，我们对外回 502，`error.code` 要认得出。
+
+    Responses 是独立的一条协议常量（`channel.ProtocolOpenAIResponses`），
+    而「它的非流式错误体与 OpenAI 那一套逐字相同」是我们自己下的结论——
+    形状上真的一样吗，得在这个协议上也走一遍才算验过。所以这一条与上面的
+    认证错误一样，自己断言自己的 `error.code`。
+    """
     import openai
 
     try:
@@ -956,6 +962,7 @@ def responses_upstream_error(ctx: Ctx) -> str:
     except openai.APIStatusError as exc:
         check("status_code", exc.status_code, 502)
         check("error.type", error_type_of(exc), "api_error")
+        check("error.code", error_code_of(exc), "upstream_http_error")
         return f"{type(exc).__name__} status={exc.status_code} type={error_type_of(exc)}"
     raise CaseFailure("上游 500 时我们本该回 502，但请求没有报错")
 

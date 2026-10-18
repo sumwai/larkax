@@ -945,12 +945,16 @@ func TestUpstreamFailureClassesAreDistinguishable(t *testing.T) {
 		{
 			name: "一个候选都不剩", err: allRejected,
 			wantStatus: http.StatusBadGateway, wantCode: CodeNoCandidateChannel,
-			wantMessage: msgNoCandidateProfile,
+			// 逐字写出来而不是引常量：断言的就是**渲染出去的那句话**，
+			// 引常量的话，常量被改坏时这里跟着一起变，没人会响。
+			wantMessage: "no candidate channel supports this request: " +
+				"the model profile rejected every candidate for this model, so no upstream was called",
 		},
 		{
 			name: "渠道类型做不了这次协议", err: typeUnsupported,
 			wantStatus: http.StatusBadGateway, wantCode: CodeChannelTypeUnsupported,
-			wantMessage: msgChannelTypeUnsupported,
+			wantMessage: "no candidate channel type that was tried can serve this protocol: " +
+				"each was rejected because its channel type cannot serve this request",
 		},
 		{
 			name: "上游回了 400", err: upstream400,
@@ -1065,6 +1069,87 @@ func TestUpstreamFailureClassesAreDistinguishableOnAnthropic(t *testing.T) {
 				t.Errorf("与「%s」的错误体分不开（error.type=%s）：两类失败的下一步不同", other, tc.code)
 			}
 			seen[tc.code] = tc.name
+		})
+	}
+}
+
+// 「本地一条候选都用不上」在响应体里有**三句**话，码是同一个——码说明处置是
+// 同一件事（去改配置，重试多少次都不会变），句子说明的是被谁挡住的。三句都从
+// **渲染出来的响应体**上读，不引常量：断言常量的话，渲染那一步接错（例如漏掉
+// noCandidateLeftMessage 的分支）照样绿。
+//
+// 三句的差别是有用的：没挂渠道要建渠道，目录声明挡的要改声明，运行状态挡的要
+// 等它恢复或加一条。合成一句会把三种处置糊成一种。
+func TestNoCandidateMessagesReachTheCaller(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		status  int
+		message string
+	}{
+		{
+			name: "一条渠道都没挂上", err: route.ErrNoCandidates,
+			status:  http.StatusServiceUnavailable,
+			message: "no available upstream for the requested model",
+		},
+		{
+			name: "目录判据把候选全挡了",
+			err: &route.Errors{
+				Unsupported: 1,
+				Excluded:    []route.Exclusion{{ChannelID: 1, Code: route.CodeCapability, Unsupported: true}},
+			},
+			status: http.StatusBadGateway,
+			message: "no candidate channel supports this request: " +
+				"the model profile rejected every candidate for this model, so no upstream was called",
+		},
+		{
+			// Attempts 为空、Unsupported 为零：候选是被额度或健康度挡的
+			// （见 route.Candidate.DrainReason），落到三句里的最后一句。
+			name: "运行状态把候选全挡了",
+			err: &route.Errors{
+				Excluded: []route.Exclusion{{ChannelID: 1, Code: route.CodeQuota, Reason: "额度已耗尽"}},
+			},
+			status: http.StatusBadGateway,
+			message: "no candidate channel is available for this request: " +
+				"every candidate for this model is unhealthy or out of quota",
+		},
+	}
+
+	seen := map[string]string{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, _ := newTestHandler()
+			h.Chatter = &fakeChatter{err: tc.err}
+
+			rec := post(h, PathChatCompletions, validBody)
+			if rec.Code != tc.status {
+				t.Fatalf("状态码 = %d，期望 %d（响应体 %s）", rec.Code, tc.status, rec.Body)
+			}
+
+			var body struct {
+				Error struct {
+					Message string  `json:"message"`
+					Code    *string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("响应不是 JSON: %v（%s）", err, rec.Body)
+			}
+			if body.Error.Message != tc.message {
+				t.Errorf("error.message = %q，期望 %q", body.Error.Message, tc.message)
+			}
+			code := ""
+			if body.Error.Code != nil {
+				code = *body.Error.Code
+			}
+			// 三句共用一个码：处置是同一件事，调用方不必分三支去改配置。
+			if code != CodeNoCandidateChannel {
+				t.Errorf("error.code = %q，期望 %q", code, CodeNoCandidateChannel)
+			}
+			if other, dup := seen[tc.message]; dup {
+				t.Errorf("文案与「%s」共用了一句：三句说的是三种挡人的东西", other)
+			}
+			seen[tc.message] = tc.name
 		})
 	}
 }
