@@ -117,6 +117,21 @@ POST 路径，**没有** `GET /v1/models`、`GET /v1/models/{id}`、`/v1/embeddi
 | `501` | `not_implemented` | 推不出来时为 `null` | `not_implemented` |
 | 其余 | `api_error` | 推不出来时为 `null` | `api_error` |
 
+除了由状态码推出来那两个，还有几个码**只能读 `code` 才知道**——它们落在同一个
+状态码上，而各自的下一步完全不同：
+
+| `error.code` | 状态码 | 什么时候给 | 调用方该做什么 |
+|---|---|---|---|
+| `no_candidate_channel` | `503` / `502` | `503`：这个模型一条渠道都没挂上。`502`：候选有，但全被本地判据挡在门外（能力、上限、健康度、额度），**一次上游调用都没发生** | 改渠道配置或模型目录声明；重试多少次都是同一个结果 |
+| `channel_type_unsupported` | `502` | 候选试过了，但每一条的渠道类型都做不了这次请求的协议 | 换一条类型对的渠道 |
+| `upstream_http_error` | `502` / `429` | 上游真的回了非 2xx；`429` 那一档是上游限流（`type` 仍是 `rate_limit_error`） | `429` 退避重试；其余看 `message` 与日志：改请求，或者换上游 |
+
+候选都失败、而最后一个错误来自我们这一侧（插件阻断、账本写不进去）时也是 502，
+但**不给码**——把它标成上游那一侧的失败，调用方会照码去查上游，而该查的是我们。
+
+Anthropic 那套没有 `error.code`，这几个码写在 `error.type` 上（见上面那张形状
+表）：那一侧连 `type` 也跟着变，调用方照样分支得出来。
+
 **`message` 里不回上游的错误原文，也不回内部路径与标识**：上游的错误体里可能
 回显请求内容，而调用方不需要它也知道该改什么。要细节就拿 `X-Request-Id` 去查
 日志。
@@ -192,9 +207,11 @@ the account balance ran out while this response was streaming, so it was cut sho
 - **OpenAI 的用量合并在结束分片里**，而官方是在它之后另发一个 `choices` 为空的
   分片。分开写会让按 `choices[0]` 取值的朴素客户端读到空数组而崩；合并则是多一个
   它们不认识的字段——后者是更安全的偏差。
-- **流式与同协议的非流式 5xx 用了不同的错误类型**：流式帧里是 `server_error`，
-  非流式 5xx 是 `api_error`（Anthropic 两侧则一致，都是 `api_error`）。这是现状，
-  统一它属于对外契约变更，按 [versioning.md](versioning.md) 的版本策略走。
+- **流式与同协议的非流式 5xx 用了不同的错误类型**：流式帧里是 `server_error`
+  （Anthropic 那一侧是 `api_error`），非流式的 `error.type` 是 `api_error`——而
+  Anthropic 那一栏放的是码 `upstream_http_error`（它没有 `error.code`，见上面那张
+  表）。这是现状，统一它属于对外契约变更，按 [versioning.md](versioning.md) 的
+  版本策略走。
 - **引用标注（citation / annotation）只在 Responses 这条路上有事件**
   （`response.output_text.annotation.added`）。chat 与 Anthropic 两侧都不转它：
   chat completions 的分片里没有它的位置（那会是 relaykit 的 dto 扩字段，一次

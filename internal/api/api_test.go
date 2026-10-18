@@ -823,8 +823,21 @@ func TestUpstreamErrorStatus(t *testing.T) {
 		name string
 		err  error
 		want int
+		// wantCode 是 error.code（OpenAI 形状）与 error.type（Anthropic 形状，
+		// 见 writeErrorCode）。空串表示「推不出来」，落成 null。
+		wantCode string
 	}{
-		{name: "没有可用渠道", err: route.ErrNoCandidates, want: http.StatusServiceUnavailable},
+		{name: "没有可用渠道", err: route.ErrNoCandidates, want: http.StatusServiceUnavailable,
+			wantCode: CodeNoCandidateChannel},
+		{name: "一个候选都不剩", err: &route.Errors{Unsupported: 1,
+			Excluded: []route.Exclusion{{Unsupported: true}}}, want: http.StatusBadGateway,
+			wantCode: CodeNoCandidateChannel},
+		{name: "候选都被运行状态挡了", err: &route.Errors{
+			Excluded: []route.Exclusion{{Code: route.CodeQuota}}}, want: http.StatusBadGateway,
+			wantCode: CodeNoCandidateChannel},
+		{name: "渠道类型做不了这次协议", err: &route.Errors{Attempts: []route.Attempt{
+			{Err: fmt.Errorf("渠道 1: %w", channel.ErrUnsupported)}}}, want: http.StatusBadGateway,
+			wantCode: CodeChannelTypeUnsupported},
 		{name: "没有执行器", err: gateway.ErrNoExecutor, want: http.StatusNotImplemented},
 		{
 			name: "缺 max_tokens",
@@ -837,19 +850,31 @@ func TestUpstreamErrorStatus(t *testing.T) {
 			name: "上游限流",
 			err:  &channel.ErrUpstream{StatusCode: http.StatusTooManyRequests, Retryable: true},
 			want: http.StatusTooManyRequests,
+			// 码与其余上游错误同一个：429 里既有上游说的，也有我们自己限的
+			// （后者不带码），靠它才分得开该找谁。
+			wantCode: pipeline.ErrorUpstreamHTTPError,
 		},
 		{
 			name: "上游说请求不对",
 			err:  &channel.ErrUpstream{StatusCode: http.StatusBadRequest},
 			// 不跟着上游回 400：那会让调用方去改一个本来正确的请求。
-			want: http.StatusBadGateway,
+			want:     http.StatusBadGateway,
+			wantCode: pipeline.ErrorUpstreamHTTPError,
 		},
 		{
-			name: "上游挂了",
-			err:  &channel.ErrUpstream{StatusCode: http.StatusBadGateway},
+			name:     "上游挂了",
+			err:      &channel.ErrUpstream{StatusCode: http.StatusBadGateway},
+			want:     http.StatusBadGateway,
+			wantCode: pipeline.ErrorUpstreamHTTPError,
+		},
+		{
+			// 试过、但不是「做不了这件事」：最后一个错误不是上游那一侧的。
+			// 码留空——给 upstream_http_error 会把我们自己的失败标成上游的。
+			name: "所有候选都失败",
+			err: &route.Errors{Attempts: []route.Attempt{
+				{Err: errors.New("账本写不进去")}}},
 			want: http.StatusBadGateway,
 		},
-		{name: "所有候选都失败", err: &route.Errors{}, want: http.StatusBadGateway},
 		{name: "认不出来的错误", err: errors.New("账本写不进去"), want: http.StatusInternalServerError},
 	}
 
@@ -866,6 +891,180 @@ func TestUpstreamErrorStatus(t *testing.T) {
 			if strings.Contains(rec.Body.String(), tc.err.Error()) {
 				t.Errorf("不该回内部错误原文: %s", rec.Body)
 			}
+
+			var body struct {
+				Error struct {
+					Message string  `json:"message"`
+					Code    *string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("响应不是 JSON: %v（%s）", err, rec.Body)
+			}
+			got := ""
+			if body.Error.Code != nil {
+				got = *body.Error.Code
+			}
+			if got != tc.wantCode {
+				t.Errorf("error.code = %q，期望 %q", got, tc.wantCode)
+			}
+			if body.Error.Message == "" {
+				t.Error("message 是空的：调用方据此判断下一步，不能空着")
+			}
+		})
+	}
+}
+
+// 「一个候选都不剩」与「渠道类型做不了这次协议」是两类**下一步不同**的失败
+// （改目录声明 / 换一条类型对的渠道），而它们的响应体一度一模一样：同一句
+// 「upstream call failed」、code 恒为 null，调用方只能开单问人。
+//
+// 这条用例钉住三件事，缺一条那三类就还是分不开：
+//
+//   - 三种失败的码互不相同（上游那一档单独一个）；
+//   - 两句本地话**各自**说清挡人的是什么、以及上游调用发生过没有；
+//   - 上游那一档不并进本地那两档——它说的是「请求或上游要改」，不是「配置
+//     没配好」。
+func TestUpstreamFailureClassesAreDistinguishable(t *testing.T) {
+	allRejected := &route.Errors{
+		Unsupported: 1,
+		Excluded:    []route.Exclusion{{ChannelID: 1, Code: route.CodeCapability, Unsupported: true}},
+	}
+	typeUnsupported := &route.Errors{
+		Attempts: []route.Attempt{{ChannelID: 1, Err: channel.ErrUnsupported}},
+	}
+	upstream400 := &channel.ErrUpstream{StatusCode: http.StatusBadRequest, GotResponse: true}
+
+	cases := []struct {
+		name        string
+		err         error
+		wantStatus  int
+		wantCode    string
+		wantMessage string
+	}{
+		{
+			name: "一个候选都不剩", err: allRejected,
+			wantStatus: http.StatusBadGateway, wantCode: CodeNoCandidateChannel,
+			wantMessage: msgNoCandidateProfile,
+		},
+		{
+			name: "渠道类型做不了这次协议", err: typeUnsupported,
+			wantStatus: http.StatusBadGateway, wantCode: CodeChannelTypeUnsupported,
+			wantMessage: msgChannelTypeUnsupported,
+		},
+		{
+			name: "上游回了 400", err: upstream400,
+			wantStatus: http.StatusBadGateway, wantCode: pipeline.ErrorUpstreamHTTPError,
+			wantMessage: "upstream call failed",
+		},
+	}
+
+	seenCode := map[string]string{}
+	seenMessage := map[string]string{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, _ := newTestHandler()
+			h.Chatter = &fakeChatter{err: tc.err}
+
+			rec := post(h, PathChatCompletions, validBody)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("状态码 = %d，期望 %d（响应体 %s）", rec.Code, tc.wantStatus, rec.Body)
+			}
+
+			var body struct {
+				Error struct {
+					Message string  `json:"message"`
+					Type    string  `json:"type"`
+					Code    *string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("响应不是 JSON: %v（%s）", err, rec.Body)
+			}
+			// 那句话本身，不是「有个 message 就行」：三类压平成同一句时，
+			// 只断言状态码的用例照样是绿的（三条都是 502）。
+			if body.Error.Message != tc.wantMessage {
+				t.Errorf("error.message = %q，期望 %q", body.Error.Message, tc.wantMessage)
+			}
+			got := ""
+			if body.Error.Code != nil {
+				got = *body.Error.Code
+			}
+			if got != tc.wantCode {
+				t.Errorf("error.code = %q，期望 %q", got, tc.wantCode)
+			}
+			if other, dup := seenCode[tc.wantCode]; dup {
+				t.Errorf("码 %q 与「%s」共用了：两类失败的处置不同，调用方据此分支", tc.wantCode, other)
+			}
+			seenCode[tc.wantCode] = tc.name
+			if other, dup := seenMessage[tc.wantMessage]; dup {
+				t.Errorf("文案与「%s」共用了一句：话说的是两件不同的事", other)
+			}
+			seenMessage[tc.wantMessage] = tc.name
+		})
+	}
+}
+
+// 同一批失败在 **Anthropic 形状**下也要分得开，分它们的是 `error.type`
+// ——那套协议没有 `error.code`，码只能写在这一栏（见 writeErrorCode）。
+//
+// 与上面那条 OpenAI 的用例是同一批错误值，断言的位置不同：那一条比的是
+// `error.code`（三条的 `error.type` 都由 502 推成 api_error，分不开），这一条
+// 比的是 `error.type` 本身。两条合起来，才等于「凭 `code` / `type` 分得清
+// 『我配错了』与『上游答了但不是我要的』」——按协议读哪一栏不一样，能分出来
+// 这件事一样。
+func TestUpstreamFailureClassesAreDistinguishableOnAnthropic(t *testing.T) {
+	allRejected := &route.Errors{
+		Unsupported: 1,
+		Excluded:    []route.Exclusion{{ChannelID: 1, Code: route.CodeCapability, Unsupported: true}},
+	}
+	typeUnsupported := &route.Errors{
+		Attempts: []route.Attempt{{ChannelID: 1, Err: channel.ErrUnsupported}},
+	}
+	upstream400 := &channel.ErrUpstream{StatusCode: http.StatusBadRequest, GotResponse: true}
+
+	cases := []struct {
+		name string
+		err  error
+		code string
+	}{
+		{name: "一个候选都不剩", err: allRejected, code: CodeNoCandidateChannel},
+		{name: "渠道类型做不了这次协议", err: typeUnsupported, code: CodeChannelTypeUnsupported},
+		{name: "上游回了 400", err: upstream400, code: pipeline.ErrorUpstreamHTTPError},
+	}
+
+	seen := map[string]string{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, _ := newTestHandler()
+			h.Chatter = &fakeChatter{err: tc.err}
+
+			rec := post(h, PathMessages, validBody)
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("状态码 = %d，期望 502（响应体 %s）", rec.Code, rec.Body)
+			}
+
+			var body struct {
+				Type  string `json:"type"`
+				Error struct {
+					Type string `json:"type"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("响应不是 Anthropic 形状的错误体: %v（%s）", err, rec.Body)
+			}
+			if body.Type != "error" {
+				t.Errorf("顶层的 type = %q，期望 error", body.Type)
+			}
+			// 形状对不上时（例如错回了 OpenAI 那份结构体）这一栏会是空的：
+			// 断言它等于码，等于同时钉住了「形状是 Anthropic 这份」。
+			if body.Error.Type != tc.code {
+				t.Errorf("error.type = %q，期望码 %q（这套协议里码写在这一栏）", body.Error.Type, tc.code)
+			}
+			if other, dup := seen[tc.code]; dup {
+				t.Errorf("与「%s」的错误体分不开（error.type=%s）：两类失败的下一步不同", other, tc.code)
+			}
+			seen[tc.code] = tc.name
 		})
 	}
 }

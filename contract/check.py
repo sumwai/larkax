@@ -366,6 +366,10 @@ def openai_upstream_error(ctx: Ctx) -> str:
     502 在 OpenAI 那套里没有专门的名字，SDK 把它归到 InternalServerError
     （`APIStatusError` 的子类）——所以断言落在**基类 + 状态码**上，
     而不是某个具体的异常名：名字是 SDK 的内部选择，状态码才是契约。
+
+    `error.code` 是上游这一档的名字（`upstream_http_error`，与账单、快照同一套
+    词汇，见 internal/api 的 httpStatusOfUpstream）：本地判定的失败不落这一档，
+    它们的码是另两个。
     """
     import openai
 
@@ -378,6 +382,7 @@ def openai_upstream_error(ctx: Ctx) -> str:
     except openai.APIStatusError as exc:
         check("status_code", exc.status_code, 502)
         check("error.type", error_type_of(exc), "api_error")
+        check("error.code", error_code_of(exc), "upstream_http_error")
         return f"{type(exc).__name__} status={exc.status_code} type={error_type_of(exc)}"
     raise CaseFailure("上游 500 时我们本该回 502，但请求没有报错")
 
@@ -385,9 +390,10 @@ def openai_upstream_error(ctx: Ctx) -> str:
 def openai_auth_error(ctx: Ctx) -> str:
     """认证错误：401 要落到 AuthenticationError 上，`error.code` 要认得出。
 
-    这是 OpenAI 那套形状里**唯一**会把 `error.code` 填上一个具体值的地方
-    （见 internal/api/error.go 的 errorKind：401 走 `invalid_api_key`，
-    而普通的 400 给的是 null）。所以「error.code 对不对」只能在这里验。
+    401 在 errorKind 里映射成 `invalid_api_key`，普通的 400 给的是 null。所以
+    「error.code 对不对」能在这里验一次；上游那一档的码在
+    `openai_upstream_error` 里另验一条（幂等那三条 409 不进契约测试，它们要
+    先造一次冲突请求，由 `internal/assembly/idempotency_e2e_test.go` 钉着）。
     """
     import openai
 
@@ -619,6 +625,12 @@ def anthropic_bad_request(ctx: Ctx) -> str:
 
 
 def anthropic_upstream_error(ctx: Ctx) -> str:
+    """上游错误：假上游回 500，我们对外回 502，SDK 要能当成 5xx 认出来。
+
+    Anthropic 那套没有 `error.code`，我们给的码放在 `error.type` 上（见
+    writeErrorCode），所以这一栏读到的是码本身 `upstream_http_error`：
+    502 单独推出来的 `api_error` 只是没有码时的落点。
+    """
     import anthropic
 
     try:
@@ -629,7 +641,7 @@ def anthropic_upstream_error(ctx: Ctx) -> str:
         )
     except anthropic.APIStatusError as exc:
         check("status_code", exc.status_code, 502)
-        check("error.type", error_type_of(exc), "api_error")
+        check("error.type", error_type_of(exc), "upstream_http_error")
         return f"{type(exc).__name__} status={exc.status_code} type={error_type_of(exc)}"
     raise CaseFailure("上游 500 时我们本该回 502，但请求没有报错")
 

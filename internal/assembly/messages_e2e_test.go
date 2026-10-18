@@ -538,8 +538,11 @@ func TestMessagesUpstreamFailureReturnsAnthropicError(t *testing.T) {
 		t.Fatalf("状态码 = %d，期望 502（上游失败是我们与上游之间的问题）。响应体：%s", status, out)
 	}
 
-	// 一、错误体是 Anthropic 形状：顶层 type=error，错误类型 api_error
-	//（502 落到 errorKind 的默认分支），且**不回上游的错误原文**。
+	// 一、错误体是 Anthropic 形状：顶层 type=error，且**不回上游的错误原文**。
+	// 错误类型这一栏在 Anthropic 那套里就是放码的位置（它没有 error.code，见
+	// writeErrorCode），所以这一条断言的是**码**：上游那一档是
+	// upstream_http_error。状态码 502 单独推出来的类型是 api_error，给出码时
+	// 以码为准——两个名字指同一档，而有名字的那个才能被 SDK 用来分支。
 	var got struct {
 		Type  string `json:"type"`
 		Error struct {
@@ -555,8 +558,8 @@ func TestMessagesUpstreamFailureReturnsAnthropicError(t *testing.T) {
 	if got.Type != "error" {
 		t.Errorf("顶层的 type = %q，期望 error", got.Type)
 	}
-	if got.Error.Type != "api_error" {
-		t.Errorf("错误类型 = %q，期望 api_error", got.Error.Type)
+	if got.Error.Type != "upstream_http_error" {
+		t.Errorf("错误类型 = %q，期望 upstream_http_error（Anthropic 那套只有这一栏放得下码）", got.Error.Type)
 	}
 	if got.Error.Message == "" {
 		t.Error("错误体没有 message")
