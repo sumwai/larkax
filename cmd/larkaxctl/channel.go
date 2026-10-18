@@ -204,19 +204,15 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	// 一个写错的命令不该先连上生产库再报错，而「连上库之后才发现参数不对」
 	// 还有一个更坏的可能——它没报错。
 	if strings.TrimSpace(*name) == "" {
-		fs.Usage()
 		return channels.CreateRequest{}, "", errors.New("缺少 --name")
 	}
 	if strings.TrimSpace(*channelType) == "" {
-		fs.Usage()
 		return channels.CreateRequest{}, "", errors.New("缺少 --type")
 	}
 	if strings.TrimSpace(*baseURL) == "" {
-		fs.Usage()
 		return channels.CreateRequest{}, "", errors.New("缺少 --base-url")
 	}
 	if strings.TrimSpace(*models) == "" {
-		fs.Usage()
 		return channels.CreateRequest{}, "", errors.New("缺少 --models（至少一个规范模型名）")
 	}
 	plaintext, err := readCredential(*credentialStdin, *credentialEnv, true)
@@ -267,7 +263,6 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 			"update 不接受位置参数，得到 %q：要改的渠道用 --id 指定", fs.Arg(0))
 	}
 	if *id <= 0 {
-		fs.Usage()
 		return channels.UpdateRequest{}, errors.New("缺少 --id（要改的渠道 ID）")
 	}
 
@@ -323,7 +318,6 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 		changes++
 	}
 	if changes == 0 {
-		fs.Usage()
 		return channels.UpdateRequest{}, errors.New(
 			"update 至少要改一项：给出 --name / --type / --base-url / --models / " +
 				"--weight / --priority / --setting / --credential-* 之一")
@@ -452,7 +446,6 @@ func runChannelSetStatus(args []string, status string) error {
 		return usageErr(fmt.Errorf("%s 不接受位置参数，得到 %q：渠道用 --id 指定", verb, fs.Arg(0)))
 	}
 	if *id <= 0 {
-		fs.Usage()
 		return usageErr(errors.New("缺少 --id（渠道 ID）"))
 	}
 
@@ -502,7 +495,6 @@ func runChannelDelete(args []string) error {
 		return usageErr(fmt.Errorf("delete 不接受位置参数，得到 %q：要删的渠道用 --id 指定", fs.Arg(0)))
 	}
 	if *id <= 0 {
-		fs.Usage()
 		return usageErr(errors.New("缺少 --id（要删的渠道 ID）"))
 	}
 

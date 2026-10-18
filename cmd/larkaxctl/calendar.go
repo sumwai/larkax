@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -138,11 +137,12 @@ func runCalendarImport(args []string) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return err
+		return usageErr(err)
 	}
 	if fs.NArg() != 1 {
-		fs.Usage()
-		return fmt.Errorf("price calendar import 需要一个文件参数，得到 %d 个", fs.NArg())
+		// 不打整段用法：人已经会用这条命令了，只是位置参数没给对。用法留给
+		// 「还没开始用」的那几处（缺子命令 / 未知子命令 / flag 解析失败）。
+		return usageErr(fmt.Errorf("price calendar import 需要一个文件参数，得到 %d 个", fs.NArg()))
 	}
 	path := fs.Arg(0)
 
@@ -163,19 +163,16 @@ func runCalendarImport(args []string) error {
 	if err != nil {
 		return err
 	}
-	db, err := sql.Open("pgx", cfg.DBDSN)
-	if err != nil {
-		return fmt.Errorf("打开数据库连接失败: %w", err)
-	}
-	defer func() { _ = db.Close() }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), calendarImportTimeout)
 	defer cancel()
-	// 变量名不复用 err：这里的每一次重新声明都会让后面读代码的人停下来判断
-	// 「看到的是哪个 err」，而包一层名字的成本是零。
-	if pingErr := db.PingContext(ctx); pingErr != nil {
-		return fmt.Errorf("连接数据库失败: %w", pingErr)
+	// 走 openDB 而不是自己 sql.Open + Ping：打开与探活失败时的处置相同
+	// （都归 exitDBUnreach），各写一遍的表现是同一类失败在两条命令上给出
+	// 不同的退出码，而脚本对它们的处置是不一样的。
+	db, err := openDB(ctx, cfg)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = db.Close() }()
 
 	result, err := calendarstore.NewAdmin(db).Import(ctx, doc)
 	if err != nil {

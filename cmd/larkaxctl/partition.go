@@ -269,7 +269,9 @@ func partitionCheckLines(missing []string, usageDefaultRows, snapshotDefaultRows
 // 分派的（见 docs/cli-output.md 的「退出码」）。
 func partitionCheckErr(problems []string) error {
 	if len(problems) > 0 {
-		return fmt.Errorf("usage_events 月分区体检不通过：%s", strings.Join(problems, "；"))
+		// 结论已经在体检打出来的那一行状态与清单里了，标成 reportedErr：
+		// main 不再补打一行 `larkaxctl: …`，退出码照旧非零给调度器。
+		return reportedErr(fmt.Errorf("usage_events 月分区体检不通过：%s", strings.Join(problems, "；")))
 	}
 	return nil
 }

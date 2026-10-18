@@ -145,11 +145,9 @@ func parseAliasCreate(args []string) (catalog.CreateAliasRequest, error) {
 	}
 
 	if strings.TrimSpace(*canonical) == "" {
-		fs.Usage()
 		return catalog.CreateAliasRequest{}, errors.New("缺少 --model")
 	}
 	if strings.TrimSpace(*upstream) == "" {
-		fs.Usage()
 		return catalog.CreateAliasRequest{}, errors.New("缺少 --upstream")
 	}
 	if *channelID < 0 {
@@ -269,7 +267,6 @@ func parseAliasUpdate(args []string) (catalog.UpdateAliasRequest, error) {
 			"update 不接受位置参数，得到 %q：要改的别名用 --id 指定", fs.Arg(0))
 	}
 	if *id <= 0 {
-		fs.Usage()
 		return catalog.UpdateAliasRequest{}, errors.New("缺少 --id（要改的别名 ID）")
 	}
 
@@ -293,7 +290,6 @@ func parseAliasUpdate(args []string) (catalog.UpdateAliasRequest, error) {
 		changes++
 	}
 	if changes == 0 {
-		fs.Usage()
 		return catalog.UpdateAliasRequest{}, errors.New(
 			"update 至少要改一项：给出 --upstream 或 --overrides 之一")
 	}
@@ -317,7 +313,6 @@ func runAliasDelete(args []string) error {
 			"delete 不接受位置参数，得到 %q：要删的别名用 --id 指定", fs.Arg(0)))
 	}
 	if *id <= 0 {
-		fs.Usage()
 		return usageErr(errors.New("缺少 --id（要删的别名 ID）"))
 	}
 
@@ -359,7 +354,6 @@ func runAliasResolve(args []string) error {
 			"resolve 不接受位置参数，得到 %q：规范名用 --model 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*canonical) == "" {
-		fs.Usage()
 		return usageErr(errors.New("缺少 --model"))
 	}
 	if *channelID < 0 {
