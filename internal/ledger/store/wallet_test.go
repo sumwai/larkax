@@ -282,6 +282,39 @@ func TestOpenWalletRejectsNonPositiveUser(t *testing.T) {
 	}
 }
 
+// 非法的用户 id 要在**碰库之前**被挡下，而且不能被分到任何一类库上的拒绝里。
+//
+// 变异：把 `userID <= 0` 改成 `< 0`，0 就被放行、一路走到外键，于是被分类成
+// ErrNoSuchUser。命令行按哨兵给退出码（见 cmd/larkaxctl 的 conflictErrors），
+// 这一改会把「id 写成了 0」从退出码 1 变成退出码 4——报成一次约束冲突。
+// 上面那条用例断言过「0 与负数会被拒」，但它要连库（没有 LARKAX_DB_DSN 时
+// 整包跳过），而且只判「有没有错」，判不出错误被分到哪一类。
+//
+// 这里给的 Store **没有数据库句柄**，而这正是断言的一部分：判据生效时它在
+// 碰 s.db 之前就返回，句柄是空的也走得通；判据一旦不生效，这次调用会直接撞上
+// 空句柄。于是「非法 id 不碰库」这件事不连库就钉得住。
+func TestOpenWalletRejectsNonPositiveUserBeforeTouchingDB(t *testing.T) {
+	s := New(nil)
+	ctx := context.Background()
+
+	for _, id := range []int64{0, -1} {
+		_, err := s.OpenWallet(ctx, id, ledger.AssetCNY)
+		if err == nil {
+			t.Fatalf("用户 id %d 应当被拒", id)
+		}
+		// 报的是「id 非法」这件参数问题，不是库那边发生了什么。
+		if !strings.Contains(err.Error(), "非法") {
+			t.Errorf("用户 id %d 的错误信息 %q 里没有说清是 id 非法", id, err)
+		}
+		if errors.Is(err, ErrNoSuchUser) {
+			t.Errorf("用户 id %d 被分类成了「用户不存在」：%v", id, err)
+		}
+		if errors.Is(err, ErrConstraintViolation) {
+			t.Errorf("用户 id %d 被分类成了「数据库约束冲突」：%v", id, err)
+		}
+	}
+}
+
 // 用户不存在时，错误要指认「哪个用户不存在」，而不是一句外键冲突原文。
 //
 // 命令行的正常路径会先解析用户、走不到这里；这条覆盖的是绕过解析的调用方

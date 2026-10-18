@@ -474,8 +474,15 @@ func TestBalanceOfReportsOverflow(t *testing.T) {
 	}
 
 	// 同一组走 Balances（`ledger balance --all` 那条路）也必须报错。
-	if _, err := Balances(entries); err == nil {
-		t.Error("汇总里有一个科目算不出来时，整份汇总都该报错")
+	_, err = Balances(entries)
+	if err == nil {
+		t.Fatal("汇总里有一个科目算不出来时，整份汇总都该报错")
+	}
+	// 只有一个科目溢出时，报错里**不该**出现「另有 N 个科目也超出范围」：
+	// 那一句的用处是「别以为修好这一个就没事了」，凭空多一句会让人去翻一个
+	// 根本不存在的科目。变异：`len(overflowed) > 1` 改成 `>= 1`。
+	if strings.Contains(err.Error(), "另有") {
+		t.Errorf("只有一个科目溢出时不该出现「另有 N 个科目」：%v", err)
 	}
 }
 
