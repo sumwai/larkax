@@ -1008,10 +1008,15 @@ go run ./cmd/larkaxctl apikey update --id 3 --clear-rpm
 负数一律拒绝。这两项**不开简写**：它们是限额，写短了容易看错也容易按错。
 
 `--quota` **是生效的**，不是只记下来：超限的请求会被拒（`429` +
-`insufficient_quota`，见 [limits.md](limits.md)）。判据只有一份
-（`internal/keyquota` 的 `CheckInTx`），**落点有两处**——入口在读请求体之前的
-早拒绝（`internal/ledger/store` 的 `Store.CheckQuota`），以及预留那个事务里的
-权威判定。两处引用的是同一份判据，不是两条各算各的规则。
+`insufficient_quota`，见 [limits.md](limits.md)）。**落点有两处**——入口在读请求体
+之前的早拒绝（`internal/ledger/store` 的 `Store.CheckQuota`，它转给
+`internal/keyquota` 的 `Check`），以及预留那个事务里的权威判定
+（同一包的 `CheckInTx`）。
+
+两处共用的是两样东西：读「这把 key 累计花了多少」的口径（`spentSQL`），
+以及「算不算超」那条判据（`over`）；它们不是两条各算各的规则。
+差别只在早拒绝那一支：它传 `additional = 0`，也就是「已经超了才拒」，
+所以它只会比权威判定更松，不会拒掉一个权威判定会放行的请求。
 
 ## 当前能做什么
 
