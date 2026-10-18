@@ -1470,8 +1470,8 @@ func (c *fakeCalendar) DayInfo(_ string, day time.Time) (expr.DayInfo, error) {
 
 // Peak 在这里只满足接口：这条用例集里的规则不用峰谷，所以没有可答的窗口。
 // 判不出来就报错，不猜一个值——与真实适配器同一条口径（未知不折成 false）。
-func (c *fakeCalendar) Peak(string, time.Time, []expr.PeakWindow) (bool, error) {
-	return false, fmt.Errorf("%w: 这条用例没有峰谷数据", expr.ErrCalendarRequired)
+func (c *fakeCalendar) Peak(string, time.Time, []expr.PeakWindow) (expr.PeakVerdict, error) {
+	return expr.PeakVerdict{}, fmt.Errorf("%w: 这条用例没有峰谷数据", expr.ErrCalendarRequired)
 }
 
 // 跨「工作日 / 休息日」边界：周五 23:59 受理、周六 00:01 结算，

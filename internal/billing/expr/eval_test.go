@@ -69,14 +69,14 @@ func (c *testCalendar) DayInfo(region string, day time.Time) (DayInfo, error) {
 	return info, nil
 }
 
-func (c *testCalendar) Peak(region string, instant time.Time, windows []PeakWindow) (bool, error) {
+func (c *testCalendar) Peak(region string, instant time.Time, windows []PeakWindow) (PeakVerdict, error) {
 	c.saw = append(c.saw, peakCall{region: region, instant: instant, windows: windows})
 	if c.fails {
-		return false, ErrCalendarRequired
+		return PeakVerdict{}, ErrCalendarRequired
 	}
 	loc, err := time.LoadLocation(c.tz[region])
 	if err != nil {
-		return false, ErrCalendarRequired
+		return PeakVerdict{}, ErrCalendarRequired
 	}
 	at := instant.In(loc)
 
@@ -84,11 +84,21 @@ func (c *testCalendar) Peak(region string, instant time.Time, windows []PeakWind
 	// DayUnknown，由适配器折成 ErrCalendarRequired）。判不出来时报同一个错，
 	// 不回答 false：false 是「按低谷算」这个具体的判断。
 	day := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC)
-	if _, ok := c.days[region+"|"+day.Format("2006-01-02")]; !ok {
-		return false, fmt.Errorf("%w: 这一天的高峰与否判不出来", ErrCalendarRequired)
+	info, ok := c.days[region+"|"+day.Format("2006-01-02")]
+	if !ok {
+		return PeakVerdict{}, fmt.Errorf("%w: 这一天的高峰与否判不出来", ErrCalendarRequired)
 	}
-	return c.peakMinutes[at.Hour()*60+at.Minute()], nil
+	// 判定所依据的那一天随结果一起回去——真实实现里它出自同一次 Lookup
+	// （见 internal/billing/calendaradapter 的 Peak）。
+	return PeakVerdict{IsPeak: c.peakMinutes[at.Hour()*60+at.Minute()], Day: info}, nil
 }
+
+// calendarCalls 是这一次求值查日历数据的次数。
+//
+// DayInfo 与 Peak 都算：真实适配器里两者各自查同一天的那一行
+// （见 internal/billing/calendaradapter），所以「这条规则查了几次日历」得
+// 两者一起数——只数其中一个的话，把一次查询换个入口就骗过去了。
+func (c *testCalendar) calendarCalls() int { return c.dayCalls + len(c.saw) }
 
 func newTestCalendar() *testCalendar {
 	return &testCalendar{

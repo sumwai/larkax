@@ -66,12 +66,20 @@ func (a *Adapter) TimeZone(region string) (string, error) {
 // 为什么不返回 `DayInfo{}` 加一个错误位：`expr` 的接口没有那个位，
 // 而返回零值加错误会让两个调用点里总有一个忘记检查错误。
 func (a *Adapter) DayInfo(region string, day time.Time) (expr.DayInfo, error) {
-	ctx := a.ctx()
-	status, err := a.cal.Lookup(ctx, calendar.Region(region), calendar.DateOf(day))
+	status, err := a.cal.Lookup(a.ctx(), calendar.Region(region), calendar.DateOf(day))
 	if err != nil {
 		return expr.DayInfo{}, err
 	}
+	return dayInfoOf(region, status)
+}
 
+// dayInfoOf 把日历那侧的一天折成 expr 侧的形状。
+//
+// 两个入口共用它：问属性的 DayInfo，与判峰谷时顺手把当天属性带回来的 Peak
+// ——在那一边，这一份就是同一次 Lookup 的产物（见 internal/calendar 的
+// PeakAt），不额外查库。各写一份的话，同一个未知成因会在两处折出两句不一样
+// 的解释，而它们讲的是同一件事。
+func dayInfoOf(region string, status calendar.DayStatus) (expr.DayInfo, error) {
 	switch status.Kind {
 	case calendar.DayWorkday:
 		return expr.DayInfo{
@@ -106,6 +114,15 @@ func (a *Adapter) DayInfo(region string, day time.Time) (expr.DayInfo, error) {
 // 一样，这一层只做形状转换，判定不在这里重写（窗口怎么算、跨零点怎么算，
 // 见 internal/calendar 的 peak.go）。
 //
+// # 当天属性随判定一起回去
+//
+// 判定本来就要先查当天的工作日/休息日（PeakAt 的判定顺序），所以那一次
+// Lookup 顺手把 DayStatus 也带了回来。这里照 DayInfo 那一套把它折成
+// expr.DayInfo 交出去（见 dayInfoOf），求值拿它填 Result.LocalTime 的两格——
+// 于是那两格与这次判定出自**同一次 Lookup**，不是同一天的第二行。
+// 适配器自己不做任何额外查询：多查一次既慢，又让「写进库的值与判档依据是
+// 同一个」从结构上的保证退化成「两次查询问的是同一天」这个推论。
+//
 // # 窗口的形状在这里再校验一次
 //
 // 规则的窗口在**保存规则**时就判过（见 internal/billing/expr 的
@@ -122,12 +139,12 @@ func (a *Adapter) DayInfo(region string, day time.Time) (expr.DayInfo, error) {
 //
 // Peak 为 unknown 只可能是日子未知：那一天已知时它必然落到 peak 或 off_peak
 // （见 PeakAt 的判定顺序），所以这条错误讲的还是「哪一天的日历没有数据」。
-func (a *Adapter) Peak(region string, instant time.Time, windows []expr.PeakWindow) (bool, error) {
+func (a *Adapter) Peak(region string, instant time.Time, windows []expr.PeakWindow) (expr.PeakVerdict, error) {
 	converted := make([]calendar.PeakWindow, 0, len(windows))
 	for _, w := range windows {
 		pw, err := calendar.NewPeakWindow(w.StartMinute, w.EndMinute)
 		if err != nil {
-			return false, err
+			return expr.PeakVerdict{}, err
 		}
 		converted = append(converted, pw)
 	}
@@ -135,17 +152,21 @@ func (a *Adapter) Peak(region string, instant time.Time, windows []expr.PeakWind
 	// 所以这里恒为 false——接口上那一个开关由规则表达，见 expr.Calendar 的 Peak。
 	schedule, err := calendar.NewPeakSchedule(false, converted...)
 	if err != nil {
-		return false, err
+		return expr.PeakVerdict{}, err
 	}
 
 	st, err := a.cal.PeakAt(a.ctx(), calendar.Region(region), instant, schedule)
 	if err != nil {
-		return false, err
+		return expr.PeakVerdict{}, err
 	}
 	if !st.Peak.Known() {
-		return false, unknownDayError(region, st.Day)
+		return expr.PeakVerdict{}, unknownDayError(region, st.Day)
 	}
-	return st.Peak == calendar.PeakKindPeak, nil
+	day, err := dayInfoOf(region, st.Day)
+	if err != nil {
+		return expr.PeakVerdict{}, err
+	}
+	return expr.PeakVerdict{IsPeak: st.Peak == calendar.PeakKindPeak, Day: day}, nil
 }
 
 // unknownDayError 把「这一天的日历数据还没有」讲成一句指向配置缺口的话。
