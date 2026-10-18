@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/catalog"
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/config"
 )
 
@@ -46,6 +47,7 @@ const modelUsage = `larkaxctl model 管理模型目录里的规范模型。
                          [--output-limit <tokens>]
                          [--reasoning[=false]] [--tools[=false]] [--vision[=false]]
                          [--audio[=false]] [--cache[=false]] [--batch[=false]]
+                         [--endpoints <端点路径,...>]
                          [--input-modalities <模态,...>] [--output-modalities <模态,...>]
                          [--knowledge-cutoff <YYYY-MM-DD>] [--release-date <YYYY-MM-DD>]
   larkaxctl model list
@@ -56,6 +58,7 @@ const modelUsage = `larkaxctl model 管理模型目录里的规范模型。
                          [--output-limit <tokens>]
                          [--reasoning[=false]] [--tools[=false]] [--vision[=false]]
                          [--audio[=false]] [--cache[=false]] [--batch[=false]]
+                         [--endpoints <端点路径,...>]
                          [--input-modalities <模态,...>] [--output-modalities <模态,...>]
                          [--knowledge-cutoff <YYYY-MM-DD>] [--release-date <YYYY-MM-DD>]
   larkaxctl model delete --model <规范名>
@@ -72,16 +75,24 @@ create 的 stdout 只有新模型的 ID，其余信息走 stderr。
 不支持会让用到那一项的请求选不到这个模型。
 
 **判断一条记录配没配过，看 list / get 的那一栏**：没配过的项在 list 里不列
-（六项都没配过时打 -），get 里逐项打出「未知 / 支持 / 不支持」。
+（六项都没配过时打 -），get 里逐项打出「未知 / 支持 / 不支持」。端点清单只在
+get 里打，list 那张表不列它。
+
+**--endpoints 收的是端点路径**，逗号分隔，取值只有 /v1/chat/completions、
+/v1/responses、/v1/messages、/v1/systemone 四种；写别的当场报错，并把
+这四种列出来。它与能力那六项是同一组声明，三态也同一套：不给 = 未知（这一项
+不参与选路判据）、给空串 = 明确声明一条都不支持、给路径 = 支持这几条。
+「未知」与「明确没有」在这里的结论相反——后者会让所有候选都落选。
 
 update **只改真的给了的那几项**，其余保持库里的值。空串与 0 是几种有含义的写法：
 --vendor '' 与 --context-limit 0 都是「把这一栏清空」（库里存 NULL），
 --knowledge-cutoff '' 与 --release-date '' 同理，--input-modalities '' 表示
 这个模型没有这类模态。--display 清不掉——那一栏非空，它正是给人看的那一栏。
 
-六个能力标志**成组**写入（写入路径对那六列是一次全量覆盖），所以给了其中任何
-一个，命令会先读出当前那一行，再把这次给出的盖上去：只给 --tools 不会把另外
-五个能力抹掉。要关掉一个能力写 --tools=false。
+六个能力标志与端点清单**成组**写入（写入路径对这一组是一次全量覆盖），所以给了
+其中任何一项，命令会先读出当前那一行，再把这次给出的盖上去：只给 --tools 不会把
+另外五个能力与端点清单抹掉，只给 --endpoints 也不会把六个能力抹掉。要关掉一个
+能力写 --tools=false，要把端点清成「一条都不支持」写 --endpoints ''。
 
 delete 只在**无人引用**时允许：还有别名或计价规则挂着这个规范名时它会被拒，
 并报出各有多少条。别名要先删（渠道的 models 白名单里还留着这个名字，删别名
@@ -189,6 +200,7 @@ func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
 	outputLimit := fs.Int("output-limit", 0, "输出上限（tokens），留空表示未知")
 	intAlias(fs, outputLimit, "out", sameAs("output-limit"))
 	capFlags := newCapabilityFlags(fs)
+	endpoints := fs.String("endpoints", "", endpointFlagUsage)
 	modalitiesIn := legacyStringFlag(fs, "input-modalities", "modalities-input", "", "输入模态，逗号分隔")
 	stringAlias(fs, modalitiesIn, "im", sameAs("input-modalities"))
 	modalitiesOut := legacyStringFlag(fs, "output-modalities", "modalities-output", "", "输出模态，逗号分隔")
@@ -220,8 +232,14 @@ func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
 
 	// 只把**给了的**开关写进请求。没给的那几项留在零值 nil 上，落库是 NULL
 	// = 未知——不是 false。「没配过」与「配了说不支持」的区分就从这一行开始，
-	// 判据是 fs.Visit 记下的清单（见 modelCapabilityFlag）。
-	markGivenCapabilityFlags(visitedFlags(fs), capFlags)
+	// 判据是 fs.Visit 记下的清单（见 modelCapabilityFlag）。端点清单与那六项
+	// 同一组、同一套三态，所以一起收（见 capabilityEdit）。
+	given := visitedFlags(fs)
+	markGivenCapabilityFlags(given, capFlags)
+	edit, err := newCapabilityEdit(given, capFlags, *endpoints)
+	if err != nil {
+		return catalog.CreateModelRequest{}, err
+	}
 
 	return catalog.CreateModelRequest{
 		CanonicalName:    *canonical,
@@ -231,7 +249,7 @@ func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
 		ContextLimit:     *contextLimit,
 		InputLimit:       *inputLimit,
 		OutputLimit:      *outputLimit,
-		Capabilities:     applyCapabilityFlags(catalog.Capabilities{}, capFlags),
+		Capabilities:     edit.apply(catalog.Capabilities{}),
 		ModalitiesInput:  splitOptionalList(*modalitiesIn),
 		ModalitiesOutput: splitOptionalList(*modalitiesOut),
 		KnowledgeCutoff:  cutoff,
@@ -339,19 +357,71 @@ func applyCapabilityFlags(base catalog.Capabilities, flags []modelCapabilityFlag
 	return base
 }
 
+// capabilityEdit 是这次给过的那一组声明：六个能力标志，外加端点清单。
+//
+// # 为什么它不直接进请求
+//
+// 这一组在写入路径上是**一次全量覆盖**（见 catalog.modelUpdateSets）：给出
+// 其中任何一项，整组都要一起交出去。update 光有这次给的那几项不够——它得先
+// 读出库里当前那一行再合并，否则「加一个能力」会静默地关掉另外五项与端点
+// 清单。而合并要连库，参数解析必须在连库之前完成（参数错要当场报出来），
+// 所以这一组由解析函数单独交出去。create 没有「当前那一行」，apply 的 base
+// 就是零值。
+type capabilityEdit struct {
+	flags []modelCapabilityFlag
+
+	// endpoints 只在 endpointsGiven 为真时有意义。
+	endpoints []channel.Endpoint
+	// endpointsGiven 分开「没给 --endpoints」与「--endpoints ''」：后者是
+	// 明确声明一条都不支持（空切片），前者是不改这一栏（库里原样留着）。
+	endpointsGiven bool
+}
+
+// newCapabilityEdit 按 fs.Visit 记下的清单，把这次给过的能力那一组收起来。
+//
+// 取值当场解析：写错的端点要在连库之前报出来，而报错里列全了那四种取值
+// （见 parseEndpointsFlag）。
+func newCapabilityEdit(given map[string]bool, flags []modelCapabilityFlag, endpointsRaw string) (capabilityEdit, error) {
+	edit := capabilityEdit{flags: flags, endpointsGiven: given["endpoints"]}
+	if !edit.endpointsGiven {
+		return edit, nil
+	}
+	parsed, err := parseEndpointsFlag("--endpoints", endpointsRaw)
+	if err != nil {
+		return capabilityEdit{}, err
+	}
+	edit.endpoints = parsed
+	return edit, nil
+}
+
+// given 报告这一组这次有没有被动过。update 用它判断要不要先读出当前那一行。
+func (e capabilityEdit) given() bool {
+	return anyCapabilityGiven(e.flags) || e.endpointsGiven
+}
+
+// apply 把这次给过的那几项盖到 base 上。base 是 create 的零值，或者 update
+// 时库里当前那一行。
+func (e capabilityEdit) apply(base catalog.Capabilities) catalog.Capabilities {
+	base = applyCapabilityFlags(base, e.flags)
+	if e.endpointsGiven {
+		base.Endpoints = e.endpoints
+	}
+	return base
+}
+
 // runModelUpdate 改一条规范模型。
 //
-// 它比别的 update 多一步：给过能力标志时先读出当前那一行（见
-// applyCapabilityFlags）。那一步与后面的写入不在一个事务里，所以两次
-// `model update` 并发时，能力那一栏是后写的那次说了算。这是刻意的取舍——
-// 另一个做法是把六个标志当成「一组必须给全」，那会让「加一个能力」变成
-// 每次都要把另外五个也抄一遍，而抄漏一个就是静默地关掉一个能力。
+// 它比别的 update 多一步：动过能力那一组（六个标志或端点清单）时，先读出
+// 当前那一行再合并（见 capabilityEdit）。那一步与后面的写入不在一个事务里，
+// 所以两次 `model update` 并发时，那一组是后写的那次说了算。这是刻意的取舍——
+// 另一个做法是把这一组当成「必须给全」，那会让「加一个能力」变成每次都要把
+// 另外五项与端点清单也抄一遍，而抄漏一个就是静默地关掉一个能力或一条端点。
 func runModelUpdate(args []string) error {
 	if err := jsonUnsupported("model update"); err != nil {
 		return err
 	}
 
-	req, capFlags, err := parseModelUpdate(args)
+	req, edit, err := parseModelUpdate(args)
 	if err != nil {
 		return usageErr(err)
 	}
@@ -368,12 +438,12 @@ func runModelUpdate(args []string) error {
 	}
 	defer func() { _ = db.Close() }()
 
-	if anyCapabilityGiven(capFlags) {
+	if edit.given() {
 		current, readErr := catalog.New(db).Model(ctx, req.CanonicalName)
 		if readErr != nil {
 			return readErr
 		}
-		merged := applyCapabilityFlags(current.Capabilities, capFlags)
+		merged := edit.apply(current.Capabilities)
 		req.Capabilities = &merged
 	}
 
@@ -386,8 +456,8 @@ func runModelUpdate(args []string) error {
 
 // parseModelUpdate 解析 update 的参数。
 //
-// 除了请求本身，它还把六个能力标志单独交出去：那六个要跟库里当前的值合并
-// （见 applyCapabilityFlags），而合并要连库，参数解析必须在连库之前完成。
+// 除了请求本身，它还把能力那一组单独交出去（见 capabilityEdit）：那几项要跟
+// 库里当前的值合并，而合并要连库，参数解析必须在连库之前完成。
 // 这几项各有别名，判「这次给没给」时要把别名一起查（见 flagGiven）。
 // 漏掉一种的表现是「`--ctx 0` 被当成没提过这一项」，也就是清空静默失效。
 var (
@@ -398,7 +468,7 @@ var (
 	modalitiesOutFlagNames = []string{"output-modalities", "modalities-output", "om"}
 )
 
-func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabilityFlag, error) {
+func parseModelUpdate(args []string) (catalog.UpdateModelRequest, capabilityEdit, error) {
 	fs := flag.NewFlagSet("model update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "", "要改的规范模型名（它本身不可改）")
@@ -419,26 +489,33 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabil
 	knowledgeCutoff := fs.String("knowledge-cutoff", "", "知识截止日期 YYYY-MM-DD，给空串表示清空")
 	releaseDate := fs.String("release-date", "", "发布日期 YYYY-MM-DD，给空串表示清空")
 	capFlags := newCapabilityFlags(fs)
+	endpoints := fs.String("endpoints", "", endpointFlagUsage)
 	if err := fs.Parse(args); err != nil {
-		return catalog.UpdateModelRequest{}, nil, err
+		return catalog.UpdateModelRequest{}, capabilityEdit{}, err
 	}
 	if fs.NArg() > 0 {
-		return catalog.UpdateModelRequest{}, nil, fmt.Errorf(
+		return catalog.UpdateModelRequest{}, capabilityEdit{}, fmt.Errorf(
 			"update 不接受位置参数，得到 %q：要改的模型用 --model 指定", fs.Arg(0))
 	}
 	if strings.TrimSpace(*canonical) == "" {
-		return catalog.UpdateModelRequest{}, nil, errors.New("缺少 --model（要改的规范模型名）")
+		return catalog.UpdateModelRequest{}, capabilityEdit{}, errors.New("缺少 --model（要改的规范模型名）")
 	}
 
 	// 只有**真的给了**的标志才进请求。--context-limit 0 与「没提这一项」是
 	// 两件事，而 flag 包的零值分不出它们，所以这里看 fs.Visit 记下的清单。
-	// 能力那六个同理：--tools=false 与「没提 --tools」也必须分得开。
+	// 能力与端点同理：--tools=false 与「没提 --tools」、--endpoints ''（明确
+	// 一条都不支持）与「没提 --endpoints」都必须分得开。
 	//
 	// 有别名的那几项要连别名一起查（见 flagGiven）：fs.Visit 记的是**实际
 	// 写出来的那个名字**，只查规范名的表现是 `--ctx 0` 被当成「没提这一项」，
 	// 于是清空静默失效——命令报了成功，库里那一栏没动。
 	given := visitedFlags(fs)
 	markGivenCapabilityFlags(given, capFlags)
+
+	edit, err := newCapabilityEdit(given, capFlags, *endpoints)
+	if err != nil {
+		return catalog.UpdateModelRequest{}, capabilityEdit{}, err
+	}
 
 	req := catalog.UpdateModelRequest{CanonicalName: *canonical}
 	changes := 0
@@ -479,7 +556,7 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabil
 	if given["knowledge-cutoff"] {
 		cutoff, err := parseClearableDateFlag("--knowledge-cutoff", *knowledgeCutoff)
 		if err != nil {
-			return catalog.UpdateModelRequest{}, nil, err
+			return catalog.UpdateModelRequest{}, capabilityEdit{}, err
 		}
 		req.KnowledgeCutoff = cutoff
 		changes++
@@ -487,22 +564,23 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabil
 	if given["release-date"] {
 		released, err := parseClearableDateFlag("--release-date", *releaseDate)
 		if err != nil {
-			return catalog.UpdateModelRequest{}, nil, err
+			return catalog.UpdateModelRequest{}, capabilityEdit{}, err
 		}
 		req.ReleaseDate = released
 		changes++
 	}
-	if anyCapabilityGiven(capFlags) {
+	if edit.given() {
 		changes++
 	}
 	if changes == 0 {
-		return catalog.UpdateModelRequest{}, nil, errors.New(
+		return catalog.UpdateModelRequest{}, capabilityEdit{}, errors.New(
 			"update 至少要改一项：给出 --display / --vendor / --family / " +
 				"--context-limit / --input-limit / --output-limit / 六个能力标志 / " +
-				"--input-modalities / --output-modalities / --knowledge-cutoff / --release-date 之一")
+				"--endpoints / --input-modalities / --output-modalities / " +
+				"--knowledge-cutoff / --release-date 之一")
 	}
 
-	return req, capFlags, nil
+	return req, edit, nil
 }
 
 // runModelDelete 删掉一条规范模型。
@@ -691,8 +769,13 @@ func modelEntry(m catalog.Model) map[string]any {
 //
 // reasoning_options 与 raw 不打：它们不参与任何判断，而 raw 可能是一大段
 // 嵌套 JSON。要它们的一方直接查库，而不是让每条 get 都拖着这一坨。
+//
+// endpoints 打在 capabilities 旁边而不是它里面：capabilities 那一档是六个
+// 三态开关的对象（见 capabilityEntry），而端点是一张清单，它的三态落在
+// null / `[]` / 非空数组上，与那六个布尔键不同一种形状。
 func modelDetailEntry(m catalog.Model) map[string]any {
 	entry := modelEntry(m)
+	entry["endpoints"] = nullableEndpoints(m.Capabilities.Endpoints)
 	entry["knowledge_cutoff"] = jsonDate(m.KnowledgeCutoff)
 	entry["release_date"] = jsonDate(m.ReleaseDate)
 	entry["canonical_model_id"] = nullableString(m.CanonicalModelID)
@@ -762,6 +845,7 @@ func printModelDetail(w io.Writer, m catalog.Model) {
 	row("输入上限", limitLabel(m.InputLimit))
 	row("输出上限", limitLabel(m.OutputLimit))
 	row("能力", capabilityDetail(m.Capabilities))
+	row("端点", endpointDetail(m.Capabilities.Endpoints))
 	row("输入模态", joinOrDash(m.ModalitiesInput))
 	row("输出模态", joinOrDash(m.ModalitiesOutput))
 	row("知识截止", dateLabel(m.KnowledgeCutoff))
@@ -825,6 +909,44 @@ func capabilityDetail(c catalog.Capabilities) string {
 	return strings.Join(parts, " ")
 }
 
+// endpointDetail 把端点那一栏打出来，用于明细。
+//
+// 三态都要看得见，理由与能力那六项相同：「没配过」不参与选路判据，而
+// 「明确一条都不支持」筛掉所有候选，两者结论相反。空清单不能打成 -：- 在
+// 这一栏里已经表示「没配过」了（见 capabilityState 的同一条理由）。
+//
+// 分隔符用逗号不留空格：值就是命令行上那串路径，照着打出来的这一行抄回去
+// 正是同一条命令。
+func endpointDetail(endpoints []channel.Endpoint) string {
+	switch {
+	case endpoints == nil:
+		return "未知"
+	case len(endpoints) == 0:
+		return "无（明确一条都不支持）"
+	default:
+		parts := make([]string, 0, len(endpoints))
+		for _, e := range endpoints {
+			parts = append(parts, string(e))
+		}
+		return strings.Join(parts, ",")
+	}
+}
+
+// nullableEndpoints 把端点那一栏打成 JSON 的三态。
+//
+// 不套 jsonList：它把 nil 折成 `[]`，而这一列上 nil（没配过）与空数组
+// （明确一条都不支持）的结论正好相反（见 catalog.Capabilities.Endpoints）。
+func nullableEndpoints(endpoints []channel.Endpoint) any {
+	if endpoints == nil {
+		return nil
+	}
+	out := make([]string, 0, len(endpoints))
+	for _, e := range endpoints {
+		out = append(out, string(e))
+	}
+	return out
+}
+
 // capabilityField 是一项能力在输出里的样子：名字与三态值。
 type capabilityField struct {
 	name     string
@@ -881,6 +1003,45 @@ func joinOrDash(values []string) string {
 		return "-"
 	}
 	return strings.Join(values, ",")
+}
+
+// endpointFlagUsage 是 --endpoints 的标志说明。
+//
+// 四种取值列在命令的用法文本里（见 modelUsage），不在这里再抄一遍：本包覆写了
+// FlagSet.Usage，这一句不会自己打印出来，它是给读代码的人看的，抄两份只会分岔。
+const endpointFlagUsage = "上游端点清单，逗号分隔；不给 = 未知，给空串 = 明确一条都不支持"
+
+// parseEndpointsFlag 解析 --endpoints 的值。
+//
+// # 三态
+//
+//	没给这个标志   调用方不写这一栏，库里的值原样留着
+//	--endpoints '' 空切片：明确声明一条都不支持
+//	一串路径       这几条
+//
+// 空串落空切片而不是 nil，与 --input-modalities 那两项同一条口径；区别在于
+// 这一列可空，所以「没配过」由**没给标志**表达，不由空串表达。
+//
+// # 每一项都过 channel.ParseEndpoint
+//
+// 取值就是适配器实际发的那几条路径，判据用 channel 包里那一个，不在这里另写
+// 一遍 switch：两侧各判各的时，从命令行写进去的值可能读不出来，而那要等到
+// 有人读那一行才发现。报错里会把这四条路径列全（见 channel.ParseEndpoint）。
+func parseEndpointsFlag(name, raw string) ([]channel.Endpoint, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return []channel.Endpoint{}, nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]channel.Endpoint, 0, len(parts))
+	for _, part := range parts {
+		endpoint, err := channel.ParseEndpoint(strings.TrimSpace(part))
+		if err != nil {
+			return nil, fmt.Errorf("%s 不是端点路径: %w", name, err)
+		}
+		out = append(out, endpoint)
+	}
+	return out, nil
 }
 
 func orDash(value string) string {
