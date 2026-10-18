@@ -1474,6 +1474,12 @@ scripts/check-mutation.sh              # 全部包
 scripts/check-mutation.sh money route  # 只跑指定的
 ```
 
+包参数**按后缀匹配脚本里那份包清单**（`scripts/check-mutation.sh` 的 `PKGS`），
+照清单里的名字写，别照目录树猜：清单里只有 `internal/billing`、没有它的子包，
+所以 `scripts/check-mutation.sh internal/billing/expr` 会**一条都不选中**，
+几秒钟就结束。认出这种情况的判据是那句「没有选中任何包」——看到它就说明
+**这次什么都没检查**，哪怕屏幕上还有一张汇总表的表头。
+
 **`LARKAX_DB_DSN` 是硬前提，不是可选参数**：没有它 `internal/ledger/store` 的
 集成测试整包被 `t.Skip`，那一包等于没测。脚本会直接拒绝运行，而不是跑出一批
 不可比的数字（见 [LESSONS.md](../LESSONS.md) 第 17 条）。
@@ -1534,6 +1540,8 @@ scripts/check-mutation.sh money route  # 只跑指定的
 
 **判据是超时条数，不是百分比。** 超时不为 0 就说明这一轮受了干扰，
 那几个数不与历史比较、也不抄进表里。
+（这句话管的是怎么**读数**；门禁另有一条判据——脚本里的 `MAX_TIMED_OUT` 是 10，
+超时超过 10 才判「这一轮结果不可信」并让这道门失败，两者各管一头。）
 
 ### 对存活的变异逐个判断
 
