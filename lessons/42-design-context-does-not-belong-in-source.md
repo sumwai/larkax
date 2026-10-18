@@ -40,17 +40,17 @@
 **能机器判的那一半要判，剩下的那一半只能靠评审读。**
 
 - 可判：**面向使用者的文本**（帮助、文档、错误与提示）里不该有设计理由。
-  这一半有硬边界——读者是使用者，谈「取舍」一定放错了地方。
-  `cmd/larkaxctl/usage_test.go` 的 `TestRootUsageHasNoDesignRationale` 就是这一道门
-  （词表命中即红，红证是把那句「`-o` 是行业惯例（kubectl、gh）」搬回根帮助）。
+  这一半有硬边界——读者是使用者，谈「取舍」一定放错了地方，所以它能被一个词表
+  挡住：命中即红。红证是把那句「`-o` 是行业惯例（kubectl、gh）」搬回根帮助——
+  搬回去，它就红。
 - **剩下的那一半脚本覆盖不了，只能由 review 逐条读。** 词表判据在全仓没有边界：
   实测 `决策` 255 处、`会话` 79 处、`本次` 71 处、`取舍` 58 处，绝大多数是技术词与
   领域词（`systemone` 的 `Decider`、账本的「本轮对账」与「本轮跳过的行」、插件的
   「会话」）；词表在这里假阳性泛滥，而**一份没人认真看的报告等于没有门**——
   与 `docs/development.md` 的「golangci-lint」一节要求 `golangci-lint` 只开有价值
   检查器是同一个道理。所以这一条**是 review 的活**
-  （见 [`.claude/skills/larkax-workflow/SKILL.md`](../.claude/skills/larkax-workflow/SKILL.md)
-  的「评审看什么」表里那一行），
+  （见 [`.claude/agents/reviewer.md`](../.claude/agents/reviewer.md) 的判据表里
+  「设计上下文」那一行），
   不写成扫描器。
 
 **预防**
