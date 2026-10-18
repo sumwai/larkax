@@ -26,8 +26,11 @@ const apiKeyShortUsage = `larkaxctl apikey 管理 API Key。
 用法：
   larkaxctl apikey create --user <ID 或用户名> [--name <备注>]
                           [--expires-at <RFC3339>] [--rpm <整数>] [--quota <金额>]
-  larkaxctl apikey update --id <ID> [--rpm <整数> | --clear-rpm]
+  larkaxctl apikey update --id <ID> [--status <active|disabled|revoked>]
+                                  [--name <备注>] [--rpm <整数> | --clear-rpm]
                                   [--quota <金额> | --clear-quota]
+                                  [--expires-at <RFC3339> | --clear-expires-at]
+  larkaxctl apikey get --id <ID>
   larkaxctl apikey list [--user <ID 或用户名>]
 
 create 的明文只打印这一次（库里存的是哈希），它单独打在 stdout 上。
@@ -43,8 +46,11 @@ const apiKeyUsage = `larkaxctl apikey 管理 API Key。
 用法：
   larkaxctl apikey create --user <ID 或用户名> [--name <备注>] [--expires-at <RFC3339>]
                           [--rpm <整数>] [--quota <金额>]
-  larkaxctl apikey update --id <ID> [--rpm <整数> | --clear-rpm]
+  larkaxctl apikey update --id <ID> [--status <active|disabled|revoked>]
+                                  [--name <备注>] [--rpm <整数> | --clear-rpm]
                                   [--quota <金额> | --clear-quota]
+                                  [--expires-at <RFC3339> | --clear-expires-at]
+  larkaxctl apikey get --id <ID>
   larkaxctl apikey list [--user <ID 或用户名>]
 
 create 生成一把新 key，只把哈希入库。
@@ -57,6 +63,10 @@ create 生成一把新 key，只把哈希入库。
   larkaxctl apikey create --user alice > key.txt
 
 保存下来的文件里只有明文，不会混进前缀、id 与提示语。
+
+get 打一把 key 的现状：状态、备注、两列额度、过期与最近使用时刻。它读的是
+list 那一行的同一份数据，只是收成一把。四处没设过的值打成「继承」「不过期」
+「从未」（每分钟与额度都打「继承」），与 list 一致。
 
 # 额度
 
@@ -73,11 +83,29 @@ create 生成一把新 key，只把哈希入库。
 负数一律拒绝：限流那一侧把负数也当成「一个都不放行」，而写下 -60 的人
 几乎总是想写 60。
 
-update 只改额度，不改备注与过期时间：那两样目前没有入口，只能直接改库。
+update 一次可以改多项，只改命令行上**真的给出**的那几项：没给的列连写都
+不写一次。一项都没给时报参数错——一条什么都没改的命令与一条改成功的命令
+在屏幕上一模一样。
+
+# 状态与有效期
+
+  --status           取 active、disabled、revoked 之一。disabled 与 revoked
+                     在鉴权那一侧都会被拒绝，区别只记在原因上（观测里分别
+                     计数）。一把停用的 key 可以用 --status active 恢复。
+
+  --expires-at       一个 RFC3339 时刻，到点之后这把 key 自动不可用。
+  --clear-expires-at 写回「不过期」。
+
+过去的时刻会被拒绝：要立刻停掉一把 key 就改 --status，那样它在鉴权侧记下的
+原因是「被停用」，而设一个已经过去的过期时刻记下的是「已过期」——两种情形
+要分的是下一步该找谁。
+
+--name 给空串表示「没有备注」，与 create 不给 --name 是同一个意思：列是
+NOT NULL，空串就是它的「没有」。
 
 # 权限
 
-这三条命令都不需要 LARKAX_MASTER_KEYS：它们不碰渠道凭证，也就不碰
+这四个子命令都不需要 LARKAX_MASTER_KEYS：它们不碰渠道凭证，也就不碰
 信封加密。主密钥是 rotate 与 channels 那一组的事。
 
 # 别名
@@ -91,7 +119,7 @@ update 只改额度，不改备注与过期时间：那两样目前没有入口�
   --clear-quota-limit      同 --clear-quota
 
 两个额度**不开简写**：它们是限额，写短了容易看错也容易按错，要的是完整写出来。
--u 是这三个子命令上唯一的简写。
+apikey 下唯一的简写是 -u（--user 的别名，create 与 list 认它）。
 
 更细的约定见 docs/cli-reference.md 的「apikey」一节。
 `
@@ -122,6 +150,8 @@ func runAPIKey(args []string) error {
 		return runAPIKeyCreate(rest)
 	case "update":
 		return runAPIKeyUpdate(rest)
+	case "get":
+		return runAPIKeyGet(rest)
 	case "list":
 		return runAPIKeyList(rest)
 	default:
@@ -159,18 +189,14 @@ func runAPIKeyCreate(args []string) error {
 
 	var expires *time.Time
 	if *expiresAt != "" {
-		t, err := time.Parse(time.RFC3339, *expiresAt)
+		// 已过去的时刻直接拒绝，而不是建一把立刻不可用的 key：那种情况几乎
+		// 只可能是写错了年份（2025 写成 2024），而它的表现是「刚建好的 key
+		// 就说无效」——最费时的一类排查。auth.Create 本身不拦：库层允许建
+		// 一把已过期的 key（造测试数据、补历史数据都要用到），拦在交互式
+		// 命令这一层才合适。
+		t, err := parseFutureExpiresAt(*expiresAt, "这样的 key 建出来就是不可用的")
 		if err != nil {
-			return usageErr(fmt.Errorf("--expires-at 不是 RFC3339 时间（例如 2026-12-31T00:00:00Z）: %w", err))
-		}
-		// 已过去的时刻直接拒绝，而不是建一把立刻不可用的 key。
-		// 那种情况几乎只可能是写错了年份（2025 写成 2024），
-		// 而它的表现是「刚建好的 key 就说无效」——最费时的一类排查。
-		// auth.Create 本身不拦：库层允许建一把已过期的 key（造测试数据、
-		// 补历史数据都要用到），拦在交互式命令这一层才合适。
-		if !t.After(time.Now()) {
-			return usageErr(fmt.Errorf("--expires-at %s 已经过去了：这样的 key 建出来就是不可用的",
-				t.Format(time.RFC3339)))
+			return usageErr(err)
 		}
 		expires = &t
 	}
@@ -214,6 +240,10 @@ func runAPIKeyUpdate(args []string) error {
 	fs := flag.NewFlagSet("apikey update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
 	id := fs.Int64("id", 0, "要改的 API Key 的 id（apikey list 里能看到）")
+	status := fs.String("status", "", "")
+	name := fs.String("name", "", "")
+	expiresAt := fs.String("expires-at", "", "")
+	clearExpiresAt := fs.Bool("clear-expires-at", false, "")
 	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "")
 	clearRPM := fs.Bool("clear-rpm", false, "")
 	boolAlias(fs, clearRPM, "clear-rate-limit-rpm")
@@ -232,21 +262,64 @@ func runAPIKeyUpdate(args []string) error {
 		return usageErr(errors.New("缺少 --id：要改哪一把 key"))
 	}
 
-	params, err := updateLimits(seen,
+	params, err := updateParams(seen,
 		limitFlag{value: *rpm, clear: *clearRPM},
-		limitFlag{value: *quota, clear: *clearQuota})
+		limitFlag{value: *quota, clear: *clearQuota},
+		metaFlags{status: *status, name: *name, expiresAt: *expiresAt, clearExpires: *clearExpiresAt})
 	if err != nil {
-		// 这几条错误（负数、小数位过多、两个旗标打架）都在信息里点了名，
-		// 已经够看懂，不再附带整段用法——与 create / user 一样，用法只在
-		// 「还没开始用」时打。
+		// 这几条错误（负数、小数位过多、两个旗标打架、状态取值不认识、没有要改
+		// 的东西）都在信息里点了名，已经够看懂，不再附带整段用法——与 create /
+		// user 一样，用法只在「还没开始用」时打。
 		return usageErr(err)
 	}
 
 	return withDB(apiKeyTimeout, func(ctx context.Context, db *sql.DB) error {
-		if err := auth.New(db).UpdateLimits(ctx, *id, params); err != nil {
+		store := auth.New(db)
+
+		// 先读一次，为的是回显里那个「从什么」。它不是这次写的一部分：写由
+		// 下面那一条语句独立完成，认的是 id 与显式给出的字段。两次读之间若有
+		// 别人插进来改同一把 key，回显的**原值**会旧一格；新值取自写语句本身，
+		// 不会。为了这一句回显去开一个事务不值得，而这条路径上没有并发写它的人。
+		before, err := store.GetKey(ctx, *id)
+		if err != nil {
 			return err
 		}
-		printUpdatedLimits(humanStderr(), *id, params)
+
+		after, err := store.UpdateKey(ctx, *id, params)
+		if err != nil {
+			return err
+		}
+
+		printUpdatedKey(humanStderr(), before, after, params)
+		return nil
+	})
+}
+
+func runAPIKeyGet(args []string) error {
+	fs := flag.NewFlagSet("apikey get", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
+	id := fs.Int64("id", 0, "要看的 API Key 的 id（apikey list 里能看到）")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("get 不接受位置参数，得到 %q：要看哪一把 key 用 --id 指定", fs.Arg(0)))
+	}
+	if *id <= 0 {
+		return usageErr(errors.New("缺少 --id：要看哪一把 key"))
+	}
+
+	return withDB(apiKeyTimeout, func(ctx context.Context, db *sql.DB) error {
+		key, err := auth.New(db).GetKey(ctx, *id)
+		if err != nil {
+			return err
+		}
+		// 与 list 同一条约定：JSON 是另一条渲染路径，不是把上面那张表转成 JSON
+		// （见 format.go 开头）。
+		if jsonOutput() {
+			return emitJSON(os.Stdout, apiKeyGetDoc(key), nil)
+		}
+		printKeyDetail(humanStdout(), key)
 		return nil
 	})
 }
@@ -294,7 +367,7 @@ func runAPIKeyList(args []string) error {
 
 // limitFlag 是某一项额度在命令行上给的那一对旗标：一个设值、一个清空。
 //
-// 收成一个结构体而不是四个平铺的参数：updateLimits 要收两组这样的东西，
+// 收成一个结构体而不是四个平铺的参数：updateParams 要收两组这样的东西，
 // 平铺开就是 rpm 字符串、rpm 布尔、quota 字符串、quota 布尔四个相邻的
 // 位置参数，而其中两个是字符串、两个是布尔——调用点写反了顺序照样能编过。
 // 这不是假设：写下这段注释的时候，用例里就刚写反过一次。
@@ -303,7 +376,19 @@ type limitFlag struct {
 	clear bool
 }
 
-// updateLimits 把 update 的四个旗标读成一次修改意图。
+// metaFlags 是 update 上「状态 / 备注 / 过期」三项在命令行上给的值。
+//
+// 同样收成结构体：updateParams 里额度那两项已经是两个同形状的位置参数，
+// 再平铺四个（其中还有一个布尔）的话，把 name 与 status 写反只是又一次
+// 「编得过、跑出来是另一件事」。
+type metaFlags struct {
+	status       string
+	name         string
+	expiresAt    string
+	clearExpires bool
+}
+
+// updateParams 把 update 的旗标读成一次修改意图。
 //
 // seen 是「命令行上真的出现过哪些旗标」（见 providedFlags）。每对旗标有三种
 // 状态——不改 / 设值 / 写回 NULL——而判据要**同时**看 seen 与 --clear-* 的值：
@@ -313,24 +398,25 @@ type limitFlag struct {
 //   - 只看 seen：`--clear-rate-limit-rpm=false` 会被当成「要清空」，
 //     而它其实是「不要清空」，与不给它是同一件事
 //
-// 抽成一个不碰数据库的函数，是因为这三态正是最容易写错、也最该被单测钉住的
+// 抽成一个不碰数据库的函数，是因为这几态正是最容易写错、也最该被单测钉住的
 // 地方：把「清空」实现成「写成 0」，表现是每一次「恢复默认」都变成一次静默的
 // 封禁，而它不报任何错。
-// 两列额度各有几种写法，判「这次到底给没给」时要全查（见 flagGiven）。
-//
-// 漏掉一种的表现是「`--rpm 60 --clear-rpm` 不报冲突」：两个写着相反意思的旗标
-// 一起生效，后一个安静地赢。所以名字组与注册那一段一起看。
 var (
+	// rpmFlagNames / quotaFlagNames 是这两项额度在命令行上的全部写法。
+	//
+	// 判「这次到底给没给」时要把每一种写法都查（见 flagGiven）。漏掉一种的表现
+	// 是「--rpm 60 --clear-rpm 不报冲突」：两个写着相反意思的旗标一起生效，
+	// 后一个安静地赢，所以名字组与注册那一段要一起看。
 	rpmFlagNames   = []string{"rpm", "rate-limit-rpm"}
 	quotaFlagNames = []string{"quota", "quota-limit"}
 )
 
-func updateLimits(seen map[string]bool, rpm, quota limitFlag) (auth.LimitParams, error) {
-	var params auth.LimitParams
+func updateParams(seen map[string]bool, rpm, quota limitFlag, meta metaFlags) (auth.KeyParams, error) {
+	var params auth.KeyParams
 
 	switch rpmGiven := flagGiven(seen, rpmFlagNames...); {
 	case rpm.clear && rpmGiven:
-		return auth.LimitParams{}, errors.New("--rpm 与 --clear-rpm 不能同时给：" +
+		return auth.KeyParams{}, errors.New("--rpm 与 --clear-rpm 不能同时给：" +
 			"一个是设值，一个是写回 NULL")
 	case rpm.clear:
 		// RateLimitRPM 留 nil：SetRateLimit 为真而指针为 nil 就是「写回 NULL」。
@@ -338,33 +424,99 @@ func updateLimits(seen map[string]bool, rpm, quota limitFlag) (auth.LimitParams,
 	case rpmGiven:
 		parsed, err := parseRateLimitRPM(rpm.value)
 		if err != nil {
-			return auth.LimitParams{}, err
+			return auth.KeyParams{}, err
 		}
 		params.SetRateLimit, params.RateLimitRPM = true, parsed
 	}
 
 	switch quotaGiven := flagGiven(seen, quotaFlagNames...); {
 	case quota.clear && quotaGiven:
-		return auth.LimitParams{}, errors.New("--quota 与 --clear-quota 不能同时给：" +
+		return auth.KeyParams{}, errors.New("--quota 与 --clear-quota 不能同时给：" +
 			"一个是设值，一个是写回 NULL")
 	case quota.clear:
 		params.SetQuota = true
 	case quotaGiven:
 		parsed, err := parseQuotaLimit(quota.value)
 		if err != nil {
-			return auth.LimitParams{}, err
+			return auth.KeyParams{}, err
 		}
 		params.SetQuota, params.QuotaLimit = true, parsed
 	}
 
+	switch expiresGiven := flagGiven(seen, "expires-at"); {
+	case meta.clearExpires && expiresGiven:
+		return auth.KeyParams{}, errors.New("--expires-at 与 --clear-expires-at 不能同时给：" +
+			"一个是设值，一个是写回「不过期」")
+	case meta.clearExpires:
+		// ExpiresAt 留 nil：SetExpiresAt 为真而指针为 nil 就是「写回 NULL」。
+		params.SetExpiresAt = true
+	case expiresGiven:
+		parsed, err := parseFutureExpiresAt(meta.expiresAt, "改完就不可用了")
+		if err != nil {
+			return auth.KeyParams{}, err
+		}
+		params.SetExpiresAt, params.ExpiresAt = true, &parsed
+	}
+
+	if flagGiven(seen, "status") {
+		status, err := validateKeyStatus(meta.status)
+		if err != nil {
+			return auth.KeyParams{}, err
+		}
+		params.SetStatus, params.Status = true, status
+	}
+
+	if flagGiven(seen, "name") {
+		// 空串照收：它表示「没有备注」，与 create 不给 --name 是同一件事。
+		// 把它当成「没给」会让清空备注变成一条改不动任何东西的命令。
+		params.SetName, params.Name = true, meta.name
+	}
+
 	// 一条什么都没要求的 update 是「看起来做了、其实没做」的命令，而它的
 	// 表现与成功一模一样。零值在这里的意思是「不改」，所以这个检查不能省。
-	if !params.SetRateLimit && !params.SetQuota {
-		return auth.LimitParams{}, errors.New("没有要改的东西：--rpm、" +
-			"--clear-rpm、--quota、--clear-quota 至少要给一个")
+	if !params.SetRateLimit && !params.SetQuota && !params.SetStatus &&
+		!params.SetName && !params.SetExpiresAt {
+		return auth.KeyParams{}, errors.New("没有要改的东西：--status、--name、" +
+			"--expires-at、--rpm、--quota 至少要给一个（要清空的给对应的 --clear-*）")
 	}
 
 	return params, nil
+}
+
+// validateKeyStatus 检查 --status 的取值，返回归一后的（去掉首尾空白的）那个。
+//
+// 取值来自 auth.KeyStatuses：库里那条 CHECK 约束、鉴权那一侧的判定与命令行
+// 收不收这个值，说的是同一件事。这里自己抄一份的话，改了一处不会报错——表现
+// 是命令行收下一个鉴权侧不认的状态，而它要等到有人拿这把 key 打请求才露出来。
+func validateKeyStatus(value string) (string, error) {
+	allowed := auth.KeyStatuses()
+	status := strings.TrimSpace(value)
+	for _, ok := range allowed {
+		if status == ok {
+			return status, nil
+		}
+	}
+	return "", fmt.Errorf("--status 取 %s 之一，得到 %q",
+		strings.Join(allowed, "、"), value)
+}
+
+// parseFutureExpiresAt 解析 --expires-at：RFC3339，且必须在将来。
+//
+// consequence 是「给了一个过去的时刻会怎样」那半句，由调用方补：create 上是
+// 「建出来就不可用」，update 上是「改完就不可用」。判据（认 RFC3339、必须在
+// 将来）只有这一份——两处各写一遍时，放宽的那一处不会有任何东西报出来，而它
+// 表现为「刚建好的 key 就说无效」这类最费时的排查。
+func parseFutureExpiresAt(plain, consequence string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339, plain)
+	if err != nil {
+		return time.Time{}, fmt.Errorf(
+			"--expires-at 不是 RFC3339 时间（例如 2026-12-31T00:00:00Z）: %w", err)
+	}
+	if !t.After(time.Now()) {
+		return time.Time{}, fmt.Errorf("--expires-at %s 已经过去了：%s",
+			t.Format(time.RFC3339), consequence)
+	}
+	return t, nil
 }
 
 // keyLimits 是一次解析出来的两列额度，nil 表示 NULL。
@@ -493,20 +645,80 @@ func printCreatedKey(stdout, stderr io.Writer, owner auth.User, c auth.Created,
 	_, _ = fmt.Fprintln(stdout, c.Plaintext)
 }
 
-// printUpdatedLimits 回显这次改了哪两项。
+// printUpdatedKey 回显这次改了哪几项、各从什么变成什么。
 //
 // 回显是必要的：update 的参数里「不改」与「清空」在命令行长得很像
 // （一个是不给旗标，一个是给 --clear-*），把结果打出来才能让人当场
 // 确认自己做的正是想做的那一件事。
-func printUpdatedLimits(w io.Writer, id int64, p auth.LimitParams) {
+//
+// 打「从什么变成什么」而不是一句「已更新」，是因为要确认的是**那几项的值**：
+// 一句「已更新」在把 --name 敲成 --status 时照样是它。列出的是**命令行上
+// 给出**的那几项，不是「两次读出来不一样」的那几项——后者在给出一个与库里
+// 相同的值时什么都不打，读的人分不清「没生效」与「本来就是它」。
+//
+// 走 stderr：「写成功之后只回一句确认」的那一档统一在这里，stdout 上只留能被
+// 脚本直接接走的值（见 streams_test.go 的 TestWriteEchoesAppearOnlyOnStderr）。
+func printUpdatedKey(w io.Writer, before, after auth.Key, p auth.KeyParams) {
 	var parts []string
+	if p.SetStatus {
+		parts = append(parts, fmt.Sprintf("状态 从 %s 改为 %s", before.Status, after.Status))
+	}
+	if p.SetName {
+		parts = append(parts, fmt.Sprintf("备注 从 %s 改为 %s",
+			orDash(before.Name), orDash(after.Name)))
+	}
 	if p.SetRateLimit {
-		parts = append(parts, "每分钟="+formatRPM(p.RateLimitRPM))
+		parts = append(parts, fmt.Sprintf("每分钟 从 %s 改为 %s",
+			formatRPM(before.RateLimitRPM), formatRPM(after.RateLimitRPM)))
 	}
 	if p.SetQuota {
-		parts = append(parts, "额度="+formatQuota(p.QuotaLimit))
+		parts = append(parts, fmt.Sprintf("额度 从 %s 改为 %s",
+			formatQuota(before.QuotaLimit), formatQuota(after.QuotaLimit)))
 	}
-	_, _ = fmt.Fprintf(w, "已改 API Key id=%d %s\n", id, strings.Join(parts, " "))
+	if p.SetExpiresAt {
+		parts = append(parts, fmt.Sprintf("过期 从 %s 改为 %s",
+			formatTime(before.ExpiresAt, "不过期"), formatTime(after.ExpiresAt, "不过期")))
+	}
+	_, _ = fmt.Fprintf(w, "已改 API Key id=%d：%s\n", after.ID, strings.Join(parts, "；"))
+}
+
+// printKeyDetail 打一把 key 的现状。
+//
+// 竖排的「字段 / 值」两列，与 printModelDetail 同一种形状：一把 key 的字段
+// 比 list 那十栏更值得铺开（备注可能很长，权限说明也要位置），而横排的一行
+// 在窄终端里会自己折行，折出来的行与下一个字段分不开。
+//
+// 三个时刻打完整的 RFC3339（不截到分钟）：list 那一栏回答的是「哪一把最近
+// 用过」，这里是「这一把到底什么时候建的、什么时候到期」，秒是它要回答的
+// 问题的一部分。
+func printKeyDetail(w io.Writer, k auth.Key) {
+	tw := newTableWriter(w)
+	p := newPalette(w)
+	row := func(label, value string) {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+	}
+	row("ID", strconv.FormatInt(k.ID, 10))
+	row("KEY 前缀", k.Prefix)
+	row("所属用户", k.Username)
+	row("备注", orDash(k.Name))
+	row("状态", k.Status)
+	row("每分钟", formatRPM(k.RateLimitRPM))
+	row("额度", formatQuota(k.QuotaLimit))
+	row("创建", formatTimeValue(k.CreatedAt))
+	row("过期", formatTime(k.ExpiresAt, "不过期"))
+	row("最近使用", formatTime(k.LastUsedAt, "从未"))
+	_ = tw.Flush()
+}
+
+// apiKeyGetDoc 组装 apikey get 的机器可读输出。
+//
+// 条目形状**逐字段**借用 list 的 apiKeyEntry：同一份数据的两条读路径给出两套
+// 字段名时，对读它的脚本来说那就是两件事。这里是 list 收成一条，不是另一种
+// 详情。
+func apiKeyGetDoc(k auth.Key) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["key"] = apiKeyEntry(k)
+	return doc
 }
 
 // printKeyList 打印 key 清单。

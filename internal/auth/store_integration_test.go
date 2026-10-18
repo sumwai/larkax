@@ -665,7 +665,7 @@ func TestAuthenticateReadsQuotaLimit(t *testing.T) {
 
 // setQuotaLimit 把一把 key 的额度上限写成指定值。传 nil 写回 NULL。
 //
-// 直接 UPDATE 而不走 auth.UpdateLimits：这一条用例测的是**读**那一侧，
+// 直接 UPDATE 而不走 auth.UpdateKey：这一条用例测的是**读**那一侧，
 // 写那一侧有自己的用例（limits_integration_test.go）。从这里绕过去，读的
 // 口径变了这条会失败，而写的口径变了那条会失败——两条各自指向一处。
 func setQuotaLimit(ctx context.Context, t *testing.T, db *sql.DB, keyID int64, limit *string) {

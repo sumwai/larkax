@@ -187,10 +187,18 @@ larkaxctl apikey update --id 42 --rpm 120
 # 取消其中一项（写回 NULL）
 larkaxctl apikey update --id 42 --clear-quota
 larkaxctl apikey update --id 42 --clear-rpm
+
+# 停用 / 吊销这一把 key（恢复用 --status active）
+larkaxctl apikey update --id 42 --status disabled
+larkaxctl apikey update --id 42 --status revoked
 ```
 
 `--quota` 最多 8 位小数。负数一律拒绝：写下 `-60` 的人几乎总是想写
 `60`，让他当场改掉比让它变成一个静默的封禁好。
+
+同一条 `update` 也改备注与过期时间（`--name`、`--expires-at` /
+`--clear-expires-at`）；`apikey get --id <ID>` 打一把 key 的现状，
+`apikey list` 列全部。三个子命令都不需要主密钥。
 
 改名之前的写法（`--rate-limit-rpm`、`--quota-limit`、`--clear-rate-limit-rpm`、
 `--clear-quota-limit`）仍然可用，完整清单在 `larkaxctl apikey --help` 末尾的

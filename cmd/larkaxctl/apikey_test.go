@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"maps"
 	"slices"
 	"sort"
 	"strconv"
@@ -68,24 +70,24 @@ func TestAPIKeyUnknownSubcommand(t *testing.T) {
 	}
 }
 
-// TestUpdateLimitsThreeStates 钉住 update 的三态。
+// TestUpdateParamsThreeStates 钉住额度那两项的三态。
 //
 // 这三态里最不能弄错的是**清空与设成 0**：前者是不限，后者是一个都不放行。
 // 把清空实现成「写成 0」，表现是每一次「恢复默认」都变成一次静默的封禁，
 // 而它不报任何错——所以这里逐个断言 Set* 与指针的组合，而不只是「没报错」。
-func TestUpdateLimitsThreeStates(t *testing.T) {
+func TestUpdateParamsThreeStates(t *testing.T) {
 	rpmFlag := map[string]bool{"rate-limit-rpm": true}
 	quotaFlag := map[string]bool{"quota-limit": true}
 
 	t.Run("不给旗标就是不改", func(t *testing.T) {
-		_, err := updateLimits(map[string]bool{}, limitFlag{}, limitFlag{})
+		_, err := updateParams(map[string]bool{}, limitFlag{}, limitFlag{}, metaFlags{})
 		if err == nil || !strings.Contains(err.Error(), "没有要改的东西") {
 			t.Fatalf("期望「没有要改的东西」，得到 %v", err)
 		}
 	})
 
 	t.Run("清空 rpm 是 Set 为真且指针为 nil", func(t *testing.T) {
-		params, err := updateLimits(map[string]bool{}, limitFlag{clear: true}, limitFlag{})
+		params, err := updateParams(map[string]bool{}, limitFlag{clear: true}, limitFlag{}, metaFlags{})
 		if err != nil {
 			t.Fatalf("出错: %v", err)
 		}
@@ -99,7 +101,7 @@ func TestUpdateLimitsThreeStates(t *testing.T) {
 	})
 
 	t.Run("rpm 给 0 是 Set 为真且指针指向 0", func(t *testing.T) {
-		params, err := updateLimits(rpmFlag, limitFlag{value: "0"}, limitFlag{})
+		params, err := updateParams(rpmFlag, limitFlag{value: "0"}, limitFlag{}, metaFlags{})
 		if err != nil {
 			t.Fatalf("出错: %v", err)
 		}
@@ -110,7 +112,7 @@ func TestUpdateLimitsThreeStates(t *testing.T) {
 	})
 
 	t.Run("rpm 给 60", func(t *testing.T) {
-		params, err := updateLimits(rpmFlag, limitFlag{value: "60"}, limitFlag{})
+		params, err := updateParams(rpmFlag, limitFlag{value: "60"}, limitFlag{}, metaFlags{})
 		if err != nil {
 			t.Fatalf("出错: %v", err)
 		}
@@ -120,7 +122,7 @@ func TestUpdateLimitsThreeStates(t *testing.T) {
 	})
 
 	t.Run("清空 quota 是 Set 为真且指针为 nil", func(t *testing.T) {
-		params, err := updateLimits(map[string]bool{}, limitFlag{}, limitFlag{clear: true})
+		params, err := updateParams(map[string]bool{}, limitFlag{}, limitFlag{clear: true}, metaFlags{})
 		if err != nil {
 			t.Fatalf("出错: %v", err)
 		}
@@ -134,7 +136,7 @@ func TestUpdateLimitsThreeStates(t *testing.T) {
 	})
 
 	t.Run("quota 给 0 是 Set 为真且指针指向 0", func(t *testing.T) {
-		params, err := updateLimits(quotaFlag, limitFlag{}, limitFlag{value: "0"})
+		params, err := updateParams(quotaFlag, limitFlag{}, limitFlag{value: "0"}, metaFlags{})
 		if err != nil {
 			t.Fatalf("出错: %v", err)
 		}
@@ -145,7 +147,7 @@ func TestUpdateLimitsThreeStates(t *testing.T) {
 	})
 
 	t.Run("quota 给具体金额", func(t *testing.T) {
-		params, err := updateLimits(quotaFlag, limitFlag{}, limitFlag{value: "12.34"})
+		params, err := updateParams(quotaFlag, limitFlag{}, limitFlag{value: "12.34"}, metaFlags{})
 		if err != nil {
 			t.Fatalf("出错: %v", err)
 		}
@@ -156,7 +158,7 @@ func TestUpdateLimitsThreeStates(t *testing.T) {
 
 	t.Run("两项一起改", func(t *testing.T) {
 		seen := map[string]bool{"rate-limit-rpm": true, "quota-limit": true}
-		params, err := updateLimits(seen, limitFlag{value: "60"}, limitFlag{value: "5"})
+		params, err := updateParams(seen, limitFlag{value: "60"}, limitFlag{value: "5"}, metaFlags{})
 		if err != nil {
 			t.Fatalf("出错: %v", err)
 		}
@@ -168,14 +170,94 @@ func TestUpdateLimitsThreeStates(t *testing.T) {
 	// --clear-rate-limit-rpm=false 是「不要清空」，与不给它是同一件事，
 	// 而与给它（true）是两件事。只看旗标出现过没有就会把它读反。
 	t.Run("clear 旗标显式给 false 等于没给", func(t *testing.T) {
-		_, err := updateLimits(map[string]bool{}, limitFlag{}, limitFlag{})
+		_, err := updateParams(map[string]bool{}, limitFlag{}, limitFlag{}, metaFlags{})
 		if err == nil {
 			t.Fatal("clear=false 不该被当成一次修改")
 		}
 	})
+
+	// ── 状态 / 备注 / 过期那三项 ──
+
+	t.Run("status 取合法值", func(t *testing.T) {
+		params, err := updateParams(map[string]bool{"status": true}, limitFlag{}, limitFlag{},
+			metaFlags{status: " disabled "})
+		if err != nil {
+			t.Fatalf("出错: %v", err)
+		}
+		if !params.SetStatus || params.Status != "disabled" {
+			t.Fatalf("得到 SetStatus=%v Status=%q，期望 true 与 disabled（首尾空白去掉）",
+				params.SetStatus, params.Status)
+		}
+	})
+
+	t.Run("status 取不认识的值", func(t *testing.T) {
+		_, err := updateParams(map[string]bool{"status": true}, limitFlag{}, limitFlag{},
+			metaFlags{status: "suspended"})
+		if err == nil {
+			t.Fatal("期望报错")
+		}
+		// 三个合法取值都要列出来：只报「不认识」的话，读的人还得去翻文档。
+		for _, want := range []string{"active", "disabled", "revoked"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("错误信息 %q 里没有合法取值 %q", err.Error(), want)
+			}
+		}
+	})
+
+	t.Run("name 给空串是清空备注，不是没给", func(t *testing.T) {
+		params, err := updateParams(map[string]bool{"name": true}, limitFlag{}, limitFlag{},
+			metaFlags{name: ""})
+		if err != nil {
+			t.Fatalf("出错: %v", err)
+		}
+		if !params.SetName || params.Name != "" {
+			t.Fatalf("得到 SetName=%v Name=%q，期望 true 与空串", params.SetName, params.Name)
+		}
+	})
+
+	t.Run("expires-at 给将来的时刻", func(t *testing.T) {
+		params, err := updateParams(map[string]bool{"expires-at": true}, limitFlag{}, limitFlag{},
+			metaFlags{expiresAt: "2030-01-02T03:04:05Z"})
+		if err != nil {
+			t.Fatalf("出错: %v", err)
+		}
+		want := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+		if !params.SetExpiresAt || params.ExpiresAt == nil || !params.ExpiresAt.Equal(want) {
+			t.Fatalf("得到 SetExpiresAt=%v ExpiresAt=%s，期望 true 与 %s",
+				params.SetExpiresAt, showPtr(params.ExpiresAt), want)
+		}
+	})
+
+	t.Run("清空过期是 Set 为真且指针为 nil", func(t *testing.T) {
+		params, err := updateParams(map[string]bool{}, limitFlag{}, limitFlag{},
+			metaFlags{clearExpires: true})
+		if err != nil {
+			t.Fatalf("出错: %v", err)
+		}
+		if !params.SetExpiresAt || params.ExpiresAt != nil {
+			t.Fatalf("得到 SetExpiresAt=%v ExpiresAt=%s，期望 true 与 nil",
+				params.SetExpiresAt, showPtr(params.ExpiresAt))
+		}
+	})
+
+	t.Run("三项一起改", func(t *testing.T) {
+		seen := map[string]bool{"status": true, "name": true, "expires-at": true}
+		params, err := updateParams(seen, limitFlag{}, limitFlag{}, metaFlags{
+			status: "revoked", name: "吊销了", expiresAt: "2030-01-02T03:04:05Z",
+		})
+		if err != nil {
+			t.Fatalf("出错: %v", err)
+		}
+		if !params.SetStatus || !params.SetName || !params.SetExpiresAt {
+			t.Fatalf("三项都该被标成要改，得到 %+v", params)
+		}
+		if params.SetRateLimit || params.SetQuota {
+			t.Errorf("没给的两项额度被标成了要改：%+v", params)
+		}
+	})
 }
 
-func TestUpdateLimitsRejectsConflictingAndBadValues(t *testing.T) {
+func TestUpdateParamsRejectsConflictingAndBadValues(t *testing.T) {
 	cases := []struct {
 		name       string
 		seen       map[string]bool
@@ -183,29 +265,46 @@ func TestUpdateLimitsRejectsConflictingAndBadValues(t *testing.T) {
 		clearRPM   bool
 		quota      string
 		clearQuota bool
+		meta       metaFlags
 		want       string
 	}{
 		{"rpm 设值与清空同时给",
-			map[string]bool{"rate-limit-rpm": true}, "60", true, "", false,
+			map[string]bool{"rate-limit-rpm": true}, "60", true, "", false, metaFlags{},
 			"不能同时给"},
 		{"quota 设值与清空同时给",
-			map[string]bool{"quota-limit": true}, "", false, "5", true,
+			map[string]bool{"quota-limit": true}, "", false, "5", true, metaFlags{},
 			"不能同时给"},
-		{"rpm 是负数", map[string]bool{"rate-limit-rpm": true}, "-1", false, "", false,
+		{"rpm 是负数", map[string]bool{"rate-limit-rpm": true}, "-1", false, "", false, metaFlags{},
 			"不能是负数"},
-		{"rpm 不是整数", map[string]bool{"rate-limit-rpm": true}, "六十", false, "", false,
+		{"rpm 不是整数", map[string]bool{"rate-limit-rpm": true}, "六十", false, "", false, metaFlags{},
 			"需要整数"},
 		{"quota 小数位过多", map[string]bool{"quota-limit": true}, "", false, "1.123456789", false,
-			"最多 8 位小数"},
-		{"quota 是负数", map[string]bool{"quota-limit": true}, "", false, "-0.5", false,
+			metaFlags{}, "最多 8 位小数"},
+		{"quota 是负数", map[string]bool{"quota-limit": true}, "", false, "-0.5", false, metaFlags{},
 			"不能是负数"},
+
+		// 元信息那三项：过期与状态各有自己的冲突与取值判据。
+		{"expires-at 设值与清空同时给",
+			map[string]bool{"expires-at": true}, "", false, "", false,
+			metaFlags{expiresAt: "2030-01-02T03:04:05Z", clearExpires: true},
+			"不能同时给"},
+		{"expires-at 不是 RFC3339",
+			map[string]bool{"expires-at": true}, "", false, "", false,
+			metaFlags{expiresAt: "2030-01-02"}, "RFC3339"},
+		{"expires-at 在过去",
+			map[string]bool{"expires-at": true}, "", false, "", false,
+			metaFlags{expiresAt: "2020-01-01T00:00:00Z"}, "已经过去"},
+		{"status 取值不认识",
+			map[string]bool{"status": true}, "", false, "", false,
+			metaFlags{status: "suspended"}, "--status 取"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := updateLimits(tc.seen,
+			_, err := updateParams(tc.seen,
 				limitFlag{value: tc.rpm, clear: tc.clearRPM},
-				limitFlag{value: tc.quota, clear: tc.clearQuota})
+				limitFlag{value: tc.quota, clear: tc.clearQuota},
+				tc.meta)
 			if err == nil {
 				t.Fatal("期望报错，却通过了")
 			}
@@ -235,11 +334,54 @@ func TestAPIKeyUpdateRejectsBadFlags(t *testing.T) {
 			"不能同时给"},
 		{"rpm 是负数", []string{"--id", "3", "--rate-limit-rpm", "-1"}, "不能是负数"},
 		{"quota 小数位过多", []string{"--id", "3", "--quota-limit", "1.123456789"}, "最多 8 位小数"},
+
+		// 状态 / 备注 / 过期那三项：这三条路径的错误都发生在连库之前，
+		// 所以它们能在不打库的情况下被钉住——而它们正是最常被敲错的地方。
+		{"--status 取值不认识",
+			[]string{"--id", "3", "--status", "suspended"}, "--status 取"},
+		{"--status 给了空值", []string{"--id", "3", "--status", ""}, "--status 取"},
+		{"--expires-at 不是时间",
+			[]string{"--id", "3", "--expires-at", "明天"}, "RFC3339"},
+		{"--expires-at 在过去",
+			[]string{"--id", "3", "--expires-at", "2020-01-01T00:00:00Z"}, "已经过去"},
+		{"--expires-at 与 --clear-expires-at 同时给",
+			[]string{"--id", "3", "--expires-at", "2030-01-01T00:00:00Z", "--clear-expires-at"},
+			"不能同时给"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := runAPIKeyUpdate(tc.args)
+			if err == nil {
+				t.Fatalf("期望报错，却通过了")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// apikey get 的那几条不碰数据库的拒绝路径。
+//
+// 与 update 一样，判据是「参数错要在连库之前报出来」：一条 id 都没给的命令
+// 不该先连上生产库再说话。--id 0 与负数走的是同一条：id 是 bigserial，
+// 它们不可能有一行，放进去也只会得到一句「找不到」。
+func TestAPIKeyGetRejectsBadFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"没有 --id", []string{}, "缺少 --id"},
+		{"--id 是 0", []string{"--id", "0"}, "缺少 --id"},
+		{"--id 是负数", []string{"--id", "-2"}, "缺少 --id"},
+		{"位置参数多余", []string{"--id", "3", "extra"}, "不接受位置参数"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runAPIKeyGet(tc.args)
 			if err == nil {
 				t.Fatalf("期望报错，却通过了")
 			}
@@ -410,25 +552,88 @@ func TestPrintKeyListEmpty(t *testing.T) {
 	}
 }
 
-// printUpdatedLimits 要能区分「清空」与「设成 0」——两者的输出不能一样，
+// printUpdatedKey 要能区分「清空」与「设成 0」——两者的输出不能一样，
 // 否则回显就失去了它的用处（确认自己做的正是想做的那一件事）。
-func TestPrintUpdatedLimitsDistinguishesClearFromZero(t *testing.T) {
+func TestPrintUpdatedKeyDistinguishesClearFromZero(t *testing.T) {
+	rpm := 60
 	zero := 0
 
 	var cleared bytes.Buffer
-	printUpdatedLimits(&cleared, 3, auth.LimitParams{SetRateLimit: true})
+	printUpdatedKey(&cleared,
+		auth.Key{ID: 3, RateLimitRPM: &rpm},
+		auth.Key{ID: 3},
+		auth.KeyParams{SetRateLimit: true})
 
 	var setToZero bytes.Buffer
-	printUpdatedLimits(&setToZero, 3, auth.LimitParams{SetRateLimit: true, RateLimitRPM: &zero})
+	printUpdatedKey(&setToZero,
+		auth.Key{ID: 3},
+		auth.Key{ID: 3, RateLimitRPM: &zero},
+		auth.KeyParams{SetRateLimit: true, RateLimitRPM: &zero})
 
-	if got, want := cleared.String(), "已改 API Key id=3 每分钟=继承\n"; got != want {
+	if got, want := cleared.String(), "已改 API Key id=3：每分钟 从 60 改为 继承\n"; got != want {
 		t.Errorf("清空 = %q，期望 %q", got, want)
 	}
-	if got, want := setToZero.String(), "已改 API Key id=3 每分钟=0\n"; got != want {
+	if got, want := setToZero.String(), "已改 API Key id=3：每分钟 从 继承 改为 0\n"; got != want {
 		t.Errorf("设成 0 = %q，期望 %q", got, want)
 	}
 	if cleared.String() == setToZero.String() {
 		t.Error("清空与设成 0 打出来的东西一样")
+	}
+}
+
+// 一次改多项时，回显要**逐项**说出从什么变成什么，且只列命令行上给出的那几项。
+//
+// 打的是「给出过的那几项」而不是「两次读出来不一样的那几项」：给出一个与库里
+// 相同的值时后者什么都不打，读的人分不清「没生效」与「本来就是它」——而这正
+// 是回显存在的理由。
+func TestPrintUpdatedKeyListsEveryGivenField(t *testing.T) {
+	rpm := 60
+	quota := money.MustParse("12.34")
+	expires := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	before := auth.Key{
+		ID: 3, Status: "active", Name: "旧备注",
+		RateLimitRPM: &rpm, QuotaLimit: &quota, ExpiresAt: &expires,
+	}
+	// 改完之后：状态与备注变了，过期被清空，两列额度原样不动。
+	after := auth.Key{
+		ID: 3, Status: "revoked", Name: "新备注",
+		RateLimitRPM: &rpm, QuotaLimit: &quota,
+	}
+
+	var buf bytes.Buffer
+	printUpdatedKey(&buf, before, after, auth.KeyParams{
+		SetStatus: true, Status: "revoked",
+		SetName:      true,
+		Name:         "新备注",
+		SetExpiresAt: true,
+	})
+
+	want := "已改 API Key id=3：状态 从 active 改为 revoked；备注 从 旧备注 改为 新备注；" +
+		"过期 从 2030-01-02T03:04:05Z 改为 不过期\n"
+	if got := buf.String(); got != want {
+		t.Errorf("回显 = %q，期望 %q", got, want)
+	}
+	// 没给的两项不许出现：打出来会让人以为这次命令也动过额度。
+	for _, unwanted := range []string{"每分钟", "额度"} {
+		if strings.Contains(buf.String(), unwanted) {
+			t.Errorf("回显里出现了没要求改的 %q：%s", unwanted, buf.String())
+		}
+	}
+}
+
+// 备注被清空要打成 `-`，而不是留一个空档。
+//
+// 空档与「这一栏不存在」长得一样，而这两种情形在读回显的人那里是两件事。
+func TestPrintUpdatedKeyShowsClearedName(t *testing.T) {
+	var buf bytes.Buffer
+	printUpdatedKey(&buf,
+		auth.Key{ID: 3, Name: "旧备注"},
+		auth.Key{ID: 3},
+		auth.KeyParams{SetName: true})
+
+	if got, want := buf.String(), "已改 API Key id=3：备注 从 旧备注 改为 -\n"; got != want {
+		t.Errorf("回显 = %q，期望 %q", got, want)
 	}
 }
 
@@ -830,5 +1035,326 @@ func TestAPIKeyTimesAreUTCWhateverTheProcessZone(t *testing.T) {
 			t.Errorf("%s = %q，想要 %q（同一瞬间的 UTC 写法，与进程时区无关）",
 				tc.name, tc.got, tc.want)
 		}
+	}
+}
+
+// apikey get 的机器可读输出：与 list 里那一条**逐字段相同**。
+//
+// 同一份数据的两条读路径给出两套字段名时，对读它的脚本来说那就是两件事：
+// 读 list 的那段代码换到 get 上要改一遍字段名，而漏改的那个字段会静默变成
+// 零值。所以这里不只比「有哪些键」，而是把两份文档里对应的那一条整体比一遍。
+func TestAPIKeyGetDocIsMachineReadable(t *testing.T) {
+	rpm := 60
+	quota := money.MustParse("12.34")
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	expires := time.Date(2027, 6, 7, 8, 9, 10, 0, time.UTC)
+	used := time.Date(2026, 10, 17, 6, 10, 11, 0, time.UTC)
+
+	key := auth.Key{
+		ID: 3, UserID: 7, Username: "user-placeholder", Name: "限额的",
+		Prefix: "larkax_abcd", Status: "active",
+		RateLimitRPM: &rpm, QuotaLimit: &quota,
+		CreatedAt: created, ExpiresAt: &expires, LastUsedAt: &used,
+	}
+
+	var got struct {
+		Status string `json:"status"`
+		Key    struct {
+			ID       int64  `json:"id"`
+			Prefix   string `json:"prefix"`
+			Username string `json:"username"`
+			// 指针类型是刻意的：键不在、或者编成了 null 之外的别的东西，
+			// 这里就是 nil，下面的断言当场失败。
+			Name         *string `json:"name"`
+			Status       string  `json:"status"`
+			RateLimitRPM *int    `json:"rate_limit_rpm"`
+			QuotaLimit   *string `json:"quota_limit"`
+			CreatedAt    string  `json:"created_at"`
+			ExpiresAt    *string `json:"expires_at"`
+			LastUsedAt   *string `json:"last_used_at"`
+		} `json:"key"`
+	}
+	raw := decodeDoc(t, apiKeyGetDoc(key), &got)
+
+	if got.Status != jsonOK {
+		t.Errorf("status = %q，想要 %q：看一把 key 的结论也是 ok", got.Status, jsonOK)
+	}
+	if got.Key.ID != 3 || got.Key.Prefix != "larkax_abcd" || got.Key.Username != "user-placeholder" {
+		t.Errorf("key 的标识对不上：%+v", got.Key)
+	}
+	if got.Key.Name == nil || *got.Key.Name != "限额的" {
+		t.Errorf("name = %s，想要「限额的」", showPtr(got.Key.Name))
+	}
+	if got.Key.Status != "active" {
+		t.Errorf("status = %q，想要 active", got.Key.Status)
+	}
+	if got.Key.RateLimitRPM == nil || *got.Key.RateLimitRPM != 60 {
+		t.Errorf("rate_limit_rpm = %s，想要 60", showPtr(got.Key.RateLimitRPM))
+	}
+	if got.Key.QuotaLimit == nil || *got.Key.QuotaLimit != "12.34000000" {
+		t.Errorf("quota_limit = %s，想要字符串 \"12.34000000\"", showPtr(got.Key.QuotaLimit))
+	}
+	// 三个时刻都是完整精度的 RFC3339，且取自不同的列（接错栏会当场挂）。
+	for _, tc := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"created_at", got.Key.CreatedAt, "2026-01-02T03:04:05Z"},
+		{"expires_at", showPtr(got.Key.ExpiresAt), "2027-06-07T08:09:10Z"},
+		{"last_used_at", showPtr(got.Key.LastUsedAt), "2026-10-17T06:10:11Z"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q，想要 %q", tc.name, tc.got, tc.want)
+		}
+	}
+	// 明文与哈希一个字节都不许出现：这一份是给管道下游的。
+	if text := string(raw); strings.Contains(text, "plaintext") || strings.Contains(text, "hash") {
+		t.Errorf("这一份里出现了 key 的明文或哈希字段：\n%s", text)
+	}
+
+	// 键集与 list 的条目逐个相同，两条路径给的是同一条。
+	var generic, listDoc map[string]any
+	decodeDoc(t, apiKeyGetDoc(key), &generic)
+	decodeDoc(t, apiKeyListDoc([]auth.Key{key}), &listDoc)
+
+	entry, ok := generic["key"].(map[string]any)
+	if !ok {
+		t.Fatalf("key 不是一个对象：%v", generic["key"])
+	}
+	assertDocKeys(t, entry, []string{
+		"id", "prefix", "username", "name", "status",
+		"rate_limit_rpm", "quota_limit", "created_at", "expires_at", "last_used_at",
+	})
+
+	// 解回 any 之后，数组是 []any、元素是 map[string]any——JSON 里没有
+	// 「map 的切片」这个概念，所以这里按解码后的形状取。
+	listed, ok := listDoc["keys"].([]any)
+	if !ok || len(listed) != 1 {
+		t.Fatalf("list 那一份不是一条的数组：%v", listDoc["keys"])
+	}
+	listedEntry, ok := listed[0].(map[string]any)
+	if !ok {
+		t.Fatalf("list 里的那一条不是对象：%v", listed[0])
+	}
+	if !maps.Equal(entry, listedEntry) {
+		t.Errorf("get 的那一条与 list 里那一条不一样：\nget  = %v\nlist = %v", entry, listedEntry)
+	}
+}
+
+// apikey get 是读类命令，json 模式必须**支持**。
+//
+// 与写类那两条相反：它在 json 模式下要真的去连库，所以连不上时拿到的是
+// 「连接数据库失败」（退出码 3），而不是「还不支持 --format json」（退出码 2）。
+// 拿一句「不支持」把它当写类命令拦下来，脚本就再也拿不到单把 key 的字段了。
+func TestAPIKeyGetSupportsJSONFormat(t *testing.T) {
+	withFormat(t, formatJSON)
+	// 连不上的库：真的去连就会以 exitDBUnreach 收场。
+	t.Setenv("LARKAX_DB_DSN", "postgres://larkax:placeholder@127.0.0.1:1/larkax?sslmode=disable")
+
+	var err error
+	stdout, _ := captureStreams(t, func() { err = runAPIKeyGet([]string{"--id", "1"}) })
+	if err == nil {
+		t.Fatal("连不上库时应当报错")
+	}
+	if strings.Contains(err.Error(), "不支持 --format json") {
+		t.Fatalf("apikey get 是读类命令，不该被拦下：%v", err)
+	}
+	if code := exitCode(err); code != exitDBUnreach {
+		t.Errorf("退出码 = %d，想要 %d（连不上库）", code, exitDBUnreach)
+	}
+	if stdout != "" {
+		t.Errorf("还没有结果时 stdout 应当为空，得到 %q", stdout)
+	}
+}
+
+// 按 --id 找不着一行时落 exitConflict（4），不是 1。
+//
+// 下一步是「先去看库里现在有什么」（apikey list），而不是改一下命令重发——
+// 这正是 1 与 4 的区别。判据落在具体的哨兵上，不只判「报错了」。
+func TestAPIKeyGetMissingKeyExitsFour(t *testing.T) {
+	// 库要真的连得上：这条命令的失败发生在**查询**那一步，不是连库那一步。
+	testDB(t)
+	setupEnv(t)
+
+	err := runCaptured(t, func() error {
+		return runAPIKeyGet([]string{"--id", "9223372036854775807"})
+	})
+	if err == nil {
+		t.Fatal("期望报错")
+	}
+	if !errors.Is(err, auth.ErrKeyNotFound) {
+		t.Fatalf("错误 %v 不满足 errors.Is(err, auth.ErrKeyNotFound)", err)
+	}
+	if got := exitCode(err); got != exitConflict {
+		t.Errorf("退出码 = %d，想要 %d（要查的那一行不存在）", got, exitConflict)
+	}
+}
+
+// detailField 从 printKeyDetail 的竖排输出里取一个字段的值。
+func detailField(t *testing.T, out, label string) string {
+	t.Helper()
+
+	for line := range strings.SplitSeq(out, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), label)
+		if !ok {
+			continue
+		}
+		return strings.TrimSpace(rest)
+	}
+	t.Fatalf("输出里没有 %q 这一栏：\n%s", label, out)
+	return ""
+}
+
+// apikey 的写侧串一遍：真库 + 真命令。
+//
+// 走「建 → 看现状 → 吊销 → 再看」这一串：#693 之前没有任何一条路径能把状态
+// 写进去，而 get 是这次新加的「读一把」的路径。断的是命令打出来的东西，不是
+// 包里的结构体——中间那一段（把旗标读成一次修改意图、再把结果渲染出来）只有
+// 过真命令才覆盖得到，而它正是最容易「编得过、做出来是另一件事」的一段。
+func TestAPIKeyStatusRoundTripThroughRealCommands(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	owner := createTestUser(t)
+	created, err := auth.New(db).Create(context.Background(), auth.CreateParams{
+		UserID: owner, Name: uniqueName("吊销"),
+	})
+	if err != nil {
+		t.Fatalf("建一把 key 失败: %v", err)
+	}
+	id := strconv.FormatInt(created.ID, 10)
+
+	getDetail := func() string {
+		t.Helper()
+		var getErr error
+		stdout, _ := captureStreams(t, func() { getErr = runAPIKeyGet([]string{"--id", id}) })
+		if getErr != nil {
+			t.Fatalf("apikey get 失败: %v", getErr)
+		}
+		return stdout
+	}
+
+	if got := detailField(t, getDetail(), "状态"); got != "active" {
+		t.Fatalf("刚建出来的 key 状态 = %q，期望 active", got)
+	}
+
+	var updateErr error
+	_, stderr := captureStreams(t, func() {
+		updateErr = runAPIKeyUpdate([]string{"--id", id, "--status", "revoked"})
+	})
+	if updateErr != nil {
+		t.Fatalf("apikey update 失败: %v", updateErr)
+	}
+	if !strings.Contains(stderr, "状态 从 active 改为 revoked") {
+		t.Errorf("回显没说清这次改了什么：\n%s", stderr)
+	}
+
+	// 再看一次：变的是库里那一列，不是回显自己编的。
+	if got := detailField(t, getDetail(), "状态"); got != "revoked" {
+		t.Errorf("吊销之后状态 = %q，期望 revoked", got)
+	}
+}
+
+// 一个字段都没给时报用法错，且库里那一行原样不动。
+//
+// 前半句是「不能静默空转」——一条什么都没改的命令与一条改成功的命令在屏幕上
+// 一模一样；后半句是「这半句真的成立」：报错发生在连库之前，所以那一行不该
+// 有任何变化。
+func TestAPIKeyUpdateWithNoFieldsChangesNothing(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	owner := createTestUser(t)
+	name := uniqueName("空转")
+	created, err := auth.New(db).Create(context.Background(), auth.CreateParams{
+		UserID: owner, Name: name,
+	})
+	if err != nil {
+		t.Fatalf("建一把 key 失败: %v", err)
+	}
+	id := strconv.FormatInt(created.ID, 10)
+
+	var runErr error
+	stdout, _ := captureStreams(t, func() { runErr = runAPIKeyUpdate([]string{"--id", id}) })
+	if runErr == nil {
+		t.Fatal("一个字段都没给时应当报错，而不是静默空转")
+	}
+	if code := exitCode(runErr); code != exitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+	}
+	if !strings.Contains(runErr.Error(), "没有要改的东西") {
+		t.Errorf("错误信息 %q 里没说清缺什么", runErr.Error())
+	}
+	if stdout != "" {
+		t.Errorf("被拦下时 stdout 应当为空，得到 %q", stdout)
+	}
+
+	after, err := auth.New(db).GetKey(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("读回 key 失败: %v", err)
+	}
+	if after.Status != "active" || after.Name != name {
+		t.Errorf("这次调用动了库里的行：status=%q name=%q，期望 %q / %q",
+			after.Status, after.Name, "active", name)
+	}
+}
+
+// 备注与过期时间也串一遍：这两列原先没有写侧，而它们的判据与状态不同
+// （备注空串是合法取值、过期要能写回 NULL）。
+func TestAPIKeyNameAndExpiryRoundTripThroughRealCommands(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	owner := createTestUser(t)
+	created, err := auth.New(db).Create(context.Background(), auth.CreateParams{
+		UserID: owner, Name: uniqueName("备注"),
+	})
+	if err != nil {
+		t.Fatalf("建一把 key 失败: %v", err)
+	}
+	id := strconv.FormatInt(created.ID, 10)
+
+	getDetail := func() string {
+		t.Helper()
+		var getErr error
+		stdout, _ := captureStreams(t, func() { getErr = runAPIKeyGet([]string{"--id", id}) })
+		if getErr != nil {
+			t.Fatalf("apikey get 失败: %v", getErr)
+		}
+		return stdout
+	}
+
+	if err := runCaptured(t, func() error {
+		return runAPIKeyUpdate([]string{"--id", id, "--name", "运维备用", "--expires-at", "2030-01-02T03:04:05Z"})
+	}); err != nil {
+		t.Fatalf("apikey update 失败: %v", err)
+	}
+
+	detail := getDetail()
+	if got := detailField(t, detail, "备注"); got != "运维备用" {
+		t.Errorf("备注 = %q，期望 运维备用", got)
+	}
+	// 详情里的时刻打完整 RFC3339：这一栏回答的是「什么时候到期」，秒是它要
+	// 回答的问题的一部分。它是**给人看的那一档**，按进程时区打（与 list 的
+	// 时刻同一套约定）；机器读的那一份走 jsonTime，恒 UTC。所以期望值按
+	// 进程时区算出来，别钉一个字面量——钉了的那一份只在 UTC 的机器上是对的。
+	wantExpires := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC).In(time.Local).Format(time.RFC3339)
+	if got := detailField(t, detail, "过期"); got != wantExpires {
+		t.Errorf("过期 = %q，期望 %q（进程时区下的写法）", got, wantExpires)
+	}
+
+	// 清空：写回 NULL，读回来是「不过期」。
+	if err := runCaptured(t, func() error {
+		return runAPIKeyUpdate([]string{"--id", id, "--name", "", "--clear-expires-at"})
+	}); err != nil {
+		t.Fatalf("清空失败: %v", err)
+	}
+	detail = getDetail()
+	if got := detailField(t, detail, "过期"); got != "不过期" {
+		t.Errorf("清空之后过期 = %q，期望 不过期", got)
+	}
+	if got := detailField(t, detail, "备注"); got != "-" {
+		t.Errorf("清空之后备注 = %q，期望 -", got)
 	}
 }
