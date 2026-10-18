@@ -41,6 +41,10 @@ import traceback
 TEXT_SUFFIX = "text"
 TOOLS_SUFFIX = "tools"
 FAIL_SUFFIX = "fail"
+# 余额在流的中间耗尽那条路。它配的价目让几个阈值段就把余额花光，
+# 而假上游备了一条很长的流——切断因此是**余额**造成的（见 contract_test.go
+# 的 contractDrainRule 与 contractDrainChunks）。
+DRAIN_SUFFIX = "drain"
 
 # 假上游回的正文。分成两片，这样流式用例能验「增量要拼起来」。
 TEXT_PARTS = ("契约测试", "的正文")
@@ -234,6 +238,62 @@ def openai_stream(ctx: Ctx) -> str:
     return f"{chunks} 个分片，finish_reason={reasons}，usage 在流里读到"
 
 
+def openai_balance_exhausted(ctx: Ctx) -> str:
+    """余额在流的中间耗尽时，官方 SDK 要把流内那条错误帧抛成异常。
+
+    三件事一起断言，缺一不可：
+
+    1. **异常真的被抛出来了**。这一条同时覆盖「有没有伪造结束标记」——
+       openai 的 SDK 见到 `[DONE]` 就 break，伪造一个会让它安静地正常迭代完，
+       于是调用方把半截回答当成完整回答；
+    2. 抛的是 SDK 自己解析出来的那个错误对象，`error.message` 是我们写的那句
+       （不是从 `str(exc)` 里碰巧带上的 JSON 文本里读出来的）；
+    3. 异常之前已经收到了正文、而且**没有**出现过任何正常结束的迹象
+       （没有 `finish_reason`）——失败发生在流的中间，不是刚开始。
+
+    它测的是**返回路径之外**的一件事：状态码早在第一个事件之前就写出去了
+    （见 internal/api/stream.go 的说明），所以流中途的失败只能从帧序列里
+    看出来。客户端能不能看出来，只有真的 SDK 说了算。
+    """
+    import openai
+
+    stream = ctx.client.chat.completions.create(
+        model=ctx.model(DRAIN_SUFFIX),
+        messages=[{"role": "user", "content": "你好"}],
+        max_tokens=100000,
+        stream=True,
+    )
+
+    text = ""
+    reasons = []
+    chunks = 0
+    try:
+        for chunk in stream:
+            chunks += 1
+            for choice in chunk.choices:
+                if choice.delta.content:
+                    text += choice.delta.content
+                if choice.finish_reason:
+                    reasons.append(choice.finish_reason)
+    except openai.APIError as exc:
+        check_true("异常之前收到过正文（失败发生在流的中间）", text != "")
+        check("异常之前出现过的 finish_reason", reasons, [])
+        check_true("error.message 提到余额", "balance" in body_error_message(exc))
+        return (f"{type(exc).__name__}：{body_error_message(exc)}"
+                f"（此前已收到 {chunks} 个分片、{len(text)} 个字符）")
+    except Exception as exc:
+        # 抛出来的东西不对也算失败，但要说清是「类型不对」而不是「没抛」：
+        # 两者的原因不同（前者是那条帧的形状让 SDK 认不出来，后者是压根没写）。
+        raise CaseFailure(
+            f"余额耗尽的流抛的是 {type(exc).__name__}，不是 openai.APIError：{exc}"
+        ) from exc
+
+    raise CaseFailure(
+        f"余额耗尽的流没有抛异常：SDK 正常迭代完了（收到 {chunks} 个分片、"
+        f"{len(reasons)} 个 finish_reason）"
+    )
+
+
 def openai_tool_call(ctx: Ctx) -> str:
     """含工具调用的往返：SDK 要能把 arguments 当成 JSON 字符串解出来。"""
     resp = ctx.client.chat.completions.create(
@@ -349,6 +409,7 @@ def openai_auth_error(ctx: Ctx) -> str:
 OPENAI_CASES = [
     ("非流式", openai_nonstream),
     ("流式", openai_stream),
+    ("流式·余额耗尽", openai_balance_exhausted),
     ("工具调用", openai_tool_call),
     ("客户端错误 400", openai_bad_request),
     ("认证错误 401", openai_auth_error),
@@ -453,6 +514,60 @@ def anthropic_stream(ctx: Ctx) -> str:
             f"input_tokens 首帧 {start_input_tokens} → message_delta {delta_input_tokens}")
 
 
+def anthropic_balance_exhausted(ctx: Ctx) -> str:
+    """同 OpenAI 那一条，但两套 SDK 认的是**不同**的东西。
+
+    anthropic 的 SDK 不走「data 里有没有 `error` 字段」那条判据，它认的是
+    **事件名** `event: error`。所以这两条用例钉的不是同一处渲染代码：
+    两套协议的流内错误帧由两个分支分别写出来（见 internal/api 的
+    streamErrorFrame），一个分支写坏了只有对应的那一条会红。
+
+    断言与那一条同一组：抛异常了、抛的是 SDK 自己的错误类型、
+    异常之前收到过正文且没有正常结束的迹象。
+    """
+    import anthropic
+
+    stream = ctx.client.messages.create(
+        model=ctx.model(DRAIN_SUFFIX),
+        max_tokens=100000,
+        messages=[{"role": "user", "content": "你好"}],
+        stream=True,
+    )
+
+    text = ""
+    events = 0
+    stop_reasons = []
+    saw_message_stop = False
+    try:
+        for event in stream:
+            events += 1
+            if event.type == "content_block_delta" and event.delta.type == "text_delta":
+                text += event.delta.text
+            if event.type == "message_delta" and event.delta.stop_reason:
+                stop_reasons.append(event.delta.stop_reason)
+            if event.type == "message_stop":
+                saw_message_stop = True
+    except anthropic.APIStatusError as exc:
+        check_true("异常之前收到过正文（失败发生在流的中间）", text != "")
+        check("异常之前出现过的 stop_reason", stop_reasons, [])
+        check_true("异常之前没有 message_stop", not saw_message_stop)
+        # 状态码仍是 200：失败只能从流里看出来（响应头在第一个事件之前就发出去了）。
+        check("status_code", exc.status_code, 200)
+        check("error.type", error_type_of(exc), "api_error")
+        check_true("error.message 提到余额", "balance" in body_error_message(exc))
+        return (f"{type(exc).__name__}：{body_error_message(exc)}"
+                f"（此前已收到 {events} 个事件、{len(text)} 个字符）")
+    except Exception as exc:
+        raise CaseFailure(
+            f"余额耗尽的流抛的是 {type(exc).__name__}，不是 anthropic.APIStatusError：{exc}"
+        ) from exc
+
+    raise CaseFailure(
+        f"余额耗尽的流没有抛异常：SDK 正常迭代完了（收到 {events} 个事件、"
+        f"{len(stop_reasons)} 个 stop_reason）"
+    )
+
+
 def anthropic_tool_call(ctx: Ctx) -> str:
     """含工具调用的往返：input 是**对象**（与 OpenAI 的字符串正好相反）。"""
     resp = ctx.client.messages.create(
@@ -544,6 +659,7 @@ def anthropic_auth_error(ctx: Ctx) -> str:
 ANTHROPIC_CASES = [
     ("非流式", anthropic_nonstream),
     ("流式", anthropic_stream),
+    ("流式·余额耗尽", anthropic_balance_exhausted),
     ("工具调用", anthropic_tool_call),
     ("客户端错误 400", anthropic_bad_request),
     ("认证错误 401", anthropic_auth_error),
@@ -639,6 +755,65 @@ def responses_stream(ctx: Ctx) -> str:
           completed.output[0].content[0].text, TEXT)
 
     return f"{len(seen)} 个事件，末事件={seen[-1]}，usage 在终态里读到"
+
+
+def responses_balance_exhausted(ctx: Ctx) -> str:
+    """Responses 那套的流内错误帧——**官方 SDK 不抛异常**，它交给调用方一个事件。
+
+    这与 chat / messages 那两条不一样，而且不是我们的偏差：Responses 协议
+    自己的流内失败就是一个**平铺的事件**（type / code / message 在顶层），
+    官方 SDK 把它解析成 `ResponseErrorEvent` 交给调用方（实测：我们那条帧
+    被解析成 `ResponseErrorEvent(code='server_error', message=...)`）。
+    所以这一条断言的是那个形状：
+
+    1. 收到一条 error 事件，而且是从 SDK 的对象模型上读出来的 `code` 与
+       `message`（不是从原始 JSON 里抠）；
+    2. error 事件之前收到过正文——失败发生在流的中间；
+    3. **没有** `response.completed`：Responses 那套的正常结束标志就是它，
+       没有它就说明这条流没跑完。
+
+    第 3 条是这三条用例里唯一能验「没有伪造结束标记」的那种写法，因为
+    这一套没有 `[DONE]`：调用方判断「答完了」的依据就是终态事件。
+
+    **迭代过程中抛异常要当失败报出来**：它说明我们那条帧的形状变了
+    （比如被包进了一个 `error` 外层），或者 SDK 换了处置方式——两种都要
+    重新读一遍这一条，而不是当成「反正它也报错了」。
+    """
+    stream = ctx.client.responses.create(
+        model=ctx.model(DRAIN_SUFFIX),
+        input="你好",
+        max_output_tokens=100000,
+        stream=True,
+    )
+
+    text = ""
+    events = 0
+    err_event = None
+    saw_completed = False
+    try:
+        for event in stream:
+            events += 1
+            if event.type == "response.output_text.delta":
+                text += event.delta
+            if event.type == "error":
+                err_event = event
+            if event.type == "response.completed":
+                saw_completed = True
+    except Exception as exc:
+        raise CaseFailure(
+            f"Responses 那套的流内错误不该抛异常：官方 SDK 把它当作一个事件交给"
+            f"调用方（它认的是 `type: error` 这个事件类型，不是 chat 那套的 error "
+            f"字段）。抛出来的是 {type(exc).__name__}：{exc}"
+        ) from exc
+
+    check_true("error 事件之前收到过正文（失败发生在流的中间）", text != "")
+    check_true("收到了一条 error 事件", err_event is not None)
+    check("error 事件的 code", err_event.code, "server_error")
+    check_true("error 事件的 message 提到余额", "balance" in err_event.message)
+    check_true("没有 response.completed（没有正常结束的迹象）", not saw_completed)
+
+    return (f"{events} 个事件，error(code={err_event.code})：{err_event.message}"
+            f"（此前已收到 {len(text)} 个字符）")
 
 
 def responses_tool_call(ctx: Ctx) -> str:
@@ -775,6 +950,7 @@ def responses_upstream_error(ctx: Ctx) -> str:
 
 RESPONSES_CASES = [
     ("非流式", responses_nonstream),
+    ("流式·余额耗尽", responses_balance_exhausted),
     ("流式", responses_stream),
     ("工具调用", responses_tool_call),
     ("客户端错误 400", responses_bad_request),

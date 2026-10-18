@@ -286,9 +286,9 @@ func flatPrices() billing.Prices {
 func settleAgainst(t *testing.T, inputTokens int64, maxTokens int64, actual billing.Usage) billing.Settlement {
 	t.Helper()
 	reserved, err := billing.Reserve(billing.ReserveRequest{
-		Prices:      flatPrices(),
-		InputTokens: inputTokens,
-		MaxTokens:   maxTokens,
+		Prices:       flatPrices(),
+		InputTokens:  inputTokens,
+		OutputTokens: maxTokens,
 	})
 	if err != nil {
 		t.Fatalf("算预留失败: %v", err)

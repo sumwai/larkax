@@ -377,6 +377,241 @@ func TestReserveRejectsWhenNoCandidateHasRule(t *testing.T) {
 	}
 }
 
+// ── 流式的初始预留只冻第一段 ────────────────────────────────────────────
+//
+// 这一组钉的是 #498 要修的那个问题：按调用方声明的 max_tokens 冻满时，一条
+// max_tokens 填得很大、实际只产几十个 token 的流式请求会被自己的预留拒掉。
+// 换成「只冻第一段」之后，那条请求的预留与声明上界脱钩。
+
+// 第一段 = min(声明的上界, 阈值段)。
+func TestReserveStreamFreezesOnlyTheFirstSegment(t *testing.T) {
+	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}
+	p := newPipeline(t, src)
+
+	req := baseRequest()
+	req.MaxTokens = 100000
+
+	res, err := p.ReserveStream(context.Background(), req, 4096)
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	// 输入 1000 × 1e-6 = 0.001；输出 4096 × 2e-6 = 0.008192。
+	// 按声明的 100000 冻满会是 0.201——那正是这条要修的东西。
+	if got := res.Amount.String(); got != "0.00919200" {
+		t.Errorf("预留 = %s，期望 0.00919200（只有第一段）", got)
+	}
+	// 「已经冻了 4096 个输出 token」要跟着这份预留一起交回来：补冻那一侧靠
+	// 它算「还差多少」，算错就会重复冻或者冻不够。
+	if res.OutputTokens != 4096 {
+		t.Errorf("OutputTokens = %d，期望 4096", res.OutputTokens)
+	}
+}
+
+// 声明的上界比一个段还小时，第一段就把它冻满——不留一段出去。
+//
+// max_tokens=100 的请求本来也撞不上要修的那个问题，所以这里不允许「也冻 4096」：
+// 那会凭空多冻 40 倍，把一种余额不足换成另一种。
+func TestReserveStreamClampsToTheDeclaredBound(t *testing.T) {
+	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}
+	p := newPipeline(t, src)
+
+	req := baseRequest()
+	req.MaxTokens = 100
+
+	res, err := p.ReserveStream(context.Background(), req, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OutputTokens != 100 {
+		t.Errorf("OutputTokens = %d，期望 100（声明的上界）", res.OutputTokens)
+	}
+	// 与非流式那条路逐字相同：1000 × 1e-6 + 100 × 2e-6 = 0.0012
+	if got := res.Amount.String(); got != "0.00120000" {
+		t.Errorf("预留 = %s，期望 0.0012", got)
+	}
+}
+
+// 阈值段必须为正。零值不是「不限」也不是「每次事件都查」：前者让补冻整条不
+// 发生（流式又退回按声明上界冻），后者把数据库往返摊到每一个事件上。
+func TestReserveStreamRejectsNonPositiveStep(t *testing.T) {
+	p := newPipeline(t, &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}})
+	for _, step := range []int64{0, -1} {
+		_, err := p.ReserveStream(context.Background(), baseRequest(), step)
+		if !errors.Is(err, ErrNoFreezeStep) {
+			t.Errorf("段 = %d 时 err = %v，期望 ErrNoFreezeStep", step, err)
+		}
+	}
+}
+
+// ── 补冻 ────────────────────────────────────────────────────────────────
+
+// 补冻的单价来自**实际选中的那个渠道**的规则，而不是预留时给出最大金额的那条
+// 候选规则。
+//
+// 这是「补冻与结算同源」这条口径的核心判据。渠道级与商家级规则都算数，所以结算
+// 按选中的渠道重新匹配时拿到的可能不是预留时那条——用它去补冻会冻出另一个数：
+// 冻少了结算撞 Capped（差额由平台吃掉、账目仍然是平的），冻多了把用户的钱白
+// 冻着。两种情况都不报错。
+func TestReserveMorePricesByTheSelectedChannel(t *testing.T) {
+	// 渠 7 的规则便宜、渠 8 的贵，而**预留时**留下的是贵的那条（8 给出上界）。
+	cheap := Rule{ID: 7, Version: 1, Source: `{"prompt": 0.000001, "completion": 0.000002}`}
+	dear := Rule{ID: 8, Version: 1, Source: `{"prompt": 0.001, "completion": 0.002}`}
+	src := &ruleSource{byChannel: map[int64]Rule{7: cheap, 8: dear}}
+	p := newPipeline(t, src)
+
+	req := baseRequest()
+	req.MaxTokens = 100000
+	req.Candidates = []RuleCandidate{{ChannelID: 7, OwnerUserID: 9}, {ChannelID: 8, OwnerUserID: 9}}
+
+	res, err := p.ReserveStream(context.Background(), req, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 预留按最贵的那条（渠 8）：输入 1000 × 1e-3 + 输出 4096 × 2e-3 = 9.192
+	if got := res.Amount.String(); got != "9.19200000" {
+		t.Fatalf("预留 = %s，期望 9.192（按最贵的候选规则）", got)
+	}
+	if res.RuleID != dear.ID {
+		t.Fatalf("预留的依据 = %d，期望最贵的 %d", res.RuleID, dear.ID)
+	}
+
+	// 选中的是渠 7：补冻要按渠 7 的价（输出 2e-6），而不是渠 8 的 2e-3。
+	req.ChannelID = 7
+	more, err := p.ReserveMore(context.Background(), req, res, 4096)
+	if err != nil {
+		t.Fatalf("补冻出错: %v", err)
+	}
+	if got := more.String(); got != "0.00819200" {
+		t.Errorf("补冻 = %s，期望 0.00819200（按选中的渠 7 的价，而不是最贵那条）", got)
+	}
+	// 查询条件也要与结算逐字相同：只有一个候选（选中的那个），时刻是受理时刻。
+	last := src.queries[len(src.queries)-1]
+	if len(last.Candidates) != 1 || last.Candidates[0].ChannelID != 7 || last.Candidates[0].OwnerUserID != 9 {
+		t.Errorf("补冻的候选 = %+v，期望恰好一个：渠道 7 商家 9", last.Candidates)
+	}
+	if !last.At.Equal(res.RuleMatchedAt) {
+		t.Errorf("补冻用的时刻 %v 与受理时刻 %v 不同", last.At, res.RuleMatchedAt)
+	}
+}
+
+// 补冻只算输出侧那一项：输入、固定费、最低消费、非 token 计量都是一次请求
+// 只发生一次的量，按段重复加会让冻结额随段数一路长上去。
+func TestReserveMoreChargesOnlyTheOutputSide(t *testing.T) {
+	rule := Rule{ID: 1, Version: 1, Source: `{"prompt": 0.000001, "completion": 0.000002, "minimum": 0.5, "units": {"images": 1.0}}`}
+	p := newPipeline(t, &ruleSource{rule: rule})
+
+	res, err := p.ReserveStream(context.Background(), baseRequest(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	more, err := p.ReserveMore(context.Background(), baseRequest(), res, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 只有 1000 × 2e-6 = 0.002：最低消费 0.5 与一份 images 都不进来。
+	if got := more.String(); got != "0.00200000" {
+		t.Errorf("补冻 = %s，期望 0.00200000（只有输出侧）", got)
+	}
+}
+
+// 补冻的 token 数必须为正：传 0 进来是一个真值错误的信号，静默返回 0 会让
+// 「补冻了但金额是零」看起来像成功——调用方据此推进它的累计量，于是钱包与
+// 账单行少冻一段，没有任何东西会报出来。
+func TestReserveMoreRejectsNonPositiveTokens(t *testing.T) {
+	p := newPipeline(t, &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}})
+	req := baseRequest()
+	res, err := p.ReserveStream(context.Background(), req, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int64{0, -1} {
+		if _, err := p.ReserveMore(context.Background(), req, res, n); err == nil {
+			t.Errorf("token 数 %d 应被拒绝", n)
+		}
+	}
+}
+
+// 补冻必须基于一次**真实的**预留，而且受理时刻不能缺：它是定价基准，
+// 缺了就只能退回读墙钟，而那正是「一次请求的价格在受理时就定了」要消除的。
+func TestReserveMoreRequiresReservation(t *testing.T) {
+	p := newPipeline(t, &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}})
+	req := baseRequest()
+
+	// 没有预留
+	if _, err := p.ReserveMore(context.Background(), req, nil, 100); err == nil {
+		t.Error("缺少预留应报错")
+	}
+	// 预留属于另一个请求
+	other := &Reservation{RequestID: "req-2", RuleMatchedAt: fixedAt}
+	if _, err := p.ReserveMore(context.Background(), req, other, 100); err == nil {
+		t.Error("预留属于别的请求时应报错")
+	}
+	// 缺受理时刻
+	noInstant := &Reservation{RequestID: req.RequestID}
+	if _, err := p.ReserveMore(context.Background(), req, noInstant, 100); err == nil {
+		t.Error("缺受理时刻应报错")
+	}
+}
+
+// 补冻与初始预留的**和**必须盖得住已产出的那部分用量。
+//
+// 这条不变量是整套递进冻结的立足点：每一段都在为「已经产出的 token」加钱，
+// 而中断那一刻结算到的是真实用量。段与段之间若因为取价不同（例如一条按推理
+// 计价、一条按输出计价）而漏掉一部分，结算就会撞 Capped。
+func TestReserveMoreAndReserveCoverProducedUsage(t *testing.T) {
+	rule := Rule{ID: 1, Version: 1, Source: `{"prompt": 0.000001, "completion": 0.000002, "reasoning": 0.00001}`}
+	p := newPipeline(t, &ruleSource{rule: rule})
+
+	req := baseRequest()
+	req.MaxTokens = 10000
+	res, err := p.ReserveStream(context.Background(), req, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 一段一段补到声明的上界，与网关那边（按段跨过阈值就补一次）同一个节奏。
+	total := res.Amount
+	frozen := res.OutputTokens
+	for frozen < req.MaxTokens {
+		step := int64(1000)
+		if left := req.MaxTokens - frozen; left < step {
+			step = left
+		}
+		more, moreErr := p.ReserveMore(context.Background(), req, res, step)
+		if moreErr != nil {
+			t.Fatal(moreErr)
+		}
+		total = total.Add(more)
+		frozen += step
+	}
+	if frozen != req.MaxTokens {
+		t.Fatalf("累计冻到 %d 个 token，期望 %d", frozen, req.MaxTokens)
+	}
+
+	// 这一笔冻结要盖得住「上游把输出全算成推理」这个最坏拆法下的结算。
+	charge, err := p.Settle(context.Background(), req, res, Outcome{
+		Usage: channel.Usage{
+			PromptTokens:     req.InputTokens,
+			CompletionTokens: 5000,
+			ReasoningTokens:  req.MaxTokens - 5000,
+		},
+		UsageSource: tokens.SourceMeasured,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Settle 按 res.Amount 截，所以这里断言的是**总额**够不够：
+	// 两份输出侧的价必须一样（都取 max(completion, reasoning)）。
+	wantOutput := money.MustParse("0.00001").MulInt(req.MaxTokens)
+	want := money.MustParse("0.000001").MulInt(req.InputTokens).Add(wantOutput)
+	if total.Cmp(want) != 0 {
+		t.Errorf("逐段冻出来的合计 = %s，期望 %s", total, want)
+	}
+	if actual := charge.Settlement.Actual; actual.Cmp(money.Zero) <= 0 {
+		t.Errorf("结算金额 = %s，期望正数", actual)
+	}
+}
+
 // ── 结算 ────────────────────────────────────────────────────────────────
 
 func TestSettleProducesChargeAndEntries(t *testing.T) {

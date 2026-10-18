@@ -295,3 +295,97 @@ func TestBuildAcceptsFactorySettings(t *testing.T) {
 		t.Fatal("出厂配置下装出来的 handler 是 nil")
 	}
 }
+
+// 流式递进冻结的阈值段必须被读到，而且真的接到网关上。
+//
+// 两头各会静默出错，所以一起钉：
+//
+//   - 装配期的范围校验：配成 0 或负数时网关会拒掉**每一个**流式请求
+//     （见 gateway.ErrNoFreezeStep），现场是一批 5xx；配得比输出上界还大时
+//     第一段就把整笔冻满，递进冻结整条不发生；
+//   - 接线：校验过了、网关那个字段却还是零值（漏接或接错字段）时，表现与
+//     第一条完全一样（一批 5xx）——「配置错」与「代码漏接」在那批 5xx 里
+//     分不出来，而处置是两件事。
+//
+// 所以这一条既比对库里的值，也比对**网关拿到的值**：只看前者，漏接照样绿。
+func TestBuildReadsStreamFreezeStep(t *testing.T) {
+	db := testDB(t)
+
+	app, err := buildAppWithSettings(t, db, nil)
+	if err != nil {
+		t.Fatalf("出厂配置下装配失败: %v", err)
+	}
+	// 出厂值由迁移写下（4096）。写死这个字面量而不是引用某个常量：这条用例
+	// 要钉的正是「库里那个数」与「网关拿到的数」是同一个。
+	if got := app.Gateway.StreamFreezeStep; got != 4096 {
+		t.Errorf("出厂阈值段 = %d，期望 4096（迁移写下的那个数）", got)
+	}
+
+	app, err = buildAppWithSettings(t, db, map[string]string{streamFreezeStepKey: "8192"})
+	if err != nil {
+		t.Fatalf("改阈值段之后装配失败: %v", err)
+	}
+	if got := app.Gateway.StreamFreezeStep; got != 8192 {
+		t.Errorf("改过之后网关的阈值段 = %d，期望 8192——这个键没有被读到网关上", got)
+	}
+}
+
+// 阈值段超出允许范围或非正时必须在装配期被拒。
+//
+// 非正的值会让每一个流式请求都失败（网关拒掉整条路），而这与代码故障同形；
+// 超过出厂输出上界默认值（65536）的段让初始预留就冻满整笔，等于把递进冻结
+// 关掉——「关掉」与「配得很宽」在请求上长得一模一样。
+//
+// 越界值写**字面量** 65537，不写 maxStreamFreezeStep + 1：后者是拿实现里的
+// 常量测实现里的常量，把上界改成多少这条用例都绿，钉不住这个数（见 AGENTS.md
+// 的「用常量测常量等于没测」）。边界值本身装得起来那一半见下一条。
+func TestBuildRefusesOutOfRangeStreamFreezeStep(t *testing.T) {
+	db := testDB(t)
+
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"零", `0`},
+		{"负数", `-1`},
+		{"超过上界", `65537`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := buildWithSetting(t, db, streamFreezeStepKey, tc.value)
+			if err == nil {
+				t.Fatalf("settings.%s = %s 时装配成功了——这个键没有被读",
+					streamFreezeStepKey, tc.value)
+			}
+			if !strings.Contains(err.Error(), streamFreezeStepKey) {
+				t.Errorf("错误信息 %q 里没有键名：配错的人要能一眼看出改哪个键", err.Error())
+			}
+		})
+	}
+}
+
+// 阈值段的**边界值本身**必须装得起来。
+//
+// 上一条只说明「界外会失败」，它分辨不出「界画错了一位」：把上界写成 6553
+// （少一位）时，上一条照样全过，而一个完全合理的配置会在启动时被拒；反过来
+// 把上界抬回 1<<20 时，上一条也全过，而那条要防的配置又放行了。这一条把上界
+// 钉在 65536：它装得起来，界往内挪一格它就红。下界 1 同理。
+func TestBuildAcceptsStreamFreezeStepAtBounds(t *testing.T) {
+	db := testDB(t)
+
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"上界（65536，出厂输出上界默认值）", `65536`},
+		{"下界（一段）", `1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := buildWithSetting(t, db, streamFreezeStepKey, tc.value); err != nil {
+				t.Fatalf("settings.%s = %s 是允许范围内的值，装配却失败了：%v",
+					streamFreezeStepKey, tc.value, err)
+			}
+		})
+	}
+}

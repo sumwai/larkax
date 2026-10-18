@@ -77,7 +77,7 @@ func settle(t *testing.T, p *Program, source string, env Env, maxTokens int64) {
 	reserved, err := billing.Reserve(billing.ReserveRequest{
 		Prices:          worst.Prices,
 		Charges:         worst.Charges,
-		MaxTokens:       maxTokens,
+		OutputTokens:    maxTokens,
 		InputTokens:     probe.Usage.PromptTokens,
 		CacheReadTokens: probe.Usage.CacheReadTokens,
 		// 生产传了它（internal/pipeline/pipeline.go 的 boundOf）。探针少传一项，
