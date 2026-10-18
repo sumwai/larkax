@@ -1050,6 +1050,36 @@ func TestChannelListJSONStdoutIsPure(t *testing.T) {
 	}
 }
 
+// TestChannelGetJSONStdoutIsPure 拿真命令跑一遍 get 的 json 那一档。
+//
+// 与 list / health 那两条同一形状：纯函数那条钉字段形状，这一条钉**命令那一层**
+// ——stdout 上从头到尾只有一份 JSON，没有表格文本、没有转义序列、没有被回显掺进来。
+func TestChannelGetJSONStdoutIsPure(t *testing.T) {
+	_ = testDB(t)
+	setupEnv(t)
+
+	// 夹具要在切到 json 之前造好：json 档下写类命令直接报不支持。
+	id := createTestChannel(t, uniqueName("get-json"), uniqueName("model"))
+
+	withFormat(t, formatJSON)
+	stdout, stderr := captureStreams(t, func() {
+		if err := runChannelGet([]string{"--id", strconv.FormatInt(id, 10)}); err != nil {
+			t.Fatalf("channel get 失败: %v", err)
+		}
+	})
+	if stderr != "" {
+		t.Errorf("json 档的 stderr 应当是空的，得到 %q", stderr)
+	}
+
+	got := assertJSONStdout(t, stdout)
+	assertJSONField(t, got, "status", jsonOK)
+	entry := jsonObjectField(t, got, "channel")
+	assertJSONField(t, entry, "id", float64(id))
+	if _, ok := entry["created_at"]; !ok {
+		t.Error("get 的 json 里应当有 created_at")
+	}
+}
+
 // ── get / health / restore ──────────────────────────────────────────────
 
 // TestChannelGetHealthRestoreRejectBadFlags 钉住这三个动词的参数判据。
@@ -1205,7 +1235,9 @@ func TestChannelHealthDocIsMachineReadable(t *testing.T) {
 	assertJSONField(t, first, "deleted_at", nil)
 
 	second := list[1].(map[string]any)
-	assertJSONField(t, second, "health", channels.HealthUnknown)
+	// 断言用字面量而不是 channels.HealthUnknown：夹具里那格也是用同一个常量填的，
+	// 常量改了名或改了值，两边一起变，这条就什么都没钉住。
+	assertJSONField(t, second, "health", "unknown")
 	assertJSONField(t, second, "last_probe_at", nil)
 	assertJSONField(t, second, "requests", float64(0))
 	assertJSONField(t, second, "failure_rate", nil)
@@ -1255,10 +1287,10 @@ func TestChannelHealthDocIsMachineReadable(t *testing.T) {
 
 // TestChannelHealthShowsCacheTokens 钉住缓存 token 真的出现在三张表上。
 //
-// 它是 issue 背景里点名的那两列（`channel_health_rollup` 的 cache_hit_tokens /
-// cache_miss_tokens 会被选路读，命令行上原先一处都打不出来），所以判据不是「库里
-// 读得出来」——那是 internal/channels 那侧的用例——而是**三个视口里都看得见**：
-// 汇总表、--id 的读数、逐小时明细。只打在其中一处时，另一处的读者仍然够不着。
+// 它钉的是 `channel_health_rollup` 的 cache_hit_tokens / cache_miss_tokens——选路会
+// 读、而命令行原先一处都打不出来的那两列。判据不是「库里读得出来」（那是
+// internal/channels 那侧的用例），而是**三个视口里都看得见**：汇总表、--id 的读数、
+// 逐小时明细。只打在其中一处时，另一处的读者仍然够不着。
 func TestChannelHealthShowsCacheTokens(t *testing.T) {
 	row := channels.ChannelHealth{
 		ID: 7, Name: "c1", Health: "healthy",

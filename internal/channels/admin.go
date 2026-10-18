@@ -454,8 +454,10 @@ func (a *Admin) SoftDelete(ctx context.Context, id int64) (bool, error) {
 // 逼他去翻 --all 或者直接看库。已删与否由返回值的 DeletedAt 说出来，调用方据此
 // 在输出里标出它。
 //
-// 写路径（Update / SetStatus / Restore）不照这条走：那里撞上已删的渠道要拒绝，
-// 理由是「不静默改一行用户看不见的数据」（见 ErrChannelDeleted）。
+// 写路径对已删渠道的处置不照这条走，而且彼此不同：Update / SetStatus 撞上已删的
+// 渠道要拒绝，理由是「不静默改一行用户看不见的数据」（见 ErrChannelDeleted）；
+// Restore 恰恰相反，它是唯一**接受**已删渠道的写路径——把 deleted_at 清掉正是它
+// 的职责。
 func (a *Admin) Get(ctx context.Context, id int64) (ChannelInfo, error) {
 	if id <= 0 {
 		return ChannelInfo{}, errors.New("渠道 id 无效")
