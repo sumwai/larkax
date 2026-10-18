@@ -1,0 +1,21 @@
+.TH LARKAXCTL\-LEDGER 1 "" "larkax" "larkaxctl\-ledger"
+.ds AD l
+.ad l
+.nh
+.SH NAME
+larkaxctl\-ledger \- 财\:务\:账\:本\:管\:理\:（余\:额\:查\:询、\:分\:录\:校\:验、\:对\:账）
+.SH SYNOPSIS
+.B larkaxctl ledger
+.RI [ 选\:项 ]
+.br
+二\:级\:动\:作\:与\:参\:数\:见 \fBlarkaxctl ledger \-\-help\fR（短\:版）\:与 \fBlarkaxctl help ledger\fR（长\:版）。
+.PP
+财\:务\:账\:本\:管\:理：\:读\:余\:额、\:校\:验\:分\:录，\:以\:及\:跑\:一\:轮\:对\:账。\fBbalance\fR 与 \fBverify\fR \fB只\:读\fR：\:不\:改\:任\:何\:一\:行、\:不\:写\:任\:何\:快\:照，\:任\:何\:写\:入\:都\:走\:各\:自\:的\:写\:入\:路\:径，\:这\:里\:不\:提\:供。\fBreconcile\fR不\:是\:只\:读\:的：\:它\:往 \fBreconcile_runs\fR 记\:一\:行，\:并\:在 \fBsettings\fR 的\fBreconcile\&.auto_repair\fR 为\:真\:时\:按\:口\:径\:修\:差\:额——要\:不\:要\:动\:手\:由\:那\:个\:开\:关\:决\:定，\:命\:令\:行\:上\:不\:带\:参\:数，\:于\:是\:「线\:上\:跑\:的\:是\:哪\:一\:套\:口\:径」\:只\:有\:一\:个\:答\:案\:（库\:里\:的\:值）。
+.PP
+\fBbalance\fR 打\:出\:来\:的\:余\:额\:是\:从\:分\:录\fB现\:算\fR的\:权\:威\:值，\:不\:是 \fBuser_wallets\fR 里\:那\:个\:快\:照。\:两\:者\:是\:否\:一\:致\:由 \fBreconcile\fR 比\:对，\:它\:还\:会\:把\:差\:额\:归\:集\:到 \fBreconcile_difference\fR；\fBbalance\fR 只\:回\:答\:「账\:本\:上\:是\:多\:少」。
+.PP
+科\:目\:按\:账\:本\:的\:写\:法\:给，\:例\:如 \fBuser:42\fR、\fBmerchant_payable:7\fR、\fBpayout:3\fR、\fBpayment_gateway:<通\:道\:名>\fR、\fBplatform_revenue\fR、\fBupstream_cost\fR、\fBreconcile_difference\fR。\:时\:刻\:用 RFC3339 或\:只\:写\:日\:期\:（按 UTC 零\:点\:算），\:区\:间\:左\:闭\:右\:开。
+.PP
+\fBverify\fR 的\:范\:围\:按\:「在\:这\:个\:区\:间\:里\:出\:现\:过\:的\:交\:易」\:圈\:定，\:而\:每\:一\:笔\:交\:易\:都\:会\fB整\:笔\fR读\:回\:来\:校\:验：\:只\:按\:行\:过\:滤\:会\:把\:横\:跨\:区\:间\:边\:界\:的\:交\:易\:切\:两\:半，\:而\:半\:笔\:可\:能\:看\:起\:来\:是\:平\:的。\fBverify\fR 发\:现\:不\:合\:法、\:或\:区\:间\:里\:一\:条\:分\:录\:都\:没\:有\:时\:退\:出 1；\fBreconcile\fR 发\:现\:不\:一\:致\:时\:也\:是1。\:旧\:路\:径 \fBlarkaxctl reconcile\fR 仍\:然\:可\:用。
+.SH SEE ALSO
+.BR larkaxctl (1)

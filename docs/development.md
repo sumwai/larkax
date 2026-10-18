@@ -1228,6 +1228,7 @@ bash scripts/check-deadmethods.sh   # 导出方法有没有调用点（上面两
 bash scripts/check-test-names.sh    # Go 顶层函数声明的名字必须是 ASCII
 bash scripts/check-lessons-index.sh # LESSONS.md 的索引与 lessons/ 下的正文对得上
 bash scripts/check-docs-index.sh    # docs/README.md 的分组表、development.md 的 TOC 与正文对得上
+bash scripts/check-man-pages.sh     # man/man1 下的手页与命令注册表、cli-reference.md 对得上
 scripts/check-mutation.sh           # 变异测试（改动计费/账本时），见下文
 
 # 契约测试：用官方 SDK 当客户端验我们对外响应的形状。要先装 Python 依赖，
@@ -1242,7 +1243,7 @@ go vet -tags=contract ./internal/assembly/
 **改了哪个脚本就跑它自己的自测**：`scripts/check-redlines.test.sh`、
 `check-deadcode.test.sh`、`check-unimported.test.sh`、`check-deadmethods.test.sh`、
 `check-test-names.test.sh`、`check-layering.test.sh`、`check-mutation.test.sh`、
-`check-lessons-index.test.sh`、`check-docs-index.test.sh`。
+`check-lessons-index.test.sh`、`check-docs-index.test.sh`、`check-man-pages.test.sh`。
 扫描器坏掉时的输出和「干净」一模一样，没有自测就无法证明它还在工作
 （见 [LESSONS.md](../LESSONS.md) 第 2、7 条）。
 
@@ -1300,6 +1301,30 @@ TOC 的每个锚点在文中都有对应标题。前两条是一对，只留一�
 
 哪些标题该进 TOC 是取舍；索引分组的措辞好不好、指向仓库别处的链接（`../…`）
 有没有写错，都不在它里面——这些在脚本开头的「已知边界」里逐条写着，不是漏判。
+
+`scripts/check-man-pages.sh` 管的是 `man/man1/` 下的手页与它们的来源是否同一次生成
+的。手页是**产物**：名字、分组与一句话来自命令注册表（`cmd/larkaxctl` 的
+`commandGroups`），长文本来自 `docs/cli-reference.md`，由 `internal/manpage` 渲染成
+roff，生成一次提交进库。产物与来源分家的样子是安静的——改了注册表里的一句话或
+文档的某一节却没重新生成，库里的手页仍然说着旧话，而 CI 里不会有任何一步失败，
+只有照着 `man larkaxctl-channel` 敲的人才会撞上。形状照抄 cargo 的 `validate-man.sh`：
+重新生成一遍，与提交的那一份逐页比对，对不上就红。
+
+改了那两处源文件之后，重新生成并提交：
+
+```sh
+scripts/check-man-pages.sh --update
+```
+
+翻一份源码树里的手页（`man` 只认 `MANPATH` 下的 `man1/` 这类子目录，所以指到 `man/` 那一层）：
+
+```sh
+MANPATH="$PWD/man" man larkaxctl-channel
+```
+
+它只判「同不同」，不判「对不对」：roff 宏用得对不对、中文有没有断在难看的字后面，
+都不是它的判据。它的成功信号也是沉默，所以脚本每次都打印一行计数，生成器非零退出、
+一页都没写出来、写出空页或没有 `.TH` 的页时判「没跑成」（退出码 2），不报通过。
 
 `scripts/check-test-names.sh` 管的是「标识符保持英文」这条约定：**Go 顶层
 `func` 声明的名字**只许由 `[A-Za-z0-9_]` 组成。判的是**名字那个标识符**，
@@ -1404,7 +1429,8 @@ CI 包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`�
 （`check-unimported.sh`）、导出方法调用点门禁及其自测（`check-deadmethods.sh`）、
 测试函数名门禁及其自测（`check-test-names.sh`）、索引与正文一致性门禁及其自测
 （`check-lessons-index.sh`）、文档索引与正文一致性门禁及其自测
-（`check-docs-index.sh`）、非 UTC 时区下的时刻门禁（`TZ=Asia/Shanghai` 再跑一遍
+（`check-docs-index.sh`）、手页同步门禁及其自测（`check-man-pages.sh`）、
+非 UTC 时区下的时刻门禁（`TZ=Asia/Shanghai` 再跑一遍
 受影响的包，见 [cli-output.md](cli-output.md) 的「时刻与时区」）、契约测试（见下）。
 
 **变异测试不在 CI 里跑**（CI 跑的是它自己的自测），它只在本地按需跑；

@@ -6,6 +6,13 @@
 每条命令有两版帮助：`larkaxctl <命令> --help`（也认 `-h`）给一屏摘要，
 `larkaxctl help <命令>` 与 `larkaxctl <命令> help` 给展开的那一份。
 
+这份参考同时有 man 版：首页列出各命令页，各命令页指回首页，而命令页之间不互相引用。
+它们由命令注册表与本文件生成（见 [development.md](development.md) 的「每道门在挡什么」），
+不手工改。发布物里没有这几页，要看就到源码树里翻。下面这条命令里的 `MANPATH` 指到 `man/`
+那一层，是因为 `man` 只认它下面的 `man1/` 这类子目录：
+
+- `MANPATH="$PWD/man" man larkaxctl-channel`
+
 ## 全局约定
 
 这几条对所有命令生效，写在子命令的前面或后面都认。
