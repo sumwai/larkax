@@ -524,6 +524,15 @@ func retryableErr() error { return &channel.ErrUpstream{StatusCode: 500, Retryab
 func permanentErr() error { return &channel.ErrUpstream{StatusCode: 401, Retryable: false} }
 func plainErr() error     { return errors.New("随便一个错") }
 
+// requestTimeoutErr 是上游自己超时（408）的那一条。
+//
+// 单列一个而不是复用 retryableErr：408 是 #613 补进来的第一个既不是 429 也不是
+// 5xx 的可重试码，而这次要证明的正是「这一档也走同一条路」——照抄一个 500 的话，
+// 那个新码在这条路径上仍然没有人试过。
+func requestTimeoutErr() error {
+	return &channel.ErrUpstream{StatusCode: 408, Retryable: true, GotResponse: true}
+}
+
 // 决策那条表面递进来的请求由本包合成（见 ChatModel），而它只含一个模型名：
 // 「本包除 Model 之外不读载体的别的字段」这条前提就建立在这上面。
 //
@@ -577,6 +586,35 @@ func TestChatFailsOverOnRetryableError(t *testing.T) {
 	}
 	if res.Channel.ID == 1 {
 		t.Fatal("不应停在失败的渠道上")
+	}
+	if len(res.Attempts) != 2 {
+		t.Fatalf("尝试记录数为 %d，期望 2（含失败的那次）", len(res.Attempts))
+	}
+	if res.Attempts[0].Err == nil || !res.Attempts[0].Retryable {
+		t.Errorf("第一次尝试应记为可重试失败: %+v", res.Attempts[0])
+	}
+}
+
+// 408（上游自己的超时）也要换下一个候选。
+//
+// 上面那条用的是 500：它钉的是换候选这条机制本身，而机制是按「可重试」这一个
+// 布尔判的，与是哪个状态码无关。这一条钉的是**新加的那一档接进了机制**——408 是
+// #613 之后第一个既不是 429 也不是 5xx 的可重试码，它换渠道的理由与那两类一样
+// （见 httpx.RetryableStatus 的判据：上游这一侧暂时答不上来）。
+func TestChatFailsOverOnRequestTimeout(t *testing.T) {
+	exec := &fakeExecutor{
+		results: map[int64]error{1: requestTimeoutErr()},
+		resp:    &channel.Response{UpstreamModel: "m"},
+	}
+	r := seededRouter(1)
+
+	res, err := r.Chat(context.Background(), exec, &channel.Request{Model: "m"},
+		[]Candidate{candidate(1, "m", withPriority(10)), candidate(2, "m", withPriority(1))}, "m")
+	if err != nil {
+		t.Fatalf("408 应换渠道成功: %v", err)
+	}
+	if res.Channel.ID == 1 {
+		t.Fatal("不应停在回 408 的渠道上")
 	}
 	if len(res.Attempts) != 2 {
 		t.Fatalf("尝试记录数为 %d，期望 2（含失败的那次）", len(res.Attempts))
