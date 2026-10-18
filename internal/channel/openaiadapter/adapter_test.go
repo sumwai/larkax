@@ -116,6 +116,39 @@ func TestChatDetectsEmbeddedError(t *testing.T) {
 	}
 }
 
+// 200 里的错误对象是**限流**形态时，这次失败值得换渠道重试。
+//
+// 限流这件事写在哪个字段上、以什么类型写，各家不同：写在 type 上，写在 code
+// 上（OpenAI 真实的 429 响应体里 type 是 "requests"，限流写在 code 里），也有
+// 上游把状态码写成数字塞进 code。三种都要认出来。
+//
+// 判成不可重试的后果有两条（见 internal/gateway 的 channelAtFault）：路由层不换
+// 下一个候选，一次本可成功的请求直接失败；这个渠道也不记失败，正在限流的它照旧
+// 拿流量。
+func TestChatEmbeddedRateLimitIsRetryable(t *testing.T) {
+	bodies := []string{
+		`{"error":{"message":"Rate limit reached","type":"rate_limit_error"}}`,
+		`{"error":{"message":"Rate limit reached","type":"requests","code":"rate_limit_exceeded"}}`,
+		`{"error":{"message":"Rate limit reached","code":429}}`,
+	}
+	for _, body := range bodies {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, body)
+		}))
+
+		_, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), &channel.Request{Model: "m"})
+		srv.Close()
+
+		if err == nil {
+			t.Fatalf("%s：200 里的 error 对象应当被识别", body)
+		}
+		if !channel.IsRetryable(err) {
+			t.Errorf("%s：限流是上游这一侧暂时答不上来，换一个渠道可能成功，应当可重试", body)
+		}
+	}
+}
+
 // `"error": null` 与空对象是正常的「无错误」写法，不能被误判。
 func TestChatIgnoresNullError(t *testing.T) {
 	for _, body := range []string{

@@ -196,6 +196,28 @@ func TestChatDetectsEmbeddedError(t *testing.T) {
 	}
 }
 
+// 200 里的错误对象是**限流**形态时，这次失败值得换渠道重试。
+//
+// Anthropic 把分类放在 type 上（这个错误对象里没有 code），与 OpenAI 兼容
+// 上游把分类放在 code 上是同一件事的两种写法。三家共用一处判据
+// （channel.IsEmbeddedErrorRetryable），所以这条与另外两家那两条钉的是同一件事：
+// 同一个 429 语义不该因为走哪条入口而分岔。
+func TestChatEmbeddedRateLimitIsRetryable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w,
+			`{"type":"error","error":{"type":"rate_limit_error","message":"Rate limit reached"}}`)
+	}))
+	defer srv.Close()
+
+	_, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), &channel.Request{Model: "m"})
+	if err == nil {
+		t.Fatal("200 里的 error 对象应当被识别")
+	}
+	if !channel.IsRetryable(err) {
+		t.Error("限流是上游这一侧暂时答不上来，换一个渠道可能成功，应当可重试")
+	}
+}
+
 func TestEmbeddedErrorRetryability(t *testing.T) {
 	cases := map[string]bool{
 		"overloaded_error":      true,

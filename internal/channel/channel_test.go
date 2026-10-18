@@ -301,3 +301,54 @@ func TestErrUpstreamUnwrap(t *testing.T) {
 		t.Error("Error() 不应为空")
 	}
 }
+
+// 内嵌错误的可重试判据只有一处（三个适配器都调它），所以它的分类表钉在这里。
+//
+// 两个方向都要钉：只钉「限流可重试」的话，把所有内嵌错误都判成可重试也能过，
+// 而那会让「模型名不存在」这种请求侧的错在每个候选渠道上重放一遍——费用与
+// 延迟乘以渠道数。
+func TestIsEmbeddedErrorRetryable(t *testing.T) {
+	cases := []struct {
+		name     string
+		typeName string
+		code     string
+		want     bool
+	}{
+		// 限流。三种写法指的是同一件事：Anthropic 写在 type 上，OpenAI 兼容
+		// 上游写在 code 上，也有上游直接把状态码填进 code。
+		{name: "限流写在 type 上", typeName: "rate_limit_error", want: true},
+		{name: "限流写在 code 上", typeName: "requests", code: "rate_limit_exceeded", want: true},
+		{name: "限流换一种大小写与分隔", typeName: "RateLimitError", want: true},
+		{name: "限流写成状态码", code: "429", want: true},
+		{name: "限流换一种叫法", code: "too_many_requests", want: true},
+
+		{name: "过载", typeName: "overloaded_error", want: true},
+		{name: "过载写成状态码", code: "529", want: true},
+		{name: "超时", code: "timeout", want: true},
+		{name: "超时换个写法", code: "timed_out", want: true},
+		{name: "上游自身出错", code: "server_error", want: true},
+		{name: "上游自身出错的另一种写法", code: "internal_error", want: true},
+		{name: "5xx 写成状态码", code: "503", want: true},
+
+		// 请求侧的问题：换到哪个渠道都是同一个错。
+		{name: "参数不对", typeName: "invalid_request_error", want: false},
+		{name: "鉴权失败", typeName: "authentication_error", want: false},
+		{name: "权限不够", typeName: "permission_error", want: false},
+		{name: "找不到", typeName: "not_found_error", want: false},
+		{name: "请求体过大", typeName: "request_too_large", want: false},
+		{name: "额度用完", code: "insufficient_quota", want: false},
+
+		// 认不出来的一律不可重试，与 channel.IsRetryable 同一个方向。
+		{name: "两个字段都没说什么", want: false},
+		{name: "没见过的分类", typeName: "something_new", want: false},
+		{name: "数字形态的 code 要整个对上才算", code: "15003", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsEmbeddedErrorRetryable(tc.typeName, tc.code); got != tc.want {
+				t.Errorf("IsEmbeddedErrorRetryable(%q, %q) = %v，期望 %v",
+					tc.typeName, tc.code, got, tc.want)
+			}
+		})
+	}
+}
