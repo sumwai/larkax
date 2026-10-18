@@ -980,7 +980,7 @@ cat key.txt | go run ./cmd/larkaxctl doctor --live --model claude-x --credential
 |---|---|
 | `--model <规范名>` | 这次请求用的规范模型名，`--live` 时必填 |
 | `--endpoint chat\|messages\|responses` | 打哪个入口，默认 `chat`。`chat` 是 `POST /v1/chat/completions`（`Authorization: Bearer`），`messages` 是 `POST /v1/messages`（`x-api-key`），`responses` 是 `POST /v1/responses`（`Authorization: Bearer`） |
-| `--base-url <URL>` | 网关公共入口的地址，默认 `http://127.0.0.1:8080`（换过 `LARKAX_HTTP_ADDR` 就要显式给） |
+| `--base-url <URL>` | 网关公共入口的地址。不给时按配置里的 `LARKAX_HTTP_ADDR` 拼（那个变量写着 `127.0.0.1:8081` 就打成 `http://127.0.0.1:8081`；写成 `:8080` 这类不写主机的「所有网卡」时按 `127.0.0.1` 打），网关不在本机时要显式给 |
 | `--credential-stdin` / `--credential-env <变量名>` | 读 API Key 的来源，二者只能给一个（`--stdin` / `--env` 是同一个选项的简写） |
 | `-v` / `--verbose` | 每一项多打一段细节，默认不打。**全局选项**，写在子命令前或后都认；目前只有 `doctor` 用它 |
 | `-q` / `--quiet` | 压掉「给人看」那一档的全部输出，只留退出码（致命错误与 `-o json` 不受影响，见 [cli-output.md](cli-output.md)） |

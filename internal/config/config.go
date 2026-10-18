@@ -33,6 +33,15 @@ import (
 	"strings"
 )
 
+// defaultHTTPAddr 是主服务没配 LARKAX_HTTP_ADDR 时听在哪儿。
+//
+// 提成一个常量，是因为这个值有两个读取方：服务进程（Load）与运维命令
+// （LoadOps 的 HTTPAddr，`doctor --live` 靠它算默认往哪儿打请求）。两处各写一份
+// 字面量时，改了一处而没改另一处的表现是 doctor 朝一个没人监听的端口发请求。
+// Makefile 的 check-ports 里还有一份兜底值，那一份与这里由
+// makefile_ports_test.go 对在一起。
+const defaultHTTPAddr = "127.0.0.1:8080"
+
 // Role 是同一个二进制承担的服务角色。
 //
 // 数据面（RoleGateway）绝不能依赖控制面（RoleControl）在线，
@@ -131,7 +140,7 @@ func Load() (*Config, error) {
 		Role: Role(env("LARKAX_ROLE", string(RoleGateway))),
 		// 两个监听地址默认只绑回环：内部端点（/healthz、/readyz、/metrics）与业务入口
 		// 共用这套默认值，而它们都不需要对外。要对外时显式写，例如容器里写 ":8080"。
-		HTTPAddr:     env("LARKAX_HTTP_ADDR", "127.0.0.1:8080"),
+		HTTPAddr:     env("LARKAX_HTTP_ADDR", defaultHTTPAddr),
 		InternalAddr: env("LARKAX_INTERNAL_ADDR", "127.0.0.1:9090"),
 		LogLevel:     env("LARKAX_LOG_LEVEL", "info"),
 		DBDSN:        os.Getenv("LARKAX_DB_DSN"),
@@ -166,8 +175,9 @@ func Load() (*Config, error) {
 // OpsConfig 是**运维命令**所需的配置面。
 //
 // 它与 Config 分开，因为两者回答的不是同一个问题。Config 描述「一个服务实例
-// 以什么身份启动」——角色决定它要不要解渠道凭证，主密钥与监听地址跟着角色走。
-// 运维命令不属于任何角色：它要的只是「连哪个库」，加上打日志要的级别。
+// 以什么身份启动」——角色决定它要不要解渠道凭证，主密钥跟着角色走。运维命令
+// 不属于任何角色：它要的是「连哪个库」，加上打日志要的级别，以及下面那个
+// 监听地址。
 //
 // 做成一个具名的类型，是为了让这个面**只有这几项**。想给运维命令加配置时改的是
 // 这里，而服务那一侧不受影响；反过来，加进 Config 的字段也不会悄悄变成
@@ -176,6 +186,17 @@ type OpsConfig struct {
 	Env      string
 	LogLevel string
 	DBDSN    string
+
+	// HTTPAddr 是主服务的**监听**地址，取值与默认值都跟 Config 的同名字段
+	// 一致（LARKAX_HTTP_ADDR）。
+	//
+	// 它进运维命令的配置面，是因为 `doctor --live` 要朝自己的网关打一次真请求：
+	// 那个默认地址只有配置知道，写死一个端口时，在 .env 里改过端口的人拿到的是
+	// 「连不上」，而那句话读起来像服务没起来。
+	//
+	// 它是监听地址，不是能连的地址——`:8080` 这种不写主机的「所有网卡」写法
+	// 不是能给 http.Client 的值，怎么把它变成能连的地址是调用方的事。
+	HTTPAddr string
 }
 
 // IsProduction 与 Config 的同名方法一致：只用来选日志格式。
@@ -217,6 +238,9 @@ func LoadOps() (*OpsConfig, error) {
 		Env:      env("LARKAX_ENV", "development"),
 		LogLevel: env("LARKAX_LOG_LEVEL", "info"),
 		DBDSN:    os.Getenv("LARKAX_DB_DSN"),
+		// 同一个变量、同一个默认值，读法与 Load 一致（见 defaultHTTPAddr）。
+		// 它不参与下面的校验：一个运维命令不会因为监听地址写得怪而跑不起来。
+		HTTPAddr: env("LARKAX_HTTP_ADDR", defaultHTTPAddr),
 	}
 	if cfg.DBDSN == "" {
 		// 措辞与 Load 保持一致：两者都是「配置无效」这一类，而缺 DSN 是

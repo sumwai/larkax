@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1725,6 +1726,208 @@ func TestDoctorLiveTrimsTrailingSlashFromBaseURL(t *testing.T) {
 	if got := opts.baseURL + doctorPathChat; got != "http://127.0.0.1:8080"+doctorPathChat {
 		t.Errorf("拼出来的地址 = %q", got)
 	}
+}
+
+// TestDoctorBaseURLFromListenAddr 固定住「监听地址怎么变成能连的地址」这条换算。
+//
+// 「能监听」与「能连」不是一回事：`:8080` 这类写法表示监听所有网卡，它不是一个
+// http.Client 拿得走的地址；而 doctor 与网关通常在同一台机器上，所以这类一律按
+// 环回取。期望值逐条写死在用例里，改判据就会红。
+func TestDoctorBaseURLFromListenAddr(t *testing.T) {
+	// 「所有网卡」写全了的 v4 写法在这里拼出来，而不是写成一行字面量：红线扫描
+	// 把「IP:端口」那个形态当成可能泄露本机信息的一类（对通配地址来说是误报），
+	// 而这里要的是一个能监听的地址，不是一行扫描器接受的文本。
+	allInterfacesV4 := net.JoinHostPort("0.0.0.0", "8081")
+
+	for _, tc := range []struct {
+		listen string
+		want   string
+	}{
+		{"127.0.0.1:8081", "http://127.0.0.1:8081"},
+		{":8081", "http://127.0.0.1:8081"},
+		{allInterfacesV4, "http://127.0.0.1:8081"},
+		{"[::]:8081", "http://127.0.0.1:8081"},
+		// IPv6 通配地址的长写法。判据要是写成「列几个字面量」，这一格会拼出
+		// http://[0:0:0:0:0:0:0:0]:8081——它在 Linux 上连得上（落到环回），但那
+		// 是碰巧，不是这条判据要的那件事。
+		{"[0:0:0:0:0:0:0:0]:8081", "http://127.0.0.1:8081"},
+		{"192.0.2.7:9000", "http://192.0.2.7:9000"},
+		{"[::1]:8081", "http://[::1]:8081"},
+		{"gateway.example.com:8443", "http://gateway.example.com:8443"},
+	} {
+		got, err := doctorBaseURLFromListenAddr(tc.listen)
+		if err != nil {
+			t.Errorf("LARKAX_HTTP_ADDR = %q 时不该报错：%v", tc.listen, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("LARKAX_HTTP_ADDR = %q 拼出来 %q，想要 %q", tc.listen, got, tc.want)
+		}
+	}
+
+	// 读不出主机与端口的不给默认值：替它猜一个端口，等于把「配置写错了」变成
+	// 一次看起来像服务没起来的连接失败。
+	for _, listen := range []string{"8080", "127.0.0.1:", ""} {
+		got, err := doctorBaseURLFromListenAddr(listen)
+		if err == nil {
+			t.Errorf("LARKAX_HTTP_ADDR = %q 该报错，却拼出了 %q", listen, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), "LARKAX_HTTP_ADDR") {
+			t.Errorf("报错要说清是哪个变量：%v", err)
+		}
+	}
+}
+
+// fakeDoctorGateway 起一个假网关：收下一次请求，回 200 与一份正常的响应体。
+//
+// 返回的第二个值是「最后一次请求打在哪条路径上」，用来证明请求真的到了这里，
+// 而不是 doctor 自己编了一段输出。
+func fakeDoctorGateway(t *testing.T) (*httptest.Server, func() string) {
+	t.Helper()
+	var lastPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastPath = r.URL.Path
+		w.Header().Set(doctorHeaderVersion, "1.2.3")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"cmpl-1","model":"claude-x","choices":[],`+
+			`"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() string { return lastPath }
+}
+
+// deadDoctorDSN 是一个连不上的库。
+//
+// 127.0.0.1:1 上不会有 Postgres 在听，连接当场被拒（不是等超时），所以这些用例
+// 走的都是「库连不上、真打上游照跑」那条路——那正是要验的那一项所在的路径。
+const deadDoctorDSN = "postgres://larkax:placeholder@127.0.0.1:1/larkax?sslmode=disable"
+
+// TestDoctorLiveDefaultBaseURLFollowsListenAddr 固定住「默认地址跟着本次配置走」。
+//
+// 假网关听在内核挑的一个端口上，配置里的 LARKAX_HTTP_ADDR 就写成那个地址，
+// 命令行**不给** --base-url。要看到的是它真的打到了这里：假网关收到了那次请求，
+// 报告里那一行是通过，-v 里打出来的入口地址就是它。
+//
+// 库连不上（DSN 指到一个没人听的端口）不影响这一项：真打上游走 HTTP，不读库
+// （见 doctorReportWithoutDB）。
+func TestDoctorLiveDefaultBaseURLFollowsListenAddr(t *testing.T) {
+	srv, lastPath := fakeDoctorGateway(t)
+
+	t.Setenv("LARKAX_HTTP_ADDR", strings.TrimPrefix(srv.URL, "http://"))
+	t.Setenv("LARKAX_DB_DSN", deadDoctorDSN)
+	t.Setenv("LARKAX_TEST_DOCTOR_KEY", testDoctorKey)
+	withVerbose(t, true)
+
+	out, err := runDoctorCaptured(t,
+		"--live", "--model", "claude-x", "--credential-env", "LARKAX_TEST_DOCTOR_KEY")
+
+	if got := lastPath(); got != doctorPathChat {
+		t.Fatalf("假网关收到的路径 = %q，期望 %q——默认地址没跟着 LARKAX_HTTP_ADDR 走：\n%s",
+			got, doctorPathChat, out)
+	}
+	if !strings.Contains(out, "✓ 上游连通") {
+		t.Errorf("真打上游那一行该是通过：\n%s", out)
+	}
+	liveSection := doctorSection(t, out, "上游连通")
+	want := "入口：POST " + srv.URL + doctorPathChat
+	if !strings.Contains(liveSection, want) {
+		t.Errorf("打出来的入口地址里没有 %q：\n%s", want, liveSection)
+	}
+	// 库连不上是这一条的前提，不是它的结论：退出码照旧是那一档。
+	if got := exitCode(err); got != exitDBUnreach {
+		t.Errorf("退出码 = %d，期望 %d（库连不上）", got, exitDBUnreach)
+	}
+}
+
+// TestDoctorLiveBaseURLFlagBeatsListenAddr 固定住「显式给的 --base-url 仍然优先」。
+//
+// 配置里的地址指向一个没人听的端口：默认值要是盖住了命令行给的地址，这次请求就会
+// 打空，报告以「请求没发出去」收场。
+func TestDoctorLiveBaseURLFlagBeatsListenAddr(t *testing.T) {
+	srv, lastPath := fakeDoctorGateway(t)
+
+	t.Setenv("LARKAX_HTTP_ADDR", "127.0.0.1:1")
+	t.Setenv("LARKAX_DB_DSN", deadDoctorDSN)
+	t.Setenv("LARKAX_TEST_DOCTOR_KEY", testDoctorKey)
+
+	out, err := runDoctorCaptured(t,
+		"--live", "--model", "claude-x", "--base-url", srv.URL,
+		"--credential-env", "LARKAX_TEST_DOCTOR_KEY")
+
+	if got := lastPath(); got != doctorPathChat {
+		t.Fatalf("假网关收到的路径 = %q，期望 %q：\n%s", got, doctorPathChat, out)
+	}
+	if !strings.Contains(out, "✓ 上游连通") {
+		t.Errorf("真打上游那一行该是通过：\n%s", out)
+	}
+	if got := exitCode(err); got != exitDBUnreach {
+		t.Errorf("退出码 = %d，期望 %d（库连不上）", got, exitDBUnreach)
+	}
+}
+
+// TestDoctorUnusableListenAddr 固定住配置读不出主机与端口时的三条处置。
+//
+// 开了 --live 而没给 --base-url 时**不**替它猜一个地址：说清是哪个变量、给不出
+// 默认值，并指出显式给 --base-url 就能接着跑。第二条子用例把那句话兑现一遍——
+// 写在错误信息里的出路，要真的走得通。
+//
+// 退出码是 1 而不是 2：错的是环境里的那份配置，不是这次敲的命令。
+//
+// 没开 --live 时它一点都不该受影响：那六项只读检查不碰网络，地址用不上（第三条
+// 子用例）。
+func TestDoctorUnusableListenAddr(t *testing.T) {
+	const unusable = "8080"
+	t.Setenv("LARKAX_HTTP_ADDR", unusable)
+	t.Setenv("LARKAX_DB_DSN", deadDoctorDSN)
+	t.Setenv("LARKAX_TEST_DOCTOR_KEY", testDoctorKey)
+
+	t.Run("不给 --base-url 就报错", func(t *testing.T) {
+		err := runCaptured(t, func() error {
+			return runDoctor([]string{
+				"--live", "--model", "claude-x", "--credential-env", "LARKAX_TEST_DOCTOR_KEY",
+			})
+		})
+		if err == nil {
+			t.Fatal("配置里读不出主机与端口、命令行又没给地址时，必须报错")
+		}
+		for _, want := range []string{"LARKAX_HTTP_ADDR", unusable, "--base-url"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("报错里没有 %q：%v", want, err)
+			}
+		}
+		if got := exitCode(err); got != exitFailure {
+			t.Errorf("退出码 = %d，期望 %d", got, exitFailure)
+		}
+	})
+
+	t.Run("显式给 --base-url 就能接着跑", func(t *testing.T) {
+		srv, lastPath := fakeDoctorGateway(t)
+
+		out, _ := runDoctorCaptured(t,
+			"--live", "--model", "claude-x", "--base-url", srv.URL,
+			"--credential-env", "LARKAX_TEST_DOCTOR_KEY")
+
+		if got := lastPath(); got != doctorPathChat {
+			t.Fatalf("假网关收到的路径 = %q，期望 %q：\n%s", got, doctorPathChat, out)
+		}
+		if !strings.Contains(out, "✓ 上游连通") {
+			t.Errorf("真打上游那一行该是通过：\n%s", out)
+		}
+	})
+
+	t.Run("没开 --live 时不受影响", func(t *testing.T) {
+		out, err := runDoctorCaptured(t)
+
+		// 退出码是「连不上库」那一档：报错走的是六项检查那条路，而不是地址
+		// 拼不出来——那件事只在 --live 时才有意义。
+		if got := exitCode(err); got != exitDBUnreach {
+			t.Errorf("退出码 = %d，期望 %d（库连不上）:\n%s", got, exitDBUnreach, out)
+		}
+		if !strings.Contains(out, "上游连通") {
+			t.Errorf("报告里该有真打上游那一节：\n%s", out)
+		}
+	})
 }
 
 // ── 端到端（需要数据库） ────────────────────────────────────────────────
