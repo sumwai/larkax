@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1456,5 +1457,623 @@ func TestUnifiedToWireCoversEveryBlockField(t *testing.T) {
 	shape, _ := thinking["thinking"].(map[string]any)
 	if shape[fieldType] != typeText {
 		t.Errorf("思考内容应当只留长度: %#v", thinking["thinking"])
+	}
+}
+
+// ── #675：整包变异存活条目的判据 ─────────────────────────────────────────
+
+// redactionError 的区别只有有没有路径前缀；错误会进日志，
+// 路径是定位问题的全部信息。
+//
+// 变异：`path == ""` 翻成 `!=`：空路径也会被写成「路径 : 原因」，
+// 非空路径反而把路径丢掉。
+func TestRedactionErrorCarriesPath(t *testing.T) {
+	if got, want := redactionError("", "原因").Error(), ErrRedaction.Error()+": 原因"; got != want {
+		t.Errorf("空路径的错误 = %q，期望 %q", got, want)
+	}
+	got := redactionError("messages[0].content.text", "原因").Error()
+	if !strings.Contains(got, "路径 messages[0].content.text: 原因") {
+		t.Errorf("带路径的错误 = %q，里面没有路径", got)
+	}
+	if !errors.Is(redactionError("a", "b"), ErrRedaction) {
+		t.Error("错误必须带 ErrRedaction 标记")
+	}
+}
+
+// 传输层没有头时，骨架里连 headers 这个键都不该出现：空对象读起来像
+// 「这次响应没有头」，而「没有采集」是另一件事。
+//
+// 变异：`len(tr.Headers) > 0` 的 `>` 翻成 `>=`：空的头集合也会被写进骨架，
+// 变成 `headers: {}`。
+func TestTransportOmitsEmptyHeaders(t *testing.T) {
+	r := mustNew(t, RootResponse)
+	res, err := r.RedactResponseWithTransport(&channel.Response{}, Transport{})
+	if err != nil {
+		t.Fatalf("脱敏失败: %v", err)
+	}
+	if v, ok := res.Skeleton["headers"]; ok {
+		t.Errorf("空传输层不该写出 headers，实际 %#v", v)
+	}
+}
+
+// 上限为 0 是配置错误，不是「一切都太大」。
+//
+// 变异：`r.maxBytes <= 0` 的 `<=` 翻成 `<`：0 会漏过这道检查，落进下面的
+// 降级路径，最后以 ErrTooLarge 收场——调用方会把它记成「报文太大」，
+// 而真正该修的是配置。
+//
+// 走到这里只能直接构造 Redactor：New 的 WithMaxBytes 就拒掉了非正值。
+func TestBudgetUnsetIsNotTooLarge(t *testing.T) {
+	r := &Redactor{maxBytes: 0}
+	res := &Result{Skeleton: map[string]any{"a": 1}}
+	err := r.applyBudget(res)
+	if err == nil {
+		t.Fatal("上限为 0 时应当报错")
+	}
+	if errors.Is(err, ErrTooLarge) {
+		t.Errorf("上限为 0 不是「太大」：%v", err)
+	}
+	if !strings.Contains(err.Error(), "上限未设置") {
+		t.Errorf("错误里应当说明上限没设置：%v", err)
+	}
+}
+
+// 恰好等于上限的骨架不降级：上限是「不超过」。
+//
+// 变异：`size <= r.maxBytes` 的 `<=` 翻成 `<`：等于上限的骨架会被降级，
+// 摘要层反而超出上限，最后丢掉整条快照。
+func TestBudgetExactBoundaryFits(t *testing.T) {
+	sk := map[string]any{"a": 1}
+	n, err := jsonSize(sk)
+	if err != nil {
+		t.Fatalf("量不出大小: %v", err)
+	}
+	r := &Redactor{maxBytes: n}
+	res := &Result{Skeleton: sk}
+	if err := r.applyBudget(res); err != nil {
+		t.Fatalf("恰好等于上限不该报错: %v", err)
+	}
+	if res.Truncated {
+		t.Error("恰好等于上限不该降级")
+	}
+	if _, ok := res.Skeleton["_truncated"]; ok {
+		t.Error("骨架里不该出现 _truncated")
+	}
+}
+
+// 摘要层恰好等于上限时仍然保留（降级过一次，但没超）。
+//
+// 变异：第二处 `size > r.maxBytes` 的 `>` 翻成 `>=`：摘要层正好等于上限
+// 也会被当成超限丢掉。
+func TestBudgetTruncationAtExactLimit(t *testing.T) {
+	big := map[string]any{"a": 1, "nested": map[string]any{"x": "y"}}
+	top := topScalars(big)
+	n, err := jsonSize(top)
+	if err != nil {
+		t.Fatalf("量不出摘要层大小: %v", err)
+	}
+	full, err := jsonSize(big)
+	if err != nil {
+		t.Fatalf("量不出骨架大小: %v", err)
+	}
+	if full <= n {
+		t.Fatalf("前提不成立：原始骨架 %d 字节，摘要层 %d 字节", full, n)
+	}
+	r := &Redactor{maxBytes: n}
+	res := &Result{Skeleton: big}
+	if err := r.applyBudget(res); err != nil {
+		t.Fatalf("摘要层恰好等于上限不该报错: %v", err)
+	}
+	if !res.Truncated {
+		t.Error("超限的骨架应当被标记为截断")
+	}
+	if _, ok := res.Skeleton["nested"]; ok {
+		t.Error("摘要层不该保留容器")
+	}
+	if res.Skeleton["_truncated"] != true {
+		t.Error("摘要层应当带 _truncated")
+	}
+}
+
+// 布尔位置上的非布尔取值按内容处理；nil 原样留空，且不算「被替换」。
+//
+// 变异：`if v == nil` 翻成 `!=`：字符串 "yes" 会被当成 nil 吞掉，
+// 而真正的 nil 会变成 {_t:null} 并被记进 redacted_paths。
+func TestAllowBoolFieldRejectsNonBool(t *testing.T) {
+	r := mustNew(t, RootRequest)
+
+	res, err := r.RedactRaw(map[string]any{"stream": "yes"})
+	if err != nil {
+		t.Fatalf("脱敏失败: %v", err)
+	}
+	ph, ok := res.Skeleton["stream"].(map[string]any)
+	if !ok || ph["_t"] != "text" || ph["chars"] != 3 {
+		t.Errorf("字符串取值应当换成文本占位，实际 %#v", res.Skeleton["stream"])
+	}
+	if !slices.Contains(res.Redacted, "stream") {
+		t.Errorf("被替换的字段应当记进 redacted_paths：%v", res.Redacted)
+	}
+
+	res, err = r.RedactRaw(map[string]any{"stream": nil})
+	if err != nil {
+		t.Fatalf("脱敏失败: %v", err)
+	}
+	if v, ok := res.Skeleton["stream"]; !ok || v != nil {
+		t.Errorf("nil 应当原样留空，实际 %#v（键存在=%v）", v, ok)
+	}
+	if slices.Contains(res.Redacted, "stream") {
+		t.Errorf("nil 没有被替换，不该记进 redacted_paths：%v", res.Redacted)
+	}
+}
+
+// 非负整数的放行档：0 是合法取值，负值与小数不是。
+//
+// 变异（同一行两处）：
+//   - `ok && n >= 0` 的 `&&` 翻成 `||`：非数字取值（如 "7"）也会走整数那一条，
+//     被写成 0；
+//   - `n >= 0` 的 `>=` 翻成 `>`：seed=0 被当成非法值换成类型描述符。
+func TestAllowUintAcceptsZeroOnly(t *testing.T) {
+	r := mustNew(t, RootRequest)
+
+	res, err := r.RedactRaw(map[string]any{"seed": json.Number("0")})
+	if err != nil {
+		t.Fatalf("脱敏失败: %v", err)
+	}
+	if res.Skeleton["seed"] != int64(0) {
+		t.Errorf("seed=0 应当原样放行，实际 %#v", res.Skeleton["seed"])
+	}
+	if slices.Contains(res.Redacted, "seed") {
+		t.Errorf("被放行的字段不该记进 redacted_paths：%v", res.Redacted)
+	}
+
+	for _, bad := range []any{json.Number("-1"), json.Number("1.5"), "7", -3} {
+		res, err := r.RedactRaw(map[string]any{"seed": bad})
+		if err != nil {
+			t.Fatalf("脱敏失败: %v", err)
+		}
+		if _, ok := res.Skeleton["seed"].(map[string]any); !ok {
+			t.Errorf("seed=%#v 应当换成形状描述符，实际 %#v", bad, res.Skeleton["seed"])
+		}
+		if !slices.Contains(res.Redacted, "seed") {
+			t.Errorf("seed=%#v 被替换了，应当记进 redacted_paths：%v", bad, res.Redacted)
+		}
+	}
+}
+
+// error 块的 code 只在像枚举词时才留：那个位置一旦被上游回显用户内容，
+// 原样留下就是把内容写进快照。
+//
+// 变异：`ok && isEnumWord(code)` 的 `&&` 翻成 `||`：只要 code 是字符串就留，
+// 含空格的取值也照样写进骨架。
+func TestErrorBlockCodeMustLookLikeEnum(t *testing.T) {
+	w := &walker{redactor: mustNew(t, RootRequest), refs: newToolRefs()}
+
+	got, ok := w.block(map[string]any{
+		"type": "error", "message": "boom", "code": "user said hello",
+	}, "content[0]").(map[string]any)
+	if !ok {
+		t.Fatal("error 块应当换成对象")
+	}
+	if v, has := got["code"]; has {
+		t.Errorf("不像枚举词的 code 不该留下，实际 %#v", v)
+	}
+	if got["_t"] != "text" || got["kind"] != "error" || got["chars"] != 4 {
+		t.Errorf("error 块的占位不对：%#v", got)
+	}
+
+	got, ok = w.block(map[string]any{
+		"type": "error", "code": "invalid_request_error",
+	}, "content[1]").(map[string]any)
+	if !ok || got["code"] != "invalid_request_error" {
+		t.Errorf("枚举词形态的 code 应当留下，实际 %#v", got["code"])
+	}
+}
+
+// schema 递归的深度上限：第 maxSchemaDepth 层仍然展开，再下一层才换成形状。
+//
+// 变异（三处）：
+//   - `depth > maxSchemaDepth` 的 `>` 翻成 `>=`：第 maxSchemaDepth 层就被截断；
+//   - 两处 `depth+1` 翻成 `depth-1`（schemaKey 的未知键分支与 namedSchemas）：
+//     深度不再增长，上限永远走不到，整条链被完整展开。
+func TestSchemaDepthBoundary(t *testing.T) {
+	w := &walker{redactor: mustNew(t, RootRequest), refs: newToolRefs()}
+
+	atLimit, ok := w.schema(map[string]any{"type": "string"}, "", maxSchemaDepth).(map[string]any)
+	if !ok || atLimit["type"] != "string" {
+		t.Errorf("第 %d 层应当仍然展开，实际 %#v", maxSchemaDepth, atLimit)
+	}
+	over, ok := w.schema(map[string]any{"type": "string"}, "", maxSchemaDepth+1).(map[string]any)
+	if !ok {
+		t.Fatal("超深的那一层应当换成形状描述符")
+	}
+	if over["_t"] != "object" || over["keys"] != 1 || over["redacted"] != true {
+		t.Errorf("超深的那一层占位不对：%#v", over)
+	}
+
+	// 未知键里套容器：每层只加 1 深度，靠 schemaKey 的 `depth+1`。
+	deep := any("s")
+	for i := 0; i < maxSchemaDepth+3; i++ {
+		deep = map[string]any{"x": deep}
+	}
+	leaf := w.schema(deep, "", 0)
+	for i := 0; i < maxSchemaDepth+1; i++ {
+		m, ok := leaf.(map[string]any)
+		if !ok {
+			t.Fatalf("未知键链第 %d 层不是对象：%T", i, leaf)
+		}
+		leaf = m["x"]
+	}
+	if shape, ok := leaf.(map[string]any); !ok || shape["_t"] != "object" || shape["redacted"] != true {
+		t.Errorf("未知键链在第 %d 层之后应当被截断，实际 %#v", maxSchemaDepth+1, leaf)
+	}
+
+	// properties 里套子 schema：靠 namedSchemas 的 `depth+1`。
+	deep = any("s")
+	for i := 0; i < maxSchemaDepth+3; i++ {
+		deep = map[string]any{"properties": map[string]any{"p": deep}}
+	}
+	leaf = w.schema(deep, "", 0)
+	for i := 0; i < maxSchemaDepth+1; i++ {
+		m, ok := leaf.(map[string]any)
+		if !ok {
+			t.Fatalf("properties 链第 %d 层不是对象：%T", i, leaf)
+		}
+		props, ok := m["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("properties 链第 %d 层没有 properties：%#v", i, m)
+		}
+		leaf = props["p"]
+	}
+	if shape, ok := leaf.(map[string]any); !ok || shape["_t"] != "object" || shape["redacted"] != true {
+		t.Errorf("properties 链在第 %d 层之后应当被截断，实际 %#v", maxSchemaDepth+1, leaf)
+	}
+}
+
+// 全是凭证头时什么都不留，连 _hashed 这个键都不出现。
+//
+// 变异：`len(hashed) > 0` 的 `>` 翻成 `>=`：会写出 `_hashed: []`，
+// 读起来像「有一组头被哈希了」，实际上一个都没留。
+func TestHeadersAllDeniedKeepsNothing(t *testing.T) {
+	w := &walker{redactor: mustNew(t, RootRequest), refs: newToolRefs()}
+	got, ok := w.headers(map[string]string{"authorization": "Bearer secret"}, "headers", false).(map[string]any)
+	if !ok {
+		t.Fatal("头容器应当换成对象")
+	}
+	if len(got) != 0 {
+		t.Errorf("只有凭证头时不该留下任何键，实际 %#v", got)
+	}
+	if _, has := got["_hashed"]; has {
+		t.Error("一个头都没留时不该写出 _hashed")
+	}
+	if len(w.paths) != 0 {
+		t.Errorf("没有替换任何东西，不该记路径：%v", w.paths)
+	}
+}
+
+// 头名哈希按升序排列：输出要能与预期逐个比对。
+//
+// 变异：比较器 `<` 翻成 `>=`：顺序变成降序，钉死的那份期望对不上。
+//
+// 同一位置的边界变异（`<` 翻成 `<=`）是**等价变异**：两者只在两个元素相等时
+// 给出不同答案，而元素是头名的短哈希——两个头名只有小写后相同才会得到相同的
+// 哈希，那时两个元素是同一个字符串，交换它们不改变输出。
+func TestHeaderHashesAreSorted(t *testing.T) {
+	w := &walker{redactor: mustNew(t, RootRequest), refs: newToolRefs()}
+	got, ok := w.headers(map[string]string{
+		"x-c": "3", "x-a": "1", "x-b": "2",
+	}, "headers", false).(map[string]any)
+	if !ok {
+		t.Fatal("头容器应当换成对象")
+	}
+	hashed, ok := got["_hashed"].([]any)
+	if !ok || len(hashed) != 3 {
+		t.Fatalf("_hashed 应当是三个元素，实际 %#v", got["_hashed"])
+	}
+	want := []string{shortHash("x-a"), shortHash("x-b"), shortHash("x-c")}
+	slices.Sort(want)
+	for i, s := range want {
+		if hashed[i] != s {
+			t.Errorf("第 %d 个哈希 = %v，期望 %s（整列 %v）", i, hashed[i], s, hashed)
+		}
+	}
+}
+
+// 非字符串的头取值序列化成 JSON 文本，而不是变成空串。
+//
+// 变异：`if err != nil` 翻成 `== nil`：序列化成功时返回空串，
+// 失败时也返回空串——这个函数就只剩 nil / string / []string 三档能用。
+func TestFlattenHeaderValueSerializesNonStrings(t *testing.T) {
+	if got := flattenHeaderValue(42); got != "42" {
+		t.Errorf("整数应当序列化成 \"42\"，实际 %q", got)
+	}
+	if got := flattenHeaderValue(map[string]any{"a": 1}); got != `{"a":1}` {
+		t.Errorf("对象应当序列化成 JSON，实际 %q", got)
+	}
+	if got := flattenHeaderValue([]any{"a", "b"}); got != "a, b" {
+		t.Errorf("字符串数组应当用逗号连接，实际 %q", got)
+	}
+}
+
+// 按清单顺序取第一个非空的负载；空串是「这一格没写」，不是「负载是空」。
+//
+// 变异（同一行两处）：
+//   - `ok && s != ""` 的 `&&` 翻成 `||`：空串也当成找到了，返回 "" 而不再看
+//     下一个字段；
+//   - `s != ""` 翻成 `== ""`：非空的负载被跳过，反而优先返回空字段。
+func TestBinaryDataOfPicksFirstNonEmpty(t *testing.T) {
+	cases := []struct {
+		block map[string]any
+		want  string
+	}{
+		{map[string]any{"data": "", "base64": "QUJD"}, "QUJD"},
+		{map[string]any{"data": "QUJD"}, "QUJD"},
+		{map[string]any{"data": 42, "base64": "QUJD"}, "QUJD"},
+		{map[string]any{}, ""},
+	}
+	for _, tc := range cases {
+		if got := binaryDataOf(tc.block); got != tc.want {
+			t.Errorf("binaryDataOf(%#v) = %q，期望 %q", tc.block, got, tc.want)
+		}
+	}
+}
+
+// image_url 只有 data URI 才算负载；普通 URL 里即便有逗号也不能切。
+//
+// 变异：
+//   - `ok && strings.HasPrefix(s, "data:")` 的 `&&` 翻成 `||`：任何字符串
+//     image_url 都会按逗号切一刀；
+//   - `i >= 0` 翻成 `i < 0`：带逗号的 data URI 反而取不到负载；
+//   - `s[i+1:]` 的 `+1` 翻成 `-1`：切出来的串多带一截编码标记。
+//
+// `i >= 0` 的边界变异（`>=` 翻成 `>`）是**等价变异**：能走到这里说明 s 以
+// "data:" 开头，逗号的位置至少是 5，不可能是 0。
+func TestBinaryDataOfRequiresDataURI(t *testing.T) {
+	cases := []struct {
+		block map[string]any
+		want  string
+	}{
+		{map[string]any{"image_url": "https://example.test/a,b"}, ""},
+		{map[string]any{"image_url": "data:image/png;base64,QUJD"}, "QUJD"},
+		{map[string]any{"image_url": "data:image/png;base64"}, ""},
+	}
+	for _, tc := range cases {
+		if got := binaryDataOf(tc.block); got != tc.want {
+			t.Errorf("binaryDataOf(%#v) = %q，期望 %q", tc.block, got, tc.want)
+		}
+	}
+}
+
+// 可选字段在零值时不写进线格式结构：「没传」与「传了零」在骨架里必须分开。
+//
+// 变异：这一组条件各被翻了边界或取反（`> 0` → `>= 0` / `<= 0`，
+// `!= ""` → `== ""`，`!= nil` → `== nil`）：零值请求会多出空字段，
+// 有值请求会丢掉字段。两侧都钉住。
+func TestRequestMapOmitsEmptyOptionalFields(t *testing.T) {
+	empty := requestToMap(&channel.Request{})
+	for _, k := range []string{
+		"max_tokens", "temperature", "top_p", "reasoning_effort",
+		"messages", "tools", "extra", "headers",
+	} {
+		if v, ok := empty[k]; ok {
+			t.Errorf("零值请求不该写出 %q，实际 %#v", k, v)
+		}
+	}
+	if empty["model"] != "" || empty["stream"] != false {
+		t.Errorf("model 与 stream 总是在：%#v", empty)
+	}
+
+	temp, topP := 0.7, 0.9
+	req := &channel.Request{
+		Model:           "up-model",
+		Stream:          true,
+		MaxTokens:       128,
+		Temperature:     &temp,
+		TopP:            &topP,
+		ReasoningEffort: "high",
+		Messages: []channel.Message{{
+			Role:    "user",
+			Content: []channel.ContentBlock{{Type: "text", Text: "hi"}},
+		}},
+		Tools: []channel.Tool{
+			{Name: "lookup", Description: "查天气", InputSchema: map[string]any{"type": "object"}},
+			{Name: "bare"},
+		},
+		Extra:   map[string]any{"vendor_flag": true},
+		Headers: map[string]string{"x-larkax-plugin": "on"},
+	}
+	m := requestToMap(req)
+	if m["max_tokens"] != 128 {
+		t.Errorf("max_tokens = %#v，期望 128", m["max_tokens"])
+	}
+	if m["temperature"] != 0.7 || m["top_p"] != 0.9 {
+		t.Errorf("采样参数丢了：temperature=%#v top_p=%#v", m["temperature"], m["top_p"])
+	}
+	if m["reasoning_effort"] != "high" {
+		t.Errorf("reasoning_effort = %#v，期望 high", m["reasoning_effort"])
+	}
+
+	messages, ok := m["messages"].([]any)
+	if !ok || len(messages) != 1 {
+		t.Fatalf("messages = %#v，期望一条", m["messages"])
+	}
+	msg, ok := messages[0].(map[string]any)
+	if !ok || msg["role"] != "user" {
+		t.Fatalf("第一条消息不对：%#v", messages[0])
+	}
+	blocks, ok := msg["content"].([]any)
+	if !ok || len(blocks) != 1 {
+		t.Fatalf("content = %#v，期望一块", msg["content"])
+	}
+	blk, ok := blocks[0].(map[string]any)
+	if !ok || blk["type"] != "text" || blk["text"] != "hi" {
+		t.Errorf("第一块不对：%#v", blocks[0])
+	}
+
+	tools, ok := m["tools"].([]any)
+	if !ok || len(tools) != 2 {
+		t.Fatalf("tools = %#v，期望两个", m["tools"])
+	}
+	first, ok := tools[0].(map[string]any)
+	if !ok || first["name"] != "lookup" {
+		t.Fatalf("第一个工具不对：%#v", tools[0])
+	}
+	if first["description"] != "查天气" {
+		t.Errorf("description = %#v", first["description"])
+	}
+	schema, ok := first["input_schema"].(map[string]any)
+	if !ok || schema["type"] != "object" {
+		t.Errorf("input_schema = %#v", first["input_schema"])
+	}
+	second, ok := tools[1].(map[string]any)
+	if !ok || second["name"] != "bare" {
+		t.Fatalf("第二个工具不对：%#v", tools[1])
+	}
+	if v, has := second["description"]; has {
+		t.Errorf("空描述不该写出 description，实际 %#v", v)
+	}
+	if v, has := second["input_schema"]; has {
+		t.Errorf("nil schema 不该写出 input_schema，实际 %#v", v)
+	}
+
+	extra, ok := m["extra"].(map[string]any)
+	if !ok || extra["vendor_flag"] != true {
+		t.Errorf("extra = %#v", m["extra"])
+	}
+	headers, ok := m["headers"].(map[string]any)
+	if !ok || headers["x-larkax-plugin"] != "on" {
+		t.Errorf("headers = %#v", m["headers"])
+	}
+}
+
+// 图片块的 URL 与 Base64 二选一，只摊出实际用的那一个。
+//
+// 这一支没有落在 #675 的存活清单里（清单里的四处取反都在未知块那一支），
+// 顺带把它钉住：`switch` 的三条分支各取一个样本，两条「有值」的分支不能互相
+// 抢，两者都空时写的是空的 data 而不是空的 url。
+func TestBlockToMapImagePicksOneEncoding(t *testing.T) {
+	withData := blockToMap(channel.ContentBlock{
+		Type: "image", ImageBase64: "QUJD", ImageMediaType: "image/png",
+	})
+	if withData["data"] != "QUJD" || withData["media_type"] != "image/png" {
+		t.Errorf("Base64 图片块摊错了：%#v", withData)
+	}
+	if v, ok := withData["url"]; ok {
+		t.Errorf("只用了 Base64 时不该写出 url，实际 %#v", v)
+	}
+
+	withURL := blockToMap(channel.ContentBlock{
+		Type: "image", ImageURL: "https://example.test/i.png",
+	})
+	if withURL["url"] != "https://example.test/i.png" {
+		t.Errorf("URL 图片块摊错了：%#v", withURL)
+	}
+	if v, ok := withURL["data"]; ok {
+		t.Errorf("只用了 URL 时不该写出 data，实际 %#v", v)
+	}
+
+	neither := blockToMap(channel.ContentBlock{Type: "image"})
+	if neither["data"] != "" {
+		t.Errorf("两者都空时应当写出空的 data，实际 %#v", neither)
+	}
+	if v, ok := neither["url"]; ok {
+		t.Errorf("两者都空时不该写出 url，实际 %#v", v)
+	}
+}
+
+// 未知块类型把可能承载内容的字段都摊出来，让允许表逐字段决定；
+// 没写的字段不摊。
+//
+// 变异（同一段 default 的四处）：`b.ImageBase64 != ""`、`b.ImageURL != ""`、
+// `b.ToolUseID != ""`、`b.ToolName != ""` 各翻成 `== ""`：有值的字段被丢掉，
+// 空值反而写出空串。
+func TestBlockToMapUnknownBlockKeepsEveryField(t *testing.T) {
+	full := blockToMap(channel.ContentBlock{
+		Type:           "mystery",
+		Text:           "正文",
+		ToolInput:      map[string]any{"q": "x"},
+		ImageBase64:    "QUJD",
+		ImageURL:       "https://example.test/i.png",
+		ImageMediaType: "image/png",
+		ToolUseID:      "toolu_1",
+		ToolName:       "lookup",
+	})
+	for k, want := range map[string]any{
+		"type":       "mystery",
+		"text":       "正文",
+		"data":       "QUJD",
+		"url":        "https://example.test/i.png",
+		"media_type": "image/png",
+		"id":         "toolu_1",
+		"name":       "lookup",
+	} {
+		if full[k] != want {
+			t.Errorf("未知块的 %s = %#v，期望 %#v", k, full[k], want)
+		}
+	}
+	if input, ok := full["input"].(map[string]any); !ok || input["q"] != "x" {
+		t.Errorf("未知块的 input = %#v", full["input"])
+	}
+
+	bare := blockToMap(channel.ContentBlock{Type: "mystery"})
+	for _, k := range []string{"text", "input", "data", "url", "media_type", "id", "name"} {
+		if v, ok := bare[k]; ok {
+			t.Errorf("空块的 %s 不该摊出来，实际 %#v", k, v)
+		}
+	}
+}
+
+// 没有内容块时不写 message：空消息读起来像「模型回了空文本」，
+// 与「这次没有消息」是两件事。
+//
+// 变异：`len(resp.Message.Content) > 0` 的 `>` 翻成 `>=`：
+// 空响应也会写出 `message: {role: "", content: []}`。
+func TestResponseMapOmitsEmptyMessage(t *testing.T) {
+	empty := responseToMap(&channel.Response{})
+	if v, ok := empty["message"]; ok {
+		t.Errorf("空响应不该写出 message，实际 %#v", v)
+	}
+
+	full := responseToMap(&channel.Response{
+		UpstreamModel: "up-model",
+		FinishReason:  "stop",
+		Message: channel.Message{
+			Role:    "assistant",
+			Content: []channel.ContentBlock{{Type: "text", Text: "hi"}},
+		},
+		Usage: channel.Usage{PromptTokens: 3, CompletionTokens: 2},
+	})
+	msg, ok := full["message"].(map[string]any)
+	if !ok || msg["role"] != "assistant" {
+		t.Fatalf("message = %#v", full["message"])
+	}
+	blocks, ok := msg["content"].([]any)
+	if !ok || len(blocks) != 1 {
+		t.Fatalf("content = %#v", msg["content"])
+	}
+	blk, ok := blocks[0].(map[string]any)
+	if !ok || blk["type"] != "text" || blk["text"] != "hi" {
+		t.Errorf("内容块不对：%#v", blocks[0])
+	}
+}
+
+// 没有非 token 计量时不写 unit_counts。
+//
+// 变异（同一行两处）：`len(u.UnitCounts) > 0` 的 `>` 翻成 `>=`：
+// 空计量也会写出 `unit_counts: {}`；翻成 `<=`：非空的计量反而被丢掉。
+func TestUsageToMapOmitsEmptyUnitCounts(t *testing.T) {
+	empty := usageToMap(channel.Usage{})
+	if v, ok := empty["unit_counts"]; ok {
+		t.Errorf("空计量不该写出 unit_counts，实际 %#v", v)
+	}
+
+	full := usageToMap(channel.Usage{
+		UnitCounts: map[string]int64{"tokens": 3, "images": 1},
+	})
+	units, ok := full["unit_counts"].(map[string]any)
+	if !ok {
+		t.Fatalf("unit_counts = %#v", full["unit_counts"])
+	}
+	if units["tokens"] != int64(3) || units["images"] != int64(1) {
+		t.Errorf("unit_counts = %#v", units)
 	}
 }

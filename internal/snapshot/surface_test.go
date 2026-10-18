@@ -96,3 +96,22 @@ func TestSurfaceTablesAreDistinct(t *testing.T) {
 		}
 	}
 }
+
+// Surfaces 的顺序固定是它自己文档里的承诺：两次运行给同一份输出，
+// 遍历型的调用方（命令行打印允许表、审计）照着它走。
+//
+// 变异：比较器 `<` 翻成 `<=` 是**等价变异**：清单里是两个互不相等的
+// 常量（chat 与 decision），而 `<` 与 `<=` 只在两个元素相等时给出不同答案，
+// 那一格不存在；即便存在，两个同值元素互换位置也不改变输出的那一列。
+func TestSurfacesOrderIsFixed(t *testing.T) {
+	got := Surfaces()
+	want := []Surface{SurfaceChat, SurfaceDecision}
+	if len(got) != len(want) {
+		t.Fatalf("Surfaces() = %v，期望 %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Surfaces() = %v，期望 %v", got, want)
+		}
+	}
+}

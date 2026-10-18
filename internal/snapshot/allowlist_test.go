@@ -751,3 +751,129 @@ func TestRootValuesMatchSchema(t *testing.T) {
 		t.Error("未列在取值清单里的取值不该通过校验")
 	}
 }
+
+// ── #675：整包变异存活条目的判据 ─────────────────────────────────────────
+//
+// 这一批钉的是 allowlist 自己的判据：哪个位置按哪一档处理、兜底键怎么合并、
+// 路径怎么归一。每条用例的注释写明它钉住的那条变异；判为等价变异的，
+// 同一处也写明「哪一格分不开」以及为什么那一格到不了。
+
+// Roots 的顺序固定：调用方照着它遍历，两次运行必须是同一列。
+//
+// 变异：比较器 `<` 翻成 `>=`，Roots() 变成降序——两次运行之间仍然一致，
+// 但「按方向名升序」这条可预期的次序没了，而这一行 sort 存在的理由正是它。
+// 同一个比较器上 `<` 翻成 `<=` 是**等价变异**：元素是 allowlists 的键，
+// 两两不相等，而 `<` 与 `<=` 只在两个元素相等时给出不同答案，那一格在这份
+// 输入上不存在。
+func TestRootsOrderIsFixed(t *testing.T) {
+	got := Roots()
+	want := []Root{RootRequest, RootResponse}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Roots() = %v，期望 %v", got, want)
+	}
+}
+
+// lookup 的逐段下滑：去掉开头若干段再比，所以同一层的字段出现在别的容器里
+// 也照样命中，不会因为少写一行就退化成默认档。
+//
+// 变异：`for i := 1; i < len(segs); i++` 的边界翻成 `<=` 是**等价变异**。
+// 多出来的是 i == len(segs) 那一趟：`segs[i:]` 是空切片，拼出来是空串，
+// 于是查的是 t[""]——而编译出来的表里没有这个键：键要么是归一化后的非空路径
+// （validateRules 拒掉空白路径，归一化只删下标、不会把非空串变成空串），
+// 要么是 nameOnlyKey 加了 `\x00` 前缀的兜底键。
+func TestLookupDropsLeadingSegments(t *testing.T) {
+	tab := buildTable([]fieldRule{{Path: "messages[].role", Kind: roleField, Note: "探针"}})
+	for _, path := range []string{"messages[0].role", "choices[].messages[2].role"} {
+		if k, ok := tab.lookup(path, "role"); !ok || k != roleField {
+			t.Errorf("lookup(%q) = %v/%v，期望 roleField/true——去掉开头几段之后该命中", path, k, ok)
+		}
+	}
+}
+
+// normalizePath 把具体下标折成 `[]`；没有闭合的 `[` 原样带到底。
+//
+// 变异：`if j < 0` 的边界翻成 `j <= 0` 是**等价变异**：能走到那一行时
+// path[i] 一定是 `[`（外层判的就是它），所以 `]` 不可能出现在偏移 0，
+// j == 0 这一格不存在。
+func TestNormalizePathFoldsIndices(t *testing.T) {
+	cases := map[string]string{
+		"messages[0].content[12].name": "messages[].content[].name",
+		"messages[].role":              "messages[].role",
+		"plain":                        "plain",
+		"broken[12":                    "broken[12",
+	}
+	for in, want := range cases {
+		if got := normalizePath(in); got != want {
+			t.Errorf("normalizePath(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+}
+
+// trimIndex 去掉段尾的下标：兜底键就是靠它把 `content[]` 折成 `content`。
+//
+// 变异：循环条件 `<` 翻成 `>=`，循环一次都不走，trimIndex 退化成恒等函数。
+// 兜底键于是变成 `content[]` 这种带下标的写法，运行期路径
+// `messages[0].content[0]` 落到兜底那一层时对不上任何规则，整段退回默认档——
+// 不报错，只是「以为留着的字段没留」。
+func TestTrimIndexStripsArraySuffix(t *testing.T) {
+	cases := map[string]string{
+		"content[]":  "content",
+		"content[3]": "content",
+		"content":    "content",
+	}
+	for in, want := range cases {
+		if got := trimIndex(in); got != want {
+			t.Errorf("trimIndex(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+	// 兜底键的最后一环：取最后一段时同样要把下标去掉
+	if got := lastSegment("messages[].content[]"); got != "content" {
+		t.Errorf("lastSegment(%q) = %q，期望 %q", "messages[].content[]", got, "content")
+	}
+}
+
+// lastSegment 的输入只有「表里那条路径」——而表里的路径没有一条以 `.` 开头。
+//
+// 变异：循环边界从 `i >= 0` 翻成 `i > 0`，只在下标 0 处那个字符是 `.` 时才
+// 分得开（那时它会返回 `.role` 而不是 `role`）。做这件事的输入只有「表里
+// 写着一条以 `.` 开头的路径」，而下面这遍遍历确认四个方向都没有这种写法。
+// 将来有人真写了，这条会红：那时要么改表，要么把这条等价判据重新审一遍。
+func TestRulePathsHaveNoLeadingDot(t *testing.T) {
+	for _, tbl := range allTables() {
+		for _, r := range rulesFor(t, tbl) {
+			if strings.HasPrefix(r.Path, ".") {
+				t.Errorf("%s/%s: 路径 %q 以 . 开头——lastSegment 的等价判据要重审",
+					tbl.surface, tbl.root, r.Path)
+			}
+		}
+	}
+}
+
+// 同名兜底键上有两条规则时，留下信息更少的那条；信息量相同则先写的赢。
+//
+// 变异（同一行两支，分开判）：
+//   - `<=` 翻成 `<`：同秩时改成后写的赢。chat 请求侧的兜底键 `content` 上
+//     真有两档同秩的规则（秩 3 的 block-list-field 与 hide-keys-keep-shape），
+//     换谁赢是能观测到的——兜底那一层的处理方式整个换掉。
+//   - `<=` 翻成 `>`：整条判据反过来，留下信息**多**的那条。同一张表里兜底键
+//     `name` 上是秩 0 的 hide-value 与秩 2 的 tool-ref，翻过来之后
+//     「按兜底键走的字段」反而放行得更多。
+func TestMoreConservativePicksLessRevealing(t *testing.T) {
+	// 异秩：hide-value（秩 0）该压过 tool-ref（秩 2）
+	tab := buildTable([]fieldRule{
+		{Path: "a.name", Kind: toolRef, Note: "探针"},
+		{Path: "b.name", Kind: hideValue, Note: "探针"},
+	})
+	if got := tab[nameOnlyKey("name")]; got != hideValue {
+		t.Errorf("异秩冲突选中了 %v，期望 hideValue（秩 0 小于 toolRef 的 2）", got)
+	}
+
+	// 同秩：先写的那条赢，判据不随表的书写顺序之外的东西变
+	tab = buildTable([]fieldRule{
+		{Path: "a.content", Kind: blockListField, Note: "探针"},
+		{Path: "b.content", Kind: roleField, Note: "探针"},
+	})
+	if got := tab[nameOnlyKey("content")]; got != blockListField {
+		t.Errorf("同秩冲突选中了 %v，期望先写的 blockListField", got)
+	}
+}
