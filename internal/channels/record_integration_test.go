@@ -57,21 +57,24 @@ func readRollup(t *testing.T, db *sql.DB, channelID int64, bucket time.Time) (re
 	return requests, successes, failures
 }
 
-// readRollupSignals 读回某个小时桶的三列推导值（延迟与缓存）。
+// readRollupSignals 读回某个小时桶的四列推导值（延迟与缓存）。
 //
-// 三列都可空：延迟在「整桶没有样本」时是 NULL，缓存两列是 NOT NULL，
-// 但没有桶时读不到行——所以这三个都按可空接。
-func readRollupSignals(t *testing.T, db *sql.DB, channelID int64, bucket time.Time) (p95 sql.NullInt64, hit, miss sql.NullInt64) {
+// 四列都可空：延迟两列在「整桶没有样本」时是 NULL，缓存两列是 NOT NULL，
+// 但没有桶时读不到行——所以这四个都按可空接。
+//
+// 两个分位数一次读出来：它们由同一条语句、同一个样本集算出，判据里
+// 「p50 ≤ p95」要拿同一个桶的这两个数比，分两次查会读到两个时刻的快照。
+func readRollupSignals(t *testing.T, db *sql.DB, channelID int64, bucket time.Time) (p50, p95, hit, miss sql.NullInt64) {
 	t.Helper()
 	err := db.QueryRowContext(context.Background(), `
-		SELECT latency_p95_ms, cache_hit_tokens, cache_miss_tokens
+		SELECT latency_p50_ms, latency_p95_ms, cache_hit_tokens, cache_miss_tokens
 		  FROM channel_health_rollup
 		 WHERE channel_id = $1 AND bucket = $2`,
-		channelID, bucket).Scan(&p95, &hit, &miss)
+		channelID, bucket).Scan(&p50, &p95, &hit, &miss)
 	if err != nil {
 		t.Fatalf("读健康度桶的推导列失败: %v", err)
 	}
-	return p95, hit, miss
+	return p50, p95, hit, miss
 }
 
 // insertUsageEvent 按**落库时刻**插一行用量事件，只带聚合要读的四个数。
@@ -326,7 +329,7 @@ func TestRecordCallAggregatesCacheFromUsageEvents(t *testing.T) {
 		t.Fatalf("记录失败: %v", err)
 	}
 
-	_, hit, miss := readRollupSignals(t, db, id, bucket)
+	_, _, hit, miss := readRollupSignals(t, db, id, bucket)
 	if !hit.Valid || hit.Int64 != 800 {
 		t.Errorf("cache_hit_tokens = %v，期望 800（两次的 cache_read 之和）", hit)
 	}
@@ -361,7 +364,7 @@ func TestRecordCallAggregatesCacheFromUsageEvents(t *testing.T) {
 // 读侧把「合计为 0」当成没有样本（见 cacheHitRate），所以这里不写也等价于
 // 「未知」。这条用例钉的是「重算不会把一列莫名其妙写成别的数」，以及
 // 重算语句在空集合上不报错——它的 SUM 套了 COALESCE，`FROM` 没有行时
-// 聚合仍返回一行（cache 两列 0、p95 为 NULL）。
+// 聚合仍返回一行（cache 两列 0、延迟两列 NULL）。
 func TestRecordCallWithoutUsageLeavesCacheAtZero(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
@@ -374,26 +377,30 @@ func TestRecordCallWithoutUsageLeavesCacheAtZero(t *testing.T) {
 		t.Fatalf("记录失败: %v", err)
 	}
 
-	p95, hit, miss := readRollupSignals(t, db, id, at.Truncate(time.Hour))
-	if p95.Valid {
-		t.Errorf("latency_p95_ms = %v，期望 NULL（一个耗时样本都没有）", p95)
+	p50, p95, hit, miss := readRollupSignals(t, db, id, at.Truncate(time.Hour))
+	if p50.Valid || p95.Valid {
+		t.Errorf("延迟两列 = (p50 %v, p95 %v)，期望都是 NULL（一个耗时样本都没有）", p50, p95)
 	}
 	if hit.Int64 != 0 || miss.Int64 != 0 {
 		t.Errorf("缓存两列 = (%d, %d)，期望 (0, 0)", hit.Int64, miss.Int64)
 	}
 }
 
-// 延迟取桶内耗时的 95 分位，NULL 不参与。
+// 延迟取桶内耗时的 50 与 95 分位，NULL 不参与。
 //
 // # 分位数的一个边界
 //
 // 样本少时 p95 没有统计意义：两条样本的 p95 就是较大的那条（percentile_disc
 // 取的是真实观测值里最靠后的那个）。这条用例刻意只用少量样本，钉的是
-// **口径**（哪个数是 p95、NULL 怎么处理），不是统计性质。
+// **口径**（哪个数是 p50、哪个是 p95、NULL 怎么处理），不是统计性质。
+//
+// 两个分位数由同一条语句、同一个样本集算出（见 rollupSignalsSQL），所以这条
+// 用例把它们**一起**读出来比：p50 落在样本的中位、p95 落在靠后的那个，且
+// p50 ≤ p95。只钉 p95 时，把 SET 里的 p50 写成别的列（或写反）不会现形。
 //
 // NULL 那一次必须不参与：把没测到的调用当成 0 毫秒，会把分位数往下拉，
 // 而拉低之后读出来是「这个渠道很快」——没有任何东西会报出来。
-func TestRecordCallAggregatesLatencyP95(t *testing.T) {
+func TestRecordCallAggregatesLatencyQuantiles(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
@@ -413,12 +420,22 @@ func TestRecordCallAggregatesLatencyP95(t *testing.T) {
 		t.Fatalf("记录失败: %v", err)
 	}
 
-	p95, _, _ := readRollupSignals(t, db, id, bucket)
-	// percentile_disc(0.95) 在 20 个样本里取第 ceil(0.95*20)=19 个，即 19ms。
-	// NULL 若被当成 0 参与，排序后样本变成 21 个且最小是 0，第 20 个还是 19
-	// ——所以这里另外单独钉 NULL 不参与（下一条用例用少样本让它显形）。
+	p50, p95, _, _ := readRollupSignals(t, db, id, bucket)
+	// percentile_disc(0.5) 在 20 个样本里取第 ceil(0.5*20)=10 个，即 10ms；
+	// percentile_disc(0.95) 取第 ceil(0.95*20)=19 个，即 19ms。
+	// NULL 若被当成 0 参与，样本变成 {0, 1..20}：第 11 个仍是 10、第 20 个仍是
+	// 19，这一条分辨不出这个区别——让 NULL 显形的是下一条用例（样本更少）。
+	if !p50.Valid || p50.Int64 != 10 {
+		t.Errorf("latency_p50_ms = %v，期望 10（1..20 的中位数）", p50)
+	}
 	if !p95.Valid || p95.Int64 != 19 {
 		t.Errorf("latency_p95_ms = %v，期望 19（1..20 的 95 分位）", p95)
+	}
+	// 两个分位数出自同一条语句、同一个样本集：中位数不可能大于 95 分位。
+	// 分开写成三条断言是为了让失败信息指出是哪一列不对——把 SET 里的两列
+	// 写反时，红的只会是这一条。
+	if p50.Valid && p95.Valid && p50.Int64 > p95.Int64 {
+		t.Errorf("p50 = %d 大于 p95 = %d，两个分位数写反了", p50.Int64, p95.Int64)
 	}
 
 	// 读侧把它当毫秒的 Duration 交出去。
@@ -451,29 +468,33 @@ func TestRecordCallLatencyIgnoresNullSamples(t *testing.T) {
 	at := time.Now().UTC().Truncate(time.Hour).Add(30 * time.Minute)
 	bucket := at.Truncate(time.Hour)
 
-	// 只有 NULL 样本：分位数必须是 NULL，不是 0。
+	// 只有 NULL 样本：两个分位数都必须是 NULL，不是 0。
 	insertUsageEvent(t, db, id, at, 10, 0, 0, nil)
 	insertUsageEvent(t, db, id, at, 10, 0, 0, nil)
 	if err := r.RecordCall(context.Background(), outcome(id, at, route.VerdictSuccess)); err != nil {
 		t.Fatalf("记录失败: %v", err)
 	}
-	if p95, _, _ := readRollupSignals(t, db, id, bucket); p95.Valid {
-		t.Fatalf("全是 NULL 样本时 latency_p95_ms = %v，期望 NULL", p95)
+	if p50, p95, _, _ := readRollupSignals(t, db, id, bucket); p50.Valid || p95.Valid {
+		t.Fatalf("全是 NULL 样本时延迟两列 = (p50 %v, p95 %v)，期望都是 NULL", p50, p95)
 	}
 
-	// 再加一条真实样本：结果就是它，NULL 那两条不参与。
+	// 再加一条真实样本：两条分位数都是它，NULL 那两条不参与。
 	insertUsageEvent(t, db, id, at, 10, 0, 0, 42)
 	if err := r.RecordCall(context.Background(), outcome(id, at, route.VerdictSuccess)); err != nil {
 		t.Fatalf("记录失败: %v", err)
 	}
-	if p95, _, _ := readRollupSignals(t, db, id, bucket); !p95.Valid || p95.Int64 != 42 {
+	p50, p95, _, _ := readRollupSignals(t, db, id, bucket)
+	if !p50.Valid || p50.Int64 != 42 {
+		t.Errorf("latency_p50_ms = %v，期望 42（NULL 样本不参与）", p50)
+	}
+	if !p95.Valid || p95.Int64 != 42 {
 		t.Errorf("latency_p95_ms = %v，期望 42（NULL 样本不参与）", p95)
 	}
 }
 
 // 重算只动**本桶**：相邻小时的用量事件不混进来。
 //
-// 读侧按 24 小时窗口把各桶的 p95 取最近一个非空值，所以一个桶里混进上一小时
+// 读侧按 24 小时窗口把各桶的分位数取最近一个非空值，所以一个桶里混进上一小时
 // 的样本不会立刻表现为错，只会让那个数悄悄偏掉。
 func TestRecordCallSignalsArePerBucket(t *testing.T) {
 	db := testDB(t)
@@ -491,7 +512,10 @@ func TestRecordCallSignalsArePerBucket(t *testing.T) {
 		t.Fatalf("记录失败: %v", err)
 	}
 
-	p95, hit, miss := readRollupSignals(t, db, id, current.Truncate(time.Hour))
+	p50, p95, hit, miss := readRollupSignals(t, db, id, current.Truncate(time.Hour))
+	if !p50.Valid || p50.Int64 != 30 {
+		t.Errorf("当前桶 latency_p50_ms = %v，期望 30（上一小时的 900ms 不该混进来）", p50)
+	}
 	if !p95.Valid || p95.Int64 != 30 {
 		t.Errorf("当前桶 latency_p95_ms = %v，期望 30（上一小时的 900ms 不该混进来）", p95)
 	}

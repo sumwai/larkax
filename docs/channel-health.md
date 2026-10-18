@@ -168,11 +168,11 @@ NULL 表示不知道按什么计。这个列是**比较的前提**：`route.scor
   数值时会设 `LastErrorCode`，而 `LastErrorCode` 只在 `KindAPIQuery` 分支被清。
   两个分支今天都没有写入方，但一旦接上，一次 429 就会让一个查不到额度的渠道
   被 `Routable` **永久**排除，而且不留任何持久痕迹。接线前要先有答案。
-- **延迟的分位数只在很小的样本上算**：`latency_p95_ms` 与 `cache_*` 由写入方
-  从 `usage_events` 按「渠道 × 小时桶」重算（见 `internal/channels` 的
-  `rollupSignalsSQL`）。一个低流量渠道的一小时可能只有两三次调用，那时的
-  p95 就是较大的那个观测值，不是统计意义上的分位数——读它的时候要知道这一点。
-  `latency_p50_ms` 没有读方，因此也不算。
+- **延迟的分位数只在很小的样本上算**：`latency_p50_ms` 与 `latency_p95_ms`
+  由写入方从 `usage_events` 按「渠道 × 小时桶」重算（见 `internal/channels` 的
+  `rollupSignalsSQL`），`cache_*` 也是。一个低流量渠道的一小时可能只有两三次
+  调用，那时的 p95 是较大的那个观测值、p50 是排在中间的那个（样本为偶数个时
+  取偏小的那个），都算不上统计意义上稳定的分位数——读它们的时候要知道这一点。
 - **成本**：`channel_health_rollup.cost` 仍然没有写入方，而 `route.scoreCost`
   的 `CostPerUnit` 要的是「售价」还是「我们的成本」还没有定
   （`usage_events.cost` 是售价，上游成本那一列是 NULL，见 #163）。
