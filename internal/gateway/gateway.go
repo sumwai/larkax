@@ -211,14 +211,19 @@ type CallRecorder interface {
 //
 // 同一个事实，**各记各的**。取值口径与 derivation 是同一套（见
 // upstreamEvidence、streamResponseEvidence 与 pipeline 的那组常量），但两列
-// 回答的问题不同：账单上的 error_code 答的是「这次为什么没计费」，而快照的
-// ErrorKind 答的是「这次响应怎么了」。两列出现分歧时，以账单为准的是
-// 「钱为什么没扣」，以快照为准的是「上游当时回了什么」。
+// 回答的问题不同：快照的 ErrorKind 答的是「这次响应怎么了」，不看计不计费；
+// 账单上的 error_code 在两种行上答两个问题——计费的行上它答的是
+// 「钱收了，回答是不是在调用方不知情的情况下被截短」，不计费的行上答的是
+// 「这次没向上游收钱，是不是因为上游这一侧出了事」（见 pipeline.Outcome）。
+// 两列出现分歧时，以账单为准的是「钱为什么没扣」，以快照为准的是
+// 「上游当时回了什么」。
 //
-// 例外是 upstream_stream_truncated：它**应该**在两表上都写。那一次回答计了费
-// （上游已经产生了 token），而「回答只写了一半」是需要能事后读出来的——
-// 只写在快照上的话，按账单核对金额的人看不到它。今天它只落在快照那一侧：
-// 已计费的行上 error_code 的唯一写入点（markSettled）还没接，见 #461。
+// upstream_stream_truncated 是唯一在两表上都写的分类：那一次回答计了费（上游
+// 已经产生了 token），而「回答只写了一半」是需要能事后读出来的——只写在快照上
+// 的话，按账单核对金额的人看不到它（快照另有留存期，见
+// docs/request-retention.md）。两边判据仍是同一个 streamTruncated，落点分别是
+// 快照的 error_kind 与 billing_requests 的两列（经 pipeline.Settle 搬进
+// Charge，由 store 的 markSettled 写入）。
 type Snapshot struct {
 	RequestID string
 	// UserID 是**发起这次请求的用户**，不是渠道所属的商家。
@@ -258,7 +263,8 @@ type Snapshot struct {
 	// 一切不是上游那一侧出的错。两列的关系见类型注释。
 	//
 	// 取值与账单**同源**：同一个事件在两表上必须给同一个词，所以判据只有
-	// 一处（streamResponseEvidence / upstreamEvidence），两边各推一次的话，
+	// 一处——快照侧是 streamResponseEvidence / upstreamEvidence，账单侧那条
+	// 经 billedStreamEvidence 落到同一个 streamTruncated。两边各推一次的话，
 	// 「快照说 A、账单说 B」会静默地发生——那正是 #461 修掉的形状。
 	ErrorKind *string
 }
@@ -1202,6 +1208,10 @@ func (h *handle) abort(ctx context.Context) {
 func (h *handle) settleAndFail(ctx context.Context, placed placement, cause error, out pipeline.Outcome) error {
 	h.settled = true
 	h.routedTo(placed)
+	// 依据**无条件覆盖**，调用方传来的那两个字段在这里被丢掉：失败这一条路上
+	// 依据只能来自 cause（这次结算认下的原因是它），让调用方自己填就有了两个
+	// 来源。调用方设定本包这一对值的地方只有计费那条路（见 stream.go 的
+	// billedStreamEvidence）。
 	out.UpstreamStatus, out.ErrorCode = upstreamEvidence(cause)
 	h.settleFailure(ctx, out)
 	return cause
@@ -1292,10 +1302,12 @@ func upstreamEvidence(err error) (status int, code string) {
 
 // release 把这次请求冻住的钱放开。
 //
-// 它同时是**上游失败依据唯一的落库点**：不计费的结局不写账本，账单那一行
-// 上「上游回了什么、为什么不计费」两列只有这一次写入机会（见 h.failure）。
-// 把依据挂在这里而不是另开一次写库，是因为这一行本来就只有这一条 UPDATE
-// ——两次写之间会有一个「已经 released 但没有理由」的窗口。
+// 它是不计费那一侧**唯一的上游失败依据落点**：不计费的结局不写账本，账单
+// 那一行上「上游回了什么、为什么不计费」两列只有这一次写入机会（见
+// h.failure）。计费那一侧另有自己的落点（静默截断经 markSettled 写入，见
+// internal/ledger/store）。把依据挂在这里而不是另开一次写库，是因为这一行
+// 本来就只有这一条 UPDATE——两次写之间会有一个「已经 released 但没有理由」
+// 的窗口。
 //
 // # 它为什么不跟着请求的 ctx 走
 //

@@ -214,12 +214,12 @@ func upstreamModelOf(t *testing.T, db *sql.DB, requestID string) sql.NullString 
 	return model
 }
 
-// upstreamFailureOf 读一条账单上「上游失败的依据」那两列。
+// upstreamFailureOf 读一条账单上「上游侧的依据」那两列。
 //
-// 两个都返回可空类型：它们恒为 NULL 是**正常**的一种取值（这一行没有上游
-// 失败的证据），而不是「没读到」。用例要分辨的是「NULL」与「写了个 0 /
-// 空串进去」——后者是落库层的写法出了问题，而按 string 读回来时两者长得
-// 一模一样（见 Release 里 NULLIF 那一步的注释）。
+// 两个都返回可空类型：它们为 NULL 是**正常**的一种取值（这一行没有上游侧的
+// 依据可写），而不是「没读到」。用例要分辨的是「NULL」与
+// 「写了个 0 或空串进去」——后者是落库层的写法出了问题，而按 string 读回来时
+// 两者长得一模一样（见 Release 里 NULLIF 那一步的注释）。
 func upstreamFailureOf(t *testing.T, db *sql.DB, requestID string) (sql.NullInt64, sql.NullString) {
 	t.Helper()
 	var (
