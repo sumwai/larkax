@@ -208,15 +208,21 @@ go run ./cmd/larkaxctl snapshot cleanup             # 执行删除
   `upstream_stream_truncated`）**已经产生了 token**，这次照常计费。
 
 两列的取值判据与账单同源（`internal/gateway` 的 `upstreamEvidence` 与
-`streamResponseEvidence`），但两张表回答的问题不同：账单的 `error_code` 答的是
-「这次为什么没计费」，所以已计费的行上它是 NULL（唯一的例外见下）；快照的
-`error_kind` 答的是「这次响应怎么了」，中断的流在这里都有分类。出现分歧时，
-钱的问题以账单为准，「上游当时回了什么」以快照为准。
+`streamResponseEvidence`），但两张表回答的问题不同：快照的 `error_kind` 答的是
+「这次响应怎么了」，不看计不计费；账单的 `error_code` 在两种行上答两个问题——
+计费的行上它答的是「钱收了，回答是不是在调用方不知情的情况下被截短」，不计费
+的行上是「这次没向上游收钱，是不是因为上游这一侧出了事」。出现分歧时，钱的
+问题以账单为准，「上游当时回了什么」以快照为准。
 
-`upstream_stream_truncated` 是这条分界上的例外：那一次回答**计了费**，而
-「回答只写了一半」同样值得记在账单上。它今天还只落在快照的 `error_kind` 上——
-已计费的行上 `error_code` 的唯一写入点（`internal/ledger/store` 的
-`markSettled`）还没接。接上之后两表会取同一个值。
+`upstream_stream_truncated` 是唯一在两表上都写的分类：那一次回答**计了费**，
+而「回答只写了一半」同样值得记在账单上：它没有错误帧，调用方只能自己看出这条
+流没写完（见 [api.md](api.md) 的「没有结束标记就是被截断」一节）；而对按账单
+核对金额的人来说，账单是唯一能说明这件事的地方（快照另有留存期）。它在账单上
+落进 `billing_requests` 的那两列，路径是：网关在流的结局那一刻取定
+（`internal/gateway` 的 `billedStreamEvidence`）→ 随 `pipeline.Settle` 搬进
+`Charge` → `internal/ledger/store` 的 `markSettled` 写入，`NULLIF` 的口径与
+不计费那条路（`Release`）逐字一致。上游在流里报错的那一次不写：错误帧当时就
+送到调用方手里了，账单不必再讲一遍。
 
 `larkaxctl snapshot get` 按方向与列渲染：请求方向的行上打成
 `<不适用（请求方向快照）>`，响应方向的状态码 NULL 打成 `<无上游响应>`、

@@ -595,7 +595,26 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 	// 分位数与账本上那一行说的不是同一件事。
 	elapsed := streamDuration(res.Attempts, start, g.now())
 
-	g.billStream(settleCtx, h, placed, res, usage, source, clientGone, elapsed)
+	// 结算用的那份输入整个拼在这里，而不是在 billStream 里现攒：**上游侧
+	// 的依据只有这一刻拼得出来**（ours / done / started / streamErr 都还在
+	// 手上），而它要与用量、耗时一起进 Outcome。攒在下面那个函数里的话，
+	// 那四位还得再往下传一层。
+	//
+	// 依据取的是「账单侧」的那一份，与上面快照那份不是同一个函数：快照要的是
+	// 「上游出过什么事」，账单要的是「这条已经计费的行上该不该留一条说明」
+	// （见 billedStreamEvidence）。
+	billStatus, billCode := billedStreamEvidence(upstreamStatus, streamErr, started, done, ours)
+	g.billStream(settleCtx, h, placed, res, pipeline.Outcome{
+		Usage:       usage,
+		UsageSource: source,
+		Duration:    elapsed,
+		// ClientCanceled 只描述「客户端中途断开」这一种结局，别拿它当
+		// 「用量是估的」用：上游中途报错时用量同样是估的，但那不是客户端
+		// 断的——两者在对账与告警上是两回事（见 pipeline.Outcome 的注释）。
+		ClientCanceled: clientGone,
+		UpstreamStatus: billStatus,
+		ErrorCode:      billCode,
+	})
 
 	// 用量照记，即便这次算「不是渠道的失败」：客户端断开时上游已经为
 	// 输入计了费，额度自记账要跟着扣。
@@ -887,18 +906,13 @@ func streamAttempts(r *route.StreamResult) []route.Attempt {
 
 // billStream 结算一次要计费的流式请求。
 //
-// elapsed 是这次调用从发出去到读完那条流的时间，落进 usage_events.duration_ms
-// ——渠道健康度延迟那一维的唯一样本来源（见 pipeline.Outcome.Duration）。
-func (g *Gateway) billStream(ctx context.Context, h *handle, placed placement, res *Result, usage channel.Usage, source tokens.Source, canceled bool, elapsed time.Duration) {
-	charge, err := g.finishCharge(ctx, h, placed, pipeline.Outcome{
-		Usage:       usage,
-		UsageSource: source,
-		Duration:    elapsed,
-		// ClientCanceled 只描述「客户端中途断开」这一种结局，别拿它当
-		// 「用量是估的」用：上游中途报错时用量同样是估的，但那不是客户端
-		// 断的——两者在对账与告警上是两回事（见 pipeline.Outcome 的注释）。
-		ClientCanceled: canceled,
-	})
+// out 是这次结算的全部输入，由调用方在流的结局定下来的那一刻拼好：用量、
+// 耗时（落进 usage_events.duration_ms——渠道健康度延迟那一维的唯一样本来源，
+// 见 pipeline.Outcome.Duration），以及上游侧的依据（那几位只有调用方手上
+// 齐全，见 billedStreamEvidence）。入口收一整个 Outcome 而不是一列参数：
+// 加一个字段时不必再动这个签名，也不会在层层转发里漏掉一个。
+func (g *Gateway) billStream(ctx context.Context, h *handle, placed placement, res *Result, out pipeline.Outcome) {
+	charge, err := g.finishCharge(ctx, h, placed, out)
 	if err != nil {
 		// 结算落库失败：账算出来了但没记下，而钱是真金白银。调用方那边流
 		// 已经结束（收尾在关流之前），所以这条错误只能留痕，交不回去。
@@ -1189,11 +1203,50 @@ func streamResponseEvidence(status int, streamErr error, started, done, ours boo
 //     上游不守信的渠道。
 //
 // 它同时是快照与账单两侧的判据：两表对同一次截断必须给出同一个值，所以
-// 判据只能有一处，两边都调这一个函数，不各判一次。账单那一侧的落点是
-// store.Release 之外的另一处（已计费的行不走 Release），见 pipeline 的
-// ErrorUpstreamStreamTruncated。
+// 判据只能有一处，两边都调这一个函数，不各判一次。两边的落点不同——快照记
+// error_kind，账单那条路经 billedStreamEvidence 进 Outcome，再由
+// pipeline.Settle 搬进 Charge，最后写进 billing_requests（见
+// internal/ledger/store 的 markSettled）。
 func streamTruncated(streamErr error, started, done, ours bool) bool {
 	return !ours && !done && started && streamErr == nil
+}
+
+// billedStreamEvidence 推出**已计费的行**上该写的上游侧依据。
+//
+// 判据与快照那份共用 streamTruncated（同一次截断两表必须同值），但这里只放行
+// 截断这一种，其余一律给零值——零值落库时被 NULLIF 折成 NULL。
+//
+// 只有截断放行的理由：它是**唯一一种调用方不会当场知道的**上游事故。截断
+// 不上报，调用方要靠「帧序列里没有结束标记」自己发现被截短了（见 docs/api.md
+// 的「没有结束标记就是被截断」一节），而按账单核对金额的人看不到它——账单
+// 于是成了唯一能说明「这次回答只写了一半」的地方（快照有留存期，见
+// docs/request-retention.md）。这是流式这一路的事故里唯一到得了这里的：另外
+// 几种要么压根不计费（走不到这个函数），要么调用方当场就看见了（不必在账单
+// 上再讲一遍）。
+//
+// status 原样交出去，不在这里补值：适配器没吐过 start 事件时，传进来的就是 0，
+// 于是那一行落成 `error_code` 有值而 `upstream_status IS NULL`——读起来像
+// 「拿到过内容，却没拿到过响应」。三个内置适配器都在第一条事件上带状态码，
+// 真实路径上造不出这个组合，所以只在注释里说明。
+//
+// 逐个说清不写的那几种：
+//
+//   - 正常结束：没有上游事故可记；
+//   - 一个字没吐就结束（upstream_stream_aborted），以及非流式那三个
+//     （http_error / unusable_response / no_answer）：这几种结局**不计费**，
+//     依据走另一条路（settleAndFail → store.Release），到不了这里；
+//   - 客户端断开、插件终止、余额不足的中断：停下这条流的是**我们**（ours），
+//     把它们记到上游头上等于把我们的动作算成上游的问题——那条分类的用途正是
+//     挑出上游不守信的渠道；
+//   - 吐过字之后上游在**流里报错**：它有依据（*channel.ErrUpstream 与那个状态
+//     码），也确实算上游的事，但错误帧当时就送到调用方手里了，账单不必再讲
+//     一遍，所以快照记、账单留 NULL（见 pipeline.Outcome 里那一节
+//     「计费的行上只有一种值会到这里」）。
+func billedStreamEvidence(status int, streamErr error, started, done, ours bool) (int, string) {
+	if streamTruncated(streamErr, started, done, ours) {
+		return status, pipeline.ErrorUpstreamStreamTruncated
+	}
+	return 0, ""
 }
 
 // streamSettleTimeout 是流式收尾（结算 + 释放）的时间上限。

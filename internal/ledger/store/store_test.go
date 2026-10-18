@@ -936,36 +936,75 @@ func TestReleaseWithoutEvidenceWritesNull(t *testing.T) {
 	}
 }
 
-// 已结算的行这两列仍然是 NULL——它们记的是**上游失败**的证据。
+// 结算那条路也写上游侧那两列，口径与 Release 逐字一致：有依据就写，没有就
+// NULL。
 //
-// 它钉的是另一半：把这两列顺手也写进结算那条 UPDATE（写个 200 上去）会让
-// 「这一行是不是上游挂的」这个问题失去判据。而上游响应里根本没有状态码
-// （channel.Response 不带它），所以那一步写得出来的只有编出来的数。
-func TestSettlementLeavesUpstreamFailureColumnsNull(t *testing.T) {
+// 两个方向都钉，理由与 TestReleaseWithoutEvidenceWritesNull 相同：只钉
+// 「有依据时写得进去」的话，把零值也无条件写上去（0 与空串）能通过，而库里就
+// 分不出「上游回了 0 号」与「没有这回事」——HTTP 里没有 0 这个状态码，它是
+// 「没有值」的编码。
+//
+// 两条路上这两列答的问题不同（见 pipeline.Outcome）：不计费的行上答的是
+// 「这次没向上游收钱，是不是因为上游这一侧出了事」，计费的行上答的是
+// 「钱收了，回答是不是在调用方不知情的情况下被截短」——后者的取值只有
+// upstream_stream_truncated 一种。
+//
+// 改动之前这里断言的是「已结算的行恒为 NULL」：那是接线前的事实，不是规矩，
+// 而它同时意味着正常结束与流被截断在账单这一侧分不开。
+func TestSettlementWritesUpstreamEvidenceVerbatim(t *testing.T) {
 	db := testDB(t)
 	s := New(db)
 	ctx := context.Background()
 
 	userID := seed(t, db, "100")
-	requestID := reqID(t)
-	req := testRequest(ctx, t, db, userID, requestID)
 
-	billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
-	if reserveErr != nil {
-		t.Fatal(reserveErr)
+	// 没有依据的那一行。零值到这里，落库时被 NULLIF 折成 NULL。
+	noEvidence := reqID(t)
+	reqA := testRequest(ctx, t, db, userID, noEvidence)
+	billA, err := s.SaveReservation(ctx, reqA, reservation(t, userID, noEvidence, "30", "CNY"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	charge := &pipeline.Charge{
-		RequestID: requestID, UserID: userID, Asset: "CNY",
+	chargeA := &pipeline.Charge{
+		RequestID: noEvidence, UserID: userID, Asset: "CNY",
 		PricedAt: pricedAt(),
-		Entries:  consumeEntries(t, userID, "12", billID),
+		Entries:  consumeEntries(t, userID, "12", billA),
 	}
-	charge.Settlement.Actual = money.MustParse("12")
-	if err := s.Save(ctx, req, charge); err != nil {
+	chargeA.Settlement.Actual = money.MustParse("12")
+	if err = s.Save(ctx, reqA, chargeA); err != nil {
 		t.Fatalf("结算失败: %v", err)
 	}
+	if status, code := upstreamFailureOf(t, db, noEvidence); status.Valid || code.Valid {
+		t.Errorf("没有依据的行两列应当是 NULL，得到 upstream_status=%v error_code=%v", status, code)
+	}
 
-	if status, code := upstreamFailureOf(t, db, requestID); status.Valid || code.Valid {
-		t.Errorf("已结算的行不该有上游失败的依据，得到 upstream_status=%v error_code=%v", status, code)
+	// 有依据的那一行（截断）：原样写进去，两位都要对。
+	withEvidence := reqID(t)
+	reqB := testRequest(ctx, t, db, userID, withEvidence)
+	billB, err := s.SaveReservation(ctx, reqB, reservation(t, userID, withEvidence, "30", "CNY"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chargeB := &pipeline.Charge{
+		RequestID: withEvidence, UserID: userID, Asset: "CNY",
+		PricedAt: pricedAt(),
+		Entries:  consumeEntries(t, userID, "12", billB),
+		// 状态码取 200：截断的那一次上游是回过的（吐过内容），它不是
+		// 「没拿到响应」那一类，而 200 也正好证明这一列写的是上游那个数、
+		// 不是编出来的。
+		UpstreamStatus: http.StatusOK,
+		ErrorCode:      pipeline.ErrorUpstreamStreamTruncated,
+	}
+	chargeB.Settlement.Actual = money.MustParse("12")
+	if err := s.Save(ctx, reqB, chargeB); err != nil {
+		t.Fatalf("结算失败: %v", err)
+	}
+	status, code := upstreamFailureOf(t, db, withEvidence)
+	if !status.Valid || status.Int64 != http.StatusOK {
+		t.Errorf("结算后的 upstream_status = %v，期望 %d", status, http.StatusOK)
+	}
+	if !code.Valid || code.String != pipeline.ErrorUpstreamStreamTruncated {
+		t.Errorf("结算后的 error_code = %v，期望 %q", code, pipeline.ErrorUpstreamStreamTruncated)
 	}
 }
 
