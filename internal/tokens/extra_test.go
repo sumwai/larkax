@@ -87,6 +87,12 @@ func TestCeil(t *testing.T) {
 	}
 }
 
+// mergeOutputSource 记下的是累计过程中**最不可信**的来源（数值最大的那个）。
+//
+// 变异：`if s > e.outputSource` 改成 `>=`。这一处是**等价变异**：相等那一格
+// 变异版把 `e.outputSource` 赋成 `s`，赋进去的正是它已经持有的那个值，
+// 结果一模一样。下面最后一段就走在那一格上（同一个来源连来两次），
+// 它把「重复合并不改变结果」写下来。
 func TestMergeOutputSourceKeepsEstimate(t *testing.T) {
 	// 先精确后估算：整体必须是估算。
 	e := NewStreamEstimator(NewCounter(), "gpt-4o")
@@ -101,5 +107,11 @@ func TestMergeOutputSourceKeepsEstimate(t *testing.T) {
 	e2.mergeOutputSource(SourceTokenized)
 	if e2.outputSource != SourceEstimated {
 		t.Errorf("来源 = %v, 期望 estimated", e2.outputSource)
+	}
+	// 同一个来源连来两次：走的是 `s == outputSource` 那一格。
+	e2.mergeOutputSource(SourceEstimated)
+	e2.mergeOutputSource(SourceEstimated)
+	if e2.outputSource != SourceEstimated {
+		t.Errorf("重复合并后来源 = %v, 期望仍是 estimated", e2.outputSource)
 	}
 }

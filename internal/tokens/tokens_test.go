@@ -17,11 +17,33 @@ func newPrepared(t *testing.T) *Counter {
 	return c
 }
 
+// FamilyOf 先剥掉渠道写进模型名的那一段（`anthropic/claude-…`）再看族。
+// 剥的判据 `i >= 0 && i < len(m)-1` 上有四处变异，逐处判：
+//
+//   - `i >= 0` 改成 `i > 0`：**真缺口**。多出来的那一格是 `i == 0`，即模型名
+//     以斜杠开头——`/claude-3` 在那一版里不再剥前缀，返回 unknown。
+//     `anthropic/claude-opus-4-7` 那一格照样是 claude（i 不为 0），所以
+//     只看原来那批用例分不开两版。
+//   - `&&` 改成 `||`：**等价**。多出来的两格是「没有斜杠」（`LastIndex` 给 -1，
+//     而 `familyOfName(m[0:])` 与 `familyOfName(m)` 是同一个串）与「斜杠在
+//     末尾」（尾巴是空串，`familyOfName("")` 落空到 unknown，于是照旧往下走
+//     `familyOfName(m)`）。两条都汇到同一个答案。
+//   - `i < len(m)-1` 改成 `<=`：**等价**，多出来的那一格还是「斜杠在末尾」，
+//     理由同上。
+//   - `len(m)-1` 改成 `len(m)+1`：**等价**。`LastIndex` 给出的 i 最大就是
+//     `len(m)-1`，所以这一改只是把判据放宽成 `i >= 0`，多出来的仍是末尾斜杠
+//     那一格。（这一处在存活清单里出现两次，INVERT_NEGATIVES 与
+//     ARITHMETIC_BASE 生成的是同一个改动，按一处算。）
+//   - 末尾斜杠那一格本身写进用例里（`claude-3/`），它正是上面三条等价
+//     多出来的那一格，用它把「走两个分支得到同一个族」固定下来。
 func TestFamilyOf(t *testing.T) {
 	cases := []struct {
 		model string
 		want  Family
 	}{
+		{"/claude-3", FamilyClaude}, // 斜杠在开头：剥前缀那一支必须照走
+		{"claude-3/", FamilyClaude}, // 斜杠在末尾：尾巴是空串，两版同路
+		{"/", FamilyUnknown},
 		{"claude-sonnet-4-6", FamilyClaude},
 		{"claude-3-5-haiku-latest", FamilyClaude},
 		{"anthropic/claude-opus-4-7", FamilyClaude},
@@ -221,6 +243,11 @@ func TestEstimatedCJKHigherThanLatin(t *testing.T) {
 
 func TestEstimateMinimumOnePerNonEmpty(t *testing.T) {
 	// 非空文本必须至少 1 个 token。算出 0 会让这段内容在账上消失。
+	//
+	// 变异：estimateRounded 里 `if v < 1` 改成 `<=`。这一处是**等价变异**：
+	// `v` 正好等于 1 那一格，变异版直接返回 1，原版走到 `return ceil(v)`，
+	// 而 `ceil(1)` 也是 1。相等那一格两版返回同一个数，所以没有任何输入
+	// 能把两版分开——理由在值上，不是「想不到输入」。
 	for _, s := range []string{"a", " ", "\n", "。", "🎉", "\t"} {
 		if got := EstimatedTokens("claude-sonnet-4-6", s); got < 1 {
 			t.Errorf("EstimatedTokens(%q) = %d, 必须 >= 1", s, got)
@@ -243,6 +270,11 @@ func TestEstimateHandlesLongIncompressibleRun(t *testing.T) {
 	}
 }
 
+// 两边来源不同时取较不可信的那个。
+//
+// 变异：`if o.Source > src` 改成 `>=`。这一处是**等价变异**：相等那一格
+// 变异版把 `src` 赋成 `o.Source`，赋进去的正是它已经持有的那个值，
+// 结果一模一样。这是「赋值写的就是算出来正好等于要赋的那个值」那一类。
 func TestCountAddTakesLessTrustedSource(t *testing.T) {
 	measured := Count{Tokens: 10, Source: SourceMeasured, Model: "m"}
 	estimated := Count{Tokens: 5, Source: SourceEstimated, Model: "m"}
