@@ -63,6 +63,19 @@ func writeError(w http.ResponseWriter, protocol channel.Protocol, status int, me
 	writeErrorCode(w, protocol, status, "", message)
 }
 
+// WriteNotImplemented 写出「这条路径在这个实例上不接推理流量」的 501。
+//
+// 501 的错误体在这个包里定义一次，要回这条状态码的地方都从这里走：手写一份
+// 字面量的话，形状改了那一处不会跟着改，而两份看起来都对。最容易漏掉的是
+// error.param 与 error.code——OpenAI 的形状里这两个字段总在（值为 null，
+// 见 openAIError 的注释），少一次就会让某些客户端当它们丢了。
+//
+// 形状用 OpenAI 那一套，理由与未知路径那一支相同：这种实例的公共端口是路径
+// 全捕获的，请求里没有任何东西说明调用方说哪套协议。
+func WriteNotImplemented(w http.ResponseWriter, message string) {
+	writeError(w, channel.ProtocolOpenAI, http.StatusNotImplemented, message)
+}
+
 // writeErrorCode 与 writeError 相同，但错误码由调用方给定而不是从状态码推。
 //
 // 用途是同一状态码下的几种情形**处置不同**的时候——幂等键的三条 409 就是
