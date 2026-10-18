@@ -207,18 +207,18 @@ func runChannelCreate(args []string) error {
 func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	fs := flag.NewFlagSet("channel create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
-	name := fs.String("name", "", "渠道名")
-	channelType := fs.String("type", "", "适配器类型")
-	baseURL := fs.String("base-url", "", "上游地址，必须以 http:// 或 https:// 开头")
-	models := fs.String("models", "", "该渠道支持的规范模型名，逗号分隔，至少一个")
-	owner := legacyStringFlag(fs, "user", "owner", "", "归属用户（ID 或用户名），留空表示平台自营")
+	name := fs.String("name", "", "")
+	channelType := fs.String("type", "", "")
+	baseURL := fs.String("base-url", "", "")
+	models := fs.String("models", "", "")
+	owner := legacyStringFlag(fs, "user", "owner", "", "")
 	stringAlias(fs, owner, "u", sameAs("user"))
-	weight := fs.Int("weight", 0, "分流权重，0 表示用默认值 1")
-	priority := fs.Int("priority", 0, "优先级，越大越优先")
-	setting := fs.String("setting", "", "渠道级 JSON 配置对象，留空表示空对象")
-	credentialStdin := fs.Bool("credential-stdin", false, "从标准输入读明文凭证")
+	weight := fs.Int("weight", 0, "")
+	priority := fs.Int("priority", 0, "")
+	setting := fs.String("setting", "", "")
+	credentialStdin := fs.Bool("credential-stdin", false, "")
 	boolAlias(fs, credentialStdin, "stdin", sameAs("credential-stdin"))
-	credentialEnv := fs.String("credential-env", "", "从指定环境变量读明文凭证")
+	credentialEnv := fs.String("credential-env", "", "")
 	stringAlias(fs, credentialEnv, "env", sameAs("credential-env"))
 	if err := fs.Parse(args); err != nil {
 		return channels.CreateRequest{}, "", err
@@ -279,16 +279,16 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	fs := flag.NewFlagSet("channel update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "要改的渠道 ID")
-	name := fs.String("name", "", "渠道名")
-	channelType := fs.String("type", "", "适配器类型")
-	baseURL := fs.String("base-url", "", "上游地址")
-	models := fs.String("models", "", "该渠道支持的规范模型名，逗号分隔")
-	weight := fs.Int("weight", 0, "分流权重")
-	priority := fs.Int("priority", 0, "优先级")
-	setting := fs.String("setting", "", "渠道级 JSON 配置对象")
-	credentialStdin := fs.Bool("credential-stdin", false, "从标准输入读新的明文凭证")
+	name := fs.String("name", "", "")
+	channelType := fs.String("type", "", "")
+	baseURL := fs.String("base-url", "", "")
+	models := fs.String("models", "", "")
+	weight := fs.Int("weight", 0, "")
+	priority := fs.Int("priority", 0, "")
+	setting := fs.String("setting", "", "")
+	credentialStdin := fs.Bool("credential-stdin", false, "")
 	boolAlias(fs, credentialStdin, "stdin", sameAs("credential-stdin"))
-	credentialEnv := fs.String("credential-env", "", "从指定环境变量读新的明文凭证")
+	credentialEnv := fs.String("credential-env", "", "")
 	stringAlias(fs, credentialEnv, "env", sameAs("credential-env"))
 	if err := fs.Parse(args); err != nil {
 		return channels.UpdateRequest{}, err
@@ -431,7 +431,7 @@ func printSettingUnreadNote(w io.Writer) {
 func runChannelList(args []string) error {
 	fs := flag.NewFlagSet("channel list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
-	all := fs.Bool("all", false, "含已删除的渠道，并在「已删」一栏标出删除时刻")
+	all := fs.Bool("all", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}

@@ -110,9 +110,9 @@ func runRotate(args []string) error {
 
 	fs := flag.NewFlagSet("secret rotate", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, rotateShortUsage) }
-	apply := fs.Bool("apply", false, "真正改写 credential_enc（不加这个参数只干跑）")
-	verify := fs.Bool("verify", false, "只验证每一行是否都含当前主密钥，不写库")
-	batchSize := fs.Int("batch-size", channels.DefaultRotateBatch, "每批处理的行数")
+	apply := fs.Bool("apply", false, "")
+	verify := fs.Bool("verify", false, "")
+	batchSize := fs.Int("batch-size", channels.DefaultRotateBatch, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}

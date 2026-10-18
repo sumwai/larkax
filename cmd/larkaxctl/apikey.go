@@ -139,12 +139,12 @@ func runAPIKeyCreate(args []string) error {
 
 	fs := flag.NewFlagSet("apikey create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
-	user := fs.String("user", "", "key 的归属用户：用户 ID 或用户名")
+	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u", sameAs("user"))
-	name := fs.String("name", "", "备注名，用于日后在列表里认出这把 key")
-	expiresAt := fs.String("expires-at", "", "过期时间（RFC3339），留空表示不过期")
-	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "", "每分钟请求额度；0 表示一个都不放行，不填表示 NULL")
-	quota := legacyStringFlag(fs, "quota", "quota-limit", "", "累计可花费的金额上限；0 表示一个都不放行，不填表示 NULL")
+	name := fs.String("name", "", "")
+	expiresAt := fs.String("expires-at", "", "")
+	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "", "")
+	quota := legacyStringFlag(fs, "quota", "quota-limit", "", "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -214,11 +214,11 @@ func runAPIKeyUpdate(args []string) error {
 	fs := flag.NewFlagSet("apikey update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
 	id := fs.Int64("id", 0, "要改的 API Key 的 id（apikey list 里能看到）")
-	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "", "每分钟请求额度；0 表示一个都不放行")
-	clearRPM := fs.Bool("clear-rpm", false, "把每分钟额度清空（写回 NULL）")
+	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "", "")
+	clearRPM := fs.Bool("clear-rpm", false, "")
 	boolAlias(fs, clearRPM, "clear-rate-limit-rpm", legacyNote("clear-rpm"))
-	quota := legacyStringFlag(fs, "quota", "quota-limit", "", "累计可花费的金额上限；0 表示一个都不放行")
-	clearQuota := fs.Bool("clear-quota", false, "把金额上限清空（写回 NULL）")
+	quota := legacyStringFlag(fs, "quota", "quota-limit", "", "")
+	clearQuota := fs.Bool("clear-quota", false, "")
 	boolAlias(fs, clearQuota, "clear-quota-limit", legacyNote("clear-quota"))
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -254,7 +254,7 @@ func runAPIKeyUpdate(args []string) error {
 func runAPIKeyList(args []string) error {
 	fs := flag.NewFlagSet("apikey list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
-	user := fs.String("user", "", "只看这个用户的 key：用户 ID 或用户名；留空表示全部")
+	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u", sameAs("user"))
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)

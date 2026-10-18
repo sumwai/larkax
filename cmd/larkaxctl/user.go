@@ -84,9 +84,9 @@ func runUserCreate(args []string) error {
 
 	fs := flag.NewFlagSet("user create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
-	name := fs.String("name", "", "用户名，唯一（大小写不敏感）")
-	email := fs.String("email", "", "邮箱，留空表示不填")
-	role := fs.String("role", string(auth.RoleUser), "角色：user、merchant、admin")
+	name := fs.String("name", "", "")
+	email := fs.String("email", "", "")
+	role := fs.String("role", string(auth.RoleUser), "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}

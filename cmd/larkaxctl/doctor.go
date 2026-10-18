@@ -338,14 +338,14 @@ func emitDoctorReport(w io.Writer, rep doctorReport, dbErr error, verbose bool) 
 func parseDoctorOptions(args []string) (doctorOptions, error) {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, doctorShortUsage) }
-	live := fs.Bool("live", false, "真打一次上游（会花钱、要凭证）")
-	model := fs.String("model", "", "真打上游时用的规范模型名")
+	live := fs.Bool("live", false, "")
+	model := fs.String("model", "", "")
 	stringAlias(fs, model, "m", sameAs("model"))
-	endpoint := fs.String("endpoint", doctorEndpointChat, "真打上游打哪个入口：chat、messages 或 responses")
-	baseURL := fs.String("base-url", doctorDefaultBaseURL, "网关公共入口的地址")
-	credentialStdin := fs.Bool("credential-stdin", false, "从标准输入读 API Key")
+	endpoint := fs.String("endpoint", doctorEndpointChat, "")
+	baseURL := fs.String("base-url", doctorDefaultBaseURL, "")
+	credentialStdin := fs.Bool("credential-stdin", false, "")
 	boolAlias(fs, credentialStdin, "stdin", sameAs("credential-stdin"))
-	credentialEnv := fs.String("credential-env", "", "从指定环境变量读 API Key")
+	credentialEnv := fs.String("credential-env", "", "")
 	stringAlias(fs, credentialEnv, "env", sameAs("credential-env"))
 	if err := fs.Parse(args); err != nil {
 		return doctorOptions{}, err

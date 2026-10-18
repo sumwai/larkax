@@ -187,8 +187,8 @@ func surfaceFor(name string, fallback snapshot.Surface) (snapshot.Surface, error
 func runSnapshotAllowlist(args []string) error {
 	fs := flag.NewFlagSet("snapshot allowlist", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
-	direction := fs.String("direction", "", "只打某个方向（request / response），不填则两个方向都打")
-	surfaceName := fs.String("surface", "", "只打某个表面（chat / decision），不填则每个表面都打")
+	direction := fs.String("direction", "", "")
+	surfaceName := fs.String("surface", "", "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -326,10 +326,10 @@ func runSnapshotRedact(args []string) error {
 
 	fs := flag.NewFlagSet("snapshot redact", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
-	direction := fs.String("direction", "", "报文的方向：request 或 response（必填）")
-	surfaceName := fs.String("surface", "", "报文的表面：chat（默认）或 decision")
+	direction := fs.String("direction", "", "")
+	surfaceName := fs.String("surface", "", "")
 	maxBytes := fs.Int("max-bytes", snapshot.DefaultMaxBytes,
-		"骨架的字节上限，超过就降级为摘要层")
+		"")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -543,9 +543,9 @@ type snapshotRow struct {
 func runSnapshotGet(args []string) error {
 	fs := flag.NewFlagSet("snapshot get", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
-	actor := fs.String("actor", "", "读这条快照的人：用户 ID 或用户名（必填）")
-	reason := fs.String("reason", "", "读它的理由，会落进 snapshot_access_log（必填）")
-	direction := fs.String("direction", "", "只读某个方向（request / response），不填则都读")
+	actor := fs.String("actor", "", "")
+	reason := fs.String("reason", "", "")
+	direction := fs.String("direction", "", "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -976,7 +976,7 @@ func runSnapshotCleanup(args []string) error {
 
 	fs := flag.NewFlagSet("snapshot cleanup", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
-	dryRun := fs.Bool("dry-run", false, "只列出会被删除的分区，不执行删除")
+	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}

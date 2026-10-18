@@ -202,19 +202,19 @@ func runPriceCreate(args []string) error {
 func parsePriceCreate(args []string) (pricing.CreateRequest, string, error) {
 	fs := flag.NewFlagSet("price create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
-	scope := fs.String("scope", "", "作用域：platform、merchant、channel")
-	name := fs.String("name", "", "规则名，列举与告警都靠它指认一条规则")
-	expression := fs.String("expr", "", "规则表达式源码")
-	owner := legacyStringFlag(fs, "user", "owner", "", "商家的用户 ID 或用户名，merchant 作用域必填")
+	scope := fs.String("scope", "", "")
+	name := fs.String("name", "", "")
+	expression := fs.String("expr", "", "")
+	owner := legacyStringFlag(fs, "user", "owner", "", "")
 	stringAlias(fs, owner, "u", sameAs("user"))
 	channelID := fs.Int64("channel", 0, "渠道 ID，channel 作用域必填")
-	models := fs.String("models", "", "适用的规范模型名，逗号分隔，留空表示全部")
-	priority := fs.Int("priority", 0, "优先级，同一作用域里越大越优先")
-	effectiveFrom := fs.String("effective-from", "", "生效时刻（RFC3339），留空表示从现在起")
+	models := fs.String("models", "", "")
+	priority := fs.Int("priority", 0, "")
+	effectiveFrom := fs.String("effective-from", "", "")
 	stringAlias(fs, effectiveFrom, "from", sameAs("effective-from"))
-	effectiveTo := fs.String("effective-to", "", "失效时刻（RFC3339），留空表示不过期")
+	effectiveTo := fs.String("effective-to", "", "")
 	stringAlias(fs, effectiveTo, "to", sameAs("effective-to"))
-	disabled := fs.Bool("disabled", false, "建一条停用的规则")
+	disabled := fs.Bool("disabled", false, "")
 	if err := fs.Parse(args); err != nil {
 		return pricing.CreateRequest{}, "", err
 	}
@@ -375,25 +375,25 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 	fs := flag.NewFlagSet("price update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
 	id := fs.Int64("id", 0, "要改的规则 ID")
-	scope := fs.String("scope", "", "作用域：platform、merchant、channel")
-	name := fs.String("name", "", "规则名")
-	owner := legacyStringFlag(fs, "user", "owner", "", "商家的用户 ID 或用户名；0 表示改成不挂商家")
+	scope := fs.String("scope", "", "")
+	name := fs.String("name", "", "")
+	owner := legacyStringFlag(fs, "user", "owner", "", "")
 	stringAlias(fs, owner, "u", sameAs("user"))
 	channelID := fs.Int64("channel", 0, "渠道 ID；0 表示改成不挂渠道")
-	models := fs.String("models", "", "适用的规范模型名，逗号分隔，给空串表示全部")
-	expression := fs.String("expr", "", "规则表达式源码")
-	priority := fs.Int("priority", 0, "优先级，同一作用域里越大越优先")
-	effectiveFrom := fs.String("effective-from", "", "生效时刻（RFC3339）")
+	models := fs.String("models", "", "")
+	expression := fs.String("expr", "", "")
+	priority := fs.Int("priority", 0, "")
+	effectiveFrom := fs.String("effective-from", "", "")
 	stringAlias(fs, effectiveFrom, "from", sameAs("effective-from"))
-	effectiveTo := fs.String("effective-to", "", "失效时刻（RFC3339）")
+	effectiveTo := fs.String("effective-to", "", "")
 	stringAlias(fs, effectiveTo, "to", sameAs("effective-to"))
-	clearEffectiveTo := fs.Bool("clear-effective-to", false, "把失效时刻清成不过期")
+	clearEffectiveTo := fs.Bool("clear-effective-to", false, "")
 	boolAlias(fs, clearEffectiveTo, "no-expire", sameAs("clear-effective-to"))
 	// --enable / --disable 是**旧形态**（见 priceUsage 的「启停是独立的二级
 	// 动词」那一节）：留着是为了不让已经在跑的脚本坏掉，新写的命令用
 	// price enable / price disable。它们不出现在用法行里。
-	enable := fs.Bool("enable", false, "启用这条规则（旧形态，新写法是 price enable）")
-	disable := fs.Bool("disable", false, "停用这条规则（旧形态，新写法是 price disable）")
+	enable := fs.Bool("enable", false, "")
+	disable := fs.Bool("disable", false, "")
 	if err := fs.Parse(args); err != nil {
 		return pricing.UpdateRequest{}, "", err
 	}
@@ -521,12 +521,12 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 func runPriceExplain(args []string) error {
 	fs := flag.NewFlagSet("price explain", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
-	model := fs.String("model", "", "这次请求的规范模型名")
+	model := fs.String("model", "", "")
 	stringAlias(fs, model, "m", sameAs("model"))
-	owner := legacyStringFlag(fs, "user", "owner", "", "这次请求的商家（用户 ID 或用户名），留空表示未选定")
+	owner := legacyStringFlag(fs, "user", "owner", "", "")
 	stringAlias(fs, owner, "u", sameAs("user"))
 	channelID := fs.Int64("channel", 0, "这次请求的渠道 ID，留空表示未选定")
-	at := fs.String("at", "", "问的是哪一刻（RFC3339），留空表示现在")
+	at := fs.String("at", "", "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
