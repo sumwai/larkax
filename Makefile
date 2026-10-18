@@ -8,6 +8,7 @@
 #   make down     只停依赖（保留数据卷）
 #   make migrate  只跑迁移
 #   make test     跑测试（先确保依赖起着）
+#   make dist     打一个发布用的 tar.gz（linux/amd64），把 release.yml 那一步演练一遍
 #   make clean    清容器、数据卷与生成的 .env，回到刚克隆的状态
 #
 # 端口被占用（5432 是常事）就换一个：make run PG_PORT=55432
@@ -51,7 +52,7 @@ MASTER_KEYS_PLACEHOLDER := current:$(MASTER_KEY_PLACEHOLDER),previous:$(MASTER_K
 # 跟着改成双引号。
 ESCAPED_DB_PASSWORD := $(subst ','\'',$(subst |,\|,$(subst &,\&,$(subst \,\\,$(DB_PASSWORD)))))
 
-.PHONY: help init up down migrate run check-ports test clean
+.PHONY: help init up down migrate run check-ports test dist clean
 
 help:
 	@echo "make run      准备 .env → 起依赖 → 迁移 → 前台跑服务"
@@ -59,6 +60,7 @@ help:
 	@echo "make down     只停依赖，保留数据卷"
 	@echo "make migrate  只跑迁移"
 	@echo "make test     跑测试（先确保依赖起着）"
+	@echo "make dist     打发布用的 tar.gz（linux/amd64，make dist VERSION=v0.1.0）"
 	@echo "make clean    清容器、数据卷与生成的 .env"
 	@echo ""
 	@echo "端口被占用时：make run PG_PORT=55432"
@@ -193,6 +195,53 @@ run: init check-ports up migrate
 # 而「跳过」在输出里和「通过」长得一样（见 LESSONS.md 第 16 条）。
 test: init up
 	@set -a; . ./$(ENV_FILE); set +a; go test ./...
+
+# 发布产物：与 .github/workflows/release.yml 的「构建」与「打包」两步同一套，
+# 只是这里只打 linux/amd64 一个架构——发布时才两个架构都打。发布流程能在这里演练，出问题时不必
+# 先推一个 tag 去试；改了这个目标或那一步，另一处要跟着改。
+#
+# tarball 里的手页取仓库里**已提交**的那一份（`man/man1/*.1`），不在这里跑生成器
+# （理由同 release.yml 那一步）：手页是产物，它与源文件的一致性由
+# scripts/check-man-pages.sh 保证。
+#
+# VERSION 默认 dev：未注入的二进制也自称 dev（见 docs/versioning.md），
+# 于是「忘了给版本」在本地演练里就现形，而不是等发布出去才发现。
+#
+# 顺序与 CI 一致：构建 → 校验版本注入（验的是**裸**二进制，所以必须在打包
+# 之前）→ 打包 → 删掉裸二进制 → 算校验和。发布物只有 tarball 一条安装路径，
+# 校验和才盖得住发出去的东西。
+#
+# 跑完之后 dist/ 里就是发布那份资产清单：一个 tarball 与 SHA256SUMS——发布那一步
+# 发的是 `dist/*`，本地看到的与线上的一致。
+VERSION ?= dev
+
+dist:
+	@rm -rf dist
+	@mkdir -p dist
+	@set -e; \
+	for pair in "larkax:./cmd/larkax" "larkaxctl:./cmd/larkaxctl"; do \
+	  name=$${pair%%:*}; pkg=$${pair#*:}; \
+	  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+	    -ldflags "-s -w -X main.version=$(VERSION)" \
+	    -o "dist/$${name}_linux_amd64" "$$pkg"; \
+	done; \
+	if ! dist/larkax_linux_amd64 --version | grep -qx "$(VERSION)"; then \
+	  echo "版本注入失败：二进制自称 $$(dist/larkax_linux_amd64 --version)，期望 $(VERSION)"; \
+	  exit 1; \
+	fi; \
+	stage=$$(mktemp -d); \
+	trap 'rm -rf "$$stage"' EXIT; \
+	cp dist/larkax_linux_amd64 "$$stage/larkax"; \
+	cp dist/larkaxctl_linux_amd64 "$$stage/larkaxctl"; \
+	chmod 0755 "$$stage/larkax" "$$stage/larkaxctl"; \
+	cp LICENSE README.md "$$stage/"; \
+	mkdir -p "$$stage/man/man1"; \
+	cp man/man1/*.1 "$$stage/man/man1/"; \
+	tar -czf "dist/larkax_$(VERSION)_linux_amd64.tar.gz" \
+	  --sort=name --owner=0 --group=0 --numeric-owner -C "$$stage" .; \
+	rm -f dist/larkax_linux_amd64 dist/larkaxctl_linux_amd64; \
+	cd dist && sha256sum *.tar.gz > SHA256SUMS; \
+	echo "已打出 dist/larkax_$(VERSION)_linux_amd64.tar.gz"
 
 clean:
 	@docker compose down --volumes --remove-orphans

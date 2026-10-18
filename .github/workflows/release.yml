@@ -71,9 +71,46 @@ jobs:
             exit 1
           fi
 
+      # 打包：发出去的是 tarball，除了两个二进制还有 LICENSE、README.md 与
+      # man/man1/ 下的手页。手页是**用户面文档**的一部分：只存在于源码树里的话，
+      # 装了发布版的人 `man larkaxctl-channel` 翻不到，而那时他多半以为是自己
+      # 没装对。
+      #
+      # 打的是仓库里**已提交**的那一份（`man/man1/*.1`），不在这里跑生成器：手页
+      # 是产物，它与两份源文件是否同一次生成由 scripts/check-man-pages.sh 保证
+      # （见 docs/development.md）。发布时再生成一次，等于给要发出去的那一包多加
+      # 一个变量，而这一次生成后面没有第二道门——错了就直接发出去。
+      - name: 打包
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          for arch in amd64 arm64; do
+            stage="$(mktemp -d)"
+            cp "dist/larkax_linux_${arch}" "$stage/larkax"
+            cp "dist/larkaxctl_linux_${arch}" "$stage/larkaxctl"
+            chmod 0755 "$stage/larkax" "$stage/larkaxctl"
+            cp LICENSE README.md "$stage/"
+            mkdir -p "$stage/man/man1"
+            cp man/man1/*.1 "$stage/man/man1/"
+            # 条目顺序与属主固定下来：tar 默认按目录顺序写、并带上构建机的
+            # uid/gid（runner 上是 1001），两样都让同一个包随环境变。
+            tar -czf "dist/larkax_${VERSION}_linux_${arch}.tar.gz" \
+              --sort=name --owner=0 --group=0 --numeric-owner \
+              -C "$stage" .
+            rm -rf "$stage"
+          done
+          # 裸二进制到此为止：发布物只有 tarball。两份产物等于两条安装故事，而
+          # SHA256SUMS 只盖得住一条——「有校验和的那个」与「用户脚本里可能正在
+          # curl 的那个」不是同一个东西时，校验和就成了摆设。
+          #
+          # 通配只命中 larkax_linux_<架构> 与 larkaxctl_linux_<架构>：tarball 叫
+          # larkax_<版本>_linux_<架构>.tar.gz，前缀不是这两个。
+          rm -f dist/larkax_linux_* dist/larkaxctl_linux_*
+
+      # 校验和算的是 tarball：它是用户下载之后要核对的那一份。
       - name: 校验和
         working-directory: dist
-        run: sha256sum * > SHA256SUMS
+        run: sha256sum *.tar.gz > SHA256SUMS
 
       - name: 发布
         env:

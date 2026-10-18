@@ -60,13 +60,33 @@ Anthropic 格式同理。这条不能混。
 前置：`main` 上的 CI 全绿。
 
 1. **在 `main` 上打 tag**：`git tag -a v0.1.0 -m "..."`，然后推 tag
-2. CI 由 tag 触发，构建多架构二进制并发布 Release
+2. CI 由 tag 触发，按平台构建并打包发布（包里有什么见下一节）
 3. Release 说明由 `gh release create --generate-notes` 生成（GitHub 按 PR 标签
    与提交类型分组），再人工过一遍——自动生成的分组只保证「按类型归类」，
    不保证「说人话」
 
 **从同一个 commit 构建，不要先构建再打 tag。** 否则 tag 指向的源码与
 发布的二进制不是同一个东西，而这一点在出问题时才被发现。
+
+**破坏性改动在那条 PR 上打 `breaking` 标签**（改字段语义、改默认值这类，见上文
+「API 契约的冻结」）。`--generate-notes` 按 PR 标签分组，而没有这个标签时，一处
+改了错误码的取值会和一处文案修正落进同一个 `fix`，读的人分不出哪一条要动手——
+客户端按文档里那个取值写分支，改了就掉进 `else`，本该重试的调用会被上报成失败。
+
+发行说明里还要**逐条点名** `breaking` 下的每一条，不能只让它待在自动分组里：
+分组只说「有这一类」，说不了调用方要改什么。
+
+## 发布包里有什么
+
+每个平台一个 tar.gz，名字形如 `larkax_v0.1.0_linux_amd64.tar.gz`，解开是：
+
+- `larkax` 与 `larkaxctl`：两个二进制，可执行位保留
+- `LICENSE`、`README.md`
+- `man/man1/` 下的手页：解开之后 `man larkaxctl-channel` 直接可翻
+  （在源码树里翻的写法见 [cli-reference.md](cli-reference.md)）
+
+`SHA256SUMS` 与这些 tarball 一起挂在 Release 上。要在本地演练这一套
+（只打本机架构），用 `make dist VERSION=v0.1.0`。
 
 ## 版本号出现在哪里
 
