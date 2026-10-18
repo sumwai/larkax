@@ -682,12 +682,16 @@ func (s *Store) Save(ctx context.Context, req pipeline.Request, charge *pipeline
 // 前者是没有预留记录（也就没冻过钱），目的已经达到，返回 nil；后者是
 // 数据不一致——冻结额长在钱包行上，行不在就真的什么都没释放，报错回滚。
 //
-// # upstream_status 与 error_code 唯一的写入点就是这里
+// # upstream_status 与 error_code 在不计费的这一侧只有这一条写入路径
 //
-// 那两列说的是「这次请求为什么没计费」，而不计费的结局**只有这一条写库的
-// 路**：结算那条路（markSettled）只在计费时才走——上游失败时 pipeline.Settle
-// 直接返回一个错误、一个副作用都不留。所以把它们写在别处（包括 markSettled
-// 里那两个曾经摆在那儿的字面量参数位）都等于永远不写。
+// 那两列在不计费的行上说的是「这次请求为什么没计费」，而不计费的结局**只有
+// 这一条写库的路**：结算那条路（markSettled）只在计费时才走——上游失败时
+// pipeline.Settle 直接返回一个错误、一个副作用都不留。
+//
+// 计费那一侧另有自己的那一份：静默截断那一次要计费，而「回答只写了一半」得
+// 留在账单上，它由 markSettled 写（见那里的注释）。两处写的是同一对列，取的
+// 是同一个词汇表里不同的子集——不计费那一侧是那四个失败分类，计费这一侧只有
+// 截断一个。所以 `error_code IS NOT NULL` 要连着 status 一起读。
 //
 // failure 为 nil 表示这次没有上游失败的依据：插件阻断、结算本身出错，
 // 以及「还没到结算那一步就返回了」那条路（结算之前客户端就断了、context
@@ -882,27 +886,38 @@ func failureColumns(failure *pipeline.UpstreamFailure) (status int, code string)
 // 值本身非空已经由 Save 开头的 checkUpstreamModel 挡住，这里只是不把一个
 // 空串当名字写进去。
 //
-// # 上游失败那两列为什么不在这里
+// # 上游侧那两列也在这里写
 //
-// upstream_status 与 error_code 曾经也在这条 UPDATE 里，参数位写的是字面量
+// upstream_status 与 error_code 一度也在这条 UPDATE 里，参数位写的是字面量
 // 0 与空串，所以那两列恒为 NULL——包括上游回了 400 的那条失败记录。参数位
 // 是字面量时 NULLIF 挡不住任何东西，它读起来却像「这里可能有值」，于是
 // 「这两列没有写入方」这件事被一个看起来有逻辑的表达式盖住了。
 //
-// 它们现在写在 Release 里，那是它们唯一写得进去的地方：结算这条路只在
-// **计费**时才走，而因上游失败不计费——那时 pipeline.Settle 直接返回错误，
-// 这一行 UPDATE 一条都不执行。计费这一侧也确实没有值可写：上游响应里
-// 没有状态码（channel.Response 不带它），「这次是 2xx」这件事在链路里
-// 根本没有一个字段记着，编一个 200 出来就是假数据。
+// 当时修的是另一半：不计费的依据写在 Release 里，而这条结算 UPDATE 只在
+// **计费**时才走（因上游失败不计费时 pipeline.Settle 直接返回错误，这一行
+// 一条都不执行）。计费这一侧那时也确实没有值可写：上游响应里没有状态码
+// （channel.Response 不带它），「这次是 2xx」这件事在链路里根本没有一个
+// 字段记着，编一个 200 出来就是假数据。
 //
-// 于是两列在**已结算**的行上恒为 NULL，含义是「这次**不是因上游失败而
-// 不计费**」——与 client_canceled_at 的 NULL 同一个口径（见上面那段注释）。
+// 后来链路里有了那个字段：网关把这次响应的归类带了下来（见
+// pipeline.Outcome 的 UpstreamStatus 与 ErrorCode，它由 Settle 搬进
+// Charge）。于是**已计费的行**上有了唯一一种写得出来的依据——
+// upstream_stream_truncated，也就是「上游吐过字之后静默把连接掐断」：那一次
+// 回答照常计费，而客户端看到的是一次正常结束，账单是唯一能说明
+// 「这次回答只写了一半」的地方（快照有留存期，见 docs/request-retention.md）。
+// 这条 UPDATE 因此也写这两列了。
 //
-// **这句话不能读成「这次没有上游失败」。** 上游吐了字之后才失败的那一次
-// 要计费（token 已经产生了，上游是算了钱的），账单就是已结算的行，两列
-// 同样是 NULL——见 stream_e2e_test.go 的 TestStreamUpstreamErrorMidStream。
-// 所以 `error_code IS NOT NULL` 不能当成「上游出过问题的请求」的判据，
-// 它答的只是「这次没向上游收钱，是不是因为上游这一侧出了事」。
+// 零值与空串落成 NULL 的口径与 Release 逐字一致：正常结束、客户端断开、插件
+// 终止都不带依据，写进来的是零值，NULLIF 把它们折成 NULL。那里的 NULL 含义是
+// 「这次没有上游侧的依据可写」——与 client_canceled_at 的 NULL 同一个口径
+// （见上面那段注释）。
+//
+// **它仍然不能读成「这次没有上游失败」。** 上游吐了字之后**报错**的那一次
+// 要计费（token 已经产生了，上游是算了钱的），账单就是已结算的行，两列同样
+// 是 NULL——见 stream_e2e_test.go 的 TestStreamUpstreamErrorMidStream。所以
+// `error_code IS NOT NULL` 不能当成「上游出过问题的请求」的判据；在已计费的
+// 行上它答的是「钱收了，但回答是不是只写了一半」，在不计费的行上答的才是
+// 「这次没向上游收钱，是不是因为上游这一侧出了事」。
 func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *pipeline.Charge) (bool, error) {
 	// channel_id 是 bigint，NULLIF 的实参标成 bigint（理由见 SaveReservation）。
 	res, err := tx.ExecContext(ctx, `
@@ -913,11 +928,13 @@ func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *
 		       settled_at = now(),
 		       channel_id = NULLIF($3, 0::bigint),
 		       upstream_model = NULLIF($6, ''),
+		       upstream_status = NULLIF($7, 0),
+		       error_code = NULLIF($8, ''),
 		       client_canceled_at = CASE WHEN $4 THEN now() END
 		 WHERE request_id = $1 AND status = 'pending'`,
 		req.RequestID, charge.Settlement.Actual.String(), req.ChannelID,
 		charge.ClientCanceled, charge.Settlement.Breakdown.Total.String(),
-		req.UpstreamModel)
+		req.UpstreamModel, charge.UpstreamStatus, charge.ErrorCode)
 	if err != nil {
 		// 与 Release 同一条外键：channel_id → channels(id)。
 		return false, constraintFailure(fmt.Errorf("标记结算失败: %w", err))

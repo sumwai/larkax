@@ -211,14 +211,19 @@ type CallRecorder interface {
 //
 // 同一个事实，**各记各的**。取值口径与 derivation 是同一套（见
 // upstreamEvidence、streamResponseEvidence 与 pipeline 的那组常量），但两列
-// 回答的问题不同：账单上的 error_code 答的是「这次为什么没计费」，而快照的
-// ErrorKind 答的是「这次响应怎么了」。两列出现分歧时，以账单为准的是
-// 「钱为什么没扣」，以快照为准的是「上游当时回了什么」。
+// 回答的问题不同：快照的 ErrorKind 答的是「这次响应怎么了」，不看计不计费；
+// 账单上的 error_code 在两种行上答两个问题——计费的行上它答的是
+// 「钱收了，回答是不是只写了一半」，不计费的行上答的是
+// 「这次没向上游收钱，是不是因为上游这一侧出了事」（见 pipeline.Outcome）。
+// 两列出现分歧时，以账单为准的是「钱为什么没扣」，以快照为准的是
+// 「上游当时回了什么」。
 //
-// 例外是 upstream_stream_truncated：它**应该**在两表上都写。那一次回答计了费
-// （上游已经产生了 token），而「回答只写了一半」是需要能事后读出来的——
-// 只写在快照上的话，按账单核对金额的人看不到它。今天它只落在快照那一侧：
-// 已计费的行上 error_code 的唯一写入点（markSettled）还没接，见 #461。
+// upstream_stream_truncated 是唯一在两表上都写的分类：那一次回答计了费（上游
+// 已经产生了 token），而「回答只写了一半」是需要能事后读出来的——只写在快照上
+// 的话，按账单核对金额的人看不到它（快照另有留存期，见
+// docs/request-retention.md）。两边判据仍是同一个 streamTruncated，落点分别是
+// 快照的 error_kind 与 billing_requests 的两列（经 pipeline.Settle 搬进
+// Charge，由 store 的 markSettled 写入）。
 type Snapshot struct {
 	RequestID string
 	// UserID 是**发起这次请求的用户**，不是渠道所属的商家。
@@ -1202,6 +1207,10 @@ func (h *handle) abort(ctx context.Context) {
 func (h *handle) settleAndFail(ctx context.Context, placed placement, cause error, out pipeline.Outcome) error {
 	h.settled = true
 	h.routedTo(placed)
+	// 依据**无条件覆盖**，调用方传来的那两个字段在这里被丢掉：失败这一条路上
+	// 依据只能来自 cause（这次结算认下的原因是它），让调用方自己填就有了两个
+	// 来源。调用方设定本包这一对值的地方只有计费那条路（见 stream.go 的
+	// billedStreamEvidence）。
 	out.UpstreamStatus, out.ErrorCode = upstreamEvidence(cause)
 	h.settleFailure(ctx, out)
 	return cause

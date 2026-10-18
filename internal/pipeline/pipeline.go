@@ -331,12 +331,12 @@ type Outcome struct {
 	// 不计费，但仍然要落一条记录——「这个请求失败了」本身是排查的依据。
 	UpstreamFailed bool
 
-	// UpstreamStatus 与 ErrorCode 是「这次为什么不计费」的依据，供事后核对
-	// 「这个错误码当时是不是真的不该计费」。
+	// UpstreamStatus 与 ErrorCode 是**上游这一侧**这次的依据，供事后核对
+	// 「这个错误码当时是不是真的不该计费」。同一对值有两处落点，按这次计不
+	// 计费分开：不计费的走 internal/ledger/store 的 Release，计费的走
+	// markSettled（见下）。
 	//
-	// 它们最后落进 billing_requests 的同名两列（见 internal/ledger/store 的
-	// Release——不计费的结局只有那一条写库的路）。两者都只在**上游这一侧**
-	// 的失败上有值：
+	// 两者都只在**上游这一侧**的失败与截断上有值：
 	//
 	//   - UpstreamStatus 是上游那次 HTTP 响应的状态码。**拿到过响应就有值**，
 	//     包括上游回 2xx、却把错误写在体里的那些（通常是 200）；一个响应都
@@ -344,13 +344,22 @@ type Outcome struct {
 	//     「上游回了 0 号」。
 	//   - ErrorCode 的取值口径见下面那组常量。
 	//
-	// **口径是「因上游失败而不计费」，不是「上游失败过」。** 上游吐了字之后
-	// 才失败的那一次要计费，账单是 settled，两列同样是 NULL（见
-	// stream_e2e_test.go 的 TestStreamUpstreamErrorMidStream）。所以
-	// `error_code IS NOT NULL` 不是「上游出过问题的请求」的判据——它答的是
-	// 「这次没向上游收钱，是不是因为上游这一侧出了事」。
+	// # 计费的行上只有一种值会到这里
 	//
-	// 不是上游的失败（插件阻断、别名没配）两列也留空：它们不是上游出的
+	// 上游吐了字之后出的问题不改变计费（token 已经产生，上游算了钱），而其中
+	// 只有**静默截断**（ErrorUpstreamStreamTruncated）会记在账单上：那一次
+	// 客户端看到的是一次正常结束，账单是唯一能说明「这次回答只写了一半」的
+	// 地方，而快照有留存期（见 docs/request-retention.md）。上游在流里报错的
+	// 那一次，客户端当场就拿到错误帧了，账单不必再讲一遍——它的两列留 NULL
+	// （见 stream_e2e_test.go 的 TestStreamUpstreamErrorMidStream）。
+	//
+	// 所以 `error_code IS NOT NULL` 仍然不是「上游出过问题的请求」的判据，
+	// 而且它在两种行上答的是两个问题：计费的行上答的是
+	// 「钱收了，但回答是不是只写了一半」，不计费的行上答的是
+	// 「这次没向上游收钱，是不是因为上游这一侧出了事」。两种读法都得连着
+	// status 一起看。
+	//
+	// 不是上游的失败（插件阻断、别名没配）两列一律留空：它们不是上游出的
 	// 事，写进去会让上面那个问题答错。
 	UpstreamStatus int
 	ErrorCode      string
@@ -466,10 +475,10 @@ const (
 	// 快照的 error_kind 用同一个值：同一件事在两表里取同一个词，读的人不必
 	// 再翻译一次。
 	//
-	// **已计费那条路的落点还没接上**：今天写 error_code 的只有
-	// internal/ledger/store 的 Release（不计费的结局），markSettled 不写这
-	// 两列（见 #461 的报告）。在那之前这个值只出现在快照的 error_kind 上；
-	// 接上之后两表会同时有它，而上面那两句判据才成立。
+	// 已计费那条路的落点就是 markSettled：这个值随 Outcome 进 Settle，由
+	// Settle 搬进 Charge.ErrorCode，落库时写进 billing_requests.error_code
+	// （见 internal/ledger/store）。所以它现在是五个取值里唯一**会在已计费
+	// 的行上**出现的那个。
 	ErrorUpstreamStreamTruncated = "upstream_stream_truncated"
 )
 
@@ -522,6 +531,17 @@ type Charge struct {
 	// 用量确实是估的，但上游中途报错时用量同样是估的，而那不是客户端断的
 	// ——两者在对账与告警上是两回事（见 Outcome.ClientCanceled 的注释）。
 	ClientCanceled bool
+
+	// UpstreamStatus 与 ErrorCode 是这次响应的上游侧依据，由 Settle 从
+	// Outcome 原样搬过来，落进 billing_requests 的同名两列（见
+	// internal/ledger/store 的 markSettled）。
+	//
+	// 已计费的行上只可能是 ErrorUpstreamStreamTruncated 那一种（见
+	// Outcome 的注释）：正常结束、客户端断开、插件终止都不带依据。零值与
+	// 空串在这里的意思就是「这次没有依据可写」，落库时被 NULLIF 折成
+	// NULL——与不计费那条路（Release）的口径逐字一致。
+	UpstreamStatus int
+	ErrorCode      string
 
 	// Duration 是这次上游调用的耗时，由 Settle 从 Outcome 搬过来。
 	//
@@ -981,6 +1001,11 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 		// 截之前的值。理由与边界见 Charge.Prices 的注释。
 		Prices:         val.Prices,
 		ClientCanceled: out.ClientCanceled,
+		// 上游侧的依据原样带过去，落库层照着写 billing_requests 那两列。
+		// 已计费的行上它只可能是截断那一种——取舍在网关那一侧做，见
+		// Outcome 的注释；这里不判，判两次就成了两份会各自漂移的规矩。
+		UpstreamStatus: out.UpstreamStatus,
+		ErrorCode:      out.ErrorCode,
 		// 耗时与金额无关，原样带过去：它只在落库时变成 usage_events 的一列，
 		// 延迟那一维的输入就从那里按桶聚出来。
 		Duration: out.Duration,

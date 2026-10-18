@@ -1117,6 +1117,57 @@ func TestSettleUpstreamSuccessIsNotClientCanceled(t *testing.T) {
 	}
 }
 
+// 上游侧的依据要**原样**搬到 Charge 上——它是 billing_requests 那两列的来源。
+//
+// 两个方向都钉：只钉「有依据时搬过去」的话，无条件搬一个零值过去也过得了，
+// 而零值经 markSettled 的 NULLIF 正好变成 NULL——那是「没有依据」该有的样子，
+// 于是写错也看不出来。反过来只钉零值那一侧同理。两列一起判，是因为它们成对
+// 才有意义（读法是 `upstream_stream_truncated` + 200，见 Outcome 的注释）。
+//
+// 什么结局配得上依据**不在这里判**：那只有网关知道（流的结局它才看得见），
+// Settle 只负责搬。
+func TestSettleCarriesUpstreamEvidenceVerbatim(t *testing.T) {
+	cases := []struct {
+		name string
+		in   Outcome
+	}{
+		{
+			name: "带依据（吐过字之后静默截断）",
+			in: Outcome{
+				// 那一次上游是回过响应的（已经吐了内容），不是
+				// 「一个响应都没拿到」，所以状态码有值。
+				UpstreamStatus: 200,
+				ErrorCode:      ErrorUpstreamStreamTruncated,
+			},
+		},
+		{name: "不带依据（正常结束）", in: Outcome{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// 每个分支一条新的流水线：夹具里的 RequestID 是固定的，同一个
+			// 假账本上预留两次会撞。
+			src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}
+			p := newPipeline(t, src)
+
+			req := baseRequest()
+			res, _ := p.Reserve(context.Background(), req)
+
+			out := tc.in
+			out.Usage = channel.Usage{PromptTokens: 1000, CompletionTokens: 50}
+			out.UsageSource = tokens.SourceMeasured
+			charge, err := p.Settle(context.Background(), req, res, out)
+			if err != nil {
+				t.Fatalf("结算失败: %v", err)
+			}
+			if charge.UpstreamStatus != tc.in.UpstreamStatus || charge.ErrorCode != tc.in.ErrorCode {
+				t.Errorf("Charge 上的依据 = (%d, %q)，期望原样搬过来 (%d, %q)",
+					charge.UpstreamStatus, charge.ErrorCode,
+					tc.in.UpstreamStatus, tc.in.ErrorCode)
+			}
+		})
+	}
+}
+
 // 结算必须基于一次真实的预留。
 func TestSettleRequiresReservation(t *testing.T) {
 	p := newPipeline(t, &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}})

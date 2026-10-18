@@ -532,12 +532,18 @@ type billingRow struct {
 	canonicalModel string
 	upstreamModel  sql.NullString
 
-	// upstreamStatus 与 errorCode 是「这次为什么没计费」的依据（见 #362）。
+	// upstreamStatus 与 errorCode 是上游侧这次的依据（见 #362、#560）。
 	//
-	// 两列都可空，而 NULL 在这里是**正常取值**：它表示这一行没有上游失败的
-	// 证据，不是「没读到」。所以断言要连着 Valid 一起判——只判 String 的话
+	// 两列都可空，而 NULL 在这里是**正常取值**：它表示这一行没有要记的上游
+	// 依据，不是「没读到」。所以断言要连着 Valid 一起判——只判 String 的话
 	// 「写了个 0 / 空串进去」与「留了 NULL」在用例里长得一样，而前者会让
 	// 「上游回了 0 号」与「没有这回事」在库里分不开。
+	//
+	// 两列在计费与不计费两种行上**都可能有值**，各自答的问题不同：不计费的
+	// 行上答「这次没向上游收钱，是不是因为上游这一侧出了事」（唯一写它的是
+	// store.Release），计费的行上答「钱收了，回答是不是只写了一半」（唯一
+	// 写它的是 markSettled，取值只有 upstream_stream_truncated 一种，见
+	// pipeline.Outcome）。
 	upstreamStatus sql.NullInt64
 	errorCode      sql.NullString
 }
@@ -785,6 +791,16 @@ func TestStreamChatCompletionsEndToEnd(t *testing.T) {
 	assertWallet(t, db, user, "99.99967", "0")
 	assertConsumeEntry(t, db, bill.id, user, "0.00033")
 	assertReservedBeforeUpstream(t, fake)
+
+	// 正常结束的那一次没有上游侧的依据可写：两列留 NULL。
+	//
+	// 这一条钉的是「接上截断之后没有顺手把所有已计费的行都写上值」。写上去的
+	// 值只可能来自这一次的响应归类，而这一次是干净结束，于是那个值就是编出来
+	// 的；更糟的是「账单上有值」会从此不再意味着「这里有一件只有账单知道的事」。
+	if bill.upstreamStatus.Valid || bill.errorCode.Valid {
+		t.Errorf("正常结束的流式请求两列应当是 NULL，得到 %v / %v",
+			bill.upstreamStatus, bill.errorCode)
+	}
 
 	// 三、发出去的那份请求体真的是流式的。
 	bodies := fake.sentBodies()
@@ -1052,6 +1068,16 @@ func TestStreamClientDisconnectIsBilled(t *testing.T) {
 	assertWallet(t, db, user, "99.99969", "0")
 	assertConsumeEntry(t, db, bill.id, user, "0.00031")
 	assertReservedBeforeUpstream(t, fake)
+
+	// 客户端断开的那一次两列也是 NULL：停下这条流的是**我们**，不是上游。
+	//
+	// 这一条钉的是归属：把 ours 那几种结局（客户端断开、插件终止、余额不足的
+	// 中断）写进这两列，等于把我们的动作记到上游头上——而这一列的存在理由正是
+	// 挑出上游不守信的渠道，记错了会让一个健康的渠道看起来在掐流。
+	if bill.upstreamStatus.Valid || bill.errorCode.Valid {
+		t.Errorf("客户端断开的两列应当是 NULL，得到 %v / %v",
+			bill.upstreamStatus, bill.errorCode)
+	}
 }
 
 // 上游在流中途报错：已经吐出的部分被计费，剩下的部分**不假装正常结束**。
@@ -1127,6 +1153,17 @@ func TestStreamUpstreamErrorMidStream(t *testing.T) {
 	}
 	assertWallet(t, db, user, "99.99984", "0")
 	assertConsumeEntry(t, db, bill.id, user, "0.00016")
+
+	// 账单上那两列留 NULL，尽管这次确实是上游出的问题。
+	//
+	// 这是有意不写的（见 gateway 的 billedStreamEvidence）：错误帧当时就送到
+	// 调用方手里了，「这次没写完」他当场就知道——真正需要账单替调用方说话的
+	// 只有静默截断那一种（那一次调用方看到的是一次正常结束）。把报错也写进去，
+	// 「账单上有值」就不再等于「这里有一件只有账单知道的事」。
+	if bill.upstreamStatus.Valid || bill.errorCode.Valid {
+		t.Errorf("流中途报错的两列应当是 NULL，得到 %v / %v",
+			bill.upstreamStatus, bill.errorCode)
+	}
 }
 
 // 已经吐字之后不再换渠道。
@@ -1435,32 +1472,36 @@ func TestStreamTruncatedAfterOutputRecordsSameClassification(t *testing.T) {
 
 	waitForSnapshotRows(t, db, user, 2)
 	var snapKind sql.NullString
+	var snapStatus sql.NullInt64
 	if err := db.QueryRowContext(context.Background(), `
-		SELECT error_kind FROM request_snapshots
-		 WHERE user_id = $1 AND direction = 'response'`, user).Scan(&snapKind); err != nil {
+		SELECT error_kind, upstream_status FROM request_snapshots
+		 WHERE user_id = $1 AND direction = 'response'`, user).Scan(&snapKind, &snapStatus); err != nil {
 		t.Fatalf("查响应方向的快照失败: %v", err)
 	}
 	if !snapKind.Valid || snapKind.String != pipeline.ErrorUpstreamStreamTruncated {
 		t.Fatalf("快照的 error_kind = %v，期望 %q",
 			snapKind, pipeline.ErrorUpstreamStreamTruncated)
 	}
+	if !snapStatus.Valid {
+		t.Fatalf("快照的 upstream_status 没有值，下面那条「两表同值」就无从比起")
+	}
 
-	// 账单侧：分类与快照同值。
+	// 账单侧：分类与快照同值，两列都是。
 	//
-	// **已知边界（#461 之后仍开着）**：已结算的行上 error_code 今天恒为
-	// NULL——唯一写这两列的地方是 store.Release，而它只走「不计费」那条路；
-	// markSettled 不写这两列（见 internal/ledger/store 的注释与
-	// TestSettlementLeavesUpstreamFailureColumnsNull）。所以「两表同值」这
-	// 一半还没落地，这里断言的是**当前**的落库结果，而不是目标值。
+	// 这是 #560 接上的那一半。已计费的行不走 store.Release，它那两列由
+	// markSettled 写，值由网关在流的结局那一刻拼好、经 pipeline.Settle 搬过去
+	// （见 internal/gateway 的 billedStreamEvidence）。
 	//
-	// 它写成断言而不是放过：这一行一旦有人把 markSettled 接上，这条用例
-	// 会立刻变红，提醒把那两行改成同一个值——比留一句注释更难被忽略。
-	// 目标值的断言在 internal/gateway 的
-	// TestStreamTruncatedAfterOutputClassifiedAndBilled 里（那一层不落库，
-	// 已经钉住了快照与结算两侧）。
-	if bill.errorCode.Valid {
-		t.Errorf("账单的 error_code = %q：已结算的行今天不该有值，"+
-			"接上 markSettled 之后请把这一条改成 %q（与快照同值）",
-			bill.errorCode.String, pipeline.ErrorUpstreamStreamTruncated)
+	// 改动之前这里断言的是反方向——「已结算的行上恒为 NULL」。那是接线前的
+	// 事实，不是目标：它同时意味着「正常结束」与「流被截断」在账单这一侧
+	// 分不开，按账单核对金额的人看不出这次回答只写了一半。接上之后反过来的
+	// 这一条才是要保住的：同一次截断两表给同一个词、同一个状态码。
+	if !bill.errorCode.Valid || bill.errorCode.String != pipeline.ErrorUpstreamStreamTruncated {
+		t.Errorf("账单的 error_code = %v，期望 %q（与快照的 error_kind 同值）",
+			bill.errorCode, pipeline.ErrorUpstreamStreamTruncated)
+	}
+	if !bill.upstreamStatus.Valid || bill.upstreamStatus.Int64 != snapStatus.Int64 {
+		t.Errorf("账单的 upstream_status = %v，快照的 = %d：同一次截断两表必须同值",
+			bill.upstreamStatus, snapStatus.Int64)
 	}
 }
