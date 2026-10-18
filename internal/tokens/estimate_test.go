@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -14,6 +15,13 @@ import (
 // 事，见 COUNTER.md），而是校验**方向与形态**：同类之间谁高谁低、
 // 哪些形态必须被下限兜住。方向写反了不会报错，只会让某一类输入系统性偏。
 
+// classOf 的快路径与 unicode 路要在 0x80 这个分界点给出同一个答案。
+//
+// 变异：`if r < utf8.RuneSelf` 改成 `<=`。两版只在 `0x80` 这一个码点上
+// 走不同的分支，而 U+0080 落在 classOf **两条路都不认识的**类别里
+// （unicode 的 C1 控制符：不是字母、不是数字、不是空白、也不是标点），
+// 于是两边都落到各自 switch 的 default，同得一个 classSymbol。
+// 这一格分不开的原因在类别判定上，不在分支顺序上。
 func TestClassOf(t *testing.T) {
 	cases := []struct {
 		r    rune
@@ -26,6 +34,7 @@ func TestClassOf(t *testing.T) {
 		{'中', classCJK}, {'あ', classCJK}, {'ア', classCJK}, {'한', classCJK},
 		{'я', classOtherLetter}, {'م', classOtherLetter}, {'अ', classOtherLetter},
 		{'🎉', classSymbol}, {'→', classSymbol}, {'€', classSymbol},
+		{0x80, classSymbol}, // 快路径与 unicode 路的分界点，两边同得一个 default
 	}
 	for _, tc := range cases {
 		if got := classOf(tc.r); got != tc.want {
@@ -68,6 +77,11 @@ func TestEstimateRunFloorForBlankRuns(t *testing.T) {
 	// 空白段的密度算出来远小于 1，而下限必须把它抬到 1。
 	// 没有下限的话 `\n\n` 会被算成 0.2 个 token，而实测是 1 个。
 	// 用「多一段空白就多一个 token」来验证下限生效。
+	//
+	// 变异：runValue 里 `if v < 1` 改成 `<=`。这一处是**等价变异**：`v` 正好
+	// 等于 1 那一格，变异版返回字面量 1，原版走到 `return v` 返回的也是 1，
+	// 同一个值。两版在任何输入上都给同一个结果，所以不存在「能分开两版的
+	// 输入」——这不是想不到输入，是相等那一格两版返回同一个数。
 	base := estimate("x", tableOpenAI)
 	withBlank := estimate("x\n\n", tableOpenAI)
 	if withBlank <= base {
@@ -99,6 +113,70 @@ func TestEstimateShortRunsDoNotTriggerFloor(t *testing.T) {
 	if got := estimate(short, tbl) / tbl.bias; got > plain*2 {
 		t.Errorf("短标识符 %q 的估算 %v 明显高于线性估算 %v，下限阈值可能太低",
 			short, got, plain)
+	}
+}
+
+// 长不可压缩串的额外下限在几处边界上各有一个具体的数：
+//
+//	23 字符 — 差一个字符不到阈值，完全不触发下限（5.1502198）
+//	24 字符 — 正好落在阈值上，下限开始生效（15.1944）
+//	48 字符 — 阈值以上，下限把这段抬到每字符 0.65（30.3888）
+//	24 个数字（Claude 表）— 线性部分本来就高过下限，加不上去（14.4926136）
+//
+// 这几个数一起把这条式子上的四处固定住。每一处都能说出让两版不同的输入：
+//
+//   - `if runLen >= t.runFloorLen` 改成 `>`：23 与 24 两行把两版分开，
+//     24 那一行会掉回 5.1502198（阈值整整晚一个字符才生效）；
+//   - `runFloorDensity * float64(runLen)` 改成 `/`：24 那一行算出 0.65÷24，
+//     低于线性部分、加不上去，同样掉回 5.1502198；
+//   - `if f > body` 改成 `<=`：方向反过来，24 个数字那一行会被倒扣
+//     （15.6 − 19.1448）再乘偏置，得到 11.8092；
+//   - `runLen++` 改成 `--`：计数器反向，永远到不了阈值，48 那一行掉回
+//     10.7482848（= 线性部分 × 偏置）。
+//
+// 同一处的 `if f > body` 改成 `>=` 是**等价变异**：相等那一格两版都往
+// extra 加 `f - body`，而它在相等时正好是 0，加与不加是同一个数。
+func TestEstimateRunFloorBoundaryValues(t *testing.T) {
+	blob48 := strings.Repeat("a", 48)
+	// 下限实际补加的那一项：0.65×48 − 0.2299×48。
+	if got := runFloorExtra(blob48, tableOpenAI); math.Abs(got-20.1648) > 1e-6 {
+		t.Errorf("48 字符的额外下限 = %v, 期望 20.1648", got)
+	}
+	cases := []struct {
+		name string
+		text string
+		tbl  weightTable
+		want float64
+	}{
+		{"23 字符（不到阈值）", strings.Repeat("a", 23), tableOpenAI, 5.1502198},
+		{"24 字符（正好在阈值上）", strings.Repeat("a", 24), tableOpenAI, 15.1944},
+		{"48 字符（阈值以上）", blob48, tableOpenAI, 30.3888},
+		{"24 个数字（下限低于线性部分）", strings.Repeat("0", 24), tableClaude, 14.4926136},
+	}
+	for _, tc := range cases {
+		if got := estimate(tc.text, tc.tbl); math.Abs(got-tc.want) > 1e-6 {
+			t.Errorf("%s 的估算 = %v, 期望 %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// runFloorLen 为 0 表示「这张表不设下限」。三张内置表都取 24，所以这一格
+// 只有另造一张表才走得到——但它是真缺口，不是等价变异：阈值为 0 时变异版
+// （`<= 0` 改成 `< 0`）不再提前返回，而是继续往下走，让下限对**每一段**
+// 都生效，于是估算从 10.7482848 跳到 30.3888。
+//
+// 夹具只把阈值改成 0、密度留着 0.65：这样变异版算出 0.65×48 高于线性部分，
+// 会补上一笔。若把密度一起清成 0，两版都补不上，这条用例就分不开两版了
+// ——那是夹具没选对，不是这一格等价。
+func TestEstimateRunFloorDisabledWhenZero(t *testing.T) {
+	tbl := tableOpenAI
+	tbl.runFloorLen = 0
+	blob := strings.Repeat("a", 48)
+	if got := runFloorExtra(blob, tbl); got != 0 {
+		t.Errorf("阈值为 0 时不该有额外下限, 得到 %v", got)
+	}
+	if got := estimate(blob, tbl); math.Abs(got-10.7482848) > 1e-6 {
+		t.Errorf("阈值为 0 的估算 = %v, 期望 10.7482848（只有线性部分）", got)
 	}
 }
 
@@ -153,6 +231,12 @@ func TestTableUnknownAtLeastAsHighAsBoth(t *testing.T) {
 	}
 }
 
+// isCodeish 在快路径与 unicode 路的同一个分界点上也要给同一个答案。
+//
+// 变异：`if r < utf8.RuneSelf` 改成 `<=`。两版只在 `0x80` 上分岔：不走快路径
+// 时函数直接 `return false`，走快路径时它既不是字母数字也不是那四个符号，
+// 落到 switch 之后同样 `return false`。C1 控制符不属于快路径认的任何一类，
+// 所以两版在**所有**码点上一致——下面那句 0x80 的断言把这一格写下来。
 func TestIsCodeish(t *testing.T) {
 	for _, r := range "aZ09+/=_-" {
 		if !isCodeish(r) {
@@ -163,6 +247,9 @@ func TestIsCodeish(t *testing.T) {
 		if isCodeish(r) {
 			t.Errorf("isCodeish(%q) = true, 期望 false", r)
 		}
+	}
+	if isCodeish(0x80) {
+		t.Error("isCodeish(0x80) = true, 期望 false（分界点上两版同值）")
 	}
 }
 

@@ -13,6 +13,11 @@ import (
 
 // 短键、枚举值多的 schema：这一类形状的启发式估算落在 JSON 实测密度
 // （0.26 ~ 0.29 token/字符）的下沿，所以由**按字节的地板**决定结果。
+//
+// 变异：payloadTokens 里 `floor > n` 改成 `>=`。这一处是**等价变异**：
+// 相等那一格（地板正好等于启发式估算）两版都返回同一个数——原版走
+// `return n`，变异版走 `return floor`，而 `floor == n`。这不是「挑不出
+// 刚好相等的输入」，是相等那一格两边返回的就是同一个值。
 func TestToolDefinitionInputTokensFloorLiftsShortKeySchema(t *testing.T) {
 	def := []byte(`{"name":"set_mode","description":"Set the operating mode.",` +
 		`"parameters":{"type":"object","properties":{"mode":{"type":"string",` +
