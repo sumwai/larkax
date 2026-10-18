@@ -266,8 +266,8 @@ func TestPluginOutputsShowLoadResultBesideSelectedGeneration(t *testing.T) {
 			Key: "idle", Version: "5.0.0", Status: pluginstore.StatusPending, Generation: 0,
 			Name: "没启用", Latest: true,
 		}, {
-			// 两代同代次（覆盖发布的副产物）：取中的是按版本名定下来的那一行，而
-			// 「取中的那一行」只能有一行。
+			// 两代同代次（#754 之前写下的行：那时覆盖发布把代次原地加一，旧行不搬）：
+			// 取中的是按版本名定下来的那一行，而「取中的那一行」只能有一行。
 			Key: "twice", Version: "7.0.0", Status: pluginstore.StatusActive, Generation: 1,
 			Name: "两代", Latest: true,
 			Running:     &pluginstore.Generation{Version: "7.0.0", Number: 1},

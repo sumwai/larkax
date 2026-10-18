@@ -617,7 +617,7 @@ func TestPublishInsertsNewVersionAsPending(t *testing.T) {
 	}
 }
 
-// 同一个 (key, version) 重复发布是**覆盖**：代次加一，状态保持原值。
+// 同一个 (key, version) 重复发布是**覆盖**：代次取该 key 的最大值加一，状态保持原值。
 //
 // 「状态保持原值」是这一条的重点：已启用的插件不该因为改了一个错别字就下线。
 // 写成「覆盖时重置成 pending」的话，改一次注释就等于停用一次插件，而它在
@@ -660,6 +660,179 @@ func TestPublishOverwritesSameVersion(t *testing.T) {
 	}
 	if !strings.Contains(rows[0].source, "错别字") {
 		t.Error("覆盖之后源码该是新的")
+	}
+}
+
+// 判据：覆盖取的是**整个 key** 的最大代次加一，于是「代次最高」「最新一次发布」与
+// 「加载器取中的」重新是同一件事。
+//
+// 三个问题各问一次，因为它们走三条不同的读路径（加载器的 activeRows、Get 那一份
+// SQL、清单里 latest 那一栏）。改动之前覆盖只把那一行**自己**的代次加一：A(1.0.0)
+// 是 0、B(2.0.0) 是 1，重发 A 之后 A 也成了 1，与 B 并列；而并列由 pickedOrder 收尾
+// （代次一样就比版本名），于是加载器与 Get 给的会是 **B**，清单里两行都说自己是
+// 「最新一次尝试」。这一条在那一刻是红的，而库与命令行上什么都看不出来。
+func TestPublishOverwriteTakesMaxGenerationPlusOne(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	s := New(db)
+
+	key := uniqueKey("pub-max")
+	pub := Publication{
+		Key: key, Version: "1.0.0", Name: "测试插件",
+		Source: goodSource(key, "1.0.0"), Meta: []byte(`{"key":"` + key + `"}`),
+	}
+
+	// A@0，启用它：只有 active 的那一代参与注册。
+	if _, err := s.Publish(ctx, pub); err != nil {
+		t.Fatalf("发布 1.0.0 失败: %v", err)
+	}
+	if _, err := s.Enable(ctx, key); err != nil {
+		t.Fatalf("启用 1.0.0 失败: %v", err)
+	}
+	// B@1，也启用：enable 新版本不会把旧的那一行按下去，两行都成了 active。
+	pub.Version = "2.0.0"
+	pub.Source = goodSource(key, "2.0.0")
+	if _, err := s.Publish(ctx, pub); err != nil {
+		t.Fatalf("发布 2.0.0 失败: %v", err)
+	}
+	if _, err := s.Enable(ctx, key); err != nil {
+		t.Fatalf("启用 2.0.0 失败: %v", err)
+	}
+
+	// 重发**旧**的那一版（改了个错别字）：覆盖。
+	pub.Version = "1.0.0"
+	pub.Source = goodSource(key, "1.0.0") + "\n// 改了一个错别字\n"
+	res, err := s.Publish(ctx, pub)
+	if err != nil {
+		t.Fatalf("覆盖失败: %v", err)
+	}
+	if !res.Overwritten {
+		t.Error("同一个 (key, version) 的第二次发布该报成覆盖")
+	}
+	if res.Generation != 2 {
+		t.Errorf("覆盖该取这个 key 的最大代次加一（2），实际 %d——只把这一行自己加一的话"+
+			"它会与 2.0.0 并列", res.Generation)
+	}
+
+	// 答案一：Get 给的是刚覆盖的这一行。
+	d, err := s.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("看详情失败: %v", err)
+	}
+	if d.Version != "1.0.0" || d.Generation != 2 {
+		t.Errorf("Get 该给刚覆盖的这一行（1.0.0 / 2）：%+v", d.Row)
+	}
+	if !d.IsRunning() || !d.Latest {
+		t.Errorf("刚覆盖的这一行既在跑，又是最新一次尝试：%+v", d.Row)
+	}
+
+	// 答案二：清单里恰好一行是「最新一次尝试」，也恰好一行是「在跑」，都是它。
+	rows, err := s.List(ctx)
+	if err != nil {
+		t.Fatalf("列清单失败: %v", err)
+	}
+	var latest, running []Row
+	generations := map[string]int64{}
+	for _, r := range rows {
+		if r.Key != key {
+			continue
+		}
+		generations[r.Version] = r.Generation
+		if r.Latest {
+			latest = append(latest, r)
+		}
+		if r.IsRunning() {
+			running = append(running, r)
+		}
+	}
+	if len(latest) != 1 || latest[0].Version != "1.0.0" {
+		t.Errorf("最新一次尝试该恰好是刚覆盖的那一行，实际 %d 行：%+v", len(latest), latest)
+	}
+	if len(running) != 1 || running[0].Version != "1.0.0" {
+		t.Errorf("取中的该恰好是刚覆盖的那一行，实际 %d 行：%+v", len(running), running)
+	}
+	// 覆盖只动它自己那一行：另一行还是它原来的代次。
+	if generations["2.0.0"] != 1 {
+		t.Errorf("覆盖不该动另一行：2.0.0 的代次 = %d，想要 1", generations["2.0.0"])
+	}
+
+	// 答案三：加载器取中的就是它——真的装配一遍，装上的是刚发的那一代。
+	reg, err := s.LoadRegistry(ctx, discardLogger(), allCaps())
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	p, ok := reg.Get(key)
+	if !ok {
+		t.Fatal("这个 key 有两代 active，该有一代被装上")
+	}
+	if p.Meta.Version != "1.0.0" {
+		t.Errorf("加载器该取中刚覆盖的那一代（1.0.0），实际装的是 %s", p.Meta.Version)
+	}
+}
+
+// 判据：这个 key 上已经有别人持着发布锁时，Publish **等**，而不是照写。
+//
+// 上面那一条测不出两条发布真的重叠时的样子（能不能重叠取决于调度）。这里由用例
+// 自己在一个事务里持住同一把 advisory lock，再看 Publish 会不会立刻完成：把上锁
+// 那一句删掉之后，它会立刻写完并返回，这条用例必红。
+//
+// 它按 key 去拿锁，所以也钉住了「锁挂在哪个键上」：键换成别的东西（例如进程内的
+// mutex），跨进程那条路就不再被覆盖，而这条用例会红。
+func TestPublishWaitsOnKeyLock(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	s := New(db)
+
+	key := uniqueKey("pub-lock")
+	holder, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("开启持锁事务失败: %v", err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	// 这一句是照 Publish 上锁那一句抄的**字面量**（见 publishLockSQL），不是引用
+	// 那个常量：常量自己改掉（换了前缀、换了哈希）而 Publish 与用例一起跟着走的话，
+	// 「锁挂在哪个键上」就没人守着了。
+	if _, err := holder.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended('plugin:' || $1::text, 0))`, key); err != nil {
+		t.Fatalf("用例自己拿锁失败: %v", err)
+	}
+
+	var (
+		res    Result
+		pubErr error
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		res, pubErr = s.Publish(ctx, Publication{
+			Key: key, Version: "1.0.0", Name: "测试插件",
+			Source: goodSource(key, "1.0.0"), Meta: []byte(`{"key":"` + key + `"}`),
+		})
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("这个 key 已经被锁着时，Publish 不该完成：那把事务级 advisory lock 没生效")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// 放锁之后它接着跑完——是等待，不是放弃，也不是报错。
+	if err := holder.Rollback(); err != nil {
+		t.Fatalf("释放持锁事务失败: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("放锁之后 Publish 该接着跑完")
+	}
+	if pubErr != nil {
+		t.Fatalf("发布失败: %v", pubErr)
+	}
+	if res.Generation != 0 {
+		t.Errorf("首次发布的代次该是 0，实际 %d", res.Generation)
+	}
+	if rows := rowsFor(t, db, key); len(rows) != 1 {
+		t.Errorf("该只留下 1 行，实际 %d 行", len(rows))
 	}
 }
 
@@ -920,9 +1093,9 @@ func TestListReportsRunningLatestAttemptAndLoadResult(t *testing.T) {
 // 判据：同一个 key 里两行撞在同一个代次上时，「取中的是哪一行」三处指的是同一行，
 // 而写回只落在加载器读的那一行上。
 //
-// 代次撞车是覆盖发布的副产物：A(1.0.0) 发布后代次是 0，B(2.0.0) 发布时拿 1，再把
-// A 重发一次，A 也变成 1（原地加一，见 Publish）。于是同一个 key 里两行同代次，
-// 而只按代次比大小的写法在三处各错一次：
+// 代次撞车来自**早先写下的行**（见 Publish 与 pickedOrder）：那时覆盖发布把代次
+// 原地加一，A(1.0.0) 发布后代次是 0，B(2.0.0) 发布时拿 1，再把 A 重发一次，A 也
+// 变成 1。于是同一个 key 里两行同代次，而只按代次比大小的写法在三处各错一次：
 //
 //   - 读表那一处（activeRows）与管理面那一处（runningJoin）各写一份排序，就会各选
 //     一行——写回落在加载器读的那一行上，而清单报的是另一行，库里看不出异常；
@@ -1117,8 +1290,8 @@ type pluginRow struct {
 	compileError   sql.NullString
 }
 
-// 排序键带上 version：代次会撞车（覆盖发布的副产物），只按代次排的话两行的先后
-// 由库决定，用例里就会随机。
+// 排序键带上 version：代次会撞车（早先写下的行，见 pickedOrder），只按代次排的话
+// 两行的先后由库决定，用例里就会随机。
 func rowsFor(t *testing.T, db *sql.DB, key string) []pluginRow {
 	t.Helper()
 	rows, err := db.QueryContext(context.Background(),
