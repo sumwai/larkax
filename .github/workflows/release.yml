@@ -47,78 +47,21 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # 版本号只有一处来源：tag。代码里不写死，构建时注入。
-      # 两个二进制注入同一个变量名，它们的版本必须能对上。
-      - name: 构建
-        env:
-          VERSION: ${{ github.ref_name }}
-        run: |
-          mkdir -p dist
-          for pair in "larkax:./cmd/larkax" "larkaxctl:./cmd/larkaxctl"; do
-            name="${pair%%:*}"
-            pkg="${pair#*:}"
-            for arch in amd64 arm64; do
-              GOOS=linux GOARCH="$arch" CGO_ENABLED=0 \
-                go build -trimpath \
-                  -ldflags "-s -w -X main.version=$VERSION" \
-                  -o "dist/${name}_linux_${arch}" "$pkg"
-            done
-          done
-          # 校验注入成功：漏了这一步，发布出去的二进制会自称 dev，
-          # 而这只有在用户报问题时才会被发现
-          if ! ./dist/larkax_linux_amd64 --version | grep -qx "$VERSION"; then
-            echo "::error::版本注入失败，二进制自称 $(./dist/larkax_linux_amd64 --version)"
-            exit 1
-          fi
-
-      # 打包：发出去的是 tarball，除了两个二进制还有 LICENSE、README.md 与
-      # man/man1/ 下的手页。手页是**用户面文档**的一部分：只存在于源码树里的话，
-      # 装了发布版的人 `man larkaxctl-channel` 翻不到，而那时他多半以为是自己
-      # 没装对。
+      # 构建、打包、算校验和是**一条配方**，写在 Makefile 的 `dist` 目标里。
+      # 这里只调它，不把这些步骤再列一遍——列一遍就是第二份，改一处要记得改
+      # 另一处，而漂移之后没有任何门禁会响（LESSONS.md 第 16 条：少做了一步
+      # 与全做过了，在日志里长得一样）。
       #
-      # 打的是仓库里**已提交**的那一份（`man/man1/*.1`），不在这里跑生成器：手页
-      # 是产物，它与两份源文件是否同一次生成由 scripts/check-man-pages.sh 保证
-      # （见 docs/development.md）。发布时再生成一次，等于给要发出去的那一包多加
-      # 一个变量，而这一次生成后面没有第二道门——错了就直接发出去。
-      - name: 打包
+      # ARCHS 两个架构都给：CI 跑在 linux/amd64 上，于是 amd64 会被真执行一次，
+      # 校验版本注入确实进去了；arm64 执行不起来，会打印一句「跳过执行校验
+      # （架构不同）」。后者是预期内的，而那行字是故意打出来的。
+      #
+      # 版本号只有一处来源：tag。代码里不写死，构建时注入；两个二进制注入同一个
+      # 变量名，它们的版本必须能对上。
+      - name: 构建并打包
         env:
           VERSION: ${{ github.ref_name }}
-        run: |
-          # 同一个 tag 打两次要得到同一个包：四样都不许随环境变——成员时间戳
-          #（tar 默认取文件自己的 mtime，那是打包那一刻）、权限位（tar 默认取文件
-          # 自己的，而那是 cp 与 mkdir 时的 umask 留下的）、条目顺序（默认按目录
-          # 顺序）、属主（默认带上构建机的 uid/gid）。它们不固定时，包的内容一样
-          # 而 sha256 不同；校验和就只能证明「下载没坏」，证明不了「手上这一份与
-          # 发布的那一份是同一个」。
-          #
-          # 顶层套一个以包名命名的目录：解到同一个位置的两个版本不会互相覆盖。
-          umask 022
-          for arch in amd64 arm64; do
-            root="$(mktemp -d)"
-            stage="$root/larkax_${VERSION}_linux_${arch}"
-            mkdir -p "$stage/man/man1"
-            cp "dist/larkax_linux_${arch}" "$stage/larkax"
-            cp "dist/larkaxctl_linux_${arch}" "$stage/larkaxctl"
-            chmod 0755 "$stage/larkax" "$stage/larkaxctl"
-            cp LICENSE README.md "$stage/"
-            cp man/man1/*.1 "$stage/man/man1/"
-            tar -czf "dist/larkax_${VERSION}_linux_${arch}.tar.gz" \
-              --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
-              -C "$root" "larkax_${VERSION}_linux_${arch}"
-            rm -rf "$root"
-          done
-          # 裸二进制到此为止：发布物只有 tarball。两份产物等于两条安装故事，而
-          # SHA256SUMS 只盖得住一条——「有校验和的那个」与「用户脚本里可能正在
-          # curl 的那个」不是同一个东西时，校验和就成了摆设。
-          #
-          # 通配只命中 larkax_linux_<架构> 与 larkaxctl_linux_<架构>：tarball 叫
-          # larkax_<版本>_linux_<架构>.tar.gz，前缀不是这两个。
-          rm -f dist/larkax_linux_* dist/larkaxctl_linux_*
-
-      # 校验和算的是 tarball：它是用户下载之后要核对的那一份。
-      - name: 校验和
-        working-directory: dist
-        run: sha256sum *.tar.gz > SHA256SUMS
+        run: make dist VERSION="$VERSION" ARCHS="amd64 arm64"
 
       - name: 发布
         env:
