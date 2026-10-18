@@ -27,13 +27,36 @@ import (
 // redact 回答「这段报文交给它会长成什么样」，get 回答「这次请求当时存下了什么」，
 // cleanup 负责把到期的删掉。中间两条是同一张表的两侧——redact 走脱敏的
 // **输入**，get 读脱敏的**产出**。
+// snapshotHelp 是 snapshot 的两版帮助文本（见 helpText）。
+var snapshotHelp = helpText{short: snapshotShortUsage, long: snapshotUsage}
+
+// snapshotShortUsage 是 snapshot 的短版：`-h` / `--help` 与参数写错时打的那一份。
+const snapshotShortUsage = `larkaxctl snapshot 维护与查看请求结构快照。
+
+用法：
+  larkaxctl snapshot cleanup [--dry-run]
+        按 settings 里的留存期删除到期分区
+  larkaxctl snapshot allowlist [--direction request|response] [--surface chat|decision]
+        打印允许表：哪些字段放行、哪些替换成占位
+  larkaxctl snapshot get <request_id> --actor <用户 ID 或用户名> --reason <文本>
+        读出一条请求存下来的结构快照
+  larkaxctl snapshot redact --direction request|response
+        从标准输入读一段 JSON 报文，按允许表脱敏
+
+get 的 --actor 与 --reason 都是必填，读一次就写一行访问日志。
+redact 的骨架走 stdout，方向、字节上限与那句提醒走 stderr。
+
+更细的边界：larkaxctl help snapshot。
+`
+
+// snapshotUsage 是 snapshot 的长版：`larkaxctl help snapshot` 与 `snapshot help`。
 const snapshotUsage = `larkaxctl snapshot 维护与查看请求结构快照。
 
 用法：
   larkaxctl snapshot cleanup               按 settings 里的留存期删除到期分区
   larkaxctl snapshot cleanup --dry-run     只列出会被删除的分区，不删
   larkaxctl snapshot allowlist [--direction request|response] [--surface chat|decision]
-        打印允许表：哪些字段放行、哪些替换成占位、每一行为什么这么定
+        打印允许表：哪些字段放行、哪些替换成占位，以及每一行的依据
   larkaxctl snapshot get <request_id> --actor <用户 ID 或用户名> --reason <文本>
         [--direction request|response]
         读出一条请求存下来的结构快照
@@ -45,16 +68,15 @@ const snapshotUsage = `larkaxctl snapshot 维护与查看请求结构快照。
 不在命令行上另设参数：同一件事有两个来源时，命令行的那个会悄悄赢，
 而「留存期到底是几天」会变成一件要看是谁执行的才知道的事。
 
-allowlist 不需要连库。它只读 internal/snapshot 里那张允许表，那是纯代码里的
-数据。所以它能在没有数据库、没有配置的机器上跑——而「我们到底存了什么」
-这个问题，恰恰经常是在一个连不上生产库的地方被问出来的。
+allowlist 不需要连库：它只读代码里那张允许表。所以它能在没有数据库、没有
+配置的机器上跑——而「我们到底存了什么」这个问题，恰恰经常是在一个连不上
+生产库的地方被问出来的。
 
 get 的 --actor 与 --reason 都是必填。读一条别人的请求结构是读敏感数据的
 动作，所以每一次读都要留痕：snapshot_access_log 里会写下一行，记着谁、
 什么时候、以什么理由看了哪一条。表里 reason 允许为空，那是给系统自己写的行
 留的余地；人手读一次，理由必须留下。两个参数都不给默认值——「我写了
---reason」与「我忘了写」在库里必须分得开。写日志与读快照在同一个事务里：
-一个「读了但没记」的成功返回看起来完全正常，而它意味着这张表存在的理由落空了。
+--reason」与「我忘了写」在库里必须分得开。写日志与读快照在同一个事务里。
 
 同一个 request_id 可能有多行（请求与响应各一行，重试也可能各一行），
 get 全部按 created_at 升序打出来。只取一行会让「这次请求还有另一半」看不见。
@@ -79,12 +101,14 @@ allowlist 与 get 不填时两个方向都处理。
 
 **旧名仍可用**：snapshot show 等同于 snapshot get。它保留是为了不让已经在跑的
 脚本与部署流程坏掉，行为与新名字逐字相同；新写的命令请用新名字。
+
+更细的约定见 docs/cli-reference.md 的「snapshot」一节。
 `
 
 // runSnapshot 处理 snapshot 子命令。
 func runSnapshot(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, snapshotUsage)
+		printUsage(os.Stderr, snapshotShortUsage)
 		return usageErr(errors.New("snapshot 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -98,11 +122,11 @@ func runSnapshot(args []string) error {
 		return runSnapshotGet(rest)
 	case "redact":
 		return runSnapshotRedact(rest)
-	case "help", "-h", "--help":
-		fmt.Print(snapshotUsage)
+	case "-h", "--help":
+		printUsage(os.Stdout, snapshotShortUsage)
 		return nil
 	default:
-		fmt.Fprint(os.Stderr, snapshotUsage)
+		printUsage(os.Stderr, snapshotShortUsage)
 		return usageErr(fmt.Errorf("未知的 snapshot 子命令 %q", action))
 	}
 }
@@ -162,7 +186,7 @@ func surfaceFor(name string, fallback snapshot.Surface) (snapshot.Surface, error
 // 在一个连不上库的地方回答「你们存了我请求里的哪些字段」。
 func runSnapshotAllowlist(args []string) error {
 	fs := flag.NewFlagSet("snapshot allowlist", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, snapshotUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
 	direction := fs.String("direction", "", "只打某个方向（request / response），不填则两个方向都打")
 	surfaceName := fs.String("surface", "", "只打某个表面（chat / decision），不填则每个表面都打")
 	if err := fs.Parse(args); err != nil {
@@ -301,7 +325,7 @@ func runSnapshotRedact(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("snapshot redact", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, snapshotUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
 	direction := fs.String("direction", "", "报文的方向：request 或 response（必填）")
 	surfaceName := fs.String("surface", "", "报文的表面：chat（默认）或 decision")
 	maxBytes := fs.Int("max-bytes", snapshot.DefaultMaxBytes,
@@ -518,7 +542,7 @@ type snapshotRow struct {
 // 而多余的位置参数照样会被拒——它们落在第二趟的 fs.Args() 里。
 func runSnapshotGet(args []string) error {
 	fs := flag.NewFlagSet("snapshot get", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, snapshotUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
 	actor := fs.String("actor", "", "读这条快照的人：用户 ID 或用户名（必填）")
 	reason := fs.String("reason", "", "读它的理由，会落进 snapshot_access_log（必填）")
 	direction := fs.String("direction", "", "只读某个方向（request / response），不填则都读")
@@ -951,7 +975,7 @@ func runSnapshotCleanup(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("snapshot cleanup", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, snapshotUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
 	dryRun := fs.Bool("dry-run", false, "只列出会被删除的分区，不执行删除")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)

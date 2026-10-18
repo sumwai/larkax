@@ -14,7 +14,26 @@ import (
 	"github.com/sumwai/larkax/internal/config"
 )
 
-// rotateUsage 是 secret rotate 子命令的帮助。
+// rotateHelp 是 secret rotate 的两版帮助文本（见 helpText）。
+var rotateHelp = helpText{short: rotateShortUsage, long: rotateUsage}
+
+// rotateShortUsage 是 secret rotate 的短版：`-h` / `--help` 与参数写错时打的那一份。
+const rotateShortUsage = `larkaxctl secret rotate 轮换渠道凭证的主密钥。
+
+用法：
+  larkaxctl secret rotate                     干跑：列出会被改动的行，不写库（默认）
+  larkaxctl secret rotate --apply             轮换：逐批补上当前主密钥的数据密钥副本
+  larkaxctl secret rotate --verify            验证：每一行是否都含当前主密钥
+  larkaxctl secret rotate --batch-size <N>    每批处理的行数（默认 500）
+
+顺序：先把新主密钥放进 LARKAX_MASTER_KEYS 的首位、重启服务，再干跑、--apply、
+--verify 各走一遍，**最后**才去掉旧主密钥。跑 --apply 之前先备份 channels 表。
+
+更细的边界：larkaxctl secret rotate help。
+`
+
+// rotateUsage 是 secret rotate 的长版：`secret rotate help`（旧写法
+// `rotate help` 也走这一份）。
 //
 // 它原先是一个顶层命令（larkaxctl rotate）的帮助，#475 把这个动词收进
 // secret 域：轮换的是渠道凭证的主密钥，与渠道管理是两件事，所以不挂在
@@ -56,6 +75,8 @@ const rotateUsage = `larkaxctl secret rotate 轮换渠道凭证的主密钥。
 运维命令不属于任何角色，主密钥直接从这个变量读。
 
 旧路径：larkaxctl rotate 仍然可用，与 larkaxctl secret rotate 逐字相同。
+
+更细的约定见 docs/cli-reference.md 的「secret rotate」一节。
 `
 
 // rotateTimeout 是这条命令连库与跑完整轮换的时间上限。
@@ -80,8 +101,15 @@ func runRotate(args []string) error {
 		return err
 	}
 
+	// `secret rotate help`（以及旧写法 `rotate help`）给长版：那一份完整的
+	// 顺序说明才是这条命令的正文，短版只是一屏摘要。
+	if len(args) > 0 && args[0] == "help" {
+		printUsage(os.Stdout, rotateUsage)
+		return nil
+	}
+
 	fs := flag.NewFlagSet("secret rotate", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, rotateUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, rotateShortUsage) }
 	apply := fs.Bool("apply", false, "真正改写 credential_enc（不加这个参数只干跑）")
 	verify := fs.Bool("verify", false, "只验证每一行是否都含当前主密钥，不写库")
 	batchSize := fs.Int("batch-size", channels.DefaultRotateBatch, "每批处理的行数")

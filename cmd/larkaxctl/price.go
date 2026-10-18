@@ -16,6 +16,29 @@ import (
 	"github.com/sumwai/larkax/internal/pricing"
 )
 
+// priceHelp 是 price 的两版帮助文本（见 helpText）。
+var priceHelp = helpText{short: priceShortUsage, long: priceUsage}
+
+// priceShortUsage 是 price 的短版：`-h` / `--help` 与参数写错时打的那一份。
+const priceShortUsage = `larkaxctl price 管理计价规则。
+
+用法：
+  larkaxctl price create --scope <platform|merchant|channel> --name <规则名>
+                         --expr '<表达式>' [--priority <优先级>] [--models <…>]
+  larkaxctl price list
+  larkaxctl price update --id <规则 ID> [与 create 相同的字段]
+  larkaxctl price enable <规则 ID>
+  larkaxctl price disable <规则 ID>
+  larkaxctl price explain --model <规范模型名> [--user <ID 或用户名>] [--at <…>]
+  larkaxctl price calendar import <文件>
+
+作用域决定哪两栏 id 有效；五个计价项（prompt、completion、cache_read、
+cache_write、reasoning）在规则里缺一个，用到它的请求就会整个失败。
+
+更细的边界：larkaxctl help price。
+`
+
+// priceUsage 是 price 的长版：`larkaxctl help price` 与 `price help`。
 const priceUsage = `larkaxctl price 管理计价规则。
 
 用法：
@@ -41,19 +64,17 @@ const priceUsage = `larkaxctl price 管理计价规则。
         文件格式见 larkaxctl price calendar --help）
 
 作用域决定哪两栏 id 有效：platform 两栏都留空；merchant 必须给 --user；
-channel 必须给 --channel。写了读取路径不看的那一栏会被拒绝，因为那是一条
-「配了却不生效」的规则。
+channel 必须给 --channel。写了读取路径不看的那一栏会被拒绝。
 
 --models 留空表示适用于全部模型（兜底规则）；给了就按元素逐字匹配，
 不支持通配符——带 * 或 ? 的名字会被拒绝。
 
-表达式在写入前会编译一次，编译不过的命令直接失败：一条编译不过的规则进了库，
-表现是每个用到它的请求都失败，而失败点在请求路径上。
+表达式在写入前会编译一次，编译不过的命令直接失败。
 
 计价项一共五个：prompt、completion、cache_read、cache_write、reasoning。
 上游报了哪一项，规则里就必须有哪一项的单价——少一项不是少收，是这次请求整个
-失败（结算报「用量里有规则未定价的计量项」）。会报缓存的上游很常见，所以新规则
-把这五项都写上、用不到的填 0，比漏掉再被拦住省事。
+失败（结算报「用量里有规则未定价的计量项」）。新规则把这五项都写上、用不到的
+填 0，比漏掉再被拦住省事。
 
 list 按**裁决次序**排列：适用于某次请求的第一条就是会被选中的那条。
 裁决次序是作用域（channel > merchant > platform）→ priority 大的优先 →
@@ -69,16 +90,15 @@ update **只改真的给了的那几项**，其余保持库里的值。校验的
 填一个很远的未来：那会在库里留一个假的日期。
 
 **启停是独立的二级动词**：price enable <规则 ID> / price disable <规则 ID>。
-改属性的命令不带状态开关——「顺便改个状态」与「启用这条规则」是两种意图，
-混在一个命令里时，那条 update 的最后一行日志说不清是哪一种。
+改属性的命令不带状态开关。
 
 **旧名仍可用**：price update 上的 --enable 与 --disable 是这次改名的旧形态，
 --owner 等同于 --user，price add 等同于 price create。它们保留是为了不让已经
 在跑的脚本与部署流程坏掉，行为与新名字逐字相同；新写的命令请用新名字。
 
 explain 回答「这次请求按哪条规则计价」：它把**全部适用**的规则按裁决次序
-列出来，第一条就是会被选中的那条，排在它后面的每一条都在说明「为什么不是
-它」。--at 用来问过去某一刻（对账时问「这一笔当时按哪条算的」），留空表示
+列出来，第一条就是会被选中的那条，排在它后面的每一条都在说明它落选的原因。
+--at 用来问过去某一刻（对账时问「这一笔当时按哪条算的」），留空表示
 现在。--user 与 --channel 是这次请求的商家与渠道，都不给时按平台级规则算。
 一条适用的都没有时非零退出，与请求路径上的处置一致（那是拒绝服务，不是
 「按 0 元计」）。
@@ -95,16 +115,18 @@ explain 回答「这次请求按哪条规则计价」：它把**全部适用**�
 
 **--channel 与 --effective-to 不开简写**：-c 在别的命令行里既可能是 channel
 也可能是 config、count，挑错作用域会把一条规则挂到另一个渠道上；--effective-to
-是边界参数，写短了容易看错。这两个约束有用例钉着（见 short_flags_test.go）。
+是边界参数，写短了容易看错。
 
 --from / --to 在这一组命令上表示**生效区间的起止**。ledger verify 上的
 --from / --to 是它自己的规范名（查账区间），与这里不冲突：两条命令不重名，
 也没有一条命令同时认这两种含义。
+
+更细的约定见 docs/cli-reference.md 的「price」一节。
 `
 
 func runPrice(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, priceUsage)
+		printUsage(os.Stderr, priceShortUsage)
 		return usageErr(errors.New("price 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -126,11 +148,11 @@ func runPrice(args []string) error {
 		// 分时计价的日历原先是一个顶层命令组（larkaxctl calendar），#475 把它
 		// 收进 price：这些数据是计价规则的输入，离开规则没有别的用处。
 		return runPriceCalendar(rest)
-	case "help", "-h", "--help":
-		fmt.Print(priceUsage)
+	case "-h", "--help":
+		printUsage(os.Stdout, priceShortUsage)
 		return nil
 	default:
-		fmt.Fprint(os.Stderr, priceUsage)
+		printUsage(os.Stderr, priceShortUsage)
 		return usageErr(fmt.Errorf("未知的 price 子命令 %q", action))
 	}
 }
@@ -179,7 +201,7 @@ func runPriceCreate(args []string) error {
 // 必须在连库之前完成。所以这里只做「有没有给、给了什么」，解析留给调用方。
 func parsePriceCreate(args []string) (pricing.CreateRequest, string, error) {
 	fs := flag.NewFlagSet("price create", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, priceUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
 	scope := fs.String("scope", "", "作用域：platform、merchant、channel")
 	name := fs.String("name", "", "规则名，列举与告警都靠它指认一条规则")
 	expression := fs.String("expr", "", "规则表达式源码")
@@ -310,7 +332,7 @@ func runPriceSetEnabled(args []string, enable bool) error {
 	}
 
 	fs := flag.NewFlagSet("price "+verb, flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, priceUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -351,7 +373,7 @@ var (
 // 解析成用户 ID，而参数解析必须在连库之前完成。这里只做「有没有给、给了什么」。
 func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 	fs := flag.NewFlagSet("price update", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, priceUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
 	id := fs.Int64("id", 0, "要改的规则 ID")
 	scope := fs.String("scope", "", "作用域：platform、merchant、channel")
 	name := fs.String("name", "", "规则名")
@@ -498,7 +520,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 // runPriceExplain 回答「这次请求按哪条规则计价」。
 func runPriceExplain(args []string) error {
 	fs := flag.NewFlagSet("price explain", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, priceUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
 	model := fs.String("model", "", "这次请求的规范模型名")
 	stringAlias(fs, model, "m", sameAs("model"))
 	owner := legacyStringFlag(fs, "user", "owner", "", "这次请求的商家（用户 ID 或用户名），留空表示未选定")
@@ -564,7 +586,7 @@ func runPriceExplain(args []string) error {
 
 func runPriceList(args []string) error {
 	fs := flag.NewFlagSet("price list", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, priceUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}

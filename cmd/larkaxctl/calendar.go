@@ -13,7 +13,24 @@ import (
 	"github.com/sumwai/larkax/internal/config"
 )
 
-// priceCalendarUsage 是 price calendar 子命令的帮助，同时也是这份文件格式的说明。
+// priceCalendarHelp 是 price calendar 的两版帮助文本（见 helpText）。
+var priceCalendarHelp = helpText{short: priceCalendarShortUsage, long: priceCalendarUsage}
+
+// priceCalendarShortUsage 是 price calendar 的短版：`-h` / `--help` 与参数写错
+// 时打的那一份。
+const priceCalendarShortUsage = `larkaxctl price calendar 维护分时计价用的日历数据。
+
+用法：
+  larkaxctl price calendar import <文件>   把一份日历数据文件灌进库里
+
+文件是一个 JSON 对象，字段写错会直接报错；只有 synced 状态才带 days，而 days
+必须覆盖本年的每一天。同一年再灌一次是覆盖，不是追加。
+
+更细的边界：larkaxctl price calendar help。
+`
+
+// priceCalendarUsage 是 price calendar 的长版：`price calendar help`；这也是
+// 那份数据文件格式的说明。
 //
 // 格式写在这里而不是只写在文档里：跑 `larkaxctl price calendar import` 时手边
 // 应当就能查到它，否则「文件该怎么写」要先去找文档。
@@ -69,12 +86,14 @@ days 也不带 source——那一年还没有定论，写进去的数据行会�
 
 旧路径：larkaxctl calendar import <文件> 仍然可用，与
 larkaxctl price calendar import <文件> 逐字相同。
+
+更细的约定见 docs/cli-reference.md 的「price calendar」一节。
 `
 
 // runPriceCalendar 处理 price 下的 calendar 子命令。
 func runPriceCalendar(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, priceCalendarUsage)
+		printUsage(os.Stderr, priceCalendarShortUsage)
 		return usageErr(errors.New("price calendar 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -82,11 +101,14 @@ func runPriceCalendar(args []string) error {
 	switch action {
 	case "import":
 		return runCalendarImport(rest)
-	case "help", "-h", "--help":
-		fmt.Print(priceCalendarUsage)
+	case "help":
+		printUsage(os.Stdout, priceCalendarUsage)
+		return nil
+	case "-h", "--help":
+		printUsage(os.Stdout, priceCalendarShortUsage)
 		return nil
 	default:
-		fmt.Fprint(os.Stderr, priceCalendarUsage)
+		printUsage(os.Stderr, priceCalendarShortUsage)
 		return usageErr(fmt.Errorf("未知的 price calendar 子命令 %q", action))
 	}
 }
@@ -98,7 +120,7 @@ func runPriceCalendar(args []string) error {
 // 所以新旧两条路径的输出逐字相同。
 func runCalendar(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, priceCalendarUsage)
+		printUsage(os.Stderr, priceCalendarShortUsage)
 		return usageErr(errors.New("calendar 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -106,11 +128,14 @@ func runCalendar(args []string) error {
 	switch action {
 	case "import":
 		return runCalendarImport(rest)
-	case "help", "-h", "--help":
-		fmt.Print(priceCalendarUsage)
+	case "help":
+		printUsage(os.Stdout, priceCalendarUsage)
+		return nil
+	case "-h", "--help":
+		printUsage(os.Stdout, priceCalendarShortUsage)
 		return nil
 	default:
-		fmt.Fprint(os.Stderr, priceCalendarUsage)
+		printUsage(os.Stderr, priceCalendarShortUsage)
 		return usageErr(fmt.Errorf("未知的 calendar 子命令 %q", action))
 	}
 }
@@ -127,7 +152,7 @@ func runCalendarImport(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("price calendar import", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, priceCalendarUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, priceCalendarShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		// -h / --help 不是失败：flag 在返回 ErrHelp 之前已经把用法打印过了，
 		// 再把它当错误返回会让 `larkaxctl price calendar import --help` 以退出码 1

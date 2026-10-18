@@ -16,6 +16,25 @@ import (
 	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
 )
 
+// pluginHelp 是 plugin 的两版帮助文本（见 helpText）。
+var pluginHelp = helpText{short: pluginShortUsage, long: pluginUsage}
+
+// pluginShortUsage 是 plugin 的短版：`-h` / `--help` 与参数写错时打的那一份。
+const pluginShortUsage = `larkaxctl plugin 管理插件。
+
+用法：
+  larkaxctl plugin list
+  larkaxctl plugin publish <文件> [--key <键>] [--priority <整数>]
+  larkaxctl plugin enable <key>
+  larkaxctl plugin disable <key>
+
+publish 先在沙箱里编译一遍再落库，编译不过的不进库。同一个 (key, version)
+重复发布是覆盖；换版本要改源码里的 meta.version，并 enable 一次。
+
+更细的边界：larkaxctl help plugin。
+`
+
+// pluginUsage 是 plugin 的长版：`larkaxctl help plugin` 与 `plugin help`。
 const pluginUsage = `larkaxctl plugin 管理插件。
 
 用法：
@@ -28,18 +47,19 @@ const pluginUsage = `larkaxctl plugin 管理插件。
 --key；只有想让注册名与源码里声明的不一致时才需要它——那种情况下两条路会
 对不上，命令会拒绝。
 
-publish **先在沙箱里编译一遍再落库**：一个编译不过的插件不许进库，否则加载器
-每次启动都要处理它。编译失败时命令以非零退出，库里不会多出一行。
+publish **先在沙箱里编译一遍再落库**：编译不过的命令以非零退出，库里不会多出
+一行。
 
 同一个 (key, version) 重复发布是**覆盖**：源码、元数据、名称换新，代次
-（generation）加一，启用状态保持原值——改一个笔误不该让已启用的插件下线。
-换版本请改源码里的 meta.version，那会插入一行新代次，状态是 pending，
-要 enable 才生效。
+（generation）加一，启用状态保持原值。换版本请改源码里的 meta.version，那会
+插入一行新代次，状态是 pending，要 enable 才生效。
 
 **本版没有热更新**：publish / enable / disable 都只改库，跑着的进程要重启
 才会重新加载。
 
 退出码与其余子命令一致；key 在库里没有对应行时按「约束冲突」返回 4。
+
+更细的约定见 docs/cli-reference.md 的「plugin」一节。
 `
 
 // pluginTimeout 是插件命令连库与写库的时间上限。
@@ -51,7 +71,7 @@ const pluginTimeout = 60 * time.Second
 
 func runPlugin(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, pluginUsage)
+		printUsage(os.Stderr, pluginShortUsage)
 		return usageErr(errors.New("plugin 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -65,18 +85,18 @@ func runPlugin(args []string) error {
 		return runPluginSetEnabled(rest, true)
 	case "disable":
 		return runPluginSetEnabled(rest, false)
-	case "help", "-h", "--help":
-		fmt.Print(pluginUsage)
+	case "-h", "--help":
+		printUsage(os.Stdout, pluginShortUsage)
 		return nil
 	default:
-		fmt.Fprint(os.Stderr, pluginUsage)
+		printUsage(os.Stderr, pluginShortUsage)
 		return usageErr(fmt.Errorf("未知的 plugin 子命令 %q", action))
 	}
 }
 
 func runPluginList(args []string) error {
 	fs := flag.NewFlagSet("plugin list", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, pluginUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -179,7 +199,7 @@ func runPluginPublish(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("plugin publish", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, pluginUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
 	key := fs.String("key", "", "插件 key；省略时取源码 meta 里声明的那个")
 	priority := fs.Int("priority", 0, "同一 key 的优先级，越大越先被选中")
 	if err := parseFlagsAnywhere(fs, args); err != nil {
@@ -365,7 +385,7 @@ func runPluginSetEnabled(args []string, enable bool) error {
 	}
 
 	fs := flag.NewFlagSet("plugin "+verb, flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, pluginUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}

@@ -73,10 +73,47 @@ type command struct {
 	name string
 	// summary 是根帮助页上跟在名字后面的那一句话。
 	summary string
-	// help 是这条命令自己的 --help 正文。
-	help string
+	// help 是这条命令的两版帮助文本（见 helpText）。
+	help helpText
 	// run 处理这条命令，args 是命令名之后的参数。
 	run func([]string) error
+}
+
+// helpText 是一条命令的两版帮助文本。
+//
+// 两版的分工是这一条规格的骨架：**短版**回答「这条命令有哪些动作、参数怎么给」，
+// 外加一两条最关键的边界，收在一屏之内；**长版**在短版之外再把其余边界说完。
+// 哪一版由**要帮助的方式**决定——`-h` / `--help` 与参数写错时打的那一份是短版，
+// `larkaxctl help <命令>` 与 `<命令> help` 是长版（见 dispatch）。
+//
+// 两版都**不写设计理由**：某个字段为什么必填、别家工具怎么做这类话，家是
+// docs/cli-reference.md 里那一节。写在帮助里的话，跑命令的人每次敲错参数都要
+// 被念一遍，而他要的只是那几行用法。这条有门钉着（见 usage_test.go）。
+type helpText struct {
+	// short 是短版：首行点出自己是谁，然后是用法骨架，最后指向长版。
+	short string
+	// long 是长版：短版 + 其余关键边界，末尾指向 docs/cli-reference.md。
+	long string
+}
+
+// printUsage 打一份帮助文本，是**帮助文本的唯一出口**。
+//
+// 收成一处之前，帮助散在几十处（各命令 help 分支里的 fmt.Print、各 fs.Usage
+// 闭包里的 fmt.Fprint），于是「打哪一版、打在哪条流上」得挨处看一遍才知道，
+// 而两处写法不一致在页面上看不出来。现在只剩两条规则：
+//
+//   - **打哪一版**看这一次要的是哪一版：`larkaxctl help <命令>` 与
+//     `<命令> help` 给长版，`-h` / `--help` 与参数写错时给短版。
+//   - **打在哪条流**看这份帮助是不是使用者要来的。要来的（`-h`、`help <命令>`）
+//     走 stdout——它是这一次运行的结果，要能进管道（`larkaxctl help channel |
+//     less`）。跟着错误打的那一份走 stderr：那时 stdout 上可能正要落一份 JSON
+//     （`--format json`），把用法页混进去下游的 jq 就解析不了；而且它本来就是
+//     那条错误的附注。这与 docs/cli-output.md 定下的分界是同一条。
+//
+// w 收 os.Stdout / os.Stderr 本身，不是 humanStdout()：`-q` 压的是「给人看」那一
+// 档的输出，而帮助是使用者主动要的，不该被它压掉。
+func printUsage(w io.Writer, text string) {
+	_, _ = fmt.Fprint(w, text)
 }
 
 // commandGroup 是根帮助页上的一个业务领域分组。
@@ -95,38 +132,38 @@ var commandGroups = []commandGroup{
 	{
 		title: "核心与诊断 (Core & Diagnostics)",
 		commands: []command{
-			{name: "doctor", summary: "系统健康与链路连通性体检", help: doctorUsage, run: runDoctor},
-			{name: "settings", summary: "运行期动态配置项管理（settings 表）", help: settingsUsage, run: runSettings},
-			{name: "version", summary: "打印版本号与编译元数据", help: versionUsage, run: runVersion},
+			{name: "doctor", summary: "系统健康与链路连通性体检", help: doctorHelp, run: runDoctor},
+			{name: "settings", summary: "运行期动态配置项管理（settings 表）", help: settingsHelp, run: runSettings},
+			{name: "version", summary: "打印版本号与编译元数据", help: versionHelp, run: runVersion},
 		},
 	},
 	{
 		title: "路由与模型配置 (Routing & Models)",
 		commands: []command{
-			{name: "channel", summary: "上游渠道管理（网关、凭证、关联模型）", help: channelUsage, run: runChannel},
-			{name: "model", summary: "规范模型目录（catalog 基础定义）", help: modelUsage, run: runModel},
-			{name: "alias", summary: "模型别名映射（上游模型名 ↔ 规范名）", help: aliasUsage, run: runAlias},
-			{name: "price", summary: "模型计价规则与日历管理（含 calendar 子命令）", help: priceUsage, run: runPrice},
+			{name: "channel", summary: "上游渠道管理（网关、凭证、关联模型）", help: channelHelp, run: runChannel},
+			{name: "model", summary: "规范模型目录（catalog 基础定义）", help: modelHelp, run: runModel},
+			{name: "alias", summary: "模型别名映射（上游模型名 ↔ 规范名）", help: aliasHelp, run: runAlias},
+			{name: "price", summary: "模型计价规则与日历管理（含 calendar 子命令）", help: priceHelp, run: runPrice},
 		},
 	},
 	{
 		title: "权限与财务 (Access & Ledger)",
 		commands: []command{
-			{name: "user", summary: "系统用户管理（创建用户）", help: userUsage, run: runUser},
-			{name: "apikey", summary: "API Key 访问密钥与额度管理", help: apiKeyUsage, run: runAPIKey},
-			{name: "wallet", summary: "用户钱包账户与入账管理", help: walletUsage, run: runWallet},
-			{name: "ledger", summary: "财务账本管理（余额查询、分录校验、对账）", help: ledgerUsage, run: runLedger},
+			{name: "user", summary: "系统用户管理（创建用户）", help: userHelp, run: runUser},
+			{name: "apikey", summary: "API Key 访问密钥与额度管理", help: apiKeyHelp, run: runAPIKey},
+			{name: "wallet", summary: "用户钱包账户与入账管理", help: walletHelp, run: runWallet},
+			{name: "ledger", summary: "财务账本管理（余额查询、分录校验、对账）", help: ledgerHelp, run: runLedger},
 		},
 	},
 	{
 		title: "系统与数据维护 (Maintenance & Data)",
 		commands: []command{
-			{name: "migrate", summary: "数据库版本迁移（up、down、status、version）", help: migrateUsage, run: runMigrate},
-			{name: "partition", summary: "数据库月度分区维护（check、ensure）", help: partitionUsage, run: runPartition},
-			{name: "secret", summary: "安全凭证与主密钥维护（rotate 密钥轮换）", help: secretUsage, run: runSecret},
-			{name: "maintenance", summary: "数据留存与过期清理（idempotency 幂等记录）", help: maintenanceUsage, run: runMaintenance},
-			{name: "snapshot", summary: "请求结构快照管理（cleanup、allowlist、get、redact）", help: snapshotUsage, run: runSnapshot},
-			{name: "plugin", summary: "动态插件系统管理（list、publish、enable、disable）", help: pluginUsage, run: runPlugin},
+			{name: "migrate", summary: "数据库版本迁移（up、down、status、version）", help: migrateHelp, run: runMigrate},
+			{name: "partition", summary: "数据库月度分区维护（check、ensure）", help: partitionHelp, run: runPartition},
+			{name: "secret", summary: "安全凭证与主密钥维护（rotate 密钥轮换）", help: secretHelp, run: runSecret},
+			{name: "maintenance", summary: "数据留存与过期清理（idempotency 幂等记录）", help: maintenanceHelp, run: runMaintenance},
+			{name: "snapshot", summary: "请求结构快照管理（cleanup、allowlist、get、redact）", help: snapshotHelp, run: runSnapshot},
+			{name: "plugin", summary: "动态插件系统管理（list、publish、enable、disable）", help: pluginHelp, run: runPlugin},
 		},
 	},
 }
@@ -140,11 +177,15 @@ var commandGroups = []commandGroup{
 //
 // name 与 commandGroups 里的命令名不重叠（有用例钉着），所以查表时谁先谁后
 // 不影响结果，旧路径也不会遮住任何一条正式命令。
+//
+// help 给的是它们搬去之后那一格的帮助：`larkaxctl help rotate` 与
+// `larkaxctl help secret` 打出来的正文指向同一条路，旧路径才不会变成一个
+// 「认得出名字、却什么也不说」的入口。
 var legacyCommands = []command{
-	{name: "reconcile", run: runReconcile},
-	{name: "rotate", run: runRotate},
-	{name: "idempotency", run: runIdempotency},
-	{name: "calendar", run: runCalendar},
+	{name: "reconcile", help: ledgerHelp, run: runReconcile},
+	{name: "rotate", help: rotateHelp, run: runRotate},
+	{name: "idempotency", help: maintenanceIdempotencyHelp, run: runIdempotency},
+	{name: "calendar", help: priceCalendarHelp, run: runCalendar},
 }
 
 // lookupCommand 按名字找出顶层命令的条目。
@@ -225,11 +266,14 @@ const usageNotes = `
 机器可读输出（--format json）的契约见 docs/cli-output.md。
 `
 
-// migrateUsage 是 migrate 子命令的帮助。
+// migrateHelp 是 migrate 的两版帮助文本（见 helpText）。
+var migrateHelp = helpText{short: migrateShortUsage, long: migrateUsage}
+
+// migrateShortUsage 是 migrate 的短版：`-h` / `--help` 与参数写错时打的那一份。
 //
 // 迁移的七个动作原先列在根帮助页上，那是一行一条的三级用法——根页面只留
 // 一级命令，具体动作各归各的 --help。
-const migrateUsage = `larkaxctl migrate 应用、回滚与生成数据库迁移（goose，见 internal/migrate）。
+const migrateShortUsage = `larkaxctl migrate 应用、回滚与生成数据库迁移。
 
 用法：
   larkaxctl migrate up                     应用全部未执行的迁移
@@ -240,26 +284,57 @@ const migrateUsage = `larkaxctl migrate 应用、回滚与生成数据库迁移�
   larkaxctl migrate version                显示当前数据库版本
   larkaxctl migrate create <名称>           生成迁移文件（固定为 .sql）
 
-up-to / down-to 是一步一步走到目标版本的，不调用 goose 自带的同名命令：
-实测它们会停在目标版本的相邻位置（从 v2 执行 down-to 0 只退到 v1），
-差一位的表现比不支持更危险。
+create 只写文件、不碰数据库，其余各条都要连库。
+
+更细的边界：larkaxctl help migrate。
+`
+
+// migrateUsage 是 migrate 的长版：`larkaxctl help migrate` 与 `migrate help`。
+const migrateUsage = `larkaxctl migrate 应用、回滚与生成数据库迁移。
+
+用法：
+  larkaxctl migrate up                     应用全部未执行的迁移
+  larkaxctl migrate down                   回滚最近一次迁移
+  larkaxctl migrate down-to <版本>          回滚到指定版本（0 表示全部回滚）
+  larkaxctl migrate up-to <版本>            前进到指定版本
+  larkaxctl migrate status                 显示每个迁移的应用状态
+  larkaxctl migrate version                显示当前数据库版本
+  larkaxctl migrate create <名称>           生成迁移文件（固定为 .sql）
 
 create 只写文件、不碰数据库，其余各条都要连库。
 
-退出码见 larkaxctl --help。
+up-to / down-to 一步一个版本地走到目标，不用 goose 自带的同名命令：那两个会停在
+目标版本的相邻位置（从 v2 执行 down-to 0 只退到 v1），差一位的表现比不支持更危险。
+
+更细的约定见 docs/cli-reference.md 的「migrate」一节。
 `
 
-// versionUsage 是 version 子命令的帮助。
+// versionHelp 是 version 的两版帮助文本（见 helpText）。
+var versionHelp = helpText{short: versionShortUsage, long: versionUsage}
+
+// versionShortUsage 是 version 的短版：`-h` / `--help` 与参数写错时打的那一份。
 //
 // 「每个一级命令的 --help 至少有一句话」：这条命令原先把参数全丢掉、直接打
 // 版本号，于是 `larkaxctl version --help` 打出来的是一个版本号。
+const versionShortUsage = `larkaxctl version 打印版本号与编译元数据。
+
+用法：
+  larkaxctl version              打印版本号
+  larkaxctl version -o json      打成 {"ok":true,"version":"..."}
+
+更细的边界：larkaxctl help version。
+`
+
+// versionUsage 是 version 的长版：`larkaxctl help version` 与 `version help`。
 const versionUsage = `larkaxctl version 打印版本号与编译元数据。
 
 用法：
   larkaxctl version              打印版本号
   larkaxctl version -o json      打成 {"ok":true,"version":"..."}
 
-版本号在构建时注入（见 Makefile），从源码直接编译出来的是 dev。
+版本号在构建时注入，从源码直接编译出来的是 dev。
+
+更细的约定见 docs/cli-reference.md 的「version」一节。
 `
 
 // migrationsDir 是迁移文件所在目录，相对于仓库根目录。
@@ -307,7 +382,7 @@ func run() error {
 	}
 
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, usage)
+		printUsage(os.Stderr, usage)
 		return usageErr(errors.New("缺少子命令"))
 	}
 	return dispatch(args)
@@ -322,19 +397,19 @@ func dispatch(args []string) error {
 	name, rest := args[0], args[1:]
 	switch name {
 	case "help", "-h", "--help":
-		// `larkaxctl help <命令>` 打那条命令自己的帮助正文，不给名字时打根帮助页。
+		// `larkaxctl help <命令>` 打那条命令自己的**长版**帮助，不给名字时打根帮助页。
 		// 根帮助页的末行指的就是这个写法——**指针指向的必须真的能用**，否则
 		// 它比不写更坏：人照着敲一次，得到的是刚才那一页。
 		if len(rest) == 0 {
-			fmt.Print(usage)
+			printUsage(os.Stdout, usage)
 			return nil
 		}
 		c, ok := lookupCommand(rest[0])
 		if !ok {
-			fmt.Fprint(os.Stderr, usage)
+			printUsage(os.Stderr, usage)
 			return usageErr(fmt.Errorf("未知子命令 %q", rest[0]))
 		}
-		fmt.Print(c.help)
+		printUsage(os.Stdout, c.help.long)
 		return nil
 	case "-V", "--version":
 		name, rest = "version", nil
@@ -342,8 +417,18 @@ func dispatch(args []string) error {
 
 	c, ok := lookupCommand(name)
 	if !ok {
-		fmt.Fprint(os.Stderr, usage)
+		printUsage(os.Stderr, usage)
 		return usageErr(fmt.Errorf("未知子命令 %q", name))
+	}
+	// `<命令> help` 与 `larkaxctl help <命令>` 是同一条路，在这里一次收掉。
+	//
+	// 收在分派这一处、不在各命令自己的参数解析里各补一个分支：收一次之后每条
+	// 命令（含以后新加的）自带长版入口，不必记得补；也省得「有的命令认 help、
+	// 有的不认」这种要敲下去才发现的不一致。-h / --help 不走这里——它是参数，
+	// 要与同一条命令的其它参数一起看（`channel list --help` 说 `list`）。
+	if len(rest) > 0 && rest[0] == "help" {
+		printUsage(os.Stdout, c.help.long)
+		return nil
 	}
 	return c.run(rest)
 }
@@ -357,8 +442,8 @@ func dispatch(args []string) error {
 func runVersion(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
-		case "help", "-h", "--help":
-			fmt.Print(versionUsage)
+		case "-h", "--help":
+			printUsage(os.Stdout, versionShortUsage)
 			return nil
 		}
 		return usageErr(fmt.Errorf("version 不接受参数，得到 %q", args[0]))
@@ -451,7 +536,7 @@ func runReconcile(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("ledger reconcile", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, ledgerUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, ledgerShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -642,7 +727,7 @@ func withDB(timeout time.Duration, fn func(context.Context, *sql.DB) error) erro
 
 func runMigrate(args []string) error {
 	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, migrateUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, migrateShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}

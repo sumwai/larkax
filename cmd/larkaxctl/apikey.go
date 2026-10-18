@@ -17,6 +17,27 @@ import (
 	"github.com/sumwai/larkax/internal/money"
 )
 
+// apiKeyHelp 是 apikey 的两版帮助文本（见 helpText）。
+var apiKeyHelp = helpText{short: apiKeyShortUsage, long: apiKeyUsage}
+
+// apiKeyShortUsage 是 apikey 的短版：`-h` / `--help` 与参数写错时打的那一份。
+const apiKeyShortUsage = `larkaxctl apikey 管理 API Key。
+
+用法：
+  larkaxctl apikey create --user <ID 或用户名> [--name <备注>]
+                          [--expires-at <RFC3339>] [--rpm <整数>] [--quota <金额>]
+  larkaxctl apikey update --id <ID> [--rpm <整数> | --clear-rpm]
+                                  [--quota <金额> | --clear-quota]
+  larkaxctl apikey list [--user <ID 或用户名>]
+
+create 的明文只打印这一次（库里存的是哈希），它单独打在 stdout 上。
+
+--rpm 与 --quota 都按明文给：0 不是「不限」，是「一个都不放行」；负数一律拒绝。
+
+更细的边界：larkaxctl help apikey。
+`
+
+// apiKeyUsage 是 apikey 的长版：`larkaxctl help apikey` 与 `apikey help`。
 const apiKeyUsage = `larkaxctl apikey 管理 API Key。
 
 用法：
@@ -50,10 +71,9 @@ create 生成一把新 key，只把哈希入库。
                      0 与不填的区别同上。
 
 负数一律拒绝：限流那一侧把负数也当成「一个都不放行」，而写下 -60 的人
-几乎总是想写 60。让他当场改掉，比让它变成一个静默的封禁好。
+几乎总是想写 60。
 
-update 只改额度，不改备注与过期时间——那两样目前没有入口，只能直接改库。
-这个限制写在帮助里，而不是让它安静地什么都不做。
+update 只改额度，不改备注与过期时间：那两样目前没有入口，只能直接改库。
 
 # 权限
 
@@ -72,6 +92,8 @@ update 只改额度，不改备注与过期时间——那两样目前没有入�
 
 两个额度**不开简写**：它们是限额，写短了容易看错也容易按错，要的是完整写出来。
 -u 是这三个子命令上唯一的简写。
+
+更细的约定见 docs/cli-reference.md 的「apikey」一节。
 `
 
 // apiKeyTimeout 是这条命令连库与写库的时间上限。
@@ -83,7 +105,7 @@ const apiKeyTimeout = 30 * time.Second
 
 func runAPIKey(args []string) error {
 	fs := flag.NewFlagSet("apikey", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, apiKeyUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -116,7 +138,7 @@ func runAPIKeyCreate(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("apikey create", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, apiKeyUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
 	user := fs.String("user", "", "key 的归属用户：用户 ID 或用户名")
 	stringAlias(fs, user, "u", sameAs("user"))
 	name := fs.String("name", "", "备注名，用于日后在列表里认出这把 key")
@@ -190,7 +212,7 @@ func runAPIKeyUpdate(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("apikey update", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, apiKeyUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
 	id := fs.Int64("id", 0, "要改的 API Key 的 id（apikey list 里能看到）")
 	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "", "每分钟请求额度；0 表示一个都不放行")
 	clearRPM := fs.Bool("clear-rpm", false, "把每分钟额度清空（写回 NULL）")
@@ -231,7 +253,7 @@ func runAPIKeyUpdate(args []string) error {
 
 func runAPIKeyList(args []string) error {
 	fs := flag.NewFlagSet("apikey list", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, apiKeyUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
 	user := fs.String("user", "", "只看这个用户的 key：用户 ID 或用户名；留空表示全部")
 	stringAlias(fs, user, "u", sameAs("user"))
 	if err := fs.Parse(args); err != nil {

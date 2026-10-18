@@ -29,6 +29,28 @@ import (
 	"github.com/sumwai/larkax/internal/pricing"
 )
 
+// doctorHelp 是 doctor 的两版帮助文本（见 helpText）。
+var doctorHelp = helpText{short: doctorShortUsage, long: doctorUsage}
+
+// doctorShortUsage 是 doctor 的短版：`-h` / `--help` 与参数写错时打的那一份。
+const doctorShortUsage = `larkaxctl doctor 逐项检查「配好的链路能不能接一次请求」。
+
+用法：
+  larkaxctl doctor
+        只读检查六项，不碰网络
+  larkaxctl doctor --live --model <规范名> [--endpoint chat|messages|responses]
+                   (--credential-stdin | --credential-env <变量名>)
+        额外真打一次上游
+  larkaxctl doctor -v
+        每项多打一段细节
+
+六项只读；凭证不能写在命令行参数里，只能从标准输入或环境变量读。
+「没跑成」与「通过」是两件事，前者也非零退出。
+
+更细的边界：larkaxctl help doctor。
+`
+
+// doctorUsage 是 doctor 的长版：`larkaxctl help doctor` 与 `doctor help`。
 const doctorUsage = `larkaxctl doctor 逐项检查「配好的链路能不能接一次请求」。
 
 用法：
@@ -62,13 +84,9 @@ const doctorUsage = `larkaxctl doctor 逐项检查「配好的链路能不能接
   6. 钱包      有用户吗、每个用户都有钱包行吗、有没有一个钱包余额大于 0
 
 第 3、4、5 项回答的是同一个字符串在两个数组里对不上的问题：渠道的 --models
-与目录里的规范名差一个字符，或者模型建了却没加进任何渠道的白名单——那时调用
-回 503「no available upstream for the requested model」，而那句话不会说是
-哪一个名字不对。第 3 项还多判一层：名字在目录里、但它声明的端点与这条渠道打的
-那条对不上（模型目录里可以声明一个模型只在某几条端点上被服务，而渠道的 type
-决定它打哪条）——那时请求会打到一条服务不了的端点上，上游回 400
-unsupported_model，从我们这边看与「模型不存在」无从分辨。第 6 项把「用户没有
-钱包行」这类缺口在第一次调用之前指出来，而不是让人从 500 往回推。
+与目录里的规范名差一个字符，或者模型建了却没加进任何渠道的白名单。第 3 项还
+多判一层名字与端点的对应，第 6 项把「用户没有钱包行」这类缺口在第一次调用
+之前指出来。
 
 **前六项只读**：不写任何一行、不建任何东西、不发网络请求。第七项要花钱、
 要凭证，默认不跑。
@@ -91,7 +109,7 @@ LARKAX_HTTP_ADDR 的默认值一致；网关不在本机时要显式给。
 退出码：0 表示六项都通过（--live 给了的话那一次也成功）、1 表示有问题或某一项
 没跑成、3 表示连不上数据库。**「没跑成」与「通过」是两件事**：没有可检查的
 对象时那一项报「没跑成」而不是「通过」，退出码也非 0——两者在安静的终端里
-长得一样，是这个项目反复踩的坑（见 LESSONS.md 第 16 条）。
+长得一样，脚本按退出码分派时要留意。
 
 例：
 
@@ -110,6 +128,8 @@ LARKAX_HTTP_ADDR 的默认值一致；网关不在本机时要显式给。
 
 -v / --verbose 与 -q / --quiet 是全局选项（见 larkaxctl --help 的「全局选项」），
 写在子命令前后都认。两个不能一起给。
+
+更细的约定见 docs/cli-reference.md 的「doctor」一节。
 `
 
 // doctorTimeout 是六项只读检查的时间上限。
@@ -317,7 +337,7 @@ func emitDoctorReport(w io.Writer, rep doctorReport, dbErr error, verbose bool) 
 // 连上生产库再报错。
 func parseDoctorOptions(args []string) (doctorOptions, error) {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, doctorUsage) }
+	fs.Usage = func() { printUsage(os.Stderr, doctorShortUsage) }
 	live := fs.Bool("live", false, "真打一次上游（会花钱、要凭证）")
 	model := fs.String("model", "", "真打上游时用的规范模型名")
 	stringAlias(fs, model, "m", sameAs("model"))
