@@ -1586,8 +1586,8 @@ func TestSettlementRejectsWalletDeltaOverflow(t *testing.T) {
 		}
 	}
 	// 顺序交替：Transaction.Verify 按出现顺序逐个 Add，同号大额分录挨在一起
-	// 时中间值会被夹住而先判成不平（按真实和判 Verify 是 issue #446 的 (c)，
-	// 不在本轮范围）。这里要测的是写路径。
+	// 时中间值会被夹住而先判成不平（Verify 该按真实和判还是按表示值判，是 issue #446
+	// 的 (c)）。这里要测的是写路径。
 	entries := []ledger.Entry{
 		entry(ledger.UserAccount(userID), first.Neg()),
 		entry(ledger.PlatformRevenueAccount(), first),

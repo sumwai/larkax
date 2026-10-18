@@ -29,9 +29,11 @@
 .DS_Store
 Thumbs.db
 
-# 本地工具的运行状态。编辑器的 agent 目录不该进公开仓库：
-# 里面是个人会话的残留，与项目无关，也不该被外部读到。
-.claude/
+# 本地工具的运行状态。`.claude/` 下只有 skill 与 subagent 定义是项目资产，要进仓库；
+# 其余（会话残留、锁文件、个人设置）不进——它们与项目无关，也不该被外部读到。
+.claude/*
+!.claude/skills
+!.claude/agents
 
 # Local runtime state
 /tmp/

@@ -509,7 +509,7 @@ else
 fi
 
 # 15. 存活清单要打出来，并且**带包名与位置**——只打计数的话，
-#     AGENTS.md 那句「对存活的变异逐个判断」没有可判断的对象。
+#     docs/development.md 那句「对存活的变异逐个判断」没有可判断的对象。
 stub_surv="$tmp/gremlins-survivors"
 make_gremlins_with_survivors "$stub_surv"
 run "$stub_surv" "$tmp/lock15" internal/money
@@ -584,7 +584,7 @@ if [ "$rc" -eq 1 ]; then ok; else bad "读不出变异器集合 —— 应拒绝
 grep -q '读不出 gremlins 的变异器集合' "$last_out" || bad "读不出变异器集合 —— 要报出是这个原因"
 
 # 20. 正常跑时，第一行就是「这把尺子是什么」：版本 + 变异器集合 + 已开的开关
-#     + workers + 系数。**粘进 AGENTS.md 那张表的数字自带条件**，不依赖人记得补。
+#     + workers + 系数。**粘进 docs/development.md「各包的现状」那张表的数字自带条件**，不依赖人记得补。
 #     集合是探测来的，所以这里逐项比对，而不是只看它打了一行字。
 run "$stub_ok" "$tmp/lock20" internal/money
 rc=$?

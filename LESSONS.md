@@ -57,3 +57,4 @@
 | [39](lessons/39-wording-floor-of-shared-strings.md) | 一个字符串被两个入口共用时，措辞下限由最窄的那个入口决定 | 写一句会经多个入口返回给使用者的话（错误、提示）时 | 活 |
 | [40](lessons/40-spec-says-intent-not-state.md) | 任务书写的是意图不是现状，建对象之前先核对库 | 写迁移建表/建索引/加列、按任务书去建一个可能已经存在的东西时 | 活 |
 | [41](lessons/41-same-name-masking-can-be-removed-elsewhere.md) | 同名掩护可以被一次与它无关的重构拿掉，门禁在 main 上才红 | 门禁突然冒出一条旧符号、改共用输出函数的名字时 | 活 |
+| [42](lessons/42-design-context-does-not-belong-in-source.md) | 设计上下文（需求来源、讨论过程、「本轮范围」）会被顺手夹带进源码，而它读起来像一条正常的注释；脚本只判得了「面向使用者的文本」那一半 | 写注释、文档、帮助文本，或派 review agent 时 | 活 |
