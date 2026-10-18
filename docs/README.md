@@ -14,6 +14,7 @@
 | 本机环境怎么搭、`make` 各目标做什么、`.env` 与主密钥怎么用 | [development.md](development.md) |
 | 常用检查怎么跑、CI 跑哪些门、变异测试怎么读 | [development.md](development.md) 的「常用检查」「CI 跑什么」「变异测试」 |
 | 加一个环境变量或一个 `settings` 键 | [development.md](development.md) 的「加一个配置项」 |
+| 某个配置键的默认值、取值范围、改了什么时候生效 | [settings.md](settings.md) |
 | 查 `larkaxctl` 的全局约定与退出码 | [cli-reference.md](cli-reference.md) |
 | 查命令输出的形状（颜色、表格、空清单、时刻与时区） | [cli-output.md](cli-output.md) |
 
@@ -21,6 +22,7 @@
 
 | 想做的事 | 看哪份 |
 |---|---|
+| 四条路径分别是什么协议、响应头与状态码、错误体的形状、流式的帧序列 | [api.md](api.md) |
 | 一把 Key 的每分钟次数与累计额度是什么语义、超限时回什么 | [limits.md](limits.md) |
 | 同一个请求重发两次只执行一次（`Idempotency-Key`） | [idempotency.md](idempotency.md) |
 | 单次请求的输出上限（`max_tokens`）怎么定、超了回什么 | [max-tokens.md](max-tokens.md) |
