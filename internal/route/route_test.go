@@ -867,7 +867,7 @@ func TestUnwrapIsNilWhenUnsupportedIsZero(t *testing.T) {
 	if got := (&Errors{}).Unwrap(); got != nil {
 		t.Errorf("Unsupported 为 0 时 Unwrap = %v，期望 nil", got)
 	}
-	if got := (&Errors{Unsupported: 1}).Unwrap(); got != channel.ErrUnsupported {
+	if got := (&Errors{Unsupported: 1}).Unwrap(); !errors.Is(got, channel.ErrUnsupported) {
 		t.Errorf("Unsupported 为 1 时 Unwrap = %v，期望 channel.ErrUnsupported", got)
 	}
 
