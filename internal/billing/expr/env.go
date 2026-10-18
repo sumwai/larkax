@@ -89,6 +89,14 @@ type Calendar interface {
 	// **判不出来时返回错误，不答 false**：与 DayInfo 同一条口径，那边是
 	// 未知直接报错。答 false 会在春节期间按低谷价收费，而账单看上去完全正常。
 	//
+	// **用 isPeak 的规则还会用到 TimeZone 与 DayInfo**：求值走这条路时先要把
+	// 「当地」解析出来——那是判峰谷的前提（窗口按当地零点起算），也是复算要
+	// 的两格（见 Result.LocalTime）。那一步按 TimeZone(region) 折出当地那一天，
+	// 再问 DayInfo(region, 那一天)。所以实现方三个方法都得答得出来：
+	// 一个只实现 Peak 的 Calendar 会在 isPeak 上失败，即便 Peak 自己算得出来。
+	// 适配器两条路查的是同一次 Lookup（见 internal/billing/calendaradapter），
+	// 所以从它身上看不出来这一点。
+	//
 	// 休息日整天算不算高峰**不在这个接口上**：那是规则用 isWorkday() 组合
 	// 出来的事（`!isWorkday() || isPeak("08:00-22:00")`），不必再多一个开关。
 	Peak(region string, instant time.Time, windows []PeakWindow) (bool, error)

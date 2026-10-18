@@ -23,8 +23,10 @@ import (
 type LocalTime struct {
 	// Hour 是 Env.Region 的时区下 Env.At 是几点（0–23）。
 	//
-	// 它是 isPeak 的窗口量在哪个钟表上的那个钟点：窗口按当地零点起算
-	// （见 PeakWindow），所以「当时当地几点」正是复算一笔分时单子缺的输入。
+	// 它是这次求值解析「当地」时算出来的那个钟点，而这份解析是 isWorkday() /
+	// isHoliday() / isPeak() 共用的：只问 isWorkday() 的规则一样会填这一格，
+	// 不是只有峰谷那条路才有值。isPeak 的窗口按当地零点起算（见 PeakWindow），
+	// 所以这一格也是「当时当地几点」——复算一笔分时单子缺的输入。
 	Hour int
 	// OffDay 是当地那一天在日历上算不算休息日。
 	//
