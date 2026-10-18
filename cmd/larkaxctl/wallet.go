@@ -152,7 +152,7 @@ func runWalletCreate(args []string) error {
 	fs := flag.NewFlagSet("wallet create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u", sameAs("user"))
+	stringAlias(fs, user, "u")
 	asset := fs.String("asset", "", "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -205,11 +205,11 @@ func runWalletCredit(args []string) error {
 	fs := flag.NewFlagSet("wallet credit", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u", sameAs("user"))
+	stringAlias(fs, user, "u")
 	amount := fs.String("amount", "", "")
 	asset := fs.String("asset", "", "")
-	ref := legacyStringFlag(fs, "ref", "idempotency-key", "", "")
-	stringAlias(fs, ref, "order", legacyNote("ref"))
+	ref := legacyStringFlag(fs, "ref", "idempotency-key", "")
+	stringAlias(fs, ref, "order")
 	gateway := fs.String("gateway", manualGateway, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)

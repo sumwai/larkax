@@ -6,12 +6,8 @@
 //
 // 每个子命令的 fs.Usage 都被改写成打印手写的常量（`channelShortUsage` 这一类），
 // 而 flag 包自己的 `PrintDefaults` 全包没有调用点。所以**给 flag 注册传的说明字符串
-// 一个字都不会被打印**——不管它直接写在注册调用里（`fs.String(…, "说明")`），还是经
-// `legacyStringFlag` 那类助手转一手。这两处今天一律传空串。
-//
-// 还写着非空说明的只剩几个「说明的产地」，它们不是注册参数，要清掉得动代码：
-// `sameAs` / `legacyNote`（拼简写行与旧名行）、`endpointFlagUsage` 常量、
-// `capabilityFlagUsage` 函数。
+// 一个字都不会被打印**——注册助手（`stringAlias` / `legacyStringFlag` 那几个）因此
+// 不收说明参数，注册时一律传空串。
 //
 // 要改用户看到的帮助，就改那些 *Usage 常量。**别往 flag 注册里补说明**：补了不会
 // 出现在任何输出里，只会多出一份看起来生效的副本，而它与常量分叉时没有任何用例会报出来。
