@@ -1177,6 +1177,19 @@ func TestLoadRegistrySameGenerationWritesBackOneRow(t *testing.T) {
 	if running[0].RunningLoad == nil || !running[0].RunningLoad.Failed() {
 		t.Errorf("取中的那一行该带着它那一次加载的结果：%+v", running[0].RunningLoad)
 	}
+
+	// 代次并列时 latest 两行都为真：这一栏答的是「这一行的代次是不是最高的」，
+	// 而并列的两行代次都是 1。它不替「取中」定唯一一行——那一行的判据在
+	// pickedOrder 那一侧（见 Row.Latest），上面那条断言问的就是它。
+	var tie []Row
+	for _, r := range rows {
+		if r.Key == key {
+			tie = append(tie, r)
+		}
+	}
+	if len(tie) != 2 || !tie[0].Latest || !tie[1].Latest {
+		t.Errorf("代次并列时两行的 latest 都该为真，实际：%+v", tie)
+	}
 }
 
 // 判据：两个常量与迁移里那条 CHECK 说的是同一套字面量。

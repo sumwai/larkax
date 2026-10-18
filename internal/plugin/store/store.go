@@ -689,8 +689,10 @@ type Result struct {
 
 // publishLockSQL 按 key 拿一把发布用的锁。
 //
-// advisory lock 的键空间是全局的：账本按交易号取锁，插件 KV 按插件与用户取锁。
-// 这里给自己的键带一个前缀，几处就不会共用同一把锁（真撞上也只是多等一次）。
+// advisory lock 的键空间是全局的：账本按交易号取锁，插件 KV 按「插件名 : 用户 id」
+// 取锁。这里给自己的键带一个前缀，与那两处**不容易**撞上——前缀只是字符串，不保证
+// 分开：KV 那边的插件名叫 `plugin`、用户 id 又正好是这里的 key 时，两边算出来是同一个
+// 键，于是共用一把锁（真撞上也只是多等一次，两条路各自仍然是对的）。
 //
 // 事务级：随 commit / rollback 一起释放，不必手工解锁（同 ledger 的 PostTransaction
 // 与 kv.go 里那一把）。
@@ -733,7 +735,7 @@ const publishLockSQL = `SELECT pg_advisory_xact_lock(hashtextextended('plugin:' 
 //
 //   - `(key, generation)` 上**没有**唯一约束（见 00001_init.sql，那里只有
 //     UNIQUE (key, version)），约束拦不住两条覆盖撞回同一个代次；
-//   - 锁自己那一行也挡不住：覆盖要读的是**整个 key** 的最大代次，而这个 key 里
+//   - 只锁要改的那一行也挡不住：覆盖要读的是**整个 key** 的最大代次，而这个 key 里
 //     还有别的版本，那几行同时也在被别人覆盖；
 //   - 空 key 的首次发布没有行可锁，行锁覆盖不到它，而两条并发的首发会取到同一个代次。
 //
