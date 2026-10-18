@@ -469,6 +469,57 @@ func TestPeakWindowEndpointsAreHalfOpen(t *testing.T) {
 	}
 }
 
+// Peak 带回来的那一天是**地区时区**折出来的那一天，与 DayInfo 答的是同一份属性。
+//
+// 这一条钉的是 `expr.PeakVerdict.Day` 那条义务（见 expr.Calendar 的 Peak）：
+// 求值那侧不再自己折一天，也就没有东西替你把「判定内部用的时区」与
+// TimeZone(region) 比一遍。两者不一致时，落库的 local_hour 取自 TimeZone、
+// is_off_day 取自这里，同一行的两格会互相矛盾，而它们存在的全部理由正是事后
+// 复算——矛盾的两格复算不出当时的价，库里也看不出是哪一格错了。
+//
+// 所以取一个**跨 UTC 日**的时刻（当地已经是次日），并让当地那一天是休息日：
+// 「Day 掉成零值」与「Day 按 UTC 取日期」这两种错法于是都看得出来——两者都
+// 给出「不是休息日」，而正确的那一份是休息日。
+func TestPeakReturnsTheDayOfTheRegionTimeZone(t *testing.T) {
+	src := workdaySource(t)
+	// 北京时间 2026-01-06 00:30 已经是次日；把这一天改成休息日，
+	// 它就与 UTC 那一天（01-05，周一，工作日）在属性上分得开。
+	if err := src.AddDay(calendar.RegionCN, calendar.DayRow{
+		Date: calendar.Date{Year: 2026, Month: time.January, Day: 6},
+		Name: "测试休息日", OffDay: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a := adapt(t, src)
+
+	// 2026-01-05 16:30 UTC = 北京时间 2026-01-06 00:30。
+	instant := time.Date(2026, 1, 5, 16, 30, 0, 0, time.UTC)
+	verdict, err := a.Peak("CN", instant, []expr.PeakWindow{
+		{StartMinute: 8 * 60, EndMinute: 22 * 60},
+	})
+	if err != nil {
+		t.Fatalf("判峰谷出错: %v", err)
+	}
+	// 判定本身不是这条用例要钉的，但它是这条路的入口：当地 00:30 不在窗口里。
+	if verdict.IsPeak {
+		t.Error("当地 00:30 落在 08:00-22:00 之外，却判成了高峰")
+	}
+
+	localDay := time.Date(2026, 1, 6, 0, 0, 0, 0, time.UTC)
+	want, err := a.DayInfo("CN", localDay)
+	if err != nil {
+		t.Fatalf("查 %s 的属性出错: %v", localDay.Format("2006-01-02"), err)
+	}
+	if verdict.Day != want {
+		t.Errorf("Peak 带回来的那一天 = %+v，期望 %+v——instant 的 UTC 日是 01-05，"+
+			"而地区时区下落在 01-06", verdict.Day, want)
+	}
+	if !verdict.Day.OffDay {
+		t.Error("Day.OffDay = false，但当地那一天（01-06）在数据里是休息日——" +
+			"这一格按 UTC 取日期、或者掉成零值，都会长成这样")
+	}
+}
+
 // 全天段与其他段并列时不成立——这条校验在适配器与日历那一层都还在。
 //
 // 规则走不到这里：窗口的写法在保存规则时就判过一遍（见 expr 的

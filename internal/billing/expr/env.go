@@ -113,8 +113,14 @@ type Calendar interface {
 type PeakVerdict struct {
 	// IsPeak 是判定：这一刻算不算高峰。
 	IsPeak bool
-	// Day 是判定所依据的那一天的日历属性——地区时区下 instant 落在的那一天，
-	// 与求值自己折出来的那一天是同一个。
+	// Day 是判定所依据的那一天的日历属性。
+	//
+	// **这是一条对实现方的要求，不是一句描述**：它必须是 TimeZone(region)
+	// 折出来的那一天——**判峰谷内部用的时区，得与 TimeZone 答的是同一个**。
+	// 求值那侧不再自己折一天，两者不一致时也没有哪一处会发现：local_hour
+	// 取自 TimeZone，is_off_day 取自这里，同一行的两格会互相矛盾。那两格存在的
+	// 全部理由是事后复算一笔分时单子，矛盾的两格复算不出当时的价，而库里看不出
+	// 是哪一格错了。
 	Day DayInfo
 }
 

@@ -328,7 +328,12 @@ func (rt *runtime) env(u usageView) map[string]any {
 			// 于是它与这次判定是同一个变量，而不必再查一次同一天的那一行。
 			//
 			// Peak 排在 window 解析之后：写法错要报「写法不成立」（见上），
-			// 这个先后次序不因为这里少一步而改变。
+			// 这个次序与改动前一样。
+			//
+			// 「地区不认识」与「这不是一天的数据」谁先报，则由实现方定：
+			// 适配器那条路是 PeakAt 先解析时区、再查那一天（见 internal/calendar
+			// 的 PeakAt），所以坏地区先报——求值那侧不再替它保证这个次序，
+			// 因为折时区那一步已经挪到判定之后了（见 adoptPeakDay）。
 			verdict, peakErr := rt.calendar.Peak(rt.region, rt.at, windows)
 			if peakErr != nil {
 				return false, peakErr
@@ -427,8 +432,9 @@ func (rt *runtime) resolveLocal() (localBasis, error) {
 // 两个数（见 Result.LocalTime）。
 //
 // 已经有解析结果时不动它：同一次求值里的当地口径只有一份。所以
-// `isWorkday() && isPeak(...)` 这样先问日历属性的规则，那一次 Peak 仍然要查
-// ——判定本身就得查；反过来 `isPeak(...) && isWorkday()` 会省掉 DayInfo 那一次。
+// `isWorkday() && isPeak(...)` 这样先问日历属性的规则，那一次 Peak 仍然要查，
+// 因为判定本身就得查；反过来先问 isPeak() 的规则，isWorkday() 会直接命中
+// 这一份，省掉 DayInfo 那一次。
 func (rt *runtime) adoptPeakDay(info DayInfo) error {
 	if rt.local != nil {
 		return nil

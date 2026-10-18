@@ -162,6 +162,9 @@ func (a *Adapter) Peak(region string, instant time.Time, windows []expr.PeakWind
 	if !st.Peak.Known() {
 		return expr.PeakVerdict{}, unknownDayError(region, st.Day)
 	}
+	// 走到这里时 st.Day 必然是已知的一天：日子未知时 PeakAt 连 peak/off_peak
+	// 都给不出来（见它的判定顺序），所以 dayInfoOf 的未知分支在这条路上到不了。
+	// 共用它求的是两处折法一模一样——将来 DayKind 多一态时也一起跟上。
 	day, err := dayInfoOf(region, st.Day)
 	if err != nil {
 		return expr.PeakVerdict{}, err

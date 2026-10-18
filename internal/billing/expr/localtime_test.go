@@ -134,6 +134,43 @@ func TestEvalPeakRuleQueriesCalendarOnce(t *testing.T) {
 	}
 }
 
+// 反过来先问峰谷的规则也只查一次：Peak 已经把那一天带回来了，后问的
+// isWorkday() 直接命中这一份（见 adoptPeakDay），不必自己再查一遍。
+//
+// 与上一条是同一件事的两面：上一条钉「不为落库那两格再查一次」，这一条钉
+// 「后问的那个函数蹭上前面已经查回来的那一份」。
+func TestEvalPeakThenWorkdayQueriesCalendarOnce(t *testing.T) {
+	cal := newTestCalendar()
+	cal.peakMinutes = map[int]bool{17*60 + 30: true}
+
+	p := mustCompile(t, `isPeak("08:00-22:00") && isWorkday()
+		? tier("peak_workday", {"prompt": 0.0000030})
+		: tier("other", {"prompt": 0.0000010})`)
+	res, err := p.Eval(Env{At: testAt, Region: "CN", Calendar: cal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 当地 17:30 在窗口里，2026-10-16 又是工作日——两支都成立才走第一支。
+	if res.Tier != "peak_workday" {
+		t.Fatalf("档位 = %q，期望 peak_workday（当地 17:30 在窗口里，且是工作日）",
+			res.Tier)
+	}
+	if got := cal.calendarCalls(); got != 1 {
+		t.Errorf("一次求值查了 %d 次日历，期望 1 次——isWorkday() 命中的是判定"+
+			"带回来的那一份", got)
+	}
+	if res.LocalTime == nil {
+		t.Fatal("规则用了 isPeak() 与 isWorkday()，当地口径却是 nil")
+	}
+	if res.LocalTime.Hour != 17 {
+		t.Errorf("当地钟点 = %d，期望 17", res.LocalTime.Hour)
+	}
+	if res.LocalTime.OffDay {
+		t.Error("OffDay = true，但这一天是工作日——这一格与 isWorkday() 当时" +
+			"判的是同一份依据")
+	}
+}
+
 // hour(tz) 不算「用到当地口径」：它的时区由规则作者逐次给出，问的是那一个
 // 钟表，与地区的日历不是一套口径。
 //
