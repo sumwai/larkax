@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"fmt"
 	"go/ast"
 	"go/token"
@@ -795,10 +796,46 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				Region: "CN", Year: 2031, Status: "synced", DayCount: 365, SyncedAt: at,
 			}}, false)
 		}},
+		// 下面四条是三条只读入口带出来的清单：#695 补上的用量事件、计费请求、
+		// 对账运行记录与快照访问记录。与被截断时那一句同样，它们都是
+		// 「主键加粗、表头加粗」的清单表。
+		{"用量事件", func(w io.Writer) {
+			printUsageEvents(w, []usageEventRow{{
+				CreatedAt: at, UserID: 7, Username: "user-placeholder",
+				CanonicalModel: "claude-x",
+				PromptTokens:   1200, CompletionTokens: 800,
+				CacheReadTokens: 300, CacheWriteTokens: 100,
+				BillingPath: "measured", Cost: money.MustParse("0.01234500"),
+			}}, false)
+		}},
+		{"计费请求", func(w io.Writer) {
+			printUsageRequests(w, []usageRequestRow{{
+				StartedAt: at, RequestID: "req-placeholder", UserID: 7,
+				Username: "user-placeholder", CanonicalModel: "claude-x",
+				Status:         "settled",
+				ReservedAmount: money.MustParse("0.02000000"),
+				FinalAmount:    sql.NullString{String: "0.01234500", Valid: true},
+			}}, false)
+		}},
+		{"对账运行记录", func(w io.Writer) {
+			printLedgerRuns(w, []store.ReconcileRun{{
+				ID: 3, StartedAt: at, Watermark: at, FullScan: true,
+				Status: "done", CheckedWallets: 12,
+			}}, false)
+		}},
+		{"快照访问记录", func(w io.Writer) {
+			printSnapshotAccessLog(w, []snapshotAccessRow{{
+				ID: 1, SnapshotID: 9, RequestID: "req-placeholder",
+				ActorUserID: sql.NullInt64{Int64: 7, Valid: true},
+				ActorKind:   "admin",
+				Reason:      sql.NullString{String: "排查一次上游报错", Valid: true},
+				AccessedAt:  at,
+			}}, map[int64]string{7: "user-placeholder"}, false)
+		}},
 	}
 
-	if len(cases) != 21 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 21 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 25 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 25 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {

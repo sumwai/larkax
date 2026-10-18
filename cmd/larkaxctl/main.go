@@ -171,7 +171,8 @@ var commandGroups = []commandGroup{
 			{name: "user", summary: "系统用户管理（创建、查询与修改）", help: userHelp, run: runUser},
 			{name: "apikey", summary: "API Key 访问密钥、状态与额度管理", help: apiKeyHelp, run: runAPIKey},
 			{name: "wallet", summary: "用户钱包账户与入账管理", help: walletHelp, run: runWallet},
-			{name: "ledger", summary: "财务账本管理（余额查询、分录校验、对账）", help: ledgerHelp, run: runLedger},
+			{name: "usage", summary: "用量与计费的只读清单（用量事件、计费请求）", help: usageHelp, run: runUsage},
+			{name: "ledger", summary: "财务账本管理（余额查询、分录校验、对账、对账历史）", help: ledgerHelp, run: runLedger},
 		},
 	},
 	{

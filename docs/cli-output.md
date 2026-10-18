@@ -119,6 +119,12 @@ N 项通过 (运行 -v 查看细节)`），`ledger verify` 与 `secret rotate --
   更坏，例如 `ledger balance --all` 的科目由分录产生）。逐条钉在
   `style_test.go` 的 `TestEmptyListMessages` 里，模板的唯一性钉在
   `renderpaths_test.go` 的 `TestEmptyStateWordingHasASingleSource` 里。
+- 被 `--limit` 截住时，末行补一句 **`（以上是最近 N 条，更早的没打出来：把 --limit
+  调大，或用筛选条件缩小范围）`**，没被截住时一个字都不补：一份少了后文的清单与一份
+  完整的清单在屏幕上长得一样，而每次都补一句「可能还有」与不补一样没用。这句模板
+  只有 `style.go` 的 `truncatedListNote` 一处，调用点只传打了多少条；**「打出来的
+  条数等于上限」不足以判截断**，查询要多读一行（`LIMIT limit+1`）才分得开「刚好打完」
+  与「恰好被截住」。
 - 一个实体**只点一次身份**：写名字就不挂 ID（`用户 alice`，不是
   `用户 alice(id=7)`）——名字已经认出这条记录了，括号里的 ID 只是让按名字读的人
   多跳一次。这条命令自己创建的那个对象上，ID 单独成一个字段，且**字段顺序固定**：

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,15 +22,16 @@ import (
 var ledgerHelp = helpText{short: ledgerShortUsage, long: ledgerUsage}
 
 // ledgerShortUsage 是 ledger 的短版：`-h` / `--help` 与参数写错时打的那一份。
-const ledgerShortUsage = `larkaxctl ledger 管财务账本：读余额、校验分录，以及跑一轮对账。
+const ledgerShortUsage = `larkaxctl ledger 管财务账本：读余额、校验分录，跑一轮对账，以及看对账的历史。
 
 用法：
   larkaxctl ledger balance --account <科目> [--asset <资产>]
   larkaxctl ledger balance --all [--asset <资产>]
   larkaxctl ledger verify [--from <时刻>] [--to <时刻>] [--max-txns <笔数>]
   larkaxctl ledger reconcile
+  larkaxctl ledger runs [--limit <条数>]
 
-balance 与 verify 只读；reconcile 会写库，口径来自 settings 表。
+balance、verify 与 runs 只读；reconcile 会写库，口径来自 settings 表。
 balance 打的是从分录现算的权威值，不是 user_wallets 里的那个快照。
 
 更细的边界：larkaxctl help ledger。
@@ -40,7 +42,7 @@ balance 打的是从分录现算的权威值，不是 user_wallets 里的那个�
 // balance 与 verify 只读这件事写在第一行：这两条命令出现在事故现场（余额对
 // 不上、导入之后要复核），而那时候最要紧的一件事是**不要**再动账本。reconcile
 // 是这一组里唯一会写库的那条，它写什么写在它自己那一段里。
-const ledgerUsage = `larkaxctl ledger 管财务账本：读余额、校验分录，以及跑一轮对账。
+const ledgerUsage = `larkaxctl ledger 管财务账本：读余额、校验分录，跑一轮对账，以及看对账的历史。
 
 用法：
   larkaxctl ledger balance --account <科目> [--asset <资产>]
@@ -51,9 +53,16 @@ const ledgerUsage = `larkaxctl ledger 管财务账本：读余额、校验分录
         逐笔校验分录（和为零、科目与类型合法、借贷方向与交易类型相符）
   larkaxctl ledger reconcile
         跑一轮对账（开关与口径见 settings 表）
+  larkaxctl ledger runs [--limit <条数>]
+        列出对账的历史运行：什么时候跑的、起点在哪、比出多少差额、修了几条
 
-balance 与 verify 只读：不改任何一行、不写任何快照。reconcile 不是只读的：它往
-reconcile_runs 记一行，并在 settings 的 reconcile.auto_repair 为真时按口径修差额。
+balance、verify 与 runs 只读：不改任何一行、不写任何快照。reconcile 不是只读的：
+它往 reconcile_runs 记一行，并在 settings 的 reconcile.auto_repair 为真时按口径修差额。
+
+runs 读的就是 reconcile 写下的那张表，所以两件事对得上：清单里最新那一行就是上一轮。
+读它同样是管理员动作——跑得起 larkaxctl 的人本来就能连上这个库，所以这条命令不额外
+要求别的授权，也不带角色参数。清单新的在前，--limit 默认 20、0 表示不限；被截住时
+末行会说明只打了多少条。
 
 balance 打出来的余额是从分录**现算**的权威值，不是 user_wallets 里那个快照。
 两者是否一致由 reconcile 比对，它还会把差额归集到 reconcile_difference；
@@ -107,6 +116,8 @@ func runLedger(args []string) error {
 		// 对账原先是一个顶层命令（larkaxctl reconcile），#475 把它收进账本域：
 		// 它比的是账本与快照，属于同一个域。旧路径留着，接的是同一个函数。
 		return runReconcile(rest)
+	case "runs":
+		return runLedgerRuns(rest)
 	case "-h", "--help":
 		printUsage(os.Stdout, ledgerShortUsage)
 		return nil
@@ -564,6 +575,123 @@ func verifyFindingDoc(f store.VerifyFinding) map[string]any {
 		"error":   nullableError(f.Err),
 		"entries": entries,
 	}
+}
+
+// ledgerRunsDefaultLimit 是 ledger runs 默认打几行。
+//
+// reconcile_runs 只追加、不清扫，而看这份清单通常是为了回答「上一次扫到哪」——
+// 最近那几行。被截住时末行会说明，所以默认值不会让人把一份截过的清单当成完整的。
+const ledgerRunsDefaultLimit = 20
+
+// runLedgerRuns 列出对账的历史运行。
+//
+// 它读的就是 reconcile 写下的那张表（reconcile_runs）。这条命令与 reconcile 是
+// 一写一读的两半：只跑不读的话，「跑过几次、上次扫到哪、差额怎么处理的」只能连库看，
+// 而那张表同时还是下一轮增量扫描的起点。
+func runLedgerRuns(args []string) error {
+	fs := flag.NewFlagSet("ledger runs", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, ledgerShortUsage) }
+	limit := fs.Int("limit", ledgerRunsDefaultLimit, "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("ledger runs 不接受位置参数，得到 %q：要少看几行用 --limit", fs.Arg(0)))
+	}
+	if *limit < 0 {
+		return usageErr(fmt.Errorf("--limit 不能为负，得到 %d（0 表示不限）", *limit))
+	}
+
+	return withDB(ledgerReadTimeout, func(ctx context.Context, db *sql.DB) error {
+		page, err := store.New(db).ReconcileRuns(ctx, *limit)
+		if err != nil {
+			return err
+		}
+
+		if jsonOutput() {
+			return emitJSON(os.Stdout, ledgerRunsDoc(page.Runs, page.More, *limit), nil)
+		}
+		printLedgerRuns(humanStdout(), page.Runs, page.More)
+		return nil
+	})
+}
+
+// printLedgerRuns 打一张对账运行清单。
+//
+// 「范围」那一栏把 full_scan 翻成全量 / 增量：它是这张清单里最要紧的一栏——增量
+// 只看上次起点之后变动过的行，所以一份全是增量的清单说明「两边都早就错着」的那种
+// 不一致还从来没被看过一眼（见迁移 00004 里 full_scan_interval_hours 的说明）。
+//
+// 空清单也说一句话：一行都不打时，「一轮对账都没跑过」与「命令没跑成」在安静的
+// 终端里长得一样（见 LESSONS.md 第 16 条）。这一句不套 style.go 的 emptyListNote
+// ——运行记录由 reconcile 跑出来，没有「添加」这个动作。
+func printLedgerRuns(w io.Writer, runs []store.ReconcileRun, more bool) {
+	if len(runs) == 0 {
+		_, _ = fmt.Fprintln(w, "还没有跑过对账，一条运行记录都没有。")
+		return
+	}
+
+	tw := newTableWriter(w)
+	p := newPalette(w)
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		p.bold("run_id"), p.bold("开始"), p.bold("状态"), p.bold("范围"), p.bold("起点"),
+		p.bold("比对"), p.bold("余额差"), p.bold("冻结差"), p.bold("畸形科目"),
+		p.bold("陈旧预留"), p.bold("修复"))
+	for _, r := range runs {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\n",
+			p.bold(strconv.FormatInt(r.ID, 10)),
+			p.dim(r.StartedAt.Format(longStampLayout)),
+			r.Status, scanScopeCell(r.FullScan),
+			p.dim(r.Watermark.Format(longStampLayout)),
+			r.CheckedWallets, r.BalanceMismatches, r.FrozenMismatches,
+			r.MalformedAccounts, r.StaleReservations, r.Repaired)
+	}
+	_ = tw.Flush()
+	printTruncatedListNote(w, more, len(runs))
+}
+
+// scanScopeCell 把 full_scan 翻成「全量 / 增量」。
+func scanScopeCell(fullScan bool) string {
+	if fullScan {
+		return "全量"
+	}
+	return "增量"
+}
+
+// ledgerRunsDoc 组装 ledger runs 的机器可读输出。
+//
+// 每一行的 status 是**那一轮对账**的状态（running / done / failed），与最外层那个
+// status（这份输出本身成不成立）不是一回事。取库里那一列的原文，不在命令行这一侧
+// 另翻一套词：对账与运维看的是同一个字符串。
+func ledgerRunsDoc(runs []store.ReconcileRun, more bool, limit int) map[string]any {
+	items := make([]map[string]any, 0, len(runs))
+	for _, r := range runs {
+		items = append(items, map[string]any{
+			"id":         r.ID,
+			"started_at": jsonTime(r.StartedAt),
+			// finished_at 为空表示这一轮还没收尾（status = running）。
+			"finished_at":        jsonTimePtr(nullTimeToPtr(r.FinishedAt)),
+			"watermark":          jsonTime(r.Watermark),
+			"full_scan":          r.FullScan,
+			"checked_wallets":    r.CheckedWallets,
+			"balance_mismatches": r.BalanceMismatches,
+			"frozen_mismatches":  r.FrozenMismatches,
+			"repaired":           r.Repaired,
+			"malformed_accounts": r.MalformedAccounts,
+			"stale_reservations": r.StaleReservations,
+			"status":             r.Status,
+			"error":              nullableString(r.Error.String),
+		})
+	}
+
+	doc := jsonDoc(jsonOK)
+	doc["summary"] = map[string]any{
+		"total":     len(items),
+		"limit":     limit,
+		"truncated": more,
+	}
+	doc["runs"] = items
+	return doc
 }
 
 // parseLedgerTime 解析一个时刻参数，空串表示不限。

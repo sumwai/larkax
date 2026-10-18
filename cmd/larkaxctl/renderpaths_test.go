@@ -66,17 +66,21 @@ var tableRenderPaths = []string{
 	"printKeyDetail",   // apikey get
 	"printKeyList",
 	"printLedgerBalances", // ledger balance --all
+	"printLedgerRuns",     // ledger runs
 	"printModelDetail",
 	"printModelList",
 	"printPluginDetail",  // plugin get
 	"printPluginKVEntry", // plugin kv get
 	"printPluginList",
 	"printRuleTable",
-	"printSettingsDetail", // settings get
-	"printUserDetail",     // user get
-	"printUserList",       // user list
-	"printUserUpdate",     // user update 的改动回显：一栏一行，与 get 那一片同一个形状
-	"printWalletList",     // wallet list
+	"printSettingsDetail",    // settings get
+	"printSnapshotAccessLog", // snapshot access-log
+	"printUsageEvents",       // usage events
+	"printUsageRequests",     // usage requests
+	"printUserDetail",        // user get
+	"printUserList",          // user list
+	"printUserUpdate",        // user update 的改动回显：一栏一行，与 get 那一片同一个形状
+	"printWalletList",        // wallet list
 }
 
 // emptyListPaths 是清单空状态文案的调用点。
