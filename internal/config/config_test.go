@@ -213,6 +213,12 @@ func TestLoadOpsNeedsOnlyDSN(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Errorf("LogLevel = %q，期望 info", cfg.LogLevel)
 	}
+	// 监听地址那个默认值写死在这里，不引用包里的常量：引用它等于用常量测常量，
+	// 两边一起改就一起过。`doctor --live` 拿它算默认往哪儿打请求，改成别的值时
+	// 要有人红一次。
+	if cfg.HTTPAddr != "127.0.0.1:8080" {
+		t.Errorf("HTTPAddr = %q，期望 127.0.0.1:8080", cfg.HTTPAddr)
+	}
 	if cfg.IsProduction() {
 		t.Error("development 环境下 IsProduction() 应为 false")
 	}

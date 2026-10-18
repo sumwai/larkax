@@ -200,10 +200,10 @@ const (
 // doctorLoopbackHost 是监听地址写成「所有网卡」时，替它去连的那一个主机。
 //
 // 监听地址有三种写法：`127.0.0.1:8080`（指定主机）、`:8080`（不写主机，示例里
-// 用的是这一种）、以及把主机写成 `0.0.0.0` 或 `::` 的「所有网卡」。后两种都不是
-// 能连的地址，而 doctor 与网关通常跑在同一台机器上，环回是这里面最短的那条路。
-// 取 127.0.0.1 而不是 localhost：后者要先解析一次名字，还可能落到 ::1 上，而
-// 服务未必听在那一侧。
+// 用的是这一种）、以及把主机写成通配地址的——`0.0.0.0`、`::`，IPv6 还有长写法。
+// 后两种都不是能连的地址，而 doctor 与网关通常跑在同一台机器上，环回是这里面
+// 最短的那条路。取 127.0.0.1 而不是 localhost：后者要先解析一次名字，还可能
+// 落到 ::1 上，而服务未必听在那一侧。
 const doctorLoopbackHost = "127.0.0.1"
 
 // doctorBaseURLFromListenAddr 把主服务的监听地址拼成一个能连的网关地址。
@@ -220,8 +220,13 @@ func doctorBaseURLFromListenAddr(listenAddr string) (string, error) {
 			"给不出 --base-url 的默认值（%v）；显式给一个 --base-url 就能接着跑",
 			listenAddr, err)
 	}
-	switch host {
-	case "", "0.0.0.0", "::":
+	// 空主机与通配地址（`0.0.0.0`、`::`，以及 IPv6 的长写法）都不是能连的地址。
+	// 判通配用 ParseIP().IsUnspecified 而不是列几个字面量：通配地址有好几种
+	// 写法，列字面量时漏掉的那一种会拼出一个看着像地址、判据却没认出来的结果。
+	// 解析不出 IP 的是主机名（`gateway.example.com`），原样留着。
+	if host == "" {
+		host = doctorLoopbackHost
+	} else if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
 		host = doctorLoopbackHost
 	}
 	return "http://" + net.JoinHostPort(host, port), nil
