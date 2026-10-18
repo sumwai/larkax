@@ -19,8 +19,9 @@
 长得一样，是这个项目反复踩的坑（见 [LESSONS.md](../LESSONS.md) 第 16 条），
 所以它们各有各的符号，也各自影响退出码。
 
-体检类命令（`doctor`、`partition check`、`ledger verify`、`secret rotate
---verify`）共用同一条渲染路径 `printStatusLines`（`cmd/larkaxctl/style.go`）：
+体检类命令（`doctor`、`partition check`、`ledger verify`、
+`secret rotate --verify`）共用同一条渲染路径 `printStatusLines`
+（`cmd/larkaxctl/style.go`）：
 每一项一行「状态符 标题 一句结论」，标题那一栏按最宽的那个对齐，细节只在 `-v`
 时跟着各自那一行缩进打出来。默认一屏收敛的是**篇幅**，不是信息量——原先那些
 长句一条都没删，只是挪进了 `-v`。
@@ -80,11 +81,20 @@
 默认那一行是 `状态符 标题 结论`，标题那一栏按最宽的那个对齐。一项超过一条问题时
 默认只打第一条，其余的折成「（另有 N 条，用 -v 看）」。
 
-`doctor` 之外的体检命令（`partition check`、`ledger verify`、`secret rotate
---verify`）自己收一组 `statusLine` 交给 `printStatusLines`，不要另起一套渲染：
-状态符、对齐、`-v` 缩进、以及那句「N 项异常、N 项通过」的汇总都从这条路出来。
-汇总那一句要用 `countStatusLines` 从**打出去的行**里数，不要从上游的数据结构再
-数一遍——两处各数一遍时，多打或少打一行就会让那句汇总说谎。
+`doctor` 之外的体检命令（`partition check`、`ledger verify`、
+`secret rotate --verify`）自己收一组 `statusLine` 交给 `printStatusLines`，
+不要另起一套渲染：状态符、对齐、`-v` 缩进都从这条路出来。
+
+**汇总行不由这条路打。** 它有自己的前缀与档数，由各命令自己打，打不打也由
+各命令自己定：`doctor` 打完三档（`doctor: N 项异常, N 项跳过, N 项通过
+(运行 -v 查看细节)`），`partition check` 打完两档（`partition check: N 项异常,
+N 项通过 (运行 -v 查看细节)`），`ledger verify` 与 `secret rotate --verify`
+只有那一行、不打汇总。
+
+计数分两条实现，不是一处：`partition check` 用 `countStatusLines` 从**打出去的
+行**里数；`doctor` 从自己报告结构上的计数（`rep.counts()`）数。汇总说的是「上面
+这一屏里有几项」，所以从打出去的行里数更不容易说谎——多打或少打一行时，
+从数据结构数出来的那句汇总会与它上面那一屏对不上。
 
 ## 加一个清单命令
 
@@ -103,9 +113,12 @@
   `renderpaths_test.go` 的 `TestEmptyStateWordingHasASingleSource` 里。
 - 一个实体**只点一次身份**：写名字就不挂 ID（`用户 alice`，不是
   `用户 alice(id=7)`）——名字已经认出这条记录了，括号里的 ID 只是让按名字读的人
-  多跳一次。这条命令自己创建的那个对象上，ID 单独成一个字段
-  （`已创建 API Key id=5 prefix=… 用户=alice`），方便脚本接着用；行里其余的位置
-  仍然只写名字。挂括号的写法由 `TestNoParenthesisedIDInHumanOutput` 按字面量钉住。
+  多跳一次。这条命令自己创建的那个对象上，ID 单独成一个字段，且**字段顺序固定**：
+  `已创建 API Key id=5 prefix=… 用户=alice 过期=不过期 每分钟=继承 额度=继承`
+  ——后面三项就是同一行里的其余位置（时刻、RPM、额度），没设时分别打
+  `不过期` 与 `继承`。那一行打在 **stderr** 上，stdout 上只有那串一次性明文
+  （见「提示与警告」）。行里其余的位置仍然只写名字；挂括号的写法由
+  `TestNoParenthesisedIDInHumanOutput` 按字面量钉住。
 
 `settings list` 是例外：settings 表是空的与「还没有配过」不是一回事（那些键来自
 Registry，加不了），它留着自己的说法。

@@ -168,9 +168,11 @@ Not wired yet:
 
 See [docs/development.md](docs/development.md) for how to build and run it, and
 [docs/README.md](docs/README.md) for every other document — that index is organised
-by what you are trying to do rather than by module. The `larkaxctl` command
-reference is in [docs/cli-reference.md](docs/cli-reference.md); the metrics the
-service exports, and how to alert on each, in [docs/metrics.md](docs/metrics.md).
+by what you are trying to do rather than by module. The HTTP surface — paths,
+response headers, status codes, error bodies, streaming event sequences — is in
+[docs/api.md](docs/api.md). The `larkaxctl` command reference is in
+[docs/cli-reference.md](docs/cli-reference.md); the metrics the service exports,
+and how to alert on each, in [docs/metrics.md](docs/metrics.md).
 
 ## What it will do
 
