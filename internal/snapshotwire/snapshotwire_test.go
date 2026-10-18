@@ -1,9 +1,12 @@
 package snapshotwire
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +14,7 @@ import (
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/gateway"
 	"github.com/sumwai/larkax/internal/observe"
+	"github.com/sumwai/larkax/internal/snapshot"
 )
 
 func testConfig() Config {
@@ -247,6 +251,75 @@ func TestSlotsAreReleasedAfterWrite(t *testing.T) {
 	}
 }
 
+// 四个计数不只要自己记着，还要真的出现在 /metrics 的正文里。
+//
+// # 为什么钉渲染出来的那一行，而不是 counter 变量
+//
+// Stats() 与指标是同一批事件的两份口径（见它的注释），但只有后者会被人看见：
+// 变量涨了而登记漏了、或者名字写错了，读变量是对的而抓下来的正文里没有那一行。
+// 「没接上的计数器」与「一次都没发生的计数器」在采集端长得一样，所以这条
+// 用例判的是输出，不是内存里的数。
+//
+// # 为什么逐个事件读增量
+//
+// observe.Metrics 是**进程级**的：同一个测试二进制里别的用例也会往这四个
+// 计数器上加数，所以判据只能是「这件事之后它涨了 1」。
+func TestSnapshotCountsAppearOnMetrics(t *testing.T) {
+	// 1. 落库成功。
+	expectMetricDelta(t, "larkax_snapshot_written_total", func() {
+		if err := newCollector(t, testConfig(), &fakeDB{}).Save(context.Background(), newSnap()); err != nil {
+			t.Fatalf("Save 失败: %v", err)
+		}
+	})
+
+	// 2. 并发写已满而就地丢弃。占满令牌之后那一条立刻返回，不等令牌释放。
+	expectMetricDelta(t, "larkax_snapshot_dropped_total", func() {
+		release := make(chan struct{})
+		db := &blockingDB{release: release}
+		c := newCollector(t, testConfig(), db)
+
+		var wg sync.WaitGroup
+		for i := 0; i < maxConcurrentWrites; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_ = c.Save(context.Background(), newSnap())
+			}()
+		}
+		waitUntil(t, func() bool { return db.started() == maxConcurrentWrites })
+
+		if err := c.Save(context.Background(), newSnap()); !errors.Is(err, ErrCapacityExceeded) {
+			t.Fatalf("满了时应当返回 ErrCapacityExceeded，实际 %v", err)
+		}
+		// 放行占着令牌的那些写入再继续：它们会各自记一次 written，
+		// 而这一条判的是 dropped 的增量，两者互不干扰。
+		close(release)
+		wg.Wait()
+	})
+
+	// 3. 落库失败：骨架里塞一个 JSON 序列化不了的值，写库之前就报错。
+	expectMetricDelta(t, "larkax_snapshot_failed_total", func() {
+		snap := newSnap()
+		snap.Skeleton = map[string]any{"bad": make(chan int)}
+		if err := newCollector(t, testConfig(), &fakeDB{}).Save(context.Background(), snap); err == nil {
+			t.Fatal("落库失败时应当返回错误")
+		}
+	})
+
+	// 4. 脱敏阶段整条丢弃：上限小到连降级后的摘要层都装不下。
+	//
+	// 它记的是「上限配错了」而不是「存储坏了」，所以必须与上面两条分开——
+	// 三种丢弃混成一个数，排查方向就没了。
+	expectMetricDelta(t, "larkax_snapshot_oversized_total", func() {
+		cfg := testConfig()
+		cfg.MaxBytes = 1
+		c := newCollector(t, cfg, &fakeDB{})
+		if _, err := c.Redact(&channel.Request{Model: "placeholder-model"}); !errors.Is(err, snapshot.ErrTooLarge) {
+			t.Fatalf("上限 1 字节时应当整条丢弃并带 ErrTooLarge 标记，实际 %v", err)
+		}
+	})
+}
+
 // 请求标识从 context 里带进日志，这条链路就是给排障用的，日志拼不上等于白记。
 func TestLogCarriesRequestTagWithoutPanic(t *testing.T) {
 	c := newCollector(t, testConfig(), &fakeDB{})
@@ -423,6 +496,47 @@ func waitUntil(t *testing.T, cond func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("等待条件超时")
+}
+
+// expectMetricDelta 断言 do 让某个不带标签的计数器恰好涨 1。
+//
+// 涨的幅度才是判据：observe.Metrics 是进程级的，同一个二进制里别的用例
+// （并行跑的也算）会往同一个计数器上加数，所以「取值等于 1」这种断言
+// 只要别处也用一次就碎。
+func expectMetricDelta(t *testing.T, name string, do func()) {
+	t.Helper()
+	before := metricValue(t, name)
+	do()
+	after := metricValue(t, name)
+	if after != before+1 {
+		t.Errorf("%s 从 %d 变成 %d，期望涨 1", name, before, after)
+	}
+}
+
+// metricValue 渲染一次 /metrics，取某个不带标签的计数器的取值。
+//
+// 走的是登记表自己那条渲染路径（Render），与采集端抓到的正文同源——
+// 直接读字段的话，测到的就只是那个变量，而没登记、名字写错、格式不对
+// 这几种情况它一种都拦不住。
+func metricValue(t *testing.T, name string) uint64 {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := observe.Metrics.Render(&buf); err != nil {
+		t.Fatalf("渲染指标失败: %v", err)
+	}
+	for _, line := range strings.Split(buf.String(), "\n") {
+		rest, ok := strings.CutPrefix(line, name+" ")
+		if !ok {
+			continue
+		}
+		n, err := strconv.ParseUint(rest, 10, 64)
+		if err != nil {
+			t.Fatalf("指标 %s 的取值解析不了: %q", name, line)
+		}
+		return n
+	}
+	t.Fatalf("指标里没有 %s 这一行:\n%s", name, buf.String())
+	return 0
 }
 
 func contextWithRequestID(t *testing.T, id string) context.Context {

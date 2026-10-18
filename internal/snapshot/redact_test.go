@@ -704,6 +704,12 @@ func TestBudgetDegradesThenFails(t *testing.T) {
 		if !errors.Is(err, ErrRedaction) {
 			t.Fatalf("摘要层超限应当导致丢快照: %v", err)
 		}
+		// 丢弃的**原因**还要可判：采集侧按它把「上限配错了」单独计一个数
+		// （见 snapshotwire 的 toSnapshot 与 observe 的 snapshot_oversized）。
+		// 只说「脱敏失败」的话，上限配错与一次可能的泄露在指标上是同一件事。
+		if !errors.Is(err, ErrTooLarge) {
+			t.Errorf("超限丢弃应当带 ErrTooLarge 标记: %v", err)
+		}
 		if res != nil {
 			t.Fatalf("报错时不该同时返回结果: %#v", res)
 		}

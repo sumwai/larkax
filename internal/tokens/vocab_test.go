@@ -1,6 +1,7 @@
 package tokens
 
 import (
+	"context"
 	"slices"
 	"sort"
 	"testing"
@@ -25,6 +26,60 @@ func TestAvailableEncodingsActuallyLoad(t *testing.T) {
 		if _, err := tokenizer.Get(tokenizer.Encoding(name)); err != nil {
 			t.Errorf("能力列表里的 %s 加载不出来: %v", name, err)
 		}
+	}
+}
+
+// 就绪探针要真的把清单里每一种都加载一次，能加载时才算就绪。
+//
+// 判据有两半，缺一不可：返回 nil，**并且**词表真的进了内存（Loaded）。
+// 只看返回值的话，一个「什么都不做就返回 nil」的实现照样通过——而它在
+// 词表全坏掉的进程上会让 /readyz 继续报就绪，那正是这条探针要防的事。
+func TestVocabReadyLoadsEveryEncoding(t *testing.T) {
+	c := NewCounter()
+	if loaded := c.Loaded(); len(loaded) != 0 {
+		t.Fatalf("新建的计数器不该已经加载了词表，实际 %v", loaded)
+	}
+
+	if err := c.VocabReady(context.Background()); err != nil {
+		t.Fatalf("词表加载得出来时就绪探针应当返回 nil，实际 %v", err)
+	}
+
+	loaded := c.Loaded()
+	for _, name := range AvailableEncodings() {
+		if !slices.Contains(loaded, name) {
+			t.Errorf("探针跑完之后 %s 还没加载（Loaded = %v）：探针没有真的逐项加载", name, loaded)
+		}
+	}
+}
+
+// 计数器没建起来时探针报错，而不是报就绪。
+//
+// 生产里不会有这种实例（计数器由装配层建），但就绪检查是**照着探针的返回值**
+// 决定摘不摘实例的：在「查不了」的时候返回 nil，等于把「不知道」说成「好」。
+// 这一点与 postgres 探针同形——那边同样不在拿不到句柄时报 ok。
+func TestVocabReadyRejectsUninitializedCounter(t *testing.T) {
+	var nilCounter *Counter
+	if err := nilCounter.VocabReady(context.Background()); err == nil {
+		t.Error("nil 计数器上应当报错，而不是报就绪")
+	}
+
+	zero := &Counter{}
+	if err := zero.VocabReady(context.Background()); err == nil {
+		t.Error("零值计数器上应当报错，而不是报就绪")
+	}
+}
+
+// 探针被放弃时不能报就绪。
+//
+// 加载本身不可中断，放弃点落在两次加载之间；ctx 已经取消说明这一轮探测的
+// 结论没人要了（就绪检查带超时）。这时返回 nil 会让一次被取消的探测看起来
+// 像一次成功的探测。
+func TestVocabReadyReportsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := NewCounter().VocabReady(ctx); err == nil {
+		t.Error("ctx 已取消时应当返回错误")
 	}
 }
 

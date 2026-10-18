@@ -209,6 +209,6 @@ internal/plugin/sandbox/plugin.go | Module.Hooks                   | lib | 插�
 internal/ratelimit/redis.go    | redisLogAdapter.Printf            | lib | go-redis 的 Logger 接口实现：库自己的 goroutine 拨号失败时经接口回调它，本仓没有调用点也不该有（连测试都没有——测它等于测「日志转接」这一行）；它此前被同名的 fmt.Printf 调用点掩护着，见上面那段
 internal/route/route.go        | Router.Score                      | lib | 路由库的解释出口：单个候选的分数（score 是私有的）；生产排序走 order，目前只有测试在调它
 internal/snapshot/redact.go    | Redactor.RedactResponseWithTransport | lib | 脱敏库的入口：把传输层信息并进骨架；采集传输层这件事被推迟了，目前只有测试在调它
-internal/snapshotwire/snapshotwire.go | Collector.Stats            | lib | 这条链路的观测出口：丢弃与失败的计数；指标那一头还没有写，目前只有测试在读它
+internal/snapshotwire/snapshotwire.go | Collector.Stats            | lib | 这条链路**本实例**的计数：与 /metrics 上那一族（snapshot_written / dropped / failed / oversized）是同一批事件的两份口径，指标按调用点自增、进不了测试里的中间状态，所以保留它给装配层的端到端用例等一条快照落库；生产读的是指标，不是它
 internal/tokens/count.go       | Counter.CountTextEstimated        | lib | 估算路径的显式入口：调用方知道上游换了词表而本地还没跟上时用它避开本地词表；目前只有测试在调它
 internal/tokens/tokens.go      | Source.IsExact                    | lib | 枚举上的具名判据：「这个来源能不能直接与上游对账」。两处生产代码以它为准（pipeline 与 ledger/store 的注释各引一次），而各自把比较写成了 `== SourceMeasured`（一处是 switch 的 case，一处要读成 Estimated），所以它没有调用点；目前只有测试在调它
