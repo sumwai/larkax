@@ -317,6 +317,44 @@ func TestReserveTakesMaxNotFirstCandidate(t *testing.T) {
 	}
 }
 
+// 两条候选规则算出**同一个上界**时，留下的依据是**先出现**的那一条。
+//
+// 变异（gremlins CONDITIONALS_BOUNDARY，把 `bound.amount.Cmp(best.amount) > 0`
+// 的 `>` 改成 `>= 0`）：相等时也换人，于是「取最大」变成「取最后一个」。
+// 金额一样，但 Reservation 要带走给出这个上界的那条规则（RuleID 与
+// PricingExprSnap）——同一笔请求记下的定价依据换成了另一条，事后按 RuleID
+// 回溯「这笔钱按哪条规则估的」会指到没参与定价的那一条上。
+//
+// 上面两条用例里参与比较的金额都两两不同（`0.002` 与 `2`；`0.001`/`0.002`/`0.005`），
+// 走到这个比较器时两支都取「严格大于」那一侧，相等那一格从没被走到过。
+func TestReserveKeepsFirstRuleWhenUpperBoundsTie(t *testing.T) {
+	// 两条规则价一样、ID 不同：金额分不出高下，分得出高下的是顺序。
+	first := Rule{ID: 31, Version: 1, Source: `{"prompt": 0.001, "completion": 0.002}`}
+	second := Rule{ID: 32, Version: 1, Source: `{"prompt": 0.001, "completion": 0.002}`}
+
+	src := &ruleSource{byChannel: map[int64]Rule{7: first, 8: second}}
+	p := newPipeline(t, src)
+
+	req := baseRequest()
+	req.Candidates = []RuleCandidate{{ChannelID: 7, OwnerUserID: 9}, {ChannelID: 8, OwnerUserID: 9}}
+
+	res, err := p.Reserve(context.Background(), req)
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	// 输入 1000 × 1e-3 + 500 × 2e-3 = 2，两条规则给的是同一个数。
+	if got := res.Amount.String(); got != "2.00000000" {
+		t.Errorf("预留 = %s，期望 2.00000000", got)
+	}
+	if res.RuleID != first.ID {
+		t.Errorf("规则依据 = %d，期望先出现的那条 %d（并列时不该换人，第二条是 %d）",
+			res.RuleID, first.ID, second.ID)
+	}
+	if res.PricingExprSnap != first.Source {
+		t.Errorf("表达式快照 = %q，期望先出现的那条 %q", res.PricingExprSnap, first.Source)
+	}
+}
+
 // 预留要把**整个候选集**交给规则来源，每个候选带自己的商家。
 //
 // 商家级规则按 owner 匹配，只给渠道 id 是不够的——漏掉一条更贵的商家价
@@ -1687,6 +1725,32 @@ func TestMaxTokensBoundary(t *testing.T) {
 	req.MaxTokens = 1
 	if _, err := p.Reserve(context.Background(), req); err != nil {
 		t.Errorf("max_tokens = 1 应被接受: %v", err)
+	}
+}
+
+// max_tokens 为 0 的请求在**问规则来源之前**就被拒掉。
+//
+// 变异（gremlins CONDITIONALS_BOUNDARY，把 `r.MaxTokens <= 0` 的 `<=` 改成 `< 0`）：
+// 0 从这道门里过去，一路走到 billing.Reserve 才被「要冻的输出 token 数必须为正」
+// 拒掉。两版都报 ErrNoUpperBound，所以只断言错误类型或「有没有报错」的用例
+// （上面那条与 TestReserveRequiresMaxTokens）**分不开这两版**——这正是它活着的原因。
+//
+// 分得开的是**顺序**：规则来源不可用时，原版报的是 max_tokens 这一条，变异版
+// 报的是规则来源的错误。顺序本身也是要钉的行为——被拒的请求不该先去匹配规则，
+// 报出来的错误也该指着真正缺的那个字段。
+func TestMaxTokensZeroIsRejectedBeforeRulesAreConsulted(t *testing.T) {
+	src := &ruleSource{err: errors.New("规则来源不可用")}
+	p := newPipeline(t, src)
+
+	req := baseRequest()
+	req.MaxTokens = 0
+
+	_, err := p.Reserve(context.Background(), req)
+	if !errors.Is(err, billing.ErrNoUpperBound) {
+		t.Fatalf("期望 ErrNoUpperBound（max_tokens 先被拒），得到 %v", err)
+	}
+	if len(src.queries) != 0 {
+		t.Errorf("被拒的请求不该去问规则来源，问了 %d 次", len(src.queries))
 	}
 }
 

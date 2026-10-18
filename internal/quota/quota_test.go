@@ -332,6 +332,12 @@ func TestProjectClampsAtZero(t *testing.T) {
 	}
 }
 
+// 消耗正好等于余量：新的余量是 0，并且标记耗尽。
+//
+// 等价变异（gremlins CONDITIONALS_BOUNDARY，把 `if left < 0` 的 `<` 改成
+// `<= 0`）：恰好为 0 那一格也进夹取分支，而那里 `left = 0` 是恒等变换
+// （值本来就是 0），后面的 `Exhausted` 又由同一个 `left == 0` 判据给出——
+// 两版对任何输入都同值。这一格就是本条用例。
 func TestProjectExhaustsExactlyToZero(t *testing.T) {
 	prev := State{Remaining: f(10)}
 	obs := Project(prev, 10, base)
@@ -469,6 +475,13 @@ func contains(s, sub string) bool {
 //
 // 这条曲线原本只被断言了「越久越低」这种相对关系，于是改常量、
 // 改插值系数，只要单调性不变就测不出来。
+//
+// 等价变异（gremlins CONDITIONALS_BOUNDARY，把 `if elapsed <= staleAfter` 的
+// `<=` 改成 `<`）：恰好等于阈值那一格不再走「直接给基线」，而是落到线性段上。
+// 那一格的 ratio 恰好是 0，`confidenceSelfAccountingBase -
+// (confidenceSelfAccountingBase-floor)*0` 与直接返回基线**逐位相同**——
+// 乘 0 与减 0 在 float64 里都是精确的，那一格两版给出的是同一个数。
+// 下面 `score(testStaleAfter)` 那一行钉的就是这一格。
 func TestSelfAccountingConfidenceCurvePoints(t *testing.T) {
 	const baseScore = 0.8 // confidenceSelfAccountingBase
 	const floorScore = 0.2
