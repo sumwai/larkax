@@ -1429,3 +1429,305 @@ func TestCandidatesCarriesDeclaredEndpoints(t *testing.T) {
 		})
 	}
 }
+
+// ── 健康读数与恢复 ──────────────────────────────────────────────────────
+//
+// 这一组测的是**只有真库才能证明**的几件事：窗口筛选真的按 bucket 比大小、
+// 分位数真的取的是最近一个非空桶、NULLIF 真的把「没记过成本」变成 NULL、
+// 恢复真的在一个事务里把三处写完。拿内存假装这些，测的是「我以为 SQL 会怎么做」。
+
+// seedProbeAt 把一行额度状态的「最近一次探测时刻」写上。
+//
+// insertQuota 不写这一列（那一批用例关心的是余量与可信度），而健康读数要把它
+// 打出来——探测过与没探测过在输出上分得开，正是这一列要证明的事。
+func seedProbeAt(t *testing.T, db *sql.DB, channelID int64, at time.Time) {
+	t.Helper()
+	_, err := db.ExecContext(context.Background(),
+		`UPDATE channel_quota_state SET last_probe_at = $2 WHERE channel_id = $1`, channelID, at)
+	if err != nil {
+		t.Fatalf("写渠道 %d 的探测时刻失败: %v", channelID, err)
+	}
+}
+
+// TestHealthReadsWindowAndSignals 钉住健康读数的三件事：窗口筛选、分位数的口径、
+// 以及「没有额度状态行」时的兜底。
+func TestHealthReadsWindowAndSignals(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+	admin := NewAdmin(db, nil, nil)
+
+	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	// 两行相隔 30 小时的桶：窗口一收，旧的那一行就不该再进汇总。
+	// 缓存 token 两桶给不同的值：汇总里读到的是不是**窗口内那几桶之和**，
+	// 靠它们分得出来（分位数那一栏做不到这件事，它取的是最近一个非空桶）。
+	insertRollupSignals(t, db, id, hourBucket(1), 10, 9, 1, 200, "1.50000000", 300, 700)
+	insertRollupSignals(t, db, id, hourBucket(30), 100, 50, 50, 900, "9.00000000", 1000, 1000)
+	insertQuota(t, db, id, "12.5", "tokens", "api_query", "degraded", 0.9)
+	probeAt := hourBucket(2)
+	seedProbeAt(t, db, id, probeAt)
+
+	t.Run("24 小时的窗口只算得进最近那一桶", func(t *testing.T) {
+		got, buckets, err := admin.HealthOne(ctx, id, time.Now().Add(-24*time.Hour))
+		if err != nil {
+			t.Fatalf("HealthOne 失败: %v", err)
+		}
+		if got.Health != "degraded" {
+			t.Errorf("health = %q，期望 degraded", got.Health)
+		}
+		if got.LastProbeAt == nil || !got.LastProbeAt.Equal(probeAt) {
+			t.Errorf("最近探测时刻 = %v，期望 %v", got.LastProbeAt, probeAt)
+		}
+		if got.Requests != 10 || got.Successes != 9 || got.Failures != 1 {
+			t.Errorf("窗口内的计数 = %d/%d/%d，期望 10/9/1",
+				got.Requests, got.Successes, got.Failures)
+		}
+		rate := got.FailureRate()
+		if rate == nil || *rate != 0.1 {
+			t.Errorf("失败率 = %v，期望 0.1", rate)
+		}
+		// 分位数取最近一个非空桶（那一桶是 200），不是最差的那一个（900）。
+		if got.LatencyP95ms == nil || *got.LatencyP95ms != 200 {
+			t.Errorf("p95 = %v，期望最近那一桶的 200", got.LatencyP95ms)
+		}
+		// p50 今天没有任何写入方，所以它必须是「没有样本」而不是 0。
+		if got.LatencyP50ms != nil {
+			t.Errorf("p50 = %v，期望没有样本（那一列从来没被写过）", *got.LatencyP50ms)
+		}
+		if got.Cost == nil || *got.Cost != "1.50000000" {
+			t.Errorf("成本 = %v，期望 1.50000000", got.Cost)
+		}
+		// 缓存 token 是窗口内之和：只有最近那一桶（30 小时前那一桶在窗口外）。
+		if got.CacheHitTokens != 300 || got.CacheMissTokens != 700 {
+			t.Errorf("窗口内的缓存 token = %d/%d，期望 300/700",
+				got.CacheHitTokens, got.CacheMissTokens)
+		}
+		if len(buckets) != 1 {
+			t.Fatalf("明细 %d 行，期望只剩窗口内的那一行", len(buckets))
+		}
+		if !buckets[0].Bucket.Equal(hourBucket(1)) {
+			t.Errorf("明细那一行的桶 = %v，期望 %v", buckets[0].Bucket, hourBucket(1))
+		}
+		if buckets[0].CacheHitTokens != 300 || buckets[0].CacheMissTokens != 700 {
+			t.Errorf("明细那一行的缓存 token = %d/%d，期望 300/700",
+				buckets[0].CacheHitTokens, buckets[0].CacheMissTokens)
+		}
+	})
+
+	t.Run("窗口放宽到 40 小时时两桶都算进去", func(t *testing.T) {
+		got, buckets, err := admin.HealthOne(ctx, id, time.Now().Add(-40*time.Hour))
+		if err != nil {
+			t.Fatalf("HealthOne 失败: %v", err)
+		}
+		if got.Requests != 110 || got.Failures != 51 {
+			t.Errorf("窗口内的计数 = %d/%d，期望 110/51", got.Requests, got.Failures)
+		}
+		if got.Cost == nil || *got.Cost != "10.50000000" {
+			t.Errorf("成本 = %v，期望两桶之和 10.50000000", got.Cost)
+		}
+		if got.CacheHitTokens != 1300 || got.CacheMissTokens != 1700 {
+			t.Errorf("窗口内的缓存 token = %d/%d，期望两桶之和 1300/1700",
+				got.CacheHitTokens, got.CacheMissTokens)
+		}
+		// 最近的一行在最上面：这条命令回答的是「它最近怎么了」。
+		if len(buckets) != 2 {
+			t.Fatalf("明细 %d 行，期望 2 行", len(buckets))
+		}
+		if !buckets[0].Bucket.After(buckets[1].Bucket) {
+			t.Errorf("明细没有按时刻倒序：%v 在 %v 之前", buckets[0].Bucket, buckets[1].Bucket)
+		}
+	})
+
+	t.Run("没有额度状态行的渠道是未知，不是最差", func(t *testing.T) {
+		bare := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+		got, buckets, err := admin.HealthOne(ctx, bare, time.Now().Add(-24*time.Hour))
+		if err != nil {
+			t.Fatalf("HealthOne 失败: %v", err)
+		}
+		if got.Health != HealthUnknown {
+			t.Errorf("health = %q，期望 %q", got.Health, HealthUnknown)
+		}
+		if got.LastProbeAt != nil {
+			t.Errorf("从来没探测过时最近探测时刻应当是 nil，得到 %v", got.LastProbeAt)
+		}
+		if got.Requests != 0 || got.Failures != 0 {
+			t.Errorf("没有桶时计数应当是 0，得到 %d/%d", got.Requests, got.Failures)
+		}
+		// 0/0 不是一个百分数：没有请求时失败率必须是「没有数据」。
+		if rate := got.FailureRate(); rate != nil {
+			t.Errorf("没有请求时失败率应当是 nil，得到 %v", *rate)
+		}
+		if got.LatencyP95ms != nil || got.Cost != nil {
+			t.Errorf("没有桶时 p95 与成本都应当是 nil，得到 %v / %v", got.LatencyP95ms, got.Cost)
+		}
+		// 缓存 token 没有「没有数据」那一档：没有桶时是 0，与选路侧读 0 的口径一致。
+		if got.CacheHitTokens != 0 || got.CacheMissTokens != 0 {
+			t.Errorf("没有桶时缓存 token 应当是 0，得到 %d/%d",
+				got.CacheHitTokens, got.CacheMissTokens)
+		}
+		if len(buckets) != 0 {
+			t.Errorf("没有桶时明细应当是空的，得到 %d 行", len(buckets))
+		}
+	})
+
+	t.Run("成本那一列的 0 读作没有数据", func(t *testing.T) {
+		// 那一列是 NOT NULL DEFAULT 0 且今天没有生产写入方，于是「有桶、成本是 0」
+		// 只可能表示没记过账。把它当免费会让每一行都显示一个凭空的零成本。
+		zero := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+		insertRollup(t, db, zero, hourBucket(1), 5, 5, 0, 120, "0.00000000")
+
+		got, _, err := admin.HealthOne(ctx, zero, time.Now().Add(-24*time.Hour))
+		if err != nil {
+			t.Fatalf("HealthOne 失败: %v", err)
+		}
+		if got.Cost != nil {
+			t.Errorf("成本是 0 时应当读作没有数据，得到 %q", *got.Cost)
+		}
+		if got.Requests != 5 {
+			t.Errorf("计数仍然要读出来：请求数 = %d，期望 5", got.Requests)
+		}
+	})
+
+	t.Run("找不到那条渠道", func(t *testing.T) {
+		if _, _, err := admin.HealthOne(ctx, 999999999, time.Now()); !errors.Is(err, ErrChannelNotFound) {
+			t.Fatalf("期望 ErrChannelNotFound，得到 %v", err)
+		}
+	})
+}
+
+// TestHealthHidesDeletedUnlessAll 钉住读侧对已软删渠道的那条分工：
+// 清单默认不列、--all 才列，而按 id 取一条一律读得出来。
+func TestHealthHidesDeletedUnlessAll(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+	admin := NewAdmin(db, nil, nil)
+	since := time.Now().Add(-24 * time.Hour)
+
+	alive := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	deleted := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	softDeleteRow(t, db, deleted)
+
+	contains := func(rows []ChannelHealth, id int64) bool {
+		for _, h := range rows {
+			if h.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	rows, err := admin.Health(ctx, since, false)
+	if err != nil {
+		t.Fatalf("Health 失败: %v", err)
+	}
+	if !contains(rows, alive) {
+		t.Error("默认清单里应当有那条没删的渠道")
+	}
+	if contains(rows, deleted) {
+		t.Error("默认清单里不该有已删的渠道")
+	}
+
+	rows, err = admin.Health(ctx, since, true)
+	if err != nil {
+		t.Fatalf("Health --all 失败: %v", err)
+	}
+	if !contains(rows, deleted) {
+		t.Error("ListAll 那一档应当带上已删的渠道")
+	}
+
+	// 按 id 取一条：已删的也读得出来，且 DeletedAt 非零（调用方据此标出它）。
+	one, _, err := admin.HealthOne(ctx, deleted, since)
+	if err != nil {
+		t.Fatalf("按 id 读一条已删的渠道失败: %v", err)
+	}
+	if one.DeletedAt.IsZero() {
+		t.Error("已删的那一条应当带上删除时刻")
+	}
+}
+
+// TestRestoreBringsChannelBack 钉住恢复写的三处，以及「本来就没删」那一档。
+func TestRestoreBringsChannelBack(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+	admin := NewAdmin(db, nil, nil)
+
+	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	// 造一个**不是** unknown 的结论：一条本来就是 unknown 的渠道被恢复之后还是
+	// unknown，那样「回落成 unknown」这条断言什么都没钉住。
+	insertQuota(t, db, id, "5", "tokens", "api_query", "drained", 0.9)
+	// 连续失败计数也造上，证明恢复**不**动它（那个计数自带 15 分钟冷却期）。
+	failureAt := time.Now().Add(-time.Minute)
+	setStreak(t, db, id, 3, &failureAt)
+	envelopeBefore := channelEnvelopeOf(t, db, id)
+
+	softDeleteRow(t, db, id)
+
+	restored, err := admin.Restore(ctx, id)
+	if err != nil {
+		t.Fatalf("Restore 失败: %v", err)
+	}
+	if !restored {
+		t.Fatal("Restore 应当报「这次才恢复的」")
+	}
+
+	var (
+		deleted sql.NullTime
+		status  string
+		streak  int
+		health  string
+	)
+	if err := db.QueryRowContext(ctx,
+		`SELECT deleted_at, status, consecutive_failures FROM channels WHERE id = $1`, id).
+		Scan(&deleted, &status, &streak); err != nil {
+		t.Fatalf("读回渠道行失败: %v", err)
+	}
+	if deleted.Valid {
+		t.Error("恢复之后 deleted_at 应当是 NULL")
+	}
+	if status != StatusEnabled {
+		// 「恢复回可用」是字面意思：选路要求 status = 'enabled'，恢复成 disabled
+		// 的渠道会出现在清单上却选不中。
+		t.Errorf("恢复之后 status = %q，期望 %q", status, StatusEnabled)
+	}
+	if streak != 3 {
+		t.Errorf("恢复不该动连续失败计数：得到 %d，期望 3", streak)
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT health FROM channel_quota_state WHERE channel_id = $1`, id).Scan(&health); err != nil {
+		t.Fatalf("读回额度状态失败: %v", err)
+	}
+	if health != HealthUnknown {
+		// 上一次的结论是软删之前的，直接沿用等于把一段已经过去的历史当成现在的判断。
+		t.Errorf("恢复之后 health = %q，期望 %q", health, HealthUnknown)
+	}
+	if got := channelEnvelopeOf(t, db, id); string(got) != string(envelopeBefore) {
+		t.Error("恢复不该重新封装凭证密文")
+	}
+
+	// 没删的再恢复一次：幂等成功，报 false，不再改写任何一列。
+	again, err := admin.Restore(ctx, id)
+	if err != nil {
+		t.Fatalf("重复 Restore 不该报错，得到 %v", err)
+	}
+	if again {
+		t.Error("本来就没删时 Restore 应当报 false")
+	}
+
+	// id 不存在仍然报错——幂等不能让一次打错的调用看起来像成功。
+	if _, err := admin.Restore(ctx, 999999999); !errors.Is(err, ErrChannelNotFound) {
+		t.Fatalf("期望 ErrChannelNotFound，得到 %v", err)
+	}
+}
+
+// channelEnvelopeOf 直接读出一行的凭证密文（清单里没有这一栏）。
+func channelEnvelopeOf(t *testing.T, db *sql.DB, id int64) []byte {
+	t.Helper()
+	var envelope []byte
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT credential_enc FROM channels WHERE id = $1`, id).Scan(&envelope); err != nil {
+		t.Fatalf("读渠道 %d 的密文失败: %v", id, err)
+	}
+	return envelope
+}

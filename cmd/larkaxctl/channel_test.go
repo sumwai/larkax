@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"reflect"
 	"strconv"
 	"strings"
@@ -612,6 +614,33 @@ func containsID(listOut string, id int64) bool {
 	return false
 }
 
+// deletedNoteNamesID 判断「渠道 3、7 已删除：…」那一行里点了这个 id。
+//
+// 与 containsID 同一条理由：用例共用一个库，同一张清单里可能不止一条已删的
+// 渠道，所以那一行给出的是一串 id。判据是「这条 id 在名单里」，不是「名单里
+// 只有它」——后者只在别处还没删过渠道时才成立，换一次执行顺序就红。
+//
+// 那一行整个不在时也返回 false：提示没了与没点到这一条，都是这里要看的事。
+func deletedNoteNamesID(listOut string, id int64) bool {
+	want := strconv.FormatInt(id, 10)
+	for _, line := range strings.Split(listOut, "\n") {
+		at := strings.Index(line, " 已删除：它们不再参与选路")
+		if at < 0 {
+			continue
+		}
+		named, ok := strings.CutPrefix(line[:at], "渠道 ")
+		if !ok {
+			return false
+		}
+		for _, got := range strings.Split(named, "、") {
+			if got == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // createTestChannel 用命令行建一条渠道，返回它的 ID。
 func createTestChannel(t *testing.T, name, model string) int64 {
 	t.Helper()
@@ -681,7 +710,7 @@ func TestChannelDeleteSoftDeletes(t *testing.T) {
 	if !containsID(allOut, id) {
 		t.Errorf("list --all 里没有已删的渠道 %d：\n%s", id, allOut)
 	}
-	if !strings.Contains(allOut, "渠道 "+idArg+" 已删除") {
+	if !deletedNoteNamesID(allOut, id) {
 		t.Errorf("list --all 没有点出 %s 已删除：\n%s", idArg, allOut)
 	}
 
@@ -974,6 +1003,7 @@ func TestChannelWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
 			return runChannelSetStatus(nil, channels.StatusDisabled)
 		}},
 		{"channel delete", func() error { return runChannelDelete(nil) }},
+		{"channel restore", func() error { return runChannelRestore(nil) }},
 	}
 
 	for _, tc := range cases {
@@ -1018,4 +1048,692 @@ func TestChannelListJSONStdoutIsPure(t *testing.T) {
 		t.Errorf("summary.total = %v 与 channels 的长度 %d 对不上",
 			summary["total"], len(jsonEntries(t, got, "channels")))
 	}
+}
+
+// ── get / health / restore ──────────────────────────────────────────────
+
+// TestChannelGetHealthRestoreRejectBadFlags 钉住这三个动词的参数判据。
+//
+// 它们全在**连库之前**：写错的命令不该先连上生产库再报错。三条用例因此在没有
+// DSN 的机器上也真的跑（碰库的用例在本地是跳过的，而「跳过」在输出里和「通过」
+// 长得一样）。
+func TestChannelGetHealthRestoreRejectBadFlags(t *testing.T) {
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+
+	cases := []struct {
+		name string
+		run  func() error
+		want string
+	}{
+		{"get 没有 --id", func() error { return runChannelGet(nil) }, "缺少 --id"},
+		{"get 的 --id 是零", func() error { return runChannelGet([]string{"--id", "0"}) }, "缺少 --id"},
+		{"get 多出位置参数", func() error {
+			return runChannelGet([]string{"--id", "1", "extra"})
+		}, "不接受位置参数"},
+
+		{"health 的 --id 是负数", func() error {
+			return runChannelHealth([]string{"--id", "-2"})
+		}, "--id 必须是正数"},
+		{"health 多出位置参数", func() error {
+			return runChannelHealth([]string{"extra"})
+		}, "不接受位置参数"},
+		{"health 的 --since 认不出来", func() error {
+			return runChannelHealth([]string{"--since", "昨天"})
+		}, "既不是一段时长"},
+		{"health 的 --since 不是正的", func() error {
+			return runChannelHealth([]string{"--since=-1h"})
+		}, "时长必须为正"},
+		{"health 的 --since 是零", func() error {
+			return runChannelHealth([]string{"--since", "0s"})
+		}, "时长必须为正"},
+		{"health 的 --since 在将来", func() error {
+			return runChannelHealth([]string{"--since", future})
+		}, "在将来"},
+
+		{"restore 没有 --id", func() error { return runChannelRestore(nil) }, "缺少 --id"},
+		{"restore 多出位置参数", func() error {
+			return runChannelRestore([]string{"--id", "1", "extra"})
+		}, "不接受位置参数"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runCaptured(t, tc.run)
+			if err == nil {
+				t.Fatal("期望报错，却通过了")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
+			}
+			if got := exitCode(err); got != exitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			}
+		})
+	}
+}
+
+// TestChannelHealthEmptyListWordingIsPinned 逐字钉住空清单那一句。
+//
+// 空清单与「命令因为某个原因没跑起来」在安静的终端里长得一样（见 LESSONS.md
+// 第 16 条），所以这一句是一个要说出口的结论，不是「没什么可打」。它走的是
+// style.go 的 emptyListNote，与 channel list 同一句——两个动词对「还没有渠道」
+// 这一件事给出两种说法时，读的人分不出它们是同一件事还是两个不同的状态。
+func TestChannelHealthEmptyListWordingIsPinned(t *testing.T) {
+	var buf bytes.Buffer
+	printChannelHealthList(&buf, nil, false)
+
+	const want = "暂无渠道。可使用 larkaxctl channel create 添加。\n"
+	if buf.String() != want {
+		t.Errorf("空清单的文案 = %q，期望 %q", buf.String(), want)
+	}
+}
+
+// TestChannelHealthHoursEmptyWordingIsPinned 逐字钉住「窗口里没有桶」那一句。
+//
+// 它**不套**空清单那一句：这里缺的不是「还没有渠道」这个可以添加的东西，而是
+// 「这段时间它一次都没被调用过」这个结论，给不出下一步命令。
+func TestChannelHealthHoursEmptyWordingIsPinned(t *testing.T) {
+	var buf bytes.Buffer
+	printChannelHealthHours(&buf, nil)
+
+	const want = "窗口内没有逐小时的数据：这段时间它一次都没被调用过。\n"
+	if buf.String() != want {
+		t.Errorf("空明细的文案 = %q，期望 %q", buf.String(), want)
+	}
+}
+
+// TestChannelHealthDocIsMachineReadable 钉住 health 那一档 JSON 的字段形状。
+//
+// 纯函数、不连库：这一档要防的是「表格里的占位符被顺手带进 JSON」——`-`、
+// `从未` 在机器读的那一档里都是解析不了的值（见 docs/cli-output.md 的
+// 「值的约定」），缺值一律是 null。
+func TestChannelHealthDocIsMachineReadable(t *testing.T) {
+	ms50, ms95 := 80, 240
+	cost := "1.50000000"
+	probe := time.Date(2026, 10, 17, 4, 25, 15, 0, time.UTC)
+	since := time.Date(2026, 10, 16, 4, 0, 0, 0, time.UTC)
+
+	rows := []channels.ChannelHealth{
+		{
+			ID: 7, Name: "c1", Health: "healthy", LastProbeAt: &probe,
+			Requests: 40, Successes: 39, Failures: 1,
+			CacheHitTokens: 300, CacheMissTokens: 700,
+			LatencyP50ms: &ms50, LatencyP95ms: &ms95, Cost: &cost,
+		},
+		{
+			// 一条什么数据都没有的渠道：这一行专门盯住「缺值是 null，不是 `-`
+			// 也不是 0」。它同时是已软删的那一条（--all 才看得见）。
+			ID: 8, Name: "c2", Health: channels.HealthUnknown,
+			DeletedAt: time.Date(2026, 10, 15, 1, 2, 3, 0, time.UTC),
+		},
+	}
+	buckets := []channels.HealthBucket{{
+		Bucket:   time.Date(2026, 10, 17, 4, 0, 0, 0, time.UTC),
+		Requests: 40, Successes: 39, Failures: 1,
+		CacheHitTokens: 300, CacheMissTokens: 700,
+		LatencyP95ms: &ms95, Cost: &cost,
+	}}
+
+	got := jsonRoundTrip(t, channelHealthDoc(rows, since, true, buckets, true))
+	assertJSONField(t, got, "status", jsonOK)
+
+	summary := jsonObjectField(t, got, "summary")
+	assertJSONField(t, summary, "total", float64(2))
+	assertJSONField(t, summary, "deleted", float64(1))
+	assertJSONField(t, summary, "buckets", float64(1))
+	// 窗口起点必须进文档：不给它的话 `requests: 40` 说不清是哪段时间里的 40。
+	assertJSONField(t, summary, "since", "2026-10-16T04:00:00Z")
+
+	list := jsonEntries(t, got, "channels")
+	first := list[0].(map[string]any)
+	assertJSONField(t, first, "id", float64(7))
+	assertJSONField(t, first, "name", "c1")
+	assertJSONField(t, first, "health", "healthy")
+	assertJSONField(t, first, "last_probe_at", "2026-10-17T04:25:15Z")
+	assertJSONField(t, first, "requests", float64(40))
+	assertJSONField(t, first, "successes", float64(39))
+	assertJSONField(t, first, "failures", float64(1))
+	assertJSONField(t, first, "failure_rate", 1.0/40.0)
+	// 缓存 token 是数字，不是表格里的标签；0 表示窗口里没有样本（与 requests 同一档）。
+	assertJSONField(t, first, "cache_hit_tokens", float64(300))
+	assertJSONField(t, first, "cache_miss_tokens", float64(700))
+	// 分位数与成本是**数字**与**定点字符串**，不是表格里那种带单位的写法：
+	// `"240ms"` 与 `"1.50"` 都会让按数字解析它的一方拿到一个解析不了的值。
+	assertJSONField(t, first, "latency_p50_ms", float64(80))
+	assertJSONField(t, first, "latency_p95_ms", float64(240))
+	assertJSONField(t, first, "cost", "1.50000000")
+	assertJSONField(t, first, "deleted_at", nil)
+
+	second := list[1].(map[string]any)
+	assertJSONField(t, second, "health", channels.HealthUnknown)
+	assertJSONField(t, second, "last_probe_at", nil)
+	assertJSONField(t, second, "requests", float64(0))
+	assertJSONField(t, second, "failure_rate", nil)
+	assertJSONField(t, second, "latency_p50_ms", nil)
+	assertJSONField(t, second, "latency_p95_ms", nil)
+	assertJSONField(t, second, "cost", nil)
+	// 一条什么数据都没有的渠道：缓存 token 与 requests 一样是 0，不是 null——
+	// 「窗口里没有样本」在选路侧读的也是 0（见 cacheHitRate）。
+	assertJSONField(t, second, "cache_hit_tokens", float64(0))
+	assertJSONField(t, second, "cache_miss_tokens", float64(0))
+	assertJSONField(t, second, "deleted_at", "2026-10-15T01:02:03Z")
+
+	bs := jsonEntries(t, got, "buckets")
+	if len(bs) != 1 {
+		t.Fatalf("逐小时明细 %d 行，期望 1 行", len(bs))
+	}
+	bucket := bs[0].(map[string]any)
+	assertJSONField(t, bucket, "bucket", "2026-10-17T04:00:00Z")
+	assertJSONField(t, bucket, "requests", float64(40))
+	assertJSONField(t, bucket, "cache_hit_tokens", float64(300))
+	assertJSONField(t, bucket, "cache_miss_tokens", float64(700))
+	assertJSONField(t, bucket, "latency_p50_ms", nil)
+	assertJSONField(t, bucket, "latency_p95_ms", float64(240))
+	assertJSONField(t, bucket, "cost", "1.50000000")
+
+	t.Run("清单那一档不给 buckets", func(t *testing.T) {
+		listOnly := jsonRoundTrip(t, channelHealthDoc(rows, since, false, nil, false))
+		if _, ok := listOnly["buckets"]; ok {
+			t.Error("没带 --id 时不该有逐小时明细")
+		}
+		// 没带 --all 时那个计数恒为 0，给出来只是一栏背景音。
+		if _, ok := jsonObjectField(t, listOnly, "summary")["deleted"]; ok {
+			t.Error("没带 --all 时 summary 里不该有 deleted")
+		}
+	})
+
+	t.Run("空清单是空数组，不是 null", func(t *testing.T) {
+		empty := jsonRoundTrip(t, channelHealthDoc(nil, since, false, nil, true))
+		if len(jsonEntries(t, empty, "channels")) != 0 {
+			t.Error("空清单应当是空数组")
+		}
+		if len(jsonEntries(t, empty, "buckets")) != 0 {
+			t.Error("没有桶时 buckets 应当是空数组")
+		}
+	})
+}
+
+// TestChannelHealthShowsCacheTokens 钉住缓存 token 真的出现在三张表上。
+//
+// 它是 issue 背景里点名的那两列（`channel_health_rollup` 的 cache_hit_tokens /
+// cache_miss_tokens 会被选路读，命令行上原先一处都打不出来），所以判据不是「库里
+// 读得出来」——那是 internal/channels 那侧的用例——而是**三个视口里都看得见**：
+// 汇总表、--id 的读数、逐小时明细。只打在其中一处时，另一处的读者仍然够不着。
+func TestChannelHealthShowsCacheTokens(t *testing.T) {
+	row := channels.ChannelHealth{
+		ID: 7, Name: "c1", Health: "healthy",
+		Requests: 40, Successes: 39, Failures: 1,
+		CacheHitTokens: 300, CacheMissTokens: 700,
+	}
+	bucket := channels.HealthBucket{
+		Bucket:   time.Date(2026, 10, 17, 4, 0, 0, 0, time.UTC),
+		Requests: 40, Successes: 39, Failures: 1,
+		CacheHitTokens: 300, CacheMissTokens: 700,
+	}
+
+	views := []struct {
+		name  string
+		print func(w io.Writer)
+	}{
+		{"汇总表", func(w io.Writer) {
+			printChannelHealthList(w, []channels.ChannelHealth{row}, false)
+		}},
+		{"单条读数", func(w io.Writer) { printChannelHealthDetail(w, row) }},
+		{"逐小时明细", func(w io.Writer) {
+			printChannelHealthHours(w, []channels.HealthBucket{bucket})
+		}},
+	}
+
+	for _, v := range views {
+		t.Run(v.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			v.print(&buf)
+			got := buf.String()
+			for _, want := range []string{"缓存命中", "缓存未命中", "300", "700"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("%s 里没有 %q：\n%s", v.name, want, got)
+				}
+			}
+			// 打的是原始 token 数，不是表格里那种带单位的写法——按数字接走它的一方
+			// 解析不了 `300 tokens`。
+			if strings.Contains(got, "300 tokens") {
+				t.Errorf("%s 给 token 数加了单位：\n%s", v.name, got)
+			}
+		})
+	}
+}
+
+// TestChannelGetDocIsMachineReadable 钉住单条详情那一档把两个时刻也带上。
+func TestChannelGetDocIsMachineReadable(t *testing.T) {
+	created := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	updated := time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)
+
+	got := jsonRoundTrip(t, channelGetDoc(channels.ChannelInfo{
+		ID: 7, Name: "c1", Type: testChanType, BaseURL: testBaseURL,
+		Status: channels.StatusEnabled, Models: []string{"m1"},
+		CredentialKeys: []string{"test"},
+		CreatedAt:      created, UpdatedAt: updated,
+	}))
+
+	assertJSONField(t, got, "status", jsonOK)
+	entry := jsonObjectField(t, got, "channel")
+	assertJSONField(t, entry, "id", float64(7))
+	assertJSONField(t, entry, "name", "c1")
+	assertJSONField(t, entry, "created_at", "2026-10-01T00:00:00Z")
+	assertJSONField(t, entry, "updated_at", "2026-10-02T00:00:00Z")
+	// 清单那几栏在这一档里一个不少：详情是「清单那几栏 + 两个时刻」。
+	assertJSONField(t, entry, "models", []any{"m1"})
+	assertJSONField(t, entry, "credential_keys", []any{"test"})
+}
+
+// ── 这三条要真库 ────────────────────────────────────────────────────────
+
+// insertHealthBucket 直接往 channel_health_rollup 里写一行。
+//
+// 走 SQL 而不是命令：这张表只由网关的调用收尾处写，命令行上没有产生它的路径，
+// 而这几条用例要钉的正是「窗口筛选把哪几行算了进去」。
+func insertHealthBucket(t *testing.T, db *sql.DB, id int64, bucket time.Time,
+	requests, failures int, p95 any, cost string, cacheHit, cacheMiss int) {
+	t.Helper()
+	_, err := db.ExecContext(context.Background(), `
+		INSERT INTO channel_health_rollup
+			(channel_id, bucket, requests, successes, failures, latency_p95_ms, cost,
+			 cache_hit_tokens, cache_miss_tokens)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (channel_id, bucket) DO UPDATE
+		   SET requests = EXCLUDED.requests, successes = EXCLUDED.successes,
+		       failures = EXCLUDED.failures, latency_p95_ms = EXCLUDED.latency_p95_ms,
+		       cost = EXCLUDED.cost,
+		       cache_hit_tokens = EXCLUDED.cache_hit_tokens,
+		       cache_miss_tokens = EXCLUDED.cache_miss_tokens`,
+		id, bucket, requests, requests-failures, failures, p95, cost, cacheHit, cacheMiss)
+	if err != nil {
+		t.Fatalf("插入渠道 %d 的健康桶失败: %v", id, err)
+	}
+}
+
+// setQuotaHealth 写一行额度状态（health 与最近一次探测时刻）。
+func setQuotaHealth(t *testing.T, db *sql.DB, id int64, health string, probeAt time.Time) {
+	t.Helper()
+	_, err := db.ExecContext(context.Background(), `
+		INSERT INTO channel_quota_state (channel_id, health, last_probe_at)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (channel_id) DO UPDATE
+		   SET health = EXCLUDED.health, last_probe_at = EXCLUDED.last_probe_at`,
+		id, health, probeAt)
+	if err != nil {
+		t.Fatalf("写渠道 %d 的额度状态失败: %v", id, err)
+	}
+}
+
+// healthJSON 跑一遍 channel health -o json，把那份文档解回来。
+func healthJSON(t *testing.T, args ...string) map[string]any {
+	t.Helper()
+	withFormat(t, formatJSON)
+	stdout, _ := captureStreams(t, func() {
+		if err := runChannelHealth(args); err != nil {
+			t.Fatalf("channel health %v 失败: %v", args, err)
+		}
+	})
+	return assertJSONStdout(t, stdout)
+}
+
+// onlyChannelEntries 从 health 的输出里挑出属于某个渠道的那一条。
+func onlyChannelEntries(t *testing.T, doc map[string]any, id int64) map[string]any {
+	t.Helper()
+	for _, e := range jsonEntries(t, doc, "channels") {
+		entry := e.(map[string]any)
+		if entry["id"] == float64(id) {
+			return entry
+		}
+	}
+	t.Fatalf("health 的输出里没有渠道 %d", id)
+	return nil
+}
+
+// TestChannelHealthWindowFiltersBuckets 钉住窗口筛选：两条不同小时的数据，
+// 只有落进窗口的那一条被算进汇总与明细。
+//
+// 造两行**相隔 30 小时**的桶，用三个起点各跑一遍：
+//
+//   - `--since 24h`（默认那一档的口径）只算得进最近那一桶；
+//   - `--since 40h` 两桶都算进去；
+//   - `--since <40 小时前的 RFC3339>` 与上一条结果相同——两种写法是同一个窗口。
+//
+// 顺带钉住分位数的口径：汇总里的 p95 取**最近一个非空桶**的值，不是两桶的平均，
+// 也不是最差的那个（分位数不可累加，理由见 internal/channels 的 healthFrom）。
+func TestChannelHealthWindowFiltersBuckets(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	id := createTestChannel(t, uniqueName("health-window"), uniqueName("model"))
+	probe := time.Now().Add(-2 * time.Hour).UTC().Truncate(time.Second)
+	setQuotaHealth(t, db, id, "degraded", probe)
+
+	recent := hourBucketOf(t, 1)
+	old := hourBucketOf(t, 30)
+	insertHealthBucket(t, db, id, recent, 10, 1, 200, "1.50000000", 300, 700)
+	insertHealthBucket(t, db, id, old, 100, 50, 900, "9.00000000", 1000, 1000)
+
+	t.Run("24 小时只算得进最近那一桶", func(t *testing.T) {
+		doc := healthJSON(t, "--id", strconv.FormatInt(id, 10), "--since", "24h")
+		entry := onlyChannelEntries(t, doc, id)
+
+		assertJSONField(t, entry, "requests", float64(10))
+		assertJSONField(t, entry, "failures", float64(1))
+		assertJSONField(t, entry, "failure_rate", 0.1)
+		assertJSONField(t, entry, "latency_p95_ms", float64(200))
+		assertJSONField(t, entry, "cost", "1.50000000")
+		// 缓存 token 与请求数同一档：窗口内各小时之和。
+		assertJSONField(t, entry, "cache_hit_tokens", float64(300))
+		assertJSONField(t, entry, "cache_miss_tokens", float64(700))
+		// health 与最近一次探测来自 channel_quota_state，与窗口无关。
+		assertJSONField(t, entry, "health", "degraded")
+		assertJSONField(t, entry, "last_probe_at", probe.Format(time.RFC3339))
+
+		buckets := jsonEntries(t, doc, "buckets")
+		if len(buckets) != 1 {
+			t.Fatalf("明细 %d 行，期望只剩窗口内的那 1 行", len(buckets))
+		}
+		assertJSONField(t, buckets[0].(map[string]any), "bucket", recent.Format(time.RFC3339))
+	})
+
+	t.Run("40 小时两桶都算进去", func(t *testing.T) {
+		doc := healthJSON(t, "--id", strconv.FormatInt(id, 10), "--since", "40h")
+		entry := onlyChannelEntries(t, doc, id)
+
+		assertJSONField(t, entry, "requests", float64(110))
+		assertJSONField(t, entry, "failures", float64(51))
+		assertJSONField(t, entry, "cost", "10.50000000")
+		assertJSONField(t, entry, "cache_hit_tokens", float64(1300))
+		assertJSONField(t, entry, "cache_miss_tokens", float64(1700))
+		// 最近的桶是 recent，所以汇总的 p95 是它那一个，不是 900（最差的那个），
+		// 也不是两桶的某种平均。
+		assertJSONField(t, entry, "latency_p95_ms", float64(200))
+
+		if got := len(jsonEntries(t, doc, "buckets")); got != 2 {
+			t.Fatalf("明细 %d 行，期望 2 行", got)
+		}
+	})
+
+	t.Run("RFC3339 时刻与时长是同一个窗口", func(t *testing.T) {
+		start := time.Now().Add(-40 * time.Hour).UTC().Format(time.RFC3339)
+		doc := healthJSON(t, "--id", strconv.FormatInt(id, 10), "--since", start)
+		entry := onlyChannelEntries(t, doc, id)
+		assertJSONField(t, entry, "requests", float64(110))
+		assertJSONField(t, doc["summary"].(map[string]any), "since", start)
+	})
+}
+
+// TestChannelHealthSkipsDeletedUnlessAll 钉住读侧对已软删渠道的处置。
+//
+// 清单形状默认不列已删的、--all 才列；按 id 的单条读取一律打得出来并标出
+// 「已删」——`--all` 管的是「清单要不要变长」，不是「单条能不能看」。
+func TestChannelHealthSkipsDeletedUnlessAll(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	id := createTestChannel(t, uniqueName("health-deleted"), uniqueName("model"))
+	idArg := strconv.FormatInt(id, 10)
+	if err := runCaptured(t, func() error {
+		return runChannelDelete([]string{"--id", idArg})
+	}); err != nil {
+		t.Fatalf("delete 失败: %v", err)
+	}
+
+	listOut, _ := captureStreams(t, func() {
+		if err := runChannelHealth(nil); err != nil {
+			t.Fatalf("health 失败: %v", err)
+		}
+	})
+	if containsID(listOut, id) {
+		t.Errorf("默认清单里出现了已删的渠道 %d：\n%s", id, listOut)
+	}
+	if strings.Contains(listOut, "已删") {
+		t.Errorf("默认清单不该有「已删」那一栏：\n%s", listOut)
+	}
+
+	allOut, _ := captureStreams(t, func() {
+		if err := runChannelHealth([]string{"--all"}); err != nil {
+			t.Fatalf("health --all 失败: %v", err)
+		}
+	})
+	if !containsID(allOut, id) {
+		t.Errorf("health --all 里没有已删的渠道 %d：\n%s", id, allOut)
+	}
+	if !deletedNoteNamesID(allOut, id) {
+		t.Errorf("health --all 没有点出 %s 已删除：\n%s", idArg, allOut)
+	}
+
+	// 单条读取：不带 --all 也打得出来，并在「已删」那一栏标出删除时刻。
+	detailOut, _ := captureStreams(t, func() {
+		if err := runChannelHealth([]string{"--id", idArg}); err != nil {
+			t.Fatalf("health --id 失败: %v", err)
+		}
+	})
+	var deletedAt sql.NullTime
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT deleted_at FROM channels WHERE id = $1`, id).Scan(&deletedAt); err != nil {
+		t.Fatalf("读回 deleted_at 失败: %v", err)
+	}
+	if !strings.Contains(detailOut, "已删") ||
+		!strings.Contains(detailOut, deletedAt.Time.UTC().Format(time.RFC3339)) {
+		t.Errorf("health --id 没有标出已删与删除时刻：\n%s", detailOut)
+	}
+}
+
+// TestChannelHealthUnknownIDIsNotFound 钉住「按 id 读一条不存在的渠道」。
+//
+// 与 get / restore 同一档：id 指的是库里没有的那一条时报 ErrChannelNotFound
+// （退出 4），而不是打一张空表——空表读起来像「这条渠道现在没有读数」，
+// 而事实是根本没有这一条。
+func TestChannelHealthUnknownIDIsNotFound(t *testing.T) {
+	_ = testDB(t)
+	setupEnv(t)
+
+	err := runCaptured(t, func() error {
+		return runChannelHealth([]string{"--id", "999999999"})
+	})
+	if !errors.Is(err, channels.ErrChannelNotFound) {
+		t.Fatalf("读一条不存在的渠道应当报 ErrChannelNotFound，得到 %v", err)
+	}
+	if got := exitCode(err); got != exitConflict {
+		t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+	}
+}
+
+// TestChannelGetReadsOneChannel 钉住 get 的三条：正常路径、已删的照打、找不到报 4。
+func TestChannelGetReadsOneChannel(t *testing.T) {
+	_ = testDB(t)
+	setupEnv(t)
+
+	name := uniqueName("get-channel")
+	model := uniqueName("model")
+	id := createTestChannel(t, name, model)
+	idArg := strconv.FormatInt(id, 10)
+
+	out, note := captureStreams(t, func() {
+		if err := runChannelGet([]string{"--id", idArg}); err != nil {
+			t.Fatalf("get 失败: %v", err)
+		}
+	})
+	for _, want := range []string{idArg, name, testBaseURL, model, "openai", "平台", "test"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("详情里没有 %q：\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, testSecret) {
+		t.Errorf("详情里出现了明文凭证：\n%s", out)
+	}
+	if strings.Contains(out, "已删") {
+		t.Errorf("没删的渠道不该有「已删」那一行：\n%s", out)
+	}
+	if note != "" {
+		t.Errorf("get 不该往 stderr 上写东西：%q", note)
+	}
+
+	t.Run("已删的也打得出来", func(t *testing.T) {
+		if err := runCaptured(t, func() error {
+			return runChannelDelete([]string{"--id", idArg})
+		}); err != nil {
+			t.Fatalf("delete 失败: %v", err)
+		}
+		deletedOut, _ := captureStreams(t, func() {
+			if err := runChannelGet([]string{"--id", idArg}); err != nil {
+				t.Fatalf("get 已删的渠道失败: %v", err)
+			}
+		})
+		if !strings.Contains(deletedOut, "已删") {
+			t.Errorf("get 一条已删的渠道应当标出它：\n%s", deletedOut)
+		}
+	})
+
+	t.Run("找不到那条渠道走退出码 4", func(t *testing.T) {
+		err := runCaptured(t, func() error {
+			return runChannelGet([]string{"--id", "999999999"})
+		})
+		if !errors.Is(err, channels.ErrChannelNotFound) {
+			t.Fatalf("期望 ErrChannelNotFound，得到 %v", err)
+		}
+		if got := exitCode(err); got != exitConflict {
+			t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+		}
+	})
+}
+
+// TestChannelRestoreRoundTrip 是这一组里唯一的端到端：
+// 软删 → restore → 又出现在 channel list 里，且 health 回落成 unknown。
+//
+// 「health 回落」这一条必须先造出一个**不是** unknown 的结论才有意义——一条
+// 从来没被探测过、health 本来就是 unknown 的渠道，恢复了也还是 unknown，那样
+// 这条断言什么都没钉住。所以先把 health 写成 drained。
+func TestChannelRestoreRoundTrip(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	id := createTestChannel(t, uniqueName("restore-channel"), uniqueName("model"))
+	idArg := strconv.FormatInt(id, 10)
+	setQuotaHealth(t, db, id, "drained", time.Now().Add(-time.Hour).UTC())
+
+	if err := runCaptured(t, func() error {
+		return runChannelDelete([]string{"--id", idArg})
+	}); err != nil {
+		t.Fatalf("delete 失败: %v", err)
+	}
+
+	out, note := captureStreams(t, func() {
+		if err := runChannelRestore([]string{"--id", idArg}); err != nil {
+			t.Fatalf("restore 失败: %v", err)
+		}
+	})
+	// 回显走 stderr，而且必须点出 health 回落这件事：恢复之后的第一次 health
+	// 会报 unknown，而 unknown 与「这条渠道没问题」很容易被读成一回事。
+	if !strings.Contains(note, "已恢复渠道 "+idArg) {
+		t.Errorf("restore 的回显不对：\n%s", note)
+	}
+	if !strings.Contains(note, channels.HealthUnknown) {
+		t.Errorf("restore 的回显没有点出 health 回落成 %s：\n%s", channels.HealthUnknown, note)
+	}
+	if strings.Contains(out, "已恢复渠道") {
+		t.Errorf("回显不该混进 stdout：\n%s", out)
+	}
+
+	// 一、它又出现在默认清单里，而且回到可用状态。
+	listOut, _ := captureStreams(t, func() {
+		if err := runChannelList(nil); err != nil {
+			t.Fatalf("list 失败: %v", err)
+		}
+	})
+	if !containsID(listOut, id) {
+		t.Errorf("恢复之后默认清单里应当有渠道 %d：\n%s", id, listOut)
+	}
+	var (
+		deleted sql.NullTime
+		status  string
+		health  string
+	)
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT deleted_at, status FROM channels WHERE id = $1`, id).
+		Scan(&deleted, &status); err != nil {
+		t.Fatalf("读回渠道行失败: %v", err)
+	}
+	if deleted.Valid {
+		t.Error("恢复之后 deleted_at 应当是 NULL")
+	}
+	if status != channels.StatusEnabled {
+		// 「恢复回可用」是字面意思：选路要求 status = 'enabled'，恢复成 disabled
+		// 的渠道会出现在清单上却选不中。
+		t.Errorf("恢复之后 status = %q，期望 %q", status, channels.StatusEnabled)
+	}
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT health FROM channel_quota_state WHERE channel_id = $1`, id).Scan(&health); err != nil {
+		t.Fatalf("读回额度状态失败: %v", err)
+	}
+	if health != channels.HealthUnknown {
+		t.Errorf("恢复之后 health = %q，期望 %q", health, channels.HealthUnknown)
+	}
+
+	// 二、`channel health` 上看到的也是 unknown——这是使用者真正会撞上的那一面，
+	// 库里那一列对了而输出没跟上，等于没做。
+	healthOut, _ := captureStreams(t, func() {
+		if err := runChannelHealth([]string{"--id", idArg}); err != nil {
+			t.Fatalf("health 失败: %v", err)
+		}
+	})
+	if !strings.Contains(healthOut, channels.HealthUnknown) {
+		t.Errorf("恢复之后 health 的输出里没有 %s：\n%s", channels.HealthUnknown, healthOut)
+	}
+
+	// 三、凭证密文一个字节都没动：恢复不是重新封装。
+	if len(channelEnvelope(t, db, id)) == 0 {
+		t.Error("恢复不该动凭证密文，而它现在是空的")
+	}
+
+	// 四、再恢复一次是幂等的。
+	repeatOut, repeatNote := captureStreams(t, func() {
+		if err := runChannelRestore([]string{"--id", idArg}); err != nil {
+			t.Fatalf("重复 restore 不该报错（幂等），得到 %v", err)
+		}
+	})
+	if !strings.Contains(repeatNote, "没有处于删除状态") {
+		t.Errorf("重复恢复的输出不对：\nstdout:\n%s\nstderr:\n%s", repeatOut, repeatNote)
+	}
+	if strings.Contains(repeatNote, "已恢复渠道") {
+		t.Errorf("没恢复的那一次不该说「已恢复」：\n%s", repeatNote)
+	}
+
+	// 五、不存在的 id 仍然报错，退出码走「要改的那一行不存在」。
+	err := runCaptured(t, func() error {
+		return runChannelRestore([]string{"--id", "999999999"})
+	})
+	if !errors.Is(err, channels.ErrChannelNotFound) {
+		t.Fatalf("恢复不存在的 id 应当报 ErrChannelNotFound，得到 %v", err)
+	}
+	if got := exitCode(err); got != exitConflict {
+		t.Errorf("恢复不存在的 id 的退出码 = %d，期望 %d", got, exitConflict)
+	}
+}
+
+// TestChannelHealthJSONStdoutIsPure 拿真命令跑一遍 json 那一档。
+func TestChannelHealthJSONStdoutIsPure(t *testing.T) {
+	_ = testDB(t)
+	setupEnv(t)
+
+	got := healthJSON(t, "--since", "24h")
+	assertJSONField(t, got, "status", jsonOK)
+	summary := jsonObjectField(t, got, "summary")
+	total, _ := summary["total"].(float64)
+	if int(total) != len(jsonEntries(t, got, "channels")) {
+		t.Errorf("summary.total = %v 与 channels 的长度 %d 对不上",
+			summary["total"], len(jsonEntries(t, got, "channels")))
+	}
+}
+
+// hourBucketOf 返回距今最近的那个整点桶，n 为回退的小时数。
+//
+// 与 internal/channels 的 integration_test 里那一个同形：桶是 UTC 整点，
+// 而窗口筛选比的就是这个时刻。
+func hourBucketOf(t *testing.T, n int) time.Time {
+	t.Helper()
+	return time.Now().UTC().Truncate(time.Hour).Add(-time.Duration(n) * time.Hour)
 }
