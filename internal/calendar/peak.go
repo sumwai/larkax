@@ -172,8 +172,12 @@ type PeakStatus struct {
 //     放假安排还没公布，而那几天里可能有调休、也可能有连休，
 //     用星期猜一天的答案正是本包要避免的事；
 //  3. 休息日且 RestDayAllPeak → 高峰；
-//  4. 否则看时刻是否落在某段高峰时段里。跨零点的段按**当地日期**判：
-//     22:00–02:00 在当天 22:00 之后成立，在次日 02:00 之前也成立。
+//  4. 否则看时刻是否落在某段高峰时段里。跨零点的段按**时刻当地那一天**判：
+//     22:00–02:00 在当天 22:00 之后成立，在次日 02:00 之前也成立——后一半
+//     用的仍是时刻自己那一天的日期，不回头查窗口开始那一天。所以跨年的那一夜
+//     两个端点各自查各自的年份：当地 12-31 23:00 查 12-31，次年 01-01 01:00
+//     查 01-01，而后者在公告未发布时会因 year_unknown 报错——这是对的，那一
+//     时刻的价钱确实还不知道。
 func (c *Calendar) PeakAt(ctx context.Context, region Region, instant time.Time, s PeakSchedule) (PeakStatus, error) {
 	if err := s.Validate(); err != nil {
 		return PeakStatus{}, err

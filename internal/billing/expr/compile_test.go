@@ -161,6 +161,35 @@ func TestCompileIsPeakWindowMustBeALiteral(t *testing.T) {
 	}
 }
 
+// TestCompileRejectsFullDayWindowAlongsideOthers 验证全天段不许与其他段并列，
+// 而且**在编译期**就被拒。
+//
+// 这条检查原先是留给日历在求值时判的，后来上移到这里：预留那一步走的是
+// `EvalWorstCase`，它把三元条件整个换成 `__worst(真, 假)`（见 worst.go 的
+// worstPatcher），`isPeak` 在预留时根本不被求值。留在求值期的后果是这条规则
+// 存得进库、预留成功、结算时才炸；而流式路上那一炸只留一行日志、随后释放
+// 预扣，客户端正常收完不付钱。
+//
+// 单独一段的 `"00:00-00:00"`（跨满一整天）仍然编得过：那不是写错，日历那边
+// 本来就把两端相等解释成整天。
+func TestCompileRejectsFullDayWindowAlongsideOthers(t *testing.T) {
+	err := compileErr(t, `{"prompt": isPeak("00:00-00:00,08:00-12:00") ? 1.0 : 2.0}`)
+	if err.Reason != ReasonShape {
+		t.Errorf("原因 = %s，期望 %s（%v）", err.Reason, ReasonShape, err.Err)
+	}
+	// 报错要说清是哪一段、为什么不行：写规则的人照着这一句改得动。
+	if !strings.Contains(err.Error(), "全天") {
+		t.Errorf("错误信息应当说清那是全天时段: %v", err)
+	}
+	if !errors.Is(err, ErrCalendarRequired) {
+		t.Errorf("期望 ErrCalendarRequired，得到 %v", err)
+	}
+
+	if _, err := Compile(`{"prompt": isPeak("00:00-00:00") ? 1.0 : 2.0}`); err != nil {
+		t.Errorf("单独一段全天时段应当编得过: %v", err)
+	}
+}
+
 // TestCompileNestedTier 验证 tier 可以嵌在别的表达式里。
 func TestCompileNestedTier(t *testing.T) {
 	cases := []string{

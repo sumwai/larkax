@@ -442,6 +442,8 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 			// （见 internal/pricing 的 admin），于是错写法在保存时就报出来。
 			// 与 tier 要求档位名是字面量同一条理由：运行期才知道的窗口
 			// 没法在规则被保存时给人看。
+			// 这一遍解析里包含「全天段不能与其他段并列」，那一条是为了钱
+			// 上移到这里来的——预留那一步不跑求值（见 parsePeakWindows）。
 			if len(n.Arguments) != 1 {
 				return fmt.Errorf("isPeak 需要一个参数（高峰时段，例如 \"08:00-22:00\"），当前 %d 个", len(n.Arguments))
 			}

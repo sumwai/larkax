@@ -430,23 +430,62 @@ func TestEvalIsPeakFailsOnUnknownDay(t *testing.T) {
 	}
 }
 
-// 时段本身不成立时也报错：全天段不能与其他段并列（见 PeakSchedule.Validate）。
+// 端点必须按左闭右开判：`08:00-22:00` 里 08:00 算高峰、22:00 不算。
 //
-// 这条错误来自日历的排班校验，而规则里写得出它——写法合法、排班语义不合法，
-// 所以它只能在求值时发现，不能在编译期。
-func TestPeakRejectsFullDayWindowAlongsideOthers(t *testing.T) {
+// 这一条特意落在**适配器**这一层，而不是只靠 internal/calendar 的分钟层用例：
+// 把 containsMinute 的 `m >=` 改成 `m >`，日历那边会红，而这一层与 expr 那一层
+// 不会——两层用例的取样点都在窗口中间，端点的错就穿过去了。整点是规则作者
+// 最常写的边界（上游那张表写的就是 8:00 起、22:00 止）。
+func TestPeakWindowEndpointsAreHalfOpen(t *testing.T) {
 	a := adapt(t, workdaySource(t))
-	prog, err := expr.Compile(`isPeak("00:00-00:00,08:00-12:00") ? {"prompt": 2.0} : {"prompt": 1.0}`)
+	prog, err := expr.Compile(`isPeak("08:00-22:00")
+		? {"prompt": 2.0}
+		: {"prompt": 1.0}`)
 	if err != nil {
 		t.Fatalf("编译出错: %v", err)
 	}
-	if _, err := prog.Eval(expr.Env{
-		Usage:    billing.Usage{PromptTokens: 100},
-		At:       monday,
-		Region:   "CN",
-		Calendar: a,
-	}); err == nil {
-		t.Error("全天段与其他段并列的排班应当报错")
+
+	for _, tc := range []struct {
+		name  string
+		hour  int
+		price string
+	}{
+		{"起点 08:00 在窗口内", 8, "2.00000000"},
+		{"终点 22:00 不在窗口内", 22, "1.00000000"},
+	} {
+		at := time.Date(2026, 1, 5, tc.hour-8, 0, 0, 0, time.UTC)
+		res, err := prog.Eval(expr.Env{
+			Usage:    billing.Usage{PromptTokens: 100},
+			At:       at,
+			Region:   "CN",
+			Calendar: a,
+		})
+		if err != nil {
+			t.Fatalf("%s: 求值出错: %v", tc.name, err)
+		}
+		if got := res.Prices.Prompt.String(); got != tc.price {
+			t.Errorf("%s（北京时间 %d:00）单价 = %s，期望 %s", tc.name, tc.hour, got, tc.price)
+		}
+	}
+}
+
+// 全天段与其他段并列时不成立——这条校验在适配器与日历那一层都还在。
+//
+// 规则走不到这里：窗口的写法在保存规则时就判过一遍（见 expr 的
+// parsePeakWindows 与 compile 的那条用例），全天段并列的规则编不过。这一条
+// 直接调适配器，为的是另一件事：这两个入口不止服务规则（测试与夹具直接构造
+// 排班），转换那一段的防线不该因为规则挡在前面就被拆掉。
+func TestPeakRejectsFullDayWindowAlongsideOthers(t *testing.T) {
+	a := adapt(t, workdaySource(t))
+	_, err := a.Peak("CN", monday, []expr.PeakWindow{
+		{StartMinute: 0, EndMinute: 0},
+		{StartMinute: 8 * 60, EndMinute: 12 * 60},
+	})
+	if err == nil {
+		t.Fatal("全天段与其他段并列应当报错")
+	}
+	if !errors.Is(err, calendar.ErrInvalidPeakWindow) {
+		t.Errorf("期望 ErrInvalidPeakWindow（日历的排班校验），得到 %v", err)
 	}
 }
 
