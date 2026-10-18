@@ -1,7 +1,7 @@
 # 单次输出上限（max_tokens）
 
 调用方在请求体里声明的 `max_tokens` 有一个**上界**：非流式请求超过它会被拒，
-回 `400`。
+回 `400`。**流式请求与 `/v1/systemone`（决策表面）不在这一条里**，见下文。
 
 这一条与按 Key 的额度、限流、钱包余额**互不相干**——那三条见
 [limits.md](limits.md)。上界之内也不会改变任何行为：预留与结算还是按调用方
@@ -31,7 +31,7 @@
 | 顺序 | 取哪个 | 在哪儿配 | 什么时候生效 |
 |---|---|---|---|
 | 1 | 模型目录里登记的 `output_limit` | `larkaxctl model create` / `model update --output-limit` | 下一个请求 |
-| 2 | 全局默认值（出厂 `65536`） | `larkaxctl settings set --key billing.max_output_tokens --value <token 数>` | 重启服务 |
+| 2 | 全局默认值（出厂 `65536`） | `larkaxctl settings set --key billing.max_output_tokens --value <token 数> --by <用户 ID 或用户名>` | 重启服务 |
 
 两条要说清楚：
 
@@ -43,6 +43,10 @@
 - **全局默认值只在启动时读一次**（settings 表里所有键都是这个口径，见
   `internal/settings`）。改完要重启服务；模型目录那一列每个请求都读，改完即
   生效。
+- **全局默认值的取值范围是 1–1048576**（`internal/assembly` 的
+  `minMaxOutputTokens` / `maxMaxOutputTokens`）。越界时服务**拒绝启动**并指出
+  这个键——它不像模型目录那一列只影响某一个模型。`settings set` 缺 `--by` 时
+  直接报参数错（退出码 2），这一条也适用于所有 `settings set`。
 
 出厂默认值取 `65536`：那是「目前已知的最大单次输出」这个量级，它是一道
 **我们愿意单次承担多少**的界，不是上游的能力（上游的输出上限是上游的事）。
@@ -84,7 +88,9 @@ Anthropic 那套（`/v1/messages`）的码放在 `error.type`，文案逐字相�
 请求不会被这条拒，预留仍按覆盖之后那个数冻（见 `internal/gateway` 的
 `outputBound`）。那一笔多冻出来的钱是商家配置的结果，要改的是那条别名。
 
-**流式请求不在这一条里**：流式有中途观测点，钱的处置是随流递进冻结。
+**流式请求与 `/v1/systemone` 都不在这一条里。** 流式有中途观测点，钱的处置是随
+流递进冻结；决策表面的请求体里没有 `max_tokens` 这个字段，它的预留上界取自我们
+自己的两个常量（见 [development.md](development.md) 的「决策接口」）。
 
 ## 改它的时候
 
