@@ -157,9 +157,12 @@ func (f usageReadFlags) window(what string) (from, to time.Time, limit int, err 
 //
 // 先解析成 ID 再查，两种写法（ID / 用户名）就停在同一处：与 apikey list、
 // wallet list 同一条约定。
+//
+// 「没给 --user」与「查不到这个用户」是两回事：前者返回 nil、不报错——它是这一栏
+// 的合法取值，不是「出错了但没报」，所以这里显式 nolint。
 func (f usageReadFlags) resolveUser(ctx context.Context, authStore *auth.Store) (*int64, error) {
 	if *f.user == "" {
-		return nil, nil
+		return nil, nil //nolint:nilnil // 见上
 	}
 	owner, err := authStore.ResolveUser(ctx, *f.user)
 	if err != nil {
