@@ -33,7 +33,7 @@ const walletShortUsage = `larkaxctl wallet 管理用户钱包。
                           [--asset <资产>] [--gateway <来源>]
   larkaxctl wallet list [--user <ID 或用户名>]
 
-list 只读：列出用户 ID、用户名、资产、余额与冻结额。
+list 只读：列出用户 ID、用户名、资产、余额与冻结。
 --ref 必填，它同时是幂等键：同一条命令重跑两次只入账一次，换单号才是另一笔。
 钱包必须已经存在（先 create）；这三条命令都不需要 LARKAX_MASTER_KEYS。
 
@@ -96,7 +96,7 @@ create 与 credit 只写 user_wallets 与 ledger_entries，不碰 users，也不
 LARKAX_MASTER_KEYS。
 
 list 是只读的那一条：列出钱包与它的**余额快照**（user_wallets.balance 与
-user_wallets.frozen），一栏一个字段：用户 ID、用户名、资产、余额、冻结额。
+user_wallets.frozen），一栏一个字段：用户 ID、用户名、资产、余额、冻结。
 不带 --user 时列出全部钱包，带的时候只列那一个用户；用户不存在时报「找不到用户」
 并退出 4，与「用户存在但还没有钱包」是两件事（后者列出来是空的）。
 
@@ -603,8 +603,9 @@ func runWalletList(args []string) error {
 // userNames 取「用户 id → 用户名」，供清单里那一栏用。
 //
 // 单独查一次而不是在账本那条 SQL 里 JOIN users：用户名属于 auth 那一侧
-// （见 ledger/store 的 Wallets）。没有筛用户时这一次是全表，而 users 是一张
-// 小表——换来的是「谁是用户」只有一处定义。
+// （见 ledger/store 的 Wallets）。它**每次都读整张 users**，给了 --user 也一样
+// ——筛的是钱包那一侧，这一栏只是按 id 把名字补上，没有「筛了就只读一行」这
+// 回事。users 是一张小表，换来的是「谁是用户」只有一处定义。
 func userNames(ctx context.Context, store *auth.Store) (map[int64]string, error) {
 	users, err := store.ListUsers(ctx, auth.ListUsersFilter{})
 	if err != nil {
