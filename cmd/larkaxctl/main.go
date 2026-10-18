@@ -41,7 +41,12 @@ func main() {
 	if helpRequested(err) {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "larkaxctl: %v\n", err)
+	// 报告已经说清了的失败（体检类命令的结论）不再补打一行：那一行与报告
+	// 说的是同一件事，而它的形状（`larkaxctl: …`）读起来像一次崩溃。退出码
+	// 照旧非零，调度器按它分派。
+	if !reportedOnly(err) {
+		fmt.Fprintf(os.Stderr, "larkaxctl: %v\n", err)
+	}
 	os.Exit(exitCode(err))
 }
 
@@ -456,27 +461,27 @@ func runReconcile(args []string) error {
 	fs := flag.NewFlagSet("ledger reconcile", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, ledgerUsage) }
 	if err := fs.Parse(args); err != nil {
-		return err
+		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("ledger reconcile 不接受位置参数，得到 %q：开关与口径在 settings 表里", fs.Arg(0))
+		return usageErr(fmt.Errorf(
+			"ledger reconcile 不接受位置参数，得到 %q：开关与口径在 settings 表里", fs.Arg(0)))
 	}
 
 	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
 	}
-	db, err := sql.Open("pgx", cfg.DBDSN)
-	if err != nil {
-		return fmt.Errorf("打开数据库连接失败: %w", err)
-	}
-	defer func() { _ = db.Close() }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), reconcileTimeout)
 	defer cancel()
-	if pingErr := db.PingContext(ctx); pingErr != nil {
-		return fmt.Errorf("连接数据库失败: %w", pingErr)
+	// 走 openDB 而不是自己 sql.Open + Ping：打开与探活失败时的处置相同
+	// （都归 exitDBUnreach），各写一遍的表现是同一类失败在两条命令上给出
+	// 不同的退出码，而脚本对它们的处置是不一样的。
+	db, err := openDB(ctx, cfg)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = db.Close() }()
 
 	values, err := settings.Load(ctx, settings.NewPgSource(db))
 	if err != nil {
@@ -502,8 +507,17 @@ func runReconcile(args []string) error {
 	// 发现不一致时以非零退出码收尾：调度器与告警系统本来就盯着退出码，
 	// 而「对账跑完了但有 3 条不一致」与「对账跑完了一切正常」是两件事，
 	// 让它们落在同一个退出码上等于把告警交给「有没有人去看日志」。
+	return reconcileFindingsErr(report)
+}
+
+// reconcileFindingsErr 把一轮对账的结果折成「要不要非零收尾」。
+//
+// 结论已经在打印出来的报告里（run_id、范围、每一条不一致），所以它标成
+// reportedErr：main 不再补打那一行，只留退出码给调度器。
+func reconcileFindingsErr(report *store.Report) error {
 	if len(report.Findings) > 0 {
-		return fmt.Errorf("发现 %d 条不一致（见上面的清单与 run_id=%d）", len(report.Findings), report.RunID)
+		return reportedErr(fmt.Errorf(
+			"发现 %d 条不一致（见上面的清单与 run_id=%d）", len(report.Findings), report.RunID))
 	}
 	return nil
 }
@@ -638,15 +652,37 @@ func runMigrate(args []string) error {
 	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, migrateUsage) }
 	if err := fs.Parse(args); err != nil {
-		return err
+		return usageErr(err)
 	}
 
 	rest := fs.Args()
 	if len(rest) == 0 {
 		fs.Usage()
-		return errors.New("migrate 需要子命令")
+		return usageErr(errors.New("migrate 需要子命令"))
 	}
 	action, rest := rest[0], rest[1:]
+
+	// 子命令与它吃的取值先校验掉，**再连库**：`migrate bogus` 与
+	// `migrate down-to abc` 都是用户输入错，报出来的应该是「改命令」（退出码 2）。
+	// 把它们留到连库之后判，库一连不上就会盖成「连不上库」（3），脚本按
+	// 退出码分派时走错分支——一个该改命令的错被当成「稍后重试」。
+	var target *int64
+	switch action {
+	case "create":
+		if len(rest) < 1 {
+			return usageErr(errors.New("用法：larkaxctl migrate create <名称>"))
+		}
+	case "up", "down", "status", "version":
+		// 这四条不吃取值。
+	case "down-to", "up-to":
+		ver, verErr := parseVersion(action, rest)
+		if verErr != nil {
+			return usageErr(verErr)
+		}
+		target = ver
+	default:
+		return usageErr(fmt.Errorf("未知的 migrate 子命令 %q", action))
+	}
 
 	// migrate 的每一条子命令都还没接机器可读输出：它的输出是 goose 自己打的
 	// （goose.RunContext 往 stdout 直接写「goose: no migrations to run」这类
@@ -657,9 +693,6 @@ func runMigrate(args []string) error {
 	}
 
 	if action == "create" {
-		if len(rest) < 1 {
-			return errors.New("用法：larkaxctl migrate create <名称>")
-		}
 		// 第二个参数固定为 sql。goose 默认生成 .go 迁移，而内嵌规则是
 		// sql/*.sql，生成的 Go 文件既不会被执行，又会在迁移目录里多出一个包。
 		//
@@ -683,43 +716,28 @@ func runMigrate(args []string) error {
 		return fmt.Errorf("设置迁移方言失败: %w", dialectErr)
 	}
 
-	db, err := sql.Open("pgx", cfg.DBDSN)
-	if err != nil {
-		return fmt.Errorf("打开数据库连接失败: %w", err)
-	}
-	// 关闭错误无处可报：此时函数已经在返回的路上，命令行该打印的错误
-	// 已经打印了，而关闭失败不会改变命令的结果。
-	defer func() { _ = db.Close() }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
-		return fmt.Errorf("连接数据库失败: %w", err)
+	// 走 openDB 而不是自己 sql.Open + Ping：打开与探活失败时的处置相同
+	// （都归 exitDBUnreach），各写一遍的表现是同一类失败在两条命令上给出
+	// 不同的退出码，而脚本对它们的处置是不一样的。
+	db, err := openDB(ctx, cfg)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = db.Close() }()
 
 	goose.SetBaseFS(migrate.FS())
 
 	switch action {
 	case "up", "down", "status", "version":
 		return gooseRun(ctx, db, action)
-
 	case "down-to":
-		ver, err := parseVersion(action, rest)
-		if err != nil {
-			return err
-		}
-		return stepTo(ctx, db, *ver, false)
-
+		return stepTo(ctx, db, *target, false)
 	case "up-to":
-		ver, err := parseVersion(action, rest)
-		if err != nil {
-			return err
-		}
-		return stepTo(ctx, db, *ver, true)
-
-	default:
-		return fmt.Errorf("未知的 migrate 子命令 %q", action)
+		return stepTo(ctx, db, *target, true)
 	}
+	return nil
 }
 
 // stepTo 一步一步地前进或回滚到目标版本。

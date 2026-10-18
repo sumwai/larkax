@@ -314,7 +314,6 @@ func runSnapshotRedact(args []string) error {
 			"snapshot redact 不接受位置参数，得到 %q：报文从标准输入读", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*direction) == "" {
-		fs.Usage()
 		return usageErr(errors.New("缺少 --direction：request 与 response 各有一张允许表，必须指明"))
 	}
 	if *maxBytes <= 0 {
@@ -335,7 +334,7 @@ func runSnapshotRedact(args []string) error {
 	if err != nil {
 		// 走到这里说明允许表本身有问题（重复路径、空 Note 之类），
 		// 那不是参数错，是这份代码或这个二进制有问题。
-		return fmt.Errorf("构造脱敏器失败: %w", err)
+		return internalErr(fmt.Errorf("构造脱敏器失败: %w", err))
 	}
 
 	data, err := readBoundedInput(os.Stdin, snapshotRedactMaxInput)
@@ -347,11 +346,13 @@ func runSnapshotRedact(args []string) error {
 	// 那两件事只有「外部拿一段报文进来」时才起作用，而这里正是那个场景。
 	payload, err := snapshot.Decode(data)
 	if err != nil {
-		return fmt.Errorf("解析报文失败: %w", err)
+		// 按这条命令的用法，喂进来的是一段**已经采下来的**报文；它解不开说明
+		// 这一段本身坏了，不是使用者写错了参数——归「内部错误」。
+		return internalErr(fmt.Errorf("解析报文失败: %w", err))
 	}
 	res, err := redactor.RedactRaw(payload)
 	if err != nil {
-		return fmt.Errorf("脱敏失败: %w", err)
+		return internalErr(fmt.Errorf("脱敏失败: %w", err))
 	}
 	return printRedaction(humanStdout(), humanStderr(), redactor, res)
 }
@@ -395,7 +396,7 @@ func printRedaction(out, info io.Writer, redactor *snapshot.Redactor, res *snaps
 	// MarshalIndent 对 map 的键是排序的，所以同一段报文两次跑出来逐行相同。
 	raw, err := json.MarshalIndent(res.Skeleton, "", "  ")
 	if err != nil {
-		return fmt.Errorf("骨架无法序列化: %w", err)
+		return internalErr(fmt.Errorf("骨架无法序列化: %w", err))
 	}
 	_, _ = fmt.Fprintf(out, "%s\n", raw)
 
@@ -519,7 +520,6 @@ func runSnapshotGet(args []string) error {
 	// 第一趟 Parse 之后，fs.Args() 是「第一个位置参数 + 它后面的一切」。
 	rest := fs.Args()
 	if len(rest) == 0 {
-		fs.Usage()
 		return usageErr(errors.New(
 			"用法：larkaxctl snapshot get <request_id> --actor <用户> --reason <文本>"))
 	}
@@ -539,11 +539,9 @@ func runSnapshotGet(args []string) error {
 	// 两个都不给默认值。理由见 snapshotUsage：「我写了 --reason」与
 	// 「我忘了写」在库里必须分得开，而一个默认值恰好让这两件事在库里长得一样。
 	if strings.TrimSpace(*actor) == "" {
-		fs.Usage()
 		return usageErr(errors.New("缺少 --actor：读一条快照要记下是谁读的"))
 	}
 	if strings.TrimSpace(*reason) == "" {
-		fs.Usage()
 		return usageErr(errors.New("缺少 --reason：读一条别人的请求结构，理由必须留下"))
 	}
 
@@ -691,13 +689,41 @@ func readSnapshotsWithAudit(ctx context.Context, db *sql.DB, req snapshotRead) (
 	return rows, nil
 }
 
+// errSnapshotNotFound 是读路径上「要读的那一条快照不在库里」的哨兵。
+//
+// 它登记在 conflictErrors（exit.go）里，落 exitConflict：与「要改的那一行不
+// 在」是同一个形状——下一步都是先去看数据里现在是什么，而不是改一条命令重发。
+var errSnapshotNotFound = errors.New("要读的快照不存在")
+
+// snapshotNotFoundError 是「一条都没读到」时返回的具体错误。
+//
+// 单独一个类型而不是直接 fmt.Errorf：那句话要带上 request id 与方向（给读的人
+// 看），而 conflictErrors 是按哨兵分类的（给脚本看退出码）。一个纯哨兵带不了
+// 前者，一个纯错误串进不了后者，所以这里让类型自己认作那个哨兵。
+type snapshotNotFoundError struct {
+	requestID  string
+	directions []string
+	filtered   bool
+}
+
+func (e *snapshotNotFoundError) Error() string {
+	if e.filtered {
+		return fmt.Sprintf("请求 %q 没有 %s 方向的快照（去掉 --direction 或换一个再试）",
+			e.requestID, strings.Join(e.directions, "、"))
+	}
+	return fmt.Sprintf("请求 %q 没有存下来的快照", e.requestID)
+}
+
+// Is 让它等于哨兵 errSnapshotNotFound：conflictErrors 按哨兵分类，退出码 4。
+func (e *snapshotNotFoundError) Is(target error) bool { return target == errSnapshotNotFound }
+
 // snapshotNotFound 说明一条都没读到。
 func snapshotNotFound(req snapshotRead) error {
-	if req.Filtered {
-		return fmt.Errorf("请求 %q 没有 %s 方向的快照（去掉 --direction 或换一个再试）",
-			req.RequestID, strings.Join(req.Directions, "、"))
+	return &snapshotNotFoundError{
+		requestID:  req.RequestID,
+		directions: req.Directions,
+		filtered:   req.Filtered,
 	}
-	return fmt.Errorf("请求 %q 没有存下来的快照", req.RequestID)
 }
 
 // querySnapshots 读出一行行快照。

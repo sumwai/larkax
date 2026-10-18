@@ -143,7 +143,6 @@ func runWalletCreate(args []string) error {
 		return usageErr(fmt.Errorf("create 不接受位置参数，得到 %q：用户用 --user 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
-		fs.Usage()
 		return usageErr(errors.New("缺少 --user"))
 	}
 
@@ -202,14 +201,12 @@ func runWalletCredit(args []string) error {
 			"credit 不接受位置参数，得到 %q：用户、金额与幂等键都用旗标指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
-		fs.Usage()
 		return usageErr(errors.New("缺少 --user"))
 	}
 	// 外部单据号必填且**没有默认值**：默认值会把「操作者忘了给单号」变成两笔
 	// 互不相干的入账，而这两笔在账面上都合法——正是最难事后发现的那种错。
 	orderKey := strings.TrimSpace(*ref)
 	if orderKey == "" {
-		fs.Usage()
 		return usageErr(errors.New(
 			"缺少 --ref：它是这笔入账对应的外部单据号，同时是幂等键——重跑同一条命令时靠它认出「已经入过账」"))
 	}

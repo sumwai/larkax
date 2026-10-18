@@ -662,10 +662,13 @@ func (r doctorReport) exitErr(dbErr error) error {
 	}
 	_, failed, skipped := r.counts()
 	if failed > 0 || skipped > 0 {
-		return fmt.Errorf("doctor 不通过：%d 项有问题、%d 项没跑成", failed, skipped)
+		// 结论已经在上面那份报告里（每一项一行 `✗` / `!`），这里只给退出码：
+		// reportedErr 让 main 不再补打一行 `larkaxctl: …`——那是同一句话说
+		// 第二遍，形状还像一次崩溃。
+		return reportedErr(fmt.Errorf("doctor 不通过：%d 项有问题、%d 项没跑成", failed, skipped))
 	}
 	if r.live.enabled && !r.live.ok() {
-		return errors.New("doctor 不通过：真打上游那一次没有成功")
+		return reportedErr(errors.New("doctor 不通过：真打上游那一次没有成功"))
 	}
 	return nil
 }

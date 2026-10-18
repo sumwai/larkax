@@ -295,10 +295,13 @@ func ledgerVerifyCause(report *store.VerifyReport, runErr error) error {
 		// 「一条都没校验到」不是成功。范围写错、库是空的、连错了环境，
 		// 三种情况都会走到这里，而它们的输出与「校验完了一笔都没问题」
 		// 必须不一样（LESSONS 第 16 条）。
-		return errLedgerVerifyEmpty
+		//
+		// 标成 reportedErr：结论已经在屏幕那一行状态里打出来了，main 不再
+		// 补打一行 `larkaxctl: …`，只留退出码。
+		return reportedErr(errLedgerVerifyEmpty)
 	}
 	if len(report.Findings) > 0 {
-		return fmt.Errorf("发现 %d 笔不合法的交易（见上面的清单）", len(report.Findings))
+		return reportedErr(fmt.Errorf("发现 %d 笔不合法的交易（见上面的清单）", len(report.Findings)))
 	}
 	return nil
 }

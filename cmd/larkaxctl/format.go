@@ -188,10 +188,11 @@ func emitJSON(w io.Writer, doc map[string]any, cause error) error {
 	enc.SetEscapeHTML(false)
 
 	if err := enc.Encode(doc); err != nil {
-		// 编不出来只可能是有人往 doc 里塞了编不了的东西（chan、函数）。
+		// 编不出来只可能是有人往 doc 里塞了编不了的东西（chan、函数）——
+		// 那是这份代码的 bug，不是使用者的输入错，所以标成「内部错误」。
 		// stdout 此时仍是干净的：Encoding 失败不会写出去半个字节以外的东西
 		// ——它先编完再写，所以这里不会留下半份 JSON 让 jq 更迷惑。
-		return fmt.Errorf("序列化 JSON 输出失败: %w", err)
+		return internalErr(fmt.Errorf("序列化 JSON 输出失败: %w", err))
 	}
 	return cause
 }

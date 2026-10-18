@@ -34,15 +34,30 @@ const (
 	exitConflict  = 4
 )
 
-// codedError 给一个错误带上退出码。
+// codedError 给一个错误带上退出码，外加两个形状标记。
 //
-// Error() 原样返回内层：退出码是给脚本看的，不该改变人看到的那句话。
+// 退出码是给脚本看的，不该改变人看到的那句话——所以 Error() 原则上原样返回
+// 内层。唯一的例外是 internal：它在人读到的那句话前面加「内部错误: 」，
+// 让人一眼分清「这是我们的 bug」与「这是你的输入或环境的问题」。
 type codedError struct {
 	code int
 	err  error
+	// reportOnly 表示这个失败**已经由命令自己的报告说清楚了**（体检类命令的
+	// 结论）：main 因此不再补打那一行 `larkaxctl: …`，只取退出码。退出码照旧
+	// 非零——调度器与脚本盯的就是它。
+	reportOnly bool
+	// internal 表示「不该发生的事发生了」：序列化失败、不变量被破坏。它不是
+	// 输入错也不是环境故障，所以退出码是 exitFailure，而人读到的那句话前面
+	// 加「内部错误: 」。
+	internal bool
 }
 
-func (e *codedError) Error() string { return e.err.Error() }
+func (e *codedError) Error() string {
+	if e.internal {
+		return "内部错误: " + e.err.Error()
+	}
+	return e.err.Error()
+}
 func (e *codedError) Unwrap() error { return e.err }
 
 // usageErr 把一个参数错误标成 exitUsage。
@@ -62,6 +77,40 @@ func dbErr(err error) error {
 		return nil
 	}
 	return &codedError{code: exitDBUnreach, err: err}
+}
+
+// reportedErr 把一个「报告已经说清楚了」的失败标出来。
+//
+// 体检类命令（doctor / partition check / ledger verify / secret rotate
+// --verify / ledger reconcile）跑完之后，结论本身就在它们打出来的那份报告
+// 里：屏幕上一行 `✗ 标题 结论`，或者对账清单里那几条不一致。它们返回的错误
+// 只是给调度器看的退出码，再让 main 补打一行 `larkaxctl: …` 是把同一件事说
+// 第二遍——而那一行还长得像一次崩溃。
+//
+// 退出码原样保留（它已经是对的）：非零，调度器据此告警。内层若已经带码就以
+// 那个码为准，不在这里重新分类。
+func reportedErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &codedError{code: exitCode(err), err: err, reportOnly: true}
+}
+
+// internalErr 把一个内部故障标出来（序列化失败、不变量被破坏）。
+//
+// 退出码是 exitFailure：它不是输入错（2）也不是环境故障（3），脚本对它的
+// 处置就是「上报」。
+func internalErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &codedError{code: exitFailure, err: err, internal: true}
+}
+
+// reportedOnly 判断一个错误是不是「报告已说明」，供 main 决定打不打那一行。
+func reportedOnly(err error) bool {
+	var coded *codedError
+	return errors.As(err, &coded) && coded.reportOnly
 }
 
 // conflictErrors 是各包的写入与解析路径撞上数据约束时返回的哨兵错误。
@@ -119,6 +168,11 @@ var conflictErrors = []error{
 	pipeline.ErrNoRule,
 
 	pluginstore.ErrPluginNotFound,
+
+	// 读路径上的「要读的那一条不在」：snapshot get 一条都没读到。它与上面
+	// 那些写入路径的哨兵是同一个形状，只是发生在**读**的一侧，所以它由命令
+	// 自己造（snapshot.go），不来自某个 store 包。
+	errSnapshotNotFound,
 }
 
 // noChangeErrors 是「这次调用没提到任何要改的字段」。

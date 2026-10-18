@@ -180,11 +180,9 @@ func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
 	}
 
 	if strings.TrimSpace(*canonical) == "" {
-		fs.Usage()
 		return catalog.CreateModelRequest{}, errors.New("缺少 --model")
 	}
 	if strings.TrimSpace(*display) == "" {
-		fs.Usage()
 		return catalog.CreateModelRequest{}, errors.New("缺少 --display")
 	}
 	cutoff, err := parseDateFlag("--knowledge-cutoff", *knowledgeCutoff)
@@ -405,7 +403,6 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabil
 			"update 不接受位置参数，得到 %q：要改的模型用 --model 指定", fs.Arg(0))
 	}
 	if strings.TrimSpace(*canonical) == "" {
-		fs.Usage()
 		return catalog.UpdateModelRequest{}, nil, errors.New("缺少 --model（要改的规范模型名）")
 	}
 
@@ -475,7 +472,6 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, []modelCapabil
 		changes++
 	}
 	if changes == 0 {
-		fs.Usage()
 		return catalog.UpdateModelRequest{}, nil, errors.New(
 			"update 至少要改一项：给出 --display / --vendor / --family / " +
 				"--context-limit / --input-limit / --output-limit / 六个能力标志 / " +
@@ -507,7 +503,6 @@ func runModelDelete(args []string) error {
 			"delete 不接受位置参数，得到 %q：要删的模型用 --model 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*canonical) == "" {
-		fs.Usage()
 		return usageErr(errors.New("缺少 --model（要删的规范模型名）"))
 	}
 
@@ -548,7 +543,6 @@ func runModelGet(args []string) error {
 			"get 不接受位置参数，得到 %q：要看的模型用 --model 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*canonical) == "" {
-		fs.Usage()
 		return usageErr(errors.New("缺少 --model（要看的规范模型名）"))
 	}
 

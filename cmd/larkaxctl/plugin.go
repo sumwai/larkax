@@ -187,7 +187,8 @@ func runPluginPublish(args []string) error {
 	}
 	switch {
 	case fs.NArg() == 0:
-		fs.Usage()
+		// 不打整段用法：人已经会用这条命令了，只是漏了源文件路径。用法留给
+		// 「还没开始用」的那几处（缺子命令 / 未知子命令 / flag 解析失败）。
 		return usageErr(errors.New("缺少插件源文件路径"))
 	case fs.NArg() > 1:
 		return usageErr(fmt.Errorf("publish 只接受一个源文件，多出 %q", fs.Arg(1)))
@@ -369,7 +370,6 @@ func runPluginSetEnabled(args []string, enable bool) error {
 		return usageErr(err)
 	}
 	if fs.NArg() != 1 {
-		fs.Usage()
 		return usageErr(fmt.Errorf("%s 需要一个插件 key，得到 %d 个参数", verb, fs.NArg()))
 	}
 	key := strings.TrimSpace(fs.Arg(0))
