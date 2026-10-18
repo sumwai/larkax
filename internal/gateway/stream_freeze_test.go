@@ -509,9 +509,14 @@ func TestChatStreamKeepsGoingWhenTopUpWriteFails(t *testing.T) {
 // 声明上界冻），后者把数据库往返摊到每一个事件上。两种都不会报错，只会安静地
 // 跑错——所以它必须在开始之前就失败（见 Gateway.StreamFreezeStep）。
 //
-// 变异记录：begin 里那条 `g.StreamFreezeStep <= 0` 改成 `< 0` 是**等价变异**
-// ——同一次请求接着会被 pipeline.ReserveStream 用同一个 ErrNoFreezeStep 挡下，
-// 本用例的断言分不出是哪一层拒的（网关这道是公开类型上的第二道防线）。
+// 变异记录：`g.StreamFreezeStep <= 0` 改成 `< 0` 时，阈值段为 0 的这一条会漏过
+// 网关这道，一路走到 pipeline.ReserveStream 才被挡下。两层用的是**同一个哨兵**
+// （ErrNoFreezeStep），所以只比哨兵的话分不出是哪一层拒的；分得开的是**拒在哪
+// 一层**：网关这一层把哨兵原样抛出，下面那层会在它外面包一句「当前 0」。
+//
+// 所以这条用例连错误值一起比。它钉的是「第二道防线自己就拒了，而没把这一步交给
+// 下游」——网关是公开类型，装配之外还有人能造它出来，这道防线不生效时，拒绝
+// 发生在哪一层就没人说得出。
 func TestChatStreamRejectsMissingFreezeStep(t *testing.T) {
 	h := newHarness(t, withStreamFreezeStep(0))
 	exec := useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
@@ -519,8 +524,9 @@ func TestChatStreamRejectsMissingFreezeStep(t *testing.T) {
 	}})
 
 	_, err := h.gw.ChatStream(context.Background(), freezeRequest(), upstreamRequest(), Hooks{})
-	if !errors.Is(err, pipeline.ErrNoFreezeStep) {
-		t.Fatalf("err = %v，期望 ErrNoFreezeStep", err)
+	if err != pipeline.ErrNoFreezeStep {
+		t.Fatalf("err = %v，期望网关这一层原样抛出的 %v（不是下面那层包过的）",
+			err, pipeline.ErrNoFreezeStep)
 	}
 	if calls := exec.calledChannels(); len(calls) != 0 {
 		t.Errorf("拒绝发生在调上游之前，实际打了渠道 %v", calls)

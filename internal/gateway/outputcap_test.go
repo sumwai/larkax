@@ -198,6 +198,56 @@ func TestOutputCapFallsBackWhenDirectoryLimitUnknown(t *testing.T) {
 	}
 }
 
+// 候选里混进一个「登记了但上限未知」（0）时，取最小要**跳过它**，而不是把它
+// 当成一个 0 拉进来。
+//
+// 目录那一列是模型级的，今天同一份 Profile 发给每一个候选，所以「候选之间取值
+// 不同」这件事平时看不出来；而 0 一旦被当成候选值参与比较，limit 会被拉到 0，
+// 再过下面那道「0 就落全局默认值」——判据于是从目录里那个 100 悄悄放宽到全局
+// 默认的 65536，超限的请求就这么过了，而账上、日志上都看不出来。
+//
+// 变异记录：`c.Profile.OutputLimit <= 0` 改成 `< 0` 时，正是这一格被放进来
+// ——真缺口，这条用例钉的就是它。同一段里那个 `< limit` 的另外两支：
+//
+//   - 改成 `>=` 也是真缺口：取最小变成取最大，第三个候选（200）会把上限从
+//     100 抬到 200；
+//   - 改成 `<=` 是**等价变异**：多出来的一格是取值恰好等于 limit，而那一支
+//     赋的就是 limit 自己，值不变。
+func TestOutputCapMinSkipsUnknownDirectoryLimit(t *testing.T) {
+	// 全局默认值刻意给得大：0 漏进来时，下面那道「0 落默认值」会把上限抬到
+	// 65536，与目录里那个 100 分得开。
+	h := newHarness(t, withMaxOutputTokens(65536), func(h *harness) {
+		known := candidate(1, "gpt-4o")
+		known.Profile = &route.ModelProfile{OutputLimit: 100}
+		unknown := candidate(2, "gpt-4o")
+		unknown.Profile = &route.ModelProfile{OutputLimit: 0} // 库里是 NULL
+		bigger := candidate(3, "gpt-4o")
+		bigger.Profile = &route.ModelProfile{OutputLimit: 200}
+		h.candidates = &fakeCandidates{cands: []route.Candidate{known, unknown, bigger}}
+	})
+
+	req := request()
+	req.MaxTokens = 101
+
+	_, err := h.gw.Chat(context.Background(), req, upstreamRequest(), Hooks{})
+
+	var over *OutputCapExceeded
+	if !errors.As(err, &over) {
+		t.Fatalf("错误 = %v，期望 *OutputCapExceeded（已登记的那些值里最小的是 100）", err)
+	}
+	if over.Limit != 100 {
+		t.Errorf("上限 = %d，期望 100（0 是未知，不参与取最小；取最大会得到 200，"+
+			"把 0 当成一个值会落回全局默认的 65536）", over.Limit)
+	}
+
+	// 反方向：恰好等于目录那个值要放行。只钉上面那一条的话，一个把上限压到
+	// 别的数的实现照样能过。
+	req.MaxTokens = 100
+	if _, err := h.gw.Chat(context.Background(), req, upstreamRequest(), Hooks{}); err != nil {
+		t.Fatalf("100 是已登记的上限里最小的那个，该放行，实际出错: %v", err)
+	}
+}
+
 // 别名覆盖把上界**抬到上限之上**时，调用方在上限之内的请求照旧放行。
 //
 // 判的是调用方声明的那个数，覆盖不参与（理由见 checkOutputCap）。代价也在

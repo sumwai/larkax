@@ -438,19 +438,29 @@ func TestDecisionSnapshotRecordsDegradationPerAttempt(t *testing.T) {
 // 描述符，一条时钟抖动换来一行噪音。只断言负的那一格时，把比较符写反——正的
 // 也压成 0——不会被发现，而那让延迟这一列等于没有：账单上记着花了多久，足迹
 // 里却永远是零。
+//
+// 变异记录：`item.Duration < 0` 改成 `<= 0` 是**等价变异**——多出来的一格是
+// 耗时恰好为 0，而那一支赋的也是 0，与不赋同值。第三个候选就是那一格：它进来
+// 的耗时本来就是 0，两版给的都是 0，写在这里是为了让「这一格分不开」有个
+// 落点，而不是只写在注释里。
 func TestDecisionAttemptDurationKeepsPositive(t *testing.T) {
 	out := decisionAttemptsOf([]route.Attempt{
 		{ChannelID: 1, Duration: 1200 * time.Millisecond},
 		{ChannelID: 2, Err: errors.New("上游在首片之前断开"), Retryable: true, Duration: -time.Second},
+		// 耗时恰好为 0：同一个瞬间发了又回，或者夹具没给时长。
+		{ChannelID: 3, Duration: 0},
 	})
-	if len(out) != 2 {
-		t.Fatalf("足迹 %d 条，期望 2", len(out))
+	if len(out) != 3 {
+		t.Fatalf("足迹 %d 条，期望 3", len(out))
 	}
 	if got := out[0].Duration; got != 1200*time.Millisecond {
 		t.Errorf("耗时 = %s，期望 1.2s（原样带出去，不归零）", got)
 	}
 	if got := out[1].Duration; got != 0 {
 		t.Errorf("负耗时 = %s，期望 0（时钟回拨不写成负数）", got)
+	}
+	if got := out[2].Duration; got != 0 {
+		t.Errorf("零耗时 = %s，期望 0（本来就对，不该被写成别的数）", got)
 	}
 }
 

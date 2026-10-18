@@ -1245,6 +1245,85 @@ func TestStreamResponseBuilderAttachesAnnotationBehindToolCall(t *testing.T) {
 	}
 }
 
+// 工具调用块上的 id 与 name 要留在归一后的响应里，而且**后面那些分片不能把它们
+// 抹掉**。
+//
+// 协议里 id 与 name 只在第一个分片给出，后面的分片带空串（见 channel.ToolCallDelta），
+// 所以那两行是「有值才写」而不是「有值就写空」。判据写反的表现是快照上那两格
+// 永远是空的：流本身一切正常，只有回看那份响应时才发现工具调用的 id 与名字没了。
+//
+// 参数那一侧在同一条路上，但判据不同：分片要**拼接**，拼完是一个完整对象才写
+// 进快照（下一对手）。
+func TestStreamResponseBuilderKeepsToolCallFieldsAcrossDeltas(t *testing.T) {
+	b := newStreamResponseBuilder()
+	b.observe(channel.StreamEvent{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{
+		Index: 0, ID: "call_abc", Name: "lookup", Arguments: `{"city":"上海"`,
+	}})
+	// 第二个分片：id 与 name 是空串（协议如此），参数再拼一段。
+	b.observe(channel.StreamEvent{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{
+		Index: 0, Arguments: `,"n":2}`,
+	}})
+
+	resp := b.response("gpt-4o-2024")
+	if resp == nil {
+		t.Fatal("有一个工具调用块时该归一出一份响应")
+	}
+	if len(resp.Message.Content) != 1 {
+		t.Fatalf("内容块 = %d 个，期望 1（两个分片拼成同一个工具调用块）", len(resp.Message.Content))
+	}
+	blk := resp.Message.Content[0]
+	if blk.Type != "tool_use" {
+		t.Fatalf("块类型 = %q，期望 tool_use", blk.Type)
+	}
+	if blk.ToolUseID != "call_abc" {
+		t.Errorf("ToolUseID = %q，期望 call_abc（第一个分片给的那个；后面那片空串不该盖掉它）", blk.ToolUseID)
+	}
+	if blk.ToolName != "lookup" {
+		t.Errorf("ToolName = %q，期望 lookup（同上）", blk.ToolName)
+	}
+	if in := blk.ToolInput; len(in) != 2 || in["city"] != "上海" || in["n"] != float64(2) {
+		t.Errorf("ToolInput = %#v，期望两个键都拼进去：city=上海、n=2", in)
+	}
+}
+
+// 参数拼不成一个 JSON 对象时留空，**哪怕 json 已经把它解了一半**。
+//
+// 「非空就写」与这条判据在多数串上给出同一个结果——整串语法就不成立时，目标
+// map 一个字节都不会被写（json.Unmarshal 先跑一遍语法校验）。分得开的是**语法
+// 合法、解到中途才失败**的那一类：`{"a":1e999}` 里的数越界，报错时 map 里已经
+// 落下了 a→nil。把半份参数写进快照等于替上游猜内容，而快照那条铁律是不猜
+// （见 internal/snapshot）。
+//
+// 空串那一条钉的是另一半：参数一个分片都没到（或只给了空串）时同样留空。
+func TestStreamResponseBuilderLeavesUnparsableToolInputEmpty(t *testing.T) {
+	for _, tc := range []struct{ name, arguments string }{
+		{"断流只到一半：少一个右括号", `{"city":"上海"`},
+		{"语法合法但解到一半失败：有一个数越界", `{"a":1e999}`},
+		{"一个分片都没带参数", ``},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newStreamResponseBuilder()
+			b.observe(channel.StreamEvent{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{
+				Index: 0, ID: "call_abc", Name: "lookup", Arguments: tc.arguments,
+			}})
+
+			resp := b.response("gpt-4o-2024")
+			if resp == nil {
+				t.Fatal("有一个工具调用块时该归一出一份响应")
+			}
+			blk := resp.Message.Content[0]
+			if blk.ToolInput != nil {
+				t.Errorf("ToolInput = %#v，期望 nil（整串没解成功，半份结果不写进去）", blk.ToolInput)
+			}
+			// 参数留空不该连 id 与 name 一起丢：三样是各自独立的判据。
+			if blk.ToolUseID != "call_abc" || blk.ToolName != "lookup" {
+				t.Errorf("id/name = %q/%q，期望 call_abc/lookup（参数解不开不牵动这两格）",
+					blk.ToolUseID, blk.ToolName)
+			}
+		})
+	}
+}
+
 // streamResponseEvidence 把 started / done / ours 的每一格各归哪一档。
 //
 // 写成一张表是为了让每一格都有一句话，而不是只钉住走过的那几条路。此前缺的
