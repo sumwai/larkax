@@ -195,23 +195,23 @@ func runModelCreate(args []string) error {
 func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
 	fs := flag.NewFlagSet("model create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "", "")
-	stringAlias(fs, canonical, "m", sameAs("model"))
+	canonical := legacyStringFlag(fs, "model", "canonical", "")
+	stringAlias(fs, canonical, "m")
 	display := fs.String("display", "", "")
 	vendor := fs.String("vendor", "", "")
 	family := fs.String("family", "", "")
 	contextLimit := fs.Int("context-limit", 0, "")
-	intAlias(fs, contextLimit, "ctx", sameAs("context-limit"))
+	intAlias(fs, contextLimit, "ctx")
 	inputLimit := fs.Int("input-limit", 0, "")
-	intAlias(fs, inputLimit, "in", sameAs("input-limit"))
+	intAlias(fs, inputLimit, "in")
 	outputLimit := fs.Int("output-limit", 0, "")
-	intAlias(fs, outputLimit, "out", sameAs("output-limit"))
+	intAlias(fs, outputLimit, "out")
 	capFlags := newCapabilityFlags(fs)
-	endpoints := fs.String("endpoints", "", endpointFlagUsage)
-	modalitiesIn := legacyStringFlag(fs, "input-modalities", "modalities-input", "", "")
-	stringAlias(fs, modalitiesIn, "im", sameAs("input-modalities"))
-	modalitiesOut := legacyStringFlag(fs, "output-modalities", "modalities-output", "", "")
-	stringAlias(fs, modalitiesOut, "om", sameAs("output-modalities"))
+	endpoints := fs.String("endpoints", "", "")
+	modalitiesIn := legacyStringFlag(fs, "input-modalities", "modalities-input", "")
+	stringAlias(fs, modalitiesIn, "im")
+	modalitiesOut := legacyStringFlag(fs, "output-modalities", "modalities-output", "")
+	stringAlias(fs, modalitiesOut, "om")
 	knowledgeCutoff := fs.String("knowledge-cutoff", "", "")
 	releaseDate := fs.String("release-date", "", "")
 	if err := fs.Parse(args); err != nil {
@@ -283,12 +283,6 @@ type modelCapabilityFlag struct {
 	given bool
 }
 
-// capabilityFlagUsage 是一句统一的帮助文本。六个标志的语义一模一样，
-// 差别只在能力名，所以文本拼出来而不是抄六遍。
-func capabilityFlagUsage(capability string) string {
-	return capability + "：给 = 声明支持，=false = 明确不支持，不给 = 未知"
-}
-
 // newCapabilityFlags 注册六个能力标志。
 //
 // 名字只写一次：它同时是 flag 包里的标志名与下面用来查「给没给」的键。
@@ -296,24 +290,24 @@ func capabilityFlagUsage(capability string) string {
 // 「没给」，而它的表现是「关不掉一个能力」。
 func newCapabilityFlags(fs *flag.FlagSet) []modelCapabilityFlag {
 	return []modelCapabilityFlag{
-		newCapabilityFlag(fs, "reasoning", capabilityFlagUsage("推理"),
+		newCapabilityFlag(fs, "reasoning",
 			func(c *catalog.Capabilities, v *bool) { c.Reasoning = v }),
-		newCapabilityFlag(fs, "tools", capabilityFlagUsage("工具调用"),
+		newCapabilityFlag(fs, "tools",
 			func(c *catalog.Capabilities, v *bool) { c.Tools = v }),
-		newCapabilityFlag(fs, "vision", capabilityFlagUsage("图片"),
+		newCapabilityFlag(fs, "vision",
 			func(c *catalog.Capabilities, v *bool) { c.Vision = v }),
-		newCapabilityFlag(fs, "audio", capabilityFlagUsage("音频"),
+		newCapabilityFlag(fs, "audio",
 			func(c *catalog.Capabilities, v *bool) { c.Audio = v }),
-		newCapabilityFlag(fs, "cache", capabilityFlagUsage("提示缓存"),
+		newCapabilityFlag(fs, "cache",
 			func(c *catalog.Capabilities, v *bool) { c.Cache = v }),
-		newCapabilityFlag(fs, "batch", capabilityFlagUsage("批量接口"),
+		newCapabilityFlag(fs, "batch",
 			func(c *catalog.Capabilities, v *bool) { c.Batch = v }),
 	}
 }
 
-func newCapabilityFlag(fs *flag.FlagSet, name, usage string,
+func newCapabilityFlag(fs *flag.FlagSet, name string,
 	set func(*catalog.Capabilities, *bool)) modelCapabilityFlag {
-	return modelCapabilityFlag{name: name, value: fs.Bool(name, false, usage), set: set}
+	return modelCapabilityFlag{name: name, value: fs.Bool(name, false, ""), set: set}
 }
 
 // visitedFlags 列出这次真的设置过的标志名——「给了 --x=false」与「没提 --x」
@@ -478,25 +472,25 @@ var (
 func parseModelUpdate(args []string) (catalog.UpdateModelRequest, capabilityEdit, error) {
 	fs := flag.NewFlagSet("model update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "", "")
-	stringAlias(fs, canonical, "m", sameAs("model"))
+	canonical := legacyStringFlag(fs, "model", "canonical", "")
+	stringAlias(fs, canonical, "m")
 	display := fs.String("display", "", "")
 	vendor := fs.String("vendor", "", "")
 	family := fs.String("family", "", "")
 	contextLimit := fs.Int("context-limit", 0, "")
-	intAlias(fs, contextLimit, "ctx", sameAs("context-limit"))
+	intAlias(fs, contextLimit, "ctx")
 	inputLimit := fs.Int("input-limit", 0, "")
-	intAlias(fs, inputLimit, "in", sameAs("input-limit"))
+	intAlias(fs, inputLimit, "in")
 	outputLimit := fs.Int("output-limit", 0, "")
-	intAlias(fs, outputLimit, "out", sameAs("output-limit"))
-	modalitiesIn := legacyStringFlag(fs, "input-modalities", "modalities-input", "", "")
-	stringAlias(fs, modalitiesIn, "im", sameAs("input-modalities"))
-	modalitiesOut := legacyStringFlag(fs, "output-modalities", "modalities-output", "", "")
-	stringAlias(fs, modalitiesOut, "om", sameAs("output-modalities"))
+	intAlias(fs, outputLimit, "out")
+	modalitiesIn := legacyStringFlag(fs, "input-modalities", "modalities-input", "")
+	stringAlias(fs, modalitiesIn, "im")
+	modalitiesOut := legacyStringFlag(fs, "output-modalities", "modalities-output", "")
+	stringAlias(fs, modalitiesOut, "om")
 	knowledgeCutoff := fs.String("knowledge-cutoff", "", "")
 	releaseDate := fs.String("release-date", "", "")
 	capFlags := newCapabilityFlags(fs)
-	endpoints := fs.String("endpoints", "", endpointFlagUsage)
+	endpoints := fs.String("endpoints", "", "")
 	if err := fs.Parse(args); err != nil {
 		return catalog.UpdateModelRequest{}, capabilityEdit{}, err
 	}
@@ -602,8 +596,8 @@ func runModelDelete(args []string) error {
 
 	fs := flag.NewFlagSet("model delete", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "", "")
-	stringAlias(fs, canonical, "m", sameAs("model"))
+	canonical := legacyStringFlag(fs, "model", "canonical", "")
+	stringAlias(fs, canonical, "m")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -642,8 +636,8 @@ func runModelDelete(args []string) error {
 func runModelGet(args []string) error {
 	fs := flag.NewFlagSet("model get", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "", "")
-	stringAlias(fs, canonical, "m", sameAs("model"))
+	canonical := legacyStringFlag(fs, "model", "canonical", "")
+	stringAlias(fs, canonical, "m")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -1011,13 +1005,6 @@ func joinOrDash(values []string) string {
 	}
 	return strings.Join(values, ",")
 }
-
-// endpointFlagUsage 是 --endpoints 的标志说明。
-//
-// 取值那一串列在命令的用法文本里（见 modelUsage），不在这里再抄一遍：本包覆写了
-// FlagSet.Usage，这一句不会自己打印出来，它是给读代码的人看的，抄两份只会分岔。
-// 用法文本与解析失败的报错取自同一份清单（channel.EndpointValueList）。
-const endpointFlagUsage = "上游端点清单，逗号分隔；不给 = 未知，给空串 = 明确一条都不支持"
 
 // parseEndpointsFlag 解析 --endpoints 的值。
 //

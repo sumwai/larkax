@@ -140,11 +140,11 @@ func runAPIKeyCreate(args []string) error {
 	fs := flag.NewFlagSet("apikey create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u", sameAs("user"))
+	stringAlias(fs, user, "u")
 	name := fs.String("name", "", "")
 	expiresAt := fs.String("expires-at", "", "")
-	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "", "")
-	quota := legacyStringFlag(fs, "quota", "quota-limit", "", "")
+	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "")
+	quota := legacyStringFlag(fs, "quota", "quota-limit", "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -214,12 +214,12 @@ func runAPIKeyUpdate(args []string) error {
 	fs := flag.NewFlagSet("apikey update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
 	id := fs.Int64("id", 0, "要改的 API Key 的 id（apikey list 里能看到）")
-	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "", "")
+	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "")
 	clearRPM := fs.Bool("clear-rpm", false, "")
-	boolAlias(fs, clearRPM, "clear-rate-limit-rpm", legacyNote("clear-rpm"))
-	quota := legacyStringFlag(fs, "quota", "quota-limit", "", "")
+	boolAlias(fs, clearRPM, "clear-rate-limit-rpm")
+	quota := legacyStringFlag(fs, "quota", "quota-limit", "")
 	clearQuota := fs.Bool("clear-quota", false, "")
-	boolAlias(fs, clearQuota, "clear-quota-limit", legacyNote("clear-quota"))
+	boolAlias(fs, clearQuota, "clear-quota-limit")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -255,7 +255,7 @@ func runAPIKeyList(args []string) error {
 	fs := flag.NewFlagSet("apikey list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u", sameAs("user"))
+	stringAlias(fs, user, "u")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}

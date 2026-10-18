@@ -10,6 +10,10 @@ import "flag"
 //
 // 两类都不列进用法行（列进去等于把它们当正式写法），但要在命令的说明里单起
 // 一段说清它们仍然可用：静默存在的别名会让人以为那才是正式写法。
+//
+// 下面这几个助手注册时**一律不收说明**：它们交给 fs 注册的那一行永远不会被打印——
+// 帮助文案的唯一来源是各文件里的 *Usage 常量（见包注释）。要改用户看到的帮助，
+// 就改那些常量。
 
 // stringStorage 把一个 *string 接成 flag.Value。
 //
@@ -31,10 +35,8 @@ func (s *stringStorage) Set(v string) error {
 }
 
 // stringAlias 给一个**已经注册过**的字符串选项再挂一个写法。
-//
-// usage 是它在 --help 里那一行，用 sameAs / legacyNote 拼。
-func stringAlias(fs *flag.FlagSet, holder *string, alias, usage string) {
-	fs.Var(&stringStorage{holder}, alias, usage)
+func stringAlias(fs *flag.FlagSet, holder *string, alias string) {
+	fs.Var(&stringStorage{holder}, alias, "")
 }
 
 // boolAlias 给一个**已经注册过**的布尔选项再挂一个写法。
@@ -42,23 +44,15 @@ func stringAlias(fs *flag.FlagSet, holder *string, alias, usage string) {
 // fs.BoolVar 会把指向的格子先赋成它给的默认值，所以这里的 false 顺带是一次
 // 赋值：调用点必须在注册那一段（fs.Parse 之前）调用它，别在解析之后补挂——
 // 那时它会把使用者刚写上的 true 抹回 false。
-func boolAlias(fs *flag.FlagSet, holder *bool, alias, usage string) {
-	fs.BoolVar(holder, alias, false, usage)
+func boolAlias(fs *flag.FlagSet, holder *bool, alias string) {
+	fs.BoolVar(holder, alias, false, "")
 }
 
 // intAlias 给一个**已经注册过**的整数选项再挂一个写法。
 //
 // 与 boolAlias 是同一条注意事项：fs.IntVar 会先给指向的格子赋一次默认值。
-func intAlias(fs *flag.FlagSet, holder *int, alias, usage string) {
-	fs.IntVar(holder, alias, 0, usage)
-}
-
-// sameAs 是给简写那一行用的说明。
-func sameAs(name string) string { return "同 --" + name }
-
-// legacyNote 是给旧名那一行用的说明。
-func legacyNote(name string) string {
-	return "旧名，仍可用；新写的命令请用 --" + name
+func intAlias(fs *flag.FlagSet, holder *int, alias string) {
+	fs.IntVar(holder, alias, 0, "")
 }
 
 // legacyStringFlag 注册一个选项与它的旧名，两个名字写同一个变量，返回那个变量。
@@ -68,11 +62,11 @@ func legacyNote(name string) string {
 // 另发明一条规则。
 //
 // 要再挂一个简写，就在它后面接一句 stringAlias（见 model.go 的 --model）。
-func legacyStringFlag(fs *flag.FlagSet, name, legacy, value, usage string) *string {
+func legacyStringFlag(fs *flag.FlagSet, name, legacy, value string) *string {
 	holder := new(string)
 	*holder = value
-	fs.Var(&stringStorage{holder}, name, usage)
-	stringAlias(fs, holder, legacy, legacyNote(name))
+	fs.Var(&stringStorage{holder}, name, "")
+	stringAlias(fs, holder, legacy)
 	return holder
 }
 

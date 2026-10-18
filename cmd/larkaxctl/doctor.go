@@ -340,13 +340,13 @@ func parseDoctorOptions(args []string) (doctorOptions, error) {
 	fs.Usage = func() { printUsage(os.Stderr, doctorShortUsage) }
 	live := fs.Bool("live", false, "")
 	model := fs.String("model", "", "")
-	stringAlias(fs, model, "m", sameAs("model"))
+	stringAlias(fs, model, "m")
 	endpoint := fs.String("endpoint", doctorEndpointChat, "")
 	baseURL := fs.String("base-url", doctorDefaultBaseURL, "")
 	credentialStdin := fs.Bool("credential-stdin", false, "")
-	boolAlias(fs, credentialStdin, "stdin", sameAs("credential-stdin"))
+	boolAlias(fs, credentialStdin, "stdin")
 	credentialEnv := fs.String("credential-env", "", "")
-	stringAlias(fs, credentialEnv, "env", sameAs("credential-env"))
+	stringAlias(fs, credentialEnv, "env")
 	if err := fs.Parse(args); err != nil {
 		return doctorOptions{}, err
 	}
