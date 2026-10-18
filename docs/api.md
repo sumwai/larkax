@@ -34,7 +34,7 @@ POST 路径，**没有** `GET /v1/models`、`GET /v1/models/{id}`、`/v1/embeddi
 ### 请求本身的两道门
 
 - **`Content-Type` 必须是 `application/json`**，否则 `415`。
-- **请求体最大 8 MiB**，超出回 `413`。这条限制在**读请求体之前**生效，不是可配项，
+- **请求体最大 8 MiB**，超出回 `413`。这条限制在**解析请求体之前**生效，不是可配项，
   见 [limits.md](limits.md) 的「请求体上限」一节。
 - **方法必须是 `POST`**，否则 `405`，并带 `Allow: POST`。
 
@@ -173,9 +173,14 @@ Responses 的每一帧都带 `sequence_number`（从 `0` 起递增，官方 SDK 
 **官方 SDK 拿到这三种帧之后各是什么反应**（一个抛异常、一个按事件名认、一个
 不抛而是交给调用方一个事件对象），见 [contract/README.md](../contract/README.md)
 的「流内错误帧」一节——那一份是用真 SDK 钉出来的，这里只写帧本身长什么样。
-失败原因分得出三种，只体现在 `message` 上：认不出来的失败、余额不足
-（`the account balance is insufficient for this request`）、以及响应已经开始产出
-之后被中断（`the response was interrupted before it finished`）。
+失败原因分得出三种，只体现在 `message` 上：认不出来的失败、余额不足、以及响应
+已经开始产出之后被中断（`the response was interrupted before it finished`）。
+余额那一条的措辞与请求前那条 `429` 刻意不同——请求已经发出去了，它要说清这段
+回答**是被截断的**，不能当成完整回答用：
+
+```text
+the account balance ran out while this response was streaming, so it was cut short; top up the wallet before retrying
+```
 
 ## 与上游契约的已知偏差
 

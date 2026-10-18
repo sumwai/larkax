@@ -553,8 +553,9 @@ go run ./cmd/larkaxctl model create --model claude-x --display '示例模型' \
 **目录里的能力与上限在选路时生效。** `--tools` / `--vision` / `--reasoning`
 声明的是「这个模型能做这件事」：请求用到某项能力、而目录声明**不支持**时，这个
 模型下的候选全部落选。两个上限同理——请求的输入加输出超过 `--context-limit`、
-或输出超过 `--output-limit` 时落选。一个候选都不剩时报「N 个候选渠道都不支持
-这次请求」（HTTP 502），一个上游调用都不会发出去。判据里的输入 token 数是
+或输出超过 `--output-limit` 时落选。一个候选都不剩时**一个上游调用都不会发出去**，
+调用方拿到 `502` 与 `upstream call failed`；为什么一个都不剩只在**服务端日志**里，
+那一行点名了原因（形如「N 个候选渠道都不支持这次请求：…」）。判据里的输入 token 数是
 **只按正文估算**的那个量（`channel.Request.PromptText`），不含工具定义、图片与历史里的
 tool_use 参数。它与**预留**已经不是同一个口径——预留把那几项算了进去（见
 `internal/api` 的 `inputTokensOf`）。方向是判据偏宽松：这个数偏小只会少挡几个其实接得住的请求，
@@ -598,8 +599,9 @@ LARKAX_CHANNEL_CREDENTIAL='<CHANNEL_CREDENTIAL>' go run ./cmd/larkaxctl channel 
 `/messages`）由我们补上去。带不带版本段都行——`https://api.example.com/v1` 与
 `https://api.example.com` 拼出来是同一条 URL，已经带了 `/v1` 时不会重复加。
 **端点本身不能写进去**：`https://api.example.com/v1/chat/completions` 会拼成
-`…/v1/chat/completions/v1/chat/completions`，上游回 `404`——而那个 404 长得
-很像「模型不存在」。
+`…/v1/chat/completions/v1/chat/completions`，上游回 `404`。**调用方看不到这个
+`404`**：上游的状态码一律不透传（见 [api.md](api.md) 的两条刻意口径），他会拿到
+`502` 与 `upstream call failed`——反倒丢掉了「模型不存在」这条线索。
 
 `--models` 是这条渠道支持的**规范模型名**（第一步建的那个），至少一个：
 读取路径把 `models` 当白名单用，空数组的渠道永远选不中。
@@ -710,9 +712,11 @@ go run ./cmd/larkaxctl price create --scope platform --name example-price \
 
 计价项一共五个：`prompt`、`completion`、`cache_read`、`cache_write`、`reasoning`。
 **上游报了哪一项，规则里就必须有哪一项的单价**——少一项不是少收，是这次请求
-**整个失败**（500），因为上游报了我们没定价的用量，宁可报错也不要静默少收：
+**整个失败**（`500`），因为上游报了我们没定价的用量，宁可报错也不要静默少收。
+调用方拿到的是 `500` 与一句 `internal error`（`500` 这一档不点名原因，见
+[api.md](api.md) 的状态码表）；点得出原因的那一句只在**服务端日志**里：
 
-```
+```text
 结算失败: 用量里有规则未定价的计量项: "cache_read"（规则里没写这个单价；要免费就显式写 0）
 ```
 
