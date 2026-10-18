@@ -649,6 +649,15 @@ func TestFromIntBoundaryIsNotClamped(t *testing.T) {
 //
 // 变异：把 `whole > (MaxInt64-fracUnits)/unit` 的 `>` 改掉，
 // 边界上的值会被误拒或误收。
+//
+// 等价变异（把 `(limit-uint64(fracUnits))` 的 `-` 改成 `+`）：两个商最多只差 1，
+// 于是两版判法不同的整数元就只有两格可能——92233720369（fracUnits 挤到
+// 45224192 以上那一段）与 92233720368（再往上，到 54775808 以上那一段）。
+// 这两格的幅值都已经越过 limit，被后面那道 `magnitude > limit` 拦下，两版都报
+// 溢出；而这一段里 `whole*unit` 还没有回绕，那道比较用的是真值。
+// gremlins 把这一处同时报成 INVERT_NEGATIVES 与 ARITHMETIC_BASE，但那两个名字
+// 说的是同一个变异体（`token.SUB` 在两张表里都映射到 `token.ADD`），
+// 对账存活清单时别当成两条。
 func TestParseOverflowBoundary(t *testing.T) {
 	// 恰好能表示的最大值：MaxInt64 个最小单位 = 92233720368.54775807
 	maxStr := Amount{units: math.MaxInt64}.String()
@@ -663,6 +672,34 @@ func TestParseOverflowBoundary(t *testing.T) {
 	// 再大一点就应当报溢出
 	if _, err := Parse("92233720368.54775808"); err == nil {
 		t.Error("超出范围应报错")
+	}
+}
+
+// 负侧上界下面那一格：幅值是 2^63-2，只比 MinInt64 的幅值小两个最小单位。
+//
+// 变异：把 `magnitude == uint64(math.MaxInt64)+1` 的 `+` 改成 `-`。判别式整体
+// 挪了一格，这一格于是被当成 MinInt64 返回，String 从 -92233720368.54775806
+// 变成 -92233720368.54775808——差两个最小单位，而两版都不报错。原来两侧只喂了
+// 上界的相邻格（...807 与 ...808），夹在中间的这一格没人喂过。
+func TestParseNegativeMagnitudeBelowMinInt64(t *testing.T) {
+	got, err := Parse("-92233720368.54775806")
+	if err != nil {
+		t.Fatalf("Parse 出错: %v", err)
+	}
+	if got.Units() != -9223372036854775806 {
+		t.Errorf("Units() = %d，期望 -9223372036854775806", got.Units())
+	}
+	if want := "-92233720368.54775806"; got.String() != want {
+		t.Errorf("String() = %q，期望 %q", got.String(), want)
+	}
+
+	// 四舍五入也能落到这一格（被丢掉的第一位是 5），走的是另一条路
+	rounded, err := Parse("-92233720368.547758055")
+	if err != nil {
+		t.Fatalf("Parse 出错: %v", err)
+	}
+	if rounded.Units() != -9223372036854775806 {
+		t.Errorf("四舍五入后的 Units() = %d，期望 -9223372036854775806", rounded.Units())
 	}
 }
 
