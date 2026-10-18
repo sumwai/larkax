@@ -2,6 +2,7 @@ package expr
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -230,6 +231,28 @@ func TestCompileRejectsFullDayWindowAlongsideOthers(t *testing.T) {
 
 	if _, err := Compile(`{"prompt": isPeak("00:00-00:00") ? 1.0 : 2.0}`); err != nil {
 		t.Errorf("单独一段全天时段应当编得过: %v", err)
+	}
+}
+
+// TestCompilePeakWindowErrorNamesTheSegment 验证报错说得出是哪一段不行。
+//
+// 一条窗口里可以并列好几段，只有一段不合法时，「第几段」是照着这句去改的
+// 唯一线索。编号从 1 数起——它给人看，不是数组下标。
+func TestCompilePeakWindowErrorNamesTheSegment(t *testing.T) {
+	cases := []struct {
+		windows string
+		want    string
+	}{
+		// 不行的那一段落在哪一段，报出来的号就该跟着变。两头各放一条，
+		// 免得「总是报同一个号」也蒙混过去。
+		{"00:00-00:00,08:00-12:00", "第 1 段"},
+		{"08:00-12:00,09:00-09:00", "第 2 段"},
+	}
+	for _, c := range cases {
+		err := compileErr(t, fmt.Sprintf(`{"prompt": isPeak(%q) ? 1.0 : 2.0}`, c.windows))
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("窗口 %q 的报错应当指明 %s，得到: %v", c.windows, c.want, err)
+		}
 	}
 }
 
