@@ -163,6 +163,10 @@ func assertUnitPrices(t *testing.T, got []byte, want map[string]string) {
 // 这条用量下 prompt 那一项的金额是 0.001（1000 token × 1e-6），而单价是
 // 0.000001。两个数摆在同一条用例里，「填的是价格侧还是金额侧」就不是靠注释
 // 声明，而是断言里看得见的事——从 Breakdown 反推单价的那条路会在这里挂。
+//
+// 等价变异（gremlins ARITHMETIC_BASE，unitPricesJSON 里 `len(billing.TokenSlots)
+// + len(prices.Units)` 的 `+` 改成 `-`）：那只是 make 的**容量提示**，差变小
+// （乃至为负）最多多扩容一次，键与值一个字节都不变。
 func TestUsageEventUnitPricesAreSettlementPrices(t *testing.T) {
 	db := testDB(t)
 	s := New(db)

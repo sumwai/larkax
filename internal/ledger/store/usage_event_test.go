@@ -250,6 +250,10 @@ func TestSaveWritesUsageEvent(t *testing.T) {
 //
 // 不足 1 毫秒的耗时向上取整：向下取整会变成 0，于是那次调用被当成「没测到」
 // 丢掉，等于把最快的那批样本从分位数里删掉。
+//
+// 等价变异（gremlins CONDITIONALS_BOUNDARY，durationMS 开头 `d <= 0` 的 `<=`
+// 改成 `<`）：d 恰好为 0 时两支返回的都是 0——`0 / Millisecond` 是 0，
+// `0 % Millisecond` 也是 0，于是取整那一支不会加 1，行为逐点相同。
 func TestSaveWritesUsageEventDuration(t *testing.T) {
 	cases := []struct {
 		name string

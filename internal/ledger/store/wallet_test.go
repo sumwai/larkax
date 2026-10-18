@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -355,3 +356,58 @@ func TestOpenWalletUnknownUser(t *testing.T) {
 		t.Errorf("约束名 = %q，期望 %q", pgErr.ConstraintName, userWalletsUserIDConstraint)
 	}
 }
+
+// 排序器按 (user_id, asset) 排，**asset 是次键**这件事要钉在断言里。
+//
+// # 为什么不能只断言「排过序了」
+//
+// sortWalletKeys 存在的唯一理由就是那个次键（见它的注释：只按 user_id 排的话，
+// 同一个用户的两种币种之间顺序不定）。而「两次输出一致」这种断言抓不住它：
+// 把比较器改成整体倒序，输出同样每次都一样，死锁那一条它也照样满足——这条
+// 用例就什么都没钉住。所以这里断言的是**具体的次序**。
+//
+// 输入故意把 7 号用户的两种资产倒着放（USD 在前）：这样「只按 user_id 挪位置、
+// 资产原样不动」也会露出来。
+//
+// 不需要数据库：比较器只碰传进来的那个切片。
+func TestSortWalletKeysPutsAssetSecond(t *testing.T) {
+	keys := []WalletKey{
+		{UserID: 7, Asset: "USD"},
+		{UserID: 3, Asset: "CNY"},
+		{UserID: 5, Asset: "USD"},
+		{UserID: 3, Asset: "USD"},
+		{UserID: 7, Asset: "CNY"},
+		{UserID: 5, Asset: "CNY"},
+	}
+	want := []WalletKey{
+		{UserID: 3, Asset: "CNY"},
+		{UserID: 3, Asset: "USD"},
+		{UserID: 5, Asset: "CNY"},
+		{UserID: 5, Asset: "USD"},
+		{UserID: 7, Asset: "CNY"},
+		{UserID: 7, Asset: "USD"},
+	}
+
+	sortWalletKeys(keys)
+
+	if !slices.Equal(keys, want) {
+		t.Errorf("排序结果 = %v，期望 %v（先按用户，同一个用户再按资产）", keys, want)
+	}
+}
+
+// 等价变异（gremlins CONDITIONALS_BOUNDARY，把上面那个比较器里
+// `keys[i].UserID < keys[j].UserID` 的 `<` 改成 `<=`）：第一支只在两个 UserID
+// 不等时进得来，而两侧不等时 `<` 与 `<=` 逐点相同——没有输入分得出这两版。
+//
+// 同一个变异器打的**另一支**（`keys[i].Asset < keys[j].Asset` 的 `<` 改成 `<=`）
+// 也是等价变异，但**理由不同，别把上面那段抄过来**：这一支没有 `!=` 守卫，两版
+// 确实会在「两个键的 UserID 相同、Asset 也相同」时取值不同（`<` 给 false、
+// `<=` 给 true）。可那种情形下交换的是**同一个值**，而 sort.Slice 的输出只是
+// 输入的一个排列——值相同的两个元素谁在前，从输出里看不出来，WalletKey 又只有
+// (UserID, Asset) 这两个字段，没有第三个字段能把「谁原本在前」记下来。所以没有
+// 输入分得出这两版，分不开的原因是**输出对值相同的元素不敏感**，而不是
+// 「这一支碰不到」。
+//
+// 穷举印证（把两支抄进一个临时模块跑，不在仓库里）：字母表取 {1A,1B,2A,2B}、
+// 长度 0..6 的全部 5461 个输入（含重复键与任意初始次序），逐一排序比对，
+// 第二支改 `<=` 后输出不同的输入 0 个。
