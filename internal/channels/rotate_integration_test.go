@@ -87,7 +87,7 @@ func insertRotateRows(t *testing.T, db *sql.DB, sealer *credential.Sealer, n int
 	t.Helper()
 	ids := make([]int64, 0, n)
 	for i := 0; i < n; i++ {
-		ids = append(ids, insertChannel(t, db, sealer, channelSpec{model: uniqueModel()}))
+		ids = append(ids, insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()}))
 	}
 	return ids
 }
@@ -101,7 +101,7 @@ func TestRotatePlanDoesNotWrite(t *testing.T) {
 	rotator := NewRotator(db, newRotateSealer(t, newKey, oldKey))
 
 	ids := insertRotateRows(t, db, oldSealer, 3)
-	badID := insertChannel(t, db, oldSealer, channelSpec{
+	badID := insertChannel(t.Context(), t, db, oldSealer, channelSpec{
 		model:      uniqueModel(),
 		credential: []byte("not-an-envelope"),
 	})
@@ -247,7 +247,7 @@ func TestRotateApplyReportsBadEnvelopePerRow(t *testing.T) {
 	rotator := NewRotator(db, newRotateSealer(t, newKey, oldKey))
 
 	ids := insertRotateRows(t, db, oldSealer, 2)
-	badID := insertChannel(t, db, oldSealer, channelSpec{
+	badID := insertChannel(t.Context(), t, db, oldSealer, channelSpec{
 		model:      uniqueModel(),
 		credential: []byte("not-an-envelope"),
 	})

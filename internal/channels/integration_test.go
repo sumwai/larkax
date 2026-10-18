@@ -112,7 +112,7 @@ type channelSpec struct {
 //
 // 凭证密文默认用 testSealer 现封一份，于是取出来能解开——
 // 只有需要「密文坏了」的用例才自己传 credential。
-func insertChannel(t *testing.T, db *sql.DB, sealer *credential.Sealer, spec channelSpec) int64 {
+func insertChannel(ctx context.Context, t *testing.T, db *sql.DB, sealer *credential.Sealer, spec channelSpec) int64 {
 	t.Helper()
 
 	if spec.status == "" {
@@ -133,7 +133,7 @@ func insertChannel(t *testing.T, db *sql.DB, sealer *credential.Sealer, spec cha
 	}
 
 	var id int64
-	err := db.QueryRowContext(context.Background(), `
+	err := db.QueryRowContext(ctx, `
 		INSERT INTO channels
 			(owner_user_id, name, type, base_url, credential_enc,
 			 status, models, weight, priority, setting)
@@ -158,10 +158,10 @@ func hourBucket(n int) time.Time {
 // 与 insertRollup 分开：那三列正是选路打分的三个维度，「这个用例到底写没写
 // 它们」在调用处要一眼看得出来。收 any 是为了让「这一列是 NULL」也能表达
 // ——写入侧今天写的正是 NULL（latency）与 0（cost / cache）。
-func insertRollupSignals(t *testing.T, db *sql.DB, channelID int64, bucket time.Time,
+func insertRollupSignals(ctx context.Context, t *testing.T, db *sql.DB, channelID int64, bucket time.Time,
 	requests, successes, failures int, p95, cost, cacheHit, cacheMiss any) {
 	t.Helper()
-	_, err := db.ExecContext(context.Background(), `
+	_, err := db.ExecContext(ctx, `
 		INSERT INTO channel_health_rollup
 			(channel_id, bucket, requests, successes, failures,
 			 latency_p95_ms, cost, cache_hit_tokens, cache_miss_tokens)
@@ -172,9 +172,9 @@ func insertRollupSignals(t *testing.T, db *sql.DB, channelID int64, bucket time.
 	}
 }
 
-func insertRollup(t *testing.T, db *sql.DB, channelID int64, bucket time.Time, requests, successes, failures, p95 int, cost string) {
+func insertRollup(ctx context.Context, t *testing.T, db *sql.DB, channelID int64, bucket time.Time, requests, successes, failures, p95 int, cost string) {
 	t.Helper()
-	_, err := db.ExecContext(context.Background(), `
+	_, err := db.ExecContext(ctx, `
 		INSERT INTO channel_health_rollup
 			(channel_id, bucket, requests, successes, failures, latency_p95_ms, cost)
 		VALUES ($1, $2, $3, $4, $5, $6, $7::numeric)`,
@@ -211,7 +211,7 @@ func TestCandidatesReturnsEnabledChannel(t *testing.T) {
 	model := uniqueModel()
 	merchant := seedMerchant(t, db)
 
-	id := insertChannel(t, db, sealer, channelSpec{
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{
 		ownerUserID: merchant, model: model, priority: 7, weight: 3,
 		extraModels: []string{"other-" + model},
 	})
@@ -253,7 +253,7 @@ func TestCandidatesPlatformChannelHasZeroOwner(t *testing.T) {
 	sealer := testSealer(t)
 	model := uniqueModel()
 
-	insertChannel(t, db, sealer, channelSpec{model: model})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 
 	src := New(db, sealer)
 	got, err := src.Candidates(context.Background(), model)
@@ -274,9 +274,9 @@ func TestCandidatesFiltersStatusAndModel(t *testing.T) {
 	sealer := testSealer(t)
 	model := uniqueModel()
 
-	insertChannel(t, db, sealer, channelSpec{model: model, status: "disabled"})
-	insertChannel(t, db, sealer, channelSpec{model: model, status: "drained"})
-	insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model, status: "disabled"})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model, status: "drained"})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 
 	src := New(db, sealer)
 	got, err := src.Candidates(context.Background(), model)
@@ -295,7 +295,7 @@ func TestCandidatesMatchesModelExactly(t *testing.T) {
 	sealer := testSealer(t)
 	model := uniqueModel()
 
-	insertChannel(t, db, sealer, channelSpec{model: model + "-suffix"})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model + "-suffix"})
 
 	src := New(db, sealer)
 	got, err := src.Candidates(context.Background(), model)
@@ -312,11 +312,11 @@ func TestCandidatesIncludesHealthAndQuota(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	id := insertChannel(t, db, sealer, channelSpec{model: model})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 
 	// 两个桶：成功率是两者之和，p95 取**最新**那个非空值。
-	insertRollup(t, db, id, hourBucket(1), 10, 9, 1, 300, "2.0")
-	insertRollup(t, db, id, hourBucket(0), 5, 5, 0, 200, "1.0")
+	insertRollup(t.Context(), t, db, id, hourBucket(1), 10, 9, 1, 300, "2.0")
+	insertRollup(t.Context(), t, db, id, hourBucket(0), 5, 5, 0, 200, "1.0")
 	insertQuota(t, db, id, "12.5", "money", "api_query", "healthy", 1)
 
 	src := New(db, sealer)
@@ -386,16 +386,16 @@ func TestCandidatesRollupSignalsAffectOrdering(t *testing.T) {
 	sealer := testSealer(t)
 	model := uniqueModel()
 
-	withData := insertChannel(t, db, sealer, channelSpec{model: model})
-	withoutData := insertChannel(t, db, sealer, channelSpec{model: model})
+	withData := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
+	withoutData := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 
 	// 两边同一个健康度：20 次请求、2 次成功。没有额度行（未知）。
 	// 有数据的那一个：p95 50ms、20 次请求共 0.02（每次 0.001）、
 	// 缓存命中 80 / 未命中 20。
-	insertRollupSignals(t, db, withData, hourBucket(0), 20, 2, 18,
+	insertRollupSignals(t.Context(), t, db, withData, hourBucket(0), 20, 2, 18,
 		50, "0.02", 80, 20)
 	// 没有数据的那一个：桶在、健康度一样，而那三列就是写入侧今天的样子。
-	insertRollupSignals(t, db, withoutData, hourBucket(0), 20, 2, 18,
+	insertRollupSignals(t.Context(), t, db, withoutData, hourBucket(0), 20, 2, 18,
 		nil, "0", 0, 0)
 
 	src := New(db, sealer)
@@ -470,9 +470,9 @@ func TestCandidatesConsecutiveFailuresFromColumn(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	id := insertChannel(t, db, sealer, channelSpec{model: model})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 
-	insertRollup(t, db, id, hourBucket(0), 4, 0, 4, 900, "0")
+	insertRollup(t.Context(), t, db, id, hourBucket(0), 4, 0, 4, 900, "0")
 	setStreak(t, db, id, 0, nil)
 
 	src := New(db, sealer)
@@ -512,7 +512,7 @@ func TestCandidatesStreakExpiresAfterCooldown(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	id := insertChannel(t, db, sealer, channelSpec{model: model})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 
 	// 16 分钟前失败过：冷却期（15 分钟）已经过了。
 	old := time.Now().UTC().Add(-16 * time.Minute)
@@ -555,7 +555,7 @@ func TestCandidatesWithoutHealthOrQuotaIsUnknown(t *testing.T) {
 	sealer := testSealer(t)
 	model := uniqueModel()
 
-	insertChannel(t, db, sealer, channelSpec{model: model})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 
 	src := New(db, sealer)
 	got, err := src.Candidates(context.Background(), model)
@@ -589,7 +589,7 @@ func TestCandidatesNullRemainingIsUnknown(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	id := insertChannel(t, db, sealer, channelSpec{model: model})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 
 	insertQuota(t, db, id, nil, nil, "self_accounting", "unknown", 0.2)
 
@@ -614,7 +614,7 @@ func TestCandidatesDrainedQuotaIsZero(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	id := insertChannel(t, db, sealer, channelSpec{model: model})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 
 	insertQuota(t, db, id, nil, nil, "error_observed", "drained", 0.6)
 
@@ -641,8 +641,8 @@ func TestCandidatesSurvivesBrokenCredential(t *testing.T) {
 	sealer := testSealer(t)
 	model := uniqueModel()
 
-	insertChannel(t, db, sealer, channelSpec{model: model, credential: []byte{0x99}})
-	insertChannel(t, db, sealer, channelSpec{model: model})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model, credential: []byte{0x99}})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 
 	src := New(db, sealer)
 	got, err := src.Candidates(context.Background(), model)
@@ -663,8 +663,8 @@ func TestCandidatesAllBrokenCredentialsReportsCorrupt(t *testing.T) {
 	sealer := testSealer(t)
 	model := uniqueModel()
 
-	insertChannel(t, db, sealer, channelSpec{model: model, credential: []byte{0x99}})
-	insertChannel(t, db, sealer, channelSpec{model: model, credential: []byte{0x98}})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model, credential: []byte{0x99}})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model, credential: []byte{0x98}})
 
 	src := New(db, sealer)
 	_, err := src.Candidates(context.Background(), model)
@@ -686,7 +686,7 @@ func TestCandidatesWithoutSealerReportsMissingKey(t *testing.T) {
 	sealer := testSealer(t)
 	model := uniqueModel()
 
-	insertChannel(t, db, sealer, channelSpec{model: model})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 
 	src := New(db, nil)
 	_, err := src.Candidates(context.Background(), model)
@@ -710,7 +710,7 @@ func TestCandidatesForeignKeyReportsMissingKey(t *testing.T) {
 		t.Fatalf("构造 Sealer 失败: %v", err)
 	}
 	model := uniqueModel()
-	insertChannel(t, db, other, channelSpec{model: model})
+	insertChannel(t.Context(), t, db, other, channelSpec{model: model})
 
 	src := New(db, testSealer(t))
 	_, err = src.Candidates(context.Background(), model)
@@ -775,9 +775,9 @@ func TestCandidatesSkipsDeletedChannel(t *testing.T) {
 	sealer := testSealer(t)
 	model := uniqueModel()
 
-	deleted := insertChannel(t, db, sealer, channelSpec{model: model})
-	deletedEnabled := insertChannel(t, db, sealer, channelSpec{model: model})
-	live := insertChannel(t, db, sealer, channelSpec{model: model})
+	deleted := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
+	deletedEnabled := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
+	live := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 	softDeleteRow(t, db, deleted)
 	softDeleteKeepingEnabled(t, db, deletedEnabled)
 
@@ -800,7 +800,7 @@ func TestListHidesDeletedChannelUnlessAll(t *testing.T) {
 	admin := newAdmin(t, db, sealer)
 	model := uniqueModel()
 
-	id := insertChannel(t, db, sealer, channelSpec{model: model})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 	// 走生产里那个删除入口，不是直接写库：这一组要钉的正是「删掉之后清单
 	// 怎么表现」，夹具自己拼一遍 deleted_at 的话，删除入口本身改坏了它照样通过。
 	if _, err := admin.SoftDelete(context.Background(), id); err != nil {
@@ -853,10 +853,10 @@ func TestRotateSkipsDeletedChannels(t *testing.T) {
 	sealer := testSealer(t)
 	model := uniqueModel()
 
-	deleted := insertChannel(t, db, sealer, channelSpec{
+	deleted := insertChannel(t.Context(), t, db, sealer, channelSpec{
 		model: model, credential: []byte{0x99}, // 解析不了的信封
 	})
-	live := insertChannel(t, db, sealer, channelSpec{model: model})
+	live := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 	softDeleteRow(t, db, deleted)
 
 	rot := NewRotator(db, sealer)
@@ -891,7 +891,7 @@ func TestRecordCallIgnoresDeletedChannel(t *testing.T) {
 	sealer := testSealer(t)
 	model := uniqueModel()
 
-	id := insertChannel(t, db, sealer, channelSpec{model: model, status: "disabled"})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model, status: "disabled"})
 	softDeleteRow(t, db, id)
 
 	rec := NewRecorder(db, time.Minute)
@@ -1058,7 +1058,7 @@ func TestCandidatesCarryCatalogProfile(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	insertChannel(t, db, sealer, channelSpec{model: model})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 	insertModelCatalog(t, db, model, true, false, true, 200000, 8192)
 
 	got, err := New(db, sealer).Candidates(context.Background(), model)
@@ -1105,7 +1105,7 @@ func TestCandidatesWithoutCatalogRowAreUnknown(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	insertChannel(t, db, sealer, channelSpec{model: model})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 
 	got, err := New(db, sealer).Candidates(context.Background(), model)
 	if err != nil {
@@ -1125,7 +1125,7 @@ func TestCandidatesFailWhenCatalogReadFails(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	insertChannel(t, db, sealer, channelSpec{model: model})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 
 	src := New(db, sealer)
 	src.catalog = &fakeCatalog{inner: src.catalog, err: errors.New("库挂了")}
@@ -1148,7 +1148,7 @@ func TestCandidatesTreatMissingModelAsUnknown(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	insertChannel(t, db, sealer, channelSpec{model: model})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 
 	src := New(db, sealer)
 	src.catalog = &fakeCatalog{inner: src.catalog,
@@ -1171,8 +1171,8 @@ func TestCandidatesReadCatalogOncePerCall(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	insertChannel(t, db, sealer, channelSpec{model: model, extraModels: []string{"x-" + model}})
-	insertChannel(t, db, sealer, channelSpec{model: model})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model, extraModels: []string{"x-" + model}})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 	insertModelCatalog(t, db, model, true, true, true, nil, nil)
 
 	src := New(db, sealer)
@@ -1206,7 +1206,7 @@ func TestCatalogProfileFiltersCandidateInRoute(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	insertChannel(t, db, sealer, channelSpec{model: model})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 	insertModelCatalog(t, db, model, false, false, false, 1000, nil)
 
 	got, err := New(db, sealer).Candidates(context.Background(), model)
@@ -1242,7 +1242,7 @@ func TestUnknownCapabilityDoesNotFilterCandidate(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
-	insertChannel(t, db, sealer, channelSpec{model: model})
+	insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 
 	// 走写入路径且不给任何能力开关：与 `larkaxctl model create --model …
 	// --display …`（不带那六个标志）是同一条路——命令行那一层只把参数搬进
@@ -1395,7 +1395,7 @@ func TestCandidatesCarriesDeclaredEndpoints(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			model := uniqueModel()
 			tc.seed(model)
-			insertChannel(t, db, sealer, channelSpec{model: model})
+			insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
 
 			// ctx 在这个用例里内联着写：insertChannel 是夹具，它自己起一个
 			// context.Background()，本文件其余用例也是这么用的（contextcheck
@@ -1457,12 +1457,12 @@ func TestHealthReadsWindowAndSignals(t *testing.T) {
 	ctx := context.Background()
 	admin := NewAdmin(db, nil, nil)
 
-	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 	// 两行相隔 30 小时的桶：窗口一收，旧的那一行就不该再进汇总。
 	// 缓存 token 两桶给不同的值：汇总里读到的是不是**窗口内那几桶之和**，
 	// 靠它们分得出来（分位数那一栏做不到这件事，它取的是最近一个非空桶）。
-	insertRollupSignals(t, db, id, hourBucket(1), 10, 9, 1, 200, "1.50000000", 300, 700)
-	insertRollupSignals(t, db, id, hourBucket(30), 100, 50, 50, 900, "9.00000000", 1000, 1000)
+	insertRollupSignals(t.Context(), t, db, id, hourBucket(1), 10, 9, 1, 200, "1.50000000", 300, 700)
+	insertRollupSignals(t.Context(), t, db, id, hourBucket(30), 100, 50, 50, 900, "9.00000000", 1000, 1000)
 	insertQuota(t, db, id, "12.5", "tokens", "api_query", "degraded", 0.9)
 	probeAt := hourBucket(2)
 	seedProbeAt(t, db, id, probeAt)
@@ -1539,7 +1539,7 @@ func TestHealthReadsWindowAndSignals(t *testing.T) {
 	})
 
 	t.Run("没有额度状态行的渠道是未知，不是最差", func(t *testing.T) {
-		bare := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+		bare := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 		got, buckets, err := admin.HealthOne(ctx, bare, time.Now().Add(-24*time.Hour))
 		if err != nil {
 			t.Fatalf("HealthOne 失败: %v", err)
@@ -1573,8 +1573,8 @@ func TestHealthReadsWindowAndSignals(t *testing.T) {
 	t.Run("成本那一列的 0 读作没有数据", func(t *testing.T) {
 		// 那一列是 NOT NULL DEFAULT 0 且今天没有生产写入方，于是「有桶、成本是 0」
 		// 只可能表示没记过账。把它当免费会让每一行都显示一个凭空的零成本。
-		zero := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
-		insertRollup(t, db, zero, hourBucket(1), 5, 5, 0, 120, "0.00000000")
+		zero := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
+		insertRollup(t.Context(), t, db, zero, hourBucket(1), 5, 5, 0, 120, "0.00000000")
 
 		got, _, err := admin.HealthOne(ctx, zero, time.Now().Add(-24*time.Hour))
 		if err != nil {
@@ -1604,8 +1604,8 @@ func TestHealthHidesDeletedUnlessAll(t *testing.T) {
 	admin := NewAdmin(db, nil, nil)
 	since := time.Now().Add(-24 * time.Hour)
 
-	alive := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
-	deleted := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	alive := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
+	deleted := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 	softDeleteRow(t, db, deleted)
 
 	contains := func(rows []ChannelHealth, id int64) bool {
@@ -1653,7 +1653,7 @@ func TestRestoreBringsChannelBack(t *testing.T) {
 	ctx := context.Background()
 	admin := NewAdmin(db, nil, nil)
 
-	id := insertChannel(t, db, sealer, channelSpec{model: uniqueModel()})
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 	// 造一个**不是** unknown 的结论：一条本来就是 unknown 的渠道被恢复之后还是
 	// unknown，那样「回落成 unknown」这条断言什么都没钉住。
 	insertQuota(t, db, id, "5", "tokens", "api_query", "drained", 0.9)
@@ -1678,10 +1678,10 @@ func TestRestoreBringsChannelBack(t *testing.T) {
 		streak  int
 		health  string
 	)
-	if err := db.QueryRowContext(ctx,
+	if scanErr := db.QueryRowContext(ctx,
 		`SELECT deleted_at, status, consecutive_failures FROM channels WHERE id = $1`, id).
-		Scan(&deleted, &status, &streak); err != nil {
-		t.Fatalf("读回渠道行失败: %v", err)
+		Scan(&deleted, &status, &streak); scanErr != nil {
+		t.Fatalf("读回渠道行失败: %v", scanErr)
 	}
 	if deleted.Valid {
 		t.Error("恢复之后 deleted_at 应当是 NULL")
@@ -1694,9 +1694,9 @@ func TestRestoreBringsChannelBack(t *testing.T) {
 	if streak != 3 {
 		t.Errorf("恢复不该动连续失败计数：得到 %d，期望 3", streak)
 	}
-	if err := db.QueryRowContext(ctx,
-		`SELECT health FROM channel_quota_state WHERE channel_id = $1`, id).Scan(&health); err != nil {
-		t.Fatalf("读回额度状态失败: %v", err)
+	if scanErr := db.QueryRowContext(ctx,
+		`SELECT health FROM channel_quota_state WHERE channel_id = $1`, id).Scan(&health); scanErr != nil {
+		t.Fatalf("读回额度状态失败: %v", scanErr)
 	}
 	if health != HealthUnknown {
 		// 上一次的结论是软删之前的，直接沿用等于把一段已经过去的历史当成现在的判断。

@@ -643,7 +643,7 @@ func TestListSurvivesCorruptEnvelope(t *testing.T) {
 	sealer := testSealer(t)
 	admin := newAdmin(t, db, sealer)
 
-	broken := insertChannel(t, db, sealer, channelSpec{
+	broken := insertChannel(t.Context(), t, db, sealer, channelSpec{
 		model: uniqueModel(), credential: []byte{0x99},
 	})
 	req := baseRequest("ch-good-" + itoa(nextID()))

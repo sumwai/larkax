@@ -726,9 +726,9 @@ func runChannelHealth(args []string) error {
 	admin := channels.NewAdmin(db, nil, nil)
 
 	if *id > 0 {
-		one, buckets, err := admin.HealthOne(ctx, *id, windowStart)
-		if err != nil {
-			return err
+		one, buckets, healthErr := admin.HealthOne(ctx, *id, windowStart)
+		if healthErr != nil {
+			return healthErr
 		}
 		if jsonOutput() {
 			return emitJSON(os.Stdout,
