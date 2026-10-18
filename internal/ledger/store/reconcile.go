@@ -576,6 +576,10 @@ func (s *Store) Reconcile(ctx context.Context, cfg ReconcileConfig, alert Alert)
 		_ = s.finishReconcileRun(ctx, report, err)
 		return report, err
 	}
+	// 这一支是防御性的：这条路走到这里时 cause 为 nil，status 只会写成
+	// 'done'，与 reconcile_runs 表上的 CHECK 不冲突，运行记录那一行也刚
+	// 由 beginReconcileRun 插进去。唯一能让它返错的是那次 UPDATE 自己失败
+	// （连接断了之类），而那不是任何输入能造出来的形状——别为它编一条用例。
 	if err := s.finishReconcileRun(ctx, report, nil); err != nil {
 		return report, err
 	}
