@@ -126,6 +126,10 @@ func reportedOnly(err error) bool {
 // 路径共用同一个哨兵，所以这里两类并列而不是只列写入。
 var conflictErrors = []error{
 	auth.ErrUserNotFound,
+	// 同一件事在 key 上的对应物：apikey get / update 按 --id 找一行，
+	// 而那一行不在。读与写共用这一个哨兵，所以两条子命令给出同一个退出码
+	// ——按 id 找不到时，下一步都是先跑 apikey list 看库里现在有什么。
+	auth.ErrKeyNotFound,
 	// 「要查的那一行不在」在写入路径上的对应物：解析完用户之后、插入钱包之前
 	// 用户被删，store 那边由外键挡下并返回它（见 store.ErrNoSuchUser）。它与
 	// auth.ErrUserNotFound 是同一个事实的两条路径，共用一个退出码。

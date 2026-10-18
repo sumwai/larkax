@@ -91,6 +91,14 @@ func parseCases() []parseCase {
 		{"apikey create 缺 --user", func() error { return runAPIKeyCreate(nil) }, false, apikeyHint},
 		{"apikey update 缺 --id", func() error { return runAPIKeyUpdate(nil) }, false, apikeyHint},
 		{"apikey update 位置参数多余", func() error { return runAPIKeyUpdate([]string{"extra"}) }, false, apikeyHint},
+		{"apikey update 一个字段都没给", func() error {
+			return runAPIKeyUpdate([]string{"--id", "1"})
+		}, false, apikeyHint},
+		{"apikey update --status 取值不认识", func() error {
+			return runAPIKeyUpdate([]string{"--id", "1", "--status", "suspended"})
+		}, false, apikeyHint},
+		{"apikey get 缺 --id", func() error { return runAPIKeyGet(nil) }, false, apikeyHint},
+		{"apikey get 位置参数多余", func() error { return runAPIKeyGet([]string{"extra"}) }, false, apikeyHint},
 		{"apikey list 位置参数多余", func() error { return runAPIKeyList([]string{"extra"}) }, false, apikeyHint},
 
 		{"user create 缺 --name", func() error { return runUserCreate(nil) }, false, userHint},
@@ -162,6 +170,7 @@ func TestDBUnreachableEntriesExitThree(t *testing.T) {
 	}{
 		{"channel list", func() error { return runChannelList(nil) }},
 		{"apikey list", func() error { return runAPIKeyList(nil) }},
+		{"apikey get", func() error { return runAPIKeyGet([]string{"--id", "1"}) }},
 		{"settings list", func() error { return runSettingsList(nil) }},
 		{"ledger reconcile", func() error { return runReconcile(nil) }},
 		{"migrate up", func() error { return runMigrate([]string{"up"}) }},
@@ -208,6 +217,7 @@ func TestConflictSentinelsExitFour(t *testing.T) {
 		err  error
 	}{
 		{"auth.ErrUserNotFound", auth.ErrUserNotFound},
+		{"auth.ErrKeyNotFound", auth.ErrKeyNotFound},
 		{"store.ErrNoSuchUser", store.ErrNoSuchUser},
 		{"store.ErrNoWallet", store.ErrNoWallet},
 		{"store.ErrTxnConflict", store.ErrTxnConflict},
