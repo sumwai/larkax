@@ -154,6 +154,74 @@ func writeIdempotencyError(w http.ResponseWriter, protocol channel.Protocol, cod
 	writeErrorCode(w, protocol, http.StatusConflict, code, message)
 }
 
+// CodeNoCandidateChannel 是「本地这一侧一条候选渠道都用不上」的错误码。
+//
+// 两种情况共用它，因为调用方的处置是同一件事——去改模型目录声明或渠道配置，
+// 重试多少次都不会变（两者的文案不同，见 noCandidateLeftMessage）：
+//
+//   - 这个模型一条渠道都没挂上（route.ErrNoCandidates）；
+//   - 候选有，但一条都没试过：本地判据在发请求之前把它们全挡了。
+//
+// 它与 CodeChannelTypeUnsupported 分开，判据是**上游调用发生过没有**：这一档
+// 一次都没发生过，那一档发生了、是我们手里的渠道类型接不了这条入口。
+const CodeNoCandidateChannel = "no_candidate_channel"
+
+// CodeChannelTypeUnsupported 是「候选的渠道类型做不了这次请求的协议」的错误码。
+//
+// 判据是每一条试过的候选都回了「这条做不了这件事」（channel.ErrUnsupported
+// 或 channel.ErrUnknownType，见 route.Errors.AllAttemptsUnsupported）。它与
+// CodeNoCandidateChannel 的差别是处置不同：那一档要改的是目录声明，这一档要
+// 换的是一条类型对的渠道。
+const CodeChannelTypeUnsupported = "channel_type_unsupported"
+
+// msgNoCandidateChannel 是「这个模型一条渠道都没挂上」时给调用方的那句话。
+//
+// 它与下面两句说的是同一档（码也同一个）：模型名写错、渠道没建、或者渠道
+// 没声明支持这个模型，都在这一档里。文案分开是因为能说清的东西不同——
+// 这里只知道「没有」，那两句知道是被什么挡住的。
+const msgNoCandidateChannel = "no available upstream for the requested model"
+
+// msgNoCandidateProfile 是「候选有，但目录判据把它们全挡在门外」时的那句话。
+//
+// 说清两件事：挡人的是**模型目录的声明**（不是渠道坏了，也不是请求写错了），
+// 以及**一次上游调用都没发生**——重试多少次都是同一个结果，要改的是目录
+// 声明或渠道配置。档是 CodeNoCandidateChannel。
+//
+// 不带候选数：日志里那句（route.Errors.Error）带，而这里要过英文的单复数
+// 那一关，一句话里多一个数不值得。
+const msgNoCandidateProfile = "no candidate channel supports this request: " +
+	"the model profile rejected every candidate for this model, so no upstream was called"
+
+// msgNoCandidateDrained 是「候选有，但运行状态把它们全挡了」时的那句话。
+//
+// 与 msgNoCandidateProfile 同一档（码也同一个），只有文案不同：这里的处置
+// 是等渠道恢复或加一条，与「目录声明覆盖不到这次请求」不是同一件事。
+const msgNoCandidateDrained = "no candidate channel is available for this request: " +
+	"every candidate for this model is unhealthy or out of quota"
+
+// msgChannelTypeUnsupported 是「试过的候选都做不了这次请求的协议」时的那句话。
+//
+// 档是 CodeChannelTypeUnsupported（见它的注释）。它要和 msgNoCandidateProfile
+// 分得开：那句说「一次都没试过」，这句说「试过了、是类型不对」——处置前者是
+// 改目录声明，后者是换一条类型对的渠道。
+//
+// **范围词只限「试过的」**：判据是 Attempts（见 route.Errors.AllAttemptsUnsupported），
+// 而被本地状态挡掉的候选不在里面——额度与健康度走 Excluded。于是「有候选被状态
+// 挡掉、剩下的都类型不符」也落进这一档，说成「每一条候选」就是在承诺判据没保证
+// 的事。调用方要的是「换一条类型对的渠道」，多说的那部分不改变这个结论。
+//
+// **类型不认识也算这一档**：渠道类型不在当前版本的适配器清单里时也落进来（回滚
+// 之后最容易出现——库里有一条配置，跑着的这个二进制不认识它），错误链里包着的是
+// channel.ErrUnknownType，与 ErrUnsupported 在链上分得开（见 internal/upstream 的
+// Executor.adapter）；两种情况共用一个码，因为调用方要做的是同一件事——换一条
+// 类型对的渠道。
+//
+// 那句 each was rejected 说的是「这条候选没成」，不是「这个类型设计上不做这件事」：
+// 「类型不认识」是部署留下的痕迹，不是渠道的性质，单为它分一个码只会多出一条没人
+// 能照做的分支。
+const msgChannelTypeUnsupported = "no candidate channel type that was tried can serve this protocol: " +
+	"each was rejected because its channel type cannot serve this request"
+
 // CodeInsufficientQuota 是「这个账户现在没法再花这笔钱」的错误码。
 //
 // 它有两个来源，两者给出**同一个**状态码与码：
@@ -254,8 +322,9 @@ const HeaderRetryAfter = "Retry-After"
 // 整数秒是各家 SDK 都直接解析的那种。至少 1 秒——写 0 会让客户端立刻重试，
 // 而它必然还在同一个窗口里，白白多一次往返。
 //
-// 错误体仍然按调用协议给形状（429 → rate_limit_error，见 errorKind），
-// 所以这一条不需要各协议各写一份。
+// 错误体仍然按调用协议给形状（429 推出来的类型是 rate_limit_error，见 errorKind），
+// 所以这一条不需要各协议各写一份：它不带码，Anthropic 那一栏也就仍是推出来的
+// 类型名；带码的那几条（额度、余额、上游限流）会把它顶掉。
 func writeRateLimited(w http.ResponseWriter, protocol channel.Protocol, retryAfter time.Duration) {
 	w.Header().Set(HeaderRetryAfter, strconv.FormatInt(retryAfterSeconds(retryAfter), 10))
 	writeError(w, protocol, http.StatusTooManyRequests,
