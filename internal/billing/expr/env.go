@@ -79,7 +79,7 @@ type Calendar interface {
 	// 实现方只按日期查表，不必关心时区。
 	DayInfo(region string, day time.Time) (DayInfo, error)
 
-	// Peak 判定某地区某个时刻算不算高峰。
+	// Peak 判定某地区某个时刻算不算高峰，并带回判定所依据的那一天。
 	//
 	// windows 是这条规则认的高峰时段，和 hour(tz) 的时区一样由**规则**给出
 	// （见 runtime.env 的 isPeak）：窗口决定「按哪一档计价」，是定价口径，
@@ -89,17 +89,39 @@ type Calendar interface {
 	// **判不出来时返回错误，不答 false**：与 DayInfo 同一条口径，那边是
 	// 未知直接报错。答 false 会在春节期间按低谷价收费，而账单看上去完全正常。
 	//
-	// **用 isPeak 的规则还会用到 TimeZone 与 DayInfo**：求值走这条路时先要把
-	// 「当地」解析出来——那是判峰谷的前提（窗口按当地零点起算），也是复算要
-	// 的两格（见 Result.LocalTime）。那一步按 TimeZone(region) 折出当地那一天，
-	// 再问 DayInfo(region, 那一天)。所以实现方三个方法都得答得出来：
-	// 一个只实现 Peak 的 Calendar 会在 isPeak 上失败，即便 Peak 自己算得出来。
-	// 适配器两条路查的是同一次 Lookup（见 internal/billing/calendaradapter），
-	// 所以从它身上看不出来这一点。
+	// **那一天要一起带回来**（见 PeakVerdict）：窗口按当地零点起算，所以判峰谷
+	// 本来就要先落到当地那一天、问出它是不是休息日——实现方答 Peak 时手上已经
+	// 有这一份。它随判定回来之后，求值不必为了 Result.LocalTime 的两格再查一次
+	// 日历（那两格落的是 usage_events.local_hour / is_off_day），而落库的值与
+	// 这次判定也就成了同一个变量，不必靠「两次查询的入参相同」这个推论。
+	//
+	// 走这条路时实现方还要答得出来 TimeZone：那两格里的钟点按**当地**算，而
+	// 时区是 Calendar 才知道的事（见 runtime.localClock）。**DayInfo 不必**——
+	// 那一天已经随判定回来了；只有 isWorkday() / isHoliday() 才走 DayInfo。
 	//
 	// 休息日整天算不算高峰**不在这个接口上**：那是规则用 isWorkday() 组合
 	// 出来的事（`!isWorkday() || isPeak("08:00-22:00")`），不必再多一个开关。
-	Peak(region string, instant time.Time, windows []PeakWindow) (bool, error)
+	Peak(region string, instant time.Time, windows []PeakWindow) (PeakVerdict, error)
+}
+
+// PeakVerdict 是一次峰谷判定的结果：判定本身，以及判定所依据的那一天。
+//
+// 那一天不是附赠的。判峰谷本来就要先落到当地那一天、问出它是不是休息日
+// （见 internal/calendar 的 PeakAt），所以实现方手里已经有这一份；把它交出来
+// 是为了让求值填 Result.LocalTime 时不必再问一次 DayInfo——落库的那两格于是
+// 与这次判定出自同一个变量，而不是「两次查询问的是同一天」这个推论。
+type PeakVerdict struct {
+	// IsPeak 是判定：这一刻算不算高峰。
+	IsPeak bool
+	// Day 是判定所依据的那一天的日历属性。
+	//
+	// **这是一条对实现方的要求，不是一句描述**：它必须是 TimeZone(region)
+	// 折出来的那一天——**判峰谷内部用的时区，得与 TimeZone 答的是同一个**。
+	// 求值那侧不再自己折一天，两者不一致时也没有哪一处会发现：local_hour
+	// 取自 TimeZone，is_off_day 取自这里，同一行的两格会互相矛盾。那两格存在的
+	// 全部理由是事后复算一笔分时单子，矛盾的两格复算不出当时的价，而库里看不出
+	// 是哪一格错了。
+	Day DayInfo
 }
 
 // PeakWindow 是一段高峰时段：一天之内的 [StartMinute, EndMinute)，
