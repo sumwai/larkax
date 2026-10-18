@@ -222,11 +222,6 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 	// 而那两个字段在下面才写好。
 	defer close(out)
 
-	// 结算与释放都用**不带取消**的 ctx：最需要计费的那一刻，正是客户端
-	// 断开、请求 ctx 已经 Done 的那一刻（理由与 handle.release 相同）。
-	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), streamSettleTimeout)
-	defer cancel()
-
 	est := tokens.NewStreamEstimator(g.Counter, upstream.Model)
 	// 估算器的方法不收 ctx，下面三处也不给它传一个——这是有意的，不是漏了：
 	// 它们全是纯内存累加，唯一的 I/O 是词表加载，而那发生在 Counter 构造与
@@ -446,10 +441,9 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 		// 我们会在一条已经正常结束的流后面追加一个错误帧——调用方同时看到
 		// 「正常结束」与「出错了」。
 		//
-		// 用 settleCtx 之外的 ctx（observe 内部自己配一个不带取消的上限）：
-		// settleCtx 的 10 秒预算是从**这条流开始**算的，而一次补冻可能发生在
-		// 流的第 30 秒——拿它去写库必然超时（见 settleCtx 的注释与
-		// streamFreezeTimeout）。
+		// 补冻用**它自己那一份** ctx（observe 内部配一个不带取消的上限，见
+		// streamFreezeTimeout），不用收尾那份：两者计时的起点不同——补冻发生在
+		// 流中间，而收尾的预算要到收尾才开始算（见下面建 settleCtx 的位置）。
 		if !done {
 			if freezeErr := freeze.observe(ctx, freeze.produced(est, measured)); freezeErr != nil {
 				// 余额不够覆盖已经产出的部分：切断这条流，而且只到这里为止。
@@ -527,6 +521,22 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 	case done && streamErr == nil:
 		verdict = route.VerdictSuccess
 	}
+
+	// 收尾（结算 + 释放）的预算在**这一刻**才开始算，不是流的开头。
+	//
+	// 建在流的开头就等于「整条流可以跑多久」：deadline 从第一片开始走，而它
+	// 要到下面才被用。一条跑得比它久的流（LLM 的流跑过十秒是常态）拿到的是一份
+	// 早就过期的 ctx，结算与落库一并失败，于是按既有规则把预留释放掉——钱一分
+	// 没收，而调用方看到的是一次正常结束的流。
+	//
+	// 这条错误是静默的：失败的方向是**释放**，不是「钱一直冻着」，所以既没有
+	// 卡住的钱、也没有调用方报错，只在日志里留一行，对账时表现为余额与用量对
+	// 不上。收尾要多久是收尾自己的事，与这条流跑了多久无关（见 streamSettleTimeout）。
+	//
+	// 去掉取消的理由与 handle.release 相同：最需要计费的那一刻，正是客户端
+	// 断开、请求 ctx 已经 Done 的那一刻。
+	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), g.settleTimeout())
+	defer cancel()
 
 	if !ours && !done && !started {
 		// 上游在接受请求之后、吐出任何内容之前就结束了（报错或直接断开）。
@@ -739,9 +749,10 @@ func (f *streamFreeze) observe(ctx context.Context, produced int64) error {
 	}
 
 	// 这一次补冻的时间上限由**这一次**决定，而不是由「这条流已经跑了多久」决定
-	// ——settleCtx 的预算是从流开始算的，拿它去写库会让一次长流的补冻必然超时。
+	// ——补冻在流中间，而收尾那份预算要到收尾才开始算（见 pumpStream 里建
+	// settleCtx 的位置），两者计时的起点不同，合用一个是错的。
 	// 同时去掉取消：客户端断开那一刻已经产出的 token 仍然要冻上、要计费，理由与
-	// settleCtx 用 WithoutCancel 相同。
+	// 收尾那份用 WithoutCancel 相同。
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), streamFreezeTimeout)
 	defer cancel()
 
@@ -809,9 +820,9 @@ func roundUpTo(n, step int64) int64 {
 
 // streamFreezeTimeout 是**一次**补冻（算价 + 写库）的时间上限。
 //
-// 与 streamSettleTimeout 分开，因为它们计时的起点不同：那个是整条流收尾的预算
-// （从流开始算），而这个是每一次补冻各自的预算。合用一个是错的——一条跑了两分钟
-// 的流在第二个检查点上拿到的会是一份早就过期的预算（见 streamFreeze.observe）。
+// 与 streamSettleTimeout 分开：那个只管收尾那一次（结算 + 释放），这个管流中间
+// 的每一次补冻。两者不是同一件事——收尾在流结束后只发生一次，补冻按检查点反复
+// 发生，而一次补冻卡住会直接停住上游的输出（见 streamFreeze.observe）。
 //
 // 5 秒比 streamSettleTimeout 短：补冻在一段流中间，卡住会直接停住上游的输出，
 // 而收尾那次结算不再有人等（流已经结束了）。够不着就放行、记账（见
@@ -1187,8 +1198,24 @@ func streamTruncated(streamErr error, started, done, ours bool) bool {
 
 // streamSettleTimeout 是流式收尾（结算 + 释放）的时间上限。
 //
+// **从收尾那一刻开始算**，不是从这条流的第一片（见 pumpStream 里建它的位置）：
+// 它说的是「收尾要多久」，而不是「整条流可以跑多久」。两者混起来时，一条跑得
+// 比它久的流会静默地不记账（见那里的注释）。
+//
 // 与 releaseTimeout 分开：那个只管一次按主键定位的单行 UPDATE，这个还要
 // 匹配规则、构造分录、写账本，是一次事务。取 10 秒的依据与它相同——
 // 连事务都提交不进去时，说明库已经不接受写入了，放宽上限也救不回来，
 // 而这一步的全部意义是不许挂住。
 const streamSettleTimeout = 10 * time.Second
+
+// settleTimeout 是**一次**收尾的预算：默认 streamSettleTimeout，可注入
+// （见 Gateway.SettleTimeout）。
+//
+// 注入那条路只为一件事：让「跑得比收尾预算久的流」这个形状能在用例里构造
+// 出来，而不必让每条用例真等十秒。
+func (g *Gateway) settleTimeout() time.Duration {
+	if g.SettleTimeout > 0 {
+		return g.SettleTimeout
+	}
+	return streamSettleTimeout
+}
