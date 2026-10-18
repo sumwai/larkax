@@ -73,12 +73,16 @@ func TestSettingsListRejectsPositional(t *testing.T) {
 // 值打的是 jsonb 原文：字符串带引号、布尔与整数不带。这不是排版偏好——
 // 这一列里到底存了什么正是核对时要看的东西，而一个漏了引号的字符串配置
 // 解码之后与正常的看起来一模一样，可它会让服务起不来。
+//
+// 那句「值打的是 jsonb 原文」只在 -v 下打：它在每一次 list 里都会出现，
+// 属于「每次成功运行都有的解释」，读第二遍就不再是信息。所以这里跑两档：
+// 带说明的那一档（下面按行号断言的那一份）与默认那一档（少一行，且没有
+// 那句话）。
 func TestPrintSettingsList(t *testing.T) {
 	by := int64(7)
 	at := time.Date(2026, 10, 17, 6, 10, 0, 0, time.UTC)
 
-	var buf bytes.Buffer
-	printSettingsList(&buf, []settings.Entry{
+	entries := []settings.Entry{
 		{
 			// 接线正常的键：plugin.enabled 现在真的被读了（见 internal/plugin
 			// 的 LoadConfig 与 internal/assembly 那几条装配用例），所以它
@@ -103,7 +107,10 @@ func TestPrintSettingsList(t *testing.T) {
 			Key: "typo.key", Value: []byte(`1`),
 			Editable: true, UpdatedAt: at,
 		},
-	})
+	}
+
+	var buf bytes.Buffer
+	printSettingsList(&buf, entries, true)
 
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 	// 一行表头；plugin.enabled 两行（元数据、说明）；
@@ -164,6 +171,16 @@ func TestPrintSettingsList(t *testing.T) {
 	if !strings.Contains(third, "typo.key = 1") || !strings.Contains(third, "[未声明]") {
 		t.Errorf("未声明的键没有被标出来：%q", third)
 	}
+
+	// 默认那一档：同一张表，少的正是上面那句解释。
+	var plain bytes.Buffer
+	printSettingsList(&plain, entries, false)
+	if strings.Contains(plain.String(), "jsonb 原文") {
+		t.Errorf("那句解释只在 -v 下打，默认输出里不该有：\n%s", plain.String())
+	}
+	if got := len(strings.Split(strings.TrimRight(plain.String(), "\n"), "\n")); got != len(lines)-1 {
+		t.Errorf("默认那一档打了 %d 行，比带说明的那一档少一行：\n%s", got, plain.String())
+	}
 }
 
 // TestPrintSettingsSetResult 钉住 `settings set` 写完之后的输出。
@@ -203,7 +220,7 @@ func TestPrintSettingsSetResult(t *testing.T) {
 
 func TestPrintSettingsListEmpty(t *testing.T) {
 	var buf bytes.Buffer
-	printSettingsList(&buf, nil)
+	printSettingsList(&buf, nil, false)
 	if got, want := buf.String(), "settings 表是空的。\n"; got != want {
 		t.Errorf("空清单 = %q，期望 %q", got, want)
 	}
@@ -467,12 +484,14 @@ func TestSettingsListJSONStdoutIsMachineReadable(t *testing.T) {
 	}
 }
 
-// json 模式下，Load 那份校验照旧跑：警告走 stderr，结论由 exit_code 说出来。
+// json 模式下，Load 那份校验照旧跑：结论由 exit_code 说出来，出错那句话走错误
+// 出口（main 打的那一行），命令自己不再另打一句。
 //
 // 这一条钉住的是「配置有问题」这件事在机器可读输出里的落点。它有三个不能错的
-// 地方：stdout 上仍然只有一份 JSON（警告混进去会让 jq 报错）、那句话确实出现在
-// stderr、以及那份**清单照旧列出来**——配置有问题的时候恰恰是最需要看到内容的
-// 时候，一个「校验不过就什么都不列」的清单等于在最需要它的时候闭嘴。
+// 地方：stdout 上仍然只有一份 JSON（一句话混进去会让 jq 报错）、stderr 上**没有**
+// 那一行（同一件事只报一次，见 streams_test.go 的同名判据）、以及那份**清单照旧
+// 列出来**——配置有问题的时候恰恰是最需要看到内容的时候，一个「校验不过就什么都
+// 不列」的清单等于在最需要它的时候闭嘴。
 func TestSettingsListJSONKeepsValidationWarningOffStdout(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
@@ -519,11 +538,13 @@ func TestSettingsListJSONKeepsValidationWarningOffStdout(t *testing.T) {
 	if got.ExitCode != exitFailure {
 		t.Errorf("报告里的 exit_code = %d，想要 %d", got.ExitCode, exitFailure)
 	}
-	if !strings.Contains(stderr, "警告：") {
-		t.Errorf("校验不过那句话应当在 stderr 上：%q", stderr)
+	// 命令自己不再打附注：那句话走错误出口（main 打 `larkaxctl: …` 那一行），
+	// 而错误里带着「加载不起来」这半句——使用者要知道的是这意味着什么。
+	if stderr != "" {
+		t.Errorf("这一档的 stderr 应当是空的，那句话走错误出口：%q", stderr)
 	}
-	if strings.Contains(stdout, "警告") {
-		t.Errorf("警告混进了 stdout：\n%s", stdout)
+	if !strings.Contains(err.Error(), "这套配置服务加载不起来") {
+		t.Errorf("返回的错误要带上「加载不起来」，实际是 %v", err)
 	}
 
 	// 那一行自己要在清单里，且 kind 是 null——它是「服务加载不起来」的直接

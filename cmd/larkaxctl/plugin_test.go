@@ -260,25 +260,32 @@ func TestPluginPublishEnableDisable(t *testing.T) {
 		t.Error("pending 的插件不该参与注册")
 	}
 
-	enableOut, _ := captureStreams(t, func() {
+	// 回显走 stderr：stdout 只放能被脚本接走的值，而这条命令没有新值要给出去。
+	enableOut, enableNote := captureStreams(t, func() {
 		if err := runPluginSetEnabled([]string{key}, true); err != nil {
 			t.Errorf("启用失败: %v", err)
 		}
 	})
-	if !strings.Contains(enableOut, "已启用") {
-		t.Errorf("启用之后的输出里没有「已启用」：%q", enableOut)
+	if !strings.Contains(enableNote, "已启用") {
+		t.Errorf("启用之后的回显里没有「已启用」：%q", enableNote)
+	}
+	if strings.Contains(enableOut, "已启用") {
+		t.Errorf("回显不该混进 stdout：%q", enableOut)
 	}
 	if !hasActive(t, db, key) {
 		t.Error("启用之后该参与注册")
 	}
 
-	disableOut, _ := captureStreams(t, func() {
+	disableOut, disableNote := captureStreams(t, func() {
 		if err := runPluginSetEnabled([]string{key}, false); err != nil {
 			t.Errorf("停用失败: %v", err)
 		}
 	})
-	if !strings.Contains(disableOut, "已停用") {
-		t.Errorf("停用之后的输出里没有「已停用」：%q", disableOut)
+	if !strings.Contains(disableNote, "已停用") {
+		t.Errorf("停用之后的回显里没有「已停用」：%q", disableNote)
+	}
+	if strings.Contains(disableOut, "已停用") {
+		t.Errorf("回显不该混进 stdout：%q", disableOut)
 	}
 	if hasActive(t, db, key) {
 		t.Error("停用之后不该参与注册")

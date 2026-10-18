@@ -547,13 +547,17 @@ func TestChannelDeleteSoftDeletes(t *testing.T) {
 	id := createTestChannel(t, uniqueName("channel"), uniqueName("model"))
 	idArg := strconv.FormatInt(id, 10)
 
-	out, _ := captureStreams(t, func() {
+	// 回显走 stderr（stdout 只放能被脚本接走的值，而 delete 没有新值要给出去）。
+	out, note := captureStreams(t, func() {
 		if err := runChannelDelete([]string{"--id", idArg}); err != nil {
 			t.Fatalf("delete 失败: %v", err)
 		}
 	})
-	if !strings.Contains(out, "已删除渠道 "+idArg) {
-		t.Errorf("delete 的输出不对：\n%s", out)
+	if !strings.Contains(note, "已删除渠道 "+idArg) {
+		t.Errorf("delete 的回显不对：\n%s", note)
+	}
+	if strings.Contains(out, "已删除渠道") {
+		t.Errorf("回显不该混进 stdout：\n%s", out)
 	}
 
 	// 一、默认清单不含它，--all 含它并标出删除时刻。
@@ -605,13 +609,17 @@ func TestChannelDeleteSoftDeletes(t *testing.T) {
 	}
 
 	// 二、再删一次是幂等的。
-	out, _ = captureStreams(t, func() {
+	repeatOut, repeatNote := captureStreams(t, func() {
 		if err := runChannelDelete([]string{"--id", idArg}); err != nil {
 			t.Fatalf("再删一次不该报错（幂等），得到 %v", err)
 		}
 	})
-	if !strings.Contains(out, "已经是删除状态") {
-		t.Errorf("重复删除的输出不对：\n%s", out)
+	// 这一句是确认，不是值：走 stderr（见 docs/cli-output.md 的「提示与警告」）。
+	if !strings.Contains(repeatNote, "已经是删除状态") {
+		t.Errorf("重复删除的输出不对：\nstdout:\n%s\nstderr:\n%s", repeatOut, repeatNote)
+	}
+	if strings.Contains(repeatOut, "已经是删除状态") {
+		t.Errorf("重复删除的确认混进了 stdout：\n%s", repeatOut)
 	}
 
 	// 三、不存在的 id 仍然报错，退出码走「要改的那一行不存在」。
