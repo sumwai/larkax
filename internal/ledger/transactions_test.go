@@ -827,3 +827,86 @@ func TestMemoWithOrderEmptyVariants(t *testing.T) {
 		t.Errorf("单据号里的控制字符应被清洗，得到 %q", got)
 	}
 }
+
+// 分成与上游成本之和**恰好**等于售价时应当被接受，只有大于才拒。
+//
+// 变异：把 `Cmp(p.Amount) > 0` 改成 `>= 0`，恰好相等的那些单被误拒——而它们
+// 正是「上游成本原样转给用户」这一类零毛利单，拒掉等于整类单发不出去。
+// 原先只测过「之和明显超过售价」，没测相等这个边界。
+func TestConsumeZeroMarginIsAccepted(t *testing.T) {
+	p := ConsumeParams{
+		TxnID: NewTxnID(), UserID: 1, Asset: AssetCNY,
+		Amount:        money.MustParse("10"),
+		MerchantShare: money.MustParse("5"),
+		MerchantID:    7,
+		UpstreamCost:  money.MustParse("5"),
+	}
+	if _, err := Consume(p); err != nil {
+		t.Errorf("分成与上游成本之和恰好等于售价时应当被接受，得到 %v", err)
+	}
+
+	// 大一点点就该拒：那一单在亏钱，该改定价而不是写负收入。
+	p.UpstreamCost = money.MustParse("5.00000001")
+	if _, err := Consume(p); err == nil {
+		t.Error("分成与成本之和超过售价应被拒绝")
+	}
+}
+
+// 退款侧的同一条边界：要冲回的分成与成本恰好等于退款额时应当被接受。
+//
+// 变异：把 Refund 里的 `Cmp(p.Amount) > 0` 改成 `>= 0`。Consume 与 Refund 的
+// 判据是**分开写的两处**，改一处不影响另一处，所以上面的用例管不到这里——
+// 退款侧的这条边界原先一格都没有。
+func TestRefundZeroMarginIsAccepted(t *testing.T) {
+	p := RefundParams{
+		TxnID: NewTxnID(), UserID: 1, Asset: AssetCNY,
+		Amount:        money.MustParse("10"),
+		MerchantShare: money.MustParse("5"),
+		MerchantID:    7,
+		UpstreamCost:  money.MustParse("5"),
+	}
+	if _, err := Refund(p); err != nil {
+		t.Errorf("要冲回的分成与成本之和恰好等于退款额时应当被接受，得到 %v", err)
+	}
+
+	// 大一点点就该拒：多冲回的那一分钱没有对应的消费。
+	p.UpstreamCost = money.MustParse("5.00000001")
+	if _, err := Refund(p); err == nil {
+		t.Error("要冲回的分成与成本之和超过退款额应被拒绝")
+	}
+}
+
+// 退款分录也要挂上被退的那次计费请求——与 Consume 侧那条同构。
+//
+// 变异：把 Refund 里的 `if p.BillingRequestID > 0` 方向改掉，给了计费请求的
+// 那些分录退化成没有关联。两处判据分开写，Consume 侧那条管不到这里，而少了
+// billing_request_id 的退款在争议发生时无从追溯「退的是哪一次请求」。
+func TestRefundAttachesBillingRequest(t *testing.T) {
+	txn := newTxnID(t, txnA)
+	tx, err := Refund(RefundParams{
+		TxnID: txn, UserID: 1, Amount: amount(t, "1"), Asset: AssetCNY, BillingRequestID: 99,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range tx.Entries {
+		if e.BillingRequestID == nil || *e.BillingRequestID != 99 {
+			t.Errorf("分录 %s 没有挂上 billing_request_id", e.Account)
+		}
+	}
+
+	// 反着也要判：没给计费请求时，字段该是**空的**。「关联到 0」与「没有关联」
+	// 在这一层不能混同，少判这一半的话判据往边界上偏一格仍然通过。
+	plain, err := Refund(RefundParams{
+		TxnID: newTxnID(t, txnB), UserID: 1, Amount: amount(t, "1"), Asset: AssetCNY,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range plain.Entries {
+		if e.BillingRequestID != nil {
+			t.Errorf("没给计费请求时分录 %s 不该挂上 billing_request_id，得到 %d",
+				e.Account, *e.BillingRequestID)
+		}
+	}
+}
