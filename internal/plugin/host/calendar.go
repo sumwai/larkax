@@ -212,8 +212,8 @@ func peakFn(env Env) func(context.Context, []moejs.Value) (moejs.Value, error) {
 			return moejs.Undefined(), err
 		}
 		window := argString(args, 2)
-		if err := checkPeakWindow(window); err != nil {
-			return moejs.Undefined(), err
+		if winErr := checkPeakWindow(window); winErr != nil {
+			return moejs.Undefined(), winErr
 		}
 		kind, err := env.Calendar.Peak(ctx, region, instant, window)
 		if err != nil {

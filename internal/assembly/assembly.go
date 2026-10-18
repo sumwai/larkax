@@ -722,9 +722,9 @@ func (a pluginCalendar) Peak(ctx context.Context, region string, instant time.Ti
 	}
 	windows := make([]calendar.PeakWindow, 0, len(parsed))
 	for _, w := range parsed {
-		pw, err := calendar.NewPeakWindow(w.StartMinute, w.EndMinute)
-		if err != nil {
-			return "", err
+		pw, winErr := calendar.NewPeakWindow(w.StartMinute, w.EndMinute)
+		if winErr != nil {
+			return "", winErr
 		}
 		windows = append(windows, pw)
 	}
