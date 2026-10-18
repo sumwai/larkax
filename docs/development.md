@@ -1,13 +1,45 @@
 # 本地开发环境
 
+本文件很长，按下面的目录找。想看「这个仓库有哪些文档」而不是「这一份讲了什么」，
+去 [docs/README.md](README.md) 的索引。
+
+- [需要什么](#需要什么)
+- [一次跑通](#一次跑通)
+- [请求快照](#请求快照)
+- [用量事件的分区](#用量事件的分区)
+- [分时计价的日历数据](#分时计价的日历数据)
+- [环境变量](#环境变量)
+- [加一个配置项](#加一个配置项)
+- [主密钥](#主密钥)
+- [建表](#建表)
+- [配一条能接请求的链路](#配一条能接请求的链路)
+- [造用户、造 key、打一次请求](#造用户造-key打一次请求)
+- [检查这条链路通不通](#检查这条链路通不通)
+- [给一把 key 设额度](#给一把-key-设额度)
+- [当前能做什么](#当前能做什么)
+- [决策接口（`/v1/systemone`）](#决策接口v1systemone)
+- [常用检查](#常用检查)
+- [CI 跑什么](#ci-跑什么)
+- [变异测试](#变异测试)
+
 ## 需要什么
 
-- Go 1.26 或更新（`go.mod` 里写明了最低版本）
+- Go 1.26 或更新（`go.mod` 里写明了最低版本）。本机装的是更低的版本也不必先
+  升级：进到模块目录里构建时，`go` 会自动拉取 `go.mod` 要的那一版。`go version`
+  在模块外打的是本机那一版，`go env GOTOOLCHAIN` 说明允不允许自动拉取。
 - Docker 与 `docker compose` v2.1 或更新（跑 PostgreSQL）
 - `make`
-- 只有开发前端才需要 Node.js 20 或更新
+- `openssl`——`make` 用它生成主密钥（见「主密钥」一节）。**没有它时生成的 `.env`
+  里主密钥是空的**，服务会以「主密钥未设置」拒绝启动。
+- 开发前端（`web/`，尚未落地）才需要 Node.js 20 或更新
 - **要真的打通一次推理**，还需要一个上游服务与它的凭证——本仓库不自带上游，
   示例里的上游地址都是假的
+
+三个端口要在本机上有空位：PostgreSQL 的 `5432`、公共入口的 `8080`、内部端点的
+`9090`。三个都能换——`make run PG_PORT=55432`，两个监听地址见「一次跑通」里的
+`LARKAX_HTTP_ADDR` / `LARKAX_INTERNAL_ADDR`。**下文示例里的端口写的是默认值**，
+换过的话那些示例要跟着换，否则连不上——而「连不上」与「服务没起来」在终端里
+长得一样。
 
 **app 不进容器。** compose 只负责依赖的生命周期，服务本身留在宿主上 `go run`——
 改一行即时生效，不必每改一次就 rebuild 镜像。全栈容器化适合「只想跑起来看看」，
@@ -49,7 +81,7 @@ DSN 指向的不是本机时不同步——那种 `.env` 是故意配到远端�
 不止「连不上」：如果原端口上恰好有另一个 larkax 库、口令也相同，连接会
 **安静地成功**，然后迁移打到了那个库上，而人以为打的是自己刚起的那个。
 
-验证：
+验证（这里用的是默认端口；换过端口的话，下面几行的端口也要换）：
 
 ```sh
 curl -i 127.0.0.1:9090/healthz
@@ -92,6 +124,11 @@ LARKAX_INTERNAL_ADDR="127.0.0.1:8082"
 | `make migrate` | 只跑迁移 |
 | `make test` | 跑测试（先确保依赖起着） |
 | `make clean` | 清容器、数据卷与生成的 `.env`，回到刚克隆的状态 |
+| `make init` | 只生成或同步 `.env`，不碰容器 |
+| `make check-ports` | 只查那两个监听地址有没有被占（`make run` 起服务之前会跑它） |
+| `make help` | 把常用的那几条打出来（不含本表里的 `init` 与 `check-ports`） |
+
+`make migrate` 与 `make test` 都会先跑 `make init`——它们都要那份 DSN。
 
 `make test` 会先起依赖并加载 `.env`——集成测试拿不到 `LARKAX_DB_DSN` 时会**跳过**，
 而「跳过」在输出里和「通过」长得一样。
@@ -209,13 +246,13 @@ echo '{"model":"...","messages":[...]}' | \
 决策表然后以为规则写漏了。名字不认识时命令**报错退出**，不静默回退：
 打出一份看着正常的允许表，比报错更坏。
 
-`show` 是读**敏感数据**的动作，所以每一次读都会往 `snapshot_access_log`
+`get` 是读**敏感数据**的动作，所以每一次读都会往 `snapshot_access_log`
 写一行（谁、什么时候、什么理由、读了哪一条）。写日志与读快照在同一个事务里：
 日志写不进去时命令整体失败，一行数据都不返回。`--actor` 与 `--reason` 都没有
 默认值——「我写了 --reason」与「我忘了写」在库里必须分得开。
 
 同一个 `request_id` 可能有多行（请求与响应各一行，重试也可能各一行），
-`show` 全部按 `created_at` 升序打出来。`skeleton_truncated` 为真的那条会额外
+`get` 全部按 `created_at` 升序打出来。`skeleton_truncated` 为真的那条会额外
 说明它被降级成了摘要层——一份被截断的骨架与一份完整的骨架在肉眼下长得一样。
 
 `redact` 的骨架走 stdout（可以直接接给 `jq`），方向、字节上限、被替换的路径
@@ -224,6 +261,7 @@ echo '{"model":"...","messages":[...]}' | \
 
 标准输入有 64 MiB 上限，不配开关：这条命令是拿一段**单次请求**的报文来试，
 不是拿整份日志。把整份日志喂进来会超出上限并报错，要先拆开、一次喂一段。
+
 ## 用量事件的分区
 
 `usage_events` 按月分区，粒度与维护方式都与快照不同——**分区不会自己长出来**，
@@ -262,8 +300,8 @@ go run ./cmd/larkaxctl price calendar import ./cn-2031.json
 | `LARKAX_MASTER_KEYS` | 无 | `gateway` 与 `control` **必填**，`worker` 不需要 |
 | `LARKAX_HTTP_ADDR` | `127.0.0.1:8080` | 业务入口监听地址 |
 | `LARKAX_INTERNAL_ADDR` | `127.0.0.1:9090` | 内部端点监听地址 |
-| `LARKAX_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
-| `LARKAX_ENV` | `development` | 设为 `production` 切换日志格式 |
+| `LARKAX_LOG_LEVEL` | `info` | `debug` / `info` / `warn`（`warning` 也认）/ `error` |
+| `LARKAX_ENV` | `development` | 只有 `production` 特殊：它把日志格式切成 JSON。**其余任何取值都等同 `development`**，写成 `prod` 既不会报错也不会切过去 |
 | `LARKAX_REDIS_DSN` | 空 | 限流的共享计数（`redis://` / `rediss://` / `unix://`）。留空时计数在进程内，单实例正确、多实例下额度按实例数放大 |
 
 两个监听地址默认只绑回环（`127.0.0.1`），服务因此默认只在本机可达。容器里端口
@@ -362,6 +400,13 @@ go run ./cmd/larkaxctl settings set --key plugin.enabled --value true --by alice
 LARKAX_MASTER_KEYS="current:<MASTER_KEY>,previous:<MASTER_KEY>"
 ```
 
+两处 `<MASTER_KEY>` 是**两把不同的钥匙**，各跑一次 `openssl rand -base64 32`。
+两处写成同一个值，下面「轮换」与「丢一把不至于毁掉存量数据」这两条理由就当场
+失效了。示例里两处拼写相同，是因为 `make` 会把整段替换成一把生成的钥匙。
+
+`make` 写进去的是**一把不带标识的裸 base64**，标识取默认值 `default`；手工填时
+按上面这个形状写。
+
 为什么支持多把：渠道凭证是用数据密钥（DEK）加密的，DEK 又用每把主密钥各包一份存在库里。
 任何一把都能解开 DEK，所以——
 
@@ -443,6 +488,22 @@ go run ./cmd/larkaxctl migrate up
 下面四条命令按顺序跑完，就有了一条能接请求的链路。示例里的上游是假的
 （`https://api.example.com/v1`），换成你自己的即可。
 
+文中 `<...>` 是**占位符**，尖括号本身不要原样粘进 shell：出现在参数位上时
+（`--upstream <上游模型 id>`）它是安全的，出现在赋值前时
+（`LARKAX_CHANNEL_CREDENTIAL=<凭证>`）shell 会把尖括号当成重定向，那一行不会
+设置任何环境变量。手工填值时把整段用单引号括起来。
+
+**先问你的上游它有哪些模型 id。** 渠道的 `--models` 与别名的 `--upstream` 填的是
+**上游自己的 id**，不是它宣传页上的名字——这两者经常不一样：
+
+```sh
+curl -s https://api.example.com/v1/models -H "Authorization: Bearer $UPSTREAM_KEY"
+```
+
+猜一个名字的代价不是当场报错：`doctor` 照样全绿（它不校验上游侧的名字），第一次
+真实调用才回 `503 no available upstream for the requested model`，而那句话**不点名
+是哪个名字不对**（见「检查这条链路通不通」）。
+
 这些命令直接用 `go run` 即可：`larkaxctl` 自己会读 `.env`（见上文
 「环境变量」），不必先手工导出。
 
@@ -509,14 +570,23 @@ cat secret.txt | go run ./cmd/larkaxctl channel create \
   --models claude-x --credential-stdin
 
 # 或者从环境变量
-LARKAX_CHANNEL_CREDENTIAL=<CHANNEL_CREDENTIAL> go run ./cmd/larkaxctl channel create \
+LARKAX_CHANNEL_CREDENTIAL='<CHANNEL_CREDENTIAL>' go run ./cmd/larkaxctl channel create \
   --name my-upstream --type openai --base-url https://api.example.com/v1 \
   --models claude-x --credential-env LARKAX_CHANNEL_CREDENTIAL
 ```
 
-`--type` 必须是已注册的适配器类型（当前是 `openai`、`anthropic` 与
-`openai-responses`）。上面的示例用 `openai` 只是占位；上游说的是 Anthropic
-协议（例如 Claude）时用 `anthropic`，不要照抄示例的 `openai`。
+`--type` 必须是已注册的适配器类型（当前是 `openai`、`anthropic`、
+`openai-responses` 与 `systemone`——最后一条是决策表面，见「决策接口」一节）。
+上面的示例用 `openai` 只是占位；上游说的是 Anthropic 协议（例如 Claude）时用
+`anthropic`，不要照抄示例的 `openai`。
+
+`--base-url` 填到**端点之前**：`/chat/completions`（`anthropic` 渠道则是
+`/messages`）由我们补上去。带不带版本段都行——`https://api.example.com/v1` 与
+`https://api.example.com` 拼出来是同一条 URL，已经带了 `/v1` 时不会重复加。
+**端点本身不能写进去**：`https://api.example.com/v1/chat/completions` 会拼成
+`…/v1/chat/completions/v1/chat/completions`，上游回 `404`——而那个 404 长得
+很像「模型不存在」。
+
 `--models` 是这条渠道支持的**规范模型名**（第一步建的那个），至少一个：
 读取路径把 `models` 当白名单用，空数组的渠道永远选不中。
 stdout 只有新渠道的 ID，其余信息走 stderr。
@@ -783,13 +853,16 @@ go run ./cmd/larkaxctl wallet credit --user alice --amount 100 --ref ORD-2026101
 curl -i 127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer $KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"<模型名>","messages":[{"role":"user","content":"hi"}],"max_tokens":1024}'
+  -d '{"model":"claude-x","messages":[{"role":"user","content":"hi"}],"max_tokens":1024}'
 ```
+
+`"model"` 填的是第一步那条**规范名**（这里就是 `claude-x`），不是别名里的上游名
+——规范名是选路与计费共用的键。填成上游名会选不中任何渠道，回 `503`。
 
 `max_tokens` 是**必填**的，虽然 OpenAI 协议里它可选：预留必须有上界，而预留上界
 由它算出来（见 `billing.ErrNoUpperBound`）。漏了它会在请求出网关之前就回 400
-`max_tokens is required`，错误里不会提到这是本地网关的要求。写 `stream: true`
-则走 SSE，其余字段照旧。
+`max_tokens is required: the request must set a positive output token limit`，
+错误里不会提到这是本地网关的要求。写 `stream: true` 则走 SSE，其余字段照旧。
 
 推理接口接到公共端口上的进度见下文「当前能做什么」。
 
@@ -814,7 +887,8 @@ go run ./cmd/larkaxctl ledger balance --all
 go run ./cmd/larkaxctl doctor
 ```
 
-它按顺序查六项，每一项都打出「检查了什么、结论是什么」：
+它按顺序查六项，每一项都打出「检查了什么、结论是什么」；末尾另有一行「上游连通」，
+不加 `--live` 时那一行一直是 `-`（见「真打一次上游」）：
 
 | # | 查什么 |
 |---|---|
@@ -879,19 +953,29 @@ cat key.txt | go run ./cmd/larkaxctl doctor --live --model claude-x --credential
 |---|---|
 | `--model <规范名>` | 这次请求用的规范模型名，`--live` 时必填 |
 | `--endpoint chat\|messages\|responses` | 打哪个入口，默认 `chat`。`chat` 是 `POST /v1/chat/completions`（`Authorization: Bearer`），`messages` 是 `POST /v1/messages`（`x-api-key`），`responses` 是 `POST /v1/responses`（`Authorization: Bearer`） |
-| `--base-url <URL>` | 网关公共入口的地址，默认 `http://127.0.0.1:8080` |
+| `--base-url <URL>` | 网关公共入口的地址，默认 `http://127.0.0.1:8080`（换过 `LARKAX_HTTP_ADDR` 就要显式给） |
 | `--credential-stdin` / `--credential-env <变量名>` | 读 API Key 的来源，二者只能给一个（`--stdin` / `--env` 是同一个选项的简写） |
 | `-v` / `--verbose` | 每一项多打一段细节，默认不打。**全局选项**，写在子命令前或后都认；目前只有 `doctor` 用它 |
 | `-q` / `--quiet` | 压掉「给人看」那一档的全部输出，只留退出码（致命错误与 `-o json` 不受影响，见 [cli-output.md](cli-output.md)） |
+| `-V` / `--version` | 打版本号，**不是** `-v` 那个详细模式。同样是全局选项 |
+
+六个简写的完整清单，以及它们和全名的对应关系，见
+[docs/cli-reference.md](cli-reference.md)。
 
 这里读的是打网关用的 **API Key**（`apikey create` 发的那把），不是渠道凭证。
 与 `channel create` 同一条约定：**凭证不能写在命令行参数里**——参数会出现在
 `ps` 的输出与 shell 历史里。
 
-### 退出码
+### `doctor` 的退出码
 
 `0` 六项都通过（给了 `--live` 时那一次也成功）、`1` 有问题或某一项没跑成、
 `3` 连不上数据库。
+
+这只是退出码契约落在 `doctor` 上的那一部分。完整的是五档——`0` 成功、
+`1` 其他失败、`2` 命令行参数错、`3` 连不上数据库、`4` 约束冲突，
+外加「写入路径自己校验出来的参数问题归 `1` 不归 `2`」那条脚注——
+见 [docs/cli-reference.md](cli-reference.md) 的「退出码」一节。那一份
+才是对所有命令生效的对外契约。
 
 **「没跑成」与「通过」是两件事**，输出里分得开：没有可检查的对象时（例如一条
 enabled 渠道都没有，第 3 项就没有名字可查）那一项报「没跑成」而不是「通过」，
@@ -920,8 +1004,11 @@ go run ./cmd/larkaxctl apikey update --id 3 --clear-rpm
 `update` 不给某个旗标表示「这一项不改」，与清空也不同。
 负数一律拒绝。这两项**不开简写**：它们是限额，写短了容易看错也容易按错。
 
-`--quota` 这一列目前只有写入路径，**没有读侧**——它记下了额度，
-但还没有任何地方拿它去拦请求。
+`--quota` **是生效的**，不是只记下来：超限的请求会被拒（`429` +
+`insufficient_quota`，见 [limits.md](limits.md)）。判据只有一份
+（`internal/keyquota` 的 `CheckInTx`），**落点有两处**——入口在读请求体之前的
+早拒绝（`internal/ledger/store` 的 `Store.CheckQuota`），以及预留那个事务里的
+权威判定。两处引用的是同一份判据，不是两条各算各的规则。
 
 ## 当前能做什么
 
@@ -1008,8 +1095,8 @@ ingress 规则下。
 
 ## 决策接口（`/v1/systemone`）
 
-`POST /v1/systemone` 是第三条公开路径。它不做对话，而是拿一段**状态**（一段
-自由文本，比如一张工单）与一组**带类型的判定问题**，回一组答案。与另外两条
+`POST /v1/systemone` 是第四条公开路径。它不做对话，而是拿一段**状态**（一段
+自由文本，比如一张工单）与一组**带类型的判定问题**，回一组答案。与另外三条
 路径一样：协议由路径决定，计费走同一条两阶段流水线，上游由选路层按渠道挑。
 
 请求体是一个 JSON 对象：
