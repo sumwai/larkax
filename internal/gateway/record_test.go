@@ -110,6 +110,74 @@ func TestChatRecordsRetryableFailure(t *testing.T) {
 	}
 }
 
+// 客户端中途断开（点停止、LB 空闲超时、客户端自己超时）：**不是渠道的失败**，
+// 记成「不归因」——连续失败计数既不加一也不清零。
+//
+// 它与上面那条可重试失败的差别只有一处，而这一处正是缺陷本身：适配器把 ctx
+// 取消包成的就是 ErrUpstream{Retryable: true}，形态与 429、5xx 一样，只按错误
+// 的形态判就会记成渠道故障。三次之后这个渠道按 streakCooldown 被摘掉十五分钟，
+// 而它一次都没坏过。
+//
+// 判据是 ctx 而不是错误的形态：客户端断开时换一个渠道不会有任何不同
+// （见 channelAtFault）。流式那条路对同一件事就是这么判的
+// （见 TestChatStreamRecordsClientDisconnectAsUnattributed）。
+func TestChatRecordsClientDisconnectAsUnattributed(t *testing.T) {
+	h := newHarness(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// 取消由执行器在返回之前触发（见 cancelingExecutor）：预先取消的 ctx
+	// 一次调用都不会发生，也就没有尝试可记——这个窗口正是「调用期间断开」。
+	h.gw.Executor = &cancelingExecutor{
+		cancel: cancel,
+		inner:  &fakeExecutor{err: upstreamErr(500, true)},
+	}
+
+	if _, err := h.gw.Chat(ctx, request(), upstreamRequest(), Hooks{}); err == nil {
+		t.Fatal("ctx 已取消时不该成功")
+	}
+
+	// 连续失败计数由结局推出来（见 internal/channels 的 streakChange）：
+	// 只有 VerdictFailure 加一。所以这一条同时就是「计数没有增加」。
+	rec := h.recorder.only(t)
+	if rec.Verdict != route.VerdictUnattributed {
+		t.Fatalf("Verdict = %q，期望不归因（是客户端断的，换一个渠道不会有任何不同）",
+			rec.Verdict)
+	}
+}
+
+// 客户端在上游那一次调用**成功之后**才断开：这一次照记成功，不因取消改判。
+//
+// 取消发生在记账之前（健康度排在结算之后记），所以记这一笔时 ctx 已经结束了。
+// 改判它会连用量一起丢掉，而成功那一次的用量是额度自记账的依据。
+//
+// 与流式那条路同判：那边也是「流正常走完之后调用方断开不算断开」
+// （clientGone 要求流没走完，见 pumpStream）。
+func TestChatKeepsSuccessWhenClientDisconnectsAfterUpstream(t *testing.T) {
+	h := newHarness(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// 结算落库的那一刻断开：上游那一次调用早就成功了。
+	h.settlements.onSave = func() { cancel() }
+
+	res, err := h.gw.Chat(ctx, request(), upstreamRequest(), Hooks{})
+	if err != nil {
+		t.Fatalf("断开发生在上游返回之后，这次请求该照常成功: %v", err)
+	}
+	if res.Charge == nil {
+		t.Fatal("这次请求该照常结算")
+	}
+
+	rec := h.recorder.only(t)
+	if rec.Verdict != route.VerdictSuccess {
+		t.Errorf("Verdict = %q，期望成功（上游那一次调用真的成功了）", rec.Verdict)
+	}
+	if rec.Usage.PromptTokens != 1000 {
+		t.Errorf("成功那一次的用量要照记，实际 %+v", rec.Usage)
+	}
+}
+
 // 上游拒绝了我们的身份（401/403）或余额（402）：换谁都是同一个错，
 // 但那正是**这个渠道**坏了，所以记成失败。
 func TestChatRecordsAuthAndCreditFailures(t *testing.T) {
