@@ -1,0 +1,15 @@
+# 发行说明怎么分组。
+#
+# `gh release create --generate-notes` 按**这份配置里的标签**分类，而不是按提交
+# 类型：没有这个文件时，标签一个都不起作用，说明里只有 GitHub 默认的那几节。
+#
+# 破坏性改动要自己一类。它混在其余改动里时，读的人分不出哪一条要动手——而两类
+# 改动的处置正好相反（一类改了就动，一类可以放着）。
+changelog:
+  categories:
+    - title: 破坏性改动
+      labels:
+        - breaking
+    - title: 其他改动
+      labels:
+        - "*"
