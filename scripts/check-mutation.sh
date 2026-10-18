@@ -55,14 +55,26 @@
 # 同理，认不出输出格式（没有那几行）也往失败一侧倒，不静默当成通过。
 #（LESSONS 第 16 条：检查工具「没跑成」时看起来和「跑成了」一样。）
 #
+# # 包参数没匹配到包时也要说出来
+#
+# 包参数按后缀匹配 `PKGS`，而那份清单里只有父包——照目录树写出来的名字
+#（例如 internal/billing/expr）一条都匹配不上。**一条都没选中时**脚本已经会报
+#「没有选中任何包」；会漏的是**只选中一部分**：匹配到的那几包照常跑、汇总表照出，
+# 少的只是一行，收尾仍打「全部跑成。」。写参数的人以为覆盖了三个包，实际只有两个，
+# 而少验的那一包不会被别的机制补上——CI 里没有 gremlins。
+#
+# 所以选包之后核一遍：**每个包参数至少要匹配到 `PKGS` 里的一条**，没匹配到的
+# 当场列出来，并让整轮判为失败。**匹配规则与 `PKGS` 清单都不动**：把子包自动
+# 归到父包会把「名字写错」变成「悄悄跑了另一个包」，那是另一种看不见。
+#
 # 用法：
 #   scripts/check-mutation.sh              # 跑全部包
 #   scripts/check-mutation.sh money route  # 只跑指定的（按包名后缀匹配）
 #
 # 退出码：
 #   0  全部跑成
-#   1  没跑成：gremlins 缺失、版本不符、读不出变异器集合，或者有包没跑成
-#      （超时过多、一个变异都没跑到、认不出输出）
+#   1  没跑成：gremlins 缺失、版本不符、读不出变异器集合、有包参数没匹配到任何包，
+#      或者有包没跑成（超时过多、一个变异都没跑到、认不出输出）
 #   3  拿不到锁：另一个实例正在跑（或锁文件不可用），本次未执行
 # 1 与 3 分开是因为处置不同：前者要去看代码或环境，后者等一会儿重跑就行。
 #
@@ -317,17 +329,49 @@ PKGS=(
 MAX_TIMED_OUT=10
 
 filters=("$@")
+
+# 后缀匹配。**规则只写这一处**：选包与下面的核对共用它，免得两处各写一份、
+# 日后只改一处就分岔。
+matches_filter() {  # matches_filter <包参数> <包>
+  case "$2" in *"$1") return 0 ;; esac
+  return 1
+}
+
 selected() {
   [ ${#filters[@]} -eq 0 ] && return 0
   local pkg="$1"
   for f in "${filters[@]}"; do
-    case "$pkg" in *"$f") return 0 ;; esac
+    matches_filter "$f" "$pkg" && return 0
   done
   return 1
 }
 
 failed=0
 checked=0
+
+# ── 核对：每个包参数至少要匹配到 PKGS 里的一条 ─────────────────────────────
+#
+# 只选中一部分时，不加核对就一个字都不说：匹配到的照常跑、汇总表照出，少的只是
+# 一行，收尾照打「全部跑成。」——与「跳过与通过长得一样」同类（LESSONS 第 16 条，
+# 理由见文件开头）。
+#
+# 这里只负责说出来，**不改匹配规则、也不把子包归到父包**：那会把「名字写错」
+# 变成「悄悄跑了另一个包」。没匹配到的参数对应的包这一轮没跑，所以整轮判失败。
+unmatched_filters=()
+for f in "${filters[@]}"; do
+  matched=0
+  for pkg in "${PKGS[@]}"; do
+    if matches_filter "$f" "$pkg"; then matched=1; break; fi
+  done
+  [ "$matched" -eq 1 ] || unmatched_filters+=("$f")
+done
+if [ ${#unmatched_filters[@]} -gt 0 ]; then
+  echo "⚠ 这些包参数没有匹配到任何包：${unmatched_filters[*]}"
+  echo "   包参数按后缀匹配本脚本里的 PKGS 清单，照清单里的名字写，别照目录树猜"
+  echo "   （清单里只有 internal/billing，没有它的子包）。没匹配到的参数对应的包"
+  echo "   这一轮没跑，所以整轮判为失败。"
+fi
+
 printf '%-20s %8s %7s %8s  %s\n' "包" "killed" "存活" "超时" "efficacy"
 printf '%s\n' "──────────────────────────────────────────────────────────────"
 
@@ -436,8 +480,13 @@ if [ "$checked" -eq 0 ]; then
   echo "没有选中任何包（筛选条件：${filters[*]:-无}）——这次什么都没检查，不算通过。"
   exit 1
 fi
-if [ "$failed" -ne 0 ]; then
-  echo "有包的结果不可信或没跑成，见上面的 ⚠。"
+if [ "$failed" -ne 0 ] || [ ${#unmatched_filters[@]} -gt 0 ]; then
+  if [ ${#unmatched_filters[@]} -gt 0 ]; then
+    echo "有包参数没匹配到任何包（${unmatched_filters[*]}）——那些包这一轮没跑。"
+  fi
+  if [ "$failed" -ne 0 ]; then
+    echo "有包的结果不可信或没跑成，见上面的 ⚠。"
+  fi
   exit 1
 fi
 echo "全部跑成。"
