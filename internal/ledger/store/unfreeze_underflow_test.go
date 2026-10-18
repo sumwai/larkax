@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -21,7 +22,8 @@ import (
 // unfreezeFailure 翻译成 ErrFrozenUnderflow。**别把 GREATEST 加回去**——
 // 加回去这两条用例就会失败，那正是它们的作用。
 //
-// 需要 LARKAX_DB_DSN，没有时跳过（与其余集成测试相同）。
+// 前面两条用例走真库（需要 LARKAX_DB_DSN，没有时跳过，与其余集成测试相同）；
+// 最后一条手搓驱动错误，不连库——判据本身在哪儿都该验得动。
 
 // pendingReserved 汇总某用户处于 pending 的预留之和——即 frozen 的权威值。
 //
@@ -222,4 +224,91 @@ func settledCharge(t *testing.T, userID int64, requestID string, billID int64, a
 	}
 	charge.Settlement.Actual = amt
 	return charge
+}
+
+// TestFrozenUnderflowIsNarrow 逐个改驱动错误的字段，看判据在哪一步翻面。
+//
+// 判据是「23514 **且** 约束名是 wallet_non_negative」。只认错误码不够——
+// 23514 的含义只是「有某个 CHECK 被违反」，库里别处的 CHECK（计价规则的作用域
+// 与归属要配套、授权采集的范围与形态要配套）被违反时报的也是它，那些与冻结额
+// 变成负数毫无关系。认成下溢的代价是排查方向被带偏：人去查冻结额，真正违反的
+// 却是另一条约束。
+//
+// 手搓 PgError 而不是去真库上造：两个条件是**与**的关系，要分开验就得能单独
+// 控制每一个字段，而真库上造得出的组合只有「这一条 CHECK 冲突」一种。
+// 与 wallet_missing_user_test.go 的 TestMissingUserViolationIsNarrow 同构。
+func TestFrozenUnderflowIsNarrow(t *testing.T) {
+	const subject = "用户 1 的 CNY 预留（10）"
+	// rule_scope_owner 是迁移里另一条**有名字**的 CHECK，名字照抄自
+	// 00001_init.sql，所以这里的输入与库里真会冒上来的那个错误同形。
+	const otherCheck = "rule_scope_owner"
+
+	cases := []struct {
+		name      string
+		err       error
+		wantUnder bool
+	}{
+		{
+			name:      "user_wallets 上那条 CHECK",
+			err:       &pgconn.PgError{Code: pgCheckViolation, ConstraintName: walletNonNegativeConstraint},
+			wantUnder: true,
+		},
+		{
+			name:      "别的 CHECK 约束",
+			err:       &pgconn.PgError{Code: pgCheckViolation, ConstraintName: otherCheck},
+			wantUnder: false,
+		},
+		{
+			name:      "同一个约束名但错误码不是 CHECK 违反",
+			err:       &pgconn.PgError{Code: pgForeignKeyViolation, ConstraintName: walletNonNegativeConstraint},
+			wantUnder: false,
+		},
+		{
+			name: "包了一层驱动错误",
+			err: fmt.Errorf("更新冻结额失败: %w",
+				&pgconn.PgError{Code: pgCheckViolation, ConstraintName: walletNonNegativeConstraint}),
+			wantUnder: true,
+		},
+		{
+			name:      "不是 PostgreSQL 错误（连接断了之类）",
+			err:       errors.New("connection reset by peer"),
+			wantUnder: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := unfreezeFailure(tc.err, subject)
+
+			gotUnder := errors.Is(got, ErrFrozenUnderflow)
+			if gotUnder != tc.wantUnder {
+				t.Errorf("unfreezeFailure(%v) 判成冻结下溢 = %v，期望 %v：%v",
+					tc.err, gotUnder, tc.wantUnder, got)
+			}
+			// 文本是排查方向的指路牌，要与分类一致：判成下溢就得说清是冻结额
+			// 变成负数，不是下溢就不能带这句话。
+			if inText := strings.Contains(got.Error(), "冻结额变成负数"); inText != tc.wantUnder {
+				t.Errorf("错误文本里带「冻结额变成负数」= %v，期望 %v：%v", inText, tc.wantUnder, got)
+			}
+			// ErrInsufficientBalance 挂在冻结下溢那一条链上，别处不该有它：
+			// 拿它判断用户欠费是错的（见那个哨兵的注释），误挂会凭空多出一批
+			// 被当成「余额不足」的错误。
+			if hasBalance := errors.Is(got, ErrInsufficientBalance); hasBalance != tc.wantUnder {
+				t.Errorf("错误链里有 ErrInsufficientBalance = %v，期望 %v：%v",
+					hasBalance, tc.wantUnder, got)
+			}
+			if tc.wantUnder {
+				// 驱动给的原始错误要留在链里：SQLSTATE 与 DETAIL 是运维现场
+				// 唯一拿得到的依据，加一个哨兵是给它加名字，不是替掉它。
+				var pgErr *pgconn.PgError
+				if !errors.As(got, &pgErr) {
+					t.Errorf("错误链里应当留着原始 *pgconn.PgError，得到 %v", got)
+				}
+			} else if !strings.Contains(got.Error(), "解冻失败") {
+				// 认不出来就按原错误上抛，少一层分类而已——绝不能因为读不懂
+				// 就当成功。
+				t.Errorf("认不出来时应当退成「解冻失败」并把原错误包在链里，得到 %v", got)
+			}
+		})
+	}
 }
