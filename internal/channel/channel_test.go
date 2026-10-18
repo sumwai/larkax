@@ -326,6 +326,7 @@ func TestIsEmbeddedErrorRetryable(t *testing.T) {
 		{name: "过载写成状态码", code: "529", want: true},
 		{name: "超时", code: "timeout", want: true},
 		{name: "超时换个写法", code: "timed_out", want: true},
+		{name: "超时写成状态码", code: "408", want: true},
 		{name: "上游自身出错", code: "server_error", want: true},
 		{name: "上游自身出错的另一种写法", code: "internal_error", want: true},
 		{name: "5xx 写成状态码", code: "503", want: true},

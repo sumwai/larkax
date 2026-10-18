@@ -35,11 +35,16 @@ func TestEndpointJoining(t *testing.T) {
 
 func TestRetryableStatus(t *testing.T) {
 	cases := map[int]bool{
-		http.StatusBadRequest:          false,
-		http.StatusUnauthorized:        false,
-		http.StatusForbidden:           false,
-		http.StatusNotFound:            false,
-		http.StatusUnprocessableEntity: false,
+		http.StatusBadRequest:            false,
+		http.StatusUnauthorized:          false,
+		http.StatusForbidden:             false,
+		http.StatusNotFound:              false,
+		http.StatusConflict:              false,
+		http.StatusRequestEntityTooLarge: false,
+		http.StatusUnprocessableEntity:   false,
+		// 上游这一侧「暂时答不上来」的三个 4xx：与 5xx 同档，值得换一个渠道。
+		http.StatusRequestTimeout:      true,
+		http.StatusTooEarly:            true,
 		http.StatusTooManyRequests:     true,
 		http.StatusInternalServerError: true,
 		http.StatusBadGateway:          true,
@@ -50,6 +55,39 @@ func TestRetryableStatus(t *testing.T) {
 		if got := RetryableStatus(code); got != want {
 			t.Errorf("RetryableStatus(%d) = %v，期望 %v", code, got, want)
 		}
+	}
+}
+
+// 408（上游自己的超时）要走完到「换渠道重试」那一档：与 429、5xx 同路。
+//
+// 这条把两步连起来看——上游回 408、CheckStatus 把它翻成错误，而路由层换不换
+// 下一个候选、渠道健康度算不算这次失败，读的都是后一步（见 channel.IsRetryable）。
+// 只钉 RetryableStatus 的话，「它有没有接到错误上」没有人回答。
+//
+// 与 #607 的客户端断开不是一回事：那一种**根本没有响应**，归不归因由 ctx 判
+// （见 internal/gateway 的 channelAtFault），不走这条状态码路径。
+func TestRequestTimeoutIsRetryable(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusRequestTimeout,
+		Header:     http.Header{},
+		Body:       http.NoBody,
+	}
+	err := CheckStatus(resp)
+	if err == nil {
+		t.Fatal("408 应报错")
+	}
+	if !channel.IsRetryable(err) {
+		t.Error("408 应可重试：路由层据此换下一个候选渠道")
+	}
+	var up *channel.ErrUpstream
+	if !errors.As(err, &up) {
+		t.Fatalf("错误类型为 %T", err)
+	}
+	if up.StatusCode != http.StatusRequestTimeout {
+		t.Errorf("StatusCode = %d，期望 %d", up.StatusCode, http.StatusRequestTimeout)
+	}
+	if !up.GotResponse {
+		t.Error("408 是拿到过响应的失败，GotResponse 应为 true")
 	}
 }
 

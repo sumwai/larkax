@@ -620,9 +620,15 @@ var retryableEmbeddedMarkers = []string{
 }
 
 // retryableEmbeddedStatusCodes 是上游把状态码直接填进 code 里的那几种写法，
-// 按**整个字段**比对（理由见 IsEmbeddedErrorRetryable）：429 是限流，529 是
-// 上游报过载用的那个非标准码，其余四个是 5xx。
-var retryableEmbeddedStatusCodes = []string{"429", "500", "502", "503", "504", "529"}
+// 按**整个字段**比对（理由见 IsEmbeddedErrorRetryable）：408 是上游（或它前面
+// 的网关）替自己的超时回的那个码，429 是限流，529 是上游报过载用的那个非标准码，
+// 其余四个是 5xx。
+//
+// 408 这一条与 httpx.RetryableStatus 认的那几个 4xx 是同一件事的两处判据，两处
+// 都要认：只在一处认，上游把错误写在 200 响应体里、把 408 填进 code 时就不会换
+// 渠道重试（issue #613）。425 只在那一边认——这一组收的是「上游真的会把状态码
+// 填进 code」的那几个，而 425 是 TLS 早数据的码，不出现在错误体里。
+var retryableEmbeddedStatusCodes = []string{"408", "429", "500", "502", "503", "504", "529"}
 
 // normalizeErrorField 把上游写在 type / code 里的那个词归一成可做子串匹配的
 // 形状：转小写，去掉下划线、连字符与空格——这三样在上游的写法里是同一个

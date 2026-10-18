@@ -110,6 +110,26 @@ func TestChatRecordsRetryableFailure(t *testing.T) {
 	}
 }
 
+// 408（上游自己的超时）同样记在这个渠道的失败计数上。
+//
+// 上面那条用的是 503：它钉的是「可重试 ⇒ 记渠道故障」这条规则本身。这一条钉的是
+// **新加的那一档也落进这条规则**——408 是 #613 之后第一个既不是 429 也不是 5xx 的
+// 可重试码，而它正是那个「上游真的卡住、这个渠道却一直留在候选里」的形状；上层
+// 判它的依据只有一个（见 channel.IsRetryable），这里证明那个依据真的接到了健康度上。
+func TestChatRecordsRequestTimeoutAsFailure(t *testing.T) {
+	h := newHarness(t)
+	h.executor.err = upstreamErr(408, true)
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err == nil {
+		t.Fatal("上游失败时该返回错误")
+	}
+
+	rec := h.recorder.only(t)
+	if rec.Verdict != route.VerdictFailure {
+		t.Errorf("Verdict = %q，期望失败（408 是上游这一侧暂时答不上来）", rec.Verdict)
+	}
+}
+
 // 客户端中途断开（点停止、LB 空闲超时、客户端自己超时）：**不是渠道的失败**，
 // 记成「不归因」——连续失败计数既不加一也不清零。
 //
