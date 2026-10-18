@@ -60,6 +60,12 @@ create 建一个新用户，只把新用户的 ID 打到 stdout。
 
 **不做幂等**：用户名已被占用时直接报错，不会改到已有的那个用户。
 
+用户名的形状也有限制：**整串是一个十进制整数的名字建不出来**（--name 123、
+--name 007 都是，带一个正负号的 +7 也算），报参数错。--user 收「ID 或用户名」，
+纯数字一律按 ID 解释（见下面 get）——那样一个名字建出来之后就够不着了，
+user get 与 user update 都按 ID 去找它。名字里带一个非数字字符即可
+（1a、a1 都收，1.0、1e3 这类也不是整数）。
+
 list 按 id 从小到大列出用户，一栏一个字段：ID、用户名、状态、角色、邮箱。
 
 两个筛选项都可以同时给，也可以都不给（不给就是列全部）：
@@ -170,6 +176,12 @@ func runUserCreate(args []string) error {
 	if strings.TrimSpace(*name) == "" {
 		// 不打整段用法：人已经会用这条命令了，只是漏了一个必填项。
 		return usageErr(errors.New("缺少 --name"))
+	}
+	// 名字的形状也在这里判（判据在 auth，命令行与包认的是同一处，见
+	// auth.ValidateNewUsername）：纯数字的名字建得出来、读不回来，而这一条
+	// 不必连库就知道。放在连库之前还有一层：它挡的是一次注定要回滚的写入。
+	if err := auth.ValidateNewUsername(*name); err != nil {
+		return usageErr(err)
 	}
 	parsedRole, err := auth.ParseRole(*role)
 	if err != nil {

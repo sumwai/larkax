@@ -220,6 +220,15 @@ var noChangeErrors = []error{
 	pricing.ErrNoChanges,
 }
 
+// usageErrors 是各包判出来的**取值**上的参数错（不是缺字段那一类，见上面）。
+//
+// 命令行自己在连库之前也挡了一遍（`user create` 拒绝一个纯数字的名字），所以
+// 这里登记的是绕过那一层的调用方拿到的分类——不登记的话，同一个错误从包直接
+// 上来会退回 exitFailure，而 1 与 2 在脚本里是两种处置。
+var usageErrors = []error{
+	auth.ErrUsernameIsIDRef,
+}
+
 // exitCode 给出一个错误该用的退出码。
 //
 // 显式标记（codedError）优先于按哨兵分类：命令自己知道得最清楚。
@@ -233,6 +242,11 @@ func exitCode(err error) int {
 		return coded.code
 	}
 	for _, target := range noChangeErrors {
+		if errors.Is(err, target) {
+			return exitUsage
+		}
+	}
+	for _, target := range usageErrors {
 		if errors.Is(err, target) {
 			return exitUsage
 		}

@@ -36,6 +36,10 @@ func TestUserCreateRejectsBadFlags(t *testing.T) {
 		{"--name 只有空白", []string{"--name", "   "}, "缺少 --name"},
 		{"多出位置参数", []string{"--name", "alice", "extra"}, "不接受位置参数"},
 		{"--role 不认识", []string{"--name", "alice", "--role", "root"}, "未知的角色"},
+		// 纯数字的名字建得出来、读不回来（`--user` 按 ID 解释它），所以在
+		// 连库之前就挡下来。两个都拦：不带空白的，与去掉空白之后是纯数字的。
+		{"--name 是纯数字", []string{"--name", "123"}, "--user"},
+		{"--name 去掉空白后是纯数字", []string{"--name", " 007 "}, "--user"},
 	}
 
 	for _, tc := range cases {
@@ -46,6 +50,75 @@ func TestUserCreateRejectsBadFlags(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// TestUserCreateRejectsNumericNameLeavesNoRow 过真命令、连真库。
+//
+// 两件事一起钉：命令报参数错（退出码 2），以及库里**没有多出一行**。只断言报错
+// 是不够的——先写库再报错的实现同样会打出那句话，而那时那个用户已经躺在库里，
+// 并且按标识再也够不着它。
+//
+// 查库直接查，而不是看 `user list` 的输出：列表那一栏是渲染过的（有对齐与空值
+// 记号），而这里要回答的是「users 表里有没有这一行」。
+func TestUserCreateRejectsNumericNameLeavesNoRow(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+	const numeric = "123"
+
+	r := runOnce(t, runUserCreate, []string{"--name", numeric})
+	if r.err == nil {
+		t.Fatal("纯数字的用户名应当报错")
+	}
+	if code := exitCode(r.err); code != exitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错那一档）：%v", code, exitUsage, r.err)
+	}
+	// 报错要说清为什么，不是一句「名字不合法」：这个名字用 --user 找不回来。
+	if !strings.Contains(r.err.Error(), "--user") {
+		t.Errorf("报错没说清原因（--user 会按 ID 解释它）：%v", r.err)
+	}
+
+	var rows int
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT count(*) FROM users WHERE username = $1`, numeric).Scan(&rows); err != nil {
+		t.Fatalf("查库失败: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("被拒的那一次在库里留了 %d 行 %q", rows, numeric)
+	}
+}
+
+// TestUserCreateAcceptsNamesWithDigits 钉住拦的是「--user 会当成 ID 的写法」，
+// 不是「名字里有数字」。
+//
+// 后半句才是判据：这两个名字建完之后必须能**按名字**读回来。只断言「建成功了」
+// 的话，一个把 `--user 1a` 也当成 ID 的实现照样通过。
+func TestUserCreateAcceptsNamesWithDigits(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+
+	for _, name := range []string{"1a", "a1"} {
+		t.Run(name, func(t *testing.T) {
+			id := createUserWithRole(t, name, "", string(auth.RoleUser))
+			t.Cleanup(func() {
+				// 名字是写死的（不是 uniqueName 那一套），所以用完删掉：
+				// 同一个库上再跑一次时，第二次 create 会撞上这次留下的那一行。
+				if _, err := db.ExecContext(context.WithoutCancel(t.Context()),
+					`DELETE FROM users WHERE id = $1`, id); err != nil {
+					t.Logf("清理用户 %d 失败: %v", id, err)
+				}
+			})
+
+			got := runOnce(t, runUser, []string{"get", "--user", name})
+			if got.err != nil {
+				t.Fatalf("user get --user %s 失败: %v\nstderr=%s", name, got.err, got.stderr)
+			}
+			for _, want := range []string{name, strconv.FormatInt(id, 10)} {
+				if !strings.Contains(got.stdout, want) {
+					t.Errorf("详情里没有 %q：\n%s", want, got.stdout)
+				}
 			}
 		})
 	}
@@ -286,6 +359,38 @@ func TestUserGetResolvesIDAndUsernameToTheSameUser(t *testing.T) {
 	} {
 		if !strings.Contains(byID.stdout, want) {
 			t.Errorf("详情里没有 %q：\n%s", want, byID.stdout)
+		}
+	}
+}
+
+// TestUserGetTrimsRefWhitespace 钉住 `--user` 两头的空白在解析之前就去掉。
+//
+// 判据在三条解析路径各自的那一次 strings.TrimSpace（ResolveUser / UserByRef /
+// UpdateUser），而少掉其中一处的症状很安静：`user get --user " alice "` 会拿
+// 带空白的那个串去查用户名，查不到、退 4，而敲命令的人以为自己给的正是那个名字。
+//
+// 名字里带空格的用户本来也建不出来（create 落库前会 trim），所以这里比的是
+// 「带空白与不带空白读到的是同一个人」，不是「能查到一个名字里带空格的用户」。
+func TestUserGetTrimsRefWhitespace(t *testing.T) {
+	setupEnv(t)
+
+	name := uniqueName("trim")
+	createUserWithRole(t, name, "", string(auth.RoleUser))
+
+	plain := runOnce(t, runUser, []string{"get", "--user", name})
+	if plain.err != nil {
+		t.Fatalf("user get --user %s 失败: %v\nstderr=%s", name, plain.err, plain.stderr)
+	}
+
+	for _, padded := range []string{" " + name + " ", "\t" + name + "\n"} {
+		got := runOnce(t, runUser, []string{"get", "--user", padded})
+		if got.err != nil {
+			t.Fatalf("user get --user %q 失败（两头空白应当先去掉）: %v\nstderr=%s",
+				padded, got.err, got.stderr)
+		}
+		if got.stdout != plain.stdout {
+			t.Errorf("--user %q 读到的不是同一个人：\n带空白：\n%s\n不带：\n%s",
+				padded, got.stdout, plain.stdout)
 		}
 	}
 }

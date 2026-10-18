@@ -273,6 +273,10 @@ var ErrUserNotFound = errors.New("找不到用户")
 // 纯数字一律按 ID 解析。于是用户名恰好全是数字时无法按名字指定——
 // 那是个取舍：另一种做法（先按名字查、查不到再按 ID）会让
 // 「用户名是 12345 的用户」与「ID 为 12345 的用户」静默地互相覆盖。
+//
+// 这条取舍的另一半在写入路径上：这样一个名字**建不出来**（见
+// ValidateNewUsername），否则落库的就是一个按标识读不回来的用户。
+// 库里已有的纯数字用户名不动——它们本来就够不着，而改解释规则是另一件事。
 func (s *Store) ResolveUser(ctx context.Context, ref string) (User, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -304,9 +308,33 @@ func (s *Store) ResolveUser(ctx context.Context, ref string) (User, error) {
 // 纯数字一律按 ID（取舍见 ResolveUser 的注释）。返回的条件里表名由调用方补，
 // 所以它就是一段不带别名的谓词；占位符编号由调用方给，因为 UPDATE 的 SET 子句
 // 已经占掉了前面几个（见 UpdateUser），写死 $1 会让那里的语句对不上号。
+//
+// 三条路都**先把两头空白去掉**再调它（见各自的 strings.TrimSpace）：这里按
+// 传进来的那个串判，不自己 trim，否则「按 ID」那支用的是去掉空白的值、
+// 「按用户名」那支用的是原值，一条语句里两种口径。
 func userRefWhere(ref string, placeholder int) (where string, arg any) {
-	if id, err := strconv.ParseInt(ref, 10, 64); err == nil {
+	if id, ok := userRefIsID(ref); ok {
 		return fmt.Sprintf("id = $%d", placeholder), id
 	}
 	return fmt.Sprintf("username = $%d", placeholder), ref
+}
+
+// userRefIsID 报告一个标识会不会被 userRefWhere 按 ID 解释，会的话给出那个 ID。
+//
+// 判断「这个串是 ID 还是用户名」的**只有这一处**：userRefWhere（一个标识怎么
+// 解释）与 ValidateNewUsername（哪些名字建不得，见 user.go）都从它这里过。
+// 两处各写一份 strconv.ParseInt 的话，写入路径与解析路径会对同一批串给出不同
+// 答案——一个纯数字的名字建得进去，而建完就再也按名字读不回来，两边各自的
+// 用例还都是绿的。
+//
+// 认的是 strconv 那一套十进制：可带一个正负号（`+7`、`-7` 都算），不接受空白、
+// 下划线与进制前缀（`1_0`、`0x10` 是用户名）。上界由 int64 定：超出它的那一串
+// 两个方向都落回用户名——够不着的那一类由此与放行的那一类自动对齐，不必另立
+// 一条判据。
+func userRefIsID(ref string) (int64, bool) {
+	id, err := strconv.ParseInt(ref, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return id, true
 }
