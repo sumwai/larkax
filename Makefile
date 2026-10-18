@@ -8,7 +8,7 @@
 #   make down     只停依赖（保留数据卷）
 #   make migrate  只跑迁移
 #   make test     跑测试（先确保依赖起着）
-#   make dist     打一个发布用的 tar.gz（linux/amd64），把 release.yml 那一步演练一遍
+#   make dist     打发布用的 tar.gz（默认只打 amd64；CI 发布调的也是它）
 #   make clean    清容器、数据卷与生成的 .env，回到刚克隆的状态
 #
 # 端口被占用（5432 是常事）就换一个：make run PG_PORT=55432
@@ -60,7 +60,7 @@ help:
 	@echo "make down     只停依赖，保留数据卷"
 	@echo "make migrate  只跑迁移"
 	@echo "make test     跑测试（先确保依赖起着）"
-	@echo "make dist     打发布用的 tar.gz（linux/amd64，make dist VERSION=v0.1.0）"
+	@echo "make dist     打发布用的 tar.gz（默认只打 amd64，可 ARCHS=\"amd64 arm64\"）"
 	@echo "make clean    清容器、数据卷与生成的 .env"
 	@echo ""
 	@echo "端口被占用时：make run PG_PORT=55432"
@@ -196,62 +196,103 @@ run: init check-ports up migrate
 test: init up
 	@set -a; . ./$(ENV_FILE); set +a; go test ./...
 
-# 发布产物：与 .github/workflows/release.yml 的「构建」与「打包」两步同一套，
-# 只是这里只打 linux/amd64 一个架构——发布时才两个都打。发布流程能在这里演练，
-# 出问题时不必先推一个 tag 去试；改了这个目标或那一步，另一处要跟着改。
+# 发布产物：构建 → 校验版本注入 → 打包 → 删掉裸二进制 → 算校验和。
 #
-# 这个目标只在 linux/amd64 上跑得动，两处原因：版本校验那一步会把刚打出来的
-# amd64 二进制**真执行**一次（见下），别的主机连不起来；tar 用的是 GNU 的那几个
-# 选项（`--sort=name`、`--mtime=@0`），macOS 自带的 bsdtar 不认。
+# **发布配方只有这一份。** .github/workflows/release.yml 不再自己列一遍这些步骤，
+# 只调这个目标（`make dist VERSION=<tag> ARCHS="amd64 arm64"`）。原先两处各写一份，
+# 改一处得记得改另一处，而漂移之后没有任何门禁会响：本地演练出来的包与真发出去的
+# 包不一样，只有在用户下载之后才发现。
 #
-# tarball 里的手页取仓库里**已提交**的那一份（`man/man1/*.1`），不在这里跑生成器
-# （理由同 release.yml 那一步）：手页是产物，它与源文件的一致性由
-# scripts/check-man-pages.sh 保证。
+# ARCHS：打哪些架构，默认只打 amd64（本地演练够用）。
 #
-# VERSION 默认 dev：未注入的二进制也自称 dev（见 docs/versioning.md），
-# 于是「忘了给版本」在本地演练里就现形，而不是等发布出去才发现。
+# VERIFY_EXEC：要不要把刚打出来的二进制**真执行**一次，比对它自称的版本。只有
+# 「正在打的架构就是本机架构、且本机是 linux」时执行得起来，其余架构打印一句
+# 「跳过执行校验（架构不同）」——静默跳过与「校验通过」在日志里长得一样
+# （LESSONS.md 第 16 条）。整个关掉用 VERIFY_EXEC=0。
 #
-# 顺序与 CI 一致：构建 → 校验版本注入（验的是**裸**二进制，所以必须在打包
-# 之前）→ 打包 → 删掉裸二进制 → 算校验和。发布物只有 tarball 一条安装路径，
-# 校验和才盖得住发出去的东西。
+# 校验必须在**打包之前**：验的是裸二进制，而它打完包就删了。漏掉这一步的话，
+# 发布出去的二进制会自称 dev，而这只有在用户报问题时才会被发现。
+#
+# 同一个 tag 打两次要得到同一个包：四样都不许随环境变——成员时间戳（tar 默认取
+# 文件自己的 mtime，那是打包那一刻）、权限位（tar 默认取文件自己的，而那是 cp 与
+# mkdir 时的 umask 留下的）、条目顺序（默认按目录顺序）、属主（默认带上构建机的
+# uid/gid）。它们不固定时，包的内容一样而 sha256 不同，校验和就只能证明「下载没
+# 坏」，证明不了「手上这一份与发布的那一份是同一个」。所以下面固定 umask，并把
+# 那五个选项交给 tar。顶层再套一个以包名命名的目录：解到同一个位置的两个版本
+# 不会互相覆盖。
+#
+# 包里除两个二进制之外还有 LICENSE、README.md 与 man/man1/ 下的手页。手页是
+# **用户面文档**的一部分：只躺在源码树里的话，装了发布版的人
+# `man larkaxctl-channel` 翻不到，而那多半会被他当成「自己没装对」。
+#
+# 手页取仓库里**已提交**的那一份（`man/man1/*.1`），不在这里跑生成器：手页是
+# 产物，它与源文件是不是同一次生成由 scripts/check-man-pages.sh 保证。发布时再
+# 生成一次，等于给要发出去的那一包多一个变量，而这一次生成后面没有第二道门。
+#
+# VERSION 默认 dev：未注入的二进制也自称 dev（见 docs/versioning.md），于是
+# 「忘了给版本」在本地演练里就现形，而不是等发布出去才发现。
+#
+# 发布物只有 tarball 一条安装路径（裸二进制删掉，见下），校验和才盖得住发出去的
+# 东西：两份产物等于两条安装故事，而「有校验和的那个」与「用户脚本里可能正在
+# curl 的那个」不是同一个东西时，校验和就成了摆设。
+#
+# tar 用的是 GNU 的那几个选项（`--sort=name`、`--mtime=@0` …），macOS 自带的
+# bsdtar 不认；在那类主机上跑要先装 GNU tar。
 #
 # 开头那句 `rm -rf dist` 连本地放在 dist/ 里的别的东西一起删；dist/ 在
 # .gitignore 里，删它不脏树，但别把要留着的东西放在那儿。
 #
-# 跑完之后 dist/ 里就是发布那份资产清单：一个 tarball 与 SHA256SUMS——发布那一步
-# 发的是 `dist/*`，本地看到的与线上的一致。
-VERSION ?= dev
+# 跑完之后 dist/ 里就是发布那份资产清单：每个架构一个 tarball 与一份 SHA256SUMS
+# ——发布那一步发的是 `dist/*`，本地看到的与线上的一致。
+VERSION     ?= dev
+ARCHS       ?= amd64
+VERIFY_EXEC ?= 1
+
+# 本机是什么，决定哪个架构能真执行。取 GOHOSTARCH / GOHOSTOS 而不是 GOARCH /
+# GOOS：后两者会被环境里的交叉编译设置改掉，那就正好把「能不能跑」判断反了
+# ——判断反了不会报错，只会少校验一次而看起来一切正常。
+HOSTARCH := $(shell go env GOHOSTARCH)
+HOSTOS   := $(shell go env GOHOSTOS)
 
 dist:
 	@rm -rf dist
 	@mkdir -p dist
 	@set -e; \
 	umask 022; \
-	for pair in "larkax:./cmd/larkax" "larkaxctl:./cmd/larkaxctl"; do \
-	  name=$${pair%%:*}; pkg=$${pair#*:}; \
-	  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
-	    -ldflags "-s -w -X main.version=$(VERSION)" \
-	    -o "dist/$${name}_linux_amd64" "$$pkg"; \
-	done; \
-	if ! dist/larkax_linux_amd64 --version | grep -qx "$(VERSION)"; then \
-	  echo "版本注入失败：二进制自称 $$(dist/larkax_linux_amd64 --version)，期望 $(VERSION)"; \
-	  exit 1; \
-	fi; \
 	root=$$(mktemp -d); \
 	trap 'rm -rf "$$root"' EXIT; \
-	stage="$$root/larkax_$(VERSION)_linux_amd64"; \
-	mkdir -p "$$stage/man/man1"; \
-	cp dist/larkax_linux_amd64 "$$stage/larkax"; \
-	cp dist/larkaxctl_linux_amd64 "$$stage/larkaxctl"; \
-	chmod 0755 "$$stage/larkax" "$$stage/larkaxctl"; \
-	cp LICENSE README.md "$$stage/"; \
-	cp man/man1/*.1 "$$stage/man/man1/"; \
-	tar -czf "dist/larkax_$(VERSION)_linux_amd64.tar.gz" \
-	  --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
-	  -C "$$root" "larkax_$(VERSION)_linux_amd64"; \
-	rm -f dist/larkax_linux_amd64 dist/larkaxctl_linux_amd64; \
+	for arch in $(ARCHS); do \
+	  for pair in "larkax:./cmd/larkax" "larkaxctl:./cmd/larkaxctl"; do \
+	    name=$${pair%%:*}; pkg=$${pair#*:}; \
+	    GOOS=linux GOARCH=$$arch CGO_ENABLED=0 go build -trimpath \
+	      -ldflags "-s -w -X main.version=$(VERSION)" \
+	      -o "dist/$${name}_linux_$${arch}" "$$pkg"; \
+	  done; \
+	  if [ "$(VERIFY_EXEC)" = 0 ]; then \
+	    echo "跳过执行校验（VERIFY_EXEC=0）：dist/larkax_linux_$${arch}"; \
+	  elif [ "$$arch" = "$(HOSTARCH)" ] && [ "$(HOSTOS)" = linux ]; then \
+	    if ! dist/larkax_linux_$${arch} --version | grep -qx "$(VERSION)"; then \
+	      echo "版本注入失败：二进制自称 $$(dist/larkax_linux_$${arch} --version)，期望 $(VERSION)"; \
+	      exit 1; \
+	    fi; \
+	  else \
+	    echo "跳过执行校验（架构不同）：dist/larkax_linux_$${arch} 在 $(HOSTOS)/$(HOSTARCH) 上跑不起来"; \
+	  fi; \
+	  stage="$$root/larkax_$(VERSION)_linux_$${arch}"; \
+	  mkdir -p "$$stage/man/man1"; \
+	  cp "dist/larkax_linux_$${arch}" "$$stage/larkax"; \
+	  cp "dist/larkaxctl_linux_$${arch}" "$$stage/larkaxctl"; \
+	  chmod 0755 "$$stage/larkax" "$$stage/larkaxctl"; \
+	  cp LICENSE README.md "$$stage/"; \
+	  cp man/man1/*.1 "$$stage/man/man1/"; \
+	  tar -czf "dist/larkax_$(VERSION)_linux_$${arch}.tar.gz" \
+	    --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+	    -C "$$root" "larkax_$(VERSION)_linux_$${arch}"; \
+	done; \
+	rm -f dist/larkax_linux_* dist/larkaxctl_linux_*; \
 	cd dist && sha256sum *.tar.gz > SHA256SUMS; \
-	echo "已打出 dist/larkax_$(VERSION)_linux_amd64.tar.gz"
+	echo "已打出："; \
+	ls -1 *.tar.gz
 
 clean:
 	@docker compose down --volumes --remove-orphans
