@@ -449,6 +449,25 @@ if [ "$rc" -eq 1 ]; then ok; else bad "筛选项没选中任何包 —— 应失
 grep -q '没有选中任何包' "$last_out" || bad "筛选项没选中任何包 —— 应报出「什么都没检查」"
 grep -q '不算通过' "$last_out" || bad "筛选项没选中任何包 —— 要说明这不算通过"
 
+# 11b. **只有一部分**包参数没匹配到：也要说，且整轮判失败（#746）。
+#      与第 11 条的区别是「一条都没选中」与「只漏了一部分」：后者原先与「全部
+#      跑成」长得一模一样——匹配到的照常跑，汇总表少一行，收尾照打「全部跑成。」，
+#      退出码 0。而写参数的人以为自己覆盖了两个包，实际只覆盖一个，少验的那一包
+#      不会被别的机制补上（CI 里没有 gremlins）。
+#      两个方向都钉：没匹配到的参数要被列出来，而匹配到的包该跑还是要跑——判据是
+#      「不静默」，不是「一个参数写错就整轮什么都不做」。
+run "$stub_ok" "$tmp/lock11b" internal/money internal/no-such-package
+rc=$?
+if [ "$rc" -eq 1 ]; then ok; else bad "部分包参数没匹配到 —— 应失败，实际退出码 $rc"; dump; fi
+grep -q '没匹配到任何包' "$last_out" || bad "部分包参数没匹配到 —— 要报出是「没匹配到」"
+grep -q 'internal/no-such-package' "$last_out" || bad "部分包参数没匹配到 —— 要列出没匹配到的是哪一个参数"
+grep -q 'internal/money ' "$last_out" || bad "部分包参数没匹配到 —— 匹配到的包仍应照常跑"
+if grep -q '全部跑成' "$last_out"; then
+  bad "部分包参数没匹配到 —— 收尾不能照打「全部跑成」"
+else
+  ok
+fi
+
 # 12. 缺 LARKAX_DB_DSN：必须拒绝运行，而不是跑出一批不可比的数字。
 #     internal/ledger/store 的集成测试会整包被 t.Skip，而它给别的包贡献的
 #     那部分覆盖也跟着没了——同一个包的可测变异体会少掉四成。
