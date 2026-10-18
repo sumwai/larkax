@@ -108,6 +108,10 @@ func TestReserveBoundFollowsOverrideDown(t *testing.T) {
 //
 // 预留发生在选路之前，还不知道会走哪个候选，所以上界要盖得住每一个。取小的
 // 那个会让「选中了贵的那条」变成一次撞上界的少收。
+//
+// 变异记录：函数里那条 `int64(effective) > bound` 改成 `>=` 是**等价变异**
+// ——多出来的一格是 effective 恰好等于 bound，而那一支赋的就是 bound 自己，
+// 值不变。这条用例的两个候选（128 与 1024）不同值，走的正是「大于」那一支。
 func TestReserveBoundTakesMaxOverCandidates(t *testing.T) {
 	overrides := &fixedOverrides{byChannel: map[int64]map[string]any{
 		1: {"max_tokens": 128},
