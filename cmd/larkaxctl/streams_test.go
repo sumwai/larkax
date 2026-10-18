@@ -369,7 +369,8 @@ type writeEchoCase struct {
 //
 // 这张表只收「写成功之后只回一句确认」的命令。wallet 的 create / credit 不在
 // 里面：它们打在 stdout 上的是**一份报告**（余额、分录、交易号），属于表里
-// 「结果」那一档，不是要挪走的那类回显。
+// 「结果」那一档，不是要挪走的那类回显。`user update` 同理（stdout 上是这次改了
+// 哪几列、从什么变成什么）。
 func TestWriteEchoesAppearOnlyOnStderr(t *testing.T) {
 	fx := newStreamFixture(t)
 	id := func(v int64) string { return strconv.FormatInt(v, 10) }

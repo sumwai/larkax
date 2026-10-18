@@ -153,6 +153,8 @@ stderr 上，stdout 只留值。于是 `larkaxctl channel update --id 3 | head -
 - **写成功回显只在一个流上**，而且是 stderr：`已创建…` / `已更新…` / `已删除…` /
   `已启用…` 一类只回一句确认的命令都走它。wallet 的 create / credit 不在这一列——
   它们打在 stdout 上的是**报告**（余额、分录、交易号），属于上面「结果」那一档。
+  `user update` 同样不在这一列：它打在 stdout 上的是这次改动的回显（哪几列、从什么
+  变成什么），也是报告而不是一句确认。
 
 提示语写成**带前缀的陈述句**（`提示：` / `注意：` / `警告：`），这样它落在哪个流上
 一眼看得出来，门禁也扫得到。默认输出里允许留下的是两条，各有理由：一次性明文 key
@@ -247,7 +249,7 @@ larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled
 
 | 触发条件 | 形状 | 流 | 退出码 | 接管道的一方看到 |
 |---|---|---|---|---|
-| **A 用户输入错**（参数名、取值、必填缺失、标志组合、flag 解析失败） | `larkaxctl: <msg>` | stderr | **2** | stdout 空 |
+| **A 用户输入错**（参数名、取值、必填缺失、标志组合（含读过库里那一行才判得出的那种）、flag 解析失败） | `larkaxctl: <msg>` | stderr | **2** | stdout 空 |
 | **B1 连不上库** | `larkaxctl: <msg>` | stderr | **3** | stdout 空 |
 | **B2 约束冲突 / 那一行不存在**（撞唯一键、撞外键、要改或要查的那一行不在） | `larkaxctl: <msg>` | stderr | **4** | stdout 空 |
 | **B3 其它环境**（文件读不动、权限、配置值不合法） | `larkaxctl: <msg>` | stderr | **1** | stdout 空 |

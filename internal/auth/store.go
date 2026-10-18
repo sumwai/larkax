@@ -279,7 +279,7 @@ func (s *Store) ResolveUser(ctx context.Context, ref string) (User, error) {
 		return User{}, errors.New("用户标识为空")
 	}
 
-	where, arg := userRefWhere(ref)
+	where, arg := userRefWhere(ref, 1)
 
 	var user User
 	err := s.db.QueryRowContext(ctx,
@@ -297,15 +297,16 @@ func (s *Store) ResolveUser(ctx context.Context, ref string) (User, error) {
 
 // userRefWhere 把「用户 ID 或用户名」这个标识折成一条 WHERE 条件与它的实参。
 //
-// ResolveUser 与 UserByRef 都从它这里过，为的是**只有一处**决定这个标识怎么
-// 解释：两条路各写一份的话，`user get 12345` 与 `apikey create --user 12345`
-// 迟早会指向不同的人，而那种错法的表现是两条命令都成功。
+// ResolveUser、UserByRef 与 UpdateUser 都从它这里过，为的是**只有一处**决定这个
+// 标识怎么解释：三条路各写一份的话，`user get 12345` 与 `apikey create --user
+// 12345` 迟早会指向不同的人，而那种错法的表现是命令都成功。
 //
 // 纯数字一律按 ID（取舍见 ResolveUser 的注释）。返回的条件里表名由调用方补，
-// 所以它就是一段不带别名的谓词，两个调用点的 SQL 里都只出现一次 $1。
-func userRefWhere(ref string) (where string, arg any) {
+// 所以它就是一段不带别名的谓词；占位符编号由调用方给，因为 UPDATE 的 SET 子句
+// 已经占掉了前面几个（见 UpdateUser），写死 $1 会让那里的语句对不上号。
+func userRefWhere(ref string, placeholder int) (where string, arg any) {
 	if id, err := strconv.ParseInt(ref, 10, 64); err == nil {
-		return "id = $1", id
+		return fmt.Sprintf("id = $%d", placeholder), id
 	}
-	return "username = $1", ref
+	return fmt.Sprintf("username = $%d", placeholder), ref
 }

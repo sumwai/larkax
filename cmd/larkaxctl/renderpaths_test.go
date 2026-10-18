@@ -67,6 +67,7 @@ var tableRenderPaths = []string{
 	"printRuleTable",
 	"printUserDetail", // user get
 	"printUserList",   // user list
+	"printUserUpdate", // user update 的改动回显：一栏一行，与 get 那一片同一个形状
 	"printWalletList", // wallet list
 }
 

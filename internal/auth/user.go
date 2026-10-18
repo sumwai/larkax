@@ -5,16 +5,18 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// 本文件是 users 表的**写入**路径：建一个用户，以及「角色」这个称呼到
-// 表上两个布尔标记的对应关系；同样的表也有**读**路径（列用户、按标识读一个），
-// 它们与写入路径落在同一个文件里，因为两者共用角色称呼与标记之间那一套映射
-// （见 Role.flags 与 roleOf）——分到两个文件里，这套映射就会长成两份。
+// 本文件是 users 表的**写入**路径：建一个用户、改一个已有用户的若干列，以及
+// 「角色」这个称呼到表上两个布尔标记的对应关系；同样的表也有**读**路径（列用户、
+// 按标识读一个），它们与写入路径落在同一个文件里，因为两者共用角色称呼与标记
+// 之间那一套映射（见 Role.Flags 与 roleOf）——分到两个文件里，这套映射就会长成
+// 两份。
 //
 // 它与 store.go 的分工按**表**来分，不按操作来分：store.go 管 api_keys
 // 的鉴权与创建，这里管 users 的创建与读取。两边共用 User 与同一个 *sql.DB，
@@ -56,11 +58,12 @@ var (
 //
 // # 这两个标记今天还是**预留**，不是权限
 //
-// 全仓没有一处**鉴权判断**读 users.is_merchant / users.is_admin：写入点在
-// CreateUser，读方只有展示与筛选那一侧（`user list` 的角色栏与 `--role`
-// 筛选，见 roleOf 与 rolePredicate），没有任何代码按它放行或拒绝。所以
-// `--role` 今天只是**把称呼记下来**，它不改任何一处行为——`channel create
-// --user` 接受任何存在的用户，建完也不会去问这个人是不是 merchant。
+// 全仓没有一处**鉴权判断**读 users.is_merchant / users.is_admin：写入点只有
+// 建用户与 `user update` 两处（见 Flags），读方只有展示与筛选那一侧（`user
+// list` 的角色栏与 `--role` 筛选，见 roleOf 与 rolePredicate），没有任何代码
+// 按它放行或拒绝。于是 `--role` 今天只是**把称呼记下来**，它不改任何一处
+// 行为——`channel create --user` 接受任何存在的用户，建完也不会去问这个人
+// 是不是 merchant。
 //
 // 它们打算给管理面的鉴权用（#158）：那时「谁能挂渠道、谁能进管理接口」
 // 才是被检查的。接上之前别把这里的注释读成「已经生效」——一句写下来却
@@ -100,13 +103,20 @@ func ParseRole(s string) (Role, error) {
 	return r, nil
 }
 
-// flags 把角色翻译成 users 表上的两个标记。
+// Flags 把角色翻译成 users 表上的两个标记。
 //
-// 生产代码里这里是这两列**唯一**的写入点，而读方只有展示与筛选那一侧
-// （见 Role 的注释）：翻出来的值只是落库，没有任何鉴权判断读它。所以它现在
-// 的作用是「把 --role 记下来」，把对应关系收在一处是为了将来接上时有唯一
-// 一处可改，而不是因为它已经生效。
-func (r Role) flags() (isMerchant, isAdmin bool) {
+// 读方只有展示与筛选那一侧（见 Role 的注释）：翻出来的值只是落库，没有任何
+// 鉴权判断读它。所以它今天的作用是「把称呼记下来」，而把对应关系收在一处，
+// 是为了将来接上时有唯一一处可改，不是因为它已经生效。
+//
+// # 为什么导出
+//
+// 写入侧有两处，都从这里取：CreateUser 整体按角色落值；`user update` 的
+// --admin 也要把 is_merchant 一起置真（那条命令按旗标逐列写，只有这一格
+// 需要「称呼 → 标记」这张表）。两处各写一份的话，改了一处之后，建出来的
+// admin 与改出来的 admin 会是两行不同的数据，而两边各自的用例都照样通过
+// ——这条不变式也写在迁移对 users.is_admin 的注释里。
+func (r Role) Flags() (isMerchant, isAdmin bool) {
 	switch r {
 	case RoleMerchant:
 		return true, false
@@ -166,7 +176,7 @@ func (s *Store) CreateUser(ctx context.Context, p CreateUserParams) (User, error
 	}
 
 	// 这两列是**预留**：按角色写进去，读它的只有展示与筛选那一侧（见 Role 的注释）。
-	isMerchant, isAdmin := p.Role.flags()
+	isMerchant, isAdmin := p.Role.Flags()
 
 	// status、created_at、updated_at 不写：它们都有默认值（active / now()），
 	// 让默认值留在库里一处定义，命令行不必跟着抄一遍。
@@ -188,6 +198,19 @@ func (s *Store) CreateUser(ctx context.Context, p CreateUserParams) (User, error
 // **它只翻译，不吞**：认不出来的错误原样包一层返回，绝不因为读不懂而
 // 当成成功。
 func createUserFailure(err error, username, email string) error {
+	if mapped := usersUniqueFailure(err, username, email); mapped != nil {
+		return mapped
+	}
+	return fmt.Errorf("写入用户失败: %w", err)
+}
+
+// usersUniqueFailure 把 users 表上的唯一约束冲突翻成调用方认得出的错误，
+// 认不出来时返回 nil。
+//
+// 建与改两条路共用它：约束名与哨兵的对应关系只有一处，否则将来多一条唯一
+// 约束时，漏改的那一侧会把冲突原样抛给使用者——而退出码表把「名字被占了」
+// 算成使用者能处理的那一类，原文上抛会让它落回「其它失败」。
+func usersUniqueFailure(err error, username, email string) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
 		switch pgErr.ConstraintName {
@@ -197,13 +220,13 @@ func createUserFailure(err error, username, email string) error {
 			return fmt.Errorf("%w: %q", ErrEmailTaken, email)
 		}
 	}
-	return fmt.Errorf("写入用户失败: %w", err)
+	return nil
 }
 
 // ── 读侧 ────────────────────────────────────────────────────────────────
 //
 // 下面这一半与上面的写入路径服务同一张表上同一批列。分不开的两处是**角色**：
-// `--role` 怎么写成两个标记（Role.flags）与两个标记怎么读回一个称呼（roleOf）
+// `--role` 怎么写成两个标记（Role.Flags）与两个标记怎么读回一个称呼（roleOf）
 // 是同一套映射的两半，它们必须一起改，所以放在同一个文件里。
 
 // 用户状态，与迁移里 users.status 的 CHECK 约束一致。
@@ -230,13 +253,19 @@ func UserStatuses() []string {
 
 // ParseUserStatus 校验一个用户状态的取值。
 //
+// 两头空白先去掉，与 ParseRole 同一口径：取值是给人敲的，多一个空格不该判成不
+// 认识，而两处不一致的表现是同一条命令上两种规矩（`--role " user "` 通过、
+// `--status " active "` 报错）。校验走去掉空白之后那个串，报错里仍打调用方给的
+// 原文——他该看到自己敲进去的东西。
+//
 // 取值不认识时**当场报错**，不静默回落成「不筛」。回落的那一面很坏：
 // 一个写错的 --status 会让筛选少一层，命令照样退出 0，打出来的却是全部
 // 用户，看起来像「原来这么多人是这个状态」。
 func ParseUserStatus(s string) (string, error) {
+	trimmed := strings.TrimSpace(s)
 	for _, known := range UserStatuses() {
-		if s == known {
-			return s, nil
+		if trimmed == known {
+			return known, nil
 		}
 	}
 	return "", fmt.Errorf("未知的用户状态 %q：只认 %s", s, strings.Join(UserStatuses(), "、"))
@@ -244,11 +273,12 @@ func ParseUserStatus(s string) (string, error) {
 
 // roleOf 把 users 表上那两个标记反推成一个角色称呼。
 //
-// 它是 Role.flags 在**读侧**的另一半：那一处按称呼写标记，这里按标记读称呼。
+// 它是 Role.Flags 在**读侧**的另一半：那一处按称呼写标记，这里按标记读称呼。
 //
 // 先看 is_admin：迁移里写着 admin 天然也是 merchant，所以一行只写了 is_admin
-// 没写 is_merchant 的数据（只能由手改库产生）仍然算 admin。读侧给不出角色时，
-// 命令行那一栏就只能空着，而空着与「这一栏没填」在输出里分不出来。
+// 没写 is_merchant 的数据仍然算 admin。**造得出这样一行的路有两条**：直接改库，
+// 以及绕过命令行直接调 UpdateUser——它按列写，不替调用方补那条不变式。读侧给不出
+// 角色时，命令行那一栏就只能空着，而空着与「这一栏没填」在输出里分不出来。
 func roleOf(isMerchant, isAdmin bool) Role {
 	switch {
 	case isAdmin:
@@ -283,7 +313,9 @@ func rolePredicate(r Role) (isMerchant, isAdmin *bool) {
 // UserInfo 是一个用户在**读侧**的字段。
 //
 // 与 CreateUserParams 是两件事：那个是「要写成什么」，这个是「库里现在是什么」，
-// 所以它带着 status、created_at 这些命令行写不了、只能读的列。
+// 所以它带着 created_at / updated_at 这两个时刻——它们由库自己维护，命令行写不了，
+// 只有读侧看得见（status 与两个角色标记都另有写入路径，见 UpdateUserParams 与
+// Role.Flags）。
 type UserInfo struct {
 	// ID 是 users.id。
 	ID int64
@@ -383,7 +415,7 @@ func (s *Store) UserByRef(ctx context.Context, ref string) (UserInfo, error) {
 		return UserInfo{}, errors.New("用户标识为空")
 	}
 
-	where, arg := userRefWhere(ref)
+	where, arg := userRefWhere(ref, 1)
 	info, err := scanUserInfo(s.db.QueryRowContext(ctx,
 		`SELECT `+userInfoColumns+` FROM users WHERE `+where, arg).Scan)
 
@@ -413,4 +445,159 @@ func scanUserInfo(scan func(...any) error) (UserInfo, error) {
 	}
 	info.Role = roleOf(isMerchant, isAdmin)
 	return info, nil
+}
+
+// ── 改一个已有用户 ──────────────────────────────────────────────────────
+//
+// 这一段两边都碰：定位用 userRefWhere（写侧），两个标记按 Role.Flags 与 roleOf
+// 那一套映射写（读侧要用它读回来），返回的又是读侧那一份 UserInfo。所以它排在
+// 文件末尾，而不是塞进上面某一半里。
+
+// ErrNoChanges 表示这次修改没有任何字段要改。
+//
+// 单独报错而不是发一条只动 updated_at 的语句：后者会成功退出，而调用方以为
+// 改动生效了（与 channels / catalog / pricing 的同名哨兵同一个理由）。命令行
+// 在连库之前就挡住了这一档，这个哨兵留给绕过它的调用方；它同时让命令那一层
+// 把这个错误归到「参数错」而不是「其他失败」——值不同，所以那边逐个登记
+// （见 cmd/larkaxctl 的 exitCode）。
+var ErrNoChanges = errors.New("没有要改的字段")
+
+// UpdateUserParams 描述一次修改要动的列。
+//
+// 与 CreateUserParams 的分别在于**每一列都可以不改**：nil 表示「这一列不动」，
+// 于是「没提到」与「写成一个零值」分得开——后者会把没打算碰的列一起改掉。
+// 两个文本列还多一档：指向空串表示把这一列清成 NULL，那是「不填」在库里的样子
+// （见 CreateUser 对空邮箱的处理）。
+//
+// 两个标记分开给，而不是收一个 Role：`--no-admin` 的意思是「只把 is_admin 置假，
+// merchant 不动」，一个 Role 说不出来（见 Role.Flags 与 roleOf）。
+type UpdateUserParams struct {
+	// Status 为 nil 表示不改；给了必须是 UserStatuses() 里的一个。
+	Status *string
+	// DisplayName 为 nil 表示不改；指向空串（或只有空白）表示清成 NULL。
+	DisplayName *string
+	// Email 同上。这一列有唯一约束，撞上别的用户时报 ErrEmailTaken。
+	Email *string
+	// IsMerchant 为 nil 表示不改。
+	IsMerchant *bool
+	// IsAdmin 为 nil 表示不改。
+	IsAdmin *bool
+}
+
+// UpdateUser 按 ref 定位一个用户，改给出的那几列，返回改完之后的读侧字段。
+//
+// # 只碰给出的列
+//
+// SET 子句按「给没给」拼起来，没提到的列**在语句里根本不出现**。用
+// `COALESCE($n, col)` 那类写法省掉拼接，就等于把 NULL 借去当「不改」的记号——
+// 而 display_name 与 email 本来就可以是 NULL，两件事挤在同一个记号上，清空
+// 这一档就再也表达不出来，只能靠再立一个约定去区分（那正是这一档想避免的）。
+//
+// # 定位与返回
+//
+// ref 的解释与 ResolveUser / UserByRef 共用 userRefWhere，三条路径认的是同一个人。
+// 改完的那一行用 RETURNING 一次读回来（读侧九列与 ListUsers 共用一处定义），
+// 于是调用方不必再查一次：再查一次会让「改完之后是什么」依赖两次查询之间世界
+// 没有变，而调用方要拿它跟改之前比，比的必须是**这一条语句的**前后。
+//
+// 影响行数为 0 与「找不到这一行」是同一件事（RETURNING 一行都不吐），所以
+// 落回 ErrUserNotFound，与按标识读一个用户时报的是同一个哨兵。
+func (s *Store) UpdateUser(ctx context.Context, ref string, p UpdateUserParams) (UserInfo, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return UserInfo{}, errors.New("用户标识为空")
+	}
+
+	sets, args, err := userUpdateSets(p)
+	if err != nil {
+		return UserInfo{}, err
+	}
+	if len(sets) == 0 {
+		// 一列都没给。命令行那一侧在连库之前就挡住了，这里挡的是绕过它的
+		// 调用方：发一条只动 updated_at 的语句会成功退出，而调用方以为改动
+		// 生效了。
+		return UserInfo{}, ErrNoChanges
+	}
+	// updated_at 每次都动：它回答的是「这一行最后一次被改是什么时候」，
+	// 与改的是哪一列无关。也正因为每次都有它，这条语句永远不会变成空 SET。
+	sets = append(sets, "updated_at = now()")
+
+	where, arg := userRefWhere(ref, len(args)+1)
+	args = append(args, arg)
+
+	info, err := scanUserInfo(s.db.QueryRowContext(ctx,
+		`UPDATE users SET `+strings.Join(sets, ", ")+` WHERE `+where+
+			` RETURNING `+userInfoColumns, args...).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return UserInfo{}, fmt.Errorf("%w: %q", ErrUserNotFound, ref)
+	}
+	if err != nil {
+		return UserInfo{}, updateUserFailure(err, p.Email)
+	}
+	return info, nil
+}
+
+// userUpdateSets 把一次修改编成 SET 片段与参数。
+//
+// 与 internal/catalog 的 modelUpdateSets 同一个写法，理由也相同：它只做校验与
+// 编码、不碰数据库，可以单独读；而且它**没有函数作用域上的 err**，每个分支各自
+// 声明，作用域互不重叠，也就不存在遮蔽（.golangci.yml 里 govet 开了 enable-all，
+// 全写在一个函数里时最上面那次校验声明的 err 会被下面每个 `:=` 遮住）。
+//
+// 状态在这里再校验一次（命令行那侧已经校验过，见 cmd/larkaxctl 的 user update）：
+// 两处走的是同一个 ParseUserStatus，所以不存在「改一处漏一处」；换来的是
+// 绕过命令行的调用方拿到一句能读的报错，而不是 CHECK 约束的原文。
+func userUpdateSets(p UpdateUserParams) ([]string, []any, error) {
+	var sets []string
+	var args []any
+	add := func(column string, value any) {
+		args = append(args, value)
+		sets = append(sets, column+" = $"+strconv.Itoa(len(args)))
+	}
+	// addText 把空串（含只有空白的）写成 NULL：那一列在库里的「不填」是 NULL，
+	// 而读侧把 NULL 与空串都折成「没填」——再写进去一个空串只让「没填」多出
+	// 一种存法，而对 email 尤其坏：空串在 citext 里是一个具体的值，唯一约束
+	// 只容得下一个（见 CreateUser）。
+	addText := func(column string, value *string) {
+		if trimmed := strings.TrimSpace(*value); trimmed != "" {
+			add(column, trimmed)
+			return
+		}
+		add(column, nil)
+	}
+
+	if p.Status != nil {
+		parsed, err := ParseUserStatus(*p.Status)
+		if err != nil {
+			return nil, nil, err
+		}
+		add("status", parsed)
+	}
+	if p.Email != nil {
+		addText("email", p.Email)
+	}
+	if p.DisplayName != nil {
+		addText("display_name", p.DisplayName)
+	}
+	if p.IsMerchant != nil {
+		add("is_merchant", *p.IsMerchant)
+	}
+	if p.IsAdmin != nil {
+		add("is_admin", *p.IsAdmin)
+	}
+	return sets, args, nil
+}
+
+// updateUserFailure 把改用户语句的错误翻译成调用方认得出的错误。
+//
+// 只能撞上 email 那一条唯一约束（username 不在能改的列里，所以不传它，那一支
+// 也永远碰不到），但仍然走共用的 usersUniqueFailure：认不出来的原样包一层返回，
+// 绝不因为读不懂而当成成功。
+func updateUserFailure(err error, email *string) error {
+	if email != nil {
+		if mapped := usersUniqueFailure(err, "", strings.TrimSpace(*email)); mapped != nil {
+			return mapped
+		}
+	}
+	return fmt.Errorf("修改用户失败: %w", err)
 }
