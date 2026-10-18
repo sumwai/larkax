@@ -240,6 +240,13 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 	//nolint:contextcheck // 估算不碰 ctx，理由见上
 	est.ObserveRequest(upstream.PromptText(), len(upstream.Messages), len(upstream.Tools))
 
+	// 递进冻结的推进器：初始那一笔在 begin 里冻好（按第一段），此后每产出一个
+	// 阈值段就在这里补冻一次（见 streamFreeze）。
+	//
+	// 它收的是**结算口径**的那份请求（选中渠道与商家已填，见 settledRequest）：
+	// 补冻要按结算会用的那条规则取单价，两处的输入必须逐字相同。
+	freeze := newStreamFreeze(g, h.settledRequest(placed), h.reserved)
+
 	var (
 		// measured 是上游在流里带过的实测用量。
 		//
@@ -285,6 +292,16 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 		// 不是客户端断的。其余一切（结局判定、计费分支、读空上游）两者同路
 		// ——见下面那一段。
 		terminated bool
+		// interrupted 表示**我们**因为余额不足以补冻而切断了这条流（见下面
+		// streamFreeze 那一段）。它是 #498 新增的第三种「不是上游的错」的
+		// 结局。
+		//
+		// 它与 ended 分开记，而不是并进那一个判据：两者在「结局判定」与
+		// 「读空上游」上同路（都不是上游的错），**但在给调用方的那条错误帧上
+		// 完全不同**——ended 那两种情形（客户端断开、插件终止）不写错误帧，
+		// 而这一种必须写。并进 ended 的话，这条流会静默结束，调用方把半截
+		// 回答当成完整回答。
+		interrupted bool
 		// chunkIndex 是交给插件的块序号，只数内容块（见 StreamChunk）。
 		chunkIndex int
 		// accText 是已经发给调用方的正文。
@@ -299,6 +316,13 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 		// 它与 accText 的口径相反：观察发生在插件的处置**之前**，记的是
 		// 上游回来的那份内容。插件改的是发给调用方的东西，不是上游的事实。
 		upstreamResp = newStreamResponseBuilder()
+		// ours 是「**我们**把这条流停下的」，在循环之后才赋得了值（它取决于
+		// 这条流是怎么结束的），而下面的 defer 要读它。
+		//
+		// 它在这里声明而不是在循环之后就地处，是因为快照那次判定挂在 defer 上
+		// ——那一位在循环之前就注册了。与 upstreamStatus / clientGone 同一个
+		// 形状：defer 读的是返回那一刻的值。
+		ours bool
 	)
 
 	// 开始泵流的时刻。它只是延迟的**兜底起点**：真正发出去的时刻取自
@@ -312,7 +336,7 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 	// 「计费」），只挂在其中一条上就会漏掉另一半——那正是这张表想要的
 	// 「上游出过什么事」。
 	defer func() {
-		status, kind := streamResponseEvidence(upstreamStatus, streamErr, started, done, clientGone || terminated)
+		status, kind := streamResponseEvidence(upstreamStatus, streamErr, started, done, ours)
 		g.responseSnapshotAsync(ctx, upstreamResp.response(res.UpstreamModel), h.req.UserID,
 			optionalInt(status), optionalString(kind))
 	}()
@@ -413,6 +437,38 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 			clientGone = true
 			break
 		}
+
+		// 补冻的检查点。它排在转发**之后**：这一块已经产出、也已经发给调用方，
+		// 而计费口径是「已产出的部分进结算」（见 issue 的判据）。先拦下来不转发
+		// 不会让上游少收那笔钱，只会让调用方少看到一块他已经付了钱的正文。
+		//
+		// 上游给了结束标记之后不再检查：那时不会再有产出，而这次补冻若失败，
+		// 我们会在一条已经正常结束的流后面追加一个错误帧——调用方同时看到
+		// 「正常结束」与「出错了」。
+		//
+		// 用 settleCtx 之外的 ctx（observe 内部自己配一个不带取消的上限）：
+		// settleCtx 的 10 秒预算是从**这条流开始**算的，而一次补冻可能发生在
+		// 流的第 30 秒——拿它去写库必然超时（见 settleCtx 的注释与
+		// streamFreezeTimeout）。
+		if !done {
+			if freezeErr := freeze.observe(ctx, freeze.produced(est, measured)); freezeErr != nil {
+				// 余额不够覆盖已经产出的部分：切断这条流，而且只到这里为止。
+				//
+				// 它既不是上游的错，也不是客户端断的，所以只用**流内**的方式
+				// 表达（HTTP 状态码早就发出去了，改不了）：注入一条错误事件，
+				// 由入口按各协议渲染成错误帧（见 internal/api 的 streamErrorFrame）。
+				//
+				// 不补一个正常结束标记，也不静默断开——前者会让调用方把半截
+				// 回答当成完整回答（答到一半的内容可能语义完全相反），后者
+				// 分不出「被谁截断」。
+				//
+				// 已产出的部分照常结算（下面那条计费路径），所以这里不做任何
+				// 钱的处置：这一条事件只表达「这条流到此为止」。
+				interrupted = true
+				forward(ctx, out, channel.StreamEvent{Kind: "error", Err: freezeErr})
+				break
+			}
+		}
 	}
 
 	// 客户端断开有两种表现：转发时被 ctx.Done 打断（上面那个 select），
@@ -432,7 +488,17 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 	// 「已经吐出去的回答一分钱没记」。
 	ended := clientGone || terminated
 
-	if ended {
+	// ours 是「这是我们自己把这条流停下的」：上面那两种，加上余额不足的中断。
+	//
+	// 三件事上它们完全同路：结局判定（都不是渠道的失败，所以都不加连续失败
+	// 也不清零）、读空上游（上游那条连接要放掉）、快照与截断分类（都不是上游
+	// 截断）。差别只在一处：给调用方的那条错误帧，只有 interrupted 那一种写。
+	//
+	// 所以它不并进 ended：那一位还兼着「这次流没有走到该有的结局」这层读法，
+	// 而中断是**有结局的**——它已经用一条错误帧说清楚了，只是钱不够继续。
+	ours = ended || interrupted
+
+	if ours {
 		// 我们不再转发，但上游那条流可能还没读完：适配器的泵阻塞在发送上，
 		// 不读空它就永远不退出，它持有的上游连接也不会被释放。这里在后台
 		// 读掉——上游的 ctx 就是被取消的这个，所以它很快就会结束。
@@ -442,22 +508,27 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 		}()
 	}
 
-	// 这次调用在渠道健康度上算成什么，三种结局的判定只有这里做得出来：
+	// 这次调用在渠道健康度上算成什么，几种结局的判定只有这里做得出来：
 	//
 	//   - 客户端断开不是渠道的失败（是我们这边断的），但它也没有正常结束，
 	//     所以既不加连续失败也不清零；插件终止同理——那是插件按自己的策略
-	//     截的，与这个渠道好不好无关
+	//     截的，与这个渠道好不好无关；余额不足的中断也是我们这边断的，而
+	//     上游那条渠道当时正在正常产出
 	//   - 上游接受请求之后报错、或者没吐字就断了，是渠道此刻不行
 	//   - 正常结束（收到结束标记且流里没报错）才是成功
+	//
+	// 最后一条意味着中断**不**算渠道的失败：把一次「我们没钱了」记成渠道
+	// 挂了，会让一个完全正常的渠道被降权，而那正是 #498 说的「不污染渠道
+	// 健康度」。
 	verdict := route.VerdictFailure
 	switch {
-	case ended:
+	case ours:
 		verdict = route.VerdictUnattributed
 	case done && streamErr == nil:
 		verdict = route.VerdictSuccess
 	}
 
-	if !ended && !done && !started {
+	if !ours && !done && !started {
 		// 上游在接受请求之后、吐出任何内容之前就结束了（报错或直接断开）。
 		// 这等于「没有成功返回」：不计费，预留由 finish 释放。
 		//
@@ -533,6 +604,219 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 		Usage:     coreUsage,
 	})
 }
+
+// streamFreeze 是流式请求的递进冻结推进器。
+//
+// # 它要解决什么
+//
+// 流式那条路原先按调用方声明的 max_tokens 冻满整笔。而 max_tokens 是**调用方
+// 给的值**，填大是常态（不少 SDK 的默认值就很大）：一个余额够付实际消耗的账户，
+// 发一条 max_tokens 填得很大、实际只产出几十个 token 的流式请求，光预留就冻掉
+// 一大笔，单发一条就被「可用余额不足」拒掉——而拒绝的理由与真实原因被抹成同一
+// 句话（见 #498）。
+//
+// 换成的做法是：开始之前只冻第一段，之后**随流递进**——每产出一个阈值段就在这里
+// 补冻一次，补不上（余额不够）就把这条流切断。
+//
+// # 不变量：冻结额领先已产出量一个段
+//
+// 每一个成功的检查点之后都成立：
+//
+//	已冻结的输出 token 数 ≥ 已产出量 + 一个阈值段（不超过声明的上界）
+//
+// 那多出来的一个段是**中断时不留下未计费尾巴**的保证，而尾巴这件事是这一整套
+// 设计的要紧处：检查排在转发**之后**，所以中断那一刻已经产出的量可能刚越过上
+// 一个检查点冻住的额度——如果冻结额只是追平已产出量，中断就会留下一小段没冻住
+// 的产出，结算到它时实际金额超过预留额、撞上 Capped，而 Capped 按定义是「上游
+// 不守信、结算超过了我们声明的上界」这一个信号，不该变成「用户余额不够」的常态
+// 出口（差额由平台承担，账目仍然是平的，对账看不出来）。领先一段之后，中断时
+// 已产出量始终落在上一次冻住的额度**之内**：结算按实际用量收，不撞上界，余额也
+// 不会变负（本轮不引入透支）。
+//
+// 代价写在明处：一条流在跑的时候，用户账上多冻住至多两个阈值段（一段是领先量，
+// 另一段是目标按段取整带出来的）。它随流结束释放，不影响最终结算。
+type streamFreeze struct {
+	gw *Gateway
+
+	// req 是**结算口径**的那份请求：选中渠道与商家已经填上（见 handle.settledRequest）。
+	// 补冻要按结算会用的那条规则取单价，两处的输入必须逐字相同（见 pipeline.ReserveMore）。
+	req pipeline.Request
+
+	// reserved 是这次请求的预留，**就地推进**：Amount 与 OutputTokens 一起加。
+	// 结算读的就是它（见 finishCharge），所以与落库同进同退的那两个数也只有它。
+	reserved *pipeline.Reservation
+
+	// step 是阈值段（token）。装配期校验为正（见 Gateway.StreamFreezeStep）。
+	step int64
+
+	// max 是这次请求声明的输出上界，冻结额的封顶。
+	//
+	// 补冻不越过它：越过就等于在冻结这一侧认下「上游不守声明的上界」，而那个
+	// 判断是结算时按实际用量做的（Capped）。同时它也是「目标值」的自然上限——
+	// max_tokens 比一个段还小的请求（例如 100），第一段就把它冻满了，此后一次
+	// 补冻都不会发生。
+	max int64
+
+	// warned 表示这次请求已经记过一次「未充分冻结」。
+	//
+	// 它只挡重复的计数与日志，**不挡重试**：补冻写库失败多半是库在报错，下一个
+	// 检查点再试一次的成本与正常路径一样（每段一次），而一次瞬时故障本来不该让
+	// 整条流从此失去冻结。计数与日志各记一次，是因为它们回答的是两个问题：
+	// 「有多少次请求出过这个问题」（指标）与「是哪一次」（日志）。
+	warned bool
+}
+
+// newStreamFreeze 造一个推进器。
+//
+// reserved 是 begin 里那笔已经落库的预留（第一段）。
+func newStreamFreeze(g *Gateway, req pipeline.Request, reserved *pipeline.Reservation) *streamFreeze {
+	return &streamFreeze{
+		gw:       g,
+		req:      req,
+		reserved: reserved,
+		step:     g.StreamFreezeStep,
+		max:      req.MaxTokens,
+	}
+}
+
+// produced 是这条流**已经产出**了多少输出 token。
+//
+// 取估算量与上游实测量里**大**的那个：上游报了 usage 就以它为准（那是它自己
+// 认的数），没报就用本地累计（见 tokens.StreamEstimator）。两者在流中间可能
+// 只到一个，而取大的那一侧才是「我们可能已经欠了多少」的上界——取小的那一侧
+// 会让冻结额落后于真实产出，而落后正是这条要修的东西。
+func (f *streamFreeze) produced(est *tokens.StreamEstimator, measured *channel.Usage) int64 {
+	n := est.Result().Output.Tokens
+	if measured != nil && measured.CompletionTokens > n {
+		n = measured.CompletionTokens
+	}
+	return n
+}
+
+// pending 是这次检查要补冻的输出 token 数；0 表示不必补。
+//
+// 目标是「已产出量之上再加一段，并对齐到段的整数倍」——对齐是必须的，不然后
+// 每个事件都会算出一个不同的目标值，补冻就从「每段一次」退化成「每个事件一次」
+// （一次几 token 的流会打出上百次数据库往返）。对齐之后，检查点落在**跨过段
+// 边界**那一刻，与「按累计 token 跨过阈值」是同一件事。
+func (f *streamFreeze) pending(produced int64) int64 {
+	// 阈值段非正时**不补冻**，也就走不到下面那个整除。
+	//
+	// 这条守卫落在调用点而不是 roundUpTo 里：roundUpTo 是一个纯数学小工具，
+	// 它的前置条件（step 为正）由这里保证；把「step<=0」解释成「不递进冻结」
+	// 是这一层的语义，塞进那个函数反而会让它悄悄吞掉别处传错的段而看不出来。
+	//
+	// 为什么它今天够得着：pumpStream 无论 req.Streamed 真假都会造 streamFreeze
+	// （见它的调用点），而 begin 只在**流式**那一支挡了 StreamFreezeStep<=0
+	// （见 gateway.go）。于是「ChatStream + Streamed=false + 阈值段为 0」这条
+	// 路上 f.step 就是 0，第一次产出就撞上 roundUpTo 的整数除零 panic——而
+	// 崩点离原因（一个没设的字段）很远。零值的语义是「不递进冻结」，不是
+	// 「每次事件都查」：不补冻即可，不该崩。
+	if f.step <= 0 {
+		return 0
+	}
+
+	want := roundUpTo(produced, f.step) + f.step
+	if want > f.max {
+		want = f.max
+	}
+	if want <= f.reserved.OutputTokens {
+		return 0
+	}
+	return want - f.reserved.OutputTokens
+}
+
+// observe 在产出一个块之后推进冻结。返回非 nil 表示**这条流要中断**。
+//
+// 返回的错误只有一种：余额不够继续冻（errors.Is(err, pipeline.ErrInsufficientAvailable)，
+// 由落库层的冻结语句给出）。其余一切失败都放行——算不出价、写库报错都是我们自己
+// 的故障，不该让一条正在正常产出的流断掉；中断是留给「用户的钱不够」的。放行之后
+// 这次请求成为「未充分冻结」，由 markUnderfrozen 记数留痕。
+func (f *streamFreeze) observe(ctx context.Context, produced int64) error {
+	need := f.pending(produced)
+	if need == 0 {
+		return nil
+	}
+
+	// 这一次补冻的时间上限由**这一次**决定，而不是由「这条流已经跑了多久」决定
+	// ——settleCtx 的预算是从流开始算的，拿它去写库会让一次长流的补冻必然超时。
+	// 同时去掉取消：客户端断开那一刻已经产出的 token 仍然要冻上、要计费，理由与
+	// settleCtx 用 WithoutCancel 相同。
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), streamFreezeTimeout)
+	defer cancel()
+
+	amount, err := f.gw.Pipeline.ReserveMore(ctx, f.req, f.reserved, need)
+	if err != nil {
+		f.markUnderfrozen(ctx, err)
+		return nil
+	}
+
+	if err := f.gw.Reservations.AddReservation(ctx, f.req, amount); err != nil {
+		if errors.Is(err, pipeline.ErrInsufficientAvailable) {
+			// 唯一的断流理由，也是这个计数器的**唯一**增量点：调用方拿到这个
+			// 返回值就会切断这条流（见下面循环里那一段），所以「想断」与
+			// 「数到了」是同一件事，不会出现「记了数却没断」。
+			observe.Metrics.StreamBalanceExhausted.Inc()
+			return err
+		}
+		// 写库失败、钱包行不在：放行，这次请求从此未充分冻结。
+		f.markUnderfrozen(ctx, err)
+		return nil
+	}
+
+	// 落库成功之后才推进内存里那两个数，顺序不能反：结算读的就是它们，先推进
+	// 再落库的话，一次写失败会让结算按一个库里并不存在的预留额去算——差额要么
+	// 冻结额虚高（多冻用户的钱，而释放读的是账单行，两边对不上），要么结算被截
+	// （撞 Capped，差额由平台吃掉）。
+	f.reserved.Amount = f.reserved.Amount.Add(amount)
+	f.reserved.OutputTokens += need
+	return nil
+}
+
+// markUnderfrozen 记下一次「补冻没冻上」。
+//
+// 计数与日志各记一次（第一次），因为两者回答的不是同一个问题：指标答「有多少次
+// 请求出过这个问题」，日志答「是哪一次」。这与 CappedSettlements 和
+// computed_amount 的分工一致（见 internal/observe 里那条计数器的注释）。
+//
+// 它**不改变控制流**：一次次要的存储故障不该让用户的请求失败，捂不住的那一侧是
+// 平台自己的问题。后果也如实写在计数器上——这次请求之后产出的 token 没有对应的
+// 冻结额，结算到它们时会撞上界、差额由平台承担。
+func (f *streamFreeze) markUnderfrozen(ctx context.Context, err error) {
+	if f.warned {
+		return
+	}
+	f.warned = true
+
+	observe.Metrics.StreamUnderfrozen.Inc()
+	observe.FromContext(ctx).Warn("流式补冻未成功，这次请求按未充分冻结继续",
+		"err", err, "request_id", f.req.RequestID)
+}
+
+// roundUpTo 把 n 向上对齐到 step 的整数倍。
+//
+// step 必须为正：step 为 0 时 `(n+step-1)/step` 是整数除零、会 panic，所以
+// 调用方（pending）在进来之前就把 step<=0 挡掉了——这一段前置条件由它保证，
+// 这里不重复判（就在这里判的话，别处传错的段会被悄悄吞成 0，看不出来）。
+// n 为负数时返回 0：调用方给的是「已经产出了多少 token」，负值表达不出来，
+// 返回 0 相当于「还没产出」，不会算出一个小于已冻额的目标。
+func roundUpTo(n, step int64) int64 {
+	if n <= 0 {
+		return 0
+	}
+	return ((n + step - 1) / step) * step
+}
+
+// streamFreezeTimeout 是**一次**补冻（算价 + 写库）的时间上限。
+//
+// 与 streamSettleTimeout 分开，因为它们计时的起点不同：那个是整条流收尾的预算
+// （从流开始算），而这个是每一次补冻各自的预算。合用一个是错的——一条跑了两分钟
+// 的流在第二个检查点上拿到的会是一份早就过期的预算（见 streamFreeze.observe）。
+//
+// 5 秒比 streamSettleTimeout 短：补冻在一段流中间，卡住会直接停住上游的输出，
+// 而收尾那次结算不再有人等（流已经结束了）。够不着就放行、记账（见
+// markUnderfrozen），而不是把用户的流停在这里。
+const streamFreezeTimeout = 5 * time.Second
 
 // streamDuration 是一次流式调用的耗时。
 //
@@ -859,12 +1143,12 @@ func (b *streamResponseBuilder) response(upstreamModel string) *channel.Response
 //
 // 一个 token 都没吐之后的分类是「流在接受之后断了」；吐过字之后上游把连接
 // 掐断（没有结束标记、也没有错误帧）是「流被截断」，见 streamTruncated。
-// 其余（正常结束、客户端断开、插件终止）没有上游失败可归。
-func streamResponseEvidence(status int, streamErr error, started, done, ended bool) (int, string) {
-	if !ended && !done && !started {
+// 其余（正常结束、客户端断开、插件终止、余额不足的中断）没有上游失败可归。
+func streamResponseEvidence(status int, streamErr error, started, done, ours bool) (int, string) {
+	if !ours && !done && !started {
 		return status, pipeline.ErrorUpstreamStreamAborted
 	}
-	if streamTruncated(streamErr, started, done, ended) {
+	if streamTruncated(streamErr, started, done, ours) {
 		return status, pipeline.ErrorUpstreamStreamTruncated
 	}
 	if streamErr != nil {
@@ -888,15 +1172,17 @@ func streamResponseEvidence(status int, streamErr error, started, done, ended bo
 //   - !done：上游没给结束标记（[DONE] / message_stop）。给了就是正常结束；
 //   - streamErr == nil：上游没有报错。报错是另一条路（已经吐字之后报错要
 //     计费，但结局是「上游的响应不可用」而不是「静默截断」）；
-//   - !ended：不是我们这边断的。客户端断开或插件终止时，上游那条连接多半
-//     也跟着断了，把它记成上游截断等于把我们的行为算到上游头上。
+//   - !ours：不是我们这边停的。客户端断开、插件终止、余额不足的中断——这
+//     三种情形下上游那条连接多半也跟着断了（或我们不再读它了），把它记成
+//     上游截断等于把**我们的**行为算到上游头上，而这条分类的用途正是挑出
+//     上游不守信的渠道。
 //
 // 它同时是快照与账单两侧的判据：两表对同一次截断必须给出同一个值，所以
 // 判据只能有一处，两边都调这一个函数，不各判一次。账单那一侧的落点是
 // store.Release 之外的另一处（已计费的行不走 Release），见 pipeline 的
 // ErrorUpstreamStreamTruncated。
-func streamTruncated(streamErr error, started, done, ended bool) bool {
-	return !ended && !done && started && streamErr == nil
+func streamTruncated(streamErr error, started, done, ours bool) bool {
+	return !ours && !done && started && streamErr == nil
 }
 
 // streamSettleTimeout 是流式收尾（结算 + 释放）的时间上限。

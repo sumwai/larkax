@@ -21,8 +21,12 @@ import (
 // 上界的构成：
 //
 //	输入侧：已知的输入 token × prompt / cache_read / cache_write 里最贵的单价
-//	输出侧：请求的 max_tokens × max(completion, reasoning) 单价
+//	输出侧：要冻的输出 token 数 × max(completion, reasoning) 单价
 //	其余：非 token 计量各留一份，宁可多留
+//
+// 「要冻的输出 token 数」不等于请求声明的 max_tokens：非流式那条路按声明冻满，
+// 流式那条路只冻第一段、之后随流递进补冻（见 ReserveRequest.OutputTokens 与
+// pipeline.ReserveMore）。
 //
 // 两侧都取「最贵的那个单价」，理由相同：请求前不知道结算会怎么拆，而按贵的估
 // 才是与拆法无关的上界。逐条理由写在各自那一段的注释里。
@@ -81,20 +85,19 @@ func Reserve(req ReserveRequest) (money.Amount, error) {
 	cacheRead := mul(money.Max(p.Prompt, p.CacheRead), req.CacheReadTokens)
 	cacheWrite := mul(p.CacheWrite, req.CacheWriteTokens)
 
-	// 输出侧：按 max_tokens 估。这是预留里最大的一块，
+	// 输出侧：按 OutputTokens 估。这是预留里最大的一块，
 	// 也是「大请求冻住余额多」的来源。
 	//
-	// 用输出侧两个单价（Completion 与 Reasoning）的较大者来估：推理单价
-	// 通常更高，而预留宁可多留。
-	//
+	// 它算的是**有多少个输出 token 要冻**，而不是「请求声明的上界有多大」：
+	// 非流式那条路两者相同（按声明的 max_tokens 冻满），流式那条路只冻第一段
+	// （见 pipeline.ReserveStream 与 #498），之后按真实产出补冻。
 	// max_tokens 是**调用方给的值**，没有上界校验（见 pipeline.Request.validate），
 	// 所以这一项是「不需要任何数据前提就能撞上溢出」的那一处——上面的 mul
 	// 因此不是防御性代码，它挡的就是这条。
-	outputPrice := money.Max(p.Completion, p.Reasoning)
-	output := mul(outputPrice, req.MaxTokens)
+	output := mul(OutputPrice(p), req.OutputTokens)
 
-	// 推理 token 不在这里加：输出侧按 max_tokens 估，已经用
-	// max(Completion, Reasoning) 覆盖了那一块（见下面 total 的构成）。
+	// 推理 token 不在这里加：输出侧按 OutputPrice（completion 与 reasoning 里
+	// 较贵的那个）估，已经覆盖了那一块（见下面 total 的构成）。
 	// 所以这个函数里没有单独的推理项，也就不存在「漏加一项」——
 	// 上界由输出侧那一项撑着。
 	total := input.Add(cacheRead).Add(cacheWrite).Add(output)
@@ -122,8 +125,8 @@ func Reserve(req ReserveRequest) (money.Amount, error) {
 	// 两处会夹住的地方各判一次：
 	//
 	//   - 乘法：上面每一处 mul 都记下了 clampErr（单价 × 数量放不进 int64）。
-	//     这是最要紧的一处——max_tokens 是调用方给的值、没有上界，一个请求
-	//     就能走到；而夹住的预留是一个偏小的上界。
+	//     这是最要紧的一处——声明的 max_tokens 是调用方给的值、没有上界，
+	//     一个请求就能走到；而夹住的预留是一个偏小的上界。
 	//   - 求和：各分项各自放得下而合起来放不下。判据用 SumChecked 按真实和
 	//     判，而不是逐个中间值——中间值溢出但真实和放得下是正常的（见
 	//     money.SumChecked）。各分项都已被 validate 保证非负，所以也不存在
@@ -154,6 +157,37 @@ func Reserve(req ReserveRequest) (money.Amount, error) {
 	return total, nil
 }
 
+// OutputPrice 是输出侧按哪一档单价估：completion 与 reasoning 里较贵的那个。
+//
+// 推理单价通常更高，而预留宁可多留。取 max 而不是按用量拆开：请求前不知道
+// 结算会把输出拆成多少普通输出、多少推理，而两个桶都塞满才是与拆法无关的上界。
+//
+// 它是**唯一**一处取这一档价的地方：初始预留（Reserve）与流式的递进补冻
+// （ReserveOutput）都从这里取。两处各写一次的那天，就是两份开始分岔的那天
+// ——补冻冻出来的钱与结算算出来的钱从此不是同一把尺子量的，而那种偏差不会
+// 报错，只会表现成撞上界（少收）或者多冻。
+func OutputPrice(p Prices) money.Amount {
+	return money.Max(p.Completion, p.Reasoning)
+}
+
+// ReserveOutput 算出 outputTokens 个输出 token 对应的预留金额。
+//
+// 它只算**输出侧那一项**。固定费、最低消费、非 token 计量与输入侧都不在这里：
+// 那些是一次请求只发生一次的量，初始预留里已经各算过一份，按段重复加会让
+// 预留越滚越大（见 pipeline.ReserveMore）。
+//
+// 夹住时返回错误而不是夹住的数：夹住的预留是一个偏小的上界，结算会超过它、
+// 撞上 Capped，差额静默由平台承担（与 Reserve 里那条判据同一个理由）。
+func ReserveOutput(p Prices, outputTokens int64) (money.Amount, error) {
+	amount, ok := money.MulIntChecked(OutputPrice(p), outputTokens)
+	if !ok {
+		return money.Zero, fmt.Errorf(
+			"输出侧的预留金额在相乘时放不进 int64 的最小单位表示（库里的 numeric(20, 8) 存得下，money 表示不了）: %w",
+			money.ErrOverflow)
+	}
+	return amount, nil
+}
+
 // ReserveRequest 是预留计算的输入。
 type ReserveRequest struct {
 	Prices Prices
@@ -182,9 +216,18 @@ type ReserveRequest struct {
 	// 真要填估计量时两个量得分开算。
 	CacheWriteTokens int64
 
-	// MaxTokens 是请求允许的最大输出。这是上界的关键：
-	// 不给它就没法算出上界，此时必须由调用方给一个兜底值。
-	MaxTokens int64
+	// OutputTokens 是这次要冻的输出 token 数。**它不是请求声明的 max_tokens**，
+	// 两者只在非流式那条路上恰好相等：
+	//
+	//   - 非流式（pipeline.Reserve）：按调用方声明的上界冻满，所以这里就是
+	//     max_tokens（别名覆盖之后的值，见 gateway.outputBound）；
+	//   - 流式（pipeline.ReserveStream）：只冻第一段，之后按真实产出补冻
+	//     （见 pipeline.ReserveMore 与 #498），所以这里是一个小于 max_tokens 的段。
+	//
+	// 叫 OutputTokens 而不是 MaxTokens，是因为它答的是「按多少 token 估」而
+	// 不是「上界是多少」——流式那条路上两者不是同一个数，用一个名字会让读的人
+	// 以为上界被改小了。
+	OutputTokens int64
 
 	// Charges 是一次性费用（固定费、最低消费），由规则求值得到。
 	//
@@ -203,10 +246,10 @@ func (r ReserveRequest) validate() error {
 	if r.CacheWriteTokens < 0 {
 		return fmt.Errorf("缓存写 token 为负: %d", r.CacheWriteTokens)
 	}
-	if r.MaxTokens <= 0 {
-		// 没有 max_tokens 就算不出上界。用典型值兜底会让结算可能超过预留，
+	if r.OutputTokens <= 0 {
+		// 没有输出上界就算不出上界。用典型值兜底会让结算可能超过预留，
 		// 从而破坏「余额不为负」——那正是预留机制要避免的。
-		return fmt.Errorf("%w: max_tokens 必须为正，当前 %d", ErrNoUpperBound, r.MaxTokens)
+		return fmt.Errorf("%w: 要冻的输出 token 数必须为正，当前 %d", ErrNoUpperBound, r.OutputTokens)
 	}
 	if err := r.Charges.Validate(); err != nil {
 		return err

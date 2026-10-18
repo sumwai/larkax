@@ -12,6 +12,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/billing/expr"
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/route"
 	"github.com/sumwai/larkax/internal/tokens"
@@ -71,6 +72,18 @@ type fakeReservations struct {
 	err   error
 	next  int64
 
+	// added 是每次追加冻结额的记录（请求 + 增量），按调用顺序。
+	//
+	// 「追加了几次、每次多少」是流式递进冻结的**全部外部表现**：金额对不对、
+	// 检查点落在哪、以及「中断之后有没有再多冻一笔」都在这一份记录里。
+	added []addCall
+	// onAdd 非 nil 时由它决定这次追加的结果；nil 表示成功。
+	//
+	// 用回调而不是一个按次序的错误列表：用例要判的是「冻到第二段的时候余额
+	// 不够」，而按金额或按累计量判比数「第几次调用」稳——那个数会随实现里
+	// 检查点的位置变，于是用例会在一次无害的重构之后开始测别的东西。
+	onAdd func(pipeline.Request, money.Amount) error
+
 	released []releaseCall
 	// releaseCtxErr 记下每次释放时传进来的 ctx 是不是已经不可用。
 	//
@@ -80,12 +93,40 @@ type fakeReservations struct {
 	releaseErr    error
 }
 
+// addCall 是一次追加冻结额：给哪次请求追加了多少。
+type addCall struct {
+	req   pipeline.Request
+	delta money.Amount
+}
+
+// AddReservation 记下一次追加，并按 onAdd 给出结果。
+//
+// 它**不改**已经保存的那份 Reservation：真实实现改的是库里的两处（钱包与账单
+// 行），而内存里那份由调用方自己推进（见 streamFreeze.observe）。假实现跟着改
+// 的话，「调用方忘了推进」这件事就测不出来了——而那正是最要紧的一半：结算读的
+// 是内存里那份。
+func (f *fakeReservations) AddReservation(_ context.Context, req pipeline.Request, delta money.Amount) error {
+	f.added = append(f.added, addCall{req: req, delta: delta})
+	if f.onAdd != nil {
+		return f.onAdd(req, delta)
+	}
+	return nil
+}
+
 func (f *fakeReservations) SaveReservation(_ context.Context, _ pipeline.Request, r *pipeline.Reservation) (int64, error) {
 	if f.err != nil {
 		return 0, f.err
 	}
 	f.next++
-	f.saved = append(f.saved, r)
+	// 存**副本**而不是那个指针：流式那条路上网关会在流中间就地推进这份预留
+	// （补冻要加金额与「已经冻了多少个 token」，见 streamFreeze），而这一份
+	// 记录要回答的是「开始之前冻了多少」——那是递进冻结最要紧的一个断言
+	// （第一段），被后来那些补冻盖掉就什么都断言不了了。落库那一刻的值就是
+	// 库里那一行刚插进去时的值，副本与它同形。
+	//
+	// 最终值（结算用的那个数）从别处拿：它就在 Charge.Settlement.Reserved 上。
+	snapshot := *r
+	f.saved = append(f.saved, &snapshot)
 	return f.next, nil
 }
 
@@ -374,6 +415,15 @@ type harness struct {
 	// 「没超限」那条路——那些用例钉的是别的事，不该被这条判据绊住。要钉这条
 	// 判据的用例自己把它压下来（见 outputcap_test.go 的 withMaxOutputTokens）。
 	maxOutputTokens int64
+
+	// streamFreezeStep 是流式递进冻结的阈值段（见 Gateway.StreamFreezeStep）。
+	//
+	// 默认取 4096，与 settings 里的默认值一致。夹具里 request() 声明的
+	// max_tokens 是 500，**小于**这个段——于是初始预留就冻满了整笔，一次补冻
+	// 都不会发生：那些用例原本钉的就是「按声明上界冻满」这条路，换成递进冻结
+	// 不该把它们的行为改掉。要钉递进冻结自己的用例把段压到 max_tokens 以下
+	// （见 stream_test.go 的 withStreamFreezeStep）。
+	streamFreezeStep int64
 }
 
 func newHarness(t *testing.T, opts ...func(*harness)) *harness {
@@ -403,6 +453,7 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 		aliases:          identityAliases{},
 		aliasOverrides:   identityOverrides{},
 		maxOutputTokens:  65536,
+		streamFreezeStep: 4096,
 	}
 	for _, o := range opts {
 		o(h)
@@ -416,7 +467,9 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 		Router:         &route.Router{Rand: rand.New(rand.NewSource(1)), Aliases: h.aliases},
 		AliasOverrides: h.aliasOverrides,
 		// 单次输出上限的全局默认值，见 harness.maxOutputTokens。
-		MaxOutputTokens:  h.maxOutputTokens,
+		MaxOutputTokens: h.maxOutputTokens,
+		// 流式递进冻结的阈值段，见 harness.streamFreezeStep。
+		StreamFreezeStep: h.streamFreezeStep,
 		Candidates:       h.candidates,
 		Reservations:     h.reservations,
 		Settlements:      h.settlements,

@@ -200,6 +200,8 @@ const (
 	probeIntervalKey = "quota.probe_interval_seconds"
 	// maxOutputTokensKey 是单次输出上限的全局默认值（token）。
 	maxOutputTokensKey = "billing.max_output_tokens"
+	// streamFreezeStepKey 是流式请求递进冻结的阈值段（token）。
+	streamFreezeStepKey = "billing.stream_freeze_step"
 )
 
 // 单次输出上限允许的范围（token）。
@@ -214,6 +216,29 @@ const (
 const (
 	minMaxOutputTokens = 1
 	maxMaxOutputTokens = 1 << 20
+)
+
+// 流式递进冻结的阈值段允许的范围（token）。
+//
+// 下界 1：0 与负数在语义上不成立（见 pipeline.ErrNoFreezeStep）。配成那样时
+// 网关会拒掉**每一个**流式请求，而现场看到的是一批 5xx——那种失败与代码故障
+// 同形，所以在启动时判掉。
+//
+// 上界取 1<<16（65536），也就是 `billing.max_output_tokens` 的**出厂默认值**
+// （见迁移 00026）——它是「一次输出能产出多少」的那一档。
+//
+// 要挡的是「段大到把递进冻结整条关掉」：初始预留取 min(max_tokens, step)，所以
+// 段一旦不小于某次请求声明的输出上界，那一笔就把整笔冻满，此后一次补冻都不发生
+// ——而在请求上「关掉」与「配得很宽」长得一模一样。这里**不是**跟着单次输出上限
+// 自己那个 1<<20 的上界走：那个数是「这个量还算不算一个界」的上界，它比默认输出
+// 上界还大，用它当阈值恰好把这条判据开在它自己要防的位置上（配成 1<<20 等于关掉）。
+//
+// 边界说清楚：一个全局的数不可能对每一次请求都成立（调用方可以声明小于段的上界，
+// 例如 500），而这一点由调用方声明的上界决定，不是这个常量能兜住的。这个上界管的
+// 是**配置层面**的那条线——不允许把段配到一次输出的量级上，那正是「关掉」的形态。
+const (
+	minStreamFreezeStep = 1
+	maxStreamFreezeStep = 1 << 16
 )
 
 // 探测间隔允许的范围（秒）。
@@ -314,6 +339,20 @@ func Build(cfg Config) (*App, error) {
 			maxOutputTokensKey, maxOutputTokens, minMaxOutputTokens, maxMaxOutputTokens)
 	}
 
+	// 流式递进冻结的阈值段。它同时是「多久检查一次」与「冻结额最多领先已产出量
+	// 多少」——一个数担两个角色是有意的（见 gateway.Gateway.StreamFreezeStep）。
+	//
+	// 与其他键一样在这里判范围：配错的表现是流式那条路回一批 5xx（网关拒掉
+	// 每一个流式请求），而「配置错」与「代码坏」在那一批 5xx 里分不出来。
+	streamFreezeStep, err := cfg.Settings.Int(streamFreezeStepKey)
+	if err != nil {
+		return nil, fmt.Errorf("读取流式递进冻结的阈值段失败: %w", err)
+	}
+	if streamFreezeStep < minStreamFreezeStep || streamFreezeStep > maxStreamFreezeStep {
+		return nil, fmt.Errorf("settings.%s = %d 超出允许范围 [%d, %d] token",
+			streamFreezeStepKey, streamFreezeStep, minStreamFreezeStep, maxStreamFreezeStep)
+	}
+
 	cal, calendarEnv, err := buildCalendar(cfg.DB)
 	if err != nil {
 		return nil, err
@@ -370,9 +409,15 @@ func Build(cfg Config) (*App, error) {
 		// 是这条判据整条失效，而「没配上限」与「上限配得很宽」在请求上
 		// 长得一模一样。
 		MaxOutputTokens: maxOutputTokens,
-		Candidates:      channels.New(cfg.DB, cfg.Sealer),
-		Reservations:    ledgerStore,
-		Settlements:     ledgerStore,
+		// StreamFreezeStep 是流式请求递进冻结的阈值段：流式那条路不按声明的
+		// max_tokens 冻满，而是先冻一段、之后随流补冻（见 gateway/stream.go
+		// 的 streamFreeze 与 #498）。它必须在装配期就是正的（见上面那次校验）
+		// ——不接或接成 0 的表现是每一个流式请求都失败，而不是安静地退回到
+		// 某个默认行为。
+		StreamFreezeStep: streamFreezeStep,
+		Candidates:       channels.New(cfg.DB, cfg.Sealer),
+		Reservations:     ledgerStore,
+		Settlements:      ledgerStore,
 		// 写入侧与读取侧共用同一个包：两边读写的列是同一批，
 		// 分开放会让「写进去的值读出来不对」这类错没有唯一的归属。
 		Recorder:  channels.NewRecorder(cfg.DB, staleAfter),

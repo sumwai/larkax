@@ -1034,6 +1034,36 @@ func TestStreamNormalEndHasNoClassification(t *testing.T) {
 	}
 }
 
+// streamResponseEvidence 把 started / done / ours 的每一格各归哪一档。
+//
+// 写成一张表是为了让每一格都有一句话，而不是只钉住走过的那几条路。此前缺的
+// 那一格是「一个字没吐，但收到了结束标记」：上游正常结束、只是没有内容。它
+// 不是中断——aborted 说的是「接受之后断掉」，而正常结束（哪怕没有内容）没有
+// 上游失败可归，该留空。
+func TestStreamResponseEvidenceClasses(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		started, done, ours bool
+		want                string
+	}{
+		{"一个字没吐就结束", false, false, false, pipeline.ErrorUpstreamStreamAborted},
+		{"空内容但正常结束", false, true, false, ""},
+		{"吐过字、上游没给结束标记", true, false, false, pipeline.ErrorUpstreamStreamTruncated},
+		{"吐过字且正常结束", true, true, false, ""},
+		{"我们自己把这条流停下的", true, false, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, kind := streamResponseEvidence(http.StatusOK, nil, tc.started, tc.done, tc.ours)
+			if kind != tc.want {
+				t.Errorf("error_kind = %q，期望 %q", kind, tc.want)
+			}
+			if status != http.StatusOK {
+				t.Errorf("status = %d，期望 %d", status, http.StatusOK)
+			}
+		})
+	}
+}
+
 // kindOf 把快照的分类打成能读的形态。
 //
 // ErrorKind 是 *string，直接 %v 打出来的是地址——失败信息里出现一串
