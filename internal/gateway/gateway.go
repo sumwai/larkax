@@ -403,6 +403,18 @@ type Gateway struct {
 
 	// Now 可注入，便于测试时间相关的逻辑。
 	Now func() time.Time
+
+	// SettleTimeout 覆盖流式收尾（结算 + 释放）的时间预算。
+	//
+	// 零值表示用 streamSettleTimeout 那个常量——**不是**「不限」：收尾那一步
+	// 写的是账本，没有上限时一次卡住的写库会把这笔钱吊在半空。
+	//
+	// 可注入，理由与 Now 相同：那一段预算要靠「一条跑得比它久的流」才验得到，
+	// 而常量是十秒。用例把它压到毫秒级，形状不变（见 stream.go 的 settleTimeout）。
+	//
+	// 它只管**收尾**：流中间的每一次补冻各自配 5 秒（见 streamFreezeTimeout），
+	// 与这个字段无关。
+	SettleTimeout time.Duration
 }
 
 // Executor 是调上游的能力，由适配器组合而成。
