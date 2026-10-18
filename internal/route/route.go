@@ -56,7 +56,13 @@ type Candidate struct {
 
 	// Priority 数值大者先选。商家用它表达「这个渠道是主力」。
 	Priority int
-	// Weight 是同优先级内的分流比例。<= 0 视为 1。
+	// Weight 不参与排序：决定「谁先试」的只有 Priority 与 score()（见 order），
+	// 它不是分流比例——改这个数不会改变任何一次请求的去向。
+	//
+	// 它今天的作用是「被记下来」：CLI（`larkaxctl channel create` 与 `update`
+	// 的 `--weight`）收它，落进 channels.weight，也出现在决策快照里。负值
+	// 会被拒绝；0 在写库前落成 1（见 channels.normalizeWeight），表上的
+	// 默认值也是 1。
 	Weight int
 
 	// Health 是渠道健康度，由 channel_health_rollup 汇总而来。
@@ -744,18 +750,22 @@ func (p Plan) unsupportedOnly() bool {
 // 排序规则：
 //
 //  1. priority 降序——这是商家的显式意图，不该被任何打分盖过。
-//  2. 同 priority 内按分数降序。分数是各维度的加权和。
-//  3. 同分之间按 weight 加权随机——**不是**严格顺序。
+//  2. 同 priority 内按分数降序。分数是各维度的加权和（见 score）。
+//  3. 同分之间随机打散——**不是**严格顺序，也不是按 weight 加权。
+//     每个候选拿到一个随机键（tie），同分的那些因此等概率地被排到前面。
 //
-// 为什么第 3 步是加权随机而不是固定顺序：固定顺序会让所有流量压在
-// 排序第一的那个渠道上，于是
+// 这三步都不读 Candidate 的 Weight 字段——它被接受、落库、进快照，
+// 但与「谁先试」无关。
 //
-//   - 一台坏渠道影响的是全部流量，而不是一部分；
-//   - 其余渠道长期空转，健康数据陈旧，等主力渠道挂了才第一次被使用，
+// 为什么第 3 步是随机而不是固定顺序：同分的候选若按固定顺序排，落在前面的
+// 那个会一直吃到这批流量，于是
+//
+//   - 一台坏渠道影响的是同分的全部流量，而不是其中一部分；
+//   - 其余候选长期空转，健康数据陈旧，等前面那个挂了才第一次被使用，
 //     而那时才发现它也不行。
 //
-// 加权随机让每个渠道都在持续被使用。代价是同一条请求两次走不同渠道，
-// 因此对上游缓存的命中率会下降——这一点在缓存亲和那一层另议。
+// 随机的代价是同一条请求两次可能走不同渠道，对上游缓存的命中率会下降
+// ——这一点在缓存亲和那一层另议。
 func (r *Router) order(candidates []Candidate) []Candidate {
 	if len(candidates) == 0 {
 		return nil
@@ -790,9 +800,8 @@ func (r *Router) order(candidates []Candidate) []Candidate {
 	out := make([]Candidate, 0, len(candidates))
 	for _, p := range priorities {
 		group := grouped[p]
-		// 同 priority 内：分数降序。同分之间用 tie 打散——
-		// 本轮请求内不再考虑 weight，因为 weight 表达的是**长期比例**，
-		// 而这里排的是「这一条请求的尝试顺序」。
+		// 同 priority 内：分数降序。同分之间用 tie 打散——tie 是等概率的
+		// 随机键，与渠道上配的 Weight 无关：那个字段不参与排序。
 		sort.SliceStable(group, func(i, j int) bool {
 			if group[i].score != group[j].score {
 				return group[i].score > group[j].score
