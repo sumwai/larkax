@@ -1,6 +1,9 @@
 # larkax 规则
 
-本文件记录 larkax 项目的长期约定：开发流程、协作规则、代码与文档要求。
+本文件记录 larkax 的长期约定：**这个仓库是什么样**——代码与文档要求、红线，以及其余文档在哪。
+
+**接手开发任务前先读 [`.claude/skills/larkax-workflow/SKILL.md`](.claude/skills/larkax-workflow/SKILL.md)**——
+角色分工、派活与回报协议、评审与测试怎么派、issue → PR → 合并的流程都在那里，本文件不重复。
 
 开发中遇到的问题与解决方案按条拆在 [`lessons/`](lessons/)，根目录的 [LESSONS.md](LESSONS.md) 是索引。
 **开始任何工作前先读索引**，按「什么时候读」那一列找到与手上的活相关的条目，再点编号进正文——
@@ -45,34 +48,9 @@ GitHub Flow：`main` 受保护，只能通过 PR 合入。
 功能分支 → PR → CI → review → 合入 main → 部署 staging
 ```
 
-CI 目前包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`）、
-覆盖率摘要、迁移 up→down→up 往返（真 PostgreSQL）、分层自查及其自测
-（`check-layering.sh` / `check-layering.test.sh`）、红线扫描及其自测、
-变异测试脚本的自测、不可达符号门禁及其自测（`check-deadcode.sh`）、
-整包没人 import 的门禁及其自测（`check-unimported.sh`）、
-导出方法调用点门禁及其自测（`check-deadmethods.sh`）、
-测试函数名门禁及其自测（`check-test-names.sh`）、
-索引与正文一致性门禁及其自测（`check-lessons-index.sh`）、
-非 UTC 时区下的时刻门禁（`TZ=Asia/Shanghai` 再跑一遍受影响的包，
-见 `docs/cli-output.md` 的「时刻与时区」）、
-契约测试（`contract/`，见下）。
-集成测试另有一道**「确认真跑了」的门禁**——它逐包显式跑依赖数据库的那些包，
-被 `t.Skip` 时报错，因为「跳过」在输出里和「通过」长得一样
-（见 [LESSONS.md](LESSONS.md) 第 16 条）。**包清单的唯一来源是**
-`.github/actions/check-integration-tests`，新增依赖数据库的测试包时要往那里补；
-本文件不重复列一遍——两处清单迟早会不一致，而那时没人知道哪一份算数。
+**CI 的门禁清单不写在本文件**——有哪些门、各自挡什么、本地怎么跑、契约测试为什么是
+独立一个 job，见 [docs/development.md](docs/development.md) 的「CI 跑什么」一节。
 **自动部署尚未接入**，落地时补进这条流水线。
-
-契约测试是**独立的一个 job**（`契约`），与上面那道流水线并列：它多两个运行期
-依赖（Python 3.12 与两个官方 SDK），塞进 Go 那个 job 会让「Go 测试挂了」与
-「Python 依赖没装」混在同一份日志里。它验的是**我们对外响应的形状**，
-用官方 SDK 当客户端——仓库里的端到端用例用的是自己写的假上游与自己构造的
-请求，证明的只是「我们的响应我们自己能解析」。怎么跑、怎么加一条、
-有哪些已知偏差，见 [contract/README.md](contract/README.md)。
-
-它与集成测试那道门是同一个形状：`-run Contract` **匹配不到任何用例时
-`go test` 照样退出 0**，所以那个 job 的判据是「`--- PASS: TestContract...`
-出现过几次」，不是退出码。
 
 分支命名：`feat/`、`fix/`、`refactor/`、`docs/`、`test/`、`chore/` 前缀 + 简短描述。
 
@@ -92,74 +70,39 @@ git log --oneline main..HEAD | wc -l    # 必须是 0
 `git branch --merged main | xargs git branch -d` 会把 `main` 自己也扫进去。
 
 Commit 用 Conventional Commits。提交信息与 PR 描述里**不得出现会话上下文与私有信息**。
+PR 描述按 [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) 的几节写，
+**用 `Closes #NNN` 关 issue**——编号只写在标题里不会关它。
 
-## 协作角色
+## 测试与门禁
 
-用多个 agent 并行工作，至少包含两个专职角色：测试与 review。
+本地怎么跑、每道门挡什么、CI 跑哪些门、变异测试的分数怎么读，见
+[docs/development.md](docs/development.md) 的「常用检查」「CI 跑什么」「变异测试」三节。
+留在这里的只有四条判据：
 
-**但不要每改一次就叫一轮。** 起一个 agent 要花几分钟、烧掉不少 token，而它做的大部分事
-（跑 `gofmt`、`go vet`、`go test`、读 diff、看排版）谁都在做。所以：
-
-| 改动性质 | 怎么做 |
-|---|---|
-| 日常小改（改文案、加个函数、修拼写） | 自己跑命令检查，不起 agent |
-| 一次功能改动完成 | 自己检查；只有触及计费、账本、协议转换这类高风险区才起 review agent |
-| 准备发新版本 | 起完整的测试与 review agent，此时不省 |
-
-自己动手时，把下面两个角色清单当成自查表逐条过一遍——它们的价值在清单本身，
-不在「由另一个 agent 来执行」。
-
-### 测试角色
-
-**日常开发**：跟随改动写针对性的测试即可，不要求全量 e2e。
-
-**发布新版本时**：跑完整测试，包含：
-
-- **端到端测试**：从客户端 SDK 到上游的完整链路（OpenAI 与 Anthropic 两套协议各一遍）
-- **变异测试**：对核心计费与账本代码做变异测试。计费算错是这套系统最贵的 bug，变异测试能发现「测试通过了但逻辑是错的」这类问题
-
-**扮演首次使用者**：测试时让 agent 扮演**第一次使用 larkax 的用户**，给他一个目标（例如「我要用 larkax 调 Claude 模型」），**不带任何已有上下文**，让他从文档开始自己摸索。任何让他卡住、需要猜、找不到的地方都是缺陷。
-
-**老用户视角**：如果改动会影响既有用户的使用习惯（改配置格式、改参数名、改默认值、改界面路径），**另起一轮**让 agent 以老用户视角测试，确认不会造成困扰或静默的行为变化。
-
-### Review 角色
-
-Review 不只看代码逻辑。让 agent **扮演对项目一无所知的 reviewer** 审核 diff，检查：
-
-| 维度 | 具体项 |
-|---|---|
-| 代码 | 逻辑正确性、边界条件、错误处理、并发安全、资源释放 |
-| 可读性 | 命名是否达意、是否有不必要的复杂度、注释是否解释「为什么」 |
-| 文档 | 与代码是否一致、示例能否直接运行、是否有过时描述 |
-| 注释 | 是否准确、有无残留的调试代码与 TODO |
-| 用词 | 措辞是否清晰、术语是否一致、有无中英混用不一致 |
-| 格式与排版 | 空行、换行符、缩进、行尾空白、文件末尾换行、全角/半角标点 |
-| Lint | 所有 lint 与格式化工具的输出必须干净 |
-| 公开性 | 是否混入非公开内容（见上文红线） |
-| 设计上下文 | 有没有把「为什么现在做」写进来——需求来源、讨论过程、谁提的、排期，以及「本轮 / 这次 / 本次范围」这类只有当时在场的人才懂的指代 |
-
-最后一行**脚本判不了**：能机器判的只有「面向使用者的文本里不出现设计理由」那一半
-（`cmd/larkaxctl/usage_test.go` 的 `TestRootUsageHasNoDesignRationale`，全仓词表在这里会
-假阳性泛滥——`决策`、`会话`、`本次` 都是技术词）。所以剩下的一半**是 review 的活**：
-逐条问一句「这句话是给**读代码的人**看的，还是给**当时在讨论的人**看的」。
-
-「让人看起来不顺眼」本身就是问题，要提出来。格式与排版的一致性是这个项目的一部分。
+- **改了哪个门禁脚本，就跑它自己的自测**（`scripts/check-*.test.sh`）。扫描器坏掉时的
+  输出和「干净」一模一样，没有自测就无法证明它还在工作（见 [LESSONS.md](LESSONS.md) 第 2、7 条）。
+- **「跳过」与「通过」在输出里长得一样**，本仓反复踩这个坑（见 [LESSONS.md](LESSONS.md)
+  第 16 条）：缺 `LARKAX_DB_DSN` 时依赖数据库的用例整包 `t.Skip`，所以 CI 里另有一道门
+  专门确认它们真的跑了，被 `t.Skip` 时报错。新增这类测试包时要往
+  `.github/actions/check-integration-tests` 补上包名——那是这份清单的唯一来源。
+- **测试通过不等于行为被钉住**：覆盖率只说明「这一行被执行过」。计费、账本、金额的
+  改动要过变异测试。
+- 白名单（`scripts/*-allowlist.txt`）的条目只许减不许增，**不要为了把它刷空而硬接一条
+  假的调用方**——那比留着一条白名单更坏。
 
 ## 配置的分界线
 
 新增配置项前先问：**它是不是必须在连上数据库之前拿到？**
 
-- 是 → 环境变量。目前是数据库 DSN、主密钥、角色、日志级别、环境名、
-  Redis 连接串，以及两个监听地址（公共与内部）——共八个。
-  完整清单以 `internal/config` 的 `Load` 为准。
-- 否 → 数据库的 `settings` 表。
+- 是 → 环境变量，目前只有八个（数据库 DSN、主密钥、角色、日志级别、环境名、
+  Redis 连接串、两个监听地址）。完整清单以 `internal/config` 的 `Load` 为准。
+- 否 → 数据库的 `settings` 表；密钥类配置也不进 `settings`——那里的值会明文落盘
+  并进入备份，它们走 `channels` 表的信封加密。
 
-**环境变量要少。** 它必须跟着数据一起走：备份恢复、换机器、切环境时漏掉一个变量，
-数据就可能整体不可用，而这类错误往往几周后才暴露。配置放在库里则与数据同生共死。
-
-因此环境变量的门槛很高，加一个要有明确的「必须在连库前拿到」的理由。
-密钥类配置（上游 API Key、支付凭证）也不进 `settings`——那里的值会明文落盘并进入备份，
-它们走 `channels` 表的信封加密。
+**环境变量要少**：它必须跟着数据一起走，备份恢复、换机器、切环境时漏掉一个变量，
+数据就可能整体不可用，而这类错误往往几周后才暴露；放在库里则与数据同生共死。
+所以加一个要有明确的「必须在连库前拿到」的理由。加配置项的两步见
+[docs/development.md](docs/development.md) 的「加一个配置项」一节。
 
 ## 代码约定
 
@@ -187,309 +130,21 @@ Review 不只看代码逻辑。让 agent **扮演对项目一无所知的 review
 
 ## 其他文档在哪
 
-上面四条曾经列在这里当「待补充」，其中三条**已经有了，只是写在自己的文件里**。
-本文件不把它们抄一遍：抄第二份的那一天，就是两份开始分岔的那一天
+本文件不把别处的清单抄第二份：抄第二份的那一天，就是两份开始分岔的那一天
 （见 [LESSONS.md](LESSONS.md) 第 29 条）。
 
 | 要找什么 | 在哪 |
 |---|---|
+| 开发流程、角色分工与边界、派活与回报协议、评审看什么、测试角色 | [.claude/skills/larkax-workflow/SKILL.md](.claude/skills/larkax-workflow/SKILL.md) |
+| 本地开发环境搭建、跑通一次请求 | [docs/development.md](docs/development.md) |
+| lint 与门禁命令、每道门挡什么、变异测试怎么跑怎么读、各包现状 | [docs/development.md](docs/development.md) |
+| CI 跑哪些门、契约测试怎么加一条、有哪些已知偏差 | [docs/development.md](docs/development.md) → [contract/README.md](contract/README.md) |
 | 开发中踩过的坑（按条，含「什么时候读」） | [LESSONS.md](LESSONS.md) 索引 → [lessons/](lessons/) 正文 |
-| 本地开发环境搭建 | [docs/development.md](docs/development.md) |
-| 测试与 lint 的具体命令 | 本文件的「Lint」一节 |
 | 新开 issue、写 PR 描述的格式 | [.github/ISSUE_TEMPLATE/](.github/ISSUE_TEMPLATE/) 与 [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) |
 | 发布流程的操作细节 | [docs/versioning.md](docs/versioning.md) |
+| 命令行输出的形状约定（颜色、表格、空清单怎么打） | [docs/cli-output.md](docs/cli-output.md) |
 | 技术栈选型 | 本文件的「代码约定」一节 |
 
 **唯一没写的是「选型理由」**，而且它**不该**写进本仓库：本文件的「文档约定」一节
 写着仓库里的文档只写「是什么、怎么用、怎么改」，不写「为什么要这么做」的讨论过程。
 选型理由属于那一类，留在仓库外。
-
-## 用子代理并行工作
-
-主会话负责：拆解任务、定接口边界、集成、决策、管 PR。实现细节交给子代理——
-把读文件、试错、跑测试吃进主会话的上下文，后续轮次就只能在被压缩过的摘要上
-做判断，而判断质量会随之下滑。
-
-| 什么样的活 | 谁做 |
-|---|---|
-| 开新包、重写已有包、跨多文件调研 | 子代理 |
-| 定接口、写决策、合并 PR、修一行 | 主会话 |
-
-**每轮开始时先规划**：把这一轮的活拆成**互不重叠的文件集**，让多个子代理
-能同时开工，而不是串行等一个做完再想下一个。
-
-给子代理的任务里必须写清楚：
-
-- 要建/改的确切路径，以及**不要碰什么**
-- 禁止任何改动 git 状态的命令（`add`/`commit`/`checkout`/`stash`/`switch`）
-  与 `go mod tidy`——多个代理共用一棵工作树时，这些会互相破坏
-- 只跑与自己目录相关的 `go build` / `go vet` / `go test` / `gofmt`
-- **PR 的创建与合并由主会话做**，保证 GitHub 流程一致，
-  也避免多个代理同时操作远端
-
-## Lint
-
-```sh
-gofmt -l .                          # 格式
-go vet ./...                        # 标准检查
-golangci-lint run ./...             # 跨文件与语义检查（配置见 .golangci.yml）
-go test ./...                       # 单测（有 LARKAX_DB_DSN 时连集成测试一起跑）
-
-# 契约测试：用官方 SDK 当客户端验我们对外响应的形状。要先装 Python 依赖，
-# 且 go vet 默认不看 build tag 后面的文件，所以这里要单独带 -tags 跑一遍。
-pip install -r contract/requirements.txt
-go test -tags=contract -count=1 -v ./internal/assembly/ -run Contract
-go vet -tags=contract ./internal/assembly/
-
-bash scripts/check-redlines.sh      # 公开红线：密钥、私有主机、本机路径
-bash scripts/check-layering.sh      # 分层约定：谁 import 谁
-bash scripts/check-deadcode.sh      # 不可达符号：可达的包内部有没有没人调的函数
-bash scripts/check-unimported.sh    # 整包没人 import：包本身有没有接上
-bash scripts/check-deadmethods.sh   # 导出方法有没有调用点（上面两道门都照不到）
-bash scripts/check-test-names.sh    # Go 顶层函数声明的名字必须是 ASCII
-bash scripts/check-lessons-index.sh # LESSONS.md 的索引与 lessons/ 下的正文对得上
-scripts/check-mutation.sh           # 变异测试（改动计费/账本时）
-```
-
-`scripts/check-redlines.sh --all` 扫全树而不是暂存区。**改了哪个脚本就跑它自己的
-自测**：`scripts/check-redlines.test.sh`、`check-deadcode.test.sh`、
-`check-unimported.test.sh`、`check-deadmethods.test.sh`、`check-test-names.test.sh`、
-`check-layering.test.sh`、`check-mutation.test.sh`。扫描器坏掉时的输出和
-「干净」一模一样，没有自测就无法证明它还在工作（见 [LESSONS.md](LESSONS.md)
-第 2、7 条）。
-
-`scripts/check-deadcode.sh` 需要 `deadcode`，版本必须与脚本里的
-`PINNED_TOOLS_VERSION` 一致——符号集合随 `golang.org/x/tools` 的版本变化，
-版本不对它直接拒绝运行。它比对的白名单是 `scripts/deadcode-allowlist.txt`：
-新出现的不可达符号直接失败；白名单里已经消失的条目只提示「可以删了」，
-不算失败（它出现的原因是有人把没门的东西接上线了）；条目数只许减不许增。
-
-`scripts/check-unimported.sh` 是它的**补集**，只依赖 `go`：把「仓库自己的包」
-（`go list ./...`）与「从入口可达的包」（`go list -deps`，入口同样由 `cmd/`
-自动发现）两个集合相减，差集就是**整包没有任何 import 方**的那些——
-`deadcode` 照不到这一类，因为它只分析从入口可达的包。白名单是
-`scripts/unimported-allowlist.txt`，口径与上面那份一致：新出现的直接失败，
-已经接上的只提示「可以删了」，条目数只许减不许增。
-
-`scripts/check-deadmethods.sh` 是**第三类**，只依赖 `go`：一个导出方法在
-「入口可达的、非测试的」文件里有没有出现过调用语法。`deadcode` 照不到这一类——
-它底下的 RTA 把「任何 runtime type 的导出方法」整体当成可达（反射可能调到），
-而且掩蔽会沿调用链传下去：一个被掩蔽的方法如果是某个自由函数唯一的调用方，
-那个函数也从清单里消失。本仓不用反射，所以这一类要单独有一道门。
-判据走 Go 的 AST 而不是文本匹配（注释与字符串里的 `.Name(` 不算调用点），
-白名单是 `scripts/deadmethods-allowlist.txt`，口径与上面两份一致。
-
-它有两个**已知的边界**，写在脚本与白名单的开头，别当成 bug：按方法名判，
-所以同名方法会互相掩护（假阴性）；`f := x.Name` 这种方法值语法与字段访问
-无法区分，取严的一侧（假阳性）。它与 `deadcode` 的白名单**不共享条目**——
-判据不同，同一个符号可能在两边各记一条，也可能只在一处出现。
-
-`scripts/check-lessons-index.sh` 管的是 [LESSONS.md](LESSONS.md) 与 `lessons/`
-下正文的一致性。LESSONS.md 是索引、每条正文各一个文件，两者原先只靠手工对齐——
-索引里多一条、正文没建，点进去是 404；编号与文件名脱钩时更坏，点进去是**另一条**
-而没人会察觉。它只依赖 bash 与 coreutils，与分层自查同一类，所以放在那个 job 里。
-
-它与上面几道门同一个形状：判据是集合比对，坏掉时（索引一行都没解析出来、
-`lessons/` 一个文件都没扫到）的输出和「全部对得上」一模一样。所以它每次都打印
-「解析出多少行索引 / 扫到多少个文件」，任一为 0 就判「没跑成」（退出码 2），
-而不是报通过（见 [LESSONS.md](LESSONS.md) 第 16 条），自测也照第 2、23 条一并跑。
-
-`scripts/check-test-names.sh` 管的是「标识符保持英文」这条约定：**Go 顶层
-`func` 声明的名字**只许由 `[A-Za-z0-9_]` 组成。判的是**名字那个标识符**，
-不是「整行含中文」——后者会把中文在函数体、字符串或形参名上的行全部误报
-（实测全仓 5 处命中，5 处都是误报）。三种声明形态都认：普通函数、方法
-（跳过接收者）、泛型函数（名字截到 `[` 之前）。退出码分三档：0 通过、
-1 命中、2 **没跑成**（一个文件都没扫到、一条 `func` 都没有、或者解析不出名字）
-——第 2 档与第 1 档分开，是因为「没跑成」在输出里和「干净」长得一样
-（见 [LESSONS.md](LESSONS.md) 第 16 条）。
-
-它的**已知边界**写在脚本头注释里，各有自测钉着：函数体内的局部变量、形参、
-包级 `const` / `var` / `type` 名不判；非 Go 文件不判。这条约定的动机是
-`go test -run` 的正则与 CI 失败行里的可读性，那些名字不出现在这两处。
-
-**只被测试 import 的包算「没人 import」。** 测试自己就能构造调用方，
-所以「只有测试在调」与「生产在调」在覆盖率上长得一样
-（见 [LESSONS.md](LESSONS.md) 第 22 条）；测试夹具包因此也要进白名单。
-
-**不要为了把白名单刷空而去硬接一条调用方**——接一条假的比留着它更坏。
-
-**集成测试需要 `LARKAX_DB_DSN`**。没设时它们会跳过，而**「跳过」在输出里和
-「通过」长得一样**——所以 CI 里专门有一道检查确认它们真的跑了（见
-[LESSONS.md](LESSONS.md) 第 16 条）。变异测试也依赖它：`internal/ledger/store`
-被整包跳过后那一包等于没测，脚本因此会拒绝运行（见 [LESSONS.md](LESSONS.md)
-第 17 条）。
-
-**每个连库的测试包跑在自己的库上**（`internal/testdb`）：它按包路径建一个
-`larkax_test_<包路径>`、在上面跑全量迁移、跑完删掉。原先所有包共用 DSN 指向的
-那一个库，而 `go test ./...` 默认并行跑包，于是「A 包的夹具被 B 包看见」只在
-并行窗口里现形。
-
-由此多了两条前提：
-
-- **DSN 里那个角色要有 `CREATEDB`**——助手要连维护库（`postgres`）建库、删库。
-  没有这个权限时它**报错退出**，不是跳过。
-- **DSN 里的库名只当连接信息用**，测试不会写它。所以 DSN 指向一个空库就够了，
-  **不必先手工 `migrate up`**。
-
-本地跑集成测试：
-
-```sh
-docker run -d --name larkax-pg -e POSTGRES_USER=larkax \
-  -e POSTGRES_PASSWORD=placeholder -e POSTGRES_DB=larkax \
-  -p 127.0.0.1:5432:5432 postgres:16-alpine
-
-export LARKAX_DB_DSN="postgres://larkax:placeholder@127.0.0.1:5432/larkax?sslmode=disable"
-go test ./internal/ledger/store/
-```
-
-（`larkaxctl` 自己要连的那个库仍然要迁移，那是另一回事：`go run ./cmd/larkaxctl migrate up`。）
-
-`golangci-lint` **只开有价值的检查器，不做「全部打开」**——一份报上百条无关警告的
-报告，第二次就没人看了。配置里每一项都有它对应的理由。
-
-版本上有两个坑，都实际撞过：
-
-1. **用比 `go.mod` 更旧的 Go 构建的 golangci-lint 会直接拒绝运行**。
-   release 二进制通常比当前 Go 旧，所以本地要用 `go install` 一份，
-   CI 里用 `install-mode: goinstall`。
-2. **它自带的 typechecker 也要够新**。旧版读不了新版 Go 的导出数据格式，
-   报 `export data version N is greater than maximum supported version M`——
-   这个错看起来像代码问题，其实是工具版本问题。
-
-所以升级 Go 或 golangci-lint 时，两者要一起看。
-
-## 变异测试
-
-核心计费与账本代码的测试**必须**用变异测试验证。覆盖率只说明「这一行被
-执行过」，不说明「这一行的每个分支都被钉住了」——把 `>=` 改成 `>`、
-把分支方向反过来，覆盖率一点不变，而测试照样通过。
-
-```sh
-scripts/check-mutation.sh              # 全部包
-scripts/check-mutation.sh money route  # 只跑指定的
-```
-
-**并发与超时系数是同一个旋钮，而并发是更该先调的那个。** gremlins 给每个
-变异的超时预算 = 「跑一次测试集的时间 × 系数」，而那个基准是**串行**测出来
-的；并发跑变异时机器上同时有 N 个 `go test` 在编译与执行，超时按墙钟算，
-于是并发越高、越多变异被判超时。
-
-实测（`internal/money`，系数固定 10）：
-
-| workers | 结果 |
-|---|---|
-| 1 | `Killed 80, Timed out 0` |
-| 2 | `Killed 80, Timed out 0` |
-| **4** | `Killed 3, Timed out 92` |
-
-所以**调大系数是在补并发造成的短缺**，而那会让「这个包需要多大系数」
-变成一个随机器负载变化的**假属性**——同一份代码两次运行给出截然不同的
-分数，一次「0.00% efficacy」看起来像真实结论。
-
-`scripts/check-mutation.sh` 因此固定 `workers=1`、系数 10。串行慢，
-但变异测试不是每次提交都跑的东西（见上文协作节奏），**慢而可信比快而误导好**。
-
-### 一个分数要连着它的条件一起读
-
-固定了 workers 还不够。同一个包在两种条件下给出的不是同一个数：
-
-| 条件 | `internal/ledger` | Mutator coverage |
-|---|---|---|
-| `LARKAX_DB_DSN` 有效 | `Killed 132, Lived 11, Not covered 27` | 84.12% |
-| `LARKAX_DB_DSN` 不存在 | `Killed 94, Lived 7, Not covered 69` | 59.41% |
-
-**变的是「有多少变异体被测到」，不是「杀掉的比例」。** 两个 Test efficacy
-几乎一样（92.31% 与 93.07%），差得多的是 Mutator coverage——所以
-**只看 efficacy 会把这件事完全盖住**，要连着 Mutator coverage 一起看。
-
-原因：gremlins 收集覆盖时用的是**整个模块**的测试集，而被测包只是其中一个。
-`internal/ledger/store` 的集成测试要 `LARKAX_DB_DSN`，没设时整包 `t.Skip`，
-于是它给 `internal/ledger` 贡献的那部分覆盖也没了——可测的变异体从 143 个
-掉到 101 个，那 42 个从「被杀/存活」挪进了「不可达」。
-
-修法是**把 DSN 变成硬前提**，而不是去收窄覆盖范围：脚本缺 `LARKAX_DB_DSN`
-时直接拒绝运行。收窄成 `--coverpkg=./<pkg>/` 是错的方向——那是把「被别的包
-测试覆盖到」的部分白白丢掉（可测变异体 143 → 101），数字看着稳了、信息量少了。
-
-另一条来源是机器上的别的负载——它挡不住，只能按下面的判据识别：
-
-| 包 | 机器空闲 | 有别的负载 |
-|---|---|---|
-| `internal/billing` | `Killed 145, Timed out 0` | `Killed 136, Timed out 10` |
-| `internal/tokens` | `Killed 100, Timed out 0` | `Killed 95, Timed out 5` |
-
-**判据是超时条数，不是百分比。** 超时不为 0 就说明这一轮受了干扰，
-那几个数不与历史比较、也不抄进表里。
-
-### 对存活的变异逐个判断
-
-`scripts/check-mutation.sh` 跑完会把**存活的变异逐条列出来**（包名 + 变异类型 + 位置）。
-只打一个计数的话这一节没法执行——数得出来，看不了，于是「逐个判断」实际退化成
-「看一个百分比」。存活不进退出码：存活本身不是失败，判过之后可以放过。
-
-只有两类可放过：
-
-- **等价变异**：改法与改后行为不可区分（例如 `f >= unit` 与 `f > unit`
-  在「小数部分恰好填满一个单位」时结果相同）
-- **不可达分支**：前置条件已经保证走不到，例如「商超出 int64 时它不可能为 0」
-
-放过时在测试里写一行说明，否则下一个人会以为是漏了。
-
-### 用常量测常量等于没测
-
-`internal/quota` 里曾经写成
-
-```go
-if got := score(selfAccountingStaleAfter); got != baseScore { ... }
-```
-
-被测的阈值与喂进去的输入是同一个常量。把它从 15 分钟改成 15 秒，
-用例照样通过——测的是「相对关系」而不是这个数。要钉住一个数就用字面量：
-`score(14 * time.Minute)`。
-
-## 各包的现状
-
-由 `scripts/check-mutation.sh` 跑出（workers=1、系数 10、带 `LARKAX_DB_DSN`）。
-**超时列不为 0 的包，这一轮的分数不与历史比较**——见上文。
-改动过某个包的测试之后重跑并在表里更新。
-
-**这张表是历史值，暂不与新一轮比较。** 它出自一个没钉版本的 gremlins
-（`@latest` 装出来的，上游一变变异器集合就变），与现在脚本跑出来的不是同一把尺子。
-efficacy 的分母是变异体数，分母变了分数就会变——所以**表待按当前口径整表重跑**。
-
-**怎么跑**：`scripts/check-mutation.sh`（需要 `LARKAX_DB_DSN` 与钉住那一版的
-gremlins；缺哪个它都会拒绝运行并给出安装命令）。它每次运行打一行
-「这把尺子：…」，写的就是这个数的三个条件：
-
-- gremlins 版本：`v0.6.0`，由脚本里的 `PINNED_GREMLINS_VERSION` 钉住，
-  运行时探测并校验，不符就拒绝运行；
-- 变异器集合：脚本从 `unleash --help` 探测，不在这里抄一份——抄第二份的那天
-  就是两份开始分岔的那天；
-- `--invert-logical` 已打开（`&&` ↔ `||`，默认关闭）。打开它之前，`a || b`
-  这类判据一个变异体都不生成，那时「efficacy 高」不能当成「布尔判据也被钉住了」。
-
-**贴数字时把那一行「这把尺子」一起贴上**：它是数字的条件，不是装饰。
-两次运行的条件不同，两个数就不是同一个包的两个样本，别放在一起比。
-
-| 包 | 覆盖率 | Test efficacy | 超时 |
-|---|---|---|---|
-| `internal/gateway` | 96.4% | 100% | 0 |
-| `internal/pipeline` | 86.8% | 96.0% | 0 |
-| `internal/quota` | 95.6% | 93.9% | 0 |
-| `internal/calendar` | 97.8% | 93.6% | 1 |
-| `internal/ledger` | 96.5% | 92.3% | 0 |
-| `internal/ledger/store` | 79.8% | 90.2% | 1 |
-| `internal/route` | 93.3% | 84.3% | 0 |
-| `internal/money` | 95.9% | 84.2% | 0 |
-| `internal/billing` | 97.5% | 81.0% | 0 |
-| `internal/tokens` | 97.4% | 74.6% | 4 |
-| `internal/snapshot` | 88.6% | 70.8% | 7 |
-| `internal/snapshotwire` | 95.2% | 100% | 0 |
-
-**覆盖率高而 efficacy 低，说明测试断言的是「相对关系」而不是「具体边界」。**
-`route` 与 `snapshot` 两个包都是这个形状：原用例写的是「A 明显比 B 好」
-这种比较，于是改 `<=` 为 `<`、去掉分母的加数、改常量，只要顺序不变就测不出来。
-
-**不要为了把 efficacy 刷上去而写对着分支的琐碎断言。** 它会让数字好看，
-但不会让行为更可信。`snapshot` 的遍历器那一层还没补，因为**它需要按功能
-场景补而不是按函数补**（例如「一次含工具往返的请求走完整流程」）。
