@@ -356,6 +356,9 @@ go run ./cmd/larkaxctl --env-file .env.staging wallet create --user alice
    （`settings.description` 那一列，`settings list` 打的就是它）。
 2. 在 `internal/settings/settings.go` 的 `Registry` 里加一行，声明键与类型。
 
+**现有 19 个键的默认值、取值范围，以及各自改完什么时候生效，见
+[settings.md](settings.md)。** 这一节讲的是**加一个新键**的步骤。
+
 说明只写在迁移里一份，`Registry` 里没有第二份——写两份的话，改了一处另一处不动，
 而改错了不会有任何反馈。
 
@@ -1098,6 +1101,7 @@ ingress 规则下。
 `POST /v1/systemone` 是第四条公开路径。它不做对话，而是拿一段**状态**（一段
 自由文本，比如一张工单）与一组**带类型的判定问题**，回一组答案。与另外三条
 路径一样：协议由路径决定，计费走同一条两阶段流水线，上游由选路层按渠道挑。
+它的错误体用 OpenAI 形状、不支持流式，两条都在 [api.md](api.md) 里。
 
 请求体是一个 JSON 对象：
 

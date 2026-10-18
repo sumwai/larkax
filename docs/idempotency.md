@@ -60,7 +60,8 @@ UUID、`<订单号>-<第几次尝试>` 之类的都可以；带空格、换行�
 | `idempotency_in_progress` | 稍后用**同一个**键重试 |
 | `idempotency_incomplete` | 第一次没成功，换一个新键重发 |
 
-两套协议的错误体形状不同，码放的位置也不同：
+两套协议的错误体形状不同，码放的位置也不同（完整的形状清单见
+[api.md](api.md) 的「错误体的形状」一节）：
 
 ```json
 // POST /v1/chat/completions（OpenAI 形状）
