@@ -142,19 +142,26 @@ func runRotatePlan(ctx context.Context, rotator *channels.Rotator) error {
 	if err != nil {
 		return err
 	}
-	printRotateReport(humanStdout(), report)
+	printRotateReport(humanStdout(), humanStderr(), report)
 	return nil
 }
 
 // runRotateApply 逐批轮换。
 //
-// 它先打一句备份提示再动手：这条命令改的是全库的凭证密文，
-// 而「先备份」是唯一一个出了事还能回头的动作。
+// # 备份提醒为什么只在 -v 下打
+//
+// 「先备份」是这条命令唯一一个出了事还能回头的动作，但**每一次 --apply 都会
+// 出现**——而一句每次成功运行都在的话，读的人第二遍就不再读它了。真正需要它
+// 的时刻是第一次跑，而那时用法文本（rotateUsage 的「跑 --apply 之前先备份
+// channels 表」那一节）正摆在眼前。所以它跟着 -v 走：要动手的人按需多问一句。
 func runRotateApply(ctx context.Context, rotator *channels.Rotator) error {
-	_, _ = fmt.Fprintln(humanStderr(), "提示：本命令会改写 channels.credential_enc，开始前请确认已经备份。")
+	if verboseOutput {
+		_, _ = fmt.Fprintln(humanStderr(),
+			"提示：本命令会改写 channels.credential_enc，开始前请确认已经备份。")
+	}
 
 	report, err := rotator.Apply(ctx, rotateProgressPrinter(humanStdout()))
-	printRotateReport(humanStdout(), report)
+	printRotateReport(humanStdout(), humanStderr(), report)
 	if report != nil && len(report.Problems) > 0 {
 		_, _ = fmt.Fprintf(humanStderr(), "有 %d 行没能轮换，见上面的清单：它们要么密文坏了、要么缺一把主密钥，再跑一次也还是这样。\n",
 			len(report.Problems))
@@ -162,7 +169,8 @@ func runRotateApply(ctx context.Context, rotator *channels.Rotator) error {
 	if err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintln(humanStdout(), "跑 larkaxctl secret rotate --verify 确认全库都补上了，再退役旧主密钥。")
+	// 下一步走 stderr：它是附注，不是这一轮的结果——结果在上面那份报告里。
+	_, _ = fmt.Fprintln(humanStderr(), "跑 larkaxctl secret rotate --verify 确认全库都补上了，再退役旧主密钥。")
 	return nil
 }
 
@@ -175,7 +183,7 @@ func runRotateVerify(ctx context.Context, rotator *channels.Rotator) error {
 	if err != nil {
 		return err
 	}
-	printVerifyReport(humanStdout(), report)
+	printVerifyReport(humanStdout(), humanStderr(), report)
 	return rotateVerifyErr(report)
 }
 
@@ -197,7 +205,11 @@ func rotateVerifyErr(report *channels.VerifyReport) error {
 // 每一处写入的返回值都显式丢弃（`_, _ =`）：目标是 stdout，写不进去只可能是
 // 下游管道断了（`larkaxctl secret rotate | head` 就是最常见的一种），
 // 那种情况下重试与报错都没有意义，而它对这一轮的结论也毫无影响。
-func printRotateReport(w io.Writer, r *channels.RotateReport) {
+//
+// out 与 note 分开：清单与数字是**结果**（下游 `| head` 要接的正是它），
+// 「另有一处轮换在跑」与「这次什么都没改」是**附注**——只在条件成立时出现，
+// 走 stderr（见 docs/cli-output.md 的「提示与警告」）。
+func printRotateReport(out, note io.Writer, r *channels.RotateReport) {
 	if r == nil {
 		return
 	}
@@ -206,23 +218,25 @@ func printRotateReport(w io.Writer, r *channels.RotateReport) {
 	if r.DryRun {
 		what = "会被补上"
 	}
-	_, _ = fmt.Fprintf(w, "扫过 %d 行：%s主密钥 %q 的副本 %d 行，本来就含它的 %d 行。\n",
+	_, _ = fmt.Fprintf(out, "扫过 %d 行：%s主密钥 %q 的副本 %d 行，本来就含它的 %d 行。\n",
 		r.Scanned, what, r.PrimaryKeyID, r.Rewrapped, r.Current)
 
 	if r.RotationRunning {
-		_, _ = fmt.Fprintln(w, "注意：扫描时另有一处轮换持着互斥锁，上面的数字可能不是终态。")
+		_, _ = fmt.Fprintln(note, "注意：扫描时另有一处轮换持着互斥锁，上面的数字可能不是终态。")
 	}
 	if len(r.Problems) > 0 {
-		_, _ = fmt.Fprintf(w, "轮换不了的行 %d 行：\n", len(r.Problems))
-		printRotateRows(w, r.Problems)
+		_, _ = fmt.Fprintf(out, "轮换不了的行 %d 行：\n", len(r.Problems))
+		printRotateRows(out, r.Problems)
 	}
 	if len(r.Concurrent) > 0 {
-		_, _ = fmt.Fprintf(w, "轮换期间被别的写入改掉、本轮跳过的行 %d 行（它们不一定还是旧的）：\n", len(r.Concurrent))
-		printRotateRows(w, r.Concurrent)
+		_, _ = fmt.Fprintf(out, "轮换期间被别的写入改掉、本轮跳过的行 %d 行（它们不一定还是旧的）：\n", len(r.Concurrent))
+		printRotateRows(out, r.Concurrent)
 	}
 
 	if r.DryRun {
-		_, _ = fmt.Fprintln(w, "现在什么都没改。要真改就加 --apply（先备份 channels 表）。")
+		// 「这次什么都没改」是干跑的结论，不是排版：一次干跑之后以为已经改过，
+		// 与「跑成了」在终端上长得一样。它只在干跑那一档出现，所以是附注。
+		_, _ = fmt.Fprintln(note, "现在什么都没改。要真改就加 --apply。")
 	}
 }
 
@@ -235,7 +249,9 @@ func printRotateReport(w io.Writer, r *channels.RotateReport) {
 //
 // 「可以退役旧主密钥了」那句原先单独打一行，现在收进结论里：它与 `✓` 说的是
 // 同一件事，各打一遍时两句话会随改动漂移开。
-func printVerifyReport(w io.Writer, r *channels.VerifyReport) {
+//
+// note 收的是附注（另一处轮换还在跑），走 stderr；结论与清单走 out。
+func printVerifyReport(out, note io.Writer, r *channels.VerifyReport) {
 	if r == nil {
 		return
 	}
@@ -250,16 +266,16 @@ func printVerifyReport(w io.Writer, r *channels.VerifyReport) {
 			"扫过 %d 行，含当前主密钥 %q 的 %d 行、不含的 %d 行；现在还不能退役旧主密钥（清单见下）",
 			r.Scanned, r.PrimaryKeyID, r.Wrapped, len(r.Missing))
 	}
-	printStatusLines(w, []statusLine{line}, false)
+	printStatusLines(out, []statusLine{line}, false)
 
 	if r.RotationRunning {
-		// 这一句必须默认就打：它改的是「上面那个结论怎么读」——另一处轮换还
-		// 没轮到那些行时，缺的那几行可能只是暂时的。
-		_, _ = fmt.Fprintln(w, "注意：扫描时另有一处轮换持着互斥锁，清单里的行可能只是还没轮到。")
+		// 这一句必须默认就打（只是改走 stderr）：它改的是「上面那个结论怎么读」
+		// ——另一处轮换还没轮到那些行时，缺的那几行可能只是暂时的。
+		_, _ = fmt.Fprintln(note, "注意：扫描时另有一处轮换持着互斥锁，清单里的行可能只是还没轮到。")
 	}
 	if len(r.Missing) > 0 {
-		_, _ = fmt.Fprintln(w, "不含当前主密钥的行：")
-		printRotateRows(w, r.Missing)
+		_, _ = fmt.Fprintln(out, "不含当前主密钥的行：")
+		printRotateRows(out, r.Missing)
 	}
 }
 

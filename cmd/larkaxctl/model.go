@@ -356,7 +356,7 @@ func runModelUpdate(args []string) error {
 	if err := catalog.NewAdmin(db).Update(ctx, req); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(humanStdout(), "已更新规范模型 %s。\n", req.CanonicalName)
+	_, _ = fmt.Fprintf(humanStderr(), "已更新规范模型 %s。\n", req.CanonicalName)
 	return nil
 }
 
@@ -521,7 +521,7 @@ func runModelDelete(args []string) error {
 	if err := catalog.NewAdmin(db).Delete(ctx, *canonical); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(humanStdout(), "已删除规范模型 %s。\n", *canonical)
+	_, _ = fmt.Fprintf(humanStderr(), "已删除规范模型 %s。\n", *canonical)
 	return nil
 }
 

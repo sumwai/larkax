@@ -102,22 +102,28 @@ func runSettingsList(args []string) error {
 		}
 		// 表先打出来。json 那一档在这里什么都不打，它打的是下面那份文档。
 		if !jsonOutput() {
-			printSettingsList(humanStdout(), entries)
+			printSettingsList(humanStdout(), entries, verboseOutput)
 		}
 
 		// 列完之后再让 Load 校验一遍。它跑的是**服务启动时那一份**校验
 		// （缺键、未声明的键、类型不对、JSON 不合法），所以这一步回答的是
 		// 运维真正要问的那个问题：这套配置服务能不能加载起来。
 		//
-		// 结果收在 loadErr 里而不是直接返回：配置有问题的时候，恰恰是最需要
+		// 结论收在 loadErr 里返回，而不是先自己打一行「警告：」再返回：
+		// 那句话与 main 打出的那一行说的是同一件事，两处都打是把这个项目
+		// 反复防的那类问题（同一件事说两遍）搬到了输出上。**报告先说，
+		// 错误出口随后**——顺序与分工都是这样：清单回答「库里有什么」，
+		// 非零退出码与 stderr 上那一行回答「这套配置能不能用」。
+		//
+		// 不 return-nil-改报错的原因见上面：配置有问题的时候，恰恰是最需要
 		// 看到内容的时候，而一个「校验不过就什么都不列」的清单等于在最需要它
-		// 的时候闭嘴。json 那一档同一条：清单照打，结论由 exit_code 说。
+		// 的时候闭嘴。
 		_, loadErr := settings.Load(ctx, src)
 		if loadErr != nil {
-			// 警告走 stderr，两档都是：stdout 是给管道下游的
-			// （`larkaxctl settings list -o json | jq`），混进一行提示就会让
-			// jq 报错——而它报的那句话离原因很远。
-			_, _ = fmt.Fprintf(humanStderr(), "警告：这套配置服务加载不起来——%v\n", loadErr)
+			// 带上「加载不起来」这半句：loadErr 自己只说得出是哪一项不对
+			// （「settings 里有未声明的配置项 …」），而读这条命令输出的人要
+			// 知道的是**这意味着什么**——服务起不来，不只是清单里多了一行。
+			loadErr = fmt.Errorf("这套配置服务加载不起来: %w", loadErr)
 		}
 
 		if jsonOutput() {
@@ -228,14 +234,21 @@ func printSettingsSetResult(w io.Writer, key string, value []byte, by string) {
 // 值打印的是 jsonb 原文而不是解码后的样子：这一列里到底存了什么，
 // 正是核对时要看的东西，而解码会把它盖住——一个漏了引号的字符串配置
 // 解码后与一个正常的看起来一样，而它会让服务起不来。
-func printSettingsList(w io.Writer, entries []settings.Entry) {
+//
+// 「值打的是 jsonb 原文」那句只在 verbose 下打：它在**每一次** list 里都会
+// 出现，属于「每一次成功运行都有的解释」——那类话读第二遍就不再是信息
+// （见 docs/cli-output.md 的「提示与警告」）。第一次看这张表的人要它，
+// 而那时加一个 -v 比把它塞进每一屏更划算。
+func printSettingsList(w io.Writer, entries []settings.Entry, verbose bool) {
 	if len(entries) == 0 {
 		_, _ = fmt.Fprintln(w, "settings 表是空的。")
 		return
 	}
 
 	p := newPalette(w)
-	_, _ = fmt.Fprintln(w, "值打的是 settings.value 的 jsonb 原文：字符串带引号，布尔与整数不带。")
+	if verbose {
+		_, _ = fmt.Fprintln(w, "值打的是 settings.value 的 jsonb 原文：字符串带引号，布尔与整数不带。")
+	}
 	for _, e := range entries {
 		// 未声明的键单独标出来：它是「服务加载不起来」的直接原因，
 		// 而它在类型那一列里只是一句话，不标出来就得靠人记得去比对 Registry。
@@ -277,8 +290,9 @@ func printSettingsList(w io.Writer, entries []settings.Entry) {
 // settingsListDoc 组装 settings list 的机器可读输出。
 //
 // 与 printSettingsList 是同一份数据的另一条渲染路径（见 format.go 开头）。
-// 表头那句「值打的是 settings.value 的 jsonb 原文」不进这里：它是给终端里看
-// 表的人的一句说明，而 JSON 里值本身就是原文，没有第二种读法要交代。
+// 那句「值打的是 settings.value 的 jsonb 原文」（表格那一档只在 -v 下打）不进
+// 这里：它是给终端里看表的人的一句说明，而 JSON 里值本身就是原文，没有第二种
+// 读法要交代。
 func settingsListDoc(entries []settings.Entry) map[string]any {
 	doc := jsonDoc(jsonOK)
 	doc["summary"] = map[string]any{"total": len(entries)}

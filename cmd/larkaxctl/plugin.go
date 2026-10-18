@@ -388,7 +388,7 @@ func runPluginSetEnabled(args []string, enable bool) error {
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(humanStdout(), "插件 %s %s。重启后生效。\n", key, done)
+		_, _ = fmt.Fprintf(humanStderr(), "插件 %s %s。重启后生效。\n", key, done)
 		return nil
 	})
 }

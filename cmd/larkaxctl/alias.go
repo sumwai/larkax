@@ -245,7 +245,7 @@ func runAliasUpdate(args []string) error {
 	if err := catalog.NewAdmin(db).UpdateAlias(ctx, req); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(humanStdout(), "已更新别名 %d。\n", req.ID)
+	_, _ = fmt.Fprintf(humanStderr(), "已更新别名 %d。\n", req.ID)
 	return nil
 }
 
@@ -331,7 +331,7 @@ func runAliasDelete(args []string) error {
 	if err := catalog.NewAdmin(db).DeleteAlias(ctx, *id); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(humanStdout(), "已删除别名 %d。\n", *id)
+	_, _ = fmt.Fprintf(humanStderr(), "已删除别名 %d。\n", *id)
 	return nil
 }
 
