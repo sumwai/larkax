@@ -200,8 +200,8 @@ func runPluginPublish(args []string) error {
 
 	fs := flag.NewFlagSet("plugin publish", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
-	key := fs.String("key", "", "插件 key；省略时取源码 meta 里声明的那个")
-	priority := fs.Int("priority", 0, "同一 key 的优先级，越大越先被选中")
+	key := fs.String("key", "", "")
+	priority := fs.Int("priority", 0, "")
 	if err := parseFlagsAnywhere(fs, args); err != nil {
 		return usageErr(err)
 	}

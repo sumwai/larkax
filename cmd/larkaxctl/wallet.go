@@ -151,9 +151,9 @@ func runWalletCreate(args []string) error {
 
 	fs := flag.NewFlagSet("wallet create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
-	user := fs.String("user", "", "钱包归属的用户：用户 ID 或用户名")
+	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u", sameAs("user"))
-	asset := fs.String("asset", "", "资产品种；留空表示取 settings 的 billing.default_asset")
+	asset := fs.String("asset", "", "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -204,13 +204,13 @@ func runWalletCredit(args []string) error {
 
 	fs := flag.NewFlagSet("wallet credit", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
-	user := fs.String("user", "", "入账的用户：用户 ID 或用户名")
+	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u", sameAs("user"))
-	amount := fs.String("amount", "", "入账金额，必须为正")
-	asset := fs.String("asset", "", "资产品种；留空表示取 settings 的 billing.default_asset")
-	ref := legacyStringFlag(fs, "ref", "idempotency-key", "", "外部单据号，同时是幂等键；必填，同一条命令重跑不会重复入账")
+	amount := fs.String("amount", "", "")
+	asset := fs.String("asset", "", "")
+	ref := legacyStringFlag(fs, "ref", "idempotency-key", "", "")
 	stringAlias(fs, ref, "order", legacyNote("ref"))
-	gateway := fs.String("gateway", manualGateway, "这笔钱从哪个外部来源进来；manual 表示线下到账")
+	gateway := fs.String("gateway", manualGateway, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}

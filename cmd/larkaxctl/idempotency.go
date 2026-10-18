@@ -113,7 +113,7 @@ func runIdempotencyCleanup(args []string) error {
 
 	fs := flag.NewFlagSet("maintenance idempotency", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, maintenanceIdempotencyShortUsage) }
-	dryRun := fs.Bool("dry-run", false, "只数一遍会被删除的条数，不执行删除")
+	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
