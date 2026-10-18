@@ -82,6 +82,32 @@ func TestTotalEqualsSumOfParts(t *testing.T) {
 	}
 }
 
+// TestSumCheckedHandlesManyUnits 验证计量项多的时候求和照样算得对。
+//
+// 行项的容量按 8 + 计量项个数预留。容量只影响分配：写小了顶多多扩容一次，
+// 金额不会因此变样；而方向写反时那个值是负的，make 会先 panic，
+// 连一个错金额都拿不到。这里给 9 个计量项——那是那个预留刚好不够用的第一格。
+func TestSumCheckedHandlesManyUnits(t *testing.T) {
+	units := make(map[string]money.Amount, 9)
+	for i := 0; i < 9; i++ {
+		units[fmt.Sprintf("u%d", i)] = money.MustParse("0.01")
+	}
+	b := Breakdown{
+		Prompt: money.MustParse("0.5"),
+		Units:  units,
+		Fixed:  money.MustParse("0.2"),
+	}
+
+	got, ok := b.sumChecked()
+	if !ok {
+		t.Fatal("这些金额都放得进 int64，不该报放不下")
+	}
+	// 0.5 + 9 × 0.01 + 0.2 = 0.79
+	if want := money.MustParse("0.79"); got.Cmp(want) != 0 {
+		t.Errorf("求和 = %s，期望 %s", got, want)
+	}
+}
+
 // 外部构造的 Breakdown 也要能校验——那正是最需要校验的地方。
 func TestVerifyDetectsMismatch(t *testing.T) {
 	b := Breakdown{
