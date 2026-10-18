@@ -64,6 +64,9 @@ var tableRenderPaths = []string{
 	"printModelList",
 	"printPluginList",
 	"printRuleTable",
+	"printUserDetail", // user get
+	"printUserList",   // user list
+	"printWalletList", // wallet list
 }
 
 // emptyListPaths 是清单空状态文案的调用点。
@@ -80,6 +83,8 @@ var emptyListPaths = []string{
 	"printModelList",
 	"printPluginList",
 	"printRuleList",
+	"printUserList",   // user list
+	"printWalletList", // wallet list
 }
 
 // TestEveryStatusRenderPathIsRegistered 钉住诊断体检类的调用点集合。

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -642,5 +643,214 @@ func TestWalletCreditUnknownUserExitCode(t *testing.T) {
 	}
 	if code := exitCode(err); code != exitConflict {
 		t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", code, exitConflict)
+	}
+}
+
+// ── wallet list ─────────────────────────────────────────────────────────
+
+// TestWalletListRejectsPositionalArgs 走的是**不碰数据库**的那条路径（同
+// TestWalletOpenRejectsBadArgs 的理由）。
+func TestWalletListRejectsPositionalArgs(t *testing.T) {
+	err := runWalletList([]string{"alice"})
+	if err == nil {
+		t.Fatal("list 收到位置参数时应当报错")
+	}
+	if !strings.Contains(err.Error(), "不接受位置参数") {
+		t.Fatalf("错误信息 %q 里没有「不接受位置参数」", err.Error())
+	}
+	if code := exitCode(err); code != exitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+	}
+}
+
+// walletRow 在清单里按用户 ID 找到那一行，返回它的各栏。
+func walletListRow(t *testing.T, stdout, userID string) []string {
+	t.Helper()
+	for _, line := range strings.Split(stdout, "\n") {
+		cells := strings.Fields(line)
+		if len(cells) >= 5 && cells[0] == userID {
+			return cells
+		}
+	}
+	t.Fatalf("清单里没有用户 %s 那一行：\n%s", userID, stdout)
+	return nil
+}
+
+// TestWalletListShowsBalanceAndFrozen 过真命令、连真库：入账之后那一行是
+// 库里两个快照列的**原值**，用户名那一栏也填上了。
+//
+// 冻结额没有命令行写入路径（它由结算那一路写），所以直接用 SQL 造一个非零值：
+// 不给它一个非零的输入，「冻结那一栏真的读了 frozen 列」这句话证明不了——
+// 一个恒打 0 的实现照样通过。
+func TestWalletListShowsBalanceAndFrozen(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	userID := createTestUser(t)
+	ref := strconv.FormatInt(userID, 10)
+	owner, err := auth.New(db).ResolveUser(t.Context(), ref)
+	if err != nil {
+		t.Fatalf("解析用户失败: %v", err)
+	}
+
+	if r := runOnce(t, runWallet, []string{"create", "--user", ref}); r.err != nil {
+		t.Fatalf("开户失败: %v", r.err)
+	}
+	if r := runOnce(t, runWallet, []string{
+		"credit", "--user", ref, "--amount", "12.5", "--ref", uniqueName("ref"),
+	}); r.err != nil {
+		t.Fatalf("入账失败: %v", r.err)
+	}
+	if _, err := db.ExecContext(t.Context(),
+		`UPDATE user_wallets SET frozen = '3.25' WHERE user_id = $1 AND asset = 'CNY'`,
+		userID); err != nil {
+		t.Fatalf("造冻结额失败: %v", err)
+	}
+
+	r := runOnce(t, runWallet, []string{"list", "--user", ref})
+	if r.err != nil {
+		t.Fatalf("wallet list 失败: %v\nstderr=%s", r.err, r.stderr)
+	}
+
+	got := walletListRow(t, r.stdout, ref)
+	want := []string{ref, owner.Username, "CNY", "12.50000000", "3.25000000"}
+	if !slices.Equal(got, want) {
+		t.Errorf("这一行是 %q，想要 %q", got, want)
+	}
+}
+
+// TestWalletListWithoutFilterNamesEveryUser 钉住不筛时的那条路：用户名那一栏
+// 由 users 取来，而不是空着。
+//
+// 它问的是「这一栏真的去查了名字吗」：一个只打 ID 的实现同样能让
+// TestWalletListShowsBalanceAndFrozen 过（那一栏只是没断言到），而这一条会在
+// 名字对不上时就红。
+func TestWalletListWithoutFilterNamesEveryUser(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	userID := createTestUser(t)
+	ref := strconv.FormatInt(userID, 10)
+	owner, err := auth.New(db).ResolveUser(t.Context(), ref)
+	if err != nil {
+		t.Fatalf("解析用户失败: %v", err)
+	}
+	if r := runOnce(t, runWallet, []string{"create", "--user", ref}); r.err != nil {
+		t.Fatalf("开户失败: %v", r.err)
+	}
+
+	r := runOnce(t, runWallet, []string{"list"})
+	if r.err != nil {
+		t.Fatalf("wallet list 失败: %v", r.err)
+	}
+	// 不带筛选时清单里不止这一行（别的用例也建过钱包），所以按行找而不是比全量。
+	got := walletListRow(t, r.stdout, ref)
+	if got[1] != owner.Username {
+		t.Errorf("用户名那一栏是 %q，想要 %q：%q", got[1], owner.Username, got)
+	}
+}
+
+// TestWalletListForUserWithoutWalletIsEmpty 钉住「用户存在但没有钱包行」这一档。
+//
+// 它与「用户不存在」是两件事（后者退出 4）：一条命令里走错一步的人看到的
+// 应当是「这个用户还没开户」，而不是一个空表头或一句「找不到用户」。
+func TestWalletListForUserWithoutWalletIsEmpty(t *testing.T) {
+	setupEnv(t)
+
+	ref := strconv.FormatInt(createTestUser(t), 10)
+	r := runOnce(t, runWallet, []string{"list", "--user", ref})
+	if r.err != nil {
+		t.Fatalf("没开户的用户上也应当成功（列出来是空的）: %v", r.err)
+	}
+	if want := emptyListNote("钱包", "wallet create"); !strings.Contains(r.stdout, want) {
+		t.Errorf("空清单的输出里没有 %q：%q", want, r.stdout)
+	}
+}
+
+// TestWalletListUnknownUserIsAConflict 钉住「要查的那一行不在」的退出码。
+func TestWalletListUnknownUserIsAConflict(t *testing.T) {
+	setupEnv(t)
+
+	r := runOnce(t, runWallet, []string{"list", "--user", uniqueName("nobody")})
+	if r.err == nil {
+		t.Fatal("筛一个不存在的用户应当报错")
+	}
+	if !errors.Is(r.err, auth.ErrUserNotFound) {
+		t.Errorf("错误 %v 不是 ErrUserNotFound", r.err)
+	}
+	if code := exitCode(r.err); code != exitConflict {
+		t.Errorf("退出码 = %d，想要 %d", code, exitConflict)
+	}
+}
+
+// TestWalletListJSONShape 断言机器可读那一档：金额是**字符串**（过一遍 float64
+// 会丢精度），用户 ID 是数字，没筛到东西时是 `[]` 而不是 null。
+func TestWalletListJSONShape(t *testing.T) {
+	setupEnv(t)
+
+	userID := createTestUser(t)
+	ref := strconv.FormatInt(userID, 10)
+	if r := runOnce(t, runWallet, []string{"create", "--user", ref}); r.err != nil {
+		t.Fatalf("开户失败: %v", r.err)
+	}
+	// 另一个用户不建钱包：它是下面「空清单」那一档的输入。
+	// 两个用户都在切到 json 之前建好——写类的命令会拒掉 --format json
+	// （见 format.go 的 jsonUnsupported），在那一档里建不了。
+	withoutWallet := strconv.FormatInt(createTestUser(t), 10)
+
+	withFormat(t, formatJSON)
+	r := runOnce(t, runWallet, []string{"list", "--user", ref})
+	if r.err != nil {
+		t.Fatalf("wallet list -o json 失败: %v", r.err)
+	}
+	assertOnlyJSON(t, r.stdout)
+
+	var got struct {
+		Status  string `json:"status"`
+		Summary struct {
+			Total int `json:"total"`
+		} `json:"summary"`
+		Wallets []struct {
+			UserID   int64  `json:"user_id"`
+			Username string `json:"username"`
+			Asset    string `json:"asset"`
+			Balance  string `json:"balance"`
+			Frozen   string `json:"frozen"`
+		} `json:"wallets"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &got); err != nil {
+		t.Fatalf("解不回来: %v\n%s", err, r.stdout)
+	}
+	if got.Status != jsonOK || got.Summary.Total != 1 || len(got.Wallets) != 1 {
+		t.Fatalf("形状不对：status=%q total=%d 行数=%d\n%s",
+			got.Status, got.Summary.Total, len(got.Wallets), r.stdout)
+	}
+
+	w := got.Wallets[0]
+	if w.UserID != userID || w.Asset != "CNY" {
+		t.Errorf("这一行是 %+v，想要 user_id=%d asset=CNY", w, userID)
+	}
+	if w.Balance != "0.00000000" || w.Frozen != "0.00000000" {
+		t.Errorf("金额是 %q / %q，想要两个 0.00000000（字符串，不是数字）",
+			w.Balance, w.Frozen)
+	}
+
+	// 空清单：用户存在、钱包不存在的那一档。
+	empty := runOnce(t, runWallet, []string{"list", "--user", withoutWallet})
+	if empty.err != nil {
+		t.Fatalf("空清单那次失败: %v", empty.err)
+	}
+	var emptyDoc struct {
+		Wallets []map[string]any `json:"wallets"`
+		Total   int              `json:"total"`
+	}
+	if err := json.Unmarshal([]byte(empty.stdout), &emptyDoc); err != nil {
+		t.Fatalf("解不回来: %v\n%s", err, empty.stdout)
+	}
+	if emptyDoc.Wallets == nil {
+		t.Errorf("空清单编成了 null，想要 []：%s", empty.stdout)
+	}
+	if emptyDoc.Total != 0 {
+		t.Errorf("空清单的 total 是 %d，想要 0", emptyDoc.Total)
 	}
 }

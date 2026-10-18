@@ -201,13 +201,13 @@ func TestDoctorCarriesTheOldSentencesIntoVerbose(t *testing.T) {
 
 // TestEmptyListMessages 把空清单的文案逐条钉住。
 //
-// 六条命令原先各说各的（「还没有渠道。」「目录里还没有模型。」「没有 API Key。」），
+// 八条命令原先各说各的（「还没有渠道。」「目录里还没有模型。」「没有 API Key。」），
 // 而它们是同一件事。文案里带上下一步的命令：空清单是「还没配」，读者接下来
 // 要做什么就写在那一句里。
 //
-// doctor 的钱包体检是第七处调用点（一个用户都没有），它的期望值在 doctor_test.go
-// 里——它打的是整份报告，不是单独一句清单。第七处的存在由 renderpaths_test.go
-// 按调用点计数钉住。
+// doctor 的钱包体检是这张表之外的一处调用点（一个用户都没有），它的期望值在
+// doctor_test.go 里——它打的是整份报告，不是单独一句清单。表外那几处的存在由
+// renderpaths_test.go 按调用点计数钉住。
 //
 // settings list 不在这张表里：settings 表是空的与「还没有配过」不是一回事
 // （键来自 Registry，加不了），那句文案留着它自己的说法。
@@ -229,12 +229,16 @@ func TestEmptyListMessages(t *testing.T) {
 			func(w io.Writer) { printKeyList(w, nil) }},
 		{"别名", "暂无别名。可使用 larkaxctl alias create 添加。",
 			func(w io.Writer) { printAliasList(w, nil) }},
+		{"用户", "暂无用户。可使用 larkaxctl user create 添加。",
+			func(w io.Writer) { printUserList(w, nil) }},
+		{"钱包", "暂无钱包。可使用 larkaxctl wallet create 添加。",
+			func(w io.Writer) { printWalletList(w, nil) }},
 	}
 
 	// 与另一张样式表同一个做法：条数写死。少了一条就等于那条没人看，而
 	// 「用例还在跑、只是不覆盖那条命令」在输出里和通过长得一样。
-	if len(cases) != 6 {
-		t.Fatalf("这张表里 %d 条清单命令，期望 6 条", len(cases))
+	if len(cases) != 8 {
+		t.Fatalf("这张表里 %d 条清单命令，期望 8 条", len(cases))
 	}
 
 	for _, tc := range cases {

@@ -119,3 +119,69 @@ func TestCreateUserFailureClassifies(t *testing.T) {
 		}
 	})
 }
+
+// TestRoleOfAndRolePredicateDescribeTheSameMapping 钉住读侧的两半是同一套映射。
+//
+// roleOf 按两个标记读出一个称呼，rolePredicate 按一个称呼挑标记。它们必须互相
+// 是对方的反函数：不一致的表现是清单里明明打着一个 admin，`--role admin` 却
+// 筛不出它——两处各自都「对」，只有放在一起才看得出来。
+//
+// 判据按**四个标记组合**逐个走，而不是按三个称呼走一遍：只有前者能证明这套
+// 映射是全覆盖且互斥的（每一行都恰好落进一档）。手改库能造出
+// (merchant=false, admin=true) 这种数据，它就落在这一格里。
+func TestRoleOfAndRolePredicateDescribeTheSameMapping(t *testing.T) {
+	accepts := func(r Role, isMerchant, isAdmin bool) bool {
+		wantMerchant, wantAdmin := rolePredicate(r)
+		if wantMerchant != nil && *wantMerchant != isMerchant {
+			return false
+		}
+		if wantAdmin != nil && *wantAdmin != isAdmin {
+			return false
+		}
+		return true
+	}
+
+	for _, flags := range []struct{ merchant, admin bool }{
+		{false, false}, {true, false}, {false, true}, {true, true},
+	} {
+		fromFlags := roleOf(flags.merchant, flags.admin)
+
+		matched := 0
+		for _, r := range []Role{RoleUser, RoleMerchant, RoleAdmin} {
+			if accepts(r, flags.merchant, flags.admin) {
+				matched++
+				if r != fromFlags {
+					t.Errorf("标记 (merchant=%v, admin=%v) 读出来是 %q，"+
+						"而 --role %s 又会把它筛出来",
+						flags.merchant, flags.admin, fromFlags, r)
+				}
+			}
+		}
+		// 恰好一档：0 档说明这一行筛不出来，2 档说明两个 --role 会给出同一批人。
+		if matched != 1 {
+			t.Errorf("标记 (merchant=%v, admin=%v) 落在 %d 档里，想要 1 档",
+				flags.merchant, flags.admin, matched)
+		}
+	}
+}
+
+// TestParseUserStatus 钉住三个取值都认、别的都拒。
+func TestParseUserStatus(t *testing.T) {
+	for _, s := range UserStatuses() {
+		got, err := ParseUserStatus(s)
+		if err != nil {
+			t.Errorf("%q 应当被接受: %v", s, err)
+		}
+		if got != s {
+			t.Errorf("%q 解析成了 %q", s, got)
+		}
+	}
+
+	// 空串也不认：命令行的「没给这个筛选项」由调用方判空，不靠这里回落——
+	// 回落的表现是一个空取值被当成「不过滤」，而它读起来像一次成功的筛选。
+	for _, bad := range []string{"", "Active", "frozen", " active"} {
+		if _, err := ParseUserStatus(bad); err == nil {
+			t.Errorf("%q 应当被拒绝", bad)
+		}
+	}
+}

@@ -19,7 +19,9 @@ const (
 	keyStatusDisabled = "disabled"
 	keyStatusRevoked  = "revoked"
 
-	userStatusActive = "active"
+	// 取值与读侧共用一处定义（见 user.go 的 UserStatusActive）：同一列的值
+	// 在两侧各写一遍，改一处漏一处时鉴权判的是另一个字符串，而它不报错。
+	userStatusActive = UserStatusActive
 )
 
 // lookup 按哈希定位一行，再逐条判断它能不能用。
@@ -277,19 +279,12 @@ func (s *Store) ResolveUser(ctx context.Context, ref string) (User, error) {
 		return User{}, errors.New("用户标识为空")
 	}
 
-	var (
-		user User
-		err  error
-	)
-	if id, parseErr := strconv.ParseInt(ref, 10, 64); parseErr == nil {
-		err = s.db.QueryRowContext(ctx,
-			`SELECT id, username FROM users WHERE id = $1`, id,
-		).Scan(&user.ID, &user.Username)
-	} else {
-		err = s.db.QueryRowContext(ctx,
-			`SELECT id, username FROM users WHERE username = $1`, ref,
-		).Scan(&user.ID, &user.Username)
-	}
+	where, arg := userRefWhere(ref)
+
+	var user User
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, username FROM users WHERE `+where, arg,
+	).Scan(&user.ID, &user.Username)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, fmt.Errorf("%w: %q", ErrUserNotFound, ref)
@@ -298,4 +293,19 @@ func (s *Store) ResolveUser(ctx context.Context, ref string) (User, error) {
 		return User{}, fmt.Errorf("查询用户失败: %w", err)
 	}
 	return user, nil
+}
+
+// userRefWhere 把「用户 ID 或用户名」这个标识折成一条 WHERE 条件与它的实参。
+//
+// ResolveUser 与 UserByRef 都从它这里过，为的是**只有一处**决定这个标识怎么
+// 解释：两条路各写一份的话，`user get 12345` 与 `apikey create --user 12345`
+// 迟早会指向不同的人，而那种错法的表现是两条命令都成功。
+//
+// 纯数字一律按 ID（取舍见 ResolveUser 的注释）。返回的条件里表名由调用方补，
+// 所以它就是一段不带别名的谓词，两个调用点的 SQL 里都只出现一次 $1。
+func userRefWhere(ref string) (where string, arg any) {
+	if id, err := strconv.ParseInt(ref, 10, 64); err == nil {
+		return "id = $1", id
+	}
+	return "username = $1", ref
 }

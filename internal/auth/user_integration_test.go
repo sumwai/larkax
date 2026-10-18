@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -241,5 +242,136 @@ func TestCreateUserRoleFlags(t *testing.T) {
 					tc.role, isMerchant, isAdmin, tc.isMerchant, tc.isAdmin)
 			}
 		})
+	}
+}
+
+// TestListUsersAndUserByRef 把读侧那一半过一遍真库。
+//
+// # 为什么非要在真库上跑
+//
+// 要钉住的几件事都来自列本身，而不是 Go 里的判断：
+//
+//   - 两列可空文本（email / display_name）读回来是 NULL，而它在读侧要折成空串
+//   - citext 的用户名与 id 各是一条 WHERE 分支，两条得指向同一行
+//   - roleOf 折出来的称呼与 SQL 里那对标记条件挑出的是同一批行
+//
+// 库是这个包独占的，但同一个包里别的用例也在建用户，所以每一条断言都按
+// 本用例建的那几个 id 找，不比全量。
+func TestListUsersAndUserByRef(t *testing.T) {
+	ctx := t.Context()
+	db := testDB(ctx, t)
+	store := New(db)
+
+	byRole := map[Role]UserInfo{}
+	for _, role := range []Role{RoleUser, RoleMerchant, RoleAdmin} {
+		u, err := store.CreateUser(ctx, CreateUserParams{
+			Username: uniqueUsername(), Role: role,
+		})
+		if err != nil {
+			t.Fatalf("建用户失败: %v", err)
+		}
+		cleanupUsers(ctx, t, db, u.ID)
+		byRole[role] = UserInfo{ID: u.ID, Username: u.Username, Role: role}
+	}
+
+	// 不带筛选：本用例建的三个都在，每一栏都是库里那一行的值。
+	all, err := store.ListUsers(ctx, ListUsersFilter{})
+	if err != nil {
+		t.Fatalf("ListUsers 失败: %v", err)
+	}
+	seen := map[int64]UserInfo{}
+	for _, u := range all {
+		seen[u.ID] = u
+	}
+	for role, want := range byRole {
+		got, ok := seen[want.ID]
+		if !ok {
+			t.Fatalf("清单里没有 %s（id=%d）", want.Username, want.ID)
+		}
+		if got.Username != want.Username || got.Role != role {
+			t.Errorf("id=%d 那一行是 (username=%q, role=%q)，想要 (%q, %q)",
+				want.ID, got.Username, got.Role, want.Username, role)
+		}
+		if got.Status != UserStatusActive {
+			t.Errorf("刚建的用户状态是 %q，想要 %q", got.Status, UserStatusActive)
+		}
+		// 没填邮箱与展示名：两列都是 NULL，读侧折成空串（不是 "<nil>"，
+		// 也不是别的占位符）。
+		if got.Email != "" || got.DisplayName != "" {
+			t.Errorf("没填过的两列应当是空串，得到 email=%q display_name=%q",
+				got.Email, got.DisplayName)
+		}
+	}
+
+	// 按角色筛：本用例的三个人各落在自己那一档里，且只落在一档。
+	for role, want := range byRole {
+		users, listErr := store.ListUsers(ctx, ListUsersFilter{Role: &role})
+		if listErr != nil {
+			t.Fatalf("ListUsers(role=%s) 失败: %v", role, listErr)
+		}
+		for _, u := range users {
+			// 每一个筛出来的行，它自己那一栏必须正是筛的那个角色。
+			if u.Role != role {
+				t.Errorf("--role %s 筛出了 role=%s 的行（id=%d）", role, u.Role, u.ID)
+			}
+		}
+		hits := 0
+		for _, u := range users {
+			if u.ID == want.ID {
+				hits++
+			}
+		}
+		if hits != 1 {
+			t.Errorf("--role %s 筛出 %d 个本用例的用户，想要 1 个", role, hits)
+		}
+	}
+
+	// 按状态筛。状态没有写入命令，直接改库造出第二个取值。
+	if _, execErr := db.ExecContext(ctx,
+		`UPDATE users SET status = $1 WHERE id = $2`,
+		UserStatusBanned, byRole[RoleUser].ID); execErr != nil {
+		t.Fatalf("改状态失败: %v", execErr)
+	}
+	banned, err := store.ListUsers(ctx, ListUsersFilter{Status: UserStatusBanned})
+	if err != nil {
+		t.Fatalf("ListUsers(status=banned) 失败: %v", err)
+	}
+	found := false
+	for _, u := range banned {
+		if u.ID == byRole[RoleUser].ID {
+			found = true
+		}
+		if u.ID == byRole[RoleAdmin].ID {
+			t.Errorf("按 banned 筛出了 active 的 id=%d", u.ID)
+		}
+	}
+	if !found {
+		t.Errorf("按 banned 没筛出刚改成 banned 的 id=%d", byRole[RoleUser].ID)
+	}
+
+	// 两种标识指向同一个人：一条走 id，一条走 citext 用户名。
+	target := byRole[RoleMerchant]
+	byID, err := store.UserByRef(ctx, strconv.FormatInt(target.ID, 10))
+	if err != nil {
+		t.Fatalf("UserByRef(id) 失败: %v", err)
+	}
+	byName, err := store.UserByRef(ctx, target.Username)
+	if err != nil {
+		t.Fatalf("UserByRef(用户名) 失败: %v", err)
+	}
+	if byID != byName {
+		t.Errorf("同一个人的两条读法不同：\n按 id：%+v\n按名字：%+v", byID, byName)
+	}
+	if byID.ID != target.ID || byID.Username != target.Username ||
+		byID.Role != RoleMerchant || byID.Status != UserStatusActive {
+		t.Errorf("读回来的字段不对：%+v", byID)
+	}
+	if byID.CreatedAt.IsZero() || byID.UpdatedAt.IsZero() {
+		t.Errorf("两个时刻不该是零值：%+v", byID)
+	}
+
+	// 找不到时是那个具名哨兵，不是一句驱动原文——命令行的退出码按它分类。
+	if _, err := store.UserByRef(ctx, uniqueUsername()); !errors.Is(err, ErrUserNotFound) {
+		t.Errorf("读一个不存在的用户得到 %v，想要 ErrUserNotFound", err)
 	}
 }
