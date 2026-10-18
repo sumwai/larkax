@@ -19,7 +19,6 @@ import (
 	"github.com/sumwai/larkax/internal/assembly"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/config"
-	"github.com/sumwai/larkax/internal/gateway"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -364,13 +363,23 @@ func TestInternalHandlerServesHealthAndMetrics(t *testing.T) {
 // # 为什么这条要在命令行这一层测
 //
 // 探针有没有接上，判据是「生产的清单里有它」——接线写在 run 里，那一段要连库
-// 才跑得起来。所以清单被抽成了 readinessChecks：测得到的是**同一份**清单，
-// 而不是照着抄一份出来测。抄一份的话，「线上到底探了什么」仍然没人回答。
+// 才跑得起来。所以清单被抽成了 readinessChecks、从装配结果里取计数器被抽成了
+// readinessVocab：测得到的是**同一份**生产路径，而不是照着抄一份出来测。抄一份
+// 的话，「线上到底探了什么」仍然没人回答。
 //
 // # 为什么词表那一项是有条件的
 //
 // worker 角色的 App 是零值，那种实例上没有计数器、也没预热过词表。无条件加上
 // 会让一个按设计就该长这样的实例永远不就绪——而编排系统据此把它摘掉。
+//
+// # 这里为什么只造得出两种 App
+//
+// 装配结果里那个网关的类型是 gateway.Gateway，而在这一层写出它的名字就等于
+// 命令行直接依赖 internal/gateway——装配入口与数据面是 internal/assembly 的事
+// （那条规则由 scripts/check-layering.sh 守着）。所以「有网关、但计数器没装上」
+// 那一格构造不出来：它由 readinessVocab 里那个 nil 判断兜着，而「没有计数器就
+// 不加这一项」在下表第二段按计数器本身测到。加用例时别为了补那一格去 import
+// gateway，那道门会红。
 func TestReadinessChecksFollowTheWiring(t *testing.T) {
 	names := func(checks []observe.ReadinessCheck) []string {
 		out := make([]string, 0, len(checks))
@@ -380,6 +389,7 @@ func TestReadinessChecksFollowTheWiring(t *testing.T) {
 		return out
 	}
 
+	// 从装配结果到清单，走的是生产用的那两步：先取计数器，再拼清单。
 	for _, tc := range []struct {
 		what string
 		app  *assembly.App
@@ -388,15 +398,25 @@ func TestReadinessChecksFollowTheWiring(t *testing.T) {
 		// 测试与 worker 角色传进来的就是 nil（见 newInternalHandler）。
 		{"没有装配层的实例", nil, []string{"postgres"}},
 		{"worker 角色的零值 App", &assembly.App{Public: workerPlaceholder()}, []string{"postgres"}},
-		{"有网关但没计数器", &assembly.App{Gateway: &gateway.Gateway{}}, []string{"postgres"}},
-		{
-			"装好了网关与计数器",
-			&assembly.App{Gateway: &gateway.Gateway{Counter: tokens.NewCounter()}},
-			[]string{"postgres", "tokens"},
-		},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
-			if got := names(readinessChecks(nil, tc.app)); !slices.Equal(got, tc.want) {
+			if got := names(readinessChecks(nil, readinessVocab(tc.app))); !slices.Equal(got, tc.want) {
+				t.Errorf("就绪检查 = %v，期望 %v", got, tc.want)
+			}
+		})
+	}
+
+	// 清单那一侧的判据：有没有计数器决定 tokens 那一项在不在。
+	for _, tc := range []struct {
+		what  string
+		vocab *tokens.Counter
+		want  []string
+	}{
+		{"没有计数器", nil, []string{"postgres"}},
+		{"装好了计数器", tokens.NewCounter(), []string{"postgres", "tokens"}},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			if got := names(readinessChecks(nil, tc.vocab)); !slices.Equal(got, tc.want) {
 				t.Errorf("就绪检查 = %v，期望 %v", got, tc.want)
 			}
 		})
@@ -404,8 +424,7 @@ func TestReadinessChecksFollowTheWiring(t *testing.T) {
 
 	// 加进来的那一项要真的**通过**：挂一个永远报错的探针，效果是把每个实例
 	// 都摘掉——而它在「清单里有 tokens」这条断言上看起来是完全正确的。
-	app := &assembly.App{Gateway: &gateway.Gateway{Counter: tokens.NewCounter()}}
-	for _, c := range readinessChecks(nil, app) {
+	for _, c := range readinessChecks(nil, tokens.NewCounter()) {
 		if c.Name != "tokens" {
 			continue
 		}

@@ -139,7 +139,7 @@ func run() error {
 
 	internalSrv := &http.Server{
 		Addr:              cfg.InternalAddr,
-		Handler:           newInternalHandler(readinessChecks(handle, app), app),
+		Handler:           newInternalHandler(readinessChecks(handle, readinessVocab(app)), app),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -149,6 +149,26 @@ func run() error {
 	}
 
 	return serveUntilSignal(ctx, logger, shutdownTimeout, servers)
+}
+
+// readinessVocab 从装配结果里取出词表计数器；没装时返回 nil。
+//
+// # 为什么要有这个函数
+//
+// 这一层不 import internal/gateway：装配入口与数据面是 internal/assembly 的事，
+// 命令行直接依赖 gateway 等于绕开装配层（那条规则由 scripts/check-layering.sh
+// 守着）。所以「装配结果里有没有计数器」这个形状只在这里出现一次，清单那一层
+// 只看见一个计数器。
+//
+// 返回值是**具体指针**而不是一个「只要 VocabReady 就行」的接口：接口里装一个
+// 类型化的 nil 指针不是 nil（`app.Gateway.Counter` 为 nil 时直接交给接口，
+// 判 `vocab != nil` 会为真），于是一个没有计数器的实例会被加进词表探针——
+// 而那个探针在一个没预热过的实例上永远不会通过。指针的 nil 就是 nil。
+func readinessVocab(app *assembly.App) *tokens.Counter {
+	if app == nil || app.Gateway == nil {
+		return nil
+	}
+	return app.Gateway.Counter
 }
 
 // readinessChecks 汇总内部端口就绪检查要报的那几项。
@@ -164,14 +184,14 @@ func run() error {
 //
 // # 词表那一项为什么是有条件的
 //
-// 它只在真的装了计数器时才加。worker 角色的 App 是零值（见 publicHandler），
-// 那种实例既不接推理流量、也没有预热过词表，无条件加上的话它会永远报不就绪——
-// 而它本来是一个完全正常、按设计就该长这样的实例。
+// 它只在真的装了计数器时才加（见 readinessVocab）。worker 角色的 App 是零值
+// （见 publicHandler），那种实例既不接推理流量、也没有预热过词表，无条件加上
+// 的话它会永远报不就绪——而它本来是一个完全正常、按设计就该长这样的实例。
 //
 // 之所以要探：词表没预热或加载失败时请求照样进来，计数悄悄退回估算
 // （见 tokens.Counter.VocabReady），链路上没有一处报错。这种事只有就绪检查
 // 能说出来——不就绪会被摘掉，而日志里的一句话不会。
-func readinessChecks(handle *sql.DB, app *assembly.App) []observe.ReadinessCheck {
+func readinessChecks(handle *sql.DB, vocab *tokens.Counter) []observe.ReadinessCheck {
 	checks := []observe.ReadinessCheck{
 		{
 			Name: "postgres",
@@ -180,16 +200,15 @@ func readinessChecks(handle *sql.DB, app *assembly.App) []observe.ReadinessCheck
 			},
 		},
 	}
-	if app != nil && app.Gateway != nil && app.Gateway.Counter != nil {
-		counter := app.Gateway.Counter
+	if vocab != nil {
+		// 包一层闭包而不是直接把方法值交出去：与上面 postgres 那一项同形，
+		// 而且**那是一次真的调用**——方法值只是取了个函数，仓库里那道
+		// 「导出方法没有调用点」的门（check-deadmethods.sh）按调用点名字
+		// 扫，取方法值它看不见。
 		checks = append(checks, observe.ReadinessCheck{
 			Name: "tokens",
-			// 包一层闭包而不是直接把方法值交出去：与上面 postgres 那一项同形，
-			// 而且**那是一次真的调用**——方法值只是取了个函数，仓库里那道
-			// 「导出方法没有调用点」的门（check-deadmethods.sh）按调用点名字
-			// 扫，取方法值它看不见。
 			Check: func(ctx context.Context) error {
-				return counter.VocabReady(ctx)
+				return vocab.VocabReady(ctx)
 			},
 		})
 	}
