@@ -492,6 +492,33 @@ func TestReserveOutputRejectsOverflow(t *testing.T) {
 	}
 }
 
+// TestReserveRejectsClampedTotal 验证求和被夹住时报错，而不是交回那个夹住的数。
+//
+// 夹住的值从返回值上看不出来：它是 int64 的边界，形如一个正常金额。而这个
+// 函数交出去的是**预留上界**——一个夹住的、偏小的上界会让结算越过它，
+// 撞上 Capped，差额静默由平台承担。所以这里必须是错误。
+//
+// 与上面几处溢出的取数方式不同：那些是某一项相乘放不下，这一处各项都放得下，
+// 夹住发生在**最低消费与固定费相加**那一步。
+func TestReserveRejectsClampedTotal(t *testing.T) {
+	// 最低消费取 money 能表示的最大值，再加一个最小单位：
+	// 真实和越过 int64，而相加那一步只会夹到边界。
+	req := ReserveRequest{
+		Prices:       prices(),
+		InputTokens:  1,
+		OutputTokens: 1,
+		Charges: Charges{
+			Minimum: money.MustParse("92233720368.54775807"),
+			Fixed:   money.MustParse("0.00000001"),
+		},
+	}
+	got, err := Reserve(req)
+	if !errors.Is(err, money.ErrOverflow) {
+		t.Errorf("总额夹住时应当报 money.ErrOverflow，实际 err=%v 预留=%s"+
+			"（夹住的边界值不等于算得出来的金额）", err, got)
+	}
+}
+
 // ── 结算 ────────────────────────────────────────────────────────────────
 
 func TestSettleReturnsDifference(t *testing.T) {

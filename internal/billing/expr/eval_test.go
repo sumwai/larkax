@@ -230,6 +230,27 @@ func TestEvalConditionalPicksBranch(t *testing.T) {
 	}
 }
 
+// TestEvalContextLengthCountsCacheWrite 验证 len 把缓存写进来的那一份也算在内。
+//
+// 缓存写同样占着窗口，只是单价与正文不同——它属于「送进去的上下文」。
+// 少算这一份会让一个 35 000 token 的请求落回短上下文档、取到偏低的单价：
+// 档位看着正常，而账单上少收的那一笔不会报错。
+//
+// 期望值写成字面量，不从规则文本里推：分档线与单价都是规则里写着的数，
+// 拿它们当参照，改规则时两边会一起变。
+func TestEvalContextLengthCountsCacheWrite(t *testing.T) {
+	source := `len <= 32000
+		? tier("standard", {"prompt": 0.0000015, "completion": 0.0000075})
+		: tier("long_context", {"prompt": 0.0000030, "completion": 0.00001125})`
+
+	// 30 000 + 5 000 = 35 000，越过 32 000 那条分档线。
+	res := eval(t, source, billing.Usage{PromptTokens: 30_000, CacheWriteTokens: 5_000})
+	if res.Tier != "long_context" || res.Prices.Prompt.String() != "0.00000300" {
+		t.Errorf("30 000 正文加 5 000 缓存写的上下文: tier=%q prompt=%s，期望 long_context 与 0.00000300",
+			res.Tier, res.Prices.Prompt)
+	}
+}
+
 // TestEvalLenIsVariableNotBuiltin 钉住「变量遮蔽内置函数」这个行为。
 //
 // len 是 expr 的内置函数名，而本项目把它用作上下文长度变量。
@@ -811,6 +832,25 @@ func TestEvalRejectsNonFinite(t *testing.T) {
 		if !strings.Contains(err.Error(), "NaN") && !strings.Contains(err.Error(), "无穷") {
 			t.Errorf("%q 的错误信息应当说明是 NaN/无穷，得到: %v", source, err)
 		}
+	}
+}
+
+// TestEvalRejectsNonFiniteFixedFee 验证一次性费用也走「必须有限」那一关。
+//
+// 单价那一侧由 asPrice 拦下，而 fixed() 走的是副作用通道、落到 chargeOf。
+// 那里若把非有限值放过去，这笔费用会静默变成零：规则里写了固定费，
+// 账单上一分不收，而且不报错——账目仍然平，只有对账时表现为
+// 「用量对不上金额」。
+func TestEvalRejectsNonFiniteFixedFee(t *testing.T) {
+	// 一次性的固定费与用量无关，所以这里给的用量是空的：
+	// 这条规则该不该收钱只看那一项费用本身。
+	p := mustCompile(t, `{"prompt": min(fixed(1.0 / 0.0), 1.0)}`)
+	res, err := p.Eval(Env{At: testAt})
+	if err == nil {
+		t.Fatalf("非有限的固定费没报错，算出来的 fixed = %s（期望报「不是有限数值」）", res.Charges.Fixed)
+	}
+	if !strings.Contains(err.Error(), `"fixed"`) || !strings.Contains(err.Error(), "不是有限数值") {
+		t.Errorf("错误信息应当说清是哪一项费用非法，得到: %v", err)
 	}
 }
 
