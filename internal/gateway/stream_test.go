@@ -583,6 +583,36 @@ func TestChatStreamSettlesAfterStreamOutlivesTheBudget(t *testing.T) {
 	}
 }
 
+// 收尾预算那个旋钮的三支：零值走常量、正数走注入、负数也走常量。
+//
+// 形状照 TestNowFallsBackToRealClock：那一条管的是「注入被移除时没人拦得住」，
+// 这一条同理。上面那条长流用例只钉住**deadline 从哪一刻开始算**，把
+// newHarness 里那行 wiring 删掉它照样绿（预算回到十秒的常量，300ms 的流过不了期）；
+// 而「注入真的被读到了」要这一条来钉。
+//
+// 三支各有各的红法：删掉 wiring → 第二条变红；把 settleTimeout 的 `> 0` 改成
+// `>= 0` → 第一条变红。负数那一支只是跟着正数走同一个判据（`> 0` 挡住 0 与负数），
+// 不给它单独的语义——它不是会出现的输入，只是「旋钮怎么读」这件事的一个边界。
+func TestSettleTimeoutFallsBackToTheConstant(t *testing.T) {
+	cases := []struct {
+		name     string
+		injected time.Duration
+		want     time.Duration
+	}{
+		{"没有注入", 0, streamSettleTimeout},
+		{"注入了正数", 3 * time.Second, 3 * time.Second},
+		{"注入了负数", -time.Second, streamSettleTimeout},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t, withSettleTimeout(c.injected))
+			if got := h.gw.settleTimeout(); got != c.want {
+				t.Errorf("settleTimeout() = %v，期望 %v", got, c.want)
+			}
+		})
+	}
+}
+
 // ── 与调用方的约定 ──────────────────────────────────────────────────────
 
 // 结算在事件流关闭**之前**完成：调用方读完流就不必再等一个信号，
