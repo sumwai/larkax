@@ -21,9 +21,19 @@ func testConfig() Config {
 	return Config{Enabled: true, MaxBytes: 65536, RetentionDays: 30}
 }
 
+// newCollector 建一条「永远没有授权」的链路。
+//
+// 默认这一档是有意的：绝大多数用例判的是骨架那条路，而「没有授权」正是
+// 它今天在装配层拿到的那个答案（见 NoConsentSource）。
 func newCollector(t *testing.T, cfg Config, db DB) *Collector {
 	t.Helper()
-	c, err := New(cfg, db, quietLogger())
+	return newCollectorWithConsent(t, cfg, db, NoConsentSource{})
+}
+
+// newCollectorWithConsent 建一条按给定授权来源判定的链路。
+func newCollectorWithConsent(t *testing.T, cfg Config, db DB, consent ConsentSource) *Collector {
+	t.Helper()
+	c, err := New(cfg, db, consent, quietLogger())
 	if err != nil {
 		t.Fatalf("建立快照链路失败: %v", err)
 	}
@@ -69,7 +79,10 @@ func TestEnabledCollectorSatisfiesGatewayInterfaces(t *testing.T) {
 	if s == nil {
 		t.Fatal("启用时 Sink 该有实现")
 	}
-	if _, err := r.Redact(&channel.Request{Model: "placeholder-model"}); err != nil {
+	// 判据是「取出来的这个能用」，所以身份给零值：授权那一层用不上它
+	// （这条链路接的是 NoConsentSource），而零值正是「拿不到身份」的形状。
+	if _, err := r.Redact(context.Background(), &channel.Request{Model: "placeholder-model"},
+		gateway.CaptureIdentity{}); err != nil {
 		t.Errorf("取出来的 Redactor 应当能用: %v", err)
 	}
 	if err := s.Save(context.Background(), newSnap()); err != nil {
@@ -83,7 +96,7 @@ func TestNewRejectsNonPositiveMaxBytes(t *testing.T) {
 	for _, n := range []int{0, -1, -65536} {
 		cfg := testConfig()
 		cfg.MaxBytes = n
-		if _, err := New(cfg, &fakeDB{}, quietLogger()); err == nil {
+		if _, err := New(cfg, &fakeDB{}, NoConsentSource{}, quietLogger()); err == nil {
 			t.Errorf("max_bytes = %d 时应当报错", n)
 		}
 	}
@@ -101,7 +114,7 @@ func TestRedactBridgesBothDirections(t *testing.T) {
 			Content: []channel.ContentBlock{{Type: "text", Text: "帮我看看这段"}},
 		}},
 	}
-	snap, err := c.Redact(req)
+	snap, err := c.Redact(context.Background(), req, gateway.CaptureIdentity{})
 	if err != nil {
 		t.Fatalf("脱敏请求失败: %v", err)
 	}
@@ -113,6 +126,10 @@ func TestRedactBridgesBothDirections(t *testing.T) {
 	}
 	// 原样文本绝不能出现在骨架里。
 	assertNoContent(t, snap, "帮我看看这段")
+	// 没有授权时落的就是默认那一档。
+	if snap.CaptureMode != captureModeSkeleton {
+		t.Errorf("capture_mode = %q，期望 %q", snap.CaptureMode, captureModeSkeleton)
+	}
 
 	// 调用方负责填归属信息，脱敏本身不碰它们。
 	if snap.RequestID != "" || snap.Direction != "" || snap.UserID != 0 {
@@ -130,7 +147,7 @@ func TestRedactResponseBridgesDirection(t *testing.T) {
 		},
 		Usage: channel.Usage{PromptTokens: 100, CompletionTokens: 20},
 	}
-	snap, err := c.RedactResponse(resp)
+	snap, err := c.RedactResponse(context.Background(), resp, gateway.CaptureIdentity{})
 	if err != nil {
 		t.Fatalf("脱敏响应失败: %v", err)
 	}
@@ -144,7 +161,7 @@ func TestRedactResponseBridgesDirection(t *testing.T) {
 // 网关会把整条快照丢掉，「连不上上游」这件事就不会出现在表里。
 func TestRedactResponseNilGivesEmptySkeleton(t *testing.T) {
 	c := newCollector(t, testConfig(), &fakeDB{})
-	snap, err := c.RedactResponse(nil)
+	snap, err := c.RedactResponse(context.Background(), nil, gateway.CaptureIdentity{})
 	if err != nil {
 		t.Fatalf("nil 响应不该报错: %v", err)
 	}
@@ -314,7 +331,7 @@ func TestSnapshotCountsAppearOnMetrics(t *testing.T) {
 		cfg := testConfig()
 		cfg.MaxBytes = 1
 		c := newCollector(t, cfg, &fakeDB{})
-		if _, err := c.Redact(&channel.Request{Model: "placeholder-model"}); !errors.Is(err, snapshot.ErrTooLarge) {
+		if _, err := c.Redact(context.Background(), &channel.Request{Model: "placeholder-model"}, gateway.CaptureIdentity{}); !errors.Is(err, snapshot.ErrTooLarge) {
 			t.Fatalf("上限 1 字节时应当整条丢弃并带 ErrTooLarge 标记，实际 %v", err)
 		}
 	})

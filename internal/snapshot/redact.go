@@ -293,6 +293,67 @@ func (r *Redactor) RedactResponse(resp *channel.Response) (*Result, error) {
 	return r.RedactRaw(responseToMap(resp))
 }
 
+// RedactRequestVerbatim 返回请求的**原样**结构：一个内容都不替换。
+//
+// 它只服务「用户已明确授权原样采集」那一档（见 internal/snapshotwire 的
+// ConsentSource），**不能**被别的调用方顺手用上：这一包其余部分的承诺是
+// 「默认脱敏、白名单放行」，而这里的承诺正好相反——留下的是用户原文。
+// 所以它的名字里带 Verbatim，入口也刻意与 RedactRequest 分开两个：
+// 调用点读起来就能看出「这一条走的是另一档」。
+//
+// 与 RedactRequest 相同的那几件事照旧做：nil 检查、方向检查，以及体积上限。
+// 超限时与骨架那条路一样降级成摘要层并置 Truncated——**原文被降级比骨架被
+// 降级更严重**（授权采集的用途就是看原文），所以那个标志必须诚实，读的人
+// 才知道手里这份不全。
+//
+// 不看允许表：这条路不查白名单，表坏掉对它没有影响，也就不会发现。
+func (r *Redactor) RedactRequestVerbatim(req *channel.Request) (*Result, error) {
+	if r == nil {
+		return nil, redactionError("", "脱敏器为 nil")
+	}
+	if req == nil {
+		return nil, redactionError("", "请求为 nil")
+	}
+	if r.root != RootRequest {
+		return nil, redactionError("", "脱敏器是 %q 方向，不能处理请求", r.root)
+	}
+	return r.verbatim(requestToMap(req))
+}
+
+// RedactResponseVerbatim 返回响应的**原样**结构，与 RedactRequestVerbatim 同理。
+//
+// 采集范围与 RedactResponse 一致：只有归一化后的字段，**不含**上游原样返回的
+// Response.Raw 与 Usage.Raw。「原样」指的是「不替换归一化字段里的内容」，
+// 不是「上游字节的副本」——后者要单独决定，不在这一档里。
+func (r *Redactor) RedactResponseVerbatim(resp *channel.Response) (*Result, error) {
+	if r == nil {
+		return nil, redactionError("", "脱敏器为 nil")
+	}
+	if resp == nil {
+		return nil, redactionError("", "响应为 nil")
+	}
+	if r.root != RootResponse {
+		return nil, redactionError("", "脱敏器是 %q 方向，不能处理响应", r.root)
+	}
+	return r.verbatim(responseToMap(resp))
+}
+
+// verbatim 是两条「原样」入口的共同收尾。
+//
+// 它不做遍历：结构本身就是结果。Redacted 留空是如实的——没有被替换掉的字段，
+// 于是 redacted_paths 落库时是空数组（见 internal/snapshotwire 的 Insert）。
+func (r *Redactor) verbatim(v any) (*Result, error) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil, redactionError("", "顶层不是 JSON 对象而是 %T", v)
+	}
+	res := &Result{Skeleton: m, Version: SkeletonVersion}
+	if err := r.applyBudget(res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
 // applyBudget 在骨架超限时降级为摘要层，仍然超限则报错。
 //
 // 降级保留的是顶层标量：模型名、max_tokens、消息条数这类「一眼能看出这次请求
