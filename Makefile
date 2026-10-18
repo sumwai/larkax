@@ -25,6 +25,17 @@ export DB_PASSWORD PG_PORT PG_DB
 ENV_FILE := .env
 TEMPLATE := .env.example
 
+# .env.example 里那几个占位符的拼写只写在这里：下面的 sed（替换）、grep（提示
+# 「拷来的 .env 里占位符还在」）与生成之后那次复查都从它派生。
+#
+# 各写一份的话，「改了 .env.example 而没改 Makefile」这条路上没有任何东西会响：
+# 替换对不上，.env 里留着占位符或一个空值，而那份文件写出来之后就不再重建
+# （见 init 的注释）——坏掉的那份会一直躺在那里，直到有人对着服务那句
+# 「主密钥无效」去翻它。
+DB_PASSWORD_PLACEHOLDER := <DB_PASSWORD>
+MASTER_KEY_PLACEHOLDER  := <MASTER_KEY>
+MASTER_KEYS_PLACEHOLDER := current:$(MASTER_KEY_PLACEHOLDER),previous:$(MASTER_KEY_PLACEHOLDER)
+
 # sed 的替换串里 & 是整个匹配、\ 是转义、| 是这里用作分隔符的字符。
 # 口令里带上它们会生成一份语法没错但内容不对的 .env——最难发现的那种坏法。
 # 反斜杠要先转，否则后面几步加进去的反斜杠会被自己再转一遍。
@@ -33,6 +44,11 @@ TEMPLATE := .env.example
 # 一层反斜杠，口令里的 \ 就没了）。单引号串里没法直接写 '，标准写法是
 # 收尾、转义、重开 —— '\'' 。它必须放在最后一步：先做的话，它自己带进来的
 # 反斜杠会被上一步再转一遍。
+#
+# 唯一的例外是主密钥那一条：它带一个 shell 变量（$$key），所以用双引号。
+# 那不涉及上面这套转义——base64 的字母表里没有 sed 的特殊字符（& \ | '），
+# 于是双引号替 shell 吃掉一层反斜杠这件事在那里无从发生。口令那一条不能
+# 跟着改成双引号。
 ESCAPED_DB_PASSWORD := $(subst ','\'',$(subst |,\|,$(subst &,\&,$(subst \,\\,$(DB_PASSWORD)))))
 
 .PHONY: help init up down migrate run check-ports test clean
@@ -61,12 +77,19 @@ help:
 #
 # 生成分支的三条替换分别填上密码、主密钥，以及示例 DSN 里的端口与库名。
 # 第三条与 .env.example 的默认值（:5432/larkax）绑定：改了那边的默认值，
-# 这里也要跟着改。下面紧接着 grep 一次确认它真的命中了——
-# 替换没命中时 .env 会安静地留着旧端口，而服务就连不上 compose 起的那个库。
+# 这里也要跟着改。后两条各自紧跟着一次复查，复查不过就把刚写出来的 .env 删掉
+# ——替换没命中是**静默**的：DSN 那一条留着旧端口（服务连不上 compose 起的
+# 库），主密钥那一条留着占位符或一个空值（服务以主密钥无效拒绝启动），
+# 而 .env 已经落在磁盘上、之后不再重建，于是坏掉的那份会一直留着。
+#
+# 生成之前先探 openssl。没有它时 `$$(openssl rand -base64 32)` 展开成**空串**，
+# 而命令替换失败并不会让 sed 那一行失败——于是 .env 照样被写出来、主密钥是空的、
+# 末尾还打印「已生成」。报错点与真实原因隔了一层，这里把它挪回真实原因那一处
+# （docs/development.md 的「需要什么」一节也这么写）。
 init:
 	@if [ -f $(ENV_FILE) ]; then \
 	  echo "$(ENV_FILE) 已存在，不重建"; \
-	  if grep -qE '(<MASTER_KEY>|<DB_PASSWORD>)' $(ENV_FILE); then \
+	  if grep -qE '($(MASTER_KEY_PLACEHOLDER)|$(DB_PASSWORD_PLACEHOLDER))' $(ENV_FILE); then \
 	    echo "警告：它是从 $(TEMPLATE) 直接拷来的，占位符还在，服务会因主密钥无效而拒绝启动"; \
 	  fi; \
 	  before=$$(grep -m1 '^LARKAX_DB_DSN=' $(ENV_FILE) || true); \
@@ -92,12 +115,27 @@ init:
 	      echo "      $$before" ;; \
 	  esac; \
 	else \
-	  sed -e 's|<DB_PASSWORD>|$(ESCAPED_DB_PASSWORD)|' \
-	      -e "s|current:<MASTER_KEY>,previous:<MASTER_KEY>|$$(openssl rand -base64 32)|" \
+	  command -v openssl >/dev/null 2>&1 || { \
+	    echo "错误：生成主密钥需要 openssl，这个命令不在 PATH 里"; \
+	    echo "      装上它再重跑（Debian/Ubuntu: apt install openssl）。$(ENV_FILE) 没有创建"; \
+	    exit 1; \
+	  }; \
+	  key=$$(openssl rand -base64 32) || { \
+	    echo "错误：openssl rand 没能生成主密钥。$(ENV_FILE) 没有创建"; \
+	    exit 1; \
+	  }; \
+	  sed -e 's|$(DB_PASSWORD_PLACEHOLDER)|$(ESCAPED_DB_PASSWORD)|' \
+	      -e "s|$(MASTER_KEYS_PLACEHOLDER)|$$key|" \
 	      -e "s|:5432/larkax|:$(PG_PORT)/$(PG_DB)|" \
 	      $(TEMPLATE) > $(ENV_FILE); \
 	  grep -q ":$(PG_PORT)/$(PG_DB)" $(ENV_FILE) || { \
 	    echo "$(TEMPLATE) 的 DSN 里没有 \":5432/larkax\"，端口与库名没能替换进去"; \
+	    rm -f $(ENV_FILE); \
+	    exit 1; \
+	  }; \
+	  grep -qE '^LARKAX_MASTER_KEYS="[A-Za-z0-9+/]{40,}={0,2}"' $(ENV_FILE) || { \
+	    echo "错误：主密钥没能生成进 $(ENV_FILE)，那份文件已删掉"; \
+	    echo "      查 $(TEMPLATE) 里主密钥的占位符与 Makefile 顶部的 MASTER_KEYS_PLACEHOLDER 是不是同一串"; \
 	    rm -f $(ENV_FILE); \
 	    exit 1; \
 	  }; \

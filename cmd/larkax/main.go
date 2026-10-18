@@ -307,6 +307,13 @@ func warmVocab(ctx context.Context, counter *tokens.Counter, logger *slog.Logger
 	)
 }
 
+// workerPlaceholderMessage 是 worker 角色的公共端口占位响应文案。
+//
+// 这一层只有文案：状态码与错误体的形状都由 internal/api 给出（见
+// api.WriteNotImplemented）。在这里手写一份完整字面量的话，它与 api 那一侧
+// 会各改各的——而两份看起来都对，除非有人把两处的字节对一遍。
+const workerPlaceholderMessage = "this instance runs the worker role and does not serve inference traffic"
+
 // workerPlaceholder 是 worker 角色的公共端口占位响应。
 //
 // 它按路径全捕获，任何真实流量都会立刻得到「这个实例不接推理流量」，
@@ -318,10 +325,8 @@ func warmVocab(ctx context.Context, counter *tokens.Counter, logger *slog.Logger
 func workerPlaceholder() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set(api.HeaderVersion, version)
-		w.WriteHeader(http.StatusNotImplemented)
-		_, _ = w.Write([]byte(`{"error":{"type":"not_implemented","message":"this instance runs the worker role and does not serve inference traffic"}}`))
+		api.WriteNotImplemented(w, workerPlaceholderMessage)
 	})
 	// 最外层是关联标识：放在其他中间件之前，
 	// 这样被后续中间件拒绝掉的请求也带着 id，能被排查到。
