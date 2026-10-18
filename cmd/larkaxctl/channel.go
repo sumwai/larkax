@@ -211,15 +211,15 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	channelType := fs.String("type", "", "")
 	baseURL := fs.String("base-url", "", "")
 	models := fs.String("models", "", "")
-	owner := legacyStringFlag(fs, "user", "owner", "", "")
-	stringAlias(fs, owner, "u", sameAs("user"))
+	owner := legacyStringFlag(fs, "user", "owner", "")
+	stringAlias(fs, owner, "u")
 	weight := fs.Int("weight", 0, "")
 	priority := fs.Int("priority", 0, "")
 	setting := fs.String("setting", "", "")
 	credentialStdin := fs.Bool("credential-stdin", false, "")
-	boolAlias(fs, credentialStdin, "stdin", sameAs("credential-stdin"))
+	boolAlias(fs, credentialStdin, "stdin")
 	credentialEnv := fs.String("credential-env", "", "")
-	stringAlias(fs, credentialEnv, "env", sameAs("credential-env"))
+	stringAlias(fs, credentialEnv, "env")
 	if err := fs.Parse(args); err != nil {
 		return channels.CreateRequest{}, "", err
 	}
@@ -287,9 +287,9 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	priority := fs.Int("priority", 0, "")
 	setting := fs.String("setting", "", "")
 	credentialStdin := fs.Bool("credential-stdin", false, "")
-	boolAlias(fs, credentialStdin, "stdin", sameAs("credential-stdin"))
+	boolAlias(fs, credentialStdin, "stdin")
 	credentialEnv := fs.String("credential-env", "", "")
-	stringAlias(fs, credentialEnv, "env", sameAs("credential-env"))
+	stringAlias(fs, credentialEnv, "env")
 	if err := fs.Parse(args); err != nil {
 		return channels.UpdateRequest{}, err
 	}

@@ -152,8 +152,8 @@ func runAliasCreate(args []string) error {
 func parseAliasCreate(args []string) (catalog.CreateAliasRequest, error) {
 	fs := flag.NewFlagSet("alias create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "", "")
-	stringAlias(fs, canonical, "m", sameAs("model"))
+	canonical := legacyStringFlag(fs, "model", "canonical", "")
+	stringAlias(fs, canonical, "m")
 	upstream := fs.String("upstream", "", "")
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示平台级别名")
 	overrides := fs.String("overrides", "", "")
@@ -192,8 +192,8 @@ func runAliasList(args []string) error {
 	fs := flag.NewFlagSet("alias list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示平台级别名")
-	canonical := legacyStringFlag(fs, "model", "canonical", "", "")
-	stringAlias(fs, canonical, "m", sameAs("model"))
+	canonical := legacyStringFlag(fs, "model", "canonical", "")
+	stringAlias(fs, canonical, "m")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -364,8 +364,8 @@ func runAliasDelete(args []string) error {
 func runAliasResolve(args []string) error {
 	fs := flag.NewFlagSet("alias resolve", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "", "")
-	stringAlias(fs, canonical, "m", sameAs("model"))
+	canonical := legacyStringFlag(fs, "model", "canonical", "")
+	stringAlias(fs, canonical, "m")
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示不针对具体渠道（只看平台级那条）")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
