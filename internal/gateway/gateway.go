@@ -1871,8 +1871,11 @@ func (g *Gateway) recordCall(ctx context.Context, rec route.CallOutcome) {
 	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	if err := g.Recorder.RecordCall(recCtx, rec); err != nil {
+		// request_id 那一栏由观测层从 ctx 附上来（见 observe.FromContext），
+		// 这里不手写：手写的那一栏取不到值时会附上一个空串，而日志里同名键
+		// 后者胜，真值会被那个空串盖掉。
 		observe.FromContext(ctx).Error("写渠道健康度失败",
-			"err", err, "channel_id", rec.ChannelID, "request_id", requestIDOf(ctx))
+			"err", err, "channel_id", rec.ChannelID)
 	}
 }
 
@@ -1904,13 +1907,12 @@ func (g *Gateway) now() time.Time {
 	return time.Now()
 }
 
+// requestIDOf 取这次请求的标识，没有则返回空串。
+//
+// 键用观测层那一个（observe.WithRequestID 放进去的），网关自己不再留一份：
+// 留的那一份从来没有被写进过 context——往 context 里放标识的是观测层的中间件，
+// 用的是观测层自己的键类型，两者**同名不同型**，看着像一份，取值却一直落到
+// 空串上。本包已经 import 观测层，直接取即可。
 func requestIDOf(ctx context.Context) string {
-	// 不 import observe 而用一个窄接口，是为了让本包能在没有观测层时
-	// 也能测。真实实现由调用方在 ctx 里放一个实现该接口的值。
-	if v, ok := ctx.Value(requestIDKey{}).(interface{ String() string }); ok {
-		return v.String()
-	}
-	return ""
+	return string(observe.RequestIDFromContext(ctx))
 }
-
-type requestIDKey struct{}
