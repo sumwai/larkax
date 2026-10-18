@@ -10,7 +10,7 @@ larkaxctl\-apikey \- API Key 访\:问\:密\:钥、\:状\:态\:与\:额\:度\:管
 .br
 二\:级\:动\:作\:与\:参\:数\:见 \fBlarkaxctl apikey \-\-help\fR（短\:版）\:与 \fBlarkaxctl help apikey\fR（长\:版）。
 .PP
-API Key 访\:问\:密\:钥、\:状\:态\:与\:额\:度\:管\:理。\:这\:四\:个\:子\:命\:令\:都\:不\:需\:要 \fBLARKAX_MASTER_KEYS\fR：\:它\:们\:不\:碰\:渠\:道\:凭\:证，\:也\:就\:不\:碰\:信\:封\:加\:密\:（主\:密\:钥\:是 \fBsecret rotate\fR 与 \fBchannels\fR 那\:一\:组\:的\:事）。
+API Key 访\:问\:密\:钥、\:状\:态\:与\:额\:度\:管\:理。\:这\:四\:个\:子\:命\:令\:都\:不\:需\:要 \fBLARKAX_MASTER_KEYS\fR：\:它\:们\:不\:碰\:渠\:道\:凭\:证，\:也\:就\:不\:碰\:信\:封\:加\:密\:（主\:密\:钥\:是 \fBsecret rotate\fR、\fBchannel\fR 的\:写\:入\:与 \fBplugin\fR 的\fBdelete\fR / \fBkv set\fR / \fBkv delete\fR 那\:三\:条\:的\:事）。
 .PP
 \fB明\:文\:只\:打\:印\:这\:一\:次\fR：\:库\:里\:存\:的\:是 SHA\-256 哈\:希，\:它\:不\:可\:逆，\:丢\:了\:没\:有\:任\:何\:办\:法\:取\:回，\:只\:能\:重\:建\:一\:把。\:所\:以\:明\:文\:单\:独\:打\:到 stdout，\:其\:余\:信\:息\:打\:到 stderr——\fBlarkaxctl apikey create \-\-user alice > key\&.txt\fR 保\:存\:下\:来\:的\:文\:件\:里\:只\:有\:明\:文，\:不\:会\:混\:进\:前\:缀、id 与\:提\:示\:语。
 .PP

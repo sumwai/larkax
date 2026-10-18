@@ -24,6 +24,7 @@ const settingsShortUsage = `larkaxctl settings 查看与修改运行期配置。
 
 用法：
   larkaxctl settings list
+  larkaxctl settings get --key <键>
   larkaxctl settings set --key <键> --value <值> --by <用户 ID 或用户名>
 
 未声明的键写不进去；--by 必填，每次改动都要记名。值按明文给，整数写数字、
@@ -37,7 +38,11 @@ const settingsUsage = `larkaxctl settings 查看与修改运行期配置。
 
 用法：
   larkaxctl settings list
+  larkaxctl settings get --key <键>
   larkaxctl settings set --key <键> --value <值> --by <用户 ID 或用户名>
+
+get 打一个配置项：库里那一行的值（jsonb 原文）、类型、改自谁、什么时候改的，
+以及它在 Registry 里声明了没有。键在库里没有行时按「那一行不存在」返回 4。
 
 set 的值按明文给，不用写成 JSON：
 
@@ -87,12 +92,23 @@ func runSettings(args []string) error {
 	switch action {
 	case "list":
 		return runSettingsList(rest)
+	case "get":
+		return runSettingsGet(rest)
 	case "set":
 		return runSettingsSet(rest)
 	default:
 		return usageErr(fmt.Errorf("未知的 settings 子命令 %q", action))
 	}
 }
+
+// errSettingsNotFound 表示要看的那个键在 settings 表里没有行。
+//
+// 由命令自己造，不是从包里拿：internal/settings 有一个 ErrUnknownKey，但它是
+// **写入路径**的哨兵——`settings set` 撞上它时给的退出码是 1（键名与取值由
+// settings 包校验的那一档，见 docs/cli-reference.md 的退出码一节）。读这一侧
+// 要的是「要查的那一行不在」，那是 4。两者共用一个错误值的话，改其中一个的
+// 分类就把另一个的退出码也带跑了（与 errSnapshotNotFound 同一个位置）。
+var errSettingsNotFound = errors.New("settings 里没有这一行")
 
 func runSettingsList(args []string) error {
 	fs := flag.NewFlagSet("settings list", flag.ContinueOnError)
@@ -140,6 +156,122 @@ func runSettingsList(args []string) error {
 		}
 		return loadErr
 	})
+}
+
+// runSettingsGet 看一个配置项。
+//
+// 只读，不要主密钥：它不改任何东西，与 list 同一条。
+func runSettingsGet(args []string) error {
+	fs := flag.NewFlagSet("settings get", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, settingsShortUsage) }
+	key := fs.String("key", "", "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("get 不接受位置参数，得到 %q：键用 --key 指定", fs.Arg(0)))
+	}
+	if *key == "" {
+		return usageErr(errors.New("缺少 --key：要看哪一个配置项"))
+	}
+
+	return withSettingsDB(func(ctx context.Context, _ *sql.DB, src *settings.PgSource) error {
+		e, found, err := src.Get(ctx, *key)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return settingsMissing(*key)
+		}
+		// 与 list 同一条约定：JSON 是另一条渲染路径，不是把上面那张表转成 JSON
+		// （见 format.go 开头）。
+		if jsonOutput() {
+			return emitJSON(os.Stdout, settingsGetDoc(e), nil)
+		}
+		printSettingsDetail(humanStdout(), e, verboseOutput)
+		return nil
+	})
+}
+
+// settingsMissing 组装「这个键在库里没有行」那句报错。
+//
+// 声没声明在 Registry 里分开说：库里没有这一行而 Registry 里有，说明写它的那条
+// 迁移没跑到（或者这一行被人删了）；两边都没有，多半是键名写错了。两种的下一步
+// 动作不同，但都是「要找的那一行不在」——所以共用一个退出码（4）。
+func settingsMissing(key string) error {
+	if _, declared := settings.Lookup(key); declared {
+		return fmt.Errorf("%w：settings.%s 在 Registry 里声明过，库里却没有这一行——"+
+			"写它的那条迁移跑到了吗", errSettingsNotFound, key)
+	}
+	return fmt.Errorf("%w：settings.%s 在 Registry 里也没有声明，先看键名有没有写错",
+		errSettingsNotFound, key)
+}
+
+// printSettingsDetail 打出一个配置项。
+//
+// 一栏一行（与 plugin get、apikey get 同一个形状）：一条实体的回显不是清单，
+// 没有「一行一个」要维持。
+//
+// 值打的是 jsonb 原文，「这句话本身」只在 -v 下打——与 list 同一档：它在每一次
+// get 里都会出现，属于「每一次成功运行都有的解释」（见 docs/cli-output.md 的
+// 「提示与警告」）。
+func printSettingsDetail(w io.Writer, e settings.Entry, verbose bool) {
+	p := newPalette(w)
+	if verbose {
+		_, _ = fmt.Fprintln(w, "值打的是 settings.value 的 jsonb 原文：字符串带引号，布尔与整数不带。")
+	}
+
+	// kind 与 unwired 取自 Registry，不是库里那一行：类型与接不接线都是**代码**
+	// 的事实（见 settingsEntry 与 settings.UnwiredNote 的注释）。Registry 里没有
+	// 这个键时打「未声明」——那正是「服务加载不起来」的直接原因。
+	kind := "未声明"
+	unwired := ""
+	if spec, ok := settings.Lookup(e.Key); ok {
+		kind = string(spec.Kind)
+		unwired = spec.Unwired
+	}
+
+	editable := "否"
+	if e.Editable {
+		editable = "是"
+	}
+	by := "-"
+	if e.UpdatedBy != nil {
+		by = strconv.FormatInt(*e.UpdatedBy, 10)
+	}
+
+	tw := newTableWriter(w)
+	row := func(label, value string) {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+	}
+	row("键", e.Key)
+	row("值", string(e.Value))
+	row("类型", kind)
+	row("可改", editable)
+	row("改自", by)
+	// 一条实体的回显打完整时刻（与 plugin get 同一条）：清单才截到分钟。
+	row("改于", e.UpdatedAt.Format(time.RFC3339))
+	_ = tw.Flush()
+
+	if e.Description != "" {
+		_, _ = fmt.Fprintf(w, "说明：%s\n", e.Description)
+	}
+	// 还没接线的键单独一行：没有它，改一个没人读的键与改一个真的生效的键，在
+	// 这份输出上一样（与 printSettingsList 同一条理由）。
+	if unwired != "" {
+		_, _ = fmt.Fprintf(w, "尚未接线：%s\n", unwired)
+	}
+}
+
+// settingsGetDoc 组装 settings get 的机器可读输出。
+//
+// 条目形状**逐字段**借用 list 的 settingsEntry：同一份数据的两条读路径给出两套
+// 字段名时，对读它的脚本来说那就是两件事。这里是 list 收成一条，不是另一种详情
+// （与 apikey get 同一条理由）。
+func settingsGetDoc(e settings.Entry) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["setting"] = settingsEntry(e)
+	return doc
 }
 
 // runSettingsSet 改一个配置项。

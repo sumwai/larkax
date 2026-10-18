@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sumwai/larkax/internal/plugin"
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
@@ -530,10 +532,12 @@ func TestPluginListDocEmptyListIsEmptyArray(t *testing.T) {
 	}
 }
 
-// 三条写类命令在 json 模式下必须在连库之前被拦下，且命名的正是自己那一条。
+// 写类命令在 json 模式下必须在连库之前被拦下，且命名的正是自己那一条。
 //
 // enable 与 disable 共用 runPluginSetEnabled：命令名写死一个的话，另一条命令
 // 在不支持 json 时会报出兄弟命令的名字——而照着那句话去改的人会改错命令。
+// 表里不写条数：这类清单每加一条命令就要跟着长，写死的数字只会变成一句
+// 随表变旧的谎。
 func TestPluginWriteCommandsRejectJSONFormatBeforeTouchingTheDB(t *testing.T) {
 	withFormat(t, formatJSON)
 	// 连不上的库：真的去连就会以 exitDBUnreach 收场。
@@ -549,6 +553,13 @@ func TestPluginWriteCommandsRejectJSONFormatBeforeTouchingTheDB(t *testing.T) {
 		}, "plugin publish"},
 		{"enable", func() error { return runPluginSetEnabled([]string{"k"}, true) }, "plugin enable"},
 		{"disable", func() error { return runPluginSetEnabled([]string{"k"}, false) }, "plugin disable"},
+		{"delete", func() error { return runPluginDelete([]string{"k"}) }, "plugin delete"},
+		{"kv set", func() error {
+			return runPluginKVSet([]string{"--plugin", "p", "--user", "u", "--key", "k", "--value", "v"})
+		}, "plugin kv set"},
+		{"kv delete", func() error {
+			return runPluginKVDelete([]string{"--plugin", "p", "--user", "u", "--key", "k"})
+		}, "plugin kv delete"},
 	}
 
 	for _, tc := range cases {
@@ -631,5 +642,899 @@ func TestPluginListJSONStdoutIsMachineReadable(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("清单里没有刚发布的 %s：\n%s", key, stdout)
+	}
+}
+
+// ── plugin get / delete / kv（#694） ────────────────────────────────
+//
+// 这三组补的是「库里已经有、命令行够不着」的面。判据与同组其余子命令一致：
+// 参数错在连库之前报出来、读类给表格与 -o json 两条路、写类的回显只在 stderr、
+// 找不到那一行落退出码 4。
+
+// 参数错全部发生在连库之前：不设 LARKAX_DB_DSN 也跑得通。
+func TestPluginGetAndDeleteRejectBadArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		fn   func() error
+		want string
+	}{
+		{"get 没有 key", func() error { return runPluginGet(nil) }, "需要一个插件 key"},
+		{"get 两个 key", func() error { return runPluginGet([]string{"a", "b"}) }, "需要一个插件 key"},
+		{"get 空 key", func() error { return runPluginGet([]string{"  "}) }, "不能为空"},
+		{"delete 没有 key", func() error { return runPluginDelete(nil) }, "需要一个插件 key"},
+		{"delete 两个 key", func() error { return runPluginDelete([]string{"a", "b"}) }, "需要一个插件 key"},
+		{"delete 空 key", func() error { return runPluginDelete([]string{"  "}) }, "不能为空"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runCaptured(t, tc.fn)
+			if err == nil {
+				t.Fatal("期望报错，却通过了")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("错误信息 %q 里没有 %q", err.Error(), tc.want)
+			}
+			if got := exitCode(err); got != exitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数问题）", got, exitUsage)
+			}
+		})
+	}
+}
+
+// kv 的三段身份（插件、用户、键）缺一段都不往下走。
+//
+// 缺 --user 尤其不能放过：那一段决定读的是谁的键，而漏掉它之后命令照样能跑出
+// 一份输出——只是那份输出可能不是这个人的。
+func TestPluginKVRejectsBadArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		fn   func() error
+		want string
+	}{
+		{"没有子命令", func() error { return runPluginKV(nil) }, "需要子命令"},
+		{"未知子命令", func() error { return runPluginKV([]string{"bogus"}) }, "未知的 plugin kv 子命令"},
+		{"get 缺 --plugin", func() error {
+			return runPluginKVGet([]string{"--user", "alice", "--key", "k"})
+		}, "缺少 --plugin"},
+		{"get 缺 --user", func() error {
+			return runPluginKVGet([]string{"--plugin", "p", "--key", "k"})
+		}, "缺少 --user"},
+		{"get 缺 --key", func() error {
+			return runPluginKVGet([]string{"--plugin", "p", "--user", "alice"})
+		}, "缺少 --key"},
+		{"get 不收位置参数", func() error {
+			return runPluginKVGet([]string{"--plugin", "p", "--user", "alice", "--key", "k", "extra"})
+		}, "不接受位置参数"},
+		{"set 负 ttl", func() error {
+			return runPluginKVSet([]string{
+				"--plugin", "p", "--user", "alice", "--key", "k", "--ttl", "-1s"})
+		}, "--ttl 不接受负数"},
+		{"set 不收位置参数", func() error {
+			return runPluginKVSet([]string{"--plugin", "p", "--user", "alice", "--key", "k", "x"})
+		}, "不接受位置参数"},
+		{"delete 缺 --plugin", func() error {
+			return runPluginKVDelete([]string{"--user", "alice", "--key", "k"})
+		}, "缺少 --plugin"},
+		{"delete 缺 --user", func() error {
+			return runPluginKVDelete([]string{"--plugin", "p", "--key", "k"})
+		}, "缺少 --user"},
+		{"delete 缺 --key", func() error {
+			return runPluginKVDelete([]string{"--plugin", "p", "--user", "alice"})
+		}, "缺少 --key"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runCaptured(t, tc.fn)
+			if err == nil {
+				t.Fatal("期望报错，却通过了")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("错误信息 %q 里没有 %q", err.Error(), tc.want)
+			}
+			if got := exitCode(err); got != exitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数问题）", got, exitUsage)
+			}
+		})
+	}
+}
+
+// 详情页把这一代的事实都打出来，并把「还有更老的版本」与 meta 问题说清楚。
+func TestPrintPluginDetail(t *testing.T) {
+	at := time.Date(2026, 10, 18, 4, 25, 15, 0, time.UTC)
+	seven := int64(7)
+
+	var buf bytes.Buffer
+	printPluginDetail(&buf, pluginstore.Detail{
+		Row: pluginstore.Row{
+			Key: "demo", Version: "2.0.0", Status: pluginstore.StatusActive,
+			Generation: 3, Priority: 5, Name: "示例插件",
+			MetaProblem: "meta 是空的",
+		},
+		CreatedAt: at, CreatedBy: &seven, Versions: 2,
+	})
+	out := buf.String()
+
+	for _, want := range []string{
+		"demo", "2.0.0", pluginstore.StatusActive, "3", "5", "示例插件",
+		at.Format(time.RFC3339),
+		"这个插件的 meta 有问题：meta 是空的",
+		// 只打最新的一代，所以必须说出「还有别的」：不说的话，「只有一个
+		// 版本」与「有好几代、你看到的是最上面那一个」在这份输出上一样。
+		"这个 key 下还有 1 个更老的版本",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("详情里没有 %q：\n%s", want, out)
+		}
+	}
+	if row := lineEndingWith(t, out, "写自"); !strings.HasSuffix(row, "7") {
+		t.Errorf("「写自」那一行 = %q，期望以 7 结尾", row)
+	}
+
+	// 没有记录时打 `-`，不是 0：0 读起来像「写自用户 0」。
+	var nilBuf bytes.Buffer
+	printPluginDetail(&nilBuf, pluginstore.Detail{
+		Row: pluginstore.Row{
+			Key: "demo", Version: "1.0.0", Status: pluginstore.StatusPending, Name: "示例",
+		},
+		CreatedAt: at,
+	})
+	if row := lineEndingWith(t, nilBuf.String(), "写自"); !strings.HasSuffix(row, "-") {
+		t.Errorf("没有创建者时「写自」那一行 = %q，期望以 - 结尾", row)
+	}
+	// 只有一代时不打「更老的版本」：那一句是条件成立时才有的附注。
+	if strings.Contains(nilBuf.String(), "更老的版本") {
+		t.Errorf("只有一代时不该提更老的版本：\n%s", nilBuf.String())
+	}
+}
+
+// lineEndingWith 找出含 marker 的那一行（报错时这一行就是上下文）。
+func lineEndingWith(t *testing.T, out, marker string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, marker) {
+			return strings.TrimRight(line, " ")
+		}
+	}
+	t.Fatalf("输出里没有 %q 那一行：\n%s", marker, out)
+	return ""
+}
+
+// get 的 JSON 是「list 的条目 + 详情才有的三栏」，不是另一套字段名。
+func TestPluginGetDocIsMachineReadable(t *testing.T) {
+	at := time.Date(2026, 10, 18, 4, 25, 15, 0, time.UTC)
+	nine := int64(9)
+
+	doc := pluginGetDoc(pluginstore.Detail{
+		Row: pluginstore.Row{
+			Key: "demo", Version: "1.2.3", Status: pluginstore.StatusActive,
+			Generation: 4, Priority: 2, Name: "示例", MetaProblem: "坏了",
+		},
+		CreatedAt: at, CreatedBy: &nine, Versions: 3,
+	})
+
+	var got struct {
+		Status string `json:"status"`
+		Plugin struct {
+			Key         string  `json:"key"`
+			Version     string  `json:"version"`
+			Status      string  `json:"status"`
+			Generation  int64   `json:"generation"`
+			Priority    int     `json:"priority"`
+			Name        string  `json:"name"`
+			MetaProblem *string `json:"meta_problem"`
+			Versions    int64   `json:"versions"`
+			CreatedAt   string  `json:"created_at"`
+			CreatedBy   *int64  `json:"created_by"`
+		} `json:"plugin"`
+	}
+	decodeDoc(t, doc, &got)
+
+	if got.Status != jsonOK {
+		t.Errorf("status = %q，想要 %q", got.Status, jsonOK)
+	}
+	p := got.Plugin
+	if p.Key != "demo" || p.Version != "1.2.3" || p.Status != pluginstore.StatusActive ||
+		p.Generation != 4 || p.Priority != 2 || p.Name != "示例" {
+		t.Errorf("清单那几栏对不上：%+v", p)
+	}
+	if p.MetaProblem == nil || *p.MetaProblem != "坏了" {
+		t.Errorf("meta_problem = %q，想要「坏了」", showPtr(p.MetaProblem))
+	}
+	if p.Versions != 3 {
+		t.Errorf("versions = %d，想要 3", p.Versions)
+	}
+	// 时刻恒 UTC、完整精度（见 jsonTime）：同一行在两台机器上必须编出同一个串。
+	if p.CreatedAt != "2026-10-18T04:25:15Z" {
+		t.Errorf("created_at = %q，想要 UTC 的 RFC3339", p.CreatedAt)
+	}
+	if p.CreatedBy == nil || *p.CreatedBy != 9 {
+		t.Errorf("created_by = %q，想要 9", showPtr(p.CreatedBy))
+	}
+}
+
+// 没有创建者时 created_by 是 null，不是 0。
+func TestPluginGetDocCreatedByNil(t *testing.T) {
+	doc := pluginGetDoc(pluginstore.Detail{
+		Row:       pluginstore.Row{Key: "demo", Version: "1.0.0", Status: pluginstore.StatusPending},
+		CreatedAt: time.Date(2026, 10, 18, 4, 25, 15, 0, time.UTC),
+	})
+
+	var got map[string]any
+	decodeDoc(t, doc, &got)
+	entry, ok := got["plugin"].(map[string]any)
+	if !ok {
+		t.Fatalf("plugin 不是一个对象：%v", got["plugin"])
+	}
+	if v, present := entry["created_by"]; !present || v != nil {
+		t.Errorf("created_by = %v（在不在：%v），想要 null", v, present)
+	}
+}
+
+// 卸载的回显把三样一起说清楚：版本、启用记录、私有存储。
+//
+// 只复述一句「已删除」的话，把 KV 一起删掉这件事在输出上完全看不出来。
+func TestPrintPluginDeleteResult(t *testing.T) {
+	var buf bytes.Buffer
+	printPluginDeleteResult(&buf, pluginstore.Deleted{Key: "demo", Versions: 2, Activations: 1, KVKeys: 5})
+	want := "已删除插件 demo：2 个版本、1 条启用记录、5 个私有存储的键。重启后生效。\n"
+	if got := buf.String(); got != want {
+		t.Errorf("卸载回显 = %q，期望 %q", got, want)
+	}
+}
+
+// kv get 的 JSON 照抄三段身份，并把值原样交出去。
+func TestPluginKVGetDocIsMachineReadable(t *testing.T) {
+	doc := pluginKVGetDoc(kvTarget{plugin: "demo", user: "alice", key: "k"}, "raw\tvalue")
+
+	var got struct {
+		Status string `json:"status"`
+		Entry  struct {
+			Plugin string `json:"plugin"`
+			User   string `json:"user"`
+			Key    string `json:"key"`
+			Value  string `json:"value"`
+		} `json:"entry"`
+	}
+	decodeDoc(t, doc, &got)
+
+	if got.Status != jsonOK {
+		t.Errorf("status = %q，想要 %q", got.Status, jsonOK)
+	}
+	if got.Entry.Plugin != "demo" || got.Entry.User != "alice" || got.Entry.Key != "k" {
+		t.Errorf("身份那几栏对不上：%+v", got.Entry)
+	}
+	if got.Entry.Value != "raw\tvalue" {
+		t.Errorf("value = %q，期望原样搬过去", got.Entry.Value)
+	}
+}
+
+// get 看的是最新一代：加载器只认代次最高的那一行。
+func TestPluginGetShowsNewestGeneration(t *testing.T) {
+	setupEnv(t)
+
+	key := uniqueName("cliget")
+	for _, version := range []string{"1.0.0", "2.0.0"} {
+		path := writePluginFile(t, "v"+version+".js", pluginSource(key, version, 0))
+		if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+			t.Fatalf("发布 %s 失败: %v", version, err)
+		}
+	}
+
+	out, _ := captureStreams(t, func() {
+		if err := runPluginGet([]string{key}); err != nil {
+			t.Errorf("看详情失败: %v", err)
+		}
+	})
+	for _, want := range []string{key, "2.0.0", "这个 key 下还有 1 个更老的版本"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("详情里没有 %q：\n%s", want, out)
+		}
+	}
+	// 老版本那一行不该出现：这一页回答的是「现在生效的是哪一个」。
+	if strings.Contains(out, "1.0.0") {
+		t.Errorf("详情里出现了更老的版本：\n%s", out)
+	}
+
+	// JSON 那一档同样只给最新的一代，并且整份能解出来、不含转义码。
+	withFormat(t, formatJSON)
+	jsonOut, _ := captureStreams(t, func() {
+		if err := runPluginGet([]string{key}); err != nil {
+			t.Errorf("json 档看详情失败: %v", err)
+		}
+	})
+	assertOnlyJSON(t, jsonOut)
+	var doc struct {
+		Plugin struct {
+			Version  string `json:"version"`
+			Versions int64  `json:"versions"`
+		} `json:"plugin"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &doc); err != nil {
+		t.Fatalf("解不回来: %v\n%s", err, jsonOut)
+	}
+	if doc.Plugin.Version != "2.0.0" || doc.Plugin.Versions != 2 {
+		t.Errorf("version=%q versions=%d，想要 2.0.0 / 2", doc.Plugin.Version, doc.Plugin.Versions)
+	}
+}
+
+// 看一个库里没有的插件：按「约束冲突」返回 4。
+func TestPluginGetUnknownKeyExitsFour(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	err := runCaptured(t, func() error { return runPluginGet([]string{uniqueName("nope")}) })
+	if err == nil {
+		t.Fatal("看不存在的插件该报错")
+	}
+	if !errors.Is(err, pluginstore.ErrPluginNotFound) {
+		t.Errorf("错误链里没有 ErrPluginNotFound：%v", err)
+	}
+	if got := exitCode(err); got != exitConflict {
+		t.Errorf("退出码 = %d，期望 %d（约束冲突）", got, exitConflict)
+	}
+}
+
+// 卸载把三张表里属于这个插件的行一起删掉，别人的数据不动。
+func TestPluginDeleteRemovesPluginActivationsAndKV(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+	ctx := context.Background()
+
+	key := uniqueName("clidel")
+	path := writePluginFile(t, "del.js", pluginSource(key, "1.0.0", 0))
+	if err := runCaptured(t, func() error { return runPluginPublish([]string{path, "--priority", "3"}) }); err != nil {
+		t.Fatalf("发布失败: %v", err)
+	}
+	if err := runCaptured(t, func() error { return runPluginSetEnabled([]string{key}, true) }); err != nil {
+		t.Fatalf("启用失败: %v", err)
+	}
+	userID := createTestUser(t)
+	if err := pluginstore.NewKV(db).Set(ctx, key, userID, "state", "1", 0); err != nil {
+		t.Fatalf("种一个 KV 键失败: %v", err)
+	}
+
+	// 另起一个插件，卸载不该碰到它。
+	other := uniqueName("clidel-other")
+	otherPath := writePluginFile(t, "other.js", pluginSource(other, "1.0.0", 0))
+	if err := runCaptured(t, func() error { return runPluginPublish([]string{otherPath}) }); err != nil {
+		t.Fatalf("发布对照组失败: %v", err)
+	}
+	if err := pluginstore.NewKV(db).Set(ctx, other, userID, "state", "1", 0); err != nil {
+		t.Fatalf("种对照组的 KV 键失败: %v", err)
+	}
+
+	stdout, stderr := captureStreams(t, func() {
+		if err := runPluginDelete([]string{key}); err != nil {
+			t.Errorf("卸载失败: %v", err)
+		}
+	})
+	// 回显只走 stderr：stdout 上这条命令没有能被接走的值。
+	if strings.Contains(stdout, "已删除插件") {
+		t.Errorf("卸载回显混进了 stdout：%q", stdout)
+	}
+	for _, want := range []string{
+		"已删除插件 " + key,
+		"1 个版本", "1 条启用记录", "1 个私有存储的键",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("回显里没有 %q：%q", want, stderr)
+		}
+	}
+
+	if n := countPlugins(t, db, key); n != 0 {
+		t.Errorf("plugins 里还剩 %d 行，该是 0 行", n)
+	}
+	if n := countQueryRows(t, db, `SELECT count(*) FROM plugin_activations WHERE plugin_key = $1`, key); n != 0 {
+		t.Errorf("plugin_activations 里还剩 %d 行，该是 0 行", n)
+	}
+	if n := countQueryRows(t, db, `SELECT count(*) FROM plugin_kv WHERE plugin_key = $1`, key); n != 0 {
+		t.Errorf("plugin_kv 里还剩 %d 行，该是 0 行", n)
+	}
+
+	// 对照组一行都不能少。
+	if n := countPlugins(t, db, other); n != 1 {
+		t.Errorf("对照组的插件行 = %d，想要 1", n)
+	}
+	if n := countQueryRows(t, db, `SELECT count(*) FROM plugin_kv WHERE plugin_key = $1`, other); n != 1 {
+		t.Errorf("对照组的 KV 行 = %d，想要 1", n)
+	}
+}
+
+// 卸载一个不存在的 key：报「插件不存在」，而且**一行都不许删**。
+//
+// plugin_activations 与 plugin_kv 按 plugin_key 存，与 plugins 之间没有外键。
+// 先删 plugins、删不到就收手，是这两张表的行不被一个拼错的 key 扫掉的那道闸。
+func TestPluginDeleteUnknownKeyLeavesOtherTablesAlone(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	key := uniqueName("clidel-nope")
+	// 只往从属表里塞行，plugins 里没有这个 key。
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO plugin_activations (plugin_key, scope, priority) VALUES ($1, 'platform', 0)`,
+		key); err != nil {
+		t.Fatalf("种启用记录失败: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM plugin_activations WHERE plugin_key = $1`, key); err != nil {
+			t.Errorf("清理启用记录失败: %v", err)
+		}
+	})
+
+	err := runCaptured(t, func() error { return runPluginDelete([]string{key}) })
+	if err == nil {
+		t.Fatal("卸载不存在的插件该报错")
+	}
+	if !errors.Is(err, pluginstore.ErrPluginNotFound) {
+		t.Errorf("错误链里没有 ErrPluginNotFound：%v", err)
+	}
+	if got := exitCode(err); got != exitConflict {
+		t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+	}
+	if n := countQueryRows(t, db, `SELECT count(*) FROM plugin_activations WHERE plugin_key = $1`, key); n != 1 {
+		t.Errorf("启用记录被删掉了 %d 行，它不该动", 1-n)
+	}
+}
+
+// set → get → delete 走一遍；删完之后 get 与再删都是「没有这个键」（退出码 4）。
+func TestPluginKVSetGetDelete(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	key := uniqueName("clikv")
+	path := writePluginFile(t, "kv.js", pluginSource(key, "1.0.0", 0))
+	if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+		t.Fatalf("发布失败: %v", err)
+	}
+	user := uniqueName("kvuser")
+	if err := runCaptured(t, func() error { return runUserCreate([]string{"--name", user}) }); err != nil {
+		t.Fatalf("建用户失败: %v", err)
+	}
+
+	setOut, setNote := captureStreams(t, func() {
+		if err := runPluginKVSet([]string{
+			"--plugin", key, "--user", user, "--key", "greeting", "--value", "你好",
+		}); err != nil {
+			t.Errorf("写键失败: %v", err)
+		}
+	})
+	if setOut != "" {
+		t.Errorf("写键的 stdout 该是空的，实际 %q", setOut)
+	}
+	// 「你好」是 6 个字节、2 个字：报的是字节数，插件配额按字节算。
+	for _, want := range []string{"已写入插件 " + key, "greeting", user, "不过期", "6 字节"} {
+		if !strings.Contains(setNote, want) {
+			t.Errorf("写键回显里没有 %q：%q", want, setNote)
+		}
+	}
+
+	getOut, _ := captureStreams(t, func() {
+		if err := runPluginKVGet([]string{
+			"--plugin", key, "--user", user, "--key", "greeting",
+		}); err != nil {
+			t.Errorf("读键失败: %v", err)
+		}
+	})
+	if !strings.Contains(getOut, "你好") {
+		t.Errorf("读回的值里没有「你好」：%q", getOut)
+	}
+
+	delOut, delNote := captureStreams(t, func() {
+		if err := runPluginKVDelete([]string{
+			"--plugin", key, "--user", user, "--key", "greeting",
+		}); err != nil {
+			t.Errorf("删键失败: %v", err)
+		}
+	})
+	if delOut != "" {
+		t.Errorf("删键的 stdout 该是空的，实际 %q", delOut)
+	}
+	// 开头是「已删除 <key> 的键」而不是「已删除插件 <key>」：那后一种开头
+	// 是卸载那条命令的，两条回显分不开就会让人以为插件被删了。
+	if !strings.Contains(delNote, "已删除 "+key+" 的键 greeting") {
+		t.Errorf("删键回显对不上：%q", delNote)
+	}
+	if n := countQueryRows(t, db, `SELECT count(*) FROM plugin_kv WHERE plugin_key = $1`, key); n != 0 {
+		t.Errorf("删完之后还剩 %d 个键", n)
+	}
+
+	for _, tc := range []struct {
+		name string
+		fn   func() error
+	}{
+		{"删完再读", func() error {
+			return runPluginKVGet([]string{"--plugin", key, "--user", user, "--key", "greeting"})
+		}},
+		{"删完再删", func() error {
+			return runPluginKVDelete([]string{"--plugin", key, "--user", user, "--key", "greeting"})
+		}},
+	} {
+		err := runCaptured(t, tc.fn)
+		if err == nil {
+			t.Fatalf("%s：期望报错，却通过了", tc.name)
+		}
+		if !errors.Is(err, errPluginKVKeyNotFound) {
+			t.Errorf("%s：错误链里没有 errPluginKVKeyNotFound：%v", tc.name, err)
+		}
+		if got := exitCode(err); got != exitConflict {
+			t.Errorf("%s：退出码 = %d，期望 %d", tc.name, got, exitConflict)
+		}
+	}
+}
+
+// 过期的键按不存在处置；而删除**不动**它（清理在写入那一侧）。
+func TestPluginKVExpiredKeyLooksAbsent(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+	ctx := context.Background()
+
+	key := uniqueName("clikv-exp")
+	path := writePluginFile(t, "kvexp.js", pluginSource(key, "1.0.0", 0))
+	if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+		t.Fatalf("发布失败: %v", err)
+	}
+	userID := createTestUser(t)
+	user := strconv.FormatInt(userID, 10)
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO plugin_kv (plugin_key, user_id, key, value, expires_at, updated_at)
+		VALUES ($1, $2, 'stale', 'v', now() - interval '1 hour', now())`,
+		key, userID); err != nil {
+		t.Fatalf("种一个过期键失败: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(ctx,
+			`DELETE FROM plugin_kv WHERE plugin_key = $1`, key); err != nil {
+			t.Errorf("清理过期键失败: %v", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		fn   func() error
+	}{
+		{"读", func() error {
+			return runPluginKVGet([]string{"--plugin", key, "--user", user, "--key", "stale"})
+		}},
+		{"删", func() error {
+			return runPluginKVDelete([]string{"--plugin", key, "--user", user, "--key", "stale"})
+		}},
+	} {
+		err := runCaptured(t, tc.fn)
+		if err == nil {
+			t.Fatalf("%s过期的键：期望报错，却通过了", tc.name)
+		}
+		if got := exitCode(err); got != exitConflict {
+			t.Errorf("%s过期的键：退出码 = %d，期望 %d", tc.name, got, exitConflict)
+		}
+	}
+
+	// 过期的行仍躺在表里：删除只清「可见」的那些，收拾过期行是 set 那一步的事。
+	if n := countQueryRows(t, db, `SELECT count(*) FROM plugin_kv WHERE plugin_key = $1`, key); n != 1 {
+		t.Errorf("过期的行被删掉了（剩 %d 行），它该留着等 set 清", n)
+	}
+}
+
+// 插件或用户写错时，KV 一行都不落。
+//
+// plugin_kv 没有外键指着 plugins：不拦这一下的话，一个拼错的 --plugin 会留下
+// 一行谁也读不到、谁也清不掉的数据。
+func TestPluginKVRejectsUnknownPluginAndUser(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	key := uniqueName("clikv-guard")
+	path := writePluginFile(t, "kvguard.js", pluginSource(key, "1.0.0", 0))
+	if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+		t.Fatalf("发布失败: %v", err)
+	}
+	user := uniqueName("kvguard-user")
+	if err := runCaptured(t, func() error { return runUserCreate([]string{"--name", user}) }); err != nil {
+		t.Fatalf("建用户失败: %v", err)
+	}
+
+	unknownPlugin := uniqueName("clikv-noplugin")
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM plugin_kv WHERE plugin_key = ANY($1)`,
+			[]string{unknownPlugin, key}); err != nil {
+			t.Errorf("清理 KV 失败: %v", err)
+		}
+	})
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"插件不存在", []string{
+			"--plugin", unknownPlugin, "--user", user, "--key", "k", "--value", "v",
+		}},
+		{"用户不存在", []string{
+			"--plugin", key, "--user", uniqueName("kvguard-nouser"), "--key", "k", "--value", "v",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runCaptured(t, func() error { return runPluginKVSet(tc.args) })
+			if err == nil {
+				t.Fatal("期望报错，却通过了")
+			}
+			if got := exitCode(err); got != exitConflict {
+				t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", got, exitConflict)
+			}
+		})
+	}
+
+	for _, k := range []string{unknownPlugin, key} {
+		if n := countQueryRows(t, db, `SELECT count(*) FROM plugin_kv WHERE plugin_key = $1`, k); n != 0 {
+			t.Errorf("%s 名下落了 %d 个键，该是 0", k, n)
+		}
+	}
+}
+
+// 改库的那三条要主密钥，只读那三条不要。
+//
+// 「要」这一档的判据是命令自己报出来：没有 LARKAX_MASTER_KEYS 时它在连库之前
+// 就停下。只读那三条在同样的环境里照常跑——排查时手上往往只有库口令。
+func TestPluginWriteVerbsRequireMasterKey(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	key := uniqueName("clikv-keys")
+	path := writePluginFile(t, "keys.js", pluginSource(key, "1.0.0", 0))
+	if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+		t.Fatalf("发布失败: %v", err)
+	}
+	userID := createTestUser(t)
+	user := strconv.FormatInt(userID, 10)
+
+	t.Setenv("LARKAX_MASTER_KEYS", "")
+
+	writes := []struct {
+		name string
+		fn   func() error
+	}{
+		{"delete", func() error { return runPluginDelete([]string{key}) }},
+		{"kv set", func() error {
+			return runPluginKVSet([]string{"--plugin", key, "--user", user, "--key", "k", "--value", "v"})
+		}},
+		{"kv delete", func() error {
+			return runPluginKVDelete([]string{"--plugin", key, "--user", user, "--key", "k"})
+		}},
+	}
+	for _, tc := range writes {
+		t.Run(tc.name+" 没有主密钥", func(t *testing.T) {
+			err := runCaptured(t, tc.fn)
+			if err == nil {
+				t.Fatal("没有主密钥时该被拒绝")
+			}
+			if !strings.Contains(err.Error(), "LARKAX_MASTER_KEYS") {
+				t.Errorf("错误信息 %q 里没有点出 LARKAX_MASTER_KEYS", err.Error())
+			}
+		})
+	}
+	if n := countPlugins(t, db, key); n != 1 {
+		t.Errorf("被拒绝的卸载动了库：plugins 剩 %d 行", n)
+	}
+
+	// 只读那三条照样能跑。
+	reads := []struct {
+		name string
+		fn   func() error
+	}{
+		{"get", func() error { return runPluginGet([]string{key}) }},
+		{"list", func() error { return runPluginList(nil) }},
+		{"kv get（键不在也照样走到了库）", func() error {
+			return runPluginKVGet([]string{"--plugin", key, "--user", user, "--key", "absent"})
+		}},
+	}
+	for _, tc := range reads {
+		t.Run(tc.name+" 没有主密钥", func(t *testing.T) {
+			err := runCaptured(t, tc.fn)
+			if err != nil && strings.Contains(err.Error(), "LARKAX_MASTER_KEYS") {
+				t.Errorf("%s 不该要主密钥：%v", tc.name, err)
+			}
+		})
+	}
+}
+
+// countQueryRows 跑一条带实参的 count 查询。
+func countQueryRows(t *testing.T, db *sql.DB, query string, args ...any) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRowContext(context.Background(), query, args...).Scan(&n); err != nil {
+		t.Fatalf("统计行数失败: %v", err)
+	}
+	return n
+}
+
+// 值排在表外、原样打。
+//
+// 它是插件自己写进去的任意文本，换行与制表符都可能带（写 JSON 时最常见）。
+// 当成表格最后一栏的话，带换行的值会顶出一行、带制表符的值会多出一栏——而
+// 「多出来那一栏」在终端上看着就像另一个字段。
+func TestPrintPluginKVEntryKeepsValueOutsideTheTable(t *testing.T) {
+	value := "first\nsecond\tthird"
+
+	var buf bytes.Buffer
+	printPluginKVEntry(&buf, kvTarget{plugin: "demo", user: "alice", key: "k"}, value)
+	out := buf.String()
+
+	if !strings.Contains(out, "值：first\nsecond\tthird\n") {
+		t.Errorf("值该原样排在表外一行：\n%q", out)
+	}
+	// 值自己那几行不许沾上表里的栏名：沾上就说明它又被当成一栏了，
+	// 而带制表符的那一段会把那一行多顶出一栏。
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "first") && !strings.Contains(line, "second") {
+			continue
+		}
+		for _, label := range []string{"插件", "用户", "键"} {
+			if strings.Contains(line, label) {
+				t.Errorf("值那一行沾上了表里的栏名 %q：%q", label, line)
+			}
+		}
+	}
+	// 三栏身份仍在表里。
+	for _, want := range []string{"插件", "用户", "键"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("表里少了 %q 那一栏：\n%s", want, out)
+		}
+	}
+}
+
+// 卸载一个多版本的 key：回显里的三个数都是可核对的，所以按字面量钉住。
+//
+// 只走「一个版本」的用例钉不住这件事：版本数写成 RowsAffected、启用记录数与
+// KV 键数写成常量 1，在只有一个版本的库上照样全对。
+func TestPluginDeleteCountsEveryVersionAndDependentRow(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+	ctx := context.Background()
+
+	key := uniqueName("clidel-multi")
+	for _, version := range []string{"1.0.0", "2.0.0"} {
+		path := writePluginFile(t, "v"+version+".js", pluginSource(key, version, 0))
+		if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+			t.Fatalf("发布 %s 失败: %v", version, err)
+		}
+	}
+	if err := runCaptured(t, func() error { return runPluginSetEnabled([]string{key}, true) }); err != nil {
+		t.Fatalf("启用失败: %v", err)
+	}
+	userID := createTestUser(t)
+	if err := pluginstore.NewKV(db).Set(ctx, key, userID, "state", "1", 0); err != nil {
+		t.Fatalf("种 KV 键失败: %v", err)
+	}
+
+	// 先确认夹具确实是「两代、一条启用记录、一个键」——否则下面的回显断言
+	// 只是把夹具的数字抄了一遍。
+	if n := countPlugins(t, db, key); n != 2 {
+		t.Fatalf("夹具里 plugins 有 %d 行，想要两代", n)
+	}
+	if n := countQueryRows(t, db, `SELECT count(*) FROM plugin_activations WHERE plugin_key = $1`, key); n != 1 {
+		t.Fatalf("夹具里启用记录有 %d 行，想要 1", n)
+	}
+	if n := countQueryRows(t, db, `SELECT count(*) FROM plugin_kv WHERE plugin_key = $1`, key); n != 1 {
+		t.Fatalf("夹具里 KV 有 %d 个键，想要 1", n)
+	}
+
+	_, stderr := captureStreams(t, func() {
+		if err := runPluginDelete([]string{key}); err != nil {
+			t.Errorf("卸载失败: %v", err)
+		}
+	})
+	want := fmt.Sprintf("已删除插件 %s：%d 个版本、%d 条启用记录、%d 个私有存储的键。重启后生效。\n",
+		key, 2, 1, 1)
+	if !strings.Contains(stderr, want) {
+		t.Errorf("回显里没有这一个数都没错的整句：\n得到 %q\n想要含 %q", stderr, want)
+	}
+}
+
+// KV 按用户隔离：同一个键名，换个用户就是另一个键。
+//
+// 隔离在存储层由主键保证，但命令行这一层要自己把 --user 解析对——解析错成
+// 别人的 ID 时，读出来的是别人的值、删掉的是别人的键，而两条命令都会成功。
+func TestPluginKVIsolatesUsers(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+	ctx := context.Background()
+
+	key := uniqueName("clikv-iso")
+	path := writePluginFile(t, "iso.js", pluginSource(key, "1.0.0", 0))
+	if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+		t.Fatalf("发布失败: %v", err)
+	}
+	alice := createTestUser(t)
+	bob := createTestUser(t)
+	if err := pluginstore.NewKV(db).Set(ctx, key, alice, "shared-name", "给 alice 的值", 0); err != nil {
+		t.Fatalf("种 alice 的键失败: %v", err)
+	}
+
+	// bob 读同一个键名：读不到。
+	err := runCaptured(t, func() error {
+		return runPluginKVGet([]string{
+			"--plugin", key, "--user", strconv.FormatInt(bob, 10), "--key", "shared-name",
+		})
+	})
+	if err == nil {
+		t.Fatal("bob 名下没有这个键，不该读到")
+	}
+	if !errors.Is(err, errPluginKVKeyNotFound) {
+		t.Errorf("错误链里没有 errPluginKVKeyNotFound：%v", err)
+	}
+	if got := exitCode(err); got != exitConflict {
+		t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+	}
+
+	// bob 删同一个键名：删不掉，而 alice 那一行还在。
+	err = runCaptured(t, func() error {
+		return runPluginKVDelete([]string{
+			"--plugin", key, "--user", strconv.FormatInt(bob, 10), "--key", "shared-name",
+		})
+	})
+	if err == nil {
+		t.Fatal("bob 名下没有这个键，不该删得掉")
+	}
+	if got := exitCode(err); got != exitConflict {
+		t.Errorf("删除的退出码 = %d，期望 %d", got, exitConflict)
+	}
+	if n := countQueryRows(t, db,
+		`SELECT count(*) FROM plugin_kv WHERE plugin_key = $1 AND user_id = $2`, key, alice); n != 1 {
+		t.Errorf("alice 的键被 bob 删掉了（剩 %d 行）", n)
+	}
+
+	// alice 自己读得到——证明上面那两条不是因为键名写错了。
+	out, _ := captureStreams(t, func() {
+		if err := runPluginKVGet([]string{
+			"--plugin", key, "--user", strconv.FormatInt(alice, 10), "--key", "shared-name",
+		}); err != nil {
+			t.Errorf("alice 读自己的键失败: %v", err)
+		}
+	})
+	if !strings.Contains(out, "给 alice 的值") {
+		t.Errorf("alice 没读回自己的值：\n%s", out)
+	}
+
+	if _, err := db.ExecContext(ctx, `DELETE FROM plugin_kv WHERE plugin_key = $1`, key); err != nil {
+		t.Errorf("清理 KV 失败: %v", err)
+	}
+}
+
+// 带换行与制表符的值走一遍真库：写进去、读回来，形状不变。
+//
+// 上面那条只钉渲染，这条钉「库里那一列没被改写」——值原样进出，命令不解析它。
+func TestPluginKVValueWithNewlineRoundTrips(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	key := uniqueName("clikv-multiline")
+	path := writePluginFile(t, "multi.js", pluginSource(key, "1.0.0", 0))
+	if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+		t.Fatalf("发布失败: %v", err)
+	}
+	user := strconv.FormatInt(createTestUser(t), 10)
+	value := "first\nsecond\tthird"
+
+	if err := runCaptured(t, func() error {
+		return runPluginKVSet([]string{
+			"--plugin", key, "--user", user, "--key", "multi", "--value", value,
+		})
+	}); err != nil {
+		t.Fatalf("写多行值失败: %v", err)
+	}
+
+	out, _ := captureStreams(t, func() {
+		if err := runPluginKVGet([]string{
+			"--plugin", key, "--user", user, "--key", "multi",
+		}); err != nil {
+			t.Errorf("读多行值失败: %v", err)
+		}
+	})
+	if !strings.Contains(out, "值：first\nsecond\tthird\n") {
+		t.Errorf("多行的值没有原样读回来：\n%q", out)
 	}
 }

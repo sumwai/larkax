@@ -187,6 +187,17 @@ var conflictErrors = []error{
 	pipeline.ErrNoRule,
 
 	pluginstore.ErrPluginNotFound,
+	// 要看的那个配置项在 settings 表里没有行。**不能**改用它旁边那个
+	// settings.ErrUnknownKey：那是写入路径的哨兵，`settings set` 撞上它给的
+	// 退出码是 1（见 docs/cli-reference.md 的退出码一节），登记到这里会把那条
+	// 命令的码也改成 4。读与写各有一个形状相同、归宿不同的错误值。
+	errSettingsNotFound,
+	// 插件 KV 里要读或要删的那个键不在。与上面那些是同一个形状（要动的那一行
+	// 不在），只是缺的那一行在 plugin_kv 里，而且**过期的行也算不在**——它还在
+	// 表里躺着，但对读与删都等于没有。由命令自己造，存储层不返回它：KV 的读与删
+	// 把「不存在」与「已经过期」归成一个 false，没有、也不该有一个错误值
+	// （与下面 errSnapshotNotFound 同一个位置）。
+	errPluginKVKeyNotFound,
 
 	// 要撤销的那条授权不在库里，或者已经撤销过。它与上面那些是同一个形状
 	// （要改的那一行不在），只是缺的那一行在 capture_consents 里。

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -614,5 +615,264 @@ func TestSettingsUpdatedAtIsUTCWhateverTheProcessZone(t *testing.T) {
 	if want := "2026-10-17T06:10:00Z"; got.Settings[0].UpdatedAt != want {
 		t.Errorf("updated_at = %q，想要 %q（同一瞬间的 UTC 写法，与进程时区无关）",
 			got.Settings[0].UpdatedAt, want)
+	}
+}
+
+// ── settings get（#694） ──────────────────────────────────────────────
+
+// 参数错在连库之前报出来。
+func TestSettingsGetRejectsBadArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"没有 --key", nil, "缺少 --key"},
+		{"--key 为空", []string{"--key", ""}, "缺少 --key"},
+		{"位置参数", []string{"plugin.enabled"}, "不接受位置参数"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runCaptured(t, func() error { return runSettingsGet(tc.args) })
+			if err == nil {
+				t.Fatal("期望报错，却通过了")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("错误信息 %q 里没有 %q", err.Error(), tc.want)
+			}
+			if got := exitCode(err); got != exitUsage {
+				t.Errorf("退出码 = %d，期望 %d", got, exitUsage)
+			}
+		})
+	}
+}
+
+// 「库里没有这一行」的那句话分两种：Registry 里声明过（迁移没跑到 / 行被删了）
+// 与 Registry 里也没有（多半键名写错）。两种的下一步动作不同，但都退出 4。
+func TestSettingsMissingDistinguishesDeclaredFromUndeclared(t *testing.T) {
+	declared := settingsMissing("plugin.enabled")
+	if !errors.Is(declared, errSettingsNotFound) {
+		t.Errorf("声明过的键：错误链里没有 errSettingsNotFound：%v", declared)
+	}
+	if !strings.Contains(declared.Error(), "在 Registry 里声明过") {
+		t.Errorf("声明过的键：报错没说它在 Registry 里：%v", declared)
+	}
+	if got := exitCode(declared); got != exitConflict {
+		t.Errorf("声明过的键：退出码 = %d，期望 %d", got, exitConflict)
+	}
+
+	undeclared := settingsMissing("typo.retentoin_days")
+	if !errors.Is(undeclared, errSettingsNotFound) {
+		t.Errorf("未声明的键：错误链里没有 errSettingsNotFound：%v", undeclared)
+	}
+	if !strings.Contains(undeclared.Error(), "在 Registry 里也没有声明") {
+		t.Errorf("未声明的键：报错没说 Registry 里也没有：%v", undeclared)
+	}
+	if got := exitCode(undeclared); got != exitConflict {
+		t.Errorf("未声明的键：退出码 = %d，期望 %d", got, exitConflict)
+	}
+}
+
+// 详情页一栏一行，值打 jsonb 原文。
+func TestPrintSettingsDetail(t *testing.T) {
+	at := time.Date(2026, 10, 18, 5, 6, 7, 0, time.UTC)
+	seven := int64(7)
+
+	var buf bytes.Buffer
+	printSettingsDetail(&buf, settings.Entry{
+		Key:         "plugin.enabled",
+		Value:       []byte(`true`),
+		Editable:    true,
+		UpdatedBy:   &seven,
+		UpdatedAt:   at,
+		Description: "插件系统总开关",
+	}, false)
+	out := buf.String()
+
+	for _, want := range []string{
+		"plugin.enabled",
+		// 值不带引号：这一列存的是 jsonb 的布尔，原文就是 true。
+		"true",
+		// 类型取自 Registry，不是库里那一列。
+		string(settings.KindBool),
+		"是",
+		"2026-10-18T05:06:07Z",
+		"说明：插件系统总开关",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("详情里没有 %q：\n%s", want, out)
+		}
+	}
+	// 默认那一档不打 jsonb 的说明：它在每一次 get 里都会出现。
+	if strings.Contains(out, "jsonb 原文") {
+		t.Errorf("默认档不该打 jsonb 的说明：\n%s", out)
+	}
+
+	// -v 那一档补上说明。
+	var verbose bytes.Buffer
+	printSettingsDetail(&verbose, settings.Entry{
+		Key: "plugin.enabled", Value: []byte(`false`), UpdatedAt: at,
+	}, true)
+	if !strings.Contains(verbose.String(), "值打的是 settings.value 的 jsonb 原文") {
+		t.Errorf("-v 档没有 jsonb 的说明：\n%s", verbose.String())
+	}
+}
+
+// Registry 里没有的键打「未声明」：那正是服务加载不起来的直接原因。
+func TestPrintSettingsDetailUndeclared(t *testing.T) {
+	var buf bytes.Buffer
+	printSettingsDetail(&buf, settings.Entry{
+		Key:       "typo.retentoin_days",
+		Value:     []byte(`7`),
+		UpdatedAt: time.Date(2026, 10, 18, 5, 6, 7, 0, time.UTC),
+	}, false)
+
+	if !strings.Contains(buf.String(), "未声明") {
+		t.Errorf("未声明的键没有打「未声明」：\n%s", buf.String())
+	}
+	// 没有创建者时打 `-`，不是 0。
+	if row := lineEndingWith(t, buf.String(), "改自"); !strings.HasSuffix(row, "-") {
+		t.Errorf("「改自」那一栏 = %q，期望以 - 结尾", row)
+	}
+}
+
+// get 的 JSON 条目形状与 list 里那一条逐字段相同。
+func TestSettingsGetDocIsMachineReadable(t *testing.T) {
+	at := time.Date(2026, 10, 18, 5, 6, 7, 0, time.UTC)
+	seven := int64(7)
+
+	doc := settingsGetDoc(settings.Entry{
+		Key:         "plugin.enabled",
+		Value:       []byte(`true`),
+		Editable:    true,
+		UpdatedBy:   &seven,
+		UpdatedAt:   at,
+		Description: "插件系统总开关",
+	})
+
+	var got struct {
+		Status  string `json:"status"`
+		Setting struct {
+			Key       string          `json:"key"`
+			Value     json.RawMessage `json:"value"`
+			Kind      *string         `json:"kind"`
+			Editable  bool            `json:"editable"`
+			UpdatedBy *int64          `json:"updated_by"`
+			UpdatedAt string          `json:"updated_at"`
+		} `json:"setting"`
+	}
+	decodeDoc(t, doc, &got)
+
+	if got.Status != jsonOK {
+		t.Errorf("status = %q，想要 %q", got.Status, jsonOK)
+	}
+	s := got.Setting
+	if s.Key != "plugin.enabled" || !s.Editable {
+		t.Errorf("key/editable 对不上：%+v", s)
+	}
+	// 值走原文：布尔在 JSON 里就是不带引号的 true，而不是字符串 "true"。
+	if string(s.Value) != "true" {
+		t.Errorf("value 原文 = %s，想要 true", s.Value)
+	}
+	if s.Kind == nil || *s.Kind != string(settings.KindBool) {
+		t.Errorf("kind = %q，想要 %q", showPtr(s.Kind), settings.KindBool)
+	}
+	if s.UpdatedBy == nil || *s.UpdatedBy != 7 {
+		t.Errorf("updated_by = %q，想要 7", showPtr(s.UpdatedBy))
+	}
+	if s.UpdatedAt != "2026-10-18T05:06:07Z" {
+		t.Errorf("updated_at = %q，想要 UTC 的 RFC3339", s.UpdatedAt)
+	}
+}
+
+// 从库里读一条：迁移把 Registry 里的键都写进去了，所以 plugin.enabled 必然在。
+func TestSettingsGetReadsExistingKey(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	out, _ := captureStreams(t, func() {
+		if err := runSettingsGet([]string{"--key", "plugin.enabled"}); err != nil {
+			t.Errorf("settings get 失败: %v", err)
+		}
+	})
+	if !strings.Contains(out, "plugin.enabled") {
+		t.Errorf("详情里没有键名：\n%s", out)
+	}
+	if !strings.Contains(out, string(settings.KindBool)) {
+		t.Errorf("详情里没有类型：\n%s", out)
+	}
+}
+
+// 库里的键不存在：退出 4，并指出是哪一种「不存在」。
+func TestSettingsGetUnknownKeyExitsFour(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	err := runCaptured(t, func() error { return runSettingsGet([]string{"--key", "typo.get_test"}) })
+	if err == nil {
+		t.Fatal("不存在的键该报错")
+	}
+	if !errors.Is(err, errSettingsNotFound) {
+		t.Errorf("错误链里没有 errSettingsNotFound：%v", err)
+	}
+	if got := exitCode(err); got != exitConflict {
+		t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+	}
+	if !strings.Contains(err.Error(), "在 Registry 里也没有声明") {
+		t.Errorf("报错没说清楚是哪一种不存在：%v", err)
+	}
+}
+
+// 读配置不要主密钥：排查时手上往往只有库口令。
+func TestSettingsGetDoesNotRequireMasterKey(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+	t.Setenv("LARKAX_MASTER_KEYS", "")
+
+	if err := runCaptured(t, func() error {
+		return runSettingsGet([]string{"--key", "plugin.enabled"})
+	}); err != nil {
+		t.Fatalf("settings get 不该要主密钥: %v", err)
+	}
+}
+
+// json 档：stdout 上只有一份 JSON，条目形状能解出来。
+func TestSettingsGetJSONStdoutIsMachineReadable(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+	withFormat(t, formatJSON)
+
+	var err error
+	stdout, stderr := captureStreams(t, func() {
+		err = runSettingsGet([]string{"--key", "plugin.enabled"})
+	})
+	if err != nil {
+		t.Fatalf("settings get 失败: %v（stderr: %s）", err, stderr)
+	}
+	assertOnlyJSON(t, stdout)
+
+	var got struct {
+		Status   string `json:"status"`
+		ExitCode int    `json:"exit_code"`
+		Setting  struct {
+			Key   string          `json:"key"`
+			Kind  *string         `json:"kind"`
+			Value json.RawMessage `json:"value"`
+		} `json:"setting"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("解不回来: %v\n%s", err, stdout)
+	}
+	if got.Status != jsonOK || got.ExitCode != exitOK {
+		t.Errorf("status=%q exit_code=%d，想要 %q / %d", got.Status, got.ExitCode, jsonOK, exitOK)
+	}
+	if got.Setting.Key != "plugin.enabled" {
+		t.Errorf("key = %q", got.Setting.Key)
+	}
+	if got.Setting.Kind == nil || *got.Setting.Kind != string(settings.KindBool) {
+		t.Errorf("kind = %q，想要 %q", showPtr(got.Setting.Kind), settings.KindBool)
+	}
+	if len(got.Setting.Value) == 0 {
+		t.Error("value 是空的")
 	}
 }

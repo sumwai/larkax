@@ -183,7 +183,7 @@ var commandGroups = []commandGroup{
 			{name: "maintenance", summary: "数据留存与过期清理（idempotency 幂等记录）", help: maintenanceHelp, run: runMaintenance},
 			{name: "snapshot", summary: "请求结构快照管理（cleanup、allowlist、get、redact）", help: snapshotHelp, run: runSnapshot},
 			{name: "consent", summary: "原样采集请求正文的授权（grant、list、revoke）", help: consentHelp, run: runConsent},
-			{name: "plugin", summary: "动态插件系统管理（list、publish、enable、disable）", help: pluginHelp, run: runPlugin},
+			{name: "plugin", summary: "动态插件系统管理（list、get、publish、enable、disable、delete、kv）", help: pluginHelp, run: runPlugin},
 		},
 	},
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/auth"
+	calendarstore "github.com/sumwai/larkax/internal/calendar/store"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/ledger"
@@ -233,12 +234,14 @@ func TestEmptyListMessages(t *testing.T) {
 			func(w io.Writer) { printUserList(w, nil) }},
 		{"钱包", "暂无钱包。可使用 larkaxctl wallet create 添加。",
 			func(w io.Writer) { printWalletList(w, nil) }},
+		{"日历", "暂无日历。可使用 larkaxctl price calendar import 添加。",
+			func(w io.Writer) { printCalendarList(w, nil, false) }},
 	}
 
 	// 与另一张样式表同一个做法：条数写死。少了一条就等于那条没人看，而
 	// 「用例还在跑、只是不覆盖那条命令」在输出里和通过长得一样。
-	if len(cases) != 8 {
-		t.Fatalf("这张表里 %d 条清单命令，期望 8 条", len(cases))
+	if len(cases) != 9 {
+		t.Fatalf("这张表里 %d 条清单命令，期望 9 条", len(cases))
 	}
 
 	for _, tc := range cases {
@@ -767,10 +770,35 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				CaptureMode: "full", Skeleton: map[string]any{"model": "model-x"},
 			})
 		}},
+		// 下面四条是 #694 补上的单条详情与日历清单：与上面同一类，都是
+		// 「主键加粗、表头加粗」的清单表。
+		{"插件详情", func(w io.Writer) {
+			printPluginDetail(w, pluginstore.Detail{
+				Row: pluginstore.Row{
+					Key: "demo", Version: "1.0.0", Name: "示例插件",
+					Status: pluginstore.StatusActive, Generation: 1, Priority: 1,
+				},
+				CreatedAt: at, Versions: 1,
+			})
+		}},
+		{"插件 KV 详情", func(w io.Writer) {
+			printPluginKVEntry(w, kvTarget{plugin: "demo", user: "user-placeholder", key: "k"}, "v")
+		}},
+		{"配置详情", func(w io.Writer) {
+			printSettingsDetail(w, settings.Entry{
+				Key: "billing.default_asset", Value: []byte(`"CNY"`),
+				Editable: true, UpdatedAt: at,
+			}, false)
+		}},
+		{"日历清单", func(w io.Writer) {
+			printCalendarList(w, []calendarstore.Year{{
+				Region: "CN", Year: 2031, Status: "synced", DayCount: 365, SyncedAt: at,
+			}}, false)
+		}},
 	}
 
-	if len(cases) != 17 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 17 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 21 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 21 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {
