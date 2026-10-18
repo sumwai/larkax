@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 	"testing"
@@ -114,6 +115,17 @@ func TestAddSubNeg(t *testing.T) {
 	if got := a.Neg().Neg(); got.Cmp(a) != 0 {
 		t.Error("两次取负应回到原值")
 	}
+	// 上面几条比的是「两者相等」，两版判据错成同一种错时照样绿；这里把和本身
+	// 钉成字面量——两个负数相加、异号相加、加零是账上最常见的三种形态。
+	if got := MustParse("-5").Add(MustParse("-3")); got.String() != "-8.00000000" {
+		t.Errorf("-5 + -3 = %s", got.String())
+	}
+	if got := MustParse("10").Add(MustParse("-5")); got.String() != "5.00000000" {
+		t.Errorf("10 + -5 = %s", got.String())
+	}
+	if got := MustParse("-5").Add(Zero); got.String() != "-5.00000000" {
+		t.Errorf("-5 + 0 = %s", got.String())
+	}
 }
 
 func TestSum(t *testing.T) {
@@ -127,6 +139,10 @@ func TestSum(t *testing.T) {
 }
 
 // 单价 × 数量是最常见的运算，它必须精确。
+//
+// 等价变异（gremlins INVERT_LOGICAL，`if n == 0 || a.units == 0` 的 `||` 改成
+// `&&`）：早退只是省一次乘法，落到下面算出来的乘积同样是 0（零乘任何数为零），
+// 返回的值与早退那条逐位相同。
 func TestMulInt(t *testing.T) {
 	// 每千 token 0.0001 元，用 3500 个 token
 	unitPrice := MustParse("0.0001")
@@ -191,6 +207,10 @@ func TestMulFloatHandlesImpreciseFactors(t *testing.T) {
 }
 
 // 系数非法时返回零而不是 panic：它来自配置，配置写错不该让进程挂掉。
+//
+// 等价变异（gremlins INVERT_LOGICAL，`math.IsNaN(factor) || math.IsInf(factor, 0)`
+// 的 `||` 改成 `&&`）：NaN 与 ±Inf 互斥，那个条件于是永远不成立，而落到下面
+// `SetFloat64` 对非有限值返回 nil，`r == nil` 那一支照样给出 Zero——两版同值。
 func TestMulFloatRejectsInvalidFactors(t *testing.T) {
 	for _, f := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
 		if got := MulFloat(One, f); !got.IsZero() {
@@ -438,6 +458,10 @@ func TestSmallUnitPricesSurvive(t *testing.T) {
 //
 // 变异：把 `2*|rem| >= |den|` 的 `>=` 改成 `>`，恰好一半就不再进位。
 // 覆盖不到是因为原有用例里没有「除数恰好是余数的两倍」这种情形。
+//
+// 等价变异（gremlins CONDITIONALS_BOUNDARY，把 `numerator.Sign() < 0` 的 `<`
+// 改成 `<= 0`）：这一段只在「|余数| 的两倍 ≥ |除数|」时进得来，而 |除数| ≥ 1，
+// 于是 |余数| ≥ 1、numerator 也就不可能是 0——`Sign() == 0` 那一格到不了。
 func TestRoundHalfAwayFromZero(t *testing.T) {
 	cases := []struct {
 		name string
@@ -499,6 +523,9 @@ func TestZeroIsNeitherPositiveNorNegative(t *testing.T) {
 //
 // 变异：把 `a.units < 0` 改成 `<= 0`。零的结果不变，所以看不出来；
 // 但那个分支的形状变了，而这类改动正是「看着没问题」的那类。
+//
+// 等价变异（gremlins CONDITIONALS_BOUNDARY，把 `a.units < 0` 的 `<` 改成
+// `<= 0`）：units 为 0 时 a 本身就是 Zero，返回 Zero 与返回 a 是同一个值。
 func TestClampZeroBoundary(t *testing.T) {
 	if got := (Amount{units: -1}).ClampZero(); !got.IsZero() {
 		t.Errorf("负数应被夹到零，得到 %s", got)
@@ -513,8 +540,10 @@ func TestClampZeroBoundary(t *testing.T) {
 
 // Min/Max 在两边相等时应返回其中之一，且不改变值。
 //
-// 变异：把 `<=` 改成 `<`、`>=` 改成 `>`。相等时走的分支不同，
-// 而结果相同——所以只有断言「相等时也正确」才能钉住。
+// 变异：把 `<=` 改成 `<`、`>=` 改成 `>`。相等时走的分支不同，而结果相同——
+// 那两条是等价变异（gremlins CONDITIONALS_BOUNDARY）：Amount 只有一个字段，
+// units 相等就是同一个值，返回 a 与返回 b 给出的东西逐位相同，**断言分不开两版**。
+// 这条用例留着，是把「相等时也正确」这个行为写下来。
 func TestMinMaxWithEqualValues(t *testing.T) {
 	a, b := MustParse("1.5"), MustParse("1.5")
 	if got := Min(a, b); got.Cmp(a) != 0 {
@@ -675,6 +704,31 @@ func TestAddAgreesWithSumCheckedOnEveryBoundary(t *testing.T) {
 	}
 }
 
+// clampInt64Sign 只看**符号**，不看那个已经被回绕过的值。
+//
+// 变异（gremlins CONDITIONALS_BOUNDARY，把 `sign > 0` 的 `>` 改成 `>= 0`）：
+// 分得开两版的输入只有 `sign == 0` 这一个（那一格它落负边界），而 Add 的溢出分支
+// 只在同号相加时走到这里，传进来的 sign 就是 a.units（同号相加时不为 0）——
+// 包内到不了这一格。所以这里直接调它，把口径钉住，而不是写一句「到不了」了事。
+//
+// 第一个参数是「这里有一个回绕之后的值」的占位，**不参与判断**：下面两行传不同的
+// 数而结果相同，就是把这件事写出来。
+func TestClampInt64SignUsesOnlyTheSign(t *testing.T) {
+	if got := clampInt64Sign(12345, 1); got != math.MaxInt64 {
+		t.Errorf("正的 sign 应取上界，得到 %d", got)
+	}
+	if got := clampInt64Sign(-12345, -1); got != math.MinInt64 {
+		t.Errorf("负的 sign 应取下界，得到 %d", got)
+	}
+	if got := clampInt64Sign(math.MinInt64, 1); got != math.MaxInt64 {
+		t.Errorf("结果只由 sign 决定（回绕后的值不看），得到 %d", got)
+	}
+	// 只有直接调用才分得出来的那一格。
+	if got := clampInt64Sign(1, 0); got != math.MinInt64 {
+		t.Errorf("clampInt64Sign(_, 0) = %d，期望 %d（0 不算正数）", got, int64(math.MinInt64))
+	}
+}
+
 // 求和溢出时 SumChecked 要说出来，而不是交回一个夹住的数。
 //
 // 夹住的那个数是**错的**：真实的和比 MaxInt64 大，而返回的边界值比它小。
@@ -737,10 +791,22 @@ func TestSumStillClamps(t *testing.T) {
 	}
 }
 
-// 解析时的进位边界：小数部分进位恰好填满一个整数单位。
+// 解析时的进位边界：小数部分进位恰好填满一个整数单位，以及它与整数上界相遇的那几格。
 //
-// 变异：把 `f >= unit` 改成 `f > unit`，恰好等于 unit 时就不会
-// 进位到整数部分，得到一个越界的小数部分。
+// `f >= unit` 那一行上有一条等价变异（gremlins CONDITIONALS_BOUNDARY，`>=` 改成
+// `>`），它不是「拿一个输入就能分开」的那类，理由分两步写：
+//
+//   - 进到这一支之后，改坏的那一版会把 frac 写成 9 位的 "100000000"，parseInt64
+//     读回来恰好也是 unit，于是 `whole*unit + fracUnits` 与进过位的那一版逐位相同；
+//   - 下面那道溢出门槛（`whole > (MaxInt64-fracUnits)/unit`）在两版下也落在同一个
+//     整数上：门槛里的 fracUnits 差一个 unit，而 whole 正好也差一个。
+//
+// 于是两版要么给出同一个数、要么都报 ErrOverflow，没有第三种。
+//
+// #668 之前这条**不是**等价：那时「整数部分顶在上界、小数还要进位」这一格，原版
+// 把 `whole++` 回绕过去、静默返回 0，而变异版报错——一个输入就分得开。修掉那一格
+// 之后两面才收敛（见下面表里最后三条）。所以这条用例的用处不是杀它，而是把**进位
+// 这件事本身**钉住：真把进位那一支去掉，0.999999995 会得到 0.99999999。
 func TestParseCarryFillsWholeUnit(t *testing.T) {
 	// 0.999999995 的四舍五入会让小数部分恰好进位到 1.0
 	got, err := Parse("0.999999995")
@@ -759,6 +825,54 @@ func TestParseCarryFillsWholeUnit(t *testing.T) {
 	if got.String() != "2.00000000" {
 		t.Errorf("进位应传播到整数部分，得到 %s", got)
 	}
+
+	// 进位刚好发生在整数的上界之内：结果仍在范围内，不该被误拒。
+	got, err = Parse("92233720367.999999999")
+	if err != nil {
+		t.Fatalf("上界之内的进位不该报溢出: %v", err)
+	}
+	if want := int64(9223372036800000000); got.Units() != want {
+		t.Errorf("units = %d，期望 %d", got.Units(), want)
+	}
+
+	// 上界附近逐格钉住，每一格都写具体值。`92233720368.54775807` 就是
+	// MaxInt64 个最小单位——刚刚好放得下那一个；再大一个最小单位就该报错。
+	// 中间那几条走的是「四舍五入之后才越界」这条路：`...074` 与 `...075`
+	// 只差被丢掉的那一位，而它决定进位与否。
+	cases := []struct {
+		in   string
+		want string // 空表示应当报 ErrOverflow
+	}{
+		{"92233720368.54775806", "92233720368.54775806"},
+		{"92233720368.54775807", "92233720368.54775807"},
+		{"92233720368.547758074", "92233720368.54775807"},
+		{"92233720368.547758075", ""},
+		{"92233720368.54775808", ""},
+		{"92233720368.999999999", ""},
+		// 整数部分顶在上界上：没有小数也放不下（整数部分是**元**，不是最小单位）。
+		{"9223372036854775807.00000000", ""},
+		{"9223372036854775807.99999999", ""},
+		// 顶在上界、小数还要进位——#668 的那一格。修之前它静默返回 0 且 err 为 nil。
+		{"9223372036854775807.999999995", ""},
+		// 整数部分少一个单位，但进位之后照样越界。
+		{"9223372036854775806.999999995", ""},
+	}
+	for _, tc := range cases {
+		got, err := Parse(tc.in)
+		if tc.want == "" {
+			if !errors.Is(err, ErrOverflow) {
+				t.Errorf("Parse(%q) = %d, err=%v，期望 ErrOverflow", tc.in, got.Units(), err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("Parse(%q) 应当解析得出来，得到 %v", tc.in, err)
+			continue
+		}
+		if got.String() != tc.want {
+			t.Errorf("Parse(%q) = %s，期望 %s", tc.in, got.String(), tc.want)
+		}
+	}
 }
 
 // 超大中间结果被夹到边界时，正负方向要分别取正确的边界。
@@ -766,14 +880,26 @@ func TestParseCarryFillsWholeUnit(t *testing.T) {
 // 变异：把 `v.Sign() > 0` 改成别的，负向溢出会被夹到 MaxInt64——
 // 一个「看起来正常的大正数」。原先测不到是因为构造一个超出 int64 的
 // 中间结果需要特意设计输入。
+//
+// 还有一条（gremlins CONDITIONALS_BOUNDARY，把 `v.Sign() > 0` 的 `>` 改成
+// `>= 0`）：分得开两版的输入只有一个——v 正好是 0，那一格它落负边界
+// （`Sign() > 0` 为假）。三个调用点都只在「big.Int 放不进 int64」那一支调它
+// （IsInt64 为假意味着 |v| > MaxInt64），v 不可能是 0，所以**包内到不了这一格**。
+// 到不了不等于等价，只是没有调用方递得出那个输入——所以下面直接调一次，把函数
+// 自身的口径钉住：0 不算正数。谁将来给它递一个 0 进来，拿到的就是 MinInt64。
 func TestClampFromBigPicksCorrectBoundary(t *testing.T) {
 	// MulInt 用一个超大乘数，让中间结果超出 int64
-	big := Amount{units: math.MaxInt64}
-	if got := big.MulInt(1000); got.Units() != math.MaxInt64 {
+	huge := Amount{units: math.MaxInt64}
+	if got := huge.MulInt(1000); got.Units() != math.MaxInt64 {
 		t.Errorf("正向溢出应夹到 MaxInt64，得到 %d", got.Units())
 	}
-	if got := big.MulInt(-1000); got.Units() != math.MinInt64 {
+	if got := huge.MulInt(-1000); got.Units() != math.MinInt64 {
 		t.Errorf("负向溢出应夹到 MinInt64，得到 %d", got.Units())
+	}
+
+	// 直接调用那一格：包内没有调用点会传 0（见上），所以只有这里能分出来。
+	if got := clampFromBig(new(big.Int)); got != math.MinInt64 {
+		t.Errorf("clampFromBig(0) = %d，期望 %d（0 不算正数）", got, int64(math.MinInt64))
 	}
 }
 
@@ -808,6 +934,10 @@ func TestCmpAllBranches(t *testing.T) {
 //
 // 三个分支都要走：正常、每个方向溢出、乘零。乘零那条不能落到乘法上判：
 // 零乘任何数都是零，把它报告成溢出会让「没用量」变成一次失败。
+//
+// 等价变异（gremlins INVERT_LOGICAL，`if n == 0 || a.units == 0` 的 `||` 改成
+// `&&`）：与 MulInt 同形——落到下面的乘积是 0，返回 (Zero, true)，
+// 与早退那条逐位相同。
 func TestMulIntChecked(t *testing.T) {
 	cases := []struct {
 		name     string

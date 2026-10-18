@@ -124,6 +124,14 @@ func Parse(s string) (Amount, error) {
 			f, _ := parseInt64(frac)
 			f++
 			if f >= unit {
+				// 整数部分已经顶在上界上时，这一次进位就再也放不下了：**先拦住它**。
+				// 放它过去的话 whole++ 会把 MaxInt64 回绕成 MinInt64，而下面那道
+				// 门槛用的正是回绕之后的值——MinInt64 当然不大于门槛，于是判据在
+				// 值已经被改坏之后才用，一个远比上界大的金额被静默算成 0。
+				// 0 在金额里是「一切正常」的那个数（免单、零用量），不是错误信号。
+				if whole == math.MaxInt64 {
+					return Zero, ErrOverflow
+				}
 				whole++
 				f -= unit
 			}
