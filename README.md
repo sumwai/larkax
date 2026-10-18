@@ -135,10 +135,18 @@ go run ./cmd/larkaxctl doctor
 
 When the names do not line up, which answer you get depends on which link is
 missing, and the answer never says which name was wrong — `larkaxctl doctor` does,
-and it names both the channel and the name. A model no channel serves is check 3
-there, and the request gets `503 no available upstream for the requested model`.
-A missing alias is check 4 and a missing price rule is check 5; both come back
-as `500 internal error`: from the request's side they are our configuration.
+and it names both the channel and the name:
+
+- **A model no channel serves** — check 3, and the request gets `503 no available
+  upstream for the requested model`.
+- **No alias at all** for the canonical name — check 4 passes: there is nothing to
+  translate, so the name goes upstream unchanged. If the upstream does not know it
+  either, the request gets `502 upstream call failed`, a message that names the
+  upstream although the missing mapping is ours to add.
+- **Some aliases, none covering this channel** — check 4 fails and names the
+  channel and the name; the request gets `500 internal error`.
+- **A missing price rule** — check 5 fails; the request gets `500 internal error`
+  too, and which rule was missing goes to our server log, not to the response.
 
 That command also answers "did my money move": the credit and the cost are both
 ledger entries, and `larkaxctl ledger balance --account user:1` reads them back.
