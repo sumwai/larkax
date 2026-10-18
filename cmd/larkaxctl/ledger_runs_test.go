@@ -130,10 +130,11 @@ func TestLedgerRunsListsFullAndIncremental(t *testing.T) {
 		t.Errorf("增量那一轮的范围栏不对：%s", incrLine)
 	}
 
-	// ③ 起点那一栏就是上一轮的开始时刻，按带年份的写法打。
-	if !strings.Contains(incrLine, fullStarted.Format(longStampLayout)) {
-		t.Errorf("增量那一轮的起点栏里没有 %s：%s",
-			fullStarted.Format(longStampLayout), incrLine)
+	// ③ 起点那一栏就是上一轮的开始时刻，按带年份的写法打。布局在这里写成字面量而
+	// 不引 longStampLayout：引那个常量的话，它哪天被改成不带年份，这一条会跟着一起
+	// 改，等于没钉住「要带年份」。
+	if want := fullStarted.Format("2006-01-02 15:04"); !strings.Contains(incrLine, want) {
+		t.Errorf("增量那一轮的起点栏里没有 %s：%s", want, incrLine)
 	}
 
 	// ④ 状态是那一轮对账的状态（跑完了是 done），而整份输出本身也是 ok。
@@ -310,6 +311,24 @@ func TestLedgerRunsSaysWhenTruncated(t *testing.T) {
 	}
 	if strings.Contains(out, "更早的没打出来") {
 		t.Errorf("没被截住却说了「更早的没打出来」：\n%s", out)
+	}
+
+	// 边界那一格：--limit 正好等于表里的行数。这时后面没有别的行了，而「打出来的
+	// 条数等于上限」在两件事上长得一样（刚好打完 / 恰好被截住），所以判据只能是末尾
+	// 那句话——它读的是**多读一行**的结果（见 store 的 ReconcileRuns）。这一格写错
+	// 时，一份已经读完的清单会劝人再去调大 --limit。行数当场从库里数：这张表是共享
+	// 的，写死一个数就会随别的用例写下的行一起失效。
+	var total int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM reconcile_runs`).Scan(&total); err != nil {
+		t.Fatalf("数运行记录失败: %v", err)
+	}
+	out = ledgerRunsOut(t, "--limit", itoa64(int64(total)))
+	if got := countRunRows(out); got != total {
+		t.Fatalf("--limit %d（正好等于表里的行数）打了 %d 行：\n%s", total, got, out)
+	}
+	if strings.Contains(out, "更早的没打出来") {
+		t.Errorf("--limit 正好等于行数（后面没有别的行了）却说被截住了：\n%s", out)
 	}
 }
 

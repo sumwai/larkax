@@ -328,6 +328,18 @@ func TestSnapshotAccessLogEmptyAndTruncated(t *testing.T) {
 	if strings.Contains(out, "更早的没打出来") {
 		t.Errorf("没被截住却说了「更早的没打出来」：\n%s", out)
 	}
+
+	// 边界那一格：--limit 正好等于这个 request_id 下的行数。这时后面没有别的行了，
+	// 而「打出来的条数等于上限」在两件事上长得一样（刚好打完 / 恰好被截住），所以判据
+	// 只能是末尾那句话——它读的是**多读一行**的结果（见 snapshot.go 的
+	// readSnapshotAccessLog）。这一格写错时，一份已经读完的清单会劝人再去调大 --limit。
+	out = accessLogOut(t, "--request-id", requestID, "--limit", "3")
+	if got := strings.Count(out, requestID); got != 3 {
+		t.Fatalf("--limit 3（正好等于行数）打了 %d 行：\n%s", got, out)
+	}
+	if strings.Contains(out, "更早的没打出来") {
+		t.Errorf("--limit 正好等于行数（后面没有别的行了）却说被截住了：\n%s", out)
+	}
 }
 
 // TestSnapshotAccessLogJSONShape 钉住机器可读档把筛的条件复述出来。
@@ -399,8 +411,12 @@ func TestSnapshotAccessLogJSONShape(t *testing.T) {
 		doc.Summary.To != to.UTC().Format(time.RFC3339) {
 		t.Errorf("summary 里的窗口与传进去的对不上：%s", r.stdout)
 	}
-	if doc.Summary.Limit != snapshotAccessLogDefaultLimit || doc.Summary.Truncated {
-		t.Errorf("summary 里的 limit / truncated 不对：%s", r.stdout)
+	// 默认上限写成字面量，不引 snapshotAccessLogDefaultLimit：引那个常量的话，它哪天
+	// 被改小，这一条会跟着一起改，等于没钉住「不给 --limit 时是文档里那个数」。
+	if doc.Summary.Limit != 50 || doc.Summary.Truncated {
+		t.Errorf("summary 里的 limit / truncated 不对（limit=%d truncated=%v），"+
+			"没给 --limit 时上限应当是默认的 50：%s",
+			doc.Summary.Limit, doc.Summary.Truncated, r.stdout)
 	}
 	got := doc.Accesses[0]
 	if got.ActorUserID == nil || *got.ActorUserID != actor {

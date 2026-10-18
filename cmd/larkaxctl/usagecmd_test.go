@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -59,20 +60,50 @@ func usageEventsModels(t *testing.T, args ...string) []string {
 	return tableModels(r.stdout)
 }
 
+// usageModelField 是模型那一栏在数据行里的**空白字段**下标，不是栏号。
+//
+// 表格是按显示宽度补空格的，所以「第几栏」与「第几个空白字段」不是一回事：
+// 「时刻」那一栏自带一个空格（`2026-10-20 10:00`），按空白切开占两项。栏的布局
+// 见 usage.go 的 printUsageEvents（10 栏，模型是第 4 栏），于是模型落在下标 4 上：
+// 0 与 1 是时刻的两项，2 是用户 ID，3 是用户名。
+const usageModelField = 4
+
+// usageRowClock 认出表格里的**数据行**：它们都以「时刻」那一栏开头。
+//
+// 表头行与末尾那句截断说明都不是这个形状，于是这一条把两者一并挡在外面。按项数
+// 认数据行是不行的：表头里的「用户 ID」也含空格，切下来与数据行同样多（各 11 项），
+// 而截断那句话切出来是 5 项——按下标取它的第 5 项，会取出一段说明文字当模型名。
+var usageRowClock = regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2} `)
+
 // tableModels 从一张 usage events 表格里抠出模型名那一栏。
 //
-// 表头是 10 栏、模型在第 4 栏；这一组用例造出来的模型名都是 uniqueName 的唯一值，
-// 所以直接在行里找得到它们，不必解析列宽。
+// 这一组用例造出来的模型名都是 uniqueName 的唯一值，所以拿到的都是能一眼对上的
+// 名字，不必解析列宽。
 func tableModels(out string) []string {
 	var models []string
 	for _, line := range strings.Split(out, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 10 {
+		if !usageRowClock.MatchString(line) {
 			continue
 		}
-		models = append(models, fields[3])
+		if fields := strings.Fields(line); len(fields) > usageModelField {
+			models = append(models, fields[usageModelField])
+		}
 	}
 	return models
+}
+
+// countUsageRows 数一张用量清单里打了几行数据。
+//
+// 与 tableModels 同一条：数据行按行首那个时刻认（表头与截断说明都不是这个形状）。
+// events 与 requests 两张表的第一栏都是时刻，所以这一个助手服务两条命令。
+func countUsageRows(out string) int {
+	n := 0
+	for _, line := range strings.Split(out, "\n") {
+		if usageRowClock.MatchString(line) {
+			n++
+		}
+	}
+	return n
 }
 
 // TestUsageEventsFiltersByUserAndWindow 钉住筛选真的生效。
@@ -119,7 +150,7 @@ func TestUsageEventsFiltersByUserAndWindow(t *testing.T) {
 		t.Errorf("bob 十月窗口筛出来 %v，只该有 %s", got, bobOct)
 	}
 
-	// ③ 只按窗口筛（不给 --user）：同一个用户的两条按月份分开。
+	// ③ 换窗口（用户不变）：同一个用户的两条按月份分开。
 	got = usageEventsModels(t, "--user", aliceRef,
 		"--from", usageWindowNovFrom.Format(time.RFC3339),
 		"--to", usageWindowNovTo.Format(time.RFC3339))
@@ -165,6 +196,64 @@ func TestUsageEventsWindowCrossesMonthBoundary(t *testing.T) {
 	}
 	if !contains(got, firstOfNov) {
 		t.Errorf("十一月窗口里没有 %s：跨月之后的那一条被漏掉了", firstOfNov)
+	}
+}
+
+// TestUsageEventsListsNewestFirst 钉住清单的顺序：新的在前。
+//
+// 两把钥匙各钉一次。**created_at 相同的那两行**才是要紧的那一格：只按 created_at
+// 排的话，它们的先后由数据库决定，两次读出来可以不同，「同一段窗口读两次、清单对
+// 不上」于是变成一件碰运气的事——排序因此补了 id（见 store 的 UsageEvents）。所以
+// 这里造两行同一时刻的、一行更晚的，判据是输出里那三行的先后与库里的 id 对得上。
+func TestUsageEventsListsNewestFirst(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+
+	userID := createTestUser(t)
+	tie := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+
+	// 前两行同一时刻，第三行晚一小时。id 从库里读回来，不按插入顺序推。
+	models := make([]string, 0, 3)
+	idByModel := map[string]int64{}
+	times := []time.Time{tie, tie, tie.Add(time.Hour)}
+	for _, at := range times {
+		requestID, model := uniqueName("req"), uniqueName("model")
+		insertUsageEvent(t, db, requestID, userID, model, at, "0.01000000")
+		var id int64
+		if err := db.QueryRowContext(context.Background(),
+			`SELECT id FROM usage_events WHERE request_id = $1`, requestID).Scan(&id); err != nil {
+			t.Fatalf("读用量事件的 id 失败: %v", err)
+		}
+		models = append(models, model)
+		idByModel[model] = id
+	}
+	if idByModel[models[1]] <= idByModel[models[0]] {
+		t.Fatalf("同一时刻的两行里，后写的 id 反而更小（%d 与 %d）：这一条的前提不成立",
+			idByModel[models[0]], idByModel[models[1]])
+	}
+
+	got := usageEventsModels(t, "--user", itoa64(userID),
+		"--from", usageWindowOctFrom.Format(time.RFC3339),
+		"--to", usageWindowOctTo.Format(time.RFC3339))
+	if len(got) != 3 {
+		t.Fatalf("窗口里应当正好三行，得到 %v", got)
+	}
+	// ① 晚的那一行在最前。
+	if got[0] != models[2] {
+		t.Errorf("最前的一行是 %s，想要最晚落库的 %s：清单新的在前", got[0], models[2])
+	}
+	// ② 同一时刻的相邻两行按 id 从大到小。
+	ids := make([]int64, 0, 2)
+	for _, model := range got[1:] {
+		id, ok := idByModel[model]
+		if !ok {
+			t.Fatalf("清单里出现了这一条没造过的行（%s）：%v", model, got)
+		}
+		ids = append(ids, id)
+	}
+	if ids[0] <= ids[1] {
+		t.Errorf("同一时刻的相邻两行是 %s（id=%d）与 %s（id=%d）：id 大的该在前",
+			got[1], ids[0], got[2], ids[1])
 	}
 }
 
@@ -275,6 +364,8 @@ func TestUsageListsStateEmptyResults(t *testing.T) {
 // 一份少了后文的清单与一份完整的清单在屏幕上长得一样，看的人会照着第一份下结论
 // （见 LESSONS.md 第 16 条），所以末尾那句话必须有；而没被截住时它不该出现——
 // 每次都说一句「可能还有」与不说一样没用。
+//
+// 两条子命令各读一张表、各走一条查询，所以各自的截断与边界都在这一条里钉一次。
 func TestUsageLimitSaysHowManyItDropped(t *testing.T) {
 	setupEnv(t)
 	db := testDB(t)
@@ -317,6 +408,21 @@ func TestUsageLimitSaysHowManyItDropped(t *testing.T) {
 	}
 	if strings.Contains(r.stdout, "更早的没打出来") {
 		t.Errorf("--limit 正好等于行数（后面没有别的行了）却说被截住了：\n%s", r.stdout)
+	}
+
+	// 计费请求走的是另一条查询（store 的 BillingRequests），「多读一行」与边界
+	// 各有一份，所以这一格它也钉一次。
+	for i := 0; i < 3; i++ {
+		insertBillingRequest(t, db, uniqueName("req"), userID, uniqueName("model"),
+			time.Date(2026, 10, 20, 11, i, 0, 0, time.UTC), "pending")
+	}
+	r = runOnce(t, runUsage, append([]string{"requests", "--limit", "3"}, window...))
+	if got := countUsageRows(r.stdout); got != 3 {
+		t.Fatalf("usage requests --limit 3 打了 %d 行，想要 3 行：\n%s", got, r.stdout)
+	}
+	if strings.Contains(r.stdout, "更早的没打出来") {
+		t.Errorf("usage requests 的 --limit 正好等于行数（后面没有别的行了）却说被截住了：\n%s",
+			r.stdout)
 	}
 }
 
@@ -378,9 +484,11 @@ func TestUsageJSONShapes(t *testing.T) {
 	if events.Summary.Truncated {
 		t.Errorf("一条都没截掉，truncated 却是 true：\n%s", r.stdout)
 	}
-	if events.Summary.Limit != usageDefaultLimit {
-		t.Errorf("summary.limit = %d，没给 --limit 时应当是默认的 %d",
-			events.Summary.Limit, usageDefaultLimit)
+	// 默认上限写成字面量，不引 usageDefaultLimit：引那个常量的话，它哪天被改小，
+	// 这一条会跟着一起改，等于没钉住「不给 --limit 时是文档里那个数」。
+	if events.Summary.Limit != 50 {
+		t.Errorf("summary.limit = %d，没给 --limit 时应当是默认的 50（见帮助与 docs/cli-reference.md）",
+			events.Summary.Limit)
 	}
 	if events.Summary.UserID == nil || *events.Summary.UserID != userID {
 		t.Errorf("summary 里没有说这次筛的是哪个用户：%s", r.stdout)
