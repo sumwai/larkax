@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -61,6 +62,13 @@ var (
 	// 措辞只说十进制整数，不说「一个数」：`1.0`、`1e3`、`0x10` 与 `1_0` 在
 	// strconv 那一套里都不是整数（见 userRefIsID），它们是名字。
 	ErrUsernameIsIDRef = errors.New("用户名不能整个是一个十进制整数")
+	// ErrInvalidEmail 表示这个串不是一个邮箱地址的写法。
+	//
+	// 与 ErrEmailTaken 分开放：那一条说的是「这个邮箱挂在别人名下」，下一步是换
+	// 一个邮箱；这一条说的是「这个串不像一个邮箱地址」，下一步同样是换一个串，
+	// 但它与库里现在有什么无关。单独一个哨兵是为了让命令行把它归到「参数错」
+	// （退出码 2），与 ErrUsernameIsIDRef 同一档——重发一次就能过。
+	ErrInvalidEmail = errors.New("不是一个邮箱地址")
 )
 
 // ValidateNewUsername 校验一个**要建**的用户名。
@@ -87,6 +95,195 @@ func ValidateNewUsername(name string) error {
 			"建出来之后 user get 与 user update 都找不到它", ErrUsernameIsIDRef, trimmed)
 	}
 	return nil
+}
+
+// 邮箱地址两半各自允许出现的符号。
+//
+// 字母与数字由 isASCIILetterDigit 认，点由 badEmailDots 判位置，所以下面两个
+// 串里只有别的符号。本地部分那一组是标准里不带引号的写法允许的那些；域名的只有
+// 连字符——域名实际只用字母、数字、点与连字符。
+const (
+	emailLocalSymbols  = "!#$%&'*+-/=?^_`{|}~"
+	emailDomainSymbols = "-"
+	// emailCharsHint 是「哪些字符收」那一句，符号表由上面那个常量拼出来：
+	// 手抄一遍的话，往表里加一个符号而忘了改这句话，报错就少说一个——而少说的
+	// 那一个正是使用者照着改的那一个。
+	//
+	// 表后面不跟 ASCII 的句点：`.` 本身就在这张表里，紧跟一个句号的话，读的人
+	// 分不出那个点是表的一部分还是句子的结束。
+	emailCharsHint = "本地部分只收字母、数字与 " + emailLocalSymbols + " 这几个符号，" +
+		"域名只收字母、数字、连字符与点"
+	// 下面每一句各由一处判据用，一句一件事，不合成一句总述：`alice@gmail` 这种
+	// 漏了半截的写法，合成一句时会读到两条与它无关的条件，而他要改的只有一处。
+	// `@` 那一条（数量与两边非空）落在两个分支里，其余各落在一个条件上。
+	shapeReason        = "里的 @ 应当恰好一个，而且两边都不为空"
+	dotsReason         = "的域名里要有一个点"
+	dotPlacementReason = "两半都不能以点开头或结尾，也不能连着两个点"
+	hyphenReason       = "的域名里，用点分开的每一段都不能以连字符开头或结尾"
+)
+
+// ValidateEmail 校验一个要写进 users.email 的邮箱地址。
+//
+// # 空串通过
+//
+// 空串（含只有空白的）不算格式不对：这一列「没填」在库里的样子是 NULL，而两条
+// 写入路径都把空串落成 NULL（见 CreateUser 对空邮箱的处理）。把「没填」判成
+// 格式错，使用者会被逼着编一个邮箱出来。
+//
+// # 收什么
+//
+// 去掉两头空白之后，判五件事：
+//
+//  1. `@` 恰好一个，两边都不为空；
+//  2. 本地部分只由字母、数字与 `!#$%&'*+-/=?^_`{|}~.` 组成，域名只由字母、
+//     数字、连字符与点组成。非 ASCII 的字母与数字也收（本地化的域名与本地部分
+//     是真实存在的写法），别的非 ASCII 字符不收——全角逗号、emoji 这些出现在
+//     地址里，几乎都是粘贴时一起带进来的；
+//  3. 域名里至少有一个点；
+//  4. 两半都不以点开头或结尾，也不出现连着两个点；
+//  5. 域名里用点分开的每一段，都不以连字符开头或结尾。
+//
+// 这样收：`a@example.com`、`a@b.example.com`、`user+tag@example.com`、
+// `first.last@example.com`、`A.B@Example.COM`、`用户@例え.jp`。这样拒：
+// `not-an-email`、`@example.com`、`first@second@example.com`、`a b@example.com`、
+// `a@example.com.`、`a@example`（域名没有点）、`a@-b.example.com`、
+// `a,b@example.com`、`Bob <bob@example.com>`、`a@[127.0.0.1]`。用例里那两张表比
+// 这里全，改判据要连着它们一起改。
+//
+// # 非 ASCII 收的是「任何 Unicode 字母与数字」
+//
+// 非 ASCII 的那一批只按 unicode.IsLetter / IsDigit 认，不查它属于哪张表，所以全角
+// 的 `ａ`、西里尔与希腊的同形字都在这五条之内。要说清后果的是这一列的大小写不敏感
+// （库里的类型是 citext，做的就是折叠大小写）：它只覆盖有大小写之分的那些，`Ａ` 与
+// ASCII 的 `A`、西里尔 `а` 与拉丁 `a` 是**两个不同的值**，唯一约束分得开，两条会
+// 并存。这不是这一版要改的行为，是要让人知道这一列实际收什么。
+//
+// # 长度不判
+//
+// 本地部分与整串的长度都不设上限（标准里本地部分到 64、整串到 254）：300 字的本地
+// 部分照收。这是**有意留的边界**，不是漏了——这一版要挡住的是「写不成一个地址」
+// 的那一类，长度是另一类问题（真实的地址会先被上游拒掉），要加就得单开一条判据、
+// 单开一张用例表，并且说清超长那一次报的是哪一句。
+//
+// # 比标准窄的地方
+//
+// 这五条比标准里的地址语法窄，窄在四处，都是有意不收的：带引号的本地部分
+// （`"a b"@example.com`）、方括号包起来的域名（`a@[127.0.0.1]`）、带尖括号或
+// 注释的写法（`Bob <bob@example.com>`、`bob@example.com (comment)`）、没有点的
+// 域名（`a@example`）。前三处是这一列不该出现的写法——它存的是地址本身，不是一个
+// 信封上的收件人栏；存成带显示名的那一串，同一个人的另一种写法会被当成第二个邮箱
+// （这一列上有唯一约束）。第四处的理由见下。
+//
+// 串里不能有空白不必单列一条：空格与制表符不在上面那张符号表里，不断行空格那种
+// 非 ASCII 空白也不是字母数字，两条判据都到不了它们那儿。
+//
+// # 为什么不借 net/mail
+//
+// 它是现成的，但它那一套的宽严**跟着 Go 版本走**：同一台机器上，`a@[127.0.0.1]`
+// 在 go1.22 那儿是拒的，go1.26 收了（而同一批输入里的其余几条没变）。这一列收什么
+// 是对外行为——升级编译器顺手改了它，收严的那一天会拒掉使用者原本存得进去的邮箱，
+// 放松的那一天会静默放行一批从前挡住的写法。所以允许哪些字符写死在上面那张表里，
+// 改它要改的是这段注释、那张表，以及用例里那两张表。
+//
+// # 为什么要求域名里有一个点
+//
+// 没有点的域名几乎都是漏了半截（`alice@gmail`），而这一列今天只用来记联系方式
+// 与查重。代价是**收不下真的本地域名**：`alice@corp` 会报参数错，而这一列没有
+// 一条绕过校验的写法。两边都是坏结果，选了挡住的那一边——挡住会立刻报出来，
+// 静默存下一个写错的，要等到真按这一列找人时才发现。报错里写着域名要有一个点，
+// 所以被挡住的那一次说得清是为什么。
+//
+// 已经躺在库里的值不归它管：校验只在写之前做，读一行时再判一次格式，只会让
+// 一行早就在那里的数据突然读不出来。
+func ValidateEmail(email string) error {
+	trimmed := strings.TrimSpace(email)
+	if trimmed == "" {
+		return nil
+	}
+
+	at := strings.Index(trimmed, "@")
+	if at < 0 || at != strings.LastIndex(trimmed, "@") {
+		return invalidEmail(trimmed, shapeReason)
+	}
+	local, domain := trimmed[:at], trimmed[at+1:]
+	if local == "" || domain == "" {
+		return invalidEmail(trimmed, shapeReason)
+	}
+	if !emailPartAllowed(local, emailLocalSymbols) ||
+		!emailPartAllowed(domain, emailDomainSymbols) {
+		return invalidEmail(trimmed, "里有不该出现在地址里的字符（"+emailCharsHint+"）")
+	}
+	if !strings.ContainsRune(domain, '.') {
+		return invalidEmail(trimmed, dotsReason)
+	}
+	if badEmailDots(local) || badEmailDots(domain) {
+		return invalidEmail(trimmed, dotPlacementReason)
+	}
+	if badEmailHyphens(domain) {
+		return invalidEmail(trimmed, hyphenReason)
+	}
+	return nil
+}
+
+// invalidEmail 说清一次拒绝：哪个串、哪里不对。
+//
+// 每条判据各给自己那一句，而不是合成一句总述（「要写成 name@example.com 这样」）：
+// 总述在恰好没碰坏被点名那一条的人眼里等于没说——他逐条对一遍全对，还是不知道
+// 错在哪儿，只能猜着改。报的是去掉两头空白之后的那个串，与判据看的是同一个值。
+func invalidEmail(email, reason string) error {
+	return fmt.Errorf("%w：%q %s", ErrInvalidEmail, email, reason)
+}
+
+// emailPartAllowed 报告地址的某一半里，每个字符都在允许之列。
+//
+// 非 ASCII 只收字母与数字（见 ValidateEmail）：**任何**非 ASCII 字符都收的话，
+// 全角逗号、emoji 这类东西会一起放进来。
+func emailPartAllowed(part, symbols string) bool {
+	for _, r := range part {
+		if r > unicode.MaxASCII {
+			if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+				return false
+			}
+			continue
+		}
+		if !isASCIILetterDigit(r) && r != '.' && !strings.ContainsRune(symbols, r) {
+			return false
+		}
+	}
+	return true
+}
+
+// badEmailDots 报告地址的某一半里，点号摆得不对：以点开头或结尾，或者连着两个点。
+//
+// 两半都判，不分开写：标准里本地部分与域名的点号摆放是同一条规矩（各段之间用
+// 一个点隔开，每一段至少一个字符），分开写的话，只改了其中一处的那一天，两半的
+// 规矩会不一样，而两边各自的用例都还是绿的。
+func badEmailDots(part string) bool {
+	return strings.HasPrefix(part, ".") || strings.HasSuffix(part, ".") ||
+		strings.Contains(part, "..")
+}
+
+// badEmailHyphens 报告域名的某一段以连字符开头或结尾。
+//
+// 段的边界是点，与 badEmailDots 同一套分段：`a@b-c.example.com` 里的连字符在一段
+// 中间，收；`a@-b.example.com`、`a@b-.example.com` 那样以连字符开头或结尾的，拒。
+// 这一条与「域名里要有一个点」同一路——它挡住的几乎都是漏了半截的写法（少打了一个
+// 字母），而真的长成那样的一段本来也不是能解析的主机名。
+func badEmailHyphens(domain string) bool {
+	for _, label := range strings.Split(domain, ".") {
+		if strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return true
+		}
+	}
+	return false
+}
+
+// isASCIILetterDigit 报告 r 是不是 ASCII 的字母或数字。
+//
+// 不能拿 unicode.IsLetter 代替它：那个对非 ASCII 也返回真，而这里要的正是不把
+// 那一类算进来（非 ASCII 由 emailPartAllowed 单独判）。
+func isASCIILetterDigit(r rune) bool {
+	return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9'
 }
 
 // Role 是用户角色的称呼。
@@ -177,7 +374,8 @@ type CreateUserParams struct {
 	// 不能整个是一个十进制整数：那样一个名字会被 `--user` 按 ID 解释，建出来就再也
 	// 按名字读不回来（见 ValidateNewUsername）。
 	Username string
-	// Email 为空表示不填。填了就唯一（同样大小写不敏感）。
+	// Email 为空表示不填。填了要是一个邮箱地址的写法（见 ValidateEmail），
+	// 且唯一（同样大小写不敏感）。
 	Email string
 	// Role 必须是三个已知角色之一，**没有默认值**：
 	// 它是将来用于访问控制的那个字段（今天只落库、不参与鉴权判断，见 Role 的注释），
@@ -200,6 +398,8 @@ type CreateUserParams struct {
 //     换个名字就能继续，是使用者能处理的
 //   - errors.Is(err, ErrUsernameIsIDRef)：这个名字的形状不能用（整串是一个十进制
 //     整数），同样换个名字就能继续——它不连库就判得出来
+//   - errors.Is(err, ErrInvalidEmail)：这个邮箱的写法不认，换一个写法就能继续，
+//     同样不连库就判得出来
 //   - 其它：写入失败（连不上库、约束之外的错误），要人去查
 func (s *Store) CreateUser(ctx context.Context, p CreateUserParams) (User, error) {
 	username := strings.TrimSpace(p.Username)
@@ -214,6 +414,11 @@ func (s *Store) CreateUser(ctx context.Context, p CreateUserParams) (User, error
 	}
 	if !p.Role.valid() {
 		return User{}, fmt.Errorf("未知的角色 %q", p.Role)
+	}
+	// 邮箱的形状同样在落库之前判，判的是**真的要写进去的那个值**：空串表示
+	// 不填这一列（下面落成 NULL），ValidateEmail 放行它。
+	if err := ValidateEmail(p.Email); err != nil {
+		return User{}, err
 	}
 
 	// 空邮箱存 NULL 而不是空串：email 上有唯一约束，而空串在 citext 里
@@ -525,7 +730,9 @@ type UpdateUserParams struct {
 	Status *string
 	// DisplayName 为 nil 表示不改；指向空串（或只有空白）表示清成 NULL。
 	DisplayName *string
-	// Email 同上。这一列有唯一约束，撞上别的用户时报 ErrEmailTaken。
+	// Email 同上，只是这一列的写法要先过 ValidateEmail；空串（含只有空白的）
+	// 表示清成 NULL，不是「一个写错的邮箱」。这一列有唯一约束，撞上别的用户时
+	// 报 ErrEmailTaken。
 	Email *string
 	// IsMerchant 为 nil 表示不改。
 	IsMerchant *bool
@@ -593,9 +800,10 @@ func (s *Store) UpdateUser(ctx context.Context, ref string, p UpdateUserParams) 
 // 声明，作用域互不重叠，也就不存在遮蔽（.golangci.yml 里 govet 开了 enable-all，
 // 全写在一个函数里时最上面那次校验声明的 err 会被下面每个 `:=` 遮住）。
 //
-// 状态在这里再校验一次（命令行那侧已经校验过，见 cmd/larkaxctl 的 user update）：
-// 两处走的是同一个 ParseUserStatus，所以不存在「改一处漏一处」；换来的是
-// 绕过命令行的调用方拿到一句能读的报错，而不是 CHECK 约束的原文。
+// 状态与邮箱在这里都再校验一次（命令行那侧已经校验过，见 cmd/larkaxctl 的
+// user update）：两处走的是同一个 ParseUserStatus、同一个 ValidateEmail，所以
+// 不存在「改一处漏一处」；换来的是绕过命令行的调用方拿到一句能读的报错，而不是
+// CHECK 约束的原文。
 func userUpdateSets(p UpdateUserParams) ([]string, []any, error) {
 	var sets []string
 	var args []any
@@ -623,6 +831,13 @@ func userUpdateSets(p UpdateUserParams) ([]string, []any, error) {
 		add("status", parsed)
 	}
 	if p.Email != nil {
+		// 与状态同一处：命令行那侧已经判过一遍（见 cmd/larkaxctl 的
+		// userUpdateParams），两处走的是同一个 ValidateEmail。绕过命令行的调用方
+		// 从这里拿到的是同一句话，而不是让一个写错的邮箱进库、等到撞上唯一约束
+		// 才发现。空串过它那一关，由 addText 落成 NULL——那是「清掉这一列」。
+		if err := ValidateEmail(*p.Email); err != nil {
+			return nil, nil, err
+		}
 		addText("email", p.Email)
 	}
 	if p.DisplayName != nil {

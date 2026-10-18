@@ -105,6 +105,10 @@ func parseCases() []parseCase {
 		{"user create --name 是纯数字", func() error {
 			return runUserCreate([]string{"--name", "123"})
 		}, false, userHint},
+		// 同一条路，另一条判据：邮箱写不成一个地址（见 auth.ValidateEmail）。
+		{"user create --email 不成邮箱", func() error {
+			return runUserCreate([]string{"--name", "alice", "--email", "not-an-email"})
+		}, false, userHint},
 
 		{"migrate create 缺名称", func() error { return runMigrate([]string{"create"}) }, false, migrateHint},
 		{"migrate 未知子命令", func() error { return runMigrate([]string{"bogus"}) }, false, migrateHint},
