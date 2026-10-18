@@ -81,6 +81,12 @@
 #
 # 所以这一段留着的意义只剩一条：**下次再有人问「#282 那一批去哪了」，答案在理由栏里。**
 #
+# 24 之后有 4 条从 `lib` 改判 `gap`（`Adapter.ListModels` 四个适配器）——**条数没变**，
+# 类型栏变了。原先写的是「生产里还没有拉取上游模型列表的入口」，那是 `lib` 的说法（先有库、
+# 后接线，等一下就会自然发生）。核过之后不是：拉这份列表要有**能解出明文凭证的路**，而
+# `channels.Admin` 的不变量是「凭证只封不开」，所以出口落在服务端还是命令行要先定（见 #641）。
+# `lib` 的答案是「它是积木」，这一条的答案是「有一张单子在跟」——两档的差别就在这里。
+#
 # 48 之后减了 4（#262）：`Registry.NewSession`、`Session.OnRequest`、
 # `Session.OnResponse`、`Session.Failures` 随请求侧的 hook 接上而有了生产调用点。
 # 注意这与 scripts/deadcode-allowlist.txt 那边的情形不同——这四条是**真的接上了**，
@@ -194,13 +200,13 @@ internal/calendar/calendar.go  | Date.IsWeekend                    | lib | 日�
 internal/calendar/memory.go    | MemorySource.AddDay               | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.SetDefaultRange      | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.SetYearState         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
-internal/channel/anthropicadapter/adapter.go | Adapter.ListModels   | lib | channel.Adapter 的契约面：接口方法由各适配器实现；生产里还没有拉取上游模型列表的入口，目前只有测试在调它
+internal/channel/anthropicadapter/adapter.go | Adapter.ListModels   | gap | channel.Adapter 的契约面：接口方法由各适配器实现；拉取上游模型列表还没有出口，出口落在哪一侧要先定（见 #641）——渠道的核查（create/update 与 doctor 第 3 项）是静态判据、不碰网络，而拉这份列表要有一条能解出明文凭证的路（见 channel.Adapter.ListModels 的注释）。目前只有测试在调它
 internal/channel/anthropicadapter/adapter.go | Adapter.Quota        | lib | channel.Adapter 的契约面：接口方法由各适配器实现；额度查询还没接线，目前只有测试在调它
-internal/channel/openaiadapter/adapter.go | Adapter.ListModels      | lib | channel.Adapter 的契约面：接口方法由各适配器实现；生产里还没有拉取上游模型列表的入口，目前只有测试在调它
+internal/channel/openaiadapter/adapter.go | Adapter.ListModels      | gap | channel.Adapter 的契约面：接口方法由各适配器实现；拉取上游模型列表还没有出口，出口落在哪一侧要先定（见 #641）——渠道的核查（create/update 与 doctor 第 3 项）是静态判据、不碰网络，而拉这份列表要有一条能解出明文凭证的路（见 channel.Adapter.ListModels 的注释）。目前只有测试在调它
 internal/channel/openaiadapter/adapter.go | Adapter.Quota           | lib | channel.Adapter 的契约面：接口方法由各适配器实现；额度查询还没接线，目前只有测试在调它
-internal/channel/responsesadapter/adapter.go | Adapter.ListModels    | lib | channel.Adapter 的契约面：接口方法由各适配器实现；生产里还没有拉取上游模型列表的入口，目前只有测试在调它
+internal/channel/responsesadapter/adapter.go | Adapter.ListModels    | gap | channel.Adapter 的契约面：接口方法由各适配器实现；拉取上游模型列表还没有出口，出口落在哪一侧要先定（见 #641）——渠道的核查（create/update 与 doctor 第 3 项）是静态判据、不碰网络，而拉这份列表要有一条能解出明文凭证的路（见 channel.Adapter.ListModels 的注释）。目前只有测试在调它
 internal/channel/responsesadapter/adapter.go | Adapter.Quota         | lib | channel.Adapter 的契约面：接口方法由各适配器实现；额度查询还没接线，目前只有测试在调它
-internal/channel/systemoneadapter/adapter.go | Adapter.ListModels    | lib | channel.Adapter 的契约面：接口方法由各适配器实现，本适配器回 ErrUnsupported（这条表面不提供模型列表）；生产里还没有拉取上游模型列表的入口，目前只有测试在调它
+internal/channel/systemoneadapter/adapter.go | Adapter.ListModels    | gap | channel.Adapter 的契约面：接口方法由各适配器实现，本适配器回 ErrUnsupported（这条表面不提供模型列表）；拉取上游模型列表还没有出口，出口落在哪一侧要先定（见 #641）——渠道的核查（create/update 与 doctor 第 3 项）是静态判据、不碰网络，而拉这份列表要有一条能解出明文凭证的路（见 channel.Adapter.ListModels 的注释）。目前只有测试在调它
 internal/channel/systemoneadapter/adapter.go | Adapter.Quota         | lib | channel.Adapter 的契约面：接口方法由各适配器实现，本适配器回 ErrUnsupported（这条表面没有额度查询）；额度查询还没接线，目前只有测试在调它
 internal/ledger/account.go     | Account.ID                        | lib | 科目类型的读取面：取后缀而不解释它（与 Type、UserID 成对）；生产走 Type 与 UserID，目前只有测试在调它
 internal/money/money.go        | Amount.ClampZero                  | lib | 金额库的运算面：负数归零；目前只有测试在调它

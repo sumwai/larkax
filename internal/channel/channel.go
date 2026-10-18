@@ -454,6 +454,26 @@ type Adapter interface {
 
 	// ListModels 返回上游账号可用的模型名。
 	// 不是所有上游都提供，不支持时返回 ErrUnsupported。
+	//
+	// # 生产里没有调用点
+	//
+	// 四个适配器都实现了它、也都有用例，但今天没有一个调用方（记在
+	// scripts/deadmethods-allowlist.txt 里）。不接有两条理由：
+	//
+	//   - 渠道的核查——`channel create` / `update` 与 doctor 的第 3 项（模型目录）
+	//     走的是**静态**判据：模型目录里声明的端点 × 渠道 type 打的那条端点
+	//     （见 internal/channels 的 endpoints.go）。它只读库里的表、不碰网络，
+	//     依据是「不知道就别拦」——目录里没有声明就不拦，否则刚接一家上游、
+	//     目录还空着时一条渠道都建不出来。
+	//   - 拉这份列表要有一条能拿到**明文**上游凭证的路。今天全仓库解出明文的
+	//     地方只有 channels.Source.decrypt：写入侧只封不开（见 channels.Admin
+	//     的包注释）。所以它的出口在服务端那一侧——与额度探测（Quota）同一处，
+	//     不在写入路径上。
+	//
+	// 客户端面也不在这里：GET /v1/models 是**故意**的 501（见 docs/api.md），
+	// 没有「顺手接在那儿」的现成读者。
+	//
+	// 出口落在哪一侧要先定，跟踪见 #641。
 	ListModels(ctx context.Context, ch Channel) ([]string, error)
 
 	// Quota 查询额度。查不到时返回 ErrUnsupported，而不是一个「余量未知」
