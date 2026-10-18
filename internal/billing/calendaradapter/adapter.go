@@ -91,21 +91,77 @@ func (a *Adapter) DayInfo(region string, day time.Time) (expr.DayInfo, error) {
 		// 把成因带进错误里：`year_pending`（公告未发布，正常）与
 		// `row_missing`（数据不完整，要查）对运维是两个完全不同的问题，
 		// 而它们在这里都表现为「这一天算不出价」。
-		//
-		// 措辞指向**配置缺口**而不是服务故障：日历数据是运维灌进来的
-		// （见 internal/calendar/store），缺数据时该去看的是「这一年的数据
-		// 导入了没有」，而一句「日历不可用」会把人引向「日历服务挂了」——
-		// 这个项目里根本没有那样一个服务。
-		return expr.DayInfo{}, fmt.Errorf("%w：%s %s 的节假日日历还没有数据（%s）。"+
-			"这是配置缺口，不是服务故障：该年的日历数据还没有导入，在它补齐之前"+
-			"用到日历的计价规则一直算不出价",
-			expr.ErrCalendarRequired, region, status.Date, status.Reason)
+		return expr.DayInfo{}, unknownDayError(region, status)
 
 	default:
 		// 新增了 DayKind 取值却忘了在这里处理。报错而不是落到某个分支：
 		// 落到工作日会让新状态被静默当成工作日。
 		return expr.DayInfo{}, fmt.Errorf("日历返回了未知的判定类型 %q", status.Kind)
 	}
+}
+
+// Peak 判定某地区某个时刻算不算高峰，高峰时段由规则给出。
+//
+// 它把 expr 侧的时段形状翻成 calendar 侧的，再交给 PeakAt 判——与 DayInfo
+// 一样，这一层只做形状转换，判定不在这里重写（窗口怎么算、跨零点怎么算，
+// 见 internal/calendar 的 peak.go）。
+//
+// # 窗口的形状在这里再校验一次
+//
+// 规则的窗口在**保存规则**时就判过（见 internal/billing/expr 的
+// parsePeakWindows），所以从规则走下来的窗口都是合法的。这里仍然走 calendar
+// 那两个构造函数、让它们再判一次：它们的入口不止规则一条（插件适配器与夹具
+// 都直接构造排班），少判一次换不来什么。
+//
+// # unknown 与 DayInfo 同一条口径
+//
+// PeakAt 给出的是三态，其中 unknown 表示「那一天是不是休息日还没查清」，
+// 于是峰谷也判不出来。这里把它折成错误，理由与上面那个 switch 完全一样：
+// false 是一个具体的判断（「按低谷算」），用它代理未知会在春节期间按低谷价
+// 收费，而账单看上去完全正常。
+//
+// Peak 为 unknown 只可能是日子未知：那一天已知时它必然落到 peak 或 off_peak
+// （见 PeakAt 的判定顺序），所以这条错误讲的还是「哪一天的日历没有数据」。
+func (a *Adapter) Peak(region string, instant time.Time, windows []expr.PeakWindow) (bool, error) {
+	converted := make([]calendar.PeakWindow, 0, len(windows))
+	for _, w := range windows {
+		pw, err := calendar.NewPeakWindow(w.StartMinute, w.EndMinute)
+		if err != nil {
+			return false, err
+		}
+		converted = append(converted, pw)
+	}
+	// 休息日整天算不算高峰留给规则组合（`!isWorkday() || isPeak(...)`），
+	// 所以这里恒为 false——接口上那一个开关由规则表达，见 expr.Calendar 的 Peak。
+	schedule, err := calendar.NewPeakSchedule(false, converted...)
+	if err != nil {
+		return false, err
+	}
+
+	st, err := a.cal.PeakAt(a.ctx(), calendar.Region(region), instant, schedule)
+	if err != nil {
+		return false, err
+	}
+	if !st.Peak.Known() {
+		return false, unknownDayError(region, st.Day)
+	}
+	return st.Peak == calendar.PeakKindPeak, nil
+}
+
+// unknownDayError 把「这一天的日历数据还没有」讲成一句指向配置缺口的话。
+//
+// DayInfo 与 Peak 共用它：两处是同一件事在两个入口上的表现，各写一份的话，
+// 运维会为同一个原因拿到两句不一样的解释。
+//
+// 措辞指向**配置缺口**而不是服务故障：日历数据是运维灌进来的
+// （见 internal/calendar/store），缺数据时该去看的是「这一年的数据导入了没有」，
+// 而一句「日历不可用」会把人引向「日历服务挂了」——这个项目里根本没有那样
+// 一个服务。
+func unknownDayError(region string, day calendar.DayStatus) error {
+	return fmt.Errorf("%w：%s %s 的节假日日历还没有数据（%s）。"+
+		"这是配置缺口，不是服务故障：该年的日历数据还没有导入，在它补齐之前"+
+		"用到日历的计价规则一直算不出价",
+		expr.ErrCalendarRequired, region, day.Date, day.Reason)
 }
 
 // ctx 提供一个供适配器使用的 context。

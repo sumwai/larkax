@@ -677,12 +677,16 @@ var _ host.CalendarSource = pluginCalendar{}
 
 // pluginPeakSchedule 是插件 calendar 能力用的高峰排班：**空的**。
 //
-// 空不是「还没写」，而是这份部署此刻的真实答案：高峰窗口从哪来（库里还是配置
-// 里）还没有定（见 internal/calendar 的包注释与 docs/calendar-data.md），所以
-// 这里没有任何窗口可传。空排班在 calendar.PeakAt 里的语义是明确的：已知的
+// 空不是「还没写」，而是这份部署此刻的真实答案：插件的窗口从哪来还没有定。
+// **规则那一半已经定了**——窗口写在规则自己身上（`isPeak("08:00-22:00")`，
+// 见 internal/billing/calendaradapter 与 expr.Calendar 的 Peak）；而插件这一半
+// 不同：插件调的是宿主给的能力，写不出自己的窗口参数（SDK 的 calendar 命名空间
+// 里没有 peak 函数），窗口只能由宿主决定，那个决定还没做。
+//
+// 于是这里没有任何窗口可传。空排班在 calendar.PeakAt 里的语义是明确的：已知的
 // 日子里一律 off_peak，日子未知时 unknown——不会凭星期几猜一天。
 //
-// 将来定了「高峰窗口从哪来」，改的是这一个值（或者由装配从配置里读），而不是
+// 将来定了插件的高峰窗口从哪来，改的是这一个值（或者由装配从配置里读），而不是
 // 在适配器里重写一遍判定。
 var pluginPeakSchedule = calendar.PeakSchedule{}
 
@@ -716,7 +720,8 @@ func (a pluginCalendar) Day(ctx context.Context, region string, instant time.Tim
 // 返回值就是 calendar.PeakKind 的取值：peak / off_peak / unknown（三态，
 // 未知不会被压成低谷）。**当前没有插件能调到它**：SDK 的 calendar 命名空间里
 // 没有 peak 这个函数（见 internal/plugin/sandbox 的 sdkSource），接上它要先定
-// 「高峰窗口从哪来」——那是一条独立的决定（见 pluginPeakSchedule 与本文件在
+// 「插件的高峰窗口从哪来」——规则那一半已经定了（窗口随规则走），插件这一半
+// 还没有，那是一条独立的决定（见 pluginPeakSchedule 与本文件在
 // scripts/deadmethods-allowlist.txt 里的那一条）。
 func (a pluginCalendar) Peak(ctx context.Context, region string, instant time.Time) (string, error) {
 	st, err := a.cal.PeakAt(ctx, calendar.Region(region), instant, a.peak)

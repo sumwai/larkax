@@ -69,6 +69,11 @@
 # 那条路整条删除而消失。同批的 `Cache.Invalidate` / `Program.BranchCount` /
 # `Program.Source` 是导出方法，只由 deadmethods 那道门照到，不在这份清单里。
 #
+# **31 之后减了 2（#542）**：规则 DSL 接上 `isPeak()` 之后，`calendar/peak.go` 的
+# `NewPeakSchedule` / `NewPeakWindow` 有了生产调用方——规则的窗口串经
+# `calendaradapter.Peak` 折成这两者，判定由 `Calendar.PeakAt` 做。这两条登记的
+# 理由（「峰谷计价没有生产调用方」）到此不成立，一起删掉。
+#
 # **34 之后减了 3（#216）**：`internal/plugin` 里三条已被取代或根本没有位置的符号
 # 删掉——`patch.go` 的 `ApplyRequestBodyPatch` 与只被它用的 `originalMaxTokens`
 # （请求路径走的是 `adapter.go` 的 `applyBodyToChannel`，那是唯一一条应用路径），
@@ -97,11 +102,11 @@
 # 「它可达」是分析器的近似，不是有人调了它。这与「有门与没门在输出上长得一样」
 # 是同一个形状（见 LESSONS 第 22 条）。
 #
-# **gap 挂的 issue 一旦关闭，条目就成了死链。** `peak.go` 那两条原先挂 #205，
-# 而 #205 只做了「把它标记成未接线」（包注释 + 文件头 + docs），**真的接进 DSL
-# 那一步没做**——接线改挂 #542。将来再有 gap 的 issue 关闭时，先问一句
-# 「缺口是在那条 issue 里兑现了，还是被留在原地了」：兑现了就删条目，
-# 留在原地就换一条活的跟踪 issue，别让它指向一个关掉的条目。
+# **gap 挂的 issue 一旦关闭，条目就成了死链。** 一条 gap 有两种下场，得分开看：
+# 缺口在那条 issue 里兑现了，就把条目删掉（哪次删了哪几条，记在上面那几段
+# 「减了几条」里）；缺口没做、只是那张单子关了，就把它改挂到一条活的跟踪
+# issue 上——挂 #172 的那几条今天就是这种。留着不换的话，后来的人照编号点过去
+# 只看到一张已经关掉的单子，而条目还在清单里，看上去像有人在盯，其实没有。
 #
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
@@ -113,8 +118,6 @@ internal/calendar/memory.go    | MemorySource.SetDefaultRange   | lib | 测试�
 internal/calendar/memory.go    | MemorySource.SetYearState      | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.YearState         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | NewMemorySource                | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
-internal/calendar/peak.go        | NewPeakSchedule                | gap | #542 峰谷计价没有生产调用方：规则 DSL 里还没有一个走 PeakAt 的函数（原挂 #205，那条只做了「标记成未接线」，接线这一步没做）
-internal/calendar/peak.go        | NewPeakWindow                  | gap | #542 峰谷计价没有生产调用方：规则 DSL 里还没有一个走 PeakAt 的函数（原挂 #205，那条只做了「标记成未接线」，接线这一步没做）
 internal/channel/httpx/httpx.go  | DrainAndClose                   | lib | HTTP 收尾辅助，给拿不到 *http.Response 的调用点用；目前只有测试在调它
 internal/ledger/account.go       | PayoutAccount                   | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
 internal/ledger/entry.go         | Entry.withPayout                | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口

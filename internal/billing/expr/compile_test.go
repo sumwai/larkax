@@ -120,6 +120,76 @@ func TestCompileShapeErrors(t *testing.T) {
 	}
 }
 
+// TestCompileIsPeakWindowMustBeALiteral 验证高峰时段必须写成字面量，
+// 而且写法当场就解析一遍。
+//
+// 规则入库时会走 Compile（见 internal/pricing 的 admin），所以这两条在
+// **保存规则**时就会报出来。放到求值时才发现的话，一条写错窗口的规则会先在
+// 库里躺一段时间，然后让每一次用到它的计价失败。
+func TestCompileIsPeakWindowMustBeALiteral(t *testing.T) {
+	// 字面量，以及会被折成字面量的常量拼接。
+	for _, source := range []string{
+		`{"prompt": isPeak("08:00-22:00") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("08:00-12:00,22:00-02:00") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("08:00" + "-22:00") ? 1.0 : 2.0}`,
+	} {
+		if _, err := Compile(source); err != nil {
+			t.Errorf("%q 应当编得过: %v", source, err)
+		}
+	}
+
+	// 运行期才知道的窗口：与 tier 的档位名同一条理由，规则保存时没法给人看。
+	if _, err := Compile(`{"prompt": isPeak(region) ? 1.0 : 2.0}`); err == nil {
+		t.Error("运行期才知道的高峰时段应当被拒绝")
+	}
+
+	// 写法错的窗口。每一条都点出一种写法：缺小时、不是钟点、分钟不是两位、
+	// 只有一个时刻、参数个数不对。
+	for _, source := range []string{
+		`{"prompt": isPeak("8-22") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("25:00-26:00") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("08:60-09:00") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("8:5-9:00") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("08:00") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("08:00-22:00,") ? 1.0 : 2.0}`,
+		`{"prompt": isPeak() ? 1.0 : 2.0}`,
+		`{"prompt": isPeak("08:00-22:00", "23:00-23:30") ? 1.0 : 2.0}`,
+	} {
+		if _, err := Compile(source); err == nil {
+			t.Errorf("%q 应当编不过", source)
+		}
+	}
+}
+
+// TestCompileRejectsFullDayWindowAlongsideOthers 验证全天段不许与其他段并列，
+// 而且**在编译期**就被拒。
+//
+// 这条检查原先是留给日历在求值时判的，后来上移到这里：预留那一步走的是
+// `EvalWorstCase`，它把三元条件整个换成 `__worst(真, 假)`（见 worst.go 的
+// worstPatcher），`isPeak` 在预留时根本不被求值。留在求值期的后果是这条规则
+// 存得进库、预留成功、结算时才炸；而流式路上那一炸只留一行日志、随后释放
+// 预扣，客户端正常收完不付钱。
+//
+// 单独一段的 `"00:00-00:00"`（跨满一整天）仍然编得过：那不是写错，日历那边
+// 本来就把两端相等解释成整天。
+func TestCompileRejectsFullDayWindowAlongsideOthers(t *testing.T) {
+	err := compileErr(t, `{"prompt": isPeak("00:00-00:00,08:00-12:00") ? 1.0 : 2.0}`)
+	if err.Reason != ReasonShape {
+		t.Errorf("原因 = %s，期望 %s（%v）", err.Reason, ReasonShape, err.Err)
+	}
+	// 报错要说清是哪一段、为什么不行：写规则的人照着这一句改得动。
+	if !strings.Contains(err.Error(), "全天") {
+		t.Errorf("错误信息应当说清那是全天时段: %v", err)
+	}
+	if !errors.Is(err, ErrCalendarRequired) {
+		t.Errorf("期望 ErrCalendarRequired，得到 %v", err)
+	}
+
+	if _, err := Compile(`{"prompt": isPeak("00:00-00:00") ? 1.0 : 2.0}`); err != nil {
+		t.Errorf("单独一段全天时段应当编得过: %v", err)
+	}
+}
+
 // TestCompileNestedTier 验证 tier 可以嵌在别的表达式里。
 func TestCompileNestedTier(t *testing.T) {
 	cases := []string{
