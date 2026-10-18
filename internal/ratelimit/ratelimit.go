@@ -363,10 +363,15 @@ func (l *Limiter) Close() error {
 // 启动期用它。不探的话，那个信号要等到第一个请求才出现，而「还没来过请求」
 // 与「共享存储不该有这一行」在 /metrics 上没有任何分别。
 //
-// 探测失败**不**表示这个实例不能用（见 Allow 的降级），也不计入
-// RateLimitStoreErrors——那个数说的是「有多少次判定退回了进程内计数」，
-// 而这一次还没有请求。没有任何共享存储时它把信号写成近似并返回 nil：
-// 那个部署本来就只有进程内计数。
+// 探测失败**不**表示这个实例不能用（见 Allow 的降级）。失败那一次计进
+// RateLimitStoreErrors：那个数说的是「共享存储调用失败的次数」，而探活就是
+// 一次这样的调用。它也要计，是因为启动期还没有请求——不记这一次，「配了但
+// 连不上」与「压根没配」在 /metrics 上给出完全相同的两行（仪表都是 0、
+// 计数器都是 0），而 docs/metrics.md 教运维按这两行分辨这两件事，读出来
+// 正好是让人不去查的那一种。
+//
+// 没有任何共享存储时它把信号写成近似并返回 nil，也不计那一次：那个部署
+// 本来就只有进程内计数，没有任何一次存储调用失败过。
 func (l *Limiter) Probe(ctx context.Context) error {
 	if l.store == nil {
 		l.mark(false)
@@ -378,6 +383,9 @@ func (l *Limiter) Probe(ctx context.Context) error {
 
 	err := l.store.Ping(cctx)
 	l.mark(err == nil)
+	if err != nil && l.metrics != nil {
+		l.metrics.RateLimitStoreErrors.Inc()
+	}
 	return err
 }
 
