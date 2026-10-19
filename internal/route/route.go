@@ -75,8 +75,11 @@ type Candidate struct {
 	// LastErrorCode 两个字段。少带一个，判据就退化成「有没有数值」，
 	// 而那是本包早先自己重写的那一遍（见 issue #204）。
 	//
-	// 读侧只填本包用得上的列（Remaining / Unit / Confidence / ResetsAt /
-	// Kind / LastProbeAt / LastErrorCode）；窗口那几列不填，本包不看它们。
+	// 读侧填本包用来看的列（Remaining / Unit / Confidence / ResetsAt /
+	// Kind / LastProbeAt / LastErrorCode），再加上 LastProbeAttemptAt 与
+	// LastProbeStatus——后两列本包的判据不看，它们随候选一起交给
+	// OnAttempt 的实现（额度探测按尝试时刻决定该不该再探）。窗口那几列
+	// 不填，本包不看它们。
 	//
 	// 余量只在**同一单位**下与其他候选可比（见 scoreQuota）：Remaining 是
 	// 裸数字，Unit 说明它按什么计，Confidence 说明这个数有多可信——本包按
@@ -401,6 +404,22 @@ type Router struct {
 	// （渠道级优先于平台级、一条都没配过时按同名处理）只有一份实现，在
 	// internal/catalog；这里只问一句「这个渠道上这个规范名该叫什么」。
 	Aliases ModelAliases
+
+	// OnAttempt 在每一次**真的要向上游发起调用**之前被调用，参数是这次
+	// 尝试的候选。
+	//
+	// 它存在是为了让「用到时触发」这类副作用有一个落点：额度探测在渠道被
+	// 真正用到的这一刻才值得去问上游（见 internal/channels 的 QuotaProbe）。
+	// 放在本包是因为只有这里知道「哪一条候选被选中、什么时候发出去」；
+	// 而本包仍然不碰数据库，副作用由实现方注入。
+	//
+	// # 实现必须立刻返回
+	//
+	// 它站在请求热路径上，返回之前不应该查库、发 HTTP 或等待任何锁以外的
+	// 东西。异步与否是实现的事，本包只负责在发出去之前调用一次。
+	//
+	// 别名翻不出来的尝试不会触发它：那一次请求没有发出去，也就算不上用到。
+	OnAttempt func(Candidate)
 }
 
 // ModelAliases 把规范模型名翻成某个渠道上的上游模型名，并给出这条别名上
@@ -1460,6 +1479,9 @@ func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.R
 			return result, aliasErr
 		}
 
+		if r.OnAttempt != nil {
+			r.OnAttempt(c)
+		}
 		started := r.now()
 		resp, err := exec.Chat(ctx, c.Channel, attempt)
 		result.Attempts = append(result.Attempts, Attempt{

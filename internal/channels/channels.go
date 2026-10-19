@@ -429,6 +429,8 @@ SELECT
     q.health,
     q.resets_at,
     q.last_probe_at,
+    q.last_probe_attempt_at,
+    q.last_probe_status,
     q.last_error_code
   FROM channels c
   LEFT JOIN LATERAL (
@@ -497,8 +499,13 @@ type candidateRow struct {
 	// 「余量未知」有两种，一种是从来没观测过（上游不支持查询额度），
 	// 另一种是观测过却没拿到数值。少带这两列就分不出它们，判据退化成
 	// 「有没有数值」。
-	lastProbeAt   sql.NullTime
-	lastErrorCode sql.NullString
+	lastProbeAt sql.NullTime
+	// lastProbeAttemptAt / lastProbeStatus 不参与 Routable：前者是触发侧的
+	// TTL 时钟（成功、查不到、出错都更新），后者把「查不到」与「探测失败」
+	// 分开。读侧带出去是为了让触发判据与排障看的是同一个快照。
+	lastProbeAttemptAt sql.NullTime
+	lastProbeStatus    sql.NullString
+	lastErrorCode      sql.NullString
 }
 
 func scanCandidate(rows *sql.Rows) (candidateRow, error) {
@@ -512,7 +519,8 @@ func scanCandidate(rows *sql.Rows) (candidateRow, error) {
 		&row.cost, &row.cacheHit, &row.cacheMiss,
 		&row.remaining, &row.unit, &row.confidence,
 		&row.probeKind, &row.quotaHealth, &row.resetsAt,
-		&row.lastProbeAt, &row.lastErrorCode,
+		&row.lastProbeAt, &row.lastProbeAttemptAt, &row.lastProbeStatus,
+		&row.lastErrorCode,
 	)
 	if err != nil {
 		return candidateRow{}, fmt.Errorf("读取渠道行失败: %w", err)
@@ -699,6 +707,11 @@ func (row candidateRow) quota() (quota.State, error) {
 		at := row.lastProbeAt.Time
 		state.LastProbeAt = &at
 	}
+	if row.lastProbeAttemptAt.Valid {
+		at := row.lastProbeAttemptAt.Time
+		state.LastProbeAttemptAt = &at
+	}
+	state.LastProbeStatus = row.lastProbeStatus.String
 	if row.resetsAt.Valid {
 		reset := row.resetsAt.Time
 		state.ResetsAt = &reset

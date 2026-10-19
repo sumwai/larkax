@@ -22,6 +22,7 @@ import (
 	"github.com/sumwai/larkax/internal/channel/openaiadapter"
 	"github.com/sumwai/larkax/internal/channel/responsesadapter"
 	"github.com/sumwai/larkax/internal/channel/systemoneadapter"
+	"github.com/sumwai/larkax/internal/quota"
 	"github.com/sumwai/larkax/internal/systemone"
 )
 
@@ -130,6 +131,22 @@ func (e *Executor) ChatStream(ctx context.Context, ch channel.Channel, req *chan
 		return nil, err
 	}
 	return a.ChatStream(ctx, ch, req)
+}
+
+// Quota 查询某个渠道的额度，按 ch.Type 分发。
+//
+// 与 Chat / ChatStream 同一个做法：这里只负责按类型找到适配器、调它一次。
+// 它不在请求路径上——调用方是额度探测的写入侧（见 internal/channels 的
+// QuotaProbe），那条路自己决定什么时候探、要不要等。
+//
+// 未知类型包着 channel.ErrUnknownType 返回；「这家上游没有查询接口」由适配器
+// 返回 channel.ErrUnsupported，两者分得开。
+func (e *Executor) Quota(ctx context.Context, ch channel.Channel) (quota.State, error) {
+	a, err := e.adapter(ch)
+	if err != nil {
+		return quota.State{}, err
+	}
+	return a.Quota(ctx, ch)
 }
 
 // Decide 发起一次决策调用，按 ch.Type 分发。

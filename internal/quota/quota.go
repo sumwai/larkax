@@ -104,6 +104,26 @@ type State struct {
 	// LastProbeAt 是最近一次**实测**（KindAPIQuery）的时刻。自记账与错误
 	// 观测都不动它——它是自记账可信度的衰减基准（见 Merge）。
 	LastProbeAt *time.Time
+
+	// LastProbeAttemptAt 是最近一次**尝试**探测的时刻，不论结果如何：拿到
+	// 实测值、上游没有查询接口（ErrUnsupported）、探测失败都算。
+	//
+	// 它与 LastProbeAt 是两列，因为两者回答的问题不同。LastProbeAt 只记
+	// 成功的实测，而且是 Routable 的判据（余量为 NULL 而它有值时，这个渠道
+	// 被当成「观测过却没拿到数值」排除）；LastProbeAttemptAt 只服务于触发：
+	// 按它与探测间隔判断该不该再探一次。
+	//
+	// 合成一列的话，「查不到」的上游会永远停在「从未探测过」，于是每一条
+	// 命中它的请求都再问一次上游——而这类上游是多数。
+	LastProbeAttemptAt *time.Time
+
+	// LastProbeStatus 是最近一次探测的结论：ok / unsupported / error。
+	//
+	// 空字符串表示还没有探测过（自记账写出来的行就是这一档）。它不参与
+	// 路由判据，只用来分清「查不到」与「探测失败」——两者都会更新
+	// LastProbeAttemptAt，但处置不同：前者是常态，后者要在排障时看得见。
+	LastProbeStatus string
+
 	// UpdatedAt 是最近一次 Merge 的时刻，任何种类的观测都会更新它。
 	UpdatedAt time.Time
 }
@@ -126,6 +146,11 @@ type Observation struct {
 
 	// ErrorCode 是上游给的错误码，用于事后统计哪类错误最常见。
 	ErrorCode string
+
+	// ResetsAt 是上游给出的额度重置时刻。nil 表示这次观测没有给出这个信息，
+	// 合并时保留上一状态的值——「没提」与「确认不会重置」是两件事，后者今天
+	// 没有表达方式，所以空值只按「没提」处理。
+	ResetsAt *time.Time
 
 	// ObservedAt 是这次观测发生的时间。
 	ObservedAt time.Time
@@ -176,6 +201,11 @@ func Merge(prev State, obs Observation, now time.Time, staleAfter time.Duration)
 		next.Kind = obs.Kind
 		next.Estimated = false
 		next.LastProbeAt = &obs.ObservedAt
+		if obs.ResetsAt != nil {
+			// 这次实测带回了重置时刻。没带回时保留旧值：上游这次没提，
+			// 不等于它确认了「不会重置」。
+			next.ResetsAt = obs.ResetsAt
+		}
 		// 实测成功即清掉之前的错误信号：那个信号已经被更新的信息取代了。
 		next.LastErrorCode = ""
 		next.LastErrorAt = nil
