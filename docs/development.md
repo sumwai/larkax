@@ -264,6 +264,11 @@ echo '{"model":"...","messages":[...]}' | \
 日志写不进去时命令整体失败，一行数据都不返回。`--actor` 与 `--reason` 都没有
 默认值——「我写了 --reason」与「我忘了写」在库里必须分得开。
 
+原样采集（`capture_mode = full_consented`）的行在打正文之前会按这一行的
+`user_id` 与 `request_id` 再查一次授权：到期或撤销之后，那一行的正文不显示，
+机器可读输出里 `raw_withheld` 为真、`skeleton` 为 `null`。查库失败按「没有授权」
+处理，所以失败的方向是扣下正文。
+
 同一个 `request_id` 可能有多行（请求与响应各一行，重试也可能各一行），
 `get` 全部按 `created_at` 升序打出来。`skeleton_truncated` 为真的那条会额外
 说明它被降级成了摘要层——一份被截断的骨架与一份完整的骨架在肉眼下长得一样。
