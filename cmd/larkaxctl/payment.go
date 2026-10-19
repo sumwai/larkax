@@ -283,7 +283,7 @@ func paymentEnabled(ctx context.Context, db *sql.DB) (bool, error) {
 	return enabled, nil
 }
 
-// paymentReceipt 是一张支付单的回执。
+// paymentReceipt 是一张支付单的回显。
 type paymentReceipt struct {
 	// Verdict 是首行结论（「已下单」「未改动」「现状」）。
 	Verdict string
@@ -295,9 +295,9 @@ type paymentReceipt struct {
 	ChannelStatus *payment.Status
 }
 
-// printPayment 打印一张支付单的回执。
+// printPayment 打印一张支付单的回显。
 //
-// 与提现回执同一类（一栏一行）：金额、状态与单据号是人工对账时要逐项核的东西，
+// 与提现回显同一类（一栏一行）：金额、状态与单据号是人工对账时要逐项核的东西，
 // 挤成一行反而难读。
 func printPayment(w io.Writer, r paymentReceipt) {
 	tw := newTableWriter(w)
