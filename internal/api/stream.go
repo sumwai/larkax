@@ -960,9 +960,9 @@ func (s *responsesStream) errorFrame(w io.Writer, err error) error {
 // 两处必须是同一个顺序、同一批内容（与非流式的 output[].content[].annotations
 // 也是同一批）。
 //
-// 存进列表的是**折成协议形状之后**的那一条（见 responsesAnnotation）：增量帧与
-// 收尾事件里的同一批标注必须是同一个形状，客户端把两处拼起来时才不会看到同一
-// 条标注有两种读法。
+// 存进列表的是**摊平之后**的那一条（见 responsesAnnotation）：增量帧与收尾事件里
+// 的同一批标注必须是同一个形状，客户端把两处拼起来时才不会看到同一条标注有两种
+// 读法。
 //
 // 标注到达时正文项可能还没打开（上游只保证「标注属于这一项」，不保证先有
 // 哪怕一个正文增量）。这里先把项打开：事件里的 output_index / item_id 必须

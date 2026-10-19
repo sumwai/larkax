@@ -1100,11 +1100,13 @@ go run ./cmd/larkaxctl apikey update --id 3 --clear-rpm
 引用标注（`response.output_text.annotation.added`）是**转发**的：它是正文的脚注
 （哪一段对应哪个来源），不参与分词与计费。流式下它是独立的一帧
 （`response.output_text.annotation.added`），非流式下挂在
-`output[].content[].annotations`；两处给的是**同一个形状**，即协议自己那个扁平的
-`url_citation`。非流式那条路上游过来的那一份先被转换层折成了两层（chat 那套非官方
-扩展的形状，见 relayconvert 的 `responseAnnotationToChat`），`internal/api` 在渲染
-响应体与流式事件时摊回扁平那一份（见 `responsesAnnotation`），所以客户端按一个形状
-写解析就够。
+`output[].content[].annotations`。
+
+两处给的是同一个形状，即 Responses 协议本身定义的那一份 url_citation：
+`url`、`title`、`start_index` 这些字段与 `type` 并排。非流式那条路上游过来的
+那一份，先被转换层折成了两层。那是 chat 那套非官方扩展的形状，见 relayconvert 的
+`responseAnnotationToChat`；`internal/api` 在渲染响应体与流式事件时摊平（见
+`responsesAnnotation`），客户端按一个形状写解析就够。
 
 要真的拿到一次 `200`，库里得先有：一个用户与钱包、一把 API Key
 （`larkaxctl apikey create --user <ID 或用户名>`）、一条指向上游的渠道、
