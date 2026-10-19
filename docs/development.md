@@ -1544,25 +1544,69 @@ scripts/check-mutation.sh money route  # 只跑指定的
 
 ### 一个分数要连着它的条件一起读
 
-固定了 workers 还不够。同一个包在两种条件下给出的不是同一个数：
+固定了 workers 还不够。efficacy 的分母只是**被测到的**那些变异体，而「被测到多少」
+取决于跑的是哪些测试；同一个包换了条件就不是同一个数。所以脚本的汇总表除了
+killed / 存活 / 超时 / efficacy，还打 **Not covered** 与 **Mutator coverage**
+（这两个数 gremlins 本来就在打，以前只是没被抄进表）。
 
-| 条件 | `internal/ledger` | Mutator coverage |
-|---|---|---|
-| `LARKAX_DB_DSN` 有效 | `Killed 132, Lived 11, Not covered 27` | 84.12% |
-| `LARKAX_DB_DSN` 不存在 | `Killed 94, Lived 7, Not covered 69` | 59.41% |
+**只看 efficacy 会把「没被碰到」读成「被钉住」。** `internal/keyquota` 那一包是
+活例——8 个变异体，本包用例只碰到 `over()` 这个纯函数：
+
+```
+Killed: 2, Lived: 0, Not covered: 6
+Test efficacy: 100.00%
+Mutator coverage: 25.00%
+```
+
+那个 `100.00%` 说的是「`over()` 的两个变异体被杀掉了」，不是「这一包被钉住了」。
+两栏都照实打、都不进退出码：判据仍然只看存活与超时，覆盖低不是失败，
+是「这一包还有多少没测」。
+
+**覆盖范围说的是「哪些测试参与」，与判据是两件事。** 默认口径是**被测包自己的
+测试**，脚本用的就是默认——`--coverpkg` 与 `--integration` 都不传。这组实验调用
+（`internal/keyquota`，workers=1、系数 10、`--invert-logical`，库建好并迁移过、
+DSN 有效）说明单独传哪个都不改变本仓的结果，只有两个一起才把别的包的测试纳进来：
+
+| 开关 | Gathering coverage | Killed / Not covered | Mutator coverage |
+|---|---|---|---|
+| 默认 | 219ms | 2 / 6 | 25.00% |
+| `--coverpkg=./...` | 269ms | 2 / 6 | 25.00% |
+| `--integration` | 34.16s | 2 / 6 | 25.00% |
+| `--integration --coverpkg=./...` | 37.85s | 8 / 0 | 100.00% |
+
+那 6 条守卫（`Spent` 与 `CheckInTx` 里的 `err != nil`）整个测试集**确实执行得到**：
+`go test -coverpkg=./internal/keyquota/ ./...` 给出 `over 100.0% / Spent 71.4% /
+Check 83.3% / CheckInTx 68.8%`，而这个包自己的测试只有 3.3%。但那条路走不得——
+最后一个开关组合每个变异体跑一遍整个测试集，本仓一套上百个变异体，代价不现实。
+**这一节要解决的不是「范围窄」，而是「范围窄这件事在表上看不出来」。**
+
+**`./<pkg>/` 是递归口径，这一条最容易被读错。** `./internal/ledger/` 一次同时变异
+`internal/ledger` 与子包 `internal/ledger/store`：同一轮的输出里同时有
+`account.go:行:列` 与 `store/reconcile.go:行:列` 两种位置。所以汇总表上
+`internal/ledger` 那一行读作「ledger + store」；脚本在两条都选中时会自己打一行
+注记点明范围重叠（父子两条同时在 `PKGS` 里各占一行）。
+
+DSN 改的正是**递归进来那一半**。实测（两轮都是手工裸 gremlins：
+`gremlins unleash --timeout-coefficient=10 --workers=1 --invert-logical ./internal/ledger/`，
+库先建好并 `migrate up`，两轮只差 DSN）：
+
+| 条件 | Killed | Lived | Not covered | Test efficacy | Mutator coverage |
+|---|---|---|---|---|---|
+| `LARKAX_DB_DSN` 有效 | 476 | 9 | 92 | 98.14% | 84.06% |
+| 不设 `LARKAX_DB_DSN` | 195 | 6 | 376 | 97.01% | 34.84% |
+
+两轮的变异体总数都是 577；两轮的 `Not covered` 是**包含**关系——A 轮那 72 处位置
+每一处都在 B 轮的清单里（B 轮 341 处）。`internal/ledger` 自己的文件
+（`account.go`、`entry.go`、`balance.go`）两轮都是 32 条，一处没变；涨起来的
+284 条全在 `store/` 下（`store/read.go` 9 → 60、`store/reconcile.go` 5 → 60）。
 
 **变的是「有多少变异体被测到」，不是「杀掉的比例」。** 两个 Test efficacy
-几乎一样（92.31% 与 93.07%），差得多的是 Mutator coverage——所以
+几乎一样（98.14% 与 97.01%），差得多的是 Mutator coverage——所以
 **只看 efficacy 会把这件事完全盖住**，要连着 Mutator coverage 一起看。
 
-原因：gremlins 收集覆盖时用的是**整个模块**的测试集，而被测包只是其中一个。
-`internal/ledger/store` 的集成测试要 `LARKAX_DB_DSN`，没设时整包 `t.Skip`，
-于是它给 `internal/ledger` 贡献的那部分覆盖也没了——可测的变异体从 143 个
-掉到 101 个，那 42 个从「被杀/存活」挪进了「不可达」。
-
 修法是**把 DSN 变成硬前提**，而不是去收窄覆盖范围：脚本缺 `LARKAX_DB_DSN`
-时直接拒绝运行。收窄成 `--coverpkg=./<pkg>/` 是错的方向——那是把「被别的包
-测试覆盖到」的部分白白丢掉（可测变异体 143 → 101），数字看着稳了、信息量少了。
+时直接拒绝运行。脚本也不传 `--coverpkg`、不传 `--integration`——上表里单独传
+哪个都不改变本仓的结果，而两个一起的代价不现实。
 
 另一条来源是机器上的别的负载——它挡不住，只能按下面的判据识别：
 

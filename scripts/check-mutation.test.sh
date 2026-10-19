@@ -192,6 +192,7 @@ done
 echo "Killed: 5, Lived: 2, Not covered: 1"
 echo "Timed out: 0, Not viable: 0, Skipped: 0"
 echo "Test efficacy: 71.43%"
+echo "Mutator coverage: 87.50%"
 EOF
   } > "$path"
   chmod +x "$path"
@@ -234,6 +235,26 @@ run() {
 }
 
 dump() { sed 's/^/    | /' "$last_out" | tail -6; }
+
+# table_field <表头标签> <包名> <输出文件>
+#
+# 取汇总表里某一栏的值：**先按表头量出那一栏的起止位置，再按同一位置从数据行上取**。
+#
+# 不按空白切：表是定宽 printf 排出来的（包名一栏 %-20s、数值栏 %7s 之类），
+# 空白项数与列数不是一回事——按项数写死的解析会在某一栏变宽时静默错位，
+# 而「错位」与「这一栏没有值」在断言里长得一样。
+#
+# `LC_ALL=C` 是必须的，不是顺手加的：表头第一栏是汉字「包」，bash 的 printf
+# 按**字节**把它补到 20 位（3 字节 + 17 个空格），数据行那一栏是 ASCII，
+# 于是整张表的列位置只在**字节**口径下与表头对齐。awk 在 UTF-8 locale 下按
+# 字符数 index/substr，每一栏会整体左移 2 位，读到的是**邻栏**的值——
+# 断言于是「每栏都有值」，只是值全是隔壁那一栏的。
+table_field() {
+  LC_ALL=C awk -v label="$1" -v pkg="$2" '
+    !hdr && index($0, label) && /killed/ { start = index($0, label); w = length(label); hdr = 1; next }
+    hdr && $0 ~ ("^" pkg " ") { print substr($0, start, w); exit }
+  ' "$3"
+}
 
 # wait_lock_held <第一个实例的日志> <它的 PID> <最多等多少拍，每拍 0.1s>
 #
@@ -309,6 +330,99 @@ run "$stub_ok" "$tmp/lock1" internal/money
 rc=$?
 if [ "$rc" -eq 0 ]; then ok; else bad "正常输出 —— 应通过，实际退出码 $rc"; dump; fi
 grep -q '全部跑成' "$last_out" || bad "正常输出 —— 通过时也要说清「全部跑成」"
+
+# 1b. 汇总表要连着「有多少变异体没被碰到」一起打（#769）。
+#
+#     efficacy 的分母只是**被测到的**那些变异体。internal/keyquota 刚进清单
+#     那一轮的实际输出是 Killed 2 / Lived 0 / Not covered 6，efficacy 100.00%、
+#     Mutator coverage 25.00%——那个 100% 说的是「`over()` 的两个变异体被杀掉了」，
+#     不是「这一包被钉住了」。桩件照抄的就是这一轮。
+#
+#     这一条同时钉住「数字照实打、不拦」：Mutator coverage 只有 25% 仍然**通过**。
+#     覆盖率不进判据——这一条要解决的只是「范围窄这件事在表上看不出来」。
+stub_lowcov="$tmp/gremlins-lowcov"
+{
+  stub_head
+  cat <<'EOF'
+echo "Killed: 2, Lived: 0, Not covered: 6"
+echo "Timed out: 0, Not viable: 0, Skipped: 0"
+echo "Test efficacy: 100.00%"
+echo "Mutator coverage: 25.00%"
+EOF
+} > "$stub_lowcov"
+chmod +x "$stub_lowcov"
+run "$stub_lowcov" "$tmp/lock1b" internal/keyquota
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "低覆盖的包 —— 应通过（覆盖率不进判据），实际退出码 $rc"; dump; fi
+grep -q 'Not covered' "$last_out" || bad "低覆盖的包 —— 表头要有 Not covered 这一栏"
+grep -q 'Mutator coverage' "$last_out" || bad "低覆盖的包 —— 表头要有 Mutator coverage 这一栏"
+# 逐栏按表头量出来的列取值：新两栏要打出来，而且**打在对的栏里**。
+# 只断言「输出里有 6 与 25.00%」不够——两栏写反、或塞进别的栏里，一样能过。
+for pair in "killed:2" "存活:0" "超时:0" "Not covered:6" "Mutator coverage:25.00%" "efficacy:100.00%"; do
+  label="${pair%%:*}"; want="${pair#*:}"
+  got=$(table_field "$label" internal/keyquota "$last_out" | tr -d ' ')
+  if [ "$got" = "$want" ]; then
+    ok
+  else
+    bad "低覆盖的包 —— 「$label」那一栏应是 $want，实际读到「$got」"
+  fi
+done
+
+# 1c. 只有老那四行、没有 Not covered / Mutator coverage：按「认不出输出」处理。
+#
+#     这两栏现在上了表，读不出来时表上会留两个空格子，而空格子看起来像
+#     「这两个数不存在」，不像「没读到」。版本是钉住的，所以真出现这种情况
+#     更可能是格式变了——那时照旧不许当成通过。
+stub_oldfmt="$tmp/gremlins-oldfmt"
+{
+  stub_head
+  cat <<'EOF'
+echo "Killed: 8, Lived: 2, Not covered: 3"
+echo "Timed out: 0, Not viable: 0, Skipped: 0"
+echo "Test efficacy: 80.00%"
+EOF
+} > "$stub_oldfmt"
+chmod +x "$stub_oldfmt"
+run "$stub_oldfmt" "$tmp/lock1c" internal/money
+rc=$?
+if [ "$rc" -eq 1 ]; then ok; else bad "少了新两行 —— 应失败，实际退出码 $rc"; dump; fi
+grep -q '认不出' "$last_out" || bad "少了新两行 —— 应报出是「认不出输出」"
+
+# 1d. 清单里父子两条同时选中时，要说清范围是重叠的（#769）。
+#
+#     包路径是递归口径：`./internal/ledger/` 会把子包 internal/ledger/store 的
+#     变异体一起跑，于是 store 在表上各算一次。不说的话，那两行会被读成互不
+#     相干的两个包，而左边那一行其实读作「ledger + store」。
+#     **这句话从 PKGS 算出来**，所以两个方向都要钉：都选中时要说，只选子包时不说。
+run "$stub_ok" "$tmp/lock1d" internal/ledger internal/ledger/store
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "父子两条同时选中 —— 应通过，实际退出码 $rc"; dump; fi
+grep -q 'internal/ledger 含 internal/ledger/store' "$last_out" \
+  || bad "父子两条同时选中 —— 要说明 internal/ledger 那一行含子包 store"
+if grep -q 'internal/billing 含' "$last_out"; then
+  bad "父子两条同时选中 —— 没选中的 billing / expr 不该被列出来"
+else
+  ok
+fi
+# 只选子包时没有重叠可言：父包这一轮根本没跑。
+run "$stub_ok" "$tmp/lock1d-child" internal/ledger/store
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "只选子包 —— 应通过，实际退出码 $rc"; dump; fi
+if grep -q '范围是重叠的' "$last_out"; then
+  bad "只选子包 —— 不该说重叠（父包这一轮没跑）"
+else
+  ok
+fi
+# 只选父包时也不说：它这一次跑出来的**就是** ledger + store，表上没有第二行
+# 与它重叠，这时说一句「范围重叠」反而会让人以为表里还有另一个 store。
+run "$stub_ok" "$tmp/lock1d-parent" internal/ledger
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "只选父包 —— 应通过，实际退出码 $rc"; dump; fi
+if grep -q '范围是重叠的' "$last_out"; then
+  bad "只选父包 —— 不该说重叠（表里只有它这一行）"
+else
+  ok
+fi
 
 # 2. 一个变异都没跑到。**这是本自测存在的理由**：
 #    它以前被判为「全部跑成」，而 0.00% efficacy 看着像真实的低分。
@@ -469,8 +583,12 @@ else
 fi
 
 # 12. 缺 LARKAX_DB_DSN：必须拒绝运行，而不是跑出一批不可比的数字。
-#     internal/ledger/store 的集成测试会整包被 t.Skip，而它给别的包贡献的
-#     那部分覆盖也跟着没了——同一个包的可测变异体会少掉四成。
+#     internal/ledger/store 的集成测试缺它时整包被 t.Skip，而那个包在 PKGS
+#     清单里有自己的一行——那一行等于没测（Killed 0、Lived 0）。
+#     它还会连带改掉别的行的数：`internal/ledger` 那一条是**递归**口径
+#     （`./internal/ledger/` 同时选中子包 store），store 的变异体全落进
+#     Not covered，于是 ledger 那一行的 Not covered 也涨上去。
+#     机制与实测见 docs/development.md「一个分数要连着它的条件一起读」。
 env -u LARKAX_DB_DSN GREMLINS="$stub_ok" GREMLINS_VERSION="$PINNED" LOCK_FILE="$tmp/lock12" \
   bash "$SCRIPT" internal/money >"$last_out" 2>&1
 rc=$?
@@ -479,10 +597,11 @@ grep -q '没有 LARKAX_DB_DSN' "$last_out" || bad "缺 DSN —— 应报出是�
 grep -q 't.Skip' "$last_out" || bad "缺 DSN —— 应说明 store 会被整包跳过"
 
 # 13. **不许**用 --coverpkg 把覆盖范围收窄。
-#     这是走过一遍的错路：收窄确实让数字稳定（不再随 DSN 变），但代价是把
-#     「被别的包测试覆盖到」的那部分丢掉——internal/ledger 的可测变异体从
-#     143 个掉到 101 个，而表面上只是数字变小了一点，没有任何提示。
-#     真正的变量是 DSN，那就固定 DSN（第 12 条），不要砍范围。
+#     它单独并不改变「哪些测试参与」——实测 internal/keyquota：默认与
+#     `--coverpkg=./...` 给同一组数（见 docs/development.md
+#     「一个分数要连着它的条件一起读」那张表），所以命令行里没有它。
+#     而把它收窄成 `./<pkg>/` 只会让表上的覆盖数变小，且看不出为什么小。
+#     这一条要解决的是「范围窄在表上看不出来」，不是去调范围。
 #     桩件把收到的参数打出来，这里断言 --coverpkg 不在其中。
 stub_args="$tmp/gremlins-args"
 {
@@ -492,6 +611,7 @@ printf '%s\n' "$*" > "$ARGS_OUT"
 echo "Killed: 5, Lived: 2, Not covered: 1"
 echo "Timed out: 0, Not viable: 0, Skipped: 0"
 echo "Test efficacy: 71.43%"
+echo "Mutator coverage: 87.50%"
 EOF
 } > "$stub_args"
 chmod +x "$stub_args"
@@ -500,7 +620,7 @@ ARGS_OUT="$tmp/args.txt" LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_args" GREMLINS
 rc=$?
 if [ "$rc" -eq 0 ]; then ok; else bad "记录参数 —— 应通过，实际退出码 $rc"; dump; fi
 if grep -q -- '--coverpkg' "$tmp/args.txt" 2>/dev/null; then
-  bad "覆盖范围被收窄了 —— 收窄会丢掉别的包贡献的覆盖（收到：$(cat "$tmp/args.txt" 2>/dev/null)）"
+  bad "命令行里冒出 --coverpkg —— 它单独不改变哪些测试参与，收窄只会让覆盖数变小（收到：$(cat "$tmp/args.txt" 2>/dev/null)）"
 else
   ok
 fi
@@ -569,12 +689,14 @@ case "$*" in
     echo "Killed: 3, Lived: 1, Not covered: 9"
     echo "Timed out: 282, Not viable: 0, Skipped: 0"
     echo "Test efficacy: 75.00%"
+    echo "Mutator coverage: 30.77%"
     ;;
   *)
     echo " LIVED CONDITIONALS_BOUNDARY at money.go:103:8"
     echo "Killed: 8, Lived: 1, Not covered: 3"
     echo "Timed out: 0, Not viable: 0, Skipped: 0"
     echo "Test efficacy: 88.89%"
+    echo "Mutator coverage: 75.00%"
     ;;
 esac
 EOF
