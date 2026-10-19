@@ -404,9 +404,10 @@ func (s *Store) PurgeDeletion(ctx context.Context, ref, confirm string) (Deletio
 	if result.KeysRevoked, err = rowsAffected(res); err != nil {
 		return DeletionResult{}, err
 	}
-	if err := tx.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		`SELECT count(*) FROM api_keys WHERE user_id = $1`, row.id,
-	).Scan(&result.KeysTotal); err != nil {
+	).Scan(&result.KeysTotal)
+	if err != nil {
 		return DeletionResult{}, fmt.Errorf("统计用户 %s 的 API Key 失败: %w", row.username, err)
 	}
 
@@ -430,10 +431,11 @@ func (s *Store) PurgeDeletion(ctx context.Context, ref, confirm string) (Deletio
 		return DeletionResult{}, err
 	}
 
-	if err := tx.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		`SELECT count(*) FROM ledger_entries WHERE account = $1`,
 		ledger.UserAccount(row.id).String(),
-	).Scan(&result.LedgerEntries); err != nil {
+	).Scan(&result.LedgerEntries)
+	if err != nil {
 		return DeletionResult{}, fmt.Errorf("统计用户 %s 的账本分录失败: %w", row.username, err)
 	}
 

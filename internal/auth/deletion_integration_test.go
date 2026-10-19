@@ -43,9 +43,9 @@ func newDeletionUser(ctx context.Context, t *testing.T, db *sql.DB, status, emai
 	return u
 }
 
-func seedWallet(t *testing.T, db *sql.DB, userID int64, balance, frozen string) {
+func seedWallet(ctx context.Context, t *testing.T, db *sql.DB, userID int64, balance, frozen string) {
 	t.Helper()
-	if _, err := db.ExecContext(t.Context(), `
+	if _, err := db.ExecContext(ctx, `
 		INSERT INTO user_wallets (user_id, asset, balance, frozen)
 		VALUES ($1, 'CNY', $2::numeric, $3::numeric)`, userID, balance, frozen,
 	); err != nil {
@@ -53,9 +53,9 @@ func seedWallet(t *testing.T, db *sql.DB, userID int64, balance, frozen string) 
 	}
 }
 
-func seedLedgerEntry(t *testing.T, db *sql.DB, userID int64, txnID string) {
+func seedLedgerEntry(ctx context.Context, t *testing.T, db *sql.DB, userID int64, txnID string) {
 	t.Helper()
-	if _, err := db.ExecContext(t.Context(), `
+	if _, err := db.ExecContext(ctx, `
 		INSERT INTO ledger_entries (txn_id, account, amount, entry_type, memo)
 		VALUES ($1, $2, 1, 'adjustment', '销户用例')`,
 		txnID, fmt.Sprintf("user:%d", userID),
@@ -80,11 +80,12 @@ func TestDeletionRequestBlocksKeysAndRevertRestoresThem(t *testing.T) {
 		t.Fatalf("创建 key 失败: %v", err)
 	}
 	authOK := func() error {
-		_, err := store.Authenticate(ctx, request(ctx, "x-api-key", created.Plaintext))
-		return err
+		_, authErr := store.Authenticate(ctx, request(ctx, "x-api-key", created.Plaintext))
+		return authErr
 	}
 
-	if err := authOK(); err != nil {
+	err = authOK()
+	if err != nil {
 		t.Fatalf("刚创建的 key 就认证失败: %v", err)
 	}
 
@@ -97,15 +98,17 @@ func TestDeletionRequestBlocksKeysAndRevertRestoresThem(t *testing.T) {
 			mark.FromStatus, mark.ToStatus)
 	}
 
-	if err := authOK(); err == nil {
+	err = authOK()
+	if err == nil {
 		t.Fatal("打标之后 key 还能用")
 	} else if !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("打标之后的失败不是「凭证无效」那一类: %v", err)
 	}
 
 	var keyStatus string
-	if err := db.QueryRowContext(ctx,
-		`SELECT status FROM api_keys WHERE id = $1`, created.ID).Scan(&keyStatus); err != nil {
+	err = db.QueryRowContext(ctx,
+		`SELECT status FROM api_keys WHERE id = $1`, created.ID).Scan(&keyStatus)
+	if err != nil {
 		t.Fatalf("读 key 状态失败: %v", err)
 	}
 	if keyStatus != keyStatusActive {
@@ -175,7 +178,7 @@ func TestDeletionRefusesNonZeroBalance(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			u := newUser(ctx, t, db, UserStatusActive)
-			seedWallet(t, db, u.ID, tc.balance, tc.frozen)
+			seedWallet(ctx, t, db, u.ID, tc.balance, tc.frozen)
 
 			_, err := store.RequestDeletion(ctx, u.Username)
 			if err == nil {
@@ -210,7 +213,7 @@ func TestPurgeChecksBalanceAgain(t *testing.T) {
 	db := testDB(ctx, t)
 	store := New(db)
 	u := newUser(ctx, t, db, UserStatusActive)
-	seedWallet(t, db, u.ID, "0", "0")
+	seedWallet(ctx, t, db, u.ID, "0", "0")
 
 	if _, err := store.RequestDeletion(ctx, u.Username); err != nil {
 		t.Fatalf("打标失败: %v", err)
@@ -243,9 +246,9 @@ func TestPurgeAnonymizesAndKeepsFinancialRows(t *testing.T) {
 
 	const email = "purgeme@example.com"
 	u := newDeletionUser(ctx, t, db, UserStatusActive, email, "要销户的人")
-	seedWallet(t, db, u.ID, "0", "0")
-	seedLedgerEntry(t, db, u.ID, "00000000-0000-8000-8000-000000000001")
-	seedLedgerEntry(t, db, u.ID, "00000000-0000-8000-8000-000000000002")
+	seedWallet(ctx, t, db, u.ID, "0", "0")
+	seedLedgerEntry(ctx, t, db, u.ID, "00000000-0000-8000-8000-000000000001")
+	seedLedgerEntry(ctx, t, db, u.ID, "00000000-0000-8000-8000-000000000002")
 
 	// 两把 key：一把 active、一把此前就 disabled。前者要被作废，后者保留它
 	// 原来的状态——「此前停用过」也是一条该留下的记录。
@@ -257,28 +260,32 @@ func TestPurgeAnonymizesAndKeepsFinancialRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("创建 disabled key 失败: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `
-		UPDATE api_keys SET status = 'disabled' WHERE id = $1`, disabled.ID); err != nil {
+	_, err = db.ExecContext(ctx, `
+		UPDATE api_keys SET status = 'disabled' WHERE id = $1`, disabled.ID)
+	if err != nil {
 		t.Fatalf("停用 key 失败: %v", err)
 	}
 
 	// 两条用户态插件 KV、两条采集授权（一条有效、一条早就撤销过）。
-	if _, err := db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO plugin_kv (plugin_key, user_id, key, value) VALUES
-			('demo', $1, 'a', '1'), ('demo', $1, 'b', '2')`, u.ID); err != nil {
+			('demo', $1, 'a', '1'), ('demo', $1, 'b', '2')`, u.ID)
+	if err != nil {
 		t.Fatalf("写插件 KV 失败: %v", err)
 	}
 	const revokedAt = "2026-10-01T00:00:00Z"
-	if _, err := db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO capture_consents
 			(user_id, scope, request_id, consent_text, consent_version, expires_at, revoked_at)
 		VALUES ($1, 'single_request', 'req-1', '同意', 1, now() + interval '1 day', NULL),
 		       ($1, 'single_request', 'req-2', '同意', 1, now() + interval '1 day', $2::timestamptz)`,
-		u.ID, revokedAt); err != nil {
+		u.ID, revokedAt)
+	if err != nil {
 		t.Fatalf("写采集授权失败: %v", err)
 	}
 
-	if _, err := store.RequestDeletion(ctx, u.Username); err != nil {
+	_, err = store.RequestDeletion(ctx, u.Username)
+	if err != nil {
 		t.Fatalf("打标失败: %v", err)
 	}
 	result, err := store.PurgeDeletion(ctx, u.Username, u.Username)

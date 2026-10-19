@@ -73,9 +73,9 @@ func TestUserDeleteLifecycle(t *testing.T) {
 		t.Fatalf("user create 的 stdout 不是 ID: %q", created.stdout)
 	}
 	t.Cleanup(func() {
-		if _, err := db.ExecContext(context.WithoutCancel(ctx),
-			`DELETE FROM users WHERE id = $1`, id); err != nil {
-			t.Logf("清理用户 %d 失败: %v", id, err)
+		if _, cleanupErr := db.ExecContext(context.WithoutCancel(ctx),
+			`DELETE FROM users WHERE id = $1`, id); cleanupErr != nil {
+			t.Logf("清理用户 %d 失败: %v", id, cleanupErr)
 		}
 	})
 	if r := runOnce(t, runUserUpdate, []string{
@@ -85,20 +85,23 @@ func TestUserDeleteLifecycle(t *testing.T) {
 	}
 
 	// 钱包、账本、插件 KV 与一把真 key：销户之后它们各自的处置都能核对。
-	if _, err := db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO user_wallets (user_id, asset, balance, frozen)
-		VALUES ($1, 'CNY', 0, 0)`, id); err != nil {
+		VALUES ($1, 'CNY', 0, 0)`, id)
+	if err != nil {
 		t.Fatalf("建钱包失败: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO ledger_entries (txn_id, account, amount, entry_type, memo)
 		VALUES ('00000000-0000-8000-8000-000000000003', $1, 1, 'adjustment', '销户用例')`,
-		"user:"+strconv.FormatInt(id, 10)); err != nil {
+		"user:"+strconv.FormatInt(id, 10))
+	if err != nil {
 		t.Fatalf("写账本分录失败: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO plugin_kv (plugin_key, user_id, key, value) VALUES ('demo', $1, 'k', 'v')`,
-		id); err != nil {
+		id)
+	if err != nil {
 		t.Fatalf("写插件 KV 失败: %v", err)
 	}
 	key, err := auth.New(db).Create(ctx, auth.CreateParams{UserID: id})
@@ -137,7 +140,8 @@ func TestUserDeleteLifecycle(t *testing.T) {
 	}
 
 	// ── 再打标；--confirm 写错时什么都不写 ─────────────────────────
-	if r := runOnce(t, runUser, []string{"delete", "request", "--user", name}); r.err != nil {
+	r = runOnce(t, runUser, []string{"delete", "request", "--user", name})
+	if r.err != nil {
 		t.Fatalf("第二次打标失败: %v", r.err)
 	}
 	r = runOnce(t, runUser, []string{
@@ -194,7 +198,8 @@ func TestUserDeleteLifecycle(t *testing.T) {
 			t.Errorf("user get 里没有 %q:\n%s", want, r.stdout)
 		}
 	}
-	if r := runOnce(t, runUser, []string{"get", "--user", newName}); r.err != nil {
+	r = runOnce(t, runUser, []string{"get", "--user", newName})
+	if r.err != nil {
 		t.Fatalf("按新用户名读不到: %v", r.err)
 	}
 
