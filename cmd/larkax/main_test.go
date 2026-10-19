@@ -742,7 +742,7 @@ func TestReloadLoopCoalescesQueuedSignals(t *testing.T) {
 		return nil
 	}
 
-	var logs bytes.Buffer
+	var logs syncBuffer
 	go reloadPluginsOnSignal(ctx, sigs, reload, slog.New(slog.NewTextHandler(&logs, nil)))
 	<-reloaded
 
@@ -774,7 +774,7 @@ func TestReloadLoopContinuesAfterFailure(t *testing.T) {
 		return errors.New("库连不上")
 	}
 
-	var logs bytes.Buffer
+	var logs syncBuffer
 	go reloadPluginsOnSignal(ctx, sigs, reload, slog.New(slog.NewTextHandler(&logs, nil)))
 
 	for i := 0; i < 2; i++ {
@@ -788,9 +788,9 @@ func TestReloadLoopContinuesAfterFailure(t *testing.T) {
 	if got != 2 {
 		t.Fatalf("两次信号触发了 %d 次装载，期望 2 次", got)
 	}
-	if !strings.Contains(logs.String(), "插件热更新失败") {
-		t.Errorf("装载失败该留下一条错误日志，实际日志：\n%s", logs.String())
-	}
+	// 日志在 reload 返回之后才落笔（见 reloadPluginsOnSignal 的 switch），
+	// 所以等到它真的出现再读；syncBuffer 保证这次读与那一次写不并发。
+	waitForLog(t, &logs, "插件热更新失败")
 	if strings.Contains(logs.String(), "插件系统未启用") {
 		t.Errorf("这是一次失败，不该被说成「没启用」：\n%s", logs.String())
 	}
@@ -810,20 +810,14 @@ func TestReloadLoopReportsDisabledSeparately(t *testing.T) {
 		return assembly.ErrPluginsDisabled
 	}
 
-	var logs bytes.Buffer
+	var logs syncBuffer
 	go reloadPluginsOnSignal(ctx, sigs, reload, slog.New(slog.NewTextHandler(&logs, nil)))
 	sigs <- syscall.SIGHUP
 	<-reloaded
 
-	// 等循环把那一条日志写完：reload 返回后 switch 才落笔，这里用一个短的
-	// 轮询等它，而不是假设「reloaded 一到，日志就在了」。
-	deadline := time.Now().Add(time.Second)
-	for !strings.Contains(logs.String(), "插件系统未启用") && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if !strings.Contains(logs.String(), "插件系统未启用") {
-		t.Errorf("没启用时该在日志里说清楚，实际：\n%s", logs.String())
-	}
+	// 等循环把那一条日志写完：reload 返回后 switch 才落笔，而 syncBuffer 让
+	// 这次读与那次写不并发。
+	waitForLog(t, &logs, "插件系统未启用")
 	if strings.Contains(logs.String(), "插件热更新失败") {
 		t.Errorf("「没启用」不该被记成一次失败：\n%s", logs.String())
 	}
