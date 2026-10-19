@@ -166,8 +166,9 @@ func reconcileWithInterval(t *testing.T, db *sql.DB, interval time.Duration) *Re
 //
 // limit：`More` 由**多读一行**得出，不由 `len(Runs) == limit` 推断。这两者在
 // 「这一页刚好有 limit 条、后面没有了」这一格上分道扬镳：按行数推断会误报「后面
-// 还有」，而那一句会让人去翻一份其实已经读完的清单。所以两条都要判：limit=1 时
-// More 为真，limit 足够大时 More 为假、条数等于库里的行数。
+// 还有」，而那一句会让人去翻一份其实已经读完的清单。所以三种 limit 都要判：
+// limit=1 时 More 为真；limit 足够大时 More 为假、条数等于库里的行数；limit 恰好
+// 等于总行数时 More 同样为假——最后这一格正是上面说的那一格。
 func TestReconcileRunsOrderAndLimit(t *testing.T) {
 	db := testDB(t)
 	seed(t, db, "100")
@@ -217,5 +218,18 @@ func TestReconcileRunsOrderAndLimit(t *testing.T) {
 	if !page.Runs[0].StartedAt.Equal(all.Runs[0].StartedAt) {
 		t.Errorf("limit=1 读回的是 %s，最新的一行是 %s",
 			page.Runs[0].StartedAt, all.Runs[0].StartedAt)
+	}
+
+	// 刚好装满一页：limit 与总行数相等，也就是「这一页刚好有 limit 条、后面没有
+	// 了」。按行数推断会在这一格上报 true，而这正是本节要挡的那一件事。
+	exact, err := New(db).ReconcileRuns(context.Background(), total)
+	if err != nil {
+		t.Fatalf("读对账运行记录失败: %v", err)
+	}
+	if len(exact.Runs) != total {
+		t.Fatalf("limit=%d 时应当读回 %d 行，读回 %d 行", total, total, len(exact.Runs))
+	}
+	if exact.More {
+		t.Errorf("limit=%d 恰好装满一页、后面没有下一页，More 却是 true", total)
 	}
 }
