@@ -703,16 +703,24 @@ func TestResponsesAnnotationShapeIsSameOnBothPaths(t *testing.T) {
 // 只有 url_citation 会被摊平：其余类型没有折过，客户端拿到的就是上游那一份。
 //
 // 上游的标注类型不止 url_citation（Responses 协议里还有 file_citation 这些）。
-// 我们不知道它们的字段长什么样。多摊一次就会让字段少一层，
-// 而那一层是协议对客户端的承诺。两条路的行为一样，摊平都在共用的
+// 别的类型我们没有折过，多认一种就等于替上游解释它的字段，
+// 而标注的字段集归上游决定。两条路的行为一样，摊平都在共用的
 // responsesAnnotation 里。
+//
+// 下面这个输入是**造出来的**，上游不会这么给：真实的 file_citation 没有
+// url_citation 这一层。带上它，是为了让「type 必须是 url_citation」那一条判据
+// 真的被读到——只删掉那一行判据，内层就会被摊出来（type 变成 url_citation），
+// 这个用例随即变红；如果输入里没有这一层，删掉判据它照样绿。
 func TestResponsesOtherAnnotationTypesPassThrough(t *testing.T) {
 	h, _, chatter := newTestHandler()
 	res := responsesResult()
 	res.Response.Message.Content = []channel.ContentBlock{{
 		Type: "text", Text: "你好",
 		Annotations: []map[string]any{{
-			"type": "file_citation", "file_id": "file-1", "filename": "a.txt", "index": 3,
+			"type": "file_citation",
+			"url_citation": map[string]any{
+				"file_id": "file-1", "filename": "a.txt", "index": 3,
+			},
 		}},
 	}}
 	chatter.result = res
@@ -727,7 +735,10 @@ func TestResponsesOtherAnnotationTypesPassThrough(t *testing.T) {
 	}
 	got := soleAnnotation(t, dig(t, body, "output", "0", "content", "0", "annotations"))
 	assertAnnotation(t, got, map[string]any{
-		"type": "file_citation", "file_id": "file-1", "filename": "a.txt", "index": 3,
+		"type": "file_citation",
+		"url_citation": map[string]any{
+			"file_id": "file-1", "filename": "a.txt", "index": 3,
+		},
 	})
 }
 
