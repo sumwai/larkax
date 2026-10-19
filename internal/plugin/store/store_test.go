@@ -1355,3 +1355,109 @@ func hasKey(regs []plugin.Registration, key string) bool {
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 }
+
+// ── 热更新 ────────────────────────────────────────────────────────────
+
+// 判据：重新装载读到的是**最新一代**，装上了的那一行被写回 ok。
+//
+// 断言落在具体的版本名上，不是「变了」：加载器在一个 key 里取代次最高的那一行，
+// 而热更新的全部意义就是让线上从 1.0.0 那一行换到 2.0.0 那一行。
+func TestReloadRegistrySwitchesToNewGeneration(t *testing.T) {
+	db := testDB(t)
+	clearPlugins(t, db)
+	ctx := context.Background()
+	key := uniqueKey("reload-switch")
+	insertPlugin(t, db, key, "1.0.0", StatusActive, 0)
+
+	reg, err := New(db).ReloadRegistry(ctx, discardLogger(), allCaps())
+	if err != nil {
+		t.Fatalf("重新装载失败: %v", err)
+	}
+	p, ok := reg.Get(key)
+	if !ok {
+		t.Fatalf("插件 %s 该在注册表里", key)
+	}
+	if p.Meta.Version != "1.0.0" {
+		t.Fatalf("第一次装载的版本 = %q，期望 1.0.0", p.Meta.Version)
+	}
+	if row := rowsFor(t, db, key)[0]; row.lastLoadResult.String != LoadResultOK {
+		t.Errorf("装上了该写回 %s，实际 %q", LoadResultOK, row.lastLoadResult.String)
+	}
+
+	// 发布新一代并启用它。旧的一行仍是 active（Enable 只抬最高的一代），
+	// 所以这一条同时钉住「同一个 key 里取代次最高的那一行」。
+	insertPlugin(t, db, key, "2.0.0", StatusActive, 1)
+
+	reg, err = New(db).ReloadRegistry(ctx, discardLogger(), allCaps())
+	if err != nil {
+		t.Fatalf("第二次重新装载失败: %v", err)
+	}
+	p, ok = reg.Get(key)
+	if !ok {
+		t.Fatalf("插件 %s 该在注册表里", key)
+	}
+	if p.Meta.Version != "2.0.0" {
+		t.Fatalf("重新装载之后版本 = %q，期望 2.0.0（仍停在 1.0.0 说明没重新读表）",
+			p.Meta.Version)
+	}
+	rows := rowsFor(t, db, key)
+	for _, row := range rows {
+		if row.lastLoadResult.String != LoadResultOK {
+			t.Errorf("读过的那一行（%s）该写回 ok，实际 %q", row.version, row.lastLoadResult.String)
+		}
+	}
+}
+
+// 判据：有一个插件编译不过时**整批不发布**，且只有它那一行被写回 failed。
+//
+// 这两半必须一起断言：只判「返回错误」的话，一个先发布一半、再返回错误的实现
+// 也能过；只判「写回 failed」的话，写回对了而换表照样发生了，在途请求与下一个
+// 请求会各看到一份不同的注册表。
+//
+// 好插件那一行**不动**（last_load_result 仍是 NULL）：它还在跑着上一代，
+// 而「这一次没有切换」不是它的失败；把它刷成 failed 会让 list 指错人。
+func TestReloadRegistryRejectsWholeBatchAndMarksOnlyTheBrokenOne(t *testing.T) {
+	db := testDB(t)
+	clearPlugins(t, db)
+	ctx := context.Background()
+	good, broken := uniqueKey("reload-good"), uniqueKey("reload-broken")
+	insertPlugin(t, db, good, "1.0.0", StatusActive, 0)
+	insertPluginRaw(t, db, broken, "1.0.0", StatusActive, 0,
+		goodMeta(broken, "1.0.0"), brokenSource)
+
+	reg, err := New(db).ReloadRegistry(ctx, discardLogger(), allCaps())
+	if err == nil {
+		t.Fatal("有一条编译不过时该返回错误：这一批不能发布")
+	}
+	if reg != nil {
+		t.Fatalf("失败时不该交出注册表，实际拿到 %d 个插件", reg.Len())
+	}
+	if !strings.Contains(err.Error(), broken) {
+		t.Errorf("错误信息 %q 里没有坏插件的 key", err.Error())
+	}
+
+	brokenRow := rowsFor(t, db, broken)[0]
+	if brokenRow.lastLoadResult.String != LoadResultFailed {
+		t.Errorf("坏的那一行该写回 %s，实际 %q", LoadResultFailed, brokenRow.lastLoadResult.String)
+	}
+	if !strings.Contains(brokenRow.lastLoadError.String, broken) {
+		t.Errorf("错误原文里没有插件 key（三个 key 一起重载时读的人要能知道是谁）: %q",
+			brokenRow.lastLoadError.String)
+	}
+	if goodRow := rowsFor(t, db, good)[0]; goodRow.lastLoadResult.Valid {
+		t.Errorf("好插件那一行不该被这次失败的装载改动，实际写成了 %q", goodRow.lastLoadResult.String)
+	}
+}
+
+// clearPlugins 清空加载器会读的两张插件表。
+//
+// 热更新的判据是**整批**：这个包的库里留着别的用例的坏插件时，重新装载会先因为
+// 它失败，而那不是本用例要看的东西。测试之间没有并行，清表不会与谁打架。
+func clearPlugins(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, stmt := range []string{`DELETE FROM plugin_activations`, `DELETE FROM plugins`} {
+		if _, err := db.ExecContext(context.Background(), stmt); err != nil {
+			t.Fatalf("清空插件表失败: %v", err)
+		}
+	}
+}

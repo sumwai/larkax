@@ -33,10 +33,12 @@ package assembly
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sumwai/larkax/internal/api"
@@ -120,14 +122,16 @@ type App struct {
 	// 丢弃的计数，而「一条快照都没写进去」与「没有请求」在日志里长得一样。
 	Snapshots *snapshotwire.Collector
 
-	// Plugins 是启动时从 plugins 表加载出来的注册表，plugin.enabled 为
-	// false 时为 nil。
+	// Plugins 是**当前发布**的插件注册表，plugin.enabled 为 false 时为 nil。
 	//
 	// 它已经挂在请求路径上：五个挂载点都接在入口与网关里（onRequest 见
 	// internal/api 的 runRequestHook，其余四个见同文件的 pluginHooks 与
 	// gateway.Hooks）。两条路各自只跑自己那条路上会发生的那几个——onResponse
 	// 只在非流式那条路上跑，onStream 只在流式那条路上跑。
-	Plugins *plugin.Registry
+	//
+	// 拿的是持有者而不是一份注册表：SIGHUP 热更新换的是里面的指针（见
+	// ReloadPlugins），而一次请求在开始时取一次，整个请求都用那一份。
+	Plugins *plugin.Holder
 
 	// PluginLimits 是插件每次调用的限额，来自 settings 表。
 	//
@@ -144,6 +148,10 @@ type App struct {
 	//
 	// 为 nil 时表示这个 App 没有限流器（worker 角色：它不接推理流量）。
 	RateLimiter *ratelimit.Limiter
+
+	// pluginReload 是收到 SIGHUP 时重新装载注册表要用的那一点依赖。
+	// 插件系统没启用（或这个角色不装插件）时为 nil，见 ReloadPlugins。
+	pluginReload *pluginReloader
 }
 
 // RegisterInternalOps 把本包在**内部监听**上的只读端点挂到 mux 上。
@@ -173,11 +181,70 @@ func (a *App) Close() error {
 	return a.RateLimiter.Close()
 }
 
-// pluginLoadTimeout 是启动期问 plugins 表的时间上限，读与写共用一个。
+// ErrPluginsDisabled 表示这个进程没有装载插件，因此没有可热更新的注册表。
+//
+// 它不是一个故障：plugin.enabled 关着、或者这个角色根本不接推理流量，都会让
+// ReloadPlugins 返回它。调用方据此把「SIGHUP 收到了，但没有东西要换」说清楚，
+// 而不是记一条像是出了问题一样的错误。
+var ErrPluginsDisabled = errors.New("插件系统未启用")
+
+// ReloadPlugins 重新读库、编译并**原子发布**一份新的注册表。
+//
+// 它是 SIGHUP 那条路的落点（见 cmd/larkax）。成功之后，在途请求继续用它们
+// 开始时取到的那一份，下一个请求走新的一份。
+//
+// 失败时返回错误且**不换表**：这一条与启动路径有意的不同——启动时没有旧表可守，
+// 一个坏插件不该让服务起不来；热更新时有一份正在服务的注册表，所以正确的处置
+// 是这一批不发布、旧的继续服务（见 store.ReloadRegistry）。
+func (a *App) ReloadPlugins(ctx context.Context) error {
+	if a == nil || a.pluginReload == nil {
+		return ErrPluginsDisabled
+	}
+	return a.pluginReload.reload(ctx)
+}
+
+// pluginReloader 是热更新要用的那一点依赖。
+//
+// 它持有与启动期**同一份** store、logger 与能力清单：注册时按「这次装配真的
+// 提供什么」收窄（见 pluginWiring.provided），重新装载不能另算一份——两份清单
+// 迟早不一致，而那种错表现为「插件申请到了、运行期拿到 undefined」。
+type pluginReloader struct {
+	store    *pluginstore.Store
+	logger   *slog.Logger
+	provided []string
+	holder   *plugin.Holder
+
+	// mu 让并发信号排队装载。装载本身只是读库、编译与一次指针替换；串行化
+	// 换来的不是正确性，而是「同一时刻只有一批在编译」。
+	mu sync.Mutex
+}
+
+// reload 是 ReloadPlugins 的实现。
+func (r *pluginReloader) reload(ctx context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// 与启动期同一个上限：这个库现在能不能用，是同一个问题。如果调用方的 ctx
+	// 先结束（收到退出信号），装载跟着放弃，旧注册表不动。
+	ctx, cancel := context.WithTimeout(ctx, pluginLoadTimeout)
+	defer cancel()
+
+	reg, err := r.store.ReloadRegistry(ctx, r.logger, r.provided)
+	if err != nil {
+		return err
+	}
+	r.holder.Store(reg)
+	return nil
+}
+
+// pluginLoadTimeout 是问 plugins 表的时间上限，启动与热更新共用，读与写也共用。
 //
 // 写回这一次加载的结果（store 的 recordLoadResults）走同一个 ctx：它是同一次
-// 启动期装配的后半截——加载器读完表才知道该写什么。另起一个 ctx 只会多出一个
+// 装载的后半截——加载器读完表才知道该写什么。另起一个 ctx 只会多出一个
 // 「写回能比读表多等多久」的参数，而两个上限要按同一件事定：这个库现在能不能用。
+//
+// 热更新用它是同一个理由：一次 SIGHUP 不该被一个黑洞地址拖住，而「多久算连不上」
+// 在两处没有第二种答案。
 //
 // 超时落在读那一步是启动失败（见 buildPlugins 的注释）；落在写回那一步只记日志，
 // 已经装好的注册表不受影响——那是这一片与读表那一处有意的不同。
@@ -385,7 +452,7 @@ func Build(cfg Config) (*App, error) {
 		kv:       pluginstore.NewKV(cfg.DB),
 	}
 
-	plugins, pluginLimits, err := buildPlugins(cfg, logger, wiring)
+	plugins, err := buildPlugins(cfg, logger, wiring)
 	if err != nil {
 		return nil, err
 	}
@@ -516,8 +583,8 @@ func Build(cfg Config) (*App, error) {
 	// 日历与 KV 这一版都接上了（见 wiring）：接上之后插件不再需要自己折算时区，
 	// 也有了自己的持久化存储；接不上时那两项能力**不注入**，而「能不能注入」
 	// 与「注册时允许申请哪些」读的是同一份 wiring（见 pluginWiring.provided）。
-	handler.Plugins = plugins
-	handler.PluginLimits = pluginLimits
+	handler.Plugins = plugins.holder
+	handler.PluginLimits = plugins.limits
 	handler.PluginHost = wiring.host
 	// 幂等记录的读与写走同一个 Store：入口读它、落库层在预留那个事务里写它，
 	// 两边读写的列是同一批（见 internal/idempotency 的包注释）。
@@ -530,9 +597,10 @@ func Build(cfg Config) (*App, error) {
 		Public:       observe.Middleware(handler),
 		Gateway:      gw,
 		Snapshots:    snapshots,
-		Plugins:      plugins,
-		PluginLimits: pluginLimits,
+		Plugins:      plugins.holder,
+		PluginLimits: plugins.limits,
 		RateLimiter:  limiter,
+		pluginReload: plugins.reload,
 	}, nil
 }
 
@@ -618,23 +686,48 @@ func buildRateLimiter(cfg Config, logger *slog.Logger) (*ratelimit.Limiter, erro
 // 与「一个坏插件」不同：读表失败（连接断了、表不在）说明这一份配置整体不可信，
 // 装出来的服务会带着一个空注册表跑，而「插件全都没跑」与「没有插件」在日志里
 // 长得一样。所以那一种在这里直接失败。
-func buildPlugins(cfg Config, logger *slog.Logger, wiring pluginWiring) (*plugin.Registry, sandbox.Limits, error) {
+func buildPlugins(cfg Config, logger *slog.Logger, wiring pluginWiring) (pluginsBuilt, error) {
 	pluginCfg, err := plugin.LoadConfig(cfg.Settings)
 	if err != nil {
-		return nil, sandbox.Limits{}, fmt.Errorf("读取插件配置失败: %w", err)
+		return pluginsBuilt{}, fmt.Errorf("读取插件配置失败: %w", err)
 	}
 	if !pluginCfg.Enabled {
-		return nil, pluginCfg.Limits, nil
+		return pluginsBuilt{limits: pluginCfg.Limits}, nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), pluginLoadTimeout)
 	defer cancel()
 
-	registry, err := pluginstore.New(cfg.DB).LoadRegistry(ctx, logger, wiring.provided())
+	store := pluginstore.New(cfg.DB)
+	provided := wiring.provided()
+	registry, err := store.LoadRegistry(ctx, logger, provided)
 	if err != nil {
-		return nil, sandbox.Limits{}, fmt.Errorf("加载插件失败: %w", err)
+		return pluginsBuilt{}, fmt.Errorf("加载插件失败: %w", err)
 	}
-	return registry, pluginCfg.Limits, nil
+	holder := plugin.NewHolder(registry)
+	return pluginsBuilt{
+		holder: holder,
+		reload: &pluginReloader{
+			store:    store,
+			logger:   logger,
+			provided: provided,
+			holder:   holder,
+		},
+		limits: pluginCfg.Limits,
+	}, nil
+}
+
+// pluginsBuilt 是 buildPlugins 装出来的插件链路。
+//
+// 三样一起返回，不拆成多个返回值：holder 与 reload 要么都有、要么都没有
+// （插件系统关着时都是 nil），而 limits 在关着时也有值（它不做任何事）。
+type pluginsBuilt struct {
+	// holder 是当前注册表；nil 表示插件系统关着。
+	holder *plugin.Holder
+	// reload 让 SIGHUP 能重新装载注册表；nil 与 holder 同步。
+	reload *pluginReloader
+	// limits 是 settings 那四个键映射出来的每次调用限额。
+	limits sandbox.Limits
 }
 
 // pluginWiring 是这次装配**给插件链路接上的东西**。

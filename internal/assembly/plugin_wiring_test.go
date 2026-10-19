@@ -99,7 +99,7 @@ func TestBuildLoadsPluginsWhenEnabled(t *testing.T) {
 	if app.Plugins == nil {
 		t.Fatal("开着的时候该有一份注册表")
 	}
-	if _, ok := app.Plugins.Get(key); !ok {
+	if _, ok := app.Plugins.Load().Get(key); !ok {
 		t.Errorf("刚放进库里的插件 %s 该被装配进注册表", key)
 	}
 
@@ -137,7 +137,7 @@ func TestBuildHasNoRegistryWhenDisabled(t *testing.T) {
 		t.Fatalf("装配失败: %v", err)
 	}
 	if app.Plugins != nil {
-		t.Errorf("关着的时候不该构造注册表，实际装了 %d 个插件", app.Plugins.Len())
+		t.Errorf("关着的时候不该构造注册表，实际装了 %d 个插件", app.Plugins.Load().Len())
 	}
 	if app.PluginLimits != (sandbox.Limits{}) {
 		t.Errorf("关着的时候限额该是零值，实际 %+v", app.PluginLimits)
@@ -157,10 +157,10 @@ func TestBuildSkipsBrokenPluginAtStartup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("一条坏插件不该让装配失败: %v", err)
 	}
-	if _, ok := app.Plugins.Get(good); !ok {
+	if _, ok := app.Plugins.Load().Get(good); !ok {
 		t.Errorf("好的插件 %s 该照常上线", good)
 	}
-	if _, ok := app.Plugins.Get(broken); ok {
+	if _, ok := app.Plugins.Load().Get(broken); ok {
 		t.Errorf("编译不过的插件 %s 不该上线", broken)
 	}
 }

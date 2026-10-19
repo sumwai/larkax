@@ -124,8 +124,12 @@ kv 那一组照宿主给插件的能力铺：get / set / delete，分别对应�
 delete 与 kv 的 set / delete 会改库，要求 LARKAX_MASTER_KEYS 在场——命令不做
 解密，这一条要的是「这台机器带着运维凭证」。
 
-**本版没有热更新**：publish / enable / disable / delete 都只改库，跑着的进程要
-重启才会重新加载。
+**改完要重新加载**：publish / enable / disable / delete 都只改库，跑着的进程不会
+自己发现。对 larkax 进程发 SIGHUP 会重新读库并原子切换（新的一代编译不过时整批
+不发布、旧的继续服务）；重启进程也会重新加载。SIGHUP 是逐进程的，每个实例都要发。
+
+SIGHUP 热更新与重启有一处不同：启动时编译不过的插件会被跳过，其余照常上线；
+SIGHUP 时只要有**一个**插件编译不过，这一批就整个不发布，线上仍是上一份注册表。
 
 退出码与其余子命令一致；key 在库里没有对应行时按「约束冲突」返回 4。
 
@@ -746,7 +750,7 @@ func runPluginPublish(args []string) error {
 	if res.Overwritten {
 		action = "已覆盖（同一版本重新发布）"
 	}
-	_, _ = fmt.Fprintf(humanStdout(), "插件 %s %s，版本 %s，第 %d 代，状态 %s。重启后生效。\n",
+	_, _ = fmt.Fprintf(humanStdout(), "插件 %s %s，版本 %s，第 %d 代，状态 %s。对 larkax 进程发 SIGHUP 后生效。\n",
 		res.Key, action, res.Version, res.Generation, res.Status)
 	if res.Status != pluginstore.StatusActive {
 		_, _ = fmt.Fprintf(humanStdout(), "它还没有生效：%s 不参与注册，用 `larkaxctl plugin enable %s` 启用。\n",
@@ -920,7 +924,7 @@ func runPluginDelete(args []string) error {
 // 抽成函数是为了有一条不连库也能跑的判据：删除本身要连库，而「这一行里有没有
 // 说出删掉了几样东西」正是要钉住的东西（与 printSettingsSetResult 同一个理由）。
 func printPluginDeleteResult(w io.Writer, r pluginstore.Deleted) {
-	_, _ = fmt.Fprintf(w, "已删除插件 %s：%d 个版本、%d 条启用记录、%d 个私有存储的键。重启后生效。\n",
+	_, _ = fmt.Fprintf(w, "已删除插件 %s：%d 个版本、%d 条启用记录、%d 个私有存储的键。对 larkax 进程发 SIGHUP 后生效。\n",
 		r.Key, r.Versions, r.Activations, r.KVKeys)
 }
 
@@ -1252,7 +1256,7 @@ func runPluginSetEnabled(args []string, enable bool) error {
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(humanStderr(), "插件 %s %s。重启后生效。\n", key, done)
+		_, _ = fmt.Fprintf(humanStderr(), "插件 %s %s。对 larkax 进程发 SIGHUP 后生效。\n", key, done)
 		return nil
 	})
 }

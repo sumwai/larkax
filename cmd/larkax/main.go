@@ -131,6 +131,18 @@ func run() error {
 	// 位置与数据库连接池那一处相同，都在 run 的收尾上。
 	defer func() { _ = app.Close() }()
 
+	// 插件热更新走 SIGHUP：重新读库、编译，成功就原子换表。它与退出信号分开
+	// 注册——NotifyContext 收到信号会取消 ctx、开始排空，而热更新要的是接着跑，
+	// 只是换一份注册表。放在监听开始之前：端口一开就该能接这个信号。
+	//
+	// 通道只缓冲一条：连发的信号在装载期间合并成一条待处理（见 reloadPluginsOnSignal）。
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	go reloadPluginsOnSignal(ctx, hup, func(ctx context.Context) error {
+		return app.ReloadPlugins(ctx)
+	}, logger)
+
 	publicSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           app.Public,
@@ -388,6 +400,62 @@ func workerPlaceholder() http.Handler {
 	// 最外层是关联标识：放在其他中间件之前，
 	// 这样被后续中间件拒绝掉的请求也带着 id，能被排查到。
 	return observe.Middleware(mux)
+}
+
+// reloadPluginsOnSignal 收到 SIGHUP 就重新装载插件，直到 ctx 结束。
+//
+// # 为什么收到一条信号后先把通道取空
+//
+// 连着发两次 SIGHUP 说的是同一件事——「库里变了，再读一遍」——而一次重新装载
+// 读到的就是最新的库。所以收到一条之后先把已经排队的取空，只装载一次。
+//
+// 装载**期间**到达的信号仍然会排队，并在装完之后再触发一次装载：它可能落在这次
+// 读库之后，合并掉就漏掉了一次更新。通道只缓冲一条，所以连发再多次，待处理的
+// 也至多一次。
+//
+// # 失败不退出
+//
+// 插件系统坏了不该把进程一起带走：记一条错误日志，继续等下一次信号。旧注册表
+// 一直在服务（见 assembly.App.ReloadPlugins）。
+func reloadPluginsOnSignal(ctx context.Context, sigs <-chan os.Signal, reload func(context.Context) error, logger *slog.Logger) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-sigs:
+			if !ok {
+				return
+			}
+		}
+		if drainSignals(sigs) {
+			return
+		}
+
+		logger.Info("收到 SIGHUP")
+		switch err := reload(ctx); {
+		case errors.Is(err, assembly.ErrPluginsDisabled):
+			logger.Info("插件系统未启用，这一次 SIGHUP 什么都没做")
+		case err != nil:
+			logger.Error("插件热更新失败，继续用当前这一份注册表", "err", err)
+		}
+	}
+}
+
+// drainSignals 取空已经排队的信号，返回通道是否已关闭。
+//
+// 返回「已关闭」而不是继续循环：生产路径上 signal.Stop 不关通道，但测试会用
+// close 表示「不会再有信号了」，而那时还要再装载一次是多余的。
+func drainSignals(sigs <-chan os.Signal) bool {
+	for {
+		select {
+		case _, ok := <-sigs:
+			if !ok {
+				return true
+			}
+		default:
+			return false
+		}
+	}
 }
 
 type namedServer struct {

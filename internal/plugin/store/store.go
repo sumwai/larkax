@@ -166,6 +166,73 @@ func (s *Store) LoadRegistry(ctx context.Context, logger *slog.Logger, provided 
 	return reg, nil
 }
 
+// ReloadRegistry 重新读表、编译，并按**整批换表**的语义返回一份新注册表。
+//
+// # 与 LoadRegistry 的判据差在哪
+//
+// 读的是同一批行、用的是同一份能力清单，区别只在「有插件编译不过」时的处置：
+//
+//   - LoadRegistry 跳过它（服务总得起来，见 load.go）；
+//   - 这里**整批不发布**——调用方手上已经有一份正在服务的注册表，所以一次失败的
+//     热更新应当什么都不改变。跳过坏插件会让那个 key 从线上消失，而它是本来
+//     跑着的那一个。
+//
+// 失败时错误里带着第一条失败的插件；每一行的原因另经日志与写回单独落地。
+//
+// # 写回
+//
+// 全部通过时与 LoadRegistry 一样把读过的那几行刷成 ok；失败时**只写失败的那几
+// 行**（结果写成 failed、原文落在 last_load_error），其余行不动：它们仍在跑着
+// 上一代，而「这一次没有切换」不是它们的失败。
+//
+// 写回本身失败只记日志，不影响返回值——与 LoadRegistry 同一条理由：注册表已经
+// 建好了，库里的管理面那三列不该把可用的一份丢掉。
+func (s *Store) ReloadRegistry(ctx context.Context, logger *slog.Logger, provided []string) (*plugin.Registry, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	rows, err := s.activeRows(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("读取 plugins 表失败: %w", err)
+	}
+	regs := make([]plugin.Registration, 0, len(rows))
+	for _, r := range rows {
+		regs = append(regs, r.reg)
+	}
+
+	failed := map[string]error{}
+	// 编译一段源码不需要 ctx，也不该收一个：理由与 LoadRegistry 里同一处相同
+	// （sandbox 自己给编译期时限）。
+	//
+	//nolint:contextcheck // 理由见上
+	reg, err := plugin.PublishAll(regs, provided, func(r plugin.Registration, cause error) {
+		failed[r.Key] = cause
+		logger.Error("插件编译失败，这一批没有发布（线上仍是上一份注册表）",
+			"plugin", r.Key, "原因", cause)
+	})
+	if err != nil {
+		recs := make([]loadRecord, 0, len(failed))
+		for _, row := range rows {
+			if cause, ok := failed[row.reg.Key]; ok {
+				recs = append(recs, loadRecord{
+					key: row.reg.Key, version: row.version,
+					result: LoadResultFailed, errorText: cause.Error(),
+				})
+			}
+		}
+		recordLoadResults(ctx, s.db, logger, recs)
+		return nil, err
+	}
+	recordLoadResults(ctx, s.db, logger, loadRecords(rows, nil))
+
+	keys := make([]string, 0, reg.Len())
+	for _, p := range reg.Plugins() {
+		keys = append(keys, p.Key)
+	}
+	logger.Info("插件已重新加载", "已启用", reg.Len(), "插件", strings.Join(keys, "、"))
+	return reg, nil
+}
+
 // loadRecord 是一次加载对**一行**的结果，准备写回 plugins 的那三列。
 //
 // 身份用 (key, version) 而不是 (key, generation)：代次在同一个 key 里不唯一，而
@@ -747,8 +814,9 @@ const publishLockSQL = `SELECT pg_advisory_xact_lock(hashtextextended('plugin:' 
 //     新 version 走的是另一条路（插入新行，状态 pending），那条路上启用与否
 //     由 enable 决定。
 //
-// **本片没有热更新**：覆盖之后库里是新源码，而跑着的进程里还是旧的，要重启
-// 才生效。命令行的输出会把「重启后生效」写出来。
+// **跑着的进程不会自己发现这次发布**：覆盖之后库里是新源码，而进程里还是旧的。
+// 让它换表要靠 SIGHUP（见 ReloadRegistry）或者重启；命令行的输出会把这一条
+// 写出来。
 //
 // # 并发
 //

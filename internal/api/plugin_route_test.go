@@ -7,6 +7,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/gateway"
+	"github.com/sumwai/larkax/internal/plugin"
 	"github.com/sumwai/larkax/internal/route"
 )
 
@@ -147,7 +148,7 @@ func TestOnRouteHookReachesBothEntryPoints(t *testing.T) {
 	reg := pluginRegistry(t, "", `onRoute(ctx) { return undefined; }`)
 
 	withPlugin, _, chatter := newTestHandler()
-	withPlugin.Plugins = reg
+	withPlugin.Plugins = plugin.NewHolder(reg)
 	if rec := post(withPlugin, PathChatCompletions, validBody); rec.Code != http.StatusOK {
 		t.Fatalf("状态码 = %d，响应体 %s", rec.Code, rec.Body)
 	}
@@ -156,7 +157,7 @@ func TestOnRouteHookReachesBothEntryPoints(t *testing.T) {
 	}
 
 	withPlugin, _, chatter = newTestHandler()
-	withPlugin.Plugins = reg
+	withPlugin.Plugins = plugin.NewHolder(reg)
 	chatter.streamResult = &gateway.Result{Events: streamOf(channel.StreamEvent{Kind: "done"})}
 	if rec := post(withPlugin, PathChatCompletions, streamBody); rec.Code != http.StatusOK {
 		t.Fatalf("流式状态码 = %d，响应体 %s", rec.Code, rec.Body)

@@ -235,7 +235,7 @@ func newPluginHarnessWith(t *testing.T, reg *plugin.Registry, aliases pluginAlia
 	h := New(&fakeAuth{user: User{ID: 7}}, gw)
 	h.Version = "v0.1.0-test"
 	h.DefaultAsset = "CNY"
-	h.Plugins = reg
+	h.Plugins = plugin.NewHolder(reg)
 	h.Now = now
 
 	return &pluginHarness{
