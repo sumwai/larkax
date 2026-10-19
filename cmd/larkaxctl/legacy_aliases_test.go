@@ -204,6 +204,9 @@ func TestLegacyPriceVerbAndFlagAliases(t *testing.T) {
 
 	ownerID := createTestUser(t)
 	ownerRef := strconv.FormatInt(ownerID, 10)
+	// --by 必填（谁定的这条价），两次对照给**同一个人**：这一组比的是两个
+	// 写法逐字相同，换一个人就比不出来了。
+	by := createTestUserID(t)
 
 	// 这一组建的规则全部**只适用于一个本用例专属的模型名**。
 	//
@@ -218,7 +221,7 @@ func TestLegacyPriceVerbAndFlagAliases(t *testing.T) {
 	name := uniqueName("rule")
 	created := runOnce(t, runPrice, []string{
 		"add", "--scope", "merchant", "--name", name, "--expr", testExpr, "--owner", ownerRef,
-		"--models", onlyModel,
+		"--models", onlyModel, "--by", by,
 	})
 	if created.err != nil {
 		t.Fatalf("price add 失败: %v", created.err)
@@ -232,18 +235,18 @@ func TestLegacyPriceVerbAndFlagAliases(t *testing.T) {
 		assertIdentical(t,
 			runOnce(t, runPrice, []string{
 				"add", "--scope", "platform", "--name", sameName, "--expr", testExpr,
-				"--models", onlyModel,
+				"--models", onlyModel, "--by", by,
 			}),
 			runOnce(t, runPrice, []string{
 				"create", "--scope", "platform", "--name", sameName, "--expr", testExpr,
-				"--models", onlyModel,
+				"--models", onlyModel, "--by", by,
 			}))
 	})
 
 	t.Run("update 的 --owner 等同于 --user", func(t *testing.T) {
 		assertIdentical(t,
-			runOnce(t, runPrice, []string{"update", "--id", idArg, "--owner", ownerRef}),
-			runOnce(t, runPrice, []string{"update", "--id", idArg, "--user", ownerRef}))
+			runOnce(t, runPrice, []string{"update", "--id", idArg, "--owner", ownerRef, "--by", by}),
+			runOnce(t, runPrice, []string{"update", "--id", idArg, "--user", ownerRef, "--by", by}))
 	})
 
 	t.Run("explain 的 --owner 等同于 --user", func(t *testing.T) {
@@ -274,11 +277,12 @@ func TestLegacyPriceEnableFlagForm(t *testing.T) {
 	setupEnv(t)
 
 	name := uniqueName("rule")
+	by := createTestUserID(t)
 	// --models 收窄到一个专属名字：兜底规则会适用于所有模型，而别的用例
 	// 依赖「某个名字下一条规则都不适用」（见 TestPriceExplainNoRule）。
 	created := runOnce(t, runPrice, []string{
 		"create", "--scope", "platform", "--name", name, "--expr", testExpr,
-		"--models", uniqueName("model"),
+		"--models", uniqueName("model"), "--by", by,
 	})
 	if created.err != nil {
 		t.Fatalf("price create 失败: %v", created.err)
@@ -287,13 +291,17 @@ func TestLegacyPriceEnableFlagForm(t *testing.T) {
 	idArg := strconv.FormatInt(ruleID, 10)
 
 	// 旧形态：停用，再启用。
-	if r := runOnce(t, runPrice, []string{"update", "--id", idArg, "--disable"}); r.err != nil {
+	if r := runOnce(t, runPrice, []string{
+		"update", "--id", idArg, "--disable", "--by", by,
+	}); r.err != nil {
 		t.Fatalf("price update --disable 失败: %v", r.err)
 	}
 	if ruleEnabled(t, db, ruleID) {
 		t.Error("旧形态 --disable 之后规则仍然启用")
 	}
-	if r := runOnce(t, runPrice, []string{"update", "--id", idArg, "--enable"}); r.err != nil {
+	if r := runOnce(t, runPrice, []string{
+		"update", "--id", idArg, "--enable", "--by", by,
+	}); r.err != nil {
 		t.Fatalf("price update --enable 失败: %v", r.err)
 	}
 	if !ruleEnabled(t, db, ruleID) {

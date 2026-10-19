@@ -28,7 +28,7 @@ const pluginShortUsage = `larkaxctl plugin 管理插件。
 用法：
   larkaxctl plugin list
   larkaxctl plugin get <key>
-  larkaxctl plugin publish <文件> [--key <键>] [--priority <整数>]
+  larkaxctl plugin publish <文件> --by <用户> [--key <键>] [--priority <整数>]
   larkaxctl plugin enable <key>
   larkaxctl plugin disable <key>
   larkaxctl plugin delete <key>
@@ -49,7 +49,7 @@ const pluginUsage = `larkaxctl plugin 管理插件。
 用法：
   larkaxctl plugin list
   larkaxctl plugin get <key>
-  larkaxctl plugin publish <文件> [--key <键>] [--priority <整数>]
+  larkaxctl plugin publish <文件> --by <用户> [--key <键>] [--priority <整数>]
   larkaxctl plugin enable <key>
   larkaxctl plugin disable <key>
   larkaxctl plugin delete <key>
@@ -60,6 +60,11 @@ const pluginUsage = `larkaxctl plugin 管理插件。
 插件的 key 与版本写在源码里（export const meta），所以 publish 默认不要求
 --key；只有想让注册名与源码里声明的不一致时才需要它——那种情况下两条路会
 对不上，命令会拒绝。
+
+--by 必填：plugins.created_by 记的是谁写下的这一行，它收 users.id 或用户名
+（与其余命令同一个解析路径），落库记的是那个 id。同一个 (key, version) 重新
+发布（覆盖）时这一栏跟着换成这一次的 --by——覆盖之后这一行装的是这一次的
+源码，读侧那一栏问的就是「写自谁」。
 
 publish **先在沙箱里编译一遍再落库**：编译不过的命令以非零退出，库里不会多出
 一行。
@@ -653,6 +658,10 @@ func runPluginPublish(args []string) error {
 	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
 	key := fs.String("key", "", "")
 	priority := fs.Int("priority", 0, "")
+	// 操作人必填，与 settings set 的 --by 同一条约定（见那个命令里的说明）：
+	// plugins.created_by 记的是谁写下的这一行，而一条不记名的写入等于没有审计
+	// ——允许留空的话，最省事的用法就是永远不填。
+	by := fs.String("by", "", "")
 	if err := parseFlagsAnywhere(fs, args); err != nil {
 		return usageErr(err)
 	}
@@ -663,6 +672,9 @@ func runPluginPublish(args []string) error {
 		return usageErr(errors.New("缺少插件源文件路径"))
 	case fs.NArg() > 1:
 		return usageErr(fmt.Errorf("publish 只接受一个源文件，多出 %q", fs.Arg(1)))
+	}
+	if strings.TrimSpace(*by) == "" {
+		return usageErr(errors.New("缺少 --by：这条命令要记下是谁发布的插件"))
 	}
 	path := fs.Arg(0)
 
@@ -712,6 +724,16 @@ func runPluginPublish(args []string) error {
 
 	var res pluginstore.Result
 	err = withDB(pluginTimeout, func(ctx context.Context, db *sql.DB) error {
+		// 先解析 --by 再发布，与 settings set 同一个理由：plugins.created_by
+		// 是可空外键，但写进去一个不存在的 users.id 会被约束拒掉，报出来的
+		// 是一句数据库的错；在这里解析则是一句「找不到用户」（退出码 4），
+		// 说的是「你写的这个人不在库里」。
+		actor, resolveErr := auth.New(db).ResolveUser(ctx, *by)
+		if resolveErr != nil {
+			return fmt.Errorf("解析 --by 失败: %w", resolveErr)
+		}
+		pub.CreatedBy = actor.ID
+
 		var pubErr error
 		res, pubErr = pluginstore.New(db).Publish(ctx, pub)
 		return pubErr

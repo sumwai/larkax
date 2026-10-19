@@ -103,6 +103,16 @@ func createTestUser(t *testing.T) int64 {
 	return id
 }
 
+// createTestUserID 建一个用户，返回它 ID 的十进制写法。
+//
+// 给「这一次是谁做的」那几个旗标（--by / --actor）：它们收 users.id 或用户名，
+// 而落库那一列上有外键指着 users，所以用例得有一个真的存在的用户——随手编一个
+// 标识会在解析那一步失败，而那条失败说的是「找不到用户」，不是用例想测的东西。
+func createTestUserID(t *testing.T) string {
+	t.Helper()
+	return strconv.FormatInt(createTestUser(t), 10)
+}
+
 // captureStreams 捕获函数执行期间写到 os.Stdout 与 os.Stderr 的内容。
 //
 // 命令把结果打到标准输出/标准错误上，所以「打了什么」只有把这两个流接住

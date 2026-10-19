@@ -507,7 +507,11 @@ go run ./cmd/larkaxctl migrate up
 （指向上游、带凭证）、把上游模型名映射到规范名的别名、一条计价规则。
 `larkaxctl` 的 `model` / `channel` / `alias` / `price` 四组子命令就是干这个的。
 
-下面四条命令按顺序跑完，就有了一条能接请求的链路。示例里的上游是假的
+这四样之外还有一个**前置**：计价规则要记下是谁定的（`--by`），而 `--by` 收的
+是一个**已经存在的用户**，所以第四步会先建一个用户、再建规则。用户本身不在
+这条选路链路上——选路看的是模型、渠道、别名与价——但没有它，那条规则建不出来。
+
+下面四步按顺序跑完，就有了一条能接请求的链路。示例里的上游是假的
 （`https://api.example.com/v1`），换成你自己的即可。
 
 文中 `<...>` 是**占位符**，尖括号本身不要原样粘进 shell：出现在参数位上时
@@ -712,14 +716,21 @@ overrides 不允许覆盖 "messages"：它是调用方发来的正文（允许�
 覆盖与上游名来自**同一条别名行**：渠道级别名命中时用它那条的覆盖，不会回平台级
 那条上再凑一次。
 
-**四、配一条计价规则。** 没有生效的规则时请求会失败，而不是按零价放行：
+**四、配一条计价规则。** 没有生效的规则时请求会失败，而不是按零价放行。
+
+写规则要记下**这条价是谁定的**，所以 `--by` 必填（收用户 ID 或用户名），
+且它填的那个用户**得已经存在于库里**——先建一个：
 
 ```sh
-go run ./cmd/larkaxctl price create --scope platform --name example-price \
+go run ./cmd/larkaxctl user create --name alice
+
+go run ./cmd/larkaxctl price create --scope platform --name example-price --by alice \
   --expr '{"prompt": 0.0000015, "completion": 0.0000075,
            "cache_read": 0.0000002, "cache_write": 0.0000019,
            "reasoning": 0.0000090}'
 ```
+
+缺少 `--by` 时它报参数错（退出码 2），不会按「不记名」落库。
 
 计价项一共五个：`prompt`、`completion`、`cache_read`、`cache_write`、`reasoning`。
 **上游报了哪一项，规则里就必须有哪一项的单价**——少一项不是少收，是这次请求

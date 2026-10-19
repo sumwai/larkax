@@ -155,9 +155,8 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 	}
 
 	// 第一版的改动人就是建它的人：取值来源是 CreateRequest.CreatedBy，
-	// 不需要调用方额外提供任何东西。它今天多半落成 NULL——CLI 的 price create
-	// 不带操作人——但那是「没有人可记」，与「记了一个没做过这件事的人」
-	// 是两回事，所以这里不兜一个编出来的值。
+	// 不需要调用方额外提供任何东西。为 0 时落成 NULL——那是「没有人可记」，
+	// 与「记了一个没做过这件事的人」是两回事，所以这里不兜一个编出来的值。
 	if err = insertRuleVersion(ctx, tx, id, rule.Expr, rule.CreatedBy); err != nil {
 		return 0, err
 	}
@@ -242,6 +241,17 @@ type UpdateRequest struct {
 	ClearEffectiveTo bool
 
 	Enabled *bool
+
+	// ChangedBy 是这次改价是谁做的（users.id）。0 表示不记，库里存 NULL。
+	//
+	// 它只落在版本历史那一行上（pricing_rule_versions.changed_by）——那张表
+	// 记的是「成交价的依据留痕」，改价的人属于这条留痕。规则行自己的
+	// created_by 不跟着换：那记的是这条价是谁定的，与谁改的（见 Update 里
+	// 的说明）不是同一件事。
+	//
+	// 它**不是**一次修改：只给 ChangedBy 而不给别的字段时，这次调用没有要
+	// 改的东西（见 changesAnything 与 ErrNoChanges）。
+	ChangedBy int64
 }
 
 // Update 按 UpdateRequest 修改一条规则。
@@ -328,10 +338,11 @@ func (a *Admin) Update(ctx context.Context, req UpdateRequest) error {
 	// 判据用的是这一行**改之前**的值（current 是上面 FOR UPDATE 读出来的），
 	// 不是「这次有没有传 Expr」：传了一个与现值相同的表达式不算一次改价。
 	if merged.Expr != current.Expr {
-		// UpdateRequest 里没有「谁改的」这一项，所以这里的 changed_by 是 NULL。
-		// 编一个值（例如写 0 或写规则的 created_by）会让审计读到一个**没做过
-		// 这件事的人**，而审计里一条错的归属比一条空的归属坏得多。
-		if err = insertRuleVersion(ctx, tx, req.ID, merged.Expr, 0); err != nil {
+		// changed_by 取自这次调用（UpdateRequest.ChangedBy）。规则行自己的
+		// created_by 不动：那记的是这条价是谁**定**的，而这个人在这次改价
+		// 里可能根本没参与；把它当成改动人写下来，审计会读到一个没做过
+		// 这件事的人，而一条错的归属比一条空的归属坏得多。
+		if err = insertRuleVersion(ctx, tx, req.ID, merged.Expr, req.ChangedBy); err != nil {
 			return err
 		}
 	}
