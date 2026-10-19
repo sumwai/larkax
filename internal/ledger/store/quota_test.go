@@ -110,6 +110,11 @@ func TestReservationRejectedOverKeyQuota(t *testing.T) {
 //
 // 结算之后那一行从 pending 变成 settled，计入的金额也从预留额换成最终额。
 // 这一条与上一条合起来才覆盖了 spentSQL 那个 CASE 的两个分支。
+//
+// **结算额必须与预留额不一样**，这一条才钉得住那个分支：两数相同时，CASE 里
+// 写 `THEN final_amount` 还是 `THEN reserved_amount` 给出的累计花费一模一样，
+// 上面那句「按 final_amount 算」就成了一句没有用例支撑的话。所以这里预留 30、
+// 实际只花 10（预留是上界，实际撞不到它是常态）。
 func TestQuotaCountsSettledFinalAmount(t *testing.T) {
 	db := testDB(t)
 	s := New(db)
@@ -125,18 +130,25 @@ func TestQuotaCountsSettledFinalAmount(t *testing.T) {
 	if reserveErr != nil {
 		t.Fatal(reserveErr)
 	}
-	settle(ctx, t, s, first, billID, "30")
+	settle(ctx, t, s, first, billID, "10")
 
-	// 已结算 30，再要 80 —— 合计 110，超过 100。
-	over := testRequestWithKey(userID, reqID(t), keyID)
-	if _, err := s.SaveReservation(ctx, over, reservation(t, userID, over.RequestID, "80", "CNY")); !errors.Is(err, keyquota.ErrExceeded) {
-		t.Fatalf("已结算 30 之后再要 80 应当超限，得到 %v", err)
+	// 已结算 10，再要 80 —— 合计 90，仍在 100 以内。
+	// 按预留额 30 算的那一版在这里得到 110，会拒掉这一笔。
+	mid := testRequestWithKey(userID, reqID(t), keyID)
+	if _, err := s.SaveReservation(ctx, mid, reservation(t, userID, mid.RequestID, "80", "CNY")); err != nil {
+		t.Fatalf("已结算 10 之后再要 80 应当放行（按预留额 30 算才超限）: %v", err)
 	}
 
-	// 恰好填满：30 + 70 = 100。
+	// 恰好填满：10 + 80 + 10 = 100。
 	exact := testRequestWithKey(userID, reqID(t), keyID)
-	if _, err := s.SaveReservation(ctx, exact, reservation(t, userID, exact.RequestID, "70", "CNY")); err != nil {
-		t.Fatalf("已结算 30 之后再要 70 恰好用满，应当放行: %v", err)
+	if _, err := s.SaveReservation(ctx, exact, reservation(t, userID, exact.RequestID, "10", "CNY")); err != nil {
+		t.Fatalf("再要 10 恰好用满，应当放行: %v", err)
+	}
+
+	// 再多一个最小单位就越界。
+	over := testRequestWithKey(userID, reqID(t), keyID)
+	if _, err := s.SaveReservation(ctx, over, reservation(t, userID, over.RequestID, "0.00000001", "CNY")); !errors.Is(err, keyquota.ErrExceeded) {
+		t.Fatalf("已经用满之后再要一分钱应当超限，得到 %v", err)
 	}
 }
 
@@ -173,6 +185,13 @@ func TestQuotaCountsPendingReservedAmount(t *testing.T) {
 //
 // 上游失败的那一笔被释放掉，钱一分没扣。把它算进累计花费，等于让一次失败
 // 的请求吃掉用户的额度——而那笔钱根本没花出去。
+//
+// 这一个 CASE 的 `ELSE 0` 有两版写法分不出来：`ELSE final_amount`。原因是
+// final_amount 只有 markSettled 一条写路径，而它在**同一条 UPDATE 里**把
+// status 置成 settled（见 store.go 的 markSettled），于是「final_amount 非
+// NULL」蕴含「status 是 settled」；走到 ELSE 的那些行（released）final_amount
+// 恒为 NULL，而 SUM 忽略 NULL，两版同值。下面那条断言钉的就是这件事——谁哪天
+// 在失败行上也写一个 final_amount，它会红，而那正是两版开始分岔的时候。
 func TestQuotaIgnoresReleasedRequests(t *testing.T) {
 	db := testDB(t)
 	s := New(db)
@@ -191,10 +210,67 @@ func TestQuotaIgnoresReleasedRequests(t *testing.T) {
 		t.Fatalf("释放预留失败: %v", err)
 	}
 
+	// 释放那一行的 final_amount 必须是 NULL：额度判定不读它，而 CASE 的
+	// ELSE 分支两版写法也只在「这一格有值」时才分得开（见上面那段）。
+	var final sql.NullString
+	if err := db.QueryRowContext(ctx,
+		`SELECT final_amount FROM billing_requests WHERE request_id = $1`,
+		first.RequestID).Scan(&final); err != nil {
+		t.Fatalf("读释放行的 final_amount 失败: %v", err)
+	}
+	if final.Valid {
+		t.Errorf("释放那一行的 final_amount = %q，期望 NULL——它一分钱都没结算", final.String)
+	}
+
 	// 释放之后额度应当整个回来：再要 100 仍然放行。
 	second := testRequestWithKey(userID, reqID(t), keyID)
 	if _, err := s.SaveReservation(ctx, second, reservation(t, userID, second.RequestID, "100", "CNY")); err != nil {
 		t.Fatalf("上一笔已释放，再要 100 应当放行: %v", err)
+	}
+}
+
+// TestQuotaCountsOnlyThisKeysSpending 钉住 spentSQL 的 `WHERE api_key_id = $1`。
+//
+// 同一个用户的第二把 key 与第一把的额度互不相干：额度是**逐把 key** 设的
+// （见 keyquota 的 limitSQL 注释），一把花掉的钱不该记到另一把头上。
+//
+// 少了那个过滤条件，被漏掉的不只是别的 key：api_key_id 为 NULL 的历史行
+// （补上写入点之前那些，见迁移 00017 的列注释）会并进每一把 key 的汇总。
+//
+// 判据用**同一把用户、额度一样的另一把 key**：第一把花掉 60 之后，第二把
+// 仍要得到完整的 100。
+func TestQuotaCountsOnlyThisKeysSpending(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "1000")
+	spentKey := seedAPIKey(ctx, t, db, userID)
+	otherKey := seedAPIKey(ctx, t, db, userID)
+	limit := "100"
+	setQuotaLimit(ctx, t, db, spentKey, &limit)
+	setQuotaLimit(ctx, t, db, otherKey, &limit)
+
+	// 第一把 key 花掉 60（还挂着 pending）。
+	first := testRequestWithKey(userID, reqID(t), spentKey)
+	if _, err := s.SaveReservation(ctx, first, reservation(t, userID, first.RequestID, "60", "CNY")); err != nil {
+		t.Fatal(err)
+	}
+
+	// 第二把 key 一笔都没花，整份额度都还在。
+	second := testRequestWithKey(userID, reqID(t), otherKey)
+	if _, err := s.SaveReservation(ctx, second, reservation(t, userID, second.RequestID, "100", "CNY")); err != nil {
+		t.Fatalf("另一把 key 一笔都没花，整份 100 都该放行: %v", err)
+	}
+
+	// 而第一把 key 自己仍然只放得下 40。
+	third := testRequestWithKey(userID, reqID(t), spentKey)
+	if _, err := s.SaveReservation(ctx, third, reservation(t, userID, third.RequestID, "40", "CNY")); err != nil {
+		t.Fatalf("已花 60 的 key 再要 40 恰好用满，应当放行: %v", err)
+	}
+	fourth := testRequestWithKey(userID, reqID(t), spentKey)
+	if _, err := s.SaveReservation(ctx, fourth, reservation(t, userID, fourth.RequestID, "0.00000001", "CNY")); !errors.Is(err, keyquota.ErrExceeded) {
+		t.Fatalf("这一把 key 已经用满，再要一分钱应当超限，得到 %v", err)
 	}
 }
 

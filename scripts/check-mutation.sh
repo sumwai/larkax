@@ -57,8 +57,9 @@
 #
 # # 包参数没匹配到包时也要说出来
 #
-# 包参数按后缀匹配 `PKGS`，而那份清单里只有父包——照目录树写出来的名字
-#（例如 internal/billing/expr）一条都匹配不上。**一条都没选中时**脚本已经会报
+# 包参数按后缀匹配 `PKGS`，而 `PKGS` 是手工维护的一份清单、不等于目录树——
+# 照目录树写出来的名字（例如 internal/calendar/store，父包 internal/calendar
+# 在清单里、它自己不在）一条都匹配不上。**一条都没选中时**脚本已经会报
 #「没有选中任何包」；会漏的是**只选中一部分**：匹配到的那几包照常跑、汇总表照出，
 # 少的只是一行，收尾仍打「全部跑成。」。写参数的人以为覆盖了三个包，实际只有两个，
 # 而少验的那一包不会被别的机制补上——CI 里没有 gremlins。
@@ -313,12 +314,14 @@ fi
 PKGS=(
   internal/money
   internal/billing
+  internal/billing/expr
   internal/pricing
   internal/ledger
   internal/ledger/store
   internal/pipeline
   internal/calendar
   internal/quota
+  internal/keyquota
   internal/tokens
   internal/route
   internal/snapshot
@@ -369,7 +372,7 @@ done
 if [ ${#unmatched_filters[@]} -gt 0 ]; then
   echo "⚠ 这些包参数没有匹配到任何包：${unmatched_filters[*]}"
   echo "   包参数按后缀匹配本脚本里的 PKGS 清单，照清单里的名字写，别照目录树猜"
-  echo "   （清单里只有 internal/billing，没有它的子包）。没匹配到的参数对应的包"
+  echo "   （清单是手工维护的，不等于目录树）。没匹配到的参数对应的包"
   echo "   这一轮没跑，所以整轮判为失败。"
 fi
 

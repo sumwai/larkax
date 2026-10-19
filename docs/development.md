@@ -1502,8 +1502,9 @@ scripts/check-mutation.sh money route  # 只跑指定的
 ```
 
 包参数**按后缀匹配脚本里那份包清单**（`scripts/check-mutation.sh` 的 `PKGS`），
-照清单里的名字写，别照目录树猜：清单里只有 `internal/billing`、没有它的子包，
-所以 `scripts/check-mutation.sh internal/billing/expr` 会**一条都不选中**，
+照清单里的名字写，别照目录树猜：`PKGS` 是手工维护的，不等于目录树——
+`internal/calendar/store` 的父包 `internal/calendar` 在清单里、它自己不在，
+所以 `scripts/check-mutation.sh internal/calendar/store` 会**一条都不选中**，
 几秒钟就结束。认出这种情况的判据是那句「没有选中任何包」——看到它就说明
 **这次什么都没检查**，哪怕屏幕上还有一张汇总表的表头。
 
