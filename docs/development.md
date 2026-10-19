@@ -1725,13 +1725,13 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | 包 | killed | 存活 | 超时 | Not covered | Mutator coverage | Test efficacy（递归） | 覆盖率（包内） |
 |---|---|---|---|---|---|---|---|
 | `internal/payment` | 110 | 0 | 0 | 5 | 95.65% | 100.00% | 77.8% |
-| `internal/pricing` | 107 | 0 | 0 | 18 | 85.60% | 100.00% | 90.2% |
 | `internal/pipeline` | 43 | 0 | 0 | 0 | 100.00% | 100.00% | 87.5% |
 | `internal/keyquota` | 2 | 0 | 0 | 6 | 25.00% | 100.00% | 3.3% |
 | `internal/snapshotwire` | 103 | 1 | 0 | 3 | 97.20% | 99.04% | 94.6% |
 | `internal/calendar` | 150 | 2 | 0 | 14 | 91.57% | 98.68% | 97.8% |
-| `internal/ledger` | 476 | 9 | 0 | 92 | 84.06% | 98.14% | 96.1% |
 | `internal/ledger/store` | 431 | 7 | 0 | 60 | 87.95% | 98.40% | 79.8% |
+| `internal/ledger` | 476 | 9 | 0 | 92 | 84.06% | 98.14% | 96.1% |
+| `internal/pricing` | 170 | 4 | 0 | 48 | 78.38% | 97.70% | 86.5% |
 | `internal/route` | 120 | 4 | 0 | 24 | 83.78% | 96.77% | 97.7% |
 | `internal/gateway` | 238 | 9 | 0 | 9 | 96.48% | 96.36% | 95.7% |
 | `internal/snapshot` | 153 | 6 | 0 | 50 | 76.08% | 96.23% | 90.1% |
