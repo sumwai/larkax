@@ -923,8 +923,8 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		}},
 	}
 
-	if len(cases) != 30 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 30 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 31 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 31 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {
