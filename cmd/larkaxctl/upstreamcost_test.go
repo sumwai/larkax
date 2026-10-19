@@ -416,7 +416,7 @@ func TestUpstreamCostUpdateChangesOnlyGivenFields(t *testing.T) {
 		}
 	})
 	if !strings.Contains(stderr, "已更新成本规则") {
-		t.Errorf("回执里没有说清改了哪条：%q", stderr)
+		t.Errorf("回显里没有说清改了哪条：%q", stderr)
 	}
 
 	rules := listCostRules(t, db, channelID)
@@ -526,7 +526,7 @@ func TestUpstreamCostDisableClosesWindow(t *testing.T) {
 	})
 	after := time.Now()
 	if !strings.Contains(stderr, "已停用") {
-		t.Errorf("回执里没有说清停用了哪条：%q", stderr)
+		t.Errorf("回显里没有说清停用了哪条：%q", stderr)
 	}
 
 	rules := listCostRules(t, db, channelID)

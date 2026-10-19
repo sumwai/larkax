@@ -12,14 +12,14 @@ import (
 )
 
 // 这一组用例走的是**命令行的那一条完整路径**：解析旗标 → 账本 → store → 落库 →
-// 回执。它要证明的与账本、store 两层不同：
+// 回显。它要证明的与账本、store 两层不同：
 //
-//   - 回执上逐条分录的形状（金额是定点十进制、科目名、借/贷那一列）
+//   - 回显上逐条分录的形状（金额是定点十进制、科目名、借/贷那一列）
 //   - 幂等键是从哪来的、重跑同一条命令认不认得出来
 //   - 「没经过 approved 就打款」在命令行这一层也是被拒的（退出码 4，不是 1）
 //
 // 金额一律按 money 的定点写法断言（8 位小数）：`10` 与 `10.00000000` 是同一个
-// 数，但回执上打出来的是后者——按前者断言会写成一条恒不成立的判据。
+// 数，但回显上打出来的是后者——按前者断言会写成一条恒不成立的判据。
 
 // runCmd 跑一条命令并接住三个流。
 //
@@ -44,7 +44,7 @@ func mustRun(t *testing.T, run func([]string) error, args ...string) string {
 
 // assertHas 断言输出里包含这几段。
 //
-// 报错时把整份输出打出来：回执是一屏文本，只报「少了哪一段」看不出它是被打错
+// 报错时把整份输出打出来：回显是一屏文本，只报「少了哪一段」看不出它是被打错
 // 了还是根本没打。
 func assertHas(t *testing.T, out string, wants ...string) {
 	t.Helper()
@@ -57,7 +57,7 @@ func assertHas(t *testing.T, out string, wants ...string) {
 
 // txnEntryCount 数某个交易在库里留下了几条分录。
 //
-// 「被拒的动作一个字节都没写」这类判据只有数库里的条数才判得了：被拒时回执上
+// 「被拒的动作一个字节都没写」这类判据只有数库里的条数才判得了：被拒时回显上
 // 什么都不打，而「什么都没打」与「这次根本没跑」在屏幕上是同一个样子。
 func txnEntryCount(t *testing.T, db *sql.DB, txnID string) int {
 	t.Helper()
@@ -141,7 +141,7 @@ func fundMerchantPayable(t *testing.T, db *sql.DB, merchantID int64, amount stri
 
 // ── wallet refund ───────────────────────────────────────────────────────
 
-// 退款：回执逐条列出分录，余额真的加上了，重跑同一条命令不改动任何东西。
+// 退款：回显逐条列出分录，余额真的加上了，重跑同一条命令不改动任何东西。
 func TestWalletRefundReceiptAndReplay(t *testing.T) {
 	setupEnv(t)
 	db := testDB(t)
@@ -168,7 +168,7 @@ func TestWalletRefundReceiptAndReplay(t *testing.T) {
 		t.Errorf("退款之后余额 = %s，期望 10.00000000", got)
 	}
 
-	// 重放：同一把幂等键、同样的参数，回执说「未改动」，余额一分不动。
+	// 重放：同一把幂等键、同样的参数，回显说「未改动」，余额一分不动。
 	again := mustRun(t, runWalletRefund,
 		"--user", owner, "--amount", "10", "--ref", ref, "--memo", "请求失败")
 	assertHas(t, again, "幂等键 "+ref+" 已经退过款，本次未改动。", "此前写入的分录：", "借 user:"+owner)
@@ -195,7 +195,7 @@ func TestWalletRefundReceiptAndReplay(t *testing.T) {
 	}
 }
 
-// 分账退款：给了商户与上游成本时，回执上是四条分录，平台收入那一笔是差额。
+// 分账退款：给了商户与上游成本时，回显上是四条分录，平台收入那一笔是差额。
 func TestWalletRefundWithSplit(t *testing.T) {
 	setupEnv(t)
 	owner := createTestUserID(t)
@@ -262,7 +262,7 @@ func TestWalletRefundRejectsHalfGivenSplit(t *testing.T) {
 
 // ── wallet payout ───────────────────────────────────────────────────────
 
-// 申请：回执列出冻结那一组分录，库里多一行 pending 的单子，重跑不再建单。
+// 申请：回显列出冻结那一组分录，库里多一行 pending 的单子，重跑不再建单。
 func TestWalletPayoutRequestReceiptAndReplay(t *testing.T) {
 	setupEnv(t)
 	db := testDB(t)
@@ -439,7 +439,7 @@ func TestWalletPayoutPaidRefusesUnapproved(t *testing.T) {
 		t.Errorf("被拒之后状态 = %q，期望仍是 pending", got)
 	}
 
-	// 批准 → 打款：回执上是出账那一组分录（贷待付、借通道）。
+	// 批准 → 打款：回显上是出账那一组分录（贷待付、借通道）。
 	approveOut := mustRun(t, runWalletPayout, "approve", "--id", itoa64(id), "--by", merchant)
 	assertHas(t, approveOut, "已批准提现单", "approved（已批准）", "审批人")
 	// 批准不打分录：那一行只是从待审批变成已批准。

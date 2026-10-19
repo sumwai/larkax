@@ -115,7 +115,7 @@ platform_revenue），并在同一个事务里更新 user_wallets.balance。修�
 两者都不由旗标指定。它也不碰冻结额：冻结额不在账本里，调它产生不了分录。
 
 --memo 必填，它是这笔调账事后的解释——调账是唯一没有业务依据的分录，不写原因
-就成了一笔来路不明的钱。它也不接受控制字符：回执打的是原样的原因，而库里那一份
+就成了一笔来路不明的钱。它也不接受控制字符：回显打的是原样的原因，而库里那一份
 会把换行、制表符换成空格，两边因此不是同一个串。--by 必填，记的是**谁调的账**
 （用户 ID 或用户名）：它先
 被解析成一个真实存在的用户，再把用户名与单据号跟在原因后面写进分录的备注，逐字是
@@ -197,7 +197,7 @@ paid 是唯一一个把钱付出去的入口，**它只放行已批准的单子*
 
 **这一族不动余额**：提现动的是分成与待付，商户的用户余额（user 科目）不受影响，所以四条
 命令都不要求那个用户有钱包行。列出提现单的清单命令还没有：要查库里现在有哪些单子，
-暂时只有这一族的回执与直接查 payout_requests 表。
+暂时只有这一族的回显与直接查 payout_requests 表。
 
 钱包必须已经存在：先 wallet create，再 credit / adjust / refund。用户或钱包不存在都退出 4。
 
@@ -476,7 +476,7 @@ func runWalletAdjust(args []string) error {
 		return usageErr(errors.New(
 			"缺少 --memo：调账是唯一没有业务依据的分录，不写清原因，这笔钱事后解释不了"))
 	}
-	// 控制字符在这里挡掉，理由见 checkMemo：回执打的是原样的原因，而库里那一份
+	// 控制字符在这里挡掉，理由见 checkMemo：回显打的是原样的原因，而库里那一份
 	// 过了 sanitizeMemo。
 	if memoErr := checkMemo("--memo", reason); memoErr != nil {
 		return memoErr
@@ -704,20 +704,20 @@ func checkOrderKey(flagName, order string) error {
 
 // checkMemo 拒绝 --memo 里的控制字符。
 //
-// 原因会**原样**进回执，而落库的那一份由 ledger 的 sanitizeMemo 把 \r\n\t 换成
-// 空格——两个串因此不是同一个，报告里写的与账本里记的就对不上。带换行时回执里会
+// 原因会**原样**进回显，而落库的那一份由 ledger 的 sanitizeMemo 把 \r\n\t 换成
+// 空格——两个串因此不是同一个，报告里写的与账本里记的就对不上。带换行时回显里会
 // 多出一行，按 docs/cli-output.md「加一个清单命令」那一节的说法，折出来的行与下
 // 一条记录分不开；ESC 之类则会原样进终端。不带控制字符时两边逐字相同，这道判据把
 // 两者钉成同一份。
 //
-// 不选「回执打清洗后的那一份」：那要么在命令行里抄第二份清洗判据（与 ledger 迟早
+// 不选「回显打清洗后的那一份」：那要么在命令行里抄第二份清洗判据（与 ledger 迟早
 // 分叉），要么让 ledger 为显示开一个出口。原因本来就不该是多行的，拒掉更省事。
 //
 // 判据比 sanitizeMemo 宽（它只处理 \r\n\t）：\x07 这类照样会原样进终端。
 func checkMemo(flagName, memo string) error {
 	if r, bad := hasControlChar(memo); bad {
 		return usageErr(fmt.Errorf(
-			"%s 不能含控制字符（这里是 %q）：回执打的是原样的原因，落库那一份会把"+
+			"%s 不能含控制字符（这里是 %q）：回显打的是原样的原因，落库那一份会把"+
 				"控制字符换成空格，两边就不是同一个串了",
 			flagName, r))
 	}

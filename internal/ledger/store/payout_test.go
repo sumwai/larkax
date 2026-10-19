@@ -966,7 +966,7 @@ func TestApprovePayoutRecordsReviewerAndIsIdempotent(t *testing.T) {
 	}
 
 	// 重跑：库里那一行必须**一个字都没变**——包括审批人与说明。换一个人再批
-	// 一次不许把「谁批的」改成他。（回执上那句「未改动」由调用方渲染。）
+	// 一次不许把「谁批的」改成他。（回显上那句「未改动」由调用方渲染。）
 	again, applied, err := s.ApprovePayout(ctx, ApprovePayoutInput{
 		PayoutID: row.ID, Reviewer: second, Note: "第二次核对",
 	})

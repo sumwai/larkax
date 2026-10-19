@@ -690,8 +690,8 @@ func TestWalletAdjustRejectsBadArgs(t *testing.T) {
 		{"--ref 含换行", args("--ref", "--ref", "ADJ\n1"), "控制字符"},
 		{"--ref 含制表符", args("--ref", "--ref", "ADJ\t1"), "控制字符"},
 		{"--ref 含其它控制字符", args("--ref", "--ref", "ADJ\x071"), "控制字符"},
-		// 原因也会进回执，而落库那一份过了 sanitizeMemo：带控制字符时两边不是
-		// 同一个串，换行还会把「一栏一行」的回执折出一行没有栏名的续行。
+		// 原因也会进回显，而落库那一份过了 sanitizeMemo：带控制字符时两边不是
+		// 同一个串，换行还会把「一栏一行」的回显折出一行没有栏名的续行。
 		{"--memo 含换行", args("--memo", "--memo", "误扣\n补回"), "控制字符"},
 		{"--memo 含制表符", args("--memo", "--memo", "误扣\t补回"), "控制字符"},
 		{"--memo 含 ESC", args("--memo", "--memo", "误扣\x1b补回"), "控制字符"},
