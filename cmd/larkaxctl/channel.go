@@ -34,10 +34,10 @@ const channelShortUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel get --id <渠道 ID>
   larkaxctl channel health [--id <渠道 ID>] [--since <时长或时刻>] [--all]
   larkaxctl channel update --id <渠道 ID> [字段与 create 相同，另可换凭证]
-  larkaxctl channel enable --id <渠道 ID>
-  larkaxctl channel disable --id <渠道 ID>
-  larkaxctl channel delete --id <渠道 ID>
-  larkaxctl channel restore --id <渠道 ID>
+  larkaxctl channel enable|disable --id <渠道 ID>
+  larkaxctl channel delete|restore --id <渠道 ID>
+  larkaxctl channel sync-models --id <渠道 ID>
+  larkaxctl channel upstream-models --id <渠道 ID>
 
 明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。
 create 的 stdout 只有新渠道的 ID；delete 是软删，restore 是它的逆操作。
@@ -65,6 +65,8 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel disable --id <渠道 ID>
   larkaxctl channel delete --id <渠道 ID>
   larkaxctl channel restore --id <渠道 ID>
+  larkaxctl channel sync-models --id <渠道 ID>
+  larkaxctl channel upstream-models --id <渠道 ID>
 
 **明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。**命令行参数会
 出现在 ps 的输出与 shell 历史里。
@@ -123,6 +125,16 @@ restore 是 delete 的逆操作：清掉 deleted_at、把状态置回 enabled，
 健康结论置回 unknown——它上一次的结论是**软删之前**的，不能直接沿用，恢复之后
 报 unknown 的意思是「现在好不好还没人说得出来」。没有处于删除状态的渠道再
 restore 一次不报错（打印「没有处于删除状态」）。
+
+sync-models 从上游拉一次这条渠道的模型清单并落库，需要主密钥（要解出凭证）。
+它拉的是**上游自己的模型名**，存在单独的表里，不写进 channels.models——那一栏
+是选路用的规范名，两者之间隔着别名映射。upstream-models 只读库里那一份，不碰
+网络、不要主密钥。
+
+上游不提供模型列表接口是常态：适配器回「不支持」时 sync-models 照样成功返回
+（退出码 0），只把状态记成 unsupported，**已有清单一行不动**。同一个渠道连续
+同步两次是幂等的：模型名按渠道唯一，第二次不会多出行，只把每行的「最近见到」
+刷新到这一次；上游下线了某个模型时，再同步一次会把它从清单里删掉。
 
 渠道类型必须是已注册的适配器类型；类型写错时错误信息会列出已知的类型。
 --models 至少要有一个：读取路径把 models 当白名单用，空数组的渠道永远选不中。
@@ -193,6 +205,10 @@ func runChannel(args []string) error {
 		return runChannelDelete(rest)
 	case "restore":
 		return runChannelRestore(rest)
+	case "sync-models":
+		return runChannelSyncModels(rest)
+	case "upstream-models":
+		return runChannelUpstreamModels(rest)
 	case "-h", "--help":
 		printUsage(os.Stdout, channelShortUsage)
 		return nil

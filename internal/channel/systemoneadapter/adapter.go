@@ -96,6 +96,9 @@ func (a *Adapter) ChatStream(context.Context, channel.Channel, *channel.Request)
 // responses 的），而这条渠道的 channels.models 记的是「这条渠道支持哪些
 // 规范模型名」。拿前者填后者会把一大批这条表面根本调不动的模型写成可用，
 // 而那条路径上的失败要到请求时才显形。所以不实现，而不是实现成一个会写错的映射。
+//
+// 运营命令 `larkaxctl channel sync-models` 打到这条渠道时收到的是这个
+// ErrUnsupported，命令据此记「上游不支持」，不判成失败。
 func (a *Adapter) ListModels(context.Context, channel.Channel) ([]string, error) {
 	return nil, channel.ErrUnsupported
 }
