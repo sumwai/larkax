@@ -1318,6 +1318,7 @@ func TestWalletListWithoutFilterNamesEveryUser(t *testing.T) {
 // 它与「用户不存在」是两件事（后者退出 4）：一条命令里走错一步的人看到的
 // 应当是「这个用户还没开户」，而不是一个空表头或一句「找不到用户」。
 func TestWalletListForUserWithoutWalletIsEmpty(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 
 	ref := strconv.FormatInt(createTestUser(t), 10)
@@ -1332,6 +1333,7 @@ func TestWalletListForUserWithoutWalletIsEmpty(t *testing.T) {
 
 // TestWalletListUnknownUserIsAConflict 钉住「要查的那一行不在」的退出码。
 func TestWalletListUnknownUserIsAConflict(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 
 	r := runOnce(t, runWallet, []string{"list", "--user", uniqueName("nobody")})
@@ -1349,6 +1351,7 @@ func TestWalletListUnknownUserIsAConflict(t *testing.T) {
 // TestWalletListJSONShape 断言机器可读那一档：金额是**字符串**（过一遍 float64
 // 会丢精度），用户 ID 是数字，没筛到东西时是 `[]` 而不是 null。
 func TestWalletListJSONShape(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 
 	userID := createTestUser(t)

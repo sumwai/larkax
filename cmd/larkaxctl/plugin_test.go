@@ -1332,6 +1332,7 @@ func TestPluginKVGetDocIsMachineReadable(t *testing.T) {
 
 // get 看的是最新一代：加载器只认代次最高的那一行。
 func TestPluginGetShowsNewestGeneration(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 
 	key := uniqueName("cliget")
