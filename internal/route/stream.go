@@ -97,6 +97,9 @@ func (r *Router) chatStreamWithPlan(ctx context.Context, exec StreamExecutor, re
 			return result, aliasErr
 		}
 
+		if r.OnAttempt != nil {
+			r.OnAttempt(c)
+		}
 		started := r.now()
 		events, err := exec.ChatStream(ctx, c.Channel, attempt)
 		result.Attempts = append(result.Attempts, Attempt{

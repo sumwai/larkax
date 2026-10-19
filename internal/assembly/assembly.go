@@ -85,8 +85,8 @@ type Config struct {
 	// Version 是发布版本，写进每个响应的 x-larkax-version 头。
 	Version string
 
-	// Executor 是调上游的能力，由调用方构造。两条路径（chat 与决策）都要能走，
-	// 见 Executor 那个类型的注释。
+	// Executor 是调上游的能力，由调用方构造。三条路径（chat、决策与额度查询）
+	// 都要能走，见 Executor 那个类型的注释。
 	Executor Executor
 
 	// Rules 是计价规则的来源，由调用方构造。
@@ -268,15 +268,19 @@ const (
 	maxProbeIntervalSeconds = 365 * 24 * 60 * 60
 )
 
-// Executor 是装配层要求的上游执行器：chat 与决策两条路都要能走。
+// Executor 是装配层要求的上游执行器：chat、决策与额度查询三条路都要能走。
 //
-// 两个接口嵌在一起，而不是在 Config 上分成两个字段：生产里它们永远是同一个
-// 对象（*upstream.Executor，它按渠道类型查表，两条路共用同一份注册表）。
-// 分成两个字段能装出「只接上一个」的状态，而那种状态的现场是一半路径回 501，
-// 看代码的人却会以为它们本来就是一回事。
+// 三个接口嵌在一起，而不是在 Config 上分成几个字段：生产里它们永远是同一个
+// 对象（*upstream.Executor，它按渠道类型查表，几条路共用同一份注册表）。
+// 分成几个字段能装出「只接上一个」的状态，而那种状态的现场是一半路径回 501
+// 或者额度探测永不发生，看代码的人却会以为它们本来就是一回事。
+//
+// 额度查询那一条复用 internal/channels 声明的 QuotaAdapter：写入侧认的就是
+// 这个契约，装配层再抄一遍只会多一处会漂的签名。
 type Executor interface {
 	gateway.Executor
 	gateway.DecideExecutor
+	channels.QuotaAdapter
 }
 
 // Build 装配一次服务。
@@ -329,6 +333,10 @@ func Build(cfg Config) (*App, error) {
 	}
 
 	staleAfter, err := quotaStaleAfter(cfg.Settings)
+	if err != nil {
+		return nil, err
+	}
+	probeInterval, err := quotaProbeInterval(cfg.Settings)
 	if err != nil {
 		return nil, err
 	}
@@ -392,6 +400,16 @@ func Build(cfg Config) (*App, error) {
 	// 会来自两次不同的读。
 	aliasCatalog := catalog.New(cfg.DB)
 
+	// 额度探测的写入侧。它按渠道查上游额度，写回 channel_quota_state；
+	// 触发点在选路层（见下面 Router.OnAttempt），用的是 settings 里的探测
+	// 间隔。构造失败是启动失败：间隔非正或适配器缺失时，探测要么每一条命中
+	// 都打一次上游，要么永远不会发生，两种在现场都不报错。
+	prober, err := channels.NewQuotaProbe(cfg.DB, cfg.Executor, probeInterval)
+	if err != nil {
+		return nil, fmt.Errorf("装配额度探测: %w", err)
+	}
+	prober.Logger = logger
+
 	gw := &gateway.Gateway{
 		Pipeline: &pipeline.Pipeline{
 			Rules:    cfg.Rules,
@@ -404,7 +422,18 @@ func Build(cfg Config) (*App, error) {
 		// 把规范名翻成上游名。不接这一项的表现是**别名配了不生效**——上游
 		// 收到的永远是规范名，只要两者不同就必然打不通，而现场看到的只是
 		// 上游说这个模型不存在。
-		Router: &route.Router{Now: cfg.Now, Aliases: aliasCatalog},
+		//
+		// OnAttempt 是额度探测的触发点：路由每真正尝试一个渠道之前调它一次。
+		// 探测异步执行、每渠道单飞（见 internal/channels 的 QuotaProbe），
+		// 所以这条闭包只碰内存，不拖慢请求。用闭包而不是方法值：方法值在
+		// 仓库那几道可达性检查里不算一次调用。
+		Router: &route.Router{
+			Now:     cfg.Now,
+			Aliases: aliasCatalog,
+			OnAttempt: func(c route.Candidate) {
+				prober.ProbeIfStale(c)
+			},
+		},
 		// AliasOverrides 是预留要用的那一半：别名上的 max_tokens 覆盖顶掉
 		// 调用方给的那个数，所以预留的输出上界要按覆盖之后的算。不接这一项
 		// 请求会失败（见 gateway.ErrNoAliasOverrideSource）——上界算错的表现
@@ -778,6 +807,28 @@ func (c Config) validate() error {
 	return nil
 }
 
+// quotaProbeInterval 从 settings 读出额度探测的默认间隔。
+//
+// 它是两个量的来源，所以范围检查只写在这里：
+//
+//   - 触发侧按它判断「同一个渠道多久该再探一次」（见 internal/channels 的
+//     QuotaProbe）；
+//   - 自记账的可信度衰减阈值由它导出（见 quotaStaleAfter）。
+//
+// 范围检查在**换算之前**：换算本身会溢出，而溢出绕出来的数看着是正常的
+// （见 minProbeIntervalSeconds / maxProbeIntervalSeconds 上的说明）。
+func quotaProbeInterval(v *settings.Values) (time.Duration, error) {
+	seconds, err := v.Int(probeIntervalKey)
+	if err != nil {
+		return 0, fmt.Errorf("读取额度探测间隔失败: %w", err)
+	}
+	if seconds < minProbeIntervalSeconds || seconds > maxProbeIntervalSeconds {
+		return 0, fmt.Errorf("settings.%s = %d 秒，超出允许范围 [%d, %d] 秒",
+			probeIntervalKey, seconds, minProbeIntervalSeconds, maxProbeIntervalSeconds)
+	}
+	return time.Duration(seconds) * time.Second, nil
+}
+
 // quotaStaleAfter 从 settings 读出额度探测的默认间隔，再导出「实测值开始
 // 显得陈旧」的时长（见 quota.SelfAccountingStaleAfter）。
 //
@@ -787,19 +838,12 @@ func (c Config) validate() error {
 //
 // 间隔配成 0 或负数时拒绝启动而不是回落到某个默认值：阈值也非正时，任何
 // 一次自记账都会立刻被判成陈旧，而它在库里与「配置生效了」长得一样。
-//
-// 范围检查在**换算之前**：换算本身会溢出，而溢出绕出来的数看着是正常的
-// （见 minProbeIntervalSeconds / maxProbeIntervalSeconds 上的说明）。
 func quotaStaleAfter(v *settings.Values) (time.Duration, error) {
-	seconds, err := v.Int(probeIntervalKey)
+	interval, err := quotaProbeInterval(v)
 	if err != nil {
-		return 0, fmt.Errorf("读取额度探测间隔失败: %w", err)
+		return 0, err
 	}
-	if seconds < minProbeIntervalSeconds || seconds > maxProbeIntervalSeconds {
-		return 0, fmt.Errorf("settings.%s = %d 秒，超出允许范围 [%d, %d] 秒",
-			probeIntervalKey, seconds, minProbeIntervalSeconds, maxProbeIntervalSeconds)
-	}
-	staleAfter, err := quota.SelfAccountingStaleAfter(time.Duration(seconds) * time.Second)
+	staleAfter, err := quota.SelfAccountingStaleAfter(interval)
 	if err != nil {
 		return 0, fmt.Errorf("settings.%s 不合法: %w", probeIntervalKey, err)
 	}

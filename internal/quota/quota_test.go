@@ -155,6 +155,30 @@ func TestMergeAPIQueryOverrides(t *testing.T) {
 	}
 }
 
+// 重置时刻跟着实测走：带回来就换成新的，没带回来就保留旧的。
+//
+// 「这次没提」不等于「确认不会重置」——用 NULL 覆盖会让 scoreQuota 的
+// 紧迫度那一半悄悄退回中性分。
+func TestMergeAPIQueryResetsAt(t *testing.T) {
+	oldResets := base.Add(24 * time.Hour)
+	prev := State{ChannelID: 1, Remaining: f(50), Kind: KindAPIQuery, ResetsAt: &oldResets}
+
+	newResets := base.Add(48 * time.Hour)
+	next := Merge(prev, Observation{
+		Kind: KindAPIQuery, Remaining: f(60), ResetsAt: &newResets, ObservedAt: base,
+	}, base, testStaleAfter)
+	if next.ResetsAt == nil || !next.ResetsAt.Equal(newResets) {
+		t.Errorf("带回来时 ResetsAt = %v，期望 %v", next.ResetsAt, newResets)
+	}
+
+	next = Merge(prev, Observation{
+		Kind: KindAPIQuery, Remaining: f(60), ObservedAt: base,
+	}, base, testStaleAfter)
+	if next.ResetsAt == nil || !next.ResetsAt.Equal(oldResets) {
+		t.Errorf("没带回来时 ResetsAt = %v，期望保留 %v", next.ResetsAt, oldResets)
+	}
+}
+
 // 从错误码推断「额度不足」是定性但确定的信号——
 // 它比任何推算都更能说明「现在选它会失败」。
 func TestMergeExhaustedFromError(t *testing.T) {
