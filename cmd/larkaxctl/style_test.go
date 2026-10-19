@@ -728,6 +728,15 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		{"渠道健康逐小时", func(w io.Writer) {
 			printChannelHealthHours(w, []channels.HealthBucket{healthBucket})
 		}},
+		{"渠道上游模型清单", func(w io.Writer) {
+			printChannelUpstreamModels(w, channels.ChannelModels{
+				ChannelID: 1, ChannelName: "示例渠道", Status: channels.ModelSyncSynced,
+				AttemptedAt: at, SyncedAt: at,
+				Models: []channels.StoredModel{{
+					UpstreamModel: "upstream-model-x", FirstSeenAt: at, LastSeenAt: at,
+				}},
+			})
+		}},
 		{"模型清单", func(w io.Writer) {
 			printModelList(w, []catalog.Model{{
 				ID: 7, CanonicalName: "claude-x", DisplayName: "示例模型",
@@ -893,8 +902,8 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		}},
 	}
 
-	if len(cases) != 29 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 29 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 30 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 30 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {

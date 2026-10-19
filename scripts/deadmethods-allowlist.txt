@@ -87,6 +87,10 @@
 # `channels.Admin` 的不变量是「凭证只封不开」，所以出口落在服务端还是命令行要先定（见 #641）。
 # `lib` 的答案是「它是积木」，这一条的答案是「有一张单子在跟」——两档的差别就在这里。
 #
+# 24 之后减了 4（#641）：出口定在运营命令 `larkaxctl channel sync-models`，四个适配器的
+# `Adapter.ListModels` 随之有了生产调用点（`channels.ModelSync` 调 `adapter.ListModels`）。
+# 这道门按方法名数调用语法，所以四条同时不再上报——**是真的接上了**，不是被掩蔽。
+#
 # 48 之后减了 4（#262）：`Registry.NewSession`、`Session.OnRequest`、
 # `Session.OnResponse`、`Session.Failures` 随请求侧的 hook 接上而有了生产调用点。
 # 注意这与 scripts/deadcode-allowlist.txt 那边的情形不同——这四条是**真的接上了**，
@@ -210,10 +214,6 @@ internal/calendar/calendar.go  | Date.IsWeekend                    | lib | 日�
 internal/calendar/memory.go    | MemorySource.AddDay               | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.SetDefaultRange      | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.SetYearState         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
-internal/channel/anthropicadapter/adapter.go | Adapter.ListModels   | gap | channel.Adapter 的契约面：接口方法由各适配器实现；拉取上游模型列表还没有出口，出口落在哪一侧要先定（见 #641）——渠道的核查（create/update 与 doctor 第 3 项）是静态判据、不碰网络，而拉这份列表要有一条能解出明文凭证的路（见 channel.Adapter.ListModels 的注释）。目前只有测试在调它
-internal/channel/openaiadapter/adapter.go | Adapter.ListModels      | gap | channel.Adapter 的契约面：接口方法由各适配器实现；拉取上游模型列表还没有出口，出口落在哪一侧要先定（见 #641）——渠道的核查（create/update 与 doctor 第 3 项）是静态判据、不碰网络，而拉这份列表要有一条能解出明文凭证的路（见 channel.Adapter.ListModels 的注释）。目前只有测试在调它
-internal/channel/responsesadapter/adapter.go | Adapter.ListModels    | gap | channel.Adapter 的契约面：接口方法由各适配器实现；拉取上游模型列表还没有出口，出口落在哪一侧要先定（见 #641）——渠道的核查（create/update 与 doctor 第 3 项）是静态判据、不碰网络，而拉这份列表要有一条能解出明文凭证的路（见 channel.Adapter.ListModels 的注释）。目前只有测试在调它
-internal/channel/systemoneadapter/adapter.go | Adapter.ListModels    | gap | channel.Adapter 的契约面：接口方法由各适配器实现，本适配器回 ErrUnsupported（这条表面不提供模型列表）；拉取上游模型列表还没有出口，出口落在哪一侧要先定（见 #641）——渠道的核查（create/update 与 doctor 第 3 项）是静态判据、不碰网络，而拉这份列表要有一条能解出明文凭证的路（见 channel.Adapter.ListModels 的注释）。目前只有测试在调它
 internal/ledger/account.go     | Account.ID                        | lib | 科目类型的读取面：取后缀而不解释它（与 Type、UserID 成对）；生产走 Type 与 UserID，目前只有测试在调它
 internal/money/money.go        | Amount.ClampZero                  | lib | 金额库的运算面：负数归零；目前只有测试在调它
 internal/money/money.go        | Amount.DivInt                     | lib | 金额库的运算面：按整数相除；目前只有测试在调它

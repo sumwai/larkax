@@ -158,8 +158,8 @@ func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, events 
 
 // ListModels 查询上游可用模型。
 //
-// 目前只有测试在调它：channel.Adapter 的接口方法，生产里还没有拉取上游
-// 模型列表的入口（渠道支持哪些模型由渠道自己的配置给出）。
+// 生产里的唯一调用点是 `larkaxctl channel sync-models`（经 channels.ModelSync）：
+// 那是一次显式同步，把结果落库供人查看，不在请求路径上。
 func (a *Adapter) ListModels(ctx context.Context, ch channel.Channel) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, httpx.Endpoint(ch.BaseURL, "/v1/models"), nil)
 	if err != nil {

@@ -21,6 +21,10 @@
 // 它不在请求热路径上，也不改变 Source 的行为。两个类型读的是同一套列，
 // 由同一批辅助函数解码。
 //
+// 上游模型清单的显式同步在 ModelSync 上（见 modelsync.go）：它同样不在请求
+// 热路径上，是唯一一处为了「去上游拉一份清单」而解出明文凭证的写侧路径。
+// 它不写 channels.models，也不参与选路——清单落在自己的表里，见 00043。
+//
 // # 取一次，不逐个查
 //
 // 候选通常是几个到几十个，一次查询把所有渠道连同健康度、额度一起取回来。
@@ -288,15 +292,23 @@ func (e *DecryptErrors) Unwrap() []error {
 	return out
 }
 
-// decrypt 把一行的密文解成明文凭证。
+// decrypt 把一行的密文解成明文凭证（见 openCredential）。
+func (s *Source) decrypt(envelope []byte) (string, error) {
+	return openCredential(s.sealer, envelope)
+}
+
+// openCredential 把一行的密文解成明文凭证。
 //
 // 错误分类集中在这里：调用方只需要判断 ErrNoMasterKey 与 ErrCredentialCorrupt，
-// 不必知道 internal/credential 的内部错误类型。
-func (s *Source) decrypt(envelope []byte) (string, error) {
-	if s.sealer == nil {
+// 不必知道 internal/credential 的内部错误类型。它有两个调用点——请求路径上的
+// Source.decrypt 与运营命令的 ModelSync——所以分类只能有一份：两处各写一遍时，
+// 「解不开」的成因会在一边被认成钥匙缺失、在另一边被认成密文损坏，而这两种
+// 处置完全不同（补钥匙 / 重新写一次凭证）。
+func openCredential(sealer *credential.Sealer, envelope []byte) (string, error) {
+	if sealer == nil {
 		return "", fmt.Errorf("%w：本进程没有配置主密钥", ErrNoMasterKey)
 	}
-	plaintext, err := s.sealer.Open(envelope)
+	plaintext, err := sealer.Open(envelope)
 	if err != nil {
 		switch {
 		case errors.Is(err, credential.ErrNoKey):

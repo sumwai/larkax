@@ -63,7 +63,8 @@ var tableRenderPaths = []string{
 	"printChannelHealthHours",  // channel health --id 的逐小时明细
 	"printChannelHealthList",   // channel health 的汇总表
 	"printChannelList",
-	"printConsentList", // consent list
+	"printChannelUpstreamModels", // channel upstream-models
+	"printConsentList",           // consent list
 	"printCostTable",
 	"printKeyDetail", // apikey get
 	"printKeyList",
@@ -97,7 +98,8 @@ var emptyListPaths = []string{
 	"printCalendarList",
 	"printChannelHealthList", // channel health：一条渠道都没有
 	"printChannelList",
-	"printConsentList", // consent list
+	"printChannelUpstreamModels", // channel upstream-models：从没同步过
+	"printConsentList",           // consent list
 	"printCostList",
 	"printKeyList",
 	"printModelList",
