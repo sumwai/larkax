@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sumwai/larkax/internal/ledger"
+	"github.com/sumwai/larkax/internal/money"
 )
 
 // seedBareUser 只建 users 那一行，不建钱包、不写分录。
@@ -490,28 +491,150 @@ func TestWalletsReadsSnapshotsInOrder(t *testing.T) {
 	}
 }
 
-// 余额读不出来时**报错**，不给一个夹住的数。
+// 一行的金额读不出来时：**那一行照样回来，只是被标出来**，其余行一个不少，
+// 排序也不受影响。
 //
-// 列是 numeric(20, 8)，比 money 的 int64 宽：999999999999.99999999 是这一列
-// 装得下、而定点数装不下的值。夹住它的话，余额偏小看起来正是「少扣了钱」，
-// 而那是最难查的一类。
-func TestWalletsRejectsUnreadableBalance(t *testing.T) {
+// # 为什么不是整批失败
+//
+// 列是 numeric(20, 8)，比 money 的 int64 宽：999999999999.99999999 是这一列装得下、
+// 而定点数装不下的值（见 #442、#446）。从前这一行会让整条查询报错，于是别人的钱包
+// 一个也看不到——一行的坏数据把整份清单劫持了（#777）。夹住那个数交出去更坏：
+// 余额偏小看起来正是「少扣了钱」，而那是最难查的一类。
+//
+// **把坏行跳过**也不是答案，这条用例正是钉这件事：三行必须回来三行，坏掉的那一行
+// 在对应的 Err 上带着原文。跳过的话 len 就是 2，用例立刻红。
+//
+// 两列各判各的，所以这里特意让「余额坏」的那一行**冻结额是个好值**、「冻结额坏」
+// 的那一行**余额是个好值**：把两列绑在一起判（任一坏就整行给零值）的实现会在这里露出来。
+func TestWalletsMarksUnreadableAmountsAndKeepsOtherRows(t *testing.T) {
 	db := testDB(t)
 	s := New(db)
 	ctx := context.Background()
 
-	userID := seedBareUser(t, db)
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO user_wallets (user_id, asset, balance, frozen)
-		VALUES ($1, 'CNY', 999999999999.99999999, 0)`, userID); err != nil {
-		t.Fatalf("造一行超范围的余额失败: %v", err)
+	good := seedBareUser(t, db)
+	badBalance := seedBareUser(t, db)
+	badFrozen := seedBareUser(t, db)
+
+	const over = "999999999999.99999999" // numeric(20,8) 装得下，money.Amount 装不下
+	for _, row := range []struct {
+		userID          int64
+		balance, frozen string
+	}{
+		{good, "12.34", "0.5"},
+		{badBalance, over, "0.5"},
+		{badFrozen, "12.34", over},
+	} {
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO user_wallets (user_id, asset, balance, frozen)
+			VALUES ($1, 'CNY', $2::numeric, $3::numeric)`,
+			row.userID, row.balance, row.frozen); err != nil {
+			t.Fatalf("造钱包行失败: %v", err)
+		}
+	}
+	// 用完必须删掉：本包的库是全包共用的，留一行读不出来的余额在这里，后面每一个
+	// 碰 user_wallets 的用例都会撞上它（同一个道理见 ledger_test.go 里造溢出那处）。
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(),
+			`DELETE FROM user_wallets WHERE user_id IN ($1, $2, $3)`,
+			good, badBalance, badFrozen)
+	})
+
+	wallets, err := s.Wallets(ctx, nil)
+	if err != nil {
+		t.Fatalf("一行读不出来不该让整份清单失败: %v", err)
 	}
 
-	wallets, err := s.Wallets(ctx, &userID)
-	if err == nil {
-		t.Fatalf("余额读不出来时应当报错，得到 %d 行：%+v", len(wallets), wallets)
+	byUser := make(map[int64]Wallet, 3)
+	order := make([]int64, 0, 3)
+	for _, w := range wallets {
+		byUser[w.UserID] = w
+		switch w.UserID {
+		case good, badBalance, badFrozen:
+			order = append(order, w.UserID)
+		}
 	}
-	if !strings.Contains(err.Error(), "余额") {
-		t.Errorf("错误信息 %q 里没有点出是哪一列", err.Error())
+	if len(order) != 3 {
+		t.Fatalf("本用例的三行只回来 %d 行：%v", len(order), order)
+	}
+	want := []int64{good, badBalance, badFrozen}
+	slices.Sort(want)
+	if !slices.Equal(order, want) {
+		t.Errorf("三行的次序 = %v，期望 %v", order, want)
+	}
+
+	// 好行：两个数都读得出来，两个 Err 都是 nil。
+	if g := byUser[good]; g.BalanceErr != nil || g.FrozenErr != nil {
+		t.Errorf("好行被标了错：balance=%v frozen=%v", g.BalanceErr, g.FrozenErr)
+	} else if g.Balance.String() != "12.34000000" || g.Frozen.String() != "0.50000000" {
+		t.Errorf("好行的余额=%s 冻结=%s，期望 12.34000000 / 0.50000000", g.Balance, g.Frozen)
+	}
+
+	// 余额坏的那一行：只有余额被标，冻结额照常读出来。
+	bb := byUser[badBalance]
+	if bb.BalanceErr == nil {
+		t.Error("超范围的余额没有被标出来")
+	} else if !errors.Is(bb.BalanceErr, money.ErrOverflow) {
+		// 哨兵是给调用方分类用的（命令行按它在那一格上挑标记）；错误里不带
+		// 「哪一行哪一列」——那是这一行自己的字段，见 Wallet 的注释。
+		t.Errorf("余额的错误里没有 ErrOverflow：%v", bb.BalanceErr)
+	}
+	// 原文按列各归各位：这一条同时钉住「哪一列的原文留在哪个字段」，
+	// 只判「有个 Raw 等于那个数」的话，两列串了位也照样绿。
+	// 好的那一列比的是 `0.50000000` 而不是写进去的 `0.5`：原文是**库里那一列
+	// 自己的文本形态**（numeric(20, 8) 存下来是 8 位小数），不是用例写下去的
+	// 那个字面量。
+	if bb.BalanceRaw != over {
+		t.Errorf("余额那一列的原文 = %q，期望库里那一串 %q", bb.BalanceRaw, over)
+	}
+	if bb.FrozenRaw != "0.50000000" {
+		t.Errorf("冻结额那一列的原文 = %q，期望 0.50000000（那一列是好的）", bb.FrozenRaw)
+	}
+	// 标了错的那个字段是零值——文档注释这么写的，调用方照着它判。
+	if !bb.Balance.IsZero() {
+		t.Errorf("读不出来的余额 = %s，期望零值（不能把半个数交出去）", bb.Balance)
+	}
+	if bb.FrozenErr != nil {
+		t.Errorf("同一个钱包里读得出来的那一列被连累标错了：%v", bb.FrozenErr)
+	}
+	if bb.Frozen.String() != "0.50000000" {
+		t.Errorf("同一行的冻结额 = %s，期望照常读出来 0.50000000", bb.Frozen)
+	}
+
+	// 冻结额坏的那一行：镜像，余额照常。
+	bf := byUser[badFrozen]
+	if bf.FrozenErr == nil {
+		t.Error("超范围的冻结额没有被标出来")
+	} else if !errors.Is(bf.FrozenErr, money.ErrOverflow) {
+		t.Errorf("冻结额的错误里没有 ErrOverflow：%v", bf.FrozenErr)
+	}
+	if bf.FrozenRaw != over {
+		t.Errorf("冻结额那一列的原文 = %q，期望库里那一串 %q", bf.FrozenRaw, over)
+	}
+	if bf.BalanceRaw != "12.34000000" {
+		t.Errorf("余额那一列的原文 = %q，期望 12.34000000（那一列是好的）", bf.BalanceRaw)
+	}
+	if !bf.Frozen.IsZero() {
+		t.Errorf("读不出来的冻结额 = %s，期望零值", bf.Frozen)
+	}
+	if bf.BalanceErr != nil {
+		t.Errorf("同一行里读得出来的余额被连累标错了：%v", bf.BalanceErr)
+	}
+	if bf.Balance.String() != "12.34000000" {
+		t.Errorf("同一行的余额 = %s，期望照常读出来 12.34000000", bf.Balance)
+	}
+
+	// 筛一个用户时也一样：库这一侧照常把那一行交出来，只是带着标记。
+	// 「`--user` 遇上读不出来的行仍然报错」是命令行自己判的（它看得见 Err），
+	// 不是这里改回整批失败——两档行为的分界在调用方，见 cmd/larkaxctl 的
+	// runWalletList。
+	one, err := s.Wallets(ctx, &badBalance)
+	if err != nil {
+		t.Fatalf("筛一个用户时不该失败: %v", err)
+	}
+	if len(one) != 1 {
+		t.Fatalf("筛一个用户得到 %d 行，想要 1 行", len(one))
+	}
+	if one[0].BalanceErr == nil {
+		t.Error("筛一个用户时那一行的坏余额没有被标出来")
 	}
 }

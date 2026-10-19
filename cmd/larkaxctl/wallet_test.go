@@ -1417,3 +1417,371 @@ func TestWalletListJSONShape(t *testing.T) {
 		t.Errorf("空清单的 total 是 %d，想要 0", emptyDoc.Total)
 	}
 }
+
+// ── wallet list：某一格读不出来（#777）────────────────────────────────────
+
+// overRangeWalletBalance 是构造「这一格读不出来」用的余额。
+//
+// 两个数各超一边：小数点前面 11 位已经到 int64 的上界（金额以 10^-8 为单位存，
+// 上界是 92233720368.54775807），末两位 08 再往上顶一格。库里那一列是
+// numeric(20, 8)，装得下它——于是「列里存着、命令读不出来」这个现场是真的
+// （见 docs/cli-reference.md 的 wallet 一节与 #442）。
+const overRangeWalletBalance = "92233720368.54775808"
+
+// seedOverRangeWallet 把一个用户钱包的某一列改成超范围的数，并挂上清理。
+//
+// column 只接 user_wallets 上那两列（balance / frozen），且**各自写成一句 SQL**，
+// 不拼串：用例写错列名时当场失败，而不是拼出一句跑不通的语句。
+//
+// # 为什么直接改快照，而不是照 ledger 那条用例写分录
+//
+// 写路径自己就挡住这种余额：applyToWallets 按**真实和**判（money.SumChecked），
+// 超范围时整笔拒绝，所以从账本那条路造不出这个现场。而 wallet list 读的正是
+// user_wallets 里的快照——库里真出现这个数，只可能来自更早的版本、迁移或对账
+// 修正，改快照是对现场的忠实复现。
+//
+// # 必须自己清掉
+//
+// 本包的库是全包共用的。留着一行读不出来的余额，后面每一条不筛 --user 的清单
+// 用例都会跟着退 1（TestWalletListWithoutFilterNamesEveryUser 就是一条），
+// 而那种连带失效看起来像别处坏了。同一条教训见 ledger_test.go 里造溢出的那处。
+func seedOverRangeWallet(t *testing.T, db *sql.DB, userID int64, column string) {
+	t.Helper()
+
+	var stmt string
+	switch column {
+	case "balance":
+		stmt = `UPDATE user_wallets SET balance = $2::numeric WHERE user_id = $1`
+	case "frozen":
+		stmt = `UPDATE user_wallets SET frozen = $2::numeric WHERE user_id = $1`
+	default:
+		t.Fatalf("用例写错了列名 %q：只有 balance 与 frozen 两列可造", column)
+	}
+	if _, err := db.ExecContext(t.Context(), stmt, userID, overRangeWalletBalance); err != nil {
+		t.Fatalf("造超范围的 %s 失败: %v", column, err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM user_wallets WHERE user_id = $1`, userID); err != nil {
+			t.Fatalf("清理用例的钱包失败: %v", err)
+		}
+	})
+}
+
+// 一格读不出来时：**其余行照打**，那一格有标记，命令退出 1，错误里点出是哪一行、
+// 库里的原文是什么。
+//
+// 这是 #777 的现场：从前整条命令失败，别人的钱包一个也看不到——调用方看不出是
+// 哪一行的问题，也绕不过去（只能一条一条 --user 试，而那一条恰好也失败）。
+//
+// 两行坏数据各占一列（一行坏余额、一行坏冻结额）：两格是**各判各的**，
+// 只让余额坏的话，「冻结额那一格也照常打」这句话没有输入能证明——一个把两格
+// 绑在一起判的实现照样绿。
+func TestWalletListKeepsRowsWhenOneBalanceIsUnreadable(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	goodID := createTestUser(t)
+	good := strconv.FormatInt(goodID, 10)
+	if r := runOnce(t, runWallet, []string{"create", "--user", good}); r.err != nil {
+		t.Fatalf("开户失败: %v", r.err)
+	}
+	badBalanceID := createTestUser(t)
+	badBalance := strconv.FormatInt(badBalanceID, 10)
+	if r := runOnce(t, runWallet, []string{"create", "--user", badBalance}); r.err != nil {
+		t.Fatalf("开户失败: %v", r.err)
+	}
+	badFrozenID := createTestUser(t)
+	badFrozen := strconv.FormatInt(badFrozenID, 10)
+	if r := runOnce(t, runWallet, []string{"create", "--user", badFrozen}); r.err != nil {
+		t.Fatalf("开户失败: %v", r.err)
+	}
+	seedOverRangeWallet(t, db, badBalanceID, "balance")
+	seedOverRangeWallet(t, db, badFrozenID, "frozen")
+
+	owner, err := auth.New(db).ResolveUser(t.Context(), badBalance)
+	if err != nil {
+		t.Fatalf("解析用户失败: %v", err)
+	}
+
+	r := runOnce(t, runWallet, []string{"list"})
+
+	// 退出码非零：这一屏不是一次成功的调用，机器读的一方也要能据此告警。
+	if r.err == nil {
+		t.Fatalf("有一格读不出来时命令应当退出非零，stdout=\n%s", r.stdout)
+	}
+	if code := exitCode(r.err); code != exitFailure {
+		t.Errorf("退出码 = %d，想要 %d", code, exitFailure)
+	}
+
+	// 好行照打：这正是 #777 要的那件事。用户名那一栏也照旧来自 users 表。
+	goodOwner, err := auth.New(db).ResolveUser(t.Context(), good)
+	if err != nil {
+		t.Fatalf("解析用户失败: %v", err)
+	}
+	gotGood := walletListRow(t, r.stdout, good)
+	if want := []string{good, goodOwner.Username, "CNY", "0.00000000", "0.00000000"}; !slices.Equal(gotGood, want) {
+		t.Errorf("好行是 %q，想要 %q", gotGood, want)
+	}
+
+	// 坏行也在，不是被跳过：坏的是余额那一格，冻结额照常打。
+	gotBad := walletListRow(t, r.stdout, badBalance)
+	if len(gotBad) < 5 {
+		t.Fatalf("坏行只有 %d 栏：%q", len(gotBad), gotBad)
+	}
+	if gotBad[3] != walletUnreadableCell {
+		t.Errorf("余额那一格 = %q，想要 %q", gotBad[3], walletUnreadableCell)
+	}
+	if gotBad[4] != "0.00000000" {
+		t.Errorf("同一行的冻结额 = %q，想要照常打 0.00000000（两格各判各的）", gotBad[4])
+	}
+
+	// 镜像：坏的是冻结额那一格，余额照常打。
+	gotFrozen := walletListRow(t, r.stdout, badFrozen)
+	if gotFrozen[3] != "0.00000000" {
+		t.Errorf("同一行的余额 = %q，想要照常打 0.00000000（两格各判各的）", gotFrozen[3])
+	}
+	if gotFrozen[4] != walletUnreadableCell {
+		t.Errorf("冻结额那一格 = %q，想要 %q", gotFrozen[4], walletUnreadableCell)
+	}
+
+	// 那一句话点出是哪一行、哪一格、原文是什么：表格里那一格放不下原文，
+	// 所以这不是把表里的话说第二遍。两行都要点出来。
+	msg := r.err.Error()
+	for _, want := range []string{owner.Username, overRangeWalletBalance, "余额", "冻结额"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("错误信息 %q 里没有 %q", msg, want)
+		}
+	}
+
+	// 带 --user 时口径不变：窄查询问的就是那一格的值，读不出来就是没答上来，
+	// 一个字都不打（与这份清单的宽查询相反，见 runWalletList）。
+	narrow := runOnce(t, runWallet, []string{"list", "--user", badBalance})
+	if narrow.err == nil {
+		t.Fatal("--user 指向那一行时应当失败")
+	}
+	if narrow.stdout != "" {
+		t.Errorf("--user 失败时 stdout 应当是空的，实际 %q", narrow.stdout)
+	}
+
+	// 而筛一个读得出来的用户不受影响：别的行坏掉不牵连同一次调用，退出码仍是 0。
+	other := runOnce(t, runWallet, []string{"list", "--user", good})
+	if other.err != nil {
+		t.Fatalf("筛一个读得出来的用户不该失败: %v", other.err)
+	}
+	if code := exitCode(other.err); code != exitOK {
+		t.Errorf("没有坏行时退出码 = %d，想要 %d", code, exitOK)
+	}
+}
+
+// 机器可读那一档里，读不出来的那一格是 `null`，那一行多一个 `unreadable` 说出是
+// 哪一栏，状态是 failed、exit_code 与进程那个码是同一个数。
+//
+// 单看 null 分不出「这一栏没有值」与「值读不出来」，而钱包那两栏是非空列。
+// 库里的原文**不在这一档里**：它在 cause 那句话上，两种格式下都经 main 打到
+// stderr（见 walletListDoc）。
+func TestWalletListJSONMarksUnreadableCells(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	goodID := createTestUser(t)
+	good := strconv.FormatInt(goodID, 10)
+	if r := runOnce(t, runWallet, []string{"create", "--user", good}); r.err != nil {
+		t.Fatalf("开户失败: %v", r.err)
+	}
+	badBalanceID := createTestUser(t)
+	badBalance := strconv.FormatInt(badBalanceID, 10)
+	if r := runOnce(t, runWallet, []string{"create", "--user", badBalance}); r.err != nil {
+		t.Fatalf("开户失败: %v", r.err)
+	}
+	badFrozenID := createTestUser(t)
+	badFrozen := strconv.FormatInt(badFrozenID, 10)
+	if r := runOnce(t, runWallet, []string{"create", "--user", badFrozen}); r.err != nil {
+		t.Fatalf("开户失败: %v", r.err)
+	}
+	seedOverRangeWallet(t, db, badBalanceID, "balance")
+	seedOverRangeWallet(t, db, badFrozenID, "frozen")
+
+	withFormat(t, formatJSON)
+	r := runOnce(t, runWallet, []string{"list"})
+	if r.err == nil {
+		t.Fatal("有读不出来的格子时应当退出非零")
+	}
+	if code := exitCode(r.err); code != exitFailure {
+		t.Errorf("退出码 = %d，想要 %d", code, exitFailure)
+	}
+	// 清单照打：报告比退出码更先被看到，而「退 1」不该同时意味着「stdout 是空的」。
+	assertOnlyJSON(t, r.stdout)
+
+	var got struct {
+		Status  string `json:"status"`
+		Exit    int    `json:"exit_code"`
+		Summary struct {
+			Total          int `json:"total"`
+			UnreadableRows int `json:"unreadable_rows"`
+		} `json:"summary"`
+		Wallets []struct {
+			UserID     int64    `json:"user_id"`
+			Balance    *string  `json:"balance"`
+			Frozen     *string  `json:"frozen"`
+			Unreadable []string `json:"unreadable"`
+		} `json:"wallets"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &got); err != nil {
+		t.Fatalf("解不回来: %v\n%s", err, r.stdout)
+	}
+	if got.Status != jsonFailed {
+		t.Errorf("status = %q，想要 %q", got.Status, jsonFailed)
+	}
+	// exit_code 与进程真正退出的那个码必须是同一个数（见 docs/cli-output.md）。
+	if got.Exit != exitFailure {
+		t.Errorf("exit_code = %d，想要 %d", got.Exit, exitFailure)
+	}
+	if got.Summary.UnreadableRows != 2 {
+		t.Errorf("unreadable_rows = %d，想要 2（一行坏余额、一行坏冻结额）", got.Summary.UnreadableRows)
+	}
+
+	seen := map[int64]bool{}
+	for _, w := range got.Wallets {
+		switch w.UserID {
+		case badBalanceID:
+			seen[badBalanceID] = true
+			if w.Balance != nil {
+				t.Errorf("读不出来的余额应当是 null，实际 %q", *w.Balance)
+			}
+			if !slices.Equal(w.Unreadable, []string{"balance"}) {
+				t.Errorf("unreadable = %v，想要 [balance]", w.Unreadable)
+			}
+			if w.Frozen == nil || *w.Frozen != "0.00000000" {
+				t.Errorf("同一行的冻结额 = %v，想要照常打 0.00000000", w.Frozen)
+			}
+		case badFrozenID:
+			seen[badFrozenID] = true
+			if w.Balance == nil || *w.Balance != "0.00000000" {
+				t.Errorf("同一行的余额 = %v，想要照常打 0.00000000", w.Balance)
+			}
+			if w.Frozen != nil {
+				t.Errorf("读不出来的冻结额应当是 null，实际 %q", *w.Frozen)
+			}
+			if !slices.Equal(w.Unreadable, []string{"frozen"}) {
+				t.Errorf("unreadable = %v，想要 [frozen]", w.Unreadable)
+			}
+		case goodID:
+			seen[goodID] = true
+			if w.Balance == nil || *w.Balance != "0.00000000" {
+				t.Errorf("好行的余额 = %v，想要 0.00000000", w.Balance)
+			}
+			// 好行的 unreadable 是空数组而不是 null 或省略：键在、值是空，
+			// 「这一栏有，一个都没有」（见 format.go 的 jsonList）。
+			if w.Unreadable == nil || len(w.Unreadable) != 0 {
+				t.Errorf("好行的 unreadable = %v，想要空数组", w.Unreadable)
+			}
+		}
+	}
+	if !seen[badBalanceID] || !seen[badFrozenID] || !seen[goodID] {
+		t.Fatalf("清单里少了行：%v\n%s", seen, r.stdout)
+	}
+}
+
+// 与上一条互补的那个组合：机器可读那一档**再加上**窄查询，走的是 early return，
+// 连 JSON 文档都不生成，所以这里要钉的不是「哪一栏是 null」而是「stdout 一字节
+// 不打、退 1」。这条路径今天没有别处覆盖——窄查询那条用例是表格档的（见上面
+// TestWalletListKeepsRowsWhenOneBalanceIsUnreadable 的末段）。
+func TestWalletListJSONNarrowQueryOnUnreadableRow(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	badID := createTestUser(t)
+	bad := strconv.FormatInt(badID, 10)
+	if r := runOnce(t, runWallet, []string{"create", "--user", bad}); r.err != nil {
+		t.Fatalf("开户失败: %v", r.err)
+	}
+	seedOverRangeWallet(t, db, badID, "balance")
+
+	withFormat(t, formatJSON)
+	r := runOnce(t, runWallet, []string{"list", "--user", bad})
+	if r.err == nil {
+		t.Fatal("窄查询撞上读不出来的那一格时应当失败")
+	}
+	if code := exitCode(r.err); code != exitFailure {
+		t.Errorf("退出码 = %d，想要 %d", code, exitFailure)
+	}
+	// 半个 JSON 文档比没有更难用：解析器拿到的是截断的输入，而该说的那件事
+	// （哪一行、哪一栏、原文是什么）本来也不在文档里。
+	if r.stdout != "" {
+		t.Errorf("窄查询失败时 stdout 应当是空的，实际 %q", r.stdout)
+	}
+	if !strings.Contains(r.err.Error(), overRangeWalletBalance) {
+		t.Errorf("错误信息里要带上库里的原文：%v", r.err)
+	}
+}
+
+// 那条错误把「是哪几行」写全，行数多时折起来并说出折了几行——不是静默地只报前几条。
+//
+// 纯函数，不连库：喂进去的行自己造。
+func TestWalletUnreadableCauseCapsTheNamedRows(t *testing.T) {
+	if cause := walletUnreadableCause(nil); cause != nil {
+		t.Errorf("一行都没有时应当是 nil，得到 %v", cause)
+	}
+	if cause := walletUnreadableCause([]walletRow{{UserID: 1, Asset: ledger.AssetCNY}}); cause != nil {
+		t.Errorf("都读得出来时应当是 nil，得到 %v", cause)
+	}
+
+	cellErr := errors.New(`解析余额 "1" 失败: 金额超出可表示范围`)
+	rows := make([]walletRow, 0, maxUnreadableInReport+2)
+	for i := 0; i < maxUnreadableInReport+2; i++ {
+		rows = append(rows, walletRow{
+			UserID: int64(i + 1), Username: "u" + strconv.Itoa(i+1),
+			Asset: ledger.AssetCNY, BalanceErr: cellErr,
+		})
+	}
+
+	cause := walletUnreadableCause(rows)
+	if cause == nil {
+		t.Fatal("有坏行时应当给出错误")
+	}
+	msg := cause.Error()
+	if got := strings.Count(msg, "钱包："); got != maxUnreadableInReport {
+		t.Errorf("点名的行数 = %d，想要 %d：%s", got, maxUnreadableInReport, msg)
+	}
+	// 折掉的行数要照写：少了它，读的人会以为坏的只有点到的这几行。
+	if want := fmt.Sprintf("另有 %d 行", 2); !strings.Contains(msg, want) {
+		t.Errorf("错误信息里没有 %q：%s", want, msg)
+	}
+}
+
+// 那一格的标记只有一处来源：帮助文本里写的必须是同一个串。
+//
+// 短用法与长帮助都是手写的原始字符串，插不进常量，所以改标记时最容易漏掉它们，
+// 而漏掉的表现是帮助文本安静地说着一个已经不成立的形状（与 snapshot 那个上限
+// 是同一类用例）。
+func TestWalletUsageStatesTheUnreadableCellRule(t *testing.T) {
+	for _, tc := range []struct{ name, text string }{
+		{"短用法", walletShortUsage},
+		{"长帮助", walletUsage},
+	} {
+		if !strings.Contains(tc.text, walletUnreadableCell) {
+			t.Errorf("%s 里没有 %q：改标记时帮助文本也要跟着改", tc.name, walletUnreadableCell)
+		}
+		if !strings.Contains(tc.text, "退出 1") {
+			t.Errorf("%s 里没说清那一格读不出来时命令退出几", tc.name)
+		}
+	}
+}
+
+// walletCell 的三种输入各一种写法：读得出来是那个数；读出不来给标记；只有原因是
+// 溢出时标记才带上原因。
+//
+// 第三种今天到不了（见 walletUnreadableCellGeneric 的注释），留着是因为标记说错
+// 原因比说得笼统更坏——那会把读的人送去查一个不存在的边界。所以这里也钉住它。
+func TestWalletCellLabelsUnreadableAmounts(t *testing.T) {
+	if got := walletCell(money.MustParse("12.34"), nil); got != "12.34000000" {
+		t.Errorf("读得出来的那一格 = %q，想要 12.34000000", got)
+	}
+	if got := walletCell(money.Zero, money.ErrOverflow); got != walletUnreadableCell {
+		t.Errorf("溢出那一格 = %q，想要 %q", got, walletUnreadableCell)
+	}
+	if got := walletCell(money.Zero, errors.New("别的错")); got != walletUnreadableCellGeneric {
+		t.Errorf("别的原因那一格 = %q，想要 %q", got, walletUnreadableCellGeneric)
+	}
+}

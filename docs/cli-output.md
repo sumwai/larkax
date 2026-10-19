@@ -261,6 +261,7 @@ larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled
 | **B3 其它环境**（文件读不动、权限、配置值不合法） | `larkaxctl: <msg>` | stderr | **1** | stdout 空 |
 | **C 内部故障**（序列化失败、不变量被破坏） | `larkaxctl: 内部错误: <msg>` | stderr | **1** | stdout 空 |
 | **D 体检结论**（`doctor` / `partition check` / `ledger verify` / `secret rotate --verify` / `ledger reconcile`） | 报告本身说清结论，**不再打第二行** | — | **非零保留** | `status` 与 `exit_code` 在那份 JSON 里 |
+| **E 清单里有读不出来的格子**（`wallet list` 不带 `--user` 时） | 整张清单 + `larkaxctl: <msg>` | stdout 与 stderr | **1** | stdout **不是空的**：清单整张在，读不出来的那一格打着标记 |
 
 三条附则：
 
@@ -272,6 +273,12 @@ larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled
   事，形状还像一次崩溃。退出码照旧非零，调度器盯的正是它。这三类（2 / 3 / 4）
   与「其它失败」（1）必须分得开：把「连不上库」报成 1，调度器会把「稍后重试」
   当成「别再试了」；把「参数错」报成 1，包装脚本的分支会走错。
+- **E 与 D 都打报告、都退非零，差别在那第二行**：D 的结论全在报告里，补一行等于
+  把它说第二遍；E 的那一行带着**报告里放不下的东西**——哪一个用户的哪一格、库里
+  的原文是什么（表格那一格只放得下一个短标记，JSON 那档只给 `null` 与栏名）。所以
+  E 有第二行，而 stdout 上那份清单仍然是完整的，`1` 在这里的意思不是「这次什么都
+  没得到」。今天只有 `wallet list` 一条走 E；它带上 `--user` 时是整条失败，形状与
+  B3 / C 那一档一样（一句 `larkaxctl: <msg>`、stdout 空、退出 1）。
 
 **与交互模式完全一致**，脚本基于退出码的逻辑不因为换了输出格式而变：
 `doctor` 有失败项时 json 模式仍然退出 1，连不上库时仍然是 3。
