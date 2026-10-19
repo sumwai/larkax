@@ -1728,7 +1728,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | 包 | killed | 存活 | 超时 | Not covered | Mutator coverage | Test efficacy（递归） | 覆盖率（包内） |
 |---|---|---|---|---|---|---|---|
 | `internal/payment` | 110 | 0 | 0 | 5 | 95.65% | 100.00% | 77.8% |
-| `internal/pipeline` | 43 | 0 | 0 | 0 | 100.00% | 100.00% | 87.5% |
+| `internal/pipeline` | 48 | 0 | 0 | 0 | 100.00% | 100.00% | 88.2% |
 | `internal/keyquota` | 2 | 0 | 0 | 6 | 25.00% | 100.00% | 3.3% |
 | `internal/pricing` | 176 | 0 | 0 | 46 | 79.28% | 100.00% | 89.2% |
 | `internal/snapshotwire` | 103 | 1 | 0 | 3 | 97.20% | 99.04% | 94.6% |
