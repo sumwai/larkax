@@ -430,6 +430,34 @@ func TestPrintSnapshotLabelsAuthorizedRawBody(t *testing.T) {
 	}
 }
 
+// 扣下正文的那一行要在正文的位置上说清为什么，而不是留一个空标题。
+//
+// 只把正文打空的话，读的人看到的是「一行 capture_mode=full_consented 的快照，
+// 正文什么都没有」——那与输出被截断长得一样，而下一步该做的事完全不同。
+func TestPrintSnapshotWithheldRawExplainsWhy(t *testing.T) {
+	rows := []snapshotRow{
+		{ID: 1, Direction: "request", SkeletonVersion: 1, CaptureMode: "full_consented",
+			RawWithheld: true,
+			CreatedAt:   time.Date(2026, 10, 17, 1, 2, 3, 0, time.UTC)},
+	}
+
+	var buf, note bytes.Buffer
+	printSnapshots(&buf, &note, "req-probe", rows)
+	out := buf.String()
+
+	if !strings.Contains(out, "授权已失效或无法确认") {
+		t.Errorf("正文不显示时要说明原因：\n%s", out)
+	}
+	// 正文标题（冒号后跟 JSON）不该出现：正文真的没有打出来。
+	if strings.Contains(out, "原文（用户已授权原样采集）:\n") {
+		t.Errorf("扣下正文时不该再打正文标题：\n%s", out)
+	}
+	// 这一行的身份照旧看得见。
+	if !strings.Contains(out, "capture_mode=full_consented") {
+		t.Errorf("扣下正文不该把这一行的其它列也藏起来：\n%s", out)
+	}
+}
+
 // TestPrintSnapshotSkeletonIsStable 钉住「同一个库两次跑出来逐行相同」。
 //
 // 骨架是 map，直接 fmt 打印的键序是随机的；走 json.Marshal 才有稳定输出，
@@ -833,12 +861,14 @@ type probeSnapshot struct {
 	requestID string
 	userID    int64
 	direction string
-	skeleton  string
-	truncated bool
-	status    *int
-	errorKind *string
-	redacted  []string
-	createdAt time.Time
+	// captureMode 为空时按列上的默认值落成 skeleton。
+	captureMode string
+	skeleton    string
+	truncated   bool
+	status      *int
+	errorKind   *string
+	redacted    []string
+	createdAt   time.Time
 }
 
 // insertSnapshot 造一行快照，返回它的 id。
@@ -857,14 +887,19 @@ func insertSnapshot(t *testing.T, db *sql.DB, p probeSnapshot) int64 {
 		paths = []string{}
 	}
 
+	mode := p.captureMode
+	if mode == "" {
+		mode = "skeleton"
+	}
+
 	var id int64
 	if err := db.QueryRowContext(context.Background(), `
 		INSERT INTO request_snapshots
-			(request_id, user_id, direction, skeleton, skeleton_truncated,
+			(request_id, user_id, direction, capture_mode, skeleton, skeleton_truncated,
 			 upstream_status, error_kind, redacted_paths, created_at)
-		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)
 		RETURNING id`,
-		p.requestID, p.userID, p.direction, p.skeleton, p.truncated,
+		p.requestID, p.userID, p.direction, mode, p.skeleton, p.truncated,
 		p.status, p.errorKind, paths, at).Scan(&id); err != nil {
 		t.Fatalf("造快照失败: %v", err)
 	}
@@ -1125,6 +1160,192 @@ func TestSnapshotGetLogFailureBlocksRead(t *testing.T) {
 	}
 }
 
+// grantRequestConsent 给一次请求写一条单请求授权，返回授权 ID。
+//
+// 走 Grant 而不是手写 INSERT：能让一条授权成立的形状（范围与 request_id 的
+// 配对）由它保证，而读取侧的判定读的正是同一张表的列。
+func grantRequestConsent(t *testing.T, db *sql.DB, userID int64, requestID string, ttl time.Duration) int64 {
+	t.Helper()
+	id, err := snapshotwire.NewConsentStore(snapshotwire.Wrap(db)).Grant(
+		context.Background(),
+		snapshotwire.ConsentRequest{
+			UserID:    userID,
+			Scope:     snapshotwire.ConsentScopeSingleRequest,
+			RequestID: requestID,
+			ExpiresAt: time.Now().UTC().Add(ttl),
+		}, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("写授权失败: %v", err)
+	}
+	return id
+}
+
+// getSnapshot 在人类可读那一档读一次，返回 stdout。
+func getSnapshot(t *testing.T, requestID, actor string) string {
+	t.Helper()
+	var runErr error
+	out, _ := captureStreams(t, func() {
+		runErr = runSnapshotGet([]string{requestID, "--actor", actor, "--reason", "用例"})
+	})
+	if runErr != nil {
+		t.Fatalf("snapshot get 失败: %v", runErr)
+	}
+	return out
+}
+
+// 授权撤销之后，存下来的原文立刻读不出来。
+//
+// # 为什么这一半必须单独判
+//
+// 采集侧的判定管的是「这一次要不要留原文」，它答不了「已经存下来的那一条
+// 还能不能读」。两半都接上之前，撤销只会让**新**请求回落成骨架，而撤销之前
+// 存下来的原文照旧躺在库里、在 terminal 上照旧打得出来——那正是「撤销之后
+// 仍能读到原文」的那个窗口。
+//
+// 用例先把「授权还在时读得出来」判一遍：只判撤销之后读不出来时，一个恒不
+// 打正文的实现也能过，而那会把正常读原文这条能力一起废掉。
+func TestSnapshotGetWithholdsRawAfterRevoke(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+	userID, username := seedSnapshotUser(t, db)
+
+	requestID := uniqueName("raw-revoke")
+	insertSnapshot(t, db, probeSnapshot{
+		requestID: requestID, userID: userID, direction: "request",
+		captureMode: "full_consented",
+		skeleton:    `{"messages":[{"content":"原样留下的提示词"}]}`,
+	})
+	consentID := grantRequestConsent(t, db, userID, requestID, time.Hour)
+
+	if out := getSnapshot(t, requestID, username); !strings.Contains(out, "原样留下的提示词") {
+		t.Fatalf("授权还在时应当打得出原文：\n%s", out)
+	}
+
+	revoked, err := snapshotwire.NewConsentStore(snapshotwire.Wrap(db)).
+		Revoke(context.Background(), consentID)
+	if err != nil || !revoked {
+		t.Fatalf("撤销授权 = (%v, %v)，期望 (true, nil)", revoked, err)
+	}
+
+	out := getSnapshot(t, requestID, username)
+	if strings.Contains(out, "原样留下的提示词") {
+		t.Errorf("撤销之后不该再打出原文：\n%s", out)
+	}
+	// 行本身还在：读的人要看得见「这里本来有一条原文、现在不能读了」，
+	// 而不是以为这条快照没了。
+	if !strings.Contains(out, "capture_mode=full_consented") {
+		t.Errorf("撤销不该把这一行从输出里抹掉：\n%s", out)
+	}
+	if !strings.Contains(out, "授权已失效或无法确认") {
+		t.Errorf("正文不显示时要说明原因：\n%s", out)
+	}
+}
+
+// 授权到期之后，存下来的原文读不出来——判据不靠等时钟。
+//
+// 这里把 expires_at 直接拨到过去。等待真实到期要么让用例慢上一小时，要么
+// 把授权时长压到秒级、让用例在慢机器上偶发变红；拨一行数据既快又确定。
+func TestSnapshotGetWithholdsRawAfterExpiry(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+	userID, username := seedSnapshotUser(t, db)
+
+	requestID := uniqueName("raw-expired")
+	insertSnapshot(t, db, probeSnapshot{
+		requestID: requestID, userID: userID, direction: "request",
+		captureMode: "full_consented",
+		skeleton:    `{"messages":[{"content":"原样留下的提示词"}]}`,
+	})
+	consentID := grantRequestConsent(t, db, userID, requestID, time.Hour)
+
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE capture_consents SET expires_at = now() - interval '1 minute' WHERE id = $1`,
+		consentID); err != nil {
+		t.Fatalf("把到期时间拨到过去失败: %v", err)
+	}
+
+	out := getSnapshot(t, requestID, username)
+	if strings.Contains(out, "原样留下的提示词") {
+		t.Errorf("授权到期之后不该再打出原文：\n%s", out)
+	}
+	if !strings.Contains(out, "授权已失效或无法确认") {
+		t.Errorf("正文不显示时要说明原因：\n%s", out)
+	}
+}
+
+// 一条授权记录都没有时，原样采集的那一行也读不出正文。
+//
+// 这是读取侧的「默认不放行」：授权记录被删掉（例如用户被删除时级联带走的）
+// 之后，库里那些 full_consented 行不能因此变成谁都能读的原文。
+func TestSnapshotGetWithholdsRawWithoutConsent(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+	userID, username := seedSnapshotUser(t, db)
+
+	requestID := uniqueName("raw-no-consent")
+	insertSnapshot(t, db, probeSnapshot{
+		requestID: requestID, userID: userID, direction: "request",
+		captureMode: "full_consented",
+		skeleton:    `{"messages":[{"content":"原样留下的提示词"}]}`,
+	})
+
+	out := getSnapshot(t, requestID, username)
+	if strings.Contains(out, "原样留下的提示词") {
+		t.Errorf("没有任何授权时不该打出原文：\n%s", out)
+	}
+	if !strings.Contains(out, "授权已失效或无法确认") {
+		t.Errorf("正文不显示时要说明原因：\n%s", out)
+	}
+}
+
+// 机器可读那一档也不能把扣下的正文带出去。
+//
+// 两档共用一个判定（见 withholdInactiveRaw），这一条判的是它真的共用：
+// 只在渲染里分岔的话，终端上看不到、`| jq` 里拿得到，泄露反而更安静。
+func TestSnapshotGetJSONMarksWithheldRaw(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+	userID, username := seedSnapshotUser(t, db)
+
+	requestID := uniqueName("raw-json")
+	insertSnapshot(t, db, probeSnapshot{
+		requestID: requestID, userID: userID, direction: "request",
+		captureMode: "full_consented",
+		skeleton:    `{"messages":[{"content":"原样留下的提示词"}]}`,
+	})
+
+	withFormat(t, formatJSON)
+	var runErr error
+	stdout, _ := captureStreams(t, func() {
+		runErr = runSnapshotGet([]string{requestID, "--actor", username, "--reason", "用例"})
+	})
+	if runErr != nil {
+		t.Fatalf("snapshot get 失败: %v", runErr)
+	}
+
+	var got struct {
+		Snapshots []struct {
+			Skeleton    map[string]any `json:"skeleton"`
+			RawWithheld bool           `json:"raw_withheld"`
+		} `json:"snapshots"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("json 模式下 stdout 不是一份合法的 JSON: %v\n%s", err, stdout)
+	}
+	if len(got.Snapshots) != 1 {
+		t.Fatalf("快照数 = %d，想要 1", len(got.Snapshots))
+	}
+	if !got.Snapshots[0].RawWithheld {
+		t.Error("扣下正文时 raw_withheld 该是 true")
+	}
+	if got.Snapshots[0].Skeleton != nil {
+		t.Errorf("扣下正文时 skeleton 该是 null，得到 %#v", got.Snapshots[0].Skeleton)
+	}
+	if strings.Contains(stdout, "原样留下的提示词") {
+		t.Errorf("原文不该出现在 JSON 输出里：\n%s", stdout)
+	}
+}
+
 // ptrTo 造一个指向字面量的指针，供可空列用。
 func ptrTo[T any](v T) *T { return &v }
 
@@ -1207,6 +1428,11 @@ func TestSnapshotsDocCarriesEveryColumn(t *testing.T) {
 	}
 	if req["skeleton_truncated"] != false {
 		t.Errorf("没被截断时该是 false，得到 %v", req["skeleton_truncated"])
+	}
+	// 这一栏每行都要在：正文被扣下时它是解释 null 的唯一依据，而「平时不出现、
+	// 出问题才出现」的字段会被只按出现过的形状解析的一侧漏掉。
+	if req["raw_withheld"] != false {
+		t.Errorf("没扣下正文时 raw_withheld 该是 false，得到 %v", req["raw_withheld"])
 	}
 	paths, _ := req["redacted_paths"].([]any)
 	if len(paths) != 1 || paths[0] != "messages[0].content[0].text" {

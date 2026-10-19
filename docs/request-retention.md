@@ -70,6 +70,11 @@ larkaxctl consent revoke 7
 （`capture_mode = full_consented`），可以单独筛出来审计；没有授权的那些仍然是骨架
 （`skeleton`）。读原文还是走 `snapshot get`，同样写访问日志。
 
+读的时候会按这一条的用户与请求再查一次授权，而且**没有缓存**：授权到期或撤销之后，
+已经存下来的正文不再打出来；这次查询失败时同样按「没有授权」处理，宁可不显示，
+也不放行。所以原文的可读期就是授权的有效期，不必等哪一步把它从盘上删掉——留存期
+仍与骨架相同，由 `larkaxctl snapshot cleanup` 按分区兑现。
+
 ## 决策接口的留存范围
 
 `/v1/systemone`（见 [development.md](development.md)）这条路径**也留存，但只留

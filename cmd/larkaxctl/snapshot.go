@@ -45,7 +45,7 @@ const snapshotShortUsage = `larkaxctl snapshot 维护与查看请求结构快照
   larkaxctl snapshot redact --direction request|response
         从标准输入读一段 JSON 报文，按允许表脱敏
 
-get 的 --actor 与 --reason 都是必填，读一次就写一行访问日志；access-log 把那些行读回来。
+get 的 --actor 与 --reason 都是必填，读一次就写一行访问日志；授权失效之后原文不再展示。
 redact 的骨架走 stdout，方向、字节上限与那句提醒走 stderr。
 
 更细的边界：larkaxctl help snapshot。
@@ -86,6 +86,11 @@ get 的 --actor 与 --reason 都是必填。读一条别人的请求结构是读
 同一个 request_id 可能有多行（请求与响应各一行，重试也可能各一行），
 get 全部按 created_at 升序打出来。只取一行会让「这次请求还有另一半」看不见。
 request_id 一条都没读到的时候非零退出，并且不写访问日志：没读到东西不算一次访问。
+
+原样采集的行要再问一次授权：正文能不能打出来，按这一行的 user_id 与 request_id
+在**读的这一刻**重新查一次授权记录。授权到期或被撤销之后，那一行照常列出来，
+正文不再打出——原样采集的承诺只在授权有效期间成立。查库失败时按「没有授权」处理，
+方向与采集侧一致：扣下正文，不放行原文。
 
 access-log 把 get 写下的那些行读回来：谁、什么时候、以什么理由读了哪一条快照。
 它按 request_id、读取者（--user 收用户 ID 或用户名）与时间窗筛，三者可以一起给，
@@ -492,8 +497,11 @@ const snapshotRedactMaxInput = 64 << 20
 //
 // redacted_paths 是 text[]，database/sql 不认这个类型，所以查询侧用
 // array_to_json 转成文本再解（与 internal/channels、internal/catalog 同一个做法）。
+//
+// user_id 也要读：原样采集的行在打正文之前要按「这一行属于谁」重新问一次
+// 授权（见 withholdInactiveRaw），而这一列是判定要用的那两个身份之一。
 const selectSnapshotsSQL = `
-	SELECT id, direction, skeleton_version, capture_mode, skeleton,
+	SELECT id, user_id, direction, skeleton_version, capture_mode, skeleton,
 	       skeleton_truncated, upstream_status, error_kind,
 	       array_to_json(redacted_paths), created_at
 	  FROM request_snapshots
@@ -534,6 +542,7 @@ type snapshotRead struct {
 // 而 `*` 在演进时会静默改变列序与含义（与 snapshotwire 的 insertSQL 同一条理由）。
 type snapshotRow struct {
 	ID              int64
+	UserID          int64
 	Direction       string
 	SkeletonVersion int
 	CaptureMode     string
@@ -543,6 +552,13 @@ type snapshotRow struct {
 	ErrorKind       sql.NullString
 	RedactedPaths   []string
 	CreatedAt       time.Time
+
+	// RawWithheld 表示这一行采的是原文，而授权在**读的这一刻**已经不作数，
+	// 所以正文没有读出来（见 withholdInactiveRaw）。Skeleton 此时为空。
+	//
+	// 行本身照常保留：读的人要看得见「这里本来有一条原文、现在不能读了」，
+	// 而不是以为输出被截断了；访问日志也照旧，因为这一行确实被读过。
+	RawWithheld bool
 }
 
 // runSnapshotGet 读出一条请求存下来的结构快照。
@@ -654,8 +670,11 @@ func snapshotsDoc(requestID string, rows []snapshotRow) map[string]any {
 			// 布尔必须带出来：没有它，读的人会把「这里只有这些」读成
 			// 「上游只发了这些」（见 printSnapshot）。
 			"skeleton_truncated": row.Truncated,
-			"redacted_paths":     jsonList(row.RedactedPaths),
-			"skeleton":           row.Skeleton,
+			// 正文被扣下时 skeleton 是 null。没有这个布尔，null 与「这次什么
+			// 都没发」分不开，而两者要读的人做的事完全不同。
+			"raw_withheld":   row.RawWithheld,
+			"redacted_paths": jsonList(row.RedactedPaths),
+			"skeleton":       row.Skeleton,
 		}
 		if row.UpstreamStatus.Valid {
 			item["upstream_status"] = row.UpstreamStatus.Int64
@@ -724,6 +743,15 @@ func readSnapshotsWithAudit(ctx context.Context, db *sql.DB, req snapshotRead) (
 		return nil, snapshotNotFound(req)
 	}
 
+	// 正文该不该交出去，在写访问日志之前定下来：日志记的是「这一行被读过」，
+	// 而扣下正文的读同样是一次读。放在这里也让人类可读与 JSON 两档共用同一个
+	// 结论——两路各判一次，迟早会出现「终端里看不到、jq 里拿得到」。
+	//
+	// request_id 取命令行那一个，不取行里读出来的：查询是 `WHERE request_id = $1`
+	// 精确匹配，所以两者恒等。哪天这条查询改成前缀或模糊匹配，这里就要换成
+	// rows[i].RequestID——拿命令行那个值去问授权，会把这次请求的判定套到别的请求上。
+	withholdInactiveRaw(ctx, db, req.RequestID, rows)
+
 	for _, row := range rows {
 		if _, execErr := tx.ExecContext(ctx, insertSnapshotAccessSQL,
 			row.ID, req.RequestID, actor.ID, snapshotActorKindAdmin, req.Reason,
@@ -738,6 +766,38 @@ func readSnapshotsWithAudit(ctx context.Context, db *sql.DB, req snapshotRead) (
 		return nil, fmt.Errorf("提交事务失败: %w", commitErr)
 	}
 	return rows, nil
+}
+
+// withholdInactiveRaw 把授权已经不作数的原文行扣下来。
+//
+// # 为什么读的时候还要再问一次授权
+//
+// 采集那一刻的判定回答的是「这一次要不要留原文」，它管不到「存下来之后还能不能
+// 读」。授权到期或被撤销之后，那一行仍然是 full_consented，而原样采集的承诺只在
+// 授权有效期间成立——所以读的这一刻要按这一行的 user_id 与 request_id 再问一次。
+// 判据与采集侧是同一个来源（见 snapshotwire.DBConsentSource）：每次都查库、
+// 没有缓存，撤销立即生效靠的就是这一点；任何缓存都会留下一段「已经撤销、
+// 却还能读到原文」的窗口。
+//
+// # 扣下的是什么
+//
+// 只把正文置空，行本身留着：读的人要看得见「这里本来有一条原文、现在不能读了」，
+// 而不是以为输出被截断了。查库失败时那个来源按「没有授权」回答，所以失败的方向
+// 是扣下正文，不是放行原文。到了渲染那一层，「没有授权」与「判断不了」已经分不开，
+// 所以那一句提示同时盖住两种情形（见 printSnapshot）。
+func withholdInactiveRaw(ctx context.Context, db *sql.DB, requestID string, rows []snapshotRow) {
+	src := snapshotwire.NewDBConsentSource(snapshotwire.Wrap(db), nil)
+	for i := range rows {
+		// 骨架行不用问：它们本来就不含原文，查一次库只会把判定点散成两处。
+		if !snapshotwire.CaptureModeIsRaw(rows[i].CaptureMode) {
+			continue
+		}
+		if src.AllowsRawCapture(ctx, rows[i].UserID, requestID) {
+			continue
+		}
+		rows[i].Skeleton = nil
+		rows[i].RawWithheld = true
+	}
 }
 
 // errSnapshotNotFound 是读路径上「要读的那一条快照不在库里」的哨兵。
@@ -797,7 +857,7 @@ func querySnapshots(ctx context.Context, tx *sql.Tx, req snapshotRead) ([]snapsh
 			redacted string
 		)
 		if scanErr := rows.Scan(
-			&row.ID, &row.Direction, &row.SkeletonVersion, &row.CaptureMode,
+			&row.ID, &row.UserID, &row.Direction, &row.SkeletonVersion, &row.CaptureMode,
 			&skeleton, &row.Truncated, &row.UpstreamStatus, &row.ErrorKind,
 			&redacted, &row.CreatedAt,
 		); scanErr != nil {
@@ -909,6 +969,19 @@ func printSnapshot(out, note io.Writer, seq int, row snapshotRow) {
 	bodyLabel := "skeleton"
 	if rawCapture {
 		bodyLabel = "原文（用户已授权原样采集）"
+	}
+
+	// 授权已经不作数、或者这一行当场判断不了时，正文没有读出来。这一句打在
+	// out 而不是 note，因为它回答的是「这一行的正文是什么」——与正文同一个
+	// 出口；写在 note 上，一份保存下来的 stdout 里就会只剩一行没有正文的快照，
+	// 看不出为什么。
+	//
+	// 措辞要把「没有授权」与「判断不了」一起盖住：查库失败时判定那一层按
+	// 未授权回答（方向是安全的），而渲染这一层手上只有「正文被扣下了」这一个
+	// 事实，说不出是到期、撤销，还是那次查询根本没成功。
+	if row.RawWithheld {
+		_, _ = fmt.Fprintf(out, "  %s：不显示——授权已失效或无法确认，原文不再可读\n", bodyLabel)
+		return
 	}
 
 	if row.Truncated {

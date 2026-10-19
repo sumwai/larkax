@@ -281,6 +281,15 @@ func TestConsentSingleRequestRoundTrip(t *testing.T) {
 	if row.consentVersion != snapshotwire.ConsentVersion {
 		t.Errorf("consent_version = %d，期望 %d", row.consentVersion, snapshotwire.ConsentVersion)
 	}
+	// 上面两句钉的是「写入方与常量同源」与「版本号就是命令用的那个」；这两句
+	// 钉的是**同源的那一段到底是哪一段**：只有前两句时，把常量连同命令一起
+	// 改掉的实现永远是绿的，而合规举证要的正是这段文字与这个版本号本身。
+	if !strings.Contains(row.consentText, "我同意开启请求原文采集。") {
+		t.Errorf("落库的同意文案不是这一段：%q", row.consentText)
+	}
+	if row.consentVersion != 1 {
+		t.Errorf("consent_version = %d，期望 1", row.consentVersion)
+	}
 	if !row.expiresAt.Equal(expires) {
 		t.Errorf("expires_at = %s，期望 %s", row.expiresAt, expires)
 	}
