@@ -597,6 +597,11 @@ func TestResponseAnnotationsReachContentBlock(t *testing.T) {
 	// 的形状，见 relayconvert 的 responseAnnotationToChat）。这里钉的是
 	// 「标注到了正文块上」，而**到的是 relaykit 认的那个形状**——按上游的
 	// 扁平形状断言会对着一个真实链路里不存在的中间态。
+	//
+	// 折过的那一层不会露给客户端：Responses 这条入口把它摊平成协议本身定义的
+	// 那一份扁平形状，流式与非流式因此是同一个（见 internal/api 的
+	// responsesAnnotation）。本包不解释标注内容，所以摊平不在这里做（见
+	// attachAnnotations）。
 	if got := block.Annotations[0]["type"]; got != "url_citation" {
 		t.Errorf("标注的 type = %v，期望 url_citation", got)
 	}

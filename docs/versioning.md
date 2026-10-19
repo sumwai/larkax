@@ -55,6 +55,42 @@ go build -ldflags "-X main.version=$(git describe --tags --always --dirty)" ./cm
 错误格式与调用协议绑定：用 OpenAI 格式调用就返回 OpenAI 形状的错误，
 Anthropic 格式同理。这条不能混。
 
+## 升级说明
+
+对外可见的契约变更合并时在这里留一条：**改了什么、调用方要做什么**。
+
+破坏性改动按上文「API 契约的冻结」的判据认定，在 PR 上打 `breaking` 标签，并在
+发行说明里逐条点名（见下文「发一个版本要做什么」）。点名指到这里：发行说明列出
+哪几条变了，这一节写每一条具体要改哪一行。
+
+### 引用标注的形状（`/v1/responses`）
+
+**改了什么**：非流式响应里 `output[].content[].annotations` 的 `url_citation`
+改成 Responses 协议本身定义的那一份形状。它不是上游给的那一份，
+也不是转换层折出来的中间产物。字段与 `type` 并排：
+
+```json
+{"type":"url_citation","url":"https://example.com/a","start_index":0,"end_index":12}
+```
+
+改之前那一份多包了一层，是转换层折出来的中间形状：
+
+```json
+{"type":"url_citation","url_citation":{"url":"…","start_index":0,"end_index":12}}
+```
+
+流式那一侧给的一直是扁平那一份：`response.output_text.annotation.added` 事件，
+以及收尾事件里的同一批标注。现在两条路是同一个形状。
+
+**这一条算破坏性改动**：字段的形状变了，按「API 契约的冻结」的判据，PR 上要带
+`breaking` 标签。它不需要 `/v2`：`/v1` 至今没有发布过任何版本——仓库里没有 tag，
+也没有 release——「一旦公开就不能改语义」这条冻结还没开始。
+
+**调用方要做什么**：按外层 `url_citation` 取值的解析改成从标注本身取值——
+`annotation["url_citation"]["url"]` 变成 `annotation["url"]`，`title`、
+`start_index`、`end_index` 同理，它们现在都与 `type` 并排。按协议写的解析不用改，
+扁平那一份就是协议对 `url_citation` 的定义。
+
 ## 发一个版本要做什么
 
 前置：`main` 上的 CI 全绿。
@@ -77,7 +113,7 @@ Anthropic 格式同理。这条不能混。
 `else`，本该重试的调用会被上报成失败。
 
 发行说明里还要**逐条点名** `breaking` 下的每一条，不能只让它待在自动分组里：
-分组只说「有这一类」，说不了调用方要改什么。
+分组只说「有这一类」，每一条要改什么写在「升级说明」里（见上文），点名时指过去。
 
 ## 发布包里有什么
 

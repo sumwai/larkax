@@ -444,9 +444,69 @@ func TestResponsesStreamErrorIsFlat(t *testing.T) {
 
 // ── 引用标注 ──────────────────────────────────────────────────────────
 
+// flatCitation 是 url_citation 在 Responses 协议里的形状：字段并排。
+//
+// 两条路的用例都拿它当期望值——同一个形状只写这一份，免得两边各写各的。
+func flatCitation(url string) map[string]any {
+	return map[string]any{
+		"type": "url_citation", "url": url, "title": "甲",
+		"start_index": 0, "end_index": 2,
+	}
+}
+
+// foldedCitation 是 relaykit 的 Responses→Chat 转换折出来的那一份：
+// chat 那套非官方扩展的形状，除 type 以外的字段被挪进了内层
+// （见 relayconvert 的 responseAnnotationToChat）。非流式那条路上游送来的就是它。
+//
+// 它与 flatCitation 各写各的，不从对方推出来：一边推另一边的话，这个用例就
+// 变成在测这份夹具自己了。
+func foldedCitation(url string) map[string]any {
+	return map[string]any{
+		"type": "url_citation",
+		"url_citation": map[string]any{
+			"url": url, "title": "甲", "start_index": 0, "end_index": 2,
+		},
+	}
+}
+
+// assertAnnotation 按字面值断言一条标注：整条对上，不是挑几个字段看。
+//
+// 两边都先序列化再比。这一步顺带管住三件事：
+// 键集合多一个少一个都会让两串不一样；同一份内容每次都是同一串
+// （encoding/json 对 map 的键排序）；数字写成 0 还是 float64(0) 也不影响
+// （序列化出来都是 0）。
+func assertAnnotation(t *testing.T, got any, want map[string]any) {
+	t.Helper()
+	gotJSON, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("标注序列化失败: %v", err)
+	}
+	wantJSON, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("期望值序列化失败: %v", err)
+	}
+	if string(gotJSON) != string(wantJSON) {
+		t.Errorf("标注 = %s，期望 %s", gotJSON, wantJSON)
+	}
+}
+
+// soleAnnotation 从一条路的 output[].content[].annotations 里取出唯一的那一条。
+func soleAnnotation(t *testing.T, got any) any {
+	t.Helper()
+	list, ok := got.([]any)
+	if !ok {
+		t.Fatalf("annotations 不是数组: %v", got)
+	}
+	if len(list) != 1 {
+		t.Fatalf("annotations 有 %d 条，期望 1 条: %v", len(list), list)
+	}
+	return list[0]
+}
+
 func streamAnnotation(url string) channel.StreamEvent {
 	return channel.StreamEvent{Kind: "annotation", Annotations: []map[string]any{{
-		"type": "url_citation", "url": url, "start_index": float64(0), "end_index": float64(2),
+		"type": "url_citation", "url": url, "title": "甲",
+		"start_index": float64(0), "end_index": float64(2),
 	}}}
 }
 
@@ -457,10 +517,12 @@ func streamAnnotation(url string) channel.StreamEvent {
 // 以前把它们当噪音丢掉——只断言「流跑通了」证明不了它，因为丢掉标注的那条流
 // 一样跑得通、一样有正文、一样结算。
 func TestResponsesStreamForwardsAnnotations(t *testing.T) {
+	// 两条标注的 url 按到达顺序给出：下面既用它造事件，也用它算期望值。
+	annotationURLs := []string{"https://example.com/a", "https://example.com/b"}
 	_, frames := responsesStreamRequest(t,
 		channel.StreamEvent{Kind: "delta", Text: "你好"},
-		streamAnnotation("https://example.com/a"),
-		streamAnnotation("https://example.com/b"),
+		streamAnnotation(annotationURLs[0]),
+		streamAnnotation(annotationURLs[1]),
 		channel.StreamEvent{Kind: "done", FinishReason: "stop"},
 	)
 
@@ -490,19 +552,15 @@ func TestResponsesStreamForwardsAnnotations(t *testing.T) {
 		if !ok {
 			t.Fatalf("第 %d 帧的 annotation 不是对象: %v", i, m["annotation"])
 		}
-		if anno["type"] != "url_citation" {
-			t.Errorf("第 %d 帧的 annotation.type = %v，期望 url_citation", i, anno["type"])
-		}
+		// 形状按字面值比，比的是**没被改过**的那一份（反向断言）：
+		// 这条路原样转发上游给的扁平标注，不能被顺手改成折过的那一层。
+		// 摊平是另一侧的事（见 responsesAnnotation），对已经是扁平形状的
+		// 标注是空操作。
+		assertAnnotation(t, anno, flatCitation(annotationURLs[len(annotationFrames)]))
 		annotationFrames = append(annotationFrames, m)
 	}
 	if len(annotationFrames) != 2 {
 		t.Fatalf("标注事件有 %d 条，期望 2 条", len(annotationFrames))
-	}
-	if got := dig(t, annotationFrames[0], "annotation", "url"); got != "https://example.com/a" {
-		t.Errorf("第一条标注的 url = %v", got)
-	}
-	if got := dig(t, annotationFrames[1], "annotation", "url"); got != "https://example.com/b" {
-		t.Errorf("第二条标注的 url = %v", got)
 	}
 
 	// 收尾事件的 output[] 里是同一个顺序、同一批：客户端可能整份替换掉
@@ -516,11 +574,13 @@ func TestResponsesStreamForwardsAnnotations(t *testing.T) {
 	if len(list) != 2 {
 		t.Fatalf("终态的 annotations 有 %d 条，期望 2 条: %v", len(list), list)
 	}
-	for i, want := range []string{"https://example.com/a", "https://example.com/b"} {
-		obj, _ := list[i].(map[string]any)
-		if obj["url"] != want {
-			t.Errorf("终态第 %d 条标注的 url = %v，期望 %s", i, obj["url"], want)
+	// 收尾那一份与增量帧是同一个形状（同一条标注在两处不能有两种读法）。
+	for i, url := range annotationURLs {
+		obj, ok := list[i].(map[string]any)
+		if !ok {
+			t.Fatalf("终态第 %d 条标注不是对象: %v", i, list[i])
 		}
+		assertAnnotation(t, obj, flatCitation(url))
 	}
 }
 
@@ -560,16 +620,23 @@ func TestResponsesStreamAnnotationBeforeTextKeepsOneItem(t *testing.T) {
 	}
 }
 
-// 非流式那条路的标注同样要落到客户端（这一条以前也不成立：relaykit 的
-// dto.Message.Annotations 在 relay.messageFromRelaykit 里被丢掉了）。
+// 非流式那条路的标注同样要落到客户端，而且交出去的是扁平那一份——
+// Responses 协议本身定义的那个形状，不是转换层折出来的中间产物。
 //
-// 两条路一起钉，是因为「对齐」不能用「把另一边也弄丢」的方式达成。
+// 这一条以前不成立：relaykit 的 dto.Message.Annotations 在
+// messageFromRelaykit 里被丢掉了。
+//
+// 送进来的这一份是这条链路上真实的形状：relaykit 的 Responses→Chat 转换会把
+// 上游的 url_citation 折成两层（见 foldedCitation，以及 relay 那条链上的
+// TestResponseAnnotationsReachContentBlock）。
+// 到 internal/api 时它已经折过了。协议对客户端承诺的是扁平那一份，同一个形状
+// 流式那条路也给（见下面 TestResponsesAnnotationShapeIsSameOnBothPaths）。
 func TestResponsesNonStreamForwardsAnnotations(t *testing.T) {
 	h, _, chatter := newTestHandler()
 	res := responsesResult()
 	res.Response.Message.Content = []channel.ContentBlock{{
 		Type: "text", Text: "你好",
-		Annotations: []map[string]any{{"type": "url_citation", "url": "https://example.com/a"}},
+		Annotations: []map[string]any{foldedCitation("https://example.com/a")},
 	}}
 	chatter.result = res
 
@@ -581,17 +648,98 @@ func TestResponsesNonStreamForwardsAnnotations(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("响应体不是 JSON: %v\n%s", err, rec.Body)
 	}
-	got, ok := dig(t, body, "output", "0", "content", "0", "annotations").([]any)
-	if !ok {
-		t.Fatalf("annotations 不是数组: %v", dig(t, body, "output", "0", "content", "0", "annotations"))
+	got := soleAnnotation(t, dig(t, body, "output", "0", "content", "0", "annotations"))
+	assertAnnotation(t, got, flatCitation("https://example.com/a"))
+}
+
+// TestResponsesAnnotationShapeIsSameOnBothPaths 是 #784 的判据：两条路交出的
+// 引用标注是**同一个形状**。
+//
+// 两条路各写一条用例、各断言各的，正是这个差异能活到今天的原因：
+// 两边单看都对得上，合起来才不一致。所以这里两条路各断言一次，而且期望值是
+// 同一份字面值（见 flatCitation）：改了一边而没改另一边，这个用例就红。
+//
+// 两边送进去的输入不同，是它们在链路上的位置不同：
+// 非流式那一侧已经被 relaykit 折过（foldedCitation），
+// 流式那一侧转发的还是上游给的扁平原样。
+func TestResponsesAnnotationShapeIsSameOnBothPaths(t *testing.T) {
+	h, _, chatter := newTestHandler()
+
+	// 非流式。
+	res := responsesResult()
+	res.Response.Message.Content = []channel.ContentBlock{{
+		Type: "text", Text: "你好",
+		Annotations: []map[string]any{foldedCitation("https://example.com/a")},
+	}}
+	chatter.result = res
+
+	rec := post(h, PathResponses, responsesBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("非流式状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
 	}
-	if len(got) != 1 {
-		t.Fatalf("annotations 有 %d 条，期望 1 条: %v", len(got), got)
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应体不是 JSON: %v\n%s", err, rec.Body)
 	}
-	obj, _ := got[0].(map[string]any)
-	if obj["url"] != "https://example.com/a" {
-		t.Errorf("标注的 url = %v，期望 https://example.com/a", obj["url"])
+	nonStream := soleAnnotation(t, dig(t, body, "output", "0", "content", "0", "annotations"))
+	assertAnnotation(t, nonStream, flatCitation("https://example.com/a"))
+
+	// 流式：同一份字面值，另一条路。
+	chatter.streamResult = &gateway.Result{Events: streamOf(
+		channel.StreamEvent{Kind: "delta", Text: "你好"},
+		streamAnnotation("https://example.com/a"),
+		channel.StreamEvent{Kind: "done", FinishReason: "stop"},
+	)}
+	rec = post(h, PathResponses, responsesStreamBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("流式状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
 	}
+	frames := parseFrames(t, rec.Body.String())
+	last := frames[len(frames)-1].decode(t)
+	streamed := soleAnnotation(t, dig(t, last, "response", "output", "0", "content", "0", "annotations"))
+	assertAnnotation(t, streamed, flatCitation("https://example.com/a"))
+}
+
+// 只有 url_citation 会被摊平：其余类型没有折过，客户端拿到的就是上游那一份。
+//
+// 上游的标注类型不止 url_citation（Responses 协议里还有 file_citation 这些）。
+// 别的类型我们没有折过，多认一种就等于替上游解释它的字段，
+// 而标注的字段集归上游决定。两条路的行为一样，摊平都在共用的
+// responsesAnnotation 里。
+//
+// 下面这个输入是**造出来的**，上游不会这么给：真实的 file_citation 没有
+// url_citation 这一层。带上它，是为了让「type 必须是 url_citation」那一条判据
+// 真的被读到——只删掉那一行判据，内层就会被摊出来（type 变成 url_citation），
+// 这个用例随即变红；如果输入里没有这一层，删掉判据它照样绿。
+func TestResponsesOtherAnnotationTypesPassThrough(t *testing.T) {
+	h, _, chatter := newTestHandler()
+	res := responsesResult()
+	res.Response.Message.Content = []channel.ContentBlock{{
+		Type: "text", Text: "你好",
+		Annotations: []map[string]any{{
+			"type": "file_citation",
+			"url_citation": map[string]any{
+				"file_id": "file-1", "filename": "a.txt", "index": 3,
+			},
+		}},
+	}}
+	chatter.result = res
+
+	rec := post(h, PathResponses, responsesBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应体不是 JSON: %v\n%s", err, rec.Body)
+	}
+	got := soleAnnotation(t, dig(t, body, "output", "0", "content", "0", "annotations"))
+	assertAnnotation(t, got, map[string]any{
+		"type": "file_citation",
+		"url_citation": map[string]any{
+			"file_id": "file-1", "filename": "a.txt", "index": 3,
+		},
+	})
 }
 
 // ── 协议与请求方向 ────────────────────────────────────────────────────

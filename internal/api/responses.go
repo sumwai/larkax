@@ -267,11 +267,53 @@ func responsesOutput(id, status string, msg channel.Message) []any {
 }
 
 // annotationList 把标注摊成对外契约里的数组，没有时给空数组而不是 nil。
+//
+// 每一条都先摊平（见 responsesAnnotation），所以流式与非流式两条路走到这里时，
+// 形状已经是一样的了。
 func annotationList(annotations []map[string]any) []any {
 	out := make([]any, 0, len(annotations))
 	for _, a := range annotations {
-		out = append(out, a)
+		out = append(out, responsesAnnotation(a))
 	}
+	return out
+}
+
+// responsesAnnotation 把一条引用标注摊成 Responses 协议本身定义的那一份形状。
+//
+// 说的是哪一份：不是上游给的那一份，也不是转换层折出来的中间产物，而是 Responses
+// 协议里 url_citation 自己的定义——字段与 type 并排：
+//
+//	{"type":"url_citation","url":"…","start_index":0,"end_index":12}
+//
+// 流式那条路原样转发上游的标注，给的就是这一份；非流式那条路经过 relaykit 的
+// Responses→Chat 转换，而它按 chat 那套非官方扩展把 url_citation 折成了两层
+// `{"type":"url_citation","url_citation":{…除 type 以外的字段}}`（见 relayconvert
+// 的 responseAnnotationToChat）。同一个协议的两条路因此对同一样东西给出两种
+// 形状，客户端得按「这次是不是流式」写两套解析，所以这里摊平。
+//
+// 只认 url_citation：relaykit 也只折这一种，其余类型它原样带过。照搬它这一条
+// 判据，才不会凭空解释我们并不知道的标注类型——标注的字段集由上游决定，relay
+// 那一层不解释它（见 internal/relay 的 attachAnnotations）。
+//
+// 摊平是无损的：折的那一步只是把除 type 以外的字段挪进内层，取出来即还原，
+// 连我们不认识的字段（title 这类）也一起带出来。认不出是折过的（没有
+// url_citation 这一层，或者那一层不是对象）就原样交出去，所以对已经是扁平形状的
+// 标注是空操作——流式那条路走的就是这一条。
+func responsesAnnotation(annotation map[string]any) map[string]any {
+	typ, _ := annotation["type"].(string)
+	if strings.TrimSpace(typ) != "url_citation" {
+		return annotation
+	}
+	inner, ok := annotation["url_citation"].(map[string]any)
+	if !ok {
+		return annotation
+	}
+	out := make(map[string]any, len(inner)+1)
+	for k, v := range inner {
+		out[k] = v
+	}
+	// type 用协议里的那个值，与 relaykit 折进去时写的是同一个字符串。
+	out["type"] = "url_citation"
 	return out
 }
 
