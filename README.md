@@ -85,17 +85,20 @@ cat ~/upstream-key.txt | go run ./cmd/larkaxctl channel create \
 
 go run ./cmd/larkaxctl alias create --model claude-x --upstream <upstream-model-id>
 
+# A price records who set it, so the user it names has to exist first — the same
+# `alice` step 5 gives a wallet to.
+go run ./cmd/larkaxctl user create --name alice
+
 # Every usage slot the upstream can report needs a price. Leaving one out is not a
 # smaller charge: it fails the whole request. Write all five, 0 where you charge
 # nothing.
-go run ./cmd/larkaxctl price create --scope platform --name example-price \
+go run ./cmd/larkaxctl price create --scope platform --name example-price --by alice \
   --expr '{"prompt": 0.0000015, "completion": 0.0000075,
            "cache_read": 0.0000002, "cache_write": 0.0000019,
            "reasoning": 0.0000090}'
 
-# 5. A user, a wallet, money in it, and an API key. A fresh wallet holds 0, and the
-#    reservation step rejects every request until it does not.
-go run ./cmd/larkaxctl user create --name alice
+# 5. A wallet for the user from step 4, money in it, and an API key. A fresh wallet
+#    holds 0, and the reservation step rejects every request until it does not.
 go run ./cmd/larkaxctl wallet create --user alice
 go run ./cmd/larkaxctl wallet credit --user alice --amount 100 --ref ORD-1
 KEY=$(go run ./cmd/larkaxctl apikey create --user alice)
@@ -150,7 +153,7 @@ and it names both the channel and the name:
 
 That command also answers "did my money move": the credit and the cost are both
 ledger entries, and `larkaxctl ledger balance --account user:1` reads them back.
-The `1` is the user id that `user create` printed in step 5 — the first user in a
+The `1` is the user id that `user create` printed in step 4 — the first user in a
 fresh database.
 
 The same chain at length, and everything else under `docs/`, is Chinese. Four of

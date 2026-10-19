@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/pricing"
 )
@@ -24,9 +25,9 @@ const priceShortUsage = `larkaxctl price 管理计价规则。
 
 用法：
   larkaxctl price create --scope <platform|merchant|channel> --name <规则名>
-                         --expr '<表达式>' [--priority <优先级>] [--models <…>]
+                         --expr '<表达式>' --by <ID 或用户名> [--priority <…>] [--models <…>]
   larkaxctl price list
-  larkaxctl price update --id <规则 ID> [与 create 相同的字段]
+  larkaxctl price update --id <规则 ID> --by <ID 或用户名> [与 create 相同的字段]
   larkaxctl price enable <规则 ID>
   larkaxctl price disable <规则 ID>
   larkaxctl price explain --model <规范模型名> [--user <ID 或用户名>] [--at <…>]
@@ -35,6 +36,7 @@ const priceShortUsage = `larkaxctl price 管理计价规则。
 
 作用域决定哪两栏 id 有效；五个计价项（prompt、completion、cache_read、
 cache_write、reasoning）在规则里缺一个，用到它的请求就会整个失败。
+--by 必填：create 记下这条价是谁定的，update 记下是谁改的。
 
 更细的边界：larkaxctl help price。
 `
@@ -44,12 +46,13 @@ const priceUsage = `larkaxctl price 管理计价规则。
 
 用法：
   larkaxctl price create --scope <platform|merchant|channel> --name <规则名> --expr '<表达式>'
+                         --by <用户 ID 或用户名>
                          [--user <用户 ID 或用户名>] [--channel <渠道 ID>]
                          [--models <规范模型名,...>] [--priority <优先级>]
                          [--effective-from <RFC3339>] [--effective-to <RFC3339>]
                          [--disabled]
   larkaxctl price list
-  larkaxctl price update --id <规则 ID>
+  larkaxctl price update --id <规则 ID> --by <用户 ID 或用户名>
                          [--scope <platform|merchant|channel>] [--name <规则名>]
                          [--user <用户 ID 或用户名>] [--channel <渠道 ID>]
                          [--models <规范模型名,...>] [--expr '<表达式>']
@@ -68,6 +71,12 @@ const priceUsage = `larkaxctl price 管理计价规则。
 
 作用域决定哪两栏 id 有效：platform 两栏都留空；merchant 必须给 --user；
 channel 必须给 --channel。写了读取路径不看的那一栏会被拒绝。
+
+--by 必填：它记的是这一次是谁做的，落库记的是那个 users.id。create 把它写进
+pricing_rules.created_by（这条价是谁定的），update 把它写进版本历史的
+changed_by（这一版是谁改的，只在表达式真的变了、留了一版时才有这一行）。
+两个都收 users.id 或用户名，与其余命令同一个解析路径。它**不算**一次修改：只给
+--by 而不给别的字段时，这次调用没有要改的东西，命令会拒绝。
 
 --models 留空表示适用于全部模型（兜底规则）；给了就按元素逐字匹配，
 不支持通配符——带 * 或 ? 的名字会被拒绝。
@@ -165,7 +174,7 @@ func runPriceCreate(args []string) error {
 		return err
 	}
 
-	req, ownerRef, err := parsePriceCreate(args)
+	req, refs, err := parsePriceCreate(args)
 	if err != nil {
 		return usageErr(err)
 	}
@@ -182,8 +191,16 @@ func runPriceCreate(args []string) error {
 	}
 	defer func() { _ = db.Close() }()
 
-	if ownerRef != "" {
-		ownerID, resolveErr := resolveOwnerID(ctx, db, ownerRef)
+	// 先解析 --by 再解析 --user：前者必填，缺了上面就报错了；而已写入的
+	// created_by 认的是一个真的存在的 users.id（那一列上有外键）。
+	actor, err := auth.New(db).ResolveUser(ctx, refs.by)
+	if err != nil {
+		return fmt.Errorf("解析 --by 失败: %w", err)
+	}
+	req.CreatedBy = actor.ID
+
+	if refs.owner != "" {
+		ownerID, resolveErr := resolveOwnerID(ctx, db, refs.owner)
 		if resolveErr != nil {
 			return resolveErr
 		}
@@ -198,11 +215,23 @@ func runPriceCreate(args []string) error {
 	return nil
 }
 
+// priceRefs 是 price create / update 上那两个「用户 ID 或用户名」旗标的原文。
+//
+// 两个都要连库才解析得成 users.id，而参数解析必须在连库之前完成，所以这里
+// 只收原文，解析留给命令那一层（见 runPriceCreate / runPriceUpdate）。
+type priceRefs struct {
+	// owner 是 --user：这条规则挂在哪个商家名下。空串表示没给这一项。
+	owner string
+	// by 是 --by：这一次是谁做的。必填，所以走完参数解析之后它一定非空。
+	by string
+}
+
 // parsePriceCreate 解析 create 的参数。
 //
-// 它多带一个 ownerRef 返回值：--user 要连库才能解析成用户 ID，而参数解析
-// 必须在连库之前完成。所以这里只做「有没有给、给了什么」，解析留给调用方。
-func parsePriceCreate(args []string) (pricing.CreateRequest, string, error) {
+// 它多带一个 priceRefs 返回值：--user 与 --by 都要连库才能解析成用户 ID，
+// 而参数解析必须在连库之前完成。所以这里只做「有没有给、给了什么」，
+// 解析留给调用方。
+func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 	fs := flag.NewFlagSet("price create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
 	scope := fs.String("scope", "", "")
@@ -218,33 +247,37 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, string, error) {
 	effectiveTo := fs.String("effective-to", "", "")
 	stringAlias(fs, effectiveTo, "to")
 	disabled := fs.Bool("disabled", false, "")
+	by := fs.String("by", "", "")
 	if err := fs.Parse(args); err != nil {
-		return pricing.CreateRequest{}, "", err
+		return pricing.CreateRequest{}, priceRefs{}, err
 	}
 	if fs.NArg() > 0 {
-		return pricing.CreateRequest{}, "", fmt.Errorf(
+		return pricing.CreateRequest{}, priceRefs{}, fmt.Errorf(
 			"create 不接受位置参数，得到 %q：表达式用 --expr 指定（记得给 shell 加引号）", fs.Arg(0))
 	}
 
 	if strings.TrimSpace(*scope) == "" {
-		return pricing.CreateRequest{}, "", errors.New("缺少 --scope（platform / merchant / channel）")
+		return pricing.CreateRequest{}, priceRefs{}, errors.New("缺少 --scope（platform / merchant / channel）")
 	}
 	if strings.TrimSpace(*name) == "" {
-		return pricing.CreateRequest{}, "", errors.New("缺少 --name")
+		return pricing.CreateRequest{}, priceRefs{}, errors.New("缺少 --name")
 	}
 	if strings.TrimSpace(*expression) == "" {
-		return pricing.CreateRequest{}, "", errors.New("缺少 --expr")
+		return pricing.CreateRequest{}, priceRefs{}, errors.New("缺少 --expr")
+	}
+	if strings.TrimSpace(*by) == "" {
+		return pricing.CreateRequest{}, priceRefs{}, errors.New("缺少 --by：这条命令要记下这条价是谁定的")
 	}
 	if *channelID < 0 {
-		return pricing.CreateRequest{}, "", fmt.Errorf("--channel %d 无效：渠道 ID 从 1 开始", *channelID)
+		return pricing.CreateRequest{}, priceRefs{}, fmt.Errorf("--channel %d 无效：渠道 ID 从 1 开始", *channelID)
 	}
 	from, err := parseTimeFlag("--effective-from", *effectiveFrom)
 	if err != nil {
-		return pricing.CreateRequest{}, "", err
+		return pricing.CreateRequest{}, priceRefs{}, err
 	}
 	to, err := parseTimeFlag("--effective-to", *effectiveTo)
 	if err != nil {
-		return pricing.CreateRequest{}, "", err
+		return pricing.CreateRequest{}, priceRefs{}, err
 	}
 
 	req := pricing.CreateRequest{
@@ -266,7 +299,7 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, string, error) {
 		enabled := false
 		req.Enabled = &enabled
 	}
-	return req, *owner, nil
+	return req, priceRefs{owner: *owner, by: *by}, nil
 }
 
 func runPriceUpdate(args []string) error {
@@ -274,7 +307,7 @@ func runPriceUpdate(args []string) error {
 		return err
 	}
 
-	req, ownerRef, err := parsePriceUpdate(args)
+	req, refs, err := parsePriceUpdate(args)
 	if err != nil {
 		return usageErr(err)
 	}
@@ -291,8 +324,17 @@ func runPriceUpdate(args []string) error {
 	}
 	defer func() { _ = db.Close() }()
 
-	if ownerRef != "" {
-		ownerID, resolveErr := resolveOwnerID(ctx, db, ownerRef)
+	// --by 记在版本历史那一行上（pricing_rule_versions.changed_by），而那一列
+	// 认的是一个真的存在的 users.id。解析放在前面：标识写错了要在改库之前
+	// 报出来。
+	actor, err := auth.New(db).ResolveUser(ctx, refs.by)
+	if err != nil {
+		return fmt.Errorf("解析 --by 失败: %w", err)
+	}
+	req.ChangedBy = actor.ID
+
+	if refs.owner != "" {
+		ownerID, resolveErr := resolveOwnerID(ctx, db, refs.owner)
 		if resolveErr != nil {
 			return resolveErr
 		}
@@ -372,9 +414,10 @@ var (
 	effectiveToFlagNames   = []string{"effective-to", "to"}
 )
 
-// 与 parsePriceCreate 同一个形状，多带一个 ownerRef 返回值：--user 要连库才能
-// 解析成用户 ID，而参数解析必须在连库之前完成。这里只做「有没有给、给了什么」。
-func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
+// 与 parsePriceCreate 同一个形状，多带的 priceRefs 里放着两个用户标识的原文：
+// --user 与 --by 都要连库才能解析成用户 ID，而参数解析必须在连库之前完成。
+// 这里只做「有没有给、给了什么」。
+func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 	fs := flag.NewFlagSet("price update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
 	id := fs.Int64("id", 0, "要改的规则 ID")
@@ -392,31 +435,35 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 	stringAlias(fs, effectiveTo, "to")
 	clearEffectiveTo := fs.Bool("clear-effective-to", false, "")
 	boolAlias(fs, clearEffectiveTo, "no-expire")
+	by := fs.String("by", "", "")
 	// --enable / --disable 是**旧形态**（见 priceUsage 的「启停是独立的二级
 	// 动词」那一节）：留着是为了不让已经在跑的脚本坏掉，新写的命令用
 	// price enable / price disable。它们不出现在用法行里。
 	enable := fs.Bool("enable", false, "")
 	disable := fs.Bool("disable", false, "")
 	if err := fs.Parse(args); err != nil {
-		return pricing.UpdateRequest{}, "", err
+		return pricing.UpdateRequest{}, priceRefs{}, err
 	}
 	if fs.NArg() > 0 {
-		return pricing.UpdateRequest{}, "", fmt.Errorf(
+		return pricing.UpdateRequest{}, priceRefs{}, fmt.Errorf(
 			"update 不接受位置参数，得到 %q：要改的规则用 --id 指定", fs.Arg(0))
 	}
 	if *id <= 0 {
-		return pricing.UpdateRequest{}, "", errors.New("缺少 --id（要改的规则 ID）")
+		return pricing.UpdateRequest{}, priceRefs{}, errors.New("缺少 --id（要改的规则 ID）")
+	}
+	if strings.TrimSpace(*by) == "" {
+		return pricing.UpdateRequest{}, priceRefs{}, errors.New("缺少 --by：这条命令要记下是谁改的这条价")
 	}
 	if *enable && *disable {
-		return pricing.UpdateRequest{}, "", errors.New("--enable 与 --disable 只能给一个")
+		return pricing.UpdateRequest{}, priceRefs{}, errors.New("--enable 与 --disable 只能给一个")
 	}
 	if *clearEffectiveTo && *effectiveTo != "" {
-		return pricing.UpdateRequest{}, "", errors.New(
+		return pricing.UpdateRequest{}, priceRefs{}, errors.New(
 			"--clear-effective-to 与 --effective-to 只能给一个：前者是清成不过期，" +
 				"后者是改成某个时刻")
 	}
 	if *channelID < 0 {
-		return pricing.UpdateRequest{}, "", fmt.Errorf(
+		return pricing.UpdateRequest{}, priceRefs{}, fmt.Errorf(
 			"--channel %d 无效：渠道 ID 从 1 开始，0 表示不挂渠道", *channelID)
 	}
 
@@ -427,7 +474,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 	// 而 0 在这里是有含义的（改成不挂商家）——静默地按 0 处理会把
 	// 「我本来想挂某个商家」变成一条平台价，而那条规则照样匹配得上。
 	if flagGiven(given, userFlagNames...) && strings.TrimSpace(*owner) == "" {
-		return pricing.UpdateRequest{}, "", errors.New(
+		return pricing.UpdateRequest{}, priceRefs{}, errors.New(
 			"--user 不能是空串（多半是变量没展开）：要改成不挂商家写 --user 0")
 	}
 
@@ -457,7 +504,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 	}
 	if given["expr"] {
 		if strings.TrimSpace(*expression) == "" {
-			return pricing.UpdateRequest{}, "", errors.New(
+			return pricing.UpdateRequest{}, priceRefs{}, errors.New(
 				"--expr 不能为空（表上那一栏非空）：要停用这条规则用 price disable")
 		}
 		req.Expr = expression
@@ -472,24 +519,24 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 	// 而它看起来像一次成功的修改。
 	if flagGiven(given, effectiveFromFlagNames...) {
 		if strings.TrimSpace(*effectiveFrom) == "" {
-			return pricing.UpdateRequest{}, "", errors.New(
+			return pricing.UpdateRequest{}, priceRefs{}, errors.New(
 				"--effective-from 不能为空（表上那一栏非空）：这一栏清不掉")
 		}
 		from, err := parseTimeFlag("--effective-from", *effectiveFrom)
 		if err != nil {
-			return pricing.UpdateRequest{}, "", err
+			return pricing.UpdateRequest{}, priceRefs{}, err
 		}
 		req.EffectiveFrom = from
 		changes++
 	}
 	if flagGiven(given, effectiveToFlagNames...) {
 		if strings.TrimSpace(*effectiveTo) == "" {
-			return pricing.UpdateRequest{}, "", errors.New(
+			return pricing.UpdateRequest{}, priceRefs{}, errors.New(
 				"--effective-to 不能为空：要清成不过期用 --clear-effective-to")
 		}
 		to, err := parseTimeFlag("--effective-to", *effectiveTo)
 		if err != nil {
-			return pricing.UpdateRequest{}, "", err
+			return pricing.UpdateRequest{}, priceRefs{}, err
 		}
 		req.EffectiveTo = to
 		changes++
@@ -510,14 +557,17 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, string, error) {
 		req.Enabled = &enabled
 		changes++
 	}
+	// --by 不算「改了一项」：它记的是这一次是谁做的，而规则本身一个字段都没动。
+	// 把它算进去的话，`price update --id 5 --by ops` 会静默地变成一次
+	// 「改完了」的成功调用，而库里什么都没变。
 	if changes == 0 {
-		return pricing.UpdateRequest{}, "", errors.New(
+		return pricing.UpdateRequest{}, priceRefs{}, errors.New(
 			"update 至少要改一项：给出 --scope / --name / --user / --channel / " +
 				"--models / --expr / --priority / --effective-from / --effective-to / " +
 				"--clear-effective-to 之一（启用或停用规则用 price enable / price disable）")
 	}
 
-	return req, ownerRef, nil
+	return req, priceRefs{owner: ownerRef, by: *by}, nil
 }
 
 // runPriceExplain 回答「这次请求按哪条规则计价」。

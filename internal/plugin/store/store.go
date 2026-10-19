@@ -255,6 +255,18 @@ func nullableText(s string) any {
 	return s
 }
 
+// nullableID 把 0 折成 NULL。
+//
+// plugins.created_by 是可空的外键，而 0 会去匹配一个不存在的行——外键直接拒绝，
+// 于是「这一次没有操作人可记」这条路径根本走不通（同 internal/pricing 的
+// nullableID）。
+func nullableID(id int64) any {
+	if id == 0 {
+		return nil
+	}
+	return id
+}
+
 // pickedOrder 给出「同一个 key 里取中哪一行」的排序键，alias 是 plugins 在那个
 // 查询里的别名。
 //
@@ -654,6 +666,18 @@ type Publication struct {
 	Meta []byte
 	// Priority 写进 platform 作用域的启用记录。
 	Priority int
+	// CreatedBy 是写下这一行的人（users.id）。0 表示不记，库里存 NULL——
+	// 与 Detail.CreatedBy 的 nil 说的是同一件事。
+	//
+	// **覆盖（同一个 (key, version) 重新发布）时它跟着换成这个人**：那一次的
+	// name / source / meta 都被换掉了，而读侧那一栏问的是「写自谁」（见
+	// plugin get）。留着上一个人的 ID，审计问「现在这份源码是谁放进去的」
+	// 会答成另一个人，而一条错的归属比一条空的归属坏得多。
+	//
+	// 同一行的 created_at 不跟着换（它记的是这一行什么时候出现的），所以覆盖
+	// 之后这两个字段答的不是同一个问题：created_by 是「这份内容谁写的」，
+	// created_at 是「这一行哪一刻有的」。
+	CreatedBy int64
 }
 
 // NewPublication 从编译好的插件与它的源码造一条待发布记录。
@@ -702,8 +726,8 @@ const publishLockSQL = `SELECT pg_advisory_xact_lock(hashtextextended('plugin:' 
 //
 // # 同一个 (key, version) 重复发布是「覆盖」，不是「拒绝」
 //
-// 覆盖会换掉 source / meta / name，**状态保持原值**，代次取这个 key 的
-// MAX(generation) + 1：覆盖 = 成为最新的一代。
+// 覆盖会换掉 source / meta / name 与 created_by，**状态保持原值**，代次取这个
+// key 的 MAX(generation) + 1：覆盖 = 成为最新的一代。
 //
 //   - 为什么不拒绝：作者改一个笔误（注释、常量）不该先升 version，否则
 //     version 会变成「发布次数」而不是「版本」；而 version 写在源码的 meta 里，
@@ -769,12 +793,13 @@ func (s *Store) Publish(ctx context.Context, pub Publication) (Result, error) {
 		res.Status = existingStatus
 		if scanErr := tx.QueryRowContext(ctx,
 			`UPDATE plugins
-			    SET name = $2, source = $3, meta = $4::jsonb,
+			    SET name = $2, source = $3, meta = $4::jsonb, created_by = $6,
 			        generation = (SELECT COALESCE(MAX(m.generation), -1) + 1
 			                        FROM plugins m WHERE m.key = $5)
 			  WHERE id = $1
 			RETURNING generation`,
-			existingID, pub.Name, pub.Source, string(pub.Meta), pub.Key).Scan(&res.Generation); scanErr != nil {
+			existingID, pub.Name, pub.Source, string(pub.Meta), pub.Key,
+			nullableID(pub.CreatedBy)).Scan(&res.Generation); scanErr != nil {
 			// 上面那次 SELECT 到这次 UPDATE 之间，这一行可能被删掉了（delete 与
 			// publish 同时进行时）：UPDATE 一行都没改到，RETURNING 于是没有行。
 			return Result{}, fmt.Errorf("覆盖插件 %s 失败: %w", pub.Key, scanErr)
@@ -788,11 +813,12 @@ func (s *Store) Publish(ctx context.Context, pub Publication) (Result, error) {
 		// 锁让这个子查询读到的是稳定的一份。
 		res.Status = StatusPending
 		if scanErr := tx.QueryRowContext(ctx,
-			`INSERT INTO plugins (key, version, name, source, meta, generation)
-			 VALUES ($1, $2, $3, $4, $5::jsonb,
+			`INSERT INTO plugins (key, version, name, source, meta, created_by, generation)
+			 VALUES ($1, $2, $3, $4, $5::jsonb, $6,
 			         (SELECT COALESCE(MAX(generation), -1) + 1 FROM plugins WHERE key = $1))
 			 RETURNING generation`,
-			pub.Key, pub.Version, pub.Name, pub.Source, string(pub.Meta)).Scan(&res.Generation); scanErr != nil {
+			pub.Key, pub.Version, pub.Name, pub.Source, string(pub.Meta),
+			nullableID(pub.CreatedBy)).Scan(&res.Generation); scanErr != nil {
 			// 上面那次 SELECT 到这次 INSERT 之间，另一次发布可能已经把同一个
 			// (key, version) 插进去了；唯一键会挡下后到的那一次并给出 23505。
 			// 本包没有为它准备具名哨兵（它不是调用方按名字处理的失败），

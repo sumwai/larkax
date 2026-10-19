@@ -225,7 +225,9 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 
 		{command: "price", what: "update",
 			run: func() error {
-				return runPrice([]string{"update", "--id", id(fx.ruleID), "--priority", "4"})
+				return runPrice([]string{
+					"update", "--id", id(fx.ruleID), "--priority", "4", "--by", id(fx.userID),
+				})
 			}},
 		{command: "price", what: "list",
 			run: func() error { return runPrice([]string{"list"}) }},
@@ -322,7 +324,7 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 			run: func() error {
 				path := writePluginFile(t, "stream-publish.js",
 					pluginSource(uniqueName("stream-plugin2"), "1.0.0", 0))
-				return runPlugin([]string{"publish", path})
+				return runPlugin([]string{"publish", path, "--by", id(fx.userID)})
 			}},
 	}
 }
@@ -543,14 +545,16 @@ func TestWriteEchoesAppearOnlyOnStderr(t *testing.T) {
 				return mustStream(t, func() error {
 					return runPrice([]string{
 						"create", "--scope", "platform", "--name", uniqueName("echo-rule"),
-						"--expr", ruleExpr, "--models", fx.modelName,
+						"--expr", ruleExpr, "--models", fx.modelName, "--by", id(fx.userID),
 					})
 				})
 			}},
 		{command: "price", what: "update", marker: "已更新计价规则", stdout: stdoutEmpty,
 			run: func(t *testing.T, fx *streamFixture) (string, string) {
 				return mustStream(t, func() error {
-					return runPrice([]string{"update", "--id", id(fx.ruleID), "--priority", "4"})
+					return runPrice([]string{
+						"update", "--id", id(fx.ruleID), "--priority", "4", "--by", id(fx.userID),
+					})
 				})
 			}},
 		{command: "price", what: "disable", marker: "已停用", stdout: stdoutEmpty,
@@ -581,10 +585,12 @@ func TestWriteEchoesAppearOnlyOnStderr(t *testing.T) {
 		// 下面三条改库，回显同样只走 stderr。卸载用的是另起的一个插件：
 		// 删掉 fx.pluginKey 之后，后面两条 kv 就没有插件可用了。
 		{command: "plugin", what: "delete", marker: "已删除插件", stdout: stdoutEmpty,
-			run: func(t *testing.T, _ *streamFixture) (string, string) {
+			run: func(t *testing.T, fx *streamFixture) (string, string) {
 				key := uniqueName("echo-doomed-plugin")
 				path := writePluginFile(t, "doomed.js", pluginSource(key, "1.0.0", 0))
-				mustStream(t, func() error { return runPlugin([]string{"publish", path}) })
+				mustStream(t, func() error {
+					return runPlugin([]string{"publish", path, "--by", id(fx.userID)})
+				})
 				return mustStream(t, func() error { return runPlugin([]string{"delete", key}) })
 			}},
 		{command: "plugin", what: "kv set", marker: "已写入插件", stdout: stdoutEmpty,
@@ -808,7 +814,7 @@ func newStreamFixture(t *testing.T) *streamFixture {
 	ruleOut, _ := mustStream(t, func() error {
 		return runPrice([]string{
 			"create", "--scope", "platform", "--name", uniqueName("stream-rule"),
-			"--expr", ruleExpr, "--models", fx.modelName,
+			"--expr", ruleExpr, "--models", fx.modelName, "--by", ustr,
 		})
 	})
 	fx.ruleID = idFromStdout(t, "计价规则", ruleOut)
@@ -817,7 +823,7 @@ func newStreamFixture(t *testing.T) *streamFixture {
 
 	fx.pluginKey = uniqueName("stream-plugin")
 	path := writePluginFile(t, "stream.js", pluginSource(fx.pluginKey, "1.0.0", 0))
-	mustStream(t, func() error { return runPlugin([]string{"publish", path}) })
+	mustStream(t, func() error { return runPlugin([]string{"publish", path, "--by", ustr}) })
 
 	// 快照：snapshot get 要有一条能读出来的行。**不截断**——截断那一档另有一句
 	// 附注（它是有条件的，所以允许出现），而夹具让这一条走普通那一档。
