@@ -676,7 +676,8 @@ create --user alice > key.txt` 保存下来的文件里只有明文，不会混�
 
 用户钱包账户与入账管理。`create`、`credit`、`adjust` 与 `refund` 都只写
 `user_wallets` 与 `ledger_entries`，不碰 `users`，也不需要 `LARKAX_MASTER_KEYS`；
-`payout` 那一族写 `payout_requests` 与 `ledger_entries`（见它自己那一节）。
+`payout` 那一族写 `payout_requests` 与 `ledger_entries`，`payment` 那一族写
+`payment_orders` 与 `ledger_entries`（各自见它那一节）。
 
 `create` 给一个已存在的用户开通钱包，余额为 0。它不写任何分录：新开的户在账本上
 没有分录，这个用户在 `user` 科目上的分录之和为 0，与快照里的 0 自洽。带初始金额
@@ -696,8 +697,9 @@ create --user alice > key.txt` 保存下来的文件里只有明文，不会混�
 字符（换行、制表符等）——它既算交易号又进备注，而备注会把控制字符换成空格。
 
 `--gateway` 是这笔钱从哪个外部来源进来（记进 `payment_gateway:<来源>` 科目），默认
-`manual`，表示线下到账。来源名归一成小写。当前不接支付通道的回调，所以来源是操作者
-说的，不是系统验证过的。钱包必须已经存在：先 `create`，再 `credit`。
+`manual`，表示线下到账。来源名归一成小写。`credit` 的来源是操作者说的，不是系统
+验证过的；通道通知那条路走 `wallet payment`，金额以通道发回来的为准。钱包必须已经
+存在：先 `create`，再 `credit`。
 
 `adjust` 是运营手工调账：走账本写一组 `adjustment` 分录，被调科目是 `user:<ID>`、
 对家是 `platform_revenue`，并在同一个事务里更新 `user_wallets.balance`。修出来的
@@ -730,10 +732,10 @@ create --user alice > key.txt` 保存下来的文件里只有明文，不会混�
 
 资产默认取 `settings` 的 `billing.default_asset`（迁移里的默认值是 CNY）。它是钱包
 主键的一部分，所以同一个用户可以同时有 CNY 与其他资产的钱包；能用 `--asset` 的命令
-是 `create`、`credit`、`refund` 与 `payout request`（`payout` 的其余三条动的是
-已经建好那一条单子的品种），当前只有 CNY 一种受支持的资产。用户一律用
-`--user` 指定（`create`、`credit`、`adjust`、`refund`、`payout request`、`list`
-认它）：纯数字按 ID 解析，否则按用户名解析。
+是 `create`、`credit`、`refund`、`payout request` 与 `payment create`（`payout` 的
+其余三条动的是已经建好那一条单子的品种），当前只有 CNY 一种受支持的资产。用户一律用
+`--user` 指定（`create`、`credit`、`adjust`、`refund`、`payout request`、
+`payment create`、`list` 认它）：纯数字按 ID 解析，否则按用户名解析。
 
 `list` 是只读的那一条（也不需要 `LARKAX_MASTER_KEYS`），列出用户 ID、用户名、
 资产、余额与冻结额。不带 `--user` 时列出全部钱包，带的时候只列那一个用户。
@@ -759,7 +761,8 @@ create --user alice > key.txt` 保存下来的文件里只有明文，不会混�
 
 旧名 `wallet open` 等同于 `wallet create`；`credit` 上 `--idempotency-key` 与
 `--order` 都等同于 `--ref`（`adjust` 没有旧名）。`-u` 是 `--user` 的简写，
-`create`、`credit`、`adjust`、`refund`、`list` 与 `payout request` 认它。
+`create`、`credit`、`adjust`、`refund`、`list`、`payout request` 与
+`payment create` 认它。
 
 #### `wallet refund`
 
@@ -883,6 +886,46 @@ JSON 取不出任何字段。命令不解释它的内容，要哪些字段是通
 
 `-h` / `--help` 与写错参数时打的是短版（`larkaxctl wallet --help`），这一族的说明书
 单独一份：`larkaxctl wallet payout help`。
+
+#### `wallet payment`
+
+支付通道那一侧的充值：`create` 在通道侧建单并落一行 `payment_orders`（状态
+`created`），`status` 读这张单子的现状。**`create` 不入账**：钱要等通道把
+「已支付」的通知发到回调入口才进来（路径、请求体与状态码见
+[api.md](api.md) 的「支付回调」）。
+
+| 子命令 | 旗标 |
+|---|---|
+| `create` | `--user`、`--amount`、`--ref`（商户单号）、`[--asset]`、`[--notify-url]` |
+| `status` | `--order`（商户单号） |
+
+`--ref` 必填，是商户单号，同时是幂等键：同一个单号重跑只会得到同一张单子
+（回执「订单号 … 已经下过单，本次未改动。」，退出 0）；同一个单号配不同的
+用户、金额或资产不是重放，而是冲突（退出 4）。它不能带控制字符，理由与
+`wallet credit` 的 `--ref` 相同。
+
+`--amount` 必填且为正；`--user` 收 ID 或用户名；`--asset` 默认取
+`billing.default_asset`。`--notify-url` 原样交给通道，命令不解释它。
+
+通知到达后，账本写一组 `topup` 分录（借 `user:<ID>`、贷
+`payment_gateway:<通道>`；手续费另记借 `upstream_cost`、贷 `platform_revenue`）。
+状态机只能往前走：只有 `created` 收到「已支付」才入账并转成 `paid`；
+`failed` / `expired` / `refunded` 是终态，之后到「已支付」的通知被放过、账本
+不动。同一份通知重发不改变分录与余额。分录、余额快照与单据状态在**同一个事务**
+里写，任何一步失败都整笔回滚。
+
+`create` 要求用户已经有该资产的钱包，缺这一行时按与 `wallet credit` 同一档拒绝
+（退出 4）——回调入账时账本也要写这个用户的钱包快照，缺行会让通知处理失败。因此
+**回调入账要求钱包已经存在**。
+
+`status` 先读本地那一行，再问通道这张单子现在是什么状态。假通道没有自己的账本，
+它答的就是本地那一行，所以两栏今天恒等；接上真实通道之后才可能出现差异（通知丢了
+时本地还停在 `created`，而通道那边已经付过）。本地没有这张单子、或通道侧查不到时
+退出 4。
+
+**这条通道默认关闭**：`settings.payment.fake_enabled` 为 `false` 时 `create` 与
+`status` 都拒绝（退出 1），回调入口也不挂（那条路径回 501）。假通道的签名密钥是
+公开的占位值，只用于本地联调，见 [settings.md](settings.md) 的「支付」一节。
 
 #### `usage`
 

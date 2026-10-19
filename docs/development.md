@@ -1139,7 +1139,7 @@ ingress 规则下。
 | `price` | 计价规则：`create` / `list` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `list`） |
 | `upstream-cost` | 上游成本规则（每条渠道每个模型按生效窗口与优先级挑一条）：`create` / `list` / `update` / `disable` |
 | `user` | 用户：`create` / `list` / `get` / `update`；销户：`delete`（`request` 打标可撤 / `revert` 撤回 / `purge` 匿名化，不可逆） |
-| `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录）/ `adjust`（手工调账，走账本写分录）/ `refund`（退款，走账本写分录）/ `list`；商户提现：`payout`（`request` 申请并冻住待付 / `approve` 批准 / `reject` 驳回并解除冻结 / `paid` 打款，只放行已批准的单子） |
+| `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录）/ `adjust`（手工调账，走账本写分录）/ `refund`（退款，走账本写分录）/ `list`；商户提现：`payout`（`request` 申请并冻住待付 / `approve` 批准 / `reject` 驳回并解除冻结 / `paid` 打款，只放行已批准的单子）；支付通道：`payment`（`create` 下单 / `status` 查单，通道确认收款后才入账） |
 | `usage` | 用量与计费（只读）：`events`（用量事件）/ `requests`（每次请求的预留与结算） |
 | `apikey` | API Key：`create` / `update` / `get` / `list`；`update` 兼改状态、备注与过期时间 |
 | `ledger` | 账本：`balance` / `verify` / `runs`（三条都只读：余额、逐笔校验、对账的历史运行）与 `reconcile`（对账，会写运行记录） |
@@ -1724,13 +1724,14 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 
 | 包 | killed | 存活 | 超时 | Not covered | Mutator coverage | Test efficacy（递归） | 覆盖率（包内） |
 |---|---|---|---|---|---|---|---|
+| `internal/payment` | 110 | 0 | 0 | 5 | 95.65% | 100.00% | 77.8% |
 | `internal/pricing` | 107 | 0 | 0 | 18 | 85.60% | 100.00% | 90.2% |
 | `internal/pipeline` | 43 | 0 | 0 | 0 | 100.00% | 100.00% | 87.5% |
 | `internal/keyquota` | 2 | 0 | 0 | 6 | 25.00% | 100.00% | 3.3% |
 | `internal/snapshotwire` | 103 | 1 | 0 | 3 | 97.20% | 99.04% | 94.6% |
 | `internal/calendar` | 150 | 2 | 0 | 14 | 91.57% | 98.68% | 97.8% |
 | `internal/ledger` | 476 | 9 | 0 | 92 | 84.06% | 98.14% | 96.1% |
-| `internal/ledger/store` | 340 | 7 | 0 | 60 | 85.26% | 97.98% | 79.4% |
+| `internal/ledger/store` | 431 | 7 | 0 | 60 | 87.95% | 98.40% | 79.8% |
 | `internal/route` | 120 | 4 | 0 | 24 | 83.78% | 96.77% | 97.7% |
 | `internal/gateway` | 238 | 9 | 0 | 9 | 96.48% | 96.36% | 95.7% |
 | `internal/snapshot` | 153 | 6 | 0 | 50 | 76.08% | 96.23% | 90.1% |

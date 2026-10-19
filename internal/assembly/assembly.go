@@ -55,6 +55,8 @@ import (
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/observe"
+	"github.com/sumwai/larkax/internal/payment"
+	"github.com/sumwai/larkax/internal/payment/fakechannel"
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/plugin"
 	"github.com/sumwai/larkax/internal/plugin/host"
@@ -278,6 +280,8 @@ const (
 	maxOutputTokensKey = "billing.max_output_tokens"
 	// streamFreezeStepKey 是流式请求递进冻结的阈值段（token）。
 	streamFreezeStepKey = "billing.stream_freeze_step"
+	// paymentFakeKey 是假支付通道的开关。
+	paymentFakeKey = "payment.fake_enabled"
 )
 
 // 单次输出上限允许的范围（token）。
@@ -611,8 +615,13 @@ func Build(cfg Config) (*App, error) {
 	// 只有「读 / 写回结局」这三个方法（见 api.IdempotencyStore）。
 	handler.Idempotency = idempotency.New(cfg.DB)
 
+	public, err := buildPublicHandler(cfg, handler, ledgerStore, logger)
+	if err != nil {
+		return nil, err
+	}
+
 	return &App{
-		Public:       observe.Middleware(handler),
+		Public:       observe.Middleware(public),
 		Gateway:      gw,
 		Snapshots:    snapshots,
 		Plugins:      plugins.holder,
@@ -620,6 +629,37 @@ func Build(cfg Config) (*App, error) {
 		RateLimiter:  limiter,
 		pluginReload: plugins.reload,
 	}, nil
+}
+
+// buildPublicHandler 在推理入口之外按配置挂上其余公共路径。
+//
+// 今天只有支付回调。它只在 `settings.payment.fake_enabled` 为 true 时才挂：
+// 假通道的密钥是公开的占位值，默认打开等于让任何读过仓库的人都能伪造一笔
+// 到账。关着时这条路径落回推理入口，与其余未知路径一样回 501。
+func buildPublicHandler(cfg Config, inference *api.Handler, ledgerStore *store.Store, logger *slog.Logger) (http.Handler, error) {
+	enabled, err := cfg.Settings.Bool(paymentFakeKey)
+	if err != nil {
+		return nil, fmt.Errorf("读取假支付通道开关失败: %w", err)
+	}
+	if !enabled {
+		return inference, nil
+	}
+
+	orders := payment.NewStore(cfg.DB)
+	fake := fakechannel.New(fakechannel.WithLookup(
+		func(ctx context.Context, orderNo string) (payment.ChannelOrder, error) {
+			return orders.ChannelOrder(ctx, orderNo)
+		}))
+	service := payment.NewService(orders, ledgerStore, map[string]payment.Channel{
+		fakechannel.Name: fake,
+	})
+	logger.Warn("假支付通道已启用：它只用于本地联调，密钥是公开的占位值，不要接真实资金")
+
+	mux := http.NewServeMux()
+	mux.Handle(payment.CallbackPath(fakechannel.Name),
+		payment.NewHandler(service, fakechannel.Name, cfg.Version))
+	mux.Handle("/", inference)
+	return mux, nil
 }
 
 // redisProbeTimeout 是启动期那一次探活的时间上限。

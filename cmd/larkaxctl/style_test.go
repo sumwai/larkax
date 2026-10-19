@@ -19,6 +19,7 @@ import (
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/payment"
 	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
 	"github.com/sumwai/larkax/internal/pricing"
 	"github.com/sumwai/larkax/internal/settings"
@@ -900,8 +901,8 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				Reviewer: &auth.User{ID: 8, Username: "ops-placeholder"},
 			})
 		}},
-		// 销户回执：与调账、提现同一类（一栏一行），只是几栏随处置结果走。
-		{"销户回执", func(w io.Writer) {
+		// 销户回显：与调账、提现同一类（一栏一行），只是几栏随处置结果走。
+		{"销户回显", func(w io.Writer) {
 			printDeletionReceipt(w, deletionPurgeReceipt(auth.DeletionResult{
 				UserID:          7,
 				OldUsername:     "user-placeholder",
@@ -921,10 +922,26 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				WalletRows:      1,
 			}))
 		}},
+		// 下面一条是支付单的回显：与提现回显同一类（一栏一行）。status 那一条会
+		// 多出「通道状态」一栏，这里取能同时覆盖两栏的那一种。
+		{"支付单回显", func(w io.Writer) {
+			channelStatus := payment.StatusCreated
+			printPayment(w, paymentReceipt{
+				Verdict: "支付单 ORD-20261019-1 的现状。",
+				Order: payment.Order{
+					OrderNo: "ORD-20261019-1", UserID: 7, Gateway: "fake",
+					Asset: ledger.AssetCNY, Amount: money.MustParse("66.00"),
+					Status: payment.StatusPaid, GatewayTxnID: "TRADE-placeholder",
+					Fee: money.MustParse("0.66"), PaidAt: &at, CreatedAt: at,
+				},
+				User:          auth.User{ID: 7, Username: "user-placeholder"},
+				ChannelStatus: &channelStatus,
+			})
+		}},
 	}
 
-	if len(cases) != 31 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 31 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 32 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 32 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {

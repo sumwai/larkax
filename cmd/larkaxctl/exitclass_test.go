@@ -13,6 +13,7 @@ import (
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/dberr"
 	"github.com/sumwai/larkax/internal/ledger/store"
+	"github.com/sumwai/larkax/internal/payment"
 	"github.com/sumwai/larkax/internal/pipeline"
 	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
 	"github.com/sumwai/larkax/internal/pricing"
@@ -271,6 +272,8 @@ func TestConflictSentinelsExitFour(t *testing.T) {
 		{"errSettingsNotFound", errSettingsNotFound},
 		{"errPluginKVKeyNotFound", errPluginKVKeyNotFound},
 		{"snapshot.ErrSnapshotNotFound", errSnapshotNotFound},
+		{"payment.ErrOrderNotFound", payment.ErrOrderNotFound},
+		{"payment.ErrOrderConflict", payment.ErrOrderConflict},
 	}
 
 	for _, s := range sentinels {

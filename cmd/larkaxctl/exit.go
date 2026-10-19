@@ -9,6 +9,7 @@ import (
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/dberr"
 	"github.com/sumwai/larkax/internal/ledger/store"
+	"github.com/sumwai/larkax/internal/payment"
 	"github.com/sumwai/larkax/internal/pipeline"
 	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
 	"github.com/sumwai/larkax/internal/pricing"
@@ -230,6 +231,12 @@ var conflictErrors = []error{
 	// 那些写入路径的哨兵是同一个形状，只是发生在**读**的一侧，所以它由命令
 	// 自己造（snapshot.go），不来自某个 store 包。
 	errSnapshotNotFound,
+
+	// 支付单那一侧的两个形状：按单号找不到那一行，与同一个单号已经是一条
+	// 内容不同的单子。两者的下一步都是先去看 `wallet payment status` 或库里
+	// 那一行现在是什么，而不是改一下命令重发。
+	payment.ErrOrderNotFound,
+	payment.ErrOrderConflict,
 }
 
 // noChangeErrors 是「这次调用没提到任何要改的字段」。
