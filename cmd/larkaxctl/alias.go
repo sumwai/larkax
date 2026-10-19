@@ -171,6 +171,11 @@ func parseAliasCreate(args []string) (catalog.CreateAliasRequest, error) {
 	if strings.TrimSpace(*upstream) == "" {
 		return catalog.CreateAliasRequest{}, errors.New("缺少 --upstream")
 	}
+	// 上游模型名进 alias list 的「上游模型名」那一栏：控制字符在连库之前
+	// 拒掉（判据在 catalog 的 normalizeUpstreamModel）。
+	if err := checkDisplayText("--upstream（上游模型名）", strings.TrimSpace(*upstream)); err != nil {
+		return catalog.CreateAliasRequest{}, err
+	}
 	if *channelID < 0 {
 		return catalog.CreateAliasRequest{}, fmt.Errorf(
 			"--channel %d 无效：渠道 ID 从 1 开始，留空表示平台级别名", *channelID)
@@ -297,6 +302,9 @@ func parseAliasUpdate(args []string) (catalog.UpdateAliasRequest, error) {
 	req := catalog.UpdateAliasRequest{ID: *id}
 	changes := 0
 	if given["upstream"] {
+		if err := checkDisplayText("--upstream（上游模型名）", strings.TrimSpace(*upstream)); err != nil {
+			return catalog.UpdateAliasRequest{}, err
+		}
 		req.UpstreamModel = upstream
 		changes++
 	}

@@ -228,6 +228,32 @@ func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
 	if strings.TrimSpace(*display) == "" {
 		return catalog.CreateModelRequest{}, errors.New("缺少 --display")
 	}
+	// 这些值都会进 model list / get 的表格：控制字符在连库之前拒掉（判据在
+	// catalog 的写入路径，见 normalizeCanonicalName 一组）。
+	if err := checkDisplayText("--model（规范模型名）", strings.TrimSpace(*canonical)); err != nil {
+		return catalog.CreateModelRequest{}, err
+	}
+	if err := checkDisplayText("--display（展示名）", strings.TrimSpace(*display)); err != nil {
+		return catalog.CreateModelRequest{}, err
+	}
+	if err := checkDisplayText("--vendor（厂商）", strings.TrimSpace(*vendor)); err != nil {
+		return catalog.CreateModelRequest{}, err
+	}
+	if err := checkDisplayText("--family（家族）", strings.TrimSpace(*family)); err != nil {
+		return catalog.CreateModelRequest{}, err
+	}
+	for i, value := range splitOptionalList(*modalitiesIn) {
+		if err := checkDisplayText(
+			fmt.Sprintf("--input-modalities（输入模态） 里第 %d 个", i+1), value); err != nil {
+			return catalog.CreateModelRequest{}, err
+		}
+	}
+	for i, value := range splitOptionalList(*modalitiesOut) {
+		if err := checkDisplayText(
+			fmt.Sprintf("--output-modalities（输出模态） 里第 %d 个", i+1), value); err != nil {
+			return catalog.CreateModelRequest{}, err
+		}
+	}
 	cutoff, err := parseDateFlag("--knowledge-cutoff", *knowledgeCutoff)
 	if err != nil {
 		return catalog.CreateModelRequest{}, err
@@ -501,6 +527,11 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, capabilityEdit
 	if strings.TrimSpace(*canonical) == "" {
 		return catalog.UpdateModelRequest{}, capabilityEdit{}, errors.New("缺少 --model（要改的规范模型名）")
 	}
+	// 与 create 同一条：这些值会进 model list / get 的表格，控制字符在连库
+	// 之前拒掉（判据在 catalog 的写入路径）。
+	if err := checkDisplayText("--model（规范模型名）", strings.TrimSpace(*canonical)); err != nil {
+		return catalog.UpdateModelRequest{}, capabilityEdit{}, err
+	}
 
 	// 只有**真的给了**的标志才进请求。--context-limit 0 与「没提这一项」是
 	// 两件事，而 flag 包的零值分不出它们，所以这里看 fs.Visit 记下的清单。
@@ -521,14 +552,23 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, capabilityEdit
 	req := catalog.UpdateModelRequest{CanonicalName: *canonical}
 	changes := 0
 	if given["display"] {
+		if err := checkDisplayText("--display（展示名）", strings.TrimSpace(*display)); err != nil {
+			return catalog.UpdateModelRequest{}, capabilityEdit{}, err
+		}
 		req.DisplayName = display
 		changes++
 	}
 	if given["vendor"] {
+		if err := checkDisplayText("--vendor（厂商）", strings.TrimSpace(*vendor)); err != nil {
+			return catalog.UpdateModelRequest{}, capabilityEdit{}, err
+		}
 		req.Vendor = vendor
 		changes++
 	}
 	if given["family"] {
+		if err := checkDisplayText("--family（家族）", strings.TrimSpace(*family)); err != nil {
+			return catalog.UpdateModelRequest{}, capabilityEdit{}, err
+		}
 		req.Family = family
 		changes++
 	}
@@ -546,11 +586,23 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, capabilityEdit
 	}
 	if flagGiven(given, modalitiesInFlagNames...) {
 		list := splitOptionalList(*modalitiesIn)
+		for i, value := range list {
+			if err := checkDisplayText(
+				fmt.Sprintf("--input-modalities（输入模态） 里第 %d 个", i+1), value); err != nil {
+				return catalog.UpdateModelRequest{}, capabilityEdit{}, err
+			}
+		}
 		req.ModalitiesInput = &list
 		changes++
 	}
 	if flagGiven(given, modalitiesOutFlagNames...) {
 		list := splitOptionalList(*modalitiesOut)
+		for i, value := range list {
+			if err := checkDisplayText(
+				fmt.Sprintf("--output-modalities（输出模态） 里第 %d 个", i+1), value); err != nil {
+				return catalog.UpdateModelRequest{}, capabilityEdit{}, err
+			}
+		}
 		req.ModalitiesOutput = &list
 		changes++
 	}

@@ -201,6 +201,11 @@ func (s *Store) Create(ctx context.Context, p CreateParams) (Created, error) {
 	if p.UserID <= 0 {
 		return Created{}, fmt.Errorf("用户 ID 必须是正整数，得到 %d", p.UserID)
 	}
+	// 备注会进 apikey list 的「备注」那一栏，形状判据与 UpdateKey 共用一处
+	// （见 ValidateKeyName）。空串照收：那是「没有备注」。
+	if err := ValidateKeyName(p.Name); err != nil {
+		return Created{}, err
+	}
 
 	plaintext, err := NewKey()
 	if err != nil {

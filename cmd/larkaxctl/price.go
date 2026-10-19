@@ -262,6 +262,14 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 	if strings.TrimSpace(*name) == "" {
 		return pricing.CreateRequest{}, priceRefs{}, errors.New("缺少 --name")
 	}
+	// 规则名与模型名单进 price list / explain 的表格：控制字符在连库之前
+	// 拒掉（判据在 pricing 的写入路径，见 normalizeName / normalizePatterns）。
+	if err := checkDisplayText("--name（规则名）", strings.TrimSpace(*name)); err != nil {
+		return pricing.CreateRequest{}, priceRefs{}, err
+	}
+	if err := checkDisplayList("--models", splitOptionalList(*models)); err != nil {
+		return pricing.CreateRequest{}, priceRefs{}, err
+	}
 	if strings.TrimSpace(*expression) == "" {
 		return pricing.CreateRequest{}, priceRefs{}, errors.New("缺少 --expr")
 	}
@@ -494,11 +502,17 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 		changes++
 	}
 	if given["name"] {
+		if err := checkDisplayText("--name（规则名）", strings.TrimSpace(*name)); err != nil {
+			return pricing.UpdateRequest{}, priceRefs{}, err
+		}
 		req.Name = name
 		changes++
 	}
 	if given["models"] {
 		list := splitOptionalList(*models)
+		if err := checkDisplayList("--models", list); err != nil {
+			return pricing.UpdateRequest{}, priceRefs{}, err
+		}
 		req.ModelPatterns = &list
 		changes++
 	}

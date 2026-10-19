@@ -15,6 +15,7 @@ import (
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/dberr"
+	"github.com/sumwai/larkax/internal/textshape"
 )
 
 // 渠道状态里运维能设置的两个取值。
@@ -874,6 +875,11 @@ func normalizeName(name string) (string, error) {
 	if name == "" {
 		return "", errors.New("渠道名不能为空")
 	}
+	// 渠道名进 `channel list` 与 `channel health` 的「名称」那一栏，两处都按
+	// 一栏一行排版。判在 trim 之后的值上，与落库的那个串一致。
+	if err := textshape.Validate("--name（渠道名）", name); err != nil {
+		return "", err
+	}
 	return name, nil
 }
 
@@ -953,6 +959,11 @@ func normalizeModels(models []string) ([]string, error) {
 		m = strings.TrimSpace(m)
 		if m == "" {
 			return nil, fmt.Errorf("models 里第 %d 个模型名为空", i+1)
+		}
+		// 这一栏在 `channel list` 里按逗号连起来打成「模型」那一栏：一个带
+		// 换行的模型名会在表里折出续行，带 ESC 的则直接进终端。
+		if err := textshape.Validate(fmt.Sprintf("--models 里第 %d 个模型名", i+1), m); err != nil {
+			return nil, err
 		}
 		out = append(out, m)
 	}

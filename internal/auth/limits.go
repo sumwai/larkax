@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/textshape"
 )
 
 // 本文件是 api_keys 的**管理面**：读一把已有 key、改它的额度 / 状态 / 备注 /
@@ -72,6 +73,20 @@ func KeyStatuses() []string {
 // 库里现在是什么，后者是去看这次的报错本身。理由与 ErrUserNotFound 相同。
 var ErrKeyNotFound = errors.New("API Key 不存在")
 
+// ValidateKeyName 校验 api_keys.name（备注）的新值。
+//
+// 空串是**合法取值**：列是 NOT NULL DEFAULT ”，它表示「没有备注」，与创建
+// 时不给 --name 是同一个意思。这一列会进 `apikey list` 的「备注」那一栏与
+// `apikey get` 的同一栏，两处都按一栏一行排版——换行会把一栏拆成两行，ESC
+// 这类转义序列会原样进终端。
+//
+// 判在原值上、不去空白：写入路径也不去（见 UpdateKey 与 Store.Create），
+// 于是被拒的那个串与本来会落库的那个串是同一个。要去掉两头的空格是另一件
+// 事——这一列今天没有这条判据，别在这里顺手加上。
+func ValidateKeyName(name string) error {
+	return textshape.Validate("--name", name)
+}
+
 // UpdateKey 改一把已有 key，返回改完之后的整行。
 //
 // 按 id 定位而不是按 key_prefix：前缀只有 12 个字符，它的用途是「在列表里
@@ -106,6 +121,11 @@ func (s *Store) UpdateKey(ctx context.Context, keyID int64, p KeyParams) (Key, e
 		status = p.Status
 	}
 	if p.SetName {
+		// 判据在 auth 这一层，不只挡命令行的 --name：别的调用方（将来的
+		// 管理面、脚本）从这一头写进来的值同样会进清单与回显。
+		if err := ValidateKeyName(p.Name); err != nil {
+			return Key{}, err
+		}
 		name = p.Name
 	}
 	if p.SetExpiresAt && p.ExpiresAt != nil {

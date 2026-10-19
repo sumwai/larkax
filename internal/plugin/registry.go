@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
+	"github.com/sumwai/larkax/internal/textshape"
 )
 
 // SupportedAPIVersion 是当前支持的插件契约版本。
@@ -244,6 +245,18 @@ func ParseMeta(raw map[string]any) (Meta, error) {
 	}
 	if strings.ContainsAny(meta.Key, " \t\r\n") {
 		return Meta{}, fmt.Errorf("%w: key %q 含空白", ErrMetaMissingKey, meta.Key)
+	}
+	// 空白之外还有一类控制字符会打坏终端：key、name 与 version 都会进
+	// `plugin list` 与 `plugin get` 的表格。判据与别的展示字段共用一份
+	// （见 internal/textshape）。
+	if err := textshape.Validate("meta.key", meta.Key); err != nil {
+		return Meta{}, err
+	}
+	if err := textshape.Validate("meta.name", meta.Name); err != nil {
+		return Meta{}, err
+	}
+	if err := textshape.Validate("meta.version", meta.Version); err != nil {
+		return Meta{}, err
 	}
 	switch meta.APIVersion {
 	case SupportedAPIVersion:

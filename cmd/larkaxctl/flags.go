@@ -1,6 +1,12 @@
 package main
 
-import "flag"
+import (
+	"flag"
+	"fmt"
+	"strings"
+
+	"github.com/sumwai/larkax/internal/textshape"
+)
 
 // 这一层管的是「同一个选项的另一种写法」：**旧名**与**单字母简写**。
 //
@@ -37,6 +43,35 @@ func (s *stringStorage) Set(v string) error {
 // stringAlias 给一个**已经注册过**的字符串选项再挂一个写法。
 func stringAlias(fs *flag.FlagSet, holder *string, alias string) {
 	fs.Var(&stringStorage{holder}, alias, "")
+}
+
+// checkDisplayText 拒绝一个会原样进终端的旗标值里的控制字符。
+//
+// 判据只有一份（internal/textshape），写入路径自己也会再判一次——这里把它
+// 提前到连库之前：一个写错的命令不该先连上生产库再报错，而参数错要的是
+// 退出码 2（见 usageErr）。
+//
+// value 应当是该命令**真的会落库的那个串**：包在写入路径上会先 trim 的字段，
+// 这里也要传 trim 之后的值，否则 `--name $'\ta\t'` 会被拒，而它落库时是 `a`。
+func checkDisplayText(field, value string) error {
+	if err := textshape.Validate(field, value); err != nil {
+		return usageErr(err)
+	}
+	return nil
+}
+
+// checkDisplayList 逐个校验一组旗标值（逗号分开的名单）里的控制字符。
+//
+// 名单项在写入路径上会被 trim（见 channels 的 normalizeModels 与 pricing 的
+// normalizePatterns），所以这里也判 trim 之后的值，与落库的那个串一致。
+func checkDisplayList(field string, values []string) error {
+	for i, value := range values {
+		if err := checkDisplayText(fmt.Sprintf("%s 里第 %d 个", field, i+1),
+			strings.TrimSpace(value)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // boolAlias 给一个**已经注册过**的布尔选项再挂一个写法。

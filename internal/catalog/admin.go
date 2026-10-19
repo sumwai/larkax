@@ -14,6 +14,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/overrides"
+	"github.com/sumwai/larkax/internal/textshape"
 )
 
 // 目录写入面上的分类错误。
@@ -192,6 +193,20 @@ func (a *Admin) Create(ctx context.Context, req CreateModelRequest) (int64, erro
 	if err != nil {
 		return 0, err
 	}
+	vendor, err := optionalText("--vendor（厂商）", req.Vendor)
+	if err != nil {
+		return 0, err
+	}
+	family, err := optionalText("--family（家族）", req.Family)
+	if err != nil {
+		return 0, err
+	}
+	if err = checkTexts("--input-modalities（输入模态）", req.ModalitiesInput); err != nil {
+		return 0, err
+	}
+	if err = checkTexts("--output-modalities（输出模态）", req.ModalitiesOutput); err != nil {
+		return 0, err
+	}
 
 	var id int64
 	err = a.db.QueryRowContext(ctx, `
@@ -209,7 +224,7 @@ func (a *Admin) Create(ctx context.Context, req CreateModelRequest) (int64, erro
 		        $17, $18::date, $19::date, $20::jsonb,
 		        $21)
 		RETURNING id`,
-		name, display, textOrNull(req.Vendor), textOrNull(req.Family),
+		name, display, textOrNull(vendor), textOrNull(family),
 		contextLimit, inputLimit, outputLimit,
 		req.Capabilities.Reasoning, req.Capabilities.Tools, req.Capabilities.Vision,
 		req.Capabilities.Audio, req.Capabilities.Cache, req.Capabilities.Batch,
@@ -333,10 +348,18 @@ func modelUpdateSets(req UpdateModelRequest) ([]string, []any, error) {
 		add("display_name", display)
 	}
 	if req.Vendor != nil {
-		add("vendor", textOrNull(*req.Vendor))
+		vendor, err := optionalText("--vendor（厂商）", *req.Vendor)
+		if err != nil {
+			return nil, nil, err
+		}
+		add("vendor", textOrNull(vendor))
 	}
 	if req.Family != nil {
-		add("family", textOrNull(*req.Family))
+		family, err := optionalText("--family（家族）", *req.Family)
+		if err != nil {
+			return nil, nil, err
+		}
+		add("family", textOrNull(family))
 	}
 	if req.ContextLimit != nil {
 		limit, err := normalizeLimit("context_limit", *req.ContextLimit)
@@ -382,9 +405,15 @@ func modelUpdateSets(req UpdateModelRequest) ([]string, []any, error) {
 		add("supported_endpoints", endpoints)
 	}
 	if req.ModalitiesInput != nil {
+		if err := checkTexts("--input-modalities（输入模态）", *req.ModalitiesInput); err != nil {
+			return nil, nil, err
+		}
 		add("modalities_input", nonNilStrings(*req.ModalitiesInput))
 	}
 	if req.ModalitiesOutput != nil {
+		if err := checkTexts("--output-modalities（输出模态）", *req.ModalitiesOutput); err != nil {
+			return nil, nil, err
+		}
 		add("modalities_output", nonNilStrings(*req.ModalitiesOutput))
 	}
 	if req.ReasoningOptions != nil {
@@ -802,6 +831,11 @@ func normalizeCanonicalName(raw string) (string, error) {
 	if strings.ContainsAny(name, " \t\r\n") {
 		return "", fmt.Errorf("规范模型名 %q 里有空白字符：它是选路与计费共用的键，带空白的名字匹配不到任何请求", name)
 	}
+	// 空白之外还有一类控制字符会打坏终端：ESC 与其余 C0。规范名进
+	// `model list` 与 `model get`，两处都按一栏一行排版。
+	if err := textshape.Validate("--model（规范模型名）", name); err != nil {
+		return "", err
+	}
 	return name, nil
 }
 
@@ -828,6 +862,11 @@ func normalizeUpstreamModel(raw string) (string, error) {
 	upstream := strings.TrimSpace(raw)
 	if upstream == "" {
 		return "", errors.New("上游模型名不能为空")
+	}
+	// 「原样发给上游」不等于「什么都能收」：这个名字同时进 `alias list` 的
+	// 「上游模型名」那一栏，换行会把那一栏折出续行，ESC 会原样进终端。
+	if err := textshape.Validate("--upstream（上游模型名）", upstream); err != nil {
+		return "", err
 	}
 	return upstream, nil
 }
@@ -857,7 +896,43 @@ func normalizeDisplayName(raw string) (string, error) {
 	if display == "" {
 		return "", errors.New("display_name 不能为空：它是给人看的名字，不会回落到规范名")
 	}
+	// 展示名进 `model list` 的「展示名」那一栏与 `model get` 的同名行。
+	// 判在 trim 之后的值上，与 textOrNull 落库的那个串一致。
+	if err := textshape.Validate("--display（展示名）", display); err != nil {
+		return "", err
+	}
 	return display, nil
+}
+
+// optionalText 校验并归一一个可空的展示文本列（vendor / family）。
+//
+// 返回 trim 之后的值；空串表示「没填」，由调用方经 textOrNull 落 NULL——
+// 这里不直接返回 nil：那会让「取值」与「空」共用一个 nil 接口值，而 nilnil
+// 检查咬住的正是这个形状（`(nil, nil)` 读起来像「成功但没值」）。
+// 判在 trim 之后的值上，与落库的那个串一致。
+func optionalText(field, raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+	if err := textshape.Validate(field, value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+// checkTexts 逐个校验一组展示文本（模态清单）。
+//
+// 模态不清洗也不 trim：`--input-modalities 'a, b'` 里的空格会原样落库
+// （见 nonNilStrings），所以这里也判原值。它在 `model list` 的「模态」那一栏
+// 与 `model get` 里按逗号连起来打。
+func checkTexts(field string, values []string) error {
+	for i, value := range values {
+		if err := textshape.Validate(fmt.Sprintf("%s 里第 %d 个", field, i+1), value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // normalizeLimit 校验 token 上限。
