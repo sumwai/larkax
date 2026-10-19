@@ -71,7 +71,8 @@ list 不带 --model 时列出规则清单，同一条渠道内按裁决次序排
 （要同时给 --channel）只列适用的规则，按同一个次序，标着「选中」的那条就是现在
 按它算成本的那条，排在它后面的每一条都在说明它落选的原因。一条都不适用时不是
 失败：命令明说「没有适用的成本规则。」并以 0 退出——库里这一刻没有这条规则，
-不是命令或数据出了问题。--at 用来问过去某一刻，留空表示现在。
+--at 把「这一刻」换成指定的时刻（留空表示现在），用来回答「当时按哪条算的」；
+不给 --model 而给 --at 会被拒，--model 也要配 --channel 一起给。
 
 update 只改真的给了的那几项，其余保持库里的值。「不再过期」用
 --clear-effective-to，不要用 --effective-to 填一个很远的未来：那会在库里留一个
@@ -373,7 +374,7 @@ func runUpstreamCostList(args []string) error {
 		return usageErr(err)
 	}
 	if when != nil && modelName == "" {
-		return usageErr(errors.New("--at 只在给了 --model 时才有意义：它问的是某一次请求"))
+		return usageErr(errors.New("--at 要同时给 --model：它问的是某一次请求按哪条规则算成本"))
 	}
 	// 时刻在这里定下来再交给包：包在零值时会自己取当前时刻，而那样打出来的
 	// 表头与真正用的那一刻是两个数——「问的是哪一刻」正是这一栏要回答的问题。
@@ -461,7 +462,7 @@ func printCostList(w io.Writer, q pricing.CostListQuery, rules []pricing.CostInf
 	printCostTable(w, rules, verdictOf)
 	if q.CanonicalModel != "" {
 		_, _ = fmt.Fprintln(w, "「选中」那条就是这条渠道这个模型现在按它算成本的那条；"+
-			"排在它后面的每一条都在说明它落选的原因。")
+			"排在它后面的每一条都在说明「为什么不是它」。")
 	}
 }
 

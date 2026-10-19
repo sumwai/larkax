@@ -395,6 +395,7 @@ func TestHelpColoursStructureOnly(t *testing.T) {
 		"\x1b[1m核心与诊断 (Core & Diagnostics)：\x1b[0m", // 组标题
 		"\x1b[1mdoctor\x1b[0m",                         // 清单里的命令名
 		"\x1b[2m系统健康与链路连通性体检\x1b[0m",                   // 它后面那一句话
+		"\x1b[1m用法：\x1b[0m",                            // 段标题：整行加粗
 		"\x1b[1m全局选项（写在子命令前后都认）：\x1b[0m",               // usageNotes 里的段标题
 		"\x1b[1m--env-file <路径>\x1b[0m",                // 全局选项的名字栏
 		"\x1b[2m每条命令的详细用法：larkaxctl help <命令>。\x1b[0m", // 指针行
@@ -402,6 +403,13 @@ func TestHelpColoursStructureOnly(t *testing.T) {
 		if !strings.Contains(root.String(), want) {
 			t.Errorf("根帮助页里没有 %q：\n%s", want, helpTextRounding(root.String()))
 		}
+	}
+	// 与 version 页那条同一条反向断言：段标题被置灰，说明它不再满足段标题的
+	// 判据（顶格 + 以「：」结尾 + 下一非空行缩进）。根页这一处最容易踩到——
+	// 「用法：」与它的骨架合成一行时信息没少一个字，只是标题这一层没了，
+	// 而少了这条断言时上面那些"有"的判据一条都不会响。
+	if strings.Contains(root.String(), "\x1b[2m用法：") {
+		t.Errorf("根帮助页的段标题被置灰了：\n%s", helpTextRounding(root.String()))
 	}
 }
 

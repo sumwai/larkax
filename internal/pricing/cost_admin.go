@@ -115,8 +115,8 @@ type CostListQuery struct {
 	// 「为什么是它」的答案，见 List。
 	CanonicalModel string
 
-	// At 是「问的是哪一刻」，只在给了 CanonicalModel 时有意义。
-	// 零值表示当前时刻。
+	// At 是「问的是哪一刻」，只有给了 CanonicalModel 才用得上：另外两档列的
+	// 是全部规则，不看时刻。零值表示当前时刻。
 	At time.Time
 }
 

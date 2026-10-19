@@ -255,10 +255,11 @@ func buildUsage() string {
 
 	var b strings.Builder
 	// 命令名都是 ASCII，所以按字节数对齐与按显示宽度对齐是一回事。
-	// 用法骨架压成一行：根帮助页的行数有上界（见 usage_test.go 的
-	// TestRootUsageFitsOneScreen），而这一行与「用法：」这个只有两个字的标题
-	// 分行写，占的是同一个信息量。
-	b.WriteString("larkaxctl 是 larkax 的运维命令行。\n\n用法：larkaxctl <命令> [子命令] [选项]\n")
+	// 介绍句与「用法：」之间不空行：根帮助页的行数有上界（见 usage_test.go 的
+	// TestRootUsageFitsOneScreen），而「用法：」独成一行才满足段标题的判据
+	// （顶格 + 以「：」结尾 + 下一非空行缩进）、才会被加粗；并进骨架那一行就
+	// 会整行置灰。所以省下的是那个空行，不是标题那一行。
+	b.WriteString("larkaxctl 是 larkax 的运维命令行。\n用法：\n  larkaxctl <命令> [子命令] [选项]\n")
 	for _, g := range commandGroups {
 		b.WriteString("\n" + g.title + "：\n")
 		for _, c := range g.commands {

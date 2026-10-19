@@ -359,7 +359,7 @@ func TestUpstreamCostListRejectsBadFlags(t *testing.T) {
 		want string
 	}{
 		{"--model 没有配 --channel", []string{"--model", "m"}, "要同时给 --channel"},
-		{"--at 没有配 --model", []string{"--channel", "1", "--at", "2026-01-01T00:00:00Z"}, "只在给了 --model"},
+		{"--at 没有配 --model", []string{"--channel", "1", "--at", "2026-01-01T00:00:00Z"}, "--at 要同时给 --model"},
 		{"--channel 是负数", []string{"--channel", "-1"}, "无效"},
 		{"--at 不是 RFC3339", []string{"--channel", "1", "--model", "m", "--at", "2026-01-01"}, "RFC3339"},
 		{"多出位置参数", []string{"--channel", "1", "extra"}, "不接受位置参数"},
