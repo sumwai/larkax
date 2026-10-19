@@ -130,6 +130,23 @@ func parseCases() []parseCase {
 		{"channel create 缺 --name", func() error { return runChannelCreate(nil) }, false, channelHint},
 		{"price create 缺 --scope", func() error { return runPriceCreate(nil) }, false, priceHint},
 		{"wallet create 缺 --user", func() error { return runWalletCreate(nil) }, false, walletHint},
+		{"wallet refund 缺 --user", func() error { return runWalletRefund(nil) }, false, walletHint},
+		{"wallet refund 缺 --ref", func() error {
+			return runWalletRefund([]string{"--user", "1", "--amount", "1"})
+		}, false, walletHint},
+		{"wallet payout 缺子命令", func() error { return runWalletPayout(nil) }, true, walletHint},
+		{"wallet payout 未知子命令", func() error {
+			return runWalletPayout([]string{"bogus"})
+		}, true, walletHint},
+		{"wallet payout request 缺 --ref", func() error {
+			return runPayoutRequest([]string{"--user", "1", "--amount", "1"})
+		}, false, walletHint},
+		{"wallet payout approve 缺 --by", func() error {
+			return runPayoutApprove([]string{"--id", "1"})
+		}, false, walletHint},
+		{"wallet payout paid 缺 --gateway", func() error {
+			return runPayoutPaid([]string{"--id", "1"})
+		}, false, walletHint},
 		{"snapshot allowlist 位置参数多余", func() error { return runSnapshotAllowlist([]string{"extra"}) }, false, snapshotHint},
 		{"snapshot redact 缺 --direction", func() error { return runSnapshotRedact(nil) }, false, snapshotHint},
 	}
@@ -183,6 +200,14 @@ func TestDBUnreachableEntriesExitThree(t *testing.T) {
 		{"migrate up", func() error { return runMigrate([]string{"up"}) }},
 		{"secret rotate", func() error { return runRotate(nil) }},
 		{"price calendar import", func() error { return runCalendarImport([]string{doc}) }},
+		// 提现那一族与退款走的是同一个连库入口：连不上时也该是 3，而不是落到 1
+		// ——脚本对 1 的处置是「别再试了」，对 3 是「去看环境」。
+		{"wallet refund", func() error {
+			return runWalletRefund([]string{"--user", "1", "--amount", "1", "--ref", "R"})
+		}},
+		{"wallet payout request", func() error {
+			return runPayoutRequest([]string{"--user", "1", "--amount", "1", "--ref", "R"})
+		}},
 	}
 
 	for _, tc := range cases {

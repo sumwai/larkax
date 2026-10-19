@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/sumwai/larkax/internal/ledger"
@@ -43,6 +44,10 @@ import (
 // 锁挂在 txn_id 上而不是某个调用方传入的键上：写库这一层只认 txn_id。
 // 事务级锁随 commit / rollback 一起释放，不需要手工解锁。
 //
+// 分录里出现的 merchant_payable 科目另有一把按科目名的锁（见
+// lockPayableAccounts）：它把「读余额再决定写不写」的两条路——提现申请与退款
+// 冲回分成——串在同一条线上。加锁顺序固定为「交易键 → 科目」，两条路一致。
+//
 // # 钱包行必须已经存在
 //
 // 写入前按固定顺序锁住涉及的钱包行；任何一行不存在都返回 ErrNoWallet，
@@ -69,9 +74,8 @@ func (s *Store) PostTransaction(ctx context.Context, txn ledger.Transaction) (ap
 	defer func() { _ = tx.Rollback() }()
 
 	// 先给 txn_id 上锁，再读已有分录：读与写之间因此没有窗口。
-	if _, lockErr := tx.ExecContext(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, string(txn.TxnID)); lockErr != nil {
-		return false, fmt.Errorf("锁定交易 %s 失败: %w", txn.TxnID, lockErr)
+	if lockErr := lockTxn(ctx, tx, txn.TxnID); lockErr != nil {
+		return false, lockErr
 	}
 
 	stored, err := txnEntriesInTx(ctx, tx, txn.TxnID)
@@ -79,28 +83,108 @@ func (s *Store) PostTransaction(ctx context.Context, txn ledger.Transaction) (ap
 		return false, err
 	}
 	if len(stored) > 0 {
-		if !sameTxnContent(stored, txn.Entries) {
-			return false, fmt.Errorf(
-				"%w: 交易 %s 已经存在，但内容与这次要写的不同（库里 %d 条分录、这次 %d 条）",
-				ErrTxnConflict, txn.TxnID, len(stored), len(txn.Entries))
+		if conflictErr := sameStoredTxn(stored, txn); conflictErr != nil {
+			return false, conflictErr
 		}
 		// 重放：什么都不写，也不需要 commit。
 		return false, nil
 	}
 
-	if err := lockPostingWallets(ctx, tx, txn.Entries); err != nil {
-		return false, err
+	// 纯重放不写东西，所以科目锁放在这之后：不给一次空操作排队。
+	if lockErr := lockPayableAccounts(ctx, tx, txn.Entries); lockErr != nil {
+		return false, lockErr
 	}
-	if err := insertEntries(ctx, tx, txn.Denormalize()); err != nil {
-		return false, err
-	}
-	if err := applyToWallets(ctx, tx, txn.Entries); err != nil {
+
+	if err := writeTxnEntries(ctx, tx, txn); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("提交交易 %s 失败: %w", txn.TxnID, err)
 	}
 	return true, nil
+}
+
+// lockTxn 把同一个交易号的写入串行化。
+//
+// 事务级锁：随 commit / rollback 一起释放，不需要手工解锁。锁挂在 txn_id 上
+// 而不是某个调用方传入的键上——写库这一层只认 txn_id（见 PostTransaction 的
+// 「并发」那一节）。
+//
+// 它单独成一个函数，是因为**不止一条路在写分录**：手工入账与调账走
+// PostTransaction，提现的申请 / 驳回 / 打款走 payout.go 那三个写入函数。
+// 每一条都要先上这把锁，锁错了（或漏了）只在并发时才看得出来，所以只留
+// 一处写法。
+func lockTxn(ctx context.Context, tx *sql.Tx, txnID ledger.TxnID) error {
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, string(txnID)); err != nil {
+		return fmt.Errorf("锁定交易 %s 失败: %w", txnID, err)
+	}
+	return nil
+}
+
+// lockPayableAccounts 给分录里出现的每个 merchant_payable 科目上一把事务级锁。
+//
+// 这把锁与 RequestPayout 校验分成余额时用的是同一把（见 lockAccount）。退款与
+// 提现申请都能让这个科目变小，而提现申请要「读余额 → 判断够不够 → 写」：只锁
+// 申请那一侧的话，一笔并发退款能在读完余额之后把它冲走，校验就白做了。
+//
+// 只锁真的出现在分录里的科目：user、platform_revenue 那些科目没有「先读余额再
+// 决定写不写」的路径，给它们加锁只是拖慢并发。消费的分成也会经过这里，方向上是
+// 让科目变大，串行只会慢一点，不是错误。对账的 RepairAdjustLedger 直接写分录、
+// 不走这里，是已知例外（见 lockAccount 的说明）。
+//
+// 按科目名排序后逐个取：两个交易同时含 merchant_payable:1 与 merchant_payable:2
+// 时，不排序会各拿一把再等对方，撞出死锁。顺序固定为「交易键 → 科目」，与
+// RequestPayout 一致。
+func lockPayableAccounts(ctx context.Context, tx *sql.Tx, entries []ledger.Entry) error {
+	uniq := map[string]ledger.Account{}
+	for _, e := range entries {
+		if e.Account.Type() == ledger.AccountMerchantPayable {
+			uniq[e.Account.String()] = e.Account
+		}
+	}
+	names := make([]string, 0, len(uniq))
+	for name := range uniq {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := lockAccount(ctx, tx, uniq[name]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sameStoredTxn 核对库里已有的那笔交易与这次要写的是不是同一批分录。
+//
+// 一致返回 nil（重放），不一致返回 ErrTxnConflict。**只在 stored 非空时调用**
+// ——「库里还没有这笔交易」是另一条路，不是这一条的一个分支。
+//
+// 与 sameTxnContent 一样按多重集比较：分录的顺序不是账本的一部分。
+func sameStoredTxn(stored []ledger.Entry, txn ledger.Transaction) error {
+	if sameTxnContent(stored, txn.Entries) {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: 交易 %s 已经存在，但内容与这次要写的不同（库里 %d 条分录、这次 %d 条）",
+		ErrTxnConflict, txn.TxnID, len(stored), len(txn.Entries))
+}
+
+// writeTxnEntries 一组分录的三步写库：锁钱包 → 写分录 → 更新快照。
+//
+// 调用方负责前置判断（这笔交易是不是已经写过）与事务边界。**不在这里
+// Verify**：走到这一步的交易都出自 internal/ledger 的构造函数，它们构造时
+// 已经自检过一次（newTxn）；真正的把关在 PostTransaction 的开头，那里接的
+// 是调用方自己拼出来的交易。
+func writeTxnEntries(ctx context.Context, tx *sql.Tx, txn ledger.Transaction) error {
+	if err := lockPostingWallets(ctx, tx, txn.Entries); err != nil {
+		return err
+	}
+	if err := insertEntries(ctx, tx, txn.Denormalize()); err != nil {
+		return err
+	}
+	return applyToWallets(ctx, tx, txn.Entries)
 }
 
 // txnEntriesInTx 在一个事务里读回某个交易的全部分录。

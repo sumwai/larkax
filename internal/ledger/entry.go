@@ -35,6 +35,11 @@ const (
 	EntryPayoutRequest EntryType = "payout_request"
 	// EntryPayoutPaid 是提现打款完成：这条提现单的应付核销，钱离开平台。
 	EntryPayoutPaid EntryType = "payout_paid"
+	// EntryPayoutReject 是提现申请被驳回：这条提现单的待付核销，钱回到
+	// 商户的分成上。它与 payout_request 是**互相取消**的两笔，所以两档
+	// 分开：账面上要能回答「这条待付是打款核销的还是审批驳回的」，
+	// 而这两种处置对账的对象不同（通道账单 vs 审批记录）。
+	EntryPayoutReject EntryType = "payout_reject"
 	// EntryAdjustment 是人工调账。它不参与任何业务推导，
 	// 只在必须手工修正账目时使用，且强制要求写备注。
 	EntryAdjustment EntryType = "adjustment"
@@ -57,7 +62,7 @@ func validEntryType(t EntryType) bool {
 func EntryTypes() []EntryType {
 	return []EntryType{
 		EntryTopup, EntryConsume, EntryRefund, EntrySettle,
-		EntryPayoutRequest, EntryPayoutPaid, EntryAdjustment,
+		EntryPayoutRequest, EntryPayoutPaid, EntryPayoutReject, EntryAdjustment,
 	}
 }
 
@@ -150,6 +155,10 @@ var entryDirections = map[EntryType]map[AccountType]signMask{
 	EntryPayoutPaid: {
 		AccountPayout:         signCredit, // 这笔待付核销
 		AccountPaymentGateway: signDebit,  // 通道持有的我们的钱减少
+	},
+	EntryPayoutReject: {
+		AccountMerchantPayable: signDebit,  // 欠商户的分成恢复
+		AccountPayout:          signCredit, // 这条待付核销
 	},
 	// 人工调账是唯一的开口：它本就是要修正别处算错的余额，
 	// 所以科目与方向都不设限。代价是它不能被自动推导，

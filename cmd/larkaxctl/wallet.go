@@ -25,24 +25,29 @@ import (
 var walletHelp = helpText{short: walletShortUsage, long: walletUsage}
 
 // walletShortUsage 是 wallet 的短版：`-h` / `--help` 与参数写错时打的那一份。
+//
+// 它有一屏的上限（见 usage_test.go 的 shortUsageMaxLines），所以这一族从四条命令
+// 长到八条之后，每一行的取舍都是「哪些字必须留在一屏里」：**每个旗标都留着**
+// （它们是照着敲的东西），省下来的是散文——`--memo` 的控制字符、`--asset` 的默认值
+// 这些解释挪进长版（larkaxctl help wallet）。
 const walletShortUsage = `larkaxctl wallet 管理用户钱包。
 
 用法：
   larkaxctl wallet create --user <ID 或用户名> [--asset <资产>]
-  larkaxctl wallet credit --user <ID 或用户名> --amount <金额> --ref <外部单据号>
-                          [--asset <资产>] [--gateway <来源>]
-  larkaxctl wallet adjust --user <ID 或用户名> --amount <带符号金额> --ref <外部单据号>
-                          --memo <原因> --by <操作人>
+  larkaxctl wallet credit --user <ID 或用户名> --amount <金额> --ref <外部单据号> [--asset <资产>] [--gateway <来源>]
+  larkaxctl wallet adjust --user <ID 或用户名> --amount <带符号金额> --ref <外部单据号> --memo <原因> --by <操作人>
+  larkaxctl wallet refund --user <ID 或用户名> --amount <金额> --ref <外部单据号> [--memo <原因>]
+                          [--asset <资产>] [--merchant <ID 或用户名> --merchant-share <金额>] [--upstream-cost <金额>]
+  larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号> [--asset <资产>]
+                                  [--destination <收款信息 JSON>]
+  larkaxctl wallet payout approve|reject --id <提现单 ID> --by <操作人> [--note <说明>]
+  larkaxctl wallet payout paid --id <提现单 ID> --gateway <通道> [--gateway-ref <凭据号>]
   larkaxctl wallet list [--user <ID 或用户名>]
 
-list 只读：列出用户 ID、用户名、资产、余额与冻结。某一格读不出来时（库里那个数
-超出金额能表示的范围）那一格打「不可读（超出可表示范围）」，其余照打，命令退出 1。
-credit 与 adjust 的 --ref 必填，它同时是幂等键：同一条命令重跑两次只记一笔，
-换单号才是另一笔。adjust 的 --memo 与 --by 也必填；--amount 带符号，负数是往回扣；
---memo 里不能有控制字符（换行、制表符之类就算，见 help wallet）。
-钱包必须已经存在（先 create）；这四条命令都不需要 LARKAX_MASTER_KEYS。
-
-更细的边界：larkaxctl help wallet。
+credit / adjust / refund 要求钱包已存在（先 create）；payout 四条不动 user 科目，也不要求钱包行。
+payout 四步是申请、批准、驳回与打款；**打款只放行已批准的单子**。单据号必填且是幂等键，重跑只记一笔。
+list 只读：某一格读不出来时打「不可读（超出可表示范围）」，其余照打，命令退出 1。
+更细的边界：larkaxctl help wallet；payout 那一族另有：larkaxctl wallet payout help。
 `
 
 // walletUsage 是 wallet 的长版：`larkaxctl help wallet` 与 `wallet help`。
@@ -54,6 +59,17 @@ const walletUsage = `larkaxctl wallet 管理用户钱包。
                           [--asset <资产>] [--gateway <来源>]
   larkaxctl wallet adjust --user <ID 或用户名> --amount <带符号金额> --ref <外部单据号>
                           --memo <原因> --by <操作人>
+  larkaxctl wallet refund --user <ID 或用户名> --amount <金额> --ref <外部单据号>
+                          [--asset <资产>] [--memo <原因>]
+                          [--merchant <ID 或用户名> --merchant-share <金额>]
+                          [--upstream-cost <金额>]
+  larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号>
+                                  [--asset <资产>]
+                                  [--destination <收款信息 JSON>]
+  larkaxctl wallet payout approve|reject --id <提现单 ID> --by <操作人>
+                                         [--note <说明>]
+  larkaxctl wallet payout paid --id <提现单 ID> --gateway <通道>
+                               [--gateway-ref <凭据号>]
   larkaxctl wallet list [--user <ID 或用户名>]
 
 create 给一个已存在的用户开通钱包，余额为 0。它不写任何分录：新开的户在
@@ -121,17 +137,82 @@ CHECK (balance >= 0)，而负的用户余额说明某处少扣了钱，它应当
 user:<ID> 是同一个数），不是 user_wallets 里那个快照：两者不一致时以账本为准，
 差额由对账任务比对。
 
-钱包必须已经存在：先 wallet create，再 credit 或 adjust。用户或钱包不存在都退出 4。
+refund 是运营给用户退钱：走账本写一组 refund 分录，借 user:<ID>（余额涨回来），贷方是
+这次冲回的分成、上游成本与平台收入。它与 credit 的差别在**钱从哪来**：入账记的是外部
+进来的钱（payment_gateway），退款冲的是当初收过的那几笔，其中平台退还的收入是**推出来
+的**（退款额减去分成与上游成本），不由旗标指定。
+
+--merchant（收 ID 或用户名）与 --merchant-share 要一起给，给一边就报参数错：只给商户
+不给金额时这一笔的分成没有任何数与之对应，而静默放行会让操作者以为冲回了那个商户的分成、
+账上却一分钱都没落到他名下。两项之和超过 --amount 同样在这里拒掉，理由与 adjust 拒负
+余额同源：那样的一笔会把别的科目冲成负数。--upstream-cost 是上游退回来的成本，不写就是零。
+--memo 可选，写的时候不能带控制字符（理由同 adjust）。
+
+**退款额的上界不查**：它不能大于原始消费，而账本那一层看不到原始消费——这条由操作者保证。
+它也没有「这笔退款挂在哪条计费请求上」的旗标：--ref 是外部单据号，不是本库里某条请求的外键。
+--ref 会进分录备注（「退款：<原因>（单据 <ref>）」，没给原因时是「退款（单据 <ref>）」）：
+交易号是它的哈希，从单据号算得到交易号、反过来算不回来，不落备注就没有第二条路把这张退款单
+对上这笔账。
+
+payout 是商户提现，四个动作各一条命令：request 申请、approve 批准、reject 驳回、paid 打款。
+一条提现单按状态往前走：
+
+    pending --批准--> approved --打款--> paid
+        |
+        +--驳回--> rejected
+
+request 建一行 payout_requests（状态 pending）并写一组分录，把申请额从
+merchant_payable:<商户>（他还能申请的钱）挪进 payout:<单id>（这条单子的待付）——钱在申请
+这一步就冻住了，不是打款时才冻。--ref 是申请单号，同时是幂等键，也进 payout 那条分录的
+备注（「提现申请（单据 <ref>）」）。--destination 是商户的收款信息，必须是**一个 JSON
+对象**，落进 payout_requests.destination；本命令不解释它的内容，打款通道要哪些字段是通道
+那一侧的事。它**事后不能改**（这一族没有修改命令），所以同一个申请单号配不同的收款信息
+不是重放，而是冲突（退出 4）。
+--amount 是申请额，必填且为正。申请时**校验商户的分成余额**：余额不够就拒掉、一笔都不写
+（退出 1，与调账把余额调成负数同一档）。今天商户分成的写入侧还没落地，所以这条申请在
+分成真正进来之前会被一律拒掉——那是刻意的，不能提平台根本不欠的钱。这条校验只保证
+「申请时不能提平台还不欠的钱」，**不是**「分成科目永远非负」：退款把分成冲成负数是允许的
+（负的意思是平台多付给了商户、商户欠平台，业务上再走追回），退款不因此被拒。
+
+approve 与 reject 都**不在这一层动钱**。approve 只在那一行上记下审批人与时刻
+（reviewed_by / reviewed_at，取自 --by 解析出来的那个用户）：账本与那张表都没有角色校验，
+谁批的只能靠这条命令记下来。reject 除了记审批结果，还写一组与申请相反的分录把冻结解除
+（merchant_payable 收回来、payout:<单id> 核销）——少写这一组，钱就永远留在那个待付科目里，
+账本上看起来仍是平的。**驳回只处理还没批准的单子**：已经批准的单子要撤销是另一件事，
+这一族还没有那一步，所以它在这里报状态不允许（退出 4）。
+
+paid 是唯一一个把钱付出去的入口，**它只放行已批准的单子**：没经过批准的单子在这里被拒，
+所以「先批准再打款」不靠操作者记得，而是没有第二条路能走到出账。它写一组 payout_paid 分录
+（贷 payout:<单id>、借 payment_gateway:<通道>）并记下打款时刻，给了凭据号时一并记进备注。
+--gateway 是钱实际从哪个通道出去，**必填**：通道未知时这笔分录对不上任何一份通道账单，
+而差的那一笔查不出来。
+--gateway-ref 是通道给的凭据号（转账流水号、通道回单号），**可选**：它进分录备注供人工对账，
+但**不是**幂等键——一张提现单只可能打款成功一次，所以键取单子自己的 id。拿凭据号当键的话，
+同一张单换一个凭据号会被算成一笔新交易，payout:<单id> 被扣成负数，那正是重复打款。
+
+四个动作各自幂等：申请、驳回与打款重放时什么都不写（打出来的那一句是「已经申请过 / 已经
+驳回过 / 已经打过款，本次未改动」），批准重跑时也不覆盖上一次的审批人与时刻——一次重跑不该
+把「谁批的」改成后一个人。--id 给了一个库里没有的提现单时报「没有这条提现单」；单子停在别的
+状态上时把当前状态与这一步要求的状态都打出来，两者都退出 4。
+
+**这一族不动余额**：提现动的是分成与待付，商户的用户余额（user 科目）不受影响，所以四条
+命令都不要求那个用户有钱包行。列出提现单的清单命令还没有：要查库里现在有哪些单子，
+暂时只有这一族的回执与直接查 payout_requests 表。
+
+钱包必须已经存在：先 wallet create，再 credit / adjust / refund。用户或钱包不存在都退出 4。
 
 资产默认取 settings 的 billing.default_asset（迁移里的默认值是 CNY）。
 --asset 可以显式指定，但当前只有 CNY 一种受支持的资产，写别的会被拒绝。
 资产品种是钱包主键的一部分：同一个用户可以同时有 CNY 与其他资产的钱包。
+认 --asset 的命令是 create、credit、refund 与 payout request；payout 的其余三条
+按单子上那一行行事，不由旗标另给一个品种。
 
 用户用 --user 指定，纯数字按 ID 解析，否则按用户名解析。用户不存在时报
 「找不到用户」并退出 4——那条错误来自解析用户这一步，与「用户存在但没有
 钱包行」是两件事。
 
-create、credit 与 adjust 都只写 user_wallets 与 ledger_entries，不碰 users，也不需要
+create、credit、adjust 与 refund 只写 user_wallets 与 ledger_entries；payout 那一族
+另写 payout_requests（申请建行，审批改行），四条都不碰 users。这些命令都不需要
 LARKAX_MASTER_KEYS。
 
 list 是只读的那一条：列出钱包与它的**余额快照**（user_wallets.balance 与
@@ -156,14 +237,15 @@ user_wallets.frozen），一栏一个字段：用户 ID、用户名、资产、�
 直接退出 1。不带 --user 的那一屏回答的是「现在有哪些钱包」，那才是「其余照打」的对象。
 
 **旧名仍可用**：wallet open 等同于 wallet create，credit 上 --idempotency-key 与
---order 都等同于 --ref，-u 是 --user 的简写（四条子命令都认）。它们保留是为了不让
-已经在跑的脚本与部署流程坏掉，行为与新名字逐字相同；新写的命令请用新名字。
+--order 都等同于 --ref，-u 是 --user 的简写（认 --user 的那几条子命令都认）。它们保留
+是为了不让已经在跑的脚本与部署流程坏掉，行为与新名字逐字相同；新写的命令请用新名字。
 
 # 别名
 
 下面几个写法仍然可用，只是不再是正式写法（用法行里只写规范名）：
 
-  -u <ID 或用户名>      同 --user，create、credit、adjust 与 list 都认
+  -u <ID 或用户名>      同 --user，create、credit、adjust、refund、list 与 payout
+                        request 都认
   --idempotency-key     同 --ref，只在 credit 上（adjust 没有旧名）。
                         它是这一项上一版的正式写法，已经发布过，删掉就是破坏脚本
   --order               同 --ref，同样只在 credit 上（更早的那一版口语化写法）
@@ -200,6 +282,10 @@ func runWallet(args []string) error {
 		return runWalletCredit(rest)
 	case "adjust":
 		return runWalletAdjust(rest)
+	case "refund":
+		return runWalletRefund(rest)
+	case "payout":
+		return runWalletPayout(rest)
 	case "list":
 		return runWalletList(rest)
 	case "-h", "--help":
@@ -654,28 +740,37 @@ func parseCreditAmount(plain string) (money.Amount, error) {
 	return amount, nil
 }
 
-// parseAmountFlag 解析一个金额旗标：去空白、自己数小数位、交给 money.Parse。
+// parseAmountFlag 解析 --amount：去空白、自己数小数位、交给 money.Parse。
+func parseAmountFlag(plain string) (money.Amount, error) {
+	return parseNamedAmountFlag("--amount", plain)
+}
+
+// parseNamedAmountFlag 解析一个金额旗标，报错时点名是哪一个旗标。
+//
+// 旗标名当参数传，而不是让每条命令各抄一遍这段解析：小数位与缺值的判据只有一份，
+// 而报错那句话要能让读的人知道该改哪一个旗标——wallet refund 上有三个金额旗标，
+// 一句「--amount 不是金额」会把人指去改另一个。
 //
 // 先自己数小数位，与 parseQuotaLimit 同一条判据：money.Parse 会把多出来的位
 // 四舍五入，而钱的金额是「敲进去多少就该记多少」的数——静默改掉最后一位会让账本
 // 上的数字与操作者手里的单据对不上。
-func parseAmountFlag(plain string) (money.Amount, error) {
+func parseNamedAmountFlag(flagName, plain string) (money.Amount, error) {
 	trimmed := strings.TrimSpace(plain)
 	if trimmed == "" {
-		return money.Zero, usageErr(errors.New("缺少 --amount"))
+		return money.Zero, usageErr(fmt.Errorf("缺少 %s", flagName))
 	}
 	// 末尾的 0 不算位数：`1.000000000` 与 `1` 是同一个数，列存得下，没有
 	// 任何东西会被舍掉。不先去尾就拒，会让人以为库有问题。
 	if _, frac, hasDot := strings.Cut(trimmed, "."); hasDot {
 		if kept := strings.TrimRight(frac, "0"); len(kept) > money.Scale {
 			return money.Zero, usageErr(fmt.Errorf(
-				"--amount 最多 %d 位小数，得到 %q：金额列是 numeric(20, %d)，多出来的位存不进去",
-				money.Scale, plain, money.Scale))
+				"%s 最多 %d 位小数，得到 %q：金额列是 numeric(20, %d)，多出来的位存不进去",
+				flagName, money.Scale, plain, money.Scale))
 		}
 	}
 	amount, err := money.Parse(trimmed)
 	if err != nil {
-		return money.Zero, usageErr(fmt.Errorf("--amount 不是金额（例如 12.34）: %w", err))
+		return money.Zero, usageErr(fmt.Errorf("%s 不是金额（例如 12.34）: %w", flagName, err))
 	}
 	return amount, nil
 }

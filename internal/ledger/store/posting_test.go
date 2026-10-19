@@ -438,6 +438,86 @@ func TestPostTransactionWaitsOnTxnLock(t *testing.T) {
 	}
 }
 
+// 退款与提现申请共用一把科目锁：写 merchant_payable 分录之前要排在那把锁后面。
+//
+// 这条用例与上面那条同构，钉的是**锁挂在哪个键上**：键换成交易键、或者干脆不
+// 取锁，它都会立刻完成，于是这条用例必红。它是提现申请校验余额的另一半——只锁
+// 申请那一侧的话，一笔并发退款仍能在读完余额之后把分成冲走。
+//
+// 有一条变异存活是判过的：`lockPayableAccounts` 循环里那句 `if err := …; err != nil`
+// （posting.go 的 CONDITIONALS_NEGATION）。把它翻成 `err == nil`，函数会在第一把锁
+// 之后带着 nil 提前返回——而今天没有任何一笔交易同时含两个 merchant_payable 科目，
+// 只锁一把与锁两把的行为一样，所以是等价变异，不是漏测。等真出现那种交易（例如
+// 一次清算两家商户）时，它就不再等价了：那时要补一条同时含两个分成科目的用例。
+func TestPostTransactionWaitsOnPayableLock(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+	payer := seed(t, db, "10")
+	merchant := bareUser(t, db)
+	txn, err := ledger.Consume(ledger.ConsumeParams{
+		TxnID: ledger.NewTxnID(), UserID: payer, Amount: money.MustParse("10"),
+		Asset: ledger.AssetCNY, MerchantID: merchant, MerchantShare: money.MustParse("4"),
+	})
+	if err != nil {
+		t.Fatalf("构造消费失败: %v", err)
+	}
+
+	holder, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("开启持锁事务失败: %v", err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	if _, err := holder.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		ledger.MerchantPayableAccount(merchant).String()); err != nil {
+		t.Fatalf("用例自己拿锁失败: %v", err)
+	}
+
+	var (
+		postErr error
+		applied bool
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		applied, postErr = s.PostTransaction(ctx, txn)
+	}()
+
+	// 500ms 是给慢机器留的观测窗：锁生效时它在整个窗口里都不该完成。
+	//
+	// 这里不判「等待期间库里没有分录」：READ COMMITTED 下另一条连接看不见未提交
+	// 的插入，那条断言恒真，证明不了锁在写库之前——把锁挪到写完再拿它照样绿。
+	// 能证明锁位置的只有下面这条「没完成」。
+	select {
+	case <-done:
+		t.Fatal("分成科目已经被锁着时，PostTransaction 不该完成：那把科目锁没生效")
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	if err := holder.Rollback(); err != nil {
+		t.Fatalf("释放持锁事务失败: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("放锁之后 PostTransaction 没有接着跑完")
+	}
+	if postErr != nil {
+		t.Fatalf("消费失败: %v", postErr)
+	}
+	if !applied {
+		t.Error("等到的这一次应当是真正入账的那一次（applied=true）")
+	}
+	// 三组分录：贷用户 10、借商户分成 4、借平台收入 6。
+	if got := entriesOf(t, db, txn.TxnID); len(got) != 3 {
+		t.Errorf("这个交易有 %d 条分录，期望 3 条", len(got))
+	}
+	if got := accountTotal(t, db, ledger.MerchantPayableAccount(merchant)); got != "4.00000000" {
+		t.Errorf("放锁之后分成科目 = %s，期望 4.00000000", got)
+	}
+}
+
 // 同一用户在同一资产上的多条分录之和放不进 int64 时，整笔交易必须被拒，
 // 而不是把夹住的净额写进钱包快照。
 //
