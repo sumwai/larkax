@@ -1104,9 +1104,9 @@ go run ./cmd/larkaxctl apikey update --id 3 --clear-rpm
 
 两处给的是同一个形状，即 Responses 协议本身定义的那一份 url_citation：`url`、
 `title`、`start_index` 这些字段与 `type` 并排。非流式那条路上游过来的那一份，
-先被转换层折成了两层。那是 chat 那套非官方扩展的形状，见 relayconvert 的
-`responseAnnotationToChat`；`internal/api` 在渲染响应体与流式事件时摊平
-（见 `responsesAnnotation`），所以客户端按一个形状写解析就够。
+先被转换层折成了两层。那是 chat 那套非官方扩展的形状，
+见 relayconvert 的 `responseAnnotationToChat`；`internal/api` 在渲染响应体与
+流式事件时摊平（见 `responsesAnnotation`），所以客户端按一个形状写解析就够。
 
 要真的拿到一次 `200`，库里得先有：一个用户与钱包、一把 API Key
 （`larkaxctl apikey create --user <ID 或用户名>`）、一条指向上游的渠道、
