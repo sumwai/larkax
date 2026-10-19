@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
@@ -228,6 +229,89 @@ func TestRequestPayoutWritesRowAndFreeze(t *testing.T) {
 	}
 	if wallets != 0 {
 		t.Errorf("申请提现给商户开了 %d 行钱包：这一族不该碰 user_wallets", wallets)
+	}
+}
+
+// 提现申请在写之前要排到分成科目的锁后面。
+//
+// 余额校验是「读余额 → 判断够不够 → 写」，另开一条连接持着那把科目锁时，申请
+// 必须拿到锁之后才读数。删掉 RequestPayout 里那次 lockAccount，它会在 500ms 的
+// 观测窗内就跑完，这条用例必红——余额不足与 destination 那些用例都是单线程，
+// 碰不到这把锁。
+func TestRequestPayoutWaitsOnPayableLock(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+	merchant := bareUser(t, db)
+	fundPayable(t, db, merchant, "5")
+	txnID := ledger.NewTxnID()
+	in := RequestPayoutInput{
+		TxnID: txnID, UserID: merchant, Amount: money.MustParse("5"),
+		Asset: ledger.AssetCNY, Ref: "REQ-LOCK",
+	}
+
+	holder, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("开启持锁事务失败: %v", err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	if _, err := holder.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		ledger.MerchantPayableAccount(merchant).String()); err != nil {
+		t.Fatalf("用例自己拿锁失败: %v", err)
+	}
+
+	var (
+		row     Payout
+		applied bool
+		postErr error
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		row, applied, postErr = s.RequestPayout(ctx, in)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("分成科目已经被锁着时，RequestPayout 不该完成：申请侧的科目锁没生效")
+	case <-time.After(500 * time.Millisecond):
+	}
+	// 等待期间看不到新单与新分录，意思是它们还没有提交。这条只说明「没有提前
+	// 提交」：READ COMMITTED 下另一条连接本来就看不见未提交的插入。锁的位置由
+	// 上面那条「没完成」证明。
+	if n := payoutRows(t, db, merchant); n != 0 {
+		t.Errorf("还在等锁时库里已经有 %d 行提现单", n)
+	}
+	if got := entriesOf(t, db, txnID); len(got) != 0 {
+		t.Errorf("还在等锁时已经写下了 %d 条分录：%+v", len(got), got)
+	}
+
+	if err := holder.Rollback(); err != nil {
+		t.Fatalf("释放持锁事务失败: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("放锁之后 RequestPayout 没有接着跑完")
+	}
+	if postErr != nil {
+		t.Fatalf("申请失败: %v", postErr)
+	}
+	if !applied {
+		t.Error("等到的这一次应当是真正建单的那一次（applied=true）")
+	}
+	if row.Status != PayoutPending {
+		t.Errorf("状态 = %q，期望 %q", row.Status, PayoutPending)
+	}
+	if n := payoutRows(t, db, merchant); n != 1 {
+		t.Errorf("放锁之后库里 %d 行提现单，期望 1 行", n)
+	}
+	if got := entriesOf(t, db, txnID); len(got) != 2 {
+		t.Errorf("这个交易有 %d 条分录，期望 2 条", len(got))
+	}
+	if got := accountTotal(t, db, ledger.PayoutAccount(row.ID)); got != "5.00000000" {
+		t.Errorf("待付科目 = %s，期望 5.00000000", got)
 	}
 }
 

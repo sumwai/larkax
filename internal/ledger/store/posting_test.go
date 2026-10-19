@@ -479,14 +479,14 @@ func TestPostTransactionWaitsOnPayableLock(t *testing.T) {
 	}()
 
 	// 500ms 是给慢机器留的观测窗：锁生效时它在整个窗口里都不该完成。
+	//
+	// 这里不判「等待期间库里没有分录」：READ COMMITTED 下另一条连接看不见未提交
+	// 的插入，那条断言恒真，证明不了锁在写库之前——把锁挪到写完再拿它照样绿。
+	// 能证明锁位置的只有下面这条「没完成」。
 	select {
 	case <-done:
 		t.Fatal("分成科目已经被锁着时，PostTransaction 不该完成：那把科目锁没生效")
 	case <-time.After(500 * time.Millisecond):
-	}
-	// 持锁期间一笔分录都不该落下：锁要挡在写库之前，而不是写完再等。
-	if got := entriesOf(t, db, txn.TxnID); len(got) != 0 {
-		t.Errorf("还在等锁时已经写下了 %d 条分录：%+v", len(got), got)
 	}
 
 	if err := holder.Rollback(); err != nil {
@@ -494,7 +494,7 @@ func TestPostTransactionWaitsOnPayableLock(t *testing.T) {
 	}
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("放锁之后 PostTransaction 没有接着跑完")
 	}
 	if postErr != nil {

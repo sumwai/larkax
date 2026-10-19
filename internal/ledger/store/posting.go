@@ -130,7 +130,8 @@ func lockTxn(ctx context.Context, tx *sql.Tx, txnID ledger.TxnID) error {
 //
 // 只锁真的出现在分录里的科目：user、platform_revenue 那些科目没有「先读余额再
 // 决定写不写」的路径，给它们加锁只是拖慢并发。消费的分成也会经过这里，方向上是
-// 让科目变大，串行只会慢一点，不是错误。
+// 让科目变大，串行只会慢一点，不是错误。对账的 RepairAdjustLedger 直接写分录、
+// 不走这里，是已知例外（见 lockAccount 的说明）。
 //
 // 按科目名排序后逐个取：两个交易同时含 merchant_payable:1 与 merchant_payable:2
 // 时，不排序会各拿一把再等对方，撞出死锁。顺序固定为「交易键 → 科目」，与

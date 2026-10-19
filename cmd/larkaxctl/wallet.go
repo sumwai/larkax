@@ -37,7 +37,7 @@ const walletShortUsage = `larkaxctl wallet 管理用户钱包。
   larkaxctl wallet credit --user <ID 或用户名> --amount <金额> --ref <外部单据号> [--asset <资产>] [--gateway <来源>]
   larkaxctl wallet adjust --user <ID 或用户名> --amount <带符号金额> --ref <外部单据号> --memo <原因> --by <操作人>
   larkaxctl wallet refund --user <ID 或用户名> --amount <金额> --ref <外部单据号> [--memo <原因>]
-                          [--merchant <ID 或用户名> --merchant-share <金额>] [--upstream-cost <金额>]
+                          [--asset <资产>] [--merchant <ID 或用户名> --merchant-share <金额>] [--upstream-cost <金额>]
   larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号> [--asset <资产>]
                                   [--destination <收款信息 JSON>]
   larkaxctl wallet payout approve|reject --id <提现单 ID> --by <操作人> [--note <说明>]

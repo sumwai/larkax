@@ -367,7 +367,8 @@ func (s *Store) RequestPayout(ctx context.Context, in RequestPayoutInput) (Payou
 	// 对分录里出现的 merchant_payable 科目取同一把锁（见 lockPayableAccounts），
 	// 两条路因此落在同一条串行线上。消费的分成与驳回都只让它变大；Settle 与提现
 	// 申请是同一个形状，它还没有调用方，接的时候同样要拿这把锁。加锁顺序固定为
-	// 「交易键 → 科目」，两边一致。
+	// 「交易键 → 科目」，两边一致。对账的 RepairAdjustLedger 不拿这把锁，是已知
+	// 例外（见 lockAccount）。
 	//
 	// 这条校验保证的是「申请时不能提平台还不欠的钱」，不是「这个科目永远非负」：
 	// 退款把它冲成负数是**允许**的——负的意思是平台多付给了商户、商户欠平台
@@ -442,7 +443,14 @@ func destinationOrEmptyObject(raw []byte) []byte {
 // 它守的是「读余额 → 与申请额比 → 写分录」这三步之间不留窗口：两个并发申请用
 // 两个不同的申请单号，各自的那把交易锁互不相干，只有这把科目锁能让它们排队。
 //
-// **任何让这个科目变小的写路径都要先拿同一把锁**，否则窗口照样存在。
+// **让这个科目变小的写路径都应当先拿同一把锁**，否则窗口照样存在。今天这样做
+// 的有两条：提现申请（RequestPayout）与 PostTransaction（退款冲回分成，见
+// lockPayableAccounts）。已知例外是对账的 RepairAdjustLedger：它在
+// reconcile_batch.go 里直接 insertEntries，不走 PostTransaction；差额科目若被
+// 配成 merchant_payable:<id>，它不拿这把锁就能改动这个科目。对账是人工、低频
+// 的动作，与提现并发时最多让一次申请校验读到偏大的余额——方向不安全（可能多
+// 放一次申请）。要不要拦这一格属于「差额科目能不能配成分成」那条口径，不在
+// 这把锁的范围里。
 func lockAccount(ctx context.Context, tx *sql.Tx, acct ledger.Account) error {
 	if _, err := tx.ExecContext(ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, acct.String()); err != nil {
