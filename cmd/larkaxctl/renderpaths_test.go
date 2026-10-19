@@ -64,7 +64,8 @@ var tableRenderPaths = []string{
 	"printChannelHealthList",   // channel health 的汇总表
 	"printChannelList",
 	"printConsentList", // consent list
-	"printKeyDetail",   // apikey get
+	"printCostTable",
+	"printKeyDetail", // apikey get
 	"printKeyList",
 	"printLedgerBalances", // ledger balance --all
 	"printLedgerRuns",     // ledger runs
@@ -96,6 +97,7 @@ var emptyListPaths = []string{
 	"printChannelHealthList", // channel health：一条渠道都没有
 	"printChannelList",
 	"printConsentList", // consent list
+	"printCostList",
 	"printKeyList",
 	"printModelList",
 	"printPluginList",

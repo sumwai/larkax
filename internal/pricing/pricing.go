@@ -32,6 +32,13 @@
 // 那是把「平台统一定价」变成了「平台随时可能悄悄改掉商家的价」。
 // priority 用来在**同一层**里决胜。第 3、4 条各自表达什么、以及它们为什么
 // 不必进索引，见 ruleOrderBy 上面的注释。
+//
+// # 成本规则是另一条线
+//
+// upstream_costs 记的是反方向的数——「这次请求我们花了多少」（见 cost.go 与
+// cost_admin.go）。它比售价规则少一层作用域（上游成本是渠道自己的属性），
+// 多一栏「按渠道分组」的次序；而窗口与模型名单那两条判据与这里**共用同一段
+// 片段**，那是「两条线口径一致」唯一的守得住的做法。
 package pricing
 
 import (
@@ -62,26 +69,14 @@ var _ interface {
 	MatchAll(context.Context, pipeline.RuleQuery) ([]pipeline.Rule, error)
 } = (*Source)(nil)
 
-// ruleApplicable 是「这条规则适用于这次查询」的判据。
+// applicableWindowAndModel 是两条规则线共用的那一半判据：此刻在生效窗口内，
+// 且这条规则适用于这个模型。
 //
-// 四个条件：启用、在生效时间窗口内、适用于这个模型、适用于这次请求的作用域。
-// 它们在 Match、MatchAll 与 Explain 三条查询里必须**逐字一致**——不一致的
-// 表现是「同一个模型，预留按一条规则算、结算按另一条算」，或者「列举说这条
-// 生效、请求却按另一条算」，两种都是错账。所以这里拼一次、用三处，而不是
-// 靠注释提醒后来者同步修改。
+// 售价规则（pricing_rules）与成本规则（upstream_costs）在这一段上逐字相同，
+// 所以它只写一份：两条线拼 SQL 的地方各自抄一遍时，改了一处另一处还是老样子，
+// 而它们记的是同一件事——「此刻这个模型算不算数」。另一处用法见 costApplicable。
 //
-// ownerExpr 与 channelExpr 是「这次请求的商家与渠道」那两个表达式：单点查询
-// 传占位符（$3/$4），候选查询传 JOIN 进来的列（c.owner_user_id /
-// c.channel_id）。三处的差别只有这一点。占位符约定：$1 是匹配时刻，
-// $2 是规范模型名，调用方保证这一点。
-//
-// # 为什么「未选定」不需要额外分支
-//
-// 预留发生在选路之前，那时两个 id 都是 0（见 pipeline.RuleQuery）。而
-// owner_user_id 与 channel_id 是外键，真值都大于 0，所以 `= 0` 匹配不到
-// 任何一行——未选定这件事由数据本身表达，不需要在 SQL 里再写一遍
-// `$3 > 0 AND ...`。后者看着更明确，但它把「0 不是合法 id」这条事实
-// 抄到了第二个地方。
+// 占位符约定：$1 是匹配时刻，$2 是规范模型名。
 //
 // # 时间窗口是左闭右开
 //
@@ -96,13 +91,42 @@ var _ interface {
 // 通配（`claude-*`）目前不做：`?` 会把它当成一个普通字符串，
 // 于是配了通配的规则**一条都匹配不上**，表现为 ErrNoRule 而不是
 // 「按某条规则少收了钱」。宁可在这里失败，也不要静默地按错的价算——
-// 写入路径据此把带通配符的模式拒掉（见 Admin.Create）。
-func ruleApplicable(ownerExpr, channelExpr string) string {
-	return `r.enabled
-	       AND r.effective_from <= $1
+// 写入路径据此把带通配符的模式拒掉（见 Admin.Create 与 CostAdmin.Create）。
+const applicableWindowAndModel = `r.effective_from <= $1
 	       AND (r.effective_to IS NULL OR r.effective_to > $1)
 	       AND (jsonb_array_length(r.model_patterns) = 0
-	            OR (r.model_patterns ? $2))
+	            OR (r.model_patterns ? $2))`
+
+// modelSpecificFirst 是两条线共用的第三条裁决依据：模型名单非空的规则排在
+// 兜底规则（空的 model_patterns）前面。它表达的是「具体 > 兜底」，理由见
+// ruleOrderBy。
+const modelSpecificFirst = `CASE WHEN jsonb_array_length(r.model_patterns) = 0 THEN 1 ELSE 0 END ASC`
+
+// ruleApplicable 是「售价规则适用于这次查询」的判据。
+//
+// 它在共用的那一半（窗口与模型名单，见 applicableWindowAndModel）之外还要判
+// 启用状态与作用域。作用域那三条是这一条独有的：成本规则没有作用域那一层。
+//
+// 四处（Match、MatchAll、Explain 与写入侧的校验）必须**逐字一致**——不一致的
+// 表现是「同一个模型，预留按一条规则算、结算按另一条算」，或者「列举说这条
+// 生效、请求却按另一条算」，两种都是错账。所以这里拼一次、用几处，而不是
+// 靠注释提醒后来者同步修改。
+//
+// ownerExpr 与 channelExpr 是「这次请求的商家与渠道」那两个表达式：单点查询
+// 传占位符（$3/$4），候选查询传 JOIN 进来的列（c.owner_user_id /
+// c.channel_id）。各处的差别只有这一点。占位符约定：$1 是匹配时刻，
+// $2 是规范模型名，调用方保证这一点。
+//
+// # 为什么「未选定」不需要额外分支
+//
+// 预留发生在选路之前，那时两个 id 都是 0（见 pipeline.RuleQuery）。而
+// owner_user_id 与 channel_id 是外键，真值都大于 0，所以 `= 0` 匹配不到
+// 任何一行——未选定这件事由数据本身表达，不需要在 SQL 里再写一遍
+// `$3 > 0 AND ...`。后者看着更明确，但它把「0 不是合法 id」这条事实
+// 抄到了第二个地方。
+func ruleApplicable(ownerExpr, channelExpr string) string {
+	return `r.enabled
+	       AND ` + applicableWindowAndModel + `
 	       AND ((r.scope = 'platform' AND r.owner_user_id IS NULL)
 	            OR (r.scope = 'merchant' AND r.owner_user_id = ` + ownerExpr + `)
 	            OR (r.scope = 'channel' AND r.channel_id = ` + channelExpr + `))`
@@ -143,7 +167,7 @@ const ruleOrderBy = `CASE r.scope
 	          ELSE 1
 	        END DESC,
 	        r.priority DESC,
-	        CASE WHEN jsonb_array_length(r.model_patterns) = 0 THEN 1 ELSE 0 END ASC,
+	        ` + modelSpecificFirst + `,
 	        r.id DESC`
 
 // matchQuery 是选规则的查询。

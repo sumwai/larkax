@@ -1126,6 +1126,7 @@ ingress 规则下。
 | `model` | 模型目录：`create` / `list` / `get` / `update` / `delete` |
 | `alias` | 规范模型名到上游模型名的映射：`create` / `list` / `update` / `delete` / `resolve` |
 | `price` | 计价规则：`create` / `list` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `list`） |
+| `upstream-cost` | 上游成本规则（每条渠道每个模型按生效窗口与优先级挑一条）：`create` / `list` / `update` / `disable` |
 | `user` | 用户：`create` / `list` / `get` / `update` |
 | `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录）/ `adjust`（手工调账，走账本写分录）/ `list` |
 | `usage` | 用量与计费（只读）：`events`（用量事件）/ `requests`（每次请求的预留与结算） |

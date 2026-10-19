@@ -690,6 +690,13 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		Expr: "input * 1", Priority: 1, EffectiveFrom: at, Enabled: true,
 		DeclaredKeys: []string{"input"},
 	}}
+	costTo := at.Add(time.Hour)
+	costRules := []pricing.CostInfo{{
+		ID: 1, ChannelID: 3, ModelPatterns: []string{"model-x"},
+		Expr: `{"prompt": 0.0000012}`, Priority: 2,
+		EffectiveFrom: at, EffectiveTo: &costTo,
+		DeclaredKeys: []string{"completion", "prompt"},
+	}}
 
 	cases := []struct {
 		name  string
@@ -737,6 +744,12 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		{"计价规则", func(w io.Writer) { printRuleTable(w, rules, nil) }},
 		{"计价规则带裁决", func(w io.Writer) {
 			printRuleTable(w, rules, func(int) string { return "选中" })
+		}},
+		// 成本规则那两条与上面两条同形：同一张表的两档（不带裁决的清单、
+		// 带裁决的说明），只是数据源换成 upstream_costs。
+		{"成本规则", func(w io.Writer) { printCostTable(w, costRules, nil) }},
+		{"成本规则带裁决", func(w io.Writer) {
+			printCostTable(w, costRules, func(int) string { return "选中" })
 		}},
 		{"别名清单", func(w io.Writer) {
 			printAliasList(w, []catalog.Alias{{
@@ -857,8 +870,8 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		}},
 	}
 
-	if len(cases) != 26 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 26 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 28 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 28 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {
