@@ -856,8 +856,12 @@ type UpdateUserParams struct {
 // 于是调用方不必再查一次：再查一次会让「改完之后是什么」依赖两次查询之间世界
 // 没有变，而调用方要拿它跟改之前比，比的必须是**这一条语句的**前后。
 //
-// 影响行数为 0 与「找不到这一行」是同一件事（RETURNING 一行都不吐），所以
-// 落回 ErrUserNotFound，与按标识读一个用户时报的是同一个哨兵。
+// 状态判据先在一把行锁里做完再改：把两条状态条件挂在 UPDATE 的 WHERE 上也能挡住
+// 写入，但挡下之后还要回答「为什么没改」——那得再读一次，而两次读之间正好能塞进
+// 一次 delete revert（deletion_requested → active），一个如实存在的账号会被报成
+// 找不到。先锁住这一行，判断与写入就落在同一份状态上。
+//
+// 找不到这一行时仍报 ErrUserNotFound，与按标识读一个用户时报的是同一个哨兵。
 func (s *Store) UpdateUser(ctx context.Context, ref string, p UpdateUserParams) (UserInfo, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -878,62 +882,54 @@ func (s *Store) UpdateUser(ctx context.Context, ref string, p UpdateUserParams) 
 	// 与改的是哪一列无关。也正因为每次都有它，这条语句永远不会变成空 SET。
 	sets = append(sets, "updated_at = now()")
 
-	where, arg := userRefWhere(ref, len(args)+1)
-	args = append(args, arg)
-	where += ` AND status <> '` + UserStatusDeleted + `'`
-	if p.Status != nil {
-		// 改状态不能把一行从「要求删除」里捞出来：那条路是 delete revert，
-		// 它会把 deletion_prior_status 一起清掉。从 update 直接写 active，
-		// 既跳过了「回到原来那一个状态」的判据，又把旧值留在那一列上。
-		where += ` AND status <> '` + UserStatusDeletionRequested + `'`
-	}
-
-	info, err := scanUserInfo(s.db.QueryRowContext(ctx,
-		`UPDATE users SET `+strings.Join(sets, ", ")+` WHERE `+where+
-			` RETURNING `+userInfoColumns, args...).Scan)
-	if errors.Is(err, sql.ErrNoRows) {
-		return UserInfo{}, s.updateUserNoRows(ctx, ref)
-	}
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return UserInfo{}, updateUserFailure(err, p.Email)
+		return UserInfo{}, fmt.Errorf("开启事务失败: %w", err)
 	}
-	return info, nil
-}
+	defer func() { _ = tx.Rollback() }()
 
-// updateUserNoRows 在 UPDATE 一条也没改到时判断是「没有这个人」还是「这个人已经
-// 到终态」——两者在 RETURNING 上都表现为一行不出。
-//
-// 终态那一句写在 WHERE 里而不是先查后改：先查后改中间那道缝里正好能塞进一次
-// 匿名化，而匿名化是不可逆的，漏过去的那一次会把占位身份写回成真身份。
-// 命令行把 ErrDeletionAlreadyDeleted 归成冲突（退出 4），与 delete 家族的报错
-// 同一档。
-func (s *Store) updateUserNoRows(ctx context.Context, ref string) error {
 	where, arg := userRefWhere(ref, 1)
 	var (
+		id       int64
 		status   string
 		username string
 	)
-	err := s.db.QueryRowContext(ctx,
-		`SELECT status, username FROM users WHERE `+where, arg,
-	).Scan(&status, &username)
+	err = tx.QueryRowContext(ctx,
+		`SELECT id, status, username FROM users WHERE `+where+` FOR UPDATE`, arg,
+	).Scan(&id, &status, &username)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w: %q", ErrUserNotFound, ref)
+		return UserInfo{}, fmt.Errorf("%w: %q", ErrUserNotFound, ref)
 	}
 	if err != nil {
-		return fmt.Errorf("查询用户状态失败: %w", err)
+		return UserInfo{}, fmt.Errorf("查询用户状态失败: %w", err)
 	}
-	switch status {
-	case UserStatusDeleted:
-		return fmt.Errorf(
+	switch {
+	case status == UserStatusDeleted:
+		return UserInfo{}, fmt.Errorf(
 			"%w：账号 %q 已经匿名化，终态不可逆，不能再改这一行的任何一列",
 			ErrDeletionAlreadyDeleted, ref)
-	case UserStatusDeletionRequested:
-		return fmt.Errorf(
+	case p.Status != nil && status == UserStatusDeletionRequested:
+		// 改状态不能把一行从「要求删除」里捞出来：那条路是 delete revert，
+		// 它会把 deletion_prior_status 一起清掉。从 update 直接写 active，
+		// 既跳过了「回到原来那一个状态」的判据，又把旧值留在那一列上。
+		return UserInfo{}, fmt.Errorf(
 			"%w：要改状态请先用 larkaxctl user delete revert --user %s，它会把状态"+
 				"回到打标之前的那一个",
 			ErrDeletionAlreadyRequested, username)
 	}
-	return fmt.Errorf("%w: %q", ErrUserNotFound, ref)
+
+	args = append(args, id)
+	info, err := scanUserInfo(tx.QueryRowContext(ctx,
+		`UPDATE users SET `+strings.Join(sets, ", ")+` WHERE id = $`+
+			strconv.Itoa(len(args))+` RETURNING `+userInfoColumns, args...).Scan)
+	if err != nil {
+		return UserInfo{}, updateUserFailure(err, p.Email)
+	}
+	err = tx.Commit()
+	if err != nil {
+		return UserInfo{}, fmt.Errorf("提交用户 %q 的修改失败: %w", ref, err)
+	}
+	return info, nil
 }
 
 // userUpdateSets 把一次修改编成 SET 片段与参数。

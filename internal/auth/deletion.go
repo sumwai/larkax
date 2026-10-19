@@ -34,16 +34,20 @@ import (
 //   - 鉴权不需要为这一档加判断：lookup 只认 status = active，而两个新状态都不是
 //     active，所以打标之后用户手里的 key 立刻失效；撤销之后同一个 key 又可以用。
 //     key 本身在打标这一步**一条都不动**，正是为了让撤销真的能回到原样。
-//   - 锁序是 api_keys → users → user_wallets，全仓只有这一套。计费那一侧的出处
-//     是 internal/ledger/store 的 SaveReservation：keyquota 先锁那把 key，再锁
-//     钱包改冻结额，最后 INSERT billing_requests，经外键在 users 上取 KEY SHARE
+//   - 销户这一族的锁序是 api_keys → users → user_wallets。计费那一侧的顺序不同：
+//     出处是 internal/ledger/store 的 SaveReservation，keyquota 先锁那把 key，再
+//     锁钱包改冻结额，最后 INSERT billing_requests，经外键在 users 上取 KEY SHARE
 //     （store.go 里那句「没有任何路径按先钱包后 key 拿锁」说的就是它）。
+//
+//     两条路都把 api_keys 放在最前面，所以不会成环：一条是 key → users → 钱包，
+//     另一条是 key → 钱包 → users（KEY SHARE）。方向相反的只有后两段，而两段都
+//     从同一把 key 出发——拿不到 key 锁的计费事务停在第一把锁上，不会已经握着
+//     钱包再来等 users。反过来（销户走 users → 钱包 → key）一次「初始预留 + 销户」
+//     并发就能撞 40P01。
 //
 //     为什么 users 在钱包之前：user_wallets 的新行经外键在 users 上取 KEY SHARE，
 //     而 FOR UPDATE 与它冲突。先锁 users 就堵死了「余额查完、事务提交前插进一个
-//     新钱包行」这个窗口。为什么 api_keys 在 users 之前：拿不到 key 锁的计费事务
-//     会停在第一把锁上，不会已经握着钱包再来等 users，两条路才不成环。反过来
-//     （users → 钱包 → key）一次「初始预留 + 销户」并发就能撞 40P01。
+//     新钱包行」这个窗口。
 //
 //     下面每一次「先无锁读一行」都只是快速失败：拿到锁之后会重新读、重新校验。
 //     锁序之外还剩一个窗口——定位之后新建的 key 不在我们锁住的集合里——所以
@@ -461,13 +465,15 @@ func (s *Store) RevertDeletion(ctx context.Context, ref string) (DeletionMark, e
 			ErrDeletionNotRequested, row.username, row.status)
 	}
 
-	// prior 为 NULL 只可能来自直接改库（打标那条语句一定写它）。那时没有
-	// 「原来的状态」可回，落回 active——这一行此刻本来就不是 active，不补一个
-	// 默认值它只能永远停在删除要求上。
-	restored := UserStatusActive
-	if row.prior.Valid {
-		restored = row.prior.String
+	// status 是 deletion_requested 时，prior 一定有值：迁移 00039 的
+	// users_deletion_prior_required 管着这一对，直接改库也写不出 NULL。真读到
+	// NULL 说明那条约束被绕过了，这时不替它编一个「原来的状态」——落回 active
+	// 会让一次 suspended 或 banned 的撤销变成提权。
+	if !row.prior.Valid {
+		return DeletionMark{}, fmt.Errorf(
+			"用户 %s 停在删除要求上却没有记录原来的状态，库里的约束被绕过了", row.username)
 	}
+	restored := row.prior.String
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE users
 		   SET status = $2, deletion_prior_status = NULL, updated_at = now()

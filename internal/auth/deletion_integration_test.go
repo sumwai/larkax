@@ -604,12 +604,13 @@ func TestPurgeSkipsATakenPlaceholderEmail(t *testing.T) {
 	}
 }
 
-// TestPurgeWaitsForTheWalletLockAndThenRefuses 钉住「余额判据在锁之后」这件事。
+// TestPurgeWaitsForTheWalletLockAndThenRefuses 证明「余额判据在锁之后」。
 //
-// 另一个事务先改钱包、把行锁攥在手里；销户要么在钱包锁上等它提交，要么已经
-// 提交。前一种情况下它读到的是 5，必须拒绝；后一种情况下它先提交，但那个事务
-// 的 UPDATE 早就发出来了，行锁同样会挡住它——两种顺序都落在这条断言上。
-// 也就是说：入账与销户不会同时成功。
+// 另一个事务先改钱包、把行锁攥在手里，然后销户必须真的停在那把锁上：提交之前
+// 先在 pg_stat_activity 里看到它等待，再提交，它才继续往下读。少了这一步，销户
+// 常常还没走到钱包、提交就已经完成，用例退化成「钱包里有余额」的重复——断言
+// 照样绿，而它想证明的顺序一次都没发生。两种顺序在这里是可区分的：顺序不对时
+// 等不到那条锁等待，用例直接失败，而不是换个理由通过。
 func TestPurgeWaitsForTheWalletLockAndThenRefuses(t *testing.T) {
 	ctx := t.Context()
 	db := testDB(ctx, t)
@@ -638,6 +639,8 @@ func TestPurgeWaitsForTheWalletLockAndThenRefuses(t *testing.T) {
 		done <- err
 	}()
 
+	waitForWalletLock(ctx, t, db, tx)
+
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("提交入账失败: %v", err)
 	}
@@ -660,19 +663,61 @@ func TestPurgeWaitsForTheWalletLockAndThenRefuses(t *testing.T) {
 	}
 }
 
+// waitForWalletLock 等到有别的后端被 tx 这一笔事务挡住。
+//
+// 判据是 pg_blocking_pids：tx 只改过 user_wallets 的一行，被它挡住的后端只可能
+// 停在那一行上。不读 pg_stat_activity 的 query 文本——那一列对别的会话可能显示
+// 不出来，测试账号一换就会静默匹配不上；也不按等待类型判，那只说明「在等锁」，
+// 说不了等的是哪一把。
+//
+// 超时说明被观察的那条路根本没走到钱包：那不是「等久了一点」，而是用例想证明
+// 的顺序没有发生，必须红。
+func waitForWalletLock(ctx context.Context, t *testing.T, db *sql.DB, tx *sql.Tx) {
+	t.Helper()
+	var blocker int32
+	if err := tx.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&blocker); err != nil {
+		t.Fatalf("读本事务的后端号失败: %v", err)
+	}
+	const query = `
+		SELECT count(*) FROM pg_stat_activity
+		 WHERE datname = current_database()
+		   AND pid <> $1
+		   AND $1 = ANY(pg_blocking_pids(pid))`
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := db.QueryRowContext(ctx, query, blocker).Scan(&waiting); err != nil {
+			t.Fatalf("查被挡住的事务失败: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("10 秒内没看到匿名化停在钱包锁上：它没有按预期的顺序走到钱包")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestPurgeCountsLegacyLedgerAccountForms 证明回执数的账本分录按
-// UserIDFromAccount 的口径来：旧写路径留下过 `user:042` 这种写法，它与规范
-// 写法指向同一个钱包，按字符串相等数会漏掉这一笔。
+// UserIDFromAccount 的口径来。
+//
+// 旧写路径留下过两种写法：补零的 `user:042` 与带正号的 `user:+42`。它们与规范
+// 写法指向同一个钱包，按字符串相等数会漏掉这两笔；只认补零、不认正号，第二种
+// 照样漏。两种都要各写一笔，那一对判据才都有用例压着。
 func TestPurgeCountsLegacyLedgerAccountForms(t *testing.T) {
 	ctx := t.Context()
 	db := testDB(ctx, t)
 	store := New(db)
 	u := newUser(ctx, t, db, UserStatusActive)
 
-	// 规范写法一笔（+1）、旧写法一笔（+1），平台侧各 -1，两笔都平衡。
-	canonical := ledger.UserAccount(u.ID).String()
-	legacy := fmt.Sprintf("user:0%d", u.ID)
-	for _, account := range []string{canonical, legacy} {
+	// 规范写法、补零写法、带正号写法各一笔（+1），平台侧各 -1，三笔都平衡。
+	accounts := []string{
+		ledger.UserAccount(u.ID).String(),
+		fmt.Sprintf("user:0%d", u.ID),
+		fmt.Sprintf("user:+%d", u.ID),
+	}
+	for _, account := range accounts {
 		txnID := string(ledger.NewTxnID())
 		if _, err := db.ExecContext(ctx, `
 			INSERT INTO ledger_entries (txn_id, account, amount, entry_type, memo) VALUES
@@ -696,7 +741,8 @@ func TestPurgeCountsLegacyLedgerAccountForms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("匿名化失败: %v", err)
 	}
-	if result.LedgerEntries != 2 {
-		t.Errorf("回执说 %d 条分录，想要 2（规范写法与旧写法各一）", result.LedgerEntries)
+	if result.LedgerEntries != 3 {
+		t.Errorf("回执说 %d 条分录，想要 3（规范写法、补零写法与带正号写法各一）",
+			result.LedgerEntries)
 	}
 }
