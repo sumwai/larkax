@@ -53,7 +53,8 @@ var statusRenderPaths = []string{
 // 不上样式，列按显示宽度对齐。doctor 的 -v 明细表也在里面：它同样是清单表，
 // 只是外壳是诊断报告。
 var tableRenderPaths = []string{
-	"doctorTable.lines", // doctor -v 的逐项明细
+	"doctorTable.lines",   // doctor -v 的逐项明细
+	"printAdjustedWallet", // wallet adjust 的回执：一栏一行，与 user update 同一个形状
 	"printAliasList",
 	"printAllowlists", // snapshot allowlist
 	"printCalendarList",

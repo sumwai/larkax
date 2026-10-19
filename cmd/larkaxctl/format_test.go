@@ -276,6 +276,7 @@ func TestUnsupportedCommandsRefuseJSONBeforeDoingAnything(t *testing.T) {
 		{"user create", runUserCreate, nil},
 		{"wallet create", runWalletCreate, nil},
 		{"wallet credit", runWalletCredit, nil},
+		{"wallet adjust", runWalletAdjust, nil},
 		{"price calendar import", runCalendarImport, nil},
 		{"maintenance idempotency", runIdempotencyCleanup, nil},
 		{"partition ensure", runPartitionEnsure, nil},

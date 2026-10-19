@@ -1127,7 +1127,7 @@ ingress 规则下。
 | `alias` | 规范模型名到上游模型名的映射：`create` / `list` / `update` / `delete` / `resolve` |
 | `price` | 计价规则：`create` / `list` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `list`） |
 | `user` | 用户：`create` / `list` / `get` / `update` |
-| `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录）/ `list` |
+| `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录）/ `adjust`（手工调账，走账本写分录）/ `list` |
 | `usage` | 用量与计费（只读）：`events`（用量事件）/ `requests`（每次请求的预留与结算） |
 | `apikey` | API Key：`create` / `update` / `get` / `list`；`update` 兼改状态、备注与过期时间 |
 | `ledger` | 账本：`balance` / `verify` / `runs`（三条都只读：余额、逐笔校验、对账的历史运行）与 `reconcile`（对账，会写运行记录） |
