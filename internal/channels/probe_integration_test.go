@@ -508,3 +508,116 @@ func TestQuotaProbeWriteBackOutlivesProbeTimeout(t *testing.T) {
 		t.Errorf("last_probe_status = %q，期望 %q", row.status.String, probeStatusError)
 	}
 }
+
+// 余量见底的渠道靠冷却期恢复：见底被排除 → 冷却期到了回到候选 → 被尝试时
+// 重新探测 → 仍是 0 就再等一个冷却期 → 探到有额度就恢复正常路由。
+//
+// 这是一条**真库**用例：它要证明的正是「库里那一列被写回之后，读侧看到的
+// 判据真的变了」，单独的读写两侧各自绿着也说明不了这条链路通。
+func TestQuotaProbeRecoversExhaustedChannel(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
+
+	interval := 5 * time.Minute
+	cooldown := 15 * time.Minute
+	// 截到微秒：写进 timestamptz 的时刻只保留微秒，而这条用例会在
+	// 「恰好一个冷却期」那个边界上比较。不截的话，库里的时刻可能比 now
+	// 晚半个微秒，边界就从「已过」翻到「未过」。
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	// 见底，且上次探测尝试已经过去了一个冷却期。
+	insertQuota(t, db, id, "0", "tokens", "api_query", "healthy", 1)
+	lastAttempt := now.Add(-cooldown)
+	if _, err := db.ExecContext(t.Context(), `
+		UPDATE channel_quota_state SET last_probe_at = $2, last_probe_attempt_at = $2
+		 WHERE channel_id = $1`, id, lastAttempt); err != nil {
+		t.Fatalf("摆旧时刻失败: %v", err)
+	}
+
+	src := New(db, sealer)
+	readCandidates := func(t *testing.T) []route.Candidate {
+		t.Helper()
+		cands, err := src.Candidates(t.Context(), model)
+		if err != nil {
+			t.Fatalf("取候选失败: %v", err)
+		}
+		if len(cands) != 1 {
+			t.Fatalf("候选数为 %d，期望 1", len(cands))
+		}
+		return cands
+	}
+
+	clock := now
+	r := &route.Router{
+		Now:           func() time.Time { return clock },
+		QuotaCooldown: cooldown,
+	}
+
+	plan := r.Select(readCandidates(t), model, route.Needs{})
+	if len(plan.Candidates) != 1 {
+		t.Fatalf("冷却期已过的见底渠道没有回到候选集: %+v", plan.Excluded)
+	}
+
+	// 第一次重探：仍然是 0。
+	adapter := &fakeQuotaAdapter{state: quota.State{Remaining: floatPtr(0), Unit: "tokens"}}
+	p, err := NewQuotaProbe(db, adapter, interval)
+	if err != nil {
+		t.Fatalf("构造额度探测失败: %v", err)
+	}
+	p.Now = func() time.Time { return clock }
+	p.ProbeIfStale(plan.Candidates[0])
+	p.wg.Wait()
+	if got := adapter.count(); got != 1 {
+		t.Fatalf("冷却期到了却没有探测，适配器被调用 %d 次", got)
+	}
+
+	// 仍是 0：这次探测把尝试时刻推到了 now，于是要再等一个冷却期。
+	clock = now.Add(time.Minute)
+	plan = r.Select(readCandidates(t), model, route.Needs{})
+	if len(plan.Candidates) != 0 {
+		t.Fatalf("重探仍是 0，渠道不该在这个冷却期里被选中: %+v", plan.Candidates)
+	}
+	if len(plan.Excluded) != 1 || plan.Excluded[0].Reason != "额度已耗尽" {
+		t.Fatalf("Excluded = %+v，期望记下「额度已耗尽」", plan.Excluded)
+	}
+
+	clock = now.Add(cooldown)
+	plan = r.Select(readCandidates(t), model, route.Needs{})
+	if len(plan.Candidates) != 1 {
+		t.Fatalf("又过了一个冷却期，渠道应当再次被放行: %+v", plan.Excluded)
+	}
+
+	// 第二次重探：上游的额度回来了。
+	adapter.mu.Lock()
+	adapter.state = quota.State{Remaining: floatPtr(42), Unit: "tokens"}
+	adapter.mu.Unlock()
+	p.ProbeIfStale(plan.Candidates[0])
+	p.wg.Wait()
+	if got := adapter.count(); got != 2 {
+		t.Fatalf("第二次重探后适配器共被调用 %d 次，期望 2", got)
+	}
+
+	// 读侧恢复：余量是探到的那 42，渠道重新正常参与路由。
+	cands := readCandidates(t)
+	if got := cands[0].Quota.Remaining; got == nil || *got != 42 {
+		t.Fatalf("重探之后的余量 = %v，期望 42", got)
+	}
+	if !cands[0].Quota.Usable() {
+		t.Error("探到 42 之后渠道仍被判成不可用")
+	}
+	plan = r.Select(cands, model, route.Needs{})
+	if len(plan.Candidates) != 1 {
+		t.Fatalf("恢复之后渠道没有回到候选集: %+v", plan.Excluded)
+	}
+
+	row := readProbeRow(t, db, id)
+	if row.probeKind != "api_query" {
+		t.Errorf("probe_kind = %q，期望 api_query", row.probeKind)
+	}
+	if !row.attemptAt.Valid {
+		t.Fatal("重探之后 last_probe_attempt_at 仍是 NULL")
+	}
+	assertNear(t, "last_probe_attempt_at", row.attemptAt.Time, clock)
+}

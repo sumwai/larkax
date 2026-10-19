@@ -6,7 +6,7 @@
 [.env.example](../.env.example) 顶部的说明。密钥类配置也不放这里——这张表的值
 明文落盘并进备份，渠道凭证走 `channels` 表的信封加密。
 
-一共 **19 个键**。清单的唯一来源是 `internal/settings` 的 `Registry`，默认值的
+一共 **20 个键**。清单的唯一来源是 `internal/settings` 的 `Registry`，默认值的
 唯一来源是**迁移文件**（代码里不再写第二份，两处默认值迟早会不一致）。
 
 ## 加载：不一致就拒绝启动
@@ -67,6 +67,7 @@ larkaxctl settings set --key plugin.enabled --value true --by alice
 | 键 | 类型 | 默认值 | 取值 | 影响 |
 |---|---|---|---|---|
 | `quota.probe_interval_seconds` | int | `300` | `1`–`31536000` | 额度探测的默认间隔，**所有渠道共用这一个值**——没有按渠道覆盖的入口（`channels.setting` 这一列今天不被这一项读）。它同时是两件事的间隔：渠道被用到而上次尝试早于它时，异步探测一次（见 [channel-health.md](channel-health.md) 的「探测什么时候发生」）；额度可信度的**衰减起点由它导出**——连着三个间隔都没拿到新的实测值，就认为探测本身出了问题。越界时服务拒绝启动 |
+| `quota.exhausted_cooldown_seconds` | int | `900` | `1`–`31536000` | 余量见底的渠道重新进入候选集的冷却期：距上一次探测尝试满这么多秒，路由放行它回到候选集，被尝试到时重新探测；探测结果落库前它一直在候选里，仍有 0 就再等一个冷却期（那次尝试会把 `last_probe_attempt_at` 推到当下）。它只决定渠道多快回到候选集，**真正再探测一次仍由 `quota.probe_interval_seconds` 把关**——配得比探测间隔还短时，它会在候选集里待到探测间隔到了为止，这期间每次请求都可能真的打到一条见底的渠道。详见 [channel-health.md](channel-health.md) 的「余量见底的渠道怎么恢复」。越界时服务拒绝启动 |
 
 ## 计费
 

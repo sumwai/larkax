@@ -553,3 +553,46 @@ func TestSelfAccountingConfidenceCurvePoints(t *testing.T) {
 		t.Errorf("很久之后仍应是下限 %v，得到 %v", floorScore, got)
 	}
 }
+
+// ExhaustedRetryDue 只对「有数值且见底」这一档回答「该不该放行」。
+//
+// 冷却期用字面量 15 分钟，时刻也写成相对它的具体偏移：这条判据的全部内容
+// 就是「距上次尝试够不够久」，拿常量去测自己会把边界一起改掉。
+func TestExhaustedRetryDue(t *testing.T) {
+	cooldown := 15 * time.Minute
+	now := base
+	at := func(d time.Duration) *time.Time {
+		v := now.Add(d)
+		return &v
+	}
+
+	cases := []struct {
+		name string
+		q    State
+		want bool
+	}{
+		{"从未观测过（余量未知）", State{}, false},
+		{"余量为正", State{Remaining: f(1), LastProbeAttemptAt: at(-time.Hour)}, false},
+		{"余量未知但观测过（Routable 为假）", State{LastProbeAt: at(-time.Hour), LastProbeAttemptAt: at(-time.Hour)}, false},
+		{"见底且从未尝试过探测", State{Remaining: f(0)}, true},
+		{"见底且恰好过了冷却期", State{Remaining: f(0), LastProbeAttemptAt: at(-cooldown)}, true},
+		{"见底且差一秒没到冷却期", State{Remaining: f(0), LastProbeAttemptAt: at(-cooldown + time.Second)}, false},
+		{"余量为负：同样算见底", State{Remaining: f(-1), LastProbeAttemptAt: at(-cooldown)}, true},
+		{"尝试时刻在将来（时钟偏差）：不放行", State{Remaining: f(0), LastProbeAttemptAt: at(time.Minute)}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.q.ExhaustedRetryDue(now, cooldown); got != tc.want {
+				t.Errorf("ExhaustedRetryDue = %v，期望 %v", got, tc.want)
+			}
+		})
+	}
+
+	// 非正冷却期表示不启用恢复路径，而不是「零冷却」：后者会放行每一次请求。
+	q := State{Remaining: f(0), LastProbeAttemptAt: at(-time.Hour)}
+	for _, c := range []time.Duration{0, -time.Minute} {
+		if q.ExhaustedRetryDue(now, c) {
+			t.Errorf("冷却期 %v 时应表示不启用恢复路径，却放行了", c)
+		}
+	}
+}

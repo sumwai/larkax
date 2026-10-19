@@ -147,7 +147,7 @@ func TestEligibleRejectsBrokenConfig(t *testing.T) {
 // 连续失败的渠道无论多便宜都不该被选中。
 func TestConsecutiveFailuresDrainsChannel(t *testing.T) {
 	c := candidate(1, "m", withHealth(Health{ConsecutiveFailures: consecutiveFailureCutoff}))
-	if _, reason := c.DrainReason(); reason == "" {
+	if _, reason := c.DrainReason(time.Time{}, 0); reason == "" {
 		t.Fatal("连续失败达到阈值应当被挡下")
 	}
 
@@ -161,7 +161,7 @@ func TestConsecutiveFailuresDrainsChannel(t *testing.T) {
 // 单次失败不该摘掉渠道：上游偶发抖动很常见，一失败就摘会让流量无规律漂移。
 func TestSingleFailureDoesNotDrain(t *testing.T) {
 	c := candidate(1, "m", withHealth(Health{ConsecutiveFailures: 1}))
-	if _, reason := c.DrainReason(); reason != "" {
+	if _, reason := c.DrainReason(time.Time{}, 0); reason != "" {
 		t.Errorf("单次失败不该被挡下，实际原因: %s", reason)
 	}
 }
@@ -169,12 +169,12 @@ func TestSingleFailureDoesNotDrain(t *testing.T) {
 // 额度耗尽与「查不到额度」是两件事。
 func TestQuotaExhaustionVsUnknown(t *testing.T) {
 	exhausted := candidate(1, "m", withQuota(quotaLeft(0)))
-	if _, reason := exhausted.DrainReason(); reason == "" {
+	if _, reason := exhausted.DrainReason(time.Time{}, 0); reason == "" {
 		t.Error("额度耗尽应当被挡下")
 	}
 
 	unknown := candidate(2, "m", withQuota(quota.State{}))
-	if _, reason := unknown.DrainReason(); reason != "" {
+	if _, reason := unknown.DrainReason(time.Time{}, 0); reason != "" {
 		t.Errorf("查不到额度不该被挡下，实际原因: %s", reason)
 	}
 }

@@ -68,6 +68,7 @@ var Registry = []Spec{
 	{Key: "request_snapshot.max_bytes", Kind: KindInt},
 	{Key: "capture.consent_max_window_hours", Kind: KindInt},
 	{Key: "quota.probe_interval_seconds", Kind: KindInt},
+	{Key: "quota.exhausted_cooldown_seconds", Kind: KindInt},
 	{Key: "billing.default_asset", Kind: KindString},
 	{Key: "billing.max_output_tokens", Kind: KindInt},
 	{Key: "billing.stream_freeze_step", Kind: KindInt},
