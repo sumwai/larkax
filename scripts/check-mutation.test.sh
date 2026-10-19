@@ -12,6 +12,9 @@
 # gremlins（一个普通 bash 脚本，chmod +x），用 GREMLINS= 注入。
 # 与 check-redlines.test.sh 用桩件而不是真跑工具是同一个做法：快、可重复。
 #
+# **go 也桩掉**（见下面「假 go」一节）：被测脚本每跑一个包之前都会
+# `go clean -testcache`（#773），自测真跑就会把**开发者自己的**测试缓存清掉。
+#
 # 桩件还要**答得上来 `unleash --help`**：脚本每次运行都靠它读「这把尺子是什么」
 #（版本 + 变异器集合），读不出会直接拒绝运行。夹具用的是真 gremlins 的
 # `unleash --help` 原文（只去掉它自己那两行行尾的空格），不是按想象造一份——
@@ -286,6 +289,30 @@ wait_lock_held() {
   echo "没测成：等了 $((max * 100)) 毫秒，没有观察到锁被持有。"
   return 2
 }
+
+# ── 假 go ─────────────────────────────────────────────────────────────────
+#
+# 被测脚本现在**每跑一个包之前**都会 `go clean -testcache`（#773）。那是它的正经行为，
+# 但自测替它执行一遍，清掉的是**开发者自己的**测试缓存——自测不该有这种副作用。
+# 而且这里要问的是「这条命令有没有发在对的时点」，不是「清缓存本身管不管用」，
+# 所以整个自测都把 go 桩掉：摆在 PATH 最前面，只记下收到的子命令，别的一概不做。
+# **给整个自测都摆上，不是只给新用例**：老用例也走这条路径，只桩住新用例的话，
+# 其余二十来个用例照样会把缓存清掉。
+#
+# 序列默认记到 /dev/null（大多数用例不关心它），要看序列的用例设 FAKE_GO_LOG；
+# 失败注入走 FAKE_GO_RC（第 22b 条）。桩件对任何子命令都退出 0 且不打输出——
+# 版本探测那一路（第 18 条）拿到的仍是「读不出」。
+fakebin="$tmp/fakebin"
+mkdir -p "$fakebin"
+cat > "$fakebin/go" <<'EOF'
+#!/usr/bin/env bash
+# 桩件：check-mutation.sh 的自测用，不是真的 go
+printf 'go %s\n' "$*" >> "${FAKE_GO_LOG:-/dev/null}"
+exit "${FAKE_GO_RC:-0}"
+EOF
+chmod +x "$fakebin/go"
+PATH="$fakebin:$PATH"
+export PATH
 
 # ── 桩件 ──────────────────────────────────────────────────────────────────
 
@@ -821,6 +848,71 @@ run "$stub_nodefault" "$tmp/lock21" internal/money
 rc=$?
 if [ "$rc" -eq 1 ]; then ok; else bad "一个默认变异器都没有 —— 应拒绝运行，实际 $rc"; dump; fi
 grep -q 'default true' "$last_out" || bad "一个默认变异器都没有 —— 要报出是这个原因"
+
+# 22. 每个包在调用 gremlins **之前**都清了一次 go 的测试结果缓存（#773）。
+#
+#     gremlins 的超时预算 = 它那一次 gathering 的耗时 × 系数。gathering 是它内部
+#     拼的 `go test -cover -coverprofile …`（没有 `-count=1`），于是会命中 go 的
+#     测试结果缓存，预算按缓存那点耗时算：实测同一个包 134ms → 预算 ≈1.34s，
+#     清掉之后 5.73s → 预算 ≈57s，而 internal/ledger/store 真跑一遍是 5.1s。
+#     缓存命中那一轮整包的数字都不可信（Killed 44 / 存活 0 / 超时 303），清掉后
+#     重跑正常 KILLED。
+#
+#     **判据是「序列」，不是「序列里有这一条」**：缓存是清单里排在前面的包预热出来的
+#     （父包跑完，子包那条命令就是 `(cached) 0.218s`），所以一整轮只在循环前清一次
+#     挡不住——那正是这条要防的。所以选两个包，断言序列严格是「清、跑、清、跑」。
+#     两个包都选不重叠的，免得「范围重叠」那段注干扰对序列的判读。
+#
+#     go 与 gremlins 都由桩件顶着，两个桩件往同一份日志里各记一笔，于是「谁先谁后」
+#     是**观察出来的**，不是从脚本的结构推出来的。
+stub_seq="$tmp/gremlins-seq"
+{
+  stub_head
+  cat <<'EOF'
+printf 'gremlins-unleash\n' >> "$FAKE_GO_LOG"
+echo "Killed: 8, Lived: 2, Not covered: 3"
+echo "Timed out: 0, Not viable: 0, Skipped: 0"
+echo "Test efficacy: 80.00%"
+echo "Mutator coverage: 100.00%"
+EOF
+} > "$stub_seq"
+chmod +x "$stub_seq"
+
+seq_log="$tmp/seq22.txt"
+: > "$seq_log"
+FAKE_GO_LOG="$seq_log" LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_seq" GREMLINS_VERSION="$PINNED" \
+  LOCK_FILE="$tmp/lock22" bash "$SCRIPT" internal/money internal/pipeline >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "清缓存的时点 —— 应通过，实际退出码 $rc"; dump; fi
+if awk '
+  /^go clean -testcache$/ { if (s == 1) { print "连续两次清理之间没跑 gremlins"; bad = 1 } s = 1; cleans++; next }
+  /^gremlins-unleash$/    { if (s != 1) { print "这次 gremlins 之前没有清理"; bad = 1 } s = 0; runs++; next }
+  { print "没认出的行：" $0; bad = 1 }
+  END {
+    if (s != 0) { print "最后一次清理之后没跑 gremlins（清理排在调用之后？）"; bad = 1 }
+    if (cleans != 2 || runs != 2) { print "清理 " cleans " 次、跑 gremlins " runs " 次；两个包各应一次"; bad = 1 }
+    exit bad
+  }' "$seq_log" > "$tmp/seq22-check.txt" 2>&1; then
+  ok
+else
+  bad "清缓存的时点 —— 序列不是「清、跑」逐个交替：$(tr '\n' ' ' < "$tmp/seq22-check.txt")实际序列：$(tr '\n' ' ' < "$seq_log")"
+fi
+
+# 22b. 清不掉时必须响，而且**不许照常跑 gremlins**。
+#      预算错了的话这一包的分数整体偏移，而超时那一格在表上与「真受了别的负载」
+#      长得一样——静默继续跑正是这一处最难被发现的地方。所以这一包判为没跑成。
+: > "$seq_log"
+FAKE_GO_LOG="$seq_log" FAKE_GO_RC=1 LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_seq" GREMLINS_VERSION="$PINNED" \
+  LOCK_FILE="$tmp/lock22b" bash "$SCRIPT" internal/money >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 1 ]; then ok; else bad "清缓存失败 —— 应判没跑成（退出码 1），实际 $rc"; dump; fi
+grep -q 'go clean -testcache 失败' "$last_out" || bad "清缓存失败 —— 要报出是这一步失败了"
+grep -q 'internal/money' "$last_out" || bad "清缓存失败 —— 要说清是哪一个包没跑"
+if grep -q 'gremlins-unleash' "$seq_log"; then
+  bad "清缓存失败 —— 不该照常调 gremlins（缓存没清，超时预算就是错的）"
+else
+  ok
+fi
 
 # ── 结果 ──────────────────────────────────────────────────────────────────
 
