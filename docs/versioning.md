@@ -55,6 +55,38 @@ go build -ldflags "-X main.version=$(git describe --tags --always --dirty)" ./cm
 错误格式与调用协议绑定：用 OpenAI 格式调用就返回 OpenAI 形状的错误，
 Anthropic 格式同理。这条不能混。
 
+## 升级说明
+
+对外可见的契约变更合并时在这里留一条：**改了什么、调用方要做什么**。
+
+破坏性改动按上文「API 契约的冻结」的判据认定，在 PR 上打 `breaking` 标签并进
+发行说明（见下文「发一个版本要做什么」）。这一节补的是发行说明给不了的那一半：
+分组只说得出「有这一类」，而升级的人要知道自己那些调用里哪一行要改。
+
+### 引用标注的形状（`/v1/responses`）
+
+这一条算破坏性改动：字段的形状变了，按旧形状写的解析读不到 `url`。
+
+**改了什么**：非流式响应里 `output[].content[].annotations` 的 `url_citation`
+改成协议自己的扁平形状，字段与 `type` 并排：
+
+```json
+{"type":"url_citation","url":"https://example.com/a","start_index":0,"end_index":12}
+```
+
+在此之前它多包了一层，那是转换层折出来的中间形状：
+
+```json
+{"type":"url_citation","url_citation":{"url":"…","start_index":0,"end_index":12}}
+```
+
+流式那一侧（`response.output_text.annotation.added` 事件，以及收尾事件里的同一批
+标注）给的一直是前面那一份，现在两条路是同一个形状。
+
+**调用方要做什么**：按外层 `url_citation` 取值的解析改成从标注本身取值——`url`、
+`title`、`start_index`、`end_index` 现在都与 `type` 并排。按协议写的解析不用改，
+扁平那一份就是协议对 `url_citation` 的定义。
+
 ## 发一个版本要做什么
 
 前置：`main` 上的 CI 全绿。

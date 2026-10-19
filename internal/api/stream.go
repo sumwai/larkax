@@ -960,6 +960,10 @@ func (s *responsesStream) errorFrame(w io.Writer, err error) error {
 // 两处必须是同一个顺序、同一批内容（与非流式的 output[].content[].annotations
 // 也是同一批）。
 //
+// 存进列表的是**折成协议形状之后**的那一条（见 responsesAnnotation）：增量帧与
+// 收尾事件里的同一批标注必须是同一个形状，客户端把两处拼起来时才不会看到同一
+// 条标注有两种读法。
+//
 // 标注到达时正文项可能还没打开（上游只保证「标注属于这一项」，不保证先有
 // 哪怕一个正文增量）。这里先把项打开：事件里的 output_index / item_id 必须
 // 指向一个已经存在、且与 item.added 里那个一致的项，客户端才能把它挂上去。
@@ -975,6 +979,7 @@ func (s *responsesStream) emitAnnotations(w io.Writer, annotations []map[string]
 		if len(annotation) == 0 {
 			continue
 		}
+		annotation = responsesAnnotation(annotation)
 		annotationIndex := len(s.annotations)
 		s.annotations = append(s.annotations, annotation)
 		if err := s.emit(w, "response.output_text.annotation.added", responsesEvent{

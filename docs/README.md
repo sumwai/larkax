@@ -29,7 +29,7 @@
 | 一把 Key 的每分钟次数与累计额度是什么语义、超限时回什么 | [limits.md](limits.md) |
 | 同一个请求重发两次只执行一次（`Idempotency-Key`） | [idempotency.md](idempotency.md) |
 | 单次请求的输出上限（`max_tokens`）怎么定、超了回什么 | [max-tokens.md](max-tokens.md) |
-| 发布版本与 API 版本的区分、哪些改动算破坏性 | [versioning.md](versioning.md) |
+| 发布版本与 API 版本的区分、哪些改动算破坏性、契约变更调用方要怎么改 | [versioning.md](versioning.md) |
 
 ## 计费与钱
 
