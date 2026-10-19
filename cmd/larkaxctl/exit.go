@@ -181,9 +181,15 @@ var conflictErrors = []error{
 	catalog.ErrChannelNotFound,
 
 	pricing.ErrRuleNotFound,
+	// 成本规则那一侧的同一个形状：要改的那一行不在 upstream_costs 里。
+	// 与上一条分开登记，是因为「哪张表里少了那一行」决定下一步去看哪张清单。
+	pricing.ErrCostNotFound,
 	// 没有一条规则适用。它与「规则不存在」是同一个形状：要查的那条不在，
 	// 下一步都是先去看数据里现在是什么。请求路径上它是拒绝服务，不是按 0 元计
 	// （见 pricing.Admin.Explain），所以这里也不能让它悄悄退回「其他失败」。
+	//
+	// 成本那一侧的同类情形**不在这里**：它不参与拒绝服务，由命令自己给结论
+	// （见 cmd/larkaxctl/upstreamcost.go 的 list）。
 	pipeline.ErrNoRule,
 
 	pluginstore.ErrPluginNotFound,
@@ -218,6 +224,9 @@ var noChangeErrors = []error{
 	catalog.ErrNoChanges,
 	auth.ErrNoChanges,
 	pricing.ErrNoChanges,
+	// 成本规则那一侧的同一个形状。它与上一条是两个不同的错误值（各报各的命令），
+	// 所以各登记一次。
+	pricing.ErrCostNoChanges,
 }
 
 // usageErrors 是各包判出来的**取值**上的参数错（不是缺字段那一类，见上面）。

@@ -232,6 +232,16 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 		{command: "price", what: "list",
 			run: func() error { return runPrice([]string{"list"}) }},
 
+		{command: "upstream-cost", what: "create",
+			run: func() error {
+				return runUpstreamCost([]string{
+					"create", "--channel", id(fx.channelID), "--expr", ruleExpr,
+					"--models", fx.modelName,
+				})
+			}},
+		{command: "upstream-cost", what: "list",
+			run: func() error { return runUpstreamCost([]string{"list"}) }},
+
 		{command: "user", what: "create",
 			run: func() error {
 				return runUser([]string{"create", "--name", uniqueName("stream-user")})
@@ -335,6 +345,22 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 				return runPlugin([]string{"publish", path, "--by", id(fx.userID)})
 			}},
 	}
+}
+
+// createStreamCostRule 给门二那两条改库用例先建一条成本规则，返回它的 ID。
+//
+// 建的时候那一次回显（「已加入成本规则」）不在这条用例的判据里：它自己的回显
+// 由 create 那一行看着。这里只借它拿到一个能改的 ID。
+func createStreamCostRule(t *testing.T, fx *streamFixture) int64 {
+	t.Helper()
+
+	out, _ := mustStream(t, func() error {
+		return runUpstreamCost([]string{
+			"create", "--channel", strconv.FormatInt(fx.channelID, 10),
+			"--expr", ruleExpr, "--models", fx.modelName,
+		})
+	})
+	return idFromStdout(t, "成本规则", out)
 }
 
 // offendingLine 把命中位置那一行切出来，报错时只打这一行。
@@ -565,6 +591,33 @@ func TestWriteEchoesAppearOnlyOnStderr(t *testing.T) {
 					})
 				})
 			}},
+		// 成本规则那三条与上面 price 那条同一个形状：写成功的回显只走 stderr。
+		// update 与 disable 各自先建一条：这张表里的每条用例各跑各的，前一条
+		// 建出来的规则接不到后一条手上。
+		{command: "upstream-cost", what: "create", marker: "已加入成本规则", stdout: stdoutID,
+			run: func(t *testing.T, fx *streamFixture) (string, string) {
+				return mustStream(t, func() error {
+					return runUpstreamCost([]string{
+						"create", "--channel", id(fx.channelID), "--expr", ruleExpr,
+						"--models", fx.modelName,
+					})
+				})
+			}},
+		{command: "upstream-cost", what: "update", marker: "已更新成本规则", stdout: stdoutEmpty,
+			run: func(t *testing.T, fx *streamFixture) (string, string) {
+				ruleID := createStreamCostRule(t, fx)
+				return mustStream(t, func() error {
+					return runUpstreamCost([]string{"update", "--id", id(ruleID), "--priority", "3"})
+				})
+			}},
+		{command: "upstream-cost", what: "disable", marker: "已停用", stdout: stdoutEmpty,
+			run: func(t *testing.T, fx *streamFixture) (string, string) {
+				ruleID := createStreamCostRule(t, fx)
+				return mustStream(t, func() error {
+					return runUpstreamCost([]string{"disable", id(ruleID)})
+				})
+			}},
+
 		{command: "price", what: "disable", marker: "已停用", stdout: stdoutEmpty,
 			run: func(t *testing.T, fx *streamFixture) (string, string) {
 				return mustStream(t, func() error {
@@ -632,8 +685,8 @@ func TestWriteEchoesAppearOnlyOnStderr(t *testing.T) {
 
 	// 条数写成判据：少了说明某条写命令没人看着了，而「回显又跑回 stdout」正是
 	// 那样溜进来的。
-	if len(cases) != 25 {
-		t.Fatalf("这张表里 %d 条写命令，期望 25 条", len(cases))
+	if len(cases) != 28 {
+		t.Fatalf("这张表里 %d 条写命令，期望 28 条", len(cases))
 	}
 
 	for _, tc := range cases {

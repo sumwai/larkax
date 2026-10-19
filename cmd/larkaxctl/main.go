@@ -163,6 +163,7 @@ var commandGroups = []commandGroup{
 			{name: "model", summary: "规范模型目录（catalog 基础定义）", help: modelHelp, run: runModel},
 			{name: "alias", summary: "模型别名映射（上游模型名 ↔ 规范名）", help: aliasHelp, run: runAlias},
 			{name: "price", summary: "模型计价规则与日历管理（含 calendar 子命令）", help: priceHelp, run: runPrice},
+			{name: "upstream-cost", summary: "上游成本规则（按渠道与模型记成本价）", help: upstreamCostHelp, run: runUpstreamCost},
 		},
 	},
 	{
@@ -254,7 +255,11 @@ func buildUsage() string {
 
 	var b strings.Builder
 	// 命令名都是 ASCII，所以按字节数对齐与按显示宽度对齐是一回事。
-	b.WriteString("larkaxctl 是 larkax 的运维命令行。\n\n用法：\n  larkaxctl <命令> [子命令] [选项]\n")
+	// 介绍句与「用法：」之间不空行：根帮助页的行数有上界（见 usage_test.go 的
+	// TestRootUsageFitsOneScreen），而「用法：」独成一行才满足段标题的判据
+	// （顶格 + 以「：」结尾 + 下一非空行缩进）、才会被加粗；并进骨架那一行就
+	// 会整行置灰。所以省下的是那个空行，不是标题那一行。
+	b.WriteString("larkaxctl 是 larkax 的运维命令行。\n用法：\n  larkaxctl <命令> [子命令] [选项]\n")
 	for _, g := range commandGroups {
 		b.WriteString("\n" + g.title + "：\n")
 		for _, c := range g.commands {

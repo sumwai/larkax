@@ -395,6 +395,7 @@ func TestHelpColoursStructureOnly(t *testing.T) {
 		"\x1b[1m核心与诊断 (Core & Diagnostics)：\x1b[0m", // 组标题
 		"\x1b[1mdoctor\x1b[0m",                         // 清单里的命令名
 		"\x1b[2m系统健康与链路连通性体检\x1b[0m",                   // 它后面那一句话
+		"\x1b[1m用法：\x1b[0m",                            // 段标题：整行加粗
 		"\x1b[1m全局选项（写在子命令前后都认）：\x1b[0m",               // usageNotes 里的段标题
 		"\x1b[1m--env-file <路径>\x1b[0m",                // 全局选项的名字栏
 		"\x1b[2m每条命令的详细用法：larkaxctl help <命令>。\x1b[0m", // 指针行
@@ -402,6 +403,13 @@ func TestHelpColoursStructureOnly(t *testing.T) {
 		if !strings.Contains(root.String(), want) {
 			t.Errorf("根帮助页里没有 %q：\n%s", want, helpTextRounding(root.String()))
 		}
+	}
+	// 与 version 页那条同一条反向断言：段标题被置灰，说明它不再满足段标题的
+	// 判据（顶格 + 以「：」结尾 + 下一非空行缩进）。根页这一处最容易踩到——
+	// 「用法：」与它的骨架合成一行时信息没少一个字，只是标题这一层没了，
+	// 而少了这条断言时上面那些"有"的判据一条都不会响。
+	if strings.Contains(root.String(), "\x1b[2m用法：") {
+		t.Errorf("根帮助页的段标题被置灰了：\n%s", helpTextRounding(root.String()))
 	}
 }
 
@@ -690,6 +698,13 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		Expr: "input * 1", Priority: 1, EffectiveFrom: at, Enabled: true,
 		DeclaredKeys: []string{"input"},
 	}}
+	costTo := at.Add(time.Hour)
+	costRules := []pricing.CostInfo{{
+		ID: 1, ChannelID: 3, ModelPatterns: []string{"model-x"},
+		Expr: `{"prompt": 0.0000012}`, Priority: 2,
+		EffectiveFrom: at, EffectiveTo: &costTo,
+		DeclaredKeys: []string{"completion", "prompt"},
+	}}
 
 	cases := []struct {
 		name  string
@@ -737,6 +752,12 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		{"计价规则", func(w io.Writer) { printRuleTable(w, rules, nil) }},
 		{"计价规则带裁决", func(w io.Writer) {
 			printRuleTable(w, rules, func(int) string { return "选中" })
+		}},
+		// 成本规则那两条与上面两条同形：同一张表的两档（不带裁决的清单、
+		// 带裁决的说明），只是数据源换成 upstream_costs。
+		{"成本规则", func(w io.Writer) { printCostTable(w, costRules, nil) }},
+		{"成本规则带裁决", func(w io.Writer) {
+			printCostTable(w, costRules, func(int) string { return "选中" })
 		}},
 		{"别名清单", func(w io.Writer) {
 			printAliasList(w, []catalog.Alias{{
@@ -857,8 +878,8 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		}},
 	}
 
-	if len(cases) != 26 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 26 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 28 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 28 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {
