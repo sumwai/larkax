@@ -313,6 +313,7 @@ fi
 PKGS=(
   internal/money
   internal/billing
+  internal/pricing
   internal/ledger
   internal/ledger/store
   internal/pipeline

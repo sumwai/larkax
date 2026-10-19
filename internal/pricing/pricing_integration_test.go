@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/testdb"
 )
@@ -382,6 +384,82 @@ func TestListFirstRowAgreesWithMatch(t *testing.T) {
 	if infos[0].ID != matched.ID {
 		t.Errorf("列举的第一条是 %d，Match 选中的是 %d——两处的裁决次序不一致",
 			infos[0].ID, matched.ID)
+	}
+}
+
+// 生效窗口是左闭右开，**下界那一格**也要有一个用例把它固定住：
+// 在 effective_from 那一刻规则已经生效，早一刻则还没有。
+//
+// # 为什么这一条要单独写
+//
+// 两个边界都在 ruleApplicable 拼出来的 SQL 里，而**变异测试碰不到 SQL 字符串**
+// （gremlins 变异的是 Go 的 AST）。上界那一格已经有用例了
+// （TestMatchSkipsDisabledAndOutOfWindow 里「刚好在上界」那一条）；下界这一格
+// 原先一条都没有——把 `r.effective_from <= $1` 翻成 `<`，整包 107 个变异体
+// 全被杀死，而没有任何用例变红。所以这条边界只能由 Go 这一侧的用例固定住。
+//
+// 时刻取微秒：库里的 timestamptz 就是微秒精度，把 Go 的纳秒值直接传下去，
+// 「恰好相等」这一格就取决于两端各自怎么取整，而不是取决于判据本身。
+func TestMatchEffectiveFromIsInclusive(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	model := unique("model-from-bound")
+	from := time.Now().Add(-time.Hour).Truncate(time.Microsecond)
+	// priority 给得远高于别的规则：测试库是共享的，库里可能留着别的平台兜底
+	// 规则（见 TestMatchReturnsErrNoRule 的注释），这一条要稳定地赢过它们。
+	id := insertRule(t, ctx, db, ruleSpec{
+		patterns: []string{model}, from: &from, priority: 9999, expr: `{"prompt": 1}`,
+	})
+
+	// 恰好是 effective_from 那一刻：左闭，这条规则生效。
+	got, err := s.Match(ctx, singleCandidate(model, 0, 0, from))
+	if err != nil {
+		t.Fatalf("匹配失败: %v", err)
+	}
+	if got.ID != id {
+		t.Errorf("规则 id = %d，期望在生效时刻那一刻生效的 %d", got.ID, id)
+	}
+
+	// 早一刻就不生效。区间是左闭，不是「那一刻之前也算」。
+	//
+	// 判据写成「选中的不是这一条」而不是 ErrNoRule：这个库上「一条都匹配不上」
+	// 构造不出来（理由同上）。
+	early, err := s.Match(ctx, singleCandidate(model, 0, 0, from.Add(-time.Millisecond)))
+	if err == nil && early.ID == id {
+		t.Errorf("生效时刻之前一刻就选中了这条规则（id %d）——窗口左端是闭的", id)
+	}
+}
+
+// platform 作用域的行不得挂商家——这条约定由**数据库的 CHECK 约束**兑现
+// （rule_scope_owner，见 internal/migrate/sql/00001_init.sql），写入路径另有一份
+// 同样的校验（见 validateRule）。
+//
+// # 为什么它写在 pricing 的用例里
+//
+// 它与读取路径的 SQL 是同一件事的两半：ruleApplicable 的 platform 那一支写着
+// `scope = 'platform' AND owner_user_id IS NULL`，而那半句 `IS NULL` 是**不可达
+// 的**——库里有约束挡着，这样的行根本进不来。把 SQL 里那半句删掉，没有任何
+// 用例会变红，而变异测试也不会多出一条存活（它改不到 SQL 字符串），所以
+// 「不可达」这个判断得由这一条替它作证：约束在，那一行写不进去、那一格也就
+// 走不到；约束没了，这条用例会先红。
+func TestPlatformRuleWithOwnerIsRejectedBySchema(t *testing.T) {
+	db := testDB(t)
+	owner := seedUser(t, db)
+
+	// 绕过写入路径，直接往库里写一条 platform + owner 的行。
+	_, err := db.ExecContext(context.Background(), `
+		INSERT INTO pricing_rules (scope, owner_user_id, name, expr)
+		VALUES ('platform', $1, $2, '{"prompt": 1}')`,
+		owner, unique("rule-bad-platform"))
+	if err == nil {
+		t.Fatal("platform 作用域挂商家的行不该写得进去——" +
+			"它进得来的话，ruleApplicable 里那半句 IS NULL 就不是不可达分支了")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Errorf("err = %v，期望 23514 check_violation", err)
 	}
 }
 
