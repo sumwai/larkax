@@ -832,10 +832,33 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				AccessedAt:  at,
 			}}, map[int64]string{7: "user-placeholder"}, false)
 		}},
+		// 下面一条是 wallet adjust 的回执：它不是清单，但同样是「主键加粗、
+		// 一栏一行」的那张表（与 user update 的改动回显同一个形状）。
+		{"调账回执", func(w io.Writer) {
+			printAdjustedWallet(w, walletAdjustment{
+				Owner:    auth.User{ID: 7, Username: "user-placeholder"},
+				Operator: auth.User{ID: 8, Username: "ops-placeholder"},
+				Asset:    ledger.AssetCNY,
+				Before:   money.MustParse("100.00"),
+				After:    money.MustParse("50.00"),
+				Delta:    money.MustParse("-50.00"),
+				Reason:   "误扣补回",
+				Ref:      "ORD-20261019-1",
+				Txn: ledger.Transaction{
+					TxnID: "00000000-0000-8000-8000-000000000000",
+					Entries: []ledger.Entry{{
+						TxnID:   "00000000-0000-8000-8000-000000000000",
+						Account: ledger.UserAccount(7), Asset: ledger.AssetCNY,
+						Amount: money.MustParse("50.00"), EntryType: ledger.EntryAdjustment,
+						Memo: "误扣补回（操作人 ops-placeholder，单据 ORD-20261019-1）",
+					}},
+				},
+			}, true)
+		}},
 	}
 
-	if len(cases) != 25 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 25 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 26 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 26 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {
