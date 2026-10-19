@@ -326,6 +326,41 @@ func TestCreateRejectsInvalidFields(t *testing.T) {
 	}
 }
 
+// 名单里**第几项**不合法要报出来：名单可以很长，只说「有个模型名不合法」
+// 等于让人自己一个个试。
+//
+// 变异：normalizePatterns 里两处 `i+1`（把下标换成从 1 起的序号）各自翻成
+// `i-1`，位置就报错了。取「前两项合法、第三项不合法」的名单分辨：正确版说
+// 第 3 个，变异版说第 1 个。两处各管一条分支，所以两条都要取到这个位置。
+func TestCreateReportsWhichPatternIsInvalid(t *testing.T) {
+	db := testDB(t)
+	admin := NewAdmin(db)
+
+	cases := []struct {
+		name     string
+		patterns []string
+		want     string
+	}{
+		{"空项", []string{"a", "b", " "}, "第 3 个模型名为空"},
+		{"通配符", []string{"a", "b", "c*"}, "第 3 个模型名含通配符"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := admin.Create(context.Background(), CreateRequest{
+				Scope: ScopePlatform, Name: unique("rule-position"),
+				ModelPatterns: tc.patterns, Expr: `{"prompt": 0.00001}`,
+			})
+			if err == nil {
+				t.Fatal("不合法的模型名单应当被拒")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %q，期望里面有 %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // 空 model_patterns 是「适用于全部模型」，是正常写法而不是漏填。
 func TestCreateAllowsEmptyModelPatterns(t *testing.T) {
 	db := testDB(t)
@@ -903,6 +938,54 @@ func TestUpdateWithoutChanges(t *testing.T) {
 	}
 }
 
+// 只给一个字段也算一次「要改的请求」——哪怕这一次改不成，报的也该是改不成
+// 的那条错，而不是「没有要改的字段」。
+//
+// 变异：changesAnything 是一条十个操作数的 `||` 链，其中两处各自翻成 `&&`
+// （INVERT_LOGICAL 默认是关的，本仓在 scripts/check-mutation.sh 里显式打开）。
+// Go 里 `&&` 比 `||` 紧，于是链子变成 `(a && b) || c || …` 或
+// `(a || b) && c || …`：前者在「只给了 a」或「只给了 b」时为假，后者在
+// 「给了 a 或 b 而没给 c」时为假，两版都报 ErrNoChanges——而正确版会往下走，
+// 走到真正该报的那条错、或者真的把这一行改掉。
+//
+// 两个子用例各取一格：
+//   - 只给 Scope：正确版走到校验，报的是「platform 作用域不挂商家」；
+//   - 只给 OwnerUserID：正确版真的改掉归属。
+//
+// 一条「字段提到了没提到」的判据，错的方向都是**把一次真实的改动说成没改**。
+func TestUpdateSingleFieldCountsAsAChange(t *testing.T) {
+	db := testDB(t)
+	admin := NewAdmin(db)
+	ctx := context.Background()
+
+	// 只给 Scope：channel 规则改成 platform，channel_id 还挂着，校验要拦下它。
+	// 拦下它的**不是** ErrNoChanges——这里给了一个字段，只是这个改动本身不成立。
+	chRule := createRule(t, admin, CreateRequest{
+		Scope: ScopeChannel, ChannelID: seedChannel(t, db, seedUser(t, db)),
+		Name: unique("rule-one-field"),
+	})
+	err := admin.Update(ctx, UpdateRequest{ID: chRule, Scope: ptr(ScopePlatform)})
+	if err == nil {
+		t.Fatal("只改作用域而两栏 id 不动，改出来的组合读取路径不认，应当被拒")
+	}
+	if errors.Is(err, ErrNoChanges) {
+		t.Errorf("err = %v，被当成了「没有要改的字段」——这次给的是作用域", err)
+	}
+
+	// 只给 OwnerUserID：merchant 规则换个归属，改完之后那一行仍然合法。
+	ownerA := seedUser(t, db)
+	ownerB := seedUser(t, db)
+	merchantRule := createRule(t, admin, CreateRequest{
+		Scope: ScopeMerchant, OwnerUserID: ownerA, Name: unique("rule-one-field"),
+	})
+	if err = admin.Update(ctx, UpdateRequest{ID: merchantRule, OwnerUserID: ptr(ownerB)}); err != nil {
+		t.Fatalf("只改归属应当能改: %v", err)
+	}
+	if info := findRule(t, listAll(t, admin), merchantRule); info.OwnerUserID != ownerB {
+		t.Errorf("OwnerUserID = %d，期望改后的 %d", info.OwnerUserID, ownerB)
+	}
+}
+
 // 改一个不存在的 id 要报 ErrRuleNotFound，不能静默成功。
 func TestUpdateUnknownRule(t *testing.T) {
 	db := testDB(t)
@@ -916,8 +999,22 @@ func TestUpdateUnknownRule(t *testing.T) {
 	if n := countRuleByName(t, db, name); n != 0 {
 		t.Errorf("改不存在的规则留下了 %d 行", n)
 	}
-	if err = admin.Update(context.Background(), UpdateRequest{ID: 0, Name: &name}); err == nil {
-		t.Error("id 为 0 应当被拒")
+
+	// id 为 0 或负数在**查库之前**就被拒：那是调用方没填 id，与「这条规则
+	// 不在库里」是两回事——后者要去查那条规则是不是被删了，前者要去看调用方。
+	//
+	// 变异：`if req.ID <= 0` 的边界翻成 `< 0`（CONDITIONALS_BOUNDARY），
+	// 0 于是漏过这一层落进 loadRuleForUpdate，报的变成 ErrRuleNotFound。
+	// 区分两者的输入就是 id = 0（负数那一格同上）这一次调用。
+	for _, id := range []int64{0, -1} {
+		err = admin.Update(context.Background(), UpdateRequest{ID: id, Name: &name})
+		if err == nil {
+			t.Fatalf("id = %d 应当被拒", id)
+		}
+		if errors.Is(err, ErrRuleNotFound) {
+			t.Errorf("id = %d 的 err = %v，被报成了「规则不存在」——"+
+				"这两个诊断指向的地方不一样", id, err)
+		}
 	}
 }
 
