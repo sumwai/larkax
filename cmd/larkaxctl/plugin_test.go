@@ -62,7 +62,14 @@ func TestPluginRejectsBadArgs(t *testing.T) {
 		{"disable 两个 key",
 			func() error { return runPluginSetEnabled([]string{"a", "b"}, false) }, "需要一个插件 key"},
 		{"publish 文件不存在",
-			func() error { return runPluginPublish([]string{"/nonexistent/plugin.js"}) }, "读取插件源文件失败"},
+			func() error { return runPluginPublish([]string{"/nonexistent/plugin.js", "--by", "ops"}) }, "读取插件源文件失败"},
+		// --by 必填：这一栏记的是谁写下的这一行，而一条不记名的写入等于没有
+		// 审计。判据取「缺了」与「给了空串」两种写法——空串多半是一个没展开的
+		// 变量，静默地当成「没给这一项」会让它一路走到落库那一句。
+		{"publish 没有 --by",
+			func() error { return runPluginPublish([]string{"plugin.js"}) }, "缺少 --by"},
+		{"publish 的 --by 是空串",
+			func() error { return runPluginPublish([]string{"plugin.js", "--by", "  "}) }, "缺少 --by"},
 	}
 
 	for _, tc := range cases {
@@ -96,7 +103,7 @@ func TestPluginPublishRejectsBrokenSourceWithoutWriting(t *testing.T) {
 	path := writePluginFile(t, "broken.js", "import { definePlugin } from \"larkax\";\nexport default { onUsage() { ")
 
 	err := runCaptured(t, func() error {
-		return runPluginPublish([]string{path, "--key", key})
+		return runPluginPublish([]string{path, "--key", key, "--by", "ops"})
 	})
 	if err == nil {
 		t.Fatal("编译不过的插件该被拒绝")
@@ -157,7 +164,9 @@ func TestPluginPublishRejectsMissingVersion(t *testing.T) {
 			"export const meta = { key: \"noversion\", apiVersion: 1 };\n"+
 			"export default definePlugin({ onUsage() { return {}; } });\n")
 
-	err := runCaptured(t, func() error { return runPluginPublish([]string{path}) })
+	err := runCaptured(t, func() error {
+		return runPluginPublish([]string{path, "--by", "ops"})
+	})
 	if err == nil {
 		t.Fatal("meta 里没有 version 时该被拒绝")
 	}
@@ -540,9 +549,10 @@ func TestPluginPublishEnableDisable(t *testing.T) {
 
 	key := uniqueName("cli")
 	path := writePluginFile(t, "cli.js", pluginSource(key, "1.0.0", 0))
+	by := createTestUserID(t)
 
 	out, _ := captureStreams(t, func() {
-		if err := runPluginPublish([]string{path, "--priority", "4"}); err != nil {
+		if err := runPluginPublish([]string{path, "--priority", "4", "--by", by}); err != nil {
 			t.Errorf("发布失败: %v", err)
 		}
 	})
@@ -615,9 +625,10 @@ func TestPluginPublishSameVersionSaysOverwritten(t *testing.T) {
 
 	key := uniqueName("cliover")
 	path := writePluginFile(t, "cliover.js", pluginSource(key, "1.0.0", 0))
+	by := createTestUserID(t)
 
 	first, _ := captureStreams(t, func() {
-		if err := runPluginPublish([]string{path}); err != nil {
+		if err := runPluginPublish([]string{path, "--by", by}); err != nil {
 			t.Errorf("首次发布失败: %v", err)
 		}
 	})
@@ -626,7 +637,7 @@ func TestPluginPublishSameVersionSaysOverwritten(t *testing.T) {
 	}
 
 	second, _ := captureStreams(t, func() {
-		if err := runPluginPublish([]string{path}); err != nil {
+		if err := runPluginPublish([]string{path, "--by", by}); err != nil {
 			t.Errorf("重复发布失败: %v", err)
 		}
 	})
@@ -635,6 +646,99 @@ func TestPluginPublishSameVersionSaysOverwritten(t *testing.T) {
 	}
 	if n := countPlugins(t, db, key); n != 1 {
 		t.Errorf("覆盖之后该只有 1 行，实际 %d 行", n)
+	}
+}
+
+// 发布要记名：--by 写进 plugins.created_by，读侧那三处跟着有值。
+//
+// 三处一起看是有意的：库里那一列由写入 SQL 填、表格里的「写自」由渲染那一层
+// 打、-o json 的 created_by 由 jsonDoc 编，而「文档承诺了一个永远没有值的
+// 字段」正是这三段里有一段没接上的样子。
+func TestPluginPublishRecordsCreatedBy(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	key := uniqueName("cliby")
+	path := writePluginFile(t, "by.js", pluginSource(key, "1.0.0", 0))
+	alice := createTestUserID(t)
+
+	if err := runCaptured(t, func() error {
+		return runPluginPublish([]string{path, "--by", alice})
+	}); err != nil {
+		t.Fatalf("发布失败: %v", err)
+	}
+
+	want, err := strconv.ParseInt(alice, 10, 64)
+	if err != nil {
+		t.Fatalf("用例造的用户 ID 不是整数：%v", err)
+	}
+	detail, err := pluginstore.New(db).Get(context.Background(), key)
+	if err != nil {
+		t.Fatalf("读详情失败: %v", err)
+	}
+	if detail.CreatedBy == nil || *detail.CreatedBy != want {
+		t.Errorf("plugins.created_by = %s，期望 %d", showPtr(detail.CreatedBy), want)
+	}
+
+	// 表格那一栏打的是那个 ID——用户名不在这里（要名字用 user get）。
+	out, _ := captureStreams(t, func() {
+		if err := runPluginGet([]string{key}); err != nil {
+			t.Errorf("看详情失败: %v", err)
+		}
+	})
+	if line := lineEndingWith(t, out, "写自"); !strings.Contains(line, alice) {
+		t.Errorf("「写自」那一栏 = %q，期望里面有 %s：\n%s", line, alice, out)
+	}
+
+	withFormat(t, formatJSON)
+	var jsonErr error
+	stdout, _ := captureStreams(t, func() { jsonErr = runPluginGet([]string{key}) })
+	if jsonErr != nil {
+		t.Fatalf("plugin get 失败: %v", jsonErr)
+	}
+	var doc struct {
+		Plugin struct {
+			CreatedBy *int64 `json:"created_by"`
+		} `json:"plugin"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("解不回来: %v\n%s", err, stdout)
+	}
+	if doc.Plugin.CreatedBy == nil || *doc.Plugin.CreatedBy != want {
+		t.Errorf("created_by = %s，期望 %d（不再是 null）", showPtr(doc.Plugin.CreatedBy), want)
+	}
+}
+
+// 覆盖同一个 (key, version) 时 created_by 换成这一次的操作人。
+//
+// 「写自」问的是写下这一行内容的人，而覆盖之后这一行装的已经是这一次的源码。
+func TestPluginRepublishMovesCreatedBy(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	key := uniqueName("cliby-over")
+	path := writePluginFile(t, "byover.js", pluginSource(key, "1.0.0", 0))
+	alice, bob := createTestUserID(t), createTestUserID(t)
+
+	for _, by := range []string{alice, bob} {
+		if err := runCaptured(t, func() error {
+			return runPluginPublish([]string{path, "--by", by})
+		}); err != nil {
+			t.Fatalf("以 %s 的身份发布失败: %v", by, err)
+		}
+	}
+
+	detail, err := pluginstore.New(db).Get(context.Background(), key)
+	if err != nil {
+		t.Fatalf("读详情失败: %v", err)
+	}
+	want, err := strconv.ParseInt(bob, 10, 64)
+	if err != nil {
+		t.Fatalf("用例造的用户 ID 不是整数：%v", err)
+	}
+	if detail.CreatedBy == nil || *detail.CreatedBy != want {
+		t.Errorf("覆盖之后 created_by = %s，期望 %d（最后发布的那个人）",
+			showPtr(detail.CreatedBy), want)
 	}
 }
 
@@ -648,7 +752,7 @@ func TestPluginPublishRejectsKeyMismatch(t *testing.T) {
 	path := writePluginFile(t, "mismatch.js", pluginSource("source-key", "1.0.0", 0))
 
 	err := runCaptured(t, func() error {
-		return runPluginPublish([]string{path, "--key", "flag-key"})
+		return runPluginPublish([]string{path, "--key", "flag-key", "--by", "ops"})
 	})
 	if err == nil {
 		t.Fatal("--key 与 meta 不一致时该被拒绝")
@@ -690,10 +794,11 @@ func TestPluginPublishNewVersionAddsGeneration(t *testing.T) {
 	key := uniqueName("cligen")
 	v1 := writePluginFile(t, "v1.js", pluginSource(key, "1.0.0", 0))
 	v2 := writePluginFile(t, "v2.js", pluginSource(key, "2.0.0", 0))
+	by := createTestUserID(t)
 
 	for _, path := range []string{v1, v2} {
 		out, _ := captureStreams(t, func() {
-			if err := runPluginPublish([]string{path}); err != nil {
+			if err := runPluginPublish([]string{path, "--by", by}); err != nil {
 				t.Errorf("发布 %s 失败: %v", path, err)
 			}
 		})
@@ -907,7 +1012,10 @@ func TestPluginListJSONStdoutIsMachineReadable(t *testing.T) {
 
 	key := uniqueName("jsoncli")
 	path := writePluginFile(t, "cli.js", pluginSource(key, "1.0.0", 0))
-	if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+	by := createTestUserID(t)
+	if err := runCaptured(t, func() error {
+		return runPluginPublish([]string{path, "--by", by})
+	}); err != nil {
 		t.Fatalf("发布插件失败: %v", err)
 	}
 
@@ -1227,9 +1335,12 @@ func TestPluginGetShowsNewestGeneration(t *testing.T) {
 	setupEnv(t)
 
 	key := uniqueName("cliget")
+	by := createTestUserID(t)
 	for _, version := range []string{"1.0.0", "2.0.0"} {
 		path := writePluginFile(t, "v"+version+".js", pluginSource(key, version, 0))
-		if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+		if err := runCaptured(t, func() error {
+			return runPluginPublish([]string{path, "--by", by})
+		}); err != nil {
 			t.Fatalf("发布 %s 失败: %v", version, err)
 		}
 	}
@@ -1296,7 +1407,10 @@ func TestPluginDeleteRemovesPluginActivationsAndKV(t *testing.T) {
 
 	key := uniqueName("clidel")
 	path := writePluginFile(t, "del.js", pluginSource(key, "1.0.0", 0))
-	if err := runCaptured(t, func() error { return runPluginPublish([]string{path, "--priority", "3"}) }); err != nil {
+	by := createTestUserID(t)
+	if err := runCaptured(t, func() error {
+		return runPluginPublish([]string{path, "--priority", "3", "--by", by})
+	}); err != nil {
 		t.Fatalf("发布失败: %v", err)
 	}
 	if err := runCaptured(t, func() error { return runPluginSetEnabled([]string{key}, true) }); err != nil {
@@ -1310,7 +1424,9 @@ func TestPluginDeleteRemovesPluginActivationsAndKV(t *testing.T) {
 	// 另起一个插件，卸载不该碰到它。
 	other := uniqueName("clidel-other")
 	otherPath := writePluginFile(t, "other.js", pluginSource(other, "1.0.0", 0))
-	if err := runCaptured(t, func() error { return runPluginPublish([]string{otherPath}) }); err != nil {
+	if err := runCaptured(t, func() error {
+		return runPluginPublish([]string{otherPath, "--by", by})
+	}); err != nil {
 		t.Fatalf("发布对照组失败: %v", err)
 	}
 	if err := pluginstore.NewKV(db).Set(ctx, other, userID, "state", "1", 0); err != nil {
@@ -1398,7 +1514,10 @@ func TestPluginKVSetGetDelete(t *testing.T) {
 
 	key := uniqueName("clikv")
 	path := writePluginFile(t, "kv.js", pluginSource(key, "1.0.0", 0))
-	if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+	by := createTestUserID(t)
+	if err := runCaptured(t, func() error {
+		return runPluginPublish([]string{path, "--by", by})
+	}); err != nil {
 		t.Fatalf("发布失败: %v", err)
 	}
 	user := uniqueName("kvuser")
@@ -1485,7 +1604,10 @@ func TestPluginKVExpiredKeyLooksAbsent(t *testing.T) {
 
 	key := uniqueName("clikv-exp")
 	path := writePluginFile(t, "kvexp.js", pluginSource(key, "1.0.0", 0))
-	if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+	by := createTestUserID(t)
+	if err := runCaptured(t, func() error {
+		return runPluginPublish([]string{path, "--by", by})
+	}); err != nil {
 		t.Fatalf("发布失败: %v", err)
 	}
 	userID := createTestUser(t)
@@ -1540,7 +1662,10 @@ func TestPluginKVRejectsUnknownPluginAndUser(t *testing.T) {
 
 	key := uniqueName("clikv-guard")
 	path := writePluginFile(t, "kvguard.js", pluginSource(key, "1.0.0", 0))
-	if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+	by := createTestUserID(t)
+	if err := runCaptured(t, func() error {
+		return runPluginPublish([]string{path, "--by", by})
+	}); err != nil {
 		t.Fatalf("发布失败: %v", err)
 	}
 	user := uniqueName("kvguard-user")
@@ -1597,7 +1722,10 @@ func TestPluginWriteVerbsRequireMasterKey(t *testing.T) {
 
 	key := uniqueName("clikv-keys")
 	path := writePluginFile(t, "keys.js", pluginSource(key, "1.0.0", 0))
-	if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+	by := createTestUserID(t)
+	if err := runCaptured(t, func() error {
+		return runPluginPublish([]string{path, "--by", by})
+	}); err != nil {
 		t.Fatalf("发布失败: %v", err)
 	}
 	userID := createTestUser(t)
@@ -1708,9 +1836,12 @@ func TestPluginDeleteCountsEveryVersionAndDependentRow(t *testing.T) {
 	ctx := context.Background()
 
 	key := uniqueName("clidel-multi")
+	by := createTestUserID(t)
 	for _, version := range []string{"1.0.0", "2.0.0"} {
 		path := writePluginFile(t, "v"+version+".js", pluginSource(key, version, 0))
-		if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+		if err := runCaptured(t, func() error {
+			return runPluginPublish([]string{path, "--by", by})
+		}); err != nil {
 			t.Fatalf("发布 %s 失败: %v", version, err)
 		}
 	}
@@ -1757,7 +1888,10 @@ func TestPluginKVIsolatesUsers(t *testing.T) {
 
 	key := uniqueName("clikv-iso")
 	path := writePluginFile(t, "iso.js", pluginSource(key, "1.0.0", 0))
-	if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+	by := createTestUserID(t)
+	if err := runCaptured(t, func() error {
+		return runPluginPublish([]string{path, "--by", by})
+	}); err != nil {
 		t.Fatalf("发布失败: %v", err)
 	}
 	alice := createTestUser(t)
@@ -1825,7 +1959,10 @@ func TestPluginKVValueWithNewlineRoundTrips(t *testing.T) {
 
 	key := uniqueName("clikv-multiline")
 	path := writePluginFile(t, "multi.js", pluginSource(key, "1.0.0", 0))
-	if err := runCaptured(t, func() error { return runPluginPublish([]string{path}) }); err != nil {
+	by := createTestUserID(t)
+	if err := runCaptured(t, func() error {
+		return runPluginPublish([]string{path, "--by", by})
+	}); err != nil {
 		t.Fatalf("发布失败: %v", err)
 	}
 	user := strconv.FormatInt(createTestUser(t), 10)

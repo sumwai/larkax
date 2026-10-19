@@ -165,40 +165,40 @@ func TestShortAndLegacyFlagAliasesParseIdentically(t *testing.T) {
 		{
 			name:      "price create 的 -u 与 --owner 同 --user",
 			parse:     any2(parsePriceCreate),
-			canonical: []string{"--scope", "merchant", "--name", "n", "--expr", "1", "--user", "7"},
-			alias:     []string{"--scope", "merchant", "--name", "n", "--expr", "1", "-u", "7"},
+			canonical: []string{"--scope", "merchant", "--name", "n", "--expr", "1", "--user", "7", "--by", "9"},
+			alias:     []string{"--scope", "merchant", "--name", "n", "--expr", "1", "-u", "7", "--by", "9"},
 		},
 		{
 			name:      "price create 的 --owner 同 --user",
 			parse:     any2(parsePriceCreate),
-			canonical: []string{"--scope", "merchant", "--name", "n", "--expr", "1", "--user", "7"},
-			alias:     []string{"--scope", "merchant", "--name", "n", "--expr", "1", "--owner", "7"},
+			canonical: []string{"--scope", "merchant", "--name", "n", "--expr", "1", "--user", "7", "--by", "9"},
+			alias:     []string{"--scope", "merchant", "--name", "n", "--expr", "1", "--owner", "7", "--by", "9"},
 		},
 		{
 			name:  "price create 的 --from / --to 同两个长名",
 			parse: any2(parsePriceCreate),
-			canonical: []string{"--scope", "platform", "--name", "n", "--expr", "1",
+			canonical: []string{"--scope", "platform", "--name", "n", "--expr", "1", "--by", "9",
 				"--effective-from", "2026-01-01T00:00:00Z", "--effective-to", "2026-02-01T00:00:00Z"},
-			alias: []string{"--scope", "platform", "--name", "n", "--expr", "1",
+			alias: []string{"--scope", "platform", "--name", "n", "--expr", "1", "--by", "9",
 				"--from", "2026-01-01T00:00:00Z", "--to", "2026-02-01T00:00:00Z"},
 		},
 		{
 			name:      "price update 的 -u 同 --user",
 			parse:     any2(parsePriceUpdate),
-			canonical: []string{"--id", "5", "--user", "7"},
-			alias:     []string{"--id", "5", "-u", "7"},
+			canonical: []string{"--id", "5", "--user", "7", "--by", "9"},
+			alias:     []string{"--id", "5", "-u", "7", "--by", "9"},
 		},
 		{
 			name:      "price update 的 --from / --to 同两个长名",
 			parse:     any2(parsePriceUpdate),
-			canonical: []string{"--id", "5", "--effective-from", "2026-01-01T00:00:00Z", "--effective-to", "2026-02-01T00:00:00Z"},
-			alias:     []string{"--id", "5", "--from", "2026-01-01T00:00:00Z", "--to", "2026-02-01T00:00:00Z"},
+			canonical: []string{"--id", "5", "--by", "9", "--effective-from", "2026-01-01T00:00:00Z", "--effective-to", "2026-02-01T00:00:00Z"},
+			alias:     []string{"--id", "5", "--by", "9", "--from", "2026-01-01T00:00:00Z", "--to", "2026-02-01T00:00:00Z"},
 		},
 		{
 			name:      "price update 的 --no-expire 同 --clear-effective-to",
 			parse:     any2(parsePriceUpdate),
-			canonical: []string{"--id", "5", "--clear-effective-to"},
-			alias:     []string{"--id", "5", "--no-expire"},
+			canonical: []string{"--id", "5", "--by", "9", "--clear-effective-to"},
+			alias:     []string{"--id", "5", "--by", "9", "--no-expire"},
 		},
 
 		// ── alias：-m / --canonical ────────────────────────────────────────
@@ -259,6 +259,10 @@ func TestShortAndLegacyFlagAliasesParseIdentically(t *testing.T) {
 // 判据都是 fs.Visit 记下的**实际写出来的名字**（见 flagGiven），所以一个漏登记
 // 的别名在这里的表现是「冲突没报、命令按后者安静地跑」——静默失效里最坏的一类，
 // 它一次改了账本上的两个方向。
+//
+// price update 那几条都带着 --by：它是必填项，而这几条要比的是别名与冲突那一层，
+// 不是错误之间的先后。少了它，命令会提前死在缺少 --by 上，这几条要证的事就没人看着了
+// ——报的还是「错误信息里该提到 X」，红的样子和真出问题一模一样。
 func TestAliasConflictsStillFireUnderTheAlias(t *testing.T) {
 	t.Setenv("LARKAX_TEST_CREDENTIAL", "test-key-placeholder")
 
@@ -271,13 +275,13 @@ func TestAliasConflictsStillFireUnderTheAlias(t *testing.T) {
 		{
 			name:  "price update：--no-expire 与 --to 不能一起给",
 			run:   runPrice,
-			args:  []string{"update", "--id", "5", "--no-expire", "--to", "2026-02-01T00:00:00Z"},
+			args:  []string{"update", "--id", "5", "--by", "ops", "--no-expire", "--to", "2026-02-01T00:00:00Z"},
 			wants: []string{"--clear-effective-to", "--effective-to"},
 		},
 		{
 			name:  "price update：--no-expire 与 --effective-to 也不能一起给",
 			run:   runPrice,
-			args:  []string{"update", "--id", "5", "--clear-effective-to", "--effective-to", "2026-02-01T00:00:00Z"},
+			args:  []string{"update", "--id", "5", "--by", "ops", "--clear-effective-to", "--effective-to", "2026-02-01T00:00:00Z"},
 			wants: []string{"--clear-effective-to", "--effective-to"},
 		},
 		{
@@ -295,7 +299,7 @@ func TestAliasConflictsStillFireUnderTheAlias(t *testing.T) {
 		{
 			name:  "price update：-u 给空串要拒（多半是变量没展开）",
 			run:   runPrice,
-			args:  []string{"update", "--id", "5", "-u", ""},
+			args:  []string{"update", "--id", "5", "--by", "ops", "-u", ""},
 			wants: []string{"--user 不能是空串"},
 		},
 		{

@@ -30,11 +30,21 @@ func TestPriceCreateRejectsBadFlags(t *testing.T) {
 		{"没有 --scope", []string{"--name", "n1", "--expr", testExpr}, "缺少 --scope"},
 		{"没有 --name", []string{"--scope", "platform", "--expr", testExpr}, "缺少 --name"},
 		{"没有 --expr", []string{"--scope", "platform", "--name", "n1"}, "缺少 --expr"},
+		// --by 必填：它记的是这条价是谁定的，而一条不记名的写入等于没有审计。
+		// 判据取「缺了」与「给了空串」两种写法——空串多半是一个没展开的变量，
+		// 静默地当成「没给这一项」会让它一路走到落库那一句。
+		{"没有 --by", []string{
+			"--scope", "platform", "--name", "n1", "--expr", testExpr,
+		}, "缺少 --by"},
+		{"--by 是空串", []string{
+			"--scope", "platform", "--name", "n1", "--expr", testExpr, "--by", "  ",
+		}, "缺少 --by"},
 		{"--channel 是负数", []string{
-			"--scope", "channel", "--name", "n1", "--expr", testExpr, "--channel", "-1",
+			"--scope", "channel", "--name", "n1", "--expr", testExpr, "--by", "ops",
+			"--channel", "-1",
 		}, "无效"},
 		{"--effective-from 不是 RFC3339", []string{
-			"--scope", "platform", "--name", "n1", "--expr", testExpr,
+			"--scope", "platform", "--name", "n1", "--expr", testExpr, "--by", "ops",
 			"--effective-from", "2026-01-01",
 		}, "RFC3339"},
 		{"多出位置参数", []string{
@@ -136,9 +146,11 @@ func TestPriceCreateRejectsBadExpression(t *testing.T) {
 	testDB(t)
 	setupEnv(t)
 
+	by := createTestUserID(t)
 	err := runCaptured(t, func() error {
 		return runPriceCreate([]string{
 			"--scope", "platform", "--name", uniqueName("rule"), "--expr", "p * ",
+			"--by", by,
 		})
 	})
 	if err == nil {
@@ -157,10 +169,11 @@ func TestPriceCreateRejectsWildcardModel(t *testing.T) {
 	testDB(t)
 	setupEnv(t)
 
+	by := createTestUserID(t)
 	err := runCaptured(t, func() error {
 		return runPriceCreate([]string{
 			"--scope", "platform", "--name", uniqueName("rule"), "--expr", testExpr,
-			"--models", "claude-*",
+			"--models", "claude-*", "--by", by,
 		})
 	})
 	if err == nil {
@@ -183,18 +196,27 @@ func TestPriceUpdateRejectsBadFlags(t *testing.T) {
 		want string
 	}{
 		{"没有 --id", []string{"--priority", "3"}, "缺少 --id"},
-		{"没有要改的字段", []string{"--id", "1"}, "至少要改一项"},
-		{"--enable 与 --disable 一起", []string{"--id", "1", "--enable", "--disable"}, "只能给一个"},
-		{"--clear-effective-to 与 --effective-to 一起", []string{
-			"--id", "1", "--clear-effective-to", "--effective-to", "2027-01-01T00:00:00Z",
+		{"没有 --by", []string{"--id", "1", "--priority", "3"}, "缺少 --by"},
+		{"--by 是空串", []string{"--id", "1", "--priority", "3", "--by", "  "}, "缺少 --by"},
+		{"没有要改的字段", []string{"--id", "1", "--by", "ops"}, "至少要改一项"},
+		{"--enable 与 --disable 一起", []string{
+			"--id", "1", "--by", "ops", "--enable", "--disable",
 		}, "只能给一个"},
-		{"--user 是空串", []string{"--id", "1", "--user", ""}, "空串"},
-		{"--channel 是负数", []string{"--id", "1", "--channel", "-1"}, "无效"},
-		{"--expr 是空串", []string{"--id", "1", "--expr", ""}, "不能为空"},
-		{"--effective-from 是空串", []string{"--id", "1", "--effective-from", ""}, "不能为空"},
-		{"--effective-to 是空串", []string{"--id", "1", "--effective-to", ""}, "不能为空"},
+		{"--clear-effective-to 与 --effective-to 一起", []string{
+			"--id", "1", "--by", "ops", "--clear-effective-to",
+			"--effective-to", "2027-01-01T00:00:00Z",
+		}, "只能给一个"},
+		{"--user 是空串", []string{"--id", "1", "--by", "ops", "--user", ""}, "空串"},
+		{"--channel 是负数", []string{"--id", "1", "--by", "ops", "--channel", "-1"}, "无效"},
+		{"--expr 是空串", []string{"--id", "1", "--by", "ops", "--expr", ""}, "不能为空"},
+		{"--effective-from 是空串", []string{
+			"--id", "1", "--by", "ops", "--effective-from", "",
+		}, "不能为空"},
+		{"--effective-to 是空串", []string{
+			"--id", "1", "--by", "ops", "--effective-to", "",
+		}, "不能为空"},
 		{"--effective-from 不是 RFC3339", []string{
-			"--id", "1", "--effective-from", "2026-01-01",
+			"--id", "1", "--by", "ops", "--effective-from", "2026-01-01",
 		}, "RFC3339"},
 		{"多出位置参数", []string{"--id", "1", "--priority", "3", "extra"}, "不接受位置参数"},
 	}
@@ -236,6 +258,7 @@ func TestPriceUpdateChangesOnlyGivenFields(t *testing.T) {
 	setupEnv(t)
 
 	ownerID := createTestUser(t)
+	by := createTestUserID(t)
 	name := uniqueName("rule")
 	model := uniqueName("model")
 	id := addPriceRule(t, []string{
@@ -246,7 +269,9 @@ func TestPriceUpdateChangesOnlyGivenFields(t *testing.T) {
 	idArg := strconv.FormatInt(id, 10)
 
 	_, _ = captureStreams(t, func() {
-		if err := runPriceUpdate([]string{"--id", idArg, "--priority", "9", "--disable"}); err != nil {
+		if err := runPriceUpdate([]string{
+			"--id", idArg, "--priority", "9", "--disable", "--by", by,
+		}); err != nil {
 			t.Fatalf("update 失败: %v", err)
 		}
 	})
@@ -277,7 +302,9 @@ func TestPriceUpdateChangesOnlyGivenFields(t *testing.T) {
 	// 而那正是别的包会读到它的时间。挡住跨包影响的是商家作用域（见函数注释），
 	// 所以跑完之后它可以一直是启用的。
 	_, _ = captureStreams(t, func() {
-		if err := runPriceUpdate([]string{"--id", idArg, "--models", "", "--enable"}); err != nil {
+		if err := runPriceUpdate([]string{
+			"--id", idArg, "--models", "", "--enable", "--by", by,
+		}); err != nil {
 			t.Fatalf("update 失败: %v", err)
 		}
 	})
@@ -305,6 +332,7 @@ func TestPriceUpdateScopeChangeNeedsClearing(t *testing.T) {
 	setupEnv(t)
 
 	ownerID := createTestUser(t)
+	by := createTestUserID(t)
 	id := addPriceRule(t, []string{
 		"--scope", "merchant", "--name", uniqueName("rule"), "--expr", testExpr,
 		"--user", strconv.FormatInt(ownerID, 10), "--models", uniqueName("model"),
@@ -313,7 +341,7 @@ func TestPriceUpdateScopeChangeNeedsClearing(t *testing.T) {
 
 	// 只改作用域：owner 还挂着，改完之后那一行是无效组合。
 	err := runCaptured(t, func() error {
-		return runPriceUpdate([]string{"--id", idArg, "--scope", "platform"})
+		return runPriceUpdate([]string{"--id", idArg, "--scope", "platform", "--by", by})
 	})
 	if err == nil {
 		t.Fatal("merchant 改成 platform 时留着 owner 应当被拒")
@@ -324,7 +352,9 @@ func TestPriceUpdateScopeChangeNeedsClearing(t *testing.T) {
 
 	// 把 owner 清掉（--user 0 就是「改成不挂商家」）之后改得动。
 	_, _ = captureStreams(t, func() {
-		if err := runPriceUpdate([]string{"--id", idArg, "--scope", "platform", "--user", "0"}); err != nil {
+		if err := runPriceUpdate([]string{
+			"--id", idArg, "--scope", "platform", "--user", "0", "--by", by,
+		}); err != nil {
 			t.Fatalf("清掉 owner 之后应当改得动: %v", err)
 		}
 	})
@@ -335,6 +365,116 @@ func TestPriceUpdateScopeChangeNeedsClearing(t *testing.T) {
 	if got.OwnerUserID != 0 {
 		t.Errorf("商家 = %d，期望 0（不挂商家）", got.OwnerUserID)
 	}
+}
+
+// create 的 --by 落到 pricing_rules.created_by 上，第一版历史里也是同一个人。
+//
+// 第一版那一行不是顺带的：它的操作人取自规则的 created_by，而版本历史正是事后
+// 回答「这个价什么时候、被谁改成这样的」的那张表。
+func TestPriceCreateRecordsCreatedBy(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	by := createTestUserID(t)
+
+	// 模型名单给一个只属于这条用例的名字：规则表是全局的，而一条**启用的、
+	// 覆盖全部模型**的平台规则会被别的包读到（见
+	// TestPriceUpdateChangesOnlyGivenFields 开头那一段）。
+	stdout, _ := captureStreams(t, func() {
+		if err := runPriceCreate([]string{
+			"--scope", "platform", "--name", uniqueName("rule"), "--expr", testExpr,
+			"--models", uniqueName("model"), "--by", by,
+		}); err != nil {
+			t.Errorf("price create 失败: %v", err)
+		}
+	})
+	id, err := strconv.ParseInt(strings.TrimSpace(stdout), 10, 64)
+	if err != nil {
+		t.Fatalf("stdout 不是规则 ID：%q（%v）", stdout, err)
+	}
+	want, err := strconv.ParseInt(by, 10, 64)
+	if err != nil {
+		t.Fatalf("用例造的用户 ID 不是整数：%v", err)
+	}
+
+	if got := ruleCreatedBy(t, db, id); !got.Valid || got.Int64 != want {
+		t.Errorf("pricing_rules.created_by = %v，期望 %d", got, want)
+	}
+	if got := ruleVersionActor(t, db, id, 1); !got.Valid || got.Int64 != want {
+		t.Errorf("第一版的 changed_by = %v，期望 %d", got, want)
+	}
+}
+
+// update 的 --by 落到新那一版历史的 changed_by 上，规则行自己的 created_by 不动。
+//
+// 两栏记的不是同一件事：created_by 是这条价是谁**定**的，而改价的人可能根本没
+// 参与过定它。把这个人当成改动人写下来，审计会读到一个没做过这件事的人。
+func TestPriceUpdateRecordsChangedBy(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	creator, editor := createTestUserID(t), createTestUserID(t)
+
+	id := addPriceRule(t, []string{
+		"--scope", "platform", "--name", uniqueName("rule"), "--expr", testExpr,
+		"--models", uniqueName("model"), "--by", creator,
+	})
+	idArg := strconv.FormatInt(id, 10)
+
+	// 改表达式才留一版（见 internal/pricing 的 Update）：改名字、改优先级不
+	// 改变任何一笔已经算出来的钱，不为它们插一行。
+	_, _ = captureStreams(t, func() {
+		if err := runPriceUpdate([]string{
+			"--id", idArg, "--expr", `{"prompt": 0.000003}`, "--by", editor,
+		}); err != nil {
+			t.Fatalf("price update 失败: %v", err)
+		}
+	})
+
+	creatorID, err := strconv.ParseInt(creator, 10, 64)
+	if err != nil {
+		t.Fatalf("用例造的用户 ID 不是整数：%v", err)
+	}
+	editorID, err := strconv.ParseInt(editor, 10, 64)
+	if err != nil {
+		t.Fatalf("用例造的用户 ID 不是整数：%v", err)
+	}
+
+	if got := ruleVersionActor(t, db, id, 2); !got.Valid || got.Int64 != editorID {
+		t.Errorf("第二版的 changed_by = %v，期望 %d", got, editorID)
+	}
+	if got := ruleCreatedBy(t, db, id); !got.Valid || got.Int64 != creatorID {
+		t.Errorf("改价之后 created_by = %v，期望 %d 不动", got, creatorID)
+	}
+}
+
+// ruleCreatedBy 读一条规则的创建人（pricing_rules.created_by）。
+//
+// 直接查库：这条命令的读路径（price list / explain）不打这一栏，而要钉住的正是
+// 「写入侧有没有把它落下去」。
+func ruleCreatedBy(t *testing.T, db *sql.DB, ruleID int64) sql.NullInt64 {
+	t.Helper()
+	var by sql.NullInt64
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT created_by FROM pricing_rules WHERE id = $1`, ruleID).Scan(&by); err != nil {
+		t.Fatalf("读规则 %d 的创建人失败: %v", ruleID, err)
+	}
+	return by
+}
+
+// ruleVersionActor 读某一版历史的操作人（pricing_rule_versions.changed_by）。
+//
+// 这张表今天只有写入方、没有读取方（见 internal/pricing 的 Update），所以只能
+// 直接查它。
+func ruleVersionActor(t *testing.T, db *sql.DB, ruleID int64, version int) sql.NullInt64 {
+	t.Helper()
+	var by sql.NullInt64
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT changed_by FROM pricing_rule_versions WHERE rule_id = $1 AND version = $2`,
+		ruleID, version).Scan(&by); err != nil {
+		t.Fatalf("读规则 %d 第 %d 版的操作人失败: %v", ruleID, version, err)
+	}
+	return by
 }
 
 // TestPriceExplainPicksWinner 钉住 explain 回答的是「按哪条计价」。
@@ -460,8 +600,14 @@ func selectedRuleIs(out string, id int64) bool {
 }
 
 // addPriceRule 建一条规则并返回它的 ID。
+//
+// --by 必填，而多数用例不比这一栏：这里补上一个现建的用户。已经自己给了
+// --by 的用例原样保留——那一栏正是它要断言的东西（见 hasFlagArg）。
 func addPriceRule(t *testing.T, args []string) int64 {
 	t.Helper()
+	if !hasFlagArg(args, "--by") {
+		args = append(args, "--by", createTestUserID(t))
+	}
 	stdout, _ := captureStreams(t, func() {
 		if err := runPriceCreate(args); err != nil {
 			t.Fatalf("price add 失败: %v", err)
@@ -472,6 +618,19 @@ func addPriceRule(t *testing.T, args []string) int64 {
 		t.Fatalf("stdout 不是规则 ID：%q（%v）", stdout, err)
 	}
 	return id
+}
+
+// hasFlagArg 判断参数清单里有没有给这一个旗标。
+//
+// 只认 `--名字` 这一种写法：这一组用例都用长名写操作人，而短名与别名的存在
+// 由 short_flags_test.go 那一张表管。
+func hasFlagArg(args []string, name string) bool {
+	for _, arg := range args {
+		if arg == name {
+			return true
+		}
+	}
+	return false
 }
 
 // listRules 列出全部规则。
