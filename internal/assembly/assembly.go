@@ -22,7 +22,8 @@
 //   - 执行器是唯一会发出外部请求的东西，测试要能把它指向一个本地假上游。
 //     生产侧它由 internal/upstream 装配（各协议适配器的注册表）。
 //   - 规则来源连的是数据库，但它的匹配口径（作用域、优先级）属于计价，
-//     不属于接线。放在参数里，这一层就不必知道规则长什么样。
+//     不属于接线。放在参数里，这一层就不必知道规则长什么样。成本规则来源
+//     与它同一个理由，单独一个字段：它在结算时另问一次，算不出来不影响金额。
 //
 // 其余依赖（候选来源、账本存储、快照链路、鉴权、日历）都是本包直接构造的：
 // 它们没有第二种实现，多一层参数只会让调用方多写几行没有信息的代码。
@@ -95,6 +96,13 @@ type Config struct {
 
 	// Rules 是计价规则的来源，由调用方构造。
 	Rules pipeline.RuleSource
+
+	// Costs 是上游成本规则的来源，由调用方构造。
+	//
+	// 与 Rules 分开传：它只在结算时被问一次，算不出成本不影响任何金额
+	// （落库层把那一列写成 NULL）。但**必须接**——不接的表现是成本这一维
+	// 永远没有数据，而路由照样排得出来，现场看不出少了什么（见 validate）。
+	Costs pipeline.CostSource
 
 	// RedisDSN 是共享计数（限流）用的 Redis 连接串，来自 LARKAX_REDIS_DSN。
 	//
@@ -501,6 +509,7 @@ func Build(cfg Config) (*App, error) {
 	gw := &gateway.Gateway{
 		Pipeline: &pipeline.Pipeline{
 			Rules:    cfg.Rules,
+			Costs:    cfg.Costs,
 			Programs: expr.NewCache(cacheSize),
 			Calendar: calendarEnv,
 			Region:   region,
@@ -950,6 +959,9 @@ func (c Config) validate() error {
 	}
 	if c.Rules == nil {
 		fail("缺少计价规则来源（无法计费）")
+	}
+	if c.Costs == nil {
+		fail("缺少成本规则来源（生产装配必须接，否则上游成本那一列永远是 NULL）")
 	}
 
 	if len(errs) > 0 {

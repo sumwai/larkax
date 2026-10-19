@@ -1654,8 +1654,9 @@ func TestHealthReadsWindowAndSignals(t *testing.T) {
 	})
 
 	t.Run("成本那一列的 0 读作没有数据", func(t *testing.T) {
-		// 那一列是 NOT NULL DEFAULT 0 且今天没有生产写入方，于是「有桶、成本是 0」
-		// 只可能表示没记过账。把它当免费会让每一行都显示一个凭空的零成本。
+		// 写入侧接上之前那一列是 NOT NULL DEFAULT 0，窗口里可能还留着那时
+		// 写下的 0；而接上之后「合计为 0」也可能是真的免费。读侧两种都判成
+		// 「没有数据」：把它当免费会让每一行都显示一个凭空的零成本。
 		zero := insertChannel(ctx, t, db, sealer, channelSpec{model: uniqueModel()})
 		insertRollup(ctx, t, db, zero, hourBucket(1), 5, 5, 0, 120, "0.00000000")
 
