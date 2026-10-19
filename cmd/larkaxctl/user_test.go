@@ -64,6 +64,43 @@ func TestUserCreateRejectsBadFlags(t *testing.T) {
 	}
 }
 
+// TestUserCreateRejectsControlCharsInName 钉住「名字里有控制字符」是参数错，
+// 而且报错说清是哪个字符、要改哪里。
+//
+// 与纯数字名字同一档：这一条在连库之前就判得出来（判据在 auth.ValidateNewUsername）。
+// 带控制字符的名字落进库里之后，凡是打它的地方都会破——清单折出没有栏名的续行、
+// ESC 序列原样进终端，而它进账本备注时又会被清洗成另一个串（只洗 `\r`、`\n`、`\t`），
+// 于是回显里写的与库里记的对不上。
+func TestUserCreateRejectsControlCharsInName(t *testing.T) {
+	cases := []struct {
+		name string
+		arg  string
+		want string // 报错里点名的那个字符
+	}{
+		{"换行", "a\nb", "换行（U+000A）"},
+		{"制表符", "a\tb", "制表符（U+0009）"},
+		{"ESC 序列", "a\x1b[31mb", "ESC（U+001B）"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runUserCreate([]string{"--name", tc.arg})
+			if err == nil {
+				t.Fatal("带控制字符的名字应当报错")
+			}
+			if code := exitCode(err); code != exitUsage {
+				t.Errorf("退出码 = %d，想要 %d（参数错那一档）", code, exitUsage)
+			}
+			// 三样都要说清：是名字的哪一类问题、哪个字符、改哪个参数。
+			for _, want := range []string{"控制字符", tc.want, "--name"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("报错 %q 里没有 %q", err.Error(), want)
+				}
+			}
+		})
+	}
+}
+
 // TestUserCreateRejectsNumericNameLeavesNoRow 过真命令、连真库。
 //
 // 两件事一起钉：命令报参数错（退出码 2），以及库里**没有多出一行**。只断言报错
@@ -96,6 +133,38 @@ func TestUserCreateRejectsNumericNameLeavesNoRow(t *testing.T) {
 	}
 	if rows != 0 {
 		t.Errorf("被拒的那一次在库里留了 %d 行 %q", rows, numeric)
+	}
+}
+
+// TestUserCreateRejectsControlCharNameLeavesNoRow 过真命令、连真库。
+//
+// 与上面那条同一个形状：命令报参数错（退出码 2），以及库里**没有多出一行**。
+// 只断言报错不够——先写库再报错的实现同样会打出那句话，而那一行已经躺在库里了，
+// 之后每一次打它的地方都会破。
+func TestUserCreateRejectsControlCharNameLeavesNoRow(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+	// 名字同时带换行与 ESC 序列：这两样是这条判据要挡的两类（折行与转义序列）。
+	const name = "probe\nop\x1b[31mX"
+
+	r := runOnce(t, runUserCreate, []string{"--name", name})
+	if r.err == nil {
+		t.Fatal("带控制字符的用户名应当报错")
+	}
+	if code := exitCode(r.err); code != exitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错那一档）：%v", code, exitUsage, r.err)
+	}
+	if !strings.Contains(r.err.Error(), "控制字符") {
+		t.Errorf("报错没说清原因：%v", r.err)
+	}
+
+	var rows int
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT count(*) FROM users WHERE username = $1`, name).Scan(&rows); err != nil {
+		t.Fatalf("查库失败: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("被拒的那一次在库里留了 %d 行 %q", rows, name)
 	}
 }
 
@@ -171,6 +240,41 @@ func TestUserCreateAcceptsNamesWithDigits(t *testing.T) {
 	db := testDB(t)
 
 	for _, name := range []string{"1a", "a1"} {
+		t.Run(name, func(t *testing.T) {
+			id := createUserWithRole(t, name, "", string(auth.RoleUser))
+			t.Cleanup(func() {
+				// 名字是写死的（不是 uniqueName 那一套），所以用完删掉：
+				// 同一个库上再跑一次时，第二次 create 会撞上这次留下的那一行。
+				if _, err := db.ExecContext(context.WithoutCancel(t.Context()),
+					`DELETE FROM users WHERE id = $1`, id); err != nil {
+					t.Logf("清理用户 %d 失败: %v", id, err)
+				}
+			})
+
+			got := runOnce(t, runUser, []string{"get", "--user", name})
+			if got.err != nil {
+				t.Fatalf("user get --user %s 失败: %v\nstderr=%s", name, got.err, got.stderr)
+			}
+			for _, want := range []string{name, strconv.FormatInt(id, 10)} {
+				if !strings.Contains(got.stdout, want) {
+					t.Errorf("详情里没有 %q：\n%s", want, got.stdout)
+				}
+			}
+		})
+	}
+}
+
+// TestUserCreateAcceptsNamesWithPunctuationAndCJK 钉住新加的那条判据没有连坐：
+// 拦的是控制字符，不是「名字里不许有别的字符」。
+//
+// 与上面那条同一个理由：只断言「建成功了」不够，建完还得能**按名字**读回来，
+// 否则一个把这些名字解释成别的串的实现照样通过。点、连字符与中文是名字里最
+// 常见的三样，也正是「顺手收窄成 [A-Za-z0-9_-]」会挡掉的那一批。
+func TestUserCreateAcceptsNamesWithPunctuationAndCJK(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+
+	for _, name := range []string{"user.1", "li-si-3", "张三"} {
 		t.Run(name, func(t *testing.T) {
 			id := createUserWithRole(t, name, "", string(auth.RoleUser))
 			t.Cleanup(func() {

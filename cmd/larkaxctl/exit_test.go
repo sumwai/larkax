@@ -62,6 +62,26 @@ func TestExitCodeUsageForIDRefUsername(t *testing.T) {
 	}
 }
 
+// TestExitCodeUsageForControlCharUsername 钉住同一个形状在控制字符上的那一份。
+//
+// 与其他两条同理，但这一条要走得更远一点：`user create` 自己在连库之前就包了
+// usageErr（见 user.go 的 runUserCreate），所以**今天从命令行走不到这一格**——
+// 这里喂的是包直接返回的那个哨兵，别的调用方（将来的管理接口、导入脚本）拿到的是
+// 它，而从包直接上来的错误只有在 usageErrors 里登记过才有退出码 2：漏登记的那一天
+// 它会安静地退回 1，而 1 与 2 在脚本里是两种处置。
+func TestExitCodeUsageForControlCharUsername(t *testing.T) {
+	if got := exitCode(auth.ErrUsernameHasControlChar); got != exitUsage {
+		t.Errorf("auth.ErrUsernameHasControlChar 的退出码应当是 %d，得到 %d", exitUsage, got)
+	}
+
+	// 包返回的是包了一层的那一个（ValidateNewUsername 用 %w 接上「哪个字符、
+	// 为什么不行」那两句），链上仍然要认得出。
+	wrapped := fmt.Errorf("建用户失败: %w", auth.ErrUsernameHasControlChar)
+	if got := exitCode(wrapped); got != exitUsage {
+		t.Errorf("包了一层之后仍应当是 %d，得到 %d", exitUsage, got)
+	}
+}
+
 // TestExitCodeUsageForInvalidEmail 钉住同一个形状在邮箱上的那一份。
 //
 // 与上一条同理：`user create` 与 `user update` 各自在连库之前也挡了一遍，而别的

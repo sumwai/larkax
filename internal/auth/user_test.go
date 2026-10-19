@@ -250,12 +250,88 @@ func TestValidateNewUsernameRejectsOnlyIDRefs(t *testing.T) {
 	}
 }
 
+// TestValidateNewUsernameRejectsControlChars 钉住「哪些字符不许出现在名字里」的两侧。
+//
+// 判据不是「名字长得难看」，而是「这个字符会不会把打它的地方打坏」：清单与回显按
+// 「一条记录一行、一个字段一栏」排版，`\n`、`\r`、`\t` 会把那一栏折出一条没有栏名
+// 的续行，ESC 序列则原样进执行者的终端。名字是外部输入，而 users.username 是
+// text——不在这里拦，它就一路进到别人的终端里。
+//
+// 两头的空白不算：判的是去掉空白之后那个串，也就是 CreateUser 落库的值。
+func TestValidateNewUsernameRejectsControlChars(t *testing.T) {
+	rejected := []struct {
+		name string
+		want string // 报错里点名的那个字符
+	}{
+		{"a\nb", "换行（U+000A）"},
+		{"a\rb", "回车（U+000D）"},
+		{"a\tb", "制表符（U+0009）"},
+		{"a\x1b[31mb", "ESC（U+001B）"},
+		{"a\x00b", "NUL（U+0000）"},
+		{"a\x7fb", "DEL（U+007F）"},
+		// 没有名字的那些 C0 只报码位（见 describeControlChar）。
+		{"a\x07b", "U+0007"},
+		// 两头的空白先去掉，中间那个留着。
+		{" a\tb ", "制表符（U+0009）"},
+	}
+	for _, tc := range rejected {
+		err := ValidateNewUsername(tc.name)
+		if err == nil {
+			t.Errorf("ValidateNewUsername(%q) 通过了，期望报错", tc.name)
+			continue
+		}
+		if !errors.Is(err, ErrUsernameHasControlChar) {
+			t.Errorf("ValidateNewUsername(%q) = %v，期望 ErrUsernameHasControlChar",
+				tc.name, err)
+		}
+		// 报错要说清**哪个字符**、为什么不行：只说一句「非法字符」的话，改的人
+		// 只能一个一个字符试着删。
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("ValidateNewUsername(%q) 的报错没点名 %s：%v", tc.name, tc.want, err)
+		}
+		if !strings.Contains(err.Error(), "--name") {
+			t.Errorf("ValidateNewUsername(%q) 的报错没说清改哪里：%v", tc.name, err)
+		}
+	}
+
+	accepted := []string{
+		// 这一条不是字符白名单：名字的字符集今天没有明文规定，收的照收。
+		"alice", "a b", "a.b", "a-b", "a_b", "user.1",
+		"张三", "李四-三",
+		// 两头的空白由 TrimSpace 去掉，去掉之后就没有控制字符了。
+		"\ta\t", "\na\n", " \t a \t ",
+		// 控制字符之外的非 ASCII 不在这一条里：收不收它们（C1、零宽字符）是
+		// 另一条判据的事，见 ValidateNewUsername 的边界。这里是把界线写下来，
+		// 不是给这两种字符背书——将来要收窄，改的是这两行。
+		"a\u00a0b", "a\u200bb",
+	}
+	for _, name := range accepted {
+		if err := ValidateNewUsername(name); err != nil {
+			t.Errorf("ValidateNewUsername(%q) 报错了，期望通过：%v", name, err)
+		}
+	}
+}
+
 // TestValidateNewUsernameAgreesWithUserRefWhere 钉住这两处认的是同一批串。
 //
-// 「哪些名字建不得」与「一个标识怎么解释」是同一个判据的两半：前者的判据正是
+// 「哪些名字建不得」与「一个标识怎么解释」是同一个判据的两半：第 1 条判据正是
 // 「userRefWhere 会不会把它当成 ID」。两处各写一份 strconv.ParseInt 时，写入
 // 路径放过去一个纯数字的名字、解析路径又把它读成 ID，而两边各自的用例都绿——
 // 症状要等到有人 `user get` 一个刚建出来的用户才会现形。
+//
+// # 第 2 条判据之后，两边不再是「互相蕴含」
+//
+// 控制字符那一条（见 ValidateNewUsername）与 userRefWhere 无关，所以这里能要求
+// 的是**一个方向**的蕴含：userRefWhere 按 ID 解释的名字，ValidateNewUsername 必须
+// 拒。反过来只要求「拒得出理由，而且理由是第 2 条」——按用户名解释的名字里，
+// `a\nb` 正是被第 2 条拒掉的那一类，而它将来还会多出别的同类。下面那张表里那四个
+// 控制字符串走的就是这一支，它钉住的是**两条判据各有各的哨兵**：第 2 条拒掉一个
+// 非 ID 的名字时，报出来的必须是它自己那个错，不能借第 1 条的名义——借了的话，
+// 按哨兵分档的调用方会把「去掉那个字符就能过」读成「这个名字按 ID 找不回来」。
+//
+// 这一支**管不到第 2 条的宽严**：把 firstControlChar 放宽到也拒空格，红的是
+// TestValidateNewUsernameRejectsControlChars 那张放行表，不是这里——只要理由还是
+// 那个哨兵，这一支就 continue 过去了。
 //
 // 比的是**去掉两头空白之后**的串：三条解析路径都先 trim 再调 userRefWhere
 // （见各自的 strings.TrimSpace），而 CreateUser 落库的也是 trim 之后的名字，
@@ -267,6 +343,9 @@ func TestValidateNewUsernameAgreesWithUserRefWhere(t *testing.T) {
 		"9223372036854775808", "-9223372036854775809",
 		"1a", "a1", "a", "a b", "123a456", "1_0", "0x10", "1.0", "1e3", "١٢٣",
 		" 1a ", "", "  ", "\t",
+		// 控制字符那一类：userRefWhere 一律按用户名解释（控制字符不会让一个串
+		// 变成一个十进制整数），而 ValidateNewUsername 按第 2 条拒。
+		"a\nb", "a\tb", "a\x1b[31mb", "a\x7fb",
 	}
 
 	for _, name := range names {
@@ -281,9 +360,12 @@ func TestValidateNewUsernameAgreesWithUserRefWhere(t *testing.T) {
 			continue
 		}
 
-		if err := ValidateNewUsername(name); err != nil {
-			t.Errorf("%q 在 userRefWhere 那里是用户名（%s），ValidateNewUsername "+
-				"却拒了：%v", name, where, err)
+		err := ValidateNewUsername(name)
+		if err != nil {
+			if !errors.Is(err, ErrUsernameHasControlChar) {
+				t.Errorf("%q 在 userRefWhere 那里是用户名（%s），ValidateNewUsername "+
+					"却以别的理由拒了：%v", name, where, err)
+			}
 			continue
 		}
 		// 按用户名查的那一支，谓词的实参必须是这个名字本身：实参拼错了，
@@ -469,6 +551,28 @@ func TestCreateUserRejectsIDRefUsername(t *testing.T) {
 		_, err := s.CreateUser(t.Context(), CreateUserParams{Username: name, Role: RoleUser})
 		if !errors.Is(err, ErrUsernameIsIDRef) {
 			t.Errorf("CreateUser(%q) 的错误 = %v，期望 ErrUsernameIsIDRef", name, err)
+		}
+	}
+}
+
+// TestCreateUserRejectsControlCharUsername 钉住建用户的路上也判名字里有没有控制字符。
+//
+// 与上面那条同一条理由：CreateUser 是导出方法，别的调用方（将来的 HTTP 管理
+// 接口、导入脚本）也会走它，所以判据不能只长在命令行那一层。同样是 New(nil)——
+// 校验在连库之前，nil 句柄走不到；往下走了一步就会以 panic 收场。
+func TestCreateUserRejectsControlCharUsername(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("校验缺席：nil 句柄走到了连库那一步（panic: %v）", r)
+		}
+	}()
+
+	s := New(nil)
+
+	for _, name := range []string{"a\nb", "a\tb", "a\x1b[31mb", " a\x7fb "} {
+		_, err := s.CreateUser(t.Context(), CreateUserParams{Username: name, Role: RoleUser})
+		if !errors.Is(err, ErrUsernameHasControlChar) {
+			t.Errorf("CreateUser(%q) 的错误 = %v，期望 ErrUsernameHasControlChar", name, err)
 		}
 	}
 }

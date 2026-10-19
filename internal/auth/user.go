@@ -62,6 +62,13 @@ var (
 	// 措辞只说十进制整数，不说「一个数」：`1.0`、`1e3`、`0x10` 与 `1_0` 在
 	// strconv 那一套里都不是整数（见 userRefIsID），它们是名字。
 	ErrUsernameIsIDRef = errors.New("用户名不能整个是一个十进制整数")
+	// ErrUsernameHasControlChar 表示这个名字里有控制字符（C0 与 DEL）。
+	//
+	// 与上面两个分开放的理由与 ErrUsernameIsIDRef 一样：它说的是「这个形状的名字
+	// 不能用」，与库里现在有什么无关，命令行把它归到「参数错」（退出码 2）。
+	// 与 ErrUsernameIsIDRef 分成两条而不是合成一句「名字不合法」，是因为被拒的人
+	// 要做的动作不同：这一条是去掉某个字符，那一条是换一个名字。
+	ErrUsernameHasControlChar = errors.New("用户名不能含控制字符")
 	// ErrInvalidEmail 表示这个串不是一个邮箱地址的写法。
 	//
 	// 与 ErrEmailTaken 分开放：那一条说的是「这个邮箱挂在别人名下」，下一步是换
@@ -73,28 +80,92 @@ var (
 
 // ValidateNewUsername 校验一个**要建**的用户名。
 //
-// 今天只有一条：不能是 `--user` 会按 ID 解释的写法。名字进库之后怎么解释由
-// userRefWhere 决定，而它把这类串一律当 ID——那样一个名字建得出来、读不回来：
-// `user get` 与 `user update` 都够不着它，只能改库。拦在建的时候，是为了不让
-// 这样一行落进库里。
+// 两条判据，都只看名字本身：
 //
-// 判据与 userRefWhere 共用 userRefIsID，两边认的是同一批串；有一条用例钉住这
-// 条一致性（见 TestValidateNewUsernameAgreesWithUserRefWhere）。两处各判一遍的
-// 症状很隐蔽：写入路径放过去一个名字，解析路径读不回来，而两边各自的用例都绿。
+//  1. 不能是 `--user` 会按 ID 解释的写法。名字进库之后怎么解释由 userRefWhere
+//     决定，而它把这类串一律当 ID——那样一个名字建得出来、读不回来：`user get`
+//     与 `user update` 都够不着它，只能改库。拦在建的时候，是为了不让这样一行
+//     落进库里。
 //
-// 比的是**去掉两头空白之后**的名字，与 CreateUser 落库的那个值一致（它先去空白
-// 再插）：`--name " 123 "` 存进去的是 `123`，那正是读不回来的那一个。
+//  2. 不能含控制字符（C0 与 DEL）。这个形状的名字会把打它的地方打坏：名字是
+//     外部输入，而所有打名字的地方都按「一条记录一行、一个字段一栏」排版——
+//     `a\nb` 折出来是一条没有栏名的裸续行（`\r`、`\t` 同形），ESC 序列则原样进
+//     执行者的终端，改标题、改色、清屏都能做。同一条路上还有第二处不一致：这个
+//     名字进账本分录的备注时会过 ledger 的 sanitizeMemo，而它只把 `\r`、`\n`、
+//     `\t` 换成空格（ESC 这类原样留在备注里），于是回显里写的与库里记的不是同一
+//     个串，而没有任何提示。
 //
-// 它管不到库里已经有的行——那些纯数字的用户名本来就够不着，改解释规则是另一件
-// 事（见 ResolveUser）。改名的路也不存在：`user update` 不收 `--name`，
-// UpdateUserParams 里也没有这一列。
+// 两条都在**去掉两头空白之后**的名字上判，与 CreateUser 落库的那个值一致（它先
+// 去空白再插）：`--name " 123 "` 存进去的是 `123`，那正是读不回来的那一个；而
+// `--name $'\ta\t'` 存进去的是 `a`，那是个不带控制字符的名字，这里就不该拦。
+//
+// 第 1 条的判据与 userRefWhere 共用 userRefIsID，两边认的是同一批串；有一条用例
+// 钉住这条一致性（见 TestValidateNewUsernameAgreesWithUserRefWhere）。两处各判
+// 一遍的症状很隐蔽：写入路径放过去一个名字，解析路径读不回来，而两边各自的用例
+// 都绿。第 2 条与 userRefWhere 无关——控制字符不会让一个串变成一个十进制整数，
+// 所以它只往下加拒的那一侧，两条判据互不遮蔽。
+//
+// 第 2 条**不是**一张字符白名单：`.`、`-`、空格、中文照收，收窄成「只允许
+// `[A-Za-z0-9_-]`」是另一条判据要谈的事（名字的字符集今天没有明文规定），与
+// 「这个名字会不会把清单打坏」是两件事。C1（U+0080 起）与零宽字符同样不在
+// 这一条里：要堵的是折行与转义序列这两类。
+//
+// 它管不到库里已经有的行——那些名字本来就够不着、本来就可能带控制字符，改解释
+// 规则或清理存量是另一件事（见 ResolveUser）。改名的路也不存在：`user update`
+// 不收 `--name`，UpdateUserParams 里也没有这一列。
 func ValidateNewUsername(name string) error {
 	trimmed := strings.TrimSpace(name)
 	if _, ok := userRefIsID(trimmed); ok {
 		return fmt.Errorf("%w：%q 会被 --user 按 ID 解释，"+
 			"建出来之后 user get 与 user update 都找不到它", ErrUsernameIsIDRef, trimmed)
 	}
+	if r, ok := firstControlChar(trimmed); ok {
+		return fmt.Errorf("%w：%q 里有%s。凡是打这个名字的地方（清单与写命令的回显）"+
+			"都按「一条记录一行、一个字段一栏」排版，而这类字符会让那一栏错位、或"+
+			"折出没有栏名的续行；ESC 这类转义序列还会原样进终端。--name 里去掉它",
+			ErrUsernameHasControlChar, trimmed, describeControlChar(r))
+	}
 	return nil
+}
+
+// firstControlChar 找出名字里第一个控制字符（C0 或 DEL），没有就报 false。
+//
+// 判据与 cmd/larkaxctl 的 checkOrderKey 同一形态（那边管幂等键）：C0 是
+// U+0000–U+001F，DEL 是 U+007F。C1 与零宽字符不收，理由见 ValidateNewUsername。
+//
+// 只报第一个就够：报错要说清的是「哪个字符要改」，而一个名字里出现控制字符时，
+// 它后面往往还跟着一串（`\x1b[31m` 就是一整个转义序列）。
+func firstControlChar(name string) (rune, bool) {
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return r, true
+		}
+	}
+	return 0, false
+}
+
+// describeControlChar 把报错里点名的那个字符说成能照着改的样子：码位，以及那几个
+// 在命令行上敲得出来的字符的名字。
+//
+// 名字不是装饰：`$'a\tb'` 里的那个字符，在报错里写成 U+0009 对不上使用者眼里的
+// 东西——他敲的是一个 `\t`。其余 C0 只报码位：它们没有一个人人会随手敲出来的写法。
+func describeControlChar(r rune) string {
+	switch r {
+	case '\n':
+		return "换行（U+000A）"
+	case '\r':
+		return "回车（U+000D）"
+	case '\t':
+		return "制表符（U+0009）"
+	case 0x1b:
+		return "ESC（U+001B）"
+	case 0x00:
+		return "NUL（U+0000）"
+	case 0x7f:
+		return "DEL（U+007F）"
+	default:
+		return fmt.Sprintf("U+%04X", r)
+	}
 }
 
 // 邮箱地址两半各自允许出现的符号。
@@ -398,6 +469,8 @@ type CreateUserParams struct {
 //     换个名字就能继续，是使用者能处理的
 //   - errors.Is(err, ErrUsernameIsIDRef)：这个名字的形状不能用（整串是一个十进制
 //     整数），同样换个名字就能继续——它不连库就判得出来
+//   - errors.Is(err, ErrUsernameHasControlChar)：这个名字的形状不能用（含控制
+//     字符），去掉那个字符就能继续，同样不连库就判得出来
 //   - errors.Is(err, ErrInvalidEmail)：这个邮箱的写法不认，换一个写法就能继续，
 //     同样不连库就判得出来
 //   - 其它：写入失败（连不上库、约束之外的错误），要人去查
