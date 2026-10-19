@@ -105,8 +105,8 @@
 # **gap 挂的 issue 一旦关闭，条目就成了死链。** 一条 gap 有两种下场，得分开看：
 # 缺口在那条 issue 里兑现了，就把条目删掉（哪次删了哪几条，记在上面那几段
 # 「减了几条」里）；缺口没做、只是那张单子关了，就把它改挂到一条活的跟踪
-# issue 上——挂 #172 的那几条今天就是这种。留着不换的话，后来的人照编号点过去
-# 只看到一张已经关掉的单子，而条目还在清单里，看上去像有人在盯，其实没有。
+# issue 上——挂 #172 的那几条今天就是这么换过来的。留着不换的话，后来的人照编号
+# 点过去只看到一张已经关掉的单子，而条目还在清单里，看上去像有人在盯，其实没有。
 #
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
@@ -119,7 +119,7 @@ internal/calendar/memory.go    | MemorySource.SetYearState      | lib | 测试�
 internal/calendar/memory.go    | MemorySource.YearState         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | NewMemorySource                | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/channel/httpx/httpx.go  | DrainAndClose                   | lib | HTTP 收尾辅助，给拿不到 *http.Response 的调用点用；目前只有测试在调它
-internal/ledger/transactions.go  | Settle                          | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
+internal/ledger/transactions.go  | Settle                          | gap | #789 平台主动清算还没有触发方；商户申请的提现走的是 PayoutRequest
 internal/money/money.go          | FromInt                         | lib | 金额库的构造面：用整数元构造；目前只有测试在调它
 internal/money/money.go          | FromUnits                       | lib | 金额库的构造面：用最小单位构造；目前只有测试在调它（读库走 Parse，列是 numeric）
 internal/money/money.go          | Min                             | lib | 金额库的运算面：取较小者；目前只有测试在调它（孪生的 Max 在生产里用到）
