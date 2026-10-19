@@ -230,6 +230,10 @@ var usageErrors = []error{
 	// 邮箱的写法不认。与上一条同一个形状：错在命令里的那个值，换一个就能过，
 	// 与库里现在有什么无关。
 	auth.ErrInvalidEmail,
+	// 名字里有控制字符。它与 auth.ErrUsernameIsIDRef 出自同一次判断
+	// （ValidateNewUsername），也错在命令里的那个值：去掉那个字符就能过，
+	// 与库里现在有什么无关。
+	auth.ErrUsernameHasControlChar,
 }
 
 // exitCode 给出一个错误该用的退出码。
