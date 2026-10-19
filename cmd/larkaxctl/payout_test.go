@@ -197,6 +197,7 @@ func TestWalletRefundReceiptAndReplay(t *testing.T) {
 
 // 分账退款：给了商户与上游成本时，回显上是四条分录，平台收入那一笔是差额。
 func TestWalletRefundWithSplit(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 	owner := createTestUserID(t)
 	merchant := createTestUserID(t)
@@ -218,6 +219,7 @@ func TestWalletRefundWithSplit(t *testing.T) {
 // 分成那两个旗标必须成对出现：只给商户、不给金额是一次**静默丢弃**——
 // 操作者以为冲回了那个商户的分成，账面上一分钱都没落到他身上。
 func TestWalletRefundRejectsHalfGivenSplit(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 	owner := createTestUserID(t)
 
@@ -620,6 +622,7 @@ func TestWalletPayoutPaidWithoutGatewayRef(t *testing.T) {
 
 // 找不到单子时退出码是 4，而不是 1：那一行不在，下一步是先看清库里现在有什么。
 func TestWalletPayoutUnknownIDIsAConflict(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 	// --by 必须是一个真实存在的用户：审批那条路先解析身份、再去找单子，
 	// 随手编一个标识会先撞在「找不到用户」上，而这条用例要测的是找不到**单子**。

@@ -32,6 +32,22 @@ func testDB(t *testing.T) *sql.DB {
 	return testdb.Open(t)
 }
 
+// requireDB 是「这条用例要连库」的门槛，判据与 internal/testdb 同源。
+//
+// 这个包里连库有两条路：一条先调 testDB（内部走 testdb.Open），另一条直接调
+// 命令函数（runUserCreate、runWalletList 之类），连库那一步由命令自己
+// config.Load 完成。后一条绕开了 testdb 的跳过：缺 DSN 时拿到的是「配置无效」，
+// 看起来像自己改坏了配置，而不是「这里没有库可连」。走那条路的用例在开头调它。
+//
+// 与 testdb.Open 一样，没设 DSN 就跳过而不是失败。也不在 TestMain 里整包跳过：
+// help / style / 解析那些用例不连库，整包跳会把它们一起吞掉。
+func requireDB(t *testing.T) {
+	t.Helper()
+	if os.Getenv("LARKAX_DB_DSN") == "" {
+		t.Skip("未设置 LARKAX_DB_DSN，跳过集成测试（CI 里会跑）")
+	}
+}
+
 // TestMain 给这个包建一个独立的库，跑完删掉（见 internal/testdb）。
 func TestMain(m *testing.M) { os.Exit(testdb.Main(m)) }
 
@@ -91,6 +107,9 @@ func uniqueName(prefix string) string {
 // 名字每个用例各不相同：user create 不做幂等，重名会直接报错。
 func createTestUser(t *testing.T) int64 {
 	t.Helper()
+	// 造一个用户本身就要连库：以后新增的用例忘了显式调用 requireDB，
+	// 也会跳过而不是红在「配置无效」上。
+	requireDB(t)
 	stdout, _ := captureStreams(t, func() {
 		if err := runUserCreate([]string{"--name", uniqueName("user")}); err != nil {
 			t.Fatalf("user create 失败: %v", err)

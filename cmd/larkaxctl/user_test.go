@@ -407,6 +407,7 @@ func userRow(t *testing.T, stdout, username string) []string {
 // TestUserListShowsEveryColumn 过真命令、连真库：刚建的用户在清单里出现，
 // 五栏逐字是库里那一行的值。
 func TestUserListShowsEveryColumn(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 
 	name := uniqueName("listed")
@@ -432,6 +433,7 @@ func TestUserListShowsEveryColumn(t *testing.T) {
 // 什么都不筛的实现照样通过；只断言「别的角色没被筛出来」的话，一个筛不出
 // 任何东西的实现也照样通过。
 func TestUserListRoleFilterMatchesTheRoleColumn(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 
 	want := map[string]string{}
@@ -512,6 +514,7 @@ func TestUserListStatusFilterSelectsOnlyThatStatus(t *testing.T) {
 // 同一个人按 ID 与按用户名各读一次，两次必须是同一行：两条路各写一份解析的话，
 // 它们迟早会指向不同的人，而那两条命令都会成功。
 func TestUserGetResolvesIDAndUsernameToTheSameUser(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 
 	name := uniqueName("get")
@@ -547,6 +550,7 @@ func TestUserGetResolvesIDAndUsernameToTheSameUser(t *testing.T) {
 // 名字里带空格的用户本来也建不出来（create 落库前会 trim），所以这里比的是
 // 「带空白与不带空白读到的是同一个人」，不是「能查到一个名字里带空格的用户」。
 func TestUserGetTrimsRefWhitespace(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 
 	name := uniqueName("trim")
@@ -575,6 +579,7 @@ func TestUserGetTrimsRefWhitespace(t *testing.T) {
 // 它与「连不上库」必须分开：前者的下一步是换一个标识或先建用户，后者是去看
 // 报错本身。两者落进同一个码时，脚本没法按码分派。
 func TestUserGetMissingUserIsAConflict(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 
 	r := runOnce(t, runUser, []string{"get", "--user", uniqueName("nobody")})
@@ -592,6 +597,7 @@ func TestUserGetMissingUserIsAConflict(t *testing.T) {
 // TestUserListJSONShape 过真命令断言机器可读那一档：金额之外的那几栏、
 // 空邮箱是 null、以及 stdout 整份能被 json.Unmarshal 收下。
 func TestUserListJSONShape(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 
 	name := uniqueName("json")
@@ -643,6 +649,7 @@ func TestUserListJSONShape(t *testing.T) {
 
 // TestUserGetJSONShape 断言 get 那一档的字段名与形状。
 func TestUserGetJSONShape(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 
 	name := uniqueName("jsonget")
@@ -720,6 +727,8 @@ func TestUserListEmptyJSONIsAnArray(t *testing.T) {
 // 保证唯一（user create 不做幂等）。
 func createUserWithRole(t *testing.T, name, email, role string) int64 {
 	t.Helper()
+	// 同 createTestUser：造夹具本身就要连库，这里再过一道门槛。
+	requireDB(t)
 
 	args := []string{"--name", name, "--role", role}
 	if email != "" {
@@ -986,6 +995,7 @@ func TestUserUpdateRejectsJSONFormatBeforeTouchingTheDB(t *testing.T) {
 // 而不是一句「已更新」：改身份这一类操作的下一步常常是核对，只给终点时核对的人
 // 只能自己再读一遍，而那时起点已经没了。
 func TestUserUpdateEchoesTheDiff(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 
 	name := uniqueName("update")
@@ -1024,6 +1034,7 @@ func TestUserUpdateEchoesTheDiff(t *testing.T) {
 // 第二遍给同一个值：命令仍然成功（它不是幂等命令，只是这一次没有字段真的变），
 // 而 stdout 上只剩首行——回显说的是「库里的值变了」，不是「我请求过」。
 func TestUserUpdateSameValuePrintsOnlyTheLeadLine(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 
 	name := uniqueName("update-noop")
@@ -1047,6 +1058,7 @@ func TestUserUpdateSameValuePrintsOnlyTheLeadLine(t *testing.T) {
 // 与读那一侧同一个哨兵、同一个码：脚本按码分派时，「换一个标识或先建用户」与
 // 「去看这次的报错本身」是两种处置。
 func TestUserUpdateMissingUserIsAConflict(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 
 	r := runOnce(t, runUser, []string{"update", "--user", uniqueName("nobody"), "--display-name", "x"})
@@ -1066,6 +1078,7 @@ func TestUserUpdateMissingUserIsAConflict(t *testing.T) {
 // 退出码表把唯一键算作 4；错误信息里要带上撞上的那个值——否则使用者只知道
 // 「邮箱被占了」，不知道被谁占了。
 func TestUserUpdateEmailConflictIsAConflict(t *testing.T) {
+	requireDB(t)
 	setupEnv(t)
 
 	taken := uniqueName("taken") + "@example.com"
