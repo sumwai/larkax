@@ -84,16 +84,42 @@ type Wallet struct {
 	UserID int64
 	// Asset 是资产品种，钱包主键的另一半。
 	Asset ledger.Asset
-	// Balance 是可用余额快照。
+	// Balance 是可用余额快照；BalanceErr 非 nil 时它是零值，**不能当余额用**。
 	Balance money.Amount
-	// Frozen 是为在飞的请求冻结住的那部分，它不包含在 Balance 里。
+	// Frozen 是为在飞的请求冻结住的那部分，它不包含在 Balance 里；
+	// FrozenErr 非 nil 时同样是零值。
 	Frozen money.Amount
+
+	// BalanceErr 非 nil 表示 balance 那一列读不出来，里面是 money.Parse 给的
+	// **原因**。是哪一行、哪一列、库里的原文是什么，这三样要由调用方按 UserID /
+	// Asset / BalanceRaw 说出来——这个错误里一个都没有，它只说「这个数怎么会读
+	// 不出来」。见 Wallets 的「一行读不出来不拖垮整份清单」。
+	BalanceErr error
+	// FrozenErr 同 BalanceErr，对应 frozen 那一列。
+	FrozenErr error
+	// BalanceRaw / FrozenRaw 是两列在库里的十进制原文，**总是填**：读得出来的
+	// 时候它与上面那个金额是同一个数的另一种写法，读不出来的时候它是仅剩的
+	// 证据——报告要说清「读不出来的是什么」，只能引它。
+	BalanceRaw string
+	FrozenRaw  string
 }
 
 // Wallets 列钱包快照，按 user_id、asset 排序。
 //
 // userID 为 nil 时列全部用户的钱包。与 ListKeys 同一条约定：标识先由命令行
 // 解析成具体 id 再查。
+//
+// # 一行读不出来不拖垮整份清单
+//
+// 金额列是 numeric(20, 8)，比 money.Amount 的 int64 宽：库里可以存在一个这一列
+// 装得下、而定点数装不下的余额（见 #442 与 #446）。这样的行**不**让整条查询失败，
+// 其余行照常返回，那一行在对应的 Err 字段上带着原因、在 Raw 字段上带着原文
+// ——**读的人必须处理它**：Err 非 nil 时同一个 Wallet 上那个金额字段是零值，
+// 照着用就会把「读不出来」显示成「0」，而一个偏小的余额看起来正是「少扣了钱」
+// （见 #777：一行的坏数据不该让别人的钱包一个也看不到；夹住那个数交出去更坏）。
+//
+// 只有**扫不动**那一行（连接断了、驱动层面出错）才是整条失败：那不是某一格的值
+// 有问题，是这一份清单没法保证完整。
 //
 // # 这里不 JOIN users
 //
@@ -125,14 +151,14 @@ func (s *Store) Wallets(ctx context.Context, userID *int64) ([]Wallet, error) {
 		}
 		// 金额列是 numeric，没有能直接扫进定点数类型的驱动类型，所以按
 		// 十进制文本读回来再解析（与 reconcile_batch.go 的 readWallets 同一写法）。
-		if w.Balance, err = money.Parse(balance); err != nil {
-			return nil, fmt.Errorf("解析用户 %d 的 %s 余额 %q 失败: %w",
-				w.UserID, w.Asset, balance, err)
-		}
-		if w.Frozen, err = money.Parse(froze); err != nil {
-			return nil, fmt.Errorf("解析用户 %d 的 %s 冻结额 %q 失败: %w",
-				w.UserID, w.Asset, froze, err)
-		}
+		// 两列的原文都留着：解析不了时它是报告里唯一的证据。
+		//
+		// 两列各解析各的，失败只记在对应的 Err 上——**这一行照样进 out**。
+		// 跳过整行会让一个只在 balance 上出问题的钱包连它读得出来的冻结额
+		// 一起消失，而这一行的两个字段本来就互相独立。
+		w.BalanceRaw, w.FrozenRaw = balance, froze
+		w.Balance, w.BalanceErr = money.Parse(balance)
+		w.Frozen, w.FrozenErr = money.Parse(froze)
 		out = append(out, w)
 	}
 	if err := rows.Err(); err != nil {

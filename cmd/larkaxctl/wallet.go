@@ -35,7 +35,8 @@ const walletShortUsage = `larkaxctl wallet 管理用户钱包。
                           --memo <原因> --by <操作人>
   larkaxctl wallet list [--user <ID 或用户名>]
 
-list 只读：列出用户 ID、用户名、资产、余额与冻结。
+list 只读：列出用户 ID、用户名、资产、余额与冻结。某一格读不出来时（库里那个数
+超出金额能表示的范围）那一格打「不可读（超出可表示范围）」，其余照打，命令退出 1。
 credit 与 adjust 的 --ref 必填，它同时是幂等键：同一条命令重跑两次只记一笔，
 换单号才是另一笔。adjust 的 --memo 与 --by 也必填；--amount 带符号，负数是往回扣；
 --memo 里不能有控制字符（换行、制表符之类就算，见 help wallet）。
@@ -144,6 +145,15 @@ user_wallets.frozen），一栏一个字段：用户 ID、用户名、资产、�
 
 冻结额是给在飞的请求预扣住的那部分，它**不包含**在余额里——「这个用户还能花
 多少」看余额，「有多少正被占着」看冻结额。
+
+余额与冻结额那两格**可能读不出来**：库里那两列是 numeric(20, 8)，装得下的数比金额
+能表示的范围宽，于是存在一种这两列存得下、而命令表示不了的余额。这时那一格打
+「不可读（超出可表示范围）」，**其余行照打**，命令退出 1，并且在 stderr 上说清是哪
+一行的哪一格、库里的原文是什么。整条命令失败会让调用方看不出是哪一行的问题，也拿不到
+读得出来的那些行。
+
+带上 --user 时反过来：窄查询问的就是那一格的值，读不出来就是没答上来，一个字都不打、
+直接退出 1。不带 --user 的那一屏回答的是「现在有哪些钱包」，那才是「其余照打」的对象。
 
 **旧名仍可用**：wallet open 等同于 wallet create，credit 上 --idempotency-key 与
 --order 都等同于 --ref，-u 是 --user 的简写（四条子命令都认）。它们保留是为了不让
@@ -881,6 +891,114 @@ type walletRow struct {
 	Asset    ledger.Asset
 	Balance  money.Amount
 	Frozen   money.Amount
+
+	// BalanceErr / FrozenErr 非 nil 时上面那个金额是零值，**不能当余额打**：
+	// 那一栏要打标记（见 walletCell），而退出码由 walletUnreadableCause 定。
+	// 两列各判各的，一个坏不影响另一个。见 ledger/store 的 Wallets。
+	BalanceErr error
+	FrozenErr  error
+	// BalanceRaw / FrozenRaw 是库里两列的十进制原文。读得出来的时候它与对面那个
+	// 金额是同一个数的两种写法，读不出来的时候它是仅剩的证据：那一句话里说得出
+	// 「读不出来的是什么」，靠的就是它（原因那边只说「这个数怎么会读不出来」）。
+	BalanceRaw string
+	FrozenRaw  string
+}
+
+// 表格里「这一格读不出来」的标记。
+//
+// 它必须说得出为什么。只写「不可读」的话，读的人第一反应是「权限不够？那一列
+// 没了？」；而这条路上唯一到得了的原因是库里那个数超出了金额能表示的范围
+// （列是 numeric(20, 8)，比 money.Amount 的 int64 宽，见 #442、#446）。
+//
+// 兜底那一条今天到不了（列是 NOT NULL 的 numeric，解析失败只可能是溢出），
+// 留着是因为**标记说错原因比说得笼统更坏**：把一个不是溢出的失败写成「超出可
+// 表示范围」，会把读的人送去查一个不存在的边界。
+const (
+	walletUnreadableCell        = "不可读（超出可表示范围）"
+	walletUnreadableCellGeneric = "不可读"
+)
+
+// walletCell 把一格金额渲染成给人看的文本：读得出来就是那个数，读不出来给标记。
+func walletCell(amount money.Amount, err error) string {
+	if err == nil {
+		return amount.String()
+	}
+	if errors.Is(err, money.ErrOverflow) {
+		return walletUnreadableCell
+	}
+	return walletUnreadableCellGeneric
+}
+
+// walletAmountJSON 打一格金额：读得出来就是那串定点小数，读不出来是 null。
+//
+// 名字不跟着 format.go 那一族的 `jsonXxx`：那些是给所有命令共用的取值助手
+// （jsonAmount / jsonTime / jsonID），而「这一格可能读不出来」只发生在钱包
+// 清单上，助手也就留在这条命令自己的文件里。
+func walletAmountJSON(amount money.Amount, err error) any {
+	if err != nil {
+		return nil
+	}
+	return jsonAmount(amount)
+}
+
+// maxUnreadableInReport 是那行错误里最多点名几行读不出来的钱包。
+//
+// 其余的在表格里同样带着标记（一屏之内看得到），抄进同一句话里的几百行则不是
+// 一句话而是一屏错误。折掉的行数照写在末尾：少了那个数，读的人会以为坏的只有
+// 点到的这几行（与 doctor 的「另有 N 条」同一条理由）。
+const maxUnreadableInReport = 5
+
+// walletUnreadableCellNote 描述一格读不出来：哪一列、库里的原文是什么、为什么会这样。
+//
+// 三样都要有。少了原文，看报告的人只知道「有个数坏了」，还得回库里翻是哪一格；
+// 少了原因，他不知道往哪儿查。
+func walletUnreadableCellNote(column, raw string, err error) string {
+	return fmt.Sprintf("%s读不出来（库里的原文是 %q）：%v", column, raw, err)
+}
+
+// walletUnreadableCause 把「有格子读不出来」折成一条错误，全都读得出来时是 nil。
+//
+// 它同时定退出码（1）与给人看的那句话：哪一行的哪一格、库里的原文是什么。
+// 表格那一格只放得下一个短标记，**原文只有这一条路出得来**——两种输出格式下
+// 它都经 main 打到 stderr 上（见 emitJSON 的 cause）。
+func walletUnreadableCause(rows []walletRow) error {
+	var (
+		parts  []string
+		hidden int
+	)
+	for _, r := range rows {
+		cells := make([]string, 0, 2)
+		if r.BalanceErr != nil {
+			cells = append(cells, walletUnreadableCellNote("余额", r.BalanceRaw, r.BalanceErr))
+		}
+		if r.FrozenErr != nil {
+			cells = append(cells, walletUnreadableCellNote("冻结额", r.FrozenRaw, r.FrozenErr))
+		}
+		if len(cells) == 0 {
+			continue
+		}
+		if len(parts) >= maxUnreadableInReport {
+			hidden++
+			continue
+		}
+		// 名字点一次就够了（用户名与 ID 是同一个身份，见 docs/cli-output.md）。
+		// 用户名那一栏来自 users 表，理论上取不到（钱包那一行有外键指着它），
+		// 真取不到时退回 ID，别把这一行说成「用户 」。
+		who := r.Username
+		if who == "" {
+			who = strconv.FormatInt(r.UserID, 10)
+		}
+		parts = append(parts, fmt.Sprintf("用户 %s 的 %s 钱包：%s",
+			who, r.Asset, strings.Join(cells, "；")))
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	msg := strings.Join(parts, "；")
+	if hidden > 0 {
+		msg += fmt.Sprintf("（另有 %d 行同样读不出来）", hidden)
+	}
+	return errors.New(msg)
 }
 
 // runWalletList 列出钱包与余额快照。
@@ -926,20 +1044,42 @@ func runWalletList(args []string) error {
 		rows := make([]walletRow, 0, len(snapshots))
 		for _, w := range snapshots {
 			rows = append(rows, walletRow{
-				UserID:   w.UserID,
-				Username: names[w.UserID],
-				Asset:    w.Asset,
-				Balance:  w.Balance,
-				Frozen:   w.Frozen,
+				UserID:     w.UserID,
+				Username:   names[w.UserID],
+				Asset:      w.Asset,
+				Balance:    w.Balance,
+				Frozen:     w.Frozen,
+				BalanceErr: w.BalanceErr,
+				FrozenErr:  w.FrozenErr,
+				BalanceRaw: w.BalanceRaw,
+				FrozenRaw:  w.FrozenRaw,
 			})
+		}
+
+		// 有格子读不出来时退出 1，但清单本身照打（见下面那段）。store 那一侧
+		// 不再为一行坏数据整批失败，所以这个判断落在命令行上。
+		cause := walletUnreadableCause(rows)
+
+		// 带 --user 时口径与从前一样：一个字都不打，直接失败。窄查询问的就是
+		// 那一格的余额，答不上来就是没答上来，没有「其余照打」可言——只有一行，
+		// 打出来的仍然是「有一个数你不知道是多少」。
+		//
+		// 不带 --user 时**反过来**：那一屏回答的是「现在有哪些钱包」，一格坏掉
+		// 不该把其余几十行一起收走——调用方连「是哪一行的问题」都看不出来，
+		// 也绕不过去（只能一条一条 --user 试，而那一条恰好也是失败）。
+		// 两条路差在这里，是因为它们回答的不是同一个问题（见 #777）。
+		if userID != nil && cause != nil {
+			return cause
 		}
 
 		// JSON 是另一条渲染路径，不是把上面那张表转成 JSON（见 format.go 开头）。
 		if jsonOutput() {
-			return emitJSON(os.Stdout, walletListDoc(rows), nil)
+			return emitJSON(os.Stdout, walletListDoc(rows, cause), cause)
 		}
 		printWalletList(humanStdout(), rows)
-		return nil
+		// 清单已经打下去了，这一句只定退出码。main 把那句话原样打到 stderr，
+		// stdout 上仍然是完整的一份清单。
+		return cause
 	})
 }
 
@@ -966,6 +1106,10 @@ func userNames(ctx context.Context, store *auth.Store) (map[int64]string, error)
 // 用户 ID 与用户名各占一栏：ID 是别的命令要接过去的那个值
 // （`ledger balance --account user:<ID>`），所以它得在清单里看得见，而不是
 // 要人再回头去 user list 里查一次。
+//
+// 有一格读不出来时**照样把整张表打完**：那一格打标记，其余照打。清单的用处正在于
+// 「一次看全」，而退出码与那句错误由调用方（runWalletList）定——它才看得见
+// `--user` 给没给。见那里的「两条路差在这里」。
 func printWalletList(w io.Writer, rows []walletRow) {
 	if len(rows) == 0 {
 		_, _ = fmt.Fprintln(w, emptyListNote("钱包", "wallet create"))
@@ -979,7 +1123,8 @@ func printWalletList(w io.Writer, rows []walletRow) {
 	for _, r := range rows {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
 			p.bold(strconv.FormatInt(r.UserID, 10)), p.bold(r.Username),
-			string(r.Asset), r.Balance.String(), r.Frozen.String())
+			string(r.Asset),
+			walletCell(r.Balance, r.BalanceErr), walletCell(r.Frozen, r.FrozenErr))
 	}
 	_ = tw.Flush()
 }
@@ -989,20 +1134,49 @@ func printWalletList(w io.Writer, rows []walletRow) {
 // 与 printWalletList 是同一份数据的另一条渲染路径：那一档把金额按定点小数打给
 // 人看，这一档打**字符串**——金额过一遍 float64 会丢精度（见 format.go 的
 // jsonAmount）。
-func walletListDoc(rows []walletRow) map[string]any {
-	doc := jsonDoc(jsonOK)
-	doc["summary"] = map[string]any{"total": len(rows)}
+//
+// 一格里读不出来的金额打 **null**，不打表格那个标记：占位符进 JSON 会让按金额
+// 解析它的一方拿到一个解析不了的值（见 docs/cli-output.md 的「值的约定」）。
+// 同一行再给一个 `unreadable` 列出是哪几栏——单看 null 分不出「这一栏没有值」
+// 与「这一栏的值读不出来」，而钱包行这两栏本来是非空列，null 只可能是后者；
+// 把它写明，读的一方就不必知道那条列约束才判得出。库里的原文不在这一档里：
+// 它与原因一起在那句 cause 上，两种格式下都经 main 打到 stderr。
+//
+// cause 一并传进来，而不是在这里重新数一遍哪几行有问题：报告里的状态与退出码
+// 必须是同一个判断的两面，两处各数一遍迟早分叉（见 doctor 的同一处提醒）。
+func walletListDoc(rows []walletRow, cause error) map[string]any {
+	status := jsonOK
+	if cause != nil {
+		status = jsonFailed
+	}
+	doc := jsonDoc(status)
 
+	unreadableRows := 0
 	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
+		cells := make([]string, 0, 2)
+		if r.BalanceErr != nil {
+			cells = append(cells, "balance")
+		}
+		if r.FrozenErr != nil {
+			cells = append(cells, "frozen")
+		}
+		if len(cells) > 0 {
+			unreadableRows++
+		}
 		entries = append(entries, map[string]any{
-			"user_id":  r.UserID,
-			"username": nullableString(r.Username),
-			"asset":    string(r.Asset),
-			"balance":  jsonAmount(r.Balance),
-			"frozen":   jsonAmount(r.Frozen),
+			"user_id":    r.UserID,
+			"username":   nullableString(r.Username),
+			"asset":      string(r.Asset),
+			"balance":    walletAmountJSON(r.Balance, r.BalanceErr),
+			"frozen":     walletAmountJSON(r.Frozen, r.FrozenErr),
+			"unreadable": cells,
 		})
+	}
+	doc["summary"] = map[string]any{
+		"total":           len(rows),
+		"unreadable_rows": unreadableRows,
 	}
 	doc["wallets"] = entries
 	return doc
