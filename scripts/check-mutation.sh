@@ -376,8 +376,49 @@ if [ ${#unmatched_filters[@]} -gt 0 ]; then
   echo "   这一轮没跑，所以整轮判为失败。"
 fi
 
-printf '%-20s %8s %7s %8s  %s\n' "包" "killed" "存活" "超时" "efficacy"
-printf '%s\n' "──────────────────────────────────────────────────────────────"
+# ── 清单里父子两条同时在选中范围内时，要说出来 ─────────────────────────────
+#
+# 包路径是**递归**的：`./internal/ledger/` 会把子包 internal/ledger/store 一起
+# 变异（实测：那一轮的输出里能读到 `store/reconcile.go:行:列` 这样的位置）。
+# 而 PKGS 里 internal/ledger 与 internal/ledger/store 两条都在，internal/billing
+# 与 internal/billing/expr 也一样——于是子包的变异体在两条命令里各跑一次，
+# 汇总表上那两行也不再是互不相干的两个包：左边那一行要读作「含右边」。
+#
+# 这件事**从 PKGS 算出来，不写死**：写死一份「哪个包含哪个子包」的表，就是
+# 这份清单的第二份，两者开始分岔的那天没人知道哪一份算数。只在这一对都选中时
+# 才说——只选了其中一个时，没有重叠可言。
+overlap_pairs=()
+for a in "${PKGS[@]}"; do
+  selected "$a" || continue
+  for b in "${PKGS[@]}"; do
+    [ "$a" = "$b" ] && continue
+    selected "$b" || continue
+    case "$b" in "$a"/*) overlap_pairs+=("$a $b") ;; esac
+  done
+done
+if [ ${#overlap_pairs[@]} -gt 0 ]; then
+  echo "注：下面这些行的范围是重叠的——包路径递归，左边那条命令会把右边那个包的"
+  echo "    变异体一起跑，于是它在表上各算一次，左边那一行读作「含右边」："
+  for pair in "${overlap_pairs[@]}"; do
+    echo "      ${pair%% *} 含 ${pair#* }"
+  done
+  echo
+fi
+
+# 表里要带上「有多少变异体根本没被测到」这两栏（#769）。
+#
+# gremlins 自己打了 `Not covered` 与 `Mutator coverage`，以前只抄了四个数。
+# 而只打 efficacy 时，**「大部分变异体没有任何用例碰到」与「真被钉住」在表上
+# 长得一模一样**：internal/keyquota 刚进清单那一轮是 Killed 2 / Lived 0 /
+# Not covered 6，efficacy 100.00%，Mutator coverage 只有 25.00%——那个 100%
+# 说的是「`over()` 的两个变异体被杀掉了」，不是「这一包被钉住了」。
+# 它与 LESSONS 第 16 条同类：`Not covered` 与 `Lived` 都不出现在表上，
+# 而处置完全相反（前者要补测试，后者要判等价）。
+#
+# 两栏都照实打、都不进退出码：判据仍然只看存活与超时。
+printf '%-20s %7s %6s %7s %12s %17s  %s\n' \
+  "包" "killed" "存活" "超时" "Not covered" "Mutator coverage" "efficacy"
+printf '%s\n' "─────────────────────────────────────────────────────────────────────────────────"
 
 # 存活清单。docs/development.md 要求「对存活的变异逐个判断」，而只打一个计数时
 # 那句话没法执行：数得出来，看不了。所以每个包一跑完就把它的存活行抄下来，
@@ -391,19 +432,32 @@ for pkg in "${PKGS[@]}"; do
   selected "$pkg" || continue
   checked=$((checked + 1))
 
-  # 这里**不传** --coverpkg：让它用默认范围（整个模块的测试集）。
+  # 这里**不传** --coverpkg、也不传 --integration：用默认调用。
   #
-  # 曾经想过收紧成 --coverpkg=./<pkg>/ 来「固定范围」，那是错的方向。
-  # 默认范围下 internal/ledger 有 143 个变异体可被测到，收窄后只剩 101 个——
-  # 收窄是把「被别的包测试覆盖到」的那部分白白丢掉，数字看着稳了，信息量少了。
+  # 默认口径是**被测包自己的测试**。实测（internal/keyquota，workers=1、系数 10、
+  # --invert-logical，库建好并迁移过、DSN 有效，8 个变异体）：
   #
-  # 真正让范围漂移的是 LARKAX_DB_DSN：它不在时 internal/ledger/store 整包
-  # t.Skip，于是 ledger 的可测变异体从 143 掉到 101。所以上面把 DSN 变成了
-  # 硬前提，而不是在这里收窄范围。
+  #   默认                            gathering   219ms   Killed 2 / Not covered 6   25.00%
+  #   --coverpkg=./...                gathering   269ms   Killed 2 / Not covered 6   25.00%
+  #   --integration                   gathering 34.16s   Killed 2 / Not covered 6   25.00%
+  #   --integration --coverpkg=./...  gathering 37.85s   Killed 8 / Not covered 0  100.00%
   #
-  # 实测（ledger）：有 DSN 时 132/11/27（可测 143），无 DSN 时 94/7/69（可测 101）。
-  # 注意两个百分比别混：Test efficacy 是 92.31% 与 93.07%（几乎不变），
-  # 差得多的是 Mutator coverage，84.12% 与 59.41%。
+  # **两个一起**才把别的包贡献的覆盖算进来（最后一列是 Mutator coverage）。
+  # 那 6 条守卫（Spent 与 CheckInTx 里的 `err != nil`）整个测试集**确实执行得到**：
+  # `go test -coverpkg=./internal/keyquota/ ./...` 给出 Spent 71.4%、CheckInTx 68.8%，
+  # 而这个包自己的测试只有 3.3%——而 `--integration` 单独跑一轮，gathering 从
+  # 219ms 涨到 34.16s（范围确实宽了）却一个都没多测到。
+  #
+  # 那条路仍然走不得：每个变异体跑一遍整个测试集，本仓一套上百个变异体。
+  # 这一条要解决的不是「范围窄」，而是**范围窄这件事在表上看不出来**——所以汇总表
+  # 连 Not covered 与 Mutator coverage 一起打（见上面表头那段），判据不变。
+  #
+  # **包路径是递归的**：`./internal/ledger/` 会把子包 internal/ledger/store 一起
+  # 变异（实测：那一轮的输出里能读到 `store/reconcile.go:行:列` 这样的位置）。
+  # 于是 LARKAX_DB_DSN 这个硬前提仍然成立——它不在时 internal/ledger/store 整包
+  # t.Skip，而递归口径下 store 那部分变异体全落进 Not covered，internal/ledger
+  # 那一行的数也跟着变（实测：92 → 376，涨的全在 store/ 下）。**那两个包在 PKGS
+  # 里各占一行、范围互相重叠**，脚本在这一对都选中时会自己说出来（见上面那段注）。
   # 开关都在 GREMLINS_ARGS 里拼好了（--invert-logical 是显式打开的，默认关，
   # 理由见文件开头：不开的话 `a || b` 这类判据一个变异体都不生成，而「没生成」
   # 与「生成了且被杀死」在分数上分不出来）。这里不再单独写一遍开关，
@@ -420,19 +474,26 @@ for pkg in "${PKGS[@]}"; do
   killed=$(printf '%s\n' "$out" | sed -n 's/^Killed: \([0-9]*\).*/\1/p')
   lived=$(printf '%s\n' "$out" | sed -n 's/^.*Lived: \([0-9]*\).*/\1/p')
   timed=$(printf '%s\n' "$out" | sed -n 's/^.*Timed out: \([0-9]*\).*/\1/p')
+  notcov=$(printf '%s\n' "$out" | sed -n 's/^.*Not covered: \([0-9]*\).*/\1/p')
   eff=$(printf '%s\n' "$out" | sed -n 's/^Test efficacy: \(.*\)$/\1/p')
+  mutcov=$(printf '%s\n' "$out" | sed -n 's/^Mutator coverage: \(.*\)$/\1/p')
 
   # 一行都认不出来，说明 gremlins 的输出格式变了（升级、换了实现）。
-  # 这时脚本什么都没在判断，而「什么都没判断」绝不能被当成「都没问题」。
-  if [ -z "$killed" ] || [ -z "$lived" ] || [ -z "$timed" ] || [ -z "$eff" ]; then
-    echo "⚠ $pkg: 认不出 gremlins 的输出——没有 Killed / Lived / Timed out / Test efficacy 这几行。"
-    echo "   格式变了，脚本没在判断任何东西，这不是「通过」。下面是它实际打出来的："
+  # 这时脚本没法判断的东西与表上读不出来的格子，都绝不能被当成「都没问题」。
+  #
+  # Not covered 与 Mutator coverage 也在这一组里：它们上了表，读不出来时
+  # 表上就会留两个空格子，而那看起来像「这两个数不存在」，不像「没读到」。
+  if [ -z "$killed" ] || [ -z "$lived" ] || [ -z "$timed" ] || [ -z "$eff" ] ||
+    [ -z "$notcov" ] || [ -z "$mutcov" ]; then
+    echo "⚠ $pkg: 认不出 gremlins 的输出——没有 Killed / Lived / Timed out / Not covered / Test efficacy / Mutator coverage 这几行。"
+    echo "   格式变了，这一轮的数读不全，这不是「通过」。下面是它实际打出来的："
     printf '%s\n' "$out" | tail -5 | sed 's/^/   /'
     failed=1
     continue
   fi
 
-  printf '%-20s %8s %7s %8s  %s\n' "$pkg" "$killed" "$lived" "$timed" "$eff"
+  printf '%-20s %7s %6s %7s %12s %17s  %s\n' \
+    "$pkg" "$killed" "$lived" "$timed" "$notcov" "$mutcov" "$eff"
 
   # gremlins 每测一个变异就打一行 `LIVED <类型> at <文件>:<行>:<列>`
   # （前面可能带缩进），把它抄下来。**不解析 JSON**：那要再引一个解析器，
