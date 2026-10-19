@@ -122,6 +122,64 @@ type RuleCandidate struct {
 // 前者是配置缺失（该拒绝服务并告警），后者是规则本身有问题。
 var ErrNoRule = errors.New("没有匹配的计价规则")
 
+// CostSource 提供一次请求适用的上游成本规则。
+//
+// 与 RuleSource 分开，而不是给它加两个方法：成本规则只在结算时问一次，
+// 问的是「这条渠道上这个模型的上游单价是多少」；它不参与预留（上游成本
+// 不进任何金额的上界），也就没有「每个候选各一条」那个阶段。
+//
+// 方法名是 MatchCost 而不是 Match：pricing 的 CostSource 已经用 Match
+// 提供了「问某一次请求按哪条成本规则算」这个形状（命令行的 explain 用），
+// 两个签名不同，同一个类型无法同时满足。结算要的那一份多带一个版本号，
+// 用来做编译缓存的键。
+type CostSource interface {
+	// MatchCost 返回这条渠道这个模型此刻适用的成本规则。
+	//
+	// 没有规则时返回 ErrNoCostRule——**不要返回一条零成本的兜底规则**：
+	// 那会让「没配成本价」表现为「上游不要钱」，而毛利会因此虚高。
+	MatchCost(ctx context.Context, q CostQuery) (CostRule, error)
+}
+
+// CostQuery 是「这条渠道这个模型的上游成本按哪条规则算」这一次提问。
+type CostQuery struct {
+	// ChannelID 是这次请求实际落到的渠道。成本规则按渠道挂，所以它没有
+	// 「未选定」（0）这一档。
+	ChannelID int64
+	// CanonicalModel 是规范模型名。与售价规则同一套键。
+	CanonicalModel string
+	// At 是匹配用的时刻，取受理时刻：生效窗口按它判，与这次计费用的是
+	// 同一个时刻（见 Settle）。
+	At time.Time
+}
+
+// CostRule 是一条待求值的上游成本规则。
+type CostRule struct {
+	ID int64
+	// Source 是表达式源码。成本与售价用同一个表达式方言，只是它写的是
+	// 「我们付给上游多少」。
+	Source string
+	// Version 是用于编译缓存的版本号。upstream_costs 没有版本列，这个值
+	// 由来源按表达式算出来（与售价侧的 pricing.Source 同一个做法）。
+	Version int64
+}
+
+// CacheKey 是这条成本规则在编译缓存里的键。
+//
+// 带 cost: 前缀：成本规则与售价规则是两张表，id 各自从 1 开始，裸的
+// 「id:version」会让两条不相干的规则撞同一个键，而症状是**用另一条规则的
+// 表达式算成本**——算得出数来，只是数不对。
+func (r CostRule) CacheKey() string {
+	return fmt.Sprintf("cost:%d:%d", r.ID, r.Version)
+}
+
+// ErrNoCostRule 表示这条渠道这个模型没有生效的成本规则。
+//
+// 与 ErrNoRule 分开：那一条在请求路径上是拒绝服务（没配价就不能算钱），
+// 而成本这一侧不参与任何拒绝。上游成本是观测值：算不出来时结算照走，
+// 只是这一列留 NULL（见 Charge.UpstreamCost）。所以拿着这个错误的调用方
+// 该做的是「记下没有成本数据」，不是把请求打回去。
+var ErrNoCostRule = errors.New("没有生效的成本规则")
+
 // Pipeline 是完整的计费流程。
 //
 // 它由 gateway **单实例并发共用**，所以 Reserve 与 Settle 会同时在多个
@@ -129,6 +187,13 @@ var ErrNoRule = errors.New("没有匹配的计价规则")
 // 装配发生在任何请求之前。
 type Pipeline struct {
 	Rules RuleSource
+	// Costs 是上游成本规则的来源。
+	//
+	// 与 Rules 分开：它只在结算时被问一次，且算不出来不影响任何金额。
+	// 为 nil 时结算不写成本（落库层写 NULL）——这只对**直接构造 Pipeline 的
+	// 测试**有意义：生产装配必须接上，assembly.Config 的 validate 会拒绝 nil
+	// （不接的表现是成本这一维永远没有数据，而路由照样排得出来）。
+	Costs CostSource
 	// Programs 是规则表达式的编译缓存。
 	//
 	// 不给时由 programs 兜底建一个（容量 defaultCacheSize）。要换容量
@@ -381,17 +446,6 @@ type Outcome struct {
 	// 因为「这笔钱是按估的收的」是需要能被事后看出来的。
 	UsageSource tokens.Source
 
-	// UpstreamCost 是上游侧的成本，供对账。
-	//
-	// **今天没有来源。** 口径还没定——是让适配器按自己的计价口径算，还是从
-	// 上游响应的用量字段折算——所以全仓库没有一处给它赋值：结算只构造
-	// 「用户被扣了多少」这一侧（见 entries），上游成本与商家分成那一半留给
-	// 另一个环节。落库层因此把对应的那一列写成 NULL（见 internal/ledger/store
-	// 的 upstream_cost 那一节）。
-	//
-	// 别拿这次收的钱顶上：那是售价，混起来毛利永远是零，而账目仍然是平的。
-	UpstreamCost money.Amount
-
 	// Duration 是这次上游调用**实际花了多久**，只用于统计，不参与金额计算。
 	//
 	// 它由网关量：非流式取最后一次尝试的耗时（route.Attempt.Duration），
@@ -526,6 +580,19 @@ type Charge struct {
 	// ——「写了 0」（这一项免费）与「没写」（规则漏了）在 money.Amount 上分不
 	// 出来，详见 insertUsageEventSQL 里 unit_prices 那一节。
 	Prices billing.Prices
+
+	// UpstreamCost 是这次请求在**上游一侧**的成本，由 Settle 按成本规则
+	// （upstream_costs）算出：用这条渠道上这个模型适用的表达式求值，
+	// 再按这次的实际用量乘出来。
+	//
+	// 它是「我们付给上游多少」，不是售价——售价在 Settlement.Actual 里。
+	// 两者混起来毛利永远是零，而账目仍然是平的。
+	//
+	// nil 表示**算不出来**，落库层据此写 NULL：没有生效的成本规则是正常
+	// 状态；规则存在却编译不过、求值失败或覆盖不了这次用量时另外写一条
+	// 告警。**不要用零值顶替 nil**——0 在库里读作「上游不要钱」，而毛利会
+	// 因此虚高，且没有任何东西会报出来。
+	UpstreamCost *money.Amount
 
 	// ClientCanceled 为 true 表示这次请求是客户端在流式响应中途断开的。
 	//
@@ -949,6 +1016,12 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 		return nil, fmt.Errorf("结算失败: %w", err)
 	}
 
+	// 上游成本与这笔售价是两件事：它由另一条规则线（upstream_costs）算出，
+	// 而且**算不出来不影响这次结算**——那是一次观测缺口，不是计费错误。
+	// 求值时刻与售价那一侧相同（val.At，也就是受理时刻），于是同一个请求
+	// 的售价与成本问的是同一刻的档位。
+	upstreamCost := p.upstreamCost(ctx, req, usage, val.At)
+
 	entries, err := p.entries(req, val, settlement)
 	if err != nil {
 		return nil, err
@@ -997,7 +1070,10 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 		// 来源。取 val.Prices（这次结算**按哪一组价**算的），不取
 		// settlement.Breakdown：后者是金额（单价 × 用量），撞上界时还留着
 		// 截之前的值。理由与边界见 Charge.Prices 的注释。
-		Prices:         val.Prices,
+		Prices: val.Prices,
+		// 上游成本另算一次，是 usage_events.upstream_cost 唯一的来源。
+		// nil 表示算不出来（没有规则，或规则坏了），落库层写 NULL。
+		UpstreamCost:   upstreamCost,
 		ClientCanceled: out.ClientCanceled,
 		// 上游侧的依据原样带过去，落库层照着写 billing_requests 那两列。
 		// 已计费的行上它只可能是截断那一种——取舍在网关那一侧做，见
@@ -1016,6 +1092,77 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 		// 是 nil，落库层写 NULL——理由见 Charge.LocalTime。
 		LocalTime: val.LocalTime,
 	}, nil
+}
+
+// upstreamCost 算这次请求在上游一侧的成本，算不出来时返回 nil。
+//
+// # 算不出来不影响结算
+//
+// 成本是**观测值**，不是收费依据：算不出来时这次请求照常结算，只是
+// usage_events.upstream_cost 留 NULL。这不是兜底，而是两类「没有数」的
+// 明确区分——NULL 读作「不知道」，0 读作「上游不要钱」。用 0 顶替会让
+// 毛利虚高，而账面仍然是平的，事后看不出来。
+//
+// # 两种来路的处置不同
+//
+//   - 没有生效的成本规则：正常的配置状态（多数渠道不配成本价），静默留 NULL。
+//   - 规则存在却算不出来：编译不过、求值失败、或者规则漏了这次用量的某个
+//     单价（billing.ValidateCharges 会拒）。写一条告警——否则它在库里与
+//     「没配」长得一模一样，而配了规则正是有人要看见它的信号。
+//
+// 与售价那一侧共用同一个表达式方言、同一个编译缓存与同一份用量口径：
+// 成本规则写的也是「一组单价（可含一次性费用）」，由这里乘实际用量。
+func (p *Pipeline) upstreamCost(ctx context.Context, req Request, usage billing.Usage, at time.Time) *money.Amount {
+	if p.Costs == nil {
+		return nil
+	}
+
+	rule, err := p.Costs.MatchCost(ctx, CostQuery{
+		ChannelID:      req.ChannelID,
+		CanonicalModel: req.CanonicalModel,
+		At:             at,
+	})
+	if errors.Is(err, ErrNoCostRule) {
+		return nil
+	}
+	if err != nil {
+		p.warnCost(ctx, req, CostRule{}, err)
+		return nil
+	}
+
+	program, err := p.programs().Get(rule.CacheKey(), rule.Source)
+	if err != nil {
+		p.warnCost(ctx, req, rule, fmt.Errorf("%w: 规则 %d 无法编译: %w", ErrRuleBroken, rule.ID, err))
+		return nil
+	}
+	val, err := program.Eval(p.env(usage, at))
+	if err != nil {
+		p.warnCost(ctx, req, rule, fmt.Errorf("%w: %w", ErrRuleBroken, err))
+		return nil
+	}
+
+	// 与售价那一侧同一条校验：用量里有、规则却没给价的那一项，乘出来是 0，
+	// 成本因此被低估。那是一个「算得出来但算得不对」的数，比 NULL 更坏。
+	if err := billing.ValidateCharges(usage, val.Prices, val.Charges); err != nil {
+		p.warnCost(ctx, req, rule, err)
+		return nil
+	}
+
+	total := billing.ComputeWithCharges(usage, val.Prices, val.Charges).Total
+	return &total
+}
+
+// warnCost 把一次「配了成本规则却算不出来」报出来。
+//
+// 不报「没有规则」那一档：那是最常见也最正常的状态，逐请求打一条会把日志
+// 淹没，而真正需要看见的那几条反而找不到了。
+func (p *Pipeline) warnCost(ctx context.Context, req Request, rule CostRule, err error) {
+	observe.FromContext(ctx).Warn("上游成本算不出来，这次记 NULL",
+		"channel_id", req.ChannelID,
+		"canonical_model", req.CanonicalModel,
+		"cost_rule_id", rule.ID,
+		"err", err,
+	)
 }
 
 // env 构造求值环境。

@@ -210,11 +210,12 @@ func TestSaveWritesUsageEvent(t *testing.T) {
 	}
 
 	// 下面这几列在这个夹具上应当是 NULL，理由各自写在 insertUsageEvent 上：
-	// 这个夹具的 Charge 没带当地口径（LocalTime 为 nil），上游成本的口径也还
-	// 没定（issue #163 的第 2 条）。断言 NULL 是为了让「拿零值顶上」这种改法
-	// 必须显式改这一处——那种值在库里长得像「求值算出来就是当地 0 点、
-	// 不是休息日」，而它照样算得出数来。当地口径**有值**的那一支由
-	// TestSaveWritesLocalBasis 钉住。
+	// 这个夹具的 Charge 没带当地口径（LocalTime 为 nil），也没带上游成本
+	// （UpstreamCost 为 nil，表示结算那一侧算不出来）。断言 NULL 是为了让
+	// 「拿零值顶上」这种改法必须显式改这一处——那种值在库里长得像「求值
+	// 算出来就是当地 0 点、不是休息日」或「上游不要钱」，而它照样算得出
+	// 数来。有值的那两支分别由 TestSaveWritesLocalBasis 与
+	// TestSaveWritesUpstreamCost 钉住。
 	for _, tc := range []struct {
 		column string
 		isNull bool
@@ -297,6 +298,59 @@ func TestSaveWritesUsageEventDuration(t *testing.T) {
 			got := usageEventOf(ctx, t, db, requestID).DurationMS
 			if got != tc.want {
 				t.Errorf("duration_ms = %+v，期望 %+v（输入 %s）", got, tc.want, tc.in)
+			}
+		})
+	}
+}
+
+// upstream_cost 落的是「我们付给上游多少」，nil 落 NULL。
+//
+// 这一列与 cost（售价）是两件事，混起来毛利永远是零。零值与 nil 也是两件事：
+// 0 是「上游不要钱」，NULL 是「算不出来」——用 0 顶替 NULL 会让成本那一维
+// 把每个没配规则的渠道当成免费。
+func TestSaveWritesUpstreamCost(t *testing.T) {
+	// 指针是调用方表达「算得出来」的唯一手段，所以这里直接按指针造。
+	zero, positive := money.Zero, money.MustParse("0.0042")
+	cases := []struct {
+		name string
+		in   *money.Amount
+		want sql.NullString
+	}{
+		{"算不出来写 NULL", nil, sql.NullString{}},
+		{"规则算出 0 写 0", &zero, sql.NullString{String: "0.00000000", Valid: true}},
+		{"有成本写金额", &positive, sql.NullString{String: "0.00420000", Valid: true}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testDB(t)
+			s := New(db)
+			ctx := context.Background()
+
+			userID := seed(t, db, "100")
+			channelID := seedChannel(t, ctx, db)
+			requestID := reqID(t)
+
+			req := testRequest(ctx, t, db, userID, requestID)
+			billID, reserveErr := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "30", "CNY"))
+			if reserveErr != nil {
+				t.Fatal(reserveErr)
+			}
+
+			settleReq := req
+			settleReq.ChannelID = channelID
+
+			charge := billedCharge(t, userID, requestID, billID, "12",
+				tokens.SourceMeasured, time.Date(2026, 10, 17, 9, 30, 0, 0, time.UTC))
+			charge.UpstreamCost = tc.in
+
+			if err := s.Save(ctx, settleReq, charge); err != nil {
+				t.Fatalf("结算失败: %v", err)
+			}
+
+			got := usageEventOf(ctx, t, db, requestID).UpstreamCost
+			if got != tc.want {
+				t.Errorf("upstream_cost = %+v，期望 %+v", got, tc.want)
 			}
 		})
 	}

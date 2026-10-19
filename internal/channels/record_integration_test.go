@@ -84,17 +84,42 @@ func readRollupSignals(t *testing.T, db *sql.DB, channelID int64, bucket time.Ti
 func insertUsageEvent(t *testing.T, db *sql.DB, channelID int64, at time.Time,
 	prompt, cacheRead, cacheWrite int64, durationMS any) {
 	t.Helper()
+	insertUsageEventWithCost(t, db, channelID, at, prompt, cacheRead, cacheWrite, durationMS, nil)
+}
+
+// insertUsageEventWithCost 与 insertUsageEvent 相同，另给一列上游成本。
+//
+// cost 传 nil 落成 NULL（「这个桶里没有成本数据」），传字符串落成那个金额。
+// 单独一个入口而不是改上面那个的签名：绝大多数用例与成本无关，让它们
+// 逐个写一个 nil 只会把「这次在测什么」埋掉。
+func insertUsageEventWithCost(t *testing.T, db *sql.DB, channelID int64, at time.Time,
+	prompt, cacheRead, cacheWrite int64, durationMS, cost any) {
+	t.Helper()
 	_, err := db.ExecContext(context.Background(), `
 		INSERT INTO usage_events
 			(request_id, user_id, channel_id, canonical_model, prompt_tokens,
 			 cache_read_tokens, cache_write_tokens, billing_path, cost,
-			 priced_at, duration_ms, created_at)
-		VALUES ($1, $2, $3, 'gpt-4o', $4, $5, $6, 'measured', 0, $7, $8, $9)`,
+			 upstream_cost, priced_at, duration_ms, created_at)
+		VALUES ($1, $2, $3, 'gpt-4o', $4, $5, $6, 'measured', 0, $7, $8, $9, $10)`,
 		"req-"+itoa(nextID()), nextID(), channelID,
-		prompt, cacheRead, cacheWrite, at, durationMS, at)
+		prompt, cacheRead, cacheWrite, cost, at, durationMS, at)
 	if err != nil {
 		t.Fatalf("插入用量事件失败: %v", err)
 	}
+}
+
+// readRollupCost 读回某个小时桶的成本合计。NULL 表示桶里没有带成本的事件。
+func readRollupCost(t *testing.T, db *sql.DB, channelID int64, bucket time.Time) sql.NullString {
+	t.Helper()
+	var cost sql.NullString
+	err := db.QueryRowContext(context.Background(), `
+		SELECT cost FROM channel_health_rollup
+		 WHERE channel_id = $1 AND bucket = $2`,
+		channelID, bucket).Scan(&cost)
+	if err != nil {
+		t.Fatalf("读健康度桶的成本失败: %v", err)
+	}
+	return cost
 }
 
 // ── 连续失败 ────────────────────────────────────────────────────────────
@@ -356,6 +381,117 @@ func TestRecordCallAggregatesCacheFromUsageEvents(t *testing.T) {
 	}
 	if got[0].SampleCount != 1500 {
 		t.Errorf("SampleCount = %d，期望 1500（样本数是 token 数，不是请求数）", got[0].SampleCount)
+	}
+}
+
+// 桶里的成本是 usage_events.upstream_cost 的合计，且读侧按请求数摊成单价。
+//
+// # 为什么两段一起钉
+//
+// 写入侧改对了、读侧没跟着生效的话，成本这一维仍然不参与排序，而两边各自的
+// 用例都能是绿的。这里把「写进去多少」与「读侧看到多少」放在同一条用例里。
+//
+// 部分事件没有成本时 SUM 只加有值的那些——这是单列能表达的最小单位，
+// 下面那条用例把「一条都没有」单独钉住。
+func TestRecordCallAggregatesCostFromUsageEvents(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
+	r := NewRecorder(db, testStaleAfter)
+
+	at := time.Now().UTC().Truncate(time.Hour).Add(10 * time.Minute)
+	bucket := at.Truncate(time.Hour)
+
+	insertUsageEventWithCost(t, db, id, at, 300, 0, 0, 120, "0.00100000")
+	insertUsageEventWithCost(t, db, id, at.Add(time.Minute), 300, 0, 0, 80, "0.00250000")
+	// 这一条没有成本：SUM 忽略 NULL，不会把它当成 0 加进去，也不会让整列变 NULL。
+	insertUsageEvent(t, db, id, at.Add(2*time.Minute), 300, 0, 0, 90)
+
+	// 记两次调用，桶里的 requests 因此是 2——读侧摊出来的单价与桶的合计
+	// 不相等，才能证明「总数被除过」，而不是把合计原样当单价。
+	for i := range 2 {
+		if err := r.RecordCall(context.Background(), outcome(id, at.Add(time.Duration(3+i)*time.Minute), route.VerdictSuccess)); err != nil {
+			t.Fatalf("记录失败: %v", err)
+		}
+	}
+
+	got := readRollupCost(t, db, id, bucket)
+	if !got.Valid {
+		t.Fatal("桶里的成本是 NULL，期望有值（两条事件带成本）")
+	}
+	if got.String != "0.00350000" {
+		t.Errorf("桶里的成本 = %s，期望 0.0035（0.001 + 0.0025）", got.String)
+	}
+
+	// 读侧：每次请求摊到的成本 = 桶内合计 / 请求数 = 0.0035 / 2。
+	cands, err := New(db, sealer).Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("候选数 = %d，期望 1", len(cands))
+	}
+	if cands[0].CostPerUnit == nil {
+		t.Fatal("有成本数据时 CostPerUnit 不该为 nil——成本这一维会整个退出排序")
+	}
+	if *cands[0].CostPerUnit != 0.00175 {
+		t.Errorf("CostPerUnit = %v，期望 0.00175（0.0035 / 2 次请求）", *cands[0].CostPerUnit)
+	}
+}
+
+// 一条带成本的事件都没有时，桶里是 NULL 而不是 0，读侧因此判「没有数据」。
+//
+// 两种来路各钉一次：桶里有事件、但它们都没带成本；以及桶里一条事件都没有
+// （只有一次失败调用）。写 0 的话读侧会把它当成「上游不要钱」，而成本恰好
+// 为 0 的渠道拿到满分——那是最容易超支的路径。
+func TestRecordCallWithoutCostLeavesCostNull(t *testing.T) {
+	cases := []struct {
+		name string
+		// withEvent 为真时先插一条**没有成本**的用量事件。
+		withEvent bool
+	}{
+		{"有事件但都没有成本", true},
+		{"一条事件都没有", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testDB(t)
+			sealer := testSealer(t)
+			model := uniqueModel()
+			id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
+			r := NewRecorder(db, testStaleAfter)
+
+			at := time.Now().UTC().Truncate(time.Hour).Add(10 * time.Minute)
+			if tc.withEvent {
+				insertUsageEvent(t, db, id, at, 300, 0, 0, 100)
+			}
+
+			// 用失败调用：没有用量事件，于是第二种情形连桶里的行都只有计数。
+			verdict := route.VerdictSuccess
+			if !tc.withEvent {
+				verdict = route.VerdictFailure
+			}
+			if err := r.RecordCall(context.Background(), outcome(id, at.Add(time.Minute), verdict)); err != nil {
+				t.Fatalf("记录失败: %v", err)
+			}
+
+			if got := readRollupCost(t, db, id, at.Truncate(time.Hour)); got.Valid {
+				t.Errorf("桶里的成本 = %s，期望 NULL（没有一条带成本的事件）", got.String)
+			}
+
+			cands, err := New(db, sealer).Candidates(context.Background(), model)
+			if err != nil {
+				t.Fatalf("Candidates 出错: %v", err)
+			}
+			if len(cands) != 1 {
+				t.Fatalf("候选数 = %d，期望 1", len(cands))
+			}
+			if cands[0].CostPerUnit != nil {
+				t.Errorf("没有成本数据时 CostPerUnit 应为 nil，实际 %v", *cands[0].CostPerUnit)
+			}
+		})
 	}
 }
 

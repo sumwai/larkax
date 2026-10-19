@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/billing"
+	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/tokens"
 )
@@ -64,14 +65,21 @@ var ErrUnknownUsageSource = errors.New("未知的用量来源")
 // 什么算「用到」由 expr.Result.LocalTime 定义，这里不重判一遍：两处各判一份
 // 的表现是「求值说用了、落库说没用」这种谁也看不出错的组合。
 //
-// # upstream_cost 为什么不写
+// # upstream_cost 写什么
 //
-// 上游成本的**口径还没定**（适配器按自己的计价口径算，还是从上游响应的用量
-// 字段折算），而填一个猜出来的数比不填更糟——见 issue #163 的第 2 条。
-// 这一列留给那一半：**今天全仓库没有任何写入点**，
-// pipeline.Outcome.UpstreamCost 也还没有生产者（它那处注释同样标了「没有来源」）。
+// 写这次请求**在上游一侧**的成本：结算时按（渠道，规范模型）选一条成本规则
+// （upstream_costs），用这条渠道的表达式求值再乘实际用量（见 pipeline 的
+// upstreamCost）。它是「我们付给上游多少」，与 cost（售价）是两列不同的事——
+// 拿售价顶上会让毛利永远是零，而账目仍然是平的。
 //
-// 尤其不能拿这次收的钱顶上：那是售价，混起来毛利永远是零。
+// nil 写 NULL，零值写 0，两者含义不同：
+//
+//   - NULL：算不出来。没有生效的成本规则是最常见的一种；规则存在却编译不过、
+//     求值失败、或者覆盖不了这次用量时，结算那一侧会另写一条告警。
+//   - 0：规则算出来确实是 0（例如它显式写了免费）。
+//
+// 用 0 顶替 NULL 会让读侧把「不知道」当成「免费」——渠道健康度的成本那一维
+// 因此给出满分，而它看起来完全正常。
 //
 // # unit_prices 写什么
 //
@@ -125,10 +133,14 @@ var ErrUnknownUsageSource = errors.New("未知的用量来源")
 // 来的分位数往下拉，而那条渠道的延迟分因此在库里读作「很快」——没有任何
 // 东西会报出来。NULL 在读侧是「没有样本」，聚合时被 FILTER 掉。
 //
-// duration_ms 是 integer 列，$19 传的是 Go 的 int64 毫秒数。这里**不加**
+// duration_ms 是 integer 列，$20 传的是 Go 的 int64 毫秒数。这里**不加**
 // 类型标注：裸 0 与 $3 那处不同——它与列宽一致（integer），而 $3 是 bigint，
 // 不加标注会被推成 int4。超过 int32 的耗时（约 24 天）会在数据库这一侧
 // 报溢出，不会静默截断。
+//
+// upstream_cost 是 numeric(20,8) 且可空，$15 传的是 money 的定点字符串或
+// nil；nil 直接落成 NULL，不加 NULLIF——「没有成本数据」在这里只有一个
+// 表示（见上面那一节）。
 //
 // local_hour / is_off_day 两列的参数位同理不加标注：小整数与布尔按列宽
 // 传过去即可，「没有值」由 Go 那一侧的 nil 表达（见下面那两个变量）。
@@ -140,12 +152,12 @@ const insertUsageEventSQL = `
 		request_id, user_id, channel_id, canonical_model,
 		prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens,
 		reasoning_tokens, unit_counts, unit_prices, billing_path, estimator,
-		cost, asset, priced_at, local_hour, is_off_day, duration_ms
+		cost, upstream_cost, asset, priced_at, local_hour, is_off_day, duration_ms
 	) VALUES (
 		$1, $2, NULLIF($3, 0::bigint), $4,
 		$5, $6, $7, $8,
 		$9, $10::jsonb, $11::jsonb, $12, NULLIF($13, ''),
-		$14::numeric, $15, $16, $17, $18, NULLIF($19, 0)
+		$14::numeric, $15, $16, $17, $18, $19, NULLIF($20, 0)
 	)`
 
 // insertUsageEvent 写一行用量事件：这次结算**按什么用量**算出来的。
@@ -214,6 +226,9 @@ func insertUsageEvent(ctx context.Context, tx *sql.Tx, req pipeline.Request, cha
 		// 时（Capped）Actual 是截住后的值，与分录里扣的钱一致——而那一档下
 		// 它与 Breakdown.Total 不相等，见 insertUsageEventSQL 的注释。
 		charge.Settlement.Actual.String(),
+		// 上游成本：nil 落成 NULL（算不出来），有值落成那条规则算出的金额。
+		// 零值与 nil 是两件事，见 Charge.UpstreamCost 与 insertUsageEventSQL。
+		upstreamCostArg(charge.UpstreamCost),
 		charge.Asset,
 		charge.PricedAt,
 		// 当地钟点与「那一天算不算休息日」：这次求值用到的两个值，
@@ -228,6 +243,17 @@ func insertUsageEvent(ctx context.Context, tx *sql.Tx, req pipeline.Request, cha
 		return constraintFailure(fmt.Errorf("写用量事件失败: %w", err))
 	}
 	return nil
+}
+
+// upstreamCostArg 把「算不出来的成本」折成 SQL 的 NULL。
+//
+// 指针是唯一的区分手段：money.Amount 的零值与「规则算出 0」在值上分不开，
+// 而这一列两者含义相反——NULL 是「不知道」，0 是「上游不要钱」。
+func upstreamCostArg(cost *money.Amount) any {
+	if cost == nil {
+		return nil
+	}
+	return cost.String()
 }
 
 // durationMS 把耗时折成 usage_events.duration_ms 的整数毫秒。

@@ -315,6 +315,9 @@ func publicHandler(ctx context.Context, cfg *config.Config, handle *sql.DB, valu
 		Version:  version,
 		Executor: executor,
 		Rules:    pricing.New(handle),
+		// 成本规则来源：结算时按（渠道，规范模型）问一次，算出的金额落进
+		// usage_events.upstream_cost，渠道健康度的成本那一维从那里汇总。
+		Costs: pricing.NewCostSource(handle),
 		// 共享计数（限流）用的 Redis。留空表示这个部署不启用它，那时限流
 		// 只在单实例下正确——装配层会打一条 warn 把这件事说出来。
 		RedisDSN: cfg.RedisDSN,

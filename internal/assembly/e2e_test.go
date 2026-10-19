@@ -197,6 +197,26 @@ func seedChannelRule(t *testing.T, db *sql.DB, channelID int64, model, expr stri
 	return id
 }
 
+// seedCostRule 插一条渠道作用域的上游成本规则。
+//
+// 成本规则只按渠道挂（见 upstream_costs），所以这里没有平台兜底的那一档。
+// `effective_from` 与 seedRule 同一个理由显式写成很早的时刻：用例注入的
+// 冻结时钟可能落在过去。
+func seedCostRule(t *testing.T, db *sql.DB, channelID int64, model, expr string) int64 {
+	t.Helper()
+
+	var id int64
+	if err := db.QueryRowContext(context.Background(), `
+		INSERT INTO upstream_costs (channel_id, model_patterns, expr, priority, effective_from)
+		VALUES ($1, to_jsonb(ARRAY[$2]::text[]), $3, 0, '1970-01-01T00:00:00Z')
+		RETURNING id`,
+		channelID, model, expr,
+	).Scan(&id); err != nil {
+		t.Fatalf("插成本规则失败: %v", err)
+	}
+	return id
+}
+
 // TestSeedRuleIsEffectiveAtAnyFrozenInstant 钉住两个 seed 帮手写进去的
 // effective_from。
 //
@@ -784,6 +804,7 @@ func newAppAt(t *testing.T, db *sql.DB, sealer *credential.Sealer, now func() ti
 		Version:  "e2e",
 		Executor: executor,
 		Rules:    pricing.New(db),
+		Costs:    pricing.NewCostSource(db),
 		Now:      now,
 	})
 	if err != nil {
@@ -905,6 +926,9 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	channelID := seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
 	// 每 token 的单价写死在规则里，于是下面的期望金额可以逐位算出来。
 	rule := seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+	// 上游成本是**另一条规则线**，单价有意与售价不同：把售价顶上去的实现
+	// 算出来的数也会「看起来正常」，只有两个数不相等才拆得穿。
+	seedCostRule(t, db, channelID, model, `{"prompt": 0.000002, "completion": 0.000004}`)
 
 	app := newApp(t, db, sealer)
 	public := httptest.NewServer(app.Public)
@@ -993,6 +1017,32 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	}
 	if !exprSnapshot.Valid || exprSnapshot.String == "" {
 		t.Error("pricing_expr_snapshot 为空——规则事后可变，账单必须留下当时的表达式")
+	}
+	// 上游成本落在用量事件上，按（渠道，规范模型）那条成本规则乘实际用量：
+	// 12 × 0.000002 + 7 × 0.000004 = 0.00005200。它与上面那个售价（0.00033）
+	// 是两列不同的事——毛利算的是两者之差，混起来永远是零。
+	var upstreamCost sql.NullString
+	if costErr := db.QueryRowContext(ctx, `
+		SELECT upstream_cost::text FROM usage_events WHERE request_id = $1`, requestID,
+	).Scan(&upstreamCost); costErr != nil {
+		t.Fatalf("查用量事件的上游成本失败: %v", costErr)
+	}
+	if !upstreamCost.Valid || !sameDecimal(upstreamCost.String, "0.000052") {
+		t.Errorf("usage_events.upstream_cost = %+v，期望 0.000052"+
+			"（12 × 0.000002 + 7 × 0.000004，不是售价 0.00033）", upstreamCost)
+	}
+	// 汇总那一半：结算写完用量事件之后，Recorder 按桶重算健康度，成本那一列
+	// 取同一个桶里 upstream_cost 之和。两半各自绿而中间那条连接断了的话，
+	// 成本这一维仍然永远没有数据——所以这里按渠道读回库里那一行。
+	var bucketCost sql.NullString
+	if costErr := db.QueryRowContext(ctx, `
+		SELECT cost::text FROM channel_health_rollup WHERE channel_id = $1`, channelID,
+	).Scan(&bucketCost); costErr != nil {
+		t.Fatalf("查渠道健康度桶的成本失败: %v", costErr)
+	}
+	if !bucketCost.Valid || !sameDecimal(bucketCost.String, "0.000052") {
+		t.Errorf("channel_health_rollup.cost = %+v，期望 0.000052"+
+			"（这个桶里只有这一次请求）", bucketCost)
 	}
 	// 三、余额：扣掉实际金额，冻结额回到零。
 	assertWallet(t, db, user, "99.99967", "0")

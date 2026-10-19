@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/sumwai/larkax/internal/pipeline"
 )
 
 // 本文件是**成本规则**那一侧：upstream_costs 表里的一行说的是「这条渠道上，
@@ -45,12 +47,11 @@ const costOrderBy = `r.channel_id ASC,
 
 // ErrNoCostRule 表示这条渠道这个模型没有生效的成本规则。
 //
-// 与 pipeline.ErrNoRule 分开：那一条在请求路径上是拒绝服务（没配价就不能算
-// 钱），而成本这一侧今天不参与任何拒绝。上游成本还没有消费方：选路那一维
-// （route.CostPerUnit）没有写入侧，读到的始终是「没有数据」，于是它连权重一起
-// 退出分母（见 route.DefaultWeights）。所以拿着这个错误的调用方该做的是「记下
-// 算不出成本」，不是把请求打回去。
-var ErrNoCostRule = errors.New("没有生效的成本规则")
+// 定义在 pipeline 那一侧（`pipeline.ErrNoCostRule`），这里只保留一个别名：
+// 「算不出成本」是消费方的结论——结算拿它决定这一列写 NULL 而不是报错——
+// 而本包只是把它作为匹配失败的一个返回值。命令行与用例沿用这个包的名字，
+// 用 errors.Is 判定时两者是同一个值。
+var ErrNoCostRule = pipeline.ErrNoCostRule
 
 // CostSource 按渠道与模型从 upstream_costs 表里选出一条成本规则。
 //
@@ -63,7 +64,17 @@ type CostSource struct {
 // NewCostSource 包装一个已打开的数据库句柄。
 func NewCostSource(db *sql.DB) *CostSource { return &CostSource{db: db} }
 
+// 编译期断言：它要满足 pipeline 对「结算时的成本规则来源」的要求。
+//
+// 与 Source 那处同一个做法（内联接口，不 import 一个别处的声明）。
+var _ interface {
+	MatchCost(context.Context, pipeline.CostQuery) (pipeline.CostRule, error)
+} = (*CostSource)(nil)
+
 // CostQuery 是「这条渠道这个模型的上游成本按哪条规则算」这一次提问。
+//
+// 这是管理面与 explain 用的形状；结算路径问的是同一个问题，但用
+// pipeline.CostQuery——那边多一个版本号，用于编译缓存（见 MatchCost）。
 type CostQuery struct {
 	// ChannelID 是这次请求落到的那条渠道。成本规则按渠道挂，所以它没有
 	// 「未选定」（0）这一档：调用方拿到渠道之后才问得出这个问题。
@@ -77,9 +88,8 @@ type CostQuery struct {
 
 // CostRule 是被选中的那条成本规则。
 //
-// 它只有 id 与表达式源码：怎么求值、求出来的数落在哪一列，是消费这一侧的事
-// （今天没有消费方，见包注释）。留 id 是为了让「按哪条算的」能被记下来，
-// 与售价侧 pipeline.Rule 的 ID 同一个用处。
+// 它只有 id 与表达式源码：这是 explain 要回答的形状（「按哪条算」）。
+// 结算路径上用的是 pipeline.CostRule，那份多带版本号供编译缓存。
 type CostRule struct {
 	ID   int64
 	Expr string
@@ -94,18 +104,36 @@ var matchCostQuery = `
 	 ORDER BY ` + costOrderBy + `
 	 LIMIT 1`
 
-// Match 返回这条渠道这个模型现在适用的成本规则。
+// Match 返回这条渠道这个模型现在适用的成本规则（explain 用的形状）。
 //
 // 没有匹配的规则时返回 ErrNoCostRule，**不返回一条零成本的兜底规则**：那会让
 // 「没配成本价」表现为「上游不要钱」，而毛利会因此虚高——那是最不容易被发现的
-// 一类错账。这条判断与售价那一侧是同一条，只是失败落在哪一侧不同（见
-// ErrNoCostRule）。
+// 一类错账。这条判断与售价那一侧是同一条。
 func (s *CostSource) Match(ctx context.Context, q CostQuery) (CostRule, error) {
+	rule, err := s.MatchCost(ctx, pipeline.CostQuery{
+		ChannelID:      q.ChannelID,
+		CanonicalModel: q.CanonicalModel,
+		At:             q.At,
+	})
+	if err != nil {
+		return CostRule{}, err
+	}
+	return CostRule{ID: rule.ID, Expr: rule.Source}, nil
+}
+
+// MatchCost 返回结算路径要的那条成本规则，带编译缓存需要的版本号。
+//
+// 与 Match 共用同一条查询与同一份校验：两处各拼一份的话，explain 说「按这条
+// 算」与结算实际按的那条会各自漂移，而两边都算得出数来。
+//
+// 没有匹配的规则时返回 ErrNoCostRule——结算据此把这一列写 NULL，不拒绝请求
+// （见 pipeline.ErrNoCostRule）。
+func (s *CostSource) MatchCost(ctx context.Context, q pipeline.CostQuery) (pipeline.CostRule, error) {
 	if q.ChannelID <= 0 {
-		return CostRule{}, fmt.Errorf("渠道 ID %d 无效：渠道 ID 从 1 开始", q.ChannelID)
+		return pipeline.CostRule{}, fmt.Errorf("渠道 ID %d 无效：渠道 ID 从 1 开始", q.ChannelID)
 	}
 	if q.CanonicalModel == "" {
-		return CostRule{}, errors.New("规范模型名为空")
+		return pipeline.CostRule{}, errors.New("规范模型名为空")
 	}
 	// 查询没给时刻时用当前的，与 Source.now 同一个判据：零值时刻（公元 1 年）
 	// 会让所有规则都还没生效。
@@ -120,11 +148,14 @@ func (s *CostSource) Match(ctx context.Context, q CostQuery) (CostRule, error) {
 	)
 	err := s.db.QueryRowContext(ctx, matchCostQuery, at, q.CanonicalModel, q.ChannelID).Scan(&id, &src)
 	if errors.Is(err, sql.ErrNoRows) {
-		return CostRule{}, fmt.Errorf("%w：渠道 %d 上模型 %q 没有生效的成本规则",
+		return pipeline.CostRule{}, fmt.Errorf("%w：渠道 %d 上模型 %q 没有生效的成本规则",
 			ErrNoCostRule, q.ChannelID, q.CanonicalModel)
 	}
 	if err != nil {
-		return CostRule{}, fmt.Errorf("查询成本规则失败: %w", err)
+		return pipeline.CostRule{}, fmt.Errorf("查询成本规则失败: %w", err)
 	}
-	return CostRule{ID: id, Expr: src}, nil
+	// upstream_costs 没有版本列，于是版本号按表达式算出来——与售价侧
+	// pricing.Source.Match 的 versionOf 同一个做法：规则被原地改过之后，
+	// 缓存键必须跟着变，否则「改了规则但没生效」看起来像「规则写错了」。
+	return pipeline.CostRule{ID: id, Source: src, Version: versionOf(src)}, nil
 }

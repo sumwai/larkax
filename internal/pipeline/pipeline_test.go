@@ -99,6 +99,25 @@ func (r *ruleSource) MatchAll(_ context.Context, q RuleQuery) ([]Rule, error) {
 	return out, nil
 }
 
+// costSource 是测试用的上游成本规则来源：一条固定规则，或一个错误。
+//
+// 与 ruleSource 分开而不是给它加个方法：两者在结算里的处置完全不同——
+// 售价取不到就拒绝服务，成本取不到只记 NULL。
+type costSource struct {
+	rule CostRule
+	err  error
+	// queries 记录每次匹配的条件，用于断言用的是受理时刻与实际渠道。
+	queries []CostQuery
+}
+
+func (c *costSource) MatchCost(_ context.Context, q CostQuery) (CostRule, error) {
+	c.queries = append(c.queries, q)
+	if c.err != nil {
+		return CostRule{}, c.err
+	}
+	return c.rule, nil
+}
+
 // 每 token 1e-6 元、输出 2e-6 元的简单规则。
 const simpleRule = `{"prompt": 0.000001, "completion": 0.000002}`
 
@@ -686,6 +705,173 @@ func TestSettleProducesChargeAndEntries(t *testing.T) {
 	}
 	if charge.UsageSource != tokens.SourceMeasured {
 		t.Errorf("用量来源 = %v", charge.UsageSource)
+	}
+}
+
+// 结算按成本规则算出上游成本：它是 usage_events.upstream_cost 的唯一来源。
+//
+// # 为什么这一条值得单独钉
+//
+// 成本与售价是两条规则线。漏接的话，售价那一侧一切照旧正确、分录照旧平衡，
+// 只是成本这一列永远是 NULL——渠道健康度的成本那一维因此永远不参与排序，
+// 而「没配规则」与「代码没接上」在库里长得一模一样。
+//
+// 同时钉住问的是**哪一条渠道、哪个模型、哪一刻**：渠道串了成本就串了；
+// 时刻必须是受理时刻（与售价同一次求值），否则跨档位的请求会按结算时刻
+// 的另一档算成本。
+func TestSettleComputesUpstreamCost(t *testing.T) {
+	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}
+	const costRule = `{"prompt": 0.0000005, "completion": 0.0000015}`
+	costs := &costSource{rule: CostRule{ID: 9, Version: 3, Source: costRule}}
+	p := newPipeline(t, src, func(p *Pipeline) { p.Costs = costs })
+
+	req := baseRequest()
+	res, err := p.Reserve(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	charge, err := p.Settle(context.Background(), req, res, Outcome{
+		Usage:       channel.Usage{PromptTokens: 1000, CompletionTokens: 200},
+		UsageSource: tokens.SourceMeasured,
+	})
+	if err != nil {
+		t.Fatalf("结算出错: %v", err)
+	}
+
+	// 1000 * 5e-7 + 200 * 1.5e-6 = 0.0005 + 0.0003
+	if charge.UpstreamCost == nil {
+		t.Fatal("有成本规则时应算出成本，实际为 nil（落库会写 NULL）")
+	}
+	if got := charge.UpstreamCost.String(); got != "0.00080000" {
+		t.Errorf("上游成本 = %s，期望 0.0008", got)
+	}
+	// 售价按另一条规则算，不受成本规则影响。
+	if got := charge.Settlement.Actual.String(); got != "0.00140000" {
+		t.Errorf("售价 = %s，期望 0.0014——成本不该混进售价", got)
+	}
+
+	if len(costs.queries) != 1 {
+		t.Fatalf("成本规则应恰好问一次，实际 %d 次", len(costs.queries))
+	}
+	q := costs.queries[0]
+	if q.ChannelID != req.ChannelID || q.CanonicalModel != req.CanonicalModel {
+		t.Errorf("问的是渠道 %d 模型 %q，期望渠道 %d 模型 %q",
+			q.ChannelID, q.CanonicalModel, req.ChannelID, req.CanonicalModel)
+	}
+	if !q.At.Equal(res.RuleMatchedAt) {
+		t.Errorf("成本求值时刻 = %s，期望受理时刻 %s", q.At, res.RuleMatchedAt)
+	}
+}
+
+// 没有成本规则时留 nil（落库写 NULL），而这一次结算照常成功。
+//
+// 成本这一侧不参与任何拒绝：一次上游调用已经发生了，不能因为「算不出成本」
+// 把它退回去。nil 与「成本 0」是两件事——后者在库里读作「上游不要钱」。
+func TestSettleLeavesUpstreamCostNilWithoutRule(t *testing.T) {
+	var logs bytes.Buffer
+	adoptTestLogger(t, &logs)
+
+	p := newPipeline(t,
+		&ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}},
+		func(p *Pipeline) {
+			p.Costs = &costSource{err: fmt.Errorf("%w：没配", ErrNoCostRule)}
+		})
+
+	req := baseRequest()
+	res, err := p.Reserve(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	charge, err := p.Settle(context.Background(), req, res, Outcome{
+		Usage:       channel.Usage{PromptTokens: 1000, CompletionTokens: 200},
+		UsageSource: tokens.SourceMeasured,
+	})
+	if err != nil {
+		t.Fatalf("没有成本规则不该让结算失败: %v", err)
+	}
+	if charge.UpstreamCost != nil {
+		t.Errorf("没有规则时上游成本应为 nil，实际 %s", charge.UpstreamCost)
+	}
+	// 「没配规则」是正常状态，不该逐请求告警——否则日志会把真正需要看的
+	// 那几条（配了却算不出来）淹没。
+	if strings.Contains(logs.String(), "上游成本算不出来") {
+		t.Errorf("没有成本规则时不该告警，实际日志:\n%s", logs.String())
+	}
+}
+
+// 配了成本规则却算不出来：结算照走，成本留 NULL，但**要告警**。
+//
+// 三条来路各钉一次：表达式编译不过、求值期出错、覆盖不了这次用量（规则漏了
+// 输出单价，billing.ValidateCharges 会拒）。它们与「没配规则」在库里长得
+// 一样（都是 NULL），差别只能靠日志看出来——所以日志是这一条断言的一部分。
+func TestSettleWarnsWhenCostRuleCannotBeUsed(t *testing.T) {
+	cases := []struct {
+		name string
+		expr string
+		// want 是日志里必须出现的那一段，用来证明这一档真的是从它说的那条路
+		// 失败下来的——只断言「有告警」的话，三档坏规则互相顶替也能通过。
+		want string
+	}{
+		// 编译不过：写入路径会拒，但绕过它写进库的行仍会被用到。
+		{"表达式编译不过", `这不是表达式(`, "无法编译"},
+		// 编译得过、求值期才失败：分母在求值时的两个时刻相等，除零在写规则时
+		// 看不出来。编译期校验挡不住它，而结算那一刻必须仍然不能把请求打回去。
+		{"求值期出错", `{"prompt": 1.0 / (hour("UTC") - hour("UTC")), "completion": 1}`, "是无穷大"},
+		// 规则只写了 prompt，而这次有 200 个输出 token：ValidateCharges 报缺价。
+		// 放过去会让输出那一半的成本算成 0，毛利因此虚高。
+		{"规则覆盖不了这次用量", `{"prompt": 0.0000005}`, "规则未定价"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			adoptTestLogger(t, &logs)
+
+			p := newPipeline(t,
+				&ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}},
+				func(p *Pipeline) {
+					p.Costs = &costSource{rule: CostRule{ID: 11, Version: 1, Source: tc.expr}}
+				})
+
+			req := baseRequest()
+			res, err := p.Reserve(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			charge, err := p.Settle(context.Background(), req, res, Outcome{
+				Usage:       channel.Usage{PromptTokens: 1000, CompletionTokens: 200},
+				UsageSource: tokens.SourceMeasured,
+			})
+			if err != nil {
+				t.Fatalf("成本规则坏了不该让结算失败: %v", err)
+			}
+			if charge.UpstreamCost != nil {
+				t.Errorf("算不出来时上游成本应为 nil，实际 %s", charge.UpstreamCost)
+			}
+			if !strings.Contains(logs.String(), "上游成本算不出来") {
+				t.Errorf("算不出来时应告警，实际日志:\n%s", logs.String())
+			}
+			if !strings.Contains(logs.String(), tc.want) {
+				t.Errorf("告警应说明失败在「%s」，实际日志:\n%s", tc.want, logs.String())
+			}
+			// 规则 id 要进日志：一张表上可能挂着多条，只有渠道与模型时
+			// 还要去库里反查是哪一条。
+			if !strings.Contains(logs.String(), `"cost_rule_id":11`) {
+				t.Errorf("告警里应带规则 id，实际日志:\n%s", logs.String())
+			}
+		})
+	}
+}
+
+// 成本规则与售价规则的编译缓存键不能撞。
+//
+// 两张表的 id 各自从 1 开始，裸的「id:version」会让不相干的规则共用一份
+// 编译产物——症状是**用另一条规则的表达式算成本**，算得出数，只是数不对。
+func TestCostRuleCacheKeyIsDistinctFromSaleRule(t *testing.T) {
+	sale := Rule{ID: 1, Version: 2}
+	cost := CostRule{ID: 1, Version: 2}
+	if sale.CacheKey() == cost.CacheKey() {
+		t.Errorf("售价规则与成本规则的缓存键相同（%q）", sale.CacheKey())
 	}
 }
 

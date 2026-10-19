@@ -105,6 +105,7 @@ func buildAppWithSettings(t *testing.T, db *sql.DB, overrides map[string]string)
 		Version:  "wiring-test",
 		Executor: executor,
 		Rules:    pricing.New(db),
+		Costs:    pricing.NewCostSource(db),
 	})
 }
 

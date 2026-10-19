@@ -35,14 +35,15 @@ import (
 // 健康度与额度是两个独立的信号，其中一处写不进去不该让另外两处也不写。
 // 错误交给调用方（见 gateway 的 recordCall），由它决定怎么留痕。
 //
-// # 桶里没写的列
+// # 桶里的推导列
 //
-// cost 留空：它属于「这次请求我们花了多少」那条线（upstream_costs / #163），
-// 口径还没定，这一轮不接。
+// 延迟、缓存与成本那五列是**推导值**，不是逐次累加的：它们由该桶的
+// usage_events 聚合出来（见 rollupSignalsSQL）。读侧把「没有数据」映射成
+// 「没有数据」，打分时那一维整个不参与，所以没流量就是未知，而不是很差。
 //
-// 延迟与缓存那四列是**推导值**，不是逐次累加的：它们由该桶的 usage_events
-// 聚合出来（见 rollupSignalsSQL）。读侧把「一列都没写过」映射成「没有数据」，
-// 打分时那一维整个不参与，所以没流量就是未知，而不是很差。
+// 成本与计数列的量级不同：counts 是逐次 +1，这里是**每次调用重算整桶**。
+// 重算发生在结算落库之后（见 gateway.recordAttempts），所以这一次调用的
+// 成本已经被算进桶里，不会落后一个请求。
 type Recorder struct {
 	db *sql.DB
 
@@ -167,14 +168,14 @@ ON CONFLICT (channel_id, bucket) DO UPDATE
        successes = channel_health_rollup.successes + EXCLUDED.successes,
        failures  = channel_health_rollup.failures  + EXCLUDED.failures`
 
-// rollupSignalsSQL 用一个桶的用量事件重算它那三列**推导值**。
+// rollupSignalsSQL 用一个桶的用量事件重算它那五列**推导值**。
 //
 // # 为什么是重算，不是累加
 //
 // 延迟要的是分位数，而分位数不是可累加的量：每次只有一个样本，把它写进
 // p95 等于给一个错的数起了一个对的名字。所以样本留在 usage_events 里
-// （duration_ms 一列），这里按桶把它们聚成分位数。缓存两列用同一个来源，
-// 于是三个数说的是同一批请求、同一个时刻窗口。
+// （duration_ms 一列），这里按桶把它们聚成分位数。缓存两列与成本用同一个
+// 来源，于是四类数说的是同一批请求、同一个时刻窗口。
 //
 // 重算的代价说清楚：每记一次调用就扫一遍该渠道在当前小时里的用量行
 // （走 usage_events_channel_idx）。低流量渠道可以忽略；高流量渠道就是
@@ -185,7 +186,7 @@ ON CONFLICT (channel_id, bucket) DO UPDATE
 // 写进去的是旧值，而该桶的下一次调用会把它们整体重算一遍——不会像累加
 // 那样永久偏离。
 //
-// # 三个口径
+// # 四个口径
 //
 //   - cache_hit_tokens = SUM(cache_read_tokens)：命中缓存、直接复用的输入。
 //   - cache_miss_tokens = SUM(prompt_tokens + cache_write_tokens)：
@@ -203,6 +204,14 @@ ON CONFLICT (channel_id, bucket) DO UPDATE
 //     ordered-set 聚合会**忽略 NULL**，所以没有耗时的行不参与，也不会被
 //     当成 0 毫秒把分位数往下拉。整桶都没有样本时结果是 NULL，写回去是
 //     「没有数据」，与「一行都没写过」在读侧同一档。
+//   - cost = SUM(upstream_cost)：这个桶里所有请求的上游成本合计。
+//     不 COALESCE：整桶都没有成本时 SUM 是 NULL，写回去读作「这个桶没有
+//     成本数据」，与「上游不要钱」（合计 0）分得开——那一列因此是可空的
+//     （见迁移 00046）。写 0 会让每个没配成本规则的渠道拿到成本这一维的
+//     满分，而那正是最容易超支的路径。
+//     部分事件有成本、部分没有时 SUM 只加有值的那些：它按请求数（requests）
+//     相除读成「平均每次请求成本」，覆盖面不全时会被摊低。这是单列能表达的
+//     最小单位，不是这里的选择（见 costPerUnit）。
 //
 // 两个分位数都有人读：选路只看 p95（见 candidateQuery），而 `channel health`
 // 把两列一起打出来——同一个窗口里，中位数与 95 分位分开看才知道这个渠道是
@@ -219,12 +228,14 @@ UPDATE channel_health_rollup h
    SET cache_hit_tokens  = a.cache_hit,
        cache_miss_tokens = a.cache_miss,
        latency_p50_ms    = a.latency_p50_ms,
-       latency_p95_ms    = a.latency_p95_ms
+       latency_p95_ms    = a.latency_p95_ms,
+       cost              = a.cost
   FROM (
         SELECT COALESCE(SUM(u.cache_read_tokens), 0) AS cache_hit,
                COALESCE(SUM(u.prompt_tokens + u.cache_write_tokens), 0) AS cache_miss,
                percentile_disc(0.5) WITHIN GROUP (ORDER BY u.duration_ms) AS latency_p50_ms,
-               percentile_disc(0.95) WITHIN GROUP (ORDER BY u.duration_ms) AS latency_p95_ms
+               percentile_disc(0.95) WITHIN GROUP (ORDER BY u.duration_ms) AS latency_p95_ms,
+               SUM(u.upstream_cost) AS cost
           FROM usage_events u
          WHERE u.channel_id = $1
            AND u.created_at >= $2
@@ -233,7 +244,7 @@ UPDATE channel_health_rollup h
  WHERE h.channel_id = $1
    AND h.bucket = $2`
 
-// rollup 把一次调用累加进小时桶，并按桶重算延迟与缓存。
+// rollup 把一次调用累加进小时桶，并按桶重算延迟、缓存与成本。
 //
 // 「没成功也没失败」（客户端断开）也计入 requests 而不计入另外两个：
 // 分母要诚实，而成功率的分子不该为一件与渠道无关的事记一笔。
@@ -263,7 +274,7 @@ func (r *Recorder) rollup(ctx context.Context, rec route.CallOutcome) error {
 	}
 
 	if _, err := r.db.ExecContext(ctx, rollupSignalsSQL, rec.ChannelID, bucket, bucket.Add(time.Hour)); err != nil {
-		return fmt.Errorf("重算渠道 %d 在 %s 这一桶的延迟与缓存失败: %w", rec.ChannelID, bucket.Format(time.RFC3339), err)
+		return fmt.Errorf("重算渠道 %d 在 %s 这一桶的延迟、缓存与成本失败: %w", rec.ChannelID, bucket.Format(time.RFC3339), err)
 	}
 	return nil
 }
