@@ -443,6 +443,12 @@ func TestPostTransactionWaitsOnTxnLock(t *testing.T) {
 // 这条用例与上面那条同构，钉的是**锁挂在哪个键上**：键换成交易键、或者干脆不
 // 取锁，它都会立刻完成，于是这条用例必红。它是提现申请校验余额的另一半——只锁
 // 申请那一侧的话，一笔并发退款仍能在读完余额之后把分成冲走。
+//
+// 有一条变异存活是判过的：`lockPayableAccounts` 循环里那句 `if err := …; err != nil`
+// （posting.go 的 CONDITIONALS_NEGATION）。把它翻成 `err == nil`，函数会在第一把锁
+// 之后带着 nil 提前返回——而今天没有任何一笔交易同时含两个 merchant_payable 科目，
+// 只锁一把与锁两把的行为一样，所以是等价变异，不是漏测。等真出现那种交易（例如
+// 一次清算两家商户）时，它就不再等价了：那时要补一条同时含两个分成科目的用例。
 func TestPostTransactionWaitsOnPayableLock(t *testing.T) {
 	db := testDB(t)
 	s := New(db)
