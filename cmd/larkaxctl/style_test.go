@@ -853,9 +853,9 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				AccessedAt:  at,
 			}}, map[int64]string{7: "user-placeholder"}, false)
 		}},
-		// 下面一条是 wallet adjust 的回执：它不是清单，但同样是「主键加粗、
+		// 下面一条是 wallet adjust 的回显：它不是清单，但同样是「主键加粗、
 		// 一栏一行」的那张表（与 user update 的改动回显同一个形状）。
-		{"调账回执", func(w io.Writer) {
+		{"调账回显", func(w io.Writer) {
 			printAdjustedWallet(w, walletAdjustment{
 				Owner:    auth.User{ID: 7, Username: "user-placeholder"},
 				Operator: auth.User{ID: 8, Username: "ops-placeholder"},
@@ -876,9 +876,9 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				},
 			}, true)
 		}},
-		// 下面一条是提现的回执：与调账回执同一类（一栏一行），只是几栏随状态走
+		// 下面一条是提现的回显：与调账回显同一类（一栏一行），只是几栏随状态走
 		// ——审批人与审批时刻只有走过审批的单子才有。
-		{"提现回执", func(w io.Writer) {
+		{"提现回显", func(w io.Writer) {
 			reviewedBy := int64(8)
 			printPayout(w, payoutReceipt{
 				Verdict: "已批准提现单 3。",

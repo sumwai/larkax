@@ -54,7 +54,7 @@ var statusRenderPaths = []string{
 // 只是外壳是诊断报告。
 var tableRenderPaths = []string{
 	"doctorTable.lines",   // doctor -v 的逐项明细
-	"printAdjustedWallet", // wallet adjust 的回执：一栏一行，与 user update 同一个形状
+	"printAdjustedWallet", // wallet adjust 的回显：一栏一行，与 user update 同一个形状
 	"printAliasList",
 	"printAllowlists", // snapshot allowlist
 	"printCalendarList",
@@ -71,7 +71,7 @@ var tableRenderPaths = []string{
 	"printLedgerRuns",     // ledger runs
 	"printModelDetail",
 	"printModelList",
-	"printPayout",        // wallet payout 的回执：一栏一行，与 wallet adjust 同一个形状
+	"printPayout",        // wallet payout 的回显：一栏一行，与 wallet adjust 同一个形状
 	"printPluginDetail",  // plugin get
 	"printPluginKVEntry", // plugin kv get
 	"printPluginList",

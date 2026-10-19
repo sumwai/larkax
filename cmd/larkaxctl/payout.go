@@ -119,7 +119,7 @@ paid 是唯一一个把钱付出去的入口，**只放行已批准的单子**�
     打款。不给这一项就留一条没有凭据号的备注：线下打款（银行转账、现金）拿不到通道流水号，
     那里要填就只能是编一个，编出来的号进了备注反而更难对账。
 
-**幂等**：四个动作各自幂等。申请、驳回与打款重放时什么都不写，回执打「已经申请过 /
+**幂等**：四个动作各自幂等。申请、驳回与打款重放时什么都不写，回显打「已经申请过 /
 已经驳回过 / 已经打过款，本次未改动」；批准重跑时也不覆盖上一次的审批人与时刻——一次
 重跑不该把「谁批的」改成后一个人。两种结果都是退出 0，只能靠那一行字分辨。
 
@@ -268,7 +268,7 @@ func runPayoutRequest(args []string) error {
 		if requestErr != nil {
 			return requestErr
 		}
-		// 回执要逐条列出这次写的分录。重建一遍而不是让 store 把交易交回来：构造函数
+		// 回显要逐条列出这次写的分录。重建一遍而不是让 store 把交易交回来：构造函数
 		// 是确定性的（同一批输入给同一批分录），而单子的 id 只有库知道——重放时用的
 		// 也是这一行，所以两条路径重建出来的是同一批分录。
 		txn, buildErr := ledger.PayoutRequest(ledger.PayoutRequestParams{
@@ -312,7 +312,7 @@ func runPayoutReject(args []string) error {
 // 落到哪个状态、以及驳回要多写一组解冻分录（后者在 store 那一层按动作分开）。
 //
 // 合成一个函数而不是抄成两份：这两条命令的旗标、校验与措辞必须逐字一致——一份写成
-// --by 必填、另一份忘了判，只有敲到那一条时才发现。动作名进错误信息与回执，于是
+// --by 必填、另一份忘了判，只有敲到那一条时才发现。动作名进错误信息与回显，于是
 // 使用者看到的仍然是「approve」「reject」那两个词。
 func runPayoutReview(action string, args []string) error {
 	command := "wallet payout " + action
@@ -338,14 +338,14 @@ func runPayoutReview(action string, args []string) error {
 	}
 	if *id <= 0 {
 		return usageErr(fmt.Errorf(
-			"缺少 --id：要%s的是哪条提现单（payout_requests.id，申请那一步的回执里有）", payoutActionWord(action)))
+			"缺少 --id：要%s的是哪条提现单（payout_requests.id，申请那一步的回显里有）", payoutActionWord(action)))
 	}
 	if strings.TrimSpace(*by) == "" {
 		return usageErr(fmt.Errorf(
 			"缺少 --by：%s要记下是谁做的", payoutActionWord(action)))
 	}
-	// 说明会原样落进 payout_requests.review_note（那一列不过清洗），也会打进回执，
-	// 所以挡住控制字符的理由是「回执会原样打出来」，与 --memo 那一条不同。
+	// 说明会原样落进 payout_requests.review_note（那一列不过清洗），也会打进回显，
+	// 所以挡住控制字符的理由是「回显会原样打出来」，与 --memo 那一条不同。
 	reviewNote := strings.TrimSpace(*note)
 	if reviewNote != "" {
 		if noteErr := checkPayoutNote("--note", reviewNote); noteErr != nil {
@@ -386,7 +386,7 @@ func runPayoutReview(action string, args []string) error {
 		if rowErr != nil {
 			return rowErr
 		}
-		// 商户与审批人都从**库里那一行**解析：重放时批的是上一次那个人，回执要回答
+		// 商户与审批人都从**库里那一行**解析：重放时批的是上一次那个人，回显要回答
 		// 的正是「库里记着谁」，而不是这次命令的 --by。
 		owner, ownerErr := payoutUser(ctx, authStore, row.UserID, "商户")
 		if ownerErr != nil {
@@ -428,10 +428,10 @@ func runPayoutReview(action string, args []string) error {
 	})
 }
 
-// payoutActionWord 把一个动作名翻成中文动词，用在错误信息与回执里。
+// payoutActionWord 把一个动作名翻成中文动词，用在错误信息与回显里。
 //
 // 只有「拒绝」与「同意」这两种处置各要一个词，而库里的状态名（rejected /
-// approved）说的是结果不是动作——回执那句话说「已驳回提现单 7」，不说「已 rejected」。
+// approved）说的是结果不是动作——回显那句话说「已驳回提现单 7」，不说「已 rejected」。
 func payoutActionWord(action string) string {
 	if action == "reject" {
 		return "驳回"
@@ -463,7 +463,7 @@ func runPayoutPaid(args []string) error {
 	}
 	if *id <= 0 {
 		return usageErr(errors.New(
-			"缺少 --id：要打款的是哪条提现单（payout_requests.id，申请那一步的回执里有）"))
+			"缺少 --id：要打款的是哪条提现单（payout_requests.id，申请那一步的回显里有）"))
 	}
 	// 通道必填且没有默认值：见 walletPayoutUsage 里那一段（credit 上那个 manual
 	// 默认值在这一侧不适用）。
@@ -541,7 +541,7 @@ func payoutUser(ctx context.Context, authStore *auth.Store, id int64, what strin
 
 // errPayoutNotReviewed 表示这一行还没有审批人。
 //
-// 「还没走过审批」是这条链上的一个正常状态，不是失败：调用方拿到它就把回执上
+// 「还没走过审批」是这条链上的一个正常状态，不是失败：调用方拿到它就把回显上
 // 审批人那一栏留空，别的错误照常往上抛。用一个哨兵把它说成返回值里的一项，
 // 而不是返回 (nil, nil)——(nil, nil) 让「没有审批人」与「查到了、但读不出来」
 // 在调用点长得一样，而后者是要报出来的。
@@ -551,7 +551,7 @@ var errPayoutNotReviewed = errors.New("这条提现单还没有审批人")
 // errPayoutNotReviewed。
 //
 // 从那一行读，不从这次的 --by 拿：重放（或对一张早先批过的单子打款）时批的是上一次
-// 那个人，而回执要回答的正是「库里记着谁」。
+// 那个人，而回显要回答的正是「库里记着谁」。
 func payoutReviewer(ctx context.Context, authStore *auth.Store, row store.Payout) (*auth.User, error) {
 	if row.ReviewedBy == nil {
 		return nil, errPayoutNotReviewed
@@ -566,13 +566,13 @@ func payoutReviewer(ctx context.Context, authStore *auth.Store, row store.Payout
 // checkPayoutNote 拒绝审批说明里的控制字符。
 //
 // 与 checkMemo 的理由不同：这一栏**不过清洗**（它原样落进 payout_requests.review_note），
-// 所以两边不会不一致。挡住它是因为回执要打这一栏——换行会把「一栏一行」的回执拆开
+// 所以两边不会不一致。挡住它是因为回显要打这一栏——换行会把「一栏一行」的回显拆开
 // （见 docs/cli-output.md 的「加一个清单命令」那一节），ESC 之类会原样进终端。
-// 打款凭据号走同一条判据：它同样原样落库、原样进回执与分录备注。
+// 打款凭据号走同一条判据：它同样原样落库、原样进回显与分录备注。
 func checkPayoutNote(flagName, note string) error {
 	if r, bad := hasControlChar(note); bad {
 		return usageErr(fmt.Errorf(
-			"%s 不能含控制字符（这里是 %q）：回执会原样打出来，换行会把一栏拆成两行",
+			"%s 不能含控制字符（这里是 %q）：回显会原样打出来，换行会把一栏拆成两行",
 			flagName, r))
 	}
 	return nil
@@ -603,7 +603,7 @@ type payoutReceipt struct {
 
 // printPayout 打印一次提现动作的结果。
 //
-// 一栏一行（走 tableWriter，与 wallet adjust 的回执同一个形状）：这些是给人核对的字段，
+// 一栏一行（走 tableWriter，与 wallet adjust 的回显同一个形状）：这些是给人核对的字段，
 // 拼成一句在窄终端里会自己折行，折出来的行与下一条信息分不开。
 //
 // **不回收款信息**（payout_requests.destination）：那是商户填的 jsonb 原文，原样打会把
