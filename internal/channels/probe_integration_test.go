@@ -207,6 +207,50 @@ func TestQuotaProbeRefreshesStaleValue(t *testing.T) {
 	}
 }
 
+// 适配器这次没带回重置时刻时，库里已有的值要保留——「这次没提」不等于
+// 「确认不会重置」。这是写回 SQL 里 COALESCE 的保留分支。
+func TestQuotaProbeKeepsResetsAtWhenAdapterOmitsIt(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
+
+	interval := 5 * time.Minute
+	now := time.Now().UTC()
+	stale := now.Add(-2 * interval)
+	oldResets := now.Add(72 * time.Hour)
+	insertQuota(t, db, id, "100", "tokens", "api_query", "healthy", 1)
+	if _, err := db.ExecContext(t.Context(), `
+		UPDATE channel_quota_state SET last_probe_at = $2, last_probe_attempt_at = $2,
+		       resets_at = $3
+		 WHERE channel_id = $1`, id, stale, oldResets); err != nil {
+		t.Fatalf("摆旧时刻失败: %v", err)
+	}
+
+	// 这次实测只有余量与单位，没有 ResetsAt。
+	adapter := &fakeQuotaAdapter{state: quota.State{Remaining: floatPtr(88), Unit: "tokens"}}
+	p, err := NewQuotaProbe(db, adapter, interval)
+	if err != nil {
+		t.Fatalf("构造额度探测失败: %v", err)
+	}
+	p.Now = func() time.Time { return now }
+
+	p.ProbeIfStale(route.Candidate{
+		Channel: channel.Channel{ID: id, Type: "openai-compatible"},
+		Quota:   quota.State{LastProbeAttemptAt: &stale},
+	})
+	p.wg.Wait()
+
+	row := readProbeRow(t, db, id)
+	if !row.remaining.Valid || parseNumeric(t, "remaining_estimate", row.remaining.String) != 88 {
+		t.Errorf("remaining_estimate = %v，期望 88", row.remaining)
+	}
+	if !row.resetsAt.Valid {
+		t.Fatal("resets_at 被空值抹掉了，期望保留旧值")
+	}
+	assertNear(t, "resets_at", row.resetsAt.Time, oldResets)
+}
+
 // 并发命中同一个过期渠道时，适配器只被调用一次。
 //
 // 关键在于时钟：第一次探测卡住后要把它推过 TTL，否则后来的调用者连
