@@ -337,6 +337,210 @@ func runUsageRequestsOut(t *testing.T, args ...string) string {
 	return r.stdout
 }
 
+// insertBillingRequestWithRule 造一条计价规则，再写一行指向它的计费请求，返回规则 id。
+//
+// 规则按**只有本用例知道**的模型名建（与 internal/ledger/store 的
+// TestReservationRecordsPricingRule 同一条理由）：pricing_rules 是全局表，而测试库由
+// 同包与别的包的用例共用，一条不带 model_patterns 的规则会匹配**任何**模型，于是
+// 「一条规则都匹配不上」这个状态在整库范围内消失，受影响的正是那条规则留在库里的
+// 那个窗口。
+func insertBillingRequestWithRule(t *testing.T, db *sql.DB, requestID string,
+	userID int64, model string, startedAt time.Time, status string) int64 {
+	t.Helper()
+
+	var ruleID int64
+	if err := db.QueryRowContext(context.Background(), `
+		INSERT INTO pricing_rules (scope, name, model_patterns, expr, priority)
+		VALUES ('platform', 'placeholder-rule', to_jsonb($1::text[]),
+		        '{"prompt": 0.000001}', 0)
+		RETURNING id`, []string{model}).Scan(&ruleID); err != nil {
+		t.Fatalf("造计价规则失败: %v", err)
+	}
+
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO billing_requests
+			(request_id, user_id, canonical_model, protocol, streamed,
+			 reserved_amount, reserved_asset, status, started_at, pricing_rule_id)
+		VALUES ($1, $2, $3, 'openai', false, 0.02, 'CNY', $4, $5, $6)`,
+		requestID, userID, model, status, startedAt, ruleID); err != nil {
+		t.Fatalf("写计费请求失败: %v", err)
+	}
+
+	// 清理的顺序不能反：billing_requests.pricing_rule_id 指向这条规则且没有 ON DELETE，
+	// 先删规则会被外键挡下（实测报 billing_requests_pricing_rule_id_fkey）。清不掉要
+	// 报出来——被忽略的失败与清理成功在输出里长得一样。
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM billing_requests WHERE request_id = $1`, requestID); err != nil {
+			t.Errorf("清理账单行失败: %v", err)
+		}
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM pricing_rules WHERE id = $1`, ruleID); err != nil {
+			t.Errorf("清理计价规则失败: %v", err)
+		}
+	})
+	return ruleID
+}
+
+// usageTableLastCell 在一张清单表格里找到含 needle 的那一行，返回它**最后一栏**。
+//
+// 取末项而不按下标取：栏是按显示宽度补空格的，栏里出现空格（用户名、模型）就会让
+// 下标整体错位（见 LESSONS 里「清单表用例按空白项数解析」那一条）。末项在
+// usage requests 上有确定的含义——规则是表格的末栏，而它前面每一栏都非空
+// （没值时打 `-`，不打空白）。
+func usageTableLastCell(t *testing.T, out, needle string) string {
+	t.Helper()
+
+	for _, line := range strings.Split(out, "\n") {
+		if !usageRowClock.MatchString(line) || !strings.Contains(line, needle) {
+			continue
+		}
+		fields := strings.Fields(line)
+		return fields[len(fields)-1]
+	}
+	t.Fatalf("表格里没有含 %q 的数据行：\n%s", needle, out)
+	return ""
+}
+
+// ruleCellFromDoc 按 docs/cli-reference.md 里 `usage` 那一节写的，把机器可读档的
+// pricing_rule_id 翻成表格里该打的样子：没值时表格打 `-`，有值时打那个 id。
+//
+// 照抄一遍那条规则，是为了让「表格与 json 是同一套」变成一条能挂的断言：两边分开
+// 算、再比一次，改了任一边而另一边没跟上都会红。规则本身写在文档里，这里不另立一份
+// 口径——它要是变了，这条用例与文档一起改。
+func ruleCellFromDoc(id *int64) string {
+	if id == nil {
+		return "-"
+	}
+	return itoa64(*id)
+}
+
+// TestUsageRequestsShowsPricingRuleID 让账单答得出「这一单是按哪条规则算的」。
+//
+// 库里的 pricing_rule_id 写得到、却一处都不读，这一条就是它的读者：落了规则的行，
+// 表格那一栏与机器可读档那一个字段都等于库里的规则 id；没落到任何规则的行（库里是
+// NULL），表格打 `-`、机器可读档是 null——0 不是一个合法的规则 id，用它冒充「没有」
+// 会被读成「一条编号为 0 的规则」。
+func TestUsageRequestsShowsPricingRuleID(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+
+	userID := createTestUser(t)
+	window := []string{"--user", itoa64(userID),
+		"--from", usageWindowOctFrom.Format(time.RFC3339),
+		"--to", usageWindowOctTo.Format(time.RFC3339)}
+	startedAt := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+
+	withRule := uniqueName("req-rule")
+	withoutRule := uniqueName("req-none")
+	ruleID := insertBillingRequestWithRule(t, db, withRule, userID,
+		uniqueName("model"), startedAt, "pending")
+	insertBillingRequest(t, db, withoutRule, userID, uniqueName("model"),
+		startedAt.Add(time.Minute), "pending")
+
+	// ── 表格那一档 ──
+	out := runUsageRequestsOut(t, window...)
+	if got := usageTableLastCell(t, out, withRule); got != itoa64(ruleID) {
+		t.Errorf("%s 那一行的规则栏 = %q，想要库里的规则 id %d：\n%s",
+			withRule, got, ruleID, out)
+	}
+	if got := usageTableLastCell(t, out, withoutRule); got != "-" {
+		t.Errorf("%s 那一行没落规则，规则栏该打 `-`，得到 %q：\n%s", withoutRule, got, out)
+	}
+
+	// ── 机器可读那一档 ──
+	//
+	// 夹具都在切到 json 之前建好：写类的命令在那一档会被拒（见 format.go 的
+	// jsonUnsupported）。这一条只用读类命令，但这条纪律照样守着。
+	withFormat(t, formatJSON)
+
+	r := runOnce(t, runUsage, append([]string{"requests"}, window...))
+	if r.err != nil {
+		t.Fatalf("usage requests -o json 失败: %v\nstderr:\n%s", r.err, r.stderr)
+	}
+	assertOnlyJSON(t, r.stdout)
+
+	var doc struct {
+		Requests []struct {
+			RequestID     string `json:"request_id"`
+			PricingRuleID *int64 `json:"pricing_rule_id"`
+		} `json:"requests"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+		t.Fatalf("解不回来: %v\n%s", err, r.stdout)
+	}
+	if len(doc.Requests) != 2 {
+		t.Fatalf("json 里 %d 行，想要 2 行：\n%s", len(doc.Requests), r.stdout)
+	}
+	got := map[string]*int64{}
+	for _, req := range doc.Requests {
+		got[req.RequestID] = req.PricingRuleID
+	}
+	if id, ok := got[withRule]; !ok || id == nil || *id != ruleID {
+		t.Errorf("%s 的 pricing_rule_id = %s，想要 %d：\n%s",
+			withRule, showPtr(id), ruleID, r.stdout)
+	}
+	if id, ok := got[withoutRule]; !ok || id != nil {
+		t.Errorf("%s 没落到任何规则上，pricing_rule_id 该是 null，得到 %s：\n%s",
+			withoutRule, showPtr(id), r.stdout)
+	}
+}
+
+// TestUsageRequestsRuleColumnAgreesAcrossFormats 比一遍表格那一栏与 json 那一个字段
+// 是不是同一套。
+//
+// 两档各跑一次，再按文档里那条推导式从 json 算一遍表格该打什么，逐行比。两边分开算，
+// 改了任一边而另一边没跟上都会红——这是「两个档位由同一份数据推出来」在测试里的落点
+// （照 plugin_test.go 的「四处同一套」那一条的形状）。
+func TestUsageRequestsRuleColumnAgreesAcrossFormats(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+
+	userID := createTestUser(t)
+	window := []string{"--user", itoa64(userID),
+		"--from", usageWindowOctFrom.Format(time.RFC3339),
+		"--to", usageWindowOctTo.Format(time.RFC3339)}
+	startedAt := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+
+	withRule := uniqueName("req-rule")
+	withoutRule := uniqueName("req-none")
+	insertBillingRequestWithRule(t, db, withRule, userID,
+		uniqueName("model"), startedAt, "pending")
+	insertBillingRequest(t, db, withoutRule, userID, uniqueName("model"),
+		startedAt.Add(time.Minute), "pending")
+
+	table := runUsageRequestsOut(t, window...)
+
+	withFormat(t, formatJSON)
+	r := runOnce(t, runUsage, append([]string{"requests"}, window...))
+	if r.err != nil {
+		t.Fatalf("usage requests -o json 失败: %v\nstderr:\n%s", r.err, r.stderr)
+	}
+
+	var doc struct {
+		Requests []struct {
+			RequestID     string `json:"request_id"`
+			PricingRuleID *int64 `json:"pricing_rule_id"`
+		} `json:"requests"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+		t.Fatalf("解不回来: %v\n%s", err, r.stdout)
+	}
+	// 先数一遍行数：两行都读不回来时下面的循环一次都不进，一条断言都没跑过也算通过
+	// （见 LESSONS.md 第 30 条）。
+	if len(doc.Requests) != 2 {
+		t.Fatalf("json 里 %d 行，想要 2 行：\n%s", len(doc.Requests), r.stdout)
+	}
+
+	for _, req := range doc.Requests {
+		want := ruleCellFromDoc(req.PricingRuleID)
+		if got := usageTableLastCell(t, table, req.RequestID); got != want {
+			t.Errorf("%s：json 的 pricing_rule_id 推出表格该打 %q，表格打的是 %q\n表格:\n%s",
+				req.RequestID, want, got, table)
+		}
+	}
+}
+
 // TestUsageListsStateEmptyResults 钉住空结果也说一句话。
 //
 // 一行都不打的话，「这个窗口里没有记录」与「命令没跑成」在安静的终端里长得一样
@@ -543,6 +747,7 @@ func TestUsageJSONShapes(t *testing.T) {
 			Reserved      string  `json:"reserved_amount"`
 			FinalAmount   *string `json:"final_amount"`
 			SettledAt     *string `json:"settled_at"`
+			PricingRuleID *int64  `json:"pricing_rule_id"`
 			Streamed      bool    `json:"streamed"`
 			CanonicalName string  `json:"canonical_model"`
 		} `json:"requests"`
@@ -561,6 +766,10 @@ func TestUsageJSONShapes(t *testing.T) {
 	// 没结算：结算金额与结算时刻都是 null，不是 `-`，也不是 0。
 	if req.FinalAmount != nil || req.SettledAt != nil {
 		t.Errorf("没结算的请求，final_amount 与 settled_at 应当是 null：%+v", req)
+	}
+	// 这一行的夹具没挂规则：规则 id 同样是 null，不是 0。
+	if req.PricingRuleID != nil {
+		t.Errorf("没落到任何规则上，pricing_rule_id 应当是 null：%+v", req)
 	}
 	if req.Reserved != "0.02000000" {
 		t.Errorf("reserved_amount = %q，想要 0.02000000", req.Reserved)

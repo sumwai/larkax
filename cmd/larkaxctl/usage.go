@@ -282,6 +282,7 @@ func runUsageRequests(args []string) error {
 				Status:         r.Status,
 				ReservedAmount: r.ReservedAmount,
 				FinalAmount:    r.FinalAmount,
+				PricingRuleID:  r.PricingRuleID,
 				Asset:          r.Asset,
 				UpstreamModel:  r.UpstreamModel,
 				Protocol:       r.Protocol,
@@ -325,6 +326,10 @@ type usageEventRow struct {
 }
 
 // usageRequestRow 是 usage requests 清单里的一行。
+//
+// 前几个字段进表格，其余只进 JSON（与 usageEventRow 同一条排布）：upstream_model
+// 是选路之后才知道的名字，protocol / streamed / error_code 只在排查某一条请求时才
+// 用得上，摆进表格会把每一行撑到折行（见 docs/cli-output.md 的「加一个清单命令」）。
 type usageRequestRow struct {
 	StartedAt      time.Time
 	RequestID      string
@@ -340,6 +345,10 @@ type usageRequestRow struct {
 	// 「有没有值」一起读回来。文本的形状与 money.Amount 的 String() 一致
 	// （定点十进制、小数保留到 8 位），两处打出来的是同一种写法。
 	FinalAmount sql.NullString
+	// PricingRuleID 是定这一单价的计价规则。可空：请求没有落到任何规则上时库里
+	// 那一列就是 NULL（见 store.BillingRequestRow 的说明）。规则事后可变，而账单
+	// 要能回答「当时按哪条规则算的」，所以它跟着这一行一起打出来。
+	PricingRuleID sql.NullInt64
 
 	Asset         string
 	UpstreamModel sql.NullString
@@ -383,7 +392,7 @@ func printUsageEvents(w io.Writer, rows []usageEventRow, more bool) {
 //
 // 结算金额那一栏对没结算的行打 `-`：pending 的行结出来是 0，与「还没结算」在
 // 数字上分不开，而这两件事的处置完全不同（那一栏进 JSON 是 null，见
-// usageRequestsDoc）。
+// usageRequestsDoc）。末尾的规则那一栏同一条：没落到任何规则上时打 `-`，不打 0。
 func printUsageRequests(w io.Writer, rows []usageRequestRow, more bool) {
 	if len(rows) == 0 {
 		_, _ = fmt.Fprintln(w, "这个范围内没有计费请求。")
@@ -392,14 +401,15 @@ func printUsageRequests(w io.Writer, rows []usageRequestRow, more bool) {
 
 	tw := newTableWriter(w)
 	p := newPalette(w)
-	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 		p.bold("时刻"), p.bold("request_id"), p.bold("用户 ID"), p.bold("用户名"),
-		p.bold("模型"), p.bold("状态"), p.bold("预留"), p.bold("结算"))
+		p.bold("模型"), p.bold("状态"), p.bold("预留"), p.bold("结算"), p.bold("规则"))
 	for _, r := range rows {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			p.dim(r.StartedAt.Format(longStampLayout)), p.bold(r.RequestID),
 			p.bold(strconv.FormatInt(r.UserID, 10)), p.bold(r.Username),
-			r.CanonicalModel, r.Status, r.ReservedAmount.String(), r.settledCell())
+			r.CanonicalModel, r.Status, r.ReservedAmount.String(), r.settledCell(),
+			r.pricingRuleCell())
 	}
 	_ = tw.Flush()
 	printTruncatedListNote(w, more, len(rows))
@@ -411,6 +421,18 @@ func (r usageRequestRow) settledCell() string {
 		return "-"
 	}
 	return r.FinalAmount.String
+}
+
+// pricingRuleCell 是规则那一栏的表格写法，没落到任何规则上时打 `-`。
+//
+// 打 `-` 而不是 0：规则 id 从 1 开始，0 在读数的一方看起来仍像「一条编号为 0 的
+// 规则」。这一栏进 JSON 是 null（见 usageRequestsDoc）——两处都由 PricingRuleID
+// 这一个字段推出来，改了判别「有没有值」的那条线，两边会一起动。
+func (r usageRequestRow) pricingRuleCell() string {
+	if !r.PricingRuleID.Valid {
+		return "-"
+	}
+	return strconv.FormatInt(r.PricingRuleID.Int64, 10)
 }
 
 // usageFilters 是这次查询用的那几个筛选条件，供机器可读输出复述。
@@ -481,8 +503,9 @@ func usageEventsDoc(rows []usageEventRow, more bool, filters usageFilters) map[s
 
 // usageRequestsDoc 组装 usage requests 的机器可读输出。
 //
-// 结算金额这一档没结算就是 null，不打 `-`：占位符进 JSON 比留空更坏，按数字解析
-// 它的一方会拿到一个解析不了的值（见 format.go 上面那几段）。
+// 结算金额与规则这两档没值时是 null，不打 `-`：占位符进 JSON 比留空更坏，按数字
+// 解析它的一方会拿到一个解析不了的值（见 format.go 上面那几段）。两个字段的命名
+// 与库里那两列对得上（final_amount、pricing_rule_id）。
 func usageRequestsDoc(rows []usageRequestRow, more bool, filters usageFilters) map[string]any {
 	summary := filters.summary()
 	summary["total"] = len(rows)
@@ -503,6 +526,7 @@ func usageRequestsDoc(rows []usageRequestRow, more bool, filters usageFilters) m
 			"status":          r.Status,
 			"reserved_amount": jsonAmount(r.ReservedAmount),
 			"final_amount":    nullableString(r.FinalAmount.String),
+			"pricing_rule_id": jsonNullInt64(r.PricingRuleID),
 			"asset":           r.Asset,
 			"error_code":      nullableString(r.ErrorCode.String),
 		})
