@@ -38,6 +38,34 @@ func bareUser(t *testing.T, db *sql.DB) int64 {
 	return id
 }
 
+// fundPayable 通过**真实路径**给一个商户记下分成：一个已开户的付款人消费一次，
+// 分成落进 merchant_payable:<商户>。
+//
+// 不直接改余额、也不手插分录：那样造出来的分成在账本里没有出处，而「余额等于
+// 账本推出来的值」正是本包要保证的东西（同 seed 的说明）。提现申请现在会先核
+// 这个科目的余额，所以每一条要申请成功的用例都得先走这一步。
+//
+// merchantID 不要求真实存在：给幽灵商户记分成正是「外键守卫」那条用例要造的
+// 状态——申请最后该倒在 payout_requests 的外键上。
+func fundPayable(t *testing.T, db *sql.DB, merchantID int64, amount string) {
+	t.Helper()
+	share, err := money.Parse(amount)
+	if err != nil {
+		t.Fatalf("解析分成金额失败: %v", err)
+	}
+	payer := seed(t, db, amount)
+	txn, buildErr := ledger.Consume(ledger.ConsumeParams{
+		TxnID: ledger.NewTxnID(), UserID: payer, Amount: share,
+		Asset: ledger.AssetCNY, MerchantID: merchantID, MerchantShare: share,
+	})
+	if buildErr != nil {
+		t.Fatalf("构造分成消费失败: %v", buildErr)
+	}
+	if _, postErr := New(db).PostTransaction(context.Background(), txn); postErr != nil {
+		t.Fatalf("记分成失败: %v", postErr)
+	}
+}
+
 // payoutOf 读一条提现单现在的样子。
 //
 // 走 scanPayout（生产的那一份解析），不在这里另写一遍 SELECT：另写一遍的话，
@@ -137,11 +165,13 @@ func TestRequestPayoutWritesRowAndFreeze(t *testing.T) {
 	s := New(db)
 	ctx := context.Background()
 	merchant := bareUser(t, db)
+	fundPayable(t, db, merchant, "12.5")
 	txnID := ledger.NewTxnID()
 
 	row, applied, err := s.RequestPayout(ctx, RequestPayoutInput{
 		TxnID: txnID, UserID: merchant, Amount: money.MustParse("12.5"),
 		Asset: ledger.AssetCNY, Destination: []byte(`{"bank":"placeholder-bank"}`),
+		Ref: "REQ-A",
 	})
 	if err != nil {
 		t.Fatalf("申请提现失败: %v", err)
@@ -181,6 +211,7 @@ func TestRequestPayoutWritesRowAndFreeze(t *testing.T) {
 		{
 			Account: ledger.PayoutAccount(row.ID).String(), Asset: "CNY",
 			Amount: "12.50000000", EntryType: string(ledger.EntryPayoutRequest),
+			Memo: "提现申请（单据 REQ-A）",
 		},
 	})
 
@@ -206,10 +237,11 @@ func TestRequestPayoutReplayKeepsTheSameRow(t *testing.T) {
 	s := New(db)
 	ctx := context.Background()
 	merchant := bareUser(t, db)
+	fundPayable(t, db, merchant, "7")
 	txnID := ledger.NewTxnID()
 	in := RequestPayoutInput{
 		TxnID: txnID, UserID: merchant, Amount: money.MustParse("7"),
-		Asset: ledger.AssetCNY, Destination: []byte(`{"bank":"b"}`),
+		Asset: ledger.AssetCNY, Destination: []byte(`{"bank":"b"}`), Ref: "REQ-B",
 	}
 
 	first, applied, err := s.RequestPayout(ctx, in)
@@ -248,10 +280,12 @@ func TestRequestPayoutSameRefDifferentAmountIsAConflict(t *testing.T) {
 	s := New(db)
 	ctx := context.Background()
 	merchant := bareUser(t, db)
+	fundPayable(t, db, merchant, "7")
 	txnID := ledger.NewTxnID()
 
 	first, _, err := s.RequestPayout(ctx, RequestPayoutInput{
 		TxnID: txnID, UserID: merchant, Amount: money.MustParse("7"), Asset: ledger.AssetCNY,
+		Ref: "REQ-C",
 	})
 	if err != nil {
 		t.Fatalf("第一次申请失败: %v", err)
@@ -259,6 +293,7 @@ func TestRequestPayoutSameRefDifferentAmountIsAConflict(t *testing.T) {
 
 	_, _, err = s.RequestPayout(ctx, RequestPayoutInput{
 		TxnID: txnID, UserID: merchant, Amount: money.MustParse("9"), Asset: ledger.AssetCNY,
+		Ref: "REQ-C",
 	})
 	if !errors.Is(err, ErrTxnConflict) {
 		t.Fatalf("同键异参应当返回 ErrTxnConflict，得到 %v", err)
@@ -268,6 +303,88 @@ func TestRequestPayoutSameRefDifferentAmountIsAConflict(t *testing.T) {
 	}
 	if got := accountTotal(t, db, ledger.PayoutAccount(first.ID)); got != "7.00000000" {
 		t.Errorf("冲突之后待付 = %s，期望仍是 7.00000000（没有被写成 9）", got)
+	}
+}
+
+// 同一个申请单号配不同的收款信息不是重放，而是冲突。
+//
+// 收款信息不在分录里，同一条交易比不出它来，所以这一栏单独判一次：放过去的话，
+// 重跑一条旧命令会把那张单子的收款账号悄悄换掉，而账面上没有任何痕迹。
+//
+// 比较按 jsonb 的等值口径：键序与空白不同、内容相同仍是重放——那是同一份收款
+// 信息，把它判成冲突会让重跑一条命令看起来像换了账号。
+func TestRequestPayoutSameRefDifferentDestinationIsAConflict(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+	merchant := bareUser(t, db)
+	fundPayable(t, db, merchant, "7")
+	txnID := ledger.NewTxnID()
+	in := RequestPayoutInput{
+		TxnID: txnID, UserID: merchant, Amount: money.MustParse("7"), Asset: ledger.AssetCNY,
+		Destination: []byte(`{"bank":"placeholder-bank"}`), Ref: "REQ-DEST",
+	}
+
+	first, applied, err := s.RequestPayout(ctx, in)
+	if err != nil || !applied {
+		t.Fatalf("第一次申请: applied=%v err=%v", applied, err)
+	}
+
+	// 空白不同、内容相同：jsonb 归一之后是同一份，按重放处理。
+	same := in
+	same.Destination = []byte(`{ "bank" : "placeholder-bank" }`)
+	if _, replayApplied, replayErr := s.RequestPayout(ctx, same); replayErr != nil || replayApplied {
+		t.Errorf("内容相同的收款信息应当判成重放: applied=%v err=%v", replayApplied, replayErr)
+	}
+
+	// 换一份内容：冲突，且库里那一份一个字都不能变。
+	changed := in
+	changed.Destination = []byte(`{"bank":"another-bank"}`)
+	_, _, err = s.RequestPayout(ctx, changed)
+	if !errors.Is(err, ErrTxnConflict) {
+		t.Fatalf("同键异收款信息应当返回 ErrTxnConflict，得到 %v", err)
+	}
+	if n := payoutRows(t, db, merchant); n != 1 {
+		t.Errorf("冲突之后库里 %d 行提现单，期望仍是 1 行", n)
+	}
+	if got := string(payoutOf(t, db, first.ID).Destination); got != `{"bank": "placeholder-bank"}` {
+		t.Errorf("冲突之后收款信息 = %s，期望仍是第一份", got)
+	}
+}
+
+// 分成余额不够时拒掉，一笔都不写，报错里带两个数。
+//
+// 「够不够」要拿两个数说清：只说「余额不足」，运维得自己去查那一格，而这一条
+// 最常见的成因是分成本身还没记进账本（见 funding 的说明）。
+func TestRequestPayoutRejectsInsufficientPayable(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+	merchant := bareUser(t, db)
+	fundPayable(t, db, merchant, "5")
+	txnID := ledger.NewTxnID()
+
+	_, _, err := s.RequestPayout(ctx, RequestPayoutInput{
+		TxnID: txnID, UserID: merchant, Amount: money.MustParse("5.01"),
+		Asset: ledger.AssetCNY, Ref: "REQ-NSF",
+	})
+	if !errors.Is(err, ErrInsufficientPayable) {
+		t.Fatalf("余额不足应当返回 ErrInsufficientPayable，得到 %v", err)
+	}
+	for _, want := range []string{"商户 " + itoa(merchant), "5.00000000", "5.01000000"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("报错 = %v，期望含 %q", err, want)
+		}
+	}
+	if n := payoutRows(t, db, merchant); n != 0 {
+		t.Errorf("被拒的申请留下了 %d 行提现单", n)
+	}
+	if got := entriesOf(t, db, txnID); len(got) != 0 {
+		t.Errorf("被拒的申请写下了 %d 条分录：%+v", len(got), got)
+	}
+	// 分成科目原样：被拒的那一次一分钱都没动它。
+	if got := accountTotal(t, db, ledger.MerchantPayableAccount(merchant)); got != "5.00000000" {
+		t.Errorf("被拒之后分成科目 = %s，期望仍是 5.00000000", got)
 	}
 }
 
@@ -303,7 +420,18 @@ func TestRequestPayoutRejectsBadInput(t *testing.T) {
 			Amount: money.MustParse("1"), Asset: ledger.AssetCNY}, "缺少 txn_id"},
 		{"收款信息不是 JSON", RequestPayoutInput{TxnID: ledger.NewTxnID(), UserID: merchant,
 			Amount: money.MustParse("1"), Asset: ledger.AssetCNY, Destination: []byte("not-json")},
-			"收款信息不是合法的 JSON"},
+			"收款信息必须是合法的 JSON 对象"},
+		// 合法 JSON 但不是对象：字符串、数组、null 都取不出字段，而打款通道按
+		// 字段取值。三种形状各占一条，判「首字符是 {」的那一格才算逐条钉住。
+		{"收款信息是字符串", RequestPayoutInput{TxnID: ledger.NewTxnID(), UserID: merchant,
+			Amount: money.MustParse("1"), Asset: ledger.AssetCNY, Destination: []byte(`"abc"`)},
+			"收款信息必须是合法的 JSON 对象"},
+		{"收款信息是数组", RequestPayoutInput{TxnID: ledger.NewTxnID(), UserID: merchant,
+			Amount: money.MustParse("1"), Asset: ledger.AssetCNY, Destination: []byte(`[1]`)},
+			"收款信息必须是合法的 JSON 对象"},
+		{"收款信息是 null", RequestPayoutInput{TxnID: ledger.NewTxnID(), UserID: merchant,
+			Amount: money.MustParse("1"), Asset: ledger.AssetCNY, Destination: []byte(`null`)},
+			"收款信息必须是合法的 JSON 对象"},
 	}
 
 	for _, tc := range cases {
@@ -337,12 +465,13 @@ func TestPayoutFamilyRejectsZeroIDs(t *testing.T) {
 	ctx := context.Background()
 	merchant := bareUser(t, db)
 	reviewer := bareUser(t, db)
+	fundPayable(t, db, merchant, "1")
 
 	// 一条待审批的单子：「审批人 / 驳回人为 0」那两格要一个真的存在的单号，
 	// 否则先撞在「找不到单子」上，测不到要测的那一个守卫。
 	row, _, err := s.RequestPayout(ctx, RequestPayoutInput{
 		TxnID: ledger.NewTxnID(), UserID: merchant,
-		Amount: money.MustParse("1"), Asset: ledger.AssetCNY,
+		Amount: money.MustParse("1"), Asset: ledger.AssetCNY, Ref: "REQ-ZERO",
 	})
 	if err != nil {
 		t.Fatalf("建待审批的单子失败: %v", err)
@@ -412,12 +541,13 @@ func TestPayoutFreezeIsReleasedOrSettled(t *testing.T) {
 	ctx := context.Background()
 	merchant := bareUser(t, db)
 	reviewer := bareUser(t, db)
+	fundPayable(t, db, merchant, "28.5")
 
 	request := func(amount string) Payout {
 		t.Helper()
 		row, _, err := s.RequestPayout(ctx, RequestPayoutInput{
 			TxnID: ledger.NewTxnID(), UserID: merchant, Amount: money.MustParse(amount),
-			Asset: ledger.AssetCNY,
+			Asset: ledger.AssetCNY, Ref: "REQ-FREEZE-" + amount,
 		})
 		if err != nil {
 			t.Fatalf("申请 %s 失败: %v", amount, err)
@@ -429,14 +559,14 @@ func TestPayoutFreezeIsReleasedOrSettled(t *testing.T) {
 	rejected := request("7")
 	toBePaid := request("9")
 
-	// 分成科目上是三条申请的和（负数：欠商户的分成多了一笔）；待付科目上是
-	// 同样多的正数。钱在申请这一步就全部冻住了。
-	const requested = "-28.50000000"
+	// 分成科目上先是 +28.5（fundPayable 记下的那一笔），三条申请各冻走一份，
+	// 合计正好把它清到 0；待付科目上是同样多的正数。钱在申请这一步就全部冻住了。
+	const funded = "28.50000000"
 	if got := merchantPayoutTotal(t, db, merchant); got != "28.50000000" {
 		t.Fatalf("申请之后待付合计 = %s，期望 28.50000000", got)
 	}
-	if got := accountTotal(t, db, ledger.MerchantPayableAccount(merchant)); got != requested {
-		t.Fatalf("申请之后分成科目 = %s，期望 %s", got, requested)
+	if got := accountTotal(t, db, ledger.MerchantPayableAccount(merchant)); got != "0.00000000" {
+		t.Fatalf("申请之后分成科目 = %s，期望 0.00000000（%s 全部冻走了）", got, funded)
 	}
 
 	// 驳回：解冻那 7 元。分录是申请那一组的镜像。
@@ -475,9 +605,9 @@ func TestPayoutFreezeIsReleasedOrSettled(t *testing.T) {
 	if got := accountTotal(t, db, ledger.PayoutAccount(rejected.ID)); got != "0.00000000" {
 		t.Errorf("驳回之后那条待付 = %s，期望 0.00000000", got)
 	}
-	// 分成科目跟着回到 -21.5：那 7 元回到「他还能申请」的那一份里。
-	if got := accountTotal(t, db, ledger.MerchantPayableAccount(merchant)); got != "-21.50000000" {
-		t.Errorf("驳回之后分成科目 = %s，期望 -21.50000000（解冻的那 7 元回来了）", got)
+	// 分成科目跟着回到 7：那 7 元回到「他还能申请」的那一份里。
+	if got := accountTotal(t, db, ledger.MerchantPayableAccount(merchant)); got != "7.00000000" {
+		t.Errorf("驳回之后分成科目 = %s，期望 7.00000000（解冻的那 7 元回来了）", got)
 	}
 
 	// 打款：9 元从待付出账。它必须先被批准。
@@ -549,9 +679,10 @@ func TestRejectPayoutReplayWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	merchant := bareUser(t, db)
 	reviewer := bareUser(t, db)
+	fundPayable(t, db, merchant, "4")
 	row, _, err := s.RequestPayout(ctx, RequestPayoutInput{
 		TxnID: ledger.NewTxnID(), UserID: merchant, Amount: money.MustParse("4"),
-		Asset: ledger.AssetCNY,
+		Asset: ledger.AssetCNY, Ref: "REQ-REJ",
 	})
 	if err != nil {
 		t.Fatalf("申请失败: %v", err)
@@ -575,8 +706,8 @@ func TestRejectPayoutReplayWritesNothing(t *testing.T) {
 	if got := accountTotal(t, db, ledger.PayoutAccount(row.ID)); got != "0.00000000" {
 		t.Errorf("重放之后待付 = %s，期望 0.00000000（没有被解冻两次）", got)
 	}
-	if got := accountTotal(t, db, ledger.MerchantPayableAccount(merchant)); got != "0.00000000" {
-		t.Errorf("重放之后分成科目 = %s，期望 0.00000000（那 4 元没有被还两次）", got)
+	if got := accountTotal(t, db, ledger.MerchantPayableAccount(merchant)); got != "4.00000000" {
+		t.Errorf("重放之后分成科目 = %s，期望 4.00000000（那 4 元只被还回来一次）", got)
 	}
 	if got := entriesOf(t, db, txnID); len(got) != 2 {
 		t.Errorf("重放之后这笔交易有 %d 条分录，期望 2 条", len(got))
@@ -592,9 +723,10 @@ func TestPayPayoutRequiresApproveFirst(t *testing.T) {
 	s := New(db)
 	ctx := context.Background()
 	merchant := bareUser(t, db)
+	fundPayable(t, db, merchant, "5")
 	row, _, err := s.RequestPayout(ctx, RequestPayoutInput{
 		TxnID: ledger.NewTxnID(), UserID: merchant, Amount: money.MustParse("3"),
-		Asset: ledger.AssetCNY,
+		Asset: ledger.AssetCNY, Ref: "REQ-PAY-A",
 	})
 	if err != nil {
 		t.Fatalf("申请失败: %v", err)
@@ -620,7 +752,7 @@ func TestPayPayoutRequiresApproveFirst(t *testing.T) {
 	// 驳回过的单子同样打不了款：终态就是终态。
 	rejected, _, rerr := s.RequestPayout(ctx, RequestPayoutInput{
 		TxnID: ledger.NewTxnID(), UserID: merchant, Amount: money.MustParse("2"),
-		Asset: ledger.AssetCNY,
+		Asset: ledger.AssetCNY, Ref: "REQ-PAY-B",
 	})
 	if rerr != nil {
 		t.Fatalf("申请失败: %v", rerr)
@@ -658,9 +790,10 @@ func TestPayPayoutReplayAndRefChangeIsAConflict(t *testing.T) {
 	s := New(db)
 	ctx := context.Background()
 	merchant := bareUser(t, db)
+	fundPayable(t, db, merchant, "5")
 	row, _, err := s.RequestPayout(ctx, RequestPayoutInput{
 		TxnID: ledger.NewTxnID(), UserID: merchant, Amount: money.MustParse("5"),
-		Asset: ledger.AssetCNY,
+		Asset: ledger.AssetCNY, Ref: "REQ-PAID",
 	})
 	if err != nil {
 		t.Fatalf("申请失败: %v", err)
@@ -711,10 +844,11 @@ func TestApprovePayoutRecordsReviewerAndIsIdempotent(t *testing.T) {
 	merchant := bareUser(t, db)
 	first := bareUser(t, db)
 	second := bareUser(t, db)
+	fundPayable(t, db, merchant, "6")
 
 	row, _, err := s.RequestPayout(ctx, RequestPayoutInput{
 		TxnID: ledger.NewTxnID(), UserID: merchant, Amount: money.MustParse("6"),
-		Asset: ledger.AssetCNY,
+		Asset: ledger.AssetCNY, Ref: "REQ-APPROVE",
 	})
 	if err != nil {
 		t.Fatalf("申请失败: %v", err)
@@ -782,9 +916,10 @@ func TestPayoutStateErrorNamesBothStates(t *testing.T) {
 	s := New(db)
 	ctx := context.Background()
 	merchant := bareUser(t, db)
+	fundPayable(t, db, merchant, "1")
 	row, _, err := s.RequestPayout(ctx, RequestPayoutInput{
 		TxnID: ledger.NewTxnID(), UserID: merchant, Amount: money.MustParse("1"),
-		Asset: ledger.AssetCNY,
+		Asset: ledger.AssetCNY, Ref: "REQ-STATE",
 	})
 	if err != nil {
 		t.Fatalf("申请失败: %v", err)
@@ -826,20 +961,25 @@ func TestPayoutMissingIDIsAConflict(t *testing.T) {
 	}
 }
 
-// 建单要求商户真实存在：外键挡下，并且**账本上一笔都不留**。
+// 建单要求商户真实存在：外键挡下，并且**这次申请在账本上一笔都不留**。
 //
 // 这一条挡的是账本那一边的漏洞：merchant_payable:<id> 是自由拼出来的科目，
 // 没有外键指着 users，所以「这个商户真的存在」只能靠 payout_requests 那一列。
 // 少了它，一张挂在幽灵用户上的单子会让分成科目上多出一笔永远对不上的余额。
+//
+// 先给幽灵商户记一笔分成：没有它，申请会先倒在「分成余额不足」上，外键那一道
+// 守卫就测不到了。那正是这道守卫要防的状态——账上已经有分成了，却没有这个人。
 func TestRequestPayoutForUnknownUserIsRejected(t *testing.T) {
 	db := testDB(t)
 	s := New(db)
 	ctx := context.Background()
 	ghost := int64(1 << 40)
+	fundPayable(t, db, ghost, "1")
+	txnID := ledger.NewTxnID()
 
 	_, _, err := s.RequestPayout(ctx, RequestPayoutInput{
-		TxnID: ledger.NewTxnID(), UserID: ghost, Amount: money.MustParse("1"),
-		Asset: ledger.AssetCNY,
+		TxnID: txnID, UserID: ghost, Amount: money.MustParse("1"),
+		Asset: ledger.AssetCNY, Ref: "REQ-GHOST",
 	})
 	if err == nil {
 		t.Fatal("给一个不存在的商户建单应当被拒")
@@ -847,8 +987,11 @@ func TestRequestPayoutForUnknownUserIsRejected(t *testing.T) {
 	if !errors.Is(err, ErrConstraintViolation) {
 		t.Errorf("期望外键冲突（ErrConstraintViolation），得到 %v", err)
 	}
-	if got := accountTotal(t, db, ledger.MerchantPayableAccount(ghost)); got != "0.00000000" {
-		t.Errorf("被拒的申请在 merchant_payable:%d 上留下了 %s", ghost, got)
+	if got := entriesOf(t, db, txnID); len(got) != 0 {
+		t.Errorf("被拒的申请写下了 %d 条分录：%+v", len(got), got)
+	}
+	if got := accountTotal(t, db, ledger.MerchantPayableAccount(ghost)); got != "1.00000000" {
+		t.Errorf("被拒的申请动了 merchant_payable:%d，现在 %s，期望仍是记下的 1.00000000", ghost, got)
 	}
 	if n := payoutRows(t, db, ghost); n != 0 {
 		t.Errorf("被拒的申请留下了 %d 行提现单", n)

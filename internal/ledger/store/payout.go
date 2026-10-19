@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -63,11 +64,15 @@ const (
 	PayoutPaid PayoutStatus = "paid"
 )
 
-// Label 给状态值一个中文说法，供错误信息与回执用。
+// Label 给状态值一个中文说法。
 //
-// 库里那一列存的是英文取值（pending / approved / …），而这两处都是打给人看的
-// 句子；两个都给出来（`pending（待审批）`），读的人既认得库里的值，也看得懂
-// 现在停在哪一步。库里将来多出来的取值（例如某个取消状态）照原样打，不猜中文。
+// 库里那一列存的是英文取值（pending / approved / …），而打给人看的地方要中文。
+// 本方法**只回中文**；「英文（中文）」那种并排的写法由调用方拼（回执在
+// cmd/larkaxctl 的 printPayout，错误在本包的 payoutStateError）——两处拼出来
+// 一样，是因为拼的时候都调了这一个方法，而不是各写一份对照表。
+//
+// 库里将来多出来的取值（例如某个取消状态）照原样打，不猜中文：认不出的状态
+// 原样露出来比猜错强，而它至少还能与库里的值逐字对上。
 //
 // 它是导出方法而不是本文件里的一个私有函数：错误信息由本包写，回执由命令行写，
 // 两处都要说这同一个状态——收在两处各写一份的话，某一处加了新状态之后，另一处
@@ -129,6 +134,15 @@ var ErrNoPayoutRequest = errors.New("没有这条提现单")
 //
 // **它不是参数错**：命令没有写错，是数据不在那个状态上。
 var ErrPayoutState = errors.New("提现单的状态不允许这次动作")
+
+// ErrInsufficientPayable 表示商户的分成余额不够这次提现申请。
+//
+// 它与 ErrInsufficientBalance 分开：那个说的是用户钱包（user_wallets 那张快照）
+// 被扣成负数，这个说的是 merchant_payable 科目的余额小于申请额——商户要提的钱
+// 比他还没拿到的分成多。两句话看起来都是「钱不够」，但看的地方不同（一张快照
+// vs 一个科目的分录之和），下一步也不同：前者去查这一笔为什么多扣了，后者去
+// 查这个商户的分成为什么还没进账。
+var ErrInsufficientPayable = errors.New("商户的分成余额不足")
 
 // payoutColumns 是读回一条提现单时取的列，顺序与 scanPayout 一一对应。
 //
@@ -235,13 +249,22 @@ type RequestPayoutInput struct {
 	// TxnID 由调用方按幂等键（外部申请单号）推出来。同一个键重放到达时，
 	// 这次调用什么都不写，返回 applied=false。
 	TxnID ledger.TxnID
+	// Ref 是这张提现单的申请单号，进 payout 那条分录的备注（见
+	// ledger.PayoutRequestParams.Ref）。重放判定也要拿它算一遍期望值——
+	// 同一个交易号配不同的单号是冲突，不是重放。
+	Ref string
 	// UserID 是申请提现的商户。它必须是 users 里真实存在的一行：那一列有
 	// 外键（命令行在更早一步就把标识解析成了用户）。
 	UserID int64
 	Amount money.Amount
 	Asset  ledger.Asset
-	// Destination 是收款信息，必须是合法 JSON（列是 jsonb）。留空表示
-	// 「这一栏还没有内容」，落库成 `{}`——那是列的默认值，不是把空值当合法。
+	// Destination 是收款信息，必须是一个合法的 **JSON 对象**（列是 jsonb，
+	// 而命令与文档说的都是「一段 JSON 对象」）。留空表示「这一栏还没有内容」，
+	// 落库成 `{}`——那是列的默认值，不是把空值当合法。
+	//
+	// 它**参与重放判定**：同一个申请单号配不同的收款信息是冲突，不是重放。
+	// 这一栏事后没有修改命令，放过去的话库里会留下一份错的信息，而重跑
+	// 同一条命令又不会再写。
 	Destination []byte
 }
 
@@ -266,8 +289,10 @@ func (s *Store) RequestPayout(ctx context.Context, in RequestPayoutInput) (Payou
 	if !in.Asset.Valid() {
 		return Payout{}, false, fmt.Errorf("资产 %q 不受支持（目前只有 %s）", in.Asset, ledger.AssetCNY)
 	}
-	if len(in.Destination) > 0 && !json.Valid(in.Destination) {
-		return Payout{}, false, errors.New("收款信息不是合法的 JSON")
+	if len(in.Destination) > 0 {
+		if destErr := validateDestination(in.Destination); destErr != nil {
+			return Payout{}, false, destErr
+		}
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -298,6 +323,7 @@ func (s *Store) RequestPayout(ctx context.Context, in RequestPayoutInput) (Payou
 			UserID:   in.UserID,
 			Amount:   in.Amount,
 			Asset:    in.Asset,
+			Ref:      in.Ref,
 		})
 		if buildErr != nil {
 			return Payout{}, false, buildErr
@@ -305,11 +331,60 @@ func (s *Store) RequestPayout(ctx context.Context, in RequestPayoutInput) (Payou
 		if conflictErr := sameStoredTxn(stored, expected); conflictErr != nil {
 			return Payout{}, false, conflictErr
 		}
+		// 收款信息不在分录里，同一条交易比不出它来，得单独比一次：这一栏
+		// 事后没有修改命令，放过去的话库里会留下一份错的信息。
+		//
+		// 比较交给库做（`=::jsonb`）而不是比字符串：jsonb 会归一键序与空白，
+		// `{"a":1,"b":2}` 与 `{"b":2,"a":1}` 是同一份收款信息，按文本比会
+		// 把它们判成冲突。
+		var sameDestination bool
+		if destErr := tx.QueryRowContext(ctx, `
+			SELECT destination = $2::jsonb FROM payout_requests WHERE id = $1`,
+			payoutID, string(destinationOrEmptyObject(in.Destination))).Scan(&sameDestination); destErr != nil {
+			return Payout{}, false, fmt.Errorf("核对收款信息失败: %w", destErr)
+		}
+		if !sameDestination {
+			return Payout{}, false, fmt.Errorf(
+				"%w: 申请单号对应的这条提现单已经存在，但收款信息与这次要写的不一样；"+
+					"收款信息事后不能改，要换收款方式只能驳回后重新申请", ErrTxnConflict)
+		}
 		row, readErr := payoutByID(ctx, tx, payoutID)
 		if readErr != nil {
 			return Payout{}, false, readErr
 		}
 		return row, false, nil
+	}
+
+	// 申请要把申请额从商户的分成里挪进待付，先确认那里够。
+	//
+	// 余额取科目分录之和（merchant_payable 没有快照行），并且读的是**当前事务**
+	// 里的余额。锁按科目名字挂在事务上：同一商户的两个不同申请单号会在这里排队，
+	// 不会双双读完余额再各自扣一次。
+	//
+	// 让这个科目变小的路径有两条：提现申请，以及退款把分成冲回去。光在申请这一侧
+	// 拿锁只把**申请之间**串行化，退款那条路不排队的话，「读完余额到写入之间」仍
+	// 有一个窗口——一边校验通过，另一边已经把它冲走了。所以 store.PostTransaction
+	// 对分录里出现的 merchant_payable 科目取同一把锁（见 lockPayableAccounts），
+	// 两条路因此落在同一条串行线上。消费的分成与驳回都只让它变大；Settle 与提现
+	// 申请是同一个形状，它还没有调用方，接的时候同样要拿这把锁。加锁顺序固定为
+	// 「交易键 → 科目」，两边一致。
+	//
+	// 这条校验保证的是「申请时不能提平台还不欠的钱」，不是「这个科目永远非负」：
+	// 退款把它冲成负数是**允许**的——负的意思是平台多付给了商户、商户欠平台
+	// （应收账款），账本仍然平衡，业务上再走追回。退款不为此加校验。
+	payable := ledger.MerchantPayableAccount(in.UserID)
+	if lockErr := lockAccount(ctx, tx, payable); lockErr != nil {
+		return Payout{}, false, lockErr
+	}
+	available, balanceErr := accountBalanceInTx(ctx, tx, payable, in.Asset)
+	if balanceErr != nil {
+		return Payout{}, false, balanceErr
+	}
+	if available.Cmp(in.Amount) < 0 {
+		return Payout{}, false, fmt.Errorf(
+			"%w：商户 %d 的分成余额 %s，这次要提 %s。先确认这个商户的分成已经记进账本，"+
+				"或者少提一点——不能提平台还不欠的钱",
+			ErrInsufficientPayable, in.UserID, available, in.Amount)
 	}
 
 	row, err := insertPayoutRequest(ctx, tx, in)
@@ -322,6 +397,7 @@ func (s *Store) RequestPayout(ctx context.Context, in RequestPayoutInput) (Payou
 		UserID:   in.UserID,
 		Amount:   in.Amount,
 		Asset:    in.Asset,
+		Ref:      in.Ref,
 	})
 	if err != nil {
 		return Payout{}, false, err
@@ -335,19 +411,79 @@ func (s *Store) RequestPayout(ctx context.Context, in RequestPayoutInput) (Payou
 	return row, true, nil
 }
 
+// validateDestination 要求收款信息是一个 JSON **对象**（顶层的 `{…}`）。
+//
+// 只判 json.Valid 不够：`"abc"`、`[1]`、`null` 都是合法 JSON，落进 jsonb 之后
+// 看着也像「填过了」，而命令与文档说的都是「一段 JSON 对象」。打款通道是按字段
+// 取值的，数组或 null 在上面一个字段都取不到——那种失败要到打款那一刻才现形，
+// 而那时单子已经批过了。
+func validateDestination(raw []byte) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
+		return fmt.Errorf("收款信息必须是合法的 JSON 对象（形如 {\"bank\":\"…\"}），得到 %q", string(trimmed))
+	}
+	return nil
+}
+
+// destinationOrEmptyObject 把「还没填」归一成空对象。
+//
+// 空收款信息落成 `{}`：列的默认值。写成 NULL 会撞上 NOT NULL，而那一列本来就是
+// 「还没有内容」的容器，不是「不知道」。
+func destinationOrEmptyObject(raw []byte) []byte {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return []byte("{}")
+	}
+	return raw
+}
+
+// lockAccount 把同一个科目的写入串行化（事务级 advisory lock，随 commit /
+// rollback 一起释放，不需要手工解锁）。
+//
+// 它守的是「读余额 → 与申请额比 → 写分录」这三步之间不留窗口：两个并发申请用
+// 两个不同的申请单号，各自的那把交易锁互不相干，只有这把科目锁能让它们排队。
+//
+// **任何让这个科目变小的写路径都要先拿同一把锁**，否则窗口照样存在。
+func lockAccount(ctx context.Context, tx *sql.Tx, acct ledger.Account) error {
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, acct.String()); err != nil {
+		return fmt.Errorf("锁定科目 %s 失败: %w", acct, err)
+	}
+	return nil
+}
+
+// accountBalanceInTx 读一个科目在某种资产上的余额（分录之和），在调用方的事务里。
+//
+// 与 AccountBalance 同一个口径（借为正、贷为负），差别只有两处：它读的是**当前
+// 事务**已经写进去的那些行（提到事务外读，判的就不是同一个时刻），并且只按科目
+// 原文精确匹配——会走别名归一化的只有 user 科目（见 read.go 的
+// userAccountCanonicalSQL），merchant_payable 没有别的写法。
+//
+// 金额取 `::numeric(20,8)::text` 再交给 money.Parse：库里的 numeric 比 money 宽，
+// 放不进 int64 时报错而不是给一个夹住的数（同 AccountBalance 的理由）。
+func accountBalanceInTx(ctx context.Context, tx *sql.Tx, acct ledger.Account, asset ledger.Asset) (money.Amount, error) {
+	var raw string
+	err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(amount), 0)::numeric(20, 8)::text
+		FROM ledger_entries WHERE account = $1 AND asset = $2`,
+		acct.String(), string(asset)).Scan(&raw)
+	if err != nil {
+		return money.Zero, fmt.Errorf("读科目 %s 的余额失败: %w", acct, err)
+	}
+	balance, parseErr := money.Parse(raw)
+	if parseErr != nil {
+		return money.Zero, fmt.Errorf("科目 %s 的余额读不出来（%s）: %w", acct, raw, parseErr)
+	}
+	return balance, nil
+}
+
 // insertPayoutRequest 写一行 pending 的提现单，返回库里那一行。
 func insertPayoutRequest(ctx context.Context, tx *sql.Tx, in RequestPayoutInput) (Payout, error) {
-	// 空收款信息落成 `{}`：列的默认值。写成 NULL 会撞上 NOT NULL，
-	// 而那一列本来就是「还没有内容」的容器，不是「不知道」。
-	destination := in.Destination
-	if len(destination) == 0 {
-		destination = []byte("{}")
-	}
 	row, err := scanPayout(tx.QueryRowContext(ctx, `
 		INSERT INTO payout_requests (merchant_user_id, asset, amount, destination, status)
 		VALUES ($1, $2, $3::numeric, $4::jsonb, 'pending')
 		RETURNING `+payoutColumns,
-		in.UserID, string(in.Asset), in.Amount.String(), string(destination)).Scan)
+		in.UserID, string(in.Asset), in.Amount.String(),
+		string(destinationOrEmptyObject(in.Destination))).Scan)
 	if err != nil {
 		return Payout{}, constraintFailure(fmt.Errorf("建提现单失败: %w", err))
 	}

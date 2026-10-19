@@ -34,6 +34,8 @@ request 把申请额挪进这条单子的待付（钱在申请这一步就冻住
 审批结果（reject 顺带把那笔冻结解除），paid 把钱从待付出账。**paid 只放行已批准的单子**：
 不存在一条不经过批准就能出钱的路。approve 与 reject 都要 --by，记的是谁批的（撤回冻结
 发生在 reject 里，不是 paid）。--amount、--ref 与 --gateway 必填。
+request 会先核商户的分成余额：分成还没记进账本前申请会被一律拒掉（退出 1），那是对的。
+--destination 必须是一个 JSON 对象，且事后不能改（同一个申请单号换一份就是冲突，退出 4）。
 
 更细的边界：larkaxctl wallet payout help。
 `
@@ -64,10 +66,27 @@ request 建一行 payout_requests 并把申请额挪进待付，分录是：
     借 payout:<单id>             A    这条单子的待付多了一笔
 
 钱在**申请**这一步就冻住了，不是打款时才冻：这样「有多少钱已经承诺出去了」随时看得见，
-而打款只需要核销那条待付。--amount 必填且为正。--ref 是申请单号，同时是幂等键：同一条
-命令重跑两次只会建一条单子。--destination 是商户的收款信息（一段 JSON 对象，落进
-payout_requests.destination，不给就是空对象）；本命令不解释它的内容，打款通道要哪些字段
-是通道那一侧的事。
+而打款只需要核销那条待付。
+
+--amount 必填且为正。申请时**先核商户的分成余额**，余额不够就拒掉、一笔都不写（退出 1，
+与 wallet adjust 把余额调成负数同一档）：提现只能提平台已经欠他的钱。报错里带着两个数
+——当前能提多少、这次要提多少。商户分成的写入侧（consume 时的 merchant_share）今天还没有
+调用方落进这条流水线，所以在那里接上之前，申请会被一律拒掉；那是刻意的，不是这条命令坏了。
+这条校验只保证「申请时不能提平台还不欠的钱」，**不是**「分成科目永远非负」：退款把分成
+冲成负数是允许的（平台多付给了商户、商户欠平台），退款不因此被拒。
+
+--ref 是申请单号，同时是幂等键：同一条命令重跑两次只会建一条单子。它也进 payout 那条
+分录的备注，逐字是「提现申请（单据 <ref>）」——交易号是它的哈希，从单据号算得到交易号，
+反过来算不回来，不落备注就再没有第二条路把这张申请单对上这笔账。
+
+--destination 是商户的收款信息，必须是**一个 JSON 对象**（形如 {"bank":"…"}），落进
+payout_requests.destination；不给就是空对象。字符串、数组与 null 都在连库之前按参数错
+拒掉（退出 2）：那一列是 jsonb，而打款通道要按字段取值，一个不是对象的 JSON 取不出任何
+字段。本命令不解释它的内容，要哪些字段是通道那一侧的事。
+
+收款信息**事后不能改**：这一族没有修改命令。所以同一个申请单号配同一份收款信息是重放，
+配了另一份不是重放而是冲突（退出 4），一笔都不写——否则重跑一条旧命令就会把那张单子的
+收款账号悄悄换掉。要换收款方式只能驳回后重新申请。
 
 approve 与 reject 都**不在这一层动钱**，钱在申请时就动了：
 
@@ -214,14 +233,17 @@ func runPayoutRequest(args []string) error {
 	if assetErr != nil {
 		return assetErr
 	}
-	// 收款信息在连库之前判一次是否合法 JSON：这一栏要落进 jsonb 列，写错一个括号
-	// 由库报出来时那句话是「invalid input syntax for type json」，看不出是哪条命令
-	// 的哪个参数。空串表示还没填这一栏，落库时空对象。
+	// 收款信息在连库之前判一次：这一栏要落进 jsonb 列，而且必须是**对象**——
+	// `"abc"`、`[1]`、`null` 都是合法 JSON，落库看着也像填过了，但打款通道按
+	// 字段取值，在它们上面一个字段都取不到。写错一个括号由库报出来时，那句话
+	// 是「invalid input syntax for type json」，看不出是哪条命令的哪个参数。
+	// 空串表示还没填这一栏，落库时空对象。
 	destinationJSON := strings.TrimSpace(*destination)
-	if destinationJSON != "" && !json.Valid([]byte(destinationJSON)) {
+	if destinationJSON != "" &&
+		(!strings.HasPrefix(destinationJSON, "{") || !json.Valid([]byte(destinationJSON))) {
 		return usageErr(fmt.Errorf(
-			"--destination 不是合法的 JSON，得到 %q：它是商户的收款信息，要落进 payout_requests.destination（一个 jsonb 列），例如 '{\"bank\":\"…\"}'",
-			destinationJSON))
+			`--destination 必须是合法的 JSON 对象（形如 {"bank":"…"}），得到 %q：`+
+				"它要落进 payout_requests.destination（一个 jsonb 列），打款通道按字段取值", destinationJSON))
 	}
 
 	return withDB(walletTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -237,6 +259,7 @@ func runPayoutRequest(args []string) error {
 
 		row, applied, requestErr := store.New(db).RequestPayout(ctx, store.RequestPayoutInput{
 			TxnID:       txnIDForPayoutRequest(requestRef),
+			Ref:         requestRef,
 			UserID:      owner.ID,
 			Amount:      amountValue,
 			Asset:       assetValue,
@@ -254,6 +277,7 @@ func runPayoutRequest(args []string) error {
 			UserID:   row.UserID,
 			Amount:   row.Amount,
 			Asset:    row.Asset,
+			Ref:      requestRef,
 		})
 		if buildErr != nil {
 			return buildErr

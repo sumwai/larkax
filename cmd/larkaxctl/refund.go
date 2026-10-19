@@ -220,6 +220,7 @@ func runWalletRefund(args []string) error {
 			MerchantShare: share,
 			UpstreamCost:  cost,
 			Memo:          reason,
+			Ref:           refundRef,
 			// BillingRequestID 不给：没有一个把退款挂到那条计费请求上的入口，
 			// 而一个没校验过的关联比没有关联更坏——它会把两笔不相干的账挂到一起，
 			// 事后按它去查反而查错。见 docs/cli-reference.md 的「wallet」一节。

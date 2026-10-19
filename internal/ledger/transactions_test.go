@@ -907,6 +907,51 @@ func TestPayoutPaidMemoCarriesReference(t *testing.T) {
 	}
 }
 
+// 退款的单据号与提现申请单号同样要进分录备注。
+//
+// 变异：去掉 Refund / PayoutRequest 里的 memoWithOrder，这一组会红——而幂等本身
+// 仍然正常（交易号照样从键算得出来），所以别的用例看不出来。少了这一栏，事后
+// 只能反算哈希才知道这张退款单 / 申请单对应哪一笔账，而那个方向算不回来。
+func TestRefundAndPayoutRequestMemosCarryReference(t *testing.T) {
+	refund, err := Refund(RefundParams{
+		TxnID: NewTxnID(), UserID: 1, Amount: money.MustParse("10"), Asset: AssetCNY,
+		Memo: "上游 500", Ref: "REF-9",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := refund.Entries[0].Memo; got != "退款：上游 500（单据 REF-9）" {
+		t.Errorf("退款分录备注 = %q，期望带上原因与单据号", got)
+	}
+
+	// 没给原因时也带单据号，只是没有「退款：…」那一段。
+	plain, err := Refund(RefundParams{
+		TxnID: NewTxnID(), UserID: 1, Amount: money.MustParse("1"), Asset: AssetCNY,
+		Ref: "REF-10",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plain.Entries[0].Memo; got != "退款（单据 REF-10）" {
+		t.Errorf("没有原因的退款备注 = %q，期望「退款（单据 REF-10）」", got)
+	}
+
+	req, err := PayoutRequest(PayoutRequestParams{
+		TxnID: NewTxnID(), PayoutID: 3, UserID: 7, Amount: money.MustParse("5"),
+		Asset: AssetCNY, Ref: "REQ-9",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 单号挂在 payout 那一条上（这张申请单冻住的那一笔），分成那一侧不重复写。
+	if got := req.Entries[0].Memo; got != "" {
+		t.Errorf("分成分录的备注 = %q，期望为空", got)
+	}
+	if got := req.Entries[1].Memo; got != "提现申请（单据 REQ-9）" {
+		t.Errorf("待付分录备注 = %q，期望带上申请单号", got)
+	}
+}
+
 // 单据号为空串与只有空白，都应视为「没有单据号」。
 //
 // 变异：`orderNo == ""` 改成别的会让空串走进拼接分支，

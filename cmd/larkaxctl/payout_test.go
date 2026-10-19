@@ -5,6 +5,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sumwai/larkax/internal/ledger"
+	"github.com/sumwai/larkax/internal/ledger/store"
+	"github.com/sumwai/larkax/internal/money"
 )
 
 // 这一组用例走的是**命令行的那一条完整路径**：解析旗标 → 账本 → store → 落库 →
@@ -111,6 +115,30 @@ func payoutIDOfMerchant(t *testing.T, db *sql.DB, merchantID int64) int64 {
 	return id
 }
 
+// fundMerchantPayable 通过真实路径给商户记下分成：一个已开户、入过账的付款人
+// 消费一次，分成落进 merchant_payable:<商户>。
+//
+// 申请现在会先核这个科目的余额，所以每一条要申请成功的用例都得先走这一步。
+// 直接改余额会造出一个账本里没有出处的分成，而那正是这些用例要证明的东西。
+func fundMerchantPayable(t *testing.T, db *sql.DB, merchantID int64, amount string) {
+	t.Helper()
+	payer := mustUserID(t, createTestUserID(t))
+	mustRun(t, runWalletCreate, "--user", itoa64(payer))
+	mustRun(t, runWalletCredit,
+		"--user", itoa64(payer), "--amount", amount, "--ref", uniqueName("fund"))
+	share := money.MustParse(amount)
+	txn, err := ledger.Consume(ledger.ConsumeParams{
+		TxnID: ledger.NewTxnID(), UserID: payer, Amount: share,
+		Asset: ledger.AssetCNY, MerchantID: merchantID, MerchantShare: share,
+	})
+	if err != nil {
+		t.Fatalf("构造分成消费失败: %v", err)
+	}
+	if _, err := store.New(db).PostTransaction(t.Context(), txn); err != nil {
+		t.Fatalf("记分成失败: %v", err)
+	}
+}
+
 // ── wallet refund ───────────────────────────────────────────────────────
 
 // 退款：回执逐条列出分录，余额真的加上了，重跑同一条命令不改动任何东西。
@@ -129,9 +157,10 @@ func TestWalletRefundReceiptAndReplay(t *testing.T) {
 		"幂等键 " + ref,
 		"原因：请求失败",
 		"分录：",
-		// 借用户、贷平台收入：退款把这一笔从平台收入里冲回去。
+		// 借用户、贷平台收入：退款把这一笔从平台收入里冲回去；单据号进备注。
 		"借 user:" + owner,
 		"贷 platform_revenue",
+		"退款：请求失败（单据 " + ref + "）",
 	}
 	assertHas(t, out, want...)
 
@@ -238,6 +267,7 @@ func TestWalletPayoutRequestReceiptAndReplay(t *testing.T) {
 	setupEnv(t)
 	db := testDB(t)
 	merchant := createTestUserID(t)
+	fundMerchantPayable(t, db, mustUserID(t, merchant), "12.5")
 	ref := uniqueName("payout")
 
 	out := mustRun(t, runWalletPayout, "request",
@@ -248,9 +278,11 @@ func TestWalletPayoutRequestReceiptAndReplay(t *testing.T) {
 		"12.50000000",
 		"pending（待审批）",
 		"分录：",
-		// 钱从商户的分成挪进这条单子的待付，两边都挂着这条单子。
+		// 钱从商户的分成挪进这条单子的待付，两边都挂着这条单子；
+		// 申请单号进待付那条的备注。
 		"贷 merchant_payable:"+merchant,
 		"借 payout:",
+		"提现申请（单据 "+ref+"）",
 	)
 
 	var id int64
@@ -277,21 +309,104 @@ func TestWalletPayoutRequestReceiptAndReplay(t *testing.T) {
 	}
 }
 
-// --destination 不是合法 JSON 时在连库之前就退 2：那一栏要落进 jsonb 列，交给库去
-// 报的话，回来的那句是「invalid input syntax for type json」，看不出是哪条命令的
-// 哪个参数。这一条不碰库，所以有没有 LARKAX_DB_DSN 都该是红的。
+// --destination 不是**一个 JSON 对象**时在连库之前就退 2：那一栏要落进 jsonb 列，
+// 交给库去报的话，回来的那句是「invalid input syntax for type json」，看不出是
+// 哪条命令的哪个参数；而字符串、数组与 null 是**合法 JSON 却取不出字段**，
+// 库那一层根本不会报，打款通道到要用的时候才发现没有 bank。这一条不碰库，
+// 所以有没有 LARKAX_DB_DSN 都该是红的。
 func TestWalletPayoutRequestRejectsBadDestination(t *testing.T) {
 	setupEnv(t)
 
-	r := runCmd(t, runPayoutRequest,
-		"--user", "1", "--amount", "1", "--ref", "R-dest", "--destination", "{bank:")
+	for _, destination := range []string{`{bank:`, `"abc"`, `[1]`, `null`} {
+		t.Run(destination, func(t *testing.T) {
+			r := runCmd(t, runPayoutRequest,
+				"--user", "1", "--amount", "1", "--ref", "R-dest", "--destination", destination)
+			if r.err == nil {
+				t.Fatalf("--destination %q 应当被拒", destination)
+			}
+			if code := exitCode(r.err); code != exitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错，连库之前就该拒）", code, exitUsage)
+			}
+			assertHas(t, r.err.Error(), "--destination", "JSON 对象")
+		})
+	}
+}
+
+// 同一个申请单号配不同的收款信息不是重放，是冲突（退出 4），库里那一份不变。
+//
+// 收款信息不在分录里，交易内容比对不到它；这一栏又没有修改命令，放过去的话，
+// 重跑一条旧命令会把那张单子的收款账号悄悄换掉。
+func TestWalletPayoutRequestDestinationCannotChange(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+	merchant := createTestUserID(t)
+	fundMerchantPayable(t, db, mustUserID(t, merchant), "5")
+	ref := uniqueName("payout-dest")
+
+	mustRun(t, runWalletPayout, "request",
+		"--user", merchant, "--amount", "5", "--ref", ref,
+		"--destination", `{"bank":"placeholder-bank"}`)
+
+	// 空白不同、内容相同：jsonb 归一之后是同一份，按重放处理。
+	mustRun(t, runWalletPayout, "request",
+		"--user", merchant, "--amount", "5", "--ref", ref,
+		"--destination", `{ "bank" : "placeholder-bank" }`)
+
+	r := runCmd(t, runWalletPayout, "request",
+		"--user", merchant, "--amount", "5", "--ref", ref,
+		"--destination", `{"bank":"another-bank"}`)
 	if r.err == nil {
-		t.Fatal("不是合法 JSON 的 --destination 应当被拒")
+		t.Fatal("同一把键配另一份收款信息应当被拒")
 	}
-	if code := exitCode(r.err); code != exitUsage {
-		t.Errorf("退出码 = %d，期望 %d（参数错，连库之前就该拒）", code, exitUsage)
+	if code := exitCode(r.err); code != exitConflict {
+		t.Errorf("退出码 = %d，期望 %d（约束冲突）：%v", code, exitConflict, r.err)
 	}
-	assertHas(t, r.err.Error(), "--destination", "JSON")
+	assertHas(t, r.err.Error(), "收款信息")
+
+	id := payoutIDOfMerchant(t, db, mustUserID(t, merchant))
+	var destination string
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT destination::text FROM payout_requests WHERE id = $1`, id).Scan(&destination); err != nil {
+		t.Fatalf("读收款信息失败: %v", err)
+	}
+	if want := `{"bank": "placeholder-bank"}`; destination != want {
+		t.Errorf("收款信息 = %s，期望仍是 %s（冲突那一次一个字段都没写进去）", destination, want)
+	}
+}
+
+// 分成余额不够时退 1，一笔都不写，报错里带「能提多少、要提多少」。
+//
+// 今天分成那条写入侧还没有调用方，所以申请会被一律拒掉——这一条就是那个状态的
+// 样子。退出码与 wallet adjust 把余额调成负数同一档（其他失败，不是参数错、
+// 也不是约束冲突）：改命令本身过不了，得先把分成记进账本。
+func TestWalletPayoutRequestRejectsInsufficientPayable(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+	merchant := createTestUserID(t)
+	fundMerchantPayable(t, db, mustUserID(t, merchant), "2")
+	ref := uniqueName("payout-nsf")
+
+	r := runCmd(t, runWalletPayout, "request",
+		"--user", merchant, "--amount", "3", "--ref", ref)
+	if r.err == nil {
+		t.Fatal("分成不够时申请应当被拒")
+	}
+	if code := exitCode(r.err); code != 1 {
+		t.Errorf("退出码 = %d，期望 1（其他失败）：%v", code, r.err)
+	}
+	assertHas(t, r.err.Error(), "2.00000000", "3.00000000")
+	if n := txnEntryCount(t, db, string(txnIDForPayoutRequest(ref))); n != 0 {
+		t.Errorf("被拒的申请写下了 %d 条分录", n)
+	}
+	var rows int
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT count(*) FROM payout_requests WHERE merchant_user_id = $1`,
+		mustUserID(t, merchant)).Scan(&rows); err != nil {
+		t.Fatalf("数提现单失败: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("被拒的申请留下了 %d 行提现单", rows)
+	}
 }
 
 // 出账那道门在命令行这一层也关着：没批准的单子打不了款，而且一笔分录都不写。
@@ -299,6 +414,7 @@ func TestWalletPayoutPaidRefusesUnapproved(t *testing.T) {
 	setupEnv(t)
 	db := testDB(t)
 	merchant := createTestUserID(t)
+	fundMerchantPayable(t, db, mustUserID(t, merchant), "9")
 
 	mustRun(t, runWalletPayout, "request",
 		"--user", merchant, "--amount", "9", "--ref", uniqueName("payout-gate"))
@@ -375,6 +491,7 @@ func TestWalletPayoutRejectReleasesFreeze(t *testing.T) {
 	setupEnv(t)
 	db := testDB(t)
 	merchant := createTestUserID(t)
+	fundMerchantPayable(t, db, mustUserID(t, merchant), "4")
 
 	mustRun(t, runWalletPayout, "request",
 		"--user", merchant, "--amount", "4", "--ref", uniqueName("payout-reject"))
@@ -432,6 +549,7 @@ func TestWalletPayoutRefChangeIsNotANewPayment(t *testing.T) {
 	setupEnv(t)
 	db := testDB(t)
 	merchant := createTestUserID(t)
+	fundMerchantPayable(t, db, mustUserID(t, merchant), "5")
 
 	mustRun(t, runWalletPayout, "request",
 		"--user", merchant, "--amount", "5", "--ref", uniqueName("payout-ref"))
@@ -468,6 +586,7 @@ func TestWalletPayoutPaidWithoutGatewayRef(t *testing.T) {
 	setupEnv(t)
 	db := testDB(t)
 	merchant := createTestUserID(t)
+	fundMerchantPayable(t, db, mustUserID(t, merchant), "6")
 
 	mustRun(t, runWalletPayout, "request",
 		"--user", merchant, "--amount", "6", "--ref", uniqueName("payout-noref"))

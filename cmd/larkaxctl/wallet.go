@@ -44,8 +44,8 @@ const walletShortUsage = `larkaxctl wallet 管理用户钱包。
   larkaxctl wallet payout paid --id <提现单 ID> --gateway <通道> [--gateway-ref <凭据号>]
   larkaxctl wallet list [--user <ID 或用户名>]
 
-credit / adjust / refund 与 payout 的 <单据号> 必填，它同时是幂等键：同一条命令重跑只记一笔，换单号才是另一笔。
-payout 四步是申请、批准、驳回与打款，**打款只放行已批准的单子**；钱包要先 create，list 之外那几条都要求它已在。
+credit / adjust / refund 要求钱包已存在（先 create）；payout 四条不动 user 科目，也不要求钱包行。
+payout 四步是申请、批准、驳回与打款；**打款只放行已批准的单子**。单据号必填且是幂等键，重跑只记一笔。
 list 只读：某一格读不出来时打「不可读（超出可表示范围）」，其余照打，命令退出 1。
 更细的边界：larkaxctl help wallet；payout 那一族另有：larkaxctl wallet payout help。
 `
@@ -59,6 +59,17 @@ const walletUsage = `larkaxctl wallet 管理用户钱包。
                           [--asset <资产>] [--gateway <来源>]
   larkaxctl wallet adjust --user <ID 或用户名> --amount <带符号金额> --ref <外部单据号>
                           --memo <原因> --by <操作人>
+  larkaxctl wallet refund --user <ID 或用户名> --amount <金额> --ref <外部单据号>
+                          [--asset <资产>] [--memo <原因>]
+                          [--merchant <ID 或用户名> --merchant-share <金额>]
+                          [--upstream-cost <金额>]
+  larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号>
+                                  [--asset <资产>]
+                                  [--destination <收款信息 JSON>]
+  larkaxctl wallet payout approve|reject --id <提现单 ID> --by <操作人>
+                                         [--note <说明>]
+  larkaxctl wallet payout paid --id <提现单 ID> --gateway <通道>
+                               [--gateway-ref <凭据号>]
   larkaxctl wallet list [--user <ID 或用户名>]
 
 create 给一个已存在的用户开通钱包，余额为 0。它不写任何分录：新开的户在
@@ -139,6 +150,9 @@ refund 是运营给用户退钱：走账本写一组 refund 分录，借 user:<I
 
 **退款额的上界不查**：它不能大于原始消费，而账本那一层看不到原始消费——这条由操作者保证。
 它也没有「这笔退款挂在哪条计费请求上」的旗标：--ref 是外部单据号，不是本库里某条请求的外键。
+--ref 会进分录备注（「退款：<原因>（单据 <ref>）」，没给原因时是「退款（单据 <ref>）」）：
+交易号是它的哈希，从单据号算得到交易号、反过来算不回来，不落备注就没有第二条路把这张退款单
+对上这笔账。
 
 payout 是商户提现，四个动作各一条命令：request 申请、approve 批准、reject 驳回、paid 打款。
 一条提现单按状态往前走：
@@ -149,10 +163,16 @@ payout 是商户提现，四个动作各一条命令：request 申请、approve 
 
 request 建一行 payout_requests（状态 pending）并写一组分录，把申请额从
 merchant_payable:<商户>（他还能申请的钱）挪进 payout:<单id>（这条单子的待付）——钱在申请
-这一步就冻住了，不是打款时才冻。--ref 是申请单号，同时是幂等键。--destination 是商户的
-收款信息，一段 JSON 对象，落进 payout_requests.destination；本命令不解释它的内容，打款
-通道要哪些字段是通道那一侧的事。--amount 是申请额，必填且为正；它**不校验商户的分成够不够
-扣**：把商户分成写进账本的那条流水线还没有，加了这道判据这条命令会百分之百失败。
+这一步就冻住了，不是打款时才冻。--ref 是申请单号，同时是幂等键，也进 payout 那条分录的
+备注（「提现申请（单据 <ref>）」）。--destination 是商户的收款信息，必须是**一个 JSON
+对象**，落进 payout_requests.destination；本命令不解释它的内容，打款通道要哪些字段是通道
+那一侧的事。它**事后不能改**（这一族没有修改命令），所以同一个申请单号配不同的收款信息
+不是重放，而是冲突（退出 4）。
+--amount 是申请额，必填且为正。申请时**校验商户的分成余额**：余额不够就拒掉、一笔都不写
+（退出 1，与调账把余额调成负数同一档）。今天商户分成的写入侧还没落地，所以这条申请在
+分成真正进来之前会被一律拒掉——那是刻意的，不能提平台根本不欠的钱。这条校验只保证
+「申请时不能提平台还不欠的钱」，**不是**「分成科目永远非负」：退款把分成冲成负数是允许的
+（负的意思是平台多付给了商户、商户欠平台，业务上再走追回），退款不因此被拒。
 
 approve 与 reject 都**不在这一层动钱**。approve 只在那一行上记下审批人与时刻
 （reviewed_by / reviewed_at，取自 --by 解析出来的那个用户）：账本与那张表都没有角色校验，

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/sumwai/larkax/internal/ledger"
@@ -42,6 +43,10 @@ import (
 //
 // 锁挂在 txn_id 上而不是某个调用方传入的键上：写库这一层只认 txn_id。
 // 事务级锁随 commit / rollback 一起释放，不需要手工解锁。
+//
+// 分录里出现的 merchant_payable 科目另有一把按科目名的锁（见
+// lockPayableAccounts）：它把「读余额再决定写不写」的两条路——提现申请与退款
+// 冲回分成——串在同一条线上。加锁顺序固定为「交易键 → 科目」，两条路一致。
 //
 // # 钱包行必须已经存在
 //
@@ -85,6 +90,11 @@ func (s *Store) PostTransaction(ctx context.Context, txn ledger.Transaction) (ap
 		return false, nil
 	}
 
+	// 纯重放不写东西，所以科目锁放在这之后：不给一次空操作排队。
+	if lockErr := lockPayableAccounts(ctx, tx, txn.Entries); lockErr != nil {
+		return false, lockErr
+	}
+
 	if err := writeTxnEntries(ctx, tx, txn); err != nil {
 		return false, err
 	}
@@ -108,6 +118,39 @@ func lockTxn(ctx context.Context, tx *sql.Tx, txnID ledger.TxnID) error {
 	if _, err := tx.ExecContext(ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, string(txnID)); err != nil {
 		return fmt.Errorf("锁定交易 %s 失败: %w", txnID, err)
+	}
+	return nil
+}
+
+// lockPayableAccounts 给分录里出现的每个 merchant_payable 科目上一把事务级锁。
+//
+// 这把锁与 RequestPayout 校验分成余额时用的是同一把（见 lockAccount）。退款与
+// 提现申请都能让这个科目变小，而提现申请要「读余额 → 判断够不够 → 写」：只锁
+// 申请那一侧的话，一笔并发退款能在读完余额之后把它冲走，校验就白做了。
+//
+// 只锁真的出现在分录里的科目：user、platform_revenue 那些科目没有「先读余额再
+// 决定写不写」的路径，给它们加锁只是拖慢并发。消费的分成也会经过这里，方向上是
+// 让科目变大，串行只会慢一点，不是错误。
+//
+// 按科目名排序后逐个取：两个交易同时含 merchant_payable:1 与 merchant_payable:2
+// 时，不排序会各拿一把再等对方，撞出死锁。顺序固定为「交易键 → 科目」，与
+// RequestPayout 一致。
+func lockPayableAccounts(ctx context.Context, tx *sql.Tx, entries []ledger.Entry) error {
+	uniq := map[string]ledger.Account{}
+	for _, e := range entries {
+		if e.Account.Type() == ledger.AccountMerchantPayable {
+			uniq[e.Account.String()] = e.Account
+		}
+	}
+	names := make([]string, 0, len(uniq))
+	for name := range uniq {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := lockAccount(ctx, tx, uniq[name]); err != nil {
+			return err
+		}
 	}
 	return nil
 }
