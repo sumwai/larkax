@@ -16,6 +16,7 @@ import (
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/ledger/store"
+	"github.com/sumwai/larkax/internal/money"
 )
 
 func TestWalletUnknownSubcommand(t *testing.T) {
@@ -643,6 +644,568 @@ func TestWalletCreditUnknownUserExitCode(t *testing.T) {
 	}
 	if code := exitCode(err); code != exitConflict {
 		t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", code, exitConflict)
+	}
+}
+
+// ── wallet adjust ──────────────────────────────────────────────────────
+
+// 参数检查同样发生在**连库之前**：这些用例不需要库。
+func TestWalletAdjustRejectsBadArgs(t *testing.T) {
+	// 一条「别的都给全」的基线：缺哪一项就把它拿掉。挨着写五遍全量参数，
+	// 改动一处旗标名时要改的地方会多到看不住。
+	base := map[string]string{
+		"--user": "1", "--amount": "-1", "--memo": "误扣补回", "--ref": "ADJ-1", "--by": "ops",
+	}
+	names := []string{"--user", "--amount", "--memo", "--ref", "--by"}
+	args := func(drop string, extra ...string) []string {
+		out := make([]string, 0, 2*len(names)+len(extra))
+		for _, name := range names {
+			if name == drop {
+				continue
+			}
+			out = append(out, name, base[name])
+		}
+		return append(out, extra...)
+	}
+
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"没有 --user", args("--user"), "缺少 --user"},
+		{"--user 只有空白", args("--user", "--user", "   "), "缺少 --user"},
+		{"没有 --amount", args("--amount"), "缺少 --amount"},
+		{"--amount 只有空白", args("--amount", "--amount", "  "), "缺少 --amount"},
+		// 原因与操作人都必填，且都在连库之前判：调账是唯一没有业务依据的分录，
+		// 一条不记名、不写原因的调账事后谁也解释不了（见 runWalletAdjust）。
+		{"没有 --memo", args("--memo"), "缺少 --memo"},
+		{"--memo 只有空白", args("--memo", "--memo", "  "), "缺少 --memo"},
+		{"没有 --ref", args("--ref"), "缺少 --ref"},
+		{"--ref 只有空白", args("--ref", "--ref", "  "), "缺少 --ref"},
+		{"没有 --by", args("--by"), "缺少 --by"},
+		{"--by 只有空白", args("--by", "--by", "  "), "缺少 --by"},
+		{"金额不是数字", args("--amount", "--amount", "abc"), "不是金额"},
+		{"小数位过多", args("--amount", "--amount", "1.000000001"), "最多 8 位小数"},
+		{"--ref 含换行", args("--ref", "--ref", "ADJ\n1"), "控制字符"},
+		{"--ref 含制表符", args("--ref", "--ref", "ADJ\t1"), "控制字符"},
+		{"--ref 含其它控制字符", args("--ref", "--ref", "ADJ\x071"), "控制字符"},
+		// 原因也会进回执，而落库那一份过了 sanitizeMemo：带控制字符时两边不是
+		// 同一个串，换行还会把「一栏一行」的回执折出一行没有栏名的续行。
+		{"--memo 含换行", args("--memo", "--memo", "误扣\n补回"), "控制字符"},
+		{"--memo 含制表符", args("--memo", "--memo", "误扣\t补回"), "控制字符"},
+		{"--memo 含 ESC", args("--memo", "--memo", "误扣\x1b补回"), "控制字符"},
+		// 这三个旗标是别的命令上的：调账只认自己那六个。判据落在「认不认这个
+		// 旗标」上，不是落在文案上——flag 包那句是英文的。
+		{"--asset 在 adjust 上不存在", args("", "--asset", "CNY"), "asset"},
+		{"--order 只在 credit 上", args("", "--order", "ORD-1"), "order"},
+		{"--idempotency-key 只在 credit 上", args("", "--idempotency-key", "ORD-1"), "idempotency-key"},
+		{"多出位置参数", args("", "extra"), "不接受位置参数"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runWalletAdjust(tc.args)
+			if err == nil {
+				t.Fatal("期望报错，却通过了")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
+			}
+			if code := exitCode(err); code != exitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", code, exitUsage)
+			}
+		})
+	}
+}
+
+// 控制字符那条错误要点名这条命令真的认的旗标。
+//
+// credit 与 adjust 的幂等键各是一个旗标，而 credit 上还挂着一个旧名
+// --idempotency-key。判据过去把那个旧名写死在文案里；adjust 上没有这个旧名，
+// 报出来就是一条照着重敲走不通的路。这一条钉住那个名字来自调用点。
+func TestWalletAdjustControlCharErrorNamesTheFlag(t *testing.T) {
+	err := runWalletAdjust([]string{
+		"--user", "1", "--amount", "-1", "--memo", "m", "--ref", "ADJ\x071", "--by", "ops",
+	})
+	if err == nil {
+		t.Fatal("键里含控制字符时应当报错")
+	}
+	if !strings.Contains(err.Error(), "--ref") {
+		t.Errorf("错误信息 %q 里没有 --ref", err.Error())
+	}
+	if strings.Contains(err.Error(), "--idempotency-key") {
+		t.Errorf("adjust 上没有 --idempotency-key 这个写法，错误里不该出现它：%q", err.Error())
+	}
+}
+
+// credit 上写旧名时，那条错误仍然点名规范名 --ref。
+//
+// 与上一条是一对：方向都是「报出能照着敲的那个名字」，而 credit 上挂着旧名
+// --idempotency-key。这是对外可见的行为（脚本照着错误信息改参数），所以把它钉住，
+// 免得以后被人当成写错了名字顺手「修」掉。
+func TestWalletCreditControlCharErrorNamesCanonicalFlag(t *testing.T) {
+	err := runWalletCredit([]string{
+		"--user", "1", "--amount", "1", "--idempotency-key", "ORD\nX",
+	})
+	if err == nil {
+		t.Fatal("键里含控制字符时应当报错")
+	}
+	if !strings.Contains(err.Error(), "--ref") {
+		t.Errorf("错误信息 %q 里没有规范名 --ref", err.Error())
+	}
+	if strings.Contains(err.Error(), "--idempotency-key") {
+		t.Errorf("错误信息该报规范名，不该出现旧名：%q", err.Error())
+	}
+}
+
+// 调账的幂等键到交易号的映射必须**稳定**，钉死到一个字面量上。
+//
+// 与 TestTxnIDForOrderIsPinned 同一条理由，另外还多一件：两条命令的键**不能**
+// 映射到同一个交易号。单据号来自同一个物理来源（银行流水号、回单号），撞上了
+// 就意味着「先 credit 再 adjust 同一个单号」里的第二笔会被判成冲突或重放，
+// 而它本该是一笔新的调账。
+func TestTxnIDForAdjustmentIsPinned(t *testing.T) {
+	const ref = "ADJ-1"
+	const want = "6b409e53-e1c2-870e-879a-ad20804381f5"
+
+	got := txnIDForAdjustment(ref)
+	if string(got) != want {
+		t.Errorf("txnIDForAdjustment(%q) = %s，期望 %s（改了映射就要说清旧幂等键怎么办）", ref, got, want)
+	}
+	if txnIDForAdjustment(ref) != got {
+		t.Error("同一个幂等键两次算出的交易号不同")
+	}
+	if txnIDForAdjustment("ADJ-2") == got {
+		t.Error("不同的幂等键算出了同一个交易号")
+	}
+	if txnIDForOrder(ref) == got {
+		t.Error("调账与入账对同一个单据号算出了同一个交易号：两条命令会认成同一笔交易")
+	}
+	if _, err := ledger.ParseTxnID(string(got)); err != nil {
+		t.Errorf("算出来的交易号不是合法 uuid: %v", err)
+	}
+}
+
+// 用户不存在时退出码是「要查的那一行不存在」——两个用户旗标各自都算。
+//
+// --by 与 --user 走的是同一套解析，但报错要说得出是哪一个没对上：两个都认
+// 「ID 或用户名」的命令里，只报一句「找不到用户」的话，操作者得自己猜是钱包
+// 的主人写错了还是操作人写错了。
+func TestWalletAdjustUnknownUserExitCode(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	ref := strconv.FormatInt(createTestUser(t), 10)
+	by := createTestUserID(t)
+
+	byErr := runCaptured(t, func() error {
+		return runWalletAdjust([]string{
+			"--user", ref, "--amount", "-1", "--memo", "m",
+			"--ref", uniqueName("adj"), "--by", uniqueName("nobody"),
+		})
+	})
+	if !errors.Is(byErr, auth.ErrUserNotFound) {
+		t.Fatalf("--by 认不出用户时应当返回 auth.ErrUserNotFound，得到 %v", byErr)
+	}
+	if !strings.Contains(byErr.Error(), "--by") {
+		t.Errorf("错误信息 %q 里没有点出 --by", byErr)
+	}
+	if code := exitCode(byErr); code != exitConflict {
+		t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", code, exitConflict)
+	}
+
+	ownerErr := runCaptured(t, func() error {
+		return runWalletAdjust([]string{
+			"--user", uniqueName("nobody"), "--amount", "-1", "--memo", "m",
+			"--ref", uniqueName("adj"), "--by", by,
+		})
+	})
+	if !errors.Is(ownerErr, auth.ErrUserNotFound) {
+		t.Fatalf("--user 认不出用户时应当返回 auth.ErrUserNotFound，得到 %v", ownerErr)
+	}
+	if !strings.Contains(ownerErr.Error(), "--user") {
+		t.Errorf("错误信息 %q 里没有点出 --user", ownerErr)
+	}
+	if code := exitCode(ownerErr); code != exitConflict {
+		t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", code, exitConflict)
+	}
+}
+
+// 调账命令走完整条链路：开户 → 入账 → 调减 → 重放 → 同键异参。
+//
+// 金额、科目、方向、备注与余额逐条钉死：这一层动钱，而「写成功了但方向写反了」
+// 「加了两次」都不会报错。
+func TestWalletAdjustCommand(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	userID := createTestUser(t)
+	ref := strconv.FormatInt(userID, 10)
+	operatorID := createTestUserID(t)
+	adjustRef := uniqueName("adj")
+	txnID := txnIDForAdjustment(adjustRef)
+
+	// 原因里特意带一对全角括号：备注末尾那段「（操作人 …，单据 …）」是**锚在串尾**
+	// 的固定后缀，原因里出现同样形状的括号是允许的，而这个用例把「原样进账本」
+	// 钉在这一串上——清洗（只换 \r\n\t）与拼接都不许动它内部一个字符。
+	const adjustMemo = "误扣补回（第二次）"
+
+	// 输出里点名的是用户名而不是 ID（见 docs/cli-output.md 的「实体只点一次
+	// 身份」），两个身份各查一遍，断言才有得比。
+	owner, err := auth.New(db).ResolveUser(t.Context(), ref)
+	if err != nil {
+		t.Fatalf("解析用户失败: %v", err)
+	}
+	operator, err := auth.New(db).ResolveUser(t.Context(), operatorID)
+	if err != nil {
+		t.Fatalf("解析操作人失败: %v", err)
+	}
+	if owner.Username == operator.Username {
+		t.Fatal("被调用户与操作人撞成了同一个人：这一条要证明两个身份分得开")
+	}
+
+	adjustArgs := func(amount string) []string {
+		return []string{
+			"--user", ref, "--amount", amount, "--memo", adjustMemo,
+			"--ref", adjustRef, "--by", operatorID,
+		}
+	}
+
+	// 还没开户：调账要被拒，且一条分录都不留。缺钱包行与余额不足是两件事
+	// （前者先跑 wallet create，后者要先把余额调够），所以判据是哨兵。
+	noWalletErr := runCaptured(t, func() error { return runWalletAdjust(adjustArgs("-40")) })
+	if !errors.Is(noWalletErr, store.ErrNoWallet) {
+		t.Fatalf("没有钱包时应当返回 store.ErrNoWallet，得到 %v", noWalletErr)
+	}
+	if code := exitCode(noWalletErr); code != exitConflict {
+		t.Errorf("退出码 = %d，期望 %d（要改的那一行不存在）", code, exitConflict)
+	}
+	if rows := txnRows(t, db, txnID); len(rows) != 0 {
+		t.Fatalf("被拒的调账留下了 %d 条分录：%v", len(rows), rows)
+	}
+
+	if openErr := runCaptured(t, func() error {
+		return runWalletCreate([]string{"--user", ref})
+	}); openErr != nil {
+		t.Fatalf("开户失败: %v", openErr)
+	}
+	if creditErr := runCaptured(t, func() error {
+		return runWalletCredit([]string{
+			"--user", ref, "--amount", "100", "--ref", uniqueName("order"),
+		})
+	}); creditErr != nil {
+		t.Fatalf("入账失败: %v", creditErr)
+	}
+
+	// 调减 40：余额从 100 到 60，分录是 贷 user / 借 platform_revenue
+	// （负数是「把记多的钱扣回来」，方向与调增相反）。
+	var adjustErr error
+	out, _ := captureStreams(t, func() { adjustErr = runWalletAdjust(adjustArgs("-40")) })
+	if adjustErr != nil {
+		t.Fatalf("调账失败: %v", adjustErr)
+	}
+	for _, want := range []string{
+		"已调账用户 " + owner.Username,
+		"余额", "100.00000000 → 60.00000000",
+		"调整", "-40.00000000",
+		"原因", adjustMemo,
+		"操作人", operator.Username,
+		"幂等键", adjustRef,
+		string(txnID),
+		"贷 " + ledger.UserAccount(userID).String(),
+		"借 " + ledger.PlatformRevenueAccount().String(),
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("调账输出里没有 %q：\n%s", want, out)
+		}
+	}
+
+	if balance := walletBalance(t, db, userID); balance != "60.00000000" {
+		t.Errorf("余额 = %s，期望 60.00000000", balance)
+	}
+	wantRows := []string{
+		ledger.PlatformRevenueAccount().String() + "|40.00000000|adjustment|" + adjustMemo + "（操作人 " + operator.Username + "，单据 " + adjustRef + "）",
+		ledger.UserAccount(userID).String() + "|-40.00000000|adjustment|" + adjustMemo + "（操作人 " + operator.Username + "，单据 " + adjustRef + "）",
+	}
+	if got := txnRows(t, db, txnID); !slices.Equal(got, wantRows) {
+		t.Errorf("分录 = %v，期望 %v", got, wantRows)
+	}
+
+	// 快照与账本两侧都是 60：调账走的是账本，快照只是跟着动。
+	authoritative, err := store.New(db).AccountBalance(
+		t.Context(), ledger.UserAccount(userID), ledger.AssetCNY)
+	if err != nil {
+		t.Fatalf("读权威余额失败: %v", err)
+	}
+	if authoritative.String() != "60.00000000" {
+		t.Errorf("账本侧余额 = %s，期望 60.00000000", authoritative)
+	}
+
+	// 重放同一条命令：退出 0，一个字都不改，且**不打**余额那一对——那两行会让
+	// 人以为这一次真的动了钱，而它一分钱都没动（LESSONS 第 16 条）。
+	var replayErr error
+	replay, _ := captureStreams(t, func() { replayErr = runWalletAdjust(adjustArgs("-40")) })
+	if replayErr != nil {
+		t.Fatalf("重放不该报错: %v", replayErr)
+	}
+	for _, want := range []string{"已经调过账", "未改动", "幂等键 " + adjustRef} {
+		if !strings.Contains(replay, want) {
+			t.Errorf("重放输出里没有 %q：\n%s", want, replay)
+		}
+	}
+	if strings.Contains(replay, "已调账用户") || strings.Contains(replay, "余额") {
+		t.Errorf("重放不该打一份「余额从多少到多少」：\n%s", replay)
+	}
+	if balance := walletBalance(t, db, userID); balance != "60.00000000" {
+		t.Errorf("重放之后余额 = %s，期望仍是 60.00000000", balance)
+	}
+	if got := txnRows(t, db, txnID); !slices.Equal(got, wantRows) {
+		t.Errorf("重放之后分录 = %v，期望仍是 %v", got, wantRows)
+	}
+
+	// 同一个幂等键配不同的金额不是重放，是冲突：退出 4，一笔都不写。
+	conflictErr := runCaptured(t, func() error { return runWalletAdjust(adjustArgs("-20")) })
+	if !errors.Is(conflictErr, store.ErrTxnConflict) {
+		t.Fatalf("同键异参应当返回 store.ErrTxnConflict，得到 %v", conflictErr)
+	}
+	if code := exitCode(conflictErr); code != exitConflict {
+		t.Errorf("退出码 = %d，期望 %d（去看库里那笔是什么）", code, exitConflict)
+	}
+	if balance := walletBalance(t, db, userID); balance != "60.00000000" {
+		t.Errorf("冲突之后余额 = %s，期望仍是 60.00000000", balance)
+	}
+	if got := txnRows(t, db, txnID); !slices.Equal(got, wantRows) {
+		t.Errorf("冲突之后分录 = %v，期望仍是 %v", got, wantRows)
+	}
+}
+
+// 调增、零金额与「结果会变负」三档：都是 ledger.Adjustment 与该写路径的判据，
+// 命令行一条都不重复实现——所以它们的退出码不是参数错。
+//
+// 零金额那条尤其要说清：命令行**不判**零，拒它的是 Adjustment 那句「调账金额
+// 为零，没有需要修正的东西」。这不是漏了，是口径（同一件事只在一处判）。
+func TestWalletAdjustAmountEdges(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	userID := createTestUser(t)
+	ref := strconv.FormatInt(userID, 10)
+	by := createTestUserID(t)
+	if openErr := runCaptured(t, func() error {
+		return runWalletCreate([]string{"--user", ref})
+	}); openErr != nil {
+		t.Fatalf("开户失败: %v", openErr)
+	}
+
+	adjust := func(amount string) (string, error) {
+		var err error
+		out, _ := captureStreams(t, func() {
+			err = runWalletAdjust([]string{
+				"--user", ref, "--amount", amount, "--memo", "按线下对账结果平掉差额",
+				"--ref", uniqueName("adj"), "--by", by,
+			})
+		})
+		return out, err
+	}
+
+	// 调增：空钱包上也能做，余额从 0 到 10。分录方向与调减相反
+	// （借 user / 贷 platform_revenue）——对家是平台认下的这笔差额。
+	out, err := adjust("10")
+	if err != nil {
+		t.Fatalf("调增失败: %v", err)
+	}
+	for _, want := range []string{"0.00000000 → 10.00000000", "借 " + ledger.UserAccount(userID).String()} {
+		if !strings.Contains(out, want) {
+			t.Errorf("调增输出里没有 %q：\n%s", want, out)
+		}
+	}
+	if balance := walletBalance(t, db, userID); balance != "10.00000000" {
+		t.Errorf("调增之后余额 = %s，期望 10.00000000", balance)
+	}
+
+	// 结果为负：拒绝，一笔都不写。库里那道 `UPDATE … AND balance + delta >= 0`
+	// 拦的，命令行只把它那句「余额不足以扣」换成调账这一侧的说法。
+	shortRef := uniqueName("adj")
+	negativeErr := runCaptured(t, func() error {
+		return runWalletAdjust([]string{
+			"--user", ref, "--amount", "-11", "--memo", "多扣了要退回去",
+			"--ref", shortRef, "--by", by,
+		})
+	})
+	if !errors.Is(negativeErr, store.ErrInsufficientBalance) {
+		t.Fatalf("调成负数应当返回 store.ErrInsufficientBalance，得到 %v", negativeErr)
+	}
+	if !strings.Contains(negativeErr.Error(), "不允许把余额调成负数") {
+		t.Errorf("错误信息 %q 里没有「不允许把余额调成负数」", negativeErr)
+	}
+	if rows := txnRows(t, db, txnIDForAdjustment(shortRef)); len(rows) != 0 {
+		t.Errorf("被拒的调账留下了 %d 条分录：%v", len(rows), rows)
+	}
+	if balance := walletBalance(t, db, userID); balance != "10.00000000" {
+		t.Errorf("被拒之后余额 = %s，期望仍是 10.00000000", balance)
+	}
+
+	// 结果正好是零：允许。余额为 0 不违反那条 CHECK，而「把钱正好扣光」是
+	// 一次合法的修正——把它一起拒掉会让人以为得留一分钱。
+	if _, err := adjust("-10"); err != nil {
+		t.Fatalf("把余额调成正好为零应当允许: %v", err)
+	}
+	if balance := walletBalance(t, db, userID); balance != "0.00000000" {
+		t.Errorf("调成零之后余额 = %s，期望 0.00000000", balance)
+	}
+
+	// 零金额：由 Adjustment 拒，退出码因此是「其它失败」而不是参数错。
+	zeroErr := runCaptured(t, func() error {
+		return runWalletAdjust([]string{
+			"--user", ref, "--amount", "0", "--memo", "什么都没改",
+			"--ref", uniqueName("adj"), "--by", by,
+		})
+	})
+	if zeroErr == nil {
+		t.Fatal("金额为零时应当报错")
+	}
+	if !strings.Contains(zeroErr.Error(), "为零") {
+		t.Errorf("错误信息 %q 里没有提到金额为零", zeroErr)
+	}
+	if code := exitCode(zeroErr); code != exitFailure {
+		t.Errorf("退出码 = %d，期望 %d（这条判据在账本那一层，不是参数错）", code, exitFailure)
+	}
+}
+
+// 余额贴着金额表示上界时的那条早退，连同它的代价。
+//
+// `after, fits := money.SumChecked(...)` 判在**重放判定之前**：重放判定在
+// PostTransaction 里面，命令行这一层看不到它。于是余额顶到上界之后，重放同一条调账
+// 拿到的不是「已经调过账」，而是参数错。这是已知代价（见 runWalletAdjust 里那段
+// 注释），不是回归——这一条把它钉住，顺带证明那条早退一笔都不写。
+func TestWalletAdjustOverflowAtAmountBoundary(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	userID := createTestUser(t)
+	ref := strconv.FormatInt(userID, 10)
+	by := createTestUserID(t)
+	if openErr := runCaptured(t, func() error {
+		return runWalletCreate([]string{"--user", ref})
+	}); openErr != nil {
+		t.Fatalf("开户失败: %v", openErr)
+	}
+
+	adjust := func(amount, memo, key string) error {
+		return runCaptured(t, func() error {
+			return runWalletAdjust([]string{
+				"--user", ref, "--amount", amount, "--memo", memo,
+				"--ref", key, "--by", by,
+			})
+		})
+	}
+	credit := func(amount, key string) error {
+		return runCaptured(t, func() error {
+			return runWalletCredit([]string{
+				"--user", ref, "--amount", amount, "--ref", key,
+			})
+		})
+	}
+
+	// 写完的东西收尾时删掉：这一格最后留下的余额放不进 money.Amount，而包里那些
+	// 「列出全部钱包」「扫全表」的用例会把全库的余额逐个解析一遍——留着它，它们会
+	// 跟着红（与 TestLedgerBalanceReportsOverflowInsteadOfClamping 同一条理由）。
+	// 测试库跑完即丢，这里按交易号把这次造出来的删干净。
+	created := []ledger.TxnID{}
+	t.Cleanup(func() {
+		for _, id := range created {
+			if _, err := db.ExecContext(context.Background(),
+				`DELETE FROM ledger_entries WHERE txn_id = $1`, string(id)); err != nil {
+				t.Fatalf("清理用例的分录失败: %v", err)
+			}
+		}
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM user_wallets WHERE user_id = $1`, userID); err != nil {
+			t.Fatalf("清理用例的钱包行失败: %v", err)
+		}
+	})
+
+	// 先落一笔正常的调增，它的键下面要重放。
+	const firstAmount = "1"
+	replayRef := uniqueName("adj")
+	if err := adjust(firstAmount, "先调一笔", replayRef); err != nil {
+		t.Fatalf("第一次调增失败: %v", err)
+	}
+	created = append(created, txnIDForAdjustment(replayRef))
+
+	// 把余额顶到上界：调增那 1 已经在里面了，所以补的是「上界减去现值」，
+	// 补 92233720367.54775807 —— 1 + 92233720367.54775807 = 92233720368.54775807，
+	// 也就是 int64 能表示的最后一个最小单位（money.Amount 是 int64 存最小单位的）。
+	// 顺带断言一次现值：没顶到的话，下面两条判据都会变成空转。
+	const boundary = "92233720368.54775807"
+	topUpRef := uniqueName("order")
+	if creditErr := credit("92233720367.54775807", topUpRef); creditErr != nil {
+		t.Fatalf("把余额顶到上界失败: %v", creditErr)
+	}
+	created = append(created, txnIDForOrder(topUpRef))
+	if balance := walletBalance(t, db, userID); balance != boundary {
+		t.Fatalf("余额 = %s，期望顶到 %s：没顶到上界这一条就白测了", balance, boundary)
+	}
+
+	// 新键 + 正金额：现值加上它就超出 int64，在碰库之前拦下。
+	overRef := uniqueName("adj")
+	overErr := adjust("0.00000001", "把余额顶出上界", overRef)
+	if overErr == nil {
+		t.Fatal("调后余额超出金额可表示的范围时应当报错")
+	}
+	if !strings.Contains(overErr.Error(), "超出金额可表示的范围") {
+		t.Errorf("错误信息 %q 里没有说明是超出表示范围", overErr)
+	}
+	if code := exitCode(overErr); code != exitUsage {
+		t.Errorf("退出码 = %d，期望 %d（这一条判的是参数量级）", code, exitUsage)
+	}
+	if rows := txnRows(t, db, txnIDForAdjustment(overRef)); len(rows) != 0 {
+		t.Errorf("被拒的调账留下了 %d 条分录：%v", len(rows), rows)
+	}
+
+	// 重放同一个键：这一条拿到的也是参数错，而不是「已经调过账」——早退排在
+	// 重放判定前面。库里不该因此多出任何一行。
+	replayErr := adjust(firstAmount, "先调一笔", replayRef)
+	if replayErr == nil {
+		t.Fatal("贴着上界重放时应当报错（重放判定排在早退之后，这是已知代价）")
+	}
+	if !strings.Contains(replayErr.Error(), "超出金额可表示的范围") {
+		t.Errorf("贴着重放时的错误不是那条早退：%v", replayErr)
+	}
+	if rows := txnRows(t, db, txnIDForAdjustment(replayRef)); len(rows) != 2 {
+		t.Errorf("重放之后第一次那笔的分录 = %d 条，期望仍是 2 条：%v", len(rows), rows)
+	}
+	if balance := walletBalance(t, db, userID); balance != boundary {
+		t.Errorf("两次被拒之后余额 = %s，期望仍是 %s", balance, boundary)
+	}
+
+	// 顶**过**上界：账本的和已经放不进 money.Amount（库里的 numeric(20, 8) 存得
+	// 下它，放不下的是 money），于是读余额那一步先失败——这是同一类问题的另一道
+	// 门，而且它连金额都不用挑：任何金额、连重放都到不了重放判定。
+	pastRef := uniqueName("order")
+	if creditErr := credit("0.00000001", pastRef); creditErr != nil {
+		t.Fatalf("顶过上界那一笔入账应当成功（和进的是 numeric，只在读回来时才放不下）: %v", creditErr)
+	}
+	created = append(created, txnIDForOrder(pastRef))
+	pastErr := adjust("1", "顶过上界之后随便调一笔", uniqueName("adj"))
+	if pastErr == nil {
+		t.Fatal("余额的和放不进 money.Amount 时应当报错")
+	}
+	if !errors.Is(pastErr, money.ErrOverflow) {
+		t.Errorf("错误链里没有 money.ErrOverflow：%v", pastErr)
+	}
+	// 退出码 1 而不是 2：这一条不是参数错，是库里的数读不出来。
+	if code := exitCode(pastErr); code != exitFailure {
+		t.Errorf("退出码 = %d，期望 %d（读余额失败，不是参数错）", code, exitFailure)
+	}
+	// 连重放也走不到重放判定：它同样在这一步失败，库里一行都不该多出来。
+	pastReplayErr := adjust(firstAmount, "先调一笔", replayRef)
+	if pastReplayErr == nil {
+		t.Fatal("这一格上重放也应当报错（读余额排在重放判定之前）")
+	}
+	if rows := txnRows(t, db, txnIDForAdjustment(replayRef)); len(rows) != 2 {
+		t.Errorf("重放之后第一次那笔的分录 = %d 条，期望仍是 2 条：%v", len(rows), rows)
 	}
 }
 

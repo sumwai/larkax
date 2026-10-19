@@ -31,11 +31,15 @@ const walletShortUsage = `larkaxctl wallet 管理用户钱包。
   larkaxctl wallet create --user <ID 或用户名> [--asset <资产>]
   larkaxctl wallet credit --user <ID 或用户名> --amount <金额> --ref <外部单据号>
                           [--asset <资产>] [--gateway <来源>]
+  larkaxctl wallet adjust --user <ID 或用户名> --amount <带符号金额> --ref <外部单据号>
+                          --memo <原因> --by <操作人>
   larkaxctl wallet list [--user <ID 或用户名>]
 
 list 只读：列出用户 ID、用户名、资产、余额与冻结。
---ref 必填，它同时是幂等键：同一条命令重跑两次只入账一次，换单号才是另一笔。
-钱包必须已经存在（先 create）；这三条命令都不需要 LARKAX_MASTER_KEYS。
+credit 与 adjust 的 --ref 必填，它同时是幂等键：同一条命令重跑两次只记一笔，
+换单号才是另一笔。adjust 的 --memo 与 --by 也必填；--amount 带符号，负数是往回扣；
+--memo 里不能有控制字符（换行、制表符之类就算，见 help wallet）。
+钱包必须已经存在（先 create）；这四条命令都不需要 LARKAX_MASTER_KEYS。
 
 更细的边界：larkaxctl help wallet。
 `
@@ -47,6 +51,8 @@ const walletUsage = `larkaxctl wallet 管理用户钱包。
   larkaxctl wallet create --user <ID 或用户名> [--asset <资产>]
   larkaxctl wallet credit --user <ID 或用户名> --amount <金额> --ref <外部单据号>
                           [--asset <资产>] [--gateway <来源>]
+  larkaxctl wallet adjust --user <ID 或用户名> --amount <带符号金额> --ref <外部单据号>
+                          --memo <原因> --by <操作人>
   larkaxctl wallet list [--user <ID 或用户名>]
 
 create 给一个已存在的用户开通钱包，余额为 0。它不写任何分录：新开的户在
@@ -82,7 +88,39 @@ payment_gateway:<来源>），并在同一个事务里更新 user_wallets.balanc
 manual 是同一个科目。当前不接支付通道的回调，所以来源是操作者说的，
 不是系统验证过的。
 
-钱包必须已经存在：先 wallet create，再 credit。用户或钱包不存在都退出 4。
+adjust 是运营手工调账：走账本写一组 adjustment 分录（借/贷 user:<ID>，对家是
+platform_revenue），并在同一个事务里更新 user_wallets.balance。修出来的是一笔
+**有科目、有原因、有单据号的账本分录**，而不是直接改快照——直接改快照不产生
+分录，账本与快照从此对不上，下一轮对账会报差额，报了也查不出出处。
+
+--amount 是**带符号**的：负数是「把记多的钱扣回来」，不是写错了。被调的科目固定
+是 user:<ID>，对家固定是 platform_revenue（调账的实质是平台认下这笔差额），
+两者都不由旗标指定。它也不碰冻结额：冻结额不在账本里，调它产生不了分录。
+
+--memo 必填，它是这笔调账事后的解释——调账是唯一没有业务依据的分录，不写原因
+就成了一笔来路不明的钱。它也不接受控制字符：回执打的是原样的原因，而库里那一份
+会把换行、制表符换成空格，两边因此不是同一个串。--by 必填，记的是**谁调的账**
+（用户 ID 或用户名）：它先
+被解析成一个真实存在的用户，再把用户名与单据号跟在原因后面写进分录的备注，逐字是
+「<原因>（操作人 <用户名>，单据 <ref>）」。它只是记名，不是权限门——这条命令与
+wallet credit 是同一条面，没有额外的角色校验。单据号进备注有它自己的理由：交易号
+是它的哈希，从单据号算得到交易号，反过来算不回来，不落备注就再没有第二条路能把这
+张单子对上这笔账。操作人与单据号那一段是**固定后缀、锚在串尾**：原因里可以出现
+同样形状的括号，按这个格式反解单号时要从末尾往前认这一段。
+
+--ref 与 credit 的那一个同义（外部单据号 + 幂等键），但**两条命令的键互不相认**：
+同一个单据号在调账与入账上是两笔互不相干的交易。键里同样不能有控制字符。同一个
+--ref 配不同的金额、用户、原因或操作人不是重放，而是冲突：命令退出 4，一笔都不写。
+
+结果余额会变成负数时拒绝，一笔都不写：库里 user_wallets 的余额有
+CHECK (balance >= 0)，而负的用户余额说明某处少扣了钱，它应当被拦住，而不是记成
+一笔负数等下一轮对账去发现。
+
+从多少到多少那一对取自分录现算的**权威值**（与 ledger balance --account
+user:<ID> 是同一个数），不是 user_wallets 里那个快照：两者不一致时以账本为准，
+差额由对账任务比对。
+
+钱包必须已经存在：先 wallet create，再 credit 或 adjust。用户或钱包不存在都退出 4。
 
 资产默认取 settings 的 billing.default_asset（迁移里的默认值是 CNY）。
 --asset 可以显式指定，但当前只有 CNY 一种受支持的资产，写别的会被拒绝。
@@ -92,7 +130,7 @@ manual 是同一个科目。当前不接支付通道的回调，所以来源是�
 「找不到用户」并退出 4——那条错误来自解析用户这一步，与「用户存在但没有
 钱包行」是两件事。
 
-create 与 credit 只写 user_wallets 与 ledger_entries，不碰 users，也不需要
+create、credit 与 adjust 都只写 user_wallets 与 ledger_entries，不碰 users，也不需要
 LARKAX_MASTER_KEYS。
 
 list 是只读的那一条：列出钱包与它的**余额快照**（user_wallets.balance 与
@@ -107,18 +145,18 @@ user_wallets.frozen），一栏一个字段：用户 ID、用户名、资产、�
 冻结额是给在飞的请求预扣住的那部分，它**不包含**在余额里——「这个用户还能花
 多少」看余额，「有多少正被占着」看冻结额。
 
-**旧名仍可用**：wallet open 等同于 wallet create，--idempotency-key 与 --order
-都等同于 --ref，-u 是 --user 的简写。它们保留是为了不让已经在跑的脚本与部署
-流程坏掉，行为与新名字逐字相同；新写的命令请用新名字。
+**旧名仍可用**：wallet open 等同于 wallet create，credit 上 --idempotency-key 与
+--order 都等同于 --ref，-u 是 --user 的简写（四条子命令都认）。它们保留是为了不让
+已经在跑的脚本与部署流程坏掉，行为与新名字逐字相同；新写的命令请用新名字。
 
 # 别名
 
 下面几个写法仍然可用，只是不再是正式写法（用法行里只写规范名）：
 
-  -u <ID 或用户名>      同 --user，create、credit 与 list 都认
-  --idempotency-key     同 --ref。它是这一项上一版的正式写法，已经发布过，
-                        删掉就是破坏脚本
-  --order               同 --ref（更早的那一版口语化写法）
+  -u <ID 或用户名>      同 --user，create、credit、adjust 与 list 都认
+  --idempotency-key     同 --ref，只在 credit 上（adjust 没有旧名）。
+                        它是这一项上一版的正式写法，已经发布过，删掉就是破坏脚本
+  --order               同 --ref，同样只在 credit 上（更早的那一版口语化写法）
 
 更细的约定见 docs/cli-reference.md 的「wallet」一节。
 `
@@ -150,6 +188,8 @@ func runWallet(args []string) error {
 		return runWalletCreate(rest)
 	case "credit":
 		return runWalletCredit(rest)
+	case "adjust":
+		return runWalletAdjust(rest)
 	case "list":
 		return runWalletList(rest)
 	case "-h", "--help":
@@ -246,7 +286,7 @@ func runWalletCredit(args []string) error {
 		return usageErr(errors.New(
 			"缺少 --ref：它是这笔入账对应的外部单据号，同时是幂等键——重跑同一条命令时靠它认出「已经入过账」"))
 	}
-	if ctrlErr := checkOrderKey(orderKey); ctrlErr != nil {
+	if ctrlErr := checkOrderKey("--ref", orderKey); ctrlErr != nil {
 		return ctrlErr
 	}
 	amountValue, amountErr := parseCreditAmount(*amount)
@@ -292,6 +332,177 @@ func runWalletCredit(args []string) error {
 		}
 
 		printCreditedWallet(humanStdout(), owner, txn, orderKey, applied)
+		return nil
+	})
+}
+
+// runWalletAdjust 给一个用户手工调账。
+//
+// 与 runWalletCredit 同一个形状：把命令行参数变成账本要的输入、调
+// ledger.Adjustment 造分录、交给 store.PostTransaction 落库。记账逻辑一行都不在
+// 这里——「一笔调账算哪个科目、对家是谁」是 internal/ledger 已经定好的语义。
+func runWalletAdjust(args []string) error {
+	if err := jsonUnsupported("wallet adjust"); err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet("wallet adjust", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
+	user := fs.String("user", "", "")
+	stringAlias(fs, user, "u")
+	amount := fs.String("amount", "", "")
+	memo := fs.String("memo", "", "")
+	ref := fs.String("ref", "", "")
+	by := fs.String("by", "", "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf(
+			"adjust 不接受位置参数，得到 %q：用户、金额、原因、单据号与操作人都用旗标指定", fs.Arg(0)))
+	}
+	if strings.TrimSpace(*user) == "" {
+		return usageErr(errors.New("缺少 --user"))
+	}
+	adjustRef := strings.TrimSpace(*ref)
+	if adjustRef == "" {
+		return usageErr(errors.New(
+			"缺少 --ref：它是这笔调账对应的外部单据号，同时是幂等键——重跑同一条命令时靠它认出「已经调过账」"))
+	}
+	if ctrlErr := checkOrderKey("--ref", adjustRef); ctrlErr != nil {
+		return ctrlErr
+	}
+	// 原因在这里判空，而不是留给 ledger.Adjustment 那句「人工调账必须写 memo」：
+	// 送进去的备注是「原因 + 操作人」拼出来的，原因空掉时它照样非空，于是那一层
+	// 看不出少了什么，落库的会是一条只有操作人、没有原因的备注。
+	reason := strings.TrimSpace(*memo)
+	if reason == "" {
+		return usageErr(errors.New(
+			"缺少 --memo：调账是唯一没有业务依据的分录，不写清原因，这笔钱事后解释不了"))
+	}
+	// 控制字符在这里挡掉，理由见 checkMemo：回执打的是原样的原因，而库里那一份
+	// 过了 sanitizeMemo。
+	if memoErr := checkMemo("--memo", reason); memoErr != nil {
+		return memoErr
+	}
+	if strings.TrimSpace(*by) == "" {
+		return usageErr(errors.New("缺少 --by：这条命令要记下是谁调的账"))
+	}
+	// 与 credit 走同一个解析，只是不判正负：调账的金额**带符号**，负数是
+	// 「把记多的钱扣回来」，零由 ledger.Adjustment 自己拒。
+	amountValue, amountErr := parseAmountFlag(*amount)
+	if amountErr != nil {
+		return amountErr
+	}
+
+	return withDB(walletTimeout, func(ctx context.Context, db *sql.DB) error {
+		// 变量叫 authStore 而不是 store：本文件顶部那个 `store` 是账本包的名字，
+		// 遮掉它会让下面那些 store.New 看起来是同一侧的（与 runWalletList 同）。
+		authStore := auth.New(db)
+
+		// 先解析 --by：账本这一侧没有外键指着 users，一个查不到人的身份照样写得
+		// 进去，留下的是一条查无此人的审计记录（与 settings set 的 --by 同一条
+		// 理由）。两条解析各带旗标名，报错时才说得出该改哪一个。
+		operator, err := authStore.ResolveUser(ctx, *by)
+		if err != nil {
+			return fmt.Errorf("解析 --by 失败: %w", err)
+		}
+		owner, err := authStore.ResolveUser(ctx, *user)
+		if err != nil {
+			return fmt.Errorf("解析 --user 失败: %w", err)
+		}
+
+		// 这条命令不接 --asset：口径是「只调 user:<id> 这一个科目」，而首先
+		// 得知道是哪种资产上那一行。资产随默认值走（同 credit 不给 --asset 时）。
+		assetValue, assetResolveErr := resolveWalletAsset(ctx, db, "")
+		if assetResolveErr != nil {
+			return assetResolveErr
+		}
+
+		account := ledger.UserAccount(owner.ID)
+		// 余额那一对取自账本现算的权威值，不用 user_wallets 里那个快照：快照是
+		// 派生物，两者不一致时账本才是「应该是多少」（见 ledger 的 BalanceOf）。
+		// 它也是 ledger balance --account 那条命令读的同一个数。
+		before, balanceErr := store.New(db).AccountBalance(ctx, account, assetValue)
+		if balanceErr != nil {
+			return balanceErr
+		}
+		// 调后余额先算出来再落库，算不出来就不写：两个数都要进报告，而
+		// money.Add 在溢出时夹到 int64 边界——夹出来的数不等于真实的和，打进
+		// 报告就是一个错的余额。它要凑出来得让余额与金额之和超出 int64。
+		//
+		// 这条早退发生在**重放判定之前**（那个判定在 PostTransaction 里面），
+		// 于是余额在表示上界或以上时，重放同一条命令拿到的不是「已经调过账」，
+		// 而是下面两道门之一：
+		//
+		//   - 余额正好落在 92233720368.54775807 这个上界：这里报参数错（退出码
+		//     2）。条件是重放的那笔金额为**正**——负的装得下，走得到重放判定；
+		//   - 余额已被顶过那个上界（账本的和放不进 money.Amount 了）：上面读
+		//     余额那一步（AccountBalance）先失败，退出码 1，任何金额、连重放都
+		//     到不了重放判定。库里的 numeric(20, 8) 存得下这种和，放不下的是
+		//     money，所以这一格是入账自己就能造出来的，连金额都不用挑。
+		//
+		// 不去修它：命令行这一层要在这两道门之前拿到重放判定，得先按交易号查
+		// 一次分录，或干脆先落库再算，两种都比「把余额调到上界以上」这件事本身
+		// 更贵。
+		after, fits := money.SumChecked(before, amountValue)
+		if !fits {
+			return usageErr(fmt.Errorf(
+				"这次调账会让用户 %s 的 %s 余额超出金额可表示的范围（现值 %s 加上 %s）：拆成两笔，或先确认那个余额是不是对的",
+				owner.Username, assetValue, before, amountValue))
+		}
+
+		txn, buildErr := ledger.Adjustment(ledger.AdjustmentParams{
+			TxnID:   txnIDForAdjustment(adjustRef),
+			Account: account,
+			Amount:  amountValue,
+			Asset:   assetValue,
+			// 原因、操作人与单据号写进同一条备注，格式固定成
+			// 「（操作人 X，单据 Y）」：账本里没有 actor 列，谁调的只能落在这里；
+			// 单据号则是因为交易号是它的哈希——从单据号能算出交易号，反过来算不
+			// 回来，不落备注就再没有第二条路能把这个单号对上这笔账。清洗（控制
+			// 字符换成空格）由 Adjustment 自己做。
+			Memo: fmt.Sprintf("%s（操作人 %s，单据 %s）", reason, operator.Username, adjustRef),
+			// 对家不给：留零表示 platform_revenue，那正是人工调账的实质——平台
+			// 认下这笔差额。对账修正要的是另一个科目，走的是 reconcile 那条路。
+		})
+		if buildErr != nil {
+			return buildErr
+		}
+
+		applied, postErr := store.New(db).PostTransaction(ctx, txn)
+		if postErr != nil {
+			// 调减到负余额由库里那道 `UPDATE … AND balance + delta >= 0` 拦下
+			// （见 store.applyToWallets）。**不在命令行自己判**：判据要拿当前
+			// 值算，而重放时算出来的「调后余额」是错的——那一笔早就调过了，再
+			// 扣一次当然是负的（PostTransaction 在动钱包之前就先认重放，命令行
+			// 这一层看不到那一步）。这里只把措辞换成调账的那一侧：原文说的是
+			// 「余额不足以扣」，那是结算路径的说法。
+			//
+			// ErrFrozenUnderflow 先排掉再按 ErrInsufficientBalance 判，是 store
+			// 那条分类规则要求的顺序（它的错误链里同时带着这两个哨兵）。本命令
+			// 不写 frozen，所以它今天不会出现在这里——判据按规则写，不按今天是
+			// 不是会发生写。
+			if errors.Is(postErr, store.ErrInsufficientBalance) &&
+				!errors.Is(postErr, store.ErrFrozenUnderflow) {
+				return fmt.Errorf(
+					"不允许把余额调成负数：这次调账会让用户 %s 的 %s 余额变成负的，先调够再调减: %w",
+					owner.Username, assetValue, postErr)
+			}
+			return postErr
+		}
+
+		printAdjustedWallet(humanStdout(), walletAdjustment{
+			Owner:    owner,
+			Operator: operator,
+			Asset:    assetValue,
+			Before:   before,
+			After:    after,
+			Delta:    amountValue,
+			Reason:   reason,
+			Ref:      adjustRef,
+			Txn:      txn,
+		}, applied)
 		return nil
 	})
 }
@@ -353,6 +564,19 @@ func resolveWalletAsset(ctx context.Context, db *sql.DB, explicit ledger.Asset) 
 	return assetValue, nil
 }
 
+// hasControlChar 报告 s 里第一个控制字符（C0 与 DEL）。
+//
+// 两处用它：幂等键与 --memo。两处的**理由不同**（见 checkOrderKey 与 checkMemo），
+// 判据是同一条——这两样都会被人读，而控制字符在终端里会被当成动作，不是字。
+func hasControlChar(s string) (rune, bool) {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return r, true
+		}
+	}
+	return 0, false
+}
+
 // checkOrderKey 拒绝幂等键里的控制字符。
 //
 // 键是**逐字**用来算交易号的，而它同时进备注，备注在 ledger 那边过一道
@@ -368,24 +592,64 @@ func resolveWalletAsset(ctx context.Context, db *sql.DB, explicit ledger.Asset) 
 //
 // 判据比 sanitizeMemo 宽（它只处理 \r\n\t）：\x07 这类控制字符会原样进备注，
 // 而备注是要被人读的。宽的这一侧只影响这条命令自己的入账，不动别的写路径。
-func checkOrderKey(order string) error {
-	for _, r := range order {
-		if r < 0x20 || r == 0x7f {
-			return usageErr(fmt.Errorf(
-				"--idempotency-key 不能含控制字符（这里是 %q）：它同时是幂等键与备注里的"+
-					"单据号，带控制字符会让两笔不同的入账在账面上看起来一样",
-				r))
-		}
+//
+// flagName 是这条命令上那个旗标的**规范名**（credit 是 --ref，adjust 也是
+// --ref）：报出来的那句话要能照着重敲，点名一个这条命令不认的旧名（例如
+// adjust 上没有的 --idempotency-key）等于把人指去一条走不通的路。
+func checkOrderKey(flagName, order string) error {
+	if r, bad := hasControlChar(order); bad {
+		return usageErr(fmt.Errorf(
+			"%s 不能含控制字符（这里是 %q）：它同时是幂等键与备注里的单据号，"+
+				"带控制字符会让两笔不同的入账在账面上看起来一样",
+			flagName, r))
 	}
 	return nil
 }
 
-// parseCreditAmount 解析 --amount。
+// checkMemo 拒绝 --memo 里的控制字符。
 //
-// 与 parseQuotaLimit 同一条判据：先自己数小数位。money.Parse 会把多出来的
-// 位四舍五入，而入账金额是「敲进去多少就该记多少」的数——静默改掉最后一位
-// 会让账本上的数字与操作者手里的单据对不上。
+// 原因会**原样**进回执，而落库的那一份由 ledger 的 sanitizeMemo 把 \r\n\t 换成
+// 空格——两个串因此不是同一个，报告里写的与账本里记的就对不上。带换行时回执里会
+// 多出一行，按 docs/cli-output.md「加一个清单命令」那一节的说法，折出来的行与下
+// 一条记录分不开；ESC 之类则会原样进终端。不带控制字符时两边逐字相同，这道判据把
+// 两者钉成同一份。
+//
+// 不选「回执打清洗后的那一份」：那要么在命令行里抄第二份清洗判据（与 ledger 迟早
+// 分叉），要么让 ledger 为显示开一个出口。原因本来就不该是多行的，拒掉更省事。
+//
+// 判据比 sanitizeMemo 宽（它只处理 \r\n\t）：\x07 这类照样会原样进终端。
+func checkMemo(flagName, memo string) error {
+	if r, bad := hasControlChar(memo); bad {
+		return usageErr(fmt.Errorf(
+			"%s 不能含控制字符（这里是 %q）：回执打的是原样的原因，落库那一份会把"+
+				"控制字符换成空格，两边就不是同一个串了",
+			flagName, r))
+	}
+	return nil
+}
+
+// parseCreditAmount 解析 credit 的 --amount。
+//
+// 与 adjust 共用 parseAmountFlag 那一条判据，差别只有符号：入账只收正数，
+// 调账带符号。
 func parseCreditAmount(plain string) (money.Amount, error) {
+	amount, err := parseAmountFlag(plain)
+	if err != nil {
+		return money.Zero, err
+	}
+	if !amount.IsPositive() {
+		return money.Zero, usageErr(fmt.Errorf(
+			"--amount 必须为正数，得到 %s：入账不带负号，方向由分录决定", amount))
+	}
+	return amount, nil
+}
+
+// parseAmountFlag 解析一个金额旗标：去空白、自己数小数位、交给 money.Parse。
+//
+// 先自己数小数位，与 parseQuotaLimit 同一条判据：money.Parse 会把多出来的位
+// 四舍五入，而钱的金额是「敲进去多少就该记多少」的数——静默改掉最后一位会让账本
+// 上的数字与操作者手里的单据对不上。
+func parseAmountFlag(plain string) (money.Amount, error) {
 	trimmed := strings.TrimSpace(plain)
 	if trimmed == "" {
 		return money.Zero, usageErr(errors.New("缺少 --amount"))
@@ -402,10 +666,6 @@ func parseCreditAmount(plain string) (money.Amount, error) {
 	amount, err := money.Parse(trimmed)
 	if err != nil {
 		return money.Zero, usageErr(fmt.Errorf("--amount 不是金额（例如 12.34）: %w", err))
-	}
-	if !amount.IsPositive() {
-		return money.Zero, usageErr(fmt.Errorf(
-			"--amount 必须为正数，得到 %s：入账不带负号，方向由分录决定", amount))
 	}
 	return amount, nil
 }
@@ -431,10 +691,25 @@ func parseGatewayFlag(fs *flag.FlagSet, gateway string) (string, error) {
 	return name, nil
 }
 
-// txnIDForOrder 把运维给的幂等键确定性映射成一个交易号。
+// txnIDForOrder 把入账的幂等键映射成一个交易号。
+func txnIDForOrder(order string) ledger.TxnID {
+	return txnIDFromKey("larkax:wallet-credit:v1", order)
+}
+
+// txnIDForAdjustment 把调账的幂等键映射成一个交易号。
+//
+// 与 txnIDForOrder 是同一个映射，只换了域分隔前缀——**必须换**：两条命令的幂等
+// 键来自同一个物理来源（银行流水号、回单号），共用一个前缀会让「先 credit 再
+// adjust 同一个单号」算成同一笔交易，于是那笔调账要么被判成冲突（退出 4），要么
+// 被判成重放（静默不写），而它本该是一笔新的调账。
+func txnIDForAdjustment(ref string) ledger.TxnID {
+	return txnIDFromKey("larkax:wallet-adjust:v1", ref)
+}
+
+// txnIDFromKey 把（用途前缀 + 幂等键）确定性映射成一枚交易号。
 //
 // 为什么是确定性映射而不是每次生成一个新的随机 uuid：幂等键的用途就是
-// 「同一条命令重跑不会重复入账」。随机 id 会让每次重跑都成为一笔新交易，
+// 「同一条命令重跑不会重复记账」。随机 id 会让每次重跑都成为一笔新交易，
 // 幂等就只能靠「先按备注查一遍」——而备注会清洗、会被人改，不是判据。
 // 把键映射成 txn_id 之后，重跑的第二次在写库那一步撞上同一笔交易，
 // 由 store.PostTransaction 判定「内容一致 = 重放」。
@@ -443,8 +718,8 @@ func parseGatewayFlag(fs *flag.FlagSet, gateway string) (string, error) {
 // 版本位用 8（RFC 9562 的自定义版本）而不是 5：底层是 SHA-256，
 // 写成 v5 会谎称是 SHA-1 名字空间 uuid。ParseTxnID 不检查版本位，
 // 这里设它只是为了让生成的值是一枚形态规范的 uuid。
-func txnIDForOrder(order string) ledger.TxnID {
-	sum := sha256.Sum256([]byte("larkax:wallet-credit:v1\x00" + order))
+func txnIDFromKey(domain, key string) ledger.TxnID {
+	sum := sha256.Sum256([]byte(domain + "\x00" + key))
 	var b [16]byte
 	copy(b[:], sum[:16])
 	b[6] = (b[6] & 0x0f) | 0x80
@@ -512,19 +787,87 @@ func printCreditedWallet(w io.Writer, owner auth.User, txn ledger.Transaction,
 		_, _ = fmt.Fprintln(w, "此前写入的分录：")
 	}
 
-	for _, e := range txn.Entries {
+	printEntryLines(w, txn.Entries)
+}
+
+// printEntryLines 逐条打印一组分录。
+//
+// 借方是正、贷方是负（见 ledger.Entry.Amount）；打给人看时换成「借 / 贷 + 正数」，
+// 否则两条分录一条正一条负，读起来像两种金额。
+//
+// 口径只有这一处：wallet credit 与 wallet adjust 都把分录逐条列出来（理由见
+// printCreditedWallet），两处各写一遍的话，迟早有一处只改了一半。
+func printEntryLines(w io.Writer, entries []ledger.Entry) {
+	for _, e := range entries {
 		direction, magnitude := "借", e.Amount
 		if e.Amount.IsNegative() {
 			direction, magnitude = "贷", e.Amount.Neg()
 		}
-		// 借方是正、贷方是负（见 ledger.Entry.Amount）；打给人看时换成
-		// 「借 / 贷 + 正数」，否则两条分录一条正一条负，读起来像两种金额。
 		line := fmt.Sprintf("  %s %-24s %s %s", direction, e.Account, magnitude, e.Asset)
 		if e.Memo != "" {
 			line += "  " + e.Memo
 		}
 		_, _ = fmt.Fprintln(w, line)
 	}
+}
+
+// walletAdjustment 是一次人工调账的结果，供渲染路径打给人看。
+//
+// 收成一个结构体而不是把八个值平铺给打印函数：它们都是同一件事的几个面，位置
+// 参数排到第七八个之后，读调用点的人得数着看哪个是哪个；而「谁调的」与「调谁的」
+// 是两个不同的人，混在同一串位置参数里读起来容易当成同一个人。
+type walletAdjustment struct {
+	// Owner 是余额被调的那个用户。
+	Owner auth.User
+	// Operator 是这次调账的操作人（--by），与 Owner 可能不是同一个人。
+	Operator auth.User
+	Asset    ledger.Asset
+	// Before 与 After 是这次调账前后**账本现算的权威值**。
+	Before, After money.Amount
+	// Delta 是这次调的**带符号**金额：负数是往回扣。
+	Delta money.Amount
+	// Reason 是原样的 --memo，不含操作人那一段（备注里那一份由 Adjustment 拼）。
+	Reason string
+	Ref    string
+	Txn    ledger.Transaction
+}
+
+// printAdjustedWallet 打印调账结果。
+//
+// 一栏一行，而不是把几件事拼成一句：操作人、被调用户、余额从多少到多少、原因、
+// 单据号与交易号都是要核对的东西，拼成一句在窄终端里会自己折行，折出来的行与
+// 下一条信息分不开（见 docs/cli-output.md 的「加一个清单命令」）。
+//
+// 「刚调完」与「重放」必须能分开（LESSONS 第 16 条）：两者都退出 0，而一次静默的
+// 空操作与一次真的调了账不是同一个结果。重放那一档**不打**余额那一对——那两行会
+// 让人以为这一次真的动了钱，而它一分钱都没动。
+func printAdjustedWallet(w io.Writer, adj walletAdjustment, applied bool) {
+	if !applied {
+		_, _ = fmt.Fprintf(w, "幂等键 %s 已经调过账，本次未改动。交易 %s。\n",
+			adj.Ref, adj.Txn.TxnID)
+		_, _ = fmt.Fprintln(w, "此前写入的分录：")
+		printEntryLines(w, adj.Txn.Entries)
+		return
+	}
+
+	tw := newTableWriter(w)
+	p := newPalette(w)
+	_, _ = fmt.Fprintf(w, "已调账用户 %s\n", adj.Owner.Username)
+	row := func(label, value string) {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+	}
+	// 资产紧挨着余额：余额那个数单独看没有意义，它总是某个资产上的一个数。
+	row("资产", string(adj.Asset))
+	row("余额", adj.Before.String()+" → "+adj.After.String())
+	row("调整", adj.Delta.String())
+	row("原因", adj.Reason)
+	row("操作人", adj.Operator.Username)
+	row("幂等键", adj.Ref)
+	row("交易", string(adj.Txn.TxnID))
+	_ = tw.Flush()
+
+	_, _ = fmt.Fprintln(w, "分录：")
+	printEntryLines(w, adj.Txn.Entries)
 }
 
 // walletRow 是一条钱包记录的展示形态：账本那几列加上从 users 取来的用户名。
