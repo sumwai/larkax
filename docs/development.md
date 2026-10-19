@@ -1138,7 +1138,7 @@ ingress 规则下。
 | `alias` | 规范模型名到上游模型名的映射：`create` / `list` / `update` / `delete` / `resolve` |
 | `price` | 计价规则：`create` / `list` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `list`） |
 | `upstream-cost` | 上游成本规则（每条渠道每个模型按生效窗口与优先级挑一条）：`create` / `list` / `update` / `disable` |
-| `user` | 用户：`create` / `list` / `get` / `update` |
+| `user` | 用户：`create` / `list` / `get` / `update`；销户：`delete`（`request` 打标可撤 / `revert` 撤回 / `purge` 匿名化，不可逆） |
 | `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录）/ `adjust`（手工调账，走账本写分录）/ `refund`（退款，走账本写分录）/ `list`；商户提现：`payout`（`request` 申请并冻住待付 / `approve` 批准 / `reject` 驳回并解除冻结 / `paid` 打款，只放行已批准的单子） |
 | `usage` | 用量与计费（只读）：`events`（用量事件）/ `requests`（每次请求的预留与结算） |
 | `apikey` | API Key：`create` / `update` / `get` / `list`；`update` 兼改状态、备注与过期时间 |

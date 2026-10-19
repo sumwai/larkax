@@ -175,7 +175,6 @@ func TestAdminImpliesMerchantConstraintSurvivesRoundTrip(t *testing.T) {
 func TestAdminImpliesMerchantAlignsRowsAndDownKeepsThem(t *testing.T) {
 	ctx := t.Context()
 	db := testDB(ctx, t)
-	store := New(db)
 
 	migrateToConstraint(t, db)
 
@@ -191,14 +190,16 @@ func TestAdminImpliesMerchantAlignsRowsAndDownKeepsThem(t *testing.T) {
 	}
 	cleanupUsers(ctx, t, db, id)
 
-	if m, a := readMarkers(ctx, t, db, id); m || !a {
+	m, a := readMarkers(ctx, t, db, id)
+	if m || !a {
 		t.Fatalf("造出来的那一行是 (merchant=%v, admin=%v)，期望 (false, true)——反例没造出来", m, a)
 	}
 	// 它今天就已经按 admin 读：对齐那一列不改变任何既有语义。
-	if info, err := store.UserByRef(ctx, username); err != nil {
-		t.Fatalf("读反例行失败: %v", err)
-	} else if info.Role != RoleAdmin {
-		t.Fatalf("反例行折出来的称呼是 %q，期望 %q", info.Role, RoleAdmin)
+	//
+	// 这里拿两个标记直接走 roleOf，而不是走 UserByRef：库停在这条迁移之前，
+	// 那张表上还没有后续迁移加的列，而 UserByRef 读的是最新 schema。
+	if role := roleOf(m, a); role != RoleAdmin {
+		t.Fatalf("反例行折出来的称呼是 %q，期望 %q", role, RoleAdmin)
 	}
 
 	if err := goose.UpContext(ctx, db, "."); err != nil {

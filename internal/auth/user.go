@@ -672,6 +672,12 @@ type UserInfo struct {
 	Role Role
 	// DisplayName 为空串表示这一列是 NULL。
 	DisplayName string
+	// DeletedAt 是匿名化完成的时刻；nil 表示还没走到销户终态。
+	//
+	// 它与 Status 说的是两件事：Status 是鉴权读的那一列（deleted 之后账号不能
+	// 再用），DeletedAt 回答「什么时候销的户」。行永远不删，所以这一列也是
+	// 事后核对「这一行是什么时候变成终态的」的唯一来源。
+	DeletedAt *time.Time
 	// CreatedAt 与 UpdatedAt 是 users 表上那两列。
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -696,7 +702,8 @@ type ListUsersFilter struct {
 //
 // is_merchant / is_admin 读的是**原始标记**，折成称呼的事只在 roleOf 里做一次。
 const userInfoColumns = `id, username, COALESCE(email, ''), status,
-	       is_merchant, is_admin, COALESCE(display_name, ''), created_at, updated_at`
+	       is_merchant, is_admin, COALESCE(display_name, ''), deleted_at,
+	       created_at, updated_at`
 
 // ListUsers 列出用户，按 id 排序。
 //
@@ -780,12 +787,17 @@ func scanUserInfo(scan func(...any) error) (UserInfo, error) {
 		info       UserInfo
 		isMerchant bool
 		isAdmin    bool
+		deletedAt  sql.NullTime
 	)
 	if err := scan(&info.ID, &info.Username, &info.Email, &info.Status,
-		&isMerchant, &isAdmin, &info.DisplayName, &info.CreatedAt, &info.UpdatedAt); err != nil {
+		&isMerchant, &isAdmin, &info.DisplayName, &deletedAt,
+		&info.CreatedAt, &info.UpdatedAt); err != nil {
 		return UserInfo{}, err
 	}
 	info.Role = roleOf(isMerchant, isAdmin)
+	if deletedAt.Valid {
+		info.DeletedAt = &deletedAt.Time
+	}
 	return info, nil
 }
 
@@ -871,14 +883,40 @@ func (s *Store) UpdateUser(ctx context.Context, ref string, p UpdateUserParams) 
 
 	info, err := scanUserInfo(s.db.QueryRowContext(ctx,
 		`UPDATE users SET `+strings.Join(sets, ", ")+` WHERE `+where+
-			` RETURNING `+userInfoColumns, args...).Scan)
+			` AND status <> '`+UserStatusDeleted+`' RETURNING `+userInfoColumns, args...).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
-		return UserInfo{}, fmt.Errorf("%w: %q", ErrUserNotFound, ref)
+		return UserInfo{}, s.updateUserNoRows(ctx, ref)
 	}
 	if err != nil {
 		return UserInfo{}, updateUserFailure(err, p.Email)
 	}
 	return info, nil
+}
+
+// updateUserNoRows 在 UPDATE 一条也没改到时判断是「没有这个人」还是「这个人已经
+// 到终态」——两者在 RETURNING 上都表现为一行不出。
+//
+// 终态那一句写在 WHERE 里而不是先查后改：先查后改中间那道缝里正好能塞进一次
+// 匿名化，而匿名化是不可逆的，漏过去的那一次会把占位身份写回成真身份。
+// 命令行把 ErrDeletionAlreadyDeleted 归成冲突（退出 4），与 delete 家族的报错
+// 同一档。
+func (s *Store) updateUserNoRows(ctx context.Context, ref string) error {
+	where, arg := userRefWhere(ref, 1)
+	var status string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT status FROM users WHERE `+where, arg).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %q", ErrUserNotFound, ref)
+	}
+	if err != nil {
+		return err
+	}
+	if status == UserStatusDeleted {
+		return fmt.Errorf(
+			"%w：账号 %q 已经匿名化，终态不可逆，不能再改这一行的任何一列",
+			ErrDeletionAlreadyDeleted, ref)
+	}
+	return fmt.Errorf("%w: %q", ErrUserNotFound, ref)
 }
 
 // userUpdateSets 把一次修改编成 SET 片段与参数。
