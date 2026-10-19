@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sumwai/larkax/internal/ledger"
 )
 
 // 销户那一族的集成测试。
@@ -53,15 +55,29 @@ func seedWallet(ctx context.Context, t *testing.T, db *sql.DB, userID int64, bal
 	}
 }
 
-func seedLedgerEntry(ctx context.Context, t *testing.T, db *sql.DB, userID int64, txnID string) {
+// seedLedgerPair 写一笔**平衡的**分录：用户账户 +1、平台收入 -1，共用一个
+// txn_id，并按 txn_id 登记清理。
+//
+// 单边分录会让账本的不变式（每个 txn_id 求和为零）不成立：销户本身不写分录，
+// 但同一张库上的其他用例与校验会把这几行读进去，而它们不是一笔真实交易。
+func seedLedgerPair(ctx context.Context, t *testing.T, db *sql.DB, userID int64) string {
 	t.Helper()
+	txnID := string(ledger.NewTxnID())
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO ledger_entries (txn_id, account, amount, entry_type, memo)
-		VALUES ($1, $2, 1, 'adjustment', '销户用例')`,
-		txnID, fmt.Sprintf("user:%d", userID),
+		VALUES ($1, $2, 1, 'adjustment', '销户用例'),
+		       ($1, $3, -1, 'adjustment', '销户用例')`,
+		txnID, ledger.UserAccount(userID).String(), ledger.PlatformRevenueAccount().String(),
 	); err != nil {
 		t.Fatalf("写账本分录失败: %v", err)
 	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.WithoutCancel(ctx),
+			`DELETE FROM ledger_entries WHERE txn_id = $1`, txnID); err != nil {
+			t.Logf("清理账本分录 %s 失败: %v", txnID, err)
+		}
+	})
+	return txnID
 }
 
 // TestDeletionRequestBlocksKeysAndRevertRestoresThem 证明「打标可撤」这件事的
@@ -247,8 +263,8 @@ func TestPurgeAnonymizesAndKeepsFinancialRows(t *testing.T) {
 	const email = "purgeme@example.com"
 	u := newDeletionUser(ctx, t, db, UserStatusActive, email, "要销户的人")
 	seedWallet(ctx, t, db, u.ID, "0", "0")
-	seedLedgerEntry(ctx, t, db, u.ID, "00000000-0000-8000-8000-000000000001")
-	seedLedgerEntry(ctx, t, db, u.ID, "00000000-0000-8000-8000-000000000002")
+	seedLedgerPair(ctx, t, db, u.ID)
+	seedLedgerPair(ctx, t, db, u.ID)
 
 	// 两把 key：一把 active、一把此前就 disabled。前者要被作废，后者保留它
 	// 原来的状态——「此前停用过」也是一条该留下的记录。
@@ -282,6 +298,28 @@ func TestPurgeAnonymizesAndKeepsFinancialRows(t *testing.T) {
 		u.ID, revokedAt)
 	if err != nil {
 		t.Fatalf("写采集授权失败: %v", err)
+	}
+
+	// 另一个用户：他的 key、插件 KV 与授权都不该被这条命令带走。销户的几条
+	// UPDATE/DELETE 都带 user_id 条件，这里就是钉住那个条件的那一半。
+	other := newDeletionUser(ctx, t, db, UserStatusActive, "", "")
+	otherKey, err := store.Create(ctx, CreateParams{UserID: other.ID})
+	if err != nil {
+		t.Fatalf("创建另一个用户的 key 失败: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO plugin_kv (plugin_key, user_id, key, value) VALUES ('demo', $1, 'keep', 'v')`,
+		other.ID)
+	if err != nil {
+		t.Fatalf("写另一个用户的插件 KV 失败: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO capture_consents
+			(user_id, scope, request_id, consent_text, consent_version, expires_at)
+		VALUES ($1, 'single_request', 'req-other', '同意', 1, now() + interval '1 day')`,
+		other.ID)
+	if err != nil {
+		t.Fatalf("写另一个用户的采集授权失败: %v", err)
 	}
 
 	_, err = store.RequestDeletion(ctx, u.Username)
@@ -399,14 +437,58 @@ func TestPurgeAnonymizesAndKeepsFinancialRows(t *testing.T) {
 		t.Errorf("钱包 = %d 行，余额 %s、冻结 %s，想要 1 行、两个 0",
 			walletRows, balance, frozenText)
 	}
-	var ledgerRows int
+	var (
+		ledgerRows   int
+		ledgerAmount string
+	)
+	account := ledger.UserAccount(u.ID).String()
 	if err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM ledger_entries WHERE account = $1`,
-		fmt.Sprintf("user:%d", u.ID)).Scan(&ledgerRows); err != nil {
+		`SELECT count(*), sum(amount)::text FROM ledger_entries WHERE account = $1`,
+		account).Scan(&ledgerRows, &ledgerAmount); err != nil {
 		t.Fatalf("统计账本分录失败: %v", err)
 	}
-	if ledgerRows != 2 || result.LedgerEntries != 2 {
-		t.Errorf("账本分录 = %d 条（回执说 %d 条），想要 2", ledgerRows, result.LedgerEntries)
+	if ledgerRows != 2 || ledgerAmount != "2.00000000" {
+		t.Errorf("账本分录 = %d 条、用户侧合计 %s，想要 2 条、+2",
+			ledgerRows, ledgerAmount)
+	}
+	if result.LedgerEntries != 2 {
+		t.Errorf("回执说 %d 条分录，想要 2", result.LedgerEntries)
+	}
+	// 平台侧那两行是 -1 各一笔：单边分录会让「每个 txn_id 求和为零」不成立。
+	var platformAmount string
+	if err := db.QueryRowContext(ctx,
+		`SELECT sum(amount)::text FROM ledger_entries
+		  WHERE account = $1 AND txn_id IN
+		        (SELECT txn_id FROM ledger_entries WHERE account = $2)`,
+		ledger.PlatformRevenueAccount().String(), account).Scan(&platformAmount); err != nil {
+		t.Fatalf("读平台侧合计失败: %v", err)
+	}
+	if platformAmount != "-2.00000000" {
+		t.Errorf("平台侧合计 = %s，想要 -2（每笔都应当平衡）", platformAmount)
+	}
+
+	// ── 另一个用户：一行都不该变 ───────────────────────────────────
+	var otherKV int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM plugin_kv WHERE user_id = $1`, other.ID,
+	).Scan(&otherKV); err != nil {
+		t.Fatalf("统计另一个用户的插件 KV 失败: %v", err)
+	}
+	if otherKV != 1 {
+		t.Errorf("另一个用户的插件 KV 剩 %d 行，想要 1 行", otherKV)
+	}
+	var otherRevoked sql.NullTime
+	if err := db.QueryRowContext(ctx, `
+		SELECT revoked_at FROM capture_consents
+		 WHERE user_id = $1 AND request_id = 'req-other'`, other.ID,
+	).Scan(&otherRevoked); err != nil {
+		t.Fatalf("读另一个用户的采集授权失败: %v", err)
+	}
+	if otherRevoked.Valid {
+		t.Errorf("另一个用户的采集授权被撤销了：%s", otherRevoked.Time)
+	}
+	if _, err := store.Authenticate(ctx, request(ctx, "x-api-key", otherKey.Plaintext)); err != nil {
+		t.Errorf("另一个用户的 key 失效了: %v", err)
 	}
 }
 
@@ -481,5 +563,140 @@ func TestPurgeSkipsATakenPlaceholderName(t *testing.T) {
 	}
 	if want := fmt.Sprintf("deleted-user-%d-2", u.ID); result.NewUsername != want {
 		t.Errorf("新用户名 = %q，想要 %q", result.NewUsername, want)
+	}
+}
+
+// TestPurgeSkipsATakenPlaceholderEmail 钉住占位邮箱撞上已有用户时的处置：
+// 用户名空着、但那个邮箱已经被别人占了，同样要往后找——两列都有唯一约束，
+// 只查用户名会在写 users 那一句上撞回来。
+func TestPurgeSkipsATakenPlaceholderEmail(t *testing.T) {
+	ctx := t.Context()
+	db := testDB(ctx, t)
+	store := New(db)
+	u := newUser(ctx, t, db, UserStatusActive)
+
+	takenEmail := fmt.Sprintf("deleted-user-%d@example.com", u.ID)
+	var occupierID int64
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO users (username, email) VALUES ($1, $2) RETURNING id`,
+		uniqueUsername(), takenEmail).Scan(&occupierID); err != nil {
+		t.Fatalf("占住占位邮箱失败: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.WithoutCancel(ctx),
+			`DELETE FROM users WHERE id = $1`, occupierID); err != nil {
+			t.Logf("清理占位用户 %d 失败: %v", occupierID, err)
+		}
+	})
+
+	if _, err := store.RequestDeletion(ctx, u.Username); err != nil {
+		t.Fatalf("打标失败: %v", err)
+	}
+	result, err := store.PurgeDeletion(ctx, u.Username, u.Username)
+	if err != nil {
+		t.Fatalf("匿名化失败: %v", err)
+	}
+	if want := fmt.Sprintf("deleted-user-%d-2", u.ID); result.NewUsername != want {
+		t.Errorf("新用户名 = %q，想要 %q", result.NewUsername, want)
+	}
+	if want := fmt.Sprintf("deleted-user-%d-2@example.com", u.ID); result.NewEmail != want {
+		t.Errorf("新邮箱 = %q，想要 %q", result.NewEmail, want)
+	}
+}
+
+// TestPurgeWaitsForTheWalletLockAndThenRefuses 钉住「余额判据在锁之后」这件事。
+//
+// 另一个事务先改钱包、把行锁攥在手里；销户要么在钱包锁上等它提交，要么已经
+// 提交。前一种情况下它读到的是 5，必须拒绝；后一种情况下它先提交，但那个事务
+// 的 UPDATE 早就发出来了，行锁同样会挡住它——两种顺序都落在这条断言上。
+// 也就是说：入账与销户不会同时成功。
+func TestPurgeWaitsForTheWalletLockAndThenRefuses(t *testing.T) {
+	ctx := t.Context()
+	db := testDB(ctx, t)
+	store := New(db)
+	u := newUser(ctx, t, db, UserStatusActive)
+	seedWallet(ctx, t, db, u.ID, "0", "0")
+
+	if _, err := store.RequestDeletion(ctx, u.Username); err != nil {
+		t.Fatalf("打标失败: %v", err)
+	}
+
+	// 这笔入账不提交，先把钱包行锁住。
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("开启事务失败: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE user_wallets SET balance = 5 WHERE user_id = $1`, u.ID); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("入账失败: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.PurgeDeletion(ctx, u.Username, u.Username)
+		done <- err
+	}()
+
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("提交入账失败: %v", err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrDeletionBalanceNotZero) {
+			t.Fatalf("入账之后匿名化应当拒绝，错误 = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("匿名化一直没返回：它可能卡在锁上，也可能根本没走到钱包")
+	}
+
+	var status string
+	if err := db.QueryRowContext(ctx,
+		`SELECT status FROM users WHERE id = $1`, u.ID).Scan(&status); err != nil {
+		t.Fatalf("读状态失败: %v", err)
+	}
+	if status != UserStatusDeletionRequested {
+		t.Errorf("被拒绝的匿名化把状态改成了 %q", status)
+	}
+}
+
+// TestPurgeCountsLegacyLedgerAccountForms 证明回执数的账本分录按
+// UserIDFromAccount 的口径来：旧写路径留下过 `user:042` 这种写法，它与规范
+// 写法指向同一个钱包，按字符串相等数会漏掉这一笔。
+func TestPurgeCountsLegacyLedgerAccountForms(t *testing.T) {
+	ctx := t.Context()
+	db := testDB(ctx, t)
+	store := New(db)
+	u := newUser(ctx, t, db, UserStatusActive)
+
+	// 规范写法一笔（+1）、旧写法一笔（+1），平台侧各 -1，两笔都平衡。
+	canonical := ledger.UserAccount(u.ID).String()
+	legacy := fmt.Sprintf("user:0%d", u.ID)
+	for _, account := range []string{canonical, legacy} {
+		txnID := string(ledger.NewTxnID())
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO ledger_entries (txn_id, account, amount, entry_type, memo) VALUES
+				($1, $2, 1, 'adjustment', '销户用例'),
+				($1, $3, -1, 'adjustment', '销户用例')`,
+			txnID, account, ledger.PlatformRevenueAccount().String()); err != nil {
+			t.Fatalf("写账本分录失败: %v", err)
+		}
+		t.Cleanup(func() {
+			if _, err := db.ExecContext(context.WithoutCancel(ctx),
+				`DELETE FROM ledger_entries WHERE txn_id = $1`, txnID); err != nil {
+				t.Logf("清理账本分录 %s 失败: %v", txnID, err)
+			}
+		})
+	}
+
+	if _, err := store.RequestDeletion(ctx, u.Username); err != nil {
+		t.Fatalf("打标失败: %v", err)
+	}
+	result, err := store.PurgeDeletion(ctx, u.Username, u.Username)
+	if err != nil {
+		t.Fatalf("匿名化失败: %v", err)
+	}
+	if result.LedgerEntries != 2 {
+		t.Errorf("回执说 %d 条分录，想要 2（规范写法与旧写法各一）", result.LedgerEntries)
 	}
 }

@@ -675,7 +675,7 @@ type UserInfo struct {
 	// DeletedAt 是匿名化完成的时刻；nil 表示还没走到销户终态。
 	//
 	// 它与 Status 说的是两件事：Status 是鉴权读的那一列（deleted 之后账号不能
-	// 再用），DeletedAt 回答「什么时候销的户」。行永远不删，所以这一列也是
+	// 再用），DeletedAt 回答「什么时候销的户」。users 行永远不删，所以这一列也是
 	// 事后核对「这一行是什么时候变成终态的」的唯一来源。
 	DeletedAt *time.Time
 	// CreatedAt 与 UpdatedAt 是 users 表上那两列。
@@ -880,10 +880,17 @@ func (s *Store) UpdateUser(ctx context.Context, ref string, p UpdateUserParams) 
 
 	where, arg := userRefWhere(ref, len(args)+1)
 	args = append(args, arg)
+	where += ` AND status <> '` + UserStatusDeleted + `'`
+	if p.Status != nil {
+		// 改状态不能把一行从「要求删除」里捞出来：那条路是 delete revert，
+		// 它会把 deletion_prior_status 一起清掉。从 update 直接写 active，
+		// 既跳过了「回到原来那一个状态」的判据，又把旧值留在那一列上。
+		where += ` AND status <> '` + UserStatusDeletionRequested + `'`
+	}
 
 	info, err := scanUserInfo(s.db.QueryRowContext(ctx,
 		`UPDATE users SET `+strings.Join(sets, ", ")+` WHERE `+where+
-			` AND status <> '`+UserStatusDeleted+`' RETURNING `+userInfoColumns, args...).Scan)
+			` RETURNING `+userInfoColumns, args...).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return UserInfo{}, s.updateUserNoRows(ctx, ref)
 	}
@@ -902,19 +909,29 @@ func (s *Store) UpdateUser(ctx context.Context, ref string, p UpdateUserParams) 
 // 同一档。
 func (s *Store) updateUserNoRows(ctx context.Context, ref string) error {
 	where, arg := userRefWhere(ref, 1)
-	var status string
+	var (
+		status   string
+		username string
+	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT status FROM users WHERE `+where, arg).Scan(&status)
+		`SELECT status, username FROM users WHERE `+where, arg,
+	).Scan(&status, &username)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: %q", ErrUserNotFound, ref)
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("查询用户状态失败: %w", err)
 	}
-	if status == UserStatusDeleted {
+	switch status {
+	case UserStatusDeleted:
 		return fmt.Errorf(
 			"%w：账号 %q 已经匿名化，终态不可逆，不能再改这一行的任何一列",
 			ErrDeletionAlreadyDeleted, ref)
+	case UserStatusDeletionRequested:
+		return fmt.Errorf(
+			"%w：要改状态请先用 larkaxctl user delete revert --user %s，它会把状态"+
+				"回到打标之前的那一个",
+			ErrDeletionAlreadyRequested, username)
 	}
 	return fmt.Errorf("%w: %q", ErrUserNotFound, ref)
 }

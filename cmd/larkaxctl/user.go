@@ -102,12 +102,13 @@ list 按 id 从小到大列出用户，一栏一个字段：ID、用户名、状
             --role admin 列的是 admin（admin 同时也是 merchant，但两者在这里
             是两个不同的取值）。
 
-状态是鉴权时真正被检查的那一列（suspended 与 banned 都让他手里的 key 全部失效），
-**命令行上改它只有下面 update 这一条路**：直接改库也一样生效，但那样既没有校验
-也没有回显，事后说不清是谁改的。
+状态是鉴权时真正被检查的那一列（suspended 与 banned 都让用户手里的 key 全部失效）。
+命令行上动它有两条路：update --status 改前三个取值，下面 delete 那一族打上并
+撤回 deletion_requested。直接改库也一样生效，但那样既没有校验也没有回显，事后
+说不清是谁改的。
 
-get 按 ID 或用户名读一个用户的全部字段：除上面那几栏，还有展示名、创建时间与
-更新时间。标识怎么解释与别的命令一致：纯数字按 ID，否则按用户名。
+get 按 ID 或用户名读一个用户的全部字段：除上面那几栏，还有展示名、删除时间、
+创建时间与更新时间。标识怎么解释与别的命令一致：纯数字按 ID，否则按用户名。
 
 update 只改**显式给出**的字段，一个都没给就报参数错（不做静默空操作）：
 
@@ -142,14 +143,15 @@ merchant 的用户再 --merchant），那一行不会出现。用户不存在时
 --status 也是先去两头空白再比对，但空串不认。
 
 create、list、get 与 update 只碰 users 表（不碰渠道凭证）；delete 那一族会写到
-api_keys、钱包、插件 KV 与采集授权，但不删任何一行。它们都不需要
-LARKAX_MASTER_KEYS。
+api_keys、plugin_kv 与 capture_consents，钱包只读加锁。除了 plugin_kv 里属于
+这个用户的行，别的行都不删。它们都不需要 LARKAX_MASTER_KEYS。
 
 delete 这一族把账号从「要求删除」走到终态，分两步，中间可以撤回。
 
 request 打标：把账号置为 deletion_requested，并记下它原来的状态。从这个时刻起，
 用户手里的 API Key 全部失效——鉴权只认 status = active，打标之后这些
-key 在任何一条路上都过不去。key 一行都不改，撤销之后原来的 key 继续能用。
+key 在任何一条路上都过不去。key 一行都不改，撤销之后原本有效的 key 恢复有效
+（此前停用的仍然是停用）。
 
 打标之前先看钱包：余额与冻结额都必须是 0。不是 0 时拒绝，并给出当前的两个数与
 下一步（先用 wallet adjust 调账，或等退款与还没结算完的请求处理完）。
@@ -591,9 +593,9 @@ func deletionRequestReceipt(m auth.DeletionMark) deletionReceipt {
 		headline: fmt.Sprintf("已标记用户 %s 要求删除。", m.Username),
 		rows: [][2]string{
 			{"状态", m.FromStatus + " → " + m.ToStatus},
-			{"撤销", fmt.Sprintf("larkaxctl user delete revert --user %s", m.Username)},
-			{"匿名化", fmt.Sprintf("larkaxctl user delete purge --user %s --confirm %s",
-				m.Username, m.Username)},
+			{"撤销", "larkaxctl user delete revert --user " + shellArg(m.Username)},
+			{"匿名化", "larkaxctl user delete purge --user " + shellArg(m.Username) +
+				" --confirm " + shellArg(m.Username)},
 		},
 	}
 }
@@ -604,7 +606,7 @@ func deletionRevertReceipt(m auth.DeletionMark) deletionReceipt {
 		headline: fmt.Sprintf("已撤销用户 %s 的删除要求。", m.Username),
 		rows: [][2]string{
 			{"状态", m.FromStatus + " → " + m.ToStatus},
-			{"API Key", "未改动，原来的 key 可以继续用"},
+			{"API Key", "未改动，原本有效的 key 恢复有效"},
 		},
 	}
 }
@@ -627,10 +629,30 @@ func deletionPurgeReceipt(r auth.DeletionResult) deletionReceipt {
 				r.KeysRevoked, r.KeysTotal)},
 			{"插件 KV", fmt.Sprintf("%d 个键已删除", r.PluginKVDeleted)},
 			{"采集授权", fmt.Sprintf("%d 条已撤销（行保留）", r.ConsentsRevoked)},
-			{"钱包", fmt.Sprintf("余额 %s、冻结 %s，行保留", r.Balance, r.Frozen)},
+			{"钱包", deletionWalletLine(r)},
 			{"账本", fmt.Sprintf("%d 条分录保留", r.LedgerEntries)},
 		},
 	}
+}
+
+// deletionWalletLine 说清钱包那一条处置。
+//
+// 「余额 0、冻结 0，行保留」只对有钱包行的账号成立：从没开过户的账号一行都
+// 没有，回执说「行保留」会让人以为那里还有一条记录可查。
+func deletionWalletLine(r auth.DeletionResult) string {
+	if r.WalletRows == 0 {
+		return "没有钱包行"
+	}
+	return fmt.Sprintf("余额 %s、冻结 %s，行保留", r.Balance, r.Frozen)
+}
+
+// shellArg 把一个值写成能直接粘进 POSIX shell 的形态。
+//
+// 用户名只挡了控制字符与「会被 --user 当成 ID」的写法，空格、引号、$ 都能
+// 出现；回执里那句「下一步敲什么」要能原样执行，所以整体用单引号包住，内部的
+// 单引号用 '\” 收尾再开头。
+func shellArg(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // printDeletionReceipt 打一张销户回执。

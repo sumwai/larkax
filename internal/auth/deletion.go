@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
@@ -22,14 +25,29 @@ import (
 // 而销户必须是**一个事务**：删了一半的账号（key 作废了、users 行还 active）在
 // 输出上不报错，事后也分不出它停在哪一步。
 //
-// 两处边界要说清：
+// 三处边界要说清：
 //
-//   - 行永远不删。users 行、api_keys 行、钱包行、账本分录、快照、授权记录都留着，
-//     销户改的是它们的状态与身份信息。账单是财务记录，不随账号删除清除
+//   - 行基本不删。users、api_keys、钱包、账本分录、快照、采集授权记录都留着，
+//     销户改的是它们的状态与身份信息。唯一的例外是用户态插件 KV（plugin_kv）
+//     里属于这个用户的行——它们随匿名化删掉。账单是财务记录，不随账号删除清除
 //     （见 docs/request-retention.md）。
 //   - 鉴权不需要为这一档加判断：lookup 只认 status = active，而两个新状态都不是
 //     active，所以打标之后用户手里的 key 立刻失效；撤销之后同一个 key 又可以用。
 //     key 本身在打标这一步**一条都不动**，正是为了让撤销真的能回到原样。
+//   - 锁序是 api_keys → users → user_wallets，全仓只有这一套。计费那一侧的出处
+//     是 internal/ledger/store 的 SaveReservation：keyquota 先锁那把 key，再锁
+//     钱包改冻结额，最后 INSERT billing_requests，经外键在 users 上取 KEY SHARE
+//     （store.go 里那句「没有任何路径按先钱包后 key 拿锁」说的就是它）。
+//
+//     为什么 users 在钱包之前：user_wallets 的新行经外键在 users 上取 KEY SHARE，
+//     而 FOR UPDATE 与它冲突。先锁 users 就堵死了「余额查完、事务提交前插进一个
+//     新钱包行」这个窗口。为什么 api_keys 在 users 之前：拿不到 key 锁的计费事务
+//     会停在第一把锁上，不会已经握着钱包再来等 users，两条路才不成环。反过来
+//     （users → 钱包 → key）一次「初始预留 + 销户」并发就能撞 40P01。
+//
+//     下面每一次「先无锁读一行」都只是快速失败：拿到锁之后会重新读、重新校验。
+//     锁序之外还剩一个窗口——定位之后新建的 key 不在我们锁住的集合里——所以
+//     整笔事务对 40P01 留了有限次重跑（见 retryDeletion），只作退路。
 
 // 销户引入的两个 users.status 取值，与迁移 00039 的 CHECK 约束一致。
 //
@@ -116,6 +134,9 @@ type DeletionResult struct {
 	// Balance / Frozen 是销户那一刻钱包里的两个数（判据要求都是 0）。
 	Balance money.Amount
 	Frozen  money.Amount
+	// WalletRows 是读到的钱包行数：0 表示这个账号从没开过户，回执不该说
+	// 「行保留」——那一行不存在。
+	WalletRows int64
 }
 
 // deletionRow 是销户要读的那一行 users。
@@ -150,6 +171,102 @@ func lockDeletionRow(ctx context.Context, tx *sql.Tx, ref string) (deletionRow, 
 	return row, nil
 }
 
+// readDeletionRow 按 ref 读一行 users，**不加锁**。
+//
+// 锁序要求 api_keys 与 users 先于钱包，而定位一个人只能先按 ref 读一次：ref 既
+// 可能是 id 也可能是用户名，而用户名要等 users 锁之后再读一遍才是判据。这一次
+// 读只用来快速失败与拿到 id，结果不参与任何判定。
+func readDeletionRow(ctx context.Context, tx *sql.Tx, ref string) (deletionRow, error) {
+	where, arg := userRefWhere(ref, 1)
+	var row deletionRow
+	err := tx.QueryRowContext(ctx,
+		`SELECT id, username, email, display_name, status, deletion_prior_status, deleted_at
+		   FROM users WHERE `+where, arg,
+	).Scan(&row.id, &row.username, &row.email, &row.displayName,
+		&row.status, &row.prior, &row.deletedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return deletionRow{}, fmt.Errorf("%w: %q", ErrUserNotFound, ref)
+	}
+	if err != nil {
+		return deletionRow{}, fmt.Errorf("查询用户失败: %w", err)
+	}
+	return row, nil
+}
+
+// lockDeletionRowByID 按 id 锁住一行 users，并把锁之后的那一版读出来。
+//
+// 用 id 而不是 ref：ID 不随改名变化，而用户名正是匿名化要换掉的那一列。
+// 锁之后读到的是**锁内**的版本，并发改名或并发匿名化都在这里被看见。
+func lockDeletionRowByID(ctx context.Context, tx *sql.Tx, id int64) (deletionRow, error) {
+	var row deletionRow
+	err := tx.QueryRowContext(ctx,
+		`SELECT id, username, email, display_name, status, deletion_prior_status, deleted_at
+		   FROM users WHERE id = $1 FOR UPDATE`, id,
+	).Scan(&row.id, &row.username, &row.email, &row.displayName,
+		&row.status, &row.prior, &row.deletedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return deletionRow{}, fmt.Errorf("%w: id %d", ErrUserNotFound, id)
+	}
+	if err != nil {
+		return deletionRow{}, fmt.Errorf("锁定用户失败: %w", err)
+	}
+	return row, nil
+}
+
+// lockUserAPIKeys 按锁序先锁住这个用户名下的 api_keys 行。
+//
+// 锁的是**行**，不读值：只 SELECT 一个恒量，拦的是计费路径里 keyquota 对同一行
+// 的 FOR UPDATE。不按 status 过滤是有意的——UPDATE 那一句只锁 active 的行，
+// 而这里要的是「这个用户的 key 集合在前、别的锁在后」这条顺序，与某一行的状态
+// 无关。结果集必须读完并关闭，否则驱动会留着一个打开的游标。
+func lockUserAPIKeys(ctx context.Context, tx *sql.Tx, userID int64) error {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM api_keys WHERE user_id = $1 FOR UPDATE`, userID)
+	if err != nil {
+		return fmt.Errorf("锁定用户 %d 的 API Key 失败: %w", userID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("读锁定中的 API Key 失败: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("锁定用户 %d 的 API Key 失败: %w", userID, err)
+	}
+	return nil
+}
+
+// deletionTxRetries 是撞上死锁时整笔事务重跑的次数上限。
+//
+// 锁序已经避开已知的环，这里只兜「定位之后又新建了一把 key」那种边角：重跑
+// 一次会把它一起锁进来。做成重跑而不是在代码里绕开，是因为绕过它的写法要在
+// 别的路径上加锁，那会把一条不变式散到三处。
+const deletionTxRetries = 2
+
+// retryDeletion 在整笔事务因死锁被回滚时重跑它。
+//
+// 只认 PostgreSQL 的 40P01（deadlock_detected），别的错误原样返回——把唯一键
+// 冲突也拿来重试，只会把一次失败变慢。次数用尽后把最后一次的错误包一层说明：
+// 那时候库里什么都没留下（事务已回滚），原样重跑是安全的。
+func retryDeletion(run func() error) error {
+	var err error
+	for attempt := 0; attempt <= deletionTxRetries; attempt++ {
+		if err = run(); err == nil || !isDeadlock(err) {
+			return err
+		}
+	}
+	return fmt.Errorf("销户事务反复撞上死锁，已重跑 %d 次仍未成功（每一笔都已回滚，可以原样重跑）: %w",
+		deletionTxRetries, err)
+}
+
+// isDeadlock 判断一个错误是不是 PostgreSQL 的死锁。
+func isDeadlock(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "40P01"
+}
+
 // deletionWalletError 是钱包行读不出来时的错误。
 //
 // 读不出来就不能说「余额是 0」：那一列是 numeric(20, 8)，比定点数能表示的范围
@@ -166,7 +283,8 @@ func deletionWalletError(asset, column, raw string, err error) error {
 // 直到这个事务提交。
 //
 // 没有钱包行等同余额为 0——那样的账号从没开过户，销户不该逼人先 create。
-func checkDeletionBalance(ctx context.Context, tx *sql.Tx, userID int64, username string) (balance, frozen money.Amount, err error) {
+// walletRows 是读到的行数，回执用它区分「没有钱包行」与「两个数都是 0」。
+func checkDeletionBalance(ctx context.Context, tx *sql.Tx, userID int64, username string) (balance, frozen money.Amount, walletRows int64, err error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT asset, balance::text, frozen::text
 		  FROM user_wallets
@@ -174,7 +292,7 @@ func checkDeletionBalance(ctx context.Context, tx *sql.Tx, userID int64, usernam
 		 ORDER BY asset
 		 FOR UPDATE`, userID)
 	if err != nil {
-		return money.Amount{}, money.Amount{}, fmt.Errorf("查询钱包失败: %w", err)
+		return money.Amount{}, money.Amount{}, 0, fmt.Errorf("查询钱包失败: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -190,15 +308,16 @@ func checkDeletionBalance(ctx context.Context, tx *sql.Tx, userID int64, usernam
 			b, f                         money.Amount
 		)
 		if scanErr := rows.Scan(&asset, &rawBalance, &rawFrozen); scanErr != nil {
-			return money.Amount{}, money.Amount{}, fmt.Errorf("读钱包行失败: %w", scanErr)
+			return money.Amount{}, money.Amount{}, 0, fmt.Errorf("读钱包行失败: %w", scanErr)
 		}
+		walletRows++
 		b, err = money.Parse(rawBalance)
 		if err != nil {
-			return money.Amount{}, money.Amount{}, deletionWalletError(asset, "余额", rawBalance, err)
+			return money.Amount{}, money.Amount{}, 0, deletionWalletError(asset, "余额", rawBalance, err)
 		}
 		f, err = money.Parse(rawFrozen)
 		if err != nil {
-			return money.Amount{}, money.Amount{}, deletionWalletError(asset, "冻结额", rawFrozen, err)
+			return money.Amount{}, money.Amount{}, 0, deletionWalletError(asset, "冻结额", rawFrozen, err)
 		}
 		sumB = sumB.Add(b)
 		sumF = sumF.Add(f)
@@ -208,15 +327,15 @@ func checkDeletionBalance(ctx context.Context, tx *sql.Tx, userID int64, usernam
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return money.Amount{}, money.Amount{}, fmt.Errorf("遍历钱包行失败: %w", err)
+		return money.Amount{}, money.Amount{}, 0, fmt.Errorf("遍历钱包行失败: %w", err)
 	}
 	if nonZero {
-		return sumB, sumF, fmt.Errorf(
+		return sumB, sumF, walletRows, fmt.Errorf(
 			"%w（账号 %s：%s。先把它们处理到 0，例如用 wallet adjust 调账，"+
 				"或等退款与还没结算完的请求处理完，再重试）",
 			ErrDeletionBalanceNotZero, username, strings.Join(details, "；"))
 	}
-	return sumB, sumF, nil
+	return sumB, sumF, walletRows, nil
 }
 
 // RequestDeletion 打标：账号进入「要求删除」态，可撤销。
@@ -229,28 +348,51 @@ func (s *Store) RequestDeletion(ctx context.Context, ref string) (DeletionMark, 
 		return DeletionMark{}, errors.New("用户标识为空")
 	}
 
+	var mark DeletionMark
+	err := retryDeletion(func() error {
+		m, err := s.requestDeletionOnce(ctx, ref)
+		mark = m
+		return err
+	})
+	if err != nil {
+		return DeletionMark{}, err
+	}
+	return mark, nil
+}
+
+func (s *Store) requestDeletionOnce(ctx context.Context, ref string) (DeletionMark, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return DeletionMark{}, fmt.Errorf("开启事务失败: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	row, err := lockDeletionRow(ctx, tx, ref)
+	// 先无锁地定位一次，只用来快速失败；判据是下面锁内那一版。
+	row, err := readDeletionRow(ctx, tx, ref)
 	if err != nil {
 		return DeletionMark{}, err
 	}
-	switch row.status {
-	case UserStatusDeletionRequested:
-		return DeletionMark{}, fmt.Errorf(
-			"%w：要撤回请用 larkaxctl user delete revert --user %s",
-			ErrDeletionAlreadyRequested, row.username)
-	case UserStatusDeleted:
-		return DeletionMark{}, fmt.Errorf(
-			"%w：账号 %s 已经匿名化（删除时间 %s），不能再次打标",
-			ErrDeletionAlreadyDeleted, row.username, formatDeletionTime(row.deletedAt))
+	err = requestDeletionGate(row)
+	if err != nil {
+		return DeletionMark{}, err
 	}
 
-	if _, _, err := checkDeletionBalance(ctx, tx, row.id, row.username); err != nil {
+	// 锁序：api_keys → users → user_wallets（见文件头）。打标不动 key，
+	// 但这里仍要先锁它：不锁的话本事务会握着 users 去等钱包，而计费事务
+	// 可能正握着钱包等 users。
+	err = lockUserAPIKeys(ctx, tx, row.id)
+	if err != nil {
+		return DeletionMark{}, err
+	}
+	row, err = lockDeletionRowByID(ctx, tx, row.id)
+	if err != nil {
+		return DeletionMark{}, err
+	}
+	if err := requestDeletionGate(row); err != nil {
+		return DeletionMark{}, err
+	}
+
+	if _, _, _, err := checkDeletionBalance(ctx, tx, row.id, row.username); err != nil {
 		return DeletionMark{}, err
 	}
 
@@ -269,6 +411,22 @@ func (s *Store) RequestDeletion(ctx context.Context, ref string) (DeletionMark, 
 		FromStatus: row.status,
 		ToStatus:   UserStatusDeletionRequested,
 	}, nil
+}
+
+// requestDeletionGate 是打标的两个状态前提，单独一处给「无锁快失败」与
+// 「锁内判据」共用。
+func requestDeletionGate(row deletionRow) error {
+	switch row.status {
+	case UserStatusDeletionRequested:
+		return fmt.Errorf(
+			"%w：要撤回请用 larkaxctl user delete revert --user %s",
+			ErrDeletionAlreadyRequested, row.username)
+	case UserStatusDeleted:
+		return fmt.Errorf(
+			"%w：账号 %s 已经匿名化（删除时间 %s），不能再次打标",
+			ErrDeletionAlreadyDeleted, row.username, formatDeletionTime(row.deletedAt))
+	}
+	return nil
 }
 
 // RevertDeletion 撤掉删除要求：状态回到打标之前的那一个。
@@ -353,35 +511,52 @@ func (s *Store) PurgeDeletion(ctx context.Context, ref, confirm string) (Deletio
 		return DeletionResult{}, errors.New("缺少 --confirm（要逐字写出用户名）")
 	}
 
+	var result DeletionResult
+	err := retryDeletion(func() error {
+		r, err := s.purgeDeletionOnce(ctx, ref, confirm)
+		result = r
+		return err
+	})
+	if err != nil {
+		return DeletionResult{}, err
+	}
+	return result, nil
+}
+
+func (s *Store) purgeDeletionOnce(ctx context.Context, ref, confirm string) (DeletionResult, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return DeletionResult{}, fmt.Errorf("开启事务失败: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	row, err := lockDeletionRow(ctx, tx, ref)
+	// 先无锁地定位一次，只用来快速失败；判据是下面锁内那一版。并发改名、
+	// 并发匿名化、或者另一个 purge 抢先，都在那把 users 锁里被看见。
+	row, err := readDeletionRow(ctx, tx, ref)
 	if err != nil {
 		return DeletionResult{}, err
 	}
-	switch row.status {
-	case UserStatusDeletionRequested:
-	case UserStatusDeleted:
-		return DeletionResult{}, fmt.Errorf(
-			"%w：账号 %s 已经匿名化（删除时间 %s），不能重复执行",
-			ErrDeletionAlreadyDeleted, row.username, formatDeletionTime(row.deletedAt))
-	default:
-		return DeletionResult{}, fmt.Errorf(
-			"%w：账号 %s 当前是 %s。先运行 larkaxctl user delete request --user %s",
-			ErrDeletionNotRequested, row.username, row.status, row.username)
+	err = purgeDeletionGate(row, confirm)
+	if err != nil {
+		return DeletionResult{}, err
 	}
 
-	if confirm != row.username {
-		return DeletionResult{}, fmt.Errorf(
-			"%w：--confirm 给的是 %q，当前用户名是 %q",
-			ErrDeletionConfirmMismatch, confirm, row.username)
+	// 锁序：api_keys → users → user_wallets（见文件头）。key 先锁，计费事务
+	// 就不会「握着钱包等 users」；如果校验在锁内失败，回滚把 key 还原。
+	err = lockUserAPIKeys(ctx, tx, row.id)
+	if err != nil {
+		return DeletionResult{}, err
+	}
+	row, err = lockDeletionRowByID(ctx, tx, row.id)
+	if err != nil {
+		return DeletionResult{}, err
+	}
+	err = purgeDeletionGate(row, confirm)
+	if err != nil {
+		return DeletionResult{}, err
 	}
 
-	balance, frozen, err := checkDeletionBalance(ctx, tx, row.id, row.username)
+	balance, frozen, walletRows, err := checkDeletionBalance(ctx, tx, row.id, row.username)
 	if err != nil {
 		return DeletionResult{}, err
 	}
@@ -393,6 +568,7 @@ func (s *Store) PurgeDeletion(ctx context.Context, ref, confirm string) (Deletio
 		OldDisplayName: deletionText(row.displayName),
 		Balance:        balance,
 		Frozen:         frozen,
+		WalletRows:     walletRows,
 	}
 
 	res, err := tx.ExecContext(ctx, `
@@ -431,12 +607,31 @@ func (s *Store) PurgeDeletion(ctx context.Context, ref, confirm string) (Deletio
 		return DeletionResult{}, err
 	}
 
-	err = tx.QueryRowContext(ctx,
-		`SELECT count(*) FROM ledger_entries WHERE account = $1`,
-		ledger.UserAccount(row.id).String(),
-	).Scan(&result.LedgerEntries)
+	// 按 UserIDFromAccount 的口径数：旧写路径留下过 `user:042`、`user:+42` 这类
+	// 写法，按字符串相等只数得到规范的那一种，回执会少报。SQL 里只做一次窄预筛，
+	// 「读成哪个 id」仍由 UserIDFromAccount 回答——科目归属只有那一处判定。
+	pattern := `^user:\+?0*` + strconv.FormatInt(row.id, 10) + `$`
+	ledgerRows, err := tx.QueryContext(ctx,
+		`SELECT account FROM ledger_entries WHERE account ~ $1`, pattern)
 	if err != nil {
 		return DeletionResult{}, fmt.Errorf("统计用户 %s 的账本分录失败: %w", row.username, err)
+	}
+	for ledgerRows.Next() {
+		var account string
+		if scanErr := ledgerRows.Scan(&account); scanErr != nil {
+			_ = ledgerRows.Close()
+			return DeletionResult{}, fmt.Errorf("读用户 %s 的账本分录失败: %w", row.username, scanErr)
+		}
+		if userID, ok := ledger.UserIDFromAccount(account); ok && userID == row.id {
+			result.LedgerEntries++
+		}
+	}
+	if rowsErr := ledgerRows.Err(); rowsErr != nil {
+		_ = ledgerRows.Close()
+		return DeletionResult{}, fmt.Errorf("遍历用户 %s 的账本分录失败: %w", row.username, rowsErr)
+	}
+	if closeErr := ledgerRows.Close(); closeErr != nil {
+		return DeletionResult{}, fmt.Errorf("关闭账本分录结果集失败: %w", closeErr)
 	}
 
 	placeholder, err := freeDeletionPlaceholder(ctx, tx, row.id)
@@ -466,6 +661,30 @@ func (s *Store) PurgeDeletion(ctx context.Context, ref, confirm string) (Deletio
 		return DeletionResult{}, fmt.Errorf("提交用户 %s 的匿名化失败: %w", row.username, err)
 	}
 	return result, nil
+}
+
+// purgeDeletionGate 是匿名化的三个前提：状态、确认串，一次写全。
+//
+// 无锁快失败与锁内判据共用同一份文案，两处不各写一遍——那正是「快失败看到的
+// 是旧值、判据看到的是新值」时最容易分岔的地方。
+func purgeDeletionGate(row deletionRow, confirm string) error {
+	switch row.status {
+	case UserStatusDeletionRequested:
+	case UserStatusDeleted:
+		return fmt.Errorf(
+			"%w：账号 %s 已经匿名化（删除时间 %s），不能重复执行",
+			ErrDeletionAlreadyDeleted, row.username, formatDeletionTime(row.deletedAt))
+	default:
+		return fmt.Errorf(
+			"%w：账号 %s 当前是 %s。先运行 larkaxctl user delete request --user %s",
+			ErrDeletionNotRequested, row.username, row.status, row.username)
+	}
+	if confirm != row.username {
+		return fmt.Errorf(
+			"%w：--confirm 给的是 %q，当前用户名是 %q",
+			ErrDeletionConfirmMismatch, confirm, row.username)
+	}
+	return nil
 }
 
 // deletionEmailDomain 是匿名化之后邮箱的域名。

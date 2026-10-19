@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sumwai/larkax/internal/auth"
+	"github.com/sumwai/larkax/internal/ledger"
 )
 
 // 销户命令那一族：参数门、退出码与回执。
@@ -91,13 +92,24 @@ func TestUserDeleteLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("建钱包失败: %v", err)
 	}
+	// 一笔平衡的分录（用户 +1、平台 -1）：账本的不变式是每个 txn_id 求和为零，
+	// 单边的测试数据会让同库上的校验看见一笔不存在的交易。
+	const ledgerTxn = "00000000-0000-8000-8000-000000000003"
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO ledger_entries (txn_id, account, amount, entry_type, memo)
-		VALUES ('00000000-0000-8000-8000-000000000003', $1, 1, 'adjustment', '销户用例')`,
-		"user:"+strconv.FormatInt(id, 10))
+		INSERT INTO ledger_entries (txn_id, account, amount, entry_type, memo) VALUES
+			($1, $2, 1, 'adjustment', '销户用例'),
+			($1, $3, -1, 'adjustment', '销户用例')`,
+		ledgerTxn, "user:"+strconv.FormatInt(id, 10),
+		ledger.PlatformRevenueAccount().String())
 	if err != nil {
 		t.Fatalf("写账本分录失败: %v", err)
 	}
+	t.Cleanup(func() {
+		if _, cleanupErr := db.ExecContext(context.WithoutCancel(ctx),
+			`DELETE FROM ledger_entries WHERE txn_id = $1`, ledgerTxn); cleanupErr != nil {
+			t.Logf("清理账本分录失败: %v", cleanupErr)
+		}
+	})
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO plugin_kv (plugin_key, user_id, key, value) VALUES ('demo', $1, 'k', 'v')`,
 		id)
@@ -125,6 +137,26 @@ func TestUserDeleteLifecycle(t *testing.T) {
 	}
 	if err := authOK(); err == nil {
 		t.Fatal("打标之后 key 还能用")
+	}
+
+	// 停在「要求删除」上时，update --status 改不走：那条路是 revert，它会
+	// 一起清掉 deletion_prior_status。
+	r = runOnce(t, runUser, []string{"update", "--user", name, "--status", "active"})
+	if r.err == nil {
+		t.Fatal("从 deletion_requested 用 update --status 走掉了")
+	}
+	if !strings.Contains(r.err.Error(), "delete revert") {
+		t.Errorf("报错没指向 revert: %v", r.err)
+	}
+	if code := exitCode(r.err); code != exitConflict {
+		t.Errorf("退出码 = %d，想要 %d（冲突）", code, exitConflict)
+	}
+	r = runOnce(t, runUser, []string{"get", "--user", name})
+	if r.err != nil {
+		t.Fatalf("被拒之后 user get 失败: %v", r.err)
+	}
+	if !strings.Contains(r.stdout, auth.UserStatusDeletionRequested) {
+		t.Errorf("被拒的 update 改了状态:\n%s", r.stdout)
 	}
 
 	// ── 撤销：原来的 key 还能用 ───────────────────────────────────

@@ -918,6 +918,7 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				LedgerEntries:   9,
 				Balance:         money.MustParse("0"),
 				Frozen:          money.MustParse("0"),
+				WalletRows:      1,
 			}))
 		}},
 	}
