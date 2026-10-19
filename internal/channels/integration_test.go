@@ -491,7 +491,7 @@ func TestCandidatesConsecutiveFailuresFromColumn(t *testing.T) {
 		t.Errorf("ConsecutiveFailures = %d，期望 0（桶里全是失败，但计数是 0）",
 			got[0].Health.ConsecutiveFailures)
 	}
-	if _, reason := got[0].DrainReason(); reason != "" {
+	if _, reason := got[0].DrainReason(time.Time{}, 0); reason != "" {
 		t.Errorf("计数为 0 的渠道不该被摘除：%s", reason)
 	}
 
@@ -506,7 +506,7 @@ func TestCandidatesConsecutiveFailuresFromColumn(t *testing.T) {
 	if got[0].Health.ConsecutiveFailures != 4 {
 		t.Errorf("ConsecutiveFailures = %d，期望 4", got[0].Health.ConsecutiveFailures)
 	}
-	if _, reason := got[0].DrainReason(); reason == "" {
+	if _, reason := got[0].DrainReason(time.Time{}, 0); reason == "" {
 		t.Error("连续失败 4 次的渠道应被判为暂时不该使用")
 	}
 }
@@ -532,7 +532,7 @@ func TestCandidatesStreakExpiresAfterCooldown(t *testing.T) {
 	if got[0].Health.ConsecutiveFailures != 0 {
 		t.Errorf("ConsecutiveFailures = %d，期望 0（冷却期已过）", got[0].Health.ConsecutiveFailures)
 	}
-	if _, reason := got[0].DrainReason(); reason != "" {
+	if _, reason := got[0].DrainReason(time.Time{}, 0); reason != "" {
 		t.Errorf("冷却期已过的渠道不该被摘除：%s", reason)
 	}
 }
@@ -583,7 +583,7 @@ func TestCandidatesWithoutHealthOrQuotaIsUnknown(t *testing.T) {
 	if c.Quota.Remaining != nil {
 		t.Errorf("没有额度行时应是未知，实际 %+v", c.Quota)
 	}
-	if _, reason := c.DrainReason(); reason != "" {
+	if _, reason := c.DrainReason(time.Time{}, 0); reason != "" {
 		t.Errorf("新渠道不该被判为不该使用：%s", reason)
 	}
 }
@@ -634,7 +634,7 @@ func TestCandidatesDrainedQuotaIsZero(t *testing.T) {
 	if q.Remaining == nil || *q.Remaining != 0 {
 		t.Fatalf("Quota = %+v，期望有值且为 0", q)
 	}
-	if _, reason := got[0].DrainReason(); reason == "" {
+	if _, reason := got[0].DrainReason(time.Time{}, 0); reason == "" {
 		t.Error("drained 的渠道应被 DrainReason 排除")
 	}
 }

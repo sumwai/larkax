@@ -110,8 +110,9 @@ type State struct {
 	//
 	// 它与 LastProbeAt 是两列，因为两者回答的问题不同。LastProbeAt 只记
 	// 成功的实测，而且是 Routable 的判据（余量为 NULL 而它有值时，这个渠道
-	// 被当成「观测过却没拿到数值」排除）；LastProbeAttemptAt 只服务于触发：
-	// 按它与探测间隔判断该不该再探一次。
+	// 被当成「观测过却没拿到数值」排除）；LastProbeAttemptAt 服务两件事：
+	// 触发侧按它与探测间隔判断该不该再探一次，以及余量见底后的恢复路径
+	// 按它与冷却期判断该不该放行一次（见 ExhaustedRetryDue）。
 	//
 	// 合成一列的话，「查不到」的上游会永远停在「从未探测过」，于是每一条
 	// 命中它的请求都再问一次上游——而这类上游是多数。
@@ -369,6 +370,44 @@ func (s State) Usable() bool {
 		return true
 	}
 	return *s.Remaining > 0
+}
+
+// ExhaustedRetryDue 判断一条**余量见底**的渠道是否到了放行一次、重新探测的时刻。
+//
+// # 它补的是 Usable 的另一面
+//
+// Usable 为假的渠道会被路由排除，而排除之后就没有请求会命中它——探测是
+// 「用到时才发生」的（见 channels.QuotaProbe），于是它的额度状态永远停在
+// 见底那一刻，上游恢复了我们也不知道。冷却期是那条路径的出口：距上一次
+// **尝试**探测已满一个冷却期时，让路由放它回候选集一次；真被尝试到时，
+// 探测就会再问一次上游。仍然是 0 的话，这次尝试会把 LastProbeAttemptAt
+// 推到当下，它就要再等一个冷却期。
+//
+// # 为什么时钟是 LastProbeAttemptAt
+//
+// 它是三种探测结论都会更新的那一列（见它的注释）。用 LastProbeAt 不行：
+// 「查不到」「探测失败」都不动那一列，于是一条不支持查询额度的见底渠道
+// 会永远停在旧时刻上，每条请求都被放行——那不是冷却，是关掉了判据。
+//
+// # 三种取值
+//
+//   - Usable 为真：这不是这条规则管的事，返回假。恢复路径只针对见底。
+//   - 从未尝试过（LastProbeAttemptAt 为 nil）：返回真。没有时刻可比，
+//     而「不放行」等于这类渠道永远等不到第一次探测。这与连续失败那条
+//     冷却期对 NULL 时间戳的处置是同一条理由（见 channels 的
+//     consecutiveFailures）。
+//   - cooldown 非正：返回假。零值表示**不启用**恢复路径——写成「零冷却」
+//     会让每一条见底渠道的每一次请求都被放行，而两者在配置里长得一样。
+//
+// 它只回答时刻，不回答「该不该被排除」：那两条判据是 Routable 与 Usable。
+func (s State) ExhaustedRetryDue(now time.Time, cooldown time.Duration) bool {
+	if s.Usable() || cooldown <= 0 {
+		return false
+	}
+	if s.LastProbeAttemptAt == nil {
+		return true
+	}
+	return now.Sub(*s.LastProbeAttemptAt) >= cooldown
 }
 
 // Validate 检查一次观测是否自洽。

@@ -389,3 +389,88 @@ func TestBuildAcceptsStreamFreezeStepAtBounds(t *testing.T) {
 		})
 	}
 }
+
+// 见底渠道的恢复冷却期必须被读到，而且真的接到路由上。
+//
+// 两头各会静默出错：键没人读时，改多少次都不会有渠道恢复——现场只表现为
+// 「额度回来之后渠道还是不用」；读到却漏接路由时一模一样。所以既比对库里
+// 的值，也比对**路由拿到的值**：只看前者，漏接照样绿。
+//
+// 出厂值 900 秒与迁移写下的一致，这里写字面量而不是引用常量：这条用例要钉
+// 的正是那个数与路由字段是同一个。
+func TestBuildReadsQuotaExhaustedCooldown(t *testing.T) {
+	db := testDB(t)
+
+	app, err := buildAppWithSettings(t, db, nil)
+	if err != nil {
+		t.Fatalf("出厂配置下装配失败: %v", err)
+	}
+	if got := app.Gateway.Router.QuotaCooldown; got != 900*time.Second {
+		t.Errorf("出厂冷却期 = %v，期望 15m（迁移写下的 900 秒）", got)
+	}
+
+	app, err = buildAppWithSettings(t, db, map[string]string{quotaCooldownKey: "60"})
+	if err != nil {
+		t.Fatalf("改冷却期之后装配失败: %v", err)
+	}
+	if got := app.Gateway.Router.QuotaCooldown; got != 60*time.Second {
+		t.Errorf("改过之后路由的冷却期 = %v，期望 1m——这个键没有被读到路由上", got)
+	}
+}
+
+// 冷却期非正或超出范围时必须在装配期被拒。
+//
+// 零值会让这条恢复路径整个关掉（见 route.Router.QuotaCooldown），而「关掉」
+// 与「配成了一个正数」在运行期长得一样；超大负数还会在换算成 time.Duration
+// 时绕回一个看起来正常的时长。两个方向都在启动时判掉。
+//
+// 越界值写字面量，不拿 min/max 常量给自己出题。
+func TestBuildRefusesOutOfRangeQuotaCooldown(t *testing.T) {
+	db := testDB(t)
+
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"零", `0`},
+		{"负数", `-1`},
+		{"超大负数，换算后绕成正时长", `-9223372036854775807`},
+		{"超大负数，换算后绕成负时长", `-3074457345618258603`},
+		{"比上限多一秒", `31536001`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := buildWithSetting(t, db, quotaCooldownKey, tc.value)
+			if err == nil {
+				t.Fatalf("settings.%s = %s 时装配成功了——这个键没有被读，或者范围判据漏了",
+					quotaCooldownKey, tc.value)
+			}
+			if !strings.Contains(err.Error(), quotaCooldownKey) {
+				t.Errorf("错误信息 %q 里没有键名：配错的人要能一眼看出改哪个键", err.Error())
+			}
+		})
+	}
+}
+
+// 冷却期的边界值本身必须装得起来：一年与一秒。
+//
+// 上一条只说明「界外会失败」，分辨不出「界画错了一位」：把上限写成
+// 3153600（少一个零）时它照样全过，而一个完全合理的配置会在启动时被拒。
+func TestBuildAcceptsQuotaCooldownAtBounds(t *testing.T) {
+	db := testDB(t)
+
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"上界（一年）", `31536000`},
+		{"下界（一秒）", `1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := buildWithSetting(t, db, quotaCooldownKey, tc.value); err != nil {
+				t.Fatalf("settings.%s = %s 是允许范围内的值，装配却失败了：%v",
+					quotaCooldownKey, tc.value, err)
+			}
+		})
+	}
+}

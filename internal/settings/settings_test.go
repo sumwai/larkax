@@ -24,6 +24,7 @@ func fullRows() []Row {
 		{Key: "request_snapshot.max_bytes", Value: []byte(`65536`)},
 		{Key: "capture.consent_max_window_hours", Value: []byte(`24`)},
 		{Key: "quota.probe_interval_seconds", Value: []byte(`300`)},
+		{Key: "quota.exhausted_cooldown_seconds", Value: []byte(`900`)},
 		{Key: "billing.default_asset", Value: []byte(`"CNY"`)},
 		{Key: "billing.max_output_tokens", Value: []byte(`65536`)},
 		{Key: "billing.stream_freeze_step", Value: []byte(`4096`)},

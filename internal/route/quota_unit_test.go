@@ -357,7 +357,7 @@ func TestDrainReasonQuotaNotUsable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := candidate(1, "m", withQuota(tc.q))
-			if _, reason := c.DrainReason(); reason != "额度已耗尽" {
+			if _, reason := c.DrainReason(time.Time{}, 0); reason != "额度已耗尽" {
 				t.Errorf("DrainReason = %q，期望「额度已耗尽」", reason)
 			}
 		})
@@ -371,19 +371,19 @@ func TestDrainReasonQuotaNotUsable(t *testing.T) {
 // 有损投影（只有一个 Known 布尔），两者在它眼里长得一样。
 func TestDrainReasonDistinguishesNeverObservedFromObservedWithoutValue(t *testing.T) {
 	never := candidate(1, "m", withQuota(quota.State{}))
-	if _, reason := never.DrainReason(); reason != "" {
+	if _, reason := never.DrainReason(time.Time{}, 0); reason != "" {
 		t.Errorf("从未观测过不该被挡下，实际原因: %q", reason)
 	}
 
 	observed := candidate(2, "m", withQuota(quotaObservedNoValue()))
-	if _, reason := observed.DrainReason(); reason != "额度观测过但没有可用信息" {
+	if _, reason := observed.DrainReason(time.Time{}, 0); reason != "额度观测过但没有可用信息" {
 		t.Errorf("观测过却没有数值应当被挡下，实际原因: %q", reason)
 	}
 
 	// 同一个判据的另一半：从错误里看到的信号也算「观测过」。
 	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	errored := candidate(3, "m", withQuota(quota.State{LastErrorCode: "402", LastErrorAt: &at}))
-	if _, reason := errored.DrainReason(); reason != "额度观测过但没有可用信息" {
+	if _, reason := errored.DrainReason(time.Time{}, 0); reason != "额度观测过但没有可用信息" {
 		t.Errorf("有错误码却没有数值应当被挡下，实际原因: %q", reason)
 	}
 }
@@ -419,5 +419,98 @@ func TestSelectKeepsNeverObservedQuota(t *testing.T) {
 	}
 	if len(plan.Excluded) != 0 {
 		t.Errorf("Excluded = %v，期望空", plan.Excluded)
+	}
+}
+
+// ── 见底之后的恢复路径：冷却期 ──────────────────────────────────────────
+
+// exhaustedAt 造一个见底的额度状态，并把上一次探测尝试放在 at。
+// at 为 nil 表示从未尝试过探测。
+func exhaustedAt(at *time.Time) quota.State {
+	q := quotaLeft(0)
+	q.LastProbeAttemptAt = at
+	return q
+}
+
+// 冷却期到了的见底渠道回到候选集；差一秒没到的仍然被排除。
+func TestExhaustedChannelReturnsAfterCooldown(t *testing.T) {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	const cooldown = 15 * time.Minute
+
+	due := now.Add(-cooldown)
+	notYet := now.Add(-cooldown + time.Second)
+
+	r := seededRouter(1)
+	r.Now = func() time.Time { return now }
+	r.QuotaCooldown = cooldown
+
+	plan := r.Select([]Candidate{
+		candidate(1, "m", withQuota(exhaustedAt(&due))),
+		candidate(2, "m", withQuota(exhaustedAt(&notYet))),
+	}, "m", Needs{})
+
+	if len(plan.Candidates) != 1 || plan.Candidates[0].Channel.ID != 1 {
+		t.Fatalf("候选集 = %v，期望只有冷却期已过的渠道 1", plan.Candidates)
+	}
+	if len(plan.Excluded) != 1 || plan.Excluded[0].ChannelID != 2 {
+		t.Fatalf("Excluded = %v，期望记下渠道 2", plan.Excluded)
+	}
+	if plan.Excluded[0].Reason != "额度已耗尽" {
+		t.Errorf("Excluded 原因 = %q，期望「额度已耗尽」", plan.Excluded[0].Reason)
+	}
+}
+
+// 从未尝试过探测的见底渠道（自记账把余量扣到 0 就是这一档）也要放行一次：
+// 不放行的话它永远等不到第一次探测。
+func TestExhaustedChannelNeverProbedReturns(t *testing.T) {
+	r := seededRouter(1)
+	r.QuotaCooldown = 15 * time.Minute
+
+	plan := r.Select([]Candidate{
+		candidate(1, "m", withQuota(exhaustedAt(nil))),
+	}, "m", Needs{})
+
+	if len(plan.Candidates) != 1 {
+		t.Fatalf("候选集 = %v，期望从未探测过的见底渠道被放行", plan.Candidates)
+	}
+}
+
+// 冷却期为零表示**不启用**这条恢复路径，而不是「零冷却」：后者会让每一次
+// 请求都被放行，两者在配置里长得一样。零值的 Router 保持旧行为。
+func TestZeroQuotaCooldownKeepsExhaustedExcluded(t *testing.T) {
+	old := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
+
+	plan := seededRouter(1).Select([]Candidate{
+		candidate(1, "m", withQuota(exhaustedAt(&old))),
+	}, "m", Needs{})
+
+	if len(plan.Candidates) != 0 {
+		t.Fatalf("候选集 = %v，期望冷却期不启用时见底渠道仍被排除", plan.Candidates)
+	}
+}
+
+// 冷却期不改变「观测过却没有数值」那一档。
+//
+// 这条判据的顺序是：先 Routable，再「见底 + 冷却期」。顺序坏了（先算冷却期）
+// 或 nil 余量被当成 due 时，下面这条会被放行——而它不是见底，探测再问一次
+// 也未必能拿到数值。
+func TestCooldownDoesNotRescueObservedWithoutValue(t *testing.T) {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-time.Hour)
+
+	q := quotaObservedNoValue()
+	q.LastProbeAttemptAt = &old
+
+	r := seededRouter(1)
+	r.Now = func() time.Time { return now }
+	r.QuotaCooldown = 15 * time.Minute
+
+	plan := r.Select([]Candidate{candidate(1, "m", withQuota(q))}, "m", Needs{})
+
+	if len(plan.Candidates) != 0 {
+		t.Fatalf("候选集 = %v，期望冷却期不改变这一档的排除", plan.Candidates)
+	}
+	if len(plan.Excluded) != 1 || plan.Excluded[0].Reason != "额度观测过但没有可用信息" {
+		t.Fatalf("Excluded = %+v，期望「额度观测过但没有可用信息」", plan.Excluded)
 	}
 }

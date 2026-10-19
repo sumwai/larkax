@@ -77,7 +77,8 @@ type Candidate struct {
 	//
 	// 读侧填本包用来看的列（Remaining / Unit / Confidence / ResetsAt /
 	// Kind / LastProbeAt / LastErrorCode），再加上 LastProbeAttemptAt 与
-	// LastProbeStatus——后两列本包的判据不看，它们随候选一起交给
+	// LastProbeStatus——LastProbeAttemptAt 是余量见底后的冷却期时钟（见
+	// DrainReason）；LastProbeStatus 本包的判据不看。两列随候选一起交给
 	// OnAttempt 的实现（额度探测按尝试时刻决定该不该再探）。窗口那几列
 	// 不填，本包不看它们。
 	//
@@ -384,6 +385,18 @@ type Router struct {
 	// Now 可注入，便于测试时间相关的逻辑。
 	Now func() time.Time
 
+	// QuotaCooldown 是余量见底的渠道重新进入候选集的冷却期。
+	//
+	// 见底的渠道会被 DrainReason 排除，而额度探测是「用到时才发生」的：
+	// 排除之后就没有请求会命中它，上游的额度恢复了也发现不了。这个字段
+	// 是那条路径的出口——距上次探测尝试已满一个冷却期的见底渠道重新进入
+	// 候选集；真被尝试到时，探测会再问一次上游。
+	//
+	// 零值表示**不启用**这条恢复路径，而不是「冷却期为零」：后者会让
+	// 每一条见底渠道的每一次请求都被放行，两者在配置里长得一样。装配层
+	// 总会给出 settings 里的正值；只问状态判据的调用方保持旧行为。
+	QuotaCooldown time.Duration
+
 	// Aliases 把规范名翻成某个渠道上的上游名，连同这条别名上配的参数覆盖。
 	// **必填**，nil 时请求失败（见 ErrNoAliasSource）。
 	//
@@ -527,13 +540,24 @@ func (c Candidate) Eligible() (bool, string) {
 // 本包不自己读 Remaining 再判一遍——同一个语义两处实现，迟早分叉，
 // 而分叉的表现是「读侧说能用、写侧说不能用」这类查不出原因的行为。
 //
+// # 额度见底有一条冷却期出口
+//
+// 「见底」这个结论不让它自己恢复：被排除的渠道没有流量，而额度探测只在
+// 渠道被用到时才发生，于是它会一直停在见底那一刻，上游后来恢复了也没有
+// 人知道。所以这一档带一个冷却期：距上次**尝试**探测已满 quotaCooldown
+// 时，这次判断不排除它，让它回到候选集里试一次；真被尝试到就会重新探测，
+// 探测仍有 0 就再等一个冷却期。冷却期为非正值时这条出口是关着的（见
+// Router.QuotaCooldown）。
+//
+// 出口只开在「有数值且见底」这一档。「观测过却没有数值」不在其中：它不是
+// 「用完了」，而是一次没有给出任何数值的观测留下的状态，探测再问一次也未必
+// 能修好它。判据本身在 quota.ExhaustedRetryDue，本包不自己算冷却期。
+//
 // 两个返回值出自**同一次判断**，所以一起在这里算出来：分成两处各判一遍的话，
 // 留痕上记的分类与日志里写的那句话迟早会对不上，而那种偏差只有在下一次排查
 // 时才会被发现，那时两份都已经是「现场」了。分类的读者是留痕（见
 // Exclusion.Code），那句话的读者是日志与 runbook。
-//
-// 只关心那句话的调用方（含别的包的测试）写成 `_, reason := …`。
-func (c Candidate) DrainReason() (ExclusionCode, string) {
+func (c Candidate) DrainReason(now time.Time, quotaCooldown time.Duration) (ExclusionCode, string) {
 	if c.Health.ConsecutiveFailures >= consecutiveFailureCutoff {
 		return CodeHealth, fmt.Sprintf("连续失败 %d 次", c.Health.ConsecutiveFailures)
 	}
@@ -545,8 +569,8 @@ func (c Candidate) DrainReason() (ExclusionCode, string) {
 	}
 	// 有数值且已经见底：这是事实，不是偏好，必须挡住。
 	// 未知（Remaining 为 nil）不挡——那说明这个渠道查不到额度，
-	// 不是它没额度了。
-	if !c.Quota.Usable() {
+	// 不是它没额度了。冷却期到了的见底渠道放行一次，理由见上面的注释。
+	if !c.Quota.Usable() && !c.Quota.ExhaustedRetryDue(now, quotaCooldown) {
 		return CodeQuota, "额度已耗尽"
 	}
 	return "", ""
@@ -706,6 +730,10 @@ func (r *Router) Select(candidates []Candidate, canonicalModel string, needs Nee
 		plan     = Plan{}
 	)
 
+	// 冷却期那条判据要一个时刻：整批候选共用同一个，避免同一次选择里前后
+	// 两条候选按两个时刻判。不启用恢复路径时这个值不影响结果。
+	now := r.now()
+
 	for _, c := range candidates {
 		if ok, reason := c.Eligible(); !ok {
 			plan.Excluded = append(plan.Excluded, Exclusion{
@@ -726,7 +754,7 @@ func (r *Router) Select(candidates []Candidate, canonicalModel string, needs Nee
 				Code: code, Unsupported: true})
 			continue
 		}
-		if code, reason := c.DrainReason(); code != "" {
+		if code, reason := c.DrainReason(now, r.QuotaCooldown); code != "" {
 			plan.Excluded = append(plan.Excluded, Exclusion{
 				ChannelID: c.Channel.ID, Name: c.Channel.Name, Reason: reason,
 				Code: code})
@@ -1021,7 +1049,8 @@ func scoreHealth(h Health) float64 {
 //   - **见底**（Usable 为假）给 0。它是事实而不是偏好，与它有多可信无关；
 //     而且这一档的处置在 DrainReason（判断）里，本函数只是把那个判断映射成
 //     分数。让低可信度把「已经用完了」抬回中性，等于让一个旧数字重新放行
-//     一个见底的渠道。
+//     一个见底的渠道。冷却期让 DrainReason 放行它一次时，分数仍然是 0：
+//     放行只是让它**可能**被尝试，不该把它排到有额度的渠道前面。
 //   - **没有数值**与**跨单位**本来就是中性分，往中性分靠是它自己。
 func scoreQuota(q quota.State, mixedUnits bool) float64 {
 	if !q.Usable() {

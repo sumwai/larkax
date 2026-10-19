@@ -163,7 +163,7 @@ func TestRecordCallStreakIsVisibleToCandidates(t *testing.T) {
 	if got[0].Health.ConsecutiveFailures != 3 {
 		t.Errorf("ConsecutiveFailures = %d，期望 3", got[0].Health.ConsecutiveFailures)
 	}
-	if _, reason := got[0].DrainReason(); reason == "" {
+	if _, reason := got[0].DrainReason(time.Time{}, 0); reason == "" {
 		t.Error("连续失败 3 次的渠道应被判为暂时不该使用")
 	}
 }
@@ -201,7 +201,7 @@ func TestRecordCallStreakExpiresForCandidates(t *testing.T) {
 		t.Errorf("冷却期已过时 ConsecutiveFailures = %d，期望 0（放它进来试一次）",
 			got[0].Health.ConsecutiveFailures)
 	}
-	if _, reason := got[0].DrainReason(); reason != "" {
+	if _, reason := got[0].DrainReason(time.Time{}, 0); reason != "" {
 		t.Errorf("冷却期已过不该被摘除：%s", reason)
 	}
 }

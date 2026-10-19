@@ -264,7 +264,7 @@ const cacheSize = 256
 // 本包要读的运行期配置键。
 //
 // 写成常量而不是散落的字面量：键名写错的表现是「启动就失败」，而那样
-// 一眼看不出是拼写问题。三个都与 settings.Registry 里声明的一致。
+// 一眼看不出是拼写问题。它们都与 settings.Registry 里声明的一致。
 const (
 	// regionKey 是分时计价默认地区。
 	regionKey = "calendar.default_region"
@@ -272,6 +272,8 @@ const (
 	assetKey = "billing.default_asset"
 	// probeIntervalKey 是额度探测的默认间隔（秒）。
 	probeIntervalKey = "quota.probe_interval_seconds"
+	// quotaCooldownKey 是余量见底的渠道重新进入候选集的冷却期（秒）。
+	quotaCooldownKey = "quota.exhausted_cooldown_seconds"
 	// maxOutputTokensKey 是单次输出上限的全局默认值（token）。
 	maxOutputTokensKey = "billing.max_output_tokens"
 	// streamFreezeStepKey 是流式请求递进冻结的阈值段（token）。
@@ -333,6 +335,17 @@ const (
 const (
 	minProbeIntervalSeconds = 1
 	maxProbeIntervalSeconds = 365 * 24 * 60 * 60
+)
+
+// 见底恢复冷却期允许的范围（秒）。
+//
+// 与探测间隔同一组界、同一条理由：范围检查必须在换算成 time.Duration 之前做，
+// 否则超大秒数会绕成一个看起来正常的时长（见上面那段）。下界 1 秒与其中的
+// 「0 在语义上不成立」也一致：零冷却不是「不冷却」，而是每一次请求都放行，
+// 而两者在配置里长得一样。
+const (
+	minQuotaCooldownSeconds = 1
+	maxQuotaCooldownSeconds = 365 * 24 * 60 * 60
 )
 
 // Executor 是装配层要求的上游执行器：chat、决策与额度查询三条路都要能走。
@@ -404,6 +417,10 @@ func Build(cfg Config) (*App, error) {
 		return nil, err
 	}
 	probeInterval, err := quotaProbeInterval(cfg.Settings)
+	if err != nil {
+		return nil, err
+	}
+	quotaCooldown, err := quotaExhaustedCooldown(cfg.Settings)
 	if err != nil {
 		return nil, err
 	}
@@ -495,8 +512,9 @@ func Build(cfg Config) (*App, error) {
 		// 所以这条闭包只碰内存，不拖慢请求。用闭包而不是方法值：方法值在
 		// 仓库那几道可达性检查里不算一次调用。
 		Router: &route.Router{
-			Now:     cfg.Now,
-			Aliases: aliasCatalog,
+			Now:           cfg.Now,
+			Aliases:       aliasCatalog,
+			QuotaCooldown: quotaCooldown,
 			OnAttempt: func(c route.Candidate) {
 				prober.ProbeIfStale(c)
 			},
@@ -918,6 +936,27 @@ func quotaProbeInterval(v *settings.Values) (time.Duration, error) {
 	if seconds < minProbeIntervalSeconds || seconds > maxProbeIntervalSeconds {
 		return 0, fmt.Errorf("settings.%s = %d 秒，超出允许范围 [%d, %d] 秒",
 			probeIntervalKey, seconds, minProbeIntervalSeconds, maxProbeIntervalSeconds)
+	}
+	return time.Duration(seconds) * time.Second, nil
+}
+
+// quotaExhaustedCooldown 从 settings 读出余量见底后的恢复冷却期。
+//
+// 它只决定见底的渠道多快重新进入候选集；真正再问一次上游仍由探测间隔把关
+// （见 internal/channels 的 QuotaProbe）。所以配得比探测间隔还短时，渠道会
+// 先被放行、却还要等探测门槛到了才会被重新探测——这层关系写在
+// docs/settings.md 与 docs/channel-health.md 里，这里不替使用者拒绝它：
+// 那仍然是一个能工作的配置，只是「放行」与「重探」之间隔着一个探测间隔。
+//
+// 范围检查在**换算之前**，理由与 quotaProbeInterval 相同。
+func quotaExhaustedCooldown(v *settings.Values) (time.Duration, error) {
+	seconds, err := v.Int(quotaCooldownKey)
+	if err != nil {
+		return 0, fmt.Errorf("读取见底渠道的恢复冷却期失败: %w", err)
+	}
+	if seconds < minQuotaCooldownSeconds || seconds > maxQuotaCooldownSeconds {
+		return 0, fmt.Errorf("settings.%s = %d 秒，超出允许范围 [%d, %d] 秒",
+			quotaCooldownKey, seconds, minQuotaCooldownSeconds, maxQuotaCooldownSeconds)
 	}
 	return time.Duration(seconds) * time.Second, nil
 }

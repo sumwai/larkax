@@ -705,7 +705,9 @@ func (row candidateRow) consecutiveFailures(now time.Time) int {
 // last_probe_at 与 last_error_code 也填进 State：它们与余量一起决定
 // Routable（「从未观测过」与「观测过却没拿到数值」是两回事），
 // 而这两列正是本函数早先丢掉的那两列——丢掉的后果是判据在路由侧退化成
-// 「有没有数值」。
+// 「有没有数值」。last_probe_attempt_at 同样要带出去：它是余量见底后
+// 冷却期的时钟（见 internal/quota 的 ExhaustedRetryDue），少了它，见底的
+// 渠道永远等不到重新探测。
 //
 // confidence 同样要带出去（由 withValue 填），理由见那里。
 func (row candidateRow) quota() (quota.State, error) {

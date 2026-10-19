@@ -152,8 +152,10 @@ func (s *Session) ApplyRequest(ctx context.Context, requestID string, req *chann
 // 插件选中的渠道**必须在候选集之内**，否则按插件失败处置。这一条在这里强制，
 // 而不是在调用方：允许插件选候选集之外的渠道等于让插件决定流量去哪。
 //
-// 注意这里的候选集是**内核已经筛过一轮的**（Eligible / DrainReason 都过了），
-// 所以插件拿不到一个已经耗尽额度的渠道去选。
+// 注意这里的候选集是**内核已经筛过一轮的**（Eligible / DrainReason 都过了）。
+// 例外是余量见底的渠道刚过冷却期的那一次：它会回到候选集里重探（见
+// docs/channel-health.md 的「余量见底的渠道怎么恢复」），此时额度那一项是
+// 最低分。除此之外，插件拿不到一个已经耗尽额度的渠道去选。
 func (s *Session) OnRoute(ctx context.Context, rc RouteContext) Result[RouteDecision] {
 	if s == nil || !s.Next() || !s.Plugin.Module.Has(HookRoute) {
 		return Result[RouteDecision]{}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
 )
@@ -81,4 +82,27 @@ type failingAliases struct{}
 
 func (failingAliases) Alias(context.Context, int64, string) (string, map[string]any, error) {
 	return "", nil, errors.New("别名翻译失败（占位）")
+}
+
+// 冷却期到了的见底渠道真的会被尝试一次，于是 OnAttempt 触发——额度探测
+// 就是挂在这个挂点上的。放行之后一条都不试的话，恢复路径只写在纸面上。
+func TestOnAttemptFiresForExhaustedChannelAfterCooldown(t *testing.T) {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	at := now.Add(-15 * time.Minute)
+
+	var seen []int64
+	r := seededRouter(1)
+	r.Now = func() time.Time { return now }
+	r.QuotaCooldown = 15 * time.Minute
+	r.OnAttempt = func(c Candidate) { seen = append(seen, c.Channel.ID) }
+
+	exec := &fakeExecutor{results: map[int64]error{}, resp: &channel.Response{}}
+	if _, err := r.Chat(context.Background(), exec, &channel.Request{Model: "m"},
+		[]Candidate{candidate(1, "m", withQuota(exhaustedAt(&at)))}, "m"); err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+
+	if len(seen) != 1 || seen[0] != 1 {
+		t.Errorf("OnAttempt 看到的渠道 = %v，期望 [1]（冷却期已过，应被尝试一次）", seen)
+	}
 }
