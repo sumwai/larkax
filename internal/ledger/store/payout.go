@@ -67,7 +67,7 @@ const (
 //
 // 库里那一列存的是英文取值（pending / approved / …），而这两处都是打给人看的
 // 句子；两个都给出来（`pending（待审批）`），读的人既认得库里的值，也看得懂
-// 现在停在哪一步。库里将来多出来的取值（cancelled）照原样打，不猜中文。
+// 现在停在哪一步。库里将来多出来的取值（例如某个取消状态）照原样打，不猜中文。
 //
 // 它是导出方法而不是本文件里的一个私有函数：错误信息由本包写，回执由命令行写，
 // 两处都要说这同一个状态——收在两处各写一份的话，某一处加了新状态之后，另一处
@@ -485,8 +485,8 @@ func (s *Store) RejectPayout(ctx context.Context, in ReviewPayoutInput) (Payout,
 		return Payout{}, false, payoutStateError(row, "驳回", PayoutPending)
 	}
 
-	if err := writeTxnEntries(ctx, tx, txn); err != nil {
-		return Payout{}, false, err
+	if writeErr := writeTxnEntries(ctx, tx, txn); writeErr != nil {
+		return Payout{}, false, writeErr
 	}
 	updated, err := reviewPayout(ctx, tx, in.PayoutID, PayoutRejected, in.Reviewer, in.Note)
 	if err != nil {
@@ -597,8 +597,8 @@ func (s *Store) PayPayout(ctx context.Context, in PayPayoutInput) (Payout, bool,
 		return Payout{}, false, payoutStateError(row, "打款", PayoutApproved)
 	}
 
-	if err := writeTxnEntries(ctx, tx, txn); err != nil {
-		return Payout{}, false, err
+	if writeErr := writeTxnEntries(ctx, tx, txn); writeErr != nil {
+		return Payout{}, false, writeErr
 	}
 	updated, err := scanPayout(tx.QueryRowContext(ctx, `
 		UPDATE payout_requests

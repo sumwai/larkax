@@ -559,8 +559,8 @@ func TestRejectPayoutReplayWritesNothing(t *testing.T) {
 	txnID := ledger.NewTxnID()
 	in := ReviewPayoutInput{PayoutID: row.ID, Reviewer: reviewer, Note: "驳回", TxnID: txnID}
 
-	if _, applied, err := s.RejectPayout(ctx, in); err != nil || !applied {
-		t.Fatalf("第一次驳回: applied=%v err=%v", applied, err)
+	if _, applied, rejectErr := s.RejectPayout(ctx, in); rejectErr != nil || !applied {
+		t.Fatalf("第一次驳回: applied=%v err=%v", applied, rejectErr)
 	}
 	again, applied, err := s.RejectPayout(ctx, in)
 	if err != nil {
@@ -665,16 +665,16 @@ func TestPayPayoutReplayAndRefChangeIsAConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("申请失败: %v", err)
 	}
-	if _, _, err := s.ApprovePayout(ctx, ApprovePayoutInput{
+	if _, _, approveErr := s.ApprovePayout(ctx, ApprovePayoutInput{
 		PayoutID: row.ID, Reviewer: merchant,
-	}); err != nil {
-		t.Fatalf("批准失败: %v", err)
+	}); approveErr != nil {
+		t.Fatalf("批准失败: %v", approveErr)
 	}
 
 	txnID := ledger.NewTxnID()
 	in := PayPayoutInput{PayoutID: row.ID, TxnID: txnID, Gateway: "placeholder-gateway", Ref: "PAYOUT-7"}
-	if _, applied, err := s.PayPayout(ctx, in); err != nil || !applied {
-		t.Fatalf("第一次打款: applied=%v err=%v", applied, err)
+	if _, applied, payErr := s.PayPayout(ctx, in); payErr != nil || !applied {
+		t.Fatalf("第一次打款: applied=%v err=%v", applied, payErr)
 	}
 	again, applied, err := s.PayPayout(ctx, in)
 	if err != nil {

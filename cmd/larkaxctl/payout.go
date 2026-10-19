@@ -369,7 +369,7 @@ func runPayoutReview(action string, args []string) error {
 			return ownerErr
 		}
 		reviewer, reviewerErr := payoutReviewer(ctx, authStore, row)
-		if reviewerErr != nil {
+		if reviewerErr != nil && !errors.Is(reviewerErr, errPayoutNotReviewed) {
 			return reviewerErr
 		}
 
@@ -472,7 +472,7 @@ func runPayoutPaid(args []string) error {
 			return ownerErr
 		}
 		reviewer, reviewerErr := payoutReviewer(ctx, authStore, row)
-		if reviewerErr != nil {
+		if reviewerErr != nil && !errors.Is(reviewerErr, errPayoutNotReviewed) {
 			return reviewerErr
 		}
 		txn, buildErr := ledger.PayoutPaid(ledger.PayoutPaidParams{
@@ -515,13 +515,22 @@ func payoutUser(ctx context.Context, authStore *auth.Store, id int64, what strin
 	return user, nil
 }
 
-// payoutReviewer 按 reviewed_by 取回审批人；这条单子还没走过审批时返回 nil。
+// errPayoutNotReviewed 表示这一行还没有审批人。
+//
+// 「还没走过审批」是这条链上的一个正常状态，不是失败：调用方拿到它就把回执上
+// 审批人那一栏留空，别的错误照常往上抛。用一个哨兵把它说成返回值里的一项，
+// 而不是返回 (nil, nil)——(nil, nil) 让「没有审批人」与「查到了、但读不出来」
+// 在调用点长得一样，而后者是要报出来的。
+var errPayoutNotReviewed = errors.New("这条提现单还没有审批人")
+
+// payoutReviewer 按 reviewed_by 取回审批人；这条单子还没走过审批时返回
+// errPayoutNotReviewed。
 //
 // 从那一行读，不从这次的 --by 拿：重放（或对一张早先批过的单子打款）时批的是上一次
 // 那个人，而回执要回答的正是「库里记着谁」。
 func payoutReviewer(ctx context.Context, authStore *auth.Store, row store.Payout) (*auth.User, error) {
 	if row.ReviewedBy == nil {
-		return nil, nil
+		return nil, errPayoutNotReviewed
 	}
 	user, err := payoutUser(ctx, authStore, *row.ReviewedBy, "审批人")
 	if err != nil {
