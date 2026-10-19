@@ -9,6 +9,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/gateway"
+	"github.com/sumwai/larkax/internal/plugin"
 	"github.com/sumwai/larkax/internal/tokens"
 )
 
@@ -399,7 +400,7 @@ func TestEveryHookIsWiredOnBothEntryPoints(t *testing.T) {
 
 	t.Run("非流式入口", func(t *testing.T) {
 		h, _, chatter := newTestHandler()
-		h.Plugins = pluginRegistry(t, "", hooks)
+		h.Plugins = plugin.NewHolder(pluginRegistry(t, "", hooks))
 
 		if rec := post(h, PathChatCompletions, validBody); rec.Code != http.StatusOK {
 			t.Fatalf("状态码 = %d，响应体 %s", rec.Code, rec.Body)
@@ -410,7 +411,7 @@ func TestEveryHookIsWiredOnBothEntryPoints(t *testing.T) {
 
 	t.Run("流式入口", func(t *testing.T) {
 		h, _, chatter := newTestHandler()
-		h.Plugins = pluginRegistry(t, "", hooks)
+		h.Plugins = plugin.NewHolder(pluginRegistry(t, "", hooks))
 		chatter.streamResult = &gateway.Result{Events: streamOf(channel.StreamEvent{Kind: "done"})}
 
 		if rec := post(h, PathChatCompletions, streamBody); rec.Code != http.StatusOK {

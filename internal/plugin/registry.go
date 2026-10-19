@@ -326,9 +326,11 @@ func narrowCapabilities(requested, provided []string) ([]string, error) {
 //
 // # 今天谁来调它
 //
-// **生产代码没有调用方，只有测试。** 两条生产路径都不经过它：
+// **生产代码没有调用方，只有测试。** 三条生产路径都不经过它：
 //
 //   - 启动：store.LoadRegistry 用 PublishPartial（跳过坏的，见 load.go）；
+//   - 热更新：store.ReloadRegistry 用 PublishAll（整批拒绝、按装配提供的能力
+//     收窄，见下）；
 //   - 上传：larkaxctl plugin publish 自己 Compile 一个插件，再把结果写库
 //     （见 cmd/larkaxctl/plugin.go），不建内存注册表。
 //
@@ -339,14 +341,46 @@ func narrowCapabilities(requested, provided []string) ([]string, error) {
 // 别为了「把它接上」让启动路径改用它：那会把一个坏插件升级成整个服务起不来
 // （理由见 PublishPartial 的注释）。
 func Publish(regs []Registration) (*Registry, error) {
+	// 不关心「这一批里谁失败了」的调用方走这一条：它的报错只留第一条。
+	return PublishAll(regs, sandbox.CapabilityNames(), nil)
+}
+
+// PublishAll 与 Publish 相同——**整批全部通过才发布**——但按这次装配真的提供的
+// 能力收窄（见 CompileWith），并把每一条编译失败的注册交给 onFail。
+//
+// # 热更新为什么用它，而启动路径不用
+//
+// 热更新发生时手上已经有一份能用的注册表。有插件编译不过时，正确的处置是这批
+// 不发布、旧的继续服务；把它跳过会让那个 key 什么都不跑（启动路径可以接受这个
+// 损失，因为服务总得起来；这里不行，本来跑着的那一个会被一次热更新弄没）。
+//
+// onFail 收到的是**已经带上 key 的错误**：它要写进库里的 last_load_error，而一条
+// 不知道是哪个插件的原文没法排查。它只影响报错与写回，不影响「整批不发布」这个
+// 结论；为 nil 时静默跳过。
+func PublishAll(regs []Registration, provided []string, onFail func(Registration, error)) (*Registry, error) {
 	compiled := make([]*Plugin, 0, len(regs))
+	failed := 0
+	var firstErr error
 	for _, reg := range regs {
-		p, err := Compile(reg)
+		p, err := CompileWith(reg, provided)
 		if err != nil {
 			// 错误里带上 key：一批十几个插件里只报「元数据不合法」没法排查。
-			return nil, fmt.Errorf("插件 %s 无法注册: %w", reg.Key, err)
+			err = fmt.Errorf("插件 %s 无法注册: %w", reg.Key, err)
+			failed++
+			if firstErr == nil {
+				firstErr = err
+			}
+			if onFail != nil {
+				onFail(reg, err)
+			}
+			continue
 		}
 		compiled = append(compiled, p)
+	}
+	if failed > 0 {
+		// 只报第一条：其余几条已经逐条交给 onFail（调用方拿去写回与记日志），
+		// 拼成一长行反而让入口那一句更难读。
+		return nil, fmt.Errorf("%d 个插件无法注册，这一批没有发布: %w", failed, firstErr)
 	}
 	return assemble(compiled)
 }

@@ -186,6 +186,79 @@ func TestPublishPartialSkipsPluginAskingUnprovidedCapability(t *testing.T) {
 	}
 }
 
+// 判据：PublishAll 是**整批拒绝**——一条编译不过，整批都不发布。
+//
+// 这一条与 TestPublishPartialSkipsBrokenPlugin 成对：同一批数据在两条路上给出
+// 相反的结论，而结论正是热更新与启动路径要分开的那个判据。好的两个也必须不在
+// 返回的注册表里（此时返回 nil），否则「整批拒绝」就成了「跳过坏的、留下一半」。
+func TestPublishAllRejectsWholeBatch(t *testing.T) {
+	regs := []Registration{
+		goodReg("good-a", 0),
+		{Key: "broken", Source: brokenSource},
+		goodReg("good-b", 0),
+	}
+
+	var failed []Registration
+	reg, err := PublishAll(regs, allCaps(), func(r Registration, _ error) { failed = append(failed, r) })
+	if err == nil {
+		t.Fatal("有一条编译不过时该返回错误：这批不能发布")
+	}
+	if reg != nil {
+		t.Fatalf("失败时不该交出注册表，实际拿到 %d 个插件", reg.Len())
+	}
+	if !strings.Contains(err.Error(), "broken") {
+		t.Errorf("错误信息 %q 里没有坏插件的 key", err.Error())
+	}
+	if len(failed) != 1 || failed[0].Key != "broken" {
+		t.Fatalf("该恰好报一条 broken 的失败，实际 %s", keysOf(failed))
+	}
+}
+
+// 判据：PublishAll 按调用方给的能力清单收窄，与启动路径同一口径。
+//
+// 与 PublishPartial 那条用例的区别只在「失败时整批不发布」；能力判据本身
+// 不能因此分成两份。
+func TestPublishAllNarrowsByProvided(t *testing.T) {
+	regs := []Registration{{
+		Key:    "wants-kv",
+		Source: src(`key:"wants-kv", apiVersion:1, capabilities:["kv"],`, `onUsage(){ return { promptTokens: 1 }; }`),
+	}}
+
+	reg, err := PublishAll(regs, []string{sandbox.CapabilityLog}, nil)
+	if err == nil {
+		t.Fatal("这份清单没提供 kv，申请 kv 的插件该让整批失败")
+	}
+	if reg != nil {
+		t.Fatalf("失败时不该交出注册表，实际拿到 %d 个插件", reg.Len())
+	}
+	if !strings.Contains(err.Error(), "kv") {
+		t.Errorf("错误信息 %q 里没有缺的能力名", err.Error())
+	}
+
+	reg, err = PublishAll(regs, []string{sandbox.CapabilityLog, sandbox.CapabilityKV}, nil)
+	if err != nil {
+		t.Fatalf("清单里给了 kv，这一批该发布: %v", err)
+	}
+	p, ok := reg.Get("wants-kv")
+	if !ok {
+		t.Fatal("清单里给了 kv，这个插件该在注册表里")
+	}
+	if len(p.Capabilities) != 1 || p.Capabilities[0] != sandbox.CapabilityKV {
+		t.Errorf("生效的能力 = %v，期望 [%s]", p.Capabilities, sandbox.CapabilityKV)
+	}
+}
+
+// 空输入：一份空注册表，不是错误。库里一个插件都没有时热更新走的就是这一条。
+func TestPublishAllEmpty(t *testing.T) {
+	reg, err := PublishAll(nil, allCaps(), nil)
+	if err != nil {
+		t.Fatalf("空输入不该报错: %v", err)
+	}
+	if reg == nil || reg.Len() != 0 {
+		t.Fatalf("空输入该得到一份空注册表，实际 %v", reg)
+	}
+}
+
 func keysOf(regs []Registration) string {
 	keys := make([]string, 0, len(regs))
 	for _, r := range regs {

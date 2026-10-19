@@ -282,13 +282,17 @@ type Handler struct {
 	// 那是有意的：装配漏了一步要当场响，而不是安静地记错品种。
 	DefaultAsset string
 
-	// Plugins 是插件注册表。为 nil 时请求路径上不跑插件——插件系统关着、
-	// 或者装配时没接上，都是这个状态。
+	// Plugins 是当前发布的那一份插件注册表。为 nil 时请求路径上不跑插件——
+	// 插件系统关着、或者装配时没接上，都是这个状态。
+	//
+	// 它拿的是一个持有者而不是一份注册表：热更新换的是里面的指针，而一次请求
+	// 在开始时取一次（见 runRequestHook），整个请求都用这一次取到的那一份。
+	// 于是切换对在途请求不可见，下一个请求走新的一份。
 	//
 	// 「为 nil 就不做」与 RateLimiter / Quota / Idempotency 同一个取舍：
 	// 没接上这条链路时，行为与插件系统出现之前完全一样。反过来（nil 时
 	// 回 501）会让一次装配疏漏表现为「所有请求都失败」。
-	Plugins *plugin.Registry
+	Plugins *plugin.Holder
 
 	// PluginLimits 是插件每次 hook 调用的限额，由装配层从 settings 表的
 	// 四个 plugin.* 键读出来填上（见 internal/assembly）。
@@ -660,7 +664,11 @@ func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol cha
 // 拒服务。代价要说清楚：**声明了 blocking 的插件在建会话这一步失败时
 // 也没能让请求失败**，因为那时还拿不到那个插件的 meta。原因是记进日志的。
 func (h *Handler) runRequestHook(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, user User, requestID string) (*plugin.Session, bool) {
-	if h.Plugins == nil {
+	// 一次请求只取一次注册表：整个请求（含各个 hook）都用这一份，热更新换掉的
+	// 是下一次请求看到的那一份。在这里取、而不是每次要用时再取，才能让
+	// 「onRequest 与 onResponse 跑的是同一个插件版本」成立。
+	registry := h.Plugins.Load()
+	if registry == nil {
 		return nil, true
 	}
 	ctx := r.Context()
@@ -669,7 +677,7 @@ func (h *Handler) runRequestHook(w http.ResponseWriter, r *http.Request, protoco
 	// 渠道才翻得出来（见 internal/route 的 upstreamRequest）。所以这里传的是
 	// 规范名，插件看到的 UpstreamModel 与 body.model 也是它
 	// （见 plugin.RequestContext 的字段注释）。
-	sess, err := h.Plugins.NewSession(ctx, plugin.SessionRequest{
+	sess, err := registry.NewSession(ctx, plugin.SessionRequest{
 		CanonicalModel: upstream.Model,
 		Protocol:       string(protocol),
 	}, h.pluginHost(requestID, user.ID), h.PluginLimits)

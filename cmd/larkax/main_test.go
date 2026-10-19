@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -710,5 +713,118 @@ func TestServeUntilSignalServesThePortItClaims(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "已退出") {
 		t.Errorf("排空之后应当留下「已退出」: %s", logs.String())
+	}
+}
+
+// ── 插件热更新：SIGHUP 循环 ────────────────────────────────────────────
+
+// 判据：连着排队的两条信号只触发一次装载。
+//
+// 两条信号说的是同一件事（「库里变了，再读一遍」），而装载读到的就是最新的库。
+// 这一条把信号在循环开始之前就放进缓冲，于是「先取空、再装载」与「来一条装一次」
+// 两种实现给出不同的次数（1 与 2）。
+func TestReloadLoopCoalescesQueuedSignals(t *testing.T) {
+	sigs := make(chan os.Signal, 2)
+	sigs <- syscall.SIGHUP
+	sigs <- syscall.SIGHUP
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	loads := 0
+	reloaded := make(chan struct{}, 2)
+	reload := func(context.Context) error {
+		mu.Lock()
+		loads++
+		mu.Unlock()
+		reloaded <- struct{}{}
+		return nil
+	}
+
+	var logs bytes.Buffer
+	go reloadPluginsOnSignal(ctx, sigs, reload, slog.New(slog.NewTextHandler(&logs, nil)))
+	<-reloaded
+
+	mu.Lock()
+	got := loads
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("两条排队的信号触发了 %d 次装载，期望 1 次", got)
+	}
+}
+
+// 判据：装载失败只记日志，循环继续等下一次信号。
+//
+// 失败时退出循环的话，一次坏掉的重新装载会让这个进程从此不再响应 SIGHUP——
+// 而修好之后重新发信号正是最自然的下一步。
+func TestReloadLoopContinuesAfterFailure(t *testing.T) {
+	sigs := make(chan os.Signal, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	loads := 0
+	reloaded := make(chan struct{}, 2)
+	reload := func(context.Context) error {
+		mu.Lock()
+		loads++
+		mu.Unlock()
+		reloaded <- struct{}{}
+		return errors.New("库连不上")
+	}
+
+	var logs bytes.Buffer
+	go reloadPluginsOnSignal(ctx, sigs, reload, slog.New(slog.NewTextHandler(&logs, nil)))
+
+	for i := 0; i < 2; i++ {
+		sigs <- syscall.SIGHUP
+		<-reloaded
+	}
+
+	mu.Lock()
+	got := loads
+	mu.Unlock()
+	if got != 2 {
+		t.Fatalf("两次信号触发了 %d 次装载，期望 2 次", got)
+	}
+	if !strings.Contains(logs.String(), "插件热更新失败") {
+		t.Errorf("装载失败该留下一条错误日志，实际日志：\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "插件系统未启用") {
+		t.Errorf("这是一次失败，不该被说成「没启用」：\n%s", logs.String())
+	}
+}
+
+// 判据：没有可热更新的注册表时，日志说的是「没启用」，不是「失败」。
+//
+// 两者在运维眼里下一步完全不同：一个是去查插件设置，一个是去查库与插件源码。
+func TestReloadLoopReportsDisabledSeparately(t *testing.T) {
+	sigs := make(chan os.Signal, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	reloaded := make(chan struct{}, 1)
+	reload := func(context.Context) error {
+		reloaded <- struct{}{}
+		return assembly.ErrPluginsDisabled
+	}
+
+	var logs bytes.Buffer
+	go reloadPluginsOnSignal(ctx, sigs, reload, slog.New(slog.NewTextHandler(&logs, nil)))
+	sigs <- syscall.SIGHUP
+	<-reloaded
+
+	// 等循环把那一条日志写完：reload 返回后 switch 才落笔，这里用一个短的
+	// 轮询等它，而不是假设「reloaded 一到，日志就在了」。
+	deadline := time.Now().Add(time.Second)
+	for !strings.Contains(logs.String(), "插件系统未启用") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !strings.Contains(logs.String(), "插件系统未启用") {
+		t.Errorf("没启用时该在日志里说清楚，实际：\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "插件热更新失败") {
+		t.Errorf("「没启用」不该被记成一次失败：\n%s", logs.String())
 	}
 }

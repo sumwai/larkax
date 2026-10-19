@@ -68,7 +68,7 @@ func TestPluginKVAndCalendarEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("装配失败: %v", err)
 	}
-	if _, ok := app.Plugins.Get(pluginKey); !ok {
+	if _, ok := app.Plugins.Load().Get(pluginKey); !ok {
 		t.Fatal("申请了 kv 与 calendar 的插件该上线——这份装配两项都接上了")
 	}
 	public := httptest.NewServer(app.Public)

@@ -1298,7 +1298,7 @@ func TestPluginGetDocCreatedByNil(t *testing.T) {
 func TestPrintPluginDeleteResult(t *testing.T) {
 	var buf bytes.Buffer
 	printPluginDeleteResult(&buf, pluginstore.Deleted{Key: "demo", Versions: 2, Activations: 1, KVKeys: 5})
-	want := "已删除插件 demo：2 个版本、1 条启用记录、5 个私有存储的键。重启后生效。\n"
+	want := "已删除插件 demo：2 个版本、1 条启用记录、5 个私有存储的键。对 larkax 进程发 SIGHUP 后生效。\n"
 	if got := buf.String(); got != want {
 		t.Errorf("卸载回显 = %q，期望 %q", got, want)
 	}
@@ -1871,7 +1871,7 @@ func TestPluginDeleteCountsEveryVersionAndDependentRow(t *testing.T) {
 			t.Errorf("卸载失败: %v", err)
 		}
 	})
-	want := fmt.Sprintf("已删除插件 %s：%d 个版本、%d 条启用记录、%d 个私有存储的键。重启后生效。\n",
+	want := fmt.Sprintf("已删除插件 %s：%d 个版本、%d 条启用记录、%d 个私有存储的键。对 larkax 进程发 SIGHUP 后生效。\n",
 		key, 2, 1, 1)
 	if !strings.Contains(stderr, want) {
 		t.Errorf("回显里没有这一个数都没错的整句：\n得到 %q\n想要含 %q", stderr, want)

@@ -39,7 +39,7 @@ func TestBuildRegistersPluginAskingForWiredCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("装配失败: %v", err)
 	}
-	p, ok := app.Plugins.Get(key)
+	p, ok := app.Plugins.Load().Get(key)
 	if !ok {
 		t.Fatalf("申请了 kv 与 calendar 的插件该上线——这份装配两项都接上了")
 	}
@@ -78,11 +78,11 @@ func TestBuildSkipsPluginAskingUnwiredCapability(t *testing.T) {
 		t.Fatalf("这份 wiring 什么都没接，provided 该只有 log，实际 %v", got)
 	}
 
-	reg, _, err := buildPlugins(Config{DB: db, Settings: values}, logger, bare)
+	built, err := buildPlugins(Config{DB: db, Settings: values}, logger, bare)
 	if err != nil {
 		t.Fatalf("加载失败: %v", err)
 	}
-	if _, ok := reg.Get(wantsKV); ok {
+	if _, ok := built.holder.Load().Get(wantsKV); ok {
 		t.Error("这份装配没接 kv，申请 kv 的插件不该上线——它该在注册期就失败，" +
 			"而不是注册成功、运行期拿到一个 undefined 的能力")
 	}
@@ -90,20 +90,20 @@ func TestBuildSkipsPluginAskingUnwiredCapability(t *testing.T) {
 	if !strings.Contains(logged.String(), wantsKV) {
 		t.Errorf("跳过的插件该在日志里被点名:\n%s", logged.String())
 	}
-	if _, ok := reg.Get(wantsLog); !ok {
+	if _, ok := built.holder.Load().Get(wantsLog); !ok {
 		t.Error("只申请 log 的插件该照常上线——少了这一半，一个什么都不装的实现也能过")
 	}
 
 	// 同一行数据，把两个依赖接上，它就上线了。这一条分辨的是「按 wiring 判」
 	// 与「按某个写死的清单判」：写死的清单要么永远放行、要么永远拒绝，
 	// 两种都过不了这一对用例。
-	reg, _, err = buildPlugins(Config{DB: db, Settings: values}, logger,
+	built, err = buildPlugins(Config{DB: db, Settings: values}, logger,
 		pluginWiring{logger: logger, now: time.Now,
 			calendar: pluginCalendar{cal: testCalendar(t, db)}, kv: recordingKVForWiring{}})
 	if err != nil {
 		t.Fatalf("加载失败: %v", err)
 	}
-	if _, ok := reg.Get(wantsKV); !ok {
+	if _, ok := built.holder.Load().Get(wantsKV); !ok {
 		t.Error("接上依赖之后，同一个插件该上线")
 	}
 }
