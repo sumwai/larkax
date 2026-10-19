@@ -1517,9 +1517,8 @@ scripts/check-mutation.sh money route  # 只跑指定的
 集成测试整包被 `t.Skip`，那一包等于没测。脚本会直接拒绝运行，而不是跑出一批
 不可比的数字（见 [LESSONS.md](../LESSONS.md) 第 17 条）。
 
-实测：计费与账本各包的覆盖率都在 82%~98%，而变异测试每次都找出两位数个
-**存活**变异——它们集中在「恰好相等」「恰好为零」这类边界上，
-而写测试时的自然倾向正是跳过这些。
+实测：覆盖率很高的包照样有**存活**变异（逐包见「各包的现状」那张表）——它们集中在
+「恰好相等」「恰好为零」这类边界上，而写测试时的自然倾向正是跳过这些。
 
 **并发与超时系数是同一个旋钮，而并发是更该先调的那个。** gremlins 给每个
 变异的超时预算 = 「跑一次测试集的时间 × 系数」，而那个基准是**串行**测出来的；
@@ -1574,6 +1573,25 @@ DSN 有效）说明单独传哪个都不改变本仓的结果，只有两个一�
 | `--integration` | 34.16s | 2 / 6 | 25.00% |
 | `--integration --coverpkg=./...` | 37.85s | 8 / 0 | 100.00% |
 
+**两个开关管的是两件不同的事。** 看 gremlins 在 gathering 阶段实际调的命令行就清楚
+了——这是用记日志的 `go` 包一层抓到的，gremlins 按 `PATH` 找 `go`：
+
+```sh
+# 不传 --integration
+go test -cover -coverprofile … ./internal/keyquota/...
+
+# 传了 --integration
+go test -cover -coverprofile … ./...
+
+# 两个都传
+go test -coverpkg ./... -cover -coverprofile … ./...
+```
+
+**`--integration` 管「跑哪些测试」**：从这一个包变成整套（实测 33.16s，热缓存下
+`go test ./...` 整套 48 个包是 32.81s）。**`-coverpkg` 管「把哪些包的行计进覆盖」**：
+少了它，别的包执行到 keyquota 的那几行不算在 keyquota 头上，所以跑全了还是 6 条
+`Not covered`。
+
 那 6 条守卫（`Spent` 与 `CheckInTx` 里的 `err != nil`）整个测试集**确实执行得到**：
 `go test -coverpkg=./internal/keyquota/ ./...` 给出 `over 100.0% / Spent 71.4% /
 Check 83.3% / CheckInTx 68.8%`，而这个包自己的测试只有 3.3%。但那条路走不得——
@@ -1585,6 +1603,11 @@ Check 83.3% / CheckInTx 68.8%`，而这个包自己的测试只有 3.3%。但那
 `account.go:行:列` 与 `store/reconcile.go:行:列` 两种位置。所以汇总表上
 `internal/ledger` 那一行读作「ledger + store」；脚本在两条都选中时会自己打一行
 注记点明范围重叠（父子两条同时在 `PKGS` 里各占一行）。
+
+**这与「选中了哪些包」是两件事。** 包参数按后缀匹配清单（照清单里的名字写，
+别照目录树猜）：传 `internal/ledger` 只选中清单里那一条，**不会**顺带选中
+`internal/ledger/store`；想单独量 store 就得把 `internal/ledger/store` 自己写上。
+递归管的是「变异哪些文件」，选包管的是「跑清单里哪一行」。
 
 DSN 改的正是**递归进来那一半**。实测（两轮都是手工裸 gremlins：
 `gremlins unleash --timeout-coefficient=10 --workers=1 --invert-logical ./internal/ledger/`，
@@ -1615,8 +1638,12 @@ DSN 改的正是**递归进来那一半**。实测（两轮都是手工裸 greml
 | `internal/billing` | `Killed 145, Timed out 0` | `Killed 136, Timed out 10` |
 | `internal/tokens` | `Killed 100, Timed out 0` | `Killed 95, Timed out 5` |
 
-**判据是超时条数，不是百分比。** 超时不为 0 就说明这一轮受了干扰，
-那几个数不与历史比较、也不抄进表里。
+这两行的数出自更早的一轮（那时 gremlins 还没钉版本、`--invert-logical` 也还没开），
+只用来对照同一行的两列，不与下面「各包的现状」那张表对账。
+
+**判据是超时条数，不是百分比。** 超时不为 0 就说明这一轮受了干扰：那一行照实写进
+表里、连超时条数一起写（那一列就是为这个存在的），只是不与别的轮次比较，也不据此
+判这个包测得好不好。
 （这句话管的是怎么**读数**；门禁另有一条判据——脚本里的 `MAX_TIMED_OUT` 是 10，
 超时超过 10 才判「这一轮结果不可信」并让这道门失败，两者各管一头。）
 
@@ -1653,46 +1680,73 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 
 ### 各包的现状
 
-由 `scripts/check-mutation.sh` 跑出（workers=1、系数 10、带 `LARKAX_DB_DSN`）。
-**超时列不为 0 的包，这一轮的分数不与历史比较**——见上文。改动过某个包的测试
-之后重跑并在表里更新。
+由 `scripts/check-mutation.sh` 跑出。**下面每个数都连着这一轮的条件**——它们不是
+「一般怎么跑」，是这些数实际跑出来的样子。
 
-**这张表是历史值，暂不与新一轮比较。** 它出自一个没钉版本的 gremlins
-（`@latest` 装出来的，上游一变变异器集合就变），与现在脚本跑出来的不是同一把尺子。
-efficacy 的分母是变异体数，分母变了分数就会变——所以**表待按当前口径整表重跑**。
+先贴上那一行「这把尺子」（脚本每次运行都会打，这里是原样）：
 
-**怎么跑**：`scripts/check-mutation.sh`（需要 `LARKAX_DB_DSN` 与钉住那一版的
-gremlins；缺哪个它都会拒绝运行并给出安装命令）。它每次运行打一行「这把尺子：…」，
-写的就是这个数的三个条件：
+```
+这把尺子：gremlins v0.6.0 / 变异器集合 ARITHMETIC_BASE CONDITIONALS_BOUNDARY CONDITIONALS_NEGATION INCREMENT_DECREMENT INVERT_NEGATIVES INVERT_LOGICAL / --invert-logical 已开 / workers=1 / 系数 10
+```
 
-- gremlins 版本：`v0.6.0`，由脚本里的 `PINNED_GREMLINS_VERSION` 钉住，
-  运行时探测并校验，不符就拒绝运行；
-- 变异器集合：脚本从 `unleash --help` 探测，不在这里抄一份——抄第二份的那天
-  就是两份开始分岔的那天；
-- `--invert-logical` 已打开（`&&` ↔ `||`，默认关闭）。打开它之前，`a || b`
-  这类判据一个变异体都不生成，那时「efficacy 高」不能当成「布尔判据也被钉住了」。
+它逐项的意思：
 
-**贴数字时把那一行「这把尺子」一起贴上**：它是数字的条件，不是装饰。
-两次运行的条件不同，两个数就不是同一个包的两个样本，别放在一起比。
+- **gremlins 版本**由脚本里的 `PINNED_GREMLINS_VERSION` 钉住，运行时探测并校验，
+  不符就拒绝运行；
+- **变异器集合**由脚本从 `unleash --help` 探测出来，不在这里抄一份——抄第二份的
+  那天就是两份开始分岔的那天；
+- **`--invert-logical` 已开**（`&&` ↔ `||`，默认关闭）。不开它时 `a || b` 这类
+  判据一个变异体都不生成，那时的「efficacy 高」不能当成「布尔判据也被钉住了」；
+- **workers=1、系数 10**，理由见上文「并发与超时系数是同一个旋钮」那一段；
+- **`LARKAX_DB_DSN` 有效**，缺了它 `internal/ledger/store` 整包被跳过。
 
-| 包 | 覆盖率 | Test efficacy | 超时 |
-|---|---|---|---|
-| `internal/gateway` | 96.4% | 100% | 0 |
-| `internal/pipeline` | 86.8% | 96.0% | 0 |
-| `internal/quota` | 95.6% | 93.9% | 0 |
-| `internal/calendar` | 97.8% | 93.6% | 1 |
-| `internal/ledger` | 96.5% | 92.3% | 0 |
-| `internal/ledger/store` | 79.8% | 90.2% | 1 |
-| `internal/route` | 93.3% | 84.3% | 0 |
-| `internal/money` | 95.9% | 84.2% | 0 |
-| `internal/billing` | 97.5% | 81.0% | 0 |
-| `internal/tokens` | 97.4% | 74.6% | 4 |
-| `internal/snapshot` | 88.6% | 70.8% | 7 |
-| `internal/snapshotwire` | 95.2% | 100% | 0 |
+**贴数字时把那一行「这把尺子」一起贴上**：它是数字的条件，不是装饰。两次运行的
+条件不同，两个数就不是同一个包的两个样本，别放在一起比。
+
+**还有一条不在这一行里，而它同样在改数字**：gathering 那一次 `go test` 的耗时就是
+每个变异体的超时预算（× 系数），而那一次调用没有 `-count=1`、会命中 go 的测试结果
+缓存。命中时预算按缓存里的耗时算（实测 `134ms`，真跑一次是 `5.7s`），整包的变异体
+会假超时：同一份代码、同一把尺子，`internal/ledger/store` 跑出过 `44 / 0 / 303`
+与 `340 / 7 / 0` 两组，差别只在有没有先 `go clean -testcache`。这一轮的数是在清掉
+测试结果缓存之后跑的（见 #773）。
+
+| 包 | killed | 存活 | 超时 | Not covered | Mutator coverage | Test efficacy（递归） | 覆盖率（包内） |
+|---|---|---|---|---|---|---|---|
+| `internal/pricing` | 107 | 0 | 0 | 18 | 85.60% | 100.00% | 90.2% |
+| `internal/pipeline` | 43 | 0 | 0 | 0 | 100.00% | 100.00% | 87.5% |
+| `internal/keyquota` | 2 | 0 | 0 | 6 | 25.00% | 100.00% | 3.3% |
+| `internal/snapshotwire` | 103 | 1 | 0 | 3 | 97.20% | 99.04% | 94.6% |
+| `internal/calendar` | 150 | 2 | 0 | 14 | 91.57% | 98.68% | 97.8% |
+| `internal/ledger` | 476 | 9 | 0 | 92 | 84.06% | 98.14% | 96.1% |
+| `internal/ledger/store` | 340 | 7 | 0 | 60 | 85.26% | 97.98% | 79.4% |
+| `internal/route` | 120 | 4 | 0 | 24 | 83.78% | 96.77% | 97.7% |
+| `internal/gateway` | 238 | 9 | 0 | 9 | 96.48% | 96.36% | 95.7% |
+| `internal/snapshot` | 153 | 6 | 0 | 50 | 76.08% | 96.23% | 90.1% |
+| `internal/billing/expr` | 168 | 8 | 0 | 12 | 93.62% | 95.45% | 85.9% |
+| `internal/quota` | 38 | 2 | 0 | 0 | 100.00% | 95.00% | 94.8% |
+| `internal/billing` | 243 | 14 | 0 | 12 | 95.54% | 94.55% | 98.3% |
+| `internal/money` | 90 | 14 | 0 | 4 | 96.30% | 86.54% | 96.8% |
+| `internal/tokens` | 89 | 14 | 0 | 51 | 66.88% | 86.41% | 97.2% |
+
+**最后两栏的范围不一样，别混着读。** `Test efficacy（递归）` 说的是 `./<pkg>/`
+这一条命令：包路径递归，子包的变异体一起算进来；`覆盖率（包内）` 另取一条命令
+（`go test -cover ./<pkg>/`），只算这一个包自己的行。两个集合不同，同一行这两栏
+没有可比性。
+
+**有两对行的范围是重叠的。** `internal/ledger` 那一行的变异范围含
+`internal/ledger/store`，`internal/billing` 那一行含 `internal/billing/expr`——
+子包的变异体在父包那一条命令里跑一次、又在子包自己那一行跑一次。脚本在父子两条
+都选中时会自己打一行注记点明。**这不是「父包会把子包选中」**：递归管的是「变异
+哪些文件」，选包管的是「跑清单里哪一行」，两件事，规则见上文。
+
+**超时列不为 0 的行不与别的轮次比较**——见上文。改动过某个包的测试之后重跑并在
+表里更新。
 
 **覆盖率高而 efficacy 低，说明测试断言的是「相对关系」而不是「具体边界」。**
-`route` 与 `snapshot` 两个包都是这个形状：原用例写的是「A 明显比 B 好」
-这种比较，于是改 `<=` 为 `<`、去掉分母的加数、改常量，只要顺序不变就测不出来。
+这类包的用例写的是「A 明显比 B 好」这种比较，于是改 `<=` 为 `<`、去掉分母的加数、
+改常量，只要顺序不变就测不出来。按这一轮这把尺子，两栏差得最大的是 `tokens`
+（覆盖率 97.2%、efficacy 86.41%）与 `money`（96.8% 对 86.54%）——差得大就值得去
+脚本打印的那份存活清单里逐条看。
 
 **不要为了把 efficacy 刷上去而写对着分支的琐碎断言。** 它会让数字好看，
 但不会让行为更可信。`snapshot` 的遍历器那一层还没补，因为**它需要按功能
