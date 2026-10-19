@@ -69,9 +69,8 @@ func (s *Store) PostTransaction(ctx context.Context, txn ledger.Transaction) (ap
 	defer func() { _ = tx.Rollback() }()
 
 	// 先给 txn_id 上锁，再读已有分录：读与写之间因此没有窗口。
-	if _, lockErr := tx.ExecContext(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, string(txn.TxnID)); lockErr != nil {
-		return false, fmt.Errorf("锁定交易 %s 失败: %w", txn.TxnID, lockErr)
+	if lockErr := lockTxn(ctx, tx, txn.TxnID); lockErr != nil {
+		return false, lockErr
 	}
 
 	stored, err := txnEntriesInTx(ctx, tx, txn.TxnID)
@@ -79,28 +78,69 @@ func (s *Store) PostTransaction(ctx context.Context, txn ledger.Transaction) (ap
 		return false, err
 	}
 	if len(stored) > 0 {
-		if !sameTxnContent(stored, txn.Entries) {
-			return false, fmt.Errorf(
-				"%w: 交易 %s 已经存在，但内容与这次要写的不同（库里 %d 条分录、这次 %d 条）",
-				ErrTxnConflict, txn.TxnID, len(stored), len(txn.Entries))
+		if conflictErr := sameStoredTxn(stored, txn); conflictErr != nil {
+			return false, conflictErr
 		}
 		// 重放：什么都不写，也不需要 commit。
 		return false, nil
 	}
 
-	if err := lockPostingWallets(ctx, tx, txn.Entries); err != nil {
-		return false, err
-	}
-	if err := insertEntries(ctx, tx, txn.Denormalize()); err != nil {
-		return false, err
-	}
-	if err := applyToWallets(ctx, tx, txn.Entries); err != nil {
+	if err := writeTxnEntries(ctx, tx, txn); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("提交交易 %s 失败: %w", txn.TxnID, err)
 	}
 	return true, nil
+}
+
+// lockTxn 把同一个交易号的写入串行化。
+//
+// 事务级锁：随 commit / rollback 一起释放，不需要手工解锁。锁挂在 txn_id 上
+// 而不是某个调用方传入的键上——写库这一层只认 txn_id（见 PostTransaction 的
+// 「并发」那一节）。
+//
+// 它单独成一个函数，是因为**不止一条路在写分录**：手工入账与调账走
+// PostTransaction，提现的申请 / 驳回 / 打款走 payout.go 那三个写入函数。
+// 每一条都要先上这把锁，锁错了（或漏了）只在并发时才看得出来，所以只留
+// 一处写法。
+func lockTxn(ctx context.Context, tx *sql.Tx, txnID ledger.TxnID) error {
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, string(txnID)); err != nil {
+		return fmt.Errorf("锁定交易 %s 失败: %w", txnID, err)
+	}
+	return nil
+}
+
+// sameStoredTxn 核对库里已有的那笔交易与这次要写的是不是同一批分录。
+//
+// 一致返回 nil（重放），不一致返回 ErrTxnConflict。**只在 stored 非空时调用**
+// ——「库里还没有这笔交易」是另一条路，不是这一条的一个分支。
+//
+// 与 sameTxnContent 一样按多重集比较：分录的顺序不是账本的一部分。
+func sameStoredTxn(stored []ledger.Entry, txn ledger.Transaction) error {
+	if sameTxnContent(stored, txn.Entries) {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: 交易 %s 已经存在，但内容与这次要写的不同（库里 %d 条分录、这次 %d 条）",
+		ErrTxnConflict, txn.TxnID, len(stored), len(txn.Entries))
+}
+
+// writeTxnEntries 一组分录的三步写库：锁钱包 → 写分录 → 更新快照。
+//
+// 调用方负责前置判断（这笔交易是不是已经写过）与事务边界。**不在这里
+// Verify**：走到这一步的交易都出自 internal/ledger 的构造函数，它们构造时
+// 已经自检过一次（newTxn）；真正的把关在 PostTransaction 的开头，那里接的
+// 是调用方自己拼出来的交易。
+func writeTxnEntries(ctx context.Context, tx *sql.Tx, txn ledger.Transaction) error {
+	if err := lockPostingWallets(ctx, tx, txn.Entries); err != nil {
+		return err
+	}
+	if err := insertEntries(ctx, tx, txn.Denormalize()); err != nil {
+		return err
+	}
+	return applyToWallets(ctx, tx, txn.Entries)
 }
 
 // txnEntriesInTx 在一个事务里读回某个交易的全部分录。

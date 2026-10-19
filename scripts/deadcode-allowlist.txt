@@ -119,11 +119,6 @@ internal/calendar/memory.go    | MemorySource.SetYearState      | lib | 测试�
 internal/calendar/memory.go    | MemorySource.YearState         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | NewMemorySource                | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/channel/httpx/httpx.go  | DrainAndClose                   | lib | HTTP 收尾辅助，给拿不到 *http.Response 的调用点用；目前只有测试在调它
-internal/ledger/account.go       | PayoutAccount                   | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
-internal/ledger/entry.go         | Entry.withPayout                | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
-internal/ledger/transactions.go  | PayoutPaid                      | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
-internal/ledger/transactions.go  | PayoutRequest                   | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
-internal/ledger/transactions.go  | Refund                          | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
 internal/ledger/transactions.go  | Settle                          | gap | #172 这套事务函数目前只有测试在调，支付与运营面还没有入口
 internal/money/money.go          | FromInt                         | lib | 金额库的构造面：用整数元构造；目前只有测试在调它
 internal/money/money.go          | FromUnits                       | lib | 金额库的构造面：用最小单位构造；目前只有测试在调它（读库走 Parse，列是 numeric）

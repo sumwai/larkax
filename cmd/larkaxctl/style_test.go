@@ -876,10 +876,25 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				},
 			}, true)
 		}},
+		// 下面一条是提现的回执：与调账回执同一类（一栏一行），只是几栏随状态走
+		// ——审批人与审批时刻只有走过审批的单子才有。
+		{"提现回执", func(w io.Writer) {
+			reviewedBy := int64(8)
+			printPayout(w, payoutReceipt{
+				Verdict: "已批准提现单 3。",
+				Payout: store.Payout{
+					ID: 3, UserID: 7, Asset: ledger.AssetCNY, Amount: money.MustParse("88.00"),
+					Status: store.PayoutApproved, ReviewedBy: &reviewedBy, ReviewedAt: &at,
+					ReviewNote: "核对无误", CreatedAt: at,
+				},
+				User:     auth.User{ID: 7, Username: "user-placeholder"},
+				Reviewer: &auth.User{ID: 8, Username: "ops-placeholder"},
+			})
+		}},
 	}
 
-	if len(cases) != 28 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 28 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 29 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 29 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {

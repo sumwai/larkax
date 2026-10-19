@@ -459,6 +459,60 @@ func PayoutPaid(p PayoutPaidParams) (Transaction, error) {
 	return newTxn(EntryPayoutPaid, p.TxnID, p.At, entries...)
 }
 
+// PayoutRejectParams 是一次提现申请被驳回的输入。
+type PayoutRejectParams struct {
+	TxnID TxnID
+	// PayoutID 是提现单 id，**必填**：它就是要核销的那条待付。
+	// 与 PayoutRequest 同一个标识，于是账本里这一对（申请 / 驳回）能对上。
+	PayoutID int64
+	// UserID 是这条提现单的商户。它不出现在分录里（钱从 payout 科目回到
+	// 商户的分成科目），但必填：账本要能回答「这条单子是谁的」，而那不是
+	// 从 payout 科目的 id 推得出来的。
+	UserID int64
+	Amount money.Amount
+	Asset  Asset
+	At     time.Time
+}
+
+// PayoutReject 构造一次提现驳回，它是 PayoutRequest 的镜像，每一项的
+// 方向都反过来。
+//
+//	借 merchant_payable:<id>   A    欠商户的分成恢复（他还能再申请）
+//	贷 payout:<payoutID>       A    这条提现单的待付核销
+//
+// # 为什么驳回要写分录，而不是只改审批状态
+//
+// 申请那一步把钱从 merchant_payable 挪进了 payout 科目（见 PayoutRequest），
+// 驳回是把这个动作取消。只改状态而账不动，那笔钱就永远留在 payout 科目上
+// ——它既付不出去（这条单子再也不会被打款），也不再是商户可申请的分成，
+// 于是账面上多出一笔没有归属的待付，而它只会以「payout 科目长期不平」的
+// 形式在某个对账日出现。
+//
+// # 驳回原因不在这里
+//
+// 与 PayoutRequest 同一条口径：审核是谁做的、什么时候、为什么，都在
+// payout_requests 那一行上（reviewed_by / reviewed_at / review_note）。
+// 账本记的是钱，不重复记一份会与那行分叉的审批记录。
+func PayoutReject(p PayoutRejectParams) (Transaction, error) {
+	if err := validateCommon(EntryPayoutReject, p.TxnID, p.Asset, p.Amount); err != nil {
+		return Transaction{}, err
+	}
+	if p.PayoutID <= 0 {
+		return Transaction{}, fmt.Errorf("提现单 id 非法: %d", p.PayoutID)
+	}
+	if p.UserID <= 0 {
+		return Transaction{}, fmt.Errorf("商户 id 非法: %d", p.UserID)
+	}
+
+	entries := []Entry{
+		debit(p.TxnID, MerchantPayableAccount(p.UserID), p.Asset, p.Amount, EntryPayoutReject).
+			withPayout(p.PayoutID),
+		credit(p.TxnID, PayoutAccount(p.PayoutID), p.Asset, p.Amount, EntryPayoutReject).
+			withPayout(p.PayoutID),
+	}
+	return newTxn(EntryPayoutReject, p.TxnID, p.At, entries...)
+}
+
 // AdjustmentParams 是一次人工调账的输入。
 type AdjustmentParams struct {
 	TxnID TxnID

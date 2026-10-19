@@ -1010,3 +1010,96 @@ func TestRefundAttachesBillingRequest(t *testing.T) {
 		}
 	}
 }
+
+// PayoutReject 是 PayoutRequest 的镜像：借 merchant_payable、贷 payout。
+//
+// 金额、科目、方向与 payout_id 逐条钉住，而不只断言「没报错」：这一组分录写反
+// 方向同样和为零（与被测的那一组一样「平」），而它会**再冻一次**商户的分成——
+// 驳回之后钱还留在 payout:<id> 上，账面看不出来，只有等到那一栏长期不平才发现。
+//
+// 变异：把两条分录的方向对调（debit/credit 互换），这条用例红；只断言
+// 「2 条分录、和为 0」的用例不会红。
+func TestPayoutRejectMirrorsRequest(t *testing.T) {
+	txn := newTxnID(t, txnA)
+	tr, err := PayoutReject(PayoutRejectParams{
+		TxnID: txn, PayoutID: 3, UserID: 7, Amount: amount(t, "5"), Asset: AssetCNY,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 借为正、贷为负（见 Entry.Amount），所以退回来的分成是正的，
+	// 核销掉的那条待付是负的。
+	want := map[string]string{
+		MerchantPayableAccount(7).String(): amount(t, "5").String(),
+		PayoutAccount(3).String():          amount(t, "-5").String(),
+	}
+	got := map[string]string{}
+	for _, e := range tr.Entries {
+		if e.EntryType != EntryPayoutReject {
+			t.Errorf("分录 %s 的类型 = %q，期望 %q", e.Account, e.EntryType, EntryPayoutReject)
+		}
+		if e.PayoutID == nil || *e.PayoutID != 3 {
+			t.Errorf("分录 %s 没有挂上 payout_id 3", e.Account)
+		}
+		got[e.Account.String()] = e.Amount.String()
+	}
+	if len(got) != len(want) {
+		t.Fatalf("写了 %d 条分录（%v），期望 %d 条", len(got), got, len(want))
+	}
+	for account, amount := range want {
+		if got[account] != amount {
+			t.Errorf("科目 %s 的金额 = %q，期望 %q", account, got[account], amount)
+		}
+	}
+
+	// 申请与驳回必须是同一组科目的两条相反分录，不然这一对在账本里对不上。
+	req, err := PayoutRequest(PayoutRequestParams{
+		TxnID: newTxnID(t, txnB), PayoutID: 3, UserID: 7, Amount: amount(t, "5"), Asset: AssetCNY,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flipped := map[string]string{}
+	for _, e := range req.Entries {
+		flipped[e.Account.String()] = e.Amount.Neg().String()
+	}
+	for account, amount := range want {
+		if flipped[account] != amount {
+			t.Errorf("驳回时 %s 的金额 = %q，期望是申请那一笔的反向 %q",
+				account, amount, flipped[account])
+		}
+	}
+}
+
+// 驳回的输入校验：提现单 id、商户 id、金额与资产各判一遍。
+//
+// 这几条与 PayoutRequest 是同一批判据（都用 validateCommon 加那两个 id），
+// 但它们各自挡下的是一类**会把分录记到错归属上**的输入：没有单 id 的核销
+// 分不清是哪条待付，没有商户 id 的退回分不清还给谁。
+func TestPayoutRejectRejectsBadInput(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(p *PayoutRejectParams)
+	}{
+		{"缺提现单 id", func(p *PayoutRejectParams) { p.PayoutID = 0 }},
+		{"缺商户 id", func(p *PayoutRejectParams) { p.UserID = 0 }},
+		{"金额为零", func(p *PayoutRejectParams) { p.Amount = money.Zero }},
+		{"金额为负", func(p *PayoutRejectParams) { p.Amount = money.MustParse("-5") }},
+		{"资产不认识", func(p *PayoutRejectParams) { p.Asset = Asset("USDT") }},
+		{"缺交易号", func(p *PayoutRejectParams) { p.TxnID = "" }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := PayoutRejectParams{
+				TxnID: newTxnID(t, txnA), PayoutID: 3, UserID: 7,
+				Amount: amount(t, "5"), Asset: AssetCNY,
+			}
+			tc.mutate(&p)
+			if _, err := PayoutReject(p); err == nil {
+				t.Error("这条输入应当被拒，却构造出了一笔交易")
+			}
+		})
+	}
+}
