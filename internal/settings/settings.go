@@ -54,6 +54,17 @@ type Spec struct {
 	Unwired string
 }
 
+// KeyAdminToken 是内部监听上管理令牌的 verifier：令牌明文的 SHA-256，
+// 小写十六进制。空串表示还没配置过——那时 admin API 一律回 503，而不是
+// 「没配就放开」。
+//
+// 它放这里而不是散在调用方，是因为 Registry 要用同一个字面量：两处各写一份
+// 时，键名拼错的表现是「启动时报缺少配置项」，而那时没人会先怀疑拼写。
+//
+// 它**不**走 settings.Setter：写入要求一个记名的用户，而管理令牌不对应任何
+// 用户；`larkaxctl admin token create|revoke` 自己写这一行。
+const KeyAdminToken = "admin.token_sha256"
+
 // Registry 是全部已知配置项。
 //
 // 新增配置项时：先加迁移里的 INSERT，再在这里加一行。两处都要改是有意的，
@@ -84,6 +95,7 @@ var Registry = []Spec{
 	{Key: "reconcile.shard_size", Kind: KindInt},
 	{Key: "reconcile.full_scan_interval_hours", Kind: KindInt},
 	{Key: "payment.fake_enabled", Kind: KindBool},
+	{Key: KeyAdminToken, Kind: KindString},
 }
 
 // Row 是从存储层读出的一行。

@@ -153,6 +153,7 @@ var commandGroups = []commandGroup{
 		commands: []command{
 			{name: "doctor", summary: "系统健康与链路连通性体检", help: doctorHelp, run: runDoctor},
 			{name: "settings", summary: "运行期动态配置项管理（settings 表）", help: settingsHelp, run: runSettings},
+			{name: "admin", summary: "内部监听上 admin API 的令牌（create、revoke）", help: adminHelp, run: runAdmin},
 			{name: "version", summary: "打印版本号与编译元数据", help: versionHelp, run: runVersion},
 		},
 	},
@@ -284,7 +285,6 @@ const usageNotes = `
   --quiet                 压掉给人看的输出，只在出错时说话（-q 是它的简写）
 
 短选项：-u --user、-m --model、-o --format、-v --verbose、-q --quiet、-V --version（其余写全名）
-
 退出码：0 成功，1 其他失败，2 命令行参数错，3 连不上数据库，4 约束冲突。
 
 每条命令的详细用法：larkaxctl help <命令>。

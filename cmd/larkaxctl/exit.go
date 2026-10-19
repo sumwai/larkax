@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 
+	"github.com/sumwai/larkax/internal/adminapi"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
@@ -237,6 +238,14 @@ var conflictErrors = []error{
 	// 那一行现在是什么，而不是改一下命令重发。
 	payment.ErrOrderNotFound,
 	payment.ErrOrderConflict,
+
+	// 管理令牌那一行不在 settings 里。它与上面那些是同一个形状（要改的那一行
+	// 不在），下一步动作也一样：先跑迁移把这一行建出来。
+	adminapi.ErrNoTokenRow,
+	// 那一行在、但从来没配置过令牌（空串）。撤销它是一次**空操作**而不是
+	// 一次成功：下一步是去创建一枚，与「那一行不在一」同属「先去看数据里
+	// 现在是什么」。
+	adminapi.ErrNoTokenConfigured,
 }
 
 // noChangeErrors 是「这次调用没提到任何要改的字段」。

@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/internal/adminapi"
 	"github.com/sumwai/larkax/internal/api"
 	"github.com/sumwai/larkax/internal/assembly"
 	"github.com/sumwai/larkax/internal/channel"
@@ -229,7 +230,7 @@ func settleOutcome() pipeline.Outcome {
 func scrape(t *testing.T) []string {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	newInternalHandler(nil, nil).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", nil))
+	newInternalHandler(nil, nil, nil).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("抓 /metrics 得到状态码 %d，期望 200；正文:\n%s", rec.Code, rec.Body.String())
 	}
@@ -348,7 +349,7 @@ func TestMetricsEndpointIsNotOnPublicHandler(t *testing.T) {
 
 // 健康检查与指标共用同一个内部 handler，抽函数时不能只搬走其中一个。
 func TestInternalHandlerServesHealthAndMetrics(t *testing.T) {
-	handler := newInternalHandler(nil, nil)
+	handler := newInternalHandler(nil, nil, nil)
 
 	for _, path := range []string{"/healthz", "/readyz", "/metrics"} {
 		t.Run(path, func(t *testing.T) {
@@ -450,7 +451,7 @@ func TestRateLimitUsageIsOnInternalHandlerOnly(t *testing.T) {
 	limiter.Allow(7, &rpm)
 
 	app := &assembly.App{RateLimiter: limiter}
-	handler := newInternalHandler(nil, app)
+	handler := newInternalHandler(nil, app, nil)
 
 	target := api.PathRateLimitUsage + "?key_id=7"
 	rec := httptest.NewRecorder()
@@ -472,9 +473,63 @@ func TestRateLimitUsageIsOnInternalHandlerOnly(t *testing.T) {
 	// 没有限流器的实例（worker 角色）：这条路径不注册。回 404 而不是回一个
 	// 「永远是 0」的答案——后者会让查询的人以为那个实例上确实没被打过。
 	rec = httptest.NewRecorder()
-	newInternalHandler(nil, nil).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil))
+	newInternalHandler(nil, nil, nil).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil))
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("没有限流器时 %s 的状态码 = %d，期望 404", target, rec.Code)
+	}
+}
+
+// 管理面只挂在内部端口上；没装配它的实例（worker 角色）是 404，不是 401。
+//
+// # 为什么 404 与 401 要分开
+//
+// 「没装配」与「没授权」是两件事：前者是这个实例根本没有这个面，后者是路径在、
+// 只是这枚令牌不行。把它们混成同一个状态码，等运维分不清「去 worker 上敲了
+// 一次」与「令牌过期了」——而这两种的下一步完全不同。
+//
+// 两半都在这一条里：装了的内部端口要走到管理面（这里用替身，判据是**管理面
+// 自己返回的那个状态码原样出来了**，而不是被 ServeMux 拦成 404），公共端口
+// 要够不着它。
+func TestAdminAPIOnInternalHandlerOnly(t *testing.T) {
+	// 替身回一个不会与 404、200 混淆的状态码：它出现就说明请求真的进了管理面。
+	const adminMark = http.StatusTeapot
+	admin := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(adminMark)
+	})
+
+	handler := newInternalHandler(nil, nil, admin)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, adminapi.PathPrefix+"channels", nil))
+	if rec.Code != adminMark {
+		t.Fatalf("内部端口上 %s 的状态码 = %d，期望走到管理面（%d）",
+			adminapi.PathPrefix+"channels", rec.Code, adminMark)
+	}
+
+	// 公共端口：worker 角色的 handler 就是公共端口的形状，判据是够不着。
+	rec = httptest.NewRecorder()
+	workerPlaceholder().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, adminapi.PathPrefix+"channels", nil))
+	if rec.Code == adminMark {
+		t.Errorf("公共端口把管理面服务出去了")
+	}
+
+	// 没装配管理面的实例（worker 角色）：404，而不是 401。
+	rec = httptest.NewRecorder()
+	newInternalHandler(nil, nil, nil).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, adminapi.PathPrefix+"channels", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("没装配管理面时 %s 的状态码 = %d，期望 404", adminapi.PathPrefix+"channels", rec.Code)
+	}
+}
+
+// worker 角色不装配管理面：adminSurface 回 (nil, nil)，装配层于是不给它注册
+// /admin/v1/。判据是 Role.NeedsMasterKey()，而这条用例喂的是角色本身。
+func TestAdminSurfaceNotAssembledForWorker(t *testing.T) {
+	cfg := &config.Config{Role: config.RoleWorker}
+	handler, err := adminSurface(cfg, nil, slog.Default())
+	if err != nil {
+		t.Fatalf("worker 角色装配管理面不应报错：%v", err)
+	}
+	if handler != nil {
+		t.Errorf("worker 角色装出了管理面：一个解不开渠道凭证的实例不该能改渠道")
 	}
 }
 

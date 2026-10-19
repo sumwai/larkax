@@ -47,6 +47,7 @@ var factorySettings = map[string]string{
 	"reconcile.shard_size":               `1000`,
 	"reconcile.full_scan_interval_hours": `24`,
 	"payment.fake_enabled":               `false`,
+	"admin.token_sha256":                 `""`,
 }
 
 func settingsValues(t *testing.T, overrides map[string]string) *settings.Values {

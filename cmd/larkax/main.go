@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sumwai/larkax/internal/adminapi"
 	"github.com/sumwai/larkax/internal/api"
 	"github.com/sumwai/larkax/internal/assembly"
 	"github.com/sumwai/larkax/internal/config"
@@ -143,6 +144,15 @@ func run() error {
 		return app.ReloadPlugins(ctx)
 	}, logger)
 
+	// 管理面与公共入口分开装：它只挂在内部监听上（见 newInternalHandler），
+	// 而它需要的是主密钥与适配器清单，不是网关的装配结果。装配失败就启动
+	// 失败——一个「内部端口通、管理面却什么都没挂」的实例，与「这次部署本来
+	// 就没开管理面」在外部看起来完全一样。
+	admin, err := adminSurface(cfg, handle, logger)
+	if err != nil {
+		return err
+	}
+
 	publicSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           app.Public,
@@ -151,7 +161,7 @@ func run() error {
 
 	internalSrv := &http.Server{
 		Addr:              cfg.InternalAddr,
-		Handler:           newInternalHandler(readinessChecks(handle, readinessVocab(app)), app),
+		Handler:           newInternalHandler(readinessChecks(handle, readinessVocab(app)), app, admin),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -227,8 +237,8 @@ func readinessChecks(handle *sql.DB, vocab *tokens.Counter) []observe.ReadinessC
 	return checks
 }
 
-// newInternalHandler 装配内部监听端口的 handler：健康检查、指标，以及那条
-// 只读的限流用量查询。
+// newInternalHandler 装配内部监听端口的 handler：健康检查、指标、那条
+// 只读的限流用量查询，以及（给了才挂的）管理面。
 //
 // 抽成函数是为了让测试拿到**生产用的那一份**装配。写一份只给测试用的
 // 装配，测到的就只是那份替身，而「指标端点到底挂在哪个监听上」正是最该
@@ -237,14 +247,48 @@ func readinessChecks(handle *sql.DB, vocab *tokens.Counter) []observe.ReadinessC
 // 挂到公共端口上等于把内部状态交给每一个能发推理请求的人。
 //
 // app 可以为 nil（测试、以及 worker 角色）：那时限流那条路径不注册。
-func newInternalHandler(checks []observe.ReadinessCheck, app *assembly.App) http.Handler {
+// admin 为 nil 表示这个实例没有管理面（worker 角色），那时 /admin/v1/ 是 404。
+func newInternalHandler(checks []observe.ReadinessCheck, app *assembly.App, admin http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	observe.RegisterHealthHandlers(mux, checks)
 	observe.RegisterMetricsHandler(mux)
 	if app != nil {
 		app.RegisterInternalOps(mux)
 	}
+	if admin != nil {
+		mux.Handle(adminapi.PathPrefix, admin)
+	}
 	return mux
+}
+
+// adminSurface 装配内部监听上的管理面；worker 角色返回 nil。
+//
+// 挂载点用 adminapi.PathPrefix 而不是在这里再写一份字面量：两边各写一份时，
+// 改一处就是「路由都注册了、却一条也到不了」，而那种错在测试里两边用同一
+// 个常量配替身时抓不到。
+//
+// 判据是 `Role.NeedsMasterKey()`：worker 角色不持有主密钥，也就解不开任何
+// 渠道凭证、装不出管理面需要的封装器。写成方法而不是 `Role == RoleWorker`，
+// 是为了让新角色按「要不要主密钥」自动落到同一边，而不必在两处各加一个分支。
+//
+// # 为什么自己再建一个 sealer
+//
+// publicHandler 里那个是给请求路径解凭证用的，而这一层只需要**封**（写渠道
+// 时把明文包成信封）。两边各建一个不会多出一处能拿到明文的地方：Sealer 的
+// Open 在这里没有任何调用点，凭证只封不开这条边界仍然成立。
+func adminSurface(cfg *config.Config, handle *sql.DB, logger *slog.Logger) (http.Handler, error) {
+	if !cfg.Role.NeedsMasterKey() {
+		return nil, nil //nolint:nilnil // worker 角色没有管理面：nil handler 是结论，不是「出错了但没报」
+	}
+	sealer, err := credential.NewSealer(cfg.MasterKeys)
+	if err != nil {
+		return nil, fmt.Errorf("构造管理面的凭证封装器失败: %w", err)
+	}
+	registry, err := upstream.Registry()
+	if err != nil {
+		return nil, fmt.Errorf("构造管理面的渠道类型注册表失败: %w", err)
+	}
+	return adminapi.New(adminapi.Config{DB: handle, Sealer: sealer, Registry: registry, Logger: logger}), nil
 }
 
 // publicHandler 装配公共监听端口的 handler。

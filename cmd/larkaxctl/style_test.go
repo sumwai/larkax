@@ -938,10 +938,15 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				ChannelStatus: &channelStatus,
 			})
 		}},
+		// 管理令牌的回显：stdout 只有那一行令牌，说明去 stderr。它不随数据变长，
+		// 但与上面几条回显同样「主键（这里是令牌）加粗」。
+		{"管理令牌回显", func(w io.Writer) {
+			printAdminToken(w, io.Discard, "token-placeholder")
+		}},
 	}
 
-	if len(cases) != 32 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 32 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 33 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 33 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {

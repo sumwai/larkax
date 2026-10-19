@@ -63,6 +63,18 @@ func writeError(w http.ResponseWriter, protocol channel.Protocol, status int, me
 	writeErrorCode(w, protocol, status, "", message)
 }
 
+// WriteError 按 OpenAI 的错误体形状写出一个错误响应。
+//
+// 给公共监听之外的入口用（目前只有内部监听上的 admin API）：它不属于任何
+// 调用协议，而错误体的形状只能有一套。手写一份一样的字面量的话，形状改了
+// 那一处不会跟着改，而两份看起来都对。
+//
+// message 是给调用方看的那句话，不带上游原文与内部路径；需要细节时用请求
+// 标识去查日志。
+func WriteError(w http.ResponseWriter, status int, message string) {
+	writeError(w, channel.ProtocolOpenAI, status, message)
+}
+
 // WriteNotImplemented 写出「这条路径在这个实例上不接推理流量」的 501。
 //
 // 501 的错误体在这个包里定义一次，要回这条状态码的地方都从这里走：手写一份
@@ -73,7 +85,7 @@ func writeError(w http.ResponseWriter, protocol channel.Protocol, status int, me
 // 形状用 OpenAI 那一套，理由与未知路径那一支相同：这种实例的公共端口是路径
 // 全捕获的，请求里没有任何东西说明调用方说哪套协议。
 func WriteNotImplemented(w http.ResponseWriter, message string) {
-	writeError(w, channel.ProtocolOpenAI, http.StatusNotImplemented, message)
+	WriteError(w, http.StatusNotImplemented, message)
 }
 
 // writeErrorCode 与 writeError 相同，但错误码由调用方给定而不是从状态码推。

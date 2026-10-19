@@ -46,6 +46,7 @@
 | 上游渠道的健康度与额度状态从哪读 | [channel-health.md](channel-health.md) |
 | 请求快照留了什么、怎么读一条、怎么清到期分区 | [request-retention.md](request-retention.md) |
 | `usage_events` 的月分区怎么预建、缺了会怎样 | [partitions.md](partitions.md) |
+| 从内部端口改渠道、模型、别名与计价规则，管理令牌怎么发 | [admin-api.md](admin-api.md) |
 
 ## 扩展
 

@@ -198,6 +198,11 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 				})
 			}},
 
+		{command: "admin", what: "token create",
+			// 明文那行是结果不是附注，与 apikey create 同一类：stdout 只有它，
+			// 「只有这一次」那句说明在 stderr，且不带提示前缀。
+			run: func() error { return runAdmin([]string{"token", "create"}) }},
+
 		{command: "channel", what: "update",
 			run: func() error {
 				return runChannel([]string{"update", "--id", id(fx.channelID), "--priority", "7"})

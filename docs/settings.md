@@ -6,7 +6,7 @@
 [.env.example](../.env.example) 顶部的说明。密钥类配置也不放这里——这张表的值
 明文落盘并进备份，渠道凭证走 `channels` 表的信封加密。
 
-一共 **20 个键**。清单的唯一来源是 `internal/settings` 的 `Registry`，默认值的
+一共 **22 个键**。清单的唯一来源是 `internal/settings` 的 `Registry`，默认值的
 唯一来源是**迁移文件**（代码里不再写第二份，两处默认值迟早会不一致）。
 
 ## 加载：不一致就拒绝启动
@@ -34,15 +34,17 @@ larkaxctl settings set --key plugin.enabled --value true --by alice
 - **`--by` 必填**（用户 ID 或用户名）：`settings.updated_by` 记的是谁改的，一条
   不记名的写入等于没有审计。缺它直接报参数错（退出码 2）。
 - 整数直接写数字、布尔只认 `true` / `false`、字符串直接写、**不加引号**。
-- **有四个键不接受这条路径的修改**（`settings.editable` 为 `false`，改错后果严重，
+- **有五个键不接受这条路径的修改**（`settings.editable` 为 `false`，改错后果严重，
   只允许由迁移写入）：`billing.default_asset`、`calendar.default_region`、
-  `reconcile.repair_mode`、`reconcile.difference_account`。命令会报错并指出是哪一个。
+  `reconcile.repair_mode`、`reconcile.difference_account`、`admin.token_sha256`。
+  命令会报错并指出是哪一个。
 - 标着「未接线」的键写得进去，但改了没有任何效果。今天一个都没有：最后一个
   （`capture.consent_max_window_hours`）的读者是 `larkaxctl consent grant`。
 
-**什么时候生效**：下表里除 `reconcile.*`、`idempotency.retention_hours` 与
-`capture.consent_max_window_hours` 之外，都是**装配期读一次**——改完要重启服务。
-那三个是每轮 / 每次读的，改完下一次就生效。
+**什么时候生效**：下表里除 `reconcile.*`、`idempotency.retention_hours`、
+`capture.consent_max_window_hours` 与 `admin.token_sha256` 之外，都是**装配期
+读一次**——改完要重启服务。那三个是每轮 / 每次读的，管理令牌是每个管理面请求
+读一次，改完下一次就生效。
 
 ## 请求快照
 
@@ -129,6 +131,14 @@ larkaxctl settings set --key plugin.enabled --value true --by alice
 | `reconcile.difference_account` | string | `"reconcile_difference"` | 科目名 | `repair_mode=adjust_ledger` 时修正分录的对家科目。默认单独归集，不污染平台收入。**不接受 `settings set`** |
 | `reconcile.shard_size` | int | `1000` | 正数 | 一批比对的钱包行数上限。按 `user_id` 分片逐批处理，避免一次把大表读进内存 |
 | `reconcile.full_scan_interval_hours` | int | `168` | `0` 表示每次都全量 | 距上一次全量扫描超过这个小时数就做一次全量。增量只看上次起点之后变动过的行，而「两边都早就错着」的那种不一致只有全量能发现 |
+
+## 管理面
+
+见 [admin-api.md](admin-api.md)。
+
+| 键 | 类型 | 默认值 | 取值 | 影响 |
+|---|---|---|---|---|
+| `admin.token_sha256` | string | `""` | 空串（没配置），或 64 位小写十六进制 | 内部监听上 `/admin/v1/*` 管理令牌的 SHA-256。空串时管理面一律回 `503`；撤销之后是 64 个 0（没有令牌能匹配上，请求得到 `401`）。只由 `larkaxctl admin token create` / `revoke` 写入，**不接受 `settings set`**；改完下一个请求就生效 |
 
 ## 加一个键
 
