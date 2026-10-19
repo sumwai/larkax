@@ -842,7 +842,8 @@ KEY=$(go run ./cmd/larkaxctl apikey create --user "$(go run ./cmd/larkaxctl user
 读这两个标记**，所以：
 
 - `--role merchant` **不会**让这个用户多出什么权限，`--role admin` 也**不会**
-  让他能进管理接口。管理面还不存在。
+  让他能进管理接口。管理面的鉴权不读这两个标记：它用单独一套管理令牌
+  （见 [admin-api.md](admin-api.md)）。
 - `channel create --user <用户>` 不检查那个人是不是 `merchant`：归属只决定
   分账记到谁的账上，不决定「有没有资格」。
 - 角色能改，但改的也只是这两个标记：`user update` 的 `--merchant` / `--no-merchant` /
@@ -851,8 +852,8 @@ KEY=$(go run ./cmd/larkaxctl apikey create --user "$(go run ./cmd/larkaxctl user
   却是假」的数据，当场报参数错；先 `--no-admin`，或者两个一起给，一步落到普通用户。
   `user create` 仍然只建新用户，重名直接报错。
 
-这两个标记是给管理面的鉴权**预留**的（#158）。在那条路接上之前，把 `--role`
-当成一条备注，而不是一条访问控制。
+这两个标记今天仍然只是备注，不是访问控制：管理面的令牌**不对应任何用户**，
+也不读这两个标记（#158）。把 `--role` 当成一条记录，而不是一条授权。
 
 ### 开户：新用户需要一行钱包
 
@@ -1127,7 +1128,8 @@ go run ./cmd/larkaxctl apikey update --id 3 --clear-rpm
 
 内部端点单独一个端口：它面向编排系统与指标抓取器（`/healthz`、`/readyz`、
 `/metrics`），不和业务入口共用监听地址，也就不需要跟着业务入口一起暴露在
-ingress 规则下。
+ingress 规则下。同一个端口上还有管理面 `/admin/v1/*`，用单独一套管理令牌鉴权，
+接口面与令牌怎么发见 [admin-api.md](admin-api.md)。
 
 运维命令行走另一个入口（`cmd/larkaxctl`），目前有这些：
 
@@ -1144,6 +1146,7 @@ ingress 规则下。
 | `apikey` | API Key：`create` / `update` / `get` / `list`；`update` 兼改状态、备注与过期时间 |
 | `ledger` | 账本：`balance` / `verify` / `runs`（三条都只读：余额、逐笔校验、对账的历史运行）与 `reconcile`（对账，会写运行记录） |
 | `settings` | 运行期配置：`list` / `get` / `set` |
+| `admin` | 内部监听上 admin API 的令牌：`token`（`create` / `revoke`） |
 | `plugin` | 插件：`list` / `get` / `publish` / `enable` / `disable` / `delete`；插件私有的键值存储：`kv`（`get` / `set` / `delete`） |
 | `partition` | `usage_events` 月分区：`ensure` / `check` |
 | `doctor` | 逐项检查这条链路通不通（`--live` 才真打上游） |

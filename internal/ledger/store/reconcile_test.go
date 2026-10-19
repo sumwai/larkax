@@ -1987,6 +1987,7 @@ func settingsRows(overrides map[string]string) []settings.Row {
 		"plugin.memory_limit_bytes":        "67108864",
 		"plugin.max_payload_bytes":         "4194304",
 		"payment.fake_enabled":             "false",
+		"admin.token_sha256":               `""`,
 		SettingAutoRepair:                  "false",
 		SettingRepairMode:                  `"resync_snapshot"`,
 		SettingDifferenceAccount:           `"reconcile_difference"`,
