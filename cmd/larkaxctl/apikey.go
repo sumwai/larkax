@@ -101,7 +101,8 @@ update 一次可以改多项，只改命令行上**真的给出**的那几项：
 要分的是下一步该找谁。
 
 --name 给空串表示「没有备注」，与 create 不给 --name 是同一个意思：列是
-NOT NULL，空串就是它的「没有」。
+NOT NULL，空串就是它的「没有」。备注会进 apikey list / get 的「备注」那一
+栏，所以换行、制表符、ESC 这些控制字符当场报参数错，报错点名是哪一个字符。
 
 # 权限
 
@@ -186,6 +187,11 @@ func runAPIKeyCreate(args []string) error {
 		// 不打整段用法：人已经会用这条命令了，只是漏了一个必填项。用法留给
 		// 「还没有开始用」的那几处（缺子命令 / 未知子命令 / flag 解析失败）。
 		return usageErr(errors.New("缺少 --user"))
+	}
+	// 备注会进 apikey list / get 的「备注」那一栏，形状判据在 auth
+	// （见 ValidateKeyName），在连库之前判。空串照收：那是「没有备注」。
+	if err := auth.ValidateKeyName(*name); err != nil {
+		return usageErr(err)
 	}
 
 	var expires *time.Time
@@ -470,6 +476,11 @@ func updateParams(seen map[string]bool, rpm, quota limitFlag, meta metaFlags) (a
 	if flagGiven(seen, "name") {
 		// 空串照收：它表示「没有备注」，与 create 不给 --name 是同一件事。
 		// 把它当成「没给」会让清空备注变成一条改不动任何东西的命令。
+		// 形状判据与 create 共用 auth.ValidateKeyName：这一栏会进清单与单条
+		// 回显，控制字符会把它们打坏。
+		if err := auth.ValidateKeyName(meta.name); err != nil {
+			return auth.KeyParams{}, err
+		}
 		params.SetName, params.Name = true, meta.name
 	}
 

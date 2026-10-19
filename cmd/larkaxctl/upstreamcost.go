@@ -160,6 +160,11 @@ func parseUpstreamCostCreate(args []string) (pricing.CostCreateRequest, error) {
 	if strings.TrimSpace(*expression) == "" {
 		return pricing.CostCreateRequest{}, errors.New("缺少 --expr")
 	}
+	// 模型名单进 upstream-cost list / explain 的「模型」那一栏：控制字符
+	// 在连库之前拒掉（判据在 pricing 的 normalizePatterns）。
+	if err := checkDisplayList("--models", splitOptionalList(*models)); err != nil {
+		return pricing.CostCreateRequest{}, err
+	}
 	from, err := parseTimeFlag("--effective-from", *effectiveFrom)
 	if err != nil {
 		return pricing.CostCreateRequest{}, err
@@ -251,6 +256,9 @@ func parseUpstreamCostUpdate(args []string) (pricing.CostUpdateRequest, error) {
 	}
 	if given["models"] {
 		list := splitOptionalList(*models)
+		if err := checkDisplayList("--models", list); err != nil {
+			return pricing.CostUpdateRequest{}, err
+		}
 		req.ModelPatterns = &list
 		changes++
 	}

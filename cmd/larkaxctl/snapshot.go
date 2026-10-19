@@ -19,6 +19,7 @@ import (
 	"github.com/sumwai/larkax/internal/settings"
 	"github.com/sumwai/larkax/internal/snapshot"
 	"github.com/sumwai/larkax/internal/snapshotwire"
+	"github.com/sumwai/larkax/internal/textshape"
 )
 
 // snapshotUsage 是 snapshot 子命令的帮助。
@@ -611,6 +612,12 @@ func runSnapshotGet(args []string) error {
 	if strings.TrimSpace(*reason) == "" {
 		return usageErr(errors.New("缺少 --reason：读一条别人的请求结构，理由必须留下"))
 	}
+	// 理由原样落进 snapshot_access_log，随后由 `snapshot access-log` 打成表格的
+	// 最后一栏。这条写入路径就在本文件里（readSnapshotsWithAudit），没有别的
+	// 包可以承载判据，所以在连库之前判一次，写入那一步与这里用同一个函数。
+	if err := checkDisplayText("--reason", *reason); err != nil {
+		return err
+	}
 
 	roots, err := snapshotRootsFor(*direction)
 	if err != nil {
@@ -718,6 +725,12 @@ func snapshotsDoc(requestID string, rows []snapshotRow) map[string]any {
 // 一次 get 打出几行就写几行，于是「看了请求那一半还是响应那一半」
 // 在日志里分得开。
 func readSnapshotsWithAudit(ctx context.Context, db *sql.DB, req snapshotRead) ([]snapshotRow, error) {
+	// 理由会原样落进 snapshot_access_log，随后由 `snapshot access-log` 打进
+	// 表格最后一栏。这里再判一次，而不是只靠命令行的 pre-check：写入路径自己
+	// 守住，别的调用方从这一头同样进不来（判据与命令行那一处是同一个函数）。
+	if err := textshape.Validate("--reason", req.Reason); err != nil {
+		return nil, err
+	}
 	// 先解析 actor：actor_user_id 上有外键，写一个不存在的用户会失败，
 	// 而那时快照已经读出来了。把它放在读之前，「谁在读」这件事不成立时
 	// 根本不会有读发生（与 settings set 的 --by 同一个做法）。

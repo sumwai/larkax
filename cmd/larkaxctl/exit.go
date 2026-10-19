@@ -13,6 +13,7 @@ import (
 	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
 	"github.com/sumwai/larkax/internal/pricing"
 	"github.com/sumwai/larkax/internal/snapshotwire"
+	"github.com/sumwai/larkax/internal/textshape"
 )
 
 // 退出码。运维脚本按它分派处置，所以这几个数是对外契约的一部分，
@@ -250,6 +251,10 @@ var usageErrors = []error{
 	// （ValidateNewUsername），也错在命令里的那个值：去掉那个字符就能过，
 	// 与库里现在有什么无关。
 	auth.ErrUsernameHasControlChar,
+	// 别的展示文本字段里有控制字符（展示名、备注、渠道名、模型名、规则名、
+	// 授权请求号、插件键、读取理由……）。判据统一在 internal/textshape，
+	// 这里登记一次就覆盖全部字段：同一个东西，从哪个包返回都是同一个分类。
+	textshape.ErrControlChar,
 }
 
 // exitCode 给出一个错误该用的退出码。

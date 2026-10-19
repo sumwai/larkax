@@ -158,6 +158,11 @@ func runConsentGrant(args []string) error {
 		if *from != "" || *to != "" {
 			return usageErr(errors.New("--scope single_request 不接受 --from / --to：按单条请求授权只用到 --request-id 与 --expires-at"))
 		}
+		// request_id 会进 grant 的回执与 consent list 的 RANGE 那一栏：控制
+		// 字符在连库之前拒掉（判据也在 ConsentStore.Grant 的 validate 里）。
+		if err := checkDisplayText("--request-id", *requestID); err != nil {
+			return err
+		}
 		if *expiresAt == "" {
 			return usageErr(errors.New("缺少 --expires-at：这条授权到什么时候为止"))
 		}

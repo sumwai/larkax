@@ -1123,9 +1123,10 @@ func TestSnapshotGetFilteredMissSaysWhichDirection(t *testing.T) {
 
 // TestSnapshotGetLogFailureBlocksRead 是判据「读了但没记不可能发生」。
 //
-// 让写日志那一步在真库上失败：reason 里带一个 NUL 字节，PostgreSQL 的 text
-// 收不了它（表上没有任何约束会因为「理由太长」而拒绝，所以这是这条路径上
-// 唯一能确定复现的失败方式）。此时命令必须整体失败，一行数据都不返回。
+// 让写日志那一步在真库上失败：把那一段的执行准备成**日志表不在**。以前这条
+// 用例往 reason 里塞一个 NUL 字节（PostgreSQL 的 text 收不了它），但形状判据
+// 现在在写入路径之前就拒掉控制字符（见 internal/textshape），这条路走不到了。
+// 临时改表名与输入取值无关，失败点仍然确定地落在 INSERT 上。
 //
 // 判据是**输出里有没有骨架**：把写日志挪到读之后（或者去掉事务）的实现，
 // 会在这里打出骨架并且返回 nil——那正是「读了但没记」的形状。
@@ -1140,12 +1141,32 @@ func TestSnapshotGetLogFailureBlocksRead(t *testing.T) {
 		skeleton: `{"model":"probe-model"}`,
 	})
 
+	if _, err := db.ExecContext(t.Context(),
+		`ALTER TABLE snapshot_access_log RENAME TO snapshot_access_log_off`); err != nil {
+		t.Fatalf("临时改名日志表失败: %v", err)
+	}
+	renamed := true
+	defer func() {
+		// 断言中途 Fatal 时也要把表名还回去，否则后面的用例一起跟着坏。
+		if renamed {
+			_, _ = db.ExecContext(context.Background(),
+				`ALTER TABLE snapshot_access_log_off RENAME TO snapshot_access_log`)
+		}
+	}()
+
 	var runErr error
 	out, _ := captureStreams(t, func() {
 		runErr = runSnapshotGet([]string{
-			requestID, "--actor", username, "--reason", "坏\x00理由",
+			requestID, "--actor", username, "--reason", "看请求",
 		})
 	})
+
+	if _, err := db.ExecContext(t.Context(),
+		`ALTER TABLE snapshot_access_log_off RENAME TO snapshot_access_log`); err != nil {
+		t.Fatalf("还原日志表名失败: %v", err)
+	}
+	renamed = false
+
 	if runErr == nil {
 		t.Fatal("访问日志写不进去时，读也必须失败——否则就是「读了但没记」")
 	}

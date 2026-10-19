@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/plugin/host"
+	"github.com/sumwai/larkax/internal/textshape"
 )
 
 // KV 是 host.KVStore 的生产实现，落在 plugin_kv 表上。
@@ -110,6 +111,12 @@ func (k *KV) Del(ctx context.Context, plugin string, userID int64, key string) (
 // 直接对这张表写 SQL 的路径（如果有）不受它管辖——配额是这一层的约束，
 // 与「隔离靠主键」不是一回事，后者连绕过实现也成立。
 func (k *KV) Set(ctx context.Context, plugin string, userID int64, key, value string, ttl time.Duration) error {
+	// 键会被 `plugin kv get` 打成「键」那一行，所以写的时候就要挡住控制字符。
+	// 值不在这条判据里：它按设计排在表外原样打（见 cmd/larkaxctl 的
+	// printPluginKVEntry），换行与制表符都是它可能带的。
+	if err := textshape.Validate("--key", key); err != nil {
+		return err
+	}
 	tx, err := k.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("开启事务失败: %w", err)

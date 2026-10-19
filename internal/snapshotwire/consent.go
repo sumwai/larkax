@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/sumwai/larkax/internal/textshape"
 )
 
 // 授权范围的取值，与 capture_consents.scope 上的 CHECK 一致。
@@ -246,6 +248,11 @@ func (r ConsentRequest) validate(now time.Time, maxWindow time.Duration) error {
 	case ConsentScopeSingleRequest:
 		if r.RequestID == "" {
 			return invalid("按单条请求授权要给出 --request-id")
+		}
+		// request_id 同时进 `consent grant` 的回执与 `consent list` 的 RANGE
+		// 那一栏：换行会把一栏拆成两行，ESC 会原样进终端。
+		if err := textshape.Validate("--request-id", r.RequestID); err != nil {
+			return err
 		}
 		if !r.WindowStart.IsZero() || !r.WindowEnd.IsZero() {
 			return invalid("按单条请求授权不带时间窗：换 --scope time_window 才能给 --from / --to")

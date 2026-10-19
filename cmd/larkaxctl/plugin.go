@@ -997,6 +997,11 @@ func parseKVTarget(verb string, args []string) (kvTarget, error) {
 	if t.key == "" {
 		return kvTarget{}, usageErr(errors.New("缺少 --key：要看、要写还是要删哪一个键"))
 	}
+	// 键会被 `plugin kv get` 打成「键」那一行：控制字符在连库之前拒掉
+	// （写入路径 store.KV.Set 也判一次，别的写方从那一头同样进不来）。
+	if err := checkDisplayText("--key", t.key); err != nil {
+		return kvTarget{}, err
+	}
 	return t, nil
 }
 
@@ -1129,6 +1134,13 @@ func runPluginKVSet(args []string) error {
 	// 手滑多打了一个减号。
 	if *ttl < 0 {
 		return usageErr(fmt.Errorf("--ttl 不接受负数（得到 %s）：不给或给 0 就是不过期", *ttl))
+	}
+	// 键会被 `plugin kv get` 打成「键」那一行：控制字符在连库之前拒掉。
+	// set 的三个旗标比 get / delete 多（--value / --ttl），所以这一段解析没走
+	// parseKVTarget；判据仍与那两条共用同一个函数，免得只有读的那两条拦得住。
+	// 值不判：它按设计排在表外原样打（见 printPluginKVEntry）。
+	if err := checkDisplayText("--key", target.key); err != nil {
+		return err
 	}
 
 	if err := requireMasterKey(); err != nil {

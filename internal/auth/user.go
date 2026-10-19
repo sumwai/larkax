@@ -11,6 +11,8 @@ import (
 	"unicode"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/sumwai/larkax/internal/textshape"
 )
 
 // 本文件是 users 表的**写入**路径：建一个用户、改一个已有用户的若干列，以及
@@ -142,6 +144,19 @@ func firstControlChar(name string) (rune, bool) {
 		}
 	}
 	return 0, false
+}
+
+// ValidateDisplayName 校验 users.display_name 的新值。
+//
+// 空串（含只有空白的）不是形状错误：那是「清掉这一列」，落库的是 NULL
+// （见 UpdateUser 的 addText）。判在去掉两头空白之后的值上，与落库的那个串
+// 一致——与 ValidateNewUsername 对 `--name $'\ta\t'` 的处置同一条口径。
+//
+// 这一列会进 `user list` 的表格与 `user get` 的单条回显，而两处都按「一个
+// 字段一栏」排版：换行会把那一栏折出没有栏名的续行，ESC 这类转义序列会原样
+// 进终端。控制字符的判据在 textshape，与别的展示字段共用一份。
+func ValidateDisplayName(name string) error {
+	return textshape.Validate("--display-name", strings.TrimSpace(name))
 }
 
 // describeControlChar 把报错里点名的那个字符说成能照着改的样子：码位，以及那几个
@@ -914,6 +929,12 @@ func userUpdateSets(p UpdateUserParams) ([]string, []any, error) {
 		addText("email", p.Email)
 	}
 	if p.DisplayName != nil {
+		// 与邮箱同一条：命令行那侧已经判过一遍（见 cmd/larkaxctl 的
+		// userUpdateParams），这里挡的是绕过命令行的调用方——否则这一列
+		// 里会进一个把表格与终端打坏的值。
+		if err := ValidateDisplayName(*p.DisplayName); err != nil {
+			return nil, nil, err
+		}
 		addText("display_name", p.DisplayName)
 	}
 	if p.IsMerchant != nil {

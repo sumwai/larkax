@@ -11,6 +11,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/billing/expr"
 	"github.com/sumwai/larkax/internal/pipeline"
+	"github.com/sumwai/larkax/internal/textshape"
 )
 
 // 作用域的取值。
@@ -762,6 +763,11 @@ func normalizeName(name string) (string, error) {
 	if name == "" {
 		return "", errors.New("规则名不能为空")
 	}
+	// 规则名进 `price list` 与 `price explain` 的「名称」那一栏，两处都按
+	// 一栏一行排版。判在 trim 之后的值上，与落库的那个串一致。
+	if err := textshape.Validate("--name（规则名）", name); err != nil {
+		return "", err
+	}
 	return name, nil
 }
 
@@ -788,6 +794,11 @@ func normalizePatterns(patterns []string) ([]string, error) {
 		if strings.ContainsAny(p, "*?") {
 			return nil, fmt.Errorf("model_patterns 里第 %d 个模型名含通配符：读取路径按元素逐字匹配，"+
 				"通配符会被当成普通字符，这条规则一条都匹配不上", i+1)
+		}
+		// 名单在 `price list` / `upstream-cost list` 的「模型」那一栏按逗号
+		// 连起来打：带换行的模型名会在表里折出续行，带 ESC 的直接进终端。
+		if err := textshape.Validate(fmt.Sprintf("--models 里第 %d 个模型名", i+1), p); err != nil {
+			return nil, err
 		}
 		out = append(out, p)
 	}

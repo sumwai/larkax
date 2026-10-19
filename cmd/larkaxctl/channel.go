@@ -278,6 +278,11 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	if strings.TrimSpace(*name) == "" {
 		return channels.CreateRequest{}, "", errors.New("缺少 --name")
 	}
+	// 名称与模型名单会进 channel list / health 的表格：控制字符在连库之前
+	// 就拒掉（判据在 channels 的写入路径，见 normalizeName / normalizeModels）。
+	if err := checkDisplayText("--name（渠道名）", strings.TrimSpace(*name)); err != nil {
+		return channels.CreateRequest{}, "", err
+	}
 	if strings.TrimSpace(*channelType) == "" {
 		return channels.CreateRequest{}, "", errors.New("缺少 --type")
 	}
@@ -293,6 +298,12 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	}
 	if strings.TrimSpace(*models) == "" {
 		return channels.CreateRequest{}, "", errors.New("缺少 --models（至少一个规范模型名）")
+	}
+	for i, model := range splitList(*models) {
+		if shapeErr := checkDisplayText(
+			fmt.Sprintf("--models 里第 %d 个模型名", i+1), strings.TrimSpace(model)); shapeErr != nil {
+			return channels.CreateRequest{}, "", shapeErr
+		}
 	}
 	plaintext, err := readCredential(*credentialStdin, *credentialEnv, true)
 	if err != nil {
@@ -353,6 +364,9 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	req := channels.UpdateRequest{ID: *id}
 	changes := 0
 	if given["name"] {
+		if err := checkDisplayText("--name（渠道名）", strings.TrimSpace(*name)); err != nil {
+			return channels.UpdateRequest{}, err
+		}
 		req.Name = name
 		changes++
 	}
@@ -372,6 +386,12 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	}
 	if given["models"] {
 		list := splitList(*models)
+		for i, model := range list {
+			if err := checkDisplayText(
+				fmt.Sprintf("--models 里第 %d 个模型名", i+1), strings.TrimSpace(model)); err != nil {
+				return channels.UpdateRequest{}, err
+			}
+		}
 		req.Models = &list
 		changes++
 	}

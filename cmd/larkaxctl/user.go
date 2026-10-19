@@ -112,7 +112,8 @@ update 只改**显式给出**的字段，一个都没给就报参数错（不做
   --status       取 active、suspended、banned 之一。
   --email        新邮箱，写法要过上面那条格式校验。给空串表示清掉这一列
                  （写回 NULL），不是写成一个空串，也不是格式错。
-  --display-name 新展示名。空串同上，表示清掉。
+  --display-name 新展示名。空串同上，表示清掉。取值不能有控制字符（换行、
+                 制表符、ESC 这些），理由同用户名那一条。
   --merchant     把 is_merchant 置真。
   --no-merchant  把 is_merchant 置假（admin 上不能单独给，见下）。
   --admin        把 is_admin 置真，**并且**把 is_merchant 一起置真：admin 天然
@@ -472,6 +473,11 @@ func userUpdateParams(seen map[string]bool, f userUpdateFlags) (auth.UpdateUserP
 		p.Email = &f.email
 	}
 	if seen["display-name"] {
+		// 与邮箱同一条：形状判据在 auth（见 ValidateDisplayName），在连库
+		// 之前判。空串过这一关——它是「清掉这一列」。
+		if err := auth.ValidateDisplayName(f.displayName); err != nil {
+			return p, err
+		}
 		p.DisplayName = &f.displayName
 	}
 
