@@ -69,6 +69,10 @@ DEL，换行、制表符、ESC 都在其中）：换行会把一栏折成两行�
 - **`user` 的 `--name` 与 `--email` 形状不合法给 `2`**：前者是整串为一个十进制整数
   或者含控制字符（都只在 `create` 上），后者是写不成一个邮箱地址（`create` 与 `update` 都有，
   见下面「user」一节）。这类错在**命令本身**——换一个值重发就能过，与库里有什么无关。
+- **`user delete` 的状态前提与余额前提给 `4`**：没打标就 `purge` 或 `revert`、
+  重复打标、重复匿名化、余额或冻结额不是 0，都是「库里那一行现在不是那个状态」，
+  下一步是先把数据挪到能执行的位置。`--confirm` 与当前用户名对不上给 `2`：它错在
+  命令里的那个值，把名字写对就能过（虽然要读过那一行才判得出）。
 - **`settings set` 的键名或取值不认识给 `1`，不是 `2`**。它和上一条是同一个形状
   （都由包在连库之前判出来，也都不依赖库里有什么），差别只在命令把它算进了哪一档。
   对照 `wallet --amount`、`apikey --quota` 这类把取值直接写在数值标志上的命令：
@@ -469,7 +473,7 @@ DEL，换行、制表符、ESC 都在其中）：换行会把一栏折成两行�
 
 #### `user`
 
-系统用户管理（创建、查询与修改）。`create` 只把新用户的 ID 打到 stdout。
+系统用户管理（创建、查询、修改与销户）。`create` 只把新用户的 ID 打到 stdout。
 
 角色取 `user`、`merchant`、`admin` 之一，默认 `user`。三者都是用户，
 `merchant` 与 `admin` 只是 `users` 表上的标记（`admin` 同时也是 `merchant`）。
@@ -524,12 +528,22 @@ ESC 序列则原样进执行者的终端。它进账本分录的备注时还会�
 的用户，`--role admin` 列的是 `admin`。取值不认识时报参数错并退出 2，不回落成
 「不筛」。
 
-**状态只有 `update` 能改**：`suspended` 与 `banned` 都会让他手里的 key 全部失效
+**状态有三档经 `update` 改**：`suspended` 与 `banned` 都会让他手里的 key 全部失效
 （见 `internal/auth` 的鉴权判据），把它写回去走 `user update --status`——在库里
 直接改也一样生效，但那样既没有取值校验也没有回显，事后说不清是谁改的。
+另外两档（`deletion_requested` 与 `deleted`）只能经下面 `delete` 那一族进入与
+离开，`update --status` 不收它们：`deleted` 是匿名化之后的终态，从 `update`
+直接写进去会跳过清身份与作废 key 的步骤。
 
-`get` 按 ID 或用户名读一个用户的全部字段：除清单那五栏，还有展示名、创建时间与
-更新时间。标识怎么解释与别的命令一致：纯数字按 ID，否则按用户名。找不到时退出 4。
+反过来，这两档也不收 `update` 的**状态**改动：已经 `deleted` 的账号不收任何
+`update`（改邮箱、展示名会被拒并退出 4），否则占位身份就有一条命令能写回真
+身份；停在 `deletion_requested` 的账号不能用 `--status` 改走，报错指向
+`delete revert`——那条路会一起清掉 `deletion_prior_status`，从 `update` 直接写
+`active` 则会把旧值留在那一列上。
+
+`get` 按 ID 或用户名读一个用户的全部字段：除清单那五栏，还有展示名、删除时间、
+创建时间与更新时间。标识怎么解释与别的命令一致：纯数字按 ID，否则按用户名。
+找不到时退出 4。
 所以纯数字的用户名按名字读不出来，`create` 不让这样的名字进库（见上面），而库里
 已经有的那些不动。
 
@@ -563,8 +577,56 @@ ESC 序列则原样进执行者的终端。它进账本分录的备注时还会�
 `--merchant`）那一行不出现，所以打出来的行与这次的改动是同一件事。用户不存在时
 退出 4；邮箱撞上别的用户时报「邮箱已被占用」并带上那个值，也退出 4。
 
-四条命令都不需要 `LARKAX_MASTER_KEYS`（它们不碰渠道凭证）；`list` 与 `get` 不改
-任何一行。
+`delete` 这一族把账号从「要求删除」走到终态，分两步，中间可以撤回。想点出
+谁被删过时看 `status` 与 `deleted_at`：行基本不删，唯一的例外是用户态插件 KV
+（`plugin_kv` 里属于这个用户的行随匿名化删掉）。
+
+`delete request` 打标（可撤）：把账号置为 `deletion_requested`，并记下它原来的
+状态。从这个时刻起，用户手里的 API Key 全部失效——鉴权只认
+`status = active`，打标之后这些 key 在任何一条路上都过不去。key 一行都不改，所以
+`delete revert` 之后原本有效的 key 恢复有效（此前停用的仍然是停用）。
+
+打标之前先看钱包：**余额与冻结额都必须是 0**。不是 0 时报「可用余额必须为 0」
+并给出当前的两个数，退出 4。冻结额也在判据里，因为它是还没结算的请求预扣住的那部分，匿名化之后
+它们仍会结算。下一步是先用 `wallet adjust` 调账，或等退款与还没结算完的请求
+处理完。
+
+`delete revert` 撤掉打标：状态回到 request 之前的那一个——原来 `active` 就回
+`active`，原来 `suspended` 就回 `suspended`，不会被顺手放回 `active`。key 仍然
+一行都不动。
+
+`delete purge` 匿名化（不可逆）：只接已经处于 `deletion_requested` 的账号，并且
+要 `--confirm` 逐字写出当前用户名。没有 `--confirm`、写错、或者账号还没打标时
+什么都不写。它在**一个事务里**做这几件事：
+
+- `api_keys` 里状态还是 `active` 的全部置为 `revoked`，行保留；此前已经
+  `disabled` 的保留原来的状态（「之前停用过」也是一条要留下的记录）。
+- `plugin_kv` 里属于这个用户的键全部删除（按插件与用户隔离的那一份）。
+- `capture_consents` 里还没撤销的授权全部撤销（写 `revoked_at`），行保留；到期
+  仍按各自的 `expires_at`，早已撤销的那一条不会被改写时刻。
+- `users` 行置为 `deleted`、写下 `deleted_at`，并把用户名、邮箱、展示名换成
+  不可逆的占位：`deleted-user-<ID>`、`deleted-user-<ID>@example.com`、
+  `已注销用户 #<ID>`。占位用户名已被别人占用时按 `-2`、`-3` 往后找。
+- 钱包行与账本分录**不动**：财务记录不随账号删除清除（见
+  [request-retention.md](request-retention.md)）。
+- 请求快照**不动**：它们按各自的留存期由 `snapshot cleanup` 删除。
+
+匿名化之后原来的用户名就查不到了（那一行已经换成占位值），要再看它得用
+`user get --user <ID>`，或者按占位用户名 `deleted-user-<ID>` 找。
+
+余额与冻结额在 `purge` 时再判一次：打标之后仍可能有退款或调账进来，而匿名化
+之后就没有账号去收这笔钱了。
+
+**哪些一致性在库层、哪些只在应用层。** 库上有两条 CHECK 钉住状态与列的配套：
+`status = deleted` 必有 `deleted_at`，`status = deletion_requested` 必有
+`deletion_prior_status`。剩下的几件——终态账号的 API Key 已作废、插件 KV 已清、
+采集授权已撤销——**没有触发器**，只由 `purge` 的同一个事务保证；绕过 `purge`
+直接 `UPDATE users` 不会连带动那几张表。
+
+`create` / `list` / `get` / `update` 只碰 `users` 表（不碰渠道凭证）；`delete`
+那一族会写到 `api_keys`、`plugin_kv` 与 `capture_consents`，钱包只读加锁。
+除了 `plugin_kv` 里属于这个用户的行，别的行都不删。它们都不需要
+`LARKAX_MASTER_KEYS`。
 
 #### `apikey`
 

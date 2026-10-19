@@ -66,7 +66,8 @@ var tableRenderPaths = []string{
 	"printChannelUpstreamModels", // channel upstream-models
 	"printConsentList",           // consent list
 	"printCostTable",
-	"printKeyDetail", // apikey get
+	"printDeletionReceipt", // user delete 的回执：一栏一行
+	"printKeyDetail",       // apikey get
 	"printKeyList",
 	"printLedgerBalances", // ledger balance --all
 	"printLedgerRuns",     // ledger runs

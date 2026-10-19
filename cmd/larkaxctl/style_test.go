@@ -900,10 +900,31 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				Reviewer: &auth.User{ID: 8, Username: "ops-placeholder"},
 			})
 		}},
+		// 销户回执：与调账、提现同一类（一栏一行），只是几栏随处置结果走。
+		{"销户回执", func(w io.Writer) {
+			printDeletionReceipt(w, deletionPurgeReceipt(auth.DeletionResult{
+				UserID:          7,
+				OldUsername:     "user-placeholder",
+				NewUsername:     "deleted-user-7",
+				OldEmail:        "user@example.com",
+				NewEmail:        "deleted-user-7@example.com",
+				OldDisplayName:  "示例用户",
+				NewDisplayName:  "已注销用户 #7",
+				DeletedAt:       at,
+				KeysRevoked:     2,
+				KeysTotal:       3,
+				PluginKVDeleted: 4,
+				ConsentsRevoked: 1,
+				LedgerEntries:   9,
+				Balance:         money.MustParse("0"),
+				Frozen:          money.MustParse("0"),
+				WalletRows:      1,
+			}))
+		}},
 	}
 
-	if len(cases) != 30 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 30 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 31 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 31 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {

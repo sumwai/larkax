@@ -274,6 +274,9 @@ func TestUnsupportedCommandsRefuseJSONBeforeDoingAnything(t *testing.T) {
 		args    []string
 	}{
 		{"user create", runUserCreate, nil},
+		{"user delete request", runUserDeleteRequest, nil},
+		{"user delete revert", runUserDeleteRevert, nil},
+		{"user delete purge", runUserDeletePurge, nil},
 		{"wallet create", runWalletCreate, nil},
 		{"wallet credit", runWalletCredit, nil},
 		{"wallet adjust", runWalletAdjust, nil},

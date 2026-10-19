@@ -163,6 +163,15 @@ var conflictErrors = []error{
 	// 是数据不在那个状态上，所以它不进 usageErrors。
 	store.ErrNoPayoutRequest,
 	store.ErrPayoutState,
+	// 销户那一族的「数据不在可执行那个动作的状态上」：账号还没打标、
+	// 已经打过标、已经匿名化，或者钱包里还有没结清的钱。与上面 ErrPayoutState
+	// 同一个形状——命令没写错，是库里那一行现在不是那个状态；下一步是先把
+	// 数据挪到能执行的位置（打标、撤销、清余额），而不是换一个参数重发。
+	auth.ErrDeletionNotRequested,
+	auth.ErrDeletionAlreadyRequested,
+	auth.ErrDeletionAlreadyDeleted,
+	auth.ErrDeletionBalanceNotZero,
+
 	// 兜底的约束冲突：各包写路径认不出具体含义的唯一键 / 外键都归到它。
 	// 上面那个具名哨兵比它精确（errors.Is 能直接问出「是用户不存在」），
 	// 但**只有被逐个认出来的约束**才有具名哨兵——枚举迟早漏，而退出码表
@@ -255,6 +264,9 @@ var usageErrors = []error{
 	// 授权请求号、插件键、读取理由……）。判据统一在 internal/textshape，
 	// 这里登记一次就覆盖全部字段：同一个东西，从哪个包返回都是同一个分类。
 	textshape.ErrControlChar,
+	// --confirm 与账号当前的用户名对不上。它要读过那一行才判得出，但错在命令
+	// 本身（把名字写对就能过），与上面 `user update --no-merchant` 那条同一档。
+	auth.ErrDeletionConfirmMismatch,
 }
 
 // exitCode 给出一个错误该用的退出码。

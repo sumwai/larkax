@@ -29,12 +29,14 @@ const userShortUsage = `larkaxctl user 管理用户。
   larkaxctl user update --user <ID 或用户名> [--status <状态>] [--email <邮箱>]
                         [--display-name <展示名>] [--merchant|--no-merchant]
                         [--admin|--no-admin]
+  larkaxctl user delete request --user <ID 或用户名>
+  larkaxctl user delete revert --user <ID 或用户名>
+  larkaxctl user delete purge --user <ID 或用户名> --confirm <用户名>
 
-create 只把新用户的 ID 打到 stdout；用户名已被占用时直接报错，不改已有的用户。
-用户名的形状与邮箱的格式都在连库之前判一遍，不合格报参数错。
-list 与 get 只读；update 只改显式给出的字段，改了什么打到 stdout。这四条都不碰
-渠道凭证，也都不需要 LARKAX_MASTER_KEYS。
-
+create 只把新用户的 ID 打到 stdout；用户名与邮箱在连库之前判形状，不合格报参数错。
+list 与 get 只读；update 只改显式给出的字段，改了什么打到 stdout。
+delete request 打标（可撤），revert 撤回，purge 匿名化（不可逆，要 --confirm）；余额先清到 0。
+这七条都不碰渠道凭证，也都不需要 LARKAX_MASTER_KEYS。
 更细的边界：larkaxctl help user。
 `
 
@@ -100,12 +102,13 @@ list 按 id 从小到大列出用户，一栏一个字段：ID、用户名、状
             --role admin 列的是 admin（admin 同时也是 merchant，但两者在这里
             是两个不同的取值）。
 
-状态是鉴权时真正被检查的那一列（suspended 与 banned 都让他手里的 key 全部失效），
-**命令行上改它只有下面 update 这一条路**：直接改库也一样生效，但那样既没有校验
-也没有回显，事后说不清是谁改的。
+状态是鉴权时真正被检查的那一列（suspended 与 banned 都让用户手里的 key 全部失效）。
+命令行上动它有两条路：update --status 改前三个取值，下面 delete 那一族打上并
+撤回 deletion_requested。直接改库也一样生效，但那样既没有校验也没有回显，事后
+说不清是谁改的。
 
-get 按 ID 或用户名读一个用户的全部字段：除上面那几栏，还有展示名、创建时间与
-更新时间。标识怎么解释与别的命令一致：纯数字按 ID，否则按用户名。
+get 按 ID 或用户名读一个用户的全部字段：除上面那几栏，还有展示名、删除时间、
+创建时间与更新时间。标识怎么解释与别的命令一致：纯数字按 ID，否则按用户名。
 
 update 只改**显式给出**的字段，一个都没给就报参数错（不做静默空操作）：
 
@@ -139,7 +142,43 @@ merchant 的用户再 --merchant），那一行不会出现。用户不存在时
 --email 与 --display-name 的取值两头空白会被去掉，去掉之后是空串就清回 NULL；
 --status 也是先去两头空白再比对，但空串不认。
 
-四条命令都只碰 users 表（不碰渠道凭证），都不需要 LARKAX_MASTER_KEYS。
+create、list、get 与 update 只碰 users 表（不碰渠道凭证）；delete 那一族会写到
+api_keys、plugin_kv 与 capture_consents，钱包只读加锁。除了 plugin_kv 里属于
+这个用户的行，别的行都不删。它们都不需要 LARKAX_MASTER_KEYS。
+
+delete 这一族把账号从「要求删除」走到终态，分两步，中间可以撤回。
+
+request 打标：把账号置为 deletion_requested，并记下它原来的状态。从这个时刻起，
+用户手里的 API Key 全部失效——鉴权只认 status = active，打标之后这些
+key 在任何一条路上都过不去。key 一行都不改，撤销之后原本有效的 key 恢复有效
+（此前停用的仍然是停用）。
+
+打标之前先看钱包：余额与冻结额都必须是 0。不是 0 时拒绝，并给出当前的两个数与
+下一步（先用 wallet adjust 调账，或等退款与还没结算完的请求处理完）。
+
+revert 撤掉打标：状态回到 request 之前的那一个——原来 active 就回 active，原来
+suspended 就回 suspended，不会被顺手放回 active。key 仍然一行都不动。
+
+purge 匿名化（不可逆）：只接已经处于 deletion_requested 的账号，并且要 --confirm
+逐字写出当前用户名。没有 --confirm 或写错时什么都不写。它在**一个事务里**做这几
+件事：
+
+  - API Key 里状态还是 active 的全部置为 revoked，行保留；
+  - plugin_kv 里属于这个用户的键全部删除（按插件与用户隔离的那一份）；
+  - capture_consents 里还没撤销的授权全部撤销（写 revoked_at），行保留，到期仍按
+    各自的 expires_at；
+  - users 行置为 deleted、写下 deleted_at，并把用户名、邮箱、展示名换成不可逆的
+    占位：deleted-user-<ID>、deleted-user-<ID>@example.com、已注销用户 #<ID>；
+  - 钱包行与账本分录不动：财务记录不随账号删除清除（见 docs/request-retention.md）；
+  - 请求快照不动：它们按各自的留存期由 snapshot cleanup 删除。
+
+余额与冻结额在 purge 时再判一次：打标之后仍可能有退款或调账进来，而匿名化之后
+就没有账号去收这笔钱了。
+
+销户的重心是**别人还认不认得出这个账号**，不是删行。users、api_keys、钱包、
+账本与授权记录的行都留着；能核对的是 status、deleted_at 与那几个占位值。
+到了 deleted 之后，update 也不再收这个账号：改邮箱、展示名会被拒（退出 4），
+否则占位身份就有一条命令能写回真身份。
 
 更细的约定见 docs/cli-reference.md 的「user」一节。
 `
@@ -174,6 +213,8 @@ func runUser(args []string) error {
 		return runUserGet(rest)
 	case "update":
 		return runUserUpdate(rest)
+	case "delete":
+		return runUserDelete(rest)
 	default:
 		return usageErr(fmt.Errorf("未知的 user 子命令 %q", action))
 	}
@@ -416,6 +457,215 @@ func runUserUpdate(args []string) error {
 	})
 }
 
+// runUserDelete 分派 delete 的三个动作。
+//
+// 三个动作各自一条命令，不合成一条带 --step 的命令：它们要的东西不一样
+// （purge 要 --confirm），而「同一个入口按旗标决定做哪一步」会让一次少写一个
+// 旗标的调用落到另一档上——那一步可能是不可逆的那一步。
+func runUserDelete(args []string) error {
+	if len(args) == 0 {
+		return usageErr(errors.New("delete 需要子命令：request、revert 或 purge"))
+	}
+	action, rest := args[0], args[1:]
+	switch action {
+	case "request":
+		return runUserDeleteRequest(rest)
+	case "revert":
+		return runUserDeleteRevert(rest)
+	case "purge":
+		return runUserDeletePurge(rest)
+	default:
+		return usageErr(fmt.Errorf("未知的 user delete 子命令 %q", action))
+	}
+}
+
+// runUserDeleteRequest 给账号打上「要求删除」的标记。
+func runUserDeleteRequest(args []string) error {
+	if err := jsonUnsupported("user delete request"); err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet("user delete request", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
+	user := fs.String("user", "", "")
+	stringAlias(fs, user, "u")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf(
+			"delete request 不接受位置参数，得到 %q：要标记的用户用 --user 指定", fs.Arg(0)))
+	}
+	if strings.TrimSpace(*user) == "" {
+		return usageErr(errors.New("缺少 --user（用户的 ID 或用户名）"))
+	}
+
+	return withDB(userTimeout, func(ctx context.Context, db *sql.DB) error {
+		mark, err := auth.New(db).RequestDeletion(ctx, *user)
+		if err != nil {
+			return err
+		}
+		printDeletionReceipt(humanStdout(), deletionRequestReceipt(mark))
+		return nil
+	})
+}
+
+// runUserDeleteRevert 撤掉「要求删除」的标记。
+func runUserDeleteRevert(args []string) error {
+	if err := jsonUnsupported("user delete revert"); err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet("user delete revert", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
+	user := fs.String("user", "", "")
+	stringAlias(fs, user, "u")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf(
+			"delete revert 不接受位置参数，得到 %q：要撤回的用户用 --user 指定", fs.Arg(0)))
+	}
+	if strings.TrimSpace(*user) == "" {
+		return usageErr(errors.New("缺少 --user（用户的 ID 或用户名）"))
+	}
+
+	return withDB(userTimeout, func(ctx context.Context, db *sql.DB) error {
+		mark, err := auth.New(db).RevertDeletion(ctx, *user)
+		if err != nil {
+			return err
+		}
+		printDeletionReceipt(humanStdout(), deletionRevertReceipt(mark))
+		return nil
+	})
+}
+
+// runUserDeletePurge 匿名化一个已经打过标的账号。
+func runUserDeletePurge(args []string) error {
+	if err := jsonUnsupported("user delete purge"); err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet("user delete purge", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
+	user := fs.String("user", "", "")
+	stringAlias(fs, user, "u")
+	confirm := fs.String("confirm", "", "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf(
+			"delete purge 不接受位置参数，得到 %q：要匿名化的用户用 --user 指定", fs.Arg(0)))
+	}
+	if strings.TrimSpace(*user) == "" {
+		return usageErr(errors.New("缺少 --user（用户的 ID 或用户名）"))
+	}
+	// 空 --confirm 在连库之前就挡下：它是这次调用的形状，不是库里的数据。
+	// 写错名字的那一档要比对用户名，只能等读到那一行之后再判。
+	if strings.TrimSpace(*confirm) == "" {
+		return usageErr(errors.New("缺少 --confirm（要逐字写出当前用户名）"))
+	}
+
+	return withDB(userTimeout, func(ctx context.Context, db *sql.DB) error {
+		result, err := auth.New(db).PurgeDeletion(ctx, *user, *confirm)
+		if err != nil {
+			return err
+		}
+		printDeletionReceipt(humanStdout(), deletionPurgeReceipt(result))
+		return nil
+	})
+}
+
+// deletionReceipt 是销户命令的一张回执：首行说这是什么，下面一栏一行。
+//
+// 三条命令共用一张表：它们的形状是同一个（一次状态改动 + 逐项结果），而各打
+// 各的版式会让「核对销户之后是什么样」这件事在三条命令上要读三次。
+type deletionReceipt struct {
+	headline string
+	rows     [][2]string
+}
+
+// deletionRequestReceipt 是打标的回执：改了什么，以及下一步敲什么。
+func deletionRequestReceipt(m auth.DeletionMark) deletionReceipt {
+	return deletionReceipt{
+		headline: fmt.Sprintf("已标记用户 %s 要求删除。", m.Username),
+		rows: [][2]string{
+			{"状态", m.FromStatus + " → " + m.ToStatus},
+			{"撤销", "larkaxctl user delete revert --user " + shellArg(m.Username)},
+			{"匿名化", "larkaxctl user delete purge --user " + shellArg(m.Username) +
+				" --confirm " + shellArg(m.Username)},
+		},
+	}
+}
+
+// deletionRevertReceipt 是撤销的回执。
+func deletionRevertReceipt(m auth.DeletionMark) deletionReceipt {
+	return deletionReceipt{
+		headline: fmt.Sprintf("已撤销用户 %s 的删除要求。", m.Username),
+		rows: [][2]string{
+			{"状态", m.FromStatus + " → " + m.ToStatus},
+			{"API Key", "未改动，原本有效的 key 恢复有效"},
+		},
+	}
+}
+
+// deletionPurgeReceipt 是匿名化的回执：每一项处置一行。
+//
+// 回执读的是**写库那一次的前后两个值**（见 auth.DeletionResult），不是从参数
+// 再拼一遍：要回答的是「库里现在是什么」，而参数只说「打算写什么」。
+func deletionPurgeReceipt(r auth.DeletionResult) deletionReceipt {
+	return deletionReceipt{
+		headline: fmt.Sprintf("已匿名化用户 %s。", r.OldUsername),
+		rows: [][2]string{
+			{"ID", strconv.FormatInt(r.UserID, 10)},
+			{"用户名", r.OldUsername + " → " + r.NewUsername},
+			{"邮箱", orDash(r.OldEmail) + " → " + r.NewEmail},
+			{"展示名", orDash(r.OldDisplayName) + " → " + r.NewDisplayName},
+			{"状态", auth.UserStatusDeletionRequested + " → " + auth.UserStatusDeleted},
+			{"删除时间", r.DeletedAt.Format(time.RFC3339)},
+			{"API Key", fmt.Sprintf("%d 把置为 revoked（共 %d 把，行都保留）",
+				r.KeysRevoked, r.KeysTotal)},
+			{"插件 KV", fmt.Sprintf("%d 个键已删除", r.PluginKVDeleted)},
+			{"采集授权", fmt.Sprintf("%d 条已撤销（行保留）", r.ConsentsRevoked)},
+			{"钱包", deletionWalletLine(r)},
+			{"账本", fmt.Sprintf("%d 条分录保留", r.LedgerEntries)},
+		},
+	}
+}
+
+// deletionWalletLine 说清钱包那一条处置。
+//
+// 「余额 0、冻结 0，行保留」只对有钱包行的账号成立：从没开过户的账号一行都
+// 没有，回执说「行保留」会让人以为那里还有一条记录可查。
+func deletionWalletLine(r auth.DeletionResult) string {
+	if r.WalletRows == 0 {
+		return "没有钱包行"
+	}
+	return fmt.Sprintf("余额 %s、冻结 %s，行保留", r.Balance, r.Frozen)
+}
+
+// shellArg 把一个值写成能直接粘进 POSIX shell 的形态。
+//
+// 用户名只挡了控制字符与「会被 --user 当成 ID」的写法，空格、引号、$ 都能
+// 出现；回执里那句「下一步敲什么」要能原样执行，所以整体用单引号包住，内部的
+// 单引号用 '\” 收尾再开头。
+func shellArg(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// printDeletionReceipt 打一张销户回执。
+func printDeletionReceipt(w io.Writer, r deletionReceipt) {
+	tw := newTableWriter(w)
+	p := newPalette(w)
+	_, _ = fmt.Fprintln(w, r.headline)
+	for _, row := range r.rows {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(row[0]), row[1])
+	}
+	_ = tw.Flush()
+}
+
 // userUpdateFlags 是 update 那一组旗标的原始取值。
 //
 // 收成一个结构体而不是八个平铺的参数：为的是让「旗标名 → 哪一列」这张对应
@@ -581,6 +831,12 @@ func printUserDetail(w io.Writer, u auth.UserInfo) {
 	row("角色", string(u.Role))
 	row("邮箱", orDash(u.Email))
 	row("展示名", orDash(u.DisplayName))
+	// 销户之后这一栏才有值；没走到终态时是 `-`，与「没填」的显示同一套。
+	deletedAt := p.dim("-")
+	if u.DeletedAt != nil {
+		deletedAt = p.dim(u.DeletedAt.Format(time.RFC3339))
+	}
+	row("删除时间", deletedAt)
 	row("创建时间", p.dim(u.CreatedAt.Format(time.RFC3339)))
 	row("更新时间", p.dim(u.UpdatedAt.Format(time.RFC3339)))
 	_ = tw.Flush()
@@ -659,6 +915,7 @@ func userEntry(u auth.UserInfo) map[string]any {
 func userDetailEntry(u auth.UserInfo) map[string]any {
 	entry := userEntry(u)
 	entry["display_name"] = nullableString(u.DisplayName)
+	entry["deleted_at"] = jsonTimePtr(u.DeletedAt)
 	entry["created_at"] = jsonTime(u.CreatedAt)
 	entry["updated_at"] = jsonTime(u.UpdatedAt)
 	return entry
