@@ -1,0 +1,159 @@
+package payment
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// TestCallbackRejectsWrongMethod 只收 POST。
+func TestCallbackRejectsWrongMethod(t *testing.T) {
+	h := NewHandler(nil, stubName, "")
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, CallbackPath(stubName), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("状态码 = %d，期望 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != http.MethodPost {
+		t.Errorf("Allow = %q，期望 POST", got)
+	}
+}
+
+// TestCallbackRejectsNonJSONContentType 请求体必须是 JSON。
+func TestCallbackRejectsNonJSONContentType(t *testing.T) {
+	h := NewHandler(nil, stubName, "")
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, CallbackPath(stubName), strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("状态码 = %d，期望 415", rec.Code)
+	}
+}
+
+// TestCallbackWithoutServiceIsNotFound 验「通道没装」时的响应。
+func TestCallbackWithoutServiceIsNotFound(t *testing.T) {
+	h := NewHandler(nil, stubName, "v-test")
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, CallbackPath(stubName),
+		strings.NewReader(`{"order_no":"ORD-1"}`))
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("状态码 = %d，期望 404", rec.Code)
+	}
+	if got := rec.Header().Get(HeaderVersion); got != "v-test" {
+		t.Errorf("%s = %q，期望 v-test", HeaderVersion, got)
+	}
+}
+
+// TestJSONContentTypeMatching 验 Content-Type 的比较口径。
+func TestJSONContentTypeMatching(t *testing.T) {
+	cases := []struct {
+		value string
+		want  bool
+	}{
+		{"application/json", true},
+		{"Application/JSON", true},
+		{"application/json; charset=utf-8", true},
+		{" application/json ", true},
+		{"application/jsonx", false},
+		{"text/json", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isJSON(tc.value); got != tc.want {
+			t.Errorf("isJSON(%q) = %v，期望 %v", tc.value, got, tc.want)
+		}
+	}
+}
+
+// TestCallbackErrorMapping 验本包的几类错误各落到哪个状态码。
+func TestCallbackErrorMapping(t *testing.T) {
+	h := NewHandler(nil, stubName, "")
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"签名不对", ErrBadSignature, http.StatusUnauthorized},
+		{"通知不合法", fmt.Errorf("%w：缺少 sign", ErrInvalidNotification), http.StatusBadRequest},
+		{"没有这张支付单", fmt.Errorf("%w: ORD-X", ErrOrderNotFound), http.StatusNotFound},
+		{"单号内容不同", fmt.Errorf("%w: ORD-X", ErrOrderConflict), http.StatusConflict},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+				CallbackPath(stubName), nil)
+			rec := httptest.NewRecorder()
+			h.writeServiceError(rec, req, tc.err)
+			if rec.Code != tc.want {
+				t.Fatalf("状态码 = %d，期望 %d（响应体 %s）", rec.Code, tc.want, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), `"error"`) {
+				t.Errorf("响应体不是错误体: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestCallbackRejectsOversizedBody 验 64 KiB 的上限在解析之前生效。
+func TestCallbackRejectsOversizedBody(t *testing.T) {
+	service := NewService(NewStore(nil), nil, map[string]Channel{stubName: &stubChannel{}})
+	h := NewHandler(service, stubName, "")
+
+	body := strings.Repeat("a", maxCallbackBodyBytes+1)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+		CallbackPath(stubName), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("状态码 = %d，期望 413", rec.Code)
+	}
+}
+
+// failingWriter 让响应体写入失败，用来走到「编码失败只记日志」那一支。
+type failingWriter struct {
+	header http.Header
+}
+
+func (w *failingWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *failingWriter) WriteHeader(int) {}
+
+func (w *failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("写入失败")
+}
+
+// TestWriteCallbackJSONLogsEncodeFailure 验编码失败时留下一条日志。
+//
+// 响应头已经发出去了，此时再写一个错误体只会拼出半截 JSON；能做的只有记下来。
+func TestWriteCallbackJSONLogsEncodeFailure(t *testing.T) {
+	var buf bytes.Buffer
+	saved := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(saved) })
+
+	writeCallbackJSON(&failingWriter{}, http.StatusOK, map[string]string{"ok": "true"})
+
+	if !strings.Contains(buf.String(), "写支付回调响应失败") {
+		t.Errorf("日志里没有编码失败那一句：%q", buf.String())
+	}
+}

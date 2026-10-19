@@ -73,6 +73,7 @@ var tableRenderPaths = []string{
 	"printLedgerRuns",     // ledger runs
 	"printModelDetail",
 	"printModelList",
+	"printPayment",       // wallet payment 的回显：一栏一行，与 wallet payout 同一个形状
 	"printPayout",        // wallet payout 的回显：一栏一行，与 wallet adjust 同一个形状
 	"printPluginDetail",  // plugin get
 	"printPluginKVEntry", // plugin kv get

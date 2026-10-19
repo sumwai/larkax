@@ -95,6 +95,14 @@ larkaxctl settings set --key plugin.enabled --value true --by alice
 |---|---|---|---|---|
 | `idempotency.retention_hours` | int | `24` | 正数（小时） | 幂等记录的留存小时数，到期由 `larkaxctl maintenance idempotency` 删除。改完不必重启，下一次清理就按新值算 |
 
+## 支付
+
+见 [cli-reference.md](cli-reference.md) 的「wallet payment」一节。
+
+| 键 | 类型 | 默认值 | 取值 | 影响 |
+|---|---|---|---|---|
+| `payment.fake_enabled` | bool | `false` | `true` / `false` | 假支付通道的开关。打开后才挂上回调入口、才允许 `wallet payment` 下单。它只用于本地联调：签名密钥是源码里的公开占位值，**不要在接真实流量的部署上打开**。改完要重启才生效——装配期读一次 |
+
 ## 插件
 
 见 [plugin-contract.md](plugin-contract.md)。

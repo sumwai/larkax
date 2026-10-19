@@ -83,6 +83,7 @@ var Registry = []Spec{
 	{Key: "reconcile.difference_account", Kind: KindString},
 	{Key: "reconcile.shard_size", Kind: KindInt},
 	{Key: "reconcile.full_scan_interval_hours", Kind: KindInt},
+	{Key: "payment.fake_enabled", Kind: KindBool},
 }
 
 // Row 是从存储层读出的一行。

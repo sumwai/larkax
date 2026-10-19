@@ -39,6 +39,7 @@ func fullRows() []Row {
 		{Key: "reconcile.difference_account", Value: []byte(`"reconcile_difference"`)},
 		{Key: "reconcile.shard_size", Value: []byte(`1000`)},
 		{Key: "reconcile.full_scan_interval_hours", Value: []byte(`168`)},
+		{Key: "payment.fake_enabled", Value: []byte(`false`)},
 	}
 }
 

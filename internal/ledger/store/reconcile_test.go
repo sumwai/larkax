@@ -1986,6 +1986,7 @@ func settingsRows(overrides map[string]string) []settings.Row {
 		"plugin.call_timeout_ms":           "5000",
 		"plugin.memory_limit_bytes":        "67108864",
 		"plugin.max_payload_bytes":         "4194304",
+		"payment.fake_enabled":             "false",
 		SettingAutoRepair:                  "false",
 		SettingRepairMode:                  `"resync_snapshot"`,
 		SettingDifferenceAccount:           `"reconcile_difference"`,

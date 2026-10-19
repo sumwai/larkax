@@ -46,6 +46,7 @@ var factorySettings = map[string]string{
 	"reconcile.difference_account":       `"difference"`,
 	"reconcile.shard_size":               `1000`,
 	"reconcile.full_scan_interval_hours": `24`,
+	"payment.fake_enabled":               `false`,
 }
 
 func settingsValues(t *testing.T, overrides map[string]string) *settings.Values {

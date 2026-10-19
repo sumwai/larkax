@@ -593,3 +593,29 @@ func TestPostTransactionRejectsWalletDeltaOverflow(t *testing.T) {
 		t.Errorf("被拒的交易动了余额：%s，期望 5.00000000", balance)
 	}
 }
+
+// 锁 merchant_payable 科目失败时不能把错误吞掉。
+//
+// 这个科目上的锁保护的是「读余额 → 决定写不写」（提现申请与退款冲回分成）。
+// 锁没拿到却当成功返回，调用方会拿着一份没被串行化的余额往下走，而那正是
+// 这把锁存在的理由。用一条已经结束的事务制造失败：任何 Exec 都会报
+// sql.ErrTxDone。
+func TestLockPayableAccountsReportsLockError(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("开启事务失败: %v", err)
+	}
+	if rollbackErr := tx.Rollback(); rollbackErr != nil {
+		t.Fatalf("结束事务失败: %v", rollbackErr)
+	}
+
+	lockErr := lockPayableAccounts(ctx, tx, []ledger.Entry{
+		{Account: ledger.MerchantPayableAccount(1)},
+	})
+	if lockErr == nil {
+		t.Fatal("事务已经结束、锁科目必然失败，却返回了 nil")
+	}
+}

@@ -427,6 +427,7 @@ var subGroupHelpCases = []subGroupHelpCase{
 	{"maintenance idempotency", maintenanceIdempotencyShortUsage, maintenanceIdempotencyUsage,
 		[]string{"maintenance", "idempotency", "help"}},
 	{"plugin kv", pluginKVShortUsage, pluginKVUsage, []string{"plugin", "kv", "help"}},
+	{"wallet payment", walletPaymentShortUsage, walletPaymentUsage, []string{"wallet", "payment", "help"}},
 }
 
 // TestSubGroupHelpKeepsTheSameShape 断言二级命令组的帮助与一级命令同一套规矩：

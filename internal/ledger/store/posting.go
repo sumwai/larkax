@@ -73,6 +73,35 @@ func (s *Store) PostTransaction(ctx context.Context, txn ledger.Transaction) (ap
 	// 已经 commit 的路径上 Rollback 返回 sql.ErrTxDone，忽略它。
 	defer func() { _ = tx.Rollback() }()
 
+	applied, err = s.PostTransactionTx(ctx, tx, txn)
+	if err != nil {
+		return false, err
+	}
+	if !applied {
+		// 重放：本事务里什么都没写，也不需要 commit。
+		return false, nil
+	}
+	if commitErr := tx.Commit(); commitErr != nil {
+		return false, fmt.Errorf("提交交易 %s 失败: %w", txn.TxnID, commitErr)
+	}
+	return true, nil
+}
+
+// PostTransactionTx 在调用方已经打开的事务里写一组分录，**不提交、不回滚**。
+//
+// 给「入账必须与另一处改动同生共死」的调用方用：支付通知要把分录与支付单
+// 状态放在同一个事务里。这样一条通知只占一条数据库连接（在事务里再开一个
+// 事务会同时占两条，并发数超过连接池容量时会整池停摆），而且不会留下「钱
+// 进了账、单子却停在 created」的中间态——要么两处都落，要么两处都不落。
+//
+// 除事务边界外，语义与 PostTransaction 相同：Verify、txn_id 上的锁、重放与
+// 冲突判据、钱包快照的更新都在这里。返回 applied=false 表示这次是重放，
+// 本事务里没有写分录——调用方仍可以提交它自己的其它改动。
+func (s *Store) PostTransactionTx(ctx context.Context, tx *sql.Tx, txn ledger.Transaction) (applied bool, err error) {
+	if verifyErr := txn.Verify(); verifyErr != nil {
+		return false, verifyErr
+	}
+
 	// 先给 txn_id 上锁，再读已有分录：读与写之间因此没有窗口。
 	if lockErr := lockTxn(ctx, tx, txn.TxnID); lockErr != nil {
 		return false, lockErr
@@ -86,7 +115,7 @@ func (s *Store) PostTransaction(ctx context.Context, txn ledger.Transaction) (ap
 		if conflictErr := sameStoredTxn(stored, txn); conflictErr != nil {
 			return false, conflictErr
 		}
-		// 重放：什么都不写，也不需要 commit。
+		// 重放：什么都不写。
 		return false, nil
 	}
 
@@ -97,9 +126,6 @@ func (s *Store) PostTransaction(ctx context.Context, txn ledger.Transaction) (ap
 
 	if err := writeTxnEntries(ctx, tx, txn); err != nil {
 		return false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("提交交易 %s 失败: %w", txn.TxnID, err)
 	}
 	return true, nil
 }

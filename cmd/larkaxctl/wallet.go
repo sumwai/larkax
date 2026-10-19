@@ -42,12 +42,12 @@ const walletShortUsage = `larkaxctl wallet 管理用户钱包。
                                   [--destination <收款信息 JSON>]
   larkaxctl wallet payout approve|reject --id <提现单 ID> --by <操作人> [--note <说明>]
   larkaxctl wallet payout paid --id <提现单 ID> --gateway <通道> [--gateway-ref <凭据号>]
+  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号> [--asset <资产>]
+  larkaxctl wallet payment status --order <订单号>
   larkaxctl wallet list [--user <ID 或用户名>]
 
-credit / adjust / refund 要求钱包已存在（先 create）；payout 四条不动 user 科目，也不要求钱包行。
-payout 四步是申请、批准、驳回与打款；**打款只放行已批准的单子**。单据号必填且是幂等键，重跑只记一笔。
-list 只读：某一格读不出来时打「不可读（超出可表示范围）」，其余照打，命令退出 1。
-更细的边界：larkaxctl help wallet；payout 那一族另有：larkaxctl wallet payout help。
+credit / adjust / refund 要求钱包已存在（先 create）；payout 四步不动 user 科目，**打款只放行已批准的单子**；单据号必填且是幂等键。
+某一格金额读不出来时打「不可读（超出可表示范围）」并退出 1；更细的边界：larkaxctl help wallet，payout 与 payment 另有各自 help。
 `
 
 // walletUsage 是 wallet 的长版：`larkaxctl help wallet` 与 `wallet help`。
@@ -70,6 +70,9 @@ const walletUsage = `larkaxctl wallet 管理用户钱包。
                                          [--note <说明>]
   larkaxctl wallet payout paid --id <提现单 ID> --gateway <通道>
                                [--gateway-ref <凭据号>]
+  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号>
+                                  [--asset <资产>] [--notify-url <回调地址>]
+  larkaxctl wallet payment status --order <订单号>
   larkaxctl wallet list [--user <ID 或用户名>]
 
 create 给一个已存在的用户开通钱包，余额为 0。它不写任何分录：新开的户在
@@ -102,8 +105,8 @@ payment_gateway:<来源>），并在同一个事务里更新 user_wallets.balanc
 
 --gateway 是这笔钱从哪个外部来源进来（记进 payment_gateway:<来源> 科目），
 默认 manual，表示线下到账（银行转账、现金）。来源名归一成小写：MANUAL 与
-manual 是同一个科目。当前不接支付通道的回调，所以来源是操作者说的，
-不是系统验证过的。
+manual 是同一个科目。**credit 的来源是操作者说的，不是系统验证过的**：通道通知
+那条路走 wallet payment，金额以通道发回来的为准。
 
 adjust 是运营手工调账：走账本写一组 adjustment 分录（借/贷 user:<ID>，对家是
 platform_revenue），并在同一个事务里更新 user_wallets.balance。修出来的是一笔
@@ -199,12 +202,24 @@ paid 是唯一一个把钱付出去的入口，**它只放行已批准的单子*
 命令都不要求那个用户有钱包行。列出提现单的清单命令还没有：要查库里现在有哪些单子，
 暂时只有这一族的回显与直接查 payout_requests 表。
 
-钱包必须已经存在：先 wallet create，再 credit / adjust / refund。用户或钱包不存在都退出 4。
+payment 是「钱从支付通道进来」的那条路：create 在通道侧建单并落一行 payment_orders
+（状态 created），**不入账**；通道把「已支付」的通知发到回调入口，校验签名、按单号幂等
+判断之后才写一组 topup 分录，分录与单据状态在同一个事务里落库。--ref 是商户单号，
+必填且是幂等键；--amount 必填且为正。
+status 读本地那一行，再问通道它现在是什么状态；假通道没有自己的账本，它答的就是本地
+这一行，所以今天两栏恒等，接上真实通道之后才可能出现差异（通知丢了时本地还停在
+created）。这条通道**默认关闭**：settings.payment.fake_enabled 为 false 时 create 与
+status 都拒绝，回调入口也不挂（那条路径回 501）。细节与那条配置的说明见
+wallet payment help。
+
+钱包必须已经存在：先 wallet create，再 credit / adjust / refund / payment create。
+用户或钱包不存在都退出 4。
 
 资产默认取 settings 的 billing.default_asset（迁移里的默认值是 CNY）。
 --asset 可以显式指定，但当前只有 CNY 一种受支持的资产，写别的会被拒绝。
 资产品种是钱包主键的一部分：同一个用户可以同时有 CNY 与其他资产的钱包。
-认 --asset 的命令是 create、credit、refund 与 payout request；payout 的其余三条
+认 --asset 的命令是 create、credit、refund、payout request 与 payment create；
+payout 的其余三条
 按单子上那一行行事，不由旗标另给一个品种。
 
 用户用 --user 指定，纯数字按 ID 解析，否则按用户名解析。用户不存在时报
@@ -244,8 +259,8 @@ user_wallets.frozen），一栏一个字段：用户 ID、用户名、资产、�
 
 下面几个写法仍然可用，只是不再是正式写法（用法行里只写规范名）：
 
-  -u <ID 或用户名>      同 --user，create、credit、adjust、refund、list 与 payout
-                        request 都认
+  -u <ID 或用户名>      同 --user，create、credit、adjust、refund、list、payout
+                        request 与 payment create 都认
   --idempotency-key     同 --ref，只在 credit 上（adjust 没有旧名）。
                         它是这一项上一版的正式写法，已经发布过，删掉就是破坏脚本
   --order               同 --ref，同样只在 credit 上（更早的那一版口语化写法）
@@ -286,6 +301,8 @@ func runWallet(args []string) error {
 		return runWalletRefund(rest)
 	case "payout":
 		return runWalletPayout(rest)
+	case "payment":
+		return runWalletPayment(rest)
 	case "list":
 		return runWalletList(rest)
 	case "-h", "--help":
