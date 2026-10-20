@@ -55,6 +55,25 @@ func assertHas(t *testing.T, out string, wants ...string) {
 	}
 }
 
+// assertFieldValue 核对一行「标签 值」里的值。
+//
+// 不能把标签与值之间的空白写死：回显是按同组标签里最长的那一个对齐的，
+// 空白个数会随那一组里有什么标签变化——写死空格数的断言会在加了更长的
+// 标签之后突然变红，而红的原因与这条断言想管的事情无关。
+func assertFieldValue(t *testing.T, out, label, want string) {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == label {
+			if fields[1] != want {
+				t.Errorf("%s 的值 = %q，期望 %q", label, fields[1], want)
+			}
+			return
+		}
+	}
+	t.Errorf("输出里没有 %s 那一行：\n%s", label, out)
+}
+
 // txnEntryCount 数某个交易在库里留下了几条分录。
 //
 // 「被拒的动作一个字节都没写」这类判据只有数库里的条数才判得了：被拒时回显上
@@ -444,7 +463,6 @@ func TestWalletPayoutSettleReceiptAndReplay(t *testing.T) {
 	out := mustRun(t, runWalletPayout, append([]string{"settle"}, args...)...)
 	assertHas(t, out,
 		"已清算提现单",
-		"结算单号 "+ref,
 		"6.50000000",
 		"approved（已批准）",
 		"审批人",
@@ -455,6 +473,7 @@ func TestWalletPayoutSettleReceiptAndReplay(t *testing.T) {
 		"借 payout:",
 		"平台清算（单据 "+ref+"）",
 	)
+	assertFieldValue(t, out, "结算单号", ref)
 
 	id := payoutIDOfMerchant(t, db, mustUserID(t, merchant))
 	if got := payoutStatus(t, db, id); got != "approved" {
