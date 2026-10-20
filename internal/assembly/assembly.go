@@ -497,7 +497,14 @@ func Build(cfg Config) (*App, error) {
 	// 取输出上界（见 gateway.outputBound），两处读的是同一张表。分成两个
 	// 实例不会有任何东西报错，但「选路时用的覆盖」与「算上界时用的覆盖」
 	// 会来自两次不同的读。
+	//
+	// 公共的那两条只读路径（/v1/models）也拿它取 vendor：那一头读的是同一张
+	// model_catalog，而这个类型只是数据库句柄的包装，没有第二种状态。
 	aliasCatalog := catalog.New(cfg.DB)
+
+	// 渠道的读点。/v1/models 的供给判据（SuppliedModels）与选路那一侧共用
+	// 同一个实例：那个类型除了库句柄只有解密器，两边用同一份不会串状态。
+	channelSource := channels.New(cfg.DB, cfg.Sealer)
 
 	// 额度探测的写入侧。它按渠道查上游额度，写回 channel_quota_state；
 	// 触发点在选路层（见下面 Router.OnAttempt），用的是 settings 里的探测
@@ -565,7 +572,7 @@ func Build(cfg Config) (*App, error) {
 		// ——不接或接成 0 的表现是每一个流式请求都失败，而不是安静地退回到
 		// 某个默认行为。
 		StreamFreezeStep: streamFreezeStep,
-		Candidates:       channels.New(cfg.DB, cfg.Sealer),
+		Candidates:       channelSource,
 		Reservations:     ledgerStore,
 		Settlements:      ledgerStore,
 		// 写入侧与读取侧共用同一个包：两边读写的列是同一批，
@@ -598,6 +605,10 @@ func Build(cfg Config) (*App, error) {
 	}
 
 	handler := api.New(authenticator{store: auth.New(cfg.DB)}, gw)
+	// 公共的模型清单：供给来自渠道侧那一条与选路共用的判据，vendor 来自目录。
+	// 两份都必填——缺一份时那两条路径回 501（见 api.Handler 的 Models 字段）。
+	handler.Models = channelSource
+	handler.Catalog = aliasCatalog
 	// 决策入口的协作者与 Chatter 是同一个对象（*gateway.Gateway 两条路都实现）。
 	// 分开赋值而不是让 api.New 收两个：那样每个构造点都要多传一个参数，
 	// 而这两个值在生产里永远是同一个。
@@ -1202,6 +1213,15 @@ func (a authenticator) Authenticate(ctx context.Context, r *http.Request) (api.U
 // 写在装配层而不是 auth 包：auth 不该 import 入口，而「两边对得上」
 // 这件事必须有人检查——放在这里，签名一改就在改的那一次编译失败。
 var _ api.Authenticator = authenticator{}
+
+// 编译期断言：公共模型清单的两份读点要满足入口声明的接口。
+//
+// 同上：channels 与 catalog 都不该 import 入口，而「两边对得上」必须有人
+// 检查——签名一改，改的那一次就编译失败。
+var (
+	_ api.ModelSupply  = (*channels.Source)(nil)
+	_ api.ModelCatalog = (*catalog.Catalog)(nil)
+)
 
 // 编译期断言：账本存储要同时满足网关的两个落库接口。
 //

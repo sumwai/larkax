@@ -83,7 +83,17 @@ const (
 	// 配的是一份把输出侧单价定得极高的规则（见 contractDrainRule），
 	// 于是一段没跑完的流就把余额花光了。
 	contractSuffixDrain = "drain"
+
+	// models 是 GET /v1/models 那条只读路径。它只**被列出来**，不会被调用：
+	// 清单里的名字来自目录行与渠道的 models 声明，与上游无关（见 #872）。
+	contractSuffixModels = "models"
 )
+
+// contractModelsVendor 是模型清单那一行的 vendor。
+//
+// 取一个与 larkax 不同的值，这样「owned_by 取的是目录里的 vendor」才是
+// 被测的；写成默认值的话，缺了目录行也读到同一个数。
+const contractModelsVendor = "contract-vendor"
 
 // contractDrainChunks 是 drain 那条流准备的分片数。
 //
@@ -146,11 +156,12 @@ func runContract(t *testing.T, protocol channel.Protocol) {
 
 	prefix := unique("contract-" + string(protocol))
 	fake := &contractUpstream{
-		protocol:   protocol,
-		textModel:  prefix + "-" + contractSuffixText,
-		toolModel:  prefix + "-" + contractSuffixTools,
-		failModel:  prefix + "-" + contractSuffixFail,
-		drainModel: prefix + "-" + contractSuffixDrain,
+		protocol:    protocol,
+		textModel:   prefix + "-" + contractSuffixText,
+		toolModel:   prefix + "-" + contractSuffixTools,
+		failModel:   prefix + "-" + contractSuffixFail,
+		drainModel:  prefix + "-" + contractSuffixDrain,
+		modelsModel: prefix + "-" + contractSuffixModels,
 	}
 
 	upstreamSrv := httptest.NewServer(fake.handler())
@@ -180,6 +191,12 @@ func runContract(t *testing.T, protocol channel.Protocol) {
 	// 会把另外三条用例的账一起改掉。
 	seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL, fake.drainModel, string(protocol), 0)
 	seedRule(t, db, fake.drainModel, contractDrainRule)
+
+	// 模型清单那条（见 #872）：**目录行**与**在供的渠道**两样都要，清单才
+	// 列得出它——只有渠道没有目录行时不列（判据是两者都在），而 vendor 也
+	// 来自目录行。渠道指同一个假上游，但这条用例不会给它发请求。
+	seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL, fake.modelsModel, string(protocol), 0)
+	insertCatalogModel(t, db, fake.modelsModel, contractModelsVendor)
 
 	// 阈值段压到 64 个 Token。
 	//
@@ -277,6 +294,9 @@ type contractUpstream struct {
 	toolModel  string
 	failModel  string
 	drainModel string
+	// modelsModel 只用于 GET /v1/models 那条用例：它由目录行与渠道声明拼
+	// 出来，请求不会打到上游。
+	modelsModel string
 
 	mu     sync.Mutex
 	calls  int

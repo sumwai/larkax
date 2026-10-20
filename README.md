@@ -4,12 +4,12 @@
 system and a billing engine that can express real-world pricing.**
 
 larkax speaks the OpenAI, Anthropic, OpenAI Responses and System One wire protocols, so
-existing SDKs work against it once `base_url` points here. Four POST paths are
-implemented — `/v1/chat/completions`, `/v1/messages`, `/v1/responses` and
-`/v1/systemone`; every other path, `GET /v1/models` included, answers `501` with a JSON
-body that says so. Requests are routed by health, latency, cost and quota; usage is
-metered and billed per request. Early development: the request path is in place, but
-nothing here is ready for production.
+existing SDKs work against it once `base_url` points here. Six paths are implemented —
+`POST /v1/chat/completions`, `/v1/messages`, `/v1/responses` and `/v1/systemone`, plus
+`GET /v1/models` and `GET /v1/models/{id}`, which list the models the calling key can
+use. Every other path answers `501` with a JSON body that says so. Requests are routed by
+health, latency, cost and quota; usage is metered and billed per request. Early
+development: the request path is in place, but nothing here is ready for production.
 
 ## Quickstart
 

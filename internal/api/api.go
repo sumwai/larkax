@@ -17,6 +17,13 @@
 // 就得到 OpenAI 形状的错误，Anthropic 同理。这一条不能混——调用方的 SDK
 // 按自己那套解错误体，形状不对时它连错误类型都读不出来。
 //
+// # 两条只读路径
+//
+// /v1/models 与 /v1/models/{id} 是唯一不走 POST 的公共路径（见 models.go）。
+// 它们与推理那几条不是同一种东西：不读请求体、不限流、不判额度、不产生
+// 用量，所以只共用其中的鉴权那一段。形状按 OpenAI 给——这两条是 OpenAI
+// 兼容表面的一部分。
+//
 // # 未实现的路径仍然回 501
 //
 // 这几条路径之外的任何请求都得到 501，与推理接口尚未实现时的行为一致。
@@ -250,6 +257,18 @@ type Handler struct {
 	// （nil 时回 501）会让一次装配疏漏表现为「所有请求都失败」。
 	Quota QuotaChecker
 
+	// Models 回答「哪些规范模型有渠道在供」，/v1/models 两条路径的唯一来源。
+	// 为 nil 时那两条路径回 501（与 Chatter / Decider 为 nil 时同一类）。
+	//
+	// 这里与 RateLimiter 那几项不同，不取「nil 就不做」：没有供给来源时
+	// 回一份空清单，等于告诉调用方「这把 key 一个模型都用不了」，而那是
+	// 一句我们并不掌握的话。
+	Models ModelSupply
+
+	// Catalog 读模型目录，用来填 owned_by。与 Models 一起必填：缺它只能
+	// 一律写 larkax，而那是把一个不知道的事实说成确定的（见 modelsReady）。
+	Catalog ModelCatalog
+
 	// Version 是发布版本，写进每个响应的 x-larkax-version 头。
 	// 见 docs/versioning.md：用户报问题时，「你调的是哪个版本」是最该先
 	// 确认的事。留空则不写这个头。
@@ -338,7 +357,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serve(w, r, channel.ProtocolOpenAIResponses)
 	case PathSystemOne:
 		h.serveDecision(w, r)
+	case PathModels:
+		h.serveModels(w, r)
 	default:
+		// 单条模型：前缀之后的部分就是 id（见 modelIDFromPath）。
+		//
+		// 先按前缀判而不是在 switch 里列：id 里可能带 "/"，没法写成一条
+		// 精确的 case。
+		if id, isModel := modelIDFromPath(r.URL.Path); isModel {
+			h.serveModel(w, r, id)
+			return
+		}
 		// 未知路径：这里不知道调用方说哪套协议（协议由路径决定，而路径
 		// 我们并不认识），所以用 OpenAI 形状——三套里更通用的那一套。
 		// Responses 那套的错误体与它逐字相同（见 error.go 的说明），
@@ -424,37 +453,8 @@ func (h *Handler) admit(w http.ResponseWriter, r *http.Request, protocol channel
 		return User{}, nil, false
 	}
 
-	user, err := h.Auth.Authenticate(r.Context(), r)
-	if err != nil {
-		// 两类失败必须分开（见 internal/auth 的包注释）：凭证本身的问题回
-		// 401，查询失败（连不上库、超时、脏数据）回 500。混在一起的话，
-		// 一次数据库抖动会表现为「全站密钥突然失效」——SDK 按「key 无效」
-		// 处理而**不重试**，监控上是 401 尖峰而不是 5xx 尖峰，值班的人去
-		// 查 key 而不是查库，两个方向完全相反的排查。
-		//
-		// 500 而不是 503：503 承诺「稍后重试」，而这一类里也有 quota_limit
-		// 解析不了这种永久性错误（见 internal/auth 的 lookup）。本包对
-		// 「我们这一侧坏了」也一直用 500（见 failUpstream 的默认分支），
-		// 503 在包内已经是另一个意思：这个模型没有可用上游。
-		//
-		// 区分的是状态码，不是响应体：凭证为什么不对不回给调用方——区分开
-		// 等于送出一个「这个 Key 存在吗」的探测器，而库为什么连不上同样是
-		// 我们内部的事。所以 5xx 这一支还要有一条日志，否则这类故障在生产
-		// 里只有一个状态码可看。
-		//
-		// 401 这一支**不写日志，只记指标**，理由与上面正相反：401 是攻击者
-		// 可控的，拿垃圾 key 打就能刷日志、刷盘；而「库里没有这个哈希」与
-		// 「这把 key 上周过期了」这两种失败必须分得开（用户报「我的 key 不能
-		// 用了」时，它们是两条完全不同的排查路径，见 internal/auth 的包注释）。
-		// 按 auth.Reason 分桶计数同时满足这两条：标签值是一个闭合枚举，
-		// 基数有界，刷不动。
-		if errors.Is(err, auth.ErrUnauthenticated) {
-			observe.Metrics.AuthFailures.With(authFailureReason(err)).Inc()
-			writeError(w, protocol, http.StatusUnauthorized, "invalid credentials")
-			return User{}, nil, false
-		}
-		observe.FromContext(r.Context()).Error("鉴权查询失败", "err", err)
-		writeError(w, protocol, http.StatusInternalServerError, "internal error")
+	user, ok := h.authenticate(w, r, protocol)
+	if !ok {
 		return User{}, nil, false
 	}
 
@@ -518,6 +518,50 @@ func (h *Handler) admit(w http.ResponseWriter, r *http.Request, protocol channel
 	}
 
 	return user, body, true
+}
+
+// authenticate 跑一次鉴权，并把两类失败写成响应（401 / 500）。
+//
+// # 为什么单提出来
+//
+// 推理那几条路径经 admit 调它，两条只读路径（见 models.go 的 admitModelRead）
+// 直接调它。两条路径对同一把 key 的解释必须一致，否则「推理请求能用、清单
+// 却说 key 无效」会成为一次查不出来的分歧——而这两处本该只有一处实现。
+//
+// # 两类失败必须分开
+//
+// 凭证本身的问题回 401，查询失败（连不上库、超时、脏数据）回 500。混在一起
+// 的话，一次数据库抖动会表现为「全站密钥突然失效」——SDK 按「key 无效」
+// 处理而**不重试**，监控上是 401 尖峰而不是 5xx 尖峰，值班的人去查 key
+// 而不是查库，两个方向完全相反的排查。
+//
+// 500 而不是 503：503 承诺「稍后重试」，而这一类里也有 quota_limit 解析不了
+// 这种永久性错误（见 internal/auth 的 lookup）。本包对「我们这一侧坏了」也
+// 一直用 500（见 failUpstream 的默认分支），503 在包内已经是另一个意思：
+// 这个模型没有可用上游。
+//
+// 区分的是状态码，不是响应体：凭证为什么不对不回给调用方——区分开等于送出
+// 一个「这个 Key 存在吗」的探测器，而库为什么连不上同样是我们内部的事。
+// 所以 5xx 这一支还要有一条日志，否则这类故障在生产里只有一个状态码可看。
+//
+// 401 这一支**不写日志，只记指标**，理由与上面正相反：401 是攻击者可控的，
+// 拿垃圾 key 打就能刷日志、刷盘；而「库里没有这个哈希」与「这把 key 上周
+// 过期了」这两种失败必须分得开（用户报「我的 key 不能用了」时，它们是两条
+// 完全不同的排查路径，见 internal/auth 的包注释）。按 auth.Reason 分桶计数
+// 同时满足这两条：标签值是一个闭合枚举，基数有界，刷不动。
+func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, protocol channel.Protocol) (User, bool) {
+	user, err := h.Auth.Authenticate(r.Context(), r)
+	if err != nil {
+		if errors.Is(err, auth.ErrUnauthenticated) {
+			observe.Metrics.AuthFailures.With(authFailureReason(err)).Inc()
+			writeError(w, protocol, http.StatusUnauthorized, "invalid credentials")
+			return User{}, false
+		}
+		observe.FromContext(r.Context()).Error("鉴权查询失败", "err", err)
+		writeError(w, protocol, http.StatusInternalServerError, "internal error")
+		return User{}, false
+	}
+	return user, true
 }
 
 // authFailureReason 把一次认证失败归到 larkax_auth_failures_total 的一个

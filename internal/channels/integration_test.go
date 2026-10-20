@@ -842,6 +842,49 @@ func TestSuppliedModelsFollowsTheSameSupplyPredicate(t *testing.T) {
 	}
 }
 
+// 读点三的补一条：**别名不进清单**。
+//
+// 清单里的名字是规范名——调用方请求时写的就是它。别名只说「这家上游把它
+// 叫作什么」，所以两个方向都不该出现：上游名本身不在清单里，而只有别名、
+// 没有渠道在供的模型也不在（别名不是供给）。
+func TestSuppliedModelsIgnoresAliases(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := t.Context()
+
+	supplied := uniqueModel()
+	upstreamName := "upstream-" + itoa(nextID())
+	insertModelCatalog(t, db, supplied, nil, nil, nil, nil, nil)
+	channelID := insertChannel(ctx, t, db, sealer, channelSpec{model: supplied})
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO model_aliases (channel_id, upstream_model, canonical_name)
+		 VALUES ($1, $2, $3)`, channelID, upstreamName, supplied); err != nil {
+		t.Fatalf("插入渠道级别名失败: %v", err)
+	}
+
+	// 只有一条平台级别名、没有任何渠道在供。
+	aliasOnly := uniqueModel()
+	insertModelCatalog(t, db, aliasOnly, nil, nil, nil, nil, nil)
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO model_aliases (upstream_model, canonical_name)
+		 VALUES ($1, $2)`, "upstream-"+itoa(nextID()), aliasOnly); err != nil {
+		t.Fatalf("插入平台级别名失败: %v", err)
+	}
+
+	got, err := New(db, sealer).SuppliedModels(ctx)
+	if err != nil {
+		t.Fatalf("SuppliedModels 出错: %v", err)
+	}
+	if !slices.Contains(got, supplied) {
+		t.Errorf("%q 有启用的渠道在供，却不在清单里: %v", supplied, got)
+	}
+	for _, absent := range []string{upstreamName, aliasOnly} {
+		if slices.Contains(got, absent) {
+			t.Errorf("%q 不该出现在在供清单里: %v", absent, got)
+		}
+	}
+}
+
 // 读点二：管理面清单。默认看不见，ListAll（--all）看得见且带上删除时刻。
 func TestListHidesDeletedChannelUnlessAll(t *testing.T) {
 	db := testDB(t)

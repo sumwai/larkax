@@ -46,6 +46,14 @@ FAIL_SUFFIX = "fail"
 # 的 contractDrainRule 与 contractDrainChunks）。
 DRAIN_SUFFIX = "drain"
 
+# 模型清单那条只读路径用的模型名后缀与 vendor。
+#
+# 它与上面几个不同：不会有请求打到上游，清单里的名字来自目录行与渠道声明
+# （见 internal/api/models.go）。vendor 取一个与 larkax 不同的值，于是
+# 「owned_by 取的是目录里的 vendor」才是被测的。
+MODELS_SUFFIX = "models"
+MODELS_VENDOR = "contract-vendor"
+
 # 假上游回的正文。分成两片，这样流式用例能验「增量要拼起来」。
 TEXT_PARTS = ("契约测试", "的正文")
 TEXT = "".join(TEXT_PARTS)
@@ -412,6 +420,47 @@ def openai_auth_error(ctx: Ctx) -> str:
     raise CaseFailure("凭证无效时本该回 401，但请求没有报错")
 
 
+def openai_models(ctx: Ctx) -> str:
+    """模型清单：官方 SDK 在启动时拉一次清单，走的就是这两条路径。
+
+    `client.models.list()` 验的是「SDK 认不认 `{object: list, data: [...]}`
+    这个形状」——自测里我们自己解这个体，认不认是两回事。单条那条验的是
+    不可用时 SDK 会不会抛 `NotFoundError`，以及 `error.code` 是不是它按码
+    分支时要读的那个值。
+    """
+    import openai
+
+    expected = ctx.model(MODELS_SUFFIX)
+    listing = ctx.client.models.list()
+    check("object", listing.object, "list")
+    by_id = {item.id: item for item in listing.data}
+    check_true(f"models.list() 里没有 {expected}：{sorted(by_id)}", expected in by_id)
+
+    item = by_id[expected]
+    check("id", item.id, expected)
+    check("object", item.object, "model")
+    check("owned_by", item.owned_by, MODELS_VENDOR)
+    # created 固定 0：目录里没有「模型创建时间」这一列（见 internal/api/models.go）。
+    check("created", item.created, 0)
+
+    one = ctx.client.models.retrieve(expected)
+    check("retrieve.id", one.id, expected)
+    check("retrieve.owned_by", one.owned_by, MODELS_VENDOR)
+
+    # 不可用：404，而且 SDK 按 `error.code` 分得出「换一个模型」。
+    missing = ctx.model("missing")
+    try:
+        ctx.client.models.retrieve(missing)
+    except openai.NotFoundError as exc:
+        check("status_code", exc.status_code, 404)
+        check("error.type", error_type_of(exc), "invalid_request_error")
+        check("error.code", error_code_of(exc), "model_not_found")
+    else:
+        raise CaseFailure(f"不可用的模型 {missing} 没有抛 NotFoundError，而清单里没有它")
+
+    return f"{len(listing.data)} 个模型，retrieve({missing}) -> NotFoundError"
+
+
 OPENAI_CASES = [
     ("非流式", openai_nonstream),
     ("流式", openai_stream),
@@ -420,6 +469,7 @@ OPENAI_CASES = [
     ("客户端错误 400", openai_bad_request),
     ("认证错误 401", openai_auth_error),
     ("上游错误 5xx", openai_upstream_error),
+    ("模型清单", openai_models),
 ]
 
 

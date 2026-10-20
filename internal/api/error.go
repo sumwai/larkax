@@ -397,6 +397,14 @@ func errorKind(protocol channel.Protocol, status int) (kind, code string) {
 	case http.StatusUnauthorized:
 		// OpenAI 把凭证问题归在 invalid_request_error 下，靠 code 区分。
 		return "invalid_request_error", "invalid_api_key"
+	case http.StatusNotFound:
+		// 目前只有只读的模型清单那一支会回 404（模型不可用，见 models.go
+		// 的 writeModelNotFound）。OpenAI 把「模型不存在」归在
+		// invalid_request_error 下，码另行由 writeErrorCode 给出。
+		//
+		// Anthropic 那一支没有这一条：那条路径不走模型清单，而 404 在它那
+		// 套里叫 not_found_error——没有调用方就不在这里猜一个。
+		return "invalid_request_error", ""
 	case http.StatusRequestEntityTooLarge:
 		return "invalid_request_error", "request_too_large"
 	case http.StatusTooManyRequests:
