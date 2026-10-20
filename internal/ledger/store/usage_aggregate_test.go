@@ -278,6 +278,19 @@ func TestUsageSummaryRejectsBadQueries(t *testing.T) {
 	if _, err := s.UsageSummary(ctx, emptyWindow); !errors.Is(err, ErrInvalidQuery) {
 		t.Errorf("空窗口应当报 ErrInvalidQuery，得到 %v", err)
 	}
+
+	// 只给一边也要拒绝：零值时刻是公元 1 年，它总在另一边之前，后面那道
+	// 「起点不早于终点」的检查拦不住少给一边的窗口——缺的那一边会安静地
+	// 变成「从有时间以来」。变异：`From.IsZero() || To.IsZero()` 的 `||`
+	// 改成 `&&`，只缺起点时这一句不再报错。
+	for name, only := range map[string]UsageWindow{
+		"只给起点": {UserID: 1, From: usageTestTime(t, "2026-10-01T00:00:00Z")},
+		"只给终点": {UserID: 1, To: usageTestTime(t, "2026-10-08T00:00:00Z")},
+	} {
+		if _, err := s.UsageSummary(ctx, only); !errors.Is(err, ErrInvalidQuery) {
+			t.Errorf("%s 应当报 ErrInvalidQuery，得到 %v", name, err)
+		}
+	}
 }
 
 func TestUsageSeriesFillsEmptyBuckets(t *testing.T) {
@@ -370,6 +383,20 @@ func TestUsageSeriesRejectsBadWindows(t *testing.T) {
 		t.Errorf("超过小时上限应当报 ErrInvalidQuery，得到 %v", err)
 	}
 
+	// 正好 366 个点要放行：上限说的是「最多这么多点」。变异：
+	// `len(starts) > maxPoints` 改成 `>=`，把边界上的窗口也拒掉。
+	// 窗口是左闭右开，所以 366 个日桶对应 366 天的跨度。
+	edge := base
+	edge.From = usageTestTime(t, "2025-10-01T00:00:00Z")
+	edge.To = edge.From.AddDate(0, 0, 366)
+	points, err := s.UsageSeries(ctx, edge, "day", time.UTC)
+	if err != nil {
+		t.Fatalf("正好 %d 个点的窗口应当放行，得到 %v", UsageSeriesMaxDays, err)
+	}
+	if len(points) != UsageSeriesMaxDays {
+		t.Errorf("边界窗口点数 = %d，期望 %d", len(points), UsageSeriesMaxDays)
+	}
+
 	// 窗口本身自洽性：起点不早于终点。
 	bad := base
 	bad.From = base.To
@@ -408,6 +435,13 @@ func TestUsageBreakdownGroupsAndFoldsTheRest(t *testing.T) {
 	}
 
 	// 分组数不超过 limit 时 Other 是全零，而不是「第 limit 组」。
+	//
+	// 两条等价变异（gremlins）记在这里：
+	//   - `len(groups) > limit` 的 `>` 改成 `>=`：相等那一格会去折
+	//     `groups[limit:]`，那是空切片，sumGroups 返回零值组，与不折时
+	//     out.Other 的零值逐字段相同。
+	//   - `sort.Slice` 里 `c > 0` 改成 `c >= 0`：这一句在 `c != 0` 之后就
+	//     进来了，相等那一格永远到不了。
 	all, err := s.UsageBreakdown(ctx, window, "model", 10)
 	if err != nil {
 		t.Fatalf("按模型分组失败: %v", err)
@@ -415,6 +449,19 @@ func TestUsageBreakdownGroupsAndFoldsTheRest(t *testing.T) {
 	if len(all.Items) != 3 || all.Other.Cost != money.Zero || all.Other.Requests != 0 {
 		t.Errorf("未截断时 Items=%d Other=%+v", len(all.Items), all.Other)
 	}
+
+	// limit 为 0 取默认值，而不是「一组都不要」。变异：`if limit <= 0` 的
+	// `<=` 改成 `<`，0 被当成有效值传给 SQL（LIMIT 1），结果 Items 为空、
+	// 唯一一组被折进 Other。
+	defaulted, err := s.UsageBreakdown(ctx, window, "model", 0)
+	if err != nil {
+		t.Fatalf("limit 为 0 时应当取默认值，得到 %v", err)
+	}
+	if len(defaulted.Items) != 3 {
+		t.Errorf("limit 为 0 时 Items = %d 组，期望默认值下的 3 组", len(defaulted.Items))
+	}
+	// 上界那一处的 `>` 改成 `>=` 是等价变异：limit 正好等于上限时，两版
+	// 都把它赋成同一个常量，用哪一版都一样。
 
 	// 按 key：pending 的 req-B 没有事件，所以不出现；名字从 api_keys 左连回来。
 	byKey, err := s.UsageBreakdown(ctx, window, "key", 10)

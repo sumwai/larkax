@@ -118,6 +118,34 @@ func TestUsageRequestsLatestEventAndCostByStatus(t *testing.T) {
 		t.Error("恰好读完时 More 应当为 false")
 	}
 
+	// 分页的两格都必须在真库上钉住：
+	//   - 给了 limit 就不能把整页都给回来。变异：`if limit > RequestPageMaxLimit`
+	//     的 `>` 改成 `<=`，小 limit 会被抬到上限 200，第一页就把 5 行全返回。
+	//   - 行数正好等于 limit 时 More 是 false。变异：`len(page.Requests) > limit`
+	//     的 `>` 改成 `>=`，那一格会误报「还有下一页」。
+	// 上界那一处的 `>` 改成 `>=` 是等价变异：limit 正好等于上限时两版赋的
+	// 是同一个常量。
+	half, err := s.UsageRequests(ctx, UsageRequestQuery{
+		UserID: userID, From: window.From, To: window.To, Limit: 2,
+	})
+	if err != nil {
+		t.Fatalf("带 limit 的查询失败: %v", err)
+	}
+	if len(half.Requests) != 2 || !half.More {
+		t.Errorf("limit=2 时得到 %d 行、More=%v，期望 2 行且还有下一页",
+			len(half.Requests), half.More)
+	}
+	exact, err := s.UsageRequests(ctx, UsageRequestQuery{
+		UserID: userID, From: window.From, To: window.To, Limit: len(wantOrder),
+	})
+	if err != nil {
+		t.Fatalf("limit 等于行数时查询失败: %v", err)
+	}
+	if len(exact.Requests) != len(wantOrder) || exact.More {
+		t.Errorf("limit=%d 时得到 %d 行、More=%v，期望正好读完且没有下一页",
+			len(wantOrder), len(exact.Requests), exact.More)
+	}
+
 	settled := page.Requests[4]
 	// 两行事件里只取最新那行：200 / 60（10:00:20），而不是旧行的 100 / 10。
 	if settled.Cost != money.MustParse("1.50") {
@@ -293,6 +321,19 @@ func TestUsageRequestsRejectsBadQueries(t *testing.T) {
 		UserID: 1, From: window.To, To: window.From,
 	}); !errors.Is(err, ErrInvalidQuery) {
 		t.Errorf("倒置的窗口应当报 ErrInvalidQuery，得到 %v", err)
+	}
+	// 只给一边同样不合法：缺的那一边会变成零值时刻（公元 1 年），窗口从
+	// 「有时间以来」开始。变异：`From.IsZero() || To.IsZero() || …` 的 `||`
+	// 改成 `&&`，只缺一边时这一句不再报错。
+	if _, err := s.UsageRequests(ctx, UsageRequestQuery{
+		UserID: 1, From: window.From,
+	}); !errors.Is(err, ErrInvalidQuery) {
+		t.Errorf("只给起点应当报 ErrInvalidQuery，得到 %v", err)
+	}
+	if _, err := s.UsageRequests(ctx, UsageRequestQuery{
+		UserID: 1, To: window.To,
+	}); !errors.Is(err, ErrInvalidQuery) {
+		t.Errorf("只给终点应当报 ErrInvalidQuery，得到 %v", err)
 	}
 	// 未知状态是**参数写错**，不是库不可用：调用方要能把它翻成 400。
 	if _, err := s.UsageRequests(ctx, UsageRequestQuery{
