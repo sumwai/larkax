@@ -26,15 +26,18 @@
 #   命令      scripts/check-unimported.sh
 #             （入口由 cmd/ 自动发现，当前是 ./cmd/larkax 与 ./cmd/larkaxctl）
 #   工具      go（版本随 go.mod；go list 的包枚举口径由它决定）
-#   条数      2，与脚本里的 MAX_ENTRIES_DEFAULT 一致
+#   条数      见脚本里的 MAX_ENTRIES_DEFAULT（**本文件不重复这个数**——抄一份就多一处
+#             会漂的地方，而脚本每次运行都会打印实际条数）
 #
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
 
 internal/manpage | lib | 只被测试 import 的手页生成器：命令注册表在 cmd/larkaxctl 的 package main 里，别的包引不到，所以由那个包的 man_test.go 驱动；它不会被生产代码 import（终态），产物提交在 man/man1/
+internal/plans | gap | #860 额度包的订阅、发放与作废：请求路径（选源与扣费）与命令行都还没接上，目前只有本包的测试在调
 internal/testdb | lib | 只被测试 import 的夹具包：给每个连库的测试包建一个独立的库
 
-# 上面两条是这份清单里该常驻的形状：**不可能接线、也不该接线**的那些。
+# 清单里的 `internal/manpage` 与 `internal/testdb` 是常驻的两条：**不可能接线、
+# 也不该接线**的那些。
 #
 #   - 测试夹具包（internal/testdb）永远不会被生产代码 import，把它从清单里删掉
 #     只有一种做法：让生产代码去 import 测试夹具，那是更坏的事。

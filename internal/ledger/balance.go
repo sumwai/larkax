@@ -22,6 +22,7 @@ import (
 //
 //	user                    正 = 平台欠用户的钱，负 = 用户欠平台
 //	merchant_payable        正 = 平台欠商户的分成
+//	prepaid                 正 = 平台欠用户的预存额度（这个订阅还剩多少面值）
 //	platform_revenue        正 = 平台收到的钱，负 = 平台付出的钱
 //	upstream_cost           正 = 上游成本
 //	payout                  正 = 已申请未打款的待付
