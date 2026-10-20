@@ -282,6 +282,7 @@ func TestUnsupportedCommandsRefuseJSONBeforeDoingAnything(t *testing.T) {
 		{"wallet adjust", runWalletAdjust, nil},
 		{"wallet refund", runWalletRefund, nil},
 		{"wallet payout request", runPayoutRequest, nil},
+		{"wallet payout settle", runPayoutSettle, nil},
 		{"wallet payout approve", runPayoutApprove, nil},
 		{"wallet payout reject", runPayoutReject, nil},
 		{"wallet payout paid", runPayoutPaid, nil},
