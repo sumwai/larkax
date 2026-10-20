@@ -28,7 +28,11 @@ name: 变异测试
 # 「装同一个版本的工具、起同一套数据库、选包、把输出留下来」。
 
 on:
+  # 默认的 pull_request 事件不含 ready_for_review：草稿改成就绪（期间可能一次
+  # push 都没有）时不会触发，变异一次都不跑、check 永远停在 skipped。所以显式
+  # 列出这四种。draft 为 true 时选包步骤会写「草稿不跑」并让变异 job 保持 skipped。
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       packages:
@@ -84,7 +88,6 @@ jobs:
 
           selected=()
           dropped=()
-          in_tree=0
 
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             input="${PACKAGES_INPUT:-}"
@@ -117,8 +120,8 @@ jobs:
               {
                 echo "### 变异测试：草稿 PR，这一轮不跑"
                 echo
-                echo "草稿还在改，跑一轮要几十分钟到几小时；标成 ready for review 后"
-                echo "下一次 push 会重新触发。下面的变异 job 显示为 **skipped**。"
+                echo "草稿还在改，跑一轮要几十分钟到几小时；标成 ready for review 时"
+                echo "会重新触发（工作流订阅了 ready_for_review）。下面的变异 job 显示为 **skipped**。"
               } >> "$GITHUB_STEP_SUMMARY"
               echo "packages=" >> "$GITHUB_OUTPUT"
               exit 0
@@ -141,7 +144,6 @@ jobs:
               if [ "$allowed" -eq 0 ]; then
                 continue
               fi
-              in_tree=1
               d=$(dirname "$f")
               # 「改动目录 → 该跑哪一条 PKGS」只由脚本回答：它取最近的、在清单里的
               # 祖先（包路径是递归的，internal/billing/calendaradapter 归

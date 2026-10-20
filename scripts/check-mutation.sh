@@ -724,8 +724,9 @@ for pkg in "${PKGS[@]}"; do
   # **进度只数变异结果行，不数输出行。** 行数里混着 `Starting...`、gathering、
   # 空行与最后的汇总，而总数是变异体数——两者相减算出来的剩余时间没有任何依据。
   # 变异结果行以状态开头（gremlins v0.6.0 的七种：KILLED / LIVED / RUNNABLE /
-  # NOT COVERED / NOT VIABLE / TIMED OUT / SKIPPED，见 internal/mutator 的
-  # `Status.String()`）。序号那一列仍然是输出行号，与进度不是同一个数。
+  # NOT COVERED / NOT VIABLE / TIMED OUT / SKIPPED，见 gremlins 源码里
+  # `internal/mutator` 包的 `Status.String()`，不是本仓的包）。序号那一列仍然是
+  # 输出行号，与进度不是同一个数。
   #
   # **总数从 gremlins 自己的输出里读，读不到就不给 ETA。** v0.6.0 正常运行
   # **不报总数**：`Starting...` 之后直接是逐条结果，汇总在最后（源码
