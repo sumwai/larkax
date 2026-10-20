@@ -1741,6 +1741,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/quota` | 45 | 2 | 0 | 0 | 100.00% | 95.74% | 95.2% |
 | `internal/billing/expr` | 168 | 8 | 0 | 12 | 93.62% | 95.45% | 85.9% |
 | `internal/billing` | 243 | 14 | 0 | 12 | 95.54% | 94.55% | 98.3% |
+| `internal/channels` | 263 | 26 | 1 | 41 | 87.58% | 91.00% | 75.6% |
 | `internal/money` | 90 | 14 | 0 | 4 | 96.30% | 86.54% | 96.8% |
 | `internal/tokens` | 89 | 14 | 0 | 51 | 66.88% | 86.41% | 97.2% |
 

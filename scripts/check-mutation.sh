@@ -350,6 +350,7 @@ PKGS=(
   internal/keyquota
   internal/tokens
   internal/route
+  internal/channels
   internal/snapshot
   internal/snapshotwire
   internal/gateway
