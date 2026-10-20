@@ -376,7 +376,7 @@ go run ./cmd/larkaxctl --env-file .env.staging wallet create --user alice
    （`settings.description` 那一列，`settings list` 打的就是它）。
 2. 在 `internal/settings/settings.go` 的 `Registry` 里加一行，声明键与类型。
 
-**现有 20 个键的默认值、取值范围，以及各自改完什么时候生效，见
+**现有 23 个键的默认值、取值范围，以及各自改完什么时候生效，见
 [settings.md](settings.md)。** 这一节讲的是**加一个新键**的步骤。
 
 说明只写在迁移里一份，`Registry` 里没有第二份——写两份的话，改了一处另一处不动，
@@ -1747,7 +1747,6 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | 包 | killed | 存活 | 超时 | Not covered | Mutator coverage | Test efficacy（递归） | 覆盖率（包内） |
 |---|---|---|---|---|---|---|---|
 | `internal/payment` | 110 | 0 | 0 | 5 | 95.65% | 100.00% | 77.8% |
-| `internal/pipeline` | 48 | 0 | 0 | 0 | 100.00% | 100.00% | 88.2% |
 | `internal/keyquota` | 2 | 0 | 0 | 6 | 25.00% | 100.00% | 3.3% |
 | `internal/pricing` | 176 | 0 | 0 | 46 | 79.28% | 100.00% | 89.2% |
 | `internal/snapshotwire` | 105 | 0 | 0 | 3 | 97.22% | 100.00% | 94.6% |
@@ -1763,6 +1762,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/ledger` | 576 | 8 | 0 | 92 | 86.39% | 98.63% | 96.3% |
 | `internal/ledger/store` | 433 | 6 | 0 | 60 | 87.98% | 98.63% | 79.9% |
 | `internal/api` | 197 | 3 | 0 | 19 | 91.32% | 98.50% | 90.2% |
+| `internal/pipeline` | 62 | 1 | 0 | 0 | 100.00% | 98.41% | 90.1% |
 | `internal/auth` | 221 | 4 | 1 | 8 | 96.57% | 98.22% | 86.6% |
 | `internal/relay` | 112 | 3 | 0 | 7 | 94.26% | 97.39% | 87.7% |
 | `internal/channel` | 313 | 9 | 0 | 22 | 93.60% | 97.20% | 88.5% |
@@ -1778,8 +1778,8 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/billing/expr` | 168 | 8 | 0 | 12 | 93.62% | 95.45% | 85.9% |
 | `internal/billing` | 243 | 14 | 0 | 12 | 95.54% | 94.55% | 98.3% |
 | `internal/ratelimit` | 33 | 2 | 0 | 3 | 92.11% | 94.29% | 92.0% |
-| `internal/money` | 90 | 14 | 0 | 4 | 96.30% | 86.54% | 96.8% |
 | `internal/tokens` | 89 | 14 | 0 | 51 | 66.88% | 86.41% | 97.2% |
+| `internal/money` | 92 | 15 | 0 | 4 | 96.40% | 85.98% | 96.9% |
 
 **最后两栏的范围不一样，别混着读。** `Test efficacy（递归）` 说的是 `./<pkg>/`
 这一条命令：包路径递归，子包的变异体一起算进来；`覆盖率（包内）` 另取一条命令
@@ -1862,6 +1862,12 @@ nil 还是空切片——调用点只做 `append(..., fieldAttrs(...)...)`，差
 `health.go:20` 的 `readyzTimeout` 是包级常量，gremlins 永远记「未覆盖」，补用例
 改变不了；用 `go test -overlay` 把 `*` 换成 `/` 单独验过，
 `TestReadyzPassesUnexpiredDeadlineToChecks` 会红。
+**`internal/money` 与 `internal/pipeline` 这一轮各多出一条等价，前提都落在零值上。**
+`money.go:376` 的 `bp == 0 || a.units == 0` 改成 `&&`：任一项为 0 时乘积恒为 0，
+`Quo` 出来仍是 0，而 Amount 的零值就是 `Zero`；`||` 省的只是一次 big.Int 分配。
+`pipeline.go:1258` 的 `bp > 0` 改成 `>= 0`：`BasisPointsFor` 只可能返回 0…10000，
+两版只在 0 处分岔，而那一格 `MulBasisPoints(0)` 早退返回 `Zero`。两条论证分别写在
+`TestMulBasisPoints` 与 `TestSettleMerchantShareBoundaries` 的注释里。
 
 **覆盖率高而 efficacy 低，说明测试断言的是「相对关系」而不是「具体边界」。**
 这类包的用例写的是「A 明显比 B 好」这种比较，于是改 `<=` 为 `<`、去掉分母的加数、

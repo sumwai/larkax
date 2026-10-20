@@ -288,6 +288,8 @@ const (
 	maxOutputTokensKey = "billing.max_output_tokens"
 	// streamFreezeStepKey 是流式请求递进冻结的阈值段（token）。
 	streamFreezeStepKey = "billing.stream_freeze_step"
+	// merchantShareKey 是售价里分给渠道商户的比例（基点）。
+	merchantShareKey = "billing.merchant_share_bp"
 	// paymentFakeKey 是假支付通道的开关。
 	paymentFakeKey = "payment.fake_enabled"
 )
@@ -514,6 +516,19 @@ func Build(cfg Config) (*App, error) {
 			Calendar: calendarEnv,
 			Region:   region,
 			Now:      cfg.Now,
+			// MerchantShare 决定每笔消费分给渠道商户多少。它**不在装配期
+			// 判范围**：越界时按不分账处理并留一条告警，而不是拒绝启动——
+			// 一个比例写错不该让整个服务起不来，而分成恒为 0 才是要有人
+			// 看见的那件事（见 pipeline.MerchantShare）。缺行与类型不对
+			// 在更前面就被 settings.Load 拒了。
+			//
+			// 闭包读的是装配期那份快照：与其余在装配期读一次的键一样，
+			// 改完要重启。
+			MerchantShare: &pipeline.MerchantShare{
+				BasisPoints: func() (int64, error) {
+					return cfg.Settings.Int(merchantShareKey)
+				},
+			},
 		},
 		// Aliases 是选路要用的那一半：选路之后、编码请求之前，按选中的渠道
 		// 把规范名翻成上游名。不接这一项的表现是**别名配了不生效**——上游

@@ -194,6 +194,11 @@ type Pipeline struct {
 	// 测试**有意义：生产装配必须接上，assembly.Config 的 validate 会拒绝 nil
 	// （不接的表现是成本这一维永远没有数据，而路由照样排得出来）。
 	Costs CostSource
+	// MerchantShare 决定一笔消费里分给渠道商户多少。为 nil 表示不分账，
+	// 全部留作平台收入——这只对**直接构造 Pipeline 的测试**有意义：
+	// 生产装配必须接上，不接的表现是 merchant_payable 永远是 0，而账面
+	// 照样是平的，没有任何东西会报出来。
+	MerchantShare *MerchantShare
 	// Programs 是规则表达式的编译缓存。
 	//
 	// 不给时由 programs 兜底建一个（容量 defaultCacheSize）。要换容量
@@ -1022,7 +1027,7 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 	// 的售价与成本问的是同一刻的档位。
 	upstreamCost := p.upstreamCost(ctx, req, usage, val.At)
 
-	entries, err := p.entries(req, val, settlement)
+	entries, err := p.entries(ctx, req, val, settlement)
 	if err != nil {
 		return nil, err
 	}
@@ -1227,31 +1232,44 @@ func (p *Pipeline) now() time.Time {
 
 // entries 把结算结果变成账本分录。
 //
-// 一次消费的账面形状：用户出钱、商户应付增加、平台留收入、上游成本记账。
-// 中间隔着一次上游调用，所以「平台先垫付了上游成本」这件事在分录里
-// 是显式的——不显式的话，平台的实际毛利只能靠事后减出来。
-func (p *Pipeline) entries(req Request, val expr.Result, s billing.Settlement) ([]ledger.Entry, error) {
+// 一次消费的账面形状：用户出钱（贷 user）、商户应付增加（借 merchant_payable）、
+// 平台留收入（借 platform_revenue）。三边由 ledger.Consume 从「售价 − 分成」
+// 推出来，所以天然平。
+//
+// 上游成本**不在**这里：它由另一条规则线算出，落在 usage_events 那一列上，
+// 是观测值而不是分账依据（见 upstreamCost 的注释）。
+func (p *Pipeline) entries(ctx context.Context, req Request, val expr.Result, s billing.Settlement) ([]ledger.Entry, error) {
 	// 金额为零时不写分录。**不是省事，是避免污染账本**：
 	// 大量零金额分录会让对账时的「有分录就说明发生过消费」这个判据失效。
 	if s.Actual.IsZero() {
 		return nil, nil
 	}
 
-	// 这里只构造「用户被扣了多少」这一侧的完整分录。
-	// 分成与上游成本的拆分需要商家分成规则，那属于另一个环节；
-	// 留一个显式的 TODO 比在这里猜一个比例好。
+	// 商户分成从售价里出，按配置的比例、向下取整，零头归平台。
 	//
-	// 猜错的表现是商户拿到的钱不对，而那要等到结算日才发现。
+	// 比例读不出来时不在这里报错，由 MerchantShare 记一条告警并按 0 处理：
+	// 一笔已经服务完的请求不该因为一个配置项写错而收不了钱（见
+	// MerchantShare.BasisPointsFor）。商户为平台自营（0）时它同样是 0。
+	//
+	// 上游成本**不**在这一层扣：它由另一条规则线算出，落在 usage_events
+	// 那一列上是观测值，不是分账依据（见 upstreamCost 的注释）。
+	share := money.Zero
+	if p.MerchantShare != nil {
+		if bp := p.MerchantShare.BasisPointsFor(ctx, req.OwnerUserID); bp > 0 {
+			share = s.Actual.MulBasisPoints(bp)
+		}
+	}
+
 	consume, err := ledger.Consume(ledger.ConsumeParams{
 		TxnID:  ledger.NewTxnID(),
 		UserID: req.UserID,
 		Asset:  ledger.Asset(req.Asset),
 		Amount: s.Actual,
-		// 分成与上游成本由另一个环节填：那需要商家的分成规则，
-		// 而在这里猜一个比例的表现是「商户拿到的钱不对」，
-		// 那要等到结算日才发现。这里只记「用户被扣了多少」这一侧，
-		// 未拆分的部分留在平台科目上，事后可查。
+		// 分成从售价里出，余下的全部记作平台收入——钱在账本上只有这一种
+		// 分法（见 ledger.Consume 的注释），所以不会出现「分出去的和留下的
+		// 加起来不等于售价」。
 		MerchantID:       req.OwnerUserID,
+		MerchantShare:    share,
 		BillingRequestID: req.BillingRequestID,
 		// At 取 val.At（受理时刻），与这次定价的依据是同一个时刻：
 		// 一笔消费记的就是「哪一次请求、按哪一刻的价」。
