@@ -442,7 +442,7 @@ fi
 #
 # 与上面那条 LARKAX_DB_DSN 同一个形状，只是范围不同：数据库是清单里每个包都要
 # 的硬前提，Redis 只有**测试文件里读它**的那几包才要。internal/ratelimit 进
-# 清单之后是第一包这样的包。
+# 清单之后是第一个这样的包。
 #
 # 缺它时 redis_integration_test.go 那几条整组 `t.Skip`，而只在这些用例里碰得到
 # 的变异体会落进 Not covered——不进 efficacy 的分母。于是分数**变好看而不是
@@ -452,6 +452,7 @@ fi
 # 判法是「这个包的测试文件里有没有出现那个变量」，与
 # .github/actions/check-integration-tests 同一套做法：按名字找引用，不另立一份
 # 「哪些包要 Redis」的名单——那份名单会在下一次有人加集成测试时悄悄漏掉一包。
+# 判据只看包目录：变量只由**包外**的测试辅助文件引用时，这里看不见。
 # 检查放在包选择之后：只跑不依赖 Redis 的包时，这个变量不是前提。
 redis_deps=()
 for pkg in "${PKGS[@]}"; do

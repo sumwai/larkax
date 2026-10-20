@@ -636,7 +636,8 @@ env -u LARKAX_REDIS_DSN LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_ok" GREMLINS_VE
 rc=$?
 if [ "$rc" -eq 1 ]; then ok; else bad "缺 LARKAX_REDIS_DSN —— 应拒绝运行，实际退出码 $rc"; dump; fi
 grep -q '没有 LARKAX_REDIS_DSN' "$last_out" || bad "缺 LARKAX_REDIS_DSN —— 应报出是这个原因"
-grep -q 'internal/ratelimit' "$last_out" || bad "缺 LARKAX_REDIS_DSN —— 应列出会整组跳过的包"
+grep -q '这些包的测试会读它：internal/ratelimit' "$last_out" \
+  || bad "缺 LARKAX_REDIS_DSN —— 应列出会整组跳过的包（认的是脚本那句话，不是表里的包名）"
 grep -q 't.Skip' "$last_out" || bad "缺 LARKAX_REDIS_DSN —— 应说明那些集成测试会被跳过"
 
 # 14. 同一个变量，只跑**不依赖** Redis 的包时不是前提：筛了 internal/money
