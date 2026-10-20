@@ -351,6 +351,7 @@ PKGS=(
   internal/tokens
   internal/route
   internal/channels
+  internal/credential
   internal/snapshot
   internal/snapshotwire
   internal/gateway
