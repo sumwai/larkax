@@ -1763,6 +1763,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/api` | 197 | 3 | 0 | 19 | 91.32% | 98.50% | 90.2% |
 | `internal/auth` | 221 | 4 | 1 | 8 | 96.57% | 98.22% | 86.6% |
 | `internal/relay` | 112 | 3 | 0 | 7 | 94.26% | 97.39% | 87.7% |
+| `internal/channel` | 313 | 9 | 0 | 22 | 93.60% | 97.20% | 88.5% |
 | `internal/idempotency` | 34 | 1 | 0 | 0 | 100.00% | 97.14% | 83.3% |
 | `internal/plugin/sandbox` | 63 | 2 | 0 | 5 | 92.86% | 96.92% | 93.8% |
 | `internal/route` | 123 | 4 | 0 | 24 | 84.11% | 96.85% | 97.8% |
@@ -1831,6 +1832,22 @@ nil 还是空切片——调用点只做 `append(..., fieldAttrs(...)...)`，差
 被对调。补上用例之后是 `114 / 0 / 0 / 5`——killed 涨的十条里，五条是原先那五条存活，
 另五条是原先落在 `Not covered` 里的变异体：新用例顺带把那些行也走到了。所以这个包
 **别拿两次的 `Not covered` 当同一件东西比**。
+
+**`internal/channel` 那九条存活分成两类：容量提示，与冗余的提前退出。**
+三条是 `bufio.Scanner` 的初始容量（`anthropicadapter/stream.go:45`、
+`openaiadapter/stream.go:33`、`responsesadapter/stream.go:74`）：`64*1024` 里的
+`*` 换成 `/` 只改预分配，Scanner 会自己长到 `maxTokenSize`，扫描上限那一格
+（`4*1024*1024`）不受影响。三条是事件行判据里的 `||` 改成 `&&`
+（`anthropicadapter/stream.go:108`、`openaiadapter/stream.go:50`、
+`responsesadapter/stream.go:166`）：空行与 `:` 注释行既不匹配 `event:` 也不匹配
+`data:`，落到后面那两道前缀判断同样被跳过，不打日志也不发事件。另外三条各是
+一格边界：`anthropicadapter/stream.go:259` 的 `!ok || m == nil`——`!ok` 时 m 本来
+就是 nil，而两条都为假时四次读取都给 nil、四处赋值又都要求 `v > 0`，累计值不变；
+`httpx/httpx.go:110` 的 `idx < 0` 改成 `<=`——只在 `idx == 0` 时不同，那时切出来
+的段是空串，紧跟着的长度判据照样返回空；`openaiadapter/dto.go:122` 的
+`len(raw) == 0` 改成 `>=`——空字节上两次解码都报错，字段停在零值 nil。最后这条
+还依赖「默认编解码器就是 `encoding/json`」，仓里没有 `SetCodec` 的调用点，这个
+前提写在用例注释里。
 
 **覆盖率高而 efficacy 低，说明测试断言的是「相对关系」而不是「具体边界」。**
 这类包的用例写的是「A 明显比 B 好」这种比较，于是改 `<=` 为 `<`、去掉分母的加数、

@@ -37,6 +37,66 @@ func TestEndpointJoining(t *testing.T) {
 	}
 }
 
+// 取不出主机名的 base_url 按原样拼接：`localhost:8080/` 会被 url.Parse
+// 当成 scheme 与 opaque 部分，Host 为空、又不以 / 开头，于是直接拼上去，
+// 结尾斜杠保留。
+//
+// 这一条同时是 `err == nil` 那一格的证据：判据取反之后，这条输入两版都
+// 解析成功、都不 panic，只有返回值不同（变异版会落进 TrimRight 那一支，
+// 把结尾斜杠去掉）。只用解析失败的输入去杀，红是 nil 解引用，那是 panic，
+// 说不清是哪条断言没通过。
+func TestEndpointOpaqueBase(t *testing.T) {
+	const base = "localhost:8080/"
+	if got, want := Endpoint(base, "/v1/chat"), "localhost:8080//v1/chat"; got != want {
+		t.Errorf("Endpoint(%q, %q) = %q，期望 %q", base, "/v1/chat", got, want)
+	}
+}
+
+// 解析失败的 base_url 也按原样拼接，结尾斜杠照样去掉。
+//
+// 这条固定的是正常行为：url.Parse 报错时不做主机判断，直接拼出去，让上层
+// 报一个含糊但可读的错。它在变异体上的红是 panic（变异版会在 url.Parse
+// 返回 nil 的那条路径上解引用 u），所以只作为行为说明，不作为证据——证据
+// 在 TestEndpointOpaqueBase。
+func TestEndpointUnparseableBase(t *testing.T) {
+	const base = "http://[::1]:namedport/"
+	if got, want := Endpoint(base, "/v1/chat"), "http://[::1]:namedport/v1/chat"; got != want {
+		t.Errorf("Endpoint(%q, %q) = %q，期望 %q", base, "/v1/chat", got, want)
+	}
+}
+
+// 版本段只在「整个段都是 v 加数字」时成立。
+//
+// 各条各自固定一处边界：路径里没有第二段（/v1）、版本段只有一个字符（/v）、
+// 段里混进非数字（/v1x、/vx）、以及两位数的合法版本（/v12）。数字两端各取
+// 一个恰好在边界上的值（0 与 9），它们仍然合法——判据是「每位都是数字」，
+// 不是「不是 1 到 8」。
+//
+// 「没有第二段」这一条固定的是「不往下切」；而 idx < 0 改成 <= 没有能把
+// 两版分开的输入：两者只在 idx == 0 时不同，那时 rest 以 / 开头、切出来的
+// 段是空串，紧跟着的长度判据照样返回 ""。同理，空段那条（//chat）也走
+// 这条出口。
+func TestVersionPrefixRecognition(t *testing.T) {
+	cases := []struct{ path, want string }{
+		{"/v1/chat", "/v1"},
+		{"/v12/chat", "/v12"},
+		{"/v0/chat", "/v0"},
+		{"/v9/chat", "/v9"},
+		{"/v1", ""},
+		{"/chat", ""},
+		{"v1/chat", ""},
+		{"/v/chat", ""},
+		{"/v1x/chat", ""},
+		{"/vx/chat", ""},
+		{"//chat", ""},
+	}
+	for _, tc := range cases {
+		if got := versionPrefix(tc.path); got != tc.want {
+			t.Errorf("versionPrefix(%q) = %q，期望 %q", tc.path, got, tc.want)
+		}
+	}
+}
+
 func TestRetryableStatus(t *testing.T) {
 	cases := map[int]bool{
 		http.StatusBadRequest:            false,
@@ -129,6 +189,27 @@ func TestCheckStatus(t *testing.T) {
 	}
 }
 
+// 300 不是 2xx：它是「有多种选择」的重定向，不是成功响应。
+//
+// 边界写宽一格，上游回 300 时会被当成成功。后果分两种情况：响应体能解
+// 成 JSON 的，会变成一份空回答，账上记成「成功但用量为零」；解不成的，
+// 报的是「响应不是 JSON」这条与真实原因无关的错。两种都让「上游给的是
+// 重定向」这件事查不出来。
+func TestCheckStatusTreats300AsFailure(t *testing.T) {
+	resp := &http.Response{StatusCode: 300, Header: http.Header{}, Body: http.NoBody}
+	err := CheckStatus(resp)
+	if err == nil {
+		t.Fatal("300 不是 2xx，应报错")
+	}
+	var up *channel.ErrUpstream
+	if !errors.As(err, &up) {
+		t.Fatalf("错误类型为 %T", err)
+	}
+	if up.StatusCode != 300 {
+		t.Errorf("StatusCode = %d，期望 300", up.StatusCode)
+	}
+}
+
 // 响应体要截断后保留：上游的错误信息可能与请求内容有关，
 // 而上层排查时需要看到它。
 func TestCheckStatusKeepsTruncatedBody(t *testing.T) {
@@ -167,6 +248,21 @@ func TestClientConfiguresTimeout(t *testing.T) {
 	}
 	if tr.ResponseHeaderTimeout != 7*time.Second {
 		t.Errorf("ResponseHeaderTimeout = %v", tr.ResponseHeaderTimeout)
+	}
+}
+
+// 空闲连接要有回收时限：这个字段取零值表示**永不回收**。
+//
+// 上游换地址、或者中间设备悄悄丢了连接之后，池里那些连接会一直以
+// 「可复用」的样子留着；请求复用到它们就失败，而连接数指标上看不出原因。
+// 断言用字面量 90s，不从被测代码里取常量。
+func TestClientExpiresIdleConnections(t *testing.T) {
+	tr, ok := Client(time.Second).Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport 类型为 %T", Client(time.Second).Transport)
+	}
+	if tr.IdleConnTimeout != 90*time.Second {
+		t.Errorf("IdleConnTimeout = %v，期望 90s", tr.IdleConnTimeout)
 	}
 }
 

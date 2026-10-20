@@ -302,6 +302,35 @@ func TestErrUpstreamUnwrap(t *testing.T) {
 	}
 }
 
+// Error() 的文本按状态码分三段：2xx（拿到了响应但用不了）、非 2xx、没有状态码。
+//
+// 每一段的边界各有一条用例，因为下游读的是这句话本身：「200 但响应不可用」
+// 与「上游返回 429」要做的处置完全不同，而两段之间只差一个比较符的写法。
+// 状态码 0 时原因在底层错误上，没有底层错误才退到最泛的那句。
+func TestErrUpstreamErrorText(t *testing.T) {
+	boom := errors.New("boom")
+	cases := []struct {
+		name string
+		err  *ErrUpstream
+		want string
+	}{
+		{name: "2xx 的下界 200", err: &ErrUpstream{StatusCode: 200, GotResponse: true}, want: "上游返回 200，但响应不可用"},
+		{name: "2xx 的上界 299", err: &ErrUpstream{StatusCode: 299, GotResponse: true}, want: "上游返回 299，但响应不可用"},
+		{name: "300 已经出了 2xx", err: &ErrUpstream{StatusCode: 300, GotResponse: true}, want: "上游返回 300"},
+		{name: "非 2xx", err: &ErrUpstream{StatusCode: 429, GotResponse: true}, want: "上游返回 429"},
+		{name: "1xx 不是 2xx", err: &ErrUpstream{StatusCode: 100, GotResponse: true}, want: "上游返回 100"},
+		{name: "没有状态码但有底层错误", err: &ErrUpstream{Err: boom}, want: "上游调用失败: boom"},
+		{name: "既没有状态码也没有底层错误", err: &ErrUpstream{}, want: "上游调用失败"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.err.Error(); got != tc.want {
+				t.Errorf("Error() = %q，期望 %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // 内嵌错误的可重试判据只有一处（三个适配器都调它），所以它的分类表钉在这里。
 //
 // 两个方向都要钉：只钉「限流可重试」的话，把所有内嵌错误都判成可重试也能过，
