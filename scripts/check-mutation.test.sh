@@ -415,19 +415,21 @@ rc=$?
 if [ "$rc" -eq 1 ]; then ok; else bad "少了新两行 —— 应失败，实际退出码 $rc"; dump; fi
 grep -q '认不出' "$last_out" || bad "少了新两行 —— 应报出是「认不出输出」"
 
-# 1d. 清单里父子两条同时选中时，要说清范围是重叠的（#769）。
+# 1d. 父子两条**一起写成参数**时拒绝执行（#866）。
 #
 #     包路径是递归口径：`./internal/ledger/` 会把子包 internal/ledger/store 的
-#     变异体一起跑，于是 store 在表上各算一次。不说的话，那两行会被读成互不
-#     相干的两个包，而左边那一行其实读作「ledger + store」。
-#     **这句话从 PKGS 算出来**，所以两个方向都要钉：都选中时要说，只选子包时不说。
+#     变异体一起跑。两个一起传，store 的几百个变异体会被跑两遍——实测第一包已经
+#     出了汇总行，第二包才开始重跑同一批。所以显式给出时直接拒绝，并说清谁包含谁、
+#     该只留哪个；而且**一个变异都不许跑**（拒绝发生在调用 gremlins 之前）。
 run "$stub_ok" "$tmp/lock1d" internal/ledger internal/ledger/store
 rc=$?
-if [ "$rc" -eq 0 ]; then ok; else bad "父子两条同时选中 —— 应通过，实际退出码 $rc"; dump; fi
-grep -q 'internal/ledger 含 internal/ledger/store' "$last_out" \
-  || bad "父子两条同时选中 —— 要说明 internal/ledger 那一行含子包 store"
-if grep -q 'internal/billing 含' "$last_out"; then
-  bad "父子两条同时选中 —— 没选中的 billing / expr 不该被列出来"
+if [ "$rc" -eq 1 ]; then ok; else bad "父子两条一起传 —— 应拒绝，实际退出码 $rc"; dump; fi
+grep -q 'internal/ledger 递归包含 internal/ledger/store' "$last_out" \
+  || bad "父子两条一起传 —— 要说明谁包含谁"
+grep -q '这一轮请只留：internal/ledger' "$last_out" \
+  || bad "父子两条一起传 —— 要提示只留外层那个"
+if grep -q '全部跑成' "$last_out" || grep -q '^internal/ledger ' "$last_out"; then
+  bad "父子两条一起传 —— 拒绝之后不该跑出任何汇总行"
 else
   ok
 fi
@@ -435,17 +437,35 @@ fi
 run "$stub_ok" "$tmp/lock1d-child" internal/ledger/store
 rc=$?
 if [ "$rc" -eq 0 ]; then ok; else bad "只选子包 —— 应通过，实际退出码 $rc"; dump; fi
-if grep -q '范围是重叠的' "$last_out"; then
+if grep -q '递归包含' "$last_out"; then
   bad "只选子包 —— 不该说重叠（父包这一轮没跑）"
 else
   ok
+fi
+# **不带参数跑全部包是例外**：那是本脚本的基线口径，表本来就按「父包含子包」读。
+# 它必须照常跑成，只打一行注记。判据也要钉住，否则哪天有人把拒绝逻辑挪到选包之后，
+# 「跑全部包」会变成一句「请只留外层」。
+LARKAX_DB_DSN="$testdsn" LARKAX_REDIS_DSN="redis://placeholder:6379/0" \
+  GREMLINS="$stub_ok" GREMLINS_VERSION="$PINNED" LOCK_FILE="$tmp/lock1d-all" \
+  bash "$SCRIPT" >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "不带参数跑全部包 —— 应照常跑成，实际退出码 $rc"; dump; fi
+grep -q 'internal/ledger 含 internal/ledger/store' "$last_out" \
+  || bad "不带参数跑全部包 —— 重叠要照旧打注记"
+grep -q '全部跑成' "$last_out" || bad "不带参数跑全部包 —— 收尾应报「全部跑成」"
+# 全部跑时，另一对真实重叠（billing / expr）也要列出来：注记从 PKGS 算，
+# 不是只认某一个包名。
+if grep -q 'internal/billing 含 internal/billing/expr' "$last_out"; then
+  ok
+else
+  bad "不带参数跑全部包 —— billing / expr 这一对重叠也要列出来"
 fi
 # 只选父包时也不说：它这一次跑出来的**就是** ledger + store，表上没有第二行
 # 与它重叠，这时说一句「范围重叠」反而会让人以为表里还有另一个 store。
 run "$stub_ok" "$tmp/lock1d-parent" internal/ledger
 rc=$?
 if [ "$rc" -eq 0 ]; then ok; else bad "只选父包 —— 应通过，实际退出码 $rc"; dump; fi
-if grep -q '范围是重叠的' "$last_out"; then
+if grep -q '递归包含' "$last_out"; then
   bad "只选父包 —— 不该说重叠（表里只有它这一行）"
 else
   ok
@@ -594,7 +614,8 @@ grep -q '不算通过' "$last_out" || bad "筛选项没选中任何包 —— �
 #      与第 11 条的区别是「一条都没选中」与「只漏了一部分」：后者原先与「全部
 #      跑成」长得一模一样——匹配到的照常跑，汇总表少一行，收尾照打「全部跑成。」，
 #      退出码 0。而写参数的人以为自己覆盖了两个包，实际只覆盖一个，少验的那一包
-#      不会被别的机制补上（CI 里没有 gremlins）。
+#      不会被别的机制补上（CI 的变异 job 与本脚本共用同一份清单，名字写错同样
+#      会少跑一包）。
 #      两个方向都钉：没匹配到的参数要被列出来，而匹配到的包该跑还是要跑——判据是
 #      「不静默」，不是「一个参数写错就整轮什么都不做」。
 run "$stub_ok" "$tmp/lock11b" internal/money internal/no-such-package
@@ -708,10 +729,56 @@ rc=$?
 if [ "$rc" -eq 0 ]; then ok; else bad "带存活明细 —— 存活不是失败，应通过，实际退出码 $rc"; dump; fi
 grep -q '存活的变异' "$last_out" || bad "带存活明细 —— 应打出存活清单"
 # 桩件的输出前面带缩进，抄下来时要归一化成「包名 + 类型 + 位置」。
-grep -q 'internal/money  CONDITIONALS_BOUNDARY at money.go:103:8' "$last_out" \
+grep -q 'internal/money  LIVED CONDITIONALS_BOUNDARY at money.go:103:8' "$last_out" \
   || bad "带存活明细 —— 清单里应有「包名 + 类型 + 位置」（缩进要去掉）"
-grep -q 'internal/money  ARITHMETIC_BASE at money.go:54:25' "$last_out" \
+grep -q 'internal/money  LIVED ARITHMETIC_BASE at money.go:54:25' "$last_out" \
   || bad "带存活明细 —— 第二条存活也应列出"
+
+# 17b. 逐行透传 + 进度（#866）。
+#
+#      以前一个包的输出被整个吞到结束才看得见，跑几十分钟时没法判断「还有五分钟
+#      还是五十分钟」。现在每行带序号与已用时间；每 PROGRESS_EVERY 条打一行进度。
+#
+#      **gremlins v0.6.0 正常运行不报总数**：源码 cmd/unleash.go 里 `Starting...`
+#      之后直接是逐条结果，汇总在最后；实际输出也核过。所以默认走降级路径，
+#      只报「已完成 + 已用 + 平均每条」，不为了打 ETA 编一个总数。
+PROGRESS_EVERY=2 LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_surv" GREMLINS_VERSION="$PINNED" \
+  LOCK_FILE="$tmp/lock17b" bash "$SCRIPT" internal/money >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "逐行透传 —— 应通过，实际退出码 $rc"; dump; fi
+grep -qE '^\[ *1\] \[[0-9]+s\]  LIVED CONDITIONALS_BOUNDARY at money.go:103:8' "$last_out" \
+  || bad "逐行透传 —— 第一行要带序号、已用时间与原样内容"
+grep -qE '^\[ *2\] \[[0-9]+s\]   LIVED ARITHMETIC_BASE at money.go:54:25' "$last_out" \
+  || bad "逐行透传 —— 序号要逐条递增，原行的缩进保留"
+grep -q '── 进度 \[2\] 已用 .*平均每条 .*s（gremlins 没报总数，不给 ETA）' "$last_out" \
+  || bad "逐行透传 —— 每 N 条要给降级进度（计数 + 已用 + 平均每条）"
+grep -qE '^internal/money +8 ' "$last_out" \
+  || bad "逐行透传 —— 汇总表那一行照旧要打出来"
+
+# 17c. 拿得到总数时算 ETA。总数只认 gremlins 自己报的形态（`<N> mutants` 或
+#      dry run 的 `Runnable: N, Not covered: M`），认不出就走 17b 的降级路径。
+stub_total="$tmp/gremlins-total"
+{
+  stub_head
+  cat <<'EOF'
+echo "Found 12 mutants"
+echo " LIVED CONDITIONALS_BOUNDARY at money.go:103:8"
+echo "  LIVED ARITHMETIC_BASE at money.go:54:25"
+echo "Killed: 8, Lived: 2, Not covered: 3"
+echo "Timed out: 0, Not viable: 0, Skipped: 0"
+echo "Test efficacy: 80.00%"
+echo "Mutator coverage: 100.00%"
+EOF
+} >"$stub_total"
+chmod +x "$stub_total"
+PROGRESS_EVERY=1 LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_total" GREMLINS_VERSION="$PINNED" \
+  LOCK_FILE="$tmp/lock17c" bash "$SCRIPT" internal/money >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "有总数时的 ETA —— 应通过，实际退出码 $rc"; dump; fi
+grep -q '── 进度 \[1/12\] 已用 .*预估还剩' "$last_out" \
+  || bad "有总数时的 ETA —— 要打「已完成/总数」与预估剩余"
+grep -q '── 进度 \[2/12\] 已用 .*预估还剩' "$last_out" \
+  || bad "有总数时的 ETA —— 逐条递增后仍按同一个总数算"
 
 # 18. 没有存活变异时，不该凭空打出一节空清单。
 run "$stub_all_killed" "$tmp/lock16" internal/money
@@ -761,7 +828,7 @@ if [ "$rc" -eq 1 ]; then ok; else bad "有包不可信 —— 应失败，实际
 grep -q '不可信' "$last_out" || bad "有包不可信 —— 要报出是这个原因"
 # 而清单照打：好包那一条是这一轮唯一的产出，丢了就只能重跑。
 grep -q '存活的变异' "$last_out" || bad "有包不可信 —— 存活清单仍然要打印（#566）"
-grep -q 'internal/money  CONDITIONALS_BOUNDARY at money.go:103:8' "$last_out" \
+grep -q 'internal/money  LIVED CONDITIONALS_BOUNDARY at money.go:103:8' "$last_out" \
   || bad "有包不可信 —— 好包那一条存活要出现在清单里"
 
 # ── 「这把尺子」：版本与变异器集合 ────────────────────────────────────────
@@ -938,6 +1005,39 @@ if grep -q 'gremlins-unleash' "$seq_log"; then
 else
   ok
 fi
+
+# 25. `--list-packages`：CI 的选包那一步靠它读清单，所以它必须**不依赖任何
+#     运行前提**——选包跑在起数据库、装 gremlins 之前。
+#
+#     判据四条：
+#       a) 缺 gremlins、缺 DSN、锁文件根本建不出来时照样退出 0；
+#       b) 不打印「已拿到锁」：这个开关只读数据；
+#       c) 打印的每个名字在仓库里都是一个真实目录，且条数非零——防它打出表头
+#          或空行，把「清单读到了」变成「读到了一些行」（LESSONS 第 16 条：
+#          空清单与干净清单长得一样）；
+#       d) 钱的那几个包在——「清单没被清空或截断」的正向证据。
+: > "$tmp/notadir"
+list_out=$(GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+  LOCK_FILE="$tmp/notadir/lock" bash "$SCRIPT" --list-packages 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else
+  bad "--list-packages —— 应不依赖 gremlins/DSN/锁就跑成，实际退出码 $rc"
+  printf '%s\n' "$list_out" | sed 's/^/    | /' | tail -5
+fi
+if printf '%s\n' "$list_out" | grep -q '已拿到锁'; then
+  bad "--list-packages —— 不该拿锁"
+else
+  ok
+fi
+list_count=$(printf '%s\n' "$list_out" | grep -c .)
+if [ "$list_count" -gt 0 ]; then ok; else bad "--list-packages —— 一条包名都没打印"; fi
+missing_dirs=$(printf '%s\n' "$list_out" | while IFS= read -r p; do [ -d "$p" ] || printf '%s\n' "$p"; done)
+if [ -z "$missing_dirs" ]; then ok; else
+  bad "--list-packages —— 这些不是仓库里的目录：$(printf '%s' "$missing_dirs" | tr '\n' ' ')"
+fi
+for want in internal/money internal/billing internal/ledger internal/pricing internal/pipeline; do
+  if printf '%s\n' "$list_out" | grep -qx "$want"; then ok; else bad "--list-packages —— 清单里缺了 $want"; fi
+done
 
 # ── 结果 ──────────────────────────────────────────────────────────────────
 
