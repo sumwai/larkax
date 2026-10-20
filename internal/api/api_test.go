@@ -936,6 +936,72 @@ func TestUpstreamErrorStatus(t *testing.T) {
 	}
 }
 
+// 上游失败的日志级别跟状态码走：5xx 是 ERROR，4xx 是 WARN。
+//
+// 这两档不是措辞问题。ERROR 的意思是「有人需要来看一眼」：5xx 里有账本、候选
+// 来源这些我们自己的环节，它们沉到 WARN 一级就没人按级别筛得到。反过来，
+// 调用方漏填字段这类事被记成 ERROR，只会把真正的服务端故障淹掉。
+//
+// 断言落在**同一行**上：整份日志里出现 level=ERROR、也出现那句话，各自成立
+// 不代表它们是同一条记录。
+func TestUpstreamFailureLogLevelFollowsStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		want    int
+		level   string
+		message string
+	}{
+		{
+			name:    "5xx 记 ERROR",
+			err:     errors.New("placeholder: 上游炸了"),
+			want:    http.StatusInternalServerError,
+			level:   "level=ERROR",
+			message: "请求处理失败",
+		},
+		{
+			name:    "4xx 记 WARN",
+			err:     fmt.Errorf("%w: max_tokens 必须为正，当前 %d", billing.ErrNoUpperBound, 0),
+			want:    http.StatusBadRequest,
+			level:   "level=WARN",
+			message: "请求被拒绝",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := &logCapture{}
+			adoptLogCapture(t, logs)
+
+			h, _, _ := newTestHandler()
+			h.Chatter = &fakeChatter{err: tc.err}
+
+			rec := post(h, PathChatCompletions, validBody)
+			if rec.Code != tc.want {
+				t.Fatalf("状态码 = %d，期望 %d（响应体 %s）", rec.Code, tc.want, rec.Body)
+			}
+			line, ok := logLineWith(logs.text(), tc.message)
+			if !ok {
+				t.Fatalf("日志里没有 %q 那条记录:\n%s", tc.message, logs.text())
+			}
+			if !strings.Contains(line, tc.level) {
+				t.Errorf("这条记录的级别不是 %s: %s", tc.level, line)
+			}
+		})
+	}
+}
+
+// logLineWith 找出第一条包含 marker 的日志行。
+//
+// 按行找，而不是在整份日志里分别找两段字串：「级别对」与「这句话出现过」
+// 各自成立，不等于它们在同一条记录上。
+func logLineWith(text, marker string) (string, bool) {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, marker) {
+			return line, true
+		}
+	}
+	return "", false
+}
+
 // 「一个候选都不剩」与「渠道类型做不了这次协议」是两类**下一步不同**的失败
 // （改目录声明 / 换一条类型对的渠道），而它们的响应体一度一模一样：同一句
 // 「upstream call failed」、code 恒为 null，调用方只能开单问人。
@@ -1232,6 +1298,59 @@ func TestResultWithoutResponseIsServerError(t *testing.T) {
 	rec := post(h, PathChatCompletions, validBody)
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("状态码 = %d，期望 500", rec.Code)
+	}
+}
+
+// 流式入口拿到没有事件流的结果时回 500，而不是把响应头写出去之后挂在那里。
+//
+// 这是 TestResultWithoutResponseIsServerError 在流式那一侧的对应物。两种坏形状
+// 都要拦：整个结果是 nil（上游那条路走了非流式），结果是空壳（Events 为 nil）。
+// 后者尤其不能漏——拦住它的是 `res == nil || res.Events == nil` 这条判据，
+// 写成 `&&` 之后空壳会一路走到 `for ev := range res.Events`：在 nil 通道上
+// range 永远不返回，调用方拿到的是一条永远不结束的流。
+//
+// 请求放在 goroutine 里跑并加一道超时：判据写坏时这一条要报「几秒内没结束」，
+// 而不是让整轮 go test 挂在那个 range 上。
+func TestStreamResultWithoutEventsIsServerError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result *gateway.Result
+	}{
+		{name: "整个结果是 nil", result: nil},
+		{name: "事件流是 nil", result: &gateway.Result{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, chatter := newTestHandler()
+			chatter.streamResult = tc.result
+
+			req := httptest.NewRequestWithContext(context.Background(),
+				http.MethodPost, PathChatCompletions, strings.NewReader(streamBody))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			finished := make(chan any, 1)
+			go func() {
+				defer func() { finished <- recover() }()
+				h.ServeHTTP(rec, req)
+			}()
+
+			select {
+			case p := <-finished:
+				if p != nil {
+					t.Fatalf("处理请求时 panic 了: %v（没有事件流的结果不是 panic 的场合）", p)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("请求 2 秒内没有结束：空壳结果被当成一条流，" +
+					"在 nil 通道上 range 永远不返回")
+			}
+
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("状态码 = %d，期望 500（响应体 %s）", rec.Code, rec.Body)
+			}
+			if !strings.Contains(rec.Body.String(), "internal error") {
+				t.Errorf("响应体里没有那句给调用方的话: %s", rec.Body)
+			}
+		})
 	}
 }
 

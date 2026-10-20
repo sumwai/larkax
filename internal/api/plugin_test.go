@@ -538,6 +538,90 @@ func TestNonBlockingOnResponseFailureKeepsRequest(t *testing.T) {
 	}
 }
 
+// 非阻断的插件失败是**只能靠日志被看见**的，所以请求结束时那条日志必须真的写出来。
+//
+// 这条请求在响应上与非阻断插件成功时一模一样（见上一条用例）：补丁没生效、
+// 请求照常成功、账单也对。想知道「这次为什么没按插件说的来」，唯一的出口是
+// Session.Failures() 与入口在请求结束时写的那条日志。会话的关闭与这条日志挂在
+// 同一个判据上，而少了它们，响应、账单、上游调用三处全都看不出来。
+func TestPluginFailureIsLoggedWhenRequestEnds(t *testing.T) {
+	logs := &logCapture{}
+	adoptLogCapture(t, logs)
+
+	h := newPluginHarness(t, pluginRegistry(t, "",
+		`onResponse(){ throw new Error("我自己挂了"); }`))
+	rec := post(h.handler, PathChatCompletions, validBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("非阻断型插件失败不该让请求失败，状态码 = %d，响应体 %s", rec.Code, rec.Body)
+	}
+
+	line, ok := logLineWith(logs.text(), "插件失败")
+	if !ok {
+		t.Fatalf("日志里没有那条「插件失败」——插件这次为什么没生效就无从查起:\n%s", logs.text())
+	}
+	// 四样都要在这一行上：级别、哪个插件、哪个 hook、哪次请求。少了任何一样，
+	// 这条记录都指不到现场。
+	for _, want := range []string{"level=WARN", "plugin=p1", "hook=onResponse"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("这条记录里没有 %q: %s", want, line)
+		}
+	}
+	// request_id 要有值，不只是键在：指不到具体请求的标识与没有这个字段一样。
+	if id := logFieldValue(line, "request_id"); id == "" {
+		t.Errorf("这条记录里的 request_id 没有值: %s", line)
+	}
+}
+
+// logFieldValue 取出一条 slog 文本记录里某个键的值，没有这个键或值为空时返回空串。
+//
+// 值可能被 slog 加引号（含空格或引号时），所以两头一起去掉再比。
+func logFieldValue(line, key string) string {
+	idx := strings.Index(line, key+"=")
+	if idx < 0 {
+		return ""
+	}
+	fields := strings.Fields(line[idx+len(key)+1:])
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.Trim(fields[0], `"`)
+}
+
+// 插件没给元数据时，不该留下那条「插件给了响应元数据」的日志。
+//
+// 元数据在协议层没有对应字段，日志是它唯一的出口（见 responseHooks 的
+// OnResponse）；但反过来，「这次没有元数据」也记一条的话，装过插件的每一个
+// 请求都会多一行空记录，把真正有元数据的那些淹掉。
+//
+// 两个子用例合起来才说明「没有」是真的没有：对照组先证明这个捕获器接得住
+// 这句话、这个插件也确实跑到了 onResponse。
+func TestResponseMetadataIsLoggedOnlyWhenPresent(t *testing.T) {
+	const marker = "插件给了响应元数据"
+
+	for _, tc := range []struct {
+		name  string
+		hooks string
+		want  bool
+	}{
+		{name: "有元数据", hooks: `onResponse(){ return { metadata: { seen: 1 } }; }`, want: true},
+		{name: "没有元数据", hooks: `onResponse(){ return {}; }`, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := &logCapture{}
+			adoptLogCapture(t, logs)
+
+			h := newPluginHarness(t, pluginRegistry(t, "", tc.hooks))
+			rec := post(h.handler, PathChatCompletions, validBody)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("状态码 = %d，响应体 %s", rec.Code, rec.Body)
+			}
+			if got := strings.Contains(logs.text(), marker); got != tc.want {
+				t.Errorf("日志里有 %q = %v，期望 %v:\n%s", marker, got, tc.want, logs.text())
+			}
+		})
+	}
+}
+
 // 阻断型插件的 onRequest 失败时请求失败，而且**上游一次都没被调过**：
 // 那时还没有任何副作用，调用方重试是安全的。
 func TestBlockingOnRequestFailsBeforeUpstream(t *testing.T) {

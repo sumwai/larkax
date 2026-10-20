@@ -584,6 +584,56 @@ func TestResponsesStreamForwardsAnnotations(t *testing.T) {
 	}
 }
 
+// 一条事件里的**一批**标注要全部发出，不是只发第一条。
+//
+// Annotations 在事件契约里是一批（见 channel.StreamEvent）：一条事件可以带
+// 好几条标注，渲染层按顺序每条给一帧、下标从 0 起连续。循环里那次写失败要
+// 中止整批——判据取反之后，**第一条写成功就立刻返回**，后面几条从此消失：
+// 客户端只看到一半的引用，而收尾事件里的 output[] 仍按整批给出，两处对不上。
+func TestResponsesStreamEmitsEveryAnnotationInABatch(t *testing.T) {
+	urls := []string{"https://example.com/a", "https://example.com/b"}
+	event := channel.StreamEvent{Kind: "annotation"}
+	for _, u := range urls {
+		event.Annotations = append(event.Annotations, flatCitation(u))
+	}
+
+	_, frames := responsesStreamRequest(t,
+		channel.StreamEvent{Kind: "delta", Text: "你好"},
+		event,
+		channel.StreamEvent{Kind: "done", FinishReason: "stop"},
+	)
+
+	var got []map[string]any
+	for i, f := range frames {
+		if f.event != "response.output_text.annotation.added" {
+			continue
+		}
+		m := f.decode(t)
+		if idx := m["annotation_index"]; idx != float64(len(got)) {
+			t.Errorf("第 %d 帧的 annotation_index = %v，期望 %d（从 0 起、连续）",
+				i, idx, len(got))
+		}
+		got = append(got, m)
+	}
+	if len(got) != len(urls) {
+		t.Fatalf("标注事件有 %d 条，期望 %d 条（一条事件里的整批都要发出）", len(got), len(urls))
+	}
+	for i, u := range urls {
+		anno, ok := got[i]["annotation"].(map[string]any)
+		if !ok {
+			t.Fatalf("第 %d 条标注不是对象: %v", i, got[i]["annotation"])
+		}
+		assertAnnotation(t, anno, flatCitation(u))
+	}
+
+	// 收尾事件的 output[] 也是整批：增量帧与终态必须是同一批、同一个顺序。
+	last := frames[len(frames)-1].decode(t)
+	list, ok := dig(t, last, "response", "output", "0", "content", "0", "annotations").([]any)
+	if !ok || len(list) != len(urls) {
+		t.Fatalf("终态的 annotations = %v，期望 %d 条", list, len(urls))
+	}
+}
+
 // 标注先于正文到达时也要落到**同一个**正文项上，而不是另开一项。
 //
 // 上游的事件顺序不保证（标注可能先于它还解释的那段正文）。另开一项会让客户端
@@ -652,6 +702,83 @@ func TestResponsesNonStreamForwardsAnnotations(t *testing.T) {
 	assertAnnotation(t, got, flatCitation("https://example.com/a"))
 }
 
+// 后一块正文没有标注时，不能把前面那一块的标注冲掉。
+//
+// 判据是「这一块带标注才取它」。写成 `>= 0` 之后恒真，于是**最后一块**正文
+// 说了算：它没有标注时就把已经取到的标注换成空。多段正文是上游允许的
+// （relay.attachAnnotations 只往其中一块上挂标注），响应体上看到的是标注整批
+// 消失，而正文一个字都没变。
+func TestResponsesKeepsAnnotationsWhenLaterTextHasNone(t *testing.T) {
+	msg := channel.Message{
+		Role: "assistant",
+		Content: []channel.ContentBlock{
+			{
+				Type: "text", Text: "前半",
+				Annotations: []map[string]any{foldedCitation("https://example.com/a")},
+			},
+			{Type: "text", Text: "后半"},
+		},
+	}
+
+	out := responsesOutput("id", "completed", msg)
+	if len(out) != 1 {
+		t.Fatalf("output 项数 = %d，期望 1（正文项）: %+v", len(out), out)
+	}
+	item, ok := out[0].(responsesMessageItem)
+	if !ok {
+		t.Fatalf("output[0] 不是正文项: %T", out[0])
+	}
+	if len(item.Content) != 1 {
+		t.Fatalf("正文项的 content 有 %d 段，期望 1: %+v", len(item.Content), item.Content)
+	}
+	if got := item.Content[0].Text; got != "前半后半" {
+		t.Errorf("正文 = %q，期望两段拼起来", got)
+	}
+	annos := item.Content[0].Annotations
+	if len(annos) != 1 {
+		t.Fatalf("标注有 %d 条，期望 1 条（后一段正文没有标注，不该把前一段的冲掉）: %+v",
+			len(annos), annos)
+	}
+	assertAnnotation(t, annos[0], flatCitation("https://example.com/a"))
+}
+
+// 空回答也要有一个正文项：output 是必填列表。
+//
+// 判据是「有正文，或者根本没有工具项」。把 `len(calls) == 0` 取反之后，空回答
+// （正文空、也没有工具调用）落进 false 那一支：output 是空数组，客户端拿到的
+// 是一份没有 output 的回答——而「模型答了个空串」与「模型什么都没说」在调用方
+// 那里本该是同一件事。
+func TestResponsesEmptyAnswerStillHasMessageItem(t *testing.T) {
+	out := responsesOutput("id", "completed", channel.Message{Role: "assistant"})
+	if len(out) != 1 {
+		t.Fatalf("output 项数 = %d，期望 1（空回答也要一个正文项）: %+v", len(out), out)
+	}
+	item, ok := out[0].(responsesMessageItem)
+	if !ok || item.Type != "message" {
+		t.Fatalf("output[0] = %+v，期望一个 message 项", out[0])
+	}
+	if len(item.Content) != 1 || item.Content[0].Text != "" {
+		t.Errorf("正文项 = %+v，期望一段空正文", item.Content)
+	}
+	// annotations 是 [] 而不是 null：SDK 的模型里它是必填列表。
+	if item.Content[0].Annotations == nil {
+		t.Error("annotations 是 nil——序列化后是 null，而协议里它是必填数组")
+	}
+}
+
+// 内层为空（一条引用只有类型、没有字段）时也照常摊平，结果是只带 type 的对象。
+//
+// 这一格同时是 TestResponsesAnnotationShapeIsSameOnBothPaths 注释里那条等价
+// 论证的实证：内层为空时，`len(inner)-1` 算出 -1，而 `make(map[string]any, -1)`
+// 在 Go 里是合法的（与切片不同，切片的负数长度会当场 panic）。
+func TestResponsesAnnotationWithEmptyInner(t *testing.T) {
+	got := responsesAnnotation(map[string]any{
+		"type":         "url_citation",
+		"url_citation": map[string]any{},
+	})
+	assertAnnotation(t, got, map[string]any{"type": "url_citation"})
+}
+
 // TestResponsesAnnotationShapeIsSameOnBothPaths 是 #784 的判据：两条路交出的
 // 引用标注是**同一个形状**。
 //
@@ -662,6 +789,14 @@ func TestResponsesNonStreamForwardsAnnotations(t *testing.T) {
 // 两边送进去的输入不同，是它们在链路上的位置不同：
 // 非流式那一侧已经被 relaykit 折过（foldedCitation），
 // 流式那一侧转发的还是上游给的扁平原样。
+//
+// # 容量提示上的变异不改变任何东西
+//
+// responsesAnnotation 里 `make(map[string]any, len(inner)+1)` 的 `+1` 被改成
+// `-1` 时，两版交出的内容是同一份：容量提示只影响分配，不进 map、也不改变
+// 写进去的键值。所以**没有输入能区分这两版**，它是等价变异而不是缺口。
+// 前提是 Go 对负的容量提示不 panic——实测 `n := 0; make(map[string]any, n-1)`
+// 正常返回一个空 map；这一点与切片不同，切片的负数长度会当场 panic。
 func TestResponsesAnnotationShapeIsSameOnBothPaths(t *testing.T) {
 	h, _, chatter := newTestHandler()
 

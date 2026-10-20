@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -208,6 +209,11 @@ func TestOpenAIStreamToolCall(t *testing.T) {
 	if got := dig(t, first, "choices", "0", "delta", "tool_calls", "0", "id"); got != "call_1" {
 		t.Errorf("id = %v，期望 call_1", got)
 	}
+	// type 只在**第一个**分片里给：OpenAI 的 SDK 按它决定把这一段计入哪一类
+	// 调用，后续分片再带一次会让客户端以为这是另一路调用。
+	if got := dig(t, first, "choices", "0", "delta", "tool_calls", "0", "type"); got != "function" {
+		t.Errorf("第一个分片的 type = %v，期望 function", got)
+	}
 	if got := dig(t, first, "choices", "0", "delta", "tool_calls", "0", "function", "name"); got != "get_weather" {
 		t.Errorf("name = %v，期望 get_weather", got)
 	}
@@ -220,6 +226,9 @@ func TestOpenAIStreamToolCall(t *testing.T) {
 	second := at(t, frames, 2).decode(t)
 	if got := dig(t, second, "choices", "0", "delta", "tool_calls", "0", "id"); got != nil {
 		t.Errorf("后续分片不该带 id: %v", got)
+	}
+	if got := dig(t, second, "choices", "0", "delta", "tool_calls", "0", "type"); got != nil {
+		t.Errorf("后续分片不该带 type: %v", got)
 	}
 	if got := dig(t, second, "choices", "0", "delta", "tool_calls", "0", "function", "arguments"); got != `"北京"}` {
 		t.Errorf("第二个参数分片 = %v", got)
@@ -598,8 +607,98 @@ func TestAnthropicStreamTextBetweenToolFragments(t *testing.T) {
 	}
 }
 
-// ── 第一帧的输入用量 ──────────────────────────────────────────────────
+// 连续的正文分片必须续在**同一个**正文块上。
+//
+// 判据是「已经开着就不重开」。把 `textIndex >= 0` 写成 `> 0` 之后，下标 0
+// 那个正文块永远算「没开」：第二个正文分片会另开一块（下标 1），正文接着往
+// 新块里写。客户端按块渲染，看到的不是一段连续的正文，而是两段各写了一半的
+// 正文；final message 里也会多出一个正文块。
+//
+// 夹具只要两个连续正文分片：第一个把块开在下标 0 上，第二个落进判据的另一边。
+func TestAnthropicStreamTextDeltasShareOneBlock(t *testing.T) {
+	_, frames := streamRequest(t, PathMessages,
+		channel.StreamEvent{Kind: "delta", Text: "你"},
+		channel.StreamEvent{Kind: "delta", Text: "好"},
+		channel.StreamEvent{Kind: "done", FinishReason: "end_turn"},
+	)
 
+	checkBlockBrackets(t, blockEvents(t, frames))
+
+	starts := 0
+	textIndex := -1
+	for i, f := range frames {
+		switch f.event {
+		case "content_block_start":
+			m := f.decode(t)
+			if dig(t, m, "content_block", "type") != "text" {
+				continue
+			}
+			starts++
+			textIndex = frameIndex(t, m, i)
+		case "content_block_delta":
+			m := f.decode(t)
+			if dig(t, m, "delta", "type") != "text_delta" {
+				continue
+			}
+			if got := frameIndex(t, m, i); got != textIndex {
+				t.Errorf("第 %d 帧的正文分片落在块 %d 上，正文块是 %d", i, got, textIndex)
+			}
+		}
+	}
+	if starts != 1 {
+		t.Errorf("正文块被打开了 %d 次，期望 1 次——一段连续的正文只该有一个块", starts)
+	}
+}
+
+// 工具块开在哪个下标上，参数分片就要落在哪个下标上。
+//
+// # 为什么这一格在别的夹具里看不出来
+//
+// `openToolBlock` 的返回值只有「这一片同时带着参数」时才被读到：不带参数时
+// 调用方提前返回，参数留给下一片；而下一片走的是 toolBlocks 的**复用**分支，
+// 不经过这个返回值。上游把 id、名字与第一段参数放在同一个分片里是常见形状
+// （见 TestOpenAIStreamToolCall 的夹具），所以这一条喂的就是它。
+//
+// 返回一个错的下标时块照样开、参数照样写，只是写在另一个块上：客户端拼出来
+// 的是两个 tool_use 块，一个只有名字、一个只有半截参数。
+func TestAnthropicStreamToolDeltaStaysOnTheOpenedBlock(t *testing.T) {
+	_, frames := streamRequest(t, PathMessages,
+		channel.StreamEvent{Kind: "delta", Text: "我查一下"},
+		toolUseEvent(0, "toolu_1", "get_weather", `{"city":`),
+		channel.StreamEvent{Kind: "done", FinishReason: "tool_use"},
+	)
+
+	checkBlockBrackets(t, blockEvents(t, frames))
+
+	toolIndex := -1
+	for i, f := range frames {
+		if f.event != "content_block_start" {
+			continue
+		}
+		m := f.decode(t)
+		if dig(t, m, "content_block", "type") != "tool_use" {
+			continue
+		}
+		toolIndex = frameIndex(t, m, i)
+	}
+	if toolIndex < 0 {
+		t.Fatal("流里没有工具块")
+	}
+	for i, f := range frames {
+		if f.event != "content_block_delta" {
+			continue
+		}
+		m := f.decode(t)
+		if dig(t, m, "delta", "type") != "input_json_delta" {
+			continue
+		}
+		if got := frameIndex(t, m, i); got != toolIndex {
+			t.Errorf("参数分片落在块 %d 上，工具块开在 %d 上", got, toolIndex)
+		}
+	}
+}
+
+// ── 第一帧的输入用量 ──────────────────────────────────────────────────
 // 上游在流的最前面报了输入用量时，message_start 里给的是**真值**，不是估算。
 //
 // 断言钉在**客户端读到的数**上：帧从 HTTP 响应里按 SSE 解出来，读的就是
@@ -656,6 +755,40 @@ func TestAnthropicStreamStartUsesUsageWhenItComesFirst(t *testing.T) {
 
 	if got := dig(t, at(t, frames, 0).decode(t), "message", "usage", "input_tokens"); got != float64(12) {
 		t.Errorf("message_start 的 input_tokens = %v，期望 12（第一个事件就是完整用量）", got)
+	}
+}
+
+// 事件契约说 Usage 只在 usage 与 usage_input 上有效；上游违反它时，第一帧
+// 要用本地估算写出去，而不是去解引用一个 nil。
+//
+// 这条用例针对的是判据的**合取**：「第一个事件带用量」与「它是个报用量的事件」
+// 两件事同时成立才用真值。写成析取之后，一个不带用量的 usage_input 事件就落进了
+// 「用真值」那一支——`*first.Usage` 当场 panic，这条流连第一帧都出不去。
+//
+// 输入是**造出来的**：本仓的适配器都会在 usage_input 上带 Usage（见
+// channel.StreamEvent 的注释）。造它是为了让那条判据真的被读到——真实输入里
+// 两件事总是一起成立，判据写成析取也照样绿。
+func TestAnthropicStreamStartFallsBackWithoutUsage(t *testing.T) {
+	s := &anthropicStream{id: "id", model: "m", input: 3, textIndex: -1, toolBlocks: map[int]int{}}
+	var buf bytes.Buffer
+
+	// panic 也算失败：这一格要的正是不 panic。
+	defer func() {
+		if p := recover(); p != nil {
+			t.Fatalf("没有用量的 usage_input 事件让第一帧 panic 了: %v", p)
+		}
+	}()
+	if err := s.writeStart(&buf, channel.StreamEvent{Kind: "usage_input"}); err != nil {
+		t.Fatalf("写第一帧失败: %v", err)
+	}
+
+	frames := parseFrames(t, buf.String())
+	start := at(t, frames, 0)
+	if start.event != "message_start" {
+		t.Fatalf("第 0 帧的事件名 = %q，期望 message_start", start.event)
+	}
+	if got := dig(t, start.decode(t), "message", "usage", "input_tokens"); got != float64(3) {
+		t.Errorf("input_tokens = %v，期望 3（拿不到真值时用本地估算）", got)
 	}
 }
 
