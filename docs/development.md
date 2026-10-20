@@ -1760,6 +1760,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/auth` | 221 | 4 | 1 | 8 | 96.57% | 98.22% | 86.6% |
 | `internal/relay` | 112 | 3 | 0 | 7 | 94.26% | 97.39% | 87.7% |
 | `internal/idempotency` | 34 | 1 | 0 | 0 | 100.00% | 97.14% | 83.3% |
+| `internal/plugin/sandbox` | 63 | 2 | 0 | 5 | 92.86% | 96.92% | 93.8% |
 | `internal/route` | 123 | 4 | 0 | 24 | 84.11% | 96.85% | 97.8% |
 | `internal/gateway` | 238 | 9 | 0 | 9 | 96.48% | 96.36% | 95.7% |
 | `internal/plugin/host` | 104 | 4 | 0 | 4 | 96.43% | 96.30% | 94.6% |
@@ -1800,6 +1801,15 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 nil 还是空切片——调用点只做 `append(..., fieldAttrs(...)...)`，差别不进日志。
 一条是数组容量提示里的 `/` → `*`，只影响预分配大小。第一条说的那个
 「`s` 恒为合法 UTF-8」，由 `TestJSStringsAreValidUTF8` 两个方向都钉住。
+
+**`internal/plugin/sandbox` 那两条存活也是等价，前提都落在构造路径上。**
+一条是 `Call` 里的 `limit > 0` 改成 `>=`：`runtimeState` 只有 `newRuntime` 一个
+构造点，它先 `normalize`，零值与负值的字节上限都变成默认的 4 MiB，所以读到的
+上限恒大于 0。另一条是合并两个父 ctx 时的 `parent != nil`：`injectCtx` 由
+`newRuntime` 置成 `Background`，`inject` 只在收到非 nil 时覆盖，所以它恒非 nil；
+剩下的差别只在两个 ctx 是同一个时，而那时多做的取消与 `AfterFunc` 登记都是
+`merged` 本来就会随父 ctx 做的同一件事。两条前提各有一条用例钉住
+（`TestNewRuntimeAlwaysNormalizesInputLimit`、`TestInjectCtxIsNeverNil`）。
 
 **覆盖率高而 efficacy 低，说明测试断言的是「相对关系」而不是「具体边界」。**
 这类包的用例写的是「A 明显比 B 好」这种比较，于是改 `<=` 为 `<`、去掉分母的加数、

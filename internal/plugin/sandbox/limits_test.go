@@ -682,6 +682,118 @@ func TestZeroAndNegativeLimitsFallBackToDefaults(t *testing.T) {
 	}
 }
 
+// newRuntime 是 runtimeState 的唯一构造点，它一定把限额规范化，
+// 于是 Call 里读到的 MaxInputBytes 恒大于 0。
+//
+// 这条钉的是一个前提，不是行为：Call 里 `limit > 0` 这一半判据
+// （「0 表示不限」）在现有构造路径上不可达——`Limits` 的零值与负值
+// 都在 newRuntime 里变成了默认上限。所以要改那一处判据，
+// 先得有一条能构造出零上限 runtimeState 的路径，而今天没有。
+func TestNewRuntimeAlwaysNormalizesInputLimit(t *testing.T) {
+	for _, 输入 := range []int{0, -1, -1024} {
+		rs := newRuntime("p", Limits{MaxInputBytes: 输入})
+		if got := rs.limits.MaxInputBytes; got != DefaultLimits.MaxInputBytes {
+			t.Errorf("MaxInputBytes=%d 时 newRuntime 得到 %d，想要默认上限 %d", 输入, got, DefaultLimits.MaxInputBytes)
+		}
+	}
+	// 显式给的正值原样保留，不被默认值盖掉。
+	if got := newRuntime("p", Limits{MaxInputBytes: 5}).limits.MaxInputBytes; got != 5 {
+		t.Errorf("显式的 MaxInputBytes=5 变成了 %d", got)
+	}
+}
+
+// runtimeState.injectCtx 恒非 nil。
+//
+// 这条同样钉一个前提：runtimeState.call 里 `parent != nil && parent != ctx`
+// 的前一半恒真（newRuntime 置 background，inject 只在收到非 nil 时覆盖，
+// 而生产代码里 inject 的调用方只有 NewRuntime）。于是那段判据的实际内容
+// 只剩 `parent != ctx`；两者相等时它做的事——先兜一次取消、再登记一次
+// AfterFunc——是 merged 本来就从 ctx 继承取消的重复。
+func TestInjectCtxIsNeverNil(t *testing.T) {
+	rs := newRuntime("p", Limits{})
+	if rs.injectCtx == nil {
+		t.Fatal("newRuntime 之后的 injectCtx 是 nil")
+	}
+	// 注入时传 nil 不覆盖已有的 ctx：NewRuntime 之外的调用方不该把槽清空。
+	// staticcheck 默认禁止传 nil ctx（SA1012），而这一格测的正是收到 nil 时的行为。
+	if err := rs.inject(nil, Host{}, nil); err != nil { //nolint:staticcheck // 见上：这里测的就是 nil 这一格
+		t.Fatalf("inject(nil) 不该失败: %v", err)
+	}
+	if rs.injectCtx == nil {
+		t.Error("inject(nil) 之后 injectCtx 变成了 nil")
+	}
+	// 「非 nil 会覆盖」那一半同样要钉：用一个可区分的 ctx，
+	// 断言槽里装的就是它，而不是原来那个 DefaultBackground。
+	注入ctx := context.WithValue(context.Background(), 注入标记{}, "注入")
+	if err := rs.inject(注入ctx, Host{}, nil); err != nil {
+		t.Fatalf("inject 不该失败: %v", err)
+	}
+	if rs.injectCtx != 注入ctx {
+		t.Error("inject 收到非 nil ctx 之后没有覆盖 injectCtx")
+	}
+}
+
+// 注入标记是上面那条用例里 WithValue 的键，只用来让 ctx 可区分。
+type 注入标记 struct{}
+
+// 注入时的父 ctx 还活着、而这次调用的 ctx 是另一个时，
+// 合并出来的调用 ctx 必须还是活的。
+//
+// 这条钉 runtimeState.call 里 context.Cause(parent) 的判向：判反了会在
+// 父 ctx 活着时走 cancelMerged(nil)，于是 cctx 一出生就是已取消的，
+// wrapFunc 在进入实现之前就拒绝它——宿主函数一次都进不去。
+//
+// 两个 ctx 必须不同：相同时那段合并不进入（parent != ctx 为假）。
+// 父 ctx 在这里始终不取消，所以判据与调度顺序无关：变异版从第一刻起
+// 就拒绝宿主能力，不存在「谁先到」的窗口。
+func TestAliveParentCtxKeepsCallCtxAlive(t *testing.T) {
+	m, err := Compile("p", `export default { onRequest() { globalThis.__larkax.看(); return {}; } };`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	父ctx, 停父 := context.WithCancel(context.Background())
+	defer 停父()
+
+	var 进入 atomic.Int64
+	看到 := make(chan error, 1)
+	host := Host{Capabilities: map[string]any{
+		"看": HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
+			进入.Add(1)
+			// 非阻塞发送：万一实现被进入不止一次，第二次不能把宿主调用
+			// 卡在这里——卡住的宿主函数收不到 Interrupt，用例会白等满超时。
+			select {
+			case 看到 <- context.Cause(ctx):
+			default:
+			}
+			return moejs.Undefined(), nil
+		}),
+	}}
+	rt, err := m.NewRuntime(父ctx, host, []string{"看"}, Limits{CallTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+
+	// 调用的 ctx 与注入时的父 ctx 不同——正常调用方就是这样传的。
+	f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, nil)
+
+	// 先看宿主函数有没有被进入：变异版无论被中断在哪一步，这个计数都是 0。
+	if got := 进入.Load(); got != 1 {
+		t.Fatalf("宿主函数被进入 %d 次，想要 1：父 ctx 活着时这次调用的 ctx 不该被取消", got)
+	}
+	if f != nil {
+		t.Fatalf("调用不该失败: %v", f)
+	}
+	select {
+	case cause := <-看到:
+		if cause != nil {
+			t.Errorf("宿主函数拿到的 ctx 已经有 cause（%v），想要没有", cause)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("宿主函数没有回报它拿到的 ctx 状态")
+	}
+}
+
 // DefaultLimits 的取值本身就是契约：改它是一次行为变更。
 // 五秒是「一次请求的预算大部分要给上游」的结果；
 // 内存 64 MiB 相对一份请求体是宽的，但足以挡住一个吃光进程内存的循环。
