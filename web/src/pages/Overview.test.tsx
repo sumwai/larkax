@@ -79,6 +79,24 @@ describe('Overview', () => {
     expect(await screen.findByText('1,234')).toBeInTheDocument()
     expect(await screen.findByText('余额加载失败。其余内容不受影响。')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
-    expect(screen.queryByText('128.46')).not.toBeInTheDocument()
+    expect(screen.queryByText('128.45')).not.toBeInTheDocument()
+  })
+
+  it('余额按 2 位截断，今日消费按 3 位截断并给小额下界', async () => {
+    mocks.wallet.mockResolvedValue({
+      asset: 'USD',
+      balance: '0.99877330',
+      frozen: '0.00000000',
+      updated_at: '2026-10-21T00:00:00Z',
+    })
+    mocks.usageSummary.mockResolvedValue({
+      ...SUMMARY,
+      totals: { ...SUMMARY.totals, cost: '0.00010000' },
+    })
+    renderOverview()
+
+    expect(await screen.findByText(/0\.99/)).toBeInTheDocument()
+    expect(await screen.findByText(/<0\.001/)).toBeInTheDocument()
+    expect(screen.queryByText(/1\.00/)).not.toBeInTheDocument()
   })
 })

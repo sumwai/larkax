@@ -197,7 +197,7 @@ export function Usage() {
             <div className="card kpi">
               <div className="k">{t('usage.summaryCost')}</div>
               <div className="v num">
-                <MoneyText value={data.summary.totals.cost} currency={meta.currency} />
+                <MoneyText value={data.summary.totals.cost} currency={meta.currency} variant="spend" />
               </div>
               <div className="d">
                 {t('usage.priceSource')} · {t('usage.intervalDay')}
@@ -238,7 +238,7 @@ export function Usage() {
                     </span>
                     <span className="num muted-cell">
                       {formatCount(path.requests, lang)} ·{' '}
-                      <MoneyText value={path.cost} currency={meta.currency} />
+                      <MoneyText value={path.cost} currency={meta.currency} variant="spend" />
                     </span>
                   </div>
                 ))}
@@ -319,7 +319,7 @@ export function Usage() {
                         {formatCount(groupTokens(row), lang)}
                       </span>
                       <span className="amount">
-                        <MoneyText value={row.cost} currency={meta.currency} />
+                        <MoneyText value={row.cost} currency={meta.currency} variant="spend" />
                       </span>
                     </div>
                   ))}
@@ -333,7 +333,7 @@ export function Usage() {
                         {t('usage.tokens')} {formatCount(groupTokens(row), lang)}
                       </span>
                       <span className="kv num" style={{ justifySelf: 'end' }}>
-                        <MoneyText value={row.cost} currency={meta.currency} />
+                        <MoneyText value={row.cost} currency={meta.currency} variant="spend" />
                       </span>
                     </div>
                   ))}
@@ -397,7 +397,7 @@ export function Usage() {
                       </span>
                       <span className="amount muted-cell">{tokens(row)}</span>
                       <span className="amount">
-                        <MoneyText value={row.cost} currency={meta.currency} />
+                        <MoneyText value={row.cost} currency={meta.currency} variant="spend" />
                       </span>
                     </div>
                   ))}
@@ -414,7 +414,7 @@ export function Usage() {
                         {tokens(row)} {t('usage.tokens')}
                       </div>
                       <span className="kv num" style={{ justifySelf: 'end' }}>
-                        <MoneyText value={row.cost} currency={meta.currency} />
+                        <MoneyText value={row.cost} currency={meta.currency} variant="spend" />
                       </span>
                     </div>
                   ))}

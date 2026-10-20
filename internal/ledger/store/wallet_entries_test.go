@@ -163,6 +163,46 @@ func TestUserEntriesWindowAndCursor(t *testing.T) {
 		t.Fatalf("窗口内分录数 = %d，期望 3", len(windowed.Entries))
 	}
 
+	// 只给一边的时间窗是允许的，那一侧单独生效。变异：`!q.From.IsZero() &&
+	// !q.To.IsZero() && …` 的 `&&` 改成 `||`，只给起点会被当成「窗口不合法」。
+	// 这里只判不报错：筛选本身由上面那条左闭右开的断言覆盖。
+	if _, err = s.UserEntries(ctx, UserEntryQuery{
+		UserID: userID,
+		From:   usageTestTime(t, "2026-10-01T00:00:00Z"),
+	}); err != nil {
+		t.Errorf("只给起点应当被接受，得到 %v", err)
+	}
+
+	// 分页的两格：给了 limit 就只给这么多行；行数正好等于 limit 时 More 是
+	// false。变异分别是 `if limit > EntryPageMaxLimit` 的 `>` 改成 `<=`
+	// （小 limit 被抬到上限，第一页把 4 行全给回来）与 `len(page.Entries) >
+	// limit` 的 `>` 改成 `>=`（正好读完时误报还有下一页）。
+	// 上界那一处的 `>` 改成 `>=` 是等价变异：limit 正好等于上限时两版赋的
+	// 是同一个常量。
+	paged := UserEntryQuery{
+		UserID: userID,
+		From:   usageTestTime(t, "2026-10-01T00:00:00Z"),
+		To:     usageTestTime(t, "2026-10-04T00:00:00Z"),
+		Limit:  2,
+	}
+	first, err := s.UserEntries(ctx, paged)
+	if err != nil {
+		t.Fatalf("带 limit 的查询失败: %v", err)
+	}
+	if len(first.Entries) != 2 || !first.More {
+		t.Errorf("limit=2 时得到 %d 行、More=%v，期望 2 行且还有下一页",
+			len(first.Entries), first.More)
+	}
+	paged.Limit = 4
+	exact, err := s.UserEntries(ctx, paged)
+	if err != nil {
+		t.Fatalf("limit 等于行数时查询失败: %v", err)
+	}
+	if len(exact.Entries) != 4 || exact.More {
+		t.Errorf("limit=4 时得到 %d 行、More=%v，期望正好读完且没有下一页",
+			len(exact.Entries), exact.More)
+	}
+
 	query := UserEntryQuery{
 		UserID: userID,
 		// 不带窗口时 seed 那笔充值的时刻（now）也会进来；这里只看本用例

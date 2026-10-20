@@ -8,6 +8,7 @@ import { useSite } from '../site/SiteProvider'
 import {
   addDays,
   exclusiveEnd,
+  formatBalance,
   formatCount,
   formatDateTime,
   formatMoney,
@@ -130,12 +131,12 @@ export function Overview() {
         <section className="balance" aria-label={t('overview.balance')}>
           <div className="label">{t('overview.balance')}</div>
           <div className="amount num">
-            <MoneyText value={wallet.data.balance} currency={meta.currency} />
+            <MoneyText value={wallet.data.balance} currency={meta.currency} variant="balance" />
           </div>
           <div className="meta">
             <span>
               {t('overview.frozen')} {symbol}
-              <span className="num">{formatMoney(wallet.data.frozen)}</span>
+              <span className="num">{formatBalance(wallet.data.frozen)}</span>
             </span>
             <span>
               {t('overview.updatedAt')} {formatDateTime(wallet.data.updated_at, meta.timezone)}
@@ -180,7 +181,7 @@ export function Overview() {
           <div className="card kpi">
             <div className="k">{t('overview.todayCost')}</div>
             <div className="v num">
-              <MoneyText value={summary.data.totals.cost} currency={meta.currency} />
+              <MoneyText value={summary.data.totals.cost} currency={meta.currency} variant="spend" />
             </div>
             <div className="d">{today}</div>
           </div>
@@ -193,12 +194,14 @@ export function Overview() {
             <h2>{t('overview.last7Days')}</h2>
             {series.data && (
               <p>
-                {t('overview.last7DaysTotal')} {symbol}
-                {formatMoney(
-                  series.data.points
+                {t('overview.last7DaysTotal')}{' '}
+                <MoneyText
+                  value={series.data.points
                     .reduce((sum, point) => sum + Number.parseFloat(point.cost), 0)
-                    .toFixed(8),
-                )}
+                    .toFixed(8)}
+                  currency={meta.currency}
+                  variant="spend"
+                />
               </p>
             )}
           </div>
@@ -259,7 +262,7 @@ export function Overview() {
                   </span>
                   <span className="muted-cell num">{requestTokens(row)}</span>
                   <span className="amount">
-                    <MoneyText value={row.cost} currency={meta.currency} />
+                    <MoneyText value={row.cost} currency={meta.currency} variant="spend" />
                   </span>
                 </div>
               ))}
@@ -277,7 +280,7 @@ export function Overview() {
                     {requestTokens(row)} {t('overview.tokens')}
                   </div>
                   <span className="kv num" style={{ justifySelf: 'end' }}>
-                    <MoneyText value={row.cost} currency={meta.currency} />
+                    <MoneyText value={row.cost} currency={meta.currency} variant="spend" />
                   </span>
                 </div>
               ))}

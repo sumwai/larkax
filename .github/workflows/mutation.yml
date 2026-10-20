@@ -1,0 +1,335 @@
+name: 变异测试
+
+# 变异测试（gremlins）只在**搬钱的代码**上跑。自动触发只认五棵树：
+#
+#   internal/ledger/    账本
+#   internal/billing/   计费
+#   internal/money/     金额
+#   internal/pipeline/  算出结算额
+#   internal/pricing/   给出单价
+#
+# 其余改动不自动跑：一轮变异以小时计，而 `scripts/check-mutation.sh` 的 PKGS
+# 有三十多个包。让每个 PR 都自动跑全清单会把公开仓库的 runner 队列占住，而
+# 大多数改动与钱无关，跑出来的数字也不会让结论更可信。要量别的包时用
+# workflow_dispatch 手工点名（`packages` 输入）。
+#
+# **改动目录怎么落到包上，不在这里判断**：交给 `scripts/check-mutation.sh
+# --list-packages --match <目录>`，它取最近的、在 PKGS 里的**祖先**——包路径是
+# 递归的，所以 internal/billing/calendaradapter（真实计费包，但不在 PKGS 里）
+# 由 internal/billing 覆盖。这里若自己写「目录 == 清单条目」，只改子包的 PR 会
+# 一个包都不量，而界面上与「不需要跑」长得一样。
+#
+# 草稿 PR 不跑：还在改的代码不该占着 runner 几小时。标成 ready for review
+# 那一刻就会触发一轮。
+#
+# **口径不在这里重写**：真正干活的是 `scripts/check-mutation.sh`——同一份实现，
+# 于是 workers=1、系数 10、`--invert-logical`、每个包之前清一次测试缓存这些
+# 条件与本地逐字相同，CI 跑出来的数字可以直接与本地对账。这个工作流只负责
+# 「装同一个版本的工具、起同一套数据库、选包、把输出留下来」。
+
+on:
+  # 默认的 pull_request 事件不含 ready_for_review：草稿改成就绪（期间可能一次
+  # push 都没有）时不会触发，变异一次都不跑、check 永远停在 skipped。所以显式
+  # 列出这四种。draft 为 true 时选包步骤会写「草稿不跑」并让变异 job 保持 skipped。
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: >-
+          逗号分隔的包名，按 scripts/check-mutation.sh 里 PKGS 的后缀匹配
+          （例如 internal/money,internal/ledger）。不给就不跑；不会默认跑全清单。
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# 同一个 PR 的新 push 取消上一轮：旧的一轮已经不代表最新代码，却还要占着
+# runner 几小时。手工触发用 run_id 分组，绕开 PR 号，互不取消。
+concurrency:
+  group: mutation-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  # 选包这一步在每个 PR 上都跑（几秒钟，不装工具、不起数据库）。它的存在是为了
+  # 让「这一轮不跑」在 PR 上**看得见**：没选中任何包时下面的变异 job 显示为
+  # skipped，而不是「跑了且通过」。
+  select:
+    name: 选包
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.pick.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 选包要 diff base...head，浅克隆拿不到 base 那一侧的提交。
+          fetch-depth: 0
+
+      - name: 选出这一轮要变异的包
+        id: pick
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PACKAGES_INPUT: ${{ github.event.inputs.packages }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          set -uo pipefail
+
+          # 清单只从脚本里读，不在这里抄第二份包名：抄第二份的那一天，CI 与
+          # 本地就会开始跑不同的包（LESSONS 第 29 条）。
+          mapfile -t ALL_PKGS < <(bash scripts/check-mutation.sh --list-packages)
+          if [ "${#ALL_PKGS[@]}" -eq 0 ]; then
+            echo "::error::读不出 PKGS 清单（--list-packages 一条都没打出来），选包不能靠猜。"
+            exit 1
+          fi
+          echo "PKGS 清单 ${#ALL_PKGS[@]} 条。"
+
+          selected=()
+          dropped=()
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            input="${PACKAGES_INPUT:-}"
+            input="${input//[[:space:]]/}"
+            if [ -z "$input" ]; then
+              echo "::notice::手工触发没有给 packages，这一轮不跑。"
+            else
+              IFS=',' read -r -a filters <<< "$input"
+              for f in "${filters[@]}"; do
+                [ -n "$f" ] || continue
+                # 后缀规则也由脚本回答（与跑变异时的包参数同一套），
+                # 这里不再自己写一遍 `case "$p" in *"$f")`。
+                if hits=$(bash scripts/check-mutation.sh --list-packages --suffix "$f"); then
+                  while IFS= read -r p; do
+                    [ -n "$p" ] && selected+=("$p")
+                  done <<< "$hits"
+                else
+                  echo "::error::包参数 '$f' 没有匹配到 PKGS 里任何一条。"
+                  echo "::error::参数按后缀匹配清单，照清单里的名字写（bash scripts/check-mutation.sh --list-packages 打印整份清单）。"
+                  exit 1
+                fi
+              done
+            fi
+          else
+            if [ "$EVENT_NAME" != "pull_request" ]; then
+              echo "::error::未处理的事件类型：$EVENT_NAME。选包规则只定义了 PR 与手工触发。"
+              exit 1
+            fi
+            if [ "$IS_DRAFT" = "true" ]; then
+              {
+                echo "### 变异测试：草稿 PR，这一轮不跑"
+                echo
+                echo "草稿还在改，跑一轮要几十分钟到几小时；标成 ready for review 时"
+                echo "会重新触发（工作流订阅了 ready_for_review）。下面的变异 job 显示为 **skipped**。"
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "packages=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
+              echo "::error::拿不到 PR 的 base/head 提交，回退到「没跑」会把坏了的前提藏起来。"
+              exit 1
+            fi
+
+            # PR：只看这五棵树里改动的 .go 文件（理由见文件开头）。
+            changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA" -- '*.go')
+            auto_prefixes=(internal/ledger/ internal/billing/ internal/money/ internal/pipeline/ internal/pricing/)
+
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              allowed=0
+              for pre in "${auto_prefixes[@]}"; do
+                case "$f" in "$pre"*) allowed=1; break ;; esac
+              done
+              if [ "$allowed" -eq 0 ]; then
+                continue
+              fi
+              d=$(dirname "$f")
+              # 「改动目录 → 该跑哪一条 PKGS」只由脚本回答：它取最近的、在清单里的
+              # 祖先（包路径是递归的，internal/billing/calendaradapter 归
+              # internal/billing 管）。这里不再自己写一遍后缀匹配——两处各写一份，
+              # 刚出生就会漂成「一处要精确相等、一处按前缀」。
+              if p=$(bash scripts/check-mutation.sh --list-packages --match "$d"); then
+                selected+=("$p")
+              else
+                dropped+=("$d")
+              fi
+            done <<< "$changed"
+
+            if [ "${#dropped[@]}" -gt 0 ]; then
+              mapfile -t dropped < <(printf '%s\n' "${dropped[@]}" | sort -u)
+              echo "::warning::这些目录在自动触发的五棵树里，但没有任何 PKGS 条目覆盖它们（找不到在清单里的祖先）：${dropped[*]}。"
+              echo "::warning::本轮不会为它们跑变异。要量它们，先把覆盖它们的包加进 scripts/check-mutation.sh 的 PKGS。"
+            fi
+          fi
+
+          if [ "${#selected[@]}" -gt 0 ]; then
+            mapfile -t selected < <(printf '%s\n' "${selected[@]}" | sort -u)
+
+            # 父子包同时选中时只留外层：脚本会拒绝重叠的显式参数（子包会被跑
+            # 两遍），而外层那条命令递归就包含了子包。留最外层，不是随便留一个。
+            collapsed=()
+            for p in "${selected[@]}"; do
+              contained=0
+              for q in "${selected[@]}"; do
+                [ "$p" = "$q" ] && continue
+                case "$p" in "$q"/*) contained=1; break ;; esac
+              done
+              if [ "$contained" -eq 0 ]; then collapsed+=("$p"); fi
+            done
+            if [ "${#collapsed[@]}" -ne "${#selected[@]}" ]; then
+              echo "::notice::父子包同时选中时只留外层（外层递归包含子包）：${selected[*]} → ${collapsed[*]}"
+              selected=("${collapsed[@]}")
+            fi
+          fi
+
+          if [ "${#selected[@]}" -eq 0 ]; then
+            {
+              echo "### 变异测试：这一轮没跑"
+              echo
+              if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+                echo "手工触发没有给 packages。"
+              elif [ "${#dropped[@]}" -gt 0 ]; then
+                echo "改动落在这五棵树里，但下面这些目录没有任何 PKGS 条目覆盖："
+                echo
+                echo '```'
+                printf '%s\n' "${dropped[@]}"
+                echo '```'
+                echo
+                echo "所以本轮没有可跑的变异包。要量它们，先把覆盖它们的包加进 PKGS——"
+                echo "否则这里会一直显示 skipped，而「只改了计费代码」与「不需要跑」看起来一样。"
+              else
+                echo "改动不涉及那五棵树（账本 / 计费 / 金额 / 结算额 / 单价）。"
+              fi
+              echo
+              echo "下面的变异 job 显示为 **skipped**——这不是「跑了且通过」。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "packages=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 一次跑太多会撞上 job 的时长上限。这里只提示，不拦：改动确实跨了
+          # 两个以上搬钱的包时，硬拦下来会让这次 PR 一个包都量不到。
+          if [ "${#selected[@]}" -gt 2 ]; then
+            echo "::warning::这一轮选了 ${#selected[@]} 个包。一次跑太多会撞上 job 的 330 分钟上限，"
+            echo "::warning::建议拆成几次手工触发。"
+          fi
+
+          {
+            echo "### 变异测试：这一轮的包"
+            echo
+            echo '```'
+            printf '%s\n' "${selected[@]}"
+            echo '```'
+            if [ "${#selected[@]}" -gt 2 ]; then
+              echo
+              echo "> 超过两个包：一次跑太多会撞上 job 时长上限，建议拆开。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          printf 'packages=%s\n' "${selected[*]}" >> "$GITHUB_OUTPUT"
+          echo "这一轮：${selected[*]}"
+
+  mutation:
+    name: 变异
+    needs: select
+    # 没选中任何包时整个 job 不跑。它在 PR 的 checks 里显示为 skipped，
+    # 与「跑了且通过」区分得开——这是这条触发规则要保证的可见性。
+    # 草稿 PR 也不起这一轮：还在改的代码不该占着 runner 跑几小时（选包步骤会
+    # 在 summary 里写明是草稿）。
+    if: needs.select.outputs.packages != '' && github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    # GitHub 单 job 上限 6 小时。这里留 30 分钟给 checkout、装工具、service
+    # 启动与收尾——超过这个时间由平台杀掉，job 判为失败（不是通过）；同一 PR
+    # 的新 push 取消旧的一轮时状态是 cancelled。两种都不是「跑成了」。
+    timeout-minutes: 330
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: placeholder
+          POSTGRES_DB: larkax_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      # Redis 只在「被选中的包里有测试文件引用 LARKAX_REDIS_DSN」时才是前提，
+      # 那个判定在脚本里按名字扫，不另立包名单；这里干脆把它起上，于是手工
+      # 点名任何一个包都不缺前提。
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      LARKAX_DB_DSN: postgres://postgres:placeholder@localhost:5432/larkax_test?sslmode=disable
+      LARKAX_REDIS_DSN: redis://localhost:6379/0
+      LARKAX_ROLE: worker
+      # 走环境变量而不是往 run 里插值：包名来自手工输入，不该被当成脚本文本。
+      PACKAGES: ${{ needs.select.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 版本不在这里写第二份：从脚本里读。脚本运行时还会用 `go version -m`
+      # 校验一遍，装错版本会直接拒绝运行——版本不同 = 变异器集合不同 =
+      # efficacy 的分母不同，两个分数看起来都是结论。
+      - name: 安装钉住版本的 gremlins
+        run: |
+          pinned=$(sed -n 's/^PINNED_GREMLINS_VERSION="\(.*\)"$/\1/p' scripts/check-mutation.sh)
+          if [ -z "$pinned" ]; then
+            echo "::error::读不出 scripts/check-mutation.sh 里的 PINNED_GREMLINS_VERSION。"
+            exit 1
+          fi
+          echo "安装 gremlins $pinned"
+          go install "github.com/go-gremlins/gremlins/cmd/gremlins@$pinned"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # 每个连库的测试包由 internal/testdb 自己建库、跑全量迁移、跑完删掉
+      #（docs/development.md「每个包一个测试库」）。这一步先把 DSN 指向的那个库
+      # 迁移一遍，让「库连得上、迁移能应用」先亮一次，而不是等变异跑到一半
+      # 才发现前提是坏的。
+      - name: 迁移
+        run: go run ./cmd/larkaxctl migrate up
+
+      - name: 变异测试
+        run: |
+          read -r -a pkgs <<< "$PACKAGES"
+          if [ "${#pkgs[@]}" -eq 0 ]; then
+            echo "::error::没有收到包名。拒绝跑全清单——一轮变异以小时计。"
+            exit 1
+          fi
+          echo "这一轮：${pkgs[*]}"
+          set +e
+          bash scripts/check-mutation.sh "${pkgs[@]}" 2>&1 | tee mutation.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          # 退出码 3 是「拿不到锁」。CI 的 runner 上没有第二个实例，真出现
+          # 说明环境坏了——同样按「没跑成」处理，不吞掉。
+          exit "$rc"
+
+      - name: 写 job summary
+        if: always()
+        run: |
+          {
+            echo "### 变异测试"
+            echo
+            echo '```'
+            if [ -s mutation.log ]; then
+              cat mutation.log
+            else
+              echo "（没有输出：脚本没跑起来，或 job 被取消 / 超时）"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
