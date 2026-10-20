@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"strconv"
@@ -193,6 +194,60 @@ func assertViolation(t *testing.T, err error, wantCode, wantConstraint string, w
 	}
 	if pgErr.ConstraintName != wantConstraint {
 		t.Errorf("被违反的约束是 %q，期望 %q", pgErr.ConstraintName, wantConstraint)
+	}
+}
+
+// injectWriteError 让接下来对 table 的写入（event 取 INSERT / UPDATE）一律
+// 失败于一条指定的数据库错误。
+//
+// 分类器（createModelError、aliasUpdateError）要回答两件事：撞上**自己这条**
+// 约束时认得出，撞上别的错误时别认成自己这条。前一半用真冲突测（同范围插两条，
+// 见 TestCreateModelRejectsDuplicateName 与 TestUpdateAliasTranslatesUpstreamConflict）；
+// 后一半在真实的表上造不出来：model_catalog 只有一条唯一约束，23505 永远带着
+// 它的名字，而 `&&` 改成 `||` 的变异体只要 SQLSTATE 或约束名对上一半就会认错。
+//
+// 所以用触发器把错误注进来。它仍是数据库返回的 *pgconn.PgError，走的是
+// ExecContext 那条路——不是进程内手搓一个结构体喂给 errors.As。与
+// internal/ledger/store 的 blockRunOutcomeWrite 同一个手法。
+//
+// 收尾走 t.Cleanup，开头先卸一次：库是同包用例共用的，上一次跑崩留下的触发器
+// 会让后面每一条写入用例都失败。
+//
+// 函数与触发器用的是固定名字，所以同一个库上不能同时注入两处：这个包的用例目前
+// 不并行，日后要加 t.Parallel() 得先把表名带进这两个对象名。
+func injectWriteError(t *testing.T, db *sql.DB, table, event, code, constraint string) {
+	t.Helper()
+	ctx := context.Background()
+
+	dropInjectedWriteError(ctx, t, db, table)
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE FUNCTION catalog_inject_write_error() RETURNS trigger
+		LANGUAGE plpgsql AS $$
+		BEGIN
+			RAISE EXCEPTION '注入的失败' USING ERRCODE = '%s', CONSTRAINT = '%s';
+		END
+		$$`, code, constraint)); err != nil {
+		t.Fatalf("建触发器函数失败: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TRIGGER catalog_inject_write_error
+			BEFORE %s ON %s
+			FOR EACH ROW EXECUTE FUNCTION catalog_inject_write_error()`, event, table)); err != nil {
+		t.Fatalf("挂触发器失败: %v", err)
+	}
+
+	t.Cleanup(func() { dropInjectedWriteError(context.Background(), t, db, table) })
+}
+
+func dropInjectedWriteError(ctx context.Context, t *testing.T, db *sql.DB, table string) {
+	t.Helper()
+	if _, err := db.ExecContext(ctx,
+		`DROP TRIGGER IF EXISTS catalog_inject_write_error ON `+table); err != nil {
+		t.Fatalf("卸触发器失败: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`DROP FUNCTION IF EXISTS catalog_inject_write_error()`); err != nil {
+		t.Fatalf("删触发器函数失败: %v", err)
 	}
 }
 
@@ -940,6 +995,53 @@ func TestCreateModelRejectsDuplicateName(t *testing.T) {
 		CanonicalName: name, DisplayName: name,
 	})
 	assertViolation(t, err, pgUniqueViolation, "model_catalog_canonical_name_key", ErrModelExists)
+	// 除了识别出是哪条约束，还得说清是哪个名字撞了，而且只留那句人话：
+	// 驱动原文就在错误链上（上一行刚查过），不该再拼进 Error() 里。
+	if !strings.HasSuffix(err.Error(), fmt.Sprintf("%q 已经在目录里了", name)) {
+		t.Errorf("err = %q，期望以「%q 已经在目录里了」收尾", err, name)
+	}
+	if strings.Contains(err.Error(), "SQLSTATE") {
+		t.Errorf("err = %q，不该把驱动原文拼进这句话", err)
+	}
+}
+
+// 不是「规范名撞车」的数据库错误要原样上抛。
+//
+// 这一条钉的是 createModelError 里那条三合一判据：SQLSTATE 与约束名**两样
+// 都对上**才算规范名撞车。两个子用例各取一半——第一个是 23505 但撞的是别的
+// 约束，第二个是约束名对得上但不是唯一冲突。把任一处 `&&` 改成 `||`，
+// 对应的子用例就会拿到 ErrModelExists，于是红。
+func TestCreateModelKeepsUnrelatedErrorsGeneric(t *testing.T) {
+	cases := []struct {
+		name       string
+		code       string
+		constraint string
+	}{
+		{"别的唯一约束", pgUniqueViolation, aliasChannelUpstreamUnique},
+		{"同名但不是唯一冲突", "23514", modelCanonicalUnique},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testDB(t)
+			injectWriteError(t, db, "model_catalog", "INSERT", tc.code, tc.constraint)
+
+			_, err := NewAdmin(db).Create(context.Background(), CreateModelRequest{
+				CanonicalName: uniqueName("model"), DisplayName: "d",
+			})
+			if err == nil {
+				t.Fatal("写入应当被注入的错误拦下")
+			}
+			// 先确认回来的确实是注入的那一条，再判它有没有被认错。
+			assertViolation(t, err, tc.code, tc.constraint, nil)
+			if errors.Is(err, ErrModelExists) {
+				t.Errorf("err = %v，%s/%s 不是规范名撞车，不该报成 ErrModelExists",
+					err, tc.code, tc.constraint)
+			}
+			if !strings.HasPrefix(err.Error(), "创建规范模型失败: ") {
+				t.Errorf("err = %q，期望按原错误上抛", err)
+			}
+		})
+	}
 }
 
 // 一次修改之后，改过的与没改过的都要读回来核对。
@@ -1505,6 +1607,62 @@ func TestUpdateAliasTranslatesUpstreamConflict(t *testing.T) {
 
 	err = admin.UpdateAlias(context.Background(), UpdateAliasRequest{ID: id, UpstreamModel: &taken})
 	assertViolation(t, err, pgUniqueViolation, "model_aliases_channel_id_upstream_model_key", ErrUpstreamTaken)
+	// 这句话不带渠道 id（渠道范围不在 SET 里，手里没有它），但要说清撞的是什么，
+	// 而不是把驱动原文端出去。
+	if !strings.Contains(err.Error(), "一个上游名只能对应一个规范名") {
+		t.Errorf("err = %q，期望说清是上游名已经映射到另一个规范名", err)
+	}
+	if strings.Contains(err.Error(), "SQLSTATE") {
+		t.Errorf("err = %q，不该把驱动原文拼进这句话", err)
+	}
+}
+
+// 别名侧的同一条判据：aliasUpdateError 只认「同一个渠道里上游名重复」，
+// 别的数据库错误原样上抛。
+//
+// 与 createModelError 那一条同形，只是约束名换成别名这侧的那条。
+func TestUpdateAliasKeepsUnrelatedErrorsGeneric(t *testing.T) {
+	cases := []struct {
+		name       string
+		code       string
+		constraint string
+	}{
+		{"别的唯一约束", pgUniqueViolation, "model_aliases_pkey"},
+		{"同名但不是唯一冲突", "23514", aliasChannelUpstreamUnique},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testDB(t)
+			admin := NewAdmin(db)
+			model := uniqueName("model")
+			channel := insertChannel(t, db, model)
+			seedModel(t, db, model)
+			id, err := admin.CreateAlias(context.Background(), CreateAliasRequest{
+				ChannelID: channel, UpstreamModel: "up-" + model, CanonicalName: model,
+			})
+			if err != nil {
+				t.Fatalf("CreateAlias 出错: %v", err)
+			}
+
+			injectWriteError(t, db, "model_aliases", "UPDATE", tc.code, tc.constraint)
+
+			newUpstream := "up-new-" + model
+			err = admin.UpdateAlias(context.Background(), UpdateAliasRequest{
+				ID: id, UpstreamModel: &newUpstream,
+			})
+			if err == nil {
+				t.Fatal("写入应当被注入的错误拦下")
+			}
+			assertViolation(t, err, tc.code, tc.constraint, nil)
+			if errors.Is(err, ErrUpstreamTaken) {
+				t.Errorf("err = %v，%s/%s 不是上游名撞车，不该报成 ErrUpstreamTaken",
+					err, tc.code, tc.constraint)
+			}
+			if !strings.HasPrefix(err.Error(), "修改别名失败: ") {
+				t.Errorf("err = %q，期望按原错误上抛", err)
+			}
+		})
+	}
 }
 
 func TestUpdateAliasRejectsEmptyRequest(t *testing.T) {
@@ -1528,6 +1686,33 @@ func TestUpdateAliasRejectsEmptyRequest(t *testing.T) {
 	err = NewAdmin(db).UpdateAlias(context.Background(), UpdateAliasRequest{ID: nextID(), UpstreamModel: &upstream})
 	if !errors.Is(err, ErrAliasIDNotFound) {
 		t.Errorf("err = %v，期望 ErrAliasIDNotFound", err)
+	}
+}
+
+// id 不是正整数时必须在碰库之前拒绝。
+//
+// 只断言「报了错」的用例杀不掉这一处：把 `<=` 放宽成 `<` 之后，0 会被当成
+// 合法 id 一路走到 UPDATE，一行都不匹配，报出来的是 ErrAliasIDNotFound——
+// 那也是一个 error，断言非 nil 的用例照样绿。所以这里断的是那句参数错误的
+// 原文，它与「查无此行」分得开。
+//
+// 注意判别力只来自 0 这一格：-1 在两版里都被拒，留着只是把下界那一侧也钉住。
+func TestUpdateAliasRejectsNonPositiveID(t *testing.T) {
+	db := testDB(t)
+	for _, id := range []int64{0, -1} {
+		upstream := "up-" + itoa(id)
+		err := NewAdmin(db).UpdateAlias(context.Background(), UpdateAliasRequest{
+			ID: id, UpstreamModel: &upstream,
+		})
+		if err == nil {
+			t.Fatalf("id = %d 应当被拒绝", id)
+		}
+		if want := "别名 id " + itoa(id) + " 无效"; err.Error() != want {
+			t.Errorf("id = %d：err = %q，期望 %q", id, err, want)
+		}
+		if errors.Is(err, ErrAliasIDNotFound) {
+			t.Errorf("id = %d：参数错误不该报成 ErrAliasIDNotFound", id)
+		}
 	}
 }
 
@@ -1571,6 +1756,26 @@ func TestDeleteAlias(t *testing.T) {
 	}
 	if err := admin.DeleteAlias(context.Background(), id); !errors.Is(err, ErrAliasIDNotFound) {
 		t.Errorf("err = %v，期望 ErrAliasIDNotFound", err)
+	}
+}
+
+// 与 UpdateAlias 那一条同一个判据：id 为 0 要在碰库之前被拒。
+//
+// 放宽成 `<` 之后，DELETE ... WHERE id = 0 删掉 0 行，报出来的是
+// ErrAliasIDNotFound，看起来同样是一次拒绝——所以这里断那句参数错误的原文。
+func TestDeleteAliasRejectsNonPositiveID(t *testing.T) {
+	db := testDB(t)
+	for _, id := range []int64{0, -1} {
+		err := NewAdmin(db).DeleteAlias(context.Background(), id)
+		if err == nil {
+			t.Fatalf("id = %d 应当被拒绝", id)
+		}
+		if want := "别名 id " + itoa(id) + " 无效"; err.Error() != want {
+			t.Errorf("id = %d：err = %q，期望 %q", id, err, want)
+		}
+		if errors.Is(err, ErrAliasIDNotFound) {
+			t.Errorf("id = %d：参数错误不该报成 ErrAliasIDNotFound", id)
+		}
 	}
 }
 

@@ -1583,6 +1583,13 @@ Mutator coverage: 25.00%
 两栏都照实打、都不进退出码：判据仍然只看存活与超时，覆盖低不是失败，
 是「这一包还有多少没测」。
 
+**`Not covered` 会把「没被执行到」与「执行了却不在任何块里」混在一起。** 覆盖块
+从 `case` 体开头的 `{` 起算，条件那几列不属于任何块，于是 `switch` 的 `case`
+条件即使天天被执行也记成未覆盖。`internal/catalog` 那 40 条里 19 条是这一类
+（`aliasWriteError` 的五个 `case` 条件、`pickAlias` 的两个）：把这些条件上的
+`&&` 改成 `||`，整包照样红。读这一列时先看它集中在哪——整函数 0 覆盖是缺口，
+`case` 条件多半不是。
+
 **覆盖范围说的是「哪些测试参与」，与判据是两件事。** 默认口径是**被测包自己的
 测试**，脚本用的就是默认——`--coverpkg` 与 `--integration` 都不传。这组实验调用
 （`internal/keyquota`，workers=1、系数 10、`--invert-logical`，库建好并迁移过、
@@ -1744,6 +1751,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/pricing` | 176 | 0 | 0 | 46 | 79.28% | 100.00% | 89.2% |
 | `internal/snapshotwire` | 105 | 0 | 0 | 3 | 97.22% | 100.00% | 94.6% |
 | `internal/overrides` | 18 | 0 | 0 | 0 | 100.00% | 100.00% | 96.2% |
+| `internal/catalog` | 178 | 0 | 0 | 40 | 81.65% | 100.00% | 77.6% |
 | `internal/channels` | 288 | 1 | 1 | 41 | 87.58% | 99.65% | 76.6% |
 | `internal/calendar` | 150 | 2 | 0 | 14 | 91.57% | 98.68% | 97.8% |
 | `internal/ledger` | 576 | 8 | 0 | 92 | 86.39% | 98.63% | 96.3% |
