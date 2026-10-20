@@ -142,6 +142,16 @@ func parseCases() []parseCase {
 		{"wallet payout request 缺 --ref", func() error {
 			return runPayoutRequest([]string{"--user", "1", "--amount", "1"})
 		}, false, walletHint},
+		{"wallet payout settle 缺 --ref", func() error {
+			return runPayoutSettle([]string{"--user", "1", "--amount", "1"})
+		}, false, walletHint},
+		{"wallet payout settle 缺 --destination", func() error {
+			return runPayoutSettle([]string{"--user", "1", "--amount", "1", "--ref", "S1", "--by", "1"})
+		}, false, walletHint},
+		{"wallet payout settle 缺 --by", func() error {
+			return runPayoutSettle([]string{"--user", "1", "--amount", "1", "--ref", "S1",
+				"--destination", `{"bank":"placeholder-bank"}`})
+		}, false, walletHint},
 		{"wallet payout approve 缺 --by", func() error {
 			return runPayoutApprove([]string{"--id", "1"})
 		}, false, walletHint},
@@ -208,6 +218,10 @@ func TestDBUnreachableEntriesExitThree(t *testing.T) {
 		}},
 		{"wallet payout request", func() error {
 			return runPayoutRequest([]string{"--user", "1", "--amount", "1", "--ref", "R"})
+		}},
+		{"wallet payout settle", func() error {
+			return runPayoutSettle([]string{"--user", "1", "--amount", "1", "--ref", "S",
+				"--destination", `{"bank":"placeholder-bank"}`, "--by", "1"})
 		}},
 	}
 

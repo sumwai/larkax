@@ -119,7 +119,6 @@ internal/calendar/memory.go    | MemorySource.SetYearState      | lib | 测试�
 internal/calendar/memory.go    | MemorySource.YearState         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | NewMemorySource                | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/channel/httpx/httpx.go  | DrainAndClose                   | lib | HTTP 收尾辅助，给拿不到 *http.Response 的调用点用；目前只有测试在调它
-internal/ledger/transactions.go  | Settle                          | gap | #789 平台主动清算还没有触发方；商户申请的提现走的是 PayoutRequest
 internal/money/money.go          | FromInt                         | lib | 金额库的构造面：用整数元构造；目前只有测试在调它
 internal/money/money.go          | FromUnits                       | lib | 金额库的构造面：用最小单位构造；目前只有测试在调它（读库走 Parse，列是 numeric）
 internal/money/money.go          | Min                             | lib | 金额库的运算面：取较小者；目前只有测试在调它（孪生的 Max 在生产里用到）
