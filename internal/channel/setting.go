@@ -9,7 +9,7 @@ package channel
 //
 // 它不靠自己守信用：internal/channel 的用例会扫一遍各适配器与选路层，
 // 看见有人读 Setting 而这一位还是 false 时判失败（见 setting_test.go）。
-const SettingReadByAdapters = false
+const SettingReadByAdapters = true
 
 // SettingUnreadNote 说明 setting 里的键今天没有读者。
 //

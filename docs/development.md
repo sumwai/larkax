@@ -732,13 +732,22 @@ stdout 只有新渠道的 ID，其余信息走 stderr。
 （能力、上下文上限）在 `model_catalog` 那边，不从这份 jsonb 里读第二份。
 因此管理面**不做键名校验**：拼错一个键不会报错，只会静默地不生效。
 
-**当前没有任何适配器读它。** 四个适配器与选路层一次都没按 `setting` 做判断，
-所以写进去的键今天对请求路径没有任何影响。这件事会在写入成功后（`channel
-create` / `update` 给了 `--setting` 时）打到 stderr 上，`channel list` 也会
-把带着 `setting` 的渠道单独点出来——一个配了却不生效的键，从库里和清单上
-看与一个生效的配置完全一样，不说出来就只能等人去查代码。第一个键被某个
-适配器实现之后，这两处提示会一起消失（判据是 `internal/channel` 里的
-`SettingReadByAdapters`，由同包的用例盯着它与代码是否一致）。
+**今天有读者的只有一个键：`reasoning_effort_map`。** 它由 `openai` 适配器读
+（`internal/channel/openaiadapter/setting.go`），把 `reasoning_effort` 的规范
+取值翻成该渠道认的写法；映射到空字符串表示把这个字段从出站报文里去掉，表里
+没有的取值照原样发。可照抄的写法（嵌一层对象、值是字符串）见
+`larkaxctl channel --help` 与 `docs/cli-reference.md` 的 `--setting` 一节。
+其余键、其余适配器与选路层都不读 `setting`，写进去仍然不影响请求路径。
+
+一个没有读者的键，从库里和清单上看与一个生效的配置完全一样，不说出来就只能
+等人去查代码。所以管理面曾经在写入成功后（`channel create` / `update` 给了
+`--setting` 时）把一句「这次配置不会影响请求路径」打到 stderr 上，`channel
+list` 也会把带着 `setting` 的渠道单独点出来。判据是 `internal/channel` 里的
+`SettingReadByAdapters`，由同包的用例盯着它——但只盯一面：适配器或选路层里
+出现了 `Setting` 而这一位还是 false 时判失败；反过来，读者被删掉而这一位没
+跟着翻回 false，没有用例会发现。这一位现在是 true，两处提示都不再打——它问的
+是「这些键有没有读者」，所以哪天那个 reader 被删掉，把它翻回 false，提示就会
+回来。
 
 `--user` 把渠道记在某个用户名下（留空表示平台自营）。它**只写
 `channels.owner_user_id`，不做权限检查**：任何存在的用户都可以被写成归属，
