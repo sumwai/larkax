@@ -435,6 +435,10 @@ func TestValidateEmail(t *testing.T) {
 		// 常见形态。
 		"a@example.com", "a@b.c.d", "user+tag@example.com", "first.last@example.com",
 		"A.B@Example.COM", "a@b-c.example.com",
+		// 字母表两端的那两个字母本身也是字母数字，用例把它们放进本地部分：
+		// isASCIILetterDigit 的上界若写成「小于 z」，本地部分里的 z 会被拒；
+		// 大写那边同理。两条各压一边。
+		"z@example.com", "Z@example.com",
 		// 本地部分里的这些符号标准里都允许，而一张自己列的字符表容易漏掉其中一个。
 		"o'brien@example.com", "a_b@example.com", "a!b@example.com",
 		// 非 ASCII 的字母与数字也收：本地化的域名与本地部分是真实存在的写法。
@@ -474,6 +478,10 @@ func TestValidateEmail(t *testing.T) {
 		{"a@b:c.com", "不该出现在地址里的字符"},
 		{"a@b/c.com", "不该出现在地址里的字符"},
 		{"a@[127.0.0.1]", "不该出现在地址里的字符"},
+		// DEL（0x7F）是 ASCII 的最后一个码点。按哪一边判它都不在允许的字母
+		// 数字里，所以「非 ASCII」那条分界的两版在这里都拒；加这一格是为了让
+		// 「拒」这件事在分界本身上也有用例。
+		{"a\x7fb@example.com", "不该出现在地址里的字符"},
 		// 带了别的东西的写法：这一列存的是地址本身。
 		{"Bob <bob@example.com>", "不该出现在地址里的字符"},
 		{"<bob@example.com>", "不该出现在地址里的字符"},
@@ -506,6 +514,16 @@ func TestValidateEmail(t *testing.T) {
 			t.Errorf("ValidateEmail(%q) 的报错里没有 %q：%v", tc.email, tc.why, err)
 		}
 	}
+
+	// 两条边界上的存活变异各有一句等价说明：
+	//
+	//   - `at < 0` 改成 `at <= 0`：strings.Index 只返回 -1 或非负值，两版只在
+	//     at==0 时不同。at==0 时要么后面还有一个 @（at != LastIndex），要么
+	//     本地部分是空串，两版都走同一句 invalidEmail(trimmed, shapeReason)，
+	//     输出逐字相同，所以没有输入能把它们分开。
+	//   - `r > unicode.MaxASCII` 改成 `r >= unicode.MaxASCII`：两版只在 r 恰好
+	//     是 0x7F 时不同，而 0x7F 在两边都不算字母或数字，两版都返回假。
+	//     上面 DEL 那一格就是这条分界的落点。
 
 	// 报错里要把允许的那一组符号逐个列出来：帮助文本与 docs/cli-reference.md 的
 	// user 一节都省掉了逐个符号，两处都写着「完整的那一组写在报错里」，指的是这里。

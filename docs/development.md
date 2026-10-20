@@ -1748,6 +1748,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/calendar` | 150 | 2 | 0 | 14 | 91.57% | 98.68% | 97.8% |
 | `internal/ledger` | 576 | 8 | 0 | 92 | 86.39% | 98.63% | 96.3% |
 | `internal/ledger/store` | 433 | 6 | 0 | 60 | 87.98% | 98.63% | 79.9% |
+| `internal/auth` | 221 | 4 | 1 | 8 | 96.57% | 98.22% | 86.6% |
 | `internal/idempotency` | 34 | 1 | 0 | 0 | 100.00% | 97.14% | 83.3% |
 | `internal/route` | 123 | 4 | 0 | 24 | 84.11% | 96.85% | 97.8% |
 | `internal/gateway` | 238 | 9 | 0 | 9 | 96.48% | 96.36% | 95.7% |
@@ -1772,7 +1773,8 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 哪些文件」，选包管的是「跑清单里哪一行」，两件事，规则见上文。
 
 **超时列不为 0 的行不与别的轮次比较**——见上文。改动过某个包的测试之后重跑并在
-表里更新。
+表里更新。`internal/auth` 那一行的超时是**自然超时**而不是机器干扰：`deletion.go:712`
+把占位名循环里的 `n++` 改成 `n--` 之后，第 1 个候选被占住就永不终止。
 
 **覆盖率高而 efficacy 低，说明测试断言的是「相对关系」而不是「具体边界」。**
 这类包的用例写的是「A 明显比 B 好」这种比较，于是改 `<=` 为 `<`、去掉分母的加数、

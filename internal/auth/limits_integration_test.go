@@ -486,8 +486,16 @@ func TestGetKeyRejectsMissingKey(t *testing.T) {
 		t.Fatalf("错误 = %v，期望满足 errors.Is(err, ErrKeyNotFound)", err)
 	}
 
+	// 0 不是「找不到」：它在库里不可能有一行，必须在查询之前就被挡下。
+	// 只判 err != nil 是不够的——边界写成 < 0 时它会一路走到查询里，最后
+	// 以 ErrKeyNotFound 收场，而那句「找不到」对着一个不可能存在的 id
+	// 是误导。
 	if _, err := store.GetKey(ctx, 0); err == nil {
 		t.Fatal("id=0 期望报错")
+	} else if errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("id=0 报成了「找不到」，它应当在查询之前被挡下：%v", err)
+	} else if !strings.Contains(err.Error(), "正整数") {
+		t.Errorf("id=0 的错误信息 %q 没说清 id 不对", err.Error())
 	}
 }
 
