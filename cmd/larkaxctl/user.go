@@ -23,12 +23,13 @@ var userHelp = helpText{short: userShortUsage, long: userUsage}
 const userShortUsage = `larkaxctl user 管理用户。
 
 用法：
-  larkaxctl user create --name <用户名> [--email <邮箱>] [--role <角色>]
+  larkaxctl user create --name <用户名> [--email <邮箱>] [--role <角色>] [--generate-password]
   larkaxctl user list [--status <状态>] [--role <角色>]
   larkaxctl user get --user <ID 或用户名>
   larkaxctl user update --user <ID 或用户名> [--status <状态>] [--email <邮箱>]
-                        [--display-name <展示名>] [--merchant|--no-merchant]
-                        [--admin|--no-admin]
+                        [--display-name <展示名>] [--merchant|--no-merchant] [--admin|--no-admin]
+  larkaxctl user password <ID 或用户名> --generate|--stdin
+  larkaxctl user unlock <ID 或用户名>
   larkaxctl user delete request --user <ID 或用户名>
   larkaxctl user delete revert --user <ID 或用户名>
   larkaxctl user delete purge --user <ID 或用户名> --confirm <用户名>
@@ -36,7 +37,6 @@ const userShortUsage = `larkaxctl user 管理用户。
 create 只把新用户的 ID 打到 stdout；用户名与邮箱在连库之前判形状，不合格报参数错。
 list 与 get 只读；update 只改显式给出的字段，改了什么打到 stdout。
 delete request 打标（可撤），revert 撤回，purge 匿名化（不可逆，要 --confirm）；余额先清到 0。
-这七条都不碰渠道凭证，也都不需要 LARKAX_MASTER_KEYS。
 更细的边界：larkaxctl help user。
 `
 
@@ -45,11 +45,14 @@ const userUsage = `larkaxctl user 管理用户。
 
 用法：
   larkaxctl user create --name <用户名> [--email <邮箱>] [--role <角色>]
+                        [--generate-password]
   larkaxctl user list [--status <状态>] [--role <角色>]
   larkaxctl user get --user <ID 或用户名>
   larkaxctl user update --user <ID 或用户名> [--status <状态>] [--email <邮箱>]
                         [--display-name <展示名>] [--merchant|--no-merchant]
                         [--admin|--no-admin]
+  larkaxctl user password <ID 或用户名> --generate|--stdin
+  larkaxctl user unlock <ID 或用户名>
 
 create 建一个新用户，只把新用户的 ID 打到 stdout。
 
@@ -180,6 +183,26 @@ purge 匿名化（不可逆）：只接已经处于 deletion_requested 的账号
 到了 deleted 之后，update 也不再收这个账号：改邮箱、展示名会被拒（退出 4），
 否则占位身份就有一条命令能写回真身份。
 
+password 设或重置控制台口令。用户标识可以是 --user，也可以直接写成一个位置参数
+（两种混用会报错）。
+
+  --generate  由本命令生成一个 24 字符的随机口令。
+  --stdin     从标准输入读，不落 shell 历史。
+
+两档必须给且只给一个。stdout 恰好一行，就是新口令，只显示这一次；其余说明走
+stderr。口令从不作为命令行参数出现（进程列表可见），也不写日志。设置成功后这个
+用户的全部控制台会话被吊销——运维重置的场景是「不知道谁还开着控制台」，留下任何
+一个旧会话都让这次重置只对下一次登录生效。
+
+口令策略与登录侧同一份判据：12–128 个字符、不能等于用户名、不能有控制字符。
+从标准输入读时行尾的换行会被去掉（echo 管道最自然的写法就是带一个）。
+
+create --generate-password 在建号的同时设一个随机初始口令：stdout 那一行因此是
+**口令**而不是用户 ID，ID 与用户名走 stderr。要接走 ID 的脚本不要带这个旗标。
+
+unlock 清掉一个账号的失败计数与锁定（连续失败 5 次后按指数锁定，上限 15 分钟）。
+它不动口令、不动会话：解锁只把「现在能不能试」恢复成默认，不改变谁能登录。
+
 更细的约定见 docs/cli-reference.md 的「user」一节。
 `
 
@@ -213,6 +236,10 @@ func runUser(args []string) error {
 		return runUserGet(rest)
 	case "update":
 		return runUserUpdate(rest)
+	case "password":
+		return runUserPassword(rest)
+	case "unlock":
+		return runUserUnlock(rest)
 	case "delete":
 		return runUserDelete(rest)
 	default:
@@ -230,6 +257,7 @@ func runUserCreate(args []string) error {
 	name := fs.String("name", "", "")
 	email := fs.String("email", "", "")
 	role := fs.String("role", string(auth.RoleUser), "")
+	generateInitialPassword := fs.Bool("generate-password", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -262,6 +290,16 @@ func runUserCreate(args []string) error {
 		return usageErr(err)
 	}
 
+	// 初始口令在连库之前生成：熵源坏了是一次「这次命令根本没开始」的失败，
+	// 不该在库里留下一个建了一半的账号。
+	var initialPassword string
+	if *generateInitialPassword {
+		initialPassword, err = generatePassword()
+		if err != nil {
+			return err
+		}
+	}
+
 	cfg, err := config.LoadOps()
 	if err != nil {
 		return err
@@ -274,13 +312,28 @@ func runUserCreate(args []string) error {
 	}
 	defer func() { _ = db.Close() }()
 
-	created, err := auth.New(db).CreateUser(ctx, auth.CreateUserParams{
+	store := auth.New(db)
+	created, err := store.CreateUser(ctx, auth.CreateUserParams{
 		Username: *name,
 		Email:    *email,
 		Role:     parsedRole,
 	})
 	if err != nil {
 		return err
+	}
+
+	if *generateInitialPassword {
+		hash, err := auth.HashPassword(auth.DefaultKDFParams, initialPassword)
+		if err != nil {
+			return fmt.Errorf("用户 %s（ID %d）已创建，但计算口令哈希失败: %w",
+				created.Username, created.ID, err)
+		}
+		if err := store.SetPassword(ctx, created.ID, hash, nil); err != nil {
+			return fmt.Errorf("用户 %s（ID %d）已创建，但设置初始口令失败: %w",
+				created.Username, created.ID, err)
+		}
+		printCreatedUserWithPassword(humanStdout(), humanStderr(), created, initialPassword)
+		return nil
 	}
 
 	printCreatedUser(humanStdout(), humanStderr(), created)
@@ -302,6 +355,17 @@ func runUserCreate(args []string) error {
 func printCreatedUser(stdout, stderr io.Writer, u auth.User) {
 	_, _ = fmt.Fprintf(stderr, "已创建用户 %s\n", u.Username)
 	_, _ = fmt.Fprintln(stdout, u.ID)
+}
+
+// printCreatedUserWithPassword 打印「建号 + 初始口令」的结果。
+//
+// 与 printCreatedUser 的分工：带 --generate-password 时 stdout 那一行是
+// **口令**——它只出现这一次，要能被直接接走或复制；ID 与用户名走 stderr。
+// 两种输出形状不能混：stdout 一行里既放 ID 又放口令，接的人分不出哪一半是哪个。
+func printCreatedUserWithPassword(stdout, stderr io.Writer, u auth.User, password string) {
+	_, _ = fmt.Fprintf(stderr, "已创建用户 %s（ID %d），初始口令只显示这一次\n",
+		u.Username, u.ID)
+	_, _ = fmt.Fprintln(stdout, password)
 }
 
 // runUserList 列出用户。

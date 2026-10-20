@@ -26,12 +26,12 @@ var walletHelp = helpText{short: walletShortUsage, long: walletUsage}
 
 // walletShortUsage 是 wallet 的短版：`-h` / `--help` 与参数写错时打的那一份。
 //
-// 它有一屏的上限（见 usage_test.go 的 shortUsageMaxLines），所以这一族从四条命令
-// 长到八条之后，每一行的取舍都是「哪些字必须留在一屏里」：**每个旗标都留着**
-// （它们是照着敲的东西），省下来的是散文——`--memo` 的控制字符、`--asset` 的默认值
-// 这些解释挪进长版（larkaxctl help wallet）。
+// 它有一屏的上限（见 usage_test.go 的 shortUsageMaxLines），所以这一族长到这么多
+// 条之后，每一行的取舍都是「哪些字必须留在一屏里」：**每个旗标都留着**
+// （它们是照着敲的东西），省下来的是散文与空行——`--memo` 的控制字符、`--asset`
+// 的默认值这些解释挪进长版（larkaxctl help wallet），首行与「用法：」之间的空行
+// 也让给了 settle。
 const walletShortUsage = `larkaxctl wallet 管理用户钱包。
-
 用法：
   larkaxctl wallet create --user <ID 或用户名> [--asset <资产>]
   larkaxctl wallet credit --user <ID 或用户名> --amount <金额> --ref <外部单据号> [--asset <资产>] [--gateway <来源>]
@@ -40,13 +40,14 @@ const walletShortUsage = `larkaxctl wallet 管理用户钱包。
                           [--asset <资产>] [--merchant <ID 或用户名> --merchant-share <金额>] [--upstream-cost <金额>]
   larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号> [--asset <资产>]
                                   [--destination <收款信息 JSON>]
+  larkaxctl wallet payout settle --user <ID 或用户名> --amount <金额> --ref <结算单号> --destination <JSON> --by <操作人> [--note <说明>]
   larkaxctl wallet payout approve|reject --id <提现单 ID> --by <操作人> [--note <说明>]
   larkaxctl wallet payout paid --id <提现单 ID> --gateway <通道> [--gateway-ref <凭据号>]
   larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号> [--asset <资产>]
   larkaxctl wallet payment status --order <订单号>
   larkaxctl wallet list [--user <ID 或用户名>]
 
-credit / adjust / refund 要求钱包已存在（先 create）；payout 四步不动 user 科目，**打款只放行已批准的单子**；单据号必填且是幂等键。
+credit / adjust / refund 要求钱包已存在（先 create）；payout 这些动作不动 user 科目，**打款只放行已批准的单子**；单据号必填且是幂等键。
 某一格金额读不出来时打「不可读（超出可表示范围）」并退出 1；更细的边界：larkaxctl help wallet，payout 与 payment 另有各自 help。
 `
 
@@ -66,6 +67,9 @@ const walletUsage = `larkaxctl wallet 管理用户钱包。
   larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号>
                                   [--asset <资产>]
                                   [--destination <收款信息 JSON>]
+  larkaxctl wallet payout settle --user <ID 或用户名> --amount <金额> --ref <结算单号>
+                                 --destination <收款信息 JSON> --by <操作人>
+                                 [--note <说明>]
   larkaxctl wallet payout approve|reject --id <提现单 ID> --by <操作人>
                                          [--note <说明>]
   larkaxctl wallet payout paid --id <提现单 ID> --gateway <通道>
@@ -157,12 +161,14 @@ refund 是运营给用户退钱：走账本写一组 refund 分录，借 user:<I
 交易号是它的哈希，从单据号算得到交易号、反过来算不回来，不落备注就没有第二条路把这张退款单
 对上这笔账。
 
-payout 是商户提现，四个动作各一条命令：request 申请、approve 批准、reject 驳回、paid 打款。
-一条提现单按状态往前走：
+payout 是商户提现，几个动作各一条命令：request 申请、settle 平台清算、approve 批准、
+reject 驳回、paid 打款。一条提现单按状态往前走：
 
     pending --批准--> approved --打款--> paid
         |
         +--驳回--> rejected
+
+settle 不走这条路的第一段：它建出来的单子直接是 approved。
 
 request 建一行 payout_requests（状态 pending）并写一组分录，把申请额从
 merchant_payable:<商户>（他还能申请的钱）挪进 payout:<单id>（这条单子的待付）——钱在申请
@@ -176,6 +182,14 @@ merchant_payable:<商户>（他还能申请的钱）挪进 payout:<单id>（这�
 分成真正进来之前会被一律拒掉——那是刻意的，不能提平台根本不欠的钱。这条校验只保证
 「申请时不能提平台还不欠的钱」，**不是**「分成科目永远非负」：退款把分成冲成负数是允许的
 （负的意思是平台多付给了商户、商户欠平台，业务上再走追回），退款不因此被拒。
+
+settle 是**平台主动清算**：平台已经决定付这笔钱，于是建单与记账在同一条命令里做完。单子
+直接落 approved（reviewed_by 记 --by、reviewed_at 取库里的 now()、review_note 记 --note），
+之后照旧用 paid 收尾。分录类型是 settle，与商户申请的 payout_request 分开，对账时
+「平台清算的」与「商户申请的」在账面上分得开。--ref 是结算单号，同样进备注
+（「平台清算（单据 <ref>）」）。--destination 在这一档**必填**：平台已经决定付了，付到哪里
+必须当场说清；申请那一档留空表示商户可能还没填。--amount 为正，且不超过商户当前的分成
+余额，超了退出 1。
 
 approve 与 reject 都**不在这一层动钱**。approve 只在那一行上记下审批人与时刻
 （reviewed_by / reviewed_at，取自 --by 解析出来的那个用户）：账本与那张表都没有角色校验，
@@ -193,12 +207,12 @@ paid 是唯一一个把钱付出去的入口，**它只放行已批准的单子*
 但**不是**幂等键——一张提现单只可能打款成功一次，所以键取单子自己的 id。拿凭据号当键的话，
 同一张单换一个凭据号会被算成一笔新交易，payout:<单id> 被扣成负数，那正是重复打款。
 
-四个动作各自幂等：申请、驳回与打款重放时什么都不写（打出来的那一句是「已经申请过 / 已经
-驳回过 / 已经打过款，本次未改动」），批准重跑时也不覆盖上一次的审批人与时刻——一次重跑不该
-把「谁批的」改成后一个人。--id 给了一个库里没有的提现单时报「没有这条提现单」；单子停在别的
-状态上时把当前状态与这一步要求的状态都打出来，两者都退出 4。
+这些动作各自幂等：申请、清算、驳回与打款重放时什么都不写（打出来的那一句是「已经申请过 /
+已经清算过 / 已经驳回过 / 已经打过款，本次未改动」），批准重跑时也不覆盖上一次的审批人与
+时刻——一次重跑不该把「谁批的」改成后一个人。--id 给了一个库里没有的提现单时报「没有这条
+提现单」；单子停在别的状态上时把当前状态与这一步要求的状态都打出来，两者都退出 4。
 
-**这一族不动余额**：提现动的是分成与待付，商户的用户余额（user 科目）不受影响，所以四条
+**这一族不动余额**：提现动的是分成与待付，商户的用户余额（user 科目）不受影响，所以这些
 命令都不要求那个用户有钱包行。列出提现单的清单命令还没有：要查库里现在有哪些单子，
 暂时只有这一族的回显与直接查 payout_requests 表。
 

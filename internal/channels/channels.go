@@ -116,6 +116,40 @@ const (
 	streakCooldown = 15 * time.Minute
 )
 
+// SuppliedModels 返回至少一个启用渠道在供的规范模型名。
+//
+// 判据与 Candidates 共用一处（见 suppliesModel）：只是方向反了，那一侧问
+// 「这个模型有哪些渠道」，这一侧问「哪些模型有渠道」。控制台的模型页与
+// 选路于是认同一件事——不会出现「页面上列着，但一发请求就说没有可用渠道」。
+//
+// 它只判**供给**，不判可用性：健康与额度不在这个片段里。一个被降权的渠道
+// 仍然在供这个模型，参考价也不该因为它今天不舒服而消失；反过来，把健康
+// 塞进这里会让「调得通、页面上却没有」成为另一类不一致。
+func (s *Source) SuppliedModels(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT m.canonical_name
+		  FROM model_catalog m
+		  JOIN channels c ON `+suppliesModel("m.canonical_name")+`
+		 ORDER BY m.canonical_name`)
+	if err != nil {
+		return nil, fmt.Errorf("查询在供模型失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("读在供模型失败: %w", err)
+		}
+		out = append(out, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历在供模型失败: %w", err)
+	}
+	return out, nil
+}
+
 // Candidates 返回某个规范模型名下的全部可用渠道。
 //
 // 过滤条件是 `status = 'enabled'` 且 `models` 数组包含该规范名。
@@ -405,7 +439,7 @@ func (s *Source) logger() *slog.Logger {
 // （见 record.go 的 rollup），所以这里也不需要 failures 去还原它。
 // 留着它是为了让「有多少次是失败」在库里可查，读侧不需要它——
 // 不为消掉一列而硬接一条假的消费。
-const candidateQuery = `
+var candidateQuery = `
 SELECT
     c.id,
     c.name,
@@ -450,10 +484,23 @@ SELECT
            AND r.bucket >= $2
        ) h ON true
   LEFT JOIN channel_quota_state q ON q.channel_id = c.id
- WHERE c.status = 'enabled'
-   AND c.models @> ARRAY[$1]::text[]
-   AND c.` + channelAlive + `
+ WHERE ` + suppliesModel("$1") + `
  ORDER BY c.id`
+
+// suppliesModel 是「这个渠道在供这个规范模型」这条判据的**唯一**一处字面量。
+//
+// Candidates 与 SuppliedModels 两侧都拼它：一个按模型取渠道，一个按渠道取
+// 模型。modelExpr 是模型名的 SQL 表达式——候选集那边是参数 `$1`，在供清单
+// 那边是目录表的列 `m.canonical_name`。
+//
+// 它只回答「配了没有」：渠道能不能用（健康、额度、降权）是选路下一层的事。
+// 两个读点都不在这里判，否则「页面上有、实际调不通」会反过来变成「调得通、
+// 页面上没有」。
+func suppliesModel(modelExpr string) string {
+	return `c.status = 'enabled'
+   AND c.models @> ARRAY[` + modelExpr + `]::text[]
+   AND c.` + channelAlive
+}
 
 // candidateRow 是查询结果的一行。
 //

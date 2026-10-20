@@ -1,0 +1,132 @@
+/* 视觉基准：p.larkax.com/components.html 的 01 基础一节。
+   组件只读这些 token，不写颜色字面量。 */
+:root {
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --surface-2: #f1f3f7;
+  --surface-3: #e9edf3;
+  --fg: #0e1525;
+  --muted: #5b6577;
+  --faint: #8b93a5;
+  --border: #e4e8ef;
+  --border-strong: #d3d9e3;
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-soft: #eef0ff;
+  --accent-fg: #ffffff;
+  --success: #0e9f6e;
+  --success-soft: #e7f6f1;
+  --danger: #d92d20;
+  --danger-soft: #feeceb;
+  --warning: #b54708;
+  --warning-soft: #fef0e6;
+
+  --code-bg: #0f172a;
+  --code-fg: #e2e8f0;
+  --code-muted: #94a3b8;
+  --cb-bg: #f5f7fb;
+  --cb-fg: #1a2233;
+  --cb-border: #e2e8f0;
+  --cb-btn-bg: #ffffff;
+  --cb-btn-fg: #475569;
+  --cb-btn-border: #d7dfea;
+  --syn-key: #1d4ed8;
+  --syn-str: #047857;
+  --syn-num: #b45309;
+  --syn-kw: #7c3aed;
+  --syn-fn: #be185d;
+  --syn-var: #b91c1c;
+  --syn-cmt: #6b7280;
+
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow-md: 0 6px 18px rgba(16, 24, 40, 0.09);
+  --r-sm: 8px;
+  --r: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #0b0e14;
+    --surface: #121722;
+    --surface-2: #182030;
+    --surface-3: #202a3d;
+    --fg: #e8ebf2;
+    --muted: #9aa4b8;
+    --faint: #6b7689;
+    --border: #232b3b;
+    --border-strong: #303b50;
+    --accent: #8b8cf8;
+    --accent-hover: #a5a6ff;
+    --accent-soft: #1b1f3a;
+    --accent-fg: #0b0e14;
+    --success: #34d399;
+    --success-soft: #10281f;
+    --danger: #f87171;
+    --danger-soft: #2a1414;
+    --warning: #fbbf24;
+    --warning-soft: #2a1f0d;
+    --code-bg: #070a11;
+    --code-fg: #e2e8f0;
+    --code-muted: #8b96ab;
+    --cb-bg: #0b1220;
+    --cb-fg: #e2e8f0;
+    --cb-border: #1e293b;
+    --cb-btn-bg: #16202f;
+    --cb-btn-fg: #cbd5e1;
+    --cb-btn-border: #2b3a50;
+    --syn-key: #93c5fd;
+    --syn-str: #a7f3d0;
+    --syn-num: #fcd34d;
+    --syn-kw: #c4b5fd;
+    --syn-fn: #f9a8d4;
+    --syn-var: #fca5a5;
+    --syn-cmt: #64748b;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.45);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme='dark'] {
+  --bg: #0b0e14;
+  --surface: #121722;
+  --surface-2: #182030;
+  --surface-3: #202a3d;
+  --fg: #e8ebf2;
+  --muted: #9aa4b8;
+  --faint: #6b7689;
+  --border: #232b3b;
+  --border-strong: #303b50;
+  --accent: #8b8cf8;
+  --accent-hover: #a5a6ff;
+  --accent-soft: #1b1f3a;
+  --accent-fg: #0b0e14;
+  --success: #34d399;
+  --success-soft: #10281f;
+  --danger: #f87171;
+  --danger-soft: #2a1414;
+  --warning: #fbbf24;
+  --warning-soft: #2a1f0d;
+  --code-bg: #070a11;
+  --code-fg: #e2e8f0;
+  --code-muted: #8b96ab;
+  --cb-bg: #0b1220;
+  --cb-fg: #e2e8f0;
+  --cb-border: #1e293b;
+  --cb-btn-bg: #16202f;
+  --cb-btn-fg: #cbd5e1;
+  --cb-btn-border: #2b3a50;
+  --syn-key: #93c5fd;
+  --syn-str: #a7f3d0;
+  --syn-num: #fcd34d;
+  --syn-kw: #c4b5fd;
+  --syn-fn: #f9a8d4;
+  --syn-var: #fca5a5;
+  --syn-cmt: #64748b;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.45);
+  color-scheme: dark;
+}

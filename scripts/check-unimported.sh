@@ -256,6 +256,22 @@ fi
 repo_abs="$tmpdir/repo.abs"
 parse_paths "$pkgs_raw" "$repo_abs" "仓库自己的包"
 
+# `go list ./...` 会把 **node_modules 里自带的 Go 包**当成仓库自己的包收进来
+# （实测：某个 npm 依赖带了 `golang/` 实现）。它们不是本仓库的源码：既不该接线，
+# 也不该进白名单。不滤掉的话，跑过 `npm install` 的工作树每次都会多出一条
+# 「新出现的整包没人 import」，而干净的 CI 上是绿的——两边各说各话，
+# 最后教人学会无视这道门（LESSONS.md 第 13 条）。
+#
+# **滤掉几条要打印出来**：安静地滤掉与「本来就没有」长得一样，
+# 而后者才是干净的形状。
+repo_abs_all="$tmpdir/repo-all.abs"
+cp "$repo_abs" "$repo_abs_all"
+awk 'index($0, "/node_modules/") == 0' "$repo_abs_all" >"$repo_abs"
+skipped_nm=$(( $(wc -l <"$repo_abs_all") - $(wc -l <"$repo_abs") ))
+if [ "$skipped_nm" -gt 0 ]; then
+  echo "· 跳过 $skipped_nm 个 node_modules 下的包（依赖自带的 Go 代码，不是本仓库的源码）"
+fi
+
 # 模块前缀必须真的剥得掉。剥不掉时白名单里的相对路径一条都对不上，
 # 于是整个仓库会被报成「新出现的无人 import」——一次假的大发现。
 stripped=$(awk -v mod="$MOD" '$0 == mod || index($0, mod "/") == 1' "$repo_abs" | wc -l)

@@ -50,7 +50,7 @@ func TestPaymentCallbackIsMountedOnlyWhenFakeChannelEnabled(t *testing.T) {
 		handler, err := buildPublicHandler(Config{
 			DB: db, Settings: loadPaymentSettings(t, ctx, db),
 			Logger: logger, Version: "test-version",
-		}, inference, ledgerStore, logger)
+		}, inference, ledgerStore, logger, publicPaths{})
 		if err != nil {
 			t.Fatalf("装配公共 handler 失败: %v", err)
 		}

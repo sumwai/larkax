@@ -188,6 +188,8 @@ type Created struct {
 	ID int64
 	// Prefix 是入库的 key_prefix，用于日后在列表里认出这把 key。
 	Prefix string
+	// Suffix 是入库的 key_suffix（明文的最后 6 个字符）。
+	Suffix string
 	// Plaintext 是**仅此一次**的明文。
 	Plaintext string
 }
@@ -221,13 +223,14 @@ func (s *Store) Create(ctx context.Context, p CreateParams) (Created, error) {
 	}
 
 	prefix := KeyPrefix(plaintext)
+	suffix := KeySuffix(plaintext)
 	var id int64
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO api_keys (user_id, name, key_hash, key_prefix, expires_at,
-		                      rate_limit_rpm, quota_limit)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO api_keys (user_id, name, key_hash, key_prefix, key_suffix,
+		                      expires_at, rate_limit_rpm, quota_limit)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id`,
-		p.UserID, p.Name, HashKey(plaintext), prefix, expiresAt,
+		p.UserID, p.Name, HashKey(plaintext), prefix, suffix, expiresAt,
 		nullableInt(p.RateLimitRPM), nullableAmount(p.QuotaLimit),
 	).Scan(&id)
 	if err != nil {
@@ -239,7 +242,7 @@ func (s *Store) Create(ctx context.Context, p CreateParams) (Created, error) {
 		return Created{}, dberr.ConstraintFailure(fmt.Errorf("写入 API Key 失败: %w", err))
 	}
 
-	return Created{ID: id, Prefix: prefix, Plaintext: plaintext}, nil
+	return Created{ID: id, Prefix: prefix, Suffix: suffix, Plaintext: plaintext}, nil
 }
 
 // nullableInt 把一个可选的整数转成能写进可空列的驱动值。
