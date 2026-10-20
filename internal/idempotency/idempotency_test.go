@@ -418,6 +418,12 @@ func TestHashRequestRejectsNilRequest(t *testing.T) {
 //
 // 期望值写**字面量**（24 * time.Hour）而不是拿 Retention 自己算一遍：
 // 后者的期望与被测来自同一个来源，把 24 改成 15 用例照样通过。
+//
+// 变异：`if hours <= 0` 改成 `<`。这一处是**等价变异**：
+// 负数两版都进分支返回 0；`hours == 0` 那一格变异版不进分支，
+// 走的是 `0 * time.Hour`，结果还是 0；正数两版都乘同一个式子。
+// 任何输入上两版返回的时长都相同，所以不存在能分开两版的输入——
+// 下面三条非正数用例在变异版下照样全绿，不是用例写得不够狠。
 func TestRetention(t *testing.T) {
 	cases := []struct {
 		name  string

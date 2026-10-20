@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -526,6 +527,75 @@ func TestTransitionsOnMissingRecordReturnErrNotFound(t *testing.T) {
 			if !errors.Is(err, ErrNotFound) {
 				t.Errorf("%s 的错误 = %v，期望 ErrNotFound——记录不存在是正常路径，"+
 					"调用方据此静默；混成状态错误会让那条唯一的告警被淹掉", tc.name, err)
+			}
+		})
+	}
+}
+
+// 记录在、但状态不是 in_progress 时，错误要指认**状态**，而不是「查存在性失败」。
+//
+// 两种 0 行的处置相反（见 requireTransition）：记录不在是正常路径，
+// 调用方静默；记录在而状态不对才是真异常，调用方报警。这条告警全靠错误文案把话说清——
+// 值班的人看到「幂等记录不在 in_progress 上」，才会去查那条卡住的记录；
+// 看到「确认幂等记录是否存在失败」，只会去查数据库连接。
+//
+// 变异：recordExists 里 `if err != nil` 改成 `== nil`。变异版在查询**成功**
+// 时反而返回「确认幂等记录是否存在失败」，于是记录在、状态不对这条路拿到的
+// 是一句指向数据库的错误。断言错误文案，就能把这两条路分开。
+func TestTransitionsOnWrongStateNameTheState(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seedUser(t, db)
+	keyID := issueKey(t, db, userID)
+
+	cases := []struct {
+		name string
+		// settle 先把记录推到 in_progress 以外的状态。
+		settle func(key string) error
+		// call 是第二次状态转换，也就是那条影响 0 行的路。
+		call func(key string) error
+		want string
+	}{
+		{
+			name: "Complete 落在 completed 上",
+			settle: func(key string) error {
+				return s.Complete(ctx, keyID, key, 200, "application/json", []byte(`{"ok":true}`))
+			},
+			call: func(key string) error {
+				return s.Complete(ctx, keyID, key, 200, "application/json", []byte(`{"ok":true}`))
+			},
+			want: "幂等记录不在 in_progress 上，响应没有写进去",
+		},
+		{
+			name:   "Fail 落在 failed 上",
+			settle: func(key string) error { return s.Fail(ctx, keyID, key) },
+			call:   func(key string) error { return s.Fail(ctx, keyID, key) },
+			want:   "幂等记录不在 in_progress 上，失败状态没有写进去",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key := unique("wrong-state")
+			if err := claim(t, db, &Claim{APIKeyID: keyID, Key: key, Hash: hashOf(0x66)}, 0); err != nil {
+				t.Fatalf("ClaimInTx 失败: %v", err)
+			}
+			if err := tc.settle(key); err != nil {
+				t.Fatalf("把记录推到终态失败: %v", err)
+			}
+
+			err := tc.call(key)
+			if err == nil {
+				t.Fatal("在终态上再做一次状态转换应当报错——影响 0 行不是成功")
+			}
+			if errors.Is(err, ErrNotFound) {
+				t.Errorf("错误 = %v，但它**不该**是 ErrNotFound：记录在，只是状态不对", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("错误 = %q，期望它说清是状态不对（含 %q），而不是指向存在性检查",
+					err.Error(), tc.want)
 			}
 		})
 	}

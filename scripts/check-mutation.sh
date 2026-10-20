@@ -352,6 +352,7 @@ PKGS=(
   internal/route
   internal/channels
   internal/credential
+  internal/idempotency
   internal/snapshot
   internal/snapshotwire
   internal/gateway
