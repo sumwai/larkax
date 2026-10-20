@@ -138,4 +138,9 @@ func TestKeyPrefix(t *testing.T) {
 	if got := KeyPrefix("short"); got != "short" {
 		t.Errorf("短输入 KeyPrefix = %q，期望原样返回", got)
 	}
+
+	// 边界上那一条（`len(plaintext) <= keyPrefixLen` 的 <= 改成 <）是等价变异：
+	// 长度恰好等于 12 时两个分支返回同一个串——`plaintext[:12]` 在长度 12 时
+	// 就是 plaintext 本身。比 12 短时两版都原样返回，比 12 长时两版都切前 12
+	// 个字符，所以没有输入能把两版分开。
 }

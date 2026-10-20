@@ -604,6 +604,87 @@ func TestPurgeSkipsATakenPlaceholderEmail(t *testing.T) {
 	}
 }
 
+// TestFreeDeletionPlaceholderReachesTheLastCandidate 钉住占位名往后找的上限。
+//
+// 占位名按 n 从小到大试：n=1 是 `deleted-user-<id>`，之后依次加 `-2`、`-3`……
+// 上限是 100 个。用例把前 99 个都占住、第 100 个空着：找得到它，说明循环真的
+// 走到了 n=100；写成 n<100 时会停在第 99 个，整条匿名化因此失败。
+//
+// 不把 100 个全占住：两边都会失败，而报错文案里那个 100 是常量，分不出两版。
+func TestFreeDeletionPlaceholderReachesTheLastCandidate(t *testing.T) {
+	ctx := t.Context()
+	db := testDB(ctx, t)
+	u := newUser(ctx, t, db, UserStatusActive)
+
+	for n := 1; n <= 99; n++ {
+		name := fmt.Sprintf("deleted-user-%d", u.ID)
+		if n > 1 {
+			name = fmt.Sprintf("deleted-user-%d-%d", u.ID, n)
+		}
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO users (username) VALUES ($1)`, name); err != nil {
+			t.Fatalf("占住第 %d 个占位名失败: %v", n, err)
+		}
+	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.WithoutCancel(ctx), `
+			DELETE FROM users
+			 WHERE username = $1 OR username LIKE $2`,
+			fmt.Sprintf("deleted-user-%d", u.ID),
+			fmt.Sprintf("deleted-user-%d-%%", u.ID)); err != nil {
+			t.Logf("清理占位用户失败: %v", err)
+		}
+	})
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("开启事务失败: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	got, err := freeDeletionPlaceholder(ctx, tx, u.ID)
+	if err != nil {
+		t.Fatalf("第 100 个占位名还空着，不该报错：%v", err)
+	}
+	if want := fmt.Sprintf("deleted-user-%d-100", u.ID); got != want {
+		t.Errorf("占位名 = %q，期望 %q", got, want)
+	}
+}
+
+// TestCheckDeletionBalanceCountsEveryWalletRow 钉住回执里的钱包行数。
+//
+// walletRows 是「读到了几行」，不是「有没有钱」：回执用它区分「没有钱包行」
+// 与「两个数都是 0」。计数写成递减时余额判据照样对，只有这个数会变成负数——
+// 所以断言要的是一个具体的行数，而不是「非零」。
+func TestCheckDeletionBalanceCountsEveryWalletRow(t *testing.T) {
+	ctx := t.Context()
+	db := testDB(ctx, t)
+	u := newUser(ctx, t, db, UserStatusActive)
+	seedWallet(ctx, t, db, u.ID, "0", "0")
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO user_wallets (user_id, asset, balance, frozen)
+		VALUES ($1, 'USD', 0, 0)`, u.ID); err != nil {
+		t.Fatalf("建第二个钱包失败: %v", err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("开启事务失败: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	balance, frozen, rows, err := checkDeletionBalance(ctx, tx, u.ID, u.Username)
+	if err != nil {
+		t.Fatalf("两个钱包都是 0，不该报错：%v", err)
+	}
+	if rows != 2 {
+		t.Errorf("walletRows = %d，期望 2（CNY 与 USD 各一行）", rows)
+	}
+	if !balance.IsZero() || !frozen.IsZero() {
+		t.Errorf("余额 = %s、冻结 = %s，期望都是 0", balance, frozen)
+	}
+}
+
 // TestPurgeWaitsForTheWalletLockAndThenRefuses 证明「余额判据在锁之后」。
 //
 // 另一个事务先改钱包、把行锁攥在手里，然后销户必须真的停在那把锁上：提交之前
@@ -745,4 +826,10 @@ func TestPurgeCountsLegacyLedgerAccountForms(t *testing.T) {
 		t.Errorf("回执说 %d 条分录，想要 3（规范写法、补零写法与带正号写法各一）",
 			result.LedgerEntries)
 	}
+
+	// 这一条同时给 `ok && userID == row.id` 上那个存活变异（&& 改成 ||）留了
+	// 等价说明：SQL 的预筛是 `^user:\+?0*<id>$`，能进这个循环的地址只可能是
+	// 「user:」+ 可选正号 + 若干前导零 + row.id 的十进制写法，而 UserIDFromAccount
+	// 把这一段正好读成 row.id。于是两版对每一行给出同一个布尔值：ok 为假时
+	// 它返回的 userID 是 0，也等于不了 row.id（bigserial 从 1 起）。
 }

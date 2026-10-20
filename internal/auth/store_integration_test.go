@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -116,6 +117,27 @@ func TestCreateKeyForMissingUserIsConstraintConflict(t *testing.T) {
 	}
 	if pgErr.ConstraintName != "api_keys_user_id_fkey" {
 		t.Errorf("约束名 = %q，期望 api_keys_user_id_fkey", pgErr.ConstraintName)
+	}
+}
+
+// TestCreateKeyRejectsNonPositiveUserID 钉住用户 ID 的检查在连库之前发生。
+//
+// 0 与负数在 users 里不可能有一行；放 0 到 INSERT 只会撞外键，报出来的是一句
+// 驱动原文，而这里要的是「用户 ID 不对」。边界写成 < 0 时 0 会漏下去：它过得了
+// 检查，最后以约束冲突收场，与「用户不存在」撞成同一个错误。
+func TestCreateKeyRejectsNonPositiveUserID(t *testing.T) {
+	ctx := t.Context()
+	db := testDB(ctx, t)
+	store := New(db)
+
+	for _, id := range []int64{0, -1} {
+		_, err := store.Create(ctx, CreateParams{UserID: id})
+		if err == nil {
+			t.Fatalf("用户 ID=%d 期望报错", id)
+		}
+		if !strings.Contains(err.Error(), "正整数") {
+			t.Errorf("用户 ID=%d 的错误信息 %q 没说清 ID 不对", id, err.Error())
+		}
 	}
 }
 
