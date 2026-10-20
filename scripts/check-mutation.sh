@@ -100,7 +100,8 @@
 #
 # 退出码：
 #   0  全部跑成
-#   1  没跑成：gremlins 缺失、版本不符、读不出变异器集合、有包参数没匹配到任何包，
+#   1  没跑成：gremlins 缺失、版本不符、读不出变异器集合、有包参数没匹配到任何包、
+#      前置环境变量缺失（LARKAX_DB_DSN，或选中包的测试要的 LARKAX_REDIS_DSN），
 #      或者有包没跑成（超时过多、一个变异都没跑到、认不出输出、测试缓存清不掉）
 #   3  拿不到锁：另一个实例正在跑（或锁文件不可用），本次未执行
 # 1 与 3 分开是因为处置不同：前者要去看代码或环境，后者等一会儿重跑就行。
@@ -354,6 +355,7 @@ PKGS=(
   internal/credential
   internal/idempotency
   internal/overrides
+  internal/ratelimit
   internal/snapshot
   internal/snapshotwire
   internal/gateway
@@ -434,6 +436,38 @@ if [ ${#overlap_pairs[@]} -gt 0 ]; then
     echo "      ${pair%% *} 含 ${pair#* }"
   done
   echo
+fi
+
+# ── 前置：被选中的包里，测试要 Redis 的，这一轮得有 LARKAX_REDIS_DSN ─────────
+#
+# 与上面那条 LARKAX_DB_DSN 同一个形状，只是范围不同：数据库是清单里每个包都要
+# 的硬前提，Redis 只有**测试文件里读它**的那几包才要。internal/ratelimit 进
+# 清单之后是第一个这样的包。
+#
+# 缺它时 redis_integration_test.go 那几条整组 `t.Skip`，而只在这些用例里碰得到
+# 的变异体会落进 Not covered——不进 efficacy 的分母。于是分数**变好看而不是
+# 变差**：Killed 仍然大于 0，下面「Killed 与 Lived 同时为 0」那条判据不触发，
+# 表照出、门照过。它与 LESSONS 第 16 条是同一个问题：跳过与通过长得一样。
+#
+# 判法是「这个包的测试文件里有没有出现那个变量」，与
+# .github/actions/check-integration-tests 同一套做法：按名字找引用，不另立一份
+# 「哪些包要 Redis」的名单——那份名单会在下一次有人加集成测试时悄悄漏掉一包。
+# 判据只看包目录：变量只由**包外**的测试辅助文件引用时，这里看不见。
+# 检查放在包选择之后：只跑不依赖 Redis 的包时，这个变量不是前提。
+redis_deps=()
+for pkg in "${PKGS[@]}"; do
+  selected "$pkg" || continue
+  if grep -rq 'LARKAX_REDIS_DSN' --include='*_test.go' "$pkg" 2>/dev/null; then
+    redis_deps+=("$pkg")
+  fi
+done
+if [ ${#redis_deps[@]} -gt 0 ] && [ -z "${LARKAX_REDIS_DSN:-}" ]; then
+  echo "没有 LARKAX_REDIS_DSN，本次未执行。"
+  echo "这些包的测试会读它：${redis_deps[*]}"
+  echo "缺它时那些集成测试整组被 t.Skip，只有它们碰得到的变异体会落进 Not covered，"
+  echo "那几包等于没测——分数只会变好看，所以这里不把这一轮当结果。"
+  echo "本地起 Redis 的办法见 docs/development.md 的「本地跑门禁的前提」一节。"
+  exit 1
 fi
 
 # 表里要带上「有多少变异体根本没被测到」这两栏（#769）。
