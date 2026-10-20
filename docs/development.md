@@ -1720,7 +1720,11 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 - **`--invert-logical` 已开**（`&&` ↔ `||`，默认关闭）。不开它时 `a || b` 这类
   判据一个变异体都不生成，那时的「efficacy 高」不能当成「布尔判据也被钉住了」；
 - **workers=1、系数 10**，理由见上文「并发与超时系数是同一个旋钮」那一段；
-- **`LARKAX_DB_DSN` 有效**，缺了它 `internal/ledger/store` 整包被跳过。
+- **`LARKAX_DB_DSN` 有效**，缺了它 `internal/ledger/store` 整包被跳过；
+- **`LARKAX_REDIS_DSN` 有效，但只对测试依赖它的包**：判据是包里的测试文件有没有
+  引用它，不是一份包名清单。缺它时那些集成测试整组被跳过，只在它们里碰得到的
+  变异体落进 `Not covered`——不进 efficacy 的分母，分数只会变好看。脚本同样
+  拒绝运行。
 
 **贴数字时把那一行「这把尺子」一起贴上**：它是数字的条件，不是装饰。两次运行的
 条件不同，两个数就不是同一个包的两个样本，别放在一起比。
