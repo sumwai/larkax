@@ -40,6 +40,12 @@ func TestNewRequestIDIsUniqueAndWellFormed(t *testing.T) {
 	}
 }
 
+// 可见 ASCII 的判定是 `c < 0x21 || c > 0x7e`（见 isVisibleASCII）。
+// 两侧端点上的边界变异——`<` 写成 `<=`、`>` 写成 `>=`——只在
+// 「字符恰好等于 0x21 或 0x7e」时才会显出区别：前者会把 `!` 判成不可见，
+// 后者会把 `~` 判成不可见。所以下面几个输入是专门为这两格准备的，
+// 端点外侧的 0x20（空格）与 0x7f（DEL）则用来钉住「两版都该拒绝」。
+// 断言落在具体输出上：保留的必须逐字等于输入，拒绝的必须换成一个新生成的标识。
 func TestRequestIDFromHeader(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -53,6 +59,16 @@ func TestRequestIDFromHeader(t *testing.T) {
 		{name: "带换行被拒绝", in: "abc\ndef", wantBad: true},
 		{name: "带制表符被拒绝", in: "abc\tdef", wantBad: true},
 		{name: "带空格被拒绝", in: "abc def", wantBad: true},
+		// 下界：0x21 是 `!`，可见 ASCII 的第一个字符。
+		{name: "下界感叹号被保留", in: "!", wantIn: true},
+		{name: "以下界开头被保留", in: "!abc", wantIn: true},
+		// 上界：0x7e 是 `~`，可见 ASCII 的最后一个字符。
+		{name: "上界波浪号被保留", in: "~", wantIn: true},
+		{name: "以上界结尾被保留", in: "abc~", wantIn: true},
+		{name: "两个端点连用被保留", in: "!~", wantIn: true},
+		// 端点外侧：0x20 的空格与 0x7f 的 DEL，两版都该拒绝。
+		{name: "下界外侧的空格被拒绝", in: "abc\x20def", wantBad: true},
+		{name: "上界外侧的 DEL 被拒绝", in: "abc\x7fdef", wantBad: true},
 		{name: "超长被拒绝", in: strings.Repeat("a", 129), wantBad: true},
 		{name: "非 ASCII 被拒绝", in: "请求标识", wantBad: true},
 		{name: "上限长度可接受", in: strings.Repeat("a", 128), wantIn: true},
