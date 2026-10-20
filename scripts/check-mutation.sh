@@ -366,6 +366,7 @@ PKGS=(
   internal/adminapi
   internal/assembly
   internal/settings
+  internal/channel
   internal/snapshot
   internal/snapshotwire
   internal/gateway

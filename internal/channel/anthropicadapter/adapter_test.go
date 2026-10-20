@@ -114,6 +114,12 @@ func TestChatSuccess(t *testing.T) {
 	if resp.Usage.CacheReadTokens != 30 || resp.Usage.CacheWriteTokens != 10 {
 		t.Errorf("缓存明细 = %+v", resp.Usage)
 	}
+	// 输出侧同样要照抄。CompletionTokens 为 0 时 UsageFromRelaykit 会改读
+	// OutputTokens，而这条路径上两个字段是同一个来源——漏抄救不回来，
+	// 只会静默地少算一次调用的输出。
+	if resp.Usage.CompletionTokens != 20 {
+		t.Errorf("CompletionTokens = %d，期望 20（来自上游的 output_tokens）", resp.Usage.CompletionTokens)
+	}
 }
 
 func TestChatWithToolUse(t *testing.T) {
@@ -193,6 +199,87 @@ func TestChatDetectsEmbeddedError(t *testing.T) {
 	if !up.GotResponse || up.StatusCode != http.StatusOK {
 		t.Errorf("GotResponse=%v StatusCode=%d，期望 true / %d",
 			up.GotResponse, up.StatusCode, http.StatusOK)
+	}
+	// 错误体要带上上游自己写的那句话：排障时它比「上游返回错误」有用得多，
+	// 而它只在 Body 里，不在 Error() 文本里（后者会进日志，见 channel_test）。
+	if up.Body != "过载了" {
+		t.Errorf("Body = %q，期望上游的错误原文", up.Body)
+	}
+}
+
+// 「是不是错误体」由两个信号共同判定：type == "error" **或** error 对象存在。
+//
+// 两个信号各自都可能单独出现：只写 type、或只写 error 对象。只认一种的话，
+// 另一种会被当成正常响应——状态码 200、内容为空、用量为零，账上表现为
+// 「成功」，没有任何一处会失败。
+//
+// 两种形态落到 ErrUpstream.Body 上的取值不同，所以按形态逐条断言具体值：
+// 只看「有没有报错」的话，认错分支也照样通过。
+func TestChatDetectsEmbeddedErrorByEitherField(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		// 只有 type：error 是 null，错误文本退到本地文案。
+		{name: "只有 type", body: `{"type":"error","error":null}`, want: "上游返回错误"},
+		// 只有 error 对象：type 写的是正常响应，错误文本来自 message。
+		{name: "只有 error 对象", body: `{"type":"message","error":{"type":"overloaded_error","message":"过载"}}`, want: "过载"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			_, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), &channel.Request{Model: "m"})
+			if err == nil {
+				t.Fatalf("应报错，期望 Body = %q", tc.want)
+			}
+			var up *channel.ErrUpstream
+			if !errors.As(err, &up) {
+				t.Fatalf("期望 *channel.ErrUpstream，得到 %v", err)
+			}
+			if up.Body != tc.want {
+				t.Errorf("Body = %q，期望 %q", up.Body, tc.want)
+			}
+		})
+	}
+}
+
+// 错误体里的 message 与 type 各自可能缺：有 message 用它，没有就退到 type，
+// 两者都没有才用本地文案。message 是给排障的人看的那句话，被吞掉之后
+// 只剩一个分类名。
+func TestChatEmbeddedErrorBodyFallback(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "message 优先于 type", body: `{"type":"error","error":{"type":"overloaded_error","message":"过载了"}}`, want: "过载了"},
+		{name: "没有 message 用 type", body: `{"type":"error","error":{"type":"overloaded_error"}}`, want: "overloaded_error"},
+		{name: "两者都没有", body: `{"type":"error","error":{}}`, want: "上游返回错误"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			_, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), &channel.Request{Model: "m"})
+			if err == nil {
+				t.Fatal("应报错")
+			}
+			var up *channel.ErrUpstream
+			if !errors.As(err, &up) {
+				t.Fatalf("期望 *channel.ErrUpstream，得到 %v", err)
+			}
+			if up.Body != tc.want {
+				t.Errorf("Body = %q，期望 %q", up.Body, tc.want)
+			}
+		})
 	}
 }
 
@@ -631,6 +718,15 @@ func TestChatStreamMidStreamError(t *testing.T) {
 			if channel.IsRetryable(ev.Err) {
 				t.Error("流中途的错误不该可重试：重试会让客户端看到两段拼接的回答")
 			}
+			// 流里的错误体同样是 {"error":{"type","message"}}：有 message
+			// 就用它，不该退到分类名上。
+			var up *channel.ErrUpstream
+			if !errors.As(ev.Err, &up) {
+				t.Fatalf("期望 *channel.ErrUpstream，得到 %v", ev.Err)
+			}
+			if up.Body != "过载" {
+				t.Errorf("Body = %q，期望上游的错误原文", up.Body)
+			}
 		}
 	}
 	if !sawText {
@@ -642,6 +738,11 @@ func TestChatStreamMidStreamError(t *testing.T) {
 }
 
 // 心跳与块结束标记对统一事件流没有对应物，不该产生任何事件。
+//
+// 空行与 ":" 开头的那道提前 continue 是冗余的：这两类行既不以 "event:" 也不以
+// "data:" 开头，落到后面同样 continue。所以把那里第一道判据里的 || 取反成 &&
+// 是等价变异——这两类行走不走第一道判据都一样被跳过，真正决定它们不变成
+// 事件的是后缀两道前缀判据，这条用例保证的就是那两道的行为。
 func TestChatStreamSkipsPingAndBlockStop(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for _, line := range []string{
@@ -723,6 +824,49 @@ func TestChatStreamWithoutEventLines(t *testing.T) {
 	}
 	if text.String() != "x" || !sawDone {
 		t.Errorf("文本 = %q，done = %v", text.String(), sawDone)
+	}
+}
+
+// 单帧可能很大：长文本的一次性增量、或一整段工具参数。默认的 64KB 上限会把
+// 合法响应判为读取失败，所以这里送一帧 100KB 的——它落在 bufio.Scanner 的
+// 初始缓冲（64KB）之上，正是「要不要扩容」的分界。
+//
+// 这一条要区分的是 maxTokenSize（扫描上限），不是初始容量：初始容量被改成
+// 0 时 Scanner 会从 4KB 起自己翻倍扩到同一个上限，能读到的 token 集合不变，
+// 只是多分配几次（那是等价变异，见 stream.go 的 scanner.Buffer 一行）。
+func TestChatStreamAcceptsEventLargerThanDefaultBuffer(t *testing.T) {
+	text := strings.Repeat("a", 100*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"`+text+`"}}`+"\n\n")
+		_, _ = io.WriteString(w, `data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer srv.Close()
+
+	events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), &channel.Request{Model: "m", Stream: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got strings.Builder
+	var sawDone, sawErr bool
+	for ev := range events {
+		switch ev.Kind {
+		case "delta":
+			got.WriteString(ev.Text)
+		case "done":
+			sawDone = true
+		case "error":
+			sawErr = true
+		}
+	}
+	if sawErr {
+		t.Error("合法的长帧不该被当成读取失败")
+	}
+	if got.Len() != len(text) {
+		t.Errorf("文本长度 = %d，期望 %d", got.Len(), len(text))
+	}
+	if !sawDone {
+		t.Error("长帧之后仍应读到 message_stop")
 	}
 }
 
@@ -818,5 +962,111 @@ func TestCustomHeadersCannotOverrideAPIKey(t *testing.T) {
 	}
 	if gotVersion != AnthropicVersion {
 		t.Errorf("anthropic-version 被覆盖了，实际 %q", gotVersion)
+	}
+}
+
+// failingReader 让 scanner 在读第一行时拿到错误，用来走「读流失败」那条路。
+type failingReader struct{ err error }
+
+func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
+
+// runPump 直接驱动 pump：读流失败这条路径要中断底层的连接才造得出来，
+// 在 httptest 里不稳定，而它的判据属于 pump 自己，与 HTTP 那一层无关。
+func runPump(ctx context.Context, body io.Reader) []channel.StreamEvent {
+	events := make(chan channel.StreamEvent, 8)
+	newAdapter().pump(ctx, http.StatusOK, body, events)
+	close(events)
+	var out []channel.StreamEvent
+	for ev := range events {
+		out = append(out, ev)
+	}
+	return out
+}
+
+// 读流时底层出错：这条错误要作为 error 事件发出去，而不是静默结束——
+// 静默结束会让「流断了」读成「模型答完了」，而已经发出的内容照常计费。
+func TestPumpEmitsScannerError(t *testing.T) {
+	readErr := errors.New("连接断了")
+	events := runPump(context.Background(), failingReader{readErr})
+	if len(events) != 1 {
+		t.Fatalf("事件 = %+v，期望恰好一个 error", events)
+	}
+	if events[0].Kind != "error" {
+		t.Fatalf("Kind = %q，期望 error", events[0].Kind)
+	}
+	var up *channel.ErrUpstream
+	if !errors.As(events[0].Err, &up) {
+		t.Fatalf("期望 *channel.ErrUpstream，得到 %v", events[0].Err)
+	}
+	// 响应头已经回来了，所以这是「拿到过响应」的失败，状态码要照实带上。
+	if !up.GotResponse || up.StatusCode != http.StatusOK {
+		t.Errorf("GotResponse=%v StatusCode=%d，期望 true / %d",
+			up.GotResponse, up.StatusCode, http.StatusOK)
+	}
+	if !errors.Is(up.Err, readErr) {
+		t.Errorf("底层错误 = %v，期望 %v", up.Err, readErr)
+	}
+	if up.Retryable {
+		t.Error("流已经开始，读失败不该判成可重试：重试会让客户端看到两段拼接的回答")
+	}
+}
+
+// ctx 已经取消时，读流的错误不再发出去：没人会收到它，而且它来自
+// 「我们自己不读了」，不是上游的失败。
+func TestPumpSilentWhenContextCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if events := runPump(ctx, failingReader{errors.New("连接断了")}); len(events) != 0 {
+		t.Errorf("ctx 已取消时不该产生事件，得到 %+v", events)
+	}
+}
+
+// readUsage 是「取到就覆盖、取不到就不动」：输入在 message_start 给出，
+// 输出在 message_delta 给出，两次调用的字段互不重叠，但后一次可能带一个
+// 只含 output_tokens 的对象——直接赋值会把已经读到的输入清零。
+//
+// 0 与「没带」在计费上是同一件事（都不增加用量），所以 0 同样不覆盖。
+func TestReadUsageDoesNotOverwriteWithZero(t *testing.T) {
+	var input, output, cacheRead, cacheWrite int64
+	readUsage(map[string]any{
+		"input_tokens":                float64(100),
+		"output_tokens":               float64(7),
+		"cache_read_input_tokens":     float64(3),
+		"cache_creation_input_tokens": float64(9),
+	}, &input, &output, &cacheRead, &cacheWrite)
+	if input != 100 || output != 7 || cacheRead != 3 || cacheWrite != 9 {
+		t.Fatalf("首帧用量 = (%d, %d, %d, %d)，期望 (100, 7, 3, 9)",
+			input, output, cacheRead, cacheWrite)
+	}
+
+	// 只带输出、且是 0 的后续事件：四个数都不动。
+	readUsage(map[string]any{"output_tokens": float64(0)}, &input, &output, &cacheRead, &cacheWrite)
+	if input != 100 || output != 7 || cacheRead != 3 || cacheWrite != 9 {
+		t.Errorf("后续事件把已累计的用量改了 = (%d, %d, %d, %d)",
+			input, output, cacheRead, cacheWrite)
+	}
+
+	// 四个字段都是 0：与「没带」同样不覆盖。
+	readUsage(map[string]any{
+		"input_tokens":                float64(0),
+		"output_tokens":               float64(0),
+		"cache_read_input_tokens":     float64(0),
+		"cache_creation_input_tokens": float64(0),
+	}, &input, &output, &cacheRead, &cacheWrite)
+	if input != 100 || output != 7 || cacheRead != 3 || cacheWrite != 9 {
+		t.Errorf("全零的用量不该覆盖 = (%d, %d, %d, %d)",
+			input, output, cacheRead, cacheWrite)
+	}
+
+	// 不是 map（含类型断言成功但为 nil 的 map）：没有字段可读，一个数都不该动。
+	//
+	// 这里的 || 取反成 && 是等价变异：!ok 时 m 本来就是 nil，&& 那一侧为真，
+	// 一样提前返回；ok 且 m 为 nil 时会继续往下读，而 nil map 的每次读取都给
+	// nil、numberFrom 返回 0，四处赋值都要求 v > 0——状态不变。
+	readUsage(nil, &input, &output, &cacheRead, &cacheWrite)
+	readUsage(map[string]any(nil), &input, &output, &cacheRead, &cacheWrite)
+	if input != 100 || output != 7 || cacheRead != 3 || cacheWrite != 9 {
+		t.Errorf("不是 map 的用法不该改动累计值 = (%d, %d, %d, %d)",
+			input, output, cacheRead, cacheWrite)
 	}
 }

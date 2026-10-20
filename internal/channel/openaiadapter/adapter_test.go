@@ -116,6 +116,31 @@ func TestChatDetectsEmbeddedError(t *testing.T) {
 	}
 }
 
+// 只有 type 没有 message 的错误对象同样是错误。
+//
+// 三字段全空才当「无错误」（`{"error":null}`、`{"error":{}}` 的写法）；
+// 最外层的 `&&` 改成 `||` 之后，只要 message 为空就会被当成没有错误，
+// 这一类上游报错于是变成正常响应：客户拿到一份空回答，账上是一条成功记录。
+func TestChatDetectsTypedErrorWithoutMessage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"error":{"type":"invalid_request_error"}}`)
+	}))
+	defer srv.Close()
+
+	_, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), &channel.Request{Model: "m"})
+	if err == nil {
+		t.Fatal("只有 type 的 error 对象也该被识别")
+	}
+	var up *channel.ErrUpstream
+	if !errors.As(err, &up) {
+		t.Fatalf("期望 *channel.ErrUpstream，得到 %v", err)
+	}
+	if up.Body != "" {
+		t.Errorf("Body = %q，没有 message 时应当是空串", up.Body)
+	}
+}
+
 // 200 里的错误对象是**限流**形态时，这次失败值得换渠道重试。
 //
 // 限流这件事写在哪个字段上、以什么类型写，各家不同：写在 type 上，写在 code
@@ -320,6 +345,11 @@ func TestChatStreamHappyPath(t *testing.T) {
 			}
 		case "done":
 			sawDone = true
+			// 结束原因要一路带到 done 事件：计费与对外的 finish_reason
+			// 都读它，丢在这里等于上游说了什么、我们记成「不知道」。
+			if ev.FinishReason != "stop" {
+				t.Errorf("done 事件的 FinishReason = %q，期望 %q", ev.FinishReason, "stop")
+			}
 		case "error":
 			t.Fatalf("不该有错误事件: %v", ev.Err)
 		}
@@ -336,6 +366,12 @@ func TestChatStreamHappyPath(t *testing.T) {
 }
 
 // 心跳帧、注释帧、非 data 行都不该打断解析。
+//
+// 空行与冒号注释这一条的 `||` 没有能把两版分开的输入：两个子条件为真时
+// 都只是 continue，而紧接着还有一道「不以 data: 开头就跳过」——空串与
+// `:...` 都落进它里面。所以把 `||` 改成 `&&` 之后，没有任何输入会走出
+// 另一条路，这一格按结构性等价判。前提是那道判据在第一道之后、且判的正是
+// 同一个前缀；任一处改动都要重新看这一条。
 func TestChatStreamSkipsNoise(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for _, line := range []string{
@@ -404,6 +440,9 @@ func TestChatStreamMidStreamError(t *testing.T) {
 
 // 连接直接关闭而没有 [DONE]：不补 done 事件。
 // 伪造正常结束会让「流被截断」看起来像「模型答完了」。
+//
+// 同时要求**没有 error 事件**：EOF 是正常结束的一种，不是读取失败。
+// 把它报成失败会让一次已经推送完成的回答在计费与渠道健康度上各记一笔错。
 func TestChatStreamTruncatedHasNoDone(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `data: {"choices":[{"index":0,"delta":{"content":"半截"}}]}`+"\n\n")
@@ -414,10 +453,21 @@ func TestChatStreamTruncatedHasNoDone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 事件流为空时整条用例会空转通过，所以先确认至少收到一帧：
+	// 断言「没有 done、没有 error」只有在真的读到过分片时才有意义。
+	var sawDelta bool
 	for ev := range events {
-		if ev.Kind == "done" {
+		switch ev.Kind {
+		case "delta":
+			sawDelta = true
+		case "done":
 			t.Error("缺少 [DONE] 时不应伪造 done 事件")
+		case "error":
+			t.Errorf("连接正常关闭不是读取失败，不该报错: %v", ev.Err)
 		}
+	}
+	if !sawDelta {
+		t.Error("一帧 delta 都没收到，这条用例什么都没证明")
 	}
 }
 
@@ -469,6 +519,79 @@ func TestChatStreamUsageWithoutDone(t *testing.T) {
 	}
 	if !sawUsage {
 		t.Error("应发出 usage 事件")
+	}
+}
+
+// failingReader 是「读到一半连接被对端关掉」的响应体：TCP 复位、上游进程
+// 退出都从 Read 上以错误返回，而不是干净地 EOF。
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("连接被重置") }
+
+// 读体出错要变成 error 事件——流没有正常结束，计费层与对外响应都不能把
+// 它当成「模型答完了」。
+//
+// 这里直接调 pump 而不走 ChatStream：httptest 的响应体很难在写入之后
+// 再制造一次 Read 错误，而这条判据看的正是「Read 返回错误时发不发事件」。
+// 用带缓冲的通道收事件，pump 同步跑完即可，不依赖 goroutine 时序。
+func TestPumpReportsReadError(t *testing.T) {
+	events := make(chan channel.StreamEvent, 8)
+	newAdapter().pump(context.Background(), http.StatusBadGateway, failingReader{}, events)
+	close(events)
+
+	var got []channel.StreamEvent
+	for ev := range events {
+		got = append(got, ev)
+	}
+	if len(got) != 1 {
+		t.Fatalf("事件数 = %d（%+v），期望只有一条 error", len(got), got)
+	}
+	if got[0].Kind != "error" {
+		t.Fatalf("事件类型 = %q，期望 error", got[0].Kind)
+	}
+	var up *channel.ErrUpstream
+	if !errors.As(got[0].Err, &up) {
+		t.Fatalf("错误类型为 %T", got[0].Err)
+	}
+	if !up.GotResponse || up.StatusCode != http.StatusBadGateway {
+		t.Errorf("GotResponse=%v StatusCode=%d，期望 true / %d",
+			up.GotResponse, up.StatusCode, http.StatusBadGateway)
+	}
+	if up.Retryable {
+		t.Error("流已经开始之后没有重试的余地，不该可重试")
+	}
+	if up.Err == nil {
+		t.Error("原始的读取错误应带在 Err 里")
+	}
+}
+
+// 单个分片可以很大（长文本的一次性增量、或 base64 图片）：默认的 64KB
+// 上限会把合法的响应判成读取失败。
+//
+// 载荷取 1.2MB：上限那一处有两个乘号，把乘号换成除号之后
+// `4/1024*1024` 是 0、`4*1024/1024` 是 4，1.2MB 的分片两边都放不进去。
+// 初始缓冲的容量（`make([]byte, 0, 64*1024)`）不在此列：bufio.Scanner
+// 会按需扩容到上限，那个值只是第一次分配的提示，改小不改变任何可观测
+// 行为，这一格按结构性等价判。
+func TestPumpAcceptsLargeFrame(t *testing.T) {
+	content := strings.Repeat("长", 400*1024) // 每个汉字 3 字节，共约 1.2MB
+	line := `data: {"choices":[{"index":0,"delta":{"content":"` + content + `"}}]}` + "\n\n"
+
+	events := make(chan channel.StreamEvent, 8)
+	newAdapter().pump(context.Background(), http.StatusOK, strings.NewReader(line), events)
+	close(events)
+
+	var text strings.Builder
+	for ev := range events {
+		switch ev.Kind {
+		case "delta":
+			text.WriteString(ev.Text)
+		case "error":
+			t.Fatalf("大分片不该被判为读取失败: %v", ev.Err)
+		}
+	}
+	if text.String() != content {
+		t.Errorf("拼出的文本长度 = %d 字节，期望 %d 字节", text.Len(), len(content))
 	}
 }
 
@@ -553,12 +676,13 @@ func TestUsageFieldPresenceDistinguishedFromZero(t *testing.T) {
 	cases := map[string]struct {
 		usage         string
 		wantCacheRead int64
+		wantReasoning int64
 	}{
-		"只报 prompt":   {`{"prompt_tokens":10}`, 0},
-		"显式零":         {`{"prompt_tokens":10,"completion_tokens":0}`, 0},
-		"带缓存明细":       {`{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":4}}`, 4},
-		"DeepSeek 写法": {`{"prompt_tokens":10,"prompt_cache_hit_tokens":6}`, 6},
-		"带推理 token":   {`{"prompt_tokens":10,"completion_tokens":9,"completion_tokens_details":{"reasoning_tokens":5}}`, 0},
+		"只报 prompt":   {`{"prompt_tokens":10}`, 0, 0},
+		"显式零":         {`{"prompt_tokens":10,"completion_tokens":0}`, 0, 0},
+		"带缓存明细":       {`{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":4}}`, 4, 0},
+		"DeepSeek 写法": {`{"prompt_tokens":10,"prompt_cache_hit_tokens":6}`, 6, 0},
+		"带推理 token":   {`{"prompt_tokens":10,"completion_tokens":9,"completion_tokens_details":{"reasoning_tokens":5}}`, 0, 5},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -580,6 +704,11 @@ func TestUsageFieldPresenceDistinguishedFromZero(t *testing.T) {
 			// 那几个 token 就按普通输入价计费——多收钱，而且不报错。
 			if resp.Usage.CacheReadTokens != tc.wantCacheRead {
 				t.Errorf("CacheReadTokens = %d, 期望 %d", resp.Usage.CacheReadTokens, tc.wantCacheRead)
+			}
+			// 推理 token 单独一列：它已经含在 completion_tokens 里，但账单
+			// 明细要分开看。丢在这一段等于「上游报了、我们没记」。
+			if resp.Usage.ReasoningTokens != tc.wantReasoning {
+				t.Errorf("ReasoningTokens = %d, 期望 %d", resp.Usage.ReasoningTokens, tc.wantReasoning)
 			}
 		})
 	}
