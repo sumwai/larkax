@@ -1762,6 +1762,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/idempotency` | 34 | 1 | 0 | 0 | 100.00% | 97.14% | 83.3% |
 | `internal/route` | 123 | 4 | 0 | 24 | 84.11% | 96.85% | 97.8% |
 | `internal/gateway` | 238 | 9 | 0 | 9 | 96.48% | 96.36% | 95.7% |
+| `internal/plugin/host` | 104 | 4 | 0 | 4 | 96.43% | 96.30% | 94.6% |
 | `internal/snapshot` | 153 | 6 | 0 | 50 | 76.08% | 96.23% | 90.1% |
 | `internal/credential` | 96 | 4 | 0 | 1 | 99.01% | 96.00% | 92.1% |
 | `internal/quota` | 45 | 2 | 0 | 0 | 100.00% | 95.74% | 95.2% |
@@ -1791,6 +1792,14 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 而 `plugins.version` 与 `plugins.generation` 在迁移里都是 `NOT NULL`，所以两列的
 `Valid` 恒等，`||` 与 `&&` 同值。这条前提不是只看一眼：`TestPluginJoinColumnsAreNotNull`
 对着 `information_schema` 机器核对，迁移哪天把列改成可空，它会红。
+
+**`internal/plugin/host` 那四条存活是同一种形态：改的是边界，改完仍然同值。**
+两条是「退到 rune 边界」循环里的 `cut > 0` → `cut >= 0`：循环只在 `s` 非空时进入，
+而 `s` 恒为合法 UTF-8（插件的 JS 字符串经引擎换码，两侧都换掉非法字节），所以
+`s[0]` 一定是 rune 起点，多查的那一格恒假。一条是 `fieldAttrs` 在空对象上返回
+nil 还是空切片——调用点只做 `append(..., fieldAttrs(...)...)`，差别不进日志。
+一条是数组容量提示里的 `/` → `*`，只影响预分配大小。第一条说的那个
+「`s` 恒为合法 UTF-8」，由 `TestJSStringsAreValidUTF8` 两个方向都钉住。
 
 **覆盖率高而 efficacy 低，说明测试断言的是「相对关系」而不是「具体边界」。**
 这类包的用例写的是「A 明显比 B 好」这种比较，于是改 `<=` 为 `<`、去掉分母的加数、

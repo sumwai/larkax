@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Calcium-Ion/moejs"
 
@@ -273,6 +275,51 @@ func TestCanceledContextPassesCauseThrough(t *testing.T) {
 	}
 	if store.calls != 0 {
 		t.Errorf("已取消的 ctx 仍然访问了 KV：%d 次", store.calls)
+	}
+}
+
+// errTestCause 是一条与取消、超时都无关的取消原因，用来确认它原样透传。
+var errTestCause = errors.New("测试用的取消原因")
+
+// TestExpiredKeepsExplicitCause 钉住「context.Cause 有值时用它，不被 ctx.Err() 覆盖」。
+//
+// 取消类上下文里 ctx.Err() 恒为 context.Canceled。拿它盖掉 context.Cause 之后，
+// 调用预算用尽（sandbox.ErrCallTimeout）与截止时间都认不出来，宿主超时那条
+// 分支走不到——插件与宿主看到的是「被取消」而不是「宿主慢」，排查方向正好反了。
+//
+// TestCanceledContextPassesCauseThrough 用的是 context.WithCancel：
+// 两条来路给的是同一个值，这一格分不出来，所以这里用 WithCancelCause 把原因显式写进去。
+func TestExpiredKeepsExplicitCause(t *testing.T) {
+	cases := []struct {
+		name        string
+		cause       error
+		wantTimeout bool
+	}{
+		{"调用预算用尽", sandbox.ErrCallTimeout, true},
+		{"与超时无关的原因", errTestCause, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			cancel(tc.cause)
+
+			err := expired(ctx)
+			if tc.wantTimeout {
+				if !errors.Is(err, sandbox.ErrHostTimeout) {
+					t.Fatalf("错误 = %v，期望包住 sandbox.ErrHostTimeout", err)
+				}
+				if errors.Is(err, context.Canceled) {
+					t.Errorf("宿主超时不该同时被认成取消: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.cause) {
+				t.Fatalf("错误 = %v，期望原样带回 %v", err, tc.cause)
+			}
+			if errors.Is(err, sandbox.ErrHostTimeout) || errors.Is(err, context.Canceled) {
+				t.Errorf("与超时无关的取消原因被改写了: %v", err)
+			}
+		})
 	}
 }
 
@@ -1180,3 +1227,315 @@ func TestArgHelpers(t *testing.T) {
 		t.Errorf("缺参数时 argString = %q，期望空串", got)
 	}
 }
+
+// TestTruncateMessageRetreatsToRuneBoundary 钉住截断循环的两半。
+//
+// 一条 4 KiB 的 message 被截成只剩一个标记，与「退到 rune 边界」是两件事：
+// `&&` 换成 `||` 之后循环一路退到 0，正常的长消息也只剩标记；退得不够则会把
+// 一个多字节字符切成两半，日志里出现乱码。所以两条都要钉：保留多少、切在哪儿。
+func TestTruncateMessageRetreatsToRuneBoundary(t *testing.T) {
+	// 边界 4096 落在「占」的第二个字节上（它从 4095 起，占三个字节），
+	// 所以要退到 4095——不退就会写出半个字符。
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "边界落在多字节字符中间",
+			in:   strings.Repeat("a", logMessageMaxBytes-1) + strings.Repeat("占", 4),
+			want: strings.Repeat("a", logMessageMaxBytes-1) + truncatedMark,
+		},
+		{
+			name: "边界正好落在字符之间",
+			in:   strings.Repeat("x", logMessageMaxBytes+1),
+			want: strings.Repeat("x", logMessageMaxBytes) + truncatedMark,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateMessage(tc.in)
+			if got != tc.want {
+				t.Fatalf("截断结果 %d 字节，期望 %d 字节", len(got), len(tc.want))
+			}
+			if !utf8.ValidString(got) {
+				t.Error("截断落在了 rune 边界之外")
+			}
+			if !strings.HasSuffix(got, truncatedMark) {
+				t.Error("截断没有标注")
+			}
+		})
+	}
+}
+
+// TestFieldBudgetSpendKeepsExactlyEnough 钉住「剩余预算恰好等于开销」是够。
+//
+// 判成 `<=` 之后这一个值被丢掉，而它前面的一切都照常：日志里少一个键，
+// 读起来像插件根本没传这个字段。
+func TestFieldBudgetSpendKeepsExactlyEnough(t *testing.T) {
+	b := fieldBudget{left: 8}
+	if !b.spend(8) {
+		t.Fatal("剩余预算恰好等于开销时应当放行")
+	}
+	if b.left != 0 {
+		t.Errorf("花完之后剩 %d，期望 0", b.left)
+	}
+	if b.spend(1) {
+		t.Error("预算用尽之后不该还能再借")
+	}
+
+	b = fieldBudget{left: 7}
+	if b.spend(8) {
+		t.Error("差一个字节就不够，应当拒")
+	}
+	if b.left != 0 {
+		t.Errorf("预算不足时应当清零（后面的值一律转不出来），实际剩 %d", b.left)
+	}
+}
+
+// TestLogKeepsFieldThatExactlyExhaustsTheBudget 是上一条在日志里的后果。
+//
+// 用一组填满预算的数组与一个长度可调的字符串，把最后一个键开始前的剩余预算
+// 调到正好等于它的开销（标量的开销就是 scalarCost），再调低一个字节：前者
+// 必须留下，后者必须丢掉。前两个字段的断言同时在验这个算术没算错——算错了
+// 的话，要么数组没收满，要么它们先被丢了。
+func TestLogKeepsFieldThatExactlyExhaustsTheBudget(t *testing.T) {
+	// 顶层容器与数组容器各记 scalarCost，三个键各记自己的字节数。
+	const overhead = scalarCost*2 + len("a") + len("s") + len("z")
+
+	cases := []struct {
+		name     string
+		filler   int // 「s」的长度，用来把剩余预算调准
+		wantLast bool
+	}{
+		{"最后一个值刚好把预算用完", 13, true},
+		{"差一个字节", 14, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wantLeft := scalarCost
+			if !tc.wantLast {
+				wantLeft = scalarCost - 1
+			}
+			spare := fieldTotalMaxBytes - overhead - tc.filler - wantLeft
+			if spare%scalarCost != 0 {
+				t.Fatalf("用例自身的算术不对：余 %d 不能被 %d 整除", spare, scalarCost)
+			}
+			n := spare / scalarCost
+
+			var buf bytes.Buffer
+			env := Env{Logger: testLogger(&buf)}
+			fn := capability(t, Standard(env), capLog).Funcs["log"]
+			obj := jsEval(t, fmt.Sprintf(
+				`({a: Array.from({length: %d}, (_, i) => i), s: "y".repeat(%d), z: 1})`,
+				n, tc.filler))
+			if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
+				t.Fatalf("log 出错: %v", err)
+			}
+			entry := logEntries(t, &buf)[0]
+
+			if arr, ok := entry["a"].([]any); !ok || len(arr) != n {
+				t.Fatalf("填充数组收了 %d 个元素，想要 %d", len(arr), n)
+			}
+			if s, ok := entry["s"].(string); !ok || len(s) != tc.filler {
+				t.Fatalf("填充字符串是 %d 字节，想要 %d", len(s), tc.filler)
+			}
+			got, ok := entry["z"]
+			if tc.wantLast {
+				if !ok || got != float64(1) {
+					t.Errorf("预算刚好够的那个字段被丢了: %#v", entry["z"])
+				}
+			} else if ok {
+				t.Errorf("差一个字节时这个字段不该出现: %#v", got)
+			}
+		})
+	}
+}
+
+// TestLogDropsValueThatFitsOnlyTheMark 钉住「预算只够截断标记」时整个值被丢掉。
+//
+// 留下一个只有标记的空壳，在日志里比没有这个键还难读：读的人会以为插件
+// 传了个空串。判成 `<` 之后，limit 恰好等于标记长度的那一格就会留下这个空壳。
+func TestLogDropsValueThatFitsOnlyTheMark(t *testing.T) {
+	cases := []struct {
+		name      string
+		left      int
+		wantValue bool
+	}{
+		{"预算恰好等于标记长度", len(truncatedMark), false},
+		{"预算比标记多一个字节", len(truncatedMark) + 1, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// 用一个足够长的键把预算烧到只剩 tc.left：容器记 scalarCost，
+			// 键按自己的字节数记。值长于 fieldValueMaxBytes，所以 boundedString
+			// 直接走截断那一支，不会先 spend 一次把预算清零。
+			key := strings.Repeat("k", fieldTotalMaxBytes-scalarCost-tc.left)
+			value := strings.Repeat("x", fieldValueMaxBytes+1)
+
+			var buf bytes.Buffer
+			env := Env{Logger: testLogger(&buf)}
+			fn := capability(t, Standard(env), capLog).Funcs["log"]
+			if _, err := fn(context.Background(), js("info", "m",
+				jsJSON(t, fmt.Sprintf(`{%q: %q}`, key, value)))); err != nil {
+				t.Fatalf("log 出错: %v", err)
+			}
+			entry := logEntries(t, &buf)[0]
+
+			got, ok := entry[key]
+			if !tc.wantValue {
+				if ok {
+					t.Errorf("只剩标记的空壳被留下了: %q", got)
+				}
+				return
+			}
+			if !ok {
+				t.Fatal("预算够放下标记时这个值不该被丢")
+			}
+			if got != "x"+truncatedMark {
+				t.Errorf("值 = %q，期望只截出一个字节加标记", got)
+			}
+		})
+	}
+}
+
+// mustMap 与 mustList 让深度用例沿着嵌套往下走时少几行类型断言。
+func mustMap(t *testing.T, v any, what string) map[string]any {
+	t.Helper()
+	m, ok := v.(map[string]any)
+	if !ok {
+		t.Fatalf("%s 应当是对象，实际 %T", what, v)
+	}
+	return m
+}
+
+func mustList(t *testing.T, v any, what string) []any {
+	t.Helper()
+	l, ok := v.([]any)
+	if !ok {
+		t.Fatalf("%s 应当是数组，实际 %T", what, v)
+	}
+	return l
+}
+
+// TestLogDepthLimitIsInclusive 钉住递归深度的边界是含的，且每进一层深度都要下降。
+//
+// `depth <= 0` 判成 `< 0` 会多进一层；`depth-1` 写成 `depth+1` 之后深度根本不下降，
+// 于是「最多四层」这条界对插件给的数据完全失效——输入来自插件，一个层层嵌套的
+// 对象就能让宿主一直转下去。这里给的嵌套层数都是有限的，所以两种坏法都只是
+// 「收进来多少」的差别，用例本身不会挂死。
+func TestLogDepthLimitIsInclusive(t *testing.T) {
+	cases := []struct {
+		name  string
+		field string
+		check func(t *testing.T, entry map[string]any)
+	}{
+		{
+			name:  "对象正好到上限",
+			field: `{"a":{"b":{"c":{"d":1}}}}`,
+			check: func(t *testing.T, entry map[string]any) {
+				c := mustMap(t, mustMap(t, entry["a"], "a")["b"], "b")["c"]
+				if got := mustMap(t, c, "c")["d"]; got != float64(1) {
+					t.Errorf("第四层的值 = %v，期望 1", got)
+				}
+			},
+		},
+		{
+			name:  "对象多一层",
+			field: `{"a":{"b":{"c":{"d":{"e":1}}}}}`,
+			check: func(t *testing.T, entry map[string]any) {
+				c := mustMap(t, mustMap(t, entry["a"], "a")["b"], "b")["c"]
+				if m := mustMap(t, c, "c"); len(m) != 0 {
+					t.Errorf("超过深度上限的一层被收进来了: %#v", m)
+				}
+			},
+		},
+		{
+			name:  "数组正好到上限",
+			field: `{"a":[[[1]]]}`,
+			check: func(t *testing.T, entry map[string]any) {
+				a := mustList(t, entry["a"], "a")
+				if len(a) != 1 {
+					t.Fatalf("a 收了 %d 层，想要 1 层", len(a))
+				}
+				inner := mustList(t, mustList(t, a[0], "a[0]")[0], "a[0][0]")
+				if len(inner) != 1 || inner[0] != float64(1) {
+					t.Errorf("最里层 = %#v，期望 [1]", inner)
+				}
+			},
+		},
+		{
+			name:  "数组多一层",
+			field: `{"a":[[[[1]]]]}`,
+			check: func(t *testing.T, entry map[string]any) {
+				a := mustList(t, entry["a"], "a")
+				if len(a) != 1 {
+					t.Fatalf("a 收了 %d 层，想要 1 层", len(a))
+				}
+				if inner := mustList(t, mustList(t, a[0], "a[0]")[0], "a[0][0]"); len(inner) != 0 {
+					t.Errorf("超过深度上限的一层被收进来了: %#v", inner)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			env := Env{Logger: testLogger(&buf)}
+			fn := capability(t, Standard(env), capLog).Funcs["log"]
+			if _, err := fn(context.Background(), js("info", "m", jsJSON(t, tc.field))); err != nil {
+				t.Fatalf("log 出错: %v", err)
+			}
+			tc.check(t, logEntries(t, &buf)[0])
+		})
+	}
+}
+
+// TestJSStringsAreValidUTF8 是「退到 rune 边界」那两条等价判断的前提，不是实现的一部分。
+//
+// truncateMessage 与 boundedString 的循环把 `cut > 0` 判成 `cut >= 0` 之后，
+// 唯一多出来的一格是「cut 已经退到 0 时再读一次 s[0]」：s[0] 在任何合法 UTF-8 里
+// 都是 rune 起点，读与不读都在同一个位置退出；只有 s 以续接字节开头（非法 UTF-8）
+// 时两者才分得开。截断的输入只来自插件的 JS 字符串，而 moejs 的 GoString 把落单的
+// 代理项换成 U+FFFD（引擎 string.go 的 utf16ToGoString），所以拿不到非法的字节串。
+// 回程同理：KV 的值在宿主侧是 Go 字符串，进引擎走 FromGoString，非法字节在那里
+// 同样被换成 U+FFFD（引擎 string.go 的 appendUTF16）。
+// 这条用例钉住这两个方向的换码：哪天任一侧改成原样保留 WTF-8，
+// log.go:115 与 log.go:229 的等价论证就不再成立，要回头重判。
+func TestJSStringsAreValidUTF8(t *testing.T) {
+	// 去程：落单的高位代理项在 UTF-16 里合法，UTF-8 里没有对应物。
+	s := jsEval(t, `String.fromCharCode(0xD800) + "a".repeat(5000)`).String()
+	if !utf8.ValidString(s) {
+		t.Fatalf("JS 字符串翻成 Go 之后不是合法 UTF-8（log.go:115 / log.go:229 的等价论证失效）: %q", s[:8])
+	}
+	if !strings.HasPrefix(s, "\uFFFD") {
+		t.Errorf("落单的代理项没有换成 U+FFFD（log.go:115 / log.go:229 的等价论证失效）: %q", s[:8])
+	}
+
+	// 回程：含非法字节的 Go 字符串送进引擎再取回。
+	const bad = "\xffa\xfe"
+	if got := moejs.String(bad).String(); !utf8.ValidString(got) || !strings.HasPrefix(got, "\uFFFD") {
+		t.Errorf("非法字节进引擎再取回没有被换成 U+FFFD（log.go:115 / log.go:229 的等价论证失效）: %q", got)
+	}
+}
+
+// 判为**等价**、不补用例的四条，前提写在这里备查：
+//
+//  1. log.go:115:10 与 log.go:229:10：`cut > 0` → `cut >= 0`。
+//     两处循环只在 s 非空时进入：truncateMessage 的入口是 len(s) > 4096；
+//     boundedString 的截断支只有值长于 1024 时才带着非零预算走到循环
+//     （值不长时第一次 spend 失败会把剩余预算清零，limit 变成 0，在循环之前就返回）。
+//     而 s 是合法 UTF-8（见 TestJSStringsAreValidUTF8），s[0] 一定是 rune 起点：
+//     cut 退到 0 时多查的那一格恒为假，两个版本在同一位置退出，输出一致。
+//
+//  2. log.go:124:9：`!ok || len(fields) == 0` → `!ok && len(fields) == 0`。
+//     两版只在「转得出来、但对象是空的」这一格不同：一版返回 nil，一版返回空切片。
+//     fieldAttrs 只有做日志时那一个调用点（log.go:81），它把结果直接展开 append 到
+//     attrs 上——追加零个元素对 nil 与空切片是同一件事，日志输出一样；
+//     另一半（!ok）两版都返回 nil，函数注释里的契约不变。
+//
+//  3. log.go:259:58：容量提示里的 `fieldTotalMaxBytes/scalarCost` 改成 `*`。
+//     make([]any, 0, min(len(keys), …)) 的容量不参与内容，也不参与任何失败判断：
+//     `*` 只是把预分配的上界从 1024 变成 65536，仍被 len(keys) 压着、
+//     与插件的规模无关。要观察它只能看分配量（一个百万元素的数组差约 1 MiB，
+//     仍远小于「按插件规模预分配」那一档）。输出由 TestLogBoundsArrayFieldValues 钉着。

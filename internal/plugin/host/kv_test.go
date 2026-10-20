@@ -350,6 +350,58 @@ func TestKVRejectsBadArguments(t *testing.T) {
 	}
 }
 
+// TestKVSizeLimitsAreInclusive 钉住两个字节上限的边界是**含**的：
+// 恰好到上限要放行，超一个字节才拒。
+//
+// 上限是一个数得出来的数，插件照着文档写到上限是正常用法。判成 `>=` 之后，
+// 恰好 64 KiB 的值与恰好 512 字节的键会被拒，而错误说的是「超过上限」——
+// 插件按上限算过，不会明白差在哪。
+func TestKVSizeLimitsAreInclusive(t *testing.T) {
+	cases := []struct {
+		name  string
+		key   string
+		value string
+		// wantErr 为 false 时要读回来，与写入逐字节一致。
+		wantErr bool
+	}{
+		{"值正好到上限", "k", strings.Repeat("v", kvValueMaxBytes), false},
+		{"值超一个字节", "k", strings.Repeat("v", kvValueMaxBytes+1), true},
+		{"键正好到上限", strings.Repeat("k", kvKeyMaxBytes), "v", false},
+		{"键超一个字节", strings.Repeat("k", kvKeyMaxBytes+1), "v", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeKV()
+			env := kvEnv(store, "p", 7)
+
+			_, err := kvFunc(t, env, "set")(context.Background(), js(tc.key, tc.value))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("超出一个字节的键或值应当被拒")
+				}
+				if !strings.Contains(err.Error(), "字节上限") {
+					t.Errorf("错误 = %v，期望提到字节上限", err)
+				}
+				if store.calls != 0 {
+					t.Errorf("被拒的写入仍然访问了 %d 次存储", store.calls)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("恰好到上限应当放行: %v", err)
+			}
+			got, err := kvFunc(t, env, "get")(context.Background(), js(tc.key))
+			if err != nil {
+				t.Fatalf("读回出错: %v", err)
+			}
+			if got.String() != tc.value {
+				t.Errorf("读回 %d 字节，与写入的 %d 字节不一致", len(got.String()), len(tc.value))
+			}
+		})
+	}
+}
+
 // TestKVStoreErrorSurfaces 确认存储出错时如实上报，不吞掉。
 func TestKVStoreErrorSurfaces(t *testing.T) {
 	sentinel := errors.New("存储不可用")
