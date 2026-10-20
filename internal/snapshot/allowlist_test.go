@@ -523,7 +523,7 @@ func TestAllowlistEntriesAreWellFormed(t *testing.T) {
 // 这条测试不检查行为，它检查的是**有人改过版本号**：版本号变了，
 // 这个断言就会失败，提醒改动者确认「白名单变更」与「版本递增」是一起提交的。
 func TestAllowlistVersionDocumented(t *testing.T) {
-	if SkeletonVersion != 1 {
+	if SkeletonVersion != 2 {
 		t.Fatalf("骨架版本变成了 %d：确认这是白名单变更带来的递增，"+
 			"并同步更新这条断言与占位描述符的文档", SkeletonVersion)
 	}

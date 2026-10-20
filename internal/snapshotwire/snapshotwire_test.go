@@ -118,8 +118,8 @@ func TestRedactBridgesBothDirections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("脱敏请求失败: %v", err)
 	}
-	if snap.Version != 1 {
-		t.Errorf("skeleton_version = %d，期望 1", snap.Version)
+	if snap.Version != snapshot.SkeletonVersion {
+		t.Errorf("skeleton_version = %d，期望 %d", snap.Version, snapshot.SkeletonVersion)
 	}
 	if _, ok := snap.Skeleton["model"]; !ok {
 		t.Errorf("骨架里应当有 model，实际键为 %v", keysOf(snap.Skeleton))
@@ -168,8 +168,8 @@ func TestRedactResponseNilGivesEmptySkeleton(t *testing.T) {
 	if snap == nil {
 		t.Fatal("nil 响应也该给出一条可落库的快照")
 	}
-	if snap.Version != 1 {
-		t.Errorf("skeleton_version = %d，期望 1", snap.Version)
+	if snap.Version != snapshot.SkeletonVersion {
+		t.Errorf("skeleton_version = %d，期望 %d", snap.Version, snapshot.SkeletonVersion)
 	}
 	if len(snap.Skeleton) != 0 {
 		t.Errorf("没有响应体时骨架应当为空，实际 %v", snap.Skeleton)
