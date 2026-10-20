@@ -1739,6 +1739,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/route` | 123 | 4 | 0 | 24 | 84.11% | 96.85% | 97.8% |
 | `internal/gateway` | 238 | 9 | 0 | 9 | 96.48% | 96.36% | 95.7% |
 | `internal/snapshot` | 153 | 6 | 0 | 50 | 76.08% | 96.23% | 90.1% |
+| `internal/credential` | 96 | 4 | 0 | 1 | 99.01% | 96.00% | 92.1% |
 | `internal/quota` | 45 | 2 | 0 | 0 | 100.00% | 95.74% | 95.2% |
 | `internal/billing/expr` | 168 | 8 | 0 | 12 | 93.62% | 95.45% | 85.9% |
 | `internal/billing` | 243 | 14 | 0 | 12 | 95.54% | 94.55% | 98.3% |

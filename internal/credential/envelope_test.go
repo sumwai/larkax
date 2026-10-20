@@ -2,6 +2,7 @@ package credential
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -288,6 +289,69 @@ func TestRewrapIsIdempotent(t *testing.T) {
 	}
 }
 
+// 一份密文可以带多份 DEK 副本，其中某一份认得却解不开（数据坏了）时，
+// Rewrap 必须接着试下一份，而不是就此认定「解不出数据密钥」。
+//
+// 判据是 `if dek, err = openWith(...); err == nil`：改成 `err != nil` 之后，
+// 第一份坏副本上就会 break，dek 仍是 nil，断言停在 ErrNoKey 上；
+// 但密文里明明还有一份完好的副本。副本存在的意义就是「一把不行还有一把」，
+// 这一条用例要证明的是：Rewrap 也兑现它，不只是 Open。
+func TestRewrapSkipsBrokenWrap(t *testing.T) {
+	oldOnly := mustSealer(t, []config.MasterKey{key("old", 0x33)})
+	sealed, err := oldOnly.Seal([]byte("multi-wrap"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 补一份 new 下的副本，此时副本顺序是 [old, new]。
+	rotated := mustSealer(t, []config.MasterKey{key("new", 0x44), key("old", 0x33)})
+	if sealed, err = rotated.Rewrap(sealed); err != nil {
+		t.Fatalf("准备多副本密文出错: %v", err)
+	}
+
+	// 改坏第一份副本的数据段：长度字段、nonce 都不动，结构仍可解析，
+	// 只有 GCM 校验会失败。偏移按布局算——头部、标识长度字节、标识、
+	// nonce、数据长度字段之后就是数据本体。
+	damaged := append([]byte(nil), sealed...)
+	pos := headerSize
+	idLen := int(damaged[pos])
+	pos += 1 + idLen + nonceSize + 2
+	damaged[pos] ^= 0x01
+
+	env, err := decode(damaged)
+	if err != nil {
+		t.Fatalf("只改数据段后结构应仍可解析: %v", err)
+	}
+	if len(env.wraps) != 2 {
+		t.Fatalf("准备出的密文有 %d 份副本，期望 2", len(env.wraps))
+	}
+
+	// 新的包装钥匙是 third；old 与 new 都认得，但第一份副本解不开。
+	third := mustSealer(t, []config.MasterKey{key("third", 0x55), key("old", 0x33), key("new", 0x44)})
+	rewrapped, err := third.Rewrap(damaged)
+	if err != nil {
+		t.Fatalf("第一份副本坏了、第二份完好，Rewrap 应成功: %v", err)
+	}
+
+	ids, err := WrappedWith(rewrapped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 3 {
+		t.Fatalf("重包装后有 %d 份副本，期望 3 份", len(ids))
+	}
+
+	// 新副本里必须装的是真的 DEK：只留 third 的进程要能打开正文。
+	thirdOnly := mustSealer(t, []config.MasterKey{key("third", 0x55)})
+	got, err := thirdOnly.Open(rewrapped)
+	if err != nil {
+		t.Fatalf("重包装后应能用新钥匙打开: %v", err)
+	}
+	if string(got) != "multi-wrap" {
+		t.Errorf("得到 %q", got)
+	}
+}
+
 // 密文被改动一个字节就必须拒绝——这是认证加密存在的全部意义。
 func TestTamperIsRejected(t *testing.T) {
 	s := mustSealer(t, testKeys())
@@ -329,12 +393,11 @@ func TestTruncatedCiphertextIsRejected(t *testing.T) {
 // 一条几字节的输入就能让进程吃掉几个 GB。
 func TestHugeLengthFieldsAreRejected(t *testing.T) {
 	cases := map[string][]byte{
-		"未知版本":   {0xFF, 0x01},
-		"零副本":    {version, 0x00},
-		"副本数超限":  {version, 0xFF},
-		"正文长度超限": buildRaw(0x01, 0x00, 0x01, 0x00, 0xFF),
-		"空输入":    {},
-		"只有一字节":  {version},
+		"未知版本":  {0xFF, 0x01},
+		"零副本":   {version, 0x00},
+		"副本数超限": {version, 0xFF},
+		"空输入":   {},
+		"只有一字节": {version},
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -342,6 +405,24 @@ func TestHugeLengthFieldsAreRejected(t *testing.T) {
 				t.Error("畸形密文应被拒绝")
 			}
 		})
+	}
+
+	// 「正文长度超限」单独构造：完整的一份副本加尾部，只把 body_len 写成
+	// maxCiphertext+1。先前那版第二个字节是 0，在「零副本」处就返回了，
+	// 这条用例一直没碰到目标判据；所以这里按文案断言，而不只是 err != nil。
+	overBody := buildRaw(version, 0x01, 0x01, 'k')
+	overBody = append(overBody, bytes.Repeat([]byte{0x00}, nonceSize)...)
+	overBody = binary.BigEndian.AppendUint16(overBody, tagSize)
+	overBody = append(overBody, bytes.Repeat([]byte{0x00}, tagSize)...)
+	overBody = append(overBody, bytes.Repeat([]byte{0x00}, nonceSize)...)
+	overBody = binary.BigEndian.AppendUint32(overBody, maxCiphertext+1)
+
+	_, err := decode(overBody)
+	if err == nil {
+		t.Fatal("正文长度超过上限的密文应被拒绝")
+	}
+	if !errors.Is(err, ErrMalformed) || !strings.Contains(err.Error(), "超过上限") {
+		t.Errorf("应报正文长度超过上限，得到: %v", err)
 	}
 }
 
@@ -356,6 +437,45 @@ func TestSealRejectsEmptyAndOversized(t *testing.T) {
 	}
 	if _, err := s.Seal(make([]byte, maxCiphertext+1)); err == nil {
 		t.Error("超长凭证应被拒绝")
+	}
+}
+
+// 上限量的是密文，而正文密文 = 明文 + 认证标签，所以能往返的最大明文是
+// maxCiphertext-tagSize。边界两侧各钉一条：
+//
+//   - 恰好到上限的明文必须封装成功，而且必须真的 Open 回来——只断言 Seal 成功，
+//     判据漏算标签时用例照样绿，封出来的密文却自己读不回来；
+//   - 再多一个字节必须被拒，错误里报的是明文长度，不是加过标签的那个数。
+//
+// TestSealRejectsEmptyAndOversized 另喂 maxCiphertext+1 字节，那比能往返的
+// 上界再多 17 字节；两条判据互不替代。
+func TestSealAcceptsExactlyMaxCiphertext(t *testing.T) {
+	s := mustSealer(t, testKeys())
+
+	atLimit := bytes.Repeat([]byte("k"), maxCiphertext-tagSize)
+	sealed, err := s.Seal(atLimit)
+	if err != nil {
+		t.Fatalf("明文 %d 字节（上限扣除认证标签）应能封装: %v", len(atLimit), err)
+	}
+	got, err := s.Open(sealed)
+	if err != nil {
+		t.Fatalf("恰好到上限的密文应能解回: %v", err)
+	}
+	if !bytes.Equal(got, atLimit) {
+		t.Error("往返后明文不一致")
+	}
+
+	over := bytes.Repeat([]byte("k"), maxCiphertext-tagSize+1)
+	_, err = s.Seal(over)
+	if err == nil {
+		t.Fatalf("明文 %d 字节应被拒绝", len(over))
+	}
+	msg := err.Error()
+	if want := fmt.Sprint(len(over)); !strings.Contains(msg, want) {
+		t.Errorf("错误信息应报出明文长度 %s，得到: %s", want, msg)
+	}
+	if want := fmt.Sprint(maxCiphertext - tagSize); !strings.Contains(msg, want) {
+		t.Errorf("错误信息应报出上限 %s，得到: %s", want, msg)
 	}
 }
 
