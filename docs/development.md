@@ -1753,6 +1753,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/overrides` | 18 | 0 | 0 | 0 | 100.00% | 100.00% | 96.2% |
 | `internal/catalog` | 178 | 0 | 0 | 40 | 81.65% | 100.00% | 77.6% |
 | `internal/channels` | 288 | 1 | 1 | 41 | 87.58% | 99.65% | 76.6% |
+| `internal/plugin/store` | 77 | 1 | 0 | 15 | 83.87% | 98.72% | 72.4% |
 | `internal/calendar` | 150 | 2 | 0 | 14 | 91.57% | 98.68% | 97.8% |
 | `internal/ledger` | 576 | 8 | 0 | 92 | 86.39% | 98.63% | 96.3% |
 | `internal/ledger/store` | 433 | 6 | 0 | 60 | 87.98% | 98.63% | 79.9% |
@@ -1784,6 +1785,12 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 **超时列不为 0 的行不与别的轮次比较**——见上文。改动过某个包的测试之后重跑并在
 表里更新。`internal/auth` 那一行的超时是**自然超时**而不是机器干扰：`deletion.go:712`
 把占位名循环里的 `n++` 改成 `n--` 之后，第 1 个候选被占住就永不终止。
+
+**`internal/plugin/store` 那一条存活是结构性的等价。** `generationOrNil` 的两个
+`sql.Null*` 出自 `runningJoin()` 同一个 `LEFT JOIN LATERAL … LIMIT 1` 的同一行，
+而 `plugins.version` 与 `plugins.generation` 在迁移里都是 `NOT NULL`，所以两列的
+`Valid` 恒等，`||` 与 `&&` 同值。这条前提不是只看一眼：`TestPluginJoinColumnsAreNotNull`
+对着 `information_schema` 机器核对，迁移哪天把列改成可空，它会红。
 
 **覆盖率高而 efficacy 低，说明测试断言的是「相对关系」而不是「具体边界」。**
 这类包的用例写的是「A 明显比 B 好」这种比较，于是改 `<=` 为 `<`、去掉分母的加数、

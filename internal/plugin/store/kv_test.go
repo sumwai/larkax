@@ -51,6 +51,19 @@ func kvCount(t *testing.T, db *sql.DB, plugin string, userID int64) int {
 	return n
 }
 
+// kvBytes 数一个命名空间里键与值一共占多少字节，与 Set 里那条聚合同口径。
+func kvBytes(t *testing.T, db *sql.DB, plugin string, userID int64) int64 {
+	t.Helper()
+	var n int64
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COALESCE(sum(octet_length(key) + octet_length(value)), 0)
+		   FROM plugin_kv WHERE plugin_key = $1 AND user_id = $2`,
+		plugin, userID).Scan(&n); err != nil {
+		t.Fatalf("数插件 KV 的字节占用失败: %v", err)
+	}
+	return n
+}
+
 // kvExpiresAt 读一个键的到期时刻，NULL（不过期）时 Valid 为 false。
 func kvExpiresAt(t *testing.T, db *sql.DB, plugin string, userID int64, key string) sql.NullTime {
 	t.Helper()
@@ -336,6 +349,63 @@ func TestKVQuotaRejectsBytes(t *testing.T) {
 	}
 	if got, found, _ := kv.Get(ctx, plugin, user, "big"); !found || got != "小值" {
 		t.Errorf("改小之后读回 = (%q, %v)", got, found)
+	}
+}
+
+// TestKVQuotaByteSumCountsTheNewValueNotTheDifference 钉住字节配额里那个**加号**：
+// 用量是「其它键的字节 + 新写的键与值」，不是「其它键的字节 + 键减值」。
+//
+// 上一条用例（TestKVQuotaRejectsBytes）构造不出能分开两版的输入：
+// 那时占用已经顶到上限、后写的键与值又都很短，两种算式都超限。
+// 这里让**值**足够长、其它键的占用卡在两个算式之间——正确的那一版超限
+// （S+k+v > 上限），把内层加号改成减号的那一版不超限（S+k-v ≤ 上限）。
+// 于是「拒掉」这件事本身就在挑版本。
+//
+// 断言落在报出来的具体数值与「被拒之后库里一格没动」上：
+// 只看错误非零的话，一个先写进去再报错的实现也能过。
+func TestKVQuotaByteSumCountsTheNewValueNotTheDifference(t *testing.T) {
+	db := testDB(t)
+	kv := NewKV(db)
+	ctx := context.Background()
+	plugin, user := kvPlugin(t), kvUser(t, db)
+
+	const (
+		seedKey    = "seed"  // 4 字节
+		probeKey   = "probe" // 5 字节
+		seedSlack  = 500     // 其它键的占用压在上限之下这么多
+		probeBytes = 600     // 值的长度：两种算式的结果相差 2*600
+	)
+	occupy := int64(host.KVMaxBytes - seedSlack)
+	if err := kv.Set(ctx, plugin, user, seedKey,
+		strings.Repeat("v", int(occupy)-len(seedKey)), 0); err != nil {
+		t.Fatalf("预置 %d 字节的占用失败: %v", occupy, err)
+	}
+	if got := kvBytes(t, db, plugin, user); got != occupy {
+		t.Fatalf("预置之后占用 = %d 字节，期望 %d", got, occupy)
+	}
+
+	value := strings.Repeat("v", probeBytes)
+	used := occupy + int64(len(probeKey)+len(value))
+	// 夹具自检：正确的那一版必须超限，把加号改成减号的那一版必须放行。
+	if used <= int64(host.KVMaxBytes) {
+		t.Fatalf("夹具错了：正确算式的结果 %d 没超过上限 %d", used, host.KVMaxBytes)
+	}
+	if reduced := used - 2*int64(probeBytes); reduced > int64(host.KVMaxBytes) {
+		t.Fatalf("夹具错了：减号那一版的结果 %d 也超过上限 %d，两版分不开", reduced, host.KVMaxBytes)
+	}
+
+	err := kv.Set(ctx, plugin, user, probeKey, value, 0)
+	if !errors.Is(err, host.ErrKVQuotaExceeded) {
+		t.Fatalf("写入错误 = %v，期望包住 host.ErrKVQuotaExceeded", err)
+	}
+	if want := fmt.Sprintf("字节数会达到 %d", used); !strings.Contains(err.Error(), want) {
+		t.Errorf("错误信息 %q 里没有 %q：报出来的必须是写完之后的总字节数", err.Error(), want)
+	}
+	if n := kvCount(t, db, plugin, user); n != 1 {
+		t.Errorf("被拒的写入却改了行数：现在 %d 行，期望 1 行（只有预置那一行，探针不该落库）", n)
+	}
+	if got := kvBytes(t, db, plugin, user); got != occupy {
+		t.Errorf("被拒的写入却改了占用：现在 %d 字节，期望 %d", got, occupy)
 	}
 }
 
