@@ -6,8 +6,9 @@
 
 ## 路径与协议
 
-**协议由路径决定，不由请求体决定。** 推理有四条路径，其余一律 `501`——唯一
-可能的例外是支付回调，它只在假支付通道启用时才挂上（见下面的「支付回调」）。
+**协议由路径决定，不由请求体决定。** 推理有四条路径，模型清单有两条只读路径，
+其余一律 `501`——唯一可能的例外是支付回调，它只在假支付通道启用时才挂上
+（见下面的「支付回调」）。
 
 | 路径 | 协议 | 认证习惯 | 流式 |
 |---|---|---|---|
@@ -15,15 +16,61 @@
 | `POST /v1/messages` | Anthropic | `x-api-key: <key>` | 是 |
 | `POST /v1/responses` | OpenAI Responses | `Authorization: Bearer <key>` | 是 |
 | `POST /v1/systemone` | System One（本网关自己的形状） | `Authorization: Bearer <key>` | **否** |
+| `GET /v1/models` | OpenAI | `Authorization: Bearer <key>`，也认 `x-api-key` | 否 |
+| `GET /v1/models/{id}` | OpenAI | 同上 | 否 |
 
 `/v1/systemone` 不做对话，而是拿一段状态与一组带类型的判定问题、回一组答案，
 形状见 [development.md](development.md) 的「决策接口」一节。它在请求体里带
 `stream` 时回 `400`，文案由 `internal/systemone` 给出。
 
-**其余路径一律 `501`**（`this endpoint is not implemented`）：只实现了上面这四条
-POST 路径，**没有** `GET /v1/models`、`GET /v1/models/{id}`、`/v1/embeddings`、
-`/v1/files` 这些 OpenAI 兼容接口的惯例端点。按 OpenAI 那套 SDK 写客户端时，
-只要有代码在启动时拉一次模型清单，就会拿到这个 `501`。
+**其余路径一律 `501`**（`this endpoint is not implemented`）：上面这六条之外的
+路径都没有实现，包括 `/v1/embeddings`、`/v1/files` 这些 OpenAI 兼容接口的惯例
+端点。
+
+### 模型清单
+
+两条只读路径，用与推理请求同一把 API Key 认证：
+
+| 路径 | 返回 |
+|---|---|
+| `GET /v1/models` | 这把 key 现在能用的模型清单 |
+| `GET /v1/models/{id}` | 其中一条；不可用时 `404` |
+
+**「能用」的判据是供给，不是健康度**：规范名在模型目录里，并且至少有一条
+**启用、未删除**的渠道声明支持它（`channels.models` 数组含这个规范名）。
+目录里有、但没有任何渠道能接到它的模型**不返回**——列出来调用方一用就是
+失败，比不列更糟。渠道的健康度与额度不在这条判据里：一个正在报错的渠道仍然
+在供这个模型，它这一刻能不能打通要等真的发一次请求才知道。
+
+响应形状与 OpenAI 的 Model 对象一致，SDK 可以直接解：
+
+```json
+{"object": "list", "data": [
+  {"id": "claude-x", "object": "model", "created": 0, "owned_by": "example"}
+]}
+```
+
+- `id` 是**规范名**，也就是请求体里 `model` 字段该写的那个名字。别名只在
+  路由时用于把规范名翻成上游模型名，不出现在清单里
+- `created` 固定 `0`：目录里没有「模型创建时间」这一列，不编一个看起来像
+  时间戳的值
+- `owned_by` 取目录里的 vendor；那一列为空时是 `larkax`
+- 清单按规范名排序，**不做分页**：规模小，等真有需要再说
+- 不返回上游模型名与渠道信息——那是运营面的事
+
+失败时（错误体形状与推理路径相同）：
+
+| 状态码 | 什么时候 | 码 |
+|---|---|---|
+| `401` | 没有带凭证，或凭证不能用 | `invalid_api_key` |
+| `404` | `{id}` 不可用：目录里没有，或没有任何启用渠道在供 | `model_not_found` |
+| `405` | 方法不是 `GET`（响应头带 `Allow: GET`） | — |
+| `500` | 我们这一侧读不出来（连不上库等） | — |
+| `501` | 这个实例没有接上模型清单 | — |
+
+这两条路径**不参与限流与额度**：它们只读，不产生用量。它们也不判渠道凭证
+能不能解开——那要逐渠道解密，代价与这条只读接口不匹配，核查由
+`larkaxctl doctor` 那条链路负责。
 
 ### 支付回调
 
@@ -104,14 +151,15 @@ POST 路径，**没有** `GET /v1/models`、`GET /v1/models/{id}`、`/v1/embeddi
 | 状态码 | 什么时候 | 谁给的 | 该做什么 |
 |---|---|---|---|
 | `400` | 请求体不是合法 JSON；`max_tokens` 缺失、非正或超过单次上限；`/v1/systemone` 带了 `stream` | 网关 | 改请求，**不要重发** |
-| `401` | 凭证缺失、格式不对、不存在或已过期；支付回调那条路径上是**签名不对** | 网关 | 推理路径换一把 key；回调路径看「支付回调」一节 |
-| `405` | 方法不是 `POST` | 网关 | 改方法 |
+| `401` | 凭证缺失、格式不对、不存在或已过期（推理与模型清单都是这一条）；支付回调那条路径上是**签名不对** | 网关 | 换一把 key；回调路径看「支付回调」一节 |
+| `404` | 模型清单上这个 `{id}` 不可用：目录里没有，或没有任何启用渠道在供 | 网关 | 换一个模型，见「模型清单」一节 |
+| `405` | 方法不对：推理路径只收 `POST`，模型清单只收 `GET` | 网关 | 改方法 |
 | `409` | 幂等键的三个情形（同键不同体 / 同键还在跑 / 同键上次没走完） | 网关 | 见 [idempotency.md](idempotency.md)，三条的处置**相反** |
 | `413` | 请求体超过 8 MiB | 网关 | 改小请求 |
 | `415` | `Content-Type` 不是 `application/json` | 网关 | 改请求头 |
 | `429` | 这个 Key 的 RPM 用满 / 这个 Key 的累计额度用尽 / 用户钱包可用余额不足 / **上游**限流 | 前三条是网关，第四条是上游 | 四个来源的处置**两两相反**，见 [limits.md](limits.md) |
 | `500` | 我们这一侧坏了（账本、候选来源、鉴权查询失败、认不出来的错误） | 网关 | 上报，附 `X-Request-Id` |
-| `501` | 路径不在上面那几条里；支付回调在通道关着时也落回这一条；这个构建没接推理（例如 `worker` 角色）；没配上游执行器 | 网关 | 换路径或改部署 |
+| `501` | 路径不在上面那几条里；支付回调在通道关着时也落回这一条；这个构建没接推理（例如 `worker` 角色）或没接模型清单；没配上游执行器 | 网关 | 换路径或改部署 |
 | `502` | 上游调用失败，底下有四种起因：上游那一侧失败（回了非 2xx，或者没答上来）/ 候选全被本地判据挡在门外 / 候选的渠道类型不支持这条协议 / 我们这一侧失败（插件阻断、账本写不进去） | 上游那一类由我们转述，另三类是网关判的 | 按 `error.code` 分，见下文那张码表——**不是每一种都能重发**；我们这一侧那一种不给码，码表下面那一段说的就是它 |
 | `503` | `no available upstream for the requested model` | 网关 | 这个词底下**没有可用渠道**。它不点名是哪个名字不对，`larkaxctl doctor` 会，见 [development.md](development.md) |
 
@@ -136,6 +184,7 @@ POST 路径，**没有** `GET /v1/models`、`GET /v1/models/{id}`、`/v1/embeddi
 | `/v1/responses` | OpenAI（**逐字相同**：两家共用同一个官方 SDK 的错误解析器） | `error.code` |
 | `/v1/messages` | Anthropic | `error.type` |
 | `/v1/systemone` | OpenAI | `error.code` |
+| `/v1/models`、`/v1/models/{id}` | OpenAI | `error.code` |
 | 未知路径（`501`） | OpenAI（路径不认识，就无从知道调用方说哪套协议） | `error.code` |
 
 ```json
@@ -158,6 +207,7 @@ POST 路径，**没有** `GET /v1/models`、`GET /v1/models/{id}`、`/v1/embeddi
 |---|---|---|---|
 | `400` / `405` / `415` / `409` | `invalid_request_error` | 推不出来时为 `null`（幂等那三条会给具体的码） | `invalid_request_error`（幂等那三条这一栏放的是码） |
 | `401` | `invalid_request_error` | `invalid_api_key` | `authentication_error` |
+| `404` | `invalid_request_error` | `model_not_found` | —（模型清单只走 OpenAI 那套） |
 | `413` | `invalid_request_error` | `request_too_large` | `request_too_large` |
 | `429` | `rate_limit_error` | 推不出来时为 `null`（额度那两条给 `insufficient_quota`，上游限流给 `upstream_http_error`） | `rate_limit_error`（额度那两条与上游限流这一栏放的是码） |
 | `501` | `not_implemented` | 推不出来时为 `null` | `not_implemented` |
@@ -279,7 +329,8 @@ the account balance ran out while this response was streaming, so it was cut sho
 
 | 要改什么 | 改哪 |
 |---|---|
-| 路径与协议的对应、路径外的 `501` | `internal/api` 的 `ServeHTTP`（`PathChatCompletions` 等四个常量） |
+| 路径与协议的对应、路径外的 `501` | `internal/api` 的 `ServeHTTP`（`PathChatCompletions`、`PathMessages`、`PathResponses`、`PathSystemOne`、`PathModels`） |
+| 模型清单的内容（列出哪些模型、`owned_by`、单条不可用时的 `404`） | `internal/api/models.go`；供给判据在 `internal/channels` 的 `SuppliedModels` |
 | 解析之前的检查顺序（方法、`Content-Type`、鉴权、限流、额度） | `internal/api` 的 `admit` |
 | 状态码与错误码的映射 | `internal/api/error.go` 的 `errorKind` 与 `internal/api/api.go` 的 `httpStatusOfUpstream` |
 | 错误体的形状 | `internal/api/error.go`（每套协议一份独立结构体） |

@@ -25,7 +25,7 @@
 
 | 想做的事 | 看哪份 |
 |---|---|
-| 四条路径分别是什么协议、响应头与状态码、错误体的形状、流式的帧序列 | [api.md](api.md) |
+| 有哪几条路径、各自什么协议、响应头与状态码、错误体的形状、流式的帧序列 | [api.md](api.md) |
 | 一把 Key 的每分钟次数与累计额度是什么语义、超限时回什么 | [limits.md](limits.md) |
 | 同一个请求重发两次只执行一次（`Idempotency-Key`） | [idempotency.md](idempotency.md) |
 | 单次请求的输出上限（`max_tokens`）怎么定、超了回什么 | [max-tokens.md](max-tokens.md) |

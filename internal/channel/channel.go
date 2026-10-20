@@ -468,7 +468,9 @@ type Adapter interface {
 	// 见 internal/channels 的 endpoints.go），只读库里的表、不碰网络。配置
 	// 命令不该依赖「上游这一刻可达」。
 	//
-	// 客户端面也不在这里：GET /v1/models 是**故意**的 501（见 docs/api.md）。
+	// 客户端面也不在这里：公共的 GET /v1/models 由模型目录与「有渠道在供」
+	// 那一份清单拼出来（见 internal/api/models.go），不问任何上游——它回答
+	// 的是「这把 key 能用什么」，而那是网关自己知道的事。
 	ListModels(ctx context.Context, ch Channel) ([]string, error)
 
 	// Quota 查询额度。查不到时返回 ErrUnsupported，而不是一个「余量未知」
