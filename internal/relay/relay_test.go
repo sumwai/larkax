@@ -241,6 +241,26 @@ func TestThinkingBlocksAreDropped(t *testing.T) {
 	}
 }
 
+// 没有工具调用的助手消息，ToolCalls 必须保持为 nil。
+//
+// 「空切片序列化出来是 null」这件事很容易漏：`len(toolCalls) > 0` 的边界变异体
+// 会让这一支永远进入，于是每条纯文本助手消息都挂上 `"null"`，下游按
+// 「有没有 ToolCalls」判断时就会把一条普通回答当成工具调用。
+func TestAssistantWithoutToolCallsKeepsToolCallsNil(t *testing.T) {
+	out, err := ToRelaykit(&channel.Request{
+		Model: "m",
+		Messages: []channel.Message{{Role: "assistant", Content: []channel.ContentBlock{
+			{Type: "text", Text: "直接回答"},
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Messages[0].ToolCalls != nil {
+		t.Errorf("ToolCalls = %q，没有工具调用时应当是 nil", out.Messages[0].ToolCalls)
+	}
+}
+
 func TestUnknownContentTypeIsRejected(t *testing.T) {
 	_, err := ToRelaykit(&channel.Request{
 		Model:    "m",
@@ -248,6 +268,32 @@ func TestUnknownContentTypeIsRejected(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("未知内容块类型应报错，而不是静默丢弃")
+	}
+}
+
+// 空 Extra 与没有 Extra 走的是同一条结果路径。
+//
+// `len(req.Extra) > 0` 的边界变异体（`>= 0`）是等价的：为空时 extrasToRelaykit
+// 返回空 map 与 nil 错误，applyExtras 对空 map 的每个键都查不到，什么也不改，
+// 两版产出的请求逐字段相同。构造不出能区分两版的输入，所以这里只证明空 Extra
+// 的转换结果是确定的，不去追那个分支本身。
+func TestEmptyExtraChangesNothing(t *testing.T) {
+	out, err := ToRelaykit(&channel.Request{
+		Model: "m",
+		Messages: []channel.Message{{Role: "user", Content: []channel.ContentBlock{
+			{Type: "text", Text: "你好"},
+		}}},
+		Extra: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Model != "m" || len(out.Messages) != 1 {
+		t.Errorf("请求 = %+v，空 Extra 不该改动任何字段", out)
+	}
+	if out.TopK != nil || out.FrequencyPenalty != nil || out.PresencePenalty != nil ||
+		out.Seed != nil || out.ParallelTooCalls != nil || out.ServiceTier != nil || out.User != nil {
+		t.Errorf("空 Extra 不该挂上任何扩展字段: %+v", out)
 	}
 }
 
@@ -316,6 +362,10 @@ func TestFormatForUnknownProtocolIsRejected(t *testing.T) {
 	}
 }
 
+// splitDataURL 里 `semi < 0` 的边界变异体（`<= 0`）是等价的：semi 为 0 意味着
+// rest 以 `;base64,` 开头，此时媒体类型是空串，原版走到后面的 `mediaType == ""`
+// 同样返回 false；semi 为 -1（没找到）两版都返回 false。其余取值两版一致。
+// 没有能区分两版的输入，所以「缺媒体类型」那一行只是覆盖取值为 0 的分支。
 func TestSplitDataURL(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -342,6 +392,17 @@ func TestSplitDataURL(t *testing.T) {
 				t.Errorf("得到 (%q, %q)，期望 (%q, %q)", data, mediaType, tc.wantData, tc.wantType)
 			}
 		})
+	}
+}
+
+// derefString 的两侧都要取到：nil 取成空串，有值时取到的是那个值本身。
+// 只测 nil 那一侧的话，「有值时也返回空串」这个错误看不见。
+func TestDerefString(t *testing.T) {
+	if got := derefString(ptr("回答")); got != "回答" {
+		t.Errorf("derefString(有值) = %q，期望 回答", got)
+	}
+	if got := derefString(nil); got != "" {
+		t.Errorf("derefString(nil) = %q，期望空串", got)
 	}
 }
 
@@ -642,6 +703,68 @@ func TestResponseAnnotationsNeedATextBlock(t *testing.T) {
 	}
 }
 
+// 空的标注对象不是一条标注，要丢掉；丢掉之后剩下的照常挂。
+//
+// `!ok || len(obj) == 0` 的与/或互换变异体会把空对象也收进来，标注张数因此
+// 会多算一条——客户端拿到一个没有任何字段的引用。
+func TestAnnotationsSkipEmptyObjects(t *testing.T) {
+	got, err := messageFromRelaykit(dto.Message{
+		Role:        "assistant",
+		Content:     "正文",
+		Annotations: json.RawMessage(`[{}, 42, {"type":"url_citation","url":"https://example.com/a"}]`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Content) != 1 {
+		t.Fatalf("内容块 = %d，期望 1: %+v", len(got.Content), got.Content)
+	}
+	annotations := got.Content[0].Annotations
+	if len(annotations) != 1 {
+		t.Fatalf("标注 = %d 条，期望 1（空对象与标量都不是标注）: %+v", len(annotations), annotations)
+	}
+	if annotations[0]["type"] != "url_citation" {
+		t.Errorf("标注 = %+v，期望剩下的是那条 url_citation", annotations[0])
+	}
+}
+
+// 标注只挂正文块。工具结果块也带 Text，但它不是正文——
+// 把 `Type == "text" && Text != ""` 的与换成或，标注会落到 tool_result 上。
+func TestAnnotationsOnlyOnTextBlocks(t *testing.T) {
+	got, err := messageFromRelaykit(dto.Message{
+		Role:        "tool",
+		ToolCallId:  "call_1",
+		Content:     "工具结果",
+		Annotations: json.RawMessage(`[{"type":"url_citation","url":"https://example.com/a"}]`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Content) != 1 || got.Content[0].Type != "tool_result" {
+		t.Fatalf("内容块 = %+v，期望一块 tool_result", got.Content)
+	}
+	if len(got.Content[0].Annotations) != 0 {
+		t.Errorf("标注挂到了工具结果块上: %+v", got.Content[0].Annotations)
+	}
+}
+
+// 没有 tool_call_id 的 tool 消息不改成 tool_result。
+//
+// `Role == "tool" && ToolCallId != ""` 的与换成或之后，这种消息会被包成一个
+// ToolUseID 为空的工具结果块，工具往返从此对不上号。
+func TestToolMessageWithoutCallIDStaysText(t *testing.T) {
+	got, err := messageFromRelaykit(dto.Message{Role: "tool", Content: "没有关联的文本"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Content) != 1 {
+		t.Fatalf("内容块 = %d，期望 1: %+v", len(got.Content), got.Content)
+	}
+	if got.Content[0].Type != "text" || got.Content[0].Text != "没有关联的文本" {
+		t.Errorf("内容块 = %+v，期望原样的文本块", got.Content[0])
+	}
+}
+
 // status=incomplete 是「停在了长度上限上」，不是失败：结束原因折成 length。
 func TestResponseFromResponsesIncomplete(t *testing.T) {
 	src := &dto.OpenAIResponsesResponse{
@@ -658,6 +781,58 @@ func TestResponseFromResponsesIncomplete(t *testing.T) {
 	if got.FinishReason != "length" {
 		t.Errorf("FinishReason = %q", got.FinishReason)
 	}
+}
+
+// 上游给出了空内容时，响应照常产出：没有正文，用量一定要保留。
+//
+// OpenAI 那一侧的 Choices 可以为空，`len(r.Choices) > 0` 的边界变异体会让它
+// 取下标 0 而 panic——真实上游在内容被过滤时就会给空 choices，那正是不该拿不到
+// 用量的时刻。
+//
+// Responses 那一侧的 `len(chat.Choices) > 0` 在可及输入上恒真：relaykit 的
+// ResponsesResponseToChatCompletionsResponse 对任何非 nil 响应都构造恰好一个
+// choice（空 output 也一样，结束原因折成 stop），nil 已在函数开头拦掉。所以
+// 那个边界变异体与本版等价，构造不出能区分两版的输入；这一侧的子用例只把
+// 「空 output 也有一个 choice」这件事钉住。
+func TestResponseWithoutChoices(t *testing.T) {
+	t.Run("OpenAI", func(t *testing.T) {
+		got, err := ResponseFromRelaykit(&dto.OpenAITextResponse{
+			Model: "gpt-4o",
+			Usage: dto.Usage{PromptTokens: 10},
+		})
+		if err != nil {
+			t.Fatalf("空 choices 不该让响应失败: %v", err)
+		}
+		if got.FinishReason != "" {
+			t.Errorf("FinishReason = %q，期望空", got.FinishReason)
+		}
+		if len(got.Message.Content) != 0 {
+			t.Errorf("内容 = %+v，期望空", got.Message.Content)
+		}
+		if got.Usage.PromptTokens != 10 {
+			t.Errorf("PromptTokens = %d，期望 10（空 choices 也要保住用量）", got.Usage.PromptTokens)
+		}
+	})
+
+	t.Run("Responses", func(t *testing.T) {
+		got, err := ResponseFromRelaykit(&dto.OpenAIResponsesResponse{
+			ID:    "resp_empty",
+			Model: "gpt-5",
+			Usage: &dto.Usage{PromptTokens: 12, CompletionTokens: 3},
+		})
+		if err != nil {
+			t.Fatalf("空 output 不该让响应失败: %v", err)
+		}
+		if got.FinishReason != "stop" {
+			t.Errorf("FinishReason = %q，期望 stop（relaykit 对空 output 折成 stop）", got.FinishReason)
+		}
+		if len(got.Message.Content) != 0 {
+			t.Errorf("内容 = %+v，期望空", got.Message.Content)
+		}
+		if got.Usage.PromptTokens != 12 || got.Usage.CompletionTokens != 3 {
+			t.Errorf("用量 = %+v，期望 12 / 3（空 output 也要保住用量）", got.Usage)
+		}
+	})
 }
 
 func TestToRelaykitResponses(t *testing.T) {
@@ -755,6 +930,114 @@ func TestUsageCacheOnlyImpliesPrompt(t *testing.T) {
 	})
 	if got.PromptTokens != 40 {
 		t.Errorf("PromptTokens = %d，期望 40", got.PromptTokens)
+	}
+}
+
+// 缓存写入的两个来源字段要相加，三种输入口径的合成结果各自正确。
+//
+// 三种口径放在同一张表里，是为了让「同一笔用量在三种声明下各是多少」可以直接
+// 对照：分岔只在 prompt_tokens 含不含缓存这一件事上，缓存明细三种口径**都应当
+// 相同**。断言的是具体数，不是「非零」——这一包算错的表现是账偏，而不是报错。
+//
+// 这张表同时钉住那条兜底条件：只有缓存写入（读为 0、写为正）时，prompt 仍要
+// 由缓存写入量兜底，不能因为读那一项为 0 就整条分支失效。
+//
+// 同一处两个边界变异体（`cacheRead > 0` / `cacheWrite > 0` 改成 `>= 0`）
+// **只在计数非负时**两版一致：进入分支时 prompt 为 0，分支体把它赋成
+// cacheRead + cacheWrite；某一项为 0 时另一项为正则原版本就进入分支（赋出
+// 同一个数），两项都为 0 则赋进去的也是 0（与不进分支相同）。
+//
+// 负值能走到这里，不能拿「非负」当前提：openaiadapter 对这三个缓存字段
+// 只做指针解引用，不校验符号（internal/channel/openaiadapter/dto.go 里
+// CachedTokens / CachedCreationTokens / CacheWriteTokens 的拷贝）。负值下
+// 两版会分岔——某一项为 0、另一项为负时，变异版把它当 `>= 0` 放行并算出
+// 负的 prompt。下面两个「负的缓存」子用例钉住这一格：prompt 保持 0，
+// 而负值本身原样透传到 CacheReadTokens / CacheWriteTokens。
+//
+// 透传是当前行为，不是本包该定的口径：要不要把负计数钳到 0 属于计费层的
+// 决定，这一条只把它钉住，不改源码。
+func TestUsageCacheAccountingDialects(t *testing.T) {
+	cases := []struct {
+		name      string
+		usage     dto.Usage
+		wantProm  int64
+		wantRead  int64
+		wantWrite int64
+	}{
+		{
+			name: "openai 原生：prompt_tokens 已含缓存，两个缓存写字段相加",
+			usage: dto.Usage{
+				PromptTokens:     9000,
+				CompletionTokens: 200,
+				PromptTokensDetails: dto.InputTokenDetails{
+					CachedTokens:         8000,
+					CachedCreationTokens: 200,
+					CacheWriteTokens:     50,
+				},
+				UsageSemantic: dto.BillingUsageSemanticOpenAI,
+			},
+			wantProm: 9000, wantRead: 8000, wantWrite: 250,
+		},
+		{
+			name: "anthropic：prompt_tokens 不含缓存，补回读 + 写",
+			usage: dto.Usage{
+				PromptTokens:     1000,
+				CompletionTokens: 200,
+				PromptTokensDetails: dto.InputTokenDetails{
+					CachedTokens:         8000,
+					CachedCreationTokens: 200,
+					CacheWriteTokens:     50,
+				},
+				UsageSemantic: dto.BillingUsageSemanticAnthropic,
+			},
+			wantProm: 9250, wantRead: 8000, wantWrite: 250,
+		},
+		{
+			name: "只有缓存字段：prompt 由读 + 写兜底",
+			usage: dto.Usage{
+				PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 7, CachedCreationTokens: 3},
+			},
+			wantProm: 10, wantRead: 7, wantWrite: 3,
+		},
+		{
+			name: "只有缓存写入：prompt 仍要由写作兜底",
+			usage: dto.Usage{
+				PromptTokensDetails: dto.InputTokenDetails{CachedCreationTokens: 3},
+			},
+			wantProm: 3, wantRead: 0, wantWrite: 3,
+		},
+		{
+			name: "负的缓存写入不参与兜底：prompt 保持 0",
+			usage: dto.Usage{
+				PromptTokensDetails: dto.InputTokenDetails{CachedCreationTokens: -3},
+			},
+			wantProm: 0, wantRead: 0, wantWrite: -3,
+		},
+		{
+			name: "负的缓存读取不参与兜底：prompt 保持 0",
+			usage: dto.Usage{
+				PromptTokensDetails: dto.InputTokenDetails{CachedTokens: -3},
+			},
+			wantProm: 0, wantRead: -3, wantWrite: 0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := UsageFromRelaykit(&tc.usage)
+			if got.PromptTokens != tc.wantProm {
+				t.Errorf("PromptTokens = %d，期望 %d", got.PromptTokens, tc.wantProm)
+			}
+			if got.CacheReadTokens != tc.wantRead {
+				t.Errorf("CacheReadTokens = %d，期望 %d", got.CacheReadTokens, tc.wantRead)
+			}
+			if got.CacheWriteTokens != tc.wantWrite {
+				t.Errorf("CacheWriteTokens = %d，期望 %d", got.CacheWriteTokens, tc.wantWrite)
+			}
+			if want := int64(tc.usage.CompletionTokens); got.CompletionTokens != want {
+				t.Errorf("CompletionTokens = %d，期望 %d", got.CompletionTokens, want)
+			}
+		})
 	}
 }
 

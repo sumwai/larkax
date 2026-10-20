@@ -358,6 +358,7 @@ PKGS=(
   internal/ratelimit
   internal/auth
   internal/catalog
+  internal/relay
   internal/snapshot
   internal/snapshotwire
   internal/gateway
