@@ -27,7 +27,7 @@ import (
 //   - 只有分录、没有单子：钱冻在 `payout:<单id>` 上，而没有任何一行说明它是谁
 //     申请、该不该付；它只会以「payout 科目长期不平」的形式在某个对账日出现。
 //
-// 所以建单、审批、驳回、打款四步都是「一个事务、要么全写要么全不写」。
+// 所以建单、审批、驳回、打款与清算这五步都是「一个事务、要么全写要么全不写」。
 //
 // # 状态怎么往前走
 //
@@ -41,9 +41,9 @@ import (
 //
 // # 幂等键在这一层是 txn_id
 //
-// 四个动作各自由调用方把「同一个业务事件」映射成一个 txn_id（命令行拿幂等键
-// 与用途前缀算出来）。写分录的那三步（申请 / 驳回 / 打款）因此天然幂等：重放到
-// 达时那笔交易已经在库里、内容一致，函数返回 applied=false 且什么都不写。
+// 五个动作各自由调用方把「同一个业务事件」映射成一个 txn_id（命令行拿幂等键
+// 与用途前缀算出来）。写分录的那四步（申请 / 清算 / 驳回 / 打款）因此天然幂等：
+// 重放到达时那笔交易已经在库里、内容一致，函数返回 applied=false 且什么都不写。
 // 批准不写分录，它的幂等由状态挡着：已经是 approved 时返回未改动。
 
 // PayoutStatus 是 payout_requests.status 的取值，与迁移里的 CHECK 约束一致。
@@ -366,9 +366,9 @@ func (s *Store) RequestPayout(ctx context.Context, in RequestPayoutInput) (Payou
 	// 有一个窗口——一边校验通过，另一边已经把它冲走了。所以 store.PostTransaction
 	// 对分录里出现的 merchant_payable 科目取同一把锁（见 lockPayableAccounts），
 	// 两条路因此落在同一条串行线上。消费的分成与驳回都只让它变大；清算
-	// （SettlePayout）与提现申请是同一个形状，两条都先拿这把锁。加锁顺序固定为
-	// 「交易键 → 科目」，两边一致。对账的 RepairAdjustLedger 不拿这把锁，是已知
-	// 例外（见 lockAccount）。
+	// 与提现申请是同一个形状（SettlePayout），两条都先拿这把锁。加锁顺序
+	// 固定为「交易键 → 科目」，两边一致。对账那条路里的 RepairAdjustLedger
+	// 是已知例外：它不拿这把锁（见 lockAccount）。
 	//
 	// 这条校验保证的是「申请时不能提平台还不欠的钱」，不是「这个科目永远非负」：
 	// 退款把它冲成负数是**允许**的——负的意思是平台多付给了商户、商户欠平台
@@ -414,7 +414,7 @@ func (s *Store) RequestPayout(ctx context.Context, in RequestPayoutInput) (Payou
 
 // SettlePayoutInput 是一次平台主动清算的输入。
 type SettlePayoutInput struct {
-	// TxnID 由调用方按清算单号（Ref）推出来。同一个键重放到达时，这次调用
+	// TxnID 由调用方按结算单号（Ref）推出来。同一个键重放到达时，这次调用
 	// 什么都不写，返回 applied=false 与库里那张单子。
 	TxnID ledger.TxnID
 	// Ref 是这次清算的单号。它进分录备注，也参与重放判定：同一个交易号配
@@ -455,10 +455,10 @@ type SettlePayoutInput struct {
 // 建单与写分录在同一个事务里：两条事实缺一条，账面就会出现一个说得通而实际
 // 不对的状态（见本文件开头）。
 //
-// 返回的 applied=false 表示这个清算单号已经建过单（重放），库里那一行原样返回。
+// 返回的 applied=false 表示这个结算单号已经建过单（重放），库里那一行原样返回。
 func (s *Store) SettlePayout(ctx context.Context, in SettlePayoutInput) (Payout, bool, error) {
 	if in.TxnID == "" {
-		return Payout{}, false, errors.New("缺少 txn_id：清算单号要确定性映射成它，幂等靠它承担")
+		return Payout{}, false, errors.New("缺少 txn_id：结算单号要确定性映射成它，幂等靠它承担")
 	}
 	if in.UserID <= 0 {
 		return Payout{}, false, fmt.Errorf("商户 id 非法: %d", in.UserID)
@@ -521,7 +521,7 @@ func (s *Store) SettlePayout(ctx context.Context, in SettlePayoutInput) (Payout,
 		}
 		if !sameDestination {
 			return Payout{}, false, fmt.Errorf(
-				"%w: 清算单号对应的这条提现单已经存在，但收款信息与这次要写的不一样；"+
+				"%w: 结算单号对应的这条提现单已经存在，但收款信息与这次要写的不一样；"+
 					"收款信息事后不能改", ErrTxnConflict)
 		}
 		row, readErr := payoutByID(ctx, tx, payoutID)
@@ -606,13 +606,12 @@ func destinationOrEmptyObject(raw []byte) []byte {
 //
 // **让这个科目变小的写路径都应当先拿同一把锁**，否则窗口照样存在。今天这样做
 // 的有三条：提现申请（RequestPayout）、平台清算（SettlePayout）与
-// PostTransaction（退款冲回分成，见 lockPayableAccounts）。已知例外是对账的
-// RepairAdjustLedger：它在
-// reconcile_batch.go 里直接 insertEntries，不走 PostTransaction；差额科目若被
-// 配成 merchant_payable:<id>，它不拿这把锁就能改动这个科目。对账是人工、低频
-// 的动作，与提现并发时最多让一次申请校验读到偏大的余额——方向不安全（可能多
-// 放一次申请）。要不要拦这一格属于「差额科目能不能配成分成」那条口径，不在
-// 这把锁的范围里。
+// PostTransaction（退款冲回分成，见 lockPayableAccounts）。已知的例外是对账
+// 那条路里的 RepairAdjustLedger：它在 reconcile_batch.go 里直接 insertEntries，
+// 不走 PostTransaction；差额科目若被配成 merchant_payable:<id>，它不拿这把锁
+// 就能改动这个科目。对账是人工、低频的动作，与提现并发时最多让一次申请校验
+// 读到偏大的余额——方向不安全（可能多放一次申请）。要不要拦这一格属于
+// 「差额科目能不能配成分成」那条口径，不在这把锁的范围里。
 func lockAccount(ctx context.Context, tx *sql.Tx, acct ledger.Account) error {
 	if _, err := tx.ExecContext(ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, acct.String()); err != nil {

@@ -324,6 +324,10 @@ type SettleParams struct {
 	// 负债等于没有记。真需要那个流程，应当由调用方先生成提现单再清算。
 	PayoutID int64
 	// Memo 说明结算依据（结算周期、对账批次号）。
+	//
+	// 命令行那条路径（wallet payout settle）不用它：备注固定是「平台清算（单据
+	// <Ref>）」，--note 只进 payout_requests.review_note。这里留着是给别的调用方
+	// 用的。
 	Memo string
 	// Ref 是这次清算对应的外部单号（结算单、对账批次）。
 	//

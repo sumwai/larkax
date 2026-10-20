@@ -585,7 +585,7 @@ func TestSettlePayoutWritesApprovedRowAndEntries(t *testing.T) {
 		t.Error("还没打款的单子不该有打款时刻与凭据")
 	}
 
-	// 分录：与申请同一形状，但类型是 settle；清算单号进分成那条的备注（交易号
+	// 分录：与申请同一形状，但类型是 settle；结算单号进分成那条的备注（交易号
 	// 是它的哈希，不落备注就对不回这张结算单）。
 	wantEntries(t, db, txnID, []entryRow{
 		{
@@ -607,7 +607,7 @@ func TestSettlePayoutWritesApprovedRowAndEntries(t *testing.T) {
 	}
 }
 
-// 同一个清算单号重放不建第二张单、不记第二次账；换金额或收款信息是冲突。
+// 同一个结算单号重放不建第二张单、不记第二次账；换金额或收款信息是冲突。
 func TestSettlePayoutReplayAndConflicts(t *testing.T) {
 	db := testDB(t)
 	s := New(db)
@@ -646,6 +646,21 @@ func TestSettlePayoutReplayAndConflicts(t *testing.T) {
 	}
 	if got := accountTotal(t, db, ledger.MerchantPayableAccount(merchant)); got != "6.00000000" {
 		t.Errorf("重放之后分成科目 = %s，期望仍是 6.00000000", got)
+	}
+
+	// 同一条结算单配另一个 --by 仍是重放：审批人只记在单子那一行上，不参与交易
+	// 内容的比较，所以它既不判冲突，也不会覆盖第一次记下的那个人。
+	other := bareUser(t, db)
+	withOther, appliedWithOther, err := s.SettlePayout(ctx, SettlePayoutInput{
+		TxnID: txnID, Ref: "SETTLE-B", UserID: merchant,
+		Amount: money.MustParse("4"), Asset: ledger.AssetCNY,
+		Destination: []byte(`{"bank":"placeholder-bank"}`), Reviewer: other,
+	})
+	if err != nil || appliedWithOther {
+		t.Fatalf("换审批人重放应当仍算重放：applied=%v err=%v", appliedWithOther, err)
+	}
+	if withOther.ReviewedBy == nil || *withOther.ReviewedBy != operator {
+		t.Errorf("重放之后审批人 = %v，期望仍是 %d", withOther.ReviewedBy, operator)
 	}
 
 	cases := []struct {

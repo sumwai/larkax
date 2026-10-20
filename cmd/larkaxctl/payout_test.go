@@ -446,7 +446,7 @@ func TestWalletPayoutRequestRejectsInsufficientPayable(t *testing.T) {
 }
 
 // 平台主动清算：一步建一张 approved 的单子并记账（分成减少、待付增加），之后
-// paid 能把它推进到 paid；同一个清算单号重放不建第二张单。
+// paid 能把它推进到 paid；同一个结算单号重放不建第二张单。
 func TestWalletPayoutSettleReceiptAndReplay(t *testing.T) {
 	setupEnv(t)
 	db := testDB(t)
@@ -491,7 +491,7 @@ func TestWalletPayoutSettleReceiptAndReplay(t *testing.T) {
 
 	// 重放：同一把键、同样的参数，既不再建单也不再记账。
 	again := mustRun(t, runWalletPayout, append([]string{"settle"}, args...)...)
-	assertHas(t, again, "清算单号 "+ref+" 已经清算过，本次未改动。")
+	assertHas(t, again, "结算单号 "+ref+" 已经清算过，本次未改动。")
 	var rows int
 	if err := db.QueryRowContext(t.Context(),
 		`SELECT count(*) FROM payout_requests WHERE merchant_user_id = $1`,

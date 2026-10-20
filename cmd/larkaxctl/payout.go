@@ -105,7 +105,7 @@ settle 是**平台主动清算**：平台已经决定付这笔钱，于是建单
     larkaxctl wallet payout settle --user <ID 或用户名> --amount <金额> --ref <结算单号>
                                    --destination <收款信息 JSON> --by <操作人> [--note <说明>]
 
-    --ref 是清算单号，同时是幂等键：同一个单号重跑只会建一张单、记一次账，回显「已经
+    --ref 是结算单号，同时是幂等键：同一个单号重跑只会建一张单、记一次账，回显「已经
     清算过，本次未改动」。它也进分录备注，逐字是「平台清算（单据 <ref>）」，理由与申请
     那一条相同。同一个单号配不同的金额、商户或收款信息不是重放，而是冲突（退出 4），
     一笔都不写。
@@ -455,7 +455,7 @@ func runPayoutSettle(args []string) error {
 
 		verdict := fmt.Sprintf("已清算提现单 %d。", row.ID)
 		if !applied {
-			verdict = fmt.Sprintf("清算单号 %s 已经清算过，本次未改动。", settleRef)
+			verdict = fmt.Sprintf("结算单号 %s 已经清算过，本次未改动。", settleRef)
 		}
 		printPayout(humanStdout(), payoutReceipt{
 			Verdict:   verdict,
@@ -751,8 +751,9 @@ func checkPayoutNote(flagName, note string) error {
 
 // payoutReceipt 是一次提现动作的结果，供渲染路径打给人看。
 //
-// 收成一个结构体而不是把七八个值平铺给打印函数：四个动作给得出的那几栏不同（申请有
-// 单号、审批有说明、打款有凭据），位置参数排到后面读调用点的人得数着看。
+// 收成一个结构体而不是把七八个值平铺给打印函数：五个动作给得出的那几栏不同（申请有
+// 单号、清算多一栏结算单号、审批有说明、打款有凭据），位置参数排到后面读调用点的人
+// 得数着看。
 type payoutReceipt struct {
 	// Verdict 是这次动作落下来的那一句话（「已批准提现单 7。」「提现单 7 已经批准过，
 	// 本次未改动。」），由调用方按动作与 applied 给——「刚做完」与「重放」必须分得开
@@ -768,7 +769,7 @@ type payoutReceipt struct {
 	// RequestRef 是申请单号，只有申请那一条有：驳回与打款按单子 id 走，键就是单子
 	// 自己，再打一遍是同一件事说两遍。
 	RequestRef string
-	// SettleRef 是清算单号，只有 settle 那一条有（理由同 RequestRef）。
+	// SettleRef 是结算单号，只有 settle 那一条有（理由同 RequestRef）。
 	SettleRef string
 	// Txn 是这次动作写的交易；批准不写分录，所以那一档是 nil。
 	Txn *ledger.Transaction
