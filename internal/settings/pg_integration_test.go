@@ -157,6 +157,63 @@ func TestSetRefusesNotEditable(t *testing.T) {
 	}
 }
 
+// TestSetRefusesNonPositiveUpdatedBy 钉住 updated_by 的下界。
+//
+// 这一列记的是「谁改的」，0 与负数都不是任何用户的 id。
+// 写入路径的其余用例传的都是 4242，所以把 `updatedBy <= 0` 收成 `< 0` 时
+// 它们全绿——差别只在传 0 的那一次：原版不碰库就报错，变异体会带着
+// updated_by = 0 把值写进库里（这一列此刻没有约束，库不会替我们拦）。
+//
+// 断言落在错误文案上，而不是只断言库里没变：即使将来库那一侧也加了约束，
+// 变异体也会在那里失败，「值没变」对两个版本都成立，能分开它们的只剩这句话。
+func TestSetRefusesNonPositiveUpdatedBy(t *testing.T) {
+	ctx := t.Context()
+	db := testDB(ctx, t)
+	src := NewPgSource(db)
+
+	const key = "quota.probe_interval_seconds"
+
+	for _, updatedBy := range []int64{0, -1} {
+		t.Run(fmt.Sprintf("updated_by=%d", updatedBy), func(t *testing.T) {
+			// 每个子用例各自记一次快照：变异体把 0 那一格放过去时，
+			// 真的会写进库里；共享一份快照会让后面那一格拿写坏的数当基线。
+			before := saveSetting(ctx, t, db, src, key)
+
+			// 写入值取当前值 +1：写进与原值相同的数，库里读出来会和
+			// 没写一样，「写进去了」与「没写进去」就分不开了。
+			var cur int
+			if unmarshalErr := json.Unmarshal(before.Value, &cur); unmarshalErr != nil {
+				t.Fatalf("settings.%s 的值 %s 不是整数：%v", key, before.Value, unmarshalErr)
+			}
+			probe, err := json.Marshal(cur + 1)
+			if err != nil {
+				t.Fatalf("拼写入值失败: %v", err)
+			}
+
+			err = src.Set(ctx, key, json.RawMessage(probe), updatedBy)
+			if err == nil {
+				t.Errorf("updated_by = %d 被接受了，期望报错", updatedBy)
+			} else {
+				want := fmt.Sprintf("updated_by 必须是正整数，得到 %d", updatedBy)
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("错误信息 %q 里没有 %q", err.Error(), want)
+				}
+			}
+
+			// 不因上一段的失败而跳过：被放过去的写入改了哪几列，
+			// 正是这条用例要一并给出的信息，也是它红在哪里的证据。
+			after := entryFor(t, mustList(ctx, t, src), key)
+			if string(after.Value) != string(before.Value) {
+				t.Errorf("本该被拒绝的写入改动了值：%s → %s", before.Value, after.Value)
+			}
+			if showPtr(after.UpdatedBy) != showPtr(before.UpdatedBy) {
+				t.Errorf("本该被拒绝的写入改动了 updated_by：%s → %s",
+					showPtr(before.UpdatedBy), showPtr(after.UpdatedBy))
+			}
+		})
+	}
+}
+
 // TestSetRefusesKeyMissingFromTable 钉住「键在 Registry 里声明过、但库里
 // 没有这一行」这一支。
 //
