@@ -32,6 +32,30 @@ func newExecutor(t *testing.T) *Executor {
 	return e
 }
 
+// eventWait 是收一个流式事件的上限。
+//
+// 之所以不直接 `<-events`：执行器返回一个 nil 通道、或者事件流再也不来值时，
+// 直接收会把整个测试进程挂住，账面表现从「少了一条断言」变成「超时」，
+// 而超时说不出是哪一处漏了。
+//
+// 上限要明显小于变异测试给单个变异体的预算，否则一条走不到的路仍会被记成超时。
+// 那个预算是「gathering（一次 `go test -cover`）的墙钟 × 系数」：
+// 这个包跑一遍测试是亚秒级，系数是十，预算是十秒以内；正常路径是本机回环，
+// 事件在毫秒内就到，所以取两秒——比「慢」宽得多，又明显低于预算。
+const eventWait = 2 * time.Second
+
+// nextEvent 收一个事件，ok 为 false 表示事件流已关闭。
+func nextEvent(t *testing.T, events <-chan channel.StreamEvent) (channel.StreamEvent, bool) {
+	t.Helper()
+	select {
+	case ev, ok := <-events:
+		return ev, ok
+	case <-time.After(eventWait):
+		t.Fatalf("等了 %v 也没收到事件：事件流既没有关闭，也没有新事件", eventWait)
+		return channel.StreamEvent{}, false
+	}
+}
+
 // 内置适配器都要真的被注册上。这条是这次改动的核心：它们此前从未被构造过，
 // 而「没注册上」在运行期的表现是每个请求都报未知渠道类型。
 func TestNewRegistersBuiltinAdapters(t *testing.T) {
@@ -48,6 +72,35 @@ func TestNewRejectsNonPositiveTimeout(t *testing.T) {
 		if _, err := New(d); err == nil {
 			t.Errorf("New(%v) 应当报错", d)
 		}
+	}
+}
+
+// Registry 是给不发请求的调用方用的（比如按渠道类型校验配置的写入路径）。
+// 它必须与 New 装出同一份注册表：两边各自装配的话，「运维命令认得的类型」
+// 与「服务认得的类型」会各自漂移，表现是某个类型配不进去，或者配进去了
+// 却在请求时报未知类型。
+func TestRegistryMatchesNew(t *testing.T) {
+	// Registry 内部用 adapterTimeout 调 New，而 New 拒绝非正数超时。这个常量
+	// 一旦被算成 0（比如乘号被改成了除号），这次调用就会带着
+	// 「上游超时必须为正」的错误回来，而不是给出一张空表。
+	registry, err := Registry()
+	if err != nil {
+		t.Fatalf("Registry 出错: %v", err)
+	}
+	if registry == nil {
+		t.Fatal("Registry 返回了 nil 注册表，err 却是 nil")
+	}
+
+	want := "anthropic,openai,openai-responses,systemone"
+	got := strings.Join(registry.Types(), ",")
+	if got != want {
+		t.Errorf("Registry 的类型 = %q，期望 %q", got, want)
+	}
+
+	// 与 New 装出来的那一份逐项对照：清单相同才算「同一份装配」。
+	e := newExecutor(t)
+	if fromNew := strings.Join(e.Types(), ","); fromNew != got {
+		t.Errorf("New 的类型 = %q，Registry 的类型 = %q，两处装配应当一致", fromNew, got)
 	}
 }
 
@@ -163,12 +216,21 @@ func TestChatStreamDispatchesByType(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ChatStream 出错: %v", err)
 			}
+			// nil 通道与 nil 错误是一组：调用方看到 err == nil 就会去收，
+			// 而在 nil 通道上永远收不到值。先把它挡在这里，下一段的超时才有意义。
+			if events == nil {
+				t.Fatal("ChatStream 返回了 nil 事件流，err 却是 nil")
+			}
 			if gotPath != tc.wantPath {
 				t.Errorf("请求路径 = %q，期望 %q", gotPath, tc.wantPath)
 			}
 
 			var text string
-			for ev := range events {
+			for {
+				ev, ok := nextEvent(t, events)
+				if !ok {
+					break
+				}
 				if ev.Kind == "delta" {
 					text += ev.Text
 				}
@@ -199,16 +261,15 @@ func TestChatStreamDoesNotConsumeEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ChatStream 出错: %v", err)
 	}
+	if events == nil {
+		t.Fatal("ChatStream 返回了 nil 事件流，err 却是 nil")
+	}
 
-	// 带超时地读：执行器若把事件读走了，这里会阻塞而不是立刻返回，
+	// 带超时地读：执行器若把事件读走了，这里会等满 eventWait 才失败，
 	// 于是失败信息里能直接看出原因，而不是整条用例卡住。
-	select {
-	case ev, ok := <-events:
-		if !ok || ev.Text != "第一片" {
-			t.Fatalf("第一个事件 = %+v，期望「第一片」——执行器把事件流读走了", ev)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("读不到事件：执行器把事件流读走了，或者它没有原样转交")
+	ev, ok := nextEvent(t, events)
+	if !ok || ev.Text != "第一片" {
+		t.Fatalf("第一个事件 = %+v，通道是否已关闭 = %v，期望「第一片」——执行器把事件流读走了", ev, !ok)
 	}
 	if fake.streamCalls != 1 {
 		t.Errorf("适配器被调了 %d 次，期望 1 次", fake.streamCalls)
@@ -218,6 +279,59 @@ func TestChatStreamDoesNotConsumeEvents(t *testing.T) {
 	}
 	if fake.lastRequest != req {
 		t.Error("请求应当原样转交，不做复制或改写")
+	}
+}
+
+// Quota 与 Chat / ChatStream 同一个做法：按 ch.Type 找到适配器，调它一次。
+// 证据是选中那个适配器收到了哪个渠道，以及另一个一次都没被调到。
+func TestQuotaDispatchesByType(t *testing.T) {
+	openai := &fakeAdapter{
+		typ:        string(channel.ProtocolOpenAI),
+		protocol:   channel.ProtocolOpenAI,
+		quotaState: quota.State{ChannelID: 7, Unit: "元", Confidence: 0.9},
+	}
+	systemone := &fakeAdapter{
+		typ:        string(channel.ProtocolSystemOne),
+		protocol:   channel.ProtocolSystemOne,
+		quotaState: quota.State{ChannelID: 99},
+	}
+	e, err := newWith(openai, systemone)
+	if err != nil {
+		t.Fatalf("newWith 出错: %v", err)
+	}
+
+	ch := testChannel("http://upstream.invalid", string(channel.ProtocolOpenAI))
+	got, err := e.Quota(context.Background(), ch)
+	if err != nil {
+		t.Fatalf("Quota 出错: %v", err)
+	}
+	if got.ChannelID != 7 || got.Unit != "元" || got.Confidence != 0.9 {
+		t.Errorf("返回值 = %+v，期望 openai 适配器给出的那一份", got)
+	}
+	if openai.quotaCalls != 1 {
+		t.Errorf("openai 适配器被调了 %d 次，期望 1 次", openai.quotaCalls)
+	}
+	if systemone.quotaCalls != 0 {
+		t.Errorf("systemone 适配器被调了 %d 次，期望 0 次——分发到了另一个适配器上", systemone.quotaCalls)
+	}
+	if seen := openai.lastQuotaChannel; seen.ID != ch.ID || seen.Type != ch.Type || seen.BaseURL != ch.BaseURL {
+		t.Errorf("适配器收到的渠道 = 第 %d 条、类型 %q、base_url %q，期望原样转交第 %d 条、类型 %q、base_url %q",
+			seen.ID, seen.Type, seen.BaseURL, ch.ID, ch.Type, ch.BaseURL)
+	}
+}
+
+// 未知类型要包着 channel.ErrUnknownType 返回。它与「这家上游没有查询接口」
+// 是两件事：后者由适配器返回 ErrUnsupported，说明这条渠道正常，只是查不到
+// 额度；前者说明库里有配置而当前二进制不认识它。两者的处置不同，所以不能
+// 认成同一种错误。
+func TestQuotaReportsUnknownType(t *testing.T) {
+	e := newExecutor(t)
+	_, err := e.Quota(context.Background(), testChannel("http://upstream.invalid", "no-such-type"))
+	if !errors.Is(err, channel.ErrUnknownType) {
+		t.Fatalf("Quota 的错误 = %v，期望包着 channel.ErrUnknownType", err)
+	}
+	if errors.Is(err, channel.ErrUnsupported) {
+		t.Errorf("不该报成「上游不支持查询额度」: %v", err)
 	}
 }
 
@@ -333,6 +447,10 @@ type fakeAdapter struct {
 	lastChannel channel.Channel
 	lastRequest *channel.Request
 	events      chan channel.StreamEvent
+
+	quotaCalls       int
+	lastQuotaChannel channel.Channel
+	quotaState       quota.State
 }
 
 func (f *fakeAdapter) Type() string               { return f.typ }
@@ -361,6 +479,8 @@ func (f *fakeAdapter) ListModels(context.Context, channel.Channel) ([]string, er
 	return nil, channel.ErrUnsupported
 }
 
-func (f *fakeAdapter) Quota(context.Context, channel.Channel) (quota.State, error) {
-	return quota.State{}, nil
+func (f *fakeAdapter) Quota(_ context.Context, ch channel.Channel) (quota.State, error) {
+	f.quotaCalls++
+	f.lastQuotaChannel = ch
+	return f.quotaState, nil
 }
