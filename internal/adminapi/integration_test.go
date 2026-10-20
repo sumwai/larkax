@@ -523,3 +523,92 @@ func containsCost(list []costView, id, channelID int64) bool {
 	}
 	return false
 }
+
+// PATCH 模型时日期两栏的三种语义：不给（不改）、给日期（改）、空串（清空）。
+//
+// 两个日期判据 —— `req.KnowledgeCutoff != nil` 与 `req.ReleaseDate != nil` ——
+// 被取反之后，「不给」会被当成「清空」而把库里已有的值抹掉，
+// 「给」会被整段跳过，改了等于没改。
+//
+// 这两类差别在测试里的可见程度不一样。「不给」那一步只改 display_name，
+// 更新体里还有别的字段，所以变异体照样回 200，只有把落库的值读回来才看得见；
+// 「给」与「清空」那两步的请求里只有这一栏，取反之后更新体是空的，catalog
+// 直接回 400「没有要改的字段」——状态码就能发现。两种都要有用例。
+//
+// 每一步只改一栏：同一条 PATCH 里两栏一起动的话，
+// 就分不清某条失败是被哪个变异体触发的了。
+func TestModelUpdateKeepsUnsetDates(t *testing.T) {
+	h, db := newTestAPI(t)
+	resetToken(t, db)
+	token := issueToken(t, db)
+
+	name := uniqueName("model-dates")
+	rec := call(t, h, http.MethodPost, PathPrefix+"models", token, map[string]any{
+		"canonical_name":   name,
+		"display_name":     "日期模型",
+		"knowledge_cutoff": "2024-03-01",
+		"release_date":     "2024-06-15",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("创建模型的状态码 = %d，期望 201；正文：%s", rec.Code, rec.Body)
+	}
+
+	read := func(t *testing.T) modelView {
+		t.Helper()
+		var list []modelView
+		decode(t, call(t, h, http.MethodGet, PathPrefix+"models", token, nil), &list)
+		model, ok := findModel(list, name)
+		if !ok {
+			t.Fatalf("列表里找不到模型 %q", name)
+		}
+		return model
+	}
+	wantDate := func(t *testing.T, label string, got *string, want string) {
+		t.Helper()
+		if want == "" {
+			if got != nil {
+				t.Errorf("%s = %q；期望 null（没有值）", label, *got)
+			}
+			return
+		}
+		if got == nil {
+			t.Errorf("%s = null；期望 %q", label, want)
+			return
+		}
+		if *got != want {
+			t.Errorf("%s = %q；期望 %q", label, *got, want)
+		}
+	}
+	patch := func(t *testing.T, body map[string]any) {
+		t.Helper()
+		rec := call(t, h, http.MethodPatch, PathPrefix+"models/"+name, token, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("改模型的状态码 = %d，期望 200；正文：%s", rec.Code, rec.Body)
+		}
+	}
+
+	created := read(t)
+	wantDate(t, "创建后的 knowledge_cutoff", created.KnowledgeCutoff, "2024-03-01")
+	wantDate(t, "创建后的 release_date", created.ReleaseDate, "2024-06-15")
+
+	// 只改名字：两栏都没出现在请求里，库里的值必须原样留着。
+	patch(t, map[string]any{"display_name": "改过的日期模型"})
+	untouched := read(t)
+	if untouched.DisplayName != "改过的日期模型" {
+		t.Errorf("display_name = %q，期望「改过的日期模型」", untouched.DisplayName)
+	}
+	wantDate(t, "没给 knowledge_cutoff 时的值", untouched.KnowledgeCutoff, "2024-03-01")
+	wantDate(t, "没给 release_date 时的值", untouched.ReleaseDate, "2024-06-15")
+
+	// 给日期：这一栏改成新值，另一栏仍然不动。
+	patch(t, map[string]any{"knowledge_cutoff": "2024-09-01"})
+	changed := read(t)
+	wantDate(t, "给了 knowledge_cutoff 之后", changed.KnowledgeCutoff, "2024-09-01")
+	wantDate(t, "没给 release_date 时的值", changed.ReleaseDate, "2024-06-15")
+
+	// 空串 = 清空：这一栏变 null，另一栏仍然不动。
+	patch(t, map[string]any{"release_date": ""})
+	cleared := read(t)
+	wantDate(t, "清空后的 release_date", cleared.ReleaseDate, "")
+	wantDate(t, "没给 knowledge_cutoff 时的值", cleared.KnowledgeCutoff, "2024-09-01")
+}

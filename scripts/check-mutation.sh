@@ -363,6 +363,7 @@ PKGS=(
   internal/plugin/host
   internal/plugin/sandbox
   internal/api
+  internal/adminapi
   internal/snapshot
   internal/snapshotwire
   internal/gateway

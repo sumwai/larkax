@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sumwai/larkax/internal/catalog"
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/dberr"
 	"github.com/sumwai/larkax/internal/pricing"
@@ -252,5 +253,132 @@ func TestQueryIDAcceptsZero(t *testing.T) {
 		if err != nil || got != tc.want {
 			t.Errorf("%q：得到 %d, %v；期望 %d", tc.query, got, err, tc.want)
 		}
+	}
+}
+
+// strPtr 把字符串常量变成指针，给表驱动里 *string 类型的用例字段用。
+func strPtr(s string) *string { return &s }
+
+// parseInt64 只收正整数：0 与负数都报错。
+//
+// `id <= 0` 上的边界变异（写成 `id < 0`）**只在 0 这一格**有差别：`/models/0`
+// 会从 400 变成「放行，去查一条 id=0 的记录」。所以这里必须有一条 0 的用例——
+// 只测 -1 与 abc 杀不掉它。
+func TestParseInt64RejectsNonPositive(t *testing.T) {
+	for _, tc := range []struct {
+		raw     string
+		want    int64
+		wantErr bool
+	}{
+		{raw: "7", want: 7},
+		{raw: "0", wantErr: true},
+		{raw: "-1", wantErr: true},
+		{raw: "", wantErr: true},
+		{raw: "abc", wantErr: true},
+	} {
+		got, err := parseInt64(tc.raw)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("parseInt64(%q) = %d, nil；期望报错", tc.raw, got)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("parseInt64(%q) = %d, %v；期望 %d", tc.raw, got, err, tc.want)
+		}
+	}
+}
+
+// parseDate 要把三种情况分开：没有值（nil 或空串）回 nil 而不是错，
+// 合法日期解出来，坏日期连字段名一起报。
+//
+// `raw == nil || *raw == ""` 里第二个 `==` 被取反（写成 `*raw != ""`）时，
+// 空串会掉进 time.Parse 变成一个 400，而合法日期会被整段跳过、回 nil——
+// 在更新路径上那等于「清空」。两个方向都要有：只测 nil 那一格杀不掉它。
+func TestParseDate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		raw     *string
+		want    string // 空串表示期望 nil
+		wantErr bool
+	}{
+		{name: "nil 是这一栏没有值", raw: nil},
+		{name: "空串也是没有值", raw: strPtr("")},
+		{name: "合法日期解出来", raw: strPtr("2024-03-01"), want: "2024-03-01"},
+		{name: "日历上不存在的日期", raw: strPtr("2024-02-30"), wantErr: true},
+		{name: "形状不对", raw: strPtr("03/01/2024"), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseDate("knowledge_cutoff", tc.raw)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("%s：parseDate = %v, nil；期望报错", tc.name, got)
+				}
+				if !strings.Contains(err.Error(), "knowledge_cutoff") {
+					t.Errorf("错误里没有字段名，调用方不知道是哪一栏坏了: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s：parseDate 报错: %v", tc.name, err)
+			}
+			if tc.want == "" {
+				if got != nil {
+					t.Errorf("%s：parseDate = %v；期望 nil", tc.name, got)
+				}
+				return
+			}
+			if got == nil || got.Format("2006-01-02") != tc.want {
+				t.Errorf("%s：parseDate = %v；期望 %s", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// 端点那一列的三态在响应里要各自保住：库里是 NULL 时编成 null，
+// 明确一条都不支持时编成 []，声明了哪几条就列出哪几条。
+//
+// `model.Capabilities.Endpoints != nil` 被取反（写成 `== nil`）时，两版在
+// **每一条模型上都把 null 与 [] 交换了**：没声明过的变成「明确一条都不支持」，
+// 声明过的变成「没配过」。列表接口的调用方正是靠 null 区分这两件事；
+// 把没配过的当成「一条都不支持」，会让一条只填了名字的记录选不到任何渠道。
+//
+// 断言落在编码后的 JSON 上，并且取的是 capabilities.endpoints 这一个字段，
+// 不是对整条响应做子串匹配：null 与 [] 的区别只在线上存在，Go 里两者都
+// len()==0；而整条子串匹配只能说明「这串字在某个地方出现过」，说明不了是哪一栏。
+func TestModelViewKeepsEndpointTriState(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		endpoints []channel.Endpoint
+		want      string
+	}{
+		{name: "未声明是 null", endpoints: nil, want: `null`},
+		{name: "明确一条都不支持是空数组", endpoints: []channel.Endpoint{}, want: `[]`},
+		{
+			name:      "声明了端点就照列",
+			endpoints: []channel.Endpoint{channel.EndpointChatCompletions},
+			want:      `["/v1/chat/completions"]`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			view := modelViewOf(catalog.Model{
+				Capabilities: catalog.Capabilities{Endpoints: tc.endpoints},
+			})
+			raw, err := json.Marshal(view)
+			if err != nil {
+				t.Fatalf("编码 modelView 失败: %v", err)
+			}
+			var wire struct {
+				Capabilities struct {
+					Endpoints json.RawMessage `json:"endpoints"`
+				} `json:"capabilities"`
+			}
+			if err := json.Unmarshal(raw, &wire); err != nil {
+				t.Fatalf("解码 modelView 失败: %v\n%s", err, raw)
+			}
+			if got := string(wire.Capabilities.Endpoints); got != tc.want {
+				t.Errorf("capabilities.endpoints = %s，期望 %s（整条响应：%s）", got, tc.want, raw)
+			}
+		})
 	}
 }
