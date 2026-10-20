@@ -12,7 +12,7 @@ import {
 } from 'react'
 import type { MessageKey } from '../i18n/zh'
 import { useI18n } from '../i18n'
-import { formatMoney, moneySymbol } from '../lib/format'
+import { formatBalance, formatMoney, formatSpend, moneySymbol } from '../lib/format'
 import type { Money } from '../api/types'
 import { IconAlert, IconCheck, IconCopy, IconChevronDown, IconInfo, IconX } from './icons'
 
@@ -94,12 +94,26 @@ export function StatusPill({ status }: { status: string }) {
 
 /* ── 金额 ─────────────────────────────────────────────────────────── */
 
-export function MoneyText({ value, currency }: { value: Money | null | undefined; currency?: string }) {
+export function MoneyText({
+  value,
+  currency,
+  variant,
+}: {
+  value: Money | null | undefined
+  currency?: string
+  /** `balance` 是余额（2 位截断），`spend` 是消费（3 位截断）；不传按价格口径。 */
+  variant?: 'balance' | 'spend'
+}) {
   const symbol = moneySymbol(currency)
+  const text = variant === 'balance' ? formatBalance(value) : variant === 'spend' ? formatSpend(value) : formatMoney(value)
+  // `<0.001` / `>-0.001` 里的比较符要落在币种符号之前，否则读成「$ 小于」。
+  const marker = text.startsWith('<') || text.startsWith('>') ? text[0] : ''
+  const amount = marker ? text.slice(1) : text
   return (
     <>
+      {marker}
       {symbol && <small>{symbol}</small>}
-      {formatMoney(value)}
+      {amount}
     </>
   )
 }

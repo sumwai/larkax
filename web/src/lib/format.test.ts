@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest'
 import {
   addDays,
   exclusiveEnd,
+  formatBalance,
   formatCount,
   formatDate,
   formatDateTime,
   formatMoney,
+  formatSpend,
   moneySymbol,
 } from './format'
 
@@ -40,6 +42,56 @@ describe('formatMoney', () => {
 
   it('不经过 double：大额金额的最后一位仍然准确', () => {
     expect(formatMoney('9007199254740993.12000000')).toBe('9,007,199,254,740,993.12')
+  })
+})
+
+describe('formatBalance', () => {
+  it('2 位小数直接截断，不四舍五入', () => {
+    expect(formatBalance('0.99877330')).toBe('0.99')
+    expect(formatBalance('1.99900000')).toBe('1.99')
+    expect(formatBalance('0.00900000')).toBe('0.00')
+  })
+
+  it('保留千分位，负的零不带符号', () => {
+    expect(formatBalance('1234567.89120000')).toBe('1,234,567.89')
+    expect(formatBalance('-1.99900000')).toBe('-1.99')
+    expect(formatBalance('-0.00900000')).toBe('0.00')
+  })
+
+  it('缺值与坏数据都显示破折号', () => {
+    expect(formatBalance(null)).toBe('—')
+    expect(formatBalance(undefined)).toBe('—')
+    expect(formatBalance('abc')).toBe('—')
+    expect(formatBalance('')).toBe('—')
+  })
+})
+
+describe('formatSpend', () => {
+  it('3 位小数直接截断，不四舍五入', () => {
+    expect(formatSpend('0.00190000')).toBe('0.001')
+    expect(formatSpend('1.99990000')).toBe('1.999')
+  })
+
+  it('非零但不足 0.001 给区间下界，零显示 0.000', () => {
+    expect(formatSpend('0.00010000')).toBe('<0.001')
+    expect(formatSpend('0.00000001')).toBe('<0.001')
+    expect(formatSpend('0.00100000')).toBe('0.001')
+    expect(formatSpend('0')).toBe('0.000')
+    expect(formatSpend('0.00000000')).toBe('0.000')
+    expect(formatSpend('-0.00000000')).toBe('0.000')
+  })
+
+  it('负的小额对称显示 >-0.001，够 0.001 后带符号', () => {
+    expect(formatSpend('-0.00010000')).toBe('>-0.001')
+    expect(formatSpend('-0.00100000')).toBe('-0.001')
+    expect(formatSpend('-2.34590000')).toBe('-2.345')
+  })
+
+  it('缺值与坏数据都显示破折号', () => {
+    expect(formatSpend(null)).toBe('—')
+    expect(formatSpend(undefined)).toBe('—')
+    expect(formatSpend('abc')).toBe('—')
+    expect(formatSpend('1.2.3')).toBe('—')
   })
 })
 

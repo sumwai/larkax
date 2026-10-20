@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import type { UsageSeriesPoint } from '../api/types'
+import type { Money, UsageSeriesPoint } from '../api/types'
 import { useI18n } from '../i18n'
-import { formatDate, formatMoney, moneySymbol } from '../lib/format'
+import { formatDate, formatSpend, moneySymbol } from '../lib/format'
 
 /**
  * 近 7 天花费：单序列柱图。
@@ -22,6 +22,13 @@ export function SpendChart({
   const { t } = useI18n()
   const [hovered, setHovered] = useState<number | null>(null)
   const symbol = moneySymbol(currency)
+  // `<0.001` 的比较符要落在币种之前，读作「小于 $0.001」。
+  const money = (value: Money | null | undefined) => {
+    const text = formatSpend(value)
+    return text.startsWith('<') || text.startsWith('>')
+      ? `${text[0]}${symbol}${text.slice(1)}`
+      : `${symbol}${text}`
+  }
 
   const values = points.map((point) => Number.parseFloat(point.cost) || 0)
   const max = Math.max(...values, 0)
@@ -32,7 +39,7 @@ export function SpendChart({
       <div
         className="bars"
         role="img"
-        aria-label={`${t('overview.last7Days')}: ${symbol}${formatMoney(String(total))}`}
+        aria-label={`${t('overview.last7Days')}: ${money(String(total))}`}
       >
         {points.map((point, index) => {
           const percent = max > 0 ? (values[index] / max) * 100 : 0
@@ -46,7 +53,7 @@ export function SpendChart({
               onFocus={() => setHovered(index)}
               onBlur={() => setHovered(null)}
               tabIndex={0}
-              aria-label={`${day}: ${symbol}${formatMoney(point.cost)}`}
+              aria-label={`${day}: ${money(point.cost)}`}
             >
               <div className="bar-track">
                 <div
@@ -57,8 +64,7 @@ export function SpendChart({
               {hovered === index && (
                 <div className="chart-tooltip" style={{ bottom: `calc(${percent}% + 10px)` }}>
                   <span className="num">
-                    {day.slice(5)} · {symbol}
-                    {formatMoney(point.cost)}
+                    {day.slice(5)} · {money(point.cost)}
                   </span>
                 </div>
               )}
@@ -83,10 +89,7 @@ export function SpendChart({
               <tr key={point.start}>
                 <td>{formatDate(point.start, timezone)}</td>
                 <td className="num">{point.requests}</td>
-                <td className="num">
-                  {symbol}
-                  {formatMoney(point.cost)}
-                </td>
+                <td className="num">{money(point.cost)}</td>
               </tr>
             ))}
           </tbody>

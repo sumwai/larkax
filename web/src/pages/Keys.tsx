@@ -4,7 +4,7 @@ import type { ApiKey, CreatedKey, KeyCreateInput } from '../api/types'
 import { useI18n } from '../i18n'
 import { useSite } from '../site/SiteProvider'
 import { useAsync } from '../hooks/useAsync'
-import { formatDate, formatDateTime, formatMoney } from '../lib/format'
+import { formatDate, formatDateTime, formatMoney, formatSpend } from '../lib/format'
 import {
   Alert,
   Button,
@@ -132,7 +132,7 @@ export function Keys() {
   const quotaText = (key: ApiKey) => (
     <>
       <b className="num">
-        <MoneyText value={key.quota_used} currency={meta.currency} />
+        <MoneyText value={key.quota_used} currency={meta.currency} variant="spend" />
       </b>
       <span>
         {t('keys.quotaUsed')} ·{' '}
@@ -415,7 +415,7 @@ export function Keys() {
             <div>
               <span>{t('keys.colQuota')}</span>
               <b>
-                {formatMoney(detail.quota_used)} /{' '}
+                {formatSpend(detail.quota_used)} /{' '}
                 {detail.quota_limit ? formatMoney(detail.quota_limit) : t('status.unlimited')}
               </b>
             </div>
