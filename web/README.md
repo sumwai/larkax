@@ -19,7 +19,7 @@ npm run dev          # Vite prints the local URL (default port 5173)
 `npm run dev` proxies `/api` to the gateway's port. The port follows
 `LARKAX_HTTP_ADDR` — read from the environment first, then from the repository's
 root `.env` (the file above `web/`) — because that is where the gateway's listen
-address lives. `":8081"`, `127.0.0.1:8081` and `0.0.0.0:8081` all yield port
+address lives. `":8081"`, `127.0.0.1:8081` and `[::1]:8081` all yield port
 8081; an address without a parsable port falls back to 8080. `VITE_API_PROXY`
 overrides the whole target, and the dev server prints the chosen target when it
 starts.
