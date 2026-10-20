@@ -83,6 +83,7 @@ var Registry = []Spec{
 	{Key: "billing.default_asset", Kind: KindString},
 	{Key: "billing.max_output_tokens", Kind: KindInt},
 	{Key: "billing.stream_freeze_step", Kind: KindInt},
+	{Key: "billing.merchant_share_bp", Kind: KindInt},
 	{Key: "calendar.default_region", Kind: KindString},
 	{Key: "idempotency.retention_hours", Kind: KindInt},
 	{Key: "plugin.enabled", Kind: KindBool},

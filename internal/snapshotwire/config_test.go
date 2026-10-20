@@ -39,6 +39,7 @@ func settingsRows(overrides map[string]string) []settings.Row {
 		"billing.default_asset":              `"CNY"`,
 		"billing.max_output_tokens":          `65536`,
 		"billing.stream_freeze_step":         `4096`,
+		"billing.merchant_share_bp":          `0`,
 		"calendar.default_region":            `"CN"`,
 		"idempotency.retention_hours":        `24`,
 		"plugin.enabled":                     `false`,

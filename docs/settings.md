@@ -6,7 +6,7 @@
 [.env.example](../.env.example) 顶部的说明。密钥类配置也不放这里——这张表的值
 明文落盘并进备份，渠道凭证走 `channels` 表的信封加密。
 
-一共 **22 个键**。清单的唯一来源是 `internal/settings` 的 `Registry`，默认值的
+一共 **23 个键**。清单的唯一来源是 `internal/settings` 的 `Registry`，默认值的
 唯一来源是**迁移文件**（代码里不再写第二份，两处默认值迟早会不一致）。
 
 ## 加载：不一致就拒绝启动
@@ -44,7 +44,8 @@ larkaxctl settings set --key plugin.enabled --value true --by alice
 **什么时候生效**：下表里除 `reconcile.*`、`idempotency.retention_hours`、
 `capture.consent_max_window_hours` 与 `admin.token_sha256` 之外，都是**装配期
 读一次**——改完要重启服务。那三个是每轮 / 每次读的，管理令牌是每个管理面请求
-读一次，改完下一次就生效。
+读一次，改完下一次就生效。`billing.merchant_share_bp` 在每次结算时从装配期
+那份快照里取值，快照本身不刷新，所以同样要重启。
 
 ## 请求快照
 
@@ -79,6 +80,7 @@ larkaxctl settings set --key plugin.enabled --value true --by alice
 |---|---|---|---|---|
 | `billing.max_output_tokens` | int | `65536` | `1`–`1048576` | 单次请求允许声明的 `max_tokens` 上界。模型目录里登记了 `output_limit` 的按目录那个数判，没登记的按这个数判；非流式请求超过它会被拒（`400`）。越界时服务拒绝启动 |
 | `billing.stream_freeze_step` | int | `4096` | `1`–`65536` | 流式请求递进冻结的段（token）：本地累计产出每越过一段就补冻一次，**同时这也是冻结额最多领先已产出量的量**。调大它数据库往返少、冻住的余量多；调小反之 |
+| `billing.merchant_share_bp` | int | `0` | `0`–`10000` | 售价里分给渠道商户的比例，单位基点（`10000` = 100%，平台抽 5% 时填 `9500`）。分给商户的金额按售价乘以它、**向下取整**，零头归平台；`0` 表示不分账，消费里没有 `merchant_payable` 那条分录。越界或读不出来时按 `0` 处理并写一条告警，请求照常完成 |
 | `billing.default_asset` | string | `"CNY"` | 目前只有 `CNY` | 新用户钱包与结算用的资产品种。**不接受 `settings set`** |
 
 ## 日历

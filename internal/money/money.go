@@ -354,6 +354,32 @@ func MulIntChecked(a Amount, n int64) (Amount, bool) {
 	return Amount{units: product.Int64()}, true
 }
 
+// MaxBasisPoints 是 100% 对应的基点数：1 bp = 0.01%，所以 100% = 10000 bp。
+//
+// 它是比例的上界，不是金额的单位：拿它判配置里的比例越不越界，
+// 与 MulBasisPoints 里除以它是同一个数。
+const MaxBasisPoints int64 = 10_000
+
+// MulBasisPoints 取金额的一部分：a × bp / 10000，**向下取整**。
+//
+// 向下取整而不是四舍五入，是因为用它算商户分成时零头归平台：四舍五入
+// 会把零头记到商户名下。更实际的一条理由是分成恒不超过按比例应得的
+// 那一份，于是「分成 + 上游成本 ≤ 售价」不会因为舍入被顶破
+// （见 ledger.Consume 的校验）。
+//
+// 中间值走 big.Int：units × 10000 会超出 int64。这里不能沿用 MulInt 的
+// 「溢出夹到边界」——夹出来的分成是一个看起来正常的数，而它已经不是
+// 按比例算出来的那个数了。
+//
+// bp 的合法范围是 0…MaxBasisPoints，由调用方判；负数按向零截断处理。
+func (a Amount) MulBasisPoints(bp int64) Amount {
+	if bp == 0 || a.units == 0 {
+		return Zero
+	}
+	product := new(big.Int).Mul(big.NewInt(a.units), big.NewInt(bp))
+	return Amount{units: new(big.Int).Quo(product, big.NewInt(MaxBasisPoints)).Int64()}
+}
+
 // MulAmount 两个金额相乘。
 //
 // 语义上是「每单位 a 元，共 b 个单位」。结果的小数位取 Scale，
