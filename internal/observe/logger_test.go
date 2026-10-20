@@ -3,11 +3,13 @@ package observe
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseLevel(t *testing.T) {
@@ -216,6 +218,54 @@ func TestReadyzReflectsCheckResults(t *testing.T) {
 				t.Errorf("checks 有 %d 项，期望 %d 项：%v", len(body.Checks), len(tc.wantChecks), body.Checks)
 			}
 		})
+	}
+}
+
+// 就绪检查必须拿到一个**尚未到期**的截止时间：依赖探针靠它决定还要不要
+// 继续等（见 internal/tokens 的 VocabReady，它按 ctx 放弃已经超时的词表加载）。
+// 超时被写成 0 时（readyzTimeout 的 `*` 换成 `/` 就是这个结果），检查项一进来
+// 就看见 ctx 已取消，会把「有依赖可用」误报成失败。
+//
+// 断言里用字面量 2 秒而不是 readyzTimeout：拿常量当判据的话，常量被一起
+// 改掉时用例照样通过。
+func TestReadyzPassesUnexpiredDeadlineToChecks(t *testing.T) {
+	const wantTimeout = 2 * time.Second
+
+	var (
+		hasDeadline bool
+		remaining   time.Duration
+		ctxErr      error
+	)
+	mux := http.NewServeMux()
+	RegisterHealthHandlers(mux, []ReadinessCheck{{
+		Name: "probe",
+		Check: func(ctx context.Context) error {
+			deadline, ok := ctx.Deadline()
+			hasDeadline = ok
+			if !ok {
+				return errors.New("context 没有截止时间")
+			}
+			remaining = time.Until(deadline)
+			ctxErr = ctx.Err()
+			return ctxErr
+		},
+	}})
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if !hasDeadline {
+		t.Fatal("检查项拿到的 context 没有截止时间")
+	}
+	if ctxErr != nil {
+		t.Fatalf("检查项开始时 context 已结束：%v（剩余 %v）", ctxErr, remaining)
+	}
+	if remaining <= 0 || remaining > wantTimeout {
+		t.Errorf("剩余超时 = %v，期望落在 (0, %v] 之内", remaining, wantTimeout)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("/readyz 返回 %d，期望 200：%s", rec.Code, rec.Body.String())
 	}
 }
 

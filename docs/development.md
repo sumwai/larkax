@@ -1501,8 +1501,9 @@ CI 包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`�
 新增依赖数据库的测试包时要往那里补；别处不重复列一遍——两处清单迟早会不一致，
 而那时没人知道哪一份算数。
 
-**自动部署尚未接入**：部署到哪台机器、用什么凭证进 CI，两样都未定，所以流水线今天
-到「合入 main」为止。落地的条件记在 #742。
+**本仓库不做部署**：`main` 合入即是流水线的终点。发布由 tag 触发 `release.yml`——
+门禁 → `make dist` → 把制品传到 GitHub Release。制品放到哪台机器上属于使用方的事，
+不在本仓库范围内。
 
 ## 变异测试
 
@@ -1769,6 +1770,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/plugin/sandbox` | 63 | 2 | 0 | 5 | 92.86% | 96.92% | 93.8% |
 | `internal/route` | 123 | 4 | 0 | 24 | 84.11% | 96.85% | 97.8% |
 | `internal/gateway` | 238 | 9 | 0 | 9 | 96.48% | 96.36% | 95.7% |
+| `internal/observe` | 28 | 1 | 0 | 1 | 96.67% | 96.55% | 94.1% |
 | `internal/plugin/host` | 104 | 4 | 0 | 4 | 96.43% | 96.30% | 94.6% |
 | `internal/snapshot` | 153 | 6 | 0 | 50 | 76.08% | 96.23% | 90.1% |
 | `internal/credential` | 96 | 4 | 0 | 1 | 99.01% | 96.00% | 92.1% |
@@ -1849,6 +1851,17 @@ nil 还是空切片——调用点只做 `append(..., fieldAttrs(...)...)`，差
 `len(raw) == 0` 改成 `>=`——空字节上两次解码都报错，字段停在零值 nil。最后这条
 还依赖「默认编解码器就是 `encoding/json`」，仓里没有 `SetCodec` 的调用点，这个
 前提写在用例注释里。
+
+**`internal/observe` 那一条存活是结构性的等价。** `metrics.go:159` 的排序比较符
+`<` 改成 `<=`：参与比较的 `labels` 由不同的 map 键渲染而来，而键是
+`strings.Join(values, "\x00")`——只要标签值不含 `\x00`，渲染就是单射，两个待比较
+的串恒不相等，两版给出的顺序完全一致。本包的标签值都取自闭枚举
+（`authFailureReason`、`UsageSource`、`Protocol`），前提成立；论证写在
+`internal/observe/metrics_test.go` 末尾。标签值含 `\x00` 时这个前提不成立，
+但那是另一件事——它会让两条序列渲染成同一个串，与排序无关（见 #858）。
+`health.go:20` 的 `readyzTimeout` 是包级常量，gremlins 永远记「未覆盖」，补用例
+改变不了；用 `go test -overlay` 把 `*` 换成 `/` 单独验过，
+`TestReadyzPassesUnexpiredDeadlineToChecks` 会红。
 
 **覆盖率高而 efficacy 低，说明测试断言的是「相对关系」而不是「具体边界」。**
 这类包的用例写的是「A 明显比 B 好」这种比较，于是改 `<=` 为 `<`、去掉分母的加数、

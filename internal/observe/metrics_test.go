@@ -3,6 +3,7 @@ package observe
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -112,6 +113,56 @@ func TestLabeledCounterRejectsWrongLabelCount(t *testing.T) {
 		}
 	}()
 	labeled.With("只有一个")
+}
+
+// 标签值里含 \x00 是编码错误，必须当场炸掉：键是按 \x00 拼接的，渲染时再
+// 按它拆回去，值里带一个会让拆出来的段数与标签名个数对不上，值串到别的
+// 标签名下，而那一行看起来完全正常。
+func TestLabeledCounterRejectsNULInLabelValue(t *testing.T) {
+	t.Run("单标签", func(t *testing.T) {
+		r := &Registry{}
+		labeled := r.newLabeled("test_labeled_total", "说明", "kind")
+
+		msg := panicMessage(t, func() { labeled.With("a\x00b") })
+		for _, want := range []string{"kind", `"a\x00b"`} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("panic 文案里缺少 %s: %q", want, msg)
+			}
+		}
+		// 拦截发生在建序列之前：这条坏值不该留下半条序列。
+		if got := render(t, r); got != "" {
+			t.Errorf("坏值不该留下序列，得到:\n%s", got)
+		}
+	})
+
+	t.Run("多标签里的第二个", func(t *testing.T) {
+		r := &Registry{}
+		labeled := r.newLabeled("test_labeled_total", "说明", "kind", "result")
+
+		msg := panicMessage(t, func() { labeled.With("ok", "a\x00b") })
+		for _, want := range []string{"第 2 个", `"result"`, `"a\x00b"`} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("panic 文案里缺少 %s: %q", want, msg)
+			}
+		}
+	})
+}
+
+// panicMessage 跑 f，返回它 panic 出来的文案；没 panic 就让用例失败。
+func panicMessage(t *testing.T, f func()) string {
+	t.Helper()
+	var msg string
+	func() {
+		defer func() {
+			v := recover()
+			if v == nil {
+				t.Fatalf("应当 panic")
+			}
+			msg = fmt.Sprint(v)
+		}()
+		f()
+	}()
+	return msg
 }
 
 // 渲染与自增会同时发生：抓取随时可能来，而增量在请求路径上。
@@ -362,3 +413,25 @@ func TestRegistryLabelsAreStable(t *testing.T) {
 		}
 	}
 }
+
+// ── samples 排序比较符的等价论证 ─────────────────────────────────────────
+//
+// LabeledCounter.samples（metrics.go:159）里的 `sort.Slice` 比较符
+// `<` 改成 `<=` 是一个**等价**变异，不是缺口，所以这里没有为它补用例。
+// 前提与推理写在这里备查：
+//
+//   - 比较键只有 sample.labels 一个，候选项来自 c.series 这个 map：
+//     每条序列一个键，键互不相同。
+//   - 键由 strings.Join(values, "\x00") 得到，renderLabels 再按 "\x00" 拆回去，
+//     经 escapeLabelValue 转义后拼成 `{name="value",...}`。转义本身不碰撞
+//     （反斜杠、双引号、换行各有不同的替身），所以在**标签值不含 \x00**
+//     的前提下，不同的键一定渲染出不同的串——参与比较的两个 labels 恒不
+//     相等，两版给出的顺序完全一致。
+//
+// 那个前提由 With 本身保证：标签值里含 \x00 会当场 panic（见
+// TestLabeledCounterRejectsNULInLabelValue），进到 c.series 的键不可能拆出
+// 与标签名个数不同的段数。于是参与比较的两个 labels 恒不相等，两版给出的
+// 顺序完全一致，没有确定性的断言能把它们分开，补用例改变不了这一格。
+//
+// 本包声明的标签值取自闭合枚举（usage_source / protocol / reason / asset，
+// 见 docs/metrics.md），没有一个含 \x00，前提在实际数据上成立。
