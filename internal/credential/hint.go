@@ -18,7 +18,8 @@ const hintRunes = 4
 // 提示更坏——它看起来像一个真实的凭证尾巴。ASCII 串上两种切法相同。
 //
 // 不超过 hintRunes 时原样返回：这一档的凭证没有更短的尾巴可取，
-// 截成空串会让界面把它显示成「这条渠道没有凭证」。
+// 截成空串会让界面把它显示成「这条渠道没有凭证」。恰好四位时，
+// 取末四位得到的仍是同一串，而 []rune 转回来会改掉非法 UTF-8 的字节。
 func Hint(plaintext string) string {
 	runes := []rune(plaintext)
 	if len(runes) <= hintRunes {

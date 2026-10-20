@@ -292,8 +292,8 @@ func TestRewrapIsIdempotent(t *testing.T) {
 // 一份密文可以带多份 DEK 副本，其中某一份认得却解不开（数据坏了）时，
 // Rewrap 必须接着试下一份，而不是就此认定「解不出数据密钥」。
 //
-// 判据是 `if dek, err = openWith(...); err == nil`：改成 `err != nil` 会
-// 在第一份坏副本上就 break，dek 仍是 nil，断言停在 ErrNoKey 上；
+// 判据是 `if dek, err = openWith(...); err == nil`：改成 `err != nil` 之后，
+// 第一份坏副本上就会 break，dek 仍是 nil，断言停在 ErrNoKey 上；
 // 但密文里明明还有一份完好的副本。副本存在的意义就是「一把不行还有一把」，
 // 这一条用例要证明的是：Rewrap 也兑现它，不只是 Open。
 func TestRewrapSkipsBrokenWrap(t *testing.T) {
