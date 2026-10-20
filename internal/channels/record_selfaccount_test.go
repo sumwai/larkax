@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/route"
 )
 
@@ -42,25 +43,17 @@ func TestRecordCallZeroUsageLeavesQuotaStateUntouched(t *testing.T) {
 	}
 }
 
-// 下面两段是等价变异的说明，不是用例。判据见 scripts/check-mutation.sh 的
-// 「存活变异要逐条人看」那一段：能写出结构性证明的存活条目不必补用例。
+// 下面两段说明对应两条存活过的判据，不是用例本身。判据见
+// scripts/check-mutation.sh 的「存活变异要逐条人看」那一段。
 
 // record.go:358 的 `!found || prev.Remaining == nil || prev.Unit != quota.UnitTokens`
-// ——把靠左的那个 ||（第 12 列）改成 && 后是等价变异。
+// ——把靠左的那个 ||（第 12 列）改成 && **不是**等价变异，由
+// TestRecordCallWithoutBaselineSkipsValidation 钉住。
 //
-// 改动后的判据是 `(!found && prev.Remaining == nil) || prev.Unit != quota.UnitTokens`。
-// 逐格看：
-//
-//   - prev.Unit != tokens 时，两版都为真，都在这里返回；
-//   - 单位是 tokens 时，两版之差只剩「恰好一个前提不成立」的两格：
-//     found 且 Remaining == nil 时原版返回、变异体继续往下走；
-//     !found 且 Remaining != nil 时变异体返回——但「没有行」时
-//     readQuotaState 返回的是 `quota.State{}, false, nil`（record.go:403-404），
-//     Remaining 必然为 nil，这一格不可达。
-//   - 唯一可达的那一格没有可观察差别：继续往下走时 Project 在基准为 nil 时
-//     返回一个没有数值的观测，Merge 于是也不动 Remaining，紧接着的第二道
-//     守卫（record.go:375-380 的 `if next.Remaining == nil { return nil }`）
-//     原样返回，一个字节都不写、错误也不变。
+// 区分输入：额度行 unit='tokens'、remaining_estimate 为 NULL（found 为真），
+// CallOutcome.At 落在将来、用量非零。原版在这里直接返回；变异体继续往下，
+// Project 产出的观测带着那个将来时刻，quota.Validate（record.go:370）命中
+// 「观测时间在将来」，selfAccount 返回错误——两版的返回值不同。
 //
 // 同一条里靠右的那个 ||（第 37 列）也有一个变异体，它被
 // TestRecordCallSelfAccountingSkipsForeignUnit 杀掉了（单位对不上时会扣减并
@@ -77,7 +70,37 @@ func TestRecordCallZeroUsageLeavesQuotaStateUntouched(t *testing.T) {
 //
 // 注意当前两个调用方（selfAccount 与探测的写回）都会用 Merge 重算 confidence，
 // 所以差别只体现在 readQuotaState 返回的 quota.State 上——它返回的是完整的
-// 状态，Confidence 是契约的一部分（交集见 internal/route 的 scoreQuota）。
+// 状态，Confidence 是契约的一部分（打分见 internal/route 的 scoreQuota）。
+
+// 没有基准时自记账在开事务之前就返回，连 quota.Validate 都不该走到。
+//
+// 额度行存在、单位是 tokens，但 remaining_estimate 为 NULL——推不出数，这次
+// 观测整个跳过（record.go:358）。于是即便 At 落在将来，也不会被 Validate 的
+// 「观测时间在将来」拒绝。这一格是 record.go:358 左侧那个 || 的区分输入：
+// 判据改成 && 之后会继续往下走，Validate 报错，RecordCall 返回失败。
+func TestRecordCallWithoutBaselineSkipsValidation(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
+	insertQuota(t, db, id, nil, "tokens", "api_query", "healthy", 1)
+
+	r := NewRecorder(db, testStaleAfter)
+	err := r.RecordCall(context.Background(), route.CallOutcome{
+		ChannelID: id,
+		// 超过 Validate 的一分钟容差。
+		At:      time.Now().UTC().Add(2 * time.Minute),
+		Verdict: route.VerdictFailure,
+		Usage:   channel.Usage{PromptTokens: 10},
+	})
+	if err != nil {
+		t.Fatalf("没有基准时不该走到 Validate（record.go:358 直接返回），实际报错：%v", err)
+	}
+
+	// 也什么都没写：余量仍是 NULL。
+	if snap := readQuota(t, db, id); snap.hasRemain {
+		t.Errorf("remaining = %v，期望仍是 NULL", snap.remaining)
+	}
+}
 
 // readQuotaState 必须把 confidence 解析出来，不能靠「跳过空串」把这一列丢掉。
 //

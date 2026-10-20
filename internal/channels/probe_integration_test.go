@@ -731,11 +731,11 @@ func TestQuotaProbeWarnsOnlyWhenWriteBackFails(t *testing.T) {
 	interval := 5 * time.Minute
 	now := time.Now().UTC()
 
-	probeWith := func(t *testing.T, adapter QuotaAdapter) string {
+	probeWith := func(t *testing.T, adapter QuotaAdapter) (logs string, db *sql.DB, id int64) {
 		t.Helper()
-		db := testDB(t)
+		db = testDB(t)
 		sealer := testSealer(t)
-		id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
+		id = insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
 
 		var buf bytes.Buffer
 		p, err := NewQuotaProbe(db, adapter, interval)
@@ -747,26 +747,38 @@ func TestQuotaProbeWarnsOnlyWhenWriteBackFails(t *testing.T) {
 
 		p.ProbeIfStale(route.Candidate{Channel: channel.Channel{ID: id, Type: "openai-compatible"}})
 		p.wg.Wait()
-		return buf.String()
+		return buf.String(), db, id
 	}
 
 	t.Run("成功写回不告警", func(t *testing.T) {
-		logs := probeWith(t, &fakeQuotaAdapter{state: quota.State{Remaining: floatPtr(10), Unit: "tokens"}})
+		logs, db, id := probeWith(t, &fakeQuotaAdapter{state: quota.State{Remaining: floatPtr(10), Unit: "tokens"}})
 		if strings.Contains(logs, "没有写进去") {
 			t.Errorf("写回成功却告警了：%s", logs)
+		}
+		// 安静之外还要真的落库：这个渠道本来没有额度行，走的是 upsert 的插入分支。
+		snap := readQuota(t, db, id)
+		if !snap.hasRemain || snap.remaining != 10 {
+			t.Errorf("remaining = %v（有值 %v），期望 10——「写回成功」要真的落库",
+				snap.remaining, snap.hasRemain)
+		}
+		if snap.unit != "tokens" {
+			t.Errorf("unit = %q，期望 tokens", snap.unit)
+		}
+		if snap.probeKind != "api_query" {
+			t.Errorf("probe_kind = %q，期望 api_query", snap.probeKind)
 		}
 	})
 
 	t.Run("写回失败要告警", func(t *testing.T) {
 		// 没有余量也没有耗尽标记的「实测」会被 quota.Validate 拒绝。
-		logs := probeWith(t, &fakeQuotaAdapter{})
+		logs, _, _ := probeWith(t, &fakeQuotaAdapter{})
 		if !strings.Contains(logs, "渠道额度探测结果没有写进去") {
 			t.Errorf("写回失败了却没有告警：%q", logs)
 		}
 	})
 
 	t.Run("查不到落库成功不告警", func(t *testing.T) {
-		logs := probeWith(t, &fakeQuotaAdapter{err: channel.ErrUnsupported})
+		logs, _, _ := probeWith(t, &fakeQuotaAdapter{err: channel.ErrUnsupported})
 		if strings.Contains(logs, "没有写进去") {
 			t.Errorf("查不到的结论写进去了却告警：%s", logs)
 		}

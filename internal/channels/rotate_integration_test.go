@@ -490,8 +490,8 @@ func TestRotateApplyBatchesByID(t *testing.T) {
 }
 
 // 分批扫描要跨过一批的边界：Plan 与 Verify 都按 BatchSize 翻页，只看第一批
-// 会漏掉后面的行（共用库上本用例的行恰好排在最后）。把 BatchSize 压到 2，
-// 四行就跨了至少两批。
+// 会漏掉后面的行。把 BatchSize 压到 2，本用例的四行无论落在表的哪个位置，
+// 都装不进一批，必然跨批——这条不依赖测试注册顺序或行的先后。
 //
 // 同时钉住两个计数器的语义：Scanned 必须真的随扫描前进，Current 只数
 // **本来就含当前主密钥**的行。

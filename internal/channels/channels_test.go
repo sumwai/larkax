@@ -383,9 +383,11 @@ func TestQuotaRejectsMalformedConfidence(t *testing.T) {
 
 // confidence 是空字符串时按「没有可信度」处理，不是「解析失败」。
 //
-// 这一条要护着的是 withValue 里的 `!= ""`：少了它，空串会掉进 ParseFloat 的
-// 错误分支，于是一行只是缺了个数的快照让整次读取失败——报错指向的「类型与表
-// 定义对不上」也就成了误诊。
+// 空字符串不是库里的形态：这一列是 numeric(3,2) NOT NULL，扫描出来要么是数字，
+// 要么是 NULL（LEFT JOIN 没连上）。它挡住的是直接构造出来的 candidateRow——
+// 本包内拿构造值调用 quota / withValue 的路径。少了 `!= ""`，那一格会掉进
+// ParseFloat 的错误分支，把「这一格没填」报成「这一行的类型与表定义对不上」。
+// 两种口径不冲突：库里不会有空串，函数级输入可以有。
 func TestQuotaEmptyConfidenceIsAbsent(t *testing.T) {
 	row := candidateRow{
 		remaining:  sql.NullString{String: "12.5", Valid: true},
