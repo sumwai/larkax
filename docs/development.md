@@ -1757,6 +1757,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/ledger` | 576 | 8 | 0 | 92 | 86.39% | 98.63% | 96.3% |
 | `internal/ledger/store` | 433 | 6 | 0 | 60 | 87.98% | 98.63% | 79.9% |
 | `internal/auth` | 221 | 4 | 1 | 8 | 96.57% | 98.22% | 86.6% |
+| `internal/relay` | 112 | 3 | 0 | 7 | 94.26% | 97.39% | 87.7% |
 | `internal/idempotency` | 34 | 1 | 0 | 0 | 100.00% | 97.14% | 83.3% |
 | `internal/route` | 123 | 4 | 0 | 24 | 84.11% | 96.85% | 97.8% |
 | `internal/gateway` | 238 | 9 | 0 | 9 | 96.48% | 96.36% | 95.7% |
