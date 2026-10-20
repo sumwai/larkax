@@ -8,23 +8,30 @@ import (
 	"fmt"
 )
 
-// API Key 明文的形态：`larkax_` 加上 32 字节随机数的 base64url 编码（43 字符）。
+// API Key 明文的形态：`sk-` 加上 24 字节随机数的 base64url 编码（32 字符）。
 //
 // 带方案前缀不是为了安全，是为了让人一眼认出手里这串是什么——日志、截图、
-// 粘贴板里的一长串字符需要能自证身份。
+// 粘贴板里的一长串字符需要能自证身份。`sk-` 同时是 OpenAI 与 Anthropic 两家
+// SDK 示例里都认得出的形状，控制台给出的一把 key 可以直接粘进它们的配置。
 //
-// 随机部分是 256 位。这个数决定了下面为什么可以用快哈希：它不是人选的口令，
+// 随机部分是 192 位。这个数决定了下面为什么可以用快哈希：它不是人选的口令，
 // 没有可猜的字典，也不存在「弱 key」。
 const (
-	keyScheme      = "larkax_"
-	keyRandomBytes = 32
+	keyScheme      = "sk-"
+	keyRandomBytes = 24
 
-	// keyPrefixLen 是存进 api_keys.key_prefix 的字符数。
+	// keyPrefixLen 是存进 api_keys.key_prefix 的字符数：方案前缀 + 前 8 个随机字符。
 	//
 	// 它只用于「在列表里认出是哪把钥匙」，不参与查找（查找走 key_hash）。
-	// 12 个字符里随机部分占 5 个（约 30 位），足够区分同一个用户的几把 key，
-	// 而剩下的 27 个随机字节仍然完好——前缀泄露不了可用的熵。
-	keyPrefixLen = 12
+	// 8 个字符（48 位）随机部分足够区分同一个用户的几把 key，而剩下的 16 个
+	// 随机字节仍然完好——前缀泄露不了可用的熵。
+	keyPrefixLen = 3 + 8
+
+	// keySuffixLen 是存进 api_keys.key_suffix 的字符数。
+	//
+	// 与前缀合起来是「认得出、猜不着」：前缀 + 后 6 位足以让人在列表里对上
+	// 手里那把钥匙，而 6 个 base64url 字符（36 位）远不足以还原整把 key。
+	keySuffixLen = 6
 )
 
 // NewKey 生成一把新的 API Key 明文。
@@ -74,4 +81,15 @@ func KeyPrefix(plaintext string) string {
 		return plaintext
 	}
 	return plaintext[:keyPrefixLen]
+}
+
+// KeySuffix 取明文的最后 keySuffixLen 个字符，用于展示。
+//
+// 短于 keySuffixLen 时返回整串：那不是一条由本包生成的 key（方案前缀就
+// 占了 3 个字符），原样交回去比补一串星号更能说明「这行数据不对劲」。
+func KeySuffix(plaintext string) string {
+	if len(plaintext) <= keySuffixLen {
+		return plaintext
+	}
+	return plaintext[len(plaintext)-keySuffixLen:]
 }

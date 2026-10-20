@@ -75,6 +75,15 @@ type Querier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
+// MultiQuerier 是批量展示读需要的能力（见 SpentMany）。
+//
+// 它与 Querier 分开而不合并：判定那一侧只需要单行读，把 QueryContext 也
+// 声明进 Querier 会让判定的依赖面随着展示的读法一起变宽。
+type MultiQuerier interface {
+	Querier
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 // spentSQL 是「这把 key 累计花了多少」的唯一口径。
 //
 // 它按 api_key_id 过滤，于是 api_key_id 为 NULL 的历史行（补上写入点之前的
@@ -203,4 +212,68 @@ func CheckInTx(ctx context.Context, tx *sql.Tx, keyID int64, additional money.Am
 			ErrExceeded, spent, additional, limit)
 	}
 	return nil
+}
+
+// spentManySQL 是 Spent 的批量形状：一次查一页 key 的累计花费。
+//
+// 与 spentSQL 必须逐个口径字面相同——两条 SQL 各写一遍时，改了一处另一处
+// 还是老样子，而它们回答的是同一个问题。所以这里不另写一份 CASE：
+// 上面那条是「一把 key」，这条是「一组 key」，其余逐字照抄。
+//
+// 结果是每个 key 一行；一笔都没有过的 key 不会出现在结果里，由调用方补 0。
+const spentManySQL = `
+	SELECT api_key_id, COALESCE(SUM(CASE
+	             WHEN status = 'settled' THEN final_amount
+	             WHEN status = 'pending' THEN reserved_amount
+	             ELSE 0
+	         END), 0)::text
+	  FROM billing_requests
+	 WHERE api_key_id = ANY($1::bigint[])
+	 GROUP BY api_key_id`
+
+// SpentMany 一次读出多把 key 的累计花费，口径与 Spent 相同。
+//
+// 它收 MultiQuerier 而不是 Querier：判定的两条路径只需要一次单行读，而
+// 批量读需要 QueryContext。把两个方法都塞进 Querier 会让「判定需要什么」
+// 与「展示需要什么」长成同一个接口，而将来多一个读法就要再改一次判定那一侧。
+//
+// 返回的 map 里**每一个传入的 key 都有一项**：没有消费的（以及不存在的）是
+// 零。少了这一条，调用方就要在渲染每一行时判一次「map 里有没有」，而漏判
+// 的那一行会把「没花过钱」打成空字符串——那看起来像数据缺失，不像 0。
+//
+// 没有请求的 key 不查库：空切片进 SQL 也能跑，但一次注定返回空集的往返
+// 只会让调用方在空清单上多等一个网络来回。
+func SpentMany(ctx context.Context, q MultiQuerier, keyIDs []int64) (map[int64]money.Amount, error) {
+	out := make(map[int64]money.Amount, len(keyIDs))
+	if len(keyIDs) == 0 {
+		return out, nil
+	}
+	for _, id := range keyIDs {
+		out[id] = money.Zero
+	}
+
+	rows, err := q.QueryContext(ctx, spentManySQL, keyIDs)
+	if err != nil {
+		return nil, fmt.Errorf("读 API Key 的累计花费失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			id   int64
+			text string
+		)
+		if err := rows.Scan(&id, &text); err != nil {
+			return nil, fmt.Errorf("读 API Key 的累计花费失败: %w", err)
+		}
+		spent, err := money.Parse(text)
+		if err != nil {
+			return nil, fmt.Errorf("API Key %d 的累计花费 %q 解析失败: %w", id, text, err)
+		}
+		out[id] = spent
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历 API Key 的累计花费失败: %w", err)
+	}
+	return out, nil
 }
