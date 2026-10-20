@@ -357,6 +357,7 @@ PKGS=(
   internal/overrides
   internal/ratelimit
   internal/auth
+  internal/catalog
   internal/snapshot
   internal/snapshotwire
   internal/gateway
