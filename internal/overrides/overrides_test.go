@@ -2,6 +2,7 @@ package overrides
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -181,9 +182,113 @@ func TestValidateRejectsUnknownKey(t *testing.T) {
 	}
 }
 
-// 值本身不合法的一律拒绝：非数字、小数型的 max_tokens、0 / 负数、超出可精确
-// 表示的范围。这几条都是**写入时**才拦得住的错误——它们进了库之后，表现是这个
-// 别名上的每个请求都失败，而原因看起来在上游。
+// 报错里那一串白名单**逐字**都对：键名、顺序、顿号的位置。
+//
+// 三样都出自同一句拼接（allowedList），坏法却各不相同：少一个键、换了顺序、
+// 在第一个键前面多一个顿号。最后一种是 `i > 0` 写错一格的结果，而
+// 三种坏法在报错文本里都只显得「那句话有点别扭」——别处不会因此报错。
+//
+// 白名单那一串写成字面量：从 allowedKeys 推出来的期望会跟着缺陷一起漂移。
+// 理由文案不钉（改措辞不该让这条红），它开头那几句由 contains 管。
+// 「不在白名单」与「显式拒绝」是两条不同的路径，各自都要带上这一串。
+func TestUnknownKeyErrorSpellsTheAllowedKeysExactly(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		value    map[string]any
+		contains []string
+	}{
+		{
+			name:     "不在白名单",
+			value:    map[string]any{"temperatur": 0.5},
+			contains: []string{`"temperatur"`, "不在允许覆盖的字段里"},
+		},
+		{
+			name:     "显式拒绝",
+			value:    map[string]any{"model": "x"},
+			contains: []string{`"model"`, "不允许覆盖"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := Validate(tc.value)
+			if err == nil {
+				t.Fatalf("%v 被收下了，期望被拒", tc.value)
+			}
+			got := err.Error()
+			for _, want := range tc.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("错误文本 = %s，期望里面说得出 %s", got, want)
+				}
+			}
+			tail := "（允许覆盖的只有 temperature、top_p、max_tokens）"
+			if !strings.HasSuffix(got, tail) {
+				t.Errorf("错误文本 = %s，期望以 %s 结尾", got, tail)
+			}
+		})
+	}
+}
+
+// NaN 与 ±Inf 一律拒，而且各自说得出是哪种。
+//
+// 这几个值走 JSON 进不来，但管理面的 Go 调用方给得出来。放过去之后两条路
+// 的表现不同：temperature / top_p 会被**悄悄收下**，热路径照着发出去；
+// max_tokens 仍会被后面几道界挡住，但报的是「必须是整数」「必须为正」
+// 「超出可精确表示的整数范围」——看着像取值太大，看不出根因不是有限数。
+//
+// 三条子用例各有分工：`||` 写成 `&&` 时，NaN 与 Inf 不会同时成立，NaN 这一
+// 条就能杀；只留下一个操作数时，漏掉的正是另一类——只留 IsNaN 时两条 Inf
+// 子用例红，只留 IsInf 时 NaN 子用例红。
+func TestValidateRejectsNonFiniteNumbers(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value float64
+		want  string
+	}{
+		{"NaN", math.NaN(), `overrides 里的 "temperature" 不是有限数（NaN）`},
+		{"正无穷", math.Inf(1), `overrides 里的 "temperature" 不是有限数（+Inf）`},
+		{"负无穷", math.Inf(-1), `overrides 里的 "temperature" 不是有限数（-Inf）`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := Validate(map[string]any{keyTemperature: tc.value})
+			if err == nil {
+				t.Fatalf("temperature = %v 被收下了，期望被拒", tc.value)
+			}
+			if got := err.Error(); got != tc.want {
+				t.Errorf("错误文本 = %s\n期望 = %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// 可精确表示的整数范围**闭**在上界：恰好 2^53 收下，再上面一格拒。
+//
+// `>` 写成 `>=` 会把 2^53 也拒掉，而它正是 float64 能精确表示的最大整数，
+// 落在合法的那一侧。上界的下一格不能写 2^53+1：它在 float64 里就等于 2^53，
+// 造不出来，所以用 2^53+2（float64 在这个量级的步长是 2）。
+func TestMaxTokensAtExactIntegerBoundary(t *testing.T) {
+	const maxExact = 9007199254740992 // 2^53
+
+	got, err := EffectiveMaxTokens(100, map[string]any{keyMaxTokens: float64(maxExact)})
+	if err != nil {
+		t.Fatalf("max_tokens = 2^53 被拒了: %v，期望收下", err)
+	}
+	if got != maxExact {
+		t.Errorf("EffectiveMaxTokens = %d，期望 2^53 = %d", got, maxExact)
+	}
+
+	err = Validate(map[string]any{keyMaxTokens: 9007199254740994.0}) // 2^53+2
+	if err == nil {
+		t.Fatal("max_tokens = 2^53+2 被收下了，期望被拒")
+	}
+	// 只钉「拒绝的理由是超出精确范围」这一句：浮点数的格式化是 Go 的事，
+	// 不是这个判据的行为，钉住它会因为换一种 %v 写法而红。
+	if want := "超出可精确表示的整数范围"; !strings.Contains(err.Error(), want) {
+		t.Errorf("错误 = %v，期望里面说明 %q", err, want)
+	}
+}
+
+// 值本身不合法的一律拒绝：非数字、小数型的 max_tokens、0 / 负数、
+// 超出可精确表示的范围。这几条都是**写入时**才拦得住的错误——它们
+// 进了库之后，表现是这个别名上的每个请求都失败，而原因看起来在上游。
 func TestValidateRejectsBadValues(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

@@ -1732,6 +1732,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/keyquota` | 2 | 0 | 0 | 6 | 25.00% | 100.00% | 3.3% |
 | `internal/pricing` | 176 | 0 | 0 | 46 | 79.28% | 100.00% | 89.2% |
 | `internal/snapshotwire` | 105 | 0 | 0 | 3 | 97.22% | 100.00% | 94.6% |
+| `internal/overrides` | 18 | 0 | 0 | 0 | 100.00% | 100.00% | 96.2% |
 | `internal/channels` | 288 | 1 | 1 | 41 | 87.58% | 99.65% | 76.6% |
 | `internal/calendar` | 150 | 2 | 0 | 14 | 91.57% | 98.68% | 97.8% |
 | `internal/ledger` | 576 | 8 | 0 | 92 | 86.39% | 98.63% | 96.3% |
