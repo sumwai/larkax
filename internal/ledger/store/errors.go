@@ -94,6 +94,16 @@ var ErrNoSuchUser = errors.New("用户不存在")
 // 「要查的那一行已经存在」这一类：下一步是去看数据里现在是什么。
 var ErrTxnConflict = errors.New("交易号已存在但内容不同")
 
+// ErrInvalidQuery 表示一次聚合读的参数不合法，而不是数据库故障。
+//
+// 控制台要按它把两类失败分开：参数问题回 400（改一下再试），查询失败回
+// 503（稍后再试）。判据收成哨兵而不是由 handler 去猜错误文案——文案会改，
+// 而「这是不是调用方的问题」这个判断不该跟着一起变。
+//
+// 只有**在发 SQL 之前就能判出来**的输入错误才带它：库里的数据读不出来、
+// 语句超时、连接断开，那些都是故障。
+var ErrInvalidQuery = errors.New("用量查询参数不合法")
+
 // ErrConstraintViolation 是 dberr.ErrConstraintViolation 的别名。
 //
 // 判据与哨兵都搬到了 internal/dberr：它只回答「唯一键 / 外键拒绝了这次

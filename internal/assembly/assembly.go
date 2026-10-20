@@ -50,6 +50,7 @@ import (
 	calendarstore "github.com/sumwai/larkax/internal/calendar/store"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
+	"github.com/sumwai/larkax/internal/consoleapi"
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/gateway"
 	"github.com/sumwai/larkax/internal/idempotency"
@@ -639,7 +640,11 @@ func Build(cfg Config) (*App, error) {
 	// 只有「读 / 写回结局」这三个方法（见 api.IdempotencyStore）。
 	handler.Idempotency = idempotency.New(cfg.DB)
 
-	public, err := buildPublicHandler(cfg, handler, ledgerStore, logger)
+	public, err := buildPublicHandler(cfg, handler, ledgerStore, logger, publicPaths{
+		region:   region,
+		asset:    asset,
+		calendar: calendarEnv,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -655,33 +660,70 @@ func Build(cfg Config) (*App, error) {
 	}, nil
 }
 
+// publicPaths 是挂控制台要的部署常量。
+//
+// 收成一个参数而不是三个：它们都来自 Build 已经读好的那几项，而三个位置
+// 参数最容易在调用点上串位——串了不会编译失败，只会让币种显示成地区码。
+type publicPaths struct {
+	// region 是分时计价默认地区，参考价求值要用它。
+	region string
+	// asset 是结算资产品种，控制台的 currency 与钱包资产都用它。
+	asset string
+	// calendar 与计价那一路共用同一个实例（它不带请求状态）。
+	calendar expr.Calendar
+}
+
 // buildPublicHandler 在推理入口之外按配置挂上其余公共路径。
 //
-// 今天只有支付回调。它只在 `settings.payment.fake_enabled` 为 true 时才挂：
-// 假通道的密钥是公开的占位值，默认打开等于让任何读过仓库的人都能伪造一笔
-// 到账。关着时这条路径落回推理入口，与其余未知路径一样回 501。
-func buildPublicHandler(cfg Config, inference *api.Handler, ledgerStore *store.Store, logger *slog.Logger) (http.Handler, error) {
+// # 控制台无条件挂
+//
+// `/api/v1/` 是用户控制台，它不依赖任何运行期开关——公开监听上本来就有
+// 它。所以这里总是建 mux：把它放进「假支付开着才建 mux」的那个分支，
+// 结果是运维一关支付联调，控制台就整体落回推理入口、对所有路径回 501。
+//
+// # 支付回调按开关挂
+//
+// 假通道只在 `settings.payment.fake_enabled` 为 true 时才挂：它的密钥是
+// 公开的占位值，默认打开等于让任何读过仓库的人都能伪造一笔到账。
+func buildPublicHandler(cfg Config, inference *api.Handler, ledgerStore *store.Store,
+	logger *slog.Logger, paths publicPaths) (http.Handler, error) {
+	siteTimezone := ""
+	if loc, err := calendar.Timezone(calendar.Region(paths.region)); err == nil {
+		siteTimezone = loc.String()
+	}
+
+	console := consoleapi.New(consoleapi.Config{
+		DB:       cfg.DB,
+		Logger:   logger,
+		SiteName: "larkax",
+		Currency: paths.asset,
+		Timezone: siteTimezone,
+		Region:   paths.region,
+		Calendar: paths.calendar,
+		Now:      cfg.Now,
+	})
+
+	mux := http.NewServeMux()
+	mux.Handle(consoleapi.PathPrefix, console)
+
 	enabled, err := cfg.Settings.Bool(paymentFakeKey)
 	if err != nil {
 		return nil, fmt.Errorf("读取假支付通道开关失败: %w", err)
 	}
-	if !enabled {
-		return inference, nil
+	if enabled {
+		orders := payment.NewStore(cfg.DB)
+		fake := fakechannel.New(fakechannel.WithLookup(
+			func(ctx context.Context, orderNo string) (payment.ChannelOrder, error) {
+				return orders.ChannelOrder(ctx, orderNo)
+			}))
+		service := payment.NewService(orders, ledgerStore, map[string]payment.Channel{
+			fakechannel.Name: fake,
+		})
+		logger.Warn("假支付通道已启用：它只用于本地联调，密钥是公开的占位值，不要接真实资金")
+		mux.Handle(payment.CallbackPath(fakechannel.Name),
+			payment.NewHandler(service, fakechannel.Name, cfg.Version))
 	}
 
-	orders := payment.NewStore(cfg.DB)
-	fake := fakechannel.New(fakechannel.WithLookup(
-		func(ctx context.Context, orderNo string) (payment.ChannelOrder, error) {
-			return orders.ChannelOrder(ctx, orderNo)
-		}))
-	service := payment.NewService(orders, ledgerStore, map[string]payment.Channel{
-		fakechannel.Name: fake,
-	})
-	logger.Warn("假支付通道已启用：它只用于本地联调，密钥是公开的占位值，不要接真实资金")
-
-	mux := http.NewServeMux()
-	mux.Handle(payment.CallbackPath(fakechannel.Name),
-		payment.NewHandler(service, fakechannel.Name, cfg.Version))
 	mux.Handle("/", inference)
 	return mux, nil
 }

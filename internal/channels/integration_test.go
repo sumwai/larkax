@@ -797,6 +797,51 @@ func TestCandidatesSkipsDeletedChannel(t *testing.T) {
 	}
 }
 
+// 读点三：控制台的模型页。在供清单与选路共用 suppliesModel 这一条判据，
+// 所以这里的四个夹具把两侧的分歧点各钉一个。
+//
+// 它只判**供给**：一个连续失败很多的渠道仍然在供这个模型（参考价不该因为
+// 它今天不舒服而消失）。健康与额度是选路下一层的事，不在这条 SQL 里。
+func TestSuppliedModelsFollowsTheSameSupplyPredicate(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := t.Context()
+
+	supplied := uniqueModel()
+	insertModelCatalog(t, db, supplied, nil, nil, nil, nil, nil)
+	unhealthy := insertChannel(ctx, t, db, sealer, channelSpec{model: supplied})
+	if _, err := db.ExecContext(ctx,
+		`UPDATE channels SET consecutive_failures = 99 WHERE id = $1`, unhealthy); err != nil {
+		t.Fatalf("改连续失败数失败: %v", err)
+	}
+
+	disabledModel := uniqueModel()
+	insertModelCatalog(t, db, disabledModel, nil, nil, nil, nil, nil)
+	insertChannel(ctx, t, db, sealer, channelSpec{model: disabledModel, status: "disabled"})
+
+	deletedModel := uniqueModel()
+	insertModelCatalog(t, db, deletedModel, nil, nil, nil, nil, nil)
+	deleted := insertChannel(ctx, t, db, sealer, channelSpec{model: deletedModel})
+	// status 留在 enabled，让 channelAlive 成为唯一挡得住它的东西。
+	softDeleteKeepingEnabled(t, db, deleted)
+
+	orphan := uniqueModel()
+	insertModelCatalog(t, db, orphan, nil, nil, nil, nil, nil)
+
+	got, err := New(db, sealer).SuppliedModels(ctx)
+	if err != nil {
+		t.Fatalf("SuppliedModels 出错: %v", err)
+	}
+	if !slices.Contains(got, supplied) {
+		t.Errorf("%q 有启用的渠道在供，却不在清单里: %v", supplied, got)
+	}
+	for _, absent := range []string{disabledModel, deletedModel, orphan} {
+		if slices.Contains(got, absent) {
+			t.Errorf("%q 不该出现在在供清单里: %v", absent, got)
+		}
+	}
+}
+
 // 读点二：管理面清单。默认看不见，ListAll（--all）看得见且带上删除时刻。
 func TestListHidesDeletedChannelUnlessAll(t *testing.T) {
 	db := testDB(t)

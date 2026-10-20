@@ -1,6 +1,23 @@
 package auth
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/sumwai/larkax/internal/textshape"
+)
+
+// IsValidationError 报告 err 是不是「给的值不合法」这一类校验失败。
+//
+// 入口层据此把 400 与 503 分开：错在这一个字段的值，改掉重发就能过；
+// 其余失败（连接、事务、约束之外的下层故障）不该被说成是调用方写错了。
+// 判据只认哨兵、不认文案；新增一个校验哨兵时在这里登记，否则它会落到 503。
+func IsValidationError(err error) bool {
+	return errors.Is(err, ErrInvalidEmail) ||
+		errors.Is(err, ErrNoChanges) ||
+		errors.Is(err, ErrUsernameHasControlChar) ||
+		errors.Is(err, ErrUsernameIsIDRef) ||
+		errors.Is(err, textshape.ErrControlChar)
+}
 
 // ErrUnauthenticated 是「凭证没能解析出用户」这一类失败的共同标识。
 //
