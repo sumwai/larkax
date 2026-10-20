@@ -131,7 +131,10 @@ func (s *Sealer) Seal(plaintext []byte) ([]byte, error) {
 	if len(plaintext) == 0 {
 		return nil, errors.New("凭证为空")
 	}
-	if len(plaintext) > maxCiphertext {
+	// 上限量的是密文，而正文密文比明文多一个认证标签，所以判据要把标签算进去：
+	// 漏算这 16 字节，最上面的那一档就会封出自己读不回来的密文——decode
+	// 用同一个 maxCiphertext 校验正文长度，标签同样计入。
+	if len(plaintext)+tagSize > maxCiphertext {
 		return nil, fmt.Errorf("凭证过长：%d 字节", len(plaintext))
 	}
 
