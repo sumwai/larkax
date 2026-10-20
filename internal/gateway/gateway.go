@@ -239,7 +239,10 @@ type Snapshot struct {
 	// 模式下是用户原文。读它的人必须先看 CaptureMode。
 	Skeleton map[string]any
 	// RedactedPaths 是被替换掉的字段路径，供确认白名单有没有漏放行项。
-	// full_consented 模式下必然为空——那一档一个字段都没替换。
+	// full_consented 模式下这一列通常为空——那一档响应体一个字段都没替换。
+	// 例外是 upstream_error 子树：message 在任何采集模式下都只留长度；type 与
+	// param 则在取值不像枚举词时同样被替换。所以那一档下这一列也可能出现它
+	// 下面的路径。
 	RedactedPaths []string
 	// Truncated 表示正文超限后降级成了摘要层。
 	Truncated bool
@@ -357,6 +360,26 @@ type Redactor interface {
 	// 返回一条空骨架而不是错误：这一行仍然要落下来，它的内容是
 	// UpstreamStatus 与 ErrorKind 两列，而不是骨架。
 	RedactResponse(ctx context.Context, resp *channel.Response, id CaptureIdentity) (*Snapshot, error)
+}
+
+// UpstreamErrorRedactor 是 Redactor 的可选扩展：把上游错误体脱敏成骨架里的
+// upstream_error 子对象。
+//
+// # 为什么是可选接口，而不是并进 Redactor
+//
+// 那段脱敏要查允许表，而允许表在 internal/snapshot。本包按分层约定不 import 它
+// （见 scripts/check-layering.sh 的第三条）。把这一个方法并进 Redactor，又会让
+// 每个实现都被迫回答「上游错误体怎么脱敏」——包括没有那张表的替身。
+//
+// 所以形状与 Redactor 相同：本包只声明要什么，装配层让脱敏器满足它，
+// 用的时候断言一次。断言不到时按「没有这份信息」处理，快照照落。
+type UpstreamErrorRedactor interface {
+	// RedactUpstreamError 把错误体脱敏成 upstream_error 子对象与它替换掉的
+	// 路径（已带 upstream_error. 前缀）。
+	//
+	// 返回空 map 表示这条正文不保留任何字段：空正文、不是 JSON、
+	// 一个可枚举字段都没有。调用方据此整个键都不写。
+	RedactUpstreamError(body string) (map[string]any, []string)
 }
 
 // Gateway 是一次请求的编排。
@@ -690,8 +713,8 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 	if routed != nil {
 		routedResp = routed.Response
 	}
-	respBody, respStatus, respKind := responseEvidence(routedResp, err)
-	g.responseSnapshotAsync(ctx, respBody, req.UserID, respStatus, respKind)
+	respBody, respStatus, respKind, upstreamBody := responseEvidence(routedResp, err)
+	g.responseSnapshotAsync(ctx, respBody, req.UserID, respStatus, respKind, upstreamBody)
 	if err != nil {
 		// 没有可用的渠道，或者全部失败。**不计费**。
 		//
@@ -1593,15 +1616,16 @@ func snapshotRequest(routed *route.Result, caller *channel.Request) *channel.Req
 // **那次调用有了结局之后**：非流式在 routeChat 返回之后、流式在事件流读完
 // （或中断）之后。它回答的是「回来的是什么」，与请求方向配对读。
 //
-// # 三个入参都可以是零值
+// # 入参都可以是零值
 //
 // resp 为 nil 表示没有可脱敏的响应体（连不上、上游回了非 2xx）；status 与
-// kind 由 upstreamEvidence 推出。**三者全空时不采集**：那说明这次请求
-// 根本没有走到上游（没有候选、别名翻不出来、插件在选路前就阻断了），
+// kind 由 upstreamEvidence 推出，upstreamBody 是 4xx 的错误正文（见
+// upstreamErrorBodyOf）。**resp、status、kind 三者全空时不采集**：那说明
+// 这次请求根本没有走到上游（没有候选、别名翻不出来、插件在选路前就阻断了），
 // 写一行方向为 response、内容为空的快照只会让人以为上游回了个空。
 //
 // 脱敏与落库的同步/异步分界与请求方向完全相同，见 snapshotAsync。
-func (g *Gateway) responseSnapshotAsync(ctx context.Context, resp *channel.Response, userID int64, status *int, kind *string) {
+func (g *Gateway) responseSnapshotAsync(ctx context.Context, resp *channel.Response, userID int64, status *int, kind *string, upstreamBody string) {
 	if g.Redactor == nil || g.Snapshots == nil {
 		return
 	}
@@ -1619,6 +1643,7 @@ func (g *Gateway) responseSnapshotAsync(ctx context.Context, resp *channel.Respo
 	snap.Direction = "response"
 	snap.UpstreamStatus = status
 	snap.ErrorKind = kind
+	g.mergeUpstreamError(snap, upstreamBody)
 
 	g.saveSnapshotAsync(ctx, snap)
 }
@@ -1641,19 +1666,75 @@ func (g *Gateway) saveSnapshotAsync(ctx context.Context, snap *Snapshot) {
 
 // responseEvidence 从一次请求的结局里取出响应方向的证据。
 //
-// 三个返回值对应响应快照要用的三样东西：脱敏的对象、状态码、错误分类。
-// 上游成功时对象是那份响应，状态码取自它（适配器在拿到响应头后填的）；
-// 失败时没有可脱敏的响应体，两列由 upstreamEvidence 推出——它与账单那
-// 两列走的是**同一个**判据，见 upstreamEvidence。
-func responseEvidence(resp *channel.Response, err error) (body *channel.Response, status *int, kind *string) {
+// 四个返回值对应响应方向快照要用的四样东西：脱敏的对象、状态码、错误分类，
+// 以及上游 4xx 的错误体。上游成功时对象是那份响应，状态码取自适配器填好的
+// 那一格；失败时没有可脱敏的响应体，两列由 upstreamEvidence 推出——它与账单
+// 那两列走的是**同一个**判据，见 upstreamEvidence。
+//
+// 错误体只取 4xx 那一段，判据见 upstreamErrorBodyOf。
+func responseEvidence(resp *channel.Response, err error) (body *channel.Response, status *int, kind *string, upstreamBody string) {
 	if err != nil {
 		s, k := upstreamEvidence(err)
-		return nil, optionalInt(s), optionalString(k)
+		return nil, optionalInt(s), optionalString(k), upstreamErrorBodyOf(err)
 	}
 	if resp == nil {
-		return nil, nil, nil
+		return nil, nil, nil, ""
 	}
-	return resp, optionalInt(resp.StatusCode), nil
+	return resp, optionalInt(resp.StatusCode), nil, ""
+}
+
+// upstreamErrorBodyOf 取出上游 4xx 的响应体，其余结局一律返回空串。
+//
+// # 为什么只取 4xx
+//
+// 4xx 是「这次请求与这个上游对不上」的那一类：参数名写错、取值不被接受、
+// 必填项漏了。上游在这些正文里会点出是哪个参数（param）与什么分类（type）；
+// 留下这两格之后，库里能定位到分类与参数名，正文里那句话仍然要靠重放才
+// 看得到，而且 param 常常是 null（报文解析失败、模型不存在这类错误里没有
+// 具体参数）。
+//
+// 范围就是 4xx。5xx 的正文是上游自己的事故说明，不在这条路上；2xx 里内嵌
+// 错误对象的那条路也不取——那时 Body 存的是正文里的一句 message，不是 JSON
+// 错误体（见各适配器的 extractEmbeddedError）。
+func upstreamErrorBodyOf(err error) string {
+	var up *channel.ErrUpstream
+	if !errors.As(err, &up) || !up.GotResponse {
+		return ""
+	}
+	if up.StatusCode < http.StatusBadRequest || up.StatusCode >= http.StatusInternalServerError {
+		return ""
+	}
+	return up.Body
+}
+
+// mergeUpstreamError 把上游 4xx 的错误体并进响应方向的骨架。
+//
+// # 几条边界
+//
+//   - 脱敏器没实现 UpstreamErrorRedactor（采集关掉、或者换了个实现）时
+//     什么都不做：这一格是附加信息，不是必填项。
+//   - 空正文与不保留的正文整个键都不写，而不是写一个空对象——空对象读起来
+//     像「上游回了一个没有字段的错误」。
+//   - 并进来的是**已经脱敏过**的形状，这里不碰取值。体积也封顶：两个短
+//     枚举词或占位、一个文本占位，与正文长度无关；正文在适配器那一层
+//     已按 httpx.MaxErrorBody 截断（见 channel.ErrUpstream.Body）。
+func (g *Gateway) mergeUpstreamError(snap *Snapshot, body string) {
+	if snap == nil || body == "" {
+		return
+	}
+	r, ok := g.Redactor.(UpstreamErrorRedactor)
+	if !ok {
+		return
+	}
+	sub, paths := r.RedactUpstreamError(body)
+	if len(sub) == 0 {
+		return
+	}
+	if snap.Skeleton == nil {
+		snap.Skeleton = make(map[string]any, 1)
+	}
+	snap.Skeleton["upstream_error"] = sub
+	snap.RedactedPaths = append(snap.RedactedPaths, paths...)
 }
 
 // optionalInt 把「0 表示没有」翻成快照的 nil 形态。

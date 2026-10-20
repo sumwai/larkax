@@ -16,6 +16,7 @@ import (
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/route"
+	"github.com/sumwai/larkax/internal/snapshot"
 	"github.com/sumwai/larkax/internal/tokens"
 )
 
@@ -307,6 +308,12 @@ func (f *fakeRedactor) RedactResponse(_ context.Context, resp *channel.Response,
 		return nil, f.respErr
 	}
 	return &Snapshot{}, nil
+}
+
+// RedactUpstreamError 交给真正的允许表：那些用例要验的是网关有没有把
+// 上游错误体交对、并进骨架的方式对不对，不是再模拟一遍脱敏。
+func (f *fakeRedactor) RedactUpstreamError(body string) (map[string]any, []string) {
+	return snapshot.UpstreamErrorSkeleton(body)
 }
 
 // seenIdentities 返回交给脱敏器的身份清单。

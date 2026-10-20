@@ -10,6 +10,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/gateway"
 	"github.com/sumwai/larkax/internal/observe"
+	"github.com/sumwai/larkax/internal/snapshot"
 )
 
 // 决策那条表面的快照要真的落进 request_snapshots，两个方向各一行。
@@ -111,8 +112,11 @@ func TestIntegrationDecisionSnapshotsLandBothDirections(t *testing.T) {
 		if row.userID != userID {
 			t.Errorf("方向 %s 的 user_id = %d，期望 %d", dir, row.userID, userID)
 		}
-		if row.version != 1 {
-			t.Errorf("方向 %s 的 skeleton_version = %d，期望 1", dir, row.version)
+		// 拿常量比，不写字面量：这一格跟着 SkeletonVersion 一起涨，写死数字
+		// 会在下一次递增时静默过期，而这条用例只在有库时跑，本地看不出来。
+		if row.version != snapshot.SkeletonVersion {
+			t.Errorf("方向 %s 的 skeleton_version = %d，期望 %d",
+				dir, row.version, snapshot.SkeletonVersion)
 		}
 		if got := row.skeleton["surface"]; got != "decision" {
 			t.Errorf("方向 %s 的 surface = %v，期望 decision", dir, got)

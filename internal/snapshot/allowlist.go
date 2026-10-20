@@ -20,7 +20,12 @@ import (
 // 版本号是旧快照唯一的解释依据，所以宁可多增一次。
 //
 // 只改注释、改错误信息这类不影响输出的改动不需要递增。
-const SkeletonVersion = 1
+//
+// 版本历史：
+//
+//   - 1：初版。
+//   - 2：响应方向新增 upstream_error 子对象（上游 4xx 错误体里可枚举的字段）。
+const SkeletonVersion = 2
 
 // Root 是一次脱敏的起点：请求侧还是响应侧。
 //
@@ -318,11 +323,34 @@ var requestRules = []fieldRule{
 		Note: "同上，Anthropic 侧的写法"},
 }
 
+// upstreamErrorRules 是上游错误体里可枚举的那几个字段。
+//
+// 它们不属于响应体：上游回 4xx 时正文只留在 channel.ErrUpstream.Body 里，
+// 由网关单独脱敏成骨架里的一个子对象（见 UpstreamErrorSkeleton），字段固定
+// 就是这三格。把这张表追加进 responseRules，是为了让「每个采集字段一条」那条
+// 用例顺着已有的遍历走到它们；而挑选要保留的键与逐格脱敏读的是同一份数据，
+// 加一个字段只改这里。
+//
+// 三格的取舍：type 与 param 是短枚举词，留下它们能定位到**分类**与被拒的
+// 参数名；正文里那句话仍然要靠重放才看得到，而且 param 并不总有值（报文
+// 解析失败、模型不存在这类错误里它是 null）。message 只留长度，内容一个字
+// 都不落库——上游完全可能在正文里回显请求内容或凭证片段。
+var upstreamErrorRules = []fieldRule{
+	{Path: "upstream_error", Kind: keepShape,
+		Note: "上游错误体的容器。只由它自己的三条子规则填进来，其余字段在挑选那一步就丢掉了"},
+	{Path: "upstream_error.type", Kind: allowEnumWord, UpstreamValue: true,
+		Note: "错误分类（invalid_request_error 之类），复现时首先看它；取值来自上游，所以自带枚举词检查"},
+	{Path: "upstream_error.param", Kind: allowEnumWord, UpstreamValue: true,
+		Note: "被拒的是哪个参数（reasoning_effort 之类），排查参数不兼容时先看它，且它常常是 null；取值来自上游，所以自带枚举词检查。像 messages[0].role 这种带方括号的数组路径过不了那一档检查，会退成只留长度的占位，名字就没了"},
+	{Path: "upstream_error.message", Kind: hideText, UpstreamValue: true,
+		Note: "上游错误正文经常回显请求内容与凭证片段，只留长度；任何采集模式下内容都不落库"},
+}
+
 // responseRules 是响应侧的允许表。
 //
 // 响应侧最容易出事的是错误正文：上游回显用户输入时正文里带着原话，
 // 所以 error.message 整体脱敏，只留 type/code/param 这类枚举字段。
-var responseRules = []fieldRule{
+var responseRules = append([]fieldRule{
 	{Path: "id", Kind: hideValue, UpstreamValue: true,
 		Note: "上游的内部标识，不是内容但也没有复现价值"},
 	{Path: "object", Kind: allowEnumWord, UpstreamValue: true,
@@ -472,7 +500,7 @@ var responseRules = []fieldRule{
 	// 自定义头的头名也可能带私有信息。
 	{Path: "headers", Kind: responseHeadersField,
 		Note: "只保留额度监控需要的响应头，其余不采"},
-}
+}, upstreamErrorRules...)
 
 // allowlists 把方向映射到允许表。测试直接遍历它；新增方向时也必须同时加表——
 // 没有表的那个方向会在 New 里被显式拒绝，而不是落到某张默认表上。

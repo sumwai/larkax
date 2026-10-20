@@ -269,8 +269,12 @@ func TestInsertWritesAllColumns(t *testing.T) {
 	if args[0] != "req-1" || args[1] != int64(42) || args[2] != "request" {
 		t.Errorf("前三列 = %v, %v, %v", args[0], args[1], args[2])
 	}
+	// 1 是写死在夹具里的哨兵，不是当前版本：这一列要原样传下去，写入方若
+	// 擅自改写成 SkeletonVersion，这里就对不上了。**这个值必须与
+	// SkeletonVersion 保持不等**——一旦夹具改成常量，写常量与写字段都会过，
+	// 这条断言就退化成了自证。
 	if args[3] != 1 {
-		t.Errorf("skeleton_version = %v，期望 1", args[3])
+		t.Errorf("skeleton_version = %v，期望夹具给的那个值 1", args[3])
 	}
 	if args[4] != "skeleton" {
 		t.Errorf("capture_mode = %v，期望 skeleton", args[4])

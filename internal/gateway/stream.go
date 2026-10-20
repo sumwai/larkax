@@ -102,8 +102,8 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 		//
 		// 响应方向的快照在这里采：上游有过调用（或至少有过一次尝试），
 		// 只是没拿到可用的响应。失败同样要留一条，那正是排查时最该看的。
-		respBody, respStatus, respKind := responseEvidence(nil, err)
-		g.responseSnapshotAsync(ctx, respBody, req.UserID, respStatus, respKind)
+		respBody, respStatus, respKind, upstreamBody := responseEvidence(nil, err)
+		g.responseSnapshotAsync(ctx, respBody, req.UserID, respStatus, respKind, upstreamBody)
 
 		// settleAndFail 只结算、不释放，非流式那条路靠 defer res.finish
 		// 兜住释放那一步；这里没有 defer 可挂（成功路径的收尾在后台），
@@ -330,10 +330,14 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 	// 用 defer 而不是写在循环之后：本函数有两条返回路径（「一个字没吐」与
 	// 「计费」），只挂在其中一条上就会漏掉另一半——那正是这张表想要的
 	// 「上游出过什么事」。
+	//
+	// 上游错误体这一格在这里**有意传空**：走到这一步说明流已经被上游接受
+	// （2xx），而 4xx 的正文只出现在接受之前那条路上，那里已经接上了（见
+	// 本函数前半段的 responseEvidence）。
 	defer func() {
 		status, kind := streamResponseEvidence(upstreamStatus, streamErr, started, done, ours)
 		g.responseSnapshotAsync(ctx, upstreamResp.response(res.UpstreamModel), h.req.UserID,
-			optionalInt(status), optionalString(kind))
+			optionalInt(status), optionalString(kind), "")
 	}()
 
 	for ev := range events {

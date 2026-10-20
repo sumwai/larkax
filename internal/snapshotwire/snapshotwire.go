@@ -339,6 +339,16 @@ func (c *Collector) RedactResponse(ctx context.Context, resp *channel.Response, 
 	return toSnapshot(res, err, mode)
 }
 
+// RedactUpstreamError 把上游 4xx 的错误体脱敏成骨架里的 upstream_error 子对象。
+//
+// 它是 gateway.UpstreamErrorRedactor 的实现，网关按类型断言用它。
+//
+// 这里只转手：哪些字段留下、每一格怎么处理，全在 internal/snapshot 的允许表
+// 里（见 UpstreamErrorSkeleton）。两侧各写一份白名单，迟早点分岔。
+func (*Collector) RedactUpstreamError(body string) (map[string]any, []string) {
+	return snapshot.UpstreamErrorSkeleton(body)
+}
+
 // rawCaptureAllowed 判这一次要不要留原文。
 //
 // 授权来源是装配进来的一个接口，本包不判它内部怎么算（见 ConsentSource）。

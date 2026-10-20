@@ -389,8 +389,8 @@ func TestRedactDecisionRequestKeepsCriteria(t *testing.T) {
 	if err != nil {
 		t.Fatalf("脱敏失败: %v", err)
 	}
-	if snap.Version != 1 {
-		t.Errorf("skeleton_version = %d，期望 1（这条链路此前不采，没有旧口径的行）", snap.Version)
+	if snap.Version != 2 {
+		t.Errorf("skeleton_version = %d，期望 2（跟着链路的版本号走）", snap.Version)
 	}
 	if got := snap.Skeleton["surface"]; got != "decision" {
 		t.Errorf("骨架里的 surface = %v，期望 decision", got)
