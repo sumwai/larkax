@@ -488,3 +488,121 @@ func TestRotateApplyBatchesByID(t *testing.T) {
 		mustHaveKeys(t, readEnvelope(t, db, id), newKey.ID, oldKey.ID)
 	}
 }
+
+// 分批扫描要跨过一批的边界：Plan 与 Verify 都按 BatchSize 翻页，只看第一批
+// 会漏掉后面的行（共用库上本用例的行恰好排在最后）。把 BatchSize 压到 2，
+// 四行就跨了至少两批。
+//
+// 同时钉住两个计数器的语义：Scanned 必须真的随扫描前进，Current 只数
+// **本来就含当前主密钥**的行。
+func TestRotatePlanAndVerifyCountEveryBatch(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	oldKey, newKey := rotateTestKeys()
+	oldSealer := newRotateSealer(t, oldKey)
+	newSealer := newRotateSealer(t, newKey, oldKey)
+	rotator := NewRotator(db, newSealer)
+	rotator.BatchSize = 2
+
+	stale := insertRotateRows(t, db, oldSealer, 3)
+	fresh := insertRotateRows(t, db, newSealer, 1)[0]
+	wantRows := int64(4)
+
+	plan, err := rotator.Plan(ctx)
+	if err != nil {
+		t.Fatalf("干跑失败: %v", err)
+	}
+	if plan.Rewrapped != 3 {
+		t.Errorf("会被轮换的行数 = %d，期望 3", plan.Rewrapped)
+	}
+	if plan.Current != 1 {
+		t.Errorf("本来就含当前主密钥的行数 = %d，期望 1", plan.Current)
+	}
+	if plan.Scanned < wantRows {
+		t.Errorf("干跑只扫了 %d 行，比本用例插进去的 %d 行还少——分批扫描漏了后面的行",
+			plan.Scanned, wantRows)
+	}
+	for _, id := range stale {
+		if row, found := findRow(plan.Problems, id); found {
+			t.Errorf("好行 %d 被报成轮换不了：%v", id, row.Err)
+		}
+	}
+
+	verify, err := rotator.Verify(ctx)
+	if err != nil {
+		t.Fatalf("验证失败: %v", err)
+	}
+	if verify.Wrapped != 1 {
+		t.Errorf("验证时含当前主密钥的行数 = %d，期望 1", verify.Wrapped)
+	}
+	if verify.Scanned < wantRows {
+		t.Errorf("验证只扫了 %d 行，比本用例插进去的 %d 行还少——分批扫描漏了后面的行",
+			verify.Scanned, wantRows)
+	}
+	for _, id := range stale {
+		if _, found := findRow(verify.Missing, id); !found {
+			t.Errorf("行 %d 不含当前主密钥却没进缺钥匙清单", id)
+		}
+	}
+	if _, found := findRow(verify.Missing, fresh); found {
+		t.Errorf("行 %d 已经含当前主密钥，不该进清单", fresh)
+	}
+}
+
+// 解不开的行，报告里要写出它挂在哪几把钥匙下——那正是排查要比对的差集。
+//
+// 信封能解析、只是本进程没有能解开它的钥匙：keysOf 必须给出钥匙标识，
+// 返回 nil 等于把「缺哪一把」这条线索丢掉。
+func TestRotateApplyReportsKeysItCannotOpen(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	oldKey, newKey := rotateTestKeys()
+	oldSealer := newRotateSealer(t, oldKey)
+	// 只带当前主密钥：旧信封解析得出钥匙标识，但解不开。
+	rotator := NewRotator(db, newRotateSealer(t, newKey))
+
+	ids := insertRotateRows(t, db, oldSealer, 2)
+
+	report, err := rotator.Apply(ctx, nil)
+	if err != nil {
+		t.Fatalf("轮换失败: %v", err)
+	}
+	if report.Rewrapped != 0 {
+		t.Errorf("补上副本的行数 = %d，期望 0（本进程没有旧钥匙）", report.Rewrapped)
+	}
+	for _, id := range ids {
+		row, found := findRow(report.Problems, id)
+		if !found {
+			t.Fatalf("行 %d 缺钥匙却没被报出来：%+v", id, report.Problems)
+		}
+		if !containsKey(row.Keys, oldKey.ID) {
+			t.Errorf("行 %d 的问题清单里挂着 %v，期望含 %q——缺哪把钥匙是排查要比对的差集",
+				id, row.Keys, oldKey.ID)
+		}
+	}
+}
+
+// 解锁成功时连接只是还回池里，不该被当成坏连接丢掉。
+//
+// release 只在解锁**失败**时把连接标坏（锁可能还留在会话上，换一条连接继续
+// 用会让后续轮换误判「另一处正在运行」）。判据反过来之后，每次成功的轮换都
+// 会白丢一条池化连接——行为上只是慢一点，所以除了看池子本身没有别的观察口。
+// 这条用例独占一个句柄：只有一条连接时，丢没丢直接体现在 OpenConnections 上。
+func TestRotateReleaseKeepsHealthyConnection(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	lock, err := acquireRotateLock(ctx, db)
+	if err != nil {
+		t.Fatalf("拿锁失败: %v", err)
+	}
+	if got := db.Stats().OpenConnections; got != 1 {
+		t.Fatalf("持锁时的连接数 = %d，期望 1（这条用例需要一个只开过一条连接的句柄）", got)
+	}
+
+	lock.release(ctx)
+
+	if got := db.Stats().OpenConnections; got != 1 {
+		t.Errorf("解锁成功之后的连接数 = %d，期望 1——健康的连接应当还回池里，不该被标成坏连接丢弃", got)
+	}
+}

@@ -1,9 +1,12 @@
 package channels
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -620,4 +623,152 @@ func TestQuotaProbeRecoversExhaustedChannel(t *testing.T) {
 		t.Fatal("重探之后 last_probe_attempt_at 仍是 NULL")
 	}
 	assertNear(t, "last_probe_attempt_at", row.attemptAt.Time, clock)
+}
+
+// 零间隔必须由 NewQuotaProbe 自己拒绝，而不是交给下游去「顺带」拒绝。
+//
+// 零值不是「不探测」，而是「每一条命中的请求都探测」——它必须作为配置错误
+// 在这里报出来。这一条同时钉住报错来自哪一层：让 SelfAccountingStaleAfter
+// 去拒绝时，错误会多一层「由探测间隔导出陈旧阈值失败」的前缀，运维看到的
+// 第一个词就成了派生失败，而不是「间隔无效」。两种拒绝在库上长得一样，
+// 只有错误文本分得开。
+func TestNewQuotaProbeRejectsZeroInterval(t *testing.T) {
+	db := testDB(t)
+
+	if _, err := NewQuotaProbe(db, &fakeQuotaAdapter{}, 0); err == nil {
+		t.Fatal("零间隔应当被拒绝")
+	} else if !strings.HasPrefix(err.Error(), "额度探测间隔必须为正") {
+		t.Errorf("零间隔的错误 = %q，期望它以「额度探测间隔必须为正」开头——由这一层拒绝，不靠下游兜底", err)
+	}
+
+	if _, err := NewQuotaProbe(db, &fakeQuotaAdapter{}, -time.Second); err == nil {
+		t.Error("负间隔应当被拒绝")
+	}
+}
+
+// 距上一次尝试**恰好**一个间隔时就算过期。
+//
+// 边界两侧各钉一次：差一个纳秒不探，到点就探。只钉一侧的话，把 >= 改成 >
+// 之后「恰好到点」那一格会静默地滑到下一轮——而 TTL 本来就是按配置给的值
+// 兑现的，滑过去等于配置说 5 分钟、实际是 5 分钟多一点。
+func TestQuotaProbeDueAtExactInterval(t *testing.T) {
+	db := testDB(t)
+	interval := 5 * time.Minute
+	now := time.Now().UTC()
+
+	p, err := NewQuotaProbe(db, &fakeQuotaAdapter{}, interval)
+	if err != nil {
+		t.Fatalf("构造额度探测失败: %v", err)
+	}
+
+	exactly := now.Add(-interval)
+	p.mu.Lock()
+	due := p.dueLocked(1, &exactly, now)
+	p.mu.Unlock()
+	if !due {
+		t.Error("距上一次尝试恰好一个间隔时应当算过期（判据是 >=，不是 >）")
+	}
+
+	notYet := now.Add(-interval + time.Nanosecond)
+	p.mu.Lock()
+	due = p.dueLocked(1, &notYet, now)
+	p.mu.Unlock()
+	if due {
+		t.Error("还差一点才到间隔时不该算过期")
+	}
+}
+
+// 进程内的尝试时刻只用来把快照往前推，不能反过来把更新的快照压回去。
+//
+// 候选快照可能来自另一个实例：它记下的尝试时刻比本进程这次更晚。两个时刻
+// 取较晚的那个，于是这里应当按快照算——还没到 TTL，不探。把 && 改成 ||
+// 会让条件在「进程内有记录」时恒真，于是用更旧的进程内时刻去覆盖更新的
+// 快照，刚被别的实例探过的渠道会被本进程再探一次。
+func TestQuotaProbeKeepsNewerCandidateAttempt(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
+
+	interval := 5 * time.Minute
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	adapter := &fakeQuotaAdapter{state: quota.State{Remaining: floatPtr(5), Unit: "tokens"}}
+	p, err := NewQuotaProbe(db, adapter, interval)
+	if err != nil {
+		t.Fatalf("构造额度探测失败: %v", err)
+	}
+	clock := base
+	p.Now = func() time.Time { return clock }
+
+	// 本进程在 base 发起过一次探测。
+	p.ProbeIfStale(route.Candidate{Channel: channel.Channel{ID: id, Type: "openai-compatible"}})
+	p.wg.Wait()
+	if got := adapter.count(); got != 1 {
+		t.Fatalf("首次探测的适配器调用数 = %d，期望 1", got)
+	}
+
+	// 另一个实例在 base+1.5 个间隔探过它；此刻离开那次尝试才 0.4 个间隔。
+	newer := base.Add(interval + interval/2)
+	clock = newer.Add(interval * 2 / 5)
+	cand := route.Candidate{
+		Channel: channel.Channel{ID: id, Type: "openai-compatible"},
+		Quota:   quota.State{LastProbeAttemptAt: &newer},
+	}
+	p.ProbeIfStale(cand)
+	p.wg.Wait()
+	if got := adapter.count(); got != 1 {
+		t.Errorf("更新的快照被更旧的进程内时刻覆盖：又探了一次，适配器共被调用 %d 次", got)
+	}
+}
+
+// 写回的结果该不该告警：成功时安静，失败时叫一声。
+//
+// 探测跑在自己的 goroutine 里，写回失败没有返回值可以断言——日志是这件事
+// **唯一**的外部信号。这里三种结局各看一次：成功写回、写回失败（实测不自洽
+// 被拒）、查不到落库成功。把任何一个判据反过来，都会让「失败静默、成功告警」
+// 这组现象出现，而它在库里看不出区别。
+func TestQuotaProbeWarnsOnlyWhenWriteBackFails(t *testing.T) {
+	interval := 5 * time.Minute
+	now := time.Now().UTC()
+
+	probeWith := func(t *testing.T, adapter QuotaAdapter) string {
+		t.Helper()
+		db := testDB(t)
+		sealer := testSealer(t)
+		id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
+
+		var buf bytes.Buffer
+		p, err := NewQuotaProbe(db, adapter, interval)
+		if err != nil {
+			t.Fatalf("构造额度探测失败: %v", err)
+		}
+		p.Now = func() time.Time { return now }
+		p.Logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+		p.ProbeIfStale(route.Candidate{Channel: channel.Channel{ID: id, Type: "openai-compatible"}})
+		p.wg.Wait()
+		return buf.String()
+	}
+
+	t.Run("成功写回不告警", func(t *testing.T) {
+		logs := probeWith(t, &fakeQuotaAdapter{state: quota.State{Remaining: floatPtr(10), Unit: "tokens"}})
+		if strings.Contains(logs, "没有写进去") {
+			t.Errorf("写回成功却告警了：%s", logs)
+		}
+	})
+
+	t.Run("写回失败要告警", func(t *testing.T) {
+		// 没有余量也没有耗尽标记的「实测」会被 quota.Validate 拒绝。
+		logs := probeWith(t, &fakeQuotaAdapter{})
+		if !strings.Contains(logs, "渠道额度探测结果没有写进去") {
+			t.Errorf("写回失败了却没有告警：%q", logs)
+		}
+	})
+
+	t.Run("查不到落库成功不告警", func(t *testing.T) {
+		logs := probeWith(t, &fakeQuotaAdapter{err: channel.ErrUnsupported})
+		if strings.Contains(logs, "没有写进去") {
+			t.Errorf("查不到的结论写进去了却告警：%s", logs)
+		}
+	})
 }
