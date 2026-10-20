@@ -5,6 +5,7 @@
 
 - [需要什么](#需要什么)
 - [一次跑通](#一次跑通)
+- [仓库结构与分层](#仓库结构与分层)
 - [请求快照](#请求快照)
 - [用量事件的分区](#用量事件的分区)
 - [分时计价的日历数据](#分时计价的日历数据)
@@ -95,6 +96,11 @@ curl -i 127.0.0.1:8080/v1/chat/completions
 （连得上库）与 `"tokens":"ok"`（本机支持的每一种分词词表都加载得出来，没预热
 或没解出来时报不就绪）。
 **健康检查在 `:9090`，不在 `:8080`**——公共端口的 `/` 捕获一切路径并返回 `501`。
+同一个内部端口上还有只读的 `/ratelimit/usage?key_id=<id>`，以及管理面
+`/admin/v1/*`（见 [admin-api.md](admin-api.md)）。
+
+`LARKAX_ROLE=worker` 的部署不接推理流量：它在公共端口上一律回 `501`，响应里点出
+这个角色，所以配错了的部署一眼能看出来，而不是看起来像别的问题。
 
 指标在同一个内部端口上，`curl -s 127.0.0.1:9090/metrics` 应含
 `larkax_billing_unbilled_settlements_total 0`。没有请求时只有不带标签的
@@ -140,6 +146,99 @@ LARKAX_INTERNAL_ADDR="127.0.0.1:8082"
 所以 `make` 用 `set -a && . ./.env && set +a` 加载它。**服务与 `larkaxctl` 自己
 也读 `.env`**（见下文「环境变量」），所以 `go run` 之前不必再手工导出一遍；
 用 direnv 或别的工具加载也不会打架——环境变量优先。
+
+## 仓库结构与分层
+
+```
+cmd/larkax/                       服务二进制
+cmd/larkaxctl/                    迁移与运维命令行
+internal/api/                     公共 HTTP 入口：路径、解析、响应形状
+internal/assembly/                把入口层装配成能跑的服务
+internal/auth/                    把请求带的凭证换成它属于哪个用户
+internal/billing/                 把用量换成钱：预留、结算、明细
+internal/billing/calendaradapter/ 把 internal/calendar 接进计价引擎
+internal/billing/expr/            求值计价规则的表达式引擎
+internal/calendar/                按地区判断工作日 / 节假日 / 峰谷时段
+internal/calendar/store/          日历表，以及导入一年的数据
+internal/catalog/                 模型目录：规范名与上游别名
+internal/channel/                 适配器接口、注册表、统一的请求与响应类型
+internal/channel/anthropicadapter/  Anthropic Messages 上游
+internal/channel/httpx/           适配器共用的 HTTP 细节
+internal/channel/openaiadapter/   OpenAI Chat Completions 上游
+internal/channel/responsesadapter/  OpenAI Responses 上游
+internal/channels/                从库里取候选渠道，把调用结果写回去
+internal/config/                  启动配置（环境变量）
+internal/credential/              渠道凭证的信封加密
+internal/db/                      数据库连接池
+internal/dberr/                   把 Postgres 约束冲突归成同一个错误值
+internal/gateway/                 一次请求的顺序：预留、选路、调上游、结算
+internal/idempotency/             Idempotency-Key 请求头：重发的请求只执行一次
+internal/keyquota/                一把 key 的累计花费有没有超过限额
+internal/ledger/                  复式记账：构造与校验分录
+internal/ledger/store/            分录、钱包与预留的落库
+internal/manpage/                 从命令行注册表与 docs/cli-reference.md 渲染手页
+internal/migrate/                 内嵌的迁移（internal/migrate/sql/）
+internal/money/                   定点金额；全仓只有这里做舍入
+internal/observe/                 日志、请求 ID、健康与就绪端点
+internal/overrides/               别名上配的上游参数覆盖
+internal/pipeline/                把计费各阶段接成一条请求流程
+internal/plugin/                  五个 hook：注册表、分发、失败策略
+internal/plugin/host/             注入插件的宿主能力（日志、kv、日历）
+internal/plugin/sandbox/          moejs 运行时、限额、中断
+internal/pricing/                 挑出这次请求适用的计价规则
+internal/quota/                   上游额度状态：观测、自记账、置信度
+internal/ratelimit/               按 key 的每分钟次数，配了 Redis 时在 Redis 里计数
+internal/relay/                   经 relaykit 做协议转换
+internal/route/                   选路与故障转移
+internal/settings/                运行期配置，存在数据库里
+internal/snapshot/                只留结构的请求快照，含脱敏
+internal/snapshotwire/            读快照配置、写骨架、删到期分区
+internal/systemone/               决策表面自己的请求与响应形状
+internal/testdb/                  仅测试用：每个测试包一个库
+internal/tokens/                  分词计数，以及流式中断时的估算
+internal/upstream/                装配协议适配器，按渠道类型分发
+scripts/                          仓库自带的检查与生成脚本
+```
+
+分层，让数据面不依赖控制面：
+
+```
+gateway  ──►  route  ──►  channel.Adapter  ──►  upstream
+                │                │
+                │                └── 只做协议转换
+                └── 选路、重试、故障转移
+
+gateway  ──►  pipeline  ──►  billing  ──►  money
+                   │             │
+                   │             └── 规则来自 billing/expr，它构造 billing.Prices
+                   ├── 把分录交回调用方
+                   └── 用量从 channel.Usage 归一，token 只是其中一项标签
+```
+
+`gateway` 是入口层，`internal/api` 是它的 HTTP 那一半；`cmd/` 在它们之上，
+`money`、`calendar`、`observe` 与 `migrate` 是叶子。`relay` 不是叶子——它依赖
+`internal/channel` 的类型。除下面点名的三处例外，没有别的包反过来依赖 `gateway`。
+
+有几条规则贯穿整棵树，由 `scripts/check-layering.sh` 在 CI 里查，而不是靠眼睛看
+——它列出允许 import relaykit 的包，并标出 `internal/money` 之外出现的
+`float64(`（那是给人看的提示，不是失败）：
+
+- **只有三个包 import [relaykit](https://github.com/QuantumNous/new-api)：**
+  `internal/relay`（接缝本身）与两个协议适配器（它们需要 DTO 类型去对接）。
+  其余包一律用 larkax 自己的类型。
+- **`internal/money` 是唯一做舍入的地方。** 其余地方都是对定点值做整数运算。
+- **入口层以下的包不 import `internal/gateway`。** 三个例外写在
+  `scripts/check-layering.sh` 里：`internal/api` 是入口层的 HTTP 那一半，调用
+  `gateway.Chat`；`internal/snapshotwire` 把快照包适配到 gateway 声明的接口；
+  `internal/assembly` 构造 gateway，也是唯一同时看得到入口层与数据面的地方。
+
+计费那条路刻意拆成几段，每段都能不起库、不连网就测：`money`（算术）→
+`billing`（用量 × 价格）→ `billing/expr`（规则）→ `pipeline`（各步的顺序）。
+
+`internal/gateway` 持有一次请求的整个顺序——调上游之前先预留、流已经开始吐字之后
+不再换渠道、快照那条路永远不许拖慢请求。`internal/assembly` 把它装进服务二进制，
+包括从库里加载的插件注册表。仓库里还没有 `plugins/`（随包发布的插件源码）；
+浏览器控制台在 `web/`。
 
 ## 请求快照
 
