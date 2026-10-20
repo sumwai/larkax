@@ -88,8 +88,9 @@
 # 在清单里、它自己不在）一条都匹配不上。**一条都没选中时**脚本已经会报
 #「没有选中任何包」；会漏的是**只选中一部分**：匹配到的那几包照常跑、汇总表照出，
 # 少的只是一行，收尾仍打「全部跑成。」。写参数的人以为覆盖了三个包，实际只有两个，
-# 而少验的那一包不会被别的机制补上——CI 的变异 job 用的是同一份清单，名字写错
-# 同样会少跑一包。
+# 而少验的那一包不会被别的机制补上。CI 的选包步骤读的也是这份清单，但它对没匹配
+# 到的参数是 `::error` 加非零退出，不会悄悄少跑；本地的包参数入口没有那一道，
+# 所以在这里核。
 #
 # 所以选包之后核一遍：**每个包参数至少要匹配到 `PKGS` 里的一条**，没匹配到的
 # 当场列出来，并让整轮判为失败。**匹配规则与 `PKGS` 清单都不动**：把子包自动
@@ -99,6 +100,18 @@
 #   scripts/check-mutation.sh              # 跑全部包
 #   scripts/check-mutation.sh money route  # 只跑指定的（按包名后缀匹配）
 #   scripts/check-mutation.sh --list-packages  # 只打印 PKGS 清单（CI 选包用）
+#   scripts/check-mutation.sh --list-packages --match internal/billing/calendaradapter
+#                                              # 打印覆盖该目录的 PKGS 条目（CI 选包用）
+#   scripts/check-mutation.sh --list-packages --suffix money
+#                                              # 打印后缀匹配的 PKGS 条目（CI 手工触发用）
+#
+# `--match` 回答的是「这个改动目录该由哪一条 PKGS 来量」：取**最近的、在 PKGS 里的
+# 祖先**（按 `/` 边界，目录本身在清单里也算）。包路径是递归的，所以
+# internal/billing/calendaradapter 归 internal/billing 那条命令管。`--suffix` 则是
+# 手工触发用的同一套后缀规则（与跑变异时的包参数一致）。匹配规则只写在这里一份——
+# CI 的选包步骤只调这两个开关，不自己再写一遍目录/后缀匹配：两处各写一份，
+# 刚出生就会漂（例如一处要求目录与清单条目精确相等，另一处按前缀）。
+# 找不到覆盖它的条目时什么都不打印、退出 1，选包步骤据此区分「在树里但没有可跑的包」。
 #
 # # 清单只此一份
 #
@@ -111,9 +124,9 @@
 # # 显式包参数重叠时拒绝执行
 #
 # `./internal/ledger/` 递归包含 `internal/ledger/store`，两个一起传会把 store 的
-# 几百个变异体跑两遍。所以**显式给了参数**且其中一个是另一个的前缀（按 `/` 边界）
-# 时报错退出，说清谁包含谁、只留外层哪个；不带参数跑全部包是例外——那是基线口径，
-# 表本来就按「父包那一行含子包」读（见上面「清单里父子两条…」那段）。
+# 几百个变异体跑两遍。所以**显式给了参数、且选中的集合里出现父子对**（一个是另一个
+# 的前缀，按 `/` 边界）时报错退出，说清谁包含谁、只留外层哪个；不带参数跑全部包是
+# 例外——那是基线口径，表本来就按「父包那一行含子包」读（见上面「清单里父子两条…」那段）。
 #
 # # 逐行透传与进度
 #
@@ -136,11 +149,15 @@
 #   3  拿不到锁：另一个实例正在跑（或锁文件不可用），本次未执行
 # 1 与 3 分开是因为处置不同：前者要去看代码或环境，后者等一会儿重跑就行。
 #
+# `--list-packages --match <目录>` 与 `--list-packages --suffix <片段>` 是查询而非
+# 跑变异：打到条目并退出 0，一条都没有则什么都不打印、退出 1。它们同样不拿锁、
+# 不要求 gremlins 与 DSN。
+#
 # **它不判「efficacy 够不够」。** 存活变异要逐条人看——等价变异与
 # 不可达分支都该放过，而脚本分不出来。这里只保证跑出来的数字可信。
 #
 # 环境变量：GREMLINS（可执行文件，默认 gremlins）、COEF、WORKERS、
-# PROGRESS_EVERY（每多少条输出打一行进度，默认 20；0 表示不打）、
+# PROGRESS_EVERY（每完成多少个变异体打一行进度，默认 20；0 表示不打）、
 # LOCK_FILE（锁文件路径，默认 <仓库根>/tmp/check-mutation.lock）、
 # GREMLINS_VERSION（自测注入用，见下；CI 与本地都不该设）。
 #
@@ -247,6 +264,48 @@ PKGS=(
 # 只读清单就退出：不拿锁、不查 gremlins、不要求 DSN。CI 的选包那一环跑在
 # 起数据库的 job 之前，它要的只是这份清单。
 if [ "${1:-}" = "--list-packages" ]; then
+  # --match <目录>：只回答「这个目录该由哪一条 PKGS 来量」，规则见文件开头。
+  # 不带 --match 时输出与以前逐字一致（CI 与用例都依赖这一点）。
+  if [ "${2:-}" = "--match" ]; then
+    dir="${3:-}"
+    if [ -z "$dir" ]; then
+      echo "--match 需要一个目录参数。" >&2
+      exit 1
+    fi
+    dir="${dir%/}"
+    best=""
+    for p in "${PKGS[@]}"; do
+      case "$dir" in
+        "$p" | "$p"/*)
+          # 取最长的那个：清单里同时在的父子两条，离改动最近的是子包。
+          if [ ${#p} -gt ${#best} ]; then best="$p"; fi
+          ;;
+      esac
+    done
+    if [ -z "$best" ]; then
+      # 什么都不打印：调用方靠退出码区分「没有包覆盖」与「覆盖到了但名字是空的」。
+      exit 1
+    fi
+    printf '%s\n' "$best"
+    exit 0
+  fi
+  # --suffix <片段>：手工触发时按包名后缀点名（与跑变异时的包参数同一套规则），
+  # 把匹配到的条目全打出来；一个都没有则退出 1。CI 不再自己写一遍后缀匹配。
+  if [ "${2:-}" = "--suffix" ]; then
+    frag="${3:-}"
+    if [ -z "$frag" ]; then
+      echo "--suffix 需要一个包名片段。" >&2
+      exit 1
+    fi
+    hit=0
+    for p in "${PKGS[@]}"; do
+      case "$p" in
+        *"$frag") printf '%s\n' "$p"; hit=1 ;;
+      esac
+    done
+    [ "$hit" -eq 1 ] || exit 1
+    exit 0
+  fi
   printf '%s\n' "${PKGS[@]}"
   exit 0
 fi
@@ -660,12 +719,18 @@ for pkg in "${PKGS[@]}"; do
   #
   # 以前这里把 gremlins 的输出整个收进变量，跑完才看得到。一个包要几十分钟时，
   # 屏幕上没有任何东西能回答「还有五分钟还是五十分钟」，只能干等。现在逐行
-  # 透传，每行带序号与已用时间；每 PROGRESS_EVERY 条打一行进度。
+  # 透传，每行带序号与已用时间；每完成 PROGRESS_EVERY 个**变异体**打一行进度。
+  #
+  # **进度只数变异结果行，不数输出行。** 行数里混着 `Starting...`、gathering、
+  # 空行与最后的汇总，而总数是变异体数——两者相减算出来的剩余时间没有任何依据。
+  # 变异结果行以状态开头（gremlins v0.6.0 的七种：KILLED / LIVED / RUNNABLE /
+  # NOT COVERED / NOT VIABLE / TIMED OUT / SKIPPED，见 internal/mutator 的
+  # `Status.String()`）。序号那一列仍然是输出行号，与进度不是同一个数。
   #
   # **总数从 gremlins 自己的输出里读，读不到就不给 ETA。** v0.6.0 正常运行
   # **不报总数**：`Starting...` 之后直接是逐条结果，汇总在最后（源码
   # cmd/unleash.go 里只有那一句；实际输出也核过）。所以这里默认走降级路径，
-  # 只报「已完成 + 已用 + 平均每条」。总数只认两种明确形态——`<N> mutants`
+  # 只报「已完成 + 已用 + 平均每个」。总数只认两种明确形态——`<N> mutants`
   # 与 dry run 的 `Runnable: N, Not covered: M`——认不出就空着，绝不为了打一行
   # ETA 去编一个总数（编出来的剩余时间比没有更误导）。
   #
@@ -674,12 +739,13 @@ for pkg in "${PKGS[@]}"; do
   stream_tmp=$(mktemp -t check-mutation-stream.XXXXXX)
   start_epoch=$(date +%s)
   total_mutants=""
-  n_done=0
+  n_lines=0    # 输出行号（序号那一列）
+  n_done=0     # 已完成的变异体数（进度与 ETA 只用它）
   "$GREMLINS" "${GREMLINS_ARGS[@]}" "./$pkg/" 2>&1 |
     while IFS= read -r line || [ -n "$line" ]; do
-      n_done=$((n_done + 1))
+      n_lines=$((n_lines + 1))
       elapsed=$(($(date +%s) - start_epoch))
-      printf '[%4d] [%s] %s\n' "$n_done" "$(fmt_duration "$elapsed")" "$line"
+      printf '[%4d] [%s] %s\n' "$n_lines" "$(fmt_duration "$elapsed")" "$line"
       printf '%s\n' "$line" >>"$stream_tmp"
 
       # 总数（只在还没拿到时试一次）。
@@ -691,17 +757,20 @@ for pkg in "${PKGS[@]}"; do
         fi
       fi
 
-      if [ "$PROGRESS_EVERY" -gt 0 ] && [ $((n_done % PROGRESS_EVERY)) -eq 0 ]; then
-        elapsed_h=$(fmt_duration "$elapsed")
-        if [ -n "$total_mutants" ] && [ "$total_mutants" -ge "$n_done" ]; then
-          left=$(awk -v e="$elapsed" -v d="$n_done" -v t="$total_mutants" \
-            'BEGIN { printf "%d", (e / d) * (t - d) }')
-          printf '── 进度 [%d/%d] 已用 %s，预估还剩 %s\n' \
-            "$n_done" "$total_mutants" "$elapsed_h" "$(fmt_duration "$left")"
-        else
-          avg=$(awk -v e="$elapsed" -v d="$n_done" 'BEGIN { printf "%.1f", e / d }')
-          printf '── 进度 [%d] 已用 %s，平均每条 %ss（gremlins 没报总数，不给 ETA）\n' \
-            "$n_done" "$elapsed_h" "$avg"
+      if [[ "$line" =~ ^[[:space:]]*(KILLED|LIVED|RUNNABLE|NOT[[:space:]]+COVERED|NOT[[:space:]]+VIABLE|TIMED[[:space:]]+OUT|SKIPPED)[[:space:]] ]]; then
+        n_done=$((n_done + 1))
+        if [ "$PROGRESS_EVERY" -gt 0 ] && [ $((n_done % PROGRESS_EVERY)) -eq 0 ]; then
+          elapsed_h=$(fmt_duration "$elapsed")
+          if [ -n "$total_mutants" ] && [ "$total_mutants" -ge "$n_done" ]; then
+            left=$(awk -v e="$elapsed" -v d="$n_done" -v t="$total_mutants" \
+              'BEGIN { printf "%d", (e / d) * (t - d) }')
+            printf '── 进度 [%d/%d] 已用 %s，预估还剩 %s\n' \
+              "$n_done" "$total_mutants" "$elapsed_h" "$(fmt_duration "$left")"
+          else
+            avg=$(awk -v e="$elapsed" -v d="$n_done" 'BEGIN { printf "%.1f", e / d }')
+            printf '── 进度 已完成 %d 个变异体，已用 %s，平均每个 %ss（gremlins 没报总数，不给 ETA）\n' \
+              "$n_done" "$elapsed_h" "$avg"
+          fi
         fi
       fi
     done

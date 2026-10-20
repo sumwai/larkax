@@ -13,6 +13,15 @@ name: 变异测试
 # 大多数改动与钱无关，跑出来的数字也不会让结论更可信。要量别的包时用
 # workflow_dispatch 手工点名（`packages` 输入）。
 #
+# **改动目录怎么落到包上，不在这里判断**：交给 `scripts/check-mutation.sh
+# --list-packages --match <目录>`，它取最近的、在 PKGS 里的**祖先**——包路径是
+# 递归的，所以 internal/billing/calendaradapter（真实计费包，但不在 PKGS 里）
+# 由 internal/billing 覆盖。这里若自己写「目录 == 清单条目」，只改子包的 PR 会
+# 一个包都不量，而界面上与「不需要跑」长得一样。
+#
+# 草稿 PR 不跑：还在改的代码不该占着 runner 几小时，标成 ready for review 后
+# 下一次 push 会重新触发。
+#
 # **口径不在这里重写**：真正干活的是 `scripts/check-mutation.sh`——同一份实现，
 # 于是 workers=1、系数 10、`--invert-logical`、每个包之前清一次测试缓存这些
 # 条件与本地逐字相同，CI 跑出来的数字可以直接与本地对账。这个工作流只负责
@@ -60,6 +69,7 @@ jobs:
           PACKAGES_INPUT: ${{ github.event.inputs.packages }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
         run: |
           set -uo pipefail
 
@@ -73,6 +83,8 @@ jobs:
           echo "PKGS 清单 ${#ALL_PKGS[@]} 条。"
 
           selected=()
+          dropped=()
+          in_tree=0
 
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             input="${PACKAGES_INPUT:-}"
@@ -83,13 +95,13 @@ jobs:
               IFS=',' read -r -a filters <<< "$input"
               for f in "${filters[@]}"; do
                 [ -n "$f" ] || continue
-                hit=0
-                for p in "${ALL_PKGS[@]}"; do
-                  case "$p" in
-                    *"$f") selected+=("$p"); hit=1 ;;
-                  esac
-                done
-                if [ "$hit" -eq 0 ]; then
+                # 后缀规则也由脚本回答（与跑变异时的包参数同一套），
+                # 这里不再自己写一遍 `case "$p" in *"$f")`。
+                if hits=$(bash scripts/check-mutation.sh --list-packages --suffix "$f"); then
+                  while IFS= read -r p; do
+                    [ -n "$p" ] && selected+=("$p")
+                  done <<< "$hits"
+                else
                   echo "::error::包参数 '$f' 没有匹配到 PKGS 里任何一条。"
                   echo "::error::参数按后缀匹配清单，照清单里的名字写（bash scripts/check-mutation.sh --list-packages 打印整份清单）。"
                   exit 1
@@ -101,6 +113,16 @@ jobs:
               echo "::error::未处理的事件类型：$EVENT_NAME。选包规则只定义了 PR 与手工触发。"
               exit 1
             fi
+            if [ "$IS_DRAFT" = "true" ]; then
+              {
+                echo "### 变异测试：草稿 PR，这一轮不跑"
+                echo
+                echo "草稿还在改，跑一轮要几十分钟到几小时；标成 ready for review 后"
+                echo "下一次 push 会重新触发。下面的变异 job 显示为 **skipped**。"
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "packages=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
               echo "::error::拿不到 PR 的 base/head 提交，回退到「没跑」会把坏了的前提藏起来。"
               exit 1
@@ -110,7 +132,6 @@ jobs:
             changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA" -- '*.go')
             auto_prefixes=(internal/ledger/ internal/billing/ internal/money/ internal/pipeline/ internal/pricing/)
 
-            dropped=()
             while IFS= read -r f; do
               [ -n "$f" ] || continue
               allowed=0
@@ -120,13 +141,14 @@ jobs:
               if [ "$allowed" -eq 0 ]; then
                 continue
               fi
+              in_tree=1
               d=$(dirname "$f")
-              found=0
-              for p in "${ALL_PKGS[@]}"; do
-                if [ "$p" = "$d" ]; then found=1; fi
-              done
-              if [ "$found" -eq 1 ]; then
-                selected+=("$d")
+              # 「改动目录 → 该跑哪一条 PKGS」只由脚本回答：它取最近的、在清单里的
+              # 祖先（包路径是递归的，internal/billing/calendaradapter 归
+              # internal/billing 管）。这里不再自己写一遍后缀匹配——两处各写一份，
+              # 刚出生就会漂成「一处要精确相等、一处按前缀」。
+              if p=$(bash scripts/check-mutation.sh --list-packages --match "$d"); then
+                selected+=("$p")
               else
                 dropped+=("$d")
               fi
@@ -134,8 +156,8 @@ jobs:
 
             if [ "${#dropped[@]}" -gt 0 ]; then
               mapfile -t dropped < <(printf '%s\n' "${dropped[@]}" | sort -u)
-              echo "::warning::这些改动目录不在 PKGS 清单里，本轮不会单独为它们出一行：${dropped[*]}。"
-              echo "::warning::若它们的父包被选中，变异体仍会被递归跑到；要单独量，先把它加进 PKGS。"
+              echo "::warning::这些目录在自动触发的五棵树里，但没有任何 PKGS 条目覆盖它们（找不到在清单里的祖先）：${dropped[*]}。"
+              echo "::warning::本轮不会为它们跑变异。要量它们，先把覆盖它们的包加进 scripts/check-mutation.sh 的 PKGS。"
             fi
           fi
 
@@ -163,7 +185,21 @@ jobs:
             {
               echo "### 变异测试：这一轮没跑"
               echo
-              echo "改动不在账本 / 计费 / 金额那五棵树里（或手工触发没有给 packages）。"
+              if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+                echo "手工触发没有给 packages。"
+              elif [ "${#dropped[@]}" -gt 0 ]; then
+                echo "改动落在这五棵树里，但下面这些目录没有任何 PKGS 条目覆盖："
+                echo
+                echo '```'
+                printf '%s\n' "${dropped[@]}"
+                echo '```'
+                echo
+                echo "所以本轮没有可跑的变异包。要量它们，先把覆盖它们的包加进 PKGS——"
+                echo "否则这里会一直显示 skipped，而「只改了计费代码」与「不需要跑」看起来一样。"
+              else
+                echo "改动不涉及那五棵树（账本 / 计费 / 金额 / 结算额 / 单价）。"
+              fi
+              echo
               echo "下面的变异 job 显示为 **skipped**——这不是「跑了且通过」。"
             } >> "$GITHUB_STEP_SUMMARY"
             echo "packages=" >> "$GITHUB_OUTPUT"
@@ -197,7 +233,9 @@ jobs:
     needs: select
     # 没选中任何包时整个 job 不跑。它在 PR 的 checks 里显示为 skipped，
     # 与「跑了且通过」区分得开——这是这条触发规则要保证的可见性。
-    if: needs.select.outputs.packages != ''
+    # 草稿 PR 也不起这一轮：还在改的代码不该占着 runner 跑几小时（选包步骤会
+    # 在 summary 里写明是草稿）。
+    if: needs.select.outputs.packages != '' && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     # GitHub 单 job 上限 6 小时。这里留 30 分钟给 checkout、装工具、service
     # 启动与收尾——超过这个时间由平台杀掉，job 判为失败（不是通过）；同一 PR

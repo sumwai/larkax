@@ -750,8 +750,8 @@ grep -qE '^\[ *1\] \[[0-9]+s\]  LIVED CONDITIONALS_BOUNDARY at money.go:103:8' "
   || bad "逐行透传 —— 第一行要带序号、已用时间与原样内容"
 grep -qE '^\[ *2\] \[[0-9]+s\]   LIVED ARITHMETIC_BASE at money.go:54:25' "$last_out" \
   || bad "逐行透传 —— 序号要逐条递增，原行的缩进保留"
-grep -q '── 进度 \[2\] 已用 .*平均每条 .*s（gremlins 没报总数，不给 ETA）' "$last_out" \
-  || bad "逐行透传 —— 每 N 条要给降级进度（计数 + 已用 + 平均每条）"
+grep -q '── 进度 已完成 2 个变异体，已用 .*平均每个 .*s（gremlins 没报总数，不给 ETA）' "$last_out" \
+  || bad "逐行透传 —— 每 N 个变异体要给降级进度（计数 + 已用 + 平均每个）"
 grep -qE '^internal/money +8 ' "$last_out" \
   || bad "逐行透传 —— 汇总表那一行照旧要打出来"
 
@@ -779,6 +779,13 @@ grep -q '── 进度 \[1/12\] 已用 .*预估还剩' "$last_out" \
   || bad "有总数时的 ETA —— 要打「已完成/总数」与预估剩余"
 grep -q '── 进度 \[2/12\] 已用 .*预估还剩' "$last_out" \
   || bad "有总数时的 ETA —— 逐条递增后仍按同一个总数算"
+# 进度只数变异结果行：`Found 12 mutants` 是第 1 行输出，但它不是变异体。
+# 若按行数算，第一条 LIVED 会报成 [2/12]，最后会多报一条 [3/12]。
+if grep -q '\[3/12\]' "$last_out"; then
+  bad "有总数时的 ETA —— 进度把输出行当成了变异体（出现了 [3/12]，实际只有 2 个变异体）"
+else
+  ok
+fi
 
 # 18. 没有存活变异时，不该凭空打出一节空清单。
 run "$stub_all_killed" "$tmp/lock16" internal/money
@@ -1038,6 +1045,94 @@ fi
 for want in internal/money internal/billing internal/ledger internal/pricing internal/pipeline; do
   if printf '%s\n' "$list_out" | grep -qx "$want"; then ok; else bad "--list-packages —— 清单里缺了 $want"; fi
 done
+
+# 25b. 不带 `--match` 时输出必须与 `PKGS` 数组逐字一致（内容与顺序）。
+#
+#      CI 与用例都依赖「这一条命令只打印清单」这个形状（#866 评审要求改参数后
+#      原样保留）。这里不用 `--list-packages` 自己的打印结果做对照，而是从源码里
+#      把 `PKGS=(...)` 那一段独立抽出来比：这样钉住的是打印路径，而不是
+#      「脚本打印了它自己刚读到的同一个数组」这种同义反复。
+pkgs_from_source=$(awk '/^PKGS=\(/{f=1;next} f&&/^\)/{exit} f{sub(/^[[:space:]]+/,"");sub(/[[:space:]]+$/,"");if(length($0))print}' "$SCRIPT")
+if [ "$list_out" = "$pkgs_from_source" ]; then
+  ok
+else
+  bad "--list-packages —— 输出与 PKGS 数组不一致（内容或顺序变了）"
+  diff <(printf '%s\n' "$list_out") <(printf '%s\n' "$pkgs_from_source") | head -5 | sed 's/^/    | /'
+fi
+
+# 26. `--list-packages --match <目录>`：CI 选包步骤靠它把「改动目录」映射到
+#     「该跑哪一条 PKGS」。判据是**最近的、在清单里的祖先**：
+#       - 目录本身在清单里 → 取它自己（internal/ledger/store 不能被并到父包，
+#         否则 store 那几百个变异体的数字会从表里消失）；
+#       - 子包不在清单里 → 取最近的祖先（internal/billing/calendaradapter →
+#         internal/billing）。这一条正是 #866 评审里的失败形态：精确相等会把
+#         「只改了计费代码」的 PR 判成「没有可跑的包」；
+#       - 整棵树里没有覆盖它的条目 → 什么都不打印、退出 1，选包步骤据此报出
+#         「在树里但没有可跑的包」，而不是混进「改动不涉及这五棵树」。
+match_one() {
+  match_out=$(GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+    LOCK_FILE="$tmp/notadir/lock" bash "$SCRIPT" --list-packages --match "$1" 2>&1)
+  match_rc=$?
+}
+
+match_one internal/billing/calendaradapter
+if [ "$match_rc" -eq 0 ] && [ "$match_out" = "internal/billing" ]; then
+  ok
+else
+  bad "--match —— 子包应映射到清单里的最近祖先 internal/billing，实际 rc=$match_rc 输出=<$match_out>"
+fi
+match_one internal/ledger/store
+if [ "$match_rc" -eq 0 ] && [ "$match_out" = "internal/ledger/store" ]; then
+  ok
+else
+  bad "--match —— 目录本身在清单里时应取它自己，实际 rc=$match_rc 输出=<$match_out>"
+fi
+match_one internal/billing/expr
+if [ "$match_rc" -eq 0 ] && [ "$match_out" = "internal/billing/expr" ]; then
+  ok
+else
+  bad "--match —— 最近的祖先是更深的条目时要取更深那条，实际 rc=$match_rc 输出=<$match_out>"
+fi
+match_one internal/money
+if [ "$match_rc" -eq 0 ] && [ "$match_out" = "internal/money" ]; then
+  ok
+else
+  bad "--match —— 顶层包应原样返回，实际 rc=$match_rc 输出=<$match_out>"
+fi
+match_one internal/no-such-package-$$
+if [ "$match_rc" -eq 1 ] && [ -z "$match_out" ]; then
+  ok
+else
+  bad "--match —— 没有条目覆盖时应空输出且退出 1，实际 rc=$match_rc 输出=<$match_out>"
+fi
+
+# 27. `--list-packages --suffix <片段>`：手工触发的后缀匹配也由脚本回答。
+#     workflow 不再自己写一遍 `case "$p" in *"$f")`——两处各写一份，就会像
+#     #866 评审第 1、4 条那样刚出生就漂。
+suffix_one() {
+  suffix_out=$(GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+    LOCK_FILE="$tmp/notadir/lock" bash "$SCRIPT" --list-packages --suffix "$1" 2>&1)
+  suffix_rc=$?
+}
+
+suffix_one money
+if [ "$suffix_rc" -eq 0 ] && [ "$suffix_out" = "internal/money" ]; then
+  ok
+else
+  bad "--suffix —— 应打出 internal/money，实际 rc=$suffix_rc 输出=<$suffix_out>"
+fi
+suffix_one ledger/store
+if [ "$suffix_rc" -eq 0 ] && [ "$suffix_out" = "internal/ledger/store" ]; then
+  ok
+else
+  bad "--suffix —— 应按后缀打出 internal/ledger/store，实际 rc=$suffix_rc 输出=<$suffix_out>"
+fi
+suffix_one no-such-suffix-$$
+if [ "$suffix_rc" -eq 1 ] && [ -z "$suffix_out" ]; then
+  ok
+else
+  bad "--suffix —— 没有匹配时应空输出且退出 1，实际 rc=$suffix_rc 输出=<$suffix_out>"
+fi
 
 # ── 结果 ──────────────────────────────────────────────────────────────────
 
