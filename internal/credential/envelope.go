@@ -40,7 +40,8 @@ const (
 	// 在解析阶段就被拒绝，而不是让长度字段去驱动一次巨大的分配。
 	maxWraps = 16
 
-	// maxCiphertext 是单条凭证密文的长度上限。
+	// maxCiphertext 是**正文密文**的长度上限，不是整条密文的：整条密文还要
+	// 加上头部与 DEK 副本，所以可以比它更长。decode 只用它卡 body_len。
 	// 凭证是 API Key 或 OAuth token，几百字节量级；1 MiB 已经远超合理范围，
 	// 而它挡住的是「长度字段被构造成 4 GiB」这类输入。
 	maxCiphertext = 1 << 20
@@ -135,7 +136,7 @@ func (s *Sealer) Seal(plaintext []byte) ([]byte, error) {
 	// 漏算这 16 字节，最上面的那一档就会封出自己读不回来的密文——decode
 	// 用同一个 maxCiphertext 校验正文长度，标签同样计入。
 	if len(plaintext)+tagSize > maxCiphertext {
-		return nil, fmt.Errorf("凭证过长：%d 字节", len(plaintext))
+		return nil, fmt.Errorf("凭证过长：%d 字节（上限 %d 字节）", len(plaintext), maxCiphertext-tagSize)
 	}
 
 	dek, err := randomBytes(dekSize)
