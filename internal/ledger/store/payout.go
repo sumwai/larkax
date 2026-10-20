@@ -365,8 +365,8 @@ func (s *Store) RequestPayout(ctx context.Context, in RequestPayoutInput) (Payou
 	// 拿锁只把**申请之间**串行化，退款那条路不排队的话，「读完余额到写入之间」仍
 	// 有一个窗口——一边校验通过，另一边已经把它冲走了。所以 store.PostTransaction
 	// 对分录里出现的 merchant_payable 科目取同一把锁（见 lockPayableAccounts），
-	// 两条路因此落在同一条串行线上。消费的分成与驳回都只让它变大；Settle 与提现
-	// 申请是同一个形状，它还没有调用方，接的时候同样要拿这把锁。加锁顺序固定为
+	// 两条路因此落在同一条串行线上。消费的分成与驳回都只让它变大；清算
+	// （SettlePayout）与提现申请是同一个形状，两条都先拿这把锁。加锁顺序固定为
 	// 「交易键 → 科目」，两边一致。对账的 RepairAdjustLedger 不拿这把锁，是已知
 	// 例外（见 lockAccount）。
 	//
@@ -412,6 +412,167 @@ func (s *Store) RequestPayout(ctx context.Context, in RequestPayoutInput) (Payou
 	return row, true, nil
 }
 
+// SettlePayoutInput 是一次平台主动清算的输入。
+type SettlePayoutInput struct {
+	// TxnID 由调用方按清算单号（Ref）推出来。同一个键重放到达时，这次调用
+	// 什么都不写，返回 applied=false 与库里那张单子。
+	TxnID ledger.TxnID
+	// Ref 是这次清算的单号。它进分录备注，也参与重放判定：同一个交易号配
+	// 不同的单号是冲突，不是重放。
+	Ref string
+	// UserID 是收款的商户。它必须是 users 里真实存在的一行：那一列有外键
+	// （命令行在更早一步就把标识解析成了用户）。
+	UserID int64
+	Amount money.Amount
+	Asset  ledger.Asset
+	// Destination 是收款信息，**必填**，且必须是一个合法的 JSON 对象。
+	//
+	// 与商户申请那一档的差别就在这里：申请时收款信息可以留空（商户还没填），
+	// 平台主动清算则是平台已经决定要付，付到哪里必须当场说清。它同样参与
+	// 重放判定——这一栏事后没有修改命令，同一张结算单配另一份收款信息是
+	// 冲突，不是重放。
+	Destination []byte
+	// Reviewer 是做出这次清算的操作人（users.id）。单子直接落 approved，
+	// 所以这里记的是 reviewed_by：清算同样是记名的动作。
+	Reviewer int64
+	// Note 是清算说明（结算周期、对账批次号），留空不写。
+	Note string
+}
+
+// SettlePayout 一步建一条已批准的提现单，并把商户的分成转进这条单子的待付。
+//
+// 与 RequestPayout 的区别只有「谁发起、走不走审批」：那一档建 pending 的单子，
+// 由商户提出、等运营批准；这一档是平台主动清算，单子直接落 approved
+// （reviewed_by / reviewed_at 当场记下），不用再走 approve。账面形状相同，但
+// 分录类型是 settle 而不是 payout_request（见 ledger.Settle），于是对账时
+// 「平台清算的」与「商户申请的」在账面上分得开。
+//
+// 分录（借为正、贷为负，见 ledger.Settle）：
+//
+//	贷 merchant_payable:<商户>   A    欠商户的分成核销
+//	借 payout:<单id>             A    这条单子的待付多了一笔
+//
+// 建单与写分录在同一个事务里：两条事实缺一条，账面就会出现一个说得通而实际
+// 不对的状态（见本文件开头）。
+//
+// 返回的 applied=false 表示这个清算单号已经建过单（重放），库里那一行原样返回。
+func (s *Store) SettlePayout(ctx context.Context, in SettlePayoutInput) (Payout, bool, error) {
+	if in.TxnID == "" {
+		return Payout{}, false, errors.New("缺少 txn_id：清算单号要确定性映射成它，幂等靠它承担")
+	}
+	if in.UserID <= 0 {
+		return Payout{}, false, fmt.Errorf("商户 id 非法: %d", in.UserID)
+	}
+	if in.Reviewer <= 0 {
+		return Payout{}, false, fmt.Errorf("操作人 id 非法: %d", in.Reviewer)
+	}
+	if !in.Amount.IsPositive() {
+		return Payout{}, false, fmt.Errorf("清算金额必须为正数，当前为 %s", in.Amount)
+	}
+	if !in.Asset.Valid() {
+		return Payout{}, false, fmt.Errorf("资产 %q 不受支持（目前只有 %s）", in.Asset, ledger.AssetCNY)
+	}
+	if destErr := validateDestination(in.Destination); destErr != nil {
+		return Payout{}, false, destErr
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Payout{}, false, fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if lockErr := lockTxn(ctx, tx, in.TxnID); lockErr != nil {
+		return Payout{}, false, lockErr
+	}
+
+	stored, err := txnEntriesInTx(ctx, tx, in.TxnID)
+	if err != nil {
+		return Payout{}, false, err
+	}
+	if len(stored) > 0 {
+		// 重放：单子已经建过，它的 id 记在分录上（见 payoutIDOf）。
+		payoutID, idErr := payoutIDOf(stored)
+		if idErr != nil {
+			return Payout{}, false, idErr
+		}
+		expected, buildErr := ledger.Settle(ledger.SettleParams{
+			TxnID:    in.TxnID,
+			UserID:   in.UserID,
+			Amount:   in.Amount,
+			Asset:    in.Asset,
+			PayoutID: payoutID,
+			Ref:      in.Ref,
+		})
+		if buildErr != nil {
+			return Payout{}, false, buildErr
+		}
+		if conflictErr := sameStoredTxn(stored, expected); conflictErr != nil {
+			return Payout{}, false, conflictErr
+		}
+		// 收款信息不在分录里，同一条交易比不出它来，得单独比一次（理由与
+		// RequestPayout 那一处相同：放过去的话，重跑一条旧命令会把那张单子
+		// 的收款账号悄悄换掉）。
+		var sameDestination bool
+		if destErr := tx.QueryRowContext(ctx, `
+			SELECT destination = $2::jsonb FROM payout_requests WHERE id = $1`,
+			payoutID, string(in.Destination)).Scan(&sameDestination); destErr != nil {
+			return Payout{}, false, fmt.Errorf("核对收款信息失败: %w", destErr)
+		}
+		if !sameDestination {
+			return Payout{}, false, fmt.Errorf(
+				"%w: 清算单号对应的这条提现单已经存在，但收款信息与这次要写的不一样；"+
+					"收款信息事后不能改", ErrTxnConflict)
+		}
+		row, readErr := payoutByID(ctx, tx, payoutID)
+		if readErr != nil {
+			return Payout{}, false, readErr
+		}
+		return row, false, nil
+	}
+
+	// 清算要把这笔钱从商户的分成里挪进待付，先确认那里够。锁的口径与申请
+	// 那一条相同：按科目名字挂在事务上，与并发的退款、申请排在同一条线上
+	// （理由见 RequestPayout 里那一段）。
+	payable := ledger.MerchantPayableAccount(in.UserID)
+	if lockErr := lockAccount(ctx, tx, payable); lockErr != nil {
+		return Payout{}, false, lockErr
+	}
+	available, balanceErr := accountBalanceInTx(ctx, tx, payable, in.Asset)
+	if balanceErr != nil {
+		return Payout{}, false, balanceErr
+	}
+	if available.Cmp(in.Amount) < 0 {
+		return Payout{}, false, fmt.Errorf(
+			"%w：商户 %d 的分成余额 %s，这次要清算 %s。先确认这个商户的分成已经记进账本，"+
+				"或者少清算一点——不能清平台还不欠的钱",
+			ErrInsufficientPayable, in.UserID, available, in.Amount)
+	}
+
+	row, err := insertApprovedPayout(ctx, tx, in)
+	if err != nil {
+		return Payout{}, false, err
+	}
+	txn, err := ledger.Settle(ledger.SettleParams{
+		TxnID:    in.TxnID,
+		UserID:   in.UserID,
+		Amount:   in.Amount,
+		Asset:    in.Asset,
+		PayoutID: row.ID,
+		Ref:      in.Ref,
+	})
+	if err != nil {
+		return Payout{}, false, err
+	}
+	if err := writeTxnEntries(ctx, tx, txn); err != nil {
+		return Payout{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Payout{}, false, fmt.Errorf("提交清算失败: %w", err)
+	}
+	return row, true, nil
+}
+
 // validateDestination 要求收款信息是一个 JSON **对象**（顶层的 `{…}`）。
 //
 // 只判 json.Valid 不够：`"abc"`、`[1]`、`null` 都是合法 JSON，落进 jsonb 之后
@@ -444,8 +605,9 @@ func destinationOrEmptyObject(raw []byte) []byte {
 // 两个不同的申请单号，各自的那把交易锁互不相干，只有这把科目锁能让它们排队。
 //
 // **让这个科目变小的写路径都应当先拿同一把锁**，否则窗口照样存在。今天这样做
-// 的有两条：提现申请（RequestPayout）与 PostTransaction（退款冲回分成，见
-// lockPayableAccounts）。已知例外是对账的 RepairAdjustLedger：它在
+// 的有三条：提现申请（RequestPayout）、平台清算（SettlePayout）与
+// PostTransaction（退款冲回分成，见 lockPayableAccounts）。已知例外是对账的
+// RepairAdjustLedger：它在
 // reconcile_batch.go 里直接 insertEntries，不走 PostTransaction；差额科目若被
 // 配成 merchant_payable:<id>，它不拿这把锁就能改动这个科目。对账是人工、低频
 // 的动作，与提现并发时最多让一次申请校验读到偏大的余额——方向不安全（可能多
@@ -492,6 +654,24 @@ func insertPayoutRequest(ctx context.Context, tx *sql.Tx, in RequestPayoutInput)
 		RETURNING `+payoutColumns,
 		in.UserID, string(in.Asset), in.Amount.String(),
 		string(destinationOrEmptyObject(in.Destination))).Scan)
+	if err != nil {
+		return Payout{}, constraintFailure(fmt.Errorf("建提现单失败: %w", err))
+	}
+	return row, nil
+}
+
+// insertApprovedPayout 写一行**直接是 approved** 的提现单，返回库里那一行。
+//
+// 审批人与时刻在 INSERT 里一次写下：平台主动清算没有「先 pending 再批准」这
+// 一步，分两次写会留下一个可以被打款却没有审批人的窗口。
+func insertApprovedPayout(ctx context.Context, tx *sql.Tx, in SettlePayoutInput) (Payout, error) {
+	row, err := scanPayout(tx.QueryRowContext(ctx, `
+		INSERT INTO payout_requests (merchant_user_id, asset, amount, destination,
+		                             status, reviewed_by, reviewed_at, review_note)
+		VALUES ($1, $2, $3::numeric, $4::jsonb, 'approved', $5, now(), NULLIF($6, ''))
+		RETURNING `+payoutColumns,
+		in.UserID, string(in.Asset), in.Amount.String(),
+		string(in.Destination), in.Reviewer, in.Note).Scan)
 	if err != nil {
 		return Payout{}, constraintFailure(fmt.Errorf("建提现单失败: %w", err))
 	}

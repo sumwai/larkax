@@ -537,6 +537,239 @@ func TestRequestPayoutRejectsBadInput(t *testing.T) {
 	}
 }
 
+// 清算：一步建一行 approved 的单子并写出 settle 那组分录，收款信息与审批人都在
+// 建单那一次落下。
+func TestSettlePayoutWritesApprovedRowAndEntries(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+	merchant := bareUser(t, db)
+	operator := bareUser(t, db)
+	fundPayable(t, db, merchant, "8")
+	txnID := ledger.NewTxnID()
+
+	row, applied, err := s.SettlePayout(ctx, SettlePayoutInput{
+		TxnID: txnID, Ref: "SETTLE-A", UserID: merchant,
+		Amount: money.MustParse("8"), Asset: ledger.AssetCNY,
+		Destination: []byte(`{"bank":"placeholder-bank"}`),
+		Reviewer:    operator, Note: "2026-10 结算",
+	})
+	if err != nil {
+		t.Fatalf("清算失败: %v", err)
+	}
+	if !applied {
+		t.Error("第一次清算应当返回 applied=true")
+	}
+	if row.Status != PayoutApproved {
+		t.Errorf("状态 = %q，期望 %q（平台已经决定付了，不再走审批）", row.Status, PayoutApproved)
+	}
+	if row.UserID != merchant {
+		t.Errorf("商户 = %d，期望 %d", row.UserID, merchant)
+	}
+	if row.Amount.String() != "8.00000000" {
+		t.Errorf("金额 = %s，期望 8.00000000", row.Amount)
+	}
+	if string(row.Destination) != `{"bank": "placeholder-bank"}` {
+		t.Errorf("收款信息 = %q，期望写下给的那一段 JSON", row.Destination)
+	}
+	if row.ReviewedBy == nil || *row.ReviewedBy != operator {
+		t.Errorf("审批人 = %v，期望 %d（--by 解析出来的那个人）", row.ReviewedBy, operator)
+	}
+	if row.ReviewedAt == nil {
+		t.Error("清算建出来的单子直接是 approved，审批时刻应当由库里的 now() 记下")
+	}
+	if row.ReviewNote != "2026-10 结算" {
+		t.Errorf("说明 = %q，期望 2026-10 结算", row.ReviewNote)
+	}
+	if row.PaidAt != nil || row.PayoutRef != "" {
+		t.Error("还没打款的单子不该有打款时刻与凭据")
+	}
+
+	// 分录：与申请同一形状，但类型是 settle；清算单号进分成那条的备注（交易号
+	// 是它的哈希，不落备注就对不回这张结算单）。
+	wantEntries(t, db, txnID, []entryRow{
+		{
+			Account: ledger.MerchantPayableAccount(merchant).String(), Asset: "CNY",
+			Amount: "-8.00000000", EntryType: string(ledger.EntrySettle),
+			Memo: "平台清算（单据 SETTLE-A）",
+		},
+		{
+			Account: ledger.PayoutAccount(row.ID).String(), Asset: "CNY",
+			Amount: "8.00000000", EntryType: string(ledger.EntrySettle),
+		},
+	})
+
+	if got := accountTotal(t, db, ledger.MerchantPayableAccount(merchant)); got != "0.00000000" {
+		t.Errorf("清算之后分成科目 = %s，期望 0.00000000（核销干净）", got)
+	}
+	if got := accountTotal(t, db, ledger.PayoutAccount(row.ID)); got != "8.00000000" {
+		t.Errorf("清算之后待付科目 = %s，期望 8.00000000", got)
+	}
+}
+
+// 同一个清算单号重放不建第二张单、不记第二次账；换金额或收款信息是冲突。
+func TestSettlePayoutReplayAndConflicts(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+	merchant := bareUser(t, db)
+	operator := bareUser(t, db)
+	fundPayable(t, db, merchant, "10")
+	txnID := ledger.NewTxnID()
+
+	in := SettlePayoutInput{
+		TxnID: txnID, Ref: "SETTLE-B", UserID: merchant,
+		Amount: money.MustParse("4"), Asset: ledger.AssetCNY,
+		Destination: []byte(`{"bank":"placeholder-bank"}`), Reviewer: operator,
+	}
+	first, applied, err := s.SettlePayout(ctx, in)
+	if err != nil || !applied {
+		t.Fatalf("第一次清算应当成功：applied=%v err=%v", applied, err)
+	}
+
+	// 重放：同一行原样返回，行数、分录条数与两个科目的余额都不变。
+	again, reapplied, err := s.SettlePayout(ctx, in)
+	if err != nil {
+		t.Fatalf("重放被拒: %v", err)
+	}
+	if reapplied {
+		t.Error("重放应当返回 applied=false")
+	}
+	if again.ID != first.ID {
+		t.Errorf("重放拿到单子 %d，期望还是 %d", again.ID, first.ID)
+	}
+	if n := payoutRows(t, db, merchant); n != 1 {
+		t.Errorf("重放之后有 %d 行提现单，期望 1 行", n)
+	}
+	if got := entriesOf(t, db, txnID); len(got) != 2 {
+		t.Errorf("重放之后这个交易有 %d 条分录，期望还是 2 条", len(got))
+	}
+	if got := accountTotal(t, db, ledger.MerchantPayableAccount(merchant)); got != "6.00000000" {
+		t.Errorf("重放之后分成科目 = %s，期望仍是 6.00000000", got)
+	}
+
+	cases := []struct {
+		name string
+		in   SettlePayoutInput
+	}{
+		{"换金额", SettlePayoutInput{TxnID: txnID, Ref: "SETTLE-B", UserID: merchant,
+			Amount: money.MustParse("5"), Asset: ledger.AssetCNY,
+			Destination: []byte(`{"bank":"placeholder-bank"}`), Reviewer: operator}},
+		{"换收款信息", SettlePayoutInput{TxnID: txnID, Ref: "SETTLE-B", UserID: merchant,
+			Amount: money.MustParse("4"), Asset: ledger.AssetCNY,
+			Destination: []byte(`{"bank":"another-bank"}`), Reviewer: operator}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := s.SettlePayout(ctx, tc.in); !errors.Is(err, ErrTxnConflict) {
+				t.Fatalf("同一张清算单%s应当撞成 ErrTxnConflict，得到 %v", tc.name, err)
+			}
+		})
+	}
+	if n := payoutRows(t, db, merchant); n != 1 {
+		t.Errorf("冲突之后有 %d 行提现单，期望 1 行", n)
+	}
+	if got := accountTotal(t, db, ledger.PayoutAccount(first.ID)); got != "4.00000000" {
+		t.Errorf("冲突之后待付科目 = %s，期望 4.00000000", got)
+	}
+}
+
+// 清算额超过商户的分成余额时拒在写库之前，一笔都不写。
+func TestSettlePayoutRejectsInsufficientPayable(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+	merchant := bareUser(t, db)
+	operator := bareUser(t, db)
+	fundPayable(t, db, merchant, "5")
+	txnID := ledger.NewTxnID()
+
+	_, _, err := s.SettlePayout(ctx, SettlePayoutInput{
+		TxnID: txnID, Ref: "SETTLE-NSF", UserID: merchant,
+		Amount: money.MustParse("5.01"), Asset: ledger.AssetCNY,
+		Destination: []byte(`{"bank":"placeholder-bank"}`), Reviewer: operator,
+	})
+	if !errors.Is(err, ErrInsufficientPayable) {
+		t.Fatalf("余额不足应当返回 ErrInsufficientPayable，得到 %v", err)
+	}
+	for _, want := range []string{"商户 " + itoa(merchant), "5.00000000", "5.01000000"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("报错 = %v，期望含 %q", err, want)
+		}
+	}
+	if n := payoutRows(t, db, merchant); n != 0 {
+		t.Errorf("被拒的清算留下了 %d 行提现单", n)
+	}
+	if got := entriesOf(t, db, txnID); len(got) != 0 {
+		t.Errorf("被拒的清算写下了 %d 条分录：%+v", len(got), got)
+	}
+	if got := accountTotal(t, db, ledger.MerchantPayableAccount(merchant)); got != "5.00000000" {
+		t.Errorf("被拒之后分成科目 = %s，期望仍是 5.00000000", got)
+	}
+}
+
+// 清算的输入校验：txn_id、商户、操作人、金额、资产与收款信息各判一遍。
+//
+// 收款信息在这一档**必填**：与申请不同，平台已经决定付了，付到哪里必须当场说清。
+func TestSettlePayoutRejectsBadInput(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+	merchant := bareUser(t, db)
+	operator := bareUser(t, db)
+	goodDest := []byte(`{"bank":"placeholder-bank"}`)
+
+	cases := []struct {
+		name string
+		in   SettlePayoutInput
+		want string
+	}{
+		{"缺交易号", SettlePayoutInput{Ref: "S", UserID: merchant, Reviewer: operator,
+			Amount: money.MustParse("1"), Asset: ledger.AssetCNY, Destination: goodDest}, "缺少 txn_id"},
+		{"缺商户 id", SettlePayoutInput{TxnID: ledger.NewTxnID(), Ref: "S", Reviewer: operator,
+			Amount: money.MustParse("1"), Asset: ledger.AssetCNY, Destination: goodDest}, "商户 id 非法: 0"},
+		{"缺操作人", SettlePayoutInput{TxnID: ledger.NewTxnID(), Ref: "S", UserID: merchant,
+			Amount: money.MustParse("1"), Asset: ledger.AssetCNY, Destination: goodDest}, "操作人 id 非法: 0"},
+		{"金额为零", SettlePayoutInput{TxnID: ledger.NewTxnID(), Ref: "S", UserID: merchant,
+			Reviewer: operator, Amount: money.Zero, Asset: ledger.AssetCNY, Destination: goodDest}, "金额必须为正数"},
+		{"金额为负", SettlePayoutInput{TxnID: ledger.NewTxnID(), Ref: "S", UserID: merchant,
+			Reviewer: operator, Amount: money.MustParse("-1"), Asset: ledger.AssetCNY,
+			Destination: goodDest}, "金额必须为正数"},
+		{"资产不认识", SettlePayoutInput{TxnID: ledger.NewTxnID(), Ref: "S", UserID: merchant,
+			Reviewer: operator, Amount: money.MustParse("1"), Asset: ledger.Asset("USDT"),
+			Destination: goodDest}, "不受支持"},
+		{"缺收款信息", SettlePayoutInput{TxnID: ledger.NewTxnID(), Ref: "S", UserID: merchant,
+			Reviewer: operator, Amount: money.MustParse("1"), Asset: ledger.AssetCNY}, "收款信息必须"},
+		{"收款信息不是 JSON", SettlePayoutInput{TxnID: ledger.NewTxnID(), Ref: "S", UserID: merchant,
+			Reviewer: operator, Amount: money.MustParse("1"), Asset: ledger.AssetCNY,
+			Destination: []byte("not-json")}, "收款信息必须"},
+		{"收款信息是字符串", SettlePayoutInput{TxnID: ledger.NewTxnID(), Ref: "S", UserID: merchant,
+			Reviewer: operator, Amount: money.MustParse("1"), Asset: ledger.AssetCNY,
+			Destination: []byte(`"abc"`)}, "收款信息必须"},
+		{"收款信息是数组", SettlePayoutInput{TxnID: ledger.NewTxnID(), Ref: "S", UserID: merchant,
+			Reviewer: operator, Amount: money.MustParse("1"), Asset: ledger.AssetCNY,
+			Destination: []byte(`[1]`)}, "收款信息必须"},
+		{"收款信息是 null", SettlePayoutInput{TxnID: ledger.NewTxnID(), Ref: "S", UserID: merchant,
+			Reviewer: operator, Amount: money.MustParse("1"), Asset: ledger.AssetCNY,
+			Destination: []byte(`null`)}, "收款信息必须"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := s.SettlePayout(ctx, tc.in)
+			if err == nil {
+				t.Fatal("这条输入应当被拒，却建出了单子")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("报错 = %v，期望含 %q（这一条该在写库之前就被拒）", err, tc.want)
+			}
+		})
+	}
+	if n := payoutRows(t, db, merchant); n != 0 {
+		t.Errorf("被拒的清算留下了 %d 行提现单", n)
+	}
+}
+
 // 批准 / 驳回 / 打款三条路上那五个 `<= 0` 的边界：单号与审批人为 0 时拒在写库之前。
 //
 // 0 要在这里拒，而不是让它往下走：单号 0 会落到「没有这条提现单」，审批人 0 会

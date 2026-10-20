@@ -355,6 +355,49 @@ func TestSettleAndPayoutRequestDifferInType(t *testing.T) {
 	}
 }
 
+// 清算单号并进备注：交易号是它的哈希，不落备注就对不回那张结算单。
+//
+// 没有说明时前缀是「平台清算」；给了说明（结算周期、对账批次号）时说明在前。
+// 两种情况都锚在分成那一条分录上——Settle 的备注一直写在那里。
+func TestSettleRecordsRefInMemo(t *testing.T) {
+	txn := newTxnID(t, txnA)
+
+	cases := []struct {
+		name string
+		memo string
+		want string
+	}{
+		{"没有说明", "", "平台清算（单据 SETTLE-1）"},
+		{"有说明", "2026-10 结算", "2026-10 结算（单据 SETTLE-1）"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			settle, err := Settle(SettleParams{
+				TxnID: txn, UserID: 7, Amount: amount(t, "5"), Asset: AssetCNY,
+				PayoutID: 3, Memo: tc.memo, Ref: "SETTLE-1",
+			})
+			if err != nil {
+				t.Fatalf("Settle: %v", err)
+			}
+			if got := settle.Entries[0].Memo; got != tc.want {
+				t.Errorf("备注 = %q，期望 %q", got, tc.want)
+			}
+		})
+	}
+
+	// 不给单号时备注原样保留：Settle 的既有调用方不该因为多了一个字段而变。
+	settle, err := Settle(SettleParams{
+		TxnID: txn, UserID: 7, Amount: amount(t, "5"), Asset: AssetCNY,
+		PayoutID: 3, Memo: "2026-10 结算",
+	})
+	if err != nil {
+		t.Fatalf("Settle: %v", err)
+	}
+	if got := settle.Entries[0].Memo; got != "2026-10 结算" {
+		t.Errorf("没给单号时备注 = %q，期望原样保留", got)
+	}
+}
+
 // 调账没有备注就无法在事后解释，只能当成来路不明的一笔。
 func TestAdjustmentRequiresMemo(t *testing.T) {
 	txn := newTxnID(t, txnA)

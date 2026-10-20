@@ -21,44 +21,53 @@ import (
 var walletPayoutHelp = helpText{short: walletPayoutShortUsage, long: walletPayoutUsage}
 
 // walletPayoutShortUsage 是 wallet payout 的短版：`-h` / `--help` 与参数写错时打的那一份。
-const walletPayoutShortUsage = `larkaxctl wallet payout 商户提现：申请、审批与打款。
+const walletPayoutShortUsage = `larkaxctl wallet payout 商户提现：申请、清算、审批与打款。
 
 用法：
   larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号>
                                   [--asset <资产>] [--destination <收款信息 JSON>]
+  larkaxctl wallet payout settle  --user <ID 或用户名> --amount <金额> --ref <结算单号>
+                                  --destination <收款信息 JSON> --by <操作人> [--note <说明>]
   larkaxctl wallet payout approve --id <提现单 ID> --by <操作人> [--note <说明>]
   larkaxctl wallet payout reject  --id <提现单 ID> --by <操作人> [--note <原因>]
   larkaxctl wallet payout paid    --id <提现单 ID> --gateway <通道> [--gateway-ref <凭据号>]
 
-request 把申请额挪进这条单子的待付（钱在申请这一步就冻住了），approve 与 reject 记下
-审批结果（reject 顺带把那笔冻结解除），paid 把钱从待付出账。**paid 只放行已批准的单子**：
-不存在一条不经过批准就能出钱的路。approve 与 reject 都要 --by，记的是谁批的（撤回冻结
-发生在 reject 里，不是 paid）。--amount、--ref 与 --gateway 必填。
-request 会先核商户的分成余额：分成还没记进账本前申请会被一律拒掉（退出 1），那是对的。
---destination 必须是一个 JSON 对象，且事后不能改（同一个申请单号换一份就是冲突，退出 4）。
+request 把申请额挪进这条单子的待付（钱在申请这一步就冻住了），settle 是平台主动清算，
+一步建单（直接 approved）并记账；approve 与 reject 记下审批结果（reject 顺带把那笔冻结
+解除），paid 把钱从待付出账。**paid 只放行已批准的单子**：不存在一条不经过批准就能出钱
+的路。settle、approve 与 reject 都要 --by，记的是谁做的（撤回冻结发生在 reject 里，不是
+paid）。--amount、--ref、--destination（settle）与 --gateway 必填。
+request 与 settle 都会先核商户的分成余额：分成还没记进账本前会被一律拒掉（退出 1），
+那是对的。--destination 必须是一个 JSON 对象，且事后不能改（同一个单号换一份就是冲突，
+退出 4）。
 
 更细的边界：larkaxctl wallet payout help。
 `
 
 // walletPayoutUsage 是 wallet payout 的长版：`wallet payout help`。
-const walletPayoutUsage = `larkaxctl wallet payout 商户提现：申请、审批与打款。
+const walletPayoutUsage = `larkaxctl wallet payout 商户提现：申请、清算、审批与打款。
 
 用法：
   larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号>
                                   [--asset <资产>] [--destination <收款信息 JSON>]
+  larkaxctl wallet payout settle  --user <ID 或用户名> --amount <金额> --ref <结算单号>
+                                  --destination <收款信息 JSON> --by <操作人> [--note <说明>]
   larkaxctl wallet payout approve --id <提现单 ID> --by <操作人> [--note <说明>]
   larkaxctl wallet payout reject  --id <提现单 ID> --by <操作人> [--note <原因>]
   larkaxctl wallet payout paid    --id <提现单 ID> --gateway <通道> [--gateway-ref <凭据号>]
 
-一条提现单按状态往前走，四个动作各一条命令：
+一条提现单按状态往前走，动它的动作各一条命令：
 
     pending --批准--> approved --打款--> paid
         |
         +--驳回--> rejected
 
+settle 不经过这一段的第一半：它建出来的单子**直接是 approved**。
+
 **分成三步走而不是一步到位**：申请是商户提出的要求，批准是运营认下它，打款是钱真的
-出去了。三者是三个时刻、可能三个人做，所以分成三条命令，各写各的记录（谁在什么时候
-批的，谁在什么时候打的款）。
+出去了。三者是三个时刻、可能三个人做，所以分成几条命令，各写各的记录（谁在什么时候
+批的，谁在什么时候打的款）。settle 是另一条入口：平台自己决定清算，批准与建单在
+同一条命令里落下来，不需要商户先申请。
 
 request 建一行 payout_requests 并把申请额挪进待付，分录是：
 
@@ -79,16 +88,33 @@ request 建一行 payout_requests 并把申请额挪进待付，分录是：
 分录的备注，逐字是「提现申请（单据 <ref>）」——交易号是它的哈希，从单据号算得到交易号，
 反过来算不回来，不落备注就再没有第二条路把这张申请单对上这笔账。
 
---destination 是商户的收款信息，必须是**一个 JSON 对象**（形如 {"bank":"…"}），落进
-payout_requests.destination；不给就是空对象。字符串、数组与 null 都在连库之前按参数错
-拒掉（退出 2）：那一列是 jsonb，而打款通道要按字段取值，一个不是对象的 JSON 取不出任何
-字段。本命令不解释它的内容，要哪些字段是通道那一侧的事。
+request 的 --destination 是商户的收款信息，必须是**一个 JSON 对象**（形如 {"bank":"…"}），
+落进 payout_requests.destination；不给就是空对象（settle 那一档必填，见下）。字符串、
+数组与 null 都在连库之前按参数错拒掉（退出 2）：那一列是 jsonb，而打款通道要按字段取值，
+一个不是对象的 JSON 取不出任何字段。本命令不解释它的内容，要哪些字段是通道那一侧的事。
 
 收款信息**事后不能改**：这一族没有修改命令。所以同一个申请单号配同一份收款信息是重放，
 配了另一份不是重放而是冲突（退出 4），一笔都不写——否则重跑一条旧命令就会把那张单子的
 收款账号悄悄换掉。要换收款方式只能驳回后重新申请。
 
-approve 与 reject 都**不在这一层动钱**，钱在申请时就动了：
+settle 是**平台主动清算**：平台已经决定付这笔钱，于是建单与记账在同一条命令里做完。
+单子直接落 approved（reviewed_by 记 --by、reviewed_at 取库里的 now()、review_note 记
+--note），之后照旧用 paid 收尾。分录类型是 settle，与商户申请的 payout_request 分开，
+对账时「平台清算的」与「商户申请的」在账面上分得开。
+
+    larkaxctl wallet payout settle --user <ID 或用户名> --amount <金额> --ref <结算单号>
+                                   --destination <收款信息 JSON> --by <操作人> [--note <说明>]
+
+    --ref 是清算单号，同时是幂等键：同一个单号重跑只会建一张单、记一次账，回显「已经
+    清算过，本次未改动」。它也进分录备注，逐字是「平台清算（单据 <ref>）」，理由与申请
+    那一条相同。同一个单号配不同的金额、商户或收款信息不是重放，而是冲突（退出 4），
+    一笔都不写。
+
+    --destination 在这一档**必填**：平台已经决定付了，付到哪里必须当场说清；申请那一档
+    可以留空，表示商户可能还没有填。--amount 为正，且不超过商户当前的分成余额，超了退出 1、
+    一笔都不写（与 request 同一档）。
+
+approve 与 reject 都**不在这一层动钱**，钱在申请或清算时就动了：
 
     larkaxctl wallet payout approve --id <单id> --by <操作人>
         只记审批人与时刻（reviewed_by / reviewed_at）。审批是记名的动作，所以 --by 必填：
@@ -119,26 +145,32 @@ paid 是唯一一个把钱付出去的入口，**只放行已批准的单子**�
     打款。不给这一项就留一条没有凭据号的备注：线下打款（银行转账、现金）拿不到通道流水号，
     那里要填就只能是编一个，编出来的号进了备注反而更难对账。
 
-**幂等**：四个动作各自幂等。申请、驳回与打款重放时什么都不写，回显打「已经申请过 /
-已经驳回过 / 已经打过款，本次未改动」；批准重跑时也不覆盖上一次的审批人与时刻——一次
-重跑不该把「谁批的」改成后一个人。两种结果都是退出 0，只能靠那一行字分辨。
+**幂等**：五个动作各自幂等。申请、清算、驳回与打款重放时什么都不写，回显打「已经申请过 /
+已经清算过 / 已经驳回过 / 已经打过款，本次未改动」；批准重跑时也不覆盖上一次的审批人与
+时刻——一次重跑不该把「谁批的」改成后一个人。两种结果都是退出 0，只能靠那一行字分辨。
 
 --id 给了一个库里没有的提现单时报「没有这条提现单」；单子停在别的状态上时，那一句里
 会把当前状态与这一步要求的状态都打出来。两者都退出 4——下一步都是先看清那一行现在
 是什么，而不是改一下命令重发。
 
 **这一族不动余额**：提现动的是分成与待付，商户的用户余额（user 科目）不受影响，所以
-四条命令都不要求那个用户有钱包行。列出提现单的清单命令还没有。
+这些命令都不要求那个用户有钱包行。列出提现单的清单命令还没有。
 
 更细的约定见 docs/cli-reference.md 的「wallet」一节。
 `
 
-// 四个动作各有一个域分隔前缀，理由见 txnIDForAdjustment：共用一个前缀会让两个不同
-// 的业务动作算成同一笔交易。申请取**外部申请单号**（它是这条命令的幂等键），驳回与
-// 打款取**提现单自己的 id**——这两个动作没有对应的外部单据，而「同一张单被驳两次 /
+// 五个动作各有一个域分隔前缀，理由见 txnIDForAdjustment：共用一个前缀会让两个不同
+// 的业务动作算成同一笔交易。申请与清算取**外部单号**（它是这两条命令的幂等键），驳回
+// 与打款取**提现单自己的 id**——这两个动作没有对应的外部单据，而「同一张单被驳两次 /
 // 被打两次款」正是要幂等挡住的重复。
 func txnIDForPayoutRequest(ref string) ledger.TxnID {
 	return txnIDFromKey("larkax:wallet-payout-request:v1", ref)
+}
+
+// txnIDForPayoutSettle 与申请那一把互不相认：同一个单号在「商户申请」与「平台清算」
+// 上是两笔不相干的交易，共用前缀会把它们算成同一笔。
+func txnIDForPayoutSettle(ref string) ledger.TxnID {
+	return txnIDFromKey("larkax:wallet-payout-settle:v1", ref)
 }
 
 func txnIDForPayoutReject(payoutID int64) ledger.TxnID {
@@ -151,8 +183,9 @@ func txnIDForPayoutPaid(payoutID int64) ledger.TxnID {
 
 // runWalletPayout 处理 wallet 下的 payout 子命令。
 //
-// 分成四条命令而不是一个「把单子推到下一步」的入口：每一步都有自己的输入（批准要
-// 审批人、打款要通道与凭据），而且谁在哪一步做了什么要能在输出与审计里分开看。
+// 每个动作一条命令而不是一个「把单子推到下一步」的入口：每一步都有自己的输入（清算
+// 要收款信息、批准要审批人、打款要通道与凭据），而且谁在哪一步做了什么要能在输出与
+// 审计里分开看。
 func runWalletPayout(args []string) error {
 	if len(args) == 0 {
 		printUsage(os.Stderr, walletPayoutShortUsage)
@@ -163,6 +196,8 @@ func runWalletPayout(args []string) error {
 	switch action {
 	case "request":
 		return runPayoutRequest(rest)
+	case "settle":
+		return runPayoutSettle(rest)
 	case "approve":
 		return runPayoutApprove(rest)
 	case "reject":
@@ -190,10 +225,10 @@ func runPayoutRequest(args []string) error {
 	if err := jsonUnsupported("wallet payout request"); err != nil {
 		return err
 	}
-	// 四个子命令（request / approve / reject / paid）都认 `help` 这一个位置参数：
-	// 它们都不接受别的位置参数，而这个字不可能是某个旗标的取值，所以认它不会有
-	// 歧义；四个里三个认、一个不认的话，`wallet payout request help` 会以「不接受
-	// 位置参数」收场，而同一族里相邻的那条命令却打出一屏说明书。
+	// 五个子命令（request / settle / approve / reject / paid）都认 `help` 这一个
+	// 位置参数：它们都不接受别的位置参数，而这个字不可能是某个旗标的取值，所以
+	// 认它不会有歧义；五个里四个认、一个不认的话，`wallet payout request help`
+	// 会以「不接受位置参数」收场，而同一族里相邻的那条命令却打出一屏说明书。
 	if len(args) > 0 && args[0] == "help" {
 		printUsage(os.Stdout, walletPayoutHelp.long)
 		return nil
@@ -293,6 +328,142 @@ func runPayoutRequest(args []string) error {
 			User:       owner,
 			RequestRef: requestRef,
 			Txn:        &txn,
+		})
+		return nil
+	})
+}
+
+// runPayoutSettle 是平台主动清算：一步建一条已批准的提现单，并把商户的分成
+// 挪进它的待付。
+//
+// 与 request 分成两条命令而不是加一个 --approved 开关：两者的输入不同（清算要
+// 操作人与收款信息，申请不要），落库的也是两件不同的事实（谁发起的），在审计时
+// 这两个问题完全不同。
+func runPayoutSettle(args []string) error {
+	if err := jsonUnsupported("wallet payout settle"); err != nil {
+		return err
+	}
+	if len(args) > 0 && args[0] == "help" {
+		printUsage(os.Stdout, walletPayoutHelp.long)
+		return nil
+	}
+
+	fs := flag.NewFlagSet("wallet payout settle", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, walletPayoutShortUsage) }
+	user := fs.String("user", "", "")
+	stringAlias(fs, user, "u")
+	amount := fs.String("amount", "", "")
+	ref := fs.String("ref", "", "")
+	destination := fs.String("destination", "", "")
+	by := fs.String("by", "", "")
+	note := fs.String("note", "", "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf(
+			"settle 不接受位置参数，得到 %q：商户、金额、单号与操作人都用旗标指定", fs.Arg(0)))
+	}
+	if strings.TrimSpace(*user) == "" {
+		return usageErr(errors.New("缺少 --user"))
+	}
+	settleRef := strings.TrimSpace(*ref)
+	if settleRef == "" {
+		return usageErr(errors.New(
+			"缺少 --ref：它是这次清算的单号，同时是幂等键——重跑同一条命令时靠它认出「已经清算过」"))
+	}
+	if ctrlErr := checkOrderKey("--ref", settleRef); ctrlErr != nil {
+		return ctrlErr
+	}
+	amountValue, amountErr := parseCreditAmount(*amount)
+	if amountErr != nil {
+		return amountErr
+	}
+	// 收款信息在这一档必填：平台已经决定付了，付到哪里必须当场说清。检查放在
+	// 连库之前，理由与 request 那一处相同（坏 JSON 由库报出来的话，看不出是
+	// 哪条命令的哪个参数）。
+	destinationJSON := strings.TrimSpace(*destination)
+	if destinationJSON == "" {
+		return usageErr(errors.New(
+			"缺少 --destination：平台清算要把钱付到哪里？这一档是平台已经决定付了，收款信息必须当场说清"))
+	}
+	if !strings.HasPrefix(destinationJSON, "{") || !json.Valid([]byte(destinationJSON)) {
+		return usageErr(fmt.Errorf(
+			`--destination 必须是合法的 JSON 对象（形如 {"bank":"…"}），得到 %q：`+
+				"它要落进 payout_requests.destination（一个 jsonb 列），打款通道按字段取值", destinationJSON))
+	}
+	if strings.TrimSpace(*by) == "" {
+		return usageErr(errors.New(
+			"缺少 --by：清算要记下是谁做的（这一栏落进 reviewed_by）"))
+	}
+	settleNote := strings.TrimSpace(*note)
+	if settleNote != "" {
+		if noteErr := checkPayoutNote("--note", settleNote); noteErr != nil {
+			return noteErr
+		}
+	}
+
+	return withDB(walletTimeout, func(ctx context.Context, db *sql.DB) error {
+		authStore := auth.New(db)
+		owner, err := authStore.ResolveUser(ctx, *user)
+		if err != nil {
+			return fmt.Errorf("解析 --user 失败: %w", err)
+		}
+		// --by 先解析成真实存在的用户：reviewed_by 上有外键，但那只保证这一行
+		// 在 users 里，不保证「这个人真的在场」（理由同审批那一条）。
+		operator, err := authStore.ResolveUser(ctx, *by)
+		if err != nil {
+			return fmt.Errorf("解析 --by 失败: %w", err)
+		}
+		assetValue, assetResolveErr := resolveWalletAsset(ctx, db, "")
+		if assetResolveErr != nil {
+			return assetResolveErr
+		}
+
+		row, applied, settleErr := store.New(db).SettlePayout(ctx, store.SettlePayoutInput{
+			TxnID:       txnIDForPayoutSettle(settleRef),
+			Ref:         settleRef,
+			UserID:      owner.ID,
+			Amount:      amountValue,
+			Asset:       assetValue,
+			Destination: []byte(destinationJSON),
+			Reviewer:    operator.ID,
+			Note:        settleNote,
+		})
+		if settleErr != nil {
+			return settleErr
+		}
+		// 回显上的审批人从**库里那一行**取，不从这次的 --by 拿：重放时记着的
+		// 是上一次那个人，回显要回答的正是「库里记着谁」（同审批与打款那两条）。
+		reviewer, reviewerErr := payoutReviewer(ctx, authStore, row)
+		if reviewerErr != nil && !errors.Is(reviewerErr, errPayoutNotReviewed) {
+			return reviewerErr
+		}
+		// 回显要逐条列出这次写的分录。重建一遍而不是让 store 把交易交回来：
+		// 构造函数是确定性的，而单子的 id 只有库知道——重放时用的也是这一行。
+		txn, buildErr := ledger.Settle(ledger.SettleParams{
+			TxnID:    txnIDForPayoutSettle(settleRef),
+			UserID:   row.UserID,
+			Amount:   row.Amount,
+			Asset:    row.Asset,
+			PayoutID: row.ID,
+			Ref:      settleRef,
+		})
+		if buildErr != nil {
+			return buildErr
+		}
+
+		verdict := fmt.Sprintf("已清算提现单 %d。", row.ID)
+		if !applied {
+			verdict = fmt.Sprintf("清算单号 %s 已经清算过，本次未改动。", settleRef)
+		}
+		printPayout(humanStdout(), payoutReceipt{
+			Verdict:   verdict,
+			Payout:    row,
+			User:      owner,
+			Reviewer:  reviewer,
+			SettleRef: settleRef,
+			Txn:       &txn,
 		})
 		return nil
 	})
@@ -597,6 +768,8 @@ type payoutReceipt struct {
 	// RequestRef 是申请单号，只有申请那一条有：驳回与打款按单子 id 走，键就是单子
 	// 自己，再打一遍是同一件事说两遍。
 	RequestRef string
+	// SettleRef 是清算单号，只有 settle 那一条有（理由同 RequestRef）。
+	SettleRef string
 	// Txn 是这次动作写的交易；批准不写分录，所以那一档是 nil。
 	Txn *ledger.Transaction
 }
@@ -623,6 +796,9 @@ func printPayout(w io.Writer, r payoutReceipt) {
 	row("状态", fmt.Sprintf("%s（%s）", r.Payout.Status, r.Payout.Status.Label()))
 	if r.RequestRef != "" {
 		row("申请单号", r.RequestRef)
+	}
+	if r.SettleRef != "" {
+		row("结算单号", r.SettleRef)
 	}
 	if r.Reviewer != nil {
 		row("审批人", r.Reviewer.Username)

@@ -325,7 +325,13 @@ type SettleParams struct {
 	PayoutID int64
 	// Memo 说明结算依据（结算周期、对账批次号）。
 	Memo string
-	At   time.Time
+	// Ref 是这次清算对应的外部单号（结算单、对账批次）。
+	//
+	// 它并进备注里（「<Memo>（单据 <Ref>）」，Memo 为空时前缀是「平台清算」），
+	// 与 Topup 的 OrderNo 同形：交易号是它的哈希，从单号算得到交易号，反过来
+	// 算不回来，不落备注就没有第二条路把这张结算单对上这笔账。
+	Ref string
+	At  time.Time
 }
 
 // Settle 构造一次商户结算。
@@ -355,9 +361,17 @@ func Settle(p SettleParams) (Transaction, error) {
 		return Transaction{}, fmt.Errorf("提现单 id 非法: %d", p.PayoutID)
 	}
 
+	memo := strings.TrimSpace(p.Memo)
+	if ref := strings.TrimSpace(p.Ref); ref != "" {
+		if memo == "" {
+			memo = "平台清算"
+		}
+		memo = memoWithOrder(memo, ref)
+	}
+
 	entries := []Entry{
 		credit(p.TxnID, MerchantPayableAccount(p.UserID), p.Asset, p.Amount, EntrySettle).
-			withMemo(sanitizeMemo(p.Memo)).
+			withMemo(sanitizeMemo(memo)).
 			withPayout(p.PayoutID),
 		debit(p.TxnID, PayoutAccount(p.PayoutID), p.Asset, p.Amount, EntrySettle).
 			withPayout(p.PayoutID),
