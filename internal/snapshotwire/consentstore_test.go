@@ -213,6 +213,17 @@ func TestConsentGrantRejectsBadRequests(t *testing.T) {
 			ConsentRequest{UserID: 1, Scope: ConsentScopeSingleRequest, RequestID: "req-1",
 				ExpiresAt: future, WindowStart: consentNow, WindowEnd: future},
 			24 * time.Hour, "不带时间窗"},
+		// 只带一端也要挡：两端的判据是「任一非零就拒」，写成「两个都非零才拒」
+		// 会让只带一端的那种申请从这里溜到写库那一层去。两端各来一条，
+		// 因为放宽成 `&&` 之后它们走的是不同的格子。
+		{"单条请求只带了时间窗的起点",
+			ConsentRequest{UserID: 1, Scope: ConsentScopeSingleRequest, RequestID: "req-1",
+				ExpiresAt: future, WindowStart: consentNow},
+			24 * time.Hour, "不带时间窗"},
+		{"单条请求只带了时间窗的终点",
+			ConsentRequest{UserID: 1, Scope: ConsentScopeSingleRequest, RequestID: "req-1",
+				ExpiresAt: future, WindowEnd: future},
+			24 * time.Hour, "不带时间窗"},
 		{"单条请求缺到期时间",
 			ConsentRequest{UserID: 1, Scope: ConsentScopeSingleRequest, RequestID: "req-1"},
 			24 * time.Hour, "到期时间"},
