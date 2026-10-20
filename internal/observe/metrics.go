@@ -113,6 +113,11 @@ func (g *Gauge) samples() []sample {
 // **标签值必须来自有限集合。** 用户 id、渠道 id、请求 id、模型名都不能
 // 做标签：每个取值各占一条时间序列，而序列数没有上限，采集器的内存与
 // 查询开销会跟着请求数一起涨。这类值属于日志。
+//
+// **标签值里不得含 \x00。** 一组标签值在内部用 \x00 拼接成一个键，渲染时
+// 再按 \x00 拆回各个标签——值里自带一个，拆出来的段数就与标签名的个数对不上，
+// 后半段会被当成别的标签的值，而渲染出来的那一行看起来完全正常。
+// With 遇到这种值直接 panic。
 type LabeledCounter struct {
 	name   string
 	labels []string // 标签名，顺序与 With 的入参一致
@@ -124,10 +129,20 @@ type LabeledCounter struct {
 //
 // 入参个数与标签名个数不一致时直接 panic：那是编码错误，而它若被静默
 // 接受，表现为「多出一条没人认识的序列」，比当场炸掉更难发现。
+//
+// 某个值里含 \x00 时同样 panic：键是按 \x00 拼接的，渲染时再按它拆回去，
+// 值里带一个会让拆出来的段数与标签名个数对不上，值串到别的标签名下。
+// 这同样是编码错误，而渲染结果表面上完全正常，比个数不对更不容易发现。
 func (c *LabeledCounter) With(values ...string) *Counter {
 	if len(values) != len(c.labels) {
 		panic(fmt.Sprintf("计数器 %s 声明了 %d 个标签，收到 %d 个值",
 			c.name, len(c.labels), len(values)))
+	}
+	for i, v := range values {
+		if strings.IndexByte(v, 0) >= 0 {
+			panic(fmt.Sprintf("计数器 %s 的第 %d 个标签 %q 的取值含 \\x00：%q",
+				c.name, i+1, c.labels[i], v))
+		}
 	}
 	key := strings.Join(values, "\x00")
 

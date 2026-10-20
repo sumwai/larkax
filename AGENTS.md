@@ -45,13 +45,14 @@ test-key-placeholder                        localhost:5432
 GitHub Flow：`main` 受保护，只能通过 PR 合入。
 
 ```
-功能分支 → PR → CI → review → 合入 main → 部署 staging
+功能分支 → PR → CI → review → 合入 main
 ```
 
 **CI 的门禁清单不写在本文件**——有哪些门、各自挡什么、本地怎么跑、契约测试为什么是
 独立一个 job，见 [docs/development.md](docs/development.md) 的「CI 跑什么」一节。
-**自动部署尚未接入**：部署到哪台机器、用什么凭证进 CI，两样都未定，所以流水线今天
-到「合入 main」为止。落地的条件记在 #742。
+**本仓库不做部署**：`main` 合入即是流水线的终点。发布由 tag 触发 `release.yml`——
+门禁 → `make dist` → 把制品传到 GitHub Release。制品放到哪台机器上属于使用方的事，
+不在本仓库范围内。
 
 分支命名：`feat/`、`fix/`、`refactor/`、`docs/`、`test/`、`chore/` 前缀 + 简短描述。
 
