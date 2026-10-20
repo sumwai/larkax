@@ -304,6 +304,122 @@ export default {
 	}
 }
 
+// 会拒绝的出参是「正常解组就一定报错」的目标：用它来区分
+// 「根本没进解组」与「进了解组但恰好没写东西」。
+type 会拒绝的出参 struct {
+	解组次数 int
+	文本   string
+}
+
+func (s *会拒绝的出参) UnmarshalJSON(b []byte) error {
+	s.解组次数++
+	s.文本 = string(b)
+	return errors.New("严格出参不接受 " + string(b))
+}
+
+// undefined 与 null 是两种「没给」，decode 对两者都在解组之前返回。
+//
+// 用 map 目标才能看见这件事：解 null 会把 map 清空，而在结构体上
+// 它看起来和「没给」一模一样（见上一条）。严格目标那一格钉的是
+// 「根本没进解组」：null 若被交给类型自己的 UnmarshalJSON，插件会收到
+// 一条「你返回得不对」——它明明什么都没返回。
+func TestNothingReturnedSkipsDecodeForBothUndefinedAndNull(t *testing.T) {
+	m, err := Compile("p", `
+export default {
+  onRequest() { },
+  onRoute() { return null; },
+};
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := m.NewRuntime(context.Background(), Host{}, nil, Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+
+	for _, 用例 := range []struct {
+		名称   string
+		hook string
+	}{
+		{"undefined", "onRequest"},
+		{"null", "onRoute"},
+	} {
+		t.Run(用例.名称, func(t *testing.T) {
+			out := map[string]any{"旧": 1}
+			if f := rt.Call(context.Background(), 用例.hook, map[string]any{"a": 1}, &out); f != nil {
+				t.Fatalf("%s: 什么都不返回不该是失败: %v", 用例.hook, f)
+			}
+			if len(out) != 1 || out["旧"] != 1 {
+				t.Errorf("%s: 出参被改动了: %v", 用例.hook, out)
+			}
+
+			var 严格 会拒绝的出参
+			if f := rt.Call(context.Background(), 用例.hook, map[string]any{"a": 1}, &严格); f != nil {
+				t.Errorf("%s: 什么都没返回时不该进解组、更不该报失败: %v", 用例.hook, f)
+			}
+			if 严格.解组次数 != 0 {
+				t.Errorf("%s: 解组被调用了 %d 次，文本 %q：什么都没返回不该走解组",
+					用例.hook, 严格.解组次数, 严格.文本)
+			}
+		})
+	}
+}
+
+// 调用已经失败时不解码返回值，即使 hook 把返回值交出来了。
+//
+// 这里构造的是「失败但返回值是真对象」的形态：hook 正常返回一个对象，
+// 同时排一个会抛异常的微任务；moejs 在调用结束时同步排空 job 队列，
+// 微任务的错误成为这次调用的 err，而返回值仍是那个对象
+// （engine/jobs.go 的 endJob 只在 err 为 nil 时才接管它）。
+//
+// 失败时的返回值没有意义。解它会让插件代码再跑一段（这里的 toJSON），
+// 还会写出参——两件事都发生在一次已经失败的调用之外。
+func TestFailedCallDoesNotDecodeReturnValue(t *testing.T) {
+	m, err := Compile("p", `
+let 解码次数 = 0;
+export default {
+  onRequest() {
+    queueMicrotask(() => { throw new Error("job boom"); });
+    return { a: 42, toJSON() { 解码次数++; return { a: 42 }; } };
+  },
+  onUsage() { return { 解码次数: 解码次数 }; },
+};
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := m.NewRuntime(context.Background(), Host{}, nil, Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+
+	out := struct {
+		A int `json:"a"`
+	}{A: 7}
+	f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, &out)
+	if f == nil {
+		t.Fatal("微任务抛出的异常应当让这次调用失败")
+	}
+	if !errors.Is(f, ErrPluginThrew) {
+		t.Errorf("Kind = %v，想要 ErrPluginThrew（job 里抛的是一次插件异常）", f.Kind)
+	}
+	if out.A != 7 {
+		t.Errorf("失败时出参被写入了: %+v——失败时的返回值不该被解码", out)
+	}
+	// 出参按契约在失败时不可读，所以再用插件自己的计数器确认 toJSON 没跑：
+	// 解码会执行 toJSON，而它是插件代码。
+	var 计数 map[string]any
+	if f := rt.Call(context.Background(), "onUsage", map[string]any{"a": 1}, &计数); f != nil {
+		t.Fatalf("onUsage 不该失败: %v", f)
+	}
+	if 计数["解码次数"] != float64(0) {
+		t.Errorf("失败之后 toJSON 被跑了 %v 次，想要 0", 计数["解码次数"])
+	}
+}
+
 // 插件返回的值解不进出参结构体时是**契约违规**，与「插件抛异常」不是一回事：
 // 前者说明插件理解错了返回值形状，上层的处置不同。
 // 返回值类型不符是契约违规。
