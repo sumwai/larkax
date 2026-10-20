@@ -1090,6 +1090,84 @@ func TestListReportsRunningLatestAttemptAndLoadResult(t *testing.T) {
 	}
 }
 
+// TestGenerationOrNil 钉住 LEFT JOIN 那两列拼成「取中的那一代」的两个可达形态。
+//
+// 两列的 Valid 恒等是前提（见下）：没有取中的一代时右边整片是 NULL，
+// 取中时两列一起有值——所以单边为空的输入走不到。
+// 用例只钉可达的两格，其中第二格是「Version 有值、Number 是 0 仍然算一代」：
+// 代次 0 是合法值（第一次发布），拿零值当「没有」会把第一代说成没被取中。
+func TestGenerationOrNil(t *testing.T) {
+	cases := []struct {
+		name    string
+		version sql.NullString
+		number  sql.NullInt64
+		want    *Generation
+	}{
+		{
+			name:    "两列都有值",
+			version: sql.NullString{String: "2.0.0", Valid: true},
+			number:  sql.NullInt64{Int64: 3, Valid: true},
+			want:    &Generation{Version: "2.0.0", Number: 3},
+		},
+		{
+			name:    "代次是 0 也算一代",
+			version: sql.NullString{String: "1.0.0", Valid: true},
+			number:  sql.NullInt64{Int64: 0, Valid: true},
+			want:    &Generation{Version: "1.0.0", Number: 0},
+		},
+		{
+			name:    "两列都空",
+			version: sql.NullString{},
+			number:  sql.NullInt64{},
+			want:    nil,
+		},
+	}
+	for _, tc := range cases {
+		got := generationOrNil(tc.version, tc.number)
+		switch {
+		case got == nil && tc.want == nil:
+		case got == nil || tc.want == nil || *got != *tc.want:
+			t.Errorf("%s: generationOrNil = %+v，期望 %+v", tc.name, got, tc.want)
+		}
+	}
+
+	// 「第一个 || 换成 &&」是**等价**变异，不是缺口：单边为空的两种输入走不到，
+	// 而两个 Valid 恒等时 a||b 与 a&&b 是同一个函数。两条前提：
+	//
+	//  1. 两个调用点（List 与 Get）喂进来的 r.version / r.generation，
+	//     出自 runningJoin 里同一个 `LEFT JOIN LATERAL … LIMIT 1` 子查询的**同一行**
+	//     （plugins 那一行）；
+	//     没有第三个调用点，也没有别的写库路径能造出「有版本号、没代次」这种单边 NULL。
+	//  2. plugins.version 与 plugins.generation 在迁移里都是 NOT NULL
+	//     （internal/migrate/sql/00001_init.sql），所以取中时两列一起有值、
+	//     没取中时两列一起是 NULL。
+	//
+	// 前提 2 由下面那条 schema 用例机器核对：哪天有一版迁移把列改成可空，它就红，
+	// 提示这里要对「单边 NULL」重新判一次。
+}
+
+// TestPluginJoinColumnsAreNotNull 是上一条用例的前提，不是实现的一部分。
+//
+// generationOrNil 把「两列的 Valid 恒等」当成事实，而那条事实的来路是 schema：
+// runningJoin 摘的 version 与 generation 出自 plugins 的同一行，两列都 NOT NULL。
+// 列一改成可空，「有版本号、没代次」就可能出现，两条判据也就分得开。
+func TestPluginJoinColumnsAreNotNull(t *testing.T) {
+	db := testDB(t)
+	for _, column := range []string{"version", "generation"} {
+		var nullable string
+		if err := db.QueryRowContext(context.Background(), `
+			SELECT is_nullable FROM information_schema.columns
+			 WHERE table_schema = current_schema()
+			   AND table_name = 'plugins' AND column_name = $1`, column).Scan(&nullable); err != nil {
+			t.Fatalf("读 plugins.%s 的可空性失败: %v", column, err)
+		}
+		if nullable != "NO" {
+			t.Errorf("plugins.%s 是可空的（is_nullable=%q）：「两列 Valid 恒等」的等价前提不成立了",
+				column, nullable)
+		}
+	}
+}
+
 // 判据：同一个 key 里两行撞在同一个代次上时，「取中的是哪一行」三处指的是同一行，
 // 而写回只落在加载器读的那一行上。
 //
@@ -1446,6 +1524,36 @@ func TestReloadRegistryRejectsWholeBatchAndMarksOnlyTheBrokenOne(t *testing.T) {
 	}
 	if goodRow := rowsFor(t, db, good)[0]; goodRow.lastLoadResult.Valid {
 		t.Errorf("好插件那一行不该被这次失败的装载改动，实际写成了 %q", goodRow.lastLoadResult.String)
+	}
+}
+
+// TestReloadRegistryLogsThroughTheCallerLogger 钉住「传进来的 logger 原样用」。
+//
+// 整批失败那条路要把每一条编译不过的插件记成一条日志
+// （见 ReloadRegistry 里传给 PublishAll 的那个回调），
+// 而这条记录必须落在**调用方给的** handler 上：传 nil 时才该退回 slog.Default()。
+// 断言落在具名 key 上：只判「调用方的 handler 上有一条日志」的话，
+// 写出来的记录没有点名是哪个插件，这条用例照样过。
+func TestReloadRegistryLogsThroughTheCallerLogger(t *testing.T) {
+	db := testDB(t)
+	clearPlugins(t, db)
+	ctx := context.Background()
+	good, broken := uniqueKey("reload-log-good"), uniqueKey("reload-log-broken")
+	insertPlugin(t, db, good, "1.0.0", StatusActive, 0)
+	insertPluginRaw(t, db, broken, "1.0.0", StatusActive, 0,
+		goodMeta(broken, "1.0.0"), brokenSource)
+
+	var log bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&log, nil))
+	if _, err := New(db).ReloadRegistry(ctx, logger, allCaps()); err == nil {
+		t.Fatal("有一条编译不过时该返回错误")
+	}
+
+	// 记录要落在我们给的 handler 上，且点名坏插件。
+	for _, want := range []string{"插件编译失败", "plugin=" + broken} {
+		if !strings.Contains(log.String(), want) {
+			t.Errorf("调用方给的 handler 上缺 %q:\n%s", want, log.String())
+		}
 	}
 }
 

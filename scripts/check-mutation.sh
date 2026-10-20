@@ -359,6 +359,7 @@ PKGS=(
   internal/auth
   internal/catalog
   internal/relay
+  internal/plugin/store
   internal/snapshot
   internal/snapshotwire
   internal/gateway
