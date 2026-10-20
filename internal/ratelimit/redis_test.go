@@ -277,6 +277,33 @@ func TestOpenRedisFromManyGoroutines(t *testing.T) {
 	}
 }
 
+// TestOpenRedisDisablesRetries 断言 OpenRedis 关掉了客户端重试。
+//
+// 一次判定只发一条命令，重试只会把时间花在等待上，而这段时间是用户请求在等；
+// 抖一下的正确处置是降级（见 Allow 的「降级」一段）。
+//
+// 断言的是**客户端上生效的值 0**，不是源码里写的 `-1`。这个值经过了一次
+// 归一化：`Options.init` 把 `-1` 归成 0，而 0 会归成库默认的 3 次，
+// `Options()` 给的正是归一化之后那一份。所以这条用例直接看结果：源码把
+// `-1` 改成 `1`（重试 1 次）时，这里读到的是 1，用例失败。
+//
+// 只解析 DSN 与构造客户端，不建立连接（库的连接是懒的），所以占位 DSN 就够了。
+func TestOpenRedisDisablesRetries(t *testing.T) {
+	store, err := OpenRedis("redis://user@localhost:6379/0")
+	if err != nil {
+		t.Fatalf("OpenRedis 失败: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	client, ok := store.cmds.(*redis.Client)
+	if !ok {
+		t.Fatalf("OpenRedis 造出来的不是 *redis.Client，而是 %T", store.cmds)
+	}
+	if got := client.Options().MaxRetries; got != 0 {
+		t.Errorf("MaxRetries = %d，期望 0（一次都不重试；1 表示重试 1 次，3 是库默认值）", got)
+	}
+}
+
 // 编译期断言：替身与真客户端一样满足 RedisStore 需要的那几条命令。
 //
 // 少了这一条，替身与真实现分岔（比如 Eval 的签名变了）时用例照样通过，

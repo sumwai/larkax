@@ -1512,6 +1512,7 @@ CI 包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`�
 
 ```sh
 export LARKAX_DB_DSN="postgres://larkax:placeholder@127.0.0.1:5432/larkax?sslmode=disable"
+export LARKAX_REDIS_DSN="redis://127.0.0.1:6379/0"   # 测试依赖 Redis 的包才需要
 scripts/check-mutation.sh              # 全部包
 scripts/check-mutation.sh money route  # 只跑指定的
 ```
@@ -1531,6 +1532,12 @@ scripts/check-mutation.sh money route  # 只跑指定的
 **`LARKAX_DB_DSN` 是硬前提，不是可选参数**：没有它 `internal/ledger/store` 的
 集成测试整包被 `t.Skip`，那一包等于没测。脚本会直接拒绝运行，而不是跑出一批
 不可比的数字（见 [LESSONS.md](../LESSONS.md) 第 17 条）。
+
+**`LARKAX_REDIS_DSN` 同理，但只对测试依赖它的包生效**：被选中的包里只要有测试
+文件引用了这个变量，它就是那一轮的前提。没有它时那些集成测试整组被 `t.Skip`，
+只在它们里碰得到的变异体落进 Not covered——不进 efficacy 的分母，分数只会变好看。
+脚本同样拒绝运行，并把要它的包列出来。判据是「测试文件里有没有引用它」，
+不是一份包名清单：加了新测试不用回来改这里。
 
 实测：覆盖率很高的包照样有**存活**变异（逐包见「各包的现状」那张表）——它们集中在
 「恰好相等」「恰好为零」这类边界上，而写测试时的自然倾向正是跳过这些。
@@ -1745,6 +1752,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/quota` | 45 | 2 | 0 | 0 | 100.00% | 95.74% | 95.2% |
 | `internal/billing/expr` | 168 | 8 | 0 | 12 | 93.62% | 95.45% | 85.9% |
 | `internal/billing` | 243 | 14 | 0 | 12 | 95.54% | 94.55% | 98.3% |
+| `internal/ratelimit` | 33 | 2 | 0 | 3 | 92.11% | 94.29% | 92.0% |
 | `internal/money` | 90 | 14 | 0 | 4 | 96.30% | 86.54% | 96.8% |
 | `internal/tokens` | 89 | 14 | 0 | 51 | 66.88% | 86.41% | 97.2% |
 

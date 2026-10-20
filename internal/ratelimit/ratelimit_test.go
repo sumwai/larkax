@@ -51,6 +51,10 @@ func TestNullMeansNoLimit(t *testing.T) {
 //
 // 「设了 60，实际是无限」正是要修的 bug，所以这里断言的是**具体数字**：
 // 前 60 次通过、第 61 次被拒，而不是「A 比 B 少」这类相对关系。
+//
+// 变异：`count <= int64(limit)` 的 `<=` 改成 `<`（同一行第 24 列）。第 60 次
+// 是 count 正好等于额度的那一格，变异版会把它误拒，而这一次就在下面那个
+// 循环的 i == 60 上，用例会在那里报错。
 func TestSixtyPerMinuteStopsAtSixtyOne(t *testing.T) {
 	c := &clock{at: base}
 	l := New(c.now)
@@ -82,6 +86,13 @@ func TestSixtyPerMinuteStopsAtSixtyOne(t *testing.T) {
 // TestZeroMeansNothingAllowed 钉住 0 的语义：一个都不放行。
 //
 // 它与 NULL 必须分开：NULL 扫进 int 会变成 0，而这两者的意思正相反。
+//
+// 变异：Allow 里 `limit > 0` 的 `>` 改成 `>=`（第 207 行第 11 列），是
+// 一个**等价变异**。额度为 0 时变异版接着算 `count <= 0`，而 count 是
+// **加一之后**的值——进程内那条先自增再返回，Redis 的 INCR 在缺键时返回 1，
+// Store 的注释也写明「返回加后的值」——所以它恒大于 0，两版都会拒绝，
+// retryAfter 也由同一个调用算出；额度非 0 时两个条件同真同假。在 Store
+// 契约内没有能分开两版的输入，额度为 0 与负数的两条用例在变异版下照样全绿。
 func TestZeroMeansNothingAllowed(t *testing.T) {
 	c := &clock{at: base}
 	l := New(c.now)
@@ -138,7 +149,15 @@ func TestWindowResetsAtMinuteBoundary(t *testing.T) {
 // TestRetryAfterRoundsUpToWholeSeconds 钉住 retryAfter 的取整方向。
 //
 // 向下取整会让客户端在窗口结束前重试，而那次请求必然又被拒一次。
-// 边界取两个具体时刻：剩 500 毫秒时回 1 秒（不是 0），剩 30 秒时回 30 秒。
+// 边界取三个具体时刻：剩 500 毫秒时回 1 秒（不是 0），
+// 恰好剩 1 秒时回 1 秒，剩 30 秒时回 30 秒。
+//
+// 变异：retryAfterUntil 里 `remaining < time.Second` 改成 `<=`，是一个
+// **等价变异**。恰好剩 1 秒那一格原版不进「至少 1 秒」那一条提前返回，
+// 而是走下面的向上取整，而 `((1s + 1s - 1) / 1s) * 1s` 正好是 1s，与提前
+// 返回的 1s 同值；其余输入两版落在同一分支——不到 1 秒的都在提前返回那一条
+// 里，超过 1 秒的都取整。所以「恰好剩一秒」那一档在变异版下照样通过，
+// 不是用例写得不够狠。
 func TestRetryAfterRoundsUpToWholeSeconds(t *testing.T) {
 	cases := []struct {
 		name string
@@ -147,6 +166,7 @@ func TestRetryAfterRoundsUpToWholeSeconds(t *testing.T) {
 	}{
 		{"整秒边界", time.Date(2026, 10, 17, 12, 0, 30, 0, time.UTC), 30 * time.Second},
 		{"不足一秒向上取整", time.Date(2026, 10, 17, 12, 0, 59, 500_000_000, time.UTC), time.Second},
+		{"恰好剩一秒", time.Date(2026, 10, 17, 12, 0, 59, 0, time.UTC), time.Second},
 		{"有零头也向上取整", time.Date(2026, 10, 17, 12, 0, 0, 1, time.UTC), 60 * time.Second},
 	}
 

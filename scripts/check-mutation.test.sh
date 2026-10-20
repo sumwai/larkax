@@ -623,7 +623,31 @@ if [ "$rc" -eq 1 ]; then ok; else bad "缺 DSN —— 应拒绝运行，实际�
 grep -q '没有 LARKAX_DB_DSN' "$last_out" || bad "缺 DSN —— 应报出是这个原因"
 grep -q 't.Skip' "$last_out" || bad "缺 DSN —— 应说明 store 会被整包跳过"
 
-# 13. **不许**用 --coverpkg 把覆盖范围收窄。
+# 13. 缺 LARKAX_REDIS_DSN：选中包里只要测试读它，同样必须拒绝运行。
+#     与第 12 条同一个道理，只是范围按**选中包**算：数据库是每包都要，Redis
+#     只有测试里读那个变量的那几包才要（当前是 internal/ratelimit）。
+#     缺它时 redis_integration_test.go 那几条整组 t.Skip，只在它们里碰得到的
+#     变异体落进 Not covered——不进 efficacy 的分母，分数只会变好看；而
+#     Killed 仍然大于 0，所以「Killed 与 Lived 同时为 0」那条判据不会触发。
+#     不给筛选项就是全部包选中，所以这一条覆盖到 ratelimit。
+#     判据不依赖真 Redis：脚本看的是测试文件里的引用，在任何机器上都能跑。
+env -u LARKAX_REDIS_DSN LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_ok" GREMLINS_VERSION="$PINNED" \
+  LOCK_FILE="$tmp/lock13r" bash "$SCRIPT" >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 1 ]; then ok; else bad "缺 LARKAX_REDIS_DSN —— 应拒绝运行，实际退出码 $rc"; dump; fi
+grep -q '没有 LARKAX_REDIS_DSN' "$last_out" || bad "缺 LARKAX_REDIS_DSN —— 应报出是这个原因"
+grep -q 'internal/ratelimit' "$last_out" || bad "缺 LARKAX_REDIS_DSN —— 应列出会整组跳过的包"
+grep -q 't.Skip' "$last_out" || bad "缺 LARKAX_REDIS_DSN —— 应说明那些集成测试会被跳过"
+
+# 14. 同一个变量，只跑**不依赖** Redis 的包时不是前提：筛了 internal/money
+#     就该照常跑。判据落在选中包上，不是「脚本里提到这个变量就必须给」——
+#     否则只跑 money 的人会被一个与这一包无关的变量挡在门外。
+env -u LARKAX_REDIS_DSN LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_ok" GREMLINS_VERSION="$PINNED" \
+  LOCK_FILE="$tmp/lock14r" bash "$SCRIPT" internal/money >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "只跑 internal/money 时不该要 LARKAX_REDIS_DSN，实际退出码 $rc"; dump; fi
+
+# 15. **不许**用 --coverpkg 把覆盖范围收窄。
 #     它单独并不改变「哪些测试参与」——实测 internal/keyquota：默认与
 #     `--coverpkg=./...` 给同一组数（见 docs/development.md
 #     「一个分数要连着它的条件一起读」那张表），所以命令行里没有它。
@@ -656,7 +680,7 @@ fi
 grep -q -- '--invert-logical' "$tmp/args.txt" 2>/dev/null \
   || bad "记录参数 —— --invert-logical 应真的传给 gremlins（收到：$(cat "$tmp/args.txt" 2>/dev/null)）"
 
-# 14. 退化路径（没有 flock）崩溃后留下的锁：报错要说清怎么清。
+# 16. 退化路径（没有 flock）崩溃后留下的锁：报错要说清怎么清。
 #     这里直接验证提示文本本身——它由 check-mutation.sh 按锁目录里的 PID
 #     判断持有者是否还在，PID 不存在就是残留锁。
 #     没有 flock 的环境才走 mkdir 路径；有 flock 时锁由内核释放，不会有残锁，
@@ -674,7 +698,7 @@ else
   echo "（跳过残留锁一条：本机有 flock，锁由内核释放，不存在残留锁）"
 fi
 
-# 15. 存活清单要打出来，并且**带包名与位置**——只打计数的话，
+# 17. 存活清单要打出来，并且**带包名与位置**——只打计数的话，
 #     docs/development.md 那句「对存活的变异逐个判断」没有可判断的对象。
 stub_surv="$tmp/gremlins-survivors"
 make_gremlins_with_survivors "$stub_surv"
@@ -688,7 +712,7 @@ grep -q 'internal/money  CONDITIONALS_BOUNDARY at money.go:103:8' "$last_out" \
 grep -q 'internal/money  ARITHMETIC_BASE at money.go:54:25' "$last_out" \
   || bad "带存活明细 —— 第二条存活也应列出"
 
-# 16. 没有存活变异时，不该凭空打出一节空清单。
+# 18. 没有存活变异时，不该凭空打出一节空清单。
 run "$stub_all_killed" "$tmp/lock16" internal/money
 rc=$?
 if [ "$rc" -eq 0 ]; then ok; else bad "无存活 —— 应通过，实际退出码 $rc"; dump; fi
@@ -746,7 +770,7 @@ grep -q 'internal/money  CONDITIONALS_BOUNDARY at money.go:103:8' "$last_out" \
 # 而「分母变了」在输出里与「代码改好了」长得一模一样，所以「用的是哪把尺子」
 # 必须是响的：不符就拒绝运行，并且每次运行都自己说出来。
 
-# 17. 版本不符：必须拒绝运行，并说清钉住的是哪一版、实际是哪一版。
+# 19. 版本不符：必须拒绝运行，并说清钉住的是哪一版、实际是哪一版。
 #     这条是活的：把 check-mutation.sh 里那几行校验删掉，它会红
 #     （脚本会照常跑完，退出码 0）。
 LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_ok" GREMLINS_VERSION="v9.9.9" \
@@ -766,7 +790,7 @@ else
   ok
 fi
 
-# 18. 版本读不出来（桩件是 bash 脚本，`go version -m` 探不出模块信息）：
+# 20. 版本读不出来（桩件是 bash 脚本，`go version -m` 探不出模块信息）：
 #     同样拒绝运行。**不猜**——猜出来的版本比没有版本更坏。
 env -u GREMLINS_VERSION LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_ok" \
   LOCK_FILE="$tmp/lock18" bash "$SCRIPT" internal/money >"$last_out" 2>&1
@@ -774,7 +798,7 @@ rc=$?
 if [ "$rc" -eq 1 ]; then ok; else bad "版本读不出 —— 应拒绝运行，实际 $rc"; dump; fi
 grep -q '读不出' "$last_out" || bad "版本读不出 —— 要报出是这个原因"
 
-# 19. 读不出变异器集合（工具答不上 `unleash --help`）：拒绝运行。
+# 21. 读不出变异器集合（工具答不上 `unleash --help`）：拒绝运行。
 #     集合就是分母的来源，读不出就说不清这一轮用的是哪把尺子。
 stub_nohelp="$tmp/gremlins-nohelp"
 cat > "$stub_nohelp" <<'EOF'
@@ -790,7 +814,7 @@ rc=$?
 if [ "$rc" -eq 1 ]; then ok; else bad "读不出变异器集合 —— 应拒绝运行，实际 $rc"; dump; fi
 grep -q '读不出 gremlins 的变异器集合' "$last_out" || bad "读不出变异器集合 —— 要报出是这个原因"
 
-# 20. 正常跑时，第一行就是「这把尺子是什么」：版本 + 变异器集合 + 已开的开关
+# 22. 正常跑时，第一行就是「这把尺子是什么」：版本 + 变异器集合 + 已开的开关
 #     + workers + 系数。**粘进 docs/development.md「各包的现状」那张表的数字自带条件**，不依赖人记得补。
 #     集合是探测来的，所以这里逐项比对，而不是只看它打了一行字。
 run "$stub_ok" "$tmp/lock20" internal/money
@@ -820,7 +844,7 @@ for m in INVERT_ASSIGNMENTS INVERT_BITWISE INVERT_BWASSIGN INVERT_LOOPCTRL REMOV
   fi
 done
 
-# 21. `--help` 里有变异器开关，但一个默认开的都没有：拒绝运行。
+# 23. `--help` 里有变异器开关，但一个默认开的都没有：拒绝运行。
 #     这几乎不可能是真的——更可能是排版变了、`(default true)` 没被认出来。
 #     那会让上面那一行少记一批默认变异器**而不报错**，所以这里要挡住。
 stub_nodefault="$tmp/gremlins-nodefault"
@@ -849,7 +873,7 @@ rc=$?
 if [ "$rc" -eq 1 ]; then ok; else bad "一个默认变异器都没有 —— 应拒绝运行，实际 $rc"; dump; fi
 grep -q 'default true' "$last_out" || bad "一个默认变异器都没有 —— 要报出是这个原因"
 
-# 22. 每个包在调用 gremlins **之前**都清了一次 go 的测试结果缓存（#773）。
+# 24. 每个包在调用 gremlins **之前**都清了一次 go 的测试结果缓存（#773）。
 #
 #     gremlins 的超时预算 = 它那一次 gathering 的耗时 × 系数。gathering 是它内部
 #     拼的 `go test -cover -coverprofile …`（没有 `-count=1`），于是会命中 go 的
