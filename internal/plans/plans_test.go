@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -187,7 +188,36 @@ func TestCreatePlanFillsAmountPackage(t *testing.T) {
 		Unit: UnitAmount, QuotaTotal: amount(t, "100"), FaceValue: amount(t, "80"),
 	})
 	if err == nil {
-		t.Error("金额包的可用量与面值不一致应当被拒")
+		t.Fatal("金额包的可用量与面值不一致应当被拒")
+	}
+	// 两个数不等时，这一句必须由这里挡下来。库里还有一道
+	// plans_amount_quota_matches_face_value 的 CHECK，不一致的 INSERT 同样会失败，
+	// 所以只看 err != nil 会把两道守卫混成一道：拆掉这一句，错误变成约束冲突，
+	// 用例仍然绿——钉住文案才分得清是谁拦的。
+	if !strings.Contains(err.Error(), "必须相等") {
+		t.Errorf("两个数不一致的错误 = %q，期望点出「必须相等」", err)
+	}
+}
+
+// 「两个都不给」不能落到「可用量必须为正数」那一句上：那会把「没填」说成
+// 「填了非正数」，调用方照着改也改不对。金额包在这一档里两个数本来是一回事，
+// 缺的是值本身，所以错误要指向「必须给出可用量（或面值）」。
+func TestCreatePlanRejectsAmountPackageWithoutAnyValue(t *testing.T) {
+	ctx := context.Background()
+	svc := New(testDB(t))
+
+	_, err := svc.CreatePlan(ctx, CreatePlanInput{
+		Key: "plan-" + itoa(nextID()), Name: "两个都不给", Asset: ledger.AssetCNY,
+		Unit: UnitAmount,
+	})
+	if err == nil {
+		t.Fatal("金额包两个数都不给应当被拒")
+	}
+	if !strings.Contains(err.Error(), "必须给出可用量") {
+		t.Errorf("两个数都不给的错误 = %q，期望点出「必须给出可用量」", err)
+	}
+	if strings.Contains(err.Error(), "必须为正数") {
+		t.Errorf("两个数都不给的错误 = %q；这里没有「填了个非正数」，不该走正数校验那一条", err)
 	}
 }
 
@@ -864,5 +894,61 @@ func TestUserPlansReportsRemaining(t *testing.T) {
 	}
 	if got.Status != UserPlanCancelled || got.VoidRef == "" {
 		t.Errorf("作废后的订阅应当带终态与作废单号: %+v", got)
+	}
+}
+
+// 0 号用户不存在：UserPlans(0) 必须报错，而不是静默返回空清单——空清单会被
+// 调用方当成「这个用户没有订阅」，一个参数错误就这样变成了业务结论。
+func TestUserPlansRejectsZeroUserID(t *testing.T) {
+	svc := New(testDB(t))
+	rows, err := svc.UserPlans(context.Background(), 0)
+	if err == nil {
+		t.Fatalf("UserPlans(0) 返回 %d 条订阅与 nil 错误；空清单会被当成「没有订阅」", len(rows))
+	}
+	if !strings.Contains(err.Error(), "用户 id 非法") {
+		t.Errorf("错误应当是「用户 id 非法」，得到: %v", err)
+	}
+}
+
+// Grant 的 UserID 在入口就拒掉：0 号用户不存在，放它进事务只会在插入时被外键
+// 拒，错误类别与文案都变了，而且多了一次写尝试。
+func TestGrantRejectsZeroUserID(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	svc := New(db)
+	plan := newPlan(t, ctx, svc, "100")
+
+	ref := "grant-" + itoa(nextID())
+	_, _, err := svc.Grant(ctx, GrantInput{
+		TxnID: newTxnID(), Ref: ref, UserID: 0, PlanKey: plan.Key,
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err == nil {
+		t.Fatal("UserID=0 的发放应当被拒")
+	}
+	if !strings.Contains(err.Error(), "用户 id 非法") {
+		t.Errorf("错误应当是「用户 id 非法」，得到: %v", err)
+	}
+	if got := countUserPlansByRef(t, db, ref); got != 0 {
+		t.Errorf("被拒的发放留下了 %d 条订阅，期望 0", got)
+	}
+}
+
+// Void 的 UserPlanID 同理：0 不是合法订阅 id，要报「订阅 id 非法」，
+// 而不是拿 0 去查库、把「参数写错了」报成「这条订阅不存在」。
+func TestVoidRejectsZeroUserPlanID(t *testing.T) {
+	svc := New(testDB(t))
+	_, _, err := svc.Void(context.Background(), VoidInput{
+		TxnID: newTxnID(), UserPlanID: 0, Ref: "void-" + itoa(nextID()),
+		Status: UserPlanCancelled,
+	})
+	if err == nil {
+		t.Fatal("UserPlanID=0 的作废应当被拒")
+	}
+	if !strings.Contains(err.Error(), "订阅 id 非法") {
+		t.Errorf("错误应当是「订阅 id 非法」，得到: %v", err)
+	}
+	if errors.Is(err, ErrNoUserPlan) {
+		t.Error("参数错误被报成了「这条订阅不存在」")
 	}
 }
