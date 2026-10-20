@@ -385,9 +385,9 @@ func TestQuotaRejectsMalformedConfidence(t *testing.T) {
 //
 // 空字符串不是库里的形态：这一列是 numeric(3,2) NOT NULL，扫描出来要么是数字，
 // 要么是 NULL（LEFT JOIN 没连上）。它挡住的是直接构造出来的 candidateRow——
-// 本包内拿构造值调用 quota / withValue 的路径。少了 `!= ""`，那一格会掉进
-// ParseFloat 的错误分支，把「这一格没填」报成「这一行的类型与表定义对不上」。
-// 两种口径不冲突：库里不会有空串，函数级输入可以有。
+// 本包内拿构造值调用 candidateRow.quota / withValue 的路径。少了 `!= ""`，
+// 那一格会掉进 ParseFloat 的错误分支，把「这一格没填」报成「这一行的类型与
+// 表定义对不上」。两种口径不冲突：库里不会有空串，函数级输入可以有。
 func TestQuotaEmptyConfidenceIsAbsent(t *testing.T) {
 	row := candidateRow{
 		remaining:  sql.NullString{String: "12.5", Valid: true},

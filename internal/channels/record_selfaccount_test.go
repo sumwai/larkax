@@ -43,7 +43,7 @@ func TestRecordCallZeroUsageLeavesQuotaStateUntouched(t *testing.T) {
 	}
 }
 
-// 下面两段说明对应两条存活过的判据，不是用例本身。判据见
+// 下面两段说明对应两条存活过的判据，各自挨着钉它的用例。判据见
 // scripts/check-mutation.sh 的「存活变异要逐条人看」那一段。
 
 // record.go:358 的 `!found || prev.Remaining == nil || prev.Unit != quota.UnitTokens`
@@ -59,25 +59,14 @@ func TestRecordCallZeroUsageLeavesQuotaStateUntouched(t *testing.T) {
 // TestRecordCallSelfAccountingSkipsForeignUnit 杀掉了（单位对不上时会扣减并
 // 改写 probe_kind），不在存活清单里。
 
-// record.go:425 的 `confidence != ""`——把 != 改成 == 是**真缺口**，不是等价变异。
+// 读到没有基准时（record.go:358）就返回，连 quota.Validate 都不该走到。
 //
-// 这一列是 `numeric(3, 2) NOT NULL DEFAULT 0`（internal/migrate/sql/00001_init.sql:203），
-// 扫进 string 一定是十进制文本（"0.00"、"0.85"…），不可能是空串。于是原判据
-// **恒为真**：每一次读都会解析并写进 state.Confidence。变异体的 `== ""` 恒为假，
-// 每次都跳过解析，Confidence 留在零值——列里写着 0.85 时，两版读出的是 0.85
-// 与 0。这不是等价，只是此前没有用例在 confidence 非零时走读路径。
-// 由 TestReadQuotaStateParsesConfidence 钉住。
-//
-// 注意当前两个调用方（selfAccount 与探测的写回）都会用 Merge 重算 confidence，
-// 所以差别只体现在 readQuotaState 返回的 quota.State 上——它返回的是完整的
-// 状态，Confidence 是契约的一部分（打分见 internal/route 的 scoreQuota）。
-
-// 没有基准时自记账在开事务之前就返回，连 quota.Validate 都不该走到。
-//
-// 额度行存在、单位是 tokens，但 remaining_estimate 为 NULL——推不出数，这次
-// 观测整个跳过（record.go:358）。于是即便 At 落在将来，也不会被 Validate 的
-// 「观测时间在将来」拒绝。这一格是 record.go:358 左侧那个 || 的区分输入：
-// 判据改成 && 之后会继续往下走，Validate 报错，RecordCall 返回失败。
+// selfAccount 已经开过事务（record.go:348），这道守卫在事务里；这一格要钉住
+// 的是「过了守卫就什么都不做」。额度行存在、单位是 tokens，但
+// remaining_estimate 为 NULL——推不出数，这次观测整个跳过。于是即便 At 落在
+// 将来，也不会被 Validate 的「观测时间在将来」拒绝。这一格是 record.go:358
+// 左侧那个 || 的区分输入：判据改成 && 之后会继续往下走，Validate 报错，
+// RecordCall 返回失败。
 func TestRecordCallWithoutBaselineSkipsValidation(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
@@ -101,6 +90,19 @@ func TestRecordCallWithoutBaselineSkipsValidation(t *testing.T) {
 		t.Errorf("remaining = %v，期望仍是 NULL", snap.remaining)
 	}
 }
+
+// record.go:425 的 `confidence != ""`——把 != 改成 == 是**真缺口**，不是等价变异。
+//
+// 这一列是 `numeric(3, 2) NOT NULL DEFAULT 0`（internal/migrate/sql/00001_init.sql:203），
+// 扫进 string 一定是十进制文本（"0.00"、"0.85"…），不可能是空串。于是原判据
+// **恒为真**：每一次读都会解析并写进 state.Confidence。变异体的 `== ""` 恒为假，
+// 每次都跳过解析，Confidence 留在零值——列里写着 0.85 时，两版读出的是 0.85
+// 与 0。这不是等价，只是此前没有用例在 confidence 非零时走读路径。
+// 由 TestReadQuotaStateParsesConfidence 钉住。
+//
+// 注意当前两个调用方（selfAccount 与探测的写回）都会用 Merge 重算 confidence，
+// 所以差别只体现在 readQuotaState 返回的 quota.State 上——它返回的是完整的
+// 状态，Confidence 是契约的一部分（打分见 internal/route 的 scoreQuota）。
 
 // readQuotaState 必须把 confidence 解析出来，不能靠「跳过空串」把这一列丢掉。
 //
