@@ -364,6 +364,7 @@ PKGS=(
   internal/plugin/sandbox
   internal/api
   internal/adminapi
+  internal/assembly
   internal/snapshot
   internal/snapshotwire
   internal/gateway

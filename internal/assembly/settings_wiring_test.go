@@ -92,12 +92,24 @@ func buildAppWithSettings(t *testing.T, db *sql.DB, overrides map[string]string)
 		return nil, err
 	}
 
+	return Build(testConfig(t, db, values))
+}
+
+// testConfig 是一份按生产路径装配所需的 Config，日志默认丢弃。
+//
+// 单独拆出来是因为「填齐所有字段」与「改其中某一个字段」是两件事。
+// 要改 Logger 的用例得先拿到一份完整的 Config，再动那一项。装配字段
+// 如果另抄一份，Config 加一个必填字段时，抄的那一份要到下次有人跑它
+// 才报错。
+func testConfig(t *testing.T, db *sql.DB, values *settings.Values) Config {
+	t.Helper()
+
 	executor, err := upstream.New(10 * time.Second)
 	if err != nil {
 		t.Fatalf("构造上游执行器失败: %v", err)
 	}
 
-	return Build(Config{
+	return Config{
 		DB:       db,
 		Sealer:   testSealer(t),
 		Settings: values,
@@ -106,7 +118,7 @@ func buildAppWithSettings(t *testing.T, db *sql.DB, overrides map[string]string)
 		Executor: executor,
 		Rules:    pricing.New(db),
 		Costs:    pricing.NewCostSource(db),
-	})
+	}
 }
 
 // 账本记不了的资产品种必须在装配期被拒。
@@ -178,6 +190,35 @@ func TestBuildRefusesOutOfRangeMaxOutputTokens(t *testing.T) {
 	}
 }
 
+// 单次输出上限的**上下界本身**必须装得起来。
+//
+// 上面那条只说明「界外会失败」，它分辨不出「界画紧了一格」：把下界抬成 2、
+// 或者把上界收成 1048575 时，上面那条照样全过（它试的 0、-1 与 1048577
+// 仍被判成界外），而一个完全合理的配置会在启动时被拒——现场看到的是
+// 「服务起不来」，看不出差在这一个数上。
+//
+// 两个值写成字面量，不拿 minMaxOutputTokens / maxMaxOutputTokens 来
+// 给自己出题（见 LESSONS.md 第 21 条）：写成常量的话，把常量改一位，
+// 用例跟着一起动，等于什么都没钉住。1 是下界，1048576（1 << 20）是上界。
+func TestBuildAcceptsMaxOutputTokensAtBounds(t *testing.T) {
+	db := testDB(t)
+
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"下界（一个 token）", `1`},
+		{"上界（一百万个 token）", `1048576`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := buildWithSetting(t, db, maxOutputTokensKey, tc.value); err != nil {
+				t.Fatalf("settings.%s = %s 是允许范围内的值，装配却失败了：%v",
+					maxOutputTokensKey, tc.value, err)
+			}
+		})
+	}
+}
+
 // 探测间隔非正时必须在装配期被拒。
 //
 // 这一条钉的是 quota.probe_interval_seconds 真的被读了。原先那个键没有任何
@@ -205,10 +246,37 @@ func TestBuildRefusesNonPositiveProbeInterval(t *testing.T) {
 				t.Fatalf("settings.quota.probe_interval_seconds = %s 时装配成功了——"+
 					"这个键没有被读，陈旧阈值仍然是代码里写死的那个", tc.value)
 			}
-			if !strings.Contains(err.Error(), "quota.probe_interval_seconds") {
-				t.Errorf("错误信息 %q 里没有键名：配错的人要能一眼看出改哪个键", err.Error())
-			}
+			assertProbeIntervalRangeError(t, err, tc.value)
 		})
+	}
+}
+
+// assertProbeIntervalRangeError 断言失败来自**范围检查那一步**。
+//
+// 只断言键名是不够的：quotaStaleAfter 里先后有两处会报错——先读探测间隔
+// （范围检查），再把间隔换算成陈旧阈值（这里对非正数也会报错）。后一处
+// 在间隔为 0 时给出的错误同样带键名，所以只查键名的话，范围检查被绕过
+// 也有错误可查，「它拒绝了」与「后面那一步替它拒绝了」就分不清。两处的
+// 文案不同：范围检查说「超出允许范围」，换算说「不合法」。
+//
+// 这不是措辞洁癖：范围检查在**换算之前**，绕过去之后溢出会把超大负数
+// 绕回一个看着正常的正数（见 minProbeIntervalSeconds 上的说明），那时
+// 换算那一步根本不会报错。
+func assertProbeIntervalRangeError(t *testing.T, err error, value string) {
+	t.Helper()
+
+	msg := err.Error()
+	if !strings.Contains(msg, "quota.probe_interval_seconds") {
+		t.Errorf("错误信息 %q 里没有键名：配错的人要能一眼看出改哪个键", msg)
+	}
+	if !strings.Contains(msg, "超出允许范围") {
+		t.Errorf("错误信息 %q 不是范围检查给出的：界外的值应当在换算之前被拒绝", msg)
+	}
+	// 值那一项带上分隔符：只查裸值的话，value 为 "0" 时下游文案「得到 0s」
+	// 也含 0，这一条就成了恒真。
+	if !strings.Contains(msg, " = "+value+" 秒") {
+		t.Errorf("错误信息 %q 里没有配下的值（应当出现「= %s 秒」）：要能看出错在哪一个数上",
+			msg, value)
 	}
 }
 
@@ -243,9 +311,7 @@ func TestBuildRefusesProbeIntervalOutOfRange(t *testing.T) {
 				t.Fatalf("settings.quota.probe_interval_seconds = %s 时装配成功了——"+
 					"绕出来的阈值谁也没配过，而服务会照常启动", tc.value)
 			}
-			if !strings.Contains(err.Error(), "quota.probe_interval_seconds") {
-				t.Errorf("错误信息 %q 里没有键名：配错的人要能一眼看出改哪个键", err.Error())
-			}
+			assertProbeIntervalRangeError(t, err, tc.value)
 		})
 	}
 }
