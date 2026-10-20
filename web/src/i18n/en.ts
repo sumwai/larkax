@@ -21,6 +21,9 @@ export const en: Record<MessageKey, string> = {
   'common.none': '—',
   'common.more': 'More',
 
+  'mock.banner':
+    'Demo data: not connected to the backend. Set `VITE_API_MODE=http` and start the gateway to use real data.',
+
   'nav.overview': 'Overview',
   'nav.keys': 'API keys',
   'nav.usage': 'Usage',

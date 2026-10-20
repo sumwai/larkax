@@ -5,6 +5,7 @@ import { I18nProvider, useI18n } from './i18n'
 import { SiteProvider } from './site/SiteProvider'
 import { ThemeProvider } from './theme/ThemeProvider'
 import { AppShell } from './components/AppShell'
+import { MockBanner } from './components/MockBanner'
 import { ToastProvider } from './components/ui'
 import { Landing } from './pages/Landing'
 import { Login } from './pages/Login'
@@ -59,6 +60,7 @@ export function App() {
           <SiteProvider>
             <AuthProvider>
               <BrowserRouter>
+                <MockBanner />
                 <Routes>
                   <Route path="/" element={<Landing />} />
                   <Route path="/login" element={<Login />} />

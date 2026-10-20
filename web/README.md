@@ -16,8 +16,13 @@ npm install
 npm run dev          # Vite prints the local URL (default port 5173)
 ```
 
-`npm run dev` proxies `/api` to `http://127.0.0.1:8080` (the gateway's default
-listen address). Override the target with `VITE_API_PROXY`.
+`npm run dev` proxies `/api` to the gateway's port. The port follows
+`LARKAX_HTTP_ADDR` — read from the environment first, then from the repository's
+root `.env` (the file above `web/`) — because that is where the gateway's listen
+address lives. `":8081"`, `127.0.0.1:8081` and `0.0.0.0:8081` all yield port
+8081; an address without a parsable port falls back to 8080. `VITE_API_PROXY`
+overrides the whole target, and the dev server prints the chosen target when it
+starts.
 
 By default the app runs against an in-memory mock of the console API, so the UI
 works before the Go side is ready. Set `VITE_API_MODE=http` to call the real
@@ -29,6 +34,8 @@ VITE_API_MODE=http npm run dev
 
 Mock notes: any non-empty password signs in; keys created in the mock disappear
 on a full page reload, while the signed-in session survives in `sessionStorage`.
+The top of every page carries a dismissible demo-data banner; closing it hides it
+for the session, and a reload shows it again.
 
 ## Build
 
@@ -51,9 +58,11 @@ deployment decision, not something this repository wires up. Do not commit it.
 | --- | --- | --- |
 | `VITE_API_MODE` | `mock` | `mock` for the in-memory fixture, `http` for the real API |
 | `VITE_API_BASE` | `/api/v1` | API prefix; keep same-origin in production |
-| `VITE_API_PROXY` | `http://127.0.0.1:8080` | Dev-server proxy target (not bundled) |
+| `VITE_API_PROXY` | derived | Dev-server proxy target; overrides the derived one (not bundled) |
+| `LARKAX_HTTP_ADDR` | `127.0.0.1:8080` | Gateway listen address, read from the environment or the root `.env`; only its port feeds the dev proxy default (not bundled) |
 
-Only `VITE_*` variables reach the browser bundle; never put secrets here.
+Only `VITE_*` variables reach the browser bundle; never put secrets here. The
+proxy target defaults to `http://127.0.0.1:<port of LARKAX_HTTP_ADDR>`.
 
 ## Checks
 

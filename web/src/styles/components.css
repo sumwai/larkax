@@ -848,6 +848,48 @@ textarea.input {
 .alert.bad .ico {
   color: var(--danger);
 }
+/* 演示数据横幅：贴在页面最顶端的一条窄带，不参与卡片之间的间距节奏。 */
+.alert.mock-banner {
+  align-items: center;
+  gap: 8px;
+  padding: 8px clamp(12px, 3vw, 24px);
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--warning) 24%, transparent);
+  border-radius: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.alert.mock-banner .ico {
+  margin-top: 0;
+  width: 16px;
+  height: 16px;
+}
+.mock-banner-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.mock-banner-close {
+  flex: none;
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.mock-banner-close:hover {
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: var(--fg);
+}
+.mock-banner-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 .warnbox {
   font-size: 12px;
   color: var(--warning);
