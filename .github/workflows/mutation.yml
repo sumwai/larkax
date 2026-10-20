@@ -19,8 +19,8 @@ name: 变异测试
 # 由 internal/billing 覆盖。这里若自己写「目录 == 清单条目」，只改子包的 PR 会
 # 一个包都不量，而界面上与「不需要跑」长得一样。
 #
-# 草稿 PR 不跑：还在改的代码不该占着 runner 几小时，标成 ready for review 后
-# 下一次 push 会重新触发。
+# 草稿 PR 不跑：还在改的代码不该占着 runner 几小时。标成 ready for review
+# 那一刻就会触发一轮。
 #
 # **口径不在这里重写**：真正干活的是 `scripts/check-mutation.sh`——同一份实现，
 # 于是 workers=1、系数 10、`--invert-logical`、每个包之前清一次测试缓存这些
