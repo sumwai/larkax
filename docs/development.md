@@ -1755,6 +1755,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/adminapi` | 114 | 0 | 0 | 5 | 95.80% | 100.00% | 70.7% |
 | `internal/assembly` | 71 | 0 | 0 | 10 | 87.65% | 100.00% | 80.1% |
 | `internal/settings` | 27 | 0 | 0 | 4 | 87.10% | 100.00% | 73.6% |
+| `internal/upstream` | 9 | 0 | 0 | 1 | 90.00% | 100.00% | 97.2% |
 | `internal/channels` | 288 | 1 | 1 | 41 | 87.58% | 99.65% | 76.6% |
 | `internal/plugin/store` | 77 | 1 | 0 | 15 | 83.87% | 98.72% | 72.4% |
 | `internal/calendar` | 150 | 2 | 0 | 14 | 91.57% | 98.68% | 97.8% |

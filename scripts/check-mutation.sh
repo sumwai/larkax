@@ -371,6 +371,7 @@ PKGS=(
   internal/snapshotwire
   internal/gateway
   internal/payment
+  internal/upstream
 )
 
 # 一个包里超时的变异超过这个数，就认为系数不够、结果不可信。
