@@ -28,6 +28,32 @@ the repository's own conventions and red lines are in [AGENTS.md](AGENTS.md).
   how, is in [docs/development.md](docs/development.md) under "常用检查" and
   "CI 跑什么".
 
+## Labels
+
+Issues carry three kinds of labels:
+
+- `area:*` — which part of the code it touches.
+- `priority:*` — `p0-critical` through `p3-low`.
+- `status:*` — where it stands:
+  - `status:ready` — actionable now, not scheduled yet.
+  - `status:working` — someone is on it.
+  - `status:tracking` — a registered gap. Nobody is waiting on anything in
+    particular; the entry exists so the gap is not rediscovered next month.
+  - `status:blocked` — cannot proceed, and not because of another issue here.
+
+Waiting on something specific gets its own label, so it does not hide inside
+`status:tracking`:
+
+- `wait:#123` — cannot start until #123 lands. Add it when the dependency
+  appears; remove it when #123 closes, and re-judge the status at the same time.
+  Delete the label itself once no issue carries it.
+- `wait:decision` — waiting on a decision or a fact from outside this repository,
+  with no issue to point at.
+
+The reason for the separate label is that the issue list shows labels but not
+blocked-by relationships: `status:tracking` says a gap exists, `wait:#123` says
+why it is not moving.
+
 ## Red lines
 
 This is a public repository. Source, commit messages, issues and pull requests must
