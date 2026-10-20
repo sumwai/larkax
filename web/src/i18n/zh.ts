@@ -19,6 +19,9 @@ export const zh = {
   'common.none': '—',
   'common.more': '更多',
 
+  'mock.banner':
+    '演示数据：未连接后端。设置 `VITE_API_MODE=http` 并启动网关后使用真实数据。',
+
   'nav.overview': '概览',
   'nav.keys': 'API 密钥',
   'nav.usage': '用量',
