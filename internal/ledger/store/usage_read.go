@@ -166,11 +166,23 @@ func (s *Store) UsageEvents(ctx context.Context, f UsageEventFilter) (UsageEvent
 }
 
 // BillingRequestFilter 描述一次计费请求的读取范围，与 UsageEventFilter 同构。
+//
+// 游标与三个筛选字段是给控制台用的（见 usage_requests.go 的 UsageRequests）。
+// 不写成同一个类型：那一条的投影多带 token 与计费路径，而这里的调用方
+// （命令行）只读账单本身的列，两边的字段一起长会让「命令行看到什么」跟着
+// 控制台的需求变。
 type BillingRequestFilter struct {
 	UserID *int64
 	From   time.Time
 	To     time.Time
 	Limit  int
+	// APIKeyID 为 nil 表示不限 key。
+	APIKeyID *int64
+	// Model 与 Status 为空表示不筛。
+	Model  string
+	Status string
+	// Cursor 为 nil 表示从头读；给了就从这一行之后接着读（按 started_at, id 降序）。
+	Cursor *RequestCursor
 }
 
 // BillingRequestRow 是一条计费请求里读出来的列。
@@ -237,6 +249,19 @@ func (s *Store) BillingRequests(ctx context.Context, f BillingRequestFilter) (Bi
 	}
 	if !f.To.IsZero() {
 		conds = append(conds, "started_at < "+param(f.To))
+	}
+	if f.APIKeyID != nil {
+		conds = append(conds, "api_key_id = "+param(*f.APIKeyID))
+	}
+	if f.Model != "" {
+		conds = append(conds, "canonical_model = "+param(f.Model))
+	}
+	if f.Status != "" {
+		conds = append(conds, "status = "+param(f.Status))
+	}
+	if f.Cursor != nil {
+		conds = append(conds, "(started_at, id) < ("+
+			param(f.Cursor.StartedAt)+", "+param(f.Cursor.ID)+")")
 	}
 
 	query := "SELECT " + billingRequestColumns + " FROM billing_requests"

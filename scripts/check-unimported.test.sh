@@ -493,6 +493,33 @@ rc=$?
 if [ "$rc" -eq 2 ]; then ok; else bad "扫不到 main 包 —— 应报「没跑成」（退出码 2），实际 $rc"; fi
 grep -q '没找到 main 包' "$last_out" || bad "扫不到 main 包 —— 要说清是这个原因"
 
+# 21. node_modules 里自带的 Go 包不算「仓库自己的包」。
+#     `go list ./...` 不看 .gitignore，会把它们收进来；不滤掉的话，
+#     跑过 `npm install` 的工作树会得到一条假的「新出现的整包没人 import」，
+#     而 CI 上是绿的。同时钉住「滤掉几条要打印出来」——安静地滤掉与
+#     「本来就没有」长得一样。
+pkgs_nm="$tmp/pkgs-nm.txt"
+cp "$pkgs_ok" "$pkgs_nm"
+echo 'example.com/fake/web/node_modules/somedep/golang/pkg/leaf' >>"$pkgs_nm"
+stub_nm="$tmp/go-nm"
+make_go "$stub_nm" "$mod_ok" "$deps_ok" "$pkgs_nm"
+run "$stub_nm" "$wl_ok"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  ok
+else
+  bad "node_modules —— 依赖自带的 Go 包不该让门禁失败，实际退出码 $rc"
+fi
+grep -q '跳过 1 个 node_modules 下的包' "$last_out" ||
+  bad "node_modules —— 滤掉几条要打印出来（否则与「本来就没有」分不开）"
+if grep -q 'somedep' "$last_out"; then
+  bad "node_modules —— 依赖自带的包不该出现在无人 import 清单里"
+else
+  ok
+fi
+grep -q '仓库自己的包 6 个' "$last_out" ||
+  bad "node_modules —— 滤掉之后的包数才是「仓库自己的包」（期望 6）"
+
 # ── 结果 ──────────────────────────────────────────────────────────────────
 
 echo

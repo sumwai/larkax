@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
@@ -102,6 +103,9 @@ type Wallet struct {
 	// 证据——报告要说清「读不出来的是什么」，只能引它。
 	BalanceRaw string
 	FrozenRaw  string
+	// UpdatedAt 是这一行最后一次被写入的时刻。控制台把它展示成「余额更新于」，
+	// 它是快照的新鲜度，不是账本的事实时间——账本的时间要看分录。
+	UpdatedAt time.Time
 }
 
 // Wallets 列钱包快照，按 user_id、asset 排序。
@@ -129,7 +133,7 @@ type Wallet struct {
 // users 的变化改。调用方要名字就自己按 user_id 去 auth 那边取。
 func (s *Store) Wallets(ctx context.Context, userID *int64) ([]Wallet, error) {
 	const query = `
-		SELECT user_id, asset, balance::text, frozen::text
+		SELECT user_id, asset, balance::text, frozen::text, updated_at
 		  FROM user_wallets
 		 WHERE $1::bigint IS NULL OR user_id = $1
 		 ORDER BY user_id, asset`
@@ -146,7 +150,7 @@ func (s *Store) Wallets(ctx context.Context, userID *int64) ([]Wallet, error) {
 			w              Wallet
 			balance, froze string
 		)
-		if scanErr := rows.Scan(&w.UserID, &w.Asset, &balance, &froze); scanErr != nil {
+		if scanErr := rows.Scan(&w.UserID, &w.Asset, &balance, &froze, &w.UpdatedAt); scanErr != nil {
 			return nil, fmt.Errorf("读钱包行失败: %w", scanErr)
 		}
 		// 金额列是 numeric，没有能直接扫进定点数类型的驱动类型，所以按

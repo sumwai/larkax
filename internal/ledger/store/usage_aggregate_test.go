@@ -1,0 +1,441 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/sumwai/larkax/internal/money"
+)
+
+// 本文件是控制台用量聚合（汇总 / 序列 / 分组）在真库上的用例。
+//
+// 这些断言里有三类东西只有数据库给得出来：分区裁剪后的时间窗、numeric 的
+// 十进制求和、以及「一次请求落了多行事件」时 COUNT(DISTINCT request_id)
+// 与 SUM(cost) 各自的口径。把它们换成内存实现，测到的就是「我以为 SQL 会
+// 怎么算」。
+
+// usageWorld 是一组跨两个用户、两个 key、三个模型的用量数据。
+type usageWorld struct {
+	userID    int64
+	key1      int64
+	key2      int64
+	channelID int64
+	requestA  string
+	requestB  string
+	requestC  string
+	requestD  string
+	requestE  string
+	requestX  string
+}
+
+// usageWindow 是这组数据的主窗口：2026 年 10 月 1 日到 8 日（左闭右开）。
+func usageWindow(t *testing.T, userID int64) UsageWindow {
+	t.Helper()
+	return UsageWindow{
+		UserID: userID,
+		From:   usageTestTime(t, "2026-10-01T00:00:00Z"),
+		To:     usageTestTime(t, "2026-10-08T00:00:00Z"),
+	}
+}
+
+// seedUsageWorld 造出后续三个用例共用的那批行。
+//
+//	req-A  key1  gpt-4o        settled 1.50，**两行事件**（0.50 + 1.00）
+//	req-B  key1  gpt-4o        pending 预留 0.50，没有事件
+//	req-C  key2  claude-3      settled 2.00
+//	req-E  key1  gpt-4o-mini   settled 0.25
+//	req-D  key1  gpt-4o        settled 7.00，但整行落在 11 月（窗口外）
+//	req-X  另一个用户           settled 100.00（不该出现在这个用户的任何读里）
+func seedUsageWorld(ctx context.Context, t *testing.T, db *sql.DB) usageWorld {
+	t.Helper()
+
+	world := usageWorld{
+		userID:    seedUsageUser(ctx, t, db),
+		channelID: seedChannel(t, ctx, db),
+		requestA:  requestIDOf("usage-a"),
+		requestB:  requestIDOf("usage-b"),
+		requestC:  requestIDOf("usage-c"),
+		requestD:  requestIDOf("usage-d"),
+		requestE:  requestIDOf("usage-e"),
+		requestX:  requestIDOf("usage-x"),
+	}
+	world.key1 = seedAPIKey(ctx, t, db, world.userID)
+	world.key2 = seedAPIKey(ctx, t, db, world.userID)
+	for id, name := range map[int64]string{world.key1: "第一把", world.key2: "第二把"} {
+		if _, err := db.ExecContext(ctx,
+			`UPDATE api_keys SET name = $2 WHERE id = $1`, id, name); err != nil {
+			t.Fatalf("改 key 名字失败: %v", err)
+		}
+	}
+
+	otherUser := seedUsageUser(ctx, t, db)
+	otherKey := seedAPIKey(ctx, t, db, otherUser)
+
+	settledA := usageTestTime(t, "2026-10-02T10:00:05Z")
+	insertBillingRequest(ctx, t, db, billingFixture{
+		UserID: world.userID, KeyID: &world.key1, ChannelID: world.channelID,
+		RequestID: world.requestA, Model: "gpt-4o",
+		Status: BillingStatusSettled, Reserved: "2.00", Final: "1.50",
+		Streamed: true, StartedAt: usageTestTime(t, "2026-10-02T10:00:00Z"),
+		SettledAt: &settledA,
+	})
+	insertBillingRequest(ctx, t, db, billingFixture{
+		UserID: world.userID, KeyID: &world.key1, ChannelID: world.channelID,
+		RequestID: world.requestB, Model: "gpt-4o",
+		Status: BillingStatusPending, Reserved: "0.50",
+		StartedAt: usageTestTime(t, "2026-10-03T12:00:00Z"),
+	})
+	insertBillingRequest(ctx, t, db, billingFixture{
+		UserID: world.userID, KeyID: &world.key2, ChannelID: world.channelID,
+		RequestID: world.requestC, Model: "claude-3",
+		Status: BillingStatusSettled, Reserved: "2.50", Final: "2.00",
+		StartedAt: usageTestTime(t, "2026-10-04T09:00:00Z"),
+	})
+	insertBillingRequest(ctx, t, db, billingFixture{
+		UserID: world.userID, KeyID: &world.key1, ChannelID: world.channelID,
+		RequestID: world.requestE, Model: "gpt-4o-mini",
+		Status: BillingStatusSettled, Reserved: "0.25", Final: "0.25",
+		StartedAt: usageTestTime(t, "2026-10-05T15:00:00Z"),
+	})
+	// 窗口外：事件落在 11 月分区，账单也落在 11 月，两边都不该被选中。
+	insertBillingRequest(ctx, t, db, billingFixture{
+		UserID: world.userID, KeyID: &world.key1, ChannelID: world.channelID,
+		RequestID: world.requestD, Model: "gpt-4o",
+		Status: BillingStatusSettled, Reserved: "7.00", Final: "7.00",
+		StartedAt: usageTestTime(t, "2026-11-02T10:00:00Z"),
+	})
+	insertBillingRequest(ctx, t, db, billingFixture{
+		UserID: otherUser, KeyID: &otherKey, ChannelID: world.channelID,
+		RequestID: world.requestX, Model: "gpt-4o",
+		Status: BillingStatusSettled, Reserved: "100.00", Final: "100.00",
+		StartedAt: usageTestTime(t, "2026-10-02T11:00:00Z"),
+	})
+
+	seedUsageEvent(ctx, t, db, usageEventFixture{
+		RequestID: world.requestA, UserID: world.userID, ChannelID: world.channelID,
+		Model: "gpt-4o", PromptTokens: 100, CompletionTokens: 50,
+		CacheReadTokens: 10, CacheWriteTokens: 20, ReasoningTokens: 5,
+		Path: "measured", Cost: "0.50",
+		CreatedAt: usageTestTime(t, "2026-10-02T10:00:10Z"),
+	})
+	// 同一请求的第二行：requests 仍是 1，金额是两行之和。
+	seedUsageEvent(ctx, t, db, usageEventFixture{
+		RequestID: world.requestA, UserID: world.userID, ChannelID: world.channelID,
+		Model: "gpt-4o", PromptTokens: 200, CompletionTokens: 60,
+		Path: "estimated", Cost: "1.00",
+		CreatedAt: usageTestTime(t, "2026-10-02T10:00:20Z"),
+	})
+	seedUsageEvent(ctx, t, db, usageEventFixture{
+		RequestID: world.requestC, UserID: world.userID, ChannelID: world.channelID,
+		Model: "claude-3", PromptTokens: 1000, CompletionTokens: 500,
+		Path: "measured", Cost: "2.00",
+		CreatedAt: usageTestTime(t, "2026-10-04T09:00:10Z"),
+	})
+	seedUsageEvent(ctx, t, db, usageEventFixture{
+		RequestID: world.requestE, UserID: world.userID, ChannelID: world.channelID,
+		Model: "gpt-4o-mini", PromptTokens: 50,
+		Path: "measured", Cost: "0.25",
+		CreatedAt: usageTestTime(t, "2026-10-05T15:00:10Z"),
+	})
+	seedUsageEvent(ctx, t, db, usageEventFixture{
+		RequestID: world.requestD, UserID: world.userID, ChannelID: world.channelID,
+		Model: "gpt-4o", PromptTokens: 7000, Path: "measured", Cost: "7.00",
+		CreatedAt: usageTestTime(t, "2026-11-02T10:00:10Z"),
+	})
+	seedUsageEvent(ctx, t, db, usageEventFixture{
+		RequestID: world.requestX, UserID: otherUser, ChannelID: world.channelID,
+		Model: "gpt-4o", PromptTokens: 9000, Path: "measured", Cost: "100.00",
+		CreatedAt: usageTestTime(t, "2026-10-02T11:00:10Z"),
+	})
+
+	return world
+}
+
+func TestUsageSummaryTotalsAndPaths(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	world := seedUsageWorld(ctx, t, db)
+	s := New(db)
+
+	summary, err := s.UsageSummary(ctx, usageWindow(t, world.userID))
+	if err != nil {
+		t.Fatalf("UsageSummary 失败: %v", err)
+	}
+
+	if got, want := summary.Totals.Cost, money.MustParse("3.75"); got != want {
+		t.Errorf("总额 = %s，期望 %s（0.50 + 1.00 + 2.00 + 0.25）", got, want)
+	}
+	// 两行事件属于 req-A，所以这里必须是 3 而不是 4。
+	if summary.Totals.Requests != 3 {
+		t.Errorf("请求数 = %d，期望 3（按 request_id 去重）", summary.Totals.Requests)
+	}
+	tokens := []struct {
+		name string
+		got  int64
+		want int64
+	}{
+		{"prompt", summary.Totals.PromptTokens, 1350},
+		{"completion", summary.Totals.CompletionTokens, 610},
+		{"cache_read", summary.Totals.CacheReadTokens, 10},
+		{"cache_write", summary.Totals.CacheWriteTokens, 20},
+		{"reasoning", summary.Totals.ReasoningTokens, 5},
+	}
+	for _, token := range tokens {
+		if token.got != token.want {
+			t.Errorf("%s tokens = %d，期望 %d", token.name, token.got, token.want)
+		}
+	}
+
+	if len(summary.Paths) != 3 {
+		t.Fatalf("路径档数 = %d，期望 3", len(summary.Paths))
+	}
+	wantPaths := []struct {
+		path     string
+		cost     string
+		requests int64
+	}{
+		{"measured", "2.75", 3},
+		{"estimated", "1.00", 1},
+		// 表上的 CHECK 只允许前两档（fallback 没有产出点），所以这一档
+		// 永远是 0；响应仍然把它列出来，形状与接口约定一致。
+		{"fallback", "0.00", 0},
+	}
+	for i, want := range wantPaths {
+		got := summary.Paths[i]
+		if got.Path != want.path || got.Cost != money.MustParse(want.cost) ||
+			got.Requests != want.requests {
+			t.Errorf("Paths[%d] = %+v，期望 %s / %s / %d 次",
+				i, got, want.path, want.cost, want.requests)
+		}
+	}
+
+	// 只有一档有数据时，另外两档仍然在，金额为 0——图表不该缺线。
+	modelWindow := usageWindow(t, world.userID)
+	modelWindow.Model = "gpt-4o-mini"
+	onlyMeasured, err := s.UsageSummary(ctx, modelWindow)
+	if err != nil {
+		t.Fatalf("按模型汇总失败: %v", err)
+	}
+	if len(onlyMeasured.Paths) != 3 {
+		t.Fatalf("只有一档数据时路径档数 = %d，期望仍是 3", len(onlyMeasured.Paths))
+	}
+	if onlyMeasured.Paths[1].Path != "estimated" ||
+		onlyMeasured.Paths[1].Cost != money.Zero ||
+		onlyMeasured.Paths[2].Path != "fallback" ||
+		onlyMeasured.Paths[2].Cost != money.Zero {
+		t.Errorf("空档没有补零: %+v", onlyMeasured.Paths)
+	}
+
+	// 按 key 过滤：req-B 是 pending 且没有事件，所以不计入；req-D 在窗口外。
+	keyWindow := usageWindow(t, world.userID)
+	keyWindow.APIKeyID = &world.key1
+	byKey, err := s.UsageSummary(ctx, keyWindow)
+	if err != nil {
+		t.Fatalf("按 key 汇总失败: %v", err)
+	}
+	if byKey.Totals.Cost != money.MustParse("1.75") || byKey.Totals.Requests != 2 {
+		t.Errorf("key1 汇总 = %s / %d 次，期望 1.75 / 2",
+			byKey.Totals.Cost, byKey.Totals.Requests)
+	}
+
+	// 空窗口不是错误，是三个 0。
+	empty := UsageWindow{
+		UserID: world.userID,
+		From:   usageTestTime(t, "2026-10-20T00:00:00Z"),
+		To:     usageTestTime(t, "2026-10-21T00:00:00Z"),
+	}
+	emptySummary, err := s.UsageSummary(ctx, empty)
+	if err != nil {
+		t.Fatalf("空窗口汇总失败: %v", err)
+	}
+	if emptySummary.Totals.Cost != money.Zero || emptySummary.Totals.Requests != 0 {
+		t.Errorf("空窗口 = %+v", emptySummary.Totals)
+	}
+}
+
+func TestUsageSummaryRejectsBadQueries(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	s := New(db)
+
+	zeroUser := UsageWindow{
+		UserID: 0,
+		From:   usageTestTime(t, "2026-10-01T00:00:00Z"),
+		To:     usageTestTime(t, "2026-10-08T00:00:00Z"),
+	}
+	if _, err := s.UsageSummary(ctx, zeroUser); !errors.Is(err, ErrInvalidQuery) {
+		t.Errorf("用户 ID 为 0 应当报 ErrInvalidQuery，得到 %v", err)
+	}
+
+	emptyWindow := UsageWindow{
+		UserID: 1,
+		From:   usageTestTime(t, "2026-10-01T00:00:00Z"),
+		To:     usageTestTime(t, "2026-10-01T00:00:00Z"),
+	}
+	if _, err := s.UsageSummary(ctx, emptyWindow); !errors.Is(err, ErrInvalidQuery) {
+		t.Errorf("空窗口应当报 ErrInvalidQuery，得到 %v", err)
+	}
+}
+
+func TestUsageSeriesFillsEmptyBuckets(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	world := seedUsageWorld(ctx, t, db)
+	s := New(db)
+
+	points, err := s.UsageSeries(ctx, usageWindow(t, world.userID), "day", time.UTC)
+	if err != nil {
+		t.Fatalf("UsageSeries 失败: %v", err)
+	}
+	if len(points) != 7 {
+		t.Fatalf("日序列点数 = %d，期望 7（10-01 到 10-07）", len(points))
+	}
+	for i, point := range points {
+		want := usageTestTime(t, "2026-10-01T00:00:00Z").AddDate(0, 0, i)
+		if !point.Start.Equal(want) {
+			t.Errorf("points[%d].Start = %s，期望 %s", i, point.Start, want)
+		}
+	}
+	// 10-02 的两行事件是同一个请求，所以是 1 次请求、金额之和。
+	if points[1].Cost != money.MustParse("1.50") || points[1].Requests != 1 {
+		t.Errorf("10-02 桶 = %s / %d 次，期望 1.50 / 1",
+			points[1].Cost, points[1].Requests)
+	}
+	if points[3].Cost != money.MustParse("2.00") || points[3].PromptTokens != 1000 {
+		t.Errorf("10-04 桶 = %+v", points[3].UsageTotals)
+	}
+	if points[4].Cost != money.MustParse("0.25") {
+		t.Errorf("10-05 桶 = %s，期望 0.25", points[4].Cost)
+	}
+	for _, i := range []int{0, 2, 5, 6} {
+		if points[i].Cost != money.Zero || points[i].Requests != 0 {
+			t.Errorf("空桶 points[%d] = %+v，期望全零", i, points[i].UsageTotals)
+		}
+	}
+
+	// 小时粒度：09:00 与 11:00 都是空桶（另一个用户的行在 11:00）。
+	hourWindow := UsageWindow{
+		UserID: world.userID,
+		From:   usageTestTime(t, "2026-10-02T09:00:00Z"),
+		To:     usageTestTime(t, "2026-10-02T12:00:00Z"),
+	}
+	hours, err := s.UsageSeries(ctx, hourWindow, "hour", time.UTC)
+	if err != nil {
+		t.Fatalf("小时序列失败: %v", err)
+	}
+	if len(hours) != 3 {
+		t.Fatalf("小时序列点数 = %d，期望 3", len(hours))
+	}
+	if hours[0].Cost != money.Zero || hours[2].Cost != money.Zero {
+		t.Errorf("小时空桶 = %+v / %+v", hours[0], hours[2])
+	}
+	if hours[1].Cost != money.MustParse("1.50") || hours[1].Requests != 1 {
+		t.Errorf("10:00 桶 = %s / %d", hours[1].Cost, hours[1].Requests)
+	}
+}
+
+func TestUsageSeriesRejectsBadWindows(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	s := New(db)
+
+	base := UsageWindow{
+		UserID: 1,
+		From:   usageTestTime(t, "2026-10-01T00:00:00Z"),
+		To:     usageTestTime(t, "2026-10-08T00:00:00Z"),
+	}
+
+	if _, err := s.UsageSeries(ctx, base, "week", time.UTC); !errors.Is(err, ErrInvalidQuery) {
+		t.Errorf("未知粒度应当报 ErrInvalidQuery，得到 %v", err)
+	}
+	if _, err := s.UsageSeries(ctx, base, "day", nil); !errors.Is(err, ErrInvalidQuery) {
+		t.Errorf("时区为空应当报 ErrInvalidQuery，得到 %v", err)
+	}
+
+	// 638 天：日序列超过 366 个点。
+	long := base
+	long.From = usageTestTime(t, "2025-01-01T00:00:00Z")
+	long.To = usageTestTime(t, "2026-10-01T00:00:00Z")
+	if _, err := s.UsageSeries(ctx, long, "day", time.UTC); !errors.Is(err, ErrInvalidQuery) {
+		t.Errorf("超过日上限应当报 ErrInvalidQuery，得到 %v", err)
+	}
+
+	// 32 天：768 个小时桶，超过 744。
+	longHours := base
+	longHours.To = base.From.Add(32 * 24 * time.Hour)
+	if _, err := s.UsageSeries(ctx, longHours, "hour", time.UTC); !errors.Is(err, ErrInvalidQuery) {
+		t.Errorf("超过小时上限应当报 ErrInvalidQuery，得到 %v", err)
+	}
+
+	// 窗口本身自洽性：起点不早于终点。
+	bad := base
+	bad.From = base.To
+	if _, err := s.UsageSeries(ctx, bad, "day", time.UTC); !errors.Is(err, ErrInvalidQuery) {
+		t.Errorf("空窗口应当报 ErrInvalidQuery，得到 %v", err)
+	}
+}
+
+func TestUsageBreakdownGroupsAndFoldsTheRest(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	world := seedUsageWorld(ctx, t, db)
+	s := New(db)
+
+	window := usageWindow(t, world.userID)
+	byModel, err := s.UsageBreakdown(ctx, window, "model", 2)
+	if err != nil {
+		t.Fatalf("按模型分组失败: %v", err)
+	}
+	if len(byModel.Items) != 2 {
+		t.Fatalf("分组数 = %d，期望 2", len(byModel.Items))
+	}
+	// 金额降序：claude-3 (2.00) 在 gpt-4o (1.50) 前面。
+	if byModel.Items[0].Model != "claude-3" ||
+		byModel.Items[0].Cost != money.MustParse("2.00") {
+		t.Errorf("Items[0] = %+v，期望 claude-3 / 2.00", byModel.Items[0])
+	}
+	if byModel.Items[1].Model != "gpt-4o" ||
+		byModel.Items[1].Cost != money.MustParse("1.50") ||
+		byModel.Items[1].Requests != 1 {
+		t.Errorf("Items[1] = %+v，期望 gpt-4o / 1.50 / 1 次", byModel.Items[1])
+	}
+	if byModel.Other.Model != "" || byModel.Other.Cost != money.MustParse("0.25") ||
+		byModel.Other.Requests != 1 {
+		t.Errorf("Other = %+v，期望 gpt-4o-mini 折进来的 0.25 / 1 次", byModel.Other)
+	}
+
+	// 分组数不超过 limit 时 Other 是全零，而不是「第 limit 组」。
+	all, err := s.UsageBreakdown(ctx, window, "model", 10)
+	if err != nil {
+		t.Fatalf("按模型分组失败: %v", err)
+	}
+	if len(all.Items) != 3 || all.Other.Cost != money.Zero || all.Other.Requests != 0 {
+		t.Errorf("未截断时 Items=%d Other=%+v", len(all.Items), all.Other)
+	}
+
+	// 按 key：pending 的 req-B 没有事件，所以不出现；名字从 api_keys 左连回来。
+	byKey, err := s.UsageBreakdown(ctx, window, "key", 10)
+	if err != nil {
+		t.Fatalf("按 key 分组失败: %v", err)
+	}
+	if len(byKey.Items) != 2 {
+		t.Fatalf("按 key 分组数 = %d，期望 2", len(byKey.Items))
+	}
+	if byKey.Items[0].KeyID == nil || *byKey.Items[0].KeyID != world.key2 ||
+		byKey.Items[0].KeyName != "第二把" ||
+		byKey.Items[0].Cost != money.MustParse("2.00") {
+		t.Errorf("Items[0] = %+v，期望 key2 / 第二把 / 2.00", byKey.Items[0])
+	}
+	if byKey.Items[1].KeyID == nil || *byKey.Items[1].KeyID != world.key1 ||
+		byKey.Items[1].KeyName != "第一把" ||
+		byKey.Items[1].Cost != money.MustParse("1.75") {
+		t.Errorf("Items[1] = %+v，期望 key1 / 第一把 / 1.75", byKey.Items[1])
+	}
+
+	if _, err := s.UsageBreakdown(ctx, window, "user", 10); !errors.Is(err, ErrInvalidQuery) {
+		t.Errorf("未知分组方式应当报 ErrInvalidQuery，得到 %v", err)
+	}
+}

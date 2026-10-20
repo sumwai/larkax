@@ -1,0 +1,438 @@
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ButtonHTMLAttributes,
+  type ReactNode,
+} from 'react'
+import type { MessageKey } from '../i18n/zh'
+import { useI18n } from '../i18n'
+import { formatMoney, moneySymbol } from '../lib/format'
+import type { Money } from '../api/types'
+import { IconAlert, IconCheck, IconCopy, IconChevronDown, IconInfo, IconX } from './icons'
+
+/* ── 按钮 ─────────────────────────────────────────────────────────── */
+
+type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger'
+
+interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: ButtonVariant
+  size?: 'md' | 'sm' | 'icon'
+  loading?: boolean
+  icon?: ReactNode
+}
+
+export function Button({
+  variant = 'primary',
+  size = 'md',
+  loading = false,
+  icon,
+  className,
+  children,
+  disabled,
+  ...rest
+}: ButtonProps) {
+  const classes = [
+    'btn',
+    variant === 'primary' ? '' : variant,
+    size === 'sm' ? 'sm' : '',
+    size === 'icon' ? 'icon' : '',
+    className ?? '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+  return (
+    <button className={classes} disabled={disabled || loading} {...rest}>
+      {loading ? <span className="spin" aria-hidden="true" /> : icon}
+      {children}
+    </button>
+  )
+}
+
+/* ── 状态 ─────────────────────────────────────────────────────────── */
+
+type Tone = 'ok' | 'neutral' | 'warn' | 'bad' | 'accent'
+
+export function Pill({ tone = 'neutral', dot = false, children }: { tone?: Tone; dot?: boolean; children: ReactNode }) {
+  return (
+    <span className={`pill ${tone}`}>
+      {dot && <span className="dot" aria-hidden="true" />}
+      {children}
+    </span>
+  )
+}
+
+const STATUS: Record<string, { tone: Tone; key: MessageKey }> = {
+  active: { tone: 'ok', key: 'status.active' },
+  disabled: { tone: 'neutral', key: 'status.disabled' },
+  revoked: { tone: 'bad', key: 'status.revoked' },
+  pending: { tone: 'warn', key: 'status.pending' },
+  ok: { tone: 'ok', key: 'status.ok' },
+  settled: { tone: 'ok', key: 'status.settled' },
+  released: { tone: 'neutral', key: 'status.released' },
+  refunded: { tone: 'accent', key: 'status.refunded' },
+  failed: { tone: 'bad', key: 'status.failed' },
+  measured: { tone: 'accent', key: 'status.measured' },
+  estimated: { tone: 'warn', key: 'status.estimated' },
+  fallback: { tone: 'neutral', key: 'status.fallback' },
+}
+
+export function StatusPill({ status }: { status: string }) {
+  const { t } = useI18n()
+  const meta = STATUS[status]
+  return (
+    <Pill tone={meta?.tone ?? 'neutral'} dot>
+      {meta ? t(meta.key) : status}
+    </Pill>
+  )
+}
+
+/* ── 金额 ─────────────────────────────────────────────────────────── */
+
+export function MoneyText({ value, currency }: { value: Money | null | undefined; currency?: string }) {
+  const symbol = moneySymbol(currency)
+  return (
+    <>
+      {symbol && <small>{symbol}</small>}
+      {formatMoney(value)}
+    </>
+  )
+}
+
+/* ── 反馈 ─────────────────────────────────────────────────────────── */
+
+type AlertTone = 'info' | 'ok' | 'warn' | 'bad'
+
+export function Alert({ tone = 'info', title, children }: { tone?: AlertTone; title?: ReactNode; children?: ReactNode }) {
+  const Glyph = tone === 'bad' || tone === 'warn' ? IconAlert : tone === 'ok' ? IconCheck : IconInfo
+  return (
+    <div className={`alert ${tone}`} role={tone === 'bad' ? 'alert' : 'status'}>
+      <Glyph className="ico" size={18} />
+      <div>
+        {title && <b>{title}</b>}
+        {children && <p>{children}</p>}
+      </div>
+    </div>
+  )
+}
+
+export function Empty({
+  icon,
+  title,
+  body,
+  action,
+}: {
+  icon?: ReactNode
+  title: ReactNode
+  body?: ReactNode
+  action?: ReactNode
+}) {
+  return (
+    <div className="empty">
+      {icon && <div className="ico">{icon}</div>}
+      <h3>{title}</h3>
+      {body && <p>{body}</p>}
+      {action}
+    </div>
+  )
+}
+
+export function Skeleton({ width = '100%', height = 12 }: { width?: number | string; height?: number | string }) {
+  return <span className="sk" style={{ display: 'block', width, height }} aria-hidden="true" />
+}
+
+/* ── 浮层 ─────────────────────────────────────────────────────────── */
+
+export function Modal({
+  title,
+  description,
+  onClose,
+  children,
+  footer,
+  sheet = false,
+}: {
+  title: ReactNode
+  description?: ReactNode
+  onClose: () => void
+  children: ReactNode
+  footer?: ReactNode
+  sheet?: boolean
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
+  const titleId = useId()
+  const { t } = useI18n()
+
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const bodyOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    dialogRef.current?.focus()
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeRef.current()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.body.style.overflow = bodyOverflow
+      previous?.focus()
+    }
+  }, [])
+
+  return (
+    <div
+      className={sheet ? 'overlay sheet-overlay' : 'overlay'}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        ref={dialogRef}
+      >
+        <div className="m-head">
+          <div>
+            <h2 id={titleId}>{title}</h2>
+            {description && <p>{description}</p>}
+          </div>
+          <button className="close" onClick={onClose} aria-label={t('common.close')}>
+            <IconX size={16} />
+          </button>
+        </div>
+        {children}
+        {footer && <div className="form-actions">{footer}</div>}
+      </div>
+    </div>
+  )
+}
+
+/* ── Toast ────────────────────────────────────────────────────────── */
+
+const ToastContext = createContext<{ show: (message: string) => void } | null>(null)
+
+export function ToastProvider({ children }: { children: ReactNode }) {
+  const [message, setMessage] = useState<string | null>(null)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const show = useCallback((next: string) => {
+    setMessage(next)
+    if (timer.current) clearTimeout(timer.current)
+    timer.current = setTimeout(() => setMessage(null), 2600)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (timer.current) clearTimeout(timer.current)
+    }
+  }, [])
+
+  const value = useMemo(() => ({ show }), [show])
+  return (
+    <ToastContext.Provider value={value}>
+      {children}
+      {message && (
+        <div className="toast-wrap" role="status" aria-live="polite">
+          <div className="toast">
+            <IconCheck size={16} />
+            {message}
+          </div>
+        </div>
+      )}
+    </ToastContext.Provider>
+  )
+}
+
+export function useToast() {
+  const context = useContext(ToastContext)
+  if (!context) throw new Error('useToast must be used inside ToastProvider')
+  return context
+}
+
+/* ── 下拉 ─────────────────────────────────────────────────────────── */
+
+export interface SelectOption<T extends string> {
+  value: T
+  label: string
+}
+
+export function Select<T extends string>({
+  value,
+  options,
+  onChange,
+  ariaLabel,
+}: {
+  value: T
+  options: Array<SelectOption<T>>
+  onChange: (value: T) => void
+  ariaLabel: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [active, setActive] = useState(() => Math.max(0, options.findIndex((o) => o.value === value)))
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const listId = useId()
+  const current = options.find((option) => option.value === value) ?? options[0]
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    return () => document.removeEventListener('mousedown', onPointerDown)
+  }, [open])
+
+  const choose = (next: T) => {
+    onChange(next)
+    setOpen(false)
+  }
+
+  return (
+    <div className="wrap-rel" ref={wrapRef}>
+      <button
+        type="button"
+        className="selectbtn"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={ariaLabel}
+        onClick={() => {
+          setActive(Math.max(0, options.findIndex((option) => option.value === value)))
+          setOpen((previous) => !previous)
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault()
+            if (!open) {
+              setOpen(true)
+              return
+            }
+            const delta = event.key === 'ArrowDown' ? 1 : -1
+            setActive((index) => (index + delta + options.length) % options.length)
+          } else if (event.key === 'Enter' && open) {
+            event.preventDefault()
+            choose(options[active].value)
+          } else if (event.key === 'Escape') {
+            setOpen(false)
+          }
+        }}
+      >
+        <span className="val">{current?.label}</span>
+        <IconChevronDown className="chev" />
+      </button>
+      {open && (
+        <div className="menu" role="listbox" id={listId} aria-label={ariaLabel}>
+          {options.map((option, index) => (
+            <button
+              key={option.value}
+              type="button"
+              role="option"
+              aria-selected={option.value === value}
+              className={index === active ? 'menu-item is-active' : 'menu-item'}
+              onMouseEnter={() => setActive(index)}
+              onClick={() => choose(option.value)}
+            >
+              {option.label}
+              {option.value === value && <IconCheck className="tick" size={14} />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ── 复制 ─────────────────────────────────────────────────────────── */
+
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    // 降级到 execCommand。
+  }
+  try {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(area)
+    return ok
+  } catch {
+    return false
+  }
+}
+
+export function CopyButton({
+  text,
+  label,
+  className = 'btn secondary sm',
+}: {
+  text: string
+  label?: string
+  className?: string
+}) {
+  const { t } = useI18n()
+  const [copied, setCopied] = useState(false)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (timer.current) clearTimeout(timer.current)
+    }
+  }, [])
+
+  return (
+    <button
+      type="button"
+      className={className}
+      aria-label={label ?? t('common.copy')}
+      onClick={async () => {
+        const ok = await copyText(text)
+        if (!ok) return
+        setCopied(true)
+        if (timer.current) clearTimeout(timer.current)
+        timer.current = setTimeout(() => setCopied(false), 2000)
+      }}
+    >
+      {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+      {copied ? t('common.copied') : (label ?? t('common.copy'))}
+    </button>
+  )
+}
+
+/* ── 页头 ─────────────────────────────────────────────────────────── */
+
+export function PageHead({
+  title,
+  subtitle,
+  actions,
+}: {
+  title: ReactNode
+  subtitle?: ReactNode
+  actions?: ReactNode
+}) {
+  return (
+    <div className="page-head">
+      <div>
+        <h1>{title}</h1>
+        {subtitle && <p>{subtitle}</p>}
+      </div>
+      {actions && <div className="page-actions">{actions}</div>}
+    </div>
+  )
+}
