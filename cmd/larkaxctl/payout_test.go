@@ -55,6 +55,25 @@ func assertHas(t *testing.T, out string, wants ...string) {
 	}
 }
 
+// assertFieldValue 核对一行「标签 值」里的值。
+//
+// 不能把标签与值之间的空白写死：回显是按同组标签里最长的那一个对齐的，
+// 空白个数会随那一组里有什么标签变化——写死空格数的断言会在加了更长的
+// 标签之后突然变红，而红的原因与这条断言想管的事情无关。
+func assertFieldValue(t *testing.T, out, label, want string) {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == label {
+			if fields[1] != want {
+				t.Errorf("%s 的值 = %q，期望 %q", label, fields[1], want)
+			}
+			return
+		}
+	}
+	t.Errorf("输出里没有 %s 那一行：\n%s", label, out)
+}
+
 // txnEntryCount 数某个交易在库里留下了几条分录。
 //
 // 「被拒的动作一个字节都没写」这类判据只有数库里的条数才判得了：被拒时回显上
@@ -89,6 +108,21 @@ func userBalance(t *testing.T, db *sql.DB, userID int64) string {
 		t.Fatalf("读余额失败: %v", err)
 	}
 	return balance
+}
+
+// ledgerAccountTotal 汇总一个科目的分录之和（定点十进制的文本）。
+//
+// 清算那几条用例要看的是「商户的分成少了多少、这张单子的待付多了多少」——两个数
+// 都在分录里，只有按科目把分录加起来才判得了。
+func ledgerAccountTotal(t *testing.T, db *sql.DB, account string) string {
+	t.Helper()
+	var total string
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT COALESCE(SUM(amount), 0)::numeric(20,8)::text FROM ledger_entries WHERE account = $1`,
+		account).Scan(&total); err != nil {
+		t.Fatalf("汇总科目 %s 失败: %v", account, err)
+	}
+	return total
 }
 
 // mustUserID 把命令行的用户标识（这里是 createTestUserID 给的十进制形式）
@@ -411,6 +445,164 @@ func TestWalletPayoutRequestRejectsInsufficientPayable(t *testing.T) {
 	}
 }
 
+// 平台主动清算：一步建一张 approved 的单子并记账（分成减少、待付增加），之后
+// paid 能把它推进到 paid；同一个结算单号重放不建第二张单。
+func TestWalletPayoutSettleReceiptAndReplay(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+	merchant := createTestUserID(t)
+	operator := createTestUserID(t)
+	fundMerchantPayable(t, db, mustUserID(t, merchant), "10")
+	ref := uniqueName("settle")
+	destination := `{"bank":"placeholder-bank"}`
+	args := []string{
+		"--user", merchant, "--amount", "6.5", "--ref", ref,
+		"--destination", destination, "--by", operator, "--note", "2026-10 结算",
+	}
+
+	out := mustRun(t, runWalletPayout, append([]string{"settle"}, args...)...)
+	assertHas(t, out,
+		"已清算提现单",
+		"6.50000000",
+		"approved（已批准）",
+		"审批人",
+		"2026-10 结算",
+		"分录：",
+		// 清算的账面形状与申请相同，但类型是 settle：单号进分成那条的备注。
+		"贷 merchant_payable:"+merchant,
+		"借 payout:",
+		"平台清算（单据 "+ref+"）",
+	)
+	assertFieldValue(t, out, "结算单号", ref)
+
+	id := payoutIDOfMerchant(t, db, mustUserID(t, merchant))
+	if got := payoutStatus(t, db, id); got != "approved" {
+		t.Errorf("清算之后状态 = %q，期望 approved（平台已经决定付了）", got)
+	}
+	if got := ledgerAccountTotal(t, db, "merchant_payable:"+merchant); got != "3.50000000" {
+		t.Errorf("清算之后分成科目 = %s，期望 3.50000000（10 减 6.5）", got)
+	}
+	if got := ledgerAccountTotal(t, db, "payout:"+itoa64(id)); got != "6.50000000" {
+		t.Errorf("清算之后待付科目 = %s，期望 6.50000000", got)
+	}
+	if n := txnEntryCount(t, db, string(txnIDForPayoutSettle(ref))); n != 2 {
+		t.Errorf("清算写下 %d 条分录，期望 2 条", n)
+	}
+
+	// 重放：同一把键、同样的参数，既不再建单也不再记账。
+	again := mustRun(t, runWalletPayout, append([]string{"settle"}, args...)...)
+	assertHas(t, again, "结算单号 "+ref+" 已经清算过，本次未改动。")
+	var rows int
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT count(*) FROM payout_requests WHERE merchant_user_id = $1`,
+		mustUserID(t, merchant)).Scan(&rows); err != nil {
+		t.Fatalf("数提现单失败: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("重放之后库里 %d 行提现单，期望 1 行", rows)
+	}
+	if got := ledgerAccountTotal(t, db, "merchant_payable:"+merchant); got != "3.50000000" {
+		t.Errorf("重放之后分成科目 = %s，期望仍是 3.50000000（没有清第二次）", got)
+	}
+	if n := txnEntryCount(t, db, string(txnIDForPayoutSettle(ref))); n != 2 {
+		t.Errorf("重放之后这个交易有 %d 条分录，期望还是 2 条", n)
+	}
+
+	// 同一个单号换一份收款信息不是重放，是冲突：库里那一份不变。
+	r := runCmd(t, runWalletPayout, "settle",
+		"--user", merchant, "--amount", "6.5", "--ref", ref,
+		"--destination", `{"bank":"another-bank"}`, "--by", operator)
+	if r.err == nil {
+		t.Fatal("同一张清算单换收款信息应当被拒")
+	}
+	if code := exitCode(r.err); code != exitConflict {
+		t.Errorf("退出码 = %d，期望 %d：%v", code, exitConflict, r.err)
+	}
+	var stored string
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT destination::text FROM payout_requests WHERE id = $1`, id).Scan(&stored); err != nil {
+		t.Fatalf("读收款信息失败: %v", err)
+	}
+	if stored != `{"bank": "placeholder-bank"}` {
+		t.Errorf("收款信息 = %s，期望仍是原来那一份（冲突那一次一个字段都没写进去）", stored)
+	}
+
+	// 清算建出来的单子直接 approved，所以 paid 能把它收尾。
+	paidOut := mustRun(t, runWalletPayout, "paid",
+		"--id", itoa64(id), "--gateway", "manual")
+	assertHas(t, paidOut, "已打款提现单", "paid（已打款）", "借 payment_gateway:manual")
+	if got := payoutStatus(t, db, id); got != "paid" {
+		t.Errorf("打款之后状态 = %q，期望 paid", got)
+	}
+}
+
+// 清算额超过商户的分成余额时退 1，一笔都不写：与申请同一档。
+func TestWalletPayoutSettleRejectsInsufficientPayable(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+	merchant := createTestUserID(t)
+	fundMerchantPayable(t, db, mustUserID(t, merchant), "2")
+	ref := uniqueName("settle-nsf")
+
+	r := runCmd(t, runWalletPayout, "settle",
+		"--user", merchant, "--amount", "3", "--ref", ref,
+		"--destination", `{"bank":"placeholder-bank"}`, "--by", merchant)
+	if r.err == nil {
+		t.Fatal("分成不够时清算应当被拒")
+	}
+	if code := exitCode(r.err); code != 1 {
+		t.Errorf("退出码 = %d，期望 1（其他失败）：%v", code, r.err)
+	}
+	assertHas(t, r.err.Error(), "2.00000000", "3.00000000")
+	if n := txnEntryCount(t, db, string(txnIDForPayoutSettle(ref))); n != 0 {
+		t.Errorf("被拒的清算写下了 %d 条分录", n)
+	}
+	var rows int
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT count(*) FROM payout_requests WHERE merchant_user_id = $1`,
+		mustUserID(t, merchant)).Scan(&rows); err != nil {
+		t.Fatalf("数提现单失败: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("被拒的清算留下了 %d 行提现单", rows)
+	}
+	if got := ledgerAccountTotal(t, db, "merchant_payable:"+merchant); got != "2.00000000" {
+		t.Errorf("被拒之后分成科目 = %s，期望仍是 2.00000000", got)
+	}
+}
+
+// --destination 在清算这一档必填，且必须是一个 JSON 对象：两条都在连库之前退 2。
+func TestWalletPayoutSettleRejectsMissingOrBadDestination(t *testing.T) {
+	setupEnv(t)
+
+	cases := []struct {
+		name        string
+		destination []string
+		want        []string
+	}{
+		{"缺失", nil, []string{"--destination"}},
+		{"不是 JSON", []string{"--destination", `{bank:`}, []string{"--destination", "JSON 对象"}},
+		{"是字符串", []string{"--destination", `"abc"`}, []string{"--destination", "JSON 对象"}},
+		{"是数组", []string{"--destination", `[1]`}, []string{"--destination", "JSON 对象"}},
+		{"是 null", []string{"--destination", `null`}, []string{"--destination", "JSON 对象"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"--user", "1", "--amount", "1", "--ref", "S-dest", "--by", "1"}
+			args = append(args, tc.destination...)
+			r := runCmd(t, runPayoutSettle, args...)
+			if r.err == nil {
+				t.Fatal("这一份 --destination 应当被拒")
+			}
+			if code := exitCode(r.err); code != exitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错，连库之前就该拒）", code, exitUsage)
+			}
+			assertHas(t, r.err.Error(), tc.want...)
+		})
+	}
+}
+
 // 出账那道门在命令行这一层也关着：没批准的单子打不了款，而且一笔分录都不写。
 func TestWalletPayoutPaidRefusesUnapproved(t *testing.T) {
 	setupEnv(t)
@@ -682,6 +874,11 @@ func TestWalletRefundAndPayoutHelpPrintLongUsage(t *testing.T) {
 			[]string{"larkaxctl wallet payout", "--destination"},
 		},
 		{
+			"wallet payout settle help",
+			runPayoutSettle, []string{"help"},
+			[]string{"larkaxctl wallet payout settle", "--destination", "--by"},
+		},
+		{
 			"wallet payout approve help",
 			runPayoutApprove, []string{"help"},
 			[]string{"larkaxctl wallet payout", "--by"},
@@ -710,10 +907,12 @@ func TestWalletPayoutUsageStatesTheApprovalGate(t *testing.T) {
 	if r.err != nil {
 		t.Fatalf("打说明书不该报错: %v", r.err)
 	}
-	// 三件事：状态怎么走、paid 只认已批准、驳回会把冻结解除。
+	// 三件事：状态怎么走、paid 只认已批准、驳回会把冻结解除；以及 settle 那条
+	// 旁路建出来的单子直接是 approved（所以之后照旧用 paid 收尾）。
 	assertHas(t, r.stdout,
 		"pending", "approved", "paid", "rejected",
 		"只放行已批准",
 		"冻结",
+		"settle", "直接是 approved",
 	)
 }
