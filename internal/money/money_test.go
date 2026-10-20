@@ -233,6 +233,60 @@ func TestMulIntRounding(t *testing.T) {
 	}
 }
 
+// 基点比例是向下取整，零头归付出这一侧（商户分成里是平台）。
+//
+// 变异：MulBasisPoints 开头 `if bp == 0 || a.units == 0` 改成 `&&`。
+// 这一处是**等价变异**：看起来少了一侧早退，实际不会算错。两项里任一为 0
+// 时乘积就是 0，`Quo(0, 10000)` 也是 0，而 Amount 的零值就是 `Zero`
+// （`Amount{}` 的 units 是 0，与 `Zero` 相等）。所以只有两项都为 0 时才
+// 早退，其余情形走到乘法上得到的是同一个零值——`||` 省掉的只是一次
+// big.Int 分配，不是一条判据。下面的 `{"0.1", 0, …}` 与零金额用例
+// 在变异版下照样通过，不是用例没覆盖到。
+func TestMulBasisPoints(t *testing.T) {
+	cases := []struct {
+		amount string
+		bp     int64
+		want   string
+	}{
+		// 平台抽 5%，商户拿 95%
+		{"0.1", 9500, "0.09500000"},
+		{"0.1", 500, "0.00500000"},
+		// 两端：0 是不分账，10000 是全额
+		{"0.1", 0, "0.00000000"},
+		{"0.1", 10000, "0.10000000"},
+		// 零金额乘任何比例都是零
+		{"0", 9500, "0.00000000"},
+		// 舍入方向：3 个最小单位 × 50% = 1.5 个，向下取整到 1 个
+		{"0.00000003", 5000, "0.00000001"},
+		// 不足一个最小单位的零头直接抹掉
+		{"0.00000001", 9999, "0.00000000"},
+		// 负数按向零截断
+		{"-0.00000003", 5000, "-0.00000001"},
+	}
+	for _, tc := range cases {
+		got := MustParse(tc.amount).MulBasisPoints(tc.bp)
+		if got.String() != tc.want {
+			t.Errorf("%s × %d bp = %s，期望 %s", tc.amount, tc.bp, got.String(), tc.want)
+		}
+	}
+}
+
+// 乘 10000 时中间值超出 int64，结果却必须原样回来。
+//
+// 走 MulInt 那条路（先乘再夹）在这里会给出一个夹过的数，而夹过的分成
+// 看起来和正常的一样——所以中间值必须走 big.Int。
+func TestMulBasisPointsDoesNotClamp(t *testing.T) {
+	full := FromUnits(math.MaxInt64)
+	if got := full.MulBasisPoints(MaxBasisPoints); got.Cmp(full) != 0 {
+		t.Errorf("满额基数点应原样返回 %s，得到 %s", full, got)
+	}
+	// MaxInt64 是奇数，一半向下取整到 MaxInt64/2
+	want := FromUnits(math.MaxInt64 / 2)
+	if got := full.MulBasisPoints(5000); got.Cmp(want) != 0 {
+		t.Errorf("MaxInt64 × 50%% = %s，期望 %s", got, want)
+	}
+}
+
 func TestMulAmount(t *testing.T) {
 	// 每单位 2.5 元，共 4 个单位
 	got := MulAmount(MustParse("2.5"), MustParse("4"))
