@@ -1733,8 +1733,8 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/pricing` | 176 | 0 | 0 | 46 | 79.28% | 100.00% | 89.2% |
 | `internal/snapshotwire` | 103 | 1 | 0 | 3 | 97.20% | 99.04% | 94.6% |
 | `internal/calendar` | 150 | 2 | 0 | 14 | 91.57% | 98.68% | 97.8% |
-| `internal/ledger/store` | 431 | 7 | 0 | 60 | 87.95% | 98.40% | 79.8% |
-| `internal/ledger` | 476 | 9 | 0 | 92 | 84.06% | 98.14% | 96.1% |
+| `internal/ledger` | 576 | 8 | 0 | 92 | 86.39% | 98.63% | 96.3% |
+| `internal/ledger/store` | 433 | 6 | 0 | 60 | 87.98% | 98.63% | 79.9% |
 | `internal/route` | 120 | 4 | 0 | 24 | 83.78% | 96.77% | 97.7% |
 | `internal/gateway` | 238 | 9 | 0 | 9 | 96.48% | 96.36% | 95.7% |
 | `internal/snapshot` | 153 | 6 | 0 | 50 | 76.08% | 96.23% | 90.1% |
