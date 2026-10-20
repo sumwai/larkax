@@ -353,6 +353,7 @@ PKGS=(
   internal/channels
   internal/credential
   internal/idempotency
+  internal/overrides
   internal/snapshot
   internal/snapshotwire
   internal/gateway
