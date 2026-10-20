@@ -10,17 +10,22 @@ import (
 //	size += 1 + len(w.keyID) + nonceSize + 2 + len(w.data)   // 79:13/28/40
 //	make([]byte, 0, len(dekNonce)+4+len(body))                // 96:38
 //
-// 输出字节由 append 决定：cap 不够时 append 自己扩容，cap 更大只是少几次
-// 扩容，拼出来的序列完全相同。所以这四个位置上的 ARITHMETIC_BASE 变异体
-// （把某个 `+` 换成 `-`）没有区分输入，杀不掉，也不该为了杀它去断言
-// 分配次数或 cap——GC 与内存峰值不是本函数的可观测契约。
+// 输出字节由 append 决定：cap 不够时 append 自己扩容，cap 更大只是少几次扩容，
+// 拼出来的序列完全相同。所以这几处 ARITHMETIC_BASE 变异体没有区分输入：
+// 把某个 `+` 换成 `-`，值也只进 cap，杀不掉，也不该为了杀它去断言分配次数
+// 或 cap；GC 与内存峰值不是本函数的可观测契约。
+//
+// 等价还依赖另一个前提：改写后的 size 在可达输入上保持非负。同一行**最后**
+// 那个 `+ len(w.data)` 不在这份清单里——换成 `-` 之后，副本数据段稍长，
+// size 就会变成负数，make([]byte, 0, size) 直接 panic；它因此是被 panic
+// 杀掉的，不是等价存活。
 //
 // 能钉住的是布局：下面用字面量把各段字节数写死，让 encode 写出的东西与
-// decode 读得回的东西对得上。这条说明只对「size 仅作 cap」成立；若将来改成
-// 按 size 切片翻写或断言 cap，等价性就不再成立，说明与用例要一起重看。
+// decode 读得回的东西对得上。上面两条前提缺一不可；若将来改成按 size
+// 切片翻写，或开始断言 cap，等价性就不再成立，说明与用例要一起重看。
 //
-// 期望里刻意不出现 headerSize / nonceSize / fixedTailLen：拿被测常量去算
-// 期望，常量改错时断言跟着一起错，等于没测。
+// 期望里刻意不出现 headerSize / nonceSize / fixedTailLen：拿被测常量去算期望，
+// 常量改错时断言跟着一起错，等于没测。
 func TestEncodeLayoutMatchesLiteralSizes(t *testing.T) {
 	nonce := func(fill byte) []byte { return bytes.Repeat([]byte{fill}, 12) }
 
@@ -61,8 +66,9 @@ func TestEncodeLayoutMatchesLiteralSizes(t *testing.T) {
 			if len(raw) != wantLen {
 				t.Fatalf("密文长度 %d，按布局应为 %d", len(raw), wantLen)
 			}
-			if raw[0] != version {
-				t.Errorf("首字节 = %d，期望版本 %d", raw[0], version)
+			// 版本号写死字面量：拿 version 常量去测 version 等于没测。
+			if raw[0] != 1 {
+				t.Errorf("首字节 = %d，期望版本 1", raw[0])
 			}
 			if got := int(raw[1]); got != len(c.wraps) {
 				t.Errorf("副本份数字节 = %d，期望 %d", got, len(c.wraps))

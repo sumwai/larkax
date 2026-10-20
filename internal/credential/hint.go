@@ -17,7 +17,7 @@ const hintRunes = 4
 // 按字节切会把一个多字节字符切成半个，打出来是乱码，而乱码的提示比没有
 // 提示更坏——它看起来像一个真实的凭证尾巴。ASCII 串上两种切法相同。
 //
-// 短于 hintRunes 时原样返回：那种凭证本身就短到没有「末几位」可辨，
+// 不超过 hintRunes 时原样返回：这一档的凭证没有更短的尾巴可取，
 // 截成空串会让界面把它显示成「这条渠道没有凭证」。
 func Hint(plaintext string) string {
 	runes := []rune(plaintext)
