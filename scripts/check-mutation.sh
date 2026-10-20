@@ -345,6 +345,7 @@ PKGS=(
   internal/pricing
   internal/ledger
   internal/ledger/store
+  internal/plans
   internal/pipeline
   internal/calendar
   internal/quota

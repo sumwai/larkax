@@ -95,6 +95,12 @@
 # 入口（一次上传一批插件）还没建，不是有人躲掉了接线。判据不是「有没有调用方」，
 # 而是「它做的事今天有没有位置」。
 #
+# **#860 加了三条**：额度包的账本面（`prepaid` 科目与 `plan_grant` /
+# `plan_void` 两条分录）先落地，生产调用方是新的 `internal/plans`——而那个包
+# 还没被请求路径与命令行接上。三条都记成 `gap | #860`：它们是**接线还没到**
+# 的构件，不是有人躲掉了接线。#860 的请求路径与命令行接上时，要把条目与
+# MAX_ENTRIES 一起减回去。
+#
 # **举例子别用已经被删掉的符号**：这一段原先点的是 `Result.Failed`，
 # 而它随 #282 的第二批真的删掉了，注释里就留下一个不存在的方法。
 #
@@ -119,6 +125,9 @@ internal/calendar/memory.go    | MemorySource.SetYearState      | lib | 测试�
 internal/calendar/memory.go    | MemorySource.YearState         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | NewMemorySource                | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/channel/httpx/httpx.go  | DrainAndClose                   | lib | HTTP 收尾辅助，给拿不到 *http.Response 的调用点用；目前只有测试在调它
+internal/ledger/account.go       | PrepaidAccount                  | gap | #860 额度包：科目构造面，只有 internal/plans 在调，而那个包还没接线
+internal/ledger/transactions.go  | PlanGrant                       | gap | #860 额度包：发放分录的构造面，只有 internal/plans 在调，而那个包还没接线
+internal/ledger/transactions.go  | PlanVoid                        | gap | #860 额度包：作废分录的构造面，只有 internal/plans 在调，而那个包还没接线
 internal/ledger/transactions.go  | Settle                          | gap | #789 平台主动清算还没有触发方；商户申请的提现走的是 PayoutRequest
 internal/money/money.go          | FromInt                         | lib | 金额库的构造面：用整数元构造；目前只有测试在调它
 internal/money/money.go          | FromUnits                       | lib | 金额库的构造面：用最小单位构造；目前只有测试在调它（读库走 Parse，列是 numeric）

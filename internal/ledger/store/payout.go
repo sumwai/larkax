@@ -364,7 +364,7 @@ func (s *Store) RequestPayout(ctx context.Context, in RequestPayoutInput) (Payou
 	// 让这个科目变小的路径有两条：提现申请，以及退款把分成冲回去。光在申请这一侧
 	// 拿锁只把**申请之间**串行化，退款那条路不排队的话，「读完余额到写入之间」仍
 	// 有一个窗口——一边校验通过，另一边已经把它冲走了。所以 store.PostTransaction
-	// 对分录里出现的 merchant_payable 科目取同一把锁（见 lockPayableAccounts），
+	// 对分录里出现的 merchant_payable 科目取同一把锁（见 lockReadThenWriteAccounts），
 	// 两条路因此落在同一条串行线上。消费的分成与驳回都只让它变大；Settle 与提现
 	// 申请是同一个形状，它还没有调用方，接的时候同样要拿这把锁。加锁顺序固定为
 	// 「交易键 → 科目」，两边一致。对账的 RepairAdjustLedger 不拿这把锁，是已知
@@ -445,7 +445,7 @@ func destinationOrEmptyObject(raw []byte) []byte {
 //
 // **让这个科目变小的写路径都应当先拿同一把锁**，否则窗口照样存在。今天这样做
 // 的有两条：提现申请（RequestPayout）与 PostTransaction（退款冲回分成，见
-// lockPayableAccounts）。已知例外是对账的 RepairAdjustLedger：它在
+// lockReadThenWriteAccounts）。已知例外是对账的 RepairAdjustLedger：它在
 // reconcile_batch.go 里直接 insertEntries，不走 PostTransaction；差额科目若被
 // 配成 merchant_payable:<id>，它不拿这把锁就能改动这个科目。对账是人工、低频
 // 的动作，与提现并发时最多让一次申请校验读到偏大的余额——方向不安全（可能多

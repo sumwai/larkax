@@ -26,6 +26,7 @@ func TestAccountConstructors(t *testing.T) {
 		{UpstreamCostAccount(), "upstream_cost", AccountUpstreamCost, ""},
 		{PaymentGatewayAccount("stripe"), "payment_gateway:stripe", AccountPaymentGateway, "stripe"},
 		{PayoutAccount(9), "payout:9", AccountPayout, "9"},
+		{PrepaidAccount(11), "prepaid:11", AccountPrepaid, "11"},
 		{ReconcileDifferenceAccount(), "reconcile_difference", AccountReconcileDifference, ""},
 	}
 	for _, tc := range cases {
@@ -54,8 +55,11 @@ func TestParseAccountRejects(t *testing.T) {
 		"merchant_payable",       // 同上
 		"payment_gateway",        //
 		"payout",                 //
+		"prepaid",                // 同上：缺订阅 id
 		"user:",                  // 后缀为空
 		"user:1:2",               // 多余分隔符：后缀含义无法确定
+		"prepaid:1:2",            // 同上
+		"prepaid:",               // 后缀为空
 		"bogus:1",                // 大类未知
 		"platform_revenue:x",     // 单例科目带了后缀
 		"upstream_cost:1",        // 同上
@@ -73,6 +77,10 @@ func TestParseAccountRejects(t *testing.T) {
 		"merchant_payable:a\x00b", // NUL：写进日志与对账输出会把它截断
 		"merchant_payable:aé",     // 多字节
 		"payment_gateway:a/b",     // 斜杠
+		"prepaid:1 2",             // 空格
+		"prepaid:a!b",             // 标点
+		"prepaid:a\x00b",          // NUL
+		"prepaid:aé",              // 多字节
 	}
 	for _, s := range bad {
 		if _, err := ParseAccount(s); err == nil {
@@ -112,6 +120,46 @@ func TestParseAccountRejectsNonCanonicalUserID(t *testing.T) {
 	for _, s := range good {
 		if _, err := ParseAccount(s); err != nil {
 			t.Errorf("ParseAccount(%q) 不该报错: %v", s, err)
+		}
+	}
+}
+
+// 订阅 id 与用户 id 一样只放行一种写法。
+//
+// prepaid 的余额按科目原文精确汇总（见 store 的 accountBalanceInTx 与
+// internal/plans 里那份同口径的读法），而那个余额就是「这个订阅还剩多少面值」。
+// 同一订阅写成 `prepaid:011` 与 `prepaid:11` 会把余额拆成两笔，两边看起来都
+// 像「还剩一点」，合起来才是真的剩多少。
+func TestParseAccountRejectsNonCanonicalPrepaidID(t *testing.T) {
+	bad := []string{
+		"prepaid:0",                   // 订阅 id 从 1 起（user_plans.id 是 bigserial）
+		"prepaid:00",                  //
+		"prepaid:+0",                  //
+		"prepaid:011",                 // 前导零
+		"prepaid:+11",                 // 正号
+		"prepaid:-1",                  // 负 id 不可能存在
+		"prepaid:abc",                 // 后缀不是整数
+		"prepaid:1234567890123456789", // 十九位：超出上限
+	}
+	for _, s := range bad {
+		if _, err := ParseAccount(s); err == nil {
+			t.Errorf("ParseAccount(%q) 应当报错", s)
+		}
+	}
+
+	good := []string{
+		"prepaid:1",
+		"prepaid:11",
+		"prepaid:123456789012345678", // 十八位：上限之内
+	}
+	for _, s := range good {
+		acct, err := ParseAccount(s)
+		if err != nil {
+			t.Errorf("ParseAccount(%q) 不该报错: %v", s, err)
+			continue
+		}
+		if acct.Type() != AccountPrepaid {
+			t.Errorf("ParseAccount(%q) 的大类 = %q，期望 %q", s, acct.Type(), AccountPrepaid)
 		}
 	}
 }
@@ -163,6 +211,7 @@ func TestUserIDFromAccount(t *testing.T) {
 		{"merchant_payable:42", 0, false},
 		{"payout:42", 0, false},
 		{"payment_gateway:42", 0, false},
+		{"prepaid:42", 0, false},
 		{"platform_revenue", 0, false},
 	}
 	for _, tc := range cases {

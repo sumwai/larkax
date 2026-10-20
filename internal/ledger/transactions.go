@@ -137,6 +137,17 @@ type ConsumeParams struct {
 	// Amount 是向用户收取的总额（售价），由 internal/billing 算出。
 	Amount money.Amount
 	Asset  Asset
+	// PrepaidAccount 是这次消费从哪个额度包订阅扣；零值表示从用户钱包
+	// user:<UserID> 扣。
+	//
+	// 传它时用户侧那条分录换成 prepaid:<订阅 id>，其余分录（商户分成、
+	// 上游成本、平台收入）一字不变——额度包只改变「钱从用户侧的哪个科目
+	// 出」，不改变这一单怎么分账。所以商户分成在额度包覆盖的调用上照常成立。
+	//
+	// 传了它时 UserID 不出现在任何分录里，但仍然必填：这笔消费属于哪个用户
+	// 是账本之外那条账（billing_requests、usage_events）要回答的事，两本账
+	// 要能按同一个用户对上。
+	PrepaidAccount Account
 	// MerchantID 是承接这次请求的渠道所属商户。为 0 表示这笔消费不归属
 	// 任何商户（平台自营渠道），此时没有分成分录。
 	MerchantID int64
@@ -158,6 +169,9 @@ type ConsumeParams struct {
 //	借 merchant_payable:<mid>     S    欠商户的分成增加
 //	借 upstream_cost              C    上游成本增加
 //	借 platform_revenue     A-S-C    剩下的是平台收入
+//
+// 给了 PrepaidAccount 时，第一条换成 `贷 prepaid:<订阅 id>`，其余三条不变
+// ——整单从一个额度包扣，不跨包拆单。
 //
 // # 为什么平台收入是推出来的
 //
@@ -183,6 +197,17 @@ func Consume(p ConsumeParams) (Transaction, error) {
 	if p.UserID <= 0 {
 		return Transaction{}, fmt.Errorf("用户 id 非法: %d", p.UserID)
 	}
+	from := UserAccount(p.UserID)
+	if !p.PrepaidAccount.IsZero() {
+		if _, err := ParseAccount(p.PrepaidAccount.String()); err != nil {
+			return Transaction{}, fmt.Errorf("额度包科目不合法: %w", err)
+		}
+		if p.PrepaidAccount.Type() != AccountPrepaid {
+			return Transaction{}, fmt.Errorf(
+				"消费只能从额度包科目 prepaid:<订阅 id> 扣，得到 %s", p.PrepaidAccount)
+		}
+		from = p.PrepaidAccount
+	}
 	if p.MerchantShare.IsNegative() || p.UpstreamCost.IsNegative() {
 		return Transaction{}, fmt.Errorf("分成 %s 与上游成本 %s 都不能为负", p.MerchantShare, p.UpstreamCost)
 	}
@@ -195,7 +220,7 @@ func Consume(p ConsumeParams) (Transaction, error) {
 	}
 
 	entries := []Entry{
-		credit(p.TxnID, UserAccount(p.UserID), p.Asset, p.Amount, EntryConsume),
+		credit(p.TxnID, from, p.Asset, p.Amount, EntryConsume),
 	}
 	if p.MerchantShare.IsPositive() {
 		entries = append(entries, debit(p.TxnID, MerchantPayableAccount(p.MerchantID), p.Asset, p.MerchantShare, EntryConsume))
@@ -308,6 +333,99 @@ func Refund(p RefundParams) (Transaction, error) {
 		}
 	}
 	return newTxn(EntryRefund, p.TxnID, p.At, entries...)
+}
+
+// PlanGrantParams 是一次额度包发放的输入。
+type PlanGrantParams struct {
+	TxnID TxnID
+	// SubscriptionID 是收到额度的那个订阅（user_plans.id），也是 prepaid
+	// 科目的后缀。
+	SubscriptionID int64
+	// Amount 是这个订阅的面值，进 prepaid。它来自额度包的 face_value，
+	// 不是调用方随手填的金额。
+	Amount money.Amount
+	Asset  Asset
+	// Ref 是外部发放单号（运营工单号、活动单号），进备注供人工对账。
+	Ref string
+	At  time.Time
+}
+
+// PlanGrant 构造一次额度包发放：运营把一个包发给某个用户。
+//
+// 分录：
+//
+//	借 prepaid:<订阅 id>      A    平台欠用户的预存额度增加
+//	贷 platform_revenue       A    这份额度是平台让出来的收入
+//
+// platform_revenue 在这一笔上走到负值是**正常的**：赠出去的额度本来就是平台
+// 少收的钱，它要到消费（记收入）或作废（归平台）时才回到零。不要给它补
+// 「不许为负」的校验。
+//
+// 它与 Topup 的区别：充值让 user 科目变大、通道科目记应收；发放不动用户钱包，
+// 也不涉及任何通道——钱从来没有真的进来过，进来的是「可以抵扣的服务量」。
+func PlanGrant(p PlanGrantParams) (Transaction, error) {
+	if err := validateCommon(EntryPlanGrant, p.TxnID, p.Asset, p.Amount); err != nil {
+		return Transaction{}, err
+	}
+	if p.SubscriptionID <= 0 {
+		return Transaction{}, fmt.Errorf("订阅 id 非法: %d", p.SubscriptionID)
+	}
+
+	entries := []Entry{
+		debit(p.TxnID, PrepaidAccount(p.SubscriptionID), p.Asset, p.Amount, EntryPlanGrant).
+			withMemo(sanitizeMemo(memoWithOrder("额度包发放", p.Ref))),
+		credit(p.TxnID, PlatformRevenueAccount(), p.Asset, p.Amount, EntryPlanGrant),
+	}
+	return newTxn(EntryPlanGrant, p.TxnID, p.At, entries...)
+}
+
+// PlanVoidParams 是一次额度包作废的输入。
+type PlanVoidParams struct {
+	TxnID TxnID
+	// SubscriptionID 是要作废的那个订阅（user_plans.id）。
+	SubscriptionID int64
+	// Amount 是**剩余**面值，由调用方从 prepaid 科目的余额读出来。
+	// 本包不查库，看不到剩多少；报一个猜测的金额会把一条错误的分录写进账本。
+	Amount money.Amount
+	Asset  Asset
+	// Reason 说明为什么作废（到期 / 人工作废）。它进备注：同一档 entry_type
+	// 覆盖两种处置，对账时要能分出是哪一种。
+	Reason string
+	// Ref 是作废单号，进备注供人工对账。
+	Ref string
+	At  time.Time
+}
+
+// PlanVoid 构造一次额度包作废：剩下的面值不再可用，归平台。
+//
+// 分录：
+//
+//	贷 prepaid:<订阅 id>      A    这个订阅的剩余额度核销
+//	借 platform_revenue       A    未用完的部分成为平台的收入
+//
+// 它与 Refund 的区别：退款把钱**还给用户**（借 user），作废是把额度**收回平台**
+// ——用户拿不到现金，只是那份抵扣权没了。
+//
+// 剩余面值为零时不要调用本函数：零金额交易会被 Verify 拒掉。调用方那时只改
+// 订阅状态，不写分录（见 internal/plans 的 Void）。
+func PlanVoid(p PlanVoidParams) (Transaction, error) {
+	if err := validateCommon(EntryPlanVoid, p.TxnID, p.Asset, p.Amount); err != nil {
+		return Transaction{}, err
+	}
+	if p.SubscriptionID <= 0 {
+		return Transaction{}, fmt.Errorf("订阅 id 非法: %d", p.SubscriptionID)
+	}
+
+	memo := "额度包作废"
+	if reason := strings.TrimSpace(p.Reason); reason != "" {
+		memo += "：" + reason
+	}
+	entries := []Entry{
+		credit(p.TxnID, PrepaidAccount(p.SubscriptionID), p.Asset, p.Amount, EntryPlanVoid).
+			withMemo(sanitizeMemo(memoWithOrder(memo, p.Ref))),
+		debit(p.TxnID, PlatformRevenueAccount(), p.Asset, p.Amount, EntryPlanVoid),
+	}
+	return newTxn(EntryPlanVoid, p.TxnID, p.At, entries...)
 }
 
 // SettleParams 是一次商户结算的输入。

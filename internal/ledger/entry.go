@@ -40,6 +40,18 @@ const (
 	// 分开：账面上要能回答「这条待付是打款核销的还是审批驳回的」，
 	// 而这两种处置对账的对象不同（通道账单 vs 审批记录）。
 	EntryPayoutReject EntryType = "payout_reject"
+	// EntryPlanGrant 是运营发放一个额度包订阅：订阅的面值记进
+	// prepaid:<订阅 id>，平台收入相应减少。
+	//
+	// 它是 plan_void 的镜像：两者是同一个订阅生命周期的两端，而消费走的是
+	// 既有的 consume（只差用户侧科目，见 Consume）。
+	EntryPlanGrant EntryType = "plan_grant"
+	// EntryPlanVoid 是额度包订阅作废——到期未用完，或运营提前作废。
+	// 剩余面值从 prepaid:<订阅 id> 转回平台收入。
+	//
+	// 到期与人工作废共用一档：在账上它们是同一个事件（剩下的额度不再可用、
+	// 归平台），区别记在订阅的状态上（到期 / 人工作废）。
+	EntryPlanVoid EntryType = "plan_void"
 	// EntryAdjustment 是人工调账。它不参与任何业务推导，
 	// 只在必须手工修正账目时使用，且强制要求写备注。
 	EntryAdjustment EntryType = "adjustment"
@@ -62,7 +74,8 @@ func validEntryType(t EntryType) bool {
 func EntryTypes() []EntryType {
 	return []EntryType{
 		EntryTopup, EntryConsume, EntryRefund, EntrySettle,
-		EntryPayoutRequest, EntryPayoutPaid, EntryPayoutReject, EntryAdjustment,
+		EntryPayoutRequest, EntryPayoutPaid, EntryPayoutReject,
+		EntryPlanGrant, EntryPlanVoid, EntryAdjustment,
 	}
 }
 
@@ -134,6 +147,7 @@ var entryDirections = map[EntryType]map[AccountType]signMask{
 	},
 	EntryConsume: {
 		AccountUser:            signCredit, // 扣用户的钱
+		AccountPrepaid:         signCredit, // 从额度包的面值里扣
 		AccountMerchantPayable: signDebit,  // 欠商户的分成增加
 		AccountPlatformRevenue: signDebit,  // 平台收入增加
 		AccountUpstreamCost:    signDebit,  // 上游成本增加
@@ -159,6 +173,18 @@ var entryDirections = map[EntryType]map[AccountType]signMask{
 	EntryPayoutReject: {
 		AccountMerchantPayable: signDebit,  // 欠商户的分成恢复
 		AccountPayout:          signCredit, // 这条待付核销
+	},
+	// 额度包的发放与作废：prepaid 是「平台还欠用户的预存额度」，正的余额
+	// 表示这个订阅还剩这么多面值。发放只让它变大、作废只让它变小；prepaid
+	// 够不够扣由选源那一侧判断（第 2 步），**本包不查余额**——同一档 consume
+	// 也会贷 prepaid，汇总之后是否透支不在这张表的判据里。
+	EntryPlanGrant: {
+		AccountPrepaid:         signDebit,  // 平台欠用户的预存额度增加
+		AccountPlatformRevenue: signCredit, // 平台让出这一份收入
+	},
+	EntryPlanVoid: {
+		AccountPrepaid:         signCredit, // 剩下的面值不再可用
+		AccountPlatformRevenue: signDebit,  // 未用完的部分归平台
 	},
 	// 人工调账是唯一的开口：它本就是要修正别处算错的余额，
 	// 所以科目与方向都不设限。代价是它不能被自动推导，

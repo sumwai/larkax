@@ -22,6 +22,7 @@ func newTxnID(t *testing.T, s string) TxnID {
 const (
 	txnA = "11111111-1111-4111-8111-111111111111"
 	txnB = "22222222-2222-4222-8222-222222222222"
+	txnC = "33333333-3333-4333-8333-333333333333"
 )
 
 func amount(t *testing.T, s string) money.Amount {
@@ -1146,5 +1147,165 @@ func TestPayoutRejectRejectsBadInput(t *testing.T) {
 				t.Error("这条输入应当被拒，却构造出了一笔交易")
 			}
 		})
+	}
+}
+
+// 额度包的三段账走完，prepaid 的余额依次等于「还剩多少面值」：
+// 发放后是满的、消费后少一截、作废后归零。它们靠余额判，不靠分录条数
+// ——条数写对而方向写反时，账面照样平，只有余额会反。
+func TestPlanBalanceTracksRemainingFaceValue(t *testing.T) {
+	grantTxn := newTxnID(t, txnA)
+	grant, err := PlanGrant(PlanGrantParams{
+		TxnID: grantTxn, SubscriptionID: 11, Amount: amount(t, "100"),
+		Asset: AssetCNY, Ref: "grant-1",
+	})
+	if err != nil {
+		t.Fatalf("PlanGrant: %v", err)
+	}
+	prepaid := PrepaidAccount(11)
+	if got := balanceOf(t, grant.Entries, prepaid, AssetCNY); got.Cmp(amount(t, "100")) != 0 {
+		t.Fatalf("发放后 prepaid 余额 = %s，期望 100", got)
+	}
+	if got := balanceOf(t, grant.Entries, PlatformRevenueAccount(), AssetCNY); got.Cmp(amount(t, "-100")) != 0 {
+		t.Errorf("发放后平台收入 = %s，期望 -100（让出去的额度）", got)
+	}
+
+	consumeTxn := newTxnID(t, txnB)
+	consume, err := Consume(ConsumeParams{
+		TxnID: consumeTxn, UserID: 42, Amount: amount(t, "30"), Asset: AssetCNY,
+		PrepaidAccount: prepaid,
+	})
+	if err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	if got := balanceOf(t, consume.Entries, prepaid, AssetCNY); got.Cmp(amount(t, "-30")) != 0 {
+		t.Fatalf("消费后 prepaid 余额 = %s，期望 -30（与发放那笔相加才是剩下的 70）", got)
+	}
+
+	voidTxn := newTxnID(t, txnC)
+	void, err := PlanVoid(PlanVoidParams{
+		TxnID: voidTxn, SubscriptionID: 11, Amount: amount(t, "70"),
+		Asset: AssetCNY, Reason: "到期", Ref: "void-1",
+	})
+	if err != nil {
+		t.Fatalf("PlanVoid: %v", err)
+	}
+
+	// 三段合起来看：prepaid 归零，平台收入也归零——发放让出的额度要么被消费
+	// 记成收入，要么在作废时收回，两条路都把那一份还回去。
+	all := append(append(append([]Entry{}, grant.Entries...), consume.Entries...), void.Entries...)
+	if got := balanceOf(t, all, prepaid, AssetCNY); !got.IsZero() {
+		t.Errorf("生命周期走完后 prepaid 余额 = %s，期望 0", got)
+	}
+	if got := balanceOf(t, all, PlatformRevenueAccount(), AssetCNY); !got.IsZero() {
+		t.Errorf("生命周期走完后平台收入 = %s，期望 0", got)
+	}
+}
+
+// 从额度包扣的消费，用户侧那条分录换成了 prepaid，商户分成与平台收入不变。
+// 分成那一行是商户分成（#732）在额度包覆盖的调用上照常成立的地方。
+func TestConsumeFromPrepaidKeepsSplit(t *testing.T) {
+	txn := newTxnID(t, txnA)
+	tx, err := Consume(ConsumeParams{
+		TxnID: txn, UserID: 42, Amount: amount(t, "10"), Asset: AssetCNY,
+		MerchantID: 7, MerchantShare: amount(t, "6"), UpstreamCost: amount(t, "3"),
+		PrepaidAccount: PrepaidAccount(11),
+	})
+	if err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+
+	byAccount := map[string]money.Amount{}
+	for _, e := range tx.Entries {
+		byAccount[e.Account.String()] = e.Amount
+	}
+	if _, has := byAccount["user:42"]; has {
+		t.Error("从额度包扣时不该再出现 user 科目：钱不是从用户钱包出的")
+	}
+	if got := byAccount["prepaid:11"]; got.Cmp(amount(t, "-10")) != 0 {
+		t.Errorf("额度包 = %s，期望 -10", got)
+	}
+	if got := byAccount["merchant_payable:7"]; got.Cmp(amount(t, "6")) != 0 {
+		t.Errorf("应付商户 = %s，期望 6", got)
+	}
+	if got := byAccount["upstream_cost"]; got.Cmp(amount(t, "3")) != 0 {
+		t.Errorf("上游成本 = %s，期望 3", got)
+	}
+	if got := byAccount["platform_revenue"]; got.Cmp(amount(t, "1")) != 0 {
+		t.Errorf("平台收入 = %s，期望 1（与从钱包扣时一样）", got)
+	}
+}
+
+// 额度包科目只放行 prepaid：传别的合法科目进来同样要拒，不能因为「它是个
+// 合法科目」就把它当成扣款来源。
+func TestConsumeRejectsNonPrepaidAccount(t *testing.T) {
+	txn := newTxnID(t, txnA)
+	bad := []Account{
+		UserAccount(42),
+		PlatformRevenueAccount(),
+		MerchantPayableAccount(7),
+	}
+	for _, acct := range bad {
+		if _, err := Consume(ConsumeParams{
+			TxnID: txn, UserID: 42, Amount: amount(t, "1"), Asset: AssetCNY,
+			PrepaidAccount: acct,
+		}); err == nil {
+			t.Errorf("从 %q 扣的消费应当被拒", acct)
+		}
+	}
+}
+
+// 授予与作废的备注要带单号：交易号是单号的哈希，反过来算不回来，
+// 不落备注就再没有第二条路把这张单子对上这笔账。
+func TestPlanMemosCarryReference(t *testing.T) {
+	grant, err := PlanGrant(PlanGrantParams{
+		TxnID: newTxnID(t, txnA), SubscriptionID: 11, Amount: amount(t, "100"),
+		Asset: AssetCNY, Ref: "grant-42",
+	})
+	if err != nil {
+		t.Fatalf("PlanGrant: %v", err)
+	}
+	if !strings.Contains(grant.Entries[0].Memo, "grant-42") {
+		t.Errorf("发放备注里没有单号: %q", grant.Entries[0].Memo)
+	}
+
+	void, err := PlanVoid(PlanVoidParams{
+		TxnID: newTxnID(t, txnB), SubscriptionID: 11, Amount: amount(t, "70"),
+		Asset: AssetCNY, Reason: "人工作废", Ref: "void-42",
+	})
+	if err != nil {
+		t.Fatalf("PlanVoid: %v", err)
+	}
+	if !strings.Contains(void.Entries[0].Memo, "void-42") {
+		t.Errorf("作废备注里没有单号: %q", void.Entries[0].Memo)
+	}
+	if !strings.Contains(void.Entries[0].Memo, "人工作废") {
+		t.Errorf("作废备注里没有处置原因: %q", void.Entries[0].Memo)
+	}
+}
+
+// 非法输入不构造交易：订阅 id 必须有、金额必须为正。
+func TestPlanConstructorsRejectBadInput(t *testing.T) {
+	txn := newTxnID(t, txnA)
+
+	if _, err := PlanGrant(PlanGrantParams{
+		TxnID: txn, SubscriptionID: 0, Amount: amount(t, "100"), Asset: AssetCNY,
+	}); err == nil {
+		t.Error("订阅 id 为 0 的发放应当被拒")
+	}
+	if _, err := PlanGrant(PlanGrantParams{
+		TxnID: txn, SubscriptionID: 11, Amount: money.Zero, Asset: AssetCNY,
+	}); err == nil {
+		t.Error("零金额的发放应当被拒")
+	}
+	if _, err := PlanVoid(PlanVoidParams{
+		TxnID: txn, SubscriptionID: -1, Amount: amount(t, "1"), Asset: AssetCNY,
+	}); err == nil {
+		t.Error("负订阅 id 的作废应当被拒")
+	}
+	if _, err := PlanVoid(PlanVoidParams{
+		TxnID: txn, SubscriptionID: 11, Amount: amount(t, "-1"), Asset: AssetCNY,
+	}); err == nil {
+		t.Error("负金额的作废应当被拒")
 	}
 }

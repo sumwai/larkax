@@ -88,6 +88,12 @@ const (
 	// 商户分成转成提现单时，钱从「他的分成」变成「这条提现单的待付」，
 	// 混在一个科目里就分不清商户还能不能再申请提现。
 	AccountPayout AccountType = "payout"
+	// AccountPrepaid 是某个额度包订阅的预存面值。正数是平台还欠用户的可用
+	// 额度，也就是「这个订阅还剩多少面值」；消费与到期作废让它归零。
+	//
+	// 后缀是**订阅** id（user_plans.id），不是额度包 id（plans.id）：同一个包
+	// 可以发给多个用户，面值分别记在各自的订阅上，余额也要各算各的。
+	AccountPrepaid AccountType = "prepaid"
 	// AccountReconcileDifference 是对账差额的归集科目（单例）。
 	//
 	// 对账修正与人工调账的区别正在于「谁认下这笔差额」：人工调账的对家是
@@ -108,7 +114,7 @@ func (t AccountType) valid() bool {
 	switch t {
 	case AccountUser, AccountMerchantPayable, AccountPlatformRevenue,
 		AccountUpstreamCost, AccountPaymentGateway, AccountPayout,
-		AccountReconcileDifference:
+		AccountReconcileDifference, AccountPrepaid:
 		return true
 	}
 	return false
@@ -139,6 +145,7 @@ func (t AccountType) needsID() bool {
 //
 //	user                    正 = 平台欠用户的钱，负 = 用户欠平台
 //	merchant_payable        正 = 平台欠商户的分成
+//	prepaid                正 = 平台欠用户的预存额度（这个订阅还剩多少面值）
 //	platform_revenue        正 = 平台收到的钱，负 = 平台付出的钱
 //	                        （收入、退款、以及由平台承担的通道手续费都走它）
 //	upstream_cost           正 = 上游成本
@@ -163,8 +170,8 @@ type Account struct {
 // ID 是科目后缀里的标识，单例科目为空串。
 //
 // 返回字符串而不是 int64：后缀在数据库里就是 text，且不同大类含义不同
-// （user 是用户 id，payment_gateway 是通道名，payout 是提现单 id）。
-// 在这里把它解释成整数，就等于替调用方决定了解释方式。
+// （user 是用户 id，payment_gateway 是通道名，payout 是提现单 id，
+// prepaid 是订阅 id）。在这里把它解释成整数，就等于替调用方决定了解释方式。
 //
 // 它只切字符串，不判断后缀能不能当用户 id——那件事只有一处答案，
 // 在 UserIDFromAccount（方法形态是 UserID），且只对 user 科目成立。
@@ -352,6 +359,15 @@ func PayoutAccount(payoutID int64) Account {
 	return Account{raw: buildAccount(AccountPayout, strconv.FormatInt(payoutID, 10))}
 }
 
+// PrepaidAccount 是某个额度包订阅的科目：这个订阅还剩多少面值。
+//
+// 传入的是**订阅** id（user_plans.id），不是额度包 id——见 AccountPrepaid 的注释。
+//
+// 命名与 MerchantPayableAccount 同构：调用点要一眼看出拿到的是科目而不是金额。
+func PrepaidAccount(subscriptionID int64) Account {
+	return Account{raw: buildAccount(AccountPrepaid, strconv.FormatInt(subscriptionID, 10))}
+}
+
 // buildAccount 拼出科目字符串。空 id 退回单例写法：这是构造期的笔误，
 // 而构造期 panic 会把一个「拼错字符串」升级成「服务起不来」，
 // 非法形态留给 Verify 统一报出来。
@@ -407,8 +423,10 @@ func ParseAccount(s string) (Account, error) {
 		// 比，把一个**正确的**余额改小。收窄在这里等于堵住新的写入；库里已经
 		// 存在的那种写法由对账按同一个 id 归位（见 UserIDFromAccount）。
 		//
-		// 只收窄 user：它是唯一会被按字符串比对归属的大类。merchant_payable
-		// 与 payout 的后缀不参与任何这样的比对，一起收窄是另一件事。
+		// 只收窄 user 与 prepaid：它们是仅有的两个会被按字符串比对归属的
+		// 大类——user 对钱包快照与对账汇总，prepaid 对面值余额（见下面那段）。
+		// merchant_payable、payout 与 payment_gateway 的后缀不参与这样的比对，
+		// 一起收窄是另一件事。
 		//
 		// 这里不另写 `userID > 0`：UserIDFromAccount 已经把 0 判成读不出
 		// （见它的注释），两处各写一遍正是这条缺陷的成因。写法是否规范由
@@ -419,7 +437,36 @@ func ParseAccount(s string) (Account, error) {
 				"科目 %q 的用户 id 不是规范写法：应为 user:<正整数>，十进制、无前导零、无正号", s)
 		}
 	}
+	if t == AccountPrepaid && !isCanonicalAccountID(id) {
+		// 与 user 同一个理由，但这里没有宽松的余地：prepaid 的余额就是「这个
+		// 订阅还剩多少面值」，而余额查询按科目原文精确汇总
+		//（store 的 accountBalanceInTx、以及任何按 account = ? 取的 SQL）。
+		// 同一订阅写成 `prepaid:007` 与 `prepaid:7` 会把余额拆成两笔，
+		// 两边看起来都像「还剩一点」，而合起来才是真的剩多少。
+		return Account{}, fmt.Errorf(
+			"科目 %q 的订阅 id 不是规范写法：应为 prepaid:<正整数>，十进制、无前导零、无正号", s)
+	}
 	return Account{raw: s}, nil
+}
+
+// isCanonicalAccountID 判断一个整数 id 后缀是不是唯一的那种写法。
+//
+// 只放行正整数：十进制、无前导零、无正号、非 0、不超过 maxUserIDDigits 位。
+// 位数上限与 user 科目共用，因为两边都是 bigserial 的 id，而账本里给它们
+// 留的宽度只有一条规则；真要放宽，两处一起改。
+func isCanonicalAccountID(id string) bool {
+	if id == "" || id[0] < '1' || id[0] > '9' {
+		return false
+	}
+	if len(id) > maxUserIDDigits {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < '0' || id[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // checkAccountID 校验后缀里能出现的字符。
