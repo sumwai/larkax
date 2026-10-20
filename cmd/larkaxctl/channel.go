@@ -145,8 +145,13 @@ sync-models 从上游拉一次这条渠道的模型清单并落库，需要主�
 拒绝，并说出「模型在目录里声明的端点」与「这条渠道打的端点」各是什么。目录里
 没有这个模型、或者那一项没配过时不拦。
 --setting 是渠道私有配置（自由形态的 JSON 对象），键由该渠道 type 指向的
-适配器解释，选路层不认，管理面也不校验键名。**当前没有任何适配器读它**，
-所以给了 --setting 时命令会把这一点说出来。
+适配器解释，选路层不认，管理面也不校验键名。今天只有一个键有读者：
+reasoning_effort_map，由 openai 适配器读——它把 reasoning_effort 的取值翻成
+该渠道认的写法（映射到空字符串表示把这个字段从出站报文里去掉，表里没有的
+取值照原样发）。例如只认 off 的上游这样写：
+  {"reasoning_effort_map":{"none":"off"}}
+要剔掉这个字段就写成 {"reasoning_effort_map":{"none":""}}。
+其它键写进去不报错，也不会生效。
 
 **选项的旧名仍可用**：--owner 等同于 --user。它保留是为了不让已经在跑的脚本
 与部署流程坏掉，行为一致；新写的命令请用 --user。
@@ -1025,10 +1030,12 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo, withDeleted boo
 	printDeletedChannelsNote(w, deletedRows)
 
 	// 带着 setting 的行单独点出来：那一栏在库里、在这张清单上都与一个生效的
-	// 配置没有区别，而今天没有任何适配器读它（见 #360）。不新开一列是同一条
+	// 配置没有区别，而没有读者的键写进去不会生效（见 #360）。不新开一列是同一条
 	// 理由——空列只是把噪音铺满每一行，而这里要说的只有「这几行配过东西」。
 	// 只在**至少一行**带 setting 时打：没有这种行时，这一句在每次 list 上
-	// 都是背景音。
+	// 都是背景音。今天 setting 里已经有读者（reasoning_effort_map），
+	// SettingUnreadNote 返回空串，这一段因此不打；留着它，是因为哪天读者没了，
+	// 这句话仍然该出现。
 	if note := channel.SettingUnreadNote(); note != "" {
 		var rows []string
 		for _, info := range infos {

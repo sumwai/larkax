@@ -49,7 +49,7 @@ func (a *Adapter) Endpoint() channel.Endpoint { return channel.EndpointChatCompl
 
 // Chat 发起一次非流式请求。
 func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Request) (*channel.Response, error) {
-	body, err := a.encodeRequest(req, false)
+	body, err := a.encodeRequest(ch, req, false)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +114,7 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 //
 // 因此这里同步发完请求、拿到响应头，再把读体的工作交给 goroutine。
 func (a *Adapter) ChatStream(ctx context.Context, ch channel.Channel, req *channel.Request) (<-chan channel.StreamEvent, error) {
-	body, err := a.encodeRequest(req, true)
+	body, err := a.encodeRequest(ch, req, true)
 	if err != nil {
 		return nil, err
 	}
@@ -216,11 +216,16 @@ func (a *Adapter) Quota(context.Context, channel.Channel) (quota.State, error) {
 }
 
 // encodeRequest 把统一请求编码成上游 JSON。
-func (a *Adapter) encodeRequest(req *channel.Request, stream bool) ([]byte, error) {
+func (a *Adapter) encodeRequest(ch channel.Channel, req *channel.Request, stream bool) ([]byte, error) {
 	converted, err := relay.ToRelaykit(req)
 	if err != nil {
 		return nil, fmt.Errorf("编码请求失败: %w", err)
 	}
+	// reasoning_effort 的取值各家不一：同一个「关闭推理」，有的上游认
+	// `none`，有的只认 `off`，还有的要靠不传这个字段。翻译放在这里而不是
+	// 选路层，因为它是协议细节，看的是这条渠道的私有配置
+	// （见 channel.Channel.Setting）。
+	converted.ReasoningEffort = reasoningEffortDialect(ch.Setting, converted.ReasoningEffort)
 	if stream {
 		yes := true
 		converted.Stream = &yes

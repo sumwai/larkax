@@ -118,12 +118,12 @@ type Channel struct {
 	//
 	// 因此管理面不做键名校验：拼错一个键不会报错，只会静默不生效。
 	//
-	// # 今天还没有读者
+	// # 今天哪些键有读者
 	//
-	// 目前四个适配器与选路层都没有任何一处读它，所以写进来的键一律不影响
+	// openaiadapter 读 reasoning_effort_map 这一个键（见该包的 setting.go），
+	// 其余适配器与选路层仍不读这里的任何键。写进去的其它键一律不影响
 	// 请求路径。这件事由 SettingReadByAdapters 声明，管理面据此在写入之后
-	// 与列举时把「没有消费者」说出来（见 SettingUnreadNote）。第一个键被
-	// 某个适配器实现时，把它改成 true，那几处提示一起消失。
+	// 与列举时把「没有消费者」说出来（见 SettingUnreadNote）。
 	Setting map[string]any
 }
 
