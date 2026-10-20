@@ -88,7 +88,9 @@
 # 在清单里、它自己不在）一条都匹配不上。**一条都没选中时**脚本已经会报
 #「没有选中任何包」；会漏的是**只选中一部分**：匹配到的那几包照常跑、汇总表照出，
 # 少的只是一行，收尾仍打「全部跑成。」。写参数的人以为覆盖了三个包，实际只有两个，
-# 而少验的那一包不会被别的机制补上——CI 里没有 gremlins。
+# 而少验的那一包不会被别的机制补上。CI 的选包步骤读的也是这份清单，但它对没匹配
+# 到的参数是 `::error` 加非零退出，不会悄悄少跑；本地的包参数入口没有那一道，
+# 所以在这里核。
 #
 # 所以选包之后核一遍：**每个包参数至少要匹配到 `PKGS` 里的一条**，没匹配到的
 # 当场列出来，并让整轮判为失败。**匹配规则与 `PKGS` 清单都不动**：把子包自动
@@ -97,19 +99,65 @@
 # 用法：
 #   scripts/check-mutation.sh              # 跑全部包
 #   scripts/check-mutation.sh money route  # 只跑指定的（按包名后缀匹配）
+#   scripts/check-mutation.sh --list-packages  # 只打印 PKGS 清单（CI 选包用）
+#   scripts/check-mutation.sh --list-packages --match internal/billing/calendaradapter
+#                                              # 打印覆盖该目录的 PKGS 条目（CI 选包用）
+#   scripts/check-mutation.sh --list-packages --suffix money
+#                                              # 打印后缀匹配的 PKGS 条目（CI 手工触发用）
+#
+# `--match` 回答的是「这个改动目录该由哪一条 PKGS 来量」：取**最近的、在 PKGS 里的
+# 祖先**（按 `/` 边界，目录本身在清单里也算）。包路径是递归的，所以
+# internal/billing/calendaradapter 归 internal/billing 那条命令管。`--suffix` 则是
+# 手工触发用的同一套后缀规则（与跑变异时的包参数一致）。匹配规则只写在这里一份——
+# CI 的选包步骤只调这两个开关，不自己再写一遍目录/后缀匹配：两处各写一份，
+# 刚出生就会漂（例如一处要求目录与清单条目精确相等，另一处按前缀）。
+# 找不到覆盖它的条目时什么都不打印、退出 1，选包步骤据此区分「在树里但没有可跑的包」。
+#
+# # 清单只此一份
+#
+# CI 的变异工作流（.github/workflows/mutation.yml）在选包那一步用
+# `--list-packages` 读这里的 `PKGS`，不另抄一份包名：抄第二份的那一天，
+# 就是 CI 与本地开始跑不同包的那一天（LESSONS 第 29 条）。这个开关只读数据——
+# 不拿锁、不要求 gremlins 与数据库，因为选包发生在起数据库的 job 之前。
+# 它退出 0 只表示清单已经打出来，不代表跑过任何变异。
+#
+# # 显式包参数重叠时拒绝执行
+#
+# `./internal/ledger/` 递归包含 `internal/ledger/store`，两个一起传会把 store 的
+# 几百个变异体跑两遍。所以**显式给了参数、且选中的集合里出现父子对**（一个是另一个
+# 的前缀，按 `/` 边界）时报错退出，说清谁包含谁、只留外层哪个；不带参数跑全部包是
+# 例外——那是基线口径，表本来就按「父包那一行含子包」读（见上面「清单里父子两条…」那段）。
+#
+# # 逐行透传与进度
+#
+# 一个包的输出曾经整个收进变量，跑完才看得到：几十分钟里屏幕上没有东西能回答
+# 「还有五分钟还是五十分钟」。现在每行带序号与已用时间透传；每
+# `PROGRESS_EVERY` 条打一行进度。
+#
+# ETA 只用 gremlins 自己报的总数：`<N> mutants` 或 dry run 的
+# `Runnable: N, Not covered: M`。v0.6.0 正常运行**不报总数**（源码
+# cmd/unleash.go 里 `Starting...` 之后直接是逐条结果），所以实际上走的是降级
+# 路径：只报「已完成 + 已用 + 平均每条」。认不出总数就绝不给 ETA——编出来的
+# 剩余时间比没有更误导。
 #
 # 退出码：
 #   0  全部跑成
 #   1  没跑成：gremlins 缺失、版本不符、读不出变异器集合、有包参数没匹配到任何包、
-#      前置环境变量缺失（LARKAX_DB_DSN，或选中包的测试要的 LARKAX_REDIS_DSN），
-#      或者有包没跑成（超时过多、一个变异都没跑到、认不出输出、测试缓存清不掉）
+#      显式包参数之间存在父子包含关系、前置环境变量缺失（LARKAX_DB_DSN，或选中
+#      包的测试要的 LARKAX_REDIS_DSN），或者有包没跑成（超时过多、一个变异都没
+#      跑到、认不出输出、测试缓存清不掉）
 #   3  拿不到锁：另一个实例正在跑（或锁文件不可用），本次未执行
 # 1 与 3 分开是因为处置不同：前者要去看代码或环境，后者等一会儿重跑就行。
+#
+# `--list-packages --match <目录>` 与 `--list-packages --suffix <片段>` 是查询而非
+# 跑变异：打到条目并退出 0，一条都没有则什么都不打印、退出 1。它们同样不拿锁、
+# 不要求 gremlins 与 DSN。
 #
 # **它不判「efficacy 够不够」。** 存活变异要逐条人看——等价变异与
 # 不可达分支都该放过，而脚本分不出来。这里只保证跑出来的数字可信。
 #
 # 环境变量：GREMLINS（可执行文件，默认 gremlins）、COEF、WORKERS、
+# PROGRESS_EVERY（每完成多少个变异体打一行进度，默认 20；0 表示不打）、
 # LOCK_FILE（锁文件路径，默认 <仓库根>/tmp/check-mutation.lock）、
 # GREMLINS_VERSION（自测注入用，见下；CI 与本地都不该设）。
 #
@@ -162,15 +210,105 @@
 # `unleash --help` 原文，就是为了让这条探测有据可依，而不是按想象造一份。
 #
 # **版本常量与安装方式必须一致**：安装提示里的 `@版本` 由 PINNED_GREMLINS_VERSION
-# 拼出来，不写第二遍。注意本仓**没有** CI job 装 gremlins——变异测试只在发布时
-# 本地跑（见 docs/development.md），CI 跑的是本脚本的自测（用桩件、不调真 gremlins）。
-# 将来若加了这样的 job，它的 `go install` 版本必须与这里一致，
-# 与 deadcode 那条同理（见 .github/workflows/gates.yml 里装 deadcode 的那一步）。
+# 拼出来，不写第二遍。CI 的变异 job（.github/workflows/mutation.yml）也从这一行
+# 读出版本再 `go install`，不写第二份——与 deadcode 那条同理（见
+# .github/workflows/gates.yml 里装 deadcode 的那一步）。装错版本时下面的校验
+# 会拒绝运行，所以两处即使漂移也是响的，不是静默换一把尺子。
 #
 # 本脚本有一份自测：scripts/check-mutation.test.sh。改动后必须跑它。
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
+
+# ── 包清单 ────────────────────────────────────────────────────────────────
+#
+# **整份清单只写在这里。** 选包时的后缀匹配、下面的核对、CI 的选包步骤都读它；
+# 别处再抄一份的那一天，就是两份开始分岔的那一天（理由见文件开头「清单只此一份」）。
+PKGS=(
+  internal/money
+  internal/billing
+  internal/billing/expr
+  internal/pricing
+  internal/ledger
+  internal/ledger/store
+  internal/pipeline
+  internal/calendar
+  internal/quota
+  internal/keyquota
+  internal/tokens
+  internal/route
+  internal/channels
+  internal/credential
+  internal/idempotency
+  internal/overrides
+  internal/ratelimit
+  internal/auth
+  internal/catalog
+  internal/relay
+  internal/plugin/store
+  internal/plugin/host
+  internal/plugin/sandbox
+  internal/api
+  internal/adminapi
+  internal/assembly
+  internal/settings
+  internal/channel
+  internal/snapshot
+  internal/snapshotwire
+  internal/gateway
+  internal/payment
+  internal/upstream
+  internal/observe
+)
+
+# 只读清单就退出：不拿锁、不查 gremlins、不要求 DSN。CI 的选包那一环跑在
+# 起数据库的 job 之前，它要的只是这份清单。
+if [ "${1:-}" = "--list-packages" ]; then
+  # --match <目录>：只回答「这个目录该由哪一条 PKGS 来量」，规则见文件开头。
+  # 不带 --match 时输出与以前逐字一致（CI 与用例都依赖这一点）。
+  if [ "${2:-}" = "--match" ]; then
+    dir="${3:-}"
+    if [ -z "$dir" ]; then
+      echo "--match 需要一个目录参数。" >&2
+      exit 1
+    fi
+    dir="${dir%/}"
+    best=""
+    for p in "${PKGS[@]}"; do
+      case "$dir" in
+        "$p" | "$p"/*)
+          # 取最长的那个：清单里同时在的父子两条，离改动最近的是子包。
+          if [ ${#p} -gt ${#best} ]; then best="$p"; fi
+          ;;
+      esac
+    done
+    if [ -z "$best" ]; then
+      # 什么都不打印：调用方靠退出码区分「没有包覆盖」与「覆盖到了但名字是空的」。
+      exit 1
+    fi
+    printf '%s\n' "$best"
+    exit 0
+  fi
+  # --suffix <片段>：手工触发时按包名后缀点名（与跑变异时的包参数同一套规则），
+  # 把匹配到的条目全打出来；一个都没有则退出 1。CI 不再自己写一遍后缀匹配。
+  if [ "${2:-}" = "--suffix" ]; then
+    frag="${3:-}"
+    if [ -z "$frag" ]; then
+      echo "--suffix 需要一个包名片段。" >&2
+      exit 1
+    fi
+    hit=0
+    for p in "${PKGS[@]}"; do
+      case "$p" in
+        *"$frag") printf '%s\n' "$p"; hit=1 ;;
+      esac
+    done
+    [ "$hit" -eq 1 ] || exit 1
+    exit 0
+  fi
+  printf '%s\n' "${PKGS[@]}"
+  exit 0
+fi
 
 # ── 排他锁 ────────────────────────────────────────────────────────────────
 #
@@ -226,6 +364,16 @@ PINNED_GREMLINS_VERSION="v0.6.0"
 
 COEF="${COEF:-10}"
 WORKERS="${WORKERS:-1}"
+
+# 每多少条 gremlins 输出打一行进度。默认 20：一个包几百条时大约每分钟一行，
+# 不至于把日志刷满。自测用 1~2 把它压到每条都打。
+PROGRESS_EVERY="${PROGRESS_EVERY:-20}"
+case "$PROGRESS_EVERY" in
+  '' | *[!0-9]*)
+    echo "PROGRESS_EVERY 不是非负整数：$PROGRESS_EVERY"
+    exit 1
+    ;;
+esac
 
 GREMLINS="${GREMLINS:-gremlins}"
 bin=$(command -v "$GREMLINS" 2>/dev/null) || {
@@ -338,43 +486,6 @@ if [ -z "${LARKAX_DB_DSN:-}" ]; then
   exit 1
 fi
 
-PKGS=(
-  internal/money
-  internal/billing
-  internal/billing/expr
-  internal/pricing
-  internal/ledger
-  internal/ledger/store
-  internal/pipeline
-  internal/calendar
-  internal/quota
-  internal/keyquota
-  internal/tokens
-  internal/route
-  internal/channels
-  internal/credential
-  internal/idempotency
-  internal/overrides
-  internal/ratelimit
-  internal/auth
-  internal/catalog
-  internal/relay
-  internal/plugin/store
-  internal/plugin/host
-  internal/plugin/sandbox
-  internal/api
-  internal/adminapi
-  internal/assembly
-  internal/settings
-  internal/channel
-  internal/snapshot
-  internal/snapshotwire
-  internal/gateway
-  internal/payment
-  internal/upstream
-  internal/observe
-)
-
 # 一个包里超时的变异超过这个数，就认为系数不够、结果不可信。
 MAX_TIMED_OUT=10
 
@@ -385,6 +496,22 @@ filters=("$@")
 matches_filter() {  # matches_filter <包参数> <包>
   case "$2" in *"$1") return 0 ;; esac
   return 1
+}
+
+# contains_word <词> <空格分隔的列表>：列表里有没有这个词（整词比对）。
+contains_word() {
+  case " $2 " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
+# fmt_duration <秒>：打印成 `12s` 或 `3m07s`。进度行与 ETA 共用它。
+fmt_duration() {
+  local s="${1:-0}"
+  if [ "$s" -ge 60 ]; then
+    printf '%dm%02ds' $((s / 60)) $((s % 60))
+  else
+    printf '%ds' "$s"
+  fi
 }
 
 selected() {
@@ -422,17 +549,23 @@ if [ ${#unmatched_filters[@]} -gt 0 ]; then
   echo "   这一轮没跑，所以整轮判为失败。"
 fi
 
-# ── 清单里父子两条同时在选中范围内时，要说出来 ─────────────────────────────
+# ── 重叠的包参数：显式给出时直接拒绝 ────────────────────────────────────────
 #
 # 包路径是**递归**的：`./internal/ledger/` 会把子包 internal/ledger/store 一起
 # 变异（实测：那一轮的输出里能读到 `store/reconcile.go:行:列` 这样的位置）。
 # 而 PKGS 里 internal/ledger 与 internal/ledger/store 两条都在，internal/billing
-# 与 internal/billing/expr 也一样——于是子包的变异体在两条命令里各跑一次，
-# 汇总表上那两行也不再是互不相干的两个包：左边那一行要读作「含右边」。
+# 与 internal/billing/expr 也一样。两个一起传时，子包的几百个变异体会被跑两遍：
+# 实测第一包已经出了汇总行，第二包才开始重跑同一批。
+#
+# 所以**显式给了包参数**时，重叠一律拒绝，并说清谁包含谁——这时重叠是写参数的人
+# 犯的错，静默跑两遍既浪费一半时间，也让表上两行不是互不相干的两个包。
+# **不带参数跑全部包是例外**：那是本脚本的基线口径，汇总表本来就按「父包那一行
+# 含子包」来读（见 docs/development.md「各包的现状」），拒绝它等于这份基线跑不成。
+# 那条路径仍然打一行注记，把重叠说出来。
 #
 # 这件事**从 PKGS 算出来，不写死**：写死一份「哪个包含哪个子包」的表，就是
 # 这份清单的第二份，两者开始分岔的那天没人知道哪一份算数。只在这一对都选中时
-# 才说——只选了其中一个时，没有重叠可言。
+# 才算重叠——只选了其中一个时，没有重叠可言。
 overlap_pairs=()
 for a in "${PKGS[@]}"; do
   selected "$a" || continue
@@ -443,6 +576,25 @@ for a in "${PKGS[@]}"; do
   done
 done
 if [ ${#overlap_pairs[@]} -gt 0 ]; then
+  if [ ${#filters[@]} -gt 0 ]; then
+    echo "包参数的范围重叠，本次未执行："
+    for pair in "${overlap_pairs[@]}"; do
+      echo "  ${pair%% *} 递归包含 ${pair#* }"
+    done
+    # 建议只留最外层：被别的选中包包含的那些就是「里面的」。
+    inner_pkgs=""
+    for pair in "${overlap_pairs[@]}"; do inner_pkgs="$inner_pkgs ${pair#* }"; done
+    outer_pkgs=""
+    for pair in "${overlap_pairs[@]}"; do
+      a="${pair%% *}"
+      if ! contains_word "$a" "$inner_pkgs" && ! contains_word "$a" "$outer_pkgs"; then
+        outer_pkgs="$outer_pkgs $a"
+      fi
+    done
+    echo "包路径是递归的：只传外层那个时，子包的变异体已经在里面了。"
+    echo "这一轮请只留：${outer_pkgs# }（去掉里面的那些）。"
+    exit 1
+  fi
   echo "注：下面这些行的范围是重叠的——包路径递归，左边那条命令会把右边那个包的"
   echo "    变异体一起跑，于是它在表上各算一次，左边那一行读作「含右边」："
   for pair in "${overlap_pairs[@]}"; do
@@ -535,7 +687,8 @@ for pkg in "${PKGS[@]}"; do
   # 于是 LARKAX_DB_DSN 这个硬前提仍然成立——它不在时 internal/ledger/store 整包
   # t.Skip，而递归口径下 store 那部分变异体全落进 Not covered，internal/ledger
   # 那一行的数也跟着变（实测：92 → 376，涨的全在 store/ 下）。**那两个包在 PKGS
-  # 里各占一行、范围互相重叠**，脚本在这一对都选中时会自己说出来（见上面那段注）。
+  # 里各占一行、范围互相重叠**，脚本在**显式给了这一对参数**时会拒绝执行
+  # （不带参数跑全部时只打一行注记，见上面那段）。
   # 开关都在 GREMLINS_ARGS 里拼好了（--invert-logical 是显式打开的，默认关，
   # 理由见文件开头：不开的话 `a || b` 这类判据一个变异体都不生成，而「没生成」
   # 与「生成了且被杀死」在分数上分不出来）。这里不再单独写一遍开关，
@@ -562,8 +715,69 @@ for pkg in "${PKGS[@]}"; do
     continue
   fi
 
-  out=$("$GREMLINS" "${GREMLINS_ARGS[@]}" "./$pkg/" 2>&1)
-  rc=$?
+  # ── 逐行透传 + 进度 ─────────────────────────────────────────────────────
+  #
+  # 以前这里把 gremlins 的输出整个收进变量，跑完才看得到。一个包要几十分钟时，
+  # 屏幕上没有任何东西能回答「还有五分钟还是五十分钟」，只能干等。现在逐行
+  # 透传，每行带序号与已用时间；每完成 PROGRESS_EVERY 个**变异体**打一行进度。
+  #
+  # **进度只数变异结果行，不数输出行。** 行数里混着 `Starting...`、gathering、
+  # 空行与最后的汇总，而总数是变异体数——两者相减算出来的剩余时间没有任何依据。
+  # 变异结果行以状态开头（gremlins v0.6.0 的七种：KILLED / LIVED / RUNNABLE /
+  # NOT COVERED / NOT VIABLE / TIMED OUT / SKIPPED，见 gremlins 源码里
+  # `internal/mutator` 包的 `Status.String()`，不是本仓的包）。序号那一列仍然是
+  # 输出行号，与进度不是同一个数。
+  #
+  # **总数从 gremlins 自己的输出里读，读不到就不给 ETA。** v0.6.0 正常运行
+  # **不报总数**：`Starting...` 之后直接是逐条结果，汇总在最后（源码
+  # cmd/unleash.go 里只有那一句；实际输出也核过）。所以这里默认走降级路径，
+  # 只报「已完成 + 已用 + 平均每个」。总数只认两种明确形态——`<N> mutants`
+  # 与 dry run 的 `Runnable: N, Not covered: M`——认不出就空着，绝不为了打一行
+  # ETA 去编一个总数（编出来的剩余时间比没有更误导）。
+  #
+  # 原始输出同时写进 $stream_tmp，下面的解析与汇总表仍读完整的一份，
+  # 所以流式输出不会拆散原来那张表。
+  stream_tmp=$(mktemp -t check-mutation-stream.XXXXXX)
+  start_epoch=$(date +%s)
+  total_mutants=""
+  n_lines=0    # 输出行号（序号那一列）
+  n_done=0     # 已完成的变异体数（进度与 ETA 只用它）
+  "$GREMLINS" "${GREMLINS_ARGS[@]}" "./$pkg/" 2>&1 |
+    while IFS= read -r line || [ -n "$line" ]; do
+      n_lines=$((n_lines + 1))
+      elapsed=$(($(date +%s) - start_epoch))
+      printf '[%4d] [%s] %s\n' "$n_lines" "$(fmt_duration "$elapsed")" "$line"
+      printf '%s\n' "$line" >>"$stream_tmp"
+
+      # 总数（只在还没拿到时试一次）。
+      if [ -z "$total_mutants" ]; then
+        if [[ "$line" =~ (^|[^0-9])([0-9]+)[[:space:]]+mutants ]]; then
+          total_mutants="${BASH_REMATCH[2]}"
+        elif [[ "$line" =~ Runnable:[[:space:]]*([0-9]+),[[:space:]]*Not\ covered:[[:space:]]*([0-9]+) ]]; then
+          total_mutants=$((BASH_REMATCH[1] + BASH_REMATCH[2]))
+        fi
+      fi
+
+      if [[ "$line" =~ ^[[:space:]]*(KILLED|LIVED|RUNNABLE|NOT[[:space:]]+COVERED|NOT[[:space:]]+VIABLE|TIMED[[:space:]]+OUT|SKIPPED)[[:space:]] ]]; then
+        n_done=$((n_done + 1))
+        if [ "$PROGRESS_EVERY" -gt 0 ] && [ $((n_done % PROGRESS_EVERY)) -eq 0 ]; then
+          elapsed_h=$(fmt_duration "$elapsed")
+          if [ -n "$total_mutants" ] && [ "$total_mutants" -ge "$n_done" ]; then
+            left=$(awk -v e="$elapsed" -v d="$n_done" -v t="$total_mutants" \
+              'BEGIN { printf "%d", (e / d) * (t - d) }')
+            printf '── 进度 [%d/%d] 已用 %s，预估还剩 %s\n' \
+              "$n_done" "$total_mutants" "$elapsed_h" "$(fmt_duration "$left")"
+          else
+            avg=$(awk -v e="$elapsed" -v d="$n_done" 'BEGIN { printf "%.1f", e / d }')
+            printf '── 进度 已完成 %d 个变异体，已用 %s，平均每个 %ss（gremlins 没报总数，不给 ETA）\n' \
+              "$n_done" "$elapsed_h" "$avg"
+          fi
+        fi
+      fi
+    done
+  rc=${PIPESTATUS[0]}
+  out=$(cat "$stream_tmp")
+  rm -f "$stream_tmp"
   if [ "$rc" -ne 0 ]; then
     echo "⚠ $pkg: gremlins 执行失败（退出码 $rc）"
     printf '%s\n' "$out" | tail -5 | sed 's/^/   /'
@@ -596,12 +810,14 @@ for pkg in "${PKGS[@]}"; do
     "$pkg" "$killed" "$lived" "$timed" "$notcov" "$mutcov" "$eff"
 
   # gremlins 每测一个变异就打一行 `LIVED <类型> at <文件>:<行>:<列>`
-  # （前面可能带缩进），把它抄下来。**不解析 JSON**：那要再引一个解析器，
-  # 而这里要的只是「哪几个活了」，gremlins 自己已经打出来了。
+  # （前面可能带缩进），把它抄下来，前面补上包名。**保留 `LIVED` 这个词**：
+  # 清单是给人逐条判的，而「一条存活的变异」与「一条被杀掉的变异」在日志里
+  # 长得一样时，读者要回去数上下文才分得清。**不解析 JSON**：那要再引一个
+  # 解析器，而这里要的只是「哪几个活了」，gremlins 自己已经打出来了。
   printf '%s\n' "$out" | awk -v pkg="$pkg" '
     /^[[:space:]]*LIVED[[:space:]]/ {
       sub(/^[[:space:]]*LIVED[[:space:]]+/, "")
-      print pkg "  " $0
+      print pkg "  LIVED " $0
     }' >>"$SURVIVORS"
 
   # 一个变异都没测到：这不是「这个包质量不行」，是「这一次没有结果」。
