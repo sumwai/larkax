@@ -907,6 +907,77 @@ func TestIdempotentTruncatedStreamIsNotCompleted(t *testing.T) {
 	}
 }
 
+// 没显式写状态码就写体时，留档的状态码要记成 200——与 net/http 实际发出去的一致。
+//
+// captureWriter 与 heldResponse 留档的都是「真正发出去的那一份」，重放读的也是
+// 这份档。两条 Write 里各有一条 `status == 0` 的判据管这一格，取反之后这一格
+// 不再被记下：留档停在 0，`Complete` 写进去的也是 0，而重放时它会被当成
+// 「没有状态码」补成 200。今天的两个调用方都先写响应头（writeJSON 与
+// writeStreamHeaders），所以这一格在生产上走不到——但它是这两个
+// http.ResponseWriter 明写的契约，接一个新写者就会现形。
+func TestResponseSinksRecordImplicitOK(t *testing.T) {
+	t.Run("captureWriter", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c := &captureWriter{ResponseWriter: rec}
+		if _, err := c.Write([]byte("x")); err != nil {
+			t.Fatalf("写响应体失败: %v", err)
+		}
+		status, _, body := c.captured()
+		if status != http.StatusOK {
+			t.Errorf("留档的状态码 = %d，期望 200（没显式写头时 net/http 按 200 发）", status)
+		}
+		if string(body) != "x" {
+			t.Errorf("留档的响应体 = %q，期望 x", body)
+		}
+	})
+
+	t.Run("heldResponse", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		h := &heldResponse{ResponseWriter: rec}
+		if _, err := h.Write([]byte("x")); err != nil {
+			t.Fatalf("写响应体失败: %v", err)
+		}
+		status, _, body := h.captured()
+		if status != http.StatusOK {
+			t.Errorf("留档的状态码 = %d，期望 200（没显式写头时 net/http 按 200 发）", status)
+		}
+		if string(body) != "x" {
+			t.Errorf("留档的响应体 = %q，期望 x", body)
+		}
+	})
+}
+
+// 重放交出的状态码就是留档的那一个，不是「一律 200」。
+//
+// 三格各给一次断言：留档 200 的照旧、留档 429 的仍是 429、留档 0 的补成 200
+// （列可空，见 writeReplay 的说明）。今天只有 200 的响应会被记成 completed，
+// 所以 429 那一格在生产上来自「被别的手段写进去的行」——writeReplay 的注释
+// 点名过这种行。这里固定的是这个函数的契约：留档是多少就回多少。把
+// `status == 0` 取反之后，**每一个非 0 的留档都会被改写成 200**，调用方按
+// 状态码分支时看到的结论就与第一次完全不同了。
+func TestWriteReplayKeepsRecordedStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		recorded int
+		want     int
+	}{
+		{name: "留档 200", recorded: http.StatusOK, want: http.StatusOK},
+		{name: "留档 429", recorded: http.StatusTooManyRequests, want: http.StatusTooManyRequests},
+		{name: "留档为 0", recorded: 0, want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			writeReplay(rec, &idempotency.Record{
+				ResponseStatus: tc.recorded,
+				ResponseBody:   []byte(`{}`),
+			})
+			if rec.Code != tc.want {
+				t.Errorf("重放的状态码 = %d，期望 %d", rec.Code, tc.want)
+			}
+		})
+	}
+}
+
 // 两套协议的错误体形状各断言一次。
 //
 // 码放在哪个字段上两套不同（见 error.go），而调用方的 SDK 按自己那套解——

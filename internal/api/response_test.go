@@ -169,6 +169,32 @@ func TestClaudeAlwaysHasContentBlock(t *testing.T) {
 	}
 }
 
+// 只有工具调用、没有正文时，content 里**不该**多出一个空正文块。
+//
+// 判据是「有正文，或者根本没有工具块」。把 `>` 写成 `>=` 之后它恒真：每一次
+// 只带工具调用的回答都会在工具块前面多出一个 text 块，内容是空串。客户端按块
+// 渲染时多出可见的空白，而把 content 当数组拼装的 SDK 会把它当成回答的一部分。
+func TestClaudeToolOnlyResponseHasNoEmptyTextBlock(t *testing.T) {
+	resp := &channel.Response{
+		Message: channel.Message{
+			Role: "assistant",
+			Content: []channel.ContentBlock{
+				{Type: "tool_use", ToolUseID: "c1", ToolName: "f", ToolInput: map[string]any{"a": 1}},
+			},
+		},
+		FinishReason: "tool_calls",
+	}
+
+	got := newClaudeMessage("id", "m", resp)
+	if len(got.Content) != 1 {
+		t.Fatalf("块数 = %d，期望 1（只有工具块）: %+v", len(got.Content), got.Content)
+	}
+	block, ok := got.Content[0].(claudeToolUseBlock)
+	if !ok || block.Type != "tool_use" || block.ID != "c1" {
+		t.Errorf("唯一那个块应是工具调用: %+v", got.Content[0])
+	}
+}
+
 // 没有结束原因时 stop_reason 是 null，而不是空串。
 func TestClaudeStopReasonNullWhenUnknown(t *testing.T) {
 	got := newClaudeMessage("id", "m", &channel.Response{FinishReason: ""})
@@ -205,6 +231,15 @@ func TestClaudeUsageClampsNegativeInput(t *testing.T) {
 	got := claudeUsageOf(channel.Usage{PromptTokens: 5, CacheReadTokens: 9})
 	if got.InputTokens != 0 {
 		t.Errorf("input_tokens = %d，期望夹到 0", got.InputTokens)
+	}
+
+	// 恰好为 0 的那一格与负数同处一条判据，但 `input < 0` 与 `input <= 0`
+	// 两版在这里得到的是同一个数：守卫体做的事就是「赋 0」，而 input 本来
+	// 就是 0。按「负数 / 等于 0 / 正数」三段看，两版对每一段都返回同一个值，
+	// 所以这是**等价**变异，不是缺口——没有输入能区分它们。
+	zero := claudeUsageOf(channel.Usage{PromptTokens: 5, CacheReadTokens: 5})
+	if zero.InputTokens != 0 {
+		t.Errorf("input_tokens = %d，期望 0（减完正好是 0）", zero.InputTokens)
 	}
 }
 
