@@ -166,7 +166,7 @@ func TestUserEntriesWindowAndCursor(t *testing.T) {
 	// 只给一边的时间窗是允许的，那一侧单独生效。变异：`!q.From.IsZero() &&
 	// !q.To.IsZero() && …` 的 `&&` 改成 `||`，只给起点会被当成「窗口不合法」。
 	// 这里只判不报错：筛选本身由上面那条左闭右开的断言覆盖。
-	if _, err := s.UserEntries(ctx, UserEntryQuery{
+	if _, err = s.UserEntries(ctx, UserEntryQuery{
 		UserID: userID,
 		From:   usageTestTime(t, "2026-10-01T00:00:00Z"),
 	}); err != nil {
