@@ -448,6 +448,20 @@ func TestCreateRejectsInvalidFields(t *testing.T) {
 	}
 }
 
+// 报错要点出**第几项**，且与人的数法一致（从 1 开始）。
+//
+// 名单可以很长，只说「有个模型名为空」等于让人自己去找。这一条同时管着报文里
+// 的 i+1：抄成 i-1 时会打出「第 0 个」，而那种输出没人会多看一眼。
+func TestNormalizeModelsReportsOneBasedPosition(t *testing.T) {
+	_, err := normalizeModels([]string{"model-a", " "})
+	if err == nil {
+		t.Fatal("空模型名应当被拒")
+	}
+	if want := "第 2 个模型名为空"; !strings.Contains(err.Error(), want) {
+		t.Errorf("err = %v，期望包含 %q", err, want)
+	}
+}
+
 // TestNormalizeBaseURLJudgesQueryAndFragment 把「带 query / fragment 的地址一律拒」
 // 钉在判据本身上。它不碰库，所以在没有 DSN 的机器上也真的跑（不是 SKIP）。
 //
@@ -1025,6 +1039,57 @@ func TestSetStatusUnknownChannel(t *testing.T) {
 	err := admin.SetStatus(context.Background(), 1<<40, StatusDisabled)
 	if !errors.Is(err, ErrChannelNotFound) {
 		t.Errorf("err = %v，期望 ErrChannelNotFound", err)
+	}
+}
+
+// 非正数 id 在碰库之前就被拒：0 与负数一样，都不是「查不到的那一行」。
+//
+// 判据不能只看「返回了错误」——这些方法对不存在的 id 也会报错。差别在报文：
+// id 为 0 是调用方算错了，不是库里少了一行，两者的排查方向不同。只判 err != nil
+// 的话，把 id 校验里的 <= 写成 < 也没有一条用例会红（变异测试实测：四种写路径
+// 与 HealthOne 的 <= 0 改成 < 0 之后全部还活着）。
+func TestAdminMethodsRejectNonPositiveID(t *testing.T) {
+	db := testDB(t)
+	admin := newAdmin(t, db, testSealer(t))
+
+	name := "ch-zero"
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{"Update", func() error {
+			return admin.Update(context.Background(), UpdateRequest{ID: 0, Name: &name})
+		}},
+		{"SetStatus", func() error {
+			return admin.SetStatus(context.Background(), 0, StatusEnabled)
+		}},
+		{"SoftDelete", func() error {
+			_, err := admin.SoftDelete(context.Background(), 0)
+			return err
+		}},
+		{"Restore", func() error {
+			_, err := admin.Restore(context.Background(), 0)
+			return err
+		}},
+		{"HealthOne", func() error {
+			_, _, err := admin.HealthOne(context.Background(), 0, time.Now())
+			return err
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil {
+				t.Fatal("id 为 0 应当被拒")
+			}
+			if !strings.Contains(err.Error(), "渠道 id 无效") {
+				t.Errorf("err = %v，期望点名「渠道 id 无效」而不是把它当成查不到的行", err)
+			}
+			if errors.Is(err, ErrChannelNotFound) {
+				t.Errorf("err = %v，id 为 0 不该报 ErrChannelNotFound", err)
+			}
+		})
 	}
 }
 

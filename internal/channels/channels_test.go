@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,6 +120,26 @@ func TestDecryptErrorsUnwrap(t *testing.T) {
 	}
 }
 
+// 有失败项时，报文必须点出第一个是谁、为什么：笼统的「都解不开」会把排查
+// 引向「主密钥配了吗」，而真正坏的往往只是某一条渠道的密文。
+//
+// 没有失败项时退回笼统文案，不去索引空切片——这个聚合类型是为「有失败项」
+// 造的，但 Error() 本身不该在空值上崩掉。
+func TestDecryptErrorsMessage(t *testing.T) {
+	one := &DecryptErrors{Failures: []DecryptFailure{
+		{ChannelID: 7, Name: "ch-7", Err: ErrCredentialCorrupt},
+	}}
+	for _, want := range []string{"1 个候选渠道", "渠道 7", "ch-7", ErrCredentialCorrupt.Error()} {
+		if !strings.Contains(one.Error(), want) {
+			t.Errorf("Error() = %q，期望包含 %q", one.Error(), want)
+		}
+	}
+
+	if got, want := (&DecryptErrors{}).Error(), "候选渠道的凭证都解不开"; got != want {
+		t.Errorf("没有失败项时 Error() = %q，期望 %q", got, want)
+	}
+}
+
 // ── 健康度 ──────────────────────────────────────────────────────────────
 
 // 新渠道还没有任何健康数据。此时必须表现为「未知」——
@@ -200,6 +221,33 @@ func TestConsecutiveFailuresWithoutTimestampIsTreatedAsExpired(t *testing.T) {
 		t.Errorf("没有时间戳时 consecutiveFailures = %d，期望 0", got)
 	}
 }
+
+// 恰好等于冷却期就算「已过」：边界落在放行这一侧，而不是再压一个周期。
+//
+// 这一条按 streakCooldown 构造输入，与上面两条用字面量不同：它管的是比较符
+// 的边界（`>=` 写成 `>` 时这一条才会红），时长本身由 14 / 16 分钟那两条负责。
+func TestConsecutiveFailuresAtExactlyCooldown(t *testing.T) {
+	now := time.Now()
+	row := candidateRow{streak: 5, lastFailureAt: sqlNullTime(now.Add(-streakCooldown))}
+
+	if got := row.consecutiveFailures(now); got != 0 {
+		t.Errorf("恰好 %v 前失败过：consecutiveFailures = %d，期望 0", streakCooldown, got)
+	}
+}
+
+// ── 变异测试的等价体 ────────────────────────────────────────────────────
+//
+// 这一段不是用例，是给变异测试留的说明：channels.go 的 consecutiveFailures
+// 里那处 `row.streak <= 0`（第 655 行）被改成 `<` 后没有用例变红，但两版
+// **在任何输入下同值**，所以区分不出：
+//
+//   - streak > 0：都不进这一支，往下走同一段逻辑；
+//   - streak < 0：都进这一支，都返回 0；
+//   - streak == 0：唯一有差异的输入——原文直接返回 0，改写后继续往下，但无论
+//     走哪个出口，最后返回的都是 row.streak，也就是 0。
+//
+// 想靠「换一个输入」杀掉它是不可能的；上面三条用例覆盖的是这条函数真正会
+// 分叉的输入（零、未过期、已过期）。
 
 // ── 额度 ────────────────────────────────────────────────────────────────
 
@@ -330,6 +378,27 @@ func TestQuotaRejectsMalformedConfidence(t *testing.T) {
 	}
 	if _, err := row.quota(); err == nil {
 		t.Fatal("confidence 不是数字时应当报错")
+	}
+}
+
+// confidence 是空字符串时按「没有可信度」处理，不是「解析失败」。
+//
+// 空字符串不是库里的形态：这一列是 numeric(3,2) NOT NULL，扫描出来要么是数字，
+// 要么是 NULL（LEFT JOIN 没连上）。它挡住的是直接构造出来的 candidateRow——
+// 本包内拿构造值调用 candidateRow.quota / withValue 的路径。少了 `!= ""`，
+// 那一格会掉进 ParseFloat 的错误分支，把「这一格没填」报成「这一行的类型与
+// 表定义对不上」。两种口径不冲突：库里不会有空串，函数级输入可以有。
+func TestQuotaEmptyConfidenceIsAbsent(t *testing.T) {
+	row := candidateRow{
+		remaining:  sql.NullString{String: "12.5", Valid: true},
+		confidence: sql.NullString{String: "", Valid: true},
+	}
+	q, err := row.quota()
+	if err != nil {
+		t.Fatalf("confidence 为空时不该报错，得到 %v", err)
+	}
+	if q.Confidence != 0 {
+		t.Errorf("Confidence = %v，期望 0", q.Confidence)
 	}
 }
 
