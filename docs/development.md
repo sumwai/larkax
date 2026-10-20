@@ -1757,7 +1757,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/calendar` | 150 | 2 | 0 | 14 | 91.57% | 98.68% | 97.8% |
 | `internal/ledger` | 576 | 8 | 0 | 92 | 86.39% | 98.63% | 96.3% |
 | `internal/ledger/store` | 433 | 6 | 0 | 60 | 87.98% | 98.63% | 79.9% |
-| `internal/api` | 195 | 3 | 2 | 19 | 91.24% | 98.48% | 90.2% |
+| `internal/api` | 197 | 3 | 0 | 19 | 91.32% | 98.50% | 90.2% |
 | `internal/auth` | 221 | 4 | 1 | 8 | 96.57% | 98.22% | 86.6% |
 | `internal/relay` | 112 | 3 | 0 | 7 | 94.26% | 97.39% | 87.7% |
 | `internal/idempotency` | 34 | 1 | 0 | 0 | 100.00% | 97.14% | 83.3% |
@@ -1788,9 +1788,10 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 **超时列不为 0 的行不与别的轮次比较**——见上文。改动过某个包的测试之后重跑并在
 表里更新。`internal/auth` 那一行的超时是**自然超时**而不是机器干扰：`deletion.go:712`
 把占位名循环里的 `n++` 改成 `n--` 之后，第 1 个候选被占住就永不终止。
-`internal/api` 那一行的两个超时也是自然超时：`api.go:671` 与 `:716` 两处 nil 判据
-被取反之后，插件会话建不出来，`TestReloadKeepsInFlightRequestOnOldGeneration` 就
-一直等在那个没有上限的 `<-entered` 上（见 #841）；`-timeout 30s` 重跑时栈停在那一行。
+**测试里等信号的那一处要带上限**：被测路径走不到时，一个无上限的接收会把变异体
+记成 Timed out 而不是 Killed——两个字母之差，一条真缺口在账面上就成了「机器忙」。
+`internal/api` 原先的两个超时就是这么来的（`<-entered` 没有上限），加上限之后
+它们变成 Killed，那一行也从 195/3/2 变成 197/3/0。
 
 **`internal/plugin/store` 那一条存活是结构性的等价。** `generationOrNil` 的两个
 `sql.Null*` 出自 `runningJoin()` 同一个 `LEFT JOIN LATERAL … LIMIT 1` 的同一行，

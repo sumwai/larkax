@@ -5,11 +5,18 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/plugin"
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
 )
+
+// observedWait 是这里等一次信号的上限。等的是「被测路径走到了哪一步」，正常
+// 路径是毫秒级；上限取十秒，是为了在路径根本走不到时判成失败，而不是把整个
+// 测试进程挂到 go test 的整轮超时——后者在变异测试里会被记成 Timed out，
+// 既不进 efficacy 的分母，也让这一行不能与别的轮次比较。
+const observedWait = 10 * time.Second
 
 // 判据：换表发生在一次请求处理**期间**时，那次请求仍用旧代次跑完，下一个请求
 // 用新代次。
@@ -50,11 +57,20 @@ func TestReloadKeepsInFlightRequestOnOldGeneration(t *testing.T) {
 	}()
 
 	// 请求已经取到旧注册表、停在宿主构造这一步；这时换表。
-	<-entered
+	select {
+	case <-entered:
+	case <-time.After(observedWait):
+		t.Fatal("宿主构造一直没被调用：请求没走到插件那一步（判据要的是它先停在旧注册表上）")
+	}
 	h.handler.Plugins.Store(newGen)
 	close(release)
 
-	firstRec := <-done
+	var firstRec *httptest.ResponseRecorder
+	select {
+	case firstRec = <-done:
+	case <-time.After(observedWait):
+		t.Fatal("放行之后在途请求没有返回")
+	}
 	if firstRec.Code != http.StatusOK {
 		t.Fatalf("在途请求状态码 = %d，响应体 %s", firstRec.Code, firstRec.Body)
 	}
