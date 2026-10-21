@@ -224,8 +224,8 @@ func (a *Adapter) encodeRequest(ch channel.Channel, req *channel.Request, stream
 	// reasoning_effort 的取值各家不一：同一个「关闭推理」，有的上游认
 	// `none`，有的只认 `off`，还有的要靠不传这个字段。翻译放在这里而不是
 	// 选路层，因为它是协议细节，看的是这条渠道的私有配置
-	// （见 channel.Channel.Setting）。
-	converted.ReasoningEffort = reasoningEffortDialect(ch.Setting, converted.ReasoningEffort)
+	// （见 channel.Channel.Setting）。翻译本身与 responsesadapter 共用一处。
+	converted.ReasoningEffort = channel.ReasoningEffortDialect(ch.Setting, converted.ReasoningEffort)
 	if stream {
 		yes := true
 		converted.Stream = &yes

@@ -24,6 +24,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/QuantumNous/new-api/relaykit/dto"
+
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channel/httpx"
 	"github.com/sumwai/larkax/internal/quota"
@@ -57,7 +59,7 @@ func (a *Adapter) Endpoint() channel.Endpoint { return channel.EndpointResponses
 
 // Chat 发起一次非流式请求。
 func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Request) (*channel.Response, error) {
-	body, err := a.encodeRequest(ctx, req, false)
+	body, err := a.encodeRequest(ctx, ch, req, false)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +151,7 @@ func (r responsesResponse) upstreamError(status int) error {
 // 这样调用方才能区分「上游连不上」（可换渠道重试）与「流中途断了」
 // （已吐给客户端，换渠道会让客户端看到两段拼接的答案）。
 func (a *Adapter) ChatStream(ctx context.Context, ch channel.Channel, req *channel.Request) (<-chan channel.StreamEvent, error) {
-	body, err := a.encodeRequest(ctx, req, true)
+	body, err := a.encodeRequest(ctx, ch, req, true)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +249,7 @@ func (a *Adapter) Quota(context.Context, channel.Channel) (quota.State, error) {
 }
 
 // encodeRequest 把统一请求编码成上游 JSON。
-func (a *Adapter) encodeRequest(ctx context.Context, req *channel.Request, stream bool) ([]byte, error) {
+func (a *Adapter) encodeRequest(ctx context.Context, ch channel.Channel, req *channel.Request, stream bool) ([]byte, error) {
 	openaiReq, err := relay.ToRelaykit(req)
 	if err != nil {
 		return nil, fmt.Errorf("编码请求失败: %w", err)
@@ -256,6 +258,21 @@ func (a *Adapter) encodeRequest(ctx context.Context, req *channel.Request, strea
 	converted, err := relay.ToRelaykitResponses(ctx, openaiReq)
 	if err != nil {
 		return nil, fmt.Errorf("编码请求失败: %w", err)
+	}
+
+	// reasoning_effort 的方言翻译与 openaiadapter 共用一处。Responses 把它
+	// 放在 reasoning.effort 里，不是顶层的 reasoning_effort，所以翻译作用在
+	// 嵌套对象里的那个取值上。
+	//
+	// 只在请求本来带了取值时才动它：没带就没有要翻译的东西，也不该因为
+	// 配了映射表就凭空多出一个字段。
+	if converted.Reasoning != nil && converted.Reasoning.Effort != "" {
+		converted.Reasoning.Effort = channel.ReasoningEffortDialect(ch.Setting, converted.Reasoning.Effort)
+		// 映射到空串时去掉 effort；reasoning 因此变空就整个去掉。留一个
+		// `{}` 给上游，等于让它去猜这次到底要不要推理。
+		if reasoningHasNothing(converted.Reasoning) {
+			converted.Reasoning = nil
+		}
 	}
 
 	// 流式**不需要** opt-in 用量：usage 跟着终态事件一起来，没有 chat 那边
@@ -350,6 +367,23 @@ func (a *Adapter) do(ctx context.Context, ch channel.Channel, body []byte, req *
 // 而上游的错误信息不会说「你用错头了」。
 func (a *Adapter) setHeaders(req *http.Request, ch channel.Channel) {
 	req.Header.Set("Authorization", "Bearer "+ch.Credential)
+}
+
+// reasoningHasNothing 判断 reasoning 对象里已经没有任何要发给上游的内容。
+//
+// 判据枚举了 dto.Reasoning 今天的全部字段（Effort、Summary、Mode、Context）。
+// 那个结构将来多出一项时，这一行不会自己跟上：新字段不在判据里，会被当成
+// 没有内容而整块删掉，所以给那个结构加字段时要回来改这里。
+//
+// Mode 与 Context 是 RawMessage，字面量 null 与缺失都算没有内容——
+// omitempty 对 null 不生效，留着它会发出 "mode":null。
+func reasoningHasNothing(r *dto.Reasoning) bool {
+	return r.Effort == "" && r.Summary == "" && rawAbsent(r.Mode) && rawAbsent(r.Context)
+}
+
+// rawAbsent 判断一个 RawMessage 是不是「没有内容」。
+func rawAbsent(raw json.RawMessage) bool {
+	return len(raw) == 0 || string(bytes.TrimSpace(raw)) == "null"
 }
 
 // rawString 把一个可能是字符串、也可能不是的 JSON 值读成字符串。
