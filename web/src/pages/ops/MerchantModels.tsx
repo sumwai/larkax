@@ -50,7 +50,7 @@ export function MerchantModels() {
         <Empty
           icon={<IconModels size={20} />}
           title={t('ops.merchant.models.emptyTitle')}
-          body={t('ops.merchant.models.emptyBody')}
+          body={t(`ops.merchant.models.emptyBody.${subject}` as MessageKey)}
           action={
             <Link className="btn secondary" to={channelsPath}>
               {t('ops.merchant.models.emptyAction')}

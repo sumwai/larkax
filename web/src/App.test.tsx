@@ -131,11 +131,16 @@ describe('运营视图的角色门槛', () => {
     expect(mocks.overview).toHaveBeenCalled()
   })
 
-  it('user 进不了商家概览，也不发运营请求', async () => {
-    await open('user', '/app/merchant/overview')
-    expect(await screen.findByText('这个视图不在你的权限范围内。')).toBeInTheDocument()
-    expect(mocks.overview).not.toHaveBeenCalled()
-  })
+  it.each(['/app/merchant/overview', '/app/merchant/models', '/app/merchant/upstreams'])(
+    'user 进不了 %s，也不发运营请求',
+    async (path) => {
+      await open('user', path)
+      expect(await screen.findByText('这个视图不在你的权限范围内。')).toBeInTheDocument()
+      expect(mocks.overview).not.toHaveBeenCalled()
+      expect(mocks.listUpstreams).not.toHaveBeenCalled()
+      expect(mocks.listSuppliedModels).not.toHaveBeenCalled()
+    },
+  )
 
   it('admin 进得去概览、模型与上游三页，主语写成全站', async () => {
     await open('admin', '/app/merchant/overview')
@@ -184,7 +189,7 @@ describe('运营视图的角色门槛', () => {
     expect(screen.getByRole('button', { name: '管理' })).toHaveAttribute('aria-pressed', 'true')
   })
 
-  it.each(['/app/merchant/channels', '/app/merchant/pricing'])(
+  it.each(['/app/merchant/channels', '/app/merchant/pricing', '/app/merchant/settings'])(
     'admin 直接敲 %s 落到无权限页',
     async (path) => {
       await open('admin', path)
@@ -194,6 +199,7 @@ describe('运营视图的角色门槛', () => {
       // 无权限页不该顺手把数据也拉一遍。
       expect(mocks.listChannels).not.toHaveBeenCalled()
       expect(mocks.listRules).not.toHaveBeenCalled()
+      expect(mocks.overview).not.toHaveBeenCalled()
     },
   )
 

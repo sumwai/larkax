@@ -104,14 +104,22 @@ describe('商家上游', () => {
     expect(within(group).getByText('#1')).toBeInTheDocument()
     expect(within(group).getByText('acme-backup')).toBeInTheDocument()
     expect(within(group).getByText('#2')).toBeInTheDocument()
+    // 反方向也要断：标题用 mine、副标题误用 site 这种混源不该能过。
+    expect(screen.queryByText(/全站/)).not.toBeInTheDocument()
   })
 
-  it('失败率按百分比保留一位小数', async () => {
-    mocks.listUpstreams.mockResolvedValue(page())
+  // 后端给 0..1 的小数，页面只换单位；两端各核一次。
+  it.each([
+    [0, '0.0%'],
+    [0.25, '25.0%'],
+    [1, '100.0%'],
+  ])('失败率 %s 显示为 %s', async (rate: number, text: string) => {
+    mocks.listUpstreams.mockResolvedValue(
+      page({ items: [{ ...UPSTREAM, failure_rate: rate }] }),
+    )
     renderPage()
 
-    // 后端给 0..1 的小数，页面只换单位。
-    expect(await screen.findByText('25.0%')).toBeInTheDocument()
+    expect(await screen.findByText(text)).toBeInTheDocument()
   })
 
   it('健康档位有文字，不只靠颜色', async () => {

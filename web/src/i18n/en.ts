@@ -433,7 +433,8 @@ export const en: Record<MessageKey, string> = {
   'ops.merchant.models.priced': 'Priced',
   'ops.merchant.models.unpriced': 'Not priced',
   'ops.merchant.models.emptyTitle': 'No models in supply yet',
-  'ops.merchant.models.emptyBody': 'This list fills up once one of your channels is enabled and declares its models.',
+  'ops.merchant.models.emptyBody.mine': 'This list fills up once one of your channels is enabled and declares its models.',
+  'ops.merchant.models.emptyBody.site': 'This list fills up once a channel on the site is enabled and declares its models.',
   'ops.merchant.models.emptyAction': 'Connect a channel',
   'ops.merchant.models.truncated': 'Showing the first {shown} of {total}.',
 

@@ -417,7 +417,8 @@ export const zh = {
   'ops.merchant.models.priced': '已定价',
   'ops.merchant.models.unpriced': '未定价',
   'ops.merchant.models.emptyTitle': '还没有在供模型',
-  'ops.merchant.models.emptyBody': '名下有一条启用中的渠道、且这条渠道声明了模型之后，这里才会有内容。',
+  'ops.merchant.models.emptyBody.mine': '名下有一条启用中的渠道、且这条渠道声明了模型之后，这里才会有内容。',
+  'ops.merchant.models.emptyBody.site': '全站有渠道启用并声明了模型之后，这里才会有内容。',
   'ops.merchant.models.emptyAction': '去接一条渠道',
   'ops.merchant.models.truncated': '共 {total} 个，只显示前 {shown} 个。',
 

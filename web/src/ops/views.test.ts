@@ -29,18 +29,27 @@ describe('控制台视图', () => {
     expect(subjectOf(undefined)).toBe('mine')
   })
 
-  it('管理员只能进商家视图里的概览、模型与上游', () => {
-    for (const path of ['/app/merchant', '/app/merchant/overview', '/app/merchant/models', '/app/merchant/upstreams']) {
-      expect(viewAllowed('admin', path)).toBe(true)
-    }
-    // 渠道、计价与设置写的都是「你名下」，管理员没有这层归属。
-    for (const path of [
-      '/app/merchant/channels',
-      '/app/merchant/pricing',
-      '/app/merchant/settings',
-    ]) {
-      expect(viewAllowed('admin', path)).toBe(false)
-    }
+  // 判定按地址段走：渠道、计价、设置写的都是「你名下」，管理员没有这层归属；
+  // 前缀混淆（`overviewish`）与未知子路径也必须拒绝。
+  const ADMIN_MERCHANT: Array<[string, boolean]> = [
+    ['/app/merchant', true],
+    ['/app/merchant/', true],
+    ['/app/merchant/overview', true],
+    ['/app/merchant/models', true],
+    ['/app/merchant/upstreams', true],
+    ['/app/merchant/channels', false],
+    ['/app/merchant/pricing', false],
+    ['/app/merchant/settings', false],
+    ['/app/merchant/settings/profile', false],
+    ['/app/merchant/foo', false],
+    ['/app/merchant/overviewish', false],
+  ]
+
+  it.each(ADMIN_MERCHANT)('管理员对 %s 的判定是 %s', (path, allowed) => {
+    expect(viewAllowed('admin', path)).toBe(allowed)
+  })
+
+  it('其余角色按视图归属判定', () => {
     expect(viewAllowed('merchant', '/app/merchant/overview')).toBe(true)
     expect(viewAllowed('user', '/app/merchant/overview')).toBe(false)
     expect(viewAllowed('admin', '/app/admin/channels')).toBe(true)

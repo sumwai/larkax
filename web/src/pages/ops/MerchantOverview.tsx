@@ -26,10 +26,13 @@ const REASONS: Record<UnhealthyReason, MessageKey> = {
   no_requests_24h: 'ops.merchant.reason.noRequests',
 }
 
-function reasonLabel(reason: UnhealthyReason): MessageKey {
-  return Object.prototype.hasOwnProperty.call(REASONS, reason)
-    ? REASONS[reason]
-    : 'ops.merchant.reason.unknown'
+/**
+ * 理由 → 文案。表里没有的值显示「其他异常」，原始理由放进 `title`：悬停与
+ * 读屏能看到，页面正文不出现枚举原值，后端单独加上一种理由时也留下痕迹。
+ */
+function reasonLabel(reason: UnhealthyReason): { key: MessageKey; title?: string } {
+  if (Object.prototype.hasOwnProperty.call(REASONS, reason)) return { key: REASONS[reason] }
+  return { key: 'ops.merchant.reason.unknown', title: reason }
 }
 
 /**
@@ -41,10 +44,11 @@ function reasonLabel(reason: UnhealthyReason): MessageKey {
 export function MerchantOverview() {
   const { t, lang } = useI18n()
   const { user } = useAuth()
-  const { meta } = useSite()
+  const { meta, ready } = useSite()
   const { data, error, loading, reload } = useAsync(() => api.merchant.overview(), [])
   const subject = subjectOf(user?.role)
-  const today = todayInZone(meta.timezone)
+  // 时区还没取到时不写日期：那天只能按 UTC 算，与「今日」的窗口对不上。
+  const today = ready ? todayInZone(meta.timezone) : null
 
   return (
     <div className="page">
@@ -85,7 +89,7 @@ export function MerchantOverview() {
             <div className="card kpi">
               <div className="k">{t(`ops.merchant.kpi.requests.${subject}` as MessageKey)}</div>
               <div className="v">{formatCount(data.today.requests, lang)}</div>
-              <div className="d">{t('ops.merchant.todayHint', { date: today })}</div>
+              {today && <div className="d">{t('ops.merchant.todayHint', { date: today })}</div>}
             </div>
             <div className="card kpi">
               <div className="k">{t(`ops.merchant.kpi.cost.${subject}` as MessageKey)}</div>
@@ -93,7 +97,8 @@ export function MerchantOverview() {
                 <MoneyText value={data.today.cost} currency={meta.currency} variant="spend" />
               </div>
               <div className="d">
-                {t('ops.merchant.priceBasis')} · {t('ops.merchant.todayHint', { date: today })}
+                {t('ops.merchant.priceBasis')}
+                {today ? ` · ${t('ops.merchant.todayHint', { date: today })}` : ''}
               </div>
             </div>
           </section>
@@ -118,9 +123,14 @@ export function MerchantOverview() {
                       <span className="tiny">#{channel.id}</span>
                     </div>
                     <ul className="reason-list">
-                      {channel.reasons.map((reason) => (
-                        <li key={reason}>{t(reasonLabel(reason))}</li>
-                      ))}
+                      {channel.reasons.map((reason) => {
+                        const label = reasonLabel(reason)
+                        return (
+                          <li key={reason} title={label.title}>
+                            {t(label.key)}
+                          </li>
+                        )
+                      })}
                     </ul>
                   </li>
                 ))}

@@ -58,9 +58,13 @@ export const MERCHANT_SHARED_PATHS = [
  * 也会被一起放行。
  */
 export function isSharedMerchantPath(pathname: string): boolean {
-  if (pathname === '/app/merchant') return true
+  // 尾斜杠与不带尾斜杠是同一个地址：不归一化的话 `/app/merchant/` 会被判成
+  // 越权，侧栏会先闪一下「无权限」。
+  const path =
+    pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname
+  if (path === '/app/merchant') return true
   return MERCHANT_SHARED_PATHS.some(
-    (path) => pathname === path || pathname.startsWith(`${path}/`),
+    (shared) => path === shared || path.startsWith(`${shared}/`),
   )
 }
 

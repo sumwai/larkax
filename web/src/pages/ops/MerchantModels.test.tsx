@@ -96,6 +96,8 @@ describe('商家模型', () => {
     const first = await screen.findByRole('row', { name: /gpt-4\.1/ })
     expect(first).toHaveTextContent('GPT-4.1')
     expect(first).toHaveTextContent('2')
+    // 反方向也要断：标题用 mine、副标题误用 site 这种混源不该能过。
+    expect(screen.queryByText(/全站/)).not.toBeInTheDocument()
   })
 
   it('priced 只出「已定价 / 未定价」两种文案', async () => {
@@ -145,11 +147,14 @@ describe('商家模型', () => {
     expect(screen.queryByText(/只显示前/)).not.toBeInTheDocument()
   })
 
-  it('空态指到接渠道的那一页', async () => {
+  it('空态指到接渠道的那一页，正文说的是自己名下', async () => {
     mocks.listSuppliedModels.mockResolvedValue({ items: [], total: 0, truncated: false })
     renderPage()
 
     expect(await screen.findByText('还没有在供模型')).toBeInTheDocument()
+    expect(
+      screen.getByText('名下有一条启用中的渠道、且这条渠道声明了模型之后，这里才会有内容。'),
+    ).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '去接一条渠道' })).toHaveAttribute(
       'href',
       '/app/merchant/channels',
@@ -165,6 +170,11 @@ describe('商家模型', () => {
       'href',
       '/app/admin/channels',
     )
+    // 空态正文也要跟着主语走，否则管理员看到的是商家口径。
+    expect(
+      screen.getByText('全站有渠道启用并声明了模型之后，这里才会有内容。'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/名下/)).not.toBeInTheDocument()
   })
 
   it('加载态、错误态与空态互不混淆', async () => {

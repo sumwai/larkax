@@ -945,8 +945,13 @@ function worstHealthOf(channels: Channel[]): ChannelHealth {
   )
 }
 
+/** 分页参数照真接口校验：缺省 50，范围 [1, 200]；越界回 400，不夹住。 */
 function limitOf(limit: number | undefined): number {
-  return Math.max(1, Math.min(limit ?? 50, 200))
+  if (limit === undefined) return 50
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+    throw new ApiError(400, 'invalid_request', 'limit must be between 1 and 200')
+  }
+  return limit
 }
 
 /** 生效中的规则：已启用、已到生效时刻、未过期。 */

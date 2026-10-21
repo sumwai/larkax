@@ -14,7 +14,7 @@ import { OpsLoadError } from './common'
 type HealthTone = 'ok' | 'neutral' | 'warn' | 'bad'
 
 /** 组健康取组内最差的一档，档位由服务端给；页面只负责换颜色与文案。 */
-const HEALTH: Partial<Record<ChannelHealth, { tone: HealthTone; key: MessageKey }>> = {
+const HEALTH: Record<ChannelHealth, { tone: HealthTone; key: MessageKey }> = {
   healthy: { tone: 'ok', key: 'ops.merchant.health.healthy' },
   unknown: { tone: 'neutral', key: 'ops.merchant.health.unknown' },
   degraded: { tone: 'warn', key: 'ops.merchant.health.degraded' },
@@ -38,9 +38,10 @@ function formatRate(rate: number): string {
 
 function HealthPill({ health }: { health: ChannelHealth }) {
   const { t } = useI18n()
-  const meta = HEALTH[health]
-  // 颜色之外必须有文字：色觉障碍的读者靠这一句分辨三档。
-  return <Pill tone={meta?.tone ?? 'neutral'}>{t(meta?.key ?? 'ops.merchant.health.unknown')}</Pill>
+  // 表写全了，服务端新增一档时这里先编译不过；运行期仍可能收到表外的值。
+  const meta = HEALTH[health] ?? HEALTH.unknown
+  // 颜色之外必须有文字：色觉障碍的读者靠这一句分辨各档。
+  return <Pill tone={meta.tone}>{t(meta.key)}</Pill>
 }
 
 function ChannelStatus({ status }: { status: string }) {

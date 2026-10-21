@@ -103,6 +103,8 @@ describe('商家概览', () => {
     expect(card('我的在供模型')).toHaveTextContent('3')
     expect(card('我的今日请求')).toHaveTextContent('5')
     expect(card('我的今日消耗')).toHaveTextContent('1.234')
+    // 反方向也要断：标题用 mine、副标题误用 site 这种混源不该能过。
+    expect(screen.queryByText(/全站/)).not.toBeInTheDocument()
   })
 
   it('零值照常显示，不换成空态或占位符', async () => {
@@ -124,9 +126,18 @@ describe('商家概览', () => {
 
     const today = todayInZone('Asia/Shanghai')
     await screen.findByText('我的今日请求')
-    expect(screen.getByText(`${today}（站点当地日期）`)).toBeInTheDocument()
+    expect(await screen.findByText(`${today}（站点当地日期）`)).toBeInTheDocument()
     expect(card('我的今日消耗')).toHaveTextContent('按售价计')
     expect(card('我的今日消耗')).toHaveTextContent(`${today}（站点当地日期）`)
+  })
+
+  it('时区还没取到时不写日期，读数照常显示', async () => {
+    mocks.meta.mockReturnValue(new Promise(() => undefined))
+    mocks.overview.mockResolvedValue(data())
+    renderPage()
+
+    expect(await screen.findByText('我的渠道')).toBeInTheDocument()
+    expect(screen.queryByText(/站点当地日期/)).not.toBeInTheDocument()
   })
 
   it('异常渠道按 reasons 逐条出人话', async () => {
@@ -173,7 +184,9 @@ describe('商家概览', () => {
     )
     renderPage()
 
-    expect(await screen.findByText('其他异常')).toBeInTheDocument()
+    const label = await screen.findByText('其他异常')
+    // 原值不进正文，但留在 title 里：悬停与读屏能看到，后端加枚举时留下痕迹。
+    expect(label).toHaveAttribute('title', 'billing_hold')
     expect(screen.queryByText('billing_hold')).not.toBeInTheDocument()
   })
 
