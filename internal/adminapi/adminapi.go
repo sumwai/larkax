@@ -38,11 +38,13 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sumwai/larkax/internal/api"
+	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/dberr"
+	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/pricing"
 )
 
@@ -87,16 +89,30 @@ type Config struct {
 	// 传什么都要理解成「整组路由的前提」，不能只包一部分。
 	Authorize func(http.Handler) http.Handler
 
-	// Groups 限定注册哪几组资源；为空表示全部（内部监听与 admin 组的默认）。
+	// Groups 限定注册哪几组资源；为空表示全部。
 	//
-	// 取值见 GroupChannels / GroupModels / GroupAliases / GroupPricing。控制台
+	// 生产的两处装配都**显式列出**：内部监听用 InternalGroups（不含 users），
+	// 控制台的 admin 组在 consoleapi 里列出（含 users）。留空只在测试与
+	// 兼容旧默认时出现。
+	//
+	// 取值见 GroupChannels / GroupModels / GroupAliases / GroupPricing /
+	// GroupCosts / GroupUsers。控制台
 	// 的 merchant 组给 channels + pricing：它管的是自己名下的渠道与自己定的价。
 	// 模型目录与别名没有「归属」可以过滤，放给 merchant 等于把全局写入权
 	// 交出去，所以不在这两个组里。
 	//
-	// `pricing/costs`（上游成本）不随 pricing 组注册：那是渠道侧的成本规则，
-	// 没有商家归属，只随「全部资源」出现。
+	// `pricing/costs`（上游成本）是单独一组（GroupCosts），不随 pricing 注册：
+	// 那是渠道侧的成本规则，没有商家归属。
+	//
+	// users 组（GroupUsers）只挂在控制台的 admin 组：它要求「操作者是会话里的
+	// 某个管理员」——改自己的角色、降最后一个管理员这两条判据在内部管理面上
+	// 无法定义（那里的调用者是运维令牌，没有「自己」）。所以内部管理面必须
+	// 显式列出资源组，不能留空（见 InternalGroups）。
 	Groups []string
+
+	// Currency 是用户详情里「余额」用哪个资产品种。为空时用 CNY。
+	// 它只影响读：钱包里没有这一品种时余额显示 0（与 /api/v1/wallet 同口径）。
+	Currency string
 }
 
 // tokenSource 提供当前令牌的 verifier。
@@ -117,6 +133,9 @@ type API struct {
 	catalogAdmin *catalog.Admin
 	rules        *pricing.Admin
 	costs        *pricing.CostAdmin
+	users        *auth.Store
+	ledger       *store.Store
+	currency     string
 }
 
 // New 装配管理面。返回的 handler **已经带上鉴权中间件**：调用方把它整片挂到
@@ -142,6 +161,12 @@ func New(cfg Config) http.Handler {
 		catalogAdmin: catalog.NewAdmin(cfg.DB),
 		rules:        pricing.NewAdmin(cfg.DB),
 		costs:        pricing.NewCostAdmin(cfg.DB),
+		users:        auth.New(cfg.DB),
+		ledger:       store.New(cfg.DB),
+		currency:     cfg.Currency,
+	}
+	if a.currency == "" {
+		a.currency = "CNY"
 	}
 
 	mux := http.NewServeMux()
@@ -171,10 +196,15 @@ func New(cfg Config) http.Handler {
 		mux.HandleFunc("GET "+prefix+"pricing/rules/{id}", a.getRule)
 		mux.HandleFunc("PATCH "+prefix+"pricing/rules/{id}", a.updateRule)
 	}
-	if all {
+	if all || groups[GroupCosts] {
 		mux.HandleFunc("GET "+prefix+"pricing/costs", a.listCosts)
 		mux.HandleFunc("POST "+prefix+"pricing/costs", a.createCost)
 		mux.HandleFunc("PATCH "+prefix+"pricing/costs/{id}", a.updateCost)
+	}
+	if all || groups[GroupUsers] {
+		mux.HandleFunc("GET "+prefix+"users", a.listUsers)
+		mux.HandleFunc("GET "+prefix+"users/{id}", a.getUser)
+		mux.HandleFunc("PATCH "+prefix+"users/{id}", a.updateUser)
 	}
 
 	authorize := cfg.Authorize
@@ -190,7 +220,22 @@ const (
 	GroupModels   = "models"
 	GroupAliases  = "aliases"
 	GroupPricing  = "pricing"
+	GroupCosts    = "costs"
+	// GroupUsers 是控制台的用户管理页。它**不在**内部管理面的清单里，
+	// 理由见 Config.Groups 与 InternalGroups。
+	GroupUsers = "users"
 )
+
+// InternalGroups 是内部监听（`/admin/v1/*`）上注册的资源组。
+//
+// 显式列出而不是留空（空 = 全部）：users 组的判据依赖「操作者是会话里的
+// 管理员」，内部管理面那一侧没有这个前提。留空的话，加一个组就会顺手把
+// 它暴露在运维令牌下面，而那种暴露在请求到达之前看不出来（见 New）。
+func InternalGroups() []string {
+	return []string{
+		GroupChannels, GroupModels, GroupAliases, GroupPricing, GroupCosts,
+	}
+}
 
 // groupSet 把 Groups 翻成集合；第二个返回值表示「全部资源」。
 //
@@ -203,7 +248,7 @@ func groupSet(groups []string) (map[string]bool, bool) {
 	set := make(map[string]bool, len(groups))
 	for _, group := range groups {
 		switch group {
-		case GroupChannels, GroupModels, GroupAliases, GroupPricing:
+		case GroupChannels, GroupModels, GroupAliases, GroupPricing, GroupCosts, GroupUsers:
 			set[group] = true
 		default:
 			panic("adminapi: 未知的资源组 " + group)
@@ -232,6 +277,29 @@ func OwnerFromContext(ctx context.Context) (int64, bool) {
 		return 0, false
 	}
 	return ownerID, true
+}
+
+// actorKey 是「这次请求的管理员是谁」的键。
+type actorKey struct{}
+
+// WithActor 把操作者的用户 id 放进 context，供 users 组使用。
+//
+// 与 WithOwner 的分别：owner 是**受限范围**（merchant 只能看自己名下的行），
+// actor 是**操作者身份**（改自己的角色/状态要被拒绝、审计日志要记下是谁）。
+// 两者都只该由路由层在拿到服务端会话之后注入，调用方传进来的 id 不能来自
+// body 或请求头。
+func WithActor(ctx context.Context, userID int64) context.Context {
+	return context.WithValue(ctx, actorKey{}, userID)
+}
+
+// ActorFromContext 读操作者。第二个返回值为 false 表示这条请求没有被
+// 控制台的 admin 组包过——users 组只挂在那一组下面，所以它等于装配错误。
+func ActorFromContext(ctx context.Context) (int64, bool) {
+	actorID, ok := ctx.Value(actorKey{}).(int64)
+	if !ok || actorID <= 0 {
+		return 0, false
+	}
+	return actorID, true
 }
 
 // 管理面自己的错误文案。
@@ -381,14 +449,20 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 		errors.Is(err, catalog.ErrModelNotFound),
 		errors.Is(err, catalog.ErrAliasIDNotFound),
 		errors.Is(err, pricing.ErrRuleNotFound),
-		errors.Is(err, pricing.ErrCostNotFound):
+		errors.Is(err, pricing.ErrCostNotFound),
+		errors.Is(err, auth.ErrUserNotFound):
 		a.writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, dberr.ErrConstraintViolation),
 		errors.Is(err, catalog.ErrModelExists),
 		errors.Is(err, catalog.ErrCanonicalTaken),
 		errors.Is(err, catalog.ErrUpstreamTaken),
 		errors.Is(err, catalog.ErrModelInUse),
-		errors.Is(err, catalog.ErrChannelNotFound):
+		errors.Is(err, catalog.ErrChannelNotFound),
+		// 用户管理那三条「数据不在可执行这个动作的状态上」：最后一个
+		// active 管理员不能被撤，销户流程里的账号不归这一页管。
+		errors.Is(err, auth.ErrLastAdmin),
+		errors.Is(err, auth.ErrDeletionAlreadyRequested),
+		errors.Is(err, auth.ErrDeletionAlreadyDeleted):
 		a.writeError(w, http.StatusConflict, err.Error())
 
 	// 二、驱动本身的错误。正文不转述它：它可能带出连接串、主机与表名，

@@ -662,6 +662,14 @@ func TestUpdateUserRoleMarkersWriteOneColumnEach(t *testing.T) {
 		t.Errorf("两个标记都真时折出来的角色是 %q，期望 %q", after.Role, RoleAdmin)
 	}
 
+	// 最后一个 active 管理员不能被撤（见 ErrLastAdmin）。这条用例要撤掉
+	// created 的 admin，先放一个不参与断言的 admin，把「最后一格」让开。
+	spare, _ := newUpdateFixture(ctx, t, db, store, RoleUser, uniqueUsername()+"@example.com")
+	if _, err := store.UpdateUser(ctx, spare.Username,
+		UpdateUserParams{IsMerchant: &yes, IsAdmin: &yes}); err != nil {
+		t.Fatalf("造备用管理员失败: %v", err)
+	}
+
 	// --no-admin 那一支：只把 is_admin 置假，merchant 不动。
 	if _, err := store.UpdateUser(ctx, created.Username, UpdateUserParams{IsAdmin: &no}); err != nil {
 		t.Fatalf("撤掉 admin 失败: %v", err)

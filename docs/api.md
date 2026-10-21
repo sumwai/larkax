@@ -244,6 +244,109 @@
   见 [limits.md](limits.md) 的「请求体上限」一节。
 - **方法必须是 `POST`**，否则 `405`，并带 `Allow: POST`。
 
+## 控制台管理接口：用户
+
+这三个端点只挂在公共监听的 `/api/v1/admin/users`，要求控制台会话（HttpOnly
+Cookie）与控制台折出来的 `admin` 角色；写方法另要 `X-CSRF-Token`。**内部管理面
+`/admin/v1/` 上没有这一组**：那里的调用者是运维令牌，没有「自己」这个概念，
+而这段接口有两条判据离不开操作者——不能改自己的角色/状态、不能撤掉最后一个
+active 管理员。对应的装配见 `internal/adminapi` 的 `GroupUsers` 与
+`InternalGroups`。
+
+角色只有三档，以 `users.is_merchant` / `users.is_admin` 两列落库，对外的
+`role` 由 `Role.Flags()` / `roleOf` 折出来（`admin` 同时也是 merchant）。
+**不要实现第四份映射**。
+
+### 清单
+
+`GET /api/v1/admin/users?query=&role=&status=&limit=&cursor=`
+
+- `query` 在用户名与邮箱上做不区分大小写的包含匹配；`%`、`_`、`\` 按字面量
+  转义，搜一个 `%` 不会列出全部用户。
+- `role` 取 `user`、`merchant`、`admin`；`merchant` 的口径是「`is_merchant`
+  为真**且** `is_admin` 为假」，所以 `admin` 不会混进来。`status` 取
+  `active`、`suspended`、`banned`（销户流程里的两种状态不在这一页的筛选里）。
+- `limit` 默认 50、上限 200。分页是 id keyset，响应：
+
+```json
+{
+  "items": [
+    {"id": 42, "username": "alice", "email": "a***@example.com",
+     "display_name": "Alice", "role": "merchant", "status": "active",
+     "created_at": "2026-10-01T08:00:00Z", "last_seen_at": "2026-10-21T09:12:00Z"}
+  ],
+  "next_cursor": "dTE6NDI"
+}
+```
+
+- `email` 是打码后的写法（本地部分只留首字符）；`email` 为 `null` 表示这名
+  用户没填邮箱。完整邮箱只在详情里给。
+- `last_seen_at` 是该用户所有会话 `last_seen_at` 的最大值，由控制台在每次
+  请求时刷新；从没登录过控制台为 `null`。
+- `next_cursor` 为 `null` 表示没有下一页。**游标不绑定筛选条件**：翻页途中
+  改 `query` / `role` / `status`，客户端要从第一页重新取，否则会拿上一组条件
+  的位置去翻这一组。
+
+### 详情
+
+`GET /api/v1/admin/users/{id}` 返回清单的全部字段，加上：
+
+| 字段 | 含义 |
+|---|---|
+| `email_full` | 完整邮箱；没填时为 `null` |
+| `balance` | 钱包余额，定点数字符串（8 位小数）。没有钱包行是 `0.00000000`，与 `/api/v1/wallet` 同口径 |
+| `active_key_count` | `api_keys.status = 'active'` 的把数 |
+| `requests_7d` / `amount_7d` | 最近 7×24 小时的请求数（去重到 request）与金额 |
+| `channel_count` | 该用户名下未删除的渠道数 |
+| `key_last_used_at` | 该用户所有 key 里 `last_used_at` 的最大值；从没用过为 `null` |
+
+`{id}` **只接受十进制正整数**；其余（用户名、`0`、负数、带别的字符）一律
+`404`。不能把路径段原样交给按「id 或用户名」解析的那条路——那会让
+`/users/alice` 读到 alice。
+
+### 修改
+
+`PATCH /api/v1/admin/users/{id}`，body 只认两个字段：
+
+```json
+{"role": "merchant", "status": "active"}
+```
+
+- 两个字段都可省略，但至少给一个；空 body、未知字段、未知取值都回 `400`。
+- 角色收**一个** `role`，服务端用 `Role.Flags()` 同时写两列。收两个布尔会让
+  「admin 且非 merchant」变成一个能发出来的请求，而库里那条
+  `users_admin_implies_merchant` 约束会把它变成 `500`。
+- 成功时返回与详情相同的响应体。
+
+拒绝规则（各自一句文案，`4xx`）：
+
+| 情形 | 状态码 |
+|---|---|
+| 改**自己的角色** | `400` |
+| 改**自己的状态** | `400`（与上一条文案不同） |
+| 把**最后一个 active 管理员**降级、停用或封禁 | `409` |
+| 目标是 `deletion_requested` / `deleted` | `409`，并说明销户要走 `larkaxctl user delete revert` / 已经不可逆 |
+| 目标不存在，或 `{id}` 不是正整数 | `404` |
+
+「最后一个 active 管理员」= `status = 'active' AND is_admin`。判据落在
+`auth.UpdateUser` 的事务里（目标行 `FOR UPDATE` + 事务级咨询锁下计数），
+所以 `larkaxctl user update --no-admin` 也挡得住；并发两笔降级只有一笔成功。
+操作者只来自服务端会话，请求头与 body 里的「actor」不参与判定；每次修改写
+一条结构化日志，含操作者 id、目标 id、改动的列与前后值、`request_id`。
+
+### 停用与封禁的语义
+
+这几条是**网关的行为**，页面据此解释，不要各自发明：
+
+- 停用**不需要动 `api_keys`**：每次鉴权都读 `users.status`，所以用户手里所有
+  key 一起失效。它们的 `status` 仍是 `active`，列表里也照这样显示——重新启用
+  后自动恢复，不需要重新建 key。
+- `suspended` 与 `banned` 今天在鉴权上没有区别（只判 `status != 'active'`）；
+  两者只差展示与将来的策略。页面不要假装它们有不同后果。
+- **新请求拒绝，已建立的连接继续**：非流式请求按原结算走完；流式不会因为
+  这次 PATCH 断开。
+- 角色改动**立即生效**，不需要吊销会话：控制台每次请求都从 `users` 折角色。
+
 ## 响应头
 
 | 头 | 什么时候带 | 说明 |

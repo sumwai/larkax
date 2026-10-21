@@ -173,6 +173,10 @@ var conflictErrors = []error{
 	auth.ErrDeletionAlreadyRequested,
 	auth.ErrDeletionAlreadyDeleted,
 	auth.ErrDeletionBalanceNotZero,
+	// `user update --no-admin` 打在最后一个 active 管理员上：命令没写错，
+	// 是库里那个账号现在不能撤（撤了控制台就没人进得去管理组）。与上面
+	// 销户那一族同一个形状——先动数据（给另一个账号 admin），再重发。
+	auth.ErrLastAdmin,
 
 	// 兜底的约束冲突：各包写路径认不出具体含义的唯一键 / 外键都归到它。
 	// 上面那个具名哨兵比它精确（errors.Is 能直接问出「是用户不存在」），

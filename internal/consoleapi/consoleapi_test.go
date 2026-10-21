@@ -424,6 +424,9 @@ type consoleFixture struct {
 	adminAdminCalls    int
 	merchantOwner      int64
 	adminOwner         int64
+	// adminActor 记下 admin 组注入的操作者（adminapi.WithActor）。0 表示
+	// 没注入——用户管理改自己、审计日志都靠它。
+	adminActor int64
 	// clock 是 handler 读到的「现在」。用例改它的值来模拟时间流逝。
 	clock *time.Time
 }
@@ -485,8 +488,8 @@ func newFixture(t *testing.T) *consoleFixture {
 		catalog:       f.catalog,
 		prices:        f.prices,
 		offers:        f.offers,
-		merchantAdmin: stubAdmin(&f.merchantAdminCalls, &f.merchantOwner),
-		adminAdmin:    stubAdmin(&f.adminAdminCalls, &f.adminOwner),
+		merchantAdmin: stubAdmin(&f.merchantAdminCalls, &f.merchantOwner, nil),
+		adminAdmin:    stubAdmin(&f.adminAdminCalls, &f.adminOwner, &f.adminActor),
 		spent: func(_ context.Context, ids []int64) (map[int64]money.Amount, error) {
 			f.spentN++
 			out := make(map[int64]money.Amount, len(ids))
@@ -502,12 +505,18 @@ func newFixture(t *testing.T) *consoleFixture {
 // stubAdmin 是角色组资源 handler 的替身：记下调用次数与 context 里的归属，
 // 回 204。204 而不是 200 是为了让「中间件放行了」与「资源 handler 返回了
 // 一个成功体」在断言里分得开。
-func stubAdmin(calls *int, owner *int64) http.Handler {
+func stubAdmin(calls *int, owner *int64, actor *int64) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		*calls++
 		*owner = 0
 		if id, ok := adminapi.OwnerFromContext(r.Context()); ok {
 			*owner = id
+		}
+		if actor != nil {
+			*actor = 0
+			if id, ok := adminapi.ActorFromContext(r.Context()); ok {
+				*actor = id
+			}
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})

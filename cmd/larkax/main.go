@@ -288,7 +288,16 @@ func adminSurface(cfg *config.Config, handle *sql.DB, logger *slog.Logger) (http
 	if err != nil {
 		return nil, fmt.Errorf("构造管理面的渠道类型注册表失败: %w", err)
 	}
-	return adminapi.New(adminapi.Config{DB: handle, Sealer: sealer, Registry: registry, Logger: logger}), nil
+	// 资源组显式给出，不留空（空 = 全部）：users 组只属于控制台的会话面，
+	// 它的判据依赖「操作者是谁」——改自己、降最后一个管理员这两条在运维
+	// 令牌那一侧没有定义（见 adminapi.InternalGroups）。
+	return adminapi.New(adminapi.Config{
+		DB:       handle,
+		Sealer:   sealer,
+		Registry: registry,
+		Logger:   logger,
+		Groups:   adminapi.InternalGroups(),
+	}), nil
 }
 
 // publicHandler 装配公共监听端口的 handler。

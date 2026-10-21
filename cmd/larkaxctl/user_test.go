@@ -1138,6 +1138,10 @@ func TestUserUpdateMarkersLandOnTheRightColumns(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 
+	// 最后一个 active 管理员不能被撤（见 internal/auth 的 ErrLastAdmin），
+	// 而这条用例要连撤两次 admin。先放一个不参与断言的 admin 把这一格让开。
+	createUserWithRole(t, uniqueName("update-role-spare"), "", "admin")
+
 	name := uniqueName("update-role")
 	id := createUserWithRole(t, name, "", "user")
 
@@ -1229,6 +1233,9 @@ func TestUserUpdateResultMarkersReadThroughTheRole(t *testing.T) {
 func TestUserUpdateNoMerchantOnAdminIsRefused(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
+
+	// 同上：这条用例最后要撤 admin，先放一个不参与断言的 admin。
+	createUserWithRole(t, uniqueName("update-demote-spare"), "", "admin")
 
 	name := uniqueName("update-demote")
 	id := createUserWithRole(t, name, "", "user")

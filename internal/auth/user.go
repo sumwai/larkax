@@ -851,6 +851,24 @@ func scanUserInfo(scan func(...any) error) (UserInfo, error) {
 // （见 cmd/larkaxctl 的 exitCode）。
 var ErrNoChanges = errors.New("没有要改的字段")
 
+// ErrLastAdmin 表示这次修改会把**最后一个 active 管理员**降级、停用或封禁。
+//
+// 判据落在 UpdateUser 而不是 HTTP 层：`larkaxctl user update --no-admin`
+// 走的是同一个函数，把判断写进控制台的 handler 只会挡住浏览器这一侧，
+// 命令行仍然能把最后一个管理员降掉——那时控制台再没有人进得去。
+//
+// 「active 管理员」按 `status = 'active' AND is_admin` 算，与控制台的
+// 目标口径一致（见 docs/api.md 的控制台用户管理一节）。
+var ErrLastAdmin = errors.New("不能降级、停用或封禁最后一个 active 管理员")
+
+// usersUpdateLockKey 是串行化「最后一个管理员」判据用的咨询锁键。
+//
+// 两笔并发修改各锁住自己的目标行之后才走到计数：不给计数加一把锁时，
+// 两个管理员同时被降级，两笔都看到对方还是管理员，于是都放行。
+// 锁用 hashtextextended 而不是裸数字，与仓里其他几处（payment、ledger）
+// 同一个写法：键是命名空间里的一个名字，不是随手挑的一个常量。
+const usersUpdateLockKey = `auth:users:update`
+
 // UpdateUserParams 描述一次修改要动的列。
 //
 // 与 CreateUserParams 的分别在于**每一列都可以不改**：nil 表示「这一列不动」，
@@ -928,10 +946,12 @@ func (s *Store) UpdateUser(ctx context.Context, ref string, p UpdateUserParams) 
 		id       int64
 		status   string
 		username string
+		isAdmin  bool
 	)
 	err = tx.QueryRowContext(ctx,
-		`SELECT id, status, username FROM users WHERE `+where+` FOR UPDATE`, arg,
-	).Scan(&id, &status, &username)
+		`SELECT id, status, username, is_admin
+		   FROM users WHERE `+where+` FOR UPDATE`, arg,
+	).Scan(&id, &status, &username, &isAdmin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return UserInfo{}, fmt.Errorf("%w: %q", ErrUserNotFound, ref)
 	}
@@ -953,6 +973,25 @@ func (s *Store) UpdateUser(ctx context.Context, ref string, p UpdateUserParams) 
 			ErrDeletionAlreadyRequested, username)
 	}
 
+	// 最后一个 active 管理员不能被降级、停用或封禁：这三种改法都会让
+	// 控制台的管理组再没人进得去，而那条路只能靠命令行救回来。
+	//
+	// 判的是**这一行现在是不是 active 管理员**加上**这次改法会不会撤掉
+	// 其中一半**。只把 admin 改成同一个 admin、或者 status 写回 active
+	// 都不触发——那两笔什么也没撤掉。
+	dropAdmin := p.IsAdmin != nil && !*p.IsAdmin
+	deactivate := p.Status != nil && *p.Status != UserStatusActive
+	if isAdmin && status == UserStatusActive && (dropAdmin || deactivate) {
+		if guardErr := ensureAnotherActiveAdmin(ctx, tx, id); guardErr != nil {
+			if errors.Is(guardErr, ErrLastAdmin) {
+				return UserInfo{}, fmt.Errorf(
+					"%w：账号 %q 是唯一还能进管理组的人，先给另一个账号 admin 角色再改它",
+					ErrLastAdmin, username)
+			}
+			return UserInfo{}, guardErr
+		}
+	}
+
 	args = append(args, id)
 	info, err := scanUserInfo(tx.QueryRowContext(ctx,
 		`UPDATE users SET `+strings.Join(sets, ", ")+` WHERE id = $`+
@@ -965,6 +1004,35 @@ func (s *Store) UpdateUser(ctx context.Context, ref string, p UpdateUserParams) 
 		return UserInfo{}, fmt.Errorf("提交用户 %q 的修改失败: %w", ref, err)
 	}
 	return info, nil
+}
+
+// ensureAnotherActiveAdmin 确认目标之外还有 active 管理员。
+//
+// 必须在 UpdateUser 的事务里调用：目标行已经 FOR UPDATE 锁住，这里再取一把
+// **事务级**咨询锁，把「数一数」与外面那次 UPDATE 放进同一个串行区间。
+// 两笔并发修改各锁各的目标行时，行锁不会互相阻塞；没有这把咨询锁的话，
+// 两边都会看到对方还是管理员，于是都放行，最后一个都不剩。
+//
+// 锁只在这一档取（目标本来是 active 管理员、且这次要撤掉其中一半），
+// 不影响改邮箱、改显示名那些路径的并发度。
+func ensureAnotherActiveAdmin(ctx context.Context, tx *sql.Tx, targetID int64) error {
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		usersUpdateLockKey); err != nil {
+		return fmt.Errorf("获取管理员判据的锁失败: %w", err)
+	}
+
+	var others int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM users
+		  WHERE is_admin AND status = $1 AND id <> $2`,
+		UserStatusActive, targetID).Scan(&others); err != nil {
+		return fmt.Errorf("统计其他 active 管理员失败: %w", err)
+	}
+	if others == 0 {
+		return ErrLastAdmin
+	}
+	return nil
 }
 
 // userUpdateSets 把一次修改编成 SET 片段与参数。
