@@ -377,6 +377,7 @@ export function Keys() {
 
       {revoking && (
         <Modal
+          sheetSize="sm"
           title={t('keys.revokeTitle')}
           description={`${revoking.name || ''} · ${revoking.masked}`}
           onClose={() => setRevoking(null)}

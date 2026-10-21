@@ -64,6 +64,16 @@ export const IconModels = (props: IconProps) => (
   </Icon>
 )
 
+/** 运营二级入口：三条并列的调节轨，与「概览」的四宫格区分开。 */
+export const IconOps = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M4 7h16M4 12h16M4 17h16" />
+    <circle cx="9" cy="7" r="1.4" />
+    <circle cx="15" cy="12" r="1.4" />
+    <circle cx="7" cy="17" r="1.4" />
+  </Icon>
+)
+
 export const IconChannel = (props: IconProps) => (
   <Icon {...props}>
     <rect x="3" y="4" width="18" height="6" rx="2" />

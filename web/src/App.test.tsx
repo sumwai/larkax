@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
 
@@ -148,10 +148,12 @@ describe('运营视图的角色门槛', () => {
     expect(mocks.overview).toHaveBeenCalled()
     // 切换器跟着地址走：这一页在商家视图里。
     expect(screen.getByRole('button', { name: '商家' })).toHaveAttribute('aria-pressed', 'true')
-    // 侧栏只列三种主语的那三页，渠道与计价不出现。
-    expect(screen.queryByRole('link', { name: '渠道' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: '计价' })).not.toBeInTheDocument()
-    expect(screen.getAllByRole('link', { name: '上游' }).length).toBeGreaterThan(0)
+    // 侧栏只列三种主语的那三页，渠道与计价不出现。底栏另有一套入口
+    // （「渠道」在管理前缀下），所以这条要限定在侧栏里看。
+    const sidebar = within(document.querySelector('.sidebar') as HTMLElement)
+    expect(sidebar.queryByRole('link', { name: '渠道' })).not.toBeInTheDocument()
+    expect(sidebar.queryByRole('link', { name: '计价' })).not.toBeInTheDocument()
+    expect(sidebar.getAllByRole('link', { name: '上游' }).length).toBeGreaterThan(0)
   })
 
   /**

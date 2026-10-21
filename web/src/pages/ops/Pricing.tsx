@@ -412,6 +412,7 @@ export function OpsPricing() {
 
       {(ruleCreating || ruleEditing) && (
         <Modal
+          sheetSize="lg"
           title={ruleEditing ? t('ops.pricing.editRule') : t('ops.pricing.createRule')}
           onClose={requestCloseRule}
           footer={
@@ -518,6 +519,7 @@ export function OpsPricing() {
 
       {(costCreating || costEditing) && (
         <Modal
+          sheetSize="lg"
           title={costEditing ? t('ops.pricing.editCost') : t('ops.pricing.createCost')}
           onClose={requestCloseCost}
           footer={

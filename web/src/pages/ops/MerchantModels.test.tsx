@@ -6,6 +6,7 @@ import { SiteProvider } from '../../site/SiteProvider'
 import { ToastProvider } from '../../components/ui'
 import type { MerchantModel, MerchantModelsResponse } from '../../api/types'
 import { MerchantModels } from './MerchantModels'
+import { mockViewport } from '../../test/media'
 
 const mocks = vi.hoisted(() => ({
   listSuppliedModels: vi.fn(),
@@ -196,5 +197,25 @@ describe('商家模型', () => {
     expect(await screen.findByText('还没有在供模型')).toBeInTheDocument()
     expect(screen.queryByLabelText('正在加载运营数据')).not.toBeInTheDocument()
     expect(screen.queryByText('数据加载失败。')).not.toBeInTheDocument()
+  })
+})
+
+describe('商家模型：窄屏卡片', () => {
+  it('改成卡片清单，桌面表格的列头不在 DOM 里', async () => {
+    const restore = mockViewport(375, 667)
+    try {
+      mocks.listSuppliedModels.mockResolvedValue(page())
+      renderPage()
+
+      const list = await screen.findByRole('region', { name: '我的模型' })
+      expect(within(list).getByText('gpt-4.1')).toBeInTheDocument()
+      expect(within(list).getByText('GPT-4.1')).toBeInTheDocument()
+      expect(within(list).getByText('2')).toBeInTheDocument()
+      expect(within(list).getByText('已定价')).toBeInTheDocument()
+      expect(screen.queryAllByRole('columnheader')).toHaveLength(0)
+      expect(screen.queryAllByRole('table')).toHaveLength(0)
+    } finally {
+      restore()
+    }
   })
 })

@@ -945,7 +945,9 @@ textarea.input {
 }
 .bottomnav {
   display: none;
-  grid-template-columns: repeat(5, 1fr);
+  /* 列数随 tab 表走：商家这一轮是 4 项，写死 5 列会让它挤在左侧四个格里。 */
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   background: var(--surface);
   border-top: 1px solid var(--border);
   padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px));
@@ -968,6 +970,14 @@ textarea.input {
 .bottomnav a[aria-current='page'],
 .bottomnav button[aria-current='page'] {
   color: var(--accent);
+}
+/* 当前项除颜色之外还有一条下划线：只靠颜色的话，色觉障碍的用户分不出
+   自己停在哪一页。 */
+.bottomnav a[aria-current='page'] span,
+.bottomnav button[aria-current='page'] span {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  font-weight: 600;
 }
 .bottomnav svg {
   width: 20px;
@@ -1195,6 +1205,83 @@ textarea.input {
   max-width: 520px;
   border-radius: 18px 18px 0 0;
   padding-bottom: calc(22px + env(safe-area-inset-bottom, 0px));
+  /*
+   * 档位是上限：`max-height` 由行内样式按 `SHEET_SIZES` 给，内容少时弹窗
+   * 仍按内容高。这里只负责别的东西：上沿可拖，拖动时不要被页面滚动抢走手势。
+   */
+  touch-action: none;
+}
+/* 上沿的拖动把手：只有指针能触发，键盘与读屏用户走 Esc / 关闭钮。 */
+.sheet-grab {
+  align-self: center;
+  width: 44px;
+  height: 20px;
+  margin: -10px 0 -4px;
+  display: grid;
+  place-items: center;
+  cursor: grab;
+}
+.sheet-grab span {
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+}
+
+/* 操作菜单：一项一行，危险项走红色 + 读屏多一句「危险操作」。 */
+.action-sheet {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.action-sheet-item {
+  width: 100%;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--fg);
+  font-size: 13.5px;
+  text-align: left;
+  text-decoration: none;
+}
+.action-sheet-item .ico {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+.action-sheet-item .txt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.action-sheet-item .txt b {
+  font-weight: 550;
+}
+.action-sheet-item .txt span {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.action-sheet-item.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--border));
+}
+.action-sheet-item.danger .ico {
+  color: var(--danger);
+}
+.action-sheet-item.cancel {
+  justify-content: center;
+  color: var(--muted);
+  background: var(--surface-2);
+  border-color: transparent;
 }
 
 /* 3.10 代码 */
@@ -1795,6 +1882,9 @@ textarea.input {
   padding: 5px 10px;
   font-size: 12px;
 }
+.range-wrap {
+  display: inline-block;
+}
 .daterange {
   display: inline-flex;
   align-items: center;
@@ -2170,6 +2260,11 @@ textarea.input {
 }
 
 /* 移动端卡片列表 */
+.mcards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 .mcard {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -2191,6 +2286,26 @@ textarea.input {
   grid-column: 1;
   font-size: 11.5px;
   color: var(--muted);
+}
+/* 字段名与值之间用空格分开，不再画一列标签：375 宽下两列会把值挤成一两个字。 */
+.mcard .kv .k {
+  color: var(--faint);
+}
+.mcard .kv .k::after {
+  content: ' ';
+}
+.mcard .sub {
+  grid-column: 1;
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.mcard .m-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
 }
 .mcard .st {
   grid-column: 2;
@@ -2406,6 +2521,19 @@ textarea.input {
   .table-foot {
     padding: 12px 16px;
   }
+  /* 计价规则一行是四列（名称 / 表达式 / 状态 / 动作），150px 的动作列在
+     375 宽下就把表达式挤没了。改成一条竖着排：表达式换成可折行的等宽块。 */
+  .ops-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+  .ops-row .actions {
+    justify-self: start;
+  }
+  .ops-row .cell-ellipsis {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
   /* 三列在 375 宽下第一列只剩几十像素，端点名会被截成 `/v1/respons…`。
      表头收起，端点独占一行，协议与方法落在第二行。 */
   .endpoint-head {
@@ -2473,6 +2601,13 @@ textarea.input {
     padding-left: max(16px, env(safe-area-inset-left, 0px));
     padding-right: max(16px, env(safe-area-inset-right, 0px));
   }
+  /*
+   * 底栏浮在内容之上。键盘焦点滚到最后一屏时，别让聚焦框落到底栏下面：
+   * 焦点本身不会被「截断」，被截断的是它的可见位置。
+   */
+  .app-content :is(a, button, input, select, textarea, [tabindex]) {
+    scroll-margin-bottom: calc(var(--bottomnav-h) + 16px);
+  }
   .balance .amount {
     font-size: 30px;
   }
@@ -2491,12 +2626,40 @@ textarea.input {
   .page-head h1 {
     font-size: 20px;
   }
-  .daterange {
+  /*
+   * 页头右侧的操作区在窄屏独占一行。它默认是收缩到内容宽的 flex 项，
+   * 里面的日期范围拿不到整宽，两行选择器会挤在右边一小条。
+   */
+  .page-head .page-actions {
     width: 100%;
   }
+  /*
+   * 起止日期各占一行：并排时每个按钮只剩 150px 左右，`2026-10-15` 会在连字符
+   * 处折成两行。改成两行之后每个按钮独占整宽，日期串一律不折。
+   */
+  .range-wrap {
+    display: block;
+    width: 100%;
+  }
+  .daterange {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    width: 100%;
+  }
+  .daterange .sep {
+    display: none;
+  }
   .daterange .dr {
-    flex: 1;
-    justify-content: center;
+    flex: none;
+    width: 100%;
+    justify-content: space-between;
+    white-space: nowrap;
+  }
+  /* 只有开始那一行有日历图标；结束行靠右对齐，两行的日期落在同一条竖线上。 */
+  .daterange .dr:last-child {
+    justify-content: flex-end;
   }
   .date-pop {
     left: 0;

@@ -9,6 +9,7 @@ import type {
 import { useI18n } from '../../i18n'
 import { useSite } from '../../site/SiteProvider'
 import { useAsync } from '../../hooks/useAsync'
+import { useIsCompact } from '../../hooks/useMediaQuery'
 import { formatDateTime } from '../../lib/format'
 import {
   Alert,
@@ -20,6 +21,8 @@ import {
   StatusPill,
   useToast,
 } from '../../components/ui'
+import { ActionSheet } from '../../components/ActionSheet'
+import { MobileCard, MobileList } from '../../components/MobileList'
 import { IconPlus } from '../../components/icons'
 import {
   Field,
@@ -72,7 +75,10 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
   )
   const confirm = useConfirm()
 
+  const compact = useIsCompact()
   const [viewing, setViewing] = useState<Channel | null>(null)
+  // 窄屏上整张卡片是一个按钮，动作放在从底部弹出的菜单里。
+  const [actions, setActions] = useState<Channel | null>(null)
   const [editing, setEditing] = useState<Channel | null>(null)
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState<ChannelForm>(EMPTY_FORM)
@@ -227,7 +233,29 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
         </div>
       )}
 
-      {channels.length > 0 && (
+      {channels.length > 0 && compact && (
+        <MobileList label={t('ops.channel.title')}>
+          {channels.map((channel) => (
+            <MobileCard
+              key={channel.id}
+              title={channel.name}
+              subtitle={channel.base_url}
+              status={<StatusPill status={channel.status} />}
+              fields={[
+                { label: t('ops.channel.colType'), value: channel.type },
+                {
+                  label: t('ops.channel.colModels'),
+                  value: t('ops.channel.modelsCount', { count: channel.models.length }),
+                },
+              ]}
+              onPress={() => setActions(channel)}
+              pressLabel={t('ops.cardActionsFor', { name: channel.name })}
+            />
+          ))}
+        </MobileList>
+      )}
+
+      {channels.length > 0 && !compact && (
         <section className="card table ops-table" aria-label={t('ops.channel.title')}>
           <div className="thead channel-head" style={{ display: 'grid' }}>
             <span>{t('ops.channel.colName')}</span>
@@ -263,8 +291,41 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
         </section>
       )}
 
+      {actions && (
+        <ActionSheet
+          title={actions.name}
+          description={actions.base_url}
+          items={[
+            {
+              key: 'view',
+              label: t('ops.view'),
+              onSelect: () => setViewing(actions),
+            },
+            {
+              key: 'edit',
+              label: t('ops.edit'),
+              onSelect: () => openEdit(actions),
+            },
+            {
+              key: 'toggle',
+              label: t(actions.status === 'enabled' ? 'ops.channel.disable' : 'ops.channel.enable'),
+              description: t(
+                actions.status === 'enabled'
+                  ? 'ops.channel.disableConfirm'
+                  : 'ops.channel.enableConfirm',
+                { name: actions.name },
+              ),
+              danger: actions.status === 'enabled',
+              onSelect: () => toggleStatus(actions),
+            },
+          ]}
+          onClose={() => setActions(null)}
+        />
+      )}
+
       {(creating || editing) && (
         <Modal
+          sheetSize="lg"
           title={editing ? t('ops.channel.editTitle') : t('ops.channel.createTitle')}
           description={
             editing

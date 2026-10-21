@@ -18,6 +18,7 @@ export const zh = {
   'common.apply': '应用',
   'common.none': '—',
   'common.more': '更多',
+  'common.dangerAction': '危险操作',
 
   'mock.banner':
     '演示数据：未连接后端。设置 `VITE_API_MODE=http` 并启动网关后使用真实数据。',
@@ -36,9 +37,11 @@ export const zh = {
   'nav.noAccess': '无权限',
   'nav.logout': '退出登录',
   'nav.skipToMain': '跳到主内容',
+  'nav.ops': '运营',
 
   'status.active': '运行中',
   'status.disabled': '已停用',
+  'status.enabled': '已启用',
   'status.revoked': '已吊销',
   'status.pending': '处理中',
   'status.ok': '成功',
@@ -186,6 +189,8 @@ export const zh = {
   'usage.presetToday': '今天',
   'usage.from': '开始日期',
   'usage.to': '结束日期',
+  'usage.fromLabel': '开始日期：{date}',
+  'usage.toLabel': '结束日期：{date}',
   'usage.rangeTooLong': '自定义区间最多 366 天。',
   'usage.rangeInvalid': '开始日期不能晚于结束日期。',
   'usage.summaryRequests': '请求数',
@@ -363,6 +368,7 @@ export const zh = {
   'ops.created': '已创建',
   'ops.deleted': '已删除',
   'ops.colActions': '操作',
+  'ops.cardActionsFor': '打开「{name}」的操作',
   'ops.colUpdated': '更新时间',
   'ops.invalidInteger': '这一栏要填整数。',
   'ops.nav.channels': '渠道',
@@ -440,8 +446,6 @@ export const zh = {
   'ops.merchant.health.unknown': '未知',
   'ops.merchant.health.degraded': '降级',
   'ops.merchant.health.drained': '已耗尽',
-  'ops.merchant.channelStatus.enabled': '启用',
-  'ops.merchant.channelStatus.disabled': '已停用',
 
   'ops.users.title': '用户',
   'ops.users.subtitle': '平台上的账号；列表里的邮箱是打码过的，完整地址在详情页。',

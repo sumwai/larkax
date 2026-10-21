@@ -4,6 +4,7 @@ import type { OpsModel, OpsModelCreateInput, OpsModelInput } from '../../api/typ
 import { useI18n } from '../../i18n'
 import { useSite } from '../../site/SiteProvider'
 import { useAsync } from '../../hooks/useAsync'
+import { useIsCompact } from '../../hooks/useMediaQuery'
 import { formatDateTime } from '../../lib/format'
 import {
   Button,
@@ -14,6 +15,8 @@ import {
   useToast,
 } from '../../components/ui'
 import { IconPlus, IconTrash } from '../../components/icons'
+import { ActionSheet } from '../../components/ActionSheet'
+import { MobileCard, MobileList } from '../../components/MobileList'
 import { Tabs } from '../../components/Tabs'
 import {
   Field,
@@ -129,7 +132,10 @@ export function OpsModels() {
   const { show: toast } = useToast()
   const { data, error, loading, reload } = useAsync(() => client.listModels(), [])
   const confirm = useConfirm()
+  const compact = useIsCompact()
   const [editing, setEditing] = useState<OpsModel | null>(null)
+  // 窄屏上整张卡片是一个按钮，编辑与删除放在底部弹出的菜单里。
+  const [actions, setActions] = useState<OpsModel | null>(null)
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState<ModelForm>(EMPTY_FORM)
   // 打开时的那份值：改动过的话，关窗前要再问一句。
@@ -473,7 +479,25 @@ export function OpsModels() {
         </div>
       )}
 
-      {models.length > 0 && (
+      {models.length > 0 && compact && (
+        <MobileList label={t('ops.model.title')}>
+          {models.map((model) => (
+            <MobileCard
+              key={model.canonical_name}
+              title={model.canonical_name}
+              subtitle={model.display_name || t('common.none')}
+              fields={[
+                { label: t('ops.model.vendor'), value: model.vendor || t('common.none') },
+                { label: t('ops.model.context'), value: model.context_limit.toLocaleString() },
+              ]}
+              onPress={() => setActions(model)}
+              pressLabel={t('ops.cardActionsFor', { name: model.canonical_name })}
+            />
+          ))}
+        </MobileList>
+      )}
+
+      {models.length > 0 && !compact && (
         <section className="card table ops-table" aria-label={t('ops.model.title')}>
           <div className="thead model-head" style={{ display: 'grid' }}>
             <span>{t('ops.model.name')}</span>
@@ -509,8 +533,26 @@ export function OpsModels() {
         </section>
       )}
 
+      {actions && (
+        <ActionSheet
+          title={actions.canonical_name}
+          description={actions.display_name || undefined}
+          items={[
+            { key: 'edit', label: t('ops.edit'), onSelect: () => openEdit(actions) },
+            {
+              key: 'delete',
+              label: t('ops.delete'),
+              danger: true,
+              onSelect: () => remove(actions),
+            },
+          ]}
+          onClose={() => setActions(null)}
+        />
+      )}
+
       {(creating || editing) && (
         <Modal
+          sheetSize="lg"
           title={editing ? t('ops.model.editTitle') : t('ops.model.createTitle')}
           onClose={requestClose}
           focusTarget={focusAfterFailure}

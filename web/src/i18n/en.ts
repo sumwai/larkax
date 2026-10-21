@@ -20,6 +20,7 @@ export const en: Record<MessageKey, string> = {
   'common.apply': 'Apply',
   'common.none': '—',
   'common.more': 'More',
+  'common.dangerAction': 'Dangerous action',
 
   'mock.banner':
     'Demo data: not connected to the backend. Set `VITE_API_MODE=http` and start the gateway to use real data.',
@@ -38,9 +39,11 @@ export const en: Record<MessageKey, string> = {
   'nav.noAccess': 'No access',
   'nav.logout': 'Sign out',
   'nav.skipToMain': 'Skip to main content',
+  'nav.ops': 'Operations',
 
   'status.active': 'Active',
   'status.disabled': 'Disabled',
+  'status.enabled': 'Enabled',
   'status.revoked': 'Revoked',
   'status.pending': 'Pending',
   'status.ok': 'Succeeded',
@@ -194,6 +197,8 @@ export const en: Record<MessageKey, string> = {
   'usage.presetToday': 'Today',
   'usage.from': 'Start date',
   'usage.to': 'End date',
+  'usage.fromLabel': 'Start date: {date}',
+  'usage.toLabel': 'End date: {date}',
   'usage.rangeTooLong': 'A custom range is at most 366 days.',
   'usage.rangeInvalid': 'The start date cannot be after the end date.',
   'usage.summaryRequests': 'Requests',
@@ -379,6 +384,7 @@ export const en: Record<MessageKey, string> = {
   'ops.created': 'Created',
   'ops.deleted': 'Deleted',
   'ops.colActions': 'Actions',
+  'ops.cardActionsFor': 'Actions for {name}',
   'ops.colUpdated': 'Updated',
   'ops.invalidInteger': 'This field must be an integer.',
   'ops.nav.channels': 'Channels',
@@ -456,8 +462,6 @@ export const en: Record<MessageKey, string> = {
   'ops.merchant.health.unknown': 'Unknown',
   'ops.merchant.health.degraded': 'Degraded',
   'ops.merchant.health.drained': 'Drained',
-  'ops.merchant.channelStatus.enabled': 'Enabled',
-  'ops.merchant.channelStatus.disabled': 'Disabled',
 
   'ops.users.title': 'Users',
   'ops.users.subtitle':

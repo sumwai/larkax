@@ -6,6 +6,7 @@ import { AuthProvider } from '../../auth/AuthProvider'
 import { SiteProvider } from '../../site/SiteProvider'
 import { ToastProvider } from '../../components/ui'
 import { AdminUserDetailPage, AdminUsers } from './Users'
+import { mockViewport } from '../../test/media'
 
 const mocks = vi.hoisted(() => ({
   listUsers: vi.fn(),
@@ -418,5 +419,30 @@ describe('用户详情页', () => {
     expect(await screen.findByText(/这是你自己的账号/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '修改角色' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '修改状态' })).toBeDisabled()
+  })
+})
+
+describe('用户清单：窄屏卡片', () => {
+  it('改成卡片清单，查看入口还在，表格列头不在 DOM 里', async () => {
+    const restore = mockViewport(375, 667)
+    try {
+      mocks.listUsers.mockResolvedValue({ items: [SUMMARY, OTHER], next_cursor: null })
+      renderList()
+
+      const list = await screen.findByRole('region', { name: '用户' })
+      expect(within(list).getByText('alice')).toBeInTheDocument()
+      expect(within(list).getByText('Alice')).toBeInTheDocument()
+      expect(within(list).getByText('a***@example.com')).toBeInTheDocument()
+      expect(within(list).getByText('商家')).toBeInTheDocument()
+      expect(within(list).getAllByText('正常').length).toBeGreaterThan(0)
+      // 每条卡片末尾都有「查看」；第一条对应 alice。
+      expect(within(list).getAllByRole('link', { name: '查看' })[0]).toHaveAttribute(
+        'href',
+        '/app/admin/users/2',
+      )
+      expect(screen.queryAllByRole('columnheader')).toHaveLength(0)
+    } finally {
+      restore()
+    }
   })
 })

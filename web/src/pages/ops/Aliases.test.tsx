@@ -1,9 +1,10 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '../../i18n'
 import { SiteProvider } from '../../site/SiteProvider'
 import { ToastProvider } from '../../components/ui'
 import { OpsAliases } from './Aliases'
+import { mockViewport } from '../../test/media'
 
 const mocks = vi.hoisted(() => ({
   listAliases: vi.fn(),
@@ -87,5 +88,59 @@ describe('别名页', () => {
     expect(field.tagName).toBe('SELECT')
     expect(field.value).toBe('7')
     expect(screen.getByRole('option', { name: 'platform-anthropic (#7)' })).toBeInTheDocument()
+  })
+})
+
+const ALIAS = {
+  id: 3,
+  channel_id: 7,
+  upstream_model: 'claude-3-opus',
+  canonical_name: 'claude-opus-4',
+  overrides: {},
+  created_at: '2026-01-01T00:00:00Z',
+}
+
+describe('别名页：窄屏卡片', () => {
+  beforeEach(() => {
+    Object.values(mocks).forEach((mock) => mock.mockReset())
+    mocks.listAliases.mockResolvedValue([ALIAS])
+    mocks.listChannels.mockResolvedValue([CHANNEL])
+    mocks.listModels.mockResolvedValue([])
+    mocks.meta.mockResolvedValue({
+      site_name: 'larkax',
+      api_base_url: 'https://api.example.com/v1',
+      currency: 'USD',
+      timezone: 'Asia/Shanghai',
+      locales: ['en', 'zh'],
+      features: { registration: false, password_reset: 'admin', topup: false },
+    })
+  })
+
+  it('清单改成卡片，编辑与删除进底部菜单，表格列头不在 DOM 里', async () => {
+    const restore = mockViewport(375, 667)
+    try {
+      render(
+        <I18nProvider>
+          <ToastProvider>
+            <SiteProvider>
+              <OpsAliases />
+            </SiteProvider>
+          </ToastProvider>
+        </I18nProvider>,
+      )
+
+      const list = await screen.findByRole('region', { name: '模型别名' })
+      const card = within(list).getByRole('button', { name: '打开「claude-3-opus」的操作' })
+      expect(card).toHaveTextContent('platform-anthropic')
+      expect(card).toHaveTextContent('claude-opus-4')
+      expect(screen.queryAllByRole('columnheader')).toHaveLength(0)
+
+      fireEvent.click(card)
+      const sheet = screen.getByRole('dialog')
+      expect(within(sheet).getByRole('button', { name: '编辑' })).toBeInTheDocument()
+      expect(within(sheet).getByRole('button', { name: /删除/ })).toHaveClass('danger')
+    } finally {
+      restore()
+    }
   })
 })
