@@ -48,6 +48,7 @@ var factorySettings = map[string]string{
 	"reconcile.shard_size":               `1000`,
 	"reconcile.full_scan_interval_hours": `24`,
 	"payment.fake_enabled":               `false`,
+	"plans.charge_order":                 `"plan_first"`,
 	"admin.token_sha256":                 `""`,
 }
 

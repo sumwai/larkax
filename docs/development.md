@@ -480,7 +480,7 @@ go run ./cmd/larkaxctl --env-file .env.staging wallet create --user alice
    （`settings.description` 那一列，`settings list` 打的就是它）。
 2. 在 `internal/settings/settings.go` 的 `Registry` 里加一行，声明键与类型。
 
-**现有 23 个键的默认值、取值范围，以及各自改完什么时候生效，见
+**现有 24 个键的默认值、取值范围，以及各自改完什么时候生效，见
 [settings.md](settings.md)。** 这一节讲的是**加一个新键**的步骤。
 
 说明只写在迁移里一份，`Registry` 里没有第二份——写两份的话，改了一处另一处不动，
@@ -1261,6 +1261,7 @@ ingress 规则下。同一个端口上还有管理面 `/admin/v1/*`，用单独�
 | `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录）/ `adjust`（手工调账，走账本写分录）/ `refund`（退款，走账本写分录）/ `list`；商户提现：`payout`（`request` 申请并冻住待付 / `settle` 平台主动清算，一步建单并记账，直接落已批准 / `approve` 批准 / `reject` 驳回并解除冻结 / `paid` 打款，只放行已批准的单子）；支付通道：`payment`（`create` 下单 / `status` 查单，通道确认收款后才入账） |
 | `usage` | 用量与计费（只读）：`events`（用量事件）/ `requests`（每次请求的预留与结算） |
 | `apikey` | API Key：`create` / `update` / `get` / `list`；`update` 兼改状态、备注与过期时间 |
+| `plan` | 额度包与订阅：`create` / `list` / `get`（单个包的详情）/ `enable` / `disable`（只挡新的发放）/ `grant`（发放，按单号幂等）/ `void`（作废，剩余面值转回平台）/ `subscriptions`（用户的订阅）；key 的额度包名单：`key`（`show` / `set`）；扣费顺序：`order`（`show` / `set`） |
 | `ledger` | 账本：`balance` / `verify` / `runs`（三条都只读：余额、逐笔校验、对账的历史运行）与 `reconcile`（对账，会写运行记录） |
 | `settings` | 运行期配置：`list` / `get` / `set` |
 | `admin` | 内部监听上 admin API 的令牌：`token`（`create` / `revoke`） |

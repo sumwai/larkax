@@ -279,6 +279,22 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 				})
 			}},
 
+		{command: "plan", what: "create + grant",
+			run: func() error {
+				key := uniqueName("stream-plan")
+				if err := runPlan([]string{
+					"create", "--key", key, "--name", "门禁额度包", "--unit", "amount",
+					"--quota", "10",
+				}); err != nil {
+					return err
+				}
+				return runPlan([]string{
+					"grant", "--user", id(fx.userID), "--plan", key,
+					"--ref", uniqueName("stream-grant"),
+					"--expires-at", time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+				})
+			}},
+
 		{command: "usage", what: "events 空清单",
 			run: func() error {
 				return runUsage([]string{"events", "--user", id(emptyUserID)})

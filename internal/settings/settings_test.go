@@ -41,6 +41,7 @@ func fullRows() []Row {
 		{Key: "reconcile.shard_size", Value: []byte(`1000`)},
 		{Key: "reconcile.full_scan_interval_hours", Value: []byte(`168`)},
 		{Key: "payment.fake_enabled", Value: []byte(`false`)},
+		{Key: "plans.charge_order", Value: []byte(`"plan_first"`)},
 		{Key: "admin.token_sha256", Value: []byte(`""`)},
 	}
 }

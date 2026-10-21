@@ -1,0 +1,952 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/sumwai/larkax/internal/auth"
+	"github.com/sumwai/larkax/internal/ledger"
+	"github.com/sumwai/larkax/internal/plans"
+)
+
+// planHelp 是 plan 的两版帮助文本（见 helpText）。
+var planHelp = helpText{short: planShortUsage, long: planUsage}
+
+// planShortUsage 是 plan 的短版：`-h` / `--help` 与参数写错时打的那一份。
+const planShortUsage = `larkaxctl plan 管理额度包、订阅与扣费顺序。
+用法：
+  larkaxctl plan create --key <key> --name <名称> --unit <amount|token|request>
+                        [--quota <可用量>] [--face-value <面值>] [--models <模型,...>]
+  larkaxctl plan list
+  larkaxctl plan get --key <key>
+  larkaxctl plan enable|disable --key <key>
+  larkaxctl plan grant --user <ID 或用户名> --plan <key> --ref <发放单号> --expires-at <RFC3339>
+  larkaxctl plan void --id <订阅 ID> --ref <作废单号> [--status <expired|canceled>]
+  larkaxctl plan subscriptions --user <ID 或用户名>
+  larkaxctl plan key show --id <API Key ID>
+  larkaxctl plan key set --id <API Key ID> [--plans <订阅 ID,...> | --all]
+  larkaxctl plan order show --user <ID 或用户名>
+  larkaxctl plan order set --user <ID 或用户名> [--order <顺序> | --clear]
+
+key 的名单为空表示「可以用这个用户名下全部订阅」；--clear 表示跟随平台默认。
+更细的边界：larkaxctl help plan。
+`
+
+// planUsage 是 plan 的长版：`larkaxctl help plan` 与 `plan help`。
+const planUsage = `larkaxctl plan 管理额度包、订阅与扣费顺序。
+
+用法：
+  larkaxctl plan create --key <key> --name <名称> --unit <amount|token|request>
+                        [--quota <可用量>] [--face-value <面值>]
+                        [--models <模型,...>] [--description <说明>]
+  larkaxctl plan list
+  larkaxctl plan get --key <key>
+  larkaxctl plan enable|disable --key <key>
+  larkaxctl plan grant --user <ID 或用户名> --plan <key> --ref <发放单号>
+                       --expires-at <RFC3339>
+  larkaxctl plan void --id <订阅 ID> --ref <作废单号> [--status <expired|canceled>]
+  larkaxctl plan subscriptions --user <ID 或用户名>
+  larkaxctl plan key show --id <API Key ID>
+  larkaxctl plan key set --id <API Key ID> [--plans <订阅 ID,...> | --all]
+  larkaxctl plan order show --user <ID 或用户名>
+  larkaxctl plan order set --user <ID 或用户名> [--order <顺序> | --clear]
+
+# 三种计量单位
+
+  amount    金额包：--quota 与 --face-value 是同一个数，只填一个即可；两个都给且
+            不相等时报参数错。
+  token     token 包：--quota 是输入加输出的 token 数，--face-value 是这个包值
+            多少钱。两个都要填。
+  request   次数包：--quota 是可用次数，--face-value 同上。两个都要填。
+
+--models 按规范模型名精确匹配，逗号分隔。token 与次数包必须至少给一个：
+它们的价值与模型强相关，不限定范围就是一个可能亏本的包。金额包可以不给，
+空表示不限模型。
+
+# 订阅
+
+grant 建一条订阅，并把面值记进 prepaid:<订阅 ID>。--ref 是发放单号，也是幂等键：
+同一个单号重跑只会发一次，第二次打「已经发过」。--expires-at 必须晚于现在。
+
+void 作废一条订阅，把剩余面值转回平台收入。默认按「人工作废」（canceled）收尾；
+--status expired 表示到期作废。--ref 是作废单号，同样是幂等键。
+
+disable 只挡新的发放：已经发出去的订阅照常消费与作废；要收回某一份额度用 void。
+get 打一个包的详情，list 列出全部（含停用的），两者都不改任何东西。
+
+# key 的额度包名单
+
+key 的名单限制这把 key 能用用户的哪些订阅。没有配过名单（或 --all 清空之后）
+表示可以用这个用户名下全部订阅。名单里的每一条都必须是这把 key 所属用户的订阅，
+否则当场报错、一行都不写。删掉 key 或删掉订阅之后，关联行跟着删除。
+
+# 扣费顺序
+
+  plan_first     先额度包后余额（平台默认）
+  balance_first  先余额后额度包
+  balance_only   只走余额
+
+用户上的取值覆盖平台默认；--clear 清掉覆盖，回到跟随平台默认。平台默认在
+settings 的 plans.charge_order 上（larkaxctl settings set plans.charge_order ...）。
+读侧遇到认不出的取值不报错：用户那一行认不出就回落到平台默认；平台那一行缺失、
+不是 JSON 或取值也认不出，才回落到兜底值 plan_first。两种都记一条日志。
+
+更细的约定见 docs/cli-reference.md 的「plan」一节。
+`
+
+// planTimeout 是这条命令连库与写库的时间上限（理由同 apiKeyTimeout）。
+const planTimeout = 30 * time.Second
+
+func runPlan(args []string) error {
+	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+
+	rest := fs.Args()
+	if len(rest) == 0 {
+		fs.Usage()
+		return usageErr(errors.New("plan 需要子命令"))
+	}
+	action, rest := rest[0], rest[1:]
+
+	switch action {
+	case "create":
+		return runPlanCreate(rest)
+	case "list":
+		return runPlanList(rest)
+	case "get":
+		return runPlanGet(rest)
+	case "enable":
+		return runPlanEnable(rest, true)
+	case "disable":
+		return runPlanEnable(rest, false)
+	case "grant":
+		return runPlanGrant(rest)
+	case "void":
+		return runPlanVoid(rest)
+	case "subscriptions":
+		return runPlanSubscriptions(rest)
+	case "key":
+		return runPlanKey(rest)
+	case "order":
+		return runPlanOrder(rest)
+	default:
+		return usageErr(fmt.Errorf("未知的 plan 子命令 %q", action))
+	}
+}
+
+func runPlanCreate(args []string) error {
+	// 写类命令在 json 模式下必须在做任何事之前拦下来（见 format.go）。
+	if err := jsonUnsupported("plan create"); err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet("plan create", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	key := fs.String("key", "", "")
+	name := fs.String("name", "", "")
+	description := fs.String("description", "", "")
+	unit := fs.String("unit", "", "")
+	quota := fs.String("quota", "", "")
+	faceValue := fs.String("face-value", "", "")
+	models := fs.String("models", "", "")
+	asset := fs.String("asset", string(ledger.AssetCNY), "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("create 不接受位置参数，得到 %q", fs.Arg(0)))
+	}
+	if strings.TrimSpace(*key) == "" {
+		return usageErr(errors.New("缺少 --key"))
+	}
+	if strings.TrimSpace(*name) == "" {
+		return usageErr(errors.New("缺少 --name"))
+	}
+	if strings.TrimSpace(*unit) == "" {
+		return usageErr(errors.New("缺少 --unit"))
+	}
+	if err := checkDisplayText("--key", strings.TrimSpace(*key)); err != nil {
+		return err
+	}
+	if err := checkDisplayText("--name", strings.TrimSpace(*name)); err != nil {
+		return err
+	}
+	if err := checkDisplayText("--description", strings.TrimSpace(*description)); err != nil {
+		return err
+	}
+	if err := checkDisplayList("--models", splitOptionalList(*models)); err != nil {
+		return err
+	}
+
+	assetValue := ledger.Asset(strings.ToUpper(strings.TrimSpace(*asset)))
+	if !assetValue.Valid() {
+		return usageErr(fmt.Errorf("资产 %q 不受支持（目前只有 %s）", *asset, ledger.AssetCNY))
+	}
+
+	in := plans.CreatePlanInput{
+		Key:         strings.TrimSpace(*key),
+		Name:        strings.TrimSpace(*name),
+		Description: strings.TrimSpace(*description),
+		Asset:       assetValue,
+		Unit:        plans.PlanUnit(strings.TrimSpace(*unit)),
+		Models:      splitOptionalList(*models),
+	}
+	switch in.Unit {
+	case plans.UnitAmount, plans.UnitToken, plans.UnitRequest:
+	default:
+		return usageErr(fmt.Errorf("--unit 只能是 %s、%s 或 %s，得到 %q",
+			plans.UnitAmount, plans.UnitToken, plans.UnitRequest, *unit))
+	}
+	var err error
+	if strings.TrimSpace(*quota) != "" {
+		if in.QuotaTotal, err = parseNamedAmountFlag("--quota", *quota); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(*faceValue) != "" {
+		if in.FaceValue, err = parseNamedAmountFlag("--face-value", *faceValue); err != nil {
+			return err
+		}
+	}
+
+	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
+		created, err := plans.New(db).CreatePlan(ctx, in)
+		if err != nil {
+			return err
+		}
+		printCreatedPlan(humanStderr(), created)
+		return nil
+	})
+}
+
+func runPlanList(args []string) error {
+	fs := flag.NewFlagSet("plan list", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
+	}
+
+	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
+		list, err := plans.New(db).Plans(ctx)
+		if err != nil {
+			return err
+		}
+		if jsonOutput() {
+			return emitJSON(os.Stdout, planListDoc(list), nil)
+		}
+		printPlanList(humanStdout(), list)
+		return nil
+	})
+}
+
+func runPlanGet(args []string) error {
+	fs := flag.NewFlagSet("plan get", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	key := fs.String("key", "", "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("get 不接受位置参数，得到 %q", fs.Arg(0)))
+	}
+	if strings.TrimSpace(*key) == "" {
+		return usageErr(errors.New("缺少 --key"))
+	}
+
+	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
+		p, err := plans.New(db).PlanByKey(ctx, strings.TrimSpace(*key))
+		if err != nil {
+			return err
+		}
+		// 与 list 同一条约定：JSON 是另一条渲染路径，不是把详情表转成 JSON。
+		if jsonOutput() {
+			return emitJSON(os.Stdout, planDoc(p), nil)
+		}
+		printPlanDetail(humanStdout(), p)
+		return nil
+	})
+}
+
+func runPlanEnable(args []string, enabled bool) error {
+	command := "plan enable"
+	if !enabled {
+		command = "plan disable"
+	}
+	if err := jsonUnsupported(command); err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	key := fs.String("key", "", "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("%s 不接受位置参数，得到 %q", strings.TrimPrefix(command, "plan "), fs.Arg(0)))
+	}
+	if strings.TrimSpace(*key) == "" {
+		return usageErr(errors.New("缺少 --key"))
+	}
+
+	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
+		p, err := plans.New(db).SetPlanEnabled(ctx, plans.SetPlanEnabledInput{
+			Key:     strings.TrimSpace(*key),
+			Enabled: enabled,
+		})
+		if err != nil {
+			return err
+		}
+		printPlanEnabled(humanStderr(), p)
+		return nil
+	})
+}
+
+func runPlanGrant(args []string) error {
+	if err := jsonUnsupported("plan grant"); err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet("plan grant", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	user := fs.String("user", "", "")
+	stringAlias(fs, user, "u")
+	planKey := fs.String("plan", "", "")
+	ref := fs.String("ref", "", "")
+	expiresAt := fs.String("expires-at", "", "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("grant 不接受位置参数，得到 %q", fs.Arg(0)))
+	}
+	if *user == "" {
+		return usageErr(errors.New("缺少 --user"))
+	}
+	if strings.TrimSpace(*planKey) == "" {
+		return usageErr(errors.New("缺少 --plan"))
+	}
+	if strings.TrimSpace(*ref) == "" {
+		return usageErr(errors.New("缺少 --ref：它是这次发放的幂等键"))
+	}
+	if err := checkDisplayText("--ref", strings.TrimSpace(*ref)); err != nil {
+		return err
+	}
+	if *expiresAt == "" {
+		return usageErr(errors.New("缺少 --expires-at"))
+	}
+	expires, err := parseFutureExpiresAt(*expiresAt, "这份额度发出去就已经到期了")
+	if err != nil {
+		return usageErr(err)
+	}
+
+	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
+		store := auth.New(db)
+		owner, err := store.ResolveUser(ctx, *user)
+		if err != nil {
+			return err
+		}
+
+		up, applied, err := plans.New(db).Grant(ctx, plans.GrantInput{
+			TxnID:     txnIDFromKey("larkax:plan-grant:v1", strings.TrimSpace(*ref)),
+			Ref:       strings.TrimSpace(*ref),
+			UserID:    owner.ID,
+			PlanKey:   strings.TrimSpace(*planKey),
+			ExpiresAt: expires,
+		})
+		if err != nil {
+			return err
+		}
+		printPlanGrant(humanStderr(), owner, up, applied)
+		return nil
+	})
+}
+
+func runPlanVoid(args []string) error {
+	if err := jsonUnsupported("plan void"); err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet("plan void", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	id := fs.Int64("id", 0, "")
+	ref := fs.String("ref", "", "")
+	status := fs.String("status", string(plans.UserPlanCancelled), "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("void 不接受位置参数，得到 %q", fs.Arg(0)))
+	}
+	if *id <= 0 {
+		return usageErr(errors.New("缺少 --id：要作废哪一条订阅"))
+	}
+	if strings.TrimSpace(*ref) == "" {
+		return usageErr(errors.New("缺少 --ref：它是这次作废的幂等键"))
+	}
+	if err := checkDisplayText("--ref", strings.TrimSpace(*ref)); err != nil {
+		return err
+	}
+	final := plans.UserPlanStatus(strings.TrimSpace(*status))
+	switch final {
+	case plans.UserPlanExpired, plans.UserPlanCancelled:
+	default:
+		return usageErr(fmt.Errorf("--status 只能是 %s 或 %s，得到 %q",
+			plans.UserPlanExpired, plans.UserPlanCancelled, *status))
+	}
+
+	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
+		up, applied, err := plans.New(db).Void(ctx, plans.VoidInput{
+			TxnID:      txnIDFromKey("larkax:plan-void:v1", strings.TrimSpace(*ref)),
+			UserPlanID: *id,
+			Ref:        strings.TrimSpace(*ref),
+			Status:     final,
+		})
+		if err != nil {
+			return err
+		}
+		printPlanVoid(humanStderr(), up, applied)
+		return nil
+	})
+}
+
+func runPlanSubscriptions(args []string) error {
+	fs := flag.NewFlagSet("plan subscriptions", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	user := fs.String("user", "", "")
+	stringAlias(fs, user, "u")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("subscriptions 不接受位置参数，得到 %q", fs.Arg(0)))
+	}
+	if *user == "" {
+		return usageErr(errors.New("缺少 --user"))
+	}
+
+	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
+		owner, err := auth.New(db).ResolveUser(ctx, *user)
+		if err != nil {
+			return err
+		}
+		list, err := plans.New(db).UserPlans(ctx, owner.ID)
+		if err != nil {
+			return err
+		}
+		if jsonOutput() {
+			return emitJSON(os.Stdout, userPlansDoc(owner, list), nil)
+		}
+		printUserPlans(humanStdout(), list)
+		return nil
+	})
+}
+
+func runPlanKey(args []string) error {
+	rest := args
+	if len(rest) == 0 {
+		printUsage(os.Stderr, planShortUsage)
+		return usageErr(errors.New("plan key 需要 show 或 set"))
+	}
+	action, rest := rest[0], rest[1:]
+	switch action {
+	case "show":
+		return runPlanKeyShow(rest)
+	case "set":
+		return runPlanKeySet(rest)
+	default:
+		return usageErr(fmt.Errorf("未知的 plan key 子命令 %q", action))
+	}
+}
+
+func runPlanKeyShow(args []string) error {
+	fs := flag.NewFlagSet("plan key show", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	id := fs.Int64("id", 0, "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("show 不接受位置参数，得到 %q", fs.Arg(0)))
+	}
+	if *id <= 0 {
+		return usageErr(errors.New("缺少 --id：要看哪一把 API Key"))
+	}
+
+	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
+		svc := plans.New(db)
+		declared, err := svc.APIKeyPlanIDs(ctx, *id)
+		if err != nil {
+			return err
+		}
+		list, err := svc.APIKeyPlans(ctx, *id)
+		if err != nil {
+			return err
+		}
+		if jsonOutput() {
+			return emitJSON(os.Stdout, apiKeyPlansDoc(*id, declared, list), nil)
+		}
+		printAPIKeyPlans(humanStdout(), *id, declared, list)
+		return nil
+	})
+}
+
+func runPlanKeySet(args []string) error {
+	if err := jsonUnsupported("plan key set"); err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet("plan key set", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	id := fs.Int64("id", 0, "")
+	raw := fs.String("plans", "", "")
+	all := fs.Bool("all", false, "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("set 不接受位置参数，得到 %q", fs.Arg(0)))
+	}
+	if *id <= 0 {
+		return usageErr(errors.New("缺少 --id：要改哪一把 API Key"))
+	}
+	given := providedFlags(fs)
+	switch {
+	case *all && given["plans"]:
+		return usageErr(errors.New("--all 与 --plans 不能同时给：一个表示全部，一个表示指定几条"))
+	case !*all && !given["plans"]:
+		return usageErr(errors.New("要么用 --plans 给出名单，要么用 --all 恢复成全部"))
+	}
+
+	var ids []int64
+	if !*all {
+		var err error
+		if ids, err = parseIDList(*raw); err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return usageErr(errors.New("--plans 给了一个空名单：要恢复成全部用 --all"))
+		}
+	}
+
+	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
+		got, err := plans.New(db).SetAPIKeyPlans(ctx, *id, ids)
+		if err != nil {
+			return err
+		}
+		printAPIKeyPlansSet(humanStderr(), *id, *all, got)
+		return nil
+	})
+}
+
+func runPlanOrder(args []string) error {
+	rest := args
+	if len(rest) == 0 {
+		printUsage(os.Stderr, planShortUsage)
+		return usageErr(errors.New("plan order 需要 show 或 set"))
+	}
+	action, rest := rest[0], rest[1:]
+	switch action {
+	case "show":
+		return runPlanOrderShow(rest)
+	case "set":
+		return runPlanOrderSet(rest)
+	default:
+		return usageErr(fmt.Errorf("未知的 plan order 子命令 %q", action))
+	}
+}
+
+func runPlanOrderShow(args []string) error {
+	fs := flag.NewFlagSet("plan order show", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	user := fs.String("user", "", "")
+	stringAlias(fs, user, "u")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("show 不接受位置参数，得到 %q", fs.Arg(0)))
+	}
+	if *user == "" {
+		return usageErr(errors.New("缺少 --user"))
+	}
+
+	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
+		owner, err := auth.New(db).ResolveUser(ctx, *user)
+		if err != nil {
+			return err
+		}
+		order, source, err := plans.New(db).EffectiveChargeOrder(ctx, owner.ID)
+		if err != nil {
+			return err
+		}
+		if jsonOutput() {
+			return emitJSON(os.Stdout, planOrderDoc(owner, order, source), nil)
+		}
+		printPlanOrder(humanStdout(), owner, order, source)
+		return nil
+	})
+}
+
+func runPlanOrderSet(args []string) error {
+	if err := jsonUnsupported("plan order set"); err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet("plan order set", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	user := fs.String("user", "", "")
+	stringAlias(fs, user, "u")
+	order := fs.String("order", "", "")
+	clear := fs.Bool("clear", false, "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("set 不接受位置参数，得到 %q", fs.Arg(0)))
+	}
+	if *user == "" {
+		return usageErr(errors.New("缺少 --user"))
+	}
+	given := providedFlags(fs)
+	switch {
+	case *clear && given["order"]:
+		return usageErr(errors.New("--clear 与 --order 不能同时给：一个清掉覆盖，一个设值"))
+	case !*clear && !given["order"]:
+		return usageErr(errors.New("要么用 --order 给出顺序，要么用 --clear 回到平台默认"))
+	}
+	value := plans.ChargeOrder(strings.TrimSpace(*order))
+	if !*clear && !value.Valid() {
+		return usageErr(fmt.Errorf("--order 只能是 %s、%s 或 %s，得到 %q",
+			plans.ChargeOrderPlanFirst, plans.ChargeOrderBalanceFirst,
+			plans.ChargeOrderBalanceOnly, *order))
+	}
+
+	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
+		owner, err := auth.New(db).ResolveUser(ctx, *user)
+		if err != nil {
+			return err
+		}
+		svc := plans.New(db)
+		if *clear {
+			if err := svc.ClearUserChargeOrder(ctx, owner.ID); err != nil {
+				return err
+			}
+			printPlanOrderSet(humanStderr(), owner, "", true)
+			return nil
+		}
+		if err := svc.SetUserChargeOrder(ctx, owner.ID, value); err != nil {
+			return err
+		}
+		printPlanOrderSet(humanStderr(), owner, value, false)
+		return nil
+	})
+}
+
+// parseIDList 解析逗号分隔的 id 名单。
+func parseIDList(raw string) ([]int64, error) {
+	parts := strings.Split(raw, ",")
+	ids := make([]int64, 0, len(parts))
+	for i, part := range parts {
+		text := strings.TrimSpace(part)
+		if text == "" {
+			return nil, usageErr(fmt.Errorf("名单里第 %d 项是空的", i+1))
+		}
+		id, err := strconv.ParseInt(text, 10, 64)
+		if err != nil || id <= 0 {
+			return nil, usageErr(fmt.Errorf("名单里第 %d 项 %q 不是正的整数 id", i+1, part))
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// unitLabel 把计量单位翻成给人看的说法。
+func unitLabel(unit plans.PlanUnit) string {
+	switch unit {
+	case plans.UnitAmount:
+		return "金额"
+	case plans.UnitToken:
+		return "token"
+	case plans.UnitRequest:
+		return "次数"
+	}
+	return string(unit)
+}
+
+// planModelsLabel 打一个包的模型范围。金额包没给范围时是「不限」。
+func planModelsLabel(p plans.Plan) string {
+	if len(p.Models) > 0 {
+		return strings.Join(p.Models, ",")
+	}
+	if p.Unit == plans.UnitAmount {
+		return "不限"
+	}
+	return "-"
+}
+
+// printCreatedPlan 打印新建出来的额度包。
+func printCreatedPlan(w io.Writer, p plans.Plan) {
+	_, _ = fmt.Fprintf(w, "已建额度包 %s：%s，%s，可用量 %s，面值 %s，模型 %s。\n",
+		p.Key, p.Name, unitLabel(p.Unit), p.QuotaTotal, p.FaceValue, planModelsLabel(p))
+}
+
+// printPlanDetail 打印一个额度包的详情，一栏一行。
+func printPlanDetail(w io.Writer, p plans.Plan) {
+	pal := newPalette(w)
+	tw := newTableWriter(w)
+	status := "启用"
+	if !p.Enabled {
+		status = "停用"
+	}
+	rows := [][2]string{
+		{"KEY", p.Key},
+		{"名称", p.Name},
+		{"说明", orDash(p.Description)},
+		{"资产", string(p.Asset)},
+		{"单位", unitLabel(p.Unit)},
+		{"可用量", p.QuotaTotal.String()},
+		{"面值", p.FaceValue.String()},
+		{"模型", planModelsLabel(p)},
+		{"状态", status},
+	}
+	for _, row := range rows {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", pal.bold(row[0]), row[1])
+	}
+	_ = tw.Flush()
+}
+
+// printPlanEnabled 打印启用/停用的结果。
+func printPlanEnabled(w io.Writer, p plans.Plan) {
+	action := "已启用"
+	if !p.Enabled {
+		action = "已停用"
+	}
+	_, _ = fmt.Fprintf(w, "%s额度包 %s。\n", action, p.Key)
+}
+
+// printPlanList 打印额度包清单。
+func printPlanList(w io.Writer, list []plans.Plan) {
+	if len(list) == 0 {
+		_, _ = fmt.Fprintln(w, emptyListNote("额度包", "plan create"))
+		return
+	}
+
+	pal := newPalette(w)
+	tw := newTableWriter(w)
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		pal.bold("KEY"), pal.bold("名称"), pal.bold("单位"), pal.bold("可用量"),
+		pal.bold("面值"), pal.bold("模型"), pal.bold("状态"))
+	for _, p := range list {
+		status := "启用"
+		if !p.Enabled {
+			status = "停用"
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			pal.bold(p.Key), p.Name, unitLabel(p.Unit), p.QuotaTotal.String(),
+			p.FaceValue.String(), planModelsLabel(p), status)
+	}
+	_ = tw.Flush()
+}
+
+// printUserPlans 打印一组订阅。
+func printUserPlans(w io.Writer, list []plans.UserPlan) {
+	if len(list) == 0 {
+		_, _ = fmt.Fprintln(w, emptyListNote("额度包订阅", "plan grant"))
+		return
+	}
+
+	pal := newPalette(w)
+	tw := newTableWriter(w)
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		pal.bold("ID"), pal.bold("用户"), pal.bold("额度包"), pal.bold("单位"),
+		pal.bold("状态"), pal.bold("到期"), pal.bold("面值"), pal.bold("剩余"),
+		pal.bold("发放单号"))
+	for _, up := range list {
+		_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			pal.bold(strconv.FormatInt(up.ID, 10)), up.UserID, up.PlanKey,
+			unitLabel(up.Unit), string(up.Status),
+			formatTimeShort(up.ExpiresAt, "不过期"),
+			up.FaceValue.String(), up.FaceValueRemaining.String(), up.Ref)
+	}
+	_ = tw.Flush()
+}
+
+// printAPIKeyPlans 打印一把 key 的额度包名单与展开后的允许集。
+func printAPIKeyPlans(w io.Writer, keyID int64, declared []int64, list []plans.UserPlan) {
+	if len(declared) == 0 {
+		_, _ = fmt.Fprintf(w, "API Key %d 的名单：全部（没有单独限制）。\n", keyID)
+	} else {
+		ids := make([]string, 0, len(declared))
+		for _, id := range declared {
+			ids = append(ids, strconv.FormatInt(id, 10))
+		}
+		_, _ = fmt.Fprintf(w, "API Key %d 的名单：%s。\n", keyID, strings.Join(ids, ","))
+	}
+	printUserPlans(w, list)
+}
+
+// printAPIKeyPlansSet 打印名单改完之后的结果。
+func printAPIKeyPlansSet(w io.Writer, keyID int64, all bool, list []plans.UserPlan) {
+	if all {
+		_, _ = fmt.Fprintf(w, "API Key %d 的名单已清空：可以用这个用户名下全部订阅（%d 条）。\n",
+			keyID, len(list))
+		return
+	}
+	ids := make([]string, 0, len(list))
+	for _, up := range list {
+		ids = append(ids, strconv.FormatInt(up.ID, 10))
+	}
+	_, _ = fmt.Fprintf(w, "API Key %d 的名单已更新：%s。\n", keyID, strings.Join(ids, ","))
+}
+
+// printPlanGrant 打印一次发放。
+func printPlanGrant(w io.Writer, owner auth.User, up plans.UserPlan, applied bool) {
+	if !applied {
+		_, _ = fmt.Fprintf(w, "发放单号 %s 已经发过（订阅 %d），本次未改动。\n", up.Ref, up.ID)
+		return
+	}
+	_, _ = fmt.Fprintf(w,
+		"已发放订阅 %d（用户 %s，额度包 %s，到期 %s，面值 %s，剩余 %s）。\n",
+		up.ID, owner.Username, up.PlanKey, formatTimeShort(up.ExpiresAt, "不过期"),
+		up.FaceValue, up.FaceValueRemaining)
+}
+
+// printPlanVoid 打印一次作废。
+func printPlanVoid(w io.Writer, up plans.UserPlan, applied bool) {
+	if !applied {
+		_, _ = fmt.Fprintf(w, "作废单号 %s 已经用过（订阅 %d 现在是 %s），本次未改动。\n",
+			up.VoidRef, up.ID, up.Status)
+		return
+	}
+	_, _ = fmt.Fprintf(w, "已作废订阅 %d：状态 %s，剩余面值已转回平台收入。\n",
+		up.ID, up.Status)
+}
+
+// printPlanOrder 打印一个用户的有效扣费顺序。
+func printPlanOrder(w io.Writer, owner auth.User, order plans.ChargeOrder, source plans.ChargeOrderSource) {
+	from := "跟随平台默认"
+	if source == plans.ChargeOrderSourceUser {
+		from = "用户覆盖"
+	}
+	_, _ = fmt.Fprintf(w, "用户 %s 的扣费顺序：%s（%s）。\n", owner.Username, order, from)
+}
+
+// printPlanOrderSet 打印扣费顺序的修改结果。
+func printPlanOrderSet(w io.Writer, owner auth.User, order plans.ChargeOrder, cleared bool) {
+	if cleared {
+		_, _ = fmt.Fprintf(w, "用户 %s 的扣费顺序已清除：跟随平台默认。\n", owner.Username)
+		return
+	}
+	_, _ = fmt.Fprintf(w, "用户 %s 的扣费顺序已设为 %s。\n", owner.Username, order)
+}
+
+// planListDoc 组装 plan list 的机器可读输出。
+func planListDoc(list []plans.Plan) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["summary"] = map[string]any{"total": len(list)}
+	entries := make([]map[string]any, 0, len(list))
+	for _, p := range list {
+		entries = append(entries, planEntry(p))
+	}
+	doc["plans"] = entries
+	return doc
+}
+
+// planEntry 打一个额度包。
+func planEntry(p plans.Plan) map[string]any {
+	return map[string]any{
+		"key":         p.Key,
+		"name":        p.Name,
+		"description": p.Description,
+		"asset":       string(p.Asset),
+		"unit":        string(p.Unit),
+		"quota_total": jsonAmount(p.QuotaTotal),
+		"face_value":  jsonAmount(p.FaceValue),
+		"models":      jsonList(p.Models),
+		"enabled":     p.Enabled,
+	}
+}
+
+// planDoc 组装 plan get 的机器可读输出：单个包而不是数组。
+func planDoc(p plans.Plan) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["plan"] = planEntry(p)
+	return doc
+}
+
+// userPlanEntry 打一条订阅。
+func userPlanEntry(up plans.UserPlan) map[string]any {
+	return map[string]any{
+		"id":                   up.ID,
+		"user_id":              up.UserID,
+		"plan_id":              up.PlanID,
+		"plan":                 up.PlanKey,
+		"asset":                string(up.Asset),
+		"unit":                 string(up.Unit),
+		"status":               string(up.Status),
+		"starts_at":            jsonTime(up.StartsAt),
+		"expires_at":           jsonTimePtr(up.ExpiresAt),
+		"quota_total":          jsonAmount(up.QuotaTotal),
+		"face_value":           jsonAmount(up.FaceValue),
+		"face_value_remaining": jsonAmount(up.FaceValueRemaining),
+		"ref":                  up.Ref,
+		"void_ref":             nullableString(up.VoidRef),
+		"voided_at":            jsonTimePtr(up.VoidedAt),
+	}
+}
+
+// userPlansDoc 组装 plan subscriptions 的机器可读输出。
+func userPlansDoc(owner auth.User, list []plans.UserPlan) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["summary"] = map[string]any{"total": len(list)}
+	doc["user"] = map[string]any{"id": owner.ID, "username": owner.Username}
+	entries := make([]map[string]any, 0, len(list))
+	for _, up := range list {
+		entries = append(entries, userPlanEntry(up))
+	}
+	doc["subscriptions"] = entries
+	return doc
+}
+
+// apiKeyPlansDoc 组装 plan key show 的机器可读输出。
+//
+// restricted 说明这把 key 配过名单没有：表格那一档把「没有配过」打成一句
+// 「全部」，这一档必须能用布尔分开，而展开后的 subscriptions 两种情况下都
+// 是同一份「允许集」。
+func apiKeyPlansDoc(keyID int64, declared []int64, list []plans.UserPlan) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["summary"] = map[string]any{"total": len(list)}
+	doc["api_key_id"] = keyID
+	doc["restricted"] = len(declared) > 0
+	doc["plan_ids"] = jsonList(declared)
+	entries := make([]map[string]any, 0, len(list))
+	for _, up := range list {
+		entries = append(entries, userPlanEntry(up))
+	}
+	doc["subscriptions"] = entries
+	return doc
+}
+
+// planOrderDoc 组装 plan order show 的机器可读输出。
+func planOrderDoc(owner auth.User, order plans.ChargeOrder, source plans.ChargeOrderSource) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["user"] = map[string]any{"id": owner.ID, "username": owner.Username}
+	doc["order"] = string(order)
+	doc["source"] = string(source)
+	return doc
+}
