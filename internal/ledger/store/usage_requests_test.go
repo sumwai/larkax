@@ -342,3 +342,47 @@ func TestUsageRequestsRejectsBadQueries(t *testing.T) {
 		t.Errorf("未知状态应当报 ErrInvalidQuery，得到 %v", err)
 	}
 }
+
+// TestUsageRequestsShowsPlanReservedAlongsideWallet 钉住「钱包一分没冻、额度包
+// 占着面值」这一格：两笔预留是并排的两个数，成本仍然只算钱包那一部分。
+//
+// 判据放在真库上，因为这一格由 SELECT 里的两列决定：少读 plan_reserved_amount、
+// 或者把它并进 reserved_amount，下面的断言都会红。
+func TestUsageRequestsShowsPlanReservedAlongsideWallet(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	s := New(db)
+
+	userID := seed(t, db, "100")
+	at := func(value string) time.Time { return usageTestTime(t, value) }
+
+	plannedID := requestIDOf("log-plan")
+	insertBillingRequest(ctx, t, db, billingFixture{
+		UserID: userID, RequestID: plannedID, Model: "gpt-4o",
+		Status: BillingStatusPending, Reserved: "0", PlanReserved: "2.50",
+		StartedAt: at("2026-10-07T09:00:00Z"),
+	})
+
+	window := usageWindow(t, userID)
+	page, err := s.UsageRequests(ctx, UsageRequestQuery{
+		UserID: userID, From: window.From, To: window.To,
+	})
+	if err != nil {
+		t.Fatalf("UsageRequests 失败: %v", err)
+	}
+	if len(page.Requests) != 1 {
+		t.Fatalf("行数 = %d，期望 1: %+v", len(page.Requests), page.Requests)
+	}
+
+	row := page.Requests[0]
+	if got := row.ReservedAmount.String(); got != "0.00000000" {
+		t.Errorf("钱包预留 = %s，额度包覆盖的请求在这一列应当是 0", got)
+	}
+	if got := row.PlanReservedAmount.String(); got != "2.50000000" {
+		t.Errorf("额度包预留面值 = %s，期望库里的 2.50000000", got)
+	}
+	// 成本仍是钱包那一部分：包的面值不是「从钱包花了多少钱」。
+	if got := row.Cost.String(); got != "0.00000000" {
+		t.Errorf("pending 的成本 = %s，期望 0：额度包覆盖不等于从钱包扣了钱", got)
+	}
+}

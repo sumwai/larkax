@@ -198,13 +198,19 @@ type BillingRequestRow struct {
 	UpstreamModel  sql.NullString
 	Protocol       string
 	Streamed       bool
+	// ReservedAmount 是钱包那一部分预留（billing_requests.reserved_amount）：
+	// 额度包覆盖的请求在这一列是 0，钱一分没冻。
 	ReservedAmount money.Amount
-	FinalAmount    sql.NullString
-	Asset          string
-	Status         string
-	ErrorCode      sql.NullString
-	StartedAt      time.Time
-	SettledAt      sql.NullTime
+	// PlanReservedAmount 是这笔请求占着的额度包面值
+	// （billing_requests.plan_reserved_amount）。它与 ReservedAmount 并列，
+	// 不合并成一个数：加在一起就答不了「钱包冻了多少」这个问题。
+	PlanReservedAmount money.Amount
+	FinalAmount        sql.NullString
+	Asset              string
+	Status             string
+	ErrorCode          sql.NullString
+	StartedAt          time.Time
+	SettledAt          sql.NullTime
 	// PricingRuleID 是定这一单价的那条规则（schema 里是 billing_requests.pricing_rule_id）。
 	// 规则事后可变，而账单要能回答「当时按哪条规则算的」，所以它跟着请求一起读回来。
 	// 写它的是预留路径（store.go 的 SaveReservation）：没有落到任何规则上时那里
@@ -220,11 +226,12 @@ type BillingRequestPage struct {
 
 // billingRequestColumns 是读一条计费请求要选的列，顺序与下面的 Scan 一致。
 //
-// 这三列的取法各写一次，其余按原样扫：final_amount 取 ::text 之后仍是 NULL，按
+// 这四列的取法各写一次，其余按原样扫：final_amount 取 ::text 之后仍是 NULL，按
 // sql.NullString 读出来；pricing_rule_id 是可空 bigint，按 sql.NullInt64 读；
-// reserved_amount 是 NOT NULL，直接 ::text 再解析。
+// reserved_amount 与 plan_reserved_amount 是 NOT NULL，直接 ::text 再解析。
 const billingRequestColumns = `id, request_id, user_id, canonical_model, upstream_model,
-	protocol, streamed, reserved_amount::text, final_amount::text, reserved_asset,
+	protocol, streamed, reserved_amount::text, plan_reserved_amount::text,
+	final_amount::text, reserved_asset,
 	status, error_code, started_at, settled_at, pricing_rule_id`
 
 // BillingRequests 读一页计费请求，新的在前。
@@ -282,13 +289,14 @@ func (s *Store) BillingRequests(ctx context.Context, f BillingRequestFilter) (Bi
 	var page BillingRequestPage
 	for rows.Next() {
 		var (
-			row               BillingRequestRow
-			reservedAmountRaw string
+			row                   BillingRequestRow
+			reservedAmountRaw     string
+			planReservedAmountRaw string
 		)
 		if err := rows.Scan(&row.ID, &row.RequestID, &row.UserID, &row.CanonicalModel,
 			&row.UpstreamModel, &row.Protocol, &row.Streamed, &reservedAmountRaw,
-			&row.FinalAmount, &row.Asset, &row.Status, &row.ErrorCode,
-			&row.StartedAt, &row.SettledAt, &row.PricingRuleID); err != nil {
+			&planReservedAmountRaw, &row.FinalAmount, &row.Asset, &row.Status,
+			&row.ErrorCode, &row.StartedAt, &row.SettledAt, &row.PricingRuleID); err != nil {
 			return BillingRequestPage{}, fmt.Errorf("读计费请求失败: %w", err)
 		}
 		// 与 UsageEvents 同一条：金额列取 ::text 再过 money.Parse。money.Amount
@@ -300,6 +308,13 @@ func (s *Store) BillingRequests(ctx context.Context, f BillingRequestFilter) (Bi
 				"计费请求 %s 的预留金额 %q 解析失败: %w", row.RequestID, reservedAmountRaw, err)
 		}
 		row.ReservedAmount = reserved
+		planReserved, err := money.Parse(planReservedAmountRaw)
+		if err != nil {
+			return BillingRequestPage{}, fmt.Errorf(
+				"计费请求 %s 的额度包预留面值 %q 解析失败: %w",
+				row.RequestID, planReservedAmountRaw, err)
+		}
+		row.PlanReservedAmount = planReserved
 		page.Requests = append(page.Requests, row)
 	}
 	if err := rows.Err(); err != nil {

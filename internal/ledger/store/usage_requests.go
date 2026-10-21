@@ -81,11 +81,20 @@ type UsageRequestRow struct {
 	KeyID   *int64
 	KeyName string
 	Status  string
-	// Cost 在 pending 时是预留额，结算后是最终额，其余状态为 0。
-	Cost     money.Amount
-	Asset    string
-	Streamed bool
-	Protocol string
+	// Cost 在 pending 时是钱包预留额，结算后是最终额，其余状态为 0。
+	// 额度包覆盖的请求在 pending 时这里是 0（钱包一分没冻）；它占着的面值
+	// 不在这个字段里，见 PlanReservedAmount。
+	Cost money.Amount
+	// ReservedAmount 是钱包那一部分预留（billing_requests.reserved_amount）：
+	// 额度包覆盖的请求在这一列是 0，钱一分没冻。
+	ReservedAmount money.Amount
+	// PlanReservedAmount 是这笔请求占着的额度包面值
+	// （billing_requests.plan_reserved_amount）。它与 ReservedAmount 并列，
+	// 不合并成一个数：加在一起就答不了「钱包冻了多少」这个问题。
+	PlanReservedAmount money.Amount
+	Asset              string
+	Streamed           bool
+	Protocol           string
 	// 五个 token 槽位取该请求最新的一条 usage_events；没有事件时全 0，
 	// BillingPath 为 nil。
 	PromptTokens     int64
@@ -169,6 +178,7 @@ func (s *Store) UsageRequests(ctx context.Context, q UsageRequestQuery) (UsageRe
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT b.id, b.request_id, b.canonical_model, b.api_key_id,
 		       COALESCE(k.name, ''), b.status, b.reserved_amount::text,
+		       b.plan_reserved_amount::text,
 		       b.final_amount::text, b.reserved_asset, b.streamed, b.protocol,
 		       b.started_at, b.settled_at,
 		       e.prompt_tokens, e.completion_tokens, e.cache_read_tokens,
@@ -196,21 +206,22 @@ func (s *Store) UsageRequests(ctx context.Context, q UsageRequestQuery) (UsageRe
 	var page UsageRequestPage
 	for rows.Next() {
 		var (
-			row        UsageRequestRow
-			keyID      sql.NullInt64
-			reserved   string
-			final      sql.NullString
-			prompt     sql.NullInt64
-			completion sql.NullInt64
-			cacheRead  sql.NullInt64
-			cacheWrite sql.NullInt64
-			reasoning  sql.NullInt64
-			path       sql.NullString
-			duration   sql.NullInt64
-			settledAt  sql.NullTime
+			row          UsageRequestRow
+			keyID        sql.NullInt64
+			reserved     string
+			planReserved string
+			final        sql.NullString
+			prompt       sql.NullInt64
+			completion   sql.NullInt64
+			cacheRead    sql.NullInt64
+			cacheWrite   sql.NullInt64
+			reasoning    sql.NullInt64
+			path         sql.NullString
+			duration     sql.NullInt64
+			settledAt    sql.NullTime
 		)
 		if err := rows.Scan(&row.ID, &row.RequestID, &row.Model, &keyID,
-			&row.KeyName, &row.Status, &reserved, &final, &row.Asset,
+			&row.KeyName, &row.Status, &reserved, &planReserved, &final, &row.Asset,
 			&row.Streamed, &row.Protocol, &row.StartedAt, &settledAt,
 			&prompt, &completion, &cacheRead, &cacheWrite, &reasoning,
 			&path, &duration); err != nil {
@@ -221,13 +232,29 @@ func (s *Store) UsageRequests(ctx context.Context, q UsageRequestQuery) (UsageRe
 			row.KeyID = &id
 		}
 
+		// 两笔预留分列读：reserved 是钱包冻住的那部分（额度包覆盖的请求在这
+		// 一列是 0），planReserved 是这笔请求占着的额度包面值。两者并列，才能
+		// 看出「钱包没冻钱」不等于「没占额度」。
+		walletReserved, err := money.Parse(reserved)
+		if err != nil {
+			return UsageRequestPage{}, fmt.Errorf("请求 %s 的预留金额 %q 解析失败: %w",
+				row.RequestID, reserved, err)
+		}
+		row.ReservedAmount = walletReserved
+		planReservedAmount, err := money.Parse(planReserved)
+		if err != nil {
+			return UsageRequestPage{}, fmt.Errorf("请求 %s 的额度包预留面值 %q 解析失败: %w",
+				row.RequestID, planReserved, err)
+		}
+		row.PlanReservedAmount = planReservedAmount
+
 		// 金额取哪一列取决于状态：pending 时最终额还不存在，用预留额；
 		// 结算后以最终额为准。released / failed / refunded 没有从用户身上
 		// 扣走钱，所以是 0——把预留额显示出来会让一次失败看起来像花了钱。
 		var amountText string
 		switch row.Status {
 		case BillingStatusPending:
-			amountText = reserved
+			amountText = row.ReservedAmount.String()
 		case BillingStatusSettled:
 			if final.Valid {
 				amountText = final.String

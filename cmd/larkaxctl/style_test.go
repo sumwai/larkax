@@ -843,9 +843,10 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 			printUsageRequests(w, []usageRequestRow{{
 				StartedAt: at, RequestID: "req-placeholder", UserID: 7,
 				Username: "user-placeholder", CanonicalModel: "claude-x",
-				Status:         "settled",
-				ReservedAmount: money.MustParse("0.02000000"),
-				FinalAmount:    sql.NullString{String: "0.01234500", Valid: true},
+				Status:             "settled",
+				ReservedAmount:     money.MustParse("0.02000000"),
+				PlanReservedAmount: money.MustParse("0.01000000"),
+				FinalAmount:        sql.NullString{String: "0.01234500", Valid: true},
 			}}, false)
 		}},
 		{"对账运行记录", func(w io.Writer) {
