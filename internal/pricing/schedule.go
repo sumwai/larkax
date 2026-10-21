@@ -537,8 +537,8 @@ func (o *ScheduleOverride) normalize(index int, base map[string]float64) (schedu
 	// holidays 只匹配放假的那几天（编译时带 !isWorkday()），与 work 是
 	// 一对自相矛盾的条件。
 	if o.DayKind == "work" && len(rule.holidays) > 0 {
-		return scheduleRule{}, fmt.Errorf("%s 自相矛盾: 节假日必然是休息日，"+
-			"day_kind=\"work\" 与 holidays 不能同时出现", where("条件"))
+		return scheduleRule{}, fmt.Errorf("%s 自相矛盾: holidays 只匹配放假的那几天"+
+			"（编译时带 !isWorkday()），与 day_kind=\"work\" 不能同时出现", where("条件"))
 	}
 
 	if len(rule.weekdays) == 0 && len(rule.window) == 0 && rule.dayKind == "" &&

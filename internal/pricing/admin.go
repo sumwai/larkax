@@ -279,10 +279,10 @@ func (req CreateRequest) normalize() (RuleInfo, error) {
 // 更糟——响应已经在转了，算不出价只留一行日志、随后释放预扣，客户端正常
 // 收完却一分钱不收。日历未知**不回落**到 base，这是既有口径。
 //
-// 生产路径上 Admin 由 NewAdmin 构造，它总会接上日历，所以这道判据今天不可达；
-// 它兜的是「将来别的构造方式」（以及测试里刻意造出的无日历实例）。不要把它
-// 接到请求路径的日历对象上：那会给写入路径引入一个随部署变化的判据，而表
-// 能不能计价是库的性质，不是这一台实例的性质。
+// 只有 calendarOf 构造失败返回 nil 时才会走到这里（见那里的说明），正常部署
+// 上 Admin 由 NewAdmin 构造、总会接上日历。不要把它接到请求路径的日历对象上：
+// 那会给写入路径引入一个随部署变化的判据，而表能不能计价是库的性质，不是
+// 这一台实例的性质。
 func checkScheduleCalendar(s *Schedule, cal expr.Calendar) error {
 	if s == nil || !s.NeedsCalendar() || cal != nil {
 		return nil
