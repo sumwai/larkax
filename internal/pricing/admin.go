@@ -278,13 +278,18 @@ func (req CreateRequest) normalize() (RuleInfo, error) {
 // 必须在写入路径判：等到第一次计价才发现时，非流式请求整次 5xx，流式请求
 // 更糟——响应已经在转了，算不出价只留一行日志、随后释放预扣，客户端正常
 // 收完却一分钱不收。日历未知**不回落**到 base，这是既有口径。
+//
+// 生产路径上 Admin 由 NewAdmin 构造，它总会接上日历，所以这道判据今天不可达；
+// 它兜的是「将来别的构造方式」（以及测试里刻意造出的无日历实例）。不要把它
+// 接到请求路径的日历对象上：那会给写入路径引入一个随部署变化的判据，而表
+// 能不能计价是库的性质，不是这一台实例的性质。
 func checkScheduleCalendar(s *Schedule, cal expr.Calendar) error {
 	if s == nil || !s.NeedsCalendar() || cal != nil {
 		return nil
 	}
 	return errors.New("这条定价表要用日历（day_kind 或 holidays），但这个实例没有接日历：" +
 		"保存之后每一笔请求都会以「日历不可用」失败，所以这里先拒绝；" +
-		"不需要日历的那几个维度（weekdays、window、min_prompt_tokens）不受影响")
+		"不需要日历的那几个维度（weekdays、window、min_context_tokens）不受影响")
 }
 
 // UpdateRequest 描述一次修改。
@@ -620,13 +625,12 @@ type RuleInfo struct {
 	// 编译出来的结果」（见 Schedule.Validate）。
 	Schedule      *Schedule
 	Priority      int
-	EffectiveFrom time.Time
-	// EffectiveTo 为 nil 表示不过期。
-	EffectiveTo *time.Time
-	Enabled     bool
-	CreatedBy   int64
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	EffectiveFrom time.Time // EffectiveTo 为 nil 表示不过期。
+	EffectiveTo   *time.Time
+	Enabled       bool
+	CreatedBy     int64
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 
 	// DeclaredKeys 是表达式里写过的键（见 expr.Program.Keys），已排序。
 	//
@@ -642,6 +646,14 @@ type RuleInfo struct {
 	// 写进库的行上。那种行每被用到一次就失败一次，而失败点在热路径上——
 	// 列举是唯一能看见它的地方。
 	ExprErr error
+
+	// ScheduleErr 说明这条规则的 schedule 为什么解不开，为 nil 表示能解开、
+	// 或本来就没有表。
+	//
+	// 与 ExprErr 同一个取舍：清单里一行坏 schedule 只写进这一行，别的行照常
+	// 出。单条读取（Get、修改前读）仍当场报错——那里只有一行，而把「解不开」
+	// 当成「没有表」会让随后的一次修改把 schedule 列静默写空。
+	ScheduleErr error
 }
 
 // List 列出全部规则，按**裁决次序**排列。
@@ -652,12 +664,13 @@ type RuleInfo struct {
 //
 // 不分页：规则表不大（见 matchQuery 的注释），而一次列举是要被运维逐条看的。
 //
-// # 一行表达式坏了不影响别的行
+// # 一行坏了不影响别的行
 //
-// 编译失败只写进那一行的 ExprErr，**不跳过、也不整次报错**：整次报错会让
-// 库里有一条坏规则时整个清单一条都看不到，而那正是最需要看清单的时候。
-// 这与 channels.List 对一行坏密文的处置一致——那里是解不开的信封，
-// 这里是编不过的表达式。
+// 编译失败只写进那一行的 ExprErr、解不开的 schedule 只写进那一行的
+// ScheduleErr，**不跳过、也不整次报错**：整次报错会让库里有一条坏规则时
+// 整个清单一条都看不到，而那正是最需要看清单的时候。这与 channels.List 对
+// 一行坏密文的处置一致——那里是解不开的信封，这里是编不过的表达式或解不开
+// 的表。单条读取仍当场报错（见 rule）。
 func (a *Admin) List(ctx context.Context) ([]RuleInfo, error) {
 	return a.queryRules(ctx, listQuery)
 }
@@ -695,6 +708,9 @@ func (a *Admin) rule(ctx context.Context, query string, args ...any) (RuleInfo, 
 	}
 	if err != nil {
 		return RuleInfo{}, err
+	}
+	if info.ScheduleErr != nil {
+		return RuleInfo{}, info.ScheduleErr
 	}
 	return decorate(info), nil
 }
@@ -899,14 +915,16 @@ func scanRuleInfo(row rowScanner) (RuleInfo, error) {
 		info.ModelPatterns = []string{}
 	}
 	// schedule 是 NULL 时 schedule 为 nil：手写表达式的规则走的就是这一格。
-	// 解析不过说明这一行是绕过写入路径改过的，整次报错而不是当没有表——
-	// 否则清单会声称一条手写规则，而 expr 里可能正是那张表的产物。
+	// 解析不过说明这一行是绕过写入路径改过的。这时不 return：清单要把这一行
+	// 连同错误一起列出来，与 ExprErr 同一个取舍（见 List 的说明）。单条读取
+	// 与修改前读会把它转成错误（见 rule / loadRuleForUpdate）。
 	if len(schedule) > 0 {
 		parsed, parseErr := ParseSchedule(schedule)
 		if parseErr != nil {
-			return RuleInfo{}, fmt.Errorf("规则 %d 的 schedule 不是合法的定价表: %w", info.ID, parseErr)
+			info.ScheduleErr = fmt.Errorf("规则 %d 的 schedule 不是合法的定价表: %w", info.ID, parseErr)
+		} else {
+			info.Schedule = parsed
 		}
-		info.Schedule = parsed
 	}
 	if to.Valid {
 		at := to.Time
@@ -945,6 +963,9 @@ func loadRuleForUpdate(ctx context.Context, tx *sql.Tx, id, ownerID int64) (Rule
 	}
 	if err != nil {
 		return RuleInfo{}, err
+	}
+	if info.ScheduleErr != nil {
+		return RuleInfo{}, info.ScheduleErr
 	}
 	return info, nil
 }

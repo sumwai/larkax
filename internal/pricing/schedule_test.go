@@ -32,9 +32,129 @@ const exampleSchedule = `{
     { "position": 20, "day_kind": "rest",            "prompt": 0.00000075 },
     { "position": 30, "weekdays": ["fri"],           "prompt": 0.000001 },
     { "position": 40, "window": "22:00-08:00",       "prompt": 0.0000005 },
-    { "position": 50, "min_prompt_tokens": 200000,   "prompt": 0.000003 }
+    { "position": 50, "min_context_tokens": 200000,   "prompt": 0.000003 }
   ]
 }`
+
+// fixedCalendar 是每一天都给同一份 DayInfo 的日历。
+//
+// 它用来造「某一天是放假的春节 / 是调休上班的春节 / 只是普通工作日」这几种
+// 判定，而 scheduleCalendar 只会给零值。
+type fixedCalendar struct{ info expr.DayInfo }
+
+func (fixedCalendar) TimeZone(string) (string, error) { return "Asia/Shanghai", nil }
+
+func (c fixedCalendar) DayInfo(string, time.Time) (expr.DayInfo, error) { return c.info, nil }
+
+func (fixedCalendar) Peak(string, time.Time, []expr.PeakWindow) (expr.PeakVerdict, error) {
+	return expr.PeakVerdict{}, errors.New("这个日历不判峰谷")
+}
+
+// mustCompileSchedule 解析、校验并编译一张表，任何一步失败就结束用例。
+func mustCompileSchedule(t *testing.T, source string) *expr.Program {
+	t.Helper()
+	sched, err := ParseSchedule([]byte(source))
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	compiled, err := sched.Validate()
+	if err != nil {
+		t.Fatalf("校验失败: %v", err)
+	}
+	prog, err := expr.Compile(compiled)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	return prog
+}
+
+// evalPrompt 在给定的日历判定下算一次 prompt 单价。
+func evalPrompt(t *testing.T, prog *expr.Program, cal expr.Calendar) float64 {
+	t.Helper()
+	res, err := prog.Eval(expr.Env{
+		At:       time.Date(2026, 10, 1, 9, 30, 0, 0, time.UTC),
+		Region:   "CN",
+		Calendar: cal,
+	})
+	if err != nil {
+		t.Fatalf("求值失败: %v", err)
+	}
+	return res.Prices.Prompt.Float64()
+}
+
+// TestScheduleHolidaysMatchRestDaysOnly 钉住 holidays 的语义是「放假的那几天」。
+//
+// 调休上班日也带着节日名：春节前后挪用周末上班的那天在日历上 HolidayName
+// 是「春节」而 OffDay 是 false。只比名字会把那天算进节假日价，而它实际上
+// 是工作日；holidays 因此编译成「名字命中 **且** 不是工作日」。
+func TestScheduleHolidaysMatchRestDaysOnly(t *testing.T) {
+	const source = `{
+	  "tz": "Asia/Shanghai",
+	  "base": {"prompt": 1},
+	  "overrides": [
+	    {"holidays": ["春节"], "prompt": 2},
+	    {"day_kind": "work", "prompt": 3}
+	  ]
+	}`
+	prog := mustCompileSchedule(t, source)
+
+	cases := []struct {
+		name string
+		info expr.DayInfo
+		want float64
+	}{
+		{"放假的春节", expr.DayInfo{OffDay: true, HolidayName: "春节"}, 2},
+		{"调休上班的春节", expr.DayInfo{OffDay: false, HolidayName: "春节"}, 3},
+		{"普通工作日", expr.DayInfo{OffDay: false}, 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := evalPrompt(t, prog, fixedCalendar{info: tc.info}); math.Abs(got-tc.want) > 1e-12 {
+				t.Errorf("%s 的 prompt 单价 = %v，期望 %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestScheduleHolidayAndWorkOrderIndependent 钉住「移动数组元素不改价」。
+//
+// 节假日与 work 两条静态不相交，所以不必给 position；这一对正是判据最容易
+// 出错的地方——把调休上班日算进节假日之后，两条会同时命中，价格就取决于
+// 数组顺序。
+func TestScheduleHolidayAndWorkOrderIndependent(t *testing.T) {
+	const forward = `{
+	  "tz": "Asia/Shanghai",
+	  "base": {"prompt": 1},
+	  "overrides": [
+	    {"holidays": ["春节"], "prompt": 2},
+	    {"day_kind": "work", "prompt": 3}
+	  ]
+	}`
+	const reversed = `{
+	  "tz": "Asia/Shanghai",
+	  "base": {"prompt": 1},
+	  "overrides": [
+	    {"day_kind": "work", "prompt": 3},
+	    {"holidays": ["春节"], "prompt": 2}
+	  ]
+	}`
+
+	forwardProg := mustCompileSchedule(t, forward)
+	reversedProg := mustCompileSchedule(t, reversed)
+
+	for _, info := range []expr.DayInfo{
+		{OffDay: true, HolidayName: "春节"},
+		{OffDay: false, HolidayName: "春节"},
+		{OffDay: false},
+	} {
+		cal := fixedCalendar{info: info}
+		a := evalPrompt(t, forwardProg, cal)
+		b := evalPrompt(t, reversedProg, cal)
+		if math.Abs(a-b) > 1e-12 {
+			t.Errorf("DayInfo %+v 下两种数组顺序算出两个价：%v vs %v", info, a, b)
+		}
+	}
+}
 
 // TestScheduleCompilesToPerKeyChain 钉住编译产物形状：每个键一条三元链、
 // 链上的次序按 position 从大到小，而不是 2^N 的笛卡尔展开。
@@ -93,7 +213,7 @@ func TestScheduleOrderIgnoresArrayOrder(t *testing.T) {
   "tz": "Asia/Shanghai",
   "base": { "prompt": 0.0000015, "completion": 0.0000075 },
   "overrides": [
-    { "position": 50, "min_prompt_tokens": 200000,   "prompt": 0.000003 },
+    { "position": 50, "min_context_tokens": 200000,   "prompt": 0.000003 },
     { "position": 40, "window": "22:00-08:00",       "prompt": 0.0000005 },
     { "position": 30, "weekdays": ["fri"],           "prompt": 0.000001 },
     { "position": 20, "day_kind": "rest",            "prompt": 0.00000075 },
@@ -203,7 +323,7 @@ func TestScheduleNeedsCalendar(t *testing.T) {
 		{"window", `{"tz":"Asia/Shanghai","base":{"prompt":1},
 			"overrides":[{"window":"22:00-08:00","prompt":2}]}`, false},
 		{"门槛", `{"tz":"Asia/Shanghai","base":{"prompt":1},
-			"overrides":[{"min_prompt_tokens":100,"prompt":2}]}`, false},
+			"overrides":[{"min_context_tokens":100,"prompt":2}]}`, false},
 		{"day_kind", `{"tz":"Asia/Shanghai","base":{"prompt":1},
 			"overrides":[{"day_kind":"rest","prompt":2}]}`, true},
 		{"holidays", `{"tz":"Asia/Shanghai","base":{"prompt":1},
@@ -231,8 +351,8 @@ func TestScheduleMinThresholdOrder(t *testing.T) {
 	  "tz": "Asia/Shanghai",
 	  "base": {"prompt": 1},
 	  "overrides": [
-	    {"min_prompt_tokens": 100, "prompt": 2},
-	    {"min_prompt_tokens": 200, "prompt": 3}
+	    {"min_context_tokens": 100, "prompt": 2},
+	    {"min_context_tokens": 200, "prompt": 3}
 	  ]
 	}`))
 	if err != nil {
@@ -375,9 +495,55 @@ func TestScheduleRejects(t *testing.T) {
 		{
 			name: "门槛与 position 方向相反",
 			raw: `{"tz":"Asia/Shanghai","base":{"prompt":1},"overrides":[
-				{"position":10,"min_prompt_tokens":200,"prompt":2},
-				{"position":20,"min_prompt_tokens":100,"prompt":3}]}`,
+				{"position":10,"min_context_tokens":200,"prompt":2},
+				{"position":20,"min_context_tokens":100,"prompt":3}]}`,
 			wantSub: "方向相反",
+		},
+		{
+			name:    "position 为负",
+			raw:     `{"tz":"Asia/Shanghai","base":{"prompt":1},"overrides":[{"position":-1,"weekdays":["fri"],"prompt":2}]}`,
+			wantSub: "position 不能为负",
+		},
+		{
+			name:    "门槛为零",
+			raw:     `{"tz":"Asia/Shanghai","base":{"prompt":1},"overrides":[{"min_context_tokens":0,"prompt":2}]}`,
+			wantSub: "门槛必须大于 0",
+		},
+		{
+			name:    "day_kind 取值不对",
+			raw:     `{"tz":"Asia/Shanghai","base":{"prompt":1},"overrides":[{"day_kind":"holiday","prompt":2}]}`,
+			wantSub: "不是取值",
+		},
+		{
+			name:    "节假日名是空白",
+			raw:     `{"tz":"Asia/Shanghai","base":{"prompt":1},"overrides":[{"holidays":["  "],"prompt":2}]}`,
+			wantSub: "空名字",
+		},
+		{
+			name:    "覆盖对象内部的重复键",
+			raw:     `{"tz":"Asia/Shanghai","base":{"prompt":1},"overrides":[{"weekdays":["fri"],"prompt":2,"prompt":3}]}`,
+			wantSub: "重复的键",
+		},
+		{
+			name: "同一维度重叠（节假日）",
+			raw: `{"tz":"Asia/Shanghai","base":{"prompt":1},"overrides":[
+				{"holidays":["春节"],"prompt":2},
+				{"holidays":["春节","国庆节"],"prompt":3}]}`,
+			wantSub: "同一维度上重叠",
+		},
+		{
+			name: "同一维度重叠（相等的门槛）",
+			raw: `{"tz":"Asia/Shanghai","base":{"prompt":1},"overrides":[
+				{"min_context_tokens":100,"prompt":2},
+				{"min_context_tokens":100,"prompt":3}]}`,
+			wantSub: "同一维度上重叠",
+		},
+		{
+			name: "同一维度重叠（时段，不跨零点）",
+			raw: `{"tz":"Asia/Shanghai","base":{"prompt":1},"overrides":[
+				{"window":"08:00-12:00","prompt":2},
+				{"window":"10:00-14:00","prompt":3}]}`,
+			wantSub: "同一维度上重叠",
 		},
 	}
 	for _, tc := range cases {
@@ -407,7 +573,7 @@ func TestScheduleErrorNamesTheOverride(t *testing.T) {
 	  "base": {"prompt": 1},
 	  "overrides": [
 	    {"position": 10, "weekdays": ["fri"], "prompt": 2},
-	    {"position": 20, "min_prompt_tokens": 100, "prompt": -3}
+	    {"position": 20, "min_context_tokens": 100, "prompt": -3}
 	  ]
 	}`))
 	if err != nil {
@@ -471,4 +637,79 @@ func TestScheduleFillsEveryBaseKey(t *testing.T) {
 	if got := strings.Count(src, "?"); got != 1 {
 		t.Errorf("只有 prompt 该有链，实际 %d 个三元：%s", got, src)
 	}
+}
+
+// TestScheduleParseRejectsBadDocuments 钉住 JSON 层那几种「不成立」的形状。
+//
+// 它们都发生在解码阶段，报错来自 ParseSchedule 而不是 Validate；分开放是
+// 因为写入路径对两者的处置相同（都是拒绝），但调用方拿到的是不同的函数。
+func TestScheduleParseRejectsBadDocuments(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		wantSub string
+	}{
+		{"空输入", "", "定价表为空"},
+		{"只有空白", " \n\t ", "定价表为空"},
+		{
+			name:    "第一个对象之后还有内容",
+			raw:     `{"tz":"Asia/Shanghai","base":{"prompt":1}} {"tz":"Asia/Shanghai","base":{"prompt":2}}`,
+			wantSub: "多余的内容",
+		},
+		{"顶层是数组", `[]`, "定价表解析失败"},
+		{"顶层是标量", `42`, "定价表解析失败"},
+		{"base 不是对象", `{"tz":"Asia/Shanghai","base":42}`, "必须是单价对象"},
+		{"overrides 不是数组", `{"tz":"Asia/Shanghai","base":{"prompt":1},"overrides":{}}`, "overrides"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseSchedule([]byte(tc.raw))
+			if err == nil {
+				t.Fatalf("这份输入应当被拒：%q", tc.raw)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("报错 = %v，期望包含 %q", err, tc.wantSub)
+			}
+		})
+	}
+}
+
+// TestScheduleOrderTiesBreakByIndex 钉住「都没有 position 时按数组下标」。
+//
+// 两条互不相交的时段本来就不必给 position，先后只影响生成源码的排布；
+// 固定的次序让「同一张表编译两次得到同一份源码」成立，对账时不用怀疑
+// 顺序是从哪来的。
+func TestScheduleOrderTiesBreakByIndex(t *testing.T) {
+	const firstMorning = `{"tz":"Asia/Shanghai","base":{"prompt":1},"overrides":[
+		{"window":"08:00-10:00","prompt":2},
+		{"window":"10:00-12:00","prompt":3}]}`
+	const firstNoon = `{"tz":"Asia/Shanghai","base":{"prompt":1},"overrides":[
+		{"window":"10:00-12:00","prompt":3},
+		{"window":"08:00-10:00","prompt":2}]}`
+
+	morning := mustCompileSource(t, firstMorning)
+	noon := mustCompileSource(t, firstNoon)
+
+	eight := `hour("Asia/Shanghai") >= 8`
+	ten := `hour("Asia/Shanghai") >= 10`
+	if strings.Index(morning, eight) > strings.Index(morning, ten) {
+		t.Errorf("正序表里第一条应当先出现：%s", morning)
+	}
+	if strings.Index(noon, ten) > strings.Index(noon, eight) {
+		t.Errorf("倒序表里第一条应当先出现：%s", noon)
+	}
+}
+
+// mustCompileSource 解析并校验一张表，返回生成的表达式源码。
+func mustCompileSource(t *testing.T, source string) string {
+	t.Helper()
+	sched, err := ParseSchedule([]byte(source))
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	compiled, err := sched.Validate()
+	if err != nil {
+		t.Fatalf("校验失败: %v", err)
+	}
+	return compiled
 }

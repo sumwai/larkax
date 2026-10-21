@@ -20,9 +20,9 @@ larkaxctl\-price \- 模\:型\:计\:价\:规\:则\:与\:日\:历\:管\:理\:（�
 .IP \(bu 2
 \fBbase\fR：\:兜\:底\:单\:价。\:键\:与\:表\:达\:式\:相\:同\:（\fBprompt\fR、\fBcompletion\fR、\fBcache_read\fR、\fBcache_write\fR、\fBreasoning\fR、\fBfixed\fR、\fBminimum\fR），\:不\:能\:为\:空。
 .IP \(bu 2
-\fBoverrides\fR：\:覆\:盖\:项，\:每\:项\:是\:「条\:件 + 单\:价」。\:条\:件\:从\:这\:几\:个\:维\:度\:里\:选，\:一\:项\:里\:写\:多\:个\:维\:度\:表\:示\:「且」：\fBweekdays\fR（\fBmon\fR … \fBsun\fR，\:可\:写\:多\:个）、\fBwindow\fR（\fBHH:MM\-HH:MM\fR，\:整\:点\:边\:界，\:可\:跨\:零\:点）、\fBday_kind\fR（\fBwork\fR / \fBrest\fR）、\fBholidays\fR（节\:假\:日\:名，\:与 \fBholidayName()\fR 的\:返\:回\:值\:逐\:字\:比\:较）、\fBmin_prompt_tokens\fR（提\:示\:词 token 门\:槛）。\:单\:价\:只\:写\:要\:改\:的\:键，\:没\:写\:的\:键\:沿\:用\fBbase\fR。
+\fBoverrides\fR：\:覆\:盖\:项，\:每\:项\:是\:「条\:件 + 单\:价」。\:条\:件\:从\:这\:几\:个\:维\:度\:里\:选，\:一\:项\:里\:写\:多\:个\:维\:度\:表\:示\:「且」：\fBweekdays\fR（\fBmon\fR … \fBsun\fR，\:可\:写\:多\:个）、\fBwindow\fR（\fBHH:MM\-HH:MM\fR，\:整\:点\:边\:界，\:可\:跨\:零\:点）、\fBday_kind\fR（\fBwork\fR / \fBrest\fR）、\fBholidays\fR（节\:假\:日\:名，\:与 \fBholidayName()\fR 的\:返\:回\:值\:逐\:字\:比\:较，\:且\:不\:是\:补\:班\:日）、\fBmin_context_tokens\fR（输\:入\:上\:下\:文 token 门\:槛，\:含\:缓\:存\:读\:写）。\:单\:价\:只\:写\:要\:改\:的\:键，\:没\:写\:的\:键\:沿\:用 \fBbase\fR。
 .PP
-\fB同\:一\:维\:度\:上\:两\:条\:覆\:盖\:重\:叠\:会\:被\:拒\fR——谁\:赢\:没\:有\:一\:致\:的\:读\:法。\:不\:同\:维\:度\:同\:时\:成\:立\:时\:用\fBposition\fR 裁\:决，\:大\:的\:优\:先；\:跨\:维\:度\:的\:覆\:盖\:必\:须\:显\:式\:给 \fBposition\fR。
+\fB同\:一\:维\:度\:上\:两\:条\:覆\:盖\:重\:叠\:会\:被\:拒\fR（门\:槛\:之\:间\:例\:外：\:门\:槛\:高\:的\:自\:动\:先\:命\:中，\:不\:必\:给\fBposition\fR）。\:不\:同\:维\:度\:同\:时\:成\:立\:时\:用 \fBposition\fR 裁\:决，\:大\:的\:优\:先；\:跨\:维\:度\:的\:覆\:盖\:必\:须\:显\:式\:给 \fBposition\fR。
 .PP
 \fBday_kind\fR 与 \fBholidays\fR 读\:日\:历\:数\:据：\:那\:一\:年\:没\:有\:导\:入、\:或\:当\:天\:查\:不\:到\:记\:录\:时\:求\:值\:失\:败，\:不\:会\:退\:回\:某\:一\:档\:价\:（见 calendar\-data\&.md）。
 .PP

@@ -273,3 +273,40 @@ func TestScheduleReadRejectsBrokenJSON(t *testing.T) {
 		t.Fatalf("读坏表的错误 = %v", err)
 	}
 }
+
+// TestScheduleListDegradesBrokenRow 钉住「一行坏表不拖垮整个清单」。
+//
+// 与 ExprErr 同一个取舍：清单是最需要看到坏行的地方，整次报错会让别的行
+// 一起消失。坏行只带 ScheduleErr，单条读取仍当场报错——那里只有一行，而把
+// 「解不开」当成「没有表」会让随后的一次修改把 schedule 列静默写空。
+func TestScheduleListDegradesBrokenRow(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	admin := NewAdmin(db)
+	id := createSchedule(t, admin, "", mustSchedule(t, exampleSchedule))
+
+	if _, err := db.ExecContext(ctx,
+		`UPDATE pricing_rules SET schedule = '{"tz": 1}'::jsonb WHERE id = $1`, id); err != nil {
+		t.Fatalf("造坏行失败: %v", err)
+	}
+
+	rules, err := admin.List(ctx)
+	if err != nil {
+		t.Fatalf("一行坏表让整个清单失败了: %v", err)
+	}
+	bad := findRule(t, rules, id)
+	if bad.ScheduleErr == nil {
+		t.Fatal("坏行没有带上 ScheduleErr")
+	}
+	if !strings.Contains(bad.ScheduleErr.Error(), "不是合法的定价表") {
+		t.Errorf("ScheduleErr = %v", bad.ScheduleErr)
+	}
+	if bad.Schedule != nil {
+		t.Error("解不开的表不应当留下半份结构")
+	}
+
+	// 单条读取仍报错，与上面的降级不矛盾。
+	if _, err := admin.Get(ctx, id); err == nil {
+		t.Fatal("Get 读到坏表时应当报错")
+	}
+}

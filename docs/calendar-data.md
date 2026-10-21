@@ -174,7 +174,7 @@ isPeak("08:00-12:00,14:00-18:00") ? {"prompt": 2.0} : {"prompt": 1.0}
 的含义见下一段）。
 
 结构化定价表（`price create --schedule-file`）里的 `day_kind` 与 `holidays` 编译成
-`isWorkday()` 与 `holidayName()`，所以它们受同一条约束：那一年的数据不在，按这张
+`isWorkday()` 与「`holidayName()` 且非工作日」，所以它们受同一条约束：那一年的数据不在，按这张
 表计价的请求就失败在求值这一步。
 
 两条边界：

@@ -1198,7 +1198,7 @@ func TestRuleInfoFieldsArePinned(t *testing.T) {
 	want := []string{
 		"ID", "Scope", "OwnerUserID", "ChannelID", "Name", "ModelPatterns",
 		"Expr", "Schedule", "Priority", "EffectiveFrom", "EffectiveTo", "Enabled",
-		"CreatedBy", "CreatedAt", "UpdatedAt", "DeclaredKeys", "ExprErr",
+		"CreatedBy", "CreatedAt", "UpdatedAt", "DeclaredKeys", "ExprErr", "ScheduleErr",
 	}
 
 	typ := reflect.TypeOf(RuleInfo{})

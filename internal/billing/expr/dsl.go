@@ -141,8 +141,9 @@ var funcSchemas = map[string]any{
 	"isHoliday": func() (bool, error) {
 		return false, nil
 	},
-	// holidayName 返回节假日名，非节假日为空串。字符串只能出现在条件位置
-	//（见 isConditionOperator），所以规则里它的用法收束到 `==` 与 `in`。
+	// holidayName 返回节假日名，非节假日为空串。它返回的是字符串：形状检查
+	//（见 walkShape）只管用法变量的位置，把字符串放进单价位置在编译期不被
+	// 拦，求值期才拒绝。所以表生成器只把它用在条件位置（`==` 与 `in`）。
 	"holidayName": func() (string, error) {
 		return "", nil
 	},

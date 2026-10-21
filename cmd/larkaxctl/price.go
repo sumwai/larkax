@@ -88,7 +88,7 @@ changed_by（这一版是谁改的，只在表达式真的变了、留了一版�
 表达式在写入前会编译一次，编译不过的命令直接失败。
 
 结构化定价表用 --schedule-file 给一份 JSON：base 是兜底单价，overrides 按
-weekdays / window / day_kind / holidays / min_prompt_tokens 分行改写单价，
+weekdays / window / day_kind / holidays / min_context_tokens 分行改写单价，
 跨维度的两条用 position 裁决（大的优先）。--expr 与 --schedule-file 二选一：
 给了表时表达式由它编译得出，读取与求值仍然走表达式那一份。
 
@@ -814,6 +814,7 @@ func priceShowDoc(r pricing.RuleInfo) map[string]any {
 	doc["rule"] = ruleEntry(r)
 	doc["expr"] = r.Expr
 	doc["schedule"] = r.Schedule
+	doc["schedule_error"] = nullableError(r.ScheduleErr)
 	return doc
 }
 
@@ -821,6 +822,12 @@ func priceShowDoc(r pricing.RuleInfo) map[string]any {
 func printRuleShow(w io.Writer, r pricing.RuleInfo) {
 	_, _ = fmt.Fprintf(w, "规则 %d：%s（作用域=%s，优先级=%d）\n",
 		r.ID, r.Name, r.Scope, r.Priority)
+	// 单条读取（Get）遇到坏表会当场报错，所以这一支今天走不到；留着是为了
+	// 与清单那一档对齐——将来若 show 改走不报错的读法，它不该把坏表渲染成
+	// «手写表达式»。
+	if r.ScheduleErr != nil {
+		_, _ = fmt.Fprintf(w, "结构化定价表解不开：%v\n", r.ScheduleErr)
+	}
 	if r.Schedule == nil {
 		_, _ = fmt.Fprintln(w, "表达式：")
 		_, _ = fmt.Fprintln(w, r.Expr)
@@ -899,6 +906,7 @@ func ruleEntry(r pricing.RuleInfo) map[string]any {
 		"effective_to":   jsonTimePtr(r.EffectiveTo),
 		"quota_keys":     jsonList(r.DeclaredKeys),
 		"expr_error":     nullableError(r.ExprErr),
+		"schedule_error": nullableError(r.ScheduleErr),
 	}
 }
 
@@ -995,6 +1003,11 @@ func printRuleTable(w io.Writer, rules []pricing.RuleInfo, verdictOf func(int) s
 	for _, r := range rules {
 		if r.ExprErr != nil {
 			_, _ = fmt.Fprintf(w, "规则 %d 的表达式编译不过：%v\n", r.ID, r.ExprErr)
+		}
+		// 坏表与坏表达式同一个位置、同一个理由：不说明的话，这一行看起来
+		// 就是一条手写规则，而它其实有一张解不开的表。
+		if r.ScheduleErr != nil {
+			_, _ = fmt.Fprintf(w, "规则 %d 的定价表解不开：%v\n", r.ID, r.ScheduleErr)
 		}
 	}
 }

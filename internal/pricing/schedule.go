@@ -63,11 +63,14 @@ type ScheduleOverride struct {
 	// DayKind 是「工作日 / 休息日」，取值 work 或 rest。
 	DayKind string `json:"day_kind,omitempty"`
 
-	// Holidays 是适用的节假日名，例如 ["春节", "国庆节"]。
+	// Holidays 是适用的节假日名，例如 ["春节", "国庆节"]。它只匹配**放假
+	// 的那几天**：调休上班日也带着节日名（例如春节前后挪用周末上班的那天），
+	// 编译出来的条件因此还要 `!isWorkday()`。
 	Holidays []string `json:"holidays,omitempty"`
 
-	// MinPromptTokens 是输入侧上下文长度的下界（len > 该值才命中）。
-	MinPromptTokens *int64 `json:"min_prompt_tokens,omitempty"`
+	// MinContextTokens 是输入侧上下文长度的下界（len > 该值才命中）。
+	// len 含缓存读写，所以名字用 context 而不是 prompt。
+	MinContextTokens *int64 `json:"min_context_tokens,omitempty"`
 
 	// Prices 是这条覆盖改写的单价。它打平在 override 对象的顶层，
 	// 不另占一个 JSON 字段。
@@ -283,12 +286,12 @@ func (o *ScheduleOverride) UnmarshalJSON(data []byte) error {
 			if err := json.Unmarshal(value, &out.Holidays); err != nil {
 				return fmt.Errorf("holidays 必须是字符串数组: %w", err)
 			}
-		case "min_prompt_tokens":
+		case "min_context_tokens":
 			var v int64
 			if err := json.Unmarshal(value, &v); err != nil {
-				return fmt.Errorf("min_prompt_tokens 必须是整数: %w", err)
+				return fmt.Errorf("min_context_tokens 必须是整数: %w", err)
 			}
-			out.MinPromptTokens = &v
+			out.MinContextTokens = &v
 		case "units":
 			return errors.New("不支持 units：计量项表没有单值可以排成一条链，" +
 				"要按计量项定价请写表达式")
@@ -296,7 +299,7 @@ func (o *ScheduleOverride) UnmarshalJSON(data []byte) error {
 			var v float64
 			if err := json.Unmarshal(value, &v); err != nil {
 				return fmt.Errorf("字段 %q 既不是条件也不是数值单价；"+
-					"可用的条件字段是 position、weekdays、window、day_kind、holidays、min_prompt_tokens，"+
+					"可用的条件字段是 position、weekdays、window、day_kind、holidays、min_context_tokens，"+
 					"单价键是 %s", key, scheduleSlotList())
 			}
 			out.Prices[key] = v
@@ -327,8 +330,8 @@ func (o ScheduleOverride) MarshalJSON() ([]byte, error) {
 	if len(o.Holidays) > 0 {
 		out["holidays"] = o.Holidays
 	}
-	if o.MinPromptTokens != nil {
-		out["min_prompt_tokens"] = *o.MinPromptTokens
+	if o.MinContextTokens != nil {
+		out["min_context_tokens"] = *o.MinContextTokens
 	}
 	return json.Marshal(out)
 }
@@ -461,11 +464,11 @@ func (o *ScheduleOverride) normalize(index int, base map[string]float64) (schedu
 		pos := *o.Position
 		rule.position = &pos
 	}
-	if o.MinPromptTokens != nil {
-		if *o.MinPromptTokens <= 0 {
-			return scheduleRule{}, fmt.Errorf("%s 非法: 门槛必须大于 0", where("min_prompt_tokens"))
+	if o.MinContextTokens != nil {
+		if *o.MinContextTokens <= 0 {
+			return scheduleRule{}, fmt.Errorf("%s 非法: 门槛必须大于 0", where("min_context_tokens"))
 		}
-		minTok := *o.MinPromptTokens
+		minTok := *o.MinContextTokens
 		rule.minTok = &minTok
 	}
 
@@ -531,7 +534,8 @@ func (o *ScheduleOverride) normalize(index int, base map[string]float64) (schedu
 	sort.Strings(rule.holidays)
 	o.Holidays = rule.holidays
 
-	// 节假日必然是休息日：同时写 work 与 holidays 是一条自相矛盾的条件。
+	// holidays 只匹配放假的那几天（编译时带 !isWorkday()），与 work 是
+	// 一对自相矛盾的条件。
 	if o.DayKind == "work" && len(rule.holidays) > 0 {
 		return scheduleRule{}, fmt.Errorf("%s 自相矛盾: 节假日必然是休息日，"+
 			"day_kind=\"work\" 与 holidays 不能同时出现", where("条件"))
@@ -577,10 +581,10 @@ func checkScheduleConflicts(rules []scheduleRule) error {
 				continue
 			case relationSameDimension:
 				return fmt.Errorf("%s 在同一维度上重叠：同一个维度写两次时，"+
-					"哪一条先命中取决于 position，而这里没有唯一的答案；"+
-					"合并成一条，或者拆到互不重叠的取值上", pair)
+					"先后没有唯一答案——门槛与门槛之间会自动按大小排，但门槛与同维度的条件"+
+					"暂不支持一起分层；合并成一条，或者拆到互不重叠的取值上", pair)
 			case relationOrderConflict:
-				return fmt.Errorf("%s 的 position 与 min_prompt_tokens 门槛方向相反："+
+				return fmt.Errorf("%s 的 position 与 min_context_tokens 门槛方向相反："+
 					"门槛高的那一档更具体、应当先命中，所以它的 position 也要更大", pair)
 			}
 
@@ -622,7 +626,7 @@ const (
 //	时段 × 时段      按分钟集合判，跨零点也按同一套算
 //	节假日 × 节假日  名字交集
 //	工作日/休息日     work 与 rest 不相交
-//	节假日 × work     节假日必然是休息日，与 work 不相交
+//	节假日 × work     holidays 只匹配休息日，与 work 不相交
 //	星期 × 休息日     不确定（调休补班把某个周六变成工作日）
 //	星期 × 节假日     不确定（节假日可以落在任何星期）
 //	用量门槛、时段与其余维度   相容，不构成「不相交」的依据
@@ -645,7 +649,8 @@ func scheduleRelation(a, b scheduleRule) scheduleRelationKind {
 	if a.dayKind != "" && b.dayKind != "" && a.dayKind != b.dayKind {
 		return relationDisjoint
 	}
-	// 节假日必然是休息日：与 work 的两条永远碰不到一起。
+	// holidays 只匹配休息日（编译时带 !isWorkday()），与 work 的两条永远
+	// 碰不到一起。
 	if len(a.holidays) > 0 && b.dayKind == "work" {
 		return relationDisjoint
 	}
@@ -792,7 +797,11 @@ func (r scheduleRule) condition(tz string) string {
 		for _, name := range r.holidays {
 			quoted = append(quoted, strconv.Quote(name))
 		}
-		parts = append(parts, fmt.Sprintf("holidayName() in [%s]", strings.Join(quoted, ", ")))
+		// 只比名字不够：调休上班日也带着节日名（例如春节前后挪用周末
+		// 上班的那天），那些天是工作日。holidays 指的是「放假的那几天」，
+		// 所以再加一道 !isWorkday()。
+		parts = append(parts, fmt.Sprintf(
+			"(holidayName() in [%s] && !isWorkday())", strings.Join(quoted, ", ")))
 	}
 	if r.minTok != nil {
 		parts = append(parts, fmt.Sprintf("len > %d", *r.minTok))

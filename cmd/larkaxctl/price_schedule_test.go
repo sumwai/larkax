@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/sumwai/larkax/internal/pricing"
 )
 
 // cliSchedule 是一份只用到星期维度的定价表：它不需要日历，所以能在一台
@@ -245,4 +250,42 @@ func TestPriceUpdateScheduleNeedsClearSchedule(t *testing.T) {
 	if strings.Contains(out, "结构化定价表") {
 		t.Errorf("清表之后 show 仍在打表：\n%s", out)
 	}
+}
+
+// TestPriceRendersBrokenSchedule 钉住「解不开的表在两条渲染路径上都说得出话」。
+//
+// 清单对坏表是降级的（那一行照常出），所以渲染层必须把原因打出来：只把
+// Schedule 留成 nil 的话，这一行看起来就是一条手写表达式规则——而降级正是
+// 为了不把那行藏起来。人读一档与 JSON 一档各断一次，show 的两条路径也各断
+// 一次：只补一处时，另一处会静默地少一句话。
+func TestPriceRendersBrokenSchedule(t *testing.T) {
+	reason := errors.New("规则 9 的 schedule 不是合法的定价表: 定价表解析失败")
+	rules := []pricing.RuleInfo{{
+		ID: 9, Scope: "platform", Name: "坏表", Enabled: true,
+		EffectiveFrom: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		Expr:          `{"prompt": 1}`,
+		ScheduleErr:   reason,
+	}}
+
+	var human bytes.Buffer
+	printRuleList(&human, rules)
+	for _, want := range []string{"规则 9 的定价表解不开：", reason.Error()} {
+		if !strings.Contains(human.String(), want) {
+			t.Errorf("清单的人读输出里没有 %q：\n%s", want, human.String())
+		}
+	}
+
+	doc := jsonRoundTrip(t, priceListDoc(rules))
+	entry := jsonEntries(t, doc, "rules")[0].(map[string]any)
+	assertJSONField(t, entry, "schedule_error", reason.Error())
+	assertJSONField(t, entry, "expr_error", nil)
+
+	var showHuman bytes.Buffer
+	printRuleShow(&showHuman, rules[0])
+	if !strings.Contains(showHuman.String(), "结构化定价表解不开：") {
+		t.Errorf("show 的人读输出里没有坏表那一行：\n%s", showHuman.String())
+	}
+
+	showDoc := jsonRoundTrip(t, priceShowDoc(rules[0]))
+	assertJSONField(t, showDoc, "schedule_error", reason.Error())
 }
