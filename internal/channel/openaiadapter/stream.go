@@ -26,7 +26,10 @@ import (
 // status 是这条流对应响应的状态码（调用方已经过了 CheckStatus，所以它是
 // 2xx）。流里的错误都发生在**响应头之后**，所以它们都是「拿到过响应」的
 // 失败——把它带进错误里，下游才不用猜。
-func (a *Adapter) pump(ctx context.Context, status int, body io.Reader, events chan<- channel.StreamEvent) {
+//
+// completionIncludesReasoning 是渠道声明的用量口径（见
+// channel.UsageCompletionIncludesReasoning），原样交给 relay.UsageFromRelaykit。
+func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReasoning bool, body io.Reader, events chan<- channel.StreamEvent) {
 	scanner := bufio.NewScanner(body)
 	// 单个分片可能很大（长文本的一次性增量、或 base64 图片）。
 	// 默认的 64KB 上限会让合法的响应被判为「读取失败」。
@@ -87,7 +90,7 @@ func (a *Adapter) pump(ctx context.Context, status int, body io.Reader, events c
 		}
 
 		if chunk.Usage != nil {
-			usage := relay.UsageFromRelaykit(chunk.Usage.toRelaykit())
+			usage := relay.UsageFromRelaykit(chunk.Usage.toRelaykit(), completionIncludesReasoning)
 			events <- channel.StreamEvent{Kind: "usage", Usage: &usage}
 		}
 

@@ -38,7 +38,10 @@ import (
 // status 是这条流对应响应的状态码（调用方已经过了 CheckStatus，所以它是
 // 2xx）。流里的错误都发生在**响应头之后**，所以它们都是「拿到过响应」的
 // 失败——把它带进错误里，下游才不用猜。
-func (a *Adapter) pump(ctx context.Context, status int, body io.Reader, events chan<- channel.StreamEvent) {
+//
+// completionIncludesReasoning 是渠道声明的用量口径（见
+// channel.UsageCompletionIncludesReasoning），原样交给 relay.UsageFromRelaykit。
+func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReasoning bool, body io.Reader, events chan<- channel.StreamEvent) {
 	scanner := bufio.NewScanner(body)
 	// 单个事件可能很大：长文本的一次性增量、或一整段 tool 参数。
 	// 默认的 64KB 上限会把合法响应判为读取失败。
@@ -73,9 +76,9 @@ func (a *Adapter) pump(ctx context.Context, status int, body io.Reader, events c
 	// 第三份实现——两份实现各加一次时，整段 prompt 命中缓存
 	// （input_tokens == 0）的请求会把缓存算两遍。
 	//
-	// CompletionIncludesReasoning 由 UsageFromRelaykit 声明为 true：
-	// Anthropic 的 output_tokens 含扩展思考的 token，而协议不单独报
-	// 推理量，所以这里也不填 ReasoningTokens。
+	// 推理口径由渠道声明（completionIncludesReasoning）：Anthropic 的
+	// output_tokens 含扩展思考的 token，而协议不单独报推理量，所以这里也
+	// 不填 ReasoningTokens；声明缺省时沿用「已含」。
 	usageOf := func() channel.Usage {
 		return relay.UsageFromRelaykit(&dto.Usage{
 			PromptTokens:     int(inputTokens),
@@ -86,7 +89,7 @@ func (a *Adapter) pump(ctx context.Context, status int, body io.Reader, events c
 			},
 			UsageSource:   dto.BillingUsageSourceClaudeMessages,
 			UsageSemantic: dto.BillingUsageSemanticAnthropic,
-		})
+		}, completionIncludesReasoning)
 	}
 
 	emitUsage := func() {

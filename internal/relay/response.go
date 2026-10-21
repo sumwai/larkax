@@ -67,10 +67,15 @@ import (
 // # 其余字段
 //
 //   - ReasoningTokens 照抄 CompletionTokenDetails.ReasoningTokens，
-//     CompletionTokens 也照抄——而在这套口径下推理**是**输出的一部分
-//     （见下面 CompletionIncludesReasoning 处的说明）。两者在这里并不互斥，
-//     减掉推理是计费层的事。
-func UsageFromRelaykit(u *dto.Usage) channel.Usage {
+//     CompletionTokens 也照抄——两者是不是互斥，由调用方按渠道的声明传入，
+//     这里只如实记下。减掉推理是计费层的事。
+//
+// completionIncludesReasoning 是渠道声明的口径（见
+// channel.UsageCompletionIncludesReasoning）：true 表示 CompletionTokens
+// 已经含推理（OpenAI 与 Anthropic 的定义），false 表示上游把两者分列。
+// 这里**不按数字推断**——completion=18、reasoning=30 既可能是「推理比输出
+// 多」，也可能是「可见输出 18、推理 30」，换一家上游就会反过来。
+func UsageFromRelaykit(u *dto.Usage, completionIncludesReasoning bool) channel.Usage {
 	if u == nil {
 		return channel.Usage{}
 	}
@@ -118,17 +123,14 @@ func UsageFromRelaykit(u *dto.Usage) channel.Usage {
 		CacheReadTokens:  cacheRead,
 		CacheWriteTokens: cacheWrite,
 		ReasoningTokens:  reasoning,
-		// dto.Usage 是 OpenAI 语义的形状，而它的规范化正是把推理并进输出里的：
-		// dto.BillingUsage 在把 Gemini 的用量折成这一形状时写的是
-		// CompletionTokens = CandidatesTokenCount + ThoughtsTokenCount，同时把
-		// ThoughtsTokenCount 记进 CompletionTokenDetails.ReasoningTokens。
-		// OpenAI 自己的定义也一样——completion_tokens 含
-		// completion_tokens_details.reasoning_tokens。
-		//
-		// Anthropic 口径（InputTokens/OutputTokens）同样如此：output_tokens
-		// 含扩展思考的 token，而协议不单独报推理量，所以 ReasoningTokens 恒为 0，
-		// 声明成「已含」在数值上是空的。
-		CompletionIncludesReasoning: true,
+		// 口径由渠道声明，不在这里推断：dto.Usage 是 OpenAI 语义的形状，
+		// 规范化时推理并进输出（dto.BillingUsage 把 Gemini 的用量折成这一
+		// 形状时写的是 CompletionTokens = CandidatesTokenCount +
+		// ThoughtsTokenCount），Anthropic 的 output_tokens 同样含扩展思考的
+		// token——但有的 OpenAI 兼容上游把两者分列（DeepSeek 就是这样）。
+		// 两种口径在上游都真实存在，光看数字判别不了，所以知不知道协议约定
+		// 决定这一位，由适配器读渠道的 setting 传进来。
+		CompletionIncludesReasoning: completionIncludesReasoning,
 		UnitCounts:                  unitCountsFromRelaykit(u),
 		// 生产方只在确实解析到 usage 块时才填 UsageSource（三个适配器的
 		// toRelaykit 都只在那一支里被调用），所以这一位就是「块在不在」的
@@ -194,14 +196,17 @@ func rawUsage(u *dto.Usage, hasCounts bool) map[string]any {
 //
 // src 允许是 OpenAI 形状、Claude 形状或 Responses 形状：上游说什么协议是
 // 适配器决定的，而计费与路由不关心那个。三条路径在这里汇合。
-func ResponseFromRelaykit(src any) (*channel.Response, error) {
+//
+// completionIncludesReasoning 是渠道声明的用量口径，三条路径都把它原样交给
+// UsageFromRelaykit（见那里的注释）。
+func ResponseFromRelaykit(src any, completionIncludesReasoning bool) (*channel.Response, error) {
 	switch v := src.(type) {
 	case *dto.OpenAITextResponse:
-		return fromOpenAIResponse(v)
+		return fromOpenAIResponse(v, completionIncludesReasoning)
 	case *dto.ClaudeResponse:
-		return fromClaudeResponse(v)
+		return fromClaudeResponse(v, completionIncludesReasoning)
 	case *dto.OpenAIResponsesResponse:
-		return fromResponsesResponse(v)
+		return fromResponsesResponse(v, completionIncludesReasoning)
 	default:
 		return nil, fmt.Errorf("不认识的响应类型 %T", src)
 	}
@@ -222,7 +227,7 @@ func ResponseFromRelaykit(src any) (*channel.Response, error) {
 //     的做法一致——换算只在 UsageFromRelaykit 里发生一次。
 //  2. 那个函数返回的用量是拿 r.Usage 再按 Responses 口径读一遍的产物，
 //     两份都留着就会出现「哪一个算数」的问题，而它们迟早会分岔。
-func fromResponsesResponse(r *dto.OpenAIResponsesResponse) (*channel.Response, error) {
+func fromResponsesResponse(r *dto.OpenAIResponsesResponse, completionIncludesReasoning bool) (*channel.Response, error) {
 	if r == nil {
 		return nil, fmt.Errorf("响应为 nil")
 	}
@@ -234,7 +239,7 @@ func fromResponsesResponse(r *dto.OpenAIResponsesResponse) (*channel.Response, e
 
 	out := &channel.Response{
 		UpstreamModel: r.Model,
-		Usage:         UsageFromRelaykit(r.Usage),
+		Usage:         UsageFromRelaykit(r.Usage, completionIncludesReasoning),
 	}
 	if len(chat.Choices) > 0 {
 		out.FinishReason = chat.Choices[0].FinishReason
@@ -262,14 +267,14 @@ func fromResponsesResponse(r *dto.OpenAIResponsesResponse) (*channel.Response, e
 	return out, nil
 }
 
-func fromOpenAIResponse(r *dto.OpenAITextResponse) (*channel.Response, error) {
+func fromOpenAIResponse(r *dto.OpenAITextResponse, completionIncludesReasoning bool) (*channel.Response, error) {
 	if r == nil {
 		return nil, fmt.Errorf("响应为 nil")
 	}
 
 	out := &channel.Response{
 		UpstreamModel: r.Model,
-		Usage:         UsageFromRelaykit(&r.Usage),
+		Usage:         UsageFromRelaykit(&r.Usage, completionIncludesReasoning),
 	}
 
 	if len(r.Choices) > 0 {
@@ -290,7 +295,7 @@ func fromOpenAIResponse(r *dto.OpenAITextResponse) (*channel.Response, error) {
 	return out, nil
 }
 
-func fromClaudeResponse(r *dto.ClaudeResponse) (*channel.Response, error) {
+func fromClaudeResponse(r *dto.ClaudeResponse, completionIncludesReasoning bool) (*channel.Response, error) {
 	if r == nil {
 		return nil, fmt.Errorf("响应为 nil")
 	}
@@ -344,7 +349,7 @@ func fromClaudeResponse(r *dto.ClaudeResponse) (*channel.Response, error) {
 			ClaudeCacheCreation1hTokens: r.Usage.ClaudeCacheCreation1hTokens,
 			UsageSource:                 dto.BillingUsageSourceClaudeMessages,
 			UsageSemantic:               dto.BillingUsageSemanticAnthropic,
-		})
+		}, completionIncludesReasoning)
 	}
 
 	raw, err := toRawMap(r)

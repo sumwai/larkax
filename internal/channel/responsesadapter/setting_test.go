@@ -29,6 +29,87 @@ func effortMap(table map[string]any) map[string]any {
 	return map[string]any{"reasoning_effort_map": table}
 }
 
+// usageSetting 拼一块 {"usage": {"completion_includes_reasoning": v}} 形状的
+// 渠道配置。键名写成字面量：它是这条判据的输入。
+func usageSetting(v bool) map[string]any {
+	return map[string]any{"usage": map[string]any{"completion_includes_reasoning": v}}
+}
+
+// 推理口径按渠道声明走，非流式与流式两条路都要传下去。
+//
+// Responses 把推理嵌在 output_tokens_details 里，`toRelaykit` 只负责把它搬到
+// dto.Usage 的并列位置；「已含还是互斥」由适配器从渠道 setting 读出来交给
+// relay.UsageFromRelaykit。这里从 setting 一路断言到 channel.Usage：只验读
+// 函数证明不了适配器真的传了，而那种漏传在金额上表现为少收或重复收一次。
+func TestChatUsageDeclaration(t *testing.T) {
+	const body = `{"id":"r1","model":"m","status":"completed","output":[],` +
+		`"usage":{"input_tokens":10,"output_tokens":18,"total_tokens":58,` +
+		`"input_tokens_details":{"cached_tokens":0},` +
+		`"output_tokens_details":{"reasoning_tokens":30}}}`
+
+	cases := []struct {
+		name    string
+		setting map[string]any
+		want    bool
+	}{
+		{"没声明时按已含", nil, true},
+		{"声明 false", usageSetting(false), false},
+		{"声明 true", usageSetting(true), true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, _ := captureServer(t, http.StatusOK, body)
+
+			ch := testChannel(srv.URL)
+			ch.Setting = tc.setting
+			resp, err := newAdapter().Chat(context.Background(), ch, textRequest())
+			if err != nil {
+				t.Fatalf("出错: %v", err)
+			}
+			if resp.Usage.CompletionIncludesReasoning != tc.want {
+				t.Errorf("CompletionIncludesReasoning = %v，期望 %v",
+					resp.Usage.CompletionIncludesReasoning, tc.want)
+			}
+			// 声明只改这一位：两个数字照抄上游报的。
+			if resp.Usage.CompletionTokens != 18 || resp.Usage.ReasoningTokens != 30 {
+				t.Errorf("用量被改动了: %+v", resp.Usage)
+			}
+		})
+	}
+}
+
+// 流式那一支单独验一遍：它走 pump 的终态事件，与非流式不是同一条路。
+func TestChatStreamUsageDeclaration(t *testing.T) {
+	srv := sseServer(t,
+		`data: {"type":"response.completed","response":{"id":"r1","model":"m","status":"completed","usage":{"input_tokens":10,"output_tokens":18,"total_tokens":58,"output_tokens_details":{"reasoning_tokens":30}}}}`,
+	)
+
+	for _, declared := range []bool{true, false} {
+		ch := testChannel(srv.URL)
+		ch.Setting = usageSetting(declared)
+		events, err := newAdapter().ChatStream(context.Background(), ch, &channel.Request{
+			Model: "m", Stream: true, Messages: textRequest().Messages,
+		})
+		if err != nil {
+			t.Fatalf("出错: %v", err)
+		}
+
+		var got *channel.Usage
+		for _, ev := range collect(t, events) {
+			if ev.Kind == "usage" {
+				got = ev.Usage
+			}
+		}
+		if got == nil {
+			t.Fatalf("声明 %v 时没有 usage 事件", declared)
+		}
+		if got.CompletionIncludesReasoning != declared {
+			t.Errorf("声明 %v 时 CompletionIncludesReasoning = %v", declared, got.CompletionIncludesReasoning)
+		}
+	}
+}
+
 // TestChatReasoningEffortBody 把每种情况比完整报文，而不是只断言字段在不在。
 //
 // 要证明「没配映射表的渠道与没有这张表时逐字一致」，只能整串比：一个错位的

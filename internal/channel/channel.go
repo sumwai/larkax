@@ -122,10 +122,11 @@ type Channel struct {
 	// # 今天哪些键有读者
 	//
 	// 由渠道的 type 决定：openai 与 openai-responses 两个适配器读
-	// reasoning_effort_map 这一个键（翻译在 ReasoningEffortDialect，
-	// 见本包的 reasoning_effort.go），其余适配器与选路层仍不读这里的任何键。
-	// 这张「类型 → 键」的对应关系在 settingKeysByType 里（见 setting.go），
-	// 管理面据此在写入之后与列举时把没有读者的键逐个点出来
+	// reasoning_effort_map 与 usage 两个键（翻译在 ReasoningEffortDialect，
+	// 见本包的 reasoning_effort.go；用量口径在 UsageCompletionIncludesReasoning，
+	// 见本包的 usage_setting.go）；anthropic 只读 usage。其余适配器与选路层
+	// 仍不读这里的任何键。这张「类型 → 键」的对应关系在 settingKeysByType 里
+	// （见 setting.go），管理面据此在写入之后与列举时把没有读者的键逐个点出来
 	// （见 SettingUnreadNote）。
 	Setting map[string]any
 }
