@@ -137,6 +137,37 @@ describe('运营视图的角色门槛', () => {
     expect(screen.getByRole('button', { name: label })).toHaveAttribute('aria-pressed', 'true')
   })
 
+  it('admin 的切换器只有用户与管理', async () => {
+    await open('admin', '/app/admin/channels')
+
+    expect(screen.getByRole('button', { name: '用户' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '管理' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByRole('button', { name: '商家' })).not.toBeInTheDocument()
+  })
+
+  it.each(['/app/merchant/channels', '/app/merchant/pricing'])(
+    'admin 直接敲 %s 落到无权限页',
+    async (path) => {
+      await open('admin', path)
+
+      expect(await screen.findByText('这个视图不在你的权限范围内。')).toBeInTheDocument()
+      expect(screen.getByRole('link', { name: '回到概览' })).toHaveAttribute('href', '/app')
+      // 无权限页不该顺手把数据也拉一遍。
+      expect(mocks.listChannels).not.toHaveBeenCalled()
+      expect(mocks.listRules).not.toHaveBeenCalled()
+    },
+  )
+
+  it('merchant 仍是用户与商家两个视图', async () => {
+    await open('merchant', '/app/merchant/channels')
+
+    expect(screen.getByRole('button', { name: '用户' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '商家' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByRole('button', { name: '管理' })).not.toBeInTheDocument()
+    // 两个页面本身是否进得去由上面「有计价页」「进得到自己的渠道页」两条钉住。
+    expect(await screen.findByText('还没有渠道')).toBeInTheDocument()
+  })
+
   it('无权限页留一个回到概览的出口', async () => {
     await open('merchant', '/app/admin/channels')
     expect(await screen.findByText('这个视图不在你的权限范围内。')).toBeInTheDocument()
