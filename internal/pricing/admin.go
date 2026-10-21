@@ -270,6 +270,34 @@ type UpdateRequest struct {
 // 非法组合没有这个问题：它只会让规则「多一栏被忽略」或「一条都匹配不上」，
 // 都不会让它在线上算错钱。
 func (a *Admin) Update(ctx context.Context, req UpdateRequest) error {
+	return a.update(ctx, req, 0)
+}
+
+// UpdateOwned 修改一条**属于 ownerID** 的商家规则。
+//
+// 归属判在 FOR UPDATE 那条读语句的 WHERE 里（见 lockOwnedRuleQuery），而不是
+// 先读出来再在调用点比一次：后者每一处调用都要记得比，而漏掉的那一处返回
+// 的是别人规则的修改结果。不属于自己、不存在、平台规则（owner 为 NULL）
+// 三者同报 ErrRuleNotFound，于是调用方只有一条 404 分支。
+//
+// # 商家不能改作用域与归属
+//
+// scope / owner_user_id / channel_id 一改，这条规则就可能变成平台规则或挂到
+// 别人的渠道上，而 validateRule 只判「形状合法」：merchant 作用域 + 自己的
+// owner 改成 platform + owner 0 是一次合法的写入。所以这一层直接拒绝这三个
+// 字段，不给「把一个自己有的东西变成全局影响」留路径。
+func (a *Admin) UpdateOwned(ctx context.Context, ownerID int64, req UpdateRequest) error {
+	if ownerID <= 0 {
+		return errors.New("用户 id 无效")
+	}
+	if req.Scope != nil || req.OwnerUserID != nil || req.ChannelID != nil {
+		return errors.New("商家不能改规则的作用域与归属：scope、owner_user_id、channel_id 只由 admin 设置")
+	}
+	return a.update(ctx, req, ownerID)
+}
+
+// update 是 Update 与 UpdateOwned 的共同实现；ownerID 为 0 表示不按归属限制。
+func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) error {
 	if req.ID <= 0 {
 		return errors.New("计价规则 id 无效")
 	}
@@ -288,7 +316,7 @@ func (a *Admin) Update(ctx context.Context, req UpdateRequest) error {
 	// 提交之后这里的 Rollback 返回 ErrTxDone，无害。
 	defer func() { _ = tx.Rollback() }()
 
-	current, err := loadRuleForUpdate(ctx, tx, req.ID)
+	current, err := loadRuleForUpdate(ctx, tx, req.ID, ownerID)
 	if err != nil {
 		return err
 	}
@@ -498,7 +526,49 @@ type RuleInfo struct {
 // 这与 channels.List 对一行坏密文的处置一致——那里是解不开的信封，
 // 这里是编不过的表达式。
 func (a *Admin) List(ctx context.Context) ([]RuleInfo, error) {
-	rows, err := a.db.QueryContext(ctx, listQuery)
+	return a.queryRules(ctx, listQuery)
+}
+
+// ListOwned 列出一位商家自己的规则（scope='merchant' 且 owner 是自己）。
+//
+// 平台规则不在结果里：商家拿平台价去压自己的定价，会让人以为平台价可协商；
+// 而「可见只读」还要在每一处读点再判一次能不能改。
+func (a *Admin) ListOwned(ctx context.Context, ownerID int64) ([]RuleInfo, error) {
+	if ownerID <= 0 {
+		return nil, errors.New("用户 id 无效")
+	}
+	return a.queryRules(ctx, listOwnedQuery, ownerID)
+}
+
+// Get 按 id 读一条规则。
+func (a *Admin) Get(ctx context.Context, id int64) (RuleInfo, error) {
+	return a.rule(ctx, ruleByIDQuery, id)
+}
+
+// GetOwned 按「归属 + id」读一条规则。不属于自己、不存在、平台规则同报
+// ErrRuleNotFound。
+func (a *Admin) GetOwned(ctx context.Context, ownerID, id int64) (RuleInfo, error) {
+	if ownerID <= 0 {
+		return RuleInfo{}, errors.New("用户 id 无效")
+	}
+	return a.rule(ctx, ownedRuleQuery, id, ownerID)
+}
+
+// rule 跑一条返回单行的查询并填好派生字段。
+func (a *Admin) rule(ctx context.Context, query string, args ...any) (RuleInfo, error) {
+	info, err := scanRuleInfo(a.db.QueryRowContext(ctx, query, args...))
+	if errors.Is(err, sql.ErrNoRows) {
+		return RuleInfo{}, ErrRuleNotFound
+	}
+	if err != nil {
+		return RuleInfo{}, err
+	}
+	return decorate(info), nil
+}
+
+// queryRules 跑一条返回多行的查询，按裁决次序扫成 RuleInfo。
+func (a *Admin) queryRules(ctx context.Context, query string, args ...any) ([]RuleInfo, error) {
+	rows, err := a.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("查询计价规则失败: %w", err)
 	}
@@ -628,6 +698,39 @@ var lockRuleQuery = `
 	 WHERE r.id = $1
 	   FOR UPDATE`
 
+// lockOwnedRuleQuery 是归属受限的同一件事：只有商家自己的 merchant 规则。
+//
+// owner_user_id 为 NULL 的平台规则不匹配任何用户 id，所以平台价对商家既看
+// 不见也改不了——这正是「不可见比只读更干净」那一条的落点。
+var lockOwnedRuleQuery = `
+	SELECT ` + ruleColumns + `
+	  FROM pricing_rules r
+	 WHERE r.id = $1
+	   AND r.scope = 'merchant'
+	   AND r.owner_user_id = $2
+	   FOR UPDATE`
+
+// ruleByIDQuery 与 ownedRuleQuery 是单条读取（Get / GetOwned）。
+var ruleByIDQuery = `
+	SELECT ` + ruleColumns + `
+	  FROM pricing_rules r
+	 WHERE r.id = $1`
+
+var ownedRuleQuery = `
+	SELECT ` + ruleColumns + `
+	  FROM pricing_rules r
+	 WHERE r.id = $1
+	   AND r.scope = 'merchant'
+	   AND r.owner_user_id = $2`
+
+// listOwnedQuery 列出一位商家自己的规则，按裁决次序。
+var listOwnedQuery = `
+	SELECT ` + ruleColumns + `
+	  FROM pricing_rules r
+	 WHERE r.scope = 'merchant'
+	   AND r.owner_user_id = $1
+	 ORDER BY ` + ruleOrderBy
+
 // ── 读取与编译 ──────────────────────────────────────────────────────────
 
 // rowScanner 同时覆盖 *sql.Row 与 *sql.Rows。
@@ -686,8 +789,12 @@ func decorate(info RuleInfo) RuleInfo {
 // 读-改-写要在一个事务里：校验的对象是「改完之后的那一行」，而那一行由
 // 「库里现在是什么」与「这次改什么」共同决定。分成两条语句的话，两个并发的
 // 修改可以各自通过校验，合起来把这一行留成一个非法状态。
-func loadRuleForUpdate(ctx context.Context, tx *sql.Tx, id int64) (RuleInfo, error) {
-	info, err := scanRuleInfo(tx.QueryRowContext(ctx, lockRuleQuery, id))
+func loadRuleForUpdate(ctx context.Context, tx *sql.Tx, id, ownerID int64) (RuleInfo, error) {
+	query, args := lockRuleQuery, []any{id}
+	if ownerID != 0 {
+		query, args = lockOwnedRuleQuery, []any{id, ownerID}
+	}
+	info, err := scanRuleInfo(tx.QueryRowContext(ctx, query, args...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return RuleInfo{}, fmt.Errorf("%w：id %d", ErrRuleNotFound, id)
 	}

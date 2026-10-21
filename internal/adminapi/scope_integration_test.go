@@ -230,7 +230,7 @@ func channelName(t *testing.T, db *sql.DB, id int64) string {
 }
 
 // TestPrefixAuthorizerAndChannelOnly 钉住可配的三项：前缀、授权中间件、
-// 只注册渠道。默认装配那一条另外判，防的是「加了配置项之后默认值变了」。
+// 按组注册。默认装配那一条另外判，防的是「加了配置项之后默认值变了」。
 func TestPrefixAuthorizerAndChannelOnly(t *testing.T) {
 	const prefix = "/api/v1/merchant/"
 	calls := 0
@@ -240,7 +240,7 @@ func TestPrefixAuthorizerAndChannelOnly(t *testing.T) {
 			next.ServeHTTP(w, r)
 		})
 	}
-	h := testSurface(t, Config{Prefix: prefix, Authorize: passThrough, OnlyChannels: true})
+	h := testSurface(t, Config{Prefix: prefix, Authorize: passThrough, Groups: []string{GroupChannels}})
 
 	// 用一条「路径参数不合法」的请求证明路由在前缀下存在：它在碰库之前就回 400。
 	rec := call(t, h, http.MethodGet, prefix+"channels/not-a-number", "", nil)
@@ -248,10 +248,11 @@ func TestPrefixAuthorizerAndChannelOnly(t *testing.T) {
 		t.Errorf("新前缀下的渠道路由状态码 = %d，期望 400（路径参数）；正文：%s", rec.Code, rec.Body)
 	}
 
-	// 只注册渠道：模型与计价都不在。
-	for _, path := range []string{prefix + "models", prefix + "pricing/rules"} {
+	// 只注册渠道：模型、别名与计价都不在。
+	absent := []string{prefix + "models", prefix + "aliases", prefix + "pricing/rules"}
+	for _, path := range absent {
 		if rec := call(t, h, http.MethodGet, path, "", nil); rec.Code != http.StatusNotFound {
-			t.Errorf("%s 的状态码 = %d，期望 404（merchant 组不该有它）", path, rec.Code)
+			t.Errorf("%s 的状态码 = %d，期望 404（这一组不该有它）", path, rec.Code)
 		}
 	}
 
@@ -260,13 +261,14 @@ func TestPrefixAuthorizerAndChannelOnly(t *testing.T) {
 		t.Errorf("指定前缀之后旧路径的状态码 = %d，期望 404", rec.Code)
 	}
 
-	if calls != 4 {
-		t.Errorf("授权中间件被调用 %d 次，期望 4（它应当包住整组，包括没匹配上的路径）", calls)
+	// 一条存在的路径、len(absent) 条不存在的、一条旧前缀，都该经过授权中间件。
+	if want := 2 + len(absent); calls != want {
+		t.Errorf("授权中间件被调用 %d 次，期望 %d（它应当包住整组，包括没匹配上的路径）", calls, want)
 	}
 }
 
 // TestDefaultAssemblyStillBearer 钉住默认装配：不传 Prefix / Authorize /
-// OnlyChannels 时，仍然是 /admin/v1/ + Bearer。
+// Groups 时，仍然是 /admin/v1/ + Bearer，且资源是全量的。
 func TestDefaultAssemblyStillBearer(t *testing.T) {
 	h := testSurface(t, Config{})
 
@@ -280,4 +282,142 @@ func TestDefaultAssemblyStillBearer(t *testing.T) {
 	if rec := call(t, h, http.MethodGet, PathPrefix+"models", "", nil); rec.Code != http.StatusUnauthorized {
 		t.Errorf("默认装配的模型路由状态码 = %d，期望 401", rec.Code)
 	}
+}
+
+// TestMerchantPricingScope 钉住计价规则的归属面：merchant 组能看到并改
+// 自己的规则；平台规则与别人的规则都是固定正文的 404；创建时作用域与归属
+// 由会话强制。
+func TestMerchantPricingScope(t *testing.T) {
+	h, db := newTestAPI(t)
+	resetToken(t, db)
+	token := issueToken(t, db)
+
+	owner := seedUser(t, db, "pricing-owner-")
+	other := seedUser(t, db, "pricing-other-")
+
+	expr := `{"prompt": 0.1}`
+	mk := func(scope string, ownerUserID int64) int64 {
+		t.Helper()
+		body := map[string]any{
+			"scope": scope, "owner_user_id": ownerUserID,
+			"name": uniqueName("rule"), "expr": expr,
+		}
+		rec := call(t, h, http.MethodPost, PathPrefix+"pricing/rules", token, body)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("建规则状态码 = %d，期望 201；正文：%s", rec.Code, rec.Body)
+		}
+		var created struct {
+			ID int64 `json:"id"`
+		}
+		decode(t, rec, &created)
+		return created.ID
+	}
+	ownID := mk("merchant", owner)
+	otherID := mk("merchant", other)
+	platformID := mk("platform", 0)
+
+	// 商家建的规则：作用域与归属被强制成自己的。
+	rec := callAsOwner(t, h, owner, http.MethodPost, PathPrefix+"pricing/rules", token, map[string]any{
+		"scope": "platform", "owner_user_id": other,
+		"name": uniqueName("forced"), "expr": expr,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("商家建规则状态码 = %d，期望 201；正文：%s", rec.Code, rec.Body)
+	}
+	var created struct {
+		ID int64 `json:"id"`
+	}
+	decode(t, rec, &created)
+	var scope string
+	var storedOwner sql.NullInt64
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT scope, owner_user_id FROM pricing_rules WHERE id = $1`, created.ID).
+		Scan(&scope, &storedOwner); err != nil {
+		t.Fatalf("读规则失败: %v", err)
+	}
+	if scope != "merchant" || !storedOwner.Valid || storedOwner.Int64 != owner {
+		t.Errorf("商家建的规则落库为 scope=%q owner=%v，期望 merchant/%d", scope, storedOwner, owner)
+	}
+
+	// 列表只有自己的。
+	var list []ruleView
+	decode(t, callAsOwner(t, h, owner, http.MethodGet, PathPrefix+"pricing/rules", token, nil), &list)
+	seen := make(map[int64]bool, len(list))
+	for _, item := range list {
+		seen[item.ID] = true
+	}
+	if !seen[ownID] || !seen[created.ID] {
+		t.Errorf("商家清单里缺少自己的规则（own=%v created=%v）", seen[ownID], seen[created.ID])
+	}
+	if seen[otherID] || seen[platformID] {
+		t.Errorf("商家清单里出现了别家或平台规则（other=%v platform=%v）", seen[otherID], seen[platformID])
+	}
+
+	// 单条读：自己的 200；别人的、平台的都是固定正文 404。
+	if rec := callAsOwner(t, h, owner, http.MethodGet, PathPrefix+"pricing/rules/"+itoa(ownID), token, nil); rec.Code != http.StatusOK {
+		t.Errorf("读自己的规则状态码 = %d，期望 200；正文：%s", rec.Code, rec.Body)
+	}
+	bodies := make([]string, 0, 2)
+	for _, id := range []int64{otherID, platformID} {
+		rec := callAsOwner(t, h, owner, http.MethodGet, PathPrefix+"pricing/rules/"+itoa(id), token, nil)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("读规则 %d 状态码 = %d，期望 404；正文：%s", id, rec.Code, rec.Body)
+		}
+		bodies = append(bodies, rec.Body.String())
+	}
+	if bodies[0] != bodies[1] || !strings.Contains(bodies[0], msgNotFound) {
+		t.Errorf("越权 404 的正文不一致或不是固定那句：%s", bodies[0])
+	}
+
+	// 改：别人的与平台的 404；自己的 200。
+	for _, id := range []int64{otherID, platformID} {
+		rec := callAsOwner(t, h, owner, http.MethodPatch, PathPrefix+"pricing/rules/"+itoa(id), token,
+			map[string]any{"priority": 99})
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("改规则 %d 状态码 = %d，期望 404；正文：%s", id, rec.Code, rec.Body)
+		}
+	}
+	if rec := callAsOwner(t, h, owner, http.MethodPatch, PathPrefix+"pricing/rules/"+itoa(ownID), token,
+		map[string]any{"priority": 7}); rec.Code != http.StatusOK {
+		t.Errorf("改自己的规则状态码 = %d，期望 200；正文：%s", rec.Code, rec.Body)
+	}
+
+	// admin（不带归属）能改平台规则。
+	if rec := call(t, h, http.MethodPatch, PathPrefix+"pricing/rules/"+itoa(platformID), token,
+		map[string]any{"priority": 5}); rec.Code != http.StatusOK {
+		t.Errorf("admin 改平台规则状态码 = %d，期望 200；正文：%s", rec.Code, rec.Body)
+	}
+}
+
+// TestGroupSelectionControlsRoutes 钉住按组注册：channels+pricing 有渠道与
+// 计价（含单条读），没有模型与别名；未知组名在装配时 panic。
+func TestGroupSelectionControlsRoutes(t *testing.T) {
+	const prefix = "/api/v1/merchant/"
+	passThrough := func(next http.Handler) http.Handler { return next }
+	h := testSurface(t, Config{
+		Prefix:    prefix,
+		Authorize: passThrough,
+		Groups:    []string{GroupChannels, GroupPricing},
+	})
+
+	// 两条路径参数不合法的请求：都在碰库之前回 400，证明路由存在。
+	for _, path := range []string{prefix + "channels/x", prefix + "pricing/rules/x"} {
+		if rec := call(t, h, http.MethodGet, path, "", nil); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s 的状态码 = %d，期望 400", path, rec.Code)
+		}
+	}
+	for _, path := range []string{prefix + "models", prefix + "aliases"} {
+		if rec := call(t, h, http.MethodGet, path, "", nil); rec.Code != http.StatusNotFound {
+			t.Errorf("%s 的状态码 = %d，期望 404（这一组不含它）", path, rec.Code)
+		}
+	}
+
+	func() {
+		var recovered any
+		defer func() { recovered = recover() }()
+		New(Config{Groups: []string{"nonsense"}})
+		if recovered == nil {
+			t.Error("未知资源组没有 panic")
+		}
+	}()
 }
