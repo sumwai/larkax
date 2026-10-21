@@ -2012,6 +2012,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/calendar` | 150 | 2 | 0 | 14 | 91.57% | 98.68% | 97.8% |
 | `internal/ledger` | 576 | 8 | 0 | 92 | 86.39% | 98.63% | 96.3% |
 | `internal/ledger/store` | 433 | 6 | 0 | 60 | 87.98% | 98.63% | 79.9% |
+| `internal/plans` | 140 | 2 | 0 | 15 | 90.45% | 98.59% | 75.2% |
 | `internal/api` | 197 | 3 | 0 | 19 | 91.32% | 98.50% | 90.2% |
 | `internal/pipeline` | 62 | 1 | 0 | 0 | 100.00% | 98.41% | 90.1% |
 | `internal/auth` | 221 | 4 | 1 | 8 | 96.57% | 98.22% | 86.6% |
@@ -2028,7 +2029,6 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/quota` | 45 | 2 | 0 | 0 | 100.00% | 95.74% | 95.2% |
 | `internal/billing/expr` | 168 | 8 | 0 | 12 | 93.62% | 95.45% | 85.9% |
 | `internal/billing` | 243 | 14 | 0 | 12 | 95.54% | 94.55% | 98.3% |
-| `internal/plans` | 131 | 10 | 0 | 15 | 90.38% | 92.91% | 74.7% |
 | `internal/ratelimit` | 33 | 2 | 0 | 3 | 92.11% | 94.29% | 92.0% |
 | `internal/tokens` | 89 | 14 | 0 | 51 | 66.88% | 86.41% | 97.2% |
 | `internal/money` | 92 | 15 | 0 | 4 | 96.40% | 85.98% | 96.9% |
