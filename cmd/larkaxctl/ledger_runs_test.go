@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -143,6 +144,86 @@ func TestLedgerRunsListsFullAndIncremental(t *testing.T) {
 	}
 }
 
+// TestLedgerRunsShowsEveryCountColumn 钉住六个计数各落在哪一栏。
+//
+// 加一栏时最容易犯的错是把它插进格式串里、表头或 JSON 键只改了一处：屏幕上
+// 的数与它上面的标题差一格，而每个数单独看都合理；JSON 那边则是键名对不上，
+// 解进结构体只会得到零值。所以这一行把六个计数写成互不相同、且都不为零的
+// 值，再**按位置**逐个核表格、**按键名**逐个核 JSON。
+//
+// 直接写一行运行记录而不是真跑一轮对账：这一条要判的是读侧怎么摆这几栏，
+// 造出「面值差为 9」的真实现场要连包、发放、在途三张表，而写入路径已经由
+// store 包的用例钉过（见 TestReconcileReportsPlanFaceShortfall）。
+func TestLedgerRunsShowsEveryCountColumn(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+
+	started := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	var runID int64
+	if err := db.QueryRowContext(context.Background(), `
+		INSERT INTO reconcile_runs (started_at, watermark, full_scan, status, finished_at,
+		                            checked_wallets, balance_mismatches, frozen_mismatches,
+		                            repaired, malformed_accounts, stale_reservations,
+		                            plan_face_shortfalls)
+		VALUES ($1, $1, true, 'done', $1, 3, 4, 5, 6, 7, 8, 9)
+		RETURNING id`, started).Scan(&runID); err != nil {
+		t.Fatalf("写运行记录失败: %v", err)
+	}
+
+	// 表格：前七栏是 id、开始（两段）、状态、范围、起点（两段），之后才是计数。
+	// 六个数互不相同，差一格就会顶到别的数上。
+	line := runLine(t, ledgerRunsOut(t, "--limit", "0"), runID)
+	want := []string{"3", "4", "5", "7", "8", "9", "6"}
+	if got := strings.Fields(line)[7:]; !slices.Equal(got, want) {
+		t.Errorf("计数栏 = %v，期望 %v（比对、余额差、冻结差、畸形科目、陈旧预留、面值差、修复）：\n%s",
+			got, want, line)
+	}
+
+	// JSON：按键名核。键漏掉时解进结构体那一栏只会是零值，所以这里读原文。
+	withFormat(t, formatJSON)
+	r := runOnce(t, runLedger, []string{"runs", "--limit", "0"})
+	if r.err != nil {
+		t.Fatalf("ledger runs -o json 失败: %v\nstderr:\n%s", r.err, r.stderr)
+	}
+	assertOnlyJSON(t, r.stdout)
+
+	var doc struct {
+		Runs []map[string]json.RawMessage `json:"runs"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+		t.Fatalf("解不回来: %v\n%s", err, r.stdout)
+	}
+
+	var row map[string]json.RawMessage
+	for _, run := range doc.Runs {
+		var id int64
+		if err := json.Unmarshal(run["id"], &id); err != nil {
+			t.Fatalf("读 run_id 失败: %v\n%s", err, r.stdout)
+		}
+		if id == runID {
+			row = run
+			break
+		}
+	}
+	if row == nil {
+		t.Fatalf("JSON 里没有 run_id=%d 那一行：\n%s", runID, r.stdout)
+	}
+
+	for key, want := range map[string]string{
+		"checked_wallets":      "3",
+		"balance_mismatches":   "4",
+		"frozen_mismatches":    "5",
+		"malformed_accounts":   "7",
+		"stale_reservations":   "8",
+		"plan_face_shortfalls": "9",
+		"repaired":             "6",
+	} {
+		if got := string(row[key]); got != want {
+			t.Errorf("JSON 的 %s = %q，期望 %q", key, got, want)
+		}
+	}
+}
+
 // TestLedgerRunsJSONShape 钉住机器可读档那几栏。
 //
 // 最要紧的是 full_scan 与 watermark 两栏：前者是布尔而不是「全量 / 增量」那两个字，
@@ -186,6 +267,7 @@ func TestLedgerRunsJSONShape(t *testing.T) {
 			Watermark  string  `json:"watermark"`
 			FullScan   bool    `json:"full_scan"`
 			Checked    int     `json:"checked_wallets"`
+			PlanFace   int     `json:"plan_face_shortfalls"`
 			Status     string  `json:"status"`
 			Error      *string `json:"error"`
 		} `json:"runs"`
@@ -244,6 +326,15 @@ func TestLedgerRunsJSONShape(t *testing.T) {
 	}
 	if got.Checked != checkedFromDB {
 		t.Errorf("checked_wallets = %d，库里是 %d", got.Checked, checkedFromDB)
+	}
+	var planFaceFromDB int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT plan_face_shortfalls FROM reconcile_runs WHERE id = $1`, full.RunID).
+		Scan(&planFaceFromDB); err != nil {
+		t.Fatalf("读面值不足条数失败: %v", err)
+	}
+	if got.PlanFace != planFaceFromDB {
+		t.Errorf("plan_face_shortfalls = %d，库里是 %d", got.PlanFace, planFaceFromDB)
 	}
 
 	runningIdx, ok := byID[runningID]

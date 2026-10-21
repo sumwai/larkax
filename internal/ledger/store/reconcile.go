@@ -942,6 +942,28 @@ func (s *Store) persistFindings(ctx context.Context, report *Report) error {
 // `larkaxctl wallet create` 做，见 internal/ledger/store/wallet.go：注册流程
 // 从来就不建钱包行，所以这不是「注册漏了一步」，而是「还没人开过户」。）
 //
+// # 为什么 union 里还有订阅那一侧，而且不设时间窗
+//
+// 「管理员发了一个额度包、用户从没充过值、名下也没有在途请求」的用户，前三个
+// 来源都看不见他：没有钱包行、没有分录、没有 pending。而额度包面值那条不变式
+// （见 reconcile_batch.go 的 readPlanFaces）偏偏要看他——结算之后 pending 变成
+// settled，那一行就再也不会回到候选集里，此后他的订阅一次都不会被比。
+//
+// user_plans 上没有库生成的时间列（只有 period_start 与 voided_at：前者是业务
+// 期，后者只在作废时写），按 watermark 筛不出「这之后新出现的订阅」。所以增量
+// 那一侧也**无条件**并进来，与另外三个能用时间窗的来源不同。
+//
+// 不按 status 筛：readPlanFaces 比的是全部订阅，过期（expired）与作废
+// （canceled）的也在里面；这里筛掉，它们就只在「恰好有别的来源把人带进来」时
+// 才被看见。
+//
+// 代价：`user_plans_user_idx` 是 `(user_id) WHERE status = 'active'` 的部分
+// 索引，这条不带 status 的查询用不上它，每分片扫一遍订阅表。这不是新增的
+// 开销——同一分片里 readPlanFaces 已经按 user_id 扫过同一张表，而它的行数由
+// 订阅数决定，不随请求量增长。真到订阅数让每分片的整表扫描变得明显时，
+// 再给 `user_plans (user_id)` 加一条不带谓词的索引；在那之前不加，索引本身
+// 也是一份写入开销。
+//
 // # 认科目用的是哪一种写法
 //
 // 账本那一侧用的是 userAccountAliasPattern：旧写路径把后缀读成整数，
@@ -992,6 +1014,8 @@ func (s *Store) reconcileCandidates(
 			UNION
 			SELECT DISTINCT user_id FROM billing_requests WHERE status = 'pending'
 			UNION
+			SELECT DISTINCT user_id FROM user_plans
+			UNION
 			SELECT unnest($3::bigint[]) AS user_id
 		) u
 		 WHERE user_id > $1
@@ -1027,6 +1051,8 @@ func (s *Store) reconcileCandidates(
 			UNION
 			SELECT DISTINCT user_id FROM billing_requests
 			 WHERE status = 'pending' AND started_at >= $3
+			UNION
+			SELECT DISTINCT user_id FROM user_plans
 			UNION
 			SELECT unnest($4::bigint[]) AS user_id
 		) u

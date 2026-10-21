@@ -544,6 +544,56 @@ func TestReconcileReportsPlanFaceShortfall(t *testing.T) {
 	}
 }
 
+// 只有额度包一侧变动的用户，增量扫描也要比到。
+//
+// 候选集里另外三条来源都不认 `prepaid:` 科目：它的后缀是订阅 id 而不是
+// 用户 id，`account ~ '^user:...'` 这一条筛不到它。如果候选里没有「订阅的
+// owner」这一侧，「发过包、此后既没充过值也没有在途」的用户就永远不在比对
+// 范围里——而结算之后正是这个形状（pending 变 settled，此后再没有行变动）。
+//
+// 造法：先跑一轮全量把起点立在「此刻」，再越过 store 直接往
+// `prepaid:<订阅>` 写一笔负数分录，然后跑一轮增量。那一笔的 created_at 在
+// 窗口之内，但**科目**那一侧的查询按前缀筛不到它；能不能比到，全看候选集里
+// 有没有订阅的 owner。钱包与 user 科目这一轮一行都没动，所以没有这条来源时
+// 候选集是空的。
+func TestReconcileIncrementalSeesPlanOwnerWithoutOtherChanges(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	planID := seedPlan(t, ctx, db, "amount", "10", "10")
+	upID := seedUserPlan(t, ctx, db, userID, planID, "10", time.Now().Add(time.Hour))
+
+	// 第一轮全量：起点立在它开始的那一刻，之后的变动才落在增量窗口里。
+	if first := reconcileWithInterval(t, db, 0); len(findingsFor(first, userID)) != 0 {
+		t.Fatalf("第一轮之前现场是干净的，却报了不一致: %v", findingsFor(first, userID))
+	}
+
+	// 绕过 store 的写入路径扣掉面值：正是对账要抓的那种写。
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO ledger_entries (txn_id, account, asset, amount, entry_type)
+		VALUES ($1, $2, 'CNY', -15::numeric, 'adjustment')`,
+		string(ledger.NewTxnID()), ledger.PrepaidAccount(upID).String()); err != nil {
+		t.Fatalf("写负数面值分录失败: %v", err)
+	}
+
+	report := reconcileWithInterval(t, db, reconcileInterval)
+	got := findingsFor(report, userID)
+	if len(got) != 1 {
+		t.Fatalf("只应有面值这一条不一致，实际 %d 条: %v", len(got), got)
+	}
+	f := got[0]
+	if f.Kind != FindingPlanFaceShortfall {
+		t.Fatalf("类别 = %s，期望 %s", f.Kind, FindingPlanFaceShortfall)
+	}
+	if want := prepaidScopePrefix + itoa(upID); f.Scope() != want {
+		t.Errorf("scope = %s，期望 %s", f.Scope(), want)
+	}
+	if f.Snapshot.Cmp(mustMoney(t, "-5")) != 0 || f.Ledger.Cmp(mustMoney(t, "0")) != 0 {
+		t.Errorf("余额/在途 = %s/%s，期望 -5/0", f.Snapshot, f.Ledger)
+	}
+}
+
 // 释放不动钱包、不记已用量；在途占用随之消失，下一次请求还能用这个包。
 func TestReleasePlanReservationFreesQuota(t *testing.T) {
 	db := testDB(t)
