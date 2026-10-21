@@ -630,9 +630,64 @@ export interface ChannelOpsClient {
 }
 
 /**
+ * 清单页的三种状态口径。
+ *
+ * 销户流程里的 `deletion_requested` / `deleted` 不在筛选里——这一页不管那两种，
+ * 它们只会出现在详情里，见 {@link AdminUserStatus}。
+ */
+export type UserStatus = 'active' | 'suspended' | 'banned'
+
+/** 详情里可能看到的全部状态；多出的两种只读，改它会被服务端拒绝。 */
+export type AdminUserStatus = UserStatus | 'deletion_requested' | 'deleted'
+
+/**
+ * 用户清单的一行。
+ *
+ * `email` 是**打码后**的写法（本地部分只留首字符）；完整邮箱只在详情里给，
+ * 见 {@link AdminUserDetail.email_full}。
+ */
+export interface AdminUserSummary {
+  id: number
+  username: string
+  email: string | null
+  display_name: string | null
+  role: Role
+  status: AdminUserStatus
+  created_at: string
+  last_seen_at: string | null
+}
+
+/** 用户详情：清单的全部字段，加上钱包、key 与近 7 天的汇总。金额是定点数字符串。 */
+export interface AdminUserDetail extends AdminUserSummary {
+  email_full: string | null
+  balance: Money
+  active_key_count: number
+  requests_7d: number
+  amount_7d: Money
+  channel_count: number
+  key_last_used_at: string | null
+}
+
+export interface AdminUserQuery {
+  query?: string
+  role?: Role
+  status?: UserStatus
+  limit?: number
+  /** 上一页的 `next_cursor`；换筛选条件时要从第一页重取，游标不绑定条件。 */
+  cursor?: string | null
+}
+
+/** 两个字段都可省略，但至少给一个——空 body 会被服务端拒。 */
+export interface AdminUserUpdateInput {
+  role?: Role
+  status?: UserStatus
+}
+
+/**
  * 平台级运营资源：模型目录、别名、计价。
  *
  * 只有 admin 前缀下有这几组路由——它们没有「归属」可过滤，不给商家视图开一份。
+ * 用户管理同理：判据里有「不能改自己的角色/状态」，离不开操作者是谁。
  */
 export interface OpsClient extends ChannelOpsClient {
   listModels(): Promise<OpsModel[]>
@@ -652,6 +707,10 @@ export interface OpsClient extends ChannelOpsClient {
   listCosts(): Promise<PricingCost[]>
   createCost(input: CostCreateInput): Promise<number>
   updateCost(id: number, input: CostUpdateInput): Promise<void>
+
+  listUsers(query?: AdminUserQuery): Promise<ListResponse<AdminUserSummary>>
+  getUser(id: number): Promise<AdminUserDetail>
+  updateUser(id: number, input: AdminUserUpdateInput): Promise<AdminUserDetail>
 }
 
 

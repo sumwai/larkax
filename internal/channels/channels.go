@@ -226,6 +226,63 @@ func (a *Admin) CountSuppliedModels(ctx context.Context, ownerID *int64) (int64,
 	return n, nil
 }
 
+// SuppliedModel 是一个在供模型在某一侧（某位商家或全局）的读数。
+type SuppliedModel struct {
+	Model       string
+	DisplayName string
+	// Channels 是在供这个模型的渠道数。同一 (type, base_url) 上的多条渠道
+	// 各算一条：它们是不同账号，不是同一个账号的重复行。
+	Channels int64
+}
+
+// SuppliedModelsOwned 列在供的规范模型与名下的在供渠道数。
+//
+// 判据与 SuppliedModels / CountSuppliedModels 是同一份 suppliesModel，
+// 只是多了一句归属条件：另写一条时，「在供」会从几处代码里各长一版。
+//
+// ownerID 为 nil 表示不按归属筛（运维视角的全局清单）；非 nil 时只数那位
+// 用户名下的渠道。展示名取目录里的 display_name，为空时回落到规范名——
+// 列表上不该出现一个空白的名字。
+func (a *Admin) SuppliedModelsOwned(ctx context.Context, ownerID *int64) ([]SuppliedModel, error) {
+	query := `
+		SELECT m.canonical_name,
+		       COALESCE(NULLIF(m.display_name, ''), m.canonical_name),
+		       count(c.id)
+		  FROM model_catalog m
+		  JOIN channels c ON ` + suppliesModel("m.canonical_name")
+	var args []any
+	if ownerID != nil {
+		if *ownerID <= 0 {
+			return nil, errors.New("用户 id 无效")
+		}
+		args = append(args, *ownerID)
+		query += ` WHERE c.owner_user_id = $1`
+	}
+	query += `
+		 GROUP BY m.canonical_name, m.display_name
+		 ORDER BY m.canonical_name`
+
+	rows, err := a.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("查询在供模型清单失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	// 从空切片开始：一条都没有是正常结果（新商家还没接渠道），不是「没有值」。
+	out := []SuppliedModel{}
+	for rows.Next() {
+		var m SuppliedModel
+		if err := rows.Scan(&m.Model, &m.DisplayName, &m.Channels); err != nil {
+			return nil, fmt.Errorf("读取在供模型失败: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历在供模型失败: %w", err)
+	}
+	return out, nil
+}
+
 // Candidates 返回某个规范模型名下的全部可用渠道。
 //
 // 过滤条件是 `status = 'enabled'` 且 `models` 数组包含该规范名。

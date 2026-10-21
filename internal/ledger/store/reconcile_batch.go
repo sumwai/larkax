@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strconv"
 
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
@@ -71,11 +72,19 @@ func (s *Store) reconcileUsers(ctx context.Context, cfg ReconcileConfig, runID i
 	if err != nil {
 		return nil, err
 	}
+	planFaces, err := readPlanFaces(ctx, tx, ids)
+	if err != nil {
+		return nil, err
+	}
 
 	findings, err := compareAndRepair(ctx, tx, cfg, runID, wallets, ledgerSums, pending)
 	if err != nil {
 		return nil, err
 	}
+	// 额度包面值那一维不属于钱包的三份数据：它的两边都是别处的数
+	// （prepaid 科目的分录之和、预留表上的 plan_reserved_amount），
+	// 所以另起一段比，见 readPlanFaces 与 comparePlanFaces。
+	findings = append(findings, comparePlanFaces(runID, planFaces)...)
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("提交对账修正失败: %w", err)
 	}
@@ -243,6 +252,158 @@ func readPendingReservations(ctx context.Context, tx *sql.Tx, ids []int64) (map[
 		return nil, fmt.Errorf("遍历预留汇总失败: %w", err)
 	}
 	return out, nil
+}
+
+// planFaceRow 是一个订阅在某一时刻的两笔数：面值余额与在途预留。
+//
+// 两笔数都不在 user_wallets 上：余额是 `prepaid:<订阅 id>` 科目的分录之和，
+// 在途预留是 `billing_requests.plan_reserved_amount` 的 pending 之和。
+type planFaceRow struct {
+	planID  int64
+	userID  int64
+	asset   string
+	balance money.Amount
+	pending money.Amount
+}
+
+// readPlanFaces 读这批用户名下每个额度包订阅的面值余额与在途预留之和。
+//
+// # 为什么两笔数必须在一条语句里取
+//
+// 迁移 00053 写下的不变量是「prepaid 科目余额 ≥ 在途预留之和」，而这两笔数
+// **都随请求进进出出**：预留会加上一笔、结算会在同一个事务里写分录并把它
+// 从 pending 移走。分两条语句读，两条之间夹一次提交，算出来的差就属于两个
+// 时点——那是一条假的不一致，而按它处置（或只是告警）都会把人引到一个
+// 不存在的问题上。
+//
+// 本函数因此是一条语句：两个 LATERAL 子查询共用该语句的快照。事务是默认的
+// read committed，**每条语句各自取快照**，所以「同一个事务里分两次查」不足
+// 以保证同源，必须是同一条语句。
+//
+// # 为什么从 user_plans 驱动，而不是从 pending 行驱动
+//
+// 不变量对每个订阅都成立，在途为零时它是「余额 ≥ 0」。从 pending 行驱动
+// 只能看见有在途的那些订阅，余额被写成负数、而恰好没有在途的那个订阅就
+// 漏掉了——那正是「只有一条写入路径绕过 store」最容易留下的形状。
+//
+// 代价是每个分片扫一遍 user_plans（`user_plans_user_idx` 只覆盖 active，
+// 带 `user_id = ANY(...)` 的查询用不上它）。这个取舍与 readLedgerSums 的
+// 全表扫描同类，但这里扫的是**订阅表**而不是分录表——它的行数由用户数
+// 决定，不随请求量增长，所以代价停在「分片数 × 订阅数」这一档。
+//
+// # 余额按订阅的资产取
+//
+// `prepaid:<订阅 id>` 只记一种资产（发放时按 plans.asset），这里与选源那条
+// 路径（plancharge.go 的 reserveFromPlan）用同一个口径：按 `p.asset` 过滤。
+// 科目原文精确匹配即可：prepaid 的后缀只放行规范写法（见 ledger.ParseAccount
+// 对 prepaid 的收窄），不存在 user 科目那样的历史别名。
+//
+// # 增量扫描怎么看见它
+//
+// 候选用户里有**订阅的 owner** 这一侧（reconcileCandidates 的 user_plans
+// 分支），它没有时间窗：每一轮、每个分片都会把订阅表扫一遍。所以只要
+// user_plans 里有这一行，它的 owner 就一定进候选，这一维每轮都被比过一次
+// ——包括「结算之后 pending 变 settled、此后再没有任何行变动」的那种用户。
+//
+// 那一侧并的是 `user_plans.user_id`，不是 `prepaid:` 科目：科目后缀是订阅 id，
+// 并进候选集还得换一次 id；按 owner 进来一次，本函数随后把他名下**所有**订阅
+// 逐条比完（不论 status）。
+//
+// 剩下的盲区只有一个形状：`prepaid:<id>` 的分录在、而 user_plans 里没有这一
+// 行。本函数从 user_plans 驱动，看不见它；它也不在钱包那三类判据里（科目后缀
+// 不是用户 id），今天没有判据报它。
+//
+// 剩下的是「从没报过、两条数也不再变动」的那种——它与本文件顶部说的增量盲区
+// 是同一类，由定期全量扫描兜底。正常写入路径造不出它：预留受 faceAvail 约束、
+// 结算按预留上界截断、作废只核销「余额 − 在途」，三者都不会让在途超过余额。
+func readPlanFaces(ctx context.Context, tx *sql.Tx, ids []int64) ([]planFaceRow, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT up.id, up.user_id, p.asset,
+		       COALESCE(bal.s, 0)::numeric(20, 8)::text,
+		       COALESCE(pend.m, 0)::numeric(20, 8)::text
+		  FROM user_plans up
+		  JOIN plans p ON p.id = up.plan_id
+		  LEFT JOIN LATERAL (
+		      SELECT SUM(amount) AS s
+		        FROM ledger_entries
+		       WHERE account = 'prepaid:' || up.id AND asset = p.asset
+		  ) bal ON true
+		  LEFT JOIN LATERAL (
+		      SELECT SUM(plan_reserved_amount) AS m
+		        FROM billing_requests
+		       WHERE user_plan_id = up.id AND status = 'pending'
+		  ) pend ON true
+		 WHERE up.user_id = ANY($1)
+		 ORDER BY up.id`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("读额度包面值与在途预留失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []planFaceRow
+	for rows.Next() {
+		var (
+			row              planFaceRow
+			balance, pending string
+		)
+		if err := rows.Scan(&row.planID, &row.userID, &row.asset, &balance, &pending); err != nil {
+			return nil, fmt.Errorf("读额度包面值与在途预留失败: %w", err)
+		}
+		b, err := money.Parse(balance)
+		if err != nil {
+			return nil, fmt.Errorf("额度包订阅 %d 的面值余额读不出来（原文 %q）: %w", row.planID, balance, err)
+		}
+		p, err := money.Parse(pending)
+		if err != nil {
+			return nil, fmt.Errorf("额度包订阅 %d 的在途预留读不出来（原文 %q）: %w", row.planID, pending, err)
+		}
+		row.balance, row.pending = b, p
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历额度包面值与在途预留失败: %w", err)
+	}
+	return out, nil
+}
+
+// comparePlanFaces 比对每个订阅的面值与在途预留，报出「在途超过余额」的那些。
+//
+// # 判据是严格大于
+//
+// 相等**不算**不一致：作废一条还有在途预留的订阅时，核销的是「余额 − 在途」，
+// 剩下的余额恰好等于在途之和。那一格是合法状态，写成 `>=` 会让每次作废都
+// 报一条出来。
+//
+// # 只报不修
+//
+// 差额的两边都不能由对账来改：补面值等于凭空记一笔平台欠用户的额度；减在途
+// 等于替一笔可能还在途的请求决定它该占多少面值。前者是造钱，后者与
+// staleReservationAfter 那条「只报不自动释放」同一个理由。所以这一类不进
+// repairPlanFace 之类的分支，Unrepairable 写明原因。
+//
+// 顺序由查询的 `ORDER BY up.id` 定：map 或并集那种随机顺序让同一份数据两次
+// 跑出不同的报告顺序，测试断言不了，人也没法对比两次的结果。
+func comparePlanFaces(runID int64, plans []planFaceRow) []Finding {
+	var findings []Finding
+	for _, p := range plans {
+		if p.pending.Cmp(p.balance) <= 0 {
+			continue
+		}
+		findings = append(findings, Finding{
+			RunID: runID, UserID: p.userID, Asset: p.asset,
+			Kind: FindingPlanFaceShortfall,
+			// 两列的取值见 Finding 上这两个字段的注释：Snapshot 是
+			// prepaid 科目的余额，Ledger 是在途预留之和，Diff 因此是缺口
+			// （正数），不是「账本减快照」那个方向的差额。
+			Snapshot:     p.balance,
+			Ledger:       p.pending,
+			Key:          strconv.FormatInt(p.planID, 10),
+			Unrepairable: "在途预留超过了订阅余额，补面值等于凭空记一笔平台欠款，对账不代平台补",
+			Detail: fmt.Sprintf("额度包订阅 %d 的面值余额 %s 小于在途预留之和 %s",
+				p.planID, p.balance, p.pending),
+		})
+	}
+	return findings
 }
 
 // compareAndRepair 逐行比对，并按配置修正。

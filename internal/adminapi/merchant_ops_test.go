@@ -205,13 +205,13 @@ func TestGroupUpstreamsDefaultsMissingHealth(t *testing.T) {
 	}
 }
 
-func TestParseUpstreamLimit(t *testing.T) {
+func TestParseListLimit(t *testing.T) {
 	cases := []struct {
 		raw     string
 		want    int
 		wantErr bool
 	}{
-		{"", upstreamDefaultLimit, false},
+		{"", listDefaultLimit, false},
 		{"1", 1, false},
 		{"200", 200, false},
 		{"0", 0, true},
@@ -219,13 +219,13 @@ func TestParseUpstreamLimit(t *testing.T) {
 		{"abc", 0, true},
 	}
 	for _, tc := range cases {
-		got, err := parseUpstreamLimit(tc.raw)
+		got, err := parseListLimit(tc.raw)
 		if (err != nil) != tc.wantErr {
-			t.Errorf("parseUpstreamLimit(%q) 错误 = %v，期望出错 = %v", tc.raw, err, tc.wantErr)
+			t.Errorf("parseListLimit(%q) 错误 = %v，期望出错 = %v", tc.raw, err, tc.wantErr)
 			continue
 		}
 		if !tc.wantErr && got != tc.want {
-			t.Errorf("parseUpstreamLimit(%q) = %d，期望 %d", tc.raw, got, tc.want)
+			t.Errorf("parseListLimit(%q) = %d，期望 %d", tc.raw, got, tc.want)
 		}
 	}
 }

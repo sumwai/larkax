@@ -113,7 +113,7 @@ const (
 	SettingRepairMode = "reconcile.repair_mode"
 	// SettingDifferenceAccount 是快照为准时修正分录的对家科目。
 	SettingDifferenceAccount = "reconcile.difference_account"
-	// SettingShardSize 是一批处理的钱包行数上限。
+	// SettingShardSize 是一批处理的候选用户数上限。
 	SettingShardSize = "reconcile.shard_size"
 	// SettingFullScanIntervalHours 是两次全量扫描之间的最长间隔。
 	SettingFullScanIntervalHours = "reconcile.full_scan_interval_hours"
@@ -216,7 +216,7 @@ type ReconcileConfig struct {
 	RepairMode RepairMode
 	// DifferenceAccount 是 RepairAdjustLedger 下修正分录的对家科目。
 	DifferenceAccount ledger.Account
-	// ShardSize 是一批处理的钱包行数上限（按 user_id 分片）。
+	// ShardSize 是一批处理的候选用户数上限（按 user_id 分片）。
 	ShardSize int
 	// FullScanInterval 是两次全量扫描之间的最长间隔。
 	// 小于等于零表示每次都全量。
@@ -296,6 +296,24 @@ const (
 	// 实际待结算额——`frozen` 减到负数，被表上的 CHECK 拒绝；而夹到零就是
 	// 平台悄悄认下差额。宁可报给人看。
 	FindingStaleReservation FindingKind = "stale_reservation"
+	// FindingPlanFaceShortfall 是某条额度包订阅的在途预留占住的面值超过了它的余额。
+	//
+	// 迁移 00053 把额度包覆盖的请求从钱包那条路上分了出来：那一类请求不冻钱包，
+	// 记在两个别的数上——`reserved_quota` 占可用量、`plan_reserved_amount` 占面值。
+	// 于是对账原有的两条不变量（余额对账本、冻结对预留）对它都成立而不报任何东西：
+	// `reserved_amount` 是 0，`frozen` 也是 0。缺的是**包这一侧**的不变量：
+	//
+	//	prepaid:<订阅 id> 的余额 ≥ 该订阅所有 pending 行的 plan_reserved_amount 之和
+	//
+	// 违反它意味着某个订阅承诺出去的额度已经超过它剩下的面值——结算时 prepaid
+	// 科目会被扣成负数（「额度包透支」），而账本上分不出是哪一步错的。所以它要
+	// 有一条自己的判据，见 reconcile_batch.go 的 readPlanFaces 与 comparePlanFaces。
+	//
+	// 它与 FindingBalanceMismatch / FindingFrozenMismatch 报的东西也不同：那两类
+	// 是「同一个数的两处记录对不上」，这一条是「两个数之间的大小关系不成立」。
+	// 两边都没有记错的可能：余额与在途分别由两条写入路径在同一次提交里改动，
+	// 对不上就说明有第三条路径绕过了它们。
+	FindingPlanFaceShortfall FindingKind = "plan_face_shortfall"
 )
 
 // Finding 是一条不一致。
@@ -313,6 +331,11 @@ type Finding struct {
 	//
 	// 例外：Kind 为 FindingStaleReservation 时**恒为零**。这一类不是一组
 	// 两边相比的值，它是「这一行滞留太久」的标记，没有快照侧。
+	//
+	// 例外：Kind 为 FindingPlanFaceShortfall 时它是 **`prepaid:<订阅 id>`
+	// 科目的余额**（分录之和，不是钱包快照），Ledger 那一列是该订阅的
+	// 在途预留之和。两列不是「同一笔钱的两种记录」，而是一条不等式的两边
+	// （见 FindingPlanFaceShortfall 的注释）。
 	Snapshot money.Amount
 	// Ledger 是推导出来的权威值（账本汇总或未结算预留之和）。
 	//
@@ -326,6 +349,10 @@ type Finding struct {
 	// 本来就相等，只是这笔钱一直冻着。放在这一列里是为了让「一共冻着多少」
 	// 能直接由 `SELECT sum(ledger) FROM reconcile_findings WHERE
 	// kind = 'stale_reservation'` 回答，而不必去解析 Detail 里的文字。
+	//
+	// 例外：Kind 为 FindingPlanFaceShortfall 时它是**在途预留之和**，与
+	// Snapshot 那一列的余额构成那条不等式；同样不是「权威值」，两列之间
+	// 没有哪一边更算数。
 	Ledger money.Amount
 	// Unrepairable 非空时说明**为什么不能自动修**。
 	//
@@ -341,6 +368,10 @@ type Finding struct {
 	// 单独一个字段而不是从 Detail 里抠：Detail 是给人看的，它带着
 	// 「几条分录」这类每轮都在变的数字，拿它当标识会让同一条不一致
 	// 每轮都被当成新的一条。
+	//
+	// 它不限于畸形科目：陈旧预留装的是**请求标识**，额度包面值那一类装的是
+	// **订阅 id 的十进制写法**（见 Scope）。三者共用这一个字段是因为它们
+	// 要的是同一件事——一个每轮稳定的标识。
 	Key string
 }
 
@@ -350,6 +381,10 @@ type Finding struct {
 // 一组两边相比的值，它只有一个金额（装在 Ledger 里，见该字段的注释），
 // 而 Snapshot 恒为零。别拿它当「差额」读，也别拿它判断这一类严不严重——
 // 严不严重的判据是滞留了多久，那在 Detail 里。
+//
+// Kind 为 FindingPlanFaceShortfall 时方向要照着那一条读：Snapshot 是余额、
+// Ledger 是在途预留，两者相减得到的是**缺口**（正数），不是「账本比快照多
+// 出多少」。两类差额在符号上恰好会被人读反，所以这里写明。
 func (f Finding) Diff() money.Amount { return f.Ledger.Sub(f.Snapshot) }
 
 // Scope 是这条不一致在 reconcile_findings 里的标识。
@@ -365,7 +400,11 @@ func (f Finding) Diff() money.Amount { return f.Ledger.Sub(f.Snapshot) }
 // 一行的，放开其中一条之后那一条就该从清单里消失；按 (user, asset) 合并的话，
 // 三条里处理掉两条看起来与一条都没处理一样。
 //
-// 三类的形态用一个前缀区分开，而不是靠「user: 开头的是钱包类」这种判断：
+// 额度包面值那一类用**订阅 id** 写成 `prepaid:<订阅 id>`，理由同上：同一个
+// 用户的两条订阅各有各的余额与在途，按 (user, asset) 合并会让一条订阅的
+// finding 覆盖掉另一条——而它们要补的是两笔不同的面值。
+//
+// 各类的形态用一个前缀区分开，而不是靠「user: 开头的是钱包类」这种判断：
 // 畸形科目的原文也可能以 `user:` 开头（`user:abc` 就是）。
 func (f Finding) Scope() string {
 	switch f.Kind {
@@ -373,6 +412,8 @@ func (f Finding) Scope() string {
 		return malformedScopePrefix + f.Key
 	case FindingStaleReservation:
 		return reservationScopePrefix + f.Key
+	case FindingPlanFaceShortfall:
+		return prepaidScopePrefix + f.Key
 	}
 	return fmt.Sprintf("user:%d@%s", f.UserID, f.Asset)
 }
@@ -430,13 +471,16 @@ type Report struct {
 	StartedAt time.Time
 	// Watermark 是这一轮比对的起点，也是下一轮的起点。
 	Watermark time.Time
-	// CheckedWallets 是这一轮比对过的钱包行数。
+	// CheckedWallets 是这一轮比对过的用户数（候选 user id 的个数），
+	// 口径见 ReconcileRun 上同名字段的注释。
 	CheckedWallets int
 	// Findings 是这一轮发现的全部不一致。
 	//
 	// 顺序：畸形科目、陈旧预留、然后才是按 (user_id, asset) 稳定排序的钱包类
-	// 不一致。前两类各有各的查询（它们不属于任何一个分片），按查询自己的
-	// 顺序追加在前面；钱包类那一段的排序是稳定的，那一条不变。
+	// 不一致，最后是按订阅 id 排序的额度包面值类。前两类各有各的查询（它们
+	// 不属于任何一个分片），按查询自己的顺序追加在前面；钱包类那一段的排序
+	// 是稳定的，那一条不变；面值类在每个分片比完之后追加，跨分片的次序因此
+	// 跟着分片走（同一个订阅只属于一个用户，一个用户只在一个分片里）。
 	Findings []Finding
 
 	// malformed 是畸形科目的条数。
@@ -464,6 +508,12 @@ func (r *Report) MalformedAccounts() int { return r.malformed }
 //
 // 从 Findings 里数，与 BalanceMismatches / FrozenMismatches 一致。
 func (r *Report) StaleReservations() int { return r.countOf(FindingStaleReservation) }
+
+// PlanFaceShortfalls 数出「在途预留超过订阅面值」的订阅条数。
+//
+// 它与余额、冻结两类都分开计数：那两类比的是同一个数的两处记录，这一类比的是
+// 同一条不等式的两边（见 FindingPlanFaceShortfall）。
+func (r *Report) PlanFaceShortfalls() int { return r.countOf(FindingPlanFaceShortfall) }
 
 // Repaired 数出被修正的不一致条数。
 func (r *Report) Repaired() int {
@@ -687,8 +737,9 @@ func (s *Store) finishReconcileRun(ctx context.Context, r *Report, cause error) 
 		status, msg = "failed", cause.Error()
 	}
 	// 这几个条数是运行记录上那几列的全部来源（balance_mismatches /
-	// frozen_mismatches / repaired / malformed_accounts / stale_reservations）：
-	// 它们由 Report 上那几个方法算出来（见 Repaired 与 countOf）。
+	// frozen_mismatches / repaired / malformed_accounts / stale_reservations /
+	// plan_face_shortfalls）：它们由 Report 上那几个方法算出来（见 Repaired 与
+	// countOf）。
 	//
 	// 所以判定「落库的条数对不对」时期望值不能取同一个方法：方法被改坏时两边
 	// 一起变，恒等，而这一列在报表上就是错的，却没有任何一处会红。用例那边
@@ -698,11 +749,12 @@ func (s *Store) finishReconcileRun(ctx context.Context, r *Report, cause error) 
 		   SET finished_at = now(), checked_wallets = $2,
 		       balance_mismatches = $3, frozen_mismatches = $4,
 		       repaired = $5, malformed_accounts = $6,
-		       stale_reservations = $7,
-		       status = $8, error = NULLIF($9, '')
+		       stale_reservations = $7, plan_face_shortfalls = $8,
+		       status = $9, error = NULLIF($10, '')
 		 WHERE id = $1`,
 		r.RunID, r.CheckedWallets, r.BalanceMismatches(), r.FrozenMismatches(),
-		r.Repaired(), r.MalformedAccounts(), r.StaleReservations(), status, msg)
+		r.Repaired(), r.MalformedAccounts(), r.StaleReservations(),
+		r.PlanFaceShortfalls(), status, msg)
 	if err != nil {
 		return constraintFailure(fmt.Errorf("写对账结果失败: %w", err))
 	}
@@ -749,6 +801,7 @@ func (s *Store) reconcileAll(ctx context.Context, cfg ReconcileConfig, alert Ale
 		if err != nil {
 			return err
 		}
+		// 数的是候选 user id 的个数，不是钱包行数（见 Report.CheckedWallets）。
 		report.CheckedWallets += len(ids)
 		report.Findings = append(report.Findings, findings...)
 		for _, f := range findings {
@@ -891,6 +944,28 @@ func (s *Store) persistFindings(ctx context.Context, report *Report) error {
 // `larkaxctl wallet create` 做，见 internal/ledger/store/wallet.go：注册流程
 // 从来就不建钱包行，所以这不是「注册漏了一步」，而是「还没人开过户」。）
 //
+// # 为什么 union 里还有订阅那一侧，而且不设时间窗
+//
+// 「管理员发了一个额度包、用户从没充过值、名下也没有在途请求」的用户，前三个
+// 来源都看不见他：没有钱包行、没有分录、没有 pending。而额度包面值那条不变式
+// （见 reconcile_batch.go 的 readPlanFaces）偏偏要看他——结算之后 pending 变成
+// settled，那一行就再也不会回到候选集里，此后他的订阅一次都不会被比。
+//
+// user_plans 上没有库生成的时间列（只有 period_start 与 voided_at：前者是业务
+// 期，后者只在作废时写），按 watermark 筛不出「这之后新出现的订阅」。所以增量
+// 那一侧也**无条件**并进来，与另外三个能用时间窗的来源不同。
+//
+// 不按 status 筛：readPlanFaces 比的是全部订阅，过期（expired）与作废
+// （canceled）的也在里面；这里筛掉，它们就只在「恰好有别的来源把人带进来」时
+// 才被看见。
+//
+// 代价：`user_plans_user_idx` 是 `(user_id) WHERE status = 'active'` 的部分
+// 索引，这条不带 status 的查询用不上它，每分片扫一遍订阅表。这不是新增的
+// 开销——同一分片里 readPlanFaces 已经按 user_id 扫过同一张表，而它的行数由
+// 订阅数决定，不随请求量增长。真到订阅数让每分片的整表扫描变得明显时，
+// 再给 `user_plans (user_id)` 加一条不带谓词的索引；在那之前不加，索引本身
+// 也是一份写入开销。
+//
 // # 认科目用的是哪一种写法
 //
 // 账本那一侧用的是 userAccountAliasPattern：旧写路径把后缀读成整数，
@@ -941,6 +1016,8 @@ func (s *Store) reconcileCandidates(
 			UNION
 			SELECT DISTINCT user_id FROM billing_requests WHERE status = 'pending'
 			UNION
+			SELECT DISTINCT user_id FROM user_plans
+			UNION
 			SELECT unnest($3::bigint[]) AS user_id
 		) u
 		 WHERE user_id > $1
@@ -976,6 +1053,8 @@ func (s *Store) reconcileCandidates(
 			UNION
 			SELECT DISTINCT user_id FROM billing_requests
 			 WHERE status = 'pending' AND started_at >= $3
+			UNION
+			SELECT DISTINCT user_id FROM user_plans
 			UNION
 			SELECT unnest($4::bigint[]) AS user_id
 		) u
@@ -1218,3 +1297,11 @@ const malformedScopePrefix = "account:"
 // 漏了另一处的表现是「那条不一致每轮都被重新发现一次」，而那看起来跟
 // 「一直没解决」一模一样。
 const reservationScopePrefix = "request:"
+
+// prepaidScopePrefix 是额度包面值类不一致的标识前缀，键是订阅 id。
+//
+// 前缀与科目的那一半同名（`prepaid:<订阅 id>` 也是账本科目），这是有意的：
+// 这条不一致说的就是那个科目。scope 与科目分属两个命名空间，不会混。
+//
+// 同样只写一处，理由与上面两个前缀相同。
+const prepaidScopePrefix = "prepaid:"

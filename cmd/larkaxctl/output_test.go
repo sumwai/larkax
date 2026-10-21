@@ -75,8 +75,8 @@ func TestPrintReconcileReportFailureIsNotSilentSuccess(t *testing.T) {
 		t.Errorf("失败路径要明说这一轮没跑完：\n%s", out)
 	}
 	// 失败前比过多少照打：那是「报告先打」要保住的信息。
-	if !strings.Contains(out, "比对=0 行") {
-		t.Errorf("失败路径仍要打出已经比过的行数：\n%s", out)
+	if !strings.Contains(out, "比对=0 个用户") {
+		t.Errorf("失败路径仍要打出已经比过的用户数：\n%s", out)
 	}
 
 	// 失败前已经比出一部分：那部分仍然要打出来，但同样不能收在成功句式上。
@@ -100,7 +100,7 @@ func TestPrintReconcileReportFailureIsNotSilentSuccess(t *testing.T) {
 	}
 }
 
-// 对账跑完而范围内确实没有钱包时，「比对=0 行」与「没有不一致。」都是真话，
+// 对账跑完而范围内确实没有候选用户时，「比对=0 个用户」与「没有不一致。」都是真话，
 // 不能被上面那条改动顺手改掉——分辨点在 err，不在计数。
 func TestPrintReconcileReportZeroWalletsIsStillSuccess(t *testing.T) {
 	var buf bytes.Buffer
@@ -108,7 +108,7 @@ func TestPrintReconcileReportZeroWalletsIsStillSuccess(t *testing.T) {
 		RunID: 4, Watermark: time.Date(2026, 10, 17, 15, 8, 48, 0, time.UTC),
 	}, nil)
 	out := buf.String()
-	for _, want := range []string{"比对=0 行", "没有不一致。"} {
+	for _, want := range []string{"比对=0 个用户", "没有不一致。"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("正常跑完的空范围仍要说 %q：\n%s", want, out)
 		}
