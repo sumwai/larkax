@@ -7,6 +7,7 @@ import { useAsync } from '../../hooks/useAsync'
 import { formatDateTime } from '../../lib/format'
 import { Alert, Button, Empty, Modal, PageHead, Skeleton, useToast } from '../../components/ui'
 import { IconPlus } from '../../components/icons'
+import { ExprEditor } from '../../components/ExprEditor'
 import {
   Field,
   InputError,
@@ -70,6 +71,8 @@ export function OpsPricing() {
   // 打开时的那份值：改动过的话，关窗前要再问一句。
   const [ruleInitial, setRuleInitial] = useState<RuleForm>(EMPTY_RULE)
   const [ruleError, setRuleError] = useState<string | null>(null)
+  // 表达式编辑器报上来的第一条错误（含「一项都没填」），提交时不再往下走。
+  const [ruleExprError, setRuleExprError] = useState<string | null>(null)
   const [ruleQuery, setRuleQuery] = useState('')
 
   const [costEditing, setCostEditing] = useState<PricingCost | null>(null)
@@ -77,6 +80,7 @@ export function OpsPricing() {
   const [costForm, setCostForm] = useState<CostForm>(EMPTY_COST)
   const [costInitial, setCostInitial] = useState<CostForm>(EMPTY_COST)
   const [costError, setCostError] = useState<string | null>(null)
+  const [costExprError, setCostExprError] = useState<string | null>(null)
   const [costQuery, setCostQuery] = useState('')
 
   const channelName = (id: number) =>
@@ -147,6 +151,7 @@ export function OpsPricing() {
     const patterns = linesToList(ruleForm.patterns)
     if (!ruleForm.name.trim()) return setRuleError(t('ops.pricing.nameRequired'))
     if (patterns.length === 0) return setRuleError(t('ops.pricing.patternsRequired'))
+    if (ruleExprError) return setRuleError(ruleExprError)
     if (!ruleForm.expr.trim()) return setRuleError(t('ops.pricing.exprRequired'))
     if (!/^-?\d+$/.test(ruleForm.priority.trim())) return setRuleError(t('ops.invalidInteger'))
     // 平台级规则没有归属，那两个栏也不在表单上：整数校验与发送都只看非平台级。
@@ -211,6 +216,7 @@ export function OpsPricing() {
       return setCostError(t('ops.pricing.channelRequired'))
     }
     if (patterns.length === 0) return setCostError(t('ops.pricing.patternsRequired'))
+    if (costExprError) return setCostError(costExprError)
     if (!costForm.expr.trim()) return setCostError(t('ops.pricing.exprRequired'))
     if (!/^-?\d+$/.test(costForm.priority.trim())) return setCostError(t('ops.invalidInteger'))
 
@@ -484,13 +490,11 @@ export function OpsPricing() {
                 onChange={(event) => setRuleForm({ ...ruleForm, patterns: event.target.value })}
               />
             </Field>
-            <Field label={t('ops.pricing.expr')}>
-              <textarea
-                className="input mono"
-                value={ruleForm.expr}
-                onChange={(event) => setRuleForm({ ...ruleForm, expr: event.target.value })}
-              />
-            </Field>
+            <ExprEditor
+              value={ruleForm.expr}
+              onChange={(expr) => setRuleForm({ ...ruleForm, expr })}
+              onErrorChange={setRuleExprError}
+            />
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
               <Field label={t('ops.pricing.priority')}>
                 <input
@@ -555,13 +559,11 @@ export function OpsPricing() {
                 onChange={(event) => setCostForm({ ...costForm, patterns: event.target.value })}
               />
             </Field>
-            <Field label={t('ops.pricing.expr')}>
-              <textarea
-                className="input mono"
-                value={costForm.expr}
-                onChange={(event) => setCostForm({ ...costForm, expr: event.target.value })}
-              />
-            </Field>
+            <ExprEditor
+              value={costForm.expr}
+              onChange={(expr) => setCostForm({ ...costForm, expr })}
+              onErrorChange={setCostExprError}
+            />
             <Field label={t('ops.pricing.priority')}>
               <input
                 className="input"
