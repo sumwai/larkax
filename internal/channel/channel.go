@@ -120,7 +120,8 @@ type Channel struct {
 	//
 	// # 今天哪些键有读者
 	//
-	// openaiadapter 读 reasoning_effort_map 这一个键（见该包的 setting.go），
+	// openai 与 openai-responses 两个适配器读 reasoning_effort_map 这一个键
+	// （翻译在 channel.ReasoningEffortDialect，见本包的 reasoning_effort.go），
 	// 其余适配器与选路层仍不读这里的任何键。写进去的其它键一律不影响
 	// 请求路径。这件事由 SettingReadByAdapters 声明，管理面据此在写入之后
 	// 与列举时把「没有消费者」说出来（见 SettingUnreadNote）。
