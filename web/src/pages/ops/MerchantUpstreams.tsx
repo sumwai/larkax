@@ -8,7 +8,7 @@ import { useI18n } from '../../i18n'
 import type { MessageKey } from '../../i18n/zh'
 import { subjectOf } from '../../ops/views'
 import { formatCount } from '../../lib/format'
-import { Empty, PageHead, Pill, Skeleton } from '../../components/ui'
+import { Empty, PageHead, Pill, Skeleton, StatusPill } from '../../components/ui'
 import { MobileCard, MobileList } from '../../components/MobileList'
 import { IconChannel } from '../../components/icons'
 import { OpsLoadError } from './common'
@@ -21,12 +21,6 @@ const HEALTH: Record<ChannelHealth, { tone: HealthTone; key: MessageKey }> = {
   unknown: { tone: 'neutral', key: 'ops.merchant.health.unknown' },
   degraded: { tone: 'warn', key: 'ops.merchant.health.degraded' },
   drained: { tone: 'bad', key: 'ops.merchant.health.drained' },
-}
-
-/** 渠道本身的启停状态；与健康是两回事，分开显示。 */
-const CHANNEL_STATUS: Record<string, MessageKey> = {
-  enabled: 'ops.merchant.channelStatus.enabled',
-  disabled: 'ops.merchant.channelStatus.disabled',
 }
 
 /**
@@ -46,12 +40,6 @@ function HealthPill({ health }: { health: ChannelHealth }) {
   return <Pill tone={meta.tone}>{t(meta.key)}</Pill>
 }
 
-function ChannelStatus({ status }: { status: string }) {
-  const { t } = useI18n()
-  const key = CHANNEL_STATUS[status]
-  return <Pill tone={status === 'enabled' ? 'ok' : 'neutral'}>{key ? t(key) : status}</Pill>
-}
-
 function ChannelRow({ channel }: { channel: MerchantUpstreamChannel }) {
   return (
     <div className="trow upstream-channel-row" role="row">
@@ -60,7 +48,8 @@ function ChannelRow({ channel }: { channel: MerchantUpstreamChannel }) {
         <span className="tiny">#{channel.id}</span>
       </div>
       <span role="cell">
-        <ChannelStatus status={channel.status} />
+        {/* 渠道启停的文案只有一处来源：`ui.tsx` 的状态表，别在页面里再抄一份。 */}
+        <StatusPill status={channel.status} />
       </span>
       <span role="cell">
         <HealthPill health={channel.health} />
@@ -149,7 +138,7 @@ export function MerchantUpstreams() {
                       key={channel.id}
                       title={channel.name}
                       subtitle={`#${channel.id}`}
-                      status={<ChannelStatus status={channel.status} />}
+                      status={<StatusPill status={channel.status} />}
                       fields={[
                         {
                           label: t('ops.merchant.upstreams.colHealth'),

@@ -140,7 +140,7 @@ describe('商家上游', () => {
     const group = (await screen.findByText('https://api.example.com/v1')).closest(
       'article',
     ) as HTMLElement
-    expect(within(group).getByText('启用')).toBeInTheDocument()
+    expect(within(group).getByText('已启用')).toBeInTheDocument()
     expect(within(group).getByText('已停用')).toBeInTheDocument()
   })
 

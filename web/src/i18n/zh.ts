@@ -446,8 +446,6 @@ export const zh = {
   'ops.merchant.health.unknown': '未知',
   'ops.merchant.health.degraded': '降级',
   'ops.merchant.health.drained': '已耗尽',
-  'ops.merchant.channelStatus.enabled': '启用',
-  'ops.merchant.channelStatus.disabled': '已停用',
 
   'ops.users.title': '用户',
   'ops.users.subtitle': '平台上的账号；列表里的邮箱是打码过的，完整地址在详情页。',

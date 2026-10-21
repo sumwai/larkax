@@ -462,8 +462,6 @@ export const en: Record<MessageKey, string> = {
   'ops.merchant.health.unknown': 'Unknown',
   'ops.merchant.health.degraded': 'Degraded',
   'ops.merchant.health.drained': 'Drained',
-  'ops.merchant.channelStatus.enabled': 'Enabled',
-  'ops.merchant.channelStatus.disabled': 'Disabled',
 
   'ops.users.title': 'Users',
   'ops.users.subtitle':
