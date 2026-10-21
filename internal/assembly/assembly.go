@@ -60,6 +60,7 @@ import (
 	"github.com/sumwai/larkax/internal/payment"
 	"github.com/sumwai/larkax/internal/payment/fakechannel"
 	"github.com/sumwai/larkax/internal/pipeline"
+	"github.com/sumwai/larkax/internal/plans"
 	"github.com/sumwai/larkax/internal/plugin"
 	"github.com/sumwai/larkax/internal/plugin/host"
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
@@ -494,6 +495,11 @@ func Build(cfg Config) (*App, error) {
 	// 账本存储同时满足预留与结算两个接口。它的方法名与签名与 gateway
 	// 声明的逐字一致，所以这里没有适配器——那正是两边刻意对齐的地方。
 	ledgerStore := store.New(cfg.DB)
+
+	// 扣费顺序的读点在 internal/plans：它要读 users 与 settings，还要做两级
+	// 兜底。落库层只声明一个方法（它不能反过来 import plans，那会成环），
+	// 由这里接上。
+	ledgerStore.SetChargeOrderSource(plans.New(cfg.DB))
 
 	// 别名的两个读点共用这一个实例：选路按选中的渠道取覆盖，预留按候选集
 	// 取输出上界（见 gateway.outputBound），两处读的是同一张表。分成两个

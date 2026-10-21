@@ -291,8 +291,9 @@ var ErrNoUpperBound = errors.New("无法确定预留上界")
 //
 // 这里**没有**「差额」字段：退回多少就是 Reserved - Actual，而这两个数都是
 // 本结构体自己的字段，任何读者都能当场减出来。再存一份同义的数，只是多出
-// 一处迟早与它们不一致的地方。落库时那次退回也不在 Go 里算——解冻走的是
-// SQL 里的 reserved_amount（见 internal/ledger/store 的 releaseFrozen）。
+// 一处迟早与它们不一致的地方。落库时那次退回也不在 Go 里算——余额那条路解冻
+// 走的是 SQL 里的 reserved_amount（见 internal/ledger/store 的 releaseFrozen），
+// 额度包覆盖的那条路不冻钱包，因此也没有要解冻的钱。
 type Settlement struct {
 	// Actual 是按实际用量算出的金额，**撞上上界时是 Reserved**（被截断）。
 	// 未截断的那个数在 Breakdown.Total 里。

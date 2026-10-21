@@ -73,7 +73,7 @@ func TestAddReservationAddsToBothPlaces(t *testing.T) {
 		t.Fatalf("初始预留失败: %v", err)
 	}
 
-	if err := s.AddReservation(ctx, req, mustMoney(t, "3")); err != nil {
+	if err := s.AddReservation(ctx, req, mustMoney(t, "3"), 0); err != nil {
 		t.Fatalf("补冻失败: %v", err)
 	}
 
@@ -104,7 +104,7 @@ func TestAddReservationKeepsReconcileInvariant(t *testing.T) {
 	}
 
 	for i, delta := range []string{"2", "4", "8"} {
-		if err := s.AddReservation(ctx, req, mustMoney(t, delta)); err != nil {
+		if err := s.AddReservation(ctx, req, mustMoney(t, delta), 0); err != nil {
 			t.Fatalf("第 %d 次补冻失败: %v", i+1, err)
 		}
 		if _, frozen := walletOf(t, db, userID); frozen != reservedAmountOf(t, db, requestID) {
@@ -132,7 +132,7 @@ func TestAddReservationRefusesToOverdraw(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := s.AddReservation(ctx, req, mustMoney(t, "10"))
+	err := s.AddReservation(ctx, req, mustMoney(t, "10"), 0)
 	if err == nil {
 		t.Fatal("可用余额不足应当失败")
 	}
@@ -172,7 +172,7 @@ func TestAddReservationExactAvailable(t *testing.T) {
 	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "25", "CNY")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddReservation(ctx, req, mustMoney(t, "5")); err != nil {
+	if err := s.AddReservation(ctx, req, mustMoney(t, "5"), 0); err != nil {
 		t.Fatalf("可用余额恰好够用应当成功: %v", err)
 	}
 	if _, frozen := walletOf(t, db, userID); frozen != "30.00000000" {
@@ -198,7 +198,7 @@ func TestAddReservationErrorIsTheSharedSentinel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := s.AddReservation(ctx, req, mustMoney(t, "1"))
+	err := s.AddReservation(ctx, req, mustMoney(t, "1"), 0)
 	if err == nil {
 		t.Fatal("余额不够应当失败")
 	}
@@ -233,7 +233,7 @@ func TestAddReservationWithoutWallet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := s.AddReservation(ctx, req, mustMoney(t, "1"))
+	err := s.AddReservation(ctx, req, mustMoney(t, "1"), 0)
 	if err == nil {
 		t.Fatal("没有钱包应当失败")
 	}
@@ -259,7 +259,7 @@ func TestAddReservationRejectsNonPositiveDelta(t *testing.T) {
 	}
 
 	for _, delta := range []string{"0", "-5"} {
-		if err := s.AddReservation(ctx, req, mustMoney(t, delta)); err == nil {
+		if err := s.AddReservation(ctx, req, mustMoney(t, delta), 0); err == nil {
 			t.Errorf("增量 %s 应被拒绝", delta)
 		}
 	}
@@ -291,7 +291,7 @@ func TestAddReservationAfterReleaseIsRejected(t *testing.T) {
 		t.Fatalf("释放之后冻结 = %s，期望 0", frozen)
 	}
 
-	if err := s.AddReservation(ctx, req, mustMoney(t, "5")); err == nil {
+	if err := s.AddReservation(ctx, req, mustMoney(t, "5"), 0); err == nil {
 		t.Fatal("已经释放的预留不该还能追加冻结额")
 	}
 	// 钱包那一半也必须被回滚
@@ -322,7 +322,7 @@ func TestAddReservationUnknownRequest(t *testing.T) {
 
 	other := req
 	other.RequestID = reqID(t)
-	if err := s.AddReservation(ctx, other, mustMoney(t, "1")); err == nil {
+	if err := s.AddReservation(ctx, other, mustMoney(t, "1"), 0); err == nil {
 		t.Fatal("没有对应账单行时应当失败")
 	}
 	if _, frozen := walletOf(t, db, userID); frozen != "10.00000000" {

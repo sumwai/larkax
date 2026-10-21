@@ -29,7 +29,7 @@ go run ./cmd/larkaxctl ledger reconcile || echo "这一轮有需要人看的东�
 | 快照字段 | 权威值 | 怎么算 |
 |---|---|---|
 | `user_wallets.balance` | `ledger_entries` | **归一到** `user:<id>` 的分录之和（`user:042` 那种写法也算这个用户的） |
-| `user_wallets.frozen` | `billing_requests` | `status='pending'` 的行的 `reserved_amount` 之和 |
+| `user_wallets.frozen` | `billing_requests` | `status='pending'` 的行的 `reserved_amount` 之和（额度包覆盖的行记 0：它占的是订阅的面值与可用量，记在同一行的 `plan_reserved_amount` 与 `reserved_quota` 上，钱包一分没冻） |
 
 `frozen` 的权威值不在账本上，因为冻结与释放都不写分录——它们没有发生任何资金
 流动，只是把冻住的钱放开。写一条零金额分录留痕会让「有分录就说明发生过资金流动」

@@ -83,6 +83,10 @@ type Store struct {
 	// 指向某个月，而不必去改系统时钟。
 	now func() time.Time
 
+	// chargeOrder 是扣费顺序的读点，由装配层接上（见 plancharge.go）。
+	// nil 表示按平台默认值 plan_first 走——测试与不接这一层的调用方都落在这里。
+	chargeOrder ChargeOrderSource
+
 	// usagePartition 记录本进程已经确认过「哪个月的 usage_events 分区存在」。
 	//
 	// 记到月而不是一个 bool：跨月之后必须重新确认一次，否则新月份的第一笔
@@ -272,18 +276,21 @@ func checkUpstreamModel(model string) error {
 	return nil
 }
 
-// SaveReservation 落一条预留记录并冻住金额。
+// SaveReservation 落一条预留记录并占用它的来源（钱包或额度包）。
 //
 // 它做三件事，在**同一个事务**里：
 //
 //  1. 往 billing_requests 插一行（status=pending）。request_id 是唯一键，
 //     所以重复预留会被数据库挡下，而不是靠调用方自觉。
-//  2. 把 user_wallets.frozen 加上预留金额。
+//  2. 按扣费顺序占住来源：从账户余额扣时把 user_wallets.frozen 加上预留金额；
+//     从额度包扣时一分钱都不冻，改为在那一行上记下订阅 id、占用的面值
+//     （plan_reserved_amount）与可用量（reserved_quota）。后者见 plancharge.go。
 //  3. req.Idempotency 非 nil 时，往 idempotency_keys 插一行。
 //
 // 冻结前要检查「可用的钱够不够」——`balance - frozen >= 预留额`。
 // 表上的 CHECK 只管两个字段各自非负，管不了这个，所以判断在 SQL 的
 // WHERE 里做：**更新影响 0 行就是余额不足**，比先查后改少一次竞态。
+// 额度包那条路的同一句话是「面值与可用量都还够」，见 planCovers。
 //
 // # 第三件事为什么必须在这个事务里
 //
@@ -311,6 +318,10 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 		return 0, err
 	}
 
+	// 扣费顺序在开事务之前读：它是一次**配置**查询，不参与事务内的判据；
+	// 读不动时的兜底由那个读点自己完成（见 ChargeOrderSource）。
+	order := s.chargeOrderFor(ctx, r.UserID)
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("开启事务失败: %w", err)
@@ -337,6 +348,94 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 		return 0, quotaErr
 	}
 
+	// 快照先清空：一次失败的尝试不该把上一次的订阅 id 留在调用方手里——
+	// Settle 读的就是这个字段。
+	r.UserPlanID = 0
+
+	id, err := s.reserveInOrder(ctx, tx, order, req, r)
+	if err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("提交预留失败: %w", err)
+	}
+	return id, nil
+}
+
+// reserveInOrder 按扣费顺序挑来源，并在**同一个事务**里落预留行。
+//
+// 两条路的锁不一样：余额那条锁钱包行，额度包那条锁订阅行（并读账本科目余额），
+// 两者不会同时持有——额度包覆盖的请求不动钱包（见 plancharge.go 的说明）。
+//
+// 都覆盖不住时返回的是**钱包那一侧的诊断**：那条错误已经分得清「没有开户」与
+// 「余额不足」，而额度包那侧没有覆盖不是一类错误，只是这条请求用不了那些包。
+func (s *Store) reserveInOrder(ctx context.Context, tx *sql.Tx, order string, req pipeline.Request, r *pipeline.Reservation) (int64, error) {
+	switch order {
+	case chargeOrderBalanceOnly:
+		id, ok, err := s.reserveFromWallet(ctx, tx, req, r)
+		if err != nil {
+			return 0, err
+		}
+		if !ok {
+			return 0, diagnoseFreezeFailure(ctx, tx, WalletKey{UserID: r.UserID, Asset: r.Asset})
+		}
+		return id, nil
+
+	case chargeOrderBalanceFirst:
+		id, ok, err := s.reserveFromWallet(ctx, tx, req, r)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			return id, nil
+		}
+		id, ok, err = s.reserveBestPlan(ctx, tx, req, r)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			return id, nil
+		}
+		return 0, diagnoseFreezeFailure(ctx, tx, WalletKey{UserID: r.UserID, Asset: r.Asset})
+
+	default: // plan_first，也是认不出的取值那一侧
+		id, ok, err := s.reserveBestPlan(ctx, tx, req, r)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			return id, nil
+		}
+		id, ok, err = s.reserveFromWallet(ctx, tx, req, r)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			return id, nil
+		}
+		return 0, diagnoseFreezeFailure(ctx, tx, WalletKey{UserID: r.UserID, Asset: r.Asset})
+	}
+}
+
+// reserveBestPlan 读候选并按序挑第一条覆盖得住的。
+func (s *Store) reserveBestPlan(ctx context.Context, tx *sql.Tx, req pipeline.Request, r *pipeline.Reservation) (int64, bool, error) {
+	candidates, err := selectPlanCandidates(ctx, tx, req, r.UserID, r.Asset)
+	if err != nil {
+		return 0, false, err
+	}
+	if len(candidates) == 0 {
+		return 0, false, nil
+	}
+	return reserveFromPlan(ctx, tx, req, r, candidates)
+}
+
+// reserveFromWallet 是余额那条路：冻住钱包、插预留行。
+//
+// 返回 ok=false 表示「这一条现在收不下」——没有钱包行，或者可用余额不够。
+// 两个原因都由调用方在最终失败时用 diagnoseFreezeFailure 分开报；中途 ok=false
+// 只意味着「该去看下一个来源了」，不是错误。
+func (s *Store) reserveFromWallet(ctx context.Context, tx *sql.Tx, req pipeline.Request, r *pipeline.Reservation) (int64, bool, error) {
 	key := WalletKey{UserID: r.UserID, Asset: r.Asset}
 
 	// 先给钱包行加锁，再插预留记录。
@@ -344,7 +443,7 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 	// 顺序固定为「先钱包后记录」是有意的：所有会改钱包的路径都按这个
 	// 顺序拿锁，于是并发时不会出现「A 持钱包等记录、B 持记录等钱包」。
 	if lockErr := lockWallets(ctx, tx, key); lockErr != nil {
-		return 0, lockErr
+		return 0, false, lockErr
 	}
 
 	// 可用余额不足时更新影响 0 行。不先 SELECT 再判断：那中间有窗口，
@@ -356,16 +455,14 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 		   AND balance - frozen >= $3::numeric`,
 		key.UserID, key.Asset, r.Amount.String())
 	if err != nil {
-		return 0, constraintFailure(fmt.Errorf("冻结余额失败: %w", err))
+		return 0, false, constraintFailure(fmt.Errorf("冻结余额失败: %w", err))
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
-		return 0, fmt.Errorf("读取影响行数失败: %w", err)
+		return 0, false, fmt.Errorf("读取影响行数失败: %w", err)
 	}
 	if affected == 0 {
-		// 两种可能：没有这个钱包行，或者可用余额不足。分开查一次是为了
-		// 给调用方可区分的信息——前者是「用户不存在」，后者是「钱不够」。
-		return 0, diagnoseFreezeFailure(ctx, tx, key)
+		return 0, false, nil
 	}
 
 	// NULLIF 的第二个实参写成 0::bigint 而不是裸 0：NULLIF 要求两个实参
@@ -400,7 +497,7 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 		// 这条 INSERT 有四条外键（users / api_keys / channels / pricing_rules）
 		// 与一条唯一键（request_id）。认得出是哪一条由驱动错误上的约束名回答，
 		// 这里只负责把它们都归成「约束冲突」。
-		return 0, constraintFailure(fmt.Errorf("写预留记录失败: %w", err))
+		return 0, false, constraintFailure(fmt.Errorf("写预留记录失败: %w", err))
 	}
 
 	// 幂等记录（调用方带了 Idempotency-Key 时）。见上面第 3 条：
@@ -413,14 +510,10 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 			// 幂等记录也有两条外键（api_keys / billing_requests）。它自己的
 			// 撞键走 ON CONFLICT DO NOTHING，不会以 23505 冒上来，所以这里
 			// 兜的是外键。
-			return 0, constraintFailure(err)
+			return 0, false, constraintFailure(err)
 		}
 	}
-
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("提交预留失败: %w", err)
-	}
-	return id, nil
+	return id, true, nil
 }
 
 // AddReservation 给一次**已经落库**的预留追加冻结额。
@@ -463,12 +556,38 @@ func (s *Store) SaveReservation(ctx context.Context, req pipeline.Request, r *pi
 // 见 keyquota 的 spentSQL，所以下一次请求会立刻看到）。这条代价写在 #498 的
 // 报告里，不在本函数里补一个「也判一下」——那会把两种错（余额不够 / 额度不够）
 // 混进同一个返回值，而调用方对它们要做的处置完全不同。
-func (s *Store) AddReservation(ctx context.Context, req pipeline.Request, delta money.Amount) error {
+//
+// # 额度包覆盖的请求加的是包，不是钱包
+//
+// 预留快照里带 `user_plan_id` 时，这一次请求从来没有冻过钱包（见
+// plancharge.go），所以这里也不能去动 `user_wallets.frozen`：那会把一个余额为
+// 零、只有额度包的用户在流中间断掉。加的是账单行的 `plan_reserved_amount`
+// 与 `reserved_quota`，判断用的是与初次选源同一组维度。outputTokens 是这一次
+// 补冻覆盖的输出 token 增量，token 包按它加可用量的占用；其余单位不看它。
+//
+// # 锁序：今天靠「同一个 goroutine」，将来要靠约定
+//
+// 两条路今天都由**同一个请求 goroutine** 顺序驱动：预留 → 流式期间补冻 →
+// 结算或释放。没有两个 goroutine 同时改同一笔预留，所以下面这组方向目前
+// 只是与其它请求相遇时的约束，不是本函数内部的同步：
+//
+//   - Save（结算）是「钱包 → 账单行 → 订阅行」：先锁钱包，再按 request_id
+//     锁账单行，记包用量时再锁 user_plans；
+//   - AddReservation 与 Release 是「账单行 → 钱包 / 订阅行」：先锁账单行，
+//     再按预留来源锁钱包或 user_plans。
+//
+// 今天是单 goroutine，所以两个方向还没有机会相遇。将来若同一笔预留真的要
+// 并发改，必须先把这组顺序统一成一种，否则「A 持账单行等钱包、B 持钱包等
+// 账单行」就是死锁，而它只在高并发时出现。
+func (s *Store) AddReservation(ctx context.Context, req pipeline.Request, delta money.Amount, outputTokens int64) error {
 	// 非正的增量没有任何意义，而静默当成 0 会让「补冻了但没冻上」看起来像
 	// 成功——调用方据此推进它的累计量，于是钱包与账单行少冻一段，没有任何
 	// 东西会报出来。调用方只在确实要补时才调它（见 gateway 的 streamFreeze）。
 	if !delta.IsPositive() {
 		return fmt.Errorf("追加冻结额必须为正，当前 %s", delta)
+	}
+	if outputTokens < 0 {
+		return fmt.Errorf("追加冻结的输出 token 数不能为负，当前 %d", outputTokens)
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -476,6 +595,31 @@ func (s *Store) AddReservation(ctx context.Context, req pipeline.Request, delta 
 		return fmt.Errorf("开启事务失败: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// 先看这一笔预留是从哪儿扣的。行锁让「读来源」与「加金额」之间没有窗口：
+	// 结算要把这一行置成 settled 时也得先等它。
+	var planID sql.NullInt64
+	err = tx.QueryRowContext(ctx, `
+		SELECT user_plan_id FROM billing_requests
+		 WHERE request_id = $1 AND status = 'pending'
+		 FOR UPDATE`, req.RequestID).Scan(&planID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf(
+			"请求 %s 的预留已经不在 pending 状态，不能追加冻结额（本该由同一次收尾处理）",
+			req.RequestID)
+	}
+	if err != nil {
+		return fmt.Errorf("查预留来源失败: %w", err)
+	}
+	if planID.Valid {
+		if err = growPlanReservation(ctx, tx, req.RequestID, planID.Int64, delta, outputTokens); err != nil {
+			return err
+		}
+		if err = tx.Commit(); err != nil {
+			return fmt.Errorf("提交追加冻结失败: %w", err)
+		}
+		return nil
+	}
 
 	key := WalletKey{UserID: req.UserID, Asset: req.Asset}
 
@@ -644,12 +788,46 @@ func (s *Store) Save(ctx context.Context, req pipeline.Request, charge *pipeline
 
 	// 判幂等要在加锁之后：锁之前查会有窗口，两个并发重放都能看到
 	// 「还没结算」然后各自往下走。
+	//
+	// 同一条语句顺带读出这次预留的来源与它占着的可用量：结算要按快照里的
+	// 订阅记 prepaid 科目，并把这笔请求实际用掉的量记进 user_plans——
+	// **不重新选源**（在途期间订阅到期、新增都不影响这一笔）。
+	var (
+		planID           sql.NullInt64
+		reservedQuotaStr string
+	)
+	err = tx.QueryRowContext(ctx, `
+		SELECT user_plan_id, reserved_quota::text
+		  FROM billing_requests
+		 WHERE request_id = $1 AND status = 'pending'
+		 FOR UPDATE`, req.RequestID).Scan(&planID, &reservedQuotaStr)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrAlreadySettled
+	}
+	if err != nil {
+		return fmt.Errorf("查预留来源失败: %w", err)
+	}
+
 	settled, err := markSettled(ctx, tx, req, charge)
 	if err != nil {
 		return err
 	}
 	if !settled {
 		return ErrAlreadySettled
+	}
+
+	// 已用量的写入与分录的写入在同一个事务里，而且排在分录**之前**：它要锁
+	// 订阅行，作废那一侧读面值余额之前先拿的是同一把锁。顺序反过来的话，作废
+	// 可能在「分录还没写、行已不再 pending」的窗口里把这份面值核销掉，随后
+	// 结算把它扣成负数。
+	if planID.Valid {
+		reservedQuota, parseErr := money.Parse(reservedQuotaStr)
+		if parseErr != nil {
+			return fmt.Errorf("预留的可用量读不出来（原文 %q）: %w", reservedQuotaStr, parseErr)
+		}
+		if err := s.applyPlanQuota(ctx, tx, planID.Int64, charge.Usage, reservedQuota); err != nil {
+			return err
+		}
 	}
 
 	if err := insertEntries(ctx, tx, charge.Entries); err != nil {
@@ -664,8 +842,13 @@ func (s *Store) Save(ctx context.Context, req pipeline.Request, charge *pipeline
 	if err := applyToWallets(ctx, tx, charge.Entries); err != nil {
 		return err
 	}
-	if err := releaseFrozen(ctx, tx, req.RequestID); err != nil {
-		return err
+	// 额度包覆盖的请求从来没有冻过钱包（见 plancharge.go）：它的分录只动
+	// prepaid 科目，`releaseFrozen` 会按 0 去减一个可能不存在的钱包行，
+	// 报出一个与本次结算无关的「钱包行不在」。
+	if !planID.Valid {
+		if err := releaseFrozen(ctx, tx, req.RequestID); err != nil {
+			return err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -722,12 +905,13 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request, failure *pipe
 		asset  string
 		amount string
 		status string
+		planID sql.NullInt64
 	)
 	err = tx.QueryRowContext(ctx, `
-		SELECT id, user_id, reserved_asset, reserved_amount, status
+		SELECT id, user_id, reserved_asset, reserved_amount, status, user_plan_id
 		  FROM billing_requests
 		 WHERE request_id = $1
-		 FOR UPDATE`, req.RequestID).Scan(&id, &userID, &asset, &amount, &status)
+		 FOR UPDATE`, req.RequestID).Scan(&id, &userID, &asset, &amount, &status, &planID)
 	if errors.Is(err, sql.ErrNoRows) {
 		// 没有预留记录：可能是预留根本没落库（那时也没冻钱）。
 		// 不当成错误——释放一个不存在的东西，目的已经达到了。
@@ -755,23 +939,29 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request, failure *pipe
 	// 而那一刻的差额是唯一的证据——夹到零会把两边同时归零，差额从此
 	// 无处可查。交给表上的 CHECK 拒绝，由 unfreezeFailure 翻译成
 	// ErrFrozenUnderflow。
-	res, err := tx.ExecContext(ctx, `
-		UPDATE user_wallets
-		   SET frozen = frozen - $3::numeric, updated_at = now()
-		 WHERE user_id = $1 AND asset = $2`,
-		userID, asset, amount)
-	if err != nil {
-		return unfreezeFailure(err, fmt.Sprintf("用户 %d 的 %s 预留（%s）", userID, asset, amount))
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("读取影响行数失败: %w", err)
-	}
-	if affected == 0 {
-		// 这条语句只按主键定位（userID 与 asset 都取自上面 SELECT 出来的
-		// 那一行），所以 0 行只有一个解释：钱包行不在。**不能当成功**——
-		// 那样紧接着的「标记已释放」会照常执行，冻结额却一分未动。
-		return walletRowMissing(fmt.Sprintf("用户 %d 的 %s 预留（%s）", userID, asset, amount))
+	//
+	// 额度包覆盖的请求跳过这一步：它从来没冻过钱包（reserved_amount 是 0），
+	// 而「减 0」仍然要求钱包行存在——一个余额为零、只有额度包的用户没有
+	// 钱包行时，那次释放会因为一个与它无关的缺行而失败，钱与状态都留在原地。
+	if !planID.Valid {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE user_wallets
+			   SET frozen = frozen - $3::numeric, updated_at = now()
+			 WHERE user_id = $1 AND asset = $2`,
+			userID, asset, amount)
+		if err != nil {
+			return unfreezeFailure(err, fmt.Sprintf("用户 %d 的 %s 预留（%s）", userID, asset, amount))
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("读取影响行数失败: %w", err)
+		}
+		if affected == 0 {
+			// 这条语句只按主键定位（userID 与 asset 都取自上面 SELECT 出来的
+			// 那一行），所以 0 行只有一个解释：钱包行不在。**不能当成功**——
+			// 那样紧接着的「标记已释放」会照常执行，冻结额却一分未动。
+			return walletRowMissing(fmt.Sprintf("用户 %d 的 %s 预留（%s）", userID, asset, amount))
+		}
 	}
 
 	// 依据跟着 status 一起写，就在这个事务里：这一行上面已经被 FOR UPDATE
@@ -869,11 +1059,13 @@ func failureColumns(failure *pipeline.UpstreamFailure) (status int, code string)
 // 未截断的那个数在 Settlement.Breakdown.Total 里（截断只改 Actual，明细不动），
 // 这里把它写进 computed_amount。于是
 //
-//	final_amount = min(computed_amount, reserved_amount)
+//	final_amount = min(computed_amount, 有效预留)
 //
-// 在每一行上都成立，而 computed_amount > reserved_amount 就是「这一行撞了」。
-// 差出来的那一截是被预留截住、由平台承担掉的金额——记下来才看得出上界是
-// 错得离谱还是擦边（见迁移 00021 的注释）。
+// 在每一行上都成立，而 computed_amount > 有效预留 就是「这一行撞了」。
+// 有效预留是两列之和：钱包那条路记在 reserved_amount 上，额度包覆盖的路记在
+// plan_reserved_amount 上（钱包一分没冻，见 plancharge.go）。差出来的那一截
+// 是被预留截住、由平台承担掉的金额——记下来才看得出上界是错得离谱还是擦边
+// （见迁移 00021 的注释；读侧的两条 SQL 见 docs/metrics.md）。
 //
 // 两列写在同一条 UPDATE 里，不另起一条：分开写会有一个窗口让这一行
 // status 已经是 settled 而 computed_amount 还是 NULL，而那个组合在库里

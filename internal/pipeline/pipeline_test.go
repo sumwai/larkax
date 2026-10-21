@@ -15,6 +15,7 @@ import (
 	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/billing/expr"
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/tokens"
@@ -1050,6 +1051,53 @@ func TestSettleEntriesBalance(t *testing.T) {
 	}
 	if !sum.IsZero() {
 		t.Errorf("分录不平：合计 %s（分录 %+v）", sum, charge.Entries)
+	}
+}
+
+// 预留快照里选了额度包时，消费那条借的是 prepaid:<订阅 id>，不是用户钱包。
+//
+// 两条路的借贷形状只差用户侧这一个科目：商户分成与平台收入照旧，账仍然平。
+// 这一条钉的是「结算用快照里的订阅」这句话在分录上的落点——漏了它，
+// 额度包覆盖的请求会照样去扣用户钱包，而余额为零的用户会在结算时失败。
+func TestSettleFromPlanDebitsPrepaidAccount(t *testing.T) {
+	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}
+	p := newPipeline(t, src)
+
+	req := baseRequest()
+	res, _ := p.Reserve(context.Background(), req)
+	// 落库层在预留事务里填这个字段（见 internal/ledger/store）。
+	res.UserPlanID = 77
+	charge, err := p.Settle(context.Background(), req, res, Outcome{
+		Usage: channel.Usage{PromptTokens: 1000, CompletionTokens: 200},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var found bool
+	for _, e := range charge.Entries {
+		if e.Account.String() == ledger.PrepaidAccount(77).String() {
+			found = true
+			// 账本的符号约定是借为正、贷为负（见 internal/ledger 的 entry）：
+			// 消费从 prepaid 里扣是贷记，所以这条应当是负数。
+			if !e.Amount.IsNegative() {
+				t.Errorf("prepaid 那条应当是贷记（负数，面值减少），实际 %s", e.Amount)
+			}
+		}
+		if e.Account.Type() == ledger.AccountUser {
+			t.Errorf("额度包覆盖的请求不该动用户钱包，却出现分录 %s", e.Account)
+		}
+	}
+	if !found {
+		t.Fatalf("没有 prepaid:77 的分录：分录 %+v", charge.Entries)
+	}
+
+	sum := money.Zero
+	for _, e := range charge.Entries {
+		sum = sum.Add(e.Amount)
+	}
+	if !sum.IsZero() {
+		t.Errorf("分录不平：合计 %s", sum)
 	}
 }
 

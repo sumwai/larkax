@@ -785,7 +785,7 @@ func (f *streamFreeze) observe(ctx context.Context, produced int64) error {
 		return nil
 	}
 
-	if err := f.gw.Reservations.AddReservation(ctx, f.req, amount); err != nil {
+	if err := f.gw.Reservations.AddReservation(ctx, f.req, amount, need); err != nil {
 		if errors.Is(err, pipeline.ErrInsufficientAvailable) {
 			// 唯一的断流理由，也是这个计数器的**唯一**增量点：调用方拿到这个
 			// 返回值就会切断这条流（见下面循环里那一段），所以「想断」与
