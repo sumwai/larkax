@@ -818,3 +818,48 @@ func TestOffersJSONCarriesChargesAndUnits(t *testing.T) {
 		}
 	}
 }
+
+// 显式免费在 JSON 里是 `"0.00000000"`，不是省略：规则写了 `prompt: 0`
+// 与没写 prompt 在响应上必须分得出来——前者键在且为 0，后者键不出现。
+// 计量项同理。
+func TestOffersJSONKeepsExplicitZeroPrices(t *testing.T) {
+	offers := newOffersJSON([]pricing.Offer{{
+		Price:  money.Zero,
+		Prices: map[string]money.Amount{"prompt": money.Zero},
+		Units:  map[string]money.Amount{"cache_write_5m": money.Zero},
+	}})
+
+	encoded, err := json.Marshal(offers)
+	if err != nil {
+		t.Fatalf("序列化报价失败: %v", err)
+	}
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &raw); err != nil {
+		t.Fatalf("响应不是 JSON: %v（%s）", err, encoded)
+	}
+	if len(raw) != 1 {
+		t.Fatalf("报价条数 = %d，期望 1", len(raw))
+	}
+
+	var prices map[string]string
+	if err := json.Unmarshal(raw[0]["prices"], &prices); err != nil {
+		t.Fatalf("prices 不是对象: %v", err)
+	}
+	if value, ok := prices["prompt"]; !ok || value != "0.00000000" {
+		t.Errorf("prices = %+v，期望 prompt 这个键在且为 0（显式免费）", prices)
+	}
+	var units map[string]string
+	if err := json.Unmarshal(raw[0]["units"], &units); err != nil {
+		t.Fatalf("units 不是对象: %v", err)
+	}
+	if value, ok := units["cache_write_5m"]; !ok || value != "0.00000000" {
+		t.Errorf("units = %+v，期望 cache_write_5m 这个键在且为 0", units)
+	}
+
+	// 一次性费用仍然按「0 不出现」处理：显式写 0 与没写都不收费。
+	for _, absent := range []string{"request", "minimum"} {
+		if _, ok := raw[0][absent]; ok {
+			t.Errorf("多出字段 %q（0 元应省略）：%v", absent, raw[0])
+		}
+	}
+}

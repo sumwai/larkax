@@ -359,6 +359,9 @@ func TestGroupByModelCarriesChargesUnitsAndRule(t *testing.T) {
 	if offer.Rule.ID != 42 || offer.Rule.Scope != "merchant" || offer.Rule.Priority != 10 {
 		t.Errorf("rule = %+v，期望原样带出规则元信息", offer.Rule)
 	}
+	if !offer.Rule.EffectiveFrom.Equal(from) {
+		t.Errorf("rule.effective_from = %v，期望 %v", offer.Rule.EffectiveFrom, from)
+	}
 	if offer.Rule.EffectiveTo == nil || !offer.Rule.EffectiveTo.Equal(to) {
 		t.Errorf("rule.effective_to = %v，期望 %v", offer.Rule.EffectiveTo, to)
 	}
@@ -380,5 +383,38 @@ func TestGroupByModelSplitsByCharges(t *testing.T) {
 	)[model]
 	if len(got.Offers) != 2 {
 		t.Fatalf("报价条数 = %d，期望 2（固定费不同）：%+v", len(got.Offers), got.Offers)
+	}
+}
+
+// 规则显式写 0 与「没写」是两件事：写了 0 的维度与计量项要出现在报价里，
+// 值为 0；没写的维度仍然不出现。结算据 Prices.Declared 区分「免费」与
+// 「漏配」，报价不能把「写了 0」丢掉。
+func TestPricesOfKeepsExplicitZeroPrices(t *testing.T) {
+	offers := NewOffers(nil, "Asia/Shanghai", nil)
+	got, err := offers.pricesOf(3, `{
+		"prompt": 0,
+		"completion": 0.000003,
+		"units": {"cache_write_5m": 0}
+	}`, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("pricesOf 出错: %v", err)
+	}
+
+	value, ok := got.Prices["prompt"]
+	if !ok {
+		t.Fatalf("规则写了 prompt: 0，报价里却没有这个维度：%+v", got.Prices)
+	}
+	if value != money.Zero {
+		t.Errorf("prompt 报价 = %s，期望 0（显式免费）", value)
+	}
+	if _, declared := got.Prices["cache_read"]; declared {
+		t.Errorf("规则没写 cache_read，报价里却有它：%+v", got.Prices)
+	}
+	unit, ok := got.Units["cache_write_5m"]
+	if !ok {
+		t.Fatalf("规则写了 cache_write_5m: 0，Units 里却没有这一项：%+v", got.Units)
+	}
+	if unit != money.Zero {
+		t.Errorf("cache_write_5m 单价 = %s，期望 0", unit)
 	}
 }
