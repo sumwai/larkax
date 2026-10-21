@@ -70,12 +70,20 @@ async function openRuleForm() {
   return screen.getByRole('dialog', { name: '新建规则' })
 }
 
-function fillRuleBasics(dialog: HTMLElement) {
+function fillRuleBasics(dialog: HTMLElement, expr = 'tokens * 2') {
   fireEvent.change(within(dialog).getByLabelText('名称'), { target: { value: 'bargain' } })
   fireEvent.change(within(dialog).getByLabelText('模型匹配式（每行一个）'), {
     target: { value: 'claude-*' },
   })
-  fireEvent.change(within(dialog).getByLabelText('表达式'), { target: { value: 'tokens * 2' } })
+  // 新建时默认是表单模式；要填一段自由写的表达式，先切过去。
+  fireEvent.click(within(dialog).getByRole('button', { name: '表达式' }))
+  fireEvent.change(within(dialog).getByLabelText('表达式'), { target: { value: expr } })
+}
+
+function fillRows(dialog: HTMLElement, values: Record<string, string>) {
+  for (const [label, value] of Object.entries(values)) {
+    fireEvent.change(within(dialog).getByLabelText(label), { target: { value } })
+  }
 }
 
 describe('计价页', () => {
@@ -117,6 +125,50 @@ describe('计价页', () => {
         enabled: true,
       }),
     )
+  })
+
+  it('五行填满后，提交的 expr 是拼好的 JSON 串', async () => {
+    renderPricing()
+    const dialog = await openRuleForm()
+    fireEvent.change(within(dialog).getByLabelText('名称'), { target: { value: 'bargain' } })
+    fireEvent.change(within(dialog).getByLabelText('模型匹配式（每行一个）'), {
+      target: { value: 'example-model' },
+    })
+    fillRows(dialog, {
+      输入: '3.5',
+      输出: '15',
+      缓存读: '1.5',
+      缓存写: '1.5',
+      推理: '6',
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: '创建' }))
+    const confirm = screen.getByRole('dialog', { name: '确认创建' })
+    fireEvent.click(within(confirm).getByRole('button', { name: '创建' }))
+
+    await waitFor(() =>
+      expect(mocks.createRule).toHaveBeenCalledWith(
+        expect.objectContaining({
+          expr: '{"prompt": 0.0000035, "completion": 0.000015, "cache_read": 0.0000015, "cache_write": 0.0000015, "reasoning": 0.000006}',
+        }),
+      ),
+    )
+  })
+
+  it('一项单价都没填时拦在本地，不发请求', async () => {
+    renderPricing()
+    const dialog = await openRuleForm()
+    fireEvent.change(within(dialog).getByLabelText('名称'), { target: { value: 'bargain' } })
+    fireEvent.change(within(dialog).getByLabelText('模型匹配式（每行一个）'), {
+      target: { value: 'example-model' },
+    })
+
+    fireEvent.submit(document.getElementById('rule-form') as HTMLFormElement)
+
+    expect(
+      await screen.findByText('至少要有一项单价，否则这次请求结算时会失败。'),
+    ).toBeInTheDocument()
+    expect(mocks.createRule).not.toHaveBeenCalled()
   })
 
   it('归属用户不是整数时挡在本地，不把 NaN 当成 0 发出去', async () => {

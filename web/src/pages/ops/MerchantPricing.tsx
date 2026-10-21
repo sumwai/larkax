@@ -5,8 +5,9 @@ import { useI18n } from '../../i18n'
 import { useSite } from '../../site/SiteProvider'
 import { useAsync } from '../../hooks/useAsync'
 import { formatDateTime } from '../../lib/format'
-import { Button, Empty, Modal, PageHead, Skeleton, useToast } from '../../components/ui'
+import { Alert, Button, Empty, Modal, PageHead, Skeleton, useToast } from '../../components/ui'
 import { IconPlus } from '../../components/icons'
+import { ExprEditor } from '../../components/ExprEditor'
 import { Field, InputError, OpsLoadError, linesToList, listToLines, useConfirm } from './common'
 
 interface RuleForm {
@@ -38,6 +39,7 @@ export function MerchantPricing() {
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState<RuleForm>(EMPTY_FORM)
   const [formError, setFormError] = useState<string | null>(null)
+  const [exprError, setExprError] = useState<string | null>(null)
 
   const openCreate = () => {
     setForm(EMPTY_FORM)
@@ -71,6 +73,7 @@ export function MerchantPricing() {
     const patterns = linesToList(form.patterns)
     if (!form.name.trim()) return setFormError(t('ops.pricing.nameRequired'))
     if (patterns.length === 0) return setFormError(t('ops.pricing.patternsRequired'))
+    if (exprError) return setFormError(exprError)
     if (!form.expr.trim()) return setFormError(t('ops.pricing.exprRequired'))
     if (!/^-?\d+$/.test(form.priority.trim())) return setFormError(t('ops.invalidInteger'))
 
@@ -163,6 +166,7 @@ export function MerchantPricing() {
                 {rule.enabled ? t('ops.pricing.on') : t('ops.pricing.off')} ·{' '}
                 {formatDateTime(rule.updated_at, meta.timezone)}
               </span>
+              {rule.expr_error && <Alert tone="bad" title={rule.expr_error} />}
               <div className="actions">
                 <Button variant="ghost" size="sm" onClick={() => openEdit(rule)}>
                   {t('ops.edit')}
@@ -203,13 +207,11 @@ export function MerchantPricing() {
                 onChange={(event) => setForm({ ...form, patterns: event.target.value })}
               />
             </Field>
-            <Field label={t('ops.pricing.expr')}>
-              <textarea
-                className="input mono"
-                value={form.expr}
-                onChange={(event) => setForm({ ...form, expr: event.target.value })}
-              />
-            </Field>
+            <ExprEditor
+              value={form.expr}
+              onChange={(expr) => setForm({ ...form, expr })}
+              onErrorChange={setExprError}
+            />
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
               <Field label={t('ops.pricing.priority')}>
                 <input
