@@ -281,9 +281,10 @@ active 管理员。对应的装配见 `internal/adminapi` 的 `GroupUsers` 与
 
 - `email` 是打码后的写法（本地部分只留首字符）；`email` 为 `null` 表示这名
   用户没填邮箱。完整邮箱只在详情里给。
-- `last_seen_at` 是该用户所有会话 `last_seen_at` 的最大值。控制台每次请求都会
-  尝试刷新它，但至多每分钟写一次库（`internal/auth` 的 `sessionTouchInterval`），
-  所以它的精度是分钟；从没登录过控制台为 `null`。
+- `last_seen_at` 是该用户所有会话 `last_seen_at` 的最大值。除会话探测
+  （`GET /auth/session`）与登出外，控制台的受保护请求都会尝试刷新它，但至多
+  每分钟写一次库（`internal/auth` 的 `sessionTouchInterval`），所以它的精度是
+  分钟；从没登录过、或会话行已被清理的老用户都是 `null`。
 - `next_cursor` 为 `null` 表示没有下一页。**游标不绑定筛选条件**：翻页途中
   改 `query` / `role` / `status`，客户端要从第一页重新取，否则会拿上一组条件
   的位置去翻这一组。

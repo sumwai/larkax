@@ -299,14 +299,27 @@ func TestUsersListReportsLastSeenAt(t *testing.T) {
 	store := auth.New(db)
 
 	seenUser := newUsersTestUser(t, db, auth.RoleUser, "seen")
-	if _, _, err := store.CreateSession(ctx, seenUser.ID, "test-agent", nil); err != nil {
-		t.Fatalf("建会话失败: %v", err)
+	// 两条会话、两个不同的活动时刻：只建一条时 max/min/ORDER BY LIMIT 1
+	// 三种写法给出的结果一样，这条用例就钉不住「取最大值」。
+	older, _, err := store.CreateSession(ctx, seenUser.ID, "test-agent", nil)
+	if err != nil {
+		t.Fatalf("建旧会话失败: %v", err)
 	}
+	newer, _, err := store.CreateSession(ctx, seenUser.ID, "test-agent", nil)
+	if err != nil {
+		t.Fatalf("建新会话失败: %v", err)
+	}
+	olderSeen := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Second)
 	seen := time.Now().UTC().Add(-90 * time.Minute).Truncate(time.Second)
-	if _, err := db.ExecContext(ctx,
-		`UPDATE user_sessions SET last_seen_at = $2 WHERE user_id = $1`,
-		seenUser.ID, seen); err != nil {
-		t.Fatalf("改 last_seen_at 失败: %v", err)
+	for _, row := range []struct {
+		id   int64
+		seen time.Time
+	}{{older.ID, olderSeen}, {newer.ID, seen}} {
+		if _, err := db.ExecContext(ctx,
+			`UPDATE user_sessions SET last_seen_at = $2 WHERE id = $1`,
+			row.id, row.seen); err != nil {
+			t.Fatalf("改 last_seen_at 失败: %v", err)
+		}
 	}
 	neverUser := newUsersTestUser(t, db, auth.RoleUser, "neverseen")
 

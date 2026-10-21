@@ -37,8 +37,9 @@ type UserPageQuery struct {
 // UserRow 是清单里的一行：读侧字段加最近一次登录。
 type UserRow struct {
 	UserInfo
-	// LastSeenAt 是这名用户所有会话里 last_seen_at 的最大值；nil 表示
-	// 从没登录过控制台。
+	// LastSeenAt 是这名用户所有会话里 last_seen_at 的最大值；nil 表示从没
+	// 登录过控制台，或者会话行已被清理——过期会话会被删掉（见会话留存），
+	// 所以「长期没登录」与「从没登录」在这里都是 nil。
 	LastSeenAt *time.Time
 }
 

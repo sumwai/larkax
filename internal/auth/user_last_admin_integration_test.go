@@ -98,7 +98,7 @@ func TestUpdateUserRejectsRemovingLastActiveAdmin(t *testing.T) {
 }
 
 // lastAdminWindow* 是一次性的触发器，把那笔撤 admin 的 UPDATE 在触发器里
-// 停住半秒。
+// 停住 1.5 秒。
 //
 // 为什么需要它：两条 goroutine 只有一个起跑信号的话，「两笔重叠」是碰运气。
 // 调度慢一点、连接建链慢一点，就会有一笔先提交，另一笔照样被拒——用例于是
@@ -127,7 +127,7 @@ func installLastAdminWindow(t *testing.T, store *Store) {
 		`CREATE OR REPLACE FUNCTION ` + lastAdminWindowFunction + `() RETURNS trigger
 		   LANGUAGE plpgsql AS $fn$
 		 BEGIN
-		   PERFORM pg_sleep(0.5);
+		   PERFORM pg_sleep(1.5);
 		   RETURN NEW;
 		 END
 		 $fn$`,
