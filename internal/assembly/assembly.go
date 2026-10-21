@@ -70,6 +70,7 @@ import (
 	"github.com/sumwai/larkax/internal/settings"
 	"github.com/sumwai/larkax/internal/snapshotwire"
 	"github.com/sumwai/larkax/internal/tokens"
+	"github.com/sumwai/larkax/internal/upstream"
 )
 
 // Config 是装配一次服务所需的全部输入。
@@ -703,8 +704,19 @@ func buildPublicHandler(cfg Config, inference *api.Handler, ledgerStore *store.S
 		siteTimezone = loc.String()
 	}
 
+	// 渠道类型的注册表与 cmd/larkax 的管理面用同一个构造（internal/upstream
+	// 的内置适配器清单）：控制台 merchant/admin 两组写渠道时要校验 type，
+	// 而「内置了哪些适配器」只有那一处清单。这里只**构造**，不读环境、不碰
+	// 主密钥——Sealer 仍然是上面注入进来的那个。
+	registry, err := upstream.Registry()
+	if err != nil {
+		return nil, fmt.Errorf("构造控制台管理路由的渠道类型注册表失败: %w", err)
+	}
+
 	console := consoleapi.New(consoleapi.Config{
 		DB:       cfg.DB,
+		Sealer:   cfg.Sealer,
+		Registry: registry,
 		Logger:   logger,
 		SiteName: "larkax",
 		Currency: paths.asset,

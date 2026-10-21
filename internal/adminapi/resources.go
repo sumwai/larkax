@@ -44,6 +44,7 @@ type channelUpdateRequest struct {
 	Weight     *int            `json:"weight"`
 	Priority   *int            `json:"priority"`
 	Setting    *map[string]any `json:"setting"`
+	Status     *string         `json:"status"`
 }
 
 type channelView struct {
@@ -93,7 +94,16 @@ func channelViewOf(info channels.ChannelInfo) channelView {
 }
 
 func (a *API) listChannels(w http.ResponseWriter, r *http.Request) {
-	infos, err := a.channels.List(r.Context())
+	ownerID, scoped := OwnerFromContext(r.Context())
+	var (
+		infos []channels.ChannelInfo
+		err   error
+	)
+	if scoped {
+		infos, err = a.channels.ListOwned(r.Context(), ownerID)
+	} else {
+		infos, err = a.channels.List(r.Context())
+	}
 	if err != nil {
 		a.fail(w, err)
 		return
@@ -111,9 +121,15 @@ func (a *API) getChannel(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	info, err := a.channels.Get(r.Context(), id)
+	ownerID, scoped := OwnerFromContext(r.Context())
+	var info channels.ChannelInfo
+	if scoped {
+		info, err = a.channels.GetOwned(r.Context(), ownerID, id)
+	} else {
+		info, err = a.channels.Get(r.Context(), id)
+	}
 	if err != nil {
-		a.fail(w, err)
+		a.failScoped(w, r, err)
 		return
 	}
 	a.writeJSON(w, http.StatusOK, channelViewOf(info))
@@ -123,6 +139,12 @@ func (a *API) createChannel(w http.ResponseWriter, r *http.Request) {
 	var req channelCreateRequest
 	if !a.decodeBody(w, r, &req) {
 		return
+	}
+	// merchant 建立渠道时归属就是他自己：请求体里的 owner_user_id 被覆盖，
+	// 而不是「校验它等于自己」。后者要在两处维护同一句判断，且请求体里本来
+	// 就不该出现这个字段——归属是服务端从会话里取的。
+	if ownerID, scoped := OwnerFromContext(r.Context()); scoped {
+		req.OwnerUserID = ownerID
 	}
 	id, err := a.channels.Create(r.Context(), channels.CreateRequest{
 		OwnerUserID: req.OwnerUserID,
@@ -152,7 +174,7 @@ func (a *API) updateChannel(w http.ResponseWriter, r *http.Request) {
 	if !a.decodeBody(w, r, &req) {
 		return
 	}
-	err = a.channels.Update(r.Context(), channels.UpdateRequest{
+	updateReq := channels.UpdateRequest{
 		ID:         id,
 		Name:       req.Name,
 		Type:       req.Type,
@@ -162,9 +184,15 @@ func (a *API) updateChannel(w http.ResponseWriter, r *http.Request) {
 		Priority:   req.Priority,
 		Setting:    req.Setting,
 		Credential: req.Credential,
-	})
+		Status:     req.Status,
+	}
+	if ownerID, scoped := OwnerFromContext(r.Context()); scoped {
+		err = a.channels.UpdateOwned(r.Context(), ownerID, updateReq)
+	} else {
+		err = a.channels.Update(r.Context(), updateReq)
+	}
 	if err != nil {
-		a.fail(w, err)
+		a.failScoped(w, r, err)
 		return
 	}
 	a.writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

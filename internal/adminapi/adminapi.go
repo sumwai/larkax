@@ -72,6 +72,27 @@ type Config struct {
 	// Logger 记录被吞掉的内部错误（库报错、读不出 verifier）。为 nil 时用
 	// slog.Default()：错误体只能说一句固定的话，真正的原因只有日志里有。
 	Logger *slog.Logger
+
+	// Prefix 是这组路由挂在哪。为空时用 PathPrefix（内部监听上的默认挂载点）。
+	//
+	// 控制台把它挂到 `/api/v1/merchant/` 与 `/api/v1/admin/` 上。前缀必须是
+	// `/` 开头、`/` 结尾的子树（见 New 的校验）：少一个斜杠会让
+	// `/api/v1/merchant/channels` 落进别的路由，而那种错只表现成 404。
+	Prefix string
+
+	// Authorize 包住整组路由。为 nil 时用本包自己的 Bearer 鉴权（内部监听）。
+	//
+	// 控制台传一个放行的中间件：它的会话角色判据在挂载处（见
+	// internal/consoleapi），这里再来一道 Bearer 只会把浏览器挡在外面。
+	// 传什么都要理解成「整组路由的前提」，不能只包一部分。
+	Authorize func(http.Handler) http.Handler
+
+	// OnlyChannels 为 true 时只注册渠道那四条路由，不注册模型目录与计价。
+	//
+	// 控制台的 merchant 组用它：merchant 管的是**自己名下**的渠道；模型目录
+	// 与计价规则是平台级的，没有「归属」可以过滤，放给 merchant 等于把全局
+	// 写入权交出去。
+	OnlyChannels bool
 }
 
 // tokenSource 提供当前令牌的 verifier。
@@ -97,6 +118,16 @@ type API struct {
 // New 装配管理面。返回的 handler **已经带上鉴权中间件**：调用方把它整片挂到
 // 内部监听的 `/admin/v1/` 上即可，不存在「只挂了业务 handler」的装配错误。
 func New(cfg Config) http.Handler {
+	prefix := cfg.Prefix
+	if prefix == "" {
+		prefix = PathPrefix
+	}
+	if !strings.HasPrefix(prefix, "/") || !strings.HasSuffix(prefix, "/") {
+		// 前缀是挂载点的**形状**，不是数据：写错时每一条路由都会落到别处，
+		// 而症状只是 404。在装配时就说出来，比等第一个请求好。
+		panic(fmt.Sprintf("adminapi: Prefix %q 必须以 / 开头并以 / 结尾", cfg.Prefix))
+	}
+
 	a := &API{
 		tokens:       NewTokenStore(cfg.DB),
 		log:          cfg.Logger,
@@ -109,30 +140,58 @@ func New(cfg Config) http.Handler {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET "+PathPrefix+"channels", a.listChannels)
-	mux.HandleFunc("POST "+PathPrefix+"channels", a.createChannel)
-	mux.HandleFunc("GET "+PathPrefix+"channels/{id}", a.getChannel)
-	mux.HandleFunc("PATCH "+PathPrefix+"channels/{id}", a.updateChannel)
+	mux.HandleFunc("GET "+prefix+"channels", a.listChannels)
+	mux.HandleFunc("POST "+prefix+"channels", a.createChannel)
+	mux.HandleFunc("GET "+prefix+"channels/{id}", a.getChannel)
+	mux.HandleFunc("PATCH "+prefix+"channels/{id}", a.updateChannel)
 
-	mux.HandleFunc("GET "+PathPrefix+"models", a.listModels)
-	mux.HandleFunc("POST "+PathPrefix+"models", a.createModel)
-	mux.HandleFunc("PATCH "+PathPrefix+"models/{name}", a.updateModel)
-	mux.HandleFunc("DELETE "+PathPrefix+"models/{name}", a.deleteModel)
+	if !cfg.OnlyChannels {
+		mux.HandleFunc("GET "+prefix+"models", a.listModels)
+		mux.HandleFunc("POST "+prefix+"models", a.createModel)
+		mux.HandleFunc("PATCH "+prefix+"models/{name}", a.updateModel)
+		mux.HandleFunc("DELETE "+prefix+"models/{name}", a.deleteModel)
 
-	mux.HandleFunc("GET "+PathPrefix+"aliases", a.listAliases)
-	mux.HandleFunc("POST "+PathPrefix+"aliases", a.createAlias)
-	mux.HandleFunc("PATCH "+PathPrefix+"aliases/{id}", a.updateAlias)
-	mux.HandleFunc("DELETE "+PathPrefix+"aliases/{id}", a.deleteAlias)
+		mux.HandleFunc("GET "+prefix+"aliases", a.listAliases)
+		mux.HandleFunc("POST "+prefix+"aliases", a.createAlias)
+		mux.HandleFunc("PATCH "+prefix+"aliases/{id}", a.updateAlias)
+		mux.HandleFunc("DELETE "+prefix+"aliases/{id}", a.deleteAlias)
 
-	mux.HandleFunc("GET "+PathPrefix+"pricing/rules", a.listRules)
-	mux.HandleFunc("POST "+PathPrefix+"pricing/rules", a.createRule)
-	mux.HandleFunc("PATCH "+PathPrefix+"pricing/rules/{id}", a.updateRule)
+		mux.HandleFunc("GET "+prefix+"pricing/rules", a.listRules)
+		mux.HandleFunc("POST "+prefix+"pricing/rules", a.createRule)
+		mux.HandleFunc("PATCH "+prefix+"pricing/rules/{id}", a.updateRule)
 
-	mux.HandleFunc("GET "+PathPrefix+"pricing/costs", a.listCosts)
-	mux.HandleFunc("POST "+PathPrefix+"pricing/costs", a.createCost)
-	mux.HandleFunc("PATCH "+PathPrefix+"pricing/costs/{id}", a.updateCost)
+		mux.HandleFunc("GET "+prefix+"pricing/costs", a.listCosts)
+		mux.HandleFunc("POST "+prefix+"pricing/costs", a.createCost)
+		mux.HandleFunc("PATCH "+prefix+"pricing/costs/{id}", a.updateCost)
+	}
 
-	return a.authorize(mux)
+	authorize := cfg.Authorize
+	if authorize == nil {
+		authorize = a.authorize
+	}
+	return authorize(mux)
+}
+
+// ownerKey 是归属上下文的键。
+type ownerKey struct{}
+
+// WithOwner 把「这次请求只代表这个用户」放进 context，用于控制台的 merchant 组。
+//
+// 它是**授权判定之后**才该调用的一步：本包拿到这个值就把渠道读写的范围收窄到
+// 这个用户名下，而不会再去问「调用者是谁」。所以传进来的 id 必须来自服务端
+// 会话，不能来自请求体或查询串。
+func WithOwner(ctx context.Context, userID int64) context.Context {
+	return context.WithValue(ctx, ownerKey{}, userID)
+}
+
+// OwnerFromContext 读 WithOwner 放进去的归属。第二个返回值为 false 表示
+// 「这组路由不做归属限制」（admin 组与内部管理面）。
+func OwnerFromContext(ctx context.Context) (int64, bool) {
+	ownerID, ok := ctx.Value(ownerKey{}).(int64)
+	if !ok || ownerID <= 0 {
+		return 0, false
+	}
+	return ownerID, true
 }
 
 // 管理面自己的错误文案。
@@ -147,6 +206,11 @@ const (
 	// 因为 err.Error() 可能带着连接串、主机名与 settings 键名。
 	msgUnavailable = "the admin API is temporarily unavailable"
 	msgDatabase    = "the database rejected the request; see the server log"
+	// msgNotFound 是归属受限（控制台 merchant）那一侧 404 的固定正文。
+	//
+	// 「不存在」与「不是你的」必须逐字相同：后者一旦能分辨，404 就变成了
+	// 「这一行存在」的确认。
+	msgNotFound = "not found"
 )
 
 // logger 返回装配时给的日志器；没给时用进程级的默认日志器。
@@ -300,6 +364,19 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 	default:
 		a.writeError(w, http.StatusBadRequest, err.Error())
 	}
+}
+
+// failScoped 是 fail 的归属受限版本：404 一律用固定正文。
+//
+// 只有渠道那几条路由用它。不带归属的调用（内部管理面）仍走 fail——那里的
+// 404 本来就该说清是哪一条，调用者是运维。
+func (a *API) failScoped(w http.ResponseWriter, r *http.Request, err error) {
+	if _, scoped := OwnerFromContext(r.Context()); scoped &&
+		errors.Is(err, channels.ErrChannelNotFound) {
+		a.writeError(w, http.StatusNotFound, msgNotFound)
+		return
+	}
+	a.fail(w, err)
 }
 
 // pathID 取路径里的数字 id。

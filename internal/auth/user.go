@@ -378,28 +378,31 @@ func isASCIILetterDigit(r rune) bool {
 // 的布尔标记，不是独立实体。所以这里不建三张表，只把「称呼 → 标记」的
 // 对应关系收在一处，免得命令行与将来别的调用方各写一份、又各自漂移。
 //
-// # 这两个标记今天还是**预留**，不是权限
+// # 读方：展示、筛选与控制台的两组管理路由
 //
-// 全仓没有一处**鉴权判断**读 users.is_merchant / users.is_admin：写入点只有
-// 建用户与 `user update` 两处（见 Flags），读方只有展示与筛选那一侧（`user
-// list` 的角色栏与 `--role` 筛选，见 roleOf 与 rolePredicate），没有任何代码
-// 按它放行或拒绝。于是 `--role` 今天只是**把称呼记下来**，它不改任何一处
-// 行为——`channel create --user` 接受任何存在的用户，建完也不会去问这个人
-// 是不是 merchant。
+// 写入点只有建用户与 `user update` 两处（见 Flags），读方有两类：
 //
-// 它们打算给管理面的鉴权用（#158）：那时「谁能挂渠道、谁能进管理接口」
-// 才是被检查的。接上之前别把这里的注释读成「已经生效」——一句写下来却
-// 没人执行的声明，比没有声明更容易让下一个人以为有人管。
+//   - 展示与筛选（`user list` 的角色栏与 `--role` 筛选，见 RoleOf 与
+//     rolePredicate）；
+//   - **控制台的角色路由**（见 internal/consoleapi）：`/api/v1/merchant/*`
+//     要求 merchant 或 admin，`/api/v1/admin/*` 要求 admin。判据只读服务端
+//     会话里这一列（见 Session.Role），请求里带的「当前视图」不参与判定。
+//
+// 内部监听上的 `/admin/v1/` 不走这条路由：它用独立的运维令牌（见
+// internal/adminapi），与角色无关。所以「admin 角色」与「管理面令牌」是
+// 两件各自成立的事，不互相代替。
+//
+// `channel create --user` 仍然接受任何存在的用户：归属是数据，不是权限。
 type Role string
 
 const (
 	// RoleUser 是普通用户：能调推理、能被计费。
 	RoleUser Role = "user"
-	// RoleMerchant 是 merchant 角色的称呼：**预留**指「可以挂载上游渠道并获得分成」，
-	// 今天不生效（没有一处代码按它放行或拒绝，见 Role 的注释）。
+	// RoleMerchant 是 merchant：可以挂载上游渠道，并在控制台的 merchant
+	// 组里管理**自己名下**的渠道（平台自营渠道对它不可见）。
 	RoleMerchant Role = "merchant"
-	// RoleAdmin 是 admin 角色的称呼：**预留**指「可以进管理面」，今天不生效
-	// （管理面本身还不存在，见 #158）。
+	// RoleAdmin 是 admin：可以进控制台的两组管理路由，看到全部渠道与
+	// 模型目录、计价规则。它不等于内部监听上的管理面令牌（见 Role 的注释）。
 	RoleAdmin Role = "admin"
 )
 
@@ -427,9 +430,9 @@ func ParseRole(s string) (Role, error) {
 
 // Flags 把角色翻译成 users 表上的两个标记。
 //
-// 读方只有展示与筛选那一侧（见 Role 的注释）：翻出来的值只是落库，没有任何
-// 鉴权判断读它。所以它今天的作用是「把称呼记下来」，而把对应关系收在一处，
-// 是为了将来接上时有唯一一处可改，不是因为它已经生效。
+// 写侧用它在库里落两个布尔列；读侧由 RoleOf 反推回同一个称呼，控制台的角色
+// 路由再按那个称呼判定（见 Role 的注释）。对应关系收在一处，是为了让「写得
+// 进去」与「读得出来」不会长成两套。
 //
 // # 为什么导出
 //
@@ -616,6 +619,8 @@ func ParseUserStatus(s string) (string, error) {
 // roleOf 把 users 表上那两个标记反推成一个角色称呼。
 //
 // 它是 Role.Flags 在**读侧**的另一半：那一处按称呼写标记，这里按标记读称呼。
+// 会话与用户资料两条读路径都从这里取（见 SessionByToken 与 scanUserInfo），
+// 于是「登录时是什么角色」与「资料里是什么角色」出自同一套映射。
 //
 // 先看 is_admin：迁移里写着 admin 天然也是 merchant，所以一行只写了 is_admin
 // 没写 is_merchant 的数据仍然算 admin。**造得出这样一行的路有两条**：直接改库，
@@ -632,9 +637,39 @@ func roleOf(isMerchant, isAdmin bool) Role {
 	}
 }
 
+// RoleOf 是 roleOf 的导出形式，供**别的包**（会话读路径）用。
+//
+// 只有这一层包装，没有第二份映射：本包内部继续用 roleOf，是为了让
+// user_test.go 与 user_constraint_integration_test.go 里那些「标记 ↔ 称呼」
+// 的用例不必跨包导出也能钉住同一条判据。
+func RoleOf(isMerchant, isAdmin bool) Role { return roleOf(isMerchant, isAdmin) }
+
+// Allows 判断 r 能不能进要求 required 的那一组路由。
+//
+// 只有一条序：admin ⊇ merchant ⊇ user。它与 roleOf 的「admin 同时也算
+// merchant」（见 Role.Flags）是同一件事在**判定侧**的表述：一行只写了
+// is_admin 的用户折出来是 admin，而 admin 必须能进 merchant 组，否则两种
+// 建法（--role admin 与 --role merchant 再改）在通行结果上会不一样。
+//
+// 它不做任何 I/O：路由中间件拿到会话之后只调这一个函数，判据因此只有一处。
+func (r Role) Allows(required Role) bool {
+	switch required {
+	case RoleAdmin:
+		return r == RoleAdmin
+	case RoleMerchant:
+		return r == RoleAdmin || r == RoleMerchant
+	case RoleUser:
+		return r == RoleAdmin || r == RoleMerchant || r == RoleUser
+	default:
+		// 拼错的 required 不能静默放开：拒绝虽然也会让一条新路由走不通，
+		// 但那是立刻能看见的错；放开则是一条没人发现的缺口。
+		return false
+	}
+}
+
 // rolePredicate 把一个角色称呼折成「要挑哪些行」的两个标记条件。
 //
-// 它是 roleOf 的另一半，两者必须描述同一套映射：一个按标记读称呼，一个按称呼
+// 它是 RoleOf 的另一半，两者必须描述同一套映射：一个按标记读称呼，一个按称呼
 // 挑标记。不一致的表现是清单里明明打着一个 admin，`--role admin` 却筛不出它。
 //
 // 返回的两个条件可以为 nil，nil 表示「这一列不参与筛选」。不能只返回一对 bool：

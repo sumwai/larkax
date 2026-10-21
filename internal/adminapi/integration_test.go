@@ -259,6 +259,21 @@ func TestChannelEndpoints(t *testing.T) {
 		t.Errorf("读回来的 credential_hint 是空的：提示应当来自写入路径")
 	}
 
+	// status 走同一条 PATCH（前端的状态切换用它）。只收管理面能设置的两个值。
+	rec = call(t, h, http.MethodPatch, fmt.Sprintf("%schannels/%d", PathPrefix, created.ID), token,
+		map[string]any{"status": "disabled"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("停用渠道的状态码 = %d，期望 200；正文：%s", rec.Code, rec.Body)
+	}
+	decode(t, call(t, h, http.MethodGet, fmt.Sprintf("%schannels/%d", PathPrefix, created.ID), token, nil), &got)
+	if got.Status != "disabled" {
+		t.Errorf("停用之后读回的 status = %q，期望 disabled", got.Status)
+	}
+	if rec := call(t, h, http.MethodPatch, fmt.Sprintf("%schannels/%d", PathPrefix, created.ID), token,
+		map[string]any{"status": "drained"}); rec.Code != http.StatusBadRequest {
+		t.Errorf("写观测状态的状态码 = %d，期望 400；正文：%s", rec.Code, rec.Body)
+	}
+
 	// 按 id 找不到：404，而不是一个「成功但没有内容」的响应。
 	if rec := call(t, h, http.MethodGet, PathPrefix+"channels/999999999", token, nil); rec.Code != http.StatusNotFound {
 		t.Errorf("不存在的渠道状态码 = %d，期望 404", rec.Code)

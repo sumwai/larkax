@@ -324,3 +324,46 @@ func TestUnlockUser(t *testing.T) {
 // TestSetPasswordRevokesOtherSessions 同时覆盖了「吊销别人、留住当前」这一条：
 // 那条 SQL 在改口令的事务里（见 account.go 的 SetPassword），没有单独导出的
 // 批量吊销入口。
+
+// TestSessionCarriesRoleFromFlags 钉住会话读回来的角色与库里的两个标记一致
+// （三种取值各一条）。
+//
+// 角色必须与控制台路由判定出自同一次读：分两次查的话，两次之间用户被降级时，
+// 这个请求会按旧角色放行。
+func TestSessionCarriesRoleFromFlags(t *testing.T) {
+	ctx := t.Context()
+	db := testDB(ctx, t)
+	store := New(db)
+
+	cases := []struct {
+		name     string
+		merchant bool
+		admin    bool
+		want     Role
+	}{
+		{"user", false, false, RoleUser},
+		{"merchant", true, false, RoleMerchant},
+		{"admin", true, true, RoleAdmin},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u := newUser(ctx, t, db, UserStatusActive)
+			if _, err := db.ExecContext(ctx,
+				`UPDATE users SET is_merchant = $2, is_admin = $3 WHERE id = $1`,
+				u.ID, tc.merchant, tc.admin); err != nil {
+				t.Fatalf("写角色标记失败: %v", err)
+			}
+			_, token, err := store.CreateSession(ctx, u.ID, "", nil)
+			if err != nil {
+				t.Fatalf("建会话失败: %v", err)
+			}
+			got, err := store.SessionByToken(ctx, token)
+			if err != nil {
+				t.Fatalf("SessionByToken 失败: %v", err)
+			}
+			if got.Role != tc.want {
+				t.Errorf("会话角色 = %q，期望 %q", got.Role, tc.want)
+			}
+		})
+	}
+}
