@@ -46,6 +46,43 @@ func TestConsumedTokensMatchesBillingTotal(t *testing.T) {
 	}
 }
 
+// 渠道声明「推理单独报」时，consumedTokens 跟着声明走。
+//
+// 这条数的口径完全来自 channel.Usage.CompletionIncludesReasoning——它由适配器
+// 按渠道 setting 填进来（见 channel.UsageCompletionIncludesReasoning）。声明
+// 为 false 的渠道（上游把完成与推理分列）上，推理没被算进输出，必须另加；
+// 声明为 true 时它已经含在完成里，再加一遍就是多扣。两种声明算出的数**必须
+// 不同**，否则说明这一位根本没有被读。
+//
+// 用一组推理多于可见输出的数（completion=18、reasoning=30）：这正是互斥口径
+// 上游的常见形状，而声明 true 时计费那一侧会把输出钳到 0——在那一格上，
+// 「跟着声明走」与「照旧按已含算」相差整整一段推理，不是几个 token 的舍入。
+func TestConsumedTokensFollowsChannelDeclaration(t *testing.T) {
+	base := channel.Usage{PromptTokens: 28621, CompletionTokens: 18, ReasoningTokens: 30}
+
+	separate := base
+	separate.CompletionIncludesReasoning = false
+	if got, want := consumedTokens(separate), int64(28621+18+30); got != want {
+		t.Errorf("声明 false 时 consumedTokens = %d，期望 %d", got, want)
+	}
+	// 与计费那一侧同一个总数：那里拆开是为了按不同单价算钱，加起来就是这里
+	// 要的数。
+	if want := billing.FromChannelUsage(separate).TotalTokens(); consumedTokens(separate) != want {
+		t.Errorf("声明 false 时 consumedTokens = %d，计费口径 = %d",
+			consumedTokens(separate), want)
+	}
+
+	included := base
+	included.CompletionIncludesReasoning = true
+	if got, want := consumedTokens(included), int64(28621+18); got != want {
+		t.Errorf("声明 true 时 consumedTokens = %d，期望 %d", got, want)
+	}
+
+	if consumedTokens(separate) == consumedTokens(included) {
+		t.Error("两种声明算出了同一个数：CompletionIncludesReasoning 没有被读")
+	}
+}
+
 // 结论决定怎么动连续失败计数。三态收成两个布尔值，SQL 里就不必认识
 // success / failure 这些字面量——那种字面量改一处名字不会编译失败，
 // 只会让那条语句静默走进「什么都不改」的分支。

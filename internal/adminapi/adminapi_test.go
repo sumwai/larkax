@@ -478,3 +478,30 @@ func TestFailScopedOnlyRewritesNotFound(t *testing.T) {
 		})
 	}
 }
+
+// TestRuleViewCarriesScheduleError 钉住控制台接口也看得见解不开的定价表。
+//
+// 清单对坏表是降级的（那一行照常出），Web 上如果不带原因，这一行看起来就是
+// 一条手写表达式规则——而降级正是为了不把那行藏起来。与 expr_error 同一个
+// 形状：有错才出现，没错时这一栏整个不出现。
+func TestRuleViewCarriesScheduleError(t *testing.T) {
+	reason := errors.New("规则 9 的 schedule 不是合法的定价表: 定价表解析失败")
+	data, err := json.Marshal(ruleViewOf(pricing.RuleInfo{ID: 9, ScheduleErr: reason}))
+	if err != nil {
+		t.Fatalf("编码规则视图失败: %v", err)
+	}
+	if !strings.Contains(string(data), `"schedule_error":`) {
+		t.Errorf("规则视图里没有 schedule_error：%s", data)
+	}
+	if !strings.Contains(string(data), "不是合法的定价表") {
+		t.Errorf("规则视图里没有解不开的原因：%s", data)
+	}
+
+	clean, err := json.Marshal(ruleViewOf(pricing.RuleInfo{ID: 10}))
+	if err != nil {
+		t.Fatalf("编码规则视图失败: %v", err)
+	}
+	if strings.Contains(string(clean), "schedule_error") {
+		t.Errorf("没有坏表时这一栏不该出现：%s", clean)
+	}
+}

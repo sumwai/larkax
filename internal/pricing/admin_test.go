@@ -1197,8 +1197,8 @@ func TestListDeclaresPriceKeys(t *testing.T) {
 func TestRuleInfoFieldsArePinned(t *testing.T) {
 	want := []string{
 		"ID", "Scope", "OwnerUserID", "ChannelID", "Name", "ModelPatterns",
-		"Expr", "Priority", "EffectiveFrom", "EffectiveTo", "Enabled",
-		"CreatedBy", "CreatedAt", "UpdatedAt", "DeclaredKeys", "ExprErr",
+		"Expr", "Schedule", "Priority", "EffectiveFrom", "EffectiveTo", "Enabled",
+		"CreatedBy", "CreatedAt", "UpdatedAt", "DeclaredKeys", "ExprErr", "ScheduleErr",
 	}
 
 	typ := reflect.TypeOf(RuleInfo{})

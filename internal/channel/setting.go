@@ -22,6 +22,17 @@ const (
 	// 由 openai 与 openai-responses 两个适配器读，翻译共用
 	// ReasoningEffortDialect（见 reasoning_effort.go）。
 	SettingKeyReasoningEffortMap SettingKey = "reasoning_effort_map"
+
+	// SettingKeyUsage 是用量口径的声明，形状
+	// {"completion_includes_reasoning": false}。
+	//
+	// 它回答的是「上游报的 completion_tokens 里含不含推理」——两种口径在
+	// 上游都真实存在，光看数字判不出来（见 channel.Usage 的注释）。不带这个
+	// 声明时按 OpenAI / Anthropic 口径（含）读，只有显式写 false 才改。
+	//
+	// 三个适配器都读它（openai、anthropic、openai-responses），读法共用
+	// UsageCompletionIncludesReasoning（见 usage_setting.go）。
+	SettingKeyUsage SettingKey = "usage"
 )
 
 // settingKeysByType 是「渠道 type → 它的适配器认的键」这张表。
@@ -43,13 +54,12 @@ const (
 // setting_test.go）。
 //
 // **没有键的 type 也要在这里占一行**（值为 nil）：一行都没有的类型会被当成
-// 「本版本不认识的 type」而跳过判据，于是 anthropic 渠道上写
-// reasoning_effort_map 又能静默成功了。表覆盖的类型集合与 protocolEndpoints
-// 相同，有用例逐个核对。
+// 「本版本不认识的 type」而跳过判据，于是那个类型上的每个键都能静默成功。
+// 表覆盖的类型集合与 protocolEndpoints 相同，有用例逐个核对。
 var settingKeysByType = map[Protocol][]SettingKey{
-	ProtocolOpenAI:          {SettingKeyReasoningEffortMap},
-	ProtocolAnthropic:       nil,
-	ProtocolOpenAIResponses: {SettingKeyReasoningEffortMap},
+	ProtocolOpenAI:          {SettingKeyReasoningEffortMap, SettingKeyUsage},
+	ProtocolAnthropic:       {SettingKeyUsage},
+	ProtocolOpenAIResponses: {SettingKeyReasoningEffortMap, SettingKeyUsage},
 	ProtocolSystemOne:       nil,
 }
 

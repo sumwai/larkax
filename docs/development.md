@@ -774,14 +774,27 @@ stdout 只有新渠道的 ID，其余信息走 stderr。
 因此管理面**不做键名校验**：拼错一个键不会被拒绝，也不会挡住写入——它在写入
 之后与列举时被指出来（见下面两段）。
 
-**今天有读者的只有一个键：`reasoning_effort_map`。** 读者是两个适配器：
-`openai` 与 `openai-responses` 都读它，翻译共用一个函数
-（`channel.ReasoningEffortDialect`，见 `internal/channel/reasoning_effort.go`），
-把 `reasoning_effort` 的规范取值翻成该渠道认的写法；映射到空字符串表示把这个
-字段从出站报文里去掉，表里没有的取值照原样发。可照抄的写法（嵌一层对象、值是
-字符串）见 `larkaxctl channel --help` 与 `docs/cli-reference.md` 的
-`--setting` 一节。其余键没有读者，`anthropic` 与 `systemone` 两个适配器与
-选路层也都不读 `setting`，写进去不影响请求路径。
+**今天有两个键有读者。**
+
+`reasoning_effort_map`：读者是 `openai` 与 `openai-responses` 两个适配器，
+翻译共用一个函数（`channel.ReasoningEffortDialect`，见
+`internal/channel/reasoning_effort.go`），把 `reasoning_effort` 的规范取值翻成
+该渠道认的写法；映射到空字符串表示把这个字段从出站报文里去掉，表里没有的取值
+照原样发。可照抄的写法（嵌一层对象、值是字符串）见 `larkaxctl channel --help`
+与 `docs/cli-reference.md` 的 `--setting` 一节。
+
+`usage`：形状是 `{"usage": {"completion_includes_reasoning": false}}`，它的
+`completion_includes_reasoning` 这一位决定上游报的输出 token 里含不含推理。
+三个适配器（`openai`、`anthropic`、`openai-responses`）都读它，读法是
+`channel.UsageCompletionIncludesReasoning`（见
+`internal/channel/usage_setting.go`）。**不写时按「含」算**，与 OpenAI 的
+`completion_tokens`、Anthropic 的 `output_tokens` 的定义一致；只有把可见输出
+与推理分列报出的上游（例如 DeepSeek）才需要显式写 `false`——不写的话，计费前
+减掉推理会让输出那一侧少收，推理比可见输出多时整段输出都收不到钱。这个关系
+不能靠数字推断：同一组数字在两种口径下都成立。
+
+其余键没有读者，`systemone` 适配器与选路层也都不读 `setting`，写进去不影响
+请求路径。
 
 一个没有读者的键，从库里和清单上看与一个生效的配置完全一样，不说出来就只能
 等人去查代码。所以管理面在**写入成功之后**（`channel create`，以及给了
@@ -790,8 +803,9 @@ stdout 只有新渠道的 ID，其余信息走 stderr。
 里。判据是 `internal/channel` 的 `settingKeysByType`（类型 → 它认的键），它由
 同包的用例与实际读键的代码双向核对（见 `internal/channel/setting_test.go`）：
 表里声明了却没人在读、或者有人读了而表里没写，两种都会让用例失败。读者按
-**目录集合**算：`openai` 与 `openai-responses` 除了各自的适配器目录，还要算上
-`internal/channel` 本身——两个适配器共用同一个翻译函数，读键的那一行在那里。
+**目录集合**算：`openai`、`anthropic` 与 `openai-responses` 除了各自的适配器
+目录，还要算上 `internal/channel` 本身——适配器共用那几段读键的翻译函数，读键
+的那一行在那里。
 
 `--user` 把渠道记在某个用户名下（留空表示平台自营）。它**只写
 `channels.owner_user_id`，不做权限检查**：任何存在的用户都可以被写成归属，
@@ -1296,7 +1310,7 @@ ingress 规则下。同一个端口上还有管理面 `/admin/v1/*`，用单独�
 | `channel` | 上游渠道：`create` / `list`（`--all` 含已删）/ `get`（单条详情）/ `health`（健康与窗口内的用量）/ `update` / `enable` / `disable` / `delete`（软删）/ `restore`（`delete` 的逆操作）/ `sync-models`（从上游拉一次模型清单并落库）/ `upstream-models`（读库里那一份清单与同步状态） |
 | `model` | 模型目录：`create` / `list` / `get` / `update` / `delete` |
 | `alias` | 规范模型名到上游模型名的映射：`create` / `list` / `update` / `delete` / `resolve` |
-| `price` | 计价规则：`create` / `list` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `list`） |
+| `price` | 计价规则：`create` / `list` / `show` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `list`） |
 | `upstream-cost` | 上游成本规则（每条渠道每个模型按生效窗口与优先级挑一条）：`create` / `list` / `update` / `disable` |
 | `user` | 用户：`create` / `list` / `get` / `update`；口令：`password` / `unlock`；销户：`delete`（`request` 打标可撤 / `revert` 撤回 / `purge` 匿名化，不可逆） |
 | `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录）/ `adjust`（手工调账，走账本写分录）/ `refund`（退款，走账本写分录）/ `list`；商户提现：`payout`（`request` 申请并冻住待付 / `settle` 平台主动清算，一步建单并记账，直接落已批准 / `approve` 批准 / `reject` 驳回并解除冻结 / `paid` 打款，只放行已批准的单子）；支付通道：`payment`（`create` 下单 / `status` 查单，通道确认收款后才入账） |

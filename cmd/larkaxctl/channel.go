@@ -145,12 +145,31 @@ sync-models 从上游拉一次这条渠道的模型清单并落库，需要主�
 拒绝，并说出「模型在目录里声明的端点」与「这条渠道打的端点」各是什么。目录里
 没有这个模型、或者那一项没配过时不拦。
 --setting 是渠道私有配置（自由形态的 JSON 对象），键由该渠道 type 指向的
-适配器解释，选路层不认，管理面也不校验键名。今天只有一个键有读者：
-reasoning_effort_map，由 openai 与 openai-responses 两个适配器读——它把
+适配器解释，选路层不认，管理面也不校验键名。今天有两个键有读者。
+
+reasoning_effort_map 由 openai 与 openai-responses 两个适配器读：它把
 reasoning_effort 的取值翻成该渠道认的写法（映射到空字符串表示把这个字段从
 出站报文里去掉，表里没有的取值照原样发）。例如只认 off 的上游这样写：
   {"reasoning_effort_map":{"none":"off"}}
 要剔掉这个字段就写成 {"reasoning_effort_map":{"none":""}}。
+
+usage 由 openai、anthropic 与 openai-responses 三个适配器读。它的
+completion_includes_reasoning 这一位决定上游报的输出 token 里含不含推理：
+不写时按「含」算——OpenAI 的 completion_tokens 与 Anthropic 的 output_tokens
+都这样；只有把可见输出与推理分列报出的上游要显式写成
+  {"usage":{"completion_includes_reasoning":false}}
+不写的话，计费前减掉推理会让输出那一侧少收；推理比可见输出多时，整段输出
+都收不到钱。两种口径靠数字分不出来，所以按渠道声明。
+
+三个适配器都读它，但只有把推理分列报出的上游需要配：anthropic 渠道上这一位
+没有数值效果——Claude 的用量不单列推理，ReasoningTokens 恒为 0，两种取值
+算出的金额相同。
+
+内层键名没有点名机制：usage 这一层拼错会被提示；内层那个键少一个 s 就等于
+没写，它会静默按「含推理」处理，而这一位在钱路上。反过来，在本来就含推理的
+口径上写 false，同一批推理会被收两次：输出整段按输出价算一次，推理那一项
+再加一次。
+
 写进去的键这条渠道的 type 不认时（拼错的、别的 type 的），照样不报错、
 不挡写入，但 create，以及给了 --setting 或 --type 的 update，成功之后会逐个
 点名打到 stderr 上，channel list 也把这样的渠道点出来。

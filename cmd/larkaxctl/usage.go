@@ -28,7 +28,7 @@ const usageShortUsage = `larkaxctl usage 读用量与计费：这段时间用了
         列出用量事件：每次请求用了多少 token、按哪条口径算的、收了多少钱
   larkaxctl usage requests [--user <用户 ID 或用户名>] [--from <时刻>] [--to <时刻>]
         [--limit <条数>]
-        列出计费请求：每次请求的预留、状态与结算金额
+        列出计费请求：每次请求的钱包预留与额度包面值、状态与结算金额
 
 两条都只读，不改任何一行、不写任何快照。
 
@@ -44,7 +44,7 @@ const usageUsage = `larkaxctl usage 读用量与计费：这段时间用了多�
         列出用量事件：每次请求用了多少 token、按哪条口径算的、收了多少钱
   larkaxctl usage requests [--user <用户 ID 或用户名>] [--from <时刻>] [--to <时刻>]
         [--limit <条数>]
-        列出计费请求：每次请求的预留、状态与结算金额
+        列出计费请求：每次请求的钱包预留与额度包面值、状态与结算金额
 
 两条都只读：不改任何一行、不写任何快照。读用量与读计费记录是管理员动作——
 跑得起 larkaxctl 的人本来就能连上这个库，所以这两条不额外要求别的授权，也不带
@@ -53,7 +53,9 @@ const usageUsage = `larkaxctl usage 读用量与计费：这段时间用了多�
 两条各读一张表，回答的问题不同：events 读 usage_events，是**计量**的底稿（用了
 多少、金额按哪条口径算出来的；billing_path 为 measured 的才是一次实测，estimated
 是按估算给的、fallback 是算不出来时按退路口径给的）；requests 读 billing_requests，
-是**每次请求**的预留与结算（一笔请求从预扣到结清的状态与金额）。
+是**每次请求**的预留与结算（一笔请求从预扣到结清的状态与金额）。预留分两栏看：
+钱包预留是钱从账户余额冻住的那部分，包预留是额度包占着的面值——额度包覆盖的请求
+在钱包那一栏是 0，两个数并列、不合并。
 
 --user 收用户 ID 或用户名，两种写法都认。不给它就是不限用户。
 
@@ -281,14 +283,16 @@ func runUsageRequests(args []string) error {
 				CanonicalModel: r.CanonicalModel,
 				Status:         r.Status,
 				ReservedAmount: r.ReservedAmount,
-				FinalAmount:    r.FinalAmount,
-				PricingRuleID:  r.PricingRuleID,
-				Asset:          r.Asset,
-				UpstreamModel:  r.UpstreamModel,
-				Protocol:       r.Protocol,
-				Streamed:       r.Streamed,
-				ErrorCode:      r.ErrorCode,
-				SettledAt:      r.SettledAt,
+				// 两笔预留分开带过去：打印层把它们摆成并列的两栏。
+				PlanReservedAmount: r.PlanReservedAmount,
+				FinalAmount:        r.FinalAmount,
+				PricingRuleID:      r.PricingRuleID,
+				Asset:              r.Asset,
+				UpstreamModel:      r.UpstreamModel,
+				Protocol:           r.Protocol,
+				Streamed:           r.Streamed,
+				ErrorCode:          r.ErrorCode,
+				SettledAt:          r.SettledAt,
 			})
 		}
 
@@ -338,8 +342,14 @@ type usageRequestRow struct {
 	CanonicalModel string
 	// Status 是 pending / settled / released / failed / refunded 之一
 	// （表上有 CHECK）。
-	Status         string
+	Status string
+	// ReservedAmount 是钱包那一部分预留：额度包覆盖的请求在这一列是 0，
+	// 钱一分没冻。表格里那一栏叫「钱包预留」。
 	ReservedAmount money.Amount
+	// PlanReservedAmount 是这笔请求占着的额度包面值。它与 ReservedAmount 并列，
+	// 不合并成一个数：加在一起就答不了「钱包冻了多少」这个问题。表格里那一栏
+	// 叫「包预留」，机器可读档里是 plan_reserved_amount。
+	PlanReservedAmount money.Amount
 	// FinalAmount 是库里那一列的十进制文本（numeric(20,8)::text），这一列可空：
 	// 「还没结算」与「结算出来是 0」在零值上分不开，所以用 sql.NullString 带着
 	// 「有没有值」一起读回来。文本的形状与 money.Amount 的 String() 一致
@@ -390,6 +400,9 @@ func printUsageEvents(w io.Writer, rows []usageEventRow, more bool) {
 
 // printUsageRequests 打一张计费请求清单。
 //
+// 预留摆成并列的两栏：钱包预留与包预留。额度包覆盖的请求在钱包那一栏是 0，
+// 它占着的面值在包那一栏；把两个数加在一起，「钱包冻了多少」就答不出来了。
+//
 // 结算金额那一栏对没结算的行打 `-`：pending 的行结出来是 0，与「还没结算」在
 // 数字上分不开，而这两件事的处置完全不同（那一栏进 JSON 是 null，见
 // usageRequestsDoc）。末尾的规则那一栏同一条：没落到任何规则上时打 `-`，不打 0。
@@ -401,15 +414,16 @@ func printUsageRequests(w io.Writer, rows []usageRequestRow, more bool) {
 
 	tw := newTableWriter(w)
 	p := newPalette(w)
-	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 		p.bold("时刻"), p.bold("request_id"), p.bold("用户 ID"), p.bold("用户名"),
-		p.bold("模型"), p.bold("状态"), p.bold("预留"), p.bold("结算"), p.bold("规则"))
+		p.bold("模型"), p.bold("状态"), p.bold("钱包预留"), p.bold("包预留"),
+		p.bold("结算"), p.bold("规则"))
 	for _, r := range rows {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			p.dim(r.StartedAt.Format(longStampLayout)), p.bold(r.RequestID),
 			p.bold(strconv.FormatInt(r.UserID, 10)), p.bold(r.Username),
-			r.CanonicalModel, r.Status, r.ReservedAmount.String(), r.settledCell(),
-			r.pricingRuleCell())
+			r.CanonicalModel, r.Status, r.ReservedAmount.String(),
+			r.PlanReservedAmount.String(), r.settledCell(), r.pricingRuleCell())
 	}
 	_ = tw.Flush()
 	printTruncatedListNote(w, more, len(rows))
@@ -504,8 +518,8 @@ func usageEventsDoc(rows []usageEventRow, more bool, filters usageFilters) map[s
 // usageRequestsDoc 组装 usage requests 的机器可读输出。
 //
 // 结算金额与规则这两档没值时是 null，不打 `-`：占位符进 JSON 比留空更坏，按数字
-// 解析它的一方会拿到一个解析不了的值（见 format.go 上面那几段）。两个字段的命名
-// 与库里那两列对得上（final_amount、pricing_rule_id）。
+// 解析它的一方会拿到一个解析不了的值（见 format.go 上面那几段）。字段的命名与库里
+// 那几列对得上（reserved_amount、plan_reserved_amount、final_amount、pricing_rule_id）。
 func usageRequestsDoc(rows []usageRequestRow, more bool, filters usageFilters) map[string]any {
 	summary := filters.summary()
 	summary["total"] = len(rows)
@@ -514,21 +528,22 @@ func usageRequestsDoc(rows []usageRequestRow, more bool, filters usageFilters) m
 	requests := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
 		requests = append(requests, map[string]any{
-			"started_at":      jsonTime(r.StartedAt),
-			"settled_at":      jsonTimePtr(nullTimeToPtr(r.SettledAt)),
-			"request_id":      r.RequestID,
-			"user_id":         r.UserID,
-			"username":        nullableString(r.Username),
-			"canonical_model": r.CanonicalModel,
-			"upstream_model":  nullableString(r.UpstreamModel.String),
-			"protocol":        r.Protocol,
-			"streamed":        r.Streamed,
-			"status":          r.Status,
-			"reserved_amount": jsonAmount(r.ReservedAmount),
-			"final_amount":    nullableString(r.FinalAmount.String),
-			"pricing_rule_id": jsonNullInt64(r.PricingRuleID),
-			"asset":           r.Asset,
-			"error_code":      nullableString(r.ErrorCode.String),
+			"started_at":           jsonTime(r.StartedAt),
+			"settled_at":           jsonTimePtr(nullTimeToPtr(r.SettledAt)),
+			"request_id":           r.RequestID,
+			"user_id":              r.UserID,
+			"username":             nullableString(r.Username),
+			"canonical_model":      r.CanonicalModel,
+			"upstream_model":       nullableString(r.UpstreamModel.String),
+			"protocol":             r.Protocol,
+			"streamed":             r.Streamed,
+			"status":               r.Status,
+			"reserved_amount":      jsonAmount(r.ReservedAmount),
+			"plan_reserved_amount": jsonAmount(r.PlanReservedAmount),
+			"final_amount":         nullableString(r.FinalAmount.String),
+			"pricing_rule_id":      jsonNullInt64(r.PricingRuleID),
+			"asset":                r.Asset,
+			"error_code":           nullableString(r.ErrorCode.String),
 		})
 	}
 

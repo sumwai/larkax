@@ -91,7 +91,7 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 		}
 	}
 
-	out, err := relay.ResponseFromRelaykit(textResp.toRelaykit())
+	out, err := relay.ResponseFromRelaykit(textResp.toRelaykit(), channel.UsageCompletionIncludesReasoning(ch.Setting))
 	if err != nil {
 		return nil, &channel.ErrUpstream{
 			StatusCode:  resp.StatusCode,
@@ -136,7 +136,7 @@ func (a *Adapter) ChatStream(ctx context.Context, ch channel.Channel, req *chann
 	// 函数要先带着事件通道返回，响应体要活到调用方读完事件为止。
 	// 交给 pumpResponse 收尾，顺序仍是先排空、后关闭。
 	events := make(chan channel.StreamEvent)
-	go a.pumpResponse(ctx, resp, events)
+	go a.pumpResponse(ctx, resp, channel.UsageCompletionIncludesReasoning(ch.Setting), events)
 	return events, nil
 }
 
@@ -145,7 +145,7 @@ func (a *Adapter) ChatStream(ctx context.Context, ch channel.Channel, req *chann
 // 单独一个方法而不是写在 goroutine 的闭包里：响应体的收尾只在关闭点
 // 完整可见时才好核对，而闭包里的 resp.Body.Close() 会被静态检查当成
 // 「这个响应体没人关」。
-func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, events chan channel.StreamEvent) {
+func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, completionIncludesReasoning bool, events chan channel.StreamEvent) {
 	defer close(events)
 	defer func() { _ = resp.Body.Close() }()
 	defer httpx.Drain(resp.Body)
@@ -153,7 +153,7 @@ func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, events 
 	// 就结束，那时它是网关知道「上游回过一个响应」的唯一途径（见
 	// channel.StreamEvent.StatusCode）。
 	events <- channel.StreamEvent{Kind: "start", StatusCode: resp.StatusCode}
-	a.pump(ctx, resp.StatusCode, resp.Body, events)
+	a.pump(ctx, resp.StatusCode, completionIncludesReasoning, resp.Body, events)
 }
 
 // ListModels 查询上游可用模型。

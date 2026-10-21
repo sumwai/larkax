@@ -418,7 +418,7 @@ func TestResponseFromOpenAI(t *testing.T) {
 		Usage: dto.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 	}
 
-	got, err := ResponseFromRelaykit(src)
+	got, err := ResponseFromRelaykit(src, true)
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestResponseFromOpenAIWithToolCall(t *testing.T) {
 		}},
 	}
 
-	got, err := ResponseFromRelaykit(src)
+	got, err := ResponseFromRelaykit(src, true)
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestResponseWithMalformedToolArguments(t *testing.T) {
 		}},
 	}
 
-	got, err := ResponseFromRelaykit(src)
+	got, err := ResponseFromRelaykit(src, true)
 	if err != nil {
 		t.Fatalf("半截参数不应让整条响应失败: %v", err)
 	}
@@ -507,7 +507,7 @@ func TestResponseFromClaude(t *testing.T) {
 		},
 	}
 
-	got, err := ResponseFromRelaykit(src)
+	got, err := ResponseFromRelaykit(src, true)
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -570,7 +570,7 @@ func TestResponseFromResponses(t *testing.T) {
 		},
 	}
 
-	got, err := ResponseFromRelaykit(src)
+	got, err := ResponseFromRelaykit(src, true)
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -639,7 +639,7 @@ func TestResponseAnnotationsReachContentBlock(t *testing.T) {
 			}},
 		}},
 	}
-	got, err := ResponseFromRelaykit(src)
+	got, err := ResponseFromRelaykit(src, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -692,7 +692,7 @@ func TestResponseAnnotationsNeedATextBlock(t *testing.T) {
 			}},
 		}},
 	}
-	got, err := ResponseFromRelaykit(src)
+	got, err := ResponseFromRelaykit(src, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -774,7 +774,7 @@ func TestResponseFromResponsesIncomplete(t *testing.T) {
 		IncompleteDetails: &dto.IncompleteDetails{Reason: "max_output_tokens"},
 	}
 
-	got, err := ResponseFromRelaykit(src)
+	got, err := ResponseFromRelaykit(src, true)
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -799,7 +799,7 @@ func TestResponseWithoutChoices(t *testing.T) {
 		got, err := ResponseFromRelaykit(&dto.OpenAITextResponse{
 			Model: "gpt-4o",
 			Usage: dto.Usage{PromptTokens: 10},
-		})
+		}, true)
 		if err != nil {
 			t.Fatalf("空 choices 不该让响应失败: %v", err)
 		}
@@ -819,7 +819,7 @@ func TestResponseWithoutChoices(t *testing.T) {
 			ID:    "resp_empty",
 			Model: "gpt-5",
 			Usage: &dto.Usage{PromptTokens: 12, CompletionTokens: 3},
-		})
+		}, true)
 		if err != nil {
 			t.Fatalf("空 output 不该让响应失败: %v", err)
 		}
@@ -880,16 +880,16 @@ func TestToRelaykitResponsesRejectsNil(t *testing.T) {
 }
 
 func TestResponseRejectsUnknownAndNil(t *testing.T) {
-	if _, err := ResponseFromRelaykit("字符串"); err == nil {
+	if _, err := ResponseFromRelaykit("字符串", true); err == nil {
 		t.Error("未知类型应报错")
 	}
-	if _, err := ResponseFromRelaykit((*dto.OpenAITextResponse)(nil)); err == nil {
+	if _, err := ResponseFromRelaykit((*dto.OpenAITextResponse)(nil), true); err == nil {
 		t.Error("nil 响应应报错")
 	}
-	if _, err := ResponseFromRelaykit((*dto.ClaudeResponse)(nil)); err == nil {
+	if _, err := ResponseFromRelaykit((*dto.ClaudeResponse)(nil), true); err == nil {
 		t.Error("nil 响应应报错")
 	}
-	if _, err := ResponseFromRelaykit((*dto.OpenAIResponsesResponse)(nil)); err == nil {
+	if _, err := ResponseFromRelaykit((*dto.OpenAIResponsesResponse)(nil), true); err == nil {
 		t.Error("nil 响应应报错")
 	}
 }
@@ -897,7 +897,7 @@ func TestResponseRejectsUnknownAndNil(t *testing.T) {
 // ── 用量口径 ────────────────────────────────────────────────────────────
 
 func TestUsageFromRelaykitNil(t *testing.T) {
-	got := UsageFromRelaykit(nil)
+	got := UsageFromRelaykit(nil, true)
 	if got.PromptTokens != 0 || got.CompletionTokens != 0 {
 		t.Errorf("nil 用量应为零值，得到 %+v", got)
 	}
@@ -909,7 +909,7 @@ func TestUsageFromAnthropicSemantic(t *testing.T) {
 		InputTokens:  50,
 		OutputTokens: 7,
 		UsageSource:  "claude_messages",
-	})
+	}, true)
 	if got.PromptTokens != 50 {
 		t.Errorf("PromptTokens = %d，期望 50", got.PromptTokens)
 	}
@@ -927,7 +927,7 @@ func TestUsageFromAnthropicSemantic(t *testing.T) {
 func TestUsageCacheOnlyImpliesPrompt(t *testing.T) {
 	got := UsageFromRelaykit(&dto.Usage{
 		PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 40},
-	})
+	}, true)
 	if got.PromptTokens != 40 {
 		t.Errorf("PromptTokens = %d，期望 40", got.PromptTokens)
 	}
@@ -1024,7 +1024,7 @@ func TestUsageCacheAccountingDialects(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := UsageFromRelaykit(&tc.usage)
+			got := UsageFromRelaykit(&tc.usage, true)
 			if got.PromptTokens != tc.wantProm {
 				t.Errorf("PromptTokens = %d，期望 %d", got.PromptTokens, tc.wantProm)
 			}
@@ -1052,7 +1052,7 @@ func TestUsageReasoningTokens(t *testing.T) {
 		PromptTokens:           10,
 		CompletionTokens:       100,
 		CompletionTokenDetails: dto.OutputTokenDetails{ReasoningTokens: 60},
-	})
+	}, true)
 	if got.ReasoningTokens != 60 {
 		t.Errorf("ReasoningTokens = %d", got.ReasoningTokens)
 	}
@@ -1070,7 +1070,7 @@ func TestUsageMarksEstimated(t *testing.T) {
 	got := UsageFromRelaykit(&dto.Usage{
 		PromptTokens: 1,
 		BillingUsage: &dto.BillingUsage{Estimated: true},
-	})
+	}, true)
 	if got.Raw["estimated"] != true {
 		t.Errorf("Raw 应标记 estimated: %+v", got.Raw)
 	}
@@ -1091,7 +1091,7 @@ func TestUsageRawCarriesSourceMarker(t *testing.T) {
 	reported := UsageFromRelaykit(&dto.Usage{
 		PromptTokens: 0, CompletionTokens: 0,
 		UsageSource: "openai_chat",
-	})
+	}, true)
 	if got, _ := reported.Raw["source"].(string); got != "openai_chat" {
 		t.Errorf("报过 usage 时 Raw[source] = %v，期望 openai_chat", reported.Raw["source"])
 	}
@@ -1102,7 +1102,7 @@ func TestUsageRawCarriesSourceMarker(t *testing.T) {
 		t.Error("报过 usage 时 Reported 应为 true")
 	}
 
-	absent := UsageFromRelaykit(&dto.Usage{})
+	absent := UsageFromRelaykit(&dto.Usage{}, true)
 	if _, ok := absent.Raw["source"]; ok {
 		t.Errorf("没报 usage 时 Raw 不该有 source: %+v", absent.Raw)
 	}
@@ -1111,7 +1111,7 @@ func TestUsageRawCarriesSourceMarker(t *testing.T) {
 	}
 
 	// nil 与「零值 dto.Usage」是同一件事：上游整块没报。
-	if (UsageFromRelaykit(nil)).Reported {
+	if (UsageFromRelaykit(nil, true)).Reported {
 		t.Error("usage 为 nil 时 Reported 应为 false")
 	}
 }
@@ -1121,7 +1121,7 @@ func TestUsageCacheCreationSplit(t *testing.T) {
 		PromptTokens:                1,
 		ClaudeCacheCreation5mTokens: 100,
 		ClaudeCacheCreation1hTokens: 200,
-	})
+	}, true)
 	if got.UnitCounts["cache_write_5m"] != 100 || got.UnitCounts["cache_write_1h"] != 200 {
 		t.Errorf("缓存写入拆分 = %+v", got.UnitCounts)
 	}
@@ -1130,7 +1130,7 @@ func TestUsageCacheCreationSplit(t *testing.T) {
 // 没有 5m/1h 拆分时 UnitCounts 应当是 nil 而不是空 map：空 map 会被
 // 序列化成 {}，在账上看起来像「报了拆分但每一项都是 0」。
 func TestUsageUnitCountsNilWithoutSplit(t *testing.T) {
-	got := UsageFromRelaykit(&dto.Usage{PromptTokens: 1})
+	got := UsageFromRelaykit(&dto.Usage{PromptTokens: 1}, true)
 	if got.UnitCounts != nil {
 		t.Errorf("没有 5m/1h 拆分时 UnitCounts 应为 nil, 得到 %v", got.UnitCounts)
 	}
@@ -1209,7 +1209,7 @@ func TestUsageSemanticDecidesCacheAccounting(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.usage.UsageSemantic = tc.semantic
-			got := UsageFromRelaykit(tc.usage)
+			got := UsageFromRelaykit(tc.usage, true)
 			if got.PromptTokens != tc.wantProm {
 				t.Errorf("PromptTokens = %d，期望 %d", got.PromptTokens, tc.wantProm)
 			}
@@ -1235,7 +1235,7 @@ func TestUsageAnthropicCacheWriteCounts(t *testing.T) {
 		PromptTokens:        1000,
 		PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 100, CachedCreationTokens: 200},
 		UsageSemantic:       dto.BillingUsageSemanticAnthropic,
-	})
+	}, true)
 	if got.PromptTokens != 1300 {
 		t.Errorf("PromptTokens = %d，期望 1300（1000 + 100 + 200）", got.PromptTokens)
 	}
@@ -1259,7 +1259,7 @@ func TestUsageAnthropicAllCachedPrompt(t *testing.T) {
 			CacheCreationInputTokens: 10,
 		},
 	}
-	got, err := ResponseFromRelaykit(src)
+	got, err := ResponseFromRelaykit(src, true)
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
@@ -1279,7 +1279,7 @@ func TestUsageAnthropicAllCachedPrompt(t *testing.T) {
 // 未声明口径时按 dto.Usage 的原生口径（OpenAI）读——但这件事要留在 Raw 里，
 // 否则事后分不出一笔用量是按声明的口径读的，还是按默认分支读的。
 func TestUsageSemanticMissingIsVisible(t *testing.T) {
-	got := UsageFromRelaykit(&dto.Usage{PromptTokens: 7})
+	got := UsageFromRelaykit(&dto.Usage{PromptTokens: 7}, true)
 	if got.Raw["semantic_missing"] != true {
 		t.Errorf("未声明口径应在 Raw 里留痕: %+v", got.Raw)
 	}
@@ -1294,7 +1294,7 @@ func TestUsageSemanticMissingIsVisible(t *testing.T) {
 // 两种缺声明都要能走到底，所以这条与上一条成对——只留一条的话，
 // 门槛写成「恒不打」或「恒打」都能通过。
 func TestUsageSemanticMissingNeedsCounts(t *testing.T) {
-	got := UsageFromRelaykit(&dto.Usage{})
+	got := UsageFromRelaykit(&dto.Usage{}, true)
 	if got.Raw["semantic_missing"] != nil {
 		t.Errorf("一个数都没读到，不该标 semantic_missing: %+v", got.Raw)
 	}
@@ -1311,7 +1311,7 @@ func TestUsageUnknownSemanticIsVisible(t *testing.T) {
 		PromptTokens:        7,
 		PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 3},
 		UsageSemantic:       "bedrock",
-	})
+	}, true)
 	if got.PromptTokens != 7 {
 		t.Errorf("PromptTokens = %d，期望 7（未知取值不该按 anthropic 补缓存）", got.PromptTokens)
 	}
@@ -1331,13 +1331,13 @@ func TestUsageDialectsAgreeOnSameRequest(t *testing.T) {
 		CompletionTokens:    200,
 		PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 8000},
 		UsageSemantic:       dto.BillingUsageSemanticAnthropic,
-	})
+	}, true)
 	openai := UsageFromRelaykit(&dto.Usage{
 		PromptTokens:        9000, // OpenAI 的 prompt_tokens 已含缓存
 		CompletionTokens:    200,
 		PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 8000},
 		UsageSemantic:       dto.BillingUsageSemanticOpenAI,
-	})
+	}, true)
 	// Responses 的 input_tokens 与 OpenAI 的 prompt_tokens 同义（都含缓存），
 	// 所以它与 openai 那一支归一后应当是同一个数——它是**同一族**，
 	// 而不是像 Anthropic 那样要补一次缓存。
@@ -1347,7 +1347,7 @@ func TestUsageDialectsAgreeOnSameRequest(t *testing.T) {
 		PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 8000},
 		UsageSource:         dto.BillingUsageSourceOAIResponses,
 		UsageSemantic:       dto.BillingUsageSemanticOpenAI,
-	})
+	}, true)
 
 	// 逐个字段比而不是比结构体：channel.Usage 里有 map，整个结构体不可比较，
 	// 而 Raw 那一栏本来就该有差别（它记着来源）。
@@ -2124,7 +2124,7 @@ func TestResponseKeepsUsageOnUnknownContentShape(t *testing.T) {
 		Usage: dto.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 	}
 
-	got, err := ResponseFromRelaykit(src)
+	got, err := ResponseFromRelaykit(src, true)
 	if err != nil {
 		t.Fatalf("响应方向不该因为认不出的内容形状失败，用量会跟着一起丢: %v", err)
 	}

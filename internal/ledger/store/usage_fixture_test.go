@@ -17,20 +17,23 @@ import (
 // billingFixture 是一条 billing_requests 的字段。
 //
 // Final 为空串表示写 NULL——pending 行本来就没有最终额。SettledAt 为 nil
-// 同理。KeyID 为 nil 表示这一行不属于任何 key（历史行）。
+// 同理。KeyID 为 nil 表示这一行不属于任何 key（历史行）。Reserved 是钱包那
+// 部分预留，PlanReserved 是额度包占着的面值（空串按 0 写）；两者分开给，
+// 「钱包一分没冻但包占着面值」那一格才写得出来。
 type billingFixture struct {
-	UserID    int64
-	KeyID     *int64
-	ChannelID int64
-	RequestID string
-	Model     string
-	Status    string
-	Reserved  string
-	Final     string
-	Protocol  string
-	Streamed  bool
-	StartedAt time.Time
-	SettledAt *time.Time
+	UserID       int64
+	KeyID        *int64
+	ChannelID    int64
+	RequestID    string
+	Model        string
+	Status       string
+	Reserved     string
+	PlanReserved string
+	Final        string
+	Protocol     string
+	Streamed     bool
+	StartedAt    time.Time
+	SettledAt    *time.Time
 }
 
 // insertBillingRequest 写一条账单行，返回它的 id。
@@ -64,18 +67,22 @@ func insertBillingRequest(ctx context.Context, t *testing.T, db *sql.DB, f billi
 	if status == "" {
 		status = BillingStatusSettled
 	}
+	planReserved := f.PlanReserved
+	if planReserved == "" {
+		planReserved = "0"
+	}
 
 	var id int64
 	if err := db.QueryRowContext(ctx, `
 		INSERT INTO billing_requests
 		       (request_id, user_id, api_key_id, channel_id, canonical_model,
-		        protocol, streamed, reserved_amount, status, final_amount,
-		        started_at, settled_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9, $10::numeric,
-		        $11, $12)
+		        protocol, streamed, reserved_amount, plan_reserved_amount, status,
+		        final_amount, started_at, settled_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9::numeric, $10,
+		        $11::numeric, $12, $13)
 		RETURNING id`,
 		f.RequestID, f.UserID, keyID, channelID, f.Model, protocol, f.Streamed,
-		f.Reserved, status, final, f.StartedAt, settled,
+		f.Reserved, planReserved, status, final, f.StartedAt, settled,
 	).Scan(&id); err != nil {
 		t.Fatalf("写账单行 %s 失败: %v", f.RequestID, err)
 	}

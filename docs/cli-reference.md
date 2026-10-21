@@ -311,15 +311,32 @@ DEL，换行、制表符、ESC 都在其中）：换行会把一栏折成两行�
 后面，而拼接本身不报错。所以挡在写入侧。
 
 `--setting` 是渠道私有配置（自由形态的 JSON 对象），键由该渠道 `type` 指向的
-适配器解释，选路层不认，管理面也不校验键名。**今天只有一个键有读者**：
-`reasoning_effort_map`，由 `openai` 与 `openai-responses` 两个适配器读——它把
-`reasoning_effort` 的取值翻成该渠道认的写法（映射到空字符串表示把这个字段从
-出站报文里去掉，表里没有的取值照原样发）。例如只认 `off` 的上游，写
-`{"reasoning_effort_map":{"none":"off"}}`；要剔掉这个字段，写成
-`{"reasoning_effort_map":{"none":""}}`。写进去的键这条渠道的 `type` 不认时
-（拼错的、别的 `type` 的），照样不报错、不挡写入，但 `create`，以及给了
-`--setting` 或 `--type` 的 `update`，成功之后会逐个点名打到 stderr 上，
-`channel list` 也把这样的渠道点出来。
+适配器解释，选路层不认，管理面也不校验键名。**今天有两个键有读者。**
+
+`reasoning_effort_map` 由 `openai` 与 `openai-responses` 两个适配器读：
+它把 `reasoning_effort` 的取值翻成该渠道认的写法（映射到空字符串表示把
+这个字段从出站报文里去掉，表里没有的取值照原样发）。例如只认 `off` 的上游，
+写成 `{"reasoning_effort_map":{"none":"off"}}`；要剔掉这个字段时，
+写成 `{"reasoning_effort_map":{"none":""}}` 这一串。
+
+`usage` 由 `openai`、`anthropic` 与 `openai-responses` 三个适配器读。
+它的 `completion_includes_reasoning` 这一位决定上游报的输出 token 里含不含
+推理：不写时按「含」算——OpenAI 的 `completion_tokens` 与 Anthropic 的 `output_tokens` 都这样；
+只有把可见输出与推理分列报出的上游要显式写成 `{"usage":{"completion_includes_reasoning":false}}` 这一串。
+不写的话，计费前减掉推理会让输出那一侧少收；推理比可见输出多时，整段输出
+都收不到钱。两种口径靠数字分不出来，所以按渠道声明。
+
+三个适配器都读它，但只有把推理分列报出的上游需要配：`anthropic` 渠道上
+这一位没有数值效果——Claude 的用量不单列推理，`ReasoningTokens` 恒为 0，
+两种取值算出的金额相同。
+
+内层键名没有点名机制：`usage` 这一层拼错会被提示；内层那个键少一个 s 就等于没写，
+它会静默按「含推理」处理，而这一位在钱路上。反过来，在本来就含推理的口径上
+写 false，同一批推理会被收两次：输出整段按输出价算一次，推理那一项再加一次。
+
+写进去的键这条渠道的 `type` 不认时（拼错的、别的 `type` 的），照样不报错、
+不挡写入，但 `create`，以及给了 `--setting` 或 `--type` 的 `update`，成功之后
+会逐个点名打到 stderr 上，`channel list` 也把这样的渠道点出来。
 
 `--channel` 不存在、`--type` / `--base-url` / `--model` 也都不开简写：这条命令上
 挑错的是「凭证写给哪条渠道」，而 `-c` 这类单字母在别的命令行里既可能是 `channel`
@@ -381,6 +398,34 @@ DEL，换行、制表符、ESC 都在其中）：换行会把一栏折成两行�
 
 表达式在写入前会编译一次，编译不过的命令直接失败：一条编译不过的规则进了库，表现
 是每个用到它的请求都失败，而失败点在请求路径上。
+
+结构化定价表用 `--schedule-file` 给一份 JSON，与其他旗标一样在连库之前读完并校验。
+`--expr` 与它**二选一**：写入时表会编译成表达式存进同一栏，`price list` 与求值用
+的都是编译结果。
+
+- `tz`：判定用的 IANA 时区名，必填。
+- `base`：兜底单价。键与表达式相同（`prompt`、`completion`、`cache_read`、
+  `cache_write`、`reasoning`、`fixed`、`minimum`），不能为空。
+- `overrides`：覆盖项，每项是「条件 + 单价」。条件从这几个维度里选，一项里写多个
+  维度表示「且」：`weekdays`（`mon` … `sun`，可写多个）、`window`
+  （`HH:MM-HH:MM`，整点边界，可跨零点）、`day_kind`（`work` / `rest`）、
+  `holidays`（节假日名，与 `holidayName()` 的返回值逐字比较，且不是补班日）、
+  `min_context_tokens`（输入上下文 token 门槛，含缓存读写）。单价只写要改的
+  键，没写的键沿用 `base`。
+
+**同一维度上两条覆盖重叠会被拒**（门槛之间例外：门槛高的自动先命中，
+不必给 `position`）。不同维度同时成立时用 `position` 裁决，大的优先；跨维度的
+覆盖必须显式给 `position`。
+
+`day_kind` 与 `holidays` 读日历数据：那一年没有导入、或当天查不到记录时求值失败，
+不会退回某一档价（见 [calendar-data.md](calendar-data.md)）。
+
+`price show <规则 ID>` 打一条规则的定价依据：带表的规则打那张表，手写规则的打表达
+式。`-o json` 下两栏都给（`schedule` 与 `expr`），脚本可以核对两者一致。
+
+带表的规则要改成手写表达式，必须同时给 `--clear-schedule`：库里存的是表编译出的那
+条表达式，直接改它会让表与计价两份说法分家。`--clear-schedule` 只清表，表达式留在
+原处；与 `--expr` 一起给就是换成一条手写规则，与 `--schedule-file` 互斥。
 
 计价项一共五个：`prompt`、`completion`、`cache_read`、`cache_write`、
 `reasoning`。上游报了哪一项，规则里就必须有哪一项的单价——少一项不是少收，是这次
@@ -1049,7 +1094,13 @@ Key 能用哪些订阅、一个用户的扣费顺序。
 收了多少钱；`billing_path` 为 `measured` 的才是一次实测，`estimated` 是按估算给的、
 `fallback` 是算不出来时按退路给的）；`requests` 读 `billing_requests`，那是**每次
 请求**的预留与结算（`pending` / `settled` / `released` / `failed` / `refunded`，
-以及预留额与结算额）。
+以及两笔预留额与结算额）。
+
+`requests` 的预留分成并列的两栏。`钱包预留` 是钱从账户余额冻住的那部分
+（`billing_requests.reserved_amount`）：额度包覆盖的请求在这一栏是 0，钱一分没冻。
+`包预留` 是这笔请求占着的额度包面值（`plan_reserved_amount`）。两个数不合并——
+加在一起就答不了「钱包冻了多少」这个问题。机器可读档里
+对应 `reserved_amount` 与 `plan_reserved_amount`。
 
 `requests` 的每一行还给出定这一单价的**规则 id**（机器可读档里是 `pricing_rule_id`，
 表格里那一栏叫 `规则`）。规则事后可变，所以账单要能回答「当时按哪条规则算的」这个
