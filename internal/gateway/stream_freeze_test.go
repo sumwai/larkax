@@ -56,7 +56,7 @@ func freezeRequest() pipeline.Request {
 
 // withStreamFreezeStep 把阈值段压到夹具的 max_tokens 以下。
 //
-// 夹具默认给 4096（与 settings 的默认值一致），而 request() 声明的上界是 500
+// 夹具默认给 1024（与 settings 的默认值一致），而 request() 声明的上界是 500
 // ——那时第一段就把整笔冻满、一次补冻都不发生（见 harness.streamFreezeStep）。
 func withStreamFreezeStep(n int64) func(*harness) {
 	return func(h *harness) { h.streamFreezeStep = n }
@@ -259,6 +259,63 @@ func TestChatStreamTopsUpByWholeSegments(t *testing.T) {
 	if got := frozenAtSettle(t, res); got.Cmp(want) != 0 {
 		t.Errorf("结算用的冻结额 = %s，期望 %s（初始 %s + 补冻合计）",
 			got, want, h.reservations.saved[0].Amount)
+	}
+}
+
+// 默认值 1024 下的完整一轮：1500 个输出 token 依次把冻结额推到三个段。
+//
+// 三条一起钉：第一段只冻 1024；第一个增量之后补到 2048（领先一段）；产出报到
+// 1500 时再补到 3072。第一条钉的是「不再按 4096 冻」，后两条钉的是「领先一段」
+// 这个设计没有随着段变小而失效——结算按实际产出的 1500 收，不撞 Capped。
+//
+// 冻结额是 1024 → 2048 → 3072，而不是 1024 → 2048 就停下：pending 的目标是
+// roundUpTo(已产出, step) + step（见 streamFreeze.pending），领先量始终是一段。
+func TestChatStreamAtDefaultFreezeStepTracksFifteenHundredTokens(t *testing.T) {
+	h := newHarness(t, withStreamFreezeStep(1024))
+	// usage 事件给**精确的** 1500 个输出 token：这条用例要钉一个确定的数，
+	// 而估算器的输出取决于文本长度与词表（见 producedOf）。
+	measured := channel.Usage{PromptTokens: 1000, CompletionTokens: 1500, Reported: true}
+	useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
+		1: {delta(chunk(100)), {Kind: "usage", Usage: &measured}, {Kind: "done", FinishReason: "stop"}},
+	}})
+
+	res, err := h.gw.ChatStream(context.Background(), freezeRequest(), upstreamRequest(), Hooks{})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	collect(t, res)
+
+	// 1. 开始之前只冻第一段：1024 个输出 token = 输入侧 0.001 + 0.002048。
+	if got := h.reservations.saved[0].OutputTokens; got != 1024 {
+		t.Errorf("初始预留覆盖 %d 个输出 token，期望 1024（只冻第一段）", got)
+	}
+	if got := h.reservations.saved[0].Amount.String(); got != "0.00304800" {
+		t.Errorf("初始预留 = %s，期望 0.00304800（输入侧 0.001 + 1024 × 2e-6）", got)
+	}
+
+	// 2. 两笔补冻各推一个段：1024 → 2048 → 3072。
+	if got := len(h.reservations.added); got != 2 {
+		t.Fatalf("补冻 %d 笔，期望 2 笔（冻结额 1024 → 2048 → 3072，每笔整段）", got)
+	}
+	for i, call := range h.reservations.added {
+		if got := call.delta.String(); got != "0.00204800" {
+			t.Errorf("第 %d 笔补冻 = %s，期望 0.00204800（一个整段 1024 × 2e-6）", i+1, got)
+		}
+	}
+	if got := frozenAtSettle(t, res); got.String() != "0.00714400" {
+		t.Errorf("结算时冻结额 = %s，期望 0.00714400（3072 个输出 token + 输入侧）", got)
+	}
+
+	// 3. 结算按实际产出的 1500 收，不撞上界。
+	if res.Charge == nil {
+		t.Fatal("正常结束必须结算")
+	}
+	if res.Charge.Settlement.Capped {
+		t.Errorf("撞上 Capped：冻结额 %s 没盖住实际用量 %s",
+			res.Charge.Settlement.Reserved, res.Charge.Settlement.Breakdown.Total)
+	}
+	if got := res.Charge.Settlement.Actual.String(); got != "0.00400000" {
+		t.Errorf("结算 = %s，期望 0.00400000（输入侧 0.001 + 1500 × 2e-6）", got)
 	}
 }
 

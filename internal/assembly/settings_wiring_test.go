@@ -382,10 +382,10 @@ func TestBuildReadsStreamFreezeStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("出厂配置下装配失败: %v", err)
 	}
-	// 出厂值由迁移写下（4096）。写死这个字面量而不是引用某个常量：这条用例
+	// 出厂值由迁移写下（1024）。写死这个字面量而不是引用某个常量：这条用例
 	// 要钉的正是「库里那个数」与「网关拿到的数」是同一个。
-	if got := app.Gateway.StreamFreezeStep; got != 4096 {
-		t.Errorf("出厂阈值段 = %d，期望 4096（迁移写下的那个数）", got)
+	if got := app.Gateway.StreamFreezeStep; got != 1024 {
+		t.Errorf("出厂阈值段 = %d，期望 1024（迁移写下的那个数）", got)
 	}
 
 	app, err = buildAppWithSettings(t, db, map[string]string{streamFreezeStepKey: "8192"})
