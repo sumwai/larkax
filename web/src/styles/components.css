@@ -240,6 +240,11 @@ textarea.input {
 .hint.error {
   color: var(--danger);
 }
+/* InputError 的元素一直在、只换文本（见 pages/ops/common.tsx）。没有句子时
+   它是空的：摘出布局，否则用 grid/flex 加 gap 的表单会多出一档间距。 */
+.hint.error:empty {
+  display: contents;
+}
 .check {
   position: relative;
   display: inline-flex;

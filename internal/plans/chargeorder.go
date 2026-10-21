@@ -83,8 +83,9 @@ const DefaultChargeOrder = ChargeOrderPlanFirst
 // 按平台默认走，并记一条 Warn——请求路径不该因为一行配置认不出就整单失败。
 //
 // 读不动库时返回错误，兜底与否由调用方决定：这一层分不清「配置写坏了」与「库现在
-// 读不了」，后者按默认值扣费会真的扣错账。请求路径的兜底策略在接上调用方那次改动
-// 里定，今天只有 `plan order show` 一个调用方，它把错误打给操作人是对的。
+// 读不了」。两个调用方的处置因此不同——`plan order show` 把错误如实打给操作人；
+// 请求路径走 RequestChargeOrder，按两级兜底继续（见下），不因为一行配置读不出来
+// 而拒绝服务。
 func (s *Service) EffectiveChargeOrder(ctx context.Context, userID int64) (ChargeOrder, ChargeOrderSource, error) {
 	if userID <= 0 {
 		return "", "", fmt.Errorf("用户 id 非法: %d", userID)
@@ -195,6 +196,37 @@ func (s *Service) ClearUserChargeOrder(ctx context.Context, userID int64) error 
 		return fmt.Errorf("清用户 %d 的扣费顺序失败: %w", userID, err)
 	}
 	return nil
+}
+
+// RequestChargeOrder 是请求路径用的那一个：任何读失败都不拒绝服务。
+//
+// 与 EffectiveChargeOrder 的分工：那个把错误交给调用方（`plan order show`
+// 要如实报告读不动库），这个按 #918 定的两级兜底走完——
+//
+//  1. 用户级读失败 → 跟随平台默认，记一条日志；
+//  2. 平台默认也读失败 → DefaultChargeOrder，再记一条日志。
+//
+// 两次都记，是因为它们指向不同的处置：第一条多半是 users 那一行的读取出了
+// 问题，第二条是 settings 或连接本身出问题。只记最终值的话，两者在日志里
+// 长得一样。
+//
+// 它满足 internal/ledger/store 声明的 ChargeOrderSource，装配层把它接到
+// 预留那条路上。
+func (s *Service) RequestChargeOrder(ctx context.Context, userID int64) string {
+	order, _, err := s.EffectiveChargeOrder(ctx, userID)
+	if err == nil {
+		return order.String()
+	}
+	s.logger().Warn("读取用户扣费顺序失败，请求路径跟随平台默认",
+		"user_id", userID, "err", err)
+
+	platform, platformErr := s.platformChargeOrder(ctx)
+	if platformErr == nil {
+		return platform.String()
+	}
+	s.logger().Warn("读取平台默认扣费顺序也失败，请求路径按兜底值走",
+		"err", platformErr, "fallback", DefaultChargeOrder)
+	return DefaultChargeOrder.String()
 }
 
 // logger 返回这一层用的日志句柄。

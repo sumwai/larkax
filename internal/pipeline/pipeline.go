@@ -382,6 +382,17 @@ type Reservation struct {
 	// 「这次是按哪一刻的档位算的」，也才谈得上复算。
 	RuleMatchedAt    time.Time
 	BillingRequestID int64
+
+	// UserPlanID 是这次预留在**额度包**里选中的那条订阅；0 表示从账户余额扣。
+	//
+	// 它由落库层在预留事务里填（见 internal/ledger/store 的 SaveReservation），
+	// 随预留行一起持久化。结算读的就是这个值，**不重新选**：在途期间订阅到期、
+	// 用户新增一个优先级更高的包，都不改变这一笔的账面。
+	//
+	// 它也是分录走哪个科目的开关：非 0 时消费那条借的是
+	// `prepaid:<订阅 id>`，其余三条（平台收入、商户应付）形状不变
+	// （见 internal/ledger 的 Consume）。
+	UserPlanID int64
 }
 
 // Outcome 是上游调用的结果，决定怎么结算。
@@ -1027,7 +1038,7 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 	// 的售价与成本问的是同一刻的档位。
 	upstreamCost := p.upstreamCost(ctx, req, usage, val.At)
 
-	entries, err := p.entries(ctx, req, val, settlement)
+	entries, err := p.entries(ctx, req, val, settlement, reserved.UserPlanID)
 	if err != nil {
 		return nil, err
 	}
@@ -1238,7 +1249,7 @@ func (p *Pipeline) now() time.Time {
 //
 // 上游成本**不在**这里：它由另一条规则线算出，落在 usage_events 那一列上，
 // 是观测值而不是分账依据（见 upstreamCost 的注释）。
-func (p *Pipeline) entries(ctx context.Context, req Request, val expr.Result, s billing.Settlement) ([]ledger.Entry, error) {
+func (p *Pipeline) entries(ctx context.Context, req Request, val expr.Result, s billing.Settlement, planID int64) ([]ledger.Entry, error) {
 	// 金额为零时不写分录。**不是省事，是避免污染账本**：
 	// 大量零金额分录会让对账时的「有分录就说明发生过消费」这个判据失效。
 	if s.Actual.IsZero() {
@@ -1260,11 +1271,22 @@ func (p *Pipeline) entries(ctx context.Context, req Request, val expr.Result, s 
 		}
 	}
 
+	// 预留快照里有订阅时，这条消费从 prepaid:<订阅 id> 扣；没有时走用户
+	// 钱包。两条路的借贷形状只差用户侧这一个科目（见 ledger.Consume）。
+	//
+	// 0 不能直接喂给 PrepaidAccount：它拼出来的是 `prepaid:0`，一个既非零值
+	// 又不指向任何订阅的科目。留零值表示「走用户钱包」。
+	prepaid := ledger.Account{}
+	if planID > 0 {
+		prepaid = ledger.PrepaidAccount(planID)
+	}
+
 	consume, err := ledger.Consume(ledger.ConsumeParams{
-		TxnID:  ledger.NewTxnID(),
-		UserID: req.UserID,
-		Asset:  ledger.Asset(req.Asset),
-		Amount: s.Actual,
+		TxnID:          ledger.NewTxnID(),
+		UserID:         req.UserID,
+		Asset:          ledger.Asset(req.Asset),
+		Amount:         s.Actual,
+		PrepaidAccount: prepaid,
 		// 分成从售价里出，余下的全部记作平台收入——钱在账本上只有这一种
 		// 分法（见 ledger.Consume 的注释），所以不会出现「分出去的和留下的
 		// 加起来不等于售价」。

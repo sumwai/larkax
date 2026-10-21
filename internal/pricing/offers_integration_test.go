@@ -521,3 +521,69 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	return &buf
 }
+
+// 报价带上每请求的固定费用、计量项单价与规则来源：编号、作用域、优先级与
+// 生效窗口都来自实际选中的那一行规则。
+//
+// 一次性费用与最低消费不进每千 token 的单价——最低消费高于按量金额时，
+// prompt 的报价仍是 0.002，而不是被抬到 1.2。
+func TestOffersCarryChargesAndRule(t *testing.T) {
+	db := testDB(t)
+	admin := NewAdmin(db)
+	owner := seedUser(t, db)
+	channel := seedChannel(t, db, owner)
+	model := unique("offers-charges")
+	at := time.Now().UTC().Add(time.Minute)
+	from := at.Add(-time.Hour).Truncate(time.Microsecond)
+	to := at.Add(time.Hour).Truncate(time.Microsecond)
+
+	ruleID := createRule(t, admin, CreateRequest{
+		Scope: ScopeChannel, ChannelID: channel,
+		ModelPatterns: []string{model}, Priority: 7,
+		EffectiveFrom: from, EffectiveTo: &to,
+		Expr: `{
+			"prompt": 0.000002,
+			"fixed": 0.05,
+			"minimum": 1.2,
+			"units": {"cache_write_5m": 0.0003}
+		}`,
+	})
+
+	got, err := NewOffers(db, "Asia/Shanghai", nil).Prices(context.Background(), at, []Candidate{
+		{Model: model, ChannelID: channel, OwnerUserID: owner},
+	})
+	if err != nil {
+		t.Fatalf("Prices 出错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("报价条数 = %d，期望 1：%+v", len(got), got)
+	}
+	price := got[0]
+	if want := money.MustParse("0.00200000"); price.Price != want {
+		t.Errorf("prompt 报价 = %s，期望 %s（最低消费不抬高单价）", price.Price, want)
+	}
+	if want := money.MustParse("0.05000000"); price.Request != want {
+		t.Errorf("request = %s，期望 charges.Fixed 的 %s", price.Request, want)
+	}
+	if want := money.MustParse("1.20000000"); price.Minimum != want {
+		t.Errorf("minimum = %s，期望 charges.Minimum 的 %s", price.Minimum, want)
+	}
+	if want := money.MustParse("0.00030000"); price.Units["cache_write_5m"] != want {
+		t.Errorf("units[cache_write_5m] = %s，期望 %s", price.Units["cache_write_5m"], want)
+	}
+	if price.Rule.ID != ruleID {
+		t.Errorf("rule.id = %d，期望 %d", price.Rule.ID, ruleID)
+	}
+	if price.Rule.Scope != ScopeChannel {
+		t.Errorf("rule.scope = %q，期望 %q", price.Rule.Scope, ScopeChannel)
+	}
+	if price.Rule.Priority != 7 {
+		t.Errorf("rule.priority = %d，期望 7", price.Rule.Priority)
+	}
+	if !price.Rule.EffectiveFrom.Equal(from) {
+		t.Errorf("rule.effective_from = %v，期望 %v", price.Rule.EffectiveFrom, from)
+	}
+	if price.Rule.EffectiveTo == nil || !price.Rule.EffectiveTo.Equal(to) {
+		t.Errorf("rule.effective_to = %v，期望 %v", price.Rule.EffectiveTo, to)
+	}
+}

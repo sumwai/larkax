@@ -9,6 +9,7 @@ import {
   useState,
   type ButtonHTMLAttributes,
   type ReactNode,
+  type RefObject,
 } from 'react'
 import type { MessageKey } from '../i18n/zh'
 import { useI18n } from '../i18n'
@@ -169,6 +170,8 @@ export function Modal({
   children,
   footer,
   sheet = false,
+  focusTarget,
+  focusToken,
 }: {
   title: ReactNode
   description?: ReactNode
@@ -176,10 +179,24 @@ export function Modal({
   children: ReactNode
   footer?: ReactNode
   sheet?: boolean
+  /**
+   * 打开之后焦点该落在谁身上。给一个 ref，或者一个「现在该聚焦哪个元素」的
+   * 取值函数——后者用在弹窗内容自己会变的情形（比如校验失败时切到出错的那一组，
+   * 目标元素这一刻才挂上）。取不到就退回聚焦弹窗本身。
+   */
+  focusTarget?: RefObject<HTMLElement | null> | (() => HTMLElement | null)
+  /**
+   * 这个值每变一次，就按 `focusTarget` 重新聚焦一次。打开时也会跑一次，
+   * 所以不传 `focusTarget` 的弹窗行为与以前一样：焦点落在弹窗上。
+   */
+  focusToken?: unknown
 }) {
   const dialogRef = useRef<HTMLDivElement>(null)
   const closeRef = useRef(onClose)
   closeRef.current = onClose
+  // 目标可能在每次渲染时是新函数，放进 ref 里，effect 只认 token。
+  const targetRef = useRef(focusTarget)
+  targetRef.current = focusTarget
   const titleId = useId()
   const { t } = useI18n()
 
@@ -187,7 +204,6 @@ export function Modal({
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const bodyOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
-    dialogRef.current?.focus()
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') closeRef.current()
     }
@@ -198,6 +214,14 @@ export function Modal({
       previous?.focus()
     }
   }, [])
+
+  useEffect(() => {
+    const target = targetRef.current
+    const element = typeof target === 'function' ? target() : target?.current
+    // 放在挂载之后：切组时目标元素与 token 在同一次提交里更新，effect 跑到时
+    // 它已经在 DOM 里了。
+    ;(element ?? dialogRef.current)?.focus()
+  }, [focusToken])
 
   return (
     <div

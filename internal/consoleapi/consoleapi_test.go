@@ -366,6 +366,11 @@ type fakeOffers struct {
 	// byOwnerPrices / byChannelPrices 覆盖整套维度价；byChannel 优先。
 	byOwnerPrices   map[int64]map[string]money.Amount
 	byChannelPrices map[int64]map[string]money.Amount
+	// 一次性费用、计量项单价与规则来源按渠道覆盖，缺省是零值。
+	byChannelRequest map[int64]money.Amount
+	byChannelMinimum map[int64]money.Amount
+	byChannelUnits   map[int64]map[string]money.Amount
+	byChannelRule    map[int64]pricing.RuleRef
 	// skipChannels 里的渠道不报价（模拟「这条渠道没有适用规则」）。
 	skipChannels map[int64]bool
 }
@@ -396,6 +401,10 @@ func (f *fakeOffers) Prices(_ context.Context, _ time.Time, candidates []pricing
 			Merchant:    candidate.Merchant,
 			Prices:      prices,
 			Price:       price,
+			Request:     f.byChannelRequest[candidate.ChannelID],
+			Minimum:     f.byChannelMinimum[candidate.ChannelID],
+			Units:       f.byChannelUnits[candidate.ChannelID],
+			Rule:        f.byChannelRule[candidate.ChannelID],
 		})
 	}
 	return out, nil
@@ -1164,8 +1173,12 @@ func TestModelsPricingAndETag(t *testing.T) {
 		CanonicalName: "no-price",
 	}}
 	price := &pricing.ReferencePrice{
-		InputPerMTok:  mustAmount(t, "12.00000000"),
-		OutputPerMTok: mustAmount(t, "60.00000000"),
+		InputPerMTok:     mustAmount(t, "12.00000000"),
+		OutputPerMTok:    mustAmount(t, "60.00000000"),
+		ReasoningPerMTok: ptrAmount(t, "18.00000000"),
+		Request:          mustAmount(t, "0.01000000"),
+		Minimum:          mustAmount(t, "0.50000000"),
+		Units:            map[string]money.Amount{"cache_write_1h": mustAmount(t, "0.00020000")},
 	}
 	f.prices.prices["claude-sonnet-4-5"] = price
 
@@ -1191,6 +1204,20 @@ func TestModelsPricingAndETag(t *testing.T) {
 	first := body.Items[0]
 	if first.Pricing == nil || first.Pricing.InputPerMTok != "12.00000000" {
 		t.Errorf("第一个模型的价格 = %+v", first.Pricing)
+	}
+	// 参考价按每百万 token 给，推理一项与缓存两项同一个口径；固定费与
+	// 计量项单价不成「每百万 token」的倍数，原样给出。
+	if first.Pricing.ReasoningPerMTok == nil || *first.Pricing.ReasoningPerMTok != "18.00000000" {
+		t.Errorf("reasoning_per_mtok = %v，期望 18.00000000", first.Pricing.ReasoningPerMTok)
+	}
+	if first.Pricing.Request == nil || *first.Pricing.Request != "0.01000000" {
+		t.Errorf("request = %v，期望 0.01000000", first.Pricing.Request)
+	}
+	if first.Pricing.Minimum == nil || *first.Pricing.Minimum != "0.50000000" {
+		t.Errorf("minimum = %v，期望 0.50000000", first.Pricing.Minimum)
+	}
+	if got := first.Pricing.Units["cache_write_1h"]; got != "0.00020000" {
+		t.Errorf("units = %+v，期望 cache_write_1h = 0.00020000", first.Pricing.Units)
 	}
 	if first.Capabilities["vision"] != false {
 		t.Errorf("vision=false 应当出现，得到 %+v", first.Capabilities)

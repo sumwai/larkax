@@ -181,7 +181,18 @@ export function OpsLoadError({ error, onRetry }: { error: unknown; onRetry: () =
   )
 }
 
+/**
+ * 表单底部的错误句。
+ *
+ * 容器一直在、只换文本，而不是「有错才插进来」：`role="alert"` 的播报发生在
+ * 已经挂载的元素内容变化时，随内容一起插入的元素在部分读屏软件里会被漏掉。
+ * 没有句子时容器是空的，靠 `components.css` 里的 `.hint.error:empty` 把它从
+ * 布局里摘出去——父容器多用 `gap` 排版，空元素也会多占一档间距。
+ */
 export function InputError({ message }: { message: string | null }) {
-  if (!message) return null
-  return <span className="hint error">{message}</span>
+  return (
+    <span className="hint error" role="alert">
+      {message}
+    </span>
+  )
 }
