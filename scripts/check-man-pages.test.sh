@@ -6,13 +6,15 @@
 # 退出码也可能一样（LESSONS.md 第 16 条；第 2 条是它的第一次现身：检查脚本自己
 # 报「通过」，实际根本没在检查）。
 #
-# 所以下面把**三条判据与六个「没跑成」的出口**各钉一条：
+# 所以下面把**四条判据与七个「没跑成」的出口**各钉一条：
 #
 #   判据 1 的两半：生成器产出的页不在库里、在库里但内容不同；
 #   判据 2：库里多出一页生成器不再产出的；
 #   退出码 2：生成器非零退出、一页都没写、写出空页、写出没有 .TH 的页、$MAN 不在、
-#            参数写错；
-#   边界：$MAN 下不属于这一族的 .1 文件既不比对也不报错（但要在证据行里报数）。
+#            参数写错、剥完转义后还有不认识的 roff 转义；
+#   边界：$MAN 下不属于这一族的 .1 文件既不比对也不报错（但要在证据行里报数）；
+#   判据 4：汉字与字母紧贴要红并点名页行、白名单能放行、数字与全角标点相邻不报、
+#          白名单的上限 / 格式 / 陈旧条目各有出口。
 #
 # **本自测跑的是真脚本**（不是副本），生成器用 GO 指的桩替掉：桩只做一件事——
 # 把 $tmp/fresh 里的几页拷进 LARKAX_MAN_OUT。比对那一段在真脚本里，桩掉它等于
@@ -276,6 +278,178 @@ if [ "$rc" -eq 0 ]; then ok; else bad "真仓库 —— 应通过（退出码 0�
 repo_pages=$(grep -oE '生成器产出 [0-9]+ 页' "$last_out" | grep -oE '[0-9]+')
 if [ "${repo_pages:-0}" -ge 10 ]; then ok; else
   bad "真仓库 —— 只生成出 ${repo_pages:-0} 页，命令注册表或扫描范围像是写错了"
+fi
+
+# ── 13. 判据 4：汉字与字母紧贴 → 红，并点名页、行与那两个紧贴的字 ──────────
+#
+# 夹具照抄缺陷的形态：一行里「是active」直接挨着（源文件按列宽硬换行时，
+# 那个空格被换行吃掉了）。
+
+cat >"$tmp/bin/go-tightjoin" <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+src="${STUB_FRESH:?}"
+out="${LARKAX_MAN_OUT:?}"
+mkdir -p "$out"
+for f in "$src"/*.1; do
+  [ -f "$f" ] || continue
+  cp "$f" "$out/"
+done
+printf '权限是active 的管理员才看得到。\n' >>"$out/larkaxctl.1"
+EOF
+
+# 数字与汉字紧贴（「4096个」）与全角标点挨着字母（「（status）」）都不该报：
+# 两条是判据 4 有意放过的写法，夹具把「不报」也钉住。
+cat >"$tmp/bin/go-legitjoin" <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+src="${STUB_FRESH:?}"
+out="${LARKAX_MAN_OUT:?}"
+mkdir -p "$out"
+for f in "$src"/*.1; do
+  [ -f "$f" ] || continue
+  cp "$f" "$out/"
+done
+printf '共 4096个 token，取值（status）与 `--role`。\n' >>"$out/larkaxctl.1"
+EOF
+
+chmod +x "$tmp/bin/go-tightjoin" "$tmp/bin/go-legitjoin"
+
+# mk_from_stub <目录> <桩>：用桩把页生成到 <目录>，当作「库里已提交的那一份」。
+# 判据 1、2 与判据 4 要分开钉：库里的那份必须与刚生成的一致，否则先红的是同步，
+# 判据 4 的结果就看不见了。
+mk_from_stub() {
+  local dir="$1" stub="$2"
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  STUB_FRESH="$fresh" LARKAX_MAN_OUT="$dir" "$stub"
+}
+
+man13="$tmp/man13"
+mk_from_stub "$man13" "$tmp/bin/go-tightjoin"
+man15="$tmp/man15"
+mk_from_stub "$man15" "$tmp/bin/go-legitjoin"
+
+# 一份空白名单：判据 4 的命中不被任何条目放行。
+: >"$tmp/allow-empty.txt"
+
+STUB_FRESH="$fresh" MAN="$man13" GO="$tmp/bin/go-tightjoin" \
+  WHITELIST="$tmp/allow-empty.txt" bash "$SCRIPT" >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 1 ]; then ok; else bad "中英紧贴 —— 应失败（退出码 1），实际 $rc"; fi
+if grep -q '判据 4 · .*larkaxctl\.1:[0-9]* 里「是a」紧贴' "$last_out"; then ok; else
+  bad "中英紧贴 —— 没有点出页、行与那两个紧贴的字"
+fi
+
+# ── 14. 判据 4：白名单放行命中的那一处 ────────────────────────────────────
+
+printf 'larkaxctl.1 | 是a | 夹具：故意留一处紧贴，验证白名单出口\n' >"$tmp/allow-one.txt"
+STUB_FRESH="$fresh" MAN="$man13" GO="$tmp/bin/go-tightjoin" \
+  WHITELIST="$tmp/allow-one.txt" bash "$SCRIPT" >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "白名单放行 —— 应通过（退出码 0），实际 $rc"; fi
+if grep -q '白名单放行 1 处' "$last_out"; then ok; else
+  bad "白名单放行 —— 证据行里没报出放行了几处（放行与没扫到在输出里长得一样）"
+fi
+
+# ── 15. 判据 4：数字紧贴与全角标点相邻都放行 ──────────────────────────────
+
+STUB_FRESH="$fresh" MAN="$man15" GO="$tmp/bin/go-legitjoin" \
+  WHITELIST="$tmp/allow-empty.txt" bash "$SCRIPT" >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else
+  bad "数字 / 全角标点相邻 —— 应通过（退出码 0），实际 $rc"
+fi
+if grep -q '中英紧贴扫描 3 页、0 处' "$last_out"; then ok; else
+  bad "数字 / 全角标点相邻 —— 证据行里扫描处数不是 0（判据把合法的写法也报了）"
+fi
+
+# ── 16. 判据 4 的白名单：上限、格式、陈旧条目 ─────────────────────────────
+#
+# 「只许减不许增」由脚本里的 MAX_ALLOW_ENTRIES 守，自测把它钉住：往上调必须
+# 同时改这里，于是那是一次会被 review 看到的 diff。
+
+declared_allow=$(grep -m1 '^MAX_ALLOW_ENTRIES=' "$SCRIPT" | cut -d= -f2)
+if [ "$declared_allow" = "1" ]; then ok; else
+  bad "MAX_ALLOW_ENTRIES 被改成了 ${declared_allow:-空}（自测钉住的是 1）"
+fi
+
+if [ -n "$declared_allow" ]; then
+  : >"$tmp/allow-over.txt"
+  i=0
+  while [ "$i" -le "$declared_allow" ]; do
+    printf 'larkaxctl.1 | 是a%d | 夹具：第 %d 条\n' "$i" "$i" >>"$tmp/allow-over.txt"
+    i=$((i + 1))
+  done
+  STUB_FRESH="$fresh" MAN="$man1" GO="$tmp/bin/go-tightjoin" \
+    WHITELIST="$tmp/allow-over.txt" bash "$SCRIPT" >"$last_out" 2>&1
+  rc=$?
+  if [ "$rc" -eq 1 ]; then ok; else bad "白名单超上限 —— 应失败（退出码 1），实际 $rc"; fi
+  if grep -q '超过上限' "$last_out"; then ok; else
+    bad "白名单超上限 —— 没说「超过上限」"
+  fi
+fi
+
+printf 'larkaxctl.1 | 只有两栏\n' >"$tmp/allow-malformed.txt"
+STUB_FRESH="$fresh" MAN="$man1" GO="$tmp/bin/go-tightjoin" \
+  WHITELIST="$tmp/allow-malformed.txt" bash "$SCRIPT" >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 1 ]; then ok; else bad "白名单格式坏 —— 应失败（退出码 1），实际 $rc"; fi
+if grep -q '不合格式' "$last_out"; then ok; else bad "白名单格式坏 —— 没说哪一行不合格式"; fi
+
+# 陈旧的条目（不再命中）只提示、不失败：那说明紧贴的写法被改掉了。
+printf 'larkaxctl-doctor.1 | 夹a | 夹具：这一页没有紧贴\n' >"$tmp/allow-stale.txt"
+STUB_FRESH="$fresh" MAN="$man1" GO="$tmp/bin/go-copy" \
+  WHITELIST="$tmp/allow-stale.txt" bash "$SCRIPT" >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "陈旧的白名单条目 —— 应通过（退出码 0），实际 $rc"; fi
+if grep -q '已经不再命中' "$last_out"; then ok; else
+  bad "陈旧的白名单条目 —— 没有提示可以删掉"
+fi
+
+# ── 17. --update 遇到判据 4 红：不写库 ────────────────────────────────────
+#
+# 一份少空格的手页不该因为「跑一次 --update」就进库：那会把判据 4 变成一句
+# 建议而不是门。
+
+man17="$tmp/man17"
+mk_committed "$man17"
+STUB_FRESH="$fresh" MAN="$man17" GO="$tmp/bin/go-tightjoin" \
+  WHITELIST="$tmp/allow-empty.txt" bash "$SCRIPT" --update >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 1 ]; then ok; else bad "--update 遇判据 4 红 —— 应失败（退出码 1），实际 $rc"; fi
+if cmp -s "$man17/larkaxctl.1" "$fresh/larkaxctl.1"; then ok; else
+  bad "--update 遇判据 4 红 —— 还是把生成结果写进了库"
+fi
+
+# ── 18. 剥完转义还剩不认识的转义 → 「没跑成」，不是干净 ───────────────────
+#
+# 剥转义的表是写死的。一个不认识的序列（夹具里是 `\s-1`）横在汉字与字母之间时，
+# 判据 4 两边都看不见，输出与「一处紧贴都没有」完全一样。这一条钉住：那时它
+# 报「没跑成」（退出码 2），而不是悄悄放行。
+
+cat >"$tmp/bin/go-unknown" <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+src="${STUB_FRESH:?}"
+out="${LARKAX_MAN_OUT:?}"
+mkdir -p "$out"
+for f in "$src"/*.1; do
+  [ -f "$f" ] || continue
+  cp "$f" "$out/"
+done
+printf '权限是%sstatus 的管理员。\n' '\s-1' >>"$out/larkaxctl.1"
+EOF
+chmod +x "$tmp/bin/go-unknown"
+
+man18="$tmp/man18"
+mk_from_stub "$man18" "$tmp/bin/go-unknown"
+STUB_FRESH="$fresh" MAN="$man18" GO="$tmp/bin/go-unknown" \
+  WHITELIST="$tmp/allow-empty.txt" bash "$SCRIPT" >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 2 ]; then ok; else bad "不认识的 roff 转义 —— 应「没跑成」（退出码 2），实际 $rc"; fi
+if grep -q '不认识的转义' "$last_out"; then ok; else
+  bad "不认识的 roff 转义 —— 提示里没说是不认识的转义（判据 4 会把它当成干净）"
 fi
 
 # ── 结果 ──────────────────────────────────────────────────────────────────
