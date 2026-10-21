@@ -448,6 +448,16 @@ jobs:
       - name: 变异测试脚本自测
         run: bash scripts/check-mutation.test.sh
 
+      # 文档里的变异基线表是 PKGS 的副本，两份都手维护。集合漂移不会让任何
+      # 测试失败：加了包却没补行、表里有行而清单里没包，数字都会安静地停在旧值。
+      # 退出码 2 是「没跑成」（表头或 PKGS 段解析不出来），不是「一致」。
+      - name: 变异清单与文档表格一致
+        run: bash scripts/check-mutation-table.sh
+
+      # 同上：判据写反时它的输出与「一致」一模一样，自测不是可选的。
+      - name: 变异清单与文档表格一致的自测
+        run: bash scripts/check-mutation-table.test.sh
+
       # 脚本用退出码区分「命中」与「自身故障」，这里要把这个区分带出来：
       # 不区分的话，扫描器坏掉的日志和干净通过长得一样，没人会去看。
       - name: 扫描密钥与私有信息
