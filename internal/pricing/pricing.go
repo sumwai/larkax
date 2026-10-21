@@ -258,7 +258,7 @@ func (s *Source) Match(ctx context.Context, q pipeline.RuleQuery) (pipeline.Rule
 		return pipeline.Rule{}, fmt.Errorf("查询计价规则失败: %w", err)
 	}
 
-	return pipeline.Rule{ID: id, Source: expr, Version: versionOf(expr)}, nil
+	return pipeline.Rule{ID: id, ChannelID: cand.ChannelID, Source: expr, Version: versionOf(expr)}, nil
 }
 
 // MatchAll 返回候选集里**每个候选各自**适用的那一条规则。
@@ -314,7 +314,7 @@ func (s *Source) MatchAll(ctx context.Context, q pipeline.RuleQuery) ([]pipeline
 		if !id.Valid {
 			continue
 		}
-		out = append(out, pipeline.Rule{ID: id.Int64, Source: expr.String, Version: versionOf(expr.String)})
+		out = append(out, pipeline.Rule{ID: id.Int64, ChannelID: channelID, Source: expr.String, Version: versionOf(expr.String)})
 	}
 	if err = rows.Err(); err != nil {
 		return nil, fmt.Errorf("读取候选计价规则失败: %w", err)

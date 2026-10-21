@@ -107,7 +107,11 @@ func (h *Handler) billingRequest(user User, upstream *channel.Request, requestID
 		CanonicalModel: upstream.Model,
 		MaxTokens:      int64(upstream.MaxTokens),
 		InputTokens:    inputTokensOf(upstream),
-		Streamed:       upstream.Stream,
+		// CachePrefix 是前缀比对用的块序列（见 pipeline.CachePrefixOf）：
+		// 预留靠它判断这一段的开头是否已在上游缓存里，从而把那一段从
+		// 「按最贵单价估」里拆出来。算不出来时是 nil，预留退回旧口径。
+		CachePrefix: pipeline.CachePrefixOf(upstream),
+		Streamed:    upstream.Stream,
 		// 协议不能由这一层推：它由路径决定，而路径是调用方的事
 		// （见 pipeline.Request.Protocol）。
 		Protocol: protocol,

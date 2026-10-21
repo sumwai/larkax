@@ -20,7 +20,8 @@ import (
 //
 // 上界的构成：
 //
-//	输入侧：已知的输入 token × prompt / cache_read / cache_write 里最贵的单价
+//	输入侧：已知的输入 token × prompt / cache_read / cache_write 里最贵的单价，
+//	        其中已确认命中缓存的前缀按 cache_read 单价算
 //	输出侧：要冻的输出 token 数 × max(completion, reasoning) 单价
 //	其余：非 token 计量各留一份，宁可多留
 //
@@ -62,6 +63,13 @@ func Reserve(req ReserveRequest) (money.Amount, error) {
 	// 这个方向是必须的：宁可多冻，不可静默少收。而多冻的那部分只在请求期间
 	// 存在（结束即释放），且输入侧通常不是预留里最大的一块（输出侧按 max_tokens
 	// 估，往往更大）。
+	//
+	// 其中**已确认**会按缓存价结算的那一段（见 ReserveRequest.ConfirmedCacheTokens）
+	// 从上面这个「全按最贵」里拆出来，按 cache_read 估；其余仍按最贵。
+	// 确认来自前缀比对（见 CacheStore.Resolve），是确定判断而不是命中率，
+	// 所以拆出去只会把上界往下压。它压得动的前提是上游确实命中了那一段；
+	// 判对而上游没命中的话，这一侧就会小于结算、撞上 Capped，差额由平台承担
+	// ——这是这条特性唯一的亏损路径，方向上的取舍写在 CacheStore 的类型注释里。
 	inputPrice := money.Max(money.Max(p.Prompt, p.CacheRead), p.CacheWrite)
 	// 每一处乘法都要看 ok。mul 把「哪一项被夹住了」记进 clampErr，由函数
 	// 末尾统一拒绝——预留算不出来时**不能**交回一个夹住的数：那是一个偏小
@@ -77,7 +85,28 @@ func Reserve(req ReserveRequest) (money.Amount, error) {
 		}
 		return v
 	}
-	input := mul(inputPrice, req.InputTokens)
+	// 确认命中的那一段按缓存读价，其余按最贵价。确认量钳进 [0, InputTokens]：
+	// 超出输入总量没有意义，而负数会让「其余」比输入还多。
+	//
+	// 确认量为 0 时 `miss` 就是 InputTokens，`SumChecked(x, 0)` 逐位等于 x
+	// ——这条默认路径的结果与拆分之前完全一致（有用例钉住）。
+	hit := req.ConfirmedCacheTokens
+	if hit < 0 {
+		hit = 0
+	}
+	if hit > req.InputTokens {
+		hit = req.InputTokens
+	}
+	miss := req.InputTokens - hit
+	input, ok := money.SumChecked(mul(inputPrice, miss), mul(p.CacheRead, hit))
+	if !ok && clampErr == nil {
+		// 两项各自放得下而合起来放不下。末尾那次 SumChecked 判不出来：
+		// 它看到的是夹住之后的 input，反过来与 total 一致。夹住的输入侧
+		// 是一个偏小的上界，所以必须在这里拒掉。
+		clampErr = fmt.Errorf(
+			"输入侧的预留金额在相加时放不进 int64 的最小单位表示（库里的 numeric(20, 8) 存得下，money 表示不了），算不出上界: %w",
+			money.ErrOverflow)
+	}
 	// 缓存读、缓存写这两项是**在整段 prompt 之外**额外给的估计量，所以照旧各按
 	// 自己的单价再算一遍。生产里它们目前恒为 0——入口没有填 pipeline.Request.Usage，
 	// 所以上界实际由上面那一侧单独撑着。这两项加不加都不改变今天的结论；
@@ -196,6 +225,20 @@ type ReserveRequest struct {
 	// 图片与历史里的 tool_use 参数——上游报的输入量里那几项都在（见
 	// internal/api 的 inputTokensOf）。
 	InputTokens int64
+
+	// ConfirmedCacheTokens 是**已确认**命中缓存的前缀 token 数。
+	//
+	// 与 CacheReadTokens 不是一回事：那个是「在 InputTokens 之外额外预估的量」，
+	// 这个是「InputTokens 里面已有确凿依据会按缓存价结算的那一段」。两者语义相反，
+	// 不能合成一个字段——前者加上去，后者从里面拆出来。
+	//
+	// 取值由前缀比对得到（见 CacheStore.Resolve）：它是确定判断，不是命中率
+	// 也不是默认值，没有依据时就是 0。超出 [0, InputTokens] 的部分在 Reserve
+	// 里被钳掉，负数按 0 处理。
+	//
+	// 它为 0 时 Reserve 的结果与拆分之前逐位相同。
+	ConfirmedCacheTokens int64
+
 	// CacheReadTokens 是**在 InputTokens 之外**额外预估的缓存命中量。
 	//
 	// 它与 InputTokens 不是「总量与其中一部分」的关系：InputTokens 是整段
