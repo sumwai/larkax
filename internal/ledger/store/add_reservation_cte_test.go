@@ -385,8 +385,9 @@ func TestAddReservationRejectedWhenSettlementWinsTheRowLock(t *testing.T) {
 
 	runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	delta := mustMoney(t, "2")
 	done := make(chan error, 1)
-	go func() { done <- s.AddReservation(runCtx, req, mustMoney(t, "2"), 0) }()
+	go func() { done <- s.AddReservation(runCtx, req, delta, 0) }()
 	// 卡在账单行上 = 钱包那一半已经加了，账单行那一半被挡住。
 	waitUntilBlocked(t, db, 1)
 
@@ -529,10 +530,16 @@ func TestAddReservationTwoRefreezesOnSameRequestKeepBothHalvesInStep(t *testing.
 func waitUntilBlocked(t *testing.T, db *sql.DB, n int) {
 	t.Helper()
 
+	// 轮询本身也要有上限：连接池被占满时 `QueryRowContext` 会**卡在拿连接**上，
+	// 不报错也不返回。用 Background 时那就成了整包超时，而这里只想在有问题的
+	// 时候直接说清楚。
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		var blocked int
-		if err := db.QueryRowContext(context.Background(), `
+		if err := db.QueryRowContext(ctx, `
 			SELECT count(*) FROM pg_stat_activity
 			 WHERE datname = current_database()
 			   AND wait_event_type = 'Lock'

@@ -582,9 +582,11 @@ func (s *Store) reserveFromWallet(ctx context.Context, tx *sql.Tx, req pipeline.
 //     的锁并确认它仍是 pending，后面的 growPlanReservation 据此不必自己再判。
 //
 // 代价要算全：额度包覆盖的流上，这次**同值** UPDATE 每次补冻都在账单行上留下
-// 一个新行版本——一个死元组加一份 WAL，随补冻次数线性增长，靠 autovacuum 回收。
-// 改动前那句 `SELECT … FOR UPDATE` 只打行锁、不写新版本。也就是说这条路用往返
-// 换了写放大；余额那条路本来就是一次真 UPDATE，没有这笔额外的账。
+// 一个新行版本——一个死元组，有索引的话还有索引项，随补冻次数线性增长，靠
+// autovacuum 回收。WAL 两边都写：改动前那句 `SELECT … FOR UPDATE` 置 xmax 的
+// 锁记录同样落 WAL，多出来的是死元组，不是「从没有 WAL 到有 WAL」。也就是说
+// 这条路用往返换了账单行的行版本增长；余额那条路本来就是一次真 UPDATE，
+// 没有这笔额外的账。
 //
 // 锁序因此是「钱包 → 账单行」，与 Save（结算）一致；两步的先后不由文本顺序
 // 碰运气，而是由 `billed` 对 `frozen` 的 RETURNING 依赖固定下来。额度包那条路
