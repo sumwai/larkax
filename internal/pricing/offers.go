@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/billing/expr"
 	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/observe"
 )
 
 // 本文件是**报价**：对一组「模型 × 渠道（连同渠道所属商家）」各取一条适用
@@ -180,7 +182,10 @@ var offerRulesQuery = `
 
 // Prices 求每个候选的报价。
 //
-// at 为零值时用当前时刻。返回的切片只含有报价的候选，顺序按 (模型, 渠道)。
+// at 为零值时用当前时刻。返回的切片只包含求得出价的候选，顺序按 (模型, 渠道)：
+// 没有适用规则的候选，以及命中了一条编译或求值失败的规则的候选，都被跳过。
+// 求不出价只影响那个候选——某条规则写坏不该让整份清单变成错误；全部候选都
+// 求不出价时返回空切片与 nil 错误。查询本身失败仍是错误。
 func (o *Offers) Prices(ctx context.Context, at time.Time, candidates []Candidate) ([]CandidatePrice, error) {
 	if len(candidates) == 0 {
 		return []CandidatePrice{}, nil
@@ -233,6 +238,9 @@ func (o *Offers) Prices(ctx context.Context, at time.Time, candidates []Candidat
 		version int64
 	}
 	prices := make(map[ruleKey]money.Amount, len(unique))
+	// 取价失败的规则也按同一个键记下来：一条兜底规则写坏时，命中它的候选
+	// 可能有几十个，它们都该被跳过，而日志只该记一次。
+	broken := make(map[ruleKey]bool)
 
 	out := []CandidatePrice{}
 	for rows.Next() {
@@ -255,9 +263,19 @@ func (o *Offers) Prices(ctx context.Context, at time.Time, candidates []Candidat
 		key := ruleKey{id: ruleID.Int64, version: versionOf(source.String)}
 		price, ok := prices[key]
 		if !ok {
+			if broken[key] {
+				continue
+			}
+			// 一条规则取不出价，只跳过命中它的候选：某个商家配错一条规则，
+			// 不该让所有调用方的模型清单都变成 500。规则 id 与原因记日志，
+			// 否则这次跳过在外部只剩下「这个模型没有报价」。
 			price, err = o.priceOf(ruleID.Int64, source.String, at)
 			if err != nil {
-				return nil, err
+				broken[key] = true
+				observe.FromContext(ctx).Warn("规则取价失败，跳过命中它的候选",
+					"rule_id", ruleID.Int64,
+					"reason", firstLine(err))
+				continue
 			}
 			prices[key] = price
 		}
@@ -274,6 +292,16 @@ func (o *Offers) Prices(ctx context.Context, at time.Time, candidates []Candidat
 		return nil, fmt.Errorf("读候选计价规则失败: %w", err)
 	}
 	return out, nil
+}
+
+// firstLine 取错误文本的第一行。
+//
+// 表达式编译失败时，错误文本会附上出错那一行的源码与一个 ^ 标记；规则表达式
+// 可能很长，整段打进日志既没有多出什么信息，也会把一行日志撑得没法读。第一行
+// 已经写清了是哪一类错误、在第几列。
+func firstLine(err error) string {
+	line, _, _ := strings.Cut(err.Error(), "\n")
+	return line
 }
 
 // priceOf 编译并求一条规则在 1000 个输入 token 下的价。
