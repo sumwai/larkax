@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -80,10 +81,13 @@ func (a *API) merchantModels(w http.ResponseWriter, r *http.Request) {
 // model_patterns 为空表示适用于全部模型（命中每一行），非空时按元素**精确**
 // 匹配（与 `r.model_patterns ? 模型名` 同义，规则写入时已拒掉通配符）。
 //
-// 商家会话只取自己的规则（ListOwned）；admin 不注入归属，取全部商家的
-// merchant 规则——同一套判据、不同的主语：管理员那一列问的是「全平台有没有
-// 一条商家规则命中它」，**不要求规则的主人正在供这个模型**。平台规则与渠道
-// 规则不算：这一列问的是「商家自己配过价没有」。
+// 商家会话只看自己的规则；admin 不注入归属，看全部商家的 merchant 规则——
+// 同一套判据、不同的主语：管理员那一列问的是「全平台有没有一条商家规则命中
+// 它」，**不要求规则的主人正在供这个模型**。平台规则与渠道规则不算：这一列
+// 问的是「商家自己配过价没有」。
+//
+// 读的是不编译表达式的窄查询（见 pricing.Admin.MerchantRulePatterns）：这条
+// 路只要模型名，`DeclaredKeys` / `ExprErr` 与那张结构化定价表都在这儿用不上。
 //
 // # 为什么是布尔而不是条数
 //
@@ -93,25 +97,31 @@ func (a *API) merchantModels(w http.ResponseWriter, r *http.Request) {
 func (a *API) applicableRules(ctx context.Context, owner *int64,
 	now time.Time,
 ) (byModel map[string]bool, anyModel bool, err error) {
-	var rules []pricing.RuleInfo
-	if owner != nil {
-		rules, err = a.rules.ListOwned(ctx, *owner)
-	} else {
-		rules, err = a.rules.List(ctx)
+	// owner <= 0 是 ListOwned 原本的守卫，换成窄查询后在这里平移保留：它不是
+	// 这条读路径新加的失败方式，改动前商家会话拿到非法 id 时也是同样报错（见
+	// pricing.Admin.ListOwned）。
+	if owner != nil && *owner <= 0 {
+		return nil, false, errors.New("用户 id 无效")
 	}
+	rules, err := a.rules.MerchantRulePatterns(ctx)
 	if err != nil {
 		return nil, false, err
 	}
-	byModel, anyModel = applicableRuleModels(rules, now)
+	byModel, anyModel = applicableRulePatterns(rules, owner, now)
 	return byModel, anyModel, nil
 }
 
-// applicableRuleModels 是上面那段口径的纯函数部分，供单测直接钉住。
-func applicableRuleModels(rules []pricing.RuleInfo, now time.Time) (map[string]bool, bool) {
+// applicableRulePatterns 是上面那段口径的纯函数部分，供单测直接钉住。
+//
+// 作用域已在查询里收窄到 merchant；归属、启停与有效期在这里判——判据只写
+// 这一份，admin（owner 为 nil）与商家（owner 非 nil）走同一段代码。
+func applicableRulePatterns(rules []pricing.RulePatterns, owner *int64,
+	now time.Time,
+) (map[string]bool, bool) {
 	byModel := make(map[string]bool, len(rules))
 	var anyModel bool
 	for _, rule := range rules {
-		if rule.Scope != pricing.ScopeMerchant {
+		if owner != nil && rule.OwnerUserID != *owner {
 			continue
 		}
 		if !rule.Enabled {
