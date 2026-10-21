@@ -4,6 +4,7 @@ import { useAuth } from '../auth/AuthProvider'
 import { useI18n } from '../i18n'
 import type { MessageKey } from '../i18n/zh'
 import { useIsMobile, useIsNarrow } from '../hooks/useMediaQuery'
+import { homeOf, viewOfPath, viewsFor, type View } from '../ops/views'
 import {
   BrandMark,
   IconCollapse,
@@ -31,6 +32,24 @@ export const APP_NAV: Array<{
   { to: '/app/quickstart', key: 'nav.quickstart', icon: IconQuickstart, group: 'access' },
 ]
 
+type NavItem = { to: string; key: MessageKey; icon: ComponentType<{ size?: number; className?: string }> }
+
+/**
+ * 运营视图的导航。
+ *
+ * merchant 只有渠道一组路由：模型目录、别名与计价是平台级资源，没有归属可过滤，
+ * 不在商家视图里出现。
+ */
+const OPS_NAV: Record<Exclude<View, 'user'>, NavItem[]> = {
+  merchant: [{ to: '/app/merchant/channels', key: 'ops.nav.channels', icon: IconOverview }],
+  admin: [
+    { to: '/app/admin/channels', key: 'ops.nav.channels', icon: IconOverview },
+    { to: '/app/admin/models', key: 'ops.nav.models', icon: IconModels },
+    { to: '/app/admin/aliases', key: 'ops.nav.aliases', icon: IconQuickstart },
+    { to: '/app/admin/pricing', key: 'ops.nav.pricing', icon: IconUsage },
+  ],
+}
+
 function initials(name: string | null | undefined): string {
   const value = (name ?? '').trim()
   if (!value) return '?'
@@ -48,21 +67,24 @@ export function AppShell() {
   const [drawer, setDrawer] = useState(false)
   const collapsed = narrow || manualCollapsed
 
+  const views = viewsFor(user?.role)
+  const view = viewOfPath(location.pathname)
+  const navItems: NavItem[] = view === 'user' ? APP_NAV : OPS_NAV[view]
+
   useEffect(() => {
     setDrawer(false)
   }, [location.pathname])
 
   // `/app` 这一项不能按前缀匹配：它是每个子路由的前缀，会先把设置页之类
-  // 没有进 APP_NAV 的页面全抢成「概览」。
+  // 没有进导航的页面全抢成「概览」。
   const current =
-    [...APP_NAV]
+    [...navItems]
       .sort((a, b) => b.to.length - a.to.length)
       .find((item) =>
         item.to === '/app'
           ? location.pathname === item.to
           : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`),
-      )
-      ?.key ?? (location.pathname.startsWith('/app/settings') ? 'nav.settings' : 'nav.overview')
+      )?.key ?? (location.pathname.startsWith('/app/settings') ? 'nav.settings' : navItems[0].key)
 
   const signOut = async () => {
     await logout()
@@ -70,6 +92,31 @@ export function AppShell() {
   }
 
   const displayName = user?.display_name || user?.username || ''
+
+  const switcher = views.length > 1 && (
+    <div className="seg view-switch" role="group" aria-label={t('common.console')}>
+      {views.map((item) => (
+        <button
+          key={item}
+          aria-pressed={view === item}
+          onClick={() => navigate(homeOf(item))}
+        >
+          {t(`view.${item}` as MessageKey)}
+        </button>
+      ))}
+    </div>
+  )
+
+  const renderNav = (items: NavItem[]) =>
+    items.map((item) => {
+      const Icon = item.icon
+      return (
+        <NavLink key={item.to} to={item.to} end={item.to === '/app'} title={t(item.key)}>
+          <Icon size={17} />
+          <span>{t(item.key)}</span>
+        </NavLink>
+      )
+    })
 
   const navGroups: Array<{ label: MessageKey; group: 'account' | 'access' }> = [
     { label: 'nav.sectionAccount', group: 'account' },
@@ -84,7 +131,7 @@ export function AppShell() {
             className="brand"
             onClick={() => {
               if (!narrow && collapsed) setManualCollapsed(false)
-              else navigate('/app')
+              else navigate(homeOf(view))
             }}
             aria-label={collapsed && !narrow ? t('nav.expand') : t('common.console')}
           >
@@ -107,23 +154,36 @@ export function AppShell() {
           )}
         </div>
 
+        {!collapsed && switcher}
+
         <nav aria-label={t('common.console')}>
-          {navGroups.map((group) => (
-            <div key={group.group} style={{ marginBottom: 14 }}>
-              <div className="side-group-label">{t(group.label)}</div>
-              <div className="nav">
-                {APP_NAV.filter((item) => item.group === group.group).map((item) => {
-                  const Icon = item.icon
-                  return (
-                    <NavLink key={item.to} to={item.to} end={item.to === '/app'} title={t(item.key)}>
-                      <Icon size={17} />
-                      <span>{t(item.key)}</span>
-                    </NavLink>
-                  )
-                })}
+          {view === 'user' ? (
+            navGroups.map((group) => (
+              <div key={group.group} style={{ marginBottom: 14 }}>
+                <div className="side-group-label">{t(group.label)}</div>
+                <div className="nav">
+                  {navItems
+                    .filter((item) => 'group' in item && item.group === group.group)
+                    .map((item) => {
+                      const Icon = item.icon
+                      return (
+                        <NavLink key={item.to} to={item.to} end={item.to === '/app'} title={t(item.key)}>
+                          <Icon size={17} />
+                          <span>{t(item.key)}</span>
+                        </NavLink>
+                      )
+                    })}
+                </div>
               </div>
+            ))
+          ) : (
+            <div style={{ marginBottom: 14 }}>
+              <div className="side-group-label">
+                {t(view === 'admin' ? 'ops.sectionAdmin' : 'ops.sectionMerchant')}
+              </div>
+              <div className="nav">{renderNav(navItems)}</div>
             </div>
-          ))}
+          )}
           <div className="nav">
             <NavLink to="/app/settings" title={t('nav.settings')}>
               <IconSettings size={17} />
@@ -171,9 +231,8 @@ export function AppShell() {
 
         <nav className="bottomnav" aria-label={t('common.console')}>
           {[
-            ...APP_NAV.filter((item) => item.group === 'account'),
-            { to: '/app/models', key: 'nav.models' as MessageKey, icon: IconModels, group: 'access' as const },
-            { to: '/app/settings', key: 'nav.settings' as MessageKey, icon: IconSettings, group: 'account' as const },
+            ...navItems.slice(0, view === 'user' ? 3 : 4),
+            { to: '/app/settings', key: 'nav.settings' as MessageKey, icon: IconSettings },
           ].map((item) => {
             const Icon = item.icon
             return (
@@ -205,8 +264,9 @@ export function AppShell() {
                 <IconX size={16} />
               </button>
             </div>
+            {switcher && <div style={{ margin: '0 0 12px' }}>{switcher}</div>}
             <div className="nav drawer-nav">
-              {APP_NAV.map((item) => {
+              {navItems.map((item) => {
                 const Icon = item.icon
                 return (
                   <NavLink key={item.to} to={item.to} end={item.to === '/app'}>

@@ -1,7 +1,13 @@
 import { ApiError } from './client'
 import type {
+  AliasUpdateInput,
   ApiClient,
   ApiKey,
+  Channel,
+  ChannelAlias,
+  ChannelCreateInput,
+  CostCreateInput,
+  CostUpdateInput,
   CreatedKey,
   KeyCreateInput,
   KeyListQuery,
@@ -10,6 +16,15 @@ import type {
   Meta,
   Model,
   ModelsResponse,
+  ChannelOpsClient,
+  OpsClient,
+  OpsModel,
+  OpsModelCreateInput,
+  OpsModelInput,
+  PricingCost,
+  PricingRule,
+  RuleCreateInput,
+  RuleUpdateInput,
   SessionResponse,
   Tokens,
   UsageBreakdown,
@@ -247,6 +262,8 @@ const user: User = {
   display_name: '演示账号',
   email: 'user@example.com',
   status: 'active',
+  // 演示数据默认给 admin：运营页是这次要展示的东西，只看得见「用户」就没法看。
+  role: 'admin',
   created_at: new Date(Date.now() - 90 * DAY_MS).toISOString(),
 }
 
@@ -399,8 +416,518 @@ function bucketStart(bucket: string): string {
   return `${bucket}T00:00:00${SITE_OFFSET}`
 }
 
+/* ── 运营资源 ─────────────────────────────────────────────────────── */
+
+/** 服务端那两句固定文案；界面原样显示，不自己编。 */
+const PERMISSION_DENIED = 'you do not have permission to perform this action'
+const CHANNEL_NOT_FOUND = 'channel not found'
+
+const ago = (hours: number) => new Date(Date.now() - hours * 3_600_000).toISOString()
+
+const OPS_CHANNELS: Channel[] = [
+  {
+    id: 1,
+    owner_user_id: 0,
+    name: 'platform-anthropic',
+    type: 'anthropic',
+    base_url: 'https://api.example.com/anthropic',
+    status: 'enabled',
+    models: ['claude-sonnet-4-5'],
+    weight: 1,
+    priority: 10,
+    setting: {},
+    credential_keys: ['k-placeholder'],
+    credential_hint: 'abcd',
+    deleted_at: null,
+    created_at: ago(720),
+    updated_at: ago(12),
+  },
+  {
+    id: 2,
+    owner_user_id: 2,
+    name: 'acme-openai',
+    type: 'openai',
+    base_url: 'https://api.example.com/v1',
+    status: 'enabled',
+    models: ['gpt-4.1'],
+    weight: 2,
+    priority: 5,
+    setting: {},
+    credential_keys: ['k-placeholder'],
+    credential_hint: 'wxyz',
+    deleted_at: null,
+    created_at: ago(400),
+    updated_at: ago(30),
+  },
+  {
+    id: 3,
+    owner_user_id: 1,
+    name: 'demo-self',
+    type: 'openai',
+    base_url: 'https://api.example.com/self',
+    status: 'disabled',
+    models: ['gpt-4.1'],
+    weight: 1,
+    priority: 0,
+    setting: {},
+    credential_keys: ['k-placeholder'],
+    credential_hint: 'demo',
+    deleted_at: null,
+    created_at: ago(90),
+    updated_at: ago(5),
+  },
+]
+
+const OPS_MODELS: OpsModel[] = [
+  {
+    id: 1,
+    canonical_name: 'claude-sonnet-4-5',
+    display_name: 'Claude Sonnet 4.5',
+    vendor: 'anthropic',
+    family: 'claude',
+    context_limit: 200_000,
+    input_limit: 0,
+    output_limit: 0,
+    capabilities: {
+      reasoning: true,
+      tools: true,
+      vision: true,
+      audio: null,
+      cache: true,
+      batch: null,
+      endpoints: ['chat', 'messages'],
+    },
+    modalities_input: ['text', 'image'],
+    modalities_output: ['text'],
+    reasoning_options: [],
+    canonical_model_id: '',
+    knowledge_cutoff: '2025-03-01',
+    release_date: '2025-09-29',
+    raw: {},
+    updated_at: ago(48),
+  },
+  {
+    id: 2,
+    canonical_name: 'gpt-4.1',
+    display_name: 'GPT-4.1',
+    vendor: 'openai',
+    family: 'gpt',
+    context_limit: 1_000_000,
+    input_limit: 0,
+    output_limit: 32_768,
+    capabilities: {
+      reasoning: false,
+      tools: true,
+      vision: true,
+      audio: null,
+      cache: null,
+      batch: null,
+      endpoints: ['chat'],
+    },
+    modalities_input: ['text', 'image'],
+    modalities_output: ['text'],
+    reasoning_options: [],
+    canonical_model_id: '',
+    knowledge_cutoff: null,
+    release_date: null,
+    raw: {},
+    updated_at: ago(72),
+  },
+]
+
+const OPS_ALIASES: ChannelAlias[] = [
+  {
+    id: 1,
+    channel_id: 1,
+    upstream_model: 'claude-sonnet-4-5-20250929',
+    canonical_name: 'claude-sonnet-4-5',
+    overrides: {},
+    created_at: ago(600),
+  },
+  {
+    id: 2,
+    channel_id: 2,
+    upstream_model: 'gpt-4.1-2025-04-14',
+    canonical_name: 'gpt-4.1',
+    overrides: { reasoning_effort: 'medium' },
+    created_at: ago(300),
+  },
+]
+
+const OPS_RULES: PricingRule[] = [
+  {
+    id: 1,
+    scope: 'platform',
+    owner_user_id: 0,
+    channel_id: 0,
+    name: 'default-prices',
+    model_patterns: ['*'],
+    expr: 'price = input_tokens * 0.000003 + output_tokens * 0.000015',
+    priority: 0,
+    effective_from: ago(24 * 365),
+    effective_to: null,
+    enabled: true,
+    created_by: 1,
+    created_at: ago(24 * 365),
+    updated_at: ago(96),
+    declared_keys: ['input_tokens', 'output_tokens'],
+  },
+  {
+    id: 2,
+    scope: 'merchant',
+    owner_user_id: 2,
+    channel_id: 0,
+    name: 'acme-discount',
+    model_patterns: ['gpt-4.1'],
+    expr: 'price = tokens_in * 0.000002 + tokens_out * 0.000010',
+    priority: 10,
+    effective_from: ago(240),
+    effective_to: null,
+    enabled: false,
+    created_by: 2,
+    created_at: ago(240),
+    updated_at: ago(20),
+    declared_keys: ['tokens_in', 'tokens_out'],
+    expr_error: 'unknown variable tokens_in',
+  },
+]
+
+const OPS_COSTS: PricingCost[] = [
+  {
+    id: 1,
+    channel_id: 1,
+    model_patterns: ['claude-*'],
+    expr: 'cost = input_tokens * 0.000002 + output_tokens * 0.000012',
+    priority: 0,
+    effective_from: ago(24 * 200),
+    effective_to: null,
+    created_at: ago(24 * 200),
+    declared_keys: ['input_tokens', 'output_tokens'],
+  },
+]
+
+function opsID(): number {
+  return 1_000 + Math.floor(Math.random() * 9_000)
+}
+
+/**
+ * 一组运营资源的替身。
+ *
+ * admin 拿全集；merchant 只通过 `channelsOf` 取走渠道那一半——模型、别名与
+ * 计价没有商家前缀的路由。渠道按服务端的判定演戏：merchant 只看得到、也只
+ * 改得了自己的渠道，别人的渠道与不存在的渠道都回 404（不透露「存在但不是你的」）。
+ */
+function mockOpsClient(scope: 'admin' | 'merchant'): OpsClient {
+  const isAdmin = scope === 'admin'
+  const denied = () => new ApiError(403, 'forbidden', PERMISSION_DENIED)
+
+  const visibleChannels = () =>
+    OPS_CHANNELS.filter(
+      (channel) =>
+        channel.deleted_at === null && (isAdmin || channel.owner_user_id === user.id),
+    )
+
+  const ownChannel = (id: number): Channel => {
+    const channel = visibleChannels().find((item) => item.id === id)
+    if (!channel) throw new ApiError(404, 'not_found', CHANNEL_NOT_FOUND)
+    return channel
+  }
+
+  const requireAdmin = () => {
+    if (!isAdmin) throw denied()
+  }
+
+  const channelInputError = (input: ChannelCreateInput): void => {
+    if (!input.name?.trim()) throw new ApiError(400, 'invalid_request', 'name is required')
+    if (!input.type?.trim()) throw new ApiError(400, 'invalid_request', 'type is required')
+    if (!input.base_url?.trim()) throw new ApiError(400, 'invalid_request', 'base_url is required')
+    if (!input.credential?.trim())
+      throw new ApiError(400, 'invalid_request', 'credential is required')
+    if (!input.models || input.models.length === 0)
+      throw new ApiError(400, 'invalid_request', 'at least one model is required')
+  }
+
+  return {
+    async listChannels() {
+      await delay()
+      requireSession()
+      return visibleChannels().map((channel) => ({ ...channel }))
+    },
+
+    async getChannel(id) {
+      await delay()
+      requireSession()
+      return { ...ownChannel(id) }
+    },
+
+    async createChannel(input) {
+      await delay()
+      requireSession()
+      channelInputError(input)
+      const created: Channel = {
+        id: opsID(),
+        owner_user_id: isAdmin ? (input.owner_user_id ?? 0) : user.id,
+        name: input.name.trim(),
+        type: input.type.trim(),
+        base_url: input.base_url.trim(),
+        status: 'enabled',
+        models: [...input.models],
+        weight: input.weight ?? 1,
+        priority: input.priority ?? 0,
+        setting: input.setting ?? {},
+        credential_keys: ['k-placeholder'],
+        credential_hint: input.credential.slice(-4),
+        deleted_at: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }
+      OPS_CHANNELS.push(created)
+      return created.id
+    },
+
+    async updateChannel(id, input) {
+      await delay()
+      requireSession()
+      const channel = ownChannel(id)
+      if (
+        (input.name !== undefined && !input.name.trim()) ||
+        (input.type !== undefined && !input.type.trim()) ||
+        (input.base_url !== undefined && !input.base_url.trim()) ||
+        (input.models !== undefined && input.models.length === 0)
+      ) {
+        throw new ApiError(400, 'invalid_request', 'the field cannot be empty')
+      }
+      Object.assign(channel, {
+        ...(input.name !== undefined ? { name: input.name.trim() } : {}),
+        ...(input.type !== undefined ? { type: input.type.trim() } : {}),
+        ...(input.base_url !== undefined ? { base_url: input.base_url.trim() } : {}),
+        ...(input.models !== undefined ? { models: [...input.models] } : {}),
+        ...(input.weight !== undefined ? { weight: input.weight } : {}),
+        ...(input.priority !== undefined ? { priority: input.priority } : {}),
+        ...(input.setting !== undefined ? { setting: input.setting } : {}),
+        ...(input.status !== undefined ? { status: input.status } : {}),
+        updated_at: new Date().toISOString(),
+      })
+      if (input.credential !== undefined && input.credential !== '') {
+        channel.credential_hint = input.credential.slice(-4)
+        channel.credential_keys = ['k-placeholder']
+      }
+    },
+
+    async listModels() {
+      await delay()
+      requireSession()
+      return OPS_MODELS.map((model) => ({ ...model }))
+    },
+
+    async createModel(input: OpsModelCreateInput) {
+      await delay()
+      requireSession()
+      requireAdmin()
+      if (!input.canonical_name.trim()) {
+        throw new ApiError(400, 'invalid_request', 'canonical_name is required')
+      }
+      if (OPS_MODELS.some((model) => model.canonical_name === input.canonical_name)) {
+        throw new ApiError(409, 'conflict', 'model already exists')
+      }
+      const created: OpsModel = {
+        ...OPS_MODELS[1],
+        ...input,
+        id: opsID(),
+        canonical_name: input.canonical_name,
+        capabilities: { ...OPS_MODELS[1].capabilities, ...(input.capabilities ?? {}) },
+        updated_at: new Date().toISOString(),
+      } as OpsModel
+      OPS_MODELS.push(created)
+      return created.id
+    },
+
+    async updateModel(name, input: OpsModelInput) {
+      await delay()
+      requireSession()
+      requireAdmin()
+      const model = OPS_MODELS.find((item) => item.canonical_name === name)
+      if (!model) throw new ApiError(404, 'not_found', 'model not found')
+      const { capabilities, ...rest } = input
+      Object.assign(model, rest, {
+        ...(capabilities
+          ? { capabilities: { ...model.capabilities, ...capabilities } }
+          : {}),
+        updated_at: new Date().toISOString(),
+      })
+      if (input.knowledge_cutoff === '') model.knowledge_cutoff = null
+      if (input.release_date === '') model.release_date = null
+    },
+
+    async deleteModel(name) {
+      await delay()
+      requireSession()
+      requireAdmin()
+      const index = OPS_MODELS.findIndex((item) => item.canonical_name === name)
+      if (index < 0) throw new ApiError(404, 'not_found', 'model not found')
+      OPS_MODELS.splice(index, 1)
+    },
+
+    async listAliases(channelId) {
+      await delay()
+      requireSession()
+      return OPS_ALIASES.filter(
+        (alias) =>
+          (channelId === undefined || alias.channel_id === channelId) &&
+          (isAdmin || ownChannel(alias.channel_id).id === alias.channel_id),
+      ).map((alias) => ({ ...alias }))
+    },
+
+    async createAlias(input) {
+      await delay()
+      requireSession()
+      requireAdmin()
+      if (!input.channel_id) throw new ApiError(400, 'invalid_request', 'channel_id is required')
+      if (!input.upstream_model.trim() || !input.canonical_name.trim()) {
+        throw new ApiError(400, 'invalid_request', 'upstream_model and canonical_name are required')
+      }
+      const created: ChannelAlias = {
+        id: opsID(),
+        channel_id: input.channel_id,
+        upstream_model: input.upstream_model.trim(),
+        canonical_name: input.canonical_name.trim(),
+        overrides: input.overrides ?? {},
+        created_at: new Date().toISOString(),
+      }
+      OPS_ALIASES.push(created)
+      return created.id
+    },
+
+    async updateAlias(id, input: AliasUpdateInput) {
+      await delay()
+      requireSession()
+      requireAdmin()
+      const alias = OPS_ALIASES.find((item) => item.id === id)
+      if (!alias) throw new ApiError(404, 'not_found', 'alias not found')
+      if (input.upstream_model === '') {
+        throw new ApiError(400, 'invalid_request', 'upstream_model cannot be empty')
+      }
+      Object.assign(alias, input)
+    },
+
+    async deleteAlias(id) {
+      await delay()
+      requireSession()
+      requireAdmin()
+      const index = OPS_ALIASES.findIndex((item) => item.id === id)
+      if (index < 0) throw new ApiError(404, 'not_found', 'alias not found')
+      OPS_ALIASES.splice(index, 1)
+    },
+
+    async listRules() {
+      await delay()
+      requireSession()
+      return OPS_RULES.map((rule) => ({ ...rule }))
+    },
+
+    async createRule(input: RuleCreateInput) {
+      await delay()
+      requireSession()
+      requireAdmin()
+      if (!input.name.trim()) throw new ApiError(400, 'invalid_request', 'name is required')
+      if (!input.expr.trim()) throw new ApiError(400, 'invalid_request', 'expr is required')
+      if (input.model_patterns.length === 0) {
+        throw new ApiError(400, 'invalid_request', 'at least one model pattern is required')
+      }
+      const created: PricingRule = {
+        id: opsID(),
+        scope: input.scope,
+        owner_user_id: input.owner_user_id ?? 0,
+        channel_id: input.channel_id ?? 0,
+        name: input.name.trim(),
+        model_patterns: [...input.model_patterns],
+        expr: input.expr,
+        priority: input.priority ?? 0,
+        effective_from: input.effective_from ?? new Date().toISOString(),
+        effective_to: input.effective_to ?? null,
+        enabled: input.enabled ?? true,
+        created_by: user.id,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        declared_keys: [],
+      }
+      OPS_RULES.push(created)
+      return created.id
+    },
+
+    async updateRule(id, input: RuleUpdateInput) {
+      await delay()
+      requireSession()
+      requireAdmin()
+      const rule = OPS_RULES.find((item) => item.id === id)
+      if (!rule) throw new ApiError(404, 'not_found', 'pricing rule not found')
+      if (input.expr !== undefined && !input.expr.trim()) {
+        throw new ApiError(400, 'invalid_request', 'expr is required')
+      }
+      if (input.model_patterns !== undefined && input.model_patterns.length === 0) {
+        throw new ApiError(400, 'invalid_request', 'at least one model pattern is required')
+      }
+      const { clear_effective_to: clearTo, ...rest } = input
+      Object.assign(rule, rest, { updated_at: new Date().toISOString() })
+      if (clearTo) rule.effective_to = null
+    },
+
+    async listCosts() {
+      await delay()
+      requireSession()
+      return OPS_COSTS.map((cost) => ({ ...cost }))
+    },
+
+    async createCost(input: CostCreateInput) {
+      await delay()
+      requireSession()
+      requireAdmin()
+      if (!input.channel_id) throw new ApiError(400, 'invalid_request', 'channel_id is required')
+      if (!input.expr.trim()) throw new ApiError(400, 'invalid_request', 'expr is required')
+      if (input.model_patterns.length === 0) {
+        throw new ApiError(400, 'invalid_request', 'at least one model pattern is required')
+      }
+      const created: PricingCost = {
+        id: opsID(),
+        channel_id: input.channel_id,
+        model_patterns: [...input.model_patterns],
+        expr: input.expr,
+        priority: input.priority ?? 0,
+        effective_from: input.effective_from ?? new Date().toISOString(),
+        effective_to: input.effective_to ?? null,
+        created_at: new Date().toISOString(),
+        declared_keys: [],
+      }
+      OPS_COSTS.push(created)
+      return created.id
+    },
+
+    async updateCost(id, input: CostUpdateInput) {
+      await delay()
+      requireSession()
+      requireAdmin()
+      const cost = OPS_COSTS.find((item) => item.id === id)
+      if (!cost) throw new ApiError(404, 'not_found', 'cost rule not found')
+      if (input.expr !== undefined && !input.expr.trim()) {
+        throw new ApiError(400, 'invalid_request', 'expr is required')
+      }
+      const { clear_effective_to: clearTo, ...rest } = input
+      Object.assign(cost, rest)
+      if (clearTo) cost.effective_to = null
+    },
+  }
+}
+
+/** 只取渠道那一半：merchant 前缀下没有模型、别名与计价路由。 */
+function channelsOf(client: OpsClient): ChannelOpsClient {
+  const { listChannels, getChannel, createChannel, updateChannel } = client
+  return { listChannels, getChannel, createChannel, updateChannel }
+}
+
 export class MockApiClient implements ApiClient {
   readonly mode = 'mock' as const
+  readonly admin: OpsClient = mockOpsClient('admin')
+  readonly merchant: ChannelOpsClient = channelsOf(mockOpsClient('merchant'))
 
   setCsrfToken(): void {
     // mock 不做 CSRF 校验；保留方法是为了与 HTTP 实现同形。
