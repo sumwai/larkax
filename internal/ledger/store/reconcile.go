@@ -1148,7 +1148,8 @@ func (s *Store) reconcileMalformed(ctx context.Context, report *Report, alert Al
 // 报出来又被修掉的不一致，处置完全不同。
 func (s *Store) reconcileStaleReservations(ctx context.Context, report *Report, alert Alert) error {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT user_id, reserved_asset, reserved_amount::text, request_id, started_at
+		SELECT user_id, reserved_asset,
+		       (reserved_amount + plan_reserved_amount)::text, request_id, started_at
 		  FROM billing_requests
 		 WHERE status = 'pending'
 		   AND started_at < now() - make_interval(secs => $1)
@@ -1177,15 +1178,16 @@ func (s *Store) reconcileStaleReservations(ctx context.Context, report *Report, 
 		f := Finding{
 			RunID: report.RunID, UserID: userID, Asset: asset,
 			Kind: FindingStaleReservation,
-			// Ledger 装的是这条预留冻住的金额——这一类的两个数字列不成对，
-			// 见 Finding 的字段注释。Snapshot 留零。
+			// Ledger 装的是这条预留占着的金额——钱包冻结额加额度包面值
+			// （额度包覆盖的请求一分钱都不冻钱包，只占住包的面值）。
+			// 这一类的两个数字列不成对，见 Finding 的字段注释。Snapshot 留零。
 			Ledger:       amt,
 			Unrepairable: "只报告不释放：自动释放与在途请求有竞态",
 			// 滞留时长按 report.StartedAt 算：它与判据里的 now() 同源
 			// （都是数据库时钟），而 started_at 是应用进程写进去的墙钟，
 			// 所以这个时长是个近似值。它以天计，偏差以秒计。
 			Detail: fmt.Sprintf(
-				"请求 %q 的预留自 %s 起一直是 pending，已滞留 %s；冻住 %s（冻结不进账本，只在预留表上）",
+				"请求 %q 的预留自 %s 起一直是 pending，已滞留 %s；占住 %s（余额那部分冻在钱包上，额度包那部分记在预留表上）",
 				requestID, startedAt.Format(time.RFC3339),
 				report.StartedAt.Sub(startedAt).Round(time.Second), amt),
 			// 标识用请求标识，一行一个：三条里放开一条之后，只有那一条

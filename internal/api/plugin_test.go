@@ -107,7 +107,7 @@ func (f *pluginReservations) Release(_ context.Context, req pipeline.Request, _ 
 // max_tokens 小于递进冻结的阈值段，初始那一笔就冻满了整笔），所以只记一笔
 // 调用：真被调到说明组装出来的东西与用例的前提不符，而那是个该当场看见的
 // 意外，不是可以静默吞掉的分支。
-func (f *pluginReservations) AddReservation(_ context.Context, _ pipeline.Request, _ money.Amount) error {
+func (f *pluginReservations) AddReservation(_ context.Context, _ pipeline.Request, _ money.Amount, _ int64) error {
 	f.added++
 	return nil
 }

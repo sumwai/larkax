@@ -3,8 +3,14 @@
 // # 口径（只有这一份）
 //
 // 「累计花费」= 这把 key 在 billing_requests 上**已结算**的那些行的
-// final_amount 之和，加上**还挂着 pending** 的那些行的 reserved_amount 之和。
-// 全部历史累计，**不按周期重置**。
+// final_amount 之和，加上**还挂着 pending** 的那些行的预留额之和。全部历史
+// 累计，**不按周期重置**。
+//
+// pending 行的预留额是 `reserved_amount + plan_reserved_amount`：前者是从钱包
+// 冻住的钱，后者是额度包覆盖的请求占着的面值。额度包覆盖时钱包一分没冻
+// （见 internal/ledger/store 的 plancharge.go），只读前者会把这一类请求在
+// 结算之前当成「没花钱」——额度上限被静默放行，而这不是额度包该带来的效果：
+// 包里的钱也是这个 key 花掉的。
 //
 // 四条都要单独说清楚，因为每一条都能被改错，而改错之后没有东西会报出来：
 //
@@ -100,7 +106,7 @@ type MultiQuerier interface {
 const spentSQL = `
 	SELECT COALESCE(SUM(CASE
 	             WHEN status = 'settled' THEN final_amount
-	             WHEN status = 'pending' THEN reserved_amount
+	             WHEN status = 'pending' THEN reserved_amount + plan_reserved_amount
 	             ELSE 0
 	         END), 0)::text
 	  FROM billing_requests
@@ -224,7 +230,7 @@ func CheckInTx(ctx context.Context, tx *sql.Tx, keyID int64, additional money.Am
 const spentManySQL = `
 	SELECT api_key_id, COALESCE(SUM(CASE
 	             WHEN status = 'settled' THEN final_amount
-	             WHEN status = 'pending' THEN reserved_amount
+	             WHEN status = 'pending' THEN reserved_amount + plan_reserved_amount
 	             ELSE 0
 	         END), 0)::text
 	  FROM billing_requests

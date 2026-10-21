@@ -1166,12 +1166,22 @@ fi
 #   32. 只改了子包：选中子包，不折到父包（父包那几百个变异体不该跟着跑）。
 #
 # 夹具用仓库里真实的目录树与真实的改动清单，但 gremlins 是桩件——这里要测的是
-# 「参数怎么拼」，不是变异本身。计数写死成 20 / 16 / 2 是有意的：那三个数就是
-# 当前目录树的形状，文件增删时要回来改，改的时候能看见「口径覆盖了哪些文件」。
+# 「参数怎么拼」，不是变异本身。文件总数**现算**（与 check-mutation.sh 同一条
+# find），不写死：这几个数就是目录树的形状，写死了每加一个生产文件都要回来改
+# 一遍测试，而这里要钉的是「摘要里的数等于目录里的数」，不是某一天的数字。
 # 第 34 条是例外：它自带一个临时 git 仓库（见那一条），因为 `--changed-from`
 # 要从仓库历史现算改动，不能依赖调用自测的这棵树有没有 `.git`。
 
 narrow_seq=0
+
+# count_prod_files <包目录>：数这个包（递归）里参与变异的生产文件。
+#
+# 与 check-mutation.sh 的 find 逐字一致。自测与被测脚本各算各的：两个数对不上，
+# 说明摘要里的口径与目录里的文件不一致——那正是这条门禁要钉的关系，而不是某一天
+# 的具体数字。
+count_prod_files() {
+  find "$1" -type f -name '*.go' ! -name '*_test.go' | wc -l | tr -d ' '
+}
 
 # run_narrow <改动清单文件> [参数...]：跑一轮收窄，参数落在 LAST_ARGS。
 run_narrow() {
@@ -1188,16 +1198,18 @@ run_narrow() {
 # 28. `-E` 的拼装形态。
 #
 #     改动清单：internal/ledger/account.go 与 internal/ledger/store/posting.go。
-#     选中 internal/ledger（递归含 store），两个文件参与，其余 18 个排除。
+#     选中 internal/ledger（递归含 store），两个文件参与，其余全部排除。
 #     要看的是：锚定与转义（`^balance\.go$`）、子目录用包相对路径
-#     （`^store/payout\.go$`）、一个文件一条（18 条，不是逗号拼一条），
+#     （`^store/payout\.go$`）、一个文件一条（不是逗号拼一条），
 #     以及被改到的两个文件**不**出现在排除里。基础开关（`--invert-logical`）
 #     也不能被收窄挤掉。
+ledger_files=$(count_prod_files internal/ledger)
+ledger_excluded=$((ledger_files - 2))
 printf '%s\n' internal/ledger/account.go internal/ledger/store/posting.go >"$tmp/changed-excl.txt"
 run_narrow "$tmp/changed-excl.txt" internal/ledger
 if [ "$LAST_RC" -eq 0 ]; then ok; else bad "收窄 -E —— 应通过，实际退出码 $LAST_RC"; dump; fi
-grep -q '参与 2 / 共 20 个生产文件，排除 18 个未改动的' "$last_out" \
-  || bad "收窄 -E —— 摘要要说清参与 2 / 共 20，排除 18"
+grep -q "参与 2 / 共 $ledger_files 个生产文件，排除 $ledger_excluded 个未改动的" "$last_out" \
+  || bad "收窄 -E —— 摘要要说清参与 2 / 共 $ledger_files，排除 $ledger_excluded"
 grep -q '与整包基线不可比' "$last_out" \
   || bad "收窄 -E —— 摘要要说清分数与整包基线不可比"
 if printf '%s\n' "$LAST_ARGS" | grep -qF -- '--exclude-files=^balance\.go$'; then
@@ -1221,14 +1233,14 @@ else
   ok
 fi
 excl_count=$(printf '%s\n' "$LAST_ARGS" | grep -o -- '--exclude-files=' | wc -l)
-if [ "$excl_count" -eq 18 ]; then ok; else
-  bad "收窄 -E —— 要一个文件一条 -E（预期 18 条，实际 $excl_count 条）"
+if [ "$excl_count" -eq "$ledger_excluded" ]; then ok; else
+  bad "收窄 -E —— 要一个文件一条 -E（预期 $ledger_excluded 条，实际 $excl_count 条）"
 fi
 if printf '%s\n' "$LAST_ARGS" | grep -q -- '--invert-logical'; then ok; else
   bad "收窄 -E —— 收窄不该挤掉基础开关（--invert-logical）"
 fi
-if grep -qx 'LARKAX_MUTATION_SCOPE=narrow excluded=18' "$last_out"; then ok; else
-  bad "收窄 -E —— 口径标记应为 LARKAX_MUTATION_SCOPE=narrow excluded=18"
+if grep -qx "LARKAX_MUTATION_SCOPE=narrow excluded=$ledger_excluded" "$last_out"; then ok; else
+  bad "收窄 -E —— 口径标记应为 LARKAX_MUTATION_SCOPE=narrow excluded=$ledger_excluded"
 fi
 
 # 29. 只有测试文件变了：跑整包，不传任何 `-E`。
@@ -1259,8 +1271,10 @@ printf 'package money\n' >"$probe_file"
 printf '%s\n' "$probe_file" >"$tmp/changed-new.txt"
 run_narrow "$tmp/changed-new.txt" internal/money
 if [ "$LAST_RC" -eq 0 ]; then ok; else bad "新文件不被排除 —— 应通过，实际退出码 $LAST_RC"; dump; fi
-grep -q '参与 1 / 共 2 个生产文件，排除 1 个未改动的' "$last_out" \
-  || bad "新文件不被排除 —— 摘要应把新文件算作参与（参与 1 / 共 2）"
+money_files=$(count_prod_files internal/money)
+money_excluded=$((money_files - 1))
+grep -q "参与 1 / 共 $money_files 个生产文件，排除 $money_excluded 个未改动的" "$last_out" \
+  || bad "新文件不被排除 —— 摘要应把新文件算作参与（参与 1 / 共 $money_files）"
 if printf '%s\n' "$LAST_ARGS" | grep -qF -- '--exclude-files=^money\.go$'; then
   ok
 else
@@ -1277,14 +1291,14 @@ fi
 #
 #     显式传父子两条参数仍要拒绝（第 1d 条），那是写参数的人犯的错；这里是从
 #     改动清单推出来的，两边都跑会把子包的变异体跑两遍。外层递归就含子包，
-#     所以只留 internal/ledger，`-E` 按整棵子树算（20 个文件里参与 2 个）。
+#     所以只留 internal/ledger，`-E` 按整棵子树算（参与 2 个）。
 printf '%s\n' internal/ledger/account.go internal/ledger/store/read.go >"$tmp/changed-parentchild.txt"
 run_narrow "$tmp/changed-parentchild.txt"
 if [ "$LAST_RC" -eq 0 ]; then ok; else bad "父子去重 —— 应通过（去重，不报错），实际退出码 $LAST_RC"; dump; fi
 grep -q '改动同时落在父子包' "$last_out" \
   || bad "父子去重 —— 要说清发生了什么"
-grep -q '参与 2 / 共 20 个生产文件，排除 18 个未改动的' "$last_out" \
-  || bad "父子去重 —— 外层应按整棵子树算（参与 2 / 共 20）"
+grep -q "参与 2 / 共 $ledger_files 个生产文件，排除 $ledger_excluded 个未改动的" "$last_out" \
+  || bad "父子去重 —— 外层应按整棵子树算（参与 2 / 共 $ledger_files）"
 if grep -qE '^internal/ledger +[0-9]' "$last_out"; then ok; else
   bad "父子去重 —— 外层包要跑（表里应有 internal/ledger 那一行）"
 fi
@@ -1302,13 +1316,15 @@ fi
 # 32. 只改了子包：选中子包，不折到父包。
 #
 #     包路径递归，但选包取的是**最近的**祖先：store 自己就在清单里，所以只跑
-#     store 那一条（16 个生产文件），父包那 4 个文件与 store 的其余 15 个都被
-#     排除。折到父包会让 20 个文件全跑，正是这条要防的。
+#     store 那一条，父包的文件与 store 的其余文件都被排除。折到父包会让整棵
+#     子树全跑，正是这条要防的。
+store_files=$(count_prod_files internal/ledger/store)
+store_excluded=$((store_files - 1))
 printf '%s\n' internal/ledger/store/read.go >"$tmp/changed-child.txt"
 run_narrow "$tmp/changed-child.txt"
 if [ "$LAST_RC" -eq 0 ]; then ok; else bad "只改子包 —— 应通过，实际退出码 $LAST_RC"; dump; fi
-grep -q '参与 1 / 共 16 个生产文件，排除 15 个未改动的' "$last_out" \
-  || bad "只改子包 —— 应按子包算（参与 1 / 共 16），不能折到父包"
+grep -q "参与 1 / 共 $store_files 个生产文件，排除 $store_excluded 个未改动的" "$last_out" \
+  || bad "只改子包 —— 应按子包算（参与 1 / 共 $store_files），不能折到父包"
 if grep -qE '^internal/ledger/store +[0-9]' "$last_out"; then ok; else
   bad "只改子包 —— 表里应有 internal/ledger/store 那一行"
 fi

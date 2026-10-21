@@ -143,11 +143,15 @@ type ReservationStore interface {
 	// 增量必须为正：非正的数在那里是一个真值错误的信号，静默当成 0 会让
 	// 「补冻了但没冻上」看起来像成功。
 	//
+	// outputTokens 是这一段补冻覆盖的输出 token 增量。只有 token 计量的额度包
+	// 用它：那类包按 token 数计可用量，补冻要把「又产出了多少」一并占上；
+	// 其余来源由实现按自己的口径处理（钱包与金额包不看它）。
+	//
 	// 余额够不着时返回的错误必须满足 errors.Is(err, pipeline.ErrInsufficientAvailable)
 	// ——调用方据此切断那条流。其余错误（写库失败、钱包行不在）按「我们这边的
 	// 故障」处置：放行，把这次请求标成未充分冻结。两类错误混成一个的话，一次
 	// 入库超时会被当成「用户没钱」而切断一条本该跑完的流。
-	AddReservation(ctx context.Context, req pipeline.Request, delta money.Amount) error
+	AddReservation(ctx context.Context, req pipeline.Request, delta money.Amount, outputTokens int64) error
 	// Release 释放一次预留。用于**不计费的结局**：上游失败、客户端中途断开。
 	//
 	// failure 是这次不计费的依据，由落库层写进账单的两列（上游状态码与
