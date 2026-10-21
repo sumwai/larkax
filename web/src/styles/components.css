@@ -1750,6 +1750,35 @@ textarea.input {
   display: flex;
   flex-direction: column;
 }
+/*
+ * 「跳到主内容」：默认视觉隐藏，但仍在可聚焦序列里——所以不能用
+ * `display: none` 或 `visibility: hidden`，那两种聚焦不了。收成 1px 再裁掉，
+ * 聚焦时回到左上角，盖在顶栏之上（顶栏是 z-index 30）。
+ */
+.skip-link {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 50;
+  max-width: 1px;
+  max-height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 550;
+  text-decoration: none;
+}
+.skip-link:focus {
+  max-width: none;
+  max-height: none;
+  overflow: visible;
+  clip-path: none;
+}
 .app-content {
   flex: 1;
   width: 100%;
@@ -1759,6 +1788,10 @@ textarea.input {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+/* 跳转的落点是被程序聚焦的容器，不是可交互控件，不该在正文周围画一圈焦点框。 */
+.app-content:focus {
+  outline: none;
 }
 .app-topbar {
   display: flex;

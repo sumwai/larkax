@@ -35,6 +35,7 @@ export const zh = {
   'nav.expand': '展开侧边栏',
   'nav.noAccess': '无权限',
   'nav.logout': '退出登录',
+  'nav.skipToMain': '跳到主内容',
 
   'status.active': '运行中',
   'status.disabled': '已停用',

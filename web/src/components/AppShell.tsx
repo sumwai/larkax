@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ComponentType } from 'react'
+import { useEffect, useRef, useState, type ComponentType, type MouseEvent as ReactMouseEvent } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthProvider'
 import { useI18n } from '../i18n'
@@ -74,6 +74,7 @@ export function AppShell() {
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const mainRef = useRef<HTMLElement | null>(null)
   const collapsed = narrow || manualCollapsed
 
   const views = viewsFor(user?.role)
@@ -131,6 +132,14 @@ export function AppShell() {
     navigate('/login', { replace: true })
   }
 
+  // 「跳到主内容」自己把焦点交给主列。只把视口滚过去的话，读屏与键盘用户
+  // 下一步 Tab 会从页面顶部重新开始；原生片段跳转在目标可聚焦时也会移焦，
+  // 但显式调用更确定，也不改动地址栏。
+  const skipToMain = (event: ReactMouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault()
+    mainRef.current?.focus()
+  }
+
   const displayName = user?.display_name || user?.username || ''
 
   const switcher = views.length > 1 && (
@@ -165,6 +174,9 @@ export function AppShell() {
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content" onClick={skipToMain}>
+        {t('nav.skipToMain')}
+      </a>
       <aside className={collapsed ? 'sidebar collapsed' : 'sidebar'} hidden={mobile}>
         <div className="side-head">
           <button
@@ -276,7 +288,7 @@ export function AppShell() {
           </div>
         </header>
 
-        <main className="app-content">
+        <main id="main-content" ref={mainRef} tabIndex={-1} className="app-content">
           <Outlet />
         </main>
 
