@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -85,10 +84,33 @@ func TestModelDetailListsSuppliersByPrice(t *testing.T) {
 		t.Errorf("currency/reference_at = %q/%q，期望 CNY 与一个时刻", body.Currency, body.ReferenceAt)
 	}
 
-	// 渠道 id、上游地址、凭证与上游模型名不能出现在公开响应里。
-	for _, leak := range []string{"channel_id", "base_url", "credential", "upstream_model", "platform-alpha"} {
-		if strings.Contains(rec.Body.String(), leak) {
-			t.Errorf("响应里出现了 %q：%s", leak, rec.Body)
+	// 公开响应里每条 supplier 的键集合必须正好是这四项。断言形状而不是
+	// grep 某个旧字符串：未来任何人加一个指向上游的字段，这条都会红。
+	var rawBody struct {
+		Model struct {
+			Suppliers []map[string]json.RawMessage `json:"suppliers"`
+		} `json:"model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rawBody); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	wantKeys := map[string]bool{
+		"merchant": true, "price": true, "prices": true, "channel_count": true,
+	}
+	for i, supplier := range rawBody.Model.Suppliers {
+		if len(supplier) != len(wantKeys) {
+			t.Errorf("第 %d 条 supplier 有 %d 个字段，期望正好 %d 个：%v",
+				i, len(supplier), len(wantKeys), supplier)
+		}
+		for key := range wantKeys {
+			if _, ok := supplier[key]; !ok {
+				t.Errorf("第 %d 条 supplier 缺字段 %q：%v", i, key, supplier)
+			}
+		}
+		for key := range supplier {
+			if !wantKeys[key] {
+				t.Errorf("第 %d 条 supplier 多出字段 %q：%v", i, key, supplier)
+			}
 		}
 	}
 }
