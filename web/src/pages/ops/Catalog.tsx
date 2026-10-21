@@ -14,7 +14,16 @@ import {
   useToast,
 } from '../../components/ui'
 import { IconPlus, IconTrash } from '../../components/icons'
-import { Field, InputError, OpsLoadError, linesToList, listToLines, useConfirm } from './common'
+import {
+  Field,
+  InputError,
+  OpsLoadError,
+  SearchBox,
+  linesToList,
+  listToLines,
+  useConfirm,
+} from './common'
+import { isDirty, useCloseGuard } from './guard'
 
 const CAPABILITY_KEYS = ['reasoning', 'tools', 'vision', 'audio', 'cache', 'batch'] as const
 type CapabilityKey = (typeof CAPABILITY_KEYS)[number]
@@ -95,16 +104,22 @@ export function OpsModels() {
   const [editing, setEditing] = useState<OpsModel | null>(null)
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState<ModelForm>(EMPTY_FORM)
+  // 打开时的那份值：改动过的话，关窗前要再问一句。
+  const [initialForm, setInitialForm] = useState<ModelForm>(EMPTY_FORM)
   const [formError, setFormError] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
 
   const openCreate = () => {
     setForm(EMPTY_FORM)
+    setInitialForm(EMPTY_FORM)
     setFormError(null)
     setCreating(true)
   }
 
   const openEdit = (model: OpsModel) => {
-    setForm(formOf(model))
+    const next = formOf(model)
+    setForm(next)
+    setInitialForm(next)
     setFormError(null)
     setEditing(model)
   }
@@ -114,6 +129,8 @@ export function OpsModels() {
     setEditing(null)
     setFormError(null)
   }
+
+  const requestClose = useCloseGuard(confirm, isDirty(form, initialForm), closeForm)
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
@@ -196,7 +213,15 @@ export function OpsModels() {
     })
   }
 
-  const models = data ?? []
+  const all = data ?? []
+  const needle = query.trim().toLowerCase()
+  const models = needle
+    ? all.filter((model) =>
+        [model.canonical_name, model.display_name, model.vendor].some((value) =>
+          value.toLowerCase().includes(needle),
+        ),
+      )
+    : all
 
   return (
     <>
@@ -220,7 +245,7 @@ export function OpsModels() {
         </div>
       )}
 
-      {data && models.length === 0 && (
+      {data && all.length === 0 && (
         <div className="card">
           <Empty
             title={t('ops.model.emptyTitle')}
@@ -231,6 +256,14 @@ export function OpsModels() {
               </Button>
             }
           />
+        </div>
+      )}
+
+      {all.length > 0 && <SearchBox value={query} onChange={setQuery} />}
+
+      {all.length > 0 && models.length === 0 && (
+        <div className="card">
+          <Empty title={t('ops.searchEmpty')} />
         </div>
       )}
 
@@ -273,10 +306,10 @@ export function OpsModels() {
       {(creating || editing) && (
         <Modal
           title={editing ? t('ops.model.editTitle') : t('ops.model.createTitle')}
-          onClose={closeForm}
+          onClose={requestClose}
           footer={
             <>
-              <Button variant="secondary" onClick={closeForm}>
+              <Button variant="secondary" onClick={requestClose}>
                 {t('common.cancel')}
               </Button>
               <Button type="submit" form="model-form">

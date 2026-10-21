@@ -64,6 +64,27 @@ export const IconModels = (props: IconProps) => (
   </Icon>
 )
 
+export const IconChannel = (props: IconProps) => (
+  <Icon {...props}>
+    <rect x="3" y="4" width="18" height="6" rx="2" />
+    <rect x="3" y="14" width="18" height="6" rx="2" />
+    <path d="M7 7h.01M7 17h.01" />
+  </Icon>
+)
+
+export const IconAlias = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M4 8h13l-3.5-3.5M20 16H7l3.5 3.5" />
+  </Icon>
+)
+
+export const IconPricing = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M20.6 13.4 12 22l-9-9V4h9l8.6 8.6a2 2 0 0 1 0 2.8Z" />
+    <circle cx="7.5" cy="7.5" r="1.2" />
+  </Icon>
+)
+
 export const IconQuickstart = (props: IconProps) => (
   <Icon {...props}>
     <path d="m5 12 4 4L19 6" />
