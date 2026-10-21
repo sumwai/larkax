@@ -613,6 +613,69 @@ the account balance ran out while this response was streaming, so it was cut sho
   声明被拒、`store` 被丢弃），同样是刻意的，见 [contract/README.md](../contract/README.md)
   的「Responses 入口上的四条」。
 
+## 控制台商家接口：概览与上游
+
+这两个只读端点挂在控制台的 `/api/v1/merchant/` 下，要求控制台会话（HttpOnly
+Cookie）与 `merchant` 角色；`admin` 也能进，且**不限定归属**（看全部渠道）。
+未登录 `401`，非商家 `403`。成功的响应都是 `application/json`。
+
+### 概览
+
+`GET /api/v1/merchant/overview`
+
+```json
+{
+  "channels": 12,
+  "models_in_supply": 34,
+  "today": {"requests": 1280, "cost": "12.34000000"},
+  "unhealthy_channels": [
+    {"id": 7, "name": "…", "reasons": ["failure_rate", "no_requests_24h"]}
+  ]
+}
+```
+
+- `channels`：名下未软删的渠道数（含停用的）。
+- `models_in_supply`：名下启用渠道在供的规范模型数。判据与模型清单「在供」那一
+  条是同一份（`enabled` + 渠道的 `models` 含该规范名 + 未软删 + 目录里有这一行）。
+- `today`：**站点当地的今天**（`meta` 的 `timezone`），不是最近 24 小时——跨零点
+  时两者给的不是同一批行。`requests` 是去重到 request 的次数；`cost` 是**售价**
+  （调用方被计的那笔钱），不是上游成本，也不是按商家分成后的所得。两个数都
+  只含带渠道的用量事件（`channel_id` 非空）；没有渠道的事件不计入这一页的合计。
+- `unhealthy_channels`：最近 24 小时窗口内的异常渠道，**没有就是 `[]`，不是
+  `null`**。每条带 `reasons`，枚举如下（多条同时成立时全部列出）：
+  - `failure_rate`：窗口内失败率 ≥ 20%，且请求数 ≥ 20（样本太少不判）；
+  - `quota_state`：额度状态是 `degraded` 或 `drained`；
+  - `probe_failed`：最近一次额度探测的结论是 `error`；
+  - `consecutive_failures`：当前连续失败数大于 0；
+  - `no_requests_24h`：24 小时内一次请求都没有（新渠道也落这一条）。
+
+### 上游
+
+`GET /api/v1/merchant/upstreams?limit=`
+
+```json
+{
+  "items": [
+    {"type": "openai", "base_url": "https://api.example.com/v1",
+     "health": "degraded", "requests": 120, "failures": 6, "failure_rate": 0.05,
+     "channels": [{"id": 3, "name": "primary", "status": "enabled", "health": "healthy"},
+                  {"id": 9, "name": "backup", "status": "enabled", "health": "degraded"}]}
+  ],
+  "total": 1,
+  "truncated": false
+}
+```
+
+- 按 `(type, base_url)` 分组：同一个地址上的多条渠道是**多个账号**（各自一份
+  凭证），归成一条上游、组内列渠道。组内按渠道 id 升序，组间按 `(type,
+  base_url)` 升序。
+- `health` 取组内最差一档（`healthy` < `unknown` < `degraded` < `drained`）；
+  `requests` / `failures` / `failure_rate` 是组内合计，窗口同概览的 24 小时。
+- `limit` 默认 50、上限 200，超出回 `400`。超过上限时返回前 `limit` 条，并置
+  `truncated: true`、`total` 给总条数——页面据此显示「还有多少条」。
+- **响应里没有任何凭证**：只有类型、地址、渠道 id 与名字；凭证提示与信封信息
+  都不在这一组里。
+
 ## 改它的时候
 
 | 要改什么 | 改哪 |
@@ -623,6 +686,7 @@ the account balance ran out while this response was streaming, so it was cut sho
 | 状态码与错误码的映射 | `internal/api/error.go` 的 `errorKind` 与 `internal/api/api.go` 的 `httpStatusOfUpstream` |
 | 错误体的形状 | `internal/api/error.go`（每套协议一份独立结构体） |
 | 请求体上限 | `internal/api` 的 `maxRequestBodyBytes` |
+| 控制台商家概览与上游的读数口径（异常理由、分组、窗口） | `internal/adminapi/merchant_ops.go`、`internal/channels/health.go` |
 | 流式的帧序列 | `internal/api/stream.go`（每套协议一个渲染器） |
 | 流中途的错误帧 | `internal/api/stream.go` 的 `streamErrorFrame` 与 `responsesStream.errorFrame` |
 | 响应头 | `internal/api` 的 `HeaderVersion` / `HeaderRetryAfter`、`internal/observe` 的 `HeaderRequestID` |
