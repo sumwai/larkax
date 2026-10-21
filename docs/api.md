@@ -86,6 +86,79 @@
 能不能解开——那要逐渠道解密，代价与这条只读接口不匹配，核查由
 `larkaxctl doctor` 那条链路负责。
 
+### 控制台单模型页
+
+`GET /api/v1/models/{name}` 是控制台模型页（`/app/models/[model-id]`）的数据
+来源。它**公开只读、不要求会话**，与模型清单同一个理由：模型与价格本来就
+是公开信息。
+
+可见性判据与模型清单完全相同：规范名在目录里，并且至少有一条启用、未删除的
+渠道声明支持它。**不在供与目录里没有回同一个 `404`**，正文逐字相同——否则
+调用方能靠状态码探出某个名字在不在目录里。
+
+```json
+{
+  "currency": "CNY",
+  "reference_at": "2026-10-21T09:00:00Z",
+  "model": {
+    "name": "claude-x",
+    "display_name": "Claude X",
+    "vendor": "Anthropic",
+    "family": "claude",
+    "context_limit": 200000,
+    "input_limit": 200000,
+    "output_limit": 64000,
+    "capabilities": {
+      "reasoning": true,
+      "tools": false,
+      "vision": null,
+      "audio": null,
+      "cache": true,
+      "batch": null,
+      "endpoints": ["chat"]
+    },
+    "modalities_input": ["text", "image"],
+    "modalities_output": ["text"],
+    "reasoning_options": [{"type": "toggle"}],
+    "canonical_model_id": "claude-x-2026",
+    "knowledge_cutoff": "2025-03-01",
+    "release_date": null,
+    "updated_at": "2026-10-21T08:30:00Z",
+    "suppliers": [
+      {"merchant": "acme", "upstream_model": "acme/claude-x", "price": "0.00200000"},
+      {"merchant": null, "upstream_model": "claude-x", "price": "0.00300000"}
+    ]
+  }
+}
+```
+
+模型字段：
+
+- `display_name` 为空时取规范名，与模型清单一致。
+- `context_limit` / `input_limit` / `output_limit` 为 `0` 表示目录里**没填**，
+  不是「上限是 0」。
+- `capabilities` 六项与 `endpoints` 都是三态，原样透传目录里的值：
+  `null` 表示没采集过，`false` 表示明确不支持，两者不能合并。
+  `endpoints` 的 `[]` 表示**明确声明一条都不支持**，与 `null`（未知）不同。
+- `knowledge_cutoff` / `release_date` 是 `YYYY-MM-DD` 或 `null`；
+  `updated_at` 是 RFC3339 UTC。
+- 不返回采集来的 `raw`：那是运维排查用的原始元信息。
+
+`suppliers` 是供应这个模型的渠道与报价：
+
+- 每个能算出价的在供渠道一条，按 `price` 升序；同价时平台自营在前。
+- `merchant` 是渠道所属商家的用户名，`null` 表示平台自营渠道。
+- `upstream_model` 是走这条渠道时发给上游的模型名，按路由同一套别名解析：
+  渠道级别名 > 平台级别名 > 规范名本身。
+- `price` 是**每 1000 个输入 token** 的金额，字符串（定点数，不经过浮点）。
+  它由 `internal/pricing` 按这条渠道实际适用的规则求出，与结算同源；固定费
+  与最低消费不进报价——它们属于一次请求，不属于每千 token 的单价。
+- 只列能算出价的渠道：一条适用规则都没有的渠道给不出这个数，编一个 0 会
+  变成「免费」。整个模型一条报价都没有时仍然返回 `200`，`suppliers` 字段
+  省略（不是空数组）。
+- 不返回渠道 id、`base_url`、凭证与任何上游地址。
+- `reference_at` 是这次求价的时刻；报价随规则分时变化，以结算金额为准。
+
 ### 支付回调
 
 | 路径 | 谁调 | 认证 | 流式 |

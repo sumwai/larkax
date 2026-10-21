@@ -328,11 +328,31 @@ func (f *fakeModels) SuppliedModels(_ context.Context) ([]string, error) {
 }
 
 type fakeCatalog struct {
-	models []catalog.Model
+	models  []catalog.Model
+	aliases []catalog.Alias
 }
 
 func (f *fakeCatalog) Models(_ context.Context) ([]catalog.Model, error) {
 	return f.models, nil
+}
+
+func (f *fakeCatalog) Model(_ context.Context, canonicalName string) (catalog.Model, error) {
+	for _, model := range f.models {
+		if model.CanonicalName == canonicalName {
+			return model, nil
+		}
+	}
+	return catalog.Model{}, catalog.ErrModelNotFound
+}
+
+func (f *fakeCatalog) UpstreamModels(_ context.Context, canonicalName string) ([]catalog.Alias, error) {
+	out := []catalog.Alias{}
+	for _, alias := range f.aliases {
+		if alias.CanonicalName == canonicalName {
+			out = append(out, alias)
+		}
+	}
+	return out, nil
 }
 
 type fakePrices struct {
@@ -354,11 +374,16 @@ func (f *fakeSupplies) Supplies(_ context.Context) ([]channels.Supply, error) {
 type fakeOffers struct {
 	base    money.Amount
 	byOwner map[int64]money.Amount
+	// skipChannels 里的渠道不报价（模拟「这条渠道没有适用规则」）。
+	skipChannels map[int64]bool
 }
 
 func (f *fakeOffers) Prices(_ context.Context, _ time.Time, candidates []pricing.Candidate) ([]pricing.CandidatePrice, error) {
 	out := []pricing.CandidatePrice{}
 	for _, candidate := range candidates {
+		if f.skipChannels[candidate.ChannelID] {
+			continue
+		}
 		price := f.base
 		if override, ok := f.byOwner[candidate.OwnerUserID]; ok {
 			price = override
