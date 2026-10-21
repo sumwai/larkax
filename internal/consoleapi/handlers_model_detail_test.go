@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -40,8 +39,8 @@ func TestModelDetailNotFoundUnlessSupplied(t *testing.T) {
 	}
 }
 
-// 供应商按价格升序；上游名按「渠道级 > 平台级 > 规范名」解析；
-// 平台自营的 merchant 是 null。
+// 供应商按价格升序；平台自营的 merchant 是 null；每条带整套维度价与
+// 渠道条数。响应里不得出现上游模型名——那会把调用方引去绕过网关。
 func TestModelDetailListsSuppliersByPrice(t *testing.T) {
 	f := newFixture(t)
 	f.catalog.models = []catalog.Model{{CanonicalName: "alpha"}}
@@ -49,10 +48,6 @@ func TestModelDetailListsSuppliersByPrice(t *testing.T) {
 		{Model: "alpha", ChannelID: 3, OwnerUserID: 12, Merchant: "beta"},
 		{Model: "alpha", ChannelID: 1, OwnerUserID: 11, Merchant: "acme"},
 		{Model: "alpha", ChannelID: 2},
-	}
-	f.catalog.aliases = []catalog.Alias{
-		{ChannelID: 1, CanonicalName: "alpha", UpstreamModel: "acme/alpha"},
-		{ChannelID: 0, CanonicalName: "alpha", UpstreamModel: "platform-alpha"},
 	}
 	f.offers.base = mustAmount(t, "0.00300000")
 	f.offers.byOwner = map[int64]money.Amount{
@@ -64,37 +59,93 @@ func TestModelDetailListsSuppliersByPrice(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200（响应 %s）", rec.Code, rec.Body)
 	}
+	// 只依赖目录与规则的响应可以公共缓存一分钟：翻模型页不必重复打三条查询。
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=60" {
+		t.Errorf("Cache-Control = %q，期望 public, max-age=60", got)
+	}
 	var body modelDetailResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("响应不是 JSON: %v", err)
 	}
 	want := []supplierJSON{
-		{Merchant: ptrString("acme"), UpstreamModel: "acme/alpha", Price: "0.00200000"},
-		{UpstreamModel: "platform-alpha", Price: "0.00300000"},
-		// beta 没配渠道级别名，落到平台级那条——与路由的解析次序一致。
-		{Merchant: ptrString("beta"), UpstreamModel: "platform-alpha", Price: "0.00400000"},
+		{Merchant: ptrString("acme"), Price: "0.00200000",
+			Prices: map[string]string{"prompt": "0.00200000"}, ChannelCount: 1},
+		{Price: "0.00300000", Prices: map[string]string{"prompt": "0.00300000"}, ChannelCount: 1},
+		{Merchant: ptrString("beta"), Price: "0.00400000",
+			Prices: map[string]string{"prompt": "0.00400000"}, ChannelCount: 1},
 	}
 	if !reflect.DeepEqual(body.Model.Suppliers, want) {
 		t.Errorf("suppliers = %+v，期望 %+v", body.Model.Suppliers, want)
+	}
+	if body.Model.UnpricedChannels != 0 {
+		t.Errorf("unpriced_channels = %d，期望 0", body.Model.UnpricedChannels)
 	}
 	if body.Currency != "CNY" || body.ReferenceAt == "" {
 		t.Errorf("currency/reference_at = %q/%q，期望 CNY 与一个时刻", body.Currency, body.ReferenceAt)
 	}
 
-	// 渠道 id、上游地址与凭证不能出现在公开响应里。
-	for _, leak := range []string{"channel_id", "base_url", "credential"} {
-		if strings.Contains(rec.Body.String(), leak) {
-			t.Errorf("响应里出现了 %q：%s", leak, rec.Body)
+	// 公开响应里每条 supplier 的键集合必须正好是这四项。断言形状而不是
+	// grep 某个旧字符串：未来任何人加一个指向上游的字段，这条都会红。
+	var rawBody struct {
+		Model struct {
+			Suppliers []map[string]json.RawMessage `json:"suppliers"`
+		} `json:"model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rawBody); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	wantKeys := map[string]bool{
+		"merchant": true, "price": true, "prices": true, "channel_count": true,
+	}
+	for i, supplier := range rawBody.Model.Suppliers {
+		if len(supplier) != len(wantKeys) {
+			t.Errorf("第 %d 条 supplier 有 %d 个字段，期望正好 %d 个：%v",
+				i, len(supplier), len(wantKeys), supplier)
+		}
+		for key := range wantKeys {
+			if _, ok := supplier[key]; !ok {
+				t.Errorf("第 %d 条 supplier 缺字段 %q：%v", i, key, supplier)
+			}
+		}
+		for key := range supplier {
+			if !wantKeys[key] {
+				t.Errorf("第 %d 条 supplier 多出字段 %q：%v", i, key, supplier)
+			}
 		}
 	}
 }
 
-// 一条别名都没配时，上游名就是规范名本身（路由侧同一条回落）。
-func TestModelDetailFallsBackToCanonicalUpstream(t *testing.T) {
+// 同一商家、同一整套维度价的多条渠道折成一行，channel_count 记条数；
+// 同一商家、任一维度不同则是两行。
+func TestModelDetailAggregatesSuppliersByMerchantAndPrices(t *testing.T) {
 	f := newFixture(t)
 	f.catalog.models = []catalog.Model{{CanonicalName: "alpha"}}
-	f.supplies.supplies = []channels.Supply{{Model: "alpha", ChannelID: 1, OwnerUserID: 11, Merchant: "acme"}}
-	f.offers.base = mustAmount(t, "0.00300000")
+	f.supplies.supplies = []channels.Supply{
+		{Model: "alpha", ChannelID: 1, OwnerUserID: 11, Merchant: "acme"},
+		{Model: "alpha", ChannelID: 2, OwnerUserID: 11, Merchant: "acme"},
+		{Model: "alpha", ChannelID: 3, OwnerUserID: 11, Merchant: "acme"},
+	}
+	f.offers.byChannelPrices = map[int64]map[string]money.Amount{
+		1: {
+			"prompt":      mustAmount(t, "0.00300000"),
+			"completion":  mustAmount(t, "0.00900000"),
+			"cache_read":  mustAmount(t, "0.00060000"),
+			"cache_write": mustAmount(t, "0.00360000"),
+			"reasoning":   mustAmount(t, "0.01200000"),
+		},
+		2: {
+			"prompt":      mustAmount(t, "0.00300000"),
+			"completion":  mustAmount(t, "0.00900000"),
+			"cache_read":  mustAmount(t, "0.00060000"),
+			"cache_write": mustAmount(t, "0.00360000"),
+			"reasoning":   mustAmount(t, "0.01200000"),
+		},
+		// 输入价相同、缓存读价不同：是另一套报价。
+		3: {
+			"prompt":     mustAmount(t, "0.00300000"),
+			"cache_read": mustAmount(t, "0.00120000"),
+		},
+	}
 
 	rec := f.request(t, http.MethodGet, PathPrefix+"models/alpha", "")
 	if rec.Code != http.StatusOK {
@@ -104,9 +155,105 @@ func TestModelDetailFallsBackToCanonicalUpstream(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("响应不是 JSON: %v", err)
 	}
-	want := []supplierJSON{{Merchant: ptrString("acme"), UpstreamModel: "alpha", Price: "0.00300000"}}
+	acme := "acme"
+	want := []supplierJSON{
+		// prompt 同价、同商家时按整套价的签名排：只有 prompt + cache_read
+		// 的那套排在五项俱全的前面（签名逐字比较的结果，与价格无关）。
+		{Merchant: &acme, Price: "0.00300000", ChannelCount: 1, Prices: map[string]string{
+			"prompt": "0.00300000", "cache_read": "0.00120000"}},
+		{Merchant: &acme, Price: "0.00300000", ChannelCount: 2, Prices: map[string]string{
+			"prompt": "0.00300000", "completion": "0.00900000", "cache_read": "0.00060000",
+			"cache_write": "0.00360000", "reasoning": "0.01200000"}},
+	}
 	if !reflect.DeepEqual(body.Model.Suppliers, want) {
 		t.Errorf("suppliers = %+v，期望 %+v", body.Model.Suppliers, want)
+	}
+}
+
+// 平台自营与商家同价时平台排在最前（与清单的排序一致）。
+func TestModelDetailPlatformFirstOnTie(t *testing.T) {
+	f := newFixture(t)
+	f.catalog.models = []catalog.Model{{CanonicalName: "alpha"}}
+	f.supplies.supplies = []channels.Supply{
+		{Model: "alpha", ChannelID: 1, OwnerUserID: 11, Merchant: "acme"},
+		{Model: "alpha", ChannelID: 2},
+	}
+	f.offers.base = mustAmount(t, "0.00300000")
+
+	rec := f.request(t, http.MethodGet, PathPrefix+"models/alpha", "")
+	var body modelDetailResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if len(body.Model.Suppliers) != 2 || body.Model.Suppliers[0].Merchant != nil {
+		t.Errorf("suppliers = %+v，期望平台自营（merchant=null）排在第一", body.Model.Suppliers)
+	}
+}
+
+// 部分渠道没有价：suppliers 只列有价的，unpriced_channels 说出剩下的条数。
+func TestModelDetailCountsUnpricedChannels(t *testing.T) {
+	f := newFixture(t)
+	f.catalog.models = []catalog.Model{{CanonicalName: "alpha"}}
+	f.supplies.supplies = []channels.Supply{
+		{Model: "alpha", ChannelID: 1, OwnerUserID: 11, Merchant: "acme"},
+		{Model: "alpha", ChannelID: 2, OwnerUserID: 12, Merchant: "beta"},
+		{Model: "alpha", ChannelID: 3},
+	}
+	f.offers.base = mustAmount(t, "0.00300000")
+	f.offers.skipChannels = map[int64]bool{2: true, 3: true}
+
+	rec := f.request(t, http.MethodGet, PathPrefix+"models/alpha", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（响应 %s）", rec.Code, rec.Body)
+	}
+	var body modelDetailResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if len(body.Model.Suppliers) != 1 || body.Model.Suppliers[0].Merchant == nil ||
+		*body.Model.Suppliers[0].Merchant != "acme" {
+		t.Errorf("suppliers = %+v，期望只列有价的 acme", body.Model.Suppliers)
+	}
+	if body.Model.UnpricedChannels != 2 {
+		t.Errorf("unpriced_channels = %d，期望 2", body.Model.UnpricedChannels)
+	}
+}
+
+// 五个维度的价都要原样给出来，不是一个价的倍数。
+func TestModelDetailCarriesDimensionPrices(t *testing.T) {
+	f := newFixture(t)
+	f.catalog.models = []catalog.Model{{CanonicalName: "alpha"}}
+	f.supplies.supplies = []channels.Supply{{Model: "alpha", ChannelID: 1}}
+	f.offers.byChannelPrices = map[int64]map[string]money.Amount{
+		1: {
+			"prompt":      mustAmount(t, "0.00300000"),
+			"completion":  mustAmount(t, "0.00900000"),
+			"cache_read":  mustAmount(t, "0.00060000"),
+			"cache_write": mustAmount(t, "0.00360000"),
+			"reasoning":   mustAmount(t, "0.01200000"),
+		},
+	}
+
+	rec := f.request(t, http.MethodGet, PathPrefix+"models/alpha", "")
+	var body modelDetailResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if len(body.Model.Suppliers) != 1 {
+		t.Fatalf("suppliers = %+v，期望一条", body.Model.Suppliers)
+	}
+	want := map[string]string{
+		"prompt":      "0.00300000",
+		"completion":  "0.00900000",
+		"cache_read":  "0.00060000",
+		"cache_write": "0.00360000",
+		"reasoning":   "0.01200000",
+	}
+	if !reflect.DeepEqual(body.Model.Suppliers[0].Prices, want) {
+		t.Errorf("prices = %+v，期望 %+v", body.Model.Suppliers[0].Prices, want)
+	}
+	if body.Model.Suppliers[0].Price != "0.00300000" {
+		t.Errorf("price = %q，期望 prompt 维度的 0.00300000", body.Model.Suppliers[0].Price)
 	}
 }
 
@@ -268,6 +415,10 @@ func TestModelDetailWithoutQuotesStillOK(t *testing.T) {
 	}
 	if _, present := model["suppliers"]; present {
 		t.Errorf("suppliers 应当整个省略，得到 %s", model["suppliers"])
+	}
+	// 没有价不等于没有供给：这一条渠道仍然在供，只是算不出价。
+	if got := string(model["unpriced_channels"]); got != "1" {
+		t.Errorf("unpriced_channels = %s，期望 1", got)
 	}
 }
 

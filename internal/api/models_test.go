@@ -49,10 +49,14 @@ func suppliesOf(names ...string) []channels.Supply {
 type fakeOffers struct {
 	base    money.Amount
 	byOwner map[int64]money.Amount
-	skip    map[string]bool
-	err     error
-	calls   int
-	seen    []pricing.Candidate
+	// byOwnerPrices 按归属覆盖整套维度价（用 base 时不带维度时按 prompt 一项造）。
+	byOwnerPrices map[int64]map[string]money.Amount
+	// byChannelPrices 按渠道覆盖整套维度价，优先于 byOwnerPrices。
+	byChannelPrices map[int64]map[string]money.Amount
+	skip            map[string]bool
+	err             error
+	calls           int
+	seen            []pricing.Candidate
 }
 
 func (f *fakeOffers) Prices(_ context.Context, _ time.Time, candidates []pricing.Candidate) ([]pricing.CandidatePrice, error) {
@@ -70,15 +74,34 @@ func (f *fakeOffers) Prices(_ context.Context, _ time.Time, candidates []pricing
 		if override, ok := f.byOwner[candidate.OwnerUserID]; ok {
 			price = override
 		}
+		prices := map[string]money.Amount{"prompt": price}
+		if override, ok := f.byOwnerPrices[candidate.OwnerUserID]; ok {
+			prices = override
+			price = override["prompt"]
+		}
+		if override, ok := f.byChannelPrices[candidate.ChannelID]; ok {
+			prices = override
+			price = override["prompt"]
+		}
 		out = append(out, pricing.CandidatePrice{
 			Model:       candidate.Model,
 			ChannelID:   candidate.ChannelID,
 			OwnerUserID: candidate.OwnerUserID,
 			Merchant:    candidate.Merchant,
+			Prices:      prices,
 			Price:       price,
 		})
 	}
 	return out, nil
+}
+
+// offerOf 造一条只有 prompt 维度的报价，供不关心其他维度的用例用。
+func offerOf(merchant *string, prompt string) offerJSON {
+	return offerJSON{
+		Merchant: merchant,
+		Price:    prompt,
+		Prices:   map[string]string{"prompt": prompt},
+	}
 }
 
 // fakeModelCatalog 是目录那一侧的读点，只提供 vendor 与规范名。
@@ -145,7 +168,7 @@ func TestModelsListOnlyListsSuppliedModels(t *testing.T) {
 	if body.Object != "list" {
 		t.Errorf("object = %q，期望 list", body.Object)
 	}
-	platformOffer := []offerJSON{{Price: "0.00350000"}}
+	platformOffer := []offerJSON{offerOf(nil, "0.00350000")}
 	want := []modelJSON{
 		{ID: "alpha", Object: "model", Created: 0, OwnedBy: "acme", Offers: platformOffer},
 		// 目录里 vendor 是空串：回 larkax，而不是一个空的 owned_by。
@@ -315,7 +338,7 @@ func TestModelByIDReturnsAvailableModel(t *testing.T) {
 		t.Fatalf("响应不是 JSON: %v（%s）", err, rec.Body)
 	}
 	want := modelJSON{ID: "vendor/alpha", Object: "model", Created: 0, OwnedBy: "acme",
-		Offers: []offerJSON{{Price: "0.00350000"}}}
+		Offers: []offerJSON{offerOf(nil, "0.00350000")}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("响应 = %+v，期望 %+v", got, want)
 	}
@@ -505,8 +528,8 @@ func TestModelsOffersListMerchantsByPrice(t *testing.T) {
 	}
 	acme, globex := "acme", "globex"
 	want := []offerJSON{
-		{Merchant: &acme, Price: "0.00350000"},
-		{Merchant: &globex, Price: "0.00400000"},
+		offerOf(&acme, "0.00350000"),
+		offerOf(&globex, "0.00400000"),
 	}
 	if !reflect.DeepEqual(body.Data[0].Offers, want) {
 		t.Errorf("offers = %+v，期望 %+v", body.Data[0].Offers, want)
@@ -544,8 +567,8 @@ func TestModelsOffersMarkPlatformAsNull(t *testing.T) {
 	}
 	acme := "acme"
 	want := []offerJSON{
-		{Merchant: &acme, Price: "0.00350000"},
-		{Price: "0.00400000"},
+		offerOf(&acme, "0.00350000"),
+		offerOf(nil, "0.00400000"),
 	}
 	if !reflect.DeepEqual(body.Data[0].Offers, want) {
 		t.Errorf("offers = %+v，期望 %+v", body.Data[0].Offers, want)
@@ -647,10 +670,85 @@ func TestModelsOffersDedupeByMerchantAndPrice(t *testing.T) {
 	}
 	acme, globex := "acme", "globex"
 	want := []offerJSON{
-		{Merchant: &acme, Price: "0.00350000"},
-		{Merchant: &globex, Price: "0.00350000"},
+		offerOf(&acme, "0.00350000"),
+		offerOf(&globex, "0.00350000"),
 	}
 	if !reflect.DeepEqual(body.Data[0].Offers, want) {
 		t.Errorf("offers = %+v，期望同价的渠道折叠成一条、商家各一条", body.Data[0].Offers)
+	}
+}
+
+// 五个 token 维度各自一个千 token 价，不是一个价的倍数。
+func TestModelsOffersCarryAllDimensions(t *testing.T) {
+	supply := &fakeSupply{supplies: []channels.Supply{
+		{Model: "alpha", ChannelID: 1, OwnerUserID: 7, Merchant: "acme"},
+	}}
+	cat := &fakeModelCatalog{models: []catalog.Model{{CanonicalName: "alpha"}}}
+	h, _ := newModelsHandler(supply, cat)
+	h.Offers = &fakeOffers{byChannelPrices: map[int64]map[string]money.Amount{
+		1: {
+			"prompt":      money.MustParse("0.00350000"),
+			"completion":  money.MustParse("0.01050000"),
+			"cache_read":  money.MustParse("0.00070000"),
+			"cache_write": money.MustParse("0.00420000"),
+			"reasoning":   money.MustParse("0.01400000"),
+		},
+	}}
+
+	rec := get(h, PathModels)
+	var body modelsBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if len(body.Data) != 1 || len(body.Data[0].Offers) != 1 {
+		t.Fatalf("清单 = %s，期望一条模型、一条报价", rec.Body)
+	}
+	offer := body.Data[0].Offers[0]
+	if offer.Price != "0.00350000" {
+		t.Errorf("price = %q，期望 prompt 维度的 0.00350000", offer.Price)
+	}
+	want := map[string]string{
+		"prompt":      "0.00350000",
+		"completion":  "0.01050000",
+		"cache_read":  "0.00070000",
+		"cache_write": "0.00420000",
+		"reasoning":   "0.01400000",
+	}
+	if !reflect.DeepEqual(offer.Prices, want) {
+		t.Errorf("prices = %+v，期望 %+v", offer.Prices, want)
+	}
+}
+
+// 同一商家、两个渠道，prompt 同价但缓存价不同：这是两套报价，不能折成
+// 一条——只按 prompt 去重会让调用方拿错的价格估算缓存用量。
+func TestModelsOffersSplitByWholePriceSet(t *testing.T) {
+	supply := &fakeSupply{supplies: []channels.Supply{
+		{Model: "alpha", ChannelID: 1, OwnerUserID: 7, Merchant: "acme"},
+		{Model: "alpha", ChannelID: 2, OwnerUserID: 7, Merchant: "acme"},
+	}}
+	cat := &fakeModelCatalog{models: []catalog.Model{{CanonicalName: "alpha"}}}
+	h, _ := newModelsHandler(supply, cat)
+	h.Offers = &fakeOffers{byChannelPrices: map[int64]map[string]money.Amount{
+		1: {"prompt": money.MustParse("0.00350000"), "cache_read": money.MustParse("0.00070000")},
+		2: {"prompt": money.MustParse("0.00350000"), "cache_read": money.MustParse("0.00140000")},
+	}}
+
+	rec := get(h, PathModels)
+	var body modelsBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if len(body.Data) != 1 || len(body.Data[0].Offers) != 2 {
+		t.Fatalf("offers = %+v，期望同一商家按整套维度价拆成两条", body.Data)
+	}
+	acme := "acme"
+	want := []offerJSON{
+		{Merchant: &acme, Price: "0.00350000", Prices: map[string]string{
+			"prompt": "0.00350000", "cache_read": "0.00070000"}},
+		{Merchant: &acme, Price: "0.00350000", Prices: map[string]string{
+			"prompt": "0.00350000", "cache_read": "0.00140000"}},
+	}
+	if !reflect.DeepEqual(body.Data[0].Offers, want) {
+		t.Errorf("offers = %+v，期望 %+v", body.Data[0].Offers, want)
 	}
 }

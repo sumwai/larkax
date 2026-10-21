@@ -224,6 +224,185 @@ func settlementPromptPrice(t *testing.T, source *Source, model string, channelID
 	return billing.ComputeWithCharges(usage, result.Prices, result.Charges).Prompt
 }
 
+// 五个 token 维度各自报一个千 token 价，并与结算逐维度对得上。
+func TestOffersReportAllTokenDimensions(t *testing.T) {
+	db := testDB(t)
+	source := New(db)
+	admin := NewAdmin(db)
+	owner := seedUser(t, db)
+	channel := seedChannel(t, db, owner)
+	model := unique("offers-dimensions")
+	at := time.Now().UTC().Add(time.Minute)
+
+	createRule(t, admin, CreateRequest{
+		Scope: ScopeMerchant, OwnerUserID: owner, ModelPatterns: []string{model},
+		Expr: `{
+			"prompt": 0.000002,
+			"completion": 0.000006,
+			"cache_read": 0.0000004,
+			"cache_write": 0.0000024,
+			"reasoning": 0.000010
+		}`,
+	})
+
+	offers := NewOffers(db, "Asia/Shanghai", nil)
+	got, err := offers.Prices(context.Background(), at, []Candidate{
+		{Model: model, ChannelID: channel, OwnerUserID: owner},
+	})
+	if err != nil {
+		t.Fatalf("Prices 出错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("报价条数 = %d，期望 1：%+v", len(got), got)
+	}
+	want := map[string]money.Amount{
+		"prompt":      money.MustParse("0.00200000"),
+		"completion":  money.MustParse("0.00600000"),
+		"cache_read":  money.MustParse("0.00040000"),
+		"cache_write": money.MustParse("0.00240000"),
+		"reasoning":   money.MustParse("0.01000000"),
+	}
+	if len(got[0].Prices) != len(want) {
+		t.Errorf("维度数 = %d，期望 %d：%+v", len(got[0].Prices), len(want), got[0].Prices)
+	}
+	for name, expected := range want {
+		if value := got[0].Prices[name]; value != expected {
+			t.Errorf("%s 的报价 = %s，期望 %s", name, value, expected)
+		}
+		settled := settlementDimensionPrice(t, source, model, channel, owner, at, name)
+		if value := got[0].Prices[name]; value != settled {
+			t.Errorf("%s 的报价 %s 与结算价 %s 不一致", name, value, settled)
+		}
+	}
+	// Price 始终是 prompt 那一项，保留给只关心输入价的调用方。
+	if got[0].Price != want["prompt"] {
+		t.Errorf("Price = %s，期望 prompt 的 %s", got[0].Price, want["prompt"])
+	}
+}
+
+// 每个维度按各自 1000 个 token 求值：规则可以引用用量，用 prompt 的用量
+// 求 completion 会得到另一个价。
+func TestOffersEvaluateEachDimensionSeparately(t *testing.T) {
+	db := testDB(t)
+	source := New(db)
+	admin := NewAdmin(db)
+	owner := seedUser(t, db)
+	channel := seedChannel(t, db, owner)
+	model := unique("offers-per-dimension")
+	at := time.Now().UTC().Add(time.Minute)
+
+	// c > 0 时 completion 更贵。若整条规则只按「1000 个 prompt」求一次，
+	// completion 会取到 0.000006——比结算低。
+	createRule(t, admin, CreateRequest{
+		Scope: ScopeMerchant, OwnerUserID: owner, ModelPatterns: []string{model},
+		Expr: `{"prompt": 0.000002, "completion": c > 0 ? 0.000008 : 0.000006}`,
+	})
+
+	offers := NewOffers(db, "Asia/Shanghai", nil)
+	got, err := offers.Prices(context.Background(), at, []Candidate{
+		{Model: model, ChannelID: channel, OwnerUserID: owner},
+	})
+	if err != nil {
+		t.Fatalf("Prices 出错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("报价条数 = %d，期望 1：%+v", len(got), got)
+	}
+	if want := money.MustParse("0.00800000"); got[0].Prices["completion"] != want {
+		t.Errorf("completion 报价 = %s，期望 %s（按 1000 个 completion 求值）",
+			got[0].Prices["completion"], want)
+	}
+	settled := settlementDimensionPrice(t, source, model, channel, owner, at, "completion")
+	if got[0].Prices["completion"] != settled {
+		t.Errorf("completion 报价 %s 与结算价 %s 不一致", got[0].Prices["completion"], settled)
+	}
+}
+
+// 规则没写的维度不出现在报价里：结算会拒绝这种用量，报价不能替它补 0。
+func TestOffersOnlyReportDeclaredDimensions(t *testing.T) {
+	db := testDB(t)
+	admin := NewAdmin(db)
+	owner := seedUser(t, db)
+	channel := seedChannel(t, db, owner)
+	model := unique("offers-declared")
+	at := time.Now().UTC().Add(time.Minute)
+
+	createRule(t, admin, CreateRequest{
+		Scope: ScopeMerchant, OwnerUserID: owner, ModelPatterns: []string{model},
+		Expr: `{"prompt": 0.000002, "completion": 0.000006}`,
+	})
+
+	offers := NewOffers(db, "Asia/Shanghai", nil)
+	got, err := offers.Prices(context.Background(), at, []Candidate{
+		{Model: model, ChannelID: channel, OwnerUserID: owner},
+	})
+	if err != nil {
+		t.Fatalf("Prices 出错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("报价条数 = %d，期望 1：%+v", len(got), got)
+	}
+	if len(got[0].Prices) != 2 {
+		t.Errorf("维度 = %+v，期望只有 prompt 与 completion", got[0].Prices)
+	}
+	for _, absent := range []string{"cache_read", "cache_write", "reasoning"} {
+		if _, ok := got[0].Prices[absent]; ok {
+			t.Errorf("规则没写 %s，报价里却有它：%+v", absent, got[0].Prices)
+		}
+	}
+}
+
+// settlementDimensionPrice 用结算那一条路径算 1000 个某一维度 token 的价。
+//
+// Breakdown 的字段按测试自己的 switch 取，不复用 Offers 的求和：两边共用
+// 同一个「哪一项落在哪个字段」的映射，就会一起错。
+func settlementDimensionPrice(t *testing.T, source *Source, model string, channelID, ownerID int64, at time.Time, name string) money.Amount {
+	t.Helper()
+
+	rule, err := source.Match(context.Background(), singleCandidate(model, channelID, ownerID, at))
+	if err != nil {
+		t.Fatalf("结算取规则失败: %v", err)
+	}
+	program, err := expr.Compile(rule.Source)
+	if err != nil {
+		t.Fatalf("编译结算规则失败: %v", err)
+	}
+	var slot billing.TokenSlot
+	found := false
+	for _, candidate := range billing.TokenSlots {
+		if candidate.Name == name {
+			slot = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("未知的 token 维度 %q", name)
+	}
+	usage := billing.Usage{}
+	slot.SetCount(&usage, offerTokenCount)
+	result, err := program.Eval(expr.Env{At: at, Region: "Asia/Shanghai", Usage: usage})
+	if err != nil {
+		t.Fatalf("求结算价失败: %v", err)
+	}
+	breakdown := billing.ComputeWithCharges(usage, result.Prices, result.Charges)
+	switch name {
+	case "prompt":
+		return breakdown.Prompt
+	case "completion":
+		return breakdown.Completion
+	case "cache_read":
+		return breakdown.CacheRead
+	case "cache_write":
+		return breakdown.CacheWrite
+	case "reasoning":
+		return breakdown.Reasoning
+	default:
+		t.Fatalf("维度 %q 没有对应的 Breakdown 字段", name)
+		return money.Zero
+	}
+}
+
 // 一条规则取不出价，只跳过命中它的候选，其余候选照常报价。
 //
 // 这是 #938 的判据：某个商家配错一条规则，不该让所有调用方的模型清单都

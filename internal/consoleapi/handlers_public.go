@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sumwai/larkax/internal/catalog"
+	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/pricing"
 )
 
@@ -95,9 +96,13 @@ type modelJSON struct {
 //
 // Merchant 为 null 表示平台自营。Price 是 1000 个输入 token 的金额——
 // 与同一条目里的 pricing（每百万 token）不是同一个单位，界面必须标出来。
+// 规则没声明输入价时 Price 是零值；要分辨「输入免费」与「没写输入价」，
+// 看 Prices 里有没有 prompt 这个键。Prices 是各 token 维度的千 token 金额，
+// 只含规则写过的维度。
 type offerJSON struct {
-	Merchant *string `json:"merchant"`
-	Price    string  `json:"price"`
+	Merchant *string           `json:"merchant"`
+	Price    string            `json:"price"`
+	Prices   map[string]string `json:"prices,omitempty"`
 }
 
 // modelsResponse 是模型清单。
@@ -155,7 +160,7 @@ func (a *API) handleModels(w http.ResponseWriter, r *http.Request) {
 		a.unavailable(w, r, err, "求报价失败")
 		return
 	}
-	offers := pricing.GroupByModel(quotes)
+	offers := pricing.GroupByModel(quotes, candidates)
 
 	items := make([]modelJSON, 0, len(names))
 	for _, name := range names {
@@ -166,7 +171,7 @@ func (a *API) handleModels(w http.ResponseWriter, r *http.Request) {
 			// 条目会让前端显示一行空白。
 			continue
 		}
-		items = append(items, newModelJSON(model, prices[name], offers[name]))
+		items = append(items, newModelJSON(model, prices[name], offers[name].Offers))
 	}
 
 	// ETag 只对「模型 + 价格」求值：reference_at 是这次求值的时刻，每次请求
@@ -241,6 +246,7 @@ func newModelJSON(model catalog.Model, price *pricing.ReferencePrice, offers []p
 		out.Offers = append(out.Offers, offerJSON{
 			Merchant: offer.Merchant,
 			Price:    offer.Price.String(),
+			Prices:   dimensionPricesJSON(offer.Prices),
 		})
 	}
 	if price != nil {
@@ -256,6 +262,21 @@ func newModelJSON(model catalog.Model, price *pricing.ReferencePrice, offers []p
 			value := price.CacheWritePerMTok.String()
 			out.Pricing.CacheWritePerMTok = &value
 		}
+	}
+	return out
+}
+
+// dimensionPricesJSON 把维度价映射成响应里的字符串 map。
+//
+// 空 map 返回 nil：omitempty 把「规则只有固定费、没有 token 维度」写成
+// 省略字段，而不是 `"prices": {}`——后者看起来像「查过了，五个维度都没有」。
+func dimensionPricesJSON(prices map[string]money.Amount) map[string]string {
+	if len(prices) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(prices))
+	for name, price := range prices {
+		out[name] = price.String()
 	}
 	return out
 }
