@@ -13,8 +13,21 @@ import { AppShell } from './AppShell'
 import { ToastProvider } from './ui'
 
 // vitest 不处理 CSS（`test.css: false`），`?raw` 拿到的也是空串；直接读文件。
+// 要断言生效样式的用例按 `main.tsx` 的导入顺序注入整份样式表——只抽一条规则
+// 注入，后面出现的覆盖规则（比如 `.skip-link:not(:focus) { display: none }`）
+// 就看不见了，而那种覆盖恰恰会让链接聚不了焦。
 // vitest 从 web/ 目录跑，相对路径即可。
-const componentsCss = readFileSync('src/styles/components.css', 'utf8')
+const stylesCss = ['tokens.css', 'base.css', 'components.css']
+  .map((name) => readFileSync(`src/styles/${name}`, 'utf8'))
+  .join('\n')
+
+/** 把整份样式表注入文档，返回撤销函数。 */
+function injectStyles() {
+  const style = document.createElement('style')
+  style.textContent = stylesCss
+  document.head.appendChild(style)
+  return () => style.remove()
+}
 
 const mocks = vi.hoisted(() => ({ session: vi.fn() }))
 
@@ -215,13 +228,9 @@ describe('AppShell 桌面端顶栏', () => {
 })
 
 describe('AppShell 跳到主内容', () => {
-  // vitest 不处理 CSS（`test.css: false`），从真实样式表里取出这两条规则注入
-  // 文档，再断言元素确实被它们隐藏；规则被删掉时下面的匹配先红。
-  function skipLinkRules() {
-    return {
-      base: componentsCss.match(/\.skip-link\s*\{([^}]*)\}/)?.[1] ?? '',
-      focus: componentsCss.match(/\.skip-link:focus\s*\{([^}]*)\}/)?.[1] ?? '',
-    }
+  /** 取出某条规则声明的原文；后面断言「有没有这一项」时用。 */
+  function ruleBody(pattern: RegExp) {
+    return stylesCss.match(pattern)?.[1] ?? ''
   }
 
   function useMatchMedia(matches: boolean) {
@@ -258,11 +267,15 @@ describe('AppShell 跳到主内容', () => {
     const main = document.getElementById('main-content')
     expect(main?.tagName).toBe('MAIN')
     expect(document.activeElement).toBe(main)
+    // `-1` 让它能被程序聚焦，但**不**进入 Tab 序列；写成 `0` 会让每个键盘用户
+    // 多走一站，还会把主内容当成可编辑区域。
+    expect(main).toHaveAttribute('tabindex', '-1')
   })
 
   it('默认不可见但可聚焦，聚焦态另有一套样式', async () => {
-    const { base, focus } = skipLinkRules()
-    // 隐藏靠 1px 的盒子加裁剪，不能用聚焦不了的那两种写法。
+    const base = ruleBody(/\.skip-link\s*\{([^}]*)\}/)
+    const focus = ruleBody(/\.skip-link:focus\s*\{([^}]*)\}/)
+    // 隐藏靠 1px 的盒子加裁剪，不能用把元素藏死的两种写法。
     expect(base).toMatch(/position:\s*absolute/)
     expect(base).toMatch(/max-width:\s*1px/)
     expect(base).toMatch(/max-height:\s*1px/)
@@ -270,27 +283,38 @@ describe('AppShell 跳到主内容', () => {
     expect(base).toMatch(/clip-path:\s*inset\(50%\)/)
     expect(base).not.toMatch(/display:\s*none/)
     expect(base).not.toMatch(/visibility:\s*hidden/)
-    // 聚焦时逐项还原，否则它会一直是个 1px 的盒子。
+    // 它一直在左上角（只是被裁成一个点），聚焦时只还原尺寸与裁剪；位置与
+    // 层级必须压过顶栏，否则聚焦后弹在顶栏下面，等于没弹。
+    expect(base).toMatch(/top:\s*\d+px/)
+    expect(base).toMatch(/left:\s*\d+px/)
+    expect(base).toMatch(/background:/)
+    const linkZ = Number(base.match(/z-index:\s*(\d+)/)?.[1])
+    const topbarZ = Number(ruleBody(/\.app-topbar\s*\{([^}]*)\}/).match(/z-index:\s*(\d+)/)?.[1])
+    expect(topbarZ).toBeGreaterThan(0)
+    expect(linkZ).toBeGreaterThan(topbarZ)
     expect(focus).toMatch(/max-width:\s*none/)
     expect(focus).toMatch(/max-height:\s*none/)
     expect(focus).toMatch(/clip-path:\s*none/)
 
-    const style = document.createElement('style')
-    style.textContent = `.skip-link {${base}}\n.skip-link:focus {${focus}}`
-    document.head.appendChild(style)
+    const removeStyles = injectStyles()
     try {
       await renderShell('user')
       const link = screen.getByRole('link', { name: '跳到主内容' })
+      // 整份样式表生效之后的 computed 值：藏死的写法会在这里露馅。
       const computed = getComputedStyle(link)
+      expect(computed.display).not.toBe('none')
+      expect(computed.visibility).not.toBe('hidden')
       expect(computed.position).toBe('absolute')
       expect(computed.maxWidth).toBe('1px')
       expect(computed.maxHeight).toBe('1px')
       expect(computed.overflow).toBe('hidden')
-      // `display: none` 的元素在 jsdom 里聚焦不上，这一条同时证明它没被藏死。
-      link.focus()
+      // `focus()` 本身证明不了可聚焦（jsdom 对 display:none 的元素也照样聚焦），
+      // 所以这里用真实的 Tab 走位：user-event 会跳过被藏死的元素。
+      const user = userEvent.setup()
+      await user.tab()
       expect(document.activeElement).toBe(link)
     } finally {
-      style.remove()
+      removeStyles()
     }
   })
 

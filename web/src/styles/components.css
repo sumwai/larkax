@@ -1753,7 +1753,7 @@ textarea.input {
 /*
  * 「跳到主内容」：默认视觉隐藏，但仍在可聚焦序列里——所以不能用
  * `display: none` 或 `visibility: hidden`，那两种聚焦不了。收成 1px 再裁掉，
- * 聚焦时回到左上角，盖在顶栏之上（顶栏是 z-index 20）。
+ * 聚焦时回到左上角，盖在顶栏之上（顶栏是 z-index 30）。
  */
 .skip-link {
   position: absolute;
