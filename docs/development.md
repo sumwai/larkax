@@ -1602,7 +1602,8 @@ CI 包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`�
 `internal/pricing/`（给出单价）与 `internal/pipeline/`（算出结算额）。
 这五棵树之外的改动不自动跑：全清单一轮以小时计，而 `PKGS` 有三十多个包；
 让每个 PR 都自动跑一遍会把公开仓库的 runner 队列占住，而大多数改动与钱无关。
-要量别的包时，用 `workflow_dispatch` 手工给 `packages`。
+要量别的包时，用 `workflow_dispatch` 手工给 `packages`。PR 自动轮还**按改动
+收窄**：只变异 PR 改到的那些生产文件，口径与分数怎么读见「变异测试」一节。
 
 工作流**不重写开关与解析**：它调用的还是 `scripts/check-mutation.sh`，所以
 gremlins 版本、`workers=1`、系数 10、`--invert-logical`、每个包之前清一次测试
@@ -1661,9 +1662,38 @@ gremlins 版本、`workers=1`、系数 10、`--invert-logical`、每个包之前
 ```sh
 export LARKAX_DB_DSN="postgres://larkax:placeholder@127.0.0.1:5432/larkax?sslmode=disable"
 export LARKAX_REDIS_DSN="redis://127.0.0.1:6379/0"   # 测试依赖 Redis 的包才需要
-scripts/check-mutation.sh              # 全部包
+scripts/check-mutation.sh              # 全部包（整包口径）
 scripts/check-mutation.sh money route  # 只跑指定的
 ```
+
+**按改动收窄**（只变异这次改动涉及的生产文件）：
+
+```sh
+scripts/check-mutation.sh --changed-from origin/main
+scripts/check-mutation.sh --changed-files changes.txt internal/ledger
+```
+
+`--changed-files` 读一份仓库相对的路径清单（一行一个，`-` 表示 stdin）；
+`--changed-from` 从 git 现算（参照到工作树，所以未提交的改动与还没被跟踪的
+新 `.go` 文件都算进来）。不给这两个开关时跑整包——本地默认与 CI 手工触发
+都是这个口径。
+
+收窄的做法是**排除没改到的**：每个包里没有出现在清单里的生产 `.go` 文件，
+逐个作为 `--exclude-files` 传给 gremlins。一个包里只有 `_test.go` 变了时
+不排除任何文件、跑整包：这种改动的风险恰恰是测试被改弱，排除文件会把要看的
+地方排除掉。新文件在清单里就算「改到」，不会被排除。改动同时落在父子包时
+只留外层（外层那条命令递归含子包）。
+
+**同时改了生产文件与测试文件时按生产文件收窄，这是一个有代价的取舍**：
+被改的那个测试所针对的文件如果本身没变，这一轮就不会覆盖它——测试被改弱时，
+它原本保护的那段代码不会跟着重跑。退回整包的条件是**该包里没有任何生产文件
+改动**（例如清单里只有 `_test.go`），不是「只改了测试文件」——清单里一条落在
+这个包的 `.go` 都没有时，同样跑整包。
+
+**收窄与整包不是同一个口径，分数不能互相比较。** 只变异了一部分文件时，
+Killed、存活、超时、Not covered 都只覆盖参与变异的那些文件。脚本会在汇总表
+前面逐包打出参与 / 排除了几个生产文件，并写明这一轮不可与整包基线对账；
+它与下面「各包的现状」那张整包基线表对不上是正常的，不是回归。
 
 包参数**按后缀匹配脚本里那份包清单**（`scripts/check-mutation.sh` 的 `PKGS`），
 照清单里的名字写，别照目录树猜：`PKGS` 是手工维护的，不等于目录树——
@@ -1728,6 +1758,12 @@ v0.6.0 正常运行不报总数，所以实际看到的是「已完成 + 已用 
 
 数字仍然要连着条件读：CI 的机器与本地不同（CPU、磁盘），超时列按下面的判据读；
 `Not covered` 与 `Mutator coverage` 不随机器变，可以直接与本地对账。
+
+**PR 自动轮按改动收窄**：选包那一步把改动的 `.go` 文件清单传给变异 job，脚本
+排除包里没改到的生产文件（规则见上面「按改动收窄」）。所以同一个包在 PR 上
+跑出来的数字是「这次改动涉及的那部分代码」的分数，要看日志开头那段「按改动
+收窄」列出的参与 / 排除数，别与整包基线对账。`workflow_dispatch` 手工点名
+不带收窄：手工触发要量的是整个包。
 
 PR 同时改到父包与子包时（例如 `internal/ledger` 与 `internal/ledger/store`），
 选包只留外层：外层那条命令递归就包含了子包，两个都跑会把子包跑两遍。
