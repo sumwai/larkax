@@ -23,7 +23,11 @@ import type {
   Meta,
   ModelDetailResponse,
   ModelsResponse,
+  MerchantOpsClient,
+  MerchantModelsResponse,
+  MerchantOverview,
   MerchantPricingClient,
+  MerchantUpstreamsResponse,
   OpsClient,
   OpsModel,
   OpsModelCreateInput,
@@ -97,7 +101,7 @@ export interface HttpApiOptions {
 export class HttpApiClient implements ApiClient {
   readonly mode = 'http' as const
   readonly admin: OpsClient
-  readonly merchant: ChannelOpsClient & MerchantPricingClient
+  readonly merchant: ChannelOpsClient & MerchantPricingClient & MerchantOpsClient
   private readonly baseUrl: string
   private readonly doFetch: typeof fetch
   private csrfToken: string | null = null
@@ -106,7 +110,11 @@ export class HttpApiClient implements ApiClient {
     this.baseUrl = (options.baseUrl ?? '/api/v1').replace(/\/$/, '')
     this.doFetch = options.fetchImpl ?? globalThis.fetch.bind(globalThis)
     this.admin = this.ops('/admin')
-    this.merchant = { ...this.channelOps('/merchant'), ...this.merchantPricing('/merchant') }
+    this.merchant = {
+      ...this.channelOps('/merchant'),
+      ...this.merchantPricing('/merchant'),
+      ...this.merchantOps('/merchant'),
+    }
   }
 
   /**
@@ -182,6 +190,22 @@ export class HttpApiClient implements ApiClient {
       updateRule: async (id, input) => {
         await this.request(`${prefix}/pricing/rules/${id}`, { method: 'PATCH', body: input })
       },
+    }
+  }
+
+  /**
+   * 商家的只读运营视图。
+   *
+   * 三个端点都在 merchant 前缀下；管理员会话进来时服务端不限定归属，
+   * 给的是全站数据——主语由页面按会话角色说，客户端不参与判断。
+   */
+  private merchantOps(prefix: string): MerchantOpsClient {
+    return {
+      overview: () => this.request<MerchantOverview>(`${prefix}/overview`),
+      listUpstreams: (query = {}) =>
+        this.request<MerchantUpstreamsResponse>(`${prefix}/upstreams`, { query: { ...query } }),
+      listSuppliedModels: (query = {}) =>
+        this.request<MerchantModelsResponse>(`${prefix}/models`, { query: { ...query } }),
     }
   }
 

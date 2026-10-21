@@ -21,8 +21,13 @@ import type {
   Model,
   ModelDetailResponse,
   ModelsResponse,
+  ChannelHealth,
   ChannelOpsClient,
+  MerchantModel,
+  MerchantOpsClient,
   MerchantPricingClient,
+  MerchantUpstream,
+  UnhealthyReason,
   OpsClient,
   OpsModel,
   OpsModelCreateInput,
@@ -581,6 +586,40 @@ const OPS_CHANNELS: Channel[] = [
     created_at: ago(90),
     updated_at: ago(5),
   },
+  {
+    id: 4,
+    owner_user_id: 1,
+    name: 'demo-primary',
+    type: 'openai',
+    base_url: 'https://api.example.com/self',
+    status: 'enabled',
+    models: ['gpt-4.1', 'gpt-4o-mini'],
+    weight: 2,
+    priority: 10,
+    setting: {},
+    credential_keys: ['k-placeholder'],
+    credential_hint: 'demo',
+    deleted_at: null,
+    created_at: ago(60),
+    updated_at: ago(2),
+  },
+  {
+    id: 5,
+    owner_user_id: 1,
+    name: 'demo-anthropic',
+    type: 'anthropic',
+    base_url: 'https://api.example.com/anthropic',
+    status: 'enabled',
+    models: ['claude-sonnet-4-5'],
+    weight: 1,
+    priority: 0,
+    setting: {},
+    credential_keys: ['k-placeholder'],
+    credential_hint: 'demo',
+    deleted_at: null,
+    created_at: ago(45),
+    updated_at: ago(3),
+  },
 ]
 
 const OPS_MODELS: OpsModel[] = [
@@ -694,6 +733,23 @@ const OPS_RULES: PricingRule[] = [
     updated_at: ago(20),
     declared_keys: ['tokens_in', 'tokens_out'],
     expr_error: 'unknown variable tokens_in',
+  },
+  {
+    id: 3,
+    scope: 'merchant',
+    owner_user_id: 1,
+    channel_id: 0,
+    name: 'demo-gpt-4.1',
+    model_patterns: ['gpt-4.1'],
+    expr: 'price = input_tokens * 0.000002 + output_tokens * 0.000010',
+    priority: 5,
+    effective_from: ago(48),
+    effective_to: null,
+    enabled: true,
+    created_by: 1,
+    created_at: ago(48),
+    updated_at: ago(10),
+    declared_keys: ['input_tokens', 'output_tokens'],
   },
 ]
 
@@ -863,7 +919,46 @@ const MOCK_USERS: AdminUserDetail[] = [
  * 计价没有商家前缀的路由。渠道按服务端的判定演戏：merchant 只看得到、也只
  * 改得了自己的渠道，别人的渠道与不存在的渠道都回 404（不透露「存在但不是你的」）。
  */
-function mockOpsClient(scope: 'admin' | 'merchant'): OpsClient & MerchantPricingClient {
+/** 演示用的渠道健康：没列出来的启用渠道按正常算。 */
+const MOCK_HEALTH: Record<number, ChannelHealth> = { 3: 'unknown', 4: 'degraded' }
+const HEALTH_ORDER: ChannelHealth[] = ['healthy', 'unknown', 'degraded', 'drained']
+
+/** 演示用的异常理由；同一渠道可以同时成立多条。 */
+const MOCK_UNHEALTHY: Record<number, UnhealthyReason[]> = {
+  2: ['quota_state', 'probe_failed'],
+  3: ['no_requests_24h'],
+  4: ['failure_rate', 'consecutive_failures'],
+}
+
+function channelHealthOf(channel: Channel): ChannelHealth {
+  return MOCK_HEALTH[channel.id] ?? (channel.status === 'enabled' ? 'healthy' : 'unknown')
+}
+
+/** 组健康取最差一档。 */
+function worstHealthOf(channels: Channel[]): ChannelHealth {
+  return channels.reduce<ChannelHealth>(
+    (worst, channel) => {
+      const health = channelHealthOf(channel)
+      return HEALTH_ORDER.indexOf(health) > HEALTH_ORDER.indexOf(worst) ? health : worst
+    },
+    'healthy',
+  )
+}
+
+function limitOf(limit: number | undefined): number {
+  return Math.max(1, Math.min(limit ?? 50, 200))
+}
+
+/** 生效中的规则：已启用、已到生效时刻、未过期。 */
+function ruleActiveNow(rule: PricingRule): boolean {
+  const now = Date.now()
+  if (Date.parse(rule.effective_from) > now) return false
+  return rule.effective_to === null || Date.parse(rule.effective_to) > now
+}
+
+function mockOpsClient(
+  scope: 'admin' | 'merchant',
+): OpsClient & MerchantPricingClient & MerchantOpsClient {
   const isAdmin = scope === 'admin'
   const denied = () => new ApiError(403, 'forbidden', PERMISSION_DENIED)
 
@@ -881,6 +976,16 @@ function mockOpsClient(scope: 'admin' | 'merchant'): OpsClient & MerchantPricing
 
   const requireAdmin = () => {
     if (!isAdmin) throw denied()
+  }
+
+  /** 在供模型：启用、未软删、目录里真有这一行。 */
+  const suppliedModels = (): string[] => {
+    const known = new Set(OPS_MODELS.map((model) => model.canonical_name))
+    const names = visibleChannels()
+      .filter((channel) => channel.status === 'enabled')
+      .flatMap((channel) => channel.models)
+      .filter((model) => known.has(model))
+    return [...new Set(names)]
   }
 
   const channelInputError = (input: ChannelCreateInput): void => {
@@ -1269,13 +1374,98 @@ function mockOpsClient(scope: 'admin' | 'merchant'): OpsClient & MerchantPricing
       if (input.status) found.status = input.status
       return { ...found }
     },
+
+    // 运营三页：概览、上游、在供模型。口径照 `docs/api.md` 演——「今天」是站点
+    // 当地日历日，上游按 (type, base_url) 归并，模型只算在供的那些。管理员会话
+    // 不限定归属，同一段代码给的是全站。
+    async overview() {
+      await delay()
+      requireSession()
+      const channels = visibleChannels()
+      return {
+        channels: channels.length,
+        models_in_supply: suppliedModels().length,
+        today: isAdmin
+          ? { requests: 9_832, cost: money(84.2) }
+          : { requests: 1_280, cost: money(12.34) },
+        unhealthy_channels: channels
+          .map((channel) => ({
+            id: channel.id,
+            name: channel.name,
+            reasons: MOCK_UNHEALTHY[channel.id] ?? [],
+          }))
+          .filter((row) => row.reasons.length > 0),
+      }
+    },
+
+    async listUpstreams(query = {}) {
+      await delay()
+      requireSession()
+      const limit = limitOf(query.limit)
+      const groups = new Map<string, Channel[]>()
+      for (const channel of visibleChannels()) {
+        const key = `${channel.type}\u0000${channel.base_url}`
+        groups.set(key, [...(groups.get(key) ?? []), channel])
+      }
+      const rows: MerchantUpstream[] = [...groups.values()].map((channels) => {
+        const requests = channels.reduce((sum, channel) => sum + 200 + channel.id * 37, 0)
+        const failures = channels.reduce((sum, channel) => sum + ((channel.id * 3) % 11), 0)
+        return {
+          type: channels[0].type,
+          base_url: channels[0].base_url,
+          health: worstHealthOf(channels),
+          requests,
+          failures,
+          failure_rate: requests === 0 ? 0 : failures / requests,
+          channels: [...channels]
+            .sort((a, b) => a.id - b.id)
+            .map((channel) => ({
+              id: channel.id,
+              name: channel.name,
+              status: channel.status,
+              health: channelHealthOf(channel),
+            })),
+        }
+      })
+      rows.sort((a, b) => a.type.localeCompare(b.type) || a.base_url.localeCompare(b.base_url))
+      return { items: rows.slice(0, limit), total: rows.length, truncated: rows.length > limit }
+    },
+
+    async listSuppliedModels(query = {}) {
+      await delay()
+      requireSession()
+      const limit = limitOf(query.limit)
+      const pricedRules = OPS_RULES.filter(
+        (rule) =>
+          rule.scope === 'merchant' &&
+          rule.enabled &&
+          ruleActiveNow(rule) &&
+          (isAdmin || rule.owner_user_id === user.id),
+      )
+      const channels = visibleChannels()
+      const rows: MerchantModel[] = suppliedModels()
+        .sort((a, b) => a.localeCompare(b))
+        .map((model) => ({
+          model,
+          display_name:
+            OPS_MODELS.find((item) => item.canonical_name === model)?.display_name ?? model,
+          channels: channels.filter(
+            (channel) => channel.status === 'enabled' && channel.models.includes(model),
+          ).length,
+          // 空名单是兜底，适用于全部模型。
+          priced: pricedRules.some(
+            (rule) => rule.model_patterns.length === 0 || rule.model_patterns.includes(model),
+          ),
+        }))
+      return { items: rows.slice(0, limit), total: rows.length, truncated: rows.length > limit }
+    },
   }
 }
 
 /** merchant 前缀下的两组路由：自有渠道与自己的售价规则，没有成本。 */
 function merchantClientOf(
-  client: OpsClient & MerchantPricingClient,
-): ChannelOpsClient & MerchantPricingClient {
+  client: OpsClient & MerchantPricingClient & MerchantOpsClient,
+): ChannelOpsClient & MerchantPricingClient & MerchantOpsClient {
   const {
     listChannels,
     getChannel,
@@ -1285,6 +1475,9 @@ function merchantClientOf(
     getRule,
     createRule,
     updateRule,
+    overview,
+    listUpstreams,
+    listSuppliedModels,
   } = client
   return {
     listChannels,
@@ -1295,13 +1488,17 @@ function merchantClientOf(
     getRule,
     createRule,
     updateRule,
+    overview,
+    listUpstreams,
+    listSuppliedModels,
   }
 }
 
 export class MockApiClient implements ApiClient {
   readonly mode = 'mock' as const
   readonly admin: OpsClient = mockOpsClient('admin')
-  readonly merchant: ChannelOpsClient & MerchantPricingClient = merchantClientOf(mockOpsClient('merchant'))
+  readonly merchant: ChannelOpsClient & MerchantPricingClient & MerchantOpsClient =
+    merchantClientOf(mockOpsClient('merchant'))
 
   setCsrfToken(): void {
     // mock 不做 CSRF 校验；保留方法是为了与 HTTP 实现同形。

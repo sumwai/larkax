@@ -8,6 +8,9 @@ const mocks = vi.hoisted(() => ({
   listModels: vi.fn(),
   models: vi.fn(),
   listRules: vi.fn(),
+  overview: vi.fn(),
+  listUpstreams: vi.fn(),
+  listSuppliedModels: vi.fn(),
   meta: vi.fn(),
 }))
 
@@ -17,6 +20,9 @@ vi.mock('./api', async (importOriginal) => {
     listChannels: mocks.listChannels,
     listModels: mocks.listModels,
     listRules: mocks.listRules,
+    overview: mocks.overview,
+    listUpstreams: mocks.listUpstreams,
+    listSuppliedModels: mocks.listSuppliedModels,
   }
   return {
     ...actual,
@@ -64,6 +70,14 @@ describe('运营视图的角色门槛', () => {
     mocks.listModels.mockResolvedValue([])
     mocks.models.mockResolvedValue([])
     mocks.listRules.mockResolvedValue([])
+    mocks.overview.mockResolvedValue({
+      channels: 1,
+      models_in_supply: 1,
+      today: { requests: 2, cost: '0.1200' },
+      unhealthy_channels: [],
+    })
+    mocks.listUpstreams.mockResolvedValue({ items: [], total: 0, truncated: false })
+    mocks.listSuppliedModels.mockResolvedValue({ items: [], total: 0, truncated: false })
     mocks.meta.mockResolvedValue({
       site_name: 'larkax',
       api_base_url: 'https://api.example.com/v1',
@@ -105,9 +119,34 @@ describe('运营视图的角色门槛', () => {
     expect(mocks.listChannels).toHaveBeenCalled()
   })
 
-  it('/app/merchant 落到渠道页', async () => {
+  it('/app/merchant 落到概览页', async () => {
     await open('merchant', '/app/merchant')
-    expect(await screen.findByText('还没有渠道')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '我的概览' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/app/merchant/overview')
+  })
+
+  it('merchant 进得去商家概览，主语是「我的」', async () => {
+    await open('merchant', '/app/merchant/overview')
+    expect(await screen.findByRole('heading', { name: '我的概览' })).toBeInTheDocument()
+    expect(mocks.overview).toHaveBeenCalled()
+  })
+
+  it('user 进不了商家概览，也不发运营请求', async () => {
+    await open('user', '/app/merchant/overview')
+    expect(await screen.findByText('这个视图不在你的权限范围内。')).toBeInTheDocument()
+    expect(mocks.overview).not.toHaveBeenCalled()
+  })
+
+  it('admin 进得去概览、模型与上游三页，主语写成全站', async () => {
+    await open('admin', '/app/merchant/overview')
+    expect(await screen.findByRole('heading', { name: '全站概览' })).toBeInTheDocument()
+    expect(mocks.overview).toHaveBeenCalled()
+    // 切换器跟着地址走：这一页在商家视图里。
+    expect(screen.getByRole('button', { name: '商家' })).toHaveAttribute('aria-pressed', 'true')
+    // 侧栏只列三种主语的那三页，渠道与计价不出现。
+    expect(screen.queryByRole('link', { name: '渠道' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '计价' })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('link', { name: '上游' }).length).toBeGreaterThan(0)
   })
 
   /**
@@ -137,12 +176,12 @@ describe('运营视图的角色门槛', () => {
     expect(screen.getByRole('button', { name: label })).toHaveAttribute('aria-pressed', 'true')
   })
 
-  it('admin 的切换器只有用户与管理', async () => {
+  it('admin 的切换器有三个视图，停在管理上', async () => {
     await open('admin', '/app/admin/channels')
 
     expect(screen.getByRole('button', { name: '用户' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '商家' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '管理' })).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.queryByRole('button', { name: '商家' })).not.toBeInTheDocument()
   })
 
   it.each(['/app/merchant/channels', '/app/merchant/pricing'])(

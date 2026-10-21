@@ -4,12 +4,22 @@ import { useAuth } from '../auth/AuthProvider'
 import { useI18n } from '../i18n'
 import type { MessageKey } from '../i18n/zh'
 import { useIsMobile, useIsNarrow } from '../hooks/useMediaQuery'
-import { homeOf, settingsOf, viewOfPath, viewsFor, type View } from '../ops/views'
+import {
+  homeOf,
+  isSharedMerchantPath,
+  settingsOf,
+  subjectOf,
+  viewAllowed,
+  viewOfPath,
+  viewsFor,
+  type View,
+} from '../ops/views'
 import {
   BrandMark,
   IconAlias,
   IconChannel,
   IconCollapse,
+  IconExternal,
   IconKey,
   IconLogout,
   IconMenu,
@@ -41,11 +51,15 @@ type NavItem = { to: string; key: MessageKey; icon: ComponentType<{ size?: numbe
 /**
  * 运营视图的导航。
  *
- * merchant 有渠道与计价两组：计价在商家前缀下只有自己的规则，没有成本页；
- * 模型目录与别名是平台级资源，没有归属可过滤，不在商家视图里出现。
+ * merchant 前三项是运营页：同类型同地址的渠道在「上游」归组，在供模型与
+ * 定价状态在「模型」。后两项是商家自己那部分：渠道与计价（只有自己的规则，
+ * 没有成本页）。模型目录与别名是平台级资源，没有归属可过滤，不在商家视图里出现。
  */
 const OPS_NAV: Record<Exclude<View, 'user'>, NavItem[]> = {
   merchant: [
+    { to: '/app/merchant/overview', key: 'nav.overview', icon: IconOverview },
+    { to: '/app/merchant/models', key: 'ops.nav.merchantModels', icon: IconModels },
+    { to: '/app/merchant/upstreams', key: 'ops.nav.upstreams', icon: IconExternal },
     { to: '/app/merchant/channels', key: 'ops.nav.channels', icon: IconChannel },
     { to: '/app/merchant/pricing', key: 'ops.nav.pricing', icon: IconPricing },
   ],
@@ -83,10 +97,18 @@ export function AppShell() {
   const routeView = viewOfPath(location.pathname)
   // 地址栏可以直接敲进账号没有的视图：那一页画的是无权限，侧栏也不该把那一组
   // 入口列出来。可用的视图与切换器同源，不另写一份角色判断。
-  const allowed = views.includes(routeView)
+  const allowed = viewAllowed(user?.role, location.pathname)
   const view = allowed ? routeView : views[views.length - 1]
-  const navItems: NavItem[] = view === 'user' ? APP_NAV : OPS_NAV[view]
-  const settings = settingsOf(view)
+  // 管理员的商家视图只有「两种主语」的那三页；渠道与计价写的是「你名下」，
+  // 管理员进那一组只会看到错的主语，所以不列链接（直接敲地址仍落到无权限）。
+  const siteWide = subjectOf(user?.role) === 'site'
+  const merchantItems = siteWide
+    ? OPS_NAV.merchant.filter((item) => isSharedMerchantPath(item.to))
+    : OPS_NAV.merchant
+  const navItems: NavItem[] =
+    view === 'user' ? APP_NAV : view === 'merchant' ? merchantItems : OPS_NAV[view]
+  // 设置是账号级的：管理员在商家视图里点设置，落到管理视图那一个地址。
+  const settings = settingsOf(view === 'merchant' && siteWide ? 'admin' : view)
 
   useEffect(() => {
     setDrawer(false)
