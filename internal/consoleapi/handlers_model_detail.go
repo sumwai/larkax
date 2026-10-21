@@ -3,12 +3,9 @@ package consoleapi
 import (
 	"errors"
 	"net/http"
-	"sort"
 	"time"
 
 	"github.com/sumwai/larkax/internal/catalog"
-	"github.com/sumwai/larkax/internal/channels"
-	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/pricing"
 )
 
@@ -57,11 +54,17 @@ type modelDetailJSON struct {
 	ReleaseDate     *string `json:"release_date"`
 	UpdatedAt       string  `json:"updated_at"`
 
-	// Suppliers 是供应这个模型、且能算出价的渠道，按价格升序。
+	// Suppliers 是供应这个模型、且能算出价的商家报价；同一商家可能有多套
+	// 维度价，各占一行。按价格升序。
 	//
 	// 一条报价都算不出来的模型仍然返回 200（可见性只看供给），这时整个字段
 	// 省略：空数组会被读成「问了，但没有人报价」，而实际是「还没有定价」。
 	Suppliers []supplierJSON `json:"suppliers,omitempty"`
+	// UnpricedChannels 是在供、但算不出价的渠道条数。
+	//
+	// 总是输出（包括 0）：这是模型级的统计，不是某一条报价的属性；省略它
+	// 会让「全部渠道都有价」与「这个字段还没上线」分不出来。
+	UnpricedChannels int `json:"unpriced_channels"`
 }
 
 // modelCapabilitiesJSON 是六项能力与端点声明的**三态**形状。
@@ -81,17 +84,20 @@ type modelCapabilitiesJSON struct {
 	Endpoints []string `json:"endpoints"`
 }
 
-// supplierJSON 是一个在供渠道的报价。
+// supplierJSON 是一个商家（或平台自营）在这个模型上的一套报价。
 //
-// 不含渠道 id、base_url、凭证与任何上游地址：这一页是公开的。渠道之间靠
-// 「商家 + 上游模型名 + 价格」区分，足以回答「谁在供、多少钱」。
+// 不含渠道 id、base_url、凭证、上游地址与上游模型名：这一页是公开的，
+// 上游名能把调用方引去绕过网关。渠道之间靠「商家 + 整套维度价」区分。
 type supplierJSON struct {
 	// Merchant 为 null 表示平台自营渠道。
 	Merchant *string `json:"merchant"`
-	// UpstreamModel 是走这条渠道时发给上游的模型名（别名解析后的结果）。
-	UpstreamModel string `json:"upstream_model"`
 	// Price 是 1000 个输入 token 的金额，字符串，与结算同源。
 	Price string `json:"price"`
+	// Prices 是各 token 维度的千 token 金额，键是 prompt / completion /
+	// cache_read / cache_write / reasoning；只含规则写过的维度。
+	Prices map[string]string `json:"prices,omitempty"`
+	// ChannelCount 是这套价对应的渠道条数（同一商家同价的多条供给折成一行）。
+	ChannelCount int `json:"channel_count"`
 }
 
 // handleModelDetail 返回一个在供模型的全部展示字段与供应商报价。
@@ -115,13 +121,11 @@ func (a *API) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 
 	// 一次把「在供判断」与「候选集」都做掉：同一份 Supplies 里既有可见性
 	// 判据，也有报价要的渠道归属。
-	onSupply := make([]channels.Supply, 0, 2)
 	candidates := make([]pricing.Candidate, 0, 2)
 	for _, supply := range supplies {
 		if supply.Model != name {
 			continue
 		}
-		onSupply = append(onSupply, supply)
 		candidates = append(candidates, pricing.Candidate{
 			Model:       supply.Model,
 			ChannelID:   supply.ChannelID,
@@ -129,7 +133,7 @@ func (a *API) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			Merchant:    supply.Merchant,
 		})
 	}
-	if len(onSupply) == 0 {
+	if len(candidates) == 0 {
 		a.notFound(w, r)
 		return
 	}
@@ -146,12 +150,6 @@ func (a *API) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	aliases, err := a.deps.catalog.UpstreamModels(ctx, name)
-	if err != nil {
-		a.unavailable(w, r, err, "读取模型别名失败")
-		return
-	}
-
 	now := a.now().UTC()
 	quotes, err := a.deps.offers.Prices(ctx, now, candidates)
 	if err != nil {
@@ -159,9 +157,16 @@ func (a *API) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	grouped := pricing.GroupByModel(quotes, candidates)[name]
 	detail := newModelDetailJSON(model)
-	detail.Suppliers = newSuppliers(onSupply, quotes, aliases)
-	a.ok(w, http.StatusOK, modelDetailResponse{
+	detail.UnpricedChannels = grouped.UnpricedChannels
+	detail.Suppliers = newSuppliers(grouped.Offers)
+
+	// 这条响应只依赖目录与计价规则，两者都不是按用户变化的：60 秒的公共
+	// 缓存能让翻模型页时不重复打三条查询，又短到改价后一分钟内可见。
+	// 它不走 a.ok——那里统一写 no-store，是给需要会话的响应用的。
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	a.writeJSON(w, http.StatusOK, modelDetailResponse{
 		Currency:    a.currency,
 		ReferenceAt: formatTime(now),
 		Model:       detail,
@@ -229,103 +234,22 @@ func dateValue(value *time.Time) *string {
 	return &formatted
 }
 
-// newSuppliers 把「在供渠道 + 各渠道的报价 + 别名」折成响应里的供应商列表。
+// newSuppliers 把折叠好的报价映射成响应里的供应商列表。
 //
-// # 上游名怎么定
+// 聚合已经由 pricing.GroupByModel 做完：一组 = 商家（平台自营单列）×
+// 一整套维度价，ChannelCount 是这套价的渠道条数。这里只做形状转换，不再
+// 按价格或上游名去重——折叠规则属于报价层，两个 HTTP 表面共用同一份。
 //
-// 与路由的别名解析同一套优先级：渠道级别名 > 平台级别名 > 规范名本身。
-// 别名按规范名一次查回（见 catalog.UpstreamModels），不按渠道往返。
-//
-// # 没有报价的渠道不出现
-//
-// 报价回答「多少钱」，一条没有适用规则的渠道给不出这个数——编一个 0 会让
-// 页面显示「免费」，写 null 又会让 price 变成两种类型。所以这里只列能算出
-// 价的渠道；一条都算不出来的模型由调用方看到省略的 suppliers（见
-// modelDetailJSON 的注释）。
-//
-// # 排序与去重
-//
-// 按价格升序；同价平台自营在前，再按商家名、上游名。渠道 id 不对外，
-// 所以「同一商家、同一上游名、同一价格」的两条渠道在响应里无法区分，
-// 折成一条——否则页面上会出现两行逐字相同的报价。
-func newSuppliers(supplies []channels.Supply, quotes []pricing.CandidatePrice, aliases []catalog.Alias) []supplierJSON {
-	priceByChannel := make(map[int64]money.Amount, len(quotes))
-	for _, quote := range quotes {
-		priceByChannel[quote.ChannelID] = quote.Price
-	}
-
-	upstreamByChannel := make(map[int64]string, len(aliases))
-	platformUpstream := ""
-	for _, alias := range aliases {
-		if alias.ChannelID == 0 {
-			platformUpstream = alias.UpstreamModel
-			continue
-		}
-		upstreamByChannel[alias.ChannelID] = alias.UpstreamModel
-	}
-
-	type supplierRow struct {
-		merchant    *string
-		ownerUserID int64
-		upstream    string
-		price       money.Amount
-	}
-
-	rows := make([]supplierRow, 0, len(supplies))
-	seen := make(map[string]bool, len(supplies))
-	for _, supply := range supplies {
-		price, ok := priceByChannel[supply.ChannelID]
-		if !ok {
-			continue
-		}
-		upstream := upstreamByChannel[supply.ChannelID]
-		if upstream == "" {
-			upstream = platformUpstream
-		}
-		if upstream == "" {
-			upstream = supply.Model
-		}
-
-		var merchant *string
-		merchantKey := ""
-		if supply.OwnerUserID != 0 {
-			name := supply.Merchant
-			merchant = &name
-			merchantKey = name
-		}
-
-		key := merchantKey + "\x00" + upstream + "\x00" + price.String()
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		rows = append(rows, supplierRow{
-			merchant:    merchant,
-			ownerUserID: supply.OwnerUserID,
-			upstream:    upstream,
-			price:       price,
-		})
-	}
-
-	sort.SliceStable(rows, func(i, j int) bool {
-		if cmp := rows[i].price.Cmp(rows[j].price); cmp != 0 {
-			return cmp < 0
-		}
-		if rows[i].ownerUserID == 0 || rows[j].ownerUserID == 0 {
-			return rows[i].ownerUserID == 0 && rows[j].ownerUserID != 0
-		}
-		if rows[i].merchant != nil && rows[j].merchant != nil && *rows[i].merchant != *rows[j].merchant {
-			return *rows[i].merchant < *rows[j].merchant
-		}
-		return rows[i].upstream < rows[j].upstream
-	})
-
-	out := make([]supplierJSON, 0, len(rows))
-	for _, row := range rows {
+// 没有报价的渠道不出现在 suppliers 里；它们由模型级的 unpriced_channels
+// 计数回答（见 modelDetailJSON 的注释）。
+func newSuppliers(offers []pricing.Offer) []supplierJSON {
+	out := make([]supplierJSON, 0, len(offers))
+	for _, offer := range offers {
 		out = append(out, supplierJSON{
-			Merchant:      row.merchant,
-			UpstreamModel: row.upstream,
-			Price:         row.price.String(),
+			Merchant:     offer.Merchant,
+			Price:        offer.Price.String(),
+			Prices:       dimensionPricesJSON(offer.Prices),
+			ChannelCount: offer.ChannelCount,
 		})
 	}
 	return out

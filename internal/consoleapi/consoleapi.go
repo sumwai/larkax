@@ -188,14 +188,13 @@ type offerSource interface {
 	Prices(ctx context.Context, at time.Time, candidates []pricing.Candidate) ([]pricing.CandidatePrice, error)
 }
 
-// catalogSource 读模型目录的展示字段与别名。
+// catalogSource 读模型目录的展示字段。
 //
-// 单条模型要读一条目录行，还要把规范名翻成上游名（见 handleModelDetail）；
-// 这三件事都在 internal/catalog，本包不另写 SQL。
+// 单条模型要读一条目录行；清单要读全部。两件事都在 internal/catalog，
+// 本包不另写 SQL。
 type catalogSource interface {
 	Models(ctx context.Context) ([]catalog.Model, error)
 	Model(ctx context.Context, canonicalName string) (catalog.Model, error)
-	UpstreamModels(ctx context.Context, canonicalName string) ([]catalog.Alias, error)
 }
 
 // priceSource 求平台规则下的参考价。

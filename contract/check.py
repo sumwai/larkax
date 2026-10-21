@@ -446,7 +446,12 @@ def openai_models(ctx: Ctx) -> str:
     check("created", item.created, 0)
     # 清单管「能不能用」，与有没有定价规则无关：这条用例的渠道没有计价规则，
     # 模型仍然必须在清单里，只是不带 offers（省略，而不是空数组）。
-    check("没有计价规则时 offers", getattr(item, "offers", None), None)
+    #
+    # 读 model_extra 而不是 getattr(item, "offers", None)：后者在 SDK 丢弃
+    # 未知字段时也返回 None，这条断言就永远是绿的。model_extra 是 SDK 收集
+    # 未建模字段的地方，字段存在时它一定看得见。
+    extras = getattr(item, "model_extra", None) or {}
+    check("没有计价规则时不应带 offers", "offers" in extras, False)
 
     one = ctx.client.models.retrieve(expected)
     check("retrieve.id", one.id, expected)

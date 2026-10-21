@@ -328,8 +328,7 @@ func (f *fakeModels) SuppliedModels(_ context.Context) ([]string, error) {
 }
 
 type fakeCatalog struct {
-	models  []catalog.Model
-	aliases []catalog.Alias
+	models []catalog.Model
 }
 
 func (f *fakeCatalog) Models(_ context.Context) ([]catalog.Model, error) {
@@ -343,16 +342,6 @@ func (f *fakeCatalog) Model(_ context.Context, canonicalName string) (catalog.Mo
 		}
 	}
 	return catalog.Model{}, catalog.ErrModelNotFound
-}
-
-func (f *fakeCatalog) UpstreamModels(_ context.Context, canonicalName string) ([]catalog.Alias, error) {
-	out := []catalog.Alias{}
-	for _, alias := range f.aliases {
-		if alias.CanonicalName == canonicalName {
-			out = append(out, alias)
-		}
-	}
-	return out, nil
 }
 
 type fakePrices struct {
@@ -374,6 +363,9 @@ func (f *fakeSupplies) Supplies(_ context.Context) ([]channels.Supply, error) {
 type fakeOffers struct {
 	base    money.Amount
 	byOwner map[int64]money.Amount
+	// byOwnerPrices / byChannelPrices 覆盖整套维度价；byChannel 优先。
+	byOwnerPrices   map[int64]map[string]money.Amount
+	byChannelPrices map[int64]map[string]money.Amount
 	// skipChannels 里的渠道不报价（模拟「这条渠道没有适用规则」）。
 	skipChannels map[int64]bool
 }
@@ -388,11 +380,21 @@ func (f *fakeOffers) Prices(_ context.Context, _ time.Time, candidates []pricing
 		if override, ok := f.byOwner[candidate.OwnerUserID]; ok {
 			price = override
 		}
+		prices := map[string]money.Amount{"prompt": price}
+		if override, ok := f.byOwnerPrices[candidate.OwnerUserID]; ok {
+			prices = override
+			price = override["prompt"]
+		}
+		if override, ok := f.byChannelPrices[candidate.ChannelID]; ok {
+			prices = override
+			price = override["prompt"]
+		}
 		out = append(out, pricing.CandidatePrice{
 			Model:       candidate.Model,
 			ChannelID:   candidate.ChannelID,
 			OwnerUserID: candidate.OwnerUserID,
 			Merchant:    candidate.Merchant,
+			Prices:      prices,
 			Price:       price,
 		})
 	}
@@ -1244,8 +1246,8 @@ func TestModelsOffersShowWhoSells(t *testing.T) {
 		t.Fatalf("items 长度 = %d，期望 1", len(body.Items))
 	}
 	want := []offerJSON{
-		{Merchant: ptrString("acme"), Price: "0.00350000"},
-		{Price: "0.00400000"},
+		{Merchant: ptrString("acme"), Price: "0.00350000", Prices: map[string]string{"prompt": "0.00350000"}},
+		{Price: "0.00400000", Prices: map[string]string{"prompt": "0.00400000"}},
 	}
 	if !reflect.DeepEqual(body.Items[0].Offers, want) {
 		t.Errorf("offers = %+v，期望 %+v", body.Items[0].Offers, want)

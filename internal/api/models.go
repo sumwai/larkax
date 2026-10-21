@@ -10,6 +10,7 @@ import (
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channels"
+	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pricing"
 )
@@ -71,6 +72,12 @@ type offerJSON struct {
 	// 字符串而不是数字：它是定点数，用 JSON 数字过一遍 float64 会在
 	// 展示与对账之间引入一个没用任何东西报出来的舍入。
 	Price string `json:"price"`
+	// Prices 是各 token 维度的千 token 金额，键是 prompt / completion /
+	// cache_read / cache_write / reasoning；只含规则写过的维度。
+	//
+	// 单独给一份而不只给 price：缓存读与推理的单价与输入价不是倍数关系，
+	// 调用方用 price 估算一笔缓存为主的请求会差出好几倍。
+	Prices map[string]string `json:"prices,omitempty"`
 }
 
 // modelJSON 是清单里的一项，字段与 OpenAI 的 Model 对象逐字对应。
@@ -231,12 +238,12 @@ func (h *Handler) availableModels(ctx context.Context) ([]modelJSON, error) {
 	if err != nil {
 		return nil, err
 	}
-	grouped := pricing.GroupByModel(quotes)
+	grouped := pricing.GroupByModel(quotes, candidates)
 
 	items := make([]modelJSON, 0, len(order))
 	for _, name := range order {
 		item := newModelJSON(name, vendors[name])
-		if offers := grouped[name]; len(offers) > 0 {
+		if offers := grouped[name].Offers; len(offers) > 0 {
 			item.Offers = newOffersJSON(offers)
 		}
 		// 没有报价的模型仍然列出：它能不能用只取决于有没有渠道在供，与
@@ -255,7 +262,20 @@ func newOffersJSON(offers []pricing.Offer) []offerJSON {
 		out = append(out, offerJSON{
 			Merchant: offer.Merchant,
 			Price:    offer.Price.String(),
+			Prices:   dimensionPricesJSON(offer.Prices),
 		})
+	}
+	return out
+}
+
+// dimensionPricesJSON 把维度价映射成响应里的字符串 map。
+func dimensionPricesJSON(prices map[string]money.Amount) map[string]string {
+	if len(prices) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(prices))
+	for name, price := range prices {
+		out[name] = price.String()
 	}
 	return out
 }
