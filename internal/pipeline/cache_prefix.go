@@ -30,6 +30,11 @@ import (
 //   - anthropic：system 是顶层字段（见 internal/channel/anthropicadapter 的
 //     encodeRequest），无论它出现在 messages 的哪个位置，实际都排在提示最前。
 //
+// protocol 是**入口协议**，不是上游适配器的协议：同一份 chat 形状的请求可以
+// 路由给说 chat 或 responses 的上游（见 internal/route）。跨协议时两者可能
+// 不一致，方向是安全的——入口按 chat 折得比上游更细（只会多判 miss），入口
+// 按 claude 折时 system 已排在最前、与上游落在同一段，都不会造出假命中。
+//
 // # 拿不准的协议返回 nil
 //
 // 未列出的协议（例如决策表面）返回 nil：宁可让预留退回旧口径，也不能拿一个
