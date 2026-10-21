@@ -520,6 +520,10 @@ func TestRedactDSN(t *testing.T) {
 		{"关键字形式", "host=h user=u password=pw123 dbname=d", "host=h user=u password=REDACTED dbname=d"},
 		{"关键字别名", "host=h passwd=pw123", "host=h passwd=REDACTED"},
 		{"关键字无口令不动", "host=h user=u dbname=d", "host=h user=u dbname=d"},
+		// URL 分支要求 scheme 非空（见 RedactDSN 的注释：postgres:// 与
+		// redis:// 两种形式）。只有主机、没有 scheme 的串不是 URL 形式，
+		// 落到关键字那一支逐词扫；这里没有 password= 之类的键，原样返回。
+		{"缺协议但有主机不改写", "//host/a b", "//host/a b"},
 		{"空串", "", ""},
 	}
 	for _, c := range cases {
