@@ -677,7 +677,16 @@ func ruleViewOf(info pricing.RuleInfo) ruleView {
 }
 
 func (a *API) listRules(w http.ResponseWriter, r *http.Request) {
-	rules, err := a.rules.List(r.Context())
+	ownerID, scoped := OwnerFromContext(r.Context())
+	var (
+		rules []pricing.RuleInfo
+		err   error
+	)
+	if scoped {
+		rules, err = a.rules.ListOwned(r.Context(), ownerID)
+	} else {
+		rules, err = a.rules.List(r.Context())
+	}
 	if err != nil {
 		a.fail(w, err)
 		return
@@ -693,6 +702,15 @@ func (a *API) createRule(w http.ResponseWriter, r *http.Request) {
 	var req ruleCreateRequest
 	if !a.decodeBody(w, r, &req) {
 		return
+	}
+	// 商家建规则时作用域与归属由会话决定：请求体里写 platform 或别人的
+	// owner 都不作数。与渠道的归属同一做法——归属是服务端的事实，不是
+	// 客户端提交的一项。
+	if ownerID, scoped := OwnerFromContext(r.Context()); scoped {
+		req.Scope = pricing.ScopeMerchant
+		req.OwnerUserID = ownerID
+		req.ChannelID = 0
+		req.CreatedBy = ownerID
 	}
 	var from time.Time
 	if req.EffectiveFrom != nil {
@@ -718,6 +736,26 @@ func (a *API) createRule(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusCreated, map[string]int64{"id": id})
 }
 
+func (a *API) getRule(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "id")
+	if err != nil {
+		a.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ownerID, scoped := OwnerFromContext(r.Context())
+	var info pricing.RuleInfo
+	if scoped {
+		info, err = a.rules.GetOwned(r.Context(), ownerID, id)
+	} else {
+		info, err = a.rules.Get(r.Context(), id)
+	}
+	if err != nil {
+		a.failScoped(w, r, err)
+		return
+	}
+	a.writeJSON(w, http.StatusOK, ruleViewOf(info))
+}
+
 func (a *API) updateRule(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r, "id")
 	if err != nil {
@@ -728,7 +766,8 @@ func (a *API) updateRule(w http.ResponseWriter, r *http.Request) {
 	if !a.decodeBody(w, r, &req) {
 		return
 	}
-	err = a.rules.Update(r.Context(), pricing.UpdateRequest{
+	ownerID, scoped := OwnerFromContext(r.Context())
+	updateReq := pricing.UpdateRequest{
 		ID:               id,
 		Scope:            req.Scope,
 		OwnerUserID:      req.OwnerUserID,
@@ -742,9 +781,16 @@ func (a *API) updateRule(w http.ResponseWriter, r *http.Request) {
 		ClearEffectiveTo: req.ClearEffectiveTo,
 		Enabled:          req.Enabled,
 		ChangedBy:        req.ChangedBy,
-	})
+	}
+	if scoped {
+		// 改价的人就是会话用户：请求体里的 changed_by 不作数。
+		updateReq.ChangedBy = ownerID
+		err = a.rules.UpdateOwned(r.Context(), ownerID, updateReq)
+	} else {
+		err = a.rules.Update(r.Context(), updateReq)
+	}
 	if err != nil {
-		a.fail(w, err)
+		a.failScoped(w, r, err)
 		return
 	}
 	a.writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

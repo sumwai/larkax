@@ -87,12 +87,16 @@ type Config struct {
 	// 传什么都要理解成「整组路由的前提」，不能只包一部分。
 	Authorize func(http.Handler) http.Handler
 
-	// OnlyChannels 为 true 时只注册渠道那四条路由，不注册模型目录与计价。
+	// Groups 限定注册哪几组资源；为空表示全部（内部监听与 admin 组的默认）。
 	//
-	// 控制台的 merchant 组用它：merchant 管的是**自己名下**的渠道；模型目录
-	// 与计价规则是平台级的，没有「归属」可以过滤，放给 merchant 等于把全局
-	// 写入权交出去。
-	OnlyChannels bool
+	// 取值见 GroupChannels / GroupModels / GroupAliases / GroupPricing。控制台
+	// 的 merchant 组给 channels + pricing：它管的是自己名下的渠道与自己定的价。
+	// 模型目录与别名没有「归属」可以过滤，放给 merchant 等于把全局写入权
+	// 交出去，所以不在这两个组里。
+	//
+	// `pricing/costs`（上游成本）不随 pricing 组注册：那是渠道侧的成本规则，
+	// 没有商家归属，只随「全部资源」出现。
+	Groups []string
 }
 
 // tokenSource 提供当前令牌的 verifier。
@@ -117,6 +121,8 @@ type API struct {
 
 // New 装配管理面。返回的 handler **已经带上鉴权中间件**：调用方把它整片挂到
 // 内部监听的 `/admin/v1/` 上即可，不存在「只挂了业务 handler」的装配错误。
+//
+// 注册哪些资源由 Config.Groups 决定；默认（空）是全部。
 func New(cfg Config) http.Handler {
 	prefix := cfg.Prefix
 	if prefix == "" {
@@ -140,26 +146,32 @@ func New(cfg Config) http.Handler {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET "+prefix+"channels", a.listChannels)
-	mux.HandleFunc("POST "+prefix+"channels", a.createChannel)
-	mux.HandleFunc("GET "+prefix+"channels/{id}", a.getChannel)
-	mux.HandleFunc("PATCH "+prefix+"channels/{id}", a.updateChannel)
-
-	if !cfg.OnlyChannels {
+	groups, all := groupSet(cfg.Groups)
+	if all || groups[GroupChannels] {
+		mux.HandleFunc("GET "+prefix+"channels", a.listChannels)
+		mux.HandleFunc("POST "+prefix+"channels", a.createChannel)
+		mux.HandleFunc("GET "+prefix+"channels/{id}", a.getChannel)
+		mux.HandleFunc("PATCH "+prefix+"channels/{id}", a.updateChannel)
+	}
+	if all || groups[GroupModels] {
 		mux.HandleFunc("GET "+prefix+"models", a.listModels)
 		mux.HandleFunc("POST "+prefix+"models", a.createModel)
 		mux.HandleFunc("PATCH "+prefix+"models/{name}", a.updateModel)
 		mux.HandleFunc("DELETE "+prefix+"models/{name}", a.deleteModel)
-
+	}
+	if all || groups[GroupAliases] {
 		mux.HandleFunc("GET "+prefix+"aliases", a.listAliases)
 		mux.HandleFunc("POST "+prefix+"aliases", a.createAlias)
 		mux.HandleFunc("PATCH "+prefix+"aliases/{id}", a.updateAlias)
 		mux.HandleFunc("DELETE "+prefix+"aliases/{id}", a.deleteAlias)
-
+	}
+	if all || groups[GroupPricing] {
 		mux.HandleFunc("GET "+prefix+"pricing/rules", a.listRules)
 		mux.HandleFunc("POST "+prefix+"pricing/rules", a.createRule)
+		mux.HandleFunc("GET "+prefix+"pricing/rules/{id}", a.getRule)
 		mux.HandleFunc("PATCH "+prefix+"pricing/rules/{id}", a.updateRule)
-
+	}
+	if all {
 		mux.HandleFunc("GET "+prefix+"pricing/costs", a.listCosts)
 		mux.HandleFunc("POST "+prefix+"pricing/costs", a.createCost)
 		mux.HandleFunc("PATCH "+prefix+"pricing/costs/{id}", a.updateCost)
@@ -170,6 +182,34 @@ func New(cfg Config) http.Handler {
 		authorize = a.authorize
 	}
 	return authorize(mux)
+}
+
+// 资源组名。取值是稳定的：装配参数里写的是它们。
+const (
+	GroupChannels = "channels"
+	GroupModels   = "models"
+	GroupAliases  = "aliases"
+	GroupPricing  = "pricing"
+)
+
+// groupSet 把 Groups 翻成集合；第二个返回值表示「全部资源」。
+//
+// 未知组名直接 panic：装配参数写错时，症状是「这一组路由一条都不存在」，
+// 那在请求到达之前就能发现，比一个安静少挂的 API 面好。
+func groupSet(groups []string) (map[string]bool, bool) {
+	if len(groups) == 0 {
+		return nil, true
+	}
+	set := make(map[string]bool, len(groups))
+	for _, group := range groups {
+		switch group {
+		case GroupChannels, GroupModels, GroupAliases, GroupPricing:
+			set[group] = true
+		default:
+			panic("adminapi: 未知的资源组 " + group)
+		}
+	}
+	return set, false
 }
 
 // ownerKey 是归属上下文的键。
@@ -368,11 +408,12 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 
 // failScoped 是 fail 的归属受限版本：404 一律用固定正文。
 //
-// 只有渠道那几条路由用它。不带归属的调用（内部管理面）仍走 fail——那里的
-// 404 本来就该说清是哪一条，调用者是运维。
+// 渠道与计价规则那几条路由用它（归属受限时「不存在」与「不是你的」逐字
+// 相同）。不带归属的调用（内部管理面、admin 组）仍走 fail——那里的 404
+// 本来就该说清是哪一条，调用者是运维。
 func (a *API) failScoped(w http.ResponseWriter, r *http.Request, err error) {
 	if _, scoped := OwnerFromContext(r.Context()); scoped &&
-		errors.Is(err, channels.ErrChannelNotFound) {
+		(errors.Is(err, channels.ErrChannelNotFound) || errors.Is(err, pricing.ErrRuleNotFound)) {
 		a.writeError(w, http.StatusNotFound, msgNotFound)
 		return
 	}

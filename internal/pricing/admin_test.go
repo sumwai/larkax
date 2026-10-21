@@ -1364,3 +1364,135 @@ func TestExplainWithoutApplicableRule(t *testing.T) {
 
 // ptr 取一个值的地址，供 UpdateRequest 的指针字段用。
 func ptr[T any](v T) *T { return &v }
+
+// TestOwnedRuleScope 钉住商家规则的读改边界：只看得到、只改得动自己的
+// merchant 规则；平台规则（owner 为 NULL）与别人的规则越权一律 ErrRuleNotFound。
+//
+// 列表这一条尤其重要：漏掉 owner 条件不是「改错一行」，而是把全平台的价
+// 摊给每一个商家看。
+func TestOwnedRuleScope(t *testing.T) {
+	db := testDB(t)
+	admin := NewAdmin(db)
+	owner := seedUser(t, db)
+	other := seedUser(t, db)
+	model := unique("owned-model")
+
+	ownID := createRule(t, admin, CreateRequest{
+		Scope: ScopeMerchant, OwnerUserID: owner, ModelPatterns: []string{model},
+		Expr: `{"prompt": 0.1}`,
+	})
+	otherID := createRule(t, admin, CreateRequest{
+		Scope: ScopeMerchant, OwnerUserID: other, ModelPatterns: []string{model},
+		Expr: `{"prompt": 0.2}`,
+	})
+	platformID := createRule(t, admin, CreateRequest{
+		Scope: ScopePlatform, ModelPatterns: []string{model},
+		Expr: `{"prompt": 0.3}`,
+	})
+
+	// 库里允许「channel 作用域 + owner_user_id」这种行：唯一的约束只管
+	// platform 不得挂 owner，channel 与 merchant 两栏怎么写它不管。所以这里
+	// 直接写库造一条，用来钉住商家清单靠的是 scope = 'merchant'，而不是只按
+	// owner 过滤——只按 owner 过滤时这一条会漏进商家自己的清单。
+	channelScopedID := insertChannelScopedRule(t, db, owner, seedChannel(t, db, owner))
+
+	rules, err := admin.ListOwned(context.Background(), owner)
+	if err != nil {
+		t.Fatalf("ListOwned 出错: %v", err)
+	}
+	seen := make(map[int64]bool, len(rules))
+	for _, info := range rules {
+		seen[info.ID] = true
+		if info.Scope != ScopeMerchant {
+			t.Errorf("商家清单里出现了作用域 %q 的规则 %d", info.Scope, info.ID)
+		}
+	}
+	if !seen[ownID] {
+		t.Errorf("自己的规则 %d 不在清单里", ownID)
+	}
+	if seen[otherID] {
+		t.Errorf("清单里出现了别人的规则 %d", otherID)
+	}
+	if seen[platformID] {
+		t.Errorf("清单里出现了平台规则 %d", platformID)
+	}
+	if seen[channelScopedID] {
+		t.Errorf("清单里出现了 channel 作用域、owner 是商家的规则 %d", channelScopedID)
+	}
+
+	if _, getErr := admin.GetOwned(context.Background(), owner, ownID); getErr != nil {
+		t.Errorf("读自己的规则失败: %v", getErr)
+	}
+	for _, id := range []int64{otherID, platformID, channelScopedID, 999999999} {
+		if _, getErr := admin.GetOwned(context.Background(), owner, id); !errors.Is(getErr, ErrRuleNotFound) {
+			t.Errorf("GetOwned(%d) 的错误 = %v，期望 ErrRuleNotFound", id, getErr)
+		}
+		priority := 99
+		if setErr := admin.UpdateOwned(context.Background(), owner, UpdateRequest{
+			ID: id, Priority: &priority,
+		}); !errors.Is(setErr, ErrRuleNotFound) {
+			t.Errorf("UpdateOwned(%d) 的错误 = %v，期望 ErrRuleNotFound", id, setErr)
+		}
+	}
+
+	// 零值 id 不是「不限制」。
+	if _, getErr := admin.GetOwned(context.Background(), 0, ownID); getErr == nil {
+		t.Error("GetOwned(owner=0) 没有报错")
+	}
+	if _, getErr := admin.ListOwned(context.Background(), 0); getErr == nil {
+		t.Error("ListOwned(0) 没有报错")
+	}
+
+	// 自己的可以改。
+	name := unique("renamed")
+	if setErr := admin.UpdateOwned(context.Background(), owner, UpdateRequest{
+		ID: ownID, Name: &name,
+	}); setErr != nil {
+		t.Fatalf("改自己的规则失败: %v", setErr)
+	}
+	got, readErr := admin.GetOwned(context.Background(), owner, ownID)
+	if readErr != nil {
+		t.Fatalf("改完再读失败: %v", readErr)
+	}
+	if got.Name != name {
+		t.Errorf("改完的名字 = %q，期望 %q", got.Name, name)
+	}
+
+	// 商家不能把规则改成平台作用域或改归属：那是一次合法的校验，但越权。
+	scope := ScopePlatform
+	zero := int64(0)
+	for _, req := range []UpdateRequest{
+		{ID: ownID, Scope: &scope, OwnerUserID: &zero},
+		{ID: ownID, OwnerUserID: &other},
+		{ID: ownID, ChannelID: ptrID(1)},
+	} {
+		if setErr := admin.UpdateOwned(context.Background(), owner, req); setErr == nil {
+			t.Errorf("商家改作用域/归属没有报错: %+v", req)
+		}
+	}
+}
+
+func ptrID(v int64) *int64 { return &v }
+
+// insertChannelScopedRule 直接写库造一条 channel 作用域、owner_user_id 也填上
+// 的规则，并登记用完删掉。
+//
+// 写入路径（Admin.Create / Admin.Update）不接受这种组合，但数据库约束允许它
+// （唯一的约束只管 platform 不得挂 owner）。读路径上「商家只看自己的 merchant
+// 规则」这个判据要靠它才钉得住：只按 owner 过滤时这一条会漏进商家清单。
+func insertChannelScopedRule(t *testing.T, db *sql.DB, owner, channelID int64) int64 {
+	t.Helper()
+
+	var id int64
+	if err := db.QueryRowContext(context.Background(), `
+		INSERT INTO pricing_rules
+			(scope, owner_user_id, channel_id, name, model_patterns, expr)
+		VALUES ('channel', $1, $2, $3, '[]'::jsonb, '{"prompt": 0.4}')
+		RETURNING id`, owner, channelID, unique("rule-channel-owner")).Scan(&id); err != nil {
+		t.Fatalf("插入 channel 作用域夹具失败: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM pricing_rules WHERE id = $1`, id)
+	})
+	return id
+}

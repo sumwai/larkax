@@ -311,22 +311,24 @@ func newAPI(cfg Config, d deps) http.Handler {
 	// 路由层（见 roleGroup），adminapi 自己的 Bearer 鉴权是内部监听那一侧的事。
 	if a.deps.merchantAdmin == nil || a.deps.adminAdmin == nil {
 		passThrough := func(next http.Handler) http.Handler { return next }
-		build := func(prefix string, onlyChannels bool) http.Handler {
+		build := func(prefix string, groups []string) http.Handler {
 			return adminapi.New(adminapi.Config{
-				DB:           cfg.DB,
-				Sealer:       cfg.Sealer,
-				Registry:     cfg.Registry,
-				Logger:       a.log,
-				Prefix:       prefix,
-				Authorize:    passThrough,
-				OnlyChannels: onlyChannels,
+				DB:        cfg.DB,
+				Sealer:    cfg.Sealer,
+				Registry:  cfg.Registry,
+				Logger:    a.log,
+				Prefix:    prefix,
+				Authorize: passThrough,
+				Groups:    groups,
 			})
 		}
 		if a.deps.merchantAdmin == nil {
-			a.deps.merchantAdmin = build(PathPrefix+"merchant/", true)
+			// 商家管自己的渠道、自己的价。模型目录与别名没有归属可过滤。
+			a.deps.merchantAdmin = build(PathPrefix+"merchant/",
+				[]string{adminapi.GroupChannels, adminapi.GroupPricing})
 		}
 		if a.deps.adminAdmin == nil {
-			a.deps.adminAdmin = build(PathPrefix+"admin/", false)
+			a.deps.adminAdmin = build(PathPrefix+"admin/", nil)
 		}
 	}
 
