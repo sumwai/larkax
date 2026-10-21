@@ -1,4 +1,4 @@
-import { useEffect, useState, type ComponentType } from 'react'
+import { useEffect, useRef, useState, type ComponentType } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthProvider'
 import { useI18n } from '../i18n'
@@ -71,6 +71,9 @@ export function AppShell() {
   const mobile = useIsMobile()
   const [manualCollapsed, setManualCollapsed] = useState(false)
   const [drawer, setDrawer] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
   const collapsed = narrow || manualCollapsed
 
   const views = viewsFor(user?.role)
@@ -83,7 +86,28 @@ export function AppShell() {
 
   useEffect(() => {
     setDrawer(false)
+    setMenuOpen(false)
   }, [location.pathname])
+
+  // 账户菜单：Esc 关闭并把焦点交还触发钮，点菜单外同样关闭。
+  useEffect(() => {
+    if (!menuOpen) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setMenuOpen(false)
+      triggerRef.current?.focus()
+    }
+    const onPointerDown = (event: MouseEvent) => {
+      if (menuRef.current?.contains(event.target as Node)) return
+      setMenuOpen(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('mousedown', onPointerDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('mousedown', onPointerDown)
+    }
+  }, [menuOpen])
 
   // `/app` 这一项不能按前缀匹配：它是每个子路由的前缀，会先把设置页之类
   // 没有进导航的页面全抢成「概览」。
@@ -164,8 +188,6 @@ export function AppShell() {
           )}
         </div>
 
-        {!collapsed && switcher}
-
         <nav aria-label={t('common.console')}>
           {view === 'user' ? (
             navGroups.map((group) => (
@@ -201,22 +223,6 @@ export function AppShell() {
             </NavLink>
           </div>
         </nav>
-
-        <div className="side-foot">
-          <Link className="side-user" to={settings} aria-label={t('nav.settings')}>
-            <span className="avatar">{initials(displayName)}</span>
-            <span className="who">
-              <b>{displayName}</b>
-              <span>{user?.email ?? user?.username}</span>
-            </span>
-          </Link>
-          <button className="side-user" onClick={signOut} aria-label={t('nav.logout')}>
-            <IconLogout size={16} />
-            <span className="who">
-              <b>{t('nav.logout')}</b>
-            </span>
-          </button>
-        </div>
       </aside>
 
       <div className="app-main">
@@ -230,9 +236,39 @@ export function AppShell() {
             <IconMenu size={20} />
           </button>
           <b>{t(current)}</b>
-          <Link to={settings} className="avatar" aria-label={t('nav.settings')}>
-            {initials(displayName)}
-          </Link>
+          <div className="topbar-right">
+            {!mobile && switcher}
+            {mobile ? (
+              <Link to={settings} className="avatar" aria-label={t('nav.settings')}>
+                {initials(displayName)}
+              </Link>
+            ) : (
+              <div className="account" ref={menuRef}>
+                <button
+                  ref={triggerRef}
+                  className="account-trigger"
+                  aria-haspopup="menu"
+                  aria-expanded={menuOpen}
+                  onClick={() => setMenuOpen((open) => !open)}
+                >
+                  <span className="avatar">{initials(displayName)}</span>
+                  <span className="account-name">{displayName}</span>
+                </button>
+                {menuOpen && (
+                  <div className="account-menu" role="menu" aria-label={t('nav.account')}>
+                    <Link role="menuitem" to={settings} onClick={() => setMenuOpen(false)}>
+                      <IconSettings size={15} />
+                      {t('nav.settings')}
+                    </Link>
+                    <button role="menuitem" onClick={signOut}>
+                      <IconLogout size={15} />
+                      {t('nav.logout')}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </header>
 
         <main className="app-content">

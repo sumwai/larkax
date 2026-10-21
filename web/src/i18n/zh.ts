@@ -33,6 +33,7 @@ export const zh = {
   'nav.menu': '菜单',
   'nav.collapse': '收起侧边栏',
   'nav.expand': '展开侧边栏',
+  'nav.account': '账户',
   'nav.logout': '退出登录',
 
   'status.active': '运行中',

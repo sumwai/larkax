@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuthProvider } from '../auth/AuthProvider'
@@ -45,7 +45,7 @@ async function renderShell(role: 'user' | 'merchant' | 'admin', path = '/app') {
       </ToastProvider>
     </I18nProvider>,
   )
-  // 会话恢复完、账号名出现之后再看视图切换（名字在顶栏与侧栏各出现一次）。
+  // 会话恢复完、账号名出现之后再看视图切换（名字在顶栏的账户区）。
   await screen.findAllByText(`${role}-account`)
 }
 
@@ -95,5 +95,59 @@ describe('AppShell 视图切换', () => {
       expect(screen.queryAllByRole('link', { name: label })).toHaveLength(0)
     }
     expect(screen.queryByText('平台管理')).not.toBeInTheDocument()
+  })
+})
+
+describe('AppShell 桌面端顶栏', () => {
+  beforeEach(() => {
+    mocks.session.mockReset()
+  })
+
+  it('账户菜单能打开，菜单里是设置与退出登录，Esc 关掉并把焦点还给触发钮', async () => {
+    await renderShell('user')
+    const trigger = screen.getByRole('button', { name: /user-account/ })
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+
+    fireEvent.click(trigger)
+    expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    const menu = screen.getByRole('menu', { name: '账户' })
+    expect(within(menu).getByRole('menuitem', { name: '设置' })).toBeInTheDocument()
+    expect(within(menu).getByRole('menuitem', { name: '退出登录' })).toBeInTheDocument()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    expect(trigger).toHaveFocus()
+  })
+
+  it('视图切换器在顶栏，侧栏里没有第二份', async () => {
+    await renderShell('admin', '/app/admin/channels')
+    const topbar = screen.getByRole('banner')
+    const switcher = within(topbar).getByRole('group', { name: '控制台' })
+    for (const label of ['用户', '商家', '管理']) {
+      expect(within(switcher).getByRole('button', { name: label })).toBeInTheDocument()
+    }
+
+    const sidebar = screen.getByRole('complementary')
+    expect(within(sidebar).queryByRole('group', { name: '控制台' })).not.toBeInTheDocument()
+    // 账户与退出也从侧栏搬走了。
+    expect(within(sidebar).queryByRole('menuitem', { name: '退出登录' })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['/app/keys', 'API 密钥'],
+    ['/app/usage', '用量'],
+  ])('%s 的顶栏标题是「%s」', async (path, title) => {
+    await renderShell('user', path)
+    expect(within(screen.getByRole('banner')).getByText(title)).toBeInTheDocument()
+  })
+
+  it('收起侧栏后 logo 仍是可点的按钮，点一下展开', async () => {
+    await renderShell('user')
+    fireEvent.click(screen.getByRole('button', { name: '收起侧边栏' }))
+
+    const logo = screen.getByRole('button', { name: '展开侧边栏' })
+    fireEvent.click(logo)
+    expect(screen.getByRole('button', { name: '收起侧边栏' })).toBeInTheDocument()
   })
 })
