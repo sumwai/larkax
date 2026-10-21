@@ -4,6 +4,7 @@ import { api } from '../api'
 import { useI18n } from '../i18n'
 import { useAsync } from '../hooks/useAsync'
 import { formatCompact } from '../lib/format'
+import { encodeModelName } from '../lib/modelName'
 import type { MessageKey } from '../i18n/zh'
 import { Alert, Button, Empty, PageHead, Skeleton } from '../components/ui'
 import { IconModels, IconSearch } from '../components/icons'
@@ -21,11 +22,11 @@ const CAPABILITY_ORDER = ['vision', 'tools', 'reasoning', 'caching']
 /**
  * 详情的地址。
  *
- * 规范名可能带 `/`（`vendor/model` 这类），所以原样拼进路径、由详情路由的
- * splat 接住；编码成 `%2F` 之后有些浏览器会解码回斜杠，有些不会。
+ * 规范名可能带 `/`（`vendor/model` 这类），所以按段编码、把斜杠留给详情路由
+ * 的 splat；其余字符交给 `encodeModelName`，免得 `?` 与 `#` 把地址截断。
  */
 function detailPath(name: string): string {
-  return `/app/models/${name}`
+  return `/app/models/${encodeModelName(name)}`
 }
 
 function modalityList(values: string[] | undefined, none: string): string {

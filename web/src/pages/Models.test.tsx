@@ -144,4 +144,17 @@ describe('模型列表', () => {
     expect(gpt).toHaveAttribute('href', '/app/models/gpt-4.1')
     expect(gpt).toHaveTextContent('gpt-4.1')
   })
+
+  it('规范名里的 ?、#、%、空格按段编码，斜杠留给详情路由', async () => {
+    mocks.models.mockResolvedValue({
+      currency: 'USD',
+      reference_at: '2026-10-21T09:00:00Z',
+      items: [{ ...ITEMS[1], name: 'acme/weird?name#1 %2', display_name: 'Weird' }],
+    })
+    renderModels()
+
+    const row = await screen.findByRole('link', { name: /Weird/ })
+    // 不编码的话 `?` 与 `#` 会把地址截成查询串或片段，点进去落到别的页。
+    expect(row).toHaveAttribute('href', '/app/models/acme/weird%3Fname%231%20%252')
+  })
 })

@@ -89,15 +89,50 @@ describe('模型详情', () => {
     renderDetail()
     await screen.findByRole('heading', { name: 'Model X' })
 
-    expect(screen.getByText('推理').closest('li')).toHaveTextContent('支持')
-    expect(screen.getByText('工具调用').closest('li')).toHaveTextContent('不支持')
-    // `null` 是没采集过，与明确不支持的 `false` 分开显示。
-    expect(screen.getByText('视觉').closest('li')).toHaveTextContent('未采集')
-    expect(screen.getByText('音频').closest('li')).toHaveTextContent('未采集')
+    const pillClass = (label: string) =>
+      screen.getByText(label).closest('li')?.querySelector('.pill')?.className ?? ''
+    // 三种态各用一组配色，只换文案的话这里会撞成同一个 class。
+    expect(pillClass('推理')).toBe('pill ok')
+    expect(pillClass('工具调用')).toBe('pill neutral')
+    expect(pillClass('视觉')).toBe('pill warn')
+    expect(pillClass('音频')).toBe('pill warn')
+    expect(new Set([pillClass('推理'), pillClass('工具调用'), pillClass('视觉')]).size).toBe(3)
 
     // 端点非空时逐条列出。
     expect(screen.getByText('chat')).toBeInTheDocument()
     expect(screen.getByText('messages')).toBeInTheDocument()
+  })
+
+  it('端点声明为 null 时写未采集，是空数组时写明确不支持', async () => {
+    mocks.modelDetail.mockResolvedValue({
+      ...DETAIL,
+      model: {
+        ...DETAIL.model,
+        capabilities: { ...DETAIL.model.capabilities, endpoints: null },
+      },
+    })
+    renderDetail('/app/models/endpoints-null')
+    await screen.findByRole('heading', { name: 'Model X' })
+    const nullRow = document.querySelector('.model-fact-inline')
+    expect(nullRow).toHaveTextContent('端点')
+    expect(nullRow).toHaveTextContent('未采集')
+    expect(nullRow?.querySelector('.pill')?.className).toBe('pill warn')
+  })
+
+  it('端点是空数组时说明一条都不支持，与未采集分开', async () => {
+    mocks.modelDetail.mockResolvedValue({
+      ...DETAIL,
+      model: {
+        ...DETAIL.model,
+        capabilities: { ...DETAIL.model.capabilities, endpoints: [] },
+      },
+    })
+    renderDetail('/app/models/endpoints-empty')
+    await screen.findByRole('heading', { name: 'Model X' })
+    const emptyRow = document.querySelector('.model-fact-inline')
+    expect(emptyRow).toHaveTextContent('明确声明不支持任何端点')
+    expect(emptyRow).not.toHaveTextContent('未采集')
+    expect(emptyRow?.querySelector('.pill')).toBeNull()
   })
 
   it('供应商表保留服务端顺序，平台自营与各维度原样显示', async () => {
@@ -123,8 +158,12 @@ describe('模型详情', () => {
     // 只给规则声明过的维度出列：缓存与推理没有声明，就不出现。
     expect(screen.queryByRole('columnheader', { name: '缓存读取' })).not.toBeInTheDocument()
 
-    // 算不出价的渠道由模型级计数回答。
-    expect(screen.getByText('另有 3 个在供渠道算不出价，没有列入上表。')).toBeInTheDocument()
+    // 算不出价的渠道由模型级计数回答，并说清落到这些渠道的后果。
+    expect(
+      screen.getByText(
+        '另有 3 个在供渠道算不出价，没有列入上表；请求落到这些渠道会被拒绝，因为算不出价就没法计费。',
+      ),
+    ).toBeInTheDocument()
     // 目录里为 0 的上限写「未填」，不写成 0。
     expect(screen.getByText('输入上限').closest('div')).toHaveTextContent('未填')
   })

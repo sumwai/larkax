@@ -288,7 +288,8 @@ export const en: Record<MessageKey, string> = {
   'models.detail.noSuppliersTitle': 'No prices yet',
   'models.detail.noSuppliersBody':
     'Channels supply this model, but none of them has an applicable pricing rule, so there is no unit price to show.',
-  'models.detail.unpriced': '{count} more supplying channels have no price and are not listed above.',
+  'models.detail.unpriced':
+    '{count} more supplying channels have no price and are not listed above; requests routed to them are rejected, because a request that cannot be priced cannot be charged.',
   'models.detail.reasoningOptions': 'Reasoning options',
   'models.detail.reasoningOptionsNone':
     'The catalog declares no reasoning options for this model.',

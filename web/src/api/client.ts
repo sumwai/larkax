@@ -1,3 +1,4 @@
+import { encodeModelName } from '../lib/modelName'
 import type {
   AliasCreateInput,
   AliasUpdateInput,
@@ -311,7 +312,7 @@ export class HttpApiClient implements ApiClient {
 
   /** 规范名可能带 `/`，按段编码但保留斜杠：服务端那条路由是多段通配。 */
   modelDetail(name: string): Promise<ModelDetailResponse> {
-    return this.request<ModelDetailResponse>(`/models/${encodeURI(name)}`)
+    return this.request<ModelDetailResponse>(`/models/${encodeModelName(name)}`)
   }
 
   usageSummary(query: UsageQuery = {}): Promise<UsageSummary> {

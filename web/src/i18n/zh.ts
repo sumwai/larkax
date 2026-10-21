@@ -276,7 +276,8 @@ export const zh = {
   'models.detail.noSuppliersTitle': '还没有报价',
   'models.detail.noSuppliersBody':
     '已经有渠道在供这个模型，但这些渠道都没有适用的计价规则，所以现在还报不出单价。',
-  'models.detail.unpriced': '另有 {count} 个在供渠道算不出价，没有列入上表。',
+  'models.detail.unpriced':
+    '另有 {count} 个在供渠道算不出价，没有列入上表；请求落到这些渠道会被拒绝，因为算不出价就没法计费。',
   'models.detail.reasoningOptions': '推理参数',
   'models.detail.reasoningOptionsNone': '目录里没有为这个模型声明推理参数。',
 
