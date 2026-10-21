@@ -444,6 +444,92 @@ textarea.input {
 .ops-row .actions {
   justify-self: end;
 }
+/* 商家运营页：四格读数。auto-fit 让窄屏自己落到两列，不另写断点。 */
+.kpis.four {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+/* 运营页里带标题的块：标题在上，说明在下。 */
+.ops-block-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.unhealthy-list,
+.reason-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.unhealthy-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+}
+.unhealthy-list > .unhealthy-row:first-child {
+  border-top: 0;
+}
+.reason-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 12.5px;
+  color: var(--warning);
+}
+/* 在供模型：三列，规范名占大头。表头要和行同一条轨道，所以也得是 grid。 */
+.supply-head,
+.supply-row {
+  grid-template-columns: minmax(0, 1.8fr) 120px 120px;
+}
+.supply-head {
+  display: grid;
+  gap: 12px;
+}
+/* 模型名与地址没有空格，窄屏上要能断开，不能顶到下一列。 */
+.supply-row .keyname,
+.upstream-head .keyname {
+  overflow-wrap: anywhere;
+}
+/* 上游按 (type, base_url) 分组成卡片，组内渠道再是一张表。 */
+.upstream + .upstream {
+  margin-top: 12px;
+}
+.upstream-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.upstream-stats {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.upstream-stats b {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.upstream-channels-head,
+.upstream-channel-row {
+  grid-template-columns: minmax(0, 1.6fr) 100px 100px;
+}
+.upstream-channels-head {
+  display: grid;
+  gap: 12px;
+}
+.upstream .table-foot {
+  border-top: 1px solid var(--border);
+}
 /* 表达式错误整行铺开，不挤进某一列。 */
 .ops-row > .alert {
   grid-column: 1 / -1;

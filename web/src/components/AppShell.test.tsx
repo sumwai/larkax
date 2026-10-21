@@ -90,12 +90,11 @@ describe('AppShell 视图切换', () => {
     expect(screen.queryByRole('button', { name: '管理' })).not.toBeInTheDocument()
   })
 
-  it('admin 只有用户与管理，运营导航四组齐全', async () => {
+  it('admin 有用户、商家与管理三个视图，运营导航四组齐全', async () => {
     await renderShell('admin', '/app/admin/channels')
-    for (const label of ['用户', '管理']) {
+    for (const label of ['用户', '商家', '管理']) {
       expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
     }
-    expect(screen.queryByRole('button', { name: '商家' })).not.toBeInTheDocument()
     for (const label of ['渠道', '模型目录', '别名', '计价']) {
       expect(screen.getAllByRole('link', { name: label }).length).toBeGreaterThan(0)
     }
@@ -184,10 +183,10 @@ describe('AppShell 桌面端顶栏', () => {
     await renderShell('admin', '/app/admin/channels')
     const topbar = screen.getByRole('banner')
     const switcher = within(topbar).getByRole('group', { name: '控制台' })
-    for (const label of ['用户', '管理']) {
+    // 管理员也有商家视图，但只有三种主语的那三页（见下一条用例）。
+    for (const label of ['用户', '商家', '管理']) {
       expect(within(switcher).getByRole('button', { name: label })).toBeInTheDocument()
     }
-    expect(within(switcher).queryByRole('button', { name: '商家' })).not.toBeInTheDocument()
 
     const sidebar = screen.getByRole('complementary')
     expect(within(sidebar).queryByRole('group', { name: '控制台' })).not.toBeInTheDocument()

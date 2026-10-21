@@ -584,6 +584,88 @@ export interface MerchantPricingClient {
   updateRule(id: number, input: MerchantRuleUpdateInput): Promise<void>
 }
 
+/* ── 商家运营：概览、上游与在供模型 ────────────────────────────────── */
+
+/**
+ * 上游健康。取组内最差一档：`healthy` < `unknown` < `degraded` < `drained`。
+ *
+ * `unknown` 是「还没探测过」或探测没给结论，与「明确坏了」不是一回事，
+ * 页面上要给不同的文字。
+ */
+export type ChannelHealth = 'healthy' | 'unknown' | 'degraded' | 'drained'
+
+/** 异常渠道的理由。多条同时成立时全部出现。 */
+export type UnhealthyReason =
+  | 'failure_rate'
+  | 'quota_state'
+  | 'probe_failed'
+  | 'consecutive_failures'
+  | 'no_requests_24h'
+
+export interface MerchantOverview {
+  /** 名下未软删的渠道数（含停用的）；管理员会话下是全站。 */
+  channels: number
+  /** 在供的规范模型数，判据与模型清单同源。 */
+  models_in_supply: number
+  /** 站点当地的今天，不是最近 24 小时；`cost` 是售价口径。 */
+  today: { requests: number; cost: Money }
+  /** 最近 24 小时窗口内的异常渠道；正常时是空数组。 */
+  unhealthy_channels: Array<{ id: number; name: string; reasons: UnhealthyReason[] }>
+}
+
+export interface MerchantUpstreamChannel {
+  id: number
+  name: string
+  status: string
+  health: ChannelHealth
+}
+
+/** 按 `(type, base_url)` 归并的一条上游；组内多条渠道是多个账号。 */
+export interface MerchantUpstream {
+  type: string
+  base_url: string
+  health: ChannelHealth
+  requests: number
+  failures: number
+  /** 0..1 的小数，页面只负责换成百分比。 */
+  failure_rate: number
+  channels: MerchantUpstreamChannel[]
+}
+
+export interface MerchantUpstreamsResponse {
+  items: MerchantUpstream[]
+  /** 截断前的总条数。 */
+  total: number
+  truncated: boolean
+}
+
+export interface MerchantModel {
+  model: string
+  display_name: string
+  /** 名下有这个模型在供的渠道数（同址多个账号各算一条）。 */
+  channels: number
+  /**
+   * 有没有一条生效中的商家规则命中它。
+   *
+   * 它回答「配过价没有」，不是「实际按哪条计价」，也不是金额；管理员
+   * 视野下问的是「全平台有没有商家配过」，规则的主人未必在供这个模型。
+   */
+  priced: boolean
+}
+
+export interface MerchantModelsResponse {
+  items: MerchantModel[]
+  total: number
+  truncated: boolean
+}
+
+/** `/api/v1/merchant/overview|upstreams|models`：只读，admin 会话下看全站。 */
+export interface MerchantOpsClient {
+  overview(): Promise<MerchantOverview>
+  listUpstreams(query?: { limit?: number }): Promise<MerchantUpstreamsResponse>
+  listSuppliedModels(query?: { limit?: number }): Promise<MerchantModelsResponse>
+}
+
 export interface PricingCost {
   id: number
   channel_id: number
@@ -745,8 +827,9 @@ export interface ApiClient {
   /** `/api/v1/admin/*` 下的运营资源；账号没有 admin 角色时服务端一律 403。 */
   admin: OpsClient
   /**
-   * `/api/v1/merchant/*`：自有渠道与自己的售价规则。
-   * 范围由服务端限定；模型目录、别名与成本规则在商家前缀下没有路由。
+   * `/api/v1/merchant/*`：自有渠道、自己的售价规则，以及只读的运营概览、
+   * 上游与在供模型。范围由服务端限定；模型目录、别名与成本规则在商家前缀
+   * 下没有路由。管理员会话下后三组给的是全站数据。
    */
-  merchant: ChannelOpsClient & MerchantPricingClient
+  merchant: ChannelOpsClient & MerchantPricingClient & MerchantOpsClient
 }
