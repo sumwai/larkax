@@ -1983,6 +1983,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/assembly` | 71 | 0 | 0 | 10 | 87.65% | 100.00% | 80.1% |
 | `internal/settings` | 27 | 0 | 0 | 4 | 87.10% | 100.00% | 73.6% |
 | `internal/upstream` | 9 | 0 | 0 | 1 | 90.00% | 100.00% | 97.2% |
+| `internal/config` | 43 | 0 | 0 | 0 | 100.00% | 100.00% | 97.2% |
 | `internal/db` | 2 | 0 | 0 | 2 | 50.00% | 100.00% | 84.6% |
 | `internal/dberr` | 3 | 0 | 0 | 0 | 100.00% | 100.00% | 100.0% |
 | `internal/systemone` | 37 | 0 | 0 | 1 | 97.37% | 100.00% | 93.7% |
@@ -2121,6 +2122,14 @@ nil 还是空切片——调用点只做 `append(..., fieldAttrs(...)...)`，差
 不会选到它们；要量只能手工触发（`workflow_dispatch` 的 `packages` 填包名）或
 本地跑。所以表里这四行会停在入库的这一轮，改了它们不会自动更新——动这几个包时
 记得手工重跑并在表里更新。
+
+**`internal/config` 的三条存活都是真实缺口，这一包没有等价变异。** 两条是
+`RedactDSN` 里判断「这串是不是 URL 形式」的 `&&` 链（`config.go:309` 的两个运算符
+各一条）：现有用例只喂过「带 scheme 的 URL」与「没有主机的关键字形式」，从没走过
+「有主机、没有 scheme」那一格，两条变异体于是都能把这种串改道进 URL 分支、让
+`u.String()` 重新转义一遍。第三条是 `dotenv.go:61` 里 `os.Getwd` 的失败判据：
+反过来之后，成功取到的目录会被丢掉，而自动查找 `.env` 正是从这个目录出发的。
+三条都用 `go test -overlay` 造出变异体跑红、还原后跑绿，复跑是 `43 / 0 / 0`。
 
 **`internal/money` 与 `internal/pipeline` 这一轮各多出一条等价，前提都落在零值上。**
 `money.go:376` 的 `bp == 0 || a.units == 0` 改成 `&&`：任一项为 0 时乘积恒为 0，

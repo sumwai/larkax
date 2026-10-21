@@ -514,3 +514,16 @@ func TestEnvFileWriteErrorIsReported(t *testing.T) {
 		t.Errorf("错误信息未点名那个键: %v", err)
 	}
 }
+
+// processEnv 要给出真实的当前目录：自动查找 .env 就是从它出发的，
+// 这里返回空串的话，当前目录里的 .env 永远找不到——而那条路径正是
+// 「在仓库里直接跑命令」最常见的用法。
+func TestProcessEnvReportsWorkingDirectory(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("取当前目录失败: %v", err)
+	}
+	if got := processEnv().dir; got != wd {
+		t.Errorf("processEnv().dir = %q，期望当前目录 %q", got, wd)
+	}
+}
