@@ -87,8 +87,25 @@ and the keys list (empty state plus the one-time secret dialog).
 | `/app/models` | Model catalogue and reference prices (read-only) |
 | `/app/quickstart` | cURL, OpenAI SDK and Anthropic SDK examples |
 | `/app/settings` | Display name, email, password, language, theme, sign out |
+| `/app/merchant/channels` | Merchant view: the channels you own |
+| `/app/merchant/pricing` | Merchant view: your own pricing rules |
+| `/app/merchant/settings` | Account settings, still inside the merchant view |
+| `/app/admin/channels` | Admin view: every channel on the platform |
+| `/app/admin/models` | Admin view: the model catalogue |
+| `/app/admin/aliases` | Admin view: model aliases |
+| `/app/admin/pricing` | Admin view: platform sell-side rules and channel cost rules |
+| `/app/admin/settings` | Account settings, still inside the admin view |
 
+`/app/merchant` and `/app/admin` redirect to the first page of that view.
 `/app/*` redirects to `/login` when there is no session.
+
+Views are scoped by role: a user gets the user view, a merchant gets the user
+and merchant views, and an admin gets the user and admin views. There is no
+merchant view for an admin: merchant pages show only the caller's own
+resources, and the console has no "act as a merchant" mode, so `/app/merchant/*`
+renders the no-permission page instead of listing platform-wide data under
+merchant wording. The view switcher changes which set of pages is shown; it
+never changes what the server allows.
 
 ## Layout
 
