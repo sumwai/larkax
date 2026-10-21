@@ -270,6 +270,7 @@ func TestConflictSentinelsExitFour(t *testing.T) {
 		err  error
 	}{
 		{"auth.ErrUserNotFound", auth.ErrUserNotFound},
+		{"auth.ErrLastAdmin", auth.ErrLastAdmin},
 		{"auth.ErrUsernameTaken", auth.ErrUsernameTaken},
 		{"auth.ErrEmailTaken", auth.ErrEmailTaken},
 		{"auth.ErrKeyNotFound", auth.ErrKeyNotFound},

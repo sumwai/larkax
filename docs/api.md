@@ -281,8 +281,9 @@ active 管理员。对应的装配见 `internal/adminapi` 的 `GroupUsers` 与
 
 - `email` 是打码后的写法（本地部分只留首字符）；`email` 为 `null` 表示这名
   用户没填邮箱。完整邮箱只在详情里给。
-- `last_seen_at` 是该用户所有会话 `last_seen_at` 的最大值，由控制台在每次
-  请求时刷新；从没登录过控制台为 `null`。
+- `last_seen_at` 是该用户所有会话 `last_seen_at` 的最大值。控制台每次请求都会
+  尝试刷新它，但至多每分钟写一次库（`internal/auth` 的 `sessionTouchInterval`），
+  所以它的精度是分钟；从没登录过控制台为 `null`。
 - `next_cursor` 为 `null` 表示没有下一页。**游标不绑定筛选条件**：翻页途中
   改 `query` / `role` / `status`，客户端要从第一页重新取，否则会拿上一组条件
   的位置去翻这一组。
@@ -325,7 +326,7 @@ active 管理员。对应的装配见 `internal/adminapi` 的 `GroupUsers` 与
 | 改**自己的角色** | `400` |
 | 改**自己的状态** | `400`（与上一条文案不同） |
 | 把**最后一个 active 管理员**降级、停用或封禁 | `409` |
-| 目标是 `deletion_requested` / `deleted` | `409`，并说明销户要走 `larkaxctl user delete revert` / 已经不可逆 |
+| 目标是 `deletion_requested` / `deleted` | `409`：前者说明账号正在走销户流程、这一页只管理 active / suspended / banned，要从销户流程撤销；后者说明已经匿名化、不可逆 |
 | 目标不存在，或 `{id}` 不是正整数 | `404` |
 
 「最后一个 active 管理员」= `status = 'active' AND is_admin`。判据落在

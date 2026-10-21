@@ -1,10 +1,11 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"testing"
+	"time"
 )
 
 // 本文件钉住「最后一个 active 管理员」这条判据，以及它的并发形态。
@@ -96,45 +97,140 @@ func TestUpdateUserRejectsRemovingLastActiveAdmin(t *testing.T) {
 	}
 }
 
+// lastAdminWindow* 是一次性的触发器，把那笔撤 admin 的 UPDATE 在触发器里
+// 停住半秒。
+//
+// 为什么需要它：两条 goroutine 只有一个起跑信号的话，「两笔重叠」是碰运气。
+// 调度慢一点、连接建链慢一点，就会有一笔先提交，另一笔照样被拒——用例于是
+// 绿，但证明不了咨询锁有用：把 UpdateUser 里那句 pg_advisory_xact_lock 删
+// 掉，它还是绿。触发器把窗口撑成确定的一段时间，删锁之后 T2 会在 T1 未提交
+// 时数到「除自己外还有 1 个管理员」→ 放行 → 两笔都成功 → 本条用例红。
+//
+// 名字带 test_ 前缀，收尾时删掉：真库是同包共用的，留下触发器会让别的用例
+// 的 UPDATE 也停半秒。
+//
+// 触发器只对 lastAdminWindowUserPrefix 开头的用户名生效：`go test ./...`
+// 会并行跑包，别的包同一时刻也可能在撤管理员。它们停在触发器里不会出错，
+// 但那条 UPDATE 也会出现在 pg_stat_activity 里，可能被当成「T1 已就位」。
+// 把窗口收窄到本用例自己造的两个账号，信号就只可能来自 T1。
+const (
+	lastAdminWindowFunction   = "test_last_admin_window_fn"
+	lastAdminWindowTrigger    = "test_last_admin_window"
+	lastAdminWindowUserPrefix = "last-admin-window-"
+)
+
+// installLastAdminWindow 装上上述触发器，并登记收尾删除。
+func installLastAdminWindow(t *testing.T, store *Store) {
+	t.Helper()
+	ctx := context.WithoutCancel(t.Context())
+	stmts := []string{
+		`CREATE OR REPLACE FUNCTION ` + lastAdminWindowFunction + `() RETURNS trigger
+		   LANGUAGE plpgsql AS $fn$
+		 BEGIN
+		   PERFORM pg_sleep(0.5);
+		   RETURN NEW;
+		 END
+		 $fn$`,
+		`DROP TRIGGER IF EXISTS ` + lastAdminWindowTrigger + ` ON users`,
+		`CREATE TRIGGER ` + lastAdminWindowTrigger + `
+		   BEFORE UPDATE ON users
+		   FOR EACH ROW
+		   WHEN (OLD.is_admin AND NOT NEW.is_admin
+		         AND OLD.username::text LIKE '` + lastAdminWindowUserPrefix + `%')
+		   EXECUTE FUNCTION ` + lastAdminWindowFunction + `()`,
+	}
+	for _, stmt := range stmts {
+		if _, err := store.db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("安装并发窗口触发器失败: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		if _, err := store.db.ExecContext(ctx,
+			`DROP TRIGGER IF EXISTS `+lastAdminWindowTrigger+` ON users`); err != nil {
+			t.Logf("删除窗口触发器失败: %v", err)
+		}
+		if _, err := store.db.ExecContext(ctx,
+			`DROP FUNCTION IF EXISTS `+lastAdminWindowFunction+`()`); err != nil {
+			t.Logf("删除窗口函数失败: %v", err)
+		}
+	})
+}
+
+// createWindowAdmin 建一个用户名带窗口前缀的 admin；触发器只认这个前缀。
+func createWindowAdmin(t *testing.T, store *Store) User {
+	t.Helper()
+	username := lastAdminWindowUserPrefix + uniqueUsername()
+	created, err := store.CreateUser(t.Context(), CreateUserParams{
+		Username: username,
+		Email:    username + "@example.com",
+		Role:     RoleAdmin,
+	})
+	if err != nil {
+		t.Fatalf("建窗口 admin 失败: %v", err)
+	}
+	cleanupUsers(t.Context(), t, store.db, created.ID)
+	return created
+}
+
+// waitForDemotionWindow 等到 T1 停在那条 UPDATE 的触发器里。
+//
+// 判据是 pg_stat_activity：语句仍是 UPDATE users、状态 active、且正在等
+// pg_sleep（wait_event_type = Timeout）。这时 T1 已经取到咨询锁、行还没
+// 提交，正是要的窗口。
+func waitForDemotionWindow(t *testing.T, store *Store) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var n int
+		if err := store.db.QueryRowContext(t.Context(),
+			`SELECT count(*) FROM pg_stat_activity
+			  WHERE datname = current_database()
+			    AND state = 'active'
+			    AND wait_event_type = 'Timeout'
+			    AND query LIKE '%UPDATE users%'`).Scan(&n); err != nil {
+			t.Fatalf("查看 pg_stat_activity 失败: %v", err)
+		}
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("10 秒内没看到 T1 停在触发器窗口里：触发器没建成，或 pg_sleep 没在跑")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestUpdateUserConcurrentDemotionsLeaveOneAdmin(t *testing.T) {
 	ctx := t.Context()
 	store := New(testDB(ctx, t))
 	requireNoOtherActiveAdmins(t, store)
+	installLastAdminWindow(t, store)
 
-	first := createAdmin(t, store)
-	second := createAdmin(t, store)
+	first := createWindowAdmin(t, store)
+	second := createWindowAdmin(t, store)
 
 	no := false
-	start := make(chan struct{})
-	results := make(chan error, 2)
-	var wg sync.WaitGroup
-	for _, id := range []int64{first.ID, second.ID} {
-		wg.Add(1)
-		go func(target int64) {
-			defer wg.Done()
-			<-start
-			_, err := store.UpdateUser(ctx, fmt.Sprint(target),
-				UpdateUserParams{IsAdmin: &no, IsMerchant: &no})
-			results <- err
-		}(id)
-	}
-	close(start)
-	wg.Wait()
-	close(results)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := store.UpdateUser(ctx, fmt.Sprint(first.ID),
+			UpdateUserParams{IsAdmin: &no, IsMerchant: &no})
+		firstDone <- err
+	}()
 
-	var succeeded, rejected int
-	for err := range results {
-		switch {
-		case err == nil:
-			succeeded++
-		case errors.Is(err, ErrLastAdmin):
-			rejected++
-		default:
-			t.Fatalf("并发降级返回了意外的错误: %v", err)
-		}
+	// T1 停住后再起 T2：此时 T1 的咨询锁在手里、行未提交。T2 要么被锁挡到
+	// T1 提交之后（正确实现），要么在 T1 未提交时就数管理员（缺锁）——后者
+	// 会看到 first 还是管理员，于是放行，两笔都成功。
+	waitForDemotionWindow(t, store)
+	_, secondErr := store.UpdateUser(ctx, fmt.Sprint(second.ID),
+		UpdateUserParams{IsAdmin: &no, IsMerchant: &no})
+	firstErr := <-firstDone
+
+	if firstErr != nil {
+		t.Fatalf("先起的那笔降级失败了: %v", firstErr)
 	}
-	if succeeded != 1 || rejected != 1 {
-		t.Fatalf("并发降级成功 %d 笔、被拒 %d 笔，期望各 1 笔", succeeded, rejected)
+	if !errors.Is(secondErr, ErrLastAdmin) {
+		t.Fatalf("后起的那笔得到 %v，期望 ErrLastAdmin", secondErr)
 	}
 
 	var left int64

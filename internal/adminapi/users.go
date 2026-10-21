@@ -84,6 +84,7 @@ type userUpdateRequest struct {
 // 对每个条件做规范化再比对，而漏掉一处（例如 query 的空白折叠）的表现是
 // 「翻到第二页悄悄换了一批人」——不如在文档里写清这个约定。
 func (a *API) listUsers(w http.ResponseWriter, r *http.Request) {
+	usersNoStore(w)
 	q := r.URL.Query()
 
 	limit, err := parseUserLimit(q.Get("limit"))
@@ -146,6 +147,7 @@ func (a *API) listUsers(w http.ResponseWriter, r *http.Request) {
 
 // getUser 读一个用户的详情。
 func (a *API) getUser(w http.ResponseWriter, r *http.Request) {
+	usersNoStore(w)
 	id, ok := parseUserID(r.PathValue("id"))
 	if !ok {
 		// 「不是一个用户 id」与「这个 id 不存在」对调用方是同一件事：
@@ -164,6 +166,7 @@ func (a *API) getUser(w http.ResponseWriter, r *http.Request) {
 
 // updateUser 改一个用户的角色或状态。
 func (a *API) updateUser(w http.ResponseWriter, r *http.Request) {
+	usersNoStore(w)
 	id, ok := parseUserID(r.PathValue("id"))
 	if !ok {
 		a.writeError(w, http.StatusNotFound, "user not found")
@@ -250,13 +253,21 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request) {
 	a.writeUsersJSON(w, detail)
 }
 
-// writeUsersJSON 写一条用户数据，并标成不可缓存。
+// usersNoStore 让这一组的响应不可缓存，**包括错误响应**。
 //
-// 渠道、规则那几组不带宽带头（它们是配置，不是个人信息）；这一组每一条都
-// 带邮箱、余额与用量，浏览器与中间代理都不该留副本。账号被停用之后，一份
-// 缓存里的旧响应还会把「他还能用」展示出去。
-func (a *API) writeUsersJSON(w http.ResponseWriter, body any) {
+// 每个 handler 在入口先调它：这一组每条响应都可能带用户名或邮箱（清单里有
+// 打码邮箱，详情里有完整邮箱、余额），而错误体是同一个请求的另一半——只给
+// 成功路径加头的话，一个 404 / 400 仍然会被浏览器或中间代理留下副本。
+func usersNoStore(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
+}
+
+// writeUsersJSON 写一条用户数据。
+//
+// 这里再设一次 no-store 是入口那道之外的兜底：成功响应一定带着它，即使将来
+// 有人在某个 handler 里漏了入口那一行。
+func (a *API) writeUsersJSON(w http.ResponseWriter, body any) {
+	usersNoStore(w)
 	a.writeJSON(w, http.StatusOK, body)
 }
 

@@ -159,6 +159,11 @@ func TestUsersListPaginatesWithoutGapsOrDuplicates(t *testing.T) {
 		var page usersListPage
 		decodeUsers(t, rec, &page)
 		pages++
+		// 每页不能超过 limit：服务端无视 limit 一次全给时，最后的并集仍相等，
+		// 上面那条断言看不见。
+		if len(page.Items) > 2 {
+			t.Fatalf("limit=2 的一页回了 %d 条：%+v", len(page.Items), page.Items)
+		}
 		for _, item := range page.Items {
 			if first.Username == "" {
 				first = item
@@ -281,6 +286,130 @@ func TestUsersRoleFilterExcludesAdminFromMerchant(t *testing.T) {
 			if page.Items[i].Role != tc.role {
 				t.Errorf("role=%s 第 %d 条折出来的角色是 %q", tc.role, i, page.Items[i].Role)
 			}
+		}
+	}
+}
+
+// TestUsersListReportsLastSeenAt 清单里的 last_seen_at 取该用户会话的最大
+// 活动时刻；从没登录过的是 null。
+func TestUsersListReportsLastSeenAt(t *testing.T) {
+	ctx := t.Context()
+	h := usersTestHandler(t, nil)
+	db := testDB(t)
+	store := auth.New(db)
+
+	seenUser := newUsersTestUser(t, db, auth.RoleUser, "seen")
+	if _, _, err := store.CreateSession(ctx, seenUser.ID, "test-agent", nil); err != nil {
+		t.Fatalf("建会话失败: %v", err)
+	}
+	seen := time.Now().UTC().Add(-90 * time.Minute).Truncate(time.Second)
+	if _, err := db.ExecContext(ctx,
+		`UPDATE user_sessions SET last_seen_at = $2 WHERE user_id = $1`,
+		seenUser.ID, seen); err != nil {
+		t.Fatalf("改 last_seen_at 失败: %v", err)
+	}
+	neverUser := newUsersTestUser(t, db, auth.RoleUser, "neverseen")
+
+	cases := []struct {
+		name string
+		user usersTestUser
+		want *string
+	}{
+		{"登录过", seenUser, strPtr(seen.Format(time.RFC3339))},
+		{"从没登录", neverUser, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := "/api/v1/admin/users?query=" + url.QueryEscape(tc.user.Username)
+			rec := usersCall(t, ctx, h, http.MethodGet, path, 0, nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("状态码 = %d；正文：%s", rec.Code, rec.Body)
+			}
+			var page usersListPage
+			decodeUsers(t, rec, &page)
+			if len(page.Items) != 1 || page.Items[0].ID != tc.user.ID {
+				t.Fatalf("搜 %q 得到 %+v，期望只有 %d", tc.user.Username, page.Items, tc.user.ID)
+			}
+			got := page.Items[0].LastSeenAt
+			if tc.want == nil {
+				if got != nil {
+					t.Errorf("从没登录的用户 last_seen_at = %q，期望 null", *got)
+				}
+				return
+			}
+			if got == nil || *got != *tc.want {
+				t.Errorf("last_seen_at = %v，期望 %q", got, *tc.want)
+			}
+		})
+	}
+}
+
+// TestUsersStatusFilter 状态筛选真的下到了 SQL：active 与 suspended 各只
+// 回自己那一批。
+func TestUsersStatusFilter(t *testing.T) {
+	ctx := t.Context()
+	h := usersTestHandler(t, nil)
+	db := testDB(t)
+	base := uniqueName("status")
+
+	active := newUsersTestUser(t, db, auth.RoleUser, base+"-a")
+	suspended := newUsersTestUser(t, db, auth.RoleUser, base+"-s")
+	if _, err := db.ExecContext(ctx,
+		`UPDATE users SET status = 'suspended' WHERE id = $1`, suspended.ID); err != nil {
+		t.Fatalf("置成 suspended 失败: %v", err)
+	}
+
+	cases := []struct {
+		status string
+		want   int64
+	}{
+		{"active", active.ID},
+		{"suspended", suspended.ID},
+	}
+	for _, tc := range cases {
+		path := "/api/v1/admin/users?query=" + url.QueryEscape(base) + "&status=" + tc.status
+		rec := usersCall(t, ctx, h, http.MethodGet, path, 0, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%s 状态码 = %d；正文：%s", tc.status, rec.Code, rec.Body)
+		}
+		var page usersListPage
+		decodeUsers(t, rec, &page)
+		if len(page.Items) != 1 || page.Items[0].ID != tc.want {
+			t.Errorf("status=%s 得到 %+v，期望只有 %d", tc.status, page.Items, tc.want)
+		}
+		if len(page.Items) == 1 && page.Items[0].Status != tc.status {
+			t.Errorf("status=%s 回了一行 status=%q", tc.status, page.Items[0].Status)
+		}
+	}
+}
+
+// TestUsersResponsesAreNotCacheable 成功与失败响应都带 no-store：这一组的
+// 错误体也可能带着用户名。
+func TestUsersResponsesAreNotCacheable(t *testing.T) {
+	ctx := t.Context()
+	h := usersTestHandler(t, nil)
+	db := testDB(t)
+	u := newUsersTestUser(t, db, auth.RoleUser, "nostore")
+
+	cases := []struct {
+		name string
+		rec  *httptest.ResponseRecorder
+	}{
+		{"清单成功", usersCall(t, ctx, h, http.MethodGet,
+			"/api/v1/admin/users?query="+url.QueryEscape(u.Username), 0, nil)},
+		{"详情成功", usersCall(t, ctx, h, http.MethodGet,
+			fmt.Sprintf("/api/v1/admin/users/%d", u.ID), 0, nil)},
+		{"404", usersCall(t, ctx, h, http.MethodGet,
+			"/api/v1/admin/users/not-a-number", 0, nil)},
+		{"400", usersCall(t, ctx, h, http.MethodGet,
+			"/api/v1/admin/users?limit=0", 0, nil)},
+		{"403", usersCall(t, ctx, h, http.MethodPatch,
+			fmt.Sprintf("/api/v1/admin/users/%d", u.ID), 0, map[string]string{"status": "suspended"})},
+	}
+	for _, tc := range cases {
+		if got := tc.rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s 的 Cache-Control = %q，期望 no-store（状态码 %d）",
+				tc.name, got, tc.rec.Code)
 		}
 	}
 }
