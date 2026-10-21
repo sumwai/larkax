@@ -809,3 +809,55 @@ func TestDefaultLimitsValues(t *testing.T) {
 		t.Errorf("字节上限 = %d/%d，想要都是 4 MiB", DefaultLimits.MaxInputBytes, DefaultLimits.MaxOutputBytes)
 	}
 }
+
+// TestZeroInputLimitMeansNoLimit 钉住「入参上限为 0 表示不设上限」。
+//
+// newRuntime 会把 0 归一成默认值，所以正常构造走不到这一格；这里直接改
+// state（同包用例）模拟一个没有上限的 runtime。两版只在 limit=0 且负载非空
+// 时分得开：`> 0` 放行，`>= 0` 把 0 当成上限，任何非空入参都判超限。
+func TestZeroInputLimitMeansNoLimit(t *testing.T) {
+	m, err := Compile("p", `export default { onRequest(ctx) { return { 字段数: Object.keys(ctx).length }; } };`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := m.NewRuntime(context.Background(), Host{}, nil, Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	rt.state.limits.MaxInputBytes = 0
+
+	var out map[string]any
+	if f := rt.Call(context.Background(), "onRequest", map[string]string{"k": "v"}, &out); f != nil {
+		t.Fatalf("上限为 0 时不该按体积拒: %v", f)
+	}
+	if out["字段数"] != float64(1) {
+		t.Errorf("插件没拿到入参: %v", out)
+	}
+}
+
+// TestCallWithoutInjectedContext 钉住「没有父 ctx 也能调」。
+//
+// injectCtx 由 inject 置上；这里直接清掉，模拟一个没有注入过宿主能力的
+// runtime。两版只在 parent 为 nil 时分得开：`&&` 跳过合并，`||` 会去读
+// context.Cause(nil)。没有父 ctx 是允许的状态，不是每次调用都经过 inject。
+func TestCallWithoutInjectedContext(t *testing.T) {
+	m, err := Compile("p", `export default { onRequest() { return { 有: true }; } };`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := m.NewRuntime(context.Background(), Host{}, nil, Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	rt.state.injectCtx = nil
+
+	var out map[string]any
+	if f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, &out); f != nil {
+		t.Fatalf("没有父 ctx 时不该失败: %v", f)
+	}
+	if out["有"] != true {
+		t.Errorf("插件没有被调到: %v", out)
+	}
+}

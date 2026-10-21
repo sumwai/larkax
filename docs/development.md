@@ -1396,6 +1396,7 @@ bash scripts/check-test-names.sh    # Go 顶层函数声明的名字必须是 AS
 bash scripts/check-lessons-index.sh # LESSONS.md 的索引与 lessons/ 下的正文对得上
 bash scripts/check-docs-index.sh    # docs/README.md 的分组表、development.md 的 TOC 与正文对得上
 bash scripts/check-man-pages.sh     # man/man1 下的手页与命令注册表、cli-reference.md 对得上
+bash scripts/check-mutation-table.sh # 「各包的现状」那张表与 PKGS 的包名集合一致
 scripts/check-mutation.sh           # 变异测试（改动计费/账本时），见下文
 
 # 契约测试：用官方 SDK 当客户端验我们对外响应的形状。要先装 Python 依赖，
@@ -1410,7 +1411,8 @@ go vet -tags=contract ./internal/assembly/
 **改了哪个脚本就跑它自己的自测**：`scripts/check-redlines.test.sh`、
 `check-deadcode.test.sh`、`check-unimported.test.sh`、`check-deadmethods.test.sh`、
 `check-test-names.test.sh`、`check-layering.test.sh`、`check-mutation.test.sh`、
-`check-lessons-index.test.sh`、`check-docs-index.test.sh`、`check-man-pages.test.sh`。
+`check-mutation-table.test.sh`、`check-lessons-index.test.sh`、
+`check-docs-index.test.sh`、`check-man-pages.test.sh`。
 扫描器坏掉时的输出和「干净」一模一样，没有自测就无法证明它还在工作
 （见 [LESSONS.md](../LESSONS.md) 第 2、7 条）。
 
@@ -1468,6 +1470,13 @@ TOC 的每个锚点在文中都有对应标题。前两条是一对，只留一�
 
 哪些标题该进 TOC 是取舍；索引分组的措辞好不好、指向仓库别处的链接（`../…`）
 有没有写错，都不在它里面——这些在脚本开头的「已知边界」里逐条写着，不是漏判。
+
+`scripts/check-mutation-table.sh` 管的是「各包的现状」那张表与 `PKGS` 的包名集合
+是否相等。表不是 `PKGS` 的生成物，而是手工记录：加了包进清单却没补行，那个包从此
+被量而数不在任何地方；表里有行而清单里没有，那一行的数是手工跑的，脚本永远不会
+再量它，下一次改动之后它停在旧值，读表的人却以为随时能复现。两种漂移都不会让别的
+测试失败，所以单独一道门。顺序不参与比较——表按 efficacy 排、清单按优先级排。
+两边任一解析出 0 条时退出 2（「没跑成」），不报通过；每次运行都打印解析出的条数。
 
 `scripts/check-man-pages.sh` 管的是 `man/man1/` 下的手页与它们的来源是否同一次生成
 的。手页是**产物**：名字、分组与一句话来自命令注册表（`cmd/larkaxctl` 的
@@ -1591,7 +1600,9 @@ go test ./internal/ledger/store/
 
 CI 包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`）、覆盖率摘要、
 迁移 up→down→up 往返（真 PostgreSQL）、分层自查及其自测（`check-layering.sh` /
-`check-layering.test.sh`）、红线扫描及其自测、变异测试脚本的自测、不可达符号门禁
+`check-layering.test.sh`）、红线扫描及其自测、变异测试脚本的自测、
+变异清单与文档表格一致性门禁及其自测（`check-mutation-table.sh`）、
+不可达符号门禁
 及其自测（`check-deadcode.sh`）、整包没人 import 的门禁及其自测
 （`check-unimported.sh`）、导出方法调用点门禁及其自测（`check-deadmethods.sh`）、
 测试函数名门禁及其自测（`check-test-names.sh`）、索引与正文一致性门禁及其自测
@@ -1972,6 +1983,10 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 与 `340 / 7 / 0` 两组，差别只在有没有先 `go clean -testcache`。这一轮的数是在清掉
 测试结果缓存之后跑的（见 #773）。
 
+**表里的包名集合必须与脚本的 `PKGS` 一致**（顺序不必：表按 efficacy 排）。这一条
+由 `scripts/check-mutation-table.sh` 机器核对：加包进清单时要同时补行；反过来，
+手工跑出来的行也不能留在表里。
+
 | 包 | killed | 存活 | 超时 | Not covered | Mutator coverage | Test efficacy（递归） | 覆盖率（包内） |
 |---|---|---|---|---|---|---|---|
 | `internal/payment` | 110 | 0 | 0 | 5 | 95.65% | 100.00% | 77.8% |
@@ -1990,7 +2005,7 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/systemone` | 37 | 0 | 0 | 1 | 97.37% | 100.00% | 93.7% |
 | `internal/textshape` | 4 | 0 | 0 | 1 | 80.00% | 100.00% | 100.0% |
 | `internal/channels` | 288 | 1 | 1 | 41 | 87.58% | 99.65% | 76.6% |
-| `internal/plugin/store` | 77 | 1 | 0 | 15 | 83.87% | 98.72% | 72.4% |
+| `internal/plugin/store` | 78 | 0 | 0 | 15 | 83.87% | 100.00% | 72.4% |
 | `internal/calendar` | 150 | 2 | 0 | 14 | 91.57% | 98.68% | 97.8% |
 | `internal/ledger` | 576 | 8 | 0 | 92 | 86.39% | 98.63% | 96.3% |
 | `internal/ledger/store` | 433 | 6 | 0 | 60 | 87.98% | 98.63% | 79.9% |
@@ -2000,16 +2015,17 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/relay` | 112 | 3 | 0 | 7 | 94.26% | 97.39% | 87.7% |
 | `internal/channel` | 313 | 9 | 0 | 22 | 93.60% | 97.20% | 88.5% |
 | `internal/idempotency` | 34 | 1 | 0 | 0 | 100.00% | 97.14% | 83.3% |
-| `internal/plugin/sandbox` | 63 | 2 | 0 | 5 | 92.86% | 96.92% | 93.8% |
+| `internal/plugin/sandbox` | 65 | 0 | 0 | 5 | 92.86% | 100.00% | 93.8% |
 | `internal/route` | 123 | 4 | 0 | 24 | 84.11% | 96.85% | 97.8% |
 | `internal/gateway` | 238 | 9 | 0 | 9 | 96.48% | 96.36% | 95.7% |
 | `internal/observe` | 28 | 1 | 0 | 1 | 96.67% | 96.55% | 94.1% |
-| `internal/plugin/host` | 104 | 4 | 0 | 4 | 96.43% | 96.30% | 94.6% |
+| `internal/plugin/host` | 107 | 1 | 0 | 4 | 96.43% | 99.07% | 94.6% |
 | `internal/snapshot` | 153 | 6 | 0 | 50 | 76.08% | 96.23% | 90.1% |
 | `internal/credential` | 96 | 4 | 0 | 1 | 99.01% | 96.00% | 92.1% |
 | `internal/quota` | 45 | 2 | 0 | 0 | 100.00% | 95.74% | 95.2% |
 | `internal/billing/expr` | 168 | 8 | 0 | 12 | 93.62% | 95.45% | 85.9% |
 | `internal/billing` | 243 | 14 | 0 | 12 | 95.54% | 94.55% | 98.3% |
+| `internal/plans` | 131 | 10 | 0 | 15 | 90.38% | 92.91% | 74.7% |
 | `internal/ratelimit` | 33 | 2 | 0 | 3 | 92.11% | 94.29% | 92.0% |
 | `internal/tokens` | 89 | 14 | 0 | 51 | 66.88% | 86.41% | 97.2% |
 | `internal/money` | 92 | 15 | 0 | 4 | 96.40% | 85.98% | 96.9% |
@@ -2034,28 +2050,36 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 `internal/api` 原先的两个超时就是这么来的（`<-entered` 没有上限），加上限之后
 它们变成 Killed，那一行也从 195/3/2 变成 197/3/0。
 
-**`internal/plugin/store` 那一条存活是结构性的等价。** `generationOrNil` 的两个
-`sql.Null*` 出自 `runningJoin()` 同一个 `LEFT JOIN LATERAL … LIMIT 1` 的同一行，
-而 `plugins.version` 与 `plugins.generation` 在迁移里都是 `NOT NULL`，所以两列的
-`Valid` 恒等，`||` 与 `&&` 同值。这条前提不是只看一眼：`TestPluginJoinColumnsAreNotNull`
-对着 `information_schema` 机器核对，迁移哪天把列改成可空，它会红。
+**`internal/plugin/store` 原先按「前提让它不可达」放过的那一条，现在由直接用例钉住了。**
+`generationOrNil` 的两个 `sql.Null*` 出自 `runningJoin()` 同一个
+`LEFT JOIN LATERAL … LIMIT 1` 的同一行，而 `plugins.version` 与
+`plugins.generation` 在迁移里都是 `NOT NULL`，所以两列的 `Valid` 恒等，
+`||` 与 `&&` 同值。前提成立不等于守卫可以被删：那毕竟是函数自己的判断，不是
+schema 替它做的。`TestGenerationOrNil` 补了「只有版本」与「只有代次」两种单边
+为空的输入，返回都是 nil；schema 那条前提仍由 `TestPluginJoinColumnsAreNotNull`
+对着 `information_schema` 机器核对，列哪天改成可空，它会红。这一行从
+`77 / 1` 变成 `78 / 0`。
 
-**`internal/plugin/host` 那四条存活是同一种形态：改的是边界，改完仍然同值。**
-两条是「退到 rune 边界」循环里的 `cut > 0` → `cut >= 0`：循环只在 `s` 非空时进入，
-而 `s` 恒为合法 UTF-8（插件的 JS 字符串经引擎换码，两侧都换掉非法字节），所以
-`s[0]` 一定是 rune 起点，多查的那一格恒假。一条是 `fieldAttrs` 在空对象上返回
-nil 还是空切片——调用点只做 `append(..., fieldAttrs(...)...)`，差别不进日志。
-一条是数组容量提示里的 `/` → `*`，只影响预分配大小。第一条说的那个
-「`s` 恒为合法 UTF-8」，由 `TestJSStringsAreValidUTF8` 两个方向都钉住。
+**`internal/plugin/host` 只剩数组容量提示那一条等价。** `log.go:259` 把
+「字段总预算 ÷ 单个数值的估长」改成乘法，只改 `make` 的预分配上界，仍被
+`len(keys)` 压着，不进内容、也不参与任何失败判断；换出来的数组一样，
+`TestLogBoundsArrayFieldValues` 钉着结果。
 
-**`internal/plugin/sandbox` 那两条存活也是等价，前提都落在构造路径上。**
-一条是 `Call` 里的 `limit > 0` 改成 `>=`：`runtimeState` 只有 `newRuntime` 一个
-构造点，它先 `normalize`，零值与负值的字节上限都变成默认的 4 MiB，所以读到的
-上限恒大于 0。另一条是合并两个父 ctx 时的 `parent != nil`：`injectCtx` 由
-`newRuntime` 置成 `Background`，`inject` 只在收到非 nil 时覆盖，所以它恒非 nil；
-剩下的差别只在两个 ctx 是同一个时，而那时多做的取消与 `AfterFunc` 登记都是
-`merged` 本来就会随父 ctx 做的同一件事。两条前提各有一条用例钉住
-（`TestNewRuntimeAlwaysNormalizesInputLimit`、`TestInjectCtxIsNeverNil`）。
+另外三条原先也只靠前提放过，现在都由直接用例钉住：`truncateMessage` 与
+`boundedString` 的 `cut > 0` 拿非法 UTF-8 输入钉住
+（`TestTruncationStopsAtZeroForInvalidUTF8`：首字节是续字节时切点一路退到 0，
+`>= 0` 那一版就走到负下标）；`fieldAttrs` 在空对象上返回 nil 还是空切片由
+`TestFieldAttrsReturnsNilForEmptyObject` 钉住——日志行在调用点看来一样，但返回值
+是函数自己的承诺。这一行从 `104 / 4` 变成 `107 / 1`。
+
+**`internal/plugin/sandbox` 那两条守卫现在也由直接用例钉住。** `Call` 里的
+`limit > 0`（0 表示不设上限）与合并两个父 ctx 时的 `parent != nil && parent != ctx`
+（没有父 ctx 是允许的状态）：`runtimeState` 只有 `newRuntime` 一个构造点，它先把
+零值与负值的字节上限归一成默认的 4 MiB，又把 `injectCtx` 置成 `Background`，
+所以正常构造走不到这两格。`TestZeroInputLimitMeansNoLimit` 与
+`TestCallWithoutInjectedContext` 直接改 `runtimeState` 的字段，钉的是守卫本身；
+「构造路径总会归一」那两条前提的用例（`TestNewRuntimeAlwaysNormalizesInputLimit`、
+`TestInjectCtxIsNeverNil`）继续留着。这一行从 `63 / 2` 变成 `65 / 0`。
 
 **`internal/api` 那三条存活也都是等价。** `error.go:352` 的 `secs < 1` 改成 `<= 1`：
 `secs` 只有 0、1、大于 1 三种，等于 1 时两版都返回 1。`response.go:261` 的
