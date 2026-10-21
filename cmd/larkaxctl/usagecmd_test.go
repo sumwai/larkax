@@ -391,15 +391,8 @@ func insertBillingRequestWithRule(t *testing.T, db *sql.DB, requestID string,
 func usageTableLastCell(t *testing.T, out, needle string) string {
 	t.Helper()
 
-	for _, line := range strings.Split(out, "\n") {
-		if !usageRowClock.MatchString(line) || !strings.Contains(line, needle) {
-			continue
-		}
-		fields := strings.Fields(line)
-		return fields[len(fields)-1]
-	}
-	t.Fatalf("表格里没有含 %q 的数据行：\n%s", needle, out)
-	return ""
+	fields := usageRequestRowFields(t, out, needle)
+	return fields[len(fields)-1]
 }
 
 // ruleCellFromDoc 按 docs/cli-reference.md 里 `usage` 那一节写的，把机器可读档的
@@ -834,4 +827,119 @@ func contains(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// insertBillingRequestWithReservations 写一行计费请求并显式给出两笔预留。
+//
+// 通用夹具 insertBillingRequest 把钱固定成 0.02 且不碰 plan_reserved_amount；
+// 这一组要的正是「钱包 0、包有值」那一格，所以两列都由调用方给。
+func insertBillingRequestWithReservations(t *testing.T, db *sql.DB, requestID string,
+	userID int64, model string, startedAt time.Time, wallet, plan string) {
+	t.Helper()
+
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO billing_requests
+			(request_id, user_id, canonical_model, protocol, streamed,
+			 reserved_amount, plan_reserved_amount, reserved_asset, status, started_at)
+		VALUES ($1, $2, $3, 'openai', false, $4::numeric, $5::numeric, 'CNY', 'pending', $6)`,
+		requestID, userID, model, wallet, plan, startedAt); err != nil {
+		t.Fatalf("写计费请求失败: %v", err)
+	}
+}
+
+// usageRequestRowFields 找到含 needle 的那一行计费请求，按空白切开交回来。
+//
+// 调用方一律从**行尾**取栏：末三栏恒在——包预留恒有值，结算与规则可能打 `-`
+// （非空，不影响项数），所以从后面数不会因为时刻自带空格、用户名或模型里出现
+// 空白而错位（见 LESSONS 里「清单表用例按空白项数解析」那一条）。
+func usageRequestRowFields(t *testing.T, out, needle string) []string {
+	t.Helper()
+
+	for _, line := range strings.Split(out, "\n") {
+		if usageRowClock.MatchString(line) && strings.Contains(line, needle) {
+			return strings.Fields(line)
+		}
+	}
+	t.Fatalf("表格里没有含 %q 的数据行：\n%s", needle, out)
+	return nil
+}
+
+// TestUsageRequestsShowsPlanReserved 钉住「钱包预留」与「包预留」两栏并列出现。
+//
+// 两条夹具刻意写成互补的两格：额度包覆盖的在途请求是钱包 0、包有值，而走余额的
+// 是钱包有值、包 0。把包的面值并进钱包那一栏、或者只读 reserved_amount 时，
+// 「包预留」那一条断言会红；只读 plan_reserved_amount 时，钱包那一格会红。
+func TestUsageRequestsShowsPlanReserved(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+
+	userID := createTestUser(t)
+	window := []string{"--user", itoa64(userID),
+		"--from", usageWindowOctFrom.Format(time.RFC3339),
+		"--to", usageWindowOctTo.Format(time.RFC3339)}
+	startedAt := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+
+	planReq := uniqueName("req-plan")
+	walletReq := uniqueName("req-wallet")
+	insertBillingRequestWithReservations(t, db, planReq, userID,
+		uniqueName("model"), startedAt, "0", "2.50")
+	insertBillingRequestWithReservations(t, db, walletReq, userID,
+		uniqueName("model"), startedAt.Add(time.Minute), "1.50", "0")
+
+	// ── 表格 ──
+	out := runUsageRequestsOut(t, window...)
+	if !strings.Contains(out, "钱包预留") || !strings.Contains(out, "包预留") {
+		t.Errorf("表头应当有「钱包预留」与「包预留」两栏：\n%s", out)
+	}
+	// 末四栏依次是：钱包预留、包预留、结算、规则。pending 行的结算与规则都是 `-`。
+	cells := usageRequestRowFields(t, out, planReq)
+	if got := cells[len(cells)-4]; got != "0.00000000" {
+		t.Errorf("%s 的钱包预留 = %q，额度包覆盖的请求应当是 0：\n%s", planReq, got, out)
+	}
+	if got := cells[len(cells)-3]; got != "2.50000000" {
+		t.Errorf("%s 的包预留 = %q，期望 2.50000000：\n%s", planReq, got, out)
+	}
+	cells = usageRequestRowFields(t, out, walletReq)
+	if got := cells[len(cells)-4]; got != "1.50000000" {
+		t.Errorf("%s 的钱包预留 = %q，期望 1.50000000：\n%s", walletReq, got, out)
+	}
+	if got := cells[len(cells)-3]; got != "0.00000000" {
+		t.Errorf("%s 的包预留 = %q，走余额的请求应当是 0：\n%s", walletReq, got, out)
+	}
+
+	// ── 机器可读档 ──
+	// 夹具都在切到 json 之前建好（见 format.go 的 jsonUnsupported）。
+	withFormat(t, formatJSON)
+
+	r := runOnce(t, runUsage, append([]string{"requests"}, window...))
+	if r.err != nil {
+		t.Fatalf("usage requests -o json 失败: %v\nstderr:\n%s", r.err, r.stderr)
+	}
+	assertOnlyJSON(t, r.stdout)
+
+	var doc struct {
+		Requests []struct {
+			RequestID    string `json:"request_id"`
+			Reserved     string `json:"reserved_amount"`
+			PlanReserved string `json:"plan_reserved_amount"`
+		} `json:"requests"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+		t.Fatalf("解不回来: %v\n%s", err, r.stdout)
+	}
+	if len(doc.Requests) != 2 {
+		t.Fatalf("json 里 %d 行，想要 2 行：\n%s", len(doc.Requests), r.stdout)
+	}
+	got := map[string]struct{ wallet, plan string }{}
+	for _, req := range doc.Requests {
+		got[req.RequestID] = struct{ wallet, plan string }{req.Reserved, req.PlanReserved}
+	}
+	if pair := got[planReq]; pair.wallet != "0.00000000" || pair.plan != "2.50000000" {
+		t.Errorf("%s 读到 wallet=%q plan=%q，期望 0 与 2.50000000：\n%s",
+			planReq, pair.wallet, pair.plan, r.stdout)
+	}
+	if pair := got[walletReq]; pair.wallet != "1.50000000" || pair.plan != "0.00000000" {
+		t.Errorf("%s 读到 wallet=%q plan=%q，期望 1.50000000 与 0：\n%s",
+			walletReq, pair.wallet, pair.plan, r.stdout)
+	}
 }
