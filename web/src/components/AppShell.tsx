@@ -68,7 +68,10 @@ export function AppShell() {
   const collapsed = narrow || manualCollapsed
 
   const views = viewsFor(user?.role)
-  const view = viewOfPath(location.pathname)
+  const routeView = viewOfPath(location.pathname)
+  // 地址栏可以直接敲进账号没有的视图：那一页画的是无权限，侧栏也不该把那一组
+  // 入口列出来。可用的视图与切换器同源，不另写一份角色判断。
+  const view = views.includes(routeView) ? routeView : views[views.length - 1]
   const navItems: NavItem[] = view === 'user' ? APP_NAV : OPS_NAV[view]
 
   useEffect(() => {
@@ -98,7 +101,7 @@ export function AppShell() {
       {views.map((item) => (
         <button
           key={item}
-          aria-pressed={view === item}
+          aria-pressed={routeView === item}
           onClick={() => navigate(homeOf(item))}
         >
           {t(`view.${item}` as MessageKey)}

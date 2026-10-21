@@ -305,6 +305,12 @@ export const en: Record<MessageKey, string> = {
   'ops.serverError': 'The server is temporarily unavailable. Try again later.',
   'ops.loadFailed': 'Could not load this page.',
   'ops.noAccess': 'This view is outside your permissions.',
+  'ops.noAccessNext': 'Switch to a view you can access, or go back to the overview.',
+  'ops.backToOverview': 'Back to overview',
+  'ops.error.unauthorized': 'Your session has expired. Sign in again.',
+  'ops.error.forbidden': 'You do not have permission to access this resource.',
+  'ops.error.notFound':
+    'This resource was not found. It may have been deleted, or it is not yours.',
   'ops.confirmCreate': 'Confirm creation',
   'ops.confirmSave': 'Confirm save',
   'ops.create': 'Create',

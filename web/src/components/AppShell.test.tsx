@@ -84,4 +84,12 @@ describe('AppShell 视图切换', () => {
       expect(screen.queryAllByRole('link', { name: label })).toHaveLength(0)
     }
   })
+
+  it('merchant 落在管理视图的地址上时，侧栏也不列管理组入口', async () => {
+    await renderShell('merchant', '/app/admin/channels')
+    for (const label of ['模型目录', '别名', '计价']) {
+      expect(screen.queryAllByRole('link', { name: label })).toHaveLength(0)
+    }
+    expect(screen.queryByText('平台管理')).not.toBeInTheDocument()
+  })
 })
