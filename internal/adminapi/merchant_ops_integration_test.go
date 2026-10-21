@@ -22,11 +22,15 @@ import (
 // merchantSurface 装一份控制台 merchant 组的形状：渠道 + 计价 + 概览。
 func merchantSurface(t *testing.T, timezone string) http.Handler {
 	t.Helper()
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		t.Fatalf("加载时区 %q 失败: %v", timezone, err)
+	}
 	return testSurface(t, Config{
 		Prefix:    "/api/v1/merchant/",
 		Authorize: func(next http.Handler) http.Handler { return next },
 		Groups:    []string{GroupChannels, GroupPricing, GroupOverview},
-		Timezone:  timezone,
+		Loc:       loc,
 	})
 }
 

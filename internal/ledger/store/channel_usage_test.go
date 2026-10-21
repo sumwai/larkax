@@ -153,6 +153,8 @@ func TestChannelUsageTotalsScopesToOwner(t *testing.T) {
 		Cost: "2.50", CreatedAt: at,
 	})
 	// 没有渠道的事件：JOIN channels 把它丢掉，两个商家的合计里都不该有它。
+	// 已结算请求今天不会产生这种行（写入侧只在渠道为 0 时写 NULL，而那种
+	// 请求进不了这张表）；这条断言钉的是读侧口径，不是常态数据形态。
 	seedUsageEvent(ctx, t, db, usageEventFixture{
 		RequestID: requestIDOf("chown-none"), Model: "gpt-4o",
 		Cost: "9.99", CreatedAt: at,

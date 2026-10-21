@@ -118,10 +118,13 @@ type Config struct {
 	// 它只影响读：钱包里没有这一品种时余额显示 0（与 /api/v1/wallet 同口径）。
 	Currency string
 
-	// Timezone 是站点时区的 IANA 名（如 `Asia/Shanghai`），概览的「今天」
-	// 按它切日。为空或解析失败时按 UTC——没有站点时区时，UTC 是唯一一个
-	// 不需要额外假设的答案。
-	Timezone string
+	// Loc 是概览切「今天」用的站点时区，由装配方解析一次后传进来。
+	//
+	// 这里收 *time.Location 而不是字符串：收字符串就有第二次解析、第二个
+	// 回落口径，而 /meta 报的时区与概览切日用的时区必须来自同一个值。
+	// 注册 overview 组却没给 Loc 是装配错误（New 会 panic）；不注册这一组的
+	// 装配（内部管理面）不需要它。
+	Loc *time.Location
 }
 
 // tokenSource 提供当前令牌的 verifier。
@@ -146,7 +149,7 @@ type API struct {
 	ledger       *store.Store
 	currency     string
 
-	// loc 是概览切「今天」用的时区；见 Config.Timezone。
+	// loc 是概览切「今天」用的时区；见 Config.Loc。
 	loc *time.Location
 }
 
@@ -176,7 +179,7 @@ func New(cfg Config) http.Handler {
 		users:        auth.New(cfg.DB),
 		ledger:       store.New(cfg.DB),
 		currency:     cfg.Currency,
-		loc:          overviewLocation(cfg.Timezone, cfg.Logger),
+		loc:          cfg.Loc,
 	}
 	if a.currency == "" {
 		a.currency = "CNY"
@@ -185,6 +188,9 @@ func New(cfg Config) http.Handler {
 	mux := http.NewServeMux()
 
 	groups, all := groupSet(cfg.Groups)
+	if groups[GroupOverview] && cfg.Loc == nil {
+		panic("adminapi: 注册 overview 组时必须给 Loc——概览的「今天」按它切日")
+	}
 	if all || groups[GroupChannels] {
 		mux.HandleFunc("GET "+prefix+"channels", a.listChannels)
 		mux.HandleFunc("POST "+prefix+"channels", a.createChannel)

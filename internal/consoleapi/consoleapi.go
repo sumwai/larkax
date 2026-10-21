@@ -283,6 +283,25 @@ func New(cfg Config) http.Handler {
 //
 // 与 New 分开是为了让测试只替换下层，不替换这一层要验的东西（会话中间件、
 // CSRF、参数解析、响应形状）。测试造零个数据库。
+// adminConfig 是控制台两组角色路面的 adminapi 装配参数。
+//
+// Loc 直接传 a.loc：站点时区只在本包解析一次（空配置在 newAPI 里回落成
+// Asia/Shanghai，见 /meta）。这里不转成字符串再让 adminapi 解析第二遍——
+// 那样两个回落口径迟早对不上，而「今天」与 /meta 报的时区必须同源。
+func (a *API) adminConfig(cfg Config, prefix string, groups []string) adminapi.Config {
+	return adminapi.Config{
+		DB:        cfg.DB,
+		Sealer:    cfg.Sealer,
+		Registry:  cfg.Registry,
+		Logger:    a.log,
+		Prefix:    prefix,
+		Authorize: func(next http.Handler) http.Handler { return next },
+		Groups:    groups,
+		Currency:  a.currency,
+		Loc:       a.loc,
+	}
+}
+
 func newAPI(cfg Config, d deps) http.Handler {
 	a := &API{
 		log:          cfg.Logger,
@@ -332,21 +351,8 @@ func newAPI(cfg Config, d deps) http.Handler {
 	// 角色组的资源 handler。放行中间件在这里传：会话与角色的判据属于本包的
 	// 路由层（见 roleGroup），adminapi 自己的 Bearer 鉴权是内部监听那一侧的事。
 	if a.deps.merchantAdmin == nil || a.deps.adminAdmin == nil {
-		passThrough := func(next http.Handler) http.Handler { return next }
 		build := func(prefix string, groups []string) http.Handler {
-			return adminapi.New(adminapi.Config{
-				DB:        cfg.DB,
-				Sealer:    cfg.Sealer,
-				Registry:  cfg.Registry,
-				Logger:    a.log,
-				Prefix:    prefix,
-				Authorize: passThrough,
-				Groups:    groups,
-				Currency:  a.currency,
-				// 概览的「今天」按站点时区切：与 meta 端点给前端的那个
-				// 时区是同一个值，两处不各读一次配置。
-				Timezone: cfg.Timezone,
-			})
+			return adminapi.New(a.adminConfig(cfg, prefix, groups))
 		}
 		if a.deps.merchantAdmin == nil {
 			// 商家管自己的渠道、自己的价，看自己那一页的概览与上游。

@@ -3,7 +3,6 @@ package adminapi
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -44,26 +43,6 @@ const (
 	reasonConsecutiveFailures = "consecutive_failures"
 	reasonNoRequests          = "no_requests_24h"
 )
-
-// overviewLocation 解析站点时区；为空或解析失败时按 UTC。
-//
-// 解析失败不阻止装配：概览仍然可用，只是「今天」按 UTC 切。这与计费里
-// 「时区配置读不出来就告警并继续」同一方向——一个展示口径不该让整页 503。
-func overviewLocation(name string, logger *slog.Logger) *time.Location {
-	if name == "" {
-		return time.UTC
-	}
-	loc, err := time.LoadLocation(name)
-	if err != nil {
-		if logger == nil {
-			logger = slog.Default()
-		}
-		logger.Warn("站点时区解析失败，概览的「今天」按 UTC 算",
-			"timezone", name, "error", err)
-		return time.UTC
-	}
-	return loc
-}
 
 // todayWindow 返回站点当地今天的 [起, 止)。
 //
@@ -274,16 +253,22 @@ func groupUpstreams(infos []channels.ChannelInfo,
 
 	for _, info := range infos {
 		k := key{typ: info.Type, baseURL: info.BaseURL}
+		h := health[info.ID]
+		// 清单与健康是两条语句：两步之间被软删或改了归属的渠道，清单里有、
+		// 健康里没有，零值会是空串。空串不在对外那四档里，出口归一成 unknown
+		// ——它与「还没探测过」是同一件事。
+		if h.Health == "" {
+			h.Health = channels.HealthUnknown
+		}
 		i, ok := index[k]
 		if !ok {
 			i = len(out)
 			index[k] = i
 			out = append(out, upstreamJSON{
-				Type: info.Type, BaseURL: info.BaseURL, Health: health[info.ID].Health,
+				Type: info.Type, BaseURL: info.BaseURL, Health: h.Health,
 				Channels: make([]upstreamChannelJSON, 0, 1),
 			})
 		}
-		h := health[info.ID]
 		group := &out[i]
 		group.Requests += h.Requests
 		group.Failures += h.Failures

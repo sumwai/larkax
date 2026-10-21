@@ -3,6 +3,7 @@ package adminapi
 import (
 	"encoding/json"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -165,6 +166,42 @@ func TestGroupUpstreamsUnknownIsWorseThanHealthy(t *testing.T) {
 	})
 	if len(groups) != 1 || groups[0].Health != "unknown" {
 		t.Fatalf("组健康 = %+v，期望 unknown", groups)
+	}
+}
+
+// TestNewRequiresLocationForOverviewGroup 钉住装配期的错：注册了 overview
+// 组却没收 Loc 时，构造就报错——不然「今天」会按零值时区切，而那种错
+// 要到有人打开运营页才看得出来。
+func TestNewRequiresLocationForOverviewGroup(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("注册 overview 组却没给 Loc，构造没有报错")
+		}
+		if msg, ok := r.(string); !ok || !strings.Contains(msg, "overview") {
+			t.Fatalf("panic = %v，期望点出 overview 组", r)
+		}
+	}()
+	New(Config{Groups: []string{GroupOverview}})
+}
+
+// TestGroupUpstreamsDefaultsMissingHealth 钉住出口枚举：清单与健康是两条
+// 语句，健康里没有这条渠道时不能写出空串——空串不在对外那四档里。
+func TestGroupUpstreamsDefaultsMissingHealth(t *testing.T) {
+	infos := []channels.ChannelInfo{{
+		ID: 1, Name: "ch", Type: "openai",
+		BaseURL: "https://missing.example.com/v1", Status: "enabled",
+	}}
+	groups := groupUpstreams(infos, nil)
+	if len(groups) != 1 {
+		t.Fatalf("分组数 = %d，期望 1", len(groups))
+	}
+	if groups[0].Health != channels.HealthUnknown {
+		t.Errorf("组健康 = %q，期望 %q", groups[0].Health, channels.HealthUnknown)
+	}
+	if groups[0].Channels[0].Health != channels.HealthUnknown {
+		t.Errorf("渠道健康 = %q，期望 %q",
+			groups[0].Channels[0].Health, channels.HealthUnknown)
 	}
 }
 
