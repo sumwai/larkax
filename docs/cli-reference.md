@@ -1053,8 +1053,8 @@ Key 能用哪些订阅、一个用户的扣费顺序。
 `requests` 的预留分成并列的两栏。`钱包预留` 是钱从账户余额冻住的那部分
 （`billing_requests.reserved_amount`）：额度包覆盖的请求在这一栏是 0，钱一分没冻。
 `包预留` 是这笔请求占着的额度包面值（`plan_reserved_amount`）。两个数不合并——
-加在一起就答不了「钱包冻了多少」这个问题。机器可读档里对应 `reserved_amount`
-与 `plan_reserved_amount`。
+加在一起就答不了「钱包冻了多少」这个问题。机器可读档里
+对应 `reserved_amount` 与 `plan_reserved_amount`。
 
 `requests` 的每一行还给出定这一单价的**规则 id**（机器可读档里是 `pricing_rule_id`，
 表格里那一栏叫 `规则`）。规则事后可变，所以账单要能回答「当时按哪条规则算的」这个

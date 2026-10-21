@@ -391,15 +391,8 @@ func insertBillingRequestWithRule(t *testing.T, db *sql.DB, requestID string,
 func usageTableLastCell(t *testing.T, out, needle string) string {
 	t.Helper()
 
-	for _, line := range strings.Split(out, "\n") {
-		if !usageRowClock.MatchString(line) || !strings.Contains(line, needle) {
-			continue
-		}
-		fields := strings.Fields(line)
-		return fields[len(fields)-1]
-	}
-	t.Fatalf("表格里没有含 %q 的数据行：\n%s", needle, out)
-	return ""
+	fields := usageRequestRowFields(t, out, needle)
+	return fields[len(fields)-1]
 }
 
 // ruleCellFromDoc 按 docs/cli-reference.md 里 `usage` 那一节写的，把机器可读档的
@@ -856,9 +849,9 @@ func insertBillingRequestWithReservations(t *testing.T, db *sql.DB, requestID st
 
 // usageRequestRowFields 找到含 needle 的那一行计费请求，按空白切开交回来。
 //
-// 调用方一律从**行尾**取栏：末三栏（包预留、结算、规则）都有值，没值的那两栏
-// 打 `-`，所以从后面数不会因为时刻自带空格、用户名或模型里出现空白而错位
-// （见 LESSONS 里「清单表用例按空白项数解析」那一条）。
+// 调用方一律从**行尾**取栏：末三栏恒在——包预留恒有值，结算与规则可能打 `-`
+// （非空，不影响项数），所以从后面数不会因为时刻自带空格、用户名或模型里出现
+// 空白而错位（见 LESSONS 里「清单表用例按空白项数解析」那一条）。
 func usageRequestRowFields(t *testing.T, out, needle string) []string {
 	t.Helper()
 
