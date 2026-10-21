@@ -626,6 +626,8 @@ textarea.input {
   font: inherit;
   text-align: left;
   cursor: pointer;
+  /* 老 Safari 对 `<button>` 的原生外观复位不完全，显式关掉。 */
+  appearance: none;
 }
 .brand:hover {
   color: var(--accent);

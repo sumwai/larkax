@@ -80,7 +80,8 @@ export function AppShell() {
   const routeView = viewOfPath(location.pathname)
   // 地址栏可以直接敲进账号没有的视图：那一页画的是无权限，侧栏也不该把那一组
   // 入口列出来。可用的视图与切换器同源，不另写一份角色判断。
-  const view = views.includes(routeView) ? routeView : views[views.length - 1]
+  const allowed = views.includes(routeView)
+  const view = allowed ? routeView : views[views.length - 1]
   const navItems: NavItem[] = view === 'user' ? APP_NAV : OPS_NAV[view]
   const settings = settingsOf(view)
 
@@ -111,14 +112,19 @@ export function AppShell() {
 
   // `/app` 这一项不能按前缀匹配：它是每个子路由的前缀，会先把设置页之类
   // 没有进导航的页面全抢成「概览」。
-  const current =
-    [...navItems]
-      .sort((a, b) => b.to.length - a.to.length)
-      .find((item) =>
-        item.to === '/app'
-          ? location.pathname === item.to
-          : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`),
-      )?.key ?? (location.pathname === settings ? 'nav.settings' : navItems[0].key)
+  //
+  // 敲进账号没有的视图时，页面正文是无权限提示；标题跟着写「无权限」，
+  // 而不是回落到这个视图的第一项（那会显示「渠道」，与正文对不上）。
+  const matched = [...navItems]
+    .sort((a, b) => b.to.length - a.to.length)
+    .find((item) =>
+      item.to === '/app'
+        ? location.pathname === item.to
+        : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`),
+    )?.key
+  const current: MessageKey =
+    matched ??
+    (location.pathname === settings ? 'nav.settings' : allowed ? navItems[0].key : 'nav.noAccess')
 
   const signOut = async () => {
     await logout()
@@ -132,7 +138,7 @@ export function AppShell() {
       {views.map((item) => (
         <button
           key={item}
-          aria-pressed={routeView === item}
+          aria-pressed={view === item}
           onClick={() => navigate(homeOf(item))}
         >
           {t(`view.${item}` as MessageKey)}
@@ -247,7 +253,6 @@ export function AppShell() {
                 <button
                   ref={triggerRef}
                   className="account-trigger"
-                  aria-haspopup="menu"
                   aria-expanded={menuOpen}
                   onClick={() => setMenuOpen((open) => !open)}
                 >
@@ -255,12 +260,12 @@ export function AppShell() {
                   <span className="account-name">{displayName}</span>
                 </button>
                 {menuOpen && (
-                  <div className="account-menu" role="menu" aria-label={t('nav.account')}>
-                    <Link role="menuitem" to={settings} onClick={() => setMenuOpen(false)}>
+                  <div className="account-menu">
+                    <Link to={settings} onClick={() => setMenuOpen(false)}>
                       <IconSettings size={15} />
                       {t('nav.settings')}
                     </Link>
-                    <button role="menuitem" onClick={signOut}>
+                    <button type="button" onClick={signOut}>
                       <IconLogout size={15} />
                       {t('nav.logout')}
                     </button>

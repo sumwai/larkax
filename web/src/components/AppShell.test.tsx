@@ -111,28 +111,68 @@ describe('AppShell 桌面端顶栏', () => {
 
     fireEvent.click(trigger)
     expect(trigger).toHaveAttribute('aria-expanded', 'true')
-    const menu = screen.getByRole('menu', { name: '账户' })
-    expect(within(menu).getByRole('menuitem', { name: '设置' })).toBeInTheDocument()
-    expect(within(menu).getByRole('menuitem', { name: '退出登录' })).toBeInTheDocument()
+    const account = trigger.closest('.account') as HTMLElement
+    expect(within(account).getByRole('link', { name: '设置' })).toBeInTheDocument()
+    expect(within(account).getByRole('button', { name: '退出登录' })).toBeInTheDocument()
 
     fireEvent.keyDown(document, { key: 'Escape' })
-    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    expect(within(account).queryByRole('button', { name: '退出登录' })).not.toBeInTheDocument()
     expect(trigger).toHaveAttribute('aria-expanded', 'false')
     expect(trigger).toHaveFocus()
+  })
+
+  it('点菜单外也把菜单关掉', async () => {
+    await renderShell('user')
+    const trigger = screen.getByRole('button', { name: /user-account/ })
+    fireEvent.click(trigger)
+    const account = trigger.closest('.account') as HTMLElement
+    expect(within(account).getByRole('button', { name: '退出登录' })).toBeInTheDocument()
+
+    fireEvent.mouseDown(document.body)
+    expect(within(account).queryByRole('button', { name: '退出登录' })).not.toBeInTheDocument()
+  })
+
+  it('商家从账户菜单进设置，落在商家视图的设置页', async () => {
+    await renderShell('merchant', '/app/merchant/channels')
+    const trigger = screen.getByRole('button', { name: /merchant-account/ })
+    fireEvent.click(trigger)
+
+    const account = trigger.closest('.account') as HTMLElement
+    const settingsLink = within(account).getByRole('link', { name: '设置' })
+    expect(settingsLink).toHaveAttribute('href', '/app/merchant/settings')
+
+    fireEvent.click(settingsLink)
+    // 换路由之后菜单自己收起来。
+    expect(within(account).queryByRole('link', { name: '设置' })).not.toBeInTheDocument()
   })
 
   it('视图切换器在顶栏，侧栏里没有第二份', async () => {
     await renderShell('admin', '/app/admin/channels')
     const topbar = screen.getByRole('banner')
     const switcher = within(topbar).getByRole('group', { name: '控制台' })
-    for (const label of ['用户', '商家', '管理']) {
+    for (const label of ['用户', '管理']) {
       expect(within(switcher).getByRole('button', { name: label })).toBeInTheDocument()
     }
+    expect(within(switcher).queryByRole('button', { name: '商家' })).not.toBeInTheDocument()
 
     const sidebar = screen.getByRole('complementary')
     expect(within(sidebar).queryByRole('group', { name: '控制台' })).not.toBeInTheDocument()
     // 账户与退出也从侧栏搬走了。
-    expect(within(sidebar).queryByRole('menuitem', { name: '退出登录' })).not.toBeInTheDocument()
+    expect(within(sidebar).queryByRole('button', { name: '退出登录' })).not.toBeInTheDocument()
+  })
+
+  it('管理员直敲商家页：标题写无权限，切换器高亮管理', async () => {
+    await renderShell('admin', '/app/merchant/channels')
+    const topbar = screen.getByRole('banner')
+    expect(within(topbar).getByText('无权限')).toBeInTheDocument()
+    expect(within(topbar).getByRole('button', { name: '管理' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    expect(within(topbar).getByRole('button', { name: '用户' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    )
   })
 
   it.each([
