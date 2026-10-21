@@ -93,9 +93,10 @@ func unreadSettingKeys(channelType string, setting map[string]any) []string {
 // 只写「不支持」的话，前一种人会去等一个永远不会来的实现。两种情况下配置
 // 都不会被拒绝、也不会被改写——它只是不影响请求路径。
 //
-// 管理人面有两处会打它：写入成功之后（`channel create` / `update`）与
-// `channel list` 的记号。两处用的是同一句话——各写一份的话，一处改了一处
-// 不动，而「配了没生效」正是这句话要挡的那种问题。
+// 管理面有两处会打它：写入成功之后（`channel create`，以及给了 `--setting`
+// 或 `--type` 的 `channel update`）与 `channel list` 的记号。两处用的是同一
+// 句话——各写一份的话，一处改了一处不动，而「配了没生效」正是这句话要挡的
+// 那种问题。
 func SettingUnreadNote(channelType string, setting map[string]any) string {
 	unknown := unreadSettingKeys(channelType, setting)
 	if len(unknown) == 0 {

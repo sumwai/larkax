@@ -163,36 +163,56 @@ func sharedReaderFuncs(
 }
 
 // callsSharedReader 判断适配器有没有调用「取过这个键」的共用函数。
+//
+// 判的是一次**调用**，而且第一个实参是渠道的 setting：只找选择表达式的话，
+// 传一份空 map（键从此没人读）、或者只取函数值不调用，都能让这一格保持绿。
+//
+// 残留的边界（有意不追）：先把函数值取出来再调（`f := channel.X; f(...)`），
+// 或者传另一条渠道的 `.Setting`，这两种都能绕过去。要判它们得做数据流；而
+// 这一格要挡的是「这条读法整个断了」，那两种绕法都还在拿某条渠道的 setting
+// 按这个键取值，最坏是认错了渠道。
 func callsSharedReader(adapterFiles []*ast.File, sharedFuncs map[string][]string, key string) bool {
 	for name, keys := range sharedFuncs {
 		if !slices.Contains(keys, key) {
 			continue
 		}
-		if selectsChannelFunc(adapterFiles, name) {
+		if callsChannelFuncWithSetting(adapterFiles, name) {
 			return true
 		}
 	}
 	return false
 }
 
-// selectsChannelFunc reports whether any file selects `channel.<name>`.
-func selectsChannelFunc(files []*ast.File, name string) bool {
+// callsChannelFuncWithSetting reports whether any file calls `channel.<name>`
+// with the channel's setting as the first argument.
+//
+// 函数值（`var _ = channel.X`、`f := channel.X`）不算：那证明不了这条渠道的
+// 键真的被取过。传的东西也得是 setting ——传一个空 map 时翻译整条变恒等，
+// 与「没人读」是同一件事。
+func callsChannelFuncWithSetting(files []*ast.File, name string) bool {
 	found := false
 	for _, file := range files {
 		ast.Inspect(file, func(node ast.Node) bool {
 			if found {
 				return false
 			}
-			sel, ok := node.(*ast.SelectorExpr)
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
 			if !ok {
 				return true
 			}
 			pkg, ok := sel.X.(*ast.Ident)
-			if ok && pkg.Name == "channel" && sel.Sel.Name == name {
-				found = true
-				return false
+			if !ok || pkg.Name != "channel" || sel.Sel.Name != name {
+				return true
 			}
-			return true
+			if len(call.Args) == 0 || !indexesSetting(call.Args[0]) {
+				return true
+			}
+			found = true
+			return false
 		})
 	}
 	return found
@@ -301,6 +321,13 @@ func TestSettingUnreadNotePerType(t *testing.T) {
 		{
 			name:    "openai 认的键",
 			typ:     "openai",
+			setting: map[string]any{known: map[string]any{"none": "off"}},
+		},
+		{
+			// 第二个读者：同一个键对两个适配器都有意义。这一格不依赖连库
+			// 用例，没有 DSN 时也能跑。
+			name:    "openai-responses 也认这个键",
+			typ:     "openai-responses",
 			setting: map[string]any{known: map[string]any{"none": "off"}},
 		},
 		{

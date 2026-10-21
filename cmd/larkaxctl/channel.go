@@ -152,8 +152,8 @@ reasoning_effort 的取值翻成该渠道认的写法（映射到空字符串表
   {"reasoning_effort_map":{"none":"off"}}
 要剔掉这个字段就写成 {"reasoning_effort_map":{"none":""}}。
 写进去的键这条渠道的 type 不认时（拼错的、别的 type 的），照样不报错、
-不挡写入，但 create / update 成功之后会逐个点名打到 stderr 上，channel list
-也把这样的渠道点出来。
+不挡写入，但 create，以及给了 --setting 或 --type 的 update，成功之后会逐个
+点名打到 stderr 上，channel list 也把这样的渠道点出来。
 
 **选项的旧名仍可用**：--owner 等同于 --user。它保留是为了不让已经在跑的脚本
 与部署流程坏掉，行为一致；新写的命令请用 --user。

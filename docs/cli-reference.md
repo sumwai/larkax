@@ -317,8 +317,9 @@ DEL，换行、制表符、ESC 都在其中）：换行会把一栏折成两行�
 出站报文里去掉，表里没有的取值照原样发）。例如只认 `off` 的上游，写
 `{"reasoning_effort_map":{"none":"off"}}`；要剔掉这个字段，写成
 `{"reasoning_effort_map":{"none":""}}`。写进去的键这条渠道的 `type` 不认时
-（拼错的、别的 `type` 的），照样不报错、不挡写入，但 `create` / `update` 成功
-之后会逐个点名打到 stderr 上，`channel list` 也把这样的渠道点出来。
+（拼错的、别的 `type` 的），照样不报错、不挡写入，但 `create`，以及给了
+`--setting` 或 `--type` 的 `update`，成功之后会逐个点名打到 stderr 上，
+`channel list` 也把这样的渠道点出来。
 
 `--channel` 不存在、`--type` / `--base-url` / `--model` 也都不开简写：这条命令上
 挑错的是「凭证写给哪条渠道」，而 `-c` 这类单字母在别的命令行里既可能是 `channel`
