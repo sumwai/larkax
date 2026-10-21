@@ -18,6 +18,7 @@ import type {
   ListResponse,
   Meta,
   ModelsResponse,
+  MerchantPricingClient,
   OpsClient,
   OpsModel,
   OpsModelCreateInput,
@@ -91,7 +92,7 @@ export interface HttpApiOptions {
 export class HttpApiClient implements ApiClient {
   readonly mode = 'http' as const
   readonly admin: OpsClient
-  readonly merchant: ChannelOpsClient
+  readonly merchant: ChannelOpsClient & MerchantPricingClient
   private readonly baseUrl: string
   private readonly doFetch: typeof fetch
   private csrfToken: string | null = null
@@ -100,7 +101,7 @@ export class HttpApiClient implements ApiClient {
     this.baseUrl = (options.baseUrl ?? '/api/v1').replace(/\/$/, '')
     this.doFetch = options.fetchImpl ?? globalThis.fetch.bind(globalThis)
     this.admin = this.ops('/admin')
-    this.merchant = this.channelOps('/merchant')
+    this.merchant = { ...this.channelOps('/merchant'), ...this.merchantPricing('/merchant') }
   }
 
   /**
@@ -148,6 +149,25 @@ export class HttpApiClient implements ApiClient {
         this.request<{ id: number }>(`${prefix}/pricing/costs`, { method: 'POST', body: input }).then(idBody),
       updateCost: async (id, input: CostUpdateInput) => {
         await this.request(`${prefix}/pricing/costs/${id}`, { method: 'PATCH', body: input })
+      },
+    }
+  }
+
+  /**
+   * 商家自己的售价规则。
+   *
+   * 请求体只放可变字段：`scope`、`owner_user_id`、`channel_id` 在商家前缀下
+   * 出现即被拒，作用域与归属由服务端按会话决定。
+   */
+  private merchantPricing(prefix: string): MerchantPricingClient {
+    const idBody = (body: { id: number }) => body.id
+    return {
+      listRules: () => this.request<PricingRule[]>(`${prefix}/pricing/rules`),
+      getRule: (id) => this.request<PricingRule>(`${prefix}/pricing/rules/${id}`),
+      createRule: (input) =>
+        this.request<{ id: number }>(`${prefix}/pricing/rules`, { method: 'POST', body: input }).then(idBody),
+      updateRule: async (id, input) => {
+        await this.request(`${prefix}/pricing/rules/${id}`, { method: 'PATCH', body: input })
       },
     }
   }

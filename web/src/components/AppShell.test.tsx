@@ -77,17 +77,21 @@ describe('AppShell 视图切换', () => {
     }
   })
 
-  it('merchant 的运营导航只有渠道', async () => {
+  it('merchant 的运营导航是渠道与计价，没有模型目录与别名', async () => {
     await renderShell('merchant', '/app/merchant/channels')
-    expect(screen.getAllByRole('link', { name: '渠道' }).length).toBeGreaterThan(0)
-    for (const label of ['模型目录', '别名', '计价']) {
+    for (const label of ['渠道', '计价']) {
+      expect(screen.getAllByRole('link', { name: label }).length).toBeGreaterThan(0)
+    }
+    for (const label of ['模型目录', '别名']) {
       expect(screen.queryAllByRole('link', { name: label })).toHaveLength(0)
     }
+    // 成本规则在商家前缀下没有路由，导航里也不该出现。
+    expect(screen.queryByText('成本规则')).not.toBeInTheDocument()
   })
 
   it('merchant 落在管理视图的地址上时，侧栏也不列管理组入口', async () => {
     await renderShell('merchant', '/app/admin/channels')
-    for (const label of ['模型目录', '别名', '计价']) {
+    for (const label of ['模型目录', '别名']) {
       expect(screen.queryAllByRole('link', { name: label })).toHaveLength(0)
     }
     expect(screen.queryByText('平台管理')).not.toBeInTheDocument()
