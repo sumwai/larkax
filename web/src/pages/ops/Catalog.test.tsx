@@ -206,6 +206,8 @@ describe('模型目录页', () => {
     for (const label of ['基本', '限制', '能力', '模态与时间']) {
       expect(tab(label)).toBeInTheDocument()
     }
+    // 这组 tab 的名字：读屏进来先听到「模型字段分组」，再听到四个选项。
+    expect(screen.getByRole('tablist', { name: '模型字段分组' })).toBeInTheDocument()
     // 默认停在「基本」。
     expect(tab('基本')).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByLabelText('规范名')).toBeInTheDocument()
@@ -253,6 +255,11 @@ describe('模型目录页', () => {
 
     expect(await screen.findByText('上下文上限要填整数。')).toBeInTheDocument()
     expect(tab('限制')).toHaveAttribute('aria-selected', 'true')
+    // 出错的分组带上 `aria-invalid`，其余三个不带：读屏听得出该回哪一组。
+    expect(tab('限制')).toHaveAttribute('aria-invalid', 'true')
+    for (const label of ['基本', '能力', '模态与时间']) {
+      expect(tab(label)).not.toHaveAttribute('aria-invalid')
+    }
     expect(screen.getByLabelText('上下文上限')).toHaveValue('12.5')
     expect(within(tab('限制')).getByLabelText('这一组有校验错误')).toBeInTheDocument()
     expect(mocks.createModel).not.toHaveBeenCalled()

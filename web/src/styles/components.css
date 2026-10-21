@@ -789,11 +789,6 @@ textarea.input {
   background: var(--danger);
   vertical-align: middle;
 }
-/* 面板用 `hidden` 藏起来。作者样式里的 display 会盖过浏览器对 [hidden] 的
-   默认规则（比如 .model-form-group 是 flex），这里显式兜住。 */
-.tab-panel[hidden] {
-  display: none;
-}
 
 /* 编辑弹窗的内容区：给一个最小高度，切分组时底部按钮不跟着上下跳。
    左边那条竖线只在有校验错误时着色；始终占位，所以出现错误也不挤动内容。 */

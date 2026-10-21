@@ -33,6 +33,8 @@ describe('Tabs', () => {
     const user = userEvent.setup()
     render(<Harness />)
 
+    // 组本身有名字，读屏进来先听到它。
+    expect(screen.getByRole('tablist', { name: '示例分组' })).toBeInTheDocument()
     expectSelected('甲')
 
     tabOf('甲').focus()

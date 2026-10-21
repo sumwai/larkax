@@ -22,8 +22,8 @@ export interface TabItem {
  *
  * 面板只有选中的那个渲染内容，其余是空的：切走的输入框若留在 DOM 里，
  * 隐藏时仍可能被读屏念到；而 `aria-controls` 指向的节点必须存在，所以
- * 面板容器本身不卸载，用 `hidden` 藏起来（见 components.css 里 `.tab-panel[hidden]`
- * 对 `display` 的兜底）。
+ * 面板容器本身不卸载，用 `hidden` 藏起来（`base.css` 的 `[hidden]` 带
+ * `!important`，面板自己的 `display` 盖不过它）。
  */
 export function Tabs({
   items,

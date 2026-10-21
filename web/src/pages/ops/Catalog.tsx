@@ -287,8 +287,13 @@ export function OpsModels() {
       )
     : all
 
-  // 弹窗每次重新聚焦时会问这一个：出错的那一格在就交给它；不在（这一组
-  // 没有可见的输入）就落在刚切过去的那一个 tab 上。
+  // 弹窗每次重新聚焦时会问这一个：出错的那一格在就交给它，不在就落在刚切过去
+  // 的那一个 tab 上。
+  //
+  // 第二档目前走不到：四个分组的字段都是固定渲染的，切到哪一组，对应输入就
+  // 一定挂上（`fieldRefs` 在提交里已经赋值）。留着是因为字段将来若改成按条件
+  // 渲染，落在这组的 tab 上仍比落回弹窗更接近「你被带到了哪一组」；tab 的 id
+  // 由 `Tabs` 的 `idPrefix="model"` 给定。
   const focusAfterFailure = () => {
     const field = errorField ? fieldRefs.current[errorField] : null
     if (field) return field
