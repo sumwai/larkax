@@ -408,8 +408,9 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 
 // failScoped 是 fail 的归属受限版本：404 一律用固定正文。
 //
-// 只有渠道那几条路由用它。不带归属的调用（内部管理面）仍走 fail——那里的
-// 404 本来就该说清是哪一条，调用者是运维。
+// 渠道与计价规则那几条路由用它（归属受限时「不存在」与「不是你的」逐字
+// 相同）。不带归属的调用（内部管理面、admin 组）仍走 fail——那里的 404
+// 本来就该说清是哪一条，调用者是运维。
 func (a *API) failScoped(w http.ResponseWriter, r *http.Request, err error) {
 	if _, scoped := OwnerFromContext(r.Context()); scoped &&
 		(errors.Is(err, channels.ErrChannelNotFound) || errors.Is(err, pricing.ErrRuleNotFound)) {

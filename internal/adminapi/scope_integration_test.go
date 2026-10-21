@@ -353,28 +353,45 @@ func TestMerchantPricingScope(t *testing.T) {
 		t.Errorf("商家清单里出现了别家或平台规则（other=%v platform=%v）", seen[otherID], seen[platformID])
 	}
 
-	// 单条读：自己的 200；别人的、平台的都是固定正文 404。
+	// 单条读：自己的 200；别人的、平台的、不存在的都是固定正文 404，
+	// 且三份正文逐字相同——能分辨「不存在」与「不是你的」的那个 404 等于
+	// 告诉调用方「这一行存在」。
 	if rec := callAsOwner(t, h, owner, http.MethodGet, PathPrefix+"pricing/rules/"+itoa(ownID), token, nil); rec.Code != http.StatusOK {
 		t.Errorf("读自己的规则状态码 = %d，期望 200；正文：%s", rec.Code, rec.Body)
 	}
-	bodies := make([]string, 0, 2)
-	for _, id := range []int64{otherID, platformID} {
+	notFoundIDs := []int64{otherID, platformID, 999999999}
+	bodies := make([]string, 0, len(notFoundIDs))
+	for _, id := range notFoundIDs {
 		rec := callAsOwner(t, h, owner, http.MethodGet, PathPrefix+"pricing/rules/"+itoa(id), token, nil)
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("读规则 %d 状态码 = %d，期望 404；正文：%s", id, rec.Code, rec.Body)
 		}
 		bodies = append(bodies, rec.Body.String())
 	}
-	if bodies[0] != bodies[1] || !strings.Contains(bodies[0], msgNotFound) {
-		t.Errorf("越权 404 的正文不一致或不是固定那句：%s", bodies[0])
+	if !strings.Contains(bodies[0], msgNotFound) {
+		t.Errorf("越权 404 的正文不是固定那句：%s", bodies[0])
+	}
+	for i, body := range bodies[1:] {
+		if body != bodies[0] {
+			t.Errorf("读规则 %d 的 404 正文与越权那份不同：%s ≠ %s",
+				notFoundIDs[i+1], body, bodies[0])
+		}
 	}
 
-	// 改：别人的与平台的 404；自己的 200。
-	for _, id := range []int64{otherID, platformID} {
+	// 改：别人的、平台的、不存在的都是 404；自己的 200。
+	updateBodies := make([]string, 0, len(notFoundIDs))
+	for _, id := range notFoundIDs {
 		rec := callAsOwner(t, h, owner, http.MethodPatch, PathPrefix+"pricing/rules/"+itoa(id), token,
 			map[string]any{"priority": 99})
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("改规则 %d 状态码 = %d，期望 404；正文：%s", id, rec.Code, rec.Body)
+		}
+		updateBodies = append(updateBodies, rec.Body.String())
+	}
+	for i, body := range updateBodies[1:] {
+		if body != updateBodies[0] {
+			t.Errorf("改规则 %d 的 404 正文与越权那份不同：%s ≠ %s",
+				notFoundIDs[i+1], body, updateBodies[0])
 		}
 	}
 	if rec := callAsOwner(t, h, owner, http.MethodPatch, PathPrefix+"pricing/rules/"+itoa(ownID), token,
@@ -390,7 +407,7 @@ func TestMerchantPricingScope(t *testing.T) {
 }
 
 // TestGroupSelectionControlsRoutes 钉住按组注册：channels+pricing 有渠道与
-// 计价（含单条读），没有模型与别名；未知组名在装配时 panic。
+// 计价规则（含单条读），没有模型、别名与成本价；未知组名在装配时 panic。
 func TestGroupSelectionControlsRoutes(t *testing.T) {
 	const prefix = "/api/v1/merchant/"
 	passThrough := func(next http.Handler) http.Handler { return next }
@@ -406,7 +423,8 @@ func TestGroupSelectionControlsRoutes(t *testing.T) {
 			t.Errorf("%s 的状态码 = %d，期望 400", path, rec.Code)
 		}
 	}
-	for _, path := range []string{prefix + "models", prefix + "aliases"} {
+	// 成本价是渠道侧的成本口径，没有商家归属可过滤，merchant 组不注册它。
+	for _, path := range []string{prefix + "models", prefix + "aliases", prefix + "pricing/costs"} {
 		if rec := call(t, h, http.MethodGet, path, "", nil); rec.Code != http.StatusNotFound {
 			t.Errorf("%s 的状态码 = %d，期望 404（这一组不含它）", path, rec.Code)
 		}
