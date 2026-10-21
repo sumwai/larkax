@@ -49,7 +49,9 @@
   {"id": "claude-x", "object": "model", "created": 0, "owned_by": "example",
    "offers": [
      {"merchant": "acme", "price": "0.00350000",
-      "prices": {"prompt": "0.00350000", "completion": "0.01050000", "cache_read": "0.00070000"}},
+      "prices": {"prompt": "0.00350000", "completion": "0.01050000", "cache_read": "0.00070000"},
+      "request": "0.00200000", "minimum": "0.01000000",
+      "units": {"cache_write_5m": "0.00050000"}},
      {"merchant": null, "price": "0.00400000",
       "prices": {"prompt": "0.00400000"}}
    ]}
@@ -65,18 +67,27 @@
     写入缓存的输入、推理 token。每个维度各按「1000 个该维度 token」单独求值
     ——规则可以引用用量，缓存读与推理的单价通常与输入价不成倍数，不能拿
     `price` 去推
+  - `request` 是**每次请求**的固定费用（元），`minimum` 是每次请求的最低
+    消费（元）。量纲与每千 token 的金额不同，不能相加；为 0 时省略这个键
+    （规则没写与写了 0 元都不收费，省略比给一个 `"0.00000000"` 更少被读成
+    「确认免费」）。两者可以写成用量的函数，这里报的是 `prices.prompt` 那
+    一次求值（1000 个输入 token）下的值
+  - `units` 是非 token 计量项的单价，键是规则里写过的计量项名、值是**每个
+    计量单位**多少元；没有时省略这个字段。这三项与 `prices.prompt` 取自
+    同一次求值（1000 个输入 token），不与 `prices` 里其他维度同一次
   - 按 `prompt` 那一项的价格升序；规则没写输入价时用第一个存在的维度代替。
-    同一个商家供多条渠道时，**整套维度价完全相同**才折成一条，任一维度不同
-    就是两条不同的报价
+    同一个商家供多条渠道时，**整套价完全相同**（各维度、`request`、`minimum`
+    与 `units` 都相同）才折成一条，任一不同就是两条不同的报价
   - 没有任何适用规则的模型**仍然列出**，只是不带 `offers`：清单回答「能不能
     调通」，报价回答「谁在供、多少钱」，两者不是同一个条件
-  - `price` 等于 `prices.prompt`；规则没有声明输入价时它是 `"0.00000000"`，
-    此时要判断「输入免费」还是「没写输入价」，得看 `prices` 里有没有
-    `prompt` 这个键
+  - 规则写了输入价时 `price` 等于 `prices.prompt`；规则没有声明输入价时它
+    是 `"0.00000000"`，此时要判断「输入免费」还是「没写输入价」，得看
+    `prices` 里有没有 `prompt` 这个键
 - 报价与结算用同一段规则匹配与同一个求值函数（见 `internal/pricing`），
   所以它是「走这条渠道时按规则算出来的价」，不是另算的一份展示价。
-  固定费与最低消费不进报价——它们属于一次请求，不属于每千 token 的单价。
-- `offers` 为空时省略这个字段，不输出空数组；`prices` 为空时同样省略
+  固定费、最低消费与计量项单价各有自己的字段，量纲与每千 token 的金额不同。
+- `offers` 为空时省略这个字段，不输出空数组；`prices` / `units` 为空时同样
+  省略
 - `id` 是**规范名**，也就是请求体里 `model` 字段该写的那个名字。别名只在
   路由时用于把规范名翻成上游模型名，不出现在清单里
 - `created` 固定 `0`：目录里没有「模型创建时间」这一列，不编一个看起来像
@@ -98,6 +109,47 @@
 这两条路径**不参与限流与额度**：它们只读，不产生用量。它们也不判渠道凭证
 能不能解开——那要逐渠道解密，代价与这条只读接口不匹配，核查由
 `larkaxctl doctor` 那条链路负责。
+
+### 控制台模型列表
+
+`GET /api/v1/models` 是控制台模型列表页（`/app/models`）的数据来源。它**公开
+只读、不要求会话**，理由与模型清单相同。条目里的模型字段来自同一份目录数据
+（名称、vendor、上限、能力、模态）；这里只展开另外两块：平台参考价 `pricing`
+与按渠道折出的 `offers`。
+
+```json
+{"currency": "CNY", "reference_at": "2026-10-21T09:00:00Z",
+ "items": [
+   {"name": "claude-x", "display_name": "Claude X", "vendor": "Anthropic",
+    "context_limit": 200000, "max_output": 64000,
+    "capabilities": {"tools": true},
+    "modalities": {"input": ["text"], "output": ["text"]},
+    "pricing": {"input_per_mtok": "12.00000000", "output_per_mtok": "60.00000000",
+                "cache_read_per_mtok": null, "cache_write_per_mtok": null,
+                "reasoning_per_mtok": "18.00000000",
+                "request": "0.01000000", "minimum": "0.50000000",
+                "units": {"cache_write_1h": "0.20000000"}}}
+ ]}
+```
+
+- `pricing` 只取**平台级**规则（`scope = platform`）；没有平台规则时是
+  `null`，不伪造一个起价。求值用 1,000,000 个该维度的 token：输入与缓存读写
+  取自「1,000,000 个输入 token」那一次，输出与推理取自「1,000,000 个输出
+  token」那一次。
+- `input_per_mtok` / `output_per_mtok` 恒有值；`cache_read_per_mtok` /
+  `cache_write_per_mtok` / `reasoning_per_mtok` 为 `null` 表示规则**没写**
+  这一项，与 0（免费）不是一回事。
+- `request` / `minimum` / `units` 的口径与 `/v1/models` 的 `offers` 相同，
+  取自「1,000,000 个输入 token」那一次求值：`request` / `minimum` 是每请求
+  多少元，`units` 是每个计量单位多少元；为 0 或没有计量项时**整个键不出现**。
+  规则把它们写成用量的函数时，报的就是这一次用量下的值。
+- **两种「没配」的写法并存**：几个 `*_per_mtok` 用 `null` 表示没配，
+  `request` / `minimum` / `units` 用键不出现表示 0 或没配（两者都不收费，
+  省略少一种误读）。按一种约定去读另一种，会把 `null` 当成 0。
+- `offers` 与 `/v1/models` 的同名字段**逐字相同**，包括 `price` / `prices`
+  是每 1000 个 token 的金额——同一个响应里两种单位并存，展示时必须分别标注。
+  没有报价时省略这个字段。
+- `currency` 与 `reference_at` 的口径与「控制台单模型页」相同。
 
 ### 控制台单模型页
 
@@ -139,6 +191,10 @@
     "updated_at": "2026-10-21T08:30:00Z",
     "suppliers": [
       {"merchant": "acme", "price": "0.00200000", "prices": {"prompt": "0.00200000"},
+       "request": "0.00100000", "minimum": "0.00500000",
+       "units": {"cache_write_1h": "0.00020000"},
+       "rule": {"id": 42, "scope": "merchant", "priority": 10,
+                "effective_from": "2026-01-01T00:00:00Z", "effective_to": null},
        "channel_count": 2},
       {"merchant": null, "price": "0.00300000", "prices": {"prompt": "0.00300000"},
        "channel_count": 1}
@@ -162,10 +218,11 @@
 
 `suppliers` 是供应这个模型的商家与报价：
 
-- 一行 = **商家（平台自营单列）× 一整套维度价**：同一商家、所有维度价格
-  都相同的多条渠道折成一行，`channel_count` 记这套价的渠道条数；任一维度
-  不同则是两行。按 `prompt` 那一项的价格升序，规则没写输入价时用第一个存在
-  的维度代替；同价时平台自营在前，再按商家名，同商家同价时按整套维度价排。
+- 一行 = **商家（平台自营单列）× 一整套价**：同一商家、所有维度价格、固定费、
+  最低消费与计量项单价都相同的多条渠道折成一行，`channel_count` 记这套价的
+  渠道条数；任一项不同则是两行。按 `prompt` 那一项的价格升序，规则没写输入价
+  时用第一个存在的维度代替；同价时平台自营在前，再按商家名，同商家同价时按
+  整套价的内容排。
 - `merchant` 是渠道所属商家的用户名，`null` 表示平台自营渠道。
 - `price` 是**每 1000 个输入 token** 的金额，字符串（定点数，不经过浮点）。
   `prices` 是各 token 维度的千 token 金额，键为 `prompt`、`completion`、
@@ -173,11 +230,21 @@
   模型清单一节相同：非缓存输入、输出（不含推理）、缓存命中/写入的输入、推理
   token。每个维度各按「1000 个该维度 token」单独求值，规则可以引用用量，
   所以不要用 `price` 去推其他维度。
-- `price` 等于 `prices.prompt`；规则没有声明输入价时它是 `"0.00000000"`，
-  此时要判断「输入免费」还是「没写输入价」，得看 `prices` 里有没有 `prompt`
-  这个键。`price` 由 `internal/pricing` 按这条渠道实际适用的规则求出，与结算
-  同源；固定费与最低消费不进报价——它们属于一次请求，不属于每千 token 的
-  单价。
+- `request` 是**每次请求**的固定费用（元），`minimum` 是每次请求的最低消费
+  （元），`units` 是非 token 计量项的单价（**每个计量单位**多少元）。量纲与
+  每千 token 的金额不同，不能相加；为 0 或没有计量项时省略这个键。三者取自
+  `prices.prompt` 那一次求值（1000 个输入 token）；规则把它们写成用量的函数
+  时，报的就是这一次用量下的值。
+- `rule` 说明这套价出自哪条规则：`id`、`scope`（`channel` / `merchant` /
+  `platform`）、`priority`、`effective_from` 与 `effective_to`（RFC3339 UTC，
+  `null` 表示不过期）。同价的多条渠道折成一行时，它是其中渠道编号最小的那条
+  渠道适用的规则（渠道编号本身不出现在响应里）。不含表达式源码、owner id、
+  channel id 与 `base_url`。
+- 规则写了输入价时 `price` 等于 `prices.prompt`；规则没有声明输入价时它是
+  `"0.00000000"`，此时要判断「输入免费」还是「没写输入价」，得看 `prices`
+  里有没有 `prompt` 这个键。`price` 由 `internal/pricing` 按这条渠道实际
+  适用的规则求出，与结算同源；固定费、最低消费与计量项单价各占一个字段，
+  不属于每千 token 的单价。
 - 只列能算出价的渠道：一条适用规则都没有的渠道给不出这个数，编一个 0 会
   变成「免费」。这些渠道由模型级的 `unpriced_channels` 计数回答（总是输出，
   没有这种渠道时是 `0`）。整个模型一条报价都没有时仍然返回 `200`，

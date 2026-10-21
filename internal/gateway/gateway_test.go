@@ -107,7 +107,7 @@ type addCall struct {
 // 行），而内存里那份由调用方自己推进（见 streamFreeze.observe）。假实现跟着改
 // 的话，「调用方忘了推进」这件事就测不出来了——而那正是最要紧的一半：结算读的
 // 是内存里那份。
-func (f *fakeReservations) AddReservation(_ context.Context, req pipeline.Request, delta money.Amount) error {
+func (f *fakeReservations) AddReservation(_ context.Context, req pipeline.Request, delta money.Amount, outputTokens int64) error {
 	f.added = append(f.added, addCall{req: req, delta: delta})
 	if f.onAdd != nil {
 		return f.onAdd(req, delta)

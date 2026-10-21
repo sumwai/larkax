@@ -306,6 +306,20 @@ func (s *Service) Void(ctx context.Context, in VoidInput) (UserPlan, bool, error
 			row.ID, remaining)
 	}
 
+	// 在途预留虽然还没写成分录，那部分面值已经承诺给那几笔请求了。核销掉
+	// 它们，等它们结算时 prepaid 会被扣成负数——额度包透支，而账本上分不出
+	// 是哪一步错了。所以作废只核销**减掉在途之后**的剩余（见 #918）。
+	pending, err := store.PendingPlanReservation(ctx, tx, row.ID)
+	if err != nil {
+		return UserPlan{}, false, err
+	}
+	remaining = remaining.Sub(pending)
+	if remaining.IsNegative() {
+		return UserPlan{}, false, fmt.Errorf(
+			"订阅 %d 的在途预留（%s）超过面值余额——先让那几笔请求收尾，或者查清是谁多预留了",
+			row.ID, pending)
+	}
+
 	if remaining.IsPositive() {
 		voidTxn, voidErr := ledger.PlanVoid(ledger.PlanVoidParams{
 			TxnID:          in.TxnID,

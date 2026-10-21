@@ -1085,7 +1085,12 @@ go run ./cmd/larkaxctl ledger balance --all
 ```
 
 每次请求的金额落在 `billing_requests` 表：`reserved_amount` 是预留，
-`final_amount` 是实际结算。按请求查要直接连库，SQL 示例见
+`final_amount` 是实际结算。额度包覆盖的请求 `reserved_amount` 是 0（钱包一分没冻），
+它占的是订阅的面值与可用量，记在同一行的 `plan_reserved_amount` 与 `reserved_quota` 上。
+额度包结算按**预留额封顶**：实际用量超过这次预留时，`quota_used` 只加到预留额为止，
+超出部分不计入，同时留一条带 `plan_id`、`actual`、`reserved` 的 WARN——宁可少记，
+也不让包的可用量透支；账本那一侧「结算不超过预留」是同一条规则。
+按请求查要直接连库，SQL 示例见
 [metrics.md](metrics.md) 的「怎么读」。**目前没有一条按请求列出花费的命令。**
 
 ## 检查这条链路通不通

@@ -49,13 +49,21 @@ const referenceTokenCount = 1_000_000
 
 // ReferencePrice 是一个模型的参考价，单位是每百万 token。
 //
-// 四个字段里除了输入与输出，其余可为 nil：规则里没声明的那一项是「没配」，
-// 不是 0。0 是「免费」，两者在界面上与账目上都是两件事。
+// 除输入与输出外，其余字段要么是指针、要么是可空 map：规则里没声明的那一项
+// 是「没配」，不是 0。0 是「免费」，两者在界面上与账目上都是两件事。
 type ReferencePrice struct {
 	InputPerMTok      money.Amount
 	OutputPerMTok     money.Amount
 	CacheReadPerMTok  *money.Amount
 	CacheWritePerMTok *money.Amount
+	ReasoningPerMTok  *money.Amount
+	// Request / Minimum 是每次请求的固定费用与最低消费，单位是「每请求多少
+	// 元」，不是每百万 token。零值表示规则没写。
+	Request money.Amount
+	Minimum money.Amount
+	// Units 是非 token 计量项的单价，键与含义同 Offers 的 Units：每个计量
+	// 单位多少元。没有计量项时为空。
+	Units map[string]money.Amount
 }
 
 // References 求平台规则下的参考价。
@@ -260,6 +268,21 @@ func (r *References) compute(ctx context.Context, model string, at time.Time) (*
 		}
 		price.CacheWritePerMTok = &amount
 	}
+	// 推理属于输出侧，从输出那一份结果里取；与缓存两项同一条判据——规则
+	// 没声明就是「没配」。
+	if outputResult.Prices.Declared["reasoning"] {
+		amount, err := perMillion(outputResult.Prices.Reasoning)
+		if err != nil {
+			return nil, &rulePriceError{ruleID: id, err: fmt.Errorf("模型 %q 的推理价: %w", model, err)}
+		}
+		price.ReasoningPerMTok = &amount
+	}
+	// 一次性费用与计量项单价与用量无关（量纲分别是「每请求」与「每计量
+	// 单位」），原样给出、不再乘 referenceTokenCount；取输入那一份结果里的值，
+	// 与缓存两项同一个来源。
+	price.Request = inputResult.Charges.Fixed
+	price.Minimum = inputResult.Charges.Minimum
+	price.Units = inputResult.Prices.Units
 	return price, nil
 }
 
