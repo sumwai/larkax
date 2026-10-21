@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/billing"
+	"github.com/sumwai/larkax/internal/idempotency"
 	"github.com/sumwai/larkax/internal/ledger"
+	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/tokens"
 )
@@ -799,5 +801,415 @@ func TestConcurrentPlanReservationsDoNotOversell(t *testing.T) {
 	}
 	if got := pendingPlanAmount(t, db, upID); got != "0.00000000" {
 		t.Errorf("结算后仍有 %s 面值挂在在途上", got)
+	}
+}
+
+// ── 判据边界的用例 ──────────────────────────────────────────────────────
+//
+// 下面几条钉的是判据本身：哪个输入算「够」、哪个算「坏」，以及结算时
+// 「等于预留」与「超过预留」不是同一档。
+
+// 零个 token 是合法用量：上游报 0 时按 0 记，不是错误。
+//
+// 负数仍然要报错。把 `< 0` 写成 `<= 0` 会让零用量整笔失败，而那条路上
+// 失败的方向是「一次本该成功的结算被拒」。
+func TestQuotaFromCountAcceptsZero(t *testing.T) {
+	got, err := quotaFromCount(0)
+	if err != nil {
+		t.Fatalf("零个单位被当成错误: %v", err)
+	}
+	if !got.IsZero() {
+		t.Errorf("零个单位换出来是 %s，期望 0", got)
+	}
+	if _, err := quotaFromCount(-1); err == nil {
+		t.Error("负数个单位应当报错，实际没有")
+	}
+}
+
+// 面值耗尽的包（faceAvail = 0）遇到 0 元请求也不该被选中。
+//
+// 0 元请求是存在的：计价规则可以把各项都写成 0（免费模型），而
+// SaveReservation 只拒绝负的预留额（见 store.go 里对 IsNegative 的判断），
+// 0 会原样走到选源这一层。现行为是「空包连 0 元也不接」，回落钱包；
+// 用例只是把这一行为钉住，不改变它。
+//
+// 判据是「面值必须为正」与「面值不够」两条里的**任意一条**；写成「两条都
+// 满足才跳过」时，面值为 0 而请求也是 0 元这一格会从「跳过」翻成「选中」。
+func TestPlanCoversRejectsExhaustedFaceForZeroAmount(t *testing.T) {
+	zero := money.Zero
+	if planCovers("amount", zero, zero, zero, zero) {
+		t.Fatal("面值为 0 的包覆盖了 0 元请求，期望跳过：空包不是扣费来源")
+	}
+}
+
+// 空包跳过 0 元请求之后，这一笔要能落到钱包那条路，而不是变成一个失败。
+//
+// 上一条用例把「跳过空包」钉住了；这条守住它的另一半：跳过的结果必须是
+// **换一条来源**。钱包那边冻 0 元是合法操作（`balance - frozen >= 0`），
+// 所以余额为 0 的用户也能留下一条 pending 记录——否则跳过的就是一笔
+// 本该成功的 0 元请求，用户会看到一个错。
+func TestZeroAmountFallsBackToWalletWhenPlanExhausted(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	// 余额 0、钱包行在：这一笔只能由「冻 0 元」那条判据放行。
+	userID := seed(t, db, "0")
+	planID := seedPlan(t, ctx, db, "amount", "5", "5")
+	seedUserPlan(t, ctx, db, userID, planID, "5", time.Now().Add(time.Hour))
+
+	// 先把面值占满：这一笔走包。
+	fullID := reqID(t)
+	if _, err := s.SaveReservation(ctx, testRequest(ctx, t, db, userID, fullID),
+		reservation(t, userID, fullID, "5", "CNY")); err != nil {
+		t.Fatalf("占满面值的预留失败: %v", err)
+	}
+
+	// 0 元请求：空包不接，钱包余额 0 也够冻 0。
+	zeroID := reqID(t)
+	id, err := s.SaveReservation(ctx, testRequest(ctx, t, db, userID, zeroID),
+		reservation(t, userID, zeroID, "0", "CNY"))
+	if err != nil {
+		t.Fatalf("0 元请求应当成功（钱包够冻 0），实际 %v", err)
+	}
+	if id == 0 {
+		t.Fatal("0 元请求没有留下账单行")
+	}
+	row := readBillingPlanRow(t, db, zeroID)
+	if row.userPlanID.Valid {
+		t.Errorf("0 元请求用掉了面值耗尽的包 %d，期望回落到钱包", row.userPlanID.Int64)
+	}
+	if row.reservedAmount != "0.00000000" {
+		t.Errorf("预留金额 = %s，期望 0", row.reservedAmount)
+	}
+}
+
+// 余额优先时，余额不够就回落到额度包——回落的那一笔必须拿到自己的预留 id。
+//
+// 只断言「没报错」不够：回落成功却返回 id = 0 时，结算没有账单行可挂，
+// 而调用方以为预留完成了。这条同时钉住「回落发生了」：账单行的
+// user_plan_id 要落在那个包上，钱包一分钱没冻。
+func TestReserveInOrderBalanceFirstFallsBackToPlan(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	s.SetChargeOrderSource(fixedChargeOrder("balance_first"))
+	ctx := context.Background()
+
+	// 余额 1，覆盖不了 10；包的面值够。
+	userID := seed(t, db, "1")
+	planID := seedPlan(t, ctx, db, "amount", "50", "50")
+	upID := seedUserPlan(t, ctx, db, userID, planID, "50", time.Now().Add(time.Hour))
+
+	requestID := reqID(t)
+	id, err := s.SaveReservation(ctx, testRequest(ctx, t, db, userID, requestID),
+		reservation(t, userID, requestID, "10", "CNY"))
+	if err != nil {
+		t.Fatalf("余额不够时应回落到额度包，实际 %v", err)
+	}
+	if id == 0 {
+		t.Fatal("回落到额度包之后预留 id = 0：结算没有账单行可挂")
+	}
+	row := readBillingPlanRow(t, db, requestID)
+	if !row.userPlanID.Valid || row.userPlanID.Int64 != upID {
+		t.Errorf("账单行的订阅 = %+v，期望 %d（回落到那个包）", row.userPlanID, upID)
+	}
+	if _, frozen := walletOf(t, db, userID); frozen != "0.00000000" {
+		t.Errorf("钱包冻结 = %s，期望 0（额度包覆盖的请求一分没冻）", frozen)
+	}
+}
+
+// 候选名单是加锁之前读的：锁内要把三个维度重新判一遍，任一不满足就跳过。
+//
+// 每个子用例只坏**一个**维度（状态、有效期、币种）。三个都坏的写法证明不了
+// 判据是「任一」而不是「全部」——那种输入下两种写法都跳过。名单先读出来、
+// 再用另一条连接把这一行改坏，模拟的正是「读名单之后、加锁之前」那一段。
+//
+// 币种那一档要连账本一起改：判据之后还有一道「面值够不够」。只改
+// `plans.asset`、账本仍记在 CNY 上时，面值在 USD 一侧是 0，候选会被后一道
+// 判据拦下——那样这一档就证明不了币种判据自己在起作用。所以这里给这个订阅
+// 补一笔 USD 的授予，让唯一不满足的条件就是币种。
+func TestReserveRechecksStalePlanCandidate(t *testing.T) {
+	cases := []struct {
+		name  string
+		spoil func(t *testing.T, ctx context.Context, db *sql.DB, upID, planID int64)
+	}{
+		{"已作废", func(t *testing.T, ctx context.Context, db *sql.DB, upID, planID int64) {
+			if _, err := db.ExecContext(ctx,
+				`UPDATE user_plans SET status = 'expired' WHERE id = $1`, upID); err != nil {
+				t.Fatalf("把订阅改成已作废失败: %v", err)
+			}
+		}},
+		{"已过期", func(t *testing.T, ctx context.Context, db *sql.DB, upID, planID int64) {
+			if _, err := db.ExecContext(ctx,
+				`UPDATE user_plans SET period_end = now() - interval '1 hour' WHERE id = $1`,
+				upID); err != nil {
+				t.Fatalf("把订阅改成已过期失败: %v", err)
+			}
+		}},
+		{"币种不符", func(t *testing.T, ctx context.Context, db *sql.DB, upID, planID int64) {
+			if _, err := db.ExecContext(ctx,
+				`UPDATE plans SET asset = 'USD' WHERE id = $1`, planID); err != nil {
+				t.Fatalf("把包改成 USD 失败: %v", err)
+			}
+			// 面值那一侧也要够：否则拦下它的会是「面值不够」，不是币种。
+			txn := ledger.NewTxnID()
+			for _, e := range []ledger.Entry{
+				{TxnID: txn, Account: ledger.PrepaidAccount(upID), Asset: "USD",
+					Amount: mustMoney(t, "50"), EntryType: ledger.EntryPlanGrant},
+				{TxnID: txn, Account: ledger.PlatformRevenueAccount(), Asset: "USD",
+					Amount: mustMoney(t, "-50"), EntryType: ledger.EntryPlanGrant},
+			} {
+				if _, err := db.ExecContext(ctx, `
+					INSERT INTO ledger_entries (txn_id, account, asset, amount, entry_type)
+					VALUES ($1, $2, $3, $4::numeric, $5)`,
+					string(e.TxnID), e.Account.String(), string(e.Asset),
+					e.Amount.String(), string(e.EntryType)); err != nil {
+					t.Fatalf("写 USD 授予分录失败: %v", err)
+				}
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testDB(t)
+			ctx := context.Background()
+
+			userID := seed(t, db, "100")
+			planID := seedPlan(t, ctx, db, "amount", "50", "50")
+			upID := seedUserPlan(t, ctx, db, userID, planID, "50", time.Now().Add(time.Hour))
+			requestID := reqID(t)
+			req := testRequest(ctx, t, db, userID, requestID)
+			r := reservation(t, userID, requestID, "10", "CNY")
+
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("开启事务失败: %v", err)
+			}
+			defer func() { _ = tx.Rollback() }()
+
+			cands, err := selectPlanCandidates(ctx, tx, req, userID, "CNY")
+			if err != nil {
+				t.Fatalf("读候选失败: %v", err)
+			}
+			if len(cands) != 1 || cands[0] != upID {
+				t.Fatalf("候选 = %v，期望 [%d]（这一条本来是好候选）", cands, upID)
+			}
+
+			tc.spoil(t, ctx, db, upID, planID)
+
+			id, ok, err := reserveFromPlan(ctx, tx, req, r, cands)
+			if err != nil {
+				t.Fatalf("坏掉的候选应被跳过，不该返回错误: %v", err)
+			}
+			if ok || id != 0 || r.UserPlanID != 0 {
+				t.Fatalf("候选只坏了「%s」这一维却被选中：ok=%v id=%d plan=%d",
+					tc.name, ok, id, r.UserPlanID)
+			}
+		})
+	}
+}
+
+// 幂等键冲突发生在额度包这条路时，也要把整笔预留回滚。
+//
+// 钱包那条路有同类用例（store_test.go 的 TestClaimConflictRollsBackReservation）；
+// 这一条守的是另一份实现：账单行插在幂等记录之前，撞键时那一行必须一起消失，
+// 面值占用不能留下来。
+func TestPlanClaimConflictRollsBackReservation(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	// 余额 0：这次预留只能走额度包，撞键之后也不会被钱包那条路兜住。
+	userID := seed(t, db, "0")
+	planID := seedPlan(t, ctx, db, "amount", "50", "50")
+	upID := seedUserPlan(t, ctx, db, userID, planID, "50", time.Now().Add(time.Hour))
+
+	claimKeyID := seedAPIKey(ctx, t, db, userID)
+	claim := &idempotency.Claim{
+		APIKeyID: claimKeyID,
+		Key:      "plan-claim-" + itoa(nextID()),
+		Hash:     [32]byte{0x22},
+	}
+
+	firstID := reqID(t)
+	firstReq := testRequest(ctx, t, db, userID, firstID)
+	firstReq.Idempotency = claim
+	if _, err := s.SaveReservation(ctx, firstReq,
+		reservation(t, userID, firstID, "10", "CNY")); err != nil {
+		t.Fatalf("第一次预留失败: %v", err)
+	}
+
+	secondID := reqID(t)
+	secondReq := testRequest(ctx, t, db, userID, secondID)
+	secondReq.Idempotency = claim
+	_, claimErr := s.SaveReservation(ctx, secondReq,
+		reservation(t, userID, secondID, "10", "CNY"))
+	if !errors.Is(claimErr, idempotency.ErrClaimed) {
+		t.Fatalf("第二次预留的错误 = %v，期望 ErrClaimed", claimErr)
+	}
+
+	if n := countRequests(t, db, secondID); n != 0 {
+		t.Errorf("撞键的请求留下了 %d 行账单，期望 0 行", n)
+	}
+	// 面值上只该有第一笔占着的那 10：撞键那笔的插入随事务一起回滚了。
+	if got := pendingPlanAmount(t, db, upID); got != "10.00000000" {
+		t.Errorf("在途面值 = %s，期望 10（只算第一笔）", got)
+	}
+	if row := readBillingPlanRow(t, db, firstID); !row.userPlanID.Valid || row.userPlanID.Int64 != upID {
+		t.Errorf("第一笔的订阅 = %+v，期望仍是 %d", row.userPlanID, upID)
+	}
+}
+
+// 次数包结算：一次请求记 1 个已用量。
+//
+// 这条走的是 `request` 那一支：它不读 token，直接把 1 换成可用量。
+// 结算时若跳过这一步，quota_used 会停在 0，而面值照扣——账上看不出这个包
+// 用过一次。
+func TestSettleFromRequestPlanConsumesOneUnit(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	planID := seedPlan(t, ctx, db, "request", "5", "50")
+	upID := seedUserPlan(t, ctx, db, userID, planID, "50", time.Now().Add(time.Hour))
+
+	requestID := reqID(t)
+	req := testRequest(ctx, t, db, userID, requestID)
+	r := reservation(t, userID, requestID, "10", "CNY")
+	billingID, err := s.SaveReservation(ctx, req, r)
+	if err != nil {
+		t.Fatalf("预留失败: %v", err)
+	}
+
+	actual := mustMoney(t, "5")
+	consume, err := ledger.Consume(ledger.ConsumeParams{
+		TxnID:            ledger.NewTxnID(),
+		UserID:           userID,
+		Asset:            ledger.AssetCNY,
+		Amount:           actual,
+		PrepaidAccount:   ledger.PrepaidAccount(upID),
+		BillingRequestID: billingID,
+	})
+	if err != nil {
+		t.Fatalf("构造消费分录失败: %v", err)
+	}
+	charge := &pipeline.Charge{
+		RequestID:   requestID,
+		UserID:      userID,
+		Asset:       "CNY",
+		Settlement:  billing.Settlement{Actual: actual, Reserved: r.Amount, Breakdown: billing.Breakdown{Total: actual}},
+		Entries:     consume.Denormalize(),
+		Usage:       billing.Usage{PromptTokens: 120, CompletionTokens: 30},
+		UsageSource: tokens.SourceMeasured,
+		PricedAt:    time.Now(),
+	}
+	if err := s.Save(ctx, req, charge); err != nil {
+		t.Fatalf("结算失败: %v", err)
+	}
+
+	if got := quotaUsedOf(t, db, upID); got != "1.00000000" {
+		t.Errorf("quota_used = %s，期望 1（次数包每次记 1）", got)
+	}
+	if got := accountBalanceOf(t, db, ledger.PrepaidAccount(upID).String()); got != "45.00000000" {
+		t.Errorf("prepaid 余额 = %s，期望 45（50 − 5）", got)
+	}
+}
+
+// 实际用量**正好等于**预留时不算「超过」：不截断、也不打那条 WARN。
+//
+// 截断只处理「实际 > 预留」。把判据写成「>=」时，相等那一档会走进截断分支：
+// 写进库的量不变（used 赋成它自己），但每次正常结算都会多一条「实际用量
+// 超过预留额」的 WARN——日志里那类偏差从此不再可信。
+func TestSettleFromPlanDoesNotWarnWhenUsageEqualsReservation(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	planID := seedPlan(t, ctx, db, "token", "5000", "50", "gpt-4o")
+	upID := seedUserPlan(t, ctx, db, userID, planID, "50", time.Now().Add(time.Hour))
+
+	requestID := reqID(t)
+	req := testRequest(ctx, t, db, userID, requestID)
+	r := reservation(t, userID, requestID, "10", "CNY")
+	r.OutputTokens = 500 // 输入 1000 + 输出 500 = 预留 1500
+	billingID, err := s.SaveReservation(ctx, req, r)
+	if err != nil {
+		t.Fatalf("预留失败: %v", err)
+	}
+
+	var logs bytes.Buffer
+	s.logger = slog.New(slog.NewTextHandler(&logs, nil))
+
+	actual := mustMoney(t, "5")
+	consume, err := ledger.Consume(ledger.ConsumeParams{
+		TxnID:            ledger.NewTxnID(),
+		UserID:           userID,
+		Asset:            ledger.AssetCNY,
+		Amount:           actual,
+		PrepaidAccount:   ledger.PrepaidAccount(upID),
+		BillingRequestID: billingID,
+	})
+	if err != nil {
+		t.Fatalf("构造消费分录失败: %v", err)
+	}
+	charge := &pipeline.Charge{
+		RequestID:  requestID,
+		UserID:     userID,
+		Asset:      "CNY",
+		Settlement: billing.Settlement{Actual: actual, Reserved: r.Amount, Breakdown: billing.Breakdown{Total: actual}},
+		Entries:    consume.Denormalize(),
+		// 实际 1500，与预留恰好相等。
+		Usage:       billing.Usage{PromptTokens: 1000, CompletionTokens: 500},
+		UsageSource: tokens.SourceMeasured,
+		PricedAt:    time.Now(),
+	}
+	if err := s.Save(ctx, req, charge); err != nil {
+		t.Fatalf("结算失败: %v", err)
+	}
+
+	if strings.Contains(logs.String(), "实际用量超过预留额") {
+		t.Errorf("实际用量等于预留时不该打截断 WARN：%s", logs.String())
+	}
+	if got := quotaUsedOf(t, db, upID); got != "1500.00000000" {
+		t.Errorf("quota_used = %s，期望 1500", got)
+	}
+}
+
+// PendingPlanReservation 读的是在途预留之和：没出错时要返回那笔数，而不是零。
+//
+// 这个名字给作废那一侧用，读成 0 会让作废把在途请求已经占着的面值一起核销
+// 掉——账本上随后表现为 prepaid 被扣成负数。
+func TestPendingPlanReservationSumsPendingRows(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	planID := seedPlan(t, ctx, db, "amount", "50", "50")
+	upID := seedUserPlan(t, ctx, db, userID, planID, "50", time.Now().Add(time.Hour))
+
+	for _, amount := range []string{"10", "5"} {
+		requestID := reqID(t)
+		req := testRequest(ctx, t, db, userID, requestID)
+		if _, err := s.SaveReservation(ctx, req,
+			reservation(t, userID, requestID, amount, "CNY")); err != nil {
+			t.Fatalf("预留 %s 失败: %v", amount, err)
+		}
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("开启事务失败: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	got, err := PendingPlanReservation(ctx, tx, upID)
+	if err != nil {
+		t.Fatalf("读在途预留失败: %v", err)
+	}
+	if got.String() != "15.00000000" {
+		t.Errorf("在途预留 = %s，期望 15（10 + 5）", got)
 	}
 }
