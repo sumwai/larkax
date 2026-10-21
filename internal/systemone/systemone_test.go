@@ -183,6 +183,28 @@ func TestValidateLeavesStateToUpstream(t *testing.T) {
 	}
 }
 
+// Invalid.Error 的两种形状都要钉住：没有字段名时只回那句话，有字段名时
+// 带上它。入口把这段话原样放进 400 的正文，少一个字段名，调用方就得自己
+// 在整份请求里找是哪一处错了。
+func TestInvalidErrorShapes(t *testing.T) {
+	cases := []struct {
+		name    string
+		invalid *Invalid
+		want    string
+	}{
+		{"没有字段名", &Invalid{Message: "model is required"}, "model is required"},
+		{"带字段名", &Invalid{Field: "model", Message: "model is required"},
+			"model: model is required"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.invalid.Error(); got != tc.want {
+				t.Errorf("Error() = %q，期望 %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // 用量的折算是计费的口径，两边必须一一对上：input → prompt、
 // output → completion。折错的表现是账单上的输入输出对调，而金额总量
 // 在单价相同时完全看不出来。
@@ -365,6 +387,58 @@ func TestEncodeResponseKeepsZeroValues(t *testing.T) {
 	}
 	if _, ok := out.Answers["q_choice"]["probabilities"]; !ok {
 		t.Errorf("choice 的 probabilities 不见了: %s", body)
+	}
+}
+
+// 认不出的类型只带非零的字段：我们没有「哪些字段属于它」的判据，所以
+// 不凭空造键；但上游报过的那几个照带，不能因为类型不认识就整道丢掉。
+//
+// 两侧都要断言：一条只看「非零字段在不在」的用例，挡不住「零值也一起
+// 带上」的改法——那正是另一个方向上的错。
+func TestEncodeResponseUnknownTypeCarriesOnlyNonZeroFields(t *testing.T) {
+	body, err := EncodeResponse(&Response{
+		Model: "decision-model",
+		Answers: map[string]Answer{
+			"q_unknown": {Type: "graded", Noul: 0.25, Choice: "billing",
+				Confidence: 0.5, Score: 2.5,
+				Legend: map[string]string{"2": "high"}},
+			"q_empty": {Type: "graded"},
+		},
+		Usage: Usage{InputTokens: 10, OutputTokens: 2},
+	})
+	if err != nil {
+		t.Fatalf("EncodeResponse 出错: %v", err)
+	}
+
+	var out struct {
+		Answers map[string]map[string]json.RawMessage `json:"answers"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("编出来的响应解不回来: %v\n%s", err, body)
+	}
+
+	for key, want := range map[string]string{
+		"noul":       "0.25",
+		"choice":     `"billing"`,
+		"confidence": "0.5",
+		"score":      "2.5",
+	} {
+		raw, ok := out.Answers["q_unknown"][key]
+		if !ok {
+			t.Errorf("认不出的类型丢掉了非零的 %q: %s", key, body)
+			continue
+		}
+		if string(raw) != want {
+			t.Errorf("%s = %s，期望 %s", key, raw, want)
+		}
+	}
+	if _, ok := out.Answers["q_unknown"]["legend"]; !ok {
+		t.Errorf("认不出的类型丢掉了 legend: %s", body)
+	}
+
+	if got := len(out.Answers["q_empty"]); got != 1 {
+		t.Errorf("全零的认不出类型带了 %d 个键，期望只有 type: %v",
+			got, out.Answers["q_empty"])
 	}
 }
 

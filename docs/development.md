@@ -1983,6 +1983,10 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/assembly` | 71 | 0 | 0 | 10 | 87.65% | 100.00% | 80.1% |
 | `internal/settings` | 27 | 0 | 0 | 4 | 87.10% | 100.00% | 73.6% |
 | `internal/upstream` | 9 | 0 | 0 | 1 | 90.00% | 100.00% | 97.2% |
+| `internal/db` | 2 | 0 | 0 | 2 | 50.00% | 100.00% | 84.6% |
+| `internal/dberr` | 3 | 0 | 0 | 0 | 100.00% | 100.00% | 100.0% |
+| `internal/systemone` | 37 | 0 | 0 | 1 | 97.37% | 100.00% | 93.7% |
+| `internal/textshape` | 4 | 0 | 0 | 1 | 80.00% | 100.00% | 100.0% |
 | `internal/channels` | 288 | 1 | 1 | 41 | 87.58% | 99.65% | 76.6% |
 | `internal/plugin/store` | 77 | 1 | 0 | 15 | 83.87% | 98.72% | 72.4% |
 | `internal/calendar` | 150 | 2 | 0 | 14 | 91.57% | 98.68% | 97.8% |
@@ -2090,6 +2094,31 @@ nil 还是空切片——调用点只做 `append(..., fieldAttrs(...)...)`，差
 `health.go:20` 的 `readyzTimeout` 是包级常量，gremlins 永远记「未覆盖」，补用例
 改变不了；用 `go test -overlay` 把 `*` 换成 `/` 单独验过，
 `TestReadyzPassesUnexpiredDeadlineToChecks` 会红。
+
+**`internal/systemone`、`internal/db`、`internal/textshape` 那几条 `Not covered`
+也都在包级常量上，与 `readyzTimeout` 是同一形状。** gremlins 的覆盖块从语句或
+分支开头起算，包级 `const` 的声明不属于任何块，所以那几行上的变异体一律记
+「未覆盖」、根本不会被运行——改用例改变不了这一点。逐条核过：
+
+- `systemone.go:93` 的 `MaxInputTokens = 64 * 1024`：`TestInputUpperBoundIsPinned`
+  已经钉住这个数。用 `go test -overlay` 把 `*` 换成 `/` 单独验过，那条用例会红
+  （`MaxInputTokens = 0`）——它不是缺口，只是这一格进不了分母。
+- `db.go:31` 的 `pingTimeout = 5 * time.Second`：同样用 overlay 把 `*` 换成 `/`
+  （值变 0）验过，`TestOpenKeepsUnderlyingCause` 会红（错误从解析失败变成
+  `context deadline exceeded`）。
+- `db.go:26` 的 `connMaxIdleTime = 10 * time.Minute`：换成 `/` 之后用例照常通过。
+  `database/sql` 没有读回空闲连接上限的接口，要观察它得让一条真连接闲置十分钟
+  以上再看是否被复用——这属于用例不该做的事，所以这一条是真的观察不到。
+- `textshape.go:37` 的 `whyRendered`：变异器把两个字符串字面量之间的 `+` 换成
+  `-`，overlay 实测连编译都过不去（`operator - not defined on "…" (untyped string
+  constant)`）。就算它进了覆盖范围也只会记 `NOT VIABLE`，不存在能杀掉它的用例。
+
+**这四个包不在自动变异那五棵树里。** `.github/workflows/mutation.yml` 的
+`auto_prefixes` 只列了 ledger、billing、money、pipeline、pricing，PR 的自动轮
+不会选到它们；要量只能手工触发（`workflow_dispatch` 的 `packages` 填包名）或
+本地跑。所以表里这四行会停在入库的这一轮，改了它们不会自动更新——动这几个包时
+记得手工重跑并在表里更新。
+
 **`internal/money` 与 `internal/pipeline` 这一轮各多出一条等价，前提都落在零值上。**
 `money.go:376` 的 `bp == 0 || a.units == 0` 改成 `&&`：任一项为 0 时乘积恒为 0，
 `Quo` 出来仍是 0，而 Amount 的零值就是 `Zero`；`||` 省的只是一次 big.Int 分配。

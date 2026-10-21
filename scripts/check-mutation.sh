@@ -301,6 +301,10 @@ PKGS=(
   internal/payment
   internal/upstream
   internal/observe
+  internal/db
+  internal/dberr
+  internal/systemone
+  internal/textshape
 )
 
 # nearest_pkg <目录>：最近的、在 PKGS 里的祖先（按 `/` 边界，目录本身也算），
