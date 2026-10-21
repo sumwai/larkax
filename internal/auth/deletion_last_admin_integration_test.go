@@ -116,11 +116,11 @@ func TestPurgeDeletionRejectsLastActiveAdmin(t *testing.T) {
 	}
 }
 
-// 销户之前是 suspended 的管理员，匿名化不再按「最后一个管理员」拦。
+// 打标之前是 suspended 的管理员，匿名化不再按「最后一个管理员」拦。
 //
 // 判据保护的是「还能进管理组」的那一拨：suspended / banned 的管理员本来就不在
-// 其中，撤掉它不会让谁失去入口。这类行恰恰是绕过打标、或者打标之后又被停用
-// 留下的形状；对它们再拦一次，效果只是一个已经没人能登的账号永远清不掉。
+// 其中，撤掉它不会让谁失去入口。打标那一侧对它们不拦，所以这种行是正常能造
+// 出来的；在匿名化这一侧再拦一次，效果只是一个已经没人能登的账号永远清不掉。
 //
 // 现场是一行**真的被打了标的 suspended 管理员**：先建管理员、把它置成
 // suspended，再走 RequestDeletion（那一侧对非 active 管理员不拦），于是
@@ -271,16 +271,7 @@ func waitForDeletionWindow(t *testing.T, store *Store) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		var n int
-		if err := store.db.QueryRowContext(t.Context(),
-			`SELECT count(*) FROM pg_stat_activity
-			  WHERE datname = current_database()
-			    AND state = 'active'
-			    AND wait_event_type = 'Timeout'
-			    AND query LIKE '%UPDATE users%'`).Scan(&n); err != nil {
-			t.Fatalf("查看 pg_stat_activity 失败: %v", err)
-		}
-		if n > 0 {
+		if deletionWindowOpen(t, store) {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -290,34 +281,59 @@ func waitForDeletionWindow(t *testing.T, store *Store) {
 	}
 }
 
-// waitForAdvisoryLockWait 看一眼有没有会话停在咨询锁上，最多看两秒。
+// waitForAdvisoryLockWait 看后到的那笔有没有停在管理员判据那把咨询锁上。
 //
-// 两秒比触发器窗口（1.5 秒）略长：过了那个窗口还没等到，就说明后到的那笔没有
-// 停在这把锁上，而是在窗口里就拿到了或者根本没取。返回 false 而不是当场红，
-// 是因为「锁被去掉」那一版要先红在「恰好一笔成功」上——先红在哪一格，说的是
-// 哪条判据失效（见 #985）。
+// 判据钉到锁键上：pg_locks 里只认 objsubid = 1（单 bigint 形式）、没有授予、
+// 且键等于 hashtextextended(usersUpdateLockKey, 0) 的那一把。只判「有人在等
+// 任意 advisory 锁」的话，这个包里哪天再起一个等锁的用例，就会把它顶成绿。
+//
+// 退出条件跟着触发器窗口走：窗口一关（先到的那笔提交了）还没看见等待，就说明
+// 后到的那笔没有停在这把锁上。不用一个比剩余窗口还短的固定上限——那样会把
+// 「还没来得及」误报成「没停住」。十秒那一档只在窗口一直不关（触发器挂了）时
+// 才用得上。
 func waitForAdvisoryLockWait(t *testing.T, store *Store) bool {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
-		var n int
+		var waiting int
 		if err := store.db.QueryRowContext(t.Context(), `
 			SELECT count(*)
 			  FROM pg_locks l
 			  JOIN pg_stat_activity a ON a.pid = l.pid
 			 WHERE l.locktype = 'advisory'
+			   AND l.objsubid = 1
 			   AND NOT l.granted
-			   AND a.datname = current_database()`).Scan(&n); err != nil {
+			   AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtextextended($1, 0)
+			   AND a.datname = current_database()`, usersUpdateLockKey).Scan(&waiting); err != nil {
 			t.Fatalf("查看 pg_locks 失败: %v", err)
 		}
-		if n > 0 {
+		if waiting > 0 {
 			return true
 		}
-		if time.Now().After(deadline) {
+
+		if !deletionWindowOpen(t, store) {
 			return false
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("10 秒内没看见咨询锁上的等待，而触发器窗口一直开着：信号取不到")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// deletionWindowOpen 报告先到的那笔是不是还睡在打标触发器里。
+func deletionWindowOpen(t *testing.T, store *Store) bool {
+	t.Helper()
+	var n int
+	if err := store.db.QueryRowContext(t.Context(), `
+		SELECT count(*) FROM pg_stat_activity
+		  WHERE datname = current_database()
+		    AND state = 'active'
+		    AND wait_event_type = 'Timeout'
+		    AND query LIKE '%UPDATE users%'`).Scan(&n); err != nil {
+		t.Fatalf("查看 pg_stat_activity 失败: %v", err)
+	}
+	return n > 0
 }
 
 func TestRequestDeletionConcurrentLeavesOneActiveAdmin(t *testing.T) {

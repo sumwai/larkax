@@ -599,11 +599,17 @@ func (s *Store) purgeDeletionOnce(ctx context.Context, ref, confirm string) (Del
 	// 的别的入口）。这里仍要问「撤掉这一行之后还剩不剩管理员」——本行此刻是
 	// deletion_requested，不参与计数，所以唯一管理员走到这里时计数为 0。
 	//
-	// 门跟着打标那一侧走：只有「销户之前是 active 的管理员」才判。suspended /
-	// banned 的管理员本来就不在还能进管理组的那一拨里，撤掉它不保护任何入口；
-	// 它们恰恰是绕过打标、或者打标之后又被停用留下的行，对它们再拦一次，效果
-	// 只是让一个已经没人能登的账号永远清不掉。prior 取 deletion_prior_status，
-	// 为 NULL（历史数据）时按「不是 active 管理员」处理。
+	// 门跟着打标那一侧走：只有「打标之前是 active 的管理员」才判。suspended /
+	// banned 的管理员本来就不在还能进管理组的那一拨里，撤掉它不保护任何入口。
+	// 这类行有两种来源：本来就不是 active 的管理员被正常打标（打标那一侧不拦
+	// 它们），以及绕过打标直接改库把 status 写成 deletion_requested。对它再拦
+	// 一次，效果只是让一个已经没人能登的账号永远清不掉。
+	//
+	// prior 由迁移 00039 的 users_deletion_prior_required 兜着：status 是
+	// deletion_requested 时它一定有值。真读到 NULL 说明那条约束被绕过了，这里
+	// 按「不是 active 管理员」处理而不是报错——这一行本来就不参与计数，放行的
+	// 方向不会让谁少掉入口。（撤销那条路对 NULL 是报错，因为那里要把状态写
+	// 回去，替它编一个值等于给一次 suspended 或 banned 的撤销提权。）
 	//
 	// 门由调用点自己判：辅助函数回答的是「撤掉之后还剩不剩」，不是「目标是不是
 	// 管理员」。无条件调用会把普通用户销户也挡住——那正是最需要清号的时候。
