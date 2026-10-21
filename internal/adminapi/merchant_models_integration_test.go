@@ -23,7 +23,7 @@ type merchantModelsResponse struct {
 		Model       string `json:"model"`
 		DisplayName string `json:"display_name"`
 		Channels    int64  `json:"channels"`
-		OwnRules    int64  `json:"own_rules"`
+		Priced      bool   `json:"priced"`
 	} `json:"items"`
 	Total     int  `json:"total"`
 	Truncated bool `json:"truncated"`
@@ -220,62 +220,70 @@ func TestMerchantModelsOrdersAndLimits(t *testing.T) {
 	}
 }
 
-// TestMerchantModelsCountsOwnRules 钉住 own_rules 的三个方向：自己的规则算、
-// 别人的不算、停用的不算；兜底规则（model_patterns 为空）作用于每个模型。
-func TestMerchantModelsCountsOwnRules(t *testing.T) {
+// TestMerchantModelsPriced 钉住「配过价没有」的四个方向：自己的规则算、
+// 别人的不算、停用的不算；兜底规则（model_patterns 为空）让每个模型都算。
+// 这一列是布尔：没有价是 false，不是 null。
+func TestMerchantModelsPriced(t *testing.T) {
 	h := merchantSurface(t, "UTC")
 	db := testDB(t)
-	ownerA := seedUser(t, db, "m-models-rules-a-")
-	ownerB := seedUser(t, db, "m-models-rules-b-")
+	ownerA := seedUser(t, db, "m-models-priced-a-")
+	ownerB := seedUser(t, db, "m-models-priced-b-")
 
-	withRule := uniqueName("model-rule")
-	withoutRule := uniqueName("model-norule")
+	withRule := uniqueName("model-priced")
+	withoutRule := uniqueName("model-unpriced")
 	for _, name := range []string{withRule, withoutRule} {
 		seedCatalogModel(t, db, name)
-		merchantChannel(t, h, ownerA, uniqueName("ch-rule"), "openai",
-			"https://rule.example.com/v1", []string{name})
+		merchantChannel(t, h, ownerA, uniqueName("ch-priced"), "openai",
+			"https://priced.example.com/v1", []string{name})
 	}
 
-	// admin 那一列是全部商家规则的合计：同包别的用例可能也建了兜底规则，
-	// 所以先取一次基线，断言的是这次新增了多少。
-	beforeAdmin := getModels(t, h, 0, "")
-	baseline := make(map[string]int64, len(beforeAdmin.Items))
-	for _, item := range beforeAdmin.Items {
-		baseline[item.Model] = item.OwnRules
-	}
-
-	seedOwnedRule(t, db, ownerA, []string{withRule}, true)
-	seedOwnedRule(t, db, ownerA, []string{withRule}, false)   // 停用
-	seedOwnedRule(t, db, ownerA, nil, true)                   // 兜底
-	seedOwnedRule(t, db, ownerB, []string{withRule}, true)    // 别人的
-	seedOwnedRule(t, db, ownerB, []string{withoutRule}, true) // 别人的
-
-	body := getModels(t, h, ownerA, "")
-	rules := make(map[string]int64, len(body.Items))
-	for _, item := range body.Items {
-		rules[item.Model] = item.OwnRules
-	}
-	// withRule：自己一条具体规则 + 一条兜底 = 2；别人的那条不算。
-	if got := rules[withRule]; got != 2 {
-		t.Errorf("%q 的 own_rules = %d，期望 2（自己的具体规则 + 兜底）", withRule, got)
-	}
-	// withoutRule：只有兜底规则命中。
-	if got := rules[withoutRule]; got != 1 {
-		t.Errorf("%q 的 own_rules = %d，期望 1（只有兜底）", withoutRule, got)
-	}
-
-	// admin 那一列是全部商家规则的合计：withRule 再算上 B 的那一条 = 3。
-	admin := getModels(t, h, 0, "")
-	for _, item := range admin.Items {
-		if item.Model == withRule {
-			if delta := item.OwnRules - baseline[withRule]; delta != 3 {
-				t.Errorf("admin 视角 %q 的 own_rules 增加 %d，期望 3（两个商家的规则合计）",
-					withRule, delta)
-			}
+	pricedOf := func(owner int64) map[string]bool {
+		t.Helper()
+		body := getModels(t, h, owner, "")
+		out := make(map[string]bool, len(body.Items))
+		for _, item := range body.Items {
+			out[item.Model] = item.Priced
 		}
+		return out
 	}
 
-	// 规则不是「越多越好」的另一半：没有价的模型是 0，不是 null。
+	// 还没建规则：两个模型都没有价。
+	before := pricedOf(ownerA)
+	if before[withRule] || before[withoutRule] {
+		t.Fatalf("建规则前就有价：%v", before)
+	}
+
+	// A 的具体规则只管 withRule；别人给 withoutRule 建的价不算在 A 头上。
+	seedOwnedRule(t, db, ownerA, []string{withRule}, true)
+	seedOwnedRule(t, db, ownerB, []string{withoutRule}, true)
+	got := pricedOf(ownerA)
+	if !got[withRule] || got[withoutRule] {
+		t.Errorf("A 的 priced = %v，期望 %q 有、%q 无（别人的规则不算）",
+			got, withRule, withoutRule)
+	}
+
+	// admin 视角是同一套判据、不同的主语：全平台有没有一条商家规则命中它，
+	// 不要求规则的主人正在供这个模型——ownerB 没有任何渠道，它给 withoutRule
+	// 建的那条规则仍让管理员看到 true。
+	admin := pricedOf(0)
+	if !admin[withRule] || !admin[withoutRule] {
+		t.Errorf("admin 的 priced = %v，期望两个都有（两个商家各配了一条）", admin)
+	}
+
+	// 停用的规则不报价。
+	seedOwnedRule(t, db, ownerA, []string{withoutRule}, false)
+	if got = pricedOf(ownerA); got[withoutRule] {
+		t.Errorf("停用的规则被算成有价：%v", got)
+	}
+
+	// 兜底规则作用于全部模型：两个都算。
+	seedOwnedRule(t, db, ownerA, nil, true)
+	got = pricedOf(ownerA)
+	if !got[withRule] || !got[withoutRule] {
+		t.Errorf("兜底规则没有覆盖全部模型：%v", got)
+	}
+
+	// 这一列是布尔而不是 null：页面直接读 true/false。
 	rec := merchantCall(t, h, ownerA, http.MethodGet, "/api/v1/merchant/models", nil)
 	var raw struct {
 		Items []map[string]any `json:"items"`
@@ -284,13 +292,16 @@ func TestMerchantModelsCountsOwnRules(t *testing.T) {
 		t.Fatalf("响应不是 JSON: %v", err)
 	}
 	for _, item := range raw.Items {
-		if item["own_rules"] == nil {
-			t.Errorf("%v 的 own_rules 是 null，期望数字", item["model"])
+		if _, ok := item["priced"].(bool); !ok {
+			t.Errorf("%v 的 priced = %v，期望布尔", item["model"], item["priced"])
+		}
+		if _, found := item["own_rules"]; found {
+			t.Errorf("%v 还带着 own_rules 字段", item["model"])
 		}
 	}
 }
 
-// TestMerchantModelsRuleWindowIsRespected 未来生效与已停用的规则都不进这一列。
+// TestMerchantModelsRuleWindowIsRespected 未来生效与已停用的规则都不算「配过价」。
 func TestMerchantModelsRuleWindowIsRespected(t *testing.T) {
 	h := merchantSurface(t, "UTC")
 	db := testDB(t)
@@ -314,7 +325,7 @@ func TestMerchantModelsRuleWindowIsRespected(t *testing.T) {
 	if len(body.Items) != 1 {
 		t.Fatalf("清单 = %+v", body)
 	}
-	if body.Items[0].OwnRules != 0 {
-		t.Errorf("own_rules = %d，期望 0（未到生效时刻）", body.Items[0].OwnRules)
+	if body.Items[0].Priced {
+		t.Error("priced = true，期望 false（未到生效时刻）")
 	}
 }
