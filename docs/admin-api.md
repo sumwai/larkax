@@ -74,6 +74,12 @@ Authorization: Bearer <令牌>
 别名清单不带 `channel_id` 时给的是**平台级**那一段（`channel_id = 0`），与
 `larkaxctl alias list` 的默认口径一致。
 
+**用户管理不在这里**：`/api/v1/admin/users` 只挂在控制台的会话面（见
+[api.md](api.md) 的「控制台管理接口：用户」）。它的判据里有「不能改自己」
+「不能撤掉最后一个 active 管理员」，而运维令牌没有「自己」这个概念。内部
+管理面的资源组是一份显式清单（`adminapi.InternalGroups`），所以
+`/admin/v1/users` 回 `404`，不是 `401`。
+
 这一层是薄层：写入语义与校验全在 `internal/channels`、`internal/catalog`、
 `internal/pricing` 的 admin 类型里，接口只做「解请求 → 调它 → 翻成 JSON」。
 字段名用 snake_case，与 CLI 的 `--flag` 一一对应（`base_url` ↔ `--base-url`），

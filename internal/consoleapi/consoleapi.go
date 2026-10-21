@@ -342,6 +342,7 @@ func newAPI(cfg Config, d deps) http.Handler {
 				Prefix:    prefix,
 				Authorize: passThrough,
 				Groups:    groups,
+				Currency:  a.currency,
 			})
 		}
 		if a.deps.merchantAdmin == nil {
@@ -350,7 +351,16 @@ func newAPI(cfg Config, d deps) http.Handler {
 				[]string{adminapi.GroupChannels, adminapi.GroupPricing})
 		}
 		if a.deps.adminAdmin == nil {
-			a.deps.adminAdmin = build(PathPrefix+"admin/", nil)
+			// 显式列出，不留空（空 = 全部）：users 组只属于这一组——它的
+			// 判据依赖会话里的操作者，内部管理面那一侧没有这个前提。
+			a.deps.adminAdmin = build(PathPrefix+"admin/", []string{
+				adminapi.GroupChannels,
+				adminapi.GroupModels,
+				adminapi.GroupAliases,
+				adminapi.GroupPricing,
+				adminapi.GroupCosts,
+				adminapi.GroupUsers,
+			})
 		}
 	}
 
@@ -452,6 +462,11 @@ func (a *API) roleGroup(required auth.Role, next http.Handler) http.Handler {
 		a.touchSession(r, session)
 		if required == auth.RoleMerchant && session.Role == auth.RoleMerchant {
 			r = r.WithContext(adminapi.WithOwner(r.Context(), session.UserID))
+		}
+		// admin 组总带操作者：用户管理要判「是不是在改自己」，审计日志也要
+		// 记下是谁。它只来自这里（服务端会话），请求头与 body 不参与。
+		if required == auth.RoleAdmin {
+			r = r.WithContext(adminapi.WithActor(r.Context(), session.UserID))
 		}
 		next.ServeHTTP(w, r)
 	})

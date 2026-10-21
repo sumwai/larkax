@@ -424,7 +424,11 @@ func TestGroupSelectionControlsRoutes(t *testing.T) {
 		}
 	}
 	// 成本价是渠道侧的成本口径，没有商家归属可过滤，merchant 组不注册它。
-	for _, path := range []string{prefix + "models", prefix + "aliases", prefix + "pricing/costs"} {
+	for _, path := range []string{
+		prefix + "models", prefix + "aliases", prefix + "pricing/costs",
+		// 用户管理只挂在控制台的 admin 组：它的判据依赖会话里的操作者。
+		prefix + "users",
+	} {
 		if rec := call(t, h, http.MethodGet, path, "", nil); rec.Code != http.StatusNotFound {
 			t.Errorf("%s 的状态码 = %d，期望 404（这一组不含它）", path, rec.Code)
 		}

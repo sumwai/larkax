@@ -112,8 +112,8 @@ func TestModelsPageSurvivesBrokenReferenceRule(t *testing.T) {
 		}},
 		prices:        pricing.NewReferences(db, "Asia/Shanghai", nil),
 		offers:        &fakeOffers{base: money.MustParse("0.00200000")},
-		merchantAdmin: stubAdmin(new(int), new(int64)),
-		adminAdmin:    stubAdmin(new(int), new(int64)),
+		merchantAdmin: stubAdmin(new(int), new(int64), nil),
+		adminAdmin:    stubAdmin(new(int), new(int64), nil),
 		spent: func(context.Context, []int64) (map[int64]money.Amount, error) {
 			return map[int64]money.Amount{}, nil
 		},

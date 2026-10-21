@@ -41,6 +41,8 @@ func TestRoleGroupsGateBySessionRole(t *testing.T) {
 	}{
 		{"/api/v1/merchant/channels", http.StatusForbidden, http.StatusNoContent, http.StatusNoContent},
 		{"/api/v1/admin/channels", http.StatusForbidden, http.StatusForbidden, http.StatusNoContent},
+		// 用户管理也是 admin 组的一条：普通用户与 merchant 都不该进得去。
+		{"/api/v1/admin/users", http.StatusForbidden, http.StatusForbidden, http.StatusNoContent},
 	}
 
 	for _, group := range groups {
@@ -146,6 +148,39 @@ func TestMerchantGroupScopesOwnership(t *testing.T) {
 	}
 	if f.adminOwner != 0 {
 		t.Errorf("admin 组被注入了归属 %d；它不按归属过滤", f.adminOwner)
+	}
+	// 与归属相反，操作者**要**注入：用户管理判「是不是在改自己」、审计日志
+	// 记谁改的，都只认这一个值（请求头与 body 不参与）。
+	if f.adminActor != 102 {
+		t.Errorf("admin 组注入的操作者 = %d，期望会话用户 102", f.adminActor)
+	}
+}
+
+// TestAdminGroupRequiresCSRFForUserPatch 钉住用户管理的写方法也过 CSRF：
+// 它是 admin 组下的 PATCH，与渠道、计价那些写路径同一道门。
+func TestAdminGroupRequiresCSRFForUserPatch(t *testing.T) {
+	f := newFixture(t)
+	f.addRoleSession("admin-token", 12, 102, auth.RoleAdmin)
+
+	missing := f.requestAsWith(t, "127.0.0.1:8080",
+		map[string]string{"Cookie": auth.SessionCookieName + "=admin-token"},
+		http.MethodPatch, "/api/v1/admin/users/1", `{"status":"suspended"}`)
+	if missing.Code != http.StatusForbidden {
+		t.Fatalf("不带 CSRF 的 PATCH 状态码 = %d，期望 403；正文：%s", missing.Code, missing.Body)
+	}
+	if f.adminAdminCalls != 0 {
+		t.Errorf("CSRF 没过的请求进到了资源 handler（调用 %d 次）", f.adminAdminCalls)
+	}
+
+	ok := f.requestAsWith(t, "127.0.0.1:8080", map[string]string{
+		"Cookie":       auth.SessionCookieName + "=admin-token",
+		"X-CSRF-Token": "csrf-admin-token",
+	}, http.MethodPatch, "/api/v1/admin/users/1", `{"status":"suspended"}`)
+	if ok.Code != http.StatusNoContent {
+		t.Fatalf("过了 CSRF 的 PATCH 状态码 = %d，期望 204；正文：%s", ok.Code, ok.Body)
+	}
+	if f.adminAdminCalls != 1 {
+		t.Errorf("资源 handler 被调用 %d 次，期望 1", f.adminAdminCalls)
 	}
 }
 
