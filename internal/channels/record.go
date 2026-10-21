@@ -462,9 +462,10 @@ func writeQuotaState(ctx context.Context, tx *sql.Tx, s quota.State) error {
 //
 // 口径与 internal/billing 的 FromChannelUsage + TotalTokens 一致：channel.Usage
 // 的 PromptTokens **含**缓存读写，CompletionTokens 是否含推理由
-// CompletionIncludesReasoning 声明，所以推理只有在**没被算进输出**时才另加。
-// 两边算出来的是同一个总数（那里把缓存与推理拆开是为了按不同单价计费，
-// 加起来就是这里要的数）。
+// CompletionIncludesReasoning 声明——那一位由适配器按渠道 setting 填进来
+// （见 channel.UsageCompletionIncludesReasoning），所以推理只有在**没被算进
+// 输出**时才另加。两边算出来的是同一个总数（那里把缓存与推理拆开是为了按不同
+// 单价计费，加起来就是这里要的数）。
 func consumedTokens(u channel.Usage) int64 {
 	total := u.PromptTokens + u.CompletionTokens
 	if !u.CompletionIncludesReasoning {

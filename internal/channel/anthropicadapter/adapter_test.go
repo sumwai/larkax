@@ -974,7 +974,7 @@ func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
 // 在 httptest 里不稳定，而它的判据属于 pump 自己，与 HTTP 那一层无关。
 func runPump(ctx context.Context, body io.Reader) []channel.StreamEvent {
 	events := make(chan channel.StreamEvent, 8)
-	newAdapter().pump(ctx, http.StatusOK, body, events)
+	newAdapter().pump(ctx, http.StatusOK, true, body, events)
 	close(events)
 	var out []channel.StreamEvent
 	for ev := range events {

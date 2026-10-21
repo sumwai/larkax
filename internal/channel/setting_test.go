@@ -15,10 +15,10 @@ import (
 // settingReaderDirs 是「渠道类型 → 可能读它 setting 的目录」，相对本包目录。
 //
 // 除了实现这个类型的适配器目录，还要算上本包（"."）：协议翻译里共用的那部分
-// 放在 internal/channel，两个适配器调同一个函数，读键的下标就在那种函数里
-// （见 reasoning_effort.go）。只列适配器目录的话，读者搬进本包之后这条判据
-// 就再也扫不到它——表现恰好是「声明没有人核对」。本包里 `for key := range
-// setting` 之类的遍历不算读者：只有按下标取某个键才是。
+// 放在 internal/channel，多个适配器调同一个函数，读键的下标就在那种函数里
+// （见 reasoning_effort.go 与 usage_setting.go）。只列适配器目录的话，读者搬进
+// 本包之后这条判据就再也扫不到它——表现恰好是「声明没有人核对」。本包里
+// `for key := range setting` 之类的遍历不算读者：只有按下标取某个键才是。
 //
 // 这张表只属于用例：生产代码按 settingKeysByType 回答「这个 type 认哪些键」，
 // 不需要知道哪个目录是实现。正因为它是一份手写的对应关系，用例先把它自己
@@ -27,7 +27,7 @@ import (
 // 第 16 条）。
 var settingReaderDirs = map[Protocol][]string{
 	ProtocolOpenAI:          {".", "openaiadapter"},
-	ProtocolAnthropic:       {"anthropicadapter"},
+	ProtocolAnthropic:       {".", "anthropicadapter"},
 	ProtocolOpenAIResponses: {".", "responsesadapter"},
 	ProtocolSystemOne:       {"systemoneadapter"},
 }
@@ -66,7 +66,7 @@ func TestSettingKeysMatchAdapterReaders(t *testing.T) {
 		// 一行表就能被发现」的那条路。
 		keys := settingKeysByType[protocol]
 		var adapterFiles []*ast.File
-		var adapterKeys, sharedKeys []string
+		var adapterKeys []string
 		var sharedFiles []*ast.File
 		var sharedFset *token.FileSet
 		for _, dir := range dirs {
@@ -74,7 +74,6 @@ func TestSettingKeysMatchAdapterReaders(t *testing.T) {
 			keysHere := adapterSettingIndexKeys(t, files, fset, channelConsts)
 			if dir == "." {
 				sharedFiles, sharedFset = files, fset
-				sharedKeys = append(sharedKeys, keysHere...)
 				continue
 			}
 			if !dirDeclaresType(t, files, protocol) {
@@ -88,8 +87,18 @@ func TestSettingKeysMatchAdapterReaders(t *testing.T) {
 			t.Fatalf("类型 %q 的读者目录只有 \".\"：共存实现算给了谁？"+
 				"这里至少要有一个适配器目录来承接它", protocol)
 		}
-		referenced := append(append([]string{}, adapterKeys...), sharedKeys...)
 		sharedFuncs := sharedReaderFuncs(t, sharedFiles, sharedFset, channelConsts)
+		// referenced 只算**这个类型的适配器真的会走到**的共用读法：
+		// 本包里可以同时住着几个协议的共用函数，某个类型只调用其中一部分，
+		// 另一部分读的键对它就是无关的（例如 anthropic 不翻译
+		// reasoning_effort，那一项不该要求它声明）。按「调用了没有」收窄，
+		// 反方向那一格才不会逼着每个共用 "." 的类型把别人的键也登记一遍。
+		referenced := append([]string{}, adapterKeys...)
+		for name, sharedKeyList := range sharedFuncs {
+			if callsChannelFuncWithSetting(adapterFiles, name) {
+				referenced = append(referenced, sharedKeyList...)
+			}
+		}
 
 		// 一、表里声明的每个键都得有人按它取过值，而且取它的那条路要能
 		// 从本类型的适配器走到：适配器自己取，或者调用本包里取它的函数。

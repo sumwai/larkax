@@ -536,7 +536,7 @@ func (failingReader) Read([]byte) (int, error) { return 0, errors.New("连接被
 // 用带缓冲的通道收事件，pump 同步跑完即可，不依赖 goroutine 时序。
 func TestPumpReportsReadError(t *testing.T) {
 	events := make(chan channel.StreamEvent, 8)
-	newAdapter().pump(context.Background(), http.StatusBadGateway, failingReader{}, events)
+	newAdapter().pump(context.Background(), http.StatusBadGateway, true, failingReader{}, events)
 	close(events)
 
 	var got []channel.StreamEvent
@@ -578,7 +578,7 @@ func TestPumpAcceptsLargeFrame(t *testing.T) {
 	line := `data: {"choices":[{"index":0,"delta":{"content":"` + content + `"}}]}` + "\n\n"
 
 	events := make(chan channel.StreamEvent, 8)
-	newAdapter().pump(context.Background(), http.StatusOK, strings.NewReader(line), events)
+	newAdapter().pump(context.Background(), http.StatusOK, true, strings.NewReader(line), events)
 	close(events)
 
 	var text strings.Builder
