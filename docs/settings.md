@@ -6,7 +6,7 @@
 [.env.example](../.env.example) 顶部的说明。密钥类配置也不放这里——这张表的值
 明文落盘并进备份，渠道凭证走 `channels` 表的信封加密。
 
-一共 **24 个键**。清单的唯一来源是 `internal/settings` 的 `Registry`，默认值的
+一共 **25 个键**。清单的唯一来源是 `internal/settings` 的 `Registry`，默认值的
 唯一来源是**迁移文件**（代码里不再写第二份，两处默认值迟早会不一致）。
 
 ## 加载：不一致就拒绝启动
@@ -42,9 +42,11 @@ larkaxctl settings set --key plugin.enabled --value true --by alice
   （`capture.consent_max_window_hours`）的读者是 `larkaxctl consent grant`。
 
 **什么时候生效**：下表里除 `reconcile.*`、`idempotency.retention_hours`、
-`capture.consent_max_window_hours` 与 `admin.token_sha256` 之外，都是**装配期
-读一次**——改完要重启服务。那三个是每轮 / 每次读的，管理令牌是每个管理面请求
-读一次，改完下一次就生效。`billing.merchant_share_bp` 在每次结算时从装配期
+`capture.consent_max_window_hours`、`console.session_retention_days` 与
+`admin.token_sha256` 之外，都是**装配期
+读一次**——改完要重启服务。`reconcile.*` 是每轮读的，`idempotency.retention_hours`
+与 `capture.consent_max_window_hours` 是每次读的，`console.session_retention_days`
+是每次清理读一次，管理令牌是每个管理面请求读一次，改完下一次就生效。`billing.merchant_share_bp` 在每次结算时从装配期
 那份快照里取值，快照本身不刷新，所以同样要重启。
 
 ## 请求快照
@@ -98,6 +100,14 @@ larkaxctl settings set --key plugin.enabled --value true --by alice
 | 键 | 类型 | 默认值 | 取值 | 影响 |
 |---|---|---|---|---|
 | `idempotency.retention_hours` | int | `24` | 正数（小时） | 幂等记录的留存小时数，到期由 `larkaxctl maintenance idempotency` 删除。改完不必重启，下一次清理就按新值算 |
+
+## 控制台会话
+
+会话本身的形态与生命周期见 `internal/auth` 的 `session.go`。
+
+| 键 | 类型 | 默认值 | 取值 | 影响 |
+|---|---|---|---|---|
+| `console.session_retention_days` | int | `30` | 正数（天） | 已吊销的控制台会话在吊销之后保留多少天，到期由 `larkaxctl maintenance session` 删除。**过期会话到点即删，不受这个窗口影响**；窗口按 `revoked_at` 算。改完不必重启，下一次清理就按新值算 |
 
 ## 支付
 

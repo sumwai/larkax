@@ -326,6 +326,8 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 
 		{command: "maintenance", what: "idempotency --dry-run",
 			run: func() error { return runMaintenance([]string{"idempotency", "--dry-run"}) }},
+		{command: "maintenance", what: "session --dry-run",
+			run: func() error { return runMaintenance([]string{"session", "--dry-run"}) }},
 
 		{command: "snapshot", what: "allowlist",
 			run: func() error { return runSnapshot([]string{"allowlist"}) }},

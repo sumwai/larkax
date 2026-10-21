@@ -15,6 +15,8 @@ const maintenanceShortUsage = `larkaxctl maintenance 维护运行期数据的留
 用法：
   larkaxctl maintenance idempotency [--dry-run]
         按 settings 里的留存期删除到期的幂等记录（--dry-run 只数一遍，不删）
+  larkaxctl maintenance session [--dry-run]
+        按 settings 里的留存期删除过期与已吊销的控制台会话（--dry-run 只数一遍，不删）
 
 留存期不在命令行上给：同一件事有两个来源时，命令行的那个会悄悄赢。
 
@@ -31,9 +33,11 @@ const maintenanceUsage = `larkaxctl maintenance 维护运行期数据的留存�
 用法：
   larkaxctl maintenance idempotency [--dry-run]
         按 settings 里的留存期删除到期的幂等记录（--dry-run 只数一遍，不删）
+  larkaxctl maintenance session [--dry-run]
+        按 settings 里的留存期删除过期与已吊销的控制台会话（--dry-run 只数一遍，不删）
 
 留存期不在命令行上给：同一件事有两个来源时，命令行的那个会悄悄赢，而
-「留存期到底是几小时」会变成一件要看是谁执行的才知道的事。
+「留存期到底是几小时或几天」会变成一件要看是谁执行的才知道的事。
 
 第三方数据（请求快照、账本分区）的留存各有自己的命令，见 larkaxctl partition
 与 larkaxctl snapshot。
@@ -57,6 +61,9 @@ func runMaintenance(args []string) error {
 		// 清理的实现与它的用法文本都在 idempotency.go，旧路径
 		// （larkaxctl idempotency cleanup）接的也是同一个函数。
 		return runIdempotencyCleanup(rest)
+	case "session":
+		// 会话清理的实现与它的用法文本都在 maintenance_session.go。
+		return runMaintenanceSession(rest)
 	case "-h", "--help":
 		printUsage(os.Stdout, maintenanceShortUsage)
 		return nil

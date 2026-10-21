@@ -480,7 +480,7 @@ go run ./cmd/larkaxctl --env-file .env.staging wallet create --user alice
    （`settings.description` 那一列，`settings list` 打的就是它）。
 2. 在 `internal/settings/settings.go` 的 `Registry` 里加一行，声明键与类型。
 
-**现有 24 个键的默认值、取值范围，以及各自改完什么时候生效，见
+**现有 25 个键的默认值、取值范围，以及各自改完什么时候生效，见
 [settings.md](settings.md)。** 这一节讲的是**加一个新键**的步骤。
 
 说明只写在迁移里一份，`Registry` 里没有第二份——写两份的话，改了一处另一处不动，
@@ -1271,7 +1271,7 @@ ingress 规则下。同一个端口上还有管理面 `/admin/v1/*`，用单独�
 | `snapshot` | 请求快照：`cleanup` / `allowlist` / `get` / `access-log`（只读的访问记录）/ `redact` |
 | `consent` | 原样采集请求正文的授权：`grant` / `list` / `revoke` |
 | `secret` | 主密钥轮换：`rotate` |
-| `maintenance` | 运行期数据的留存清理：`idempotency`（`--dry-run` 只数不删） |
+| `maintenance` | 运行期数据的留存清理：`idempotency` / `session`（两条都支持 `--dry-run`，只数不删） |
 | `migrate` | 迁移：`up` / `down` / `down-to` / `up-to` / `status` / `version` / `create` |
 | `version` | 打印版本号 |
 

@@ -184,7 +184,7 @@ var commandGroups = []commandGroup{
 			{name: "migrate", summary: "数据库版本迁移（up、down、status、version）", help: migrateHelp, run: runMigrate},
 			{name: "partition", summary: "数据库月度分区维护（check、ensure）", help: partitionHelp, run: runPartition},
 			{name: "secret", summary: "安全凭证与主密钥维护（rotate 密钥轮换）", help: secretHelp, run: runSecret},
-			{name: "maintenance", summary: "数据留存与过期清理（idempotency 幂等记录）", help: maintenanceHelp, run: runMaintenance},
+			{name: "maintenance", summary: "数据留存与过期清理（idempotency 幂等记录、session 控制台会话）", help: maintenanceHelp, run: runMaintenance},
 			{name: "snapshot", summary: "请求结构快照管理（cleanup、allowlist、get、redact）", help: snapshotHelp, run: runSnapshot},
 			{name: "consent", summary: "原样采集请求正文的授权（grant、list、revoke）", help: consentHelp, run: runConsent},
 			{name: "plugin", summary: "动态插件系统管理（list、get、publish、enable、disable、delete、kv）", help: pluginHelp, run: runPlugin},
