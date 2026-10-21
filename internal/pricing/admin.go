@@ -686,6 +686,75 @@ func (a *Admin) ListOwned(ctx context.Context, ownerID int64) ([]RuleInfo, error
 	return a.queryRules(ctx, listOwnedQuery, ownerID)
 }
 
+// RulePatterns 是一条 merchant 规则的「命中判据」窄形状。
+//
+// 它不含表达式与结构化定价表：用到它的调用方只要模型名单与生效判据
+// （「这个模型配过价没有」），拿到表达式反而会诱使它去解码、编译。
+type RulePatterns struct {
+	ID            int64
+	OwnerUserID   int64
+	Enabled       bool
+	EffectiveFrom time.Time
+	EffectiveTo   *time.Time
+	ModelPatterns []string
+}
+
+// MerchantRulePatterns 读全部 merchant 作用域规则的模型名单。
+//
+// 与 List / ListOwned 的区别是**不跑 decorate**：不编译表达式、不解 schedule，
+// 也就不为 DeclaredKeys / ExprErr 付每次列举一次的编译代价。这条读路径服务
+// 的是「有没有一条生效中的规则命中这个模型」这类只要模型名的调用方。
+//
+// 归属、启停与有效期的判据留在调用方（admin 视角要跨 owner，商家视角只看
+// 自己）：判据只有一份，写在读的人手里，不在这里再实现一遍。
+//
+// # 为什么没有 owner 参数
+//
+// 与 ListOwned 相比，商家视角会多读别人家的规则行（在内存里筛掉）。取舍是
+// 「判据只有一份」：SQL 里再带一次 `owner_user_id = $1` 就把归属判据写成了
+// 两份，两边漂移时便宜的那份会被信。它依赖的前提与 List 不分页相同——规则表
+// 不大；`scope` 又是 pricing_rules_lookup_idx 的前导列，`WHERE scope =
+// 'merchant'` 走的仍是索引范围扫描，不是整表。
+//
+// # 表达式坏掉的行照样参与
+//
+// 不取 expr 的意思是这条路不判「表达式能不能编译」，不是跳过编不过的行：
+// List 也只是把编译失败写进那一行的 ExprErr、不丢行。两条路径对「哪些规则
+// 算数」的回答因此一致。
+func (a *Admin) MerchantRulePatterns(ctx context.Context) ([]RulePatterns, error) {
+	rows, err := a.db.QueryContext(ctx, merchantPatternsQuery)
+	if err != nil {
+		return nil, fmt.Errorf("查询商家计价规则的模型名单失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	// 从空切片开始：一条规则都没有是正常结果，不是「没有值」。
+	out := []RulePatterns{}
+	for rows.Next() {
+		var (
+			item     RulePatterns
+			patterns []byte
+			to       sql.NullTime
+		)
+		if scanErr := rows.Scan(&item.ID, &item.OwnerUserID, &item.Enabled,
+			&item.EffectiveFrom, &to, &patterns); scanErr != nil {
+			return nil, fmt.Errorf("读取商家计价规则行失败: %w", scanErr)
+		}
+		if decodeErr := json.Unmarshal(patterns, &item.ModelPatterns); decodeErr != nil {
+			return nil, fmt.Errorf("规则 %d 的 model_patterns 不是合法 JSON 数组: %w", item.ID, decodeErr)
+		}
+		if to.Valid {
+			at := to.Time
+			item.EffectiveTo = &at
+		}
+		out = append(out, item)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历商家计价规则失败: %w", err)
+	}
+	return out, nil
+}
+
 // Get 按 id 读一条规则。
 func (a *Admin) Get(ctx context.Context, id int64) (RuleInfo, error) {
 	return a.rule(ctx, ruleByIDQuery, id)
@@ -880,6 +949,17 @@ var listOwnedQuery = `
 	 WHERE r.scope = 'merchant'
 	   AND r.owner_user_id = $1
 	 ORDER BY ` + ruleOrderBy
+
+// merchantPatternsQuery 只读 merchant 规则的模型名单与生效判据。
+//
+// 它不取 expr / schedule（那两列最宽，而这条路既不求值也不展示），于是也
+// 不经过 decorate 的表达式编译。ORDER BY id 只是让结果稳定，判据不依赖次序。
+var merchantPatternsQuery = `
+	SELECT r.id, r.owner_user_id, r.enabled, r.effective_from, r.effective_to,
+	       r.model_patterns
+	  FROM pricing_rules r
+	 WHERE r.scope = 'merchant'
+	 ORDER BY r.id`
 
 // ── 读取与编译 ──────────────────────────────────────────────────────────
 
