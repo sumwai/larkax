@@ -290,7 +290,7 @@ func TestSettleRecordsMeasuredCacheAmount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Settle(context.Background(), req, res, Outcome{
+	if _, err = p.Settle(context.Background(), req, res, Outcome{
 		// 上游报的 prompt 含缓存：整段 1000 = 100 非缓存 + 900 缓存读。
 		Usage:       channel.Usage{PromptTokens: 1000, CacheReadTokens: 900, CompletionTokens: 100},
 		UsageSource: tokens.SourceMeasured,
@@ -330,7 +330,7 @@ func TestSettleDoesNotRecordWithoutCacheActivity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Settle(context.Background(), req, res, Outcome{
+	if _, err = p.Settle(context.Background(), req, res, Outcome{
 		Usage:       channel.Usage{PromptTokens: 1000, CompletionTokens: 100},
 		UsageSource: tokens.SourceMeasured,
 	}); err != nil {
@@ -366,7 +366,7 @@ func TestSettleDoesNotRecordEstimatedUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Settle(context.Background(), req, res, Outcome{
+	if _, err = p.Settle(context.Background(), req, res, Outcome{
 		Usage:       channel.Usage{PromptTokens: 1000, CacheReadTokens: 900, CompletionTokens: 100},
 		UsageSource: tokens.SourceEstimated,
 	}); err != nil {
