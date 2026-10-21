@@ -504,6 +504,30 @@ export interface RuleUpdateInput {
   enabled?: boolean
 }
 
+/**
+ * 商家自助的那一半。
+ *
+ * `Omit` 掉的三栏是「出现即拒」：作用域由服务端定成 merchant，归属是会话
+ * 用户，渠道这一维在商家规则里根本不存在。类型上拿不到，就不容易顺手带上。
+ */
+export type MerchantRuleCreateInput = Omit<
+  RuleCreateInput,
+  'scope' | 'owner_user_id' | 'channel_id'
+>
+
+export type MerchantRuleUpdateInput = Omit<
+  RuleUpdateInput,
+  'scope' | 'owner_user_id' | 'channel_id'
+>
+
+/** `/api/v1/merchant/pricing/rules*`：只有规则，没有成本。 */
+export interface MerchantPricingClient {
+  listRules(): Promise<PricingRule[]>
+  getRule(id: number): Promise<PricingRule>
+  createRule(input: MerchantRuleCreateInput): Promise<number>
+  updateRule(id: number, input: MerchantRuleUpdateInput): Promise<void>
+}
+
 export interface PricingCost {
   id: number
   channel_id: number
@@ -603,6 +627,9 @@ export interface ApiClient {
   walletEntries(query?: WalletEntriesQuery): Promise<ListResponse<WalletEntry>>
   /** `/api/v1/admin/*` 下的运营资源；账号没有 admin 角色时服务端一律 403。 */
   admin: OpsClient
-  /** `/api/v1/merchant/channels*`；范围由服务端限定为自有渠道，没有模型与计价。 */
-  merchant: ChannelOpsClient
+  /**
+   * `/api/v1/merchant/*`：自有渠道与自己的售价规则。
+   * 范围由服务端限定；模型目录、别名与成本规则在商家前缀下没有路由。
+   */
+  merchant: ChannelOpsClient & MerchantPricingClient
 }

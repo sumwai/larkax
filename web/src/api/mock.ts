@@ -17,6 +17,7 @@ import type {
   Model,
   ModelsResponse,
   ChannelOpsClient,
+  MerchantPricingClient,
   OpsClient,
   OpsModel,
   OpsModelCreateInput,
@@ -622,7 +623,7 @@ function opsID(): number {
  * 计价没有商家前缀的路由。渠道按服务端的判定演戏：merchant 只看得到、也只
  * 改得了自己的渠道，别人的渠道与不存在的渠道都回 404（不透露「存在但不是你的」）。
  */
-function mockOpsClient(scope: 'admin' | 'merchant'): OpsClient {
+function mockOpsClient(scope: 'admin' | 'merchant'): OpsClient & MerchantPricingClient {
   const isAdmin = scope === 'admin'
   const denied = () => new ApiError(403, 'forbidden', PERMISSION_DENIED)
 
@@ -827,23 +828,36 @@ function mockOpsClient(scope: 'admin' | 'merchant'): OpsClient {
     async listRules() {
       await delay()
       requireSession()
-      return OPS_RULES.map((rule) => ({ ...rule }))
+      const rows = isAdmin ? OPS_RULES : OPS_RULES.filter((rule) => rule.owner_user_id === user.id)
+      return rows.map((rule) => ({ ...rule }))
+    },
+
+    async getRule(id) {
+      await delay()
+      requireSession()
+      const rule = OPS_RULES.find((item) => item.id === id)
+      // 别人的、平台的、不存在的都是同一句 404：能区分「不是你的」就等于
+      // 告诉调用方这一行存在。
+      if (!rule || (!isAdmin && rule.owner_user_id !== user.id)) {
+        throw new ApiError(404, 'not_found', 'not found')
+      }
+      return { ...rule }
     },
 
     async createRule(input: RuleCreateInput) {
       await delay()
       requireSession()
-      requireAdmin()
       if (!input.name.trim()) throw new ApiError(400, 'invalid_request', 'name is required')
       if (!input.expr.trim()) throw new ApiError(400, 'invalid_request', 'expr is required')
       if (input.model_patterns.length === 0) {
         throw new ApiError(400, 'invalid_request', 'at least one model pattern is required')
       }
+      // 商家建规则时作用域与归属由会话决定，渠道这一维不存在。
       const created: PricingRule = {
         id: opsID(),
-        scope: input.scope,
-        owner_user_id: input.owner_user_id ?? 0,
-        channel_id: input.channel_id ?? 0,
+        scope: isAdmin ? input.scope : 'merchant',
+        owner_user_id: isAdmin ? (input.owner_user_id ?? 0) : user.id,
+        channel_id: isAdmin ? (input.channel_id ?? 0) : 0,
         name: input.name.trim(),
         model_patterns: [...input.model_patterns],
         expr: input.expr,
@@ -863,9 +877,13 @@ function mockOpsClient(scope: 'admin' | 'merchant'): OpsClient {
     async updateRule(id, input: RuleUpdateInput) {
       await delay()
       requireSession()
-      requireAdmin()
       const rule = OPS_RULES.find((item) => item.id === id)
-      if (!rule) throw new ApiError(404, 'not_found', 'pricing rule not found')
+      if (!rule || (!isAdmin && rule.owner_user_id !== user.id)) {
+        throw new ApiError(404, 'not_found', 'not found')
+      }
+      if (!isAdmin && (input.scope !== undefined || input.owner_user_id !== undefined || input.channel_id !== undefined)) {
+        throw new ApiError(400, 'invalid_request', 'scope, owner_user_id and channel_id are set by the server')
+      }
       if (input.expr !== undefined && !input.expr.trim()) {
         throw new ApiError(400, 'invalid_request', 'expr is required')
       }
@@ -923,16 +941,36 @@ function mockOpsClient(scope: 'admin' | 'merchant'): OpsClient {
   }
 }
 
-/** 只取渠道那一半：merchant 前缀下没有模型、别名与计价路由。 */
-function channelsOf(client: OpsClient): ChannelOpsClient {
-  const { listChannels, getChannel, createChannel, updateChannel } = client
-  return { listChannels, getChannel, createChannel, updateChannel }
+/** merchant 前缀下的两组路由：自有渠道与自己的售价规则，没有成本。 */
+function merchantClientOf(
+  client: OpsClient & MerchantPricingClient,
+): ChannelOpsClient & MerchantPricingClient {
+  const {
+    listChannels,
+    getChannel,
+    createChannel,
+    updateChannel,
+    listRules,
+    getRule,
+    createRule,
+    updateRule,
+  } = client
+  return {
+    listChannels,
+    getChannel,
+    createChannel,
+    updateChannel,
+    listRules,
+    getRule,
+    createRule,
+    updateRule,
+  }
 }
 
 export class MockApiClient implements ApiClient {
   readonly mode = 'mock' as const
   readonly admin: OpsClient = mockOpsClient('admin')
-  readonly merchant: ChannelOpsClient = channelsOf(mockOpsClient('merchant'))
+  readonly merchant: ChannelOpsClient & MerchantPricingClient = merchantClientOf(mockOpsClient('merchant'))
 
   setCsrfToken(): void {
     // mock 不做 CSRF 校验；保留方法是为了与 HTTP 实现同形。
