@@ -222,6 +222,74 @@ func (s *Store) RevokeSession(ctx context.Context, sessionID int64) error {
 	return nil
 }
 
+// sessionPurgePredicate 是「哪些会话行可以被删掉」这个判断，数一遍与真删共用。
+//
+// 两条**或**在一起：
+//
+//   - 已经过期的行到点即删，与留存窗口无关——它们对任何查询都没有价值；
+//   - 已吊销但还没过期的行要等 revoked_at 超出留存窗口才删。窗口内那几行是
+//     「这个会话什么时候被踢的」的证据，删早了就查不到了。
+//
+// 为什么不写成两份 SQL（数一遍一份、删一份）：条件一旦漂移（把 `<` 写成
+// `<=`、把天数换成小时），干跑报出的条数就与真删的条数对不上，而使用者正是
+// 拿前者决定要不要跑后者。这里让两条语句共用同一个常量，就没有漂移的余地。
+//
+// 索引：user_sessions_expiry_idx 是 `WHERE revoked_at IS NULL` 的偏索引，
+// 只覆盖上一条；已吊销的那一半走顺序扫描。清理是低频的维护动作，为它再加
+// 一条索引不值。
+const sessionPurgePredicate = `(expires_at < now()
+		   OR (revoked_at IS NOT NULL
+		       AND revoked_at < now() - ($1::bigint * interval '1 second')))`
+
+// CountPurgeableSessions 数一遍 PurgeSessions 会删掉的行，供 --dry-run 使用。
+func (s *Store) CountPurgeableSessions(ctx context.Context, retention time.Duration) (int64, error) {
+	if err := checkSessionRetention(retention); err != nil {
+		return 0, err
+	}
+	var n int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM user_sessions WHERE `+sessionPurgePredicate,
+		int64(retention.Seconds())).Scan(&n); err != nil {
+		return 0, fmt.Errorf("统计可清理的会话失败: %w", err)
+	}
+	return n, nil
+}
+
+// PurgeSessions 删掉已过期的会话，以及吊销超过留存窗口的会话。
+//
+// 留存期只针对已吊销的行（见 sessionPurgePredicate）。重复跑是安全的：
+// 第二次没有可删的行，返回 0 而不是错误。
+func (s *Store) PurgeSessions(ctx context.Context, retention time.Duration) (int64, error) {
+	if err := checkSessionRetention(retention); err != nil {
+		return 0, err
+	}
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM user_sessions WHERE `+sessionPurgePredicate,
+		int64(retention.Seconds()))
+	if err != nil {
+		return 0, fmt.Errorf("清理会话失败: %w", err)
+	}
+	deleted, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("读取影响行数失败: %w", err)
+	}
+	return deleted, nil
+}
+
+// checkSessionRetention 拒绝换算成秒之后不是正数的留存时长。
+//
+// 判据看的是**落到 SQL 里的那个值**（`int64(retention.Seconds())`），不是传进来的
+// Duration：0.5 秒能过「Duration 是正数」，截断之后却是 0 秒，判据退化成
+// `revoked_at < now()`——正是这里要挡的「删掉全部已吊销行」。干跑与真删用的是
+// 同一个截断值，所以「两数相等」那条用例抓不到它，只能在这里拦。
+func checkSessionRetention(retention time.Duration) error {
+	seconds := int64(retention.Seconds())
+	if seconds <= 0 {
+		return fmt.Errorf("留存时长 %s（%d 秒）不是正数，拒绝清理", retention, seconds)
+	}
+	return nil
+}
+
 // randomToken 生成一枚 base64url 随机串。
 func randomToken(n int) (string, error) {
 	raw := make([]byte, n)

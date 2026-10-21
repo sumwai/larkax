@@ -31,6 +31,7 @@ func fullRows() []Row {
 		{Key: "billing.merchant_share_bp", Value: []byte(`0`)},
 		{Key: "calendar.default_region", Value: []byte(`"CN"`)},
 		{Key: "idempotency.retention_hours", Value: []byte(`24`)},
+		{Key: "console.session_retention_days", Value: []byte(`30`)},
 		{Key: "plugin.enabled", Value: []byte(`false`)},
 		{Key: "plugin.call_timeout_ms", Value: []byte(`5000`)},
 		{Key: "plugin.memory_limit_bytes", Value: []byte(`67108864`)},

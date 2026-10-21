@@ -38,6 +38,7 @@ var factorySettings = map[string]string{
 	"billing.merchant_share_bp":          `0`,
 	"calendar.default_region":            `"CN"`,
 	"idempotency.retention_hours":        `24`,
+	"console.session_retention_days":     `30`,
 	"plugin.enabled":                     `false`,
 	"plugin.call_timeout_ms":             `5000`,
 	"plugin.memory_limit_bytes":          `67108864`,

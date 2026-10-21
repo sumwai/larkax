@@ -426,6 +426,8 @@ var subGroupHelpCases = []subGroupHelpCase{
 	{"price calendar", priceCalendarShortUsage, priceCalendarUsage, []string{"price", "calendar", "help"}},
 	{"maintenance idempotency", maintenanceIdempotencyShortUsage, maintenanceIdempotencyUsage,
 		[]string{"maintenance", "idempotency", "help"}},
+	{"maintenance session", maintenanceSessionShortUsage, maintenanceSessionUsage,
+		[]string{"maintenance", "session", "help"}},
 	{"plugin kv", pluginKVShortUsage, pluginKVUsage, []string{"plugin", "kv", "help"}},
 	{"wallet payment", walletPaymentShortUsage, walletPaymentUsage, []string{"wallet", "payment", "help"}},
 }

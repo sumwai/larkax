@@ -85,6 +85,7 @@ var Registry = []Spec{
 	{Key: "billing.stream_freeze_step", Kind: KindInt},
 	{Key: "billing.merchant_share_bp", Kind: KindInt},
 	{Key: "calendar.default_region", Kind: KindString},
+	{Key: "console.session_retention_days", Kind: KindInt},
 	{Key: "idempotency.retention_hours", Kind: KindInt},
 	{Key: "plugin.enabled", Kind: KindBool},
 	{Key: "plugin.call_timeout_ms", Kind: KindInt},
