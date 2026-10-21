@@ -60,3 +60,38 @@ func TestUnionKeysOrdersDeterministically(t *testing.T) {
 		}
 	}
 }
+
+// comparePlanFaces 只在「在途预留 > 面值余额」时报，相等与更小都不报。
+//
+// 这一条不碰数据库：两笔数由参数给，于是三格边界可以逐个造出来。
+// 真库上的那两条只能自然造出「相等」（面值 10、预留 10）与「超出」
+// （直接改大一截），「在途更小」那一格在真库里只是顺带满足——摆在这里
+// 是为了让比较写反（`<` 写成 `>`）有一个输入能分出来。
+//
+// 相等那一格是作废一条还有在途预留的订阅之后的状态（余额 − 在途被核销，
+// 剩下恰好等于在途），它必须算合法，否则每次作废都会报一条。
+func TestComparePlanFacesReportsOnlyShortfalls(t *testing.T) {
+	plans := []planFaceRow{
+		{planID: 11, userID: 7, asset: "CNY", balance: money.MustParse("10"), pending: money.MustParse("10")},
+		{planID: 12, userID: 7, asset: "CNY", balance: money.MustParse("10"), pending: money.MustParse("15")},
+		{planID: 13, userID: 8, asset: "USD", balance: money.MustParse("10"), pending: money.MustParse("3")},
+	}
+
+	got := comparePlanFaces(42, plans)
+	if len(got) != 1 {
+		t.Fatalf("只应有订阅 12 那一条，实际 %d 条: %v", len(got), got)
+	}
+	f := got[0]
+	if f.Kind != FindingPlanFaceShortfall {
+		t.Errorf("类别 = %s，期望 %s", f.Kind, FindingPlanFaceShortfall)
+	}
+	if f.RunID != 42 || f.UserID != 7 || f.Asset != "CNY" {
+		t.Errorf("run/user/asset = %d/%d/%s，期望 42/7/CNY", f.RunID, f.UserID, f.Asset)
+	}
+	if want := prepaidScopePrefix + "12"; f.Scope() != want {
+		t.Errorf("scope = %s，期望 %s", f.Scope(), want)
+	}
+	if f.Snapshot.Cmp(money.MustParse("10")) != 0 || f.Ledger.Cmp(money.MustParse("15")) != 0 {
+		t.Errorf("余额/在途 = %s/%s，期望 10/15", f.Snapshot, f.Ledger)
+	}
+}

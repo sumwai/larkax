@@ -67,7 +67,7 @@ func runLine(t *testing.T, out string, runID int64) string {
 
 	id := itoa64(runID)
 	for _, line := range strings.Split(out, "\n") {
-		if fields := strings.Fields(line); len(fields) == 13 && fields[0] == id {
+		if fields := strings.Fields(line); len(fields) == 14 && fields[0] == id {
 			return line
 		}
 	}
@@ -77,12 +77,12 @@ func runLine(t *testing.T, out string, runID int64) string {
 
 // countRunRows 数一张对账运行清单里打了几行数据。
 //
-// 表头是 11 栏（`run_id`、`开始`、`状态`、…），数据行多出来的两栏是那两个时刻里的
-// 空格：`2026-10-19 12:00` 按空白切开是两个字段。按 13 个数数据行，不必解析列宽。
+// 表头是 12 栏（`run_id`、`开始`、`状态`、…），数据行多出来的两栏是那两个时刻里的
+// 空格：`2026-10-19 12:00` 按空白切开是两个字段。按 14 个数数据行，不必解析列宽。
 func countRunRows(out string) int {
 	n := 0
 	for _, line := range strings.Split(out, "\n") {
-		if len(strings.Fields(line)) == 13 {
+		if len(strings.Fields(line)) == 14 {
 			n++
 		}
 	}
