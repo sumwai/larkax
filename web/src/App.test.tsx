@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   listChannels: vi.fn(),
   listModels: vi.fn(),
   models: vi.fn(),
+  listRules: vi.fn(),
   meta: vi.fn(),
 }))
 
@@ -15,6 +16,7 @@ vi.mock('./api', async (importOriginal) => {
   const ops = {
     listChannels: mocks.listChannels,
     listModels: mocks.listModels,
+    listRules: mocks.listRules,
   }
   return {
     ...actual,
@@ -61,6 +63,7 @@ describe('运营视图的角色门槛', () => {
     mocks.listChannels.mockResolvedValue([])
     mocks.listModels.mockResolvedValue([])
     mocks.models.mockResolvedValue([])
+    mocks.listRules.mockResolvedValue([])
     mocks.meta.mockResolvedValue({
       site_name: 'larkax',
       api_base_url: 'https://api.example.com/v1',
@@ -79,6 +82,21 @@ describe('运营视图的角色门槛', () => {
     await open('user', '/app/admin/channels')
     expect(await screen.findByText('这个视图不在你的权限范围内。')).toBeInTheDocument()
     expect(mocks.listChannels).not.toHaveBeenCalled()
+  })
+
+  it('merchant 有计价页，页上没有成本规则', async () => {
+    await open('merchant', '/app/merchant/pricing')
+    expect(await screen.findByRole('heading', { name: '计价' })).toBeInTheDocument()
+    expect(screen.queryByText('成本规则')).not.toBeInTheDocument()
+    expect(mocks.listRules).toHaveBeenCalled()
+  })
+
+  it('/app/merchant/costs 在商家视图里没有这一页', async () => {
+    // 这一页没有路由，落到最外层的 404，所以不经过 AppShell（没有账号名可等）。
+    window.history.pushState({}, '', '/app/merchant/costs')
+    mocks.session.mockResolvedValue(sessionOf('merchant'))
+    render(<App />)
+    expect(await screen.findByText('没有找到这条记录。')).toBeInTheDocument()
   })
 
   it('merchant 进得到自己的渠道页', async () => {

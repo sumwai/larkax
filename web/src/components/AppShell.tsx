@@ -40,11 +40,14 @@ type NavItem = { to: string; key: MessageKey; icon: ComponentType<{ size?: numbe
 /**
  * 运营视图的导航。
  *
- * merchant 只有渠道一组路由：模型目录、别名与计价是平台级资源，没有归属可过滤，
- * 不在商家视图里出现。
+ * merchant 有渠道与计价两组：计价在商家前缀下只有自己的规则，没有成本页；
+ * 模型目录与别名是平台级资源，没有归属可过滤，不在商家视图里出现。
  */
 const OPS_NAV: Record<Exclude<View, 'user'>, NavItem[]> = {
-  merchant: [{ to: '/app/merchant/channels', key: 'ops.nav.channels', icon: IconChannel }],
+  merchant: [
+    { to: '/app/merchant/channels', key: 'ops.nav.channels', icon: IconChannel },
+    { to: '/app/merchant/pricing', key: 'ops.nav.pricing', icon: IconPricing },
+  ],
   admin: [
     { to: '/app/admin/channels', key: 'ops.nav.channels', icon: IconChannel },
     { to: '/app/admin/models', key: 'ops.nav.models', icon: IconModels },

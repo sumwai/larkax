@@ -188,9 +188,14 @@ type offerSource interface {
 	Prices(ctx context.Context, at time.Time, candidates []pricing.Candidate) ([]pricing.CandidatePrice, error)
 }
 
-// catalogSource 读模型目录的展示字段。
+// catalogSource 读模型目录的展示字段与别名。
+//
+// 单条模型要读一条目录行，还要把规范名翻成上游名（见 handleModelDetail）；
+// 这三件事都在 internal/catalog，本包不另写 SQL。
 type catalogSource interface {
 	Models(ctx context.Context) ([]catalog.Model, error)
+	Model(ctx context.Context, canonicalName string) (catalog.Model, error)
+	UpstreamModels(ctx context.Context, canonicalName string) ([]catalog.Alias, error)
 }
 
 // priceSource 求平台规则下的参考价。
@@ -369,6 +374,9 @@ func (a *API) routes() http.Handler {
 	mux.HandleFunc("POST "+PathPrefix+"auth/logout", a.handleLogout)
 	mux.HandleFunc("GET "+PathPrefix+"auth/session", a.handleSession)
 	mux.HandleFunc("GET "+PathPrefix+"models", a.handleModels)
+	// {name...} 而不是 {name}：规范名里可能有 "/"（`vendor/model` 这种写法），
+	// 按单段匹配会把它们判成未知路径。与 /v1/models/{id} 是同一个理由。
+	mux.HandleFunc("GET "+PathPrefix+"models/{name...}", a.handleModelDetail)
 
 	mux.Handle("GET "+PathPrefix+"me", a.requireSession(false, a.handleMe))
 	mux.Handle("PATCH "+PathPrefix+"me", a.requireSession(true, a.handlePatchMe))

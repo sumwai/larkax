@@ -11,6 +11,7 @@ import { viewsFor, type View } from './ops/views'
 import { OpsChannels } from './pages/ops/Channels'
 import { OpsModels } from './pages/ops/Catalog'
 import { OpsAliases } from './pages/ops/Aliases'
+import { MerchantPricing } from './pages/ops/MerchantPricing'
 import { OpsPricing } from './pages/ops/Pricing'
 import { Landing } from './pages/Landing'
 import { Login } from './pages/Login'
@@ -122,6 +123,14 @@ export function App() {
                       element={
                         <RequireView view="merchant">
                           <OpsChannels scope="merchant" />
+                        </RequireView>
+                      }
+                    />
+                    <Route
+                      path="merchant/pricing"
+                      element={
+                        <RequireView view="merchant">
+                          <MerchantPricing />
                         </RequireView>
                       }
                     />
