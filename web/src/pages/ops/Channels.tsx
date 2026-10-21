@@ -29,6 +29,7 @@ import {
   listToLines,
   useConfirm,
 } from './common'
+import { isDirty, useCloseGuard } from './guard'
 
 interface ChannelForm {
   name: string
@@ -75,16 +76,19 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
   const [editing, setEditing] = useState<Channel | null>(null)
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState<ChannelForm>(EMPTY_FORM)
+  // 打开时的那份值：改动过的话，关窗前要再问一句。
+  const [initialForm, setInitialForm] = useState<ChannelForm>(EMPTY_FORM)
   const [formError, setFormError] = useState<string | null>(null)
 
   const openCreate = () => {
     setForm(EMPTY_FORM)
+    setInitialForm(EMPTY_FORM)
     setFormError(null)
     setCreating(true)
   }
 
   const openEdit = (channel: Channel) => {
-    setForm({
+    const next: ChannelForm = {
       name: channel.name,
       type: channel.type,
       base_url: channel.base_url,
@@ -93,7 +97,9 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
       weight: String(channel.weight),
       priority: String(channel.priority),
       owner: String(channel.owner_user_id),
-    })
+    }
+    setForm(next)
+    setInitialForm(next)
     setFormError(null)
     setEditing(channel)
   }
@@ -103,6 +109,8 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
     setEditing(null)
     setFormError(null)
   }
+
+  const requestClose = useCloseGuard(confirm, isDirty(form, initialForm), closeForm)
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
@@ -266,10 +274,10 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
                 })
               : undefined
           }
-          onClose={closeForm}
+          onClose={requestClose}
           footer={
             <>
-              <Button variant="secondary" onClick={closeForm}>
+              <Button variant="secondary" onClick={requestClose}>
                 {t('common.cancel')}
               </Button>
               <Button type="submit" form="channel-form">
@@ -309,7 +317,7 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
                 className="input"
                 type="password"
                 autoComplete="off"
-                placeholder="<CHANNEL_CREDENTIAL>"
+                placeholder={t('ops.channel.credentialPlaceholder')}
                 value={form.credential}
                 onChange={(event) => setForm({ ...form, credential: event.target.value })}
               />

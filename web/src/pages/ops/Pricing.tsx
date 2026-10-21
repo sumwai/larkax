@@ -7,7 +7,16 @@ import { useAsync } from '../../hooks/useAsync'
 import { formatDateTime } from '../../lib/format'
 import { Alert, Button, Empty, Modal, PageHead, Skeleton, useToast } from '../../components/ui'
 import { IconPlus } from '../../components/icons'
-import { Field, InputError, OpsLoadError, linesToList, listToLines, useConfirm } from './common'
+import {
+  Field,
+  InputError,
+  OpsLoadError,
+  SearchBox,
+  linesToList,
+  listToLines,
+  useConfirm,
+} from './common'
+import { isDirty, useCloseGuard } from './guard'
 
 type Tab = 'rules' | 'costs'
 
@@ -58,19 +67,24 @@ export function OpsPricing() {
   const [ruleEditing, setRuleEditing] = useState<PricingRule | null>(null)
   const [ruleCreating, setRuleCreating] = useState(false)
   const [ruleForm, setRuleForm] = useState<RuleForm>(EMPTY_RULE)
+  // 打开时的那份值：改动过的话，关窗前要再问一句。
+  const [ruleInitial, setRuleInitial] = useState<RuleForm>(EMPTY_RULE)
   const [ruleError, setRuleError] = useState<string | null>(null)
+  const [ruleQuery, setRuleQuery] = useState('')
 
   const [costEditing, setCostEditing] = useState<PricingCost | null>(null)
   const [costCreating, setCostCreating] = useState(false)
   const [costForm, setCostForm] = useState<CostForm>(EMPTY_COST)
+  const [costInitial, setCostInitial] = useState<CostForm>(EMPTY_COST)
   const [costError, setCostError] = useState<string | null>(null)
+  const [costQuery, setCostQuery] = useState('')
 
   const channelName = (id: number) =>
     id === 0 ? t('ops.pricing.platformWide') : (channels.data?.find((item) => item.id === id)?.name ?? `#${id}`)
 
   const openRule = (rule?: PricingRule) => {
     if (rule) {
-      setRuleForm({
+      const next: RuleForm = {
         name: rule.name,
         scope: rule.scope as RuleScope,
         owner: String(rule.owner_user_id),
@@ -79,11 +93,14 @@ export function OpsPricing() {
         expr: rule.expr,
         priority: String(rule.priority),
         enabled: rule.enabled,
-      })
+      }
+      setRuleForm(next)
+      setRuleInitial(next)
       setRuleEditing(rule)
       setRuleCreating(false)
     } else {
       setRuleForm(EMPTY_RULE)
+      setRuleInitial(EMPTY_RULE)
       setRuleEditing(null)
       setRuleCreating(true)
     }
@@ -92,21 +109,38 @@ export function OpsPricing() {
 
   const openCost = (cost?: PricingCost) => {
     if (cost) {
-      setCostForm({
+      const next: CostForm = {
         channel: String(cost.channel_id),
         patterns: listToLines(cost.model_patterns),
         expr: cost.expr,
         priority: String(cost.priority),
-      })
+      }
+      setCostForm(next)
+      setCostInitial(next)
       setCostEditing(cost)
       setCostCreating(false)
     } else {
-      setCostForm({ ...EMPTY_COST, channel: String(channels.data?.[0]?.id ?? '') })
+      const blank = { ...EMPTY_COST, channel: String(channels.data?.[0]?.id ?? '') }
+      setCostForm(blank)
+      setCostInitial(blank)
       setCostEditing(null)
       setCostCreating(true)
     }
     setCostError(null)
   }
+
+  const closeRuleForm = () => {
+    setRuleCreating(false)
+    setRuleEditing(null)
+  }
+
+  const closeCostForm = () => {
+    setCostCreating(false)
+    setCostEditing(null)
+  }
+
+  const requestCloseRule = useCloseGuard(confirm, isDirty(ruleForm, ruleInitial), closeRuleForm)
+  const requestCloseCost = useCloseGuard(confirm, isDirty(costForm, costInitial), closeCostForm)
 
   const submitRule = (event: FormEvent) => {
     event.preventDefault()
@@ -115,6 +149,14 @@ export function OpsPricing() {
     if (patterns.length === 0) return setRuleError(t('ops.pricing.patternsRequired'))
     if (!ruleForm.expr.trim()) return setRuleError(t('ops.pricing.exprRequired'))
     if (!/^-?\d+$/.test(ruleForm.priority.trim())) return setRuleError(t('ops.invalidInteger'))
+    // 平台级规则没有归属，那两个栏也不在表单上：整数校验与发送都只看非平台级。
+    const platform = ruleForm.scope === 'platform'
+    if (!platform && !/^\d+$/.test(ruleForm.owner.trim())) {
+      return setRuleError(t('ops.invalidInteger'))
+    }
+    if (!platform && !/^\d+$/.test(ruleForm.channel.trim())) {
+      return setRuleError(t('ops.invalidInteger'))
+    }
 
     if (ruleEditing) {
       confirm.request({
@@ -125,8 +167,8 @@ export function OpsPricing() {
           await client.updateRule(ruleEditing.id, {
             name: ruleForm.name.trim(),
             scope: ruleForm.scope,
-            owner_user_id: Number(ruleForm.owner),
-            channel_id: Number(ruleForm.channel),
+            owner_user_id: platform ? 0 : Number(ruleForm.owner),
+            channel_id: platform ? 0 : Number(ruleForm.channel),
             model_patterns: patterns,
             expr: ruleForm.expr,
             priority: Number(ruleForm.priority),
@@ -148,8 +190,8 @@ export function OpsPricing() {
         await client.createRule({
           name: ruleForm.name.trim(),
           scope: ruleForm.scope,
-          owner_user_id: Number(ruleForm.owner),
-          channel_id: Number(ruleForm.channel),
+          owner_user_id: platform ? 0 : Number(ruleForm.owner),
+          channel_id: platform ? 0 : Number(ruleForm.channel),
           model_patterns: patterns,
           expr: ruleForm.expr,
           priority: Number(ruleForm.priority),
@@ -224,6 +266,23 @@ export function OpsPricing() {
     })
   }
 
+  const ruleNeedle = ruleQuery.trim().toLowerCase()
+  const ruleRows = (rules.data ?? []).filter(
+    (rule) =>
+      !ruleNeedle ||
+      [rule.name, rule.expr, ...rule.model_patterns].some((value) =>
+        value.toLowerCase().includes(ruleNeedle),
+      ),
+  )
+  const costNeedle = costQuery.trim().toLowerCase()
+  const costRows = (costs.data ?? []).filter(
+    (cost) =>
+      !costNeedle ||
+      [channelName(cost.channel_id), cost.expr, ...cost.model_patterns].some((value) =>
+        value.toLowerCase().includes(costNeedle),
+      ),
+  )
+
   return (
     <>
       <PageHead
@@ -262,9 +321,15 @@ export function OpsPricing() {
               <Empty title={t('ops.pricing.noRules')} body={t('ops.pricing.noRulesBody')} />
             </div>
           )}
-          {(rules.data?.length ?? 0) > 0 && (
+          {(rules.data?.length ?? 0) > 0 && <SearchBox value={ruleQuery} onChange={setRuleQuery} />}
+          {(rules.data?.length ?? 0) > 0 && ruleRows.length === 0 && (
+            <div className="card">
+              <Empty title={t('ops.searchEmpty')} />
+            </div>
+          )}
+          {ruleRows.length > 0 && (
             <section className="card panel" aria-label={t('ops.pricing.rules')}>
-              {rules.data?.map((rule) => (
+              {ruleRows.map((rule) => (
                 <div key={rule.id} className="ops-row">
                   <div className="keyname">
                     <b>{rule.name}</b>
@@ -308,9 +373,15 @@ export function OpsPricing() {
               <Empty title={t('ops.pricing.noCosts')} body={t('ops.pricing.noCostsBody')} />
             </div>
           )}
-          {(costs.data?.length ?? 0) > 0 && (
+          {(costs.data?.length ?? 0) > 0 && <SearchBox value={costQuery} onChange={setCostQuery} />}
+          {(costs.data?.length ?? 0) > 0 && costRows.length === 0 && (
+            <div className="card">
+              <Empty title={t('ops.searchEmpty')} />
+            </div>
+          )}
+          {costRows.length > 0 && (
             <section className="card panel" aria-label={t('ops.pricing.costs')}>
-              {costs.data?.map((cost) => (
+              {costRows.map((cost) => (
                 <div key={cost.id} className="ops-row">
                   <div className="keyname">
                     <b>{channelName(cost.channel_id)}</b>
@@ -336,18 +407,12 @@ export function OpsPricing() {
       {(ruleCreating || ruleEditing) && (
         <Modal
           title={ruleEditing ? t('ops.pricing.editRule') : t('ops.pricing.createRule')}
-          onClose={() => {
-            setRuleCreating(false)
-            setRuleEditing(null)
-          }}
+          onClose={requestCloseRule}
           footer={
             <>
               <Button
                 variant="secondary"
-                onClick={() => {
-                  setRuleCreating(false)
-                  setRuleEditing(null)
-                }}
+                onClick={requestCloseRule}
               >
                 {t('common.cancel')}
               </Button>
@@ -365,7 +430,13 @@ export function OpsPricing() {
                 onChange={(event) => setRuleForm({ ...ruleForm, name: event.target.value })}
               />
             </Field>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: ruleForm.scope === 'platform' ? '1fr' : '1fr 1fr 1fr',
+                gap: 12,
+              }}
+            >
               <Field label={t('ops.pricing.scope')}>
                 <select
                   className="input"
@@ -379,27 +450,32 @@ export function OpsPricing() {
                   <option value="channel">channel</option>
                 </select>
               </Field>
-              <Field label={t('ops.pricing.owner')}>
-                <input
-                  className="input"
-                  value={ruleForm.owner}
-                  onChange={(event) => setRuleForm({ ...ruleForm, owner: event.target.value })}
-                />
-              </Field>
-              <Field label={t('ops.pricing.channel')}>
-                <select
-                  className="input"
-                  value={ruleForm.channel}
-                  onChange={(event) => setRuleForm({ ...ruleForm, channel: event.target.value })}
-                >
-                  <option value="0">{t('ops.pricing.platformWide')}</option>
-                  {channels.data?.map((channel) => (
-                    <option key={channel.id} value={String(channel.id)}>
-                      {channel.name} (#{channel.id})
-                    </option>
-                  ))}
-                </select>
-              </Field>
+              {/* 平台级规则没有归属，这两栏留着只会让人以为填了有用。 */}
+              {ruleForm.scope !== 'platform' && (
+                <>
+                  <Field label={t('ops.pricing.owner')}>
+                    <input
+                      className="input"
+                      value={ruleForm.owner}
+                      onChange={(event) => setRuleForm({ ...ruleForm, owner: event.target.value })}
+                    />
+                  </Field>
+                  <Field label={t('ops.pricing.channel')}>
+                    <select
+                      className="input"
+                      value={ruleForm.channel}
+                      onChange={(event) => setRuleForm({ ...ruleForm, channel: event.target.value })}
+                    >
+                      <option value="0">{t('ops.pricing.platformWide')}</option>
+                      {channels.data?.map((channel) => (
+                        <option key={channel.id} value={String(channel.id)}>
+                          {channel.name} (#{channel.id})
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                </>
+              )}
             </div>
             <Field label={t('ops.pricing.patterns')}>
               <textarea
@@ -439,18 +515,12 @@ export function OpsPricing() {
       {(costCreating || costEditing) && (
         <Modal
           title={costEditing ? t('ops.pricing.editCost') : t('ops.pricing.createCost')}
-          onClose={() => {
-            setCostCreating(false)
-            setCostEditing(null)
-          }}
+          onClose={requestCloseCost}
           footer={
             <>
               <Button
                 variant="secondary"
-                onClick={() => {
-                  setCostCreating(false)
-                  setCostEditing(null)
-                }}
+                onClick={requestCloseCost}
               >
                 {t('common.cancel')}
               </Button>

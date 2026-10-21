@@ -95,6 +95,21 @@ describe('模型目录页', () => {
     })
   })
 
+  it('搜索只留下匹配的模型', async () => {
+    mocks.listModels.mockResolvedValue([
+      MODEL,
+      { ...MODEL, canonical_name: 'gpt-5', display_name: 'GPT-5', vendor: 'openai' },
+    ])
+    renderModels()
+
+    expect(await screen.findByText('claude-sonnet-4-5')).toBeInTheDocument()
+    expect(screen.getByText('gpt-5')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('搜索'), { target: { value: 'gpt' } })
+    expect(screen.queryByText('claude-sonnet-4-5')).not.toBeInTheDocument()
+    expect(screen.getByText('gpt-5')).toBeInTheDocument()
+  })
+
   it('本地校验不通过时不发请求', async () => {
     mocks.listModels.mockResolvedValue([])
     renderModels()

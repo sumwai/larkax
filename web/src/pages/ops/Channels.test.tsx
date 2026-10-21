@@ -203,6 +203,31 @@ describe('运营渠道页', () => {
     expect(screen.queryByText('channel not found')).not.toBeInTheDocument()
   })
 
+  it('表单改过之后按 Esc 先问一句，确认才关', async () => {
+    mocks.listChannels.mockResolvedValue([CHANNEL])
+    renderChannels()
+
+    fireEvent.click(await screen.findByRole('button', { name: '编辑' }))
+    fireEvent.change(screen.getByLabelText('名称'), { target: { value: 'renamed' } })
+    fireEvent.keyDown(document, { key: 'Escape' })
+
+    const guard = screen.getByRole('dialog', { name: '放弃未保存的修改？' })
+    fireEvent.click(guard.querySelector('button.danger') as HTMLButtonElement)
+
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: '编辑渠道' })).not.toBeInTheDocument(),
+    )
+  })
+
+  it('凭证栏不给占位符形态的示例，只说明该填什么', async () => {
+    mocks.listChannels.mockResolvedValue([])
+    renderChannels()
+    await clickCreate()
+
+    const credential = screen.getByLabelText('凭证')
+    expect(credential).toHaveAttribute('placeholder', '上游的密钥或 token')
+  })
+
   it('本地校验不通过时不发请求，错误留在表单里', async () => {
     mocks.listChannels.mockResolvedValue([])
     renderChannels()

@@ -12,7 +12,13 @@ import {
   useToast,
 } from '../../components/ui'
 import { IconPlus, IconTrash } from '../../components/icons'
-import { Field, InputError, OpsLoadError, useConfirm } from './common'
+import {
+  Field,
+  InputError,
+  OpsLoadError,
+  useConfirm,
+} from './common'
+import { isDirty, useCloseGuard } from './guard'
 
 interface AliasForm {
   channel_id: string
@@ -39,21 +45,27 @@ export function OpsAliases() {
   const [editing, setEditing] = useState<ChannelAlias | null>(null)
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState<AliasForm>(EMPTY_FORM)
+  // 打开时的那份值：改动过的话，关窗前要再问一句。
+  const [initialForm, setInitialForm] = useState<AliasForm>(EMPTY_FORM)
   const [formError, setFormError] = useState<string | null>(null)
 
   const openCreate = () => {
-    setForm({ ...EMPTY_FORM, channel_id: String(channels.data?.[0]?.id ?? '') })
+    const next = { ...EMPTY_FORM, channel_id: String(channels.data?.[0]?.id ?? '') }
+    setForm(next)
+    setInitialForm(next)
     setFormError(null)
     setCreating(true)
   }
 
   const openEdit = (alias: ChannelAlias) => {
-    setForm({
+    const next = {
       channel_id: String(alias.channel_id),
       upstream_model: alias.upstream_model,
       canonical_name: alias.canonical_name,
       overrides: overridesOf(alias),
-    })
+    }
+    setForm(next)
+    setInitialForm(next)
     setFormError(null)
     setEditing(alias)
   }
@@ -63,6 +75,8 @@ export function OpsAliases() {
     setEditing(null)
     setFormError(null)
   }
+
+  const requestClose = useCloseGuard(confirm, isDirty(form, initialForm), closeForm)
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
@@ -212,10 +226,10 @@ export function OpsAliases() {
       {(creating || editing) && (
         <Modal
           title={editing ? t('ops.alias.editTitle') : t('ops.alias.createTitle')}
-          onClose={closeForm}
+          onClose={requestClose}
           footer={
             <>
-              <Button variant="secondary" onClick={closeForm}>
+              <Button variant="secondary" onClick={requestClose}>
                 {t('common.cancel')}
               </Button>
               <Button type="submit" form="alias-form">
