@@ -2098,7 +2098,7 @@ nil 还是空切片——调用点只做 `append(..., fieldAttrs(...)...)`，差
 **`internal/systemone`、`internal/db`、`internal/textshape` 那几条 `Not covered`
 也都在包级常量上，与 `readyzTimeout` 是同一形状。** gremlins 的覆盖块从语句或
 分支开头起算，包级 `const` 的声明不属于任何块，所以那几行上的变异体一律记
-「未覆盖」、根本不会被运行——改用例改变不了这一点。逐条核过：
+「未覆盖」、根本不会被运行——对这几条常量本身，改用例改变不了这一点。逐条核过：
 
 - `systemone.go:93` 的 `MaxInputTokens = 64 * 1024`：`TestInputUpperBoundIsPinned`
   已经钉住这个数。用 `go test -overlay` 把 `*` 换成 `/` 单独验过，那条用例会红
@@ -2107,8 +2107,11 @@ nil 还是空切片——调用点只做 `append(..., fieldAttrs(...)...)`，差
   （值变 0）验过，`TestOpenKeepsUnderlyingCause` 会红（错误从解析失败变成
   `context deadline exceeded`）。
 - `db.go:26` 的 `connMaxIdleTime = 10 * time.Minute`：换成 `/` 之后用例照常通过。
-  `database/sql` 没有读回空闲连接上限的接口，要观察它得让一条真连接闲置十分钟
-  以上再看是否被复用——这属于用例不该做的事，所以这一条是真的观察不到。
+  这一条没有能在用例里观察的出口：`database/sql` 没有读回空闲连接上限的 getter，
+  `DB.Stats().MaxIdleTimeClosed` 虽然就是「因这个上限被关掉的连接数」，但同样要
+  真等满十分钟才会计数，属于用例不该做的事。与上面两条不同的是，这个值没有任何
+  断言钉着——将来把它从十分钟改成三十分钟不会有东西响。补一条值断言不会改变这里
+  的分数（那一格照样记未覆盖），所以这是文档诚实度的问题，不是缺口。
 - `textshape.go:37` 的 `whyRendered`：变异器把两个字符串字面量之间的 `+` 换成
   `-`，overlay 实测连编译都过不去（`operator - not defined on "…" (untyped string
   constant)`）。就算它进了覆盖范围也只会记 `NOT VIABLE`，不存在能杀掉它的用例。
