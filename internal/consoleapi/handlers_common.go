@@ -15,16 +15,18 @@ import (
 
 // userJSON 是响应里的用户对象。
 //
-// 它刻意不含 role / is_merchant / is_admin：控制台是给客户看的，角色与
-// 商家标记属于内部拓扑。今天用户的角色全是 user，多放一个字段只会让人
-// 以为它有意义。
+// 带 role（user / merchant / admin），因为控制台要据此决定显示哪一组页面；
+// **权限判定不读它**——服务端只读会话里那一列（见 auth.Session.Role），
+// 请求里回传的「当前视图」不参与任何放行。is_merchant / is_admin 这两个
+// 实现细节仍然不出现。
 type userJSON struct {
-	ID          int64   `json:"id"`
-	Username    string  `json:"username"`
-	DisplayName *string `json:"display_name"`
-	Email       *string `json:"email"`
-	Status      string  `json:"status"`
-	CreatedAt   string  `json:"created_at"`
+	ID          int64     `json:"id"`
+	Role        auth.Role `json:"role"`
+	Username    string    `json:"username"`
+	DisplayName *string   `json:"display_name"`
+	Email       *string   `json:"email"`
+	Status      string    `json:"status"`
+	CreatedAt   string    `json:"created_at"`
 }
 
 // newUserJSON 把 auth.UserInfo 折成响应形状。
@@ -34,6 +36,7 @@ type userJSON struct {
 func newUserJSON(info auth.UserInfo) userJSON {
 	out := userJSON{
 		ID:        info.ID,
+		Role:      info.Role,
 		Username:  info.Username,
 		Status:    info.Status,
 		CreatedAt: formatTime(info.CreatedAt),
@@ -67,6 +70,10 @@ func (a *API) newSessionResponse(ctx context.Context, session auth.Session) (ses
 	if err != nil {
 		return sessionResponse{}, err
 	}
+	// 角色取用户资料那一份（LoginUserByID / UserByRef 与 SessionByToken 读的
+	// 是同一对列）。**不要**改写成 session.Role：CreateSession 的 RETURNING
+	// 只回会话行的列，没有那两个标记，登录响应会因此拿到空串——路由照样按
+	// SessionByToken 读到的角色判定，界面却拿不到角色，两边对不上。
 	return sessionResponse{
 		User:      newUserJSON(info),
 		CSRFToken: session.CSRFToken,

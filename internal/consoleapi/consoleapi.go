@@ -49,10 +49,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/internal/adminapi"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/billing/expr"
 	"github.com/sumwai/larkax/internal/catalog"
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channels"
+	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/keyquota"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/money"
@@ -78,6 +81,7 @@ const (
 	codeInvalidCredential = "invalid_credentials"
 	codeUnauthenticated   = "unauthenticated"
 	codeCSRFFailed        = "csrf_failed"
+	codeForbidden         = "forbidden"
 	codeAccountDisabled   = "account_disabled"
 	codeAccountNotReady   = "account_not_ready"
 	codeNotFound          = "not_found"
@@ -107,6 +111,11 @@ type Config struct {
 	Region string
 	// Calendar 供参考价求值使用；为 nil 时用到日历的规则取不到参考价。
 	Calendar expr.Calendar
+	// Sealer 与 Registry 是 merchant / admin 两组里的渠道写入要用的两件
+	// （见 internal/adminapi）。为零值时创建渠道会报错而不是 panic；读路径
+	// 不受影响。它们由装配层注入，本包不读环境变量、不碰主密钥。
+	Sealer   *credential.Sealer
+	Registry *channel.Registry
 	// TrustProxy 强制信任转发头（`X-Forwarded-Proto` / `-For` / `-Host`）。
 	//
 	// 它为 true 时，无论直连对端是谁都读这几个头。为 false 时按**直连对端**
@@ -187,6 +196,14 @@ type spentFunc func(ctx context.Context, keyIDs []int64) (map[int64]money.Amount
 // 单开一个结构体是为了让测试能只替换一件东西：New 从 *sql.DB 装出生产的
 // 一份，测试可以造零个数据库。
 type deps struct {
+	// merchantAdmin 与 adminAdmin 是挂在两个角色组下面的管理资源 handler。
+	//
+	// merchant 那份只注册渠道路由、并且每条都按会话用户的归属过滤；
+	// admin 那份注册全部资源。两份都由 newAPI 按 Config 现建，
+	// 测试可以注入替身（用例要验的是角色中间件，不是资源 handler）。
+	merchantAdmin http.Handler
+	adminAdmin    http.Handler
+
 	sessions sessionStore
 	accounts accountStore
 	keys     keyStore
@@ -290,6 +307,29 @@ func newAPI(cfg Config, d deps) http.Handler {
 	a.dummyHash = hash
 	a.deps = d
 
+	// 角色组的资源 handler。放行中间件在这里传：会话与角色的判据属于本包的
+	// 路由层（见 roleGroup），adminapi 自己的 Bearer 鉴权是内部监听那一侧的事。
+	if a.deps.merchantAdmin == nil || a.deps.adminAdmin == nil {
+		passThrough := func(next http.Handler) http.Handler { return next }
+		build := func(prefix string, onlyChannels bool) http.Handler {
+			return adminapi.New(adminapi.Config{
+				DB:           cfg.DB,
+				Sealer:       cfg.Sealer,
+				Registry:     cfg.Registry,
+				Logger:       a.log,
+				Prefix:       prefix,
+				Authorize:    passThrough,
+				OnlyChannels: onlyChannels,
+			})
+		}
+		if a.deps.merchantAdmin == nil {
+			a.deps.merchantAdmin = build(PathPrefix+"merchant/", true)
+		}
+		if a.deps.adminAdmin == nil {
+			a.deps.adminAdmin = build(PathPrefix+"admin/", false)
+		}
+	}
+
 	if !a.trust {
 		a.log.Info("控制台只信任本机与内网来的转发头：直连公网的请求，X-Forwarded-* 一律忽略")
 	}
@@ -328,6 +368,12 @@ func (a *API) routes() http.Handler {
 	mux.Handle("GET "+PathPrefix+"wallet", a.requireSession(false, a.handleWallet))
 	mux.Handle("GET "+PathPrefix+"wallet/entries", a.requireSession(false, a.handleWalletEntries))
 
+	// 角色组挂的是子树：组内所有路径先过角色会话中间件，再交给管理资源
+	// handler。前缀与 internal/adminapi 里注册的逐字一致，改一处就是「路由
+	// 都在、却一条也到不了」——两份都从这里取，不各写一份字面量。
+	mux.Handle(PathPrefix+"merchant/", a.roleGroup(auth.RoleMerchant, a.deps.merchantAdmin))
+	mux.Handle(PathPrefix+"admin/", a.roleGroup(auth.RoleAdmin, a.deps.adminAdmin))
+
 	return mux
 }
 
@@ -347,17 +393,72 @@ func (a *API) requireSession(write bool, next authedHandler) http.Handler {
 			return
 		}
 
-		// 刷新「最后活跃」与空闲窗。它每分钟至多写一次（见 auth.TouchSession），
-		// 错误显式丢弃：一个本来有效的请求不该因为一列观测值写不进去而失败。
-		//
-		// 用 WithoutCancel：响应写完（或客户端断开）之后这次写仍要落地，
-		// 否则「最后活跃」会在请求被取消的那些路径上永远停住。
-		if err := a.deps.sessions.TouchSession(
-			context.WithoutCancel(r.Context()), session, a.now().UTC()); err != nil {
-			a.log.Warn("刷新会话失败", "error", err)
-		}
+		a.touchSession(r, session)
 		next(w, r, session)
 	})
+}
+
+// roleGroup 是 `/merchant/` 与 `/admin/` 两组共用的中间件。
+//
+// 顺序：会话（401、账号停用 403）→ 角色（403，正文固定）→ 写方法的 CSRF →
+// 注入归属 → 资源 handler。角色判据只看服务端会话里那一列（见 auth.Session.
+// Role），请求里带的「当前视图」不参与判定。
+//
+// 归属只注入给**merchant 组里的 merchant**：admin 在这一组里看全部，与它进
+// admin 组时一样；不注入的话 adminapi 会把 admin 当成某个用户，于是它在
+// merchant 组里也只能看到自己的渠道——那不是「merchant 或 admin」的意思。
+func (a *API) roleGroup(required auth.Role, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		session, ok := a.currentSession(w, r)
+		if !ok {
+			return
+		}
+		if !session.Role.Allows(required) {
+			a.fail(w, r, http.StatusForbidden, codeForbidden, msgForbidden)
+			return
+		}
+		if !isSafeMethod(r.Method) && !a.csrfValid(r, session) {
+			a.fail(w, r, http.StatusForbidden, codeCSRFFailed,
+				"The CSRF token is missing or does not match.")
+			return
+		}
+		a.touchSession(r, session)
+		if required == auth.RoleMerchant && session.Role == auth.RoleMerchant {
+			r = r.WithContext(adminapi.WithOwner(r.Context(), session.UserID))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// msgForbidden 是角色不足时唯一的正文。
+//
+// 它不说缺哪个角色，也不说这条路径叫什么：两组路由的存在本身不是秘密，但
+// 「你差的是 merchant 还是 admin」会把内部拓扑说给一个已经登录的人，
+// 而那对排查没有帮助——他要做的是找管理员。
+const msgForbidden = "You do not have permission to perform this action."
+
+// isSafeMethod 判断一个方法是不是只读。
+//
+// 只读方法不校验 CSRF（浏览器的跨站 GET 不携带副作用的前提是服务端不把它
+// 当写）。其余一律当作写：未知方法放过去，会比漏校验一次 CSRF 更坏。
+func isSafeMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	return false
+}
+
+// touchSession 刷新「最后活跃」与空闲窗。
+//
+// 它每分钟至多写一次（见 auth.TouchSession），错误显式丢弃：一个本来有效的
+// 请求不该因为一列观测值写不进去而失败。用 WithoutCancel：响应写完（或客户端
+// 断开）之后这次写仍要落地，否则「最后活跃」会在请求被取消的那些路径上停住。
+func (a *API) touchSession(r *http.Request, session auth.Session) {
+	if err := a.deps.sessions.TouchSession(
+		context.WithoutCancel(r.Context()), session, a.now().UTC()); err != nil {
+		a.log.Warn("刷新会话失败", "error", err)
+	}
 }
 
 // currentSession 读 Cookie、校验会话，失败时已经写好响应。

@@ -198,6 +198,13 @@ type UpdateRequest struct {
 	Priority *int
 	Setting  *map[string]any
 
+	// Status 非 nil 时改成 StatusEnabled / StatusDisabled。
+	//
+	// 只收这两个取值，与 SetStatus 同一套判据：'drained' 是观测到的状态，
+	// 不是运维的决定（见顶层常量的注释）。从这里写它等于允许把一条观测
+	// 记录伪造成配置。软删的渠道仍然拒绝（WHERE 带 channelAlive）。
+	Status *string
+
 	// Credential 非 nil 时重新封装并替换密文。
 	//
 	// **为 nil 时生成的 SQL 里根本不出现 credential_enc**，密文一个字节都不动。
@@ -208,8 +215,58 @@ type UpdateRequest struct {
 
 // Update 按 UpdateRequest 修改一条渠道。
 func (a *Admin) Update(ctx context.Context, req UpdateRequest) error {
+	return a.update(ctx, req, 0)
+}
+
+// UpdateOwned 修改一条**属于 ownerID** 的渠道。
+//
+// 归属判在 UPDATE 自己的 WHERE 里（见 update 的 ownerID 参数），而不是「先读
+// 出来再在调用点比一次」：后者每一处调用都要记得比，而漏掉的那一处不会报错，
+// 它返回的是别人渠道的修改结果。不属于自己与不存在折成同一个
+// ErrChannelNotFound，于是调用方只有一条 404 分支，也就没有「比漏一次」这条路
+// （与 auth.Store.KeyForUser 同一做法）。
+func (a *Admin) UpdateOwned(ctx context.Context, ownerID int64, req UpdateRequest) error {
+	if ownerID <= 0 {
+		return errors.New("用户 id 无效")
+	}
+	return a.update(ctx, req, ownerID)
+}
+
+// ownerCheckQuery 判断一条渠道是不是在 ownerID 名下。
+//
+// 外层 COALESCE 是必须的：平台自营行的 owner_user_id 是 NULL，而
+// `NULL = $2` 求值为 NULL，扫进 bool 会报「couldn't convert <nil>」。
+// COALESCE(..., false) 把它折成「不归任何人」，而不是折成 0 再比——
+// 「0 是平台」是本包 ChannelInfo 的展示约定，SQL 这一侧不必再带一次。
+const ownerCheckQuery = `SELECT COALESCE(owner_user_id = $2, false) FROM channels WHERE id = $1`
+
+// checkOwner 确认 id 那条渠道在 ownerID 名下；不属于自己与不存在同报
+// ErrChannelNotFound。
+//
+// UpdateOwned 在拼 SQL 之前先调它，是为了让端点校验（checkModelEndpoints）
+// 也不对着别人的渠道跑：那条校验会读模型目录，而「校验错误里有别人的模型」
+// 与「修改成功」都不是该给别人的信息。
+func (a *Admin) checkOwner(ctx context.Context, ownerID, id int64) error {
+	var owned bool
+	err := a.db.QueryRowContext(ctx, ownerCheckQuery, id, ownerID).Scan(&owned)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !owned) {
+		return fmt.Errorf("%w：id %d", ErrChannelNotFound, id)
+	}
+	if err != nil {
+		return fmt.Errorf("查渠道 %d 的归属失败: %w", id, err)
+	}
+	return nil
+}
+
+// update 是 Update 与 UpdateOwned 的共同实现；ownerID 为 0 表示不按归属限制。
+func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) error {
 	if req.ID <= 0 {
 		return errors.New("渠道 id 无效")
+	}
+	if ownerID != 0 {
+		if err := a.checkOwner(ctx, ownerID, req.ID); err != nil {
+			return err
+		}
 	}
 
 	// 只把真正要改的列拼进 SET：没提到的列连现在是什么值都不必知道。
@@ -288,6 +345,12 @@ func (a *Admin) Update(ctx context.Context, req UpdateRequest) error {
 	if req.Priority != nil {
 		add("priority", *req.Priority)
 	}
+	if req.Status != nil {
+		if err := validateStatus(*req.Status); err != nil {
+			return err
+		}
+		add("status", *req.Status)
+	}
 	if req.Setting != nil {
 		setting, err := encodeSetting(*req.Setting)
 		if err != nil {
@@ -316,8 +379,16 @@ func (a *Admin) Update(ctx context.Context, req UpdateRequest) error {
 
 	// 已删的渠道不许改：条件里带上 channelAlive，于是「行不在」与「行已删」
 	// 都会让这条 UPDATE 影响 0 行，下面的 explainNoRow 把它们分开报。
-	query := "UPDATE channels SET " + strings.Join(sets, ", ") +
-		" WHERE id = $" + strconv.Itoa(len(args)) + " AND " + channelAlive
+	//
+	// 归属也进 WHERE（ownerID 非 0 时）：前面的 checkOwner 已经判过一次，这里
+	// 再判一次是给「判完到写之间那条渠道换了主人」留的兜底——今天没有改归属
+	// 的写路径，但判据写在语句里就不依赖这个现状。
+	where := "id = $" + strconv.Itoa(len(args)) + " AND " + channelAlive
+	if ownerID != 0 {
+		args = append(args, ownerID)
+		where += " AND owner_user_id = $" + strconv.Itoa(len(args))
+	}
+	query := "UPDATE channels SET " + strings.Join(sets, ", ") + " WHERE " + where
 	res, err := a.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("修改渠道失败: %w", err)
@@ -327,9 +398,36 @@ func (a *Admin) Update(ctx context.Context, req UpdateRequest) error {
 		return fmt.Errorf("确认修改结果失败: %w", err)
 	}
 	if affected == 0 {
+		if ownerID != 0 {
+			return a.explainNoRowOwned(ctx, req.ID, ownerID)
+		}
 		return a.explainNoRow(ctx, req.ID)
 	}
 	return nil
+}
+
+// explainNoRowOwned 是 UpdateOwned 撞上 0 行时的解释。
+//
+// 只在 0 行时多一条查询。与 explainNoRow 的差别是它先复核归属：判完到写之间
+// 换了主人时，这里报「不存在」而不是「已删除」——后者等于说出「这一行存在，
+// 只是删了」，而那正是 404 要挡住的信息。
+func (a *Admin) explainNoRowOwned(ctx context.Context, id, ownerID int64) error {
+	var owned, deleted bool
+	err := a.db.QueryRowContext(ctx,
+		`SELECT COALESCE(owner_user_id = $2, false), deleted_at IS NOT NULL FROM channels WHERE id = $1`,
+		id, ownerID).Scan(&owned, &deleted)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !owned) {
+		return fmt.Errorf("%w：id %d", ErrChannelNotFound, id)
+	}
+	if err != nil {
+		return fmt.Errorf("查渠道 %d 的归属与删除状态失败: %w", id, err)
+	}
+	if deleted {
+		return fmt.Errorf("%w：id %d", ErrChannelDeleted, id)
+	}
+	// 行在、没删、还归自己，却没被带 channelAlive 与归属的 UPDATE 匹配上：
+	// 两次语句之间它刚被删掉。与「已经删了」是同一个事实，只是晚了一步。
+	return fmt.Errorf("%w：id %d", ErrChannelDeleted, id)
 }
 
 // explainNoRow 把「这次的 UPDATE 一行都没匹配上」翻译成具体的那一种。
@@ -358,6 +456,18 @@ func (a *Admin) explainNoRow(ctx context.Context, id int64) error {
 	return fmt.Errorf("%w：id %d", ErrChannelDeleted, id)
 }
 
+// validateStatus 校验「管理面能设置的状态」。
+//
+// SetStatus 与 Update 的 status 字段共用它：两处各写一遍的话，改了一处之后
+// 另一处会静默收下 'drained'，而那条路径正是「观测被当成配置」的入口。
+func validateStatus(status string) error {
+	if status != StatusEnabled && status != StatusDisabled {
+		return fmt.Errorf("渠道状态 %q 不是管理面能设置的取值（只接受 %q 与 %q）",
+			status, StatusEnabled, StatusDisabled)
+	}
+	return nil
+}
+
 // SetStatus 启用或停用一条渠道。
 //
 // 只接受 StatusEnabled 与 StatusDisabled，见那两个常量的说明。
@@ -365,9 +475,8 @@ func (a *Admin) SetStatus(ctx context.Context, id int64, status string) error {
 	if id <= 0 {
 		return errors.New("渠道 id 无效")
 	}
-	if status != StatusEnabled && status != StatusDisabled {
-		return fmt.Errorf("渠道状态 %q 不是管理面能设置的取值（只接受 %q 与 %q）",
-			status, StatusEnabled, StatusDisabled)
+	if err := validateStatus(status); err != nil {
+		return err
 	}
 
 	res, err := a.db.ExecContext(ctx,
@@ -468,6 +577,29 @@ func (a *Admin) Get(ctx context.Context, id int64) (ChannelInfo, error) {
 	info, err := scanInfo(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		// 与「改不动」分开：这里要答的是「有没有这一行」，没有就是 id 写错了。
+		return ChannelInfo{}, fmt.Errorf("%w：id %d", ErrChannelNotFound, id)
+	}
+	if err != nil {
+		return ChannelInfo{}, err
+	}
+	return info, nil
+}
+
+// GetOwned 按「归属 + id」读一条渠道，已软删的也读（与 Get 同口径）。
+//
+// 不属于自己与不存在是同一条 ErrChannelNotFound：控制台对 merchant 的越权
+// 读取要回 404，回 403 等于确认「这一行存在」。
+func (a *Admin) GetOwned(ctx context.Context, ownerID, id int64) (ChannelInfo, error) {
+	if ownerID <= 0 {
+		return ChannelInfo{}, errors.New("用户 id 无效")
+	}
+	if id <= 0 {
+		return ChannelInfo{}, errors.New("渠道 id 无效")
+	}
+	row := a.db.QueryRowContext(ctx,
+		listQuery+"\n WHERE c.id = $1 AND c.owner_user_id = $2", id, ownerID)
+	info, err := scanInfo(row)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ChannelInfo{}, fmt.Errorf("%w：id %d", ErrChannelNotFound, id)
 	}
 	if err != nil {
@@ -651,7 +783,28 @@ func (a *Admin) list(ctx context.Context, includeDeleted bool) ([]ChannelInfo, e
 		query += "\n WHERE c." + channelAlive
 	}
 	query += "\n ORDER BY c.id"
-	rows, err := a.db.QueryContext(ctx, query)
+	return a.queryInfos(ctx, query)
+}
+
+// ListOwned 列出一位用户名下的渠道（不含已软删的，与 List 同口径）。
+//
+// 平台自营渠道（owner_user_id 为 NULL）不在结果里：NULL 不等于任何用户 id，
+// 不需要额外写一条 IS NOT NULL。
+func (a *Admin) ListOwned(ctx context.Context, ownerID int64) ([]ChannelInfo, error) {
+	if ownerID <= 0 {
+		return nil, errors.New("用户 id 无效")
+	}
+	return a.queryInfos(ctx,
+		listQuery+"\n WHERE c.owner_user_id = $1 AND c."+channelAlive+"\n ORDER BY c.id",
+		ownerID)
+}
+
+// queryInfos 跑一条返回 listQuery 那些列的语句并扫成 ChannelInfo。
+//
+// List / ListOwned 共用它：两处各扫一遍时，漏一列的表现是后面所有列都串位，
+// 而那只会体现在某一个清单上。
+func (a *Admin) queryInfos(ctx context.Context, query string, args ...any) ([]ChannelInfo, error) {
+	rows, err := a.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("查询渠道失败: %w", err)
 	}

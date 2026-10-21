@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sumwai/larkax/internal/adminapi"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/ledger/store"
@@ -354,6 +355,13 @@ type consoleFixture struct {
 	prices   *fakePrices
 	spent    map[int64]money.Amount
 	spentN   int
+	// 两组角色路由的资源 handler 是替身：用例验的是角色中间件，不是资源
+	// handler（后者在 internal/adminapi 用自己的集成测试验）。这三项记下
+	// 替身被调用了几次、以及 context 里的归属是什么。
+	merchantAdminCalls int
+	adminAdminCalls    int
+	merchantOwner      int64
+	adminOwner         int64
 	// clock 是 handler 读到的「现在」。用例改它的值来模拟时间流逝。
 	clock *time.Time
 }
@@ -380,12 +388,12 @@ func newFixture(t *testing.T) *consoleFixture {
 	}, auth.UserInfo{
 		ID: 7, Username: "jdoe", DisplayName: "J. Doe",
 		Email: "user@example.com", Status: auth.UserStatusActive,
-		CreatedAt: testNow.Add(-60 * 24 * time.Hour),
+		Role: auth.RoleUser, CreatedAt: testNow.Add(-60 * 24 * time.Hour),
 	})
 	sessions.add("session-token", auth.Session{
 		ID: 1, UserID: 7, CSRFToken: "csrf-token", CreatedAt: testNow,
 		LastSeenAt: testNow, ExpiresAt: testNow.Add(auth.SessionIdleTTL),
-		UserStatus: auth.UserStatusActive,
+		UserStatus: auth.UserStatusActive, Role: auth.RoleUser,
 	})
 
 	f := &consoleFixture{
@@ -404,13 +412,15 @@ func newFixture(t *testing.T) *consoleFixture {
 		Currency: "CNY",
 		Now:      func() time.Time { return now },
 	}, deps{
-		sessions: sessions,
-		accounts: accounts,
-		keys:     keys,
-		usage:    usage,
-		models:   f.models,
-		catalog:  f.catalog,
-		prices:   f.prices,
+		sessions:      sessions,
+		accounts:      accounts,
+		keys:          keys,
+		usage:         usage,
+		models:        f.models,
+		catalog:       f.catalog,
+		prices:        f.prices,
+		merchantAdmin: stubAdmin(&f.merchantAdminCalls, &f.merchantOwner),
+		adminAdmin:    stubAdmin(&f.adminAdminCalls, &f.adminOwner),
 		spent: func(_ context.Context, ids []int64) (map[int64]money.Amount, error) {
 			f.spentN++
 			out := make(map[int64]money.Amount, len(ids))
@@ -421,6 +431,20 @@ func newFixture(t *testing.T) *consoleFixture {
 		},
 	})
 	return f
+}
+
+// stubAdmin 是角色组资源 handler 的替身：记下调用次数与 context 里的归属，
+// 回 204。204 而不是 200 是为了让「中间件放行了」与「资源 handler 返回了
+// 一个成功体」在断言里分得开。
+func stubAdmin(calls *int, owner *int64) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*calls++
+		*owner = 0
+		if id, ok := adminapi.OwnerFromContext(r.Context()); ok {
+			*owner = id
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 }
 
 // request 发一次请求。

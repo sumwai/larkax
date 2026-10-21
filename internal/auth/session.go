@@ -74,6 +74,13 @@ type Session struct {
 	// 同一个读里成立。分两次查的话，两次之间用户被封禁时，这次请求会按
 	// 「会话有效」放行——封禁晚一个请求生效，而那个请求恰好是它最该挡住的那一个。
 	UserStatus string
+
+	// Role 是同一个读里带回来的 users.is_merchant / is_admin 折出来的角色。
+	//
+	// 角色必须与控制台路由判定出自同一次读：先读会话、再另查一次用户资料的
+	// 话，两次之间用户被降级时，这次请求会按旧角色放行——与 UserStatus
+	// 分两次查是同一种错误。请求里带的任何「当前视图」都不参与判定。
+	Role Role
 }
 
 // Usable 判断这个会话现在还能不能用。
@@ -150,17 +157,19 @@ func (s *Store) SessionByToken(ctx context.Context, token string) (Session, erro
 		return Session{}, ErrSessionNotFound
 	}
 	var (
-		out       Session
-		revokedAt sql.NullTime
+		out        Session
+		revokedAt  sql.NullTime
+		isMerchant bool
+		isAdmin    bool
 	)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT s.id, s.user_id, s.csrf_token, s.created_at, s.last_seen_at,
-		       s.expires_at, s.revoked_at, u.status
+		       s.expires_at, s.revoked_at, u.status, u.is_merchant, u.is_admin
 		  FROM user_sessions s
 		  JOIN users u ON u.id = s.user_id
 		 WHERE s.token_hash = $1`, hashSessionToken(token),
 	).Scan(&out.ID, &out.UserID, &out.CSRFToken, &out.CreatedAt, &out.LastSeenAt,
-		&out.ExpiresAt, &revokedAt, &out.UserStatus)
+		&out.ExpiresAt, &revokedAt, &out.UserStatus, &isMerchant, &isAdmin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrSessionNotFound
 	}
@@ -170,6 +179,7 @@ func (s *Store) SessionByToken(ctx context.Context, token string) (Session, erro
 	if revokedAt.Valid {
 		out.RevokedAt = &revokedAt.Time
 	}
+	out.Role = RoleOf(isMerchant, isAdmin)
 	return out, nil
 }
 

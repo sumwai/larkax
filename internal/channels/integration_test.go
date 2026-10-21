@@ -1903,3 +1903,74 @@ func channelEnvelopeOf(t *testing.T, db *sql.DB, id int64) []byte {
 	}
 	return envelope
 }
+
+// TestOwnedChannelScope 钉住归属过滤的 SQL：列表、读、改三条路径都只认
+// owner_user_id = 自己，平台自营（NULL）与别人的行一律看不穿。
+//
+// 「不属于自己」与「不存在」在 UpdateOwned / GetOwned 上是同一个
+// ErrChannelNotFound，所以这里连错误类型一起判——只判非 nil 的话，把越权
+// 误报成「已删除」也能过。
+func TestOwnedChannelScope(t *testing.T) {
+	ctx := t.Context()
+	db := testDB(t)
+	sealer := testSealer(t)
+	admin := NewAdmin(db, sealer, nil)
+
+	owner := seedMerchant(t, db)
+	other := seedMerchant(t, db)
+	model := uniqueModel()
+
+	ownID := insertChannel(ctx, t, db, sealer, channelSpec{ownerUserID: owner, model: model})
+	otherID := insertChannel(ctx, t, db, sealer, channelSpec{ownerUserID: other, model: model})
+	platformID := insertChannel(ctx, t, db, sealer, channelSpec{model: model})
+
+	list, err := admin.ListOwned(ctx, owner)
+	if err != nil {
+		t.Fatalf("ListOwned 失败: %v", err)
+	}
+	seen := make(map[int64]bool, len(list))
+	for _, info := range list {
+		seen[info.ID] = true
+	}
+	if !seen[ownID] {
+		t.Errorf("自己的渠道 %d 不在列表里", ownID)
+	}
+	if seen[otherID] {
+		t.Errorf("列表里出现了别人的渠道 %d", otherID)
+	}
+	if seen[platformID] {
+		t.Errorf("列表里出现了平台渠道 %d", platformID)
+	}
+
+	if _, getErr := admin.GetOwned(ctx, owner, ownID); getErr != nil {
+		t.Errorf("读自己的渠道失败: %v", getErr)
+	}
+	for _, id := range []int64{otherID, platformID, 999999999} {
+		if _, getErr := admin.GetOwned(ctx, owner, id); !errors.Is(getErr, ErrChannelNotFound) {
+			t.Errorf("GetOwned(%d) 的错误 = %v，期望 ErrChannelNotFound", id, getErr)
+		}
+		if setErr := admin.UpdateOwned(ctx, owner, UpdateRequest{
+			ID: id, Priority: func() *int { v := 9; return &v }(),
+		}); !errors.Is(setErr, ErrChannelNotFound) {
+			t.Errorf("UpdateOwned(%d) 的错误 = %v，期望 ErrChannelNotFound", id, setErr)
+		}
+	}
+
+	// 自己的可以改。
+	newName := "renamed-" + itoa(nextID())
+	if setErr := admin.UpdateOwned(ctx, owner, UpdateRequest{ID: ownID, Name: &newName}); setErr != nil {
+		t.Fatalf("改自己的渠道失败: %v", setErr)
+	}
+	got, err := admin.GetOwned(ctx, owner, ownID)
+	if err != nil {
+		t.Fatalf("改完再读失败: %v", err)
+	}
+	if got.Name != newName {
+		t.Errorf("改完的名字 = %q，期望 %q", got.Name, newName)
+	}
+
+	// 别人来改同一条：404，而且确实没变。
+	if err := admin.UpdateOwned(ctx, other, UpdateRequest{ID: ownID, Name: &newName}); !errors.Is(err, ErrChannelNotFound) {
+		t.Errorf("别人改我的渠道的错误 = %v，期望 ErrChannelNotFound", err)
+	}
+}
