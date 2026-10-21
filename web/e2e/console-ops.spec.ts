@@ -79,7 +79,7 @@ test.describe('运营视图', () => {
     expect(adminCalls).toEqual([])
   })
 
-  test('商家读别家渠道：接口 404，页面给的是后端那句话', async ({ page }) => {
+  test('商家读别家渠道：接口 404，页面给的是中文说明', async ({ page }) => {
     test.skip(FOREIGN_CHANNEL_ID <= 0, '没有提供 E2E_FOREIGN_CHANNEL_ID')
     await login(page, MERCHANT.user, MERCHANT.pass)
 
@@ -123,11 +123,9 @@ test.describe('运营视图', () => {
       .click()
 
     const dialog = page.getByRole('dialog', { name: '渠道详情' })
-    // 4xx 的正文由服务端决定，前端原样显示（见 describeError）。这里钉住的是
-    // 「原样」——后端给什么，页面上就是什么。
-    const message = (JSON.parse(direct.body) as { error: { message: string } }).error.message
-    expect(message).not.toBe('')
-    await expect(dialog).toContainText(message)
+    // 404 的正文是服务端给的英文短句，控制台不直接转给用户，改用本地文案。
+    await expect(dialog).toContainText('没有找到这个资源，可能已被删除，或者不属于你。')
+    await expect(dialog).not.toContainText('not found')
   })
 
   test('普通用户：模型列表里的提供方与价格', async ({ page }) => {
