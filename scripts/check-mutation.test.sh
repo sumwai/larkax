@@ -37,6 +37,19 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 SCRIPT="$PWD/scripts/check-mutation.sh"
+
+# 上一次自测被 SIGKILL 时，第 30 条写下的探针文件会留在工作树里，下一次的文件
+# 计数就会多一个。开始前先清掉，并说出删了几个——悄悄改别人的工作树是另一回事。
+leftover=0
+for f in internal/money/zz_narrow_probe_*.go; do
+  [ -e "$f" ] || continue
+  rm -f "$f"
+  leftover=$((leftover + 1))
+done
+if [ "$leftover" -gt 0 ]; then
+  echo "清理了 $leftover 个上次残留的探针文件（internal/money/zz_narrow_probe_*.go）"
+fi
+
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
@@ -148,11 +161,16 @@ EOF
 }
 
 # make_gremlins <路径> <killed> <lived> <timed> <efficacy> [退出码]
+#
+# 除了打汇总行，还把收到的参数原样追加到 `$GREMLINS_ARGS_LOG`（默认 /dev/null）。
+# 收窄那几条用例要看的正是「实际传了哪些 `--exclude-files`」——只看汇总行的话，
+# 参数拼错了也照样打出一张好看的表。
 make_gremlins() {
   local path="$1" killed="$2" lived="$3" timed="$4" eff="$5" rc="${6:-0}"
   {
     stub_head
     cat <<EOF
+printf '%s\n' "\$*" >> "\${GREMLINS_ARGS_LOG:-/dev/null}"
 echo "Killed: $killed, Lived: $lived, Not covered: 3"
 echo "Timed out: $timed, Not viable: 0, Skipped: 0"
 echo "Test efficacy: $eff"
@@ -234,6 +252,7 @@ testdsn="postgres://user:placeholder@localhost:5432/larkax?sslmode=disable"
 run() {
   local stub="$1" lock="$2"; shift 2
   LARKAX_DB_DSN="$testdsn" GREMLINS="$stub" GREMLINS_VERSION="$PINNED" LOCK_FILE="$lock" \
+    GREMLINS_ARGS_LOG="${GREMLINS_ARGS_LOG:-/dev/null}" \
     bash "$SCRIPT" "$@" >"$last_out" 2>&1
 }
 
@@ -1133,6 +1152,319 @@ if [ "$suffix_rc" -eq 1 ] && [ -z "$suffix_out" ]; then
 else
   bad "--suffix —— 没有匹配时应空输出且退出 1，实际 rc=$suffix_rc 输出=<$suffix_out>"
 fi
+
+# ── 按改动收窄（#883）────────────────────────────────────────────────────
+#
+# 收窄的做法是「排除没改到的」：每个包里没有出现在改动清单里的生产 `.go` 文件，
+# 逐个作为 `--exclude-files` 传给 gremlins。下面钉住五件事：
+#
+#   28. `-E` 的拼装形态：锚定两端、转义点号、包相对路径、一个文件一条，
+#       并且被改到的文件不出现在里面；
+#   29. 一个包里只有 `_test.go` 变了：不排除任何文件，跑整包；
+#   30. 新文件（清单里但 git 还没跟踪）算「改到」，不被排除；
+#   31. 改动同时落在父子包：从清单推出来的重叠自己去重，只留外层，不报错；
+#   32. 只改了子包：选中子包，不折到父包（父包那几百个变异体不该跟着跑）。
+#
+# 夹具用仓库里真实的目录树与真实的改动清单，但 gremlins 是桩件——这里要测的是
+# 「参数怎么拼」，不是变异本身。计数写死成 20 / 16 / 2 是有意的：那三个数就是
+# 当前目录树的形状，文件增删时要回来改，改的时候能看见「口径覆盖了哪些文件」。
+# 第 34 条是例外：它自带一个临时 git 仓库（见那一条），因为 `--changed-from`
+# 要从仓库历史现算改动，不能依赖调用自测的这棵树有没有 `.git`。
+
+narrow_seq=0
+
+# run_narrow <改动清单文件> [参数...]：跑一轮收窄，参数落在 LAST_ARGS。
+run_narrow() {
+  local list="$1"; shift
+  narrow_seq=$((narrow_seq + 1))
+  LAST_ARGS_LOG="$tmp/gremlins-args-$narrow_seq"
+  : >"$LAST_ARGS_LOG"
+  GREMLINS_ARGS_LOG="$LAST_ARGS_LOG" \
+    run "$stub_ok" "$tmp/lock-narrow-$narrow_seq" --changed-files "$list" "$@"
+  LAST_RC=$?
+  LAST_ARGS=$(cat "$LAST_ARGS_LOG")
+}
+
+# 28. `-E` 的拼装形态。
+#
+#     改动清单：internal/ledger/account.go 与 internal/ledger/store/posting.go。
+#     选中 internal/ledger（递归含 store），两个文件参与，其余 18 个排除。
+#     要看的是：锚定与转义（`^balance\.go$`）、子目录用包相对路径
+#     （`^store/payout\.go$`）、一个文件一条（18 条，不是逗号拼一条），
+#     以及被改到的两个文件**不**出现在排除里。基础开关（`--invert-logical`）
+#     也不能被收窄挤掉。
+printf '%s\n' internal/ledger/account.go internal/ledger/store/posting.go >"$tmp/changed-excl.txt"
+run_narrow "$tmp/changed-excl.txt" internal/ledger
+if [ "$LAST_RC" -eq 0 ]; then ok; else bad "收窄 -E —— 应通过，实际退出码 $LAST_RC"; dump; fi
+grep -q '参与 2 / 共 20 个生产文件，排除 18 个未改动的' "$last_out" \
+  || bad "收窄 -E —— 摘要要说清参与 2 / 共 20，排除 18"
+grep -q '与整包基线不可比' "$last_out" \
+  || bad "收窄 -E —— 摘要要说清分数与整包基线不可比"
+if printf '%s\n' "$LAST_ARGS" | grep -qF -- '--exclude-files=^balance\.go$'; then
+  ok
+else
+  bad "收窄 -E —— 顶层文件要锚定两端并转义点号（--exclude-files=^balance\\.go\$）"
+fi
+if printf '%s\n' "$LAST_ARGS" | grep -qF -- '--exclude-files=^store/payout\.go$'; then
+  ok
+else
+  bad "收窄 -E —— 子目录文件要用包相对路径（--exclude-files=^store/payout\\.go\$）"
+fi
+if printf '%s\n' "$LAST_ARGS" | grep -qF -- 'account.go'; then
+  bad "收窄 -E —— 被改到的文件不该出现在排除里（account.go）"
+else
+  ok
+fi
+if printf '%s\n' "$LAST_ARGS" | grep -qF -- 'store/posting.go'; then
+  bad "收窄 -E —— 被改到的子包文件不该出现在排除里（store/posting.go）"
+else
+  ok
+fi
+excl_count=$(printf '%s\n' "$LAST_ARGS" | grep -o -- '--exclude-files=' | wc -l)
+if [ "$excl_count" -eq 18 ]; then ok; else
+  bad "收窄 -E —— 要一个文件一条 -E（预期 18 条，实际 $excl_count 条）"
+fi
+if printf '%s\n' "$LAST_ARGS" | grep -q -- '--invert-logical'; then ok; else
+  bad "收窄 -E —— 收窄不该挤掉基础开关（--invert-logical）"
+fi
+if grep -qx 'LARKAX_MUTATION_SCOPE=narrow excluded=18' "$last_out"; then ok; else
+  bad "收窄 -E —— 口径标记应为 LARKAX_MUTATION_SCOPE=narrow excluded=18"
+fi
+
+# 29. 只有测试文件变了：跑整包，不传任何 `-E`。
+#
+#     这种改动的风险恰恰是「测试被改弱」——排除文件会把要看的地方排除掉。
+printf '%s\n' internal/ledger/account_test.go >"$tmp/changed-testonly.txt"
+run_narrow "$tmp/changed-testonly.txt" internal/ledger
+if [ "$LAST_RC" -eq 0 ]; then ok; else bad "只改测试 —— 应通过，实际退出码 $LAST_RC"; dump; fi
+grep -q 'internal/ledger *整包（这一包没有生产文件改动）' "$last_out" \
+  || bad "只改测试 —— 摘要要说清这一包跑整包"
+if printf '%s\n' "$LAST_ARGS" | grep -qF -- '--exclude-files'; then
+  bad "只改测试 —— 不该排除任何文件"
+else
+  ok
+fi
+if grep -qx 'LARKAX_MUTATION_SCOPE=full' "$last_out"; then ok; else
+  bad "只改测试 —— 口径标记应为 full（这一轮实际跑整包）"
+fi
+
+# 30. 新文件算「改到」。
+#
+#     判据是改动清单本身，不是 git 的文件状态：一个还没被跟踪的新文件在清单里，
+#     就不该被排除。夹具是一个临时探针文件（用例结束就删），名字带 PID，
+#     避免与并发跑同一份自测的另一个实例撞名。
+probe_file="internal/money/zz_narrow_probe_$$.go"
+trap 'rm -f "$probe_file"; rm -rf "$tmp"' EXIT
+printf 'package money\n' >"$probe_file"
+printf '%s\n' "$probe_file" >"$tmp/changed-new.txt"
+run_narrow "$tmp/changed-new.txt" internal/money
+if [ "$LAST_RC" -eq 0 ]; then ok; else bad "新文件不被排除 —— 应通过，实际退出码 $LAST_RC"; dump; fi
+grep -q '参与 1 / 共 2 个生产文件，排除 1 个未改动的' "$last_out" \
+  || bad "新文件不被排除 —— 摘要应把新文件算作参与（参与 1 / 共 2）"
+if printf '%s\n' "$LAST_ARGS" | grep -qF -- '--exclude-files=^money\.go$'; then
+  ok
+else
+  bad "新文件不被排除 —— 没改到的 money.go 应被排除"
+fi
+probe_base=$(basename "$probe_file")
+if printf '%s\n' "$LAST_ARGS" | grep -qF -- "$probe_base"; then
+  bad "新文件不被排除 —— 清单里的新文件被排除了（$probe_base）"
+else
+  ok
+fi
+
+# 31. 改动同时落在父子包：从清单推出来的重叠自己去重，只留外层，不报错。
+#
+#     显式传父子两条参数仍要拒绝（第 1d 条），那是写参数的人犯的错；这里是从
+#     改动清单推出来的，两边都跑会把子包的变异体跑两遍。外层递归就含子包，
+#     所以只留 internal/ledger，`-E` 按整棵子树算（20 个文件里参与 2 个）。
+printf '%s\n' internal/ledger/account.go internal/ledger/store/read.go >"$tmp/changed-parentchild.txt"
+run_narrow "$tmp/changed-parentchild.txt"
+if [ "$LAST_RC" -eq 0 ]; then ok; else bad "父子去重 —— 应通过（去重，不报错），实际退出码 $LAST_RC"; dump; fi
+grep -q '改动同时落在父子包' "$last_out" \
+  || bad "父子去重 —— 要说清发生了什么"
+grep -q '参与 2 / 共 20 个生产文件，排除 18 个未改动的' "$last_out" \
+  || bad "父子去重 —— 外层应按整棵子树算（参与 2 / 共 20）"
+if grep -qE '^internal/ledger +[0-9]' "$last_out"; then ok; else
+  bad "父子去重 —— 外层包要跑（表里应有 internal/ledger 那一行）"
+fi
+if grep -qE '^internal/ledger/store +[0-9]' "$last_out"; then
+  bad "父子去重 —— 子包不该再单独跑一遍（表里出现了 internal/ledger/store 一行）"
+else
+  ok
+fi
+if grep -q '包参数的范围重叠' "$last_out"; then
+  bad "父子去重 —— 从清单推出来的重叠不该按「参数写错」拒绝"
+else
+  ok
+fi
+
+# 32. 只改了子包：选中子包，不折到父包。
+#
+#     包路径递归，但选包取的是**最近的**祖先：store 自己就在清单里，所以只跑
+#     store 那一条（16 个生产文件），父包那 4 个文件与 store 的其余 15 个都被
+#     排除。折到父包会让 20 个文件全跑，正是这条要防的。
+printf '%s\n' internal/ledger/store/read.go >"$tmp/changed-child.txt"
+run_narrow "$tmp/changed-child.txt"
+if [ "$LAST_RC" -eq 0 ]; then ok; else bad "只改子包 —— 应通过，实际退出码 $LAST_RC"; dump; fi
+grep -q '参与 1 / 共 16 个生产文件，排除 15 个未改动的' "$last_out" \
+  || bad "只改子包 —— 应按子包算（参与 1 / 共 16），不能折到父包"
+if grep -qE '^internal/ledger/store +[0-9]' "$last_out"; then ok; else
+  bad "只改子包 —— 表里应有 internal/ledger/store 那一行"
+fi
+if grep -qE '^internal/ledger +[0-9]' "$last_out"; then
+  bad "只改子包 —— 不该折到父包（表里出现了 internal/ledger 一行）"
+else
+  ok
+fi
+
+# 33. 不给收窄开关时是整包口径：一个 `-E` 都不传。
+#
+#     本地与 CI 手工触发走的都是这条路，别让收窄把默认口径悄悄改掉。
+args_log="$tmp/gremlins-args-default"
+: >"$args_log"
+GREMLINS_ARGS_LOG="$args_log" run "$stub_ok" "$tmp/lock-default" internal/money
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "默认口径 —— 应通过，实际退出码 $rc"; dump; fi
+if grep -qF -- '--exclude-files' "$args_log"; then
+  bad "默认口径 —— 不给 --changed-* 时不该传任何 --exclude-files"
+else
+  ok
+fi
+if grep -q '按改动收窄' "$last_out"; then
+  bad "默认口径 —— 不打收窄那一段"
+else
+  ok
+fi
+
+# 33a. 收窄到「没有可变代码」的文件：gremlins 正常退出，但说没有结果。
+#
+#      internal/billing/expr/doc.go 只有包注释，真 gremlins 对它输出
+#      `No results to report.` 并退出 0。这不是「没跑成」——这一组文件里确实
+#      没有可变的代码；判失败会让「只改一行注释」的 PR 永远过不去。
+#
+#      **认的是那一句原样输出**，不是「输出为空」。空输出是格式变了的形状。
+stub_nomutants="$tmp/gremlins-nomutants"
+{
+  stub_head
+  cat <<'EOF'
+echo "Starting..."
+echo "Gathering coverage..."
+echo "No results to report."
+EOF
+} >"$stub_nomutants"
+chmod +x "$stub_nomutants"
+
+printf '%s\n' internal/billing/expr/doc.go >"$tmp/changed-doc.txt"
+GREMLINS_ARGS_LOG=/dev/null LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_nomutants" \
+  GREMLINS_VERSION="$PINNED" LOCK_FILE="$tmp/lock-nomutants" \
+  bash "$SCRIPT" --changed-files "$tmp/changed-doc.txt" internal/billing/expr >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "收窄到无可变代码 —— 收窄模式应通过，实际退出码 $rc"; dump; fi
+grep -q '这一包收窄后没有可变的代码（0 个变异体）' "$last_out" \
+  || bad "收窄到无可变代码 —— 要打一行说明，不能静默算通过"
+
+# 33b. 同样的输出在整包模式下仍然是失败。
+#
+#     整包一个变异体都没有，说明清单或工具出了问题，而不是「这一包没有可变的
+#     代码」。两种情形不能用同一条判据放过去。
+run "$stub_nomutants" "$tmp/lock-nomutants-full" internal/billing/expr
+rc=$?
+if [ "$rc" -eq 1 ]; then ok; else bad "整包无可变代码 —— 应判失败，实际退出码 $rc"; dump; fi
+grep -q '认不出 gremlins 的输出' "$last_out" \
+  || bad "整包无可变代码 —— 要说清是认不出输出"
+
+# 33c. 退回整包的那一支不能走绿分支。
+#
+#      包里只改了 `_test.go` 时，脚本退回整包（口径标记自己打 full）。这时
+#      gremlins 打「没有结果」并退出 0，仍然是「整包一个变异体都没有」——说明
+#      清单或工具出了问题，必须判失败。判据一旦从「这一包有生产文件参与收窄」
+#      放宽成「这一包有生产文件」，这一支就会静默变绿。
+printf '%s\n' internal/billing/expr/compile_test.go >"$tmp/changed-testonly-nomutants.txt"
+GREMLINS_ARGS_LOG=/dev/null LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_nomutants" \
+  GREMLINS_VERSION="$PINNED" LOCK_FILE="$tmp/lock-nomutants-testonly" \
+  bash "$SCRIPT" --changed-files "$tmp/changed-testonly-nomutants.txt" internal/billing/expr >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 1 ]; then ok; else bad "退回整包 + 没有结果 —— 应判失败，实际退出码 $rc"; dump; fi
+grep -q '认不出 gremlins 的输出' "$last_out" \
+  || bad "退回整包 + 没有结果 —— 要说清是认不出输出"
+if grep -q '这一包收窄后没有可变的代码' "$last_out"; then
+  bad "退回整包 + 没有结果 —— 不该走「收窄后没有可变代码」的绿分支"
+else
+  ok
+fi
+
+# 34. `--changed-from <ref>`：改动清单从 git 现算，未跟踪的新文件也算。
+#
+#     跑在一个**临时 git 仓库**里，不依赖调用自测的这棵树有没有 `.git`：
+#     门禁镜像用 rsync 同步、排除 `.git`，在真仓库里跑会得到「bad revision」
+#     而变成「没测成」。临时仓库自带 `scripts/check-mutation.sh` 的副本，脚本
+#     的 `cd 到仓库根` 落在那里面；gremlins 与 go 仍是桩件，这里测的是清单怎么算。
+#
+#     夹具：提交两个生产文件与一个测试文件，然后改掉 money.go、再加一个未跟踪的
+#     new.go。期望参与 2（money.go + new.go）、排除 1（rate.go），测试文件不计。
+#
+#     git 不在 PATH 时报错而不是跳过：那是「测不成」，不能让它看起来像通过。
+if ! command -v git >/dev/null 2>&1; then
+  bad "--changed-from —— 找不到 git，这条用例无法验证"
+else
+  gitroot="$tmp/gitroot"
+  mkdir -p "$gitroot/scripts" "$gitroot/internal/money"
+  cp "$SCRIPT" "$gitroot/scripts/check-mutation.sh"
+
+  printf 'package money\n' >"$gitroot/internal/money/money.go"
+  printf 'package money\n' >"$gitroot/internal/money/rate.go"
+  printf 'package money\n' >"$gitroot/internal/money/money_test.go"
+
+  # 身份与 gpg 签名都用 -c 显式给：这台机器上没有全局 git 身份，
+  # 而 commit 失败会变成另一种「没测成」。
+  git_user=(-c user.name=larkax-test -c user.email=user@example.com)
+  git -C "$gitroot" "${git_user[@]}" -c init.defaultBranch=main init -q
+  git -C "$gitroot" "${git_user[@]}" add -A
+  git -C "$gitroot" "${git_user[@]}" -c commit.gpgsign=false commit -q -m fixture
+
+  # 已跟踪的改动与未跟踪的新文件各一个，两条都要进清单。
+  printf 'package money\n\n// changed\n' >"$gitroot/internal/money/money.go"
+  printf 'package money\n' >"$gitroot/internal/money/new.go"
+
+  args_log="$tmp/gremlins-args-from"
+  : >"$args_log"
+  GREMLINS_ARGS_LOG="$args_log" LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_ok" \
+    GREMLINS_VERSION="$PINNED" LOCK_FILE="$tmp/lock-from" \
+    bash "$gitroot/scripts/check-mutation.sh" --changed-from HEAD internal/money >"$last_out" 2>&1
+  rc=$?
+  if [ "$rc" -eq 0 ]; then ok; else bad "--changed-from —— 应通过，实际退出码 $rc"; dump; fi
+  grep -q '参与 2 / 共 3 个生产文件，排除 1 个未改动的' "$last_out" \
+    || bad "--changed-from —— 已跟踪的改动与未跟踪的新文件都要算进清单（参与 2 / 共 3）"
+  if grep -qF -- '--exclude-files=^money\.go$' "$args_log"; then
+    bad "--changed-from —— 已跟踪的改动不该被排除（money.go）"
+  else
+    ok
+  fi
+  if grep -qF -- '--exclude-files=^new\.go$' "$args_log"; then
+    bad "--changed-from —— 未跟踪的新文件不该被排除（new.go）"
+  else
+    ok
+  fi
+  if grep -qF -- '--exclude-files=^rate\.go$' "$args_log"; then ok; else
+    bad "--changed-from —— 没改到的 rate.go 应被排除"
+  fi
+fi
+
+# 35. 改动清单读不了、或者里面没有落在 PKGS 包里的 Go 文件：都要响。
+GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+  bash "$SCRIPT" --changed-files "$tmp/no-such-list-$$" internal/money >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 1 ]; then ok; else bad "读不了改动清单 —— 应退出 1，实际 $rc"; dump; fi
+grep -q '读不了这份改动清单' "$last_out" || bad "读不了改动清单 —— 要说清是哪一份"
+
+printf '%s\n' docs/development.md >"$tmp/changed-nopkg.txt"
+GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+  bash "$SCRIPT" --changed-files "$tmp/changed-nopkg.txt" >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 1 ]; then ok; else bad "清单里没有可跑的包 —— 应退出 1，实际 $rc"; dump; fi
+grep -q '没有落在任何 PKGS 包里的 Go 文件' "$last_out" \
+  || bad "清单里没有可跑的包 —— 要说清这次什么都没检查"
 
 # ── 结果 ──────────────────────────────────────────────────────────────────
 

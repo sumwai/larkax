@@ -99,6 +99,10 @@
 # 用法：
 #   scripts/check-mutation.sh              # 跑全部包
 #   scripts/check-mutation.sh money route  # 只跑指定的（按包名后缀匹配）
+#   scripts/check-mutation.sh --changed-from origin/main
+#                                              # 按改动收窄：只变异改动涉及的生产文件
+#   scripts/check-mutation.sh --changed-files changes.txt internal/ledger
+#                                              # 同上，改动清单从文件读（`-` 表示 stdin）
 #   scripts/check-mutation.sh --list-packages  # 只打印 PKGS 清单（CI 选包用）
 #   scripts/check-mutation.sh --list-packages --match internal/billing/calendaradapter
 #                                              # 打印覆盖该目录的 PKGS 条目（CI 选包用）
@@ -127,6 +131,43 @@
 # 几百个变异体跑两遍。所以**显式给了参数、且选中的集合里出现父子对**（一个是另一个
 # 的前缀，按 `/` 边界）时报错退出，说清谁包含谁、只留外层哪个；不带参数跑全部包是
 # 例外——那是基线口径，表本来就按「父包那一行含子包」读（见上面「清单里父子两条…」那段）。
+#
+# # 按改动收窄：只变异改动涉及的生产文件（#883）
+#
+# 给一份改动文件清单（`--changed-files <文件>` 或 `--changed-from <git 参照>`），
+# 每个包里**没被改到的生产 `.go` 文件**逐个作为 `-E/--exclude-files` 传给 gremlins。
+# 不给这个开关时照旧跑整包——本地与 CI 的手工触发都走那条路。
+#
+# ## 为什么不用 gremlins 自己的 `--diff`
+#
+# v0.6.0 有 `-D/--diff`，但它不可用：它拿 `git diff` 的**仓库相对路径**
+#（`internal/ledger/account.go`）去比 gremlins 自己的文件名，而后者是**相对包参数**的
+#（`-o json` 里是 `account.go`、`store/posting.go`）。实测 `--diff HEAD~3
+# ./internal/ledger`（该区间确实改了 9 个 ledger 文件）得到 `Runnable: 0`——
+# 全被跳过，而且这是**静默错的那一侧**：0 个变异体与「文件里没有可变的代码」
+# 在输出上分不出来。
+#
+# 可用的杠杆是 `-E/--exclude-files`（正则，匹配的正是那种包相对路径）。实测
+# `-E 'account.go|balance.go' ./internal/ledger` 把 runnable 从 217 降到 159；
+# 多个 `-E` 分开给也行，**逗号分隔不行**（逗号会被当成正则的一部分）。
+#
+# ## 口径上的三条规矩
+#
+#   - **一个包里只有 `_test.go` 变了**（或者改动都在别的包）时，不排除任何文件、
+#     跑整包。这种改动的风险恰恰是「测试被改弱」，排除文件反而把要看的地方
+#     排除掉了。
+#   - **新文件算「改到」**：判据是改动清单本身，不是 git 的文件状态。新文件在
+#     清单里，就不会被排除。
+#   - **改动同时落在父子包**时只留外层（外层那条命令递归含子包），`-E` 按整棵
+#     子树算。这是**从清单推出来**的重叠，所以去重，不报错——与显式传父子两条
+#     参数（那是写参数的人犯的错）分开处理。
+#
+# ## 分数不可跨口径比较
+#
+# 只变异了一部分文件时，Killed / 存活 / 超时 / Not covered 都只覆盖参与变异的
+# 那些文件，与整包基线**不是同一把尺子**。所以收窄时脚本会先打一段「按改动收窄」，
+# 逐包列出参与与排除了几个生产文件，并说明这一轮的分数不可与整包基线对账。
+# 这句话不能只写在文档里：看表的人只看表。
 #
 # # 逐行透传与进度
 #
@@ -262,10 +303,29 @@ PKGS=(
   internal/observe
 )
 
+# nearest_pkg <目录>：最近的、在 PKGS 里的祖先（按 `/` 边界，目录本身也算），
+# 打印它；一个都没有时什么都不打印、退出 1。
+#
+# **这条规则只写这一处**：`--list-packages --match` 与「按改动收窄」的选包
+# 都调它。两处各写一份的那天，CI 与本地会开始跑不同的包。
+nearest_pkg() {
+  local dir="${1%/}" p best=""
+  for p in "${PKGS[@]}"; do
+    case "$dir" in
+      "$p" | "$p"/*)
+        # 取最长的那个：清单里同时在的父子两条，离改动最近的是子包。
+        if [ ${#p} -gt ${#best} ]; then best="$p"; fi
+        ;;
+    esac
+  done
+  [ -n "$best" ] || return 1
+  printf '%s\n' "$best"
+}
+
 # 只读清单就退出：不拿锁、不查 gremlins、不要求 DSN。CI 的选包那一环跑在
 # 起数据库的 job 之前，它要的只是这份清单。
 if [ "${1:-}" = "--list-packages" ]; then
-  # --match <目录>：只回答「这个目录该由哪一条 PKGS 来量」，规则见文件开头。
+  # --match <目录>：只回答「这个目录该由哪一条 PKGS 来量」，规则见 nearest_pkg。
   # 不带 --match 时输出与以前逐字一致（CI 与用例都依赖这一点）。
   if [ "${2:-}" = "--match" ]; then
     dir="${3:-}"
@@ -273,21 +333,8 @@ if [ "${1:-}" = "--list-packages" ]; then
       echo "--match 需要一个目录参数。" >&2
       exit 1
     fi
-    dir="${dir%/}"
-    best=""
-    for p in "${PKGS[@]}"; do
-      case "$dir" in
-        "$p" | "$p"/*)
-          # 取最长的那个：清单里同时在的父子两条，离改动最近的是子包。
-          if [ ${#p} -gt ${#best} ]; then best="$p"; fi
-          ;;
-      esac
-    done
-    if [ -z "$best" ]; then
-      # 什么都不打印：调用方靠退出码区分「没有包覆盖」与「覆盖到了但名字是空的」。
-      exit 1
-    fi
-    printf '%s\n' "$best"
+    # 什么都不打印：调用方靠退出码区分「没有包覆盖」与「覆盖到了但名字是空的」。
+    nearest_pkg "$dir" || exit 1
     exit 0
   fi
   # --suffix <片段>：手工触发时按包名后缀点名（与跑变异时的包参数同一套规则），
@@ -309,6 +356,143 @@ if [ "${1:-}" = "--list-packages" ]; then
   fi
   printf '%s\n' "${PKGS[@]}"
   exit 0
+fi
+
+# ── 按改动收窄的入参（#883）──────────────────────────────────────────────
+#
+# 两个开关二选一，剩下的位置参数照旧是包名后缀。解析放在拿锁之前：参数写错
+# 时就该在这里停下，不必先持锁再退出。
+#
+# 清单里的一行 = 一个仓库相对路径（`./` 前缀会被去掉，空行忽略）。新文件也
+# 算「改到」——判据是这份清单本身，不去问 git 它是不是新增的。
+NARROW=0
+auto_mode=0
+auto_selected=""
+CHANGED_SOURCE=""
+changed_files=()
+filters=()
+
+add_changed_lines() {
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    line="${line#./}"
+    [ -n "$line" ] || continue
+    changed_files+=("$line")
+  done
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --changed-from)
+      if [ "$NARROW" -eq 1 ]; then
+        echo "只能给一次 --changed-from / --changed-files。" >&2
+        exit 1
+      fi
+      if [ $# -lt 2 ]; then
+        echo "--changed-from 需要一个 git 参照，例如 origin/main。" >&2
+        exit 1
+      fi
+      NARROW=1
+      CHANGED_SOURCE="--changed-from $2"
+      # 两个点：参照到**工作树**，所以本地未提交的改动也算进来。
+      if ! __diff=$(git diff --name-only "$2" -- '*.go' 2>&1); then
+        echo "--changed-from $2：读不出改动清单（git diff 失败）。" >&2
+        printf '%s\n' "$__diff" | tail -3 | sed 's/^/   /' >&2
+        exit 1
+      fi
+      # 用进程替换而不是管道：管道里的函数在子 shell 里跑，`changed_files+=`
+      # 加完就随子 shell 一起消失，清单永远是空的。
+      add_changed_lines < <(printf '%s\n' "$__diff")
+      # 还没被 git 跟踪的新文件不在 git diff 里，但它已经会参与变异。本地拿
+      # 这个开关预览时把它们也算上，否则「新加了一个文件」会被当成没改到。
+      add_changed_lines < <(git ls-files --others --exclude-standard -- '*.go' 2>/dev/null)
+      shift 2
+      ;;
+    --changed-files)
+      if [ "$NARROW" -eq 1 ]; then
+        echo "只能给一次 --changed-from / --changed-files。" >&2
+        exit 1
+      fi
+      if [ $# -lt 2 ]; then
+        echo "--changed-files 需要一个文件路径（- 表示从 stdin 读）。" >&2
+        exit 1
+      fi
+      NARROW=1
+      CHANGED_SOURCE="--changed-files $2"
+      if [ "$2" = "-" ]; then
+        add_changed_lines
+      else
+        if [ ! -r "$2" ]; then
+          echo "--changed-files $2：读不了这份改动清单。" >&2
+          exit 1
+        fi
+        add_changed_lines <"$2"
+      fi
+      shift 2
+      ;;
+    *)
+      filters+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [ "$NARROW" -eq 1 ]; then
+  # 去重后再用：成员判断与计数都读一份，重复行不会把「参与几个文件」算多。
+  mapfile -t changed_files < <(printf '%s\n' "${changed_files[@]}" | sed '/^$/d' | sort -u)
+  declare -A changed_set=()
+  for f in "${changed_files[@]}"; do changed_set["$f"]=1; done
+fi
+
+# ── 只给了改动清单时，选中哪些包 ───────────────────────────────────────────
+#
+# 不给包参数、只给改动清单时，选包也由清单推出来：每个改动过的 `.go` 文件
+# 问一次 nearest_pkg，拿它最近的、在 PKGS 里的祖先。这就是 `--list-packages
+# --match` 的规则，**不再写第二份**。
+#
+# 由此推出来的父子重叠要自己去重（只留外层）：外层那条命令递归就含子包。
+# 显式传父子两条参数是另一回事——那是写参数的人犯的错，后面照旧拒绝。
+#
+# 这一段放在拿锁之前：清单读不出来、或者里面没有可跑的包，都不该先把锁拿上、
+# 再去查工具与 DSN。
+if [ "$NARROW" -eq 1 ] && [ ${#filters[@]} -eq 0 ]; then
+  auto_mode=1
+  picked=()
+  dropped=()
+  for f in "${changed_files[@]}"; do
+    case "$f" in *.go) ;; *) continue ;; esac
+    d=$(dirname "$f")
+    if p=$(nearest_pkg "$d"); then
+      picked+=("$p")
+    else
+      dropped+=("$d")
+    fi
+  done
+  if [ ${#dropped[@]} -gt 0 ]; then
+    mapfile -t dropped < <(printf '%s\n' "${dropped[@]}" | sort -u)
+    echo "⚠ 改动清单里这些目录不在任何 PKGS 条目下，这一轮不会为它们跑变异：${dropped[*]}"
+    echo "   包路径是递归的，但目录本身要先有一个在清单里的祖先。"
+  fi
+  if [ ${#picked[@]} -eq 0 ]; then
+    echo "改动清单里没有落在任何 PKGS 包里的 Go 文件——这次什么都没检查，不算通过。"
+    exit 1
+  fi
+  mapfile -t picked < <(printf '%s\n' "${picked[@]}" | sort -u)
+  outer=()
+  for p in "${picked[@]}"; do
+    contained=0
+    for q in "${picked[@]}"; do
+      [ "$p" = "$q" ] && continue
+      case "$p" in "$q"/*) contained=1; break ;; esac
+    done
+    [ "$contained" -eq 0 ] && outer+=("$p")
+  done
+  if [ ${#outer[@]} -ne ${#picked[@]} ]; then
+    echo "注：改动同时落在父子包（${picked[*]}），只留外层跑——包路径是递归的，"
+    echo "    外层那条命令已经包含子包，两个都跑会把子包的变异体跑两遍。"
+  fi
+  auto_selected=" ${outer[*]} "
 fi
 
 # ── 排他锁 ────────────────────────────────────────────────────────────────
@@ -490,7 +674,7 @@ fi
 # 一个包里超时的变异超过这个数，就认为系数不够、结果不可信。
 MAX_TIMED_OUT=10
 
-filters=("$@")
+# 位置参数在文件上半部分的解析里已经落进 filters（`--changed-*` 在那里被摘走）。
 
 # 后缀匹配。**规则只写这一处**：选包与下面的核对共用它，免得两处各写一份、
 # 日后只改一处就分岔。
@@ -516,6 +700,10 @@ fmt_duration() {
 }
 
 selected() {
+  if [ "$auto_mode" -eq 1 ]; then
+    case "$auto_selected" in *" $1 "*) return 0 ;; esac
+    return 1
+  fi
   [ ${#filters[@]} -eq 0 ] && return 0
   local pkg="$1"
   for f in "${filters[@]}"; do
@@ -636,6 +824,80 @@ if [ ${#redis_deps[@]} -gt 0 ] && [ -z "${LARKAX_REDIS_DSN:-}" ]; then
   exit 1
 fi
 
+# ── 按改动收窄：每包排除哪些文件（#883）────────────────────────────────────
+#
+# 规则见文件开头。这里只算「哪些文件要排除」与「参与 / 排除几个」，并把口径
+# 打进 stdout：只变异了一部分文件时，表上的分数与整包基线不是同一把尺子，
+# 而看表的人只看表——这句话不跟表一起出现，就等于没写。
+#
+# 排除用的正则是**包相对路径**（gremlins 的文件名就是这种形状：父包里是
+# `account.go`、子包里是 `store/posting.go`）。锚定两端、转义元字符，逐个
+# 文件一条 `--exclude-files`；逗号分隔会被当成一个整体正则，所以不合并。
+
+narrow_regex_escape() {  # 给一个字面量路径，打印它能当正则用的形状
+  printf '%s' "$1" | sed 's/[][\\^$.*+?(){}|]/\\&/g'
+}
+
+# narrow_plan <包>：扫这一包的**生产** `.go` 文件（不含 `_test.go`），结果放在
+# NARROW_TOTAL / NARROW_CHANGED / NARROW_EXCLUDED_REL 里。
+#
+# 只有 `_test.go` 变了、或者改动都在别的包时，NARROW_CHANGED 是 0——调用方据此
+# 跑整包，不传任何 `-E`。
+narrow_plan() {
+  local pkg="$1" f rel
+  NARROW_TOTAL=0
+  NARROW_CHANGED=0
+  NARROW_EXCLUDED_REL=()
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    NARROW_TOTAL=$((NARROW_TOTAL + 1))
+    rel="${f#"$pkg"/}"
+    if [ -n "${changed_set["$pkg/$rel"]:-}" ]; then
+      NARROW_CHANGED=$((NARROW_CHANGED + 1))
+    else
+      NARROW_EXCLUDED_REL+=("$rel")
+    fi
+  done < <(find "$pkg" -type f -name '*.go' ! -name '*_test.go' | sort)
+}
+
+narrow_participating=0
+narrow_excluded=0
+if [ "$NARROW" -eq 1 ]; then
+  echo "── 按改动收窄 ──"
+  echo "改动文件清单：${#changed_files[@]} 个（来源：${CHANGED_SOURCE}）"
+  for pkg in "${PKGS[@]}"; do
+    selected "$pkg" || continue
+    narrow_plan "$pkg"
+    if [ "$NARROW_CHANGED" -eq 0 ]; then
+      # 整包跑：这一包的生产文件没有被改到（常见的是只改了 `_test.go`）。
+      narrow_participating=$((narrow_participating + NARROW_TOTAL))
+      printf '  %-24s 整包（这一包没有生产文件改动）\n' "$pkg"
+    else
+      narrow_participating=$((narrow_participating + NARROW_CHANGED))
+      narrow_excluded=$((narrow_excluded + NARROW_TOTAL - NARROW_CHANGED))
+      printf '  %-24s 参与 %d / 共 %d 个生产文件，排除 %d 个未改动的\n' \
+        "$pkg" "$NARROW_CHANGED" "$NARROW_TOTAL" "$((NARROW_TOTAL - NARROW_CHANGED))"
+    fi
+  done
+  echo "合计：参与变异 $narrow_participating 个生产文件，排除 $narrow_excluded 个未改动的。"
+  if [ "$narrow_excluded" -gt 0 ]; then
+    echo "这一轮的表只覆盖改动涉及的生产文件：efficacy、存活、超时都与整包基线不可比，"
+    echo "别拿它与 docs/development.md「各包的现状」那张表对账。"
+  else
+    echo "这一轮没有排除任何生产文件，口径与整包一致。"
+  fi
+  # 机读口径标记，独占一行：CI 的 job summary 按它选措辞。只按「改动清单非空」
+  # 推定发生过排除会猜错——只改 `_test.go` 时这一轮实际跑的是整包。
+  if [ "$narrow_excluded" -gt 0 ]; then
+    echo "LARKAX_MUTATION_SCOPE=narrow excluded=$narrow_excluded"
+  else
+    echo "LARKAX_MUTATION_SCOPE=full"
+  fi
+  echo
+else
+  echo "LARKAX_MUTATION_SCOPE=full"
+fi
+
 # 表里要带上「有多少变异体根本没被测到」这两栏（#769）。
 #
 # gremlins 自己打了 `Not covered` 与 `Mutator coverage`，以前只抄了四个数。
@@ -743,7 +1005,21 @@ for pkg in "${PKGS[@]}"; do
   total_mutants=""
   n_lines=0    # 输出行号（序号那一列）
   n_done=0     # 已完成的变异体数（进度与 ETA 只用它）
-  "$GREMLINS" "${GREMLINS_ARGS[@]}" "./$pkg/" 2>&1 |
+
+  # 收窄时的排除参数：上面那段已经算过一次，这里按同一个函数重算——两次读的
+  # 是同一份改动清单与同一份目录树，结果一致；比把参数塞进一个以包名为键的
+  # 全局结构简单，也不容易在 set -u 下踩空数组。
+  pkg_args=("${GREMLINS_ARGS[@]}")
+  if [ "$NARROW" -eq 1 ]; then
+    narrow_plan "$pkg"
+    if [ "$NARROW_CHANGED" -gt 0 ] && [ "${#NARROW_EXCLUDED_REL[@]}" -gt 0 ]; then
+      for rel in "${NARROW_EXCLUDED_REL[@]}"; do
+        pkg_args+=("--exclude-files=^$(narrow_regex_escape "$rel")\$")
+      done
+    fi
+  fi
+
+  "$GREMLINS" "${pkg_args[@]}" "./$pkg/" 2>&1 |
     while IFS= read -r line || [ -n "$line" ]; do
       n_lines=$((n_lines + 1))
       elapsed=$(($(date +%s) - start_epoch))
@@ -784,6 +1060,31 @@ for pkg in "${PKGS[@]}"; do
     printf '%s\n' "$out" | tail -5 | sed 's/^/   /'
     failed=1
     continue
+  fi
+
+  # 收窄到只剩没有可变代码的文件（例如只改了包注释）时，真 gremlins 正常退出，
+  # 输出 `No results to report.`。这不是「没跑成」：它确实跑了这一组文件，只是
+  # 里面没有可变的代码。**认这一句原样输出**，不是「输出为空就当通过」——空输出
+  # 正是格式变了的形状，那一刻该判失败。
+  #
+  # 只在收窄模式认它。整包一个变异体都没有是另一回事：说明清单或工具出了问题，
+  # 照旧落到下面的「认不出输出」判失败。
+  if [ "$NARROW" -eq 1 ] && printf '%s\n' "$out" | grep -qxF 'No results to report.'; then
+    narrow_plan "$pkg"
+    # 只认「这一包真的有生产文件被收窄进来」的情形。NARROW_CHANGED 为 0 是
+    # 「这一包没有生产文件改动」（例如只改了 `_test.go`），那一轮跑的是整包，
+    # 整包一个变异体都没有照旧判失败——不能用生产文件总数把这条判据放宽成
+    # `NARROW_TOTAL > 0`。
+    #
+    # 还要求输出里没有真实的汇总行：这一句出现在正常汇总之外时，先命中绿分支
+    # 会把真数字丢掉。
+    if [ "$NARROW_CHANGED" -gt 0 ] &&
+      ! printf '%s\n' "$out" | grep -qE '^(Killed:|Test efficacy:|Mutator coverage:)'; then
+      echo "$pkg：这一包收窄后没有可变的代码（0 个变异体）。"
+      printf '%-20s %7s %6s %7s %12s %17s  %s\n' \
+        "$pkg" 0 0 0 0 "-" "-"
+      continue
+    fi
   fi
 
   killed=$(printf '%s\n' "$out" | sed -n 's/^Killed: \([0-9]*\).*/\1/p')
