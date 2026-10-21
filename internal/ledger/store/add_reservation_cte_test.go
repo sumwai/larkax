@@ -248,7 +248,7 @@ func TestAddReservationLocksWalletBeforeBillingRow(t *testing.T) {
 	go func() { done <- s.AddReservation(runCtx, req, delta, 0) }()
 
 	// 等补冻真的停在钱包锁上：那说明它已经走到 frozen，没有先拿账单行。
-	waitUntilBlocked(t, db)
+	waitUntilBlocked(t, db, 1)
 
 	// 这一步对应 Save 的第二步。方向对了，账单行还没人拿；反了就会互等。
 	if err := hog.QueryRowContext(ctx, `
@@ -348,11 +348,185 @@ func TestAddReservationAndSaveOnSameRequestDoNotDeadlock(t *testing.T) {
 	}
 }
 
-// waitUntilBlocked 等到本包之外有一个后端停在锁上。
+// TestAddReservationRejectedWhenSettlementWinsTheRowLock 钉住 `billedRows == 0`
+// 那半条判据：`target` 的快照里这一行还在 pending，等账单行锁的时候被结算了。
 //
-// 用例串行跑，所以那一条只可能是刚起的补冻 goroutine。比固定睡一段可靠：
+// 这是 READ COMMITTED 下唯一会走到那里的路径，靠并发去撞是撞不稳的，所以
+// 把中间状态人为造出来：另一个事务先拿住账单行，补冻因此卡在 `billed` 上
+// （此时 `frozen` 已经把钱加了），那个事务再把这一行置成 settled 并提交。
+// 补冻醒来时 UPDATE 重判谓词（EPQ）看到的不再是 pending，影响 0 行。
+//
+// 断言两件事：报「不在 pending」，**并且**钱包那一半退回去了——后者同时钉住
+// 事务回滚与 EPQ 重判：少了任何一个，frozen 都会多出这一笔再也解不开的钱。
+func TestAddReservationRejectedWhenSettlementWinsTheRowLock(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	requestID := reqID(t)
+	req := freezeRequest(ctx, t, db, userID, requestID)
+	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "10", "CNY")); err != nil {
+		t.Fatalf("初始预留失败: %v", err)
+	}
+
+	hog, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("开启另一个事务失败: %v", err)
+	}
+	defer func() { _ = hog.Rollback() }()
+	var one int
+	err = hog.QueryRowContext(ctx, `
+		SELECT 1 FROM billing_requests WHERE request_id = $1 FOR UPDATE`,
+		requestID).Scan(&one)
+	if err != nil {
+		t.Fatalf("先锁账单行失败: %v", err)
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.AddReservation(runCtx, req, mustMoney(t, "2"), 0) }()
+	// 卡在账单行上 = 钱包那一半已经加了，账单行那一半被挡住。
+	waitUntilBlocked(t, db, 1)
+
+	_, err = hog.ExecContext(ctx,
+		`UPDATE billing_requests SET status = 'settled', settled_at = now() WHERE request_id = $1`,
+		requestID)
+	if err != nil {
+		t.Fatalf("把这一行结算掉失败: %v", err)
+	}
+	if err = hog.Commit(); err != nil {
+		t.Fatalf("提交结算失败: %v", err)
+	}
+
+	err = <-done
+	if err == nil {
+		t.Fatal("这一行已经被结算，补冻应当失败")
+	}
+	if !strings.Contains(err.Error(), "不在 pending 状态") {
+		t.Fatalf("err = %v，期望「不在 pending 状态」", err)
+	}
+	// EPQ 重判 + 回滚：钱包那一半必须原样退回。
+	if _, frozen := walletOf(t, db, userID); frozen != "10.00000000" {
+		t.Errorf("被拒的补冻把冻结额留在了钱包上: %s，期望 10", frozen)
+	}
+	if got := reservedAmountOf(t, db, requestID); got != "10.00000000" {
+		t.Errorf("账单行预留 = %s，期望 10（这次补冻一分都没加上）", got)
+	}
+}
+
+// TestAddReservationRejectsEmptyAsset 钉住空资产的报错。
+//
+// 这条校验原先在 `lockWallets` 里（它逐个校验资产非空）。压成一条语句之后
+// 不再经过那把锁，校验挪到了 `frozenRows == 0` 那一支：不挪的话，空资产会
+// 掉进 `diagnoseFreezeFailure`，被报成「没有对应的钱包」——那是在说一件
+// 不一样的事（用户该开户），会把排查方向带偏。
+//
+// 位置也钉住：放在额度包那一支**之后**。额度包那条路从来不碰钱包，空资产在
+// 它那里不算错（改动前也是如此：`lockWallets` 在额度包分支返回之后才调用）。
+func TestAddReservationRejectsEmptyAsset(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	requestID := reqID(t)
+	req := freezeRequest(ctx, t, db, userID, requestID)
+	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "10", "CNY")); err != nil {
+		t.Fatalf("初始预留失败: %v", err)
+	}
+
+	empty := req
+	empty.Asset = ""
+	err := s.AddReservation(ctx, empty, mustMoney(t, "1"), 0)
+	if err == nil {
+		t.Fatal("空资产应当被拒绝")
+	}
+	if !strings.Contains(err.Error(), "钱包的资产品种为空") {
+		t.Errorf("err = %v，期望「钱包的资产品种为空」", err)
+	}
+	if errors.Is(err, ErrNoWallet) {
+		t.Error("空资产被报成了「没有钱包」——这是两件事，处置也不同")
+	}
+	if _, frozen := walletOf(t, db, userID); frozen != "10.00000000" {
+		t.Errorf("被拒的补冻改动了冻结额: %s", frozen)
+	}
+}
+
+// TestAddReservationTwoRefreezesOnSameRequestKeepBothHalvesInStep 让**同一笔**
+// 预留上两条补冻同时跑，两条都该成功（余额够）。
+//
+// 它们是排在同一把钱包行锁上的：后到的那条在 EPQ 重算时，`billed` 里那句
+// `EXISTS (SELECT 1 FROM frozen)` 必须仍然为真——只加钱包不加账单行的话，
+// 两半就分叉了，而分叉出来的冻结额再也解不开。
+//
+// 用另起事务先占住钱包行来制造确定的重算：两条都真的停在锁上之后才放行，
+// 所以「后到的那条走了重算」不是靠调度撞出来的。
+func TestAddReservationTwoRefreezesOnSameRequestKeepBothHalvesInStep(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	requestID := reqID(t)
+	req := freezeRequest(ctx, t, db, userID, requestID)
+	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "10", "CNY")); err != nil {
+		t.Fatalf("初始预留失败: %v", err)
+	}
+
+	hog, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("开启另一个事务失败: %v", err)
+	}
+	defer func() { _ = hog.Rollback() }()
+	var one int
+	if err := hog.QueryRowContext(ctx, `
+		SELECT 1 FROM user_wallets WHERE user_id = $1 AND asset = $2 FOR UPDATE`,
+		userID, "CNY").Scan(&one); err != nil {
+		t.Fatalf("先锁钱包失败: %v", err)
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	delta := mustMoney(t, "3")
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			results <- s.AddReservation(runCtx, req, delta, 0)
+		}()
+	}
+	close(start)
+	waitUntilBlocked(t, db, 2)
+
+	if err := hog.Rollback(); err != nil {
+		t.Fatalf("释放钱包失败: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := <-results; err != nil {
+			t.Fatalf("第 %d 条补冻失败: %v", i+1, err)
+		}
+	}
+
+	_, frozen := walletOf(t, db, userID)
+	if frozen != "16.00000000" {
+		t.Errorf("冻结 = %s，期望 16（10 + 3 + 3）", frozen)
+	}
+	if got := reservedAmountOf(t, db, requestID); got != frozen {
+		t.Errorf("账单行预留 = %s，钱包冻结 = %s——两半分叉了", got, frozen)
+	}
+}
+
+// waitUntilBlocked 等到本包之外有 n 个后端停在锁上。
+//
+// 用例串行跑，所以那几条只可能是刚起的补冻 goroutine。比固定睡一段可靠：
 // 睡得短了会在它拿到锁之前就去拿账单行，睡得长了只是慢。
-func waitUntilBlocked(t *testing.T, db *sql.DB) {
+//
+// **本包不要加 t.Parallel**：判据是「库里有几个后端停在锁上」，并行跑的用例
+// 会让别的用例的等待也算进来。今天包内全串行，这条成立。
+func waitUntilBlocked(t *testing.T, db *sql.DB, n int) {
 	t.Helper()
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -365,10 +539,10 @@ func waitUntilBlocked(t *testing.T, db *sql.DB) {
 			   AND pid <> pg_backend_pid()`).Scan(&blocked); err != nil {
 			t.Fatalf("查等待中的后端失败: %v", err)
 		}
-		if blocked > 0 {
+		if blocked >= n {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("补冻没有停在钱包行的锁上（等锁的后端一直没出现）")
+	t.Fatalf("等锁的后端一直没有达到 %d 个", n)
 }
