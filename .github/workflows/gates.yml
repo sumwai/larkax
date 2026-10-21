@@ -458,6 +458,18 @@ jobs:
       - name: 变异清单与文档表格一致的自测
         run: bash scripts/check-mutation-table.test.sh
 
+      # 迁移文件名里的号是写文件那一刻的「next」，合并顺序与它无关：号大的先合入
+      # 并部署，已经升过级的库就缺了号小的那条，goose 从此拒绝前进
+      # （见 lessons/45-migration-number-merge-order.md）。这里拿 base 树里的最大号
+      # 比本分支新增的号，不大于就红；base 解析成空集时退出码 2，不是通过。
+      # 本 job 的 checkout 是 fetch-depth: 0，base 的历史与 origin/main 都在。
+      - name: 迁移编号顺序
+        run: bash scripts/check-migration-order.sh
+
+      # 判据写反、diff 范围写错时它的输出与「没有乱序」一模一样，自测不是可选的。
+      - name: 迁移编号顺序自测
+        run: bash scripts/check-migration-order.test.sh
+
       # 脚本用退出码区分「命中」与「自身故障」，这里要把这个区分带出来：
       # 不区分的话，扫描器坏掉的日志和干净通过长得一样，没人会去看。
       - name: 扫描密钥与私有信息
