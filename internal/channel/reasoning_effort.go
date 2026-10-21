@@ -5,8 +5,11 @@ package channel
 // 形状是 {"none": "off"}：左边的键是我们内部的规范取值，右边的值是该渠道
 // 认的写法；映射到空字符串表示这个字段整条不出现在出站报文里。
 //
-// 键归适配器解释，选路层不读它（见 Channel.Setting 的注释）。
-const reasoningEffortMapKey = "reasoning_effort_map"
+// 键归适配器解释，选路层不读它（见 Channel.Setting 的注释）。取值本身声明在
+// SettingKeyReasoningEffortMap：管理面按「渠道 type 认哪些键」判一条 setting
+// 有没有读者，那一侧的判据必须与这里读的键是同一个值。再写一份字符串的话，
+// 两处可以各自改而请求路径照旧。
+const reasoningEffortMapKey = string(SettingKeyReasoningEffortMap)
 
 // ReasoningEffortDialect 按渠道的映射表翻译 reasoning_effort 的取值。
 //
@@ -21,9 +24,8 @@ const reasoningEffortMapKey = "reasoning_effort_map"
 //   - 请求本来就没带这个参数时不去查表：映射表只翻译已有的取值，不该
 //     凭空给一条没要求过推理的请求加上这个字段；
 //   - 表或其中某一项形状不对时按「没有这一项」处理，不报错也不 panic。
-//     setting 本来就不做键名校验（见 Channel.Setting），写错的
-//     值静默不生效，与拼错键名是同一种结果；而一项写坏不该让整条渠道的
-//     请求都发不出去。
+//     setting 的键名由管理面负责点名（见 SettingUnreadNote），值的形状没有
+//     人判：写错的值静默不生效，而一项写坏不该让整条渠道的请求都发不出去。
 func ReasoningEffortDialect(setting map[string]any, effort string) string {
 	if effort == "" {
 		return ""

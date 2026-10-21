@@ -1144,8 +1144,9 @@ func normalizeWeight(weight int) (int, error) {
 // encodeSetting 把 setting 编成 jsonb 的文本形式。
 //
 // 它**不校验键名**：键归该渠道 type 指向的适配器解释（见 channel.Channel.Setting），
-// 而管理面不知道任何适配器认哪些键。拼错一个键因此不会报错，只会静默地不生效——
-// 管理面的诚实靠两处提示承担，不靠这里的一条判据（见 channel.SettingUnreadNote）。
+// 拼错一个键因此不会报错，只会不生效。管理面的诚实靠写入之后与列举时的提示
+// 承担，不靠这里的一条判据：哪些键对该 type 有读者由 channel.SettingUnreadNote
+// 判，那需要在写完/读完之后才说得清。
 func encodeSetting(setting map[string]any) ([]byte, error) {
 	if len(setting) == 0 {
 		return []byte("{}"), nil

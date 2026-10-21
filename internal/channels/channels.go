@@ -904,9 +904,9 @@ func (row candidateRow) cacheSamples() int64 {
 // decodeSetting 解开 channels.setting 的 jsonb。
 //
 // 解出来的 map 原样交给 Channel.Setting：**本包不解释任何键**，键由该渠道
-// type 指向的适配器认（见 channel.Channel.Setting）。今天 openai 与
-// openai-responses 两个适配器读其中的 reasoning_effort_map 一个键，其余键
-// 正确解出来也不会影响请求路径。
+// type 指向的适配器认（见 channel.Channel.Setting）。哪些键对哪种 type 有
+// 读者，由 channel 包的 settingKeysByType 回答；其余键正确解出来也不会影响
+// 请求路径。
 //
 // 列是 NOT NULL DEFAULT '{}'，所以正常总是有值的；长度为零时给一个空 map
 // 而不是报错——那说明这一行是别的手段写进去的，不值得让整个候选集取不出来。

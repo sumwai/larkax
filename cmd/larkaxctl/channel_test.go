@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -497,64 +498,43 @@ func without(args []string, name string) []string {
 	return out
 }
 
-// TestChannelSettingPrintsUnreadNote 钉住「给了 --setting 时那句话真的打出来了」。
+// TestChannelSettingPrintsUnreadNote 检查「写进去的键没有读者时，提示真的打出来了」。
 //
-// 这是 #360 在管理面上的落点：setting 写得到、读得到，而没有任何东西按它
-// 做判断。从命令行看，「配了但不生效」与「配了就生效」长得一模一样——两边
-// 都成功、清单里都有那一行。所以不生效这件事必须在**写入的那一刻**说出来。
+// 这是 #360 在管理面上的落点：setting 写得到、读得到，而没有东西按它做判断。
+// 从命令行看，「配了但不生效」与「配了就生效」长得一模一样——两边都成功、
+// 清单里都有那一行。所以不生效这件事必须在**写入的那一刻**说出来。
 //
 // 四条判据，缺一条这句话都会以某种方式失效：
 //
-//  1. 给了 --setting 时提示出现（create 与 update 两条写入路径都要）；
+//  1. 给了 --setting 且键没有读者时提示出现（create 与 update 两条写入路径都要）；
 //  2. 它走 stderr——stdout 上那一行（create 是 ID）要能被脚本直接接走；
-//  3. 没给 --setting 时不出现，否则它很快变成所有输出里的背景音；
-//  4. list 把带着 setting 的行点出来——否则事后核对配置时完全看不出来。
+//  3. 没碰 setting 也不碰 type 的 update 不打，否则它很快变成背景音；
+//  4. list 把这样的行点出来——否则事后核对配置时完全看不出来。
 //
-// 声明改成「已经有适配器读它」之后，这四条按相反方向判（提示必须消失），
-// 而不是跳过：跳过在输出里和通过一样，而那句提示消失本身正是要钉住的事。
+// 「有没有读者」按渠道类型判（见 TestChannelSettingNoteJudgesByType），所以
+// 这里刻意用 openai 渠道配一个它不认识的键：这条用例不依赖某个键今天恰好
+// 是死是活。
 func TestChannelSettingPrintsUnreadNote(t *testing.T) {
 	db := testDB(t)
 	setupEnv(t)
 
-	// 空串表示适配器已经开始读 setting：那时提示**不该**再出现。
-	note := channel.SettingUnreadNote()
-	wantNote := func(t *testing.T, got, what string) {
-		t.Helper()
-		if note == "" {
-			if strings.Contains(got, "注意：") || strings.Contains(got, "配了 setting") {
-				t.Errorf("%s：setting 已经有读者，提示却还在打：\n%s", what, got)
-			}
-			return
-		}
-		if !strings.Contains(got, note) {
-			t.Errorf("%s：提示没打出来：\n%s", what, got)
-		}
+	const unknownKey = "supports_optional_param"
+	if note := channel.SettingUnreadNote(testChanType, map[string]any{unknownKey: true}); note == "" {
+		t.Fatalf("%s 对 %s 居然有读者了：换一个没有读者的键再跑这条用例", unknownKey, testChanType)
 	}
 
 	// 一、create 给了 --setting。
-	const settingJSON = `{"supports_optional_param":true}`
-	withStdin(t, testSecret)
-	stdout, stderr := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
-			"--name", uniqueName("channel"), "--type", testChanType,
-			"--base-url", testBaseURL, "--models", uniqueName("model"),
-			"--credential-stdin", "--setting", settingJSON,
-		}); err != nil {
-			t.Fatalf("create 失败: %v", err)
-		}
-	})
-	wantNote(t, stderr, "create 给了 --setting")
-	if note != "" && strings.Contains(stdout, note) {
-		t.Errorf("提示混进了 stdout，那条链就断了：\n%s", stdout)
+	id, stdout, stderr := createChannelWithSetting(t, testChanType, `{"supports_optional_param":true}`)
+	if !strings.Contains(stderr, "注意：") || !strings.Contains(stderr, "「"+unknownKey+"」") {
+		t.Errorf("create 没有点出没有读者的键：\n%s", stderr)
 	}
-	id, err := strconv.ParseInt(strings.TrimSpace(stdout), 10, 64)
-	if err != nil {
-		t.Fatalf("stdout 应当只有渠道 ID，得到 %q（%v）", stdout, err)
+	if strings.Contains(stdout, "注意：") {
+		t.Errorf("提示混进了 stdout，那条链就断了：\n%s", stdout)
 	}
 
 	// 写进去的键仍然照原样落库：提示说的是「没有读者」，不是「不存」。
 	idArg := strconv.FormatInt(id, 10)
-	if got := findChannel(t, db, id).Setting; got["supports_optional_param"] != true {
+	if got := findChannel(t, db, id).Setting; got[unknownKey] != true {
 		t.Errorf("setting = %v，期望原样落库", got)
 	}
 
@@ -566,34 +546,150 @@ func TestChannelSettingPrintsUnreadNote(t *testing.T) {
 			t.Fatalf("update 失败: %v", updateErr)
 		}
 	})
-	wantNote(t, stderr, "update 给了 --setting")
+	if !strings.Contains(stderr, "「"+unknownKey+"」") {
+		t.Errorf("update 没有点出没有读者的键：\n%s", stderr)
+	}
 
-	// 三、update 没给 --setting 时不打。
+	// 三、两样都没碰的 update 不打。
 	_, stderr = captureStreams(t, func() {
 		if updateErr := runChannelUpdate([]string{"--id", idArg, "--priority", "7"}); updateErr != nil {
 			t.Fatalf("update 失败: %v", updateErr)
 		}
 	})
 	if strings.Contains(stderr, "注意：") {
-		t.Errorf("没碰 setting 的那次 update 不该打这句：\n%s", stderr)
+		t.Errorf("没碰 setting 也没碰 type 的那次 update 不该打这句：\n%s", stderr)
 	}
 
-	// 四、list 点出带着 setting 的渠道。清单里有别的用例建的渠道，
-	// 所以判据是「这条渠道的 ID 出现在那句话里」，不是整份输出相等。
+	// 四、list 点出这条渠道。清单里有别的用例建的渠道，所以判据是「这条渠道
+	// 的 ID 出现在那句话里」，不是整份输出相等。
 	listOut, _ := captureStreams(t, func() {
 		if listErr := runChannelList(nil); listErr != nil {
 			t.Fatalf("list 失败: %v", listErr)
 		}
 	})
-	if note == "" {
-		if strings.Contains(listOut, "配了 setting") {
-			t.Errorf("setting 已经有读者，list 却还在点出它：\n%s", listOut)
-		}
-		return
-	}
 	if !strings.Contains(listOut, "配了 setting") || !strings.Contains(listOut, idArg) {
 		t.Errorf("list 没有点出渠道 %s 配了 setting：\n%s", idArg, listOut)
 	}
+	if !strings.Contains(listOut, "「"+unknownKey+"」") {
+		t.Errorf("list 只说了这条渠道配过 setting，没点名是哪个键没有读者：\n%s", listOut)
+	}
+}
+
+// TestChannelSettingNoteJudgesByType 检查判据落在这条渠道的 type 上。
+//
+// 先前它是一个全局布尔：只要有适配器读过 setting，提示就对所有渠道消失。
+// 于是为一条渠道打开提示等于替所有渠道关掉它——下面这几种配置因此全都
+// 静默成功：别的 type 的键、拼错的键、将来才有的键。
+func TestChannelSettingNoteJudgesByType(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	const knownKey = "reasoning_effort_map"
+	const knownSetting = `{"reasoning_effort_map":{"none":"off"}}`
+
+	cases := []struct {
+		name     string
+		typ      string
+		setting  string
+		wantKeys []string // 提示里必须逐个点名的键；空表示不该有提示
+	}{
+		{
+			name:    "openai 认的键",
+			typ:     "openai",
+			setting: knownSetting,
+		},
+		{
+			// 第二个读者：两个适配器共用同一个翻译函数。对一条已经生效的
+			// 配置说「没有读者」，比不说更坏——使用者会照着把它删掉。
+			name:    "openai-responses 也认这个键",
+			typ:     "openai-responses",
+			setting: knownSetting,
+		},
+		{
+			name:     "别的 type 的键",
+			typ:      "anthropic",
+			setting:  knownSetting,
+			wantKeys: []string{knownKey},
+		},
+		{
+			name:     "拼错的键名",
+			typ:      "openai",
+			setting:  `{"reasoning_effortmap":{"none":"off"}}`,
+			wantKeys: []string{"reasoning_effortmap"},
+		},
+		{
+			name:     "多个键里有一个不认识",
+			typ:      "openai",
+			setting:  `{"reasoning_effort_map":{"none":"off"},"future_key":true}`,
+			wantKeys: []string{"future_key"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, stderr := createChannelWithSetting(t, tc.typ, tc.setting)
+			if len(tc.wantKeys) == 0 {
+				if strings.Contains(stderr, "注意：") {
+					t.Fatalf("这个键属于该 type，提示却出现了：\n%s", stderr)
+				}
+				return
+			}
+			for _, key := range tc.wantKeys {
+				if !strings.Contains(stderr, "「"+key+"」") {
+					t.Fatalf("提示没有点名没有读者的键 %s：\n%s", key, stderr)
+				}
+			}
+			// 被认的键不能也进名单：那会让使用者以为生效的那部分同样没生效。
+			if !slices.Contains(tc.wantKeys, knownKey) && strings.Contains(stderr, "「"+knownKey+"」") {
+				t.Errorf("提示把有读者的键 %s 也点成了没有读者：\n%s", knownKey, stderr)
+			}
+		})
+	}
+
+	// 只改 type 也要重判：库里的键对旧类型有读者，对新类型未必有。
+	id, _, stderr := createChannelWithSetting(t, "openai", knownSetting)
+	if strings.Contains(stderr, "注意：") {
+		t.Fatalf("openai 渠道配 reasoning_effort_map 不该有提示：\n%s", stderr)
+	}
+	idArg := strconv.FormatInt(id, 10)
+	_, stderr = captureStreams(t, func() {
+		if updateErr := runChannelUpdate([]string{"--id", idArg, "--type", "anthropic"}); updateErr != nil {
+			t.Fatalf("改 type 失败: %v", updateErr)
+		}
+	})
+	if !strings.Contains(stderr, "「"+knownKey+"」") {
+		t.Errorf("改成 anthropic 之后，库里的键没有读者，却没有任何提示：\n%s", stderr)
+	}
+	_, stderr = captureStreams(t, func() {
+		if updateErr := runChannelUpdate([]string{"--id", idArg, "--type", "openai"}); updateErr != nil {
+			t.Fatalf("改回 type 失败: %v", updateErr)
+		}
+	})
+	if strings.Contains(stderr, "注意：") {
+		t.Errorf("改回 openai 之后这个键又有读者了，提示不该再打：\n%s", stderr)
+	}
+}
+
+// createChannelWithSetting 建一条带 setting 的渠道，返回它的 ID 与两条流。
+//
+// 名字与模型名都现取，用例共用一个库。
+func createChannelWithSetting(t *testing.T, typ, settingJSON string) (id int64, stdout, stderr string) {
+	t.Helper()
+	withStdin(t, testSecret)
+	stdout, stderr = captureStreams(t, func() {
+		if err := runChannelCreate([]string{
+			"--name", uniqueName("channel"), "--type", typ,
+			"--base-url", testBaseURL, "--models", uniqueName("model"),
+			"--credential-stdin", "--setting", settingJSON,
+		}); err != nil {
+			t.Fatalf("create 失败: %v", err)
+		}
+	})
+	parsed, err := strconv.ParseInt(strings.TrimSpace(stdout), 10, 64)
+	if err != nil {
+		t.Fatalf("stdout 应当只有渠道 ID，得到 %q（%v）", stdout, err)
+	}
+	return parsed, stdout, stderr
 }
 
 // ── 软删 ────────────────────────────────────────────────────────────────
