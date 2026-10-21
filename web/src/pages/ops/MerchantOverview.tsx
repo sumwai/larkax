@@ -47,7 +47,9 @@ export function MerchantOverview() {
   const { meta, ready } = useSite()
   const { data, error, loading, reload } = useAsync(() => api.merchant.overview(), [])
   const subject = subjectOf(user?.role)
-  // 时区还没取到时不写日期：那天只能按 UTC 算，与「今日」的窗口对不上。
+  // 时区还没取到时不写日期：那会儿只能按 UTC 算，与「今日」的窗口对不上。
+  // 取失败时 `ready` 也会变真，meta 停在 fallback 的 UTC，日期就按 UTC 写——
+  // 与页面上其他时间字段的回落一致，这里不区分「没取到」与「站点就是 UTC」。
   const today = ready ? todayInZone(meta.timezone) : null
 
   return (
