@@ -640,6 +640,12 @@ stdout 恰好一行，就是新口令，只显示这一次；其余说明走 std
 它们仍会结算。下一步是先用 `wallet adjust` 调账，或等退款与还没结算完的请求
 处理完。
 
+打标与匿名化还各有一道判据：**不能因此让平台失去最后一个能进管理组的账号**。
+`delete request` 打在仍为 `active` 的管理员上、`delete purge` 打在任何管理员上时，
+都会在同一个事务里数一遍撤掉这一行之后还剩不剩 `active` 管理员，一个不剩就拒绝，
+退出 4。错误文案会点出是哪个账号，动作指引是「先给另一个账号 admin 角色再销户」。
+`delete revert` 不判：唯一管理员要能把自己从待删除拉回来。
+
 `delete revert` 撤掉打标：状态回到 request 之前的那一个——原来 `active` 就回
 `active`，原来 `suspended` 就回 `suspended`，不会被顺手放回 `active`。key 仍然
 一行都不动。
