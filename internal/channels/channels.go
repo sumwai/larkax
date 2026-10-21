@@ -200,6 +200,32 @@ func (s *Source) Supplies(ctx context.Context) ([]Supply, error) {
 	return out, nil
 }
 
+// CountSuppliedModels 数「在供」的规范模型，ownerID 非 nil 时只数那位
+// 用户名下渠道供的。
+//
+// 判据与 SuppliedModels / Supplies 是同一份 suppliesModel：另写一条计数 SQL
+// 时，「在供」的定义会从两份代码里各长出一个版本，而两边的差只会在某天
+// 有人改了其中一条之后才现形。
+func (a *Admin) CountSuppliedModels(ctx context.Context, ownerID *int64) (int64, error) {
+	query := `
+		SELECT count(DISTINCT m.canonical_name)
+		  FROM model_catalog m
+		  JOIN channels c ON ` + suppliesModel("m.canonical_name")
+	var args []any
+	if ownerID != nil {
+		if *ownerID <= 0 {
+			return 0, errors.New("用户 id 无效")
+		}
+		args = append(args, *ownerID)
+		query += ` WHERE c.owner_user_id = $1`
+	}
+	var n int64
+	if err := a.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("统计在供模型失败: %w", err)
+	}
+	return n, nil
+}
+
 // Candidates 返回某个规范模型名下的全部可用渠道。
 //
 // 过滤条件是 `status = 'enabled'` 且 `models` 数组包含该规范名。

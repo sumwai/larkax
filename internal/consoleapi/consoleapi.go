@@ -343,12 +343,16 @@ func newAPI(cfg Config, d deps) http.Handler {
 				Authorize: passThrough,
 				Groups:    groups,
 				Currency:  a.currency,
+				// 概览的「今天」按站点时区切：与 meta 端点给前端的那个
+				// 时区是同一个值，两处不各读一次配置。
+				Timezone: cfg.Timezone,
 			})
 		}
 		if a.deps.merchantAdmin == nil {
-			// 商家管自己的渠道、自己的价。模型目录与别名没有归属可过滤。
+			// 商家管自己的渠道、自己的价，看自己那一页的概览与上游。
+			// 模型目录与别名没有归属可过滤。
 			a.deps.merchantAdmin = build(PathPrefix+"merchant/",
-				[]string{adminapi.GroupChannels, adminapi.GroupPricing})
+				[]string{adminapi.GroupChannels, adminapi.GroupPricing, adminapi.GroupOverview})
 		}
 		if a.deps.adminAdmin == nil {
 			// 显式列出，不留空（空 = 全部）：users 组只属于这一组——它的

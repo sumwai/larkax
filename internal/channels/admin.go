@@ -799,6 +799,27 @@ func (a *Admin) ListOwned(ctx context.Context, ownerID int64) ([]ChannelInfo, er
 		ownerID)
 }
 
+// CountAlive 数未软删的渠道；ownerID 非 nil 时只数那位用户名下的。
+//
+// 概览只要一个数时不必把整份清单读出来：ListOwned 还要解析凭证信封头部、
+// 拆 setting，而这里只需要一行 count。
+func (a *Admin) CountAlive(ctx context.Context, ownerID *int64) (int64, error) {
+	query := `SELECT count(*) FROM channels c WHERE c.` + channelAlive
+	var args []any
+	if ownerID != nil {
+		if *ownerID <= 0 {
+			return 0, errors.New("用户 id 无效")
+		}
+		args = append(args, *ownerID)
+		query += ` AND c.owner_user_id = $1`
+	}
+	var n int64
+	if err := a.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("统计渠道数失败: %w", err)
+	}
+	return n, nil
+}
+
 // queryInfos 跑一条返回 listQuery 那些列的语句并扫成 ChannelInfo。
 //
 // List / ListOwned 共用它：两处各扫一遍时，漏一列的表现是后面所有列都串位，

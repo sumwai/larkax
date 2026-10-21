@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -78,6 +79,18 @@ type ChannelHealth struct {
 	// 0 仍然按「没记过」处理（接上写入侧之前留下的旧桶）。把它当免费会让每一行
 	// 都显示一个凭空的零成本，而那正是这一列最容易骗人的地方。
 	Cost *string
+
+	// ConsecutiveFailures 是选路维护的连续失败计数（channels 上的同名列）。
+	//
+	// 它与桶里的 failures 回答的不是同一个问题：桶计数「窗口里失败了几次」，
+	// 这一列说的是「现在连着失败了几次」，成功一次就清零。供概览判断
+	// 「这条渠道此刻是不是在连败」。
+	ConsecutiveFailures int
+
+	// LastProbeStatus 是最近一次额度探测的结论（ok / unsupported / error），
+	// nil 表示没探测过。与 LastProbeAt 配对：一个说「什么时候」，一个说
+	// 「那次怎么样」。
+	LastProbeStatus *string
 }
 
 // FailureRate 给出窗口内的失败率，窗口里没有请求时返回 nil。
@@ -128,7 +141,9 @@ const healthColumns = `
     COALESCE(h.cache_miss_tokens, 0),
     h.latency_p50_ms,
     h.latency_p95_ms,
-    h.cost`
+    h.cost,
+    c.consecutive_failures,
+    q.last_probe_status`
 
 // healthFrom 是健康读数的取数主体：channels 是主表，两个信号表按渠道左连。
 //
@@ -190,7 +205,18 @@ const healthFrom = `
 
 // Health 读窗口内的渠道健康，按 id 排序。includeDeleted 为真时带上已软删的渠道。
 func (a *Admin) Health(ctx context.Context, since time.Time, includeDeleted bool) ([]ChannelHealth, error) {
-	return a.health(ctx, since, 0, includeDeleted)
+	return a.health(ctx, since, 0, includeDeleted, nil)
+}
+
+// HealthOwned 读一位用户名下（未软删）渠道的健康，按 id 排序。
+//
+// 与 Health 共用同一条查询：多出来的只有归属那一句条件。另写一份时，
+// 「窗口」「分位数取最近非空桶」「成本 NULLIF」这些口径会各走各的。
+func (a *Admin) HealthOwned(ctx context.Context, ownerID int64, since time.Time) ([]ChannelHealth, error) {
+	if ownerID <= 0 {
+		return nil, errors.New("用户 id 无效")
+	}
+	return a.health(ctx, since, 0, false, &ownerID)
 }
 
 // health 是清单与单条详情共用的那一遍查询。
@@ -198,15 +224,27 @@ func (a *Admin) Health(ctx context.Context, since time.Time, includeDeleted bool
 // id 非 0 时只读那一条。已软删的渠道**照读**：`--all` 那个开关管的是「清单要不要
 // 变长」，不是「单条能不能看」——行还在库里，单条读取的目的是核对配置，藏起来
 // 反而让人打不开（与 channel get 同一条口径）。
-func (a *Admin) health(ctx context.Context, since time.Time, id int64, includeDeleted bool) ([]ChannelHealth, error) {
+//
+// ownerID 非 nil 时只读那个用户名下的渠道（控制台 merchant 组）。
+func (a *Admin) health(ctx context.Context, since time.Time, id int64,
+	includeDeleted bool, ownerID *int64,
+) ([]ChannelHealth, error) {
 	args := []any{since, HealthUnknown}
-	where := ""
-	switch {
-	case id != 0:
+	var conds []string
+	if id != 0 {
 		args = append(args, id)
-		where = "\n WHERE c.id = $" + strconv.Itoa(len(args))
-	case !includeDeleted:
-		where = "\n WHERE c." + channelAlive
+		conds = append(conds, "c.id = $"+strconv.Itoa(len(args)))
+	}
+	if !includeDeleted {
+		conds = append(conds, "c."+channelAlive)
+	}
+	if ownerID != nil {
+		args = append(args, *ownerID)
+		conds = append(conds, "c.owner_user_id = $"+strconv.Itoa(len(args)))
+	}
+	where := ""
+	if len(conds) > 0 {
+		where = "\n WHERE " + strings.Join(conds, " AND ")
 	}
 
 	rows, err := a.db.QueryContext(ctx,
@@ -239,7 +277,7 @@ func (a *Admin) HealthOne(ctx context.Context, id int64, since time.Time) (Chann
 	if id <= 0 {
 		return ChannelHealth{}, nil, errors.New("渠道 id 无效")
 	}
-	rows, err := a.health(ctx, since, id, true)
+	rows, err := a.health(ctx, since, id, true, nil)
 	if err != nil {
 		return ChannelHealth{}, nil, err
 	}
@@ -299,16 +337,18 @@ func (a *Admin) healthBuckets(ctx context.Context, id int64, since time.Time) ([
 
 func scanHealth(rows *sql.Rows) (ChannelHealth, error) {
 	var (
-		h       ChannelHealth
-		deleted sql.NullTime
-		probeAt sql.NullTime
-		p50     sql.NullInt64
-		p95     sql.NullInt64
-		cost    sql.NullString
+		h         ChannelHealth
+		deleted   sql.NullTime
+		probeAt   sql.NullTime
+		p50       sql.NullInt64
+		p95       sql.NullInt64
+		cost      sql.NullString
+		probeText sql.NullString
 	)
 	err := rows.Scan(&h.ID, &h.Name, &deleted, &h.Health, &probeAt,
 		&h.Requests, &h.Successes, &h.Failures,
-		&h.CacheHitTokens, &h.CacheMissTokens, &p50, &p95, &cost)
+		&h.CacheHitTokens, &h.CacheMissTokens, &p50, &p95, &cost,
+		&h.ConsecutiveFailures, &probeText)
 	if err != nil {
 		return ChannelHealth{}, fmt.Errorf("读取渠道健康行失败: %w", err)
 	}
@@ -321,6 +361,7 @@ func scanHealth(rows *sql.Rows) (ChannelHealth, error) {
 	h.LatencyP50ms = nullIntPtr(p50)
 	h.LatencyP95ms = nullIntPtr(p95)
 	h.Cost = nullStringPtr(cost)
+	h.LastProbeStatus = nullStringPtr(probeText)
 	return h, nil
 }
 

@@ -34,6 +34,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -96,10 +97,10 @@ type Config struct {
 	// 兼容旧默认时出现。
 	//
 	// 取值见 GroupChannels / GroupModels / GroupAliases / GroupPricing /
-	// GroupCosts / GroupUsers。控制台
-	// 的 merchant 组给 channels + pricing：它管的是自己名下的渠道与自己定的价。
-	// 模型目录与别名没有「归属」可以过滤，放给 merchant 等于把全局写入权
-	// 交出去，所以不在这两个组里。
+	// GroupCosts / GroupUsers / GroupOverview。控制台的 merchant 组给
+	// channels + pricing + overview：它管的是自己名下的渠道、自己定的价，
+	// 以及自己那一页的概览。模型目录与别名没有「归属」可以过滤，放给
+	// merchant 等于把全局写入权交出去，所以不在这两个组里。
 	//
 	// `pricing/costs`（上游成本）是单独一组（GroupCosts），不随 pricing 注册：
 	// 那是渠道侧的成本规则，没有商家归属。
@@ -108,11 +109,19 @@ type Config struct {
 	// 某个管理员」——改自己的角色、降最后一个管理员这两条判据在内部管理面上
 	// 无法定义（那里的调用者是运维令牌，没有「自己」）。所以内部管理面必须
 	// 显式列出资源组，不能留空（见 InternalGroups）。
+	//
+	// overview 组（GroupOverview）正相反：它**只**随显式列名注册，不随空
+	// Groups 出现——它的每条读都建立在归属上下文上，内部管理面没有那层上下文。
 	Groups []string
 
 	// Currency 是用户详情里「余额」用哪个资产品种。为空时用 CNY。
 	// 它只影响读：钱包里没有这一品种时余额显示 0（与 /api/v1/wallet 同口径）。
 	Currency string
+
+	// Timezone 是站点时区的 IANA 名（如 `Asia/Shanghai`），概览的「今天」
+	// 按它切日。为空或解析失败时按 UTC——没有站点时区时，UTC 是唯一一个
+	// 不需要额外假设的答案。
+	Timezone string
 }
 
 // tokenSource 提供当前令牌的 verifier。
@@ -136,6 +145,9 @@ type API struct {
 	users        *auth.Store
 	ledger       *store.Store
 	currency     string
+
+	// loc 是概览切「今天」用的时区；见 Config.Timezone。
+	loc *time.Location
 }
 
 // New 装配管理面。返回的 handler **已经带上鉴权中间件**：调用方把它整片挂到
@@ -164,6 +176,7 @@ func New(cfg Config) http.Handler {
 		users:        auth.New(cfg.DB),
 		ledger:       store.New(cfg.DB),
 		currency:     cfg.Currency,
+		loc:          overviewLocation(cfg.Timezone, cfg.Logger),
 	}
 	if a.currency == "" {
 		a.currency = "CNY"
@@ -206,6 +219,13 @@ func New(cfg Config) http.Handler {
 		mux.HandleFunc("GET "+prefix+"users/{id}", a.getUser)
 		mux.HandleFunc("PATCH "+prefix+"users/{id}", a.updateUser)
 	}
+	// 概览与上游**只**随显式组名注册，不跟 all 走（见 Config.Groups）：
+	// 它们的每条读都建立在归属上下文上，而「全部资源」那条默认路径
+	// （内部管理面）没有这层上下文。写在这里而不是 `all ||` 里，是刻意的。
+	if groups[GroupOverview] {
+		mux.HandleFunc("GET "+prefix+"overview", a.merchantOverview)
+		mux.HandleFunc("GET "+prefix+"upstreams", a.merchantUpstreams)
+	}
 
 	authorize := cfg.Authorize
 	if authorize == nil {
@@ -224,6 +244,8 @@ const (
 	// GroupUsers 是控制台的用户管理页。它**不在**内部管理面的清单里，
 	// 理由见 Config.Groups 与 InternalGroups。
 	GroupUsers = "users"
+	// GroupOverview 是商家运营页的概览与上游清单。它不随空 Groups 出现。
+	GroupOverview = "overview"
 )
 
 // InternalGroups 是内部监听（`/admin/v1/*`）上注册的资源组。
@@ -248,7 +270,8 @@ func groupSet(groups []string) (map[string]bool, bool) {
 	set := make(map[string]bool, len(groups))
 	for _, group := range groups {
 		switch group {
-		case GroupChannels, GroupModels, GroupAliases, GroupPricing, GroupCosts, GroupUsers:
+		case GroupChannels, GroupModels, GroupAliases, GroupPricing, GroupCosts,
+			GroupUsers, GroupOverview:
 			set[group] = true
 		default:
 			panic("adminapi: 未知的资源组 " + group)
