@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -378,6 +379,101 @@ func TestModelViewKeepsEndpointTriState(t *testing.T) {
 			}
 			if got := string(wire.Capabilities.Endpoints); got != tc.want {
 				t.Errorf("capabilities.endpoints = %s，期望 %s（整条响应：%s）", got, tc.want, raw)
+			}
+		})
+	}
+}
+
+// TestPrefixMustBeASubtree 钉住 Prefix 的形状校验：以 / 开头、以 / 结尾。
+//
+// 两半必须同时判。只判一半的实现下，`x/` 与 `/x` 都能通过，而它们在路由表
+// 里指向的路径与调用方以为的不是同一条——症状只是 404。
+func TestPrefixMustBeASubtree(t *testing.T) {
+	cases := []struct {
+		name   string
+		prefix string
+		panics bool
+	}{
+		{name: "默认前缀", prefix: ""},
+		{name: "子树", prefix: "/api/v1/merchant/"},
+		{name: "缺前导斜杠", prefix: "x/", panics: true},
+		{name: "缺结尾斜杠", prefix: "/x", panics: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var recovered any
+			func() {
+				defer func() { recovered = recover() }()
+				New(Config{Prefix: tc.prefix})
+			}()
+			if tc.panics && recovered == nil {
+				t.Errorf("Prefix %q 没有 panic", tc.prefix)
+			}
+			if !tc.panics && recovered != nil {
+				t.Errorf("Prefix %q panic 了: %v", tc.prefix, recovered)
+			}
+		})
+	}
+}
+
+// TestOwnerContextRejectsNonPositive 钉住归属上下文只认正整数：
+// 0 与负数都读成「没有归属」，而不是「归属是 0」。
+func TestOwnerContextRejectsNonPositive(t *testing.T) {
+	ctx := context.Background()
+
+	if _, ok := OwnerFromContext(ctx); ok {
+		t.Error("空 context 被判成有归属")
+	}
+	for _, id := range []int64{0, -1} {
+		if got, ok := OwnerFromContext(WithOwner(ctx, id)); ok {
+			t.Errorf("WithOwner(%d) 读回 (%d, true)，期望 (0, false)", id, got)
+		}
+	}
+	if got, ok := OwnerFromContext(WithOwner(ctx, 7)); !ok || got != 7 {
+		t.Errorf("WithOwner(7) 读回 (%d, %v)，期望 (7, true)", got, ok)
+	}
+}
+
+// TestFailScopedOnlyRewritesNotFound 钉住归属受限的 404 改写只发生在「有归属
+// 且确实是 ErrChannelNotFound」这两条同时成立时。
+//
+// 判成「或」的话，内部管理面（没有归属）的不存在渠道也会丢掉 id 那一句，
+// 运维就分不清是 id 打错了还是路径写错了；判成「与」之外再松一格，受归属
+// 限制的其它错误会被说成 not found，真正的原因只剩日志。
+func TestFailScopedOnlyRewritesNotFound(t *testing.T) {
+	notFound := fmt.Errorf("%w：id 42", channels.ErrChannelNotFound)
+	owner := int64(7)
+	cases := []struct {
+		name     string
+		owner    *int64
+		wantBody string
+		absent   string
+	}{
+		{name: "受归属限制", owner: &owner, wantBody: msgNotFound, absent: "42"},
+		{name: "内部管理面", wantBody: "渠道不存在", absent: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tc.owner != nil {
+				ctx = WithOwner(ctx, *tc.owner)
+			}
+			req := httptest.NewRequestWithContext(ctx, http.MethodGet, PathPrefix+"channels/42", nil)
+			rec := httptest.NewRecorder()
+
+			(&API{}).failScoped(rec, req, notFound)
+
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("状态码 = %d，期望 404", rec.Code)
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, tc.wantBody) {
+				t.Errorf("正文 = %s，期望包含 %q", body, tc.wantBody)
+			}
+			if tc.absent != "" && strings.Contains(body, tc.absent) {
+				t.Errorf("正文 = %s，不该包含 %q", body, tc.absent)
 			}
 		})
 	}

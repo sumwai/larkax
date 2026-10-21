@@ -1502,3 +1502,62 @@ func TestUpdateJudgesEndpointsWhenOnlyTypeChanges(t *testing.T) {
 		}
 	})
 }
+
+// TestOwnedMethodsRejectNonPositiveIDs 钉住归属与渠道 id 的下界：0 是非法值，
+// 不是「不限制」。
+//
+// 这几个判据都在碰库之前，但用例照样走真库：把 `<= 0` 放宽成 `< 0` 之后，
+// 调用会继续往下跑到 SQL，那一侧的回答是 ErrChannelNotFound（或者一个空
+// 清单），与这里期望的「id 无效」不是同一句话——只用 panic 或「非 nil 错误」
+// 判的话，两者分不开。
+//
+// 三处等价变异不在这里补用例，也不为它们改实现：
+//
+//   - admin.go 的 UPDATE 里第二道归属条件：checkOwner 已经判过一次，而今天
+//     没有改 owner_user_id 的写路径，所以「判完到写之间换了主人」造不出来。
+//   - channels.go 的 consecutiveFailures 首个 `streak <= 0`：写入侧把计数与
+//     时间戳一起写，库里不存在「负计数 + 新鲜时间戳」这种行。
+func TestOwnedMethodsRejectNonPositiveIDs(t *testing.T) {
+	admin := NewAdmin(testDB(t), testSealer(t), nil)
+	ctx := context.Background()
+	req := UpdateRequest{ID: 1}
+
+	cases := []struct {
+		name string
+		call func() error
+		want string
+	}{
+		{
+			name: "UpdateOwned 归属为 0",
+			call: func() error { return admin.UpdateOwned(ctx, 0, req) },
+			want: "用户 id 无效",
+		},
+		{
+			name: "GetOwned 归属为 0",
+			call: func() error { _, err := admin.GetOwned(ctx, 0, 1); return err },
+			want: "用户 id 无效",
+		},
+		{
+			name: "GetOwned 渠道为 0",
+			call: func() error { _, err := admin.GetOwned(ctx, 1, 0); return err },
+			want: "渠道 id 无效",
+		},
+		{
+			name: "ListOwned 归属为 0",
+			call: func() error { _, err := admin.ListOwned(ctx, 0); return err },
+			want: "用户 id 无效",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil {
+				t.Fatalf("错误为 nil，期望 %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("错误 = %v，期望包含 %q", err, tc.want)
+			}
+		})
+	}
+}
