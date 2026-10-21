@@ -1,10 +1,20 @@
+// 用例跑在 Node 里，读文件没问题；但 web 的 tsconfig 不带 Node 的类型
+// （`@types/node` 没有装），所以这一行要靠指令压掉「找不到模块」。
+// 哪天真装了 Node 类型，这条指令反而会报「多余」，正好提醒把它删掉。
+// @ts-expect-error node:fs 只在 vitest 的 Node 运行时里用，不进构建产物
+import { readFileSync } from 'node:fs'
 import { fireEvent, render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuthProvider } from '../auth/AuthProvider'
 import { I18nProvider } from '../i18n'
 import { AppShell } from './AppShell'
 import { ToastProvider } from './ui'
+
+// vitest 不处理 CSS（`test.css: false`），`?raw` 拿到的也是空串；直接读文件。
+// vitest 从 web/ 目录跑，相对路径即可。
+const componentsCss = readFileSync('src/styles/components.css', 'utf8')
 
 const mocks = vi.hoisted(() => ({ session: vi.fn() }))
 
@@ -201,5 +211,119 @@ describe('AppShell 桌面端顶栏', () => {
     const logo = screen.getByRole('button', { name: '展开侧边栏' })
     fireEvent.click(logo)
     expect(screen.getByRole('button', { name: '收起侧边栏' })).toBeInTheDocument()
+  })
+})
+
+describe('AppShell 跳到主内容', () => {
+  // vitest 不处理 CSS（`test.css: false`），从真实样式表里取出这两条规则注入
+  // 文档，再断言元素确实被它们隐藏；规则被删掉时下面的匹配先红。
+  function skipLinkRules() {
+    return {
+      base: componentsCss.match(/\.skip-link\s*\{([^}]*)\}/)?.[1] ?? '',
+      focus: componentsCss.match(/\.skip-link:focus\s*\{([^}]*)\}/)?.[1] ?? '',
+    }
+  }
+
+  function useMatchMedia(matches: boolean) {
+    const previous = window.matchMedia
+    window.matchMedia = ((query: string) =>
+      ({
+        matches: matches && query.includes('max-width'),
+        media: query,
+        onchange: null,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        addListener: () => undefined,
+        removeListener: () => undefined,
+        dispatchEvent: () => false,
+      }) as unknown as MediaQueryList) as typeof window.matchMedia
+    return () => {
+      window.matchMedia = previous
+    }
+  }
+
+  it('第一次按 Tab 落在「跳到主内容」上', async () => {
+    await renderShell('user')
+    const user = userEvent.setup()
+    await user.tab()
+    expect(document.activeElement).toBe(screen.getByRole('link', { name: '跳到主内容' }))
+  })
+
+  it('回车后焦点落在主内容容器上', async () => {
+    await renderShell('user')
+    const user = userEvent.setup()
+    await user.tab()
+    await user.keyboard('{Enter}')
+
+    const main = document.getElementById('main-content')
+    expect(main?.tagName).toBe('MAIN')
+    expect(document.activeElement).toBe(main)
+  })
+
+  it('默认不可见但可聚焦，聚焦态另有一套样式', async () => {
+    const { base, focus } = skipLinkRules()
+    // 隐藏靠 1px 的盒子加裁剪，不能用聚焦不了的那两种写法。
+    expect(base).toMatch(/position:\s*absolute/)
+    expect(base).toMatch(/max-width:\s*1px/)
+    expect(base).toMatch(/max-height:\s*1px/)
+    expect(base).toMatch(/overflow:\s*hidden/)
+    expect(base).toMatch(/clip-path:\s*inset\(50%\)/)
+    expect(base).not.toMatch(/display:\s*none/)
+    expect(base).not.toMatch(/visibility:\s*hidden/)
+    // 聚焦时逐项还原，否则它会一直是个 1px 的盒子。
+    expect(focus).toMatch(/max-width:\s*none/)
+    expect(focus).toMatch(/max-height:\s*none/)
+    expect(focus).toMatch(/clip-path:\s*none/)
+
+    const style = document.createElement('style')
+    style.textContent = `.skip-link {${base}}\n.skip-link:focus {${focus}}`
+    document.head.appendChild(style)
+    try {
+      await renderShell('user')
+      const link = screen.getByRole('link', { name: '跳到主内容' })
+      const computed = getComputedStyle(link)
+      expect(computed.position).toBe('absolute')
+      expect(computed.maxWidth).toBe('1px')
+      expect(computed.maxHeight).toBe('1px')
+      expect(computed.overflow).toBe('hidden')
+      // `display: none` 的元素在 jsdom 里聚焦不上，这一条同时证明它没被藏死。
+      link.focus()
+      expect(document.activeElement).toBe(link)
+    } finally {
+      style.remove()
+    }
+  })
+
+  it('移动端：它仍是第一个落点，跳转不把抽屉带出来', async () => {
+    const restore = useMatchMedia(true)
+    try {
+      mocks.session.mockResolvedValue({
+        user: userOf('user'),
+        csrf_token: 'csrf',
+        expires_at: '2026-12-01T00:00:00Z',
+      })
+      render(
+        <I18nProvider>
+          <ToastProvider>
+            <AuthProvider>
+              <MemoryRouter initialEntries={['/app']}>
+                <AppShell />
+              </MemoryRouter>
+            </AuthProvider>
+          </ToastProvider>
+        </I18nProvider>,
+      )
+      // 移动端顶栏只留首字母头像，账号名不出现，等菜单按钮就够了。
+      await screen.findByRole('button', { name: '菜单' })
+      const user = userEvent.setup()
+      await user.tab()
+      expect(document.activeElement).toBe(screen.getByRole('link', { name: '跳到主内容' }))
+
+      await user.keyboard('{Enter}')
+      expect(document.activeElement).toBe(document.getElementById('main-content'))
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    } finally {
+      restore()
+    }
   })
 })
