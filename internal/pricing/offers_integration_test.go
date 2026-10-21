@@ -1,14 +1,19 @@
 package pricing
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"log/slog"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/billing/expr"
 	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/observe"
 )
 
 // 报价要按**实际选中的那条渠道的商家**取价，并与结算对得上。
@@ -396,4 +401,123 @@ func settlementDimensionPrice(t *testing.T, source *Source, model string, channe
 		t.Fatalf("维度 %q 没有对应的 Breakdown 字段", name)
 		return money.Zero
 	}
+}
+
+// 一条规则取不出价，只跳过命中它的候选，其余候选照常报价。
+//
+// 这是 #938 的判据：某个商家配错一条规则，不该让所有调用方的模型清单都
+// 变成 500。跳过要留一条日志（规则 id + 原因），否则外部只剩下「这个模型
+// 没有报价」——那与「没有适用规则」长得一模一样。
+func TestOffersSkipCandidatesWithBrokenRule(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	ownerOK := seedUser(t, db)
+	ownerBroken := seedUser(t, db)
+	channelOK := seedChannel(t, db, ownerOK)
+	channelBroken := seedChannel(t, db, ownerBroken)
+	model := unique("offers-broken")
+	at := time.Now().UTC().Add(time.Minute)
+
+	createRule(t, NewAdmin(db), CreateRequest{
+		Scope: ScopeMerchant, OwnerUserID: ownerOK, ModelPatterns: []string{model},
+		Expr: `{"prompt": 0.000002}`,
+	})
+	// 绕过写入路径直接插一条编译不过的规则：Create 会先编译，所以这类行
+	// 只能来自历史数据、直接写库，或编译器收紧之后的旧表达式。
+	brokenID := insertRule(t, ctx, db, ruleSpec{
+		scope: "merchant", ownerID: ownerBroken, patterns: []string{model},
+		expr: `{"prompt": notAThing + }`,
+	})
+
+	logs := captureLogs(t)
+
+	got, err := NewOffers(db, "Asia/Shanghai", nil).Prices(ctx, at, []Candidate{
+		{Model: model, ChannelID: channelBroken, OwnerUserID: ownerBroken},
+		{Model: model, ChannelID: channelOK, OwnerUserID: ownerOK},
+	})
+	if err != nil {
+		t.Fatalf("一条规则取价失败就让整次取价失败: %v", err)
+	}
+	if len(got) != 1 || got[0].ChannelID != channelOK {
+		t.Fatalf("报价 = %+v，期望只有渠道 %d 那一条", got, channelOK)
+	}
+	if want := money.MustParse("0.00200000"); got[0].Price != want {
+		t.Errorf("正常渠道的报价 = %s，期望 %s", got[0].Price, want)
+	}
+
+	logged := logs.String()
+	if !strings.Contains(logged, "rule_id="+strconv.FormatInt(brokenID, 10)) {
+		t.Errorf("日志里没有规则 id %d：%s", brokenID, logged)
+	}
+	if !strings.Contains(logged, "规则取价失败") {
+		t.Errorf("日志里没有取价失败的说明：%s", logged)
+	}
+	// 表达式全文可能很长，日志只该留错误的第一行。
+	if strings.Contains(logged, "notAThing") {
+		t.Errorf("日志里带上了表达式全文：%s", logged)
+	}
+}
+
+// 全部候选都取价失败时返回空结果而不是错误：清单仍然列得出来，只是不带
+// offers（见 internal/api 的 TestModelsOffersOmittedWhenAllRulesBroken）。
+//
+// 同一条规则命中多个候选只记一条日志：一条兜底规则写坏时，逐候选记会把
+// 同一件事刷几十遍。
+func TestOffersBrokenRulesYieldEmptyResult(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	ownerA := seedUser(t, db)
+	ownerB := seedUser(t, db)
+	channelA1 := seedChannel(t, db, ownerA)
+	channelA2 := seedChannel(t, db, ownerA)
+	channelB := seedChannel(t, db, ownerB)
+	model := unique("offers-all-broken")
+	at := time.Now().UTC().Add(time.Minute)
+
+	ruleA := insertRule(t, ctx, db, ruleSpec{
+		scope: "merchant", ownerID: ownerA, patterns: []string{model},
+		expr: `{"prompt": notAThing + }`,
+	})
+	ruleB := insertRule(t, ctx, db, ruleSpec{
+		scope: "merchant", ownerID: ownerB, patterns: []string{model},
+		expr: `{"prompt": "x" + }`,
+	})
+
+	logs := captureLogs(t)
+
+	got, err := NewOffers(db, "Asia/Shanghai", nil).Prices(ctx, at, []Candidate{
+		{Model: model, ChannelID: channelA1, OwnerUserID: ownerA},
+		{Model: model, ChannelID: channelA2, OwnerUserID: ownerA},
+		{Model: model, ChannelID: channelB, OwnerUserID: ownerB},
+	})
+	if err != nil {
+		t.Fatalf("全部候选都取价失败时返回了错误: %v", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Errorf("报价 = %+v，期望非 nil 的空切片", got)
+	}
+
+	logged := logs.String()
+	if n := strings.Count(logged, "规则取价失败"); n != 2 {
+		t.Errorf("日志条数 = %d，期望 2（每条坏规则一条，命中它的候选不重复记）：%s", n, logged)
+	}
+	for _, id := range []int64{ruleA, ruleB} {
+		if !strings.Contains(logged, "rule_id="+strconv.FormatInt(id, 10)) {
+			t.Errorf("日志里没有规则 id %d：%s", id, logged)
+		}
+	}
+	if strings.Contains(logged, "notAThing") {
+		t.Errorf("日志里带上了表达式全文：%s", logged)
+	}
+}
+
+// captureLogs 把这条用例期间打的日志收进缓冲区。
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(observe.NewLoggerWithWriter(&buf, "debug", "text", false))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }

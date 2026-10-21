@@ -5,7 +5,8 @@ describe('控制台视图', () => {
   it('角色决定拥有哪些视图', () => {
     expect(viewsFor('user')).toEqual(['user'])
     expect(viewsFor('merchant')).toEqual(['user', 'merchant'])
-    expect(viewsFor('admin')).toEqual(['user', 'merchant', 'admin'])
+    // 管理员没有商家视图：商家页列的是「调用者名下」的资源，管理员没有这层归属。
+    expect(viewsFor('admin')).toEqual(['user', 'admin'])
     // 旧响应没有 role 字段时按 user 处理。
     expect(viewsFor(undefined)).toEqual(['user'])
   })

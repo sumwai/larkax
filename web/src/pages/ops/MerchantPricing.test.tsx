@@ -38,8 +38,8 @@ const RULE = {
   owner_user_id: 1,
   channel_id: 0,
   name: 'own-price',
-  model_patterns: ['claude-*'],
-  expr: 'input_tokens * 0.003',
+  model_patterns: ['claude-sonnet-4-5'],
+  expr: '{"prompt": 0.000003}',
   priority: 0,
   effective_from: '2026-01-01T00:00:00Z',
   effective_to: null,
@@ -68,11 +68,9 @@ async function fillAndSubmit(name: string) {
   const form = screen.getByRole('dialog', { name: '新建规则' })
   fireEvent.change(within(form).getByLabelText('名称'), { target: { value: name } })
   fireEvent.change(within(form).getByLabelText('模型匹配式（每行一个）'), {
-    target: { value: 'claude-*' },
+    target: { value: 'claude-sonnet-4-5' },
   })
-  fireEvent.change(within(form).getByLabelText('表达式'), {
-    target: { value: 'input_tokens * 0.003' },
-  })
+  fireEvent.change(within(form).getByLabelText('输入'), { target: { value: '3' } })
   fireEvent.submit(document.getElementById('merchant-rule-form') as HTMLFormElement)
   return form
 }
@@ -105,8 +103,8 @@ describe('商家计价页', () => {
     await waitFor(() =>
       expect(mocks.createRule).toHaveBeenCalledWith({
         name: 'own-price',
-        model_patterns: ['claude-*'],
-        expr: 'input_tokens * 0.003',
+        model_patterns: ['claude-sonnet-4-5'],
+        expr: '{"prompt": 0.000003}',
         priority: 0,
         enabled: true,
       }),
@@ -121,9 +119,7 @@ describe('商家计价页', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: '编辑' }))
     const form = screen.getByRole('dialog', { name: '编辑规则' })
-    fireEvent.change(within(form).getByLabelText('表达式'), {
-      target: { value: 'input_tokens * 0.004' },
-    })
+    fireEvent.change(within(form).getByLabelText('输入'), { target: { value: '4' } })
     fireEvent.submit(document.getElementById('merchant-rule-form') as HTMLFormElement)
 
     const confirm = screen.getByRole('dialog', { name: '确认保存' })
@@ -134,14 +130,59 @@ describe('商家计价页', () => {
     expect(id).toBe(11)
     expect(payload).toEqual({
       name: 'own-price',
-      model_patterns: ['claude-*'],
-      expr: 'input_tokens * 0.004',
+      model_patterns: ['claude-sonnet-4-5'],
+      expr: '{"prompt": 0.000004}',
       priority: 0,
       enabled: true,
     })
     expect(payload).not.toHaveProperty('scope')
     expect(payload).not.toHaveProperty('owner_user_id')
     expect(payload).not.toHaveProperty('channel_id')
+  })
+
+  it('五行填满后，提交的 expr 是拼好的 JSON 串', async () => {
+    mocks.createRule.mockResolvedValue(12)
+    renderPricing()
+
+    const [first] = await screen.findAllByRole('button', { name: '新建规则' })
+    fireEvent.click(first)
+    const form = screen.getByRole('dialog', { name: '新建规则' })
+    fireEvent.change(within(form).getByLabelText('名称'), { target: { value: 'five-rows' } })
+    fireEvent.change(within(form).getByLabelText('模型匹配式（每行一个）'), {
+      target: { value: 'claude-sonnet-4-5' },
+    })
+    for (const [label, value] of Object.entries({
+      输入: '3.5',
+      输出: '15',
+      缓存读: '1.5',
+      缓存写: '1.5',
+      推理: '6',
+    })) {
+      fireEvent.change(within(form).getByLabelText(label), { target: { value } })
+    }
+    fireEvent.submit(document.getElementById('merchant-rule-form') as HTMLFormElement)
+
+    const confirm = screen.getByRole('dialog', { name: '确认创建' })
+    fireEvent.click(within(confirm).getByRole('button', { name: '创建' }))
+
+    await waitFor(() =>
+      expect(mocks.createRule).toHaveBeenCalledWith({
+        name: 'five-rows',
+        model_patterns: ['claude-sonnet-4-5'],
+        expr: '{"prompt": 0.0000035, "completion": 0.000015, "cache_read": 0.0000015, "cache_write": 0.0000015, "reasoning": 0.000006}',
+        priority: 0,
+        enabled: true,
+      }),
+    )
+  })
+
+  it('存量表达式的编译错误在商家页也显示出来', async () => {
+    mocks.listRules.mockResolvedValue([
+      { ...RULE, expr: '{"promt": 0.000003}', expr_error: '编译失败：未知的键 promt' },
+    ])
+    renderPricing()
+
+    expect(await screen.findByText('编译失败：未知的键 promt')).toBeInTheDocument()
   })
 
   it('改别人的或平台的规则拿 404 时，页面给中文说明', async () => {
@@ -151,7 +192,7 @@ describe('商家计价页', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: '编辑' }))
     const form = screen.getByRole('dialog', { name: '编辑规则' })
-    fireEvent.change(within(form).getByLabelText('表达式'), { target: { value: 'x * 1' } })
+    fireEvent.change(within(form).getByLabelText('输入'), { target: { value: '4' } })
     fireEvent.submit(document.getElementById('merchant-rule-form') as HTMLFormElement)
     const confirm = screen.getByRole('dialog', { name: '确认保存' })
     fireEvent.click(within(confirm).getByRole('button', { name: '保存' }))

@@ -67,11 +67,12 @@ describe('AppShell 视图切换', () => {
     expect(screen.queryByRole('button', { name: '管理' })).not.toBeInTheDocument()
   })
 
-  it('admin 三个视图都有，运营导航四组齐全', async () => {
+  it('admin 只有用户与管理，运营导航四组齐全', async () => {
     await renderShell('admin', '/app/admin/channels')
-    for (const label of ['用户', '商家', '管理']) {
+    for (const label of ['用户', '管理']) {
       expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
     }
+    expect(screen.queryByRole('button', { name: '商家' })).not.toBeInTheDocument()
     for (const label of ['渠道', '模型目录', '别名', '计价']) {
       expect(screen.getAllByRole('link', { name: label }).length).toBeGreaterThan(0)
     }
