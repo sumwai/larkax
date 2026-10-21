@@ -26,8 +26,9 @@
 //
 // # 这一层做什么、不做什么
 //
-// 做：额度包与订阅的增删查、发放、作废。**不做**请求路径上的选源与扣费，
-// 也不做售卖、周期续费与结转。本包不改计价规则。
+// 做：额度包与订阅的增删查、发放、作废；一把 key 能用哪些订阅（`api_key_plans`，
+// 空集合 = 全部）；一个用户的有效扣费顺序（用户覆盖或平台默认）。**不做**请求
+// 路径上的选源与扣费，也不做售卖、周期续费与结转。本包不改计价规则。
 //
 // # 幂等
 //
@@ -41,6 +42,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -59,10 +61,13 @@ import (
 type Service struct {
 	db     *sql.DB
 	ledger *store.Store
+	// log 是读侧回落时的日志出口（库里出现认不出的取值）。为 nil 时用
+	// slog.Default()，测试可以换成一个收得到的句柄。
+	log *slog.Logger
 }
 
 // New 构造一个额度包服务。
-func New(db *sql.DB) *Service { return &Service{db: db, ledger: store.New(db)} }
+func New(db *sql.DB) *Service { return &Service{db: db, ledger: store.New(db), log: slog.Default()} }
 
 // PlanUnit 是额度包的计量单位，取值与 `plans.unit` 的 CHECK 约束一致。
 type PlanUnit string
@@ -356,6 +361,44 @@ func normalizeModels(models []string) ([]string, error) {
 		out = append(out, m)
 	}
 	sort.Strings(out)
+	return out, nil
+}
+
+// Plans 读全部额度包（含禁用的），按 key 升序，每个包带上模型范围。
+//
+// 不过滤 enabled：与 UserPlans 同一条理由——运营要能同时看到停用的那些，
+// 也才能把 key 重新启用。
+func (s *Service) Plans(ctx context.Context) ([]Plan, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+planColumns+` FROM plans ORDER BY key`)
+	if err != nil {
+		return nil, fmt.Errorf("读额度包清单失败: %w", err)
+	}
+
+	var out []Plan
+	for rows.Next() {
+		p, err := scanPlan(rows.Scan)
+		if err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("读额度包清单失败: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("遍历额度包清单失败: %w", err)
+	}
+	_ = rows.Close()
+
+	// 模型范围在 rows 关掉之后逐个读：与上面共用一个连接池时，边遍历边发
+	// 查询会把池子里的连接借到耗尽，而这一条命令没有并发压力，逐个读更稳。
+	for i := range out {
+		models, err := planModelsIn(ctx, s.db, out[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		out[i].Models = models
+	}
 	return out, nil
 }
 

@@ -173,6 +173,7 @@ var commandGroups = []commandGroup{
 			{name: "user", summary: "系统用户管理（创建、查询、修改与销户）", help: userHelp, run: runUser},
 			{name: "apikey", summary: "API Key 访问密钥、状态与额度管理", help: apiKeyHelp, run: runAPIKey},
 			{name: "wallet", summary: "用户钱包账户与入账管理", help: walletHelp, run: runWallet},
+			{name: "plan", summary: "额度包、订阅与扣费顺序管理", help: planHelp, run: runPlan},
 			{name: "usage", summary: "用量与计费的只读清单（用量事件、计费请求）", help: usageHelp, run: runUsage},
 			{name: "ledger", summary: "财务账本管理（余额查询、分录校验、对账、对账历史）", help: ledgerHelp, run: runLedger},
 		},
@@ -286,7 +287,6 @@ const usageNotes = `
 
 短选项：-u --user、-m --model、-o --format、-v --verbose、-q --quiet、-V --version（其余写全名）
 退出码：0 成功，1 其他失败，2 命令行参数错，3 连不上数据库，4 约束冲突。
-
 每条命令的详细用法：larkaxctl help <命令>。
 全局约定、.env 查找规则与退出码边界见 docs/cli-reference.md。
 机器可读输出（--format json）的契约见 docs/cli-output.md。

@@ -75,6 +75,8 @@ var tableRenderPaths = []string{
 	"printModelList",
 	"printPayment",       // wallet payment 的回显：一栏一行，与 wallet payout 同一个形状
 	"printPayout",        // wallet payout 的回显：一栏一行，与 wallet adjust 同一个形状
+	"printPlanDetail",    // plan get
+	"printPlanList",      // plan list
 	"printPluginDetail",  // plugin get
 	"printPluginKVEntry", // plugin kv get
 	"printPluginList",
@@ -85,6 +87,7 @@ var tableRenderPaths = []string{
 	"printUsageRequests",     // usage requests
 	"printUserDetail",        // user get
 	"printUserList",          // user list
+	"printUserPlans",         // plan subscriptions 与 plan key show
 	"printUserUpdate",        // user update 的改动回显：一栏一行，与 get 那一片同一个形状
 	"printWalletList",        // wallet list
 }
@@ -105,9 +108,11 @@ var emptyListPaths = []string{
 	"printCostList",
 	"printKeyList",
 	"printModelList",
+	"printPlanList",
 	"printPluginList",
 	"printRuleList",
 	"printUserList",   // user list
+	"printUserPlans",  // plan subscriptions 与 plan key show
 	"printWalletList", // wallet list
 }
 

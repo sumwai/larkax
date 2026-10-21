@@ -6,7 +6,7 @@
 [.env.example](../.env.example) 顶部的说明。密钥类配置也不放这里——这张表的值
 明文落盘并进备份，渠道凭证走 `channels` 表的信封加密。
 
-一共 **23 个键**。清单的唯一来源是 `internal/settings` 的 `Registry`，默认值的
+一共 **24 个键**。清单的唯一来源是 `internal/settings` 的 `Registry`，默认值的
 唯一来源是**迁移文件**（代码里不再写第二份，两处默认值迟早会不一致）。
 
 ## 加载：不一致就拒绝启动
@@ -106,6 +106,14 @@ larkaxctl settings set --key plugin.enabled --value true --by alice
 | 键 | 类型 | 默认值 | 取值 | 影响 |
 |---|---|---|---|---|
 | `payment.fake_enabled` | bool | `false` | `true` / `false` | 假支付通道的开关。打开后才挂上回调入口、才允许 `wallet payment` 下单。它只用于本地联调：签名密钥是源码里的公开占位值，**不要在接真实流量的部署上打开**。改完要重启才生效——装配期读一次 |
+
+## 额度包
+
+见 [cli-reference.md](cli-reference.md) 的「plan」一节。
+
+| 键 | 类型 | 默认值 | 取值 | 影响 |
+|---|---|---|---|---|
+| `plans.charge_order` | string | `"plan_first"` | `plan_first` / `balance_first` / `balance_only` | 平台默认的扣费顺序：先额度包后余额、先余额后额度包、只走余额。用户可以用 `larkaxctl plan order set` 覆盖，用户上那一行是 NULL 时跟随这里，用户那一行认不出时也回落到这里。这一行本身缺失、不是 JSON 或取值认不出时，读侧才回落到兜底值 `plan_first`；两种回落都记一条日志 |
 
 ## 插件
 
