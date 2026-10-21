@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
 
@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   session: vi.fn(),
   listChannels: vi.fn(),
   listModels: vi.fn(),
+  models: vi.fn(),
   meta: vi.fn(),
 }))
 
@@ -21,6 +22,7 @@ vi.mock('./api', async (importOriginal) => {
     api: {
       admin: ops,
       merchant: ops,
+      models: mocks.models,
       meta: mocks.meta,
       session: mocks.session,
       setCsrfToken: vi.fn(),
@@ -58,6 +60,7 @@ describe('运营视图的角色门槛', () => {
     Object.values(mocks).forEach((mock) => mock.mockReset())
     mocks.listChannels.mockResolvedValue([])
     mocks.listModels.mockResolvedValue([])
+    mocks.models.mockResolvedValue([])
     mocks.meta.mockResolvedValue({
       site_name: 'larkax',
       api_base_url: 'https://api.example.com/v1',
@@ -87,6 +90,33 @@ describe('运营视图的角色门槛', () => {
   it('/app/merchant 落到渠道页', async () => {
     await open('merchant', '/app/merchant')
     expect(await screen.findByText('还没有渠道')).toBeInTheDocument()
+  })
+
+  /**
+   * 侧栏里第一个「设置」入口。
+   *
+   * 用户卡和右上角头像也用同一个名字，并且排在同一份 DOM 的后面。
+   */
+  function sidebarSettings() {
+    return screen.getAllByRole('link', { name: '设置' })[0]
+  }
+
+  it.each([
+    ['user', '/app/models', '/app/settings'],
+    ['merchant', '/app/merchant/channels', '/app/merchant/settings'],
+    ['admin', '/app/admin/channels', '/app/admin/settings'],
+  ] as const)('%s 点设置后停在原视图', async (role, home, expected) => {
+    await open(role, home)
+    fireEvent.click(sidebarSettings())
+
+    expect(await screen.findByRole('heading', { name: '设置' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe(expected)
+    if (role === 'user') {
+      expect(document.querySelector('.view-switch')).toBeNull()
+      return
+    }
+    const label = role === 'merchant' ? '商家' : '管理'
+    expect(screen.getByRole('button', { name: label })).toHaveAttribute('aria-pressed', 'true')
   })
 
   it('无权限页留一个回到概览的出口', async () => {

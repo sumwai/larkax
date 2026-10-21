@@ -22,6 +22,18 @@ export function viewOfPath(pathname: string): View {
   return 'user'
 }
 
+/**
+ * 设置页在各自视图里的落点。
+ *
+ * 设置本身是账号级的，三处渲染同一页；分成不同地址是为了让「在看哪个视图」
+ * 仍然由地址栏决定——否则从运营视图点进设置，页面会被判成用户视图。
+ */
+export function settingsOf(view: View): string {
+  if (view === 'admin') return '/app/admin/settings'
+  if (view === 'merchant') return '/app/merchant/settings'
+  return '/app/settings'
+}
+
 export function homeOf(view: View): string {
   if (view === 'admin') return '/app/admin/channels'
   if (view === 'merchant') return '/app/merchant/channels'
