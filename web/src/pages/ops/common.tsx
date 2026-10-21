@@ -149,10 +149,28 @@ export function useConfirm() {
   return { request, dialog, pending }
 }
 
+export type ConfirmHandle = ReturnType<typeof useConfirm>
+
+/** 列表的搜索框：只过滤已经取回来的那一页，不发请求。 */
+export function SearchBox({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const { t } = useI18n()
+  return (
+    <input
+      className="input"
+      type="search"
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      placeholder={t('ops.search')}
+      aria-label={t('ops.search')}
+      style={{ maxWidth: 280, marginBottom: 12 }}
+    />
+  )
+}
+
 /** 页面级的加载/空态/错误态判据，放在一处避免各页写得不一样。 */
 export function OpsLoadError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
   const { t } = useI18n()
-  // 越权与「不是你的」都属于 4xx：正文是服务端那句话，原样显示。
+  // 越权与「不是你的」由 describeError 换成本地文案；其余 4xx 仍原样显示。
   const { message } = describeError(error, t, 'ops.loadFailed')
   return (
     <Alert tone="bad" title={message}>

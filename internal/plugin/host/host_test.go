@@ -1491,7 +1491,7 @@ func TestLogDepthLimitIsInclusive(t *testing.T) {
 	}
 }
 
-// TestJSStringsAreValidUTF8 是「退到 rune 边界」那两条等价判断的前提，不是实现的一部分。
+// TestJSStringsAreValidUTF8 钉住的是引擎换码这一条前提，不是实现的一部分。
 //
 // truncateMessage 与 boundedString 的循环把 `cut > 0` 判成 `cut >= 0` 之后，
 // 唯一多出来的一格是「cut 已经退到 0 时再读一次 s[0]」：s[0] 在任何合法 UTF-8 里
@@ -1500,42 +1500,67 @@ func TestLogDepthLimitIsInclusive(t *testing.T) {
 // 代理项换成 U+FFFD（引擎 string.go 的 utf16ToGoString），所以拿不到非法的字节串。
 // 回程同理：KV 的值在宿主侧是 Go 字符串，进引擎走 FromGoString，非法字节在那里
 // 同样被换成 U+FFFD（引擎 string.go 的 appendUTF16）。
-// 这条用例钉住这两个方向的换码：哪天任一侧改成原样保留 WTF-8，
-// log.go:115 与 log.go:229 的等价论证就不再成立，要回头重判。
+//
+// 那两处守卫现在由直接用例钉着（见 TestTruncationStopsAtZeroForInvalidUTF8）；
+// 这条用例仍然值得留着：合法 UTF-8 是截断结果可读的前提，哪天任一侧改成原样
+// 保留 WTF-8，截断出来的字节会在终端里变成另一串东西。
 func TestJSStringsAreValidUTF8(t *testing.T) {
 	// 去程：落单的高位代理项在 UTF-16 里合法，UTF-8 里没有对应物。
 	s := jsEval(t, `String.fromCharCode(0xD800) + "a".repeat(5000)`).String()
 	if !utf8.ValidString(s) {
-		t.Fatalf("JS 字符串翻成 Go 之后不是合法 UTF-8（log.go:115 / log.go:229 的等价论证失效）: %q", s[:8])
+		t.Fatalf("JS 字符串翻成 Go 之后不是合法 UTF-8: %q", s[:8])
 	}
 	if !strings.HasPrefix(s, "\uFFFD") {
-		t.Errorf("落单的代理项没有换成 U+FFFD（log.go:115 / log.go:229 的等价论证失效）: %q", s[:8])
+		t.Errorf("落单的代理项没有换成 U+FFFD: %q", s[:8])
 	}
 
 	// 回程：含非法字节的 Go 字符串送进引擎再取回。
 	const bad = "\xffa\xfe"
 	if got := moejs.String(bad).String(); !utf8.ValidString(got) || !strings.HasPrefix(got, "\uFFFD") {
-		t.Errorf("非法字节进引擎再取回没有被换成 U+FFFD（log.go:115 / log.go:229 的等价论证失效）: %q", got)
+		t.Errorf("非法字节进引擎再取回没有被换成 U+FFFD: %q", got)
 	}
 }
 
-// 判为**等价**、不补用例的四条，前提写在这里备查：
+// 判为**等价**、不补用例的一条，前提写在这里备查：
 //
-//  1. log.go:115:10 与 log.go:229:10：`cut > 0` → `cut >= 0`。
-//     两处循环只在 s 非空时进入：truncateMessage 的入口是 len(s) > 4096；
-//     boundedString 的截断支只有值长于 1024 时才带着非零预算走到循环
-//     （值不长时第一次 spend 失败会把剩余预算清零，limit 变成 0，在循环之前就返回）。
-//     而 s 是合法 UTF-8（见 TestJSStringsAreValidUTF8），s[0] 一定是 rune 起点：
-//     cut 退到 0 时多查的那一格恒为假，两个版本在同一位置退出，输出一致。
+// log.go:259:58：容量提示里的 `fieldTotalMaxBytes/scalarCost` 改成 `*`。
+// make([]any, 0, min(len(keys), …)) 的容量不参与内容，也不参与任何失败判断：
+// `*` 只是把预分配的上界从 1024 变成 65536，仍被 len(keys) 压着、
+// 与插件的规模无关。要观察它只能看分配量（一个百万元素的数组差约 1 MiB，
+// 仍远小于「按插件规模预分配」那一档）。输出由 TestLogBoundsArrayFieldValues 钉着。
+
+// TestTruncationStopsAtZeroForInvalidUTF8 钉住两处「退到 rune 边界」循环在
+// cut=0 处停下。
 //
-//  2. log.go:124:9：`!ok || len(fields) == 0` → `!ok && len(fields) == 0`。
-//     两版只在「转得出来、但对象是空的」这一格不同：一版返回 nil，一版返回空切片。
-//     fieldAttrs 只有做日志时那一个调用点（log.go:81），它把结果直接展开 append 到
-//     attrs 上——追加零个元素对 nil 与空切片是同一件事，日志输出一样；
-//     另一半（!ok）两版都返回 nil，函数注释里的契约不变。
+// 两版只在「cut 已经是 0 时再查一次 s[0]」这一格分得开；这一格只有 s 以续
+// 字节开头（非法 UTF-8）时才走到。截断的输入来自插件的 JS 字符串，引擎会把
+// 非法字节换成 U+FFFD（见 TestJSStringsAreValidUTF8），所以今天走不到——这里
+// 直接喂非法字节，钉的是循环自己的边界：哪天换码那一层变了，守卫还在。
+func TestTruncationStopsAtZeroForInvalidUTF8(t *testing.T) {
+	// 全是续字节，切点会一路退到 0：循环多走一步就会切出负下标。
+	invalid := strings.Repeat("\x80", logMessageMaxBytes+16)
+	if got := truncateMessage(invalid); got != truncatedMark {
+		t.Errorf("truncateMessage = %q，期望只剩截断标记", got)
+	}
+
+	b := fieldBudget{left: len(truncatedMark) + 2}
+	got, ok := boundedString(strings.Repeat("\x80", 2*fieldValueMaxBytes), &b)
+	if !ok {
+		t.Fatal("截断支应当返回一个值")
+	}
+	if got != truncatedMark {
+		t.Errorf("boundedString = %q，期望只剩截断标记", got)
+	}
+}
+
+// TestFieldAttrsReturnsNilForEmptyObject 钉住空对象返回 nil，而不是空切片。
 //
-//  3. log.go:259:58：容量提示里的 `fieldTotalMaxBytes/scalarCost` 改成 `*`。
-//     make([]any, 0, min(len(keys), …)) 的容量不参与内容，也不参与任何失败判断：
-//     `*` 只是把预分配的上界从 1024 变成 65536，仍被 len(keys) 压着、
-//     与插件的规模无关。要观察它只能看分配量（一个百万元素的数组差约 1 MiB，
-//     仍远小于「按插件规模预分配」那一档）。输出由 TestLogBoundsArrayFieldValues 钉着。
+// 函数注释里的契约是「转不出来就返回 nil」；两版只在「转得出来、但对象是
+// 空的」这一格不同。日志行在两种情况下一样（调用点只是把结果 append 上去），
+// 但返回值是函数自己的承诺，不该靠调用点碰巧抹平。
+func TestFieldAttrsReturnsNilForEmptyObject(t *testing.T) {
+	args := js("info", "m", jsJSON(t, "{}"))
+	if got := fieldAttrs(args, 2); got != nil {
+		t.Errorf("空对象应返回 nil，实际 %#v", got)
+	}
+}

@@ -143,6 +143,10 @@ const MODELS: Model[] = [
       cache_read_per_mtok: '0.30000000',
       cache_write_per_mtok: '3.75000000',
     },
+    offers: [
+      { merchant: 'acme', price: '0.00350000' },
+      { merchant: null, price: '0.00400000' },
+    ],
   },
   {
     name: 'claude-opus-4-1',
@@ -173,6 +177,7 @@ const MODELS: Model[] = [
       cache_read_per_mtok: '0.50000000',
       cache_write_per_mtok: null,
     },
+    offers: [{ merchant: null, price: '0.00200000' }],
   },
   {
     name: 'gpt-4.1-mini',

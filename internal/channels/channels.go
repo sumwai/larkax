@@ -150,6 +150,56 @@ func (s *Source) SuppliedModels(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
+// Supply 是一条供给：某个规范模型在某条渠道上，以及这条渠道归谁。
+//
+// 与 SuppliedModels 的区别是它**带渠道**：报价要回答「谁在供这个模型」，
+// 而「谁」是渠道的 owner，不是模型目录的属性。判据仍然是 suppliesModel
+// 那一条，两个读点不会出现「清单里有、报价里没有」。
+type Supply struct {
+	Model     string
+	ChannelID int64
+	// OwnerUserID 是渠道所属商家。0 表示平台自营（库里的 NULL）。
+	OwnerUserID int64
+	// Merchant 是归属用户的用户名；平台自营时为空串。
+	//
+	// 它只用于展示（报价里的 `merchant` 字段）。账号名不参与任何判定：
+	// 归属判据始终是 OwnerUserID，改用户名不该改变谁看到哪个价。
+	Merchant string
+}
+
+// Supplies 返回全部「模型 × 在供渠道 × 归属」的行。
+//
+// 一次查询取回整张供给表，而不是按模型逐个问：/v1/models 一次要列全部
+// 模型，逐个问会把「目录里有几个模型」变成几倍的数据库往返。
+//
+// 它只判供给，不判健康与额度——与 SuppliedModels 同一条判据（suppliesModel）
+// 与同一条理由：报价不该因为一个渠道今天不舒服而消失。
+func (s *Source) Supplies(ctx context.Context) ([]Supply, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT m.canonical_name, c.id, COALESCE(c.owner_user_id, 0), COALESCE(u.username, '')
+		  FROM model_catalog m
+		  JOIN channels c ON `+suppliesModel("m.canonical_name")+`
+		  LEFT JOIN users u ON u.id = c.owner_user_id
+		 ORDER BY m.canonical_name, c.id`)
+	if err != nil {
+		return nil, fmt.Errorf("查询在供渠道失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := []Supply{}
+	for rows.Next() {
+		var supply Supply
+		if err := rows.Scan(&supply.Model, &supply.ChannelID, &supply.OwnerUserID, &supply.Merchant); err != nil {
+			return nil, fmt.Errorf("读在供渠道失败: %w", err)
+		}
+		out = append(out, supply)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历在供渠道失败: %w", err)
+	}
+	return out, nil
+}
+
 // Candidates 返回某个规范模型名下的全部可用渠道。
 //
 // 过滤条件是 `status = 'enabled'` 且 `models` 数组包含该规范名。

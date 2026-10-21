@@ -6,27 +6,79 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"slices"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/catalog"
+	"github.com/sumwai/larkax/internal/channels"
+	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/pricing"
 )
 
 // fakeSupply 是公共模型清单的供给来源。
 //
-// 真实现是 channels.Source.SuppliedModels，那条查询要真库才能跑；这里只
-// 回答「哪些名字可用」，所以入口那一层的判据（谁该出现、谁不该）可以脱离
-// 数据库钉住。供给判据本身由 internal/channels 的集成用例钉着。
+// 真实现是 channels.Source.Supplies，那条查询要真库才能跑；这里只回答
+// 「哪些模型在哪条渠道上、归谁」，所以入口那一层的判据（谁该出现、谁不该）
+// 可以脱离数据库钉住。供给判据本身由 internal/channels 的集成用例钉着。
 type fakeSupply struct {
-	names []string
-	err   error
-	calls int
+	supplies []channels.Supply
+	err      error
+	calls    int
 }
 
-func (f *fakeSupply) SuppliedModels(context.Context) ([]string, error) {
+func (f *fakeSupply) Supplies(context.Context) ([]channels.Supply, error) {
 	f.calls++
-	return f.names, f.err
+	return f.supplies, f.err
+}
+
+// suppliesOf 给每个模型造一条平台自营渠道，供大多数不关心归属的用例用。
+func suppliesOf(names ...string) []channels.Supply {
+	out := make([]channels.Supply, 0, len(names))
+	for i, name := range names {
+		out = append(out, channels.Supply{Model: name, ChannelID: int64(i + 1)})
+	}
+	return out
+}
+
+// fakeOffers 是报价来源的替身。
+//
+// base 是默认价；byOwner 按归属覆盖（用来造「两个商家不同价」）；skip 里的
+// 模型一律不报价（用来钉「无价的模型照样列、只是不带 offers」）。
+type fakeOffers struct {
+	base    money.Amount
+	byOwner map[int64]money.Amount
+	skip    map[string]bool
+	err     error
+	calls   int
+	seen    []pricing.Candidate
+}
+
+func (f *fakeOffers) Prices(_ context.Context, _ time.Time, candidates []pricing.Candidate) ([]pricing.CandidatePrice, error) {
+	f.calls++
+	f.seen = candidates
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := []pricing.CandidatePrice{}
+	for _, candidate := range candidates {
+		if f.skip[candidate.Model] {
+			continue
+		}
+		price := f.base
+		if override, ok := f.byOwner[candidate.OwnerUserID]; ok {
+			price = override
+		}
+		out = append(out, pricing.CandidatePrice{
+			Model:       candidate.Model,
+			ChannelID:   candidate.ChannelID,
+			OwnerUserID: candidate.OwnerUserID,
+			Merchant:    candidate.Merchant,
+			Price:       price,
+		})
+	}
+	return out, nil
 }
 
 // fakeModelCatalog 是目录那一侧的读点，只提供 vendor 与规范名。
@@ -41,11 +93,12 @@ func (f *fakeModelCatalog) Models(context.Context) ([]catalog.Model, error) {
 	return f.models, f.err
 }
 
-// newModelsHandler 装一个带齐两份读点的 handler。
+// newModelsHandler 装一个带齐三份读点的 handler。
 func newModelsHandler(supply *fakeSupply, cat *fakeModelCatalog) (*Handler, *fakeAuth) {
 	h, authStub, _ := newTestHandler()
 	h.Models = supply
 	h.Catalog = cat
+	h.Offers = &fakeOffers{base: money.MustParse("0.00350000")}
 	return h, authStub
 }
 
@@ -68,7 +121,7 @@ type modelsBody struct {
 // 目录里有的没在供的（gamma）不能出现：列出来调用方一用就是失败，比不列
 // 更糟。owned_by 取 vendor，没填时回 larkax；created 固定 0。
 func TestModelsListOnlyListsSuppliedModels(t *testing.T) {
-	supply := &fakeSupply{names: []string{"alpha", "beta"}}
+	supply := &fakeSupply{supplies: suppliesOf("alpha", "beta")}
 	cat := &fakeModelCatalog{models: []catalog.Model{
 		{CanonicalName: "alpha", Vendor: "acme"},
 		{CanonicalName: "beta"},
@@ -92,12 +145,13 @@ func TestModelsListOnlyListsSuppliedModels(t *testing.T) {
 	if body.Object != "list" {
 		t.Errorf("object = %q，期望 list", body.Object)
 	}
+	platformOffer := []offerJSON{{Price: "0.00350000"}}
 	want := []modelJSON{
-		{ID: "alpha", Object: "model", Created: 0, OwnedBy: "acme"},
+		{ID: "alpha", Object: "model", Created: 0, OwnedBy: "acme", Offers: platformOffer},
 		// 目录里 vendor 是空串：回 larkax，而不是一个空的 owned_by。
-		{ID: "beta", Object: "model", Created: 0, OwnedBy: "larkax"},
+		{ID: "beta", Object: "model", Created: 0, OwnedBy: "larkax", Offers: platformOffer},
 	}
-	if !slices.Equal(body.Data, want) {
+	if !reflect.DeepEqual(body.Data, want) {
 		t.Errorf("清单 = %+v，期望 %+v", body.Data, want)
 	}
 	for _, item := range body.Data {
@@ -157,7 +211,7 @@ func TestModelsRequiresValidCredentials(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			supply := &fakeSupply{names: []string{"alpha"}}
+			supply := &fakeSupply{supplies: suppliesOf("alpha")}
 			h, authStub := newModelsHandler(supply, &fakeModelCatalog{})
 			authStub.err = tc.err
 
@@ -209,7 +263,7 @@ func TestModelsRejectsNonGet(t *testing.T) {
 //
 // 空清单是一句「这把 key 一个模型都用不了」，而那时我们并不知道这件事。
 func TestModelsNotWiredReturnsNotImplemented(t *testing.T) {
-	full := &fakeSupply{names: []string{"alpha"}}
+	full := &fakeSupply{supplies: suppliesOf("alpha")}
 	cat := &fakeModelCatalog{models: []catalog.Model{{CanonicalName: "alpha"}}}
 
 	cases := []struct {
@@ -245,7 +299,7 @@ func TestModelsNotWiredReturnsNotImplemented(t *testing.T) {
 
 // 单条路径：可用的模型回一条完整对象，路径里带 "/" 的规范名也认得。
 func TestModelByIDReturnsAvailableModel(t *testing.T) {
-	supply := &fakeSupply{names: []string{"vendor/alpha", "beta"}}
+	supply := &fakeSupply{supplies: suppliesOf("vendor/alpha", "beta")}
 	cat := &fakeModelCatalog{models: []catalog.Model{
 		{CanonicalName: "vendor/alpha", Vendor: "acme"},
 		{CanonicalName: "beta"},
@@ -260,8 +314,9 @@ func TestModelByIDReturnsAvailableModel(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("响应不是 JSON: %v（%s）", err, rec.Body)
 	}
-	want := modelJSON{ID: "vendor/alpha", Object: "model", Created: 0, OwnedBy: "acme"}
-	if got != want {
+	want := modelJSON{ID: "vendor/alpha", Object: "model", Created: 0, OwnedBy: "acme",
+		Offers: []offerJSON{{Price: "0.00350000"}}}
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("响应 = %+v，期望 %+v", got, want)
 	}
 }
@@ -271,7 +326,7 @@ func TestModelByIDReturnsAvailableModel(t *testing.T) {
 // 三种「不可用」都要回同一个结果：目录里没有、目录里有但没有渠道在供、
 // 以及空的 id（`/v1/models/` 走的是未知路径那一支，回 501）。
 func TestModelByIDUnavailableReturnsNotFound(t *testing.T) {
-	supply := &fakeSupply{names: []string{"alpha"}}
+	supply := &fakeSupply{supplies: suppliesOf("alpha")}
 	cat := &fakeModelCatalog{models: []catalog.Model{
 		{CanonicalName: "alpha", Vendor: "acme"},
 		{CanonicalName: "beta", Vendor: "acme"},
@@ -311,7 +366,7 @@ func TestModelsReadFailureIsInternalError(t *testing.T) {
 		cat    *fakeModelCatalog
 	}{
 		{"供给读不出来", &fakeSupply{err: errors.New("连不上库")}, &fakeModelCatalog{}},
-		{"目录读不出来", &fakeSupply{names: []string{"alpha"}}, &fakeModelCatalog{err: errors.New("连不上库")}},
+		{"目录读不出来", &fakeSupply{supplies: suppliesOf("alpha")}, &fakeModelCatalog{err: errors.New("连不上库")}},
 	}
 
 	for _, tc := range cases {
@@ -329,7 +384,7 @@ func TestModelsReadFailureIsInternalError(t *testing.T) {
 
 // 只读路径不经过限流与额度：它们不产生用量，也不该消耗任何人的额度。
 func TestModelsDoNotTouchLimiterOrQuota(t *testing.T) {
-	h, _ := newModelsHandler(&fakeSupply{names: []string{"alpha"}}, &fakeModelCatalog{
+	h, _ := newModelsHandler(&fakeSupply{supplies: suppliesOf("alpha")}, &fakeModelCatalog{
 		models: []catalog.Model{{CanonicalName: "alpha"}},
 	})
 	limiter := &fakeLimiter{allowed: false}
@@ -384,7 +439,7 @@ func TestModelIDFromPath(t *testing.T) {
 // id），两条都该得到同一个故事：路径已经实现，没有这个模型。回 501 会说成
 // 「这个部署没接模型清单」，而那是另一件事。
 func TestModelsTrailingSlashIsNotFound(t *testing.T) {
-	h, _ := newModelsHandler(&fakeSupply{names: []string{"alpha"}}, &fakeModelCatalog{
+	h, _ := newModelsHandler(&fakeSupply{supplies: suppliesOf("alpha")}, &fakeModelCatalog{
 		models: []catalog.Model{{CanonicalName: "alpha"}},
 	})
 
@@ -417,5 +472,185 @@ func TestModelsCarryVersionHeader(t *testing.T) {
 	rec := get(h, PathModels)
 	if got := rec.Header().Get(HeaderVersion); got != "v0.1.0-test" {
 		t.Errorf("%s = %q", HeaderVersion, got)
+	}
+}
+
+// 同一个模型由两个商家供、价不同：offers 列出两条，按价格升序。
+//
+// 单位是每 1000 个输入 token（与 /v1/models 的约定一致）。归属来自渠道，
+// 不是模型目录：同一个模型在不同渠道上可以是不同商家的货。
+func TestModelsOffersListMerchantsByPrice(t *testing.T) {
+	supply := &fakeSupply{supplies: []channels.Supply{
+		{Model: "alpha", ChannelID: 1, OwnerUserID: 7, Merchant: "acme"},
+		{Model: "alpha", ChannelID: 2, OwnerUserID: 8, Merchant: "globex"},
+	}}
+	cat := &fakeModelCatalog{models: []catalog.Model{{CanonicalName: "alpha", Vendor: "acme"}}}
+	h, _ := newModelsHandler(supply, cat)
+	offers := &fakeOffers{
+		base:    money.MustParse("0.00400000"),
+		byOwner: map[int64]money.Amount{7: money.MustParse("0.00350000")},
+	}
+	h.Offers = offers
+
+	rec := get(h, PathModels)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
+	}
+	var body modelsBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if len(body.Data) != 1 {
+		t.Fatalf("清单项数 = %d，期望 1（响应 %s）", len(body.Data), rec.Body)
+	}
+	acme, globex := "acme", "globex"
+	want := []offerJSON{
+		{Merchant: &acme, Price: "0.00350000"},
+		{Merchant: &globex, Price: "0.00400000"},
+	}
+	if !reflect.DeepEqual(body.Data[0].Offers, want) {
+		t.Errorf("offers = %+v，期望 %+v", body.Data[0].Offers, want)
+	}
+
+	// 一次报价查询覆盖全部候选，而不是每个模型问一次。
+	if offers.calls != 1 {
+		t.Errorf("报价查询调用了 %d 次，期望 1 次", offers.calls)
+	}
+	if len(offers.seen) != 2 {
+		t.Errorf("报价候选数 = %d，期望 2（两个渠道各一条）", len(offers.seen))
+	}
+}
+
+// 平台自营与商家并存：平台那条 merchant 是 null，不是空串。
+func TestModelsOffersMarkPlatformAsNull(t *testing.T) {
+	supply := &fakeSupply{supplies: []channels.Supply{
+		{Model: "alpha", ChannelID: 1, OwnerUserID: 7, Merchant: "acme"},
+		{Model: "alpha", ChannelID: 2},
+	}}
+	cat := &fakeModelCatalog{models: []catalog.Model{{CanonicalName: "alpha"}}}
+	h, _ := newModelsHandler(supply, cat)
+	h.Offers = &fakeOffers{
+		base:    money.MustParse("0.00400000"),
+		byOwner: map[int64]money.Amount{7: money.MustParse("0.00350000")},
+	}
+
+	rec := get(h, PathModels)
+	var body modelsBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if len(body.Data) != 1 || len(body.Data[0].Offers) != 2 {
+		t.Fatalf("清单 = %s，期望一条模型、两条报价", rec.Body)
+	}
+	acme := "acme"
+	want := []offerJSON{
+		{Merchant: &acme, Price: "0.00350000"},
+		{Price: "0.00400000"},
+	}
+	if !reflect.DeepEqual(body.Data[0].Offers, want) {
+		t.Errorf("offers = %+v，期望 %+v", body.Data[0].Offers, want)
+	}
+
+	// JSON 里平台的 merchant 是字面量 null；omitempty 不能把它吞掉，
+	// 因为 null 与「字段缺失」对客户端是两种不同的形状。
+	var raw struct {
+		Data []struct {
+			Offers []map[string]json.RawMessage `json:"offers"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	last := raw.Data[0].Offers[1]
+	value, ok := last["merchant"]
+	if !ok || string(value) != "null" {
+		t.Errorf("平台报价的 merchant = %s（存在=%v），期望 null", value, ok)
+	}
+}
+
+// 有供给、却没有计价规则的模型仍然在清单里，只是不带 offers。
+//
+// 清单回答「能不能用」，offers 回答「谁在供、多少钱」。把无价实现成不列，
+// 等于把「这个模型没定价」说成「这个模型不可用」——它其实能调通，契约用例
+// openai_models 也正是用一条没有定价规则的渠道压在这一条上。
+func TestModelsKeepModelsWithoutOffers(t *testing.T) {
+	supply := &fakeSupply{supplies: suppliesOf("alpha", "beta")}
+	cat := &fakeModelCatalog{models: []catalog.Model{
+		{CanonicalName: "alpha"},
+		{CanonicalName: "beta"},
+	}}
+	h, _ := newModelsHandler(supply, cat)
+	h.Offers = &fakeOffers{
+		base: money.MustParse("0.00350000"),
+		skip: map[string]bool{"beta": true},
+	}
+
+	rec := get(h, PathModels)
+	var raw struct {
+		Data []struct {
+			ID     string          `json:"id"`
+			Offers json.RawMessage `json:"offers"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if len(raw.Data) != 2 || raw.Data[0].ID != "alpha" || raw.Data[1].ID != "beta" {
+		t.Fatalf("清单 = %s，期望 alpha 与 beta 都在", rec.Body)
+	}
+	if string(raw.Data[0].Offers) == "[]" || string(raw.Data[0].Offers) == "null" {
+		t.Errorf("alpha 的 offers = %s，期望一个有内容的数组", raw.Data[0].Offers)
+	}
+	// 省略而不是 `[]`：空数组会被读成「问了，但没有人报价」。
+	if offers := string(raw.Data[1].Offers); offers != "" {
+		t.Errorf("beta 的 offers = %s，期望整个字段省略", offers)
+	}
+
+	// 单条路径同样在、「有没有报价」同样不影响它的可读性。
+	rec = get(h, PathModels+"/beta")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("单条 beta 的状态码 = %d，期望 200（响应 %s）", rec.Code, rec.Body)
+	}
+	var one struct {
+		ID     string          `json:"id"`
+		Offers json.RawMessage `json:"offers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &one); err != nil {
+		t.Fatalf("单条响应不是 JSON: %v", err)
+	}
+	if one.ID != "beta" || string(one.Offers) != "" {
+		t.Errorf("单条 beta = %s，期望 id=beta 且不带 offers", rec.Body)
+	}
+}
+
+// 同一个商家供两条渠道、同价只报一次；不同价则两条都在。
+func TestModelsOffersDedupeByMerchantAndPrice(t *testing.T) {
+	supply := &fakeSupply{supplies: []channels.Supply{
+		{Model: "alpha", ChannelID: 1, OwnerUserID: 7, Merchant: "acme"},
+		{Model: "alpha", ChannelID: 2, OwnerUserID: 7, Merchant: "acme"},
+		{Model: "alpha", ChannelID: 3, OwnerUserID: 8, Merchant: "globex"},
+	}}
+	cat := &fakeModelCatalog{models: []catalog.Model{{CanonicalName: "alpha"}}}
+	h, _ := newModelsHandler(supply, cat)
+	h.Offers = &fakeOffers{
+		base:    money.MustParse("0.00350000"),
+		byOwner: map[int64]money.Amount{7: money.MustParse("0.00350000"), 8: money.MustParse("0.00350000")},
+	}
+
+	rec := get(h, PathModels)
+	var body modelsBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if len(body.Data) != 1 {
+		t.Fatalf("清单项数 = %d，期望 1", len(body.Data))
+	}
+	acme, globex := "acme", "globex"
+	want := []offerJSON{
+		{Merchant: &acme, Price: "0.00350000"},
+		{Merchant: &globex, Price: "0.00350000"},
+	}
+	if !reflect.DeepEqual(body.Data[0].Offers, want) {
+		t.Errorf("offers = %+v，期望同价的渠道折叠成一条、商家各一条", body.Data[0].Offers)
 	}
 }

@@ -8,6 +8,7 @@ import {
   formatDateTime,
   formatMoney,
   formatSpend,
+  formatUnitPrice,
   moneySymbol,
 } from './format'
 
@@ -127,5 +128,27 @@ describe('时间与日期', () => {
     expect(addDays('2026-10-21', 1)).toBe('2026-10-22')
     expect(addDays('2026-12-31', 1)).toBe('2027-01-01')
     expect(exclusiveEnd('2026-10-21')).toBe('2026-10-22')
+  })
+})
+
+describe('formatUnitPrice', () => {
+  it('保留至少 4 位小数，去掉末尾多余的 0', () => {
+    expect(formatUnitPrice('0.00350000')).toBe('0.0035')
+    expect(formatUnitPrice('0.00400000')).toBe('0.0040')
+    expect(formatUnitPrice('12.34000000')).toBe('12.3400')
+  })
+
+  it('小于 0.0001 的价不被收成 0', () => {
+    expect(formatUnitPrice('0.00000025')).toBe('0.00000025')
+  })
+
+  it('零元显示 0.0000，而不是破折号', () => {
+    expect(formatUnitPrice('0.00000000')).toBe('0.0000')
+  })
+
+  it('负数保留符号；缺值与坏数据显示破折号', () => {
+    expect(formatUnitPrice('-0.00350000')).toBe('-0.0035')
+    expect(formatUnitPrice(null)).toBe('—')
+    expect(formatUnitPrice('abc')).toBe('—')
   })
 })

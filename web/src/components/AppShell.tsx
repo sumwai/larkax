@@ -7,12 +7,15 @@ import { useIsMobile, useIsNarrow } from '../hooks/useMediaQuery'
 import { homeOf, viewOfPath, viewsFor, type View } from '../ops/views'
 import {
   BrandMark,
+  IconAlias,
+  IconChannel,
   IconCollapse,
   IconKey,
   IconLogout,
   IconMenu,
   IconModels,
   IconOverview,
+  IconPricing,
   IconQuickstart,
   IconSettings,
   IconUsage,
@@ -42,14 +45,14 @@ type NavItem = { to: string; key: MessageKey; icon: ComponentType<{ size?: numbe
  */
 const OPS_NAV: Record<Exclude<View, 'user'>, NavItem[]> = {
   merchant: [
-    { to: '/app/merchant/channels', key: 'ops.nav.channels', icon: IconOverview },
-    { to: '/app/merchant/pricing', key: 'ops.nav.pricing', icon: IconUsage },
+    { to: '/app/merchant/channels', key: 'ops.nav.channels', icon: IconChannel },
+    { to: '/app/merchant/pricing', key: 'ops.nav.pricing', icon: IconPricing },
   ],
   admin: [
-    { to: '/app/admin/channels', key: 'ops.nav.channels', icon: IconOverview },
+    { to: '/app/admin/channels', key: 'ops.nav.channels', icon: IconChannel },
     { to: '/app/admin/models', key: 'ops.nav.models', icon: IconModels },
-    { to: '/app/admin/aliases', key: 'ops.nav.aliases', icon: IconQuickstart },
-    { to: '/app/admin/pricing', key: 'ops.nav.pricing', icon: IconUsage },
+    { to: '/app/admin/aliases', key: 'ops.nav.aliases', icon: IconAlias },
+    { to: '/app/admin/pricing', key: 'ops.nav.pricing', icon: IconPricing },
   ],
 }
 

@@ -1090,11 +1090,12 @@ func TestListReportsRunningLatestAttemptAndLoadResult(t *testing.T) {
 	}
 }
 
-// TestGenerationOrNil 钉住 LEFT JOIN 那两列拼成「取中的那一代」的两个可达形态。
+// TestGenerationOrNil 钉住 LEFT JOIN 那两列拼成「取中的那一代」的形态。
 //
-// 两列的 Valid 恒等是前提（见下）：没有取中的一代时右边整片是 NULL，
-// 取中时两列一起有值——所以单边为空的输入走不到。
-// 用例只钉可达的两格，其中第二格是「Version 有值、Number 是 0 仍然算一代」：
+// 包括两种**单边为空**的输入：函数自己判两列的 Valid，任何一列为 NULL 都
+// 不算一代。生产路径上走不到它们（两列的 Valid 恒等，见下），但守卫是函数
+// 的契约——将来列改成可空、或者多一个调用点，都得先过了这两格。
+// 另一格是「Version 有值、Number 是 0 仍然算一代」：
 // 代次 0 是合法值（第一次发布），拿零值当「没有」会把第一代说成没被取中。
 func TestGenerationOrNil(t *testing.T) {
 	cases := []struct {
@@ -1116,6 +1117,18 @@ func TestGenerationOrNil(t *testing.T) {
 			want:    &Generation{Version: "1.0.0", Number: 0},
 		},
 		{
+			name:    "只有版本、没有代次",
+			version: sql.NullString{String: "2.0.0", Valid: true},
+			number:  sql.NullInt64{},
+			want:    nil,
+		},
+		{
+			name:    "只有代次、没有版本",
+			version: sql.NullString{},
+			number:  sql.NullInt64{Int64: 3, Valid: true},
+			want:    nil,
+		},
+		{
 			name:    "两列都空",
 			version: sql.NullString{},
 			number:  sql.NullInt64{},
@@ -1131,8 +1144,7 @@ func TestGenerationOrNil(t *testing.T) {
 		}
 	}
 
-	// 「第一个 || 换成 &&」是**等价**变异，不是缺口：单边为空的两种输入走不到，
-	// 而两个 Valid 恒等时 a||b 与 a&&b 是同一个函数。两条前提：
+	// 单边为空的两种输入在生产路径上走不到，两条前提是：
 	//
 	//  1. 两个调用点（List 与 Get）喂进来的 r.version / r.generation，
 	//     出自 runningJoin 里同一个 `LEFT JOIN LATERAL … LIMIT 1` 子查询的**同一行**
@@ -1142,8 +1154,8 @@ func TestGenerationOrNil(t *testing.T) {
 	//     （internal/migrate/sql/00001_init.sql），所以取中时两列一起有值、
 	//     没取中时两列一起是 NULL。
 	//
-	// 前提 2 由下面那条 schema 用例机器核对：哪天有一版迁移把列改成可空，它就红，
-	// 提示这里要对「单边 NULL」重新判一次。
+	// 前提 2 由下面那条 schema 用例机器核对：哪天有一版迁移把列改成可空，它就红。
+	// 上面那两格钉的是守卫本身：前提变了的时候，函数仍然不会拼出半截 Generation。
 }
 
 // TestPluginJoinColumnsAreNotNull 是上一条用例的前提，不是实现的一部分。
