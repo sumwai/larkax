@@ -2043,14 +2043,30 @@ textarea.input {
   .app-topbar {
     display: flex;
   }
+  :root {
+    /* 底栏的固定高度：图标 + 一行文字，加上下内边距。 */
+    --bottomnav-h: 64px;
+  }
+  /*
+   * 底栏固定在视口底部，内容区在末尾留出与它等高的空白。
+   *
+   * 底栏若留在文档流里，内容末尾与它的上下关系取决于滚动实现；固定之后
+   * 底栏不再占文档高度，末尾这段空白保证最后一个模型能滚到它上方。
+   * 两处都加 `safe-area-inset-bottom`：底栏自身要让开手势区，内容区要让开
+   * 变高之后的底栏。
+   */
   .bottomnav {
     display: grid;
-    position: sticky;
+    position: fixed;
+    left: 0;
+    right: 0;
     bottom: 0;
     z-index: 30;
+    min-height: calc(var(--bottomnav-h) + env(safe-area-inset-bottom, 0px));
   }
   .app-content {
-    padding-bottom: 24px;
+    /* 底栏高度之外再留 24px，与页面上下的间距一致。 */
+    padding-bottom: calc(var(--bottomnav-h) + 24px + env(safe-area-inset-bottom, 0px));
     padding-left: max(16px, env(safe-area-inset-left, 0px));
     padding-right: max(16px, env(safe-area-inset-right, 0px));
   }
