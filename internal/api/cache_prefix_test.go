@@ -12,7 +12,7 @@ import (
 // 退回按整段输入估——全仓没有任何一步会失败，而这条特性等于没上线。
 // 这条用例就是那个缺口的门（见 Request.CachePrefix 的注释）。
 //
-// 块数按粒度算：system 一块、tools 一块、其余每条 message 各一块。
+// 块数按粒度算：tools 一块、每条 message 各一块（openai 系按原序，system 不提权）。
 func TestBillingRequestCarriesCachePrefixBlocks(t *testing.T) {
 	body := `{"model":"m-1","max_tokens":16,"messages":[` +
 		`{"role":"system","content":"你是助手"},` +
@@ -29,8 +29,8 @@ func TestBillingRequestCarriesCachePrefixBlocks(t *testing.T) {
 	if got.CachePrefix == nil {
 		t.Fatal("计费请求没有带块序列——预留会静默退回旧口径")
 	}
-	// system 1 + tools 1 + 三条非 system 消息 3。
+	// tools 1 + 四条 message 4。
 	if len(got.CachePrefix) != 5 {
-		t.Errorf("块数 = %d，期望 5（system 1 + tools 1 + message 3）", len(got.CachePrefix))
+		t.Errorf("块数 = %d，期望 5（tools 1 + message 4）", len(got.CachePrefix))
 	}
 }

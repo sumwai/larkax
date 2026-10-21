@@ -29,30 +29,30 @@ func sampleRequest() *channel.Request {
 	}
 }
 
-// 块粒度：system 一块、tools 一块、其余每条 message 各一块。
+// 块粒度：tools 一块、每条 message 各一块；块序列必须与发给上游的顺序一致。
 //
 // 这不是实现细节，而是前缀比对能成立的前提：末尾多一条消息时，前面的块必须
 // **逐块相同**，否则 [A, B] 永远成不了 [A, B, C] 的前缀。
 func TestCachePrefixOfBlockGranularity(t *testing.T) {
-	blocks := CachePrefixOf(sampleRequest())
+	blocks := CachePrefixOf(sampleRequest(), channel.ProtocolOpenAI)
 	if len(blocks) != 4 {
-		t.Fatalf("块数 = %d，期望 4（system 1 + tools 1 + message 2）", len(blocks))
+		t.Fatalf("块数 = %d，期望 4（tools 1 + message 3）", len(blocks))
 	}
 
 	// 相同的请求得到相同的块序列——块是按内容算的摘要。
-	again := CachePrefixOf(sampleRequest())
+	again := CachePrefixOf(sampleRequest(), channel.ProtocolOpenAI)
 	for i := range blocks {
 		if blocks[i] != again[i] {
 			t.Errorf("第 %d 块在相同请求上不同——摘要不稳定", i)
 		}
 	}
 
-	// 末尾多一条消息：前 4 块逐块不变，只多出第 5 块。
+	// 末尾多一条消息：原有的块逐块不变，只多出第 5 块。
 	longer := sampleRequest()
 	longer.Messages = append(longer.Messages, channel.Message{
 		Role: "user", Content: []channel.ContentBlock{{Type: "text", Text: "再来一次"}},
 	})
-	extended := CachePrefixOf(longer)
+	extended := CachePrefixOf(longer, channel.ProtocolOpenAI)
 	if len(extended) != 5 {
 		t.Fatalf("加一条消息后块数 = %d，期望 5", len(extended))
 	}
@@ -62,10 +62,11 @@ func TestCachePrefixOfBlockGranularity(t *testing.T) {
 		}
 	}
 
-	// 改中间一条消息：它自己那一块变，位置不变。
+	// 改中间一条消息：它自己那一块变，前后都不动。messages 从第 1 块起
+	// （第 0 块是 tools），所以 Messages[1] 落在第 2 块。
 	changed := sampleRequest()
 	changed.Messages[1].Content[0].Text = "换一句"
-	moved := CachePrefixOf(changed)
+	moved := CachePrefixOf(changed, channel.ProtocolOpenAI)
 	if len(moved) != len(blocks) {
 		t.Fatalf("改一条消息后块数 = %d，期望 %d", len(moved), len(blocks))
 	}
@@ -77,28 +78,85 @@ func TestCachePrefixOfBlockGranularity(t *testing.T) {
 	}
 }
 
-// 多条 system 消息合在一块；多个 tools 定义合在一块。
-func TestCachePrefixOfMergesSystemAndTools(t *testing.T) {
+// 块序列与实际发给上游的顺序一致：openai 系按 messages 原序，不把 system 提权；
+// anthropic 的 system 是顶层字段，无论出现在哪里都排在最前。
+//
+// 这一条是「顺序错就是假命中」的判据：提权 system 时 [user, system] 与
+// [system, user] 会得到同一串块，而它们在上游看到的前缀不同。
+func TestCachePrefixOfFollowsUpstreamOrder(t *testing.T) {
+	userFirst := &channel.Request{Messages: []channel.Message{
+		{Role: "user", Content: []channel.ContentBlock{{Type: "text", Text: "hi"}}},
+		{Role: "system", Content: []channel.ContentBlock{{Type: "text", Text: "s"}}},
+	}}
+	systemFirst := &channel.Request{Messages: []channel.Message{
+		{Role: "system", Content: []channel.ContentBlock{{Type: "text", Text: "s"}}},
+		{Role: "user", Content: []channel.ContentBlock{{Type: "text", Text: "hi"}}},
+	}}
+
+	openAIUserFirst := CachePrefixOf(userFirst, channel.ProtocolOpenAI)
+	openAISystemFirst := CachePrefixOf(systemFirst, channel.ProtocolOpenAI)
+	if len(openAIUserFirst) != 2 || len(openAISystemFirst) != 2 {
+		t.Fatalf("openai 块数 = %d / %d，期望各 2（两条 message）",
+			len(openAIUserFirst), len(openAISystemFirst))
+	}
+	if openAIUserFirst[0] == openAISystemFirst[0] || openAIUserFirst[1] == openAISystemFirst[1] {
+		t.Error("openai 下两种消息顺序得到了相同的块序列——那是可构造的假命中")
+	}
+
+	// 效果落到钱上：前一种顺序留下的记录，后一种顺序查不到。
+	var store billing.CacheStore
+	store.Record(11, 7, "m", billing.CacheRecord{
+		Blocks: openAIUserFirst, CachedTokens: 900, SettledAt: fixedAt.Add(-5 * time.Second),
+	}, fixedAt)
+	if got := store.Resolve(11, 7, "m", openAISystemFirst, fixedAt); got != 0 {
+		t.Errorf("顺序不同的请求命中了 %d 个 token，期望 0", got)
+	}
+
+	// anthropic：system 被提到顶层，两种写法在上游是同一段提示，块序列相同。
+	anthropicUserFirst := CachePrefixOf(userFirst, channel.ProtocolAnthropic)
+	anthropicSystemFirst := CachePrefixOf(systemFirst, channel.ProtocolAnthropic)
+	if len(anthropicUserFirst) != 2 || len(anthropicSystemFirst) != 2 {
+		t.Fatalf("anthropic 块数 = %d / %d，期望各 2（system 1 + message 1）",
+			len(anthropicUserFirst), len(anthropicSystemFirst))
+	}
+	for i := range anthropicUserFirst {
+		if anthropicUserFirst[i] != anthropicSystemFirst[i] {
+			t.Errorf("anthropic 第 %d 块不同——system 应在最前、与它在数组里的位置无关", i)
+		}
+	}
+}
+
+// 多条 system 消息只在 anthropic 下合并成一块；openai 下每条 message 各一块。
+// 拿不准的协议返回 nil，预留退回旧口径。
+func TestCachePrefixOfPerProtocolShape(t *testing.T) {
 	systemOnly := &channel.Request{Messages: []channel.Message{
 		{Role: "system", Content: []channel.ContentBlock{{Type: "text", Text: "a"}}},
 		{Role: "system", Content: []channel.ContentBlock{{Type: "text", Text: "b"}}},
 	}}
-	if got := len(CachePrefixOf(systemOnly)); got != 1 {
-		t.Errorf("两条 system 消息折成 %d 块，期望 1", got)
+	if got := CachePrefixOf(systemOnly, channel.ProtocolAnthropic); len(got) != 1 {
+		t.Errorf("anthropic 下两条 system 消息折成 %d 块，期望 1", len(got))
+	}
+	if got := CachePrefixOf(systemOnly, channel.ProtocolOpenAI); len(got) != 2 {
+		t.Errorf("openai 下两条 system 消息折成 %d 块，期望 2（按原序各一块）", len(got))
 	}
 
 	toolsOnly := &channel.Request{Tools: []channel.Tool{{Name: "a"}, {Name: "b"}}}
-	if got := len(CachePrefixOf(toolsOnly)); got != 1 {
-		t.Errorf("两个 tools 定义折成 %d 块，期望 1", got)
+	for _, protocol := range []channel.Protocol{channel.ProtocolOpenAI, channel.ProtocolAnthropic} {
+		if got := len(CachePrefixOf(toolsOnly, protocol)); got != 1 {
+			t.Errorf("%s 下两个 tools 定义折成 %d 块，期望 1", protocol, got)
+		}
 	}
 
-	if got := CachePrefixOf(nil); got != nil {
+	if got := CachePrefixOf(sampleRequest(), channel.ProtocolSystemOne); got != nil {
+		t.Errorf("未列出的协议应返回 nil，得到 %d 块", len(got))
+	}
+	if got := CachePrefixOf(nil, channel.ProtocolOpenAI); got != nil {
 		t.Errorf("nil 请求应返回 nil，得到 %d 块", len(got))
 	}
 }
 
-// 按块算前缀的直接效果：上次是 [system, tools, user]、这次末尾多一条消息时
-// 仍然命中，命中量是上次的整段输入量。
+// 按块算前缀的直接效果：上次的块序列是这次的开头时仍然命中，
+// 命中量是上次上游实测报出的缓存量。
 func TestCachePrefixMatchesLongerRequestByBlocks(t *testing.T) {
 	short := sampleRequest()
 	long := sampleRequest()
@@ -109,12 +167,12 @@ func TestCachePrefixMatchesLongerRequestByBlocks(t *testing.T) {
 	var store billing.CacheStore
 	now := fixedAt
 	store.Record(11, 7, "m", billing.CacheRecord{
-		Blocks:      CachePrefixOf(short),
-		TotalTokens: 900,
-		SettledAt:   now.Add(-5 * time.Second),
+		Blocks:       CachePrefixOf(short, channel.ProtocolOpenAI),
+		CachedTokens: 900,
+		SettledAt:    now.Add(-5 * time.Second),
 	}, now)
 
-	if got := store.Resolve(11, 7, "m", CachePrefixOf(long), now); got != 900 {
+	if got := store.Resolve(11, 7, "m", CachePrefixOf(long, channel.ProtocolOpenAI), now); got != 900 {
 		t.Errorf("更长的请求命中量 = %d，期望 900", got)
 	}
 }
@@ -130,12 +188,12 @@ func TestReserveResolvesCacheHitPerCandidate(t *testing.T) {
 	req.Candidates = []RuleCandidate{{ChannelID: 7, OwnerUserID: 9}, {ChannelID: 8, OwnerUserID: 9}}
 	req.CachePrefix = []billing.BlockHash{block("a"), block("b")}
 
-	// 只给渠道 8 记一条：整段 1000 都命中缓存。
+	// 只给渠道 8 记一条：上游报过 1000 个 token 的缓存活动。
 	record := func(p *Pipeline, channelID int64) {
 		p.cache.Record(11, channelID, req.CanonicalModel, billing.CacheRecord{
-			Blocks:      req.CachePrefix,
-			TotalTokens: 1000,
-			SettledAt:   fixedAt.Add(-5 * time.Second),
+			Blocks:       req.CachePrefix,
+			CachedTokens: 1000,
+			SettledAt:    fixedAt.Add(-5 * time.Second),
 		}, fixedAt)
 	}
 
@@ -188,7 +246,7 @@ func TestReserveWithoutCachePrefixKeepsWholeInputEstimate(t *testing.T) {
 	req.CachePrefix = []billing.BlockHash{block("a")}
 	// 先记一条「整段命中」，再从把块序列清空的请求上预留。
 	p.cache.Record(11, req.ChannelID, req.CanonicalModel, billing.CacheRecord{
-		Blocks: req.CachePrefix, TotalTokens: req.InputTokens, SettledAt: fixedAt.Add(-5 * time.Second),
+		Blocks: req.CachePrefix, CachedTokens: req.InputTokens, SettledAt: fixedAt.Add(-5 * time.Second),
 	}, fixedAt)
 
 	res, err := p.Reserve(context.Background(), req)
@@ -209,14 +267,14 @@ func TestReserveWithoutCachePrefixKeepsWholeInputEstimate(t *testing.T) {
 	}
 }
 
-// 记录里的整段输入是上游报的 prompt 那一整段：缓存占九成时也只算一次。
+const cachedRule = `{"prompt": 0.000001, "completion": 0.000002, "cache_read": 0.0000001}`
+
+// 记录里的缓存量是上游**实测**报出的那一项，不是整段输入。
 //
-// 结算用的 usage 是计费口径（缓存已从 prompt 里减出去），所以「整段」是
-// prompt + cache_read + cache_write 三项之和（见 billing.Usage.InputTokens）。
-// 若把它错记成非缓存的那一项，下一次命中量会小一个数量级，上界退回到接近
-// 旧口径——这条特性在最该生效的那类请求上失效。
-func TestSettleRecordsWholeInputWhenMostlyCached(t *testing.T) {
-	const cachedRule = `{"prompt": 0.000001, "completion": 0.000002, "cache_read": 0.0000001}`
+// 上游报 prompt=1000、cache_read=900 时，下游那一次只该按 900 个 token 估缓存，
+// 剩下 100 仍按输入价。若把整段 1000 记成命中，上界会再低一截（0.0011）；
+// 若只记非缓存的 100，上界又回到 0.00191。
+func TestSettleRecordsMeasuredCacheAmount(t *testing.T) {
 	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: cachedRule}}
 
 	now := fixedAt
@@ -246,19 +304,18 @@ func TestSettleRecordsWholeInputWhenMostlyCached(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 整段 1000 命中：1000 × 1e-7 = 0.0001；输出 500 × 2e-6 = 0.001。
-	// 若记录只存了非缓存的 100：900 × 1e-6 + 100 × 1e-7 = 0.00091，合计 0.00191。
-	if res.Amount.String() != "0.00110000" {
-		t.Errorf("上界 = %s，期望 0.0011（整段输入都算命中，缓存部分只算一次）", res.Amount)
+	// 命中 900：非缓存 100 × 1e-6 + 900 × 1e-7 = 0.00019；输出 500 × 2e-6 = 0.001。
+	if res.Amount.String() != "0.00119000" {
+		t.Errorf("上界 = %s，期望 0.00119（按实测缓存量 900 估）", res.Amount)
 	}
 }
 
-// 结算把这次请求的前缀记下来，下一次预留就能用上。
+// 上游没报缓存活动时既不记也不命中：没有依据就不许把输入侧按缓存价估。
 //
-// 只记实测用量：估算值不是上游那一段落了多少 token，拿它当命中量会把上界
-// 压到实际之下。
-func TestSettleRecordsMeasuredPrefixForNextReserve(t *testing.T) {
-	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: simpleRule}}
+// 这类渠道的规则通常把 cache_read 填 0，一旦记成「整段命中」，输入侧直接归零，
+// 每次结算都撞 Capped——与时间门槛无关，2 秒压不住。
+func TestSettleDoesNotRecordWithoutCacheActivity(t *testing.T) {
+	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: cachedRule}}
 
 	now := fixedAt
 	p := newPipeline(t, src, func(p *Pipeline) {
@@ -274,41 +331,51 @@ func TestSettleRecordsMeasuredPrefixForNextReserve(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := p.Settle(context.Background(), req, res, Outcome{
-		// 上游报的 prompt 是整段输入（含缓存部分）：这里就是 1000。
 		Usage:       channel.Usage{PromptTokens: 1000, CompletionTokens: 100},
 		UsageSource: tokens.SourceMeasured,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	// 2 秒门槛之后，同一段前缀（更长）应当命中整段 1000。
 	now = fixedAt.Add(5 * time.Second)
 	req.CachePrefix = append(req.CachePrefix, block("c"))
 	res, err = p.Reserve(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Amount.String() != "0.00100000" {
-		t.Errorf("结算之后的上界 = %s，期望 0.001（整段输入命中）", res.Amount)
+	// 没有记录：仍按整段 1000 × 1e-6 + 输出 0.001 = 0.002。
+	if res.Amount.String() != "0.00200000" {
+		t.Errorf("上界 = %s，期望 0.002（没有缓存活动时不许按缓存价估）", res.Amount)
 	}
+}
 
-	// 估算用量不记：另一条请求，同一条渠道与同一段前缀，结算来源是估算。
-	now = fixedAt
-	p2 := newPipeline(t, src, func(p *Pipeline) {
+// 估算用量不记：它不是上游报的缓存量，拿它当命中量会把上界压到实际之下。
+func TestSettleDoesNotRecordEstimatedUsage(t *testing.T) {
+	src := &ruleSource{rule: Rule{ID: 1, Version: 1, Source: cachedRule}}
+
+	now := fixedAt
+	p := newPipeline(t, src, func(p *Pipeline) {
 		p.Now = func() time.Time { return now }
 	})
-	res, err = p2.Reserve(context.Background(), req)
+
+	req := baseRequest()
+	req.APIKeyID = 11
+	req.CachePrefix = []billing.BlockHash{block("a"), block("b")}
+
+	res, err := p.Reserve(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p2.Settle(context.Background(), req, res, Outcome{
-		Usage:       channel.Usage{PromptTokens: 1000, CompletionTokens: 100},
+	if _, err := p.Settle(context.Background(), req, res, Outcome{
+		Usage:       channel.Usage{PromptTokens: 1000, CacheReadTokens: 900, CompletionTokens: 100},
 		UsageSource: tokens.SourceEstimated,
 	}); err != nil {
 		t.Fatal(err)
 	}
+
 	now = fixedAt.Add(5 * time.Second)
-	res, err = p2.Reserve(context.Background(), req)
+	req.CachePrefix = append(req.CachePrefix, block("c"))
+	res, err = p.Reserve(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}

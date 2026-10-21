@@ -1110,20 +1110,25 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 			Add(uint64(settlement.Breakdown.Total.Sub(settlement.Actual).Units()))
 	}
 
-	// 记下这次请求的块序列与整段输入量，供下一次预留判断缓存前缀。
+	// 记下这次请求的块序列与**实测缓存量**，供下一次预留判断缓存前缀。
 	//
-	// 只记**实测**用量（tokens.SourceMeasured）：估算值不是「上游那一段落了
-	// 多少 token」，拿它当命中量会把输入侧的上界压到实际之下——结算撞
-	// Capped，差额由平台承担。没实测就等于没有依据，宁可下次多冻一点。
+	// 只记实测用量（tokens.SourceMeasured）：估算值不是上游那一段落了多少
+	// token，拿它当命中量会把输入侧的上界压到实际之下——结算撞 Capped，
+	// 差额由平台承担。没实测就等于没有依据，宁可下次多冻一点。
+	//
+	// 记的是上游报出的缓存量（cache_read + cache_write），不是整段输入：
+	// 没有缓存活动的上游（两项都是 0）不能记成「整段都会命中」——那类渠道的
+	// 规则通常把缓存价填 0，下一次预留的输入侧会直接归零。这个 0 由
+	// CacheStore.Record 自己的判据挡掉（缓存量不为正就不记）。
 	//
 	// 写在这里而不是更早：上面任何一处失败都意味着这次请求没有结算，
 	// 而记录的口径是「上一次**已结算**的请求」。
 	if out.UsageSource.IsExact() {
 		settledAt := p.now()
 		p.cache.Record(req.APIKeyID, req.ChannelID, req.CanonicalModel, billing.CacheRecord{
-			Blocks:      req.CachePrefix,
-			TotalTokens: usage.InputTokens(),
-			SettledAt:   settledAt,
+			Blocks:       req.CachePrefix,
+			CachedTokens: usage.CacheReadTokens + usage.CacheWriteTokens,
+			SettledAt:    settledAt,
 		}, settledAt)
 	}
 

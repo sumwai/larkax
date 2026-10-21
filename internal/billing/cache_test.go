@@ -3,26 +3,7 @@ package billing
 import (
 	"testing"
 	"time"
-
-	"github.com/sumwai/larkax/internal/channel"
 )
-
-// 记录里的「整段输入」是计费口径三项之和，缓存只算一次。
-//
-// 上游报 prompt=1000、cache_read=900 时，FromChannelUsage 把 900 从 prompt 里
-// 减出去、记到 cache_read 上，于是三项之和回到 1000。若这张记录改写成
-// Usage.PromptTokens（也就是非缓存的那 100），命中量会小一个数量级——方向是
-// 多冻，而缓存占九成的请求正好是这条特性要救的那一类。
-func TestUsageInputTokensCountsCacheOnce(t *testing.T) {
-	u := FromChannelUsage(channel.Usage{PromptTokens: 1000, CacheReadTokens: 900})
-	if got := u.InputTokens(); got != 1000 {
-		t.Errorf("整段输入 = %d，期望 1000（缓存部分只算一次）", got)
-	}
-	// 用例前提：计费口径的 PromptTokens 是非缓存部分，不是整段。
-	if u.PromptTokens != 100 {
-		t.Fatalf("非缓存输入 = %d，期望 100（用例前提变了，下面的判据要重写）", u.PromptTokens)
-	}
-}
 
 // 缓存的四个判定条件与覆盖规则逐条钉在这里。每条用例对应 CacheStore 注释里
 // 的一条判据，把那条判据改坏（少一个比较、条件写反）就该在对应用例上变红。
@@ -47,17 +28,16 @@ func TestCacheStoreNoRecordResolvesZero(t *testing.T) {
 	}
 }
 
-// 这次以前次前缀开头时，命中量是上次的**整段**输入量。
+// 这次以前次前缀开头时，命中量是上次上游实测报出的缓存量。
 //
-// 比上次长（末尾多一块）也算命中：上游按「输入结束位置」整段落盘，
-// [A, B] 是 [A, B, C] 的完整前缀。
+// 比上次长（末尾多一块）也算命中：[A, B] 是 [A, B, C] 的完整前缀。
 func TestCacheStoreResolvesCompletePrefix(t *testing.T) {
 	var store CacheStore
-	store.Record(1, 2, "m", CacheRecord{Blocks: blocks("a", "b"), TotalTokens: 900, SettledAt: cacheNow.Add(-5 * time.Second)}, cacheNow)
+	store.Record(1, 2, "m", CacheRecord{Blocks: blocks("a", "b"), CachedTokens: 900, SettledAt: cacheNow.Add(-5 * time.Second)}, cacheNow)
 
 	for _, prefix := range [][]BlockHash{blocks("a", "b"), blocks("a", "b", "c")} {
 		if got := store.Resolve(1, 2, "m", prefix, cacheNow); got != 900 {
-			t.Errorf("前缀 %d 块时命中量 = %d，期望 900（整段输入量）", len(prefix), got)
+			t.Errorf("前缀 %d 块时命中量 = %d，期望 900（记录里的缓存量）", len(prefix), got)
 		}
 	}
 }
@@ -65,7 +45,7 @@ func TestCacheStoreResolvesCompletePrefix(t *testing.T) {
 // 只认完整前缀。公共前缀检测与固定间隔落盘预测不了，推断它们的方向是漏收。
 func TestCacheStoreRequiresCompletePrefix(t *testing.T) {
 	var store CacheStore
-	store.Record(1, 2, "m", CacheRecord{Blocks: blocks("a", "b"), TotalTokens: 900, SettledAt: cacheNow.Add(-5 * time.Second)}, cacheNow)
+	store.Record(1, 2, "m", CacheRecord{Blocks: blocks("a", "b"), CachedTokens: 900, SettledAt: cacheNow.Add(-5 * time.Second)}, cacheNow)
 
 	cases := map[string][]BlockHash{
 		"第 2 块不同":  blocks("a", "c"),
@@ -93,7 +73,7 @@ func TestCacheStoreRejectsTooSoon(t *testing.T) {
 		{"5 秒", 5 * time.Second, 900},
 	} {
 		var store CacheStore
-		store.Record(1, 2, "m", CacheRecord{Blocks: p, TotalTokens: 900, SettledAt: cacheNow.Add(-tc.gap)}, cacheNow)
+		store.Record(1, 2, "m", CacheRecord{Blocks: p, CachedTokens: 900, SettledAt: cacheNow.Add(-tc.gap)}, cacheNow)
 		if got := store.Resolve(1, 2, "m", p, cacheNow); got != tc.want {
 			t.Errorf("%s：命中量 = %d，期望 %d", tc.name, got, tc.want)
 		}
@@ -113,7 +93,7 @@ func TestCacheStoreRejectsTooOld(t *testing.T) {
 		{"两小时", 2 * time.Hour, 0},
 	} {
 		var store CacheStore
-		store.Record(1, 2, "m", CacheRecord{Blocks: p, TotalTokens: 900, SettledAt: cacheNow.Add(-tc.gap)}, cacheNow)
+		store.Record(1, 2, "m", CacheRecord{Blocks: p, CachedTokens: 900, SettledAt: cacheNow.Add(-tc.gap)}, cacheNow)
 		if got := store.Resolve(1, 2, "m", p, cacheNow); got != tc.want {
 			t.Errorf("%s：命中量 = %d，期望 %d", tc.name, got, tc.want)
 		}
@@ -126,7 +106,7 @@ func TestCacheStoreRejectsTooOld(t *testing.T) {
 func TestCacheStoreIsolatesByKeyChannelModel(t *testing.T) {
 	p := []BlockHash{block("a")}
 	var store CacheStore
-	store.Record(1, 2, "m", CacheRecord{Blocks: p, TotalTokens: 900, SettledAt: cacheNow.Add(-5 * time.Second)}, cacheNow)
+	store.Record(1, 2, "m", CacheRecord{Blocks: p, CachedTokens: 900, SettledAt: cacheNow.Add(-5 * time.Second)}, cacheNow)
 
 	for _, tc := range []struct {
 		name      string
@@ -152,10 +132,10 @@ func TestCacheStoreIsolatesByKeyChannelModel(t *testing.T) {
 func TestCacheStoreKeepsLongerRecord(t *testing.T) {
 	var store CacheStore
 	at := cacheNow.Add(-5 * time.Second)
-	store.Record(1, 2, "m", CacheRecord{Blocks: blocks("a", "b"), TotalTokens: 900, SettledAt: at}, cacheNow)
+	store.Record(1, 2, "m", CacheRecord{Blocks: blocks("a", "b"), CachedTokens: 900, SettledAt: at}, cacheNow)
 
 	// 更短的记录后到：不覆盖。[a] 这次查询只在上次记录是 [a] 时才会命中。
-	store.Record(1, 2, "m", CacheRecord{Blocks: blocks("a"), TotalTokens: 100, SettledAt: at}, cacheNow)
+	store.Record(1, 2, "m", CacheRecord{Blocks: blocks("a"), CachedTokens: 100, SettledAt: at}, cacheNow)
 	if got := store.Resolve(1, 2, "m", blocks("a"), cacheNow); got != 0 {
 		t.Fatalf("短记录覆盖了长记录：查 [a] 得到 %d，期望 0（记录仍是 [a, b]）", got)
 	}
@@ -164,13 +144,13 @@ func TestCacheStoreKeepsLongerRecord(t *testing.T) {
 	}
 
 	// 块数相同：覆盖。
-	store.Record(1, 2, "m", CacheRecord{Blocks: blocks("a", "z"), TotalTokens: 700, SettledAt: at}, cacheNow)
+	store.Record(1, 2, "m", CacheRecord{Blocks: blocks("a", "z"), CachedTokens: 700, SettledAt: at}, cacheNow)
 	if got := store.Resolve(1, 2, "m", blocks("a", "z", "q"), cacheNow); got != 700 {
 		t.Errorf("等长记录没有覆盖：命中量 = %d，期望 700", got)
 	}
 
 	// 块数更多：覆盖。
-	store.Record(1, 2, "m", CacheRecord{Blocks: blocks("a", "z", "q"), TotalTokens: 1500, SettledAt: at}, cacheNow)
+	store.Record(1, 2, "m", CacheRecord{Blocks: blocks("a", "z", "q"), CachedTokens: 1500, SettledAt: at}, cacheNow)
 	if got := store.Resolve(1, 2, "m", blocks("a", "z", "q", "r"), cacheNow); got != 1500 {
 		t.Errorf("更长的记录没有覆盖：命中量 = %d，期望 1500", got)
 	}
@@ -179,13 +159,13 @@ func TestCacheStoreKeepsLongerRecord(t *testing.T) {
 // 写入时顺手清掉过期记录：它们判不中，留着只是占内存。
 func TestCacheStoreDropsExpiredRecords(t *testing.T) {
 	var store CacheStore
-	store.Record(1, 2, "m", CacheRecord{Blocks: blocks("a"), TotalTokens: 900, SettledAt: cacheNow}, cacheNow)
+	store.Record(1, 2, "m", CacheRecord{Blocks: blocks("a"), CachedTokens: 900, SettledAt: cacheNow}, cacheNow)
 	if len(store.records) != 1 {
 		t.Fatalf("写了 1 条，记了 %d 条", len(store.records))
 	}
 
 	// 两小时后再写一条别的记录，第一条应当被清掉。
-	store.Record(3, 4, "m", CacheRecord{Blocks: blocks("a"), TotalTokens: 900, SettledAt: cacheNow.Add(2 * time.Hour)}, cacheNow.Add(2*time.Hour))
+	store.Record(3, 4, "m", CacheRecord{Blocks: blocks("a"), CachedTokens: 900, SettledAt: cacheNow.Add(2 * time.Hour)}, cacheNow.Add(2*time.Hour))
 	if len(store.records) != 1 {
 		t.Errorf("过期记录没被清掉：%d 条", len(store.records))
 	}
@@ -194,10 +174,11 @@ func TestCacheStoreDropsExpiredRecords(t *testing.T) {
 	}
 }
 
-// 身份缺失、没有块、输入量不为正：都不记。
+// 身份缺失、没有块、缓存量为 0：都不记。
 //
 // APIKeyID / ChannelID 为 0 表示入口没填（测试里直接构造的请求），按 0 归档
-// 会让互不相干的请求共用一条记录。
+// 会让互不相干的请求共用一条记录。缓存量为 0 表示上游这次没有缓存活动——
+// 没有依据就不记，否则下一次会把没命中的算成命中。
 func TestCacheStoreSkipsUnusableRecords(t *testing.T) {
 	at := cacheNow.Add(-5 * time.Second)
 	for _, tc := range []struct {
@@ -206,10 +187,10 @@ func TestCacheStoreSkipsUnusableRecords(t *testing.T) {
 		channelID int64
 		rec       CacheRecord
 	}{
-		{"没有 key", 0, 2, CacheRecord{Blocks: blocks("a"), TotalTokens: 900, SettledAt: at}},
-		{"没有渠道", 1, 0, CacheRecord{Blocks: blocks("a"), TotalTokens: 900, SettledAt: at}},
-		{"没有块", 1, 2, CacheRecord{TotalTokens: 900, SettledAt: at}},
-		{"输入量不是正数", 1, 2, CacheRecord{Blocks: blocks("a"), TotalTokens: 0, SettledAt: at}},
+		{"没有 key", 0, 2, CacheRecord{Blocks: blocks("a"), CachedTokens: 900, SettledAt: at}},
+		{"没有渠道", 1, 0, CacheRecord{Blocks: blocks("a"), CachedTokens: 900, SettledAt: at}},
+		{"没有块", 1, 2, CacheRecord{CachedTokens: 900, SettledAt: at}},
+		{"缓存量为 0", 1, 2, CacheRecord{Blocks: blocks("a"), CachedTokens: 0, SettledAt: at}},
 	} {
 		var store CacheStore
 		store.Record(tc.apiKeyID, tc.channelID, "m", tc.rec, cacheNow)
@@ -223,7 +204,7 @@ func TestCacheStoreSkipsUnusableRecords(t *testing.T) {
 func TestCacheStoreCopiesBlocks(t *testing.T) {
 	var store CacheStore
 	p := blocks("a", "b")
-	store.Record(1, 2, "m", CacheRecord{Blocks: p, TotalTokens: 900, SettledAt: cacheNow.Add(-5 * time.Second)}, cacheNow)
+	store.Record(1, 2, "m", CacheRecord{Blocks: p, CachedTokens: 900, SettledAt: cacheNow.Add(-5 * time.Second)}, cacheNow)
 
 	p[0] = block("x")
 	if got := store.Resolve(1, 2, "m", blocks("a", "b", "c"), cacheNow); got != 900 {

@@ -60,19 +60,6 @@ func (u Usage) TotalTokens() int64 {
 		u.CacheWriteTokens + u.ReasoningTokens
 }
 
-// InputTokens 返回这次请求的**整段**输入 token 数：prompt + cache_read + cache_write。
-//
-// 三项之和就是上游报的 prompt 那一整段：FromChannelUsage 把缓存从 prompt 里
-// 减出去记到 cache_read / cache_write 上了，所以缓存部分在这里只算一次。
-// **别把它写成 u.PromptTokens**——计费口径下那一个是非缓存部分，在缓存占九成
-// 的请求上会小一个数量级。
-//
-// 消费方是缓存前缀记录（见 CacheStore）：记录里必须存整段，因为上游落盘的是
-// 「输入结束位置」那一整段，下一次命中时那一段都按缓存价结算。
-func (u Usage) InputTokens() int64 {
-	return u.PromptTokens + u.CacheReadTokens + u.CacheWriteTokens
-}
-
 // IsEmpty 判断是否完全没有用量。
 //
 // 空用量是有意义的信号：它通常意味着上游返回了错误，或者解析没读到 usage。
