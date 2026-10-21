@@ -269,6 +269,11 @@ type Handler struct {
 	// 一律写 larkax，而那是把一个不知道的事实说成确定的（见 modelsReady）。
 	Catalog ModelCatalog
 
+	// Offers 给 /v1/models 的每条供给求价。与 Models、Catalog 一起必填：
+	// 缺它就只能列模型不给价，而清单的用途正是「发请求之前先看多少钱」。
+	// 判据与求值的实现在 internal/pricing（见 ModelOffers）。
+	Offers ModelOffers
+
 	// Version 是发布版本，写进每个响应的 x-larkax-version 头。
 	// 见 docs/versioning.md：用户报问题时，「你调的是哪个版本」是最该先
 	// 确认的事。留空则不写这个头。

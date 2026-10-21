@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"github.com/sumwai/larkax/internal/adminapi"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/catalog"
+	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/pricing"
@@ -341,6 +343,37 @@ func (f *fakePrices) ReferencePrices(_ context.Context, _ []string, _ time.Time)
 	return f.prices, nil
 }
 
+type fakeSupplies struct {
+	supplies []channels.Supply
+}
+
+func (f *fakeSupplies) Supplies(_ context.Context) ([]channels.Supply, error) {
+	return f.supplies, nil
+}
+
+type fakeOffers struct {
+	base    money.Amount
+	byOwner map[int64]money.Amount
+}
+
+func (f *fakeOffers) Prices(_ context.Context, _ time.Time, candidates []pricing.Candidate) ([]pricing.CandidatePrice, error) {
+	out := []pricing.CandidatePrice{}
+	for _, candidate := range candidates {
+		price := f.base
+		if override, ok := f.byOwner[candidate.OwnerUserID]; ok {
+			price = override
+		}
+		out = append(out, pricing.CandidatePrice{
+			Model:       candidate.Model,
+			ChannelID:   candidate.ChannelID,
+			OwnerUserID: candidate.OwnerUserID,
+			Merchant:    candidate.Merchant,
+			Price:       price,
+		})
+	}
+	return out, nil
+}
+
 // ── 装配 ────────────────────────────────────────────────────────────────
 
 // consoleFixture 是一次装配的全部替身。
@@ -351,8 +384,10 @@ type consoleFixture struct {
 	keys     *fakeKeys
 	usage    *fakeUsage
 	models   *fakeModels
+	supplies *fakeSupplies
 	catalog  *fakeCatalog
 	prices   *fakePrices
+	offers   *fakeOffers
 	spent    map[int64]money.Amount
 	spentN   int
 	// 两组角色路由的资源 handler 是替身：用例验的是角色中间件，不是资源
@@ -398,10 +433,12 @@ func newFixture(t *testing.T) *consoleFixture {
 
 	f := &consoleFixture{
 		sessions: sessions, accounts: accounts, keys: keys, usage: usage,
-		models:  &fakeModels{},
-		catalog: &fakeCatalog{},
-		prices:  &fakePrices{prices: map[string]*pricing.ReferencePrice{}},
-		spent:   map[int64]money.Amount{},
+		models:   &fakeModels{},
+		supplies: &fakeSupplies{},
+		catalog:  &fakeCatalog{},
+		prices:   &fakePrices{prices: map[string]*pricing.ReferencePrice{}},
+		offers:   &fakeOffers{},
+		spent:    map[int64]money.Amount{},
 	}
 	now := testNow
 	f.clock = &now
@@ -417,8 +454,10 @@ func newFixture(t *testing.T) *consoleFixture {
 		keys:          keys,
 		usage:         usage,
 		models:        f.models,
+		supplies:      f.supplies,
 		catalog:       f.catalog,
 		prices:        f.prices,
+		offers:        f.offers,
 		merchantAdmin: stubAdmin(&f.merchantAdminCalls, &f.merchantOwner),
 		adminAdmin:    stubAdmin(&f.adminAdminCalls, &f.adminOwner),
 		spent: func(_ context.Context, ids []int64) (map[int64]money.Amount, error) {
@@ -1152,6 +1191,39 @@ func TestModelsPricingAndETag(t *testing.T) {
 	if third.Code != http.StatusNotModified {
 		t.Fatalf("reference_at 变了不该影响 ETag，得到 %d: %s",
 			third.Code, third.Body.String())
+	}
+}
+
+// 模型页要回答「谁在供、多少钱」：商家名与平台自营（null）都在，
+// 按价格升序；单位是每 1000 个输入 token（与 /v1/models 一致）。
+func TestModelsOffersShowWhoSells(t *testing.T) {
+	f := newFixture(t)
+	f.models.names = []string{"alpha"}
+	f.catalog.models = []catalog.Model{{CanonicalName: "alpha"}}
+	f.supplies.supplies = []channels.Supply{
+		{Model: "alpha", ChannelID: 1, OwnerUserID: 11, Merchant: "acme"},
+		{Model: "alpha", ChannelID: 2},
+	}
+	f.offers.base = mustAmount(t, "0.00400000")
+	f.offers.byOwner = map[int64]money.Amount{11: mustAmount(t, "0.00350000")}
+
+	rec := f.request(t, http.MethodGet, PathPrefix+"models", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("models 应当 200，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	var body modelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("items 长度 = %d，期望 1", len(body.Items))
+	}
+	want := []offerJSON{
+		{Merchant: ptrString("acme"), Price: "0.00350000"},
+		{Price: "0.00400000"},
+	}
+	if !reflect.DeepEqual(body.Items[0].Offers, want) {
+		t.Errorf("offers = %+v，期望 %+v", body.Items[0].Offers, want)
 	}
 }
 

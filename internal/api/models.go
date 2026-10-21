@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"slices"
 	"strings"
+	"time"
 
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/observe"
+	"github.com/sumwai/larkax/internal/pricing"
 )
 
 // PathModels 是模型清单的入口，单条是它加 `/{id}`。
@@ -26,9 +28,9 @@ const PathModels = "/v1/models"
 // 「清单里有、单条却 501」，而这种不一致没有任何东西会报出来。
 const pathModelPrefix = PathModels + "/"
 
-// ModelSupply 回答「哪些规范模型现在有渠道在供」。
+// ModelSupply 回答「哪些规范模型现在有渠道在供、分别是谁在供」。
 //
-// 它直接复用 internal/channels 的 SuppliedModels：那条查询与选路共用同一处
+// 它直接复用 internal/channels 的 Supplies：那条查询与选路共用同一处
 // 谓词（suppliesModel——渠道启用、未删除、models 数组含这个规范名），本包
 // 不另写一份 SQL。另写一份的那天，就是「清单里列着、一发请求却说没有可用
 // 渠道」开始的那天；而那种分歧只会在调用方那里现形。
@@ -37,7 +39,16 @@ const pathModelPrefix = PathModels + "/"
 // 模型，与选路之外的其余读点（控制台的模型页）同一个口径——把健康塞进来会
 // 让「调得通、清单里却没有」成为另一类不一致。
 type ModelSupply interface {
-	SuppliedModels(ctx context.Context) ([]string, error)
+	Supplies(ctx context.Context) ([]channels.Supply, error)
+}
+
+// ModelOffers 给每个「模型 × 渠道」候选取一条适用的规则并求出价格。
+//
+// 取规则与求价的判据在 internal/pricing：本包只负责把候选凑出来、把价格
+// 折成响应形状。不在这里乘一遍用量——那会让接口上的价与账单上的价成为
+// 两份各自的算术（见 internal/pricing/offers.go 的包注释）。
+type ModelOffers interface {
+	Prices(ctx context.Context, at time.Time, candidates []pricing.Candidate) ([]pricing.CandidatePrice, error)
 }
 
 // ModelCatalog 读模型目录，这里只用它的规范名与 vendor（响应的 owned_by）。
@@ -47,6 +58,19 @@ type ModelSupply interface {
 // 适配器，而适配器本身没有第二种行为可测。
 type ModelCatalog interface {
 	Models(ctx context.Context) ([]catalog.Model, error)
+}
+
+// offerJSON 是一个模型的一条报价。
+//
+// Merchant 为 null 表示这条报价来自平台自营渠道（channels.owner_user_id
+// 为 NULL）。它不能写成空串：空串是一个字符串，客户端会把它当成一个叫作
+// 空串的商家。
+type offerJSON struct {
+	Merchant *string `json:"merchant"`
+	// Price 是 1000 个输入 token 的金额，币种沿用结算用的资产维度。
+	// 字符串而不是数字：它是定点数，用 JSON 数字过一遍 float64 会在
+	// 展示与对账之间引入一个没用任何东西报出来的舍入。
+	Price string `json:"price"`
 }
 
 // modelJSON 是清单里的一项，字段与 OpenAI 的 Model 对象逐字对应。
@@ -59,6 +83,12 @@ type modelJSON struct {
 	Object  string `json:"object"`
 	Created int64  `json:"created"`
 	OwnedBy string `json:"owned_by"`
+	// Offers 是供应这个模型的所有报价，按价格升序。
+	//
+	// 没有报价的模型不进清单（见 availableModels），所以这里不会出现空
+	// 数组；omitempty 兜住将来万一的空集合：输出 `"offers": []` 会让
+	// 客户端以为「问了，但没人报价」，而那种状态今天不会出现在响应里。
+	Offers []offerJSON `json:"offers,omitempty"`
 }
 
 // modelListJSON 是清单的响应体。
@@ -76,17 +106,13 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	names, vendors, err := h.availableModels(r.Context())
+	items, err := h.availableModels(r.Context())
 	if err != nil {
 		observe.FromContext(r.Context()).Error("读取模型清单失败", "err", err)
 		writeError(w, channel.ProtocolOpenAI, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	items := make([]modelJSON, 0, len(names))
-	for _, name := range names {
-		items = append(items, newModelJSON(name, vendors[name]))
-	}
 	writeJSON(w, http.StatusOK, jsonBody(modelListJSON{Object: "list", Data: items}))
 }
 
@@ -96,23 +122,28 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request) {
 // 没有」对调用方是同一件事，都是换一个模型。分开的话，调用方就能靠两种
 // 404 去分辨某个名字在不在目录里，而我们没有理由把目录内容告诉一个只是
 // 写错了名字的调用方。
+//
+// 单条与清单走同一个构造函数：两者的对象形状必须逐字相同，各拼一份的那天
+// 就是「清单里有 offers、单条却没有」开始的那天。
 func (h *Handler) serveModel(w http.ResponseWriter, r *http.Request, id string) {
 	if !h.admitModelRead(w, r) {
 		return
 	}
 
-	names, vendors, err := h.availableModels(r.Context())
+	items, err := h.availableModels(r.Context())
 	if err != nil {
 		observe.FromContext(r.Context()).Error("读取模型清单失败", "err", err)
 		writeError(w, channel.ProtocolOpenAI, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	if !slices.Contains(names, id) {
-		writeModelNotFound(w, id)
-		return
+	for _, item := range items {
+		if item.ID == id {
+			writeJSON(w, http.StatusOK, jsonBody(item))
+			return
+		}
 	}
-	writeJSON(w, http.StatusOK, jsonBody(newModelJSON(id, vendors[id])))
+	writeModelNotFound(w, id)
 }
 
 // admitModelRead 跑一次只读请求在写响应之前的检查：方法、装配、鉴权。
@@ -147,33 +178,85 @@ func (h *Handler) admitModelRead(w http.ResponseWriter, r *http.Request) bool {
 
 // modelsReady 报告这条路径要的协作者都装上了没有。
 //
-// 三份都要，包括 Catalog：缺它就只能把 owned_by 一律写成 larkax，而那是把
-// 一个我们不知道的事实说成确定的——与「目录里那一列本来就是空的，用 larkax
-// 补上」不是一回事（后者见 newModelJSON）。
+// 四份都要：Models 与 Offers 缺一条就列不出报价，而一份「只有模型名、
+// 没有价」的清单会把调用方引到一个它查不到成本的模型上；Catalog 缺了
+// 只能把 owned_by 一律写成 larkax，那是把一个我们不知道的事实说成确定的。
 func (h *Handler) modelsReady() bool {
-	return h.Auth != nil && h.Models != nil && h.Catalog != nil
+	return h.Auth != nil && h.Models != nil && h.Catalog != nil && h.Offers != nil
 }
 
-// availableModels 一次取回可用模型名与它们的 vendor。
+// availableModels 一次取回在供模型、vendor 与各自的价格。
 //
-// 两次读而不是一条 JOIN：供给的判据属于 internal/channels，目录的展示字段属于
-// internal/catalog，本包不把两者拼成第三条 SQL——那条 SQL 会成为供给判据的
-// 第二份字面量。清单规模小（这条路不做分页），两次读的代价可以接受。
-func (h *Handler) availableModels(ctx context.Context) ([]string, map[string]string, error) {
-	names, err := h.Models.SuppliedModels(ctx)
+// 三次读：供给（channels）、目录展示字段（catalog）、候选价格（pricing）。
+// 每一份的判据都在它自己的包里，本包不拼一条把这些拼在一起的 SQL——那会
+// 成为供给判据或取价判据的第二份字面量。三条查询都与模型数无关。
+func (h *Handler) availableModels(ctx context.Context) ([]modelJSON, error) {
+	supplies, err := h.Models.Supplies(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	models, err := h.Catalog.Models(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	vendors := make(map[string]string, len(models))
 	for _, model := range models {
 		vendors[model.CanonicalName] = model.Vendor
 	}
-	return names, vendors, nil
+
+	candidates := make([]pricing.Candidate, 0, len(supplies))
+	order := make([]string, 0, len(supplies))
+	seenModel := make(map[string]bool, len(supplies))
+	for _, supply := range supplies {
+		// 供给侧 JOIN 了目录，正常到不了这里；真到了说明两次读之间目录
+		// 被改过。跳过而不是造一个没有展示字段的条目。
+		if _, ok := vendors[supply.Model]; !ok {
+			continue
+		}
+		if !seenModel[supply.Model] {
+			seenModel[supply.Model] = true
+			order = append(order, supply.Model)
+		}
+		candidates = append(candidates, pricing.Candidate{
+			Model:       supply.Model,
+			ChannelID:   supply.ChannelID,
+			OwnerUserID: supply.OwnerUserID,
+			Merchant:    supply.Merchant,
+		})
+	}
+
+	quotes, err := h.Offers.Prices(ctx, h.now().UTC(), candidates)
+	if err != nil {
+		return nil, err
+	}
+	grouped := pricing.GroupByModel(quotes)
+
+	items := make([]modelJSON, 0, len(order))
+	for _, name := range order {
+		offers := grouped[name]
+		if len(offers) == 0 {
+			// 没有报价的模型不列：调用方拿到一个价格未知的模型，唯一的
+			// 下一步是发一次请求再猜账单，而清单的用途正是「发之前先看」。
+			continue
+		}
+		item := newModelJSON(name, vendors[name])
+		item.Offers = newOffersJSON(offers)
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+// newOffersJSON 把折叠好的报价映射成响应形状。
+func newOffersJSON(offers []pricing.Offer) []offerJSON {
+	out := make([]offerJSON, 0, len(offers))
+	for _, offer := range offers {
+		out = append(out, offerJSON{
+			Merchant: offer.Merchant,
+			Price:    offer.Price.String(),
+		})
+	}
+	return out
 }
 
 // newModelJSON 把一条规范模型映射成 OpenAI 的 Model 对象。

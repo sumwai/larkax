@@ -1281,6 +1281,35 @@ textarea.input {
   font-size: 11.5px;
   color: var(--faint);
 }
+.offers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.offers-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--faint);
+}
+.offer-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+}
+.offer-row span {
+  color: var(--muted);
+}
+.offer-row b {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
 
 /* 3.12 自定义下拉 */
 .wrap-rel {

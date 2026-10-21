@@ -29,8 +29,8 @@ import (
 //
 // 占位符沿用 matchQuery 的约定：$1 是匹配时刻，$2 是规范模型名，另加 $3
 // （渠道 id）。窗口与模型名单那两条来自与售价规则共用的那一段。
-const costApplicable = `r.channel_id = $3
-	       AND ` + applicableWindowAndModel
+var costApplicable = `r.channel_id = $3
+	       AND ` + applicableWindowAndModel("$2")
 
 // costOrderBy 是成本规则的裁决次序：渠道 ID 升序 → priority 大的优先 →
 // 模型名单非空的优先于兜底 → id 大的优先。

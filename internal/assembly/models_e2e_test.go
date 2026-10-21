@@ -33,6 +33,12 @@ func TestModelsListFollowsSuppliedChannelsEndToEnd(t *testing.T) {
 
 	owner := seedUser(t, db, true, "0")
 	seedChannel(t, db, sealer, owner, "https://upstream.example.com/v1", supplied)
+
+	// 每个有渠道的模型都给一条平台价：清单现在只列「有报价」的模型，
+	// 没有价的那几个会因为另一条判据缺席，这条用例就钉不住供给判据了。
+	for _, model := range []string{supplied, disabled, removed} {
+		seedRule(t, db, model, `{"prompt": 0.000002}`)
+	}
 	disabledID := seedChannel(t, db, sealer, owner, "https://upstream.example.com/v1", disabled)
 	removedID := seedChannel(t, db, sealer, owner, "https://upstream.example.com/v1", removed)
 
@@ -104,12 +110,23 @@ func TestModelsListFollowsSuppliedChannelsEndToEnd(t *testing.T) {
 		ID      string `json:"id"`
 		Object  string `json:"object"`
 		OwnedBy string `json:"owned_by"`
+		Offers  []struct {
+			Merchant *string `json:"merchant"`
+			Price    string  `json:"price"`
+		} `json:"offers"`
 	}
 	if err := json.Unmarshal(body, &one); err != nil {
 		t.Fatalf("单条响应不是 JSON: %v（%s）", err, body)
 	}
 	if one.ID != supplied || one.Object != "model" || one.OwnedBy != "acme" {
 		t.Errorf("单条响应 = %+v，期望 id=%q、object=model、owned_by=acme", one, supplied)
+	}
+	// 渠道属于商家 owner，但只配了平台价：报价的卖家是这家商家，价是平台价。
+	if len(one.Offers) != 1 {
+		t.Fatalf("单条 offers = %+v，期望一条（平台价兜底）", one.Offers)
+	}
+	if one.Offers[0].Merchant == nil || one.Offers[0].Price != "0.00200000" {
+		t.Errorf("单条 offers[0] = %+v，期望 merchant 非 null、price=0.00200000", one.Offers[0])
 	}
 
 	status, body = getJSON(ctx, t, public.URL+"/v1/models/"+disabled, key)

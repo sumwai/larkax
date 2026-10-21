@@ -842,6 +842,62 @@ func TestSuppliedModelsFollowsTheSameSupplyPredicate(t *testing.T) {
 	}
 }
 
+// Supplies 是报价那一侧要的供给行：模型 + 渠道 + 归属，判据与
+// SuppliedModels 同一条。
+//
+// 平台自营在库里是 owner_user_id = NULL，映射成 0 与空用户名；商家渠道
+// 带出用户名。禁用的渠道与没人供的模型都不出现。
+func TestSuppliesCarryChannelOwner(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := t.Context()
+
+	merchant := seedMerchant(t, db)
+	model := uniqueModel()
+	insertModelCatalog(t, db, model, nil, nil, nil, nil, nil)
+	merchantChannel := insertChannel(ctx, t, db, sealer, channelSpec{ownerUserID: merchant, model: model})
+	platformChannel := insertChannel(ctx, t, db, sealer, channelSpec{model: model})
+
+	disabledModel := uniqueModel()
+	insertModelCatalog(t, db, disabledModel, nil, nil, nil, nil, nil)
+	insertChannel(ctx, t, db, sealer, channelSpec{model: disabledModel, status: "disabled"})
+
+	orphan := uniqueModel()
+	insertModelCatalog(t, db, orphan, nil, nil, nil, nil, nil)
+
+	got, err := New(db, sealer).Supplies(ctx)
+	if err != nil {
+		t.Fatalf("Supplies 出错: %v", err)
+	}
+
+	byChannel := make(map[int64]Supply, len(got))
+	for _, supply := range got {
+		byChannel[supply.ChannelID] = supply
+	}
+	merchantSupply, ok := byChannel[merchantChannel]
+	if !ok {
+		t.Fatalf("商家渠道 %d 不在供给清单里", merchantChannel)
+	}
+	if merchantSupply.Model != model || merchantSupply.OwnerUserID != merchant ||
+		merchantSupply.Merchant != "m"+itoa(merchant) {
+		t.Errorf("商家渠道供给 = %+v，期望 model=%q owner=%d merchant=m%d",
+			merchantSupply, model, merchant, merchant)
+	}
+	platformSupply, ok := byChannel[platformChannel]
+	if !ok {
+		t.Fatalf("平台渠道 %d 不在供给清单里", platformChannel)
+	}
+	if platformSupply.OwnerUserID != 0 || platformSupply.Merchant != "" {
+		t.Errorf("平台渠道供给 = %+v，期望 owner=0、用户名空", platformSupply)
+	}
+
+	for _, supply := range got {
+		if supply.Model == disabledModel || supply.Model == orphan {
+			t.Errorf("%q 不该出现在供给清单里：%+v", supply.Model, supply)
+		}
+	}
+}
+
 // 读点三的补一条：**别名不进清单**。
 //
 // 清单里的名字是规范名——调用方请求时写的就是它。别名只说「这家上游把它
