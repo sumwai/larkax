@@ -426,7 +426,9 @@ def openai_models(ctx: Ctx) -> str:
     `client.models.list()` 验的是「SDK 认不认 `{object: list, data: [...]}`
     这个形状」——自测里我们自己解这个体，认不认是两回事。单条那条验的是
     不可用时 SDK 会不会抛 `NotFoundError`，以及 `error.code` 是不是它按码
-    分支时要读的那个值。
+    分支时要读的那个值。清单还验一条边界：这条用例的渠道没有计价规则，
+    模型仍须在清单里，只是不带 `offers`——「能不能用」与「有没有价」不是
+    同一个条件。
     """
     import openai
 
@@ -442,6 +444,9 @@ def openai_models(ctx: Ctx) -> str:
     check("owned_by", item.owned_by, MODELS_VENDOR)
     # created 固定 0：目录里没有「模型创建时间」这一列（见 internal/api/models.go）。
     check("created", item.created, 0)
+    # 清单管「能不能用」，与有没有定价规则无关：这条用例的渠道没有计价规则，
+    # 模型仍然必须在清单里，只是不带 offers（省略，而不是空数组）。
+    check("没有计价规则时 offers", getattr(item, "offers", None), None)
 
     one = ctx.client.models.retrieve(expected)
     check("retrieve.id", one.id, expected)

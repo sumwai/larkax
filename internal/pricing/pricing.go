@@ -92,10 +92,16 @@ var _ interface {
 // 于是配了通配的规则**一条都匹配不上**，表现为 ErrNoRule 而不是
 // 「按某条规则少收了钱」。宁可在这里失败，也不要静默地按错的价算——
 // 写入路径据此把带通配符的模式拒掉（见 Admin.Create 与 CostAdmin.Create）。
-const applicableWindowAndModel = `r.effective_from <= $1
+//
+// modelExpr 是模型名的 SQL 表达式：单点查询与成本规则传占位符 `$2`，
+// 报价那条一次查全部候选的查询传 unnest 出来的列 `q.model`。占位符约定里
+// 只有 `$1`（匹配时刻）是这一段的固定部分，其余由调用方给。
+func applicableWindowAndModel(modelExpr string) string {
+	return `r.effective_from <= $1
 	       AND (r.effective_to IS NULL OR r.effective_to > $1)
 	       AND (jsonb_array_length(r.model_patterns) = 0
-	            OR (r.model_patterns ? $2))`
+	            OR (r.model_patterns ? ` + modelExpr + `))`
+}
 
 // modelSpecificFirst 是两条线共用的第三条裁决依据：模型名单非空的规则排在
 // 兜底规则（空的 model_patterns）前面。它表达的是「具体 > 兜底」，理由见
@@ -117,7 +123,7 @@ const modelSpecificFirst = `CASE WHEN jsonb_array_length(r.model_patterns) = 0 T
 // ownerExpr 与 channelExpr 是「这次请求的商家与渠道」那两个表达式：单点查询
 // 传占位符（$3/$4），候选查询传 JOIN 进来的列（c.owner_user_id /
 // c.channel_id）。各处的差别只有这一点。占位符约定：$1 是匹配时刻，
-// $2 是规范模型名，调用方保证这一点。
+// $2 是规范模型名，调用方保证这一点；报价那条整批查询传 `q.*` 的列。
 //
 // # 为什么「未选定」不需要额外分支
 //
@@ -126,9 +132,9 @@ const modelSpecificFirst = `CASE WHEN jsonb_array_length(r.model_patterns) = 0 T
 // 任何一行——未选定这件事由数据本身表达，不需要在 SQL 里再写一遍
 // `$3 > 0 AND ...`。后者看着更明确，但它把「0 不是合法 id」这条事实
 // 抄到了第二个地方。
-func ruleApplicable(ownerExpr, channelExpr string) string {
+func ruleApplicable(modelExpr, ownerExpr, channelExpr string) string {
 	return `r.enabled
-	       AND ` + applicableWindowAndModel + `
+	       AND ` + applicableWindowAndModel(modelExpr) + `
 	       AND ((r.scope = 'platform' AND r.owner_user_id IS NULL)
 	            OR (r.scope = 'merchant' AND r.owner_user_id = ` + ownerExpr + `)
 	            OR (r.scope = 'channel' AND r.channel_id = ` + channelExpr + `))`
@@ -182,7 +188,7 @@ const ruleOrderBy = `CASE r.scope
 var matchQuery = `
 	SELECT r.id, r.expr
 	  FROM pricing_rules r
-	 WHERE ` + ruleApplicable("$3", "$4") + `
+	 WHERE ` + ruleApplicable("$2", "$3", "$4") + `
 	 ORDER BY ` + ruleOrderBy + `
 	 LIMIT 1`
 
@@ -213,7 +219,7 @@ var matchAllQuery = `
 	       c.channel_id, c.owner_user_id, r.id, r.expr
 	  FROM unnest($3::bigint[], $4::bigint[]) AS c(channel_id, owner_user_id)
 	  LEFT JOIN pricing_rules r
-	         ON ` + ruleApplicable("c.owner_user_id", "c.channel_id") + `
+	         ON ` + ruleApplicable("$2", "c.owner_user_id", "c.channel_id") + `
 	 ORDER BY c.channel_id, c.owner_user_id, ` + ruleOrderBy
 
 // Match 返回这次请求适用的规则。

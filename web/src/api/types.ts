@@ -119,6 +119,14 @@ export interface ModelModalities {
   output: string[]
 }
 
+/** 一条供应报价：谁在供这个模型、每 1000 个输入 token 多少钱。 */
+export interface ModelOffer {
+  /** 商家用户名；null 表示平台自营。 */
+  merchant: string | null
+  /** 每 1000 个输入 token 的金额。 */
+  price: Money
+}
+
 export interface Model {
   /** 规范模型名，也是调用时 `model` 字段的值。 */
   name: string
@@ -131,6 +139,11 @@ export interface Model {
   modalities: ModelModalities
   /** 没有平台计价规则时为 null，界面显示「—」。 */
   pricing: ModelPricing | null
+  /**
+   * 按渠道归属折出来的报价，已按价格升序、同商家同价只留一条。
+   * 没有报价时服务端省略这个字段（不是空数组）。
+   */
+  offers?: ModelOffer[]
 }
 
 export interface ModelsResponse {

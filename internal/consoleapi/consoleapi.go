@@ -175,6 +175,19 @@ type modelSource interface {
 	SuppliedModels(ctx context.Context) ([]string, error)
 }
 
+// modelSupply 回答「每个模型由哪些渠道在供、渠道归谁」。
+//
+// 与 modelSource 分开是因为两个问题不同：一份只列名字（参考价按名字求），
+// 另一份要逐渠道的归属（报价按渠道的商家取规则）。
+type modelSupply interface {
+	Supplies(ctx context.Context) ([]channels.Supply, error)
+}
+
+// offerSource 给每个「模型 × 渠道」候选取一条适用的规则并求价。
+type offerSource interface {
+	Prices(ctx context.Context, at time.Time, candidates []pricing.Candidate) ([]pricing.CandidatePrice, error)
+}
+
 // catalogSource 读模型目录的展示字段。
 type catalogSource interface {
 	Models(ctx context.Context) ([]catalog.Model, error)
@@ -209,8 +222,10 @@ type deps struct {
 	keys     keyStore
 	usage    usageStore
 	models   modelSource
+	supplies modelSupply
 	catalog  catalogSource
 	prices   priceSource
+	offers   offerSource
 	spent    spentFunc
 }
 
@@ -243,14 +258,17 @@ func New(cfg Config) http.Handler {
 		panic("consoleapi: Config.DB 不能为空")
 	}
 	authStore := auth.New(cfg.DB)
+	channelSource := channels.New(cfg.DB, nil)
 	return newAPI(cfg, deps{
 		sessions: authStore,
 		accounts: authStore,
 		keys:     authStore,
 		usage:    store.New(cfg.DB),
-		models:   channels.New(cfg.DB, nil),
+		models:   channelSource,
+		supplies: channelSource,
 		catalog:  catalog.New(cfg.DB),
 		prices:   pricing.NewReferences(cfg.DB, cfg.Region, cfg.Calendar),
+		offers:   pricing.NewOffers(cfg.DB, cfg.Region, cfg.Calendar),
 		spent: func(ctx context.Context, keyIDs []int64) (map[int64]money.Amount, error) {
 			return keyquota.SpentMany(ctx, cfg.DB, keyIDs)
 		},

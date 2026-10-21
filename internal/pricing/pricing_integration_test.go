@@ -124,10 +124,12 @@ func insertRule(t *testing.T, ctx context.Context, db *sql.DB, spec ruleSpec) in
 	// 消失，而那条分支必须能被测到（见 TestMatchReturnsErrNoRule）。
 	// 本包不产生任何指向 pricing_rules 的外键，所以删得掉。
 	t.Cleanup(func() {
-		// ctx 而不是 context.Background()：两者都是「与测试同生同死」，
-		// 但 t.Cleanup 里那一次删除今天也是链路的一部分，用同一个 ctx
-		// 能让 contextcheck 看清这个 context 确实一路传了下去。
-		_, _ = db.ExecContext(ctx,
+		// **不能直接用 ctx**：t.Context() 在 Cleanup 跑之前就被取消了
+		//（Go 1.24 起的约定），拿它去 DELETE 会以「context canceled」失败，
+		// 而这里的错误是被忽略的——留下的坏规则会让后面的用例撞上它。
+		// WithoutCancel 保留值、去掉取消信号，也正是 contextcheck 想看到的
+		//「一个与测试同生、但不随测试上下文取消而死」的派生。
+		_, _ = db.ExecContext(context.WithoutCancel(ctx),
 			`DELETE FROM pricing_rules WHERE id = $1`, id)
 	})
 	return id

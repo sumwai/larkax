@@ -165,7 +165,7 @@ func (r *References) compute(ctx context.Context, model string, at time.Time) (*
 		SELECT r.id, r.expr
 		  FROM pricing_rules r
 		 WHERE r.enabled
-		   AND `+applicableWindowAndModel+`
+		   AND `+applicableWindowAndModel("$2")+`
 		   AND r.scope = 'platform'
 		 ORDER BY `+ruleOrderBy+`
 		 LIMIT 1`, at, model).Scan(&id, &source)

@@ -86,6 +86,18 @@ type modelJSON struct {
 	Modalities   modalitiesJSON  `json:"modalities"`
 	// Pricing 为 nil 表示没有平台规则——界面显示「—」，不伪造一个起价。
 	Pricing *pricingJSON `json:"pricing"`
+	// Offers 是按渠道归属折出来的报价，按价格升序；没有报价时省略这个
+	// 字段而不是给一个空数组（理由见 api.modelJSON 的同名字段）。
+	Offers []offerJSON `json:"offers,omitempty"`
+}
+
+// offerJSON 是一个模型的一条报价，形状与 /v1/models 的 offers 项相同。
+//
+// Merchant 为 null 表示平台自营。Price 是 1000 个输入 token 的金额——
+// 与同一条目里的 pricing（每百万 token）不是同一个单位，界面必须标出来。
+type offerJSON struct {
+	Merchant *string `json:"merchant"`
+	Price    string  `json:"price"`
 }
 
 // modelsResponse 是模型清单。
@@ -124,6 +136,27 @@ func (a *API) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	supplies, err := a.deps.supplies.Supplies(r.Context())
+	if err != nil {
+		a.unavailable(w, r, err, "读取在供渠道失败")
+		return
+	}
+	candidates := make([]pricing.Candidate, 0, len(supplies))
+	for _, supply := range supplies {
+		candidates = append(candidates, pricing.Candidate{
+			Model:       supply.Model,
+			ChannelID:   supply.ChannelID,
+			OwnerUserID: supply.OwnerUserID,
+			Merchant:    supply.Merchant,
+		})
+	}
+	quotes, err := a.deps.offers.Prices(r.Context(), now, candidates)
+	if err != nil {
+		a.unavailable(w, r, err, "求报价失败")
+		return
+	}
+	offers := pricing.GroupByModel(quotes)
+
 	items := make([]modelJSON, 0, len(names))
 	for _, name := range names {
 		model, ok := byName[name]
@@ -133,7 +166,7 @@ func (a *API) handleModels(w http.ResponseWriter, r *http.Request) {
 			// 条目会让前端显示一行空白。
 			continue
 		}
-		items = append(items, newModelJSON(model, prices[name]))
+		items = append(items, newModelJSON(model, prices[name], offers[name]))
 	}
 
 	// ETag 只对「模型 + 价格」求值：reference_at 是这次求值的时刻，每次请求
@@ -188,7 +221,7 @@ func matchesETag(header, etag string) bool {
 }
 
 // newModelJSON 把目录行与参考价折成一项。
-func newModelJSON(model catalog.Model, price *pricing.ReferencePrice) modelJSON {
+func newModelJSON(model catalog.Model, price *pricing.ReferencePrice, offers []pricing.Offer) modelJSON {
 	out := modelJSON{
 		Name:         model.CanonicalName,
 		DisplayName:  model.DisplayName,
@@ -203,6 +236,12 @@ func newModelJSON(model catalog.Model, price *pricing.ReferencePrice) modelJSON 
 	}
 	if out.DisplayName == "" {
 		out.DisplayName = model.CanonicalName
+	}
+	for _, offer := range offers {
+		out.Offers = append(out.Offers, offerJSON{
+			Merchant: offer.Merchant,
+			Price:    offer.Price.String(),
+		})
 	}
 	if price != nil {
 		out.Pricing = &pricingJSON{

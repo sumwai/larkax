@@ -64,6 +64,7 @@ import (
 	"github.com/sumwai/larkax/internal/plugin/host"
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
 	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
+	"github.com/sumwai/larkax/internal/pricing"
 	"github.com/sumwai/larkax/internal/quota"
 	"github.com/sumwai/larkax/internal/ratelimit"
 	"github.com/sumwai/larkax/internal/route"
@@ -503,7 +504,7 @@ func Build(cfg Config) (*App, error) {
 	// model_catalog，而这个类型只是数据库句柄的包装，没有第二种状态。
 	aliasCatalog := catalog.New(cfg.DB)
 
-	// 渠道的读点。/v1/models 的供给判据（SuppliedModels）与选路那一侧共用
+	// 渠道的读点。/v1/models 的供给判据（Supplies）与选路那一侧共用
 	// 同一个实例：那个类型除了库句柄只有解密器，两边用同一份不会串状态。
 	channelSource := channels.New(cfg.DB, cfg.Sealer)
 
@@ -610,6 +611,9 @@ func Build(cfg Config) (*App, error) {
 	// 两份都必填——缺一份时那两条路径回 501（见 api.Handler 的 Models 字段）。
 	handler.Models = channelSource
 	handler.Catalog = aliasCatalog
+	// 报价与结算共用同一份日历、地区与判据（见 internal/pricing/offers.go）。
+	// 这里传的是装配期读好的那几项，不是每请求现读——与参考价同一个口径。
+	handler.Offers = pricing.NewOffers(cfg.DB, region, calendarEnv)
 	// 决策入口的协作者与 Chatter 是同一个对象（*gateway.Gateway 两条路都实现）。
 	// 分开赋值而不是让 api.New 收两个：那样每个构造点都要多传一个参数，
 	// 而这两个值在生产里永远是同一个。

@@ -3,7 +3,13 @@ import { api } from '../api'
 import { useI18n } from '../i18n'
 import { useSite } from '../site/SiteProvider'
 import { useAsync } from '../hooks/useAsync'
-import { formatCount, formatDateTime, formatMoney, moneySymbol } from '../lib/format'
+import {
+  formatCount,
+  formatDateTime,
+  formatMoney,
+  formatUnitPrice,
+  moneySymbol,
+} from '../lib/format'
 import type { MessageKey } from '../i18n/zh'
 import { Alert, Button, Empty, PageHead, Skeleton } from '../components/ui'
 import { IconModels, IconSearch } from '../components/icons'
@@ -137,6 +143,26 @@ export function Models() {
                     </div>
                   </div>
                   {!model.pricing && <span className="price-note">{t('models.noPricing')}</span>}
+                  {model.offers && model.offers.length > 0 && (
+                    <div className="offers">
+                      <div className="offers-head">
+                        <span>{t('models.offers')}</span>
+                        <span className="tiny">{t('models.offersUnit')}</span>
+                      </div>
+                      {model.offers.map((offer, index) => (
+                        <div
+                          className="offer-row"
+                          key={`${offer.merchant ?? 'platform'}-${offer.price}-${index}`}
+                        >
+                          <span>{offer.merchant ?? t('models.platform')}</span>
+                          <b>
+                            {symbol}
+                            {formatUnitPrice(offer.price)}
+                          </b>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </article>
               ))}
             </div>

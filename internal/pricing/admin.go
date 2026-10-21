@@ -688,7 +688,7 @@ var listQuery = `
 var explainQuery = `
 	SELECT ` + ruleColumns + `
 	  FROM pricing_rules r
-	 WHERE ` + ruleApplicable("$3", "$4") + `
+	 WHERE ` + ruleApplicable("$2", "$3", "$4") + `
 	 ORDER BY ` + ruleOrderBy
 
 // lockRuleQuery 读出一条规则并锁住它，供修改路径做读-改-写。
