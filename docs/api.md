@@ -613,10 +613,10 @@ the account balance ran out while this response was streaming, so it was cut sho
   声明被拒、`store` 被丢弃），同样是刻意的，见 [contract/README.md](../contract/README.md)
   的「Responses 入口上的四条」。
 
-## 控制台商家接口：概览与上游
+## 控制台商家接口：概览、上游与我的模型
 
-这两个只读端点挂在控制台的 `/api/v1/merchant/` 下，要求控制台会话（HttpOnly
-Cookie）与 `merchant` 角色；`admin` 也能进，且**不限定归属**（看全部渠道）。
+这三个只读端点挂在控制台的 `/api/v1/merchant/` 下，要求控制台会话（HttpOnly
+Cookie）与 `merchant` 角色；`admin` 也能进，且**不限定归属**（看全部渠道与模型）。
 未登录 `401`，非商家 `403`。成功的响应都是 `application/json`。
 
 ### 概览
@@ -676,6 +676,40 @@ Cookie）与 `merchant` 角色；`admin` 也能进，且**不限定归属**（�
 - **响应里没有任何凭证**：只有类型、地址、渠道 id 与名字；凭证提示与信封信息
   都不在这一组里。
 
+### 我的模型
+
+`GET /api/v1/merchant/models?limit=`
+
+```json
+{
+  "items": [
+    {"model": "gpt-4o", "display_name": "GPT-4o", "channels": 2, "priced": true}
+  ],
+  "total": 1,
+  "truncated": false
+}
+```
+
+- 只列**在供**的模型：判据与概览的 `models_in_supply` 是同一段（渠道已启用、
+  未软删、`models` 含该规范名、目录里有这一行）。停用、软删、不含该名的渠道
+  都不计入。
+- `channels`：名下在供这个模型的渠道数。同一个 `(type, base_url)` 上的多个
+  账号各算一条——它们是不同账号，不是重复行。
+- `display_name`：目录里的展示名；为空时给规范名本身。
+- `priced`：这个商家**生效中**（已启用、已到生效时刻、未过期）的 merchant
+  作用域规则里，有没有一条命中这个模型——模型名单为空（兜底，适用于全部
+  模型）或含这个规范名。没有价是 `false`，不是 `null`。
+- `priced` 回答的是「我给这个模型配过价没有」，**不是**「这个模型实际按哪条
+  计价」：多条命中时计价引擎按裁决次序只取一条（作用域 `channel` >
+  `merchant` > `platform` → `priority` 大的优先 → 模型名单非空的优先于兜底
+  → id 大的），渠道作用域的规则还可能让商家的规则完全不生效。平台规则与
+  渠道规则不计入这一列。
+- 管理员看全局时是同一套判据、不同的主语：问的是「全平台有没有一条商家
+  规则命中它」，**不要求规则的主人正在供这个模型**——一条挂着某个模型的
+  商家规则会让管理员在这一行看到 `true`，哪怕那位商家没有任何在供它的渠道。
+- 按规范名升序；`limit` 默认 50、上限 200，越界回 `400`；被截断时
+  `truncated: true`、`total` 给截断前的条数。
+
 ## 改它的时候
 
 | 要改什么 | 改哪 |
@@ -687,6 +721,7 @@ Cookie）与 `merchant` 角色；`admin` 也能进，且**不限定归属**（�
 | 错误体的形状 | `internal/api/error.go`（每套协议一份独立结构体） |
 | 请求体上限 | `internal/api` 的 `maxRequestBodyBytes` |
 | 控制台商家概览与上游的读数口径（异常理由、分组、窗口） | `internal/adminapi/merchant_ops.go`、`internal/channels/health.go` |
+| 控制台商家「我的模型」的在供判据、渠道数与 `priced` 口径 | `internal/adminapi/merchant_models.go`、`internal/channels/channels.go` 的 `SuppliedModelsOwned` |
 | 流式的帧序列 | `internal/api/stream.go`（每套协议一个渲染器） |
 | 流中途的错误帧 | `internal/api/stream.go` 的 `streamErrorFrame` 与 `responsesStream.errorFrame` |
 | 响应头 | `internal/api` 的 `HeaderVersion` / `HeaderRetryAfter`、`internal/observe` 的 `HeaderRequestID` |
