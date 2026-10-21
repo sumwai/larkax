@@ -118,21 +118,29 @@ describe('运营渠道页', () => {
     expect(await screen.findByText('还没有渠道')).toBeInTheDocument()
   })
 
-  it('加载失败时显示服务端给的那句话，并给出重试', async () => {
+  it('加载失败遇到 403 时显示本地文案，并给出重试', async () => {
     mocks.listChannels.mockRejectedValue(
       new ApiError(403, 'forbidden', 'you do not have permission to perform this action'),
     )
     renderChannels()
-    expect(
-      await screen.findByText('you do not have permission to perform this action'),
-    ).toBeInTheDocument()
+    expect(await screen.findByText('没有权限访问这个资源。')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
   })
 
-  it('别人的渠道返回 404，页面显示后端文案', async () => {
+  it('5xx 用我们自己的话，不透出服务端给运维看的那句', async () => {
+    mocks.listChannels.mockRejectedValue(new ApiError(500, 'internal', 'dial tcp: connection refused'))
+    renderChannels()
+    expect(await screen.findByText('数据加载失败。')).toBeInTheDocument()
+    expect(screen.queryByText('dial tcp: connection refused')).not.toBeInTheDocument()
+  })
+
+  it('别人的渠道返回 404，页面用中文说明，不显示后端的 not found', async () => {
     mocks.listChannels.mockRejectedValue(new ApiError(404, 'not_found', 'channel not found'))
     renderChannels('merchant')
-    expect(await screen.findByText('channel not found')).toBeInTheDocument()
+    expect(
+      await screen.findByText('没有找到这个资源，可能已被删除，或者不属于你。'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText('channel not found')).not.toBeInTheDocument()
   })
 
   it('停用渠道先确认，确认之后才发请求', async () => {
@@ -154,7 +162,7 @@ describe('运营渠道页', () => {
     )
   })
 
-  it('越权写操作在确认弹窗里显示 403 文案', async () => {
+  it('越权写操作在确认弹窗里显示 403 的本地文案', async () => {
     mocks.listChannels.mockResolvedValue([CHANNEL])
     mocks.updateChannel.mockRejectedValue(
       new ApiError(403, 'forbidden', 'you do not have permission to perform this action'),
@@ -164,9 +172,7 @@ describe('运营渠道页', () => {
     fireEvent.click(await screen.findByRole('button', { name: '停用' }))
     fireEvent.click(screen.getByRole('button', { name: '确认' }))
 
-    expect(
-      await screen.findByText('you do not have permission to perform this action'),
-    ).toBeInTheDocument()
+    expect(await screen.findByText('没有权限访问这个资源。')).toBeInTheDocument()
     expect(screen.getByRole('dialog')).toBeInTheDocument()
   })
 
@@ -184,14 +190,17 @@ describe('运营渠道页', () => {
     expect(dialog).toHaveTextContent('abcd')
   })
 
-  it('详情取不到时显示服务端那句话', async () => {
+  it('详情取不到（404）时同样用本地文案', async () => {
     mocks.listChannels.mockResolvedValue([CHANNEL])
     mocks.getChannel.mockRejectedValue(new ApiError(404, 'not_found', 'channel not found'))
     renderChannels('merchant')
 
     fireEvent.click(await screen.findByRole('button', { name: '查看' }))
 
-    expect(await screen.findByText('channel not found')).toBeInTheDocument()
+    expect(
+      await screen.findByText('没有找到这个资源，可能已被删除，或者不属于你。'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText('channel not found')).not.toBeInTheDocument()
   })
 
   it('本地校验不通过时不发请求，错误留在表单里', async () => {

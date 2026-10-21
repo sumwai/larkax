@@ -83,4 +83,15 @@ describe('运营视图的角色门槛', () => {
     expect(await screen.findByText('还没有渠道')).toBeInTheDocument()
     expect(mocks.listChannels).toHaveBeenCalled()
   })
+
+  it('/app/merchant 落到渠道页', async () => {
+    await open('merchant', '/app/merchant')
+    expect(await screen.findByText('还没有渠道')).toBeInTheDocument()
+  })
+
+  it('无权限页留一个回到概览的出口', async () => {
+    await open('merchant', '/app/admin/channels')
+    expect(await screen.findByText('这个视图不在你的权限范围内。')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '回到概览' })).toHaveAttribute('href', '/app')
+  })
 })

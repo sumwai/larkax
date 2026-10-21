@@ -8,22 +8,32 @@ import {
 } from 'react'
 import { ApiError } from '../../api'
 import { useI18n } from '../../i18n'
+import type { MessageKey } from '../../i18n/zh'
 import { Alert, Button, Modal } from '../../components/ui'
+
+/** 这几个状态码的正文是给调用方看的英文短句，换成我们自己的话。 */
+const LOCALIZED_WORDS: Partial<Record<number, MessageKey>> = {
+  401: 'ops.error.unauthorized',
+  403: 'ops.error.forbidden',
+  404: 'ops.error.notFound',
+}
 
 /**
  * 把一次失败分成「参数不对」与「服务端故障」两类。
  *
- * 4xx 的正文由服务端给（校验失败、越权、别人家的渠道），原样显示；5xx 与
- * 网络错误转成一句我们自己的话——那种错误的服务端文案通常是给运维看的。
+ * 其余的 4xx 正文由服务端给（校验失败），原样显示；5xx 与网络错误转成一句
+ * 我们自己的话——那种错误的服务端文案通常是给运维看的。
  */
 export function describeError(
   error: unknown,
-  fallback: string,
+  t: (key: MessageKey) => string,
+  fallback: MessageKey,
 ): { input: boolean; message: string } {
   if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
-    return { input: true, message: error.message }
+    const word = LOCALIZED_WORDS[error.status]
+    return { input: true, message: word ? t(word) : error.message }
   }
-  return { input: false, message: fallback }
+  return { input: false, message: t(fallback) }
 }
 
 /**
@@ -110,7 +120,7 @@ export function useConfirm() {
       await config.run()
       setConfig(null)
     } catch (failure) {
-      setError(describeError(failure, t('ops.serverError')).message)
+      setError(describeError(failure, t, 'ops.serverError').message)
     } finally {
       setPending(false)
     }
@@ -143,7 +153,7 @@ export function useConfirm() {
 export function OpsLoadError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
   const { t } = useI18n()
   // 越权与「不是你的」都属于 4xx：正文是服务端那句话，原样显示。
-  const { message } = describeError(error, t('ops.loadFailed'))
+  const { message } = describeError(error, t, 'ops.loadFailed')
   return (
     <Alert tone="bad" title={message}>
       <Button variant="secondary" size="sm" onClick={onRetry} style={{ marginTop: 8 }}>

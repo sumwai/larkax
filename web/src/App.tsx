@@ -53,7 +53,14 @@ function RequireView({ view, children }: { view: View; children: ReactNode }) {
   const { user } = useAuth()
   const { t } = useI18n()
   if (!viewsFor(user?.role).includes(view)) {
-    return <Alert tone="bad" title={t('ops.noAccess')} />
+    return (
+      <Alert tone="bad" title={t('ops.noAccess')}>
+        {t('ops.noAccessNext')}{' '}
+        <Link className="btn secondary sm" to="/app">
+          {t('ops.backToOverview')}
+        </Link>
+      </Alert>
+    )
   }
   return <>{children}</>
 }
@@ -100,11 +107,7 @@ export function App() {
                     <Route path="settings" element={<Settings />} />
                     <Route
                       path="merchant"
-                      element={
-                        <RequireView view="merchant">
-                          <OpsChannels scope="merchant" />
-                        </RequireView>
-                      }
+                      element={<Navigate to="/app/merchant/channels" replace />}
                     />
                     <Route
                       path="merchant/channels"
