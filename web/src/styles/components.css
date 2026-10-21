@@ -768,6 +768,32 @@ textarea.input {
   border-bottom-color: var(--accent);
   font-weight: 600;
 }
+.tabs button[aria-invalid='true'] {
+  color: var(--danger);
+}
+.tabs .tab-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--danger);
+  vertical-align: middle;
+}
+
+/* 编辑弹窗的内容区：给一个最小高度，切分组时底部按钮不跟着上下跳。
+   左边那条竖线只在有校验错误时着色；始终占位，所以出现错误也不挤动内容。 */
+.model-form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 268px;
+  padding-left: 12px;
+  border-left: 2px solid transparent;
+}
+.model-form-group.is-invalid {
+  border-left-color: var(--danger);
+}
 .seg {
   display: inline-flex;
   background: var(--surface);

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '../../i18n'
 import { SiteProvider } from '../../site/SiteProvider'
@@ -82,6 +82,11 @@ async function openCreate() {
   return document.getElementById('model-form') as HTMLFormElement
 }
 
+// tab 的可及名字在有校验错误时会多出圆点的 aria-label，所以按前缀匹配。
+function tab(label: string) {
+  return screen.getByRole('tab', { name: new RegExp(`^${label}`) })
+}
+
 describe('模型目录页', () => {
   beforeEach(() => {
     Object.values(mocks).forEach((mock) => mock.mockReset())
@@ -128,6 +133,7 @@ describe('模型目录页', () => {
 
     const form = await openCreate()
     fireEvent.change(screen.getByLabelText('规范名'), { target: { value: 'gpt-4.1' } })
+    fireEvent.click(tab('能力'))
     fireEvent.change(screen.getByLabelText('推理'), { target: { value: 'no' } })
     fireEvent.submit(form)
 
@@ -190,5 +196,143 @@ describe('模型目录页', () => {
     fireEvent.click(buttons[buttons.length - 1])
 
     expect(await screen.findByText('model already exists')).toBeInTheDocument()
+  })
+
+  it('四组 tab 都在，切换后看到对应字段', async () => {
+    mocks.listModels.mockResolvedValue([])
+    renderModels()
+    await openCreate()
+
+    for (const label of ['基本', '限制', '能力', '模态与时间']) {
+      expect(tab(label)).toBeInTheDocument()
+    }
+    // 默认停在「基本」。
+    expect(tab('基本')).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByLabelText('规范名')).toBeInTheDocument()
+
+    fireEvent.click(tab('限制'))
+    expect(screen.getByLabelText('上下文上限')).toBeInTheDocument()
+    expect(screen.queryByLabelText('规范名')).not.toBeInTheDocument()
+
+    fireEvent.click(tab('能力'))
+    expect(screen.getByLabelText('端点（每行一个）')).toBeInTheDocument()
+    expect(screen.getByLabelText('推理')).toBeInTheDocument()
+
+    fireEvent.click(tab('模态与时间'))
+    expect(tab('模态与时间')).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByLabelText('知识截止')).toBeInTheDocument()
+    expect(screen.getByLabelText('输入模态（每行一个）')).toBeInTheDocument()
+  })
+
+  it('规范名留空提交时停在「基本」组并标出错误', async () => {
+    mocks.listModels.mockResolvedValue([])
+    renderModels()
+    const form = await openCreate()
+
+    // 先切到别组再提交：错误必须把人带回看不到的那个组。
+    fireEvent.click(tab('能力'))
+    fireEvent.submit(form)
+
+    expect(await screen.findByText('请填规范名。')).toBeInTheDocument()
+    expect(tab('基本')).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByLabelText('规范名')).toBeInTheDocument()
+    expect(within(tab('基本')).getByLabelText('这一组有校验错误')).toBeInTheDocument()
+    expect(mocks.createModel).not.toHaveBeenCalled()
+  })
+
+  it('上限填非整数时跳到「限制」组', async () => {
+    mocks.listModels.mockResolvedValue([])
+    renderModels()
+    const form = await openCreate()
+
+    fireEvent.change(screen.getByLabelText('规范名'), { target: { value: 'gpt-4.1' } })
+    fireEvent.click(tab('限制'))
+    fireEvent.change(screen.getByLabelText('上下文上限'), { target: { value: '12.5' } })
+    fireEvent.click(tab('基本'))
+    fireEvent.submit(form)
+
+    expect(await screen.findByText('这一栏要填整数。')).toBeInTheDocument()
+    expect(tab('限制')).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByLabelText('上下文上限')).toHaveValue('12.5')
+    expect(within(tab('限制')).getByLabelText('这一组有校验错误')).toBeInTheDocument()
+    expect(mocks.createModel).not.toHaveBeenCalled()
+  })
+
+  it('切换分组不丢已填内容', async () => {
+    mocks.listModels.mockResolvedValue([])
+    renderModels()
+    await openCreate()
+
+    fireEvent.change(screen.getByLabelText('显示名'), { target: { value: '保留我' } })
+    fireEvent.change(screen.getByLabelText('厂商'), { target: { value: 'example' } })
+
+    fireEvent.click(tab('能力'))
+    fireEvent.click(tab('模态与时间'))
+    fireEvent.click(tab('基本'))
+
+    expect(screen.getByLabelText('显示名')).toHaveValue('保留我')
+    expect(screen.getByLabelText('厂商')).toHaveValue('example')
+  })
+
+  it('保存发出的载荷与改动前逐字段一致', async () => {
+    mocks.listModels.mockResolvedValue([])
+    mocks.createModel.mockResolvedValue(1)
+    renderModels()
+    const form = await openCreate()
+
+    fireEvent.change(screen.getByLabelText('规范名'), { target: { value: 'gpt-x' } })
+    fireEvent.change(screen.getByLabelText('显示名'), { target: { value: 'GPT X' } })
+    fireEvent.change(screen.getByLabelText('厂商'), { target: { value: 'openai' } })
+    fireEvent.change(screen.getByLabelText('系列'), { target: { value: 'gpt' } })
+
+    fireEvent.click(tab('限制'))
+    fireEvent.change(screen.getByLabelText('上下文上限'), { target: { value: '1000' } })
+    fireEvent.change(screen.getByLabelText('输入上限'), { target: { value: '900' } })
+    fireEvent.change(screen.getByLabelText('输出上限'), { target: { value: '100' } })
+
+    fireEvent.click(tab('能力'))
+    fireEvent.change(screen.getByLabelText('推理'), { target: { value: 'no' } })
+    fireEvent.change(screen.getByLabelText('工具'), { target: { value: 'yes' } })
+    fireEvent.change(screen.getByLabelText('音频'), { target: { value: 'yes' } })
+    fireEvent.change(screen.getByLabelText('缓存'), { target: { value: 'no' } })
+    fireEvent.change(screen.getByLabelText('端点（每行一个）'), {
+      target: { value: 'chat\nresponses' },
+    })
+
+    fireEvent.click(tab('模态与时间'))
+    fireEvent.change(screen.getByLabelText('输入模态（每行一个）'), {
+      target: { value: 'text\nimage' },
+    })
+    fireEvent.change(screen.getByLabelText('输出模态（每行一个）'), { target: { value: 'text' } })
+    fireEvent.change(screen.getByLabelText('知识截止'), { target: { value: '2024-03-01' } })
+    fireEvent.change(screen.getByLabelText('发布日期'), { target: { value: '2024-06-01' } })
+
+    fireEvent.submit(form)
+    const buttons = await screen.findAllByRole('button', { name: '创建' })
+    fireEvent.click(buttons[buttons.length - 1])
+
+    await waitFor(() => expect(mocks.createModel).toHaveBeenCalledTimes(1))
+    expect(mocks.createModel.mock.calls[0][0]).toEqual({
+      canonical_name: 'gpt-x',
+      display_name: 'GPT X',
+      vendor: 'openai',
+      family: 'gpt',
+      context_limit: 1000,
+      input_limit: 900,
+      output_limit: 100,
+      knowledge_cutoff: '2024-03-01',
+      release_date: '2024-06-01',
+      modalities_input: ['text', 'image'],
+      modalities_output: ['text'],
+      capabilities: {
+        reasoning: false,
+        tools: true,
+        vision: null,
+        audio: true,
+        cache: false,
+        batch: null,
+        endpoints: ['chat', 'responses'],
+      },
+    })
   })
 })
