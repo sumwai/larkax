@@ -78,6 +78,14 @@ type offerJSON struct {
 	// 单独给一份而不只给 price：缓存读与推理的单价与输入价不是倍数关系，
 	// 调用方用 price 估算一笔缓存为主的请求会差出好几倍。
 	Prices map[string]string `json:"prices,omitempty"`
+	// Request 是每请求的固定费用（元）。为 0 时省略这个键：规则没写固定费
+	// 与写了 0 元都不收费，给一个 "0.00000000" 会被读成「确认免费」。
+	Request *string `json:"request,omitempty"`
+	// Minimum 是每次请求的最低消费（元）。为 0 时省略。
+	Minimum *string `json:"minimum,omitempty"`
+	// Units 是非 token 计量项的单价（每个计量单位多少元），键是规则里
+	// 写过的计量项名。没有计量项时省略这个字段。
+	Units map[string]string `json:"units,omitempty"`
 }
 
 // modelJSON 是清单里的一项，字段与 OpenAI 的 Model 对象逐字对应。
@@ -263,9 +271,23 @@ func newOffersJSON(offers []pricing.Offer) []offerJSON {
 			Merchant: offer.Merchant,
 			Price:    offer.Price.String(),
 			Prices:   dimensionPricesJSON(offer.Prices),
+			Request:  amountOrNil(offer.Request),
+			Minimum:  amountOrNil(offer.Minimum),
+			Units:    dimensionPricesJSON(offer.Units),
 		})
 	}
 	return out
+}
+
+// amountOrNil 把 0 金额编码成「省略这个键」：固定费与最低消费的零值同时
+// 表示「规则没写」与「写了 0 元」，两者都是一分钱不收，省略比给一个
+// "0.00000000" 更少被误读成「确认免费」。
+func amountOrNil(amount money.Amount) *string {
+	if amount == money.Zero {
+		return nil
+	}
+	value := amount.String()
+	return &value
 }
 
 // dimensionPricesJSON 把维度价映射成响应里的字符串 map。

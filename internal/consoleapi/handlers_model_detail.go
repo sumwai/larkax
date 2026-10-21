@@ -96,8 +96,29 @@ type supplierJSON struct {
 	// Prices 是各 token 维度的千 token 金额，键是 prompt / completion /
 	// cache_read / cache_write / reasoning；只含规则写过的维度。
 	Prices map[string]string `json:"prices,omitempty"`
+	// Request / Minimum 是每请求的固定费用与最低消费（每次请求多少元），
+	// Units 是计量项单价（每个计量单位多少元）。为 0 或没有计量项时省略。
+	Request *string           `json:"request,omitempty"`
+	Minimum *string           `json:"minimum,omitempty"`
+	Units   map[string]string `json:"units,omitempty"`
+	// Rule 说明这套价出自哪条规则；口径见 ruleJSON。
+	Rule *ruleJSON `json:"rule,omitempty"`
 	// ChannelCount 是这套价对应的渠道条数（同一商家同价的多条供给折成一行）。
 	ChannelCount int `json:"channel_count"`
+}
+
+// ruleJSON 是一条规则的对外元信息：编号、作用域、优先级与生效窗口。
+//
+// 不含表达式源码，也不含 owner id 与 channel id：这一页是公开的，前两者
+// 会把定价逻辑与「谁定的价」暴露出去，渠道 id 还能关联到运营面的记录。
+// 作用域只说这一档价是按渠道、按商家还是平台兜底定的。
+type ruleJSON struct {
+	ID            int64  `json:"id"`
+	Scope         string `json:"scope"`
+	Priority      int    `json:"priority"`
+	EffectiveFrom string `json:"effective_from"`
+	// EffectiveTo 为 null 表示不过期。
+	EffectiveTo *string `json:"effective_to"`
 }
 
 // handleModelDetail 返回一个在供模型的全部展示字段与供应商报价。
@@ -245,12 +266,33 @@ func dateValue(value *time.Time) *string {
 func newSuppliers(offers []pricing.Offer) []supplierJSON {
 	out := make([]supplierJSON, 0, len(offers))
 	for _, offer := range offers {
-		out = append(out, supplierJSON{
+		entry := supplierJSON{
 			Merchant:     offer.Merchant,
 			Price:        offer.Price.String(),
 			Prices:       dimensionPricesJSON(offer.Prices),
+			Request:      amountOrNil(offer.Request),
+			Minimum:      amountOrNil(offer.Minimum),
+			Units:        dimensionPricesJSON(offer.Units),
 			ChannelCount: offer.ChannelCount,
-		})
+		}
+		// 有价的报价一定来自一条规则；编号为 0 只可能来自没有规则来源的
+		// 构造，那时不给一个空壳 rule——它会让页面显示一条不存在的规则。
+		if offer.Rule.ID != 0 {
+			entry.Rule = newRuleJSON(offer.Rule)
+		}
+		out = append(out, entry)
 	}
 	return out
+}
+
+// newRuleJSON 把规则的元信息映射成响应形状。时刻统一成 RFC3339 UTC，
+// 与 reference_at 同一个格式。
+func newRuleJSON(rule pricing.RuleRef) *ruleJSON {
+	return &ruleJSON{
+		ID:            rule.ID,
+		Scope:         rule.Scope,
+		Priority:      rule.Priority,
+		EffectiveFrom: formatTime(rule.EffectiveFrom),
+		EffectiveTo:   optionalTime(rule.EffectiveTo),
+	}
 }

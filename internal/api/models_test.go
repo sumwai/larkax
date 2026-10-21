@@ -752,3 +752,69 @@ func TestModelsOffersSplitByWholePriceSet(t *testing.T) {
 		t.Errorf("offers = %+v，期望 %+v", body.Data[0].Offers, want)
 	}
 }
+
+// 报价带上每请求的固定费用、最低消费与计量项单价；为 0 或没有计量项时
+// 省略这个键——给一个 "0.00000000" 会被读成「确认免费」。
+//
+// 断言序列化后的键集合，而不是结构体字段：omitempty 是否生效只能在 JSON
+// 上看出来，而客户端拿到的正是这一份。
+func TestOffersJSONCarriesChargesAndUnits(t *testing.T) {
+	const prompt = "0.00300000"
+	offers := newOffersJSON([]pricing.Offer{
+		{
+			Price:   money.MustParse(prompt),
+			Prices:  map[string]money.Amount{"prompt": money.MustParse(prompt)},
+			Request: money.MustParse("0.05000000"),
+			Minimum: money.MustParse("1.00000000"),
+			Units:   map[string]money.Amount{"cache_write_5m": money.MustParse("0.00030000")},
+		},
+		{
+			Price:  money.MustParse("0.00400000"),
+			Prices: map[string]money.Amount{"prompt": money.MustParse("0.00400000")},
+		},
+	})
+
+	encoded, err := json.Marshal(offers)
+	if err != nil {
+		t.Fatalf("序列化报价失败: %v", err)
+	}
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &raw); err != nil {
+		t.Fatalf("响应不是 JSON: %v（%s）", err, encoded)
+	}
+	if len(raw) != 2 {
+		t.Fatalf("报价条数 = %d，期望 2", len(raw))
+	}
+
+	wantKeys := map[string]bool{
+		"merchant": true, "price": true, "prices": true,
+		"request": true, "minimum": true, "units": true,
+	}
+	for key := range wantKeys {
+		if _, ok := raw[0][key]; !ok {
+			t.Errorf("第一条报价缺字段 %q：%v", key, raw[0])
+		}
+	}
+	if len(raw[0]) != len(wantKeys) {
+		t.Errorf("第一条报价有 %d 个字段，期望正好 %d 个：%v", len(raw[0]), len(wantKeys), raw[0])
+	}
+	// 没写固定费、最低消费与计量项：这三个键一个都不出现。
+	for _, absent := range []string{"request", "minimum", "units"} {
+		if _, ok := raw[1][absent]; ok {
+			t.Errorf("第二条报价多出字段 %q（规则没写，应为省略）：%v", absent, raw[1])
+		}
+	}
+
+	// 每条报价的 price 都与 prices.prompt 相等：两个字段同源，乘 1000
+	// 的换算只发生在「每个 token 单价 → 每千 token 金额」那一步。
+	var decoded []offerJSON
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("解码报价失败: %v", err)
+	}
+	for i, offer := range decoded {
+		if offer.Price != offer.Prices["prompt"] {
+			t.Errorf("第 %d 条报价 price = %s 与 prices.prompt = %s 不一致",
+				i, offer.Price, offer.Prices["prompt"])
+		}
+	}
+}

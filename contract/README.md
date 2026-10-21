@@ -34,7 +34,7 @@
 | 客户端错误 400 | SDK 抛 `BadRequestError`，`error.type` 是 `invalid_request_error`；Responses 另有「缺 `max_output_tokens`」与「空 `input`」两条，文案分别点名这两个字段 |
 | 认证错误 401 | SDK 抛 `AuthenticationError`；OpenAI 与 Responses 的 `error.code` 是 `invalid_api_key`，Anthropic 的 `error.type` 是 `authentication_error` |
 | 上游错误 5xx | 上游回 500 时我们回 502，SDK 抛 `APIStatusError`；OpenAI 与 Responses 的 `error.code` 是 `upstream_http_error`（`error.type` 仍是 `api_error`），Anthropic 的 `error.type` 就是那个码 |
-| 模型清单 | `models.list()` 与 `models.retrieve()` 读到的是可用模型：`object`、`id`、`owned_by`（取目录里的 vendor）、`created`；没有计价规则的模型仍然在清单里、只是不带 `offers`；不可用时抛 `NotFoundError`，`error.code` 是 `model_not_found`。这条只在 `openai` 那一套里跑——两条路径与调用协议无关，而 `anthropic` 客户端没有对应的资源方法 |
+| 模型清单 | `models.list()` 与 `models.retrieve()` 读到的是可用模型：`object`、`id`、`owned_by`（取目录里的 vendor）、`created`；配了计价规则的模型带 `offers`，且 `offers[].price` 等于 `prices.prompt`；不可用时抛 `NotFoundError`，`error.code` 是 `model_not_found`。这条只在 `openai` 那一套里跑——两条路径与调用协议无关，而 `anthropic` 客户端没有对应的资源方法 |
 
 「流式·余额耗尽」那一条需要一个**真的**余额不足：假上游没法让服务端走进那条路，
 所以它配了单独一份价目（几个阈值段就把余额花光）与一条很长的流

@@ -197,6 +197,9 @@ func runContract(t *testing.T, protocol channel.Protocol) {
 	// 来自目录行。渠道指同一个假上游，但这条用例不会给它发请求。
 	seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL, fake.modelsModel, string(protocol), 0)
 	insertCatalogModel(t, db, fake.modelsModel, contractModelsVendor)
+	// 清单里的模型要带价：契约验的是 offers 的单价表与 price 同源。
+	// 「没有规则就不带 offers」是另一条边界，由 internal/api 的用例钉住。
+	seedRule(t, db, fake.modelsModel, rule)
 
 	// 阈值段压到 64 个 Token。
 	//

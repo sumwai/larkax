@@ -56,6 +56,20 @@ type Candidate struct {
 	Merchant string
 }
 
+// RuleRef 是一条规则对外可见的那部分元信息：编号、作用域、优先级与生效窗口。
+//
+// 不含表达式源码，也不含 owner id 与 channel id：源码是定价逻辑，后两者是
+// 「谁定的价」，而两条公开响应都不能把它们给出去。作用域只说这一档价是按
+// 渠道、按商家还是平台兜底定的，不指到具体是哪条渠道。
+type RuleRef struct {
+	ID            int64
+	Scope         string
+	Priority      int
+	EffectiveFrom time.Time
+	// EffectiveTo 为 nil 表示不过期。
+	EffectiveTo *time.Time
+}
+
 // CandidatePrice 是一个候选的报价。
 //
 // 没有配价（或规则全部不适用）的候选**不出现**在结果里：`Price` 的零值是
@@ -75,6 +89,19 @@ type CandidatePrice struct {
 	// 规则没写 prompt 时它是零值——要区分「免费」与「没写」，看 Prices 里
 	// 有没有这个键，不要看 Price 的大小。
 	Price money.Amount
+	// Request 是每请求的固定费用（charges.Fixed），量纲是「每次请求多少元」，
+	// 不能与 Prices 里那些「每 1000 个 token 多少元」相加。零值表示规则
+	// 没写固定费。
+	Request money.Amount
+	// Minimum 是每次请求的最低消费（charges.Minimum）。零值表示没写。
+	Minimum money.Amount
+	// Units 是非 token 计量项的单价，键是规则里写过的计量项名（例如
+	// cache_write_5m）；每个值都是「每个计量单位多少元」。
+	//
+	// 与 Prices 一样由同一次求值得到，调用方不得修改。
+	Units map[string]money.Amount
+	// Rule 是这套价出自哪条规则。
+	Rule RuleRef
 }
 
 // Offer 是一个模型的一条展示报价：商家为 nil 表示平台自营。
@@ -86,6 +113,14 @@ type Offer struct {
 	Price    money.Amount
 	// Prices 的键与含义同 CandidatePrice.Prices。
 	Prices map[string]money.Amount
+	// Request / Minimum / Units 的含义同 CandidatePrice 的同名字段。
+	Request money.Amount
+	Minimum money.Amount
+	Units   map[string]money.Amount
+	// Rule 是这套价出自哪条规则。同价的多条渠道折成一行时，它是其中一条
+	// 渠道适用的规则——价格相同的几条规则对调用方没有区别，但溯源只报一条
+	// 比编一个合成的来源诚实。
+	Rule RuleRef
 	// ChannelCount 是这套价的渠道条数。渠道 id 不对外，去重只能落在
 	// 「商家 + 价」上；条数让调用方知道这是一条渠道还是一个商家的多条供给。
 	ChannelCount int
@@ -141,7 +176,8 @@ func GroupByModel(prices []CandidatePrice, candidates []Candidate) map[string]Mo
 		}
 		pricedByChannel[price.Model][price.ChannelID] = true
 
-		k := key{ownerID: price.OwnerUserID, prices: priceSignature(price.Prices)}
+		k := key{ownerID: price.OwnerUserID,
+			prices: priceSignature(price.Prices, price.Request, price.Minimum, price.Units)}
 		if existing := byKey[k]; existing != nil {
 			existing.count++
 			continue
@@ -175,6 +211,10 @@ func GroupByModel(prices []CandidatePrice, candidates []Candidate) map[string]Mo
 			offer := Offer{
 				Price:        item.sample.Prices["prompt"],
 				Prices:       copyPrices(item.sample.Prices),
+				Request:      item.sample.Request,
+				Minimum:      item.sample.Minimum,
+				Units:        copyPrices(item.sample.Units),
+				Rule:         item.sample.Rule,
 				ChannelCount: item.count,
 			}
 			if item.sample.OwnerUserID != 0 {
@@ -193,7 +233,9 @@ func GroupByModel(prices []CandidatePrice, candidates []Candidate) map[string]Mo
 			if offers[i].Merchant != nil && *offers[i].Merchant != *offers[j].Merchant {
 				return *offers[i].Merchant < *offers[j].Merchant
 			}
-			return priceSignature(offers[i].Prices) < priceSignature(offers[j].Prices)
+			return priceSignature(offers[i].Prices, offers[i].Request, offers[i].Minimum,
+				offers[i].Units) < priceSignature(offers[j].Prices, offers[j].Request,
+				offers[j].Minimum, offers[j].Units)
 		})
 
 		entry := out[model]
@@ -203,11 +245,16 @@ func GroupByModel(prices []CandidatePrice, candidates []Candidate) map[string]Mo
 	return out
 }
 
-// priceSignature 把一套维度价写成稳定的字符串，用作去重与排序的键。
+// priceSignature 把一整套价写成稳定的字符串，用作去重与排序的键。
 //
-// 必须按 TokenSlots 的顺序拼：map 的迭代顺序每次不同，直接遍历 map 会让
-// 同一个商家同一套价在两次请求里得到不同的键。
-func priceSignature(prices map[string]money.Amount) string {
+// 一整套价包括 token 维度、一次性费用与计量项单价：两条渠道的 token 价
+// 相同而固定费不同，是两套不同的报价，按 token 价折成一条会让调用方按错的
+// 总价估算。
+//
+// token 维度必须按 TokenSlots 的顺序拼，计量项按名字排序：map 的迭代顺序
+// 每次不同，直接遍历 map 会让同一个商家同一套价在两次请求里得到不同的键。
+func priceSignature(prices map[string]money.Amount, request, minimum money.Amount,
+	units map[string]money.Amount) string {
 	var b strings.Builder
 	for _, slot := range billing.TokenSlots {
 		value, ok := prices[slot.Name]
@@ -217,6 +264,23 @@ func priceSignature(prices map[string]money.Amount) string {
 		b.WriteString(slot.Name)
 		b.WriteByte('=')
 		b.WriteString(value.String())
+		b.WriteByte(';')
+	}
+	b.WriteString("request=")
+	b.WriteString(request.String())
+	b.WriteString(";minimum=")
+	b.WriteString(minimum.String())
+	b.WriteByte(';')
+	names := make([]string, 0, len(units))
+	for name := range units {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		b.WriteString("unit:")
+		b.WriteString(name)
+		b.WriteByte('=')
+		b.WriteString(units[name].String())
 		b.WriteByte(';')
 	}
 	return b.String()
@@ -286,11 +350,12 @@ const offerCacheSize = 64
 // 而这条路是面向调用方的高频只读接口。LATERAL 让每个候选各自取它的
 // 第一条规则，判据与次序与 Match / MatchAll 逐字相同（同一段片段）。
 var offerRulesQuery = `
-	SELECT q.model, q.channel_id, q.owner_user_id, r.id, r.expr
+	SELECT q.model, q.channel_id, q.owner_user_id,
+	       r.id, r.expr, r.scope, r.priority, r.effective_from, r.effective_to
 	  FROM unnest($2::text[], $3::bigint[], $4::bigint[])
 	       AS q(model, channel_id, owner_user_id)
 	  LEFT JOIN LATERAL (
-	        SELECT r.id, r.expr
+	        SELECT r.id, r.expr, r.scope, r.priority, r.effective_from, r.effective_to
 	          FROM pricing_rules r
 	         WHERE ` + ruleApplicable("q.model", "q.owner_user_id", "q.channel_id") + `
 	         ORDER BY ` + ruleOrderBy + `
@@ -355,7 +420,7 @@ func (o *Offers) Prices(ctx context.Context, at time.Time, candidates []Candidat
 		id      int64
 		version int64
 	}
-	prices := make(map[ruleKey]map[string]money.Amount, len(unique))
+	prices := make(map[ruleKey]rulePrices, len(unique))
 	// 取价失败的规则也按同一个键记下来：一条兜底规则写坏时，命中它的候选
 	// 可能有几十个，它们都该被跳过，而日志只该记一次。
 	broken := make(map[ruleKey]bool)
@@ -363,13 +428,18 @@ func (o *Offers) Prices(ctx context.Context, at time.Time, candidates []Candidat
 	out := []CandidatePrice{}
 	for rows.Next() {
 		var (
-			model     string
-			channelID int64
-			ownerID   int64
-			ruleID    sql.NullInt64
-			source    sql.NullString
+			model         string
+			channelID     int64
+			ownerID       int64
+			ruleID        sql.NullInt64
+			source        sql.NullString
+			scope         sql.NullString
+			priority      sql.NullInt64
+			effectiveFrom sql.NullTime
+			effectiveTo   sql.NullTime
 		)
-		if scanErr := rows.Scan(&model, &channelID, &ownerID, &ruleID, &source); scanErr != nil {
+		if scanErr := rows.Scan(&model, &channelID, &ownerID, &ruleID, &source,
+			&scope, &priority, &effectiveFrom, &effectiveTo); scanErr != nil {
 			return nil, fmt.Errorf("读候选计价规则失败: %w", scanErr)
 		}
 		// 没有匹配规则的候选在这一行上是 NULL（LEFT JOIN 的产物）。
@@ -379,7 +449,7 @@ func (o *Offers) Prices(ctx context.Context, at time.Time, candidates []Candidat
 		}
 
 		key := ruleKey{id: ruleID.Int64, version: versionOf(source.String)}
-		dimensionPrices, ok := prices[key]
+		quoted, ok := prices[key]
 		if !ok {
 			if broken[key] {
 				continue
@@ -387,7 +457,7 @@ func (o *Offers) Prices(ctx context.Context, at time.Time, candidates []Candidat
 			// 一条规则取不出价，只跳过命中它的候选：某个商家配错一条规则，
 			// 不该让所有调用方的模型清单都变成 500。规则 id 与原因记日志，
 			// 否则这次跳过在外部只剩下「这个模型没有报价」。
-			dimensionPrices, err = o.pricesOf(ruleID.Int64, source.String, at)
+			quoted, err = o.pricesOf(ruleID.Int64, source.String, at)
 			if err != nil {
 				broken[key] = true
 				observe.FromContext(ctx).Warn("规则取价失败，跳过命中它的候选",
@@ -395,7 +465,7 @@ func (o *Offers) Prices(ctx context.Context, at time.Time, candidates []Candidat
 					"reason", firstLine(err))
 				continue
 			}
-			prices[key] = dimensionPrices
+			prices[key] = quoted
 		}
 		merchant := byKey[candidateKey{model: model, channelID: channelID}].Merchant
 		out = append(out, CandidatePrice{
@@ -404,8 +474,12 @@ func (o *Offers) Prices(ctx context.Context, at time.Time, candidates []Candidat
 			OwnerUserID: ownerID,
 			Merchant:    merchant,
 			// 缓存的 map 只读共享：调用方不得修改它（见 CandidatePrice）。
-			Prices: dimensionPrices,
-			Price:  dimensionPrices["prompt"],
+			Prices:  quoted.Prices,
+			Price:   quoted.Prices["prompt"],
+			Request: quoted.Request,
+			Minimum: quoted.Minimum,
+			Units:   quoted.Units,
+			Rule:    ruleRef(ruleID.Int64, scope.String, priority.Int64, effectiveFrom, effectiveTo),
 		})
 	}
 	if err = rows.Err(); err != nil {
@@ -424,22 +498,39 @@ func firstLine(err error) string {
 	return line
 }
 
-// pricesOf 编译并求一条规则在每个 token 维度上的千 token 价。
+// rulePrices 是一条规则求出的整张价表：逐维度的千 token 价、每次请求的
+// 一次性费用与计量项单价。
+type rulePrices struct {
+	Prices  map[string]money.Amount
+	Request money.Amount
+	Minimum money.Amount
+	Units   map[string]money.Amount
+}
+
+// pricesOf 编译并求一条规则的整张价表。
 //
 // 逐维度单独求值，而不是求一次再挑字段：规则可以引用 usage（阶梯价、
 // 按用量分支），用 1000 个 prompt 求出来的 completion 价未必等于用 1000 个
 // completion 求出来的那一项。每个维度各造一份「只有这一维有 1000 个 token」
 // 的用量，就是「这一千个 token 按结算会收多少」——与对拍用例的算法一致。
 //
-// 只返回规则显式写过的维度：没写的维度在结算时会被 Validate 拒绝，报价
-// 不能替它补一个 0。
-func (o *Offers) pricesOf(ruleID int64, source string, at time.Time) (map[string]money.Amount, error) {
+// 只返回规则显式写过的 token 维度：没写的维度在结算时会被 Validate 拒绝，
+// 报价不能替它补一个 0。
+//
+// 一次性费用与计量项单价取自**第一份求值结果**（prompt 那一次）。它们与
+// token 用量无关（量纲分别是「每请求」与「每计量单位」），为它们再求一遍
+// 只会多出一次求值；而当规则真的把 fixed/minimum 写成用量的函数时，报出
+// 来的就是参考用量（1000 个 prompt）下的那一档，与逐维度价用的是同一个用量。
+func (o *Offers) pricesOf(ruleID int64, source string, at time.Time) (rulePrices, error) {
+	var out rulePrices
+
 	program, err := o.programs.Get(fmt.Sprintf("%d:%d", ruleID, versionOf(source)), source)
 	if err != nil {
-		return nil, fmt.Errorf("编译规则 %d 失败: %w", ruleID, err)
+		return out, fmt.Errorf("编译规则 %d 失败: %w", ruleID, err)
 	}
 
 	prices := make(map[string]money.Amount, len(billing.TokenSlots))
+	chargesTaken := false
 	for _, slot := range billing.TokenSlots {
 		usage := billing.Usage{}
 		slot.SetCount(&usage, offerTokenCount)
@@ -450,16 +541,34 @@ func (o *Offers) pricesOf(ruleID int64, source string, at time.Time) (map[string
 			Usage:    usage,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("求规则 %d 的报价失败: %w", ruleID, err)
+			return out, fmt.Errorf("求规则 %d 的报价失败: %w", ruleID, err)
+		}
+		if !chargesTaken {
+			out.Request = result.Charges.Fixed
+			out.Minimum = result.Charges.Minimum
+			out.Units = result.Prices.Units
+			chargesTaken = true
 		}
 		if !result.Prices.Declared[slot.Name] {
 			continue
 		}
 		// 与结算同一个函数。用量里只有这一维非零，所以 Subtotal 恰好是
-		// 这一维的金额；固定费与最低消费不进报价——它们是「一次请求」的
-		// 费用，而报价回答的是「一千个 token 多少钱」。
+		// 这一维的金额；固定费与最低消费是「一次请求」的费用，不进这一维的
+		// 金额——它们单独报（见 rulePrices 的 Request / Minimum）。
 		breakdown := billing.ComputeWithCharges(usage, result.Prices, result.Charges)
 		prices[slot.Name] = breakdown.Subtotal()
 	}
-	return prices, nil
+	out.Prices = prices
+	return out, nil
+}
+
+// ruleRef 把查询到的规则元信息折成对外形状。时刻字段只在有效时取出来，
+// NULL（LEFT JOIN 没匹配到规则时的产物）不会走到这里。
+func ruleRef(id int64, scope string, priority int64, from, to sql.NullTime) RuleRef {
+	ref := RuleRef{ID: id, Scope: scope, Priority: int(priority), EffectiveFrom: from.Time}
+	if to.Valid {
+		value := to.Time
+		ref.EffectiveTo = &value
+	}
+	return ref
 }

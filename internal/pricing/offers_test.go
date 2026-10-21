@@ -272,3 +272,113 @@ func TestGroupByModelOrdersMerchantsByNameOnEqualPrices(t *testing.T) {
 		}
 	}
 }
+
+// 一次性费用与计量项单价随整套报价带出来，并且与逐维度价出自同一次求值：
+// 最低消费不抬高每千 token 的单价，固定费也不进 Prices。
+func TestPricesOfCarriesChargesAndUnits(t *testing.T) {
+	offers := NewOffers(nil, "Asia/Shanghai", nil)
+	at := time.Now().UTC()
+	got, err := offers.pricesOf(1, `{
+		"prompt": 0.000002,
+		"fixed": 0.05,
+		"minimum": 1.2,
+		"units": {"cache_write_5m": 0.0003}
+	}`, at)
+	if err != nil {
+		t.Fatalf("pricesOf 出错: %v", err)
+	}
+	if want := money.MustParse("0.00200000"); got.Prices["prompt"] != want {
+		t.Errorf("prompt 千 token 价 = %s，期望 %s（固定费与最低消费不进单价）",
+			got.Prices["prompt"], want)
+	}
+	if want := money.MustParse("0.05000000"); got.Request != want {
+		t.Errorf("request = %s，期望 charges.Fixed 的 %s", got.Request, want)
+	}
+	if want := money.MustParse("1.20000000"); got.Minimum != want {
+		t.Errorf("minimum = %s，期望 charges.Minimum 的 %s", got.Minimum, want)
+	}
+	if want := money.MustParse("0.00030000"); got.Units["cache_write_5m"] != want {
+		t.Errorf("units[cache_write_5m] = %s，期望 %s", got.Units["cache_write_5m"], want)
+	}
+}
+
+// 规则没写固定费、最低消费与计量项时，它们保持零值：调用方据此省略键，
+// 而不是编一个 0。写了 0 与没写在报价里都不出键（两者都一分不收）。
+func TestPricesOfOmitsAbsentChargesAndUnits(t *testing.T) {
+	offers := NewOffers(nil, "Asia/Shanghai", nil)
+	got, err := offers.pricesOf(2, `{"prompt": 0.000002, "fixed": 0}`, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("pricesOf 出错: %v", err)
+	}
+	if got.Request != money.Zero {
+		t.Errorf("request = %s，期望 0（规则写了 fixed: 0）", got.Request)
+	}
+	if got.Minimum != money.Zero {
+		t.Errorf("minimum = %s，期望 0", got.Minimum)
+	}
+	if len(got.Units) != 0 {
+		t.Errorf("units = %+v，期望空（规则没写计量项单价）", got.Units)
+	}
+}
+
+// 折叠时把一次性费用、计量项单价与规则来源原样带到 Offer 上，并且
+// Offer.Price 仍等于 Prices 里的 prompt 一项。
+func TestGroupByModelCarriesChargesUnitsAndRule(t *testing.T) {
+	const model = "alpha"
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)
+	price := CandidatePrice{
+		Model:       model,
+		ChannelID:   1,
+		OwnerUserID: 7,
+		Merchant:    "acme",
+		Prices:      map[string]money.Amount{"prompt": money.MustParse("0.00300000")},
+		Price:       money.MustParse("0.00300000"),
+		Request:     money.MustParse("0.05000000"),
+		Minimum:     money.MustParse("1.00000000"),
+		Units:       map[string]money.Amount{"cache_write_5m": money.MustParse("0.00030000")},
+		Rule:        RuleRef{ID: 42, Scope: "merchant", Priority: 10, EffectiveFrom: from, EffectiveTo: &to},
+	}
+
+	got := GroupByModel([]CandidatePrice{price}, []Candidate{candidate(model, 1, 7, "acme")})[model]
+	if len(got.Offers) != 1 {
+		t.Fatalf("报价条数 = %d，期望 1：%+v", len(got.Offers), got.Offers)
+	}
+	offer := got.Offers[0]
+	if offer.Price != offer.Prices["prompt"] {
+		t.Errorf("price = %s 与 prices.prompt = %s 不一致",
+			offer.Price, offer.Prices["prompt"])
+	}
+	if offer.Request != price.Request || offer.Minimum != price.Minimum {
+		t.Errorf("request/minimum = %s/%s，期望 %s/%s",
+			offer.Request, offer.Minimum, price.Request, price.Minimum)
+	}
+	if offer.Units["cache_write_5m"] != price.Units["cache_write_5m"] {
+		t.Errorf("units = %+v，期望 %+v", offer.Units, price.Units)
+	}
+	if offer.Rule.ID != 42 || offer.Rule.Scope != "merchant" || offer.Rule.Priority != 10 {
+		t.Errorf("rule = %+v，期望原样带出规则元信息", offer.Rule)
+	}
+	if offer.Rule.EffectiveTo == nil || !offer.Rule.EffectiveTo.Equal(to) {
+		t.Errorf("rule.effective_to = %v，期望 %v", offer.Rule.EffectiveTo, to)
+	}
+}
+
+// token 价完全相同、只有固定费不同，是两套报价——不能按 token 价折成一条。
+func TestGroupByModelSplitsByCharges(t *testing.T) {
+	const model = "alpha"
+	tokenPrices := map[string]money.Amount{"prompt": money.MustParse("0.00300000")}
+	base := CandidatePrice{Model: model, OwnerUserID: 7, Merchant: "acme",
+		Prices: tokenPrices, Price: tokenPrices["prompt"]}
+	withFee := base
+	withFee.ChannelID = 2
+	withFee.Request = money.MustParse("0.05000000")
+
+	got := GroupByModel(
+		[]CandidatePrice{func() CandidatePrice { p := base; p.ChannelID = 1; return p }(), withFee},
+		[]Candidate{candidate(model, 1, 7, "acme"), candidate(model, 2, 7, "acme")},
+	)[model]
+	if len(got.Offers) != 2 {
+		t.Fatalf("报价条数 = %d，期望 2（固定费不同）：%+v", len(got.Offers), got.Offers)
+	}
+}

@@ -68,12 +68,19 @@ type modalitiesJSON struct {
 
 // pricingJSON 是一个模型的参考价，单位是每百万 token。
 //
-// 缓存两项可为 null：规则里没声明就是「没配」，与 0（免费）不是一回事。
+// 缓存两项与推理一项可为 null：规则里没声明就是「没配」，与 0（免费）不是
+// 一回事。一次性费用与计量项单价不成「每百万 token」的倍数，原样给出：
+// request / minimum 是每请求多少元，units 是每个计量单位多少元；没写时
+// 省略这个键。
 type pricingJSON struct {
-	InputPerMTok      string  `json:"input_per_mtok"`
-	OutputPerMTok     string  `json:"output_per_mtok"`
-	CacheReadPerMTok  *string `json:"cache_read_per_mtok"`
-	CacheWritePerMTok *string `json:"cache_write_per_mtok"`
+	InputPerMTok      string            `json:"input_per_mtok"`
+	OutputPerMTok     string            `json:"output_per_mtok"`
+	CacheReadPerMTok  *string           `json:"cache_read_per_mtok"`
+	CacheWritePerMTok *string           `json:"cache_write_per_mtok"`
+	ReasoningPerMTok  *string           `json:"reasoning_per_mtok"`
+	Request           *string           `json:"request,omitempty"`
+	Minimum           *string           `json:"minimum,omitempty"`
+	Units             map[string]string `json:"units,omitempty"`
 }
 
 // modelJSON 是模型清单里的一项。
@@ -99,10 +106,16 @@ type modelJSON struct {
 // 规则没声明输入价时 Price 是零值；要分辨「输入免费」与「没写输入价」，
 // 看 Prices 里有没有 prompt 这个键。Prices 是各 token 维度的千 token 金额，
 // 只含规则写过的维度。
+//
+// Request / Minimum / Units 的量纲与 Prices 不同：前两项是每请求多少元，
+// units 是每个计量单位多少元。为 0（或没有计量项）时省略这个键。
 type offerJSON struct {
 	Merchant *string           `json:"merchant"`
 	Price    string            `json:"price"`
 	Prices   map[string]string `json:"prices,omitempty"`
+	Request  *string           `json:"request,omitempty"`
+	Minimum  *string           `json:"minimum,omitempty"`
+	Units    map[string]string `json:"units,omitempty"`
 }
 
 // modelsResponse 是模型清单。
@@ -247,12 +260,18 @@ func newModelJSON(model catalog.Model, price *pricing.ReferencePrice, offers []p
 			Merchant: offer.Merchant,
 			Price:    offer.Price.String(),
 			Prices:   dimensionPricesJSON(offer.Prices),
+			Request:  amountOrNil(offer.Request),
+			Minimum:  amountOrNil(offer.Minimum),
+			Units:    dimensionPricesJSON(offer.Units),
 		})
 	}
 	if price != nil {
 		out.Pricing = &pricingJSON{
 			InputPerMTok:  price.InputPerMTok.String(),
 			OutputPerMTok: price.OutputPerMTok.String(),
+			Request:       amountOrNil(price.Request),
+			Minimum:       amountOrNil(price.Minimum),
+			Units:         dimensionPricesJSON(price.Units),
 		}
 		if price.CacheReadPerMTok != nil {
 			value := price.CacheReadPerMTok.String()
@@ -262,8 +281,25 @@ func newModelJSON(model catalog.Model, price *pricing.ReferencePrice, offers []p
 			value := price.CacheWritePerMTok.String()
 			out.Pricing.CacheWritePerMTok = &value
 		}
+		if price.ReasoningPerMTok != nil {
+			value := price.ReasoningPerMTok.String()
+			out.Pricing.ReasoningPerMTok = &value
+		}
 	}
 	return out
+}
+
+// amountOrNil 把 0 金额编码成「省略这个键」。
+//
+// 固定费与最低消费的 0 值同时表示「规则没写」与「写了 0 元」，两者都是一分
+// 钱不收；给一个 "0.00000000" 会让客户端把它当成「确认免费」而与「没配」
+// 混在一起。量纲是每请求的金额，不能与 token 单价相加。
+func amountOrNil(amount money.Amount) *string {
+	if amount == money.Zero {
+		return nil
+	}
+	value := amount.String()
+	return &value
 }
 
 // dimensionPricesJSON 把维度价映射成响应里的字符串 map。
