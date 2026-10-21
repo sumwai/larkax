@@ -472,9 +472,6 @@ textarea.input {
 .view-switch button {
   flex: 1;
 }
-.sidebar.collapsed .view-switch {
-  display: none;
-}
 .op-head,
 .op-row {
   grid-template-columns: minmax(0, 1.3fr) 90px 110px 110px 90px;
@@ -662,6 +659,18 @@ textarea.input {
   padding: 2px 8px;
   text-decoration: none;
   color: inherit;
+  /* 侧栏顶部这个标记是 <button>：不重置皮肤就会露出浏览器的灰色底框。 */
+  background: none;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  /* 老 Safari 对 `<button>` 的原生外观复位不完全，显式关掉。 */
+  appearance: none;
+}
+.brand:hover {
+  color: var(--accent);
 }
 .brand .word {
   font-size: 16.5px;
@@ -685,27 +694,6 @@ textarea.input {
   opacity: 0;
   color: var(--muted);
 }
-.side-foot {
-  margin-top: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 0 4px;
-}
-.side-user {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 8px;
-  border-radius: 10px;
-  border: 0;
-  background: transparent;
-  text-align: left;
-  width: 100%;
-}
-.side-user:hover {
-  background: var(--surface-2);
-}
 .avatar {
   width: 30px;
   height: 30px;
@@ -717,22 +705,6 @@ textarea.input {
   font-size: 12px;
   font-weight: 650;
   flex: none;
-}
-.side-user .who {
-  min-width: 0;
-}
-.side-user .who b {
-  display: block;
-  font-size: 12.5px;
-  font-weight: 600;
-}
-.side-user .who span {
-  display: block;
-  font-size: 11.5px;
-  color: var(--faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .side-group-label {
   font-size: 10.5px;
@@ -777,14 +749,6 @@ textarea.input {
 .sidebar.collapsed .nav a span,
 .sidebar.collapsed .nav button span,
 .sidebar.collapsed .side-group-label {
-  display: none;
-}
-.sidebar.collapsed .side-user {
-  justify-content: center;
-  padding: 4px;
-  gap: 0;
-}
-.sidebar.collapsed .side-user .who {
   display: none;
 }
 
@@ -1672,24 +1636,148 @@ textarea.input {
   gap: 16px;
 }
 .app-topbar {
-  display: none;
+  display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 54px;
-  padding: 0 14px;
+  min-height: 56px;
+  padding: 0 clamp(16px, 3vw, 32px);
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 30;
+  flex: none;
 }
-.app-topbar b {
+.app-topbar > b {
   font-size: 15px;
   font-weight: 650;
   letter-spacing: -0.02em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.app-topbar .avatar {
+/* 汉堡只在窄屏出现；宽屏的导航入口在左侧栏里。 */
+.app-topbar .side-toggle {
+  display: none;
+}
+.topbar-right {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+/* 切换器在顶栏右侧，不占满一行，也不带侧栏里那份下边距。 */
+.app-topbar .view-switch {
+  width: auto;
+  margin-bottom: 0;
+}
+.app-topbar .view-switch button {
+  flex: none;
+}
+
+.account {
+  position: relative;
+}
+.account-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 200px;
+  padding: 4px 8px 4px 4px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.account-trigger:hover,
+.account-trigger[aria-expanded='true'] {
+  background: var(--surface-2);
+}
+.account-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 168px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-sm);
+  z-index: 40;
+}
+.account-menu a,
+.account-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+.account-menu a:hover,
+.account-menu button:hover {
+  background: var(--surface-2);
+}
+.account-menu svg {
+  color: var(--muted);
+  flex: none;
+}
+
+/*
+ * 宽屏：整页不滚动，滚动交给右侧主列，顶栏吸在它顶部。
+ *
+ * 主列自己滚而不是 `.app-content` 自己滚，是因为内容列有 `max-width`：
+ * 让内容列当滚动容器，滚动条会停在页面中间，两侧留白跟着不动。
+ */
+@media (min-width: 520px) {
+  /*
+   * `#root` 里除了应用外壳，演示数据横幅也占一行高度，所以整页高度交给这一层
+   * 分配：横幅拿自己那几行，外壳拿剩下的。直接把外壳写成 `100dvh` 的话，
+   * 横幅会把整页顶下去同样多，document 又多出一条滚动。
+   */
+  body:has(.app-shell) #root {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+  }
+  .app-shell {
+    flex: 1;
+    height: auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .sidebar {
+    height: 100%;
+  }
+  .app-main {
+    height: auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .app-content {
+    /* 内容比视口短时撑满主列，长时按内容增高，末尾内边距跟着内容走。 */
+    flex: 1 0 auto;
+  }
 }
 .page-head {
   display: flex;
@@ -2082,6 +2170,9 @@ textarea.input {
   }
   .app-topbar {
     display: flex;
+  }
+  .app-topbar .side-toggle {
+    display: grid;
   }
   :root {
     /* 底栏的固定高度：图标 + 一行文字，加上下内边距。 */

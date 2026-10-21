@@ -96,7 +96,8 @@ and the keys list (empty state plus the one-time secret dialog).
 | `/app/admin/pricing` | Admin view: platform sell-side rules and channel cost rules |
 | `/app/admin/settings` | Account settings, still inside the admin view |
 
-`/app/merchant` and `/app/admin` redirect to the first page of that view.
+`/app/merchant` and `/app/admin` redirect to the first page of that view for
+accounts that have it; an account without the view lands on the no-permission page.
 `/app/*` redirects to `/login` when there is no session.
 
 Views are scoped by role: a user gets the user view, a merchant gets the user

@@ -35,6 +35,7 @@ export const en: Record<MessageKey, string> = {
   'nav.menu': 'Menu',
   'nav.collapse': 'Collapse sidebar',
   'nav.expand': 'Expand sidebar',
+  'nav.noAccess': 'No access',
   'nav.logout': 'Sign out',
 
   'status.active': 'Active',
