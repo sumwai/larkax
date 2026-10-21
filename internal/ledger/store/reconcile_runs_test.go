@@ -11,7 +11,7 @@ import (
 //
 // 写入方在 reconcile.go（每一轮开一行、收尾时把结果填进同一行），它的用例在
 // reconcile_test.go。这里问的是另一半：`ReconcileRuns` 把那一行读回来时，
-// 十三列里**每一列**都对得上吗、新的在前吗、被 limit 截住时说得清楚吗。
+// 十四列里**每一列**都对得上吗、新的在前吗、被 limit 截住时说得清楚吗。
 //
 // # 为什么逐列比对，而不是只比几个要紧的
 //
@@ -32,8 +32,11 @@ type runRow struct {
 	Repaired          int
 	MalformedAccounts int
 	StaleReservations int
-	Status            string
-	Error             sql.NullString
+	// PlanFaceShortfalls 是额度包面值不足的订阅条数，与 stale_reservations
+	// 一样单独归集（它不是一个差额）。
+	PlanFaceShortfalls int
+	Status             string
+	Error              sql.NullString
 }
 
 // readRunRow 从库里读回某一行，供与读侧交出来的那一行对比。
@@ -47,12 +50,12 @@ func readRunRow(t *testing.T, db *sql.DB, id int64) runRow {
 	if err := db.QueryRowContext(context.Background(), `
 		SELECT started_at, finished_at, watermark, full_scan, checked_wallets,
 		       balance_mismatches, frozen_mismatches, repaired, malformed_accounts,
-		       stale_reservations, status, error
+		       stale_reservations, plan_face_shortfalls, status, error
 		  FROM reconcile_runs WHERE id = $1`, id).Scan(
 		&row.StartedAt, &row.FinishedAt, &row.Watermark, &row.FullScan,
 		&row.CheckedWallets, &row.BalanceMismatches, &row.FrozenMismatches,
 		&row.Repaired, &row.MalformedAccounts, &row.StaleReservations,
-		&row.Status, &row.Error); err != nil {
+		&row.PlanFaceShortfalls, &row.Status, &row.Error); err != nil {
 		t.Fatalf("读运行记录 %d 失败: %v", id, err)
 	}
 	return row
@@ -100,13 +103,15 @@ func TestReconcileRunsReadsEveryColumn(t *testing.T) {
 		if run.FullScan != want.FullScan {
 			t.Errorf("run %d 的 full_scan = %v，库里是 %v", run.ID, run.FullScan, want.FullScan)
 		}
-		// 四个计数列与两个单独归集的计数列：弄反任意两列都会在这里露出来。
-		got := [6]int{run.CheckedWallets, run.BalanceMismatches, run.FrozenMismatches,
-			run.Repaired, run.MalformedAccounts, run.StaleReservations}
-		wantCounts := [6]int{want.CheckedWallets, want.BalanceMismatches, want.FrozenMismatches,
-			want.Repaired, want.MalformedAccounts, want.StaleReservations}
+		// 四个计数列与三个单独归集的计数列：弄反任意两列都会在这里露出来。
+		got := [7]int{run.CheckedWallets, run.BalanceMismatches, run.FrozenMismatches,
+			run.Repaired, run.MalformedAccounts, run.StaleReservations,
+			run.PlanFaceShortfalls}
+		wantCounts := [7]int{want.CheckedWallets, want.BalanceMismatches, want.FrozenMismatches,
+			want.Repaired, want.MalformedAccounts, want.StaleReservations,
+			want.PlanFaceShortfalls}
 		if got != wantCounts {
-			t.Errorf("run %d 的六个计数列是 %v，库里是 %v", run.ID, got, wantCounts)
+			t.Errorf("run %d 的七个计数列是 %v，库里是 %v", run.ID, got, wantCounts)
 		}
 		if run.Status != want.Status {
 			t.Errorf("run %d 的 status = %q，库里是 %q", run.ID, run.Status, want.Status)
