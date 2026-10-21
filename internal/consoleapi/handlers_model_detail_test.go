@@ -11,6 +11,7 @@ import (
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/pricing"
 )
 
 // 单条模型：不在供与目录里没有必须是同一个 404——否则调用方能靠状态码
@@ -450,4 +451,134 @@ func datePtr(t *testing.T, raw string) *time.Time {
 		t.Fatalf("解析日期 %q 失败: %v", raw, err)
 	}
 	return &value
+}
+
+// 供应商报价带上每请求的固定费用、最低消费、计量项单价与规则来源。
+//
+// 规则段只说「哪条规则、什么作用域、什么优先级、生效窗口」，不得出现表达式
+// 源码、owner id、channel id 与 base_url——这一页是公开的。
+func TestModelDetailCarriesChargesUnitsAndRule(t *testing.T) {
+	f := newFixture(t)
+	f.catalog.models = []catalog.Model{{CanonicalName: "alpha"}}
+	f.supplies.supplies = []channels.Supply{{Model: "alpha", ChannelID: 1}}
+	f.offers.byChannelPrices = map[int64]map[string]money.Amount{
+		1: {"prompt": mustAmount(t, "0.00300000")},
+	}
+	f.offers.byChannelRequest = map[int64]money.Amount{1: mustAmount(t, "0.05000000")}
+	f.offers.byChannelMinimum = map[int64]money.Amount{1: mustAmount(t, "1.00000000")}
+	f.offers.byChannelUnits = map[int64]map[string]money.Amount{
+		1: {"cache_write_5m": mustAmount(t, "0.00030000")},
+	}
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	f.offers.byChannelRule = map[int64]pricing.RuleRef{
+		1: {ID: 42, Scope: "channel", Priority: 10, EffectiveFrom: from},
+	}
+
+	rec := f.request(t, http.MethodGet, PathPrefix+"models/alpha", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（响应 %s）", rec.Code, rec.Body)
+	}
+
+	var body modelDetailResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if len(body.Model.Suppliers) != 1 {
+		t.Fatalf("suppliers = %+v，期望一条", body.Model.Suppliers)
+	}
+	supplier := body.Model.Suppliers[0]
+	if supplier.Request == nil || *supplier.Request != "0.05000000" {
+		t.Errorf("request = %v，期望 0.05000000", supplier.Request)
+	}
+	if supplier.Minimum == nil || *supplier.Minimum != "1.00000000" {
+		t.Errorf("minimum = %v，期望 1.00000000", supplier.Minimum)
+	}
+	if got := supplier.Units["cache_write_5m"]; got != "0.00030000" {
+		t.Errorf("units = %+v，期望 cache_write_5m = 0.00030000", supplier.Units)
+	}
+	if supplier.Rule == nil {
+		t.Fatal("缺少 rule 段")
+	}
+	if supplier.Rule.ID != 42 || supplier.Rule.Scope != "channel" || supplier.Rule.Priority != 10 {
+		t.Errorf("rule = %+v，期望 id/scope/priority 原样带出", supplier.Rule)
+	}
+	if supplier.Rule.EffectiveFrom != "2026-01-01T00:00:00Z" {
+		t.Errorf("rule.effective_from = %q，期望 RFC3339 UTC", supplier.Rule.EffectiveFrom)
+	}
+	if supplier.Rule.EffectiveTo != nil {
+		t.Errorf("rule.effective_to = %v，期望 null（不过期）", supplier.Rule.EffectiveTo)
+	}
+
+	// 键集合必须正好是这几项：新增字段不能顺带把表达式源码、owner/channel id
+	// 或 base_url 带出去。
+	var rawBody struct {
+		Model struct {
+			Suppliers []map[string]json.RawMessage `json:"suppliers"`
+		} `json:"model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rawBody); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	wantKeys := map[string]bool{
+		"merchant": true, "price": true, "prices": true, "request": true,
+		"minimum": true, "units": true, "rule": true, "channel_count": true,
+	}
+	rawSupplier := rawBody.Model.Suppliers[0]
+	if len(rawSupplier) != len(wantKeys) {
+		t.Errorf("supplier 有 %d 个字段，期望正好 %d 个：%v",
+			len(rawSupplier), len(wantKeys), rawSupplier)
+	}
+	for key := range wantKeys {
+		if _, ok := rawSupplier[key]; !ok {
+			t.Errorf("supplier 缺字段 %q：%v", key, rawSupplier)
+		}
+	}
+	for key := range rawSupplier {
+		if !wantKeys[key] {
+			t.Errorf("supplier 多出字段 %q：%v", key, rawSupplier)
+		}
+	}
+
+	var rawRule map[string]json.RawMessage
+	if err := json.Unmarshal(rawSupplier["rule"], &rawRule); err != nil {
+		t.Fatalf("rule 不是 JSON 对象: %v", err)
+	}
+	wantRuleKeys := map[string]bool{
+		"id": true, "scope": true, "priority": true,
+		"effective_from": true, "effective_to": true,
+	}
+	if len(rawRule) != len(wantRuleKeys) {
+		t.Errorf("rule 有 %d 个字段，期望正好 %d 个：%v",
+			len(rawRule), len(wantRuleKeys), rawRule)
+	}
+	for key := range wantRuleKeys {
+		if _, ok := rawRule[key]; !ok {
+			t.Errorf("rule 缺字段 %q：%v", key, rawRule)
+		}
+	}
+}
+
+// 规则没写固定费、最低消费、计量项，也没有规则来源时，这三个键与 rule
+// 都不出现：省略比给一个 0 或空壳 rule 更少被误读。
+func TestModelDetailOmitsAbsentChargesAndRule(t *testing.T) {
+	f := newFixture(t)
+	f.catalog.models = []catalog.Model{{CanonicalName: "alpha"}}
+	f.supplies.supplies = []channels.Supply{{Model: "alpha", ChannelID: 1}}
+	f.offers.base = mustAmount(t, "0.00300000")
+
+	rec := f.request(t, http.MethodGet, PathPrefix+"models/alpha", "")
+	var rawBody struct {
+		Model struct {
+			Suppliers []map[string]json.RawMessage `json:"suppliers"`
+		} `json:"model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rawBody); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	rawSupplier := rawBody.Model.Suppliers[0]
+	for _, absent := range []string{"request", "minimum", "units", "rule"} {
+		if _, ok := rawSupplier[absent]; ok {
+			t.Errorf("supplier 多出字段 %q（规则没写，应为省略）：%v", absent, rawSupplier)
+		}
+	}
 }
