@@ -85,6 +85,7 @@ and the keys list (empty state plus the one-time secret dialog).
 | `/app/keys` | API keys: list, create, enable/disable, revoke, quota and rate limits |
 | `/app/usage` | Usage by time window, model/key breakdown, billing path, request log |
 | `/app/models` | Model catalogue and reference prices (read-only) |
+| `/app/models/{name}` | One model: catalogue fields, capabilities, and per-dimension supplier prices |
 | `/app/quickstart` | cURL, OpenAI SDK and Anthropic SDK examples |
 | `/app/settings` | Display name, email, password, language, theme, sign out |
 | `/app/merchant/channels` | Merchant view: the channels you own |

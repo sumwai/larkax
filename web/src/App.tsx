@@ -19,6 +19,7 @@ import { Overview } from './pages/Overview'
 import { Keys } from './pages/Keys'
 import { Usage } from './pages/Usage'
 import { Models } from './pages/Models'
+import { ModelDetail } from './pages/ModelDetail'
 import { Quickstart } from './pages/Quickstart'
 import { Settings } from './pages/Settings'
 
@@ -104,6 +105,8 @@ export function App() {
                     <Route path="keys" element={<Keys />} />
                     <Route path="usage" element={<Usage />} />
                     <Route path="models" element={<Models />} />
+                    {/* 规范名可能带 `/`（`vendor/model`），所以用 splat 接住整段。 */}
+                    <Route path="models/*" element={<ModelDetail />} />
                     <Route path="quickstart" element={<Quickstart />} />
                     <Route path="settings" element={<Settings />} />
                     <Route

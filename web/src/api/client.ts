@@ -17,6 +17,7 @@ import type {
   KeyUpdateInput,
   ListResponse,
   Meta,
+  ModelDetailResponse,
   ModelsResponse,
   MerchantPricingClient,
   OpsClient,
@@ -306,6 +307,11 @@ export class HttpApiClient implements ApiClient {
 
   models(): Promise<ModelsResponse> {
     return this.request<ModelsResponse>('/models')
+  }
+
+  /** 规范名可能带 `/`，按段编码但保留斜杠：服务端那条路由是多段通配。 */
+  modelDetail(name: string): Promise<ModelDetailResponse> {
+    return this.request<ModelDetailResponse>(`/models/${encodeURI(name)}`)
   }
 
   usageSummary(query: UsageQuery = {}): Promise<UsageSummary> {

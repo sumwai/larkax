@@ -1259,86 +1259,211 @@ textarea.input {
   color: var(--faint);
   margin-top: 2px;
 }
-.model-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-.model-card {
-  padding: 18px;
+/* 模型列表：一行一个模型，整行可点进详情。 */
+.model-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
 }
-.model-card .name {
+.model-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 16px;
+  padding: 14px 18px;
+  border-top: 1px solid var(--border);
+  color: inherit;
+  text-decoration: none;
+  transition: background 0.12s ease;
 }
-.model-card .name b {
+.model-item:first-child {
+  border-top: 0;
+}
+.model-item:hover {
+  background: var(--surface-2);
+}
+.model-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.model-item .model-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.model-item .model-item-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.model-item .model-item-title b {
   font-size: 14.5px;
   font-weight: 600;
   letter-spacing: -0.01em;
+}
+.model-item .model-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  color: var(--muted);
+}
+.model-item .model-item-go {
+  flex: none;
+  color: var(--faint);
+}
+.model-item:hover .model-item-go,
+.model-item:focus-visible .model-item-go {
+  color: var(--accent);
+}
+.model-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 18px;
+  border-top: 1px solid var(--border);
+}
+.model-skeleton:first-child {
+  border-top: 0;
+}
+.model-filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+/* `.input` 默认占满一行；筛选里的下拉按内容宽度，别把搜索框挤到上一行。 */
+.model-filters select {
+  width: auto;
+  min-width: 150px;
 }
 .badges {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
 }
-.price {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
-.price div {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.price span {
-  font-size: 11px;
-  color: var(--faint);
-}
-.price b {
-  font-size: 13px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-.price-note {
-  font-size: 11.5px;
-  color: var(--faint);
-}
-.offers {
-  display: flex;
-  flex-direction: column;
+
+/* 模型详情：目录字段、三态能力与各维度报价各占一块。 */
+.model-back {
+  /* 内容列是 flex column，默认会被拉成整行宽；返回链接只该占自己的文字。 */
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
-.offers-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  font-size: 11px;
-  color: var(--faint);
-}
-.offer-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
   font-size: 12.5px;
+  color: var(--muted);
+  text-decoration: none;
 }
-.offer-row span {
+.model-back:hover {
+  color: var(--accent);
+}
+.model-detail {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+.model-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+}
+/* 供应商表列数随报价里出现的维度变，整宽铺开。 */
+.model-section.wide {
+  grid-column: 1 / -1;
+}
+.model-section h2 {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
   color: var(--muted);
 }
-.offer-row b {
+.model-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+}
+.model-facts > div,
+.model-fact-inline {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+.model-facts dt {
+  flex: none;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.model-facts dd {
+  margin: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.model-caps {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.model-caps li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+.model-section-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--faint);
+}
+.model-table-wrap {
+  overflow-x: auto;
+}
+.model-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.model-table th {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
   font-weight: 600;
-  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  text-align: left;
+  white-space: nowrap;
+  color: var(--faint);
+}
+.model-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.model-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.model-table .num {
+  text-align: right;
+}
+.model-muted {
+  color: var(--muted);
+}
+.model-missing {
+  color: var(--faint);
 }
 
 /* 3.12 自定义下拉 */
@@ -2106,10 +2231,19 @@ textarea.input {
 
 @media (max-width: 720px) {
   .form-grid,
-  .model-grid,
   .kpis,
   .cal-pair {
     grid-template-columns: 1fr;
+  }
+  .model-item {
+    padding: 12px 14px;
+  }
+  .model-caps {
+    grid-template-columns: 1fr;
+  }
+  .model-table th,
+  .model-table td {
+    padding: 8px 10px;
   }
   .cal-pair .second {
     display: none;
