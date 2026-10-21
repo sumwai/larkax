@@ -27,7 +27,7 @@ runs:
         # 有些包只在 `testdb.Open` 里跳过，测试文件里不出现这两个变量名，
         # 所以再补一遍：
         #   grep -rl 'internal/testdb' --include='*_test.go' .
-        for pkg in ./internal/ledger/store/ ./internal/keyquota/ ./internal/plans/ ./internal/channels/ ./internal/catalog/ ./internal/auth/ ./internal/snapshotwire/ ./internal/pricing/ ./internal/api/ ./internal/consoleapi/ ./internal/assembly/ ./internal/ratelimit/ ./internal/calendar/store/ ./internal/settings/ ./internal/idempotency/ ./internal/plugin/store/ ./internal/payment/ ./internal/payment/fakechannel/ ./internal/adminapi/ ./cmd/larkaxctl/; do
+        for pkg in ./internal/ledger/store/ ./internal/keyquota/ ./internal/plans/ ./internal/channels/ ./internal/catalog/ ./internal/auth/ ./internal/snapshotwire/ ./internal/pricing/ ./internal/api/ ./internal/consoleapi/ ./internal/assembly/ ./internal/ratelimit/ ./internal/calendar/store/ ./internal/settings/ ./internal/idempotency/ ./internal/plugin/store/ ./internal/payment/ ./internal/payment/fakechannel/ ./internal/adminapi/ ./internal/migrate/ ./cmd/larkaxctl/; do
           out=$(go test -count=1 -v "$pkg" 2>&1)
           rc=$?
           show() { printf '%s\n' "$out" | tail -30; }

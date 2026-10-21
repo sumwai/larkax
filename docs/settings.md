@@ -81,7 +81,7 @@ larkaxctl settings set --key plugin.enabled --value true --by alice
 | 键 | 类型 | 默认值 | 取值 | 影响 |
 |---|---|---|---|---|
 | `billing.max_output_tokens` | int | `65536` | `1`–`1048576` | 单次请求允许声明的 `max_tokens` 上界。模型目录里登记了 `output_limit` 的按目录那个数判，没登记的按这个数判；非流式请求超过它会被拒（`400`）。越界时服务拒绝启动 |
-| `billing.stream_freeze_step` | int | `4096` | `1`–`65536` | 流式请求递进冻结的段（token）：本地累计产出每越过一段就补冻一次，**同时这也是冻结额最多领先已产出量的量**。调大它数据库往返少、冻住的余量多；调小反之 |
+| `billing.stream_freeze_step` | int | `1024` | `1`–`65536` | 流式请求递进冻结的段（token）：本地累计产出每越过一段就补冻一次，**同时这也是冻结额最多领先已产出量的量**。调大它数据库往返少、冻住的余量多；调小反之。默认值取「盖住输出侧 p75 的最小 2 的幂」——覆盖多数请求，而不是几乎全部；实测样本与分布见 `internal/migrate/sql/00056_stream_freeze_step_default.sql` 的注释 |
 | `billing.merchant_share_bp` | int | `0` | `0`–`10000` | 售价里分给渠道商户的比例，单位基点（`10000` = 100%，平台抽 5% 时填 `9500`）。分给商户的金额按售价乘以它、**向下取整**，零头归平台；`0` 表示不分账，消费里没有 `merchant_payable` 那条分录。越界或读不出来时按 `0` 处理并写一条告警，请求照常完成 |
 | `billing.default_asset` | string | `"CNY"` | 目前只有 `CNY` | 新用户钱包与结算用的资产品种。**不接受 `settings set`** |
 

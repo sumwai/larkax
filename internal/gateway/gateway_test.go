@@ -448,7 +448,7 @@ type harness struct {
 
 	// streamFreezeStep 是流式递进冻结的阈值段（见 Gateway.StreamFreezeStep）。
 	//
-	// 默认取 4096，与 settings 里的默认值一致。夹具里 request() 声明的
+	// 默认取 1024，与 settings 里的默认值一致。夹具里 request() 声明的
 	// max_tokens 是 500，**小于**这个段——于是初始预留就冻满了整笔，一次补冻
 	// 都不会发生：那些用例原本钉的就是「按声明上界冻满」这条路，换成递进冻结
 	// 不该把它们的行为改掉。要钉递进冻结自己的用例把段压到 max_tokens 以下
@@ -490,7 +490,7 @@ func newHarness(t *testing.T, opts ...func(*harness)) *harness {
 		aliases:          identityAliases{},
 		aliasOverrides:   identityOverrides{},
 		maxOutputTokens:  65536,
-		streamFreezeStep: 4096,
+		streamFreezeStep: 1024,
 	}
 	for _, o := range opts {
 		o(h)
