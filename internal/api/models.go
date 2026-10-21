@@ -85,9 +85,10 @@ type modelJSON struct {
 	OwnedBy string `json:"owned_by"`
 	// Offers 是供应这个模型的所有报价，按价格升序。
 	//
-	// 没有报价的模型不进清单（见 availableModels），所以这里不会出现空
-	// 数组；omitempty 兜住将来万一的空集合：输出 `"offers": []` 会让
-	// 客户端以为「问了，但没人报价」，而那种状态今天不会出现在响应里。
+	// 可以为空：清单回答「能不能用」，offers 回答「谁在供、多少钱」。一个
+	// 有渠道在供、却没有任何适用规则的模型照样在清单里（它能调通，只是
+	// 报价算不出来），这时省略这个字段——输出 `"offers": []` 会让客户端
+	// 把它当成「问了，但没人报价」，而实际发生的是「这个模型还没有定价」。
 	Offers []offerJSON `json:"offers,omitempty"`
 }
 
@@ -234,14 +235,14 @@ func (h *Handler) availableModels(ctx context.Context) ([]modelJSON, error) {
 
 	items := make([]modelJSON, 0, len(order))
 	for _, name := range order {
-		offers := grouped[name]
-		if len(offers) == 0 {
-			// 没有报价的模型不列：调用方拿到一个价格未知的模型，唯一的
-			// 下一步是发一次请求再猜账单，而清单的用途正是「发之前先看」。
-			continue
-		}
 		item := newModelJSON(name, vendors[name])
-		item.Offers = newOffersJSON(offers)
+		if offers := grouped[name]; len(offers) > 0 {
+			item.Offers = newOffersJSON(offers)
+		}
+		// 没有报价的模型仍然列出：它能不能用只取决于有没有渠道在供，与
+		// 有没有配价无关。把「无价」实现成「不列」，调用方会以为模型不可
+		// 用；而它其实能调通，只是账单上还没有价（契约用例用一条没有计价
+		// 规则的渠道钉着这一点）。
 		items = append(items, item)
 	}
 	return items, nil

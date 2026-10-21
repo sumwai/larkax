@@ -155,7 +155,11 @@ func TestOffersFollowChannelScope(t *testing.T) {
 	}
 }
 
-// 一条规则都没有的模型不出现在结果里——不是 0 元。
+// 一条规则都没有的模型在**报价**结果里不出现——不是 0 元。
+//
+// 它仍然会出现在模型清单里，只是不带 offers（见 internal/api 的
+// TestModelsKeepModelsWithoutOffers）：报价这一层负责「算不出就别编」，
+// 「列不列」是清单那一层的判据。
 func TestOffersSkipCandidatesWithoutRule(t *testing.T) {
 	db := testDB(t)
 	owner := seedUser(t, db)

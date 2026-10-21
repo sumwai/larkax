@@ -45,7 +45,7 @@ func suppliesOf(names ...string) []channels.Supply {
 // fakeOffers 是报价来源的替身。
 //
 // base 是默认价；byOwner 按归属覆盖（用来造「两个商家不同价」）；skip 里的
-// 模型一律不报价（用来钉「没有报价的模型不列」）。
+// 模型一律不报价（用来钉「无价的模型照样列、只是不带 offers」）。
 type fakeOffers struct {
 	base    money.Amount
 	byOwner map[int64]money.Amount
@@ -568,8 +568,12 @@ func TestModelsOffersMarkPlatformAsNull(t *testing.T) {
 	}
 }
 
-// 没有报价的模型不列；整份清单里不出现空 offers 数组。
-func TestModelsDropsModelsWithoutOffers(t *testing.T) {
+// 有供给、却没有计价规则的模型仍然在清单里，只是不带 offers。
+//
+// 清单回答「能不能用」，offers 回答「谁在供、多少钱」。把无价实现成不列，
+// 等于把「这个模型没定价」说成「这个模型不可用」——它其实能调通，契约用例
+// openai_models 也正是用一条没有定价规则的渠道压在这一条上。
+func TestModelsKeepModelsWithoutOffers(t *testing.T) {
 	supply := &fakeSupply{supplies: suppliesOf("alpha", "beta")}
 	cat := &fakeModelCatalog{models: []catalog.Model{
 		{CanonicalName: "alpha"},
@@ -591,16 +595,31 @@ func TestModelsDropsModelsWithoutOffers(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("响应不是 JSON: %v", err)
 	}
-	if len(raw.Data) != 1 || raw.Data[0].ID != "alpha" {
-		t.Errorf("清单 = %s，期望只有 alpha", rec.Body)
+	if len(raw.Data) != 2 || raw.Data[0].ID != "alpha" || raw.Data[1].ID != "beta" {
+		t.Fatalf("清单 = %s，期望 alpha 与 beta 都在", rec.Body)
 	}
 	if string(raw.Data[0].Offers) == "[]" || string(raw.Data[0].Offers) == "null" {
-		t.Errorf("offers = %s，期望一个有内容的数组", raw.Data[0].Offers)
+		t.Errorf("alpha 的 offers = %s，期望一个有内容的数组", raw.Data[0].Offers)
+	}
+	// 省略而不是 `[]`：空数组会被读成「问了，但没有人报价」。
+	if offers := string(raw.Data[1].Offers); offers != "" {
+		t.Errorf("beta 的 offers = %s，期望整个字段省略", offers)
 	}
 
-	// 单条路径对「有供给却没报价」同样回 404：列表里没有它，单条就不该有。
-	if rec := get(h, PathModels+"/beta"); rec.Code != http.StatusNotFound {
-		t.Errorf("单条 beta 的状态码 = %d，期望 404（响应 %s）", rec.Code, rec.Body)
+	// 单条路径同样在、「有没有报价」同样不影响它的可读性。
+	rec = get(h, PathModels+"/beta")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("单条 beta 的状态码 = %d，期望 200（响应 %s）", rec.Code, rec.Body)
+	}
+	var one struct {
+		ID     string          `json:"id"`
+		Offers json.RawMessage `json:"offers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &one); err != nil {
+		t.Fatalf("单条响应不是 JSON: %v", err)
+	}
+	if one.ID != "beta" || string(one.Offers) != "" {
+		t.Errorf("单条 beta = %s，期望 id=beta 且不带 offers", rec.Body)
 	}
 }
 
