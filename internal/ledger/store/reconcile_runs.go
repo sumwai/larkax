@@ -33,7 +33,11 @@ type ReconcileRun struct {
 	// FullScan 为真表示这一轮扫了全量。增量只看上次起点之后变动过的行，
 	// 「两边都早就错着」的那种不一致只有全量能发现。
 	FullScan bool
-	// CheckedWallets 是这一轮比对过的钱包行数。
+	// CheckedWallets 是这一轮比对过的**用户数**，也就是候选 user id 的个数。
+	//
+	// 列名与 JSON 键沿用 checked_wallets（运维面板已经在读），语义以这里为准：
+	// 候选来自钱包、账本、在途预留与订阅 owner 四处，一个用户被并进来时未必
+	// 有钱包行，所以它不等于「钱包行数」。
 	CheckedWallets    int
 	BalanceMismatches int
 	FrozenMismatches  int

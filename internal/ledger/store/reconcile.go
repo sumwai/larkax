@@ -113,7 +113,7 @@ const (
 	SettingRepairMode = "reconcile.repair_mode"
 	// SettingDifferenceAccount 是快照为准时修正分录的对家科目。
 	SettingDifferenceAccount = "reconcile.difference_account"
-	// SettingShardSize 是一批处理的钱包行数上限。
+	// SettingShardSize 是一批处理的候选用户数上限。
 	SettingShardSize = "reconcile.shard_size"
 	// SettingFullScanIntervalHours 是两次全量扫描之间的最长间隔。
 	SettingFullScanIntervalHours = "reconcile.full_scan_interval_hours"
@@ -216,7 +216,7 @@ type ReconcileConfig struct {
 	RepairMode RepairMode
 	// DifferenceAccount 是 RepairAdjustLedger 下修正分录的对家科目。
 	DifferenceAccount ledger.Account
-	// ShardSize 是一批处理的钱包行数上限（按 user_id 分片）。
+	// ShardSize 是一批处理的候选用户数上限（按 user_id 分片）。
 	ShardSize int
 	// FullScanInterval 是两次全量扫描之间的最长间隔。
 	// 小于等于零表示每次都全量。
@@ -471,7 +471,8 @@ type Report struct {
 	StartedAt time.Time
 	// Watermark 是这一轮比对的起点，也是下一轮的起点。
 	Watermark time.Time
-	// CheckedWallets 是这一轮比对过的钱包行数。
+	// CheckedWallets 是这一轮比对过的用户数（候选 user id 的个数），
+	// 口径见 ReconcileRun 上同名字段的注释。
 	CheckedWallets int
 	// Findings 是这一轮发现的全部不一致。
 	//
@@ -800,6 +801,7 @@ func (s *Store) reconcileAll(ctx context.Context, cfg ReconcileConfig, alert Ale
 		if err != nil {
 			return err
 		}
+		// 数的是候选 user id 的个数，不是钱包行数（见 Report.CheckedWallets）。
 		report.CheckedWallets += len(ids)
 		report.Findings = append(report.Findings, findings...)
 		for _, f := range findings {

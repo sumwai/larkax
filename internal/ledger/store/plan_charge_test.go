@@ -594,6 +594,60 @@ func TestReconcileIncrementalSeesPlanOwnerWithoutOtherChanges(t *testing.T) {
 	}
 }
 
+// 候选集按用户去重：同一个人出现在几个来源里，只算一次。
+//
+// 四段并集写的是 UNION 而不是 UNION ALL，去重靠的就是它。单来源的夹具分不出
+// 这两版——只有「同一个人同时出现在不止一处」才现形。这里让一个用户同时有
+// 钱包行、`user:<id>` 分录与订阅行：正确实现给出一个 id，UNION ALL 会给出
+// 三个。
+//
+// 重复的候选不只是白比一遍：`after = ids[len-1]` 这个游标按「最后一个是本批
+// 最大的」推进，重复与乱序都会让分片边界上的计数失真（`CheckedWallets` 数的是
+// 候选 id 的个数）。所以除了数这一个用户出现几次，整段还要严格递增。
+//
+// 全量与增量两条查询各判一次：它们是两段独立的 SQL，改了一处漏了另一处时，
+// 只跑其中一档看不出来。
+func TestReconcileCandidatesDeduplicatesUsersAcrossSources(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100") // 钱包行 + user:<id> 的分录
+	planID := seedPlan(t, ctx, db, "amount", "10", "10")
+	seedUserPlan(t, ctx, db, userID, planID, "10", time.Now().Add(time.Hour))
+
+	for _, full := range []bool{true, false} {
+		name := "增量"
+		if full {
+			name = "全量"
+		}
+		t.Run(name, func(t *testing.T) {
+			// 起点给零值时刻：增量那一侧的时间窗因此覆盖全部行，两档看到的是
+			// 同一批候选。
+			ids, err := New(db).reconcileCandidates(ctx, 0, time.Time{}, full, 10000, nil)
+			if err != nil {
+				t.Fatalf("取候选用户失败: %v", err)
+			}
+
+			seen := 0
+			for _, id := range ids {
+				if id == userID {
+					seen++
+				}
+			}
+			if seen != 1 {
+				t.Errorf("用户 %d 在候选里出现 %d 次，期望 1 次（并集要去重）", userID, seen)
+			}
+
+			for i := 1; i < len(ids); i++ {
+				if ids[i] <= ids[i-1] {
+					t.Fatalf("候选不是严格递增：第 %d 个是 %d，前一个是 %d（游标按最后一项推进，重复与乱序都要挡住）",
+						i, ids[i], ids[i-1])
+				}
+			}
+		})
+	}
+}
+
 // 释放不动钱包、不记已用量；在途占用随之消失，下一次请求还能用这个包。
 func TestReleasePlanReservationFreesQuota(t *testing.T) {
 	db := testDB(t)

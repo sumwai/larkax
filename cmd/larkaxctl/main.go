@@ -660,7 +660,7 @@ const reconcileTimeout = 30 * time.Minute
 //   - 失败时不打印汇总行：与「报告先打」的设计冲突。失败之前比过几个钱包、
 //     报出了哪几条不一致，恰恰是这一轮最有用的部分，不能一起丢掉。
 //   - 按 CheckedWallets == 0 推断「没跑完」：那是拿计数猜原因。一轮正常
-//     跑完而范围内没有钱包时它同样是 0，而那时「比对=0 行」是真话，必须
+//     跑完而范围内没有候选用户时它同样是 0，而那时「比对=0 个用户」是真话，必须
 //     照常打出来。判据只能是 err。
 //
 // 每处写入的返回值都显式丢弃（`_, _ =`）：目标是 stdout，写不进去只可能是
@@ -674,7 +674,7 @@ func printReconcileReport(w io.Writer, r *store.Report, runErr error) {
 	if r.FullScan {
 		scope = "全量"
 	}
-	_, _ = fmt.Fprintf(w, "对账 run_id=%d %s 起点=%s 比对=%d 行\n",
+	_, _ = fmt.Fprintf(w, "对账 run_id=%d %s 起点=%s 比对=%d 个用户\n",
 		r.RunID, scope, r.Watermark.Format(time.RFC3339), r.CheckedWallets)
 
 	if runErr != nil {

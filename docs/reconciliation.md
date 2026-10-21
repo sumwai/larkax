@@ -197,14 +197,14 @@ go run ./cmd/larkaxctl ledger reconcile || echo "这一轮有需要人看的东�
 | `reconcile.auto_repair` | bool | `false` | 是否修正。关闭时只报告 |
 | `reconcile.repair_mode` | string | `"resync_snapshot"` | 修正方向 |
 | `reconcile.difference_account` | string | `"reconcile_difference"` | `adjust_ledger` 下的对家科目 |
-| `reconcile.shard_size` | int | `1000` | 一批比对的钱包行数上限 |
+| `reconcile.shard_size` | int | `1000` | 一批比对的候选用户数上限 |
 | `reconcile.full_scan_interval_hours` | int | `168` | 两次全量之间的最长间隔，`0` 表示每次都全量 |
 
 加配置项的步骤见 [development.md](development.md#加一个配置项)。
 
 ## 运行记录
 
-每轮在 `reconcile_runs` 留一行：比对了多少行、发现几条不一致、修了几条、
+每轮在 `reconcile_runs` 留一行：比对了多少个用户、发现几条不一致、修了几条、
 起点在哪、结局是 `done` 还是 `failed`。**只打日志是不够的**——日志轮转之后
 「账目不一致」就消失了，而它恰恰是要在几周后回答「这笔钱什么时候开始少的」
 的问题。
