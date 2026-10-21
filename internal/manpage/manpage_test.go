@@ -287,17 +287,37 @@ func TestRoffInlineHandlesNestedMarkup(t *testing.T) {
 // plain 去掉 roff 的 CJK 断点，好让用例按「读起来是什么」比对产物。
 func plain(s string) string { return strings.ReplaceAll(s, `\:`, "") }
 
-func TestJoinWrappedOnlySpacesAsciiWords(t *testing.T) {
+func TestJoinWrappedRestoresSpacesAcrossCJKAndLatin(t *testing.T) {
 	cases := []struct {
 		what string
 		in   []string
 		want string
 	}{
+		// 中文中间换行：源文件本来就没有空格。
 		{"中文之间直接接上", []string{"这句话在", "中间换行"}, "这句话在中间换行"},
+		// 中英混排：换行吃掉了源文件里的空格，两个方向都要补回来。
+		{"中文后接代码要空格", []string{"鉴权只认", "`status`"}, "鉴权只认 `status`"},
+		{"代码后接中文要空格", []string{"所以下面 `revert`", "之后"}, "所以下面 `revert` 之后"},
+		{"中文后接英文要空格", []string{"路径落到了 query", "后面"}, "路径落到了 query 后面"},
+		{"英文后接中文要空格", []string{"路径落到了", "query 后面"}, "路径落到了 query 后面"},
+		{"数字与中文之间也要空格", []string{"下限 4096", "个 token"}, "下限 4096 个 token"},
+		// 标记不占位置：判据看的是标记里面那一个字。
+		{"收尾的粗体标记按里面的字判", []string{"各取", "**自己**最近"}, "各取**自己**最近"},
+		{"粗体里是英文时按英文判", []string{"仍然是 `admin`**", "（这一档）"}, "仍然是 `admin`**（这一档）"},
+		{"开头的粗体标记按里面的字判", []string{"各取**", "自己**最近"}, "各取**自己**最近"},
+		// 全角标点与相邻字符之间按中文排版都不加空格，两个方向一样。
+		{"全角开括号后接英文不补", []string{"状态（", "status）"}, "状态（status）"},
+		{"英文后接全角开括号不补", []string{"写成 `window`", "（`HH:MM`）"}, "写成 `window`（`HH:MM`）"},
+		{"英文后接全角收标点不补", []string{"取值是 `status`", "，退出 4"}, "取值是 `status`，退出 4"},
+		{"全角收标点后接英文不补", []string{"（见 ps）", "and it"}, "（见 ps）and it"},
+		{"破折号两侧都不补", []string{"回到可用——", "分位数不能相加"}, "回到可用——分位数不能相加"},
+		{"省略号后面不补", []string{"已为用户", "… 开通"}, "已为用户… 开通"},
+		// 两侧都不是 CJK 时退回「收词 / 起词」判据：词与词补，被折断的词不补。
 		{"英文单词之间补一个空格", []string{"见 ps", "and it"}, "见 ps and it"},
 		{"右括号后面接英文要空格", []string{"（见 ps)", "and it"}, "（见 ps) and it"},
+		{"右括号后面接中文要空格", []string{"（见 ps)", "与它"}, "（见 ps) 与它"},
 		{"斜杠后面接英文不补空格（那是路径）", []string{"见 docs/", "cli-reference.md"}, "见 docs/cli-reference.md"},
-		{"后面接中文不补空格", []string{"（见 ps)", "与它"}, "（见 ps)与它"},
+		{"独立的分隔符后面接词要补空格", []string{"`list` / `get` /", "`health`"}, "`list` / `get` / `health`"},
 	}
 	for _, tc := range cases {
 		if got := joinWrapped(tc.in); got != tc.want {

@@ -198,46 +198,122 @@ func isSeparator(cells []string) bool {
 
 // joinWrapped 把硬换行接回来。
 //
-// 两侧都是 ASCII 词字符时插一个空格，其余情况直接接上：源文件是在中文句子中间
-// 换行的，插空格会在页面上多出一个空格；而英文单词被换行切开时（源文件不会这么
-// 换，但下一个写的人可能会）不插空格会把两个词粘起来。判据取「会不会粘住词」，
-// 不取「是不是中文」——中文与标点之间本来就不需要空格。
+// 接缝处补不补空格由 needsSpace 判：源文件里的换行可能是「空格被吃掉了」
+// （英文句子、中英混排），也可能是「本来就没有空格」（中文句子中间）。
 func joinWrapped(lines []string) string {
 	var b strings.Builder
+	var prev seam
 	for n, line := range lines {
-		if n > 0 && needsSpace(lastRune(lines[n-1]), firstRune(line)) {
+		if n > 0 && needsSpace(prev, rightSeam(line)) {
 			b.WriteByte(' ')
 		}
 		b.WriteString(line)
+		prev = leftSeam(line)
 	}
 	return b.String()
 }
 
-func firstRune(s string) rune {
-	for _, r := range s {
-		return r
-	}
-	return 0
+// seam 是接缝一侧**屏幕上看得见**的那个字符，以及它是不是一个独立的记号。
+type seam struct {
+	r rune
+	// standalone 表示 r 在行内前面还有一个空格。`list` / `get` / 这类写法里
+	// `/` 是独立的分隔符，接在它后面要补空格；而 `docs/` 里的 `/` 紧贴着前
+	// 一个词，整段是一个词被折断，补空格会把路径拆开。
+	standalone bool
 }
 
-func lastRune(s string) rune {
-	var last rune
-	for _, r := range s {
-		last = r
-	}
-	return last
-}
-
-// needsSpace 判两侧要不要插一个空格：两侧都是 ASCII 词字符时才插。
+// leftSeam 取一行的可见收尾字符。
 //
-// `)` `]` `}` 也算词的收尾（`…（见 ps)` 后面接一个英文词时要空格），但开括号不算
-// 词首——`(ps` 这种写法左侧本来就不该有空格。
-func needsSpace(prev, next rune) bool {
-	return isWordEnd(prev) && isASCIIAlnum(next)
+// 行尾的 `*` 与反引号是标记（粗体、代码），渲染出来不占位置，所以要跳过它们
+// 往里看：`**读出来仍然是 `admin`**` 收尾时，屏幕上离接缝最近的是那个 n，
+// 不是星号。整行都是标记时返回零值，needsSpace 按「没有字符」处理。
+func leftSeam(line string) seam {
+	s := strings.TrimRight(line, " \t")
+	i := len(s) - 1
+	for i >= 0 && isMarkupByte(s[i]) {
+		i--
+	}
+	if i < 0 {
+		return seam{}
+	}
+	r, size := utf8.DecodeLastRuneInString(s[:i+1])
+	return seam{r: r, standalone: i-size >= 0 && s[i-size] == ' '}
+}
+
+// rightSeam 取一行的可见起始字符，跳过行首的标记。
+func rightSeam(line string) rune {
+	s := strings.TrimLeft(line, " \t")
+	i := 0
+	for i < len(s) && isMarkupByte(s[i]) {
+		i++
+	}
+	if i >= len(s) {
+		return 0
+	}
+	r, _ := utf8.DecodeRuneInString(s[i:])
+	return r
+}
+
+// isMarkupByte 判一个字节是不是行内标记字符（`**` 与反引号）。
+//
+// 按字节判是安全的：这两个字符都是 ASCII，不会出现在一个多字节字符的中间。
+func isMarkupByte(b byte) bool { return b == '*' || b == '`' }
+
+// needsSpace 判硬换行接回时，接缝处要不要补一个空格。
+//
+// # 总则
+//
+// **接缝两侧一边是 CJK、另一边不是，就补一个空格**。源文件里的换行要么吃掉了
+// 原来的空格（英文句子、中英混排），要么本来就没有（中文句子任意两字之间）；
+// 两侧都是 CJK 是后一种，不补。
+//
+// # 例外
+//
+// 例外都是「中文排版本来就不加空格」的那几处：
+//
+//   - **全角标点与别的字符之间**：`（status` 不能变成 `（ status`，
+//     `status，` 也不能变成 `status ，`；`window（…）` 同理，标点在前在后
+//     一样。规则是中文排版的「全角标点与其他字符之间不加空格」。
+//   - **破折号与省略号**：`——`、`…` 在中文里紧贴前后的字（`——分位数`）。
+//   - **两侧都不是 CJK**：退回原来的判据「前一个字符收得住词、后一个字符起得
+//     了词」才补——英文词之间补，被折断的长词不补（`docs/` + `cli-reference.md`
+//     是一个路径，`--role` 断在中间也是一个词），否则会把词拆开。这里的例外
+//     是**独立的分隔符**：`/` 前面有空格时它是独立的记号（`list` / `get` /
+//     这类写法），接缝落在它后面就要补，否则 `/health` 会粘成一个像路径的东西。
+//
+// 判的是**屏幕上看得见**的字：两侧行首行尾的标记在调用前已经剥掉（见
+// leftSeam / rightSeam），所以 `**自己**` 这种收尾按里面的「己」判，
+// 而不是按星号判。
+func needsSpace(prev seam, next rune) bool {
+	switch {
+	case isPunct(prev.r), isPunct(next):
+		return false
+	case isCJK(prev.r) && isCJK(next):
+		return false
+	case isCJK(prev.r), isCJK(next):
+		return true
+	}
+	if isWordEnd(prev.r) && isASCIIAlnum(next) {
+		return true
+	}
+	return prev.standalone && (isASCIIAlnum(next) || isOpeningASCIIBracket(next))
+}
+
+// isPunct 判一个字符是不是**排版上紧贴**的标点：全角标点、破折号与省略号。
+//
+// 中文排版里它们与相邻字符之间都不加空格，所以两侧都不补。
+func isPunct(r rune) bool {
+	return isOpeningPunct(r) || isClosingPunct(r) || r == '—' || r == '…'
 }
 
 func isWordEnd(r rune) bool {
 	return isASCIIAlnum(r) || r == ')' || r == ']' || r == '}'
+}
+
+// isOpeningASCIIBracket 判 ASCII 的开括号。独立的分隔符后面接它时要补空格
+// （`/ (`），其余情况（`(ps`）不补。
+func isOpeningASCIIBracket(r rune) bool {
+	return r == '(' || r == '[' || r == '{'
 }
 
 func isASCIIAlnum(r rune) bool {
