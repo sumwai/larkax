@@ -155,11 +155,20 @@ reasoning_effort 的取值翻成该渠道认的写法（映射到空字符串表
 
 usage 由 openai、anthropic 与 openai-responses 三个适配器读。它的
 completion_includes_reasoning 这一位决定上游报的输出 token 里含不含推理：
-不写时按「含」算（OpenAI 的 completion_tokens 与 Anthropic 的 output_tokens
-都是这样）；把可见输出与推理分列报出的上游要显式写成
+不写时按「含」算——OpenAI 的 completion_tokens 与 Anthropic 的 output_tokens
+都这样；只有把可见输出与推理分列报出的上游要显式写成
   {"usage":{"completion_includes_reasoning":false}}
-不写的话，计费前减掉推理会让输出那一侧少收，推理比可见输出多时整段输出都
-收不到钱。两种口径靠数字分不出来，所以按渠道声明。
+不写的话，计费前减掉推理会让输出那一侧少收；推理比可见输出多时，整段输出
+都收不到钱。两种口径靠数字分不出来，所以按渠道声明。
+
+三个适配器都读它，但只有把推理分列报出的上游需要配：anthropic 渠道上这一位
+没有数值效果——Claude 的用量不单列推理，ReasoningTokens 恒为 0，两种取值
+算出的金额相同。
+
+内层键名没有点名机制：usage 这一层拼错会被提示；内层那个键少一个 s 就等于
+没写，它会静默按「含推理」处理，而这一位在钱路上。反过来，在本来就含推理的
+口径上写 false，同一批推理会被收两次：输出整段按输出价算一次，推理那一项
+再加一次。
 
 写进去的键这条渠道的 type 不认时（拼错的、别的 type 的），照样不报错、
 不挡写入，但 create，以及给了 --setting 或 --type 的 update，成功之后会逐个
