@@ -179,6 +179,7 @@ export function MerchantPricing() {
 
       {(creating || editing) && (
         <Modal
+          sheetSize="lg"
           title={editing ? t('ops.pricing.editRule') : t('ops.pricing.createRule')}
           onClose={closeForm}
           footer={

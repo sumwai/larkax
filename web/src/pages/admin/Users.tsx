@@ -13,6 +13,7 @@ import { useI18n } from '../../i18n'
 import type { MessageKey } from '../../i18n/zh'
 import { useSite } from '../../site/SiteProvider'
 import { formatCount, formatDateTime } from '../../lib/format'
+import { useIsCompact } from '../../hooks/useMediaQuery'
 import {
   Alert,
   Button,
@@ -24,6 +25,7 @@ import {
   Skeleton,
   useToast,
 } from '../../components/ui'
+import { MobileCard, MobileList } from '../../components/MobileList'
 import { IconUser } from '../../components/icons'
 import { OpsLoadError, SearchBox } from '../ops/common'
 
@@ -77,6 +79,7 @@ export function AdminUsers() {
   const { meta } = useSite()
   const client = api.admin
 
+  const compact = useIsCompact()
   const [typed, setTyped] = useState('')
   const [query, setQuery] = useState('')
   const [role, setRole] = useState<Role | ''>('')
@@ -224,7 +227,43 @@ export function AdminUsers() {
         </div>
       )}
 
-      {rows && rows.length > 0 && (
+      {rows && rows.length > 0 && compact && (
+        <>
+          <MobileList label={t('ops.users.title')}>
+            {rows.map((row) => (
+              <MobileCard
+                key={row.id}
+                title={row.username}
+                subtitle={row.display_name || t('common.none')}
+                status={<UserStatusPill status={row.status} />}
+                fields={[
+                  { label: t('ops.users.colRole'), value: <RolePill role={row.role} /> },
+                  // 列表里只有服务端打码过的邮箱：完整地址只在详情页出现。
+                  { label: t('ops.users.colEmail'), value: row.email || t('common.none'), mono: true },
+                  {
+                    label: t('ops.users.colCreated'),
+                    value: formatDateTime(row.created_at, meta.timezone),
+                  },
+                ]}
+                actions={
+                  <Link className="btn ghost sm" to={`/app/admin/users/${row.id}`}>
+                    {t('ops.view')}
+                  </Link>
+                }
+              />
+            ))}
+          </MobileList>
+          {nextCursor && (
+            <div className="card table-foot" style={{ display: 'flex', justifyContent: 'center' }}>
+              <Button variant="secondary" onClick={loadMore} loading={loadingMore}>
+                {t('ops.users.loadMore')}
+              </Button>
+            </div>
+          )}
+        </>
+      )}
+
+      {rows && rows.length > 0 && !compact && (
         <section className="card table ops-table">
           {/* 行与列的关系要说给读屏听：`.thead` / `.trow` 是 div 网格，没有这些
               角色时读屏拿到的是一串扁平文本。翻页按钮放在表外，它不是一行。 */}
@@ -516,6 +555,7 @@ export function AdminUserDetailPage() {
 
       {edit && detail && (
         <Modal
+          sheetSize="sm"
           title={edit.kind === 'role' ? t('ops.users.changeRole') : t('ops.users.changeStatus')}
           description={
             edit.kind === 'role'

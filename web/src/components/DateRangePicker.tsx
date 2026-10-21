@@ -146,14 +146,14 @@ export function DateRangePicker({ from, to, onChange }: DateRangePickerProps) {
   const rangeEnd = pending ? pending : to
 
   return (
-    <div className="wrap-rel" ref={wrapRef} style={{ display: 'inline-block' }}>
+    <div className="wrap-rel range-wrap" ref={wrapRef}>
       <div className="daterange">
         <button
           type="button"
           className="dr"
           aria-haspopup="dialog"
           aria-expanded={open}
-          aria-label={t('usage.range')}
+          aria-label={`${t('usage.from')}：${rangeStart}`}
           onClick={() => {
             setOpen((previous) => !previous)
             setPending(null)
@@ -168,7 +168,7 @@ export function DateRangePicker({ from, to, onChange }: DateRangePickerProps) {
         <button
           type="button"
           className="dr"
-          aria-label={t('usage.range')}
+          aria-label={`${t('usage.to')}：${rangeEnd}`}
           onClick={() => {
             setOpen((previous) => !previous)
             setPending(null)

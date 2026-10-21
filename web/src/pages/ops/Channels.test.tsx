@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '../../i18n'
 import { SiteProvider } from '../../site/SiteProvider'
 import { ToastProvider } from '../../components/ui'
 import { OpsChannels } from './Channels'
+import { mockViewport } from '../../test/media'
 
 const mocks = vi.hoisted(() => ({
   listChannels: vi.fn(),
@@ -258,5 +259,51 @@ describe('运营渠道页', () => {
 
     expect(await screen.findByText('name is already taken')).toBeInTheDocument()
     expect(mocks.createChannel).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('运营渠道页：窄屏卡片', () => {
+  beforeEach(() => {
+    Object.values(mocks).forEach((mock) => mock.mockReset())
+    mocks.listModels.mockResolvedValue([])
+    mocks.meta.mockResolvedValue({
+      site_name: 'larkax',
+      api_base_url: 'https://api.example.com/v1',
+      currency: 'USD',
+      timezone: 'Asia/Shanghai',
+      locales: ['en', 'zh'],
+      features: { registration: false, password_reset: 'admin', topup: false },
+    })
+  })
+
+  it('清单改成卡片，动作用底部菜单，表格列头不在 DOM 里', async () => {
+    const restore = mockViewport(375, 667)
+    try {
+      mocks.listChannels.mockResolvedValue([CHANNEL])
+      renderChannels()
+
+      const list = await screen.findByRole('region', { name: '渠道' })
+      const card = within(list).getByRole('button', { name: '打开「platform-anthropic」的操作' })
+      // 主标题、关键字段、状态三样都在卡片上。
+      expect(card).toHaveTextContent('platform-anthropic')
+      expect(card).toHaveTextContent('https://api.example.com/anthropic')
+      expect(card).toHaveTextContent('anthropic')
+      expect(card).toHaveTextContent('1 个')
+      expect(card).toHaveTextContent('启用')
+      // 两套清单不能同时进 DOM：读屏会把同一份数据读两遍。
+      expect(screen.queryAllByRole('columnheader')).toHaveLength(0)
+      expect(screen.queryAllByRole('table')).toHaveLength(0)
+
+      fireEvent.click(card)
+      const sheet = screen.getByRole('dialog')
+      expect(within(sheet).getByRole('button', { name: '查看' })).toBeInTheDocument()
+      expect(within(sheet).getByRole('button', { name: '编辑' })).toBeInTheDocument()
+      const disable = within(sheet).getByRole('button', { name: /停用/ })
+      // 停用是危险动作：红色之外，可及名里还有「危险操作」。
+      expect(disable.className).toContain('danger')
+      expect(disable).toHaveAccessibleName(/危险操作/)
+    } finally {
+      restore()
+    }
   })
 })

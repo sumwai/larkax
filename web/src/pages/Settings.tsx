@@ -269,6 +269,7 @@ export function Settings() {
 
       {logoutOpen && (
         <Modal
+          sheetSize="sm"
           title={t('settings.logout')}
           description={t('settings.logoutBody')}
           onClose={() => setLogoutOpen(false)}

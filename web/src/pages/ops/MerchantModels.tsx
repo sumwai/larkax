@@ -2,11 +2,13 @@ import { Link } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../auth/AuthProvider'
 import { useAsync } from '../../hooks/useAsync'
+import { useIsCompact } from '../../hooks/useMediaQuery'
 import { useI18n } from '../../i18n'
 import type { MessageKey } from '../../i18n/zh'
 import { subjectOf } from '../../ops/views'
 import { formatCount } from '../../lib/format'
 import { Empty, PageHead, Pill, Skeleton } from '../../components/ui'
+import { MobileCard, MobileList } from '../../components/MobileList'
 import { IconModels } from '../../components/icons'
 import { OpsLoadError } from './common'
 
@@ -19,6 +21,7 @@ import { OpsLoadError } from './common'
  */
 export function MerchantModels() {
   const { t, lang } = useI18n()
+  const compact = useIsCompact()
   const { user } = useAuth()
   const { data, error, loading, reload } = useAsync(() => api.merchant.listSuppliedModels(), [])
   const subject = subjectOf(user?.role)
@@ -59,7 +62,44 @@ export function MerchantModels() {
         />
       )}
 
-      {data && data.items.length > 0 && (
+      {data && data.items.length > 0 && compact && (
+        <>
+          <MobileList label={title}>
+            {data.items.map((row) => (
+              <MobileCard
+                key={row.model}
+                title={row.model}
+                subtitle={
+                  row.display_name !== row.model
+                    ? row.display_name || t('common.none')
+                    : undefined
+                }
+                status={
+                  <Pill tone={row.priced ? 'ok' : 'neutral'}>
+                    {t(row.priced ? 'ops.merchant.models.priced' : 'ops.merchant.models.unpriced')}
+                  </Pill>
+                }
+                fields={[
+                  {
+                    label: t('ops.merchant.models.colChannels'),
+                    value: formatCount(row.channels, lang),
+                  },
+                ]}
+              />
+            ))}
+          </MobileList>
+          {data.truncated && (
+            <div className="card table-foot">
+              {t('ops.merchant.models.truncated', {
+                shown: data.items.length,
+                total: data.total,
+              })}
+            </div>
+          )}
+        </>
+      )}
+
+      {data && data.items.length > 0 && !compact && (
         <section className="card table ops-table">
           <div role="table" aria-label={title}>
             <div className="thead supply-head" role="row">

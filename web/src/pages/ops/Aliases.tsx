@@ -3,6 +3,7 @@ import { api } from '../../api'
 import type { ChannelAlias } from '../../api/types'
 import { useI18n } from '../../i18n'
 import { useAsync } from '../../hooks/useAsync'
+import { useIsCompact } from '../../hooks/useMediaQuery'
 import {
   Button,
   Empty,
@@ -11,6 +12,8 @@ import {
   Skeleton,
   useToast,
 } from '../../components/ui'
+import { ActionSheet } from '../../components/ActionSheet'
+import { MobileCard, MobileList } from '../../components/MobileList'
 import { IconPlus, IconTrash } from '../../components/icons'
 import {
   Field,
@@ -42,7 +45,10 @@ export function OpsAliases() {
   const models = useAsync(() => api.admin.listModels(), [])
   const confirm = useConfirm()
 
+  const compact = useIsCompact()
   const [editing, setEditing] = useState<ChannelAlias | null>(null)
+  // 窄屏上整张卡片是一个按钮，编辑与删除放在底部弹出的菜单里。
+  const [actions, setActions] = useState<ChannelAlias | null>(null)
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState<AliasForm>(EMPTY_FORM)
   // 打开时的那份值：改动过的话，关窗前要再问一句。
@@ -186,7 +192,31 @@ export function OpsAliases() {
         </div>
       )}
 
-      {aliases.length > 0 && (
+      {aliases.length > 0 && compact && (
+        <MobileList label={t('ops.alias.title')}>
+          {aliases.map((alias) => (
+            <MobileCard
+              key={alias.id}
+              title={alias.upstream_model}
+              subtitle={`${channelName(alias.channel_id)} → ${alias.canonical_name}`}
+              fields={[
+                {
+                  label: t('ops.alias.overrides'),
+                  value:
+                    Object.keys(alias.overrides ?? {}).length === 0
+                      ? t('common.none')
+                      : JSON.stringify(alias.overrides),
+                  mono: true,
+                },
+              ]}
+              onPress={() => setActions(alias)}
+              pressLabel={t('ops.cardActionsFor', { name: alias.upstream_model })}
+            />
+          ))}
+        </MobileList>
+      )}
+
+      {aliases.length > 0 && !compact && (
         <section className="card table ops-table" aria-label={t('ops.alias.title')}>
           <div className="thead alias-head" style={{ display: 'grid' }}>
             <span>{t('ops.alias.channel')}</span>
@@ -221,6 +251,23 @@ export function OpsAliases() {
             </div>
           ))}
         </section>
+      )}
+
+      {actions && (
+        <ActionSheet
+          title={actions.upstream_model}
+          description={`${channelName(actions.channel_id)} → ${actions.canonical_name}`}
+          items={[
+            { key: 'edit', label: t('ops.edit'), onSelect: () => openEdit(actions) },
+            {
+              key: 'delete',
+              label: t('ops.delete'),
+              danger: true,
+              onSelect: () => remove(actions),
+            },
+          ]}
+          onClose={() => setActions(null)}
+        />
       )}
 
       {(creating || editing) && (

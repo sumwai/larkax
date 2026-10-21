@@ -5,12 +5,13 @@
 import { readFileSync } from 'node:fs'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuthProvider } from '../auth/AuthProvider'
 import { I18nProvider } from '../i18n'
 import { AppShell } from './AppShell'
 import { ToastProvider } from './ui'
+import { mockViewport } from '../test/media'
 
 // vitest 不处理 CSS（`test.css: false`），`?raw` 拿到的也是空串；直接读文件。
 // 要断言生效样式的用例按 `main.tsx` 的导入顺序注入整份样式表——只抽一条规则
@@ -57,7 +58,7 @@ async function renderShell(role: 'user' | 'merchant' | 'admin', path = '/app') {
     csrf_token: 'csrf',
     expires_at: '2026-12-01T00:00:00Z',
   })
-  render(
+  const result = render(
     <I18nProvider>
       <ToastProvider>
         <AuthProvider>
@@ -70,6 +71,7 @@ async function renderShell(role: 'user' | 'merchant' | 'admin', path = '/app') {
   )
   // 会话恢复完、账号名出现之后再看视图切换（名字在顶栏的账户区）。
   await screen.findAllByText(`${role}-account`)
+  return result
 }
 
 describe('AppShell 视图切换', () => {
@@ -345,6 +347,158 @@ describe('AppShell 跳到主内容', () => {
       await user.keyboard('{Enter}')
       expect(document.activeElement).toBe(document.getElementById('main-content'))
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    } finally {
+      restore()
+    }
+  })
+})
+
+describe('AppShell 底部 tab', () => {
+  beforeEach(() => {
+    mocks.session.mockReset()
+  })
+
+  /** 底栏按 DOM 顺序的可见文字；弹出型 tab 也是其中一个孩子。 */
+  function tabLabels(): string[] {
+    const nav = document.querySelector('.bottomnav') as HTMLElement
+    return [...nav.children].map((child) => child.textContent ?? '')
+  }
+
+  function bottomNav(): HTMLElement {
+    return document.querySelector('.bottomnav') as HTMLElement
+  }
+
+  it('三种角色的 tab 集合与顺序固定，各自不超过 5 个', async () => {
+    const cases = [
+      {
+        role: 'user' as const,
+        path: '/app',
+        labels: ['概览', 'API 密钥', '用量', '模型', '设置'],
+      },
+      {
+        role: 'merchant' as const,
+        path: '/app/merchant/overview',
+        labels: ['概览', '渠道', '用量', '设置'],
+      },
+      {
+        role: 'admin' as const,
+        path: '/app/admin/channels',
+        labels: ['概览', '渠道', '用量', '用户', '运营'],
+      },
+    ]
+    for (const item of cases) {
+      const { unmount } = await renderShell(item.role, item.path)
+      expect(tabLabels()).toEqual(item.labels)
+      expect(tabLabels().length).toBeLessThanOrEqual(5)
+      unmount()
+    }
+  })
+
+  it('当前项的文字本身在，可及名不是空图标', async () => {
+    await renderShell('user', '/app/keys')
+    const current = within(bottomNav()).getByRole('link', { name: 'API 密钥' })
+    expect(current).toHaveAttribute('aria-current', 'page')
+    expect(current.textContent).toBe('API 密钥')
+  })
+
+  it('商家与管理员的「概览」都指向全站主语那一页', async () => {
+    const merchant = await renderShell('merchant', '/app/merchant/channels')
+    expect(within(bottomNav()).getByRole('link', { name: '概览' }).getAttribute('href')).toBe(
+      '/app/merchant/overview',
+    )
+    merchant.unmount()
+
+    await renderShell('admin', '/app/admin/channels')
+    expect(within(bottomNav()).getByRole('link', { name: '概览' }).getAttribute('href')).toBe(
+      '/app/merchant/overview',
+    )
+  })
+
+  it('管理员的「运营」从底栏弹出二级入口，停在那三页上时算当前项', async () => {
+    const { unmount } = await renderShell('admin', '/app/admin/models')
+    const ops = within(bottomNav()).getByRole('button', { name: '运营' })
+    expect(ops).toHaveAttribute('aria-current', 'page')
+    expect(ops).toHaveAttribute('aria-haspopup', 'dialog')
+
+    fireEvent.click(ops)
+    const sheet = screen.getByRole('dialog')
+    for (const label of ['模型目录', '别名', '计价']) {
+      expect(within(sheet).getByRole('link', { name: label })).toBeInTheDocument()
+    }
+    unmount()
+
+    const other = await renderShell('admin', '/app/admin/channels')
+    expect(within(bottomNav()).getByRole('button', { name: '运营' })).not.toHaveAttribute(
+      'aria-current',
+    )
+    other.unmount()
+  })
+})
+
+describe('AppShell 移动端焦点顺序', () => {
+  beforeEach(() => {
+    mocks.session.mockReset()
+  })
+
+  it('底栏排在主内容之后：Tab 走完正文才进底栏，不被固定栏截断', async () => {
+    const restore = mockViewport(375, 667)
+    try {
+      mocks.session.mockResolvedValue({
+        user: userOf('user'),
+        csrf_token: 'csrf',
+        expires_at: '2026-12-01T00:00:00Z',
+      })
+      render(
+        <I18nProvider>
+          <ToastProvider>
+            <AuthProvider>
+              <MemoryRouter initialEntries={['/app']}>
+                <Routes>
+                  <Route path="/app" element={<AppShell />}>
+                    <Route index element={<button type="button">正文动作</button>} />
+                  </Route>
+                </Routes>
+              </MemoryRouter>
+            </AuthProvider>
+          </ToastProvider>
+        </I18nProvider>,
+      )
+      await screen.findByRole('button', { name: '菜单' })
+
+      const main = document.getElementById('main-content') as HTMLElement
+      const nav = document.querySelector('.bottomnav') as HTMLElement
+      // DOM 顺序：主内容在前、底栏在后。视觉上底栏固定在页面底部，但读屏与
+      // Tab 走的是这条顺序。
+      expect(main.compareDocumentPosition(nav) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+      const user = userEvent.setup()
+      screen.getByRole('button', { name: '正文动作' }).focus()
+      await user.tab()
+      expect(document.activeElement).toBe(within(nav).getAllByRole('link')[0])
+    } finally {
+      restore()
+    }
+  })
+})
+
+describe('AppShell 矮视口', () => {
+  beforeEach(() => {
+    mocks.session.mockReset()
+  })
+
+  it('812×375 下侧栏默认收起，点 logo 展开、点收起钮再收回去', async () => {
+    const restore = mockViewport(812, 375)
+    try {
+      await renderShell('admin', '/app/admin/channels')
+      const aside = document.querySelector('.sidebar') as HTMLElement
+      // 展开的侧栏自己也要滚，主列也要滚，同一页会出现两条滚动条。
+      expect(aside.className).toContain('collapsed')
+
+      fireEvent.click(screen.getByRole('button', { name: '展开侧边栏' }))
+      expect(aside.className).not.toContain('collapsed')
+
+      fireEvent.click(screen.getByRole('button', { name: '收起侧边栏' }))
+      expect(aside.className).toContain('collapsed')
     } finally {
       restore()
     }

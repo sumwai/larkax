@@ -4,6 +4,7 @@ import { I18nProvider } from '../../i18n'
 import { SiteProvider } from '../../site/SiteProvider'
 import { ToastProvider } from '../../components/ui'
 import { OpsModels } from './Catalog'
+import { mockViewport } from '../../test/media'
 
 const mocks = vi.hoisted(() => ({
   listModels: vi.fn(),
@@ -392,5 +393,43 @@ describe('模型目录页', () => {
 
     // 同一个节点只是被清空：没有新句子可念，也不会把旧句子再念一遍。
     expect(screen.getByRole('alert')).toBeEmptyDOMElement()
+  })
+})
+
+describe('模型目录页：窄屏卡片', () => {
+  beforeEach(() => {
+    Object.values(mocks).forEach((mock) => mock.mockReset())
+    mocks.meta.mockResolvedValue({
+      site_name: 'larkax',
+      api_base_url: 'https://api.example.com/v1',
+      currency: 'USD',
+      timezone: 'Asia/Shanghai',
+      locales: ['en', 'zh'],
+      features: { registration: false, password_reset: 'admin', topup: false },
+    })
+  })
+
+  it('清单改成卡片，编辑与删除进底部菜单，表格列头不在 DOM 里', async () => {
+    const restore = mockViewport(375, 667)
+    try {
+      mocks.listModels.mockResolvedValue([MODEL])
+      renderModels()
+
+      const list = await screen.findByRole('region', { name: '模型目录' })
+      const card = within(list).getByRole('button', { name: '打开「claude-sonnet-4-5」的操作' })
+      expect(card).toHaveTextContent('Claude Sonnet 4.5')
+      expect(card).toHaveTextContent('anthropic')
+      expect(card).toHaveTextContent('200,000')
+      expect(screen.queryAllByRole('columnheader')).toHaveLength(0)
+
+      fireEvent.click(card)
+      const sheet = screen.getByRole('dialog')
+      expect(within(sheet).getByRole('button', { name: '编辑' })).toBeInTheDocument()
+      const remove = within(sheet).getByRole('button', { name: /删除/ })
+      expect(remove.className).toContain('danger')
+      expect(remove).toHaveAccessibleName(/危险操作/)
+    } finally {
+      restore()
+    }
   })
 })

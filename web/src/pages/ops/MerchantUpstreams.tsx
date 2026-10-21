@@ -3,11 +3,13 @@ import { api } from '../../api'
 import type { ChannelHealth, MerchantUpstreamChannel } from '../../api/types'
 import { useAuth } from '../../auth/AuthProvider'
 import { useAsync } from '../../hooks/useAsync'
+import { useIsCompact } from '../../hooks/useMediaQuery'
 import { useI18n } from '../../i18n'
 import type { MessageKey } from '../../i18n/zh'
 import { subjectOf } from '../../ops/views'
 import { formatCount } from '../../lib/format'
 import { Empty, PageHead, Pill, Skeleton } from '../../components/ui'
+import { MobileCard, MobileList } from '../../components/MobileList'
 import { IconChannel } from '../../components/icons'
 import { OpsLoadError } from './common'
 
@@ -75,6 +77,7 @@ function ChannelRow({ channel }: { channel: MerchantUpstreamChannel }) {
  */
 export function MerchantUpstreams() {
   const { t, lang } = useI18n()
+  const compact = useIsCompact()
   const { user } = useAuth()
   const { data, error, loading, reload } = useAsync(() => api.merchant.listUpstreams(), [])
   const subject = subjectOf(user?.role)
@@ -139,18 +142,37 @@ export function MerchantUpstreams() {
                 </div>
               </div>
 
-              <div role="table" aria-label={`${upstream.type} ${upstream.base_url}`}>
-                <div className="thead upstream-channels-head" role="row">
-                  <span role="columnheader">{t('ops.merchant.upstreams.colChannel')}</span>
-                  <span role="columnheader">
-                    {t('ops.merchant.upstreams.colChannelStatus')}
-                  </span>
-                  <span role="columnheader">{t('ops.merchant.upstreams.colHealth')}</span>
+              {compact ? (
+                <MobileList label={`${upstream.type} ${upstream.base_url}`}>
+                  {upstream.channels.map((channel) => (
+                    <MobileCard
+                      key={channel.id}
+                      title={channel.name}
+                      subtitle={`#${channel.id}`}
+                      status={<ChannelStatus status={channel.status} />}
+                      fields={[
+                        {
+                          label: t('ops.merchant.upstreams.colHealth'),
+                          value: <HealthPill health={channel.health} />,
+                        },
+                      ]}
+                    />
+                  ))}
+                </MobileList>
+              ) : (
+                <div role="table" aria-label={`${upstream.type} ${upstream.base_url}`}>
+                  <div className="thead upstream-channels-head" role="row">
+                    <span role="columnheader">{t('ops.merchant.upstreams.colChannel')}</span>
+                    <span role="columnheader">
+                      {t('ops.merchant.upstreams.colChannelStatus')}
+                    </span>
+                    <span role="columnheader">{t('ops.merchant.upstreams.colHealth')}</span>
+                  </div>
+                  {upstream.channels.map((channel) => (
+                    <ChannelRow key={channel.id} channel={channel} />
+                  ))}
                 </div>
-                {upstream.channels.map((channel) => (
-                  <ChannelRow key={channel.id} channel={channel} />
-                ))}
-              </div>
+              )}
             </article>
           ))}
 

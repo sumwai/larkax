@@ -20,6 +20,7 @@ export const en: Record<MessageKey, string> = {
   'common.apply': 'Apply',
   'common.none': '—',
   'common.more': 'More',
+  'common.dangerAction': 'Dangerous action',
 
   'mock.banner':
     'Demo data: not connected to the backend. Set `VITE_API_MODE=http` and start the gateway to use real data.',
@@ -38,9 +39,11 @@ export const en: Record<MessageKey, string> = {
   'nav.noAccess': 'No access',
   'nav.logout': 'Sign out',
   'nav.skipToMain': 'Skip to main content',
+  'nav.ops': 'Operations',
 
   'status.active': 'Active',
   'status.disabled': 'Disabled',
+  'status.enabled': 'Enabled',
   'status.revoked': 'Revoked',
   'status.pending': 'Pending',
   'status.ok': 'Succeeded',
@@ -379,6 +382,7 @@ export const en: Record<MessageKey, string> = {
   'ops.created': 'Created',
   'ops.deleted': 'Deleted',
   'ops.colActions': 'Actions',
+  'ops.cardActionsFor': 'Actions for {name}',
   'ops.colUpdated': 'Updated',
   'ops.invalidInteger': 'This field must be an integer.',
   'ops.nav.channels': 'Channels',

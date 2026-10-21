@@ -13,6 +13,7 @@ import {
 } from 'react'
 import type { MessageKey } from '../i18n/zh'
 import { useI18n } from '../i18n'
+import { useIsMobile } from '../hooks/useMediaQuery'
 import { formatBalance, formatMoney, formatSpend, moneySymbol } from '../lib/format'
 import type { Money } from '../api/types'
 import { IconAlert, IconCheck, IconCopy, IconChevronDown, IconInfo, IconX } from './icons'
@@ -70,6 +71,9 @@ export function Pill({ tone = 'neutral', dot = false, children }: { tone?: Tone;
 
 const STATUS: Record<string, { tone: Tone; key: MessageKey }> = {
   active: { tone: 'ok', key: 'status.active' },
+  // 渠道的启停用 `enabled` / `disabled` 两个值；少了这一条，启用的渠道会把
+  // 原始英文值直接显示出来。
+  enabled: { tone: 'ok', key: 'status.enabled' },
   disabled: { tone: 'neutral', key: 'status.disabled' },
   revoked: { tone: 'bad', key: 'status.revoked' },
   pending: { tone: 'warn', key: 'status.pending' },
@@ -163,6 +167,19 @@ export function Skeleton({ width = '100%', height = 12 }: { width?: number | str
 
 /* ── 浮层 ─────────────────────────────────────────────────────────── */
 
+/**
+ * bottom sheet 的三档高度上限，单位是视口高度的百分比。
+ *
+ * 只有这一处写数值：改档位时改这里，弹窗与用例都跟着变。档位是**上限**，
+ * 内容少的弹窗按内容高，不留空白。
+ */
+export const SHEET_SIZES = { sm: 30, md: 50, lg: 80 } as const
+
+export type SheetSize = keyof typeof SHEET_SIZES
+
+/** 往下拖过这个距离才关，免得手抖碰一下就把正在填的表单关掉。 */
+const SHEET_DISMISS_PX = 96
+
 export function Modal({
   title,
   description,
@@ -170,6 +187,7 @@ export function Modal({
   children,
   footer,
   sheet = false,
+  sheetSize = 'md',
   focusTarget,
   focusToken,
 }: {
@@ -179,6 +197,8 @@ export function Modal({
   children: ReactNode
   footer?: ReactNode
   sheet?: boolean
+  /** 高度档位；窄屏上所有弹窗都按它限高，桌面只有 `sheet` 弹窗用。 */
+  sheetSize?: SheetSize
   /**
    * 打开之后焦点该落在谁身上。给一个 ref，或者一个「现在该聚焦哪个元素」的
    * 取值函数——后者用在弹窗内容自己会变的情形（比如校验失败时切到出错的那一组，
@@ -199,6 +219,15 @@ export function Modal({
   targetRef.current = focusTarget
   const titleId = useId()
   const { t } = useI18n()
+  // 窄屏上所有弹窗都从底部弹出（`.overlay` 的移动端样式本来就贴在底下），
+  // 所以拖动把手与高度档位也一并给上，不只给显式声明 `sheet` 的那几个。
+  const mobile = useIsMobile()
+  const asSheet = sheet || mobile
+  // 从上沿往下拖的位移。松手时超过阈值就关掉，否则弹回原位。
+  const [dragY, setDragY] = useState(0)
+  const dragStart = useRef<number | null>(null)
+  const dragYRef = useRef(0)
+  dragYRef.current = dragY
 
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
@@ -225,7 +254,7 @@ export function Modal({
 
   return (
     <div
-      className={sheet ? 'overlay sheet-overlay' : 'overlay'}
+      className={asSheet ? 'overlay sheet-overlay' : 'overlay'}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose()
       }}
@@ -237,7 +266,44 @@ export function Modal({
         aria-labelledby={titleId}
         tabIndex={-1}
         ref={dialogRef}
+        style={
+          asSheet
+            ? {
+                maxHeight: `${SHEET_SIZES[sheetSize]}dvh`,
+                transform: dragY > 0 ? `translateY(${dragY}px)` : undefined,
+                transition: dragStart.current === null ? 'transform 0.16s ease' : undefined,
+              }
+            : undefined
+        }
       >
+        {/*
+         * 拖动把手只给手指用：键盘与读屏用户有 Esc 和关闭钮，不依赖这条只有
+         * 指针事件才能触发的路。`touch-action: none` 让纵向拖动不被页面滚动抢走。
+         */}
+        {asSheet && (
+          <div
+            className="sheet-grab"
+            aria-hidden="true"
+            onPointerDown={(event) => {
+              dragStart.current = event.clientY
+              dragYRef.current = 0
+              setDragY(0)
+              ;(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId)
+            }}
+            onPointerMove={(event) => {
+              if (dragStart.current === null) return
+              setDragY(Math.max(0, event.clientY - dragStart.current))
+            }}
+            onPointerUp={() => {
+              if (dragStart.current === null) return
+              dragStart.current = null
+              if (dragYRef.current >= SHEET_DISMISS_PX) closeRef.current()
+              setDragY(0)
+            }}
+          >
+            <span />
+          </div>
+        )}
         <div className="m-head">
           <div>
             <h2 id={titleId}>{title}</h2>

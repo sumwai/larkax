@@ -3,7 +3,8 @@ import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-do
 import { useAuth } from '../auth/AuthProvider'
 import { useI18n } from '../i18n'
 import type { MessageKey } from '../i18n/zh'
-import { useIsMobile, useIsNarrow } from '../hooks/useMediaQuery'
+import { useMediaQuery, useIsMobile, useIsNarrow } from '../hooks/useMediaQuery'
+import { ActionSheet } from './ActionSheet'
 import {
   homeOf,
   isSharedMerchantPath,
@@ -24,6 +25,7 @@ import {
   IconLogout,
   IconMenu,
   IconModels,
+  IconOps,
   IconOverview,
   IconPricing,
   IconQuickstart,
@@ -72,6 +74,59 @@ const OPS_NAV: Record<Exclude<View, 'user'>, NavItem[]> = {
   ],
 }
 
+/**
+ * 管理员那些进不了底栏的页：从「运营」这个二级入口进。
+ *
+ * 底栏最多五个，而管理端的二级页有三个，挤不进同一个数组时不要删减——
+ * 少一个就少一条路，用户只能从抽屉里绕。
+ */
+const ADMIN_SECONDARY_PATHS = [
+  '/app/admin/models',
+  '/app/admin/aliases',
+  '/app/admin/pricing',
+] as const
+
+/**
+ * 底栏的 tab 表，一个视图一行。
+ *
+ * 这里不判断角色：`view` 已经由 `views.ts` 的视图判定给出；商家与管理员共用
+ * 的那三页，主语由页面自己按 `subjectOf` 取。加一页时往对应行里加一项即可。
+ *
+ * `to: 'settings'` 是占位——设置页的地址随视图不同，渲染时才落定。
+ */
+type BottomTab = {
+  key: MessageKey
+  icon: ComponentType<{ size?: number; className?: string }>
+  to?: string | 'settings'
+  /** 弹出二级入口的 tab：点它只开 sheet，不发导航。 */
+  sheet?: 'ops'
+  /** 弹出型 tab 在哪些地址上算当前项。 */
+  owns?: readonly string[]
+}
+
+const BOTTOM_NAV: Record<View, BottomTab[]> = {
+  user: [
+    { to: '/app', key: 'nav.overview', icon: IconOverview },
+    { to: '/app/keys', key: 'nav.keys', icon: IconKey },
+    { to: '/app/usage', key: 'nav.usage', icon: IconUsage },
+    { to: '/app/models', key: 'nav.models', icon: IconModels },
+    { to: 'settings', key: 'nav.settings', icon: IconSettings },
+  ],
+  merchant: [
+    { to: '/app/merchant/overview', key: 'nav.overview', icon: IconOverview },
+    { to: '/app/merchant/channels', key: 'ops.nav.channels', icon: IconChannel },
+    { to: '/app/usage', key: 'nav.usage', icon: IconUsage },
+    { to: 'settings', key: 'nav.settings', icon: IconSettings },
+  ],
+  admin: [
+    { to: '/app/merchant/overview', key: 'nav.overview', icon: IconOverview },
+    { to: '/app/admin/channels', key: 'ops.nav.channels', icon: IconChannel },
+    { to: '/app/usage', key: 'nav.usage', icon: IconUsage },
+    { to: '/app/admin/users', key: 'ops.nav.users', icon: IconUser },
+    { sheet: 'ops', key: 'nav.ops', icon: IconOps, owns: ADMIN_SECONDARY_PATHS },
+  ],
+}
+
 function initials(name: string | null | undefined): string {
   const value = (name ?? '').trim()
   if (!value) return '?'
@@ -85,13 +140,18 @@ export function AppShell() {
   const location = useLocation()
   const narrow = useIsNarrow()
   const mobile = useIsMobile()
+  // 矮而宽的窗口（例如横放的手机 812×375）：侧栏展开后自己也要滚，主列也要滚，
+  // 同一页出现两条滚动条。默认收起侧栏，只留主列那一条；要看导航就点 logo 展开。
+  const short = useMediaQuery('(max-height: 519.98px)')
+  const [shortExpanded, setShortExpanded] = useState(false)
   const [manualCollapsed, setManualCollapsed] = useState(false)
   const [drawer, setDrawer] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [opsSheet, setOpsSheet] = useState(false)
   const menuRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const mainRef = useRef<HTMLElement | null>(null)
-  const collapsed = narrow || manualCollapsed
+  const collapsed = narrow || (short ? !shortExpanded : manualCollapsed)
 
   const views = viewsFor(user?.role)
   const routeView = viewOfPath(location.pathname)
@@ -108,7 +168,13 @@ export function AppShell() {
   const navItems: NavItem[] =
     view === 'user' ? APP_NAV : view === 'merchant' ? merchantItems : OPS_NAV[view]
   // 设置是账号级的：管理员在商家视图里点设置，落到管理视图那一个地址。
-  const settings = settingsOf(view === 'merchant' && siteWide ? 'admin' : view)
+  //
+  // 管理员进商家视图时，底栏也按管理视图排：他看到的那三页是全站主语，
+  // 「渠道」「用户」「运营」都在管理前缀下。这对设置地址与底栏 tab 表是同一个
+  // 判断，所以只写一次。
+  const shellView: View = view === 'merchant' && siteWide ? 'admin' : view
+  const settings = settingsOf(shellView)
+  const tabs = BOTTOM_NAV[shellView]
 
   useEffect(() => {
     setDrawer(false)
@@ -206,8 +272,10 @@ export function AppShell() {
           <button
             className="brand"
             onClick={() => {
-              if (!narrow && collapsed) setManualCollapsed(false)
-              else navigate(homeOf(view))
+              if (!narrow && collapsed) {
+                if (short) setShortExpanded(true)
+                else setManualCollapsed(false)
+              } else navigate(homeOf(view))
             }}
             aria-label={collapsed && !narrow ? t('nav.expand') : t('common.console')}
           >
@@ -222,7 +290,7 @@ export function AppShell() {
           {!collapsed && (
             <button
               className="side-toggle"
-              onClick={() => setManualCollapsed(true)}
+              onClick={() => (short ? setShortExpanded(false) : setManualCollapsed(true))}
               aria-label={t('nav.collapse')}
             >
               <IconCollapse size={16} />
@@ -316,21 +384,61 @@ export function AppShell() {
           <Outlet />
         </main>
 
+        {/*
+         * 底栏在 DOM 里排在主内容之后：键盘用户走完正文，Tab 才进底栏，
+         * 不会被这条固定栏截在半路。它浮在内容之上，所以聚焦元素还有一条
+         * `scroll-margin-bottom`（见 components.css），滚到最后一屏时不被盖住。
+         */}
         <nav className="bottomnav" aria-label={t('common.console')}>
-          {[
-            ...navItems.slice(0, view === 'user' ? 3 : 4),
-            { to: settings, key: 'nav.settings' as MessageKey, icon: IconSettings },
-          ].map((item) => {
-            const Icon = item.icon
+          {tabs.map((tab) => {
+            const Icon = tab.icon
+            if (tab.sheet) {
+              const active = (tab.owns ?? []).some(
+                (path) =>
+                  location.pathname === path || location.pathname.startsWith(`${path}/`),
+              )
+              return (
+                <button
+                  key={tab.key}
+                  type="button"
+                  aria-current={active ? 'page' : undefined}
+                  aria-haspopup="dialog"
+                  aria-expanded={opsSheet}
+                  onClick={() => setOpsSheet(true)}
+                >
+                  <Icon size={20} />
+                  <span>{t(tab.key)}</span>
+                </button>
+              )
+            }
+            const to = tab.to === 'settings' ? settings : tab.to!
             return (
-              <NavLink key={item.to} to={item.to} end={item.to === '/app'}>
+              <NavLink key={tab.key} to={to} end={to === '/app'}>
                 <Icon size={20} />
-                <span>{t(item.key)}</span>
+                <span>{t(tab.key)}</span>
               </NavLink>
             )
           })}
         </nav>
       </div>
+
+      {opsSheet && (
+        <ActionSheet
+          title={t('nav.ops')}
+          items={OPS_NAV.admin
+            .filter((item) => (ADMIN_SECONDARY_PATHS as readonly string[]).includes(item.to))
+            .map((item) => {
+              const Icon = item.icon
+              return {
+                key: item.to,
+                label: t(item.key),
+                icon: <Icon size={18} />,
+                to: item.to,
+              }
+            })}
+          onClose={() => setOpsSheet(false)}
+        />
+      )}
 
       {drawer && (
         <div

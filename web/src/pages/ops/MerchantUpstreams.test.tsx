@@ -6,6 +6,7 @@ import { SiteProvider } from '../../site/SiteProvider'
 import { ToastProvider } from '../../components/ui'
 import type { MerchantUpstream, MerchantUpstreamsResponse } from '../../api/types'
 import { MerchantUpstreams } from './MerchantUpstreams'
+import { mockViewport } from '../../test/media'
 
 const mocks = vi.hoisted(() => ({
   listUpstreams: vi.fn(),
@@ -209,5 +210,26 @@ describe('商家上游', () => {
     expect(await screen.findByText('还没有上游')).toBeInTheDocument()
     expect(screen.queryByLabelText('正在加载运营数据')).not.toBeInTheDocument()
     expect(screen.queryByText('数据加载失败。')).not.toBeInTheDocument()
+  })
+})
+
+describe('商家上游：窄屏卡片', () => {
+  it('组内渠道改成卡片，桌面表格的列头不在 DOM 里', async () => {
+    const restore = mockViewport(375, 667)
+    try {
+      mocks.listUpstreams.mockResolvedValue(page())
+      renderPage()
+
+      const list = await screen.findByRole('region', {
+        name: 'openai https://api.example.com/v1',
+      })
+      expect(within(list).getByText('acme-primary')).toBeInTheDocument()
+      expect(within(list).getByText('acme-backup')).toBeInTheDocument()
+      expect(within(list).getByText('#2')).toBeInTheDocument()
+      expect(within(list).getByText('已停用')).toBeInTheDocument()
+      expect(screen.queryAllByRole('columnheader')).toHaveLength(0)
+    } finally {
+      restore()
+    }
   })
 })
