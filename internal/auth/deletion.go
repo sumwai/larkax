@@ -152,6 +152,9 @@ type deletionRow struct {
 	status      string
 	prior       sql.NullString
 	deletedAt   sql.NullTime
+	// isAdmin 是「这一行挂着管理员」——与 status 分开读：销户的两道门都要问
+	// 「撤掉这一行之后平台还剩不剩管理员」，而入口那次判断由调用点自己做。
+	isAdmin bool
 }
 
 // lockDeletionRow 按「ID 或用户名」定位一行并锁住它。
@@ -162,10 +165,10 @@ func lockDeletionRow(ctx context.Context, tx *sql.Tx, ref string) (deletionRow, 
 	where, arg := userRefWhere(ref, 1)
 	var row deletionRow
 	err := tx.QueryRowContext(ctx,
-		`SELECT id, username, email, display_name, status, deletion_prior_status, deleted_at
+		`SELECT id, username, email, display_name, status, deletion_prior_status, deleted_at, is_admin
 		   FROM users WHERE `+where+` FOR UPDATE`, arg,
 	).Scan(&row.id, &row.username, &row.email, &row.displayName,
-		&row.status, &row.prior, &row.deletedAt)
+		&row.status, &row.prior, &row.deletedAt, &row.isAdmin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return deletionRow{}, fmt.Errorf("%w: %q", ErrUserNotFound, ref)
 	}
@@ -184,10 +187,10 @@ func readDeletionRow(ctx context.Context, tx *sql.Tx, ref string) (deletionRow, 
 	where, arg := userRefWhere(ref, 1)
 	var row deletionRow
 	err := tx.QueryRowContext(ctx,
-		`SELECT id, username, email, display_name, status, deletion_prior_status, deleted_at
+		`SELECT id, username, email, display_name, status, deletion_prior_status, deleted_at, is_admin
 		   FROM users WHERE `+where, arg,
 	).Scan(&row.id, &row.username, &row.email, &row.displayName,
-		&row.status, &row.prior, &row.deletedAt)
+		&row.status, &row.prior, &row.deletedAt, &row.isAdmin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return deletionRow{}, fmt.Errorf("%w: %q", ErrUserNotFound, ref)
 	}
@@ -204,10 +207,10 @@ func readDeletionRow(ctx context.Context, tx *sql.Tx, ref string) (deletionRow, 
 func lockDeletionRowByID(ctx context.Context, tx *sql.Tx, id int64) (deletionRow, error) {
 	var row deletionRow
 	err := tx.QueryRowContext(ctx,
-		`SELECT id, username, email, display_name, status, deletion_prior_status, deleted_at
+		`SELECT id, username, email, display_name, status, deletion_prior_status, deleted_at, is_admin
 		   FROM users WHERE id = $1 FOR UPDATE`, id,
 	).Scan(&row.id, &row.username, &row.email, &row.displayName,
-		&row.status, &row.prior, &row.deletedAt)
+		&row.status, &row.prior, &row.deletedAt, &row.isAdmin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return deletionRow{}, fmt.Errorf("%w: id %d", ErrUserNotFound, id)
 	}
@@ -396,6 +399,19 @@ func (s *Store) requestDeletionOnce(ctx context.Context, ref string) (DeletionMa
 		return DeletionMark{}, err
 	}
 
+	// 最后一个 active 管理员不能打标：lookup 只认 status = active，打标之后
+	// 这个账号当场失去登录能力，平台上不再有可用的管理员。
+	//
+	// 判据与 UpdateUser 共用同一个辅助函数与同一把事务级咨询锁：各写一份计数、
+	// 各起一个锁键，两条路径就不会互相串行，「两笔并发都放行」照样能发生。
+	// 只在目标是 active 管理员时问——suspended / banned 的管理员本来就不在
+	// 还能进管理组的那一拨里，撤掉它不会让谁失去入口。
+	if row.status == UserStatusActive && row.isAdmin {
+		if guardErr := ensureAnotherActiveAdmin(ctx, tx, row.id); guardErr != nil {
+			return DeletionMark{}, deletionLastAdminError(row.username, guardErr)
+		}
+	}
+
 	if _, _, _, err := checkDeletionBalance(ctx, tx, row.id, row.username); err != nil {
 		return DeletionMark{}, err
 	}
@@ -431,6 +447,23 @@ func requestDeletionGate(row deletionRow) error {
 			ErrDeletionAlreadyDeleted, row.username, formatDeletionTime(row.deletedAt))
 	}
 	return nil
+}
+
+// deletionLastAdminError 给 ErrLastAdmin 补上销户这一侧的动作指引。
+//
+// 直接返回哨兵也能被 errors.Is 认出来、退出码同样落在「冲突」那一档，但文案
+// 只剩「不能降级、停用或封禁」——那是 UpdateUser 的说法，销户被拦下的人看不出
+// 下一步该做什么。用 %w 保住哨兵，命令行的归类不受影响。
+//
+// 非 ErrLastAdmin 的错误原样返回：那可能是取锁或计数失败，不该被说成
+// 「你是唯一管理员」。
+func deletionLastAdminError(username string, err error) error {
+	if !errors.Is(err, ErrLastAdmin) {
+		return err
+	}
+	return fmt.Errorf(
+		"%w：账号 %q 是唯一还能进管理组的人，先给另一个账号 admin 角色再销户",
+		err, username)
 }
 
 // RevertDeletion 撤掉删除要求：状态回到打标之前的那一个。
@@ -560,6 +593,18 @@ func (s *Store) purgeDeletionOnce(ctx context.Context, ref, confirm string) (Del
 	err = purgeDeletionGate(row, confirm)
 	if err != nil {
 		return DeletionResult{}, err
+	}
+
+	// 匿名化是最后一道门：它不可逆，而且可能被绕过打标直接调用（管理侧或将来
+	// 的别的入口）。这里仍要问「撤掉这一行之后还剩不剩管理员」——本行此刻是
+	// deletion_requested，不参与计数，所以唯一管理员走到这里时计数为 0。
+	//
+	// 门由调用点自己判：辅助函数回答的是「撤掉之后还剩不剩」，不是「目标是不是
+	// 管理员」。无条件调用会把普通用户销户也挡住——那正是最需要清号的时候。
+	if row.isAdmin {
+		if guardErr := ensureAnotherActiveAdmin(ctx, tx, row.id); guardErr != nil {
+			return DeletionResult{}, deletionLastAdminError(row.username, guardErr)
+		}
 	}
 
 	balance, frozen, walletRows, err := checkDeletionBalance(ctx, tx, row.id, row.username)
