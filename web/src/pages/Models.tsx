@@ -3,7 +3,7 @@ import { api } from '../api'
 import { useI18n } from '../i18n'
 import { useSite } from '../site/SiteProvider'
 import { useAsync } from '../hooks/useAsync'
-import { formatCount, formatDateTime, formatMoney, moneySymbol } from '../lib/format'
+import { compareMoney, formatCount, formatDateTime, formatMoney, moneySymbol } from '../lib/format'
 import type { MessageKey } from '../i18n/zh'
 import { Alert, Button, Empty, PageHead, Skeleton } from '../components/ui'
 import { IconModels, IconSearch } from '../components/icons'
@@ -137,6 +137,27 @@ export function Models() {
                     </div>
                   </div>
                   {!model.pricing && <span className="price-note">{t('models.noPricing')}</span>}
+                  {model.offers && model.offers.length > 0 && (
+                    <div className="offers" role="group" aria-label={t('models.offers')}>
+                      <div className="offers-row offers-head">
+                        <span>{t('models.offerMerchant')}</span>
+                        <span>{t('models.offerPrice')}</span>
+                      </div>
+                      {/* 谁便宜谁在前；平台自营没有优先级，按它的价一起排。
+                          报价是字符串，原样显示，不经过 double。 */}
+                      {[...model.offers]
+                        .sort((a, b) => compareMoney(a.price, b.price))
+                        .map((offer, index) => (
+                          <div className="offers-row" key={`${offer.merchant ?? 'platform'}-${index}`}>
+                            <span>{offer.merchant ?? t('models.platform')}</span>
+                            <b className="mono">
+                              {symbol}
+                              {offer.price}
+                            </b>
+                          </div>
+                        ))}
+                    </div>
+                  )}
                 </article>
               ))}
             </div>

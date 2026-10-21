@@ -83,6 +83,21 @@ export function formatSpend(value: Money | null | undefined): string {
   return renderUnits(parsed.units, 3, parsed.negative)
 }
 
+/**
+ * 比两个金额字符串的大小，给列表按价格升序用。
+ *
+ * 只做比较，不做换算：位数不同也能比，全程字符串与 BigInt，不经过 double。
+ * 解析不了的按相等处理（调用方拿到的是服务端的价，坏值不该让排序崩掉）。
+ */
+export function compareMoney(a: Money, b: Money): number {
+  const left = parseMoney(a, 8)
+  const right = parseMoney(b, 8)
+  if (!left || !right) return 0
+  const l = left.negative ? -left.units : left.units
+  const r = right.negative ? -right.units : right.units
+  return l < r ? -1 : l > r ? 1 : 0
+}
+
 export function moneySymbol(currency: string | undefined): string {
   switch ((currency ?? '').toUpperCase()) {
     case 'USD':

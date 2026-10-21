@@ -142,6 +142,11 @@ const MODELS: Model[] = [
       cache_read_per_mtok: '0.30000000',
       cache_write_per_mtok: '3.75000000',
     },
+    offers: [
+      { merchant: null, price: '3.000000' },
+      { merchant: 'acme', price: '2.800000' },
+      { merchant: 'northwind', price: '3.150000' },
+    ],
   },
   {
     name: 'claude-opus-4-1',
@@ -172,6 +177,7 @@ const MODELS: Model[] = [
       cache_read_per_mtok: '0.50000000',
       cache_write_per_mtok: null,
     },
+    offers: [{ merchant: 'acme', price: '1.900000' }],
   },
   {
     name: 'gpt-4.1-mini',
@@ -1082,6 +1088,7 @@ export class MockApiClient implements ApiClient {
         ...model,
         capabilities: { ...model.capabilities },
         modalities: { input: [...model.modalities.input], output: [...model.modalities.output] },
+        offers: model.offers?.map((offer) => ({ ...offer })),
         pricing: model.pricing && { ...model.pricing },
       })),
     }

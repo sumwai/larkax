@@ -1256,6 +1256,24 @@ textarea.input {
   flex-wrap: wrap;
   gap: 5px;
 }
+.offers {
+  display: grid;
+  gap: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.offers-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12.5px;
+}
+.offers-head {
+  color: var(--muted);
+  font-size: 11.5px;
+  text-transform: none;
+}
 .price {
   display: grid;
   grid-template-columns: 1fr 1fr;

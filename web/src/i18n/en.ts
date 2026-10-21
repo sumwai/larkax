@@ -226,6 +226,10 @@ export const en: Record<MessageKey, string> = {
   'models.referenceAt': 'Reference prices evaluated at {time}',
   'models.priceNote':
     'Reference prices are derived from platform pricing rules. Time-of-day tiers, volume tiers and channel overrides can change the final amount.',
+  'models.offers': 'Who offers this model',
+  'models.offerMerchant': 'Offered by',
+  'models.offerPrice': 'Price',
+  'models.platform': 'Platform',
   'models.inputPrice': 'Input / 1M tokens',
   'models.outputPrice': 'Output / 1M tokens',
   'models.context': 'Context',

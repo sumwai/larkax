@@ -119,6 +119,14 @@ export interface ModelModalities {
   output: string[]
 }
 
+/** 一条报价：谁在供这个模型，以及他对它的价。 */
+export interface ModelOffer {
+  /** 商家的展示名；平台自营为 null。 */
+  merchant: string | null
+  /** 单价字符串，原样展示——不转成数字，免得小额价被浮点吃成 0。 */
+  price: Money
+}
+
 export interface Model {
   /** 规范模型名，也是调用时 `model` 字段的值。 */
   name: string
@@ -131,6 +139,8 @@ export interface Model {
   modalities: ModelModalities
   /** 没有平台计价规则时为 null，界面显示「—」。 */
   pricing: ModelPricing | null
+  /** 在供的商家与报价；没人供时没有这一项（不是空数组）。 */
+  offers?: ModelOffer[]
 }
 
 export interface ModelsResponse {
