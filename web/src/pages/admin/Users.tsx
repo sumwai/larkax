@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { api, ApiError } from '../../api'
 import type {
@@ -104,8 +104,13 @@ export function AdminUsers() {
     [query, role, status],
   )
 
+  // 每按一组条件取第一页就换一次号。翻页带着出发时的号回来，号对不上就不写进
+  // state：翻页在途时改了筛选，旧那一页不能追到新条件的列表里。
+  const generation = useRef(0)
+
   useEffect(() => {
     let alive = true
+    const token = (generation.current += 1)
     // 条件变了就从第一页重来：旧行留在屏幕上会冒充新条件的结果。
     setRows(null)
     setNextCursor(null)
@@ -113,12 +118,12 @@ export function AdminUsers() {
     client
       .listUsers(params)
       .then((page) => {
-        if (!alive) return
+        if (!alive || token !== generation.current) return
         setRows(page.items)
         setNextCursor(page.next_cursor)
       })
       .catch((failure) => {
-        if (alive) setError(failure)
+        if (alive && token === generation.current) setError(failure)
       })
     return () => {
       alive = false
@@ -127,14 +132,16 @@ export function AdminUsers() {
 
   const loadMore = async () => {
     if (!nextCursor || loadingMore) return
+    const token = generation.current
     setLoadingMore(true)
     try {
       const page = await client.listUsers({ ...params, cursor: nextCursor })
+      if (token !== generation.current) return
       // 追加，不替换：翻页时已经读到的行不该闪一下再回来。
       setRows((prev) => [...(prev ?? []), ...page.items])
       setNextCursor(page.next_cursor)
     } catch (failure) {
-      setError(failure)
+      if (token === generation.current) setError(failure)
     } finally {
       setLoadingMore(false)
     }
@@ -218,7 +225,7 @@ export function AdminUsers() {
       )}
 
       {rows && rows.length > 0 && (
-        <section className="card ops-table" aria-label={t('ops.users.title')}>
+        <section className="card table ops-table" aria-label={t('ops.users.title')}>
           <div className="thead users-head" style={{ display: 'grid' }}>
             <span>{t('ops.users.colUser')}</span>
             <span>{t('ops.users.colEmail')}</span>

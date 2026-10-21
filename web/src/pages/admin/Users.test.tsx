@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '../../i18n'
@@ -177,6 +177,35 @@ describe('用户列表页', () => {
       status: 'suspended',
       limit: 50,
     })
+  })
+
+  it('翻页在途时改筛选，旧那一页不会追进新条件的列表', async () => {
+    let finishMore: (value: unknown) => void = () => {}
+    mocks.listUsers
+      .mockResolvedValueOnce({ items: [SUMMARY], next_cursor: 'cursor-2' })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishMore = resolve
+          }),
+      )
+    mocks.listUsers.mockResolvedValue({ items: [OTHER], next_cursor: null })
+    renderList()
+    await screen.findByText('alice')
+
+    fireEvent.click(screen.getByRole('button', { name: '加载更多' }))
+    // 翻页还挂着的时候换条件：旧那一页这时才回来。
+    fireEvent.change(screen.getByLabelText('按角色筛选'), { target: { value: 'admin' } })
+    expect(await screen.findByText('bob')).toBeInTheDocument()
+
+    finishMore({ items: [{ ...SUMMARY, id: 9, username: 'stale' }], next_cursor: null })
+    // 让那个挂起的请求真的落地，再看列表。
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByText('stale')).not.toBeInTheDocument()
+    expect(screen.queryByText('alice')).not.toBeInTheDocument()
+    expect(screen.getByText('bob')).toBeInTheDocument()
   })
 
   it('没有筛选且一条也没有时，说的是「还没有用户」', async () => {
