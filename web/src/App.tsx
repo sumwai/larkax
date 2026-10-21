@@ -111,6 +111,14 @@ export function App() {
                       element={<Navigate to="/app/merchant/channels" replace />}
                     />
                     <Route
+                      path="merchant/settings"
+                      element={
+                        <RequireView view="merchant">
+                          <Settings />
+                        </RequireView>
+                      }
+                    />
+                    <Route
                       path="merchant/channels"
                       element={
                         <RequireView view="merchant">
@@ -123,6 +131,14 @@ export function App() {
                       element={
                         <RequireView view="merchant">
                           <MerchantPricing />
+                        </RequireView>
+                      }
+                    />
+                    <Route
+                      path="admin/settings"
+                      element={
+                        <RequireView view="admin">
+                          <Settings />
                         </RequireView>
                       }
                     />

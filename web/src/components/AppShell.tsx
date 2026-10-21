@@ -4,7 +4,7 @@ import { useAuth } from '../auth/AuthProvider'
 import { useI18n } from '../i18n'
 import type { MessageKey } from '../i18n/zh'
 import { useIsMobile, useIsNarrow } from '../hooks/useMediaQuery'
-import { homeOf, viewOfPath, viewsFor, type View } from '../ops/views'
+import { homeOf, settingsOf, viewOfPath, viewsFor, type View } from '../ops/views'
 import {
   BrandMark,
   IconAlias,
@@ -79,6 +79,7 @@ export function AppShell() {
   // 入口列出来。可用的视图与切换器同源，不另写一份角色判断。
   const view = views.includes(routeView) ? routeView : views[views.length - 1]
   const navItems: NavItem[] = view === 'user' ? APP_NAV : OPS_NAV[view]
+  const settings = settingsOf(view)
 
   useEffect(() => {
     setDrawer(false)
@@ -93,7 +94,7 @@ export function AppShell() {
         item.to === '/app'
           ? location.pathname === item.to
           : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`),
-      )?.key ?? (location.pathname.startsWith('/app/settings') ? 'nav.settings' : navItems[0].key)
+      )?.key ?? (location.pathname === settings ? 'nav.settings' : navItems[0].key)
 
   const signOut = async () => {
     await logout()
@@ -194,7 +195,7 @@ export function AppShell() {
             </div>
           )}
           <div className="nav">
-            <NavLink to="/app/settings" title={t('nav.settings')}>
+            <NavLink to={settings} title={t('nav.settings')}>
               <IconSettings size={17} />
               <span>{t('nav.settings')}</span>
             </NavLink>
@@ -202,7 +203,7 @@ export function AppShell() {
         </nav>
 
         <div className="side-foot">
-          <Link className="side-user" to="/app/settings" aria-label={t('nav.settings')}>
+          <Link className="side-user" to={settings} aria-label={t('nav.settings')}>
             <span className="avatar">{initials(displayName)}</span>
             <span className="who">
               <b>{displayName}</b>
@@ -229,7 +230,7 @@ export function AppShell() {
             <IconMenu size={20} />
           </button>
           <b>{t(current)}</b>
-          <Link to="/app/settings" className="avatar" aria-label={t('nav.settings')}>
+          <Link to={settings} className="avatar" aria-label={t('nav.settings')}>
             {initials(displayName)}
           </Link>
         </header>
@@ -241,7 +242,7 @@ export function AppShell() {
         <nav className="bottomnav" aria-label={t('common.console')}>
           {[
             ...navItems.slice(0, view === 'user' ? 3 : 4),
-            { to: '/app/settings', key: 'nav.settings' as MessageKey, icon: IconSettings },
+            { to: settings, key: 'nav.settings' as MessageKey, icon: IconSettings },
           ].map((item) => {
             const Icon = item.icon
             return (
@@ -284,7 +285,7 @@ export function AppShell() {
                   </NavLink>
                 )
               })}
-              <NavLink to="/app/settings">
+              <NavLink to={settings}>
                 <IconSettings size={18} />
                 <span>{t('nav.settings')}</span>
               </NavLink>
