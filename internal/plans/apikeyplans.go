@@ -46,19 +46,28 @@ func (s *Service) APIKeyPlans(ctx context.Context, apiKeyID int64) ([]UserPlan, 
 	if err != nil {
 		return nil, err
 	}
+	return s.allowedPlansOn(ctx, s.db, userID, apiKeyID)
+}
 
-	ids, err := s.apiKeyPlanIDs(ctx, s.db, apiKeyID)
+// allowedPlansOn 在给定的查询句柄上读出「这把 key 允许的订阅集合」。
+//
+// 写入路径用它**在提交之前**读回结果：提交之后再读一次的话，读失败会被调用方
+// 当成写失败——运维会重试，或者去查一个本来没坏的库（见 #903）。句柄是事务时，
+// 读到的就是这次删除与写入之后的状态。
+func (s *Service) allowedPlansOn(ctx context.Context, q queryer, userID, apiKeyID int64) ([]UserPlan, error) {
+	ids, err := s.apiKeyPlanIDs(ctx, q, apiKeyID)
 	if err != nil {
 		return nil, err
 	}
 	if len(ids) == 0 {
+		// 没有行 = 全部：这份集合与本次写入无关，用库句柄读即可。
 		return s.UserPlans(ctx, userID)
 	}
 
 	// 只按 id 取不够：名单行理论上可能指向别的用户的订阅（手工修数、外键只保证
 	// 订阅存在）。user_id 这一条谓词让读侧在这种情况下返回的是「这个用户实际
 	// 允许的集合」，而不是把它漏出去。
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := q.QueryContext(ctx,
 		userPlanQuery+` WHERE up.user_id = $1 AND up.id = ANY($2) ORDER BY up.id`,
 		userID, ids)
 	if err != nil {
@@ -160,10 +169,18 @@ func (s *Service) SetAPIKeyPlans(ctx context.Context, apiKeyID int64, userPlanID
 			return nil, dberr.ConstraintFailure(fmt.Errorf("写 API Key %d 的额度包名单失败: %w", apiKeyID, err))
 		}
 	}
+
+	// 在提交之前读回：读失败时事务还没提交，调用方拿到的错误与「什么都没写」
+	// 是一致的，defer 里的 Rollback 会把这一轮的删除与写入一起撤掉。提交之后再
+	// 读的话，同一句错误会让运维以为没写成功，而库里其实已经改了。
+	allowed, readErr := s.allowedPlansOn(ctx, tx, userID, apiKeyID)
+	if readErr != nil {
+		return nil, readErr
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("提交 API Key %d 的额度包名单失败: %w", apiKeyID, err)
 	}
-	return s.APIKeyPlans(ctx, apiKeyID)
+	return allowed, nil
 }
 
 // APIKeyPlanIDs 读一把 key 的名单原文（按 id 升序）。
