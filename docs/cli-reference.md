@@ -316,7 +316,10 @@ DEL，换行、制表符、ESC 都在其中）：换行会把一栏折成两行�
 翻成该渠道认的写法（映射到空字符串表示把这个字段从出站报文里去掉，表里没有的
 取值照原样发）。例如只认 `off` 的上游，写
 `{"reasoning_effort_map":{"none":"off"}}`；要剔掉这个字段，写成
-`{"reasoning_effort_map":{"none":""}}`。其它键写进去不报错，也不会生效。
+`{"reasoning_effort_map":{"none":""}}`。其它键写进去不报错，也不会生效；
+**这条渠道的 `type` 不认的键**（拼错的、别的 `type` 的）在 `create` /
+`update` 成功之后会逐个点名打到 stderr 上，`channel list` 也把这样的渠道
+点出来。
 
 `--channel` 不存在、`--type` / `--base-url` / `--model` 也都不开简写：这条命令上
 挑错的是「凭证写给哪条渠道」，而 `-c` 这类单字母在别的命令行里既可能是 `channel`

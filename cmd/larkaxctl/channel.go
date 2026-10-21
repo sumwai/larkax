@@ -151,7 +151,9 @@ reasoning_effort_map，由 openai 适配器读——它把 reasoning_effort 的�
 取值照原样发）。例如只认 off 的上游这样写：
   {"reasoning_effort_map":{"none":"off"}}
 要剔掉这个字段就写成 {"reasoning_effort_map":{"none":""}}。
-其它键写进去不报错，也不会生效。
+其它键写进去不报错，也不会生效；**这条渠道的 type 不认的键**（拼错的、别的
+type 的）在 create / update 成功之后会逐个点名打到 stderr 上，channel list
+也把这样的渠道点出来。
 
 **选项的旧名仍可用**：--owner 等同于 --user。它保留是为了不让已经在跑的脚本
 与部署流程坏掉，行为一致；新写的命令请用 --user。
@@ -263,7 +265,8 @@ func runChannelCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	printCreatedChannel(humanStdout(), humanStderr(), id, sealer.PrimaryKeyID(), len(req.Setting) > 0)
+	printCreatedChannel(humanStdout(), humanStderr(), id, sealer.PrimaryKeyID(),
+		channel.SettingUnreadNote(req.Type, req.Setting))
 	return nil
 }
 
@@ -487,16 +490,27 @@ func runChannelUpdate(args []string) error {
 	// 那一条是调用方自己用 --id 指定的，没有一个新值要给出去
 	// （见 docs/cli-output.md 的「提示与警告」）。
 	_, _ = fmt.Fprintf(humanStderr(), "已更新渠道 %d。\n", req.ID)
-	if req.Setting != nil && len(*req.Setting) > 0 {
-		printSettingUnreadNote(humanStderr())
+	// 提示按**改完之后**的 type 与 setting 算：只改 --type 时，库里原有的
+	// 键可能对新类型没有读者；只改 --setting 时，类型取自库里那一行。
+	// 两样都没碰的 update 不打——那条渠道的 setting 有没有读者，`channel
+	// list` 一直在说，每次改名都重复一遍只会把提示变成背景音。
+	if req.Setting != nil || req.Type != nil {
+		info, getErr := admin.Get(ctx, req.ID)
+		if getErr != nil {
+			// 更新已经落库了：这里回滚不了，也不该把这次调用报成「没改成功」。
+			// 但「改成功了，却读不回来」本身是要人看的事实，所以照样给错误，
+			// 只是明说前半句已经完成。
+			return fmt.Errorf("渠道 %d 已更新，但读取更新后的配置失败: %w", req.ID, getErr)
+		}
+		printSettingUnreadNote(humanStderr(), info.Type, info.Setting)
 	}
 	return nil
 }
 
-// printSettingUnreadNote 说出「配了 setting 也不会影响请求路径」。
+// printSettingUnreadNote 说出 setting 里哪些键对该渠道类型没有读者。
 //
 // 打在写入**成功之后**：命令确实写进去了，所以不能报成错误；而「写进去
-// 了、但没有任何东西按它做判断」正是使用者当场该看见的事实——只写在文档里
+// 了、但没有人按它做判断」正是使用者当场该看见的事实——只写在文档里
 // 的话没人会读，而它在库里、在清单上看起来都与一个生效的配置一模一样
 // （见 #360）。
 //
@@ -504,11 +518,11 @@ func runChannelUpdate(args []string) error {
 // create 与 update 都没有新值要给出去（create 那个 ID 走 stdout 单独一行），
 // 所以两条命令的「已…」都只在 stderr 上出现一次。
 //
-// 措辞与「什么时候会变」取自 channel.SettingUnreadNote，不在这里另写一份：
-// 那段说明属于 channel 包（键归适配器解释是那条契约的一部分），而两处各写
-// 一句的话，一处改了一处不动，于是其中一处开始说谎。
-func printSettingUnreadNote(w io.Writer) {
-	note := channel.SettingUnreadNote()
+// 判据与措辞都取自 channel.SettingUnreadNote，不在这里另写一份：哪些键有
+// 读者由渠道 type 决定，那份对应关系属于 channel 包，而两处各写一句的话，
+// 一处改了一处不动，于是其中一处开始说谎。
+func printSettingUnreadNote(w io.Writer, channelType string, setting map[string]any) {
+	note := channel.SettingUnreadNote(channelType, setting)
 	if note == "" {
 		return
 	}
@@ -952,13 +966,14 @@ func readCredential(fromStdin bool, envName string, required bool) (*string, err
 // 挂在哪把主密钥下要打出来：轮换时「新写进去的密文挂在旧钥匙下」是个
 // 需要当场看见的事实，事后从库里翻不如建的时候就说清楚。
 //
-// hasSetting 为真时再补一句「setting 今天没有读者」：那句话必须与这次调用
-// 是否真的写了这个键挂钩——每次 create 都打一遍的话，它很快会变成所有输出
-// 里的一行背景音，而真正配了键的人反而不会看见。
-func printCreatedChannel(stdout, stderr io.Writer, id int64, primaryKeyID string, hasSetting bool) {
+// settingNote 为 channel.SettingUnreadNote 算出来的那句话，空串表示这次写进
+// 去的键对该渠道类型都有读者。它必须与**这次调用真的写了什么**挂钩——每次
+// create 都打一遍的话，它很快会变成所有输出里的一行背景音，而真正配了没人
+// 读的键的人反而不会看见。
+func printCreatedChannel(stdout, stderr io.Writer, id int64, primaryKeyID, settingNote string) {
 	_, _ = fmt.Fprintf(stderr, "已创建渠道 id=%d，凭证挂在主密钥 %s 下。\n", id, primaryKeyID)
-	if hasSetting {
-		printSettingUnreadNote(stderr)
+	if settingNote != "" {
+		_, _ = fmt.Fprintf(stderr, "注意：%s。\n", settingNote)
 	}
 	_, _ = fmt.Fprintln(stdout, id)
 }
@@ -1029,22 +1044,17 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo, withDeleted boo
 	}
 	printDeletedChannelsNote(w, deletedRows)
 
-	// 带着 setting 的行单独点出来：那一栏在库里、在这张清单上都与一个生效的
-	// 配置没有区别，而没有读者的键写进去不会生效（见 #360）。不新开一列是同一条
-	// 理由——空列只是把噪音铺满每一行，而这里要说的只有「这几行配过东西」。
-	// 只在**至少一行**带 setting 时打：没有这种行时，这一句在每次 list 上
-	// 都是背景音。今天 setting 里已经有读者（reasoning_effort_map），
-	// SettingUnreadNote 返回空串，这一段因此不打；留着它，是因为哪天读者没了，
-	// 这句话仍然该出现。
-	if note := channel.SettingUnreadNote(); note != "" {
-		var rows []string
-		for _, info := range infos {
-			if len(info.Setting) > 0 {
-				rows = append(rows, strconv.FormatInt(info.ID, 10))
-			}
-		}
-		if len(rows) > 0 {
-			_, _ = fmt.Fprintf(w, "渠道 %s 配了 setting：%s。\n", strings.Join(rows, "、"), note)
+	// 没有读者的键逐行点出来：那一栏在库里、在这张清单上都与一个生效的
+	// 配置没有区别，而这样的键写进去不会生效（见 #360）。判据是**这一行
+	// 自己的 type**——同一个键对 openai 是配置、对 anthropic 是噪音
+	// （见 channel.SettingUnreadNote）。
+	//
+	// 不新开一列是同一条理由：空列只是把噪音铺满每一行，而这里要说的只有
+	// 「这几行有键没人读」。一行都没这种情况时不打：那一句在每次 list 上
+	// 都是背景音，反倒把真正该看的那几行淹掉。
+	for _, info := range infos {
+		if note := channel.SettingUnreadNote(info.Type, info.Setting); note != "" {
+			_, _ = fmt.Fprintf(w, "渠道 %d 配了 setting：%s。\n", info.ID, note)
 		}
 	}
 }

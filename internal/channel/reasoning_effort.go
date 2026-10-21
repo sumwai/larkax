@@ -5,8 +5,11 @@ package channel
 // 形状是 {"none": "off"}：左边的键是我们内部的规范取值，右边的值是该渠道
 // 认的写法；映射到空字符串表示这个字段整条不出现在出站报文里。
 //
-// 键归适配器解释，选路层不读它（见 Channel.Setting 的注释）。
-const reasoningEffortMapKey = "reasoning_effort_map"
+// 键归适配器解释，选路层不读它（见 Channel.Setting 的注释）。取值本身声明在
+// SettingKeyReasoningEffortMap：管理面按「渠道 type 认哪些键」判一条 setting
+// 有没有读者，那一侧的判据必须与这里读的键是同一个值。再写一份字符串的话，
+// 两处可以各自改而请求路径照旧。
+const reasoningEffortMapKey = string(SettingKeyReasoningEffortMap)
 
 // ReasoningEffortDialect 按渠道的映射表翻译 reasoning_effort 的取值。
 //
