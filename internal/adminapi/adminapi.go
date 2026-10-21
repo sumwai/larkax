@@ -225,7 +225,7 @@ func New(cfg Config) http.Handler {
 		mux.HandleFunc("GET "+prefix+"users/{id}", a.getUser)
 		mux.HandleFunc("PATCH "+prefix+"users/{id}", a.updateUser)
 	}
-	// 概览与上游**只**随显式组名注册，不跟 all 走（见 Config.Groups）：
+	// 概览、上游与我的模型**只**随显式组名注册，不跟 all 走（见 Config.Groups）：
 	// 它们的每条读都建立在归属上下文上，而「全部资源」那条默认路径
 	// （内部管理面）没有这层上下文。写在这里而不是 `all ||` 里，是刻意的。
 	if groups[GroupOverview] {
