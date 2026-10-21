@@ -444,6 +444,210 @@ func TestReconcileAcceptsPendingPlanReservation(t *testing.T) {
 	}
 }
 
+// 面值**恰好**等于在途预留在对账眼里是合法状态。
+//
+// 这一格不是构造出来的边角：作废一条还有在途预留的订阅时，核销的是
+// 「余额 − 在途」，剩下的余额恰好等于在途之和。判据必须是严格大于，
+// 写成 `>=` 会让每一次这样的作废都报一条出来。
+//
+// 它也是「<」与「<=」两个变异体唯一分得出来的输入，所以下面要先断言现场
+// 的确是「余额 == 在途」：否则「没有 finding」可能只是因为余额更大，
+// 而不是因为边界被正确放过。
+func TestReconcileAcceptsPlanFaceEqualPending(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	planID := seedPlan(t, ctx, db, "amount", "10", "10")
+	upID := seedUserPlan(t, ctx, db, userID, planID, "10", time.Now().Add(time.Hour))
+
+	requestID := reqID(t)
+	req := testRequest(ctx, t, db, userID, requestID)
+	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "10", "CNY")); err != nil {
+		t.Fatalf("预留失败: %v", err)
+	}
+
+	if row := readBillingPlanRow(t, db, requestID); row.planReservedAmount != "10.00000000" {
+		t.Fatalf("在途面值 = %s，期望 10：这一条钉的是「恰好相等」那一格", row.planReservedAmount)
+	}
+	if got := accountBalanceOf(t, db, ledger.PrepaidAccount(upID).String()); got != "10.00000000" {
+		t.Fatalf("prepaid 余额 = %s，期望 10：这一条钉的是「恰好相等」那一格", got)
+	}
+
+	report := reconcile(t, db, noRepair())
+	if got := findingsFor(report, userID); len(got) != 0 {
+		t.Fatalf("面值恰好覆盖在途预留不该报不一致: %v", got)
+	}
+}
+
+// 在途预留超过订阅余额要报出一条，点名订阅并带上余额与在途两笔数。
+//
+// 造法是绕过 store 直接改 `plan_reserved_amount`——那正是对账要抓的那种
+// 写入路径。只改这一列、不动 `reserved_amount`，所以钱包那两条不变量仍然
+// 成立，报告里多出来的只该是面值这一条。
+func TestReconcileReportsPlanFaceShortfall(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	planID := seedPlan(t, ctx, db, "amount", "10", "10")
+	upID := seedUserPlan(t, ctx, db, userID, planID, "10", time.Now().Add(time.Hour))
+
+	requestID := reqID(t)
+	req := testRequest(ctx, t, db, userID, requestID)
+	if _, err := s.SaveReservation(ctx, req, reservation(t, userID, requestID, "10", "CNY")); err != nil {
+		t.Fatalf("预留失败: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		UPDATE billing_requests
+		   SET plan_reserved_amount = plan_reserved_amount + 5::numeric
+		 WHERE request_id = $1`, requestID); err != nil {
+		t.Fatalf("改写账单行的在途面值失败: %v", err)
+	}
+
+	report := reconcile(t, db, noRepair())
+	got := findingsFor(report, userID)
+	if len(got) != 1 {
+		t.Fatalf("只应有面值这一条不一致，实际 %d 条: %v", len(got), got)
+	}
+	f := got[0]
+	if f.Kind != FindingPlanFaceShortfall {
+		t.Fatalf("类别 = %s，期望 %s", f.Kind, FindingPlanFaceShortfall)
+	}
+	if f.Snapshot.Cmp(mustMoney(t, "10")) != 0 {
+		t.Errorf("余额 = %s，期望 10", f.Snapshot)
+	}
+	if f.Ledger.Cmp(mustMoney(t, "15")) != 0 {
+		t.Errorf("在途预留 = %s，期望 15", f.Ledger)
+	}
+	if want := prepaidScopePrefix + itoa(upID); f.Scope() != want {
+		t.Errorf("scope = %s，期望 %s", f.Scope(), want)
+	}
+	if !strings.Contains(f.Detail, itoa(upID)) {
+		t.Errorf("详情里没有点出订阅 %d：%s", upID, f.Detail)
+	}
+	if f.Repaired {
+		t.Error("面值不足不该被自动修正")
+	}
+
+	// 运行记录上这一档要单独落一个数：findings 修掉就删，那一行是唯一的历史。
+	var persisted int
+	if err := db.QueryRowContext(ctx,
+		`SELECT plan_face_shortfalls FROM reconcile_runs WHERE id = $1`,
+		report.RunID).Scan(&persisted); err != nil {
+		t.Fatalf("读运行记录的面值计数失败: %v", err)
+	}
+	if persisted != 1 {
+		t.Errorf("运行记录上 plan_face_shortfalls = %d，期望 1", persisted)
+	}
+}
+
+// 只有额度包一侧变动的用户，增量扫描也要比到。
+//
+// 候选集里另外三条来源都不认 `prepaid:` 科目：它的后缀是订阅 id 而不是
+// 用户 id，`account ~ '^user:...'` 这一条筛不到它。如果候选里没有「订阅的
+// owner」这一侧，「发过包、此后既没充过值也没有在途」的用户就永远不在比对
+// 范围里——而结算之后正是这个形状（pending 变 settled，此后再没有行变动）。
+//
+// 造法：先跑一轮全量把起点立在「此刻」，再越过 store 直接往
+// `prepaid:<订阅>` 写一笔负数分录，然后跑一轮增量。那一笔的 created_at 在
+// 窗口之内，但**科目**那一侧的查询按前缀筛不到它；能不能比到，全看候选集里
+// 有没有订阅的 owner。钱包与 user 科目这一轮一行都没动，所以没有这条来源时
+// 候选集是空的。
+func TestReconcileIncrementalSeesPlanOwnerWithoutOtherChanges(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	planID := seedPlan(t, ctx, db, "amount", "10", "10")
+	upID := seedUserPlan(t, ctx, db, userID, planID, "10", time.Now().Add(time.Hour))
+
+	// 第一轮全量：起点立在它开始的那一刻，之后的变动才落在增量窗口里。
+	if first := reconcileWithInterval(t, db, 0); len(findingsFor(first, userID)) != 0 {
+		t.Fatalf("第一轮之前现场是干净的，却报了不一致: %v", findingsFor(first, userID))
+	}
+
+	// 绕过 store 的写入路径扣掉面值：正是对账要抓的那种写。
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO ledger_entries (txn_id, account, asset, amount, entry_type)
+		VALUES ($1, $2, 'CNY', -15::numeric, 'adjustment')`,
+		string(ledger.NewTxnID()), ledger.PrepaidAccount(upID).String()); err != nil {
+		t.Fatalf("写负数面值分录失败: %v", err)
+	}
+
+	report := reconcileWithInterval(t, db, reconcileInterval)
+	got := findingsFor(report, userID)
+	if len(got) != 1 {
+		t.Fatalf("只应有面值这一条不一致，实际 %d 条: %v", len(got), got)
+	}
+	f := got[0]
+	if f.Kind != FindingPlanFaceShortfall {
+		t.Fatalf("类别 = %s，期望 %s", f.Kind, FindingPlanFaceShortfall)
+	}
+	if want := prepaidScopePrefix + itoa(upID); f.Scope() != want {
+		t.Errorf("scope = %s，期望 %s", f.Scope(), want)
+	}
+	if f.Snapshot.Cmp(mustMoney(t, "-5")) != 0 || f.Ledger.Cmp(mustMoney(t, "0")) != 0 {
+		t.Errorf("余额/在途 = %s/%s，期望 -5/0", f.Snapshot, f.Ledger)
+	}
+}
+
+// 候选集按用户去重：同一个人出现在几个来源里，只算一次。
+//
+// 四段并集写的是 UNION 而不是 UNION ALL，去重靠的就是它。单来源的夹具分不出
+// 这两版——只有「同一个人同时出现在不止一处」才现形。这里让一个用户同时有
+// 钱包行、`user:<id>` 分录与订阅行：正确实现给出一个 id，UNION ALL 会给出
+// 三个。
+//
+// 重复的候选不只是白比一遍：`after = ids[len-1]` 这个游标按「最后一个是本批
+// 最大的」推进，重复与乱序都会让分片边界上的计数失真（`CheckedWallets` 数的是
+// 候选 id 的个数）。所以除了数这一个用户出现几次，整段还要严格递增。
+//
+// 全量与增量两条查询各判一次：它们是两段独立的 SQL，改了一处漏了另一处时，
+// 只跑其中一档看不出来。
+func TestReconcileCandidatesDeduplicatesUsersAcrossSources(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100") // 钱包行 + user:<id> 的分录
+	planID := seedPlan(t, ctx, db, "amount", "10", "10")
+	seedUserPlan(t, ctx, db, userID, planID, "10", time.Now().Add(time.Hour))
+
+	for _, full := range []bool{true, false} {
+		name := "增量"
+		if full {
+			name = "全量"
+		}
+		t.Run(name, func(t *testing.T) {
+			// 起点给零值时刻：增量那一侧的时间窗因此覆盖全部行，两档看到的是
+			// 同一批候选。
+			ids, err := New(db).reconcileCandidates(ctx, 0, time.Time{}, full, 10000, nil)
+			if err != nil {
+				t.Fatalf("取候选用户失败: %v", err)
+			}
+
+			seen := 0
+			for _, id := range ids {
+				if id == userID {
+					seen++
+				}
+			}
+			if seen != 1 {
+				t.Errorf("用户 %d 在候选里出现 %d 次，期望 1 次（并集要去重）", userID, seen)
+			}
+
+			for i := 1; i < len(ids); i++ {
+				if ids[i] <= ids[i-1] {
+					t.Fatalf("候选不是严格递增：第 %d 个是 %d，前一个是 %d（游标按最后一项推进，重复与乱序都要挡住）",
+						i, ids[i], ids[i-1])
+				}
+			}
+		})
+	}
+}
+
 // 释放不动钱包、不记已用量；在途占用随之消失，下一次请求还能用这个包。
 func TestReleasePlanReservationFreesQuota(t *testing.T) {
 	db := testDB(t)

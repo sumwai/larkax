@@ -33,7 +33,11 @@ type ReconcileRun struct {
 	// FullScan 为真表示这一轮扫了全量。增量只看上次起点之后变动过的行，
 	// 「两边都早就错着」的那种不一致只有全量能发现。
 	FullScan bool
-	// CheckedWallets 是这一轮比对过的钱包行数。
+	// CheckedWallets 是这一轮比对过的**用户数**，也就是候选 user id 的个数。
+	//
+	// 列名与 JSON 键沿用 checked_wallets（运维面板已经在读），语义以这里为准：
+	// 候选来自钱包、账本、在途预留与订阅 owner 四处，一个用户被并进来时未必
+	// 有钱包行，所以它不等于「钱包行数」。
 	CheckedWallets    int
 	BalanceMismatches int
 	FrozenMismatches  int
@@ -44,8 +48,12 @@ type ReconcileRun struct {
 	// StaleReservations 是陈旧的未结算预留。它与其余几档分开：它不是「两边
 	// 数字对不上」，而是「这笔预留挂得太久了」。
 	StaleReservations int
-	Status            string
-	Error             sql.NullString
+	// PlanFaceShortfalls 是在途预留超过订阅面值的订阅条数。它同样不是「同一个
+	// 数的两处记录对不上」，而是「一条不等式的两边不成立」（见
+	// FindingPlanFaceShortfall）。
+	PlanFaceShortfalls int
+	Status             string
+	Error              sql.NullString
 }
 
 // ReconcileRunPage 是一页对账运行记录，More 的含义同 UsageEventPage：
@@ -58,7 +66,7 @@ type ReconcileRunPage struct {
 // reconcileRunColumns 是读一行运行记录要选的列，顺序与下面的 Scan 一致。
 const reconcileRunColumns = `id, started_at, finished_at, watermark, full_scan,
 	checked_wallets, balance_mismatches, frozen_mismatches, repaired,
-	malformed_accounts, stale_reservations, status, error`
+	malformed_accounts, stale_reservations, plan_face_shortfalls, status, error`
 
 // ReconcileRuns 读最近的对账运行记录，新的在前。
 //
@@ -86,7 +94,7 @@ func (s *Store) ReconcileRuns(ctx context.Context, limit int) (ReconcileRunPage,
 		if err := rows.Scan(&run.ID, &run.StartedAt, &run.FinishedAt, &run.Watermark,
 			&run.FullScan, &run.CheckedWallets, &run.BalanceMismatches,
 			&run.FrozenMismatches, &run.Repaired, &run.MalformedAccounts,
-			&run.StaleReservations, &run.Status, &run.Error); err != nil {
+			&run.StaleReservations, &run.PlanFaceShortfalls, &run.Status, &run.Error); err != nil {
 			return ReconcileRunPage{}, fmt.Errorf("读对账运行记录失败: %w", err)
 		}
 		page.Runs = append(page.Runs, run)

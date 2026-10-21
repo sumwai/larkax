@@ -660,7 +660,7 @@ const reconcileTimeout = 30 * time.Minute
 //   - 失败时不打印汇总行：与「报告先打」的设计冲突。失败之前比过几个钱包、
 //     报出了哪几条不一致，恰恰是这一轮最有用的部分，不能一起丢掉。
 //   - 按 CheckedWallets == 0 推断「没跑完」：那是拿计数猜原因。一轮正常
-//     跑完而范围内没有钱包时它同样是 0，而那时「比对=0 行」是真话，必须
+//     跑完而范围内没有候选用户时它同样是 0，而那时「比对=0 个用户」是真话，必须
 //     照常打出来。判据只能是 err。
 //
 // 每处写入的返回值都显式丢弃（`_, _ =`）：目标是 stdout，写不进去只可能是
@@ -674,7 +674,7 @@ func printReconcileReport(w io.Writer, r *store.Report, runErr error) {
 	if r.FullScan {
 		scope = "全量"
 	}
-	_, _ = fmt.Fprintf(w, "对账 run_id=%d %s 起点=%s 比对=%d 行\n",
+	_, _ = fmt.Fprintf(w, "对账 run_id=%d %s 起点=%s 比对=%d 个用户\n",
 		r.RunID, scope, r.Watermark.Format(time.RFC3339), r.CheckedWallets)
 
 	if runErr != nil {
@@ -696,9 +696,9 @@ func printReconcileReport(w io.Writer, r *store.Report, runErr error) {
 
 // printReconcileFindings 把这一轮发现的不一致逐条打出来。
 func printReconcileFindings(w io.Writer, r *store.Report) {
-	_, _ = fmt.Fprintf(w, "不一致 %d 条（余额 %d、冻结 %d、畸形科目 %d、陈旧预留 %d）：\n",
+	_, _ = fmt.Fprintf(w, "不一致 %d 条（余额 %d、冻结 %d、畸形科目 %d、陈旧预留 %d、面值 %d）：\n",
 		len(r.Findings), r.BalanceMismatches(), r.FrozenMismatches(),
-		r.MalformedAccounts(), r.StaleReservations())
+		r.MalformedAccounts(), r.StaleReservations(), r.PlanFaceShortfalls())
 	for _, f := range r.Findings {
 		printFinding(w, f)
 	}
@@ -706,14 +706,24 @@ func printReconcileFindings(w io.Writer, r *store.Report) {
 
 // printFinding 打一条不一致。
 //
-// 陈旧预留单独一种行式：它没有「快照 / 权威值」这一对（见 store.Finding
-// 的字段注释），按通用格式打出来会多出一个叫「差」而其实是金额本身的数。
-// 其余类别共用一种，字段的含义是同一套。
+// 陈旧预留与额度包面值各有一种行式，其余类别共用一种。
+//
+// 陈旧预留没有「快照 / 权威值」这一对（见 store.Finding 的字段注释），按通用
+// 格式打出来会多出一个叫「差」而其实是金额本身的数。
+//
+// 面值类的两栏同样不是那一对：Snapshot 是 `prepaid:<订阅 id>` 的余额、Ledger
+// 是该订阅的在途预留之和，按通用格式打出来会写成「快照=… 账本=…」——那是把
+// 一条不等式的两边说成同一笔钱的两种记录。所以两栏各有自己的名字，「差」是
+// **缺口**（在途减余额），订阅单独打出来，因为这一类是按订阅区分的。
 func printFinding(w io.Writer, f store.Finding) {
-	if f.Kind == store.FindingStaleReservation {
+	switch f.Kind {
+	case store.FindingStaleReservation:
 		_, _ = fmt.Fprintf(w, "  %-18s user=%d asset=%s 冻住=%s 已修=%v\n",
 			f.Kind, f.UserID, f.Asset, f.Ledger, f.Repaired)
-	} else {
+	case store.FindingPlanFaceShortfall:
+		_, _ = fmt.Fprintf(w, "  %-18s user=%d asset=%s 订阅=%s 余额=%s 在途=%s 缺口=%s 已修=%v\n",
+			f.Kind, f.UserID, f.Asset, f.Key, f.Snapshot, f.Ledger, f.Diff(), f.Repaired)
+	default:
 		_, _ = fmt.Fprintf(w, "  %-18s user=%d asset=%s 快照=%s 账本=%s 差=%s 已修=%v\n",
 			f.Kind, f.UserID, f.Asset, f.Snapshot, f.Ledger, f.Diff(), f.Repaired)
 	}

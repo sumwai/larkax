@@ -355,7 +355,7 @@ func newAPI(cfg Config, d deps) http.Handler {
 			return adminapi.New(a.adminConfig(cfg, prefix, groups))
 		}
 		if a.deps.merchantAdmin == nil {
-			// 商家管自己的渠道、自己的价，看自己那一页的概览与上游。
+			// 商家管自己的渠道、自己的价，看自己那一页的概览、上游与模型。
 			// 模型目录与别名没有归属可过滤。
 			a.deps.merchantAdmin = build(PathPrefix+"merchant/",
 				[]string{adminapi.GroupChannels, adminapi.GroupPricing, adminapi.GroupOverview})

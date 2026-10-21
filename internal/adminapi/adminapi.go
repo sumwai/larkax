@@ -225,12 +225,13 @@ func New(cfg Config) http.Handler {
 		mux.HandleFunc("GET "+prefix+"users/{id}", a.getUser)
 		mux.HandleFunc("PATCH "+prefix+"users/{id}", a.updateUser)
 	}
-	// 概览与上游**只**随显式组名注册，不跟 all 走（见 Config.Groups）：
+	// 概览、上游与我的模型**只**随显式组名注册，不跟 all 走（见 Config.Groups）：
 	// 它们的每条读都建立在归属上下文上，而「全部资源」那条默认路径
 	// （内部管理面）没有这层上下文。写在这里而不是 `all ||` 里，是刻意的。
 	if groups[GroupOverview] {
 		mux.HandleFunc("GET "+prefix+"overview", a.merchantOverview)
 		mux.HandleFunc("GET "+prefix+"upstreams", a.merchantUpstreams)
+		mux.HandleFunc("GET "+prefix+"models", a.merchantModels)
 	}
 
 	authorize := cfg.Authorize
@@ -250,7 +251,8 @@ const (
 	// GroupUsers 是控制台的用户管理页。它**不在**内部管理面的清单里，
 	// 理由见 Config.Groups 与 InternalGroups。
 	GroupUsers = "users"
-	// GroupOverview 是商家运营页的概览与上游清单。它不随空 Groups 出现。
+	// GroupOverview 是商家运营页的三个只读视图：概览、上游清单、我的模型。
+	// 它不随空 Groups 出现。
 	GroupOverview = "overview"
 )
 
