@@ -82,7 +82,10 @@ func (r *ruleSource) Match(_ context.Context, q RuleQuery) (Rule, error) {
 	if len(q.Candidates) != 1 {
 		return Rule{}, fmt.Errorf("测试替身只接受恰好一个候选，得到 %d 个", len(q.Candidates))
 	}
-	return r.ruleFor(q.Candidates[0].ChannelID), nil
+	rule := r.ruleFor(q.Candidates[0].ChannelID)
+	// 与 pricing.Match 同形：规则带上它服务的那条渠道（见 Rule.ChannelID）。
+	rule.ChannelID = q.Candidates[0].ChannelID
+	return rule, nil
 }
 
 func (r *ruleSource) MatchAll(_ context.Context, q RuleQuery) ([]Rule, error) {
@@ -95,7 +98,11 @@ func (r *ruleSource) MatchAll(_ context.Context, q RuleQuery) ([]Rule, error) {
 	}
 	out := make([]Rule, 0, len(q.Candidates))
 	for _, c := range q.Candidates {
-		out = append(out, r.ruleFor(c.ChannelID))
+		rule := r.ruleFor(c.ChannelID)
+		// 与 pricing.MatchAll 同形：规则带上它服务的那条渠道，预留才能按
+		// 候选各自查缓存记录（见 Rule.ChannelID）。
+		rule.ChannelID = c.ChannelID
+		out = append(out, rule)
 	}
 	return out, nil
 }

@@ -69,6 +69,15 @@ type RuleSource interface {
 // Rule 是一条待求值的计价规则。
 type Rule struct {
 	ID int64
+	// ChannelID 是这条规则服务的那条候选渠道，由 RuleSource 填。
+	//
+	// 预留要按候选**各自**查缓存记录（见 billing.CacheStore），而规则是
+	// 按候选匹配出来的；没有这个归属，就只能拿整批候选查一次再用到每条
+	// 规则上——那会把一条渠道的命中算到另一条头上，方向是漏收。
+	//
+	// 结算那一次（RuleSource.Match）也会填，但结算不用：那时渠道已经选定，
+	// 命中与否已经不影响任何金额。
+	ChannelID int64
 	// Source 是表达式源码。
 	Source string
 	// Version 是规则的版本号，用于编译缓存的键。
@@ -211,6 +220,15 @@ type Pipeline struct {
 	// Now 可注入，便于测试时间相关的逻辑。
 	Now func() time.Time
 
+	// cache 是缓存前缀记录的进程内存储（见 billing.CacheStore）。
+	//
+	// 零值可用：没有记录时预留退回按整段输入估，也就是这条特性出现之前的
+	// 行为。它是值字段而不是指针/接口，正因为「不配置也能跑」是这个特性
+	// 的既定退化方向——多实例之间不共享记录也一样，各实例只看得到自己写的那几条。
+	//
+	// 不放进装配配置：它没有需要调的参数，生命周期与 Pipeline 实例相同。
+	cache billing.CacheStore
+
 	// programsOnce 让 Programs 的兜底初始化只发生一次，且对并发的
 	// 调用者可见（见 programs）。
 	programsOnce sync.Once
@@ -283,6 +301,14 @@ type Request struct {
 
 	// InputTokens 是请求的输入 token 估算，由分词层给出。
 	InputTokens int64
+	// CachePrefix 是这次请求前缀的块序列，由入口按请求算出（见 CachePrefixOf）。
+	//
+	// 预留拿它去比对同一条渠道上一次结算留下的记录，判断下次会不会命中上游
+	// 缓存（见 billing.CacheStore）：命中那一段按缓存价估，上界跟着往下压。
+	//
+	// **为空表示算不出来，不表示「没有前缀」**：那时不查记录，预留按整段输入
+	// 估——即这条特性出现之前的行为。它是只读的计费依据，不落库、不参与结算。
+	CachePrefix []billing.BlockHash
 	// MaxTokens 是请求允许的最大输出。它是预留上界的关键。
 	MaxTokens int64
 
@@ -762,9 +788,14 @@ func (p *Pipeline) reserve(ctx context.Context, req Request, outputTokens int64)
 
 	// 逐个候选求上界，留最大的那一个。留下的是**整条**候选而不只是金额：
 	// Reservation 要带走给出这个上界的那条规则——见 Reservation.RuleID。
+	//
+	// 缓存记录按候选**各自**查：不同渠道的缓存是各自独立的（见
+	// billing.CacheStore 的隔离口径），拿其中一条的命中量给所有候选共用，
+	// 就会把别的渠道的命中算到没有命中的渠道头上。
 	var best *candidateBound
 	for _, rule := range rules {
-		bound, err := p.boundOf(rule, evalEnv, req, outputTokens)
+		hit := p.cache.Resolve(req.APIKeyID, rule.ChannelID, req.CanonicalModel, req.CachePrefix, evalEnv.At)
+		bound, err := p.boundOf(rule, evalEnv, req, outputTokens, hit)
 		if err != nil {
 			return nil, err
 		}
@@ -804,7 +835,11 @@ type candidateBound struct {
 //
 // outputTokens 是这次要冻的输出 token 数，由调用方按各自的口径传
 // （见 reserve 的注释）——它只影响金额，不影响规则怎么选。
-func (p *Pipeline) boundOf(rule Rule, env expr.Env, req Request, outputTokens int64) (candidateBound, error) {
+//
+// confirmedCacheTokens 是这条候选上**已确认**会命中缓存的输入 token 数
+// （见 billing.CacheStore.Resolve）——它只从输入侧最贵的那一段里拆出
+// 一部分按缓存价估，同样不影响规则怎么选。
+func (p *Pipeline) boundOf(rule Rule, env expr.Env, req Request, outputTokens, confirmedCacheTokens int64) (candidateBound, error) {
 	program, err := p.programs().Get(rule.CacheKey(), rule.Source)
 	if err != nil {
 		return candidateBound{}, fmt.Errorf("%w: 规则 %d 无法编译: %w", ErrRuleBroken, rule.ID, err)
@@ -819,6 +854,9 @@ func (p *Pipeline) boundOf(rule Rule, env expr.Env, req Request, outputTokens in
 		Prices:      worst.Prices,
 		Charges:     worst.Charges,
 		InputTokens: req.InputTokens,
+		// 已确认命中的那一段从输入侧最贵单价里拆出来按缓存价估，见
+		// billing.Reserve 里输入侧那一段。为 0 时结果与拆分之前逐位相同。
+		ConfirmedCacheTokens: confirmedCacheTokens,
 		// 缓存读与缓存写各按什么价估，见 billing.Reserve 的注释——
 		// 上界的构成写在那里，这里只负责把两个量传进去。
 		CacheReadTokens:  req.Usage.CacheReadTokens,
@@ -1070,6 +1108,28 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 		observe.Metrics.CappedAmount.
 			With(string(req.Protocol), req.Asset).
 			Add(uint64(settlement.Breakdown.Total.Sub(settlement.Actual).Units()))
+	}
+
+	// 记下这次请求的块序列与**实测缓存量**，供下一次预留判断缓存前缀。
+	//
+	// 只记实测用量（tokens.SourceMeasured）：估算值不是上游那一段落了多少
+	// token，拿它当命中量会把输入侧的上界压到实际之下——结算撞 Capped，
+	// 差额由平台承担。没实测就等于没有依据，宁可下次多冻一点。
+	//
+	// 记的是上游报出的缓存量（cache_read + cache_write），不是整段输入：
+	// 没有缓存活动的上游（两项都是 0）不能记成「整段都会命中」——那类渠道的
+	// 规则通常把缓存价填 0，下一次预留的输入侧会直接归零。这个 0 由
+	// CacheStore.Record 自己的判据挡掉（缓存量不为正就不记）。
+	//
+	// 写在这里而不是更早：上面任何一处失败都意味着这次请求没有结算，
+	// 而记录的口径是「上一次**已结算**的请求」。
+	if out.UsageSource.IsExact() {
+		settledAt := p.now()
+		p.cache.Record(req.APIKeyID, req.ChannelID, req.CanonicalModel, billing.CacheRecord{
+			Blocks:       req.CachePrefix,
+			CachedTokens: usage.CacheReadTokens + usage.CacheWriteTokens,
+			SettledAt:    settledAt,
+		}, settledAt)
 	}
 
 	return &Charge{
