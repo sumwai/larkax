@@ -6,7 +6,12 @@ import { SiteProvider } from './site/SiteProvider'
 import { ThemeProvider } from './theme/ThemeProvider'
 import { AppShell } from './components/AppShell'
 import { MockBanner } from './components/MockBanner'
-import { ToastProvider } from './components/ui'
+import { Alert, ToastProvider } from './components/ui'
+import { viewsFor, type View } from './ops/views'
+import { OpsChannels } from './pages/ops/Channels'
+import { OpsModels } from './pages/ops/Catalog'
+import { OpsAliases } from './pages/ops/Aliases'
+import { OpsPricing } from './pages/ops/Pricing'
 import { Landing } from './pages/Landing'
 import { Login } from './pages/Login'
 import { Overview } from './pages/Overview'
@@ -34,6 +39,21 @@ function RequireAuth({ children }: { children: ReactNode }) {
   if (status === 'loading') return <LoadingScreen />
   if (status === 'anonymous') {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />
+  }
+  return <>{children}</>
+}
+
+/**
+ * 视图的角色门槛。
+ *
+ * 它只决定「这个页面画不画」；真正的越权判定在服务端——这里放行了，
+ * 请求照样可能拿到 403，而页面显示的就是服务端给的那句话。
+ */
+function RequireView({ view, children }: { view: View; children: ReactNode }) {
+  const { user } = useAuth()
+  const { t } = useI18n()
+  if (!viewsFor(user?.role).includes(view)) {
+    return <Alert tone="bad" title={t('ops.noAccess')} />
   }
   return <>{children}</>
 }
@@ -78,6 +98,55 @@ export function App() {
                     <Route path="models" element={<Models />} />
                     <Route path="quickstart" element={<Quickstart />} />
                     <Route path="settings" element={<Settings />} />
+                    <Route
+                      path="merchant"
+                      element={
+                        <RequireView view="merchant">
+                          <OpsChannels scope="merchant" />
+                        </RequireView>
+                      }
+                    />
+                    <Route
+                      path="merchant/channels"
+                      element={
+                        <RequireView view="merchant">
+                          <OpsChannels scope="merchant" />
+                        </RequireView>
+                      }
+                    />
+                    <Route path="admin" element={<Navigate to="/app/admin/channels" replace />} />
+                    <Route
+                      path="admin/channels"
+                      element={
+                        <RequireView view="admin">
+                          <OpsChannels scope="admin" />
+                        </RequireView>
+                      }
+                    />
+                    <Route
+                      path="admin/models"
+                      element={
+                        <RequireView view="admin">
+                          <OpsModels />
+                        </RequireView>
+                      }
+                    />
+                    <Route
+                      path="admin/aliases"
+                      element={
+                        <RequireView view="admin">
+                          <OpsAliases />
+                        </RequireView>
+                      }
+                    />
+                    <Route
+                      path="admin/pricing"
+                      element={
+                        <RequireView view="admin">
+                          <OpsPricing />
+                        </RequireView>
+                      }
+                    />
                   </Route>
                   <Route path="*" element={<NotFound />} />
                 </Routes>

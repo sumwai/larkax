@@ -1,7 +1,16 @@
 import type {
+  AliasCreateInput,
+  AliasUpdateInput,
   ApiClient,
   ApiErrorBody,
   ApiKey,
+  Channel,
+  ChannelAlias,
+  ChannelOpsClient,
+  ChannelCreateInput,
+  ChannelUpdateInput,
+  CostCreateInput,
+  CostUpdateInput,
   CreatedKey,
   KeyCreateInput,
   KeyListQuery,
@@ -9,6 +18,14 @@ import type {
   ListResponse,
   Meta,
   ModelsResponse,
+  OpsClient,
+  OpsModel,
+  OpsModelCreateInput,
+  OpsModelInput,
+  PricingCost,
+  PricingRule,
+  RuleCreateInput,
+  RuleUpdateInput,
   SessionResponse,
   UsageBreakdown,
   UsageBreakdownQuery,
@@ -73,6 +90,8 @@ export interface HttpApiOptions {
 
 export class HttpApiClient implements ApiClient {
   readonly mode = 'http' as const
+  readonly admin: OpsClient
+  readonly merchant: ChannelOpsClient
   private readonly baseUrl: string
   private readonly doFetch: typeof fetch
   private csrfToken: string | null = null
@@ -80,6 +99,71 @@ export class HttpApiClient implements ApiClient {
   constructor(options: HttpApiOptions = {}) {
     this.baseUrl = (options.baseUrl ?? '/api/v1').replace(/\/$/, '')
     this.doFetch = options.fetchImpl ?? globalThis.fetch.bind(globalThis)
+    this.admin = this.ops('/admin')
+    this.merchant = this.channelOps('/merchant')
+  }
+
+  /**
+   * 一组运营资源。
+   *
+   * 两个前缀的路径与 JSON 完全同形，差别只在服务端的判定范围；前端不按
+   * 自己的角色去拼路径，也不自行降级——越权显示服务端给的那句话。
+   * `merchant` 只有渠道一组路由，所以它拿的是 `channelOps` 那一半。
+   */
+  private ops(prefix: string): OpsClient {
+    const idBody = (body: { id: number }) => body.id
+    return {
+      ...this.channelOps(prefix),
+
+      listModels: () => this.request<OpsModel[]>(`${prefix}/models`),
+      createModel: (input: OpsModelCreateInput) =>
+        this.request<{ id: number }>(`${prefix}/models`, { method: 'POST', body: input }).then(idBody),
+      updateModel: async (name, input: OpsModelInput) => {
+        await this.request(`${prefix}/models/${encodeURIComponent(name)}`, { method: 'PATCH', body: input })
+      },
+      deleteModel: async (name) => {
+        await this.request<void>(`${prefix}/models/${encodeURIComponent(name)}`, { method: 'DELETE' })
+      },
+
+      listAliases: (channelId) =>
+        this.request<ChannelAlias[]>(`${prefix}/aliases`, { query: { channel_id: channelId } }),
+      createAlias: (input: AliasCreateInput) =>
+        this.request<{ id: number }>(`${prefix}/aliases`, { method: 'POST', body: input }).then(idBody),
+      updateAlias: async (id, input: AliasUpdateInput) => {
+        await this.request(`${prefix}/aliases/${id}`, { method: 'PATCH', body: input })
+      },
+      deleteAlias: async (id) => {
+        await this.request<void>(`${prefix}/aliases/${id}`, { method: 'DELETE' })
+      },
+
+      listRules: () => this.request<PricingRule[]>(`${prefix}/pricing/rules`),
+      createRule: (input: RuleCreateInput) =>
+        this.request<{ id: number }>(`${prefix}/pricing/rules`, { method: 'POST', body: input }).then(idBody),
+      updateRule: async (id, input: RuleUpdateInput) => {
+        await this.request(`${prefix}/pricing/rules/${id}`, { method: 'PATCH', body: input })
+      },
+
+      listCosts: () => this.request<PricingCost[]>(`${prefix}/pricing/costs`),
+      createCost: (input: CostCreateInput) =>
+        this.request<{ id: number }>(`${prefix}/pricing/costs`, { method: 'POST', body: input }).then(idBody),
+      updateCost: async (id, input: CostUpdateInput) => {
+        await this.request(`${prefix}/pricing/costs/${id}`, { method: 'PATCH', body: input })
+      },
+    }
+  }
+
+  /** 渠道的一组路由；两个前缀都有。 */
+  private channelOps(prefix: string): ChannelOpsClient {
+    const idBody = (body: { id: number }) => body.id
+    return {
+      listChannels: () => this.request<Channel[]>(`${prefix}/channels`),
+      getChannel: (id) => this.request<Channel>(`${prefix}/channels/${id}`),
+      createChannel: (input: ChannelCreateInput) =>
+        this.request<{ id: number }>(`${prefix}/channels`, { method: 'POST', body: input }).then(idBody),
+      updateChannel: async (id, input: ChannelUpdateInput) => {
+        await this.request(`${prefix}/channels/${id}`, { method: 'PATCH', body: input })
+      },
+    }
   }
 
   /** 登录与恢复会话都会带回新的令牌，写请求靠它过 CSRF 校验。 */
