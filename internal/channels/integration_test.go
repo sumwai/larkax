@@ -2030,3 +2030,93 @@ func TestOwnedChannelScope(t *testing.T) {
 		t.Errorf("别人改我的渠道的错误 = %v，期望 ErrChannelNotFound", err)
 	}
 }
+
+// TestSuppliedModelsOwnedScopesAndCounts 钉住「我的模型」那条读的四件事：
+// 归属只看本人、渠道数按渠道条数（同地址多账号各算一条）、姓名按在供判据
+// 过滤（停用 / 软删 / 没有这个模型的渠道都不算）、展示名缺省时回落到规范名。
+func TestSuppliedModelsOwnedScopesAndCounts(t *testing.T) {
+	ctx := t.Context()
+	db := testDB(t)
+	sealer := testSealer(t)
+	admin := NewAdmin(db, nil, nil)
+
+	owner := seedMerchant(t, db)
+	other := seedMerchant(t, db)
+	shared := uniqueModel()
+	otherOnly := uniqueModel()
+	disabledOnly := uniqueModel()
+	deletedOnly := uniqueModel()
+	for _, name := range []string{shared, otherOnly, disabledOnly, deletedOnly} {
+		insertModelCatalog(t, db, name, true, true, true, 128000, 8192)
+	}
+	// 展示名为空时清单上不该出现一个空白的名字。
+	if _, err := db.ExecContext(ctx,
+		`UPDATE model_catalog SET display_name = '' WHERE canonical_name = $1`,
+		otherOnly); err != nil {
+		t.Fatalf("清空展示名失败: %v", err)
+	}
+
+	// 同一位商家的两条渠道在供同一个模型：各算一条（不同账号）。
+	insertChannel(ctx, t, db, sealer, channelSpec{ownerUserID: owner, model: shared})
+	insertChannel(ctx, t, db, sealer, channelSpec{ownerUserID: owner, model: shared})
+	// 别人的渠道在供 shared 与 otherOnly：它们不该进本人的清单。
+	insertChannel(ctx, t, db, sealer, channelSpec{ownerUserID: other, model: shared})
+	insertChannel(ctx, t, db, sealer, channelSpec{ownerUserID: other, model: otherOnly})
+	// 停用与软删的渠道即便挂着模型也不算在供。
+	insertChannel(ctx, t, db, sealer, channelSpec{
+		ownerUserID: owner, model: disabledOnly, status: "disabled",
+	})
+	deleted := insertChannel(ctx, t, db, sealer, channelSpec{
+		ownerUserID: owner, model: deletedOnly,
+	})
+	if _, err := db.ExecContext(ctx,
+		`UPDATE channels SET deleted_at = now() WHERE id = $1`, deleted); err != nil {
+		t.Fatalf("软删渠道失败: %v", err)
+	}
+
+	own, err := admin.SuppliedModelsOwned(ctx, &owner)
+	if err != nil {
+		t.Fatalf("读本人的在供模型失败: %v", err)
+	}
+	if len(own) != 1 {
+		t.Fatalf("本人的在供模型 = %+v，期望只有 %q 一条", own, shared)
+	}
+	if own[0].Model != shared || own[0].Channels != 2 {
+		t.Errorf("本人的清单 = %+v，期望 %q 两条渠道", own[0], shared)
+	}
+	if own[0].DisplayName != shared {
+		t.Errorf("展示名 = %q，期望规范名 %q", own[0].DisplayName, shared)
+	}
+
+	all, err := admin.SuppliedModelsOwned(ctx, nil)
+	if err != nil {
+		t.Fatalf("读全局在供模型失败: %v", err)
+	}
+	byName := make(map[string]SuppliedModel, len(all))
+	names := make([]string, 0, len(all))
+	for _, m := range all {
+		byName[m.Model] = m
+		names = append(names, m.Model)
+	}
+	if got := byName[shared]; got.Channels != 3 {
+		t.Errorf("全局 %q 的渠道数 = %d，期望 3（本人 2 + 别人 1）", shared, got.Channels)
+	}
+	if got, ok := byName[otherOnly]; !ok {
+		t.Errorf("全局清单里没有 %q：%+v", otherOnly, all)
+	} else if got.DisplayName != otherOnly {
+		t.Errorf("%q 的展示名 = %q，期望回落到规范名", otherOnly, got.DisplayName)
+	}
+	for _, absent := range []string{disabledOnly, deletedOnly} {
+		if _, ok := byName[absent]; ok {
+			t.Errorf("全局清单里出现了不该在供的 %q", absent)
+		}
+	}
+	if !slices.IsSorted(names) {
+		t.Errorf("清单没有按规范名升序：%v", names)
+	}
+
+	zero := int64(0)
+	if _, err := admin.SuppliedModelsOwned(ctx, &zero); err == nil {
+		t.Error("ownerID 为 0 应当报错")
+	}
+}

@@ -676,6 +676,33 @@ Cookie）与 `merchant` 角色；`admin` 也能进，且**不限定归属**（�
 - **响应里没有任何凭证**：只有类型、地址、渠道 id 与名字；凭证提示与信封信息
   都不在这一组里。
 
+### 我的模型
+
+`GET /api/v1/merchant/models?limit=`
+
+```json
+{
+  "items": [
+    {"model": "gpt-4o", "display_name": "GPT-4o", "channels": 2, "own_rules": 1}
+  ],
+  "total": 1,
+  "truncated": false
+}
+```
+
+- 只列**在供**的模型：判据与概览的 `models_in_supply` 是同一段（渠道已启用、
+  未软删、`models` 含该规范名、目录里有这一行）。停用、软删、不含该名的渠道
+  都不计入。
+- `channels`：名下在供这个模型的渠道数。同一个 `(type, base_url)` 上的多个
+  账号各算一条——它们是不同账号，不是重复行。
+- `display_name`：目录里的展示名；为空时给规范名本身。
+- `own_rules`：该商家**生效中**（已启用、已到生效时刻、未过期）的 merchant
+  作用域规则里，模型名单为空（兜底，适用于全部模型）或含这个规范名的条数。
+  没有价是 `0`，不是 `null`。平台规则与渠道规则不算这一列；管理员看全局时，
+  这一列是全部商家规则的合计。
+- 按规范名升序；`limit` 默认 50、上限 200，越界回 `400`；被截断时
+  `truncated: true`、`total` 给截断前的条数。
+
 ## 改它的时候
 
 | 要改什么 | 改哪 |
@@ -687,6 +714,7 @@ Cookie）与 `merchant` 角色；`admin` 也能进，且**不限定归属**（�
 | 错误体的形状 | `internal/api/error.go`（每套协议一份独立结构体） |
 | 请求体上限 | `internal/api` 的 `maxRequestBodyBytes` |
 | 控制台商家概览与上游的读数口径（异常理由、分组、窗口） | `internal/adminapi/merchant_ops.go`、`internal/channels/health.go` |
+| 控制台商家「我的模型」的在供判据、渠道数与 `own_rules` 口径 | `internal/adminapi/merchant_models.go`、`internal/channels/channels.go` 的 `SuppliedModelsOwned` |
 | 流式的帧序列 | `internal/api/stream.go`（每套协议一个渲染器） |
 | 流中途的错误帧 | `internal/api/stream.go` 的 `streamErrorFrame` 与 `responsesStream.errorFrame` |
 | 响应头 | `internal/api` 的 `HeaderVersion` / `HeaderRetryAfter`、`internal/observe` 的 `HeaderRequestID` |

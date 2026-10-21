@@ -231,6 +231,7 @@ func New(cfg Config) http.Handler {
 	if groups[GroupOverview] {
 		mux.HandleFunc("GET "+prefix+"overview", a.merchantOverview)
 		mux.HandleFunc("GET "+prefix+"upstreams", a.merchantUpstreams)
+		mux.HandleFunc("GET "+prefix+"models", a.merchantModels)
 	}
 
 	authorize := cfg.Authorize
@@ -250,7 +251,8 @@ const (
 	// GroupUsers 是控制台的用户管理页。它**不在**内部管理面的清单里，
 	// 理由见 Config.Groups 与 InternalGroups。
 	GroupUsers = "users"
-	// GroupOverview 是商家运营页的概览与上游清单。它不随空 Groups 出现。
+	// GroupOverview 是商家运营页的三个只读视图：概览、上游清单、我的模型。
+	// 它不随空 Groups 出现。
 	GroupOverview = "overview"
 )
 

@@ -30,9 +30,9 @@ const (
 	// failureRateThreshold 是失败率阈值（含）。
 	failureRateThreshold = 0.2
 
-	// upstreamDefaultLimit 与 upstreamMaxLimit 是上游清单一页的条数。
-	upstreamDefaultLimit = 50
-	upstreamMaxLimit     = 200
+	// listDefaultLimit 与 listMaxLimit 是运营页清单（上游、我的模型）一页的条数。
+	listDefaultLimit = 50
+	listMaxLimit     = 200
 )
 
 // 异常理由的枚举。取值稳定：页面与文档都按这些字面量解释。
@@ -200,7 +200,7 @@ type upstreamsJSON struct {
 
 func (a *API) merchantUpstreams(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	limit, err := parseUpstreamLimit(r.URL.Query().Get("limit"))
+	limit, err := parseListLimit(r.URL.Query().Get("limit"))
 	if err != nil {
 		a.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -314,14 +314,14 @@ func healthRank(health string) int {
 	}
 }
 
-// parseUpstreamLimit 解析上游清单的 limit。
-func parseUpstreamLimit(raw string) (int, error) {
+// parseListLimit 解析运营页清单的 limit。
+func parseListLimit(raw string) (int, error) {
 	if raw == "" {
-		return upstreamDefaultLimit, nil
+		return listDefaultLimit, nil
 	}
 	n, err := strconv.Atoi(raw)
-	if err != nil || n < 1 || n > upstreamMaxLimit {
-		return 0, fmt.Errorf("limit must be an integer between 1 and %d", upstreamMaxLimit)
+	if err != nil || n < 1 || n > listMaxLimit {
+		return 0, fmt.Errorf("limit must be an integer between 1 and %d", listMaxLimit)
 	}
 	return n, nil
 }
