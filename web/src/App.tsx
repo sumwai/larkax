@@ -11,6 +11,7 @@ import { viewsFor, type View } from './ops/views'
 import { OpsChannels } from './pages/ops/Channels'
 import { OpsModels } from './pages/ops/Catalog'
 import { OpsAliases } from './pages/ops/Aliases'
+import { AdminUserDetailPage, AdminUsers } from './pages/admin/Users'
 import { MerchantPricing } from './pages/ops/MerchantPricing'
 import { OpsPricing } from './pages/ops/Pricing'
 import { Landing } from './pages/Landing'
@@ -159,6 +160,22 @@ export function App() {
                       element={
                         <RequireView view="admin">
                           <OpsModels />
+                        </RequireView>
+                      }
+                    />
+                    <Route
+                      path="admin/users"
+                      element={
+                        <RequireView view="admin">
+                          <AdminUsers />
+                        </RequireView>
+                      }
+                    />
+                    <Route
+                      path="admin/users/:id"
+                      element={
+                        <RequireView view="admin">
+                          <AdminUserDetailPage />
                         </RequireView>
                       }
                     />

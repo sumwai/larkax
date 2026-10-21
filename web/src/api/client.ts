@@ -2,6 +2,9 @@ import { encodeModelName } from '../lib/modelName'
 import type {
   AliasCreateInput,
   AliasUpdateInput,
+  AdminUserDetail,
+  AdminUserSummary,
+  AdminUserUpdateInput,
   ApiClient,
   ApiErrorBody,
   ApiKey,
@@ -152,6 +155,14 @@ export class HttpApiClient implements ApiClient {
       updateCost: async (id, input: CostUpdateInput) => {
         await this.request(`${prefix}/pricing/costs/${id}`, { method: 'PATCH', body: input })
       },
+
+      // 用户管理只挂在 admin 前缀下：判据里有「不能改自己的角色/状态」，
+      // 离开操作者就没有意义。PATCH 返回与详情同形的响应体，页面直接用它刷新。
+      listUsers: (query = {}) =>
+        this.request<ListResponse<AdminUserSummary>>(`${prefix}/users`, { query: { ...query } }),
+      getUser: (id) => this.request<AdminUserDetail>(`${prefix}/users/${id}`),
+      updateUser: (id, input: AdminUserUpdateInput) =>
+        this.request<AdminUserDetail>(`${prefix}/users/${id}`, { method: 'PATCH', body: input }),
     }
   }
 

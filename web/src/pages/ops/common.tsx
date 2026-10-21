@@ -151,7 +151,7 @@ export function useConfirm() {
 
 export type ConfirmHandle = ReturnType<typeof useConfirm>
 
-/** 列表的搜索框：只过滤已经取回来的那一页，不发请求。 */
+/** 列表的搜索框：只负责输入与回调，查不查、什么时候查由调用方决定。 */
 export function SearchBox({ value, onChange }: { value: string; onChange: (value: string) => void }) {
   const { t } = useI18n()
   return (

@@ -1,6 +1,10 @@
 import { ApiError } from './client'
 import type {
   AliasUpdateInput,
+  AdminUserDetail,
+  AdminUserQuery,
+  AdminUserSummary,
+  AdminUserUpdateInput,
   ApiClient,
   ApiKey,
   Channel,
@@ -712,6 +716,147 @@ function opsID(): number {
 }
 
 /**
+ * 打码邮箱：本地部分只留首字符，与清单接口同形。
+ *
+ * 列表页拿到的就是这个写法；完整邮箱只在详情里出现。
+ */
+function maskEmail(email: string): string {
+  const at = email.indexOf('@')
+  if (at <= 0) return email
+  return `${email[0]}***${email.slice(at)}`
+}
+
+/** 演示用户；前六条手写，其余补到 60 条，让 50 条一页的清单真的能翻到第二页。 */
+const MOCK_USERS: AdminUserDetail[] = [
+  {
+    id: 1,
+    username: 'demo',
+    display_name: '演示账号',
+    email: maskEmail('demo@example.com'),
+    email_full: 'demo@example.com',
+    role: 'admin',
+    status: 'active',
+    created_at: ago(90 * 24),
+    last_seen_at: ago(1),
+    balance: money(128.4),
+    active_key_count: 3,
+    requests_7d: 1_204,
+    amount_7d: money(12.4812),
+    channel_count: 2,
+    key_last_used_at: ago(0.5),
+  },
+  {
+    id: 2,
+    username: 'alice',
+    display_name: 'Alice',
+    email: maskEmail('alice@example.com'),
+    email_full: 'alice@example.com',
+    role: 'merchant',
+    status: 'active',
+    created_at: ago(60 * 24),
+    last_seen_at: ago(26),
+    balance: money(42.75),
+    active_key_count: 6,
+    requests_7d: 3_880,
+    amount_7d: money(51.2034),
+    channel_count: 4,
+    key_last_used_at: ago(2),
+  },
+  {
+    id: 3,
+    username: 'bob',
+    display_name: null,
+    email: null,
+    email_full: null,
+    role: 'user',
+    status: 'suspended',
+    created_at: ago(30 * 24),
+    last_seen_at: ago(24 * 9),
+    balance: money(0),
+    active_key_count: 1,
+    requests_7d: 0,
+    amount_7d: money(0),
+    channel_count: 0,
+    key_last_used_at: null,
+  },
+  {
+    id: 4,
+    username: 'carol',
+    display_name: 'Carol',
+    email: maskEmail('carol@example.com'),
+    email_full: 'carol@example.com',
+    role: 'user',
+    status: 'banned',
+    created_at: ago(14 * 24),
+    last_seen_at: null,
+    balance: money(0),
+    active_key_count: 0,
+    requests_7d: 0,
+    amount_7d: money(0),
+    channel_count: 0,
+    key_last_used_at: null,
+  },
+  {
+    id: 5,
+    username: 'dave',
+    display_name: 'Dave',
+    email: maskEmail('dave@example.com'),
+    email_full: 'dave@example.com',
+    role: 'admin',
+    status: 'active',
+    created_at: ago(200 * 24),
+    last_seen_at: ago(5),
+    balance: money(9.5),
+    active_key_count: 2,
+    requests_7d: 96,
+    amount_7d: money(0.9703),
+    channel_count: 1,
+    key_last_used_at: ago(5),
+  },
+  {
+    id: 6,
+    username: 'erin',
+    display_name: 'Erin',
+    email: maskEmail('erin@example.com'),
+    email_full: 'erin@example.com',
+    role: 'user',
+    status: 'active',
+    created_at: ago(3 * 24),
+    last_seen_at: ago(2),
+    balance: money(5),
+    active_key_count: 1,
+    requests_7d: 12,
+    amount_7d: money(0.0412),
+    channel_count: 0,
+    key_last_used_at: null,
+  },
+  ...Array.from({ length: 54 }, (_, index): AdminUserDetail => {
+    const id = index + 7
+    const name = `member${String(id).padStart(2, '0')}`
+    const email = `${name}@example.com`
+    const role = index % 17 === 0 ? 'merchant' : 'user'
+    const status = index % 23 === 0 ? 'banned' : index % 11 === 0 ? 'suspended' : 'active'
+    return {
+      id,
+      username: name,
+      display_name: id % 4 === 0 ? null : `成员 ${id}`,
+      email: maskEmail(email),
+      email_full: email,
+      role,
+      status,
+      created_at: ago(id * 26),
+      last_seen_at: id % 5 === 0 ? null : ago(id * 7),
+      balance: money(id * 1.25),
+      active_key_count: id % 4,
+      requests_7d: id * 13,
+      amount_7d: money(id * 0.31),
+      channel_count: role === 'merchant' ? 1 : 0,
+      key_last_used_at: id % 6 === 0 ? null : ago(id),
+    }
+  }),
+]
+
+/**
  * 一组运营资源的替身。
  *
  * admin 拿全集；merchant 只通过 `channelsOf` 取走渠道那一半——模型、别名与
@@ -1032,6 +1177,97 @@ function mockOpsClient(scope: 'admin' | 'merchant'): OpsClient & MerchantPricing
       const { clear_effective_to: clearTo, ...rest } = input
       Object.assign(cost, rest)
       if (clearTo) cost.effective_to = null
+    },
+
+    // 用户管理。清单给打码邮箱，详情才给完整邮箱；金额是定点数字符串。
+    // 拒绝规则照服务端演：两种「不能改自己」是两句话，销户流程里的账号
+    // 回 409，最后一格 active 管理员也不能撤。
+    async listUsers(query: AdminUserQuery = {}) {
+      await delay()
+      requireSession()
+      requireAdmin()
+      const needle = (query.query ?? '').trim().toLowerCase()
+      const rows = MOCK_USERS.filter((row) => {
+        if (needle && !row.username.toLowerCase().includes(needle) &&
+          !(row.email_full ?? '').toLowerCase().includes(needle)) {
+          return false
+        }
+        if (query.role && row.role !== query.role) return false
+        if (query.status && row.status !== query.status) return false
+        return true
+      })
+      const after = query.cursor ? Number(query.cursor) : 0
+      const rest = rows.filter((row) => row.id > after)
+      const limit = Math.max(1, Math.min(query.limit ?? 50, 200))
+      const page = rest.slice(0, limit)
+      const summaryOf = (row: AdminUserDetail): AdminUserSummary => ({
+        id: row.id,
+        username: row.username,
+        email: row.email,
+        display_name: row.display_name,
+        role: row.role,
+        status: row.status,
+        created_at: row.created_at,
+        last_seen_at: row.last_seen_at,
+      })
+      return {
+        items: page.map(summaryOf),
+        next_cursor: rest.length > limit ? String(page[page.length - 1].id) : null,
+      }
+    },
+
+    async getUser(id) {
+      await delay()
+      requireSession()
+      requireAdmin()
+      const found = MOCK_USERS.find((row) => row.id === id)
+      if (!found) throw new ApiError(404, 'not_found', 'user not found')
+      return { ...found }
+    },
+
+    async updateUser(id, input: AdminUserUpdateInput) {
+      await delay()
+      requireSession()
+      requireAdmin()
+      const found = MOCK_USERS.find((row) => row.id === id)
+      if (!found) throw new ApiError(404, 'not_found', 'user not found')
+      if (found.status === 'deletion_requested') {
+        throw new ApiError(
+          409,
+          'conflict',
+          `账号已经处于「要求删除」状态：账号「${found.username}」正在走销户流程，这一页只管理 active / suspended / banned 的账号；先按销户流程撤销它`,
+        )
+      }
+      if (found.status === 'deleted') {
+        throw new ApiError(
+          409,
+          'conflict',
+          `账号已经销户：账号「${found.username}」已经匿名化，终态不可逆`,
+        )
+      }
+      if (!input.role && !input.status) {
+        throw new ApiError(400, 'invalid_request', 'no fields to update')
+      }
+      if (id === user.id && input.role) {
+        throw new ApiError(400, 'invalid_request', 'an administrator cannot change their own role')
+      }
+      if (id === user.id && input.status) {
+        throw new ApiError(400, 'invalid_request', 'an administrator cannot change their own status')
+      }
+      const demoting = found.role === 'admin' && found.status === 'active' &&
+        (input.role !== undefined && input.role !== 'admin' ||
+          input.status !== undefined && input.status !== 'active')
+      if (demoting) {
+        const others = MOCK_USERS.filter(
+          (row) => row.id !== id && row.role === 'admin' && row.status === 'active',
+        )
+        if (others.length === 0) {
+          throw new ApiError(409, 'conflict', 'this change would leave no active administrator')
+        }
+      }
+      if (input.role) found.role = input.role
+      if (input.status) found.status = input.status
+      return { ...found }
     },
   }
 }

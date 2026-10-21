@@ -403,6 +403,10 @@ textarea.input {
 .alias-row {
   grid-template-columns: 140px minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr) 160px;
 }
+.users-head,
+.users-row {
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.4fr) 90px 110px 150px 150px 76px;
+}
 /* 运营页在窄屏不折成卡片，改为表格内部横向滚动，页面本身不出现横向滚动条。 */
 .ops-table {
   overflow-x: auto;
