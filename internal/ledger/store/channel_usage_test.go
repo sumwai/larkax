@@ -158,10 +158,10 @@ func TestChannelUsageTotalsScopesToOwner(t *testing.T) {
 		Cost: "9.99", CreatedAt: at,
 	})
 	// 售价与上游成本不同：合计取的是售价那一列。
-	if _, err := db.ExecContext(ctx,
+	if _, execErr := db.ExecContext(ctx,
 		`UPDATE usage_events SET upstream_cost = 9.9 WHERE request_id = $1`,
-		requestA); err != nil {
-		t.Fatalf("写上游成本失败: %v", err)
+		requestA); execErr != nil {
+		t.Fatalf("写上游成本失败: %v", execErr)
 	}
 
 	all, err := s.ChannelUsageTotals(ctx, nil, from, to)
