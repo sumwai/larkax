@@ -113,6 +113,12 @@ func parseCases() []parseCase {
 
 		{"migrate create 缺名称", func() error { return runMigrate([]string{"create"}) }, false, migrateHint},
 		{"migrate 未知子命令", func() error { return runMigrate([]string{"bogus"}) }, false, migrateHint},
+		{"migrate down 带 --allow-missing", func() error {
+			return runMigrate([]string{"down", "--allow-missing"})
+		}, false, migrateHint},
+		{"migrate up --allow-missing 取值非法", func() error {
+			return runMigrate([]string{"up", "--allow-missing=maybe"})
+		}, false, migrateHint},
 
 		{"secret rotate 位置参数多余", func() error { return runRotate([]string{"extra"}) }, false, rotateHint},
 		{"secret rotate 标志组合", func() error { return runRotate([]string{"--apply", "--verify"}) }, false, rotateHint},

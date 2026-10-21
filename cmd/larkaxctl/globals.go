@@ -71,15 +71,21 @@ var (
 
 // takeVerboseFlag 从参数里摘出全局开关 --verbose，返回它这次是不是开着。
 func takeVerboseFlag(args []string) (bool, []string, error) {
-	return takeGlobalBool(args, verboseFlagNames, "--verbose")
+	_, on, rest, err := takeBoolFlag(args, verboseFlagNames, "--verbose")
+	return on, rest, err
 }
 
 // takeQuietFlag 从参数里摘出全局开关 --quiet，返回它这次是不是开着。
 func takeQuietFlag(args []string) (bool, []string, error) {
-	return takeGlobalBool(args, quietFlagNames, "--quiet")
+	_, on, rest, err := takeBoolFlag(args, quietFlagNames, "--quiet")
+	return on, rest, err
 }
 
-// takeGlobalBool 从参数里摘出一个全局布尔开关，返回它的取值与剩下的参数。
+// takeBoolFlag 从参数里摘出一个布尔开关，返回它有没有出现过、最终的取值，
+// 以及剩下的参数。
+//
+// 「有没有出现过」与「取值是不是 true」是两件事：`migrate down --allow-missing=false`
+// 里那个选项的取值是关的，但它仍然是用错了子命令——这一层要报的是后者。
 //
 // 它扫全表，所以写在子命令前后都认；出现多次时**后写的赢**，同样与 flag 包
 // 一致（`-q --quiet=false` 的净效果是关着）。
@@ -88,8 +94,8 @@ func takeQuietFlag(args []string) (bool, []string, error) {
 // 被子命令的 flag 集当成「flag provided but not defined」，而使用者写的是这个
 // 选项的显式取值——报「不认识 --quiet=false」会把人引到选项名上去，问题却在
 // 取值的拼法。取值不是布尔时报参数错，不静默当成 true。
-func takeGlobalBool(args []string, names []string, canonical string) (bool, []string, error) {
-	on := false
+func takeBoolFlag(args []string, names []string, canonical string) (bool, bool, []string, error) {
+	present, on := false, false
 	rest := make([]string, 0, len(args))
 
 	for _, arg := range args {
@@ -99,17 +105,18 @@ func takeGlobalBool(args []string, names []string, canonical string) (bool, []st
 			continue
 		}
 
+		present = true
 		if !hasValue {
 			on = true
 			continue
 		}
 		parsed, err := strconv.ParseBool(value)
 		if err != nil {
-			return false, nil, usageErr(fmt.Errorf(
+			return false, false, nil, usageErr(fmt.Errorf(
 				"%s 的取值 %q 不是布尔值：%s 要 true 或 false", canonical, value, canonical))
 		}
 		on = parsed
 	}
 
-	return on, rest, nil
+	return present, on, rest, nil
 }

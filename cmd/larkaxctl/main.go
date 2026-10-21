@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -303,6 +304,7 @@ const migrateShortUsage = `larkaxctl migrate 应用、回滚与生成数据库�
 
 用法：
   larkaxctl migrate up                     应用全部未执行的迁移
+  larkaxctl migrate up --allow-missing     连编号更小、此前漏掉的迁移一起补应用
   larkaxctl migrate down                   回滚最近一次迁移
   larkaxctl migrate down-to <版本>          回滚到指定版本（0 表示全部回滚）
   larkaxctl migrate up-to <版本>            前进到指定版本
@@ -320,6 +322,7 @@ const migrateUsage = `larkaxctl migrate 应用、回滚与生成数据库迁移�
 
 用法：
   larkaxctl migrate up                     应用全部未执行的迁移
+  larkaxctl migrate up --allow-missing     连编号更小、此前漏掉的迁移一起补应用
   larkaxctl migrate down                   回滚最近一次迁移
   larkaxctl migrate down-to <版本>          回滚到指定版本（0 表示全部回滚）
   larkaxctl migrate up-to <版本>            前进到指定版本
@@ -328,6 +331,9 @@ const migrateUsage = `larkaxctl migrate 应用、回滚与生成数据库迁移�
   larkaxctl migrate create <名称>           生成迁移文件（固定为 .sql）
 
 create 只写文件、不碰数据库，其余各条都要连库。
+
+up 默认不补应用「编号比当前版本小、却从未应用过」的迁移：遇到时它列出那几条并停下。
+加 --allow-missing 才补，补了哪几条打在标准错误上；其余动作不接受这个开关。
 
 up-to / down-to 一步一个版本地走到目标，不用 goose 自带的同名命令：那两个会停在
 目标版本的相邻位置（从 v2 执行 down-to 0 只退到 v1），差一位的表现比不支持更危险。
@@ -751,7 +757,24 @@ func withDB(timeout time.Duration, fn func(context.Context, *sql.DB) error) erro
 	return fn(ctx, db)
 }
 
+// allowMissingFlagNames 是 migrate up 的开关 --allow-missing 认的写法。
+//
+// 单横线的长写法一并认，理由与全局开关相同（见 globals.go 的 takeBoolFlag）。
+var allowMissingFlagNames = []string{"--allow-missing", "-allow-missing"}
+
+// takeAllowMissingFlag 从 migrate 的参数里摘出 --allow-missing。
+func takeAllowMissingFlag(args []string) (bool, bool, []string, error) {
+	return takeBoolFlag(args, allowMissingFlagNames, "--allow-missing")
+}
+
 func runMigrate(args []string) error {
+	// 开关在 fs.Parse 之前摘掉：flag 包在第一个非选项参数（子命令）处停下，
+	// 所以 `migrate up --allow-missing` 里的它根本到不了 fs。
+	allowMissingSet, allowMissing, args, flagErr := takeAllowMissingFlag(args)
+	if flagErr != nil {
+		return flagErr
+	}
+
 	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, migrateShortUsage) }
 	if err := fs.Parse(args); err != nil {
@@ -769,6 +792,20 @@ func runMigrate(args []string) error {
 	// `migrate down-to abc` 都是用户输入错，报出来的应该是「改命令」（退出码 2）。
 	// 把它们留到连库之后判，库一连不上就会盖成「连不上库」（3），脚本按
 	// 退出码分派时走错分支——一个该改命令的错被当成「稍后重试」。
+	//
+	// 先只认子命令，再判开关，最后才判它吃的取值：开关只属于 up，回滚、按版本走、
+	// 看状态都不该出现「补应用」这个动作，所以 `create --allow-missing` 报的是
+	// 用错的那个参数。判的是**参数里有没有它**，不是它的取值——
+	// `migrate down --allow-missing=false` 仍然是用错了子命令。
+	switch action {
+	case "create", "up", "down", "status", "version", "down-to", "up-to":
+	default:
+		return usageErr(fmt.Errorf("未知的 migrate 子命令 %q", action))
+	}
+	if allowMissingSet && action != "up" {
+		return usageErr(fmt.Errorf("--allow-missing 只用于 migrate up：%s 不接受它", action))
+	}
+
 	var target *int64
 	switch action {
 	case "create":
@@ -783,8 +820,6 @@ func runMigrate(args []string) error {
 			return usageErr(verErr)
 		}
 		target = ver
-	default:
-		return usageErr(fmt.Errorf("未知的 migrate 子命令 %q", action))
 	}
 
 	// migrate 的每一条子命令都还没接机器可读输出：它的输出是 goose 自己打的
@@ -833,7 +868,12 @@ func runMigrate(args []string) error {
 	goose.SetBaseFS(migrate.FS())
 
 	switch action {
-	case "up", "down", "status", "version":
+	case "up":
+		if allowMissing {
+			return gooseUpAllowMissing(ctx, db)
+		}
+		return gooseRun(ctx, db, action)
+	case "down", "status", "version":
 		return gooseRun(ctx, db, action)
 	case "down-to":
 		return stepTo(ctx, db, *target, false)
@@ -880,6 +920,77 @@ func gooseRun(ctx context.Context, db *sql.DB, action string) error {
 		return fmt.Errorf("执行 %s 失败: %w", action, err)
 	}
 	return nil
+}
+
+// gooseUpAllowMissing 让 goose 补应用编号比当前版本小、此前漏掉的迁移，
+// 再应用所有更大的未应用迁移。
+//
+// 那份清单先由自己打一遍：goose 只逐条打 `OK <文件>`，从里面看不出哪一条是
+// 补应用的乱序迁移、哪一条是正常前进。清单与 goose 的 findMissingMigrations
+// 是同一组条件，读的是同一张版本表，所以两边的名单不会分家。
+func gooseUpAllowMissing(ctx context.Context, db *sql.DB) error {
+	missing, err := missingMigrations(ctx, db)
+	if err != nil {
+		return fmt.Errorf("读取待补应用的乱序迁移失败: %w", err)
+	}
+	if len(missing) > 0 {
+		_, _ = fmt.Fprintf(humanStderr(), "将补应用 %d 条编号更小、此前漏掉的迁移：%s\n",
+			len(missing), strings.Join(missing, "、"))
+	}
+	if err := goose.UpContext(ctx, db, ".", goose.WithAllowMissing()); err != nil {
+		return fmt.Errorf("执行 up 失败: %w", err)
+	}
+	return nil
+}
+
+// missingMigrations 返回编号比库里最大版本小、却没有任何应用记录的迁移文件，
+// 按版本升序。
+//
+// 判据照抄 goose 在 WithAllowMissing 生效时用的那一条：版本小于库里的最大版本，
+// 且版本表里没有它的行。表不存在时还没有任何迁移跑过，自然没有「漏掉」的。
+func missingMigrations(ctx context.Context, db *sql.DB) ([]string, error) {
+	exists, err := gooseVersionTableExists(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, nil
+	}
+
+	migrations, err := goose.CollectMigrations(".", 0, goose.MaxVersion)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := db.QueryContext(ctx, "SELECT version_id FROM "+goose.TableName())
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	applied := make(map[int64]bool, len(migrations))
+	var maxVersion int64
+	for rows.Next() {
+		var version int64
+		if err := rows.Scan(&version); err != nil {
+			return nil, err
+		}
+		applied[version] = true
+		if version > maxVersion {
+			maxVersion = version
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var missing []string
+	for _, m := range migrations {
+		if !applied[m.Version] && m.Version < maxVersion {
+			missing = append(missing, filepath.Base(m.Source))
+		}
+	}
+	return missing, nil
 }
 
 func parseVersion(action string, args []string) (*int64, error) {
