@@ -142,8 +142,19 @@ describe('AppShell 桌面端顶栏', () => {
     expect(settingsLink).toHaveAttribute('href', '/app/merchant/settings')
 
     fireEvent.click(settingsLink)
-    // 换路由之后菜单自己收起来。
     expect(within(account).queryByRole('link', { name: '设置' })).not.toBeInTheDocument()
+  })
+
+  it('换路由后菜单自己收起（不经过菜单项）', async () => {
+    await renderShell('admin', '/app/admin/channels')
+    const trigger = screen.getByRole('button', { name: /admin-account/ })
+    fireEvent.click(trigger)
+    const account = trigger.closest('.account') as HTMLElement
+    expect(within(account).getByRole('button', { name: '退出登录' })).toBeInTheDocument()
+
+    // 顶栏切换器不经过菜单项，菜单只能靠路由变化收起。
+    fireEvent.click(within(screen.getByRole('banner')).getByRole('button', { name: '用户' }))
+    expect(within(account).queryByRole('button', { name: '退出登录' })).not.toBeInTheDocument()
   })
 
   it('视图切换器在顶栏，侧栏里没有第二份', async () => {
