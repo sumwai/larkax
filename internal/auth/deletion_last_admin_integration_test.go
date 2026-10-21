@@ -116,6 +116,58 @@ func TestPurgeDeletionRejectsLastActiveAdmin(t *testing.T) {
 	}
 }
 
+// 销户之前是 suspended 的管理员，匿名化不再按「最后一个管理员」拦。
+//
+// 判据保护的是「还能进管理组」的那一拨：suspended / banned 的管理员本来就不在
+// 其中，撤掉它不会让谁失去入口。这类行恰恰是绕过打标、或者打标之后又被停用
+// 留下的形状；对它们再拦一次，效果只是一个已经没人能登的账号永远清不掉。
+//
+// 现场是一行**真的被打了标的 suspended 管理员**：先建管理员、把它置成
+// suspended，再走 RequestDeletion（那一侧对非 active 管理员不拦），于是
+// deletion_prior_status 记下的是 suspended。不是只调辅助函数。
+func TestPurgeDeletionAllowsSuspendedAdminWithoutActiveAdmin(t *testing.T) {
+	ctx := t.Context()
+	store := New(testDB(ctx, t))
+	requireNoOtherActiveAdmins(t, store)
+
+	admin := createAdmin(t, store)
+	// 停用走 SQL：UpdateUser 对「撤掉最后一个 active 管理员」有同一道判据，
+	// 这里要的正是「库里已经没有 active 管理员」这个起点。
+	if _, err := store.db.ExecContext(ctx,
+		`UPDATE users SET status = $2 WHERE id = $1`, admin.ID, UserStatusSuspended); err != nil {
+		t.Fatalf("停用管理员失败: %v", err)
+	}
+
+	if _, err := store.RequestDeletion(ctx, fmt.Sprint(admin.ID)); err != nil {
+		t.Fatalf("对 suspended 管理员打标失败: %v", err)
+	}
+	status, prior := readUserStatusState(t, store, admin.ID)
+	if status != UserStatusDeletionRequested || prior != UserStatusSuspended {
+		t.Fatalf("打标之后是 (status=%q, prior=%q)，期望 (%q, %q)",
+			status, prior, UserStatusDeletionRequested, UserStatusSuspended)
+	}
+
+	if _, err := store.PurgeDeletion(ctx, fmt.Sprint(admin.ID), admin.Username); err != nil {
+		t.Fatalf("匿名化销户前已停用的管理员失败: %v", err)
+	}
+
+	// 终态：整个事务走完了，不是停在 deletion_requested 上的半截。
+	var (
+		afterStatus, afterPrior string
+		deleted                 bool
+	)
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT status, coalesce(deletion_prior_status, ''), deleted_at IS NOT NULL
+		  FROM users WHERE id = $1`, admin.ID,
+	).Scan(&afterStatus, &afterPrior, &deleted); err != nil {
+		t.Fatalf("读回匿名化之后的行失败: %v", err)
+	}
+	if afterStatus != UserStatusDeleted || afterPrior != "" || !deleted {
+		t.Errorf("匿名化之后是 (status=%q, prior=%q, deleted=%v)，期望 (%q, 空, true)",
+			afterStatus, afterPrior, deleted, UserStatusDeleted)
+	}
+}
+
 // 撤销不挂判据：让管理员回来是安全的方向。这里直接把行造成 deletion_requested，
 // 因为打标那条路现在会被判据挡住，而历史数据与将来的别的入口仍可能把行落到
 // 这个状态。
@@ -238,6 +290,36 @@ func waitForDeletionWindow(t *testing.T, store *Store) {
 	}
 }
 
+// waitForAdvisoryLockWait 看一眼有没有会话停在咨询锁上，最多看两秒。
+//
+// 两秒比触发器窗口（1.5 秒）略长：过了那个窗口还没等到，就说明后到的那笔没有
+// 停在这把锁上，而是在窗口里就拿到了或者根本没取。返回 false 而不是当场红，
+// 是因为「锁被去掉」那一版要先红在「恰好一笔成功」上——先红在哪一格，说的是
+// 哪条判据失效（见 #985）。
+func waitForAdvisoryLockWait(t *testing.T, store *Store) bool {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var n int
+		if err := store.db.QueryRowContext(t.Context(), `
+			SELECT count(*)
+			  FROM pg_locks l
+			  JOIN pg_stat_activity a ON a.pid = l.pid
+			 WHERE l.locktype = 'advisory'
+			   AND NOT l.granted
+			   AND a.datname = current_database()`).Scan(&n); err != nil {
+			t.Fatalf("查看 pg_locks 失败: %v", err)
+		}
+		if n > 0 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestRequestDeletionConcurrentLeavesOneActiveAdmin(t *testing.T) {
 	ctx := t.Context()
 	store := New(testDB(ctx, t))
@@ -273,7 +355,21 @@ func TestRequestDeletionConcurrentLeavesOneActiveAdmin(t *testing.T) {
 	}
 
 	waitForDeletionWindow(t, store)
-	_, secondErr := store.RequestDeletion(ctx, fmt.Sprint(second.ID))
+
+	// 后到的那笔放到另一个 goroutine：它要停在咨询锁上，主 goroutine 得能腾出
+	// 手来看这件事。先到的那笔此刻握着那把锁，正睡在触发器里。
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := store.RequestDeletion(ctx, fmt.Sprint(second.ID))
+		secondDone <- err
+	}()
+
+	// 停在咨询锁上是要钉住的东西之一。只有「起跑信号 + 1.5 秒窗口」时，删掉
+	// pg_advisory_xact_lock 两笔仍会一先一后地跑，用例可能照样绿——那时它证明的
+	// 只是「后跑的那笔看见了先跑的」，不是「两笔被这把锁串起来了」。
+	sawAdvisoryWait := waitForAdvisoryLockWait(t, store)
+
+	secondErr := <-secondDone
 	firstErr := <-firstDone
 
 	// 恰好一笔成功：只断「还剩一个」的话，两笔都被拒也绿——那样证明不了
@@ -294,6 +390,12 @@ func TestRequestDeletionConcurrentLeavesOneActiveAdmin(t *testing.T) {
 	}
 	if !errors.Is(secondErr, ErrLastAdmin) {
 		t.Fatalf("后起的那笔得到 %v，期望 ErrLastAdmin", secondErr)
+	}
+
+	// 放在上面两条之后：锁真的被去掉时，先红在「恰好一笔成功」，那一格说的是
+	// 判据失效；这一格只在判据仍然成立、但看不到它靠的那把锁时才有意义。
+	if !sawAdvisoryWait {
+		t.Fatalf("后到的那笔没有停在咨询锁上：锁没取，或者它在窗口里先跑完了")
 	}
 
 	// 被拒那一笔一个字段都没动：status、deletion_prior_status、deleted_at、

@@ -599,9 +599,15 @@ func (s *Store) purgeDeletionOnce(ctx context.Context, ref, confirm string) (Del
 	// 的别的入口）。这里仍要问「撤掉这一行之后还剩不剩管理员」——本行此刻是
 	// deletion_requested，不参与计数，所以唯一管理员走到这里时计数为 0。
 	//
+	// 门跟着打标那一侧走：只有「销户之前是 active 的管理员」才判。suspended /
+	// banned 的管理员本来就不在还能进管理组的那一拨里，撤掉它不保护任何入口；
+	// 它们恰恰是绕过打标、或者打标之后又被停用留下的行，对它们再拦一次，效果
+	// 只是让一个已经没人能登的账号永远清不掉。prior 取 deletion_prior_status，
+	// 为 NULL（历史数据）时按「不是 active 管理员」处理。
+	//
 	// 门由调用点自己判：辅助函数回答的是「撤掉之后还剩不剩」，不是「目标是不是
 	// 管理员」。无条件调用会把普通用户销户也挡住——那正是最需要清号的时候。
-	if row.isAdmin {
+	if row.isAdmin && row.prior.String == UserStatusActive {
 		if guardErr := ensureAnotherActiveAdmin(ctx, tx, row.id); guardErr != nil {
 			return DeletionResult{}, deletionLastAdminError(row.username, guardErr)
 		}
