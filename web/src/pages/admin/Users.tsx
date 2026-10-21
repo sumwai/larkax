@@ -225,43 +225,53 @@ export function AdminUsers() {
       )}
 
       {rows && rows.length > 0 && (
-        <section className="card table ops-table" aria-label={t('ops.users.title')}>
-          <div className="thead users-head" style={{ display: 'grid' }}>
-            <span>{t('ops.users.colUser')}</span>
-            <span>{t('ops.users.colEmail')}</span>
-            <span>{t('ops.users.colRole')}</span>
-            <span>{t('ops.users.colStatus')}</span>
-            <span>{t('ops.users.colCreated')}</span>
-            <span>{t('ops.users.colLastSeen')}</span>
-            <span className="amount">{t('ops.colActions')}</span>
-          </div>
-          {rows.map((row) => (
-            <div className="trow users-row" key={row.id}>
-              <div className="keyname">
-                <b>{row.username}</b>
-                <span className="muted-cell">{row.display_name || t('common.none')}</span>
-              </div>
-              {/* 列表里只有服务端打码过的邮箱：完整地址只在详情页出现。 */}
-              <span className="mono">{row.email || t('common.none')}</span>
-              <span>
-                <RolePill role={row.role} />
+        <section className="card table ops-table">
+          {/* 行与列的关系要说给读屏听：`.thead` / `.trow` 是 div 网格，没有这些
+              角色时读屏拿到的是一串扁平文本。翻页按钮放在表外，它不是一行。 */}
+          <div role="table" aria-label={t('ops.users.title')}>
+            <div className="thead users-head" role="row" style={{ display: 'grid' }}>
+              <span role="columnheader">{t('ops.users.colUser')}</span>
+              <span role="columnheader">{t('ops.users.colEmail')}</span>
+              <span role="columnheader">{t('ops.users.colRole')}</span>
+              <span role="columnheader">{t('ops.users.colStatus')}</span>
+              <span role="columnheader">{t('ops.users.colCreated')}</span>
+              <span role="columnheader">{t('ops.users.colLastSeen')}</span>
+              <span className="amount" role="columnheader">
+                {t('ops.colActions')}
               </span>
-              <span>
-                <UserStatusPill status={row.status} />
-              </span>
-              <span className="muted-cell num">{formatDateTime(row.created_at, meta.timezone)}</span>
-              <span className="muted-cell num">
-                {row.last_seen_at
-                  ? formatDateTime(row.last_seen_at, meta.timezone)
-                  : t('ops.users.neverSeen')}
-              </span>
-              <div className="actions">
-                <Link className="btn ghost sm" to={`/app/admin/users/${row.id}`}>
-                  {t('ops.view')}
-                </Link>
-              </div>
             </div>
-          ))}
+            {rows.map((row) => (
+              <div className="trow users-row" role="row" key={row.id}>
+                <div className="keyname" role="cell">
+                  <b>{row.username}</b>
+                  <span className="muted-cell">{row.display_name || t('common.none')}</span>
+                </div>
+                {/* 列表里只有服务端打码过的邮箱：完整地址只在详情页出现。 */}
+                <span className="mono" role="cell">
+                  {row.email || t('common.none')}
+                </span>
+                <span role="cell">
+                  <RolePill role={row.role} />
+                </span>
+                <span role="cell">
+                  <UserStatusPill status={row.status} />
+                </span>
+                <span className="muted-cell num" role="cell">
+                  {formatDateTime(row.created_at, meta.timezone)}
+                </span>
+                <span className="muted-cell num" role="cell">
+                  {row.last_seen_at
+                    ? formatDateTime(row.last_seen_at, meta.timezone)
+                    : t('ops.users.neverSeen')}
+                </span>
+                <div className="actions" role="cell">
+                  <Link className="btn ghost sm" to={`/app/admin/users/${row.id}`}>
+                    {t('ops.view')}
+                  </Link>
+                </div>
+              </div>
+            ))}
+          </div>
           {nextCursor && (
             <div className="table-foot" style={{ display: 'flex', justifyContent: 'center' }}>
               <Button variant="secondary" onClick={loadMore} loading={loadingMore}>
@@ -328,13 +338,15 @@ export function AdminUserDetailPage() {
       setEdit(null)
       toast(t('ops.saved'))
     } catch (problem) {
-      const known = problem instanceof ApiError
-      // 4xx 的正文是服务端给的那句话（「an administrator cannot change their own
-      // role」之类），原样展示：换成我们自己的话就把「为什么不行」丢掉了。
-      setFailure({
-        status: known ? problem.status : 0,
-        message: known ? problem.message : t('ops.serverError'),
-      })
+      // `client.ts` 把网络失败与每个非 2xx 都包成 `ApiError`，所以「是不是
+      // ApiError」分不出该不该本地化；按状态分：4xx 是服务端对这次改动的回答
+      // （「cannot change their own role」之类），原样展示；网络失败与 5xx 的
+      // 正文多半是给运维看的，换成本地那句话。
+      if (problem instanceof ApiError && problem.status >= 400 && problem.status < 500) {
+        setFailure({ status: problem.status, message: problem.message })
+      } else {
+        setFailure({ status: 0, message: t('ops.serverError') })
+      }
       setEdit(null)
     } finally {
       setPending(false)

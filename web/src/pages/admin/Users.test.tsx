@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '../../i18n'
 import { AuthProvider } from '../../auth/AuthProvider'
 import { SiteProvider } from '../../site/SiteProvider'
@@ -34,6 +34,11 @@ vi.mock('../../api', async (importOriginal) => {
 })
 
 const { ApiError } = await import('../../api')
+
+// 防抖用例换成假时钟，用完要还回去；漏了会让后面的用例看不到真实计时器。
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 const SUMMARY = {
   id: 2,
@@ -132,13 +137,21 @@ describe('用户列表页', () => {
     await screen.findByText('alice')
     expect(mocks.listUsers).toHaveBeenCalledTimes(1)
 
+    vi.useFakeTimers()
     const search = screen.getByLabelText('搜索')
     fireEvent.change(search, { target: { value: 'a' } })
     fireEvent.change(search, { target: { value: 'al' } })
     // 停手之前不发：每敲一个字发一次，服务端看到的多半是半截词。
     expect(mocks.listUsers).toHaveBeenCalledTimes(1)
 
-    await waitFor(() => expect(mocks.listUsers).toHaveBeenCalledTimes(2))
+    await act(async () => {
+      vi.advanceTimersByTime(299)
+    })
+    expect(mocks.listUsers).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      vi.advanceTimersByTime(1)
+    })
+    expect(mocks.listUsers).toHaveBeenCalledTimes(2)
     expect(mocks.listUsers).toHaveBeenLastCalledWith({
       query: 'al',
       role: undefined,
@@ -147,18 +160,49 @@ describe('用户列表页', () => {
     })
   })
 
+  it('输入还没停手就切筛选，最后一个词不会丢', async () => {
+    mocks.listUsers.mockResolvedValue({ items: [SUMMARY], next_cursor: null })
+    renderList()
+    await screen.findByText('alice')
+
+    vi.useFakeTimers()
+    fireEvent.change(screen.getByLabelText('搜索'), { target: { value: 'ali' } })
+    // 筛选先落地：这一趟还不带搜索词。
+    fireEvent.change(screen.getByLabelText('按角色筛选'), { target: { value: 'merchant' } })
+    expect(mocks.listUsers).toHaveBeenLastCalledWith({
+      query: undefined,
+      role: 'merchant',
+      status: undefined,
+      limit: 50,
+    })
+
+    // 防抖到点之后，输入的词跟着筛选一起发出去。
+    await act(async () => {
+      vi.advanceTimersByTime(300)
+    })
+    expect(mocks.listUsers).toHaveBeenLastCalledWith({
+      query: 'ali',
+      role: 'merchant',
+      status: undefined,
+      limit: 50,
+    })
+  })
+
   it('角色与状态筛选把参数带到请求上，游标回到第一页', async () => {
     mocks.listUsers.mockResolvedValueOnce({ items: [SUMMARY], next_cursor: 'cursor-2' })
-    mocks.listUsers.mockResolvedValue({ items: [OTHER], next_cursor: null })
+    mocks.listUsers.mockResolvedValue({ items: [OTHER], next_cursor: 'cursor-3' })
     renderList()
     await screen.findByText('alice')
 
     // 先翻一页，确认筛选后不会带着旧游标。
-    fireEvent.click(screen.getByRole('button', { name: '加载更多' }))
+    const more = screen.getByRole('button', { name: '加载更多' })
+    fireEvent.click(more)
     await waitFor(() => expect(mocks.listUsers).toHaveBeenCalledTimes(2))
     expect(mocks.listUsers).toHaveBeenLastCalledWith(
       expect.objectContaining({ cursor: 'cursor-2' }),
     )
+    // 翻页落地后这颗按钮要回到可用，不能一直转圈。
+    await waitFor(() => expect(more).not.toBeDisabled())
 
     fireEvent.change(screen.getByLabelText('按角色筛选'), { target: { value: 'merchant' } })
     await waitFor(() => expect(mocks.listUsers).toHaveBeenCalledTimes(3))
@@ -206,6 +250,21 @@ describe('用户列表页', () => {
     expect(screen.queryByText('stale')).not.toBeInTheDocument()
     expect(screen.queryByText('alice')).not.toBeInTheDocument()
     expect(screen.getByText('bob')).toBeInTheDocument()
+  })
+
+  it('表格带行列语义，翻页按钮不在表里', async () => {
+    mocks.listUsers.mockResolvedValue({ items: [SUMMARY, OTHER], next_cursor: 'cursor-2' })
+    renderList()
+    await screen.findByText('alice')
+
+    const table = screen.getByRole('table', { name: '用户' })
+    // 一行表头 + 两条数据。
+    expect(within(table).getAllByRole('row')).toHaveLength(3)
+    expect(within(table).getByRole('columnheader', { name: '邮箱' })).toBeInTheDocument()
+    expect(within(table).getAllByRole('cell')).toHaveLength(14)
+    // 按钮不是一行，不能进表。
+    expect(within(table).queryByRole('button', { name: '加载更多' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '加载更多' })).toBeInTheDocument()
   })
 
   it('没有筛选且一条也没有时，说的是「还没有用户」', async () => {
@@ -302,6 +361,21 @@ describe('用户详情页', () => {
     expect(
       await screen.findByText('an administrator cannot change their own role'),
     ).toBeInTheDocument()
+  })
+
+  it.each([
+    [503, 'http_error', 'the admin API is temporarily unavailable'],
+    [0, 'network_error', 'Failed to fetch'],
+  ])('%i 的失败换成本地文案，不把英文抛给用户', async (status, code, message) => {
+    mocks.getUser.mockResolvedValue(DETAIL)
+    mocks.updateUser.mockRejectedValue(new ApiError(status, code, message))
+    renderDetail()
+
+    fireEvent.click(await screen.findByRole('button', { name: '修改状态' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认' }))
+
+    expect(await screen.findByText('服务端暂时不可用，请稍后重试。')).toBeInTheDocument()
+    expect(screen.queryByText(message)).not.toBeInTheDocument()
   })
 
   it('409 另起一档，并给一条回列表的路', async () => {
