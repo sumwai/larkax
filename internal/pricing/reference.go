@@ -5,12 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/billing/expr"
 	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/observe"
 )
 
 // 本文件是控制台上的**参考价**：平台规则在当前时刻、按每百万 token 求值。
@@ -99,8 +101,10 @@ const referenceCacheSize = 64
 
 // ReferencePrices 取一组模型的参考价。
 //
-// at 为零值时用当前时刻。模型没有平台规则、或规则里没写过这两个单价时，
-// 该模型的值为 nil——调用方原样映射成 JSON 的 null。
+// at 为零值时用当前时刻。模型没有平台规则、或规则里没写过这两个单价、
+// 或命中了一条取不出价的平台规则时，该模型的值为 nil——调用方原样映射成
+// JSON 的 null。一条规则写坏只影响命中它的模型：某个模型配错一条平台规则，
+// 不该让整页模型清单都打不开。查询本身失败（连库、扫描）仍然是错误。
 //
 // 返回的 map 只含有值的模型；调用方按请求的模型清单查，缺的就是 nil。
 func (r *References) ReferencePrices(ctx context.Context, models []string, at time.Time) (map[string]*ReferencePrice, error) {
@@ -110,12 +114,43 @@ func (r *References) ReferencePrices(ctx context.Context, models []string, at ti
 	if at.IsZero() {
 		at = r.now().UTC()
 	}
+	return collectPrices(ctx, models, at, r.priceOf)
+}
 
+// rulePriceError 是「这条规则本身取不出价」：编译不过、求值失败，或换算到
+// 每百万 token 时溢出。这类失败只让那个模型的参考价为 nil；查询失败不属于
+// 这一类，它仍让整次取价失败。
+type rulePriceError struct {
+	ruleID int64
+	err    error
+}
+
+func (e *rulePriceError) Error() string { return e.err.Error() }
+func (e *rulePriceError) Unwrap() error { return e.err }
+
+// collectPrices 按模型逐个取价，并把两类失败分开处置。
+//
+// priceOf 作为参数传进来，是为了让这条分界（规则写坏只跳过那个模型、查询
+// 失败整次报错）能在不连库的情况下被钉住。
+func collectPrices(ctx context.Context, models []string, at time.Time,
+	priceOf func(context.Context, string, time.Time) (*ReferencePrice, error)) (map[string]*ReferencePrice, error) {
 	out := make(map[string]*ReferencePrice, len(models))
 	for _, model := range models {
-		price, err := r.priceOf(ctx, model, at)
+		price, err := priceOf(ctx, model, at)
 		if err != nil {
-			return nil, err
+			var bad *rulePriceError
+			if !errors.As(err, &bad) {
+				return nil, err
+			}
+			// 表达式编译失败时，错误文本会附上出错那一行的源码与一个 ^
+			// 标记；规则表达式可能很长，只把第一行打进日志——它已经写清
+			// 了是哪一类错误、在第几列。
+			reason, _, _ := strings.Cut(bad.err.Error(), "\n")
+			observe.FromContext(ctx).Warn("规则取价失败，跳过该模型的参考价",
+				"model", model,
+				"rule_id", bad.ruleID,
+				"reason", reason)
+			continue
 		}
 		if price != nil {
 			out[model] = price
@@ -178,7 +213,8 @@ func (r *References) compute(ctx context.Context, model string, at time.Time) (*
 
 	program, err := r.programs.Get(fmt.Sprintf("%d:%d", id, versionOf(source)), source)
 	if err != nil {
-		return nil, fmt.Errorf("编译模型 %q 的平台计价规则失败: %w", model, err)
+		return nil, &rulePriceError{ruleID: id,
+			err: fmt.Errorf("编译模型 %q 的平台计价规则失败: %w", model, err)}
 	}
 	env := expr.Env{
 		At:       at,
@@ -191,34 +227,36 @@ func (r *References) compute(ctx context.Context, model string, at time.Time) (*
 	env.Usage = billing.Usage{PromptTokens: referenceTokenCount}
 	inputResult, err := program.Eval(env)
 	if err != nil {
-		return nil, fmt.Errorf("求模型 %q 的输入价失败: %w", model, err)
+		return nil, &rulePriceError{ruleID: id,
+			err: fmt.Errorf("求模型 %q 的输入价失败: %w", model, err)}
 	}
 	env.Usage = billing.Usage{CompletionTokens: referenceTokenCount}
 	outputResult, err := program.Eval(env)
 	if err != nil {
-		return nil, fmt.Errorf("求模型 %q 的输出价失败: %w", model, err)
+		return nil, &rulePriceError{ruleID: id,
+			err: fmt.Errorf("求模型 %q 的输出价失败: %w", model, err)}
 	}
 
 	price := &ReferencePrice{}
 	if price.InputPerMTok, err = perMillion(inputResult.Prices.Prompt); err != nil {
-		return nil, fmt.Errorf("模型 %q 的输入价: %w", model, err)
+		return nil, &rulePriceError{ruleID: id, err: fmt.Errorf("模型 %q 的输入价: %w", model, err)}
 	}
 	if price.OutputPerMTok, err = perMillion(outputResult.Prices.Completion); err != nil {
-		return nil, fmt.Errorf("模型 %q 的输出价: %w", model, err)
+		return nil, &rulePriceError{ruleID: id, err: fmt.Errorf("模型 %q 的输出价: %w", model, err)}
 	}
 	// 缓存两项从输入侧那一份结果里取：缓存读写都属于输入侧，而规则里
 	// 给它们定价的通常是同一条分支。规则没声明的那一项保持 nil。
 	if inputResult.Prices.Declared["cache_read"] {
 		amount, err := perMillion(inputResult.Prices.CacheRead)
 		if err != nil {
-			return nil, fmt.Errorf("模型 %q 的缓存读价: %w", model, err)
+			return nil, &rulePriceError{ruleID: id, err: fmt.Errorf("模型 %q 的缓存读价: %w", model, err)}
 		}
 		price.CacheReadPerMTok = &amount
 	}
 	if inputResult.Prices.Declared["cache_write"] {
 		amount, err := perMillion(inputResult.Prices.CacheWrite)
 		if err != nil {
-			return nil, fmt.Errorf("模型 %q 的缓存写价: %w", model, err)
+			return nil, &rulePriceError{ruleID: id, err: fmt.Errorf("模型 %q 的缓存写价: %w", model, err)}
 		}
 		price.CacheWritePerMTok = &amount
 	}
