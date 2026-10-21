@@ -610,6 +610,42 @@ go run ./cmd/larkaxctl migrate up
 
 首次打 tag、第一个外部贡献者、公开发布都不构成分界线；共享数据库才是。
 
+### 编号更小的迁移漏掉时
+
+`migrate up` 默认会拒绝前进：库里的当前版本是 50，二进制里却有一条从未应用过的 49，
+goose 报 `found 1 missing migrations before current version 50` 并停下。
+
+常见的情形是两条迁移同时开发：各自按「当时的 next」取了编号，编号大的先合入并部署，
+编号小的后合入，库里的版本就跳过了它。
+
+那条迁移确实该补（没有被别的迁移取代，补在现在的位置也能跑通）时，加开关：
+
+```sh
+go run ./cmd/larkaxctl migrate up --allow-missing
+```
+
+goose 先按版本顺序补应用这些编号更小的迁移，再应用所有更大的未应用迁移。
+补了哪几条打在 stderr 上。默认不开，是因为同一个现象还有另一种来由：
+库里那条迁移被人手工回滚过。那时补应用会与已经改过的数据或表结构冲突，
+而 goose 分不出这两种情况，只能由人确认。
+
+不改二进制时的等价做法：
+
+1. 从迁移文件里取出 `-- +goose Up` 与 `-- +goose Down` 之间的 SQL；
+2. 在同一个事务里执行那段 SQL，再往 `goose_db_version` 插一行：
+
+   ```sql
+   BEGIN;
+   -- 这里放上一步取出的 SQL
+   INSERT INTO goose_db_version (version_id, is_applied) VALUES (49, true);
+   COMMIT;
+   ```
+
+3. 再正常跑 `migrate up`，它会从当前版本继续前进。
+
+两步要在同一个事务里：分开做的话，SQL 成功而插行失败时，库已经改了、版本表却没记，
+再补就得先分辨哪些改动已经做过。goose 自己跑迁移时也是这个做法。
+
 ## 配一条能接请求的链路
 
 推理请求要落到某个上游，所以库里得先有四样东西：目录里的一条规范模型、一条渠道
