@@ -59,6 +59,27 @@ func TestRunIdempotencyCleanupRejectsUnknownFlag(t *testing.T) {
 	}
 }
 
+// 位置参数是参数错，必须在连库之前拦下。
+//
+// 要挡的形状是「少写一个横线的 --dry-run」：flag 把它留在 NArg 里，`*dryRun`
+// 仍是 false，命令会照着真删的路径往下走。所以这里同时钉三件事——退出码是 2、
+// 提示点出 `--dry-run`、失败发生在 config.Load 之前（DSN 清空后报的仍是参数错
+// 而不是配置错）。
+func TestRunIdempotencyCleanupRejectsPositionalArgs(t *testing.T) {
+	t.Setenv("LARKAX_DB_DSN", "")
+
+	err := runCaptured(t, func() error { return runIdempotencyCleanup([]string{"dry-run"}) })
+	if err == nil || !strings.Contains(err.Error(), "不接受位置参数") {
+		t.Fatalf("位置参数应当报错，得到 %v", err)
+	}
+	if !strings.Contains(err.Error(), "--dry-run") {
+		t.Errorf("提示里要点出 --dry-run，实际为 %v", err)
+	}
+	if got := exitCode(err); got != exitUsage {
+		t.Errorf("位置参数的退出码应当是 %d，得到 %d", exitUsage, got)
+	}
+}
+
 // --dry-run 与不带 --dry-run 都要能过 flag 解析。
 //
 // 判据是「失败发生在解析之后」：把 DSN 清空，config.Load 必然失败并点出
@@ -151,6 +172,28 @@ func TestRunIdempotencyCleanupDeletesExpired(t *testing.T) {
 	}
 	if !keyExists(t, db, apiKeyID, freshKey) {
 		t.Error("没到期的那条不该被删掉")
+	}
+}
+
+// TestRunIdempotencyCleanupPositionalArgDeletesNothing 钉住的是后果，不只是退出码。
+//
+// 打错成 `dry-run` 时最坏的结果不是「命令报了个错」，而是它没报错却真的删了。
+// 所以先造一条到期记录，再跑一次带位置参数的调用，最后落到行上：那条必须还在。
+func TestRunIdempotencyCleanupPositionalArgDeletesNothing(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	apiKeyID := seedAPIKey(t, db)
+	expiredKey := uniqueName("expired")
+	insertIdempotencyKey(t, db, apiKeyID, expiredKey, "48 hours")
+
+	var err error
+	captureStreams(t, func() { err = runIdempotencyCleanup([]string{"dry-run"}) })
+	if got := exitCode(err); got != exitUsage {
+		t.Errorf("`dry-run` 的退出码应当是 %d，得到 %d（err=%v）", exitUsage, got, err)
+	}
+	if !keyExists(t, db, apiKeyID, expiredKey) {
+		t.Error("位置参数写错时一行都不该删")
 	}
 }
 

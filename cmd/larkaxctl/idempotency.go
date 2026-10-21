@@ -117,6 +117,13 @@ func runIdempotencyCleanup(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
+	// 位置参数一律拒绝，而不是忽略：少写一个横线的 `dry-run` 会被 flag 当成
+	// 普通参数留在 NArg 里，`*dryRun` 仍是 false，于是「只想数一遍」变成真删。
+	// 对一条会删数据的命令，多出来的一截必须让命令停下来，提示里说清该写什么。
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf(
+			"maintenance idempotency 不接受位置参数，得到 %q：干跑请写 --dry-run", fs.Arg(0)))
+	}
 
 	cfg, err := config.LoadOps()
 	if err != nil {
