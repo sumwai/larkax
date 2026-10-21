@@ -6,12 +6,12 @@
 # 退出码也可能一样（LESSONS.md 第 16 条；第 2 条是它的第一次现身：检查脚本自己
 # 报「通过」，实际根本没在检查）。
 #
-# 所以下面把**四条判据与六个「没跑成」的出口**各钉一条：
+# 所以下面把**四条判据与七个「没跑成」的出口**各钉一条：
 #
 #   判据 1 的两半：生成器产出的页不在库里、在库里但内容不同；
 #   判据 2：库里多出一页生成器不再产出的；
 #   退出码 2：生成器非零退出、一页都没写、写出空页、写出没有 .TH 的页、$MAN 不在、
-#            参数写错；
+#            参数写错、剥完转义后还有不认识的 roff 转义；
 #   边界：$MAN 下不属于这一族的 .1 文件既不比对也不报错（但要在证据行里报数）；
 #   判据 4：汉字与字母紧贴要红并点名页行、白名单能放行、数字与全角标点相邻不报、
 #          白名单的上限 / 格式 / 陈旧条目各有出口。
@@ -420,6 +420,36 @@ rc=$?
 if [ "$rc" -eq 1 ]; then ok; else bad "--update 遇判据 4 红 —— 应失败（退出码 1），实际 $rc"; fi
 if cmp -s "$man17/larkaxctl.1" "$fresh/larkaxctl.1"; then ok; else
   bad "--update 遇判据 4 红 —— 还是把生成结果写进了库"
+fi
+
+# ── 18. 剥完转义还剩不认识的转义 → 「没跑成」，不是干净 ───────────────────
+#
+# 剥转义的表是写死的。一个不认识的序列（夹具里是 `\s-1`）横在汉字与字母之间时，
+# 判据 4 两边都看不见，输出与「一处紧贴都没有」完全一样。这一条钉住：那时它
+# 报「没跑成」（退出码 2），而不是悄悄放行。
+
+cat >"$tmp/bin/go-unknown" <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+src="${STUB_FRESH:?}"
+out="${LARKAX_MAN_OUT:?}"
+mkdir -p "$out"
+for f in "$src"/*.1; do
+  [ -f "$f" ] || continue
+  cp "$f" "$out/"
+done
+printf '权限是%sstatus 的管理员。\n' '\s-1' >>"$out/larkaxctl.1"
+EOF
+chmod +x "$tmp/bin/go-unknown"
+
+man18="$tmp/man18"
+mk_from_stub "$man18" "$tmp/bin/go-unknown"
+STUB_FRESH="$fresh" MAN="$man18" GO="$tmp/bin/go-unknown" \
+  WHITELIST="$tmp/allow-empty.txt" bash "$SCRIPT" >"$last_out" 2>&1
+rc=$?
+if [ "$rc" -eq 2 ]; then ok; else bad "不认识的 roff 转义 —— 应「没跑成」（退出码 2），实际 $rc"; fi
+if grep -q '不认识的转义' "$last_out"; then ok; else
+  bad "不认识的 roff 转义 —— 提示里没说是不认识的转义（判据 4 会把它当成干净）"
 fi
 
 # ── 结果 ──────────────────────────────────────────────────────────────────

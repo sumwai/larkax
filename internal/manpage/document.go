@@ -227,6 +227,10 @@ type seam struct {
 // 行尾的 `*` 与反引号是标记（粗体、代码），渲染出来不占位置，所以要跳过它们
 // 往里看：`**读出来仍然是 `admin`**` 收尾时，屏幕上离接缝最近的是那个 n，
 // 不是星号。整行都是标记时返回零值，needsSpace 按「没有字符」处理。
+//
+// 剥掉标记之后可能**露出一个空格**（`各取 **`：空格在标记前面）。那个空格在
+// 源文件里就是两个字之间的分隔，屏幕上已经有一个了；不再 TrimRight 一次的话，
+// needsSpace 会拿它当接缝字符，于是「取」与「自」之间被补成两个空格。
 func leftSeam(line string) seam {
 	s := strings.TrimRight(line, " \t")
 	i := len(s) - 1
@@ -236,8 +240,12 @@ func leftSeam(line string) seam {
 	if i < 0 {
 		return seam{}
 	}
-	r, size := utf8.DecodeLastRuneInString(s[:i+1])
-	return seam{r: r, standalone: i-size >= 0 && s[i-size] == ' '}
+	s = strings.TrimRight(s[:i+1], " \t")
+	if s == "" {
+		return seam{}
+	}
+	r, size := utf8.DecodeLastRuneInString(s)
+	return seam{r: r, standalone: len(s)-size > 0 && s[len(s)-size-1] == ' '}
 }
 
 // rightSeam 取一行的可见起始字符，跳过行首的标记。

@@ -66,7 +66,8 @@
 # 通过时是**沉默**的，而「什么都没输出」与「什么都没检查」长得一样（LESSONS.md
 # 第 16 条）。所以它每次都打印计数：生成器产出几页、$MAN 下有几页（其中比对的有
 # 几页）、逐页比对了几次；判据 4 报出扫了几页、几处紧贴、白名单放行了几处以及
-# 白名单的条数。生成器一页都没写出来、或者写出空白页时，它判「没跑成」
+# 白名单的条数。--update 只打印紧贴那一行（再加上一句写进去几页）：比对那几项
+# 在写库这条路上不成立。生成器一页都没写出来、或者写出空白页时，它判「没跑成」
 # （退出码 2），不报通过——那时候它不是「同步」，是没生成。
 #
 # # 用法
@@ -80,7 +81,7 @@
 #   0  四条判据都成立
 #   1  有判据不成立（逐条列出是哪一页、哪一行）
 #   2  没跑成：生成器非零退出、一页都没写出来、写出了空页或没有 .TH 的页、
-#      $MAN 不在、判据 4 的扫描器自己出错
+#      $MAN 不在、判据 4 的扫描器自己出错、剥完转义后还有不认识的 roff 转义
 #
 # 1 与 2 必须分开：两者在 CI 里都是红的，但处置完全不同——前者去跑 --update 并
 # 提交（判据 4 红则回去改内容或生成器），后者说明这道门自己（或生成器）坏了
@@ -239,15 +240,50 @@ if [ "$allow_count" -gt "$MAX_ALLOW_ENTRIES" ]; then
 fi
 
 # 扫描前把 roff 转义换成它渲染出来的样子：`\:`、`\fB`/`\fR`/`\fP`/`\fI`、`\&`
-# 都是零宽的，直接删掉；`\-` 是连字符，`\e` 是反斜杠。不剥这一步，
-# `认\fBstatus` 里那两个字中间隔着四个字节，判据什么也看不见。
+# 都是零宽的，直接删掉；`\-` 是连字符，`\(bu` 是列表的圆点，`\e` 是反斜杠。
+# 不剥这一步，`认\fBstatus` 里那两个字中间隔着四个字节，判据什么也看不见。
+#
+# 这张表是写死的，所以剥完还要查一遍有没有**不认识的**转义留了下来：一个
+# `\s-1` 之类的序列横在汉字与字母之间时，判据 4 两边都看不见，把缺陷当成
+# 干净——而输出与「一处紧贴都没有」一模一样。`\e` 换成**两个**反斜杠，正是
+# 为了在下一步把它与不认识的转义分开：游戏规则变了，剩下的单个反斜杠都不是
+# 合法的 roff（字面量反斜杠必须写成 `\e`）。
 stripped="$tmp/stripped"
 mkdir -p "$stripped"
 while IFS= read -r f; do
   [ -n "$f" ] || continue
-  sed -e 's/\\f[BRPI]//g' -e 's/\\://g' -e 's/\\-/-/g' -e 's/\\&//g' -e 's/\\e/\\/g' \
-    "$f" >"$stripped/${f##*/}"
+  if ! sed -e 's/\\f[BRPI]//g' -e 's/\\://g' -e 's/\\-/-/g' -e 's/\\&//g' -e 's/\\(bu/·/g' -e 's/\\e/\\\\/g' \
+    "$f" >"$stripped/${f##*/}"; then
+    not_run "剥 roff 转义时 sed 失败（$f）。"
+  fi
 done <"$generated"
+
+# 单个反斜杠＝不认识的转义。先把成对的（来自 `\e`）删掉再看——正则里数不了
+# 奇偶，删成对的再找剩下的那一个才是对的判定。删完再整批扫一遍：命中与否看
+# 输出文件，不看逐文件循环的退出码（最后一个文件的退出码盖住前面的）。
+nopairs="$tmp/nopairs"
+mkdir -p "$nopairs"
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  if ! sed 's/\\\\//g' "$f" >"$nopairs/${f##*/}"; then
+    not_run "判据 4 的转义检查里 sed 失败（$f）。"
+  fi
+done < <(find "$stripped" -maxdepth 1 -name '*.1' -type f -print | LC_ALL=C sort)
+
+unknown_rc=0
+LC_ALL=C grep -n '\\' "$nopairs"/*.1 >"$tmp/unknown-escape.raw" 2>"$tmp/unknown-escape.err" || unknown_rc=$?
+sed "s|^$nopairs/||" "$tmp/unknown-escape.raw" >"$tmp/unknown-escape"
+if [ "$unknown_rc" -gt 1 ]; then
+  not_run "判据 4 的转义检查没跑成（grep 退出码 $unknown_rc）：
+$(sed 's/^/    /' "$tmp/unknown-escape.err")
+检查器坏掉时的输出与「没有不认识的转义」完全一样，所以这里不报通过。"
+fi
+if [ -s "$tmp/unknown-escape" ]; then
+  not_run "剥完 roff 转义之后手页里还有不认识的转义：
+$(head -5 "$tmp/unknown-escape" | sed 's/^/    /')
+判据 4 判的是汉字与字母**直接相邻**；不认识的序列夹在中间时它两边都看不见，
+会把缺陷当成干净。先在脚本的 sed 替换表里认下这个转义，再重新跑。"
+fi
 
 hits="$tmp/hits"
 : >"$hits"
