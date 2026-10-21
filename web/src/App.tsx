@@ -7,12 +7,15 @@ import { ThemeProvider } from './theme/ThemeProvider'
 import { AppShell } from './components/AppShell'
 import { MockBanner } from './components/MockBanner'
 import { Alert, ToastProvider } from './components/ui'
-import { viewsFor, type View } from './ops/views'
+import { viewAllowed, viewOfPath, type View } from './ops/views'
 import { OpsChannels } from './pages/ops/Channels'
 import { OpsModels } from './pages/ops/Catalog'
 import { OpsAliases } from './pages/ops/Aliases'
 import { AdminUserDetailPage, AdminUsers } from './pages/admin/Users'
 import { MerchantPricing } from './pages/ops/MerchantPricing'
+import { MerchantOverview } from './pages/ops/MerchantOverview'
+import { MerchantModels } from './pages/ops/MerchantModels'
+import { MerchantUpstreams } from './pages/ops/MerchantUpstreams'
 import { OpsPricing } from './pages/ops/Pricing'
 import { Landing } from './pages/Landing'
 import { Login } from './pages/Login'
@@ -55,7 +58,10 @@ function RequireAuth({ children }: { children: ReactNode }) {
 function RequireView({ view, children }: { view: View; children: ReactNode }) {
   const { user } = useAuth()
   const { t } = useI18n()
-  if (!viewsFor(user?.role).includes(view)) {
+  const { pathname } = useLocation()
+  // 判定按地址走：商家视图里那三页是「同一批页面、两种主语」，管理员也进得去；
+  // 渠道与计价仍然只对商家开放，所以不能只看传进来的视图名。
+  if (viewOfPath(pathname) !== view || !viewAllowed(user?.role, pathname)) {
     return (
       <Alert tone="bad" title={t('ops.noAccess')}>
         {t('ops.noAccessNext')}{' '}
@@ -112,7 +118,31 @@ export function App() {
                     <Route path="settings" element={<Settings />} />
                     <Route
                       path="merchant"
-                      element={<Navigate to="/app/merchant/channels" replace />}
+                      element={<Navigate to="/app/merchant/overview" replace />}
+                    />
+                    <Route
+                      path="merchant/overview"
+                      element={
+                        <RequireView view="merchant">
+                          <MerchantOverview />
+                        </RequireView>
+                      }
+                    />
+                    <Route
+                      path="merchant/models"
+                      element={
+                        <RequireView view="merchant">
+                          <MerchantModels />
+                        </RequireView>
+                      }
+                    />
+                    <Route
+                      path="merchant/upstreams"
+                      element={
+                        <RequireView view="merchant">
+                          <MerchantUpstreams />
+                        </RequireView>
+                      }
                     />
                     <Route
                       path="merchant/settings"
