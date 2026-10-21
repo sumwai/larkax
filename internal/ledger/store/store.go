@@ -536,12 +536,12 @@ func (s *Store) reserveFromWallet(ctx context.Context, tx *sql.Tx, req pipeline.
 //
 // 只加一处就破了对账的不变量，而且破法很安静：先加 frozen 会多出一笔没有
 // 来历的冻结；先加 reserved_amount 会在释放时解冻它从未冻过的钱（frozen 变负，
-// 由表上的 CHECK 挡住，报出来的是一个看不懂的 ErrFrozenUnderflow）。所以两条
-// 语句在**同一个事务**里，要么都发生要么都不发生。
+// 由表上的 CHECK 挡住，报出来的是一个看不懂的 ErrFrozenUnderflow）。所以这两处
+// 改动在**同一条语句**里（见下面的 CTE），要么都发生要么都不发生。
 //
 // # 准入判据复用同一条谓词，不先查后改
 //
-// `balance - frozen >= $3` 是**唯一**挡住透支的地方（见 SaveReservation 里那段
+// `balance - frozen >= $4` 是**唯一**挡住透支的地方（见 SaveReservation 里那段
 // 注释）。补冻走的是同一条 UPDATE、同一个条件，只是金额换成了这一次的增量：
 // 换成「先 SELECT 余额再判断」会在两个并发请求之间开一个窗口，各自都看到
 // 「够」，于是两边都冻——余额被透支，而事后从数据上完全看不出来。
@@ -565,20 +565,27 @@ func (s *Store) reserveFromWallet(ctx context.Context, tx *sql.Tx, req pipeline.
 // 与 `reserved_quota`，判断用的是与初次选源同一组维度。outputTokens 是这一次
 // 补冻覆盖的输出 token 增量，token 包按它加可用量的占用；其余单位不看它。
 //
-// # 锁序：今天靠「同一个 goroutine」，将来要靠约定
+// # 一条语句，两处改动
 //
-// 两条路今天都由**同一个请求 goroutine** 顺序驱动：预留 → 流式期间补冻 →
-// 结算或释放。没有两个 goroutine 同时改同一笔预留，所以下面这组方向目前
-// 只是与其它请求相遇时的约束，不是本函数内部的同步：
+// 余额这条路的「锁钱包 → 改冻结额 → 改账单行」压在**一条**语句里（数据修改
+// CTE）。这不是为了少打几行 SQL：补冻在流中间按段反复调用（见 gateway 的
+// streamFreeze），每次省下的往返都乘在补冻次数上，也乘在这把钱包行锁的
+// 持有期上——而那是同一用户所有并发请求的串行点。
 //
-//   - Save（结算）是「钱包 → 账单行 → 订阅行」：先锁钱包，再按 request_id
-//     锁账单行，记包用量时再锁 user_plans；
-//   - AddReservation 与 Release 是「账单行 → 钱包 / 订阅行」：先锁账单行，
-//     再按预留来源锁钱包或 user_plans。
+//   - `target` 只读一次账单行，拿到这一笔预留的来源（`user_plan_id`）。它不加锁：
+//     来源在预留那一刻就定了、之后不变，而「还在不在 pending」由下面那条
+//     UPDATE 的 WHERE 再判一次（影响 0 行就是已经结算或已释放）。
+//   - `frozen` 对钱包做与 SaveReservation 逐字相同的 UPDATE（同一句
+//     `balance - frozen >=`）；额度包覆盖的请求在这里命中 0 行，所以不冻钱包。
+//   - `billed` 加账单行的 reserved_amount，金额取 `frozen` 的结果。它对额度包
+//     那条路也会执行一次（值不变）：这次 UPDATE 在那里只做一件事——拿住账单行
+//     的锁并确认它仍是 pending，后面的 growPlanReservation 据此不必自己再判。
 //
-// 今天是单 goroutine，所以两个方向还没有机会相遇。将来若同一笔预留真的要
-// 并发改，必须先把这组顺序统一成一种，否则「A 持账单行等钱包、B 持钱包等
-// 账单行」就是死锁，而它只在高并发时出现。
+// 锁序因此是「钱包 → 账单行」，与 Save（结算）一致；两步的先后不由文本顺序
+// 碰运气，而是由 `billed` 对 `frozen` 的 RETURNING 依赖固定下来。额度包那条路
+// 仍然先账单行、再 user_plans，与 Save 的「钱包 → 账单行 → 订阅行」同向。
+// Release 仍是「账单行 → 钱包」，但它与 AddReservation 只会对同一笔预留相遇，
+// 而这两步由同一个请求 goroutine 顺序驱动（预留 → 补冻 → 结算或释放），不并发。
 func (s *Store) AddReservation(ctx context.Context, req pipeline.Request, delta money.Amount, outputTokens int64) error {
 	// 非正的增量没有任何意义，而静默当成 0 会让「补冻了但没冻上」看起来像
 	// 成功——调用方据此推进它的累计量，于是钱包与账单行少冻一段，没有任何
@@ -596,21 +603,56 @@ func (s *Store) AddReservation(ctx context.Context, req pipeline.Request, delta 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// 先看这一笔预留是从哪儿扣的。行锁让「读来源」与「加金额」之间没有窗口：
-	// 结算要把这一行置成 settled 时也得先等它。
-	var planID sql.NullInt64
+	var (
+		pendingRows int
+		planID      sql.NullInt64
+		frozenRows  int
+		billedRows  int
+	)
 	err = tx.QueryRowContext(ctx, `
-		SELECT user_plan_id FROM billing_requests
-		 WHERE request_id = $1 AND status = 'pending'
-		 FOR UPDATE`, req.RequestID).Scan(&planID)
-	if errors.Is(err, sql.ErrNoRows) {
+		WITH target AS (
+		        SELECT user_plan_id
+		          FROM billing_requests
+		         WHERE request_id = $3 AND status = 'pending'
+		), frozen AS (
+		        UPDATE user_wallets
+		           SET frozen = frozen + $4::numeric, updated_at = now()
+		         WHERE user_id = $1 AND asset = $2
+		           AND (SELECT count(*) FROM target) = 1
+		           AND (SELECT user_plan_id FROM target) IS NULL
+		           AND balance - frozen >= $4::numeric
+		        RETURNING 1
+		), billed AS (
+		        UPDATE billing_requests
+		           SET reserved_amount = reserved_amount +
+		               CASE WHEN EXISTS (SELECT 1 FROM frozen) THEN $4::numeric
+		                    ELSE 0::numeric END
+		         WHERE request_id = $3 AND status = 'pending'
+		           AND (SELECT count(*) FROM target) = 1
+		        RETURNING 1
+		)
+		SELECT (SELECT count(*) FROM target),
+		       (SELECT user_plan_id FROM target),
+		       (SELECT count(*) FROM frozen),
+		       (SELECT count(*) FROM billed)`,
+		req.UserID, req.Asset, req.RequestID, delta.String()).Scan(
+		&pendingRows, &planID, &frozenRows, &billedRows)
+	if err != nil {
+		return constraintFailure(fmt.Errorf("追加冻结额失败: %w", err))
+	}
+
+	// 这一行已经不在 pending：请求标识对不上、或者同一次收尾已经先跑了。
+	// 两种都不该再冻一笔——那笔钱没有解除路径。
+	//
+	// billedRows 为 0 是同一条结局的另一个窗口：target 读到的快照里还在
+	// pending，而等账单行锁的时候有人把它结算/释放了；UPDATE 重判谓词之后
+	// 影响 0 行。
+	if pendingRows == 0 || billedRows == 0 {
 		return fmt.Errorf(
 			"请求 %s 的预留已经不在 pending 状态，不能追加冻结额（本该由同一次收尾处理）",
 			req.RequestID)
 	}
-	if err != nil {
-		return fmt.Errorf("查预留来源失败: %w", err)
-	}
+
 	if planID.Valid {
 		if err = growPlanReservation(ctx, tx, req.RequestID, planID.Int64, delta, outputTokens); err != nil {
 			return err
@@ -621,58 +663,20 @@ func (s *Store) AddReservation(ctx context.Context, req pipeline.Request, delta 
 		return nil
 	}
 
-	key := WalletKey{UserID: req.UserID, Asset: req.Asset}
-
-	// 加锁顺序与 SaveReservation 一致（先 key 后钱包，而这里只锁钱包）：
-	// 没有任何路径按「先钱包后 key」拿锁，所以这个顺序不会成环。
-	if lockErr := lockWallets(ctx, tx, key); lockErr != nil {
-		return lockErr
-	}
-
-	// 准入谓词与 SaveReservation 里那条**逐字相同**（只差金额的来源）。
-	// 影响 0 行就是「余额 − 已冻结」不够这一次的增量，与初始预留时是同一种
-	// 情形、同一个错误值：调用方据此中断这条流（见 gateway 的 streamFreeze）。
-	res, err := tx.ExecContext(ctx, `
-		UPDATE user_wallets
-		   SET frozen = frozen + $3::numeric, updated_at = now()
-		 WHERE user_id = $1 AND asset = $2
-		   AND balance - frozen >= $3::numeric`,
-		key.UserID, key.Asset, delta.String())
-	if err != nil {
-		return constraintFailure(fmt.Errorf("追加冻结余额失败: %w", err))
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("读取影响行数失败: %w", err)
-	}
-	if affected == 0 {
+	if frozenRows == 0 {
+		// 空资产原先由 lockWallets 直接挡下（它逐个校验资产非空），报的就是
+		// 这一句；压成一条语句之后不再经过那把锁，校验挪到这里。位置变了，
+		// 报的还是同一句话——它不是「没有钱包行」，是调用方传错了。
+		//
+		// 放在额度包那一支**之后**：那条路从来不碰钱包，空资产在它那里不是
+		// 错误（与改动前一致，那时 lockWallets 在额度包分支返回之后才调用）。
+		if req.Asset == "" {
+			return errors.New("钱包的资产品种为空")
+		}
 		// 与 SaveReservation 同一处、同一套诊断：钱包行不在（ErrNoWallet）与
-		// 可用余额不够（ErrInsufficientAvailable）要分开报。
-		return diagnoseFreezeFailure(ctx, tx, key)
-	}
-
-	// 账单行的 reserved_amount 跟着加：释放按它解冻（见 Release 与
-	// releaseFrozen），不加这一笔就会在释放时少解冻一个增量。
-	//
-	// 条件是 status = 'pending'：只有还挂着的预留才谈得上追加。影响 0 行说明
-	// 这一行已经结算或已释放，而那时这块钱不该再冻——回滚整笔（下面的错误会让
-	// 事务回滚，钱包那一次 UPDATE 一并撤掉）。
-	res, err = tx.ExecContext(ctx, `
-		UPDATE billing_requests
-		   SET reserved_amount = reserved_amount + $2::numeric
-		 WHERE request_id = $1 AND status = 'pending'`,
-		req.RequestID, delta.String())
-	if err != nil {
-		return constraintFailure(fmt.Errorf("追加预留金额失败: %w", err))
-	}
-	affected, err = res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("读取影响行数失败: %w", err)
-	}
-	if affected == 0 {
-		return fmt.Errorf(
-			"请求 %s 的预留已经不在 pending 状态，不能追加冻结额（本该由同一次收尾处理）",
-			req.RequestID)
+		// 可用余额不够（ErrInsufficientAvailable）要分开报。整个语句已经回滚，
+		// 账单行那一次同值 UPDATE 也一并撤掉。
+		return diagnoseFreezeFailure(ctx, tx, WalletKey{UserID: req.UserID, Asset: req.Asset})
 	}
 
 	if err := tx.Commit(); err != nil {
