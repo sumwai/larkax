@@ -104,7 +104,15 @@ type BottomTab = {
   owns?: readonly string[]
 }
 
-const BOTTOM_NAV: Record<View, BottomTab[]> = {
+/**
+ * 底栏按「看到的这一组页面」取表，不按账号角色取。
+ *
+ * 管理员进商家视图时能进的是概览、模型、上游与用量，这四页就是他的底栏；
+ * 套用管理视图那套会出现「停在当前页却没有任何 tab 是当前项」。
+ */
+type BottomNavKey = View | 'merchantSite'
+
+const BOTTOM_NAV: Record<BottomNavKey, BottomTab[]> = {
   user: [
     { to: '/app', key: 'nav.overview', icon: IconOverview },
     { to: '/app/keys', key: 'nav.keys', icon: IconKey },
@@ -117,6 +125,12 @@ const BOTTOM_NAV: Record<View, BottomTab[]> = {
     { to: '/app/merchant/channels', key: 'ops.nav.channels', icon: IconChannel },
     { to: '/app/usage', key: 'nav.usage', icon: IconUsage },
     { to: 'settings', key: 'nav.settings', icon: IconSettings },
+  ],
+  merchantSite: [
+    { to: '/app/merchant/overview', key: 'nav.overview', icon: IconOverview },
+    { to: '/app/merchant/models', key: 'ops.nav.merchantModels', icon: IconModels },
+    { to: '/app/merchant/upstreams', key: 'ops.nav.upstreams', icon: IconExternal },
+    { to: '/app/usage', key: 'nav.usage', icon: IconUsage },
   ],
   admin: [
     { to: '/app/merchant/overview', key: 'nav.overview', icon: IconOverview },
@@ -168,13 +182,9 @@ export function AppShell() {
   const navItems: NavItem[] =
     view === 'user' ? APP_NAV : view === 'merchant' ? merchantItems : OPS_NAV[view]
   // 设置是账号级的：管理员在商家视图里点设置，落到管理视图那一个地址。
-  //
-  // 管理员进商家视图时，底栏也按管理视图排：他看到的那三页是全站主语，
-  // 「渠道」「用户」「运营」都在管理前缀下。这对设置地址与底栏 tab 表是同一个
-  // 判断，所以只写一次。
-  const shellView: View = view === 'merchant' && siteWide ? 'admin' : view
-  const settings = settingsOf(shellView)
-  const tabs = BOTTOM_NAV[shellView]
+  const settings = settingsOf(view === 'merchant' && siteWide ? 'admin' : view)
+  // 底栏跟着当前这一组页面走（见 `BottomNavKey`）。
+  const tabs = BOTTOM_NAV[view === 'merchant' && siteWide ? 'merchantSite' : view]
 
   useEffect(() => {
     setDrawer(false)

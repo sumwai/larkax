@@ -197,6 +197,8 @@ export const en: Record<MessageKey, string> = {
   'usage.presetToday': 'Today',
   'usage.from': 'Start date',
   'usage.to': 'End date',
+  'usage.fromLabel': 'Start date: {date}',
+  'usage.toLabel': 'End date: {date}',
   'usage.rangeTooLong': 'A custom range is at most 366 days.',
   'usage.rangeInvalid': 'The start date cannot be after the end date.',
   'usage.summaryRequests': 'Requests',

@@ -66,6 +66,13 @@ describe('日期范围选择器', () => {
     expect(screen.getByRole('button', { name: '结束日期：2026-10-15' })).toBeInTheDocument()
   })
 
+  it('英文下可及名用 ASCII 冒号，与中文的「：」各走各的键', () => {
+    localStorage.setItem('larkax.lang', 'en')
+    renderPicker()
+    expect(screen.getByRole('button', { name: 'Start date: 2026-10-09' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'End date: 2026-10-15' })).toBeInTheDocument()
+  })
+
   it('窄屏下起止各占一行，日期串不折行', () => {
     const block = mediaBlock('(max-width: 519.98px)')
     // 两行：容器竖排，原来那个「至」的分隔符不再占位。

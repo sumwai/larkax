@@ -180,6 +180,25 @@ export type SheetSize = keyof typeof SHEET_SIZES
 /** 往下拖过这个距离才关，免得手抖碰一下就把正在填的表单关掉。 */
 const SHEET_DISMISS_PX = 96
 
+/**
+ * 弹层里能接住 Tab 的元素。`[hidden]` 里的（比如 Tabs 未选中的面板）与
+ * `inert` 子树要排掉：它们拿不到焦点，算进来会让循环落在一个看不见的元素上。
+ */
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',')
+
+function focusableIn(root: HTMLElement): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(
+    (element) => !element.closest('[hidden], [inert]'),
+  )
+}
+
 export function Modal({
   title,
   description,
@@ -234,7 +253,32 @@ export function Modal({
     const bodyOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closeRef.current()
+      if (event.key === 'Escape') {
+        closeRef.current()
+        return
+      }
+      if (event.key !== 'Tab') return
+      // `aria-modal` 只告诉读屏「背景不用读」，拦不住浏览器把焦点 Tab 到遮罩
+      // 后面。首尾两个可聚焦元素处自己绕回来，焦点才真的留在面板里。
+      const dialog = dialogRef.current
+      if (!dialog) return
+      const items = focusableIn(dialog)
+      if (items.length === 0) {
+        event.preventDefault()
+        dialog.focus()
+        return
+      }
+      const first = items[0]
+      const last = items[items.length - 1]
+      const active = document.activeElement
+      const inside = active instanceof Node && dialog.contains(active)
+      if (event.shiftKey && (!inside || active === first || active === dialog)) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && (!inside || active === last)) {
+        event.preventDefault()
+        first.focus()
+      }
     }
     document.addEventListener('keydown', onKey)
     return () => {
@@ -298,6 +342,12 @@ export function Modal({
               if (dragStart.current === null) return
               dragStart.current = null
               if (dragYRef.current >= SHEET_DISMISS_PX) closeRef.current()
+              setDragY(0)
+            }}
+            // 指针被系统收走（来电、切到别的应用、系统手势）时不会有 pointerup：
+            // 不复位的话弹层会停在一半的位置，过渡也一并丢掉。
+            onPointerCancel={() => {
+              dragStart.current = null
               setDragY(0)
             }}
           >

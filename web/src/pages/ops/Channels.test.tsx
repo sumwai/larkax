@@ -289,7 +289,7 @@ describe('运营渠道页：窄屏卡片', () => {
       expect(card).toHaveTextContent('https://api.example.com/anthropic')
       expect(card).toHaveTextContent('anthropic')
       expect(card).toHaveTextContent('1 个')
-      expect(card).toHaveTextContent('启用')
+      expect(card).toHaveTextContent('已启用')
       // 两套清单不能同时进 DOM：读屏会把同一份数据读两遍。
       expect(screen.queryAllByRole('columnheader')).toHaveLength(0)
       expect(screen.queryAllByRole('table')).toHaveLength(0)

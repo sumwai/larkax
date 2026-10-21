@@ -41,7 +41,7 @@ export const zh = {
 
   'status.active': '运行中',
   'status.disabled': '已停用',
-  'status.enabled': '启用',
+  'status.enabled': '已启用',
   'status.revoked': '已吊销',
   'status.pending': '处理中',
   'status.ok': '成功',
@@ -189,6 +189,8 @@ export const zh = {
   'usage.presetToday': '今天',
   'usage.from': '开始日期',
   'usage.to': '结束日期',
+  'usage.fromLabel': '开始日期：{date}',
+  'usage.toLabel': '结束日期：{date}',
   'usage.rangeTooLong': '自定义区间最多 366 天。',
   'usage.rangeInvalid': '开始日期不能晚于结束日期。',
   'usage.summaryRequests': '请求数',

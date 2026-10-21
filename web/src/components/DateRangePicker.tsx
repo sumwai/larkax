@@ -153,7 +153,7 @@ export function DateRangePicker({ from, to, onChange }: DateRangePickerProps) {
           className="dr"
           aria-haspopup="dialog"
           aria-expanded={open}
-          aria-label={`${t('usage.from')}：${rangeStart}`}
+          aria-label={t('usage.fromLabel', { date: rangeStart })}
           onClick={() => {
             setOpen((previous) => !previous)
             setPending(null)
@@ -168,7 +168,7 @@ export function DateRangePicker({ from, to, onChange }: DateRangePickerProps) {
         <button
           type="button"
           className="dr"
-          aria-label={`${t('usage.to')}：${rangeEnd}`}
+          aria-label={t('usage.toLabel', { date: rangeEnd })}
           onClick={() => {
             setOpen((previous) => !previous)
             setPending(null)

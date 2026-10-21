@@ -394,6 +394,16 @@ describe('AppShell 底部 tab', () => {
     }
   })
 
+  it('管理员进商家视图时，底栏换成他能进的那四页，当前项不落空', async () => {
+    const { unmount } = await renderShell('admin', '/app/merchant/models')
+    expect(tabLabels()).toEqual(['概览', '模型', '上游', '用量'])
+    expect(within(bottomNav()).getByRole('link', { name: '模型' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    )
+    unmount()
+  })
+
   it('当前项的文字本身在，可及名不是空图标', async () => {
     await renderShell('user', '/app/keys')
     const current = within(bottomNav()).getByRole('link', { name: 'API 密钥' })
