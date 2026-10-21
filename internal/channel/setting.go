@@ -19,7 +19,8 @@ const (
 	// 形状 {"none": "off"}：左边的键是我们内部的规范取值，右边的值是该
 	// 渠道认的写法；映射到空字符串表示这个字段整条不出现在出站报文里。
 	//
-	// 由 openai 适配器读（见 internal/channel/openaiadapter/setting.go）。
+	// 由 openai 与 openai-responses 两个适配器读，翻译共用
+	// ReasoningEffortDialect（见 reasoning_effort.go）。
 	SettingKeyReasoningEffortMap SettingKey = "reasoning_effort_map"
 )
 
@@ -30,11 +31,10 @@ const (
 // 类型名与协议名不一致的适配器，所以这里按 Protocol 做键与按 type 做键是
 // 同一件事。
 //
-// 为什么是这张静态表，而不是 Adapter 接口上再加一个方法：管理面要在**不装配
-// 适配器**的情况下回答这个问题。`channel list` 只读库，构造注册表要靠
-// upstream 把四个适配器装进去；某个进程漏了那一步时，接口方法给出的是一张
-// 空表，而空表的含义恰好是「所有键都没有读者」——提示会与真相相反，且没有
-// 任何东西会报错。静态表不依赖装配顺序，漏一行的后果由用例兜住，见
+// 为什么是这张静态表，而不是 Adapter 接口上再加一个方法：管理面回答这个问题
+// 时并不需要装配适配器。`channel list` 只读库；把「哪些键有读者」挂到注册表
+// 上，答案就跟着进程有没有装配走——没装配时拿到的是「没法回答」，调用方要为
+// 这种情形另写一条处置。静态表不依赖装配顺序，漏一行的后果由用例兜住，见
 // TestSettingTypesCoverEveryProtocol。
 //
 // 加一个键只有两处：上面加常量，这里加一行。**适配器那一侧要真的读它**，
@@ -49,7 +49,7 @@ const (
 var settingKeysByType = map[Protocol][]SettingKey{
 	ProtocolOpenAI:          {SettingKeyReasoningEffortMap},
 	ProtocolAnthropic:       nil,
-	ProtocolOpenAIResponses: nil,
+	ProtocolOpenAIResponses: {SettingKeyReasoningEffortMap},
 	ProtocolSystemOne:       nil,
 }
 
@@ -87,11 +87,11 @@ func unreadSettingKeys(channelType string, setting map[string]any) []string {
 // 现在判据落在「这条渠道的这个键」上：键是否有人读，取决于渠道的 type 指向
 // 哪个适配器，而这张对应关系是本包的 settingKeysByType。
 //
-// # 措辞里给出下一步
+// # 措辞里说明两种可能
 //
-// 只说「不支持」不够：键归适配器解释，所以「什么时候生效」有确定的答案
-// （该 type 的适配器实现它的时候），这也解释了为什么写进去的值不该被当成
-// 配置错误——连库摘掉它反而是错的。
+// 「没有读者」有两个来源：键名拼错了，或者该 type 的适配器还没接这个键。
+// 只写「不支持」的话，前一种人会去等一个永远不会来的实现。两种情况下配置
+// 都不会被拒绝、也不会被改写——它只是不影响请求路径。
 //
 // 管理人面有两处会打它：写入成功之后（`channel create` / `update`）与
 // `channel list` 的记号。两处用的是同一句话——各写一份的话，一处改了一处
@@ -105,7 +105,7 @@ func SettingUnreadNote(channelType string, setting map[string]any) string {
 	for _, key := range unknown {
 		quoted = append(quoted, "「"+key+"」")
 	}
-	return "键 " + strings.Join(quoted, "、") + " 对 type=" + channelType +
-		" 的渠道没有读者，这次配置不会影响请求路径" +
-		"（键由该 type 的适配器解释，要等它实现这个键才会生效）"
+	return "键" + strings.Join(quoted, "、") + "对 type=" + channelType +
+		" 的渠道没有读者——要么键名拼错了，要么该 type 的适配器还没接这个键，" +
+		"两种情况都不会影响请求路径"
 }

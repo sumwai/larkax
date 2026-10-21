@@ -146,13 +146,13 @@ sync-models 从上游拉一次这条渠道的模型清单并落库，需要主�
 没有这个模型、或者那一项没配过时不拦。
 --setting 是渠道私有配置（自由形态的 JSON 对象），键由该渠道 type 指向的
 适配器解释，选路层不认，管理面也不校验键名。今天只有一个键有读者：
-reasoning_effort_map，由 openai 适配器读——它把 reasoning_effort 的取值翻成
-该渠道认的写法（映射到空字符串表示把这个字段从出站报文里去掉，表里没有的
-取值照原样发）。例如只认 off 的上游这样写：
+reasoning_effort_map，由 openai 与 openai-responses 两个适配器读——它把
+reasoning_effort 的取值翻成该渠道认的写法（映射到空字符串表示把这个字段从
+出站报文里去掉，表里没有的取值照原样发）。例如只认 off 的上游这样写：
   {"reasoning_effort_map":{"none":"off"}}
 要剔掉这个字段就写成 {"reasoning_effort_map":{"none":""}}。
-其它键写进去不报错，也不会生效；**这条渠道的 type 不认的键**（拼错的、别的
-type 的）在 create / update 成功之后会逐个点名打到 stderr 上，channel list
+写进去的键这条渠道的 type 不认时（拼错的、别的 type 的），照样不报错、
+不挡写入，但 create / update 成功之后会逐个点名打到 stderr 上，channel list
 也把这样的渠道点出来。
 
 **选项的旧名仍可用**：--owner 等同于 --user。它保留是为了不让已经在跑的脚本

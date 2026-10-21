@@ -24,9 +24,8 @@ const reasoningEffortMapKey = string(SettingKeyReasoningEffortMap)
 //   - 请求本来就没带这个参数时不去查表：映射表只翻译已有的取值，不该
 //     凭空给一条没要求过推理的请求加上这个字段；
 //   - 表或其中某一项形状不对时按「没有这一项」处理，不报错也不 panic。
-//     setting 本来就不做键名校验（见 Channel.Setting），写错的
-//     值静默不生效，与拼错键名是同一种结果；而一项写坏不该让整条渠道的
-//     请求都发不出去。
+//     setting 的键名由管理面负责点名（见 SettingUnreadNote），值的形状没有
+//     人判：写错的值静默不生效，而一项写坏不该让整条渠道的请求都发不出去。
 func ReasoningEffortDialect(setting map[string]any, effort string) string {
 	if effort == "" {
 		return ""

@@ -12,75 +12,190 @@ import (
 	"testing"
 )
 
-// settingAdapterDirs 是「渠道类型 → 实现它的适配器目录」，相对本包目录。
+// settingReaderDirs 是「渠道类型 → 可能读它 setting 的目录」，相对本包目录。
+//
+// 除了实现这个类型的适配器目录，还要算上本包（"."）：协议翻译里共用的那部分
+// 放在 internal/channel，两个适配器调同一个函数，读键的下标就在那种函数里
+// （见 reasoning_effort.go）。只列适配器目录的话，读者搬进本包之后这条判据
+// 就再也扫不到它——表现恰好是「声明没有人核对」。本包里 `for key := range
+// setting` 之类的遍历不算读者：只有按下标取某个键才是。
 //
 // 这张表只属于用例：生产代码按 settingKeysByType 回答「这个 type 认哪些键」，
 // 不需要知道哪个目录是实现。正因为它是一份手写的对应关系，用例先把它自己
-// 核对一遍——每个目录里必须有一个 `const Type = "<类型>"`，否则下面所有扫描
-// 都扫错了地方，而扫错地方的输出与「干净」长得一样（LESSONS.md 第 16 条）。
-var settingAdapterDirs = map[Protocol]string{
-	ProtocolOpenAI:          "openaiadapter",
-	ProtocolAnthropic:       "anthropicadapter",
-	ProtocolOpenAIResponses: "responsesadapter",
-	ProtocolSystemOne:       "systemoneadapter",
+// 核对一遍——每个适配器目录里必须有一个 `const Type = "<类型>"`，否则下面
+// 所有扫描都扫错了地方，而扫错地方的输出与「干净」长得一样（LESSONS.md
+// 第 16 条）。
+var settingReaderDirs = map[Protocol][]string{
+	ProtocolOpenAI:          {".", "openaiadapter"},
+	ProtocolAnthropic:       {"anthropicadapter"},
+	ProtocolOpenAIResponses: {".", "responsesadapter"},
+	ProtocolSystemOne:       {"systemoneadapter"},
 }
 
-// TestSettingKeysMatchAdapterReaders 检查「表里声明的键」与「适配器真读的键」
+// TestSettingKeysMatchAdapterReaders 检查「表里声明的键」与「代码真读的键」
 // 是同一组。两个方向都要查，缺一个方向就会留下一类静默的错：
 //
-//   - 表里声明了而适配器没读：管理面替一条写进去也不生效的配置作保，使用者
+//   - 表里声明了而没人读：管理面替一条写进去也不生效的配置作保，使用者
 //     不会再看到任何提示；
-//   - 适配器读了而表里没写：一个真的生效的键被提示成「没有读者」，使用者照着
+//   - 有人读了而表里没写：一个真的生效的键被提示成「没有读者」，使用者照着
 //     提示把它删掉，请求路径的行为就变了。
 //
-// 判法：扫适配器源码（注释不算——注释里写着键名，但它不读），把「表里的键」
-// 与「代码里按 setting 取值的键」两边各求出来，逐一比对。适配器取值必须走
-// channel.SettingKey* 常量或与之相同的字面量：换一种写法（变量、函数返回值）
-// 会让这条用例判不出来，所以它直接失败并要求把写法改成可核对的那种。
+// 判法：扫读者目录的源码（注释不算——注释里写着键名，但它不读），把「表里
+// 的键」与「代码里按 setting 取值的键」两边各求出来，逐一比对。读者必须按
+// 下标取键，或者引用能追到底的常量：`var _ = channel.SettingKey*` 这种
+// 不读的引用骗不过这条用例，因为反过来查的是下标集合。
 func TestSettingKeysMatchAdapterReaders(t *testing.T) {
 	channelConsts := readSettingKeyConsts(t)
 	if len(channelConsts) == 0 {
 		t.Fatal("本包一个 SettingKey 常量都没扫到：这条判据等于没跑")
 	}
 
-	// 一、每个声明过的类型都要能对上目录，且目录里真的读那个键。
-	if len(settingKeysByType) == 0 {
-		t.Fatal("settingKeysByType 是空的：这条判据等于没跑")
+	if len(settingReaderDirs) == 0 {
+		t.Fatal("settingReaderDirs 是空的：这条判据等于没跑")
 	}
-	for protocol, keys := range settingKeysByType {
-		dir, ok := settingAdapterDirs[protocol]
-		if !ok {
-			t.Fatalf("类型 %q 在用例的目录表里没有对应项，扫描无从下手", protocol)
+	// 表里多出一个类型而没有对应的读者目录时，下面根本不会遍历到它。
+	for protocol := range settingKeysByType {
+		if _, ok := settingReaderDirs[protocol]; !ok {
+			t.Fatalf("表里有类型 %q，settingReaderDirs 里却没有它的读者目录："+
+				"这个类型的声明没有任何东西核对", protocol)
 		}
-		files, fset := parseAdapterDir(t, dir)
-		if !dirDeclaresType(t, files, protocol) {
-			t.Fatalf("%s 里没有 `const Type = %q`：目录与对应用例里的表对不上，"+
-				"下面扫到的东西不属于类型 %q", dir, protocol, protocol)
-		}
+	}
 
-		referenced := adapterSettingIndexKeys(t, files, fset, channelConsts)
-		for _, key := range keys {
-			name, ok := constNameOf(channelConsts, string(key))
-			if !ok {
-				t.Errorf("表里声明了 %q，但本包没有这个取值的 SettingKey 常量："+
-					"适配器无法引用它，两个值也就无法被证明是同一个", key)
+	for protocol, dirs := range settingReaderDirs {
+		// 表里漏了这一行时 keys 为 nil，反方向那一格会红——这正是「漏写
+		// 一行表就能被发现」的那条路。
+		keys := settingKeysByType[protocol]
+		var adapterFiles []*ast.File
+		var adapterKeys, sharedKeys []string
+		var sharedFiles []*ast.File
+		var sharedFset *token.FileSet
+		for _, dir := range dirs {
+			files, fset := parseAdapterDir(t, dir)
+			keysHere := adapterSettingIndexKeys(t, files, fset, channelConsts)
+			if dir == "." {
+				sharedFiles, sharedFset = files, fset
+				sharedKeys = append(sharedKeys, keysHere...)
 				continue
 			}
-			if !referencesChannelConst(files, name) {
-				t.Errorf("表里声明类型 %q 认 %q（%s），但 %s 的源码里没有引用 "+
-					"channel.%s，也没有等值的字面量：声明可能在替一条不会生效的配置作保",
-					protocol, key, name, dir, name)
+			if !dirDeclaresType(t, files, protocol) {
+				t.Fatalf("%s 里没有 `const Type = %q`：目录与对应用例里的表对不上，"+
+					"下面扫到的东西不属于类型 %q", dir, protocol, protocol)
 			}
+			adapterFiles = append(adapterFiles, files...)
+			adapterKeys = append(adapterKeys, keysHere...)
 		}
-		// 三、反方向：适配器按 setting 取的每个键都得是这张表为它声明的。
+		if sharedFiles != nil && len(adapterFiles) == 0 {
+			t.Fatalf("类型 %q 的读者目录只有 \".\"：共存实现算给了谁？"+
+				"这里至少要有一个适配器目录来承接它", protocol)
+		}
+		referenced := append(append([]string{}, adapterKeys...), sharedKeys...)
+		sharedFuncs := sharedReaderFuncs(t, sharedFiles, sharedFset, channelConsts)
+
+		// 一、表里声明的每个键都得有人按它取过值，而且取它的那条路要能
+		// 从本类型的适配器走到：适配器自己取，或者调用本包里取它的函数。
+		// 只看「本包里有人读了」不够——共用函数留在那里、适配器不再调它时，
+		// 声明会继续替一条已经断掉的配置作保。
+		for _, key := range keys {
+			if _, ok := constNameOf(channelConsts, string(key)); !ok {
+				t.Errorf("表里声明了 %q，但本包没有这个取值的 SettingKey 常量："+
+					"代码无法引用它，两个值也就无法被证明是同一个", key)
+				continue
+			}
+			if slices.Contains(adapterKeys, string(key)) {
+				continue
+			}
+			if callsSharedReader(adapterFiles, sharedFuncs, string(key)) {
+				continue
+			}
+			t.Errorf("表里声明类型 %q 认 %q，但读者目录 %v 里没有一条从适配器走到"+
+				"它的读法：适配器既没按它取值，也没调用本包里取它的函数",
+				protocol, key, dirs)
+		}
+		// 二、反方向：读者目录里按 setting 取的每个键都得是这张表为它声明的。
 		for _, key := range referenced {
 			if !slices.Contains(keys, SettingKey(key)) {
-				t.Errorf("%s 读了 setting 键 %q，但表里没有把它声明给类型 %q："+
-					"管理面会提示使用者这个键没有读者，而它其实生效",
-					dir, key, protocol)
+				t.Errorf("读者目录 %v 里的代码读了 setting 键 %q，但表里没有把它"+
+					"声明给类型 %q：管理面会提示使用者这个键没有读者，而它其实生效",
+					dirs, key, protocol)
 			}
 		}
 	}
+}
+
+// sharedReaderFuncs 找出本包里「函数体按下标取过 setting 键」的函数，返回
+// 函数名 → 它取过的键。
+//
+// 它用来把「共用实现读了某个键」接到「这个类型的适配器调用了它」上：
+// 两个适配器共用 ReasoningEffortDialect（见 reasoning_effort.go），只看本包
+// 目录里有下标，分不出这条读法服务哪个 type。
+func sharedReaderFuncs(
+	t *testing.T, files []*ast.File, fset *token.FileSet, channelConsts map[string]string,
+) map[string][]string {
+	t.Helper()
+	if files == nil {
+		return nil
+	}
+	consts := dirConsts(t, files)
+	out := map[string][]string{}
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				index, ok := node.(*ast.IndexExpr)
+				if !ok || !indexesSetting(index.X) {
+					return true
+				}
+				key, ok := resolveKeyExpr(t, index.Index, consts, channelConsts, 0)
+				if !ok {
+					pos := fset.Position(index.Pos())
+					t.Fatalf("%s:%d 按 setting 取了键，但用例追不出它是什么键："+
+						"请写成字符串字面量或引用 SettingKey* 常量", pos.Filename, pos.Line)
+				}
+				out[fn.Name.Name] = append(out[fn.Name.Name], key)
+				return true
+			})
+		}
+	}
+	return out
+}
+
+// callsSharedReader 判断适配器有没有调用「取过这个键」的共用函数。
+func callsSharedReader(adapterFiles []*ast.File, sharedFuncs map[string][]string, key string) bool {
+	for name, keys := range sharedFuncs {
+		if !slices.Contains(keys, key) {
+			continue
+		}
+		if selectsChannelFunc(adapterFiles, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// selectsChannelFunc reports whether any file selects `channel.<name>`.
+func selectsChannelFunc(files []*ast.File, name string) bool {
+	found := false
+	for _, file := range files {
+		ast.Inspect(file, func(node ast.Node) bool {
+			if found {
+				return false
+			}
+			sel, ok := node.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			pkg, ok := sel.X.(*ast.Ident)
+			if ok && pkg.Name == "channel" && sel.Sel.Name == name {
+				found = true
+				return false
+			}
+			return true
+		})
+	}
+	return found
 }
 
 // TestSettingKeysMissingFromTable 堵住「加了常量、忘了加表」这一格。
@@ -255,9 +370,9 @@ func TestSettingUnreadNotePerType(t *testing.T) {
 			if !slices.Contains(tc.want, known) && strings.Contains(note, "「"+known+"」") {
 				t.Errorf("提示把有读者的键 %q 也点成了没有读者：%s", known, note)
 			}
-			// 一句话里要有渠道类型与下一步：只说「不支持」的话，使用者不知道
-			// 换成哪个 type 才有用，也不知道该等什么。
-			for _, want := range []string{"type=" + tc.typ, "不会影响请求路径", "生效"} {
+			// 一句话里要有渠道类型与两种可能的原因：只说「不支持」的话，
+			// 拼错键名的人会以为等某个适配器实现就好了。
+			for _, want := range []string{"type=" + tc.typ, "不会影响请求路径", "拼错", "还没接"} {
 				if !strings.Contains(note, want) {
 					t.Errorf("提示里没有 %q：%s", want, note)
 				}
@@ -370,30 +485,7 @@ func dirDeclaresType(t *testing.T, files []*ast.File, protocol Protocol) bool {
 	return false
 }
 
-// referencesChannelConst reports whether any file selects `channel.<name>`.
-func referencesChannelConst(files []*ast.File, name string) bool {
-	found := false
-	for _, file := range files {
-		ast.Inspect(file, func(node ast.Node) bool {
-			if found {
-				return false
-			}
-			sel, ok := node.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if ok && pkg.Name == "channel" && sel.Sel.Name == name {
-				found = true
-				return false
-			}
-			return true
-		})
-	}
-	return found
-}
-
-// adapterSettingIndexKeys 找出适配器按 setting 取值的那些键。
+// adapterSettingIndexKeys 找出代码里按 setting 取值的那些键。
 //
 // 认的形状：`setting[...]`、`Setting[...]` 与 `x.Setting[...]` 三种下标
 // 表达式。下标必须是字符串字面量，或者能追到底的包级常量——追不到就判失败，
@@ -429,8 +521,8 @@ func adapterSettingIndexKeys(
 func indexesSetting(expr ast.Expr) bool {
 	switch e := expr.(type) {
 	case *ast.Ident:
-		// 适配器里的统一写法是给 setting 一个局部名字再取键
-		// （见 openaiadapter 的 reasoningEffortDialect）。
+		// 翻译函数把 setting 收成同名参数再取键
+		// （见 reasoning_effort.go 的 ReasoningEffortDialect）。
 		return e.Name == "setting" || e.Name == "Setting"
 	case *ast.SelectorExpr:
 		return e.Sel.Name == "Setting"
@@ -438,7 +530,7 @@ func indexesSetting(expr ast.Expr) bool {
 	return false
 }
 
-// dirConsts 收集一个适配器包里的包级常量（能静态求出来的那些）。
+// dirConsts 收集一个目录里的包级常量（能静态求出来的那些）。
 func dirConsts(t *testing.T, files []*ast.File) map[string]ast.Expr {
 	t.Helper()
 	out := map[string]ast.Expr{}

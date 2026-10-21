@@ -312,14 +312,13 @@ DEL，换行、制表符、ESC 都在其中）：换行会把一栏折成两行�
 
 `--setting` 是渠道私有配置（自由形态的 JSON 对象），键由该渠道 `type` 指向的
 适配器解释，选路层不认，管理面也不校验键名。**今天只有一个键有读者**：
-`reasoning_effort_map`，由 `openai` 适配器读——它把 `reasoning_effort` 的取值
-翻成该渠道认的写法（映射到空字符串表示把这个字段从出站报文里去掉，表里没有的
-取值照原样发）。例如只认 `off` 的上游，写
+`reasoning_effort_map`，由 `openai` 与 `openai-responses` 两个适配器读——它把
+`reasoning_effort` 的取值翻成该渠道认的写法（映射到空字符串表示把这个字段从
+出站报文里去掉，表里没有的取值照原样发）。例如只认 `off` 的上游，写
 `{"reasoning_effort_map":{"none":"off"}}`；要剔掉这个字段，写成
-`{"reasoning_effort_map":{"none":""}}`。其它键写进去不报错，也不会生效；
-**这条渠道的 `type` 不认的键**（拼错的、别的 `type` 的）在 `create` /
-`update` 成功之后会逐个点名打到 stderr 上，`channel list` 也把这样的渠道
-点出来。
+`{"reasoning_effort_map":{"none":""}}`。写进去的键这条渠道的 `type` 不认时
+（拼错的、别的 `type` 的），照样不报错、不挡写入，但 `create` / `update` 成功
+之后会逐个点名打到 stderr 上，`channel list` 也把这样的渠道点出来。
 
 `--channel` 不存在、`--type` / `--base-url` / `--model` 也都不开简写：这条命令上
 挑错的是「凭证写给哪条渠道」，而 `-c` 这类单字母在别的命令行里既可能是 `channel`

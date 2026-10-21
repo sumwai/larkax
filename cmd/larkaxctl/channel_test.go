@@ -599,6 +599,13 @@ func TestChannelSettingNoteJudgesByType(t *testing.T) {
 			setting: knownSetting,
 		},
 		{
+			// 第二个读者：两个适配器共用同一个翻译函数。对一条已经生效的
+			// 配置说「没有读者」，比不说更坏——使用者会照着把它删掉。
+			name:    "openai-responses 也认这个键",
+			typ:     "openai-responses",
+			setting: knownSetting,
+		},
+		{
 			name:     "别的 type 的键",
 			typ:      "anthropic",
 			setting:  knownSetting,
