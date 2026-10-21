@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,14 +26,13 @@ const priceShortUsage = `larkaxctl price 管理计价规则。
 
 用法：
   larkaxctl price create --scope <platform|merchant|channel> --name <规则名>
-                         --expr '<表达式>' --by <ID 或用户名> [--priority <…>] [--models <…>]
+                         (--expr '<表达式>' | --schedule-file <文件>) --by <ID 或用户名>
   larkaxctl price list
+  larkaxctl price show <规则 ID>
   larkaxctl price update --id <规则 ID> --by <ID 或用户名> [与 create 相同的字段]
-  larkaxctl price enable <规则 ID>
-  larkaxctl price disable <规则 ID>
+  larkaxctl price enable <规则 ID> | price disable <规则 ID>
   larkaxctl price explain --model <规范模型名> [--user <ID 或用户名>] [--at <…>]
-  larkaxctl price calendar import <文件>
-  larkaxctl price calendar list
+  larkaxctl price calendar import <文件> | price calendar list
 
 作用域决定哪两栏 id 有效；五个计价项（prompt、completion、cache_read、
 cache_write、reasoning）在规则里缺一个，用到它的请求就会整个失败。
@@ -45,17 +45,21 @@ cache_write、reasoning）在规则里缺一个，用到它的请求就会整个
 const priceUsage = `larkaxctl price 管理计价规则。
 
 用法：
-  larkaxctl price create --scope <platform|merchant|channel> --name <规则名> --expr '<表达式>'
+  larkaxctl price create --scope <platform|merchant|channel> --name <规则名>
+                         (--expr '<表达式>' | --schedule-file <文件>)
                          --by <用户 ID 或用户名>
                          [--user <用户 ID 或用户名>] [--channel <渠道 ID>]
                          [--models <规范模型名,...>] [--priority <优先级>]
                          [--effective-from <RFC3339>] [--effective-to <RFC3339>]
                          [--disabled]
   larkaxctl price list
+  larkaxctl price show <规则 ID>
   larkaxctl price update --id <规则 ID> --by <用户 ID 或用户名>
                          [--scope <platform|merchant|channel>] [--name <规则名>]
                          [--user <用户 ID 或用户名>] [--channel <渠道 ID>]
-                         [--models <规范模型名,...>] [--expr '<表达式>']
+                         [--models <规范模型名,...>]
+                         [--expr '<表达式>' | --schedule-file <文件>]
+                         [--clear-schedule]
                          [--priority <优先级>] [--effective-from <RFC3339>]
                          [--effective-to <RFC3339>] [--clear-effective-to]
   larkaxctl price enable <规则 ID>
@@ -82,6 +86,18 @@ changed_by（这一版是谁改的，只在表达式真的变了、留了一版�
 不支持通配符——带 * 或 ? 的名字会被拒绝。
 
 表达式在写入前会编译一次，编译不过的命令直接失败。
+
+结构化定价表用 --schedule-file 给一份 JSON：base 是兜底单价，overrides 按
+weekdays / window / day_kind / holidays / min_prompt_tokens 分行改写单价，
+跨维度的两条用 position 裁决（大的优先）。--expr 与 --schedule-file 二选一：
+给了表时表达式由它编译得出，读取与求值仍然走表达式那一份。
+
+表里有 day_kind 或 holidays 时，实例必须接着日历，否则保存会被拒绝：日历
+没有数据时整笔计价失败，不回落到底价。price show 对带表的规则打那张表，
+对手写表达式的规则打源码。
+
+带表的规则要改成手写表达式，必须同时给 --clear-schedule：库里存的是表编译
+出来的那一份，直接换源码会让表与实际价格分家。
 
 计价项一共五个：prompt、completion、cache_read、cache_write、reasoning。
 上游报了哪一项，规则里就必须有哪一项的单价——少一项不是少收，是这次请求整个
@@ -148,6 +164,8 @@ func runPrice(args []string) error {
 		return runPriceCreate(rest)
 	case "list":
 		return runPriceList(rest)
+	case "show":
+		return runPriceShow(rest)
 	case "update":
 		return runPriceUpdate(rest)
 	case "enable":
@@ -177,6 +195,13 @@ func runPriceCreate(args []string) error {
 	req, refs, err := parsePriceCreate(args)
 	if err != nil {
 		return usageErr(err)
+	}
+	if refs.scheduleFile != "" {
+		sched, schedErr := readScheduleFile(refs.scheduleFile)
+		if schedErr != nil {
+			return schedErr
+		}
+		req.Schedule = sched
 	}
 
 	cfg, err := config.LoadOps()
@@ -224,6 +249,11 @@ type priceRefs struct {
 	owner string
 	// by 是 --by：这一次是谁做的。必填，所以走完参数解析之后它一定非空。
 	by string
+	// scheduleFile 是 --schedule-file 的路径原文。空串表示没给。
+	//
+	// 文件在连库之前读：读不出来时不该先建立一次连接，而失败信息里要带
+	// 文件路径，留给命令那一层拼。
+	scheduleFile string
 }
 
 // parsePriceCreate 解析 create 的参数。
@@ -237,6 +267,7 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 	scope := fs.String("scope", "", "")
 	name := fs.String("name", "", "")
 	expression := fs.String("expr", "", "")
+	scheduleFile := fs.String("schedule-file", "", "")
 	owner := legacyStringFlag(fs, "user", "owner", "")
 	stringAlias(fs, owner, "u")
 	channelID := fs.Int64("channel", 0, "渠道 ID，channel 作用域必填")
@@ -270,8 +301,15 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 	if err := checkDisplayList("--models", splitOptionalList(*models)); err != nil {
 		return pricing.CreateRequest{}, priceRefs{}, err
 	}
-	if strings.TrimSpace(*expression) == "" {
-		return pricing.CreateRequest{}, priceRefs{}, errors.New("缺少 --expr")
+	exprGiven := strings.TrimSpace(*expression) != ""
+	scheduleGiven := strings.TrimSpace(*scheduleFile) != ""
+	if exprGiven && scheduleGiven {
+		return pricing.CreateRequest{}, priceRefs{}, errors.New(
+			"--expr 与 --schedule-file 只能给一个：给了定价表时表达式由它编译得出")
+	}
+	if !exprGiven && !scheduleGiven {
+		return pricing.CreateRequest{}, priceRefs{}, errors.New(
+			"缺少 --expr 或 --schedule-file：表达式与结构化定价表二选一")
 	}
 	if strings.TrimSpace(*by) == "" {
 		return pricing.CreateRequest{}, priceRefs{}, errors.New("缺少 --by：这条命令要记下这条价是谁定的")
@@ -307,7 +345,7 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 		enabled := false
 		req.Enabled = &enabled
 	}
-	return req, priceRefs{owner: *owner, by: *by}, nil
+	return req, priceRefs{owner: *owner, by: *by, scheduleFile: *scheduleFile}, nil
 }
 
 func runPriceUpdate(args []string) error {
@@ -318,6 +356,13 @@ func runPriceUpdate(args []string) error {
 	req, refs, err := parsePriceUpdate(args)
 	if err != nil {
 		return usageErr(err)
+	}
+	if refs.scheduleFile != "" {
+		sched, schedErr := readScheduleFile(refs.scheduleFile)
+		if schedErr != nil {
+			return schedErr
+		}
+		req.Schedule = sched
 	}
 
 	cfg, err := config.LoadOps()
@@ -436,6 +481,8 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 	channelID := fs.Int64("channel", 0, "渠道 ID；0 表示改成不挂渠道")
 	models := fs.String("models", "", "")
 	expression := fs.String("expr", "", "")
+	scheduleFile := fs.String("schedule-file", "", "")
+	clearSchedule := fs.Bool("clear-schedule", false, "")
 	priority := fs.Int("priority", 0, "")
 	effectiveFrom := fs.String("effective-from", "", "")
 	stringAlias(fs, effectiveFrom, "from")
@@ -470,6 +517,11 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 			"--clear-effective-to 与 --effective-to 只能给一个：前者是清成不过期，" +
 				"后者是改成某个时刻")
 	}
+	if *clearSchedule && strings.TrimSpace(*scheduleFile) != "" {
+		return pricing.UpdateRequest{}, priceRefs{}, errors.New(
+			"--clear-schedule 与 --schedule-file 只能给一个：前者是清掉已有的表，" +
+				"后者是换成另一张表")
+	}
 	if *channelID < 0 {
 		return pricing.UpdateRequest{}, priceRefs{}, fmt.Errorf(
 			"--channel %d 无效：渠道 ID 从 1 开始，0 表示不挂渠道", *channelID)
@@ -477,6 +529,10 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	if given["expr"] && given["schedule-file"] {
+		return pricing.UpdateRequest{}, priceRefs{}, errors.New(
+			"--expr 与 --schedule-file 只能给一个：给了定价表时表达式由它编译得出")
+	}
 
 	// --user 给了空串就拒，而不是当成 0：它多半是一个没展开的 shell 变量，
 	// 而 0 在这里是有含义的（改成不挂商家）——静默地按 0 处理会把
@@ -522,6 +578,18 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 				"--expr 不能为空（表上那一栏非空）：要停用这条规则用 price disable")
 		}
 		req.Expr = expression
+		changes++
+	}
+	if given["schedule-file"] {
+		if strings.TrimSpace(*scheduleFile) == "" {
+			return pricing.UpdateRequest{}, priceRefs{}, errors.New(
+				"--schedule-file 不能为空：要给定价表就写文件路径")
+		}
+		changes++
+	}
+	// 清表只动结构化那一栏，表达式留在库里（它本来就是表编译出来的结果）。
+	if *clearSchedule {
+		req.ClearSchedule = true
 		changes++
 	}
 	if given["priority"] {
@@ -581,7 +649,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 				"--clear-effective-to 之一（启用或停用规则用 price enable / price disable）")
 	}
 
-	return req, priceRefs{owner: ownerRef, by: *by}, nil
+	return req, priceRefs{owner: ownerRef, by: *by, scheduleFile: *scheduleFile}, nil
 }
 
 // runPriceExplain 回答「这次请求按哪条规则计价」。
@@ -682,6 +750,91 @@ func runPriceList(args []string) error {
 	}
 	printRuleList(humanStdout(), rules)
 	return nil
+}
+
+// readScheduleFile 读一份结构化定价表。
+//
+// 读文件、解析与校验都在连库之前：文件不成立时不该先建立一次连接，而报错
+// 要带路径——不然一个相对路径写错，看到的只是一句「JSON 解析失败」。
+// 校验在这里多跑一遍是有意的：写入路径还会再跑一次，但只有这一次能把
+// 「第几条覆盖」的报错和文件名放在同一句里。
+func readScheduleFile(path string) (*pricing.Schedule, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("读定价表文件 %s 失败: %w", path, err)
+	}
+	schedule, err := pricing.ParseSchedule(data)
+	if err != nil {
+		return nil, fmt.Errorf("定价表文件 %s: %w", path, err)
+	}
+	if _, err := schedule.Validate(); err != nil {
+		return nil, fmt.Errorf("定价表文件 %s: %w", path, err)
+	}
+	return schedule, nil
+}
+
+// runPriceShow 打一条规则的定价依据。
+//
+// 带结构化定价表的规则打那张表：它是可枚举的那一份，也是运维要改的那一份。
+// 手写表达式的规则打源码——没有表可打，源码就是全部。
+func runPriceShow(args []string) error {
+	fs := flag.NewFlagSet("price show", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() != 1 {
+		return usageErr(fmt.Errorf(
+			"show 需要一个规则 ID，得到 %d 个参数：用法 larkaxctl price show <规则 ID>", fs.NArg()))
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(fs.Arg(0)), 10, 64)
+	if err != nil || id <= 0 {
+		return usageErr(fmt.Errorf("show 的规则 ID 必须是正整数，当前为 %q", fs.Arg(0)))
+	}
+
+	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
+		info, err := pricing.NewAdmin(db).Get(ctx, id)
+		if err != nil {
+			return err
+		}
+		if jsonOutput() {
+			return emitJSON(os.Stdout, priceShowDoc(info), nil)
+		}
+		printRuleShow(os.Stdout, info)
+		return nil
+	})
+}
+
+// priceShowDoc 组装 price show 的机器可读输出。
+//
+// expr 与 schedule 都给：表是给人改的那一份，表达式是求值真正用的那一份，
+// 让脚本能同时核对两者（不变式是 schedule 非 null 时 expr 等于它编译的结果）。
+func priceShowDoc(r pricing.RuleInfo) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["rule"] = ruleEntry(r)
+	doc["expr"] = r.Expr
+	doc["schedule"] = r.Schedule
+	return doc
+}
+
+// printRuleShow 打印一条规则的定价依据。
+func printRuleShow(w io.Writer, r pricing.RuleInfo) {
+	_, _ = fmt.Fprintf(w, "规则 %d：%s（作用域=%s，优先级=%d）\n",
+		r.ID, r.Name, r.Scope, r.Priority)
+	if r.Schedule == nil {
+		_, _ = fmt.Fprintln(w, "表达式：")
+		_, _ = fmt.Fprintln(w, r.Expr)
+		return
+	}
+	data, err := json.MarshalIndent(r.Schedule, "", "  ")
+	if err != nil {
+		// 表里只有数值、字符串与布尔，编码不会失败；真失败也不该让
+		// 这条命令打半张表，于是把原因照原样打出来。
+		_, _ = fmt.Fprintf(w, "结构化定价表（编码失败：%v）：\n", err)
+		return
+	}
+	_, _ = fmt.Fprintln(w, "结构化定价表：")
+	_, _ = fmt.Fprintln(w, string(data))
 }
 
 // priceListDoc 组装 price list 的机器可读输出。

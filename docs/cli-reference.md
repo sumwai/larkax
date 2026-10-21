@@ -382,6 +382,33 @@ DEL，换行、制表符、ESC 都在其中）：换行会把一栏折成两行�
 表达式在写入前会编译一次，编译不过的命令直接失败：一条编译不过的规则进了库，表现
 是每个用到它的请求都失败，而失败点在请求路径上。
 
+结构化定价表用 `--schedule-file` 给一份 JSON，与其他旗标一样在连库之前读完并校验。
+`--expr` 与它**二选一**：写入时表会编译成表达式存进同一栏，`price list` 与求值用
+的都是编译结果。
+
+- `tz`：判定用的 IANA 时区名，必填。
+- `base`：兜底单价。键与表达式相同（`prompt`、`completion`、`cache_read`、
+  `cache_write`、`reasoning`、`fixed`、`minimum`），不能为空。
+- `overrides`：覆盖项，每项是「条件 + 单价」。条件从这几个维度里选，一项里写多个
+  维度表示「且」：`weekdays`（`mon` … `sun`，可写多个）、`window`
+  （`HH:MM-HH:MM`，整点边界，可跨零点）、`day_kind`（`work` / `rest`）、
+  `holidays`（节假日名，与 `holidayName()` 的返回值逐字比较）、
+  `min_prompt_tokens`（提示词 token 门槛）。单价只写要改的键，没写的键沿用
+  `base`。
+
+**同一维度上两条覆盖重叠会被拒**——谁赢没有一致的读法。不同维度同时成立时用
+`position` 裁决，大的优先；跨维度的覆盖必须显式给 `position`。
+
+`day_kind` 与 `holidays` 读日历数据：那一年没有导入、或当天查不到记录时求值失败，
+不会退回某一档价（见 [calendar-data.md](calendar-data.md)）。
+
+`price show <规则 ID>` 打一条规则的定价依据：带表的规则打那张表，手写规则的打表达
+式。`-o json` 下两栏都给（`schedule` 与 `expr`），脚本可以核对两者一致。
+
+带表的规则要改成手写表达式，必须同时给 `--clear-schedule`：库里存的是表编译出的那
+条表达式，直接改它会让表与计价两份说法分家。`--clear-schedule` 只清表，表达式留在
+原处；与 `--expr` 一起给就是换成一条手写规则，与 `--schedule-file` 互斥。
+
 计价项一共五个：`prompt`、`completion`、`cache_read`、`cache_write`、
 `reasoning`。上游报了哪一项，规则里就必须有哪一项的单价——少一项不是少收，是这次
 请求整个失败（结算报「用量里有规则未定价的计量项」）。会报缓存的上游很常见，所以
