@@ -17,8 +17,9 @@ go run ./cmd/larkaxctl price calendar import <文件>
 节假日数据源转换而来，或者由运维手工维护。仓库里不带任何真实数据集。
 
 服务启动时把这两张表接到计价环境上（`internal/assembly`），规则里的
-`isWorkday()`、`isHoliday()` 查的就是它。接线本身**不读数据、也不做校验**：
-库里是空的照常启动，见下文「没有数据的那一年会怎样」。
+`isWorkday()`、`isHoliday()`、`holidayName()`、`isMakeupWorkday()` 查的就是它。
+接线本身**不读数据、也不做校验**：库里是空的照常启动，见下文「没有数据的那一年
+会怎样」。
 
 ## 峰谷那一半：规则里写得出，插件里也写得出
 
@@ -172,10 +173,15 @@ isPeak("08:00-12:00,14:00-18:00") ? {"prompt": 2.0} : {"prompt": 1.0}
 那一年在 `calendar_years` 里有没有、状态是什么（`year_pending` 与 `row_missing`
 的含义见下一段）。
 
+结构化定价表（`price create --schedule-file`）里的 `day_kind` 与 `holidays` 编译成
+`isWorkday()` 与「`holidayName()` 且非工作日」，所以它们受同一条约束：那一年的数据不在，按这张
+表计价的请求就失败在求值这一步。
+
 两条边界：
 
 - **没有规则用到日历时，日历缺数据完全无害。** 判断只在规则真的调用
-  `isWorkday()`、`isHoliday()`、`isPeak()` 这些函数时才发生。
+  `isWorkday()`、`isHoliday()`、`holidayName()`、`isMakeupWorkday()`、`isPeak()`
+  这些函数时才发生。
 - **启动时不检查。** 缺数据不会让服务拒绝启动——日历数据是逐年补的，未来年份
   查不到是正常状态。
 

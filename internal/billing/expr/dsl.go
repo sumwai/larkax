@@ -103,8 +103,11 @@ var reservedNames = func() map[string]struct{} {
 // 时间函数的取数方式见 runtime.env 的实现：
 //
 //	hour(tz)             时区只决定「现在几点」，由规则显式给出
+//	weekday(tz)          同上；返回 0=周日 … 6=周六
 //	isWorkday()          地区来自 Env.Region，日历与时区由 Env.Calendar 提供
 //	isHoliday()          同上
+//	isMakeupWorkday()    同上；调休补班的周末是工作日，不是休息日
+//	holidayName()        同上；没有名字的日子返回空串（周末不是节假日）
 //	isPeak("08:00-22:00")  同上，另外**高峰时段也由规则给出**：
 //	                     峰谷是定价口径，与 hour 的时区同一类，所以不由
 //	                     Region 推断——同一地区的两个渠道可以有各自的峰谷
@@ -126,10 +129,27 @@ var funcSchemas = map[string]any{
 	"hour": func(_ string) (int, error) {
 		return 0, nil
 	},
+	// weekday 与 hour 走同一条路径：时区是钟表问题，由规则显式给出。
+	// 返回值是 time.Weekday 的整数形态（0=周日），与 Go 的约定一致——
+	// 换一套「0=周一」会让写规则的人每天数错一天。
+	"weekday": func(_ string) (int, error) {
+		return 0, nil
+	},
 	"isWorkday": func() (bool, error) {
 		return false, nil
 	},
 	"isHoliday": func() (bool, error) {
+		return false, nil
+	},
+	// holidayName 返回节假日名，非节假日为空串。它返回的是字符串：形状检查
+	//（见 walkShape）只管用法变量的位置，把字符串放进单价位置在编译期不被
+	// 拦，求值期才拒绝。所以表生成器只把它用在条件位置（`==` 与 `in`）。
+	"holidayName": func() (string, error) {
+		return "", nil
+	},
+	// isMakeupWorkday 与 isWorkday 分开：调休补班的周末两边的答案不同
+	//（工作日 = true，补班 = true），要按「补班」单独定价时得能把它认出来。
+	"isMakeupWorkday": func() (bool, error) {
 		return false, nil
 	},
 	"isPeak": func(_ string) (bool, error) {
@@ -282,6 +302,15 @@ func (rt *runtime) env(u usageView) map[string]any {
 			}
 			return rt.at.In(loc).Hour(), nil
 		},
+		"weekday": func(tz string) (int, error) {
+			// 与 hour 同一条路径：显式时区、不读墙钟、不查日历。
+			// 返回值用 int，规则里写 `weekday("Asia/Shanghai") in [6, 0]`。
+			loc, err := loadLocation(tz)
+			if err != nil {
+				return 0, err
+			}
+			return int(rt.at.In(loc).Weekday()), nil
+		},
 		"isWorkday": func() (bool, error) {
 			info, err := rt.dayInfo()
 			if err != nil {
@@ -299,6 +328,22 @@ func (rt *runtime) env(u usageView) map[string]any {
 			// 把周末也算成节假日会让两条规则互相覆盖，
 			// 而覆盖顺序只能靠写规则的人记住。
 			return info.HolidayName != "", nil
+		},
+		"holidayName": func() (string, error) {
+			// 与 isHoliday 同一份判定：名字为空就是「不是节假日」，
+			// 不需要另一个布尔把同一件事说两遍。
+			info, err := rt.dayInfo()
+			if err != nil {
+				return "", err
+			}
+			return info.HolidayName, nil
+		},
+		"isMakeupWorkday": func() (bool, error) {
+			info, err := rt.dayInfo()
+			if err != nil {
+				return false, err
+			}
+			return info.MakeupWorkday, nil
 		},
 		"isPeak": func(peakWindows string) (bool, error) {
 			// 窗口、地区、时刻三件事一起交给日历：窗口由**规则**给出，

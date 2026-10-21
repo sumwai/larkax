@@ -650,6 +650,7 @@ type ruleView struct {
 	UpdatedAt     time.Time  `json:"updated_at"`
 	DeclaredKeys  []string   `json:"declared_keys"`
 	ExprErr       string     `json:"expr_error,omitempty"`
+	ScheduleErr   string     `json:"schedule_error,omitempty"`
 }
 
 func ruleViewOf(info pricing.RuleInfo) ruleView {
@@ -672,6 +673,9 @@ func ruleViewOf(info pricing.RuleInfo) ruleView {
 	}
 	if info.ExprErr != nil {
 		view.ExprErr = info.ExprErr.Error()
+	}
+	if info.ScheduleErr != nil {
+		view.ScheduleErr = info.ScheduleErr.Error()
 	}
 	return view
 }

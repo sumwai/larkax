@@ -9,7 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/internal/billing/calendaradapter"
 	"github.com/sumwai/larkax/internal/billing/expr"
+	"github.com/sumwai/larkax/internal/calendar"
+	calendarstore "github.com/sumwai/larkax/internal/calendar/store"
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/textshape"
 )
@@ -59,10 +62,41 @@ var ErrNoChanges = errors.New("没有要改的字段")
 // （见 RuleInfo.DeclaredKeys），求值仍然是 pipeline 那一侧的事。
 type Admin struct {
 	db *sql.DB
+
+	// calendar 是这个实例配到的日历，用来在保存结构化定价表时回答
+	// 「这条规则以后算不算得出价」。
+	//
+	// 它只判**接没接**（nil 与非 nil），不在保存时查某一天的数据：
+	// 未来年份的数据本来就可能还没导入，那是配置节奏而不是规则错误。
+	// 写入路径拿不到日历却存进一条 day_kind/holidays 规则时，第一次计价
+	// 才会以 ErrCalendarRequired 失败，而流式路径上那一失败是一分钱不收。
+	calendar expr.Calendar
 }
 
-// NewAdmin 包装一个已打开的数据库句柄。
-func NewAdmin(db *sql.DB) *Admin { return &Admin{db: db} }
+// NewAdmin 包装一个已打开的数据库句柄，并接上日历。
+//
+// 日历与请求路径用的是同一套实现（calendaradapter），所以「保存时判断
+// 有没有日历」与「计价时能不能算」看的是同一个东西。
+func NewAdmin(db *sql.DB) *Admin {
+	return &Admin{db: db, calendar: calendarOf(db)}
+}
+
+// calendarOf 用数据库构造计价引擎要的日历。
+//
+// 构造本身不查库，失败只可能是「没有数据源」这类编码错误；真失败时
+// 返回 nil，于是需要日历的定价表在保存时被拒——报出来的是「没接日历」，
+// 而不是一条在两处长得不一样的静默行为。
+func calendarOf(db *sql.DB) expr.Calendar {
+	cal, err := calendar.New(calendarstore.NewSource(db))
+	if err != nil {
+		return nil
+	}
+	adapter, err := calendaradapter.New(cal)
+	if err != nil {
+		return nil
+	}
+	return adapter
+}
 
 // CreateRequest 是新建一条计价规则所需的全部字段。
 type CreateRequest struct {
@@ -88,7 +122,16 @@ type CreateRequest struct {
 	ModelPatterns []string
 
 	// Expr 是规则源码。写入前会被编译一次，编译不过就整次拒绝。
+	//
+	// 它与 Schedule 二选一：给了 Schedule 时表达式由表编译得出，调用方
+	// 不该再手写一份——两份同时存在时，库里那一份到底以谁为准没有答案。
 	Expr string
+
+	// Schedule 是结构化定价表。为 nil 表示这条规则手写表达式。
+	//
+	// 非 nil 时 Expr 必须为空：写入路径会把它编译成表达式一起落库，读取
+	// 与求值仍走 Expr，**不新增第二条求值路径**。
+	Schedule *Schedule
 
 	Priority int
 
@@ -129,7 +172,14 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 	if err = validateRule(rule); err != nil {
 		return 0, err
 	}
+	if err = checkScheduleCalendar(rule.Schedule, a.calendar); err != nil {
+		return 0, err
+	}
 	if _, err = expr.Compile(rule.Expr); err != nil {
+		return 0, err
+	}
+	scheduleJSON, err := marshalSchedule(rule.Schedule)
+	if err != nil {
 		return 0, err
 	}
 
@@ -143,12 +193,12 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 	var id int64
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO pricing_rules
-			(scope, owner_user_id, channel_id, name, model_patterns, expr, priority,
+			(scope, owner_user_id, channel_id, name, model_patterns, expr, schedule, priority,
 			 enabled, effective_from, effective_to, created_by)
-		VALUES ($1, $2, $3, $4, to_jsonb($5::text[]), $6, $7, $8, $9, $10, $11)
+		VALUES ($1, $2, $3, $4, to_jsonb($5::text[]), $6, $7::jsonb, $8, $9, $10, $11, $12)
 		RETURNING id`,
 		rule.Scope, nullableID(rule.OwnerUserID), nullableID(rule.ChannelID),
-		rule.Name, rule.ModelPatterns, rule.Expr, rule.Priority,
+		rule.Name, rule.ModelPatterns, rule.Expr, scheduleJSON, rule.Priority,
 		rule.Enabled, rule.EffectiveFrom, nullableTime(rule.EffectiveTo),
 		nullableID(rule.CreatedBy)).Scan(&id)
 	if err != nil {
@@ -173,6 +223,11 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 // 归一化与校验分开：归一化只做「把一个合法值变成库里的写法」（去空白、
 // 零值换成默认），校验判「这个组合是不是读取路径认得的那种」。
 func (req CreateRequest) normalize() (RuleInfo, error) {
+	if req.Schedule != nil && strings.TrimSpace(req.Expr) != "" {
+		return RuleInfo{}, errors.New("表达式与结构化定价表只能给一个：" +
+			"给了定价表时表达式由它编译得出，再手写一份会让库里以谁为准没有答案")
+	}
+
 	name, err := normalizeName(req.Name)
 	if err != nil {
 		return RuleInfo{}, err
@@ -194,19 +249,47 @@ func (req CreateRequest) normalize() (RuleInfo, error) {
 		enabled = *req.Enabled
 	}
 
+	source := req.Expr
+	if req.Schedule != nil {
+		source, err = req.Schedule.Validate()
+		if err != nil {
+			return RuleInfo{}, err
+		}
+	}
+
 	return RuleInfo{
 		Scope:         req.Scope,
 		OwnerUserID:   req.OwnerUserID,
 		ChannelID:     req.ChannelID,
 		Name:          name,
 		ModelPatterns: patterns,
-		Expr:          req.Expr,
+		Expr:          source,
+		Schedule:      req.Schedule,
 		Priority:      req.Priority,
 		EffectiveFrom: from,
 		EffectiveTo:   req.EffectiveTo,
 		Enabled:       enabled,
 		CreatedBy:     req.CreatedBy,
 	}, nil
+}
+
+// checkScheduleCalendar 在保存前拦住「要用日历、但实例没接日历」的定价表。
+//
+// 必须在写入路径判：等到第一次计价才发现时，非流式请求整次 5xx，流式请求
+// 更糟——响应已经在转了，算不出价只留一行日志、随后释放预扣，客户端正常
+// 收完却一分钱不收。日历未知**不回落**到 base，这是既有口径。
+//
+// 只有 calendarOf 构造失败返回 nil 时才会走到这里（见那里的说明），正常部署
+// 上 Admin 由 NewAdmin 构造、总会接上日历。不要把它接到请求路径的日历对象上：
+// 那会给写入路径引入一个随部署变化的判据，而表能不能计价是库的性质，不是
+// 这一台实例的性质。
+func checkScheduleCalendar(s *Schedule, cal expr.Calendar) error {
+	if s == nil || !s.NeedsCalendar() || cal != nil {
+		return nil
+	}
+	return errors.New("这条定价表要用日历（day_kind 或 holidays），但这个实例没有接日历：" +
+		"保存之后每一笔请求都会以「日历不可用」失败，所以这里先拒绝；" +
+		"不需要日历的那几个维度（weekdays、window、min_context_tokens）不受影响")
 }
 
 // UpdateRequest 描述一次修改。
@@ -223,7 +306,21 @@ type UpdateRequest struct {
 	Name          *string
 	ModelPatterns *[]string
 	Expr          *string
-	Priority      *int
+
+	// Schedule 非 nil 时把这条规则改成结构化定价表，表达式由它编译得出。
+	//
+	// 与 Expr 不能同时给：谁为准没有唯一答案。给 Schedule 时 ClearSchedule
+	// 也没有意义（本来就是有表的状态），两者同时给会被拒。
+	Schedule *Schedule
+
+	// ClearSchedule 为 true 时清掉结构化定价表，规则变回手写表达式。
+	//
+	// 单独一个字段的理由与 ClearEffectiveTo 相同：指针表达不了「置空」与
+	// 「不改」。库里那一行的 expr 是表编译出来的，清表不会改 expr——要换价
+	// 就同时给 Expr。
+	ClearSchedule bool
+
+	Priority *int
 
 	// EffectiveFrom 非 nil 时改下界。零值时刻会被拒：那是「公元 1 年」，
 	// 一个没人想要的值，多半是调用方少赋了一次。
@@ -305,6 +402,14 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 		return errors.New("EffectiveTo 与 ClearEffectiveTo 不能同时给：" +
 			"前者是把上界改成某个时刻，后者是清成不过期")
 	}
+	if req.Schedule != nil && req.Expr != nil {
+		return errors.New("表达式与结构化定价表只能给一个：" +
+			"给了定价表时表达式由它编译得出，再手写一份会让库里以谁为准没有答案")
+	}
+	if req.Schedule != nil && req.ClearSchedule {
+		return errors.New("Schedule 与 ClearSchedule 不能同时给：前者是把规则改成定价表，" +
+			"后者是清掉已有的表")
+	}
 	if !req.changesAnything() {
 		return ErrNoChanges
 	}
@@ -328,10 +433,17 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 	if err = validateRule(merged); err != nil {
 		return err
 	}
+	if err = checkScheduleCalendar(merged.Schedule, a.calendar); err != nil {
+		return err
+	}
 	if req.Expr != nil {
 		if _, err = expr.Compile(*req.Expr); err != nil {
 			return err
 		}
+	}
+	scheduleJSON, err := marshalSchedule(merged.Schedule)
+	if err != nil {
+		return err
 	}
 
 	// 整行写回：校验的对象与写入的对象是同一个值。只写改过的列也能对，
@@ -344,12 +456,12 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 	if _, err = tx.ExecContext(ctx, `
 		UPDATE pricing_rules
 		   SET scope = $1, owner_user_id = $2, channel_id = $3, name = $4,
-		       model_patterns = to_jsonb($5::text[]), expr = $6, priority = $7,
-		       enabled = $8, effective_from = $9, effective_to = $10,
+		       model_patterns = to_jsonb($5::text[]), expr = $6, schedule = $7::jsonb,
+		       priority = $8, enabled = $9, effective_from = $10, effective_to = $11,
 		       updated_at = now()
-		 WHERE id = $11`,
+		 WHERE id = $12`,
 		merged.Scope, nullableID(merged.OwnerUserID), nullableID(merged.ChannelID),
-		merged.Name, merged.ModelPatterns, merged.Expr, merged.Priority,
+		merged.Name, merged.ModelPatterns, merged.Expr, scheduleJSON, merged.Priority,
 		merged.Enabled, merged.EffectiveFrom, nullableTime(merged.EffectiveTo),
 		req.ID); err != nil {
 		return fmt.Errorf("修改计价规则失败: %w", err)
@@ -414,6 +526,7 @@ func insertRuleVersion(ctx context.Context, tx *sql.Tx, ruleID int64, expr strin
 func (req UpdateRequest) changesAnything() bool {
 	return req.Scope != nil || req.OwnerUserID != nil || req.ChannelID != nil ||
 		req.Name != nil || req.ModelPatterns != nil || req.Expr != nil ||
+		req.Schedule != nil || req.ClearSchedule ||
 		req.Priority != nil || req.EffectiveFrom != nil || req.EffectiveTo != nil ||
 		req.ClearEffectiveTo || req.Enabled != nil
 }
@@ -439,8 +552,27 @@ func (req UpdateRequest) applyTo(cur RuleInfo) (RuleInfo, error) {
 	if req.Enabled != nil {
 		out.Enabled = *req.Enabled
 	}
-	if req.Expr != nil {
+	switch {
+	case req.Schedule != nil:
+		source, err := req.Schedule.Validate()
+		if err != nil {
+			return RuleInfo{}, err
+		}
+		out.Expr = source
+		out.Schedule = req.Schedule
+	case req.Expr != nil:
+		// 库里的 expr 可能是定价表编译出来的。直接改源码会让那张表与
+		// 实际价格分家，而清单上仍显示「有定价表」——两边各说各的。
+		// 要改成手写表达式，必须显式承认那张表已经被丢掉。
+		if cur.Schedule != nil && !req.ClearSchedule {
+			return RuleInfo{}, errors.New("这条规则带结构化定价表：要改成手写表达式，" +
+				"请同时给 ClearSchedule（命令行上是 --clear-schedule）")
+		}
 		out.Expr = *req.Expr
+		out.Schedule = nil
+	case req.ClearSchedule:
+		// 只清表、不动表达式：库里那份就是表编译出来的结果，价格不变。
+		out.Schedule = nil
 	}
 	if req.Name != nil {
 		name, err := normalizeName(*req.Name)
@@ -486,14 +618,19 @@ type RuleInfo struct {
 	Name          string
 	ModelPatterns []string
 	Expr          string
+	// Schedule 是这条规则的结构化定价表，nil 表示手写表达式。
+	//
+	// 它与 Expr 同时返回是有意的：Expr 是求值真正用的那一份，Schedule 是
+	// 给人看、可以逐档枚举的那一份。不变式是「非 nil 时 Expr 恰好等于它
+	// 编译出来的结果」（见 Schedule.Validate）。
+	Schedule      *Schedule
 	Priority      int
-	EffectiveFrom time.Time
-	// EffectiveTo 为 nil 表示不过期。
-	EffectiveTo *time.Time
-	Enabled     bool
-	CreatedBy   int64
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	EffectiveFrom time.Time // EffectiveTo 为 nil 表示不过期。
+	EffectiveTo   *time.Time
+	Enabled       bool
+	CreatedBy     int64
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 
 	// DeclaredKeys 是表达式里写过的键（见 expr.Program.Keys），已排序。
 	//
@@ -509,6 +646,14 @@ type RuleInfo struct {
 	// 写进库的行上。那种行每被用到一次就失败一次，而失败点在热路径上——
 	// 列举是唯一能看见它的地方。
 	ExprErr error
+
+	// ScheduleErr 说明这条规则的 schedule 为什么解不开，为 nil 表示能解开、
+	// 或本来就没有表。
+	//
+	// 与 ExprErr 同一个取舍：清单里一行坏 schedule 只写进这一行，别的行照常
+	// 出。单条读取（Get、修改前读）仍当场报错——那里只有一行，而把「解不开」
+	// 当成「没有表」会让随后的一次修改把 schedule 列静默写空。
+	ScheduleErr error
 }
 
 // List 列出全部规则，按**裁决次序**排列。
@@ -519,12 +664,13 @@ type RuleInfo struct {
 //
 // 不分页：规则表不大（见 matchQuery 的注释），而一次列举是要被运维逐条看的。
 //
-// # 一行表达式坏了不影响别的行
+// # 一行坏了不影响别的行
 //
-// 编译失败只写进那一行的 ExprErr，**不跳过、也不整次报错**：整次报错会让
-// 库里有一条坏规则时整个清单一条都看不到，而那正是最需要看清单的时候。
-// 这与 channels.List 对一行坏密文的处置一致——那里是解不开的信封，
-// 这里是编不过的表达式。
+// 编译失败只写进那一行的 ExprErr、解不开的 schedule 只写进那一行的
+// ScheduleErr，**不跳过、也不整次报错**：整次报错会让库里有一条坏规则时
+// 整个清单一条都看不到，而那正是最需要看清单的时候。这与 channels.List 对
+// 一行坏密文的处置一致——那里是解不开的信封，这里是编不过的表达式或解不开
+// 的表。单条读取仍当场报错（见 rule）。
 func (a *Admin) List(ctx context.Context) ([]RuleInfo, error) {
 	return a.queryRules(ctx, listQuery)
 }
@@ -562,6 +708,9 @@ func (a *Admin) rule(ctx context.Context, query string, args ...any) (RuleInfo, 
 	}
 	if err != nil {
 		return RuleInfo{}, err
+	}
+	if info.ScheduleErr != nil {
+		return RuleInfo{}, info.ScheduleErr
 	}
 	return decorate(info), nil
 }
@@ -666,6 +815,7 @@ const ruleColumns = `
 	    r.name,
 	    r.model_patterns,
 	    r.expr,
+	    r.schedule,
 	    r.priority,
 	    r.effective_from,
 	    r.effective_to,
@@ -742,11 +892,12 @@ func scanRuleInfo(row rowScanner) (RuleInfo, error) {
 	var (
 		info     RuleInfo
 		patterns []byte
+		schedule []byte
 		to       sql.NullTime
 	)
 	err := row.Scan(
 		&info.ID, &info.Scope, &info.OwnerUserID, &info.ChannelID, &info.Name,
-		&patterns, &info.Expr, &info.Priority, &info.EffectiveFrom, &to,
+		&patterns, &info.Expr, &schedule, &info.Priority, &info.EffectiveFrom, &to,
 		&info.Enabled, &info.CreatedBy, &info.CreatedAt, &info.UpdatedAt,
 	)
 	if err != nil {
@@ -762,6 +913,18 @@ func scanRuleInfo(row rowScanner) (RuleInfo, error) {
 		// 空数组与 nil 在调用方那一侧都是「适用于全部模型」，但让它们长得
 		// 不一样会让调用方写出「判 nil 还是判空」这种没有答案的代码。
 		info.ModelPatterns = []string{}
+	}
+	// schedule 是 NULL 时 schedule 为 nil：手写表达式的规则走的就是这一格。
+	// 解析不过说明这一行是绕过写入路径改过的。这时不 return：清单要把这一行
+	// 连同错误一起列出来，与 ExprErr 同一个取舍（见 List 的说明）。单条读取
+	// 与修改前读会把它转成错误（见 rule / loadRuleForUpdate）。
+	if len(schedule) > 0 {
+		parsed, parseErr := ParseSchedule(schedule)
+		if parseErr != nil {
+			info.ScheduleErr = fmt.Errorf("规则 %d 的 schedule 不是合法的定价表: %w", info.ID, parseErr)
+		} else {
+			info.Schedule = parsed
+		}
 	}
 	if to.Valid {
 		at := to.Time
@@ -800,6 +963,9 @@ func loadRuleForUpdate(ctx context.Context, tx *sql.Tx, id, ownerID int64) (Rule
 	}
 	if err != nil {
 		return RuleInfo{}, err
+	}
+	if info.ScheduleErr != nil {
+		return RuleInfo{}, info.ScheduleErr
 	}
 	return info, nil
 }
@@ -910,6 +1076,24 @@ func normalizePatterns(patterns []string) ([]string, error) {
 		out = append(out, p)
 	}
 	return out, nil
+}
+
+// marshalSchedule 把定价表折成要落进 jsonb 列的值。
+//
+// nil 落成 SQL NULL：手写表达式的规则在 schedule 那一栏是 NULL，不是空对象
+// ——空对象会让人以为它有一张空表，而读取路径会把它解成「有表但没有任何覆盖」。
+//
+// 返回 string 而不是 []byte：pgx 把 []byte 当 bytea 送，而 `$n::jsonb`
+// 那条路要的是文本。
+func marshalSchedule(s *Schedule) (any, error) {
+	if s == nil {
+		return nil, nil //nolint:nilnil // SQL NULL 是这一栏的合法取值，不是错误
+	}
+	data, err := json.Marshal(s)
+	if err != nil {
+		return nil, fmt.Errorf("定价表编码失败: %w", err)
+	}
+	return string(data), nil
 }
 
 // nullableID 把 0 变成 NULL。
