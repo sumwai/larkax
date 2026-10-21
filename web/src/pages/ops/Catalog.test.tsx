@@ -206,6 +206,8 @@ describe('模型目录页', () => {
     for (const label of ['基本', '限制', '能力', '模态与时间']) {
       expect(tab(label)).toBeInTheDocument()
     }
+    // 这组 tab 的名字：读屏进来先听到「模型字段分组」，再听到四个选项。
+    expect(screen.getByRole('tablist', { name: '模型字段分组' })).toBeInTheDocument()
     // 默认停在「基本」。
     expect(tab('基本')).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByLabelText('规范名')).toBeInTheDocument()
@@ -251,8 +253,13 @@ describe('模型目录页', () => {
     fireEvent.click(tab('基本'))
     fireEvent.submit(form)
 
-    expect(await screen.findByText('这一栏要填整数。')).toBeInTheDocument()
+    expect(await screen.findByText('上下文上限要填整数。')).toBeInTheDocument()
     expect(tab('限制')).toHaveAttribute('aria-selected', 'true')
+    // 出错的分组带上 `aria-invalid`，其余三个不带：读屏听得出该回哪一组。
+    expect(tab('限制')).toHaveAttribute('aria-invalid', 'true')
+    for (const label of ['基本', '能力', '模态与时间']) {
+      expect(tab(label)).not.toHaveAttribute('aria-invalid')
+    }
     expect(screen.getByLabelText('上下文上限')).toHaveValue('12.5')
     expect(within(tab('限制')).getByLabelText('这一组有校验错误')).toBeInTheDocument()
     expect(mocks.createModel).not.toHaveBeenCalled()
@@ -334,5 +341,56 @@ describe('模型目录页', () => {
         endpoints: ['chat', 'responses'],
       },
     })
+  })
+
+  it('规范名留空提交时，焦点落在规范名输入框上', async () => {
+    mocks.listModels.mockResolvedValue([])
+    renderModels()
+    const form = await openCreate()
+
+    // 先切到别组：错误会把人带回「基本」，而切组本身会把原来的输入框卸载。
+    fireEvent.click(tab('能力'))
+    fireEvent.submit(form)
+
+    expect(await screen.findByText('请填规范名。')).toBeInTheDocument()
+    expect(screen.getByLabelText('规范名')).toHaveFocus()
+    expect(mocks.createModel).not.toHaveBeenCalled()
+  })
+
+  // 三格共用一个错位实现时，只测一格看不出另两格错到了哪里，所以逐格来。
+  it.each([
+    ['上下文上限', '上下文上限要填整数。'],
+    ['输入上限', '输入上限要填整数。'],
+    ['输出上限', '输出上限要填整数。'],
+  ])('%s填错时，焦点落在这一格上', async (label, message) => {
+    mocks.listModels.mockResolvedValue([])
+    renderModels()
+    const form = await openCreate()
+
+    fireEvent.change(screen.getByLabelText('规范名'), { target: { value: 'gpt-4.1' } })
+    fireEvent.click(tab('限制'))
+    fireEvent.change(screen.getByLabelText(label), { target: { value: '12.5' } })
+    fireEvent.click(tab('基本'))
+    fireEvent.submit(form)
+
+    expect(await screen.findByText(message)).toBeInTheDocument()
+    expect(screen.getByLabelText(label)).toHaveFocus()
+    expect(mocks.createModel).not.toHaveBeenCalled()
+  })
+
+  it('错误句是一块常驻的 alert 区域：出错时念出来，改好后清空', async () => {
+    mocks.listModels.mockResolvedValue([])
+    renderModels()
+    const form = await openCreate()
+
+    fireEvent.submit(form)
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('请填规范名。')
+
+    fireEvent.change(screen.getByLabelText('规范名'), { target: { value: 'gpt-4.1' } })
+    fireEvent.submit(form)
+
+    // 同一个节点只是被清空：没有新句子可念，也不会把旧句子再念一遍。
+    expect(screen.getByRole('alert')).toBeEmptyDOMElement()
   })
 })

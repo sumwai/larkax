@@ -426,9 +426,9 @@ def openai_models(ctx: Ctx) -> str:
     `client.models.list()` 验的是「SDK 认不认 `{object: list, data: [...]}`
     这个形状」——自测里我们自己解这个体，认不认是两回事。单条那条验的是
     不可用时 SDK 会不会抛 `NotFoundError`，以及 `error.code` 是不是它按码
-    分支时要读的那个值。清单还验一条边界：这条用例的渠道没有计价规则，
-    模型仍须在清单里，只是不带 `offers`——「能不能用」与「有没有价」不是
-    同一个条件。
+    分支时要读的那个值。清单还验 offers 的单位与数值：`prices.prompt` 与
+    `price` 都是「1000 个输入 token」的金额，必须等于种子规则算出来的那个数
+    ——只断两者相等是拦不住整体错一个 1000 倍的。
     """
     import openai
 
@@ -444,14 +444,24 @@ def openai_models(ctx: Ctx) -> str:
     check("owned_by", item.owned_by, MODELS_VENDOR)
     # created 固定 0：目录里没有「模型创建时间」这一列（见 internal/api/models.go）。
     check("created", item.created, 0)
-    # 清单管「能不能用」，与有没有定价规则无关：这条用例的渠道没有计价规则，
-    # 模型仍然必须在清单里，只是不带 offers（省略，而不是空数组）。
+    # 这条用例的模型配了计价规则，清单必须带上 offers。
     #
     # 读 model_extra 而不是 getattr(item, "offers", None)：后者在 SDK 丢弃
-    # 未知字段时也返回 None，这条断言就永远是绿的。model_extra 是 SDK 收集
+    # 未知字段时也返回 None，这条断言就永远是空的。model_extra 是 SDK 收集
     # 未建模字段的地方，字段存在时它一定看得见。
     extras = getattr(item, "model_extra", None) or {}
-    check("没有计价规则时不应带 offers", "offers" in extras, False)
+    offers = extras.get("offers")
+    check_true(f"有计价规则时清单必须带 offers：{sorted(extras)}",
+               isinstance(offers, list) and len(offers) > 0)
+
+    # 钉**绝对值**而不是「两个字段相等」：服务端这两个字段本来就来自同一个
+    # 数（`offers.go` 的 Price 取 Prices["prompt"]），报价整体错一个 1000 倍
+    # 时等式照样成立，那种断言拦不住任何东西。种子规则的 prompt 是
+    # 0.00001/token，1000 个输入 token 就是 0.01000000。
+    offer = offers[0]
+    prices = offer.get("prices") or {}
+    check("offers[0].prices.prompt", prices.get("prompt"), "0.01000000")
+    check("offers[0].price", offer.get("price"), "0.01000000")
 
     one = ctx.client.models.retrieve(expected)
     check("retrieve.id", one.id, expected)
