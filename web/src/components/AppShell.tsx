@@ -19,6 +19,7 @@ import {
   IconQuickstart,
   IconSettings,
   IconUsage,
+  IconUser,
   IconX,
 } from './icons'
 
@@ -51,6 +52,7 @@ const OPS_NAV: Record<Exclude<View, 'user'>, NavItem[]> = {
   admin: [
     { to: '/app/admin/channels', key: 'ops.nav.channels', icon: IconChannel },
     { to: '/app/admin/models', key: 'ops.nav.models', icon: IconModels },
+    { to: '/app/admin/users', key: 'ops.nav.users', icon: IconUser },
     { to: '/app/admin/aliases', key: 'ops.nav.aliases', icon: IconAlias },
     { to: '/app/admin/pricing', key: 'ops.nav.pricing', icon: IconPricing },
   ],
