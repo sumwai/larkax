@@ -132,6 +132,8 @@ export interface Model {
   name: string
   display_name: string
   vendor: string
+  /** 厂商下的系列（如 `claude`、`gpt`）。清单接口还没带这个字段时省略。 */
+  family?: string
   context_limit: number
   max_output: number
   /** 只包含已采集的能力；键为 `tools` / `vision` / `reasoning` / `caching`。 */
@@ -151,6 +153,60 @@ export interface ModelsResponse {
   /** 参考价的求值时刻。 */
   reference_at: string
   items: Model[]
+}
+
+/** 供应商报价里的一个计价维度；接口只给规则声明过的那些。 */
+export type PriceDimension = 'prompt' | 'completion' | 'cache_read' | 'cache_write' | 'reasoning'
+
+/** 一条供应商报价：一个商家（`null` 为平台自营）× 一整套维度价。 */
+export interface SupplierPrice {
+  merchant: string | null
+  /** 每 1000 个输入 token 的金额；没有输入价时是 `0.00000000`，不能当「免费」用。 */
+  price: Money
+  /** 只含声明过的维度；一个都没有时省略整个字段。 */
+  prices?: Partial<Record<PriceDimension, Money>>
+  channel_count: number
+}
+
+/** 单模型页的能力：六项三态，`null` 是没采集过，与 `false` 不同。 */
+export interface ModelCapabilities {
+  reasoning: boolean | null
+  tools: boolean | null
+  vision: boolean | null
+  audio: boolean | null
+  cache: boolean | null
+  batch: boolean | null
+  /** `null` 未采集；`[]` 明确声明一条都不支持。 */
+  endpoints: string[] | null
+}
+
+export interface ModelDetailData {
+  name: string
+  display_name: string
+  vendor: string
+  family: string
+  /** 三个上限为 `0` 表示目录里没填，不是「上限是 0」。 */
+  context_limit: number
+  input_limit: number
+  output_limit: number
+  capabilities: ModelCapabilities
+  modalities_input: string[]
+  modalities_output: string[]
+  reasoning_options?: unknown[] | null
+  canonical_model_id: string
+  knowledge_cutoff: string | null
+  release_date: string | null
+  updated_at: string
+  /** 按服务端给的顺序展示，前端不重排；没有报价时省略。 */
+  suppliers?: SupplierPrice[]
+  /** 在供但算不出价的渠道条数，`0` 也会输出。 */
+  unpriced_channels: number
+}
+
+export interface ModelDetailResponse {
+  currency: string
+  reference_at: string
+  model: ModelDetailData
 }
 
 export interface Tokens {
@@ -619,6 +675,8 @@ export interface ApiClient {
   updateKey(id: number, input: KeyUpdateInput): Promise<ApiKey>
   revokeKey(id: number): Promise<ApiKey>
   models(): Promise<ModelsResponse>
+  /** 单模型页的数据；未知模型与无供给都回 404。 */
+  modelDetail(name: string): Promise<ModelDetailResponse>
   usageSummary(query?: UsageQuery): Promise<UsageSummary>
   usageSeries(query?: UsageSeriesQuery): Promise<UsageSeries>
   usageBreakdown(query: UsageBreakdownQuery): Promise<UsageBreakdown>

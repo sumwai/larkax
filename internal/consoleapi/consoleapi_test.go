@@ -1157,7 +1157,7 @@ func TestModelsPricingAndETag(t *testing.T) {
 	f.models.names = []string{"claude-sonnet-4-5", "no-price"}
 	f.catalog.models = []catalog.Model{{
 		CanonicalName: "claude-sonnet-4-5", DisplayName: "Claude Sonnet 4.5",
-		Vendor: "Anthropic", ContextLimit: 200000, OutputLimit: 64000,
+		Vendor: "Anthropic", Family: "claude", ContextLimit: 200000, OutputLimit: 64000,
 		ModalitiesInput: []string{"text", "image"}, ModalitiesOutput: []string{"text"},
 		Capabilities: catalog.Capabilities{Tools: ptrBool(true), Vision: ptrBool(false)},
 	}, {
@@ -1219,6 +1219,22 @@ func TestModelsPricingAndETag(t *testing.T) {
 	// 没有平台规则：pricing 为 null，不伪造一个数。
 	if body.Items[1].Pricing != nil {
 		t.Errorf("没有平台规则时 pricing 应当为 null，得到 %+v", body.Items[1].Pricing)
+	}
+	// family 是清单项的一部分：目录里填了才出现，没填时省略而不是空串。
+	if first.Family != "claude" {
+		t.Errorf("family = %q，期望 claude", first.Family)
+	}
+	var rawBody struct {
+		Items []map[string]json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rawBody); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if _, ok := rawBody.Items[0]["family"]; !ok {
+		t.Errorf("填了 family 的模型应当带这个字段: %s", rec.Body)
+	}
+	if _, ok := rawBody.Items[1]["family"]; ok {
+		t.Errorf("没填 family 的模型不该出现空字段: %s", rec.Body)
 	}
 
 	// 带上同一个 ETag：304，不重发正文。

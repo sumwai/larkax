@@ -85,9 +85,12 @@ type pricingJSON struct {
 
 // modelJSON 是模型清单里的一项。
 type modelJSON struct {
-	Name         string          `json:"name"`
-	DisplayName  string          `json:"display_name"`
-	Vendor       string          `json:"vendor"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+	Vendor      string `json:"vendor"`
+	// Family 是厂商下的系列（如 `claude`、`gpt`）。目录里没填时省略，
+	// 不输出空串：界面按「有没有」决定显不显示这一段。
+	Family       string          `json:"family,omitempty"`
 	ContextLimit int             `json:"context_limit"`
 	MaxOutput    int             `json:"max_output"`
 	Capabilities map[string]bool `json:"capabilities"`
@@ -244,6 +247,7 @@ func newModelJSON(model catalog.Model, price *pricing.ReferencePrice, offers []p
 		Name:         model.CanonicalName,
 		DisplayName:  model.DisplayName,
 		Vendor:       model.Vendor,
+		Family:       model.Family,
 		ContextLimit: model.ContextLimit,
 		MaxOutput:    model.OutputLimit,
 		Capabilities: capabilitiesJSON(model.Capabilities),
