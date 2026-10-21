@@ -80,6 +80,13 @@ describe('HttpApiClient 的 CSRF 头', () => {
     const [url] = fetchImpl.mock.calls[0]
     expect(url).toBe('/api/v1/keys?status=active&limit=20')
   })
+
+  it('模型名按段编码：斜杠保留，?、#、% 与空格转义', async () => {
+    const { client, fetchImpl } = makeClient(jsonResponse(200, {}))
+    await client.modelDetail('acme/weird?name#1 %2')
+    const [url] = fetchImpl.mock.calls[0]
+    expect(url).toBe('/api/v1/models/acme/weird%3Fname%231%20%252')
+  })
 })
 
 describe('HttpApiClient 的错误与会话', () => {

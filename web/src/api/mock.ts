@@ -15,6 +15,7 @@ import type {
   ListResponse,
   Meta,
   Model,
+  ModelDetailResponse,
   ModelsResponse,
   ChannelOpsClient,
   MerchantPricingClient,
@@ -133,6 +134,7 @@ const MODELS: Model[] = [
     name: 'claude-sonnet-4-5',
     display_name: 'Claude Sonnet 4.5',
     vendor: 'anthropic',
+    family: 'claude',
     context_limit: 200_000,
     max_output: 64_000,
     capabilities: { tools: true, vision: true, reasoning: true, caching: true },
@@ -152,6 +154,7 @@ const MODELS: Model[] = [
     name: 'claude-opus-4-1',
     display_name: 'Claude Opus 4.1',
     vendor: 'anthropic',
+    family: 'claude',
     context_limit: 200_000,
     max_output: 32_000,
     capabilities: { tools: true, vision: true, reasoning: true, caching: true },
@@ -167,6 +170,7 @@ const MODELS: Model[] = [
     name: 'gpt-4.1',
     display_name: 'GPT-4.1',
     vendor: 'openai',
+    family: 'gpt',
     context_limit: 1_047_576,
     max_output: 32_768,
     capabilities: { tools: true, vision: true },
@@ -183,6 +187,7 @@ const MODELS: Model[] = [
     name: 'gpt-4.1-mini',
     display_name: 'GPT-4.1 mini',
     vendor: 'openai',
+    family: 'gpt',
     context_limit: 1_047_576,
     max_output: 32_768,
     capabilities: { tools: true, vision: true },
@@ -198,6 +203,7 @@ const MODELS: Model[] = [
     name: 'deepseek-chat',
     display_name: 'DeepSeek Chat',
     vendor: 'deepseek',
+    family: 'deepseek',
     context_limit: 131_072,
     max_output: 8_192,
     capabilities: { tools: true },
@@ -213,6 +219,7 @@ const MODELS: Model[] = [
     name: 'example-embed',
     display_name: 'Example Embed',
     vendor: 'example',
+    family: 'example',
     context_limit: 8_192,
     max_output: 0,
     capabilities: {},
@@ -220,6 +227,94 @@ const MODELS: Model[] = [
     pricing: null,
   },
 ]
+
+/**
+ * 单模型页的假数据。
+ *
+ * `claude-sonnet-4-5` 特意放了同一商家的两条不同报价（真实的选路差异）、
+ * 一条没有 `prompt` 的平台自营（`price` 是 0，但输入价是「没写」不是「免费」），
+ * 以及三态能力与端点。`gpt-4.1` 没有报价，用来展示空态。
+ */
+const DETAIL_MODELS: Record<string, ModelDetailResponse['model']> = {
+  'claude-sonnet-4-5': {
+    name: 'claude-sonnet-4-5',
+    display_name: 'Claude Sonnet 4.5',
+    vendor: 'anthropic',
+    family: 'claude',
+    context_limit: 200_000,
+    input_limit: 0,
+    output_limit: 64_000,
+    capabilities: {
+      reasoning: true,
+      tools: true,
+      vision: true,
+      audio: null,
+      cache: true,
+      batch: false,
+      endpoints: ['chat', 'messages'],
+    },
+    modalities_input: ['text', 'image'],
+    modalities_output: ['text'],
+    reasoning_options: [{ type: 'toggle' }],
+    canonical_model_id: 'claude-sonnet-4-5-20250929',
+    knowledge_cutoff: '2025-03-01',
+    release_date: '2025-09-29',
+    updated_at: '2025-10-19T09:00:00Z',
+    suppliers: [
+      {
+        merchant: 'acme',
+        price: '0.00350000',
+        prices: {
+          prompt: '0.00350000',
+          completion: '0.01050000',
+          cache_read: '0.00035000',
+          cache_write: '0.00437500',
+          reasoning: '0.01050000',
+        },
+        channel_count: 2,
+      },
+      {
+        merchant: 'acme',
+        price: '0.00400000',
+        prices: { prompt: '0.00400000', completion: '0.01200000' },
+        channel_count: 1,
+      },
+      {
+        merchant: null,
+        price: '0.00000000',
+        prices: { completion: '0.01500000' },
+        channel_count: 1,
+      },
+    ],
+    unpriced_channels: 3,
+  },
+  'gpt-4.1': {
+    name: 'gpt-4.1',
+    display_name: 'GPT-4.1',
+    vendor: 'openai',
+    family: 'gpt',
+    context_limit: 1_047_576,
+    input_limit: 0,
+    output_limit: 32_768,
+    capabilities: {
+      reasoning: false,
+      tools: true,
+      vision: null,
+      audio: null,
+      cache: null,
+      batch: null,
+      endpoints: null,
+    },
+    modalities_input: ['text', 'image'],
+    modalities_output: [],
+    reasoning_options: [],
+    canonical_model_id: '',
+    knowledge_cutoff: null,
+    release_date: null,
+    updated_at: '2025-10-18T09:00:00Z',
+    unpriced_channels: 1,
+  },
+}
 
 let nextKeyId = 4
 
@@ -1127,6 +1222,17 @@ export class MockApiClient implements ApiClient {
         modalities: { input: [...model.modalities.input], output: [...model.modalities.output] },
         pricing: model.pricing && { ...model.pricing },
       })),
+    }
+  }
+
+  async modelDetail(name: string): Promise<ModelDetailResponse> {
+    await delay()
+    const model = DETAIL_MODELS[name]
+    if (!model) throw new ApiError(404, 'model_not_found', 'Model not found.')
+    return {
+      currency: 'USD',
+      reference_at: new Date().toISOString(),
+      model: JSON.parse(JSON.stringify(model)) as ModelDetailResponse['model'],
     }
   }
 
