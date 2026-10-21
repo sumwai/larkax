@@ -28,6 +28,18 @@ import { isDirty, useCloseGuard } from './guard'
 const CAPABILITY_KEYS = ['reasoning', 'tools', 'vision', 'audio', 'cache', 'batch'] as const
 type CapabilityKey = (typeof CAPABILITY_KEYS)[number]
 
+// 编辑弹窗的四个分组。字段按「改什么」分，不按类型分：找上限的人不会去
+// 「模态与时间」里翻，改能力的人也不需要先看到两个日期。
+const MODEL_TABS = ['basic', 'limits', 'capabilities', 'modalities'] as const
+type ModelTab = (typeof MODEL_TABS)[number]
+
+const TAB_LABEL = {
+  basic: 'ops.model.tabBasic',
+  limits: 'ops.model.tabLimits',
+  capabilities: 'ops.model.tabCapabilities',
+  modalities: 'ops.model.tabModalities',
+} as const
+
 interface ModelForm {
   canonical_name: string
   display_name: string
@@ -108,11 +120,17 @@ export function OpsModels() {
   const [initialForm, setInitialForm] = useState<ModelForm>(EMPTY_FORM)
   const [formError, setFormError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  // 当前分组与「上一次次校验失败在哪一组」。后者只用来画标记：用户改了值
+  // 也不撤，下一次提交重新判定。
+  const [tab, setTab] = useState<ModelTab>('basic')
+  const [errorTab, setErrorTab] = useState<ModelTab | null>(null)
 
   const openCreate = () => {
     setForm(EMPTY_FORM)
     setInitialForm(EMPTY_FORM)
     setFormError(null)
+    setTab('basic')
+    setErrorTab(null)
     setCreating(true)
   }
 
@@ -121,6 +139,8 @@ export function OpsModels() {
     setForm(next)
     setInitialForm(next)
     setFormError(null)
+    setTab('basic')
+    setErrorTab(null)
     setEditing(model)
   }
 
@@ -128,16 +148,27 @@ export function OpsModels() {
     setCreating(false)
     setEditing(null)
     setFormError(null)
+    setTab('basic')
+    setErrorTab(null)
   }
 
   const requestClose = useCloseGuard(confirm, isDirty(form, initialForm), closeForm)
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
-    if (!form.canonical_name.trim()) return setFormError(t('ops.model.nameRequired'))
-    for (const key of ['context_limit', 'input_limit', 'output_limit'] as const) {
-      if (!/^\d+$/.test(form[key].trim())) return setFormError(t('ops.invalidInteger'))
+    // 校验失败时跳到出错的那一组：只在底部显示一句错误，用户会在一个
+    // 看不到出错字段的分组里找不到它。
+    const fail = (target: ModelTab, message: string) => {
+      setErrorTab(target)
+      setTab(target)
+      setFormError(message)
     }
+    if (!form.canonical_name.trim()) return fail('basic', t('ops.model.nameRequired'))
+    for (const key of ['context_limit', 'input_limit', 'output_limit'] as const) {
+      if (!/^\d+$/.test(form[key].trim())) return fail('limits', t('ops.invalidInteger'))
+    }
+    setErrorTab(null)
+    setFormError(null)
     const capabilities = Object.fromEntries(
       CAPABILITY_KEYS.map((key) => [key, capValue(form.caps[key])]),
     ) as Record<CapabilityKey, boolean | null>
@@ -319,118 +350,172 @@ export function OpsModels() {
           }
         >
           <form id="model-form" onSubmit={submit} style={{ display: 'grid', gap: 12 }}>
-            <Field label={t('ops.model.name')}>
-              <input
-                className="input"
-                value={form.canonical_name}
-                readOnly={Boolean(editing)}
-                onChange={(event) => setForm({ ...form, canonical_name: event.target.value })}
-              />
-            </Field>
-            <Field label={t('ops.model.displayName')}>
-              <input
-                className="input"
-                value={form.display_name}
-                onChange={(event) => setForm({ ...form, display_name: event.target.value })}
-              />
-            </Field>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              <Field label={t('ops.model.vendor')}>
-                <input
-                  className="input"
-                  value={form.vendor}
-                  onChange={(event) => setForm({ ...form, vendor: event.target.value })}
-                />
-              </Field>
-              <Field label={t('ops.model.family')}>
-                <input
-                  className="input"
-                  value={form.family}
-                  onChange={(event) => setForm({ ...form, family: event.target.value })}
-                />
-              </Field>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
-              <Field label={t('ops.model.context')}>
-                <input
-                  className="input"
-                  value={form.context_limit}
-                  onChange={(event) => setForm({ ...form, context_limit: event.target.value })}
-                />
-              </Field>
-              <Field label={t('ops.model.inputLimit')}>
-                <input
-                  className="input"
-                  value={form.input_limit}
-                  onChange={(event) => setForm({ ...form, input_limit: event.target.value })}
-                />
-              </Field>
-              <Field label={t('ops.model.outputLimit')}>
-                <input
-                  className="input"
-                  value={form.output_limit}
-                  onChange={(event) => setForm({ ...form, output_limit: event.target.value })}
-                />
-              </Field>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              <Field label={t('ops.model.knowledgeCutoff')}>
-                <input
-                  className="input"
-                  type="date"
-                  value={form.knowledge_cutoff}
-                  onChange={(event) => setForm({ ...form, knowledge_cutoff: event.target.value })}
-                />
-              </Field>
-              <Field label={t('ops.model.releaseDate')}>
-                <input
-                  className="input"
-                  type="date"
-                  value={form.release_date}
-                  onChange={(event) => setForm({ ...form, release_date: event.target.value })}
-                />
-              </Field>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              <Field label={t('ops.model.modalitiesInput')}>
-                <textarea
-                  className="input"
-                  value={form.modalities_input}
-                  onChange={(event) => setForm({ ...form, modalities_input: event.target.value })}
-                />
-              </Field>
-              <Field label={t('ops.model.modalitiesOutput')}>
-                <textarea
-                  className="input"
-                  value={form.modalities_output}
-                  onChange={(event) => setForm({ ...form, modalities_output: event.target.value })}
-                />
-              </Field>
-            </div>
-            <Field label={t('ops.model.endpoints')} hint={t('ops.model.endpointsHint')}>
-              <textarea
-                className="input"
-                value={form.endpoints}
-                onChange={(event) => setForm({ ...form, endpoints: event.target.value })}
-              />
-            </Field>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
-              {CAPABILITY_KEYS.map((key) => (
-                <Field key={key} label={t(`ops.model.cap.${key}` as 'ops.model.cap.tools')}>
-                  <select
-                    className="input"
-                    value={form.caps[key]}
-                    onChange={(event) =>
-                      setForm({ ...form, caps: { ...form.caps, [key]: event.target.value } })
-                    }
-                  >
-                    <option value="unknown">{t('ops.model.capUnknown')}</option>
-                    <option value="yes">{t('ops.model.capYes')}</option>
-                    <option value="no">{t('ops.model.capNo')}</option>
-                  </select>
-                </Field>
+            <div className="tabs" role="tablist" aria-label={t('ops.model.formTabs')}>
+              {MODEL_TABS.map((id) => (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  id={`model-tab-${id}`}
+                  aria-controls="model-panel"
+                  aria-selected={tab === id}
+                  aria-invalid={errorTab === id || undefined}
+                  onClick={() => setTab(id)}
+                >
+                  {t(TAB_LABEL[id])}
+                  {errorTab === id && (
+                    <span className="tab-dot" aria-label={t('ops.model.tabHasError')} />
+                  )}
+                </button>
               ))}
             </div>
+
+            {/*
+              只渲染当前分组：隐藏的输入框会留在 DOM 里，既可能被 Tab 键
+              走进去，也会让读屏软件念到看不见的字段。切换分组不重置 form，
+              所以已填内容都在。
+            */}
+            <div
+              id="model-panel"
+              role="tabpanel"
+              aria-labelledby={`model-tab-${tab}`}
+              className={errorTab === tab ? 'model-form-group is-invalid' : 'model-form-group'}
+            >
+              {tab === 'basic' && (
+                <>
+                  <Field label={t('ops.model.name')}>
+                    <input
+                      className="input"
+                      value={form.canonical_name}
+                      readOnly={Boolean(editing)}
+                      onChange={(event) => setForm({ ...form, canonical_name: event.target.value })}
+                    />
+                  </Field>
+                  <Field label={t('ops.model.displayName')}>
+                    <input
+                      className="input"
+                      value={form.display_name}
+                      onChange={(event) => setForm({ ...form, display_name: event.target.value })}
+                    />
+                  </Field>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    <Field label={t('ops.model.vendor')}>
+                      <input
+                        className="input"
+                        value={form.vendor}
+                        onChange={(event) => setForm({ ...form, vendor: event.target.value })}
+                      />
+                    </Field>
+                    <Field label={t('ops.model.family')}>
+                      <input
+                        className="input"
+                        value={form.family}
+                        onChange={(event) => setForm({ ...form, family: event.target.value })}
+                      />
+                    </Field>
+                  </div>
+                </>
+              )}
+
+              {tab === 'limits' && (
+                <>
+                  <p className="hint">{t('ops.model.limitsHint')}</p>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+                    <Field label={t('ops.model.context')}>
+                      <input
+                        className="input"
+                        value={form.context_limit}
+                        onChange={(event) => setForm({ ...form, context_limit: event.target.value })}
+                      />
+                    </Field>
+                    <Field label={t('ops.model.inputLimit')}>
+                      <input
+                        className="input"
+                        value={form.input_limit}
+                        onChange={(event) => setForm({ ...form, input_limit: event.target.value })}
+                      />
+                    </Field>
+                    <Field label={t('ops.model.outputLimit')}>
+                      <input
+                        className="input"
+                        value={form.output_limit}
+                        onChange={(event) => setForm({ ...form, output_limit: event.target.value })}
+                      />
+                    </Field>
+                  </div>
+                </>
+              )}
+
+              {tab === 'capabilities' && (
+                <>
+                  <p className="hint">{t('ops.model.capHint')}</p>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+                    {CAPABILITY_KEYS.map((key) => (
+                      <Field key={key} label={t(`ops.model.cap.${key}` as 'ops.model.cap.tools')}>
+                        <select
+                          className="input"
+                          value={form.caps[key]}
+                          onChange={(event) =>
+                            setForm({ ...form, caps: { ...form.caps, [key]: event.target.value } })
+                          }
+                        >
+                          <option value="unknown">{t('ops.model.capUnknown')}</option>
+                          <option value="yes">{t('ops.model.capYes')}</option>
+                          <option value="no">{t('ops.model.capNo')}</option>
+                        </select>
+                      </Field>
+                    ))}
+                  </div>
+                  <Field label={t('ops.model.endpoints')} hint={t('ops.model.endpointsHint')}>
+                    <textarea
+                      className="input"
+                      value={form.endpoints}
+                      onChange={(event) => setForm({ ...form, endpoints: event.target.value })}
+                    />
+                  </Field>
+                </>
+              )}
+
+              {tab === 'modalities' && (
+                <>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    <Field label={t('ops.model.modalitiesInput')}>
+                      <textarea
+                        className="input"
+                        value={form.modalities_input}
+                        onChange={(event) => setForm({ ...form, modalities_input: event.target.value })}
+                      />
+                    </Field>
+                    <Field label={t('ops.model.modalitiesOutput')}>
+                      <textarea
+                        className="input"
+                        value={form.modalities_output}
+                        onChange={(event) => setForm({ ...form, modalities_output: event.target.value })}
+                      />
+                    </Field>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    <Field label={t('ops.model.knowledgeCutoff')}>
+                      <input
+                        className="input"
+                        type="date"
+                        value={form.knowledge_cutoff}
+                        onChange={(event) => setForm({ ...form, knowledge_cutoff: event.target.value })}
+                      />
+                    </Field>
+                    <Field label={t('ops.model.releaseDate')}>
+                      <input
+                        className="input"
+                        type="date"
+                        value={form.release_date}
+                        onChange={(event) => setForm({ ...form, release_date: event.target.value })}
+                      />
+                    </Field>
+                  </div>
+                </>
+              )}
+            </div>
+
             <InputError message={formError} />
           </form>
         </Modal>
