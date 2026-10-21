@@ -75,10 +75,44 @@ describe('计价表达式输入', () => {
   it('一项都没填时回报「至少要有一项」', () => {
     const editor = renderEditor()
 
-    expect(editor.lastError()).toBe('至少要有一项单价，否则这次请求结算时会失败。')
+    expect(editor.lastError()).toBe(
+      '至少要有一项单价；这次请求用到的每种 token 都要有单价，否则结算时会失败。',
+    )
 
     fireEvent.change(row('输入'), { target: { value: '3' } })
     expect(editor.lastError()).toBeNull()
+  })
+
+  it('示例里的字面量与同一行的换算结果一致', () => {
+    renderEditor()
+    fireEvent.change(row('输入'), { target: { value: '3.5' } })
+
+    const derived = screen.getByText(/每 token [0-9.]+ · 每 100 万 token/)
+    const perToken = /每 token ([0-9.]+)/.exec(derived.textContent ?? '')?.[1]
+    expect(perToken).toBe('0.0000035')
+
+    // 示例就摆在换算行旁边；它写的字面量必须与上面那一行算出来的值相同。
+    expect(screen.getByText(/^示例：/).textContent).toContain(`{"prompt": ${perToken}}`)
+  })
+
+  it('尾零不占小数位：每 token 0.123456780 能通过', () => {
+    const editor = renderEditor()
+    fireEvent.change(row('输入'), { target: { value: '0.123456780' } })
+    fireEvent.change(unitOf('输入'), { target: { value: 'token' } })
+
+    expect(editor.lastError()).toBeNull()
+    expect(editor.lastExpr()).toBe('{"prompt": 0.123456780}')
+  })
+
+  it('清空后从表达式切回表单，得到一张空表而不是「写法不认识」', () => {
+    renderEditor('{"prompt": 0.0000035}')
+    switchTo('表达式')
+    fireEvent.change(screen.getByLabelText('表达式'), { target: { value: '   ' } })
+    switchTo('表单')
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '表单' })).toHaveAttribute('aria-pressed', 'true')
+    expect(row('输入').value).toBe('')
   })
 
   it('非法数字、负数与超精度各自报错，并指出是哪一行', () => {

@@ -495,8 +495,10 @@ export const en: Record<MessageKey, string> = {
   'ops.expr.reasoning': 'Reasoning',
   'ops.expr.perToken': 'per token',
   'ops.expr.perMillion': 'per 1M tokens',
-  'ops.expr.example': 'Example: {"prompt": 0.0035} is 0.0035 per 1K input tokens.',
-  'ops.expr.atLeastOne': 'Set at least one price, or settlement for this request will fail.',
+  'ops.expr.example':
+    'Example: enter 3.5 with the unit set to per 1M tokens; the expression becomes {"prompt": 0.0000035}.',
+  'ops.expr.atLeastOne':
+    'Set at least one price; every token type the request uses also needs one, or settlement fails.',
   'ops.expr.invalidNumber': 'Row {row}: enter a non-negative decimal.',
   'ops.expr.precision': 'Row {row}: more than 8 decimal places after converting to a per-token price.',
   'ops.expr.tooLarge': 'Row {row}: the price is out of range.',

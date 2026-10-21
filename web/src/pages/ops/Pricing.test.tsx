@@ -166,7 +166,9 @@ describe('计价页', () => {
     fireEvent.submit(document.getElementById('rule-form') as HTMLFormElement)
 
     expect(
-      await screen.findByText('至少要有一项单价，否则这次请求结算时会失败。'),
+      await screen.findByText(
+        '至少要有一项单价；这次请求用到的每种 token 都要有单价，否则结算时会失败。',
+      ),
     ).toBeInTheDocument()
     expect(mocks.createRule).not.toHaveBeenCalled()
   })

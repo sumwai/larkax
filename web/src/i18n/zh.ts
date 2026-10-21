@@ -482,8 +482,10 @@ export const zh = {
   'ops.expr.reasoning': '推理',
   'ops.expr.perToken': '每 token',
   'ops.expr.perMillion': '每 100 万 token',
-  'ops.expr.example': '示例：{"prompt": 0.0035} 表示每 1000 token 的输入单价是 0.0035。',
-  'ops.expr.atLeastOne': '至少要有一项单价，否则这次请求结算时会失败。',
+  'ops.expr.example':
+    '示例：输入单价填 3.5、单位选「每 100 万 token」，表达式里就是 {"prompt": 0.0000035}。',
+  'ops.expr.atLeastOne':
+    '至少要有一项单价；这次请求用到的每种 token 都要有单价，否则结算时会失败。',
   'ops.expr.invalidNumber': '第 {row} 行：只能填非负的十进制小数。',
   'ops.expr.precision': '第 {row} 行：换算成每 token 后超过 8 位小数。',
   'ops.expr.tooLarge': '第 {row} 行：单价超出可表示范围。',

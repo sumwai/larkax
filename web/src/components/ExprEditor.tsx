@@ -115,7 +115,8 @@ function rowProblem(raw: string, unit: Unit, row: number, t: Translate): string 
   if (!DECIMAL.test(raw)) return t('ops.expr.invalidNumber', { row })
   const token = divideByPower(raw, UNIT_SHIFT[unit])
   const [whole, frac = ''] = token.split('.')
-  if (frac.length > MAX_DECIMALS) return t('ops.expr.precision', { row })
+  // 尾零不占位数：`0.123456780` 的值只有 8 位小数，服务端原样存得下。
+  if (frac.replace(/0+$/, '').length > MAX_DECIMALS) return t('ops.expr.precision', { row })
   const units = BigInt(whole || '0') * 100000000n + BigInt((frac + '00000000').slice(0, MAX_DECIMALS))
   if (units > MAX_UNITS) return t('ops.expr.tooLarge', { row })
   return null
@@ -275,6 +276,11 @@ export function ExprEditor({
   }
 
   const toForm = () => {
+    // 空串就是一张空表，不是「解析不出来的表达式」。
+    if (!state.text.trim()) {
+      setState({ ...state, mode: 'form', rows: EMPTY_ROWS, units: DEFAULT_UNITS, switchError: null })
+      return
+    }
     const parsed = parseSimpleExpr(state.text)
     if (!parsed) {
       const message = state.text.includes('?')
