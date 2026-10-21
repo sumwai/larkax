@@ -3,11 +3,17 @@ import type { Role } from '../api/types'
 /** 控制台的三个视图。切换视图只换「在看哪一组页面」，不改变服务端判定。 */
 export type View = 'user' | 'merchant' | 'admin'
 
-/** 账号实际拥有的视图；没有角色字段的旧响应按 user 处理。 */
+/**
+ * 账号实际拥有的视图；没有角色字段的旧响应按 user 处理。
+ *
+ * 管理员没有商家视图：商家页显示的是「调用者名下」的资源，而管理员没有
+ * 「以谁的身份看」这层信息——列出来的是全平台数据，文案却在说「你自己的」。
+ * `RequireView` 用同一张表，所以直接敲 `/app/merchant/*` 也会落到无权限页。
+ */
 export function viewsFor(role: Role | undefined): View[] {
   switch (role) {
     case 'admin':
-      return ['user', 'merchant', 'admin']
+      return ['user', 'admin']
     case 'merchant':
       return ['user', 'merchant']
     default:

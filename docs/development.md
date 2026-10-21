@@ -480,8 +480,8 @@ go run ./cmd/larkaxctl --env-file .env.staging wallet create --user alice
    （`settings.description` 那一列，`settings list` 打的就是它）。
 2. 在 `internal/settings/settings.go` 的 `Registry` 里加一行，声明键与类型。
 
-**现有 25 个键的默认值、取值范围，以及各自改完什么时候生效，见
-[settings.md](settings.md)。** 这一节讲的是**加一个新键**的步骤。
+**每个键的默认值、取值范围，以及各自改完什么时候生效，
+见 [settings.md](settings.md)。** 这一节讲的是**加一个新键**的步骤。
 
 说明只写在迁移里一份，`Registry` 里没有第二份——写两份的话，改了一处另一处不动，
 而改错了不会有任何反馈。
