@@ -112,9 +112,9 @@ func runChannelMapAdd(args []string) error {
 
 	var id int64
 	err = withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
-		created, err := catalog.NewAdmin(db).CreateAlias(ctx, req)
-		if err != nil {
-			return err
+		created, createErr := catalog.NewAdmin(db).CreateAlias(ctx, req)
+		if createErr != nil {
+			return createErr
 		}
 		id = created
 		return nil
@@ -159,8 +159,8 @@ func parseChannelMapAdd(args []string) (catalog.CreateAliasRequest, error) {
 	fs := flag.NewFlagSet("channel map add", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelMapShortUsage) }
 	overrides := fs.String("overrides", "", "")
-	if err := fs.Parse(args); err != nil {
-		return catalog.CreateAliasRequest{}, err
+	if parseErr := fs.Parse(args); parseErr != nil {
+		return catalog.CreateAliasRequest{}, parseErr
 	}
 	if fs.NArg() > 0 {
 		if allChannels {
@@ -182,8 +182,8 @@ func parseChannelMapAdd(args []string) (catalog.CreateAliasRequest, error) {
 	}
 	// 上游模型名进 list 的「上游模型名」那一栏：控制字符在连库之前拒掉
 	// （判据在 catalog 的 normalizeUpstreamModel，与旧路径同一处）。
-	if err := checkDisplayText("<上游模型名>", strings.TrimSpace(upstream)); err != nil {
-		return catalog.CreateAliasRequest{}, err
+	if checkErr := checkDisplayText("<上游模型名>", strings.TrimSpace(upstream)); checkErr != nil {
+		return catalog.CreateAliasRequest{}, checkErr
 	}
 	parsedOverrides, err := parseJSONObject("--overrides", *overrides)
 	if err != nil {

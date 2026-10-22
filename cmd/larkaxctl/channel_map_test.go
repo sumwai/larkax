@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"strconv"
@@ -28,7 +29,7 @@ func readAliasConfigRow(t *testing.T, db *sql.DB, id int64) aliasConfigRow {
 	t.Helper()
 
 	var row aliasConfigRow
-	err := db.QueryRow(`
+	err := db.QueryRowContext(context.Background(), `
 		SELECT channel_id, upstream_model, canonical_name, overrides::text
 		  FROM model_aliases
 		 WHERE id = $1`, id).
@@ -304,7 +305,7 @@ func rowExists(t *testing.T, db *sql.DB, id int64) bool {
 	t.Helper()
 
 	var left int
-	if err := db.QueryRow(
+	if err := db.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM model_aliases WHERE id = $1`, id).Scan(&left); err != nil {
 		t.Fatalf("确认删除结果失败: %v", err)
 	}
