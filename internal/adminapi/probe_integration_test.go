@@ -7,16 +7,22 @@ package adminapi
 // 底下几种成因各自给什么。
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channel/httpx"
+	"github.com/sumwai/larkax/internal/channel/openaiadapter"
+	"github.com/sumwai/larkax/internal/channels"
+	"github.com/sumwai/larkax/internal/upstream"
 )
 
 // probeUpstream 起一个假上游，并对每次请求记下 Authorization。
@@ -339,5 +345,135 @@ func TestProbeModelsRejectsUnknownFields(t *testing.T) {
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("状态码 = %d，期望 400；正文：%s", rec.Code, rec.Body)
+	}
+}
+
+// stallUpstream 起一个「收了请求但一直不回响应头」的假上游。
+//
+// 它让探测自己的时限先到；handler 在客户端断开后退出，用例不会留下悬着的连接。
+func stallUpstream(t *testing.T) *probeUpstream {
+	t.Helper()
+	release := make(chan struct{})
+	up := newProbeUpstream(t, func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	})
+	// 清理顺序：先放 handler 出去（它可能还在等），再关假上游。
+	t.Cleanup(func() { close(release) })
+	return up
+}
+
+// probeErrWithClient 用一个给定的客户端装配单适配器注册表，向 baseURL 探测
+// 一次，返回**真实路径**产生的错误（适配器包装、凭证脱敏都经过）。
+func probeErrWithClient(t *testing.T, client *http.Client, baseURL string) error {
+	t.Helper()
+	registry := channel.NewRegistry()
+	if err := registry.Register(openaiadapter.NewWithClient(client)); err != nil {
+		t.Fatalf("注册适配器失败: %v", err)
+	}
+	// 五秒护栏：下面那条只设 ResponseHeaderTimeout 的客户端没有整体时限，
+	// 判据失效时用它把用例停下来（时长断言会先报错）。
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := channels.NewModelProbe(nil, nil, registry).Probe(ctx, channels.ProbeRequest{
+		Type: "openai", BaseURL: baseURL, Credential: "test-key-placeholder",
+	})
+	if err == nil {
+		t.Fatal("上游不回响应头，探测却成功了")
+	}
+	return err
+}
+
+// assertGatewayTimeout 把真实错误交给 failProbe，断言它落成 504。
+func assertGatewayTimeout(t *testing.T, err error) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/merchant/channels/probe-models", nil)
+	(&API{}).failProbe(rec, req, err)
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("状态码 = %d，期望 504；正文：%s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), upstream.ProbeTimeout.String()) {
+		t.Errorf("正文没说时限：%s", rec.Body)
+	}
+}
+
+// TestProbeTimeoutMapsToGatewayTimeout 上游不回响应头：探测的时限先到，回 504
+// 而不是 502。
+//
+// 两条时限分开测：http.Client 的整体 Timeout 与 transport 的
+// ResponseHeaderTimeout 是 http 包里两个不同的机制，抛出的错误形状也不一样
+// （前者由客户端计时器取消，后者由 transport 报「等响应头超时」），但都
+// **不含 context.DeadlineExceeded**——只测其中一条会漏掉另一条。
+//
+// 用真的客户端与真的适配器，把时限压到 100ms 让用例快；不拿构造的
+// context.DeadlineExceeded 喂分类函数，那恰好会掩盖这次的问题。
+func TestProbeTimeoutMapsToGatewayTimeout(t *testing.T) {
+	t.Run("Client.Timeout", func(t *testing.T) {
+		up := stallUpstream(t)
+		// 裸客户端只设整体时限：ProbeClient 会同时设 Client.Timeout 与
+		// ResponseHeaderTimeout，两个都是 100ms 时分不清是谁先到。
+		client := &http.Client{Timeout: 100 * time.Millisecond}
+		start := time.Now()
+		err := probeErrWithClient(t, client, up.URL)
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("超时没有按客户端时限发生：%s", elapsed)
+		}
+		assertGatewayTimeout(t, err)
+	})
+
+	t.Run("ResponseHeaderTimeout", func(t *testing.T) {
+		up := stallUpstream(t)
+		// 只设响应头时限：这条路径的错误不经过 Client.Timeout。
+		client := &http.Client{
+			Transport: &http.Transport{ResponseHeaderTimeout: 100 * time.Millisecond},
+		}
+		start := time.Now()
+		err := probeErrWithClient(t, client, up.URL)
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("ResponseHeaderTimeout 没有生效：%s", elapsed)
+		}
+		assertGatewayTimeout(t, err)
+	})
+}
+
+// TestProbeConnectionRefusedIsNotTimeout 连接被拒不是超时：502 带
+// upstream_unreachable，不能因为「都是网络错误」就报成 504。
+func TestProbeConnectionRefusedIsNotTimeout(t *testing.T) {
+	// 拿一个刚关掉的端口：连过去必被拒，没有任何响应。
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听失败: %v", err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("关闭监听失败: %v", err)
+	}
+
+	probeErr := probeErrWithClient(t, httpx.ProbeClient(time.Second), "http://"+addr)
+	if isUpstreamTimeout(probeErr) {
+		t.Fatalf("连接被拒被判成了超时：%v", probeErr)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/merchant/channels/probe-models", nil)
+	(&API{}).failProbe(rec, req, probeErr)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("状态码 = %d，期望 502；正文：%s", rec.Code, rec.Body)
+	}
+	var body struct {
+		Error struct {
+			Code *string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if body.Error.Code == nil || *body.Error.Code != "upstream_unreachable" {
+		t.Errorf("错误码 = %v，期望 upstream_unreachable", body.Error.Code)
 	}
 }

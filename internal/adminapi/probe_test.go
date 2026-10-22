@@ -5,6 +5,9 @@ package adminapi
 // probe_integration_test.go。
 
 import (
+	"context"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -117,3 +120,41 @@ func TestUpstreamFailureMessageTruncates(t *testing.T) {
 type errFake string
 
 func (e errFake) Error() string { return string(e) }
+
+// fakeTimeout 是 net.Error 的超时形态：http 包自己的时限（Client.Timeout、
+// ResponseHeaderTimeout）到点给的就是这一类——它的错误链里没有
+// context.DeadlineExceeded。
+type fakeTimeout struct{ timeout bool }
+
+func (e fakeTimeout) Error() string   { return "i/o timeout" }
+func (e fakeTimeout) Timeout() bool   { return e.timeout }
+func (e fakeTimeout) Temporary() bool { return e.timeout }
+
+// TestIsUpstreamTimeout 钉住「两条时限都算超时」。
+//
+// 只认 context.DeadlineExceeded 时，挂在那两条 http 时限上的探测会漏到 502，
+// 而文档承诺 504——这一格就是那么漏掉的。
+func TestIsUpstreamTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"context 自带 deadline", context.DeadlineExceeded, true},
+		{"包了一层", fmt.Errorf("探测: %w", context.DeadlineExceeded), true},
+		{"net 层的 deadline 哨兵", os.ErrDeadlineExceeded, true},
+		{"http 包的超时", fakeTimeout{timeout: true}, true},
+		{
+			"包进 ErrUpstream 的超时",
+			&channel.ErrUpstream{StatusCode: 200, GotResponse: true, Err: fakeTimeout{timeout: true}},
+			true,
+		},
+		{"普通错误", errFake("boom"), false},
+		{"网络错误但不是超时", fakeTimeout{timeout: false}, false},
+	}
+	for _, c := range cases {
+		if got := isUpstreamTimeout(c.err); got != c.want {
+			t.Errorf("%s: isUpstreamTimeout = %v，期望 %v", c.name, got, c.want)
+		}
+	}
+}

@@ -613,11 +613,15 @@ the account balance ran out while this response was streaming, so it was cut sho
   声明被拒、`store` 被丢弃），同样是刻意的，见 [contract/README.md](../contract/README.md)
   的「Responses 入口上的四条」。
 
-## 控制台商家接口：概览、上游与我的模型
+## 控制台商家接口：概览、上游、我的模型与渠道表单
 
-这三个只读端点挂在控制台的 `/api/v1/merchant/` 下，要求控制台会话（HttpOnly
+这五个端点挂在控制台的 `/api/v1/merchant/` 下，要求控制台会话（HttpOnly
 Cookie）与 `merchant` 角色；`admin` 也能进，且**不限定归属**（看全部渠道与模型）。
 未登录 `401`，非商家 `403`。成功的响应都是 `application/json`。
+
+其中四个是只读的 `GET`（概览、上游、我的模型、适配器枚举）；
+`POST /api/v1/merchant/channels/probe-models` 是写方法：与其余非安全方法一样
+必须带会话的 `X-CSRF-Token`，缺了或不匹配回 `403`。
 
 ### 适配器与模型探测
 

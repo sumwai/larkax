@@ -7,10 +7,10 @@ package adminapi
 // channels.ModelProbe（明文凭证只在那一个包里解）。
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -226,16 +226,45 @@ func (a *API) failProbe(w http.ResponseWriter, r *http.Request, err error) {
 		// 与「上游挂了」分开给码：同一个 502，处置完全不同。
 		a.writeErrorCode(w, http.StatusBadGateway, "upstream_response_too_large",
 			"the upstream response exceeded the 8 MiB limit")
-	case errors.Is(err, context.DeadlineExceeded):
+	case isUpstreamTimeout(err):
 		a.writeError(w, http.StatusGatewayTimeout,
 			fmt.Sprintf("the upstream did not answer within %s", upstream.ProbeTimeout))
 	case errors.As(err, &up):
 		a.logger().WarnContext(r.Context(), "上游模型探测失败",
 			"status", up.StatusCode, "got_response", up.GotResponse)
+		if !up.GotResponse {
+			// 连不上与「上游答了个错」处置不同：这边没有正文可看，调用方该去
+			// 看地址与网络；超时已经在上一格分走了，落到这里的只有 DNS、连接被
+			// 拒、连接中断这一类。
+			a.writeErrorCode(w, http.StatusBadGateway, "upstream_unreachable",
+				upstreamFailureMessage(up))
+			return
+		}
 		a.writeError(w, http.StatusBadGateway, upstreamFailureMessage(up))
 	default:
 		a.fail(w, err)
 	}
+}
+
+// isUpstreamTimeout 判断这次失败是不是「到点了还没答上来」。
+//
+// 超时有三个来源：请求 context 自带的 deadline、net 包在连接层报的
+// deadline、以及 **http.Client 自己的时限**（ProbeClient 的 Timeout 与
+// transport 的 ResponseHeaderTimeout）。前两类本身就是 net.Error：
+// context 的 deadlineExceededError 与 os.ErrDeadlineExceeded 所对的
+// internal/poll.DeadlineExceededError 都实现了 Timeout() bool，所以一支
+// errors.As 就覆盖了它们。
+//
+// 第三类正是容易漏的那一类：http 包到点抛 *url.Error，里面塞着私有的
+// *httpError，它实现 Timeout() 但**不 Unwrap 到任何哨兵**——按
+// context.DeadlineExceeded 判会得到 false，超时因此被报成 502（见
+// TestProbeTimeoutMapsToGatewayTimeout，那条用的是真的客户端超时）。
+//
+// 顺序要在 ErrUpstream 之前：适配器把超时包进 ErrUpstream.Err，解开之后才
+// 看得见。
+func isUpstreamTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // upstreamFailureMessage 是 502 的正文：状态码 + 截短的响应体。
