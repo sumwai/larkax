@@ -38,6 +38,14 @@ func New(timeout time.Duration) *Adapter {
 	return &Adapter{client: httpx.Client(timeout)}
 }
 
+// NewWithClient 用给定的 HTTP 客户端构造适配器。
+//
+// 给换一套出站策略的调用方用（控制台的模型探测）：那里打的是用户填的地址，
+// 不跟随重定向、响应体有上限，而运行期那条路径两者都不要。client 必须非 nil。
+func NewWithClient(client *http.Client) *Adapter {
+	return &Adapter{client: client}
+}
+
 // Type 返回注册表里用的类型名。
 func (a *Adapter) Type() string { return Type }
 

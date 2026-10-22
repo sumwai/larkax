@@ -43,7 +43,10 @@ func TestRoleGroupsGateBySessionRole(t *testing.T) {
 		{"/api/v1/merchant/overview", http.StatusForbidden, http.StatusNoContent, http.StatusNoContent},
 		{"/api/v1/merchant/upstreams", http.StatusForbidden, http.StatusNoContent, http.StatusNoContent},
 		{"/api/v1/merchant/models", http.StatusForbidden, http.StatusNoContent, http.StatusNoContent},
+		// 渠道表单的输入：适配器枚举跟着渠道组走。
+		{"/api/v1/merchant/adapters", http.StatusForbidden, http.StatusNoContent, http.StatusNoContent},
 		{"/api/v1/admin/channels", http.StatusForbidden, http.StatusForbidden, http.StatusNoContent},
+		{"/api/v1/admin/adapters", http.StatusForbidden, http.StatusForbidden, http.StatusNoContent},
 		// 用户管理也是 admin 组的一条：普通用户与 merchant 都不该进得去。
 		{"/api/v1/admin/users", http.StatusForbidden, http.StatusForbidden, http.StatusNoContent},
 	}

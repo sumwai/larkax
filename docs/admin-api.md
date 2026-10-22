@@ -56,6 +56,8 @@ Authorization: Bearer <令牌>
 | `POST` | `/admin/v1/channels` | 建渠道 |
 | `GET` | `/admin/v1/channels/{id}` | 单条渠道 |
 | `PATCH` | `/admin/v1/channels/{id}` | 改渠道 |
+| `GET` | `/admin/v1/adapters` | 内置适配器枚举（渠道表单用） |
+| `POST` | `/admin/v1/channels/probe-models` | 拉一次上游模型清单（不落库） |
 | `GET` | `/admin/v1/models` | 模型目录 |
 | `POST` | `/admin/v1/models` | 建模型 |
 | `PATCH` | `/admin/v1/models/{name}` | 改模型（`{name}` 是规范名） |
@@ -97,6 +99,80 @@ Authorization: Bearer <令牌>
 - 渠道的凭证**只写不读**：`credential` 是写入字段，读回的是 `credential_keys`
   与 `credential_hint`（打了码的提示），任何路径都不回明文。
 
+## 渠道表单的输入
+
+两个端点给「建渠道 / 改渠道」的表单用：适配器从注册表里选，模型名先问一次
+上游。它们随 `channels` 组注册，所以控制台的 `/api/v1/merchant/` 与
+`/api/v1/admin/` 下是同一对路径。
+
+### 适配器枚举
+
+`GET /admin/v1/adapters`
+
+```json
+{"items": [
+  {"type": "anthropic", "protocol": "anthropic", "endpoint": "/v1/messages"},
+  {"type": "openai", "protocol": "openai", "endpoint": "/v1/chat/completions"}
+]}
+```
+
+按 `type` 升序。三个字段都来自适配器自己：`type` 是 `channels.type` 的取值，
+`endpoint` 是这套适配器把请求发到哪条路径。清单不额外声明「哪个类型能列模型」
+——那由下面的探测在运行时回答。
+
+### 模型探测
+
+`POST /admin/v1/channels/probe-models`
+
+```json
+{"channel_id": 12, "type": "openai",
+ "base_url": "https://api.example.com/v1", "credential": "<API_KEY>"}
+```
+
+两种形态：
+
+- 给 `channel_id`：`type`、`base_url`、`credential` 都从库里那一行取；给了
+  `base_url` 或 `credential` 就用给的那个（编辑中的表单还没保存）。渠道不存在、
+  已被软删、或不属于当前商家，都回 `404`——归属判据在读库之后、覆盖之前。
+- 不给 `channel_id`：`type` 与 `base_url` 必填，`credential` 可以为空
+  （无鉴权的自建上游）。`base_url` 走与建渠道同一条校验（`NormalizeBaseURL`）。
+
+成功回 `200`：
+
+```json
+{"supported": true, "models": ["gpt-4o"], "total": 1, "truncated": false}
+```
+
+- `models` 去重、按名字升序；空清单是 `[]`。
+- 上游没有列模型的能力（今天的 `systemone`）：`200` 与
+  `{"supported": false, "models": [], "total": 0, "truncated": false}`。
+  「这家没有这个能力」不是一次失败的请求。
+- `truncated` 表示清单超过 2000 条被截断；`total` 仍是截断前的条数。
+  **响应体**超过 8 MiB 是另一回事，见下面的 `502`。
+
+失败：
+
+| 状态码 | 什么时候 |
+|---|---|
+| `400` | 两种形态缺字段、`base_url` 校验不过、`type` 不是已知类型 |
+| `404` | `channel_id` 不存在、已软删、不属于当前商家 |
+| `429` | 同一调用方两次探测间隔不到 2 秒，或一分钟内超过 10 次；带 `Retry-After` |
+| `502` | 上游连不上、回非 `2xx`、或响应体超过 8 MiB。正文带上游状态码与截短到 200 字符的响应体片段 |
+| `504` | 上游 10 秒内没有读完 |
+
+`502` 里「响应体超过 8 MiB」这一种额外给 `error.code` 为
+`upstream_response_too_large`：它与「上游挂了」处置不同，只看状态码分不开。
+8 MiB 是**读的时候**生效的上限，不是拿 `Content-Length` 提前判的——上游完全
+可以不告诉我们长度。
+
+探测不跟随重定向（`3xx` 按失败处理）：它回答的是「这个地址返回什么」，跟到
+别处读到的已经是另一个事实。它也不按私网段拦截——自建上游在内网是真实用法；
+这块成本由限流压住。
+
+凭证只在服务端的内存里出现一次，不落库、不进日志、不进响应。上游错误体里
+回显了这次用的凭证时，返回给调用方的正文里那一串会被换成 `<redacted>`。
+探测的请求体不是一次推理请求，不会进请求快照。
+
 ## 错误体
 
 与公共监听同一个形状（`internal/api` 的 `WriteError`，OpenAI 那一套）：
@@ -111,8 +187,11 @@ Authorization: Bearer <令牌>
 | `401` | 令牌缺失或不对 |
 | `404` | 目标不存在 |
 | `409` | 约束冲突（重名、仍被引用、别名撞车） |
+| `429` | 模型探测被限流（见「渠道表单的输入」） |
+| `502` | 模型探测时上游失败或响应体过大（见「渠道表单的输入」） |
+| `504` | 模型探测时上游超时 |
 | `500` | 数据库报错 |
-| `503` | 没配置令牌、或数据库连不上 |
+| `503` | 没配置令牌、数据库连不上、或探测一条已存渠道时本进程没有主密钥 |
 
 消息是给调用方看的一句话，不带上游原文与内部路径；需要细节时去查服务端日志。
 `500` 与 `503` 的正文是**固定文案**：数据库驱动与连接错误可能带着连接串、主机名

@@ -34,6 +34,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -140,6 +141,19 @@ type API struct {
 	tokens tokenSource
 	log    *slog.Logger
 
+	// db 与 sealer 只给模型探测用：编辑一条已存渠道时要从库里取密文、
+	// 解密（见 channels.ModelProbe）。其余写路径走各自的 admin 类型。
+	db     *sql.DB
+	sealer *credential.Sealer
+
+	// probes 是探测的进程内限流（见 probe.go）。
+	probes *probeLimiter
+
+	// 探测用的适配器注册表惰性建一次（见 probeRegistry）。
+	probeOnce sync.Once
+	probeReg  *channel.Registry
+	probeErr  error
+
 	channels     *channels.Admin
 	catalog      *catalog.Catalog
 	catalogAdmin *catalog.Admin
@@ -180,6 +194,9 @@ func New(cfg Config) http.Handler {
 		ledger:       store.New(cfg.DB),
 		currency:     cfg.Currency,
 		loc:          cfg.Loc,
+		db:           cfg.DB,
+		sealer:       cfg.Sealer,
+		probes:       newProbeLimiter(),
 	}
 	if a.currency == "" {
 		a.currency = "CNY"
@@ -196,6 +213,9 @@ func New(cfg Config) http.Handler {
 		mux.HandleFunc("POST "+prefix+"channels", a.createChannel)
 		mux.HandleFunc("GET "+prefix+"channels/{id}", a.getChannel)
 		mux.HandleFunc("PATCH "+prefix+"channels/{id}", a.updateChannel)
+		// 渠道表单的输入：适配器从注册表里选，模型名从上游拉。
+		mux.HandleFunc("GET "+prefix+"adapters", a.listAdapters)
+		mux.HandleFunc("POST "+prefix+"channels/probe-models", a.probeModels)
 	}
 	if all || groups[GroupModels] {
 		mux.HandleFunc("GET "+prefix+"models", a.listModels)
@@ -421,6 +441,11 @@ func bearerToken(r *http.Request) (string, bool) {
 // writeError 写出一个错误体，形状与公共监听相同（见 internal/api.WriteError）。
 func (a *API) writeError(w http.ResponseWriter, status int, message string) {
 	api.WriteError(w, status, message)
+}
+
+// writeErrorCode 写出带自定义错误码的错误体，形状仍由 internal/api 定义。
+func (a *API) writeErrorCode(w http.ResponseWriter, status int, code, message string) {
+	api.WriteErrorCode(w, status, code, message)
 }
 
 // writeJSON 写出一个成功响应。
