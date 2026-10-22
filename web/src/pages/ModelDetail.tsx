@@ -64,7 +64,7 @@ function Endpoints({ endpoints }: { endpoints: ModelCapabilities['endpoints'] })
 
 /** 目录里 `0` 表示没填，不是「上限是 0」。 */
 function limitText(value: number, t: (key: MessageKey) => string, lang: 'zh' | 'en'): string {
-  return value > 0 ? formatCount(value, lang) : t('models.detail.notFilled')
+  return value > 0 ? formatCount(value, lang) : t('models.notFilled')
 }
 
 /** 有 token 价的报价才进每千 token 那张表。 */
@@ -311,7 +311,7 @@ export function ModelDetail() {
             </div>
             <div>
               <dt>{t('models.detail.vendor')}</dt>
-              <dd>{model.vendor || '—'}</dd>
+              <dd>{model.vendor || t('models.notFilled')}</dd>
             </div>
             <div>
               <dt>{t('models.detail.family')}</dt>
@@ -397,11 +397,11 @@ export function ModelDetail() {
           <dl className="model-facts">
             <div>
               <dt>{t('models.detail.knowledgeCutoff')}</dt>
-              <dd className="num">{model.knowledge_cutoff || t('models.detail.notFilled')}</dd>
+              <dd className="num">{model.knowledge_cutoff || t('models.notFilled')}</dd>
             </div>
             <div>
               <dt>{t('models.detail.releaseDate')}</dt>
-              <dd className="num">{model.release_date || t('models.detail.notFilled')}</dd>
+              <dd className="num">{model.release_date || t('models.notFilled')}</dd>
             </div>
             <div>
               <dt>{t('models.detail.updatedAt')}</dt>

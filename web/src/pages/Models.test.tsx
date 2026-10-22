@@ -1,3 +1,7 @@
+// 用例跑在 Node 里，读文件没问题；但 web 的 tsconfig 不带 Node 的类型
+// （`@types/node` 没有装），所以这一行要靠指令压掉「找不到模块」。
+// @ts-expect-error node:fs 只在 vitest 的 Node 运行时里用，不进构建产物
+import { readFileSync } from 'node:fs'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
@@ -7,9 +11,11 @@ import type { Model } from '../api'
 
 const mocks = vi.hoisted(() => ({ models: vi.fn() }))
 
-vi.mock('../api', () => ({
-  api: { models: mocks.models },
-}))
+// `ApiError` 要真的：错误分档的用例按状态码走，mock 掉就没得判。
+vi.mock('../api', async () => {
+  const actual = await vi.importActual<typeof import('../api')>('../api')
+  return { ...actual, api: { models: mocks.models } }
+})
 
 const ITEMS: Model[] = [
   {
@@ -183,5 +189,106 @@ describe('模型列表', () => {
     const row = await screen.findByRole('link', { name: /Weird/ })
     // 不编码的话 `?` 与 `#` 会把地址截成查询串或片段，点进去落到别的页。
     expect(row).toHaveAttribute('href', '/app/models/acme/weird%3Fname%231%20%252')
+  })
+
+  it('加载中对读屏有交代，加载完 status 与 busy 都消失', async () => {
+    let resolveModels!: (value: unknown) => void
+    mocks.models.mockReturnValue(
+      new Promise((resolve) => {
+        resolveModels = resolve
+      }),
+    )
+    renderModels()
+
+    expect(screen.getByRole('status')).toHaveTextContent('正在加载模型列表')
+    const busy = document.querySelector('[aria-busy="true"]')
+    expect(busy).not.toBeNull()
+    // 骨架自己仍然对读屏隐藏，加载态靠上面那句与 busy 交代。
+    expect(busy?.querySelector('.model-list')).toHaveAttribute('aria-hidden', 'true')
+
+    resolveModels({ currency: 'USD', reference_at: '2026-10-21T09:00:00Z', items: ITEMS })
+    await screen.findByRole('link', { name: /Claude Sonnet 4\.5/ })
+
+    // 不是留一个空元素：两者都该从可及树上消失。
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(document.querySelector('[aria-busy="true"]')).toBeNull()
+  })
+
+  it('5xx 说服务端暂时不可用，网络错误才让人查网络', async () => {
+    const { ApiError } = await import('../api')
+
+    mocks.models.mockRejectedValueOnce(
+      new ApiError(503, 'unavailable', 'The console is temporarily unavailable.'),
+    )
+    const first = renderModels()
+    expect(await screen.findByText(/控制台服务暂时不可用/)).toBeInTheDocument()
+    expect(screen.queryByText(/检查网络/)).not.toBeInTheDocument()
+    // 服务端那句英文不往界面上搬。
+    expect(screen.queryByText(/The console is temporarily unavailable\./)).not.toBeInTheDocument()
+    first.unmount()
+
+    mocks.models.mockRejectedValueOnce(new Error('Failed to fetch'))
+    renderModels()
+    expect(await screen.findByText(/检查网络后重试/)).toBeInTheDocument()
+    expect(screen.queryByText(/控制台服务暂时不可用/)).not.toBeInTheDocument()
+  })
+
+  it('筛选条独立成条，结果计数跟着筛选变化', async () => {
+    renderModels()
+    await screen.findByRole('link', { name: /Claude Sonnet 4\.5/ })
+
+    const bar = document.querySelector('.model-filter-bar')
+    expect(bar).not.toBeNull()
+    expect(bar?.contains(screen.getByLabelText('搜索名字、厂商或系列'))).toBe(true)
+    // 筛选行不再挂在页头的操作区里，否则它会跟着页面滚走。
+    expect(document.querySelector('.page-actions')).toBeNull()
+
+    // 数据到了才有计数：全量 2 条，筛到 1 条。
+    expect(screen.getByText('找到 2 个模型')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('搜索名字、厂商或系列'), {
+      target: { value: 'gpt' },
+    })
+    expect(screen.getByText('找到 1 个模型')).toBeInTheDocument()
+    expect(screen.queryByText('找到 2 个模型')).not.toBeInTheDocument()
+  })
+
+  it('筛选条的 sticky 吸附在不透明背景上', () => {
+    const css = readFileSync('src/styles/components.css', 'utf8')
+    const body = css.match(/\.model-filter-bar\s*\{([^}]*)\}/)?.[1] ?? ''
+    const topbar = css.match(/\.app-topbar\s*\{([^}]*)\}/)?.[1] ?? ''
+    const topbarHeight = topbar.match(/min-height:\s*(\d+)px/)?.[1]
+    expect(topbarHeight).toBeDefined()
+
+    expect(body).toMatch(/position:\s*sticky/)
+    // 吸附位置跟着顶栏高度走：顶栏改了高度，这里不会悄悄错位。
+    expect(body).toMatch(new RegExp(`top:\\s*${topbarHeight}px`))
+    // 不透明：用令牌变量的实色。列表从它底下滚过，transparent 或 rgba() 都会透出来。
+    expect(body).toMatch(/background:\s*var\(--surface\)/)
+    expect(body).not.toMatch(/rgba?\(/)
+  })
+
+  it('没填的厂商与上下文在列表里写「未填」，不整段省略', async () => {
+    mocks.models.mockResolvedValue({
+      currency: 'USD',
+      reference_at: '2026-10-21T09:00:00Z',
+      items: [
+        {
+          ...ITEMS[1],
+          name: 'bare-model',
+          display_name: 'Bare Model',
+          vendor: '',
+          family: '',
+          context_limit: 0,
+        },
+      ],
+    })
+    renderModels()
+
+    const row = await screen.findByRole('link', { name: /Bare Model/ })
+    const meta = row.querySelector('.model-meta') as HTMLElement
+    // 厂商一段与上下文一段是两个格子，各自断言：只断「页面上有一处未填」会漏掉另一处。
+    const cells = Array.from(meta.children).map((cell) => cell.textContent)
+    expect(cells[0]).toBe('未填')
+    expect(cells[1]).toBe('上下文 未填')
   })
 })

@@ -244,4 +244,22 @@ describe('模型详情', () => {
     fireEvent.click(screen.getByRole('button', { name: '重试' }))
     await waitFor(() => expect(mocks.modelDetail).toHaveBeenCalledTimes(2))
   })
+
+  it('没填的厂商与上下文都写「未填」，两处口径一致', async () => {
+    mocks.modelDetail.mockResolvedValue({
+      ...DETAIL,
+      model: { ...DETAIL.model, vendor: '', context_limit: 0 },
+    })
+    renderDetail('/app/models/bare-model')
+    await screen.findByRole('heading', { name: 'Model X' })
+
+    // 「厂商」与「上下文窗口」是两行，各自断言：只断「页面上有一处未填」会漏掉另一处。
+    const vendor = screen.getByText('厂商').closest('div') as HTMLElement
+    expect(vendor).toHaveTextContent('未填')
+    expect(vendor).not.toHaveTextContent('—')
+
+    const context = screen.getByText('上下文窗口').closest('div') as HTMLElement
+    expect(context).toHaveTextContent('未填')
+    expect(context).not.toHaveTextContent('—')
+  })
 })

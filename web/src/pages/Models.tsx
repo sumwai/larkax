@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api } from '../api'
+import { api, ApiError } from '../api'
 import { useI18n } from '../i18n'
 import { useAsync } from '../hooks/useAsync'
 import { formatCompact } from '../lib/format'
@@ -55,44 +55,50 @@ export function Models() {
       .includes(needle)
   })
   const filtered = needle !== '' || vendor !== ''
+  // 5xx 是服务端暂时不可用，不是网络问题——把两者说成同一句会把人引到错的方向。
+  const serverError = error instanceof ApiError && error.status >= 500
 
   return (
     <>
-      <PageHead
-        title={t('models.title')}
-        subtitle={t('models.subtitle')}
-        actions={
-          <div className="model-filters">
-            <SearchBox
-              id="model-search"
-              icon
-              className="model-search"
-              placeholder={t('models.searchPlaceholder')}
-              value={query}
-              onChange={setQuery}
-            />
-            <label className="sr-only" htmlFor="model-vendor">
-              {t('models.vendor')}
-            </label>
-            <select
-              id="model-vendor"
-              className="input"
-              value={vendor}
-              onChange={(event) => setVendor(event.target.value)}
-            >
-              <option value="">{t('models.allVendors')}</option>
-              {vendors.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </div>
-        }
-      />
+      <PageHead title={t('models.title')} subtitle={t('models.subtitle')} />
+
+      {/* 目录可能有几百行，筛选条钉在顶栏下面，滚到底也还能改。 */}
+      <div className="model-filter-bar">
+        <div className="model-filters">
+          <SearchBox
+            id="model-search"
+            icon
+            className="model-search"
+            placeholder={t('models.searchPlaceholder')}
+            value={query}
+            onChange={setQuery}
+          />
+          <label className="sr-only" htmlFor="model-vendor">
+            {t('models.vendor')}
+          </label>
+          <select
+            id="model-vendor"
+            className="input"
+            value={vendor}
+            onChange={(event) => setVendor(event.target.value)}
+          >
+            <option value="">{t('models.allVendors')}</option>
+            {vendors.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </div>
+        {/* 计数跟着每次输入变，所以不进 live region，否则读屏会念个不停。 */}
+        {data && <p className="model-count tiny">{t('models.found', { count: items.length })}</p>}
+      </div>
 
       {error && (
-        <Alert tone="bad" title={t('models.loadFailed')}>
+        <Alert
+          tone="bad"
+          title={serverError ? t('models.loadFailedServer') : t('models.loadFailed')}
+        >
           <Button variant="secondary" size="sm" onClick={reload} style={{ marginTop: 8 }}>
             {t('common.retry')}
           </Button>
@@ -100,13 +106,19 @@ export function Models() {
       )}
 
       {loading && !data && (
-        <div className="model-list" aria-hidden="true">
-          {[0, 1, 2, 3].map((key) => (
-            <div key={key} className="model-skeleton">
-              <Skeleton width="35%" height={16} />
-              <Skeleton width="60%" height={12} />
-            </div>
-          ))}
+        <div aria-busy="true">
+          {/* 骨架对读屏是隐藏的，加载态另给一句，并把忙碌状态告诉可及树。 */}
+          <p className="sr-only" role="status">
+            {t('models.loading')}
+          </p>
+          <div className="model-list" aria-hidden="true">
+            {[0, 1, 2, 3].map((key) => (
+              <div key={key} className="model-skeleton">
+                <Skeleton width="35%" height={16} />
+                <Skeleton width="60%" height={12} />
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -141,12 +153,16 @@ export function Models() {
                     <span className="mono tiny">{model.name}</span>
                   </span>
                   <span className="model-meta tiny">
-                    <span>{[model.vendor, model.family].filter(Boolean).join(' · ')}</span>
-                    {model.context_limit > 0 && (
-                      <span>
-                        {t('models.context')} {formatCompact(model.context_limit)}
-                      </span>
-                    )}
+                    <span>
+                      {[model.vendor, model.family].filter(Boolean).join(' · ') ||
+                        t('models.notFilled')}
+                    </span>
+                    <span>
+                      {t('models.context')}{' '}
+                      {model.context_limit > 0
+                        ? formatCompact(model.context_limit)
+                        : t('models.notFilled')}
+                    </span>
                     <span>
                       {t('models.modalityInput')}{' '}
                       {modalityList(model.modalities.input, t('models.modalityNone'))}
