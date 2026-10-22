@@ -338,6 +338,69 @@ func TestGroupByModelSortsTokenPricesBeforeFixedOnly(t *testing.T) {
 	}
 }
 
+// 固定费组内先比 request、再比 minimum：商家名的顺序与 minimum 的顺序相反时，
+// minimum 决定先后。只比商家名或只比 request 的实现都会在这里红。
+func TestGroupByModelOrdersFixedOnlyByMinimum(t *testing.T) {
+	const model = "alpha"
+	fixed := func(channelID, ownerID int64, merchant, request, minimum string) CandidatePrice {
+		price := candidatePrice(model, channelID, ownerID, merchant, nil)
+		price.Request = money.MustParse(request)
+		price.Minimum = money.MustParse(minimum)
+		return price
+	}
+	quotes := []CandidatePrice{
+		// 商家名靠前、最低消费却更大：按名字排的话它会在前面。
+		fixed(1, 7, "acme", "0.01000000", "9.00000000"),
+		fixed(2, 8, "zeta", "0.01000000", "1.00000000"),
+	}
+	candidates := []Candidate{
+		candidate(model, 1, 7, "acme"),
+		candidate(model, 2, 8, "zeta"),
+	}
+
+	got := GroupByModel(quotes, candidates)[model]
+	if len(got.Offers) != 2 {
+		t.Fatalf("报价条数 = %d，期望 2：%+v", len(got.Offers), got.Offers)
+	}
+	if got.Offers[0].Merchant == nil || *got.Offers[0].Merchant != "zeta" {
+		t.Errorf("最低消费更小的 zeta 应当排第一，得到 %+v", got.Offers)
+	}
+}
+
+// 既没有 token 价、也没有固定费与最低消费的报价（规则只把费用写成 0）仍然
+// 出现，位置是确定的：它在一次性费用那一组的开头（两个键都是 0），排在
+// 有固定费的报价之前、有 token 价的报价之后。
+func TestGroupByModelKeepsOfferWithNoPricesAndNoCharges(t *testing.T) {
+	const model = "alpha"
+	zero := candidatePrice(model, 1, 7, "acme", nil)
+	fixedFee := candidatePrice(model, 2, 8, "globex", nil)
+	fixedFee.Request = money.MustParse("0.02000000")
+	token := candidatePrice(model, 3, 9, "initech",
+		map[string]money.Amount{"prompt": money.MustParse("0.00100000")})
+	candidates := []Candidate{
+		candidate(model, 1, 7, "acme"),
+		candidate(model, 2, 8, "globex"),
+		candidate(model, 3, 9, "initech"),
+	}
+
+	for round := 0; round < 100; round++ {
+		got := GroupByModel([]CandidatePrice{fixedFee, zero, token}, candidates)[model]
+		if len(got.Offers) != 3 {
+			t.Fatalf("第 %d 轮报价条数 = %d，期望 3（一条都不能丢）", round, len(got.Offers))
+		}
+		want := []string{"initech", "acme", "globex"}
+		for i, name := range want {
+			merchant := ""
+			if got.Offers[i].Merchant != nil {
+				merchant = *got.Offers[i].Merchant
+			}
+			if merchant != name {
+				t.Fatalf("第 %d 轮第 %d 条 = %q，期望 %q：%+v", round, i, merchant, name, got.Offers)
+			}
+		}
+	}
+}
+
 // 三个排序键完全相同的两笔报价，末位由渠道 id 分开——其中渠道 id 小的在前。
 //
 // 这个输入在库里造不出来（users.username 唯一，同名即同一商家，整套价相同

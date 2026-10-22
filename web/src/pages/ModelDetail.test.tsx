@@ -209,9 +209,12 @@ describe('模型详情', () => {
     const charges = screen.getByRole('table', { name: '其他费用' })
     expect(charges).toHaveTextContent('globex')
     expect(charges).toHaveTextContent('每请求固定费')
-    expect(charges).toHaveTextContent('$0.1000')
-    expect(charges).toHaveTextContent('$0.2500')
-    expect(charges).toHaveTextContent('cache_write_5m 每单位 $0.0002')
+    // 渠道数与 token 表同口径：只进这一张表的报价不该因此丢掉它。
+    const chargeCells = Array.from(charges.querySelectorAll('tbody tr')[0].querySelectorAll('td')).map(
+      (cell) => cell.textContent,
+    )
+    expect(chargeCells.slice(0, 4)).toEqual(['globex', '3', '$0.1000', '$0.2500'])
+    expect(chargeCells[4]).toBe('cache_write_5m 每单位 $0.0002')
   })
 
   it('一条报价都没有时说明原因，不画一张空表', async () => {

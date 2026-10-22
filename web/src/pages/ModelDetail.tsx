@@ -142,7 +142,7 @@ function SupplierTable({ suppliers, currency }: { suppliers: SupplierPrice[]; cu
  * 反而无处可看。
  */
 function SupplierCharges({ suppliers, currency }: { suppliers: SupplierPrice[]; currency: string }) {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   // 除了带费用的报价，没有 token 价的报价也列进来：一张全是「—」的行至少
   // 说明「这个商家在供」，而两张表都不收它，它就从页面上消失了。
   const rows = suppliers.filter((supplier) => hasCharges(supplier) || !hasTokenPrices(supplier))
@@ -165,6 +165,9 @@ function SupplierCharges({ suppliers, currency }: { suppliers: SupplierPrice[]; 
             <tr>
               <th scope="col">{t('models.detail.merchant')}</th>
               <th scope="col" className="num">
+                {t('models.detail.channelCount')}
+              </th>
+              <th scope="col" className="num">
                 {t('models.detail.requestFee')}
               </th>
               <th scope="col" className="num">
@@ -180,6 +183,7 @@ function SupplierCharges({ suppliers, currency }: { suppliers: SupplierPrice[]; 
                 <td>
                   {supplier.merchant ?? <span className="model-muted">{t('models.detail.platform')}</span>}
                 </td>
+                <td className="num">{formatCount(supplier.channel_count, lang)}</td>
                 <td className="num">{amount(supplier.request)}</td>
                 <td className="num">{amount(supplier.minimum)}</td>
                 <td>

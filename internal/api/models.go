@@ -99,7 +99,8 @@ type modelJSON struct {
 	Object  string `json:"object"`
 	Created int64  `json:"created"`
 	OwnedBy string `json:"owned_by"`
-	// Offers 是供应这个模型的所有报价，按价格升序。
+	// Offers 是供应这个模型的所有报价：有 token 价的按 token 价升序在前，
+	// 只有一次性费用的排在其后（判据见 pricing.GroupByModel）。
 	//
 	// 可以为空：清单回答「能不能用」，offers 回答「谁在供、多少钱」。一个
 	// 有渠道在供、却没有任何适用规则的模型照样在清单里（它能调通，只是

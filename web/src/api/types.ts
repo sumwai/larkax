@@ -161,7 +161,8 @@ export interface Model {
   /** 没有平台计价规则时为 null，界面显示「—」。 */
   pricing: ModelPricing | null
   /**
-   * 按渠道归属折出来的报价，已按价格升序、同商家同价只留一条。
+   * 按渠道归属折出来的报价。已排序：有 token 价的按 token 价升序在前，
+   * 只有一次性费用的排在其后；同商家同价只留一条。
    * 没有报价时服务端省略这个字段（不是空数组）。
    */
   offers?: ModelOffer[]
