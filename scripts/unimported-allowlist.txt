@@ -33,7 +33,6 @@
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
 
 internal/manpage | lib | 只被测试 import 的手页生成器：命令注册表在 cmd/larkaxctl 的 package main 里，别的包引不到，所以由那个包的 man_test.go 驱动；它不会被生产代码 import（终态），产物提交在 man/man1/
-internal/plans | gap | #860 额度包的订阅、发放与作废：请求路径（选源与扣费）与命令行都还没接上，目前只有本包的测试在调
 internal/testdb | lib | 只被测试 import 的夹具包：给每个连库的测试包建一个独立的库
 
 # 清单里的 `internal/manpage` 与 `internal/testdb` 是常驻的两条：**不可能接线、
