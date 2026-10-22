@@ -223,8 +223,8 @@ larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled
 - 命令在**产出结果之前**就失败时（连不上库、参数错），stdout 是**空的**，
   错误在 stderr、退出码非 0。这一条与上一条不矛盾：那份文档回答的是「这一次
   查到了什么」，而那时还没有「查到了什么」。**接管道的一方要先看退出码**。
-- **体检类命令是上一条的例外**：`doctor` 连不上库时仍然产出一份六项全
-  `skipped` 的文档（这是设计——「第 1 项没跑成、其余五项也没跑成」比一句
+- **体检类命令是上一条的例外**：`doctor` 连不上库时仍然产出一份七项全
+  `skipped` 的文档（这是设计——「第 1 项没跑成、其余六项也没跑成」比一句
   「连不上库」有用得多）。所以「stdout 是空的」说的是**其余**命令；体检类
   命令该打的那份报告照样打，退出码照旧非 0。
 
@@ -233,7 +233,7 @@ larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled
 ```json
 {
   "status": "ok",
-  "summary": { "total": 6, "passed": 4, "failed": 1, "skipped": 1 },
+  "summary": { "total": 7, "passed": 5, "failed": 1, "skipped": 1 },
   "checks": [ ... ],
   "exit_code": 0
 }
