@@ -1773,6 +1773,12 @@ gremlins 版本、`workers=1`、系数 10、`--invert-logical`、每个包之前
 门禁 → `make dist` → 把制品传到 GitHub Release。制品放到哪台机器上属于使用方的事，
 不在本仓库范围内。
 
+另有一个**手动触发**的构建工作流 [.github/workflows/dist.yml](../.github/workflows/dist.yml)：
+它只把某一棵树打成产物——`make dist` 出的二进制，加一份 `npm run build` 出来的控制台
+静态包——通过 workflow artifact 取，**不进 Release，也不部署**。它**不跑门禁**：门禁在
+push 与 PR 上已经跑过，触发前先确认那个提交是绿的。要「门禁 + 构建 + 发布」一条龙，走
+tag 与 `release.yml`。
+
 ## 变异测试
 
 改了**计费、账本、金额**这三处代码时，除了单测还要跑变异测试。额度包的发放与
