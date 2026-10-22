@@ -711,6 +711,16 @@ export const zh = {
   'errors.generic': '出了点问题，请稍后重试。',
   'errors.network': '连不上服务。检查网络后重试。',
   'errors.notFound': '没有找到这条记录。',
+  'errors.renderTitle': '这个页面出错了',
+  'errors.renderBody': '页面在渲染时遇到问题。你可以重新加载，或从侧栏切到别的页面。',
+  'errors.fatalTitle': '应用出错了',
+  'errors.fatalBody': '应用在渲染时遇到问题。请重新加载。',
+  'errors.reload': '重新加载',
+  'errors.diagnostics': '诊断信息',
+  'errors.time': '发生时间',
+  'errors.route': '当前路由',
+  'errors.message': '错误信息',
+  'errors.copyDiagnostics': '复制诊断信息',
 } as const
 
 export type MessageKey = keyof typeof zh

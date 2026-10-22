@@ -5,6 +5,7 @@ import { I18nProvider, useI18n } from './i18n'
 import { SiteProvider } from './site/SiteProvider'
 import { ThemeProvider } from './theme/ThemeProvider'
 import { AppShell } from './components/AppShell'
+import { FatalErrorBoundary } from './components/ErrorBoundary'
 import { MockBanner } from './components/MockBanner'
 import { Alert, ToastProvider } from './components/ui'
 import { viewAllowed, viewOfPath, type View } from './ops/views'
@@ -91,157 +92,159 @@ function NotFound() {
 
 export function App() {
   return (
-    <I18nProvider>
-      <ThemeProvider>
-        <ToastProvider>
-          <SiteProvider>
-            <AuthProvider>
-              <BrowserRouter>
-                <MockBanner />
-                <Routes>
-                  <Route path="/" element={<Landing />} />
-                  <Route path="/login" element={<Login />} />
-                  <Route
-                    path="/app"
-                    element={
-                      <RequireAuth>
-                        <AppShell />
-                      </RequireAuth>
-                    }
-                  >
-                    <Route index element={<Overview />} />
-                    <Route path="keys" element={<Keys />} />
-                    <Route path="usage" element={<Usage />} />
-                    <Route path="models" element={<Models />} />
-                    {/* 规范名可能带 `/`（`vendor/model`），所以用 splat 接住整段。 */}
-                    <Route path="models/*" element={<ModelDetail />} />
-                    <Route path="quickstart" element={<Quickstart />} />
-                    <Route path="settings" element={<Settings />} />
+    <FatalErrorBoundary>
+      <I18nProvider>
+        <ThemeProvider>
+          <ToastProvider>
+            <SiteProvider>
+              <AuthProvider>
+                <BrowserRouter>
+                  <MockBanner />
+                  <Routes>
+                    <Route path="/" element={<Landing />} />
+                    <Route path="/login" element={<Login />} />
                     <Route
-                      path="merchant"
-                      element={<Navigate to="/app/merchant/overview" replace />}
-                    />
-                    <Route
-                      path="merchant/overview"
+                      path="/app"
                       element={
-                        <RequireView view="merchant">
-                          <MerchantOverview />
-                        </RequireView>
+                        <RequireAuth>
+                          <AppShell />
+                        </RequireAuth>
                       }
-                    />
-                    <Route
-                      path="merchant/models"
-                      element={
-                        <RequireView view="merchant">
-                          <MerchantModels />
-                        </RequireView>
-                      }
-                    />
-                    <Route
-                      path="merchant/upstreams"
-                      element={
-                        <RequireView view="merchant">
-                          <MerchantUpstreams />
-                        </RequireView>
-                      }
-                    />
-                    <Route
-                      path="merchant/account"
-                      element={
-                        <RequireView view="merchant">
-                          <MerchantAccount />
-                        </RequireView>
-                      }
-                    />
-                    <Route
-                      path="merchant/settings"
-                      element={
-                        <RequireView view="merchant">
-                          <MerchantSettings />
-                        </RequireView>
-                      }
-                    />
-                    <Route
-                      path="merchant/channels"
-                      element={
-                        <RequireView view="merchant">
-                          <OpsChannels scope="merchant" />
-                        </RequireView>
-                      }
-                    />
-                    <Route
-                      path="merchant/pricing"
-                      element={
-                        <RequireView view="merchant">
-                          <MerchantPricing />
-                        </RequireView>
-                      }
-                    />
-                    <Route
-                      path="admin/settings"
-                      element={
-                        <RequireView view="admin">
-                          <Settings />
-                        </RequireView>
-                      }
-                    />
-                    <Route path="admin" element={<Navigate to="/app/admin/channels" replace />} />
-                    <Route
-                      path="admin/channels"
-                      element={
-                        <RequireView view="admin">
-                          <OpsChannels scope="admin" />
-                        </RequireView>
-                      }
-                    />
-                    <Route
-                      path="admin/models"
-                      element={
-                        <RequireView view="admin">
-                          <OpsModels />
-                        </RequireView>
-                      }
-                    />
-                    <Route
-                      path="admin/users"
-                      element={
-                        <RequireView view="admin">
-                          <AdminUsers />
-                        </RequireView>
-                      }
-                    />
-                    <Route
-                      path="admin/users/:id"
-                      element={
-                        <RequireView view="admin">
-                          <AdminUserDetailPage />
-                        </RequireView>
-                      }
-                    />
-                    <Route
-                      path="admin/aliases"
-                      element={
-                        <RequireView view="admin">
-                          <OpsAliases />
-                        </RequireView>
-                      }
-                    />
-                    <Route
-                      path="admin/pricing"
-                      element={
-                        <RequireView view="admin">
-                          <OpsPricing />
-                        </RequireView>
-                      }
-                    />
-                  </Route>
-                  <Route path="*" element={<NotFound />} />
-                </Routes>
-              </BrowserRouter>
-            </AuthProvider>
-          </SiteProvider>
-        </ToastProvider>
-      </ThemeProvider>
-    </I18nProvider>
+                    >
+                      <Route index element={<Overview />} />
+                      <Route path="keys" element={<Keys />} />
+                      <Route path="usage" element={<Usage />} />
+                      <Route path="models" element={<Models />} />
+                      {/* 规范名可能带 `/`（`vendor/model`），所以用 splat 接住整段。 */}
+                      <Route path="models/*" element={<ModelDetail />} />
+                      <Route path="quickstart" element={<Quickstart />} />
+                      <Route path="settings" element={<Settings />} />
+                      <Route
+                        path="merchant"
+                        element={<Navigate to="/app/merchant/overview" replace />}
+                      />
+                      <Route
+                        path="merchant/overview"
+                        element={
+                          <RequireView view="merchant">
+                            <MerchantOverview />
+                          </RequireView>
+                        }
+                      />
+                      <Route
+                        path="merchant/models"
+                        element={
+                          <RequireView view="merchant">
+                            <MerchantModels />
+                          </RequireView>
+                        }
+                      />
+                      <Route
+                        path="merchant/upstreams"
+                        element={
+                          <RequireView view="merchant">
+                            <MerchantUpstreams />
+                          </RequireView>
+                        }
+                      />
+                      <Route
+                        path="merchant/account"
+                        element={
+                          <RequireView view="merchant">
+                            <MerchantAccount />
+                          </RequireView>
+                        }
+                      />
+                      <Route
+                        path="merchant/settings"
+                        element={
+                          <RequireView view="merchant">
+                            <MerchantSettings />
+                          </RequireView>
+                        }
+                      />
+                      <Route
+                        path="merchant/channels"
+                        element={
+                          <RequireView view="merchant">
+                            <OpsChannels scope="merchant" />
+                          </RequireView>
+                        }
+                      />
+                      <Route
+                        path="merchant/pricing"
+                        element={
+                          <RequireView view="merchant">
+                            <MerchantPricing />
+                          </RequireView>
+                        }
+                      />
+                      <Route
+                        path="admin/settings"
+                        element={
+                          <RequireView view="admin">
+                            <Settings />
+                          </RequireView>
+                        }
+                      />
+                      <Route path="admin" element={<Navigate to="/app/admin/channels" replace />} />
+                      <Route
+                        path="admin/channels"
+                        element={
+                          <RequireView view="admin">
+                            <OpsChannels scope="admin" />
+                          </RequireView>
+                        }
+                      />
+                      <Route
+                        path="admin/models"
+                        element={
+                          <RequireView view="admin">
+                            <OpsModels />
+                          </RequireView>
+                        }
+                      />
+                      <Route
+                        path="admin/users"
+                        element={
+                          <RequireView view="admin">
+                            <AdminUsers />
+                          </RequireView>
+                        }
+                      />
+                      <Route
+                        path="admin/users/:id"
+                        element={
+                          <RequireView view="admin">
+                            <AdminUserDetailPage />
+                          </RequireView>
+                        }
+                      />
+                      <Route
+                        path="admin/aliases"
+                        element={
+                          <RequireView view="admin">
+                            <OpsAliases />
+                          </RequireView>
+                        }
+                      />
+                      <Route
+                        path="admin/pricing"
+                        element={
+                          <RequireView view="admin">
+                            <OpsPricing />
+                          </RequireView>
+                        }
+                      />
+                    </Route>
+                    <Route path="*" element={<NotFound />} />
+                  </Routes>
+                </BrowserRouter>
+              </AuthProvider>
+            </SiteProvider>
+          </ToastProvider>
+        </ThemeProvider>
+      </I18nProvider>
+    </FatalErrorBoundary>
   )
 }

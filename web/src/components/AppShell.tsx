@@ -5,6 +5,7 @@ import { useI18n } from '../i18n'
 import type { MessageKey } from '../i18n/zh'
 import { useMediaQuery, useIsMobile, useIsNarrow } from '../hooks/useMediaQuery'
 import { ActionSheet } from './ActionSheet'
+import { RouteErrorBoundary } from './ErrorBoundary'
 import {
   homeOf,
   isSharedMerchantPath,
@@ -407,7 +408,9 @@ export function AppShell() {
         </header>
 
         <main id="main-content" ref={mainRef} tabIndex={-1} className="app-content">
-          <Outlet />
+          <RouteErrorBoundary>
+            <Outlet />
+          </RouteErrorBoundary>
         </main>
 
         {/*

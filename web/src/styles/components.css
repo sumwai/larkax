@@ -803,13 +803,20 @@ textarea.input {
   font-weight: 650;
   flex: none;
 }
-.side-group-label {
+.side-group-label,
+.error-page-label {
   font-size: 10.5px;
   font-weight: 650;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--faint);
+}
+.side-group-label {
   padding: 2px 10px 6px;
+}
+.error-page-label {
+  /* 与下面的 <pre> 左对齐；侧栏那条的 10px 内缩不该带过来。 */
+  padding: 0;
 }
 .sidebar.collapsed {
   width: 64px;
@@ -2324,6 +2331,35 @@ textarea.input {
 .drawer-nav .nav a,
 .drawer-nav .nav button {
   min-height: 44px;
+}
+
+/* 4.1 错误边界 */
+.error-page {
+  max-width: 720px;
+}
+.error-page-title {
+  font-size: 18px;
+}
+.error-page-body {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.error-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.error-page-diagnostics {
+  margin: 6px 0 0;
+  padding: 12px;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* ══════════════════════════════════════════════════════════════════
