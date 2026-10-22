@@ -2515,9 +2515,16 @@ textarea.input {
 
 @media (max-width: 720px) {
   .form-grid,
-  .kpis,
   .cal-pair {
     grid-template-columns: 1fr;
+  }
+  /*
+   * 三列在 390px 下每张只剩约 118px，数字会折行；两列让第三张落到第二行，
+   * 仍比单列省一屏。`.kpis.four` 是 auto-fit 的四格读数，特异度更高，
+   * 不受这条影响。
+   */
+  .kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .model-item {
     padding: 12px 14px;
@@ -2656,6 +2663,25 @@ textarea.input {
   }
   .page-head h1 {
     font-size: 20px;
+  }
+  /*
+   * 窄屏顶栏常驻当前页标题（AppShell 的 `current`），正文再把同一句写成
+   * `<h1>` 就是打两遍。这里只做视觉隐藏：标题仍在可及树里，读屏照常把
+   * 它当一级标题读出来。声明与 base.css 的 `.sr-only` 是同一套。
+   *
+   * 标题与顶栏不同文的页面不挂这个类（`PageHead` 的 `keepTitleOnNarrow`），
+   * 例如模型详情页写的是模型显示名，而顶栏是「模型」。
+   */
+  .page-head-title-narrow-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
   /*
    * 页头右侧的操作区在窄屏独占一行。它默认是收缩到内容宽的 flex 项，

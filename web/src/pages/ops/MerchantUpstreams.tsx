@@ -77,6 +77,7 @@ export function MerchantUpstreams() {
     <div className="page">
       <PageHead
         title={title}
+        keepTitleOnNarrow
         subtitle={t(`ops.merchant.upstreams.subtitle.${subject}` as MessageKey)}
       />
 

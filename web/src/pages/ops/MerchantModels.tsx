@@ -32,6 +32,7 @@ export function MerchantModels() {
     <div className="page">
       <PageHead
         title={title}
+        keepTitleOnNarrow
         subtitle={`${t(`ops.merchant.models.subtitle.${subject}` as MessageKey)} ${t(
           `ops.merchant.models.pricedHint.${subject}` as MessageKey,
         )}`}

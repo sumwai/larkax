@@ -395,7 +395,7 @@ export function AdminUserDetailPage() {
   if (!validId) {
     return (
       <>
-        <PageHead title={t('ops.users.detailTitle')} />
+        <PageHead title={t('ops.users.detailTitle')} keepTitleOnNarrow />
         <Alert tone="bad" title={t('ops.users.badId')}>
           <Link className="inline-link" to="/app/admin/users">{t('ops.users.backToList')}</Link>
         </Alert>
@@ -411,6 +411,7 @@ export function AdminUserDetailPage() {
     <>
       <PageHead
         title={t('ops.users.detailTitle')}
+        keepTitleOnNarrow
         subtitle={detail ? `#${detail.id} · ${detail.username}` : undefined}
         actions={
           detail && (

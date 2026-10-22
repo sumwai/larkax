@@ -575,15 +575,26 @@ export function PageHead({
   title,
   subtitle,
   actions,
+  keepTitleOnNarrow,
 }: {
   title: ReactNode
   subtitle?: ReactNode
   actions?: ReactNode
+  /**
+   * 窄屏下保留 `<h1>`。
+   *
+   * 窄屏顶栏常驻当前页标题，正文的一级标题只在它与顶栏不同文时才值得再占
+   * 一行——例如模型详情页的标题是模型显示名，顶栏写的是「模型」。默认隐藏，
+   * 隐藏只作用于视觉，标题仍在可及树里。
+   */
+  keepTitleOnNarrow?: boolean
 }) {
   return (
     <div className="page-head">
       <div>
-        <h1>{title}</h1>
+        <h1 className={keepTitleOnNarrow ? undefined : 'page-head-title-narrow-hidden'}>
+          {title}
+        </h1>
         {subtitle && <p>{subtitle}</p>}
       </div>
       {actions && <div className="page-actions">{actions}</div>}

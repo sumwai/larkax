@@ -188,6 +188,7 @@ export function ModelDetail() {
       {back}
       <PageHead
         title={model.display_name || model.name}
+        keepTitleOnNarrow
         subtitle={
           <>
             <span className="mono">{model.name}</span>

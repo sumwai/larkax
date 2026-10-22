@@ -56,6 +56,7 @@ export function MerchantOverview() {
     <div className="page">
       <PageHead
         title={t(`ops.merchant.overview.title.${subject}` as MessageKey)}
+        keepTitleOnNarrow
         subtitle={t(`ops.merchant.overview.subtitle.${subject}` as MessageKey)}
       />
 
