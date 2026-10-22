@@ -124,6 +124,7 @@ const BOTTOM_NAV: Record<BottomNavKey, BottomTab[]> = {
     { to: '/app/merchant/overview', key: 'nav.overview', icon: IconOverview },
     { to: '/app/merchant/channels', key: 'ops.nav.channels', icon: IconChannel },
     { to: '/app/usage', key: 'nav.usage', icon: IconUsage },
+    { to: '/app/merchant/account', key: 'nav.account', icon: IconUser },
     { to: 'settings', key: 'nav.settings', icon: IconSettings },
   ],
   merchantSite: [
@@ -183,6 +184,9 @@ export function AppShell() {
     view === 'user' ? APP_NAV : view === 'merchant' ? merchantItems : OPS_NAV[view]
   // 设置是账号级的：管理员在商家视图里点设置，落到管理视图那一个地址。
   const settings = settingsOf(view === 'merchant' && siteWide ? 'admin' : view)
+  // 「账号」只对商家开放：用户与管理员的底栏没有这一项，账号段留在他们的
+  // 设置页里；管理员进商家视图时也进不去这一页（不在共享路径里）。
+  const account = view === 'merchant' && !siteWide ? '/app/merchant/account' : null
   // 底栏跟着当前这一组页面走（见 `BottomNavKey`）。
   const tabs = BOTTOM_NAV[view === 'merchant' && siteWide ? 'merchantSite' : view]
 
@@ -225,7 +229,13 @@ export function AppShell() {
     )?.key
   const current: MessageKey =
     matched ??
-    (location.pathname === settings ? 'nav.settings' : allowed ? navItems[0].key : 'nav.noAccess')
+    (account && location.pathname === account
+      ? 'nav.account'
+      : location.pathname === settings
+        ? 'nav.settings'
+        : allowed
+          ? navItems[0].key
+          : 'nav.noAccess')
 
   const signOut = async () => {
     await logout()
@@ -337,6 +347,12 @@ export function AppShell() {
             </div>
           )}
           <div className="nav">
+            {account && (
+              <NavLink to={account} title={t('nav.account')}>
+                <IconUser size={17} />
+                <span>{t('nav.account')}</span>
+              </NavLink>
+            )}
             <NavLink to={settings} title={t('nav.settings')}>
               <IconSettings size={17} />
               <span>{t('nav.settings')}</span>
@@ -480,6 +496,12 @@ export function AppShell() {
                   </NavLink>
                 )
               })}
+              {account && (
+                <NavLink to={account}>
+                  <IconUser size={18} />
+                  <span>{t('nav.account')}</span>
+                </NavLink>
+              )}
               <NavLink to={settings}>
                 <IconSettings size={18} />
                 <span>{t('nav.settings')}</span>

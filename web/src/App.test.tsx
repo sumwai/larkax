@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   listUpstreams: vi.fn(),
   listSuppliedModels: vi.fn(),
   meta: vi.fn(),
+  updateMe: vi.fn(),
+  changePassword: vi.fn(),
 }))
 
 vi.mock('./api', async (importOriginal) => {
@@ -33,6 +35,8 @@ vi.mock('./api', async (importOriginal) => {
       models: mocks.models,
       meta: mocks.meta,
       session: mocks.session,
+      updateMe: mocks.updateMe,
+      changePassword: mocks.changePassword,
       setCsrfToken: vi.fn(),
       logout: vi.fn(),
     },
@@ -125,6 +129,14 @@ describe('运营视图的角色门槛', () => {
     expect(window.location.pathname).toBe('/app/merchant/overview')
   })
 
+  it('merchant 进得去账号页，设置页只剩界面偏好', async () => {
+    await open('merchant', '/app/merchant/account')
+    expect(await screen.findByRole('heading', { name: '账号', level: 1 })).toBeInTheDocument()
+    fireEvent.click(screen.getAllByRole('link', { name: '设置' })[0])
+    expect(await screen.findByRole('heading', { name: '设置', level: 1 })).toBeInTheDocument()
+    expect(screen.queryByText('修改口令')).not.toBeInTheDocument()
+  })
+
   it('merchant 进得去商家概览，主语是「我的」', async () => {
     await open('merchant', '/app/merchant/overview')
     expect(await screen.findByRole('heading', { name: '我的概览' })).toBeInTheDocument()
@@ -191,8 +203,12 @@ describe('运营视图的角色门槛', () => {
     expect(screen.getByRole('button', { name: '管理' })).toHaveAttribute('aria-pressed', 'true')
   })
 
-  it.each(['/app/merchant/channels', '/app/merchant/pricing', '/app/merchant/settings'])(
-    'admin 直接敲 %s 落到无权限页',
+  it.each([
+    '/app/merchant/channels',
+    '/app/merchant/pricing',
+    '/app/merchant/settings',
+    '/app/merchant/account',
+  ])('admin 直接敲 %s 落到无权限页',
     async (path) => {
       await open('admin', path)
 
@@ -202,6 +218,8 @@ describe('运营视图的角色门槛', () => {
       expect(mocks.listChannels).not.toHaveBeenCalled()
       expect(mocks.listRules).not.toHaveBeenCalled()
       expect(mocks.overview).not.toHaveBeenCalled()
+      expect(mocks.updateMe).not.toHaveBeenCalled()
+      expect(mocks.changePassword).not.toHaveBeenCalled()
     },
   )
 

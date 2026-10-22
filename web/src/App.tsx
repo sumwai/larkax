@@ -25,7 +25,8 @@ import { Usage } from './pages/Usage'
 import { Models } from './pages/Models'
 import { ModelDetail } from './pages/ModelDetail'
 import { Quickstart } from './pages/Quickstart'
-import { Settings } from './pages/Settings'
+import { MerchantSettings, Settings } from './pages/Settings'
+import { MerchantAccount } from './pages/MerchantAccount'
 
 function LoadingScreen() {
   const { t } = useI18n()
@@ -145,10 +146,18 @@ export function App() {
                       }
                     />
                     <Route
+                      path="merchant/account"
+                      element={
+                        <RequireView view="merchant">
+                          <MerchantAccount />
+                        </RequireView>
+                      }
+                    />
+                    <Route
                       path="merchant/settings"
                       element={
                         <RequireView view="merchant">
-                          <Settings />
+                          <MerchantSettings />
                         </RequireView>
                       }
                     />

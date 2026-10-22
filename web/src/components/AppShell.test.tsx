@@ -378,7 +378,7 @@ describe('AppShell 底部 tab', () => {
       {
         role: 'merchant' as const,
         path: '/app/merchant/overview',
-        labels: ['概览', '渠道', '用量', '设置'],
+        labels: ['概览', '渠道', '用量', '账号', '设置'],
       },
       {
         role: 'admin' as const,
@@ -409,6 +409,24 @@ describe('AppShell 底部 tab', () => {
     const current = within(bottomNav()).getByRole('link', { name: 'API 密钥' })
     expect(current).toHaveAttribute('aria-current', 'page')
     expect(current.textContent).toBe('API 密钥')
+  })
+
+  it('商家的「账号」在底栏与侧栏各有一条，停在账号页时是当前项', async () => {
+    await renderShell('merchant', '/app/merchant/account')
+    const tab = within(bottomNav()).getByRole('link', { name: '账号' })
+    expect(tab.getAttribute('href')).toBe('/app/merchant/account')
+    expect(tab).toHaveAttribute('aria-current', 'page')
+    // 侧栏那一组里也有：底栏在窄屏才出现，宽屏靠侧栏走进这一页。
+    const sidebar = within(document.querySelector('.sidebar') as HTMLElement)
+    expect(sidebar.getByRole('link', { name: '账号' }).getAttribute('href')).toBe(
+      '/app/merchant/account',
+    )
+    expect(within(document.querySelector('.app-topbar') as HTMLElement).getByText('账号')).toBeInTheDocument()
+  })
+
+  it('管理员进商家视图时没有「账号」：那一页不在他的共享路径里', async () => {
+    await renderShell('admin', '/app/merchant/models')
+    expect(tabLabels()).not.toContain('账号')
   })
 
   it('商家与管理员的「概览」都指向全站主语那一页', async () => {
