@@ -273,6 +273,164 @@ func TestGroupByModelOrdersMerchantsByNameOnEqualPrices(t *testing.T) {
 	}
 }
 
+// 报价排序先分量纲：有 token 价的按 token 价升序在前，只有一次性费用的
+// 排在它们之后，组内按每请求固定费、再按最低消费升序。
+//
+// 四种情形各来一条：只有固定费、只有最低消费、两者都有、token 价 + 固定费。
+// 关键判据是「只有固定费的不再排在最前」——它的 offerSortPrice 是零值，
+// 按那个键升序会让「按次收费」看起来像最便宜的一档。
+func TestGroupByModelSortsTokenPricesBeforeFixedOnly(t *testing.T) {
+	const model = "alpha"
+	fixed := func(channelID, ownerID int64, merchant string, request, minimum string) CandidatePrice {
+		price := candidatePrice(model, channelID, ownerID, merchant, nil)
+		price.Request = money.MustParse(request)
+		price.Minimum = money.MustParse(minimum)
+		return price
+	}
+	quotes := []CandidatePrice{
+		fixed(1, 8, "globex", "0.20000000", "0.00000000"),    // 只有固定费
+		fixed(2, 11, "hooli", "0.00000000", "5.00000000"),    // 只有最低消费
+		fixed(3, 10, "umbrella", "0.01000000", "2.00000000"), // 两者都有
+		fixed(4, 9, "initech", "0.01000000", "0.50000000"),   // 同上，最低消费更小
+		candidatePrice(model, 5, 7, "acme", map[string]money.Amount{ // token 价 + 固定费
+			"prompt": money.MustParse("0.00200000"),
+		}),
+		candidatePrice(model, 6, 0, "", map[string]money.Amount{ // 平台自营，只有 token 价
+			"prompt": money.MustParse("0.00400000"),
+		}),
+	}
+	quotes[4].Request = money.MustParse("0.05000000")
+	candidates := make([]Candidate, 0, len(quotes))
+	for _, quote := range quotes {
+		candidates = append(candidates, candidate(model, quote.ChannelID, quote.OwnerUserID, quote.Merchant))
+	}
+
+	got := GroupByModel(quotes, candidates)[model]
+	if len(got.Offers) != len(quotes) {
+		t.Fatalf("报价条数 = %d，期望 %d：%+v", len(got.Offers), len(quotes), got.Offers)
+	}
+	want := []struct {
+		merchant string // 空串表示平台自营
+		hasToken bool
+	}{
+		{"acme", true},      // token 价最低
+		{"", true},          // 平台自营的 token 价
+		{"hooli", false},    // 只有最低消费：固定费是 0，排在这一组最前
+		{"initech", false},  // 固定费 0.01、最低消费 0.5
+		{"umbrella", false}, // 固定费相同，最低消费更大
+		{"globex", false},   // 只有固定费，且最大
+	}
+	for i, expected := range want {
+		if i >= len(got.Offers) {
+			break
+		}
+		offer := got.Offers[i]
+		merchant := ""
+		if offer.Merchant != nil {
+			merchant = *offer.Merchant
+		}
+		if merchant != expected.merchant {
+			t.Fatalf("第 %d 条 = %q，期望 %q：%+v", i, merchant, expected.merchant, got.Offers)
+		}
+		if hasToken := len(offer.Prices) > 0; hasToken != expected.hasToken {
+			t.Fatalf("第 %d 条（%s）有 token 价 = %v，期望 %v", i, merchant, hasToken, expected.hasToken)
+		}
+	}
+}
+
+// 固定费组内先比 request、再比 minimum：商家名的顺序与 minimum 的顺序相反时，
+// minimum 决定先后。只比商家名或只比 request 的实现都会在这里红。
+func TestGroupByModelOrdersFixedOnlyByMinimum(t *testing.T) {
+	const model = "alpha"
+	fixed := func(channelID, ownerID int64, merchant, request, minimum string) CandidatePrice {
+		price := candidatePrice(model, channelID, ownerID, merchant, nil)
+		price.Request = money.MustParse(request)
+		price.Minimum = money.MustParse(minimum)
+		return price
+	}
+	quotes := []CandidatePrice{
+		// 商家名靠前、最低消费却更大：按名字排的话它会在前面。
+		fixed(1, 7, "acme", "0.01000000", "9.00000000"),
+		fixed(2, 8, "zeta", "0.01000000", "1.00000000"),
+	}
+	candidates := []Candidate{
+		candidate(model, 1, 7, "acme"),
+		candidate(model, 2, 8, "zeta"),
+	}
+
+	got := GroupByModel(quotes, candidates)[model]
+	if len(got.Offers) != 2 {
+		t.Fatalf("报价条数 = %d，期望 2：%+v", len(got.Offers), got.Offers)
+	}
+	if got.Offers[0].Merchant == nil || *got.Offers[0].Merchant != "zeta" {
+		t.Errorf("最低消费更小的 zeta 应当排第一，得到 %+v", got.Offers)
+	}
+}
+
+// 既没有 token 价、也没有固定费与最低消费的报价（规则只把费用写成 0）仍然
+// 出现，位置是确定的：它在一次性费用那一组的开头（两个键都是 0），排在
+// 有固定费的报价之前、有 token 价的报价之后。
+func TestGroupByModelKeepsOfferWithNoPricesAndNoCharges(t *testing.T) {
+	const model = "alpha"
+	zero := candidatePrice(model, 1, 7, "acme", nil)
+	fixedFee := candidatePrice(model, 2, 8, "globex", nil)
+	fixedFee.Request = money.MustParse("0.02000000")
+	token := candidatePrice(model, 3, 9, "initech",
+		map[string]money.Amount{"prompt": money.MustParse("0.00100000")})
+	candidates := []Candidate{
+		candidate(model, 1, 7, "acme"),
+		candidate(model, 2, 8, "globex"),
+		candidate(model, 3, 9, "initech"),
+	}
+
+	for round := 0; round < 100; round++ {
+		got := GroupByModel([]CandidatePrice{fixedFee, zero, token}, candidates)[model]
+		if len(got.Offers) != 3 {
+			t.Fatalf("第 %d 轮报价条数 = %d，期望 3（一条都不能丢）", round, len(got.Offers))
+		}
+		want := []string{"initech", "acme", "globex"}
+		for i, name := range want {
+			merchant := ""
+			if got.Offers[i].Merchant != nil {
+				merchant = *got.Offers[i].Merchant
+			}
+			if merchant != name {
+				t.Fatalf("第 %d 轮第 %d 条 = %q，期望 %q：%+v", round, i, merchant, name, got.Offers)
+			}
+		}
+	}
+}
+
+// 三个排序键完全相同的两笔报价，末位由渠道 id 分开——其中渠道 id 小的在前。
+//
+// 这个输入在库里造不出来（users.username 唯一，同名即同一商家，整套价相同
+// 会被折成一条），但比较器不能依赖这个前提：一旦落到 map 的迭代顺序上，
+// 同一份数据两次请求就可能给出不同的行序，而照行序读页面的人看不出这是随机的。
+func TestGroupByModelBreaksTiesByChannelID(t *testing.T) {
+	const model = "alpha"
+	prices := map[string]money.Amount{"prompt": money.MustParse("0.00300000")}
+	base := CandidatePrice{Model: model, Prices: prices, Price: prices["prompt"],
+		Request: money.MustParse("0.05000000"), Minimum: money.MustParse("1.00000000")}
+	higher := base
+	higher.ChannelID, higher.OwnerUserID, higher.Merchant = 7, 11, "acme"
+	higher.Rule = RuleRef{ID: 71}
+	lower := base
+	lower.ChannelID, lower.OwnerUserID, lower.Merchant = 3, 12, "acme"
+	lower.Rule = RuleRef{ID: 32}
+
+	candidates := []Candidate{candidate(model, 7, 11, "acme"), candidate(model, 3, 12, "acme")}
+	for round := 0; round < 100; round++ {
+		got := GroupByModel([]CandidatePrice{higher, lower}, candidates)[model]
+		if len(got.Offers) != 2 {
+			t.Fatalf("第 %d 轮报价条数 = %d，期望 2", round, len(got.Offers))
+		}
+		if got.Offers[0].Rule.ID != 32 {
+			t.Fatalf("第 %d 轮第一条的规则 = %d，期望渠道 id 较小的 32",
+				round, got.Offers[0].Rule.ID)
+		}
+	}
+}
+
 // 一次性费用与计量项单价随整套报价带出来，并且与逐维度价出自同一次求值：
 // 最低消费不抬高每千 token 的单价，固定费也不进 Prices。
 func TestPricesOfCarriesChargesAndUnits(t *testing.T) {

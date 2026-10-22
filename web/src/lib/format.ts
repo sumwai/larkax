@@ -59,8 +59,9 @@ export function formatMoney(value: Money | null | undefined): string {
 /**
  * 单价格式化：最多 8 位小数，至少保留 4 位，去掉末尾多余的 0。
  *
- * 报价是「每 1000 个输入 token」的金额（如 `0.00350000`），用 `formatMoney`
- * 的 2 位口径会显示成 `0.00`——那是把一条真实的低价显示成了免费。
+ * 用于报价里的各类单价：每 1000 个 token 的金额（如 `0.00350000`）、每次请求
+ * 的固定费用与最低消费、每个计量单位的单价。它们都可能是很小的数，用
+ * `formatMoney` 的 2 位口径会显示成 `0.00`——那是把一条真实的低价显示成了免费。
  */
 export function formatUnitPrice(value: Money | null | undefined): string {
   const parsed = parseMoney(value, 8)

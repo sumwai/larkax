@@ -97,7 +97,8 @@ type modelJSON struct {
 	Modalities   modalitiesJSON  `json:"modalities"`
 	// Pricing 为 nil 表示没有平台规则——界面显示「—」，不伪造一个起价。
 	Pricing *pricingJSON `json:"pricing"`
-	// Offers 是按渠道归属折出来的报价，按价格升序；没有报价时省略这个
+	// Offers 是按渠道归属折出来的报价，排序见 pricing.GroupByModel（有 token
+	// 价的在前）；没有报价时省略这个
 	// 字段而不是给一个空数组（理由见 api.modelJSON 的同名字段）。
 	Offers []offerJSON `json:"offers,omitempty"`
 }

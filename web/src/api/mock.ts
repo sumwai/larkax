@@ -154,6 +154,7 @@ const MODELS: Model[] = [
       output_per_mtok: '15.00000000',
       cache_read_per_mtok: '0.30000000',
       cache_write_per_mtok: '3.75000000',
+      reasoning_per_mtok: '15.00000000',
     },
     offers: [
       { merchant: 'acme', price: '0.00350000' },
@@ -174,6 +175,7 @@ const MODELS: Model[] = [
       output_per_mtok: '75.00000000',
       cache_read_per_mtok: '1.50000000',
       cache_write_per_mtok: '18.75000000',
+      reasoning_per_mtok: '75.00000000',
     },
   },
   {
@@ -190,6 +192,7 @@ const MODELS: Model[] = [
       output_per_mtok: '8.00000000',
       cache_read_per_mtok: '0.50000000',
       cache_write_per_mtok: null,
+      reasoning_per_mtok: null,
     },
     offers: [{ merchant: null, price: '0.00200000' }],
   },
@@ -207,6 +210,7 @@ const MODELS: Model[] = [
       output_per_mtok: '1.60000000',
       cache_read_per_mtok: '0.10000000',
       cache_write_per_mtok: null,
+      reasoning_per_mtok: null,
     },
   },
   {
@@ -223,6 +227,7 @@ const MODELS: Model[] = [
       output_per_mtok: '1.10000000',
       cache_read_per_mtok: null,
       cache_write_per_mtok: null,
+      reasoning_per_mtok: null,
     },
   },
   {
@@ -293,6 +298,15 @@ const DETAIL_MODELS: Record<string, ModelDetailResponse['model']> = {
         merchant: null,
         price: '0.00000000',
         prices: { completion: '0.01500000' },
+        channel_count: 1,
+      },
+      {
+        // 只有一次性费用、没有 token 价：进详情页的「其他费用」那张表。
+        merchant: 'initech',
+        price: '0.00000000',
+        request: '0.10000000',
+        minimum: '0.25000000',
+        units: { cache_write_5m: '0.00020000' },
         channel_count: 1,
       },
     ],

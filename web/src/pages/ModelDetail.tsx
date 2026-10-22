@@ -67,6 +67,20 @@ function limitText(value: number, t: (key: MessageKey) => string, lang: 'zh' | '
   return value > 0 ? formatCount(value, lang) : t('models.detail.notFilled')
 }
 
+/** 有 token 价的报价才进每千 token 那张表。 */
+function hasTokenPrices(supplier: SupplierPrice): boolean {
+  return supplier.prices !== undefined && Object.keys(supplier.prices).length > 0
+}
+
+/** 有一次性费用或计量项单价的报价才进另一张表。 */
+function hasCharges(supplier: SupplierPrice): boolean {
+  return (
+    supplier.request !== undefined ||
+    supplier.minimum !== undefined ||
+    (supplier.units !== undefined && Object.keys(supplier.units).length > 0)
+  )
+}
+
 function SupplierTable({ suppliers, currency }: { suppliers: SupplierPrice[]; currency: string }) {
   const { t, lang } = useI18n()
   const columns = DIMENSIONS.filter((dimension) =>
@@ -116,6 +130,82 @@ function SupplierTable({ suppliers, currency }: { suppliers: SupplierPrice[]; cu
         </tbody>
       </table>
     </div>
+  )
+}
+
+/**
+ * 一次性费用与计量项单价单独成表。
+ *
+ * 它们的量纲与每千 token 的金额不同——`request` / `minimum` 是每次请求多少元，
+ * `units` 是每个计量单位多少元——所以不并进上面那张表，也不与 token 价求和。
+ * 只按 token 维度出列的话，一条只有固定费的报价会渲染成一整行「—」，金额
+ * 反而无处可看。
+ */
+function SupplierCharges({ suppliers, currency }: { suppliers: SupplierPrice[]; currency: string }) {
+  const { t, lang } = useI18n()
+  // 除了带费用的报价，没有 token 价的报价也列进来：一张全是「—」的行至少
+  // 说明「这个商家在供」，而两张表都不收它，它就从页面上消失了。
+  const rows = suppliers.filter((supplier) => hasCharges(supplier) || !hasTokenPrices(supplier))
+  if (rows.length === 0) return null
+
+  const amount = (value: SupplierPrice['request']) =>
+    value === undefined ? (
+      <span className="model-missing">—</span>
+    ) : (
+      `${moneySymbol(currency)}${formatUnitPrice(value)}`
+    )
+
+  return (
+    <>
+      <p className="model-section-hint">{t('models.detail.chargesHint', { currency })}</p>
+      <div className="model-table-wrap">
+        <table className="model-table">
+          <caption className="sr-only">{t('models.detail.supplierCharges')}</caption>
+          <thead>
+            <tr>
+              <th scope="col">{t('models.detail.merchant')}</th>
+              <th scope="col" className="num">
+                {t('models.detail.channelCount')}
+              </th>
+              <th scope="col" className="num">
+                {t('models.detail.requestFee')}
+              </th>
+              <th scope="col" className="num">
+                {t('models.detail.minimumFee')}
+              </th>
+              <th scope="col">{t('models.detail.unitFee')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((supplier, index) => (
+              // 与上面那张表同一套顺序与键：行之间没有稳定的业务主键。
+              <tr key={index}>
+                <td>
+                  {supplier.merchant ?? <span className="model-muted">{t('models.detail.platform')}</span>}
+                </td>
+                <td className="num">{formatCount(supplier.channel_count, lang)}</td>
+                <td className="num">{amount(supplier.request)}</td>
+                <td className="num">{amount(supplier.minimum)}</td>
+                <td>
+                  {supplier.units === undefined || Object.keys(supplier.units).length === 0 ? (
+                    <span className="model-missing">—</span>
+                  ) : (
+                    Object.entries(supplier.units).map(([name, value]) => (
+                      <div key={name}>
+                        {t('models.detail.unitPrice', {
+                          name,
+                          price: `${moneySymbol(currency)}${formatUnitPrice(value)}`,
+                        })}
+                      </div>
+                    ))
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
   )
 }
 
@@ -186,6 +276,10 @@ export function ModelDetail() {
   const model = data.model
   const currency = data.currency || meta.currency
   const suppliers = model.suppliers ?? []
+  // 两张表不是互斥的：有 token 价的进第一张；带费用的进第二张（两种都有时
+  // 两张表都出现）；没有 token 价的即使没有费用也进第二张——两张表都不收，
+  // 这条报价就从页面上消失了。服务端给的是同一个顺序，两张表因此对得上。
+  const priced = suppliers.filter(hasTokenPrices)
   const options = model.reasoning_options ?? []
 
   return (
@@ -331,10 +425,15 @@ export function ModelDetail() {
           <h2>{t('models.detail.suppliers')}</h2>
           {suppliers.length > 0 ? (
             <>
-              <p className="model-section-hint">
-                {t('models.detail.suppliersHint', { currency })}
-              </p>
-              <SupplierTable suppliers={suppliers} currency={currency} />
+              {priced.length > 0 && (
+                <>
+                  <p className="model-section-hint">
+                    {t('models.detail.suppliersHint', { currency })}
+                  </p>
+                  <SupplierTable suppliers={priced} currency={currency} />
+                </>
+              )}
+              <SupplierCharges suppliers={suppliers} currency={currency} />
               {model.unpriced_channels > 0 && (
                 <p className="model-section-hint">
                   {t('models.detail.unpriced', { count: model.unpriced_channels })}

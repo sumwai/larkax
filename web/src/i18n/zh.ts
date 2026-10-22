@@ -280,6 +280,13 @@ export const zh = {
   'models.detail.updatedAt': '更新时间',
   'models.detail.suppliers': '供应商报价',
   'models.detail.suppliersHint': '表中每格是每 1000 个该维度 token 的金额，币种 {currency}。',
+  'models.detail.supplierCharges': '其他费用',
+  'models.detail.chargesHint':
+    '这里列的是每次请求的固定费用、每次请求的最低消费，以及按计量单位计费的单价；量纲与每 1000 个 token 的金额不同，不能相加。币种 {currency}。',
+  'models.detail.requestFee': '每请求固定费',
+  'models.detail.minimumFee': '最低消费',
+  'models.detail.unitFee': '计量项单价',
+  'models.detail.unitPrice': '{name} 每单位 {price}',
   'models.detail.merchant': '商家',
   'models.detail.platform': '平台自营',
   'models.detail.channelCount': '渠道数',
@@ -292,7 +299,7 @@ export const zh = {
   'models.detail.noSuppliersBody':
     '已经有渠道在供这个模型，但这些渠道都没有适用的计价规则，所以现在还报不出单价。',
   'models.detail.unpriced':
-    '另有 {count} 个在供渠道算不出价，没有列入上表；请求落到这些渠道会被拒绝，因为算不出价就没法计费。',
+    '另有 {count} 个在供渠道算不出价，没有列入上面的报价；请求落到这些渠道会被拒绝，因为算不出价就没法计费。',
   'models.detail.reasoningOptions': '推理参数',
   'models.detail.reasoningOptionsNone': '目录里没有为这个模型声明推理参数。',
 

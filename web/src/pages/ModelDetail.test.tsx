@@ -161,11 +161,60 @@ describe('模型详情', () => {
     // 算不出价的渠道由模型级计数回答，并说清落到这些渠道的后果。
     expect(
       screen.getByText(
-        '另有 3 个在供渠道算不出价，没有列入上表；请求落到这些渠道会被拒绝，因为算不出价就没法计费。',
+        '另有 3 个在供渠道算不出价，没有列入上面的报价；请求落到这些渠道会被拒绝，因为算不出价就没法计费。',
       ),
     ).toBeInTheDocument()
     // 目录里为 0 的上限写「未填」，不写成 0。
     expect(screen.getByText('输入上限').closest('div')).toHaveTextContent('未填')
+  })
+
+  it('只有固定费的报价进另一张表，不渲染成一整行破折号', async () => {
+    mocks.modelDetail.mockResolvedValue({
+      ...DETAIL,
+      model: {
+        ...DETAIL.model,
+        suppliers: [
+          {
+            merchant: 'acme',
+            price: '0.00350000',
+            prices: { prompt: '0.00350000' },
+            channel_count: 1,
+          },
+          {
+            merchant: 'globex',
+            price: '0.00000000',
+            request: '0.10000000',
+            minimum: '0.25000000',
+            units: { cache_write_5m: '0.00020000' },
+            channel_count: 3,
+          },
+        ],
+        unpriced_channels: 0,
+      },
+    })
+    renderDetail()
+    await screen.findByRole('heading', { name: 'Model X' })
+
+    // 每千 token 那张表只列有 token 价的报价：globex 一行全是「—」时，
+    // 它收的那笔固定费就没有地方可看了。
+    const tokenTable = screen.getByRole('table', { name: '供应商报价' })
+    const tokenRows = Array.from(tokenTable.querySelectorAll('tbody tr'))
+    expect(tokenRows).toHaveLength(1)
+    expect(tokenRows[0]).toHaveTextContent('acme')
+    expect(tokenTable).not.toHaveTextContent('globex')
+    // 固定费不进 token 表：那是一整行「没写」，不是 0.1 元。
+    expect(tokenTable).not.toHaveTextContent('0.1000')
+
+    // 另一张表带上商家名与三项费用：读者要知道是谁在收这笔钱。
+    const charges = screen.getByRole('table', { name: '其他费用' })
+    expect(charges).toHaveTextContent('globex')
+    expect(charges).toHaveTextContent('每请求固定费')
+    // 渠道数与 token 表同口径：只进这一张表的报价不该因此丢掉它。
+    const chargeCells = Array.from(charges.querySelectorAll('tbody tr')[0].querySelectorAll('td')).map(
+      (cell) => cell.textContent,
+    )
+    expect(chargeCells.slice(0, 4)).toEqual(['globex', '3', '$0.1000', '$0.2500'])
+    expect(chargeCells[4]).toBe('cache_write_5m 每单位 $0.0002')
   })
 
   it('一条报价都没有时说明原因，不画一张空表', async () => {
