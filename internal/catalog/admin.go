@@ -462,7 +462,9 @@ func modelUpdateSets(req UpdateModelRequest) ([]string, []any, error) {
 // 那里的检查就是全部：刚查完、还没删的窗口里新配一条规则，是拦不住的。
 // 说清这一点，好过假装挡住了。
 func (a *Admin) Delete(ctx context.Context, canonicalName string) error {
-	name, err := normalizeCanonicalName(canonicalName)
+	// 宽松规整，不判路径段：这里要认出的是库里已有的那一行，而不是判断
+	// 这个名字现在还能不能写进去。理由见 normalizeExistingCanonicalName。
+	name, err := normalizeExistingCanonicalName(canonicalName)
 	if err != nil {
 		return err
 	}
@@ -817,13 +819,53 @@ func aliasUpdateError(err error) error {
 // 这一批函数是写入路径与读取路径「同一套列」的兑现方式：值的形态在写入侧
 // 定下来，读取侧按同一个假设解。
 
-// normalizeCanonicalName 校验规范名。
+// normalizeCanonicalName 校验**写入侧**的规范名：Create、Update 与
+// CreateAlias 都走这一条。
 //
 // 它是选路与计费**共用**的键：请求里的模型名要按它匹配，计价规则的
-// model_patterns 也按它匹配。所以这里比别的字段严一格——空白字符一律拒绝：
-// 带空白的名字不会等于任何请求里的模型名，写进去就是一条谁都命中不了的
-// 配置，而它的表现是「这个模型配了却永远选不中」。
+// model_patterns 也按它匹配。所以这里比别的字段严一格：
+//
+//   - 空白字符一律拒绝：带空白的名字不会等于任何请求里的模型名，写进去
+//     就是一条谁都命中不了的配置，而它的表现是「这个模型配了却永远选不中」。
+//   - 空路径段与 `.` / `..` 段一律拒绝：规范名会作为路径出现在
+//     `GET /v1/models/{name}` 里，而 `net/http` 的 ServeMux 在匹配之前会
+//     先做 URL 规范化（折叠空段、解析 `.` 与 `..`）。这样的名字同样写进去
+//     不报错——读的时候要么 301、要么落到另一个模型上。
 func normalizeCanonicalName(raw string) (string, error) {
+	name, err := normalizeExistingCanonicalName(raw)
+	if err != nil {
+		return "", err
+	}
+	for _, segment := range strings.Split(name, "/") {
+		switch segment {
+		case "":
+			return "", fmt.Errorf("规范模型名 %q 的路径段为空：名字按 / 分段，空段会被 URL 规范化折叠掉，这个名字读不回来", name)
+		case ".", "..":
+			return "", fmt.Errorf("规范模型名 %q 含路径段 %q：`.` 与 `..` 会被 URL 解析掉，这个名字读不回来", name, segment)
+		}
+	}
+	return name, nil
+}
+
+// normalizeExistingCanonicalName 校验一个**按名字找已有行**的输入：Delete
+// 直接用它，严格版也建在它之上。
+//
+// 它只做宽松的规整：去首尾空白、拒空、拒控制字符，不判路径段。
+//
+// # 为什么与写入侧不是同一条规则
+//
+// Delete 要认出的是库里**已经存在**的那一行，而不是判断这个名字现在还能
+// 不能写进去。严格规则是给新写入定的；拿它来校验一个存量标识符，库里一旦
+// 出现 `a//b` 这样的名字，删除就会先被名字本身拒绝——这条历史遗留从此没有
+// 去处。宽松版只放宽路径段这一层，空白与控制字符照拒：后两者不可能属于
+// 一条真实存在的名字。
+//
+// 放宽到这一层也就到此为止：Update 仍按严格规则校验，存量名字能走的只有
+// 删除（删掉再按合法名字重建），改名不在其中。
+//
+// 写入侧在它之上再加一层（见 normalizeCanonicalName）。两者共用这一份
+// 基础规整，返回的值来自同一处，不会各自 trim 出一份略有差别的名字。
+func normalizeExistingCanonicalName(raw string) (string, error) {
 	name := strings.TrimSpace(raw)
 	if name == "" {
 		return "", errors.New("规范模型名不能为空")

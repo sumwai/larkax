@@ -179,8 +179,13 @@ type modelSource interface {
 //
 // 与 modelSource 分开是因为两个问题不同：一份只列名字（参考价按名字求），
 // 另一份要逐渠道的归属（报价按渠道的商家取规则）。
+//
+// Supplies 给清单，SuppliesFor 给单条模型页：后者只读这一个模型的供给行，
+// 成本不随目录规模增长；渠道侧仍是一次扫描（suppliesModel 未变，
+// `channels(models)` 上没有 GIN 索引）。
 type modelSupply interface {
 	Supplies(ctx context.Context) ([]channels.Supply, error)
+	SuppliesFor(ctx context.Context, model string) ([]channels.Supply, error)
 }
 
 // offerSource 给每个「模型 × 渠道」候选取一条适用的规则并求价。

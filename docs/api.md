@@ -223,6 +223,10 @@
 - `capabilities` 六项与 `endpoints` 都是三态，原样透传目录里的值：
   `null` 表示没采集过，`false` 表示明确不支持，两者不能合并。
   `endpoints` 的 `[]` 表示**明确声明一条都不支持**，与 `null`（未知）不同。
+- `reasoning_options` 只有两态：`[]` 表示没有可选项，非空数组表示有哪几项。
+  这个字段**没有 `null` 态**——列是 `NOT NULL DEFAULT '[]'`。库里即便出现
+  字面量 JSON `null`（异常数据），响应里也是 `[]`：那是把异常值抹平，不是
+  第三种状态。
 - `knowledge_cutoff` / `release_date` 是 `YYYY-MM-DD` 或 `null`。
 - `updated_at` 是目录行的**写入时刻**，RFC3339 UTC：创建时由列的默认值
   `now()` 置初值（`internal/migrate/sql/00001_init.sql`），之后每次修改由

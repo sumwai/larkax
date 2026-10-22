@@ -123,9 +123,9 @@ type ruleJSON struct {
 
 // handleModelDetail 返回一个在供模型的全部展示字段与供应商报价。
 //
-// 「在供」复用 channels.Source.Supplies 那一条判据（与清单同一处 SQL），
-// 不在供与目录里没有故意回同一个 404：让调用方能靠状态码探目录，等于把
-// 「某名字在不在」告诉一个只是写错名字的请求。
+// 「在供」复用 channels.Source.SuppliesFor 那一条判据（与清单同一处
+// suppliesModel），不在供与目录里没有故意回同一个 404：让调用方能靠状态码
+// 探目录，等于把「某名字在不在」告诉一个只是写错名字的请求。
 func (a *API) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if name == "" {
@@ -134,19 +134,15 @@ func (a *API) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	supplies, err := a.deps.supplies.Supplies(ctx)
+	supplies, err := a.deps.supplies.SuppliesFor(ctx, name)
 	if err != nil {
 		a.unavailable(w, r, err, "读取在供渠道失败")
 		return
 	}
 
-	// 一次把「在供判断」与「候选集」都做掉：同一份 Supplies 里既有可见性
-	// 判据，也有报价要的渠道归属。
-	candidates := make([]pricing.Candidate, 0, 2)
+	// 这一页只读一个模型：供给查询已经按名字取过，候选集就是它本身。
+	candidates := make([]pricing.Candidate, 0, len(supplies))
 	for _, supply := range supplies {
-		if supply.Model != name {
-			continue
-		}
 		candidates = append(candidates, pricing.Candidate{
 			Model:       supply.Model,
 			ChannelID:   supply.ChannelID,

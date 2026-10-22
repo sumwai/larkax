@@ -45,6 +45,67 @@ func TestModelDetailNotFoundUnlessSupplied(t *testing.T) {
 	}
 }
 
+// reasoning_options 只有两态：空数组与有值，没有 null 这一态
+// （列是 NOT NULL DEFAULT '[]'）。
+//
+// 库里若出现 JSON null，它是异常数据，不是第三种状态：读取侧解成 nil，
+// 这里把它抹平成 `[]`。这条用例把实际行为写下来——以后谁改了实现，文档
+// 与用例会一起红。
+func TestModelDetailFlattensNullReasoningOptions(t *testing.T) {
+	f := newFixture(t)
+	f.catalog.models = []catalog.Model{{
+		CanonicalName: "alpha",
+		DisplayName:   "Alpha",
+		// 库里是 JSON null 时，读取侧解出来就是 nil，而不是空切片。
+		ReasoningOptions: nil,
+	}}
+	f.supplies.supplies = []channels.Supply{{Model: "alpha", ChannelID: 1}}
+
+	rec := f.request(t, http.MethodGet, PathPrefix+"models/alpha", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（响应 %s）", rec.Code, rec.Body)
+	}
+	var raw struct {
+		Model struct {
+			ReasoningOptions json.RawMessage `json:"reasoning_options"`
+		} `json:"model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	// 逐字比 `[]`：只断言「不是 null」的话，把抹平那一行删掉、让它直接
+	// 编码成 null 也照样绿。
+	if got := string(raw.Model.ReasoningOptions); got != "[]" {
+		t.Errorf("reasoning_options = %s，期望 []（null 是异常数据，被抹平成空数组）", got)
+	}
+}
+
+// 单模型页只问这一个模型：不得取整张供给表再在 Go 侧过滤。
+//
+// 响应在两种实现下完全相同，所以判据只能是「调了哪个方法、参数是什么」。
+// 成本上差得很远：这条路径公开、无会话，整表查询的代价随目录与渠道的总数
+// 增长，还能靠逐个枚举模型放大。
+func TestModelDetailQueriesOnlyItsModel(t *testing.T) {
+	f := newFixture(t)
+	f.catalog.models = []catalog.Model{{CanonicalName: "alpha"}, {CanonicalName: "beta"}}
+	f.supplies.supplies = []channels.Supply{
+		{Model: "beta", ChannelID: 2},
+		{Model: "alpha", ChannelID: 1},
+	}
+
+	rec := f.request(t, http.MethodGet, PathPrefix+"models/alpha", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（响应 %s）", rec.Code, rec.Body)
+	}
+
+	if !reflect.DeepEqual(f.supplies.forCalls, []string{"alpha"}) {
+		t.Errorf("单模型查询的参数 = %q，期望只有 alpha", f.supplies.forCalls)
+	}
+	if f.supplies.allCalls != 0 {
+		t.Errorf("单模型请求调了 %d 次整表查询，期望 0 次", f.supplies.allCalls)
+	}
+}
+
 // 供应商按价格升序；平台自营的 merchant 是 null；每条带整套维度价与
 // 渠道条数。响应里不得出现上游模型名——那会把调用方引去绕过网关。
 func TestModelDetailListsSuppliersByPrice(t *testing.T) {

@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -17,14 +18,40 @@ func TestNormalizeCanonicalName(t *testing.T) {
 		input   string
 		want    string
 		wantErr bool
+		// errText 非空时，错误信息里必须出现它：报错要指到原因，不能只说
+		// 「非法名字」。
+		errText string
 	}{
-		{"去掉首尾空白", "  acme-vision  ", "acme-vision", false},
-		{"空串", "", "", true},
-		{"只有空白", "   ", "", true},
+		{"去掉首尾空白", "  acme-vision  ", "acme-vision", false, ""},
+		{"空串", "", "", true, ""},
+		{"只有空白", "   ", "", true, ""},
 		// 带空白的名字不会等于任何请求里的模型名，写进去就是一条谁都命中不了的
 		// 配置——它的表现是「这个模型配了却永远选不中」。
-		{"中间有空格", "acme vision", "", true},
-		{"中间有制表符", "acme\tvision", "", true},
+		{"中间有空格", "acme vision", "", true, ""},
+		{"中间有制表符", "acme\tvision", "", true, ""},
+
+		// 空路径段与 `.` / `..` 段：这些名字写进目录不报错，读的时候会被
+		// URL 规范化折叠或解析掉，于是要么 301、要么落到另一个模型上。
+		{"中间空段", "a//b", "", true, "路径段为空"},
+		{"开头空段", "/a", "", true, "路径段为空"},
+		{"中间单点段", "a/./b", "", true, "`.` 与 `..`"},
+		{"中间双点段", "a/../b", "", true, "`.` 与 `..`"},
+		{"开头单点段", "./a", "", true, "`.` 与 `..`"},
+		{"开头双点段", "../a", "", true, "`.` 与 `..`"},
+		{"末尾空段", "a/", "", true, "路径段为空"},
+		{"只有单点", ".", "", true, "`.` 与 `..`"},
+		{"只有双点", "..", "", true, "`.` 与 `..`"},
+		{"末尾单点段", "a/.", "", true, "`.` 与 `..`"},
+		{"末尾双点段", "a/..", "", true, "`.` 与 `..`"},
+
+		// `..` 只在**整段**等于 `.` 或 `..` 时才非法：出现在一个段内部时
+		// 它只是一个普通的字符，URL 解析不会碰它。
+		{"单段", "alpha", "alpha", false, ""},
+		{"两段", "vendor/alpha", "vendor/alpha", false, ""},
+		{"三段", "vendor/a/b", "vendor/a/b", false, ""},
+		{"段内双点", "a..b", "a..b", false, ""},
+		{"段内单点", "a.b", "a.b", false, ""},
+		{"段首双点", "a/..b", "a/..b", false, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -32,6 +59,10 @@ func TestNormalizeCanonicalName(t *testing.T) {
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("normalizeCanonicalName(%q) = %q，期望报错", tc.input, got)
+				}
+				if tc.errText != "" && !strings.Contains(err.Error(), tc.errText) {
+					t.Errorf("normalizeCanonicalName(%q) 的错误信息 = %q，期望含 %q",
+						tc.input, err, tc.errText)
 				}
 				return
 			}
@@ -42,6 +73,40 @@ func TestNormalizeCanonicalName(t *testing.T) {
 				t.Errorf("normalizeCanonicalName(%q) = %q，期望 %q", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+// 严格版建在宽松版之上：同一个输入在两处得到**逐字相同**的规整结果。
+//
+// 两份各自 trim 时返回值一样只是碰巧，没有东西挡得住它们以后分岔；这条
+// 用例红，说明 Delete 认的名字与写入侧存的名字已经不是同一个。
+func TestNormalizeCanonicalNameSharesLenientBase(t *testing.T) {
+	for _, input := range []string{"  alpha ", "vendor/alpha", "\talpha\n"} {
+		strict, err := normalizeCanonicalName(input)
+		if err != nil {
+			t.Fatalf("normalizeCanonicalName(%q) 出错: %v", input, err)
+		}
+		lenient, err := normalizeExistingCanonicalName(input)
+		if err != nil {
+			t.Fatalf("normalizeExistingCanonicalName(%q) 出错: %v", input, err)
+		}
+		if strict != lenient {
+			t.Errorf("%q 在两处规整结果不同：严格 %q、宽松 %q", input, strict, lenient)
+		}
+	}
+}
+
+// 宽松版只放宽路径段：空白、空串与控制字符照拒。Delete 认的是一个存量
+// 标识符，不是「现在能不能写进去」。
+func TestNormalizeExistingCanonicalNameStillRejectsShapeErrors(t *testing.T) {
+	for _, input := range []string{"", "   ", "a b", "a\x1b[31mb"} {
+		if got, err := normalizeExistingCanonicalName(input); err == nil {
+			t.Errorf("normalizeExistingCanonicalName(%q) = %q，期望报错", input, got)
+		}
+	}
+	// 路径段不判：这正是它与写入侧那条规则的唯一差别。
+	if got, err := normalizeExistingCanonicalName("a//b"); err != nil || got != "a//b" {
+		t.Errorf("normalizeExistingCanonicalName(%q) = %q, %v，期望原样通过", "a//b", got, err)
 	}
 }
 
