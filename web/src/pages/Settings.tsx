@@ -271,6 +271,8 @@ export function Settings() {
 /** 商家视图的设置页：只有界面偏好，账号段在同级的「账号」页。 */
 export function MerchantSettings() {
   const { t } = useI18n()
+  // 句子里用 `{account}` 标出链接落点：文案整句交给翻译，链接标签单独取键。
+  const [before, after = ''] = t('settings.accountEntryBody').split('{account}')
   return (
     <>
       <PageHead title={t('settings.title')} subtitle={t('settings.preferencesSubtitle')} />
@@ -283,14 +285,16 @@ export function MerchantSettings() {
         <div>
           <h2>{t('settings.accountEntry')}</h2>
           {/*
-           * 链接放在句子末尾而不是做成右侧按钮：英文的按钮文案比中文长得多，
-           * 一行 Flex 放不下时会被挤到视口外；行内链接跟着文字一起折行。
+           * 链接嵌在句子里、标签本身很短：句子可以折行，标签不在短语中间被拆开。
+           * 标签再长一点就守不住这一行——英文写全「Go to the Account page」后，
+           * 375 宽下仍是一行，320 宽下就被拆成两行。
            */}
           <p className="sub">
-            {t('settings.accountEntryBody')}{' '}
+            {before}
             <Link className="inline-link" to="/app/merchant/account">
               {t('settings.accountLink')}
             </Link>
+            {after}
           </p>
         </div>
       </section>

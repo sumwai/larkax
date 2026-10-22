@@ -2459,7 +2459,10 @@ textarea.input {
   text-align: center;
 }
 .auth-foot a {
+  /* 颜色沿用 muted（在页面底色上 5.5:1 以上），补下划线让它在单独一行里看得出是链接。 */
   color: var(--muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 /* ══════════════════════════════════════════════════════════════════

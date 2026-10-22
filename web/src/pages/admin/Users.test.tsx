@@ -89,7 +89,7 @@ function renderList() {
   )
 }
 
-function renderDetail(id = 2) {
+function renderDetail(id: number | string = 2) {
   return render(
     <I18nProvider>
       <ToastProvider>
@@ -379,6 +379,16 @@ describe('用户详情页', () => {
     expect(screen.queryByText(message)).not.toBeInTheDocument()
   })
 
+  it('地址里的编号不合法时，错误块里的回列表也是一条看得出的链接', async () => {
+    renderDetail('abc')
+
+    const alert = await screen.findByRole('alert')
+    const back = within(alert).getByRole('link', { name: '返回用户列表' })
+    expect(back.className).toContain('inline-link')
+    // 编号不合法时不发请求。
+    expect(mocks.getUser).not.toHaveBeenCalled()
+  })
+
   it('409 另起一档，并给一条回列表的路', async () => {
     mocks.getUser.mockResolvedValue(DETAIL)
     mocks.updateUser.mockRejectedValue(
@@ -396,7 +406,9 @@ describe('用户详情页', () => {
     expect(screen.getByText(/服务端拒绝了这次改动/)).toBeInTheDocument()
     // 顶栏本来就有一条回列表的链接，这里要的是错误块里那一条。
     const alert = screen.getByRole('alert')
-    expect(within(alert).getByRole('link', { name: '返回用户列表' })).toBeInTheDocument()
+    const back = within(alert).getByRole('link', { name: '返回用户列表' })
+    // Alert 的底色是危险色底，链接靠强调色区分，得用与其他正文链接同一套样式。
+    expect(back.className).toContain('inline-link')
   })
 
   it('自己的账号不能改，并写明原因', async () => {

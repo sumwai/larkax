@@ -397,7 +397,7 @@ export function AdminUserDetailPage() {
       <>
         <PageHead title={t('ops.users.detailTitle')} />
         <Alert tone="bad" title={t('ops.users.badId')}>
-          <Link to="/app/admin/users">{t('ops.users.backToList')}</Link>
+          <Link className="inline-link" to="/app/admin/users">{t('ops.users.backToList')}</Link>
         </Alert>
       </>
     )
@@ -456,7 +456,7 @@ export function AdminUserDetailPage() {
           {failure.status === 409 ? (
             <>
               {t('ops.users.conflictHint')}{' '}
-              <Link to="/app/admin/users">{t('ops.users.backToList')}</Link>
+              <Link className="inline-link" to="/app/admin/users">{t('ops.users.backToList')}</Link>
             </>
           ) : null}
         </Alert>
