@@ -73,8 +73,10 @@
     「确认免费」）。两者可以写成用量的函数，这里报的是 `prices.prompt` 那
     一次求值（1000 个输入 token）下的值
   - `units` 是非 token 计量项的单价，键是规则里写过的计量项名、值是**每个
-    计量单位**多少元；没有时省略这个字段。这三项与 `prices.prompt` 取自
-    同一次求值（1000 个输入 token），不与 `prices` 里其他维度同一次
+    计量单位**多少元；没有计量项时省略这个字段。有计量项时，单价为 0 的
+    那一项仍然输出 `"0.00000000"`——省略的是字段，不是某一项。这三项与
+    `prices.prompt` 取自同一次求值（1000 个输入 token），不与 `prices` 里
+    其他维度同一次
   - 按 `prompt` 那一项的价格升序；规则没写输入价时用第一个存在的维度代替。
     同一个商家供多条渠道时，**整套价完全相同**（各维度、`request`、`minimum`
     与 `units` 都相同）才折成一条，任一不同就是两条不同的报价
@@ -164,6 +166,10 @@
 渠道声明支持它。**不在供与目录里没有回同一个 `404`**，正文逐字相同——否则
 调用方能靠状态码探出某个名字在不在目录里。
 
+`{name}` 由多段通配符接住，取值按 `net/http` 的规则**逐路径段反转义、再以
+`/` 拼接**：`vendor%2Falpha` 与 `vendor/alpha` 是同一个名字；`%25` 解成字面量
+`%` 且只解一层，所以 `vendor%252Falpha` 对应名字 `vendor%2Falpha`。
+
 ```json
 {
   "currency": "CNY",
@@ -218,8 +224,9 @@
   `null` 表示没采集过，`false` 表示明确不支持，两者不能合并。
   `endpoints` 的 `[]` 表示**明确声明一条都不支持**，与 `null`（未知）不同。
 - `knowledge_cutoff` / `release_date` 是 `YYYY-MM-DD` 或 `null`。
-- `updated_at` 是**目录行最后一次被编辑**的时刻，RFC3339 UTC，写成
-  `internal/catalog` 的 `Admin.Update` 里的 `updated_at = now()`；它不是
+- `updated_at` 是目录行的**写入时刻**，RFC3339 UTC：创建时由列的默认值
+  `now()` 置初值（`internal/migrate/sql/00001_init.sql`），之后每次修改由
+  `internal/catalog` 的 `Admin.Update` 刷新（`updated_at = now()`）。它不是
   上游发布或更新模型的时间。发布日期的字段是 `release_date`。
 - 不返回采集来的 `raw`：那是运维排查用的原始元信息。
 
