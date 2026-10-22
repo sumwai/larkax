@@ -366,7 +366,7 @@ export const zh = {
   'ops.error.forbidden': '没有权限访问这个资源。',
   'ops.error.notFound': '没有找到这个资源，可能已被删除，或者不属于你。',
   'ops.discardTitle': '放弃未保存的修改？',
-  'ops.discardBody': '关掉之后，这一页填的内容不会保留。',
+  'ops.discardBody': '关掉或离开这一页之后，填的内容不会保留。',
   'ops.discardConfirm': '放弃修改',
   'ops.search': '搜索',
   'ops.searchClear': '清空搜索',

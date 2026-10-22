@@ -382,7 +382,7 @@ export const en: Record<MessageKey, string> = {
   'ops.error.notFound':
     'This resource was not found. It may have been deleted, or it is not yours.',
   'ops.discardTitle': 'Discard unsaved changes?',
-  'ops.discardBody': 'What you typed on this form will be lost when it closes.',
+  'ops.discardBody': 'What you typed will be lost if you close or leave this page.',
   'ops.discardConfirm': 'Discard',
   'ops.search': 'Search',
   'ops.searchClear': 'Clear search',

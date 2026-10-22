@@ -26,7 +26,7 @@ import { Tabs } from '../../components/Tabs'
 import { deriveAdapterDefaults } from './catalog-derive'
 import { Field, InputError, OpsLoadError, SearchBox } from './common'
 import { linesToList, listToLines, useConfirm } from './common-helpers'
-import { isDirty, useCloseGuard } from './guard'
+import { isDirty, useCloseGuard, useUnsavedGuard } from './guard'
 
 const CAPABILITY_KEYS = ['reasoning', 'tools', 'vision', 'audio', 'cache', 'batch'] as const
 type CapabilityKey = (typeof CAPABILITY_KEYS)[number]
@@ -196,7 +196,11 @@ export function OpsModels() {
     setErrorField(null)
   }
 
-  const requestClose = useCloseGuard(confirm, isDirty(form, initialForm), closeForm)
+  // 表单真的打开着才算脏：`closeForm` 不重置 form/initialForm，无条件比的话
+  // 「放弃」关窗之后这一页会永远算改过，后续每次跳转都被拦。
+  const dirty = (creating || editing !== null) && isDirty(form, initialForm)
+  const requestClose = useCloseGuard(confirm, dirty, closeForm)
+  const unsavedGuard = useUnsavedGuard(dirty)
 
   // 校验失败时跳到出错的那一组：只在底部显示一句错误，用户会在一个
   // 看不到出错字段的分组里找不到它。`errorField` 与 `focusToken` 一起
@@ -707,6 +711,7 @@ export function OpsModels() {
       )}
 
       {confirm.dialog}
+      {unsavedGuard}
     </>
   )
 }

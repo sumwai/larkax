@@ -6,8 +6,14 @@ import { useI18n } from '../i18n'
 import type { Lang } from '../i18n'
 import { useTheme, type Theme } from '../theme/ThemeProvider'
 import { Alert, Button, PageHead, Select, useToast } from '../components/ui'
+import { isDirty, useUnsavedGuard } from './ops/guard'
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+/** 打开设置页时的那份账户信息：拿它判断这两格有没有被改过。 */
+function profileInitialOf(user: { display_name: string | null; email: string | null } | null) {
+  return { displayName: user?.display_name ?? '', email: user?.email ?? '' }
+}
 
 /**
  * 账号相关的两块：账户信息与修改口令。
@@ -35,6 +41,13 @@ export function AccountSections() {
   const [passwordError, setPasswordError] = useState<string | null>(null)
   const [passwordPending, setPasswordPending] = useState(false)
 
+  // 这一页没有弹窗，脏状态由两张表单合起来算：账户信息与打开时的那份 user
+  // 比，「修改口令」的三格任一非空就算填了。保存成功后 `setUser` 会换掉基准值、
+  // 口令三格清空，于是自动回到「没改过」，跳转不再被拦。
+  const profileDirty = isDirty({ displayName, email }, profileInitialOf(user))
+  const passwordDirty = current !== '' || next !== '' || confirm !== ''
+  const unsavedGuard = useUnsavedGuard(profileDirty || passwordDirty)
+
   const saveProfile = async (event: FormEvent) => {
     event.preventDefault()
     const trimmedEmail = email.trim()
@@ -50,6 +63,10 @@ export function AccountSections() {
         email: trimmedEmail || null,
       })
       setUser(updated)
+      // 这两格也要换成服务端回传的值：提交时去掉了首尾空格，本地若还留着原值，
+      // 基准值虽然换了，比较的两边仍然不等——提示已保存，跳转却照样被拦。
+      setDisplayName(updated.display_name ?? '')
+      setEmail(updated.email ?? '')
       toast(t('settings.profileSaved'))
     } catch {
       setProfileError(t('settings.profileFailed'))
@@ -198,6 +215,7 @@ export function AccountSections() {
           </form>
         </section>
       </div>
+      {unsavedGuard}
     </>
   )
 }
