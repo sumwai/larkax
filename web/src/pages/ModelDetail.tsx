@@ -2,6 +2,7 @@ import { Link, useParams } from 'react-router-dom'
 import { api, ApiError } from '../api'
 import type { ModelCapabilities, ModelDetailResponse, PriceDimension, SupplierPrice } from '../api/types'
 import { Alert, Button, Empty, PageHead, Pill, Skeleton } from '../components/ui'
+import { useReportPageTitle } from '../components/PageTitle'
 import { IconModels } from '../components/icons'
 import { useAsync } from '../hooks/useAsync'
 import { useI18n } from '../i18n'
@@ -127,6 +128,10 @@ export function ModelDetail() {
     [name],
   )
 
+  // 顶栏与标签页标题用展示名，不用地址里那段编码过的名字。数据还没到、
+  // 或者这一页根本没有这个模型时交回 null，外壳继续写导航反推的「模型」。
+  useReportPageTitle(data?.model ? data.model.display_name || data.model.name : null)
+
   const back = (
     <Link className="model-back" to="/app/models">
       <span aria-hidden="true">←</span> {t('models.title')}
@@ -188,7 +193,6 @@ export function ModelDetail() {
       {back}
       <PageHead
         title={model.display_name || model.name}
-        keepTitleOnNarrow
         subtitle={
           <>
             <span className="mono">{model.name}</span>

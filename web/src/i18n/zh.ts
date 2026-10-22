@@ -80,6 +80,7 @@ export const zh = {
   'landing.footer': '账号由运营创建，需要开通请联系运营。',
 
   'login.title': '登录控制台',
+  'login.documentTitle': '登录',
   'login.subtitle': '用运营给你的用户名和口令登录。',
   'login.username': '用户名',
   'login.password': '口令',

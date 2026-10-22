@@ -74,15 +74,23 @@ type Row = {
   element: ReactElement
   /** 页头 h1 的文案来源：i18n 键，或模型详情页那种运行期文案。 */
   title: { key: MessageKey } | { text: string }
-  /** 窄屏顶栏会显示的那一句（`AppShell` 里 `current` 推出的键）。 */
-  topbar: MessageKey
+  /** 窄屏顶栏会显示的那一句：导航推出的键，或详情页报告上来的运行期文案。 */
+  topbar: MessageKey | { text: string }
   expect: 'hidden' | 'kept'
+}
+
+/** 这一行的顶栏文字；运行期文案不查词典。 */
+function topbarText(row: Row, dict: Record<MessageKey, string>): string {
+  return typeof row.topbar === 'string' ? dict[row.topbar] : row.topbar.text
 }
 
 /*
  * 每一行是「页面 → h1 文案来源 → 顶栏文案 → 窄屏下的期望」。
  * 隐藏与保留的分界是文案是否同文：同文才隐藏，不同文必须留着——
  * 否则等于为了去重把页面唯一的那句标题也去掉。
+ *
+ * 详情页把展示名报告给外壳（见 `PageTitle`），顶栏与正文写的是同一句，
+ * 所以模型详情页那一行是隐藏；顶栏那一格写运行期文案，不写导航的键。
  *
  * 商家视图那几页（MerchantOverview / MerchantModels / MerchantUpstreams /
  * MerchantPricing）只按 i18n 文案判过，没有浏览器实测：demo 账号进不去商家
@@ -97,7 +105,7 @@ const ROWS: Row[] = [
   { name: '设置', url: '/app/settings', route: '/app/settings', element: <Settings />, title: { key: 'settings.title' }, topbar: 'nav.settings', expect: 'hidden' },
   { name: '商家设置', url: '/app/merchant/settings', route: '/app/merchant/settings', element: <MerchantSettings />, title: { key: 'settings.title' }, topbar: 'nav.settings', expect: 'hidden' },
   { name: '账号', url: '/app/merchant/account', route: '/app/merchant/account', element: <MerchantAccount />, title: { key: 'nav.account' }, topbar: 'nav.account', expect: 'hidden' },
-  { name: '模型详情', url: '/app/models/model-x', route: '/app/models/*', element: <ModelDetail />, title: { text: 'Model X' }, topbar: 'nav.models', expect: 'kept' },
+  { name: '模型详情', url: '/app/models/model-x', route: '/app/models/*', element: <ModelDetail />, title: { text: 'Model X' }, topbar: { text: 'Model X' }, expect: 'hidden' },
   { name: '商家概览', url: '/app/merchant/overview', route: '/app/merchant/overview', element: <MerchantOverview />, title: { key: 'ops.merchant.overview.title.mine' }, topbar: 'nav.overview', expect: 'kept' },
   { name: '商家模型', url: '/app/merchant/models', route: '/app/merchant/models', element: <MerchantModels />, title: { key: 'ops.merchant.models.title.mine' }, topbar: 'ops.nav.merchantModels', expect: 'kept' },
   { name: '上游', url: '/app/merchant/upstreams', route: '/app/merchant/upstreams', element: <MerchantUpstreams />, title: { key: 'ops.merchant.upstreams.title.mine' }, topbar: 'ops.nav.upstreams', expect: 'kept' },
@@ -184,19 +192,19 @@ describe('窄屏页头标题：按「是否与顶栏同文」决定隐藏还是�
         ['zh', zh],
         ['en', en],
       ] as const) {
-        const same = dict[row.title.key] === dict[row.topbar]
+        const same = dict[row.title.key] === topbarText(row, dict)
         expect(
           same,
           `${row.name}：${lang} 里 ${row.title.key} 与 ${row.topbar} 是否同文`,
         ).toBe(row.expect === 'hidden')
       }
     } else {
-      // 运行期文案（模型显示名）永远可能与顶栏不同文，必须保留。
-      expect(h1.textContent, `${row.name}：模型显示名`).toBe(row.title.text)
+      // 运行期文案（模型显示名）也可能进了顶栏：同文就隐藏，不同文就保留。
+      expect(h1.textContent, `${row.name}：运行期标题`).toBe(row.title.text)
       expect(
-        [zh[row.topbar], en[row.topbar]],
-        `${row.name}：不能与顶栏同文`,
-      ).not.toContain(h1.textContent)
+        topbarText(row, zh) === h1.textContent,
+        `${row.name}：与顶栏是否同文`,
+      ).toBe(row.expect === 'hidden')
     }
   })
 })

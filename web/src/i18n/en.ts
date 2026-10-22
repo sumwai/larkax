@@ -85,6 +85,7 @@ export const en: Record<MessageKey, string> = {
   'landing.footer': 'Accounts are created by operators. Contact them to get set up.',
 
   'login.title': 'Sign in',
+  'login.documentTitle': 'Sign in',
   'login.subtitle': 'Use the username and password your operator provided.',
   'login.username': 'Username',
   'login.password': 'Password',

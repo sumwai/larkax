@@ -7,10 +7,12 @@ import type { MessageKey } from '../i18n/zh'
 import { useAsync } from '../hooks/useAsync'
 import { formatMoney, moneySymbol } from '../lib/format'
 import { BrandMark } from '../components/icons'
+import { useDocumentTitle } from '../components/PageTitle'
 import { CopyButton } from '../components/ui'
 
 export function Landing() {
   const { t } = useI18n()
+  useDocumentTitle(t('landing.title'))
   const { meta } = useSite()
   const { status } = useAuth()
   const signedIn = status === 'authenticated'
