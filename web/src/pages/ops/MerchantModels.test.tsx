@@ -115,9 +115,10 @@ describe('商家模型', () => {
     mocks.listSuppliedModels.mockResolvedValue(page())
     renderPage()
 
+    const first = await screen.findByRole('row', { name: /gpt-4\.1/ })
     expect(await screen.findByRole('heading', { name: '全站模型' })).toBeInTheDocument()
     // 已定价说的是「有商家配过」，不是「我的价」。
-    expect(within(row('gpt-4.1')).getByText('已定价')).toBeInTheDocument()
+    expect(within(first).getByText('已定价')).toBeInTheDocument()
     expect(screen.queryByText(/我的/)).not.toBeInTheDocument()
   })
 
