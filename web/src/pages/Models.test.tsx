@@ -110,6 +110,32 @@ describe('模型列表', () => {
     expect(screen.getByRole('link', { name: /Claude Sonnet 4\.5/ })).toBeInTheDocument()
   })
 
+  it('搜索框由共享的 SearchBox 产出，一键清空后回到全量并保持聚焦', async () => {
+    renderModels()
+    await screen.findByRole('link', { name: /Claude Sonnet 4\.5/ })
+
+    // 根类名与 data-testid 都由共享组件的 SearchBox 给出，不是这一页自己画的；
+    // 运营页那份是同一个组件的默认分支（只差左侧放大镜）。
+    const box = screen.getByTestId('search-box')
+    expect(box.className).toBe('wrap-rel search-box has-icon model-search')
+
+    const rows = () => screen.getAllByRole('link', { name: /Claude Sonnet 4\.5|gpt-4\.1/ })
+    expect(rows()).toHaveLength(2)
+
+    const search = screen.getByLabelText('搜索名字、厂商或系列') as HTMLInputElement
+    fireEvent.change(search, { target: { value: 'gpt' } })
+    expect(rows()).toHaveLength(1)
+
+    fireEvent.click(screen.getByRole('button', { name: '清空搜索' }))
+
+    // 只把值置空不够：列表要按渲染期的过滤回到全量。
+    expect(search.value).toBe('')
+    expect(rows()).toHaveLength(2)
+    // 清空钮点完就被卸载，焦点得跟回输入框，否则接着打字会落空。
+    expect(document.activeElement).toBe(search)
+    expect(screen.queryByRole('button', { name: '清空搜索' })).not.toBeInTheDocument()
+  })
+
   it('过滤后为空时说换关键词或厂商，不冒充「没有模型」', async () => {
     renderModels()
     await screen.findByRole('link', { name: /Claude Sonnet 4\.5/ })

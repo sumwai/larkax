@@ -200,4 +200,27 @@ describe('计价页', () => {
     expect(screen.queryByText('standard')).not.toBeInTheDocument()
     expect(screen.getByText('wholesale')).toBeInTheDocument()
   })
+
+  it('搜索框与模型列表由同一个组件产出，一键清空后回到全量并保持聚焦', async () => {
+    mocks.listRules.mockResolvedValue([
+      RULE,
+      { ...RULE, id: 2, name: 'wholesale', model_patterns: ['gpt-*'] },
+    ])
+    renderPricing()
+    expect(await screen.findByText('standard')).toBeInTheDocument()
+
+    // 模型列表页断的是同一个类名与 data-testid，只多一个左侧放大镜。
+    const box = screen.getByTestId('search-box')
+    expect(box.className).toBe('wrap-rel search-box')
+
+    const search = screen.getByLabelText('搜索') as HTMLInputElement
+    fireEvent.change(search, { target: { value: 'whole' } })
+    expect(screen.queryByText('standard')).not.toBeInTheDocument()
+
+    fireEvent.click(within(box).getByRole('button', { name: '清空搜索' }))
+
+    expect(search.value).toBe('')
+    expect(screen.getByText('standard')).toBeInTheDocument()
+    expect(document.activeElement).toBe(search)
+  })
 })

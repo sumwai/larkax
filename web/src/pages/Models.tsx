@@ -7,7 +7,8 @@ import { formatCompact } from '../lib/format'
 import { encodeModelName } from '../lib/modelName'
 import type { MessageKey } from '../i18n/zh'
 import { Alert, Button, Empty, PageHead, Skeleton } from '../components/ui'
-import { IconModels, IconSearch } from '../components/icons'
+import { IconModels } from '../components/icons'
+import { SearchBox } from './ops/common'
 
 const CAPABILITY: Record<string, MessageKey> = {
   vision: 'models.capability.vision',
@@ -62,23 +63,14 @@ export function Models() {
         subtitle={t('models.subtitle')}
         actions={
           <div className="model-filters">
-            <div className="wrap-rel" style={{ minWidth: 220 }}>
-              <label className="sr-only" htmlFor="model-search">
-                {t('models.searchPlaceholder')}
-              </label>
-              <input
-                id="model-search"
-                className="input"
-                style={{ paddingLeft: 36 }}
-                value={query}
-                placeholder={t('models.searchPlaceholder')}
-                onChange={(event) => setQuery(event.target.value)}
-              />
-              <IconSearch
-                size={15}
-                style={{ position: 'absolute', left: 12, top: 14, color: 'var(--faint)' }}
-              />
-            </div>
+            <SearchBox
+              id="model-search"
+              icon
+              className="model-search"
+              placeholder={t('models.searchPlaceholder')}
+              value={query}
+              onChange={setQuery}
+            />
             <label className="sr-only" htmlFor="model-vendor">
               {t('models.vendor')}
             </label>

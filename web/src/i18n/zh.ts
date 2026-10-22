@@ -368,6 +368,7 @@ export const zh = {
   'ops.discardBody': '关掉之后，这一页填的内容不会保留。',
   'ops.discardConfirm': '放弃修改',
   'ops.search': '搜索',
+  'ops.searchClear': '清空搜索',
   'ops.searchEmpty': '没有匹配的条目。',
   'ops.confirmCreate': '确认创建',
   'ops.confirmSave': '确认保存',
