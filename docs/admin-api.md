@@ -79,8 +79,15 @@ Authorization: Bearer <令牌>
 **用户管理不在这里**：`/api/v1/admin/users` 只挂在控制台的会话面（见
 [api.md](api.md) 的「控制台管理接口：用户」）。它的判据里有「不能改自己」
 「不能撤掉最后一个 active 管理员」，而运维令牌没有「自己」这个概念。内部
-管理面的资源组是一份显式清单（`adminapi.InternalGroups`），所以
-`/admin/v1/users` 回 `404`，不是 `401`。
+管理面的资源组是一份显式清单（`adminapi.InternalGroups`），`users` 组只随
+显式组名注册，不在那份清单里。
+
+`/admin/v1/users` 的 `404` 以**带有效令牌**为前提：管理面一旦装配，鉴权就
+包住整张路由表（`internal/adminapi/adminapi.go` 的 `return authorize(mux)`），
+不带令牌访问其中任何路径——包括没有注册的组——都先被鉴权拦下（配过令牌回
+`401`，没配过回 `503`）。只有当令牌有效、走进 `mux` 才发现该组没有注册
+（`if groups[GroupUsers]`）时，才是 `404`。worker 角色根本没有装配管理面，
+那是另一回事，见上面的「状态码」表。
 
 这一层是薄层：写入语义与校验全在 `internal/channels`、`internal/catalog`、
 `internal/pricing` 的 admin 类型里，接口只做「解请求 → 调它 → 翻成 JSON」。
