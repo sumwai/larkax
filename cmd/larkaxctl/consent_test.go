@@ -191,10 +191,10 @@ func TestConsentRejectsBadArgs(t *testing.T) {
 			return runConsentGrant([]string{"--user", "1", "--scope", "single_request",
 				"--request-id", "r", "--from", rfc3339(time.Hour), "--agree"})
 		}, "不接受 --from / --to"},
-		{"single_request 缺 --expires-at", func() error {
+		{"single_request 没给到期时间", func() error {
 			return runConsentGrant([]string{"--user", "1", "--scope", "single_request",
 				"--request-id", "r", "--agree"})
-		}, "缺少 --expires-at"},
+		}, "缺少过期时间"},
 		{"时刻不是 RFC3339", func() error {
 			return runConsentGrant([]string{"--user", "1", "--scope", "single_request",
 				"--request-id", "r", "--expires-at", "2026-10-18 15:00", "--agree"})
@@ -525,5 +525,95 @@ func TestConsentGrantRejectsOverLimit(t *testing.T) {
 	// 一条都不该落库：超限是拒绝，不是夹到上限。
 	if n := countConsents(t, db, userID); n != 0 {
 		t.Errorf("被拒的申请写进了 %d 行授权", n)
+	}
+}
+
+// grant 的 --ttl 按注入的现在换算，写进库里的时刻逐秒相等。
+func TestConsentGrantTTLUsesInjectedNow(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+	_, name := createConsentUser(t, db)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	withExpiryNow(t, now)
+
+	var err error
+	var stderr string
+	_, stderr = captureStreams(t, func() {
+		err = runConsentGrant([]string{"--user", name, "--scope", "single_request",
+			"--request-id", "consent-ttl-1", "--ttl", "2h", "--agree"})
+	})
+	if err != nil {
+		t.Fatalf("grant 失败: %v", err)
+	}
+	id := consentIDFromStderr(t, stderr)
+
+	want := now.Add(2 * time.Hour)
+	if row := readConsentRow(t, db, id); !row.expiresAt.Equal(want) {
+		t.Errorf("expires_at = %s，期望 %s", row.expiresAt, want.Format(time.RFC3339))
+	}
+}
+
+// --forever 换出来的是远期上限，仍然要过时长上限；它被拒时一行都不写。
+func TestConsentGrantForeverIsStillCapped(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+	userID, name := createConsentUser(t, db)
+
+	err := runCaptured(t, func() error {
+		return runConsentGrant([]string{"--user", name, "--scope", "single_request",
+			"--request-id", "consent-forever-1", "--forever", "--agree"})
+	})
+	if err == nil {
+		t.Fatal("永久授权应当被时长上限拒绝")
+	}
+	if !strings.Contains(err.Error(), "超过上限") {
+		t.Errorf("错误 = %q，里面没有「超过上限」", err.Error())
+	}
+	if got := exitCode(err); got != exitUsage {
+		t.Errorf("退出码 = %d，期望 %d（参数错）", got, exitUsage)
+	}
+	if n := countConsents(t, db, userID); n != 0 {
+		t.Errorf("被拒的申请写进了 %d 行授权", n)
+	}
+}
+
+// 三种过期写法互斥、time_window 不收它们：这些判据都在连库之前。
+func TestConsentGrantRejectsExpiryFlagMixups(t *testing.T) {
+	t.Setenv("LARKAX_DB_DSN", "")
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"expires-at 与 ttl", []string{"--user", "1", "--scope", "single_request",
+			"--request-id", "r", "--expires-at", "2030-01-01T00:00:00Z", "--ttl", "30d",
+			"--agree"}, "不能同时给"},
+		{"ttl 与 forever", []string{"--user", "1", "--scope", "single_request",
+			"--request-id", "r", "--ttl", "30d", "--forever", "--agree"}, "不能同时给"},
+		{"三个都没给", []string{"--user", "1", "--scope", "single_request",
+			"--request-id", "r", "--agree"}, "缺少过期时间"},
+		{"ttl 单位不认识", []string{"--user", "1", "--scope", "single_request",
+			"--request-id", "r", "--ttl", "30w", "--agree"}, "单位"},
+		{"time_window 收 ttl", []string{"--user", "1", "--scope", "time_window",
+			"--from", "2030-01-01T00:00:00Z", "--to", "2030-01-01T01:00:00Z",
+			"--ttl", "30d", "--agree"}, "不接受"},
+		{"time_window 收 forever", []string{"--user", "1", "--scope", "time_window",
+			"--from", "2030-01-01T00:00:00Z", "--to", "2030-01-01T01:00:00Z",
+			"--forever", "--agree"}, "不接受"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runConsentGrant(tc.args)
+			if err == nil {
+				t.Fatal("应当报参数错")
+			}
+			if got := exitCode(err); got != exitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", got, exitUsage)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("错误 = %q，里面没有 %q", err.Error(), tc.want)
+			}
+		})
 	}
 }

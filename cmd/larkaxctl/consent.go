@@ -24,7 +24,7 @@ const consentShortUsage = `larkaxctl consent 管理「原样采集请求正文�
 
 用法：
   larkaxctl consent grant --user <用户 ID 或用户名> --scope single_request
-        --request-id <请求 ID> --expires-at <RFC3339 时刻> --agree
+        --request-id <请求 ID> [--expires-at <RFC3339 时刻> | --ttl <时长> | --forever] --agree
   larkaxctl consent grant --user <用户 ID 或用户名> --scope time_window
         --from <RFC3339 时刻> --to <RFC3339 时刻> --agree
   larkaxctl consent list [--user <用户 ID 或用户名>]
@@ -41,7 +41,7 @@ const consentUsage = `larkaxctl consent 管理「原样采集请求正文」的�
 
 用法：
   larkaxctl consent grant --user <用户 ID 或用户名> --scope single_request
-        --request-id <请求 ID> --expires-at <RFC3339 时刻> --agree
+        --request-id <请求 ID> [--expires-at <RFC3339 时刻> | --ttl <时长> | --forever] --agree
   larkaxctl consent grant --user <用户 ID 或用户名> --scope time_window
         --from <RFC3339 时刻> --to <RFC3339 时刻> --agree
   larkaxctl consent list [--user <用户 ID 或用户名>]
@@ -49,16 +49,21 @@ const consentUsage = `larkaxctl consent 管理「原样采集请求正文」的�
 
 两个范围二选一，字段不能混着给：
 
-  single_request  只对 --request-id 那一次请求生效，到 --expires-at 为止
+  single_request  只对 --request-id 那一次请求生效，到到期时间为止
   time_window     对 --from 到 --to 之间的全部请求生效，到点即失效
+
+single_request 的到期时间三选一，一次只给一个：--expires-at 是一个 RFC3339
+时刻；--ttl 是从现在起的一段时长（12h、30d、3m、1y）；--forever 写远期上限
+` + foreverExpiresAt + `。后两种同样受下面的时长上限约束。
 
 两种范围都要过 --agree。不带它时命令只把同意文案打出来，什么都不写：
 同意文案与它的版本号要一起落库（capture_consents 的 consent_text 与
 consent_version），所以落库之前你得先看见自己同意的是什么。
 
 时长上限是 settings 的 capture.consent_max_window_hours：single_request 比的是
-从此刻到 --expires-at，time_window 比的是 --from 到 --to 的长度。超过上限报错
-拒绝，不夹到上限——夹一下会让申请的那段时长看起来生效了，而实际生效的更短。
+从此刻到到期时间（--expires-at、--ttl 或 --forever 换出来的那个），time_window
+比的是 --from 到 --to 的长度。超过上限报错拒绝，不夹到上限——夹一下会让申请的
+那段时长看起来生效了，而实际生效的更短。
 
 授权到期、被撤销、时间窗没开始或已经过去，这四种情况在**读取的那一刻**重新
 校验一次，所以撤销立即生效，不需要等任何后台任务。没有有效授权时，采集侧落
@@ -135,6 +140,8 @@ func runConsentGrant(args []string) error {
 	scope := fs.String("scope", "", "")
 	requestID := fs.String("request-id", "", "")
 	expiresAt := fs.String("expires-at", "", "")
+	ttl := fs.String("ttl", "", "")
+	forever := fs.Bool("forever", false, "")
 	from := fs.String("from", "", "")
 	to := fs.String("to", "", "")
 	agree := fs.Bool("agree", false, "")
@@ -152,28 +159,33 @@ func runConsentGrant(args []string) error {
 			snapshotwire.ConsentScopeSingleRequest, snapshotwire.ConsentScopeTimeWindow))
 	}
 
+	seen := providedFlags(fs)
 	req := snapshotwire.ConsentRequest{Scope: *scope, RequestID: *requestID}
 	switch *scope {
 	case snapshotwire.ConsentScopeSingleRequest:
 		if *from != "" || *to != "" {
-			return usageErr(errors.New("--scope single_request 不接受 --from / --to：按单条请求授权只用到 --request-id 与 --expires-at"))
+			return usageErr(errors.New("--scope single_request 不接受 --from / --to：按单条请求授权只用到 --request-id 与到期时间"))
 		}
 		// request_id 会进 grant 的回执与 consent list 的 RANGE 那一栏：控制
 		// 字符在连库之前拒掉（判据也在 ConsentStore.Grant 的 validate 里）。
 		if err := checkDisplayText("--request-id", *requestID); err != nil {
 			return err
 		}
-		if *expiresAt == "" {
-			return usageErr(errors.New("缺少 --expires-at：这条授权到什么时候为止"))
+		at, err := resolveExpiry(seen, expiryFlags{
+			expiresAt: *expiresAt, ttl: *ttl, forever: *forever,
+		}, expiryNow(), func(v string) (time.Time, error) {
+			return parseConsentTime("--expires-at", v)
+		})
+		if errors.Is(err, errExpiryNotGiven) {
+			return usageErr(errors.New("缺少过期时间：--expires-at、--ttl 或 --forever 给一个"))
 		}
-		at, err := parseConsentTime("--expires-at", *expiresAt)
 		if err != nil {
-			return err
+			return usageErr(err)
 		}
 		req.ExpiresAt = at
 	case snapshotwire.ConsentScopeTimeWindow:
-		if *requestID != "" || *expiresAt != "" {
-			return usageErr(errors.New("--scope time_window 不接受 --request-id / --expires-at：时间窗的到期时间就是 --to"))
+		if *requestID != "" || flagGiven(seen, "expires-at") || flagGiven(seen, "ttl") || *forever {
+			return usageErr(errors.New("--scope time_window 不接受 --request-id / --expires-at / --ttl / --forever：时间窗的到期时间就是 --to"))
 		}
 		if *from == "" || *to == "" {
 			return usageErr(errors.New("缺少 --from 或 --to：时间窗的两端都要给"))

@@ -486,8 +486,8 @@ func TestDryRunKeepsArgumentErrors(t *testing.T) {
 			[]string{"settle", "--user", "1", "--amount", "1", "--ref", "R", "--by", "1"}, "缺少 --destination"},
 		{"payment create 缺 --ref", runPaymentCreate,
 			[]string{"--user", "1", "--amount", "1"}, "缺少 --ref"},
-		{"plan grant 缺 --expires-at", runPlan,
-			[]string{"grant", "--user", "1", "--plan", "P", "--ref", "R"}, "缺少 --expires-at"},
+		{"plan grant 没给到期时间", runPlan,
+			[]string{"grant", "--user", "1", "--plan", "P", "--ref", "R"}, "缺少过期时间"},
 		{"plan void 缺 --ref", runPlan,
 			[]string{"void", "--id", "1"}, "缺少 --ref"},
 	}

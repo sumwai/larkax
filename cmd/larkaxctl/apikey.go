@@ -27,10 +27,12 @@ const apiKeyShortUsage = `larkaxctl apikey 管理 API Key。
   larkaxctl apikey update --id <ID> [--status <active|disabled|revoked>]
                                   [--name <备注>] [--rpm <整数> | --clear-rpm]
                                   [--quota <金额> | --clear-quota]
-                                  [--expires-at <RFC3339> | --clear-expires-at]
+                                  [--expires-at <RFC3339> | --ttl <时长> | --forever]
   larkaxctl apikey get --id <ID>
   larkaxctl apikey list [--user <ID 或用户名>]
 
+--ttl 收 12h、30d、3m、1y 这类相对时长；--forever（旧名 --clear-expires-at）写远期上限，
+表示不过期。
 按用户建 Key 与列 Key 在 larkaxctl user key（create / list），Key 能用哪些订阅在
 larkaxctl user key plans；旧写法 apikey create、apikey list --user 仍可用并在 stderr 提示新路径。
 
@@ -46,7 +48,7 @@ const apiKeyUsage = `larkaxctl apikey 管理 API Key。
   larkaxctl apikey update --id <ID> [--status <active|disabled|revoked>]
                                   [--name <备注>] [--rpm <整数> | --clear-rpm]
                                   [--quota <金额> | --clear-quota]
-                                  [--expires-at <RFC3339> | --clear-expires-at]
+                                  [--expires-at <RFC3339> | --ttl <时长> | --forever]
   larkaxctl apikey get --id <ID>
   larkaxctl apikey list [--user <ID 或用户名>]
 
@@ -54,7 +56,8 @@ const apiKeyUsage = `larkaxctl apikey 管理 API Key。
 
 按用户建 Key 与列一个用户的 Key 已经搬到 larkaxctl user key，核心宾语写成位置参数：
 
-  larkaxctl user key create <用户> [--name <备注>] [--expires-at <RFC3339>]
+  larkaxctl user key create <用户> [--name <备注>]
+                                   [--expires-at <RFC3339> | --ttl <时长> | --forever]
                                    [--rpm <整数>] [--quota <金额>]
   larkaxctl user key list   <用户>
   larkaxctl user key plans  show|set <API Key ID> …
@@ -104,7 +107,13 @@ update 一次可以改多项，只改命令行上**真的给出**的那几项：
                      计数）。一把停用的 key 可以用 --status active 恢复。
 
   --expires-at       一个 RFC3339 时刻，到点之后这把 key 自动不可用。
-  --clear-expires-at 写回「不过期」。
+  --ttl              从现在起算的一段时长：12h、30d、3m、1y。m 是日历月、y 是
+                     日历年，目标月没有那一天时夹到月末（1 月 31 日 + 1m 是
+                     2 月 28 日，闰年 29 日）。按 UTC 算。
+  --forever          写远期上限 ` + foreverExpiresAt + `，表示不过期。
+  --clear-expires-at 同 --forever，旧名。
+
+--expires-at、--ttl、--forever 互斥，一次只给一个。
 
 过去的时刻会被拒绝：要立刻停掉一把 key 就改 --status，那样它在鉴权侧记下的
 原因是「被停用」，而设一个已经过去的过期时刻记下的是「已过期」——两种情形
@@ -190,6 +199,8 @@ func runAPIKeyCreate(args []string) error {
 	stringAlias(fs, user, "u")
 	name := fs.String("name", "", "")
 	expiresAt := fs.String("expires-at", "", "")
+	ttl := fs.String("ttl", "", "")
+	forever := fs.Bool("forever", false, "")
 	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "")
 	quota := legacyStringFlag(fs, "quota", "quota-limit", "")
 	if err := fs.Parse(args); err != nil {
@@ -209,18 +220,18 @@ func runAPIKeyCreate(args []string) error {
 		return usageErr(err)
 	}
 
-	var expires *time.Time
-	if *expiresAt != "" {
-		// 已过去的时刻直接拒绝，而不是建一把立刻不可用的 key：那种情况几乎
-		// 只可能是写错了年份（2025 写成 2024），而它的表现是「刚建好的 key
-		// 就说无效」——最费时的一类排查。auth.Create 本身不拦：库层允许建
-		// 一把已过期的 key（造测试数据、补历史数据都要用到），拦在交互式
-		// 命令这一层才合适。
-		t, err := parseFutureExpiresAt(*expiresAt, "这样的 key 建出来就是不可用的")
-		if err != nil {
-			return usageErr(err)
-		}
-		expires = &t
+	expires, err := optionalExpiry(providedFlags(fs),
+		expiryFlags{expiresAt: *expiresAt, ttl: *ttl, forever: *forever}, expiryNow(),
+		func(v string) (time.Time, error) {
+			// 已过去的时刻直接拒绝，而不是建一把立刻不可用的 key：那种情况几乎
+			// 只可能是写错了年份（2025 写成 2024），而它的表现是「刚建好的 key
+			// 就说无效」——最费时的一类排查。auth.Create 本身不拦：库层允许建
+			// 一把已过期的 key（造测试数据、补历史数据都要用到），拦在交互式
+			// 命令这一层才合适。
+			return parseFutureExpiresAt(v, "这样的 key 建出来就是不可用的")
+		})
+	if err != nil {
+		return usageErr(err)
 	}
 
 	limits, err := parseLimits(fs, *rpm, *quota)
@@ -265,7 +276,11 @@ func runAPIKeyUpdate(args []string) error {
 	status := fs.String("status", "", "")
 	name := fs.String("name", "", "")
 	expiresAt := fs.String("expires-at", "", "")
-	clearExpiresAt := fs.Bool("clear-expires-at", false, "")
+	ttl := fs.String("ttl", "", "")
+	forever := fs.Bool("forever", false, "")
+	// --clear-expires-at 是 --forever 的旧名，两个写同一个变量：它们说的是
+	// 同一件事（写远期上限），不是「设值 / 清空」那一对。
+	boolAlias(fs, forever, "clear-expires-at")
 	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "")
 	clearRPM := fs.Bool("clear-rpm", false, "")
 	boolAlias(fs, clearRPM, "clear-rate-limit-rpm")
@@ -287,7 +302,8 @@ func runAPIKeyUpdate(args []string) error {
 	params, err := updateParams(seen,
 		limitFlag{value: *rpm, clear: *clearRPM},
 		limitFlag{value: *quota, clear: *clearQuota},
-		metaFlags{status: *status, name: *name, expiresAt: *expiresAt, clearExpires: *clearExpiresAt})
+		metaFlags{status: *status, name: *name, expiresAt: *expiresAt,
+			ttl: *ttl, forever: *forever})
 	if err != nil {
 		// 这几条错误（负数、小数位过多、两个旗标打架、状态取值不认识、没有要改
 		// 的东西）都在信息里点了名，已经够看懂，不再附带整段用法——与 create /
@@ -404,10 +420,11 @@ type limitFlag struct {
 // 再平铺四个（其中还有一个布尔）的话，把 name 与 status 写反只是又一次
 // 「编得过、跑出来是另一件事」。
 type metaFlags struct {
-	status       string
-	name         string
-	expiresAt    string
-	clearExpires bool
+	status    string
+	name      string
+	expiresAt string
+	ttl       string
+	forever   bool
 }
 
 // updateParams 把 update 的旗标读成一次修改意图。
@@ -465,19 +482,18 @@ func updateParams(seen map[string]bool, rpm, quota limitFlag, meta metaFlags) (a
 		params.SetQuota, params.QuotaLimit = true, parsed
 	}
 
-	switch expiresGiven := flagGiven(seen, "expires-at"); {
-	case meta.clearExpires && expiresGiven:
-		return auth.KeyParams{}, errors.New("--expires-at 与 --clear-expires-at 不能同时给：" +
-			"一个是设值，一个是写回「不过期」")
-	case meta.clearExpires:
-		// ExpiresAt 留 nil：SetExpiresAt 为真而指针为 nil 就是「写回 NULL」。
-		params.SetExpiresAt = true
-	case expiresGiven:
-		parsed, err := parseFutureExpiresAt(meta.expiresAt, "改完就不可用了")
-		if err != nil {
-			return auth.KeyParams{}, err
-		}
-		params.SetExpiresAt, params.ExpiresAt = true, &parsed
+	expires, err := resolveExpiry(seen, expiryFlags{
+		expiresAt: meta.expiresAt, ttl: meta.ttl, forever: meta.forever,
+	}, expiryNow(), func(v string) (time.Time, error) {
+		return parseFutureExpiresAt(v, "改完就不可用了")
+	})
+	switch {
+	case errors.Is(err, errExpiryNotGiven):
+		// 不给就不改，与两项额度同一条。
+	case err != nil:
+		return auth.KeyParams{}, err
+	default:
+		params.SetExpiresAt, params.ExpiresAt = true, &expires
 	}
 
 	if flagGiven(seen, "status") {
@@ -504,7 +520,8 @@ func updateParams(seen map[string]bool, rpm, quota limitFlag, meta metaFlags) (a
 	if !params.SetRateLimit && !params.SetQuota && !params.SetStatus &&
 		!params.SetName && !params.SetExpiresAt {
 		return auth.KeyParams{}, errors.New("没有要改的东西：--status、--name、" +
-			"--expires-at、--rpm、--quota 至少要给一个（要清空的给对应的 --clear-*）")
+			"--expires-at、--ttl、--forever、--rpm、--quota 至少要给一个" +
+			"（要清空的给对应的 --clear-*）")
 	}
 
 	return params, nil
@@ -539,7 +556,7 @@ func parseFutureExpiresAt(plain, consequence string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf(
 			"--expires-at 不是 RFC3339 时间（例如 2026-12-31T00:00:00Z）: %w", err)
 	}
-	if !t.After(time.Now()) {
+	if !t.After(expiryNow()) {
 		return time.Time{}, fmt.Errorf("--expires-at %s 已经过去了：%s",
 			t.Format(time.RFC3339), consequence)
 	}
@@ -862,7 +879,9 @@ func formatQuota(v *money.Amount) string {
 }
 
 func formatTime(v *time.Time, empty string) string {
-	if v == nil {
+	if v == nil || isForeverExpiry(*v) {
+		// --forever 写的是一个远期时间戳，不是 NULL；人读的那一档把它与
+		// 「没设过」打成同一句话：两种落库值表达的是同一件事。
 		return empty
 	}
 	return formatTimeValue(*v)
@@ -897,7 +916,7 @@ func formatStampShort(t time.Time) string {
 
 // formatTimeShort 与 formatTime 同义，只是把时刻截到分钟。
 func formatTimeShort(v *time.Time, empty string) string {
-	if v == nil {
+	if v == nil || isForeverExpiry(*v) {
 		return empty
 	}
 	return formatStampShort(*v)

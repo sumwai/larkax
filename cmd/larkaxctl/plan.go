@@ -311,6 +311,8 @@ func runPlanGrant(args []string) error {
 	planKey := fs.String("plan", "", "")
 	ref := fs.String("ref", "", "")
 	expiresAt := fs.String("expires-at", "", "")
+	ttl := fs.String("ttl", "", "")
+	forever := fs.Bool("forever", false, "")
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -330,10 +332,14 @@ func runPlanGrant(args []string) error {
 	if err := checkDisplayText("--ref", strings.TrimSpace(*ref)); err != nil {
 		return err
 	}
-	if *expiresAt == "" {
-		return usageErr(errors.New("缺少 --expires-at"))
+	expires, err := resolveExpiry(providedFlags(fs), expiryFlags{
+		expiresAt: *expiresAt, ttl: *ttl, forever: *forever,
+	}, expiryNow(), func(v string) (time.Time, error) {
+		return parseFutureExpiresAt(v, "这份额度发出去就已经到期了")
+	})
+	if errors.Is(err, errExpiryNotGiven) {
+		return usageErr(errors.New("缺少过期时间：--expires-at、--ttl 或 --forever 给一个"))
 	}
-	expires, err := parseFutureExpiresAt(*expiresAt, "这份额度发出去就已经到期了")
 	if err != nil {
 		return usageErr(err)
 	}

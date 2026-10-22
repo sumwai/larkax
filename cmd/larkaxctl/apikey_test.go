@@ -32,6 +32,12 @@ func TestAPIKeyCreateRejectsBadFlags(t *testing.T) {
 		{"多出位置参数", []string{"--user", "1", "extra"}, "不接受位置参数"},
 		{"--expires-at 不是时间", []string{"--user", "1", "--expires-at", "明天"}, "RFC3339"},
 		{"--expires-at 在过去", []string{"--user", "1", "--expires-at", "2020-01-01T00:00:00Z"}, "已经过去"},
+		{"--expires-at 与 --ttl 同时给",
+			[]string{"--user", "1", "--expires-at", "2030-01-01T00:00:00Z", "--ttl", "30d"},
+			"不能同时给"},
+		{"--ttl 与 --forever 同时给",
+			[]string{"--user", "1", "--ttl", "30d", "--forever"}, "不能同时给"},
+		{"--ttl 单位不认识", []string{"--user", "1", "--ttl", "30w"}, "单位"},
 
 		{"--rate-limit-rpm 不是整数", []string{"--user", "1", "--rate-limit-rpm", "六十"}, "需要整数"},
 		{"--rate-limit-rpm 是小数", []string{"--user", "1", "--rate-limit-rpm", "6.5"}, "需要整数"},
@@ -228,15 +234,33 @@ func TestUpdateParamsThreeStates(t *testing.T) {
 		}
 	})
 
-	t.Run("清空过期是 Set 为真且指针为 nil", func(t *testing.T) {
+	t.Run("forever 是 Set 为真且指针指向远期上限", func(t *testing.T) {
 		params, err := updateParams(map[string]bool{}, limitFlag{}, limitFlag{},
-			metaFlags{clearExpires: true})
+			metaFlags{forever: true})
 		if err != nil {
 			t.Fatalf("出错: %v", err)
 		}
-		if !params.SetExpiresAt || params.ExpiresAt != nil {
-			t.Fatalf("得到 SetExpiresAt=%v ExpiresAt=%s，期望 true 与 nil",
+		if !params.SetExpiresAt || params.ExpiresAt == nil {
+			t.Fatalf("得到 SetExpiresAt=%v ExpiresAt=%s，期望 true 与远期上限",
 				params.SetExpiresAt, showPtr(params.ExpiresAt))
+		}
+		if !params.ExpiresAt.Equal(foreverExpiry()) {
+			t.Errorf("ExpiresAt = %s，期望 %s", params.ExpiresAt.Format(time.RFC3339), foreverExpiresAt)
+		}
+	})
+
+	t.Run("ttl 按注入的现在换算", func(t *testing.T) {
+		now := time.Date(2026, 1, 31, 12, 0, 0, 0, time.UTC)
+		withExpiryNow(t, now)
+		params, err := updateParams(map[string]bool{"ttl": true}, limitFlag{}, limitFlag{},
+			metaFlags{ttl: "1m"})
+		if err != nil {
+			t.Fatalf("出错: %v", err)
+		}
+		want := time.Date(2026, 2, 28, 12, 0, 0, 0, time.UTC)
+		if !params.SetExpiresAt || params.ExpiresAt == nil || !params.ExpiresAt.Equal(want) {
+			t.Fatalf("得到 SetExpiresAt=%v ExpiresAt=%s，期望 true 与 %s",
+				params.SetExpiresAt, showPtr(params.ExpiresAt), want.Format(time.RFC3339))
 		}
 	})
 
@@ -286,11 +310,21 @@ func TestUpdateParamsRejectsConflictingAndBadValues(t *testing.T) {
 		// 元信息那三项：过期与状态各有自己的冲突与取值判据。
 		{"expires-at 设值与清空同时给",
 			map[string]bool{"expires-at": true}, "", false, "", false,
-			metaFlags{expiresAt: "2030-01-02T03:04:05Z", clearExpires: true},
+			metaFlags{expiresAt: "2030-01-02T03:04:05Z", forever: true},
 			"不能同时给"},
 		{"expires-at 不是 RFC3339",
 			map[string]bool{"expires-at": true}, "", false, "", false,
 			metaFlags{expiresAt: "2030-01-02"}, "RFC3339"},
+		{"expires-at 与 ttl 同时给",
+			map[string]bool{"expires-at": true, "ttl": true}, "", false, "", false,
+			metaFlags{expiresAt: "2030-01-02T03:04:05Z", ttl: "30d"},
+			"不能同时给"},
+		{"ttl 与 forever 同时给",
+			map[string]bool{"ttl": true}, "", false, "", false,
+			metaFlags{ttl: "30d", forever: true}, "不能同时给"},
+		{"ttl 的单位不认识",
+			map[string]bool{"ttl": true}, "", false, "", false,
+			metaFlags{ttl: "30w"}, "单位"},
 		{"expires-at 在过去",
 			map[string]bool{"expires-at": true}, "", false, "", false,
 			metaFlags{expiresAt: "2020-01-01T00:00:00Z"}, "已经过去"},
@@ -347,6 +381,13 @@ func TestAPIKeyUpdateRejectsBadFlags(t *testing.T) {
 		{"--expires-at 与 --clear-expires-at 同时给",
 			[]string{"--id", "3", "--expires-at", "2030-01-01T00:00:00Z", "--clear-expires-at"},
 			"不能同时给"},
+		{"--expires-at 与 --ttl 同时给",
+			[]string{"--id", "3", "--expires-at", "2030-01-01T00:00:00Z", "--ttl", "30d"},
+			"不能同时给"},
+		{"--ttl 与 --forever 同时给",
+			[]string{"--id", "3", "--ttl", "30d", "--forever"}, "不能同时给"},
+		{"--ttl 数值不是正整数", []string{"--id", "3", "--ttl", "-1d"}, "正整数"},
+		{"--ttl 没写单位", []string{"--id", "3", "--ttl", "30"}, "单位"},
 	}
 
 	for _, tc := range cases {
@@ -1344,7 +1385,7 @@ func TestAPIKeyNameAndExpiryRoundTripThroughRealCommands(t *testing.T) {
 		t.Errorf("过期 = %q，期望 %q（进程时区下的写法）", got, wantExpires)
 	}
 
-	// 清空：写回 NULL，读回来是「不过期」。
+	// 清空（旧名 --clear-expires-at）：写远期上限，人读的那一档仍打「不过期」。
 	if err := runCaptured(t, func() error {
 		return runAPIKeyUpdate([]string{"--id", id, "--name", "", "--clear-expires-at"})
 	}); err != nil {
@@ -1356,5 +1397,232 @@ func TestAPIKeyNameAndExpiryRoundTripThroughRealCommands(t *testing.T) {
 	}
 	if got := detailField(t, detail, "备注"); got != "-" {
 		t.Errorf("清空之后备注 = %q，期望 -", got)
+	}
+}
+
+// --forever 与它的旧名 --clear-expires-at 必须写回同一个值。
+//
+// 判据读的是**库里的那一列**，不是命令打出来的那句话：两个入口在屏幕上
+// 都打成「不过期」，而这一条要证明的是它们落库的值也逐字相等。
+func TestAPIKeyForeverAndClearExpiresWriteTheSameValue(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+	ctx := context.Background()
+
+	createKey := func() int64 {
+		t.Helper()
+		created, err := auth.New(db).Create(ctx, auth.CreateParams{
+			UserID: createTestUser(t), Name: uniqueName("forever"),
+		})
+		if err != nil {
+			t.Fatalf("建一把 key 失败: %v", err)
+		}
+		return created.ID
+	}
+	expiryOf := func(id int64) *time.Time {
+		t.Helper()
+		var at *time.Time
+		if err := db.QueryRowContext(ctx,
+			`SELECT expires_at FROM api_keys WHERE id = $1`, id).Scan(&at); err != nil {
+			t.Fatalf("读 key %d 的 expires_at 失败: %v", id, err)
+		}
+		return at
+	}
+
+	idForever := createKey()
+	idClear := createKey()
+	if err := runCaptured(t, func() error {
+		return runAPIKeyUpdate([]string{"--id", strconv.FormatInt(idForever, 10), "--forever"})
+	}); err != nil {
+		t.Fatalf("--forever 失败: %v", err)
+	}
+	if err := runCaptured(t, func() error {
+		return runAPIKeyUpdate([]string{"--id", strconv.FormatInt(idClear, 10), "--clear-expires-at"})
+	}); err != nil {
+		t.Fatalf("--clear-expires-at 失败: %v", err)
+	}
+
+	forever, clear := expiryOf(idForever), expiryOf(idClear)
+	if forever == nil || clear == nil {
+		t.Fatalf("两个入口都该写一个时刻，得到 --forever=%v --clear-expires-at=%v", forever, clear)
+	}
+	if !forever.Equal(*clear) {
+		t.Errorf("--forever 写入 %s，--clear-expires-at 写入 %s，两者应当逐字相等",
+			forever.UTC().Format(time.RFC3339), clear.UTC().Format(time.RFC3339))
+	}
+	if got := forever.UTC().Format(time.RFC3339); got != foreverExpiresAt {
+		t.Errorf("写入 %s，期望远期上限 %s", got, foreverExpiresAt)
+	}
+}
+
+// create 上的 --ttl 与 --forever 走真命令写库：--ttl 的期望值来自注入的现在。
+func TestAPIKeyCreateTTLAndForever(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+	ctx := context.Background()
+
+	expiryOf := func(userID int64) *time.Time {
+		t.Helper()
+		var at *time.Time
+		if err := db.QueryRowContext(ctx,
+			`SELECT expires_at FROM api_keys WHERE user_id = $1 ORDER BY id DESC LIMIT 1`,
+			userID).Scan(&at); err != nil {
+			t.Fatalf("读用户 %d 那把 key 的 expires_at 失败: %v", userID, err)
+		}
+		return at
+	}
+
+	// 1 月 31 日 + 1m 落在 2 月 28 日（2026 不是闰年）；判据是逐秒相等。
+	now := time.Date(2026, 1, 31, 12, 0, 0, 0, time.UTC)
+	withExpiryNow(t, now)
+
+	ttlUser := createTestUser(t)
+	_, stderr := mustStream(t, func() error {
+		return runAPIKeyCreate([]string{"--user", strconv.FormatInt(ttlUser, 10), "--ttl", "1m"})
+	})
+	wantTTL := time.Date(2026, 2, 28, 12, 0, 0, 0, time.UTC)
+	// create 的回显打的是「算出来的那个时刻」本身的时区：--ttl 按 UTC 换算，
+	// 所以这里就是 Z。读库那一档（get / update）才跟着会话时区走。
+	if want := "过期=" + wantTTL.Format(time.RFC3339); !strings.Contains(stderr, want) {
+		t.Errorf("create 回显里没有 %q：%q", want, stderr)
+	}
+	if got := expiryOf(ttlUser); got == nil || !got.Equal(wantTTL) {
+		t.Errorf("--ttl 1m 写进去的是 %v，期望 %s", got, wantTTL.Format(time.RFC3339))
+	}
+
+	foreverUser := createTestUser(t)
+	_, stderr = mustStream(t, func() error {
+		return runAPIKeyCreate([]string{"--user", strconv.FormatInt(foreverUser, 10), "--forever"})
+	})
+	if !strings.Contains(stderr, "过期=不过期") {
+		t.Errorf("--forever 建出来的 key 回显该说「不过期」：%q", stderr)
+	}
+	if got := expiryOf(foreverUser); got == nil ||
+		got.UTC().Format(time.RFC3339) != foreverExpiresAt {
+		t.Errorf("--forever 写进去的是 %v，期望 %s", got, foreverExpiresAt)
+	}
+}
+
+// splitPaddedCells 把一行对齐后的表格按「两格以上的空白」切成栏。
+//
+// 不用 strings.Fields：创建、过期、最近使用这三栏的值本身就是「月-日 时:分」，
+// 里面有一个空格；按空白切会把一栏拆成两栏，而「不过期」只有一个词——同一行
+// 的栏数会随这一格渲染成什么而变。栏与栏之间固定隔两格（table.go 的 columnGap），
+// 按它切才与列对齐无关。
+func splitPaddedCells(line string) []string {
+	var cells []string
+	start := 0
+	for i := 0; i < len(line); {
+		if line[i] != ' ' {
+			i++
+			continue
+		}
+		j := i
+		for j < len(line) && line[j] == ' ' {
+			j++
+		}
+		if j-i >= 2 {
+			cells = append(cells, line[start:i])
+			start = j
+		}
+		i = j
+	}
+	return append(cells, line[start:])
+}
+
+// TestAPIKeyNullAndForeverRenderAlike 把「没设过」与「永久」并排放在同一条
+// 用例里对拍：库里一条是 NULL、一条是远期时间戳，而给人看的两处输出说的是
+// 同一句话。
+//
+// 判据是**整格逐字相等**，不是 Contains：带日期的渲染与「不过期」之间差的
+// 正是这一格的全部内容，逐字相等顺带把「不得出现 9999-12-31 或任何年月日
+// 形态」也钉住了——只要那一格不是「不过期」，它就红。
+func TestAPIKeyNullAndForeverRenderAlike(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+	ctx := context.Background()
+
+	createKey := func(name string) int64 {
+		t.Helper()
+		k, err := auth.New(db).Create(ctx, auth.CreateParams{
+			UserID: createTestUser(t), Name: uniqueName(name),
+		})
+		if err != nil {
+			t.Fatalf("建一把 key 失败: %v", err)
+		}
+		return k.ID
+	}
+	expiryOf := func(id int64) *time.Time {
+		t.Helper()
+		var at *time.Time
+		if err := db.QueryRowContext(ctx,
+			`SELECT expires_at FROM api_keys WHERE id = $1`, id).Scan(&at); err != nil {
+			t.Fatalf("读 key %d 的 expires_at 失败: %v", id, err)
+		}
+		return at
+	}
+
+	idNull := createKey("null-expiry")
+	idForever := createKey("forever-expiry")
+	if err := runCaptured(t, func() error {
+		return runAPIKeyUpdate([]string{"--id", strconv.FormatInt(idForever, 10), "--forever"})
+	}); err != nil {
+		t.Fatalf("--forever 失败: %v", err)
+	}
+
+	// 断言之前先读库：这一条用例的前提正是两侧落库值不同——一边 NULL、
+	// 一边远期时间戳。前提不成立时，下面的相等就没有意义。
+	if at := expiryOf(idNull); at != nil {
+		t.Fatalf("NULL 那一侧的 expires_at = %s，期望 NULL", at.Format(time.RFC3339))
+	}
+	atForever := expiryOf(idForever)
+	if atForever == nil || atForever.UTC().Format(time.RFC3339) != foreverExpiresAt {
+		t.Fatalf("远期那一侧的 expires_at = %v，期望 %s", atForever, foreverExpiresAt)
+	}
+
+	// list：「过期」是从 0 数的第 9 栏（ID、KEY 前缀、所属用户、备注、状态、
+	// 每分钟、额度、创建、过期、最近使用）。
+	stdout, _ := mustStream(t, func() error { return runAPIKey([]string{"list"}) })
+	listExpiry := func(id int64) string {
+		t.Helper()
+		idText := strconv.FormatInt(id, 10)
+		for _, line := range strings.Split(strings.TrimRight(stdout, "\n"), "\n") {
+			cells := splitPaddedCells(line)
+			if len(cells) > 8 && cells[0] == idText {
+				return cells[8]
+			}
+		}
+		t.Fatalf("list 输出里找不到 id=%s 的「过期」那一栏：\n%s", idText, stdout)
+		return ""
+	}
+
+	detailExpiry := func(id int64) string {
+		t.Helper()
+		out, _ := mustStream(t, func() error {
+			return runAPIKey([]string{"get", "--id", strconv.FormatInt(id, 10)})
+		})
+		for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+			cells := splitPaddedCells(line)
+			if len(cells) == 2 && cells[0] == "过期" {
+				return cells[1]
+			}
+		}
+		t.Fatalf("详情里找不到「过期」那一栏：\n%s", out)
+		return ""
+	}
+
+	checks := []struct {
+		where string
+		got   string
+	}{
+		{"list 的 NULL 行", listExpiry(idNull)},
+		{"list 的远期行", listExpiry(idForever)},
+		{"get 的 NULL 详情", detailExpiry(idNull)},
+		{"get 的远期详情", detailExpiry(idForever)},
+	}
+	for _, c := range checks {
+		if c.got != "不过期" {
+			t.Errorf("%s「过期」= %q，期望「不过期」：远期值走的是日期渲染", c.where, c.got)
+		}
 	}
 }

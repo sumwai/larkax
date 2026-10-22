@@ -327,3 +327,91 @@ func TestPlanListJSON(t *testing.T) {
 		t.Errorf("JSON 里没有刚建的包 %q：\n%s", planKey, stdout)
 	}
 }
+
+// grant 的 --ttl 与 --forever 走真命令写库。
+//
+// --ttl 的期望值来自注入的现在，与命令自己取的那个是同一个来源；--forever
+// 与 apikey 共用同一个远期上限。
+func TestPlanGrantTTLAndForever(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	userID := createTestUser(t)
+	user := strconv.FormatInt(userID, 10)
+
+	planKey := uniqueName("ttl-plan")
+	mustStream(t, func() error {
+		return runPlan([]string{
+			"create", "--key", planKey, "--name", "时长包",
+			"--unit", "amount", "--quota", "5",
+		})
+	})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	withExpiryNow(t, now)
+
+	expiryOf := func(ref string) time.Time {
+		t.Helper()
+		var at time.Time
+		if err := db.QueryRowContext(ctx,
+			`SELECT period_end FROM user_plans WHERE ref = $1`, ref).Scan(&at); err != nil {
+			t.Fatalf("读订阅 %q 的 period_end 失败: %v", ref, err)
+		}
+		return at
+	}
+
+	ttlRef := uniqueName("ttl-grant")
+	mustStream(t, func() error {
+		return runPlan([]string{
+			"grant", "--user", user, "--plan", planKey, "--ref", ttlRef, "--ttl", "30d",
+		})
+	})
+	wantTTL := now.AddDate(0, 0, 30)
+	if got := expiryOf(ttlRef); !got.Equal(wantTTL) {
+		t.Errorf("--ttl 30d 写入 %s，期望 %s",
+			got.Format(time.RFC3339), wantTTL.Format(time.RFC3339))
+	}
+
+	foreverRef := uniqueName("forever-grant")
+	mustStream(t, func() error {
+		return runPlan([]string{
+			"grant", "--user", user, "--plan", planKey, "--ref", foreverRef, "--forever",
+		})
+	})
+	if got := expiryOf(foreverRef); got.UTC().Format(time.RFC3339) != foreverExpiresAt {
+		t.Errorf("--forever 写入 %s，期望 %s",
+			got.UTC().Format(time.RFC3339), foreverExpiresAt)
+	}
+}
+
+// 三个过期写法互斥：plan grant 的参数判据不连库。
+func TestPlanGrantRejectsConflictingExpiryFlags(t *testing.T) {
+	t.Setenv("LARKAX_DB_DSN", "")
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"expires-at 与 ttl", []string{"grant", "--user", "1", "--plan", "p", "--ref", "r",
+			"--expires-at", "2030-01-01T00:00:00Z", "--ttl", "30d"}, "不能同时给"},
+		{"ttl 与 forever", []string{"grant", "--user", "1", "--plan", "p", "--ref", "r",
+			"--ttl", "30d", "--forever"}, "不能同时给"},
+		{"三个都没给", []string{"grant", "--user", "1", "--plan", "p", "--ref", "r"},
+			"缺少过期时间"},
+		{"ttl 单位不认识", []string{"grant", "--user", "1", "--plan", "p", "--ref", "r",
+			"--ttl", "30w"}, "单位"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runPlan(tc.args)
+			if err == nil {
+				t.Fatal("应当报参数错")
+			}
+			if exitCode(err) != exitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", exitCode(err), exitUsage)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("错误 = %q，里面没有 %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
