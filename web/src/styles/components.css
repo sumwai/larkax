@@ -349,6 +349,51 @@ textarea.input {
   grid-template-columns: 1fr 1fr;
   gap: 14px;
 }
+/* 带单位前缀的输入框：符号与输入共用一圈边框，聚焦时整圈高亮。 */
+.input-affix {
+  display: flex;
+  align-items: center;
+  min-height: 42px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  transition:
+    border-color 0.14s ease,
+    box-shadow 0.14s ease;
+}
+.input-affix:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.input-affix .affix {
+  flex: none;
+  padding-left: 12px;
+  color: var(--muted);
+  font-size: 14px;
+}
+/* 外圈已经有 1px 边框，里层的输入退回内容高度，两圈叠起来仍是 42px。 */
+.input-affix .input {
+  min-width: 0;
+  min-height: 0;
+  height: 40px;
+  border: 0;
+  background: transparent;
+}
+.input-affix .input:focus {
+  box-shadow: none;
+}
+/* 快捷档位：一排小按钮，放不下就换行。行距留到 14px——`.btn.sm` 窄屏下的
+   热区向外各补 7px，行距小于这个值时上下两排的命中矩形会相交。 */
+.preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 6px;
+}
+.btn.preset-btn[aria-pressed='true'] {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  color: var(--accent);
+}
 
 /* 3.5 表格 */
 .table {
