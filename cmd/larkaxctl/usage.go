@@ -30,6 +30,7 @@ const usageShortUsage = `larkaxctl usage 读用量与计费：这段时间用了
         [--limit <条数>]
         列出计费请求：每次请求的钱包预留与额度包面值、状态与结算金额
 
+看某一个用户的用量在 larkaxctl user usage（events / requests <用户>）。
 两条都只读，不改任何一行、不写任何快照。
 
 更细的边界：larkaxctl help usage。
@@ -45,6 +46,15 @@ const usageUsage = `larkaxctl usage 读用量与计费：这段时间用了多�
   larkaxctl usage requests [--user <用户 ID 或用户名>] [--from <时刻>] [--to <时刻>]
         [--limit <条数>]
         列出计费请求：每次请求的钱包预留与额度包面值、状态与结算金额
+
+按用户看这两张表已经搬到 larkaxctl user usage，核心宾语写成位置参数：
+
+  larkaxctl user usage events   <用户> [--from <时刻>] [--to <时刻>] [--limit <条数>]
+  larkaxctl user usage requests <用户> [--from <时刻>] [--to <时刻>] [--limit <条数>]
+
+两条路径的输出逐字相同。旧写法（usage events --user …）仍可用，命中时在 stderr
+提示新路径，至少保留一个发布周期。不带 --user 时这两条回答的是全量，没有对应的
+新路径，也就不提示。
 
 两条都只读：不改任何一行、不写任何快照。读用量与读计费记录是管理员动作——
 跑得起 larkaxctl 的人本来就能连上这个库，所以这两条不额外要求别的授权，也不带
@@ -95,8 +105,16 @@ func runUsage(args []string) error {
 
 	switch action {
 	case "events":
+		if usesUserFlag(rest) {
+			return runLegacyUserPath("usage events --user 已搬到 larkaxctl user usage events <用户>",
+				func() error { return runUsageEvents(rest) })
+		}
 		return runUsageEvents(rest)
 	case "requests":
+		if usesUserFlag(rest) {
+			return runLegacyUserPath("usage requests --user 已搬到 larkaxctl user usage requests <用户>",
+				func() error { return runUsageRequests(rest) })
+		}
 		return runUsageRequests(rest)
 	case "-h", "--help":
 		printUsage(os.Stdout, usageShortUsage)

@@ -21,27 +21,23 @@ import (
 var planHelp = helpText{short: planShortUsage, long: planUsage}
 
 // planShortUsage 是 plan 的短版：`-h` / `--help` 与参数写错时打的那一份。
-const planShortUsage = `larkaxctl plan 管理额度包、订阅与扣费顺序。
+//
+// 这里只剩**商品定义**（一个包是什么、能不能再发）。某个用户持有的订阅、扣费顺序
+// 与 Key 的额度包名单已经搬到 user 那一组，旧路径仍然可用，但不在这份用法里占行。
+const planShortUsage = `larkaxctl plan 管理额度包（商品定义）。
 用法：
   larkaxctl plan create --key <key> --name <名称> --unit <amount|token|request>
                         [--quota <可用量>] [--face-value <面值>] [--models <模型,...>]
   larkaxctl plan list
   larkaxctl plan get --key <key>
   larkaxctl plan enable|disable --key <key>
-  larkaxctl plan grant --user <ID 或用户名> --plan <key> --ref <发放单号> --expires-at <RFC3339>
-  larkaxctl plan void --id <订阅 ID> --ref <作废单号> [--status <expired|canceled>]
-  larkaxctl plan subscriptions --user <ID 或用户名>
-  larkaxctl plan key show --id <API Key ID>
-  larkaxctl plan key set --id <API Key ID> [--plans <订阅 ID,...> | --all]
-  larkaxctl plan order show --user <ID 或用户名>
-  larkaxctl plan order set --user <ID 或用户名> [--order <顺序> | --clear]
 
-key 的名单为空表示「可以用这个用户名下全部订阅」；--clear 表示跟随平台默认。
+用户持有的订阅、扣费顺序与 Key 的额度包名单：larkaxctl user plan、larkaxctl user key。
 更细的边界：larkaxctl help plan。
 `
 
 // planUsage 是 plan 的长版：`larkaxctl help plan` 与 `plan help`。
-const planUsage = `larkaxctl plan 管理额度包、订阅与扣费顺序。
+const planUsage = `larkaxctl plan 管理额度包（商品定义）。
 
 用法：
   larkaxctl plan create --key <key> --name <名称> --unit <amount|token|request>
@@ -50,14 +46,6 @@ const planUsage = `larkaxctl plan 管理额度包、订阅与扣费顺序。
   larkaxctl plan list
   larkaxctl plan get --key <key>
   larkaxctl plan enable|disable --key <key>
-  larkaxctl plan grant --user <ID 或用户名> --plan <key> --ref <发放单号>
-                       --expires-at <RFC3339>
-  larkaxctl plan void --id <订阅 ID> --ref <作废单号> [--status <expired|canceled>]
-  larkaxctl plan subscriptions --user <ID 或用户名>
-  larkaxctl plan key show --id <API Key ID>
-  larkaxctl plan key set --id <API Key ID> [--plans <订阅 ID,...> | --all]
-  larkaxctl plan order show --user <ID 或用户名>
-  larkaxctl plan order set --user <ID 或用户名> [--order <顺序> | --clear]
 
 # 三种计量单位
 
@@ -71,33 +59,17 @@ const planUsage = `larkaxctl plan 管理额度包、订阅与扣费顺序。
 它们的价值与模型强相关，不限定范围就是一个可能亏本的包。金额包可以不给，
 空表示不限模型。
 
-# 订阅
-
-grant 建一条订阅，并把面值记进 prepaid:<订阅 ID>。--ref 是发放单号，也是幂等键：
-同一个单号重跑只会发一次，第二次打「已经发过」。--expires-at 必须晚于现在。
-
-void 作废一条订阅，把剩余面值转回平台收入。默认按「人工作废」（canceled）收尾；
---status expired 表示到期作废。--ref 是作废单号，同样是幂等键。
-
-disable 只挡新的发放：已经发出去的订阅照常消费与作废；要收回某一份额度用 void。
 get 打一个包的详情，list 列出全部（含停用的），两者都不改任何东西。
+enable / disable 控制一个包还能不能用于**新的发放**：已经发出去的订阅不受影响，
+它们的面值在发放时就定下了。
 
-# key 的额度包名单
+# 用户持有的订阅
 
-key 的名单限制这把 key 能用用户的哪些订阅。没有配过名单（或 --all 清空之后）
-表示可以用这个用户名下全部订阅。名单里的每一条都必须是这把 key 所属用户的订阅，
-否则当场报错、一行都不写。删掉 key 或删掉订阅之后，关联行跟着删除。
+发放、作废、列订阅与扣费顺序都在 larkaxctl user plan 下（grant / void / list /
+order）。旧路径 plan grant / plan void / plan subscriptions / plan order 仍可用，
+各条在命中时于 stderr 提示新路径。
 
-# 扣费顺序
-
-  plan_first     先额度包后余额（平台默认）
-  balance_first  先余额后额度包
-  balance_only   只走余额
-
-用户上的取值覆盖平台默认；--clear 清掉覆盖，回到跟随平台默认。平台默认在
-settings 的 plans.charge_order 上（larkaxctl settings set plans.charge_order ...）。
-读侧遇到认不出的取值不报错：用户那一行认不出就回落到平台默认；平台那一行缺失、
-不是 JSON 或取值也认不出，才回落到兜底值 plan_first。两种都记一条日志。
+一把 API Key 能用哪些订阅在 larkaxctl user key plans 下；旧路径 plan key 仍可用。
 
 更细的约定见 docs/cli-reference.md 的「plan」一节。
 `
@@ -131,15 +103,20 @@ func runPlan(args []string) error {
 	case "disable":
 		return runPlanEnable(rest, false)
 	case "grant":
-		return runPlanGrant(rest)
+		return runLegacyUserPath("plan grant 已搬到 larkaxctl user plan grant <用户> <套餐>",
+			func() error { return runPlanGrant(rest) })
 	case "void":
-		return runPlanVoid(rest)
+		return runLegacyUserPath("plan void 已搬到 larkaxctl user plan void <订阅 ID>",
+			func() error { return runPlanVoid(rest) })
 	case "subscriptions":
-		return runPlanSubscriptions(rest)
+		return runLegacyUserPath("plan subscriptions 已改名为 larkaxctl user plan list <用户>",
+			func() error { return runPlanSubscriptions(rest) })
 	case "key":
-		return runPlanKey(rest)
+		return runLegacyUserPath("plan key 已搬到 larkaxctl user key plans <show|set> <API Key ID>",
+			func() error { return runPlanKey(rest) })
 	case "order":
-		return runPlanOrder(rest)
+		return runLegacyUserPath("plan order 已搬到 larkaxctl user plan order <show|set> <用户>",
+			func() error { return runPlanOrder(rest) })
 	default:
 		return usageErr(fmt.Errorf("未知的 plan 子命令 %q", action))
 	}

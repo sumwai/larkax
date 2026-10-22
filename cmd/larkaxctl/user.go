@@ -20,8 +20,7 @@ import (
 var userHelp = helpText{short: userShortUsage, long: userUsage}
 
 // userShortUsage 是 user 的短版：`-h` / `--help` 与参数写错时打的那一份。
-const userShortUsage = `larkaxctl user 管理用户。
-
+const userShortUsage = `larkaxctl user 管理用户，以及用户手里的订阅、钱包、Key 与用量。
 用法：
   larkaxctl user create --name <用户名> [--email <邮箱>] [--role <角色>] [--generate-password]
   larkaxctl user list [--status <状态>] [--role <角色>]
@@ -30,14 +29,14 @@ const userShortUsage = `larkaxctl user 管理用户。
                         [--display-name <展示名>] [--merchant|--no-merchant] [--admin|--no-admin]
   larkaxctl user password <ID 或用户名> --generate|--stdin
   larkaxctl user unlock <ID 或用户名>
-  larkaxctl user delete request --user <ID 或用户名>
-  larkaxctl user delete revert --user <ID 或用户名>
-  larkaxctl user delete purge --user <ID 或用户名> --confirm <用户名>
-
+  larkaxctl user delete request|revert|purge --user <ID 或用户名>
+  larkaxctl user plan   {grant|list|void|order}      该用户的订阅与扣费顺序
+  larkaxctl user wallet {show|credit|adjust|refund}  该用户的钱包
+  larkaxctl user key    {list|create|plans}          该用户的 API Key
+  larkaxctl user usage  {events|requests}            该用户的用量与计费
 create 只把新用户的 ID 打到 stdout；用户名与邮箱在连库之前判形状，不合格报参数错。
-list 与 get 只读；update 只改显式给出的字段，改了什么打到 stdout。
-delete request 打标（可撤），revert 撤回，purge 匿名化（不可逆，要 --confirm）；余额先清到 0。
-更细的边界：larkaxctl help user。
+update 只改显式给出的字段；delete request 打标（可撤），revert 撤回，purge 匿名化（要 --confirm）。
+plan / wallet / key / usage 的核心宾语写成位置参数，其余边界见 larkaxctl help user。
 `
 
 // userUsage 是 user 的长版：`larkaxctl help user` 与 `user help`。
@@ -53,6 +52,15 @@ const userUsage = `larkaxctl user 管理用户。
                         [--admin|--no-admin]
   larkaxctl user password <ID 或用户名> --generate|--stdin
   larkaxctl user unlock <ID 或用户名>
+
+用户级履约操作（核心宾语写成位置参数）：
+
+  larkaxctl user plan   {grant|list|void|order}     该用户持有的订阅与扣费顺序
+  larkaxctl user wallet {show|credit|adjust|refund} 该用户的钱包
+  larkaxctl user key    {list|create|plans}         该用户的 API Key
+  larkaxctl user usage  {events|requests}           该用户的用量与计费
+
+四个子组各自的动作与参数见 larkaxctl user <子组> help。
 
 create 建一个新用户，只把新用户的 ID 打到 stdout。
 
@@ -242,6 +250,14 @@ func runUser(args []string) error {
 		return runUserUnlock(rest)
 	case "delete":
 		return runUserDelete(rest)
+	case "plan":
+		return runUserPlan(rest)
+	case "wallet":
+		return runUserWallet(rest)
+	case "key":
+		return runUserKey(rest)
+	case "usage":
+		return runUserUsage(rest)
 	default:
 		return usageErr(fmt.Errorf("未知的 user 子命令 %q", action))
 	}

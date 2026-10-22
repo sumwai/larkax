@@ -166,6 +166,28 @@ func parseCases() []parseCase {
 		}, false, walletHint},
 		{"snapshot allowlist 位置参数多余", func() error { return runSnapshotAllowlist([]string{"extra"}) }, false, snapshotHint},
 		{"snapshot redact 缺 --direction", func() error { return runSnapshotRedact(nil) }, false, snapshotHint},
+
+		// 用户级履约操作那一组：缺子命令要打用法，缺宾语与位置参数多余不打
+		// （人已经会用这条命令了，只是写错了一处）。
+		{"user plan 缺子命令", func() error { return runUserPlan(nil) }, true, userHint},
+		{"user wallet 缺子命令", func() error { return runUserWallet(nil) }, true, userHint},
+		{"user key 缺子命令", func() error { return runUserKey(nil) }, true, userHint},
+		{"user usage 缺子命令", func() error { return runUserUsage(nil) }, true, userHint},
+		{"user plan order 缺子命令", func() error { return runUserPlanOrder(nil) }, true, userHint},
+		{"user key plans 缺子命令", func() error { return runUserKeyPlans(nil) }, true, userHint},
+		{"user plan 未知子命令", func() error { return runUserPlan([]string{"bogus"}) }, true, userHint},
+		{"user plan grant 缺用户", func() error { return runUserPlanGrant(nil) }, false, userHint},
+		{"user plan grant 缺套餐", func() error {
+			return runUserPlanGrant([]string{"alice"})
+		}, false, userHint},
+		{"user plan void 缺订阅", func() error { return runUserPlanVoid(nil) }, false, userHint},
+		{"user key list 缺用户", func() error { return runUserKeyList(nil) }, false, userHint},
+		{"user usage events 缺用户", func() error { return runUserUsageEvents(nil) }, false, userHint},
+		// 宾语写成旗标（`--user alice`）时那条命令自己还会说「不接受位置参数」：
+		// 两处报错都该是参数错，退出码不变。
+		{"user key list 位置参数多余", func() error {
+			return runUserKeyList([]string{"alice", "extra"})
+		}, false, userHint},
 	}
 }
 

@@ -729,6 +729,42 @@ stdout 恰好一行，就是新口令，只显示这一次；其余说明走 std
 除了 `plugin_kv` 里属于这个用户的行，别的行都不删。它们都不需要
 `LARKAX_MASTER_KEYS`。
 
+**用户级履约操作也挂在 `user` 下**：`user plan`、`user wallet`、`user key`、
+`user usage`。核心宾语——哪个用户、哪个套餐——写成**位置参数**，修饰项（`--ref`、
+`--expires-at`、`--amount`）仍然是旗标。
+
+- `user plan`：`grant` / `list` / `void` / `order`——该用户持有的订阅与扣费顺序。
+- `user wallet`：`show` / `credit` / `adjust` / `refund`——该用户的钱包。
+- `user key`：`list` / `create` / `plans`——该用户的 API Key，以及一把 Key 能用哪些订阅。
+- `user usage`：`events` / `requests`——该用户的用量与计费。
+
+四条子组的语义与各自的旗标跟对应的顶层命令**逐字相同**，区别只在宾语的位置：
+
+| 新路径 | 旧写法（仍可用） |
+|---|---|
+| `user plan grant <用户> <套餐> --ref … --expires-at …` | `plan grant --user <用户> --plan <套餐> …` |
+| `user plan list <用户>` | `plan subscriptions --user <用户>` |
+| `user plan void <订阅 ID> --ref …` | `plan void --id <订阅 ID> …` |
+| `user plan order show <用户>` / `user plan order set <用户> …` | `plan order show --user <用户>` / `plan order set --user <用户> …` |
+| `user key plans show <API Key ID>` / `user key plans set <API Key ID> …` | `plan key show --id <API Key ID>` / `plan key set --id <API Key ID> …` |
+| `user wallet show <用户>` | `wallet list --user <用户>` |
+| `user wallet credit <用户> …` / `adjust` / `refund` | `wallet credit --user <用户> …` / `adjust` / `refund` |
+| `user key create <用户> …` / `user key list <用户>` | `apikey create --user <用户> …`、`apikey list --user <用户>` |
+| `user usage events <用户> …` / `requests` | `usage events --user <用户> …` / `requests` |
+
+旧写法**至少保留一个发布周期**，命中时在 stderr 打一行指向新路径（`提示：…`，
+`-q` 之下跟着压掉，`--format json` 的 stdout 不受影响）。这行提示与这一次跑成
+没跑成无关：参数写得出来就提示——**失败时更要说**，「Key 不存在」只说明数据不在，
+而人手上那条命令可能早该换了。唯一的例外是参数错（退出码 2）：那时 stderr 上已经
+是一屏用法，再补一句搬家提示只会把「先把参数写对」挤到后面。不带 `--user` 的
+`wallet list` / `apikey list` / `usage events|requests` 回答的是全量，没有对应的
+新路径，因此不提示。
+
+新路径**不新增业务能力**：`user plan grant` 与 `plan grant` 走的是同一段代码，
+幂等键、退出码与两种输出契约都一样。`plan` 剩下的只有商品定义（`create` /
+`list` / `get` / `enable` / `disable`）；开通钱包（`wallet create`）、商户提现
+（`wallet payout`）与支付通道（`wallet payment`）不在这一组里，仍在 `wallet` 下。
+
 #### `apikey`
 
 API Key 访问密钥、状态与额度管理。这四个子命令都不需要 `LARKAX_MASTER_KEYS`：它们不碰
@@ -1049,8 +1085,12 @@ create --user alice > key.txt` 保存下来的文件里只有明文，不会混�
 
 #### `plan`
 
-额度包（预存的服务量）与订阅（用户在某个时间段拥有某个包）的运维入口，外加一把 API
-Key 能用哪些订阅、一个用户的扣费顺序。
+额度包（预存的服务量）的运维入口，也就是**商品定义**：一个包长什么样、还能不能再发。
+
+某个用户持有的订阅、他的扣费顺序与一把 API Key 能用哪些订阅，已经搬到
+`user plan` 与 `user key plans` 下（见「user」一节），核心宾语写成位置参数。
+旧路径 `plan grant` / `plan void` / `plan subscriptions` / `plan key` / `plan order`
+仍然可用，命中时在 stderr 提示新路径。下面几节讲的语义在两条路径上相同。
 
 **三种计量单位**：`--unit amount` 的包按标价扣，`--quota` 与 `--face-value` 是同一个数
 （只填一个即可）；`token` 包按输入加输出的 token 数扣；`request` 包每次扣 1。后两种包
@@ -1068,12 +1108,15 @@ Key 能用哪些订阅、一个用户的扣费顺序。
 `void` 作废一条订阅，把剩余面值转回平台收入。`--status` 默认 `canceled`（运营提前收回），
 给 `expired` 表示到期作废；两种在账上是同一个事件。`--ref` 是作废单号，同样是幂等键。
 
-`key show` / `key set` 管一把 API Key 的额度包名单。**没有配过名单表示可以用这个用户名下
+`key show` / `key set` 管一把 API Key 的额度包名单，今天的正式写法是
+`user key plans show|set <API Key ID>`（旧写法 `plan key show|set --id <API Key ID>`
+仍可用）。**没有配过名单表示可以用这个用户名下
 全部订阅**；`--all` 清空名单，回到这个状态。名单里每一条都必须是这把 key 所属用户的订阅，
 否则当场报错（退出 1）、一行都不写。名单至少要有一条——`--plans` 给空串会被拒——要恢复成
 「全部」用 `--all`。删掉 key 或删掉订阅之后，关联行跟着删。
 
-`order show` / `order set` 管扣费顺序的三档：`plan_first`（先额度包后余额，平台默认）、
+`order show` / `order set` 管扣费顺序的三档，正式写法是 `user plan order show|set <用户>`
+（旧写法 `plan order … --user <用户>` 仍可用）：`plan_first`（先额度包后余额，平台默认）、
 `balance_first`（先余额后额度包）、`balance_only`（只走余额）。用户上的值覆盖平台默认，
 `--clear` 清掉覆盖。平台默认在 `settings` 的 `plans.charge_order` 上，用
 `larkaxctl settings set plans.charge_order <取值>` 改。读侧遇到认不出的取值不报错：用户
@@ -1081,11 +1124,11 @@ Key 能用哪些订阅、一个用户的扣费顺序。
 `plan_first`。两种都记一条日志。
 
 `plan list` 列出全部额度包（含停用的）；`plan get --key <key>` 打一个包的详情。
-`plan subscriptions` 列出一个用户的全部订阅（有效的、到期的、已作废的都在），「剩余」
+`user plan list <用户>` 列出一个用户的全部订阅（有效的、到期的、已作废的都在），「剩余」
 那一栏是 `prepaid` 科目的余额。
 
 `enable` / `disable` 控制一个包还能不能用于**新的发放**：已经发出去的订阅不受影响，它们的
-面值在发放时就定下了；要收回某一份额度用 `void`。
+面值在发放时就定下了；要收回某一份额度用 `user plan void`。
 
 #### `usage`
 
@@ -1109,7 +1152,10 @@ Key 能用哪些订阅、一个用户的扣费顺序。
 不用 0 冒充「没有」——0 不是一个合法的规则 id。
 
 两条都按 `--user`（用户 ID 或用户名，两种写法都认）与时间窗筛，时刻用 RFC3339 或
-只写日期（按 UTC 零点算），区间左闭右开。两个时间参数都不给就是不限时间，那时每个
+只写日期（按 UTC 零点算），区间左闭右开。按用户看这两张表另有正式写法
+`user usage events|requests <用户>`（见「user」一节），输出与 `--user` 那一档逐字相同；
+旧写法 `usage events|requests --user …` 仍可用并在 stderr 提示新路径。两个时间参数都不给
+就是不限时间，那时每个
 月份的分区都会被扫到。时间窗按哪一列圈定，两条不一样：`events` 按**落库时刻**，
 而那一列正是这张表的分区键（`usage_events` 按月分区，见 `partition` 一节），所以给了
 窗口时范围之外的那些月份不会被扫到；`requests` 按请求的**受理时刻**，一次迟到的结算
@@ -1462,3 +1508,6 @@ Key 能用哪些订阅、一个用户的扣费顺序。
 | `calendar import` | `price calendar import` |
 
 旧路径不进根帮助页，根帮助页只列正式写法。
+
+这张表只收一级命令的搬家。user 那一族是二级动作的搬家（plan grant 变成
+user plan grant 之类），新旧对照在「user」一节，不进这里。

@@ -1321,11 +1321,11 @@ ingress 规则下。同一个端口上还有管理面 `/admin/v1/*`，用单独�
 | `alias` | 规范模型名到上游模型名的映射：`create` / `list` / `update` / `delete` / `resolve` |
 | `price` | 计价规则：`create` / `list` / `show` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `list`） |
 | `upstream-cost` | 上游成本规则（每条渠道每个模型按生效窗口与优先级挑一条）：`create` / `list` / `update` / `disable` |
-| `user` | 用户：`create` / `list` / `get` / `update`；口令：`password` / `unlock`；销户：`delete`（`request` 打标可撤 / `revert` 撤回 / `purge` 匿名化，不可逆） |
+| `user` | 用户：`create` / `list` / `get` / `update`；口令：`password` / `unlock`；销户：`delete`（`request` 打标可撤 / `revert` 撤回 / `purge` 匿名化，不可逆）；用户级履约操作：`plan`（`grant` 发放 / `list` 订阅 / `void` 作废 / `order` 扣费顺序的 `show` / `set`）、`wallet`（`show` / `credit` / `adjust` / `refund`）、`key`（`list` / `create` / `plans` 的 `show` / `set`）、`usage`（`events` / `requests`） |
 | `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录）/ `adjust`（手工调账，走账本写分录）/ `refund`（退款，走账本写分录）/ `list`；商户提现：`payout`（`request` 申请并冻住待付 / `settle` 平台主动清算，一步建单并记账，直接落已批准 / `approve` 批准 / `reject` 驳回并解除冻结 / `paid` 打款，只放行已批准的单子）；支付通道：`payment`（`create` 下单 / `status` 查单，通道确认收款后才入账） |
 | `usage` | 用量与计费（只读）：`events`（用量事件）/ `requests`（每次请求的预留与结算） |
 | `apikey` | API Key：`create` / `update` / `get` / `list`；`update` 兼改状态、备注与过期时间 |
-| `plan` | 额度包与订阅：`create` / `list` / `get`（单个包的详情）/ `enable` / `disable`（只挡新的发放）/ `grant`（发放，按单号幂等）/ `void`（作废，剩余面值转回平台）/ `subscriptions`（用户的订阅）；key 的额度包名单：`key`（`show` / `set`）；扣费顺序：`order`（`show` / `set`） |
+| `plan` | 额度包（商品定义）：`create` / `list` / `get`（单个包的详情）/ `enable` / `disable`（只挡新的发放）。用户持有的订阅、Key 的额度包名单与扣费顺序搬到了 user 子命令那一组；旧写法 `grant` / `void` / `subscriptions` / `key`（`show` / `set`）/ `order`（`show` / `set`）仍可用，命中时在 stderr 提示新路径 |
 | `ledger` | 账本：`balance` / `verify` / `runs`（三条都只读：余额、逐笔校验、对账的历史运行）与 `reconcile`（对账，会写运行记录） |
 | `settings` | 运行期配置：`list` / `get` / `set` |
 | `admin` | 内部监听上 admin API 的令牌：`token`（`create` / `revoke`） |
