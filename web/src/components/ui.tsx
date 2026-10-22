@@ -248,6 +248,16 @@ function firstEditableIn(root: HTMLElement | null): HTMLElement | null {
   return null
 }
 
+/*
+ * 叠在一起的弹窗共用一个栈，Esc 只交给最上面那层。
+ *
+ * 每个 Modal 都往 document 上挂自己的 keydown，同一个 Esc 两层都会收到；
+ * 没有共享的「谁在上面」判据，确认框叠在表单上时按一次 Esc 会把两层一起关掉。
+ * 栈必须是模块级的：两个 Modal 是两个实例，`useRef` 各管各的。
+ */
+const modalStack: number[] = []
+let modalSeq = 0
+
 export function Modal({
   title,
   description,
@@ -282,6 +292,8 @@ export function Modal({
   const dialogRef = useRef<HTMLDivElement>(null)
   const closeRef = useRef(onClose)
   closeRef.current = onClose
+  // 挂载时领一个号，卸载时从栈里摘掉；编号只用来在栈里认出自己。
+  const [modalId] = useState(() => modalSeq++)
   // 目标可能在每次渲染时是新函数，放进 ref 里，effect 只认 token。
   const targetRef = useRef(focusTarget)
   targetRef.current = focusTarget
@@ -298,12 +310,15 @@ export function Modal({
   dragYRef.current = dragY
 
   useEffect(() => {
+    modalStack.push(modalId)
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const bodyOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        closeRef.current()
+        // 只有栈顶响应。下面那层即使收到同一个事件也不动，否则叠着的两层
+        // 会被一次 Esc 一起关掉。
+        if (modalStack[modalStack.length - 1] === modalId) closeRef.current()
         return
       }
       if (event.key !== 'Tab') return
@@ -331,11 +346,13 @@ export function Modal({
     }
     document.addEventListener('keydown', onKey)
     return () => {
+      const at = modalStack.lastIndexOf(modalId)
+      if (at >= 0) modalStack.splice(at, 1)
       document.removeEventListener('keydown', onKey)
       document.body.style.overflow = bodyOverflow
       previous?.focus()
     }
-  }, [])
+  }, [modalId])
 
   useEffect(() => {
     const target = targetRef.current

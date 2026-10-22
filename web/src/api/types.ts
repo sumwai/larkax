@@ -597,8 +597,11 @@ export interface RuleUpdateInput {
 /**
  * 商家自助的那一半。
  *
- * `Omit` 掉的三栏是「出现即拒」：作用域由服务端定成 merchant，归属是会话
- * 用户，渠道这一维在商家规则里根本不存在。类型上拿不到，就不容易顺手带上。
+ * `Omit` 掉的三栏不属于请求体：作用域由服务端定成 merchant，归属是会话用户，
+ * 渠道这一维在商家规则里根本不存在。类型上拿不到，就不容易顺手带上。
+ * 真要越过类型塞进去，两条写路径的反应也不一样：新建时服务端按会话静默覆盖
+ * （`internal/adminapi/resources.go` 的 `API.createRule`），修改时出现即拒
+ * （`internal/pricing/admin.go` 的 `Admin.UpdateOwned`）。
  */
 export type MerchantRuleCreateInput = Omit<
   RuleCreateInput,

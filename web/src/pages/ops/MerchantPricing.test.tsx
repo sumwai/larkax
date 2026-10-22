@@ -202,4 +202,90 @@ describe('商家计价页', () => {
     ).toBeInTheDocument()
     expect(screen.queryByText('not found')).not.toBeInTheDocument()
   })
+
+  it('停用走清单行上的独立入口：只发 enabled，确认钮是危险色，文案点名后果', async () => {
+    mocks.listRules.mockResolvedValue([RULE])
+    mocks.updateRule.mockResolvedValue(undefined)
+    renderPricing()
+
+    fireEvent.click(await screen.findByRole('button', { name: '停用' }))
+    const dialog = screen.getByRole('dialog', { name: '停用' })
+    // 只说「停用规则 X？」不够：点确认的人要看到后果。
+    expect(dialog).toHaveTextContent('不再计价')
+    const confirm = within(dialog).getByRole('button', { name: '确认' })
+    expect(confirm.className).toContain('danger')
+
+    fireEvent.click(confirm)
+    await waitFor(() => expect(mocks.updateRule).toHaveBeenCalledWith(11, { enabled: false }))
+    // 只带这一栏：整表单回写会把别人刚改的其它字段一起盖回去。
+    expect(mocks.updateRule.mock.calls[0][1]).toEqual({ enabled: false })
+  })
+
+  it('改过之后 Esc、点遮罩、取消都先问一句；留下不动，放弃才关', async () => {
+    mocks.listRules.mockResolvedValue([RULE])
+    renderPricing()
+
+    fireEvent.click(await screen.findByRole('button', { name: '编辑' }))
+    const form = screen.getByRole('dialog', { name: '编辑规则' })
+    fireEvent.change(within(form).getByLabelText('名称'), { target: { value: 'renamed' } })
+
+    const discard = () => screen.getByRole('dialog', { name: '放弃未保存的修改？' })
+    const keep = () => fireEvent.click(within(discard()).getByRole('button', { name: '取消' }))
+
+    // 出口一：Esc
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(discard()).toBeInTheDocument()
+    keep()
+    // 「留下」只收起这一问：表单与刚输入的值都还在。
+    expect(screen.getByRole('dialog', { name: '编辑规则' })).toBeInTheDocument()
+    expect(screen.getByLabelText('名称')).toHaveValue('renamed')
+
+    // 脏着的时候，刷新 / 关标签页要被拦一下。
+    const dirtyEvent = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(dirtyEvent)
+    expect(dirtyEvent.defaultPrevented).toBe(true)
+
+    // 出口二：点遮罩
+    fireEvent.mouseDown(document.querySelector('.overlay') as Element)
+    expect(discard()).toBeInTheDocument()
+    keep()
+
+    // 出口三：表单自己的「取消」
+    fireEvent.click(within(form).getByRole('button', { name: '取消' }))
+    expect(discard()).toBeInTheDocument()
+
+    // 只有「放弃修改」才真的关掉表单。
+    fireEvent.click(within(discard()).getByRole('button', { name: '放弃修改' }))
+    expect(screen.queryByRole('dialog', { name: '编辑规则' })).not.toBeInTheDocument()
+
+    // 关掉之后这一页不再算改过。`closeForm` 不重置 form/initialForm，脏判据里
+    // 少了「表单开着」这一条的话，放弃一次之后每次刷新都还会再问。
+    const cleanEvent = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(cleanEvent)
+    expect(cleanEvent.defaultPrevented).toBe(false)
+  })
+
+  it('清单按每 100 万 token 显示单价，条件表达式原样，页面标一次币种', async () => {
+    const tiered = 'len <= 32000 ? {"prompt": 0.0000035} : {"prompt": 0.00001}'
+    mocks.listRules.mockResolvedValue([
+      { ...RULE, name: 'simple', expr: '{"prompt": 0.0000035}' },
+      { ...RULE, id: 12, name: 'tiered', expr: tiered },
+      { ...RULE, id: 13, name: 'tiny', expr: '{"prompt": 0.0000001}' },
+    ])
+    renderPricing()
+
+    // 表单按每百万填、库里是每 token，差六个数量级；原先直接渲染 rule.expr。
+    expect(await screen.findByText('{"prompt": 3.5}')).toBeInTheDocument()
+    expect(screen.queryByText('{"prompt": 0.0000035}')).not.toBeInTheDocument()
+    // `cell-ellipsis` 会截断，完整的一段挂在 title 上。
+    expect(screen.getByText('{"prompt": 3.5}')).toHaveAttribute('title', '{"prompt": 3.5}')
+    // 1e-7 这一档才是十进制换算的判据：同一个值用浮点乘是 0.09999999999999999，
+    // 而 `0.0000035 * 1e6` 恰好是干净的 3.5，拿它证明不了没走浮点。
+    expect(screen.getByText('{"prompt": 0.1}')).toBeInTheDocument()
+    expect(screen.queryByText('{"prompt": 0.0000001}')).not.toBeInTheDocument()
+    // 带条件的不是一张单价表，不硬乘。
+    expect(screen.getByText(tiered)).toBeInTheDocument()
+    // 币种在页面里出现（每百万那句话带上它）。
+    expect(screen.getByText(/USD/)).toBeInTheDocument()
+  })
 })

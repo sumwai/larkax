@@ -26,6 +26,7 @@ export default tseslint.config(
           allowExportNames: [
             'APP_NAV',
             'copyText',
+            'exprPerMillion',
             'useAsync',
             'useAuth',
             'useDocumentTitle',

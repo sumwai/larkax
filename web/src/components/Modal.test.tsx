@@ -1,5 +1,5 @@
-import { useRef, type FormEvent, type ReactNode } from 'react'
-import { render, screen } from '@testing-library/react'
+import { useState, useRef, type FormEvent, type ReactNode } from 'react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '../i18n'
@@ -149,6 +149,41 @@ describe('弹窗打开后的焦点落点', () => {
 
     await user.keyboard('{Escape}')
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('叠起来的两层，一次 Esc 只关最上面那层', () => {
+    function Host() {
+      const [formOpen, setFormOpen] = useState(true)
+      const [confirmOpen, setConfirmOpen] = useState(true)
+      return (
+        <>
+          {formOpen && (
+            <Modal title="编辑规则" onClose={() => setFormOpen(false)}>
+              <input aria-label="名称" defaultValue="" />
+            </Modal>
+          )}
+          {confirmOpen && (
+            <Modal title="确认保存" onClose={() => setConfirmOpen(false)}>
+              <p>保存这条规则？</p>
+            </Modal>
+          )}
+        </>
+      )
+    }
+    renderModal(<Host />)
+
+    fireEvent.change(screen.getByLabelText('名称'), { target: { value: 'own-price' } })
+
+    // 确认框叠在表单上，两层各挂一个 keydown 监听、同一个事件都会收到。
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: '确认保存' })).not.toBeInTheDocument()
+    // 下面那层不动：表单还在，刚填进去的值也还在。
+    expect(screen.getByRole('dialog', { name: '编辑规则' })).toBeInTheDocument()
+    expect(screen.getByLabelText('名称')).toHaveValue('own-price')
+
+    // 上层关掉之后它就是栈顶了，第二次 Esc 才轮到它。
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: '编辑规则' })).not.toBeInTheDocument()
   })
 
   it('显式 focusTarget 优先于默认落点', () => {

@@ -709,6 +709,8 @@ export const en: Record<MessageKey, string> = {
   'ops.pricing.merchantEmpty': 'No pricing rules yet',
   'ops.pricing.merchantEmptyBody': 'Create one to price the models you offer.',
   'ops.pricing.merchantPatternsHint': 'Requests hitting these models are priced by this rule.',
+  'ops.pricing.merchantPriceNote':
+    'Prices are shown per 1M tokens (conditional expressions are shown verbatim), in {currency}.',
   'ops.pricing.createRule': 'New rule',
   'ops.pricing.createCost': 'New cost rule',
   'ops.pricing.editRule': 'Edit rule',
@@ -734,7 +736,7 @@ export const en: Record<MessageKey, string> = {
   'ops.pricing.enable': 'Enable',
   'ops.pricing.disable': 'Disable',
   'ops.pricing.enableConfirm': 'Enable rule "{name}"?',
-  'ops.pricing.disableConfirm': 'Disable rule "{name}"?',
+  'ops.pricing.disableConfirm': 'Disable rule "{name}"? It will no longer be priced.',
   'ops.pricing.platformWide': 'Platform-wide',
   'ops.pricing.channelRequired': 'Select a channel first.',
   'ops.pricing.saveConfirm': 'Save rule "{name}"?',
