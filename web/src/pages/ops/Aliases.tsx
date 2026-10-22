@@ -17,7 +17,7 @@ import { MobileCard, MobileList } from '../../components/MobileList'
 import { IconPlus, IconTrash } from '../../components/icons'
 import { Field, InputError, OpsLoadError } from './common'
 import { useConfirm } from './common-helpers'
-import { isDirty, useCloseGuard } from './guard'
+import { isDirty, useCloseGuard, useUnsavedGuard } from './guard'
 
 interface AliasForm {
   channel_id: string
@@ -78,7 +78,11 @@ export function OpsAliases() {
     setFormError(null)
   }
 
-  const requestClose = useCloseGuard(confirm, isDirty(form, initialForm), closeForm)
+  // 表单真的打开着才算脏：`closeForm` 不重置 form/initialForm，无条件比的话
+  // 「放弃」关窗之后这一页会永远算改过，后续每次跳转都被拦。
+  const dirty = (creating || editing !== null) && isDirty(form, initialForm)
+  const requestClose = useCloseGuard(confirm, dirty, closeForm)
+  const unsavedGuard = useUnsavedGuard(dirty)
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
@@ -333,6 +337,7 @@ export function OpsAliases() {
       )}
 
       {confirm.dialog}
+      {unsavedGuard}
     </>
   )
 }

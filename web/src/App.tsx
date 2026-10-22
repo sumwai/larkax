@@ -1,11 +1,18 @@
-import type { ReactNode } from 'react'
-import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { useState, type ReactNode } from 'react'
+import {
+  createBrowserRouter,
+  Link,
+  Navigate,
+  RouterProvider,
+  useLocation,
+  type RouteObject,
+} from 'react-router-dom'
 import { AuthProvider, useAuth } from './auth/AuthProvider'
 import { I18nProvider, useI18n } from './i18n'
 import { SiteProvider } from './site/SiteProvider'
 import { ThemeProvider } from './theme/ThemeProvider'
 import { AppShell } from './components/AppShell'
-import { FatalErrorBoundary } from './components/ErrorBoundary'
+import { FatalErrorBoundary, RootRouteError } from './components/ErrorBoundary'
 import { MockBanner } from './components/MockBanner'
 import { Alert, ToastProvider } from './components/ui'
 import { viewAllowed, viewOfPath, type View } from './ops/views'
@@ -97,7 +104,162 @@ function NotFound() {
   )
 }
 
+/**
+ * 路由表。
+ *
+ * 根上那一条不带路径，只做两件事：包住所有页面、给整棵树一个错误页。
+ * 路由级异常先落到 `/app` 里的 `RouteErrorBoundary`（外壳还在，用户能切走）；
+ * 根级页面（落地页、登录页、404）没有内层边界，由这里的 `errorElement` 接住，
+ * 显示与最外层 `FatalErrorBoundary` 同一个「致命错误页」——当初挂在
+ * `<BrowserRouter>` 外面时就是这个行为，转 data router 不该把它丢掉。
+ */
+const ROUTES: RouteObject[] = [
+  {
+    errorElement: <RootRouteError />,
+    children: [
+      { path: '/', element: <Landing /> },
+      { path: '/login', element: <Login /> },
+      {
+        path: '/app',
+        element: (
+          <RequireAuth>
+            <AppShell />
+          </RequireAuth>
+        ),
+        children: [
+          { index: true, element: <Overview /> },
+          { path: 'keys', element: <Keys /> },
+          { path: 'usage', element: <Usage /> },
+          { path: 'models', element: <Models /> },
+          // 规范名可能带 `/`（`vendor/model`），所以用 splat 接住整段。
+          { path: 'models/*', element: <ModelDetail /> },
+          { path: 'quickstart', element: <Quickstart /> },
+          { path: 'settings', element: <Settings /> },
+          { path: 'merchant', element: <Navigate to="/app/merchant/overview" replace /> },
+          {
+            path: 'merchant/overview',
+            element: (
+              <RequireView view="merchant">
+                <MerchantOverview />
+              </RequireView>
+            ),
+          },
+          {
+            path: 'merchant/models',
+            element: (
+              <RequireView view="merchant">
+                <MerchantModels />
+              </RequireView>
+            ),
+          },
+          {
+            path: 'merchant/upstreams',
+            element: (
+              <RequireView view="merchant">
+                <MerchantUpstreams />
+              </RequireView>
+            ),
+          },
+          {
+            path: 'merchant/account',
+            element: (
+              <RequireView view="merchant">
+                <MerchantAccount />
+              </RequireView>
+            ),
+          },
+          {
+            path: 'merchant/settings',
+            element: (
+              <RequireView view="merchant">
+                <MerchantSettings />
+              </RequireView>
+            ),
+          },
+          {
+            path: 'merchant/channels',
+            element: (
+              <RequireView view="merchant">
+                <OpsChannels scope="merchant" />
+              </RequireView>
+            ),
+          },
+          {
+            path: 'merchant/pricing',
+            element: (
+              <RequireView view="merchant">
+                <MerchantPricing />
+              </RequireView>
+            ),
+          },
+          {
+            path: 'admin/settings',
+            element: (
+              <RequireView view="admin">
+                <Settings />
+              </RequireView>
+            ),
+          },
+          { path: 'admin', element: <Navigate to="/app/admin/channels" replace /> },
+          {
+            path: 'admin/channels',
+            element: (
+              <RequireView view="admin">
+                <OpsChannels scope="admin" />
+              </RequireView>
+            ),
+          },
+          {
+            path: 'admin/models',
+            element: (
+              <RequireView view="admin">
+                <OpsModels />
+              </RequireView>
+            ),
+          },
+          {
+            path: 'admin/users',
+            element: (
+              <RequireView view="admin">
+                <AdminUsers />
+              </RequireView>
+            ),
+          },
+          {
+            path: 'admin/users/:id',
+            element: (
+              <RequireView view="admin">
+                <AdminUserDetailPage />
+              </RequireView>
+            ),
+          },
+          {
+            path: 'admin/aliases',
+            element: (
+              <RequireView view="admin">
+                <OpsAliases />
+              </RequireView>
+            ),
+          },
+          {
+            path: 'admin/pricing',
+            element: (
+              <RequireView view="admin">
+                <OpsPricing />
+              </RequireView>
+            ),
+          },
+        ],
+      },
+      { path: '*', element: <NotFound /> },
+    ],
+  },
+]
+
 export function App() {
+  // 只建一次：`createBrowserRouter` 会订阅地址变化，每次渲染换一个实例等于把
+  // 订阅原地换掉。测试里每次 `render(<App />)` 都是新的一份，互不影响。
+  const [router] = useState(() => createBrowserRouter(ROUTES))
   return (
     <FatalErrorBoundary>
       <I18nProvider>
@@ -105,148 +267,9 @@ export function App() {
           <ToastProvider>
             <SiteProvider>
               <AuthProvider>
-                <BrowserRouter>
-                  <MockBanner />
-                  <Routes>
-                    <Route path="/" element={<Landing />} />
-                    <Route path="/login" element={<Login />} />
-                    <Route
-                      path="/app"
-                      element={
-                        <RequireAuth>
-                          <AppShell />
-                        </RequireAuth>
-                      }
-                    >
-                      <Route index element={<Overview />} />
-                      <Route path="keys" element={<Keys />} />
-                      <Route path="usage" element={<Usage />} />
-                      <Route path="models" element={<Models />} />
-                      {/* 规范名可能带 `/`（`vendor/model`），所以用 splat 接住整段。 */}
-                      <Route path="models/*" element={<ModelDetail />} />
-                      <Route path="quickstart" element={<Quickstart />} />
-                      <Route path="settings" element={<Settings />} />
-                      <Route
-                        path="merchant"
-                        element={<Navigate to="/app/merchant/overview" replace />}
-                      />
-                      <Route
-                        path="merchant/overview"
-                        element={
-                          <RequireView view="merchant">
-                            <MerchantOverview />
-                          </RequireView>
-                        }
-                      />
-                      <Route
-                        path="merchant/models"
-                        element={
-                          <RequireView view="merchant">
-                            <MerchantModels />
-                          </RequireView>
-                        }
-                      />
-                      <Route
-                        path="merchant/upstreams"
-                        element={
-                          <RequireView view="merchant">
-                            <MerchantUpstreams />
-                          </RequireView>
-                        }
-                      />
-                      <Route
-                        path="merchant/account"
-                        element={
-                          <RequireView view="merchant">
-                            <MerchantAccount />
-                          </RequireView>
-                        }
-                      />
-                      <Route
-                        path="merchant/settings"
-                        element={
-                          <RequireView view="merchant">
-                            <MerchantSettings />
-                          </RequireView>
-                        }
-                      />
-                      <Route
-                        path="merchant/channels"
-                        element={
-                          <RequireView view="merchant">
-                            <OpsChannels scope="merchant" />
-                          </RequireView>
-                        }
-                      />
-                      <Route
-                        path="merchant/pricing"
-                        element={
-                          <RequireView view="merchant">
-                            <MerchantPricing />
-                          </RequireView>
-                        }
-                      />
-                      <Route
-                        path="admin/settings"
-                        element={
-                          <RequireView view="admin">
-                            <Settings />
-                          </RequireView>
-                        }
-                      />
-                      <Route path="admin" element={<Navigate to="/app/admin/channels" replace />} />
-                      <Route
-                        path="admin/channels"
-                        element={
-                          <RequireView view="admin">
-                            <OpsChannels scope="admin" />
-                          </RequireView>
-                        }
-                      />
-                      <Route
-                        path="admin/models"
-                        element={
-                          <RequireView view="admin">
-                            <OpsModels />
-                          </RequireView>
-                        }
-                      />
-                      <Route
-                        path="admin/users"
-                        element={
-                          <RequireView view="admin">
-                            <AdminUsers />
-                          </RequireView>
-                        }
-                      />
-                      <Route
-                        path="admin/users/:id"
-                        element={
-                          <RequireView view="admin">
-                            <AdminUserDetailPage />
-                          </RequireView>
-                        }
-                      />
-                      <Route
-                        path="admin/aliases"
-                        element={
-                          <RequireView view="admin">
-                            <OpsAliases />
-                          </RequireView>
-                        }
-                      />
-                      <Route
-                        path="admin/pricing"
-                        element={
-                          <RequireView view="admin">
-                            <OpsPricing />
-                          </RequireView>
-                        }
-                      />
-                    </Route>
-                    <Route path="*" element={<NotFound />} />
-                  </Routes>
-                </BrowserRouter>
+                {/* 演示横幅不读路由，放在 RouterProvider 外面，位置与原来一致。 */}
+                <MockBanner />
+                <RouterProvider router={router} />
               </AuthProvider>
             </SiteProvider>
           </ToastProvider>

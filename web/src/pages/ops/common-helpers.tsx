@@ -48,6 +48,11 @@ interface ConfirmConfig {
   /** 删除、停用这类动作的确认钮用危险色，别和「保存」长一个样。 */
   danger?: boolean
   run: () => Promise<void>
+  /**
+   * 关掉确认框、但没点确认时要补的那一句（Esc、点遮罩、取消钮都算）。
+   * 拦下路由跳转时用它把这次跳转作废；写动作的确认框一般用不上。
+   */
+  onCancel?: () => void
 }
 
 /**
@@ -69,6 +74,8 @@ export function useConfirm() {
 
   const close = () => {
     if (pending) return
+    // 先让「这次没确认」的副作用发生，再收起弹窗：取消回调里可能要改路由状态。
+    config?.onCancel?.()
     setConfig(null)
     setError(null)
   }

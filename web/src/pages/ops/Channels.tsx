@@ -30,7 +30,7 @@ import { MobileCard, MobileList } from '../../components/MobileList'
 import { IconPlus } from '../../components/icons'
 import { Field, InputError, OpsLoadError } from './common'
 import { linesToList, listToLines, useConfirm } from './common-helpers'
-import { isDirty, useCloseGuard } from './guard'
+import { isDirty, useCloseGuard, useUnsavedGuard } from './guard'
 
 interface ChannelForm {
   name: string
@@ -187,7 +187,11 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
     resetProbe()
   }
 
-  const requestClose = useCloseGuard(confirm, isDirty(form, initialForm), closeForm)
+  // 表单真的打开着才算脏：`closeForm` 不重置 form/initialForm，无条件比的话
+  // 「放弃」关窗之后这一页会永远算改过，后续每次跳转都被拦。
+  const dirty = (creating || editing !== null) && isDirty(form, initialForm)
+  const requestClose = useCloseGuard(confirm, dirty, closeForm)
+  const unsavedGuard = useUnsavedGuard(dirty)
 
   // 勾选状态就是 `form.models` 里的那些行：勾上写一行、取消删一行。
   // 再次探测只替换可选项清单（`probe`），不碰 `form.models`——已勾选因此不会
@@ -645,6 +649,7 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
       )}
 
       {confirm.dialog}
+      {unsavedGuard}
     </>
   )
 }

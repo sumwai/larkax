@@ -10,7 +10,7 @@ import { IconPlus } from '../../components/icons'
 import { ExprEditor } from '../../components/ExprEditor'
 import { Field, InputError, OpsLoadError, SearchBox } from './common'
 import { linesToList, listToLines, useConfirm } from './common-helpers'
-import { isDirty, useCloseGuard } from './guard'
+import { isDirty, useCloseGuard, useUnsavedGuard } from './guard'
 
 type Tab = 'rules' | 'costs'
 
@@ -136,8 +136,13 @@ export function OpsPricing() {
     setCostEditing(null)
   }
 
-  const requestCloseRule = useCloseGuard(confirm, isDirty(ruleForm, ruleInitial), closeRuleForm)
-  const requestCloseCost = useCloseGuard(confirm, isDirty(costForm, costInitial), closeCostForm)
+  // 表单真的打开着才算脏：`closeRuleForm` / `closeCostForm` 不重置表单值，
+  // 无条件比的话「放弃」关窗之后这一页会永远算改过，后续每次跳转都被拦。
+  const ruleDirty = (ruleCreating || ruleEditing !== null) && isDirty(ruleForm, ruleInitial)
+  const costDirty = (costCreating || costEditing !== null) && isDirty(costForm, costInitial)
+  const requestCloseRule = useCloseGuard(confirm, ruleDirty, closeRuleForm)
+  const requestCloseCost = useCloseGuard(confirm, costDirty, closeCostForm)
+  const unsavedGuard = useUnsavedGuard(ruleDirty || costDirty)
 
   const submitRule = (event: FormEvent) => {
     event.preventDefault()
@@ -572,6 +577,7 @@ export function OpsPricing() {
       )}
 
       {confirm.dialog}
+      {unsavedGuard}
     </>
   )
 }

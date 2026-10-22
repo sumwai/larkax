@@ -1,5 +1,5 @@
-import { Component, type ErrorInfo, type ReactNode } from 'react'
-import { useLocation } from 'react-router-dom'
+import { Component, useMemo, type ErrorInfo, type ReactNode } from 'react'
+import { useLocation, useRouteError } from 'react-router-dom'
 import { useI18n } from '../i18n'
 import { detectLang } from '../i18n/lang'
 import { en } from '../i18n/en'
@@ -158,4 +158,20 @@ function FatalErrorPage({ detail }: { detail: BoundaryDetail }) {
       </div>
     </div>
   )
+}
+
+/**
+ * data router 根路由的错误页。
+ *
+ * 根级页面（落地页、登录页、404）没有内层边界，渲染期异常会被路由器的
+ * `errorElement` 接住；这里把它交回与最外层边界同一个致命错误页，免得
+ * 转成 data router 之后换了一张 router 自带的错误页。
+ *
+ * 只能用在路由的 `errorElement` 里：`useRouteError` 在别处拿不到值。
+ */
+export function RootRouteError() {
+  const error = useRouteError()
+  // 时间只在错误值真的换了时重取，不跟着重渲染漂。
+  const detail = useMemo<BoundaryDetail>(() => ({ error, at: new Date() }), [error])
+  return <FatalErrorPage detail={detail} />
 }
