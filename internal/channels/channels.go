@@ -629,7 +629,10 @@ SELECT
             -- 成本按**当前要发的那个规范模型**取：贵模型与便宜模型混在同一个
             -- 渠道上时，两者的单位成本本来就不是一个数。
             SUM(r.cost)        FILTER (WHERE r.model = $1) AS cost,
-            SUM(r.cost_events) FILTER (WHERE r.model = $1) AS cost_events,
+            -- FILTER 之后一行都不匹配时 SUM 是 NULL，不是 0（老渠道、以及
+            -- 还没按这个模型写过成本事件的渠道都走这一格）。Go 侧是 int64，
+            -- 漏掉 COALESCE 会让整个候选集查询失败——所有请求 500。
+            COALESCE(SUM(r.cost_events) FILTER (WHERE r.model = $1), 0) AS cost_events,
             SUM(r.cache_hit_tokens)  FILTER (WHERE r.model = '') AS cache_hit_tokens,
             SUM(r.cache_miss_tokens) FILTER (WHERE r.model = '') AS cache_miss_tokens
           FROM channel_health_rollup r
