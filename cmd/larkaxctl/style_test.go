@@ -81,7 +81,9 @@ func styledDoctorReport() doctorReport {
 			}}},
 		alias:   doctorCheck{title: "别名", subject: doctorSubjectAlias, skip: "没有可服务的规范名"},
 		pricing: doctorCheck{title: "计价规则", subject: doctorSubjectPricing, skip: "没有可服务的规范名"},
-		wallet:  doctorCheck{title: "钱包", subject: doctorSubjectWallet, ok: "用户 1 个都有钱包行"},
+		ruleModels: doctorCheck{title: "规则模型名", subject: doctorSubjectRuleModels,
+			ok: "2 条规则、3 个模型名都在目录里"},
+		wallet: doctorCheck{title: "钱包", subject: doctorSubjectWallet, ok: "用户 1 个都有钱包行"},
 	}
 }
 

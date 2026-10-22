@@ -38,14 +38,14 @@ const doctorShortUsage = `larkaxctl doctor 逐项检查「配好的链路能不�
 
 用法：
   larkaxctl doctor
-        只读检查六项，不碰网络
+        只读检查七项，不碰网络
   larkaxctl doctor --live --model <规范名> [--endpoint chat|messages|responses]
                    (--credential-stdin | --credential-env <变量名>)
         额外真打一次上游
   larkaxctl doctor -v
         每项多打一段细节
 
-六项只读；凭证不能写在命令行参数里，只能从标准输入或环境变量读。
+七项只读；凭证不能写在命令行参数里，只能从标准输入或环境变量读。
 「没跑成」与「通过」是两件事，前者也非零退出。
 
 更细的边界：larkaxctl help doctor。
@@ -56,7 +56,7 @@ const doctorUsage = `larkaxctl doctor 逐项检查「配好的链路能不能接
 
 用法：
   larkaxctl doctor
-        只读检查六项，不碰网络
+        只读检查七项，不碰网络
 
   larkaxctl doctor --live --model <规范名> [--endpoint chat|messages|responses]
                    [--base-url <URL>] (--credential-stdin | --credential-env <变量名>)
@@ -73,23 +73,25 @@ const doctorUsage = `larkaxctl doctor 逐项检查「配好的链路能不能接
 ! 没跑成、- 没跑（这一项不在本次范围内，例如没开 --live）。最后一行是
 汇总。**细节一条都没删，只是默认不打**：加 -v 就跟着各自那一行缩进打出来。
 
-它按顺序回答六个问题，每一项都给出「检查了什么、结论是什么」：
+它按顺序回答七个问题，每一项都给出「检查了什么、结论是什么」：
 
-  1. 数据库    连得上吗、迁移跑到哪一版
-  2. 渠道      有没有至少一条 enabled 且 models 非空的渠道
-  3. 模型目录  渠道 models 里出现的每个名字都在 model_catalog 里吗、且目录声明
-               的端点含这条渠道打的那条端点吗
-  4. 别名      配过别名的规范名有没有渠道接得住；可服务的规范名在每个服务它的
-               渠道上能不能解析出上游名
-  5. 计价规则  可服务的规范名在每个服务它的渠道上都有生效的规则吗
-  6. 钱包      有用户吗、每个用户都有钱包行吗、有没有一个钱包余额大于 0
+  1. 数据库     连得上吗、迁移跑到哪一版
+  2. 渠道       有没有至少一条 enabled 且 models 非空的渠道
+  3. 模型目录   渠道 models 里出现的每个名字都在 model_catalog 里吗、且目录声明
+                的端点含这条渠道打的那条端点吗
+  4. 别名       配过别名的规范名有没有渠道接得住；可服务的规范名在每个服务它的
+                渠道上能不能解析出上游名
+  5. 计价规则   可服务的规范名在每个服务它的渠道上都有生效的规则吗
+  6. 规则模型名 计价规则与成本规则的 --models 里写到的名字都在目录里吗
+  7. 钱包       有用户吗、每个用户都有钱包行吗、有没有一个钱包余额大于 0
 
 第 3、4、5 项回答的是同一个字符串在两个数组里对不上的问题：渠道的 --models
 与目录里的规范名差一个字符，或者模型建了却没加进任何渠道的白名单。第 3 项还
-多判一层名字与端点的对应，第 6 项把「用户没有钱包行」这类缺口在第一次调用
-之前指出来。
+多判一层名字与端点的对应。第 6 项问的是同一个问题的另一半：名字写进的是规则
+而不是渠道，写错时那条规则永远命中不了，而它在任何清单里都像是配好的。第 7 项
+把「用户没有钱包行」这类缺口在第一次调用之前指出来。
 
-**前六项只读**：不写任何一行、不建任何东西、不发网络请求。第七项要花钱、
+**前七项只读**：不写任何一行、不建任何东西、不发网络请求。第八项要花钱、
 要凭证，默认不跑。
 
 --live 真打一次上游：往公共入口发一次非流式推理请求，把状态码、耗时与用量
@@ -109,7 +111,7 @@ POST /v1/messages（x-api-key），responses 是 POST /v1/responses
 「:8080」这类不写主机的「所有网卡」时按 127.0.0.1 打。网关不在本机、或者要打的
 是另一台，就显式给。
 
-退出码：0 表示六项都通过（--live 给了的话那一次也成功）、1 表示有问题或某一项
+退出码：0 表示七项都通过（--live 给了的话那一次也成功）、1 表示有问题或某一项
 没跑成、3 表示连不上数据库。**「没跑成」与「通过」是两件事**：没有可检查的
 对象时那一项报「没跑成」而不是「通过」，退出码也非 0——两者在安静的终端里
 长得一样，脚本按退出码分派时要留意。
@@ -135,7 +137,7 @@ POST /v1/messages（x-api-key），responses 是 POST /v1/responses
 更细的约定见 docs/cli-reference.md 的「doctor」一节。
 `
 
-// doctorTimeout 是六项只读检查的时间上限。
+// doctorTimeout 是七项只读检查的时间上限。
 //
 // 它们全是小查询，但「可服务的规范名 × 服务它的渠道」那一项是逐组查的，
 // 模型多、渠道多时组数会涨。给两分钟：够跑完一个中等规模的库，又不至于
@@ -306,12 +308,13 @@ var doctorHTTPClient = &http.Client{Timeout: doctorLiveTimeout}
 // 单独列出来是为了让「这一项查的是什么」与「这一项查到了什么」在输出里
 // 各占一行：只打结果的话，一个没问题的空结果看不出它到底查了没有。
 const (
-	doctorSubjectDatabase = "连得上、迁移跑到哪一版"
-	doctorSubjectChannel  = "有没有至少一条 enabled 且 models 非空的渠道"
-	doctorSubjectCatalog  = "enabled 渠道的 models 里出现的每个名字都在 model_catalog 里、且目录声明的端点含这条渠道打的那条端点吗"
-	doctorSubjectAlias    = "配过别名的规范名有没有渠道接得住；可服务的规范名在每个服务它的渠道上能不能解析出上游名"
-	doctorSubjectPricing  = "可服务的规范名在每个服务它的渠道上都有生效的计价规则吗"
-	doctorSubjectWallet   = "有用户吗、每个用户都有钱包行吗、有没有一个钱包余额大于 0"
+	doctorSubjectDatabase   = "连得上、迁移跑到哪一版"
+	doctorSubjectChannel    = "有没有至少一条 enabled 且 models 非空的渠道"
+	doctorSubjectCatalog    = "enabled 渠道的 models 里出现的每个名字都在 model_catalog 里、且目录声明的端点含这条渠道打的那条端点吗"
+	doctorSubjectAlias      = "配过别名的规范名有没有渠道接得住；可服务的规范名在每个服务它的渠道上能不能解析出上游名"
+	doctorSubjectPricing    = "可服务的规范名在每个服务它的渠道上都有生效的计价规则吗"
+	doctorSubjectRuleModels = "计价规则与成本规则的 --models 里写到的名字都在目录里吗"
+	doctorSubjectWallet     = "有用户吗、每个用户都有钱包行吗、有没有一个钱包余额大于 0"
 )
 
 // ── 命令入口 ────────────────────────────────────────────────────────────
@@ -353,7 +356,7 @@ func runDoctor(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), doctorTimeout)
 	defer cancel()
 
-	// 连不上库时**不直接返回**：报告里「第 1 项没跑成、其余五项也没跑成」
+	// 连不上库时**不直接返回**：报告里「第 1 项没跑成、其余六项也没跑成」
 	// 比一句「连接数据库失败」有用得多，而那是这个命令最要紧的一次输出。
 	db, dbErr := openDB(ctx, cfg)
 
@@ -439,7 +442,7 @@ func parseDoctorOptions(args []string) (doctorOptions, error) {
 		} {
 			if flagGiven(given, group...) {
 				return doctorOptions{}, fmt.Errorf(
-					"--%s 只在 --live 时才有意义：默认那六项不碰网络", group[0])
+					"--%s 只在 --live 时才有意义：默认那七项不碰网络", group[0])
 			}
 		}
 		return opts, nil
@@ -684,15 +687,16 @@ func (t *doctorTable) lines() []string {
 	return strings.Split(strings.TrimRight(sb.String(), "\n"), "\n")
 }
 
-// doctorReport 是六项只读检查的结果，加上可选的那一次真打上游。
+// doctorReport 是七项只读检查的结果，加上可选的那一次真打上游。
 type doctorReport struct {
-	database doctorCheck
-	channel  doctorCheck
-	catalog  doctorCheck
-	alias    doctorCheck
-	pricing  doctorCheck
-	wallet   doctorCheck
-	live     doctorLive
+	database   doctorCheck
+	channel    doctorCheck
+	catalog    doctorCheck
+	alias      doctorCheck
+	pricing    doctorCheck
+	ruleModels doctorCheck
+	wallet     doctorCheck
+	live       doctorLive
 }
 
 // doctorNamedCheck 是一项检查与它**机器可读的名字**。
@@ -706,7 +710,7 @@ type doctorNamedCheck struct {
 	check doctorCheck
 }
 
-// namedChecks 按输出顺序给出六项检查，连同它们的机器可读名字。
+// namedChecks 按输出顺序给出七项检查，连同它们的机器可读名字。
 func (r doctorReport) namedChecks() []doctorNamedCheck {
 	return []doctorNamedCheck{
 		{"database", r.database},
@@ -714,11 +718,12 @@ func (r doctorReport) namedChecks() []doctorNamedCheck {
 		{"catalog", r.catalog},
 		{"alias", r.alias},
 		{"pricing", r.pricing},
+		{"rulemodels", r.ruleModels},
 		{"wallet", r.wallet},
 	}
 }
 
-// checks 按输出顺序给出六项检查。
+// checks 按输出顺序给出七项检查。
 //
 // 从 namedChecks 推出来而不是另列一份：顺序只有一处来源（见 doctorNamedCheck）。
 func (r doctorReport) checks() []doctorCheck {
@@ -767,14 +772,14 @@ func (r doctorReport) exitErr(dbErr error) error {
 
 // ── 收集 ────────────────────────────────────────────────────────────────
 
-// doctorReportWithoutDB 是连不上库时的报告：六项全部「没跑成」。
+// doctorReportWithoutDB 是连不上库时的报告：七项全部「没跑成」。
 //
 // 真打上游仍然照跑：它走 HTTP，不读库。在一台连不上库的跳板机上，「网关是
 // 活的、只是我这里看不到库」与「整条链路都挂了」是两件事，而这个区别只有
 // 把那一项也跑一遍才看得出来。
 func doctorReportWithoutDB(ctx context.Context, dbErr error, opts doctorOptions) doctorReport {
-	// 只有第 1 项带完整的错误原文，后面五项指向它。原样重复六遍的后果是
-	// 一份四十行的报告里六行完全相同，而那句错误本身有两行长——读者要在
+	// 只有第 1 项带完整的错误原文，后面六项指向它。原样重复七遍的后果是
+	// 一份四十行的报告里七行完全相同，而那句错误本身有两行长——读者要在
 	// 噪声里找出「到底哪一项跟别的不一样」，而这次一项都不一样。
 	// 完整原文还出现在最后那行 `larkaxctl: ...` 里，不会丢。
 	full := fmt.Sprintf("连不上数据库：%v", dbErr)
@@ -783,17 +788,18 @@ func doctorReportWithoutDB(ctx context.Context, dbErr error, opts doctorOptions)
 		return doctorCheck{title: title, subject: subject, skip: reason}
 	}
 	return doctorReport{
-		database: blocked("数据库", doctorSubjectDatabase, full),
-		channel:  blocked("渠道", doctorSubjectChannel, same),
-		catalog:  blocked("模型目录", doctorSubjectCatalog, same),
-		alias:    blocked("别名", doctorSubjectAlias, same),
-		pricing:  blocked("计价规则", doctorSubjectPricing, same),
-		wallet:   blocked("钱包", doctorSubjectWallet, same),
-		live:     runDoctorLive(ctx, opts),
+		database:   blocked("数据库", doctorSubjectDatabase, full),
+		channel:    blocked("渠道", doctorSubjectChannel, same),
+		catalog:    blocked("模型目录", doctorSubjectCatalog, same),
+		alias:      blocked("别名", doctorSubjectAlias, same),
+		pricing:    blocked("计价规则", doctorSubjectPricing, same),
+		ruleModels: blocked("规则模型名", doctorSubjectRuleModels, same),
+		wallet:     blocked("钱包", doctorSubjectWallet, same),
+		live:       runDoctorLive(ctx, opts),
 	}
 }
 
-// collectDoctorReport 跑六项只读检查与可选的那一次真打上游。
+// collectDoctorReport 跑七项只读检查与可选的那一次真打上游。
 func collectDoctorReport(ctx context.Context, db *sql.DB, opts doctorOptions) doctorReport {
 	rep := doctorReport{database: checkDoctorDatabase(ctx, db)}
 
@@ -809,6 +815,7 @@ func collectDoctorReport(ctx context.Context, db *sql.DB, opts doctorOptions) do
 		rep.catalog = blocked("模型目录", doctorSubjectCatalog)
 		rep.alias = blocked("别名", doctorSubjectAlias)
 		rep.pricing = blocked("计价规则", doctorSubjectPricing)
+		rep.ruleModels = blocked("规则模型名", doctorSubjectRuleModels)
 		rep.wallet = blocked("钱包", doctorSubjectWallet)
 		rep.live = runDoctorLive(ctx, opts)
 		return rep
@@ -817,6 +824,7 @@ func collectDoctorReport(ctx context.Context, db *sql.DB, opts doctorOptions) do
 	rep.channel = checkDoctorChannels(in)
 	rep.catalog = checkDoctorCatalog(in)
 	rep.alias, rep.pricing = checkDoctorAliasAndPricing(ctx, db, in)
+	rep.ruleModels = checkDoctorRuleModels(ctx, db, in)
 	rep.wallet = checkDoctorWallets(in)
 	rep.live = runDoctorLive(ctx, opts)
 	return rep
@@ -971,7 +979,7 @@ func checkDoctorDatabase(ctx context.Context, db *sql.DB) doctorCheck {
 		c.notes = append(c.notes, fmt.Sprintf("库里没有 %s 表：一条迁移都没跑过", goose.TableName()))
 		c.findings = append(c.findings, doctorProblem{
 			headline: "迁移一条都没跑",
-			detail:   "先跑 larkaxctl migrate up，否则下面五项查不到任何东西",
+			detail:   "先跑 larkaxctl migrate up，否则下面六项查不到任何东西",
 		})
 		return c
 	}
@@ -1467,7 +1475,122 @@ func doctorChannelLabel(id int64, name string) string {
 	return fmt.Sprintf("%d（%s）", id, name)
 }
 
-// ── 第 6 项：钱包 ───────────────────────────────────────────────────────
+// ── 第 6 项：规则里的模型名 ─────────────────────────────────────────────
+
+// checkDoctorRuleModels 查计价规则与成本规则里写到的模型名在不在模型目录里。
+//
+// 写入侧不拦这件事（见 #1052）：先写规则、后建模型是正常顺序，规则也可能由
+// 迁移或导入写进来，只在写入口拦等于只拦了一部分。体检是唯一覆盖全部写入
+// 路径的地方，所以判据放在这里。
+//
+// 两类规则同形，都走 model_patterns，判据只写一遍；报出时按来源分开说，因为
+// 拿到一个规则 ID 之后，去看它的是两条不同的命令。
+//
+// 空名单不是问题：它表示「适用于全部模型」（见 pricing.RuleInfo.ModelPatterns），
+// 不指向任何名字，也就不可能对不上。
+func checkDoctorRuleModels(ctx context.Context, db *sql.DB, in doctorChainInput) doctorCheck {
+	c := doctorCheck{title: "规则模型名", subject: doctorSubjectRuleModels}
+
+	rules, err := pricing.NewAdmin(db).List(ctx)
+	if err != nil {
+		c.skip = fmt.Sprintf("读计价规则失败：%v", err)
+		return c
+	}
+	costs, err := pricing.NewCostAdmin(db).List(ctx, pricing.CostListQuery{})
+	if err != nil {
+		c.skip = fmt.Sprintf("读成本规则失败：%v", err)
+		return c
+	}
+
+	channelNames := make(map[int64]string, len(in.channels))
+	for _, ch := range in.channels {
+		channelNames[ch.ID] = ch.Name
+	}
+
+	// 两类规则折成同一个形状再走一遍判据：它们只在「怎么称呼自己」与
+	// 「去看它的命令」上不同，差集那一段逐字相同。
+	type ruleSource struct {
+		label    string
+		lookup   string
+		patterns []string
+	}
+	sources := make([]ruleSource, 0, len(rules)+len(costs))
+	for _, r := range rules {
+		sources = append(sources, ruleSource{
+			label:    fmt.Sprintf("计价规则 %d（%s）", r.ID, r.Name),
+			lookup:   fmt.Sprintf("larkaxctl price show %d", r.ID),
+			patterns: r.ModelPatterns,
+		})
+	}
+	for _, r := range costs {
+		channel := fmt.Sprintf("渠道 %d", r.ChannelID)
+		if name, ok := channelNames[r.ChannelID]; ok {
+			channel = fmt.Sprintf("渠道 %d（%s）", r.ChannelID, name)
+		}
+		sources = append(sources, ruleSource{
+			label:    fmt.Sprintf("成本规则 %d（%s）", r.ID, channel),
+			lookup:   fmt.Sprintf("larkaxctl upstream-cost list --channel %d", r.ChannelID),
+			patterns: r.ModelPatterns,
+		})
+	}
+
+	withNames := 0
+	names := map[string]bool{}
+	c.table = &doctorTable{header: []string{"规则", "模型名", "结论"}}
+	for _, src := range sources {
+		if len(src.patterns) == 0 {
+			continue
+		}
+		withNames++
+		seen := make(map[string]bool, len(src.patterns))
+		for _, name := range src.patterns {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			names[name] = true
+
+			verdict := "在目录里"
+			if !in.inCatalog(name) {
+				verdict = "目录里没有"
+				c.findings = append(c.findings, doctorProblem{
+					headline: fmt.Sprintf("%s 的 --models 里有 %q，但目录里没有这个名字",
+						src.label, name),
+					detail: "这条规则永远命中不了这个模型：--models 按元素逐字匹配规范名，" +
+						"差一个字符就不会中。如果这个模型还没建，等它建好这一项就绿了；" +
+						"否则是拼写错了。用 " + src.lookup + " 看它的完整配置",
+				})
+			}
+			c.table.rows = append(c.table.rows, []string{src.label, name, verdict})
+		}
+	}
+
+	disabled := 0
+	for _, r := range rules {
+		if !r.Enabled {
+			disabled++
+		}
+	}
+	c.notes = append(c.notes, fmt.Sprintf(
+		"计价规则 %d 条（其中停用的 %d 条）、成本规则 %d 条；其中写了 --models 的 %d 条",
+		len(rules), disabled, len(costs), withNames))
+
+	if len(sources) == 0 {
+		c.skip = "没有可查的规则"
+		c.notes = append(c.notes, "库里还没有计价规则与成本规则")
+		return c
+	}
+	if withNames == 0 {
+		c.skip = "规则里没有写模型名"
+		c.notes = append(c.notes,
+			"空名单表示适用于全部模型，不指向任何名字，没有可对账的对象")
+		return c
+	}
+	c.ok = fmt.Sprintf("%d 条规则、%d 个模型名都在目录里", withNames, len(names))
+	return c
+}
+
+// ── 第 7 项：钱包 ───────────────────────────────────────────────────────
 
 func checkDoctorWallets(in doctorChainInput) doctorCheck {
 	c := doctorCheck{title: "钱包", subject: doctorSubjectWallet}
@@ -1514,7 +1637,7 @@ func checkDoctorWallets(in doctorChainInput) doctorCheck {
 	return c
 }
 
-// ── 第 7 项：真打一次上游 ───────────────────────────────────────────────
+// ── 第 8 项：真打一次上游 ───────────────────────────────────────────────
 
 // doctorEndpointSpec 是一个入口的形状：路径、请求体、以及凭证放哪个头。
 //
@@ -1939,7 +2062,7 @@ func liveDetail(l doctorLive) []string {
 	if !l.enabled {
 		return []string{
 			"没跑：要加 --live 才会跑，它会真的发一次请求到上游，会花钱、要凭证。",
-			"真打上游不在这六项里：它的结论在上一行，失败时退出码同样非 0。",
+			"真打上游不在这七项里：它的结论在上一行，失败时退出码同样非 0。",
 		}
 	}
 
@@ -2053,8 +2176,8 @@ func (r doctorReport) jsonStatus() string {
 
 // doctorDoc 把一份体检报告折成机器可读输出。
 //
-// summary 里的 total 是**六项只读检查**，不含真打上游那一次：那一项有自己的
-// 开关（--live），把它算进分母会让「六项都过了」与「六项都过了、上游也通了」
+// summary 里的 total 是**七项只读检查**，不含真打上游那一次：那一项有自己的
+// 开关（--live），把它算进分母会让「七项都过了」与「七项都过了、上游也通了」
 // 给出不同的 total，而两者的区别在 live 那个对象里。
 func doctorDoc(r doctorReport) map[string]any {
 	passed, failed, skipped := r.counts()
