@@ -8,6 +8,7 @@ import type {
   ApiClient,
   ApiKey,
   Channel,
+  ChannelAdapter,
   ChannelAlias,
   ChannelCreateInput,
   CostCreateInput,
@@ -961,6 +962,22 @@ function ruleActiveNow(rule: PricingRule): boolean {
   return rule.effective_to === null || Date.parse(rule.effective_to) > now
 }
 
+/** 演示用的适配器清单：与后端注册表同一组类型与端点。 */
+const OPS_ADAPTERS: ChannelAdapter[] = [
+  { type: 'anthropic', protocol: 'anthropic', endpoint: '/v1/messages' },
+  { type: 'openai', protocol: 'openai', endpoint: '/v1/chat/completions' },
+  { type: 'responses', protocol: 'responses', endpoint: '/v1/responses' },
+  { type: 'systemone', protocol: 'systemone', endpoint: '/v1/systemone' },
+]
+
+/** 演示用的探测清单，按类型给；`systemone` 没有列模型的能力。 */
+const PROBE_MODELS: Record<string, string[]> = {
+  anthropic: ['claude-haiku-4-5', 'claude-sonnet-4-5'],
+  openai: ['gpt-4o', 'gpt-4o-mini'],
+  responses: ['gpt-4o'],
+  systemone: [],
+}
+
 function mockOpsClient(
   scope: 'admin' | 'merchant',
 ): OpsClient & MerchantPricingClient & MerchantOpsClient {
@@ -1014,6 +1031,29 @@ function mockOpsClient(
       await delay()
       requireSession()
       return { ...ownChannel(id) }
+    },
+
+    async listAdapters() {
+      await delay()
+      requireSession()
+      return OPS_ADAPTERS.map((adapter) => ({ ...adapter }))
+    },
+
+    async probeModels(input) {
+      await delay()
+      requireSession()
+      const type = input.channel_id ? ownChannel(input.channel_id).type : (input.type ?? '')
+      const models = PROBE_MODELS[type]
+      if (!models) throw new ApiError(400, 'invalid_request', 'unknown adapter type')
+      if (!input.channel_id && !input.base_url?.trim()) {
+        throw new ApiError(400, 'invalid_request', 'base_url is required')
+      }
+      return {
+        supported: type !== 'systemone',
+        models: type === 'systemone' ? [] : [...models],
+        total: models.length,
+        truncated: false,
+      }
     },
 
     async createChannel(input) {
@@ -1476,6 +1516,8 @@ function merchantClientOf(
     getChannel,
     createChannel,
     updateChannel,
+    listAdapters,
+    probeModels,
     listRules,
     getRule,
     createRule,
@@ -1489,6 +1531,8 @@ function merchantClientOf(
     getChannel,
     createChannel,
     updateChannel,
+    listAdapters,
+    probeModels,
     listRules,
     getRule,
     createRule,
