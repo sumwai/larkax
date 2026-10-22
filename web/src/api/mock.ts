@@ -1553,6 +1553,10 @@ export class MockApiClient implements ApiClient {
     // mock 不做 CSRF 校验；保留方法是为了与 HTTP 实现同形。
   }
 
+  setUnauthorizedHandler(): void {
+    // mock 的会话不会失效；保留方法是为了与 HTTP 实现同形。
+  }
+
   async meta(): Promise<Meta> {
     await delay()
     return {

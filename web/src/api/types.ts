@@ -842,6 +842,13 @@ export interface OpsClient extends ChannelOpsClient {
 export interface ApiClient {
   readonly mode: 'mock' | 'http'
   setCsrfToken(token: string | null): void
+  /**
+   * 注册「会话失效」回调：业务请求收到 401 时通知，路由据此回到登录页。
+   *
+   * 只通知 401——403 是权限不够，会话本身是好的。只保留一个回调，
+   * 后注册的覆盖前一个；`null` 注销。登录接口与会话探测的 401 不通知。
+   */
+  setUnauthorizedHandler(handler: (() => void) | null): void
   meta(): Promise<Meta>
   login(username: string, password: string): Promise<SessionResponse>
   logout(): Promise<void>

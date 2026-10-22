@@ -135,3 +135,110 @@ describe('HttpApiClient 的错误与会话', () => {
     await expect(client.logout()).resolves.toBeUndefined()
   })
 })
+
+describe('HttpApiClient 的会话失效通知', () => {
+  const unauthorized = () => jsonResponse(401, { error: { code: 'unauthenticated' } })
+  const session = {
+    user: {
+      id: 1,
+      username: 'demo',
+      display_name: null,
+      email: null,
+      status: 'active',
+      created_at: '',
+    },
+    csrf_token: 'fresh-token',
+    expires_at: '2026-10-28T00:00:00Z',
+  }
+
+  it('业务请求收到 401 时通知，错误照常抛出', async () => {
+    const { client } = makeClient(unauthorized())
+    const handler = vi.fn()
+    client.setUnauthorizedHandler(handler)
+
+    await expect(client.models()).rejects.toMatchObject({ status: 401 })
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it('403 不通知：会话是好的，只是这次操作没权限', async () => {
+    const { client } = makeClient(jsonResponse(403, { error: { code: 'forbidden' } }))
+    const handler = vi.fn()
+    client.setUnauthorizedHandler(handler)
+
+    await expect(client.revokeKey(3)).rejects.toMatchObject({ status: 403 })
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('会话探测的 401 不通知：匿名态本来就会拿到它', async () => {
+    const { client } = makeClient(unauthorized())
+    const handler = vi.fn()
+    client.setUnauthorizedHandler(handler)
+
+    await expect(client.session()).resolves.toBeNull()
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('登录失败的 401 不通知：口令不对不是会话失效', async () => {
+    const { client } = makeClient(unauthorized())
+    const handler = vi.fn()
+    client.setUnauthorizedHandler(handler)
+
+    await expect(client.login('demo', 'wrong')).rejects.toMatchObject({ status: 401 })
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('三个请求同时 401 只通知一次', async () => {
+    const { client } = makeClient(unauthorized())
+    const handler = vi.fn()
+    client.setUnauthorizedHandler(handler)
+
+    await Promise.allSettled([client.models(), client.wallet(), client.listKeys()])
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it('登录成功后复位：下一次会话失效照样通知', async () => {
+    const { client, fetchImpl } = makeClient(unauthorized())
+    const handler = vi.fn()
+    client.setUnauthorizedHandler(handler)
+
+    await expect(client.models()).rejects.toMatchObject({ status: 401 })
+    fetchImpl.mockResolvedValueOnce(jsonResponse(200, session))
+    await client.login('demo', 'password')
+    fetchImpl.mockResolvedValue(unauthorized())
+    await expect(client.models()).rejects.toMatchObject({ status: 401 })
+
+    expect(handler).toHaveBeenCalledTimes(2)
+  })
+
+  it('会话恢复成功也复位：刷新页面之后仍是新的一轮', async () => {
+    const { client, fetchImpl } = makeClient(unauthorized())
+    const handler = vi.fn()
+    client.setUnauthorizedHandler(handler)
+
+    await expect(client.models()).rejects.toMatchObject({ status: 401 })
+    fetchImpl.mockResolvedValueOnce(jsonResponse(200, session))
+    await client.session()
+    fetchImpl.mockResolvedValue(unauthorized())
+    await expect(client.models()).rejects.toMatchObject({ status: 401 })
+
+    expect(handler).toHaveBeenCalledTimes(2)
+  })
+
+  it('后注册的回调覆盖前一个，注销后不再通知', async () => {
+    const { client } = makeClient(unauthorized())
+    const first = vi.fn()
+    const second = vi.fn()
+    client.setUnauthorizedHandler(first)
+    client.setUnauthorizedHandler(second)
+
+    await expect(client.models()).rejects.toMatchObject({ status: 401 })
+    expect(first).not.toHaveBeenCalled()
+    expect(second).toHaveBeenCalledTimes(1)
+
+    const { client: quiet } = makeClient(unauthorized())
+    quiet.setUnauthorizedHandler(first)
+    quiet.setUnauthorizedHandler(null)
+    await expect(quiet.models()).rejects.toMatchObject({ status: 401 })
+    expect(first).not.toHaveBeenCalled()
+  })
+})

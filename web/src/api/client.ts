@@ -127,6 +127,15 @@ export class HttpApiClient implements ApiClient {
   private readonly baseUrl: string
   private readonly doFetch: typeof fetch
   private csrfToken: string | null = null
+  private unauthorizedHandler: (() => void) | null = null
+  /**
+   * 这一轮会话是否已经通知过失效。
+   *
+   * 同一轮里多个请求会各自拿到 401，每个都通知的话路由会连着跳几次，
+   * 后到的那次还会把 `next` 覆盖掉。下一次登录或会话恢复成功时复位——
+   * 不复位的话，一次失效之后就再也不会通知，第二次失效反而不跳。
+   */
+  private unauthorizedNotified = false
 
   constructor(options: HttpApiOptions = {}) {
     this.baseUrl = (options.baseUrl ?? '/api/v1').replace(/\/$/, '')
@@ -257,12 +266,30 @@ export class HttpApiClient implements ApiClient {
     this.csrfToken = token
   }
 
+  /**
+   * 注册会话失效回调，用于把「业务请求发现会话没了」翻译成重新登录。
+   *
+   * 只保留一个：路由层是唯一需要它的地方，后注册的覆盖前一个，
+   * `null` 表示注销。回调不带参数，也不需要返回值。
+   */
+  setUnauthorizedHandler(handler: (() => void) | null): void {
+    this.unauthorizedHandler = handler
+  }
+
+  private notifyUnauthorized(): void {
+    if (this.unauthorizedNotified) return
+    this.unauthorizedNotified = true
+    this.unauthorizedHandler?.()
+  }
+
   private async request<T>(
     path: string,
     options: {
       method?: string
       body?: unknown
       query?: Record<string, QueryValue | QueryValue[]>
+      /** 这条请求的 401 不代表会话失效（登录接口、会话探测、登出）。 */
+      suppressUnauthorized?: boolean
     } = {},
   ): Promise<T> {
     const method = options.method ?? 'GET'
@@ -291,6 +318,9 @@ export class HttpApiClient implements ApiClient {
       .catch(() => null)
 
     if (!response.ok) {
+      // 只有 401 才算会话没了。403 是「这次操作没权限」，会话本身是好的：
+      // 把人踢去登录页只会更困惑——重新登录回来，这一下照样是 403。
+      if (response.status === 401 && !options.suppressUnauthorized) this.notifyUnauthorized()
       const body = payload as Partial<ApiErrorBody> | null
       const error = body && typeof body === 'object' ? body.error : undefined
       throw new ApiError(
@@ -314,20 +344,34 @@ export class HttpApiClient implements ApiClient {
   }
 
   login(username: string, password: string): Promise<SessionResponse> {
+    // 登录接口的 401 是「口令不对」，不是会话失效；通知出去会让登录页
+    // 自己把自己再踢回登录页，循环。
     return this.request<SessionResponse>('/auth/login', {
       method: 'POST',
       body: { username, password },
+      suppressUnauthorized: true,
+    }).then((session) => {
+      // 新会话开始，失效通知可以重新算一次。
+      this.unauthorizedNotified = false
+      return session
     })
   }
 
   async logout(): Promise<void> {
-    await this.request<void>('/auth/logout', { method: 'POST' })
+    // 登出后本来就去匿名态，这一下 401 不必再惊动路由。
+    await this.request<void>('/auth/logout', { method: 'POST', suppressUnauthorized: true })
     this.csrfToken = null
   }
 
   async session(): Promise<SessionResponse | null> {
     try {
-      return await this.request<SessionResponse>('/auth/session')
+      // 匿名态本来就会拿到 401，这条探测不触发回调：否则落地页与登录页
+      // 一进来就会被赶去重新登录。
+      const session = await this.request<SessionResponse>('/auth/session', {
+        suppressUnauthorized: true,
+      })
+      this.unauthorizedNotified = false
+      return session
     } catch (error) {
       if (error instanceof ApiError && (error.status === 401 || error.status === 403)) return null
       throw error

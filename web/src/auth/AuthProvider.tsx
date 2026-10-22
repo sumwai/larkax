@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react'
@@ -25,6 +26,10 @@ const AuthContext = createContext<AuthValue | null>(null)
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('loading')
   const [user, setUser] = useState<User | null>(null)
+  // 回调只在挂载时注册一次，闭包里读不到后来的状态；用 ref 读「现在」。
+  // 否则登录之后它还把自己当匿名，下一次会话失效就不降级了。
+  const statusRef = useRef(status)
+  statusRef.current = status
 
   useEffect(() => {
     let alive = true
@@ -46,6 +51,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       alive = false
     }
+  }, [])
+
+  useEffect(() => {
+    api.setUnauthorizedHandler(() => {
+      // 只有真有一个会话来失效，才降级。匿名态收到 401 不稀奇：登出前发出、
+      // 晚到的请求，落地页的公开接口，都可能。会话还在恢复（loading）时同理，
+      // 这时改状态会让门槛提前把人送去登录页。
+      if (statusRef.current !== 'authenticated') return
+      // 令牌已经没用了，留着只会让下一条写请求带着一个必然过不去的值。
+      api.setCsrfToken(null)
+      setUser(null)
+      setStatus('anonymous')
+    })
+    return () => api.setUnauthorizedHandler(null)
   }, [])
 
   const login = useCallback(async (username: string, password: string) => {
