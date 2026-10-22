@@ -144,8 +144,7 @@ candidates[].quota_unit        余量的单位
 candidates[].quota_remaining   剩余量
 candidates[].quota_confidence  这个余量有多可信
 candidates[].quota_kind        余量的来源：实测 / 自记账 / 错误观测
-candidates[].cost_per_unit     最近观察到的单位成本：按**本次请求的规范模型**、在回看窗口内观察到的
-                               （该模型还没有带成本的事件时为空——不拿渠道级合并值冒充）
+candidates[].cost_per_unit     最近观察到的单位成本
 candidates[].cache_hit_rate    近期缓存命中率
 candidates[].sample_count      上面两条统计的样本数
 selected                       实际选中并发出去的那一个（只有成功时才有）
@@ -167,6 +166,11 @@ excluded[].code                为什么被筛掉：ineligible（配置不全）
 
 `selected` 三项、`attempts` 七项、`excluded` 四项，以及 `candidates[].selected`，
 只出现在 `response` 方向的行上；其余每一项在两个方向的行上都有。
+
+`candidates[].cost_per_unit` 是**这个候选在本次请求的规范模型上**的单位成本：
+桶按（渠道，规范模型，小时）存，读侧只取那个模型的那一行。该模型还没有带成本的
+事件时这个值为空——不拿渠道级合并值冒充，因此空值读作「这个模型上还没有数据」，
+而不是「免费」。
 
 `excluded` 记的是「那几个没发出去的候选**为什么**不在候选里」的答案：
 `candidates_count` 说的是选路**之前**有几个候选，`attempts` 说的是**真的发出去过**
