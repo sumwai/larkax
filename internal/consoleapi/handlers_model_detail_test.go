@@ -38,6 +38,11 @@ func TestModelDetailNotFoundUnlessSupplied(t *testing.T) {
 	if empty.Code != http.StatusNotFound {
 		t.Errorf("空名字的状态码 = %d，期望 404（响应 %s）", empty.Code, empty.Body)
 	}
+	// 状态码分不出「handler 判的 404」与「路由没挂上时的默认 404」：后者是
+	// Go 自带的纯文本页。断言错误码，路由整片丢掉时这条才红。
+	if got := errorCode(t, empty); got != codeNotFound {
+		t.Errorf("空名字的错误码 = %q，期望 %q（响应 %s）", got, codeNotFound, empty.Body)
+	}
 }
 
 // 供应商按价格升序；平台自营的 merchant 是 null；每条带整套维度价与
@@ -85,20 +90,46 @@ func TestModelDetailListsSuppliersByPrice(t *testing.T) {
 		t.Errorf("currency/reference_at = %q/%q，期望 CNY 与一个时刻", body.Currency, body.ReferenceAt)
 	}
 
-	// 公开响应里每条 supplier 的键集合必须正好是这四项。断言形状而不是
-	// grep 某个旧字符串：未来任何人加一个指向上游的字段，这条都会红。
+	// 公开响应里 model 与每条 supplier 的键集合都必须正好是约定的那些键。
+	// 断言形状而不是 grep 某个旧字符串：未来任何人加一个指向上游的字段，
+	// 这条都会红。
 	var rawBody struct {
-		Model struct {
-			Suppliers []map[string]json.RawMessage `json:"suppliers"`
-		} `json:"model"`
+		Model map[string]json.RawMessage `json:"model"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &rawBody); err != nil {
 		t.Fatalf("响应不是 JSON: %v", err)
 	}
+	wantModelKeys := map[string]bool{
+		"name": true, "display_name": true, "vendor": true, "family": true,
+		"context_limit": true, "input_limit": true, "output_limit": true,
+		"capabilities": true, "modalities_input": true, "modalities_output": true,
+		"reasoning_options": true, "canonical_model_id": true,
+		"knowledge_cutoff": true, "release_date": true, "updated_at": true,
+		"suppliers": true, "unpriced_channels": true,
+	}
+	if len(rawBody.Model) != len(wantModelKeys) {
+		t.Errorf("model 有 %d 个字段，期望正好 %d 个：%v",
+			len(rawBody.Model), len(wantModelKeys), rawBody.Model)
+	}
+	for key := range wantModelKeys {
+		if _, ok := rawBody.Model[key]; !ok {
+			t.Errorf("model 缺字段 %q：%v", key, rawBody.Model)
+		}
+	}
+	for key := range rawBody.Model {
+		if !wantModelKeys[key] {
+			t.Errorf("model 多出字段 %q：%v", key, rawBody.Model)
+		}
+	}
+
+	var suppliers []map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody.Model["suppliers"], &suppliers); err != nil {
+		t.Fatalf("suppliers 不是数组: %v", err)
+	}
 	wantKeys := map[string]bool{
 		"merchant": true, "price": true, "prices": true, "channel_count": true,
 	}
-	for i, supplier := range rawBody.Model.Suppliers {
+	for i, supplier := range suppliers {
 		if len(supplier) != len(wantKeys) {
 			t.Errorf("第 %d 条 supplier 有 %d 个字段，期望正好 %d 个：%v",
 				i, len(supplier), len(wantKeys), supplier)
@@ -168,6 +199,55 @@ func TestModelDetailAggregatesSuppliersByMerchantAndPrices(t *testing.T) {
 	}
 	if !reflect.DeepEqual(body.Model.Suppliers, want) {
 		t.Errorf("suppliers = %+v，期望 %+v", body.Model.Suppliers, want)
+	}
+}
+
+// 同商家、整套价相同、规则有效期窗口不同时，两条渠道折成一行，报的是
+// 渠道编号最小的那条渠道适用的规则：报价层按 (模型, 渠道) 返回，折行时
+// 保留先插入的那条。窗口不属于折行的判据——它不影响价格，只影响哪条规则
+// 在这次求值里适用。
+func TestModelDetailKeepsLowestChannelRuleOnPriceTie(t *testing.T) {
+	f := newFixture(t)
+	f.catalog.models = []catalog.Model{{CanonicalName: "alpha"}}
+	// 故意让编号大的渠道先出现在供给里：结果只该取决于渠道编号，与供给的
+	// 先后无关。
+	f.supplies.supplies = []channels.Supply{
+		{Model: "alpha", ChannelID: 2, OwnerUserID: 11, Merchant: "acme"},
+		{Model: "alpha", ChannelID: 1, OwnerUserID: 11, Merchant: "acme"},
+	}
+	price := map[string]money.Amount{"prompt": mustAmount(t, "0.00300000")}
+	f.offers.byChannelPrices = map[int64]map[string]money.Amount{1: price, 2: price}
+	f.offers.byChannelRule = map[int64]pricing.RuleRef{
+		1: {ID: 41, Scope: "channel", Priority: 10,
+			EffectiveFrom: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+		2: {ID: 42, Scope: "channel", Priority: 10,
+			EffectiveFrom: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)},
+	}
+
+	rec := f.request(t, http.MethodGet, PathPrefix+"models/alpha", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（响应 %s）", rec.Code, rec.Body)
+	}
+	var body modelDetailResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if len(body.Model.Suppliers) != 1 {
+		t.Fatalf("suppliers = %+v，期望折成一条", body.Model.Suppliers)
+	}
+	supplier := body.Model.Suppliers[0]
+	if supplier.ChannelCount != 2 {
+		t.Errorf("channel_count = %d，期望 2", supplier.ChannelCount)
+	}
+	if supplier.Rule == nil {
+		t.Fatal("缺少 rule 段")
+	}
+	if supplier.Rule.ID != 41 {
+		t.Errorf("rule.id = %d，期望 41（渠道编号最小的那条）", supplier.Rule.ID)
+	}
+	if supplier.Rule.EffectiveFrom != "2026-01-01T00:00:00Z" {
+		t.Errorf("rule.effective_from = %q，期望 2026-01-01T00:00:00Z",
+			supplier.Rule.EffectiveFrom)
 	}
 }
 
@@ -440,6 +520,74 @@ func TestModelDetailAcceptsSlashInName(t *testing.T) {
 	}
 	if body.Model.Name != "vendor/alpha" {
 		t.Errorf("name = %q，期望 vendor/alpha", body.Model.Name)
+	}
+}
+
+// 规范名按字面比较：大小写变体不在供，回与「目录里没有」逐字相同的 404。
+func TestModelDetailIsCaseSensitive(t *testing.T) {
+	f := newFixture(t)
+	f.catalog.models = []catalog.Model{{CanonicalName: "alpha"}}
+	f.supplies.supplies = []channels.Supply{{Model: "alpha", ChannelID: 1}}
+	f.offers.base = mustAmount(t, "0.00300000")
+
+	// 同一个 request id 才比得出「正文逐字相同」：错误体里带着它。
+	headers := map[string]string{"x-request-id": "fixed-request-id"}
+	variant := f.requestAsWith(t, "127.0.0.1:8080", headers,
+		http.MethodGet, PathPrefix+"models/Alpha", "")
+	absent := f.requestAsWith(t, "127.0.0.1:8080", headers,
+		http.MethodGet, PathPrefix+"models/absent", "")
+
+	if variant.Code != http.StatusNotFound || absent.Code != http.StatusNotFound {
+		t.Fatalf("状态码 = %d / %d，期望都是 404", variant.Code, absent.Code)
+	}
+	if got := errorCode(t, variant); got != codeNotFound {
+		t.Errorf("大小写变体的错误码 = %q，期望 %q", got, codeNotFound)
+	}
+	if variant.Body.String() != absent.Body.String() {
+		t.Errorf("大小写变体与「目录里没有」的正文不同：\n变体: %s\n不存在: %s",
+			variant.Body, absent.Body)
+	}
+}
+
+// 多段通配符按路径段反转义：编码过的 "/" 与字面写出的 "/" 是同一个名字。
+func TestModelDetailDecodesEscapedName(t *testing.T) {
+	f := newFixture(t)
+	f.catalog.models = []catalog.Model{
+		{CanonicalName: "vendor/alpha"},
+		{CanonicalName: "vendor%2Falpha"},
+	}
+	f.supplies.supplies = []channels.Supply{
+		{Model: "vendor/alpha", ChannelID: 1},
+		{Model: "vendor%2Falpha", ChannelID: 2},
+	}
+	f.offers.base = mustAmount(t, "0.00300000")
+
+	// %2F 在单个路径段里反转义成 "/"，与字面写出的两段同名。
+	escapedSlash := f.request(t, http.MethodGet, PathPrefix+"models/vendor%2Falpha", "")
+	if escapedSlash.Code != http.StatusOK {
+		t.Fatalf("%%2F 的状态码 = %d，期望 200（响应 %s）",
+			escapedSlash.Code, escapedSlash.Body)
+	}
+	var slashBody modelDetailResponse
+	if err := json.Unmarshal(escapedSlash.Body.Bytes(), &slashBody); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if slashBody.Model.Name != "vendor/alpha" {
+		t.Errorf("%%2F 解出的 name = %q，期望 vendor/alpha", slashBody.Model.Name)
+	}
+
+	// %25 反转义成字面量 "%"，只解一层：不会再把 %2F 解成 "/"。
+	escapedPercent := f.request(t, http.MethodGet, PathPrefix+"models/vendor%252Falpha", "")
+	if escapedPercent.Code != http.StatusOK {
+		t.Fatalf("%%25 的状态码 = %d，期望 200（响应 %s）",
+			escapedPercent.Code, escapedPercent.Body)
+	}
+	var percentBody modelDetailResponse
+	if err := json.Unmarshal(escapedPercent.Body.Bytes(), &percentBody); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if percentBody.Model.Name != "vendor%2Falpha" {
+		t.Errorf("%%25 解出的 name = %q，期望 vendor%%2Falpha", percentBody.Model.Name)
 	}
 }
 
