@@ -50,6 +50,10 @@ describe('弹窗打开后的焦点落点', () => {
       </Modal>,
     )
 
+    // 先钉住按回车时焦点确实在这一格：落焦若跑到提交按钮上，回车同样会提交，
+    // 只数 onSubmit 的次数看不出区别。
+    expect(screen.getByLabelText('名称')).toHaveFocus()
+
     await user.keyboard('abc{Enter}')
     expect(onSubmit).toHaveBeenCalledTimes(1)
   })
@@ -74,6 +78,50 @@ describe('弹窗打开后的焦点落点', () => {
     )
 
     expect(screen.getByLabelText('渠道')).toHaveFocus()
+  })
+
+  it('跳过被 disabled fieldset 锁住的输入框', () => {
+    renderModal(
+      <Modal title="编辑" onClose={() => undefined}>
+        <fieldset disabled>
+          <input aria-label="锁住" />
+        </fieldset>
+        <select aria-label="渠道" defaultValue="a">
+          <option value="a">甲</option>
+        </select>
+      </Modal>,
+    )
+
+    // `[disabled]` 只认元素自己的属性，fieldset 里的输入框照样匹配；`:disabled`
+    // 才把「祖先 disabled」算进来。
+    expect(screen.getByLabelText('渠道')).toHaveFocus()
+  })
+
+  it('跳过祖先 visibility: hidden 里的输入框', () => {
+    renderModal(
+      <Modal title="编辑" onClose={() => undefined}>
+        <div style={{ visibility: 'hidden' }}>
+          <input aria-label="看不见" />
+        </div>
+        <input aria-label="看得见" />
+      </Modal>,
+    )
+
+    expect(screen.getByLabelText('看得见')).toHaveFocus()
+  })
+
+  it('祖先 visibility: hidden、自己声明 visible 的输入框照常落焦', () => {
+    renderModal(
+      <Modal title="编辑" onClose={() => undefined}>
+        <div style={{ visibility: 'hidden' }}>
+          <input aria-label="自己可见" style={{ visibility: 'visible' }} />
+        </div>
+      </Modal>,
+    )
+
+    // `visibility` 会继承，但子元素可以改回 visible；按元素最后的计算值判，
+    // 不能顺着祖先一刀切。
+    expect(screen.getByLabelText('自己可见')).toHaveFocus()
   })
 
   it('没有可编辑控件的确认框落在面板上，不抢关闭钮或「取消」，Esc 仍能关', async () => {
@@ -125,5 +173,29 @@ describe('弹窗打开后的焦点落点', () => {
       </Modal>,
     )
     expect(screen.getByLabelText('名称')).toHaveFocus()
+  })
+
+  it('面板里有输入框时，Tab 顺序与首尾环绕照旧', async () => {
+    const user = userEvent.setup()
+    renderModal(
+      <Modal title="编辑" onClose={() => undefined}>
+        <input aria-label="名称" defaultValue="" />
+        <button type="button">下一个</button>
+      </Modal>,
+    )
+
+    const input = screen.getByLabelText('名称')
+    // 头部关闭钮排在最前，然后是输入框与「下一个」。
+    const close = screen.getByRole('button', { name: '关闭' })
+    const next = screen.getByRole('button', { name: '下一个' })
+
+    expect(input).toHaveFocus()
+    await user.tab()
+    expect(document.activeElement).toBe(next)
+
+    // 从第一个可聚焦元素 Shift+Tab 应该绕到最后一个，而不是跑出面板。
+    close.focus()
+    await user.tab({ shift: true })
+    expect(document.activeElement).toBe(next)
   })
 })

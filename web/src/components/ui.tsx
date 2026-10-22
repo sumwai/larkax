@@ -205,13 +205,15 @@ function focusableIn(root: HTMLElement): HTMLElement[] {
  * 确认框里第一颗按钮往往就是「取消」，聚焦它比落在面板更糟。
  *
  * 与 `FOCUSABLE_SELECTOR` 分开：那个带按钮与链接，是给 Tab 环绕算首尾的。
+ * `:disabled` 而不是 `[disabled]`：被 `fieldset[disabled]` 锁住的子控件没有这个
+ * 属性，但一样接不了焦点。
  */
 const EDITABLE_SELECTOR = [
   'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"])',
   'select',
   'textarea',
 ]
-  .map((selector) => `${selector}:not([disabled]):not([readonly])`)
+  .map((selector) => `${selector}:not(:disabled):not([readonly])`)
   .join(',')
 
 /**
