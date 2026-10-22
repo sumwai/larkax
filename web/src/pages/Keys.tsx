@@ -2,9 +2,10 @@ import { useState, type FormEvent } from 'react'
 import { api } from '../api'
 import type { ApiKey, CreatedKey, KeyCreateInput } from '../api/types'
 import { useI18n } from '../i18n'
+import type { MessageKey } from '../i18n/zh'
 import { useSite } from '../site/SiteProvider'
 import { useAsync } from '../hooks/useAsync'
-import { formatDate, formatDateTime, formatMoney, formatSpend } from '../lib/format'
+import { formatDate, formatDateTime, formatMoney, formatSpend, moneySymbol } from '../lib/format'
 import {
   Alert,
   Button,
@@ -28,6 +29,29 @@ interface CreateForm {
 
 const EMPTY_FORM: CreateForm = { name: '', quota: '', rate: '', expires: '' }
 
+interface ExpiryPreset {
+  key: MessageKey
+  /** 相对今天的天数；`years` 与 `days` 都不给表示永不过期（清空字段）。 */
+  days?: number
+  years?: number
+}
+
+const EXPIRY_PRESETS: ExpiryPreset[] = [
+  { key: 'keys.expiryNever' },
+  { key: 'keys.expiry7d', days: 7 },
+  { key: 'keys.expiry30d', days: 30 },
+  { key: 'keys.expiry90d', days: 90 },
+  { key: 'keys.expiry1y', years: 1 },
+]
+
+const RATE_PRESETS = [60, 300, 600, 1200]
+
+/** `datetime-local` 认的本地时间串，精确到分钟；快捷档位与手输写的是同一个值。 */
+function toLocalInputValue(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 export function Keys() {
   const { t } = useI18n()
   const { meta } = useSite()
@@ -36,6 +60,8 @@ export function Keys() {
 
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState<CreateForm>(EMPTY_FORM)
+  // 手输过期时间后档位高亮要撤掉；拿「现在 + N 天」在渲染期重算会随分钟漂移。
+  const [expiryPreset, setExpiryPreset] = useState<string | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [created, setCreated] = useState<CreatedKey | null>(null)
@@ -46,11 +72,29 @@ export function Keys() {
   const [actionError, setActionError] = useState<string | null>(null)
 
   const keys = data?.items ?? []
+  // 与列表里的 MoneyText 同源：站点币种由 SiteProvider 从 /api/meta 取。
+  const currencySymbol = moneySymbol(meta.currency)
 
   const openCreate = () => {
     setForm(EMPTY_FORM)
+    setExpiryPreset(null)
     setFormError(null)
     setCreating(true)
+  }
+
+  const applyExpiryPreset = (preset: ExpiryPreset) => {
+    let value = ''
+    if (preset.days) {
+      const next = new Date()
+      next.setDate(next.getDate() + preset.days)
+      value = toLocalInputValue(next)
+    } else if (preset.years) {
+      const next = new Date()
+      next.setFullYear(next.getFullYear() + preset.years)
+      value = toLocalInputValue(next)
+    }
+    setExpiryPreset(preset.key)
+    setForm((previous) => ({ ...previous, expires: value }))
   }
 
   const submit = async (event: FormEvent) => {
@@ -299,14 +343,17 @@ export function Keys() {
             <div className="form-grid">
               <div className="field">
                 <label htmlFor="key-quota">{t('keys.quotaLimit')}</label>
-                <input
-                  id="key-quota"
-                  className="input"
-                  inputMode="decimal"
-                  value={form.quota}
-                  placeholder="0.00000000"
-                  onChange={(event) => setForm({ ...form, quota: event.target.value })}
-                />
+                <div className="input-affix">
+                  {currencySymbol && <span className="affix">{currencySymbol}</span>}
+                  <input
+                    id="key-quota"
+                    className="input"
+                    inputMode="decimal"
+                    value={form.quota}
+                    placeholder="0.00000000"
+                    onChange={(event) => setForm({ ...form, quota: event.target.value })}
+                  />
+                </div>
                 <span className="hint">{t('keys.quotaHint')}</span>
               </div>
               <div className="field">
@@ -319,6 +366,22 @@ export function Keys() {
                   placeholder="60"
                   onChange={(event) => setForm({ ...form, rate: event.target.value })}
                 />
+                <div className="preset-row" role="group" aria-label={t('keys.ratePresets')}>
+                  {RATE_PRESETS.map((value) => (
+                    <Button
+                      key={value}
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      className="preset-btn"
+                      aria-pressed={form.rate === String(value)}
+                      aria-label={`${value} ${t('keys.perMinute')}`}
+                      onClick={() => setForm((previous) => ({ ...previous, rate: String(value) }))}
+                    >
+                      {value}
+                    </Button>
+                  ))}
+                </div>
                 <span className="hint">{t('keys.rateHint')}</span>
               </div>
             </div>
@@ -329,8 +392,26 @@ export function Keys() {
                 type="datetime-local"
                 className="input"
                 value={form.expires}
-                onChange={(event) => setForm({ ...form, expires: event.target.value })}
+                onChange={(event) => {
+                  setExpiryPreset(null)
+                  setForm((previous) => ({ ...previous, expires: event.target.value }))
+                }}
               />
+              <div className="preset-row" role="group" aria-label={t('keys.expiryPresets')}>
+                {EXPIRY_PRESETS.map((preset) => (
+                  <Button
+                    key={preset.key}
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    className="preset-btn"
+                    aria-pressed={expiryPreset === preset.key}
+                    onClick={() => applyExpiryPreset(preset)}
+                  >
+                    {t(preset.key)}
+                  </Button>
+                ))}
+              </div>
               <span className="hint">{t('keys.expiresHint')}</span>
             </div>
           </form>
