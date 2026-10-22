@@ -102,8 +102,16 @@ describe('设置与账号的分页', () => {
     expect(screen.queryByText('修改口令')).not.toBeInTheDocument()
     expect(screen.queryByText('账户信息')).not.toBeInTheDocument()
     // 点进设置的人常常是来改账户的：页底要有一行可点的落点。
-    const entry = screen.getByRole('link', { name: '前往账号页' })
+    const entry = screen.getByRole('link', { name: '账号页' })
     expect(entry.getAttribute('href')).toBe('/app/merchant/account')
+    // 段落里要靠强调色与下划线才看得出可点（样式在 `.inline-link` 里）。
+    expect(entry.className).toContain('inline-link')
+    // 链接是句子的一部分：`{account}` 标记丢了或写了两次，句子会断成两截而
+    // 链接仍在，只比链接比不出来，所以要比整句。
+    const sentence = entry.parentElement?.textContent ?? ''
+    expect(sentence).toContain('账号页')
+    expect(sentence).not.toContain('{account}')
+    expect(sentence).toBe('显示名、邮箱与登录口令在账号页修改。')
   })
 
   it('商家账号页有账户信息与修改口令，不再重复退出登录', async () => {
@@ -131,8 +139,8 @@ describe('设置与账号的分页', () => {
     // 退出登录只在顶栏与抽屉里。遍历三类页面而不是只看账号页：把面板加回
     // 整页也能被挡住，不只挡住加进共用账号段的那一种改法。
     expect(screen.queryByText('退出登录')).not.toBeInTheDocument()
-    // 这两页的账号段就在本页，页底再指一个「前往账号页」会指向自己。
-    expect(screen.queryByRole('link', { name: '前往账号页' })).not.toBeInTheDocument()
+    // 这两页的账号段就在本页，页底再指一个账号页入口会指向自己。
+    expect(screen.queryByRole('link', { name: '账号页' })).not.toBeInTheDocument()
     // 「语言与主题不跨设备同步」这句在共用卡里，拆页时不能跟着丢掉。
     expect(screen.getByText('语言与主题偏好，只影响这台设备。')).toBeInTheDocument()
   })
@@ -142,9 +150,20 @@ describe('设置与账号的分页', () => {
     expect(en['nav.account']).not.toBe(en['settings.profile'])
 
     localStorage.setItem('larkax.lang', 'en')
-    await renderPage('merchant', '/app/merchant/account')
+    const account = await renderPage('merchant', '/app/merchant/account')
     expect(screen.getByRole('heading', { level: 1, name: 'Account' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Account details' })).toBeInTheDocument()
+    account.unmount()
+
+    await renderPage('merchant', '/app/merchant/settings')
+    // 英文的标签同样是句子的一部分，整句要连得起来读。
+    const entry = screen.getByRole('link', { name: 'the Account page' })
+    const sentence = entry.parentElement?.textContent ?? ''
+    expect(sentence).toContain('the Account page')
+    expect(sentence).not.toContain('{account}')
+    expect(sentence).toBe(
+      'Change your display name, email, and sign-in password on the Account page.',
+    )
   })
 
   it('账号段只有一份实现：两个入口渲染出的标题一模一样', async () => {
