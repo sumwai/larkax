@@ -32,11 +32,20 @@ const aliasShortUsage = `larkaxctl alias 管理模型别名：一个上游模型
 不带 --channel 的别名是平台级、带的是渠道级，渠道级盖过平台级。同一个规范名
 在每个范围里最多只能有一个上游名；update 不能改渠道范围与规范名。
 
+出站映射的配置命令已搬到 larkaxctl channel map（add / list / remove）；
+本组的 create / add / list / delete 旧写法保留一个发布周期。
+
 更细的边界：larkaxctl help alias。
 `
 
 // aliasUsage 是 alias 的长版：`larkaxctl help alias` 与 `alias help`。
-const aliasUsage = `larkaxctl alias 管理模型别名。
+const aliasUsage = `larkaxctl alias 是出站上游名映射的旧入口。
+
+**配置命令已搬到 larkaxctl channel map**（add / list / remove）：那里用三个位置
+参数写一条映射，平台级用 --all-channels 表示。这里保留 update 与 resolve——
+update 改一条已有映射的上游名与覆盖，resolve 回答某个渠道实际会发什么名字。
+create / add / list / delete 保留一个发布周期，行为与原来逐字相同，并在 stderr
+上提示新路径。
 
 别名说的是「某家上游对同一个模型叫什么名字」：一个上游模型名对应一个规范名。
 
@@ -76,7 +85,7 @@ resolve 回答的是选路那个问题：**这个规范名在这个渠道上实�
 
 **旧名仍可用**：alias add 等同于 alias create，--canonical 等同于 --model。
 它们保留是为了不让已经在跑的脚本与部署流程坏掉，行为与新名字逐字相同；
-新写的命令请用新名字。
+配置出站映射的新写法用 larkaxctl channel map。
 
 # 别名
 
@@ -101,13 +110,16 @@ func runAlias(args []string) error {
 
 	switch action {
 	case "create", "add":
-		return runAliasCreate(rest)
+		return runLegacyUserPath("出站映射的配置命令已搬到 larkaxctl channel map add <渠道> <规范名> <上游模型名>",
+			func() error { return runAliasCreate(rest) })
 	case "list":
-		return runAliasList(rest)
+		return runLegacyUserPath("出站映射的配置命令已搬到 larkaxctl channel map list",
+			func() error { return runAliasList(rest) })
 	case "update":
 		return runAliasUpdate(rest)
 	case "delete":
-		return runAliasDelete(rest)
+		return runLegacyUserPath("出站映射的配置命令已搬到 larkaxctl channel map remove <渠道> <规范名>",
+			func() error { return runAliasDelete(rest) })
 	case "resolve":
 		return runAliasResolve(rest)
 	case "-h", "--help":
@@ -242,7 +254,7 @@ func runAliasList(args []string) error {
 	if jsonOutput() {
 		return emitJSON(os.Stdout, aliasListDoc(aliases), nil)
 	}
-	printAliasList(humanStdout(), aliases)
+	printAliasList(humanStdout(), aliases, "别名", "alias create")
 	return nil
 }
 
@@ -413,6 +425,14 @@ func runAliasResolve(args []string) error {
 		return emitJSON(os.Stdout, aliasResolveDoc(*canonical, *channelID, upstream), nil)
 	}
 	printResolvedAlias(humanStdout(), humanStderr(), *canonical, *channelID, upstream)
+	// 映射本身改在 channel map 下；resolve 留在这里，只把配置的去向点出来。
+	// 这句在每一次成功运行里都会出现，按 streams_test.go 的判据它不属于默认
+	// 输出（见那条用例注释里「那种话属于 -v，或者属于 --help 的用法文本」），
+	// 所以只在 -v 下打。
+	if verboseOutput {
+		_, _ = fmt.Fprintf(humanStderr(),
+			"出站映射的配置命令在 larkaxctl channel map（add / list / remove）。\n")
+	}
 	return nil
 }
 
@@ -489,10 +509,14 @@ func aliasResolveDoc(canonical string, channelID int64, upstream string) map[str
 	return doc
 }
 
-// printAliasList 打印别名清单。
-func printAliasList(w io.Writer, aliases []catalog.Alias) {
+// printAliasList 打印映射清单。
+//
+// entity 与 addAction 只进空清单那一句（「暂无…」+ 下一步敲哪条命令）：两条
+// 入口（alias list 与 channel map list）共用同一张表，但空清单该指去新建的
+// 命令不相同。
+func printAliasList(w io.Writer, aliases []catalog.Alias, entity, addAction string) {
 	if len(aliases) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("别名", "alias create"))
+		_, _ = fmt.Fprintln(w, emptyListNote(entity, addAction))
 		return
 	}
 

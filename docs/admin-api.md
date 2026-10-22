@@ -74,7 +74,7 @@ Authorization: Bearer <令牌>
 | `PATCH` | `/admin/v1/pricing/costs/{id}` | 改成本规则 |
 
 别名清单不带 `channel_id` 时给的是**平台级**那一段（`channel_id = 0`），与
-`larkaxctl alias list` 的默认口径一致。
+`larkaxctl channel map list` 的默认口径一致。
 
 **用户管理不在这里**：`/api/v1/admin/users` 只挂在控制台的会话面（见
 [api.md](api.md) 的「控制台管理接口：用户」）。它的判据里有「不能改自己」

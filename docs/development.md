@@ -59,7 +59,7 @@ make run
 前台跑服务。Ctrl-C 退出服务，数据库仍在跑，用 `make down` 停它。
 
 **`make run` 只证明服务起来了，不证明能成功推理。** 要真的打一次成功的推理，还需要
-一个上游账号、一条配好的模型 / 渠道 / 别名 / 定价链路、一个用户与钱包（新开的户
+一个上游账号、一条配好的模型 / 渠道 / 出站映射 / 定价链路、一个用户与钱包（新开的户
 余额是 0，要给它入一笔账）。后面几节分别讲这些；先知道这一点可以少走一段弯路。
 
 `.env` 里的主密钥由 `make` 直接生成写进去（`openssl rand -base64 32`），
@@ -651,12 +651,13 @@ goose 先按版本顺序补应用这些编号更小的迁移，再应用所有�
 ## 配一条能接请求的链路
 
 推理请求要落到某个上游，所以库里得先有四样东西：目录里的一条规范模型、一条渠道
-（指向上游、带凭证）、把上游模型名映射到规范名的别名、一条计价规则。
-`larkaxctl` 的 `model` / `channel` / `alias` / `price` 四组子命令就是干这个的。
+（指向上游、带凭证）、把规范名映射到上游模型名的出站映射、一条计价规则。
+`larkaxctl` 的 `model`、`channel`（出站映射是它的 `channel map` 子命令）与
+`price` 就是干这个的。
 
 这四样之外还有一个**前置**：计价规则要记下是谁定的（`--by`），而 `--by` 收的
 是一个**已经存在的用户**，所以第四步会先建一个用户、再建规则。用户本身不在
-这条选路链路上——选路看的是模型、渠道、别名与价——但没有它，那条规则建不出来。
+这条选路链路上——选路看的是模型、渠道、出站映射与价——但没有它，那条规则建不出来。
 
 下面四步按顺序跑完，就有了一条能接请求的链路。示例里的上游是假的
 （`https://api.example.com/v1`），换成你自己的即可。
@@ -666,7 +667,8 @@ goose 先按版本顺序补应用这些编号更小的迁移，再应用所有�
 （`LARKAX_CHANNEL_CREDENTIAL=<凭证>`）shell 会把尖括号当成重定向，那一行不会
 设置任何环境变量。手工填值时把整段用单引号括起来。
 
-**先问你的上游它有哪些模型 id。** 渠道的 `--models` 与别名的 `--upstream` 填的是
+**先问你的上游它有哪些模型 id。** 渠道的 `--models` 与
+`channel map add` 的上游模型名填的是
 **上游自己的 id**，不是它宣传页上的名字——这两者经常不一样：
 
 ```sh
@@ -815,41 +817,44 @@ stdout 只有新渠道的 ID，其余信息走 stderr。
 归属是分账的依据——商家作用域的计价规则按它匹配，结算时
 `req.OwnerUserID` 跟着渠道走进账本，而不是「他有没有资格」的判据。
 
-**三、配别名：这家上游对同一个模型叫什么名字。**
+**三、配出站映射：这家上游对同一个模型叫什么名字。**
 
 ```sh
-go run ./cmd/larkaxctl alias create --model claude-x \
-  --upstream claude-3-5-sonnet-latest
+go run ./cmd/larkaxctl channel map add --all-channels claude-x \
+  claude-3-5-sonnet-latest
 ```
 
-不带 `--channel` 的别名是平台级的，对所有渠道生效；带 `--channel <ID>` 的只对
-那个渠道生效，并盖过平台级那条。同一个范围里一个规范名只能有一个上游名。
+`--all-channels` 表示平台级映射，对所有渠道生效；换成渠道 ID
+（`channel map add <渠道> claude-x claude-3-5-sonnet-latest`）则只对那个渠道生效，
+并盖过平台级那条。同一个范围里一个规范名只能有一个上游名。旧写法
+`alias create --model … --upstream …` 仍可用，会在 stderr 上指向这里，
+保留一个发布周期。
 
-**请求时按「选中的那个渠道」翻译**，所以查不到别名时分两种，处置相反：
+**请求时按「选中的那个渠道」翻译**，所以查不到映射时分两种，处置相反：
 
-- **这个规范名一条别名都没配过** → 按同名发出。别名表表达的是「哪些模型的上游
-  叫法与规范名不同」，一条都没有的模型不在这个集合里。一条别名都没配的部署
+- **这个规范名一条映射都没配过** → 按同名发出。映射表表达的是「哪些模型的上游
+  叫法与规范名不同」，一条都没有的模型不在这个集合里。一条映射都没配的部署
   （最常见的那一类）不受影响。按同名发出去之后，上游若不认这个名字，
   调用方拿到的是 `502 upstream call failed`。
-- **配过、但没有一条覆盖选中的渠道** → 这次调用失败，返回 `500`。别名是逐渠道
+- **配过、但没有一条覆盖选中的渠道** → 这次调用失败，返回 `500`。映射是逐渠道
   配的，某个渠道漏了的时候静默按同名发出去，会表现为「上游说这个模型不存在」，
-  把排查方向指向上游。补一条渠道级别名、或者加一条平台级别名即可。
+  把排查方向指向上游。补一条渠道级映射、或者加一条平台级映射即可。
 
-后一种在升级时是**可见的行为变化**：升级前别名在请求路径上完全不生效，配了也
-白配；升级后它开始生效，于是「只给部分渠道配过别名」的规范名会在没配的那些
+后一种在升级时是**可见的行为变化**：升级前映射在请求路径上完全不生效，配了也
+白配；升级后它开始生效，于是「只给部分渠道配过映射」的规范名会在没配的那些
 渠道上失败。
 
 `larkaxctl alias resolve --model <名>` 回答的正是「这个规范名在某个渠道上
 实际会发出去什么名字」，它走的就是选路那同一条查询（见 `cmd/larkaxctl/alias.go`
 里 `runAliasResolve` 的注释）。不带 `--channel` 时只看平台级那条，所以「配了
-渠道级别名、没有平台级别名」时它会报错、退出码走「配置缺失」那一档。
+渠道级映射、没有平台级映射」时它会报错、退出码走「配置缺失」那一档。
 
-**别名上还能配一组参数覆盖**（`--overrides '<JSON 对象>'`）。它改的是**发往
+**映射上还能配一组参数覆盖**（`--overrides '<JSON 对象>'`）。它改的是**发往
 上游的那份请求**，用来给不传某些参数的调用方一个默认值，或者把某个上限钉住：
 
 ```sh
-go run ./cmd/larkaxctl alias create --model claude-x \
-  --upstream claude-3-5-sonnet-latest \
+go run ./cmd/larkaxctl channel map add --all-channels claude-x \
+  claude-3-5-sonnet-latest \
   --overrides '{"temperature": 0.2, "max_tokens": 4096}'
 ```
 
@@ -886,7 +891,7 @@ overrides 不允许覆盖 "messages"：它是调用方发来的正文（允许�
 `stream_balance_exhausted_total`），上限只决定冻结额的**封顶**——把上限调大通常
 不会让用户被冻住更多，调和它只影响一条真正产出很多、撞到封顶的流。
 
-覆盖与上游名来自**同一条别名行**：渠道级别名命中时用它那条的覆盖，不会回平台级
+覆盖与上游名来自**同一条映射行**：渠道级映射命中时用它那条的覆盖，不会回平台级
 那条上再凑一次。
 
 **四、配一条计价规则。** 没有生效的规则时请求会失败，而不是按零价放行。
@@ -934,7 +939,7 @@ go run ./cmd/larkaxctl price create --scope platform --name example-price --by a
 ```sh
 go run ./cmd/larkaxctl model list
 go run ./cmd/larkaxctl channel list
-go run ./cmd/larkaxctl alias list
+go run ./cmd/larkaxctl channel map list
 go run ./cmd/larkaxctl price list
 ```
 
@@ -1081,7 +1086,7 @@ curl -i 127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"claude-x","messages":[{"role":"user","content":"hi"}],"max_tokens":1024}'
 ```
 
-`"model"` 填的是第一步那条**规范名**（这里就是 `claude-x`），不是别名里的上游名
+`"model"` 填的是第一步那条**规范名**（这里就是 `claude-x`），不是映射里的上游名
 ——规范名是选路与计费共用的键。填成上游名会选不中任何渠道，回 `503`。
 
 `max_tokens` 是**必填**的，虽然 OpenAI 协议里它可选：预留必须有上界，而预留上界
@@ -1134,7 +1139,7 @@ go run ./cmd/larkaxctl doctor
 | 1 | 数据库连得上吗、迁移跑到哪一版 |
 | 2 | 有没有至少一条 enabled 且 `models` 非空的渠道 |
 | 3 | 渠道 `models` 里出现的每个名字都在 `model_catalog` 里吗 |
-| 4 | 配过别名的规范名有没有渠道接得住；可服务的规范名在每个服务它的渠道上能不能解析出上游名 |
+| 4 | 配过映射的规范名有没有渠道接得住；可服务的规范名在每个服务它的渠道上能不能解析出上游名 |
 | 5 | 可服务的规范名在每个服务它的渠道上都有生效的计价规则吗 |
 | 6 | 计价规则与成本规则的 `model_patterns` 里写到的名字都在模型目录里吗 |
 | 7 | 有用户吗、每个用户都有钱包行吗、有没有一个钱包余额大于 0 |
@@ -1322,9 +1327,9 @@ ingress 规则下。同一个端口上还有管理面 `/admin/v1/*`，用单独�
 
 | 子命令 | 做什么 |
 |---|---|
-| `channel` | 上游渠道：`create` / `list`（`--all` 含已删）/ `get`（单条详情）/ `health`（健康与窗口内的用量）/ `update` / `enable` / `disable` / `delete`（软删）/ `restore`（`delete` 的逆操作）/ `sync-models`（从上游拉一次模型清单并落库）/ `upstream-models`（读库里那一份清单与同步状态） |
+| `channel` | 上游渠道：`create` / `list`（`--all` 含已删）/ `get`（单条详情）/ `health`（健康与窗口内的用量）/ `update` / `enable` / `disable` / `delete`（软删）/ `restore`（`delete` 的逆操作）/ `sync-models`（从上游拉一次模型清单并落库）/ `upstream-models`（读库里那一份清单与同步状态）；出站映射：`map`（`add` / `list` / `remove`） |
 | `model` | 模型目录：`create` / `list` / `get` / `update` / `delete` |
-| `alias` | 规范模型名到上游模型名的映射：`create` / `list` / `update` / `delete` / `resolve` |
+| `alias` | 规范模型名到上游模型名的映射（旧入口，配置改用 `channel map`）：`create` / `list` / `update` / `delete` / `resolve` |
 | `price` | 计价规则：`create` / `list` / `show` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `list`） |
 | `upstream-cost` | 上游成本规则（每条渠道每个模型按生效窗口与优先级挑一条）：`create` / `list` / `update` / `disable` |
 | `user` | 用户：`create` / `list` / `get` / `update`；口令：`password` / `unlock`；销户：`delete`（`request` 打标可撤 / `revert` 撤回 / `purge` 匿名化，不可逆）；用户级履约操作：`plan`（`grant` 发放 / `list` 订阅 / `void` 作废 / `order` 扣费顺序的 `show` / `set`）、`wallet`（`show` / `credit` / `adjust` / `refund`）、`key`（`list` / `create` / `plans` 的 `show` / `set`）、`usage`（`events` / `requests`） |

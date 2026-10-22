@@ -194,10 +194,10 @@ stderr 上，stdout 只留值。于是 `larkaxctl channel update --id 3 | head -
 - **退出码不变**。`-q` 只影响写不写，不影响算什么。
 
 `--verbose` 是它的反面。两个一起给报参数错（退出码 2）而不是「后者赢」：它们要的
-是相反的东西，安静地采纳一个会让另一个看起来没生效。它有两处用处：`doctor` 与
-`partition check` 用它多打一段每项的细节，`settings list` / `snapshot redact` /
-`secret rotate --apply` 用它承放**默认输出里不该有的解释**（见「提示与警告」）；
-其余命令接受它但不使用。
+是相反的东西，安静地采纳一个会让另一个看起来没生效。它有两处用处：`doctor`、
+`partition check` 与 `price calendar list` 用它多打一段每项的细节，`settings list` /
+`snapshot redact` / `secret rotate --apply` / `alias resolve` 用它承放**默认输出里
+不该有的解释**（见「提示与警告」）；其余命令接受它但不使用。
 
 ## 机器可读输出
 
