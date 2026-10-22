@@ -978,8 +978,10 @@ func TestSuppliesForReturnsOnlyThatModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SuppliesFor 出错: %v", err)
 	}
-	// 行序按渠道编号，与整表查询按模型过滤之后的行序相同：报价在「同价折成
-	// 一行」时取编号最小的渠道那条规则，顺序一变，报出来的规则就变了。
+	// 行序按渠道编号，与整表查询按模型过滤之后的行序相同：断言要固定的是
+	// 「不依赖调用方顺序」。报价那一侧的输出来自它自己的
+	// `ORDER BY q.model, q.channel_id`（internal/pricing），与 handler 传入的
+	// 候选顺序无关。
 	if len(got) != 2 {
 		t.Fatalf("SuppliesFor(%q) = %+v，期望两条（别的模型与禁用的渠道都不算）", model, got)
 	}

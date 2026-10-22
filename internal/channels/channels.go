@@ -187,8 +187,10 @@ func (s *Source) Supplies(ctx context.Context) ([]Supply, error) {
 // suppliesModel 给出，两条路径不会出现「清单里有、模型页说没有」。排序按
 // 渠道编号，与整表查询按模型过滤之后的行序相同。
 //
-// 单模型页走这一条：它是公开、无会话的读点，成本不该随目录与渠道的总数
-// 增长，也不该能靠逐个枚举模型放大。
+// 单模型页走这一条：它是公开、无会话的读点。`WHERE` 去掉了目录那一维
+// （`canonical_name` 上有唯一索引），所以成本不再随目录规模增长；渠道侧
+// 仍是一次扫描——判据 suppliesModel 没变，`channels(models)` 上没有 GIN
+// 索引，`c.models @> ARRAY[…]` 仍要扫一遍渠道。
 func (s *Source) SuppliesFor(ctx context.Context, model string) ([]Supply, error) {
 	return s.querySupplies(ctx, ` WHERE m.canonical_name = $1 ORDER BY c.id`, model)
 }

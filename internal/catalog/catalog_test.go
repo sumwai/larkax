@@ -99,7 +99,7 @@ func TestNormalizeCanonicalNameSharesLenientBase(t *testing.T) {
 // 宽松版只放宽路径段：空白、空串与控制字符照拒。Delete 认的是一个存量
 // 标识符，不是「现在能不能写进去」。
 func TestNormalizeExistingCanonicalNameStillRejectsShapeErrors(t *testing.T) {
-	for _, input := range []string{"", "   ", "a b"} {
+	for _, input := range []string{"", "   ", "a b", "a\x1b[31mb"} {
 		if got, err := normalizeExistingCanonicalName(input); err == nil {
 			t.Errorf("normalizeExistingCanonicalName(%q) = %q，期望报错", input, got)
 		}
