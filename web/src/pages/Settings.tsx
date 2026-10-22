@@ -63,6 +63,10 @@ export function AccountSections() {
         email: trimmedEmail || null,
       })
       setUser(updated)
+      // 这两格也要换成服务端回传的值：提交时去掉了首尾空格，本地若还留着原值，
+      // 基准值虽然换了，比较的两边仍然不等——提示已保存，跳转却照样被拦。
+      setDisplayName(updated.display_name ?? '')
+      setEmail(updated.email ?? '')
       toast(t('settings.profileSaved'))
     } catch {
       setProfileError(t('settings.profileFailed'))

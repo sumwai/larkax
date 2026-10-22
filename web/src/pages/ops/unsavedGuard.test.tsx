@@ -120,7 +120,7 @@ function TestForm() {
   )
 }
 
-function mountForm() {
+function mountForm(initialEntries: string[] = ['/form'], initialIndex = initialEntries.length - 1) {
   const router = createMemoryRouter(
     [
       {
@@ -136,7 +136,7 @@ function mountForm() {
         ],
       },
     ],
-    { initialEntries: ['/form'] },
+    { initialEntries, initialIndex },
   )
   render(
     <I18nProvider>
@@ -164,7 +164,7 @@ describe('未保存改动的两个出口', () => {
     fireEvent.click(screen.getByRole('link', { name: '去别处' }))
 
     const dialog = await screen.findByRole('dialog', { name: '放弃未保存的修改？' })
-    expect(dialog).toHaveTextContent('关掉之后，这一页填的内容不会保留。')
+    expect(dialog).toHaveTextContent('关掉或离开这一页之后，填的内容不会保留。')
     // 「拦住了」的判据是地址没变，不是某个 mock 被调用。
     expect(router.state.location.pathname).toBe('/form')
     expect(screen.queryByRole('heading', { name: '别的页面' })).not.toBeInTheDocument()
@@ -182,6 +182,24 @@ describe('未保存改动的两个出口', () => {
     expect(screen.getByLabelText('字段')).toHaveValue('改了')
   })
 
+  it('选「留下」之后再点同一个链接：照样拦，地址仍不变', async () => {
+    const router = dirtyForm()
+    fireEvent.click(screen.getByRole('link', { name: '去别处' }))
+    const first = await screen.findByRole('dialog', { name: '放弃未保存的修改？' })
+
+    fireEvent.click(within(first).getByRole('button', { name: '取消' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(router.state.location.pathname).toBe('/form')
+
+    // 作废的只是这一次跳转；阻止器要回到待命，下一次跳转仍得经过它。
+    // 少了这一步复位，下面这行会被静默吞掉——没有框、也没有报错。
+    fireEvent.click(screen.getByRole('link', { name: '去别处' }))
+    const second = await screen.findByRole('dialog', { name: '放弃未保存的修改？' })
+    expect(second).toHaveTextContent('关掉或离开这一页之后，填的内容不会保留。')
+    expect(router.state.location.pathname).toBe('/form')
+    expect(screen.queryByRole('heading', { name: '别的页面' })).not.toBeInTheDocument()
+  })
+
   it('选「放弃修改」：这才跳走', async () => {
     const router = dirtyForm()
     fireEvent.click(screen.getByRole('link', { name: '去别处' }))
@@ -189,6 +207,21 @@ describe('未保存改动的两个出口', () => {
 
     fireEvent.click(within(dialog).getByRole('button', { name: '放弃修改' }))
 
+    expect(await screen.findByRole('heading', { name: '别的页面' })).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/elsewhere')
+  })
+
+  it('后退（POP）也拦：地址不变，选「放弃修改」才真的退', async () => {
+    // 前进/后退走的是 POP，与点链接（PUSH）不是同一条判定；这条盯住 POP。
+    const router = mountForm(['/elsewhere', '/form'], 1)
+    fireEvent.change(screen.getByLabelText('字段'), { target: { value: '改了' } })
+
+    void router.navigate(-1)
+    const dialog = await screen.findByRole('dialog', { name: '放弃未保存的修改？' })
+    expect(router.state.location.pathname).toBe('/form')
+    expect(screen.queryByRole('heading', { name: '别的页面' })).not.toBeInTheDocument()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '放弃修改' }))
     expect(await screen.findByRole('heading', { name: '别的页面' })).toBeInTheDocument()
     expect(router.state.location.pathname).toBe('/elsewhere')
   })
@@ -397,6 +430,27 @@ describe('四处弹窗表单与整页表单接的是同一层', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存账户信息' }))
     // 等保存落地：`setUser` 换了基准值，脏状态才归零。
     expect(await screen.findByText('账户信息已保存。')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('link', { name: '去别处' }))
+    expect(await screen.findByRole('heading', { name: '别的页面' })).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/elsewhere')
+  })
+
+  it('设置页保存的是去掉空格后的值：之后跳转与刷新都不拦', async () => {
+    // 提交的是 trim 过的值，服务端也回传 trim 过的；本地那两格若还留着空格，
+    // 就会一直被算成「改过」——提示已保存，随后每次跳转仍弹框。
+    mocks.updateMe.mockResolvedValue({ ...USER, display_name: '换了个名字' })
+    const router = mountPage(
+      <Gate>
+        <Settings />
+      </Gate>,
+      '/app/settings',
+    )
+    fireEvent.change(await screen.findByLabelText('显示名'), { target: { value: ' 换了个名字 ' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存账户信息' }))
+    expect(await screen.findByText('账户信息已保存。')).toBeInTheDocument()
+
+    expect(dispatchBeforeUnload().defaultPrevented).toBe(false)
 
     fireEvent.click(screen.getByRole('link', { name: '去别处' }))
     expect(await screen.findByRole('heading', { name: '别的页面' })).toBeInTheDocument()
