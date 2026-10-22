@@ -1,12 +1,16 @@
-import { useState, type FormEvent } from 'react'
-import { api } from '../../api'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { ApiError, api } from '../../api'
 import type {
   Channel,
+  ChannelAdapter,
   ChannelCreateInput,
   ChannelOpsClient,
+  ChannelProbeInput,
+  ChannelProbeResult,
   ChannelUpdateInput,
 } from '../../api/types'
 import { useI18n } from '../../i18n'
+import type { MessageKey } from '../../i18n/zh'
 import { useSite } from '../../site/SiteProvider'
 import { useAsync } from '../../hooks/useAsync'
 import { useIsCompact } from '../../hooks/useMediaQuery'
@@ -50,6 +54,42 @@ const EMPTY_FORM: ChannelForm = {
   owner: '0',
 }
 
+type Translate = (key: MessageKey, vars?: Record<string, string | number>) => string
+
+/**
+ * 把一次探测的失败翻成一句人话。
+ *
+ * 502 底下几种成因的处置不同（连不上 / 太大 / 上游报错），状态码相同但要说的
+ * 不是同一句话；504 是「慢」不是「坏」，与 502 分开写。
+ *
+ * 503 不给单一原因：服务端在这一格下有两种来源（本实例没配主密钥、探测用适配器
+ * 装配失败），都只有状态码没有机器码，前端分不出来。所以这里说「稍后重试」并把
+ * 两种可能并列，不替服务端断言是哪一种。
+ */
+function probeErrorText(error: unknown, t: Translate): string {
+  if (!(error instanceof ApiError)) {
+    const message = error instanceof Error ? error.message : String(error)
+    return t('ops.channel.probeFailed', { message })
+  }
+  if (error.status === 502) {
+    if (error.code === 'upstream_unreachable') return t('ops.channel.probeUnreachable')
+    if (error.code === 'upstream_response_too_large') return t('ops.channel.probeTooLarge')
+    return t('ops.channel.probeUpstream', { message: error.message })
+  }
+  switch (error.status) {
+    case 400:
+      return t('ops.channel.probeBadRequest', { message: error.message })
+    case 404:
+      return t('ops.channel.probeNotFound')
+    case 503:
+      return t('ops.channel.probeUnavailable')
+    case 504:
+      return t('ops.channel.probeTimeout')
+    default:
+      return t('ops.channel.probeFailed', { message: error.message })
+  }
+}
+
 /**
  * 渠道列表与编辑。
  *
@@ -67,6 +107,12 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
     () => (scope === 'admin' ? api.admin.listModels() : Promise.resolve([])),
     [scope],
   )
+  // 适配器清单只给管理员：商家配的是自己的上游账号，不选平台适配器，这一页
+  // 在商家视图下仍是手填类型。
+  const adapters = useAsync(
+    () => (scope === 'admin' ? client.listAdapters() : Promise.resolve<ChannelAdapter[]>([])),
+    [scope],
+  )
   const confirm = useConfirm()
 
   const compact = useIsCompact()
@@ -79,11 +125,40 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
   // 打开时的那份值：改动过的话，关窗前要再问一句。
   const [initialForm, setInitialForm] = useState<ChannelForm>(EMPTY_FORM)
   const [formError, setFormError] = useState<string | null>(null)
+  // 探测：清单、失败文案、进行中与 429 的倒计时。清单只用来渲染可勾选项，
+  // 提交体仍由 `form.models` 这一份文本决定（见 toggleModel）。
+  const [probe, setProbe] = useState<ChannelProbeResult | null>(null)
+  const [probeError, setProbeError] = useState<string | null>(null)
+  const [probing, setProbing] = useState(false)
+  const [cooldown, setCooldown] = useState(0)
+  // 429 但没给 `Retry-After`：只知道「现在别来」，不知道等多久。这时禁用按钮、
+  // 不编一个秒数，重开表单才解除——编出来的倒计时会和真实限制对不上。
+  const [rateLimited, setRateLimited] = useState(false)
+
+  useEffect(() => {
+    if (cooldown <= 0) return
+    const timer = setTimeout(() => setCooldown((seconds) => seconds - 1), 1000)
+    return () => clearTimeout(timer)
+  }, [cooldown])
+
+  // 每发起一次探测、每重置一次都递增；回来的结果只有序号还对得上才写进状态。
+  // 否则「探测途中关掉表单、再打开另一张」会把上一次的结果画到新表单上。
+  const probeSeq = useRef(0)
+
+  const resetProbe = () => {
+    probeSeq.current += 1
+    setProbe(null)
+    setProbeError(null)
+    setProbing(false)
+    setCooldown(0)
+    setRateLimited(false)
+  }
 
   const openCreate = () => {
     setForm(EMPTY_FORM)
     setInitialForm(EMPTY_FORM)
     setFormError(null)
+    resetProbe()
     setCreating(true)
   }
 
@@ -101,6 +176,7 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
     setForm(next)
     setInitialForm(next)
     setFormError(null)
+    resetProbe()
     setEditing(channel)
   }
 
@@ -108,9 +184,54 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
     setCreating(false)
     setEditing(null)
     setFormError(null)
+    resetProbe()
   }
 
   const requestClose = useCloseGuard(confirm, isDirty(form, initialForm), closeForm)
+
+  // 勾选状态就是 `form.models` 里的那些行：勾上写一行、取消删一行。
+  // 再次探测只替换可选项清单（`probe`），不碰 `form.models`——已勾选因此不会
+  // 因为清单变了而丢；手填的行也在这同一份文本里。
+  const selectedModels = linesToList(form.models)
+  const toggleModel = (model: string, checked: boolean) => {
+    const next = checked
+      ? selectedModels.includes(model)
+        ? selectedModels
+        : [...selectedModels, model]
+      : selectedModels.filter((item) => item !== model)
+    setForm({ ...form, models: listToLines(next) })
+  }
+
+  const runProbe = async () => {
+    const baseURL = form.base_url.trim()
+    if (!baseURL) return
+    const seq = ++probeSeq.current
+    setProbing(true)
+    setProbeError(null)
+    // 编辑态带上 channel_id：类型取库里那一行（界面也把类型锁住了），地址与
+    // 凭证用表单上的新值覆盖。创建态没有 id，类型就是选择器里选的那个。
+    const input: ChannelProbeInput = editing
+      ? { channel_id: editing.id, base_url: baseURL }
+      : { type: form.type.trim(), base_url: baseURL }
+    if (form.credential.trim()) input.credential = form.credential.trim()
+    try {
+      const result = await client.probeModels(input)
+      if (seq === probeSeq.current) setProbe(result)
+    } catch (error) {
+      if (seq !== probeSeq.current) return
+      setProbe(null)
+      // 429 单独处理：带 `Retry-After` 就按服务端给的秒数倒计时；没带就只禁用、
+      // 说明「请稍后再试」，不编一个数——倒计时必须是服务端说的那个。
+      if (error instanceof ApiError && error.status === 429) {
+        if (error.retryAfter !== null) setCooldown(error.retryAfter)
+        else setRateLimited(true)
+        return
+      }
+      setProbeError(probeErrorText(error, t))
+    } finally {
+      if (seq === probeSeq.current) setProbing(false)
+    }
+  }
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
@@ -350,13 +471,42 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
                 onChange={(event) => setForm({ ...form, name: event.target.value })}
               />
             </Field>
-            <Field label={t('ops.channel.type')}>
-              <input
-                className="input"
-                value={form.type}
-                onChange={(event) => setForm({ ...form, type: event.target.value })}
-              />
-            </Field>
+            {scope === 'admin' && (adapters.error || adapters.data?.length === 0) && (
+              <Alert tone="warn" title={t('ops.channel.adaptersUnavailable')} />
+            )}
+            {scope === 'admin' && !editing && adapters.data && adapters.data.length > 0 ? (
+              <Field label={t('ops.channel.type')}>
+                <select
+                  className="input"
+                  value={form.type}
+                  onChange={(event) => setForm({ ...form, type: event.target.value })}
+                >
+                  {adapters.data.map((adapter) => (
+                    <option key={adapter.type} value={adapter.type}>
+                      {t('ops.channel.adapterOption', {
+                        type: adapter.type,
+                        endpoint: adapter.endpoint,
+                      })}
+                    </option>
+                  ))}
+                  {form.type && !adapters.data.some((adapter) => adapter.type === form.type) && (
+                    <option value={form.type}>{form.type}</option>
+                  )}
+                </select>
+              </Field>
+            ) : (
+              <Field
+                label={t('ops.channel.type')}
+                hint={editing ? t('ops.channel.typeLocked') : undefined}
+              >
+                <input
+                  className="input"
+                  value={form.type}
+                  disabled={Boolean(editing)}
+                  onChange={(event) => setForm({ ...form, type: event.target.value })}
+                />
+              </Field>
+            )}
             <Field label={t('ops.channel.baseURL')}>
               <input
                 className="input"
@@ -364,6 +514,27 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
                 onChange={(event) => setForm({ ...form, base_url: event.target.value })}
               />
             </Field>
+            {scope === 'admin' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={!form.base_url.trim() || probing || cooldown > 0 || rateLimited}
+                  onClick={() => void runProbe()}
+                >
+                  {probing ? t('ops.channel.probing') : t('ops.channel.probe')}
+                </Button>
+                {cooldown > 0 && (
+                  <span className="hint">
+                    {t('ops.channel.probeCooldown', { seconds: cooldown })}
+                  </span>
+                )}
+                {rateLimited && (
+                  <span className="hint">{t('ops.channel.probeRateLimited')}</span>
+                )}
+              </div>
+            )}
             <Field
               label={t('ops.channel.credential')}
               hint={editing ? t('ops.channel.credentialKeep') : undefined}
@@ -377,6 +548,47 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
                 onChange={(event) => setForm({ ...form, credential: event.target.value })}
               />
             </Field>
+            {scope === 'admin' && probeError && <Alert tone="bad" title={probeError} />}
+            {scope === 'admin' && probe && !probe.supported && (
+              <p className="hint">{t('ops.channel.probeUnsupported')}</p>
+            )}
+            {scope === 'admin' && probe && probe.supported && probe.models.length === 0 && (
+              <p className="hint">{t('ops.channel.probeEmpty')}</p>
+            )}
+            {scope === 'admin' && probe && probe.supported && probe.models.length > 0 && (
+              <fieldset
+                style={{
+                  border: '1px solid var(--line, #e5e7eb)',
+                  borderRadius: 8,
+                  padding: '8px 10px',
+                  margin: 0,
+                }}
+              >
+                <legend className="tiny">{t('ops.channel.probePick')}</legend>
+                <div style={{ display: 'grid', gap: 6, maxHeight: 220, overflowY: 'auto' }}>
+                  {probe.models.map((model) => (
+                    <label key={model} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedModels.includes(model)}
+                        onChange={(event) => toggleModel(model, event.target.checked)}
+                      />
+                      <span className="mono" style={{ overflowWrap: 'anywhere' }}>
+                        {model}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                {probe.truncated && (
+                  <p className="hint">
+                    {t('ops.channel.probeTruncated', {
+                      total: probe.total,
+                      shown: probe.models.length,
+                    })}
+                  </p>
+                )}
+              </fieldset>
+            )}
             <Field label={t('ops.channel.models')} hint={knownModels && t('ops.channel.knownModels', { models: knownModels })}>
               <textarea
                 className="input"

@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ApiError, HttpApiClient } from './client'
 
-function jsonResponse(status: number, body: unknown): Response {
+function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return {
     status,
     ok: status >= 200 && status < 300,
     statusText: status === 204 ? 'No Content' : String(status),
     json: async () => body,
+    headers: new Headers(headers),
   } as unknown as Response
 }
 
@@ -86,6 +87,22 @@ describe('HttpApiClient 的 CSRF 头', () => {
     await client.modelDetail('acme/weird?name#1 %2')
     const [url] = fetchImpl.mock.calls[0]
     expect(url).toBe('/api/v1/models/acme/weird%3Fname%231%20%252')
+  })
+})
+
+describe('HttpApiClient 的 429', () => {
+  it('把 Retry-After 解析成整数秒', async () => {
+    const { client } = makeClient(
+      jsonResponse(429, { error: { code: 'rate_limited', message: 'slow down' } }, { 'Retry-After': '7' }),
+    )
+    await expect(client.models()).rejects.toMatchObject({ status: 429, retryAfter: 7 })
+  })
+
+  it('没有这个头时 retryAfter 是 null，不瞎猜', async () => {
+    const { client } = makeClient(
+      jsonResponse(429, { error: { code: 'rate_limited', message: 'slow down' } }),
+    )
+    await expect(client.models()).rejects.toMatchObject({ status: 429, retryAfter: null })
   })
 })
 

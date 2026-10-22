@@ -699,6 +699,41 @@ export interface CostUpdateInput {
 }
 
 /**
+ * 渠道表单可选的上游适配器。
+ *
+ * 来自服务端的适配器注册表，与建渠道时的类型校验同一份来源；`endpoint` 是
+ * 这类适配器把请求发到哪条路径。
+ */
+export interface ChannelAdapter {
+  type: string
+  protocol: string
+  endpoint: string
+}
+
+/**
+ * 一次模型探测的输入。
+ *
+ * 给 `channel_id` 时类型、地址、凭证都从库里那一行取；`base_url` 与
+ * `credential` 非空则覆盖（编辑中的表单还没保存）。不给 `channel_id` 时
+ * `type` 与 `base_url` 必填，`credential` 可以为空（无鉴权的自建上游）。
+ */
+export interface ChannelProbeInput {
+  channel_id?: number
+  type?: string
+  base_url?: string
+  credential?: string
+}
+
+/** 探测结果：`models` 已去重升序；`total` 是截断之前的条数。 */
+export interface ChannelProbeResult {
+  /** false 表示上游没有「列出模型」这个能力，不是失败。 */
+  supported: boolean
+  models: string[]
+  total: number
+  truncated: boolean
+}
+
+/**
  * 渠道的读写口，两个前缀都有。
  *
  * admin 与 merchant 的路径形状相同，JSON 逐字对齐 `internal/adminapi/resources.go`。
@@ -709,6 +744,10 @@ export interface ChannelOpsClient {
   getChannel(id: number): Promise<Channel>
   createChannel(input: ChannelCreateInput): Promise<number>
   updateChannel(id: number, input: ChannelUpdateInput): Promise<void>
+  /** 渠道表单里可选的适配器；顺序由服务端定（按类型升序）。 */
+  listAdapters(): Promise<ChannelAdapter[]>
+  /** 拿一份地址与凭证向上游问一次模型清单。不落库。 */
+  probeModels(input: ChannelProbeInput): Promise<ChannelProbeResult>
 }
 
 /**

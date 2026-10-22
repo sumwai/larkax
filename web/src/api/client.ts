@@ -9,8 +9,10 @@ import type {
   ApiErrorBody,
   ApiKey,
   Channel,
+  ChannelAdapter,
   ChannelAlias,
   ChannelOpsClient,
+  ChannelProbeResult,
   ChannelCreateInput,
   ChannelUpdateInput,
   CostCreateInput,
@@ -55,13 +57,20 @@ export class ApiError extends Error {
   readonly status: number
   readonly code: string
   readonly requestId: string
+  /**
+   * 429 上的 `Retry-After`，整数秒；没有这个头（或不是非负数）时为 null。
+   *
+   * 限流的等待时长只有服务端知道，界面按它倒计时，不自己猜一个秒数。
+   */
+  readonly retryAfter: number | null
 
-  constructor(status: number, code: string, message: string, requestId = '') {
+  constructor(status: number, code: string, message: string, requestId = '', retryAfter: number | null = null) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
     this.requestId = requestId
+    this.retryAfter = retryAfter
   }
 }
 
@@ -92,6 +101,19 @@ function buildUrl(
 }
 
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
+/**
+ * 读 429 的 `Retry-After`。
+ *
+ * 服务端只发整数秒（HTTP-date 形态在这一侧用不到），所以非数字或负数一律当
+ * 「没给」——宁可让界面说「稍后再试」，也不要拿一个解析失败的数去倒计时。
+ */
+function parseRetryAfter(response: Response): number | null {
+  const raw = response.headers.get('Retry-After')
+  if (raw === null || raw.trim() === '') return null
+  const seconds = Number(raw)
+  return Number.isInteger(seconds) && seconds >= 0 ? seconds : null
+}
 
 export interface HttpApiOptions {
   baseUrl?: string
@@ -220,6 +242,13 @@ export class HttpApiClient implements ApiClient {
       updateChannel: async (id, input: ChannelUpdateInput) => {
         await this.request(`${prefix}/channels/${id}`, { method: 'PATCH', body: input })
       },
+      listAdapters: () =>
+        this.request<{ items: ChannelAdapter[] }>(`${prefix}/adapters`).then((body) => body.items),
+      probeModels: (input) =>
+        this.request<ChannelProbeResult>(`${prefix}/channels/probe-models`, {
+          method: 'POST',
+          body: input,
+        }),
     }
   }
 
@@ -269,6 +298,7 @@ export class HttpApiClient implements ApiClient {
         error?.code ?? 'http_error',
         error?.message ?? (response.statusText || 'request failed'),
         error?.request_id,
+        parseRetryAfter(response),
       )
     }
 
