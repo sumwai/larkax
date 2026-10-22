@@ -242,7 +242,7 @@ export function Overview() {
         ) : requests.data ? (
           <>
             <div className="table table-desktop">
-              <div className="thead requests-head" style={{ display: 'grid' }}>
+              <div className="thead requests-head">
                 <span>{t('overview.time')}</span>
                 <span>{t('overview.model')}</span>
                 <span>{t('overview.key')}</span>
@@ -306,7 +306,7 @@ export function Overview() {
         ) : entries.data ? (
           <>
             <div className="table table-desktop">
-              <div className="thead entries-head" style={{ display: 'grid' }}>
+              <div className="thead entries-head">
                 <span>{t('overview.time')}</span>
                 <span>{t('overview.entryType')}</span>
                 <span>{t('overview.entryMemo')}</span>

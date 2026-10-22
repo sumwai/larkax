@@ -268,7 +268,7 @@ export function AdminUsers() {
           {/* 行与列的关系要说给读屏听：`.thead` / `.trow` 是 div 网格，没有这些
               角色时读屏拿到的是一串扁平文本。翻页按钮放在表外，它不是一行。 */}
           <div role="table" aria-label={t('ops.users.title')}>
-            <div className="thead users-head" role="row" style={{ display: 'grid' }}>
+            <div className="thead users-head" role="row">
               <span role="columnheader">{t('ops.users.colUser')}</span>
               <span role="columnheader">{t('ops.users.colEmail')}</span>
               <span role="columnheader">{t('ops.users.colRole')}</span>

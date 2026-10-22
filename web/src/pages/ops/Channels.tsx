@@ -257,7 +257,7 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
 
       {channels.length > 0 && !compact && (
         <section className="card table ops-table" aria-label={t('ops.channel.title')}>
-          <div className="thead channel-head" style={{ display: 'grid' }}>
+          <div className="thead channel-head">
             <span>{t('ops.channel.colName')}</span>
             <span>{t('ops.channel.colType')}</span>
             <span>{t('ops.channel.colModels')}</span>
