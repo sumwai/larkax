@@ -114,6 +114,22 @@ func (s *Store) Create(ctx context.Context, o Order) (Order, bool, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	stored, applied, err := s.CreateTx(ctx, tx, o)
+	if err != nil {
+		return Order{}, false, err
+	}
+	if commitErr := tx.Commit(); commitErr != nil {
+		return Order{}, false, fmt.Errorf("提交支付单 %s 失败: %w", o.OrderNo, commitErr)
+	}
+	return stored, applied, nil
+}
+
+// CreateTx 在调用方给的事务里落一张新的支付单，**不提交、不回滚**。
+//
+// 除事务边界外，语义与 Create 逐条相同：同一份 SQL、同一条重放/冲突判据。
+// 预览（`wallet payment create --dry-run`）用它把那一行走一遍再回滚，于是预览
+// 里的字段与真跑同源，而不是另写一份读侧模拟。
+func (s *Store) CreateTx(ctx context.Context, tx *sql.Tx, o Order) (Order, bool, error) {
 	var id int64
 	insertErr := tx.QueryRowContext(ctx, `
 		INSERT INTO payment_orders (order_no, user_id, gateway, asset, amount, fee, status, gateway_raw)
@@ -128,9 +144,6 @@ func (s *Store) Create(ctx context.Context, o Order) (Order, bool, error) {
 		stored, readErr := getOrder(ctx, tx, o.OrderNo)
 		if readErr != nil {
 			return Order{}, false, fmt.Errorf("读回刚写的支付单 %s 失败: %w", o.OrderNo, readErr)
-		}
-		if commitErr := tx.Commit(); commitErr != nil {
-			return Order{}, false, fmt.Errorf("提交支付单 %s 失败: %w", o.OrderNo, commitErr)
 		}
 		return stored, true, nil
 	}
@@ -154,10 +167,15 @@ func (s *Store) Create(ctx context.Context, o Order) (Order, bool, error) {
 			stored.UserID, stored.Gateway, stored.Amount, stored.Asset,
 			o.UserID, o.Gateway, o.Amount, o.Asset)
 	}
-	if err := tx.Commit(); err != nil {
-		return Order{}, false, fmt.Errorf("提交支付单 %s 失败: %w", o.OrderNo, err)
-	}
 	return stored, false, nil
+}
+
+// BeginTx 在支付单库上开一个事务，给「写完就回滚」的预览路径用。
+//
+// 预览也要走 CreateTx 那条写路径（同一份 SQL 与判据），它需要一个事务来装；
+// 由 Store 开而不是把 *sql.DB 交出去，是为了不让调用方绕开这一层直接写表。
+func (s *Store) BeginTx(ctx context.Context) (*sql.Tx, error) {
+	return s.db.BeginTx(ctx, nil)
 }
 
 // WithOrderLock 在同一个单号上串行执行 fn。

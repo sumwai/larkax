@@ -57,23 +57,9 @@ type CreateResult struct {
 // 先问通道、再落库：单号是我们给通道的，通道按它做幂等；落库失败时那张单子
 // 在通道侧仍然存在，重跑同一个单号会回到这里并补上本地这一行。
 func (s *Service) Create(ctx context.Context, channelName string, req CreateOrderRequest) (CreateResult, error) {
-	channel, err := s.channel(channelName)
+	channel, err := s.prepareCreate(ctx, channelName, req)
 	if err != nil {
 		return CreateResult{}, err
-	}
-	if validErr := validateCreateOrder(req); validErr != nil {
-		return CreateResult{}, validErr
-	}
-	// 钱包必须先存在：账本写入时缺这一行会失败，而那时通知已经到过一次，
-	// 通道看到 500 还会重发。在下单这一步先拦住，报的也是同一档（缺一行）。
-	hasWallet, walletErr := s.orders.WalletExists(ctx, req.UserID, req.Asset)
-	if walletErr != nil {
-		return CreateResult{}, walletErr
-	}
-	if !hasWallet {
-		return CreateResult{}, fmt.Errorf(
-			"%w: 用户 %d 还没有 %s 钱包——先 larkaxctl wallet create；回调入账要求钱包已经存在",
-			store.ErrNoWallet, req.UserID, req.Asset)
 	}
 
 	created, err := channel.CreateOrder(ctx, req)
@@ -90,19 +76,78 @@ func (s *Service) Create(ctx context.Context, channelName string, req CreateOrde
 			"通道 %s 返回的单号 %q 与下单时的 %q 不一致", channel.Name(), created.OrderNo, req.OrderNo)
 	}
 
-	order, applied, err := s.orders.Create(ctx, Order{
+	order, applied, err := s.orders.Create(ctx, orderForCreate(req, channel, created.Raw))
+	if err != nil {
+		return CreateResult{}, err
+	}
+	return CreateResult{Order: order, Created: created, Applied: applied}, nil
+}
+
+// CreatePreview 是 create 的干跑：走与 Create 相同的前置校验与本地落库，
+// 但**不向通道下单、不提交**。
+//
+// 不下单是刻意的：通道侧建单是一个真实的外发动作，干跑不能留下它；代价是预览
+// 里没有通道回的支付地址（Created 的零值），调用方要把它打出来说明这一点。
+// 本地那一行仍然在事务里插一遍再回滚——字段（单号、用户、通道、资产、金额、
+// 状态）与真跑同源，重放/冲突的判定也是同一条 SQL，所以预览不会出现
+// 「预览说能下、真跑报冲突」。
+func (s *Service) CreatePreview(ctx context.Context, channelName string, req CreateOrderRequest) (CreateResult, error) {
+	channel, err := s.prepareCreate(ctx, channelName, req)
+	if err != nil {
+		return CreateResult{}, err
+	}
+
+	tx, err := s.orders.BeginTx(ctx)
+	if err != nil {
+		return CreateResult{}, fmt.Errorf("开启预览事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	order, applied, err := s.orders.CreateTx(ctx, tx, orderForCreate(req, channel, nil))
+	if err != nil {
+		return CreateResult{}, err
+	}
+	return CreateResult{Order: order, Applied: applied}, nil
+}
+
+// prepareCreate 是 Create 与 CreatePreview 共用的前置检查：通道存在、请求合法、
+// 钱包已存在。两份各写一遍的话，补上的一项校验迟早只落在其中一条路上，而干跑
+// 漏掉的那一格正是「预览说能下、真跑报错」的来源。
+func (s *Service) prepareCreate(ctx context.Context, channelName string, req CreateOrderRequest) (Channel, error) {
+	channel, err := s.channel(channelName)
+	if err != nil {
+		return nil, err
+	}
+	if validErr := validateCreateOrder(req); validErr != nil {
+		return nil, validErr
+	}
+	// 钱包必须先存在：账本写入时缺这一行会失败，而那时通知已经到过一次，
+	// 通道看到 500 还会重发。在下单这一步先拦住，报的也是同一档（缺一行）。
+	hasWallet, walletErr := s.orders.WalletExists(ctx, req.UserID, req.Asset)
+	if walletErr != nil {
+		return nil, walletErr
+	}
+	if !hasWallet {
+		return nil, fmt.Errorf(
+			"%w: 用户 %d 还没有 %s 钱包——先 larkaxctl wallet create；回调入账要求钱包已经存在",
+			store.ErrNoWallet, req.UserID, req.Asset)
+	}
+	return channel, nil
+}
+
+// orderForCreate 把一次下单翻译成 payment_orders 那一行。
+//
+// raw 是通道建单的原始返回：真跑给通道的那一份，干跑给 nil（没有问通道）。
+func orderForCreate(req CreateOrderRequest, channel Channel, raw []byte) Order {
+	return Order{
 		OrderNo:    req.OrderNo,
 		UserID:     req.UserID,
 		Gateway:    channel.Name(),
 		Asset:      req.Asset,
 		Amount:     req.Amount,
 		Status:     StatusCreated,
-		GatewayRaw: created.Raw,
-	})
-	if err != nil {
-		return CreateResult{}, err
+		GatewayRaw: raw,
 	}
-	return CreateResult{Order: order, Created: created, Applied: applied}, nil
 }
 
 // NotificationResult 是一次通知的处理结果。

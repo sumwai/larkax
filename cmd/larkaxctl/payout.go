@@ -26,8 +26,10 @@ const walletPayoutShortUsage = `larkaxctl wallet payout 商户提现：申请、
 用法：
   larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号>
                                   [--asset <资产>] [--destination <收款信息 JSON>]
+                                  [--dry-run]
   larkaxctl wallet payout settle  --user <ID 或用户名> --amount <金额> --ref <结算单号>
                                   --destination <收款信息 JSON> --by <操作人> [--note <说明>]
+                                  [--dry-run]
   larkaxctl wallet payout approve --id <提现单 ID> --by <操作人> [--note <说明>]
   larkaxctl wallet payout reject  --id <提现单 ID> --by <操作人> [--note <原因>]
   larkaxctl wallet payout paid    --id <提现单 ID> --gateway <通道> [--gateway-ref <凭据号>]
@@ -50,8 +52,10 @@ const walletPayoutUsage = `larkaxctl wallet payout 商户提现：申请、清�
 用法：
   larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号>
                                   [--asset <资产>] [--destination <收款信息 JSON>]
+                                  [--dry-run]
   larkaxctl wallet payout settle  --user <ID 或用户名> --amount <金额> --ref <结算单号>
                                   --destination <收款信息 JSON> --by <操作人> [--note <说明>]
+                                  [--dry-run]
   larkaxctl wallet payout approve --id <提现单 ID> --by <操作人> [--note <说明>]
   larkaxctl wallet payout reject  --id <提现单 ID> --by <操作人> [--note <原因>]
   larkaxctl wallet payout paid    --id <提现单 ID> --gateway <通道> [--gateway-ref <凭据号>]
@@ -156,6 +160,13 @@ paid 是唯一一个把钱付出去的入口，**只放行已批准的单子**�
 **这一族不动余额**：提现动的是分成与待付，商户的用户余额（user 科目）不受影响，所以
 这些命令都不要求那个用户有钱包行。列出提现单的清单命令还没有。
 
+**干跑**：request 与 settle 接受 --dry-run，走与真跑同一条写路径（同一份余额校验、
+同一份幂等判据、同一组 SQL），把单子与分录打出来之后回滚，payout_requests 与账本
+一条都不落。**除序列号（提现单 id）外，预览与真跑逐字相等**：分录的科目、金额、借贷
+方向与余额前后完全相同。提现单 id 是这次事务从序列取到的值，事务回滚不退号，所以真跑
+会拿到下一个。分成余额不够、收款信息不合法这类拒绝在干跑下同样报错、同样退出码。
+approve / reject / paid 没有这个旗标。
+
 更细的约定见 docs/cli-reference.md 的「wallet」一节。
 `
 
@@ -242,12 +253,13 @@ func runPayoutRequest(args []string) error {
 	asset := fs.String("asset", "", "")
 	ref := fs.String("ref", "", "")
 	destination := fs.String("destination", "", "")
+	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
 		return usageErr(fmt.Errorf(
-			"request 不接受位置参数，得到 %q：商户、金额与申请单号都用旗标指定", fs.Arg(0)))
+			"request 不接受位置参数，得到 %q：商户、金额与申请单号都用旗标指定；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
 		return usageErr(errors.New("缺少 --user"))
@@ -292,16 +304,35 @@ func runPayoutRequest(args []string) error {
 			return assetResolveErr
 		}
 
-		row, applied, requestErr := store.New(db).RequestPayout(ctx, store.RequestPayoutInput{
+		// 干跑与真跑共用同一个输入与同一条写路径（见 RequestPayoutTx），
+		// 差别只有事务边界。
+		input := store.RequestPayoutInput{
 			TxnID:       txnIDForPayoutRequest(requestRef),
 			Ref:         requestRef,
 			UserID:      owner.ID,
 			Amount:      amountValue,
 			Asset:       assetValue,
 			Destination: []byte(destinationJSON),
-		})
-		if requestErr != nil {
-			return requestErr
+		}
+		var (
+			row     store.Payout
+			applied bool
+		)
+		if *dryRun {
+			dryErr := inRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+				var postErr error
+				row, applied, postErr = store.New(db).RequestPayoutTx(ctx, tx, input)
+				return postErr
+			})
+			if dryErr != nil {
+				return dryErr
+			}
+		} else {
+			var requestErr error
+			row, applied, requestErr = store.New(db).RequestPayout(ctx, input)
+			if requestErr != nil {
+				return requestErr
+			}
 		}
 		// 回显要逐条列出这次写的分录。重建一遍而不是让 store 把交易交回来：构造函数
 		// 是确定性的（同一批输入给同一批分录），而单子的 id 只有库知道——重放时用的
@@ -319,8 +350,11 @@ func runPayoutRequest(args []string) error {
 		}
 
 		verdict := "已申请提现。"
-		if !applied {
+		switch {
+		case !applied:
 			verdict = fmt.Sprintf("申请单号 %s 已经建过单，本次未改动。", requestRef)
+		case *dryRun:
+			verdict = "将申请提现。"
 		}
 		printPayout(humanStdout(), payoutReceipt{
 			Verdict:    verdict,
@@ -328,7 +362,7 @@ func runPayoutRequest(args []string) error {
 			User:       owner,
 			RequestRef: requestRef,
 			Txn:        &txn,
-		})
+		}, *dryRun)
 		return nil
 	})
 }
@@ -357,12 +391,13 @@ func runPayoutSettle(args []string) error {
 	destination := fs.String("destination", "", "")
 	by := fs.String("by", "", "")
 	note := fs.String("note", "", "")
+	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
 		return usageErr(fmt.Errorf(
-			"settle 不接受位置参数，得到 %q：商户、金额、单号与操作人都用旗标指定", fs.Arg(0)))
+			"settle 不接受位置参数，得到 %q：商户、金额、单号与操作人都用旗标指定；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
 		return usageErr(errors.New("缺少 --user"))
@@ -420,7 +455,9 @@ func runPayoutSettle(args []string) error {
 			return assetResolveErr
 		}
 
-		row, applied, settleErr := store.New(db).SettlePayout(ctx, store.SettlePayoutInput{
+		// 干跑与真跑共用同一个输入与同一条写路径（见 SettlePayoutTx），
+		// 差别只有事务边界。
+		input := store.SettlePayoutInput{
 			TxnID:       txnIDForPayoutSettle(settleRef),
 			Ref:         settleRef,
 			UserID:      owner.ID,
@@ -429,9 +466,26 @@ func runPayoutSettle(args []string) error {
 			Destination: []byte(destinationJSON),
 			Reviewer:    operator.ID,
 			Note:        settleNote,
-		})
-		if settleErr != nil {
-			return settleErr
+		}
+		var (
+			row     store.Payout
+			applied bool
+		)
+		if *dryRun {
+			dryErr := inRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+				var postErr error
+				row, applied, postErr = store.New(db).SettlePayoutTx(ctx, tx, input)
+				return postErr
+			})
+			if dryErr != nil {
+				return dryErr
+			}
+		} else {
+			var settleErr error
+			row, applied, settleErr = store.New(db).SettlePayout(ctx, input)
+			if settleErr != nil {
+				return settleErr
+			}
 		}
 		// 回显上的审批人从**库里那一行**取，不从这次的 --by 拿：重放时记着的
 		// 是上一次那个人，回显要回答的正是「库里记着谁」（同审批与打款那两条）。
@@ -454,8 +508,11 @@ func runPayoutSettle(args []string) error {
 		}
 
 		verdict := fmt.Sprintf("已清算提现单 %d。", row.ID)
-		if !applied {
+		switch {
+		case !applied:
 			verdict = fmt.Sprintf("结算单号 %s 已经清算过，本次未改动。", settleRef)
+		case *dryRun:
+			verdict = fmt.Sprintf("将清算提现单 %d。", row.ID)
 		}
 		printPayout(humanStdout(), payoutReceipt{
 			Verdict:   verdict,
@@ -464,7 +521,7 @@ func runPayoutSettle(args []string) error {
 			Reviewer:  reviewer,
 			SettleRef: settleRef,
 			Txn:       &txn,
-		})
+		}, *dryRun)
 		return nil
 	})
 }
@@ -594,7 +651,7 @@ func runPayoutReview(action string, args []string) error {
 			User:     owner,
 			Reviewer: reviewer,
 			Txn:      txn,
-		})
+		}, false)
 		return nil
 	})
 }
@@ -693,7 +750,7 @@ func runPayoutPaid(args []string) error {
 			User:     owner,
 			Reviewer: reviewer,
 			Txn:      &txn,
-		})
+		}, false)
 		return nil
 	})
 }
@@ -783,7 +840,7 @@ type payoutReceipt struct {
 // **不回收款信息**（payout_requests.destination）：那是商户填的 jsonb 原文，原样打会把
 // 里面的控制字符带进终端，清洗之后打又与库里不是同一份。要看它得走读取路径——那一族
 // 命令还没有。
-func printPayout(w io.Writer, r payoutReceipt) {
+func printPayout(w io.Writer, r payoutReceipt, dryRun bool) {
 	tw := newTableWriter(w)
 	p := newPalette(w)
 	_, _ = fmt.Fprintln(w, r.Verdict)
@@ -822,7 +879,14 @@ func printPayout(w io.Writer, r payoutReceipt) {
 	_ = tw.Flush()
 
 	if r.Txn != nil {
-		_, _ = fmt.Fprintln(w, "分录：")
+		header := "分录："
+		if dryRun {
+			header = "将写入的分录："
+		}
+		_, _ = fmt.Fprintln(w, header)
 		printEntryLines(w, r.Txn.Entries)
+	}
+	if dryRun {
+		printDryRunNote(w)
 	}
 }
