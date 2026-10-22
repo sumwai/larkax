@@ -121,6 +121,37 @@ func TestProbeChannelIDForm(t *testing.T) {
 	}
 }
 
+// TestProbeOwnershipBeforeDecryption 钉住归属判据在解密**之前**。
+//
+// 现有两条用例证明的是「适配器一次都没被打到」，那在归属判据挪到解密之后
+// 仍然成立。真正的差别只出现在「别人的渠道 + 本进程没有主密钥」这一格：
+// 现在回 ErrChannelNotFound（404），挪了以后会先解不开密文、回
+// ErrNoMasterKey（503）——那条 503 等于告诉调用方「这一行存在」。
+func TestProbeOwnershipBeforeDecryption(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	owner := seedMerchant(t, db)
+	other := seedMerchant(t, db)
+
+	adapter := &listingAdapter{models: []string{"m1"}}
+	id := insertProbeChannel(t, db, sealer, owner, endpointChatType,
+		"https://api.example.com/v1", "stored-key-placeholder")
+
+	// 本进程**没有**主密钥：sealer 传 nil。归属判据若在解密之后，这里会
+	// 先报 ErrNoMasterKey。
+	probe := NewModelProbe(db, nil, probeRegistryWith(t, endpointChatType, adapter))
+	_, err := probe.Probe(t.Context(), ProbeRequest{ChannelID: id, OwnerID: &other})
+	if !errors.Is(err, ErrChannelNotFound) {
+		t.Fatalf("别人的渠道 = %v，期望 ErrChannelNotFound（归属判据在解密之前）", err)
+	}
+	if errors.Is(err, ErrNoMasterKey) {
+		t.Errorf("错误链里有 ErrNoMasterKey：解密发生在归属判据之前，503 泄漏了这一行存在")
+	}
+	if adapter.gotCall != 0 {
+		t.Error("归属判据之前就把凭证交给了适配器")
+	}
+}
+
 // TestProbeWithoutDatabase 给了 id 却没有库连接：报错而不是 panic。
 func TestProbeWithoutDatabase(t *testing.T) {
 	probe := NewModelProbe(nil, nil, probeRegistryWith(t, endpointChatType, &listingAdapter{}))

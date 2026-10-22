@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/channel/httpx"
 	"github.com/sumwai/larkax/internal/systemone"
 )
 
@@ -73,7 +74,7 @@ func TestDecideSendsTheMeasuredShape(t *testing.T) {
 		"answers":{"q_noul":{"type":"noul","noul":0.75}},
 		"usage":{"input_tokens":387,"output_tokens":72}}`
 
-	a := New(5 * time.Second)
+	a := NewWithClient(httpx.Client(5 * time.Second))
 	resp, err := a.Decide(context.Background(), f.ch(), sampleRequest())
 	if err != nil {
 		t.Fatalf("Decide 出错: %v", err)
@@ -134,7 +135,7 @@ func TestDecideMapsStatusToRetryable(t *testing.T) {
 			f.status = tc.status
 			f.reply = `{"error":{"message":"boom"}}`
 
-			_, err := New(5*time.Second).Decide(context.Background(), f.ch(), sampleRequest())
+			_, err := NewWithClient(httpx.Client(5*time.Second)).Decide(context.Background(), f.ch(), sampleRequest())
 			var up *channel.ErrUpstream
 			if !errors.As(err, &up) {
 				t.Fatalf("期望 *channel.ErrUpstream，得到 %v", err)
@@ -155,7 +156,7 @@ func TestDecideTreatsMalformedResponseAsRetryable(t *testing.T) {
 	f := newFakeUpstream(t)
 	f.reply = `not json`
 
-	_, err := New(5*time.Second).Decide(context.Background(), f.ch(), sampleRequest())
+	_, err := NewWithClient(httpx.Client(5*time.Second)).Decide(context.Background(), f.ch(), sampleRequest())
 	var up *channel.ErrUpstream
 	if !errors.As(err, &up) {
 		t.Fatalf("期望 *channel.ErrUpstream，得到 %v", err)
@@ -173,7 +174,7 @@ func TestDecideTreatsMalformedResponseAsRetryable(t *testing.T) {
 // 这条渠道不说 chat 协议。错误要包着 ErrUnsupported：路由层据此**跳过这条
 // 候选、试下一个**（见 route 的 worthNextCandidate）。
 func TestChatIsUnsupported(t *testing.T) {
-	a := New(time.Second)
+	a := NewWithClient(httpx.Client(time.Second))
 
 	if _, err := a.Chat(context.Background(), channel.Channel{}, &channel.Request{}); !errors.Is(err, channel.ErrUnsupported) {
 		t.Errorf("Chat 的错误 = %v，期望包着 ErrUnsupported", err)
@@ -191,7 +192,7 @@ func TestChatIsUnsupported(t *testing.T) {
 }
 
 func TestTypeAndProtocol(t *testing.T) {
-	a := New(time.Second)
+	a := NewWithClient(httpx.Client(time.Second))
 	if a.Type() != "systemone" {
 		t.Errorf("Type() = %q", a.Type())
 	}
@@ -214,7 +215,7 @@ func TestTypeAndProtocol(t *testing.T) {
 }
 
 func TestUnsupportedCapabilities(t *testing.T) {
-	a := New(time.Second)
+	a := NewWithClient(httpx.Client(time.Second))
 	if _, err := a.ListModels(context.Background(), channel.Channel{}); !errors.Is(err, channel.ErrUnsupported) {
 		t.Errorf("ListModels 的错误 = %v，期望 ErrUnsupported", err)
 	}
@@ -229,7 +230,7 @@ func TestDecideRejectsOversizedResponse(t *testing.T) {
 	f := newFakeUpstream(t)
 	f.reply = strings.Repeat("a", maxResponseBytes+1)
 
-	_, err := New(5*time.Second).Decide(context.Background(), f.ch(), sampleRequest())
+	_, err := NewWithClient(httpx.Client(5*time.Second)).Decide(context.Background(), f.ch(), sampleRequest())
 	var up *channel.ErrUpstream
 	if !errors.As(err, &up) {
 		t.Fatalf("期望 *channel.ErrUpstream，得到 %v", err)

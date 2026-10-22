@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/channel/httpx"
 )
 
 func testChannel(baseURL string) channel.Channel {
@@ -23,7 +24,7 @@ func testChannel(baseURL string) channel.Channel {
 	}
 }
 
-func newAdapter() *Adapter { return New(5 * time.Second) }
+func newAdapter() *Adapter { return NewWithClient(httpx.Client(5 * time.Second)) }
 
 func TestTypeAndProtocol(t *testing.T) {
 	a := newAdapter()

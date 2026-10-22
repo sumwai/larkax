@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
 
@@ -33,15 +32,12 @@ type Adapter struct {
 	client *http.Client
 }
 
-// New 构造适配器。timeout 是「拿到响应头」的上限，不含流式传输过程。
-func New(timeout time.Duration) *Adapter {
-	return &Adapter{client: httpx.Client(timeout)}
-}
-
-// NewWithClient 用给定的 HTTP 客户端构造适配器。
+// NewWithClient 用给定的 HTTP 客户端构造适配器。这是本包唯一的构造入口。
 //
-// 给换一套出站策略的调用方用（控制台的模型探测）：那里打的是用户填的地址，
-// 不跟随重定向、响应体有上限，而运行期那条路径两者都不要。client 必须非 nil。
+// 客户端由调用方给，因为两条路径要的出站策略不同：运行期那条用
+// httpx.Client（跟随重定向、超时管响应头），模型探测那条用 httpx.ProbeClient
+// （打的是用户填的地址，不跟随重定向、响应体有上限）。清单只在
+// internal/upstream 的 builtinAdapters 里写一次。client 必须非 nil。
 func NewWithClient(client *http.Client) *Adapter {
 	return &Adapter{client: client}
 }
