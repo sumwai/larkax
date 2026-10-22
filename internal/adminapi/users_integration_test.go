@@ -792,6 +792,68 @@ func TestUsersNotOnInternalSurface(t *testing.T) {
 	}
 }
 
+// TestUsersGroupNotRegisteredWithoutExplicitName 空 Groups 下 users 的三条
+// 端点都不存在。
+//
+// 判 404 还不够说明问题：401/403 也说明路由链上有一道门，而这里要的是
+// 「路由根本没有挂上」。所以连响应体一起判：没有路由时由 ServeMux 回固定
+// 的 404 文案，users 的 handler 回的是 JSON 错误体。
+//
+// 与 TestUsersGroupRoutesWhenExplicitlyListed 配对：只判「空的时候没有」，
+// 把注册条件改成永远为假也能通过。
+func TestUsersGroupNotRegisteredWithoutExplicitName(t *testing.T) {
+	h := testSurface(t, Config{
+		Authorize: func(next http.Handler) http.Handler { return next },
+	})
+
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, PathPrefix + "users"},
+		{http.MethodGet, PathPrefix + "users/1"},
+		{http.MethodPatch, PathPrefix + "users/1"},
+	} {
+		rec := call(t, h, tc.method, tc.path, "", nil)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s 状态码 = %d，期望 404（users 组不随空 Groups 注册）；正文：%s",
+				tc.method, tc.path, rec.Code, rec.Body)
+			continue
+		}
+		if got := rec.Body.String(); got != "404 page not found\n" {
+			t.Errorf("%s %s 的正文 = %q，期望「没有这条路由」的固定文案；"+
+				"这个正文说明是 handler 回的 404，不是路由没注册",
+				tc.method, tc.path, got)
+		}
+	}
+}
+
+// TestUsersGroupRoutesWhenExplicitlyListed 显式列了 users 组时三条端点都真的
+// 挂上了。与 TestUsersGroupNotRegisteredWithoutExplicitName 配对：只判「空
+// Groups 时没有」，把注册条件改成永远为假也能通过。
+func TestUsersGroupRoutesWhenExplicitlyListed(t *testing.T) {
+	ctx := t.Context()
+	db := testDB(t)
+	h := usersTestHandler(t, nil)
+	actor := newUsersTestUser(t, db, auth.RoleAdmin, "surface")
+	target := newUsersTestUser(t, db, auth.RoleUser, "surface")
+
+	// 清单与详情各打一次：200 说明路由与 handler 都在这份装配上。
+	if rec := usersCall(t, ctx, h, http.MethodGet, "/api/v1/admin/users", 0, nil); rec.Code != http.StatusOK {
+		t.Errorf("GET /users 状态码 = %d，期望 200（404 表示没注册）；正文：%s", rec.Code, rec.Body)
+	}
+	if rec := usersCall(t, ctx, h, http.MethodGet,
+		fmt.Sprintf("/api/v1/admin/users/%d", target.ID), 0, nil); rec.Code != http.StatusOK {
+		t.Errorf("GET /users/{id} 状态码 = %d，期望 200（404 表示没注册）；正文：%s", rec.Code, rec.Body)
+	}
+	// PATCH 用空 body：路由在就会走到 userUpdateParams 的「没有要改的字段」，
+	// 回 400 且不落任何数据。
+	if rec := usersCall(t, ctx, h, http.MethodPatch,
+		fmt.Sprintf("/api/v1/admin/users/%d", target.ID), actor.ID, map[string]string{}); rec.Code != http.StatusBadRequest {
+		t.Errorf("PATCH /users/{id} 状态码 = %d，期望 400（404 表示没注册）；正文：%s", rec.Code, rec.Body)
+	}
+}
+
 // TestUsersRoleChangeTakesEffectOnNextSessionRead 角色改动立即生效：控制台
 // 每次请求都从 users 折角色，不靠吊销会话。这里用 SessionByToken 走一遍
 // 中间件读的那一条路（同一份 JOIN）。
