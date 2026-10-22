@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -408,6 +409,21 @@ func (f *fakeOffers) Prices(_ context.Context, _ time.Time, candidates []pricing
 			Rule:        f.byChannelRule[candidate.ChannelID],
 		})
 	}
+	// 与真实 Prices 的顺序契约一致：按 (模型, 渠道)。折行时保留先插入的
+	// 那条，靠的正是这个顺序——替身不排序，用例就分不出「取编号最小的」
+	// 与「取供给里排最前的」。
+	slices.SortFunc(out, func(a, b pricing.CandidatePrice) int {
+		if a.Model != b.Model {
+			return strings.Compare(a.Model, b.Model)
+		}
+		switch {
+		case a.ChannelID < b.ChannelID:
+			return -1
+		case a.ChannelID > b.ChannelID:
+			return 1
+		}
+		return 0
+	})
 	return out, nil
 }
 
