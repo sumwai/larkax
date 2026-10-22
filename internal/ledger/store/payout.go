@@ -277,6 +277,29 @@ type RequestPayoutInput struct {
 //
 // 返回的 applied=false 表示这个申请单号已经建过单（重放），库里那一行原样返回。
 func (s *Store) RequestPayout(ctx context.Context, in RequestPayoutInput) (Payout, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Payout{}, false, fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	row, applied, err := s.RequestPayoutTx(ctx, tx, in)
+	if err != nil {
+		return Payout{}, false, err
+	}
+	if commitErr := tx.Commit(); commitErr != nil {
+		return Payout{}, false, fmt.Errorf("提交提现申请失败: %w", commitErr)
+	}
+	return row, applied, nil
+}
+
+// RequestPayoutTx 在调用方给的事务里建单并写分录，**不提交、不回滚**。
+//
+// 除事务边界外，语义与 RequestPayout 逐条相同：同一份参数校验、同一把交易锁与
+// 科目锁、同一条重放/冲突判据、同一笔分录。干跑（`wallet payout request
+// --dry-run`）用它把整条写路径走一遍再回滚，于是预览里那张单子 id、分录与
+// 「会不会被判成重放」都出自同一条路。
+func (s *Store) RequestPayoutTx(ctx context.Context, tx *sql.Tx, in RequestPayoutInput) (Payout, bool, error) {
 	if in.TxnID == "" {
 		return Payout{}, false, errors.New("缺少 txn_id：申请单号要确定性映射成它，幂等靠它承担")
 	}
@@ -294,12 +317,6 @@ func (s *Store) RequestPayout(ctx context.Context, in RequestPayoutInput) (Payou
 			return Payout{}, false, destErr
 		}
 	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return Payout{}, false, fmt.Errorf("开启事务失败: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
 
 	if lockErr := lockTxn(ctx, tx, in.TxnID); lockErr != nil {
 		return Payout{}, false, lockErr
@@ -406,9 +423,6 @@ func (s *Store) RequestPayout(ctx context.Context, in RequestPayoutInput) (Payou
 	if err := writeTxnEntries(ctx, tx, txn); err != nil {
 		return Payout{}, false, err
 	}
-	if err := tx.Commit(); err != nil {
-		return Payout{}, false, fmt.Errorf("提交提现申请失败: %w", err)
-	}
 	return row, true, nil
 }
 
@@ -457,6 +471,28 @@ type SettlePayoutInput struct {
 //
 // 返回的 applied=false 表示这个结算单号已经建过单（重放），库里那一行原样返回。
 func (s *Store) SettlePayout(ctx context.Context, in SettlePayoutInput) (Payout, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Payout{}, false, fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	row, applied, err := s.SettlePayoutTx(ctx, tx, in)
+	if err != nil {
+		return Payout{}, false, err
+	}
+	if commitErr := tx.Commit(); commitErr != nil {
+		return Payout{}, false, fmt.Errorf("提交清算失败: %w", commitErr)
+	}
+	return row, applied, nil
+}
+
+// SettlePayoutTx 在调用方给的事务里建一张直接 approved 的提现单并写分录，
+// **不提交、不回滚**。
+//
+// 除事务边界外，语义与 SettlePayout 逐条相同（含科目锁、重放判定与收款信息的
+// 单独核对）。干跑（`wallet payout settle --dry-run`）用它走完整条写路径再回滚。
+func (s *Store) SettlePayoutTx(ctx context.Context, tx *sql.Tx, in SettlePayoutInput) (Payout, bool, error) {
 	if in.TxnID == "" {
 		return Payout{}, false, errors.New("缺少 txn_id：结算单号要确定性映射成它，幂等靠它承担")
 	}
@@ -475,12 +511,6 @@ func (s *Store) SettlePayout(ctx context.Context, in SettlePayoutInput) (Payout,
 	if destErr := validateDestination(in.Destination); destErr != nil {
 		return Payout{}, false, destErr
 	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return Payout{}, false, fmt.Errorf("开启事务失败: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
 
 	if lockErr := lockTxn(ctx, tx, in.TxnID); lockErr != nil {
 		return Payout{}, false, lockErr
@@ -566,9 +596,6 @@ func (s *Store) SettlePayout(ctx context.Context, in SettlePayoutInput) (Payout,
 	}
 	if err := writeTxnEntries(ctx, tx, txn); err != nil {
 		return Payout{}, false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return Payout{}, false, fmt.Errorf("提交清算失败: %w", err)
 	}
 	return row, true, nil
 }
