@@ -203,10 +203,12 @@ describe('商家概览', () => {
     mocks.overview.mockResolvedValue(data({ channels: 9, models_in_supply: 8 }))
     renderPage()
 
-    expect(await screen.findByRole('heading', { name: '全站概览' })).toBeInTheDocument()
+    // 标题在 loading 阶段就渲染（PageHead 与 loading 无关），等它等到的是骨架屏；
+    // 数据相关的元素要各自等到，否则快机器上过、慢机器上红。
     for (const label of ['全站渠道', '全站在供模型', '全站今日请求', '全站今日消耗']) {
-      expect(screen.getByText(label)).toBeInTheDocument()
+      expect(await screen.findByText(label)).toBeInTheDocument()
     }
+    expect(await screen.findByRole('heading', { name: '全站概览' })).toBeInTheDocument()
     expect(card('全站渠道')).toHaveTextContent('9')
     expect(screen.queryByText(/我的/)).not.toBeInTheDocument()
   })
