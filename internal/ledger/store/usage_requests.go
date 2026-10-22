@@ -19,8 +19,9 @@ import (
 //
 // # 每个请求只取最新一条事件
 //
-// 一次请求重试可能落多行 usage_events（见 UsageSummary 的 requests 口径）。
-// 把它们加起来会让一次重试被计两遍；取最新一条才是「这次请求最终算了多少」。
+// 现在的结算路径保证一个请求只落一行（见 UsageSummary 的 requests 口径），
+// 但 usage_events 表上没有唯一约束，历史形状与绕过结算路径的写入都可能多行。
+// 把它们加起来会让一次请求被计两遍；取最新一条才是「这次请求最终算了多少」。
 // LATERAL 子查询走 usage_events_request_idx (request_id, created_at)。
 
 // 账单请求的状态，与迁移里 billing_requests.status 的 CHECK 一致。

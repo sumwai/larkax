@@ -44,8 +44,9 @@ func (s *Store) ChannelUsageTotals(ctx context.Context, ownerID *int64,
 	}
 
 	var (
-		out      UsageTotals
-		costText string
+		out              UsageTotals
+		costText         string
+		planReservedText string
 	)
 	// usageTotalsColumns 与 UsageSummary 共用：两处各写一遍时，漏一个 token
 	// 槽位不会报错，只会让两边对同一批行给出不同的数。
@@ -56,7 +57,7 @@ func (s *Store) ChannelUsageTotals(ctx context.Context, ownerID *int64,
 		  JOIN channels c ON c.id = e.channel_id
 		 WHERE e.created_at >= $1
 		   AND e.created_at < $2`+ownerCond, args...,
-	).Scan(&costText, &out.PromptTokens, &out.CompletionTokens,
+	).Scan(&costText, &planReservedText, &out.PromptTokens, &out.CompletionTokens,
 		&out.CacheReadTokens, &out.CacheWriteTokens, &out.ReasoningTokens,
 		&out.Requests)
 	if err != nil {
@@ -65,6 +66,10 @@ func (s *Store) ChannelUsageTotals(ctx context.Context, ownerID *int64,
 	out.Cost, err = money.Parse(costText)
 	if err != nil {
 		return UsageTotals{}, fmt.Errorf("渠道用量金额 %q 解析失败: %w", costText, err)
+	}
+	out.PlanReservedAmount, err = money.Parse(planReservedText)
+	if err != nil {
+		return UsageTotals{}, fmt.Errorf("渠道用量的额度包面值 %q 解析失败: %w", planReservedText, err)
 	}
 	return out, nil
 }

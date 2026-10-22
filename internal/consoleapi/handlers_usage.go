@@ -39,9 +39,15 @@ func newTokens(t store.UsageTotals) tokensJSON {
 
 // usageTotalsJSON 是一段用量的总额。
 type usageTotalsJSON struct {
-	Cost     string     `json:"cost"`
-	Requests int64      `json:"requests"`
-	Tokens   tokensJSON `json:"tokens"`
+	Cost string `json:"cost"`
+	// PlanReservedAmount 是这段用量占着的额度包面值上界，与 Cost 并列。
+	//
+	// Cost 是这笔用量实际收了多少；PlanReservedAmount 是预留时占住的面值
+	// 上界，已随结算释放。两者不合并，也不相加——它们是同一笔消费的实收与
+	// 上界，相加会把同一笔钱算两遍。行级的 usage/requests 用同一个字段名。
+	PlanReservedAmount string     `json:"plan_reserved_amount"`
+	Requests           int64      `json:"requests"`
+	Tokens             tokensJSON `json:"tokens"`
 }
 
 // usagePathJSON 是一档计费路径。
@@ -109,9 +115,10 @@ func (a *API) handleUsageSummary(w http.ResponseWriter, r *http.Request, session
 		To:       formatTime(window.To),
 		Currency: a.currency,
 		Totals: usageTotalsJSON{
-			Cost:     summary.Totals.Cost.String(),
-			Requests: summary.Totals.Requests,
-			Tokens:   newTokens(summary.Totals),
+			Cost:               summary.Totals.Cost.String(),
+			PlanReservedAmount: summary.Totals.PlanReservedAmount.String(),
+			Requests:           summary.Totals.Requests,
+			Tokens:             newTokens(summary.Totals),
 		},
 		BillingPaths: paths,
 	})
@@ -119,10 +126,11 @@ func (a *API) handleUsageSummary(w http.ResponseWriter, r *http.Request, session
 
 // usagePointJSON 是序列上的一个桶。
 type usagePointJSON struct {
-	Start    string     `json:"start"`
-	Cost     string     `json:"cost"`
-	Requests int64      `json:"requests"`
-	Tokens   tokensJSON `json:"tokens"`
+	Start              string     `json:"start"`
+	Cost               string     `json:"cost"`
+	PlanReservedAmount string     `json:"plan_reserved_amount"`
+	Requests           int64      `json:"requests"`
+	Tokens             tokensJSON `json:"tokens"`
 }
 
 // usageSeriesResponse 是序列响应。
@@ -154,10 +162,11 @@ func (a *API) handleUsageSeries(w http.ResponseWriter, r *http.Request, session 
 	out := make([]usagePointJSON, 0, len(points))
 	for _, point := range points {
 		out = append(out, usagePointJSON{
-			Start:    formatTime(point.Start),
-			Cost:     point.Cost.String(),
-			Requests: point.Requests,
-			Tokens:   newTokens(point.UsageTotals),
+			Start:              formatTime(point.Start),
+			Cost:               point.Cost.String(),
+			PlanReservedAmount: point.PlanReservedAmount.String(),
+			Requests:           point.Requests,
+			Tokens:             newTokens(point.UsageTotals),
 		})
 	}
 
@@ -170,26 +179,29 @@ func (a *API) handleUsageSeries(w http.ResponseWriter, r *http.Request, session 
 
 // usageModelGroupJSON 是按模型分组的一行。
 type usageModelGroupJSON struct {
-	Model    string     `json:"model"`
-	Cost     string     `json:"cost"`
-	Requests int64      `json:"requests"`
-	Tokens   tokensJSON `json:"tokens"`
+	Model              string     `json:"model"`
+	Cost               string     `json:"cost"`
+	PlanReservedAmount string     `json:"plan_reserved_amount"`
+	Requests           int64      `json:"requests"`
+	Tokens             tokensJSON `json:"tokens"`
 }
 
 // usageKeyGroupJSON 是按 key 分组的一行。
 type usageKeyGroupJSON struct {
-	KeyID    *int64     `json:"key_id"`
-	KeyName  string     `json:"key_name"`
-	Cost     string     `json:"cost"`
-	Requests int64      `json:"requests"`
-	Tokens   tokensJSON `json:"tokens"`
+	KeyID              *int64     `json:"key_id"`
+	KeyName            string     `json:"key_name"`
+	Cost               string     `json:"cost"`
+	PlanReservedAmount string     `json:"plan_reserved_amount"`
+	Requests           int64      `json:"requests"`
+	Tokens             tokensJSON `json:"tokens"`
 }
 
 // usageOtherJSON 是「其余各组之和」。
 type usageOtherJSON struct {
-	Cost     string     `json:"cost"`
-	Requests int64      `json:"requests"`
-	Tokens   tokensJSON `json:"tokens"`
+	Cost               string     `json:"cost"`
+	PlanReservedAmount string     `json:"plan_reserved_amount"`
+	Requests           int64      `json:"requests"`
+	Tokens             tokensJSON `json:"tokens"`
 }
 
 // usageBreakdownResponse 是分组响应。
@@ -231,18 +243,20 @@ func (a *API) handleUsageBreakdown(w http.ResponseWriter, r *http.Request, sessi
 		switch groupBy {
 		case "model":
 			items = append(items, usageModelGroupJSON{
-				Model:    group.Model,
-				Cost:     group.Cost.String(),
-				Requests: group.Requests,
-				Tokens:   newTokens(group.UsageTotals),
+				Model:              group.Model,
+				Cost:               group.Cost.String(),
+				PlanReservedAmount: group.PlanReservedAmount.String(),
+				Requests:           group.Requests,
+				Tokens:             newTokens(group.UsageTotals),
 			})
 		default:
 			items = append(items, usageKeyGroupJSON{
-				KeyID:    group.KeyID,
-				KeyName:  group.KeyName,
-				Cost:     group.Cost.String(),
-				Requests: group.Requests,
-				Tokens:   newTokens(group.UsageTotals),
+				KeyID:              group.KeyID,
+				KeyName:            group.KeyName,
+				Cost:               group.Cost.String(),
+				PlanReservedAmount: group.PlanReservedAmount.String(),
+				Requests:           group.Requests,
+				Tokens:             newTokens(group.UsageTotals),
 			})
 		}
 	}
@@ -250,9 +264,10 @@ func (a *API) handleUsageBreakdown(w http.ResponseWriter, r *http.Request, sessi
 		GroupBy: groupBy,
 		Items:   items,
 		Other: usageOtherJSON{
-			Cost:     breakdown.Other.Cost.String(),
-			Requests: breakdown.Other.Requests,
-			Tokens:   newTokens(breakdown.Other.UsageTotals),
+			Cost:               breakdown.Other.Cost.String(),
+			PlanReservedAmount: breakdown.Other.PlanReservedAmount.String(),
+			Requests:           breakdown.Other.Requests,
+			Tokens:             newTokens(breakdown.Other.UsageTotals),
 		},
 	})
 }
@@ -273,9 +288,10 @@ type usageRequestJSON struct {
 	Cost      string          `json:"cost"`
 	// PlanReservedAmount 是这笔请求占着的额度包面值，与 Cost 并列。
 	//
-	// Cost 是钱包口径：额度包覆盖的请求在它这一列可以是 0，但包里的额度
-	// 并不是没有被占用。两者不合并成一个「总共占用」——加在一起就答不了
-	// 「钱包冻了多少」，想看到合计的一方自己把两个数相加。
+	// Cost 在这笔请求上是钱包口径的预留额（pending）或最终实收（settled）；
+	// PlanReservedAmount 是预留时占住的面值上界，结算后这笔占用随行退出
+	// pending。两者不合并，也不相加——它们是同一笔消费的实收与上界，相加会
+	// 把同一笔钱算两遍。
 	PlanReservedAmount string     `json:"plan_reserved_amount"`
 	Currency           string     `json:"currency"`
 	Tokens             tokensJSON `json:"tokens"`

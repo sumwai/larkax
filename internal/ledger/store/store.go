@@ -803,20 +803,29 @@ func (s *Store) Save(ctx context.Context, req pipeline.Request, charge *pipeline
 	// 同一条语句顺带读出这次预留的来源与它占着的可用量：结算要按快照里的
 	// 订阅记 prepaid 科目，并把这笔请求实际用掉的量记进 user_plans——
 	// **不重新选源**（在途期间订阅到期、新增都不影响这一笔）。
+	//
+	// 面值（plan_reserved_amount）也在这里读：用量事件要原样记下它，而
+	// 「原样」意味着与账单行同一个数，不是在这一层另算一遍。流式那条路会在
+	// 转发途中不断追加这一列，所以必须在结算这一刻读，早读会少掉后面的增量。
 	var (
 		planID           sql.NullInt64
 		reservedQuotaStr string
+		planReservedStr  string
 	)
 	err = tx.QueryRowContext(ctx, `
-		SELECT user_plan_id, reserved_quota::text
+		SELECT user_plan_id, reserved_quota::text, plan_reserved_amount::text
 		  FROM billing_requests
 		 WHERE request_id = $1 AND status = 'pending'
-		 FOR UPDATE`, req.RequestID).Scan(&planID, &reservedQuotaStr)
+		 FOR UPDATE`, req.RequestID).Scan(&planID, &reservedQuotaStr, &planReservedStr)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrAlreadySettled
 	}
 	if err != nil {
 		return fmt.Errorf("查预留来源失败: %w", err)
+	}
+	planReserved, parseErr := money.Parse(planReservedStr)
+	if parseErr != nil {
+		return fmt.Errorf("预留的额度包面值读不出来（原文 %q）: %w", planReservedStr, parseErr)
 	}
 
 	settled, err := markSettled(ctx, tx, req, charge)
@@ -847,7 +856,7 @@ func (s *Store) Save(ctx context.Context, req pipeline.Request, charge *pipeline
 	// 用量事件紧跟着分录写：两条都是只追加的底稿，而钱包余额是从它们推出来的
 	// 快照。顺序照「先底稿、后快照」——中途失败时回滚掉的是整组，不是快照单独
 	// 跑在前面。
-	if err := insertUsageEvent(ctx, tx, req, charge); err != nil {
+	if err := insertUsageEvent(ctx, tx, req, charge, planReserved.String()); err != nil {
 		return err
 	}
 	if err := applyToWallets(ctx, tx, charge.Entries); err != nil {

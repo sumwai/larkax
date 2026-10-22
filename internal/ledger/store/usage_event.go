@@ -123,6 +123,17 @@ var ErrUnknownUsageSource = errors.New("未知的用量来源")
 // 与规则无关的价——这一列存在的意义正是「事后能复算」，推出来的价让复算
 // 看起来成立却对不上 cost。
 //
+// # plan_reserved_amount 从哪来
+//
+// 取**结算那一笔** billing_requests.plan_reserved_amount：Save 已经加锁读了
+// 那一行，值由调用方传进来。不在这层重新推算——用量事件只记录结算时已经定下
+// 的数，两份推算迟早分岔。没有额度包占用时写 0（列默认值），不是 NULL：这一
+// 列的含义是「占住了包里的多少面值」，0 正是「没用到额度包」。
+//
+// 它记的是**预留时占住的面值上界**，不是这次实际收了多少（后者在 cost 里）。
+// 两者不合并，也不相加——同一个数里既有实收又有上界，就答不了「这笔收了多少」
+// 与「它当时占住了包里的多少」这两个不同的问题。
+//
 // # duration_ms 从哪来
 //
 // 它是「这次上游调用花了多久」，量它的只有网关（非流式取最后一次尝试的
@@ -152,15 +163,20 @@ const insertUsageEventSQL = `
 		request_id, user_id, channel_id, canonical_model,
 		prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens,
 		reasoning_tokens, unit_counts, unit_prices, billing_path, estimator,
-		cost, upstream_cost, asset, priced_at, local_hour, is_off_day, duration_ms
+		cost, plan_reserved_amount, upstream_cost, asset, priced_at,
+		local_hour, is_off_day, duration_ms
 	) VALUES (
 		$1, $2, NULLIF($3, 0::bigint), $4,
 		$5, $6, $7, $8,
 		$9, $10::jsonb, $11::jsonb, $12, NULLIF($13, ''),
-		$14::numeric, $15, $16, $17, $18, $19, NULLIF($20, 0)
+		$14::numeric, $15::numeric, $16, $17, $18,
+		$19, $20, NULLIF($21, 0)
 	)`
 
 // insertUsageEvent 写一行用量事件：这次结算**按什么用量**算出来的。
+//
+// planReserved 是这笔请求占着的额度包面值（billing_requests.plan_reserved_amount，
+// 由 Save 在同一个事务里读出来传进来）。
 //
 // # 它回答的问题与账本不同
 //
@@ -181,7 +197,7 @@ const insertUsageEventSQL = `
 // 这个判据失效），用量事件不适用那条：它不是账本，而是「这次请求用了多少」的
 // 底稿。对零金额的那一类（上游压根没报 usage）来说，正是这一行说明了
 // 「为什么这次没有分录」——没有它，那种请求在库里就只剩账单上的一条零金额。
-func insertUsageEvent(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *pipeline.Charge) error {
+func insertUsageEvent(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *pipeline.Charge, planReserved string) error {
 	path, estimator, err := billingPathOf(charge.UsageSource)
 	if err != nil {
 		return err
@@ -226,6 +242,10 @@ func insertUsageEvent(ctx context.Context, tx *sql.Tx, req pipeline.Request, cha
 		// 时（Capped）Actual 是截住后的值，与分录里扣的钱一致——而那一档下
 		// 它与 Breakdown.Total 不相等，见 insertUsageEventSQL 的注释。
 		charge.Settlement.Actual.String(),
+		// 额度包占着的面值，由 Save 从 billing_requests 上读出来（见
+		// insertUsageEventSQL 的「plan_reserved_amount 从哪来」）。没有包占用时
+		// 是 "0.00000000"，落进默认值为 0 的非空列。
+		planReserved,
 		// 上游成本：nil 落成 NULL（算不出来），有值落成那条规则算出的金额。
 		// 零值与 nil 是两件事，见 Charge.UpstreamCost 与 insertUsageEventSQL。
 		upstreamCostArg(charge.UpstreamCost),
