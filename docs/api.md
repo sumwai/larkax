@@ -141,11 +141,14 @@
   这一项，与 0（免费）不是一回事。
 - `request` / `minimum` / `units` 的口径与 `/v1/models` 的 `offers` 相同，
   取自「1,000,000 个输入 token」那一次求值：`request` / `minimum` 是每请求
-  多少元，`units` 是每个计量单位多少元；为 0 或没有计量项时**整个键不出现**。
+  多少元，`units` 是每个计量单位多少元。`request` 与 `minimum` 为 0 时
+  **整个键不出现**；`units` 只在没有计量项时整个键不出现——有计量项时，
+  单价为 0 的那一项仍然输出 `"0.00000000"`，省略的是字段而不是某一项。
   规则把它们写成用量的函数时，报的就是这一次用量下的值。
-- **两种「没配」的写法并存**：几个 `*_per_mtok` 用 `null` 表示没配，
-  `request` / `minimum` / `units` 用键不出现表示 0 或没配（两者都不收费，
-  省略少一种误读）。按一种约定去读另一种，会把 `null` 当成 0。
+- **两种「没配」的写法并存**：几个 `*_per_mtok` 用 `null` 表示没配；
+  `request` / `minimum` 为 0、`units` 没有计量项时用键不出现表示（前两者
+  收费为 0 与没配等价，省略少一种误读）。按一种约定去读另一种，会把
+  `null` 当成 0。
 - `offers` 与 `/v1/models` 的同名字段**逐字相同**，包括 `price` / `prices`
   是每 1000 个 token 的金额——同一个响应里两种单位并存，展示时必须分别标注。
   没有报价时省略这个字段。
@@ -197,6 +200,8 @@
                 "effective_from": "2026-01-01T00:00:00Z", "effective_to": null},
        "channel_count": 2},
       {"merchant": null, "price": "0.00300000", "prices": {"prompt": "0.00300000"},
+       "rule": {"id": 7, "scope": "platform", "priority": 0,
+                "effective_from": "2026-01-01T00:00:00Z", "effective_to": null},
        "channel_count": 1}
     ],
     "unpriced_channels": 1
@@ -212,8 +217,10 @@
 - `capabilities` 六项与 `endpoints` 都是三态，原样透传目录里的值：
   `null` 表示没采集过，`false` 表示明确不支持，两者不能合并。
   `endpoints` 的 `[]` 表示**明确声明一条都不支持**，与 `null`（未知）不同。
-- `knowledge_cutoff` / `release_date` 是 `YYYY-MM-DD` 或 `null`；
-  `updated_at` 是 RFC3339 UTC。
+- `knowledge_cutoff` / `release_date` 是 `YYYY-MM-DD` 或 `null`。
+- `updated_at` 是**目录行最后一次被编辑**的时刻，RFC3339 UTC，写成
+  `internal/catalog` 的 `Admin.Update` 里的 `updated_at = now()`；它不是
+  上游发布或更新模型的时间。发布日期的字段是 `release_date`。
 - 不返回采集来的 `raw`：那是运维排查用的原始元信息。
 
 `suppliers` 是供应这个模型的商家与报价：
@@ -232,22 +239,27 @@
   所以不要用 `price` 去推其他维度。
 - `request` 是**每次请求**的固定费用（元），`minimum` 是每次请求的最低消费
   （元），`units` 是非 token 计量项的单价（**每个计量单位**多少元）。量纲与
-  每千 token 的金额不同，不能相加；为 0 或没有计量项时省略这个键。三者取自
+  每千 token 的金额不同，不能相加。`request` 与 `minimum` 为 0 时整个键
+  不出现；`units` 只在没有计量项时整个键不出现——有计量项时，单价为 0 的
+  那一项仍然输出 `"0.00000000"`，省略的是字段而不是某一项。三者取自
   `prices.prompt` 那一次求值（1000 个输入 token）；规则把它们写成用量的函数
   时，报的就是这一次用量下的值。
 - `rule` 说明这套价出自哪条规则：`id`、`scope`（`channel` / `merchant` /
   `platform`）、`priority`、`effective_from` 与 `effective_to`（RFC3339 UTC，
   `null` 表示不过期）。同价的多条渠道折成一行时，它是其中渠道编号最小的那条
-  渠道适用的规则（渠道编号本身不出现在响应里）。不含表达式源码、owner id、
-  channel id 与 `base_url`。
+  渠道适用的规则（渠道编号本身不出现在响应里）。**每条 supplier 都带
+  `rule`**：只有匹配到规则的渠道才算得出价，没有匹配到规则的渠道不进
+  `suppliers`（计入 `unpriced_channels`），所以出现的一定来自某条规则。
+  不含表达式源码、owner id、channel id 与 `base_url`。
 - 规则写了输入价时 `price` 等于 `prices.prompt`；规则没有声明输入价时它是
   `"0.00000000"`，此时要判断「输入免费」还是「没写输入价」，得看 `prices`
   里有没有 `prompt` 这个键。`price` 由 `internal/pricing` 按这条渠道实际
   适用的规则求出，与结算同源；固定费、最低消费与计量项单价各占一个字段，
   不属于每千 token 的单价。
 - 只列能算出价的渠道：一条适用规则都没有的渠道给不出这个数，编一个 0 会
-  变成「免费」。这些渠道由模型级的 `unpriced_channels` 计数回答（总是输出，
-  没有这种渠道时是 `0`）。整个模型一条报价都没有时仍然返回 `200`，
+  变成「免费」；命中的规则编译或求值失败的渠道同样算不出价。这些渠道
+  都由模型级的 `unpriced_channels` 计数回答（总是输出，没有这种渠道时是
+  `0`）。整个模型一条报价都没有时仍然返回 `200`，
   `suppliers` 字段省略（不是空数组）。
 - 不返回渠道 id、`base_url`、凭证、上游地址与上游模型名——上游名会把调用方
   引去绕过网关。
