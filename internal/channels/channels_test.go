@@ -533,20 +533,29 @@ func TestQuotaCarriesObservationTraces(t *testing.T) {
 
 // ── 成本与缓存 ──────────────────────────────────────────────────────────
 
-// 表里只有总额与请求数，所以单位成本是「每次请求的平均成本」。
+// 表里只有总额与「有成本事件的请求数」，所以单位成本是「每次带成本事件
+// 的请求的平均成本」。
 //
-// 没有请求、没有成本合计、成本合计为 0 三种情况都返回 **nil**（没有数据），
-// 而不是 0：0 在 route 眼里是「免费」，而一个从没记过成本的渠道不是免费。
+// 没有成本事件、没有成本合计、成本合计为 0 三种情况都返回 **nil**（没有
+// 数据），而不是 0：0 在 route 眼里是「免费」，而一个从没记过成本的渠道
+// 不是免费。
 func TestCostPerUnit(t *testing.T) {
 	cases := []struct {
 		name string
 		row  candidateRow
 		want *float64
 	}{
-		{"没有请求", candidateRow{cost: sqlNullString("1.5")}, nil},
-		{"没有成本列（窗口内没有桶）", candidateRow{requests: 10}, nil},
-		{"成本合计为 0（写入侧从没写过）", candidateRow{requests: 10, cost: sqlNullString("0")}, nil},
-		{"平均值", candidateRow{requests: 10, cost: sqlNullString("1.5")}, ptr(0.15)},
+		{"没有成本事件", candidateRow{cost: sqlNullString("1.5")}, nil},
+		{"没有成本列（窗口内没有桶）", candidateRow{costEvents: 10}, nil},
+		{"成本合计为 0（写入侧从没写过）", candidateRow{costEvents: 10, cost: sqlNullString("0")}, nil},
+		{"平均值", candidateRow{costEvents: 10, cost: sqlNullString("1.5")}, ptr(0.15)},
+		{
+			// 分母是成本事件数，不是请求数：20 次尝试里只有 10 次结算成功，
+			// 平均数不该被失败尝试摊薄（#807）。
+			"失败尝试不进分母",
+			candidateRow{requests: 20, costEvents: 10, cost: sqlNullString("1.5")},
+			ptr(0.15),
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -566,7 +575,7 @@ func TestCostPerUnit(t *testing.T) {
 
 // 成本合计不是数字是**数据问题**，要整次调用报错，不静默当成「没有数据」。
 func TestCostPerUnitRejectsNonNumeric(t *testing.T) {
-	row := candidateRow{id: 7, requests: 10, cost: sqlNullString("abc")}
+	row := candidateRow{id: 7, costEvents: 10, cost: sqlNullString("abc")}
 	if _, err := row.costPerUnit(); err == nil {
 		t.Error("cost 不是数字时应当报错")
 	}

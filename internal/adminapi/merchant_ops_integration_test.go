@@ -96,7 +96,7 @@ func insertRollup(t *testing.T, db *sql.DB, channelID int64,
 		INSERT INTO channel_health_rollup
 			(channel_id, bucket, requests, successes, failures, cost)
 		VALUES ($1, $2, $3, $4, $5, 0)
-		ON CONFLICT (channel_id, bucket) DO UPDATE
+		ON CONFLICT (channel_id, model, bucket) DO UPDATE
 		   SET requests = EXCLUDED.requests,
 		       successes = EXCLUDED.successes,
 		       failures = EXCLUDED.failures`,

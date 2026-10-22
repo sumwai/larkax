@@ -94,7 +94,7 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 	// 换渠道过程中失败的那些尝试照记——无论这次路由最后成没成，
 	// 那些调用都已经发生过。成功接受的那一个不在这里记：它的结局只有
 	// 读完流才知道（见 recordFailedAttempts）。
-	g.recordFailedAttempts(ctx, streamAttempts(routed))
+	g.recordFailedAttempts(ctx, req.CanonicalModel, streamAttempts(routed))
 
 	if err != nil {
 		// 上游在接受请求之前就失败了：路由层已经换过渠道，剩下的处置与
@@ -123,7 +123,7 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 	// 交给 pumpStream 的是**上面那个 outbound 没有退回的那一份**：这里已经是
 	// 成功那条路（err 为 nil，尝试真的发出去过），所以它非 nil；而万一将来有
 	// 一条路让它成为 nil，onUsage 拿到的就该是「没有有效上界」而不是调用方那份。
-	go g.pumpStream(ctx, h, placed, res, out, routed.Events, upstream, routed.OutboundRequest, hooks)
+	go g.pumpStream(ctx, req.CanonicalModel, h, placed, res, out, routed.Events, upstream, routed.OutboundRequest, hooks)
 	return res, nil
 }
 
@@ -217,7 +217,7 @@ func isContentChunk(ev channel.StreamEvent) bool {
 // upstream 是**调用方发来的**那份（估算器按它的模型与正文取值），outbound 是
 // 实际发出去的那份（口径见 Hooks.OnUsage）——两者不是同一个对象，也不该合成
 // 一个：覆盖改了 max_tokens 而不改正文，哪一处该读哪一份是固定的。
-func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, res *Result, out chan channel.StreamEvent, events <-chan channel.StreamEvent, upstream, outbound *channel.Request, hooks Hooks) {
+func (g *Gateway) pumpStream(ctx context.Context, canonicalModel string, h *handle, placed placement, res *Result, out chan channel.StreamEvent, events <-chan channel.StreamEvent, upstream, outbound *channel.Request, hooks Hooks) {
 	// 关流放在最后：它一旦执行，调用方就会读到 Charge / Estimated，
 	// 而那两个字段在下面才写好。
 	defer close(out)
@@ -553,6 +553,7 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 		// 没有用量可记（一个字都没产生），所以只记结论。
 		g.recordCall(ctx, route.CallOutcome{
 			ChannelID: res.Channel.ID,
+			Model:     canonicalModel,
 			At:        g.now(),
 			Verdict:   verdict,
 		})
@@ -632,6 +633,7 @@ func (g *Gateway) pumpStream(ctx context.Context, h *handle, placed placement, r
 	// rollupSignalsSQL）。
 	g.recordCall(ctx, route.CallOutcome{
 		ChannelID: res.Channel.ID,
+		Model:     canonicalModel,
 		At:        g.now(),
 		Verdict:   verdict,
 		Usage:     coreUsage,
@@ -895,7 +897,7 @@ func streamDuration(attempts []route.Attempt, fallbackStart, end time.Time) time
 //
 // 它与 pumpStream 的 clientGone 是两个落点：那个管读完流之后的最终结局，
 // 这个管还没开始读流就已经失败掉的那几次尝试。
-func (g *Gateway) recordFailedAttempts(ctx context.Context, attempts []route.Attempt) {
+func (g *Gateway) recordFailedAttempts(ctx context.Context, canonicalModel string, attempts []route.Attempt) {
 	if g.Recorder == nil {
 		return
 	}
@@ -913,6 +915,7 @@ func (g *Gateway) recordFailedAttempts(ctx context.Context, attempts []route.Att
 		}
 		g.recordCall(ctx, route.CallOutcome{
 			ChannelID: a.ChannelID,
+			Model:     canonicalModel,
 			At:        attemptTime(a, g.now()),
 			Verdict:   verdict,
 		})

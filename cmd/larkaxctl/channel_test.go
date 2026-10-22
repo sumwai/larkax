@@ -1468,7 +1468,7 @@ func insertHealthBucket(t *testing.T, db *sql.DB, id int64, bucket time.Time,
 			(channel_id, bucket, requests, successes, failures, latency_p95_ms, cost,
 			 cache_hit_tokens, cache_miss_tokens)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (channel_id, bucket) DO UPDATE
+		ON CONFLICT (channel_id, model, bucket) DO UPDATE
 		   SET requests = EXCLUDED.requests, successes = EXCLUDED.successes,
 		       failures = EXCLUDED.failures, latency_p95_ms = EXCLUDED.latency_p95_ms,
 		       cost = EXCLUDED.cost,

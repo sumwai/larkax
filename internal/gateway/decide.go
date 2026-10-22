@@ -95,7 +95,7 @@ func (g *Gateway) Decide(ctx context.Context, req pipeline.Request, decision *sy
 	if err != nil {
 		// 与 Chat 同一处置：健康度先记（失败的调用正是它要记的那些），
 		// 再走一次结算得出「不计费」的结论，预留由 defer 的 finish 释放。
-		g.recordAttempts(ctx, attemptsOf(routed), nil)
+		g.recordAttempts(ctx, req.CanonicalModel, attemptsOf(routed), nil)
 		return nil, h.settleAndFail(ctx, placed, err, pipeline.Outcome{UpstreamFailed: true})
 	}
 
@@ -117,13 +117,13 @@ func (g *Gateway) Decide(ctx context.Context, req pipeline.Request, decision *sy
 	charge, err := g.finishCharge(ctx, h, placed, out)
 	if err != nil {
 		// 与 Chat 同一处置：结算没成，用量事件也就没落库；健康度仍然要记。
-		g.recordAttempts(ctx, routed.Attempts, &out.Usage)
+		g.recordAttempts(ctx, req.CanonicalModel, routed.Attempts, &out.Usage)
 		return nil, err
 	}
 
 	// 与 Chat 同一个顺序、同一个理由：延迟与缓存两列由写入方按桶从
 	// usage_events 重算，所以健康度要等结算落库之后再记。
-	g.recordAttempts(ctx, routed.Attempts, &kernelUsage)
+	g.recordAttempts(ctx, req.CanonicalModel, routed.Attempts, &kernelUsage)
 
 	return &DecideResult{
 		Response:      call.response,

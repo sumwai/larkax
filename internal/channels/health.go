@@ -147,6 +147,13 @@ const healthColumns = `
 
 // healthFrom 是健康读数的取数主体：channels 是主表，两个信号表按渠道左连。
 //
+// # 只读渠道级合并行
+//
+// 健康度桶带模型维度（迁移 00057），但这条命令回答的是「这个渠道」怎么样，
+// 所以两个查询都过滤 model 为空串——那是写入侧每次调用维护的合并行。模型行
+// 里也有计数与推导值（留给将来按模型看），加进来会把同一个数算两遍，逐小时
+// 明细还会同一个桶出现多次。
+//
 // # 分位数为什么每列各取最近一个非空桶
 //
 // 分位数**不可累加**：把几个桶的 p95 求平均、或者对它们再取一次分位数，得到的
@@ -200,6 +207,9 @@ const healthFrom = `
           FROM channel_health_rollup r
          WHERE r.channel_id = c.id
            AND r.bucket >= $1
+           -- 只读渠道级合并行：模型行里也有一份计数与推导值，加进来会把
+           -- 同一个数算两遍（见迁移 00057 与 record.go 的 rollupSignalsSQL）。
+           AND r.model = ''
        ) h ON true
   LEFT JOIN channel_quota_state q ON q.channel_id = c.id`
 
@@ -303,6 +313,9 @@ SELECT bucket, requests, successes, failures,
   FROM channel_health_rollup
  WHERE channel_id = $1
    AND bucket >= $2
+   -- 与 healthFrom 同一个口径：只读渠道级合并行，否则逐小时明细会把每个
+   -- 模型各打一行（同一个桶出现多次，计数也跟着拆开）。
+   AND model = ''
  ORDER BY bucket DESC`
 
 func (a *Admin) healthBuckets(ctx context.Context, id int64, since time.Time) ([]HealthBucket, error) {

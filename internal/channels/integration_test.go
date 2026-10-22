@@ -175,6 +175,23 @@ func insertRollupSignals(ctx context.Context, t *testing.T, db *sql.DB, channelI
 	}
 }
 
+// insertRollupModelCost 插一行**模型桶的成本**。
+//
+// 健康列只读渠道级合并行（model 为空串），所以这里只写成本与成本事件数、
+// 计数留 0：夹具表达的是「这个模型在这个小时的单价」，不是「这个渠道的
+// 健康度」。cost_events 是读侧算单位成本的分母。
+func insertRollupModelCost(ctx context.Context, t *testing.T, db *sql.DB,
+	channelID int64, model string, bucket time.Time, cost string, costEvents int) {
+	t.Helper()
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO channel_health_rollup (channel_id, model, bucket, cost, cost_events)
+		VALUES ($1, $2, $3, $4::numeric, $5)`,
+		channelID, model, bucket, cost, costEvents)
+	if err != nil {
+		t.Fatalf("插入模型桶成本失败: %v", err)
+	}
+}
+
 func insertRollup(ctx context.Context, t *testing.T, db *sql.DB, channelID int64, bucket time.Time, requests, successes, failures, p95 int, cost string) {
 	t.Helper()
 	_, err := db.ExecContext(ctx, `
@@ -320,6 +337,9 @@ func TestCandidatesIncludesHealthAndQuota(t *testing.T) {
 	// 两个桶：成功率是两者之和，p95 取**最新**那个非空值。
 	insertRollup(t.Context(), t, db, id, hourBucket(1), 10, 9, 1, 300, "2.0")
 	insertRollup(t.Context(), t, db, id, hourBucket(0), 5, 5, 0, 200, "1.0")
+	// 成本按模型取：同一批金额各写一条模型行，分母是带成本的事件数。
+	insertRollupModelCost(t.Context(), t, db, id, model, hourBucket(1), "2.0", 10)
+	insertRollupModelCost(t.Context(), t, db, id, model, hourBucket(0), "1.0", 5)
 	insertQuota(t, db, id, "12.5", "money", "api_query", "healthy", 1)
 
 	src := New(db, sealer)
@@ -360,7 +380,7 @@ func TestCandidatesIncludesHealthAndQuota(t *testing.T) {
 	if c.Quota.Confidence != 1 {
 		t.Errorf("Quota.Confidence = %v，期望 1（api_query 是实测）", c.Quota.Confidence)
 	}
-	// 单位成本 = 窗口内总额 / 请求数 = 3.0 / 15。
+	// 单位成本 = 窗口内总额 / 有成本事件的请求数 = 3.0 / 15。
 	if c.CostPerUnit == nil {
 		t.Fatal("CostPerUnit 是 nil，期望 3.0/15")
 	}
@@ -397,6 +417,8 @@ func TestCandidatesRollupSignalsAffectOrdering(t *testing.T) {
 	// 缓存命中 80 / 未命中 20。选路读的是 p95，p50 按写入侧的样子成对给上。
 	insertRollupSignals(t.Context(), t, db, withData, hourBucket(0), 20, 2, 18,
 		20, 50, "0.02", 80, 20)
+	// 成本按模型取：0.02 / 20 条成本事件 = 每次 0.001。
+	insertRollupModelCost(t.Context(), t, db, withData, model, hourBucket(0), "0.02", 20)
 	// 没有数据的那一个：桶在、健康度一样，而延迟与缓存那几列就是「一条样本
 	// 都没有」的样子。
 	insertRollupSignals(t.Context(), t, db, withoutData, hourBucket(0), 20, 2, 18,

@@ -18,7 +18,7 @@
 |---|---|---|
 | 连续失败计数 | `channels.consecutive_failures` / `last_failure_at` | `route.DrainReason`：连续失败到阈值就暂时摘除 |
 | 小时桶计数 | `channel_health_rollup.requests` / `successes` / `failures` | `route.Health.SuccessRate` |
-| 小时桶的延迟、缓存与成本 | `channel_health_rollup.latency_p95_ms` / `cache_hit_tokens` / `cache_miss_tokens` / `cost` | `route.Health.LatencyP95`、`route.Candidate.CacheHitRate` 与 `route.Candidate.CostPerUnit` |
+| 小时桶的延迟、缓存与成本 | `channel_health_rollup.latency_p95_ms` / `cache_hit_tokens` / `cache_miss_tokens` / `cost` / `cost_events` | `route.Health.LatencyP95`、`route.Candidate.CacheHitRate` 与 `route.Candidate.CostPerUnit` |
 | 额度自记账 | `channel_quota_state` 的余量与可信度 | `route.DrainReason`（能不能用）与 `route.scoreQuota`（怎么排） |
 
 三处各自按主键或唯一键定位单行，没有把它们绑在一起的大事务：健康度与额度是
@@ -29,14 +29,21 @@
 后几列要的是分位数、比例与合计，而分位数与比例都不是可累加的量：每次调用
 只有一个耗时样本，把它写进 p95 等于给一个错的数起了一个对的名字。所以样本
 留在用量事件里（`usage_events.duration_ms` 是「这次调用花了多久」），写入方
-每次按「渠道 × 那个小时桶」把它们重新聚一遍：
+每次按桶把它们重新聚一遍。桶带模型维度（`(channel_id, model, bucket)`），
+一次重算同时更新两类行：
+
+- **模型行**（`model` 是规范模型名）：成本与成本事件按模型分开，选路按当前
+  要发的模型取。
+- **渠道级合并行**（`model = ''`）：本渠道全模型加总。健康列（计数、延迟、
+  缓存）只读这一行，所以它们的语义与加模型维度之前一字不差。
 
 | 列 | 算式 | 口径 |
 |---|---|---|
 | `latency_p95_ms` | `percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms)` | 取一个**真实观测到**的毫秒数；NULL 样本不参与 |
 | `cache_hit_tokens` | `SUM(cache_read_tokens)` | 命中缓存、直接复用的输入 |
 | `cache_miss_tokens` | `SUM(prompt_tokens + cache_write_tokens)` | 没被缓存服务到的输入总量 |
-| `cost` | `SUM(upstream_cost)` | 这个桶里所有请求的上游成本合计；没有一条带成本的事件时是 NULL |
+| `cost` | `SUM(upstream_cost)` | 这个桶里该组请求的上游成本合计；没有一条带成本的事件时是 NULL |
+| `cost_events` | `COUNT(upstream_cost)` | 带成本的事件条数，单位成本的分母；空组是 0 |
 
 缓存两列的分母口径与读侧一致：`cacheHitRate` 算的是 `hit / (hit + miss)`，
 而 `usage_events.prompt_tokens` 已经是**不含缓存**的输入、`cache_write_tokens`
@@ -52,16 +59,15 @@
 成本这一维不参与加权。0 落库有两种来路：规则算出来确实是 0（上游不要钱），
 以及接上写入侧之前那一列 `NOT NULL DEFAULT 0` 留下的旧桶（那些桶不会再被重算）。
 读侧把 0 一律当成「没有数据」，两种都不会被当成免费。
-一个桶里只有部分请求带成本时，`SUM` 只加有值的那些，而读侧的每次请求成本
-按桶里的请求数摊——覆盖面不全时那个数会被摊低。
 
-那个「每次请求成本」还有两处已知偏差，读的时候要知道：
+`CostPerUnit` 的分母是 `cost_events`，不是 `requests`：分子与分母因此来自
+同一批事件。失败的尝试不结算、也没有用量事件，不会再把平均数摊低。桶里只有
+部分请求带成本时，`SUM` 与 `COUNT` 都只算有值的那些——覆盖面不全影响的是
+分母的大小，不会让单价被摊薄。
 
-- **分母是尝试次数，分子是结算成功那部分。** 桶里的请求数在每次尝试时加一，
-  失败与重试里的失败尝试都算；而成本只在结算成功后才落进用量事件。失败多的
-  渠道因此单位成本被系统性摊低，读侧会偏向它们。
-- **桶按渠道切，不按模型切。** 同一个渠道在同一个小时里服务过的贵模型与便宜
-  模型会合成一个总数再摊平，而选路比较的是某个具体模型的候选。
+迁移 00057 之前写下的老桶没有模型维度：它们的 `model` 是空串，落进合并行，
+健康列照旧可读；按模型查成本时它们不匹配任何模型名，**读作未知**——不拿合并
+值冒充某个模型的成本。因此升级后要等新流量进来，按模型的单位成本才会有数。
 
 重算是幂等的：上一步成功、这一步失败时写进去的是旧值，而该桶的下一次调用会
 把它们整体重算一遍，不会像累加那样永久偏离。代价是每记一次调用要扫一遍该渠道
@@ -251,11 +257,12 @@ NULL 表示不知道按什么计。这个列是**比较的前提**：`route.scor
   下一次成功探测之前的这段时间里，渠道会不会被 `Routable` 永久排除」——今天
   这个分支还没有写入方。
 - **延迟的分位数只在很小的样本上算**：`latency_p50_ms` 与 `latency_p95_ms`
-  由写入方从 `usage_events` 按「渠道 × 小时桶」重算（见 `internal/channels` 的
-  `rollupSignalsSQL`），`cache_*` 与 `cost` 也是。一个低流量渠道的一小时可能
-  只有两三次调用，那时的 p95 是较大的那个观测值、p50 是排在中间的那个（样本
-  为偶数个时取偏小的那个），都算不上统计意义上稳定的分位数——读它们的时候
-  要知道这一点。
+  由写入方从 `usage_events` 按桶重算（见 `internal/channels` 的
+  `rollupSignalsSQL`），`cache_*`、`cost` 与 `cost_events` 也是。渠道级读数
+  来自 `model = ''` 的合并行（全模型样本），模型行只是同一批事件按模型再切
+  一次。一个低流量渠道的一小时可能只有两三次调用，那时的 p95 是较大的那个
+  观测值、p50 是排在中间的那个（样本为偶数个时取偏小的那个），都算不上统计
+  意义上稳定的分位数——读它们的时候要知道这一点。
 
 读侧把空值映射成「没有数据」（`route.Candidate` 上是一个 nil 指针），打分时
 **那一维整个退出加权**，剩下的维度按各自权重归一。所以「没配成本规则」既不会

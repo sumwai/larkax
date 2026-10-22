@@ -536,6 +536,16 @@ func (s *Source) logger() *slog.Logger {
 // 新渠道还没有健康数据，很多上游也查不到额度。缺失不是错误，
 // 后面的映射会把它们表达成「未知」。
 //
+// # 桶有模型维度，但只有成本按模型取
+//
+// 健康度桶按 (channel_id, model, bucket) 存。`model` 为空串的那一行是渠道级
+// 合并行：健康列（requests / successes / latency / cache）只读它，语义与加
+// 模型维度之前一字不差。成本则按**当前要发的规范模型**（$1）过滤——贵模型
+// 与便宜模型混在同一个渠道上时，两者的单位成本本来就不是一个数。
+//
+// 两类行都留在同一个聚合里（用 FILTER 分开取），不复制第二份子查询：
+// 复制之后窗口、桶的选取这些口径会各走各的。
+//
 // 「连续失败」取自 channels 的列而不是从桶里算：桶里没有逐次记录，
 // 桶内有过成功时那段连续长度落在 0 与 failures 之间，算不出来。
 //
@@ -555,8 +565,11 @@ func (s *Source) logger() *slog.Logger {
 //     它此前的问题只在 Go 侧：那个 NULL 被扫进一个零值 Duration。
 //     写入侧按桶重算它（见 record.go 的 rollupSignalsSQL），
 //     「这个窗口里没有一条带耗时的用量事件」仍然是 NULL。
-//   - cost 也可空（见迁移 00046），语义是「这个窗口的桶里有没有带成本的
-//     事件」：NULL = 没有，0 = 有事件、合计确实是 0。写入侧同样按桶重算。
+//   - cost 也可空（见迁移 00046），语义是「这个窗口里该模型的桶里有没有
+//     带成本的事件」：NULL = 没有，0 = 有事件、合计确实是 0。写入侧按桶
+//     重算，只有按模型取到的那一行才算数——迁移前的老行落在 model 为空串，
+//     按模型查出来就是「未知」，不拿合并值冒充某个模型的成本。
+//     cost_events 与 cost 同一批事件：它是分母，0 表示「这一维没有数据」。
 //   - 两个 cache 列是 `NOT NULL DEFAULT 0`，但它们的 0 与「没有样本」同义
 //     ——一次请求的输入不可能是 0 个 token——所以由 cacheHitRate 判掉，
 //     不需要可空。
@@ -590,6 +603,7 @@ SELECT
     h.successes,
     h.latency_p95_ms,
     h.cost,
+    h.cost_events,
     h.cache_hit_tokens,
     h.cache_miss_tokens,
     q.remaining_estimate,
@@ -605,13 +619,19 @@ SELECT
   FROM channels c
   LEFT JOIN LATERAL (
         SELECT
-            COALESCE(SUM(r.requests), 0)  AS requests,
-            COALESCE(SUM(r.successes), 0) AS successes,
+            -- 健康列只读渠道级合并行（model = ''）：它把本渠道所有模型合在一起，
+            -- 语义与加模型维度之前一字不差。模型行里也有一份计数（留给将来按
+            -- 模型看），这里不读它们——否则同一个数会被加两遍。
+            COALESCE(SUM(r.requests)  FILTER (WHERE r.model = ''), 0) AS requests,
+            COALESCE(SUM(r.successes) FILTER (WHERE r.model = ''), 0) AS successes,
             (ARRAY_AGG(r.latency_p95_ms ORDER BY r.bucket DESC)
-                FILTER (WHERE r.latency_p95_ms IS NOT NULL))[1] AS latency_p95_ms,
-            SUM(r.cost)              AS cost,
-            SUM(r.cache_hit_tokens)  AS cache_hit_tokens,
-            SUM(r.cache_miss_tokens) AS cache_miss_tokens
+                FILTER (WHERE r.model = '' AND r.latency_p95_ms IS NOT NULL))[1] AS latency_p95_ms,
+            -- 成本按**当前要发的那个规范模型**取：贵模型与便宜模型混在同一个
+            -- 渠道上时，两者的单位成本本来就不是一个数。
+            SUM(r.cost)        FILTER (WHERE r.model = $1) AS cost,
+            SUM(r.cost_events) FILTER (WHERE r.model = $1) AS cost_events,
+            SUM(r.cache_hit_tokens)  FILTER (WHERE r.model = '') AS cache_hit_tokens,
+            SUM(r.cache_miss_tokens) FILTER (WHERE r.model = '') AS cache_miss_tokens
           FROM channel_health_rollup r
          WHERE r.channel_id = c.id
            AND r.bucket >= $2
@@ -666,6 +686,10 @@ type candidateRow struct {
 	// （见 candidateQuery 的注释）。用零值接住就等于把两者合并。
 	latencyP95 sql.NullInt64
 	cost       sql.NullString
+	// costEvents 是成本那一批事件的条数（单位成本的分母）。COALESCE 在
+	// 查询里做掉了：0 与「没有数据」在这一列上同义，不像 cost 那样需要一个
+	// NULL 把「没记过」与「合计是 0」分开。
+	costEvents int64
 	cacheHit   sql.NullInt64
 	cacheMiss  sql.NullInt64
 
@@ -699,7 +723,7 @@ func scanCandidate(rows *sql.Rows) (candidateRow, error) {
 		&row.credentialEnc,
 		&row.streak, &row.lastFailureAt,
 		&row.requests, &row.successes, &row.latencyP95,
-		&row.cost, &row.cacheHit, &row.cacheMiss,
+		&row.cost, &row.costEvents, &row.cacheHit, &row.cacheMiss,
 		&row.remaining, &row.unit, &row.confidence,
 		&row.probeKind, &row.quotaHealth, &row.resetsAt,
 		&row.lastProbeAt, &row.lastProbeAttemptAt, &row.lastProbeStatus,
@@ -955,45 +979,45 @@ const quotaHealthDrained = "drained"
 // probeKindAPIQuery 是「这个数字来自上游查询」的 probe_kind 取值。
 const probeKindAPIQuery = "api_query"
 
-// costPerUnit 取窗口内的平均每次请求成本，没有数据时返回 nil。
+// costPerUnit 取窗口内、**当前规范模型**下平均每次请求的上游成本，
+// 没有数据时返回 nil。
 //
-// 表里只有桶的成本**总额**与请求数，没有 token 总量，所以算不出
-// 每 token 的成本；每次请求的平均成本是这里能给出的最小单位。
+// 表里只有桶的成本**总额**与「有成本事件的请求数」，没有 token 总量，
+// 所以算不出每 token 的成本；每次请求的平均成本是这里能给出的最小单位。
+//
+// # 分子分母是同一批事件
+//
+// 分母用 cost_events（这个桶里带 upstream_cost 的用量事件条数），不是
+// requests。requests 对每一次尝试加一，而成本只在结算成功后才落进用量
+// 事件：失败与重试里的失败尝试会进 requests、不进 cost_events。两者混用
+// 时，失败多的渠道单位成本被系统性摊低，选路因此偏向它们（#807）。
+//
+// # 只看这个模型
+//
+// 桶按 (渠道, 规范模型, 小时) 存，查询已经按当前要发的模型过滤过。
+// 模型之间不再互相摊平。
 //
 // # NULL 与 0
 //
-// 那一列可空（见迁移 00046），两个值说的是两件事：
+// cost 那一列可空（见迁移 00046），两个值说的是两件事：
 //
-//   - NULL：这个窗口的桶里**没有一条带成本的事件**。写入侧按桶从
+//   - NULL：这个窗口里该模型的桶**没有一条带成本的事件**。写入侧按桶从
 //     usage_events 的 upstream_cost 重算（见 record.go 的 rollupSignalsSQL），
-//     整桶都是 NULL 时写回去的就是 NULL。这是「没有数据」，直接判 nil。
+//     整组都是 NULL 时写回去的就是 NULL。这是「没有数据」，直接判 nil。
 //   - 0：有带成本的事件，它们的合计确实是 0（例如规则显式写了免费）。
 //
 // 但 0 在这里仍然判成「没有数据」：接上写入侧之前那一列是
 // `NOT NULL DEFAULT 0`，而窗口里可能还留着那时写下的 0（那些桶没有成本
 // 事件，也不会再被重算）。把 0 当免费会让这些渠道拿到成本这一维的满分，
 // 而那正是最容易超支的路径。代价是「真的免费」也读作未知——两者中更保守
-// 的那一侧。要分出它，得让读侧知道那一桶的成本事件覆盖了多少请求。
+// 的那一侧。
+//
+// cost_events = 0 同样判 nil：没有分母，就说不出「每次多少钱」。
 //
 // 返回的 nil 是**「这一维没有数据」这个合法结论**，不是「出错了但没报」——
 // 所以这里显式 nolint 而不是造一个哨兵错误让每个调用方多判一次。
-//
-// # 分母是尝试次数，分子是结算成功那部分
-//
-// 桶里的 requests 由 Recorder 对**每一次尝试**加一（成功、失败与「不归因」
-// 都算），而分子只来自结算之后才落库的用量事件：失败的调用不结算，重试里
-// 失败的那几次也不结算。所以失败与重试多的渠道，这个平均数会被系统性摊低，
-// 选路因此偏向它们。分子与分母不是同一批请求；要改分母口径得在写入侧重新
-// 定义 requests。
-//
-// # 同一个桶里混着不同模型
-//
-// 桶按「渠道 × 小时」切，不按模型切：同一个渠道在这个小时里服务过的贵模型
-// 与便宜模型会合成一个总数，再按请求数摊。而选路比较的是某个具体模型的
-// 候选，模型之间的差别因此被摊平。桶的粒度是表结构定的，这一维能给出的
-// 只是渠道级的粗读数。
 func (row candidateRow) costPerUnit() (*float64, error) {
-	if row.requests <= 0 || !row.cost.Valid {
+	if row.costEvents <= 0 || !row.cost.Valid {
 		return nil, nil //nolint:nilnil // 见上
 	}
 	total, err := strconv.ParseFloat(row.cost.String, 64)
@@ -1003,7 +1027,7 @@ func (row candidateRow) costPerUnit() (*float64, error) {
 	if total <= 0 {
 		return nil, nil //nolint:nilnil // 见上
 	}
-	per := total / float64(row.requests)
+	per := total / float64(row.costEvents)
 	return &per, nil
 }
 
