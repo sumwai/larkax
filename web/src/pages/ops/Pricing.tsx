@@ -8,15 +8,8 @@ import { formatDateTime } from '../../lib/format'
 import { Alert, Button, Empty, Modal, PageHead, Skeleton, useToast } from '../../components/ui'
 import { IconPlus } from '../../components/icons'
 import { ExprEditor } from '../../components/ExprEditor'
-import {
-  Field,
-  InputError,
-  OpsLoadError,
-  SearchBox,
-  linesToList,
-  listToLines,
-  useConfirm,
-} from './common'
+import { Field, InputError, OpsLoadError, SearchBox } from './common'
+import { linesToList, listToLines, useConfirm } from './common-helpers'
 import { isDirty, useCloseGuard } from './guard'
 
 type Tab = 'rules' | 'costs'

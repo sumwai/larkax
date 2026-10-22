@@ -1677,6 +1677,26 @@ CI 包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`�
 非 UTC 时区下的时刻门禁（`TZ=Asia/Shanghai` 再跑一遍
 受影响的包，见 [cli-output.md](cli-output.md) 的「时刻与时区」）、契约测试（见下）。
 
+前端另有一个 `Web` job，与 `Go`、`契约` 并列，在 `web/` 下依次跑：
+`npm ci` → `npx tsc -b` → `npx vitest run` → `npx eslint src --max-warnings 0`。
+
+- `npm ci` 按 `web/package-lock.json` 精确安装，lock 与 `package.json` 对不上时
+  这一步就失败（`npm install` 会改写 lock，于是「锁文件可用」这条判据就没了）。
+  依赖缓存的键也是这份 lock。
+- 顺序是有意的：类型检查最先跑，它挂了之后的用例结果与 lint 结果都不必再看。
+- `vitest` 那一步除退出码外，还要从汇总行里取用例数：必须读到「Tests N passed」，
+  且跳过数为零。默认 reporter 的这一行是「跑了多少」的唯一正面证据；它不在输出里
+  （reporter 换了、输出被截断）时，退出码不能说明用例跑过（见
+  [LESSONS.md](../LESSONS.md) 第 16 条）。计数会打印在日志里，
+  「0 条跑过」与「全部通过」因此分得开。
+- `eslint` 带 `--max-warnings 0`：警告留着不管，下一次「只加一条警告」就没人拦。
+  `web/src/pages/ops` 下的组件与共享函数已按这条规则分成两个文件
+  （`common.tsx` 与 `common-helpers.tsx`），没有文件级豁免。
+
+耗时量级（本地一次完整跑；CI 上的实际耗时以那次运行的日志为准）：
+`npm ci` 约 10 秒（依赖缓存热的量级）、`tsc -b` 约 20 秒、
+`vitest run` 约 40–75 秒、`eslint src` 约 10 秒。
+
 **变异测试另有一个独立的工作流**（`.github/workflows/mutation.yml`），它跑的是
 真的 gremlins，不是脚本自测。**它只对搬钱的代码自动跑**：`internal/ledger/`、
 `internal/billing/`、`internal/money/` 这三棵树（账本、计费、金额），加上

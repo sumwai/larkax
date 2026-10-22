@@ -8,7 +8,8 @@ import { formatDateTime } from '../../lib/format'
 import { Alert, Button, Empty, Modal, PageHead, Skeleton, useToast } from '../../components/ui'
 import { IconPlus } from '../../components/icons'
 import { ExprEditor } from '../../components/ExprEditor'
-import { Field, InputError, OpsLoadError, linesToList, listToLines, useConfirm } from './common'
+import { Field, InputError, OpsLoadError } from './common'
+import { linesToList, listToLines, useConfirm } from './common-helpers'
 
 interface RuleForm {
   name: string
