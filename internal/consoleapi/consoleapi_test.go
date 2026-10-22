@@ -21,6 +21,7 @@ import (
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
+	"github.com/sumwai/larkax/internal/expiry"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/pricing"
@@ -1034,6 +1035,99 @@ func TestListKeysUsesBatchSpentAndCursor(t *testing.T) {
 	// 非法 status 在解析参数时就拒。
 	if rec := f.authed(t, http.MethodGet, PathPrefix+"keys?status=bogus", ""); rec.Code != http.StatusBadRequest {
 		t.Fatalf("非法 status 应当 400，得到 %d", rec.Code)
+	}
+}
+
+// TestKeyNeverExpires 钉住 never_expires 由服务端算：远期值与 NULL 都为真。
+//
+// 两种落库值表达的是同一件事，页面只读这一个布尔；所以除 expires_at 之外，
+// 这两把 key 的响应必须逐字段相同——那是前端「不看 expires_at」的依据。
+func TestKeyNeverExpires(t *testing.T) {
+	f := newFixture(t)
+	forever := expiry.Forever()
+	realExpiry := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	f.keys.put(auth.Key{ID: 1, UserID: 7, Status: "active", CreatedAt: testNow, ExpiresAt: &forever})
+	f.keys.put(auth.Key{ID: 2, UserID: 7, Status: "active", CreatedAt: testNow})
+	f.keys.put(auth.Key{ID: 3, UserID: 7, Status: "active", CreatedAt: testNow, ExpiresAt: &realExpiry})
+
+	// 三把都显式登记，期望值不留默认：没登记的 id 不该在响应里出现，也不该
+	// 被 map 的零值当成「期望 false」而放过。expires_at 的期望值里 nil 表示
+	// 库里是 NULL。
+	foreverAt := expiry.ForeverRFC3339
+	realAt := "2030-01-02T03:04:05Z"
+	want := map[int64]bool{1: true, 2: true, 3: false}
+	wantExpiresAt := map[int64]*string{1: &foreverAt, 2: nil, 3: &realAt}
+
+	rec := f.authed(t, http.MethodGet, PathPrefix+"keys", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("列 key 应当 200，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	var page keyPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if len(page.Items) != 3 {
+		t.Fatalf("列出 %d 把 key，期望 3", len(page.Items))
+	}
+	for _, item := range page.Items {
+		never, ok := want[item.ID]
+		if !ok {
+			t.Fatalf("列表里出现未登记的 id=%d", item.ID)
+		}
+		if item.NeverExpires != never {
+			t.Errorf("列表里 id=%d 的 never_expires = %v，期望 %v",
+				item.ID, item.NeverExpires, never)
+		}
+	}
+
+	raws := map[int64]map[string]any{}
+	for _, id := range []int64{1, 2, 3} {
+		rec := f.authed(t, http.MethodGet, PathPrefix+"keys/"+strconv.FormatInt(id, 10), "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("读 id=%d 应当 200，得到 %d: %s", id, rec.Code, rec.Body.String())
+		}
+		var got keyJSON
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("详情不是 JSON: %v", err)
+		}
+		if got.NeverExpires != want[id] {
+			t.Errorf("详情里 id=%d 的 never_expires = %v，期望 %v",
+				id, got.NeverExpires, want[id])
+		}
+		// expires_at 的值与类型都不动：远期值照打，库里是 NULL 时字段照旧出现、值为 null。
+		wantAt := wantExpiresAt[id]
+		switch {
+		case wantAt == nil && got.ExpiresAt != nil:
+			t.Errorf("NULL 那一把的 expires_at = %q，期望 null", *got.ExpiresAt)
+		case wantAt != nil && got.ExpiresAt == nil:
+			t.Errorf("id=%d 的 expires_at 不见了，期望 %q", id, *wantAt)
+		case wantAt != nil && *got.ExpiresAt != *wantAt:
+			t.Errorf("id=%d 的 expires_at = %q，期望 %q", id, *got.ExpiresAt, *wantAt)
+		}
+
+		var raw map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+			t.Fatalf("详情不是 JSON: %v", err)
+		}
+		// 解码到 *string 时 null 与字段缺席都是 nil，分不出来；这里按原始 JSON
+		// 断言字段确实在：NULL 那一把给的是 "expires_at": null，不是没有这个键。
+		if id == 2 {
+			value, present := raw["expires_at"]
+			if !present || value != nil {
+				t.Errorf("NULL 那一把的 expires_at 应当出现且为 null，得到 present=%v value=%v",
+					present, value)
+			}
+		}
+		raws[id] = raw
+	}
+
+	// id 是行身份，两把 key 必然不同；除它之外只允许 expires_at 有差别。
+	for _, id := range []int64{1, 2} {
+		delete(raws[id], "id")
+		delete(raws[id], "expires_at")
+	}
+	if !reflect.DeepEqual(raws[1], raws[2]) {
+		t.Errorf("远期值与 NULL 两种除 expires_at 外有差别：\n远期值: %v\nNULL:   %v", raws[1], raws[2])
 	}
 }
 

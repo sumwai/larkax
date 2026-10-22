@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/auth"
+	"github.com/sumwai/larkax/internal/expiry"
 	"github.com/sumwai/larkax/internal/settings"
 	"github.com/sumwai/larkax/internal/snapshotwire"
 )
@@ -54,7 +55,7 @@ const consentUsage = `larkaxctl consent 管理「原样采集请求正文」的�
 
 single_request 的到期时间三选一，一次只给一个：--expires-at 是一个 RFC3339
 时刻；--ttl 是从现在起的一段时长（12h、30d、3m、1y）；--forever 写远期上限
-` + foreverExpiresAt + `。后两种同样受下面的时长上限约束。
+` + expiry.ForeverRFC3339 + `。后两种同样受下面的时长上限约束。
 
 两种范围都要过 --agree。不带它时命令只把同意文案打出来，什么都不写：
 同意文案与它的版本号要一起落库（capture_consents 的 consent_text 与
