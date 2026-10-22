@@ -1638,6 +1638,25 @@ textarea.input {
   align-items: center;
 }
 /*
+ * 筛选条：目录可能有几百行，滚到底还要能改筛选，所以钉在顶栏下面。
+ * 背景必须不透明——列表会从它底下滚过，半透明或 transparent 都能看见字。
+ * 层级低于顶栏（30），高过列表内容即可。
+ */
+.model-filter-bar {
+  position: sticky;
+  top: 56px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.model-count {
+  color: var(--muted);
+}
+/*
  * 模型列表这一格搜索框的宽度。
  *
  * 原来是一个裸 `<input>`（`width: 100%`）在容器里撑出来的 231px；换成共享的

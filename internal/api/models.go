@@ -288,8 +288,8 @@ func (h *Handler) availableModels(ctx context.Context) ([]modelJSON, error) {
 		}
 		// 没有报价的模型仍然列出：它能不能用只取决于有没有渠道在供，与
 		// 有没有配价无关。把「无价」实现成「不列」，调用方会以为模型不可
-		// 用；而它其实能调通，只是账单上还没有价（契约用例用一条没有计价
-		// 规则的渠道钉着这一点）。
+		// 用；而它其实能调通，只是账单上还没有价（`TestModelsKeepModelsWithoutOffers`
+		// 用一条没有计价规则的渠道钉着这一点）。
 		items = append(items, item)
 	}
 	return items, nil
