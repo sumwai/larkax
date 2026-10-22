@@ -41,12 +41,19 @@ function LoadingScreen() {
   )
 }
 
+/**
+ * 登录门槛。
+ *
+ * 地址带在 `?next=` 上而不是路由 state 里：会话失效这一下是被动发生的，
+ * 用户可能顺手刷新一次登录页，state 一刷就没了，`next` 还在。
+ */
 function RequireAuth({ children }: { children: ReactNode }) {
   const { status } = useAuth()
   const location = useLocation()
   if (status === 'loading') return <LoadingScreen />
   if (status === 'anonymous') {
-    return <Navigate to="/login" replace state={{ from: location.pathname }} />
+    const next = `${location.pathname}${location.search}${location.hash}`
+    return <Navigate to={`/login?next=${encodeURIComponent(next)}`} replace />
   }
   return <>{children}</>
 }

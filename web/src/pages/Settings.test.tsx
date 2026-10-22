@@ -25,6 +25,7 @@ vi.mock('../api', () => ({
     changePassword: mocks.changePassword,
     logout: mocks.logout,
     setCsrfToken: vi.fn(),
+    setUnauthorizedHandler: vi.fn(),
   },
 }))
 

@@ -12,12 +12,28 @@ interface Errors {
   form?: string
 }
 
+/**
+ * 登录后要回的地址，来自门槛给的 `?next=`。
+ *
+ * 只认站内路径：`//evil.example` 与 `/\evil.example` 在浏览器眼里都是别的主机，
+ * 而这里是登录成功后直接 navigate 的目标。指回登录页自己的也丢掉——
+ * 登录成功后落在登录页，它又会把已登录的人再往 `/login` 送，来回打转。
+ */
+function nextPath(search: string): string {
+  const next = new URLSearchParams(search).get('next')
+  if (!next || !next.startsWith('/')) return '/app'
+  if (next.startsWith('//') || next.startsWith('/\\')) return '/app'
+  const path = next.split(/[?#]/, 1)[0]
+  if (path === '/login' || path === '/login/') return '/app'
+  return next
+}
+
 export function Login() {
   const { t } = useI18n()
   const { status, login } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
-  const from = (location.state as { from?: string } | null)?.from ?? '/app'
+  const from = nextPath(location.search)
 
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')

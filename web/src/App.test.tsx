@@ -1,10 +1,12 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
+import { ApiError } from './api'
 import type { ChannelOpsClient } from './api/types'
 
 const mocks = vi.hoisted(() => ({
   session: vi.fn(),
+  login: vi.fn(),
   listChannels: vi.fn(),
   getChannel: vi.fn(),
   createChannel: vi.fn(),
@@ -21,6 +23,9 @@ const mocks = vi.hoisted(() => ({
   updateMe: vi.fn(),
   changePassword: vi.fn(),
 }))
+
+/** `AuthProvider` 注册进来的失效回调；用例用它模拟「业务请求撞上 401」。 */
+const auth = vi.hoisted(() => ({ unauthorized: null as (() => void) | null }))
 
 vi.mock('./api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api')>()
@@ -52,10 +57,14 @@ vi.mock('./api', async (importOriginal) => {
       models: mocks.models,
       meta: mocks.meta,
       session: mocks.session,
+      login: mocks.login,
       updateMe: mocks.updateMe,
       changePassword: mocks.changePassword,
       setCsrfToken: vi.fn(),
       logout: vi.fn(),
+      setUnauthorizedHandler: (handler: (() => void) | null) => {
+        auth.unauthorized = handler
+      },
     },
   }
 })
@@ -260,5 +269,88 @@ describe('运营视图的角色门槛', () => {
     await open('merchant', '/app/admin/channels')
     expect(await screen.findByText('这个视图不在你的权限范围内。')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '回到概览' })).toHaveAttribute('href', '/app')
+  })
+})
+
+describe('会话失效后的引导', () => {
+  beforeEach(() => {
+    Object.values(mocks).forEach((mock) => mock.mockReset())
+    auth.unauthorized = null
+    mocks.listChannels.mockResolvedValue([])
+    mocks.listAdapters.mockResolvedValue([])
+    mocks.listModels.mockResolvedValue([])
+    mocks.models.mockResolvedValue([])
+    mocks.listRules.mockResolvedValue([])
+    mocks.meta.mockResolvedValue({
+      site_name: 'larkax',
+      api_base_url: 'https://api.example.com/v1',
+      currency: 'USD',
+      timezone: 'Asia/Shanghai',
+      locales: ['en', 'zh'],
+      features: { registration: false, password_reset: 'admin', topup: false },
+    })
+  })
+
+  afterEach(() => {
+    window.history.pushState({}, '', '/')
+  })
+
+  it('会话失效后跳到登录页，next 是原地址，登录后回到那里', async () => {
+    await open('user', '/app/settings')
+
+    // 连着三下：同一轮会话里三个请求各自 401 时，后到的不能把 `next` 覆盖掉。
+    act(() => auth.unauthorized?.())
+    act(() => auth.unauthorized?.())
+    act(() => auth.unauthorized?.())
+
+    expect(window.location.pathname).toBe('/login')
+    expect(new URLSearchParams(window.location.search).get('next')).toBe('/app/settings')
+
+    mocks.login.mockResolvedValue(sessionOf('user'))
+    fireEvent.change(await screen.findByLabelText('用户名'), { target: { value: 'user-account' } })
+    fireEvent.change(screen.getByLabelText('口令'), { target: { value: 'a-long-password' } })
+    fireEvent.click(screen.getByRole('button', { name: '登录' }))
+
+    await waitFor(() => expect(window.location.pathname).toBe('/app/settings'))
+  })
+
+  it('匿名态停在落地页时，晚到的 401 不把人赶去登录页', async () => {
+    window.history.pushState({}, '', '/')
+    mocks.session.mockResolvedValue(null)
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '一个密钥，接入全部主流模型' })).toBeInTheDocument()
+    expect(auth.unauthorized).not.toBeNull()
+    act(() => auth.unauthorized?.())
+
+    expect(window.location.pathname).toBe('/')
+    expect(screen.queryByLabelText('用户名')).toBeNull()
+  })
+
+  it('403 留在原页：会话是好的，只是这次操作没权限', async () => {
+    window.history.pushState({}, '', '/app/admin/channels')
+    mocks.session.mockResolvedValue(sessionOf('admin'))
+    mocks.listChannels.mockRejectedValue(new ApiError(403, 'forbidden', 'nope'))
+    render(<App />)
+
+    expect(await screen.findByText('没有权限访问这个资源。')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/app/admin/channels')
+  })
+
+  it('登录页口令错时留在登录页，next 也不丢', async () => {
+    window.history.pushState({}, '', '/login?next=%2Fapp%2Fsettings')
+    mocks.session.mockResolvedValue(null)
+    mocks.login.mockRejectedValue(new ApiError(401, 'invalid_credentials', 'nope'))
+    render(<App />)
+
+    fireEvent.change(await screen.findByLabelText('用户名'), { target: { value: 'demo' } })
+    fireEvent.change(screen.getByLabelText('口令'), { target: { value: 'wrong-password' } })
+    fireEvent.click(screen.getByRole('button', { name: '登录' }))
+
+    expect(
+      await screen.findByText('用户名或口令不对。检查一下输入，或者联系运营确认账号。'),
+    ).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(new URLSearchParams(window.location.search).get('next')).toBe('/app/settings')
   })
 })

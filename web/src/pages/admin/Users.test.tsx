@@ -30,6 +30,7 @@ vi.mock('../../api', async (importOriginal) => {
       meta: mocks.meta,
       session: mocks.session,
       setCsrfToken: mocks.setCsrfToken,
+      setUnauthorizedHandler: vi.fn(),
     },
   }
 })

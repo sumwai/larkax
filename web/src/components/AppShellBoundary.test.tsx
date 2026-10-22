@@ -12,6 +12,7 @@ vi.mock('../api', () => ({
   api: {
     session: mocks.session,
     setCsrfToken: vi.fn(),
+    setUnauthorizedHandler: vi.fn(),
     logout: vi.fn(),
   },
 }))
