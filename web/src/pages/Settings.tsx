@@ -1,28 +1,27 @@
 import { useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../auth/AuthProvider'
 import { useI18n } from '../i18n'
 import type { Lang } from '../i18n'
 import { useTheme, type Theme } from '../theme/ThemeProvider'
-import {
-  Alert,
-  Button,
-  Modal,
-  PageHead,
-  Select,
-  useToast,
-} from '../components/ui'
-import { IconLogout } from '../components/icons'
+import { Alert, Button, PageHead, Select, useToast } from '../components/ui'
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-export function Settings() {
-  const { t, lang, setLang } = useI18n()
-  const { theme, setTheme } = useTheme()
-  const { user, setUser, logout } = useAuth()
+/**
+ * 账号相关的两块：账户信息与修改口令。
+ *
+ * 商家视图把「账号」与「设置」拆成两页，用户与管理员没有「账号」这一项，
+ * 这两块仍留在他们的设置页里。两处渲染的是同一份实现，不是各抄一份表单——
+ * 复制一份，改文案时就会只改到一边。
+ *
+ * 退出登录不在这里：顶栏账户菜单与移动端抽屉各有一条，够了。再放一条就是
+ * 第三个入口，还要多一个确认对话框。
+ */
+export function AccountSections() {
+  const { t } = useI18n()
+  const { user, setUser } = useAuth()
   const { show: toast } = useToast()
-  const navigate = useNavigate()
 
   const [displayName, setDisplayName] = useState(user?.display_name ?? '')
   const [email, setEmail] = useState(user?.email ?? '')
@@ -34,9 +33,6 @@ export function Settings() {
   const [confirm, setConfirm] = useState('')
   const [passwordError, setPasswordError] = useState<string | null>(null)
   const [passwordPending, setPasswordPending] = useState(false)
-
-  const [logoutOpen, setLogoutOpen] = useState(false)
-  const [logoutPending, setLogoutPending] = useState(false)
 
   const saveProfile = async (event: FormEvent) => {
     event.preventDefault()
@@ -103,26 +99,8 @@ export function Settings() {
     }
   }
 
-  const doLogout = async () => {
-    setLogoutPending(true)
-    try {
-      await logout()
-      navigate('/login', { replace: true })
-    } finally {
-      setLogoutPending(false)
-    }
-  }
-
-  const themeOptions: Array<{ value: Theme; label: string }> = [
-    { value: 'system', label: t('settings.themeSystem') },
-    { value: 'light', label: t('settings.themeLight') },
-    { value: 'dark', label: t('settings.themeDark') },
-  ]
-
   return (
     <>
-      <PageHead title={t('settings.title')} subtitle={t('settings.subtitle')} />
-
       <div className="grid-2">
         <section className="card panel">
           <div>
@@ -219,74 +197,83 @@ export function Settings() {
           </form>
         </section>
       </div>
+    </>
+  )
+}
 
-      <section className="card panel">
-        <div>
-          <h2>{t('settings.appearance')}</h2>
-          <p className="sub">{t('settings.subtitle')}</p>
-        </div>
-        <div className="form-grid">
-          <div className="field">
-            <label>{t('settings.language')}</label>
-            <Select<Lang>
-              value={lang}
-              ariaLabel={t('settings.language')}
-              options={[
-                { value: 'zh', label: '中文' },
-                { value: 'en', label: 'English' },
-              ]}
-              onChange={setLang}
-            />
-          </div>
-          <div className="field">
-            <label>{t('settings.theme')}</label>
-            <div className="seg" role="group" aria-label={t('settings.theme')}>
-              {themeOptions.map((option) => (
-                <button
-                  key={option.value}
-                  aria-pressed={theme === option.value}
-                  onClick={() => setTheme(option.value)}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      </section>
+/**
+ * 界面偏好：语言与主题。
+ *
+ * 两项都存在浏览器里，只影响这台设备的显示，不落服务端；商家业务配置
+ * 是另一类东西，等有了商家级的 settings 作用域再放进来。
+ */
+export function AppearanceSection() {
+  const { t, lang, setLang } = useI18n()
+  const { theme, setTheme } = useTheme()
 
-      <section className="card panel">
-        <div className="head">
-          <div>
-            <h2>{t('settings.logout')}</h2>
-            <p>{t('settings.logoutBody')}</p>
-          </div>
-          <Button variant="danger" icon={<IconLogout size={15} />} onClick={() => setLogoutOpen(true)}>
-            {t('settings.logout')}
-          </Button>
-        </div>
-      </section>
+  const themeOptions: Array<{ value: Theme; label: string }> = [
+    { value: 'system', label: t('settings.themeSystem') },
+    { value: 'light', label: t('settings.themeLight') },
+    { value: 'dark', label: t('settings.themeDark') },
+  ]
 
-      {logoutOpen && (
-        <Modal
-          sheetSize="sm"
-          title={t('settings.logout')}
-          description={t('settings.logoutBody')}
-          onClose={() => setLogoutOpen(false)}
-          footer={
-            <>
-              <Button variant="secondary" onClick={() => setLogoutOpen(false)}>
-                {t('common.cancel')}
-              </Button>
-              <Button variant="danger" loading={logoutPending} onClick={doLogout}>
-                {t('settings.logoutConfirm')}
-              </Button>
-            </>
-          }
-        >
-          <p className="sub">{user?.display_name ?? user?.username}</p>
-        </Modal>
-      )}
+  return (
+    <section className="card panel">
+      <div>
+        <h2>{t('settings.appearance')}</h2>
+        <p className="sub">{t('settings.appearanceBody')}</p>
+      </div>
+      <div className="form-grid">
+        <div className="field">
+          <label>{t('settings.language')}</label>
+          <Select<Lang>
+            value={lang}
+            ariaLabel={t('settings.language')}
+            options={[
+              { value: 'zh', label: '中文' },
+              { value: 'en', label: 'English' },
+            ]}
+            onChange={setLang}
+          />
+        </div>
+        <div className="field">
+          <label>{t('settings.theme')}</label>
+          <div className="seg" role="group" aria-label={t('settings.theme')}>
+            {themeOptions.map((option) => (
+              <button
+                key={option.value}
+                aria-pressed={theme === option.value}
+                onClick={() => setTheme(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+/** 用户与管理员看到的设置页：账号段与偏好段都在这一页里。 */
+export function Settings() {
+  const { t } = useI18n()
+  return (
+    <>
+      <PageHead title={t('settings.title')} subtitle={t('settings.subtitle')} />
+      <AccountSections />
+      <AppearanceSection />
+    </>
+  )
+}
+
+/** 商家视图的设置页：只有界面偏好，账号段在同级的「账号」页。 */
+export function MerchantSettings() {
+  const { t } = useI18n()
+  return (
+    <>
+      <PageHead title={t('settings.title')} subtitle={t('settings.preferencesSubtitle')} />
+      <AppearanceSection />
     </>
   )
 }
