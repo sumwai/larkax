@@ -25,14 +25,15 @@ var walletPaymentHelp = helpText{short: walletPaymentShortUsage, long: walletPay
 const walletPaymentShortUsage = `larkaxctl wallet payment 走支付通道建单，并查一张单子的现状。
 
 用法：
-  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号>
+  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号> | --auto-ref
                                   [--asset <资产>] [--notify-url <回调地址>] [--dry-run]
   larkaxctl wallet payment status --order <订单号>
 
 这条通道默认关闭：settings.payment.fake_enabled 为 true 时才挂回调入口、才允许下单。
 create 落一张 payment_orders（状态 created），通道通知到达后才入账。
 status 同时打本地的状态与通道侧报的状态。create 的 --dry-run 不向通道下单，
-只把本地那一行写一遍再回滚。
+只把本地那一行写一遍再回滚。--auto-ref 现生成 MANUAL_<UTC 日期>_<随机段> 的单号并打在
+输出里，重跑不会幂等。
 
 更细的边界：larkaxctl wallet payment help。
 `
@@ -41,7 +42,7 @@ status 同时打本地的状态与通道侧报的状态。create 的 --dry-run �
 const walletPaymentUsage = `larkaxctl wallet payment 走支付通道建单，并查一张单子的现状。
 
 用法：
-  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号>
+  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号> | --auto-ref
                                   [--asset <资产>] [--notify-url <回调地址>] [--dry-run]
   larkaxctl wallet payment status --order <订单号>
 
@@ -52,6 +53,9 @@ create 在通道侧建单，并往 payment_orders 写一行（状态 created）�
 --ref 是商户单号（订单号），必填，同时是幂等键：同一个单号重跑只会得到同一张
 单子，内容不同的重跑报冲突（退出 4）。它也是通道通知里认回这张单子的依据。
 它不能带控制字符（理由与 wallet credit 的 --ref 相同）。
+
+--auto-ref 是 --ref 的替代：命令现生成一个 MANUAL_<UTC 日期>_<随机段> 的单号并打进
+输出，重跑不会幂等。两个都给、或两个都不给都是参数错（退出 2）。
 
 --amount 必填且为正，--user 收 ID 或用户名。--asset 默认取
 settings.billing.default_asset。--notify-url 是通道把结果发回来的地址，本命令
@@ -141,6 +145,7 @@ func runPaymentCreate(args []string) error {
 	amount := fs.String("amount", "", "")
 	asset := fs.String("asset", "", "")
 	ref := fs.String("ref", "", "")
+	autoRef := autoRefFlag(fs)
 	notifyURL := fs.String("notify-url", "", "")
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
@@ -153,10 +158,10 @@ func runPaymentCreate(args []string) error {
 	if strings.TrimSpace(*user) == "" {
 		return usageErr(errors.New("缺少 --user"))
 	}
-	orderNo := strings.TrimSpace(*ref)
-	if orderNo == "" {
-		return usageErr(errors.New(
-			"缺少 --ref：它是商户单号，同时是幂等键——通道按它认回这张单子，重跑靠它认出「已经下过单」"))
+	orderNo, refErr := resolveOrderRef(*ref, *autoRef, missingRefError(
+		"它是商户单号，同时是幂等键——通道按它认回这张单子，重跑靠它认出「已经下过单」"))
+	if refErr != nil {
+		return refErr
 	}
 	if keyErr := checkOrderKey("--ref", orderNo); keyErr != nil {
 		return keyErr

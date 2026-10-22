@@ -20,7 +20,7 @@ import (
 const walletRefundShortUsage = `larkaxctl wallet refund 把用户已经付过的钱退回去。
 
 用法：
-  larkaxctl wallet refund --user <ID 或用户名> --amount <金额> --ref <外部单据号>
+  larkaxctl wallet refund --user <ID 或用户名> --amount <金额> --ref <外部单据号> | --auto-ref
                           [--asset <资产>] [--memo <原因>]
                           [--merchant <ID 或用户名>] [--merchant-share <金额>]
                           [--upstream-cost <金额>] [--dry-run]
@@ -28,9 +28,10 @@ const walletRefundShortUsage = `larkaxctl wallet refund 把用户已经付过的
 退款走账本写一组 refund 分录：借 user:<用户>，贷 merchant_payable / upstream_cost /
 platform_revenue。--amount 必填且为正，是退给用户的金额；--merchant-share 与
 --upstream-cost 是这次要冲回的分成与上游成本，不写就都算平台退还的收入，写的时候两项
-之和不能超过 --amount。--ref 必填，它是这笔退款的外部单据号，同时是幂等键：同一条命令
-重跑两次只退一次。钱包必须已经存在（先 wallet create）。--dry-run 走同一条写路径后回滚，
-打印将写入的分录而不动库。
+之和不能超过 --amount。--ref 与 --auto-ref 二选一，给的那个是外部单据号，同时是幂等键：
+同一个单号重跑两次只退一次；--auto-ref 现生成 MANUAL_<UTC 日期>_<随机段> 的单号并打在
+输出里，重跑不会幂等。钱包必须已经存在（先 wallet create）。--dry-run 走同一条写路径后
+回滚，打印将写入的分录而不动库。
 
 更细的边界：larkaxctl wallet refund help。
 `
@@ -39,7 +40,7 @@ platform_revenue。--amount 必填且为正，是退给用户的金额；--merch
 const walletRefundUsage = `larkaxctl wallet refund 把用户已经付过的钱退回去。
 
 用法：
-  larkaxctl wallet refund --user <ID 或用户名> --amount <金额> --ref <外部单据号>
+  larkaxctl wallet refund --user <ID 或用户名> --amount <金额> --ref <外部单据号> | --auto-ref
                           [--asset <资产>] [--memo <原因>]
                           [--merchant <ID 或用户名>] [--merchant-share <金额>]
                           [--upstream-cost <金额>] [--dry-run]
@@ -64,11 +65,14 @@ const walletRefundUsage = `larkaxctl wallet refund 把用户已经付过的钱�
 ——后者不是退款，是一笔要单独说明的调账（用 wallet adjust）。这条上界本命令不查：
 账本那一层看不到原始消费，命令行这一路也不去回查那条计费请求，所以**由操作者保证**。
 
---ref 必填，它是这笔退款对应的**外部单据号**（退款单号、通道的退款流水号），它同时是
-幂等键：被确定性地映射成这次交易的 txn_id，于是同一条命令重跑两次只会退一次。同一个
---ref 配不同的金额、用户或对家不是重放，而是冲突（退出 4），一笔都不写。键里不能有
-控制字符——它既算交易号又进备注，理由与 credit 那一条相同。**几条命令的键互不相认**：
-同一个单据号在 refund 与 credit 上是两笔互不相干的交易。
+--ref 是这笔退款对应的**外部单据号**（退款单号、通道的退款流水号），必填——除非改用
+--auto-ref。它同时是幂等键：被确定性地映射成这次交易的 txn_id，于是同一条命令重跑两次
+只会退一次。同一个 --ref 配不同的金额、用户或对家不是重放，而是冲突（退出 4），一笔都不
+写。键里不能有控制字符——它既算交易号又进备注，理由与 credit 那一条相同。**几条命令的
+键互不相认**：同一个单据号在 refund 与 credit 上是两笔互不相干的交易。
+
+--auto-ref 是这条旗标的替代：命令现生成一个 MANUAL_<UTC 日期>_<随机段> 的单号并打进
+输出，重跑不会幂等。两个都给、或两个都不给都是参数错，退出 2。
 
 --memo 是退款原因，可以不写；写的时候不能带控制字符——回显打的是原样的原因，而进分录
 的那一份会把它们换成空格，两边就不是同一个串了。这是**可选**的原因：对账时「为什么退」
@@ -83,7 +87,7 @@ const walletRefundUsage = `larkaxctl wallet refund 把用户已经付过的钱�
 
 --dry-run 走与真跑同一条写路径（同一份校验、同一份幂等判据），把这一笔要写的分录
 逐条打出来之后回滚：余额、账本行与钱包快照都不变。参数错与业务拒绝（金额格式、用户
-不存在、--ref 缺失、分账之和超过退款额）在干跑下同样报错、同样退出码。
+不存在、--ref 与 --auto-ref 都没给、分账之和超过退款额）在干跑下同样报错、同样退出码。
 
 更细的约定见 docs/cli-reference.md 的「wallet」一节。
 `
@@ -122,6 +126,7 @@ func runWalletRefund(args []string) error {
 	amount := fs.String("amount", "", "")
 	asset := fs.String("asset", "", "")
 	ref := fs.String("ref", "", "")
+	autoRef := autoRefFlag(fs)
 	memo := fs.String("memo", "", "")
 	merchant := fs.String("merchant", "", "")
 	merchantShare := fs.String("merchant-share", "", "")
@@ -139,10 +144,10 @@ func runWalletRefund(args []string) error {
 	}
 	// 外部单据号必填且没有默认值，理由与 credit 那一条相同：默认值会把「操作者
 	// 忘了给单号」变成两笔互不相干的退款，而这两笔在账面上都合法。
-	refundRef := strings.TrimSpace(*ref)
-	if refundRef == "" {
-		return usageErr(errors.New(
-			"缺少 --ref：它是这笔退款对应的外部单据号，同时是幂等键——重跑同一条命令时靠它认出「已经退过款」"))
+	refundRef, refErr := resolveOrderRef(*ref, *autoRef, missingRefError(
+		"它是这笔退款对应的外部单据号，同时是幂等键——重跑同一条命令时靠它认出「已经退过款」"))
+	if refErr != nil {
+		return refErr
 	}
 	if ctrlErr := checkOrderKey("--ref", refundRef); ctrlErr != nil {
 		return ctrlErr
