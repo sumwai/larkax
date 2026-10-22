@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react'
+import { Link } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../auth/AuthProvider'
 import { useI18n } from '../i18n'
@@ -274,6 +275,25 @@ export function MerchantSettings() {
     <>
       <PageHead title={t('settings.title')} subtitle={t('settings.preferencesSubtitle')} />
       <AppearanceSection />
+      {/*
+       * 点进设置的人常常是来改账户的，顶栏头像也落在这里。页底给一个可点的
+       * 落点，别让人看完语言与主题再自己去找「账号」。
+       */}
+      <section className="card panel">
+        <div>
+          <h2>{t('settings.accountEntry')}</h2>
+          {/*
+           * 链接放在句子末尾而不是做成右侧按钮：英文的按钮文案比中文长得多，
+           * 一行 Flex 放不下时会被挤到视口外；行内链接跟着文字一起折行。
+           */}
+          <p className="sub">
+            {t('settings.accountEntryBody')}{' '}
+            <Link className="inline-link" to="/app/merchant/account">
+              {t('settings.accountLink')}
+            </Link>
+          </p>
+        </div>
+      </section>
     </>
   )
 }
