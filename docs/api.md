@@ -67,7 +67,8 @@
   用的资产是同一个值——本接口不在响应里另配一份。它是这里多加的一项（与
   `offers` 一样）：OpenAI 的 Model 列表没有它，不读这个字段的客户端不受影响。
   只调单条端点、又需要币种的调用方，读清单顶层的那一个值。没有它时，调用方
-  拿到 `"0.00350000"` 只能猜是人民币还是美元
+  拿到 `"0.00350000"` 只能猜是人民币还是美元。同一个值也作为 `currency`
+  出现在 [控制台站点信息](#控制台站点信息) 一节
 
 - `offers` 是供应这个模型的**报价**，每项一条：
   - `merchant` 是渠道所属商家的用户名；`null` 表示平台自营渠道
@@ -294,6 +295,62 @@
 - `reference_at` 是这次求价的时刻；报价随规则分时变化，以结算金额为准。
 - 这条响应的 `Cache-Control` 是 `public, max-age=60`：它只依赖目录与计价
   规则，不随调用方变化。
+
+### 控制台站点信息
+
+`GET /api/v1/meta`（`internal/consoleapi/consoleapi.go:398`）返回这个站点的部署
+常量：站点名、推理入口地址、币种、时区、界面语言与几项能力开关。界面在启动时
+先读它（`web/src/site/SiteProvider.tsx:29`）——要它先登录，等于让登录页不知道
+自己在哪个站（`internal/consoleapi/handlers_public.go:15-18` 的注释）。这条路径
+**公开只读、不要求会话**，也不认 API Key。
+
+成功时正文直接是这个对象，没有外层信封，响应头带 `Cache-Control: no-store`
+（`internal/consoleapi/consoleapi.go:761-763`）：
+
+```json
+{
+  "site_name": "larkax",
+  "api_base_url": "https://api.example.com/v1",
+  "currency": "CNY",
+  "timezone": "Asia/Shanghai",
+  "locales": ["en", "zh"],
+  "features": {"registration": false, "password_reset": "admin", "topup": false}
+}
+```
+
+| 字段 | 类型 | 含义 | 来源 |
+|---|---|---|---|
+| `site_name` | string | 站点显示名 | 当前装配固定传 `larkax`（`internal/assembly/assembly.go:731`） |
+| `api_base_url` | string | 推理入口的 base URL，例如 `https://api.example.com/v1` | 配置了固定值时用它，否则按这次请求推出来，见下（`internal/consoleapi/handlers_public.go:43-48`） |
+| `currency` | string | 结算与界面展示用的币种 | `settings.billing.default_asset`（`internal/assembly/assembly.go:424` 读出、`:732` 传入），迁移里播种为 `CNY`（`internal/migrate/sql/00002_settings.sql:44`） |
+| `timezone` | string | 站点当地的 IANA 时区名 | `settings.calendar.default_region` 经 `calendar.Timezone` 映射（`internal/assembly/assembly.go:712-715`），地区 `CN` 对应 `Asia/Shanghai`（`internal/calendar/calendar.go:76-78`）；映射不出来时回退 `Asia/Shanghai`（`internal/consoleapi/consoleapi.go:339-347`） |
+| `locales` | string[] | 界面支持的语言 | 固定 `["en", "zh"]`（`internal/consoleapi/handlers_public.go:54`） |
+| `features` | object | 给界面做分支的能力开关 | 三个键固定值，见下（`internal/consoleapi/handlers_public.go:55-59`） |
+
+`api_base_url` 分两种情况。配置了固定值时，取它去掉尾部一个 `/` 的结果
+（`internal/consoleapi/consoleapi.go:316`）；没有配置时，按这次请求推出
+`scheme://host` 再拼上 `/v1`（`internal/consoleapi/handlers_public.go:43-48`）。
+scheme 默认 `http`，请求走 TLS 时是 `https`；`X-Forwarded-Proto` 与
+`X-Forwarded-Host` 只在受信代理时读（`internal/consoleapi/consoleapi.go:597-614`）。
+受信指直连对端在 loopback 或私有网段，或者部署时显式打开了 `Config.TrustProxy`
+（`internal/consoleapi/consoleapi.go:625-629`）；公网客户端自己写这两个头不参与。
+当前装配不给固定值，所以这个字段总是从请求推出来的。
+
+`currency` 与 `GET /v1/models` 响应顶层的 `currency` 是同一个值、同一个来源；
+单条 `/v1/models/{id}` 有意不带它。库里缺 `settings.billing.default_asset`
+这一行时，装配直接失败，不会退回默认值（`internal/assembly/assembly.go:425-427`、
+`internal/settings/settings.go:309`）：币种的真实来源是迁移里的播种值。
+
+`timezone` 是站点当地的时区，按「当地今天」切分的读点（例如用量统计的起止与
+按日分桶）用它（`internal/consoleapi/handlers_usage.go:156`、`:175`）。装配时
+这个时区名要先经过 `time.LoadLocation` 解析，解析失败会让启动直接 panic
+（`internal/consoleapi/consoleapi.go:339-347`）：它不是一段可以随便填的展示文案。
+
+`features` 是给界面做分支用的开关，不是长期约定。v1 里 `registration` 与
+`topup` 固定 `false`，`password_reset` 固定 `"admin"`（找回口令走运维），
+三项都写死在 handler 里（`internal/consoleapi/handlers_public.go:55-59`）。
+把它们做成响应字段而不是让前端写死，是因为它们将来会变；调用方按当前返回的
+值分支即可。
 
 ### 支付回调
 
