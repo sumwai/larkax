@@ -1036,7 +1036,8 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	// 成本这一维仍然永远没有数据——所以这里按渠道读回库里那一行。
 	var bucketCost sql.NullString
 	if costErr := db.QueryRowContext(ctx, `
-		SELECT cost::text FROM channel_health_rollup WHERE channel_id = $1`, channelID,
+		SELECT cost::text FROM channel_health_rollup
+		 WHERE channel_id = $1 AND model = ''`, channelID,
 	).Scan(&bucketCost); costErr != nil {
 		t.Fatalf("查渠道健康度桶的成本失败: %v", costErr)
 	}

@@ -93,6 +93,33 @@ func TestChatRecordsSuccessWithUsage(t *testing.T) {
 	}
 }
 
+// 记进健康度的是**规范模型名**，不是这次发出去的上游名。
+//
+// 两者是 pipeline.Request 上两个不同的字段（见 CanonicalModel 与
+// UpstreamModel 的注释）：配了别名就不相等，而成本桶按规范名切（见
+// internal/channels 的 rollupSQL）。写成上游名会把成本记到别的模型名下；
+// 漏传（空串）则只落合并行、整块丢掉模型维度——两种都不会让请求失败。
+//
+// 夹具必须把两者拉开，否则这条用例区分不出它们：默认的 request() 与
+// upstreamRequest() 都是 gpt-4o。
+func TestChatRecordsCanonicalModelNotUpstreamName(t *testing.T) {
+	h := newHarness(t)
+	h.gw.Router.Aliases = fixedAliases{upstream: "vendor/gpt-4o-x"}
+
+	if _, err := h.gw.Chat(context.Background(), request(), upstreamRequest(), Hooks{}); err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+
+	// 先确认夹具真的把两者拉开了：否则下面那条断言即使实现写错也会绿。
+	if got := h.executor.sentRefs[0].Model; got != "vendor/gpt-4o-x" {
+		t.Fatalf("发给上游的模型名 = %q，期望 vendor/gpt-4o-x（夹具没拉开两者）", got)
+	}
+	rec := h.recorder.only(t)
+	if rec.Model != "gpt-4o" {
+		t.Errorf("CallOutcome.Model = %q，期望规范名 gpt-4o（不是上游名，也不是空串）", rec.Model)
+	}
+}
+
 // 可重试的失败（429、5xx、网络层）：记成渠道的失败，这是「连续失败 N 次
 // 就别再试」唯一的来源。
 func TestChatRecordsRetryableFailure(t *testing.T) {
@@ -106,6 +133,9 @@ func TestChatRecordsRetryableFailure(t *testing.T) {
 	rec := h.recorder.only(t)
 	if rec.Verdict != route.VerdictFailure {
 		t.Errorf("Verdict = %q，期望失败", rec.Verdict)
+	}
+	if rec.Model != "gpt-4o" {
+		t.Errorf("CallOutcome.Model = %q，期望规范名 gpt-4o（失败的尝试也要带）", rec.Model)
 	}
 	if rec.Usage.PromptTokens != 0 || rec.Usage.CompletionTokens != 0 {
 		t.Errorf("失败的调用没有用量，实际 %+v", rec.Usage)
@@ -522,6 +552,32 @@ func TestChatStreamRecordsSuccess(t *testing.T) {
 	}
 }
 
+// 流式同样记规范名：成功结局与失败尝试是两条收尾路径（pumpStream 与
+// recordFailedAttempts），这里走前一条；两条都要带对模型名，否则成本会
+// 记到上游名下或整块丢维度。
+func TestChatStreamRecordsCanonicalModelNotUpstreamName(t *testing.T) {
+	h := newHarness(t)
+	h.gw.Router.Aliases = fixedAliases{upstream: "vendor/gpt-4o-x"}
+	usage := channel.Usage{PromptTokens: 12, CompletionTokens: 7}
+	exec := useStreamExecutor(h, &scriptedExecutor{script: map[int64][]channel.StreamEvent{
+		1: {delta("你好"), {Kind: "usage", Usage: &usage}, {Kind: "done"}},
+	}})
+
+	res, err := h.gw.ChatStream(context.Background(), request(), upstreamRequest(), Hooks{})
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	collect(t, res)
+
+	if got := exec.sentRefs[0].Model; got != "vendor/gpt-4o-x" {
+		t.Fatalf("发给上游的模型名 = %q，期望 vendor/gpt-4o-x（夹具没拉开两者）", got)
+	}
+	rec := h.recorder.only(t)
+	if rec.Model != "gpt-4o" {
+		t.Errorf("CallOutcome.Model = %q，期望规范名 gpt-4o（不是上游名，也不是空串）", rec.Model)
+	}
+}
+
 // 流式的耗时覆盖**整条流**，不只到上游接受请求那一下。
 //
 // route 记的 Attempt.Duration 只量到 ChatStream 返回（响应头），而用户感知
@@ -605,6 +661,10 @@ func TestChatStreamRecordsAbortBeforeOutputAsFailure(t *testing.T) {
 	rec := h.recorder.only(t)
 	if rec.Verdict != route.VerdictFailure {
 		t.Errorf("Verdict = %q，期望失败", rec.Verdict)
+	}
+	if rec.Model != "gpt-4o" {
+		t.Errorf("CallOutcome.Model = %q，期望规范名 gpt-4o（一个字都没吐也要记对模型）",
+			rec.Model)
 	}
 }
 
@@ -712,6 +772,10 @@ func TestChatStreamAllPreAcceptFailuresRecorded(t *testing.T) {
 	for _, rec := range recs {
 		if rec.Verdict != route.VerdictFailure {
 			t.Errorf("渠道 %d 的结论 = %q，期望失败", rec.ChannelID, rec.Verdict)
+		}
+		if rec.Model != "gpt-4o" {
+			t.Errorf("渠道 %d 的模型名 = %q，期望规范名 gpt-4o（接受之前就失败的尝试也要带）",
+				rec.ChannelID, rec.Model)
 		}
 	}
 }

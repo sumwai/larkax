@@ -730,7 +730,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 		//
 		// 健康度先记：失败的调用正是它要记的那些，而下面那次结算
 		// 只动钱。
-		g.recordAttempts(ctx, attemptsOf(routed), nil)
+		g.recordAttempts(ctx, req.CanonicalModel, attemptsOf(routed), nil)
 		return nil, res.settleAndFail(ctx, placed, err, pipeline.Outcome{UpstreamFailed: true})
 	}
 
@@ -789,7 +789,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 		// 这里传给写入方的是 out.Usage 而不是内核那份：这一次没有用量事件，
 		// 缓存与延迟两列不会被重算，而自记账用的是**计费口径**的用量——
 		// 与结算失败时我们能给出的唯一一份数一致。
-		g.recordAttempts(ctx, routed.Attempts, &out.Usage)
+		g.recordAttempts(ctx, req.CanonicalModel, routed.Attempts, &out.Usage)
 		return nil, err
 	}
 
@@ -798,7 +798,7 @@ func (g *Gateway) Chat(ctx context.Context, req pipeline.Request, upstream *chan
 	// ——它要等下一次调用才被带进去，于是那个数总落后一个请求。
 	//
 	// 用量取内核那份（out.Usage 在 onUsage 之后可能已被插件改过，理由同上）。
-	g.recordAttempts(ctx, routed.Attempts, &kernelUsage)
+	g.recordAttempts(ctx, req.CanonicalModel, routed.Attempts, &kernelUsage)
 
 	return &Result{
 		Response:      routed.Response,
@@ -1870,7 +1870,7 @@ func ruleCandidates(cands []route.Candidate) []pipeline.RuleCandidate {
 // （Attempt 只有开始与时长），猜错的方向是把一次取消重新记成渠道故障——那
 // 正是这一道要消除的东西。丢掉的那几次方向是**不摘渠道**，与三次参数错摘掉
 // 一个健康渠道相比是轻的那一侧（见 channelAtFault）。
-func (g *Gateway) recordAttempts(ctx context.Context, attempts []route.Attempt, usage *channel.Usage) {
+func (g *Gateway) recordAttempts(ctx context.Context, canonicalModel string, attempts []route.Attempt, usage *channel.Usage) {
 	if g.Recorder == nil || len(attempts) == 0 {
 		return
 	}
@@ -1884,6 +1884,7 @@ func (g *Gateway) recordAttempts(ctx context.Context, attempts []route.Attempt, 
 		}
 		rec := route.CallOutcome{
 			ChannelID: a.ChannelID,
+			Model:     canonicalModel,
 			At:        attemptTime(a, g.now()),
 			Verdict:   verdict,
 		}

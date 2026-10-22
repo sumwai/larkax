@@ -28,7 +28,8 @@ import (
 // # 一次调用写三处
 //
 //   - channels.consecutive_failures / last_failure_at：连续失败的真计数
-//   - channel_health_rollup：小时桶的 requests / successes / failures
+//   - channel_health_rollup：小时桶的 requests / successes / failures。每次
+//     调用同时累加模型行与 model 为空串的渠道级合并行（见 rollupSQL）
 //   - channel_quota_state：自记账扣减（有基准、且单位对得上时）
 //
 // 三处都是按主键或唯一键定位的单行写，没有一个大事务把它们绑在一起：
@@ -158,17 +159,28 @@ func (r *Recorder) streak(ctx context.Context, rec route.CallOutcome, reset, inc
 
 // rollupSQL 把这次调用累加进它所属的小时桶。
 //
+// 一条语句同时写两行：模型行（model = rec.Model）与渠道级合并行（model 为
+// 空串）。合并行让健康列（requests / successes / failures）在多了模型维度
+// 之后仍然是一个数——读侧只读它，成功率这类渠道级读数因此不必跨模型再合
+// 一遍。将来要把成功率也改成按模型看，模型行里已经有一份计数了。
+//
+// 两行在同一条语句里写：分成两次 Exec 的话，中间失败会让两边的计数永久差
+// 一个（计数不可重算）。模型未知时两个值相同，DISTINCT 折成一行——同一条
+// INSERT ... ON CONFLICT 不能在一条语句里改同一行两次。
+//
 // 用 ON CONFLICT 累加而不是先查后写：桶是**多写者**的（同一渠道的并发
 // 请求会同时命中同一个桶），先查后写会丢掉并发的那些。
 const rollupSQL = `
-INSERT INTO channel_health_rollup (channel_id, bucket, requests, successes, failures)
-VALUES ($1, $2, 1, $3, $4)
-ON CONFLICT (channel_id, bucket) DO UPDATE
+INSERT INTO channel_health_rollup (channel_id, model, bucket, requests, successes, failures)
+SELECT DISTINCT $1::bigint, t.model, $3::timestamptz, 1, $4::bigint, $5::bigint
+  FROM (VALUES ($2::text), (''::text)) AS t(model)
+ON CONFLICT (channel_id, model, bucket) DO UPDATE
    SET requests  = channel_health_rollup.requests  + 1,
        successes = channel_health_rollup.successes + EXCLUDED.successes,
        failures  = channel_health_rollup.failures  + EXCLUDED.failures`
 
-// rollupSignalsSQL 用一个桶的用量事件重算它那五列**推导值**。
+// rollupSignalsSQL 用一个桶的用量事件重算它的**推导值**列：延迟、缓存、
+// 成本与成本事件数。
 //
 // # 为什么是重算，不是累加
 //
@@ -186,7 +198,15 @@ ON CONFLICT (channel_id, bucket) DO UPDATE
 // 写进去的是旧值，而该桶的下一次调用会把它们整体重算一遍——不会像累加
 // 那样永久偏离。
 //
-// # 四个口径
+// # 两行口径：模型行与渠道级合并行
+//
+// GROUPING SETS 一次算出两组，分别更新桶里的两行：
+//
+//   - (canonical_model)：模型行。成本与成本事件按模型分开，选路按模型取。
+//   - ()：渠道级合并行（落到 model 为空串）。健康列只读这一行，所以它的
+//     延迟 / 缓存仍是全模型合并的值，语义与加模型维度之前一字不差。
+//
+// # 五个口径
 //
 //   - cache_hit_tokens = SUM(cache_read_tokens)：命中缓存、直接复用的输入。
 //   - cache_miss_tokens = SUM(prompt_tokens + cache_write_tokens)：
@@ -205,13 +225,16 @@ ON CONFLICT (channel_id, bucket) DO UPDATE
 //     当成 0 毫秒把分位数往下拉。整桶都没有样本时结果是 NULL，写回去是
 //     「没有数据」，与「一行都没写过」在读侧同一档。
 //   - cost = SUM(upstream_cost)：这个桶里所有请求的上游成本合计。
-//     不 COALESCE：整桶都没有成本时 SUM 是 NULL，写回去读作「这个桶没有
-//     成本数据」，与「上游不要钱」（合计 0）分得开——那一列因此是可空的
-//     （见迁移 00046）。写 0 会让每个没配成本规则的渠道拿到成本这一维的
-//     满分，而那正是最容易超支的路径。
-//     部分事件有成本、部分没有时 SUM 只加有值的那些：它按请求数（requests）
-//     相除读成「平均每次请求成本」，覆盖面不全时会被摊低。这是单列能表达的
-//     最小单位，不是这里的选择（见 costPerUnit）。
+//     不 COALESCE：桶里只要有事件、而其中没有一条带成本时，SUM 就是 NULL，
+//     写回去读作「这个桶没有成本数据」，与「上游不要钱」（合计 0）分得开
+//     ——那一列因此是可空的（见迁移 00046）。写 0 会让每个没配成本规则的
+//     渠道拿到成本这一维的满分，而那正是最容易超支的路径。
+//     （整桶一条事件都没有时，SUM 与 COUNT 一样是空组：成本列是 NULL，
+//     cost_events 是 0。）
+//   - cost_events = COUNT(upstream_cost)：带成本的用量事件条数。它是单位
+//     成本的分母，与分子取同一批事件——失败的尝试不结算、没有用量事件，
+//     因此不再把平均数摊低。COUNT 对空组给 0（不是 NULL），0 在读侧就是
+//     「这一维没有数据」。
 //
 // 两个分位数都有人读：选路只看 p95（见 candidateQuery），而 `channel health`
 // 把两列一起打出来——同一个窗口里，中位数与 95 分位分开看才知道这个渠道是
@@ -229,31 +252,37 @@ UPDATE channel_health_rollup h
        cache_miss_tokens = a.cache_miss,
        latency_p50_ms    = a.latency_p50_ms,
        latency_p95_ms    = a.latency_p95_ms,
-       cost              = a.cost
+       cost              = a.cost,
+       cost_events       = a.cost_events
   FROM (
-        SELECT COALESCE(SUM(u.cache_read_tokens), 0) AS cache_hit,
+        SELECT COALESCE(u.canonical_model, '') AS model,
+               COALESCE(SUM(u.cache_read_tokens), 0) AS cache_hit,
                COALESCE(SUM(u.prompt_tokens + u.cache_write_tokens), 0) AS cache_miss,
                percentile_disc(0.5) WITHIN GROUP (ORDER BY u.duration_ms) AS latency_p50_ms,
                percentile_disc(0.95) WITHIN GROUP (ORDER BY u.duration_ms) AS latency_p95_ms,
-               SUM(u.upstream_cost) AS cost
+               SUM(u.upstream_cost) AS cost,
+               COUNT(u.upstream_cost) AS cost_events
           FROM usage_events u
          WHERE u.channel_id = $1
            AND u.created_at >= $2
            AND u.created_at <  $3
+         GROUP BY GROUPING SETS ((u.canonical_model), ())
        ) a
  WHERE h.channel_id = $1
-   AND h.bucket = $2`
+   AND h.bucket = $2
+   AND h.model = COALESCE(a.model, '')`
 
-// rollup 把一次调用累加进小时桶，并按桶重算延迟、缓存与成本。
+// rollup 把一次调用累加进小时桶，并按桶重算延迟、缓存、成本与成本事件数。
 //
 // 「没成功也没失败」（客户端断开）也计入 requests 而不计入另外两个：
 // 分母要诚实，而成功率的分子不该为一件与渠道无关的事记一笔。
 // 读侧对 successes = 0 的成功率给中性分，所以这不会把一个渠道打成最差。
 //
-// 两次写分两条语句：PostgreSQL 的数据修改 CTE 与外层语句用的是同一个快照，
-// 外层 UPDATE 看不到同一语句里刚插入或更新的那一行（同一行改两次也不被
-// 支持）。两条语句之间失败时计数已经落库、推导列留旧值，由该桶的下一次
-// 调用重算纠正（见 rollupSignalsSQL）。
+// 计数一条语句写完（模型行与合并行，见 rollupSQL），推导值另一条
+// （GROUPING SETS 同时算出两组）。不能把两者塞进同一条数据修改 CTE：
+// PostgreSQL 的外层语句用的是同一个快照，看不到同一语句里刚插入或更新的
+// 那一行（同一行改两次也不被支持）。两条之间失败时计数已经落库、推导列留
+// 旧值，由该桶的下一次调用重算纠正（见 rollupSignalsSQL）。
 func (r *Recorder) rollup(ctx context.Context, rec route.CallOutcome) error {
 	var success, failure int
 	switch rec.Verdict {
@@ -265,16 +294,24 @@ func (r *Recorder) rollup(ctx context.Context, rec route.CallOutcome) error {
 	}
 
 	bucket := rec.At.UTC().Truncate(time.Hour)
-	_, err := r.db.ExecContext(ctx, rollupSQL, rec.ChannelID, bucket, success, failure)
-	if err != nil {
-		// channel_health_rollup.channel_id 有指向 channels 的外键。渠道在
-		// 「选出候选」与「记下这次调用」之间被删掉时，这里拿到的是 23503；
-		// 兜底哨兵让调用方至少能把它与「库连不上」分开。
-		return dberr.ConstraintFailure(fmt.Errorf("累加渠道 %d 的健康度桶失败: %w", rec.ChannelID, err))
+	if err := r.incrRollup(ctx, rec.ChannelID, rec.Model, bucket, success, failure); err != nil {
+		return err
 	}
 
 	if _, err := r.db.ExecContext(ctx, rollupSignalsSQL, rec.ChannelID, bucket, bucket.Add(time.Hour)); err != nil {
 		return fmt.Errorf("重算渠道 %d 在 %s 这一桶的延迟、缓存与成本失败: %w", rec.ChannelID, bucket.Format(time.RFC3339), err)
+	}
+	return nil
+}
+
+// incrRollup 把一次调用累加进模型行与渠道级合并行（见 rollupSQL）。
+func (r *Recorder) incrRollup(ctx context.Context, channelID int64, model string, bucket time.Time, success, failure int) error {
+	_, err := r.db.ExecContext(ctx, rollupSQL, channelID, model, bucket, success, failure)
+	if err != nil {
+		// channel_health_rollup.channel_id 有指向 channels 的外键。渠道在
+		// 「选出候选」与「记下这次调用」之间被删掉时，这里拿到的是 23503；
+		// 兜底哨兵让调用方至少能把它与「库连不上」分开。
+		return dberr.ConstraintFailure(fmt.Errorf("累加渠道 %d 的健康度桶失败（model=%q）: %w", channelID, model, err))
 	}
 	return nil
 }

@@ -44,12 +44,12 @@ func readStreak(t *testing.T, db *sql.DB, channelID int64) (int, sql.NullTime) {
 	return count, at
 }
 
-// readRollup 读回某个小时桶的三个计数。
+// readRollup 读回某个小时桶的三个计数（渠道级合并行，model 为空串）。
 func readRollup(t *testing.T, db *sql.DB, channelID int64, bucket time.Time) (requests, successes, failures int) {
 	t.Helper()
 	err := db.QueryRowContext(context.Background(), `
 		SELECT requests, successes, failures FROM channel_health_rollup
-		 WHERE channel_id = $1 AND bucket = $2`,
+		 WHERE channel_id = $1 AND bucket = $2 AND model = ''`,
 		channelID, bucket).Scan(&requests, &successes, &failures)
 	if err != nil {
 		t.Fatalf("读健康度桶失败: %v", err)
@@ -57,7 +57,7 @@ func readRollup(t *testing.T, db *sql.DB, channelID int64, bucket time.Time) (re
 	return requests, successes, failures
 }
 
-// readRollupSignals 读回某个小时桶的四列推导值（延迟与缓存）。
+// readRollupSignals 读回某个小时桶的四列推导值（延迟与缓存，渠道级合并行）。
 //
 // 四列都可空：延迟两列在「整桶没有样本」时是 NULL，缓存两列是 NOT NULL，
 // 但没有桶时读不到行——所以这四个都按可空接。
@@ -69,7 +69,7 @@ func readRollupSignals(t *testing.T, db *sql.DB, channelID int64, bucket time.Ti
 	err := db.QueryRowContext(context.Background(), `
 		SELECT latency_p50_ms, latency_p95_ms, cache_hit_tokens, cache_miss_tokens
 		  FROM channel_health_rollup
-		 WHERE channel_id = $1 AND bucket = $2`,
+		 WHERE channel_id = $1 AND bucket = $2 AND model = ''`,
 		channelID, bucket).Scan(&p50, &p95, &hit, &miss)
 	if err != nil {
 		t.Fatalf("读健康度桶的推导列失败: %v", err)
@@ -95,31 +95,83 @@ func insertUsageEvent(t *testing.T, db *sql.DB, channelID int64, at time.Time,
 func insertUsageEventWithCost(t *testing.T, db *sql.DB, channelID int64, at time.Time,
 	prompt, cacheRead, cacheWrite int64, durationMS, cost any) {
 	t.Helper()
+	insertUsageEventRow(t, db, channelID, "gpt-4o", at, prompt, cacheRead, cacheWrite, durationMS, cost)
+}
+
+// insertUsageEventForModel 与 insertUsageEventWithCost 相同，但事件挂在指定
+// 规范模型上。
+//
+// 成本按 canonical_model 分组重算（见 rollupSignalsSQL），所以造模型桶的
+// 用例必须让事件的模型与 CallOutcome.Model 一致；两边对不上时，模型行拿不到
+// 成本，而合并行有——症状是「成本为 nil」而不是报错。
+func insertUsageEventForModel(t *testing.T, db *sql.DB, channelID int64, model string, at time.Time,
+	prompt, cacheRead, cacheWrite int64, durationMS, cost any) {
+	t.Helper()
+	insertUsageEventRow(t, db, channelID, model, at, prompt, cacheRead, cacheWrite, durationMS, cost)
+}
+
+func insertUsageEventRow(t *testing.T, db *sql.DB, channelID int64, model string, at time.Time,
+	prompt, cacheRead, cacheWrite int64, durationMS, cost any) {
+	t.Helper()
 	_, err := db.ExecContext(context.Background(), `
 		INSERT INTO usage_events
 			(request_id, user_id, channel_id, canonical_model, prompt_tokens,
 			 cache_read_tokens, cache_write_tokens, billing_path, cost,
 			 upstream_cost, priced_at, duration_ms, created_at)
-		VALUES ($1, $2, $3, 'gpt-4o', $4, $5, $6, 'measured', 0, $7, $8, $9, $10)`,
-		"req-"+itoa(nextID()), nextID(), channelID,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'measured', 0, $8, $9, $10, $11)`,
+		"req-"+itoa(nextID()), nextID(), channelID, model,
 		prompt, cacheRead, cacheWrite, cost, at, durationMS, at)
 	if err != nil {
 		t.Fatalf("插入用量事件失败: %v", err)
 	}
 }
 
-// readRollupCost 读回某个小时桶的成本合计。NULL 表示桶里没有带成本的事件。
+// outcomeFor 造一条带规范模型的调用结局。
+//
+// 带模型的调用会落两行：模型行与渠道级合并行（见 record.go 的 rollup）。
+// 只关心合并行的用例继续用 outcome（模型为空），两行才是一等公民。
+func outcomeFor(channelID int64, model string, at time.Time, verdict route.Verdict) route.CallOutcome {
+	return route.CallOutcome{ChannelID: channelID, Model: model, At: at, Verdict: verdict}
+}
+
+// readRollupCost 读回某个小时桶的成本合计（渠道级合并行）。
+//
+// NULL 表示桶里没有带成本的事件。
 func readRollupCost(t *testing.T, db *sql.DB, channelID int64, bucket time.Time) sql.NullString {
+	t.Helper()
+	return readRollupCostWhere(t, db, channelID, "", bucket)
+}
+
+// readRollupCostForModel 读回某个小时桶里**某个模型行**的成本合计。
+func readRollupCostForModel(t *testing.T, db *sql.DB, channelID int64, model string, bucket time.Time) sql.NullString {
+	t.Helper()
+	return readRollupCostWhere(t, db, channelID, model, bucket)
+}
+
+func readRollupCostWhere(t *testing.T, db *sql.DB, channelID int64, model string, bucket time.Time) sql.NullString {
 	t.Helper()
 	var cost sql.NullString
 	err := db.QueryRowContext(context.Background(), `
 		SELECT cost FROM channel_health_rollup
-		 WHERE channel_id = $1 AND bucket = $2`,
-		channelID, bucket).Scan(&cost)
+		 WHERE channel_id = $1 AND bucket = $2 AND model = $3`,
+		channelID, bucket, model).Scan(&cost)
 	if err != nil {
 		t.Fatalf("读健康度桶的成本失败: %v", err)
 	}
 	return cost
+}
+
+// readRollupRow 读回某个 (渠道, 模型, 桶) 的三列计数与成本事件数。
+func readRollupRow(t *testing.T, db *sql.DB, channelID int64, model string, bucket time.Time) (requests, successes, failures int, costEvents int64) {
+	t.Helper()
+	err := db.QueryRowContext(context.Background(), `
+		SELECT requests, successes, failures, cost_events FROM channel_health_rollup
+		 WHERE channel_id = $1 AND bucket = $2 AND model = $3`,
+		channelID, bucket, model).Scan(&requests, &successes, &failures, &costEvents)
+	if err != nil {
+		t.Fatalf("读 (渠道 %d, model %q) 的健康度桶失败: %v", channelID, model, err)
+	}
+	return requests, successes, failures, costEvents
 }
 
 // ── 连续失败 ────────────────────────────────────────────────────────────
@@ -384,15 +436,17 @@ func TestRecordCallAggregatesCacheFromUsageEvents(t *testing.T) {
 	}
 }
 
-// 桶里的成本是 usage_events.upstream_cost 的合计，且读侧按请求数摊成单价。
+// 桶里的成本是 usage_events.upstream_cost 的合计，且读侧按**有成本事件的
+// 请求数**摊成单价。
 //
 // # 为什么两段一起钉
 //
 // 写入侧改对了、读侧没跟着生效的话，成本这一维仍然不参与排序，而两边各自的
 // 用例都能是绿的。这里把「写进去多少」与「读侧看到多少」放在同一条用例里。
 //
-// 部分事件没有成本时 SUM 只加有值的那些——这是单列能表达的最小单位，
-// 下面那条用例把「一条都没有」单独钉住。
+// 部分事件没有成本时 SUM 只加有值的那些，COUNT 也只数有值的那些——分子分母
+// 因此是同一批事件，这是 #807 换掉分母口径要买的东西。下面那条用例把
+// 「一条都没有」单独钉住。
 func TestRecordCallAggregatesCostFromUsageEvents(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
@@ -403,15 +457,17 @@ func TestRecordCallAggregatesCostFromUsageEvents(t *testing.T) {
 	at := time.Now().UTC().Truncate(time.Hour).Add(10 * time.Minute)
 	bucket := at.Truncate(time.Hour)
 
-	insertUsageEventWithCost(t, db, id, at, 300, 0, 0, 120, "0.00100000")
-	insertUsageEventWithCost(t, db, id, at.Add(time.Minute), 300, 0, 0, 80, "0.00250000")
-	// 这一条没有成本：SUM 忽略 NULL，不会把它当成 0 加进去，也不会让整列变 NULL。
-	insertUsageEvent(t, db, id, at.Add(2*time.Minute), 300, 0, 0, 90)
+	insertUsageEventForModel(t, db, id, model, at, 300, 0, 0, 120, "0.00100000")
+	insertUsageEventForModel(t, db, id, model, at.Add(time.Minute), 300, 0, 0, 80, "0.00250000")
+	// 这一条没有成本：SUM 忽略 NULL，COUNT 也不数它——不会把它当成 0 加进去，
+	// 也不会让整列变 NULL。
+	insertUsageEventForModel(t, db, id, model, at.Add(2*time.Minute), 300, 0, 0, 90, nil)
 
 	// 记两次调用，桶里的 requests 因此是 2——读侧摊出来的单价与桶的合计
 	// 不相等，才能证明「总数被除过」，而不是把合计原样当单价。
 	for i := range 2 {
-		if err := r.RecordCall(context.Background(), outcome(id, at.Add(time.Duration(3+i)*time.Minute), route.VerdictSuccess)); err != nil {
+		if err := r.RecordCall(context.Background(),
+			outcomeFor(id, model, at.Add(time.Duration(3+i)*time.Minute), route.VerdictSuccess)); err != nil {
 			t.Fatalf("记录失败: %v", err)
 		}
 	}
@@ -423,8 +479,12 @@ func TestRecordCallAggregatesCostFromUsageEvents(t *testing.T) {
 	if got.String != "0.00350000" {
 		t.Errorf("桶里的成本 = %s，期望 0.0035（0.001 + 0.0025）", got.String)
 	}
+	// 模型行与合并行都该有这份合计：合并行给渠道级读数，模型行给按模型取成本。
+	if got := readRollupCostForModel(t, db, id, model, bucket); !got.Valid || got.String != "0.00350000" {
+		t.Errorf("模型行的成本 = %+v，期望 0.0035", got)
+	}
 
-	// 读侧：每次请求摊到的成本 = 桶内合计 / 请求数 = 0.0035 / 2。
+	// 读侧：每次有成本事件的请求摊到的成本 = 桶内合计 / 成本事件数 = 0.0035 / 2。
 	cands, err := New(db, sealer).Candidates(context.Background(), model)
 	if err != nil {
 		t.Fatalf("Candidates 出错: %v", err)
@@ -436,7 +496,7 @@ func TestRecordCallAggregatesCostFromUsageEvents(t *testing.T) {
 		t.Fatal("有成本数据时 CostPerUnit 不该为 nil——成本这一维会整个退出排序")
 	}
 	if *cands[0].CostPerUnit != 0.00175 {
-		t.Errorf("CostPerUnit = %v，期望 0.00175（0.0035 / 2 次请求）", *cands[0].CostPerUnit)
+		t.Errorf("CostPerUnit = %v，期望 0.00175（0.0035 / 2 条成本事件）", *cands[0].CostPerUnit)
 	}
 }
 
@@ -492,6 +552,122 @@ func TestRecordCallWithoutCostLeavesCostNull(t *testing.T) {
 				t.Errorf("没有成本数据时 CostPerUnit 应为 nil，实际 %v", *cands[0].CostPerUnit)
 			}
 		})
+	}
+}
+
+// 同渠道同小时的两个模型各落一行，另有一行渠道级合并。
+//
+// 合并行是健康列的唯一来源（见 candidateQuery 与 health.go），模型行只用来
+// 按模型取成本；两边都要在，且计数不能互相污染。这条用例同时钉住「失败尝试
+// 只进 requests、不进 cost_events」——分母与分子是同一批事件。
+func TestRecordCallKeepsModelRowsAndMergedRow(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	cheap, expensive := uniqueModel(), uniqueModel()
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: cheap, extraModels: []string{expensive}})
+	r := NewRecorder(db, testStaleAfter)
+
+	at := time.Now().UTC().Truncate(time.Hour).Add(10 * time.Minute)
+	bucket := at.Truncate(time.Hour)
+
+	insertUsageEventForModel(t, db, id, cheap, at, 100, 10, 0, 100, "0.00100000")
+	insertUsageEventForModel(t, db, id, expensive, at.Add(time.Minute), 200, 20, 0, 200, "0.01000000")
+
+	// 两个模型各成功一次；再给便宜模型一次失败（没有用量事件）。
+	for _, call := range []struct {
+		model   string
+		verdict route.Verdict
+	}{
+		{cheap, route.VerdictSuccess},
+		{expensive, route.VerdictSuccess},
+		{cheap, route.VerdictFailure},
+	} {
+		if err := r.RecordCall(context.Background(),
+			outcomeFor(id, call.model, at.Add(2*time.Minute), call.verdict)); err != nil {
+			t.Fatalf("记录失败: %v", err)
+		}
+	}
+
+	// 合并行：三个请求、两次成功、两条成本事件。
+	if req, suc, fail, events := readRollupRow(t, db, id, "", bucket); req != 3 || suc != 2 || fail != 1 || events != 2 {
+		t.Errorf("合并行 = requests %d / successes %d / failures %d / cost_events %d，"+
+			"期望 3 / 2 / 1 / 2", req, suc, fail, events)
+	}
+	if got := readRollupCost(t, db, id, bucket); !got.Valid || got.String != "0.01100000" {
+		t.Errorf("合并行成本 = %+v，期望 0.011", got)
+	}
+
+	// 便宜模型：两次尝试、一次成功、一条成本事件。失败那次不进 cost_events。
+	if req, suc, fail, events := readRollupRow(t, db, id, cheap, bucket); req != 2 || suc != 1 || fail != 1 || events != 1 {
+		t.Errorf("便宜模型行 = requests %d / successes %d / failures %d / cost_events %d，"+
+			"期望 2 / 1 / 1 / 1", req, suc, fail, events)
+	}
+	if got := readRollupCostForModel(t, db, id, cheap, bucket); !got.Valid || got.String != "0.00100000" {
+		t.Errorf("便宜模型行成本 = %+v，期望 0.001", got)
+	}
+
+	// 贵模型只有一次成功。
+	if req, suc, fail, events := readRollupRow(t, db, id, expensive, bucket); req != 1 || suc != 1 || fail != 0 || events != 1 {
+		t.Errorf("贵模型行 = requests %d / successes %d / failures %d / cost_events %d，"+
+			"期望 1 / 1 / 0 / 1", req, suc, fail, events)
+	}
+	if got := readRollupCostForModel(t, db, id, expensive, bucket); !got.Valid || got.String != "0.01000000" {
+		t.Errorf("贵模型行成本 = %+v，期望 0.010", got)
+	}
+}
+
+// 选路按当前模型取成本：贵/便宜混跑时分得开，失败不再稀释分母。
+//
+// 同时钉住「健康列只读合并行」：模型行里也有缓存计数，读侧若把两类行加在
+// 一起，SampleCount 会翻倍——成功率这类比值看不出来（分子分母同乘），
+// 所以必须用一个**可加**的列来证明。
+func TestCandidatesCostIsPerModelAndFailuresDoNotDilute(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	cheap, expensive := uniqueModel(), uniqueModel()
+	id := insertChannel(t.Context(), t, db, sealer, channelSpec{model: cheap, extraModels: []string{expensive}})
+	r := NewRecorder(db, testStaleAfter)
+
+	at := time.Now().UTC().Truncate(time.Hour).Add(10 * time.Minute)
+	insertUsageEventForModel(t, db, id, cheap, at, 100, 10, 0, 100, "0.00200000")
+	insertUsageEventForModel(t, db, id, expensive, at.Add(time.Minute), 200, 20, 0, 200, "0.02000000")
+
+	// 便宜模型成功一次、失败一次：分母仍是 1 条成本事件，单价不该被摊成一半。
+	if err := r.RecordCall(context.Background(), outcomeFor(id, cheap, at, route.VerdictSuccess)); err != nil {
+		t.Fatalf("记录失败: %v", err)
+	}
+	if err := r.RecordCall(context.Background(), outcomeFor(id, cheap, at.Add(time.Minute), route.VerdictFailure)); err != nil {
+		t.Fatalf("记录失败: %v", err)
+	}
+	if err := r.RecordCall(context.Background(), outcomeFor(id, expensive, at.Add(2*time.Minute), route.VerdictSuccess)); err != nil {
+		t.Fatalf("记录失败: %v", err)
+	}
+
+	src := New(db, sealer)
+	costOf := func(model string) (*float64, int64) {
+		t.Helper()
+		got, err := src.Candidates(context.Background(), model)
+		if err != nil {
+			t.Fatalf("Candidates(%q) 出错: %v", model, err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("Candidates(%q) 候选数 = %d，期望 1", model, len(got))
+		}
+		return got[0].CostPerUnit, got[0].SampleCount
+	}
+
+	if cost, _ := costOf(cheap); cost == nil || *cost != 0.002 {
+		t.Errorf("便宜模型的 CostPerUnit = %s，期望 0.002（0.002 / 1 条成本事件，"+
+			"失败那次不该进分母）", showPtr(cost))
+	}
+	if cost, _ := costOf(expensive); cost == nil || *cost != 0.02 {
+		t.Errorf("贵模型的 CostPerUnit = %s，期望 0.02", showPtr(cost))
+	}
+
+	// 合并行的缓存样本 = 命中 10 + 20，未命中 100 + 200，合计 330。
+	// 读侧若把模型行也加进来会是 660。
+	if _, samples := costOf(cheap); samples != 330 {
+		t.Errorf("SampleCount = %d，期望 330（只读合并行；把模型行也加进来会翻倍）", samples)
 	}
 }
 
