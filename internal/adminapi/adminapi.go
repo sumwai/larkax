@@ -91,7 +91,8 @@ type Config struct {
 	// 传什么都要理解成「整组路由的前提」，不能只包一部分。
 	Authorize func(http.Handler) http.Handler
 
-	// Groups 限定注册哪几组资源；为空表示全部。
+	// Groups 限定注册哪几组资源；为空表示全部——overview 与 users 两组例外，
+	// 它们只随显式列名注册（见下）。
 	//
 	// 生产的两处装配都**显式列出**：内部监听用 InternalGroups（不含 users），
 	// 控制台的 admin 组在 consoleapi 里列出（含 users）。留空只在测试与
@@ -106,13 +107,11 @@ type Config struct {
 	// `pricing/costs`（上游成本）是单独一组（GroupCosts），不随 pricing 注册：
 	// 那是渠道侧的成本规则，没有商家归属。
 	//
-	// users 组（GroupUsers）只挂在控制台的 admin 组：它要求「操作者是会话里的
-	// 某个管理员」——改自己的角色、降最后一个管理员这两条判据在内部管理面上
-	// 无法定义（那里的调用者是运维令牌，没有「自己」）。所以内部管理面必须
-	// 显式列出资源组，不能留空（见 InternalGroups）。
-	//
-	// overview 组（GroupOverview）正相反：它**只**随显式列名注册，不随空
-	// Groups 出现——它的每条读都建立在归属上下文上，内部管理面没有那层上下文。
+	// overview 组（GroupOverview）与 users 组（GroupUsers）只随显式列名注册，
+	// 不随空 Groups 出现。它们的判据都离不开请求里的那层上下文，而空 Groups
+	// 那条默认路径对应的是内部管理面（运维令牌）：overview 的每条读建立在归属
+	// 上下文上；users 要求「操作者是会话里的某个管理员」——改自己的角色、降最后
+	// 一个管理员这两条判据在那里没有「自己」可用。
 	Groups []string
 
 	// Currency 是用户详情里「余额」用哪个资产品种。为空时用 CNY。
@@ -170,7 +169,8 @@ type API struct {
 // New 装配管理面。返回的 handler **已经带上鉴权中间件**：调用方把它整片挂到
 // 内部监听的 `/admin/v1/` 上即可，不存在「只挂了业务 handler」的装配错误。
 //
-// 注册哪些资源由 Config.Groups 决定；默认（空）是全部。
+// 注册哪些资源由 Config.Groups 决定；默认（空）是全部，但 overview 与 users
+// 两组只随显式列名注册（见 Config.Groups）。
 func New(cfg Config) http.Handler {
 	prefix := cfg.Prefix
 	if prefix == "" {
@@ -240,18 +240,19 @@ func New(cfg Config) http.Handler {
 		mux.HandleFunc("POST "+prefix+"pricing/costs", a.createCost)
 		mux.HandleFunc("PATCH "+prefix+"pricing/costs/{id}", a.updateCost)
 	}
-	if all || groups[GroupUsers] {
-		mux.HandleFunc("GET "+prefix+"users", a.listUsers)
-		mux.HandleFunc("GET "+prefix+"users/{id}", a.getUser)
-		mux.HandleFunc("PATCH "+prefix+"users/{id}", a.updateUser)
-	}
-	// 概览、上游与我的模型**只**随显式组名注册，不跟 all 走（见 Config.Groups）：
-	// 它们的每条读都建立在归属上下文上，而「全部资源」那条默认路径
-	// （内部管理面）没有这层上下文。写在这里而不是 `all ||` 里，是刻意的。
+	// 概览、上游、我的模型与用户管理**只**随显式组名注册，不跟 all 走
+	// （见 Config.Groups）：overview 那三条读的是「自己名下」的归属，
+	// users 要求「操作者是会话里的某个管理员」，而空 Groups 那条默认路径
+	// （内部管理面）两样都没有。写在这里而不是 `all ||` 里，是刻意的。
 	if groups[GroupOverview] {
 		mux.HandleFunc("GET "+prefix+"overview", a.merchantOverview)
 		mux.HandleFunc("GET "+prefix+"upstreams", a.merchantUpstreams)
 		mux.HandleFunc("GET "+prefix+"models", a.merchantModels)
+	}
+	if groups[GroupUsers] {
+		mux.HandleFunc("GET "+prefix+"users", a.listUsers)
+		mux.HandleFunc("GET "+prefix+"users/{id}", a.getUser)
+		mux.HandleFunc("PATCH "+prefix+"users/{id}", a.updateUser)
 	}
 
 	authorize := cfg.Authorize
@@ -269,7 +270,7 @@ const (
 	GroupPricing  = "pricing"
 	GroupCosts    = "costs"
 	// GroupUsers 是控制台的用户管理页。它**不在**内部管理面的清单里，
-	// 理由见 Config.Groups 与 InternalGroups。
+	// 也不随空 Groups 出现，理由见 Config.Groups 与 InternalGroups。
 	GroupUsers = "users"
 	// GroupOverview 是商家运营页的三个只读视图：概览、上游清单、我的模型。
 	// 它不随空 Groups 出现。
@@ -278,9 +279,9 @@ const (
 
 // InternalGroups 是内部监听（`/admin/v1/*`）上注册的资源组。
 //
-// 显式列出而不是留空（空 = 全部）：users 组的判据依赖「操作者是会话里的
-// 管理员」，内部管理面那一侧没有这个前提。留空的话，加一个组就会顺手把
-// 它暴露在运维令牌下面，而那种暴露在请求到达之前看不出来（见 New）。
+// 显式列出而不是留空：空 Groups 仍是「全部」（overview 与 users 除外，见
+// Config.Groups）。留空的话，以后新加一个组就会顺手把它暴露在运维令牌下面，
+// 而那种暴露在请求到达之前看不出来（见 New）。
 func InternalGroups() []string {
 	return []string{
 		GroupChannels, GroupModels, GroupAliases, GroupPricing, GroupCosts,
