@@ -144,7 +144,8 @@ candidates[].quota_unit        余量的单位
 candidates[].quota_remaining   剩余量
 candidates[].quota_confidence  这个余量有多可信
 candidates[].quota_kind        余量的来源：实测 / 自记账 / 错误观测
-candidates[].cost_per_unit     最近观察到的单位成本
+candidates[].cost_per_unit     最近观察到的单位成本：按**本次请求的规范模型**、在回看窗口内观察到的
+                               （该模型还没有带成本的事件时为空——不拿渠道级合并值冒充）
 candidates[].cache_hit_rate    近期缓存命中率
 candidates[].sample_count      上面两条统计的样本数
 selected                       实际选中并发出去的那一个（只有成功时才有）
