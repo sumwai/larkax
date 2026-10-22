@@ -223,4 +223,3 @@ internal/route/route.go        | Router.Score                      | lib | 路�
 internal/snapshot/redact.go    | Redactor.RedactResponseWithTransport | lib | 脱敏库的入口：把传输层信息并进骨架；采集传输层这件事被推迟了，目前只有测试在调它
 internal/snapshotwire/snapshotwire.go | Collector.Stats            | lib | 这条链路**本实例**的计数：与 /metrics 上那一族（snapshot_written / dropped / failed / oversized）是同一批事件的两份口径，指标按调用点自增、进不了测试里的中间状态，所以保留它给装配层的端到端用例等一条快照落库；生产读的是指标，不是它
 internal/tokens/count.go       | Counter.CountTextEstimated        | lib | 估算路径的显式入口：调用方知道上游换了词表而本地还没跟上时用它避开本地词表；目前只有测试在调它
-internal/tokens/tokens.go      | Source.IsExact                    | lib | 枚举上的具名判据：「这个来源能不能直接与上游对账」。两处生产代码以它为准（pipeline 与 ledger/store 的注释各引一次），而各自把比较写成了 `== SourceMeasured`（一处是 switch 的 case，一处要读成 Estimated），所以它没有调用点；目前只有测试在调它
