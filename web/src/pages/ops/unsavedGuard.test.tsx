@@ -386,6 +386,24 @@ describe('四处弹窗表单与整页表单接的是同一层', () => {
     await clickOtherEntry(router)
   })
 
+  it('渠道：放弃关掉表单之后，这一页不再算改过：再点别的入口不拦', async () => {
+    const router = mountPage(<OpsChannels scope="admin" />, '/app/admin/channels')
+    fireEvent.click((await screen.findAllByRole('button', { name: '新建渠道' }))[0])
+    const form = await screen.findByRole('dialog', { name: '新建渠道' })
+    fireEvent.change(within(form).getAllByRole('textbox')[0], { target: { value: 'channel-x' } })
+
+    fireEvent.click(within(form).getByRole('button', { name: '关闭' }))
+    const discard = await screen.findByRole('dialog', { name: '放弃未保存的修改？' })
+    fireEvent.click(within(discard).getByRole('button', { name: '放弃修改' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    // 与别名那一条同理：`closeForm` 只关表单、不重置 form/initialForm，
+    // 脏状态必须靠「表单还开着」这半个条件一起归零。
+    fireEvent.click(screen.getByRole('link', { name: '去别处' }))
+    expect(await screen.findByRole('heading', { name: '别的页面' })).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/elsewhere')
+  })
+
   it('模型目录：改了字段以后点别的入口要确认', async () => {
     const router = mountPage(<OpsModels />, '/app/admin/models')
     fireEvent.click((await screen.findAllByRole('button', { name: '新建模型' }))[0])
@@ -395,6 +413,24 @@ describe('四处弹窗表单与整页表单接的是同一层', () => {
     await clickOtherEntry(router)
   })
 
+  it('模型目录：放弃关掉表单之后，这一页不再算改过：再点别的入口不拦', async () => {
+    const router = mountPage(<OpsModels />, '/app/admin/models')
+    fireEvent.click((await screen.findAllByRole('button', { name: '新建模型' }))[0])
+    const form = await screen.findByRole('dialog', { name: '新建模型' })
+    fireEvent.change(within(form).getAllByRole('textbox')[0], { target: { value: 'vendor/model-x' } })
+
+    fireEvent.click(within(form).getByRole('button', { name: '关闭' }))
+    const discard = await screen.findByRole('dialog', { name: '放弃未保存的修改？' })
+    fireEvent.click(within(discard).getByRole('button', { name: '放弃修改' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    // `closeForm` 重置的是「表单开没开」，form/initialForm 原样留着；
+    // 判脏还得看表单是否开着，否则放弃之后整页永久算改过。
+    fireEvent.click(screen.getByRole('link', { name: '去别处' }))
+    expect(await screen.findByRole('heading', { name: '别的页面' })).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/elsewhere')
+  })
+
   it('计价规则：改了字段以后点别的入口要确认', async () => {
     const router = mountPage(<OpsPricing />, '/app/admin/pricing')
     fireEvent.click(await screen.findByRole('button', { name: '新建规则' }))
@@ -402,6 +438,49 @@ describe('四处弹窗表单与整页表单接的是同一层', () => {
     fireEvent.change(within(form).getAllByRole('textbox')[0], { target: { value: 'rule-x' } })
 
     await clickOtherEntry(router)
+  })
+
+  it('计价规则：放弃关掉表单之后，这一页不再算改过：再点别的入口不拦', async () => {
+    const router = mountPage(<OpsPricing />, '/app/admin/pricing')
+    fireEvent.click(await screen.findByRole('button', { name: '新建规则' }))
+    const form = await screen.findByRole('dialog', { name: '新建规则' })
+    fireEvent.change(within(form).getAllByRole('textbox')[0], { target: { value: 'rule-x' } })
+
+    fireEvent.click(within(form).getByRole('button', { name: '关闭' }))
+    const discard = await screen.findByRole('dialog', { name: '放弃未保存的修改？' })
+    fireEvent.click(within(discard).getByRole('button', { name: '放弃修改' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    // 两张表单同页各算各的：规则这张放弃之后，规则那半个条件要归零，
+    // 不能把整页拖成永久改过。
+    //
+    // 这里「成本那一半是干净的」不是恒真前提，而是这两条用例一起钉出来的：
+    // 删掉任一张表单的脏判定条件，都只有对应用例变红（与下面成本那条互为交叉证明）。
+    fireEvent.click(screen.getByRole('link', { name: '去别处' }))
+    expect(await screen.findByRole('heading', { name: '别的页面' })).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/elsewhere')
+  })
+
+  it('计价成本：放弃关掉表单之后，这一页不再算改过：再点别的入口不拦', async () => {
+    const router = mountPage(<OpsPricing />, '/app/admin/pricing')
+    // 成本表单在另一个 tab 下：切过去之后新建按钮才会换成「新建成本规则」。
+    fireEvent.click(await screen.findByRole('button', { name: '成本规则' }))
+    fireEvent.click(await screen.findByRole('button', { name: '新建成本规则' }))
+    const form = await screen.findByRole('dialog', { name: '新建成本规则' })
+    fireEvent.change(within(form).getAllByRole('textbox')[0], { target: { value: 'gpt-*' } })
+
+    fireEvent.click(within(form).getByRole('button', { name: '关闭' }))
+    const discard = await screen.findByRole('dialog', { name: '放弃未保存的修改？' })
+    fireEvent.click(within(discard).getByRole('button', { name: '放弃修改' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    // 与上面规则那条互为镜像：成本这半个条件归零，规则那一半（全程没开）不受影响。
+    //
+    // 「规则那一半不受影响」同样不是恒真前提，而是这两条用例一起钉出来的：
+    // 删掉 `costDirty` 里的条件只有这一条变红，删掉 `ruleDirty` 里的只有规则那条变红。
+    fireEvent.click(screen.getByRole('link', { name: '去别处' }))
+    expect(await screen.findByRole('heading', { name: '别的页面' })).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/elsewhere')
   })
 
   it('设置页的账户信息：改了以后点别的入口要确认，刷新也拦', async () => {
