@@ -156,6 +156,7 @@ export function OpsAliases() {
     <>
       <PageHead
         title={t('ops.alias.title')}
+        keepTitleOnNarrow
         subtitle={t('ops.alias.subtitle')}
         actions={
           <Button icon={<IconPlus size={15} />} onClick={openCreate}>
