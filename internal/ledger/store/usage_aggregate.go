@@ -93,17 +93,22 @@ func usageEventsCTE(w UsageWindow, param func(any) string) string {
 	}
 	return `SELECT e.request_id, e.canonical_model, e.prompt_tokens,
 	               e.completion_tokens, e.cache_read_tokens, e.cache_write_tokens,
-	               e.reasoning_tokens, e.billing_path, e.cost, e.created_at
+	               e.reasoning_tokens, e.billing_path, e.cost,
+	               e.plan_reserved_amount, e.created_at
 	          FROM usage_events e
 	         WHERE ` + strings.Join(conds, " AND ")
 }
 
-// usageTotalsColumns 是五组 token 与金额的求和列，几个聚合共用。
+// usageTotalsColumns 是金额、额度包面值与五组 token 的求和列，几个聚合共用。
 //
-// 金额单独占一列（在 SELECT 里排第一），其余按 prompt / completion /
+// 金额与面值分别占一列（在 SELECT 里排前两位），其余按 prompt / completion /
 // cache_read / cache_write / reasoning 的固定次序——次序必须与扫描处逐字
 // 对齐，错一格的表现是「token 数串位」，而它不会报错。
+//
+// 两列都包 COALESCE：空窗口里 SUM 返回 NULL，而这里的「没有额度包占用」与
+// 「和为 0」是同一件事（这一列 NOT NULL、默认 0）。
 const usageTotalsColumns = `COALESCE(SUM(cost), 0)::text,
+	COALESCE(SUM(plan_reserved_amount), 0)::text,
 	COALESCE(SUM(prompt_tokens), 0),
 	COALESCE(SUM(completion_tokens), 0),
 	COALESCE(SUM(cache_read_tokens), 0),
@@ -112,8 +117,15 @@ const usageTotalsColumns = `COALESCE(SUM(cost), 0)::text,
 
 // UsageTotals 是一段时间里的总额。
 type UsageTotals struct {
-	Cost     money.Amount
-	Requests int64
+	// Cost 是这段用量实际收了多少：额度包覆盖的请求从 prepaid 科目扣，
+	// 它在这一列是实收金额，不是 0。
+	Cost money.Amount
+	// PlanReservedAmount 是这段用量占着的额度包面值上界之和，与 Cost 并列。
+	//
+	// 两者不合并，也不相加——它们是同一笔消费的实收与上界，相加会把同一笔
+	// 钱算两遍。
+	PlanReservedAmount money.Amount
+	Requests           int64
 	// 五个 token 槽位，与 usage_events 同名同义。
 	PromptTokens     int64
 	CompletionTokens int64
@@ -149,8 +161,11 @@ var usagePaths = []string{"measured", "estimated", "fallback"}
 
 // UsageSummary 读一段时间里的总额与计费路径分布。
 //
-// requests 用 COUNT(DISTINCT request_id)：一次请求重试可能落多行 usage_events，
-// 直接 count 行会偏大，而偏大的方向恰好是「看起来请求更多、单笔更便宜」。
+// requests 用 COUNT(DISTINCT request_id)。现在的结算路径保证一个请求只落一行
+// （唯一调用点是 store.Save：它锁住 pending 账单行后置 settled，而
+// billing_requests.request_id 是唯一键），但 usage_events 表上没有唯一约束——
+// 历史形状与绕过结算路径的写入都可能多行。直接 count 行会偏大，而偏大的方向
+// 恰好是「看起来请求更多、单笔更便宜」，所以这里仍按可能多行处理。
 func (s *Store) UsageSummary(ctx context.Context, w UsageWindow) (UsageSummary, error) {
 	if err := w.validate(); err != nil {
 		return UsageSummary{}, err
@@ -166,21 +181,25 @@ func (s *Store) UsageSummary(ctx context.Context, w UsageWindow) (UsageSummary, 
 	cte := usageEventsCTE(w, param)
 
 	var out UsageSummary
-	var costText string
+	var costText, planReservedText string
 	err := s.db.QueryRowContext(ctx, `
 		WITH ev AS (`+cte+`)
 		SELECT `+usageTotalsColumns+`,
 		       COUNT(DISTINCT request_id)
 		  FROM ev`, args...,
-	).Scan(&costText, &out.Totals.PromptTokens, &out.Totals.CompletionTokens,
-		&out.Totals.CacheReadTokens, &out.Totals.CacheWriteTokens,
-		&out.Totals.ReasoningTokens, &out.Totals.Requests)
+	).Scan(&costText, &planReservedText, &out.Totals.PromptTokens,
+		&out.Totals.CompletionTokens, &out.Totals.CacheReadTokens,
+		&out.Totals.CacheWriteTokens, &out.Totals.ReasoningTokens, &out.Totals.Requests)
 	if err != nil {
 		return UsageSummary{}, fmt.Errorf("汇总用量失败: %w", err)
 	}
 	out.Totals.Cost, err = money.Parse(costText)
 	if err != nil {
 		return UsageSummary{}, fmt.Errorf("用量总额 %q 解析失败: %w", costText, err)
+	}
+	out.Totals.PlanReservedAmount, err = money.Parse(planReservedText)
+	if err != nil {
+		return UsageSummary{}, fmt.Errorf("额度包面值合计 %q 解析失败: %w", planReservedText, err)
 	}
 
 	// 路径分布是第二条查询，而不是从上面那一行里拆出来：上面是整体，
@@ -309,11 +328,12 @@ func (s *Store) UsageSeries(ctx context.Context, w UsageWindow, interval string,
 	byStart := make(map[int64]UsagePoint, len(starts))
 	for rows.Next() {
 		var (
-			bucket   time.Time
-			costText string
-			point    UsagePoint
+			bucket           time.Time
+			costText         string
+			planReservedText string
+			point            UsagePoint
 		)
-		if err := rows.Scan(&bucket, &costText, &point.PromptTokens,
+		if err := rows.Scan(&bucket, &costText, &planReservedText, &point.PromptTokens,
 			&point.CompletionTokens, &point.CacheReadTokens,
 			&point.CacheWriteTokens, &point.ReasoningTokens, &point.Requests); err != nil {
 			return nil, fmt.Errorf("读用量桶失败: %w", err)
@@ -324,6 +344,12 @@ func (s *Store) UsageSeries(ctx context.Context, w UsageWindow, interval string,
 				bucket.Format(time.RFC3339), costText, err)
 		}
 		point.Cost = cost
+		planReserved, err := money.Parse(planReservedText)
+		if err != nil {
+			return nil, fmt.Errorf("用量桶 %s 的额度包面值 %q 解析失败: %w",
+				bucket.Format(time.RFC3339), planReservedText, err)
+		}
+		point.PlanReservedAmount = planReserved
 		point.Start = bucket.In(tz)
 		byStart[bucket.UTC().Unix()] = point
 	}
@@ -469,13 +495,15 @@ func (s *Store) UsageBreakdown(ctx context.Context, w UsageWindow, groupBy strin
 	var groups []UsageGroup
 	for rows.Next() {
 		var (
-			group    UsageGroup
-			keyID    sql.NullInt64
-			costText string
+			group            UsageGroup
+			keyID            sql.NullInt64
+			costText         string
+			planReservedText string
 		)
 		if err := rows.Scan(&group.Model, &keyID, &group.KeyName, &costText,
-			&group.PromptTokens, &group.CompletionTokens, &group.CacheReadTokens,
-			&group.CacheWriteTokens, &group.ReasoningTokens, &group.Requests); err != nil {
+			&planReservedText, &group.PromptTokens, &group.CompletionTokens,
+			&group.CacheReadTokens, &group.CacheWriteTokens, &group.ReasoningTokens,
+			&group.Requests); err != nil {
 			return UsageBreakdown{}, fmt.Errorf("读用量分组失败: %w", err)
 		}
 		cost, err := money.Parse(costText)
@@ -483,6 +511,12 @@ func (s *Store) UsageBreakdown(ctx context.Context, w UsageWindow, groupBy strin
 			return UsageBreakdown{}, fmt.Errorf("用量分组的金额 %q 解析失败: %w", costText, err)
 		}
 		group.Cost = cost
+		planReserved, err := money.Parse(planReservedText)
+		if err != nil {
+			return UsageBreakdown{}, fmt.Errorf("用量分组的额度包面值 %q 解析失败: %w",
+				planReservedText, err)
+		}
+		group.PlanReservedAmount = planReserved
 		if keyID.Valid {
 			id := keyID.Int64
 			group.KeyID = &id
@@ -539,12 +573,15 @@ func sortGroupsByCost(groups []UsageGroup) {
 //
 // 求和走 money.SumChecked：库里的金额列比 int64 宽，一组分组之和真的可能
 // 放不下。放不下时报错而不是交一个夹住的值——夹住的「其他」比真实和小，
-// 而偏小看起来像「少算了钱」。
+// 而偏小看起来像「少算了钱」。额度包面值与 cost 同样处理：两者是两个口径，
+// 各自都要放得下。
 func sumGroups(groups []UsageGroup) (UsageGroup, error) {
 	var out UsageGroup
 	costs := make([]money.Amount, 0, len(groups))
+	planReserved := make([]money.Amount, 0, len(groups))
 	for _, g := range groups {
 		costs = append(costs, g.Cost)
+		planReserved = append(planReserved, g.PlanReservedAmount)
 		out.PromptTokens += g.PromptTokens
 		out.CompletionTokens += g.CompletionTokens
 		out.CacheReadTokens += g.CacheReadTokens
@@ -558,5 +595,11 @@ func sumGroups(groups []UsageGroup) (UsageGroup, error) {
 			money.ErrOverflow, len(groups))
 	}
 	out.Cost = total
+	planTotal, ok := money.SumChecked(planReserved...)
+	if !ok {
+		return UsageGroup{}, fmt.Errorf("%w: 其余 %d 组的额度包面值之和超出可表示范围",
+			money.ErrOverflow, len(groups))
+	}
+	out.PlanReservedAmount = planTotal
 	return out, nil
 }

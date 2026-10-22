@@ -416,3 +416,178 @@ func TestChannelHealthRollupModelMigration(t *testing.T) {
 			orphanP50, orphanP95)
 	}
 }
+
+// planReservedMigration 是给用量事件补额度包面值的那条迁移。版本号由文件名
+// 算出来，重编号时两处不会分叉。
+const planReservedMigration = "00058_usage_event_plan_reserved.sql"
+
+// TestUsageEventsPlanReservedMigration 钉住 00058 在父表与**每个已有分区**上的
+// 结构，以及历史行的回填。
+//
+// usage_events 是分区表：只在父表上加列、分区上没跟上的话，读侧按分区扫时才会
+// 报「列不存在」，而那时离迁移已经很远。所以这里逐个分区查 pg_attribute，不
+// 只看父表。
+//
+// 判据：
+//
+//   - down 之后父表与每个分区都没有这一列；
+//   - up 之后父表与每个分区都有；
+//   - 回填按账单搬值：账单表里有同名请求的老行拿到那个面值，没有的保持 0
+//     （两条一起才说明是「按请求搬」而不是「全表刷一个数」）；
+//   - 再 down 一次，这一列从所有分区上一起消失；再 up 一次，回填重跑仍成立。
+func TestUsageEventsPlanReservedMigration(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	version, err := goose.NumericComponent(planReservedMigration)
+	if err != nil {
+		t.Fatalf("从迁移文件名读版本号失败: %v", err)
+	}
+	previous := version - 1
+
+	goose.SetBaseFS(migrate.FS())
+	if err := migrate.SetDialect("postgres"); err != nil {
+		t.Fatalf("设置方言失败: %v", err)
+	}
+	up := func() {
+		t.Helper()
+		if err := goose.UpContext(ctx, db, "."); err != nil {
+			t.Fatalf("前进到最新失败: %v", err)
+		}
+	}
+	down := func() {
+		t.Helper()
+		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
+			t.Fatalf("回滚到 %d 失败: %v", previous, err)
+		}
+	}
+
+	// usage_events 的分区：两个预建的月份与兜底分区。它们由 00001 建好，
+	// 本迁移不该改变这张清单。
+	relations := []string{
+		"usage_events",
+		"usage_events_2026_10",
+		"usage_events_2026_11",
+		"usage_events_default",
+	}
+	hasColumn := func(rel string) bool {
+		t.Helper()
+		var n int
+		if err := db.QueryRowContext(ctx, `
+			SELECT count(*) FROM pg_attribute
+			 WHERE attrelid = $1::regclass
+			   AND attname = 'plan_reserved_amount'
+			   AND attnum > 0
+			   AND NOT attisdropped`, rel).Scan(&n); err != nil {
+			t.Fatalf("读 %s 的列失败: %v", rel, err)
+		}
+		return n > 0
+	}
+	assertColumn := func(want bool, when string) {
+		t.Helper()
+		for _, rel := range relations {
+			if got := hasColumn(rel); got != want {
+				t.Errorf("%s：%s 上这一列在不在 = %v，期望 %v", when, rel, got, want)
+			}
+		}
+	}
+
+	// 收尾：把库推回最新并删掉夹具行。中途红掉时，本包其它用例不该被留在
+	// 旧结构上。
+	//
+	// 两条老用量事件各钉一件事：requestID 在账单表里有同名请求，回填要把它
+	// 搬过来；orphanID 没有，回填后仍是 0。
+	const (
+		requestID = "migr-00058"
+		orphanID  = "migr-00058-orphan"
+		userName  = "migr-00058-user"
+	)
+	dropFixtures := func(cleanupCtx context.Context) error {
+		if _, err := db.ExecContext(cleanupCtx,
+			`DELETE FROM usage_events WHERE request_id IN ($1, $2)`,
+			requestID, orphanID); err != nil {
+			return err
+		}
+		if _, err := db.ExecContext(cleanupCtx,
+			`DELETE FROM billing_requests WHERE request_id = $1`, requestID); err != nil {
+			return err
+		}
+		_, err := db.ExecContext(cleanupCtx,
+			`DELETE FROM users WHERE username = $1`, userName)
+		return err
+	}
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		if err := goose.UpContext(cleanupCtx, db, "."); err != nil {
+			t.Errorf("收尾时把库推回最新失败: %v", err)
+		}
+		if err := dropFixtures(cleanupCtx); err != nil {
+			t.Errorf("收尾时删夹具行失败: %v", err)
+		}
+	})
+
+	// 1. 回到迁移前，写两条「老数据」。
+	down()
+	assertColumn(false, "回滚之后")
+
+	// 上一次中途失败可能留下夹具行；先清掉再写，重跑才不会撞唯一键。
+	if err := dropFixtures(ctx); err != nil {
+		t.Fatalf("清理旧的夹具行失败: %v", err)
+	}
+	var userID int64
+	if err := db.QueryRowContext(ctx,
+		`INSERT INTO users (username) VALUES ($1) RETURNING id`,
+		userName).Scan(&userID); err != nil {
+		t.Fatalf("写迁移前的用户失败: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO billing_requests
+			(request_id, user_id, canonical_model, protocol, plan_reserved_amount, status)
+		VALUES ($1, $2, 'm', 'openai', 2.50, 'settled')`,
+		requestID, userID); err != nil {
+		t.Fatalf("写迁移前的账单行失败: %v", err)
+	}
+	for _, id := range []string{requestID, orphanID} {
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO usage_events
+				(request_id, user_id, canonical_model, billing_path, cost, created_at)
+			VALUES ($1, $2, 'm', 'measured', 1.00, '2026-10-15T00:00:00Z')`,
+			id, userID); err != nil {
+			t.Fatalf("写迁移前的用量事件 %s 失败: %v", id, err)
+		}
+	}
+
+	planReservedOf := func(id string) string {
+		t.Helper()
+		var raw string
+		if err := db.QueryRowContext(ctx, `
+			SELECT plan_reserved_amount::text FROM usage_events WHERE request_id = $1`,
+			id).Scan(&raw); err != nil {
+			t.Fatalf("读 %s 的面值失败: %v", id, err)
+		}
+		return raw
+	}
+	assertBackfilled := func(when string) {
+		t.Helper()
+		if got := planReservedOf(requestID); got != "2.50000000" {
+			t.Errorf("%s：账单表里有同名请求的那条读出 %s，期望 2.50000000", when, got)
+		}
+		if got := planReservedOf(orphanID); got != "0.00000000" {
+			t.Errorf("%s：账单表里没有的老行读出 %s，期望 0（没有可搬的值）", when, got)
+		}
+	}
+
+	// 2. up 之后，父表与每个分区都有这一列；回填按账单搬值，缺账单的仍是 0。
+	up()
+	assertColumn(true, "前进之后")
+	assertBackfilled("前进之后")
+
+	// 3. 再 down 一次：这一列从父表与所有分区上一起消失。
+	down()
+	assertColumn(false, "再次回滚之后")
+
+	// 4. 再 up 一次：列删掉后回填重跑，两条老行的结果与第一次一致。
+	up()
+	assertColumn(true, "第二次前进之后")
+	assertBackfilled("第二次前进之后")
+}

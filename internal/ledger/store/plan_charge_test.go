@@ -1417,3 +1417,116 @@ func TestPendingPlanReservationSumsPendingRows(t *testing.T) {
 		t.Errorf("在途预留 = %s，期望 15（10 + 5）", got)
 	}
 }
+
+// 一笔额度包覆盖的结算，面值要在五个地方是同一个数：用量事件（写入口）、
+// 行级请求日志与三个聚合视图。五处都是 10——写入口漏了这一列时，三个聚合会
+// 一致地给出 0，读起来像「这单没有用包」，而没有任何东西报错。
+//
+// 面值记的是**预留时占着的**数（10），不是最终实收的金额（5）。两者不合并、
+// 也不相加：一个是实收，一个是上界。
+func TestSettleRecordsPlanReservedInUsageEventsAndAggregates(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "0")
+	planID := seedPlan(t, ctx, db, "amount", "50", "50", "gpt-4o")
+	upID := seedUserPlan(t, ctx, db, userID, planID, "50", time.Now().Add(time.Hour))
+
+	requestID := reqID(t)
+	req := testRequest(ctx, t, db, userID, requestID)
+	r := reservation(t, userID, requestID, "10", "CNY")
+	billingID, err := s.SaveReservation(ctx, req, r)
+	if err != nil {
+		t.Fatalf("预留失败: %v", err)
+	}
+
+	actual := mustMoney(t, "5")
+	consume, err := ledger.Consume(ledger.ConsumeParams{
+		TxnID:            ledger.NewTxnID(),
+		UserID:           userID,
+		Asset:            ledger.AssetCNY,
+		Amount:           actual,
+		PrepaidAccount:   ledger.PrepaidAccount(upID),
+		BillingRequestID: billingID,
+	})
+	if err != nil {
+		t.Fatalf("构造消费分录失败: %v", err)
+	}
+	charge := &pipeline.Charge{
+		RequestID:   requestID,
+		UserID:      userID,
+		Asset:       "CNY",
+		Settlement:  billing.Settlement{Actual: actual, Reserved: r.Amount, Breakdown: billing.Breakdown{Total: actual}},
+		Entries:     consume.Denormalize(),
+		Usage:       billing.Usage{PromptTokens: 1000, CompletionTokens: 200},
+		UsageSource: tokens.SourceMeasured,
+		PricedAt:    time.Now(),
+	}
+	if saveErr := s.Save(ctx, req, charge); saveErr != nil {
+		t.Fatalf("结算失败: %v", saveErr)
+	}
+
+	// 1. 用量事件：写入口原样搬了账单行的面值（10），不是实扣金额（5）。
+	var eventReserved string
+	if scanErr := db.QueryRowContext(ctx, `
+		SELECT plan_reserved_amount::text FROM usage_events
+		 WHERE request_id = $1`, requestID).Scan(&eventReserved); scanErr != nil {
+		t.Fatalf("读用量事件的面值失败: %v", scanErr)
+	}
+	if eventReserved != "10.00000000" {
+		t.Errorf("用量事件的面值 = %s，期望 10（预留时占着的，不是实扣 5）", eventReserved)
+	}
+
+	now := time.Now()
+	from, to := now.Add(-time.Hour), now.Add(time.Hour)
+	window := UsageWindow{UserID: userID, From: from, To: to}
+
+	// 2. 行级请求日志。
+	page, err := s.UsageRequests(ctx, UsageRequestQuery{UserID: userID, From: from, To: to})
+	if err != nil {
+		t.Fatalf("读请求日志失败: %v", err)
+	}
+	if len(page.Requests) != 1 {
+		t.Fatalf("请求日志行数 = %d，期望 1", len(page.Requests))
+	}
+	row := page.Requests[0]
+	if row.PlanReservedAmount != money.MustParse("10") || row.Cost != money.MustParse("5") {
+		t.Errorf("行级 = 面值 %s / cost %s，期望 10 / 5",
+			row.PlanReservedAmount, row.Cost)
+	}
+
+	// 3. 汇总。
+	summary, err := s.UsageSummary(ctx, window)
+	if err != nil {
+		t.Fatalf("汇总失败: %v", err)
+	}
+	if summary.Totals.PlanReservedAmount != money.MustParse("10") ||
+		summary.Totals.Cost != money.MustParse("5") {
+		t.Errorf("汇总 = 面值 %s / cost %s，期望 10 / 5",
+			summary.Totals.PlanReservedAmount, summary.Totals.Cost)
+	}
+
+	// 4. 序列：窗口跨了几个小时桶，面值按桶分散，合计仍是 10。
+	points, err := s.UsageSeries(ctx, window, "hour", time.UTC)
+	if err != nil {
+		t.Fatalf("序列失败: %v", err)
+	}
+	var seriesTotal money.Amount
+	for _, point := range points {
+		seriesTotal = seriesTotal.Add(point.PlanReservedAmount)
+	}
+	if seriesTotal != money.MustParse("10") {
+		t.Errorf("序列的面值合计 = %s，期望 10", seriesTotal)
+	}
+
+	// 5. 分组。
+	breakdown, err := s.UsageBreakdown(ctx, window, "model", 10)
+	if err != nil {
+		t.Fatalf("分组失败: %v", err)
+	}
+	if len(breakdown.Items) != 1 || breakdown.Items[0].Model != "gpt-4o" ||
+		breakdown.Items[0].PlanReservedAmount != money.MustParse("10") {
+		t.Errorf("分组 = %+v，期望 gpt-4o / 面值 10", breakdown.Items)
+	}
+}

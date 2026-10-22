@@ -1107,6 +1107,15 @@ go run ./cmd/larkaxctl ledger balance --all
 按请求查要直接连库，SQL 示例见
 [metrics.md](metrics.md) 的「怎么读」。**目前没有一条按请求列出花费的命令。**
 
+控制台的三个聚合视图（`usage/summary`、`usage/series`、`usage/breakdown`）与行级的
+`usage/requests` 一样，把额度包面值与 `cost` **并列**输出（字段名
+`plan_reserved_amount`）。`cost` 是这笔用量实际收了多少；`plan_reserved_amount`
+是预留时占住的面值上界，已随结算释放。两者不合并，也不相加——它们是同一笔消费的
+实收与上界，相加会把同一笔钱算两遍。聚合侧读 `usage_events.plan_reserved_amount`，
+那一列在结算时由 `billing_requests` 的同名列原样搬过来，不在聚合层重新推算；
+迁移之前的已结算行由 00058 按 `request_id` 回填补齐，`billing_requests` 里已经
+没有的请求保持 0。
+
 ## 检查这条链路通不通
 
 上面两节走完之后，「通不通」由一条命令回答：

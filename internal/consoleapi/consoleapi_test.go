@@ -283,6 +283,7 @@ func (f *fakeKeys) ListKeysPage(_ context.Context, q auth.KeyListQuery) (auth.Ke
 
 type fakeUsage struct {
 	summary   store.UsageSummary
+	breakdown store.UsageBreakdown
 	entries   store.UserEntryPage
 	requests  store.UsageRequestPage
 	wallets   []store.Wallet
@@ -302,7 +303,7 @@ func (f *fakeUsage) UsageBreakdown(_ context.Context, _ store.UsageWindow, group
 	if groupBy == "bogus" {
 		return store.UsageBreakdown{}, store.ErrInvalidQuery
 	}
-	return store.UsageBreakdown{}, nil
+	return f.breakdown, nil
 }
 
 func (f *fakeUsage) UsageRequests(_ context.Context, q store.UsageRequestQuery) (store.UsageRequestPage, error) {
@@ -1161,6 +1162,119 @@ func TestUsageRequestsShowPlanReservedAlongsideCost(t *testing.T) {
 	}
 	if item.Cost == item.PlanReservedAmount {
 		t.Error("cost 与 plan_reserved_amount 应当是两个口径的数，不能相等")
+	}
+}
+
+// 三个聚合视图把额度包面值与 cost 并列输出，字段名与行级 usage/requests 相同。
+//
+// 三个视图各自有自己的响应结构体：漏一个（比如只给 summary 加了）在 diff 里
+// 与「三个都加了」看不出区别，所以这里逐个视图断言，并且把键名钉在原始报文上
+// ——只解到同名结构体的话，标签写错时仍然能解出来。
+func TestUsageAggregatesShowPlanReservedAlongsideCost(t *testing.T) {
+	f := newFixture(t)
+	f.usage.summary = store.UsageSummary{
+		Totals: store.UsageTotals{
+			Cost:               mustAmount(t, "3.75"),
+			PlanReservedAmount: mustAmount(t, "8.50"),
+			Requests:           3,
+		},
+	}
+	f.usage.breakdown = store.UsageBreakdown{
+		Items: []store.UsageGroup{{
+			Model:   "gpt-4o",
+			KeyID:   ptrInt64(2),
+			KeyName: "第一把",
+			UsageTotals: store.UsageTotals{
+				Cost:               mustAmount(t, "1.50"),
+				PlanReservedAmount: mustAmount(t, "4.50"),
+				Requests:           1,
+			},
+		}},
+		Other: store.UsageGroup{UsageTotals: store.UsageTotals{
+			Cost:               mustAmount(t, "2.25"),
+			PlanReservedAmount: mustAmount(t, "4.00"),
+			Requests:           2,
+		}},
+	}
+
+	// 汇总。
+	rec := f.authed(t, http.MethodGet, PathPrefix+"usage/summary", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("summary 应当 200，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"plan_reserved_amount"`) {
+		t.Errorf("summary 响应里缺 plan_reserved_amount 字段: %s", rec.Body.String())
+	}
+	var summary usageSummaryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("summary 不是 JSON: %v", err)
+	}
+	if summary.Totals.PlanReservedAmount != "8.50000000" {
+		t.Errorf("summary 的面值 = %q，期望 8.5", summary.Totals.PlanReservedAmount)
+	}
+	if summary.Totals.Cost != "3.75000000" {
+		t.Errorf("summary 的 cost = %q，期望 3.75", summary.Totals.Cost)
+	}
+
+	// 序列（假实现把 summary 的合计放进唯一一个桶）。
+	rec = f.authed(t, http.MethodGet, PathPrefix+"usage/series", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("series 应当 200，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"plan_reserved_amount"`) {
+		t.Errorf("series 响应里缺 plan_reserved_amount 字段: %s", rec.Body.String())
+	}
+	var series usageSeriesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &series); err != nil {
+		t.Fatalf("series 不是 JSON: %v", err)
+	}
+	if len(series.Points) != 1 || series.Points[0].PlanReservedAmount != "8.50000000" {
+		t.Errorf("series 的点 = %+v，期望一个面值 8.5 的桶", series.Points)
+	}
+
+	// 分组：条目与「其他」各是一个结构体，两处都要有。
+	rec = f.authed(t, http.MethodGet, PathPrefix+"usage/breakdown?group_by=model", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("breakdown 应当 200，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"plan_reserved_amount"`) {
+		t.Errorf("breakdown 响应里缺 plan_reserved_amount 字段: %s", rec.Body.String())
+	}
+	var breakdown struct {
+		Items []struct {
+			Model              string `json:"model"`
+			Cost               string `json:"cost"`
+			PlanReservedAmount string `json:"plan_reserved_amount"`
+		} `json:"items"`
+		Other usageOtherJSON `json:"other"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &breakdown); err != nil {
+		t.Fatalf("breakdown 不是 JSON: %v", err)
+	}
+	if len(breakdown.Items) != 1 || breakdown.Items[0].Model != "gpt-4o" ||
+		breakdown.Items[0].PlanReservedAmount != "4.50000000" {
+		t.Errorf("breakdown 条目 = %+v，期望 gpt-4o / 面值 4.5", breakdown.Items)
+	}
+	if breakdown.Other.PlanReservedAmount != "4.00000000" {
+		t.Errorf("breakdown 的 other 面值 = %q，期望 4",
+			breakdown.Other.PlanReservedAmount)
+	}
+
+	// 按 key 分组走的是另一个结构体（usageKeyGroupJSON）：字段漏在里面时上面
+	// 按模型的那条断言仍然全绿。
+	rec = f.authed(t, http.MethodGet, PathPrefix+"usage/breakdown?group_by=key", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("breakdown?group_by=key 应当 200，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	var byKey struct {
+		Items []usageKeyGroupJSON `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &byKey); err != nil {
+		t.Fatalf("按 key 的 breakdown 不是 JSON: %v", err)
+	}
+	if len(byKey.Items) != 1 || byKey.Items[0].KeyName != "第一把" ||
+		byKey.Items[0].PlanReservedAmount != "4.50000000" {
+		t.Errorf("按 key 的条目 = %+v，期望 第一把 / 面值 4.5", byKey.Items)
 	}
 }
 

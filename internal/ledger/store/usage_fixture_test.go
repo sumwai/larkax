@@ -10,9 +10,9 @@ import (
 // 本文件是控制台聚合读的夹具：账单行与用量事件各一个插入助手。
 //
 // 两件事必须走插入语句而不能靠上层写路径造出来：用量事件只在真实计量之后
-// 才落库，而聚合读要的正是**任意形状的历史行**（同一请求两行、pending 没有
-// 事件、结算额与预留额不同）。走上层路径造这些形状要多绕好几层，而绕出来的
-// 仍然是同一张表上的行。
+// 才落库，而聚合读要的正是**任意形状的历史行**（pending 没有事件、结算额与
+// 预留额不同、面值与实收方向相反）。走上层路径造这些形状要多绕好几层，而
+// 绕出来的仍然是同一张表上的行。
 
 // billingFixture 是一条 billing_requests 的字段。
 //
@@ -93,6 +93,9 @@ func insertBillingRequest(ctx context.Context, t *testing.T, db *sql.DB, f billi
 //
 // CreatedAt 决定它落进哪个分区；本包的用例只写 2026-10 与 2026-11 两个
 // 建好的分区，不碰兜底分区（它非空本身就是一条要被监控的告警）。
+//
+// PlanReserved 是这笔请求占着的额度包面值；空串按 0 写（「没有用到额度包」）。
+// 它与 Cost 分开给，两个口径不相等的那一格才写得出来。
 type usageEventFixture struct {
 	RequestID        string
 	UserID           int64
@@ -105,6 +108,7 @@ type usageEventFixture struct {
 	ReasoningTokens  int64
 	Path             string
 	Cost             string
+	PlanReserved     string
 	DurationMS       *int
 	CreatedAt        time.Time
 }
@@ -127,19 +131,23 @@ func seedUsageEvent(ctx context.Context, t *testing.T, db *sql.DB, f usageEventF
 	if path == "" {
 		path = "measured"
 	}
+	planReserved := f.PlanReserved
+	if planReserved == "" {
+		planReserved = "0"
+	}
 
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO usage_events
 		       (request_id, user_id, channel_id, canonical_model,
 		        prompt_tokens, completion_tokens, cache_read_tokens,
 		        cache_write_tokens, reasoning_tokens, billing_path, cost,
-		        duration_ms, created_at)
+		        plan_reserved_amount, duration_ms, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::numeric,
-		        $12, $13)`,
+		        $12::numeric, $13, $14)`,
 		f.RequestID, f.UserID, channelID, f.Model,
 		f.PromptTokens, f.CompletionTokens, f.CacheReadTokens,
 		f.CacheWriteTokens, f.ReasoningTokens, path, f.Cost,
-		durationMS, f.CreatedAt,
+		planReserved, durationMS, f.CreatedAt,
 	); err != nil {
 		t.Fatalf("写用量事件 %s 失败: %v", f.RequestID, err)
 	}
