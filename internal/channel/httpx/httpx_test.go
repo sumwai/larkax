@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -789,5 +790,98 @@ func TestApplyCustomHeadersNilRequest(t *testing.T) {
 	}
 	if got := buf.String(); got != "" {
 		t.Errorf("nil 载体不该打日志: %q", got)
+	}
+}
+
+// TestProbeClientDoesNotFollowRedirects 探测不跟随重定向：拿到的是 302 本身。
+//
+// 「跟着走了」在用例里的表现是 200 与跳转目标那一侧的正文——两者都是另一个
+// 地址上的事实，而探测要回答的是「这个地址返回什么」。
+func TestProbeClientDoesNotFollowRedirects(t *testing.T) {
+	var followed atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/elsewhere" {
+			followed.Store(true)
+			_, _ = io.WriteString(w, "followed")
+			return
+		}
+		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatalf("构造请求失败: %v", err)
+	}
+	resp, err := ProbeClient(5 * time.Second).Do(req)
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusFound {
+		t.Errorf("状态码 = %d，期望 %d（没有跟随重定向）", resp.StatusCode, http.StatusFound)
+	}
+	if followed.Load() {
+		t.Error("客户端跟随了重定向，探测打到了另一个地址")
+	}
+}
+
+// TestProbeClientCapsBody 响应体有上限：超一个字节就报 ErrBodyTooLarge，
+// 恰好等于上限不算超。
+//
+// 两种情况都跑：只测「超了会报错」的话，把上限写成 0 也能过（什么都报错），
+// 而那样正常的上游清单一条都读不出来。
+func TestProbeClientCapsBody(t *testing.T) {
+	chunk := bytes.Repeat([]byte("x"), 64<<10)
+	cases := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{"恰好到上限", ProbeBodyLimit, false},
+		{"超一个字节", ProbeBodyLimit + 1, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				// 分块写、不给 Content-Length：上限必须在读的时候生效，
+				// 不能靠响应头里的长度提前判。
+				remaining := tc.size
+				for remaining > 0 {
+					n := min(remaining, len(chunk))
+					if _, err := w.Write(chunk[:n]); err != nil {
+						return
+					}
+					remaining -= n
+				}
+			}))
+			defer srv.Close()
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+			if err != nil {
+				t.Fatalf("构造请求失败: %v", err)
+			}
+			resp, err := ProbeClient(30 * time.Second).Do(req)
+			if err != nil {
+				t.Fatalf("请求失败: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body, err := io.ReadAll(resp.Body)
+			if tc.wantErr {
+				if !errors.Is(err, ErrBodyTooLarge) {
+					t.Fatalf("读错误 = %v，期望 ErrBodyTooLarge（读了 %d 字节）", err, len(body))
+				}
+				if len(body) != ProbeBodyLimit {
+					t.Errorf("截断处读了 %d 字节，期望 %d", len(body), ProbeBodyLimit)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("恰好等于上限时读失败: %v", err)
+			}
+			if len(body) != tc.size {
+				t.Errorf("读了 %d 字节，期望 %d", len(body), tc.size)
+			}
+		})
 	}
 }

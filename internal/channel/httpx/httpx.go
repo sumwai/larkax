@@ -11,6 +11,7 @@
 package httpx
 
 import (
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -64,18 +65,102 @@ const (
 // 看不出来（请求确实发得出去）。回环地址与 NO_PROXY 命中的不上代理，
 // 那是 net/http 的行为，不是这里的判断。
 func Client(responseHeaderTimeout time.Duration) *http.Client {
+	return &http.Client{Transport: newTransport(responseHeaderTimeout)}
+}
+
+// ProbeBodyLimit 是一次探测允许读的响应体上限（8 MiB）。
+//
+// 探测打的是**用户给的地址**：对方不是我们配好的上游，回什么都可能。
+// 没有上限时，一个一直吐字节的地址会让这次调用一直读下去，直到内存或
+// 超时先到。
+const ProbeBodyLimit = 8 << 20
+
+// ErrBodyTooLarge 表示响应体超过了 ProbeBodyLimit。
+//
+// 单独一个错误而不是「解析失败」：调用方要能说出「对方回得太大了」，
+// 而不是把它报成「上游的 JSON 坏了」。
+var ErrBodyTooLarge = errors.New("上游响应体超过上限")
+
+// ProbeClient 是「拿用户给的地址直接打一次」的客户端（见控制台的模型探测）。
+//
+// 与 Client 的两处不同，都来自「地址不是我们配的」：
+//
+//   - **不跟随重定向**：默认客户端最多跟十跳，而每一跳都可能是另一个地址。
+//     探测本来就只问「这个地址上的 /v1/models 能不能读」，跳到别处读到的
+//     已经是另一个事实；禁止跟随也让「用我们的服务端探测内网」失去绕道的
+//     那一半。
+//   - **响应体有上限**：超过 ProbeBodyLimit 时读操作返回 ErrBodyTooLarge，
+//     而不是给调用方半截正文——半个 JSON 解出来的会是一个看起来「格式坏了」
+//     的错误，与真正的原因无关。
+//
+// 超时用整体 Timeout（而不是 Client 那样的 ResponseHeaderTimeout）：探测是
+// 一次把清单读完的短动作，不存在「流式长回复」那种长连接。
+func ProbeClient(timeout time.Duration) *http.Client {
 	return &http.Client{
-		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           (&net.Dialer{Timeout: dialTimeout, KeepAlive: keepAlive}).DialContext,
-			TLSHandshakeTimeout:   tlsHandshakeTimeout,
-			MaxIdleConns:          100,
-			MaxIdleConnsPerHost:   16,
-			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: responseHeaderTimeout,
-		},
+		Transport:     &bodyLimitTransport{base: newTransport(timeout), limit: ProbeBodyLimit},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Timeout:       timeout,
 	}
 }
+
+// newTransport 是 Client 与 ProbeClient 共用的连接参数。
+func newTransport(responseHeaderTimeout time.Duration) *http.Transport {
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: dialTimeout, KeepAlive: keepAlive}).DialContext,
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   16,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: responseHeaderTimeout,
+	}
+}
+
+// bodyLimitTransport 把响应体包上一层上限。
+type bodyLimitTransport struct {
+	base  http.RoundTripper
+	limit int64
+}
+
+// RoundTrip 在响应体上套一层上限，见 limitedBody。
+func (t *bodyLimitTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp == nil || resp.Body == nil {
+		return resp, err
+	}
+	resp.Body = &limitedBody{rc: resp.Body, remaining: t.limit}
+	return resp, nil
+}
+
+// limitedBody 在读到上限之后返回 ErrBodyTooLarge。
+//
+// 恰好读满还不算超限：后面可能还有字节，也可能刚好结束。下一次 Read 会
+// 区分这两种——还有内容时先返回 ErrBodyTooLarge，没有时返回底层给的 EOF。
+type limitedBody struct {
+	rc        io.ReadCloser
+	remaining int64
+}
+
+func (b *limitedBody) Read(p []byte) (int, error) {
+	if b.remaining <= 0 {
+		// 先探一个字节：读得到就说明确实超了，读不到才是正常结束。
+		var one [1]byte
+		n, err := b.rc.Read(one[:])
+		if n > 0 {
+			return 0, ErrBodyTooLarge
+		}
+		return 0, err
+	}
+	if int64(len(p)) > b.remaining {
+		p = p[:b.remaining]
+	}
+	n, err := b.rc.Read(p)
+	b.remaining -= int64(n)
+	return n, err
+}
+
+// Close 关闭底层响应体。
+func (b *limitedBody) Close() error { return b.rc.Close() }
 
 // Endpoint 拼出完整 URL。
 //

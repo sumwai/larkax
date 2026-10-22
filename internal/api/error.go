@@ -75,6 +75,15 @@ func WriteError(w http.ResponseWriter, status int, message string) {
 	writeError(w, channel.ProtocolOpenAI, status, message)
 }
 
+// WriteErrorCode 与 WriteError 相同，但错误码由调用方给定。
+//
+// 给内部监听上的 admin API 用：同一个状态码下几种情形的处置不同时，码才是
+// 调用方认得出的那一项（例如 502 里「上游挂了」与「上游响应体太大」不是
+// 同一件事）。码写进 OpenAI 形状的 error.code，形状仍由这里定义一次。
+func WriteErrorCode(w http.ResponseWriter, status int, code, message string) {
+	writeErrorCode(w, channel.ProtocolOpenAI, status, code, message)
+}
+
 // WriteNotImplemented 写出「这条路径在这个实例上不接推理流量」的 501。
 //
 // 501 的错误体在这个包里定义一次，要回这条状态码的地方都从这里走：手写一份

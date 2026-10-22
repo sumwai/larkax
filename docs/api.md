@@ -613,11 +613,27 @@ the account balance ran out while this response was streaming, so it was cut sho
   声明被拒、`store` 被丢弃），同样是刻意的，见 [contract/README.md](../contract/README.md)
   的「Responses 入口上的四条」。
 
-## 控制台商家接口：概览、上游与我的模型
+## 控制台商家接口：概览、上游、我的模型与渠道表单
 
-这三个只读端点挂在控制台的 `/api/v1/merchant/` 下，要求控制台会话（HttpOnly
+这五个端点挂在控制台的 `/api/v1/merchant/` 下，要求控制台会话（HttpOnly
 Cookie）与 `merchant` 角色；`admin` 也能进，且**不限定归属**（看全部渠道与模型）。
 未登录 `401`，非商家 `403`。成功的响应都是 `application/json`。
+
+其中四个是只读的 `GET`（概览、上游、我的模型、适配器枚举）；
+`POST /api/v1/merchant/channels/probe-models` 是写方法：与其余非安全方法一样
+必须带会话的 `X-CSRF-Token`，缺了或不匹配回 `403`。
+
+### 适配器与模型探测
+
+建渠道的表单从 `GET /api/v1/merchant/adapters` 取可选类型，用
+`POST /api/v1/merchant/channels/probe-models` 先问一次上游有哪些模型。
+两个端点与内部管理面的同名端点行为一致，字段、错误码与限流见
+[admin-api.md](admin-api.md) 的「渠道表单的输入」；控制台这一侧只多两条：
+
+- 商家会话只能探测**自己的**渠道：`channel_id` 指到别人的渠道时回 `404`，
+  与不存在同形。
+- 限流按用户计：同一商家两次探测间隔不到 2 秒、或一分钟内超过 10 次时回
+  `429` 并带 `Retry-After`。
 
 ### 概览
 
@@ -722,6 +738,7 @@ Cookie）与 `merchant` 角色；`admin` 也能进，且**不限定归属**（�
 | 请求体上限 | `internal/api` 的 `maxRequestBodyBytes` |
 | 控制台商家概览与上游的读数口径（异常理由、分组、窗口） | `internal/adminapi/merchant_ops.go`、`internal/channels/health.go` |
 | 控制台商家「我的模型」的在供判据、渠道数与 `priced` 口径 | `internal/adminapi/merchant_models.go`、`internal/channels/channels.go` 的 `SuppliedModelsOwned` |
+| 渠道表单的适配器枚举与上游模型探测 | `internal/adminapi/probe.go`、`internal/channels/modelprobe.go`、`internal/upstream/probe.go` |
 | 流式的帧序列 | `internal/api/stream.go`（每套协议一个渲染器） |
 | 流中途的错误帧 | `internal/api/stream.go` 的 `streamErrorFrame` 与 `responsesStream.errorFrame` |
 | 响应头 | `internal/api` 的 `HeaderVersion` / `HeaderRetryAfter`、`internal/observe` 的 `HeaderRequestID` |
