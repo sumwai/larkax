@@ -143,7 +143,12 @@ describe('运营视图的角色门槛', () => {
     expect(mocks.overview).toHaveBeenCalled()
   })
 
-  it.each(['/app/merchant/overview', '/app/merchant/models', '/app/merchant/upstreams'])(
+  it.each([
+    '/app/merchant/overview',
+    '/app/merchant/models',
+    '/app/merchant/upstreams',
+    '/app/merchant/account',
+  ])(
     'user 进不了 %s，也不发运营请求',
     async (path) => {
       await open('user', path)

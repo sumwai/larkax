@@ -122,6 +122,9 @@ describe('设置与账号的分页', () => {
     for (const heading of ['账户信息', '修改口令', '界面偏好']) {
       expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument()
     }
+    // 退出登录只在顶栏与抽屉里。遍历三类页面而不是只看账号页：把面板加回
+    // 整页也能被挡住，不只挡住加进共用账号段的那一种改法。
+    expect(screen.queryByText('退出登录')).not.toBeInTheDocument()
   })
 
   it('账号段只有一份实现：两个入口渲染出的标题一模一样', async () => {
