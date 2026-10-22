@@ -6,6 +6,7 @@ import type { MessageKey } from '../i18n/zh'
 import { useMediaQuery, useIsMobile, useIsNarrow } from '../hooks/useMediaQuery'
 import { ActionSheet } from './ActionSheet'
 import { RouteErrorBoundary } from './ErrorBoundary'
+import { PageTitleReporter, useDocumentTitle, type ReportedTitle } from './PageTitle'
 import {
   homeOf,
   isSharedMerchantPath,
@@ -238,6 +239,16 @@ export function AppShell() {
           ? navItems[0].key
           : 'nav.noAccess')
 
+  // 页面自己报上来的标题（模型详情页用展示名）。只有地址对得上时才采用——
+  // 换页那一帧报告还是上一页的，按地址取用就不必等它先被清掉。
+  const [reportedTitle, setReportedTitle] = useState<ReportedTitle | null>(null)
+  const pageTitle =
+    reportedTitle && reportedTitle.path === location.pathname
+      ? reportedTitle.title
+      : t(current)
+  // 顶栏与标签页标题同源：都从这一个值来。
+  useDocumentTitle(pageTitle)
+
   const signOut = async () => {
     await logout()
     navigate('/login', { replace: true })
@@ -372,7 +383,7 @@ export function AppShell() {
           >
             <IconMenu size={20} />
           </button>
-          <b>{t(current)}</b>
+          <b>{pageTitle}</b>
           <div className="topbar-right">
             {!mobile && switcher}
             {mobile ? (
@@ -409,7 +420,9 @@ export function AppShell() {
 
         <main id="main-content" ref={mainRef} tabIndex={-1} className="app-content">
           <RouteErrorBoundary>
-            <Outlet />
+            <PageTitleReporter report={setReportedTitle}>
+              <Outlet />
+            </PageTitleReporter>
           </RouteErrorBoundary>
         </main>
 

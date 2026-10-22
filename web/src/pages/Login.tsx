@@ -4,6 +4,7 @@ import { api } from '../api'
 import { useAuth } from '../auth/AuthProvider'
 import { useI18n } from '../i18n'
 import { Alert, Button } from '../components/ui'
+import { useDocumentTitle } from '../components/PageTitle'
 import { BrandMark } from '../components/icons'
 
 interface Errors {
@@ -30,6 +31,8 @@ function nextPath(search: string): string {
 
 export function Login() {
   const { t } = useI18n()
+  // 页内大标题是「登录控制台」，标签页标题不带「控制台」：这一页不属于控制台。
+  useDocumentTitle(t('login.documentTitle'))
   const { status, login } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
