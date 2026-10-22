@@ -6,7 +6,7 @@ quickstart snippets. React + Vite + TypeScript, served from the same origin as
 
 ## Requirements
 
-- Node.js 18 or newer
+- Node.js 20 or newer
 - npm 9 or newer
 
 ## Run it

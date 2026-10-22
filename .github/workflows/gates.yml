@@ -272,15 +272,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Node 20：docs/development.md 写着前端要 Node 20 或更新。版本比它旧时
-      # 依赖装得上，但会刷出一片 EBADENGINE 警告——CI 不该跑在依赖自己声明
-      # 不支持的版本上。
+      # Node 版本只写在仓库根的 `.nvmrc` 里，这里从那个文件读，不再另写一个数。
+      # 两处各写一个数的那一天，就是它们开始分岔的那一天。
       #
       # 缓存键跟着 web/package-lock.json 走，不跟仓库根的路径：这个仓只有
       # 前端一处 lock，写死路径比 glob 更容易看出它指的是哪份文件。
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: web/package-lock.json
 
