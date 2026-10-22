@@ -169,6 +169,95 @@ func TestChatDispatchesByType(t *testing.T) {
 	}
 }
 
+// 一条渠道声明多套协议时，分派看的是**这次请求的入口协议**，不是渠道的
+// 主协议。
+//
+// 判据落在「请求打到了哪条路径」上：Anthropic 与 OpenAI 的端点路径不同，
+// 而这条渠道的 base URL 只有一个——同一把凭证、同一个地址，两种入口各走
+// 各的适配器，正是这个 issue 要的行为。
+//
+// 三条子用例分别钉住：
+//
+//   - 入口协议在声明里 → 用那个协议的适配器（这是新的那一半）；
+//   - 入口协议不在声明里 → 退回主协议（与加多协议之前逐字相同，也是跨协议
+//     转换既有能力的入口）；
+//   - 入口协议为空（内部调用）→ 同样退回主协议。
+func TestChatDispatchesByInboundProtocol(t *testing.T) {
+	const openaiBody = `{"id":"cmpl-1","model":"upstream-model",
+		"choices":[{"index":0,"finish_reason":"stop",
+			"message":{"role":"assistant","content":"你好"}}],
+		"usage":{"prompt_tokens":10,"completion_tokens":5}}`
+	const anthropicBody = `{"id":"msg_1","type":"message","role":"assistant",
+		"content":[{"type":"text","text":"你好"}],"stop_reason":"end_turn",
+		"usage":{"input_tokens":10,"output_tokens":5}}`
+
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.URL.Path == "/v1/messages" {
+			_, _ = io.WriteString(w, anthropicBody)
+			return
+		}
+		_, _ = io.WriteString(w, openaiBody)
+	}))
+	defer srv.Close()
+
+	cases := []struct {
+		name      string
+		protocols []channel.Protocol
+		typ       string
+		inbound   channel.Protocol
+		wantPath  string
+	}{
+		{
+			name:      "入口协议在声明里用 Anthropic 适配器",
+			protocols: []channel.Protocol{channel.ProtocolOpenAI, channel.ProtocolAnthropic},
+			typ:       string(channel.ProtocolOpenAI),
+			inbound:   channel.ProtocolAnthropic,
+			wantPath:  "/v1/messages",
+		},
+		{
+			name:      "入口协议在声明里用 OpenAI 适配器",
+			protocols: []channel.Protocol{channel.ProtocolOpenAI, channel.ProtocolAnthropic},
+			typ:       string(channel.ProtocolAnthropic), // 主协议故意不是入口这一个
+			inbound:   channel.ProtocolOpenAI,
+			wantPath:  "/v1/chat/completions",
+		},
+		{
+			name:      "入口协议不在声明里退回主协议",
+			protocols: []channel.Protocol{channel.ProtocolAnthropic},
+			typ:       string(channel.ProtocolAnthropic),
+			inbound:   channel.ProtocolOpenAI,
+			wantPath:  "/v1/messages",
+		},
+		{
+			name:      "入口协议为空退回主协议",
+			protocols: []channel.Protocol{channel.ProtocolOpenAI, channel.ProtocolAnthropic},
+			typ:       string(channel.ProtocolOpenAI),
+			inbound:   "",
+			wantPath:  "/v1/chat/completions",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := testChannel(srv.URL, tc.typ)
+			ch.Protocols = tc.protocols
+
+			req := request()
+			req.Protocol = tc.inbound
+
+			gotPath = ""
+			if _, err := newExecutor(t).Chat(context.Background(), ch, req); err != nil {
+				t.Fatalf("Chat 出错: %v", err)
+			}
+			if gotPath != tc.wantPath {
+				t.Errorf("请求路径 = %q，期望 %q——说明分派用错了协议", gotPath, tc.wantPath)
+			}
+		})
+	}
+}
+
 // 流式同样要按类型分发，且事件要能原样读出来。
 func TestChatStreamDispatchesByType(t *testing.T) {
 	cases := []struct {
