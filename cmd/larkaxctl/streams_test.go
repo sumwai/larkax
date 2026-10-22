@@ -247,6 +247,10 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 		{command: "upstream-cost", what: "list",
 			run: func() error { return runUpstreamCost([]string{"list"}) }},
 
+		// 用户级履约操作这一族走**新路径**：旧写法在成功路径上会打一句「搬到哪儿
+		// 了」，而那正是这条门禁扫的提示前缀。这与旧路径不进这张表是同一条立场
+		// （见上面覆盖判据那一段）：门禁管的是**正式写法**的成功路径。旧写法那一句
+		// 由 user_ops_test.go 逐条钉着，不会因为这里改道而没人看着。
 		{command: "user", what: "create",
 			run: func() error {
 				return runUser([]string{"create", "--name", uniqueName("stream-user")})
@@ -255,29 +259,40 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 		{command: "apikey", what: "create",
 			allowed: "明文只打印这一次",
 			run: func() error {
-				return runAPIKey([]string{"create", "--user", id(fx.userID)})
+				return runUser([]string{"key", "create", id(fx.userID)})
 			}},
 		{command: "apikey", what: "list 空清单",
 			allowed: "暂无 API Key",
 			run: func() error {
-				return runAPIKey([]string{"list", "--user", id(emptyUserID)})
+				return runUser([]string{"key", "list", id(emptyUserID)})
 			}},
 
 		{command: "wallet", what: "credit",
 			run: func() error {
-				return runWallet([]string{
-					"credit", "--user", id(fx.userID), "--amount", "1",
+				return runUser([]string{
+					"wallet", "credit", id(fx.userID), "--amount", "1",
 					"--gateway", "manual", "--ref", uniqueName("stream-order"),
 				})
 			}},
 		{command: "wallet", what: "adjust",
 			run: func() error {
-				return runWallet([]string{
-					"adjust", "--user", id(fx.userID), "--amount", "1",
+				return runUser([]string{
+					"wallet", "adjust", id(fx.userID), "--amount", "1",
 					"--memo", "夹具调账", "--ref", uniqueName("stream-adjust"),
 					"--by", id(fx.userID),
 				})
 			}},
+
+		// 每条一级命令自己那一层也各留一条：上面的 user 那几条走的是新路径，
+		// 各命令的分发函数不该因此一条用例都没有。
+		{command: "apikey", what: "get",
+			run: func() error { return runAPIKey([]string{"get", "--id", id(fx.keyID)}) }},
+		{command: "wallet", what: "create 已存在",
+			run: func() error { return runWallet([]string{"create", "--user", id(fx.userID)}) }},
+		{command: "plan", what: "list",
+			run: func() error { return runPlan([]string{"list"}) }},
+		{command: "usage", what: "events 全量",
+			run: func() error { return runUsage([]string{"events", "--limit", "1"}) }},
 
 		{command: "plan", what: "create + grant",
 			run: func() error {
@@ -288,8 +303,8 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 				}); err != nil {
 					return err
 				}
-				return runPlan([]string{
-					"grant", "--user", id(fx.userID), "--plan", key,
+				return runUser([]string{
+					"plan", "grant", id(fx.userID), key,
 					"--ref", uniqueName("stream-grant"),
 					"--expires-at", time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 				})
@@ -297,11 +312,11 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 
 		{command: "usage", what: "events 空清单",
 			run: func() error {
-				return runUsage([]string{"events", "--user", id(emptyUserID)})
+				return runUser([]string{"usage", "events", id(emptyUserID)})
 			}},
 		{command: "usage", what: "requests 空清单",
 			run: func() error {
-				return runUsage([]string{"requests", "--user", id(emptyUserID)})
+				return runUser([]string{"usage", "requests", id(emptyUserID)})
 			}},
 
 		{command: "ledger", what: "balance --all",
@@ -457,10 +472,12 @@ func TestWriteEchoesAppearOnlyOnStderr(t *testing.T) {
 				})
 			}},
 
+		// 走新路径（user key create）：旧写法在成功路径上会打一句「搬到哪儿了」，
+		// 那是附注，不该混进这条用例要数的回显里。
 		{command: "apikey", what: "create", marker: "已创建 API Key", stdout: stdoutSecret,
 			run: func(t *testing.T, fx *streamFixture) (string, string) {
 				return mustStream(t, func() error {
-					return runAPIKey([]string{"create", "--user", id(fx.userID)})
+					return runUser([]string{"key", "create", id(fx.userID)})
 				})
 			}},
 		{command: "apikey", what: "update", marker: "已改 API Key", stdout: stdoutEmpty,

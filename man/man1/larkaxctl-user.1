@@ -89,5 +89,48 @@ stdout 恰\:好\:一\:行，\:就\:是\:新\:口\:令，\:只\:显\:示\:这\:�
 \fB哪\:些\:一\:致\:性\:在\:库\:层、\:哪\:些\:只\:在\:应\:用\:层。\fR 库\:上\:有\:两\:条 CHECK 钉\:住\:状\:态\:与\:列\:的\:配\:套：\fBstatus = deleted\fR 必\:有 \fBdeleted_at\fR，\fBstatus = deletion_requested\fR 必\:有 \fBdeletion_prior_status\fR。\:剩\:下\:的\:几\:件——终\:态\:账\:号\:的 API Key 已\:作\:废、\:插\:件 KV 已\:清、\:采\:集\:授\:权\:已\:撤\:销——\fB没\:有\:触\:发\:器\fR，\:只\:由 \fBpurge\fR 的\:同\:一\:个\:事\:务\:保\:证；\:绕\:过 \fBpurge\fR 直\:接 \fBUPDATE users\fR 不\:会\:连\:带\:动\:那\:几\:张\:表。
 .PP
 \fBcreate\fR / \fBlist\fR / \fBget\fR / \fBupdate\fR 只\:碰 \fBusers\fR 表\:（不\:碰\:渠\:道\:凭\:证）；\fBdelete\fR 那\:一\:族\:会\:写\:到 \fBapi_keys\fR、\fBplugin_kv\fR 与 \fBcapture_consents\fR，\:钱\:包\:只\:读\:加\:锁。\:除\:了 \fBplugin_kv\fR 里\:属\:于\:这\:个\:用\:户\:的\:行，\:别\:的\:行\:都\:不\:删。\:它\:们\:都\:不\:需\:要 \fBLARKAX_MASTER_KEYS\fR。
+.PP
+\fB用\:户\:级\:履\:约\:操\:作\:也\:挂\:在 user 下\fR：\fBuser plan\fR、\fBuser wallet\fR、\fBuser key\fR、\fBuser usage\fR。\:核\:心\:宾\:语——哪\:个\:用\:户、\:哪\:个\:套\:餐——写\:成\fB位\:置\:参\:数\fR，\:修\:饰\:项\:（\fB\-\-ref\fR、\fB\-\-expires\-at\fR、\fB\-\-amount\fR）\:仍\:然\:是\:旗\:标。
+.IP \(bu 2
+\fBuser plan\fR：\fBgrant\fR / \fBlist\fR / \fBvoid\fR / \fBorder\fR——该\:用\:户\:持\:有\:的\:订\:阅\:与\:扣\:费\:顺\:序。
+.IP \(bu 2
+\fBuser wallet\fR：\fBshow\fR / \fBcredit\fR / \fBadjust\fR / \fBrefund\fR——该\:用\:户\:的\:钱\:包。
+.IP \(bu 2
+\fBuser key\fR：\fBlist\fR / \fBcreate\fR / \fBplans\fR——该\:用\:户\:的 API Key，\:以\:及\:一\:把 Key 能\:用\:哪\:些\:订\:阅。
+.IP \(bu 2
+\fBuser usage\fR：\fBevents\fR / \fBrequests\fR——该\:用\:户\:的\:用\:量\:与\:计\:费。
+.PP
+四\:条\:子\:组\:的\:语\:义\:与\:各\:自\:的\:旗\:标\:跟\:对\:应\:的\:顶\:层\:命\:令\fB逐\:字\:相\:同\fR，\:区\:别\:只\:在\:宾\:语\:的\:位\:置：
+.TP
+.B user plan grant <用\:户> <套\:餐> \-\-ref … \-\-expires\-at …
+\fBplan grant \-\-user <用\:户> \-\-plan <套\:餐> …\fR
+.TP
+.B user plan list <用\:户>
+\fBplan subscriptions \-\-user <用\:户>\fR
+.TP
+.B user plan void <订\:阅 ID> \-\-ref …
+\fBplan void \-\-id <订\:阅 ID> …\fR
+.TP
+.B user plan order show <用\:户> / user plan order set <用\:户> …
+\fBplan order show \-\-user <用\:户>\fR / \fBplan order set \-\-user <用\:户> …\fR
+.TP
+.B user key plans show <API Key ID> / user key plans set <API Key ID> …
+\fBplan key show \-\-id <API Key ID>\fR / \fBplan key set \-\-id <API Key ID> …\fR
+.TP
+.B user wallet show <用\:户>
+\fBwallet list \-\-user <用\:户>\fR
+.TP
+.B user wallet credit <用\:户> … / adjust / refund
+\fBwallet credit \-\-user <用\:户> …\fR / \fBadjust\fR / \fBrefund\fR
+.TP
+.B user key create <用\:户> … / user key list <用\:户>
+\fBapikey create \-\-user <用\:户> …\fR、\fBapikey list \-\-user <用\:户>\fR
+.TP
+.B user usage events <用\:户> … / requests
+\fBusage events \-\-user <用\:户> …\fR / \fBrequests\fR
+.PP
+旧\:写\:法\fB至\:少\:保\:留\:一\:个\:发\:布\:周\:期\fR，\:命\:中\:时\:在 stderr 打\:一\:行\:指\:向\:新\:路\:径\:（\fB提\:示：…\fR，\fB\-q\fR 之\:下\:跟\:着\:压\:掉，\fB\-\-format json\fR 的 stdout 不\:受\:影\:响）。\:这\:行\:提\:示\:与\:这\:一\:次\:跑\:成\:没\:跑\:成\:无\:关：\:参\:数\:写\:得\:出\:来\:就\:提\:示——\fB失\:败\:时\:更\:要\:说\fR，\:「Key 不\:存\:在」\:只\:说\:明\:数\:据\:不\:在，\:而\:人\:手\:上\:那\:条\:命\:令\:可\:能\:早\:该\:换\:了。\:唯\:一\:的\:例\:外\:是\:参\:数\:错\:（退\:出\:码 2）：\:那\:时 stderr 上\:已\:经\:是\:一\:屏\:用\:法，\:再\:补\:一\:句\:搬\:家\:提\:示\:只\:会\:把\:「先\:把\:参\:数\:写\:对」\:挤\:到\:后\:面。\:不\:带 \fB\-\-user\fR 的 \fBwallet list\fR / \fBapikey list\fR / \fBusage events|requests\fR 回\:答\:的\:是\:全\:量，\:没\:有\:对\:应\:的\:新\:路\:径，\:因\:此\:不\:提\:示。
+.PP
+新\:路\:径\fB不\:新\:增\:业\:务\:能\:力\fR：\fBuser plan grant\fR 与 \fBplan grant\fR 走\:的\:是\:同\:一\:段\:代\:码，\:幂\:等\:键、\:退\:出\:码\:与\:两\:种\:输\:出\:契\:约\:都\:一\:样。\fBplan\fR 剩\:下\:的\:只\:有\:商\:品\:定\:义\:（\fBcreate\fR / \fBlist\fR / \fBget\fR / \fBenable\fR / \fBdisable\fR）；\:开\:通\:钱\:包\:（\fBwallet create\fR）、\:商\:户\:提\:现\:（\fBwallet payout\fR）\:与\:支\:付\:通\:道\:（\fBwallet payment\fR）\:不\:在\:这\:一\:组\:里，\:仍\:在 \fBwallet\fR 下。
 .SH SEE ALSO
 .BR larkaxctl (1)

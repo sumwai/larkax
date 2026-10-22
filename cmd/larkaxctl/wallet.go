@@ -34,10 +34,7 @@ var walletHelp = helpText{short: walletShortUsage, long: walletUsage}
 const walletShortUsage = `larkaxctl wallet 管理用户钱包。
 用法：
   larkaxctl wallet create --user <ID 或用户名> [--asset <资产>]
-  larkaxctl wallet credit --user <ID 或用户名> --amount <金额> --ref <外部单据号> [--asset <资产>] [--gateway <来源>]
-  larkaxctl wallet adjust --user <ID 或用户名> --amount <带符号金额> --ref <外部单据号> --memo <原因> --by <操作人>
-  larkaxctl wallet refund --user <ID 或用户名> --amount <金额> --ref <外部单据号> [--memo <原因>]
-                          [--asset <资产>] [--merchant <ID 或用户名> --merchant-share <金额>] [--upstream-cost <金额>]
+  larkaxctl wallet list [--user <ID 或用户名>]
   larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号> [--asset <资产>]
                                   [--destination <收款信息 JSON>]
   larkaxctl wallet payout settle --user <ID 或用户名> --amount <金额> --ref <结算单号> --destination <JSON> --by <操作人> [--note <说明>]
@@ -45,9 +42,10 @@ const walletShortUsage = `larkaxctl wallet 管理用户钱包。
   larkaxctl wallet payout paid --id <提现单 ID> --gateway <通道> [--gateway-ref <凭据号>]
   larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号> [--asset <资产>]
   larkaxctl wallet payment status --order <订单号>
-  larkaxctl wallet list [--user <ID 或用户名>]
 
-credit / adjust / refund 要求钱包已存在（先 create）；payout 这些动作不动 user 科目，**打款只放行已批准的单子**；单据号必填且是幂等键。
+钱包的入账、调账、退款与单用户查询在 larkaxctl user wallet（credit / adjust / refund / show）；
+旧写法 wallet credit|adjust|refund、wallet list --user 仍可用并在 stderr 提示新路径。
+payout 这些动作不动 user 科目，**打款只放行已批准的单子**；单据号必填且是幂等键。
 某一格金额读不出来时打「不可读（超出可表示范围）」并退出 1；更细的边界：larkaxctl help wallet，payout 与 payment 另有各自 help。
 `
 
@@ -56,14 +54,7 @@ const walletUsage = `larkaxctl wallet 管理用户钱包。
 
 用法：
   larkaxctl wallet create --user <ID 或用户名> [--asset <资产>]
-  larkaxctl wallet credit --user <ID 或用户名> --amount <金额> --ref <外部单据号>
-                          [--asset <资产>] [--gateway <来源>]
-  larkaxctl wallet adjust --user <ID 或用户名> --amount <带符号金额> --ref <外部单据号>
-                          --memo <原因> --by <操作人>
-  larkaxctl wallet refund --user <ID 或用户名> --amount <金额> --ref <外部单据号>
-                          [--asset <资产>] [--memo <原因>]
-                          [--merchant <ID 或用户名> --merchant-share <金额>]
-                          [--upstream-cost <金额>]
+  larkaxctl wallet list [--user <ID 或用户名>]
   larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号>
                                   [--asset <资产>]
                                   [--destination <收款信息 JSON>]
@@ -77,7 +68,20 @@ const walletUsage = `larkaxctl wallet 管理用户钱包。
   larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号>
                                   [--asset <资产>] [--notify-url <回调地址>]
   larkaxctl wallet payment status --order <订单号>
-  larkaxctl wallet list [--user <ID 或用户名>]
+
+# 用户级的三条：在 larkaxctl user wallet 下
+
+入账、调账、退款与单用户查询已经搬到 larkaxctl user wallet 那一组，核心宾语写成
+位置参数：
+
+  larkaxctl user wallet show   <用户>
+  larkaxctl user wallet credit <用户> --amount <金额> --ref <外部单据号> …
+  larkaxctl user wallet adjust <用户> --amount <带符号金额> --ref <外部单据号> --memo … --by …
+  larkaxctl user wallet refund <用户> --amount <金额> --ref <外部单据号> …
+
+下面几节讲的 credit / adjust / refund 语义在两条路径上逐字相同。旧写法
+wallet credit / adjust / refund 与 wallet list --user 仍可用，命中时在 stderr
+提示新路径，至少保留一个发布周期。
 
 create 给一个已存在的用户开通钱包，余额为 0。它不写任何分录：新开的户在
 账本上没有分录，这个用户在 user 科目上的分录之和为 0，与快照里的 0 自洽。
@@ -308,16 +312,23 @@ func runWallet(args []string) error {
 	case "create", "open":
 		return runWalletCreate(rest)
 	case "credit":
-		return runWalletCredit(rest)
+		return runLegacyUserPath("wallet credit 已搬到 larkaxctl user wallet credit <用户>",
+			func() error { return runWalletCredit(rest) })
 	case "adjust":
-		return runWalletAdjust(rest)
+		return runLegacyUserPath("wallet adjust 已搬到 larkaxctl user wallet adjust <用户>",
+			func() error { return runWalletAdjust(rest) })
 	case "refund":
-		return runWalletRefund(rest)
+		return runLegacyUserPath("wallet refund 已搬到 larkaxctl user wallet refund <用户>",
+			func() error { return runWalletRefund(rest) })
 	case "payout":
 		return runWalletPayout(rest)
 	case "payment":
 		return runWalletPayment(rest)
 	case "list":
+		if usesUserFlag(rest) {
+			return runLegacyUserPath("wallet list --user 已搬到 larkaxctl user wallet show <用户>",
+				func() error { return runWalletList(rest) })
+		}
 		return runWalletList(rest)
 	case "-h", "--help":
 		printUsage(os.Stdout, walletShortUsage)

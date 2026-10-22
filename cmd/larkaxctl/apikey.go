@@ -24,8 +24,6 @@ var apiKeyHelp = helpText{short: apiKeyShortUsage, long: apiKeyUsage}
 const apiKeyShortUsage = `larkaxctl apikey 管理 API Key。
 
 用法：
-  larkaxctl apikey create --user <ID 或用户名> [--name <备注>]
-                          [--expires-at <RFC3339>] [--rpm <整数>] [--quota <金额>]
   larkaxctl apikey update --id <ID> [--status <active|disabled|revoked>]
                                   [--name <备注>] [--rpm <整数> | --clear-rpm]
                                   [--quota <金额> | --clear-quota]
@@ -33,7 +31,8 @@ const apiKeyShortUsage = `larkaxctl apikey 管理 API Key。
   larkaxctl apikey get --id <ID>
   larkaxctl apikey list [--user <ID 或用户名>]
 
-create 的明文只打印这一次（库里存的是哈希），它单独打在 stdout 上。
+按用户建 Key 与列 Key 在 larkaxctl user key（create / list），Key 能用哪些订阅在
+larkaxctl user key plans；旧写法 apikey create、apikey list --user 仍可用并在 stderr 提示新路径。
 
 --rpm 与 --quota 都按明文给：0 不是「不限」，是「一个都不放行」；负数一律拒绝。
 
@@ -44,14 +43,25 @@ create 的明文只打印这一次（库里存的是哈希），它单独打在 
 const apiKeyUsage = `larkaxctl apikey 管理 API Key。
 
 用法：
-  larkaxctl apikey create --user <ID 或用户名> [--name <备注>] [--expires-at <RFC3339>]
-                          [--rpm <整数>] [--quota <金额>]
   larkaxctl apikey update --id <ID> [--status <active|disabled|revoked>]
                                   [--name <备注>] [--rpm <整数> | --clear-rpm]
                                   [--quota <金额> | --clear-quota]
                                   [--expires-at <RFC3339> | --clear-expires-at]
   larkaxctl apikey get --id <ID>
   larkaxctl apikey list [--user <ID 或用户名>]
+
+# 用户级的那两条：在 larkaxctl user key 下
+
+按用户建 Key 与列一个用户的 Key 已经搬到 larkaxctl user key，核心宾语写成位置参数：
+
+  larkaxctl user key create <用户> [--name <备注>] [--expires-at <RFC3339>]
+                                   [--rpm <整数>] [--quota <金额>]
+  larkaxctl user key list   <用户>
+  larkaxctl user key plans  show|set <API Key ID> …
+
+下面「额度」「状态与有效期」「别名」几节对两条路径同样成立。旧写法 apikey create
+与 apikey list --user 仍可用，命中时在 stderr 提示新路径，至少保留一个发布周期。
+update 与 get 的核心宾语是 Key 本身，不搬。
 
 create 生成一把新 key，只把哈希入库。
 
@@ -149,12 +159,17 @@ func runAPIKey(args []string) error {
 
 	switch action {
 	case "create":
-		return runAPIKeyCreate(rest)
+		return runLegacyUserPath("apikey create 已搬到 larkaxctl user key create <用户>",
+			func() error { return runAPIKeyCreate(rest) })
 	case "update":
 		return runAPIKeyUpdate(rest)
 	case "get":
 		return runAPIKeyGet(rest)
 	case "list":
+		if usesUserFlag(rest) {
+			return runLegacyUserPath("apikey list --user 已搬到 larkaxctl user key list <用户>",
+				func() error { return runAPIKeyList(rest) })
+		}
 		return runAPIKeyList(rest)
 	default:
 		return usageErr(fmt.Errorf("未知的 apikey 子命令 %q", action))
