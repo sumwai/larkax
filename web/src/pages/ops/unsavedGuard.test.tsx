@@ -96,7 +96,12 @@ function dispatchBeforeUnload(): Event {
   return event
 }
 
-/** 一张最小的表单：只用来钉「脏状态 → 两个出口」这一层本身。 */
+/**
+ * 一张最小的表单：只用来钉「脏状态 → 两个出口」这一层本身。
+ *
+ * 点「去别处」只是**发起一次站内路由导航**的手段，等价于浏览器后退；弹窗表单
+ * 在真实 UI 里走得到的就是后退那条（遮罩铺满视口，弹窗开着时点不到侧栏）。
+ */
 function TestForm() {
   const [value, setValue] = useState('')
   const [initial, setInitial] = useState('')
@@ -236,8 +241,9 @@ describe('未保存改动的两个出口', () => {
 /**
  * 把一页放进 data router，并在页面上放一个「去别处」的入口。
  *
- * 真页面里这个入口是侧栏；这里只关心「点它会不会先问一句」，所以用最朴素的
- * 一条链接，省掉外壳。
+ * 真页面里这个入口是侧栏；这里只关心「导航发生时会先问一句」，所以用最朴素的
+ * 一条链接，省掉外壳。四处弹窗表单的真实入口是浏览器后退（见 `TestForm` 上方的
+ * 说明）；整页表单（设置页 / 账号页）才是点侧栏。
  */
 function mountPage(page: ReactNode, path: string) {
   const router = createMemoryRouter(
