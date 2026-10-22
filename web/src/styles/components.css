@@ -548,7 +548,7 @@ textarea.input {
   padding: 12px 0;
   border-top: 1px solid var(--border);
 }
-.ops-row:first-child {
+.ops-row:first-of-type {
   border-top: 0;
 }
 .ops-row .actions {

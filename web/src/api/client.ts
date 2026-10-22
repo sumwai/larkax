@@ -208,8 +208,11 @@ export class HttpApiClient implements ApiClient {
   /**
    * 商家自己的售价规则。
    *
-   * 请求体只放可变字段：`scope`、`owner_user_id`、`channel_id` 在商家前缀下
-   * 出现即被拒，作用域与归属由服务端按会话决定。
+   * 请求体只放可变字段。作用域与归属由服务端按会话决定，但两条写路径的处理
+   * 不一样：新建（`createRule` → `internal/adminapi/resources.go` 的
+   * `API.createRule`）按会话静默覆盖 `scope` / `owner_user_id` / `channel_id`，
+   * 请求体里写了也不作数、不报错；修改（`updateRule` →
+   * `internal/pricing/admin.go` 的 `Admin.UpdateOwned`）是出现即拒。
    */
   private merchantPricing(prefix: string): MerchantPricingClient {
     const idBody = (body: { id: number }) => body.id

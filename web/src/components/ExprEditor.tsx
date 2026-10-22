@@ -6,8 +6,9 @@ import type { MessageKey } from '../i18n/zh'
  * 计价表达式的输入。
  *
  * 表单模式只覆盖「一张固定的单价表」：五个键各一行，数值与单位分开填。
- * 换算与校验全部走十进制字符串，不经过浮点——每 token 的单价低到 1e-8，
- * 用浮点乘一遍，尾巴会留在第八位之后，而服务端按 8 位小数存储。
+ * 换算与校验全部走十进制字符串，不经过浮点——每 token 的单价低到 1e-7，
+ * 这个量级上浮点乘一遍就会带出 `0.09999999999999999` 这类尾巴，而服务端按
+ * 8 位小数存储。
  * 带条件的表达式（`len <= 32000 ? {...} : {...}`）只能走表达式模式。
  */
 
@@ -67,8 +68,9 @@ interface EditorState {
 /**
  * 十进制字符串除以 10^places。
  *
- * 只做小数点搬移：`3.5` 除 10^6 得 `0.0000035`。不经过 Number，所以不会有
- * `0.0000035000000000000004` 这类尾巴。
+ * 只做小数点搬移：`0.1` 除 10^6 得 `0.0000001`。不经过 Number，所以不会有
+ * `1.0000000000000001e-7` 这类尾巴——`1e-7` 这一档才会露出浮点，`3.5` 那一档
+ * 恰好是干净的，拿它举证证明不了什么。
  */
 function divideByPower(value: string, places: number): string {
   const [whole, frac = ''] = value.split('.')
@@ -217,6 +219,25 @@ function parseSimpleExpr(source: string): { rows: Rows; units: Units } | null {
 
   skip()
   return index === text.length ? { rows, units } : null
+}
+
+/**
+ * 把一条「五项固定单价」的表达式换算成每 100 万 token 的口径，给展示用。
+ *
+ * 带条件、带别的键、值不是裸十进制字面量的表达式返回 `null`，调用方原样显示——
+ * 那些不是一张单价表，硬乘会把 `len <= 32000 ? … : …` 变成一句无意义的话。
+ * 换算走 `multiplyByPower`（只搬小数点），所以 `0.0000001` 是 `0.1`；
+ * 同一个值用浮点乘会得到 `0.09999999999999999`。
+ */
+export function exprPerMillion(source: string): string | null {
+  const parsed = parseSimpleExpr(source)
+  if (!parsed) return null
+  const parts: string[] = []
+  for (const slot of SLOTS) {
+    if (!parsed.rows[slot]) continue
+    parts.push(`"${slot}": ${parsed.rows[slot]}`)
+  }
+  return `{${parts.join(', ')}}`
 }
 
 function initialState(value: string): EditorState {

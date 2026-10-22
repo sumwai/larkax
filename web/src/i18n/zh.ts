@@ -680,6 +680,8 @@ export const zh = {
   'ops.pricing.merchantEmpty': '还没有自己的计价规则',
   'ops.pricing.merchantEmptyBody': '新建一条，给你供的模型定价。',
   'ops.pricing.merchantPatternsHint': '命中这些模型的请求按这条规则计价。',
+  'ops.pricing.merchantPriceNote':
+    '清单里的单价是每 100 万 token 的金额（带条件的表达式按原文显示），币种 {currency}。',
   'ops.pricing.createRule': '新建规则',
   'ops.pricing.createCost': '新建成本规则',
   'ops.pricing.editRule': '编辑规则',
@@ -705,7 +707,7 @@ export const zh = {
   'ops.pricing.enable': '启用',
   'ops.pricing.disable': '停用',
   'ops.pricing.enableConfirm': '启用规则「{name}」？',
-  'ops.pricing.disableConfirm': '停用规则「{name}」？',
+  'ops.pricing.disableConfirm': '停用规则「{name}」？停用后这条规则将不再计价。',
   'ops.pricing.platformWide': '平台级',
   'ops.pricing.channelRequired': '请先选择渠道。',
   'ops.pricing.saveConfirm': '保存规则「{name}」？',
