@@ -36,8 +36,8 @@ const channelShortUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel update --id <渠道 ID> [字段与 create 相同，另可换凭证]
   larkaxctl channel enable|disable --id <渠道 ID>
   larkaxctl channel delete|restore --id <渠道 ID>
-  larkaxctl channel sync-models --id <渠道 ID>
-  larkaxctl channel upstream-models --id <渠道 ID>
+  larkaxctl channel sync-models|upstream-models --id <渠道 ID>
+  larkaxctl channel map add|list|remove（出站映射，见 larkaxctl channel map help）
 
 明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。
 create 的 stdout 只有新渠道的 ID；delete 是软删，restore 是它的逆操作。
@@ -67,6 +67,11 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel restore --id <渠道 ID>
   larkaxctl channel sync-models --id <渠道 ID>
   larkaxctl channel upstream-models --id <渠道 ID>
+  larkaxctl channel map add <渠道> <规范名> <上游模型名> [--overrides <JSON 对象>]
+  larkaxctl channel map add --all-channels <规范名> <上游模型名>
+  larkaxctl channel map list [<渠道>] [--all-channels] [--model <规范名>]
+  larkaxctl channel map remove <渠道> <规范名>
+  larkaxctl channel map remove --all-channels <规范名>
 
 **明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。**命令行参数会
 出现在 ps 的输出与 shell 历史里。
@@ -130,7 +135,7 @@ restore 一次不报错（打印「没有处于删除状态」）。
 
 sync-models 从上游拉一次这条渠道的模型清单并落库，需要主密钥（要解出凭证）。
 它拉的是**上游自己的模型名**，存在单独的表里，不写进 channels.models——那一栏
-是选路用的规范名，两者之间隔着别名映射。upstream-models 只读库里那一份，不碰
+是选路用的规范名，两者之间隔着出站映射（channel map）。upstream-models 只读库里那一份，不碰
 网络、不要主密钥。
 
 上游不提供模型列表接口是常态：适配器回「不支持」时 sync-models 照样成功返回
@@ -176,6 +181,9 @@ completion_includes_reasoning 这一位决定上游报的输出 token 里含不�
 
 **选项的旧名仍可用**：--owner 等同于 --user。它保留是为了不让已经在跑的脚本
 与部署流程坏掉，行为一致；新写的命令请用 --user。
+
+渠道上的出站映射（规范名 → 这家上游的叫法）在 channel map 下：add / list /
+remove，平台级映射用 --all-channels 表示。完整边界见 larkaxctl channel map help。
 
 # 别名
 
@@ -237,6 +245,8 @@ func runChannel(args []string) error {
 		return runChannelSyncModels(rest)
 	case "upstream-models":
 		return runChannelUpstreamModels(rest)
+	case "map":
+		return runChannelMap(rest)
 	case "-h", "--help":
 		printUsage(os.Stdout, channelShortUsage)
 		return nil

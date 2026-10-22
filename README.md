@@ -35,13 +35,13 @@ printf '%s\n' '<your-upstream-key>' > ~/upstream-key.txt
 curl -s https://api.example.com/v1/models \
   -H "Authorization: Bearer $(cat ~/upstream-key.txt)"
 
-# A canonical model, a channel, the alias mapping one to the other, a user, and a price.
+# A canonical model, a channel, its outbound model mapping, a user, and a price.
 go run ./cmd/larkaxctl model create --model claude-x --display 'Example model' \
   --vendor example --context-limit 200000 --tools --vision
 cat ~/upstream-key.txt | go run ./cmd/larkaxctl channel create \
   --name my-upstream --type openai --base-url https://api.example.com/v1 \
   --models claude-x --credential-stdin
-go run ./cmd/larkaxctl alias create --model claude-x --upstream <upstream-model-id>
+go run ./cmd/larkaxctl channel map add --all-channels claude-x <upstream-model-id>
 go run ./cmd/larkaxctl user create --name alice
 go run ./cmd/larkaxctl price create --scope platform --name example-price --by alice \
   --expr '{"prompt": 0.0000015, "completion": 0.0000075,

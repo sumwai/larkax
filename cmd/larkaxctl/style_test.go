@@ -233,7 +233,9 @@ func TestEmptyListMessages(t *testing.T) {
 		{"API Key", "暂无 API Key。可使用 larkaxctl apikey create 添加。",
 			func(w io.Writer) { printKeyList(w, nil) }},
 		{"别名", "暂无别名。可使用 larkaxctl alias create 添加。",
-			func(w io.Writer) { printAliasList(w, nil) }},
+			func(w io.Writer) { printAliasList(w, nil, "别名", "alias create") }},
+		{"映射", "暂无映射。可使用 larkaxctl channel map add 添加。",
+			func(w io.Writer) { printAliasList(w, nil, "映射", "channel map add") }},
 		{"用户", "暂无用户。可使用 larkaxctl user create 添加。",
 			func(w io.Writer) { printUserList(w, nil) }},
 		{"钱包", "暂无钱包。可使用 larkaxctl wallet create 添加。",
@@ -244,8 +246,8 @@ func TestEmptyListMessages(t *testing.T) {
 
 	// 与另一张样式表同一个做法：条数写死。少了一条就等于那条没人看，而
 	// 「用例还在跑、只是不覆盖那条命令」在输出里和通过长得一样。
-	if len(cases) != 9 {
-		t.Fatalf("这张表里 %d 条清单命令，期望 9 条", len(cases))
+	if len(cases) != 10 {
+		t.Fatalf("这张表里 %d 条清单命令，期望 10 条", len(cases))
 	}
 
 	for _, tc := range cases {
@@ -774,7 +776,7 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		{"别名清单", func(w io.Writer) {
 			printAliasList(w, []catalog.Alias{{
 				ID: 1, UpstreamModel: "up-x", CanonicalName: "claude-x",
-			}})
+			}}, "别名", "alias create")
 		}},
 		{"配置清单", func(w io.Writer) {
 			printSettingsList(w, []settings.Entry{{

@@ -161,9 +161,9 @@ var commandGroups = []commandGroup{
 	{
 		title: "路由与模型配置 (Routing & Models)",
 		commands: []command{
-			{name: "channel", summary: "上游渠道管理（网关、凭证、关联模型）", help: channelHelp, run: runChannel},
+			{name: "channel", summary: "上游渠道管理（网关、凭证、关联模型与出站映射）", help: channelHelp, run: runChannel},
 			{name: "model", summary: "规范模型目录（catalog 基础定义）", help: modelHelp, run: runModel},
-			{name: "alias", summary: "模型别名映射（上游模型名 ↔ 规范名）", help: aliasHelp, run: runAlias},
+			{name: "alias", summary: "出站映射的旧入口（配置命令在 channel map）", help: aliasHelp, run: runAlias},
 			{name: "price", summary: "模型计价规则与日历管理（含 calendar 子命令）", help: priceHelp, run: runPrice},
 			{name: "upstream-cost", summary: "上游成本规则（按渠道与模型记成本价）", help: upstreamCostHelp, run: runUpstreamCost},
 		},
