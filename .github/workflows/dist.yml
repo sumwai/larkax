@@ -1,0 +1,97 @@
+name: 构建制品
+
+# 手动触发，**只构建、不发布、不部署**。
+#
+# 与 release.yml 的分工：release.yml 由 tag 触发，那是一次「对外发版」的决定；
+# 这里不发版，只把某一棵已经过了门的树打成可以拿走的产物——两个二进制与一份
+# 控制台静态包。产物通过 workflow artifact 取，不进 Release。
+#
+# 它**不跑门禁**：门禁在 push 与 PR 上已经跑过（见 gates.yml，那是全套门禁的
+# 唯一定义）。触发前请确认这个 commit 是绿的——这里只保证「能构建出来」，
+# 不保证「该发」。想要「门禁 + 构建」一条龙，走 tag 与 release.yml。
+#
+# 为什么要单独有它：构建是 CPU 活，`make dist` 要交叉编译两个二进制、控制台要
+# 跑一次 Vite 打包。放在 CI 上跑，开发机只负责取产物。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '写进二进制的版本号；留空则用 dev-<短 sha>'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  # 二进制：调 Makefile 的 `dist` 目标，不在这里把构建步骤再列一遍。
+  # 列一遍就是第二份配方，改一处要记得改另一处，而漂移之后没有任何门禁会响
+  # （LESSONS.md 第 29 条）。release.yml 也调同一个目标。
+  #
+  # 版本号只有一处来源：input，或者由提交 sha 派生。与发布路径一样，它被
+  # 注入到 `main.version`，`make dist` 会在 amd64 上真跑一次 `--version`
+  # 核对注入是否生效——跑不起来时那一步会失败，而不是产出一个自称 dev 的包。
+  go-dist:
+    name: 二进制
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 构建并打包
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          version="$INPUT_VERSION"
+          if [ -z "$version" ]; then
+            version="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "版本号：$version"
+          make dist VERSION="$version" ARCHS="amd64"
+
+      # `if-no-files-found: error`：tarball 没打出来时 upload 默认只是警告，
+      # 于是「构建成功但没有产物」与「产物好好的」在日志里长得一样。
+      - uses: actions/upload-artifact@v4
+        with:
+          name: larkax-dist
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  # 控制台：`npm run build` 自己就会先跑 `tsc -b`（见 web/package.json），
+  # 所以这里不再单列一次类型检查——那一道在 Web 门禁里已经跑过，这里要的是产物。
+  web-dist:
+    name: 控制台
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 版本跟着仓库里的 .nvmrc 走，与 Web 门禁同一个来源：写死一个数字
+      # 的话，改 .nvmrc 时这里不会跟着变，而这个 job 只在手动触发时跑，
+      # 漂了也没人会发现。
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # 用 ci 而不是 install：按 lock 精确装，lock 与 package.json 对不上时直接失败。
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建
+        run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: larkax-web
+          path: web/dist
+          if-no-files-found: error
