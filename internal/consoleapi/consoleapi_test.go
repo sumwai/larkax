@@ -1084,7 +1084,7 @@ func TestKeyNeverExpires(t *testing.T) {
 			t.Errorf("详情里 id=%d 的 never_expires = %v，期望 %v",
 				id, got.NeverExpires, want[id])
 		}
-		// expires_at 的值、类型与是否出现都不动：远期值照打，NULL 照旧缺席。
+		// expires_at 的值与类型都不动：远期值照打，库里是 NULL 时字段照旧出现、值为 null。
 		if id == 2 {
 			if got.ExpiresAt != nil {
 				t.Errorf("NULL 那一把的 expires_at = %q，期望 null", *got.ExpiresAt)
@@ -1098,6 +1098,15 @@ func TestKeyNeverExpires(t *testing.T) {
 		var raw map[string]any
 		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 			t.Fatalf("详情不是 JSON: %v", err)
+		}
+		// 解码到 *string 时 null 与字段缺席都是 nil，分不出来；这里按原始 JSON
+		// 断言字段确实在：NULL 那一把给的是 "expires_at": null，不是没有这个键。
+		if id == 2 {
+			value, present := raw["expires_at"]
+			if !present || value != nil {
+				t.Errorf("NULL 那一把的 expires_at 应当出现且为 null，得到 present=%v value=%v",
+					present, value)
+			}
 		}
 		raws[id] = raw
 	}

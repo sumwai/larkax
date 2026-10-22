@@ -20,19 +20,25 @@ const ForeverRFC3339 = "9999-12-31T23:59:59Z"
 //
 // 不放在 init 里：一个常量笔误不该让整个二进制起不来。放到第一次用到时，
 // 影响面就收窄到真正读这个值的那条路径。
-var forever = sync.OnceValue(func() time.Time {
-	at, err := time.Parse(time.RFC3339, ForeverRFC3339)
-	if err != nil {
-		// 值来自上面的常量；解析失败只可能是源码改错了。让它在第一次用到时
-		// 当场暴露，而不是把一件不可能发生的事铺成一条返回 error 的路径。
-		panic("expiry: ForeverRFC3339 不是合法的 RFC3339 时间: " + err.Error())
-	}
-	return at
+//
+// 用 OnceValues 存 error、在 Forever 里 panic，而不是 OnceValue 直接 panic：
+// sync.Once 在 f panic 之后仍把 done 置 1，OnceValue 于是只留下零值——服务端
+// 每个请求的 panic 都被 net/http recover，结果是只有第一个请求崩，之后所有
+// 调用静默返回 year 1，IsForever 对所有真实时刻都回 false。方向正好相反：
+// 「全部不过期」会变成「全部过期」。存下 error 之后每次调用都会再 panic。
+var forever = sync.OnceValues(func() (time.Time, error) {
+	return time.Parse(time.RFC3339, ForeverRFC3339)
 })
 
 // Forever 返回 ForeverRFC3339 对应的时刻。
 func Forever() time.Time {
-	return forever()
+	at, err := forever()
+	if err != nil {
+		// 值来自上面的常量；解析失败只可能是源码改错了。让它在每次用到时
+		// 当场暴露，而不是把一件不可能发生的事铺成一条返回 error 的路径。
+		panic("expiry: ForeverRFC3339 不是合法的 RFC3339 时间: " + err.Error())
+	}
+	return at
 }
 
 // IsForever 判断一个过期时刻是不是「不过期」。
