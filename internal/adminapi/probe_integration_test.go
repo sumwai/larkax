@@ -390,7 +390,7 @@ func probeErrWithClient(t *testing.T, client *http.Client, baseURL string) error
 func assertGatewayTimeout(t *testing.T, err error) {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost,
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost,
 		"/api/v1/merchant/channels/probe-models", nil)
 	(&API{}).failProbe(rec, req, err)
 	if rec.Code != http.StatusGatewayTimeout {
@@ -444,7 +444,8 @@ func TestProbeTimeoutMapsToGatewayTimeout(t *testing.T) {
 // upstream_unreachable，不能因为「都是网络错误」就报成 504。
 func TestProbeConnectionRefusedIsNotTimeout(t *testing.T) {
 	// 拿一个刚关掉的端口：连过去必被拒，没有任何响应。
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	listener, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("监听失败: %v", err)
 	}
@@ -459,7 +460,7 @@ func TestProbeConnectionRefusedIsNotTimeout(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost,
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost,
 		"/api/v1/merchant/channels/probe-models", nil)
 	(&API{}).failProbe(rec, req, probeErr)
 	if rec.Code != http.StatusBadGateway {
