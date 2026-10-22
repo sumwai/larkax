@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuthProvider, useAuth } from '../auth/AuthProvider'
 import { I18nProvider } from '../i18n'
+import { en } from '../i18n/en'
 import { ThemeProvider } from '../theme/ThemeProvider'
 import { ToastProvider } from '../components/ui'
 import { MerchantAccount } from './MerchantAccount'
@@ -94,10 +95,15 @@ describe('设置与账号的分页', () => {
     await renderPage('merchant', '/app/merchant/settings')
 
     expect(screen.getByRole('heading', { name: '界面偏好' })).toBeInTheDocument()
-    expect(screen.getByText('界面偏好：语言与主题，只影响这台设备。')).toBeInTheDocument()
+    expect(screen.getByText('界面偏好：语言与主题。')).toBeInTheDocument()
+    // 「只影响这台设备」留给共用的段说明，页副标题不再重复一遍。
+    expect(screen.getByText('语言与主题偏好，只影响这台设备。')).toBeInTheDocument()
     // 账号段搬到了同级的「账号」页；留在这里就是两处都能改。
     expect(screen.queryByText('修改口令')).not.toBeInTheDocument()
     expect(screen.queryByText('账户信息')).not.toBeInTheDocument()
+    // 点进设置的人常常是来改账户的：页底要有一行可点的落点。
+    const entry = screen.getByRole('link', { name: '前往账号页' })
+    expect(entry.getAttribute('href')).toBe('/app/merchant/account')
   })
 
   it('商家账号页有账户信息与修改口令，不再重复退出登录', async () => {
@@ -125,6 +131,20 @@ describe('设置与账号的分页', () => {
     // 退出登录只在顶栏与抽屉里。遍历三类页面而不是只看账号页：把面板加回
     // 整页也能被挡住，不只挡住加进共用账号段的那一种改法。
     expect(screen.queryByText('退出登录')).not.toBeInTheDocument()
+    // 这两页的账号段就在本页，页底再指一个「前往账号页」会指向自己。
+    expect(screen.queryByRole('link', { name: '前往账号页' })).not.toBeInTheDocument()
+    // 「语言与主题不跨设备同步」这句在共用卡里，拆页时不能跟着丢掉。
+    expect(screen.getByText('语言与主题偏好，只影响这台设备。')).toBeInTheDocument()
+  })
+
+  it('英文侧页标题与段标题不再同名', async () => {
+    // `Record<MessageKey, string>` 保证键不缺，值是否撞名要靠这一条。
+    expect(en['nav.account']).not.toBe(en['settings.profile'])
+
+    localStorage.setItem('larkax.lang', 'en')
+    await renderPage('merchant', '/app/merchant/account')
+    expect(screen.getByRole('heading', { level: 1, name: 'Account' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Account details' })).toBeInTheDocument()
   })
 
   it('账号段只有一份实现：两个入口渲染出的标题一模一样', async () => {
