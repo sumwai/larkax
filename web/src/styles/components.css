@@ -354,7 +354,11 @@ textarea.input {
 .table {
   overflow: hidden;
 }
+/* 表头与数据行共用一套网格轨道，所以两边的 `gap` 必须相同：`fr` 分的是
+   减掉 gap 之后的剩余宽度，表头少一条 gap，轨道就从左到右逐列偏移。 */
 .thead {
+  display: grid;
+  gap: 12px;
   background: var(--surface-2);
   padding: 10px 20px;
   font-size: 11px;
@@ -411,10 +415,6 @@ textarea.input {
 .users-head,
 .users-row {
   grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.4fr) 90px 110px 150px 150px 76px;
-}
-/* 表头有内边距没有 gap 的话，轨道宽度与行对不上，越往右差得越多。 */
-.thead.users-head {
-  gap: 12px;
 }
 /* 五个固定列 576px + 六条 gap 72px + 左右内边距 40px，两列还要各留约 110px；
    680px 的下限只够摆下固定列，会把这两列压成 0。 */
@@ -481,14 +481,10 @@ textarea.input {
   font-size: 12.5px;
   color: var(--warning);
 }
-/* 在供模型：三列，规范名占大头。表头要和行同一条轨道，所以也得是 grid。 */
+/* 在供模型：三列，规范名占大头。 */
 .supply-head,
 .supply-row {
   grid-template-columns: minmax(0, 1.8fr) 120px 120px;
-}
-.supply-head {
-  display: grid;
-  gap: 12px;
 }
 /* 模型名与地址没有空格，窄屏上要能断开，不能顶到下一列。 */
 .supply-row .keyname,
@@ -522,10 +518,6 @@ textarea.input {
 .upstream-channels-head,
 .upstream-channel-row {
   grid-template-columns: minmax(0, 1.6fr) 100px 100px;
-}
-.upstream-channels-head {
-  display: grid;
-  gap: 12px;
 }
 .upstream .table-foot {
   border-top: 1px solid var(--border);

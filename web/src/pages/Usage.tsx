@@ -303,7 +303,7 @@ export function Usage() {
             ) : (
               <>
                 <div className="table table-desktop">
-                  <div className="thead breakdown-head" style={{ display: 'grid' }}>
+                  <div className="thead breakdown-head">
                     <span>{groupBy === 'model' ? t('overview.model') : t('overview.key')}</span>
                     <span className="amount">{t('usage.requests')}</span>
                     <span className="amount">{t('usage.tokens')}</span>
@@ -377,7 +377,7 @@ export function Usage() {
             ) : (
               <>
                 <div className="table table-desktop">
-                  <div className="thead requests-head" style={{ display: 'grid' }}>
+                  <div className="thead requests-head">
                     <span>{t('overview.time')}</span>
                     <span>{t('overview.model')}</span>
                     <span>{t('overview.key')}</span>

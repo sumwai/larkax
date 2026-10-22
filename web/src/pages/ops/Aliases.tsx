@@ -218,7 +218,7 @@ export function OpsAliases() {
 
       {aliases.length > 0 && !compact && (
         <section className="card table ops-table" aria-label={t('ops.alias.title')}>
-          <div className="thead alias-head" style={{ display: 'grid' }}>
+          <div className="thead alias-head">
             <span>{t('ops.alias.channel')}</span>
             <span>{t('ops.alias.upstream')}</span>
             <span>{t('ops.alias.canonical')}</span>

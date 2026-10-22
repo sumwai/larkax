@@ -499,7 +499,7 @@ export function OpsModels() {
 
       {models.length > 0 && !compact && (
         <section className="card table ops-table" aria-label={t('ops.model.title')}>
-          <div className="thead model-head" style={{ display: 'grid' }}>
+          <div className="thead model-head">
             <span>{t('ops.model.name')}</span>
             <span>{t('ops.model.vendor')}</span>
             <span>{t('ops.model.context')}</span>

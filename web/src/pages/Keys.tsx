@@ -222,7 +222,7 @@ export function Keys() {
       {keys.length > 0 && (
         <>
           <section className="card table table-desktop" aria-label={t('keys.title')}>
-            <div className="thead keys-head" style={{ display: 'grid' }}>
+            <div className="thead keys-head">
               <span>{t('keys.colName')}</span>
               <span>{t('keys.colKey')}</span>
               <span>{t('keys.colQuota')}</span>

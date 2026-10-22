@@ -118,7 +118,7 @@ print(message.content[0].text)`,
       <CodeCard tabs={tabs} />
 
       <section className="card table">
-        <div className="thead endpoint-head" style={{ display: 'grid' }}>
+        <div className="thead endpoint-head">
           <span>{t('quickstart.endpoints')}</span>
           <span>{t('quickstart.protocol')}</span>
           <span>{t('quickstart.method')}</span>
