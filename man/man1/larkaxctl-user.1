@@ -90,7 +90,7 @@ stdout 恰\:好\:一\:行，\:就\:是\:新\:口\:令，\:只\:显\:示\:这\:�
 .PP
 \fBcreate\fR / \fBlist\fR / \fBget\fR / \fBupdate\fR 只\:碰 \fBusers\fR 表\:（不\:碰\:渠\:道\:凭\:证）；\fBdelete\fR 那\:一\:族\:会\:写\:到 \fBapi_keys\fR、\fBplugin_kv\fR 与 \fBcapture_consents\fR，\:钱\:包\:只\:读\:加\:锁。\:除\:了 \fBplugin_kv\fR 里\:属\:于\:这\:个\:用\:户\:的\:行，\:别\:的\:行\:都\:不\:删。\:它\:们\:都\:不\:需\:要 \fBLARKAX_MASTER_KEYS\fR。
 .PP
-\fB用\:户\:级\:履\:约\:操\:作\:也\:挂\:在 user 下\fR：\fBuser plan\fR、\fBuser wallet\fR、\fBuser key\fR、\fBuser usage\fR。\:核\:心\:宾\:语——哪\:个\:用\:户、\:哪\:个\:套\:餐——写\:成\fB位\:置\:参\:数\fR，\:修\:饰\:项\:（\fB\-\-ref\fR、\fB\-\-expires\-at\fR、\fB\-\-amount\fR）\:仍\:然\:是\:旗\:标。
+\fB用\:户\:级\:履\:约\:操\:作\:也\:挂\:在 user 下\fR：\fBuser plan\fR、\fBuser wallet\fR、\fBuser key\fR、\fBuser usage\fR。\:核\:心\:宾\:语——哪\:个\:用\:户、\:哪\:个\:套\:餐——写\:成\fB位\:置\:参\:数\fR，\:修\:饰\:项\:（\fB\-\-ref\fR、\:过\:期\:时\:间、\fB\-\-amount\fR）\:仍\:然\:是\:旗\:标。
 .IP \(bu 2
 \fBuser plan\fR：\fBgrant\fR / \fBlist\fR / \fBvoid\fR / \fBorder\fR——该\:用\:户\:持\:有\:的\:订\:阅\:与\:扣\:费\:顺\:序。
 .IP \(bu 2
@@ -128,6 +128,8 @@ stdout 恰\:好\:一\:行，\:就\:是\:新\:口\:令，\:只\:显\:示\:这\:�
 .TP
 .B user usage events <用\:户> … / requests
 \fBusage events \-\-user <用\:户> …\fR / \fBrequests\fR
+.PP
+\fBuser plan grant\fR 与 \fBuser key create\fR 的\:过\:期\:时\:间\:都\:可\:以\:写 \fB\-\-expires\-at\fR、\fB\-\-ttl\fR（\fB12h\fR、\fB30d\fR、\fB3m\fR、\fB1y\fR）\:或 \fB\-\-forever\fR；\:三\:者\:互\:斥，\:换\:算\:规\:则\:同\:上\:面 \fBapikey\fR 那\:一\:节。
 .PP
 旧\:写\:法\fB至\:少\:保\:留\:一\:个\:发\:布\:周\:期\fR，\:命\:中\:时\:在 stderr 打\:一\:行\:指\:向\:新\:路\:径\:（\fB提\:示：…\fR，\fB\-q\fR 之\:下\:跟\:着\:压\:掉，\fB\-\-format json\fR 的 stdout 不\:受\:影\:响）。\:这\:行\:提\:示\:与\:这\:一\:次\:跑\:成\:没\:跑\:成\:无\:关：\:参\:数\:写\:得\:出\:来\:就\:提\:示——\fB失\:败\:时\:更\:要\:说\fR，\:「Key 不\:存\:在」\:只\:说\:明\:数\:据\:不\:在，\:而\:人\:手\:上\:那\:条\:命\:令\:可\:能\:早\:该\:换\:了。\:唯\:一\:的\:例\:外\:是\:参\:数\:错\:（退\:出\:码 2）：\:那\:时 stderr 上\:已\:经\:是\:一\:屏\:用\:法，\:再\:补\:一\:句\:搬\:家\:提\:示\:只\:会\:把\:「先\:把\:参\:数\:写\:对」\:挤\:到\:后\:面。\:不\:带 \fB\-\-user\fR 的 \fBwallet list\fR / \fBapikey list\fR / \fBusage events|requests\fR 回\:答\:的\:是\:全\:量，\:没\:有\:对\:应\:的\:新\:路\:径，\:因\:此\:不\:提\:示。
 .PP

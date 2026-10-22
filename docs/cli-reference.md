@@ -789,7 +789,7 @@ stdout 恰好一行，就是新口令，只显示这一次；其余说明走 std
 
 **用户级履约操作也挂在 `user` 下**：`user plan`、`user wallet`、`user key`、
 `user usage`。核心宾语——哪个用户、哪个套餐——写成**位置参数**，修饰项（`--ref`、
-`--expires-at`、`--amount`）仍然是旗标。
+过期时间、`--amount`）仍然是旗标。
 
 - `user plan`：`grant` / `list` / `void` / `order`——该用户持有的订阅与扣费顺序。
 - `user wallet`：`show` / `credit` / `adjust` / `refund`——该用户的钱包。
@@ -809,6 +809,9 @@ stdout 恰好一行，就是新口令，只显示这一次；其余说明走 std
 | `user wallet credit <用户> …` / `adjust` / `refund` | `wallet credit --user <用户> …` / `adjust` / `refund` |
 | `user key create <用户> …` / `user key list <用户>` | `apikey create --user <用户> …`、`apikey list --user <用户>` |
 | `user usage events <用户> …` / `requests` | `usage events --user <用户> …` / `requests` |
+
+`user plan grant` 与 `user key create` 的过期时间都可以写 `--expires-at`、`--ttl`
+（`12h`、`30d`、`3m`、`1y`）或 `--forever`；三者互斥，换算规则同上面 `apikey` 那一节。
 
 旧写法**至少保留一个发布周期**，命中时在 stderr 打一行指向新路径（`提示：…`，
 `-q` 之下跟着压掉，`--format json` 的 stdout 不受影响）。这行提示与这一次跑成
@@ -854,12 +857,20 @@ create --user alice > key.txt` 保存下来的文件里只有明文，不会混�
 一侧都会被拒，区别只记在**拒绝的原因**上（观测里分别计数），所以选哪一个取决于你想在
 那份计数里看到什么。一把停用的 key 可以用 `--status active` 恢复。
 
-`--expires-at` 给一个 RFC3339 时刻，到点之后这把 key 自动不可用；`--clear-expires-at`
-写回「不过期」。已经过去的时刻会被拒绝：要立刻停掉一把 key 就改 `--status`，那样鉴权
-记下的原因是「被停用」，而设一个已经过去的过期时刻记下的是「已过期」——两种情形要分的
-是下一步该找谁。`--name` 给空串表示「没有备注」，与 `create` 不给 `--name` 是同一个
-意思（列是 `NOT NULL`，空串就是它的「没有」）。备注会进 `list` / `get` 的「备注」那
-一栏，所以换行、制表符、ESC 这些控制字符当场报参数错并退出 2，报错点名是哪一个字符。
+`--expires-at` 给一个 RFC3339 时刻，到点之后这把 key 自动不可用；`--ttl` 给一段
+相对时长（`12h`、`30d`、`3m`、`1y`）；`--forever` 写远期上限
+`9999-12-31T23:59:59Z`，表示不过期。三者互斥，一次只给一个。`--clear-expires-at`
+是 `--forever` 的旧名，写进去的是同一个值。已经过去的时刻会被拒绝：要立刻停掉一把
+key 就改 `--status`，那样鉴权记下的原因是「被停用」，而设一个已经过去的过期时刻记下
+的是「已过期」——两种情形要分的是下一步该找谁。`--name` 给空串表示「没有备注」，与
+`create` 不给 `--name` 是同一个意思（列是 `NOT NULL`，空串就是它的「没有」）。备注会
+进 `list` / `get` 的「备注」那一栏，所以换行、制表符、ESC 这些控制字符当场报参数错并
+退出 2，报错点名是哪一个字符。
+
+`--ttl` 的 `m` 是日历月、`y` 是日历年，按 UTC 换算。目标月没有那一天时夹到月末：
+1 月 31 日加一个月是 2 月 28 日（闰年 29 日），2 月 29 日加一年是次年 2 月 28 日。
+`h` 与 `d` 是精确时长（一天按 24 小时算）。人读的那一档把 `--forever` 写下的远期值
+与 `NULL` 一样打成「不过期」；机器可读的那一档照打时间戳。
 
 两个额度**不开简写**：它们是限额，写短了容易看错也容易按错。`apikey` 下唯一的简写
 是 `-u`（`--user` 的别名，`create` 与 `list` 认它）。
@@ -1182,7 +1193,9 @@ create --user alice > key.txt` 保存下来的文件里只有明文，不会混�
 
 `grant` 建一条订阅，并把面值记进 `prepaid:<订阅 ID>`。`--ref` 是发放单号，也是幂等键：
 同一个单号重跑只会发一次，第二次打「已经发过」并退出 0。同一单号配不同的用户、包或到期
-时刻是冲突（退出 4），一笔都不写。`--expires-at` 必须是晚于现在的 RFC3339 时刻。
+时刻是冲突（退出 4），一笔都不写。到期时间三选一，一次只给一个：`--expires-at` 必须是
+晚于现在的 RFC3339 时刻；`--ttl` 是从现在起的一段时长（`12h`、`30d`、`3m`、`1y`，
+换算规则同 `apikey` 那一节）；`--forever` 写远期上限 `9999-12-31T23:59:59Z`。
 
 `void` 作废一条订阅，把剩余面值转回平台收入。`--status` 默认 `canceled`（运营提前收回），
 给 `expired` 表示到期作废；两种在账上是同一个事件。`--ref` 是作废单号，同样是幂等键。
@@ -1447,8 +1460,13 @@ create --user alice > key.txt` 保存下来的文件里只有明文，不会混�
 原样采集请求正文的授权。`grant` 开一条授权，`list` 看现有的，`revoke` 撤销。
 
 两个范围二选一，字段不能混着给：`single_request` 只对 `--request-id` 那一次请求生效，
-到 `--expires-at` 为止；`time_window` 对 `--from` 到 `--to` 之间的全部请求生效。时间窗
+到到期时间为止；`time_window` 对 `--from` 到 `--to` 之间的全部请求生效。时间窗
 那一档的到期时间就是 `--to`，不另设参数——同一件事有两个来源时，命令行那个会悄悄赢。
+
+`single_request` 的到期时间同样三选一：`--expires-at`、`--ttl`（`12h`、`30d`、`3m`、
+`1y`，换算规则同 `apikey` 那一节）或 `--forever`（`9999-12-31T23:59:59Z`）。三者互斥。
+后两种换出来的时刻同样要过下面的时长上限，所以 `--forever` 在默认配置下会被拒——上限
+是给这类申请设的，不是给某一两种写法设的。
 
 `grant` 必须带 `--agree`。不带时它只把同意文案打出来、什么都不写：`capture_consents`
 的 `consent_text` 与 `consent_version` 两列是拿来做合规举证的，落库之前操作者得先看见

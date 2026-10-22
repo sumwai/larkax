@@ -23,13 +23,15 @@ var userPlanHelp = helpText{short: userPlanShortUsage, long: userPlanUsage}
 // userPlanShortUsage 是 user plan 的短版：`-h` / `--help` 与参数写错时打的那一份。
 const userPlanShortUsage = `larkaxctl user plan 管理一个用户持有的订阅与扣费顺序。
 用法：
-  larkaxctl user plan grant <用户> <套餐> --ref <发放单号> --expires-at <RFC3339> [--dry-run]
+  larkaxctl user plan grant <用户> <套餐> --ref <发放单号> [--dry-run]
+                             [--expires-at <RFC3339> | --ttl <时长> | --forever]
   larkaxctl user plan list <用户>
   larkaxctl user plan void <订阅 ID> --ref <作废单号> [--status <expired|canceled>] [--dry-run]
   larkaxctl user plan order show <用户>
   larkaxctl user plan order set <用户> [--order <顺序> | --clear]
 
 --ref 是幂等键；order 的三档与 --clear 见长版。
+grant 的过期时间三选一：--expires-at、--ttl（12h、30d、3m、1y）或 --forever。
 grant 与 void 的 --dry-run 打印将写入的订阅与分录后回滚。
 更细的边界：larkaxctl user plan help。
 `
@@ -38,14 +40,19 @@ grant 与 void 的 --dry-run 打印将写入的订阅与分录后回滚。
 const userPlanUsage = `larkaxctl user plan 管理一个用户持有的订阅与扣费顺序。
 
 用法：
-  larkaxctl user plan grant <用户> <套餐> --ref <发放单号> --expires-at <RFC3339> [--dry-run]
+  larkaxctl user plan grant <用户> <套餐> --ref <发放单号> [--dry-run]
+                             [--expires-at <RFC3339> | --ttl <时长> | --forever]
   larkaxctl user plan list <用户>
   larkaxctl user plan void <订阅 ID> --ref <作废单号> [--status <expired|canceled>] [--dry-run]
   larkaxctl user plan order show <用户>
   larkaxctl user plan order set <用户> [--order <顺序> | --clear]
 
 grant 建一条订阅，并把面值记进 prepaid:<订阅 ID>。--ref 是发放单号，也是幂等键：
-同一个单号重跑只会发一次，第二次打「已经发过」。--expires-at 必须晚于现在。
+同一个单号重跑只会发一次，第二次打「已经发过」。
+
+过期时间三选一，一次只给一个：--expires-at 是一个必须晚于现在的 RFC3339 时刻；
+--ttl 是从现在起的一段时长（12h、30d、3m、1y，m 是日历月、y 是日历年，按 UTC
+算，目标月没有那一天时夹到月末）；--forever 写远期上限 ` + foreverExpiresAt + `。
 
 void 作废一条订阅，把剩余面值转回平台收入。默认按人工作废（canceled）收尾；
 --status expired 表示到期作废。--ref 是作废单号，同样是幂等键。
@@ -126,11 +133,13 @@ var userKeyHelp = helpText{short: userKeyShortUsage, long: userKeyUsage}
 const userKeyShortUsage = `larkaxctl user key 管理一个用户的 API Key。
 用法：
   larkaxctl user key list <用户>
-  larkaxctl user key create <用户> [--name <备注>] [--expires-at <RFC3339>]
+  larkaxctl user key create <用户> [--name <备注>]
+                             [--expires-at <RFC3339> | --ttl <时长> | --forever]
                              [--rpm <整数>] [--quota <金额>]
   larkaxctl user key plans show <API Key ID>
   larkaxctl user key plans set <API Key ID> [--plans <订阅 ID,...> | --all]
 
+--ttl 收 12h、30d、3m、1y；--forever 表示不过期。
 create 的明文只打印这一次；改状态、备注与额度用 larkaxctl apikey update。
 更细的边界：larkaxctl user key help。
 `
@@ -140,7 +149,8 @@ const userKeyUsage = `larkaxctl user key 管理一个用户的 API Key。
 
 用法：
   larkaxctl user key list <用户>
-  larkaxctl user key create <用户> [--name <备注>] [--expires-at <RFC3339>]
+  larkaxctl user key create <用户> [--name <备注>]
+                             [--expires-at <RFC3339> | --ttl <时长> | --forever]
                              [--rpm <整数>] [--quota <金额>]
   larkaxctl user key plans show <API Key ID>
   larkaxctl user key plans set <API Key ID> [--plans <订阅 ID,...> | --all]
@@ -148,6 +158,9 @@ const userKeyUsage = `larkaxctl user key 管理一个用户的 API Key。
 list 与 create 以用户为核心宾语，用户写成位置参数。create 生成一把新 key，
 只把哈希入库：**明文只打印这一次**，库里存的是 SHA-256 哈希，丢了没有任何办法
 取回，只能重建一把。明文单独打在 stdout 上，其余信息走 stderr。
+
+过期时间三选一，一次只给一个：--expires-at 是必须晚于现在的 RFC3339 时刻；
+--ttl 是从现在起的一段时长（12h、30d、3m、1y）；--forever 写远期上限。
 
 --rpm 与 --quota 都按明文给：0 不是「不限」，是「一个都不放行」；负数一律拒绝。
 
