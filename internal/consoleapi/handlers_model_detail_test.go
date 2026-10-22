@@ -523,8 +523,9 @@ func TestModelDetailAcceptsSlashInName(t *testing.T) {
 	}
 }
 
-// 大小写变体回与「目录里没有」逐字相同的 404。两层都是字面比较：供给匹配
-// 与目录查找各自按名字精确比较，任一层放宽都会让这里的行为变掉。
+// 大小写变体回与「目录里没有」逐字相同的 404。两层各自按名字精确比较：
+// 只放宽一层时变体仍回同样的 404，两层都放宽才会变成 200——这也是这条
+// 用例唯一能红的条件。
 func TestModelDetailIsCaseSensitive(t *testing.T) {
 	f := newFixture(t)
 	f.catalog.models = []catalog.Model{{CanonicalName: "alpha"}}
