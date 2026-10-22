@@ -307,10 +307,13 @@ func TestChannelHealthRollupModelMigration(t *testing.T) {
 	})
 
 	// 夹一条渠道：健康度桶有指向 channels 的外键。
+	//
+	// 列名按**当前最新结构**写：channels.protocol 已在 00005 删掉，这里
+	// 不能再带它（带上时用例在第一步就红，后面几条断言一条都跑不到）。
 	if err := db.QueryRowContext(ctx, `
-		INSERT INTO channels (name, type, base_url, credential_enc, protocol, models)
+		INSERT INTO channels (name, type, base_url, credential_enc, models)
 		VALUES ('migr-00057', 'openai-compatible', 'https://api.example.com/v1',
-		        '\x00'::bytea, 'openai', ARRAY['m'])
+		        '\x00'::bytea, ARRAY['m'])
 		RETURNING id`).Scan(&testChannelID); err != nil {
 		t.Fatalf("插入测试渠道失败: %v", err)
 	}

@@ -20,8 +20,10 @@
 --     单位成本从此用它做分母，与分子 SUM(upstream_cost) 是同一批事件：
 --     失败的尝试不结算、也就没有用量事件，不再把平均数摊低。
 --
--- 规范模型名不可能是空串（internal/model 的目录与 usage_events.canonical_model
--- 都要求非空），所以 '' 不会与真实模型撞车。
+-- 规范模型名不会是空串：写入口有两道把关——internal/catalog/admin.go 的
+-- normalizeCanonicalName 拒绝空名，internal/pipeline/pipeline.go 的
+-- Request.validate 在缺规范模型名时报错。所以 '' 不会与真实模型撞车。
+-- （usage_events.canonical_model 只约束 NOT NULL，不约束空串，不能拿它当依据。）
 --
 -- # 老数据
 --
