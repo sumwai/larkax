@@ -175,7 +175,7 @@ var commandGroups = []commandGroup{
 			{name: "apikey", summary: "API Key 访问密钥、状态与额度管理", help: apiKeyHelp, run: runAPIKey},
 			{name: "wallet", summary: "用户钱包账户与入账管理", help: walletHelp, run: runWallet},
 			{name: "plan", summary: "额度包、订阅与扣费顺序管理", help: planHelp, run: runPlan},
-			{name: "usage", summary: "用量与计费的只读清单（用量事件、计费请求）", help: usageHelp, run: runUsage},
+			{name: "usage", summary: "用量与计费的只读查询（事件、请求与汇总）", help: usageHelp, run: runUsage},
 			{name: "ledger", summary: "财务账本管理（余额查询、分录校验、对账、对账历史）", help: ledgerHelp, run: runLedger},
 		},
 	},

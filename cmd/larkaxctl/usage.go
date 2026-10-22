@@ -9,11 +9,14 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sumwai/larkax/internal/auth"
+	"github.com/sumwai/larkax/internal/calendar"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/settings"
 )
 
 // usageHelp 是 usage 的两版帮助文本（见 helpText）。
@@ -29,9 +32,12 @@ const usageShortUsage = `larkaxctl usage 读用量与计费：这段时间用了
   larkaxctl usage requests [--user <用户 ID 或用户名>] [--from <时刻>] [--to <时刻>]
         [--limit <条数>]
         列出计费请求：每次请求的钱包预留与额度包面值、状态与结算金额
+  larkaxctl usage summary --user <用户> [--today | --this-month]
+        [--from <时刻>] [--to <时刻>]
+        汇总某个用户在一段时间里的用量与金额，按计费口径分档
 
 看某一个用户的用量在 larkaxctl user usage（events / requests <用户>）。
-两条都只读，不改任何一行、不写任何快照。
+三条都只读，不改任何一行、不写任何快照。
 
 更细的边界：larkaxctl help usage。
 `
@@ -46,6 +52,9 @@ const usageUsage = `larkaxctl usage 读用量与计费：这段时间用了多�
   larkaxctl usage requests [--user <用户 ID 或用户名>] [--from <时刻>] [--to <时刻>]
         [--limit <条数>]
         列出计费请求：每次请求的钱包预留与额度包面值、状态与结算金额
+  larkaxctl usage summary --user <用户> [--today | --this-month]
+        [--from <时刻>] [--to <时刻>]
+        汇总某个用户在一段时间里的用量与金额，按计费口径分档
 
 按用户看这两张表已经搬到 larkaxctl user usage，核心宾语写成位置参数：
 
@@ -56,23 +65,38 @@ const usageUsage = `larkaxctl usage 读用量与计费：这段时间用了多�
 提示新路径，至少保留一个发布周期。不带 --user 时这两条回答的是全量，没有对应的
 新路径，也就不提示。
 
-两条都只读：不改任何一行、不写任何快照。读用量与读计费记录是管理员动作——
-跑得起 larkaxctl 的人本来就能连上这个库，所以这两条不额外要求别的授权，也不带
+三条都只读：不改任何一行、不写任何快照。读用量与读计费记录是管理员动作——
+跑得起 larkaxctl 的人本来就能连上这个库，所以这几条不额外要求别的授权，也不带
 角色参数。
 
-两条各读一张表，回答的问题不同：events 读 usage_events，是**计量**的底稿（用了
-多少、金额按哪条口径算出来的；billing_path 为 measured 的才是一次实测，estimated
-是按估算给的、fallback 是算不出来时按退路口径给的）；requests 读 billing_requests，
-是**每次请求**的预留与结算（一笔请求从预扣到结清的状态与金额）。预留分两栏看：
-钱包预留是钱从账户余额冻住的那部分，包预留是额度包占着的面值——额度包覆盖的请求
-在钱包那一栏是 0，两个数并列、不合并。
+events 与 requests 各读一张表，回答的问题不同：events 读 usage_events，是**计量**的
+底稿（用了多少、金额按哪条口径算出来的；billing_path 为 measured 的才是一次实测，
+estimated 是按估算给的、fallback 是算不出来时按退路口径给的）；requests 读
+billing_requests，是**每次请求**的预留与结算（一笔请求从预扣到结清的状态与金额）。
+预留分两栏看：钱包预留是钱从账户余额冻住的那部分，包预留是额度包占着的面值——
+额度包覆盖的请求在钱包那一栏是 0，两个数并列、不合并。
 
---user 收用户 ID 或用户名，两种写法都认。不给它就是不限用户。
+summary 是这段时间的合计，不是清单：一行合计，下面按计费口径分三档
+（measured / estimated / fallback，没有数据的那一档金额与请求数是 0）。
+金额与额度包面值并排两栏、不相加：前者是实收，后者是预留时占住的面值上界。
+五组 token 与合计在同一行。
 
-时刻用 RFC3339（2026-10-17T00:00:00Z）或只写日期（2026-10-17，按 UTC 零点算）。
-区间左闭右开：--from 含、--to 不含；两个都不给就是不限时间，那时每个月分区都会被
-扫到。events 按落库时刻圈定，而那一列正是这张表的分区键，所以给了窗口时范围之外的
-那些月份不会被扫到；requests 按请求的受理时刻圈定。
+summary 的窗口三选一：--today、--this-month，或者 --from 与 --to 一起给。
+相对窗口与绝对窗口一起给、--today 与 --this-month 一起给、只给 --from 或只给
+--to，都按参数错处理（退出 2）。都不给时按 --today 算。--today 是站点时区下的
+当日 00:00 到次日 00:00；--this-month 是当月 1 日 00:00 到现在。站点时区取自
+settings 的 calendar.default_region。summary 的输出首行总是打出这次的实际窗口
+（起止与站点时区），默认窗口不会隐形。--from / --to 的写法与下面 events、
+requests 那一幅相同；要与控制台的 /usage/summary 对数，两边给同两个 RFC3339 时刻。
+
+--user 收用户 ID 或用户名，两种写法都认。events 与 requests 不给它就是不限用户；
+summary 必填，汇总只做用户维度。
+
+events 与 requests 的时刻用 RFC3339（2026-10-17T00:00:00Z）或只写日期
+（2026-10-17，按 UTC 零点算）。区间左闭右开：--from 含、--to 不含；这两个命令
+两个都不给就是不限时间，那时每个月分区都会被扫到。events 按落库时刻圈定，而那一列
+正是这张表的分区键，所以给了窗口时范围之外的那些月份不会被扫到；requests 按请求的
+受理时刻圈定。
 
 --limit 是一次最多打几行，默认 50，0 表示不限。两张清单都是新的在前；被截住时
 末行会说明只打了多少条——一份少了后文的清单与一份完整的清单在屏幕上长得一样。
@@ -82,7 +106,7 @@ const usageUsage = `larkaxctl usage 读用量与计费：这段时间用了多�
 更细的约定见 docs/cli-reference.md 的「usage」一节。
 `
 
-// usageReadTimeout 是这两条只读命令的时间上限。
+// usageReadTimeout 是这几条只读命令（events、requests 与 summary）的时间上限。
 //
 // 与 ledger balance 同一个量级（一分钟）：它们按索引读一段窗口里的行，读不完
 // 通常意味着谓词没走对索引、或者窗口给得太宽，两种都不该让命令无限挂下去。
@@ -116,6 +140,8 @@ func runUsage(args []string) error {
 				func() error { return runUsageRequests(rest) })
 		}
 		return runUsageRequests(rest)
+	case "summary":
+		return runUsageSummary(rest)
 	case "-h", "--help":
 		printUsage(os.Stdout, usageShortUsage)
 		return nil
@@ -321,6 +347,288 @@ func runUsageRequests(args []string) error {
 		printUsageRequests(humanStdout(), rows, page.More)
 		return nil
 	})
+}
+
+// ── usage summary：一段时间的合计 ──────────────────────────────────────
+//
+// 与上面两条清单共用同一批表，但走的是 internal/ledger/store 的聚合读
+// （UsageSummary）——金额求和的口径必须与账本、额度判定落在同一个包里，
+// 在命令行这一侧另写一条 SUM 就会成为第二个口径。
+
+// usageNow 取当前时刻，供相对窗口落成两个时刻。
+//
+// 是变量而不是直接调 time.Now()：用例注入一个固定时刻，才能把「跨零点」
+// 「跨月」这两格钉住（与 style.go 的 terminalProbe 同一个做法）。
+var usageNow = time.Now
+
+// usageWindowMode 是这次窗口的来路：两档相对窗口，或者 --from/--to 给的绝对窗口。
+type usageWindowMode string
+
+const (
+	usageWindowToday     usageWindowMode = "today"
+	usageWindowThisMonth usageWindowMode = "this_month"
+	usageWindowAbsolute  usageWindowMode = "absolute"
+)
+
+// usageSummaryFlags 是 usage summary 的筛选项。
+//
+// 与 usageReadFlags 分开：这里没有 --limit（汇总只有一行合计），多出两档相对窗口。
+type usageSummaryFlags struct {
+	user      *string
+	today     *bool
+	thisMonth *bool
+	from      *string
+	to        *string
+}
+
+// newUsageSummaryFlags 注册这组筛选项。
+func newUsageSummaryFlags(fs *flag.FlagSet) usageSummaryFlags {
+	f := usageSummaryFlags{
+		user:      fs.String("user", "", ""),
+		today:     fs.Bool("today", false, ""),
+		thisMonth: fs.Bool("this-month", false, ""),
+		from:      fs.String("from", "", ""),
+		to:        fs.String("to", "", ""),
+	}
+	stringAlias(fs, f.user, "u")
+	return f
+}
+
+// usageWindowChoice 是解析好的窗口选择。
+//
+// 相对窗口此刻只知道是哪一档：落到具体时刻要站点时区，而站点时区要连库读
+// settings。绝对窗口在参数这一层就能验完（两个时刻都在，且起点早于终点）。
+type usageWindowChoice struct {
+	mode usageWindowMode
+	from time.Time
+	to   time.Time
+}
+
+// choice 把参数翻成窗口选择，参数错在这里全部报出来。
+//
+// 这一段**不连库**：参数错必须先于「连不上库」被报出来，否则一台连不上库的
+// 机器上这几个错都看不出来（与 usage 另外两条的 --from/--to 同一个位置）。
+func (f usageSummaryFlags) choice(what string) (usageWindowChoice, error) {
+	if *f.today && *f.thisMonth {
+		return usageWindowChoice{}, usageErr(fmt.Errorf(
+			"%s 的 --today 与 --this-month 只能给一个", what))
+	}
+
+	relative := ""
+	if *f.today {
+		relative = "--today"
+	}
+	if *f.thisMonth {
+		relative = "--this-month"
+	}
+
+	fromRaw, toRaw := strings.TrimSpace(*f.from), strings.TrimSpace(*f.to)
+	if relative != "" && (fromRaw != "" || toRaw != "") {
+		return usageWindowChoice{}, usageErr(fmt.Errorf(
+			"%s 的相对窗口（--today / --this-month）与绝对窗口（--from / --to）只能给一种："+
+				"相对窗口是快捷方式，对拍请用绝对窗口", what))
+	}
+
+	if fromRaw != "" || toRaw != "" {
+		if fromRaw == "" {
+			return usageWindowChoice{}, usageErr(fmt.Errorf(
+				"%s 给了 --to 却缺 --from：两个要一起给", what))
+		}
+		if toRaw == "" {
+			return usageWindowChoice{}, usageErr(fmt.Errorf(
+				"%s 给了 --from 却缺 --to：两个要一起给", what))
+		}
+		from, err := parseLedgerTime("--from", fromRaw)
+		if err != nil {
+			return usageWindowChoice{}, usageErr(err)
+		}
+		to, err := parseLedgerTime("--to", toRaw)
+		if err != nil {
+			return usageWindowChoice{}, usageErr(err)
+		}
+		if !from.Before(to) {
+			return usageWindowChoice{}, usageErr(fmt.Errorf(
+				"%s 的 --from 必须早于 --to（区间左闭右开），得到 %s 与 %s",
+				what, from.Format(time.RFC3339), to.Format(time.RFC3339)))
+		}
+		return usageWindowChoice{mode: usageWindowAbsolute, from: from, to: to}, nil
+	}
+
+	if relative == "--this-month" {
+		return usageWindowChoice{mode: usageWindowThisMonth}, nil
+	}
+	return usageWindowChoice{mode: usageWindowToday}, nil
+}
+
+// resolveUsageWindow 把相对窗口落成两个时刻，按站点时区切分。
+//
+// --today 是站点时区下的当日 00:00 到次日 00:00（左闭右开）；--this-month 是
+// 当月 1 日 00:00 到现在。now 由调用方给，所以「跨零点」「跨月」这两格能脱离
+// 系统时钟测。
+func resolveUsageWindow(mode usageWindowMode, now time.Time, loc *time.Location) (from, to time.Time) {
+	local := now.In(loc)
+	from = time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
+	if mode == usageWindowThisMonth {
+		return time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, loc), local
+	}
+	return from, from.AddDate(0, 0, 1)
+}
+
+// usageSiteTimezone 读站点时区。
+//
+// 与装配层给控制台的 siteTimezone 同源：settings 的 calendar.default_region
+// 经 calendar.Timezone 翻成 IANA 时区。这里不另立一个默认值——读不到就报错，
+// 免得同一套设置在两个入口落成两个时区。
+func usageSiteTimezone(ctx context.Context, db *sql.DB) (*time.Location, error) {
+	values, err := settings.Load(ctx, settings.NewPgSource(db))
+	if err != nil {
+		return nil, err
+	}
+	region, err := values.String("calendar.default_region")
+	if err != nil {
+		return nil, err
+	}
+	loc, err := calendar.Timezone(calendar.Region(region))
+	if err != nil {
+		return nil, fmt.Errorf("站点时区（settings.calendar.default_region = %q）不可用: %w", region, err)
+	}
+	return loc, nil
+}
+
+// runUsageSummary 汇总一个用户在一段时间里的用量与金额。
+func runUsageSummary(args []string) error {
+	fs := flag.NewFlagSet("usage summary", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, usageShortUsage) }
+	flags := newUsageSummaryFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		// -h / --help 不是失败：flag 在返回 ErrHelp 之前已经把用法打过了。
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("usage summary 不接受位置参数，得到 %q：按用户汇总用 --user", fs.Arg(0)))
+	}
+	if strings.TrimSpace(*flags.user) == "" {
+		return usageErr(errors.New("usage summary 需要 --user <用户 ID 或用户名>：汇总只做用户维度"))
+	}
+
+	choice, err := flags.choice("usage summary")
+	if err != nil {
+		return err
+	}
+
+	return withDB(usageReadTimeout, func(ctx context.Context, db *sql.DB) error {
+		owner, err := auth.New(db).ResolveUser(ctx, *flags.user)
+		if err != nil {
+			return err
+		}
+
+		loc, err := usageSiteTimezone(ctx, db)
+		if err != nil {
+			return err
+		}
+
+		from, to := choice.from, choice.to
+		if choice.mode != usageWindowAbsolute {
+			from, to = resolveUsageWindow(choice.mode, usageNow(), loc)
+		}
+		if !from.Before(to) {
+			// 只可能发生在「现在正好是本月起点」那一瞬间：窗口宽度为 0。
+			// 换一句清楚的说明，而不是把 store 的「起点不早于终点」端给使用者。
+			return usageErr(fmt.Errorf(
+				"usage summary 的窗口是空的（%s 至 %s）：现在正好在窗口起点，稍后再跑或改用绝对窗口",
+				from.In(loc).Format(time.RFC3339), to.In(loc).Format(time.RFC3339)))
+		}
+
+		summary, err := store.New(db).UsageSummary(ctx, store.UsageWindow{
+			UserID: owner.ID, From: from, To: to,
+		})
+		if err != nil {
+			return err
+		}
+
+		if jsonOutput() {
+			return emitJSON(os.Stdout, usageSummaryDoc(owner.ID, choice.mode, from, to, loc, summary), nil)
+		}
+		printUsageSummary(humanStdout(), from, to, loc, summary)
+		return nil
+	})
+}
+
+// printUsageSummary 打这张汇总表。
+//
+// 首行是这次的实际窗口（起止与站点时区）：默认窗口（--today）不隐形，读的人
+// 不用回看命令行就知道这些数属于哪一段。表里一行合计、三行计费口径；恒三档，
+// 没有数据的那一档金额与请求数是 0（见 store 的 UsageSummary）。
+func printUsageSummary(w io.Writer, from, to time.Time, loc *time.Location, summary store.UsageSummary) {
+	_, _ = fmt.Fprintf(w, "窗口：%s 至 %s（站点时区 %s）\n",
+		from.In(loc).Format(time.RFC3339), to.In(loc).Format(time.RFC3339), loc)
+
+	tw := newTableWriter(w)
+	p := newPalette(w)
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		p.bold("计费口径"), p.bold("请求数"), p.bold("金额"), p.bold("额度包面值"),
+		p.bold("输入"), p.bold("输出"), p.bold("缓存读"), p.bold("缓存写"), p.bold("推理"))
+
+	t := summary.Totals
+	_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%d\t%d\t%d\t%d\t%d\n",
+		p.bold("合计"), t.Requests, t.Cost.String(), t.PlanReservedAmount.String(),
+		t.PromptTokens, t.CompletionTokens, t.CacheReadTokens, t.CacheWriteTokens,
+		t.ReasoningTokens)
+
+	// 计费口径那三行只有请求数与金额：store 的按口径聚合只给这两列，
+	// 面值与 token 是合计上的数。没值的格子打 `-`，不打 0——0 会被读成
+	// 「这一档的面值是 0」，与「这一档不按面值分」混成同一件事。
+	for _, path := range summary.Paths {
+		_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			path.Path, path.Requests, path.Cost.String(),
+			"-", "-", "-", "-", "-", "-")
+	}
+	_ = tw.Flush()
+}
+
+// usageSummaryDoc 组装 usage summary 的机器可读输出。
+//
+// 字段名与控制台 GET /usage/summary 一致（totals / billing_paths / tokens 的五个
+// 槽位），两边同一个 store 函数、同一个形状，对拍时不必先翻译一层。
+// cost 与 plan_reserved_amount 是两个独立字段，永不相加。
+func usageSummaryDoc(userID int64, mode usageWindowMode, from, to time.Time,
+	loc *time.Location, summary store.UsageSummary) map[string]any {
+	doc := jsonDoc(jsonOK)
+	doc["summary"] = map[string]any{
+		"user_id":  userID,
+		"window":   string(mode),
+		"from":     jsonTime(from),
+		"to":       jsonTime(to),
+		"timezone": loc.String(),
+	}
+
+	t := summary.Totals
+	doc["totals"] = map[string]any{
+		"cost":                 jsonAmount(t.Cost),
+		"plan_reserved_amount": jsonAmount(t.PlanReservedAmount),
+		"requests":             t.Requests,
+		"tokens": map[string]any{
+			"input":       t.PromptTokens,
+			"output":      t.CompletionTokens,
+			"cache_read":  t.CacheReadTokens,
+			"cache_write": t.CacheWriteTokens,
+			"reasoning":   t.ReasoningTokens,
+		},
+	}
+
+	paths := make([]map[string]any, 0, len(summary.Paths))
+	for _, path := range summary.Paths {
+		paths = append(paths, map[string]any{
+			"path":     path.Path,
+			"cost":     jsonAmount(path.Cost),
+			"requests": path.Requests,
+		})
+	}
+	doc["billing_paths"] = paths
+	return doc
 }
 
 // usageEventRow 是 usage events 清单里的一行。

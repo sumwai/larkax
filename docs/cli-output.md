@@ -328,7 +328,7 @@ larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled
 ### 哪些命令接上了
 
 **只读类**（`list` / `get` / `resolve` / `explain` / `balance` / `verify` /
-`check` 以及 `doctor`、`version`）已经接上。**写类子命令还没接**：给它们
+`check` / `summary` 以及 `doctor`、`version`）已经接上。**写类子命令还没接**：给它们
 `-o json` 会报参数错，而不是打出一段表格——写类命令那时事情已经做完了，
 脚本却只看到一句解析错误，于是重跑一次。
 
@@ -339,6 +339,10 @@ larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled
 | `migrate status` / `migrate version` | 输出是 goose 自己往 stdout 打的，要接 JSON 得先把它那份 logger 收住 |
 | `secret rotate --verify` | 与 `secret rotate --apply` 共用同一条命令，先按整条命令拒掉 |
 | `snapshot redact` | 它的 stdout 本来就是产物本身（脱敏后那段骨架的 JSON），套不上一层信封 |
+
+`usage summary` 的 `totals` 与 `billing_paths` 跟控制台 `GET /usage/summary` 同名：
+`totals.cost` 与 `totals.plan_reserved_amount` 是两个独立字段，永不相加；
+`billing_paths` 恒三档。
 
 ### 加一条机器可读输出
 

@@ -853,6 +853,21 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				FinalAmount:        sql.NullString{String: "0.01234500", Valid: true},
 			}}, false)
 		}},
+		{"用量汇总", func(w io.Writer) {
+			printUsageSummary(w, at, at.Add(24*time.Hour), time.UTC, store.UsageSummary{
+				Totals: store.UsageTotals{
+					Cost: money.MustParse("2.50"), PlanReservedAmount: money.MustParse("3.25"),
+					Requests:     3,
+					PromptTokens: 137, CompletionTokens: 73,
+					CacheReadTokens: 12, CacheWriteTokens: 6, ReasoningTokens: 8,
+				},
+				Paths: []store.UsagePathTotal{
+					{Path: "measured", Cost: money.MustParse("1.75"), Requests: 2},
+					{Path: "estimated", Cost: money.MustParse("0.75"), Requests: 1},
+					{Path: "fallback"},
+				},
+			})
+		}},
 		{"对账运行记录", func(w io.Writer) {
 			printLedgerRuns(w, []store.ReconcileRun{{
 				ID: 3, StartedAt: at, Watermark: at, FullScan: true,
@@ -950,8 +965,8 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		}},
 	}
 
-	if len(cases) != 33 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 33 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 34 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 34 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {

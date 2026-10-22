@@ -1244,7 +1244,7 @@ UTC 算，同一笔操作在哪台机器、哪个时区敲都是同一个日期�
 
 #### `usage`
 
-用量与计费的只读清单。两条子命令各读一张表，回答的问题不同：`events` 读
+用量与计费的只读查询。`events` 与 `requests` 各读一张表，回答的问题不同：`events` 读
 `usage_events`，那是**计量**的底稿（每次请求用了多少 token、金额按哪条口径算出来的、
 收了多少钱；`billing_path` 为 `measured` 的才是一次实测，`estimated` 是按估算给的、
 `fallback` 是算不出来时按退路给的）；`requests` 读 `billing_requests`，那是**每次
@@ -1278,7 +1278,25 @@ UTC 算，同一笔操作在哪台机器、哪个时区敲都是同一个日期�
 `--user`** 时，按 `started_at` 筛用不上它（索引的第一列是 `user_id`），要全表扫一遍
 再排序——窗口开得越宽越慢。
 
-两条都是**管理员动作**：跑得起 `larkaxctl` 的人本来就能连上这个库，所以这里不额外
+`usage summary` 是同一批表上的**合计**，不是清单：`--user` 必填，输出一行合计，
+下面按计费口径分三档（`measured` / `estimated` / `fallback`，没有数据的那一档金额与
+请求数是 0）。金额与额度包面值并排两栏、不相加：`cost` 是实收，`plan_reserved_amount`
+是预留时占住的面值上界。五组 token 与合计在同一行。机器可读档里 `totals` 与
+`billing_paths` 的字段名与控制台 `GET /usage/summary` 相同（`totals.tokens` 也是那五个
+槽位），两边调用同一个 store 函数；对拍时两边给同两个 RFC3339 时刻——控制台的默认
+窗口是最近 30 天，与
+`usage summary` 的默认 `--today` 不是同一段。
+
+`usage summary` 的窗口三选一：`--today`、`--this-month`，或者 `--from` 与 `--to`
+一起给。相对窗口与绝对窗口一起给、`--today` 与 `--this-month` 一起给、只给
+`--from` 或只给 `--to`，都按参数错处理（退出 2）。都不给时按 `--today` 算。
+`--today` 是站点时区下的当日 00:00 到次日 00:00（左闭右开）；`--this-month` 是
+当月 1 日 00:00 到现在。站点时区取自 `settings` 的 `calendar.default_region`
+（经 `calendar.Timezone` 翻成 IANA 时区），与控制台 `/meta` 报的时区同源。输出首行
+总是打出这次的实际窗口（起止与站点时区），默认窗口不会隐形。`--from` / `--to`
+同样接受 RFC3339 或只写日期，只写日期按 UTC 零点算（与 `events`、`requests` 同一条）。
+
+三条都是**管理员动作**：跑得起 `larkaxctl` 的人本来就能连上这个库，所以这里不额外
 要求别的授权，也不带角色参数。
 
 `--limit` 是一次最多打几行，默认 50，0 表示不限。清单新的在前；被截住时末行会说明
