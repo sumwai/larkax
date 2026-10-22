@@ -1121,7 +1121,7 @@ func checkDoctorCatalog(in doctorChainInput) doctorCheck {
 	}
 
 	// 名字在目录里的那些再判端点。它按「渠道 × 模型」判而不是按名字判：同一个
-	// 模型挂在不同 type 的渠道上结论可能不同（渠道的 type 决定它打哪条端点）。
+	// 模型挂在不同渠道上结论可能不同（渠道声明的协议决定它打哪条端点）。
 	c.findings = append(c.findings, doctorEndpointFindings(in)...)
 
 	c.ok = fmt.Sprintf("%d 个名字都在目录里，端点没有对不上的", len(referenced))
@@ -1154,7 +1154,10 @@ func doctorEndpointFindings(in doctorChainInput) []doctorProblem {
 			if !known {
 				continue
 			}
-			fit := channels.EndpointFitFor(ch.Type, declared)
+			// 按**声明的一组协议**判：多协议渠道只要有一条端点被目录声明，
+			// 这个模型就能经由那条协议被服务（见 EndpointFitForProtocols）。
+			// 单协议渠道的声明就是它的 type 一个，措辞与之前逐字相同。
+			fit := channels.EndpointFitForProtocols(ch.DeclaredProtocols(), declared)
 			if !fit.Mismatch() {
 				continue
 			}

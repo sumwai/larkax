@@ -122,42 +122,46 @@ func (e *Executor) Types() []string {
 	return e.registry.Types()
 }
 
-// Chat 发起一次非流式请求，按 ch.Type 分发。
+// Chat 发起一次非流式请求，按**这次请求的入口协议**分发。
 //
 // 不做重试：换渠道是 internal/route 的事，只有它知道候选集，以及哪些失败
-// 值得换一个。这里只负责「按类型找到适配器，调它一次」。
+// 值得换一个。这里只负责「找到适配器，调它一次」。
+//
+// 入口协议不在渠道声明里时退回 ch.Type（见 channel.Channel.DispatchProtocol）：
+// 跨协议转换是既有能力，单协议渠道的行为因此与加多协议之前逐字相同。
 func (e *Executor) Chat(ctx context.Context, ch channel.Channel, req *channel.Request) (*channel.Response, error) {
-	a, err := e.adapter(ch)
+	a, err := e.adapter(ch, req.Protocol)
 	if err != nil {
 		return nil, err
 	}
 	return a.Chat(ctx, ch, req)
 }
 
-// ChatStream 发起一次流式请求，按 ch.Type 分发。
+// ChatStream 发起一次流式请求，分派规则与 Chat 相同。
 //
 // 返回的事件流**原样交给调用方**，这里不读、不缓冲、不关闭。
 // 一旦在这里开始读，「上游是否已接受请求」这个判据就落到了这一层，
 // 而它该由 internal/route 判：只有它知道客户端已经收到过多少内容，
 // 也就只有它能决定还能不能换渠道。
 func (e *Executor) ChatStream(ctx context.Context, ch channel.Channel, req *channel.Request) (<-chan channel.StreamEvent, error) {
-	a, err := e.adapter(ch)
+	a, err := e.adapter(ch, req.Protocol)
 	if err != nil {
 		return nil, err
 	}
 	return a.ChatStream(ctx, ch, req)
 }
 
-// Quota 查询某个渠道的额度，按 ch.Type 分发。
+// Quota 查询某个渠道的额度，按 ch.Type（主协议）分发。
 //
-// 与 Chat / ChatStream 同一个做法：这里只负责按类型找到适配器、调它一次。
-// 它不在请求路径上——调用方是额度探测的写入侧（见 internal/channels 的
-// QuotaProbe），那条路自己决定什么时候探、要不要等。
+// 与 Chat / ChatStream 同一个做法：这里只负责找到适配器、调它一次。
+// 它没有入口协议可用——调用方是额度探测的写入侧（见 internal/channels 的
+// QuotaProbe），那条路自己决定什么时候探、要不要等。额度是一条渠道级的事，
+// 按主协议问一次就够。
 //
 // 未知类型包着 channel.ErrUnknownType 返回；「这家上游没有查询接口」由适配器
 // 返回 channel.ErrUnsupported，两者分得开。
 func (e *Executor) Quota(ctx context.Context, ch channel.Channel) (quota.State, error) {
-	a, err := e.adapter(ch)
+	a, err := e.adapter(ch, "")
 	if err != nil {
 		return quota.State{}, err
 	}
@@ -176,7 +180,10 @@ func (e *Executor) Quota(ctx context.Context, ch channel.Channel) (quota.State, 
 // channel.ErrUnsupported（这个类型设计上不做这件事）。两者都不可重试，
 // 处置也一样——让这条候选出局，而不是换下一个候选重试。
 func (e *Executor) Decide(ctx context.Context, ch channel.Channel, req *systemone.Request) (*systemone.Response, error) {
-	a, err := e.adapter(ch)
+	// 这条表面就是决策协议：渠道声明了 systemone 就用那个适配器，否则退回
+	// 主协议上的适配器——后者今天不实现 Decider，于是报 ErrUnsupported，
+	// 与加多协议之前一步不差。
+	a, err := e.adapter(ch, channel.ProtocolSystemOne)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +194,11 @@ func (e *Executor) Decide(ctx context.Context, ch channel.Channel, req *systemon
 	return d.Decide(ctx, ch, req)
 }
 
-// adapter 按渠道类型取适配器。
+// adapter 按这次调用该用的协议取适配器。
+//
+// 用哪套协议由 channel.Channel.DispatchProtocol 判：入口协议在这条渠道的声明
+// 里就用它，否则退回主协议。单协议渠道因此与加多协议之前逐字相同——
+// 跨协议转换那条路保持不变，多协议只是多了一条「入口协议命中声明」的捷径。
 //
 // 未知类型**包着 channel.ErrUnknownType** 返回，调用方用
 // errors.Is(err, channel.ErrUnknownType) 就能认出来。这个错误不该被当成
@@ -197,8 +208,8 @@ func (e *Executor) Decide(ctx context.Context, ch channel.Channel, req *systemon
 //
 // 包上渠道 ID 是为了让日志能直接指到那一行配置；类型与已知类型清单
 // 由 Lookup 的错误带出来。
-func (e *Executor) adapter(ch channel.Channel) (channel.Adapter, error) {
-	a, err := e.registry.Lookup(ch.Type)
+func (e *Executor) adapter(ch channel.Channel, protocol channel.Protocol) (channel.Adapter, error) {
+	a, err := e.registry.Lookup(string(ch.DispatchProtocol(protocol)))
 	if err != nil {
 		return nil, fmt.Errorf("渠道 %d: %w", ch.ID, err)
 	}

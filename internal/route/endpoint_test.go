@@ -113,6 +113,103 @@ func TestSelectRejectsCandidatesOnUndeclaredEndpoint(t *testing.T) {
 	}
 }
 
+// withProtocols 摆上这条候选声明的协议集合（见 channel.Channel.Protocols）。
+//
+// 不调它是「没有这份声明」：那条候选按 Type 一种协议判，与加多协议之前
+// 逐字相同。两种状态要能分开写出来，所以它没有默认值。
+func withProtocols(protocols ...channel.Protocol) func(*Candidate) {
+	return func(c *Candidate) { c.Channel.Protocols = protocols }
+}
+
+// 一条候选声明多套协议时，端点判据比的是**这次入口协议会走的那条**。
+//
+// 这是 #1042 最容易漏的一处：执行器按入口协议分派（见
+// channel.Channel.DispatchProtocol），而选路如果还按主协议去比目录，两边就
+// 判的不是同一条路径——一条 anthropic 入口的请求可能被「主协议是 chat、
+// 目录只声明 messages」错判出局，反过来也可能放行一条实际打不通的候选。
+func TestSelectJudgesEndpointByInboundProtocol(t *testing.T) {
+	cases := []struct {
+		name      string
+		protocols []channel.Protocol
+		typ       string
+		endpoint  channel.Endpoint
+		declared  []channel.Endpoint
+		inbound   channel.Protocol
+		want      string
+	}{
+		{
+			name:      "入口协议命中声明，按它的端点放行",
+			protocols: []channel.Protocol{channel.ProtocolOpenAI, channel.ProtocolAnthropic},
+			typ:       string(channel.ProtocolOpenAI),
+			endpoint:  channel.EndpointChatCompletions,
+			declared:  []channel.Endpoint{channel.EndpointMessages},
+			inbound:   channel.ProtocolAnthropic,
+			want:      "",
+		},
+		{
+			name:      "同一候选换 OpenAI 入口，按 chat 端点出局",
+			protocols: []channel.Protocol{channel.ProtocolOpenAI, channel.ProtocolAnthropic},
+			typ:       string(channel.ProtocolOpenAI),
+			endpoint:  channel.EndpointChatCompletions,
+			declared:  []channel.Endpoint{channel.EndpointMessages},
+			inbound:   channel.ProtocolOpenAI,
+			want:      "只在这些端点上服务：/v1/messages",
+		},
+		{
+			name:      "入口协议不在声明里，退回主协议的端点",
+			protocols: []channel.Protocol{channel.ProtocolAnthropic},
+			typ:       string(channel.ProtocolAnthropic),
+			endpoint:  channel.EndpointMessages,
+			declared:  []channel.Endpoint{channel.EndpointChatCompletions},
+			inbound:   channel.ProtocolOpenAI,
+			want:      "只在这些端点上服务：/v1/chat/completions",
+		},
+		{
+			name:      "没有入口协议时退回主协议的端点",
+			protocols: []channel.Protocol{channel.ProtocolOpenAI, channel.ProtocolAnthropic},
+			typ:       string(channel.ProtocolOpenAI),
+			endpoint:  channel.EndpointChatCompletions,
+			declared:  []channel.Endpoint{channel.EndpointMessages},
+			inbound:   "",
+			want:      "只在这些端点上服务：/v1/messages",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cand := candidate(1, "m",
+				withType(tc.typ),
+				withProtocols(tc.protocols...),
+				withEndpoint(tc.endpoint),
+				withProfile(&ModelProfile{Endpoints: tc.declared}))
+
+			plan := seededRouter(1).Select([]Candidate{cand}, "m", Needs{Protocol: tc.inbound})
+
+			if tc.want == "" {
+				if len(plan.Candidates) != 1 {
+					t.Fatalf("应当放行，实际排除原因 %+v", plan.Excluded)
+				}
+				return
+			}
+			if len(plan.Candidates) != 0 || len(plan.Excluded) != 1 {
+				t.Fatalf("应当排除，实际候选 %d 个、排除 %d 条",
+					len(plan.Candidates), len(plan.Excluded))
+			}
+			if got := plan.Excluded[0].Reason; !strings.Contains(got, tc.want) {
+				t.Errorf("排除理由 = %q，期望含 %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// NeedsOf 要把入口协议带进 Needs：端点评据靠它才知道多协议候选这次走哪条。
+func TestNeedsOfCarriesInboundProtocol(t *testing.T) {
+	req := &channel.Request{Model: "m", Protocol: channel.ProtocolAnthropic, MaxTokens: 8}
+	if got := NeedsOf(req).Protocol; got != channel.ProtocolAnthropic {
+		t.Errorf("Needs.Protocol = %q，期望 %q", got, channel.ProtocolAnthropic)
+	}
+}
+
 // 判据排在能力之后、上限之前：一条候选只记第一个命中的理由。
 //
 // 这次请求带工具（模型声明的工具能力是 false）而端点也对不上，报出来的

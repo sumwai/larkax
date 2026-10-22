@@ -120,8 +120,8 @@ type Candidate struct {
 	// 数据摆进来，本包只按它判。
 	Profile *ModelProfile
 
-	// Endpoint 是这条候选把请求发到哪条路径，由渠道 type 指向的协议决定
-	// （channel.Protocol.Endpoint()）。空串 = 未知，不判。
+	// Endpoint 是这条候选**按主协议**把请求发到哪条路径，由渠道 type 指向的
+	// 协议决定（channel.Protocol.Endpoint()）。空串 = 未知，不判。
 	//
 	// # 为什么在候选上而不在请求上
 	//
@@ -130,10 +130,31 @@ type Candidate struct {
 	// 所以它是候选的属性，由候选的来源（internal/channels）按渠道 type 算好
 	// 摆进来，判据只在这里用它（见 Needs 与 profileRejection）。
 	//
+	// # 多协议渠道：真正发往哪条由入口协议决定
+	//
+	// 一条渠道可以声明多套协议（见 Channel.Protocols）。那时「这次会发到哪条
+	// 端点」由入口协议与声明共同决定：入口协议在声明里就用它的端点，否则回到
+	// 这里（见 Candidate.endpointFor）。本字段只表达后者，是退回时的那一条。
+	//
 	// 空串只有一种来路：库里那个 type 当前版本的二进制不认识。那种候选本来
 	// 就选不中（执行器会报 ErrUnknownType），所以这里不拿一条拿不准的判据
 	// 再挡它一次——「不知道」站在放行这一侧。
 	Endpoint channel.Endpoint
+}
+
+// endpointFor 给出这次请求**真的会走**的那条端点。
+//
+// 入口协议在这条候选声明的协议里时就是它自己的端点——执行器按同一份声明
+// 分派（见 channel.Channel.DispatchProtocol），两边必须用同一个判据：选路
+// 按 A 的端点放行、执行却发给 B，那次比对判的就是另一条路径上的东西。
+//
+// 声明里没有入口协议时退回 Endpoint（主协议那一条）：跨协议转换是既有能力，
+// 加多协议之前每一次请求走的都是这条路。
+func (c Candidate) endpointFor(protocol channel.Protocol) channel.Endpoint {
+	if c.Channel.Declares(protocol) {
+		return protocol.Endpoint()
+	}
+	return c.Endpoint
 }
 
 // ModelProfile 是模型目录对一个规范模型声明的能力与上限。
@@ -194,10 +215,25 @@ type ModelProfile struct {
 // 它只装「能从请求本身读出来、且目录里有对应声明」的那几项：用到哪些能力、
 // 要花多少 token。余额、区域、合规之类不在其中——那些不是模型目录能回答的。
 //
-// **端点也不在其中**：一条请求走哪条路径不是它的属性（同一份 chat 形状的
+// **端点也不在其中**：一条请求走哪条路径不是它要求的（同一份 chat 形状的
 // 请求可以发给说 chat 的上游，也可以发给说 responses 的上游），它由候选
 // 决定（见 Candidate.Endpoint 与 profileRejection）。
+//
+// 唯一带的协议是**入口**那一条（Protocol）：它不是要求，而是用来确定
+// 多协议候选这次会走哪条端点（见 Candidate.endpointFor）。
 type Needs struct {
+	// Protocol 是这次请求走的那条入口协议（由请求路径决定，见
+	// channel.Request.Protocol）。
+	//
+	// 它不表达「请求需要上游说什么协议」——跨协议转换是允许的，那件事由
+	// 候选决定（一条 chat 形状的请求可以发给 openai 或 anthropic 渠道）。
+	// 它只用来回答「这条多协议候选这次会走哪条端点」，端点评据据此比对
+	// 目录声明（见 Candidate.endpointFor）。
+	//
+	// 空串 = 不知道入口是哪条（内部调用，例如决策那条表面的 ChatModel），
+	// 端点评据退回主协议那一条。
+	Protocol channel.Protocol
+
 	// Tools 表示这次请求带工具：有工具定义，或消息里有工具调用/结果块。
 	Tools bool
 	// Vision 表示这次请求里有图片。
@@ -233,6 +269,7 @@ type Needs struct {
 // MaxInputTokens），压根不经过这条载体。
 func NeedsOf(req *channel.Request) Needs {
 	needs := Needs{
+		Protocol:        req.Protocol,
 		Tools:           len(req.Tools) > 0,
 		Reasoning:       req.ReasoningEffort != "",
 		InputTokens:     tokens.EstimatedTokens(req.Model, req.PromptText()),
@@ -308,16 +345,20 @@ func (c Candidate) profileRejection(needs Needs) (ExclusionCode, string) {
 	// 候选的端点为空串（库里那个 type 当前版本的二进制不认识）时不判。
 	// 理由与三项能力的 declaredUnsupported 同一条：判据要站在放行这一侧。
 	// 那种候选本来就选不中——执行器会报 ErrUnknownType 并换下一个。
-	if p.Endpoints != nil && c.Endpoint != "" && !slices.Contains(p.Endpoints, c.Endpoint) {
+	//
+	// 比的是这条候选**这次真的会走**的那条端点（见 Candidate.endpointFor）：
+	// 多协议渠道按入口协议分派，按主协议去比会判错一条路径。
+	endpoint := c.endpointFor(needs.Protocol)
+	if p.Endpoints != nil && endpoint != "" && !slices.Contains(p.Endpoints, endpoint) {
 		if len(p.Endpoints) == 0 {
 			// `{}`：明确一条都不支持。它没有清单可列，所以单独说一句——
 			// 「只在这些端点上服务：」后面空着的话，读的人会以为那句话
 			// 没打完，而这一档的结论是「任何候选都选不中」。
 			return CodeCapability, fmt.Sprintf(
-				"模型目录里这个模型一条端点都不支持；这条候选走的是 %s", c.Endpoint)
+				"模型目录里这个模型一条端点都不支持；这条候选走的是 %s", endpoint)
 		}
 		return CodeCapability, fmt.Sprintf("模型目录里只在这些端点上服务：%s；这条候选走的是 %s",
-			joinEndpoints(p.Endpoints), c.Endpoint)
+			joinEndpoints(p.Endpoints), endpoint)
 	}
 
 	// 上限：只有目录里填了数（> 0）时才判。0 是未知（库里是 NULL），不判

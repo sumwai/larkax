@@ -27,8 +27,8 @@ var channelHelp = helpText{short: channelShortUsage, long: channelUsage}
 const channelShortUsage = `larkaxctl channel 管理上游渠道。
 
 用法：
-  larkaxctl channel create --name <名称> --type <类型> --base-url <URL>
-                           --models <模型名,...>
+  larkaxctl channel create --name <名称> --base-url <URL> --models <模型名,...>
+                           (--type <类型> | --protocols <协议名,...>)
                            (--credential-stdin | --credential-env <变量名>)
   larkaxctl channel list [--all]
   larkaxctl channel get --id <渠道 ID>
@@ -48,8 +48,8 @@ create 的 stdout 只有新渠道的 ID；delete 是软删，restore 是它的�
 const channelUsage = `larkaxctl channel 管理上游渠道。
 
 用法：
-  larkaxctl channel create --name <名称> --type <类型> --base-url <URL>
-                           --models <模型名,...>
+  larkaxctl channel create --name <名称> --base-url <URL> --models <模型名,...>
+                           (--type <类型> | --protocols <协议名,...>)
                            (--credential-stdin | --credential-env <变量名>)
                            [--user <用户 ID 或用户名>] [--weight <权重>]
                            [--priority <优先级>] [--setting <JSON 对象>]
@@ -57,7 +57,8 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel get --id <渠道 ID>
   larkaxctl channel health [--id <渠道 ID>] [--since <时长或时刻>] [--all]
   larkaxctl channel update --id <渠道 ID>
-                           [--name <名称>] [--type <类型>] [--base-url <URL>]
+                           [--name <名称>] [--type <类型>]
+                           [--protocols <协议名,...>] [--base-url <URL>]
                            [--models <模型名,...>] [--weight <权重>]
                            [--priority <优先级>] [--setting <JSON 对象>]
                            [--credential-stdin | --credential-env <变量名>]
@@ -144,11 +145,25 @@ sync-models 从上游拉一次这条渠道的模型清单并落库，需要主�
 刷新到这一次；上游下线了某个模型时，再同步一次会把它从清单里删掉。
 
 渠道类型必须是已注册的适配器类型；类型写错时错误信息会列出已知的类型。
+--protocols 是这条渠道声明支持的协议集合，至少一个，取值同样是已注册的适配器
+类型；写错一个名字时错误信息会列出已知的协议。一条渠道一套凭证：声明两套协议
+表示同一个上游地址、同一把凭证上两种端点都能用，请求按它走的那条入口分派到
+对应协议。
+
+--type 等价于只写一个元素的 --protocols，两者都还是单协议的写法。同时给时
+--type 必须在 --protocols 里（它就是主协议，落在渠道的类型上）；不在里面会报错。
+只给 --protocols 时主协议取第一个。update 给 --type 会把协议集合改成只含它
+一个——要扩成多协议请给 --protocols。
+
+**单协议渠道的行为与加 --protocols 之前逐字相同**：请求照旧按类型分派，
+channel get 也不多一栏（协议集合暂时不出现在 get / list 的输出里）。
+
 --models 至少要有一个：读取路径把 models 当白名单用，空数组的渠道永远选不中。
 每个模型还要能被这条渠道服务：模型目录里可以声明一个模型只在某几条端点上被
-服务，而渠道的 type 决定它把请求发到哪一条。两者对不上时 create / update 会被
-拒绝，并说出「模型在目录里声明的端点」与「这条渠道打的端点」各是什么。目录里
-没有这个模型、或者那一项没配过时不拦。
+服务，而渠道声明的协议决定它把请求发到哪几条。一条都对不上时 create / update
+会被拒绝，并说出「模型在目录里声明的端点」与「这条渠道打的端点」各是什么；
+多协议渠道只要有其中一条对得上就放行。目录里没有这个模型、或者那一项没配过时
+不拦。
 --setting 是渠道私有配置（自由形态的 JSON 对象），键由该渠道 type 指向的
 适配器解释，选路层不认，管理面也不校验键名。今天有两个键有读者。
 
@@ -294,8 +309,14 @@ func runChannelCreate(args []string) error {
 	if err != nil {
 		return err
 	}
+	// setting 的键有没有读者，按**主协议**判：只给 --protocols 时它是列表的
+	// 第一个（写入侧同一套规则，见 channels.protocolSetForCreate）。
+	primaryType := req.Type
+	if primaryType == "" && len(req.Protocols) > 0 {
+		primaryType = req.Protocols[0]
+	}
 	printCreatedChannel(humanStdout(), humanStderr(), id, sealer.PrimaryKeyID(),
-		channel.SettingUnreadNote(req.Type, req.Setting))
+		channel.SettingUnreadNote(primaryType, req.Setting))
 	return nil
 }
 
@@ -308,6 +329,7 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	name := fs.String("name", "", "")
 	channelType := fs.String("type", "", "")
+	protocols := fs.String("protocols", "", "")
 	baseURL := fs.String("base-url", "", "")
 	models := fs.String("models", "", "")
 	owner := legacyStringFlag(fs, "user", "owner", "")
@@ -338,8 +360,20 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	if err := checkDisplayText("--name（渠道名）", strings.TrimSpace(*name)); err != nil {
 		return channels.CreateRequest{}, "", err
 	}
-	if strings.TrimSpace(*channelType) == "" {
-		return channels.CreateRequest{}, "", errors.New("缺少 --type")
+	// --type 与 --protocols 至少给一个：前者是单协议的旧写法，后者是新写法，
+	// 两者都等于「这条渠道声明了哪些协议」（见 channels.CreateRequest）。
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+
+	var protocolList []string
+	if given["protocols"] {
+		if strings.TrimSpace(*protocols) == "" {
+			return channels.CreateRequest{}, "", errors.New("--protocols 里没有协议名（至少一个）")
+		}
+		protocolList = splitList(*protocols)
+	}
+	if strings.TrimSpace(*channelType) == "" && len(protocolList) == 0 {
+		return channels.CreateRequest{}, "", errors.New("缺少 --type 或 --protocols（至少给一个）")
 	}
 	if strings.TrimSpace(*baseURL) == "" {
 		return channels.CreateRequest{}, "", errors.New("缺少 --base-url")
@@ -372,6 +406,7 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	return channels.CreateRequest{
 		Name:       *name,
 		Type:       *channelType,
+		Protocols:  protocolList,
 		BaseURL:    normalizedBaseURL,
 		Credential: *plaintext,
 		Models:     splitList(*models),
@@ -391,6 +426,7 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	id := fs.Int64("id", 0, "要改的渠道 ID")
 	name := fs.String("name", "", "")
 	channelType := fs.String("type", "", "")
+	protocols := fs.String("protocols", "", "")
 	baseURL := fs.String("base-url", "", "")
 	models := fs.String("models", "", "")
 	weight := fs.Int("weight", 0, "")
@@ -427,6 +463,14 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	}
 	if given["type"] {
 		req.Type = channelType
+		changes++
+	}
+	if given["protocols"] {
+		if strings.TrimSpace(*protocols) == "" {
+			return channels.UpdateRequest{}, errors.New("--protocols 里没有协议名（至少一个）")
+		}
+		list := splitList(*protocols)
+		req.Protocols = &list
 		changes++
 	}
 	if given["base-url"] {
@@ -479,8 +523,8 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	}
 	if changes == 0 {
 		return channels.UpdateRequest{}, errors.New(
-			"update 至少要改一项：给出 --name / --type / --base-url / --models / " +
-				"--weight / --priority / --setting / --credential-* 之一")
+			"update 至少要改一项：给出 --name / --type / --protocols / --base-url / " +
+				"--models / --weight / --priority / --setting / --credential-* 之一")
 	}
 
 	return req, nil
