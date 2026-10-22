@@ -442,9 +442,12 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 
 	// 协议集合同理：给了 --type 或 --protocols 就要重写 channels.type 与
 	// channel_protocols 两处。nil 表示这次不动协议。
-	newProtocols, primaryType, err := a.protocolSetForUpdate(req)
-	if err != nil {
-		return err
+	// 不把错误名写成 err：它会让下面每一处 `x, err := …` 都遮蔽这一个，
+	// 进而触发 govet 的 shadow（CI 会红）。这里返回一次就结束，名字短一点
+	// 反而把「这是协议校验的错误」说清楚了。
+	newProtocols, primaryType, protocolErr := a.protocolSetForUpdate(req)
+	if protocolErr != nil {
+		return protocolErr
 	}
 
 	if req.Name != nil {

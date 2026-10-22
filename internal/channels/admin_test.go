@@ -467,9 +467,9 @@ func TestCreateTypeOnlyWritesSingleProtocol(t *testing.T) {
 		t.Errorf("channel_protocols = %v，期望只有 type %q 一个", got, req.Type)
 	}
 	var typ string
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT type FROM channels WHERE id = $1`, id).Scan(&typ); err != nil {
-		t.Fatalf("读 type 失败: %v", err)
+	if scanErr := db.QueryRowContext(context.Background(),
+		`SELECT type FROM channels WHERE id = $1`, id).Scan(&typ); scanErr != nil {
+		t.Fatalf("读 type 失败: %v", scanErr)
 	}
 	if typ != req.Type {
 		t.Errorf("channels.type = %q，期望 %q", typ, req.Type)
@@ -501,9 +501,9 @@ func TestCreateMultiProtocolWritesSet(t *testing.T) {
 	}
 	// 主协议取集合的第一个（调用方给的顺序，不是排序后的）。
 	var typ string
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT type FROM channels WHERE id = $1`, id).Scan(&typ); err != nil {
-		t.Fatalf("读 type 失败: %v", err)
+	if scanErr := db.QueryRowContext(context.Background(),
+		`SELECT type FROM channels WHERE id = $1`, id).Scan(&typ); scanErr != nil {
+		t.Fatalf("读 type 失败: %v", scanErr)
 	}
 	if typ != endpointMessagesType {
 		t.Errorf("channels.type = %q，期望 %q（集合的第一个）", typ, endpointMessagesType)
@@ -549,9 +549,9 @@ func TestUpdateReplacesProtocolSet(t *testing.T) {
 		t.Fatalf("Update 出错: %v", err)
 	}
 	var typ string
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT type FROM channels WHERE id = $1`, id).Scan(&typ); err != nil {
-		t.Fatalf("读 type 失败: %v", err)
+	if scanErr := db.QueryRowContext(context.Background(),
+		`SELECT type FROM channels WHERE id = $1`, id).Scan(&typ); scanErr != nil {
+		t.Fatalf("读 type 失败: %v", scanErr)
 	}
 	if typ != endpointChatType {
 		t.Errorf("channels.type = %q，期望 %q（集合的第一个）", typ, endpointChatType)
