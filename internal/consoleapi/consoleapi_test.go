@@ -356,10 +356,28 @@ func (f *fakePrices) ReferencePrices(_ context.Context, _ []string, _ time.Time)
 
 type fakeSupplies struct {
 	supplies []channels.Supply
+	// allCalls 数了整表查询被调了几次，forCalls 记下单模型查询的参数。
+	//
+	// 两个读点要分开：单模型页的成本必须与模型总数无关，而「取整张表再在
+	// Go 侧过滤」在响应上完全看不出来——只有这两个计数分得开。
+	allCalls int
+	forCalls []string
 }
 
 func (f *fakeSupplies) Supplies(_ context.Context) ([]channels.Supply, error) {
+	f.allCalls++
 	return f.supplies, nil
+}
+
+func (f *fakeSupplies) SuppliesFor(_ context.Context, model string) ([]channels.Supply, error) {
+	f.forCalls = append(f.forCalls, model)
+	out := []channels.Supply{}
+	for _, supply := range f.supplies {
+		if supply.Model == model {
+			out = append(out, supply)
+		}
+	}
+	return out, nil
 }
 
 type fakeOffers struct {

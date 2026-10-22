@@ -955,6 +955,57 @@ func TestSuppliesCarryChannelOwner(t *testing.T) {
 	}
 }
 
+// SuppliesFor 是 Supplies 的单模型版本：只取这一个模型的供给行，判据与
+// 排序口径都要与整表查询一致——模型页不该看到清单里没有的渠道。
+func TestSuppliesForReturnsOnlyThatModel(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := t.Context()
+
+	model := uniqueModel()
+	other := uniqueModel()
+	insertModelCatalog(t, db, model, nil, nil, nil, nil, nil)
+	insertModelCatalog(t, db, other, nil, nil, nil, nil, nil)
+
+	merchant := seedMerchant(t, db)
+	platformChannel := insertChannel(ctx, t, db, sealer, channelSpec{model: model})
+	merchantChannel := insertChannel(ctx, t, db, sealer, channelSpec{ownerUserID: merchant, model: model})
+	insertChannel(ctx, t, db, sealer, channelSpec{model: other})
+	// 禁用与已删的渠道不算在供，与 Supplies 同一条判据（suppliesModel）。
+	insertChannel(ctx, t, db, sealer, channelSpec{model: model, status: "disabled"})
+
+	got, err := New(db, sealer).SuppliesFor(ctx, model)
+	if err != nil {
+		t.Fatalf("SuppliesFor 出错: %v", err)
+	}
+	// 行序按渠道编号，与整表查询按模型过滤之后的行序相同：报价在「同价折成
+	// 一行」时取编号最小的渠道那条规则，顺序一变，报出来的规则就变了。
+	if len(got) != 2 {
+		t.Fatalf("SuppliesFor(%q) = %+v，期望两条（别的模型与禁用的渠道都不算）", model, got)
+	}
+	if got[0].ChannelID != platformChannel || got[1].ChannelID != merchantChannel {
+		t.Fatalf("行序 = %d, %d，期望按渠道编号 %d, %d",
+			got[0].ChannelID, got[1].ChannelID, platformChannel, merchantChannel)
+	}
+	if got[0].Model != model || got[0].OwnerUserID != 0 || got[0].Merchant != "" {
+		t.Errorf("平台渠道供给 = %+v，期望 model=%q owner=0、用户名空", got[0], model)
+	}
+	if got[1].OwnerUserID != merchant || got[1].Merchant != "m"+itoa(merchant) {
+		t.Errorf("商家渠道供给 = %+v，期望 owner=%d merchant=m%d", got[1], merchant, merchant)
+	}
+
+	// 没有渠道在供的模型回空清单，不是错误：模型页据此回 404。
+	none := uniqueModel()
+	insertModelCatalog(t, db, none, nil, nil, nil, nil, nil)
+	empty, err := New(db, sealer).SuppliesFor(ctx, none)
+	if err != nil {
+		t.Fatalf("SuppliesFor(%q) 出错: %v", none, err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("SuppliesFor(%q) = %+v，期望空", none, empty)
+	}
+}
+
 // 读点三的补一条：**别名不进清单**。
 //
 // 清单里的名字是规范名——调用方请求时写的就是它。别名只说「这家上游把它

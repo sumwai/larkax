@@ -925,6 +925,29 @@ func TestCreateModelRoundTrip(t *testing.T) {
 	}
 }
 
+// reasoning_options 的正常一态上面已经对过；这一条写的是异常值：列是
+// NOT NULL DEFAULT '[]'，但 jsonb 里可以存一个字面量 null——它不等于 SQL
+// NULL，NOT NULL 挡不住。读取侧把它解成 nil 且不报错；到了控制台的单模型
+// 响应里它被抹平成 `[]`（那是异常数据，不是第三种状态）。
+func TestModelReasoningOptionsJSONNullDecodesToNil(t *testing.T) {
+	db := testDB(t)
+	name := uniqueName("model")
+	seedModel(t, db, name)
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE model_catalog SET reasoning_options = 'null'::jsonb WHERE canonical_name = $1`,
+		name); err != nil {
+		t.Fatalf("写入 JSON null 失败: %v", err)
+	}
+
+	got, err := New(db).Model(context.Background(), name)
+	if err != nil {
+		t.Fatalf("读取出错: %v", err)
+	}
+	if got.ReasoningOptions != nil {
+		t.Errorf("ReasoningOptions = %v，期望 nil（JSON null 解成 nil，不报错）", got.ReasoningOptions)
+	}
+}
+
 // 没填的字段要落成 NULL 而不是零值：读取侧把 NULL 折成 0 与空串，
 // 存 0 会让「没填」看起来像一个测出来的值。
 func TestCreateModelLeavesUnknownFieldsNull(t *testing.T) {
@@ -1841,6 +1864,26 @@ func TestDeleteModelWhenUnreferenced(t *testing.T) {
 		t.Errorf("err = %v，期望 ErrModelNotFound", err)
 	}
 	if err := admin.Delete(context.Background(), model); !errors.Is(err, ErrModelNotFound) {
+		t.Errorf("err = %v，期望 ErrModelNotFound", err)
+	}
+}
+
+// 库里已有的「坏名字」也删得掉：Delete 认的是这一行在不在，不是这个名字
+// 现在还能不能写进去。
+//
+// 严格规则是给新写入定的。拿它来校验删除的入参，库里一旦出现 `a//b` 这样
+// 的名字（本次规则上线之前写进去的），就既改不掉也删不掉——历史遗留会变成
+// 永久的。这里直接插行模拟那份存量：写入侧现在拒绝它，所以只能绕过 Create。
+func TestDeleteModelAcceptsLegacyBadName(t *testing.T) {
+	db := testDB(t)
+	admin := NewAdmin(db)
+	model := uniqueName("model") + "//legacy"
+	seedModel(t, db, model)
+
+	if err := admin.Delete(context.Background(), model); err != nil {
+		t.Fatalf("Delete 不该因为路径段拒绝存量名字: %v", err)
+	}
+	if _, err := New(db).Model(context.Background(), model); !errors.Is(err, ErrModelNotFound) {
 		t.Errorf("err = %v，期望 ErrModelNotFound", err)
 	}
 }

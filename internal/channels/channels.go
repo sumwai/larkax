@@ -172,15 +172,39 @@ type Supply struct {
 // 一次查询取回整张供给表，而不是按模型逐个问：/v1/models 一次要列全部
 // 模型，逐个问会把「目录里有几个模型」变成几倍的数据库往返。
 //
+// 只问一个模型时用 SuppliesFor：这条查询的成本与目录、渠道的总数成正比，
+// 而单模型页本来只需要其中一行。
+//
 // 它只判供给，不判健康与额度——与 SuppliedModels 同一条判据（suppliesModel）
 // 与同一条理由：报价不该因为一个渠道今天不舒服而消失。
 func (s *Source) Supplies(ctx context.Context) ([]Supply, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return s.querySupplies(ctx, ` ORDER BY m.canonical_name, c.id`)
+}
+
+// SuppliesFor 返回一个规范模型的「在供渠道 × 归属」行。
+//
+// 与 Supplies 是同一条查询，只多了 `WHERE m.canonical_name = $1`：判据仍由
+// suppliesModel 给出，两条路径不会出现「清单里有、模型页说没有」。排序按
+// 渠道编号，与整表查询按模型过滤之后的行序相同。
+//
+// 单模型页走这一条：它是公开、无会话的读点，成本不该随目录与渠道的总数
+// 增长，也不该能靠逐个枚举模型放大。
+func (s *Source) SuppliesFor(ctx context.Context, model string) ([]Supply, error) {
+	return s.querySupplies(ctx, ` WHERE m.canonical_name = $1 ORDER BY c.id`, model)
+}
+
+// querySupplies 执行供给查询并逐行扫描。
+//
+// 列清单与判据只写这一遍；两个调用方只提供各自的 WHERE / ORDER BY 尾巴。
+// 分头写两份 SELECT 的话，「在供」的定义会从两份代码里各长出一个版本，
+// 而两边的差只会在某天有人改了其中一条之后才现形。
+func (s *Source) querySupplies(ctx context.Context, tail string, args ...any) ([]Supply, error) {
+	query := `
 		SELECT m.canonical_name, c.id, COALESCE(c.owner_user_id, 0), COALESCE(u.username, '')
 		  FROM model_catalog m
-		  JOIN channels c ON `+suppliesModel("m.canonical_name")+`
-		  LEFT JOIN users u ON u.id = c.owner_user_id
-		 ORDER BY m.canonical_name, c.id`)
+		  JOIN channels c ON ` + suppliesModel("m.canonical_name") + `
+		  LEFT JOIN users u ON u.id = c.owner_user_id` + tail
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("查询在供渠道失败: %w", err)
 	}
