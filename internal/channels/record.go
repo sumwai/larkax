@@ -172,7 +172,7 @@ func (r *Recorder) streak(ctx context.Context, rec route.CallOutcome, reset, inc
 // 请求会同时命中同一个桶），先查后写会丢掉并发的那些。
 const rollupSQL = `
 INSERT INTO channel_health_rollup (channel_id, model, bucket, requests, successes, failures)
-SELECT DISTINCT $1, t.model, $3, 1, $4, $5
+SELECT DISTINCT $1::bigint, t.model, $3::timestamptz, 1, $4::bigint, $5::bigint
   FROM (VALUES ($2::text), (''::text)) AS t(model)
 ON CONFLICT (channel_id, model, bucket) DO UPDATE
    SET requests  = channel_health_rollup.requests  + 1,
