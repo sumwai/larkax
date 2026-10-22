@@ -593,6 +593,18 @@ export const zh = {
   'ops.model.modalitiesOutput': '输出模态（每行一个）',
   'ops.model.endpoints': '端点（每行一个）',
   'ops.model.endpointsHint': '留空表示未知。',
+  'ops.model.adapterDerive': '按适配器带入',
+  'ops.model.adapterDeriveHint':
+    '端点取自适配器注册表，选定后不可手填；模态按协议推定。模型要在多条端点上被服务、或端点不在清单里时选「不指定」。',
+  'ops.model.adapterManual': '不指定（手填）',
+  'ops.model.adapterOption': '{type}（{endpoint}）',
+  'ops.model.adaptersUnavailable': '没有可用的适配器清单，端点与模态请手填。',
+  'ops.model.endpointsDerived': '由适配器 {type} 带出，换适配器会跟着变；要手填请选回「不指定」。',
+  'ops.model.modalitiesDerived':
+    '按协议推定：带入文本基线。图片、音频取决于模型自己，请按需补；改过之后不再自动重算。',
+  'ops.model.modalitiesKept': '模态保留表单里现有的值，没有按 {type} 的协议推定重算。',
+  'ops.model.modalitiesRecompute': '按协议重算',
+  'ops.model.modalitiesUnavailable': '适配器 {type}（{endpoint}）这套协议推不出模态，请手填。',
   'ops.model.nameRequired': '请填规范名。',
   'ops.model.contextLimitInvalid': '上下文上限要填整数。',
   'ops.model.inputLimitInvalid': '输入上限要填整数。',

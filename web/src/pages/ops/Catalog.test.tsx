@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   createModel: vi.fn(),
   updateModel: vi.fn(),
   deleteModel: vi.fn(),
+  listAdapters: vi.fn(),
   meta: vi.fn(),
 }))
 
@@ -21,6 +22,7 @@ vi.mock('../../api', async (importOriginal) => {
     createModel: mocks.createModel,
     updateModel: mocks.updateModel,
     deleteModel: mocks.deleteModel,
+    listAdapters: mocks.listAdapters,
   }
   return {
     ...actual,
@@ -65,6 +67,14 @@ const UNKNOWN_ENDPOINTS = {
   capabilities: { ...MODEL.capabilities, endpoints: null },
 }
 
+// 与服务端的适配器注册表同一组取值：type 与 protocol 同名，端点各一条。
+const ADAPTERS = [
+  { type: 'anthropic', protocol: 'anthropic', endpoint: '/v1/messages' },
+  { type: 'openai', protocol: 'openai', endpoint: '/v1/chat/completions' },
+  { type: 'openai-responses', protocol: 'openai-responses', endpoint: '/v1/responses' },
+  { type: 'systemone', protocol: 'systemone', endpoint: '/v1/systemone' },
+]
+
 function renderModels() {
   return render(
     <I18nProvider>
@@ -99,6 +109,7 @@ describe('模型目录页', () => {
       locales: ['en', 'zh'],
       features: { registration: false, password_reset: 'admin', topup: false },
     })
+    mocks.listAdapters.mockResolvedValue(ADAPTERS)
   })
 
   it('搜索只留下匹配的模型', async () => {
@@ -394,6 +405,123 @@ describe('模型目录页', () => {
     // 同一个节点只是被清空：没有新句子可念，也不会把旧句子再念一遍。
     expect(screen.getByRole('alert')).toBeEmptyDOMElement()
   })
+
+  it('选定适配器后端点自动带出且只读，换适配器端点跟着变', async () => {
+    mocks.listModels.mockResolvedValue([])
+    renderModels()
+    await openCreate()
+    fireEvent.click(tab('能力'))
+
+    const picker = await screen.findByLabelText('按适配器带入')
+    fireEvent.change(picker, { target: { value: 'openai' } })
+    const endpoints = screen.getByLabelText('端点（每行一个）')
+    expect(endpoints).toHaveValue('/v1/chat/completions')
+    expect(endpoints).toHaveAttribute('readonly')
+
+    // 端点不是首次推导之后就锁死：换一个适配器，它跟着换。
+    fireEvent.change(picker, { target: { value: 'anthropic' } })
+    expect(screen.getByLabelText('端点（每行一个）')).toHaveValue('/v1/messages')
+  })
+
+  it('模态按协议推定带入，并写明这是推定值', async () => {
+    mocks.listModels.mockResolvedValue([])
+    renderModels()
+    await openCreate()
+    fireEvent.click(tab('能力'))
+    fireEvent.change(await screen.findByLabelText('按适配器带入'), {
+      target: { value: 'anthropic' },
+    })
+
+    fireEvent.click(tab('模态与时间'))
+    expect(screen.getByLabelText('输入模态（每行一个）')).toHaveValue('text')
+    expect(screen.getByLabelText('输出模态（每行一个）')).toHaveValue('text')
+    expect(
+      screen.getByText(
+        '按协议推定：带入文本基线。图片、音频取决于模型自己，请按需补；改过之后不再自动重算。',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('用户改过的模态在换适配器时保留，需要时手动重算', async () => {
+    mocks.listModels.mockResolvedValue([])
+    renderModels()
+    await openCreate()
+
+    fireEvent.click(tab('模态与时间'))
+    fireEvent.change(screen.getByLabelText('输入模态（每行一个）'), {
+      target: { value: 'text\nimage' },
+    })
+    fireEvent.change(screen.getByLabelText('输出模态（每行一个）'), { target: { value: 'text' } })
+
+    fireEvent.click(tab('能力'))
+    const picker = await screen.findByLabelText('按适配器带入')
+    fireEvent.change(picker, { target: { value: 'openai' } })
+    fireEvent.change(picker, { target: { value: 'anthropic' } })
+
+    fireEvent.click(tab('模态与时间'))
+    expect(screen.getByLabelText('输入模态（每行一个）')).toHaveValue('text\nimage')
+    expect(
+      screen.getByText('模态保留表单里现有的值，没有按 anthropic 的协议推定重算。'),
+    ).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '按协议重算' }))
+    expect(screen.getByLabelText('输入模态（每行一个）')).toHaveValue('text')
+    expect(screen.getByLabelText('输出模态（每行一个）')).toHaveValue('text')
+  })
+
+  it('推不出模态的适配器：端点照样带出，模态退回手填并说明原因', async () => {
+    mocks.listModels.mockResolvedValue([])
+    renderModels()
+    await openCreate()
+    fireEvent.click(tab('能力'))
+    fireEvent.change(await screen.findByLabelText('按适配器带入'), {
+      target: { value: 'systemone' },
+    })
+
+    expect(screen.getByLabelText('端点（每行一个）')).toHaveValue('/v1/systemone')
+
+    fireEvent.click(tab('模态与时间'))
+    expect(screen.getByLabelText('输入模态（每行一个）')).not.toHaveAttribute('readonly')
+    expect(
+      screen.getByText('适配器 systemone（/v1/systemone）这套协议推不出模态，请手填。'),
+    ).toBeInTheDocument()
+  })
+
+  it('编辑既有模型时不锁端点：注册表里没有的端点仍可改', async () => {
+    // MODEL 的端点取值不在适配器清单里，不能因为没选适配器就把它锁死。
+    mocks.listModels.mockResolvedValue([MODEL])
+    renderModels()
+
+    fireEvent.click(await screen.findByRole('button', { name: '编辑' }))
+    fireEvent.click(tab('能力'))
+
+    const endpoints = screen.getByLabelText('端点（每行一个）')
+    expect(endpoints).toHaveValue('anthropic')
+    expect(endpoints).not.toHaveAttribute('readonly')
+
+    fireEvent.change(endpoints, { target: { value: '/v1/messages' } })
+    expect(endpoints).toHaveValue('/v1/messages')
+
+    // 选一次适配器、再选回「不指定」：端点回到选中之前那份，而不是被冲掉。
+    const picker = await screen.findByLabelText('按适配器带入')
+    fireEvent.change(picker, { target: { value: 'openai' } })
+    expect(endpoints).toHaveValue('/v1/chat/completions')
+    fireEvent.change(picker, { target: { value: '' } })
+    expect(endpoints).toHaveValue('/v1/messages')
+    expect(endpoints).not.toHaveAttribute('readonly')
+  })
+
+  it('适配器清单拉不到时退回手填并说明', async () => {
+    mocks.listModels.mockResolvedValue([])
+    mocks.listAdapters.mockRejectedValue(new Error('boom'))
+    renderModels()
+    await openCreate()
+    fireEvent.click(tab('能力'))
+
+    await screen.findByText('没有可用的适配器清单，端点与模态请手填。')
+    expect(screen.queryByLabelText('按适配器带入')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('端点（每行一个）')).not.toHaveAttribute('readonly')
+  })
 })
 
 describe('模型目录页：窄屏卡片', () => {
@@ -407,6 +535,7 @@ describe('模型目录页：窄屏卡片', () => {
       locales: ['en', 'zh'],
       features: { registration: false, password_reset: 'admin', topup: false },
     })
+    mocks.listAdapters.mockResolvedValue(ADAPTERS)
   })
 
   it('清单改成卡片，编辑与删除进底部菜单，表格列头不在 DOM 里', async () => {
