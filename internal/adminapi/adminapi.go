@@ -94,9 +94,10 @@ type Config struct {
 	// Groups 限定注册哪几组资源；为空表示全部——overview 与 users 两组例外，
 	// 它们只随显式列名注册（见下）。
 	//
-	// 生产的两处装配都**显式列出**：内部监听用 InternalGroups（不含 users），
-	// 控制台的 admin 组在 consoleapi 里列出（含 users）。留空只在测试与
-	// 兼容旧默认时出现。
+	// 生产的三处装配都**显式列出**：`cmd/larkax` 的内部监听用 InternalGroups()
+	// （channels/models/aliases/pricing/costs，不含 users）；`internal/consoleapi`
+	// 的 merchant 组列 channels + pricing + overview，admin 组列 channels /
+	// models / aliases / pricing / costs / users。留空只在测试与兼容旧默认时出现。
 	//
 	// 取值见 GroupChannels / GroupModels / GroupAliases / GroupPricing /
 	// GroupCosts / GroupUsers / GroupOverview。控制台的 merchant 组给

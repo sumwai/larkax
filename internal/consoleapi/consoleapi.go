@@ -361,8 +361,10 @@ func newAPI(cfg Config, d deps) http.Handler {
 				[]string{adminapi.GroupChannels, adminapi.GroupPricing, adminapi.GroupOverview})
 		}
 		if a.deps.adminAdmin == nil {
-			// 显式列出，不留空（空 = 全部）：users 组只属于这一组——它的
-			// 判据依赖会话里的操作者，内部管理面那一侧没有这个前提。
+			// 组名逐个列出：留空只注册 channels / models / aliases / pricing /
+			// costs，overview 与 users 两组必须显式列名才会注册（见
+			// adminapi.Config.Groups）。users 组只属于这一组——它的判据依赖
+			// 会话里的操作者，内部管理面那一侧没有这个前提。
 			a.deps.adminAdmin = build(PathPrefix+"admin/", []string{
 				adminapi.GroupChannels,
 				adminapi.GroupModels,
