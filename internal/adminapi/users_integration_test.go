@@ -129,6 +129,45 @@ func decodeUsers(t *testing.T, rec *httptest.ResponseRecorder, target any) {
 	}
 }
 
+// TestUsersListRowsCarryNoAccountSideColumns 列表行只有摘要的八个字段。
+//
+// 账户侧那三列（requests_7d / amount_7d / channel_count）在详情里要读三张表，
+// 列表每页几十行，带上它们就是每行三次读。这里按「响应里到底有哪些键」逐字段
+// 核，而不是只核已知的那几个——多出来的那一列正是这条用例要挡的。
+func TestUsersListRowsCarryNoAccountSideColumns(t *testing.T) {
+	h := usersTestHandler(t, nil)
+	db := testDB(t)
+	u := newUsersTestUser(t, db, auth.RoleUser, "listshape")
+
+	rec := usersCall(t, t.Context(), h, http.MethodGet,
+		"/api/v1/admin/users?query="+url.QueryEscape(u.Username), 0, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("清单状态码 = %d；正文：%s", rec.Code, rec.Body)
+	}
+	var page struct {
+		Items []map[string]json.RawMessage `json:"items"`
+	}
+	decodeUsers(t, rec, &page)
+	if len(page.Items) != 1 {
+		t.Fatalf("清单回了 %d 行，期望只有刚建的那一位", len(page.Items))
+	}
+	// 逐字对应 userSummaryJSON 的八个字段。
+	want := map[string]bool{
+		"id": true, "username": true, "email": true, "display_name": true,
+		"role": true, "status": true, "created_at": true, "last_seen_at": true,
+	}
+	for key := range want {
+		if _, ok := page.Items[0][key]; !ok {
+			t.Errorf("清单行缺字段 %q：%v", key, page.Items[0])
+		}
+	}
+	for key := range page.Items[0] {
+		if !want[key] {
+			t.Errorf("清单行多出字段 %q；账户侧那三列只该出现在详情里", key)
+		}
+	}
+}
+
 // TestUsersListPaginatesWithoutGapsOrDuplicates 翻到底：不重、不漏。
 func TestUsersListPaginatesWithoutGapsOrDuplicates(t *testing.T) {
 	h := usersTestHandler(t, nil)
@@ -464,6 +503,30 @@ func TestUsersDetailReportsAccountSide(t *testing.T) {
 		t.Fatalf("写钱包失败: %v", err)
 	}
 
+	// 账户侧三列要非零，而且必须**只算这个人**：另建一位用户，给他一条用量
+	// 与一条渠道；本用户给两笔用量、两条渠道。三列的具体值于是互不相同，
+	// 筛选条件指错人时看到的是 1 / 9.9 / 1，而不是 2 / 0.75 / 2。
+	other := newUsersTestUser(t, db, auth.RoleUser, "detail-other")
+	models := channelModel(t, db)
+	merchant := merchantSurface(t, "UTC")
+	ownedA := merchantChannel(t, merchant, u.ID, uniqueName("detail-ch"), "openai",
+		"https://api.example.com/v1", models)
+	ownedB := merchantChannel(t, merchant, u.ID, uniqueName("detail-ch"), "openai",
+		"https://api.example.com/v1", models)
+	otherChannel := merchantChannel(t, merchant, other.ID, uniqueName("detail-ch-other"), "openai",
+		"https://api.example.com/v1", models)
+	// 渠道对 users 是 RESTRICT 外键：先删渠道，用户那一行的清理才删得掉
+	// （t.Cleanup 后进先出，这条比 newUsersTestUser 注册的晚）。
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.WithoutCancel(t.Context()),
+			`DELETE FROM channels WHERE owner_user_id IN ($1, $2)`, u.ID, other.ID); err != nil {
+			t.Logf("清理渠道失败: %v", err)
+		}
+	})
+	insertUsage(t, db, u.ID, ownedA, uniqueName("req-detail"), models[0], "0.5", "0", time.Time{})
+	insertUsage(t, db, u.ID, ownedB, uniqueName("req-detail"), models[0], "0.25", "0", time.Time{})
+	insertUsage(t, db, other.ID, otherChannel, uniqueName("req-detail-other"), models[0], "9.9", "0", time.Time{})
+
 	rec := usersCall(t, ctx, h, http.MethodGet,
 		fmt.Sprintf("/api/v1/admin/users/%d", u.ID), 0, nil)
 	if rec.Code != http.StatusOK {
@@ -487,12 +550,14 @@ func TestUsersDetailReportsAccountSide(t *testing.T) {
 	if detail.ActiveKeyCount != 1 {
 		t.Errorf("active_key_count = %d，期望 1", detail.ActiveKeyCount)
 	}
-	if detail.Requests7d != 0 || detail.Amount7d != "0.00000000" {
-		t.Errorf("七日用量 = %d 次 / %q，期望 0 次 / 0.00000000",
-			detail.Requests7d, detail.Amount7d)
+	if detail.Requests7d != 2 {
+		t.Errorf("requests_7d = %d，期望 2（另一位用户那一笔不算）", detail.Requests7d)
 	}
-	if detail.ChannelCount != 0 {
-		t.Errorf("channel_count = %d，期望 0", detail.ChannelCount)
+	if detail.Amount7d != "0.75000000" {
+		t.Errorf("amount_7d = %q，期望 0.75000000（0.5 + 0.25，另一位用户那笔不算）", detail.Amount7d)
+	}
+	if detail.ChannelCount != 2 {
+		t.Errorf("channel_count = %d，期望 2（另一位用户的渠道不算）", detail.ChannelCount)
 	}
 	if detail.LastSeenAt == nil || *detail.LastSeenAt != seen.Format(time.RFC3339) {
 		t.Errorf("last_seen_at = %v，期望 %q", detail.LastSeenAt, seen.Format(time.RFC3339))
