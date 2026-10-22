@@ -21,11 +21,11 @@ name: 门禁
 # 错误体的 `error.type`），而发布是外部契约最要紧的时刻。代价是发布路径
 # 多两个运行期依赖（Python 3.12 与两个官方 SDK），一次 `pip` 抖动就会挡住
 # 发布——但那是重跑一次的事，而漏跑契约测试是「发出去的版本客户端一接就崩」。
-# 它是独立 job，与另外两个并行，所以几乎不增加墙钟时间。
+# 它是独立 job，与其余几个并行，所以几乎不增加墙钟时间。
 on:
   workflow_call:
 
-# 三个 job 都只需要读仓库。调用方（release.yml）持有 `contents: write`
+# 每个 job 都只需要读仓库。调用方（release.yml）持有 `contents: write`
 # 是为了创建 release，这里的门禁不该跟着拿到写权限——被调用工作流声明的
 # 权限只能维持或收窄，不会反过来抬高调用方。
 permissions:
@@ -252,6 +252,93 @@ jobs:
       # 检查本身在 .github/actions/check-integration-tests：发布路径调的是
       # 同一个工作流、也就调到了同一份实现，两边不会各自漂移。
       - uses: ./.github/actions/check-integration-tests
+
+  # 前端（web/）：类型检查、单元测试、ESLint。
+  #
+  # 这三道检查原先只写在任务书里，靠实现者本机自觉跑——一个前端 PR 可以带着
+  # `tsc` 报错、挂了用例或新增 lint 警告合入 main，而 CI 全绿。这与仓库里反复
+  # 强调的那条同形：「跳过」与「通过」在输出里长得一样。
+  #
+  # 与 go job 分开，是因为它多一整套运行期依赖（Node 与 npm 装出来的
+  # node_modules）；塞进 go job 会让「Go 测试挂了」与「npm 装不上」混在同一份
+  # 日志里，而这两件事的处置不同。三道检查按下面的顺序跑：类型检查最先，
+  # 它挂了之后的用例结果与 lint 结果都不必再看。
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 20：docs/development.md 写着前端要 Node 20 或更新。版本比它旧时
+      # 依赖装得上，但会刷出一片 EBADENGINE 警告——CI 不该跑在依赖自己声明
+      # 不支持的版本上。
+      #
+      # 缓存键跟着 web/package-lock.json 走，不跟仓库根的路径：这个仓只有
+      # 前端一处 lock，写死路径比 glob 更容易看出它指的是哪份文件。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # 用 ci 而不是 install：它按 lock 精确装，且 lock 与 package.json 对不上
+      # 时直接失败。install 会悄悄改写 lock，于是「锁文件可用」这条判据就没了。
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npx tsc -b
+
+      # 判据不能只看退出码。默认 reporter 的汇总行（`Tests  N passed`）是
+      # 「跑了多少」的唯一正面证据：汇总行不见了（reporter 换了、输出被截断），
+      # 或者一条用例都没跑时，退出码说明不了用例跑过。所以这里自己取一次计数
+      # 并打出来——「0 条跑过」与「全部通过」在日志里必须分得开。
+      #
+      # 跳过同样算没测（LESSONS.md 第 16 条）：`describe.skip` 写进去之后
+      # 用例数照旧好看，而那几条什么都没验。
+      - name: 单元测试
+        env:
+          # 汇总行要按文本读，颜色转义序列会让行首的空白匹配不上；那时一次
+          # 全绿的运行也会被判成「没跑成」。下面的 sed 再兜一层，与这一行
+          # 合起来是两道：任一道漏了，另一道仍然能让计数被读到。
+          NO_COLOR: '1'
+        run: |
+          set +e
+          out=$(npx vitest run 2>&1)
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+
+          clean=$(printf '%s\n' "$out" | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g')
+          summary=$(printf '%s\n' "$clean" | grep -E '^ +Tests +' | tail -1 || true)
+          skipped=$(printf '%s\n' "$summary" | sed -nE 's/.*[^0-9]([0-9]+) skipped.*/\1/p')
+          if [ -n "$skipped" ] && [ "$skipped" -ne 0 ]; then
+            echo "::error::有 $skipped 个用例被跳过。跳过等于没测。"
+            exit 1
+          fi
+
+          passed=$(printf '%s\n' "$summary" | sed -nE 's/.*[^0-9]([0-9]+) passed.*/\1/p')
+          if [ -z "$passed" ]; then
+            echo "::error::没读到用例计数（汇总行不在输出里，或者一条用例都没跑）。"
+            echo "::error::「没跑成」与「全部通过」长得一样，所以这里不能只看退出码。"
+            exit 1
+          fi
+
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::单元测试有失败用例。"
+            exit "$rc"
+          fi
+
+          echo "web 单元测试跑了 $passed 个用例，全部通过。"
+
+      # `--max-warnings 0`：警告留着不管，下一次「只加一条警告」就不会有人拦。
+      # 这条命令此前在干净的 main 上就有 4 条 react-refresh 警告（ops/common.tsx
+      # 同时导出组件与函数），那些已经通过拆文件清零；不留文件级豁免。
+      - name: ESLint
+        run: npx eslint src --max-warnings 0
 
   # 契约测试：用**官方 SDK** 当客户端跑一遍，两套协议各一遍。
   #

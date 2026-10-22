@@ -18,15 +18,8 @@ import { IconPlus, IconTrash } from '../../components/icons'
 import { ActionSheet } from '../../components/ActionSheet'
 import { MobileCard, MobileList } from '../../components/MobileList'
 import { Tabs } from '../../components/Tabs'
-import {
-  Field,
-  InputError,
-  OpsLoadError,
-  SearchBox,
-  linesToList,
-  listToLines,
-  useConfirm,
-} from './common'
+import { Field, InputError, OpsLoadError, SearchBox } from './common'
+import { linesToList, listToLines, useConfirm } from './common-helpers'
 import { isDirty, useCloseGuard } from './guard'
 
 const CAPABILITY_KEYS = ['reasoning', 'tools', 'vision', 'audio', 'cache', 'batch'] as const

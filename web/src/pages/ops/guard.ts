@@ -1,5 +1,5 @@
 import { useI18n } from '../../i18n'
-import type { ConfirmHandle } from './common'
+import type { ConfirmHandle } from './common-helpers'
 
 /** 从打开时的那份值算起，这一页有没有被改过。 */
 export function isDirty<T>(current: T, initial: T): boolean {

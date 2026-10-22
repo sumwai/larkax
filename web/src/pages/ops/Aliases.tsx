@@ -15,12 +15,8 @@ import {
 import { ActionSheet } from '../../components/ActionSheet'
 import { MobileCard, MobileList } from '../../components/MobileList'
 import { IconPlus, IconTrash } from '../../components/icons'
-import {
-  Field,
-  InputError,
-  OpsLoadError,
-  useConfirm,
-} from './common'
+import { Field, InputError, OpsLoadError } from './common'
+import { useConfirm } from './common-helpers'
 import { isDirty, useCloseGuard } from './guard'
 
 interface AliasForm {
