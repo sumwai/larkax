@@ -63,3 +63,4 @@
 | [45](lessons/45-migration-number-merge-order.md) | 号有序的两条迁移乱序合入，已升级的库再也升不上去 | 合并带迁移的 PR、或多条分支同时加迁移时 | 活 |
 | [46](lessons/46-filtered-aggregate-empty-is-null.md) | 带 `FILTER` 的聚合在空集上返回 NULL，不是 0——扫进非空 Go 类型会让整条查询失败 | 写带 `FILTER` 的聚合、给读侧加聚合列时 | 活 |
 | [47](lessons/47-insert-select-param-typed-as-text.md) | `INSERT ... SELECT` 的 select 列表里，参数推不出类型，按 text 处理 | 把 SQL 从 `VALUES` 改写成 `SELECT`、往 CTE 里搬参数时 | 活 |
+| [48](lessons/48-failing-test-uses-incidental-id.md) | 失败路径的用例用了「碰巧存在」的 id，被同包别的用例命中：整包绿、单跑红，且没有 SKIP | 写失败路径的用例、复核别人的「整包 ok」时 | 活 |
