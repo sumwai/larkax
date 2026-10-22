@@ -1120,6 +1120,50 @@ func TestUsageRequestCursor(t *testing.T) {
 	}
 }
 
+// TestUsageRequestsShowPlanReservedAlongsideCost 钉住额度包覆盖的请求在请求
+// 日志里同时给出两笔占用：cost 仍是钱包口径（包覆盖的请求在这条是 0），
+// plan_reserved_amount 是包的面值。两者并列且不相等——把它们并成一个
+// 「总共占用」，就答不了「钱包冻了多少」。
+func TestUsageRequestsShowPlanReservedAlongsideCost(t *testing.T) {
+	f := newFixture(t)
+	f.usage.requests = store.UsageRequestPage{
+		Requests: []store.UsageRequestRow{{
+			ID: 9002, RequestID: "req_02", Model: "claude-sonnet-4-5",
+			Status: store.BillingStatusPending,
+			// 额度包覆盖：钱包一分没冻，包面值 2.5。
+			Cost:               mustAmount(t, "0"),
+			PlanReservedAmount: mustAmount(t, "2.50000000"),
+			Asset:              "USD", StartedAt: testNow.Add(-time.Minute),
+		}},
+	}
+	rec := f.authed(t, http.MethodGet, PathPrefix+"usage/requests", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("requests 应当 200，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	// 键名钉在原始报文上：响应结构体的标签改错时，解到同名的结构体里
+	// 仍然能解出来，这条断言才拦得住。
+	if !strings.Contains(rec.Body.String(), `"plan_reserved_amount"`) {
+		t.Errorf("响应里缺 plan_reserved_amount 字段: %s", rec.Body.String())
+	}
+	var body usageRequestsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("items 长度 = %d", len(body.Items))
+	}
+	item := body.Items[0]
+	if item.Cost != "0.00000000" {
+		t.Errorf("cost = %q，期望 0：额度包覆盖不等于从钱包扣了钱", item.Cost)
+	}
+	if item.PlanReservedAmount != "2.50000000" {
+		t.Errorf("plan_reserved_amount = %q，期望 2.5", item.PlanReservedAmount)
+	}
+	if item.Cost == item.PlanReservedAmount {
+		t.Error("cost 与 plan_reserved_amount 应当是两个口径的数，不能相等")
+	}
+}
+
 func TestWalletZeroWithoutRowAndRejectsBadAmounts(t *testing.T) {
 	f := newFixture(t)
 

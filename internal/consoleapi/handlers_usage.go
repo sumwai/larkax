@@ -265,20 +265,26 @@ type requestKeyJSON struct {
 
 // usageRequestJSON 是请求日志里的一行。
 type usageRequestJSON struct {
-	ID          int64           `json:"id"`
-	RequestID   string          `json:"request_id"`
-	Model       string          `json:"model"`
-	Key         *requestKeyJSON `json:"key"`
-	Status      string          `json:"status"`
-	Cost        string          `json:"cost"`
-	Currency    string          `json:"currency"`
-	Tokens      tokensJSON      `json:"tokens"`
-	BillingPath *string         `json:"billing_path"`
-	Streamed    bool            `json:"streamed"`
-	Protocol    string          `json:"protocol"`
-	DurationMS  *int64          `json:"duration_ms"`
-	StartedAt   string          `json:"started_at"`
-	SettledAt   *string         `json:"settled_at"`
+	ID        int64           `json:"id"`
+	RequestID string          `json:"request_id"`
+	Model     string          `json:"model"`
+	Key       *requestKeyJSON `json:"key"`
+	Status    string          `json:"status"`
+	Cost      string          `json:"cost"`
+	// PlanReservedAmount 是这笔请求占着的额度包面值，与 Cost 并列。
+	//
+	// Cost 是钱包口径：额度包覆盖的请求在它这一列可以是 0，但包里的额度
+	// 并不是没有被占用。两者不合并成一个「总共占用」——加在一起就答不了
+	// 「钱包冻了多少」，想看到合计的一方自己把两个数相加。
+	PlanReservedAmount string     `json:"plan_reserved_amount"`
+	Currency           string     `json:"currency"`
+	Tokens             tokensJSON `json:"tokens"`
+	BillingPath        *string    `json:"billing_path"`
+	Streamed           bool       `json:"streamed"`
+	Protocol           string     `json:"protocol"`
+	DurationMS         *int64     `json:"duration_ms"`
+	StartedAt          string     `json:"started_at"`
+	SettledAt          *string    `json:"settled_at"`
 }
 
 // usageRequestsResponse 是请求日志的一页。
@@ -341,12 +347,13 @@ func (a *API) handleUsageRequests(w http.ResponseWriter, r *http.Request, sessio
 	items := make([]usageRequestJSON, 0, len(page.Requests))
 	for _, req := range page.Requests {
 		item := usageRequestJSON{
-			ID:        req.ID,
-			RequestID: req.RequestID,
-			Model:     req.Model,
-			Status:    req.Status,
-			Cost:      req.Cost.String(),
-			Currency:  req.Asset,
+			ID:                 req.ID,
+			RequestID:          req.RequestID,
+			Model:              req.Model,
+			Status:             req.Status,
+			Cost:               req.Cost.String(),
+			PlanReservedAmount: req.PlanReservedAmount.String(),
+			Currency:           req.Asset,
 			Tokens: newTokens(store.UsageTotals{
 				PromptTokens:     req.PromptTokens,
 				CompletionTokens: req.CompletionTokens,
