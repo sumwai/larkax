@@ -563,7 +563,7 @@ export const zh = {
   'ops.channel.probeTooLarge': '上游返回的响应太大（超过 8 MiB），多半是一个错误页。',
   'ops.channel.probeUpstream': '上游出错了：{message}',
   'ops.channel.probeTimeout': '上游没有在时限内答复：它可能只是慢，过一会儿再试。',
-  'ops.channel.probeNoMasterKey': '本实例没有配置主密钥，已存渠道的探测用不了。',
+  'ops.channel.probeUnavailable': '探测服务暂时不可用，稍后重试。可能是实例没有配置主密钥（探测已存渠道才需要它），也可能是探测用的适配器没能装配起来。',
   'ops.channel.probeFailed': '探测失败：{message}',
   'ops.channel.knownModels': '目录里的模型：{models}',
   'ops.channel.hint': '凭证末四位 {hint} · 主密钥 {keys}',

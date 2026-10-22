@@ -587,7 +587,7 @@ export const en: Record<MessageKey, string> = {
   'ops.channel.probeTooLarge': 'The upstream response was too large (over 8 MiB), usually an error page.',
   'ops.channel.probeUpstream': 'The upstream failed: {message}',
   'ops.channel.probeTimeout': 'The upstream did not answer in time: it may just be slow, try again later.',
-  'ops.channel.probeNoMasterKey': 'This instance has no master key, so saved channels cannot be probed.',
+  'ops.channel.probeUnavailable': 'Probing is temporarily unavailable; try again later. Either the instance has no master key (only saved channels need one) or its probe adapters could not be assembled.',
   'ops.channel.probeFailed': 'Probe failed: {message}',
   'ops.channel.knownModels': 'Models in the catalogue: {models}',
   'ops.channel.hint': 'Credential ends with {hint} · keys {keys}',

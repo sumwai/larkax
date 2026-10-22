@@ -61,6 +61,10 @@ type Translate = (key: MessageKey, vars?: Record<string, string | number>) => st
  *
  * 502 底下几种成因的处置不同（连不上 / 太大 / 上游报错），状态码相同但要说的
  * 不是同一句话；504 是「慢」不是「坏」，与 502 分开写。
+ *
+ * 503 不给单一原因：服务端在这一格下有两种来源（本实例没配主密钥、探测用适配器
+ * 装配失败），都只有状态码没有机器码，前端分不出来。所以这里说「稍后重试」并把
+ * 两种可能并列，不替服务端断言是哪一种。
  */
 function probeErrorText(error: unknown, t: Translate): string {
   if (!(error instanceof ApiError)) {
@@ -78,7 +82,7 @@ function probeErrorText(error: unknown, t: Translate): string {
     case 404:
       return t('ops.channel.probeNotFound')
     case 503:
-      return t('ops.channel.probeNoMasterKey')
+      return t('ops.channel.probeUnavailable')
     case 504:
       return t('ops.channel.probeTimeout')
     default:
@@ -103,7 +107,8 @@ export function OpsChannels({ scope }: { scope: 'admin' | 'merchant' }) {
     () => (scope === 'admin' ? api.admin.listModels() : Promise.resolve([])),
     [scope],
   )
-  // 适配器清单同理：这一轮只有管理员的渠道页用选择器，商家视图仍是手填。
+  // 适配器清单只给管理员：商家配的是自己的上游账号，不选平台适配器，这一页
+  // 在商家视图下仍是手填类型。
   const adapters = useAsync(
     () => (scope === 'admin' ? client.listAdapters() : Promise.resolve<ChannelAdapter[]>([])),
     [scope],

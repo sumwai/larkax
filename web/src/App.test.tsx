@@ -1,10 +1,16 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
+import type { ChannelOpsClient } from './api/types'
 
 const mocks = vi.hoisted(() => ({
   session: vi.fn(),
   listChannels: vi.fn(),
+  getChannel: vi.fn(),
+  createChannel: vi.fn(),
+  updateChannel: vi.fn(),
+  listAdapters: vi.fn(),
+  probeModels: vi.fn(),
   listModels: vi.fn(),
   models: vi.fn(),
   listRules: vi.fn(),
@@ -18,8 +24,19 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('./api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api')>()
-  const ops = {
+  // 渠道那一组按接口标全：页面每次 mount 都会读适配器清单，替身缺一个方法就是
+  // 一次 unhandled，而且只有跑到那个页面才会现形。标成 ChannelOpsClient 之后，
+  // 下次漏一个方法在 tsc 阶段就红。
+  const channelOps: ChannelOpsClient = {
     listChannels: mocks.listChannels,
+    getChannel: mocks.getChannel,
+    createChannel: mocks.createChannel,
+    updateChannel: mocks.updateChannel,
+    listAdapters: mocks.listAdapters,
+    probeModels: mocks.probeModels,
+  }
+  const ops = {
+    ...channelOps,
     listModels: mocks.listModels,
     listRules: mocks.listRules,
     overview: mocks.overview,
@@ -71,6 +88,7 @@ describe('运营视图的角色门槛', () => {
   beforeEach(() => {
     Object.values(mocks).forEach((mock) => mock.mockReset())
     mocks.listChannels.mockResolvedValue([])
+    mocks.listAdapters.mockResolvedValue([])
     mocks.listModels.mockResolvedValue([])
     mocks.models.mockResolvedValue([])
     mocks.listRules.mockResolvedValue([])

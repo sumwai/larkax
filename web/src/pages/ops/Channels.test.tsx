@@ -317,7 +317,7 @@ describe('运营渠道页：窄屏卡片', () => {
     }
   })
 
-  // #928：渠道表单不再靠手填适配器与模型。
+  // 渠道表单里适配器改成选择、模型改成多选。
   async function openCreateAndFillAddress(address = 'https://api.example.com/v1') {
     const form = await clickCreate()
     fireEvent.change(screen.getByLabelText('上游地址'), { target: { value: address } })
@@ -458,6 +458,55 @@ describe('运营渠道页：窄屏卡片', () => {
     fireEvent.click(screen.getByRole('button', { name: '探测模型' }))
     expect(await screen.findByText('连不上这个地址：检查地址与网络。')).toBeInTheDocument()
     expect(screen.getByLabelText('支持的模型（每行一个）')).toBeEnabled()
+  })
+
+  it('上游答了个错：把上游原话透出来，并说明是上游那边的事', async () => {
+    mocks.listChannels.mockResolvedValue([])
+    // 服务端把上游的正文截到 200 字节后放进 message，前端原样转给操作者。
+    mocks.probeModels.mockRejectedValue(
+      new ApiError(502, 'api_error', 'the upstream returned 401: {"error":"invalid api key"}'),
+    )
+    renderChannels()
+    await openCreateAndFillAddress()
+
+    fireEvent.click(screen.getByRole('button', { name: '探测模型' }))
+    const alert = await screen.findByText(/上游出错了：the upstream returned 401/)
+    expect(alert.textContent).toContain('{"error":"invalid api key"}')
+    expect(screen.getByLabelText('支持的模型（每行一个）')).toBeEnabled()
+  })
+
+  it('上游响应超过 8 MiB：说的是「响应太大」，不是「模型太多」', async () => {
+    mocks.listChannels.mockResolvedValue([])
+    mocks.probeModels.mockRejectedValue(
+      new ApiError(502, 'upstream_response_too_large', 'the upstream response exceeded the 8 MiB limit'),
+    )
+    renderChannels()
+    await openCreateAndFillAddress()
+
+    fireEvent.click(screen.getByRole('button', { name: '探测模型' }))
+    const alert = await screen.findByText(/上游返回的响应太大（超过 8 MiB）/)
+    // 这一格与「上游给了错」处置不同：别把体积上限说成模型数量。
+    expect(alert.textContent).toContain('错误页')
+    expect(alert.textContent).not.toMatch(/模型太?多|模型数量/)
+    expect(screen.getByLabelText('支持的模型（每行一个）')).toBeEnabled()
+  })
+
+  it('503 不说死原因：主密钥与装配失败在服务端分不出来', async () => {
+    mocks.listChannels.mockResolvedValue([])
+    // 两种来源都是同一个状态码、没有机器码（见 internal/adminapi/probe.go）。
+    mocks.probeModels.mockRejectedValue(
+      new ApiError(503, 'api_error', 'the admin API is temporarily unavailable'),
+    )
+    renderChannels()
+    await openCreateAndFillAddress()
+
+    fireEvent.click(screen.getByRole('button', { name: '探测模型' }))
+    const alert = await screen.findByText(/探测服务暂时不可用，稍后重试/)
+    expect(alert.textContent).toContain('主密钥')
+    expect(alert.textContent).toContain('适配器没能装配')
+    // 不能把 503 一律说成「没有主密钥」：创建态用不到主密钥。旧文案的那一句
+    // 逐字钉住，改回去时这里会红。
+    expect(alert.textContent).not.toContain('本实例没有配置主密钥，已存渠道的探测用不了。')
   })
 
   it('504 说「慢」、502 说「连不上」，两句文案不同', async () => {
@@ -601,7 +650,7 @@ describe('运营渠道页：窄屏卡片', () => {
     expect(screen.queryByRole('checkbox', { name: 'gpt-4o' })).not.toBeInTheDocument()
   })
 
-  it('商家视图不出现探测：这一轮只做管理员渠道页', async () => {
+  it('商家视图不出现探测：商家配自己的上游账号，不选平台适配器', async () => {
     mocks.listChannels.mockResolvedValue([])
     renderChannels('merchant')
     await clickCreate()
