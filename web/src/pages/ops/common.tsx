@@ -2,11 +2,13 @@ import {
   cloneElement,
   isValidElement,
   useId,
+  useRef,
   type ReactElement,
   type ReactNode,
 } from 'react'
 import { useI18n } from '../../i18n'
 import { Alert, Button } from '../../components/ui'
+import { IconSearch, IconX } from '../../components/icons'
 import { describeError } from './common-helpers'
 
 /**
@@ -41,19 +43,74 @@ export function Field({
   )
 }
 
-/** 列表的搜索框：只负责输入与回调，查不查、什么时候查由调用方决定。 */
-export function SearchBox({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+/**
+ * 列表的搜索框：只负责输入与回调，查不查、什么时候查由调用方决定。
+ *
+ * 清空是自绘的 `×`，不用 `type="search"` 的原生清除控件：那个控件在 Chromium
+ * 与 Safari 上外观、位置都不一样，也没法写样式。原生那个在 CSS 里关掉
+ * （`.search-box` 那段），否则会出现两个清除钮。
+ *
+ * 清空只把值设为空串，再额外触发一次查询是调用方的事（配上防抖的页面自己
+ * 会去发请求）。焦点跟回输入框：点完按钮它自己会被卸载，焦点落到 `<body>`
+ * 上，接着打字就落空了。
+ */
+export function SearchBox({
+  value,
+  onChange,
+  id,
+  placeholder,
+  icon = false,
+  className,
+}: {
+  value: string
+  onChange: (value: string) => void
+  id?: string
+  /** 不给时用通用的「搜索」。列表页有更具体的位置时传自己的文案。 */
+  placeholder?: string
+  /** 左侧的放大镜。列表页原本就有，运营页没有，所以默认关。 */
+  icon?: boolean
+  /** 调用方自己的类名：尺寸这类页面级约束挂在它上面，别改默认的那几个。 */
+  className?: string
+}) {
   const { t } = useI18n()
+  const inputRef = useRef<HTMLInputElement>(null)
+  const label = placeholder ?? t('ops.search')
   return (
-    <input
-      className="input"
-      type="search"
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
-      placeholder={t('ops.search')}
-      aria-label={t('ops.search')}
-      style={{ maxWidth: 280, marginBottom: 12 }}
-    />
+    <div
+      className={['wrap-rel search-box', icon ? 'has-icon' : '', className ?? '']
+        .filter(Boolean)
+        .join(' ')}
+      data-testid="search-box"
+    >
+      {icon && (
+        <span className="search-box-icon" aria-hidden="true">
+          <IconSearch size={15} />
+        </span>
+      )}
+      <input
+        ref={inputRef}
+        id={id}
+        className="input"
+        type="search"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={label}
+        aria-label={label}
+      />
+      {value !== '' && (
+        <button
+          type="button"
+          className="search-clear"
+          aria-label={t('ops.searchClear')}
+          onClick={() => {
+            onChange('')
+            inputRef.current?.focus()
+          }}
+        >
+          <IconX size={14} />
+        </button>
+      )}
+    </div>
   )
 }
 

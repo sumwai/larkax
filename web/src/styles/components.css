@@ -224,6 +224,71 @@ textarea.input {
   resize: vertical;
   line-height: 1.5;
 }
+/*
+ * 搜索框：左侧可选的放大镜、右侧自绘的清空钮。
+ *
+ * 默认尺寸就是之前裸 `<input>` 的那一份：宽不超过 280、下边距 12。模型列表
+ * 另有宽度，由调用方传的类名覆盖，见 `.search-box.model-search`。
+ *
+ * `type="search"` 自带一个原生清除控件，外观与位置随浏览器变，也没法与自绘
+ * 的这个统一，所以关掉它——两个都在时会出现并排的两个清除钮。
+ */
+.search-box {
+  /*
+   * 定宽而不是 `width: 100%`：作为 flex 项时百分比宽度会退化成内容宽
+   * （输入框的固有宽度），同一个组件在运营页那几处就会缩水。窄屏由
+   * `max-width: 100%` 兜住。
+   */
+  width: 280px;
+  max-width: 100%;
+  margin-bottom: 12px;
+}
+.search-box .input {
+  /* 给清空钮让位，否则输入到末尾的字会钻到按钮底下。 */
+  padding-right: 36px;
+}
+.search-box.has-icon .input {
+  padding-left: 36px;
+}
+.search-box-icon {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  color: var(--faint);
+  /* 图标只是装饰：别让它把点击从输入框上抢走。 */
+  pointer-events: none;
+}
+.search-box .input::-webkit-search-cancel-button,
+.search-box .input::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
+.search-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+}
+.search-clear:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+.search-clear:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 .select {
   min-height: 42px;
   border: 1px solid var(--border-strong);
@@ -1572,6 +1637,21 @@ textarea.input {
   flex-wrap: wrap;
   align-items: center;
 }
+/*
+ * 模型列表这一格搜索框的宽度。
+ *
+ * 原来是一个裸 `<input>`（`width: 100%`）在容器里撑出来的 231px；换成共享的
+ * `SearchBox` 之后容器有了自己的 `max-width`，不钉住就会跟着新加的右内边距
+ * 变宽。231 是换之前实测的宽度。
+ *
+ * 按搜索框自己的类名钉，不按 `.model-filters`：那个容器类在用户管理页也
+ * 用着，按容器选会连带改掉那一页的宽度。
+ */
+.search-box.model-search {
+  width: 231px;
+  max-width: 100%;
+  margin-bottom: 0;
+}
 /* `.input` 默认占满一行；筛选里的下拉按内容宽度，别把搜索框挤到上一行。 */
 .model-filters select {
   width: auto;
@@ -2810,6 +2890,15 @@ textarea.input {
   }
   .avatar::after {
     inset: -7px;
+  }
+  /*
+   * 搜索框的清空钮是 28px，四边各补 8px 到 44px。这里不能照上面那条「横向
+   * 只补 1px」办：那条的前提是控件横向本来就够 44，这个钮两个方向都不够。
+   */
+  .search-clear::after {
+    content: '';
+    position: absolute;
+    inset: -8px;
   }
 }
 

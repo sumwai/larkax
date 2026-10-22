@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -99,8 +100,17 @@ type CreateRequest struct {
 
 	Name string
 	// Type 必须是一个已注册的适配器类型，见 internal/channel 的注册表。
-	Type    string
-	BaseURL string
+	//
+	// 它是这条渠道的**主协议**，也是压在 channels.type 里的值。只给 Type 时
+	// 等价于只写一个元素的 Protocols（行为与加多协议之前逐字相同）。
+	Type string
+	// Protocols 是这条渠道声明支持的协议集合，每个取值都必须是一个已注册的
+	// 适配器类型。
+	//
+	// 为空表示调用方没给：这时按 Type 一种协议处理。非空而 Type 也为空时，
+	// 主协议取列表的第一个；两者同时给时 Type 必须在列表里。
+	Protocols []string
+	BaseURL   string
 
 	// Credential 是**明文**凭证。它只用于封装，不落日志、不进错误信息、
 	// 不进返回值。
@@ -125,7 +135,10 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if err = a.validateType(req.Type); err != nil {
+	// 协议集合排在地址与模型之前判：它只查注册表，不碰库，而写错一个协议名
+	// 是参数错——不该等到读完模型目录才报。
+	protocols, primaryType, err := a.protocolSetForCreate(req)
+	if err != nil {
 		return 0, err
 	}
 	baseURL, err := NormalizeBaseURL(req.BaseURL)
@@ -137,8 +150,9 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 		return 0, err
 	}
 	// 端点的校验排在封凭证之前：校验失败时这次调用根本没碰到明文
-	// （见下面 sealCredential 那一处的理由）。
-	if err = a.checkModelEndpoints(ctx, req.Type, models); err != nil {
+	// （见下面 sealCredential 那一处的理由）。判的是**全部协议**：一条渠道
+	// 声明两套协议时，模型挂在其中任意一条端点上就能被服务。
+	if err = a.checkModelEndpoints(ctx, protocols, models); err != nil {
 		return 0, err
 	}
 	weight, err := normalizeWeight(req.Weight)
@@ -163,14 +177,23 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 		owner = req.OwnerUserID
 	}
 
+	// 渠道行与协议声明在一个事务里写：只落一半的表现是「渠道建出来了、
+	// 却一条协议都没声明」，而读取侧会把那种行按 type 一种协议处理——它看起来
+	// 完全正常，于是这条渠道的多协议声明静默失效。
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("创建渠道失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var id int64
-	err = a.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO channels
 			(owner_user_id, name, type, base_url, credential_enc, credential_hint,
 			 status, models, weight, priority, setting)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
 		RETURNING id`,
-		owner, name, req.Type, baseURL, envelope, credential.Hint(req.Credential),
+		owner, name, primaryType, baseURL, envelope, credential.Hint(req.Credential),
 		StatusEnabled, models, weight, req.Priority, string(setting)).Scan(&id)
 	if err != nil {
 		// owner_user_id 上有一条指向 users 的外键：解析完归属用户、插入之前
@@ -179,7 +202,134 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 		// 退出码也因此落在 4 而不是 1。
 		return 0, dberr.ConstraintFailure(fmt.Errorf("创建渠道失败: %w", err))
 	}
+	if err := insertProtocols(ctx, tx, id, protocols); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("创建渠道失败: %w", err)
+	}
 	return id, nil
+}
+
+// protocolSetForCreate 归一化并校验这次创建要写进去的协议集合。
+//
+// 返回协议列表（去重、保持调用方给的顺序）与主协议（写进 channels.type）。
+// 判据见 CreateRequest.Type / Protocols 的注释。
+func (a *Admin) protocolSetForCreate(req CreateRequest) ([]string, string, error) {
+	if len(req.Protocols) == 0 {
+		// 没给 --protocols：与加多协议之前完全一样，只校验 Type 一种。
+		if err := a.validateType(req.Type); err != nil {
+			return nil, "", err
+		}
+		return []string{req.Type}, req.Type, nil
+	}
+
+	protocols, err := normalizeProtocols(req.Protocols)
+	if err != nil {
+		return nil, "", err
+	}
+	primary := protocols[0]
+	if req.Type != "" {
+		// Type 走它原来那句报错（「渠道类型无效」），因为调用方写的就是
+		// 一个 --type——换成「未知的协议」会让人以为自己写错了另一个参数。
+		if err := a.validateType(req.Type); err != nil {
+			return nil, "", err
+		}
+		if !slices.Contains(protocols, req.Type) {
+			return nil, "", fmt.Errorf("--type %q 不在 --protocols 里（%s）：主协议必须是这条渠道声明的协议之一",
+				req.Type, strings.Join(protocols, "、"))
+		}
+		primary = req.Type
+	}
+	for _, p := range protocols {
+		if p == primary && req.Type != "" {
+			// 已经按 Type 校验过，报错措辞也用过那一条。
+			continue
+		}
+		if err := a.validateProtocol(p); err != nil {
+			return nil, "", err
+		}
+	}
+	return protocols, primary, nil
+}
+
+// protocolSetForUpdate 归一化并校验这次修改之后的协议集合。
+//
+// 返回 nil 列表表示这次不动协议（两种字段都没给）。只给 Type 时按单元素
+// 集合处理——那就是「--type 等价于只写一个 --protocols」的字面意思。
+func (a *Admin) protocolSetForUpdate(req UpdateRequest) ([]string, string, error) {
+	if req.Protocols == nil && req.Type == nil {
+		return nil, "", nil
+	}
+	if req.Protocols == nil {
+		if err := a.validateType(*req.Type); err != nil {
+			return nil, "", err
+		}
+		return []string{*req.Type}, *req.Type, nil
+	}
+
+	protocols, err := normalizeProtocols(*req.Protocols)
+	if err != nil {
+		return nil, "", err
+	}
+	primary := protocols[0]
+	if req.Type != nil {
+		if err := a.validateType(*req.Type); err != nil {
+			return nil, "", err
+		}
+		if !slices.Contains(protocols, *req.Type) {
+			return nil, "", fmt.Errorf("--type %q 不在 --protocols 里（%s）：主协议必须是这条渠道声明的协议之一",
+				*req.Type, strings.Join(protocols, "、"))
+		}
+		primary = *req.Type
+	}
+	for _, p := range protocols {
+		if req.Type != nil && p == *req.Type {
+			continue
+		}
+		if err := a.validateProtocol(p); err != nil {
+			return nil, "", err
+		}
+	}
+	return protocols, primary, nil
+}
+
+// normalizeProtocols 去掉两头空白、去掉空项与重复项，保持调用方给的顺序。
+//
+// 顺序有意义：主协议取第一个（调用方没显式给 --type 时），而那是落在
+// channels.type 里、被 channel get 的「类型」那一栏展示的值。
+func normalizeProtocols(raw []string) ([]string, error) {
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]bool, len(raw))
+	for i, p := range raw {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return nil, fmt.Errorf("第 %d 个协议名为空", i+1)
+		}
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("协议清单不能为空：至少一个协议")
+	}
+	return out, nil
+}
+
+// insertProtocols 把协议声明写进 channel_protocols。
+//
+// 调用方负责事务：渠道行与这张表要么一起出现、要么一起不出现。
+func insertProtocols(ctx context.Context, tx *sql.Tx, channelID int64, protocols []string) error {
+	for _, p := range protocols {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO channel_protocols (channel_id, protocol) VALUES ($1, $2)`,
+			channelID, p); err != nil {
+			return dberr.ConstraintFailure(fmt.Errorf("写入渠道协议失败: %w", err))
+		}
+	}
+	return nil
 }
 
 // UpdateRequest 描述一次修改。
@@ -190,13 +340,22 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 type UpdateRequest struct {
 	ID int64
 
-	Name     *string
-	Type     *string
-	BaseURL  *string
-	Models   *[]string
-	Weight   *int
-	Priority *int
-	Setting  *map[string]any
+	Name *string
+	// Type 非 nil 时改成这个主协议。
+	//
+	// 它同时把这条渠道的协议集合改成**只含这一个**——与「--type 等价于单元素
+	// --protocols」是同一句话。要把一条渠道从单协议扩成多协议，给 Protocols
+	// （而不是连着给两次 --type）。
+	Type *string
+	// Protocols 非 nil 时整体替换协议集合（空切片是「改成零个」，会被拒绝）。
+	//
+	// 主协议取 Type（同时给时，它必须在集合里），否则取集合的第一个。
+	Protocols *[]string
+	BaseURL   *string
+	Models    *[]string
+	Weight    *int
+	Priority  *int
+	Setting   *map[string]any
 
 	// Status 非 nil 时改成 StatusEnabled / StatusDisabled。
 	//
@@ -281,6 +440,16 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 	// 「改完之后这条渠道挂着哪些模型」。没给 models 时保持 nil。
 	var newModels []string
 
+	// 协议集合同理：给了 --type 或 --protocols 就要重写 channels.type 与
+	// channel_protocols 两处。nil 表示这次不动协议。
+	// 不把错误名写成 err：它会让下面每一处 `x, err := …` 都遮蔽这一个，
+	// 进而触发 govet 的 shadow（CI 会红）。这里返回一次就结束，名字短一点
+	// 反而把「这是协议校验的错误」说清楚了。
+	newProtocols, primaryType, protocolErr := a.protocolSetForUpdate(req)
+	if protocolErr != nil {
+		return protocolErr
+	}
+
 	if req.Name != nil {
 		name, err := normalizeName(*req.Name)
 		if err != nil {
@@ -288,11 +457,10 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 		}
 		add("name", name)
 	}
-	if req.Type != nil {
-		if err := a.validateType(*req.Type); err != nil {
-			return err
-		}
-		add("type", *req.Type)
+	if newProtocols != nil {
+		// 主协议落在 channels.type 上：只给 --protocols 时它是集合的第一个，
+		// 只给 --type 时就是那一个。
+		add("type", primaryType)
 	}
 	if req.BaseURL != nil {
 		baseURL, err := NormalizeBaseURL(*req.BaseURL)
@@ -324,13 +492,16 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 	// 判的是**改完之后**的值：给了就用给的，没给读库里当前那一条（见
 	// attachmentAfter）。渠道不存在或已删时跳过，让下面那条 UPDATE 去报
 	// ——它分得出「id 打错了」与「已经删了」，在这里先报一次反而少一层区分。
-	if req.Type != nil || req.Models != nil {
-		channelType, models, ok, err := a.attachmentAfter(ctx, req, newModels)
+	//
+	// 协议变了也要重判：同一批模型在「只打 chat」与「chat + messages 都打」
+	// 两种渠道上结论不同，而只改协议、不动 models 的那次修改最容易漏掉这一支。
+	if newProtocols != nil || req.Models != nil {
+		protocols, models, ok, err := a.attachmentAfter(ctx, req, newModels, newProtocols)
 		if err != nil {
 			return err
 		}
 		if ok {
-			if err := a.checkModelEndpoints(ctx, channelType, models); err != nil {
+			if err := a.checkModelEndpoints(ctx, protocols, models); err != nil {
 				return err
 			}
 		}
@@ -389,7 +560,17 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 		where += " AND owner_user_id = $" + strconv.Itoa(len(args))
 	}
 	query := "UPDATE channels SET " + strings.Join(sets, ", ") + " WHERE " + where
-	res, err := a.db.ExecContext(ctx, query, args...)
+
+	// 渠道行与协议声明在一个事务里改：只落一半的表现是「type 改了、
+	// 协议集合还是旧的」，而读取侧按协议集合分派——那条渠道会继续把请求
+	// 发给旧协议，而 channels.type 已经说它是另一套。
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("修改渠道失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("修改渠道失败: %w", err)
 	}
@@ -398,10 +579,24 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 		return fmt.Errorf("确认修改结果失败: %w", err)
 	}
 	if affected == 0 {
+		// 事务里什么都没写，defer 的 Rollback 收尾。解释用另一个连接查，
+		// 与本事务无关。
 		if ownerID != 0 {
 			return a.explainNoRowOwned(ctx, req.ID, ownerID)
 		}
 		return a.explainNoRow(ctx, req.ID)
+	}
+	if newProtocols != nil {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM channel_protocols WHERE channel_id = $1`, req.ID); err != nil {
+			return fmt.Errorf("修改渠道协议失败: %w", err)
+		}
+		if err := insertProtocols(ctx, tx, req.ID, newProtocols); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("修改渠道失败: %w", err)
 	}
 	return nil
 }
@@ -703,15 +898,23 @@ type ChannelInfo struct {
 	ID          int64
 	OwnerUserID int64
 	Name        string
-	Type        string
-	BaseURL     string
-	Status      string
-	Models      []string
-	Weight      int
-	Priority    int
-	Setting     map[string]any
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// Type 是这条渠道的主协议（见 CreateRequest.Type）。
+	Type string
+	// Protocols 是这条渠道声明的协议集合。
+	//
+	// 它不出现在 `channel get` / `channel list` 的输出里：多协议的展示（以及
+	// 它该以什么形状出现）是下一步的事，而先加一栏会让单协议渠道的输出与
+	// 今天不再逐字相同（判据见 issue #1042）。今天它的读者是 doctor 的端点评据
+	// （见 DeclaredProtocols）。
+	Protocols []channel.Protocol
+	BaseURL   string
+	Status    string
+	Models    []string
+	Weight    int
+	Priority  int
+	Setting   map[string]any
+	CreatedAt time.Time
+	UpdatedAt time.Time
 
 	// CredentialKeys 是这份密文被哪些主密钥包过，见 credential.WrappedWith。
 	//
@@ -741,6 +944,21 @@ type ChannelInfo struct {
 	// 每一行都是零值。它是清单上「已删」那一栏的唯一依据——把已删的行
 	// 与「停用」的行混在一起列出来，人分不出哪一行还能恢复使用。
 	DeletedAt time.Time
+}
+
+// DeclaredProtocols 返回这条渠道声明支持的协议名，已排序的去重清单。
+//
+// Protocols 为空时返回 Type 那一个：那是「这份声明还不存在」的老行，按它
+// 一种协议判，与加这张表之前逐字相同（与 channel.Channel.Declares 同一口径）。
+func (i ChannelInfo) DeclaredProtocols() []string {
+	if len(i.Protocols) == 0 {
+		return []string{i.Type}
+	}
+	out := make([]string, 0, len(i.Protocols))
+	for _, p := range i.Protocols {
+		out = append(out, string(p))
+	}
+	return out
 }
 
 // List 列出**没有软删**的渠道，按 id 排序。
@@ -877,7 +1095,12 @@ SELECT
     c.credential_hint,
     c.created_at,
     c.updated_at,
-    c.deleted_at
+    c.deleted_at,
+    -- 与 candidateQuery 同一格：声明了哪些协议。管理面不把它打进输出，
+    -- 但 doctor 的端点评据要读它（见 DeclaredProtocols）。
+    (SELECT COALESCE(json_agg(p.protocol ORDER BY p.protocol), '[]'::json)::text
+       FROM channel_protocols p
+      WHERE p.channel_id = c.id) AS protocols
   FROM channels c`
 
 // rowScanner 是 *sql.Rows 与 *sql.Row 共用的那一小段：两者都只有一个 Scan，
@@ -888,17 +1111,19 @@ type rowScanner interface {
 
 func scanInfo(rows rowScanner) (ChannelInfo, error) {
 	var (
-		info       ChannelInfo
-		modelsJSON string
-		settingRaw []byte
-		envelope   []byte
-		hint       sql.NullString
-		deletedAt  sql.NullTime
+		info         ChannelInfo
+		modelsJSON   string
+		settingRaw   []byte
+		envelope     []byte
+		hint         sql.NullString
+		deletedAt    sql.NullTime
+		protocolsRaw string
 	)
 	err := rows.Scan(
 		&info.ID, &info.OwnerUserID, &info.Name, &info.Type, &info.BaseURL,
 		&info.Status, &modelsJSON, &info.Weight, &info.Priority, &settingRaw,
 		&envelope, &hint, &info.CreatedAt, &info.UpdatedAt, &deletedAt,
+		&protocolsRaw,
 	)
 	if err != nil {
 		return ChannelInfo{}, fmt.Errorf("读取渠道行失败: %w", err)
@@ -915,6 +1140,12 @@ func scanInfo(rows rowScanner) (ChannelInfo, error) {
 		return ChannelInfo{}, err
 	}
 	info.Models = models
+
+	protocols, err := decodeProtocols(info.ID, protocolsRaw)
+	if err != nil {
+		return ChannelInfo{}, err
+	}
+	info.Protocols = protocols
 
 	setting, err := decodeSetting(settingRaw)
 	if err != nil {
@@ -939,17 +1170,17 @@ func scanInfo(rows rowScanner) (ChannelInfo, error) {
 // 凭证字段固然不能回显，其余字段也用同一套写法，免得后来把某个字段换成
 // 凭证时忘了改这一处。
 
-// attachmentAfter 给出这次修改之后这条渠道挂在哪个类型、哪些模型上。
+// attachmentAfter 给出这次修改之后这条渠道声明哪些协议、挂着哪些模型。
 //
-// newModels 是调用方归一化过的新模型清单，为 nil 表示这次不改模型；类型同理
-// 取 req.Type。没给的那一项读库里当前的值——因为**两者都会单独改变**「这批
-// 模型落在哪条端点上」：只改 models 可能把服务不了的模型挂进来，只改 type
-// 会把已有的整批模型挪到另一条路径上。
+// newModels / newProtocols 是调用方归一化过的结果，为 nil 表示这次不改那一项；
+// 没给的那一项读库里当前的值——因为**两者都会单独改变**「这批模型落在哪条
+// 端点上」：只改 models 可能把服务不了的模型挂进来，只改协议会把已有的整批
+// 模型挪到另一组路径上。
 //
 // ok 为 false 表示这条渠道不存在或已删：调用方据此跳过端点校验，让随后那条
 // UPDATE 去报 ErrChannelNotFound / ErrChannelDeleted——两次报的是同一件事，
 // 而 UPDATE 那次分得出「id 打错了」与「已经删了」。
-func (a *Admin) attachmentAfter(ctx context.Context, req UpdateRequest, newModels []string) (string, []string, bool, error) {
+func (a *Admin) attachmentAfter(ctx context.Context, req UpdateRequest, newModels, newProtocols []string) ([]string, []string, bool, error) {
 	var (
 		channelType string
 		modelsJSON  string
@@ -958,25 +1189,59 @@ func (a *Admin) attachmentAfter(ctx context.Context, req UpdateRequest, newModel
 		`SELECT type, array_to_json(models)::text FROM channels WHERE id = $1 AND `+channelAlive,
 		req.ID).Scan(&channelType, &modelsJSON)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil, false, nil
+		return nil, nil, false, nil
 	}
 	if err != nil {
-		return "", nil, false, fmt.Errorf("查渠道 %d 的类型与模型失败: %w", req.ID, err)
+		return nil, nil, false, fmt.Errorf("查渠道 %d 的类型与模型失败: %w", req.ID, err)
 	}
 	models, err := decodeModels(req.ID, modelsJSON)
 	if err != nil {
-		return "", nil, false, err
+		return nil, nil, false, err
 	}
-	if req.Type != nil {
-		channelType = *req.Type
+
+	protocols := newProtocols
+	if protocols == nil {
+		stored, err := a.storedProtocols(ctx, req.ID)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if len(stored) == 0 {
+			// 没有那份声明（迁移之前的老行、或者夹具直接插的 channels 行）：
+			// 按 type 一种协议判，与加这张表之前逐字相同。
+			stored = []string{channelType}
+		}
+		protocols = stored
 	}
 	if newModels != nil {
 		models = newModels
 	}
-	return channelType, models, true, nil
+	return protocols, models, true, nil
 }
 
-// checkModelEndpoints 确认这批模型能在本条渠道的端点上被服务。
+// storedProtocols 读一条渠道当前声明的协议（没有行时返回空切片）。
+func (a *Admin) storedProtocols(ctx context.Context, channelID int64) ([]string, error) {
+	rows, err := a.db.QueryContext(ctx,
+		`SELECT protocol FROM channel_protocols WHERE channel_id = $1 ORDER BY protocol`, channelID)
+	if err != nil {
+		return nil, fmt.Errorf("查渠道 %d 的协议失败: %w", channelID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("读取渠道 %d 的协议失败: %w", channelID, err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历渠道 %d 的协议失败: %w", channelID, err)
+	}
+	return out, nil
+}
+
+// checkModelEndpoints 确认这批模型能在本条渠道声明的任一端点上被服务。
 //
 // # 它拦的是什么
 //
@@ -1013,13 +1278,15 @@ func (a *Admin) attachmentAfter(ctx context.Context, req UpdateRequest, newModel
 // 管理面不在请求热路径上，而 Create / Update 本来就已经在写库了；多读几行
 // （每个模型一行）不改变这条路径的量级。反过来，「写入时不查」意味着那条
 // 配置要等到第一次请求才暴露，而那时它已经挂在库上了。
-func (a *Admin) checkModelEndpoints(ctx context.Context, channelType string, models []string) error {
+func (a *Admin) checkModelEndpoints(ctx context.Context, protocols []string, models []string) error {
 	for _, model := range models {
 		declared, err := DeclaredEndpoints(ctx, a.catalog, model)
 		if err != nil {
 			return err
 		}
-		fit := EndpointFitFor(channelType, declared)
+		// 按**全部协议**判：一条渠道声明两套协议时，模型挂在其中任意一条
+		// 端点上就能被服务（见 EndpointFitForProtocols）。
+		fit := EndpointFitForProtocols(protocols, declared)
 		if !fit.Mismatch() {
 			continue
 		}
@@ -1041,6 +1308,22 @@ func (a *Admin) validateType(channelType string) error {
 		// 库里存一个没人实现的类型，选路时会表现为「这个渠道永远选不中」——
 		// 一条看起来配好了、实际不可用的渠道。所以挡在写入侧。
 		return fmt.Errorf("渠道类型无效: %w", err)
+	}
+	return nil
+}
+
+// validateProtocol 确认这个协议名在注册表里有对应的适配器，并说出已知清单。
+//
+// 与 validateType 同一条判据，只是措辞不同：调用方写的是 `--protocols`
+// 里的一项，「渠道类型无效」会让人去改另一个参数。清单取自注册表，不在这里
+// 另写一份——加一个协议时只有适配器那一处要改。
+func (a *Admin) validateProtocol(protocol string) error {
+	if a.registry == nil {
+		return errors.New("没有适配器注册表，无法校验协议")
+	}
+	if _, err := a.registry.Lookup(protocol); err != nil {
+		return fmt.Errorf("未知的协议 %q（已知协议：%s）",
+			protocol, strings.Join(a.registry.Types(), "、"))
 	}
 	return nil
 }

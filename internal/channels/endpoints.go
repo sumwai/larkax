@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/sumwai/larkax/internal/catalog"
@@ -31,27 +32,42 @@ import (
 // 而调用方要能说出**是哪两条端点对不上**，所以这里把两侧取值都带出来，
 // 由 Summary/Reason 渲染成一句人话。
 //
-// 字段一律不导出，只能经 EndpointFitFor 构造：渠道打哪条端点由那张表算
-// （channel.Protocol），**不让调用方自己填**——填一个就等于绕开了唯一入口，
-// 而绕开正是这条判据要防的事。模型名不在里面：判据只与「渠道类型」和「目录
-// 声明的端点」有关，名字是调用方的上下文，由它自己拼。
+// 字段一律不导出，只能经 EndpointFitForProtocols 构造：渠道声明的每种协议
+// 打哪条端点由那张表算（channel.Protocol），**不让调用方自己填**——填一个
+// 就等于绕开了唯一入口，而绕开正是这条判据要防的事。模型名不在里面：判据只与
+// 「渠道声明的协议」和「目录声明的端点」有关，名字是调用方的上下文，由它自己拼。
 type EndpointFit struct {
-	channelType     string
-	channelEndpoint channel.Endpoint
-	declared        []channel.Endpoint
+	// channelTypes / channelEndpoints 是这条渠道声明的协议与它们各自打的端点，
+	// 两片一一对应。单协议渠道只有一个元素，多协议时每个协议一条。
+	channelTypes     []string
+	channelEndpoints []channel.Endpoint
+	declared         []channel.Endpoint
 }
 
-// EndpointFitFor 组装一份对照。
+// EndpointFitForProtocols 组装一份对照：渠道声明了**一组**协议。
 //
-// declared 的三态原样传入（见 DeclaredEndpoints）；渠道打哪条端点由
-// channel.Protocol 算——**它是「渠道类型 → 端点」那张表的唯一入口**，任何
+// declared 的三态原样传入（见 DeclaredEndpoints）；每种协议打哪条端点由
+// channel.Protocol 算——**它是「协议名 → 端点」那张表的唯一入口**，任何
 // 调用方都不该自己再写一份 switch：写一份就等于抄了半张表，其余几档会随
 // 类型的新增而漂移。
-func EndpointFitFor(channelType string, declared []channel.Endpoint) EndpointFit {
+//
+// 写渠道（Admin.checkModelEndpoints）与 doctor 都用它：前者判「这次写进去的
+// 协议集合」，后者判「库里那一条声明的集合」。只声明一种协议的渠道传单元素
+// 切片，行为与措辞与加多协议之前逐字相同（见 Summary）。
+//
+// # 只有全部协议都对不上才算对不上
+//
+// 多协议渠道只要有一条端点被目录声明，这个模型就能被服务；拦下它是把一个
+// 能用的配置拒掉。所以 Mismatch 判的是「一条都不在其中」。
+func EndpointFitForProtocols(protocols []string, declared []channel.Endpoint) EndpointFit {
+	endpoints := make([]channel.Endpoint, 0, len(protocols))
+	for _, p := range protocols {
+		endpoints = append(endpoints, channel.Protocol(p).Endpoint())
+	}
 	return EndpointFit{
-		channelType:     channelType,
-		channelEndpoint: channel.Protocol(channelType).Endpoint(),
-		declared:        declared,
+		channelTypes:     protocols,
+		channelEndpoints: endpoints,
+		declared:         declared,
 	}
 }
 
@@ -65,10 +81,22 @@ func EndpointFitFor(channelType string, declared []channel.Endpoint) EndpointFit
 // 与选路侧的端点评据同一条处置：不知道就别拦，否则刚接一家上游、目录还空着时
 // 一条渠道都建不出来。
 func (f EndpointFit) Mismatch() bool {
-	if f.channelEndpoint == "" || f.declared == nil {
+	if f.declared == nil || len(f.channelEndpoints) == 0 {
 		return false
 	}
-	return !slices.Contains(f.declared, f.channelEndpoint)
+	// 任一协议的端点算不出来（本版本不认识那个协议）都算「不知道」：这条
+	// 渠道可能正是靠那一条端点服务这个模型的，拦下它比放行更糟。
+	for _, endpoint := range f.channelEndpoints {
+		if endpoint == "" {
+			return false
+		}
+	}
+	for _, endpoint := range f.channelEndpoints {
+		if slices.Contains(f.declared, endpoint) {
+			return false
+		}
+	}
+	return true
 }
 
 // Summary 说清对不上的两侧：模型在目录里声明的端点、这条渠道的类型与端点。
@@ -76,9 +104,35 @@ func (f EndpointFit) Mismatch() bool {
 // 写作「在目录里声明的端点是 X，而这条渠道的类型是 T（它把请求发到 Y）」，
 // 主语由调用方各自补：写入侧补「模型 "m"」，doctor 补「渠道 N（名字）的
 // models 里有 "m"」。措辞不在这里写主语，是为了让两处说的是同一句话的同一截。
+//
+// 单协议渠道的措辞与加多协议之前逐字相同；多协议那条另说一句，把整组协议
+// 与它们各自打的端点都列出来——只说「类型是 X」会让读的人以为还有别的协议
+// 没被考虑。
 func (f EndpointFit) Summary() string {
-	return fmt.Sprintf("在目录里声明的端点是 %s，而这条渠道的类型是 %q（它把请求发到 %s）",
-		declaredEndpointsText(f.declared), f.channelType, f.channelEndpoint)
+	if len(f.channelTypes) == 1 {
+		return fmt.Sprintf("在目录里声明的端点是 %s，而这条渠道的类型是 %q（它把请求发到 %s）",
+			declaredEndpointsText(f.declared), f.channelTypes[0], f.channelEndpoints[0])
+	}
+	return fmt.Sprintf("在目录里声明的端点是 %s，而这条渠道声明的协议是 %s（它们把请求发到 %s）",
+		declaredEndpointsText(f.declared), quotedTypes(f.channelTypes), endpointListText(f.channelEndpoints))
+}
+
+// quotedTypes 把一组协议名渲染成 `"openai"、"anthropic"` 这样的句子。
+func quotedTypes(types []string) string {
+	parts := make([]string, 0, len(types))
+	for _, t := range types {
+		parts = append(parts, strconv.Quote(t))
+	}
+	return strings.Join(parts, "、")
+}
+
+// endpointListText 把一组端点渲染成 `/v1/chat/completions、/v1/messages`。
+func endpointListText(endpoints []channel.Endpoint) string {
+	parts := make([]string, 0, len(endpoints))
+	for _, e := range endpoints {
+		parts = append(parts, string(e))
+	}
+	return strings.Join(parts, "、")
 }
 
 // Reason 说清为什么会被拦、下一步怎么办。

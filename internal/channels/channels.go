@@ -615,7 +615,14 @@ SELECT
     q.last_probe_at,
     q.last_probe_attempt_at,
     q.last_probe_status,
-    q.last_error_code
+    q.last_error_code,
+    -- 这条渠道声明了哪些协议（见 channel_protocols）。用 json 数组而不是
+    -- text[]：database/sql 不认后者，与 models 那一列同一个理由。
+    -- 没有行时给 '[]'：为空在 Go 侧读作「没有这份声明」，退回 type 一种协议
+    -- （见 channel.Channel.Declares），所以空数组与 NULL 在这里同义。
+    (SELECT COALESCE(json_agg(p.protocol ORDER BY p.protocol), '[]'::json)::text
+       FROM channel_protocols p
+      WHERE p.channel_id = c.id) AS protocols
   FROM channels c
   LEFT JOIN LATERAL (
         SELECT
@@ -671,8 +678,13 @@ type candidateRow struct {
 	// modelsJSON 是 channels.models 的 JSON 形式（见查询里的 array_to_json）。
 	// database/sql 只认有限的几种 driver.Value，text[] 不在其中，
 	// 所以让数据库把它转成 JSON 文本，再在 Go 侧解成 []string。
-	modelsJSON    string
-	models        []string
+	modelsJSON string
+	models     []string
+	// protocolsJSON 是 channel_protocols 里这一行的协议清单（JSON 数组文本），
+	// protocols 是解出来的结果。为空表示这条渠道没有声明（迁移之前的老行、
+	// 或者夹具直接插的 channels 行），那时按 type 一种协议处理。
+	protocolsJSON string
+	protocols     []channel.Protocol
 	setting       []byte
 	weight        int
 	priority      int
@@ -730,7 +742,7 @@ func scanCandidate(rows *sql.Rows) (candidateRow, error) {
 		&row.remaining, &row.unit, &row.confidence,
 		&row.probeKind, &row.quotaHealth, &row.resetsAt,
 		&row.lastProbeAt, &row.lastProbeAttemptAt, &row.lastProbeStatus,
-		&row.lastErrorCode,
+		&row.lastErrorCode, &row.protocolsJSON,
 	)
 	if err != nil {
 		return candidateRow{}, fmt.Errorf("读取渠道行失败: %w", err)
@@ -740,7 +752,37 @@ func scanCandidate(rows *sql.Rows) (candidateRow, error) {
 		return candidateRow{}, err
 	}
 	row.models = models
+	protocols, err := decodeProtocols(row.id, row.protocolsJSON)
+	if err != nil {
+		return candidateRow{}, err
+	}
+	row.protocols = protocols
 	return row, nil
+}
+
+// decodeProtocols 解开 channel_protocols 那份声明的 JSON 文本。
+//
+// 空数组原样返回 nil：调用方要知道的是「有没有这份声明」。折成一个包含
+// type 的切片会让「库里没有这一行」与「只声明了 type 一个」再也分不开，
+// 而两者的处置虽然相同（都按 type 一种协议），含义不一样——前者是这份声明
+// 还不存在（迁移之前的老行），后者是调用方真的这么写的。
+//
+// 这里不校验取值是不是当前版本认识的协议：写入侧已经挡过，而库里出现一个
+// 更新的版本才有的名字时，读取侧应当把它带出来交给执行器报 ErrUnknownType，
+// 不是在这里整次查询失败（与候选查询对未知 type 的处置一致）。
+func decodeProtocols(channelID int64, protocolsJSON string) ([]channel.Protocol, error) {
+	var raw []string
+	if err := json.Unmarshal([]byte(protocolsJSON), &raw); err != nil {
+		return nil, fmt.Errorf("渠道 %d 的 protocols 不是合法的 JSON 数组: %w", channelID, err)
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make([]channel.Protocol, 0, len(raw))
+	for _, p := range raw {
+		out = append(out, channel.Protocol(p))
+	}
+	return out, nil
 }
 
 // decodeModels 解开 models 列的 JSON 文本。
@@ -777,9 +819,13 @@ func (row candidateRow) candidate(plaintext string, now time.Time) (route.Candid
 
 	return route.Candidate{
 		Channel: channel.Channel{
-			ID:         row.id,
-			Name:       row.name,
-			Type:       row.channelType,
+			ID:   row.id,
+			Name: row.name,
+			Type: row.channelType,
+			// 声明为空时执行器按 Type 一种协议分派（见
+			// channel.Channel.Declares）：迁移之前的老行、或者夹具直接插的
+			// channels 行都走这一格，行为与加这张表之前逐字相同。
+			Protocols:  row.protocols,
 			BaseURL:    row.baseURL,
 			Credential: plaintext,
 			Models:     row.models,

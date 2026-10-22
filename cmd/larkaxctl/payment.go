@@ -26,12 +26,13 @@ const walletPaymentShortUsage = `larkaxctl wallet payment 走支付通道建单�
 
 用法：
   larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号>
-                                  [--asset <资产>] [--notify-url <回调地址>]
+                                  [--asset <资产>] [--notify-url <回调地址>] [--dry-run]
   larkaxctl wallet payment status --order <订单号>
 
 这条通道默认关闭：settings.payment.fake_enabled 为 true 时才挂回调入口、才允许下单。
 create 落一张 payment_orders（状态 created），通道通知到达后才入账。
-status 同时打本地的状态与通道侧报的状态。
+status 同时打本地的状态与通道侧报的状态。create 的 --dry-run 不向通道下单，
+只把本地那一行写一遍再回滚。
 
 更细的边界：larkaxctl wallet payment help。
 `
@@ -41,7 +42,7 @@ const walletPaymentUsage = `larkaxctl wallet payment 走支付通道建单，并
 
 用法：
   larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号>
-                                  [--asset <资产>] [--notify-url <回调地址>]
+                                  [--asset <资产>] [--notify-url <回调地址>] [--dry-run]
   larkaxctl wallet payment status --order <订单号>
 
 create 在通道侧建单，并往 payment_orders 写一行（状态 created）。它**不入账**：
@@ -67,6 +68,13 @@ status 按单号读本地那一行，再问通道这张单子现在是什么状�
 **这条通道默认关闭**：settings.payment.fake_enabled 为 false 时 create 与 status
 都拒绝，回调入口也不会挂上（那条路径回 501）。打开它之前先看那条配置的说明：
 假通道的密钥是公开的占位值，只用于本地联调。
+
+**干跑**：create 接受 --dry-run。它与真跑共用同一组前置校验（通道开着、钱包已存在、
+参数合法）和同一条落库 SQL，把 payment_orders 那一行在事务里写一遍再回滚，输出那一行
+的字段与真跑逐字相等（订单号、通道、资产、金额、状态 created；这一行没有序列号，
+单号由 --ref 给定）。它**不向通道下单**：那会在通道侧建出一张真单子，所以预览里没有
+支付地址，末尾一行写明这一点。参数错、通道没开、用户没有钱包、同一个单号配不同内容
+（冲突）在干跑下同样报错、同样退出码。
 
 更细的约定见 docs/cli-reference.md 的「wallet payment」一节。
 `
@@ -134,12 +142,13 @@ func runPaymentCreate(args []string) error {
 	asset := fs.String("asset", "", "")
 	ref := fs.String("ref", "", "")
 	notifyURL := fs.String("notify-url", "", "")
+	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
 		return usageErr(fmt.Errorf(
-			"create 不接受位置参数，得到 %q：用户、金额与订单号都用旗标指定", fs.Arg(0)))
+			"create 不接受位置参数，得到 %q：用户、金额与订单号都用旗标指定；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
 		return usageErr(errors.New("缺少 --user"))
@@ -185,28 +194,44 @@ func runPaymentCreate(args []string) error {
 			fakechannel.Name: channel,
 		})
 
-		result, createErr := service.Create(ctx, fakechannel.Name, payment.CreateOrderRequest{
+		req := payment.CreateOrderRequest{
 			OrderNo:   orderNo,
 			UserID:    owner.ID,
 			Asset:     assetValue,
 			Amount:    amountValue,
 			Subject:   fmt.Sprintf("充值 %s %s", amountValue, assetValue),
 			NotifyURL: strings.TrimSpace(*notifyURL),
-		})
-		if createErr != nil {
-			return createErr
+		}
+		// 干跑不问通道（那会在通道侧建出一张真单子），只在正确的事务里把
+		// 本地那一行写一遍再回滚；两条路共用同一组前置校验与同一条落库 SQL。
+		var result payment.CreateResult
+		if *dryRun {
+			preview, previewErr := service.CreatePreview(ctx, fakechannel.Name, req)
+			if previewErr != nil {
+				return previewErr
+			}
+			result = preview
+		} else {
+			created, createErr := service.Create(ctx, fakechannel.Name, req)
+			if createErr != nil {
+				return createErr
+			}
+			result = created
 		}
 
 		verdict := "已下单。"
-		if !result.Applied {
+		switch {
+		case !result.Applied:
 			verdict = fmt.Sprintf("订单号 %s 已经下过单，本次未改动。", orderNo)
+		case *dryRun:
+			verdict = "将下单。"
 		}
 		printPayment(humanStdout(), paymentReceipt{
 			Verdict: verdict,
 			Order:   result.Order,
 			User:    owner,
 			PayURL:  result.Created.PayURL,
-		})
+		}, *dryRun)
 		return nil
 	})
 }
@@ -265,7 +290,7 @@ func runPaymentStatus(args []string) error {
 			Order:         row,
 			User:          owner,
 			ChannelStatus: &queried.Status,
-		})
+		}, false)
 		return nil
 	})
 }
@@ -299,7 +324,7 @@ type paymentReceipt struct {
 //
 // 与提现回显同一类（一栏一行）：金额、状态与单据号是人工对账时要逐项核的东西，
 // 挤成一行反而难读。
-func printPayment(w io.Writer, r paymentReceipt) {
+func printPayment(w io.Writer, r paymentReceipt, dryRun bool) {
 	tw := newTableWriter(w)
 	p := newPalette(w)
 	_, _ = fmt.Fprintln(w, r.Verdict)
@@ -334,4 +359,9 @@ func printPayment(w io.Writer, r paymentReceipt) {
 		row("交易", string(payment.TxnIDForOrder(r.Order.OrderNo)))
 	}
 	_ = tw.Flush()
+	// 干跑的尾注要说全两件事：通道侧没有下单（所以没有支付地址），本地也没有
+	// 那一行。只说「没有写进数据库」会让人以为通道那边已经建好了单。
+	if dryRun {
+		_, _ = fmt.Fprintln(w, "干跑：没有向通道下单，也没有写入数据库。")
+	}
 }

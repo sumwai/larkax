@@ -97,10 +97,21 @@ func (p Protocol) valid() bool {
 // 做成值类型而不是让适配器自己去查库：适配器要做的事与存储无关，
 // 而它每多一个依赖，测试就多一层要搭的台子。
 type Channel struct {
-	ID      int64
-	Name    string
-	Type    string
-	BaseURL string
+	ID   int64
+	Name string
+	// Type 是这条渠道的**主协议**，也是它压在 channels.type 里的那个值。
+	//
+	// 多协议渠道的主协议只是集合里的一个成员（见 Protocols）；单协议渠道的
+	// 主协议就是它唯一的那一个。执行器按这次请求的入口协议分派时，找不到
+	// 匹配就退回这里（见 DispatchProtocol），所以它必须有值。
+	Type string
+	// Protocols 是这条渠道声明支持的协议集合。
+	//
+	// 它来自 channel_protocols 那张表。为空表示这条渠道**没有**这份声明
+	// （迁移之前建的库、或者测试里直接拼出来的值）：那时按「只有 Type
+	// 一种」处理，与加这张表之前的行为逐字相同（见 Declares）。
+	Protocols []Protocol
+	BaseURL   string
 	// Credential 是**已解密**的凭证。适配器不得记录、不得回传、不得写进错误信息。
 	Credential string
 	// Models 是该渠道支持的规范模型名。
@@ -141,6 +152,43 @@ func (c Channel) Supports(canonicalModel string) bool {
 	return false
 }
 
+// Declares 报告这条渠道有没有声明某套协议。
+//
+// Protocols 为空时只看 Type：那是「没有 channel_protocols 这份声明」的老行
+// （或者测试里直接拼出来的值），它的含义与加这张表之前一样——这条渠道只说
+// 一种协议。
+func (c Channel) Declares(p Protocol) bool {
+	if p == "" {
+		return false
+	}
+	if len(c.Protocols) == 0 {
+		return p == Protocol(c.Type)
+	}
+	return slices.Contains(c.Protocols, p)
+}
+
+// DispatchProtocol 返回这次上游调用该用哪套协议。
+//
+// # 判据是入口协议，不是主协议
+//
+// 一条渠道同时说 OpenAI 与 Anthropic 时，两套端点的请求体、流式分片与用量
+// 字段都不同：把 Anthropic 的请求交给 OpenAI 适配器，上游收到的是它不认的
+// 形状。所以先看入站协议在不在声明里。
+//
+// # 不在声明里就退回主协议
+//
+// 这是加这张表**之前**的行为，也是单协议渠道必须逐字保留的那一条：一条只说
+// anthropic 的渠道收到 OpenAI 入口的请求，今天照样由 anthropic 适配器转换后
+// 发出（跨协议转换是既有的能力，见 internal/relay）。声明为空时同理。
+//
+// inbound 为空表示调用方没有传入口协议（例如额度查询）：同样退回主协议。
+func (c Channel) DispatchProtocol(inbound Protocol) Protocol {
+	if c.Declares(inbound) {
+		return inbound
+	}
+	return Protocol(c.Type)
+}
+
 // PromptText 把所有消息里的正文块拼成一段文本。
 //
 // 它是 token 计数的输入（见 internal/tokens）：预留要在调上游之前估输入，
@@ -169,6 +217,18 @@ func (r *Request) PromptText() string {
 // 上游特有的、公共语汇里没有的参数走 Extra，避免为每一家的每个新参数
 // 都往这里加一个字段。
 type Request struct {
+	// Protocol 是调用方走的那条入口（由请求路径决定），不是这条请求要发往的
+	// 上游协议——上游协议由渠道声明与这个入口协议共同决定，见
+	// Channel.DispatchProtocol。
+	//
+	// 它只出现在一件事上：执行器按它把同一渠道下多套协议分派到对应适配器
+	// （见 internal/upstream）。适配器自己不读它（它本来就知道自己说的是
+	// 哪套协议），也不进上游报文。
+	//
+	// 空串 = 不知道入口是哪条（内部调用，例如额度查询），执行器退回渠道的
+	// 主协议。
+	Protocol Protocol
+
 	// Model 是**上游模型名**，不是规范名。规范名到上游名的映射由路由层完成，
 	// 因为一个规范名在不同渠道下对应不同上游名。
 	Model string

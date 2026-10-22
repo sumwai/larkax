@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -406,6 +407,200 @@ func TestCreateRejectsUnregisteredType(t *testing.T) {
 	}
 }
 
+// 未知的协议名要在写入时被拒，**并且说出已知的那几个**。
+//
+// 只报「未知的协议」不够：写错一个名字的人下一步要的是「那我该写什么」。
+// 清单取自适配器注册表（见 validateProtocol），所以加一个协议时这里不必改。
+func TestCreateRejectsUnknownProtocol(t *testing.T) {
+	// 不连库：协议校验排在全部库操作之前（registry 已经够判）。
+	admin := NewAdmin(nil, nil, testRegistry(t))
+
+	req := baseRequest("ch-badproto-" + itoa(nextID()))
+	req.Type = ""
+	req.Protocols = []string{endpointChatType, "no-such-protocol"}
+
+	_, err := admin.Create(context.Background(), req)
+	if err == nil {
+		t.Fatal("未注册的协议应当被拒")
+	}
+	for _, want := range []string{`"no-such-protocol"`, "已知协议", string(channel.ProtocolAnthropic),
+		string(channel.ProtocolOpenAI), stubType} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("报错里没出现 %q：%v", want, err)
+		}
+	}
+}
+
+// --type 与 --protocols 同时给时，主协议必须在集合里。
+//
+// 不在里面等于说两件互相矛盾的事：「这条渠道的类型是 X」与「它声明的协议里
+// 没有 X」。写进库之后，读取侧按集合分派、channel get 按 type 展示，两边
+// 各说一套。
+func TestCreateRejectsTypeOutsideProtocols(t *testing.T) {
+	admin := NewAdmin(nil, nil, testRegistry(t))
+
+	req := baseRequest("ch-mismatch-" + itoa(nextID()))
+	req.Type = endpointMessagesType
+	req.Protocols = []string{endpointChatType}
+
+	_, err := admin.Create(context.Background(), req)
+	if err == nil {
+		t.Fatal("--type 不在 --protocols 里应当被拒")
+	}
+	if !strings.Contains(err.Error(), "不在 --protocols") {
+		t.Errorf("报错应当是「不在 --protocols」，得到 %v", err)
+	}
+}
+
+// 多协议渠道：只声明一套协议时，写入仍按单协议那一套走（一行、与 type 相同）。
+func TestCreateTypeOnlyWritesSingleProtocol(t *testing.T) {
+	db := testDB(t)
+	admin := newAdmin(t, db, testSealer(t))
+
+	req := baseRequest("ch-single-" + itoa(nextID()))
+	id, err := admin.Create(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Create 出错: %v", err)
+	}
+
+	if got := protocolsOf(t, db, id); !slices.Equal(got, []string{req.Type}) {
+		t.Errorf("channel_protocols = %v，期望只有 type %q 一个", got, req.Type)
+	}
+	var typ string
+	if scanErr := db.QueryRowContext(context.Background(),
+		`SELECT type FROM channels WHERE id = $1`, id).Scan(&typ); scanErr != nil {
+		t.Fatalf("读 type 失败: %v", scanErr)
+	}
+	if typ != req.Type {
+		t.Errorf("channels.type = %q，期望 %q", typ, req.Type)
+	}
+}
+
+// 多协议渠道：集合原样落库，主协议取第一个；候选与管理面都读得回来。
+func TestCreateMultiProtocolWritesSet(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	admin := newAdmin(t, db, sealer)
+	model := uniqueModel()
+
+	req := baseRequest("ch-multi-" + itoa(nextID()))
+	req.Type = ""
+	req.Protocols = []string{endpointMessagesType, endpointChatType}
+	req.Models = []string{model}
+
+	id, err := admin.Create(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Create 出错: %v", err)
+	}
+
+	// 读回来按 SQL 的 ORDER BY 排序（anthropic 在 openai 之前），与调用方
+	// 给的顺序无关——顺序只影响主协议（channels.type），集合本身是无序的。
+	want := []string{endpointMessagesType, endpointChatType}
+	if got := protocolsOf(t, db, id); !slices.Equal(got, want) {
+		t.Errorf("channel_protocols = %v，期望 %v", got, want)
+	}
+	// 主协议取集合的第一个（调用方给的顺序，不是排序后的）。
+	var typ string
+	if scanErr := db.QueryRowContext(context.Background(),
+		`SELECT type FROM channels WHERE id = $1`, id).Scan(&typ); scanErr != nil {
+		t.Fatalf("读 type 失败: %v", scanErr)
+	}
+	if typ != endpointMessagesType {
+		t.Errorf("channels.type = %q，期望 %q（集合的第一个）", typ, endpointMessagesType)
+	}
+
+	// 候选读回来带集合：执行器靠它按入口协议分派。
+	cands, err := New(db, sealer).Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("候选 %d 条，期望 1 条", len(cands))
+	}
+	if got := cands[0].Channel.Protocols; !slices.Equal(got, []channel.Protocol{
+		channel.ProtocolAnthropic, channel.ProtocolOpenAI}) {
+		t.Errorf("候选的 Protocols = %v，期望 openai 与 anthropic", got)
+	}
+
+	// 管理面读回来也带集合，但输出形状不变（见 cmd 的逐字用例）。
+	info, err := admin.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Get 出错: %v", err)
+	}
+	if got := info.DeclaredProtocols(); !slices.Equal(got, want) {
+		t.Errorf("DeclaredProtocols = %v，期望 %v", got, want)
+	}
+}
+
+// update 整体替换协议集合：主协议跟着变，旧的行不残留。
+func TestUpdateReplacesProtocolSet(t *testing.T) {
+	db := testDB(t)
+	admin := newAdmin(t, db, testSealer(t))
+
+	id, err := admin.Create(context.Background(), baseRequest("ch-update-proto-"+itoa(nextID())))
+	if err != nil {
+		t.Fatalf("Create 出错: %v", err)
+	}
+
+	both := []string{endpointChatType, endpointMessagesType}
+	// 读回来按 SQL 的 ORDER BY 排序，与写入时给的顺序无关。
+	stored := []string{endpointMessagesType, endpointChatType}
+	if err := admin.Update(context.Background(), UpdateRequest{ID: id, Protocols: &both}); err != nil {
+		t.Fatalf("Update 出错: %v", err)
+	}
+	var typ string
+	if scanErr := db.QueryRowContext(context.Background(),
+		`SELECT type FROM channels WHERE id = $1`, id).Scan(&typ); scanErr != nil {
+		t.Fatalf("读 type 失败: %v", scanErr)
+	}
+	if typ != endpointChatType {
+		t.Errorf("channels.type = %q，期望 %q（集合的第一个）", typ, endpointChatType)
+	}
+	if got := protocolsOf(t, db, id); !slices.Equal(got, stored) {
+		t.Errorf("channel_protocols = %v，期望 %v", got, stored)
+	}
+
+	// 只给 --type：集合收敛成它一个，多余的那一行必须删掉。
+	only := endpointMessagesType
+	if err := admin.Update(context.Background(), UpdateRequest{ID: id, Type: &only}); err != nil {
+		t.Fatalf("Update(--type) 出错: %v", err)
+	}
+	if got := protocolsOf(t, db, id); !slices.Equal(got, []string{endpointMessagesType}) {
+		t.Errorf("channel_protocols = %v，期望只剩 %q", got, endpointMessagesType)
+	}
+}
+
+// 没有这份声明时按 type 一种协议判：迁移之前的老行、夹具直接插的行都走这格。
+func TestDeclaredProtocolsFallsBackToType(t *testing.T) {
+	info := ChannelInfo{Type: endpointMessagesType}
+	if got := info.DeclaredProtocols(); !slices.Equal(got, []string{endpointMessagesType}) {
+		t.Errorf("DeclaredProtocols = %v，期望退回 type", got)
+	}
+}
+
+// protocolsOf 按 SQL 的排序读回一条渠道声明了哪些协议。
+func protocolsOf(t *testing.T, db *sql.DB, channelID int64) []string {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(),
+		`SELECT protocol FROM channel_protocols WHERE channel_id = $1 ORDER BY protocol`, channelID)
+	if err != nil {
+		t.Fatalf("查协议失败: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			t.Fatalf("读协议失败: %v", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("遍历协议失败: %v", err)
+	}
+	return out
+}
+
 // 各种字段校验失败都要在**落库之前**停下，且报错不回显字段值。
 func TestCreateRejectsInvalidFields(t *testing.T) {
 	db := testDB(t)
@@ -609,7 +804,7 @@ func TestListReturnsNoCiphertext(t *testing.T) {
 
 	// 字段集合：改这里之前先问「这个新字段该不该出现在管理面的返回值里」。
 	want := []string{
-		"ID", "OwnerUserID", "Name", "Type", "BaseURL", "Status", "Models",
+		"ID", "OwnerUserID", "Name", "Type", "Protocols", "BaseURL", "Status", "Models",
 		"Weight", "Priority", "Setting", "CreatedAt", "UpdatedAt",
 		"CredentialKeys", "Hint", "CredentialErr", "DeletedAt",
 	}
@@ -1307,6 +1502,35 @@ func TestCreateRejectsModelOnUndeclaredEndpoint(t *testing.T) {
 	// 一个字段不对就整条不写。
 	if n := countByName(t, db, req.Name); n != 0 {
 		t.Errorf("被拒绝的 Create 留下了 %d 行", n)
+	}
+}
+
+// 多协议渠道：模型挂在**任意一条**被声明的端点上就能被服务。
+//
+// 这一条是 EndpointFitForProtocols 的存在理由：只按主协议判的话，一条同时
+// 说 openai 与 anthropic 的渠道会被「目录只声明了 /v1/messages」拒掉，
+// 而它其实正好能经由 anthropic 那一条服务这个模型。
+func TestCreateMultiProtocolAcceptsModelOnEitherEndpoint(t *testing.T) {
+	db := testDB(t)
+	admin := newAdmin(t, db, testSealer(t))
+	model := uniqueModel()
+	seedCatalogEndpoints(t, db, model, []channel.Endpoint{channel.EndpointMessages})
+
+	req := baseRequest("ch-multi-endpoint-" + itoa(nextID()))
+	req.Type = endpointChatType // 主协议打 chat，目录里没有它
+	req.Protocols = []string{endpointChatType, endpointMessagesType}
+	req.Models = []string{model}
+
+	if _, err := admin.Create(context.Background(), req); err != nil {
+		t.Fatalf("模型在 anthropic 端点上有声明，多协议渠道应当可以创建: %v", err)
+	}
+
+	// 同样的模型、只声明 chat 的渠道仍然要被拒——判据没有放松成「多协议就放行」。
+	single := baseRequest("ch-single-endpoint-" + itoa(nextID()))
+	single.Type = endpointChatType
+	single.Models = []string{model}
+	if _, err := admin.Create(context.Background(), single); err == nil {
+		t.Fatal("只声明 chat 的渠道仍然应当被拒")
 	}
 }
 

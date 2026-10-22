@@ -385,6 +385,7 @@ export const en: Record<MessageKey, string> = {
   'ops.discardBody': 'What you typed on this form will be lost when it closes.',
   'ops.discardConfirm': 'Discard',
   'ops.search': 'Search',
+  'ops.searchClear': 'Clear search',
   'ops.searchEmpty': 'Nothing matches this search.',
   'ops.confirmCreate': 'Confirm creation',
   'ops.confirmSave': 'Confirm save',

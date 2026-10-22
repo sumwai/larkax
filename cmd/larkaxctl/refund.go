@@ -23,13 +23,14 @@ const walletRefundShortUsage = `larkaxctl wallet refund 把用户已经付过的
   larkaxctl wallet refund --user <ID 或用户名> --amount <金额> --ref <外部单据号>
                           [--asset <资产>] [--memo <原因>]
                           [--merchant <ID 或用户名>] [--merchant-share <金额>]
-                          [--upstream-cost <金额>]
+                          [--upstream-cost <金额>] [--dry-run]
 
 退款走账本写一组 refund 分录：借 user:<用户>，贷 merchant_payable / upstream_cost /
 platform_revenue。--amount 必填且为正，是退给用户的金额；--merchant-share 与
 --upstream-cost 是这次要冲回的分成与上游成本，不写就都算平台退还的收入，写的时候两项
 之和不能超过 --amount。--ref 必填，它是这笔退款的外部单据号，同时是幂等键：同一条命令
-重跑两次只退一次。钱包必须已经存在（先 wallet create）。
+重跑两次只退一次。钱包必须已经存在（先 wallet create）。--dry-run 走同一条写路径后回滚，
+打印将写入的分录而不动库。
 
 更细的边界：larkaxctl wallet refund help。
 `
@@ -41,7 +42,7 @@ const walletRefundUsage = `larkaxctl wallet refund 把用户已经付过的钱�
   larkaxctl wallet refund --user <ID 或用户名> --amount <金额> --ref <外部单据号>
                           [--asset <资产>] [--memo <原因>]
                           [--merchant <ID 或用户名>] [--merchant-share <金额>]
-                          [--upstream-cost <金额>]
+                          [--upstream-cost <金额>] [--dry-run]
 
 退款是**消费的镜像**：走账本写一组 refund 分录，借 user:<用户>（他的余额涨回来），
 贷方是这次冲回的几项。写成新分录而不是删改原分录：账本只追加，一笔「消费 100、退款
@@ -79,6 +80,10 @@ const walletRefundUsage = `larkaxctl wallet refund 把用户已经付过的钱�
 资产默认取 settings 的 billing.default_asset，可以用 --asset 显式指定。用户用 --user
 指定（纯数字按 ID 解析，否则按用户名解析）。钱包必须已经存在：先 wallet create。
 用户不存在、或用户没有那一行钱包，都退出 4。
+
+--dry-run 走与真跑同一条写路径（同一份校验、同一份幂等判据），把这一笔要写的分录
+逐条打出来之后回滚：余额、账本行与钱包快照都不变。参数错与业务拒绝（金额格式、用户
+不存在、--ref 缺失、分账之和超过退款额）在干跑下同样报错、同样退出码。
 
 更细的约定见 docs/cli-reference.md 的「wallet」一节。
 `
@@ -121,12 +126,13 @@ func runWalletRefund(args []string) error {
 	merchant := fs.String("merchant", "", "")
 	merchantShare := fs.String("merchant-share", "", "")
 	upstreamCost := fs.String("upstream-cost", "", "")
+	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
 		return usageErr(fmt.Errorf(
-			"refund 不接受位置参数，得到 %q：用户、金额与单据号都用旗标指定", fs.Arg(0)))
+			"refund 不接受位置参数，得到 %q：用户、金额与单据号都用旗标指定；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
 		return usageErr(errors.New("缺少 --user"))
@@ -229,6 +235,24 @@ func runWalletRefund(args []string) error {
 			return buildErr
 		}
 
+		if *dryRun {
+			return inRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+				applied, postErr := store.New(db).PostTransactionTx(ctx, tx, txn)
+				if postErr != nil {
+					return postErr
+				}
+				printRefundedWallet(humanStdout(), walletRefund{
+					Owner:  owner,
+					Asset:  assetValue,
+					Amount: amountValue,
+					Reason: reason,
+					Ref:    refundRef,
+					Txn:    txn,
+				}, applied, true)
+				return nil
+			})
+		}
+
 		applied, postErr := store.New(db).PostTransaction(ctx, txn)
 		if postErr != nil {
 			return postErr
@@ -241,7 +265,7 @@ func runWalletRefund(args []string) error {
 			Reason: reason,
 			Ref:    refundRef,
 			Txn:    txn,
-		}, applied)
+		}, applied, false)
 		return nil
 	})
 }
@@ -294,22 +318,36 @@ type walletRefund struct {
 //
 // 「刚退」与「重放」必须能分开（LESSONS 第 16 条）：两者都退出 0，而一次静默的
 // 空操作与一次真的退了钱不是同一个结果。
-func printRefundedWallet(w io.Writer, r walletRefund, applied bool) {
+func printRefundedWallet(w io.Writer, r walletRefund, applied, dryRun bool) {
 	if !applied {
 		_, _ = fmt.Fprintf(w, "幂等键 %s 已经退过款，本次未改动。交易 %s。\n",
 			r.Ref, r.Txn.TxnID)
 		_, _ = fmt.Fprintln(w, "此前写入的分录：")
 		printEntryLines(w, r.Txn.Entries)
+		if dryRun {
+			printDryRunNote(w)
+		}
 		return
 	}
 
-	_, _ = fmt.Fprintf(w, "已退款给用户 %s：%s %s，幂等键 %s，交易 %s。\n",
-		r.Owner.Username, r.Amount, r.Asset, r.Ref, r.Txn.TxnID)
+	verb := "已退款给用户"
+	if dryRun {
+		verb = "将退款给用户"
+	}
+	_, _ = fmt.Fprintf(w, "%s %s：%s %s，幂等键 %s，交易 %s。\n",
+		verb, r.Owner.Username, r.Amount, r.Asset, r.Ref, r.Txn.TxnID)
 	// 原因单独打一行，而不是只让它留在分录的备注里：备注要在一屏分录中去找，而
 	// 它是这次退款最需要解释的一件事。
 	if r.Reason != "" {
 		_, _ = fmt.Fprintf(w, "原因：%s\n", r.Reason)
 	}
-	_, _ = fmt.Fprintln(w, "分录：")
+	header := "分录："
+	if dryRun {
+		header = "将写入的分录："
+	}
+	_, _ = fmt.Fprintln(w, header)
 	printEntryLines(w, r.Txn.Entries)
+	if dryRun {
+		printDryRunNote(w)
+	}
 }

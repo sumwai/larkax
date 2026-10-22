@@ -199,6 +199,55 @@ function focusableIn(root: HTMLElement): HTMLElement[] {
   )
 }
 
+/**
+ * 打开弹窗时优先落焦的控件：进来就是要填东西，焦点留在面板上等于让用户先
+ * 摸鼠标。按钮不在列——`<input type="submit">` 这类也是按钮，一并排掉；
+ * 确认框里第一颗按钮往往就是「取消」，聚焦它比落在面板更糟。
+ *
+ * 与 `FOCUSABLE_SELECTOR` 分开：那个带按钮与链接，是给 Tab 环绕算首尾的。
+ * `:disabled` 而不是 `[disabled]`：被 `fieldset[disabled]` 锁住的子控件没有这个
+ * 属性，但一样接不了焦点。
+ */
+const EDITABLE_SELECTOR = [
+  'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"])',
+  'select',
+  'textarea',
+]
+  .map((selector) => `${selector}:not(:disabled):not([readonly])`)
+  .join(',')
+
+/**
+ * 元素是否真的会画出来。`[hidden]` 与 `inert` 由调用方先排；这里补上
+ * `display: none` 与 `visibility`——真浏览器里 Tab 也到不了 `display: none`
+ * 的控件，但 `querySelectorAll` 照样选得到。
+ *
+ * 不用 `offsetParent` 与 `getClientRects()`：jsdom 没有布局，两者恒为空，
+ * 用例里全部控件都会被判成不可见，回退逻辑反而没有覆盖。
+ *
+ * `display` 不继承，藏在 `display: none` 分组里的输入框算出来仍是自己的值，
+ * 所以要逐级往上查；`visibility` 会继承，只查元素本身——子元素把祖先的
+ * `visibility: hidden` 改回 `visible` 时确实能被看到，不该跟着祖先判。
+ */
+function isShown(element: HTMLElement, root: HTMLElement): boolean {
+  const own = window.getComputedStyle(element)
+  if (own.visibility === 'hidden' || own.visibility === 'collapse') return false
+  for (let node: HTMLElement | null = element; node; node = node.parentElement) {
+    if (window.getComputedStyle(node).display === 'none') return false
+    if (node === root) break
+  }
+  return true
+}
+
+/** 弹窗里第一个能直接开始输入的控件；没有就返回 `null`。 */
+function firstEditableIn(root: HTMLElement | null): HTMLElement | null {
+  if (!root) return null
+  for (const element of root.querySelectorAll<HTMLElement>(EDITABLE_SELECTOR)) {
+    if (element.closest('[hidden], [inert]')) continue
+    if (isShown(element, root)) return element
+  }
+  return null
+}
+
 export function Modal({
   title,
   description,
@@ -221,12 +270,12 @@ export function Modal({
   /**
    * 打开之后焦点该落在谁身上。给一个 ref，或者一个「现在该聚焦哪个元素」的
    * 取值函数——后者用在弹窗内容自己会变的情形（比如校验失败时切到出错的那一组，
-   * 目标元素这一刻才挂上）。取不到就退回聚焦弹窗本身。
+   * 目标元素这一刻才挂上）。取不到时按默认规则落：第一个可编辑控件，没有则
+   * 弹窗本身。
    */
   focusTarget?: RefObject<HTMLElement | null> | (() => HTMLElement | null)
   /**
-   * 这个值每变一次，就按 `focusTarget` 重新聚焦一次。打开时也会跑一次，
-   * 所以不传 `focusTarget` 的弹窗行为与以前一样：焦点落在弹窗上。
+   * 这个值每变一次，就按 `focusTarget` 重新聚焦一次。打开时也会跑一次。
    */
   focusToken?: unknown
 }) {
@@ -293,7 +342,12 @@ export function Modal({
     const element = typeof target === 'function' ? target() : target?.current
     // 放在挂载之后：切组时目标元素与 token 在同一次提交里更新，effect 跑到时
     // 它已经在 DOM 里了。
-    ;(element ?? dialogRef.current)?.focus()
+    //
+    // 显式目标取不到时按默认规则走，不是直接用面板：`focusTarget` 用在
+    // 「出错的那一格在不在」这类探测上，探测不中说明这一刻没有特定落点，
+    // 打开表单仍应先落在第一个可编辑控件上。没有可编辑控件（确认框、只读
+    // 详情）才落回面板，Esc 与 Tab 环绕都靠面板接得住焦点。
+    ;(element ?? firstEditableIn(dialogRef.current) ?? dialogRef.current)?.focus()
   }, [focusToken])
 
   return (

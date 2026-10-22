@@ -63,6 +63,29 @@ type GrantInput struct {
 // 上，而订阅行存在就说明那次发放已经落过账；拿调用方这次给的 TxnID 去比，
 // 重放时若换了交易号就会误判成冲突。
 func (s *Service) Grant(ctx context.Context, in GrantInput) (UserPlan, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return UserPlan{}, false, fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	up, applied, err := s.GrantTx(ctx, tx, in)
+	if err != nil {
+		return UserPlan{}, false, err
+	}
+	if commitErr := tx.Commit(); commitErr != nil {
+		return UserPlan{}, false, fmt.Errorf("提交额度包发放失败: %w", commitErr)
+	}
+	return up, applied, nil
+}
+
+// GrantTx 在调用方给的事务里发放一个额度包，**不提交、不回滚**。
+//
+// 除事务边界外，语义与 Grant 逐条相同：同一批校验、同一份建订阅的 SQL、
+// 同一份重放判据、同一笔分录。干跑（`plan grant --dry-run`）用它把整条写路径
+// 走一遍再回滚，于是预览里的订阅 id、面值与「会不会被判成重放」都出自同一条路，
+// 而不是另写一份读侧模拟——两份迟早分叉，而分叉的表现是「预览说行、执行报错」。
+func (s *Service) GrantTx(ctx context.Context, tx *sql.Tx, in GrantInput) (UserPlan, bool, error) {
 	if in.TxnID == "" {
 		return UserPlan{}, false, errors.New("缺少 txn_id：发放单号要确定性映射成它，幂等靠它承担")
 	}
@@ -83,12 +106,6 @@ func (s *Service) Grant(ctx context.Context, in GrantInput) (UserPlan, bool, err
 	if in.ExpiresAt.IsZero() {
 		return UserPlan{}, false, errors.New("缺少有效期终点：额度必须有一个到期时刻，否则作废无从触发")
 	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return UserPlan{}, false, fmt.Errorf("开启事务失败: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
 
 	existing, found, err := userPlanByRefIn(ctx, tx, ref)
 	if err != nil {
@@ -158,9 +175,6 @@ func (s *Service) Grant(ctx context.Context, in GrantInput) (UserPlan, bool, err
 	if err != nil {
 		return UserPlan{}, false, err
 	}
-	if err := tx.Commit(); err != nil {
-		return UserPlan{}, false, fmt.Errorf("提交额度包发放失败: %w", err)
-	}
 	return row, true, nil
 }
 
@@ -227,6 +241,28 @@ type VoidInput struct {
 //
 // 返回的 applied=false 表示这个作废单号已经用过（重放），库里那一行原样返回。
 func (s *Service) Void(ctx context.Context, in VoidInput) (UserPlan, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return UserPlan{}, false, fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	up, applied, err := s.VoidTx(ctx, tx, in)
+	if err != nil {
+		return UserPlan{}, false, err
+	}
+	if commitErr := tx.Commit(); commitErr != nil {
+		return UserPlan{}, false, fmt.Errorf("提交额度包作废失败: %w", commitErr)
+	}
+	return up, applied, nil
+}
+
+// VoidTx 在调用方给的事务里作废一条订阅，**不提交、不回滚**。
+//
+// 除事务边界外，语义与 Void 逐条相同（含行锁、重放判定与「剩余面值从账本现算」）。
+// 干跑用它走完整条写路径再回滚：预览里那句「剩余面值已转回平台收入」背后的金额
+// 就是这次真的会写进分录的那个数。
+func (s *Service) VoidTx(ctx context.Context, tx *sql.Tx, in VoidInput) (UserPlan, bool, error) {
 	if in.TxnID == "" {
 		return UserPlan{}, false, errors.New("缺少 txn_id：作废单号要确定性映射成它，幂等靠它承担")
 	}
@@ -246,12 +282,6 @@ func (s *Service) Void(ctx context.Context, in VoidInput) (UserPlan, bool, error
 		return UserPlan{}, false, fmt.Errorf("作废的终态只能是 %s 或 %s，得到 %q",
 			UserPlanExpired, UserPlanCancelled, in.Status)
 	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return UserPlan{}, false, fmt.Errorf("开启事务失败: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
 
 	// 行锁：两个不同作废单号的并发调用不能都读到 active，否则同一份额度会被
 	// 作废两次。
@@ -356,9 +386,6 @@ func (s *Service) Void(ctx context.Context, in VoidInput) (UserPlan, bool, error
 	updated, err := userPlanByIDIn(ctx, tx, updatedID, false)
 	if err != nil {
 		return UserPlan{}, false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return UserPlan{}, false, fmt.Errorf("提交额度包作废失败: %w", err)
 	}
 	return updated, true, nil
 }

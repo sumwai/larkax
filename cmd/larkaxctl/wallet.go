@@ -36,16 +36,17 @@ const walletShortUsage = `larkaxctl wallet 管理用户钱包。
   larkaxctl wallet create --user <ID 或用户名> [--asset <资产>]
   larkaxctl wallet list [--user <ID 或用户名>]
   larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号> [--asset <资产>]
-                                  [--destination <收款信息 JSON>]
-  larkaxctl wallet payout settle --user <ID 或用户名> --amount <金额> --ref <结算单号> --destination <JSON> --by <操作人> [--note <说明>]
+                                  [--destination <收款信息 JSON>] [--dry-run]
+  larkaxctl wallet payout settle --user <ID 或用户名> --amount <金额> --ref <结算单号> --destination <JSON> --by <操作人> [--note <说明>] [--dry-run]
   larkaxctl wallet payout approve|reject --id <提现单 ID> --by <操作人> [--note <说明>]
   larkaxctl wallet payout paid --id <提现单 ID> --gateway <通道> [--gateway-ref <凭据号>]
-  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号> [--asset <资产>]
+  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号> [--asset <资产>] [--dry-run]
   larkaxctl wallet payment status --order <订单号>
 
 钱包的入账、调账、退款与单用户查询在 larkaxctl user wallet（credit / adjust / refund / show）；
 旧写法 wallet credit|adjust|refund、wallet list --user 仍可用并在 stderr 提示新路径。
 payout 这些动作不动 user 科目，**打款只放行已批准的单子**；单据号必填且是幂等键。
+request、settle 与 payment create 支持 --dry-run：打印将要写入的内容后回滚，不动库。
 某一格金额读不出来时打「不可读（超出可表示范围）」并退出 1；更细的边界：larkaxctl help wallet，payout 与 payment 另有各自 help。
 `
 
@@ -58,15 +59,17 @@ const walletUsage = `larkaxctl wallet 管理用户钱包。
   larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号>
                                   [--asset <资产>]
                                   [--destination <收款信息 JSON>]
+                                  [--dry-run]
   larkaxctl wallet payout settle --user <ID 或用户名> --amount <金额> --ref <结算单号>
                                  --destination <收款信息 JSON> --by <操作人>
-                                 [--note <说明>]
+                                 [--note <说明>] [--dry-run]
   larkaxctl wallet payout approve|reject --id <提现单 ID> --by <操作人>
                                          [--note <说明>]
   larkaxctl wallet payout paid --id <提现单 ID> --gateway <通道>
                                [--gateway-ref <凭据号>]
   larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号>
                                   [--asset <资产>] [--notify-url <回调地址>]
+                                  [--dry-run]
   larkaxctl wallet payment status --order <订单号>
 
 # 用户级的三条：在 larkaxctl user wallet 下
@@ -164,6 +167,24 @@ refund 是运营给用户退钱：走账本写一组 refund 分录，借 user:<I
 --ref 会进分录备注（「退款：<原因>（单据 <ref>）」，没给原因时是「退款（单据 <ref>）」）：
 交易号是它的哈希，从单据号算得到交易号、反过来算不回来，不落备注就没有第二条路把这张退款单
 对上这笔账。
+
+# 干跑（--dry-run）
+
+credit、adjust、refund、payout request、payout settle 与 payment create 都接受
+--dry-run：走与真跑同一条写路径（同一份校验、同一份幂等判据、同一份 SQL），把要写
+的分录与单据打出来之后回滚，一条都不落库。**除序列号外，预览与真跑逐字相等**：分录的
+科目、金额、借贷方向与余额前后完全相同；序列号由数据库序列决定，事务回滚不退号，所以
+真跑会拿到下一个。末尾一句「干跑：以上内容没有写进数据库。」把两者分开。
+
+它在三处与真跑不同：
+
+  - 余额快照、账本行与订阅都不变；重跑同一条命令仍然没有副作用。
+  - payment create 不向通道下单（那会在通道侧建出一张真单子），所以预览里没有支付地址。
+  - 提现与额度包发放的编号是这次事务从序列取到的值：事务回滚后这个号不会再被真跑用到，
+    真跑会拿到下一个号。其余字段（含分录的科目、金额、借贷方向与余额前后）逐字相同。
+
+参数错与业务拒绝（金额格式、用户不存在、分成余额不够、--ref 缺失）在干跑下同样报错、
+同样退出码——预览不比真跑宽松。
 
 payout 是商户提现，几个动作各一条命令：request 申请、settle 平台清算、approve 批准、
 reject 驳回、paid 打款。一条提现单按状态往前走：
@@ -407,12 +428,13 @@ func runWalletCredit(args []string) error {
 	ref := legacyStringFlag(fs, "ref", "idempotency-key", "")
 	stringAlias(fs, ref, "order")
 	gateway := fs.String("gateway", manualGateway, "")
+	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
 		return usageErr(fmt.Errorf(
-			"credit 不接受位置参数，得到 %q：用户、金额与幂等键都用旗标指定", fs.Arg(0)))
+			"credit 不接受位置参数，得到 %q：用户、金额与幂等键都用旗标指定；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
 		return usageErr(errors.New("缺少 --user"))
@@ -464,12 +486,23 @@ func runWalletCredit(args []string) error {
 			return buildErr
 		}
 
+		if *dryRun {
+			return inRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+				applied, postErr := store.New(db).PostTransactionTx(ctx, tx, txn)
+				if postErr != nil {
+					return postErr
+				}
+				printCreditedWallet(humanStdout(), owner, txn, orderKey, applied, true)
+				return nil
+			})
+		}
+
 		applied, postErr := store.New(db).PostTransaction(ctx, txn)
 		if postErr != nil {
 			return postErr
 		}
 
-		printCreditedWallet(humanStdout(), owner, txn, orderKey, applied)
+		printCreditedWallet(humanStdout(), owner, txn, orderKey, applied, false)
 		return nil
 	})
 }
@@ -492,12 +525,13 @@ func runWalletAdjust(args []string) error {
 	memo := fs.String("memo", "", "")
 	ref := fs.String("ref", "", "")
 	by := fs.String("by", "", "")
+	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
 		return usageErr(fmt.Errorf(
-			"adjust 不接受位置参数，得到 %q：用户、金额、原因、单据号与操作人都用旗标指定", fs.Arg(0)))
+			"adjust 不接受位置参数，得到 %q：用户、金额、原因、单据号与操作人都用旗标指定；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
 		return usageErr(errors.New("缺少 --user"))
@@ -608,26 +642,33 @@ func runWalletAdjust(args []string) error {
 			return buildErr
 		}
 
+		if *dryRun {
+			var applied bool
+			dryErr := inRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+				var postErr error
+				applied, postErr = store.New(db).PostTransactionTx(ctx, tx, txn)
+				return postErr
+			})
+			if dryErr != nil {
+				return adjustPostError(owner, assetValue, dryErr)
+			}
+			printAdjustedWallet(humanStdout(), walletAdjustment{
+				Owner:    owner,
+				Operator: operator,
+				Asset:    assetValue,
+				Before:   before,
+				After:    after,
+				Delta:    amountValue,
+				Reason:   reason,
+				Ref:      adjustRef,
+				Txn:      txn,
+			}, applied, true)
+			return nil
+		}
+
 		applied, postErr := store.New(db).PostTransaction(ctx, txn)
 		if postErr != nil {
-			// 调减到负余额由库里那道 `UPDATE … AND balance + delta >= 0` 拦下
-			// （见 store.applyToWallets）。**不在命令行自己判**：判据要拿当前
-			// 值算，而重放时算出来的「调后余额」是错的——那一笔早就调过了，再
-			// 扣一次当然是负的（PostTransaction 在动钱包之前就先认重放，命令行
-			// 这一层看不到那一步）。这里只把措辞换成调账的那一侧：原文说的是
-			// 「余额不足以扣」，那是结算路径的说法。
-			//
-			// ErrFrozenUnderflow 先排掉再按 ErrInsufficientBalance 判，是 store
-			// 那条分类规则要求的顺序（它的错误链里同时带着这两个哨兵）。本命令
-			// 不写 frozen，所以它今天不会出现在这里——判据按规则写，不按今天是
-			// 不是会发生写。
-			if errors.Is(postErr, store.ErrInsufficientBalance) &&
-				!errors.Is(postErr, store.ErrFrozenUnderflow) {
-				return fmt.Errorf(
-					"不允许把余额调成负数：这次调账会让用户 %s 的 %s 余额变成负的，先调够再调减: %w",
-					owner.Username, assetValue, postErr)
-			}
-			return postErr
+			return adjustPostError(owner, assetValue, postErr)
 		}
 
 		printAdjustedWallet(humanStdout(), walletAdjustment{
@@ -640,9 +681,34 @@ func runWalletAdjust(args []string) error {
 			Reason:   reason,
 			Ref:      adjustRef,
 			Txn:      txn,
-		}, applied)
+		}, applied, false)
 		return nil
 	})
+}
+
+// adjustPostError 把调账落库时的失败翻译成调账那一侧的措辞。
+//
+// 真跑与干跑共用这一份：预览说「不行」的那一格，必须与真跑拒绝的是同一格、
+// 同一条判据。
+func adjustPostError(owner auth.User, assetValue ledger.Asset, postErr error) error {
+	// 调减到负余额由库里那道 `UPDATE … AND balance + delta >= 0` 拦下
+	// （见 store.applyToWallets）。**不在命令行自己判**：判据要拿当前
+	// 值算，而重放时算出来的「调后余额」是错的——那一笔早就调过了，再
+	// 扣一次当然是负的（PostTransaction 在动钱包之前就先认重放，命令行
+	// 这一层看不到那一步）。这里只把措辞换成调账的那一侧：原文说的是
+	// 「余额不足以扣」，那是结算路径的说法。
+	//
+	// ErrFrozenUnderflow 先排掉再按 ErrInsufficientBalance 判，是 store
+	// 那条分类规则要求的顺序（它的错误链里同时带着这两个哨兵）。本命令
+	// 不写 frozen，所以它今天不会出现在这里——判据按规则写，不按今天是
+	// 不是会发生写。
+	if errors.Is(postErr, store.ErrInsufficientBalance) &&
+		!errors.Is(postErr, store.ErrFrozenUnderflow) {
+		return fmt.Errorf(
+			"不允许把余额调成负数：这次调账会让用户 %s 的 %s 余额变成负的，先调够再调减: %w",
+			owner.Username, assetValue, postErr)
+	}
+	return postErr
 }
 
 // parseAssetFlag 校验 --asset 的写法并返回显式给的资产（空表示没给）。
@@ -908,8 +974,11 @@ func printOpenedWallet(w io.Writer, owner auth.User, asset ledger.Asset, created
 //
 // 「刚入账」与「重放」必须能分开（LESSONS 第 16 条）：两者都退出 0，
 // 而一次静默的空操作与一次真的入账不是同一个结果。
+//
+// 干跑（dryRun）走的是同一个函数，只有动词与尾注不同：预览里的分录与真跑
+// 逐字相同，因为它们出自同一个 printEntryLines。
 func printCreditedWallet(w io.Writer, owner auth.User, txn ledger.Transaction,
-	order string, applied bool,
+	order string, applied, dryRun bool,
 ) {
 	// 入账金额与资产取自打到 user 科目上的那条分录。从分录上取，而不是把
 	// money.Amount 从命令行的 flag 再传一遍：口径只有一个，免得两处算出来
@@ -924,17 +993,25 @@ func printCreditedWallet(w io.Writer, owner auth.User, txn ledger.Transaction,
 		}
 	}
 
-	if applied {
+	switch {
+	case applied && dryRun:
+		_, _ = fmt.Fprintf(w, "将入账：用户 %s %s %s，幂等键 %s，交易 %s。\n",
+			owner.Username, credited, asset, order, txn.TxnID)
+		_, _ = fmt.Fprintln(w, "将写入的分录：")
+	case applied:
 		_, _ = fmt.Fprintf(w, "已入账：用户 %s %s %s，幂等键 %s，交易 %s。\n",
 			owner.Username, credited, asset, order, txn.TxnID)
 		_, _ = fmt.Fprintln(w, "分录：")
-	} else {
+	default:
 		_, _ = fmt.Fprintf(w, "幂等键 %s 已经入过账，本次未改动。交易 %s。\n",
 			order, txn.TxnID)
 		_, _ = fmt.Fprintln(w, "此前写入的分录：")
 	}
 
 	printEntryLines(w, txn.Entries)
+	if dryRun {
+		printDryRunNote(w)
+	}
 }
 
 // printEntryLines 逐条打印一组分录。
@@ -988,18 +1065,25 @@ type walletAdjustment struct {
 // 「刚调完」与「重放」必须能分开（LESSONS 第 16 条）：两者都退出 0，而一次静默的
 // 空操作与一次真的调了账不是同一个结果。重放那一档**不打**余额那一对——那两行会
 // 让人以为这一次真的动了钱，而它一分钱都没动。
-func printAdjustedWallet(w io.Writer, adj walletAdjustment, applied bool) {
+func printAdjustedWallet(w io.Writer, adj walletAdjustment, applied, dryRun bool) {
 	if !applied {
 		_, _ = fmt.Fprintf(w, "幂等键 %s 已经调过账，本次未改动。交易 %s。\n",
 			adj.Ref, adj.Txn.TxnID)
 		_, _ = fmt.Fprintln(w, "此前写入的分录：")
 		printEntryLines(w, adj.Txn.Entries)
+		if dryRun {
+			printDryRunNote(w)
+		}
 		return
 	}
 
 	tw := newTableWriter(w)
 	p := newPalette(w)
-	_, _ = fmt.Fprintf(w, "已调账用户 %s\n", adj.Owner.Username)
+	verb := "已调账用户 "
+	if dryRun {
+		verb = "将调账用户 "
+	}
+	_, _ = fmt.Fprintf(w, "%s%s\n", verb, adj.Owner.Username)
 	row := func(label, value string) {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
 	}
@@ -1013,8 +1097,15 @@ func printAdjustedWallet(w io.Writer, adj walletAdjustment, applied bool) {
 	row("交易", string(adj.Txn.TxnID))
 	_ = tw.Flush()
 
-	_, _ = fmt.Fprintln(w, "分录：")
+	header := "分录："
+	if dryRun {
+		header = "将写入的分录："
+	}
+	_, _ = fmt.Fprintln(w, header)
 	printEntryLines(w, adj.Txn.Entries)
+	if dryRun {
+		printDryRunNote(w)
+	}
 }
 
 // walletRow 是一条钱包记录的展示形态：账本那几列加上从 users 取来的用户名。

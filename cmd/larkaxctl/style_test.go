@@ -889,7 +889,7 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 						Memo: "误扣补回（操作人 ops-placeholder，单据 ORD-20261019-1）",
 					}},
 				},
-			}, true)
+			}, true, false)
 		}},
 		// 下面一条是提现的回显：与调账回显同一类（一栏一行），只是几栏随状态走
 		// ——审批人与审批时刻只有走过审批的单子才有。
@@ -904,7 +904,7 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				},
 				User:     auth.User{ID: 7, Username: "user-placeholder"},
 				Reviewer: &auth.User{ID: 8, Username: "ops-placeholder"},
-			})
+			}, false)
 		}},
 		// 销户回显：与调账、提现同一类（一栏一行），只是几栏随处置结果走。
 		{"销户回显", func(w io.Writer) {
@@ -941,7 +941,7 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				},
 				User:          auth.User{ID: 7, Username: "user-placeholder"},
 				ChannelStatus: &channelStatus,
-			})
+			}, false)
 		}},
 		// 管理令牌的回显：stdout 只有那一行令牌，说明去 stderr。它不随数据变长，
 		// 但与上面几条回显同样「主键（这里是令牌）加粗」。

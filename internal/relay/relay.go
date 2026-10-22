@@ -424,6 +424,9 @@ func FromRelaykitRequest(ctx context.Context, target channel.Protocol, src any) 
 	}
 
 	out := &channel.Request{
+		// target 是调用方走的那条入口协议（由请求路径决定）。执行器拿它把
+		// 同一渠道下多套协议分派到对应的适配器；适配器自己不读它。
+		Protocol:        target,
 		Model:           openaiReq.Model,
 		ReasoningEffort: openaiReq.ReasoningEffort,
 		Temperature:     openaiReq.Temperature,

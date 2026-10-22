@@ -23,13 +23,14 @@ var userPlanHelp = helpText{short: userPlanShortUsage, long: userPlanUsage}
 // userPlanShortUsage 是 user plan 的短版：`-h` / `--help` 与参数写错时打的那一份。
 const userPlanShortUsage = `larkaxctl user plan 管理一个用户持有的订阅与扣费顺序。
 用法：
-  larkaxctl user plan grant <用户> <套餐> --ref <发放单号> --expires-at <RFC3339>
+  larkaxctl user plan grant <用户> <套餐> --ref <发放单号> --expires-at <RFC3339> [--dry-run]
   larkaxctl user plan list <用户>
-  larkaxctl user plan void <订阅 ID> --ref <作废单号> [--status <expired|canceled>]
+  larkaxctl user plan void <订阅 ID> --ref <作废单号> [--status <expired|canceled>] [--dry-run]
   larkaxctl user plan order show <用户>
   larkaxctl user plan order set <用户> [--order <顺序> | --clear]
 
 --ref 是幂等键；order 的三档与 --clear 见长版。
+grant 与 void 的 --dry-run 打印将写入的订阅与分录后回滚。
 更细的边界：larkaxctl user plan help。
 `
 
@@ -37,9 +38,9 @@ const userPlanShortUsage = `larkaxctl user plan 管理一个用户持有的订�
 const userPlanUsage = `larkaxctl user plan 管理一个用户持有的订阅与扣费顺序。
 
 用法：
-  larkaxctl user plan grant <用户> <套餐> --ref <发放单号> --expires-at <RFC3339>
+  larkaxctl user plan grant <用户> <套餐> --ref <发放单号> --expires-at <RFC3339> [--dry-run]
   larkaxctl user plan list <用户>
-  larkaxctl user plan void <订阅 ID> --ref <作废单号> [--status <expired|canceled>]
+  larkaxctl user plan void <订阅 ID> --ref <作废单号> [--status <expired|canceled>] [--dry-run]
   larkaxctl user plan order show <用户>
   larkaxctl user plan order set <用户> [--order <顺序> | --clear]
 
@@ -48,6 +49,11 @@ grant 建一条订阅，并把面值记进 prepaid:<订阅 ID>。--ref 是发放
 
 void 作废一条订阅，把剩余面值转回平台收入。默认按人工作废（canceled）收尾；
 --status expired 表示到期作废。--ref 是作废单号，同样是幂等键。
+
+grant 与 void 都接受 --dry-run：走与真跑同一条写路径，把订阅与分录打出来之后回滚，
+user_plans 与账本一条都不落，作废时的剩余面值仍然从账本现算。**除序列号（订阅 id）外，
+预览与真跑逐字相等**：分录的科目、金额、借贷方向与余额前后完全相同。订阅 id 是这次
+事务从序列取到的值，事务回滚不退号，所以真跑会拿到下一个。
 
 list 列出该用户的全部订阅（有效的、到期的、已作废的都在）；「剩余」那一栏是
 prepaid 科目的余额。
@@ -67,12 +73,13 @@ var userWalletHelp = helpText{short: userWalletShortUsage, long: userWalletUsage
 const userWalletShortUsage = `larkaxctl user wallet 管理一个用户的钱包。
 用法：
   larkaxctl user wallet show <用户>
-  larkaxctl user wallet credit <用户> --amount <金额> --ref <外部单据号> [--asset <资产>] [--gateway <来源>]
-  larkaxctl user wallet adjust <用户> --amount <带符号金额> --ref <外部单据号> --memo <原因> --by <操作人>
+  larkaxctl user wallet credit <用户> --amount <金额> --ref <外部单据号> [--asset <资产>] [--gateway <来源>] [--dry-run]
+  larkaxctl user wallet adjust <用户> --amount <带符号金额> --ref <外部单据号> --memo <原因> --by <操作人> [--dry-run]
   larkaxctl user wallet refund <用户> --amount <金额> --ref <外部单据号> [--memo <原因>] [--asset <资产>]
-                        [--merchant <ID 或用户名> --merchant-share <金额>] [--upstream-cost <金额>]
+                        [--merchant <ID 或用户名> --merchant-share <金额>] [--upstream-cost <金额>] [--dry-run]
 
 credit / adjust / refund 要求钱包已存在；单据号必填且是幂等键。
+三条都支持 --dry-run：打印将写入的分录后回滚，不动库。
 更细的边界：larkaxctl user wallet help。
 `
 
@@ -82,13 +89,13 @@ const userWalletUsage = `larkaxctl user wallet 管理一个用户的钱包。
 用法：
   larkaxctl user wallet show <用户>
   larkaxctl user wallet credit <用户> --amount <金额> --ref <外部单据号>
-                                  [--asset <资产>] [--gateway <来源>]
+                                  [--asset <资产>] [--gateway <来源>] [--dry-run]
   larkaxctl user wallet adjust <用户> --amount <带符号金额> --ref <外部单据号>
-                                  --memo <原因> --by <操作人>
+                                  --memo <原因> --by <操作人> [--dry-run]
   larkaxctl user wallet refund <用户> --amount <金额> --ref <外部单据号>
                                   [--asset <资产>] [--memo <原因>]
                                   [--merchant <ID 或用户名> --merchant-share <金额>]
-                                  [--upstream-cost <金额>]
+                                  [--upstream-cost <金额>] [--dry-run]
 
 show 列出这个用户的钱包与余额快照，一栏一个字段：用户 ID、用户名、资产、余额、
 冻结。它与顶层的 wallet list --user 是同一份清单、同一份输出。
@@ -99,6 +106,12 @@ credit / adjust / refund 都走账本写分录，并在同一个事务里更新�
 
 adjust 的 --amount 带符号；--memo 与 --by 必填。refund 的 --merchant 与
 --merchant-share 要一起给。
+
+credit / adjust / refund 都接受 --dry-run：走与真跑同一条写路径（同一份校验、同一份
+幂等判据），把这一笔要写的分录逐条打出来之后回滚，余额、账本行与钱包快照都不变。
+**预览与真跑逐字相等**：分录的科目、金额、借贷方向与余额前后完全相同。
+末尾一句「干跑：以上内容没有写进数据库。」把两者分开。
+参数错与业务拒绝在干跑下同样报错、同样退出码。
 
 开通钱包、商户提现与支付通道那几组不在这一档：它们仍在 larkaxctl wallet 下
 （create / payout / payment）。

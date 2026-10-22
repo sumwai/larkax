@@ -307,7 +307,7 @@ func TestDoctorCatalogAllowsEndpointForUnknownOrMatching(t *testing.T) {
 // TestDoctorEndpointFindingMatchesEveryRegisteredType 让 doctor 的结论在**每个**
 // 已注册的渠道类型上都与那张表对上。
 //
-// 它是「别在 CLI 里抄一份对照表」的钉子：doctor 走的是 channels.EndpointFitFor
+// 它是「别在 CLI 里抄一份对照表」的钉子：doctor 走的是 channels.EndpointFitForProtocols
 // （「渠道类型 → 端点」那张表的唯一入口）。在 CLI 里另写一份 switch、尤其只抄了
 // 常见的那几个类型时，没抄到的类型上这里会红。期望值从 channel.Protocol
 // （写入侧同一张表）算，不从 doctor 的实现算。

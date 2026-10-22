@@ -69,6 +69,12 @@ enable / disable 控制一个包还能不能用于**新的发放**：已经发�
 order）。旧路径 plan grant / plan void / plan subscriptions / plan order 仍可用，
 各条在命中时于 stderr 提示新路径。
 
+grant 与 void 接受 --dry-run：走与真跑同一条写路径（同一份校验、同一份幂等判据、
+同一笔面值分录），把订阅与分录打出来之后回滚，user_plans 与账本一条都不落。**除序列号
+（订阅 id）外，预览与真跑逐字相等**：分录的科目、金额、借贷方向与余额前后完全相同。
+订阅 id 是这次事务从序列取到的值，事务回滚不退号，所以真跑会拿到下一个。作废时剩余
+面值仍然从账本现算。
+
 一把 API Key 能用哪些订阅在 larkaxctl user key plans 下；旧路径 plan key 仍可用。
 
 更细的约定见 docs/cli-reference.md 的「plan」一节。
@@ -305,11 +311,12 @@ func runPlanGrant(args []string) error {
 	planKey := fs.String("plan", "", "")
 	ref := fs.String("ref", "", "")
 	expiresAt := fs.String("expires-at", "", "")
+	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("grant 不接受位置参数，得到 %q", fs.Arg(0)))
+		return usageErr(fmt.Errorf("grant 不接受位置参数，得到 %q；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if *user == "" {
 		return usageErr(errors.New("缺少 --user"))
@@ -332,23 +339,42 @@ func runPlanGrant(args []string) error {
 	}
 
 	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
-		store := auth.New(db)
-		owner, err := store.ResolveUser(ctx, *user)
+		authStore := auth.New(db)
+		owner, err := authStore.ResolveUser(ctx, *user)
 		if err != nil {
 			return err
 		}
 
-		up, applied, err := plans.New(db).Grant(ctx, plans.GrantInput{
+		input := plans.GrantInput{
 			TxnID:     txnIDFromKey("larkax:plan-grant:v1", strings.TrimSpace(*ref)),
 			Ref:       strings.TrimSpace(*ref),
 			UserID:    owner.ID,
 			PlanKey:   strings.TrimSpace(*planKey),
 			ExpiresAt: expires,
-		})
-		if err != nil {
-			return err
 		}
-		printPlanGrant(humanStderr(), owner, up, applied)
+		// 干跑与真跑共用同一个输入与同一条写路径（见 plans.GrantTx），差别只有
+		// 事务边界：订阅行与那一笔面值分录都在事务里写一遍再回滚。
+		var (
+			up      plans.UserPlan
+			applied bool
+		)
+		if *dryRun {
+			dryErr := inRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+				var postErr error
+				up, applied, postErr = plans.New(db).GrantTx(ctx, tx, input)
+				return postErr
+			})
+			if dryErr != nil {
+				return dryErr
+			}
+		} else {
+			var grantErr error
+			up, applied, grantErr = plans.New(db).Grant(ctx, input)
+			if grantErr != nil {
+				return grantErr
+			}
+		}
+		printPlanGrant(humanStderr(), owner, up, applied, *dryRun)
 		return nil
 	})
 }
@@ -363,11 +389,12 @@ func runPlanVoid(args []string) error {
 	id := fs.Int64("id", 0, "")
 	ref := fs.String("ref", "", "")
 	status := fs.String("status", string(plans.UserPlanCancelled), "")
+	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("void 不接受位置参数，得到 %q", fs.Arg(0)))
+		return usageErr(fmt.Errorf("void 不接受位置参数，得到 %q；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if *id <= 0 {
 		return usageErr(errors.New("缺少 --id：要作废哪一条订阅"))
@@ -387,16 +414,35 @@ func runPlanVoid(args []string) error {
 	}
 
 	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
-		up, applied, err := plans.New(db).Void(ctx, plans.VoidInput{
+		input := plans.VoidInput{
 			TxnID:      txnIDFromKey("larkax:plan-void:v1", strings.TrimSpace(*ref)),
 			UserPlanID: *id,
 			Ref:        strings.TrimSpace(*ref),
 			Status:     final,
-		})
-		if err != nil {
-			return err
 		}
-		printPlanVoid(humanStderr(), up, applied)
+		// 干跑与真跑共用同一个输入与同一条写路径（见 plans.VoidTx）：剩余面值
+		// 仍然从账本现算，状态与分录都在事务里写一遍再回滚。
+		var (
+			up      plans.UserPlan
+			applied bool
+		)
+		if *dryRun {
+			dryErr := inRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+				var postErr error
+				up, applied, postErr = plans.New(db).VoidTx(ctx, tx, input)
+				return postErr
+			})
+			if dryErr != nil {
+				return dryErr
+			}
+		} else {
+			var voidErr error
+			up, applied, voidErr = plans.New(db).Void(ctx, input)
+			if voidErr != nil {
+				return voidErr
+			}
+		}
+		printPlanVoid(humanStderr(), up, applied, *dryRun)
 		return nil
 	})
 }
@@ -792,26 +838,38 @@ func printAPIKeyPlansSet(w io.Writer, keyID int64, all bool, list []plans.UserPl
 }
 
 // printPlanGrant 打印一次发放。
-func printPlanGrant(w io.Writer, owner auth.User, up plans.UserPlan, applied bool) {
+//
+// 干跑与真跑共用这一份：动词换成「将发放」，订阅行与面值都来自同一条写路径
+// （见 plans.GrantTx）。预览里的订阅 id 是这次事务从序列取到的号——事务回滚后
+// 这个号不会再被真跑用到，所以那一个数可能与真跑的不同；其余字段逐字相同。
+func printPlanGrant(w io.Writer, owner auth.User, up plans.UserPlan, applied, dryRun bool) {
 	if !applied {
 		_, _ = fmt.Fprintf(w, "发放单号 %s 已经发过（订阅 %d），本次未改动。\n", up.Ref, up.ID)
 		return
 	}
+	verb := "已发放"
+	if dryRun {
+		verb = "将发放"
+	}
 	_, _ = fmt.Fprintf(w,
-		"已发放订阅 %d（用户 %s，额度包 %s，到期 %s，面值 %s，剩余 %s）。\n",
-		up.ID, owner.Username, up.PlanKey, formatTimeShort(up.ExpiresAt, "不过期"),
+		"%s订阅 %d（用户 %s，额度包 %s，到期 %s，面值 %s，剩余 %s）。\n",
+		verb, up.ID, owner.Username, up.PlanKey, formatTimeShort(up.ExpiresAt, "不过期"),
 		up.FaceValue, up.FaceValueRemaining)
 }
 
 // printPlanVoid 打印一次作废。
-func printPlanVoid(w io.Writer, up plans.UserPlan, applied bool) {
+func printPlanVoid(w io.Writer, up plans.UserPlan, applied, dryRun bool) {
 	if !applied {
 		_, _ = fmt.Fprintf(w, "作废单号 %s 已经用过（订阅 %d 现在是 %s），本次未改动。\n",
 			up.VoidRef, up.ID, up.Status)
 		return
 	}
-	_, _ = fmt.Fprintf(w, "已作废订阅 %d：状态 %s，剩余面值已转回平台收入。\n",
-		up.ID, up.Status)
+	verb := "已作废"
+	if dryRun {
+		verb = "将作废"
+	}
+	_, _ = fmt.Fprintf(w, "%s订阅 %d：状态 %s，剩余面值已转回平台收入。\n",
+		verb, up.ID, up.Status)
 }
 
 // printPlanOrder 打印一个用户的有效扣费顺序。
