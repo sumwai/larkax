@@ -207,6 +207,17 @@ func (a *API) probeModels(w http.ResponseWriter, r *http.Request) {
 // 探测把几 MiB 的 HTML 错误页当正文回给浏览器。
 const upstreamBodySnippet = 200
 
+// 探测边界自己的固定正文。
+//
+// 两句的成因都在服务端（这一行的密文坏了 / 提交的地址不合法），原文可能是
+// 中文或带着内部细节，所以只写进日志；回给调用方的是一句能照着处置的话。
+const (
+	// msgProbeCorruptCredential：密文损坏是这一行的数据问题，换主密钥救不回来。
+	msgProbeCorruptCredential = "the stored credential is corrupt; rewrite this channel's credential"
+	// msgProbeInvalidBaseURL：与 NormalizeBaseURL 的中文原文分开，见那个函数。
+	msgProbeInvalidBaseURL = "base_url is not a valid upstream address"
+)
+
 // failProbe 把一次探测的失败翻成状态码。
 //
 // 与 fail 分开：那条默认「认不出来的当输入错（400）」，而探测的失败大多
@@ -215,9 +226,24 @@ func (a *API) failProbe(w http.ResponseWriter, r *http.Request, err error) {
 	var up *channel.ErrUpstream
 	switch {
 	case errors.Is(err, channels.ErrChannelNotFound):
+		if _, scoped := OwnerFromContext(r.Context()); scoped {
+			// 与 failScoped 同形：「不存在」与「不是你的」必须逐字相同，否则
+			// 这个 404 就成了「这一行存在」的确认。带 id 的细节只进日志。
+			a.logger().WarnContext(r.Context(), "商家探测了不存在或不属于自己的渠道", "error", err)
+			a.writeError(w, http.StatusNotFound, msgNotFound)
+			return
+		}
 		a.writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, channels.ErrInvalidBaseURL):
+		a.logger().WarnContext(r.Context(), "探测的 base_url 校验未通过", "error", err)
+		a.writeError(w, http.StatusBadRequest, msgProbeInvalidBaseURL)
 	case errors.Is(err, channel.ErrUnknownType):
 		a.writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, channels.ErrCredentialCorrupt):
+		// 密文损坏不是调用方能改的东西：文件里的这一行坏了，重新写一次凭证
+		// 才会好。按输入错报 400 会让人去查请求体，而那没有问题。
+		a.logger().ErrorContext(r.Context(), "渠道凭证密文损坏", "error", err)
+		a.writeError(w, http.StatusInternalServerError, msgProbeCorruptCredential)
 	case errors.Is(err, channels.ErrNoMasterKey):
 		// 与写库故障分开：这个部署没有主密钥，换一次请求也不会好。
 		a.writeError(w, http.StatusServiceUnavailable,

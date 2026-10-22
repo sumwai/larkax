@@ -59,6 +59,13 @@ type ProbeRequest struct {
 	OwnerID *int64
 }
 
+// ErrInvalidBaseURL 表示探测用的 base_url 没通过 NormalizeBaseURL。
+//
+// NormalizeBaseURL 的文案是中文——它的另一个调用方是命令行，读者是敲命令的
+// 人。探测的管理端点回英文正文，所以边界需要能认出「这是地址没通过校验」这
+// 一类，同时**不复制**那句中文：这里只加一个哨兵，原文留在错误链里进日志。
+var ErrInvalidBaseURL = errors.New("base_url 不合法")
+
 // ProbeResult 是一次探测的结果。
 type ProbeResult struct {
 	// Supported 表示上游提供了模型列表。false 时 Models 是空切片。
@@ -152,7 +159,7 @@ func (p *ModelProbe) target(ctx context.Context, req ProbeRequest) (probeTarget,
 		}
 		baseURL, err := NormalizeBaseURL(req.BaseURL)
 		if err != nil {
-			return probeTarget{}, err
+			return probeTarget{}, fmt.Errorf("%w：%w", ErrInvalidBaseURL, err)
 		}
 		return probeTarget{
 			channelType: req.Type,
@@ -193,7 +200,7 @@ func (p *ModelProbe) target(ctx context.Context, req ProbeRequest) (probeTarget,
 	if req.BaseURL != "" {
 		baseURL, err := NormalizeBaseURL(req.BaseURL)
 		if err != nil {
-			return probeTarget{}, err
+			return probeTarget{}, fmt.Errorf("%w：%w", ErrInvalidBaseURL, err)
 		}
 		out.baseURL = baseURL
 	}

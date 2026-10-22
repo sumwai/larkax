@@ -15,6 +15,7 @@ import (
 
 	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/channel"
+	"github.com/sumwai/larkax/internal/channel/httpx"
 	"github.com/sumwai/larkax/internal/observe"
 )
 
@@ -28,7 +29,7 @@ func testChannel(baseURL string) channel.Channel {
 	}
 }
 
-func newAdapter() *Adapter { return New(5 * time.Second) }
+func newAdapter() *Adapter { return NewWithClient(httpx.Client(5 * time.Second)) }
 
 // textRequest 是一条最小的请求，多数用例用它。
 func textRequest() *channel.Request {

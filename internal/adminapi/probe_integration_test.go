@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channel/httpx"
@@ -308,6 +309,102 @@ func TestProbeModelsDoesNotFollowRedirects(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "model-from-elsewhere") {
 		t.Errorf("响应里出现了跳转目标那一侧的内容：%s", rec.Body)
+	}
+}
+
+// TestProbeModelsNotFoundMatchesChannelRoute 钉住商家面上「不是你的渠道」
+// 的两条 404 逐字相同：探测与渠道资源走的是同一句固定正文。
+//
+// 与 TestProbeModelsChannelID 里那条「别人的渠道回 404」不同，这里比的是
+// **正文**。只判状态码时，探测回一句带 id 的中文、渠道路由回 `not found`，
+// 用例照样是绿的。
+func TestProbeModelsNotFoundMatchesChannelRoute(t *testing.T) {
+	h := merchantSurface(t, "UTC")
+	db := testDB(t)
+	owner := seedUser(t, db, "m-probe-404-")
+	other := seedUser(t, db, "m-probe-404-other-")
+
+	id := merchantChannel(t, h, other, uniqueName("probe-404-ch"), "openai",
+		"https://api.example.com/v1", []string{uniqueName("probe-404-model")})
+
+	probed := probeCall(t, h, owner, map[string]any{"channel_id": id})
+	if probed.Code != http.StatusNotFound {
+		t.Fatalf("探测别人的渠道状态码 = %d，期望 404；正文：%s", probed.Code, probed.Body)
+	}
+	read := merchantCall(t, h, owner, http.MethodGet,
+		"/api/v1/merchant/channels/"+itoa(id), nil)
+	if read.Code != http.StatusNotFound {
+		t.Fatalf("读别人的渠道状态码 = %d，期望 404；正文：%s", read.Code, read.Body)
+	}
+	if probed.Body.String() != read.Body.String() {
+		t.Errorf("探测与渠道路由的 404 正文不同：\n探测：%s\n路由：%s",
+			probed.Body, read.Body)
+	}
+	// 逐字对照整份错误体：只判「含 not found」时，多出来的 id 或换一处
+	// 字段名都不会红。
+	const want = `{"error":{"message":"not found","type":"invalid_request_error","param":null,"code":null}}`
+	if probed.Body.String() != want {
+		t.Errorf("404 正文 = %q，期望逐字 %q", probed.Body.String(), want)
+	}
+}
+
+// TestProbeModelsCorruptCredential 密文损坏是 500：这一行的数据坏了，
+// 换一次请求也不会好，更不是调用方写错了请求体。
+func TestProbeModelsCorruptCredential(t *testing.T) {
+	h := merchantSurface(t, "UTC")
+	db := testDB(t)
+	owner := seedUser(t, db, "m-probe-corrupt-")
+
+	id := merchantChannel(t, h, owner, uniqueName("probe-corrupt-ch"), "openai",
+		"https://api.example.com/v1", []string{uniqueName("probe-corrupt-model")})
+	// 头部版本号对不上，Sealer 会报 ErrMalformed → ErrCredentialCorrupt。
+	if _, err := db.ExecContext(t.Context(),
+		`UPDATE channels SET credential_enc = $1 WHERE id = $2`,
+		[]byte("not-a-credential-envelope"), id); err != nil {
+		t.Fatalf("写坏密文失败: %v", err)
+	}
+
+	rec := probeCall(t, h, owner, map[string]any{"channel_id": id})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("坏密文的状态码 = %d，期望 500；正文：%s", rec.Code, rec.Body)
+	}
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	decode(t, rec, &body)
+	if body.Error.Message != msgProbeCorruptCredential {
+		t.Errorf("正文 = %q，期望逐字 %q", body.Error.Message, msgProbeCorruptCredential)
+	}
+}
+
+// TestProbeModelsInvalidBaseURLIsEnglish 探测的正文统一是英文：
+// base_url 的原文（NormalizeBaseURL，命令行在用）留在日志里。
+func TestProbeModelsInvalidBaseURLIsEnglish(t *testing.T) {
+	h := merchantSurface(t, "UTC")
+	owner := seedUser(t, testDB(t), "m-probe-url-")
+
+	rec := probeCall(t, h, owner, map[string]any{
+		"type": "openai", "base_url": "https://api.example.com/v1?tenant=abc",
+		"credential": "test-key-placeholder",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("状态码 = %d，期望 400；正文：%s", rec.Code, rec.Body)
+	}
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	decode(t, rec, &body)
+	if body.Error.Message != msgProbeInvalidBaseURL {
+		t.Errorf("正文 = %q，期望逐字 %q", body.Error.Message, msgProbeInvalidBaseURL)
+	}
+	for _, r := range body.Error.Message {
+		if r > unicode.MaxASCII {
+			t.Errorf("正文里混进了非 ASCII 字符 %q：%s", r, body.Error.Message)
+		}
 	}
 }
 

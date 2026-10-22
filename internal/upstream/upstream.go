@@ -15,10 +15,12 @@ package upstream
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channel/anthropicadapter"
+	"github.com/sumwai/larkax/internal/channel/httpx"
 	"github.com/sumwai/larkax/internal/channel/openaiadapter"
 	"github.com/sumwai/larkax/internal/channel/responsesadapter"
 	"github.com/sumwai/larkax/internal/channel/systemoneadapter"
@@ -53,12 +55,25 @@ func New(timeout time.Duration) (*Executor, error) {
 	if timeout <= 0 {
 		return nil, fmt.Errorf("上游超时必须为正，得到 %v", timeout)
 	}
-	return newWith(
-		openaiadapter.New(timeout),
-		anthropicadapter.New(timeout),
-		responsesadapter.New(timeout),
-		systemoneadapter.New(timeout),
-	)
+	return newWith(builtinAdapters(func() *http.Client { return httpx.Client(timeout) })...)
+}
+
+// builtinAdapters 是内置适配器的**唯一一份清单**。
+//
+// New 与 ProbeRegistry 都在这里取适配器：两份清单漂移的表现是「枚举里少一个
+// 类型，写渠道时却认得它」，而那种偏差没有任何判据会拦——所以清单只写一次，
+// 两边只在客户端上不同（newClient 每个适配器各调一次）。
+//
+// 每个适配器各拿一个客户端而不是共用一个：运行期那条路径的四份客户端配置相同，
+// 但没有理由借这个重构改变连接池的归属。探测那边想要共用时，newClient 返回
+// 同一个指针即可（见 ProbeRegistry）。
+func builtinAdapters(newClient func() *http.Client) []channel.Adapter {
+	return []channel.Adapter{
+		openaiadapter.NewWithClient(newClient()),
+		anthropicadapter.NewWithClient(newClient()),
+		responsesadapter.NewWithClient(newClient()),
+		systemoneadapter.NewWithClient(newClient()),
+	}
 }
 
 // adapterTimeout 是构造内置适配器时给 HTTP 客户端的超时。
