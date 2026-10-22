@@ -85,6 +85,7 @@ var tableRenderPaths = []string{
 	"printSnapshotAccessLog", // snapshot access-log
 	"printUsageEvents",       // usage events
 	"printUsageRequests",     // usage requests
+	"printUsageSummary",      // usage summary
 	"printUserDetail",        // user get
 	"printUserList",          // user list
 	"printUserPlans",         // plan subscriptions 与 plan key show
