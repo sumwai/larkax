@@ -2661,6 +2661,49 @@ textarea.input {
     right: auto;
     width: calc(100vw - 32px);
   }
+  /*
+   * 触控热区：窄屏下把可点元素的命中矩形补到 44×44，视觉尺寸一个像素不动。
+   *
+   * 热区是一层透明的伪元素，不参与布局。`inset` 按控件自己的尺寸算，不写死
+   * 一个数：38px 高的 `.btn` 补 4px，32px 的 `.btn.sm` 补 7px，26.5px 高的
+   * `.code-copy` 补 10px，28px 的 `.side-toggle` 补 8px，30px 的 `.avatar`
+   * 补 7px。补出来的边长是「控件高度 - 2px 边框 + 两倍 inset」，所以纵向
+   * 每个数都比 `(44 - 高度) / 2` 多 1px。
+   *
+   * 横向只补 1px：这一圈是为了盖住圆角——圆角外面的点本来就点不中，不补的
+   * 话热区矩形在四角是缺的。多补则没有意义：宽度已经够 44 的不该往外长，
+   * 那会占掉相邻控件的命中区（`.cal-foot` 两个按钮之间只有 6px）。
+   *
+   * `.code-copy` 本来就是绝对定位，不加 `position: relative`：那会把它从
+   * 代码块右上角拽回文档流。
+   */
+  .btn,
+  .side-toggle,
+  .avatar {
+    position: relative;
+  }
+  .btn::after,
+  .code-copy::after,
+  .side-toggle::after,
+  .avatar::after {
+    content: '';
+    position: absolute;
+  }
+  .btn::after {
+    inset: -4px -1px;
+  }
+  .btn.sm::after {
+    inset: -7px -1px;
+  }
+  .code-copy::after {
+    inset: -10px -1px;
+  }
+  .side-toggle::after {
+    inset: -8px;
+  }
+  .avatar::after {
+    inset: -7px;
+  }
 }
 
 /* 柱图：单序列，柱底贴基线，柱顶 4px 圆角，柱间留 2px 面缝。 */
