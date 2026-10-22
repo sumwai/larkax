@@ -182,7 +182,7 @@ const userUsageUsage = `larkaxctl user usage 读一个用户的用量与计费�
 // runUserPlan 分发 user plan 的子命令。
 func runUserPlan(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, userPlanShortUsage)
+		printUsage(os.Stderr, userPlanHelp.short)
 		return usageErr(errors.New("user plan 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -197,13 +197,13 @@ func runUserPlan(args []string) error {
 	case "order":
 		return runUserPlanOrder(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, userPlanShortUsage)
+		printUsage(os.Stdout, userPlanHelp.short)
 		return nil
 	case "help":
-		printUsage(os.Stdout, userPlanUsage)
+		printUsage(os.Stdout, userPlanHelp.long)
 		return nil
 	default:
-		printUsage(os.Stderr, userPlanShortUsage)
+		printUsage(os.Stderr, userPlanHelp.short)
 		return usageErr(fmt.Errorf("未知的 user plan 子命令 %q", action))
 	}
 }
@@ -238,7 +238,7 @@ func runUserPlanVoid(args []string) error {
 
 func runUserPlanOrder(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, userPlanShortUsage)
+		printUsage(os.Stderr, userPlanHelp.short)
 		return usageErr(errors.New("user plan order 需要 show 或 set"))
 	}
 	action, rest := args[0], args[1:]
@@ -248,10 +248,10 @@ func runUserPlanOrder(args []string) error {
 	case "set":
 		return runUserPlanOrderSet(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, userPlanShortUsage)
+		printUsage(os.Stdout, userPlanHelp.short)
 		return nil
 	case "help":
-		printUsage(os.Stdout, userPlanUsage)
+		printUsage(os.Stdout, userPlanHelp.long)
 		return nil
 	default:
 		return usageErr(fmt.Errorf("未知的 user plan order 子命令 %q", action))
@@ -277,7 +277,7 @@ func runUserPlanOrderSet(args []string) error {
 // runUserWallet 分发 user wallet 的子命令。
 func runUserWallet(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, userWalletShortUsage)
+		printUsage(os.Stderr, userWalletHelp.short)
 		return usageErr(errors.New("user wallet 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -292,13 +292,13 @@ func runUserWallet(args []string) error {
 	case "refund":
 		return runUserWalletRefund(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, userWalletShortUsage)
+		printUsage(os.Stdout, userWalletHelp.short)
 		return nil
 	case "help":
-		printUsage(os.Stdout, userWalletUsage)
+		printUsage(os.Stdout, userWalletHelp.long)
 		return nil
 	default:
-		printUsage(os.Stderr, userWalletShortUsage)
+		printUsage(os.Stderr, userWalletHelp.short)
 		return usageErr(fmt.Errorf("未知的 user wallet 子命令 %q", action))
 	}
 }
@@ -338,7 +338,7 @@ func runUserWalletRefund(args []string) error {
 // runUserKey 分发 user key 的子命令。
 func runUserKey(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, userKeyShortUsage)
+		printUsage(os.Stderr, userKeyHelp.short)
 		return usageErr(errors.New("user key 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -351,13 +351,13 @@ func runUserKey(args []string) error {
 	case "plans":
 		return runUserKeyPlans(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, userKeyShortUsage)
+		printUsage(os.Stdout, userKeyHelp.short)
 		return nil
 	case "help":
-		printUsage(os.Stdout, userKeyUsage)
+		printUsage(os.Stdout, userKeyHelp.long)
 		return nil
 	default:
-		printUsage(os.Stderr, userKeyShortUsage)
+		printUsage(os.Stderr, userKeyHelp.short)
 		return usageErr(fmt.Errorf("未知的 user key 子命令 %q", action))
 	}
 }
@@ -381,7 +381,7 @@ func runUserKeyCreate(args []string) error {
 // runUserKeyPlans 分发 user key plans 的子命令（一把 Key 能用哪些订阅）。
 func runUserKeyPlans(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, userKeyShortUsage)
+		printUsage(os.Stderr, userKeyHelp.short)
 		return usageErr(errors.New("user key plans 需要 show 或 set"))
 	}
 	action, rest := args[0], args[1:]
@@ -391,10 +391,10 @@ func runUserKeyPlans(args []string) error {
 	case "set":
 		return runUserKeyPlansSet(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, userKeyShortUsage)
+		printUsage(os.Stdout, userKeyHelp.short)
 		return nil
 	case "help":
-		printUsage(os.Stdout, userKeyUsage)
+		printUsage(os.Stdout, userKeyHelp.long)
 		return nil
 	default:
 		return usageErr(fmt.Errorf("未知的 user key plans 子命令 %q", action))
@@ -420,7 +420,7 @@ func runUserKeyPlansSet(args []string) error {
 // runUserUsage 分发 user usage 的子命令。
 func runUserUsage(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, userUsageShortUsage)
+		printUsage(os.Stderr, userUsageHelp.short)
 		return usageErr(errors.New("user usage 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
@@ -431,13 +431,13 @@ func runUserUsage(args []string) error {
 	case "requests":
 		return runUserUsageRequests(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, userUsageShortUsage)
+		printUsage(os.Stdout, userUsageHelp.short)
 		return nil
 	case "help":
-		printUsage(os.Stdout, userUsageUsage)
+		printUsage(os.Stdout, userUsageHelp.long)
 		return nil
 	default:
-		printUsage(os.Stderr, userUsageShortUsage)
+		printUsage(os.Stderr, userUsageHelp.short)
 		return usageErr(fmt.Errorf("未知的 user usage 子命令 %q", action))
 	}
 }
