@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/auth"
+	"github.com/sumwai/larkax/internal/expiry"
 	"github.com/sumwai/larkax/internal/money"
 )
 
@@ -244,8 +245,8 @@ func TestUpdateParamsThreeStates(t *testing.T) {
 			t.Fatalf("得到 SetExpiresAt=%v ExpiresAt=%s，期望 true 与远期上限",
 				params.SetExpiresAt, showPtr(params.ExpiresAt))
 		}
-		if !params.ExpiresAt.Equal(foreverExpiry()) {
-			t.Errorf("ExpiresAt = %s，期望 %s", params.ExpiresAt.Format(time.RFC3339), foreverExpiresAt)
+		if !params.ExpiresAt.Equal(expiry.Forever()) {
+			t.Errorf("ExpiresAt = %s，期望 %s", params.ExpiresAt.Format(time.RFC3339), expiry.ForeverRFC3339)
 		}
 	})
 
@@ -1455,8 +1456,8 @@ func TestAPIKeyForeverAndClearExpiresWriteTheSameValue(t *testing.T) {
 		t.Errorf("--forever 写入 %s，--clear-expires-at 写入 %s，两者应当逐字相等",
 			forever.UTC().Format(time.RFC3339), clear.UTC().Format(time.RFC3339))
 	}
-	if got := forever.UTC().Format(time.RFC3339); got != foreverExpiresAt {
-		t.Errorf("写入 %s，期望远期上限 %s", got, foreverExpiresAt)
+	if got := forever.UTC().Format(time.RFC3339); got != expiry.ForeverRFC3339 {
+		t.Errorf("写入 %s，期望远期上限 %s", got, expiry.ForeverRFC3339)
 	}
 }
 
@@ -1503,8 +1504,8 @@ func TestAPIKeyCreateTTLAndForever(t *testing.T) {
 		t.Errorf("--forever 建出来的 key 回显该说「不过期」：%q", stderr)
 	}
 	if got := expiryOf(foreverUser); got == nil ||
-		got.UTC().Format(time.RFC3339) != foreverExpiresAt {
-		t.Errorf("--forever 写进去的是 %v，期望 %s", got, foreverExpiresAt)
+		got.UTC().Format(time.RFC3339) != expiry.ForeverRFC3339 {
+		t.Errorf("--forever 写进去的是 %v，期望 %s", got, expiry.ForeverRFC3339)
 	}
 }
 
@@ -1540,7 +1541,7 @@ func splitPaddedCells(line string) []string {
 // 同一句话。
 //
 // 判据是**整格逐字相等**，不是 Contains：带日期的渲染与「不过期」之间差的
-// 正是这一格的全部内容，逐字相等顺带把「不得出现 9999-12-31 或任何年月日
+// 正是这一格的全部内容，逐字相等顺带把「不得出现远期上限或任何年月日
 // 形态」也钉住了——只要那一格不是「不过期」，它就红。
 func TestAPIKeyNullAndForeverRenderAlike(t *testing.T) {
 	db := testDB(t)
@@ -1584,8 +1585,8 @@ func TestAPIKeyNullAndForeverRenderAlike(t *testing.T) {
 		t.Fatalf("NULL 那一侧的 expires_at = %s，期望 NULL", at.Format(time.RFC3339))
 	}
 	atForever := expiryOf(idForever)
-	if atForever == nil || atForever.UTC().Format(time.RFC3339) != foreverExpiresAt {
-		t.Fatalf("远期那一侧的 expires_at = %v，期望 %s", atForever, foreverExpiresAt)
+	if atForever == nil || atForever.UTC().Format(time.RFC3339) != expiry.ForeverRFC3339 {
+		t.Fatalf("远期那一侧的 expires_at = %v，期望 %s", atForever, expiry.ForeverRFC3339)
 	}
 
 	// list：「过期」是从 0 数的第 9 栏（ID、KEY 前缀、所属用户、备注、状态、

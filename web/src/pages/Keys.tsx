@@ -185,6 +185,10 @@ export function Keys() {
     </>
   )
 
+  // 「不过期」只读服务端给的布尔：NULL 与远期值两种落库表示在页面收成一个答案。
+  const expiresText = (key: ApiKey) =>
+    key.never_expires ? t('keys.noExpiry') : formatDateTime(key.expires_at, meta.timezone)
+
   const rateText = (key: ApiKey) =>
     key.rate_limit_rpm === null
       ? t('status.unlimited')
@@ -521,9 +525,7 @@ export function Keys() {
             </div>
             <div>
               <span>{t('keys.expiresAt')}</span>
-              <b className="num">
-                {detail.expires_at ? formatDateTime(detail.expires_at, meta.timezone) : t('keys.noExpiry')}
-              </b>
+              <b className="num">{expiresText(detail)}</b>
             </div>
           </div>
           <div className="form-actions">{actions(detail, true)}</div>

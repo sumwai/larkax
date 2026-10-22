@@ -72,6 +72,11 @@ export interface ApiKey {
   /** null 表示不限，0 表示不放行。 */
   rate_limit_rpm: number | null
   expires_at: string | null
+  /**
+   * 服务端算好的「不过期」：`expires_at` 为 null 或远期值都为 true。
+   * 页面只读这一个布尔，不自己比时刻——值的出处与判断放在一起。
+   */
+  never_expires: boolean
   last_used_at: string | null
   created_at: string
 }

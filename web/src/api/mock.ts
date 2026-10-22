@@ -338,6 +338,7 @@ const keys: ApiKey[] = [
     quota_used: '42.11840000',
     rate_limit_rpm: 600,
     expires_at: null,
+    never_expires: true,
     created_at: new Date(Date.now() - 42 * DAY_MS).toISOString(),
     last_used_at: new Date(Date.now() - 12 * 60_000).toISOString(),
   },
@@ -350,6 +351,7 @@ const keys: ApiKey[] = [
     quota_used: '3.21370000',
     rate_limit_rpm: 60,
     expires_at: null,
+    never_expires: true,
     created_at: new Date(Date.now() - 21 * DAY_MS).toISOString(),
     last_used_at: new Date(Date.now() - 3 * DAY_MS).toISOString(),
   },
@@ -362,6 +364,7 @@ const keys: ApiKey[] = [
     quota_used: '0.00000000',
     rate_limit_rpm: null,
     expires_at: null,
+    never_expires: true,
     created_at: new Date(Date.now() - 60 * DAY_MS).toISOString(),
     last_used_at: null,
   },
@@ -1656,6 +1659,8 @@ export class MockApiClient implements ApiClient {
       quota_used: '0.00000000',
       rate_limit_rpm: input.rate_limit_rpm ?? null,
       expires_at: input.expires_at ?? null,
+      // 没有过期时刻就是不过期；远期值是服务端的口径，演示数据不模拟它。
+      never_expires: input.expires_at == null,
       created_at: new Date().toISOString(),
       last_used_at: null,
     }
@@ -1683,7 +1688,10 @@ export class MockApiClient implements ApiClient {
     if (input.name !== undefined) key.name = input.name
     if (input.quota_limit !== undefined) key.quota_limit = input.quota_limit
     if (input.rate_limit_rpm !== undefined) key.rate_limit_rpm = input.rate_limit_rpm
-    if (input.expires_at !== undefined) key.expires_at = input.expires_at
+    if (input.expires_at !== undefined) {
+      key.expires_at = input.expires_at
+      key.never_expires = input.expires_at === null
+    }
     if (input.status !== undefined) key.status = input.status
     return { ...key }
   }

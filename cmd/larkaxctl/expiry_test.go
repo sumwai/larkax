@@ -2,10 +2,11 @@ package main
 
 import (
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sumwai/larkax/internal/expiry"
 )
 
 // withExpiryNow 把换算用的「现在」换成固定时刻，用完还原。
@@ -122,18 +123,8 @@ func TestTTLExpiryRejectsBeyondStorage(t *testing.T) {
 	if err == nil {
 		t.Fatal("期望报错，却通过了")
 	}
-	if !strings.Contains(err.Error(), foreverExpiresAt) {
-		t.Errorf("错误 = %q，里面没有上限 %s", err.Error(), foreverExpiresAt)
-	}
-}
-
-// TestForeverExpiryIsTheDocumentedInstant 钉住「永久」的唯一取值。
-func TestForeverExpiryIsTheDocumentedInstant(t *testing.T) {
-	if got := foreverExpiry().Format(time.RFC3339); got != "9999-12-31T23:59:59Z" {
-		t.Errorf("foreverExpiry() = %s，期望 9999-12-31T23:59:59Z", got)
-	}
-	if foreverExpiry().Location() != time.UTC {
-		t.Errorf("foreverExpiry() 的时区是 %v，期望 UTC", foreverExpiry().Location())
+	if !strings.Contains(err.Error(), expiry.ForeverRFC3339) {
+		t.Errorf("错误 = %q，里面没有上限 %s", err.Error(), expiry.ForeverRFC3339)
 	}
 }
 
@@ -181,8 +172,8 @@ func TestResolveExpiry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("出错: %v", err)
 		}
-		if !got.Equal(foreverExpiry()) {
-			t.Errorf("得到 %s，期望 %s", got.Format(time.RFC3339), foreverExpiresAt)
+		if !got.Equal(expiry.Forever()) {
+			t.Errorf("得到 %s，期望 %s", got.Format(time.RFC3339), expiry.ForeverRFC3339)
 		}
 	})
 
@@ -192,8 +183,8 @@ func TestResolveExpiry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("出错: %v", err)
 		}
-		if !got.Equal(foreverExpiry()) {
-			t.Errorf("得到 %s，期望 %s", got.Format(time.RFC3339), foreverExpiresAt)
+		if !got.Equal(expiry.Forever()) {
+			t.Errorf("得到 %s，期望 %s", got.Format(time.RFC3339), expiry.ForeverRFC3339)
 		}
 	})
 
@@ -221,42 +212,5 @@ func TestResolveExpiry(t *testing.T) {
 				t.Errorf("错误 = %q，里面没有「不能同时给」", err.Error())
 			}
 		})
-	}
-}
-
-// TestForeverLiteralDefinedOnce 钉住「远期上限只在一处定义」。
-//
-// 帮助文本各自把 9999-12-31 抄一遍时，改常量只改到其中一处，两个名字从那天
-// 起各说各的时刻——而没有任何东西会报错。所以扫包目录下全部非测试源码，
-// 要求这个字面量恰好出现一次，且就在 expiry.go 的常量定义里。
-func TestForeverLiteralDefinedOnce(t *testing.T) {
-	const literal = "9999-12-31"
-	const owner = "expiry.go"
-
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("读包目录失败: %v", err)
-	}
-
-	total := 0
-	sites := make(map[string]int)
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatalf("读 %s 失败: %v", name, err)
-		}
-		if n := strings.Count(string(src), literal); n > 0 {
-			sites[name] = n
-			total += n
-		}
-	}
-
-	if total != 1 || sites[owner] != 1 {
-		t.Errorf("字面量 %q 在非测试源码里出现 %d 次（%v），期望恰好 1 次且在 %s 的 foreverExpiresAt",
-			literal, total, sites, owner)
 	}
 }

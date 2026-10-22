@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sumwai/larkax/internal/expiry"
 )
 
 // 这一组钉 plan 这条命令的两半：参数判据（不连库）与一条走通的完整流程（连库）。
@@ -377,9 +379,9 @@ func TestPlanGrantTTLAndForever(t *testing.T) {
 			"grant", "--user", user, "--plan", planKey, "--ref", foreverRef, "--forever",
 		})
 	})
-	if got := expiryOf(foreverRef); got.UTC().Format(time.RFC3339) != foreverExpiresAt {
+	if got := expiryOf(foreverRef); got.UTC().Format(time.RFC3339) != expiry.ForeverRFC3339 {
 		t.Errorf("--forever 写入 %s，期望 %s",
-			got.UTC().Format(time.RFC3339), foreverExpiresAt)
+			got.UTC().Format(time.RFC3339), expiry.ForeverRFC3339)
 	}
 }
 

@@ -47,6 +47,7 @@ const KEY: ApiKey = {
   quota_used: '42.11840000',
   rate_limit_rpm: 600,
   expires_at: null,
+  never_expires: true,
   created_at: '2026-09-01T00:00:00Z',
   last_used_at: '2026-10-21T00:00:00Z',
 }
@@ -77,6 +78,35 @@ describe('Keys', () => {
     expect(await screen.findByText('还没有 API 密钥')).toBeInTheDocument()
     expect(screen.getByText(/创建第一把密钥，就能用它调用 \/v1 接口/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '创建第一把密钥' })).toBeInTheDocument()
+  })
+
+  // 详情只读 never_expires：下面第一条的 expires_at 是夹具，用来证明页面不看这个值。
+  it('never_expires 为真时显示「不过期」，远期时刻不进页面', async () => {
+    mocks.listKeys.mockResolvedValue({
+      items: [{ ...KEY, expires_at: '9999-12-31T23:59:59Z', never_expires: true }],
+      next_cursor: null,
+    })
+    const user = userEvent.setup()
+    renderKeys()
+
+    await user.click(await screen.findByRole('button', { name: '打开 Production 的操作' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('不过期')).toBeInTheDocument()
+    expect(within(dialog).queryByText(/9999-12-31/)).not.toBeInTheDocument()
+  })
+
+  it('never_expires 为假时按时刻显示', async () => {
+    mocks.listKeys.mockResolvedValue({
+      items: [{ ...KEY, expires_at: '2027-03-04T05:06:00Z', never_expires: false }],
+      next_cursor: null,
+    })
+    const user = userEvent.setup()
+    renderKeys()
+
+    await user.click(await screen.findByRole('button', { name: '打开 Production 的操作' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('2027-03-04 05:06')).toBeInTheDocument()
+    expect(within(dialog).queryByText('不过期')).not.toBeInTheDocument()
   })
 
   it('有密钥时列表显示脱敏串、累计花费与状态', async () => {

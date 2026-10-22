@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/sumwai/larkax/internal/expiry"
 )
 
 // 这一层是「用户级履约操作」的正式入口：user plan / wallet / key / usage。
@@ -61,7 +63,7 @@ grant 建一条订阅，并把面值记进 prepaid:<订阅 ID>。--ref 是发放
 
 过期时间三选一，一次只给一个：--expires-at 是一个必须晚于现在的 RFC3339 时刻；
 --ttl 是从现在起的一段时长（12h、30d、3m、1y，m 是日历月、y 是日历年，按 UTC
-算，目标月没有那一天时夹到月末）；--forever 写远期上限 ` + foreverExpiresAt + `。
+算，目标月没有那一天时夹到月末）；--forever 写远期上限 ` + expiry.ForeverRFC3339 + `。
 
 void 作废一条订阅，把剩余面值转回平台收入。默认按人工作废（canceled）收尾；
 --status expired 表示到期作废。--ref 是作废单号，同样是幂等键；它也可以换成

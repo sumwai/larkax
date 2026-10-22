@@ -439,6 +439,23 @@ active 管理员。对应的装配见 `internal/adminapi` 的 `GroupUsers` 与
   这次 PATCH 断开。
 - 角色改动**立即生效**，不需要吊销会话：控制台每次请求都从 `users` 折角色。
 
+## 控制台接口：密钥
+
+`GET /api/v1/keys` 与 `GET /api/v1/keys/{id}` 返回密钥对象；修改与吊销直接返回
+它，创建响应把它放在 `key` 下（旁边多一个只出现一次的 `secret`）。其中
+「不过期」由服务端给结论：
+
+```json
+{"id": 3, "expires_at": "9999-12-31T23:59:59Z", "never_expires": true}
+```
+
+- `never_expires` 是只读布尔。`expires_at` 为 `null`（历史数据里「没设过」）或等于
+  远期值 `9999-12-31T23:59:59Z`（`larkaxctl apikey --forever` 写下的那个值）时，
+  两者都为 `true`；有真实到期时刻时为 `false`。
+- `expires_at` 的值、类型与是否出现都不变：远期值照原样给出，`null` 照旧缺席。
+  **客户端不要拿它去比时刻**——「不过期」的判定只认 `never_expires`，这样值与
+  比较规则才留在同一处。
+
 ## 响应头
 
 | 头 | 什么时候带 | 说明 |

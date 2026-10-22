@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/auth"
+	"github.com/sumwai/larkax/internal/expiry"
 	"github.com/sumwai/larkax/internal/money"
 )
 
@@ -31,6 +32,7 @@ type keyJSON struct {
 	QuotaUsed    string  `json:"quota_used"`
 	RateLimitRPM *int    `json:"rate_limit_rpm"`
 	ExpiresAt    *string `json:"expires_at"`
+	NeverExpires bool    `json:"never_expires"`
 	LastUsedAt   *string `json:"last_used_at"`
 	CreatedAt    string  `json:"created_at"`
 }
@@ -63,6 +65,7 @@ func newKeyJSON(k auth.Key, used money.Amount) keyJSON {
 		out.QuotaLimit = &limit
 	}
 	out.ExpiresAt = optionalTime(k.ExpiresAt)
+	out.NeverExpires = expiry.IsForever(k.ExpiresAt)
 	out.LastUsedAt = optionalTime(k.LastUsedAt)
 	return out
 }

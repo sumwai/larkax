@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/auth"
+	"github.com/sumwai/larkax/internal/expiry"
 	"github.com/sumwai/larkax/internal/money"
 )
 
@@ -110,7 +111,7 @@ update 一次可以改多项，只改命令行上**真的给出**的那几项：
   --ttl              从现在起算的一段时长：12h、30d、3m、1y。m 是日历月、y 是
                      日历年，目标月没有那一天时夹到月末（1 月 31 日 + 1m 是
                      2 月 28 日，闰年 29 日）。按 UTC 算。
-  --forever          写远期上限 ` + foreverExpiresAt + `，表示不过期。
+  --forever          写远期上限 ` + expiry.ForeverRFC3339 + `，表示不过期。
   --clear-expires-at 同 --forever，旧名。
 
 --expires-at、--ttl、--forever 互斥，一次只给一个。
@@ -883,7 +884,7 @@ func formatQuota(v *money.Amount) string {
 }
 
 func formatTime(v *time.Time, empty string) string {
-	if v == nil || isForeverExpiry(*v) {
+	if expiry.IsForever(v) {
 		// --forever 写的是一个远期时间戳，不是 NULL；人读的那一档把它与
 		// 「没设过」打成同一句话：两种落库值表达的是同一件事。
 		return empty
@@ -920,7 +921,7 @@ func formatStampShort(t time.Time) string {
 
 // formatTimeShort 与 formatTime 同义，只是把时刻截到分钟。
 func formatTimeShort(v *time.Time, empty string) string {
-	if v == nil || isForeverExpiry(*v) {
+	if expiry.IsForever(v) {
 		return empty
 	}
 	return formatStampShort(*v)
