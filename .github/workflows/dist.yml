@@ -19,6 +19,14 @@ on:
         description: '写进二进制的版本号；留空则用 dev-<短 sha>'
         required: false
         default: ''
+      api_mode:
+        description: '控制台连哪一侧：http 连真实 API，mock 用内置演示数据'
+        required: true
+        default: http
+        type: choice
+        options:
+          - http
+          - mock
 
 permissions:
   contents: read
@@ -88,7 +96,24 @@ jobs:
         run: npm ci
 
       - name: 构建
+        env:
+          # 控制台默认是演示数据（`web/src/api/index.ts`：不显式给 http 就用 mock
+          # 客户端）。演示界面上有横幅，但登录页、菜单、数字都长得像真的，
+          # 打错了在部署之后才发现。所以这份产物显式钉住 http。
+          VITE_API_MODE: ${{ inputs.api_mode }}
         run: npm run build
+
+      # 上面那个变量写错时，构建照样成功、产物照样能跑——只是跑在演示数据上。
+      # 检查产物里有没有只有 mock 才有的字段，比看日志可靠：`演示账号` 是
+      # MockApiClient 的固定用户名，真实构建会被 tree-shake 掉。
+      - name: 确认不是演示数据
+        if: inputs.api_mode == 'http'
+        run: |
+          if grep -rqs '演示账号' dist/assets; then
+            echo "::error::产物里带着演示数据（MockApiClient），VITE_API_MODE 没生效。"
+            exit 1
+          fi
+          echo "产物里没有演示数据。"
 
       - uses: actions/upload-artifact@v4
         with:
