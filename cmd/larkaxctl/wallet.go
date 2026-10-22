@@ -35,17 +35,18 @@ const walletShortUsage = `larkaxctl wallet 管理用户钱包。
 用法：
   larkaxctl wallet create --user <ID 或用户名> [--asset <资产>]
   larkaxctl wallet list [--user <ID 或用户名>]
-  larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号> [--asset <资产>]
+  larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号> | --auto-ref [--asset <资产>]
                                   [--destination <收款信息 JSON>] [--dry-run]
-  larkaxctl wallet payout settle --user <ID 或用户名> --amount <金额> --ref <结算单号> --destination <JSON> --by <操作人> [--note <说明>] [--dry-run]
+  larkaxctl wallet payout settle --user <ID 或用户名> --amount <金额> --ref <结算单号> | --auto-ref --destination <JSON> --by <操作人> [--note <说明>] [--dry-run]
   larkaxctl wallet payout approve|reject --id <提现单 ID> --by <操作人> [--note <说明>]
   larkaxctl wallet payout paid --id <提现单 ID> --gateway <通道> [--gateway-ref <凭据号>]
-  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号> [--asset <资产>] [--dry-run]
+  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号> | --auto-ref [--asset <资产>] [--dry-run]
   larkaxctl wallet payment status --order <订单号>
 
 钱包的入账、调账、退款与单用户查询在 larkaxctl user wallet（credit / adjust / refund / show）；
 旧写法 wallet credit|adjust|refund、wallet list --user 仍可用并在 stderr 提示新路径。
-payout 这些动作不动 user 科目，**打款只放行已批准的单子**；单据号必填且是幂等键。
+payout 这些动作不动 user 科目，**打款只放行已批准的单子**；单据号 --ref 与 --auto-ref 二选一，
+给的那个就是幂等键，--auto-ref 现生成 MANUAL_<UTC 日期>_<随机段> 的单号并打进输出（重跑不会幂等）。
 request、settle 与 payment create 支持 --dry-run：打印将要写入的内容后回滚，不动库。
 某一格金额读不出来时打「不可读（超出可表示范围）」并退出 1；更细的边界：larkaxctl help wallet，payout 与 payment 另有各自 help。
 `
@@ -56,18 +57,18 @@ const walletUsage = `larkaxctl wallet 管理用户钱包。
 用法：
   larkaxctl wallet create --user <ID 或用户名> [--asset <资产>]
   larkaxctl wallet list [--user <ID 或用户名>]
-  larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号>
+  larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号> | --auto-ref
                                   [--asset <资产>]
                                   [--destination <收款信息 JSON>]
                                   [--dry-run]
-  larkaxctl wallet payout settle --user <ID 或用户名> --amount <金额> --ref <结算单号>
+  larkaxctl wallet payout settle --user <ID 或用户名> --amount <金额> --ref <结算单号> | --auto-ref
                                  --destination <收款信息 JSON> --by <操作人>
                                  [--note <说明>] [--dry-run]
   larkaxctl wallet payout approve|reject --id <提现单 ID> --by <操作人>
                                          [--note <说明>]
   larkaxctl wallet payout paid --id <提现单 ID> --gateway <通道>
                                [--gateway-ref <凭据号>]
-  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号>
+  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号> | --auto-ref
                                   [--asset <资产>] [--notify-url <回调地址>]
                                   [--dry-run]
   larkaxctl wallet payment status --order <订单号>
@@ -167,6 +168,19 @@ refund 是运营给用户退钱：走账本写一组 refund 分录，借 user:<I
 --ref 会进分录备注（「退款：<原因>（单据 <ref>）」，没给原因时是「退款（单据 <ref>）」）：
 交易号是它的哈希，从单据号算得到交易号、反过来算不回来，不落备注就没有第二条路把这张退款单
 对上这笔账。
+
+# 自动单号（--auto-ref）
+
+credit、adjust、refund、payout request、payout settle、payment create 与
+user plan grant / void 都收 --ref：外部单据号，同时是幂等键。手上还没有外部单号时，
+可以改给 --auto-ref，命令现生成一个 MANUAL_<UTC 日期>_<随机段> 的单号
+（例如 MANUAL_20261023_3f9a1c07b2d4），并把它打进输出，事后按这个串回查。日期按
+UTC 算，同一笔操作在哪台机器、哪个时区敲，单号里的日期都一样。
+
+--auto-ref 必须显式写：两个都不给是参数错（退出 2），两个一起给同样是参数错。
+**重跑一条 --auto-ref 命令是一笔新操作，不会命中幂等**——要重放，把上次打印出来的
+单号用 --ref 再跑一次。它也**不默认打开**：默默生成会让重跑从「什么都不做」变成
+「再做一次」。
 
 # 干跑（--dry-run）
 
@@ -427,6 +441,7 @@ func runWalletCredit(args []string) error {
 	asset := fs.String("asset", "", "")
 	ref := legacyStringFlag(fs, "ref", "idempotency-key", "")
 	stringAlias(fs, ref, "order")
+	autoRef := autoRefFlag(fs)
 	gateway := fs.String("gateway", manualGateway, "")
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
@@ -441,10 +456,11 @@ func runWalletCredit(args []string) error {
 	}
 	// 外部单据号必填且**没有默认值**：默认值会把「操作者忘了给单号」变成两笔
 	// 互不相干的入账，而这两笔在账面上都合法——正是最难事后发现的那种错。
-	orderKey := strings.TrimSpace(*ref)
-	if orderKey == "" {
-		return usageErr(errors.New(
-			"缺少 --ref：它是这笔入账对应的外部单据号，同时是幂等键——重跑同一条命令时靠它认出「已经入过账」"))
+	// --auto-ref 是唯一的例外，而且必须由操作者显式写出来（见 autoref.go）。
+	orderKey, refErr := resolveOrderRef(*ref, *autoRef, missingRefError(
+		"它是这笔入账对应的外部单据号，同时是幂等键——重跑同一条命令时靠它认出「已经入过账」"))
+	if refErr != nil {
+		return refErr
 	}
 	if ctrlErr := checkOrderKey("--ref", orderKey); ctrlErr != nil {
 		return ctrlErr
@@ -524,6 +540,7 @@ func runWalletAdjust(args []string) error {
 	amount := fs.String("amount", "", "")
 	memo := fs.String("memo", "", "")
 	ref := fs.String("ref", "", "")
+	autoRef := autoRefFlag(fs)
 	by := fs.String("by", "", "")
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
@@ -536,10 +553,10 @@ func runWalletAdjust(args []string) error {
 	if strings.TrimSpace(*user) == "" {
 		return usageErr(errors.New("缺少 --user"))
 	}
-	adjustRef := strings.TrimSpace(*ref)
-	if adjustRef == "" {
-		return usageErr(errors.New(
-			"缺少 --ref：它是这笔调账对应的外部单据号，同时是幂等键——重跑同一条命令时靠它认出「已经调过账」"))
+	adjustRef, refErr := resolveOrderRef(*ref, *autoRef, missingRefError(
+		"它是这笔调账对应的外部单据号，同时是幂等键——重跑同一条命令时靠它认出「已经调过账」"))
+	if refErr != nil {
+		return refErr
 	}
 	if ctrlErr := checkOrderKey("--ref", adjustRef); ctrlErr != nil {
 		return ctrlErr

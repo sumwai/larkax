@@ -24,10 +24,10 @@ var walletPayoutHelp = helpText{short: walletPayoutShortUsage, long: walletPayou
 const walletPayoutShortUsage = `larkaxctl wallet payout 商户提现：申请、清算、审批与打款。
 
 用法：
-  larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号>
+  larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号> | --auto-ref
                                   [--asset <资产>] [--destination <收款信息 JSON>]
                                   [--dry-run]
-  larkaxctl wallet payout settle  --user <ID 或用户名> --amount <金额> --ref <结算单号>
+  larkaxctl wallet payout settle  --user <ID 或用户名> --amount <金额> --ref <结算单号> | --auto-ref
                                   --destination <收款信息 JSON> --by <操作人> [--note <说明>]
                                   [--dry-run]
   larkaxctl wallet payout approve --id <提现单 ID> --by <操作人> [--note <说明>]
@@ -38,7 +38,9 @@ request 把申请额挪进这条单子的待付（钱在申请这一步就冻住
 一步建单（直接 approved）并记账；approve 与 reject 记下审批结果（reject 顺带把那笔冻结
 解除），paid 把钱从待付出账。**paid 只放行已批准的单子**：不存在一条不经过批准就能出钱
 的路。settle、approve 与 reject 都要 --by，记的是谁做的（撤回冻结发生在 reject 里，不是
-paid）。--amount、--ref、--destination（settle）与 --gateway 必填。
+paid）。--amount、--destination（settle）与 --gateway 必填。request 与 settle 的单号
+--ref 与 --auto-ref 二选一：--auto-ref 现生成 MANUAL_<UTC 日期>_<随机段> 的单号并打在
+输出里，重跑不会幂等。
 request 与 settle 都会先核商户的分成余额：分成还没记进账本前会被一律拒掉（退出 1），
 那是对的。--destination 必须是一个 JSON 对象，且事后不能改（同一个单号换一份就是冲突，
 退出 4）。
@@ -50,10 +52,10 @@ request 与 settle 都会先核商户的分成余额：分成还没记进账本�
 const walletPayoutUsage = `larkaxctl wallet payout 商户提现：申请、清算、审批与打款。
 
 用法：
-  larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号>
+  larkaxctl wallet payout request --user <ID 或用户名> --amount <金额> --ref <申请单号> | --auto-ref
                                   [--asset <资产>] [--destination <收款信息 JSON>]
                                   [--dry-run]
-  larkaxctl wallet payout settle  --user <ID 或用户名> --amount <金额> --ref <结算单号>
+  larkaxctl wallet payout settle  --user <ID 或用户名> --amount <金额> --ref <结算单号> | --auto-ref
                                   --destination <收款信息 JSON> --by <操作人> [--note <说明>]
                                   [--dry-run]
   larkaxctl wallet payout approve --id <提现单 ID> --by <操作人> [--note <说明>]
@@ -92,6 +94,9 @@ request 建一行 payout_requests 并把申请额挪进待付，分录是：
 分录的备注，逐字是「提现申请（单据 <ref>）」——交易号是它的哈希，从单据号算得到交易号，
 反过来算不回来，不落备注就再没有第二条路把这张申请单对上这笔账。
 
+--auto-ref 是 --ref 的替代：命令现生成一个 MANUAL_<UTC 日期>_<随机段> 的单号并打进
+输出，重跑不会幂等。两个都给、或两个都不给都是参数错（退出 2）。
+
 request 的 --destination 是商户的收款信息，必须是**一个 JSON 对象**（形如 {"bank":"…"}），
 落进 payout_requests.destination；不给就是空对象（settle 那一档必填，见下）。字符串、
 数组与 null 都在连库之前按参数错拒掉（退出 2）：那一列是 jsonb，而打款通道要按字段取值，
@@ -110,9 +115,9 @@ settle 是**平台主动清算**：平台已经决定付这笔钱，于是建单
                                    --destination <收款信息 JSON> --by <操作人> [--note <说明>]
 
     --ref 是结算单号，同时是幂等键：同一个单号重跑只会建一张单、记一次账，回显「已经
-    清算过，本次未改动」。它也进分录备注，逐字是「平台清算（单据 <ref>）」，理由与申请
-    那一条相同。同一个单号配不同的金额、商户或收款信息不是重放，而是冲突（退出 4），
-    一笔都不写。
+    清算过，本次未改动」。它也可以换成 --auto-ref（规则与申请那一条相同）。它也进分录
+    备注，逐字是「平台清算（单据 <ref>）」，理由与申请那一条相同。同一个单号配不同的
+    金额、商户或收款信息不是重放，而是冲突（退出 4），一笔都不写。
 
     --destination 在这一档**必填**：平台已经决定付了，付到哪里必须当场说清；申请那一档
     可以留空，表示商户可能还没有填。--amount 为正，且不超过商户当前的分成余额，超了退出 1、
@@ -252,6 +257,7 @@ func runPayoutRequest(args []string) error {
 	amount := fs.String("amount", "", "")
 	asset := fs.String("asset", "", "")
 	ref := fs.String("ref", "", "")
+	autoRef := autoRefFlag(fs)
 	destination := fs.String("destination", "", "")
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
@@ -264,10 +270,10 @@ func runPayoutRequest(args []string) error {
 	if strings.TrimSpace(*user) == "" {
 		return usageErr(errors.New("缺少 --user"))
 	}
-	requestRef := strings.TrimSpace(*ref)
-	if requestRef == "" {
-		return usageErr(errors.New(
-			"缺少 --ref：它是这张提现单的申请单号，同时是幂等键——重跑同一条命令时靠它认出「已经申请过」"))
+	requestRef, refErr := resolveOrderRef(*ref, *autoRef, missingRefError(
+		"它是这张提现单的申请单号，同时是幂等键——重跑同一条命令时靠它认出「已经申请过」"))
+	if refErr != nil {
+		return refErr
 	}
 	if ctrlErr := checkOrderKey("--ref", requestRef); ctrlErr != nil {
 		return ctrlErr
@@ -388,6 +394,7 @@ func runPayoutSettle(args []string) error {
 	stringAlias(fs, user, "u")
 	amount := fs.String("amount", "", "")
 	ref := fs.String("ref", "", "")
+	autoRef := autoRefFlag(fs)
 	destination := fs.String("destination", "", "")
 	by := fs.String("by", "", "")
 	note := fs.String("note", "", "")
@@ -402,10 +409,10 @@ func runPayoutSettle(args []string) error {
 	if strings.TrimSpace(*user) == "" {
 		return usageErr(errors.New("缺少 --user"))
 	}
-	settleRef := strings.TrimSpace(*ref)
-	if settleRef == "" {
-		return usageErr(errors.New(
-			"缺少 --ref：它是这次清算的单号，同时是幂等键——重跑同一条命令时靠它认出「已经清算过」"))
+	settleRef, refErr := resolveOrderRef(*ref, *autoRef, missingRefError(
+		"它是这次清算的单号，同时是幂等键——重跑同一条命令时靠它认出「已经清算过」"))
+	if refErr != nil {
+		return refErr
 	}
 	if ctrlErr := checkOrderKey("--ref", settleRef); ctrlErr != nil {
 		return ctrlErr

@@ -75,6 +75,9 @@ grant 与 void 接受 --dry-run：走与真跑同一条写路径（同一份校�
 订阅 id 是这次事务从序列取到的值，事务回滚不退号，所以真跑会拿到下一个。作废时剩余
 面值仍然从账本现算。
 
+--ref 也可以换成 --auto-ref：命令现生成一个 MANUAL_<UTC 日期>_<随机段> 的单号并打进
+输出，重跑不会幂等。两个都给、或两个都不给都是参数错（退出 2）。
+
 一把 API Key 能用哪些订阅在 larkaxctl user key plans 下；旧路径 plan key 仍可用。
 
 更细的约定见 docs/cli-reference.md 的「plan」一节。
@@ -310,6 +313,7 @@ func runPlanGrant(args []string) error {
 	stringAlias(fs, user, "u")
 	planKey := fs.String("plan", "", "")
 	ref := fs.String("ref", "", "")
+	autoRef := autoRefFlag(fs)
 	expiresAt := fs.String("expires-at", "", "")
 	ttl := fs.String("ttl", "", "")
 	forever := fs.Bool("forever", false, "")
@@ -326,10 +330,11 @@ func runPlanGrant(args []string) error {
 	if strings.TrimSpace(*planKey) == "" {
 		return usageErr(errors.New("缺少 --plan"))
 	}
-	if strings.TrimSpace(*ref) == "" {
-		return usageErr(errors.New("缺少 --ref：它是这次发放的幂等键"))
+	grantRef, refErr := resolveOrderRef(*ref, *autoRef, missingRefError("它是这次发放的幂等键"))
+	if refErr != nil {
+		return refErr
 	}
-	if err := checkDisplayText("--ref", strings.TrimSpace(*ref)); err != nil {
+	if err := checkDisplayText("--ref", grantRef); err != nil {
 		return err
 	}
 	expires, err := resolveExpiry(providedFlags(fs), expiryFlags{
@@ -352,8 +357,8 @@ func runPlanGrant(args []string) error {
 		}
 
 		input := plans.GrantInput{
-			TxnID:     txnIDFromKey("larkax:plan-grant:v1", strings.TrimSpace(*ref)),
-			Ref:       strings.TrimSpace(*ref),
+			TxnID:     txnIDFromKey("larkax:plan-grant:v1", grantRef),
+			Ref:       grantRef,
 			UserID:    owner.ID,
 			PlanKey:   strings.TrimSpace(*planKey),
 			ExpiresAt: expires,
@@ -394,6 +399,7 @@ func runPlanVoid(args []string) error {
 	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
 	id := fs.Int64("id", 0, "")
 	ref := fs.String("ref", "", "")
+	autoRef := autoRefFlag(fs)
 	status := fs.String("status", string(plans.UserPlanCancelled), "")
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
@@ -405,10 +411,11 @@ func runPlanVoid(args []string) error {
 	if *id <= 0 {
 		return usageErr(errors.New("缺少 --id：要作废哪一条订阅"))
 	}
-	if strings.TrimSpace(*ref) == "" {
-		return usageErr(errors.New("缺少 --ref：它是这次作废的幂等键"))
+	voidRef, refErr := resolveOrderRef(*ref, *autoRef, missingRefError("它是这次作废的幂等键"))
+	if refErr != nil {
+		return refErr
 	}
-	if err := checkDisplayText("--ref", strings.TrimSpace(*ref)); err != nil {
+	if err := checkDisplayText("--ref", voidRef); err != nil {
 		return err
 	}
 	final := plans.UserPlanStatus(strings.TrimSpace(*status))
@@ -421,9 +428,9 @@ func runPlanVoid(args []string) error {
 
 	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
 		input := plans.VoidInput{
-			TxnID:      txnIDFromKey("larkax:plan-void:v1", strings.TrimSpace(*ref)),
+			TxnID:      txnIDFromKey("larkax:plan-void:v1", voidRef),
 			UserPlanID: *id,
-			Ref:        strings.TrimSpace(*ref),
+			Ref:        voidRef,
 			Status:     final,
 		}
 		// 干跑与真跑共用同一个输入与同一条写路径（见 plans.VoidTx）：剩余面值
@@ -858,9 +865,9 @@ func printPlanGrant(w io.Writer, owner auth.User, up plans.UserPlan, applied, dr
 		verb = "将发放"
 	}
 	_, _ = fmt.Fprintf(w,
-		"%s订阅 %d（用户 %s，额度包 %s，到期 %s，面值 %s，剩余 %s）。\n",
+		"%s订阅 %d（用户 %s，额度包 %s，到期 %s，面值 %s，剩余 %s）。发放单号 %s。\n",
 		verb, up.ID, owner.Username, up.PlanKey, formatTimeShort(up.ExpiresAt, "不过期"),
-		up.FaceValue, up.FaceValueRemaining)
+		up.FaceValue, up.FaceValueRemaining, up.Ref)
 }
 
 // printPlanVoid 打印一次作废。
@@ -874,8 +881,8 @@ func printPlanVoid(w io.Writer, up plans.UserPlan, applied, dryRun bool) {
 	if dryRun {
 		verb = "将作废"
 	}
-	_, _ = fmt.Fprintf(w, "%s订阅 %d：状态 %s，剩余面值已转回平台收入。\n",
-		verb, up.ID, up.Status)
+	_, _ = fmt.Fprintf(w, "%s订阅 %d：状态 %s，剩余面值已转回平台收入。作废单号 %s。\n",
+		verb, up.ID, up.Status, up.VoidRef)
 }
 
 // printPlanOrder 打印一个用户的有效扣费顺序。

@@ -23,14 +23,16 @@ var userPlanHelp = helpText{short: userPlanShortUsage, long: userPlanUsage}
 // userPlanShortUsage 是 user plan 的短版：`-h` / `--help` 与参数写错时打的那一份。
 const userPlanShortUsage = `larkaxctl user plan 管理一个用户持有的订阅与扣费顺序。
 用法：
-  larkaxctl user plan grant <用户> <套餐> --ref <发放单号> [--dry-run]
+  larkaxctl user plan grant <用户> <套餐> --ref <发放单号> | --auto-ref [--dry-run]
                              [--expires-at <RFC3339> | --ttl <时长> | --forever]
   larkaxctl user plan list <用户>
-  larkaxctl user plan void <订阅 ID> --ref <作废单号> [--status <expired|canceled>] [--dry-run]
+  larkaxctl user plan void <订阅 ID> --ref <作废单号> | --auto-ref [--status <expired|canceled>]
+                             [--dry-run]
   larkaxctl user plan order show <用户>
   larkaxctl user plan order set <用户> [--order <顺序> | --clear]
 
---ref 是幂等键；order 的三档与 --clear 见长版。
+--ref 与 --auto-ref 二选一，给的那个就是幂等键。--auto-ref 现生成一个
+MANUAL_<UTC 日期>_<随机段> 的单号并打进输出，重跑不会幂等。order 的三档与 --clear 见长版。
 grant 的过期时间三选一：--expires-at、--ttl（12h、30d、3m、1y）或 --forever。
 grant 与 void 的 --dry-run 打印将写入的订阅与分录后回滚。
 更细的边界：larkaxctl user plan help。
@@ -40,22 +42,30 @@ grant 与 void 的 --dry-run 打印将写入的订阅与分录后回滚。
 const userPlanUsage = `larkaxctl user plan 管理一个用户持有的订阅与扣费顺序。
 
 用法：
-  larkaxctl user plan grant <用户> <套餐> --ref <发放单号> [--dry-run]
+  larkaxctl user plan grant <用户> <套餐> --ref <发放单号> | --auto-ref [--dry-run]
                              [--expires-at <RFC3339> | --ttl <时长> | --forever]
   larkaxctl user plan list <用户>
-  larkaxctl user plan void <订阅 ID> --ref <作废单号> [--status <expired|canceled>] [--dry-run]
+  larkaxctl user plan void <订阅 ID> --ref <作废单号> | --auto-ref [--status <expired|canceled>]
+                             [--dry-run]
   larkaxctl user plan order show <用户>
   larkaxctl user plan order set <用户> [--order <顺序> | --clear]
 
 grant 建一条订阅，并把面值记进 prepaid:<订阅 ID>。--ref 是发放单号，也是幂等键：
 同一个单号重跑只会发一次，第二次打「已经发过」。
 
+--ref 与 --auto-ref 二选一，两个都给是参数错。手上还没有外部单号时用 --auto-ref：
+命令现生成一个 MANUAL_<UTC 日期>_<随机段> 的单号（例如 MANUAL_20261023_3f9a1c07b2d4），
+并把它打进输出，事后按这个串回查。日期按 UTC 算，同一笔操作在哪台机器上敲都一样。
+**重跑一条 --auto-ref 命令是一笔新操作，不会命中幂等**；要重放，把上次打印出来的
+单号用 --ref 再跑一次。两个都不给同样是参数错（退出 2）。
+
 过期时间三选一，一次只给一个：--expires-at 是一个必须晚于现在的 RFC3339 时刻；
 --ttl 是从现在起的一段时长（12h、30d、3m、1y，m 是日历月、y 是日历年，按 UTC
 算，目标月没有那一天时夹到月末）；--forever 写远期上限 ` + foreverExpiresAt + `。
 
 void 作废一条订阅，把剩余面值转回平台收入。默认按人工作废（canceled）收尾；
---status expired 表示到期作废。--ref 是作废单号，同样是幂等键。
+--status expired 表示到期作废。--ref 是作废单号，同样是幂等键；它也可以换成
+--auto-ref，规则与 grant 相同。
 
 grant 与 void 都接受 --dry-run：走与真跑同一条写路径，把订阅与分录打出来之后回滚，
 user_plans 与账本一条都不落，作废时的剩余面值仍然从账本现算。**除序列号（订阅 id）外，
@@ -80,12 +90,13 @@ var userWalletHelp = helpText{short: userWalletShortUsage, long: userWalletUsage
 const userWalletShortUsage = `larkaxctl user wallet 管理一个用户的钱包。
 用法：
   larkaxctl user wallet show <用户>
-  larkaxctl user wallet credit <用户> --amount <金额> --ref <外部单据号> [--asset <资产>] [--gateway <来源>] [--dry-run]
-  larkaxctl user wallet adjust <用户> --amount <带符号金额> --ref <外部单据号> --memo <原因> --by <操作人> [--dry-run]
-  larkaxctl user wallet refund <用户> --amount <金额> --ref <外部单据号> [--memo <原因>] [--asset <资产>]
+  larkaxctl user wallet credit <用户> --amount <金额> --ref <外部单据号> | --auto-ref [--asset <资产>] [--gateway <来源>] [--dry-run]
+  larkaxctl user wallet adjust <用户> --amount <带符号金额> --ref <外部单据号> | --auto-ref --memo <原因> --by <操作人> [--dry-run]
+  larkaxctl user wallet refund <用户> --amount <金额> --ref <外部单据号> | --auto-ref [--memo <原因>] [--asset <资产>]
                         [--merchant <ID 或用户名> --merchant-share <金额>] [--upstream-cost <金额>] [--dry-run]
 
-credit / adjust / refund 要求钱包已存在；单据号必填且是幂等键。
+credit / adjust / refund 要求钱包已存在；--ref 与 --auto-ref 二选一，给的那个就是幂等键。
+--auto-ref 现生成一个 MANUAL_<UTC 日期>_<随机段> 的单号并打进输出，重跑不会幂等。
 三条都支持 --dry-run：打印将写入的分录后回滚，不动库。
 更细的边界：larkaxctl user wallet help。
 `
@@ -95,11 +106,11 @@ const userWalletUsage = `larkaxctl user wallet 管理一个用户的钱包。
 
 用法：
   larkaxctl user wallet show <用户>
-  larkaxctl user wallet credit <用户> --amount <金额> --ref <外部单据号>
+  larkaxctl user wallet credit <用户> --amount <金额> --ref <外部单据号> | --auto-ref
                                   [--asset <资产>] [--gateway <来源>] [--dry-run]
-  larkaxctl user wallet adjust <用户> --amount <带符号金额> --ref <外部单据号>
+  larkaxctl user wallet adjust <用户> --amount <带符号金额> --ref <外部单据号> | --auto-ref
                                   --memo <原因> --by <操作人> [--dry-run]
-  larkaxctl user wallet refund <用户> --amount <金额> --ref <外部单据号>
+  larkaxctl user wallet refund <用户> --amount <金额> --ref <外部单据号> | --auto-ref
                                   [--asset <资产>] [--memo <原因>]
                                   [--merchant <ID 或用户名> --merchant-share <金额>]
                                   [--upstream-cost <金额>] [--dry-run]
@@ -110,6 +121,12 @@ show 列出这个用户的钱包与余额快照，一栏一个字段：用户 ID
 credit / adjust / refund 都走账本写分录，并在同一个事务里更新余额快照。
 --ref 是外部单据号，必填且是幂等键：同一个单号重跑只会入账一次，配不同的金额、
 用户或原因则是冲突（退出 4），一笔都不写。三条命令都要求钱包已经存在。
+
+--ref 与 --auto-ref 二选一，两个都给是参数错。手上还没有外部单号时用 --auto-ref：
+命令现生成一个 MANUAL_<UTC 日期>_<随机段> 的单号（例如 MANUAL_20261023_3f9a1c07b2d4），
+并把它打进输出（「幂等键 …」那一栏），事后按这个串回查。日期按 UTC 算，同一笔操作
+在哪台机器上敲都一样。**重跑一条 --auto-ref 命令是一笔新操作，不会命中幂等**；要重放，
+把上次打印出来的单号用 --ref 再跑一次。两个都不给同样是参数错（退出 2）。
 
 adjust 的 --amount 带符号；--memo 与 --by 必填。refund 的 --merchant 与
 --merchant-share 要一起给。
