@@ -112,6 +112,17 @@ export interface ModelPricing {
   /** null 表示没有配置，与 0（免费）不是一回事。 */
   cache_read_per_mtok: Money | null
   cache_write_per_mtok: Money | null
+  /** 每 100 万推理 token 的参考价；null 表示没有配置。 */
+  reasoning_per_mtok: Money | null
+  /**
+   * 每次请求的固定费用；规则没写（或写了 0）时省略。
+   * 量纲与每百万 token 的金额不同，不能相加。
+   */
+  request?: Money
+  /** 每次请求的最低消费；没写时省略。量纲同 `request`。 */
+  minimum?: Money
+  /** 非 token 计量项的单价（每个计量单位多少元），键是计量项名；没有时省略。 */
+  units?: Record<string, Money>
 }
 
 export interface ModelModalities {
@@ -125,6 +136,14 @@ export interface ModelOffer {
   merchant: string | null
   /** 每 1000 个输入 token 的金额。 */
   price: Money
+  /** 各 token 维度的千 token 金额；只含规则写过的维度。 */
+  prices?: Partial<Record<PriceDimension, Money>>
+  /** 每次请求的固定费用；为 0 或没写时省略。量纲与 token 价不同，不能相加。 */
+  request?: Money
+  /** 每次请求的最低消费；为 0 或没写时省略。 */
+  minimum?: Money
+  /** 非 token 计量项的单价（每个计量单位多少元）；没有时省略。 */
+  units?: Record<string, Money>
 }
 
 export interface Model {
@@ -165,6 +184,15 @@ export interface SupplierPrice {
   price: Money
   /** 只含声明过的维度；一个都没有时省略整个字段。 */
   prices?: Partial<Record<PriceDimension, Money>>
+  /**
+   * 每次请求的固定费用；为 0 或没写时省略。量纲与 `prices` 不同——那是
+   * 「每 1000 个 token 多少元」，这是「每次请求多少元」，不能相加。
+   */
+  request?: Money
+  /** 每次请求的最低消费；为 0 或没写时省略。 */
+  minimum?: Money
+  /** 非 token 计量项的单价（每个计量单位多少元），键是计量项名；没有时省略。 */
+  units?: Record<string, Money>
   channel_count: number
 }
 

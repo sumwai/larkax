@@ -128,7 +128,8 @@ type Offer struct {
 
 // ModelOffers 是一个模型的全部展示报价与统计。
 type ModelOffers struct {
-	// Offers 按价格升序；没有任何能算出价的渠道时为空。
+	// Offers 按报价排序（判据见 lessOffer）：有 token 价的在前，只有一次性
+	// 费用的在后。没有任何能算出价的渠道时为空。
 	Offers []Offer
 	// UnpricedChannels 是在供、但算不出价的渠道条数。
 	//
@@ -149,8 +150,10 @@ type ModelOffers struct {
 // 一次，并用 ChannelCount 记条数。只比 prompt 是不够的——两条渠道的输入价
 // 相同、缓存价不同，是两套不同的报价，折成一条会让调用方按错的价格估算。
 //
-// 排序按 prompt 那一项的价格升序；规则只有 completion 时用第一个存在的
-// 维度代替。同价时平台自营排在最前，再按商家名、整套价。
+// 排序先看量纲：有 token 价的报价按 prompt 那一项升序（规则只有 completion
+// 时用第一个存在的维度代替），只有一次性费用的排在它们之后，组内按每请求
+// 固定费、再按最低消费升序。两个量纲不可比，混排会让「按次收费」看起来像
+// 最便宜的一档。同一组内平台自营在前，再按商家名、整套价、渠道 id。
 //
 // 两个 HTTP 表面（调用方清单与控制台）共用这一处折叠：各写一遍的那天，
 // 就是「接口上按 A 排序、页面上按 B 排序」开始的那天。
@@ -206,7 +209,7 @@ func GroupByModel(prices []CandidatePrice, candidates []Candidate) map[string]Mo
 		out[model] = ModelOffers{UnpricedChannels: unpriced}
 	}
 	for model, byKey := range grouped {
-		offers := make([]Offer, 0, len(byKey))
+		sortable := make([]sortableOffer, 0, len(byKey))
 		for _, item := range byKey {
 			offer := Offer{
 				Price:        item.sample.Prices["prompt"],
@@ -221,28 +224,70 @@ func GroupByModel(prices []CandidatePrice, candidates []Candidate) map[string]Mo
 				merchant := item.sample.Merchant
 				offer.Merchant = &merchant
 			}
-			offers = append(offers, offer)
+			sortable = append(sortable, sortableOffer{offer: offer, channelID: item.sample.ChannelID})
 		}
-		sort.SliceStable(offers, func(i, j int) bool {
-			if cmp := offerSortPrice(offers[i].Prices).Cmp(offerSortPrice(offers[j].Prices)); cmp != 0 {
-				return cmp < 0
-			}
-			if (offers[i].Merchant == nil) != (offers[j].Merchant == nil) {
-				return offers[i].Merchant == nil
-			}
-			if offers[i].Merchant != nil && *offers[i].Merchant != *offers[j].Merchant {
-				return *offers[i].Merchant < *offers[j].Merchant
-			}
-			return priceSignature(offers[i].Prices, offers[i].Request, offers[i].Minimum,
-				offers[i].Units) < priceSignature(offers[j].Prices, offers[j].Request,
-				offers[j].Minimum, offers[j].Units)
-		})
+		sort.SliceStable(sortable, func(i, j int) bool { return lessOffer(sortable[i], sortable[j]) })
 
+		offers := make([]Offer, 0, len(sortable))
+		for _, item := range sortable {
+			offers = append(offers, item.offer)
+		}
 		entry := out[model]
 		entry.Offers = offers
 		out[model] = entry
 	}
 	return out
+}
+
+// sortableOffer 是排序期的报价：对外形状加上一个只用于定序的渠道 id。
+//
+// 渠道 id 不进 Offer——它对调用方没有意义，也不该出现在公开响应里；但排序
+// 需要一个能把「三个键全相同」的两笔报价分开的比较键，而它恰好是现成且
+// 稳定的：同一个渠道在同一份数据里永远给出同一个 id。没有它，末位比较会
+// 落到 map 的迭代顺序上，同一份数据两次请求可能给出不同的行序。
+type sortableOffer struct {
+	offer     Offer
+	channelID int64
+}
+
+// lessOffer 是报价的排序判据，从主键到末位兜底依次比较：
+//
+//  1. **有 token 价的排在前**，组内按 offerSortPrice 升序。没有 token 价的
+//     报价在 offerSortPrice 上的零值会让它排到最前，看起来最便宜；而它与
+//     每千 token 的金额量纲不同，不能这样混排。
+//  2. **只有一次性费用的排在后面**，组内按每请求固定费、再按最低消费升序。
+//     两者都是「每次请求多少元」，彼此可比。
+//  3. 平台自营在前，再按商家名、整套价的内容。
+//  4. 渠道 id——保证这是一个全序：任意两笔报价都有确定的先后。
+func lessOffer(a, b sortableOffer) bool {
+	aHas, bHas := len(a.offer.Prices) > 0, len(b.offer.Prices) > 0
+	if aHas != bHas {
+		return aHas
+	}
+	if aHas {
+		if cmp := offerSortPrice(a.offer.Prices).Cmp(offerSortPrice(b.offer.Prices)); cmp != 0 {
+			return cmp < 0
+		}
+	} else {
+		if cmp := a.offer.Request.Cmp(b.offer.Request); cmp != 0 {
+			return cmp < 0
+		}
+		if cmp := a.offer.Minimum.Cmp(b.offer.Minimum); cmp != 0 {
+			return cmp < 0
+		}
+	}
+	if (a.offer.Merchant == nil) != (b.offer.Merchant == nil) {
+		return a.offer.Merchant == nil
+	}
+	if a.offer.Merchant != nil && *a.offer.Merchant != *b.offer.Merchant {
+		return *a.offer.Merchant < *b.offer.Merchant
+	}
+	aSignature := priceSignature(a.offer.Prices, a.offer.Request, a.offer.Minimum, a.offer.Units)
+	bSignature := priceSignature(b.offer.Prices, b.offer.Request, b.offer.Minimum, b.offer.Units)
+	if aSignature != bSignature {
+		return aSignature < bSignature
+	}
+	return a.channelID < b.channelID
 }
 
 // priceSignature 把一整套价写成稳定的字符串，用作去重与排序的键。
@@ -286,8 +331,11 @@ func priceSignature(prices map[string]money.Amount, request, minimum money.Amoun
 	return b.String()
 }
 
-// offerSortPrice 取排序键：prompt 价；规则没写 prompt 时用第一个存在的
-// 维度。规则至少写一项，所以除非 Prices 为空（只有固定费的规则），一定有值。
+// offerSortPrice 取 token 维度的排序键：prompt 价；规则没写 prompt 时用
+// 第一个存在的维度。
+//
+// 调用点只在 Prices 非空时用它：没有 token 价的报价（只有固定费）在
+// lessOffer 里先被分到另一组，零值不再是一个排序位置。
 func offerSortPrice(prices map[string]money.Amount) money.Amount {
 	if value, ok := prices["prompt"]; ok {
 		return value

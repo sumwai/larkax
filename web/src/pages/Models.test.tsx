@@ -26,6 +26,7 @@ const ITEMS: Model[] = [
       output_per_mtok: '15.00000000',
       cache_read_per_mtok: '0.30000000',
       cache_write_per_mtok: null,
+      reasoning_per_mtok: null,
     },
     offers: [
       { merchant: 'acme', price: '0.00350000' },

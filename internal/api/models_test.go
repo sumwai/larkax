@@ -135,8 +135,9 @@ func get(h *Handler, path string) *httptest.ResponseRecorder {
 
 // modelsBody 是清单响应里本文件要断言的部分。
 type modelsBody struct {
-	Object string      `json:"object"`
-	Data   []modelJSON `json:"data"`
+	Object   string      `json:"object"`
+	Currency string      `json:"currency"`
+	Data     []modelJSON `json:"data"`
 }
 
 // 清单只列**有渠道在供**的模型，形状按 OpenAI 给。
@@ -203,6 +204,43 @@ func TestModelsListEmptyDataIsArray(t *testing.T) {
 	}
 	if string(raw.Data) != "[]" {
 		t.Errorf("data = %s，期望 []", raw.Data)
+	}
+}
+
+// 清单顶层带币种：金额有了单位，调用方不必去猜。
+//
+// 值取自 Handler.DefaultAsset——装配层从 settings 读一次，控制台的 currency
+// 与结算资产用的是同一个。这里用 USD 而不是 CNY 做非空那一格，是为了钉住
+// 「读的是这个字段」：写死成 CNY 的实现会在这里红。（USD 不是账本支持的
+// 品种，装配层会把它挡在启动那一步；这条用例只验清单不自己发明币种。）
+func TestModelsListCarriesCurrency(t *testing.T) {
+	cases := []struct {
+		name  string
+		asset string
+		want  string
+	}{
+		{"取自装配层", "USD", "USD"},
+		// 空值回落与控制台一致（见 consoleapi.New）；装配正常不会给出空值。
+		{"空值回落到 CNY", "", "CNY"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _ := newModelsHandler(&fakeSupply{supplies: suppliesOf("alpha")},
+				&fakeModelCatalog{models: []catalog.Model{{CanonicalName: "alpha"}}})
+			h.DefaultAsset = tc.asset
+
+			rec := get(h, PathModels)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
+			}
+			var body modelsBody
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("响应不是 JSON: %v（%s）", err, rec.Body)
+			}
+			if body.Currency != tc.want {
+				t.Errorf("currency = %q，期望 %q", body.Currency, tc.want)
+			}
+		})
 	}
 }
 

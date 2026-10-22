@@ -292,6 +292,13 @@ export const en: Record<MessageKey, string> = {
   'models.detail.suppliers': 'Supplier prices',
   'models.detail.suppliersHint':
     'Each cell is the price of 1000 tokens of that dimension, in {currency}.',
+  'models.detail.supplierCharges': 'Other charges',
+  'models.detail.chargesHint':
+    'These are the fixed fee per request, the minimum charge per request, and per-unit prices for metered items. They are a different unit from the per-1000-token amounts above and are not added to them. Currency: {currency}.',
+  'models.detail.requestFee': 'Fixed fee / request',
+  'models.detail.minimumFee': 'Minimum / request',
+  'models.detail.unitFee': 'Unit prices',
+  'models.detail.unitPrice': '{name} per unit: {price}',
   'models.detail.merchant': 'Merchant',
   'models.detail.platform': 'Platform',
   'models.detail.channelCount': 'Channels',

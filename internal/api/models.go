@@ -10,6 +10,7 @@ import (
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channels"
+	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/observe"
 	"github.com/sumwai/larkax/internal/pricing"
@@ -111,9 +112,35 @@ type modelJSON struct {
 //
 // Data 从空切片开始构造（见 serveModels）：目录空或无渠道在供是正常结果，
 // 序列化成 `null` 会让一部分 SDK 的解码直接失败。
+//
+// Currency 是这里多加的一项，与 offers 一样是向后兼容的加法：OpenAI 的
+// Model 列表本来没有它，不读这个字段的客户端不受影响。
 type modelListJSON struct {
-	Object string      `json:"object"`
-	Data   []modelJSON `json:"data"`
+	Object string `json:"object"`
+	// Currency 是清单里所有金额（`offers` 的 price / prices / request /
+	// minimum / units）的币种。
+	//
+	// 单币种部署：值与控制台的 currency 同源，都是装配层从 settings 的
+	// billing.default_asset 读出来的那一个（见 Handler.currency）。不给的话
+	// 调用方拿到一串金额却不知道是人民币还是美元，只能去猜。
+	Currency string      `json:"currency"`
+	Data     []modelJSON `json:"data"`
+}
+
+// currency 是只读清单里金额的币种。
+//
+// 取自 Handler.DefaultAsset：装配层从 settings 读一次，这个值同时喂控制台的
+// currency 与结算资产。本包不第二次读 settings——两份读取在配置改动后可能
+// 短暂不一致，而「控制台说人民币、接口说美元」是一类查不出来的分歧。
+//
+// 空值回落到 CNY，与控制台那一处的回落相同（见 consoleapi.New）。这与结算
+// 路径有意不同：那里空值会让每个请求失败，因为记错品种会写坏账；而这里只
+// 是展示，两个响应在同一个装配下不该给出两种币种。
+func (h *Handler) currency() string {
+	if h.DefaultAsset == "" {
+		return string(ledger.AssetCNY)
+	}
+	return h.DefaultAsset
 }
 
 // serveModels 处理 GET /v1/models。
@@ -129,7 +156,11 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, jsonBody(modelListJSON{Object: "list", Data: items}))
+	writeJSON(w, http.StatusOK, jsonBody(modelListJSON{
+		Object:   "list",
+		Currency: h.currency(),
+		Data:     items,
+	}))
 }
 
 // serveModel 处理 GET /v1/models/{id}。

@@ -55,7 +55,7 @@ type modelDetailJSON struct {
 	UpdatedAt       string  `json:"updated_at"`
 
 	// Suppliers 是供应这个模型、且能算出价的商家报价；同一商家可能有多套
-	// 维度价，各占一行。按价格升序。
+	// 维度价，各占一行。排序见 pricing.GroupByModel：有 token 价的在前。
 	//
 	// 一条报价都算不出来的模型仍然返回 200（可见性只看供给），这时整个字段
 	// 省略：空数组会被读成「问了，但没有人报价」，而实际是「还没有定价」。

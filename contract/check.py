@@ -435,6 +435,12 @@ def openai_models(ctx: Ctx) -> str:
     expected = ctx.model(MODELS_SUFFIX)
     listing = ctx.client.models.list()
     check("object", listing.object, "list")
+    # 顶层币种：金额有了单位，调用方不必猜。读 model_extra 而不是
+    # getattr(listing, "currency", None)——SDK 丢弃未知字段时后者也是 None，
+    # 这条断言就永远是空的。这里断的是**默认值**：契约环境不覆盖
+    # billing.default_asset，用的是迁移里那条种子（CNY）。
+    listing_extras = getattr(listing, "model_extra", None) or {}
+    check("currency", listing_extras.get("currency"), "CNY")
     by_id = {item.id: item for item in listing.data}
     check_true(f"models.list() 里没有 {expected}：{sorted(by_id)}", expected in by_id)
 
