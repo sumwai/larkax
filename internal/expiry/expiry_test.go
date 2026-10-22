@@ -14,10 +14,13 @@ import (
 // TestForever 钉住「永久」的唯一取值。
 //
 // 字面量写死在这里是故意的：拿 ForeverRFC3339 自己断言自己，常量写错了
-// 这条用例照样绿。本文件也是全仓唯一允许出现这个字面量的测试文件。
+// 这条用例照样绿。本文件也是 Go 侧唯一允许出现这个字面量的测试文件。
 func TestForever(t *testing.T) {
-	if got := Forever().Format(time.RFC3339); got != "9999-12-31T23:59:59Z" {
-		t.Errorf("Forever() = %s，期望 %s", got, ForeverRFC3339)
+	// 断言与失败信息用同一个字面量：常量写错了，报出来的期望值才不会
+	// 跟着常量一起错，读的人一眼能看出两边不一致。
+	const want = "9999-12-31T23:59:59Z"
+	if got := Forever().Format(time.RFC3339); got != want {
+		t.Errorf("Forever() = %s，期望 %s", got, want)
 	}
 	if Forever().Location() != time.UTC {
 		t.Errorf("Forever() 的时区是 %v，期望 UTC", Forever().Location())
@@ -59,18 +62,27 @@ func TestIsForever(t *testing.T) {
 // 帮助文本、控制台或别处各自把远期值抄一遍时，改常量只改到其中一处，
 // 两个名字从那天起各说各的时刻——而没有任何东西会报错。所以扫全仓 .go：
 // 非测试源码里这个值只能出现在 expiry.go 的常量定义里；测试里只能出现在
-// 本文件 TestForever 的那一条断言里。
+// 本文件 TestForever 的那个期望值里。
 //
-// 本文件里那条例外不是「测试里可以随便抄」的口子：断言的那个字面量正是
-// 用来发现常量被改错的钉子，其余地方（包括别的测试）一律要走常量。
+// 本文件里那条例外不是「测试里可以随便抄」的口子：那个期望值正是用来发现
+// 常量被改错的钉子，其余地方（包括别的测试）一律要走常量。
 func TestForeverLiteralDefinedOnce(t *testing.T) {
-	// 不把这个值直接写在这里：那样扫描器自己就成了第二处。
-	needle := strings.Split(ForeverRFC3339, "T")[0]
+	// needle 用拼接写，扫描器自己就不算第二处；但它**不跟着常量走**：
+	// 常量被改成别的年份时，老值若还留在别处的拷贝里，扫描必须看得见它。
+	// 从常量取 needle 的话，扫描范围会跟着常量一起挪走，那些拷贝反而落在
+	// 范围外——常量换年份这条扫描也就悄悄失效了。下面的断言让改常量的人
+	// 必须连这里一起改。
+	needle := "9999-" + "12-31"
+	if !strings.HasPrefix(ForeverRFC3339, needle) {
+		t.Fatalf("ForeverRFC3339 = %q 不再以 %q 开头：换年份时这条扫描要跟着改", ForeverRFC3339, needle)
+	}
 	const owner = "internal/expiry/expiry.go"
 	const testException = "internal/expiry/expiry_test.go"
 
-	// time.Date(9999, 12, 31, …) 绕开了常量，同样要红。
-	dateCall := regexp.MustCompile(`time\.Date\(\s*9999\s*,\s*12\s*,\s*31`)
+	// time.Date(9999, 12, 31, …) 与 time.Date(9999, time.December, 31, …) 都
+	// 绕开了常量，同样要红。只认这两种参数写法：time.Unix 换算出来的时刻、
+	// 或者先解析再加减出来的值，它挡不住，那类写法靠审查。
+	dateCall := regexp.MustCompile(`time\.Date\(\s*9999\s*,\s*(12|time\.December)\s*,\s*31`)
 
 	var (
 		productionTotal int
@@ -145,17 +157,17 @@ func TestForeverLiteralDefinedOnce(t *testing.T) {
 		}
 	})
 
-	t.Run("测试里只有断言那一行", func(t *testing.T) {
+	t.Run("测试里只有期望值那一处", func(t *testing.T) {
 		if testTotal != 1 || len(testSites) != 1 ||
 			testSites[0] != testException+"×1" {
-			t.Errorf("字面量 %q 在测试文件里出现 %d 次（%v），期望只有 %s 的 TestForever 那一条断言",
+			t.Errorf("字面量 %q 在测试文件里出现 %d 次（%v），期望只有 %s 的 TestForever 那个期望值",
 				needle, testTotal, testSites, testException)
 		}
 	})
 
 	t.Run("不用 time.Date 绕开常量", func(t *testing.T) {
 		if len(dateSites) > 0 {
-			t.Errorf("非测试源码用 time.Date(9999, 12, 31, …) 绕开了常量（%v），请改走 expiry.Forever()",
+			t.Errorf("非测试源码用 time.Date(9999, 12 或 time.December, 31, …) 绕开了常量（%v），请改走 expiry.Forever()",
 				dateSites)
 		}
 	})

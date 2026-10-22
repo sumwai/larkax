@@ -441,9 +441,14 @@ active 管理员。对应的装配见 `internal/adminapi` 的 `GroupUsers` 与
 
 ## 控制台接口：密钥
 
-`GET /api/v1/keys` 返回密钥对象的分页（`items` 里是同一形状的对象），
-`GET /api/v1/keys/{id}` 返回单个密钥对象；修改与吊销直接返回它，创建响应把它
-放在 `key` 下（旁边多一个只出现一次的 `secret`）。其中「不过期」由服务端给结论：
+`GET /api/v1/keys` 返回密钥对象的分页：`items` 是这一页的密钥对象，`next_cursor`
+在还有下一页时给出、取完时为 `null`，翻页时把它原样作为 `?cursor=` 传回。
+`GET /api/v1/keys/{id}` 返回单个密钥对象。
+
+修改用 `PATCH /api/v1/keys/{id}`，吊销用 `POST /api/v1/keys/{id}/revoke`
+（不是 `DELETE`：吊销只是把状态改成 `revoked`，这把 key 仍然留在列表里）。
+两者都直接返回密钥对象；创建响应把它放在 `key` 下，旁边多一个只出现一次的
+`secret`。其中「不过期」由服务端给结论，下面是单个密钥对象的节选：
 
 ```json
 {"id": 3, "expires_at": "9999-12-31T23:59:59Z", "never_expires": true}

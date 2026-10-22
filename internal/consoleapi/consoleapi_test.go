@@ -1050,7 +1050,13 @@ func TestKeyNeverExpires(t *testing.T) {
 	f.keys.put(auth.Key{ID: 2, UserID: 7, Status: "active", CreatedAt: testNow})
 	f.keys.put(auth.Key{ID: 3, UserID: 7, Status: "active", CreatedAt: testNow, ExpiresAt: &realExpiry})
 
+	// 三把都显式登记，期望值不留默认：没登记的 id 不该在响应里出现，也不该
+	// 被 map 的零值当成「期望 false」而放过。expires_at 的期望值里 nil 表示
+	// 库里是 NULL。
+	foreverAt := expiry.ForeverRFC3339
+	realAt := "2030-01-02T03:04:05Z"
 	want := map[int64]bool{1: true, 2: true, 3: false}
+	wantExpiresAt := map[int64]*string{1: &foreverAt, 2: nil, 3: &realAt}
 
 	rec := f.authed(t, http.MethodGet, PathPrefix+"keys", "")
 	if rec.Code != http.StatusOK {
@@ -1064,9 +1070,13 @@ func TestKeyNeverExpires(t *testing.T) {
 		t.Fatalf("列出 %d 把 key，期望 3", len(page.Items))
 	}
 	for _, item := range page.Items {
-		if item.NeverExpires != want[item.ID] {
+		never, ok := want[item.ID]
+		if !ok {
+			t.Fatalf("列表里出现未登记的 id=%d", item.ID)
+		}
+		if item.NeverExpires != never {
 			t.Errorf("列表里 id=%d 的 never_expires = %v，期望 %v",
-				item.ID, item.NeverExpires, want[item.ID])
+				item.ID, item.NeverExpires, never)
 		}
 	}
 
@@ -1085,14 +1095,14 @@ func TestKeyNeverExpires(t *testing.T) {
 				id, got.NeverExpires, want[id])
 		}
 		// expires_at 的值与类型都不动：远期值照打，库里是 NULL 时字段照旧出现、值为 null。
-		if id == 2 {
-			if got.ExpiresAt != nil {
-				t.Errorf("NULL 那一把的 expires_at = %q，期望 null", *got.ExpiresAt)
-			}
-		} else if got.ExpiresAt == nil {
-			t.Errorf("id=%d 的 expires_at 不见了", id)
-		} else if id == 1 && *got.ExpiresAt != expiry.ForeverRFC3339 {
-			t.Errorf("远期那一把的 expires_at = %q，期望 %q", *got.ExpiresAt, expiry.ForeverRFC3339)
+		wantAt := wantExpiresAt[id]
+		switch {
+		case wantAt == nil && got.ExpiresAt != nil:
+			t.Errorf("NULL 那一把的 expires_at = %q，期望 null", *got.ExpiresAt)
+		case wantAt != nil && got.ExpiresAt == nil:
+			t.Errorf("id=%d 的 expires_at 不见了，期望 %q", id, *wantAt)
+		case wantAt != nil && *got.ExpiresAt != *wantAt:
+			t.Errorf("id=%d 的 expires_at = %q，期望 %q", id, *got.ExpiresAt, *wantAt)
 		}
 
 		var raw map[string]any

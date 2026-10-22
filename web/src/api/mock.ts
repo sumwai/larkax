@@ -1690,6 +1690,7 @@ export class MockApiClient implements ApiClient {
     if (input.rate_limit_rpm !== undefined) key.rate_limit_rpm = input.rate_limit_rpm
     if (input.expires_at !== undefined) {
       key.expires_at = input.expires_at
+      // 没有过期时刻就是不过期；远期值是服务端的口径，演示数据不模拟它。
       key.never_expires = input.expires_at === null
     }
     if (input.status !== undefined) key.status = input.status
