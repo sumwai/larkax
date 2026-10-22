@@ -1,6 +1,11 @@
 import { useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { api } from '../../api'
-import type { OpsModel, OpsModelCreateInput, OpsModelInput } from '../../api/types'
+import type {
+  ChannelAdapter,
+  OpsModel,
+  OpsModelCreateInput,
+  OpsModelInput,
+} from '../../api/types'
 import { useI18n } from '../../i18n'
 import { useSite } from '../../site/SiteProvider'
 import { useAsync } from '../../hooks/useAsync'
@@ -18,6 +23,7 @@ import { IconPlus, IconTrash } from '../../components/icons'
 import { ActionSheet } from '../../components/ActionSheet'
 import { MobileCard, MobileList } from '../../components/MobileList'
 import { Tabs } from '../../components/Tabs'
+import { deriveAdapterDefaults } from './catalog-derive'
 import { Field, InputError, OpsLoadError, SearchBox } from './common'
 import { linesToList, listToLines, useConfirm } from './common-helpers'
 import { isDirty, useCloseGuard } from './guard'
@@ -124,6 +130,9 @@ export function OpsModels() {
   const client = api.admin
   const { show: toast } = useToast()
   const { data, error, loading, reload } = useAsync(() => client.listModels(), [])
+  // 只用来带出端点、按协议推定模态。选中的是表单里的一次选择，不随模型存下来：
+  // 模型可以在多条端点上被服务，那种情况选「不指定」。
+  const adapters = useAsync<ChannelAdapter[]>(() => client.listAdapters(), [])
   const confirm = useConfirm()
   const compact = useIsCompact()
   const [editing, setEditing] = useState<OpsModel | null>(null)
@@ -133,6 +142,11 @@ export function OpsModels() {
   const [form, setForm] = useState<ModelForm>(EMPTY_FORM)
   // 打开时的那份值：改动过的话，关窗前要再问一句。
   const [initialForm, setInitialForm] = useState<ModelForm>(EMPTY_FORM)
+  // 选中的适配器类型；'' 是「不指定」，端点与模态都手填。
+  const [adapterType, setAdapterType] = useState('')
+  // 模态是不是「表单里现有的值」：编辑时目录里的既有值、用户改过的值都算。
+  // 是的话不再按协议重推——那会把采集过的事实或人的输入冲掉。
+  const [modalitiesTouched, setModalitiesTouched] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   // 当前分组与「上一次次校验失败在哪一组」。后者只用来画标记：用户改了值
@@ -148,6 +162,8 @@ export function OpsModels() {
   const openCreate = () => {
     setForm(EMPTY_FORM)
     setInitialForm(EMPTY_FORM)
+    setAdapterType('')
+    setModalitiesTouched(false)
     setFormError(null)
     setTab('basic')
     setErrorTab(null)
@@ -159,6 +175,9 @@ export function OpsModels() {
     const next = formOf(model)
     setForm(next)
     setInitialForm(next)
+    setAdapterType('')
+    // 既有模型的两栏模态是目录里采集过的事实，不是可以重推的默认值。
+    setModalitiesTouched(true)
     setFormError(null)
     setTab('basic')
     setErrorTab(null)
@@ -169,6 +188,8 @@ export function OpsModels() {
   const closeForm = () => {
     setCreating(false)
     setEditing(null)
+    setAdapterType('')
+    setModalitiesTouched(false)
     setFormError(null)
     setTab('basic')
     setErrorTab(null)
@@ -299,6 +320,49 @@ export function OpsModels() {
     return errorTab ? document.getElementById(`model-tab-${errorTab}`) : null
   }
 
+  const adapterList = adapters.data ?? []
+  const selectedAdapter = adapterList.find((adapter) => adapter.type === adapterType) ?? null
+  const adapterDefaults = selectedAdapter ? deriveAdapterDefaults(selectedAdapter) : null
+  // 清单拉不到、或者服务端一个适配器都没注册：退回手填，并把原因写出来。
+  const adaptersUnavailable = Boolean(adapters.error) || adapters.data?.length === 0
+
+  // 换适配器：端点总是跟着走；模态只在没人动过的时候重推。
+  //
+  // 选回「不指定」时把选中适配器之前那份端点文本还回去：误选一下就把既有模型
+  // 的端点冲掉，只靠取消才找得回来，代价太大。
+  const manualEndpoints = useRef('')
+  const chooseAdapter = (type: string) => {
+    const hadAdapter = adapterType !== ''
+    if (!hadAdapter && type !== '') manualEndpoints.current = form.endpoints
+    setAdapterType(type)
+    const adapter = adapterList.find((item) => item.type === type)
+    const defaults = adapter ? deriveAdapterDefaults(adapter) : null
+    const derived = defaults?.modalities && !modalitiesTouched ? defaults.modalities : null
+    setForm((current) => ({
+      ...current,
+      endpoints: defaults?.endpoint ?? (hadAdapter ? manualEndpoints.current : current.endpoints),
+      ...(derived
+        ? {
+            modalities_input: listToLines(derived.input),
+            modalities_output: listToLines(derived.output),
+          }
+        : {}),
+    }))
+  }
+
+  // 「按适配器重算」：把推定值写回模态，并撤掉「这是现有值」的标记——写回的
+  // 是推定值，之后再换适配器它就继续跟着走，不然这个按钮按下去等于只生效一次。
+  const applyDerivedModalities = () => {
+    const modalities = adapterDefaults?.modalities
+    if (!modalities) return
+    setModalitiesTouched(false)
+    setForm((current) => ({
+      ...current,
+      modalities_input: listToLines(modalities.input),
+      modalities_output: listToLines(modalities.output),
+    }))
+  }
+
   // 每个分组自己的面板。只有选中的那一个有内容，切走的分组由 Tabs 留成空面板
   // ——隐藏的输入框留在 DOM 里既会被 Tab 走到，也会被读屏念出来。
   const panels: Record<ModelTab, ReactNode> = {
@@ -379,10 +443,39 @@ export function OpsModels() {
             </Field>
           ))}
         </div>
-        <Field label={t('ops.model.endpoints')} hint={t('ops.model.endpointsHint')}>
+        {adapterList.length > 0 ? (
+          <Field label={t('ops.model.adapterDerive')} hint={t('ops.model.adapterDeriveHint')}>
+            <select
+              className="input"
+              value={adapterType}
+              onChange={(event) => chooseAdapter(event.target.value)}
+            >
+              <option value="">{t('ops.model.adapterManual')}</option>
+              {adapterList.map((adapter) => (
+                <option key={adapter.type} value={adapter.type}>
+                  {t('ops.model.adapterOption', {
+                    type: adapter.type,
+                    endpoint: adapter.endpoint,
+                  })}
+                </option>
+              ))}
+            </select>
+          </Field>
+        ) : (
+          adaptersUnavailable && <p className="hint">{t('ops.model.adaptersUnavailable')}</p>
+        )}
+        <Field
+          label={t('ops.model.endpoints')}
+          hint={
+            selectedAdapter
+              ? t('ops.model.endpointsDerived', { type: selectedAdapter.type })
+              : t('ops.model.endpointsHint')
+          }
+        >
           <textarea
             className="input"
             value={form.endpoints}
+            readOnly={Boolean(selectedAdapter)}
             onChange={(event) => setForm({ ...form, endpoints: event.target.value })}
           />
         </Field>
@@ -395,17 +488,44 @@ export function OpsModels() {
             <textarea
               className="input"
               value={form.modalities_input}
-              onChange={(event) => setForm({ ...form, modalities_input: event.target.value })}
+              onChange={(event) => {
+                setModalitiesTouched(true)
+                setForm({ ...form, modalities_input: event.target.value })
+              }}
             />
           </Field>
           <Field label={t('ops.model.modalitiesOutput')}>
             <textarea
               className="input"
               value={form.modalities_output}
-              onChange={(event) => setForm({ ...form, modalities_output: event.target.value })}
+              onChange={(event) => {
+                setModalitiesTouched(true)
+                setForm({ ...form, modalities_output: event.target.value })
+              }}
             />
           </Field>
         </div>
+        {selectedAdapter && adapterDefaults?.modalities && !modalitiesTouched && (
+          <p className="hint">
+            {t('ops.model.modalitiesDerived', { type: selectedAdapter.type })}
+          </p>
+        )}
+        {selectedAdapter && adapterDefaults?.modalities && modalitiesTouched && (
+          <p className="hint">
+            {t('ops.model.modalitiesKept', { type: selectedAdapter.type })}{' '}
+            <Button type="button" variant="ghost" size="sm" onClick={applyDerivedModalities}>
+              {t('ops.model.modalitiesRecompute')}
+            </Button>
+          </p>
+        )}
+        {selectedAdapter && !adapterDefaults?.modalities && (
+          <p className="hint">
+            {t('ops.model.modalitiesUnavailable', {
+              type: selectedAdapter.type,
+              endpoint: selectedAdapter.endpoint,
+            })}
+          </p>
+        )}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <Field label={t('ops.model.knowledgeCutoff')}>
             <input

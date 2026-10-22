@@ -617,6 +617,22 @@ export const en: Record<MessageKey, string> = {
   'ops.model.modalitiesOutput': 'Output modalities (one per line)',
   'ops.model.endpoints': 'Endpoints (one per line)',
   'ops.model.endpointsHint': 'Leave blank when unknown.',
+  'ops.model.adapterDerive': 'Fill from an adapter',
+  'ops.model.adapterDeriveHint':
+    'Endpoints come from the adapter registry and become read-only; modalities are inferred from the protocol. Choose "none" to type them yourself, e.g. when the model is served on several endpoints.',
+  'ops.model.adapterManual': 'None (type manually)',
+  'ops.model.adapterOption': '{type} ({endpoint})',
+  'ops.model.adaptersUnavailable':
+    'No adapter list available — type the endpoints and modalities yourself.',
+  'ops.model.endpointsDerived':
+    'Brought in from adapter {type}; it follows the adapter. Choose "none" to type it yourself.',
+  'ops.model.modalitiesDerived':
+    'Inferred from the protocol: the text baseline is filled in. Image or audio depends on the model, so add it as needed; once edited, it is no longer recomputed.',
+  'ops.model.modalitiesKept':
+    'Modalities keep the values already in the form; they were not recomputed for {type}.',
+  'ops.model.modalitiesRecompute': 'Recompute from protocol',
+  'ops.model.modalitiesUnavailable':
+    'Adapter {type} ({endpoint}) cannot infer modalities — type them yourself.',
   'ops.model.nameRequired': 'Enter the canonical name.',
   'ops.model.contextLimitInvalid': 'The context limit must be an integer.',
   'ops.model.inputLimitInvalid': 'The input limit must be an integer.',
