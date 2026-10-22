@@ -1,6 +1,7 @@
 package channels
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -80,6 +81,40 @@ func TestEndpointFitForProtocols(t *testing.T) {
 	}
 }
 
+// 单元素切片必须与「只声明一种协议的渠道」的旧行为等价。
+//
+// 多协议把 EndpointFit 的构造收成了 `EndpointFitForProtocols`，单协议渠道
+// 传的是单元素切片。这一条不复述函数名，而是**独立算一遍期望**：端点由协议
+// 表算，判据是「在不在目录声明里」，未知协议放行——与加多协议之前那条规则
+// 一字不差。算错了、或者单元素被当成另一档处理，这里都会红。
+func TestEndpointFitSingleElementKeepsSingleProtocolBehaviour(t *testing.T) {
+	declared := []channel.Endpoint{
+		channel.EndpointChatCompletions,
+		channel.EndpointMessages,
+		channel.EndpointResponses,
+	}
+	// 最后一档是未知协议：算不出端点，按「不知道」放行（旧行为同）。
+	for _, protocol := range []string{"openai", "anthropic", "openai-responses", "no-such-protocol"} {
+		t.Run(protocol, func(t *testing.T) {
+			endpoint := channel.Protocol(protocol).Endpoint()
+			wantMismatch := endpoint != "" && !slices.Contains(declared, endpoint)
+			fit := EndpointFitForProtocols([]string{protocol}, declared)
+			if got := fit.Mismatch(); got != wantMismatch {
+				t.Errorf("Mismatch() = %v，期望 %v（端点 %q 在不在目录声明里）",
+					got, wantMismatch, endpoint)
+			}
+			// 措辞也走单协议那一档：说「这条渠道的类型是」，不是「声明的协议是」。
+			summary := fit.Summary()
+			if !strings.Contains(summary, `这条渠道的类型是 "`+protocol+`"`) {
+				t.Errorf("单元素切片没有走单协议措辞：%s", summary)
+			}
+			if strings.Contains(summary, "声明的协议") {
+				t.Errorf("单元素切片落进了多协议措辞：%s", summary)
+			}
+		})
+	}
+}
+
 // 单协议渠道的报错措辞必须与加多协议之前逐字相同。
 //
 // 这句同时经命令行与管理面返回给使用者，而它此前是按「渠道的类型是 T」写
@@ -89,7 +124,7 @@ func TestEndpointFitForProtocols(t *testing.T) {
 func TestEndpointFitSummaryWording(t *testing.T) {
 	declared := []channel.Endpoint{channel.EndpointChatCompletions}
 
-	single := EndpointFitFor("anthropic", declared).Summary()
+	single := EndpointFitForProtocols([]string{"anthropic"}, declared).Summary()
 	wantSingle := `在目录里声明的端点是 /v1/chat/completions，而这条渠道的类型是 "anthropic"（它把请求发到 /v1/messages）`
 	if single != wantSingle {
 		t.Errorf("单协议措辞 = %q，期望 %q", single, wantSingle)

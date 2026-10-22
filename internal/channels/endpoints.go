@@ -32,10 +32,10 @@ import (
 // 而调用方要能说出**是哪两条端点对不上**，所以这里把两侧取值都带出来，
 // 由 Summary/Reason 渲染成一句人话。
 //
-// 字段一律不导出，只能经 EndpointFitFor 构造：渠道打哪条端点由那张表算
-// （channel.Protocol），**不让调用方自己填**——填一个就等于绕开了唯一入口，
-// 而绕开正是这条判据要防的事。模型名不在里面：判据只与「渠道类型」和「目录
-// 声明的端点」有关，名字是调用方的上下文，由它自己拼。
+// 字段一律不导出，只能经 EndpointFitForProtocols 构造：渠道声明的每种协议
+// 打哪条端点由那张表算（channel.Protocol），**不让调用方自己填**——填一个
+// 就等于绕开了唯一入口，而绕开正是这条判据要防的事。模型名不在里面：判据只与
+// 「渠道声明的协议」和「目录声明的端点」有关，名字是调用方的上下文，由它自己拼。
 type EndpointFit struct {
 	// channelTypes / channelEndpoints 是这条渠道声明的协议与它们各自打的端点，
 	// 两片一一对应。单协议渠道只有一个元素，多协议时每个协议一条。
@@ -44,21 +44,16 @@ type EndpointFit struct {
 	declared         []channel.Endpoint
 }
 
-// EndpointFitFor 组装一份对照：**只声明一种协议**的渠道走这里。
-//
-// declared 的三态原样传入（见 DeclaredEndpoints）；渠道打哪条端点由
-// channel.Protocol 算——**它是「渠道类型 → 端点」那张表的唯一入口**，任何
-// 调用方都不该自己再写一份 switch：写一份就等于抄了半张表，其余几档会随
-// 类型的新增而漂移。
-func EndpointFitFor(channelType string, declared []channel.Endpoint) EndpointFit {
-	return EndpointFitForProtocols([]string{channelType}, declared)
-}
-
 // EndpointFitForProtocols 组装一份对照：渠道声明了**一组**协议。
 //
+// declared 的三态原样传入（见 DeclaredEndpoints）；每种协议打哪条端点由
+// channel.Protocol 算——**它是「协议名 → 端点」那张表的唯一入口**，任何
+// 调用方都不该自己再写一份 switch：写一份就等于抄了半张表，其余几档会随
+// 类型的新增而漂移。
+//
 // 写渠道（Admin.checkModelEndpoints）与 doctor 都用它：前者判「这次写进去的
-// 协议集合」，后者判「库里那一条声明的集合」。单元素切片与 EndpointFitFor
-// 等价，包括报错措辞。
+// 协议集合」，后者判「库里那一条声明的集合」。只声明一种协议的渠道传单元素
+// 切片，行为与措辞与加多协议之前逐字相同（见 Summary）。
 //
 // # 只有全部协议都对不上才算对不上
 //

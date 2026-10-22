@@ -1090,7 +1090,7 @@ func checkDoctorChannels(in doctorChainInput) doctorCheck {
 // 两问：名字在不在目录里（第一段），以及——名字在目录里的那些——它声明的端点
 // 含不含这条渠道打的那条端点（第二段，见 doctorEndpointFindings）。
 //
-// 第二问的判据是 channels.EndpointFitFor，与写入侧建渠道时用的是**同一份**
+// 第二问的判据是 channels.EndpointFitForProtocols，与写入侧建渠道时用的是**同一份**
 // （见 internal/channels/endpoints.go）：doctor 是排查入口，它说的与建渠道时
 // 说的必须是同一件事，两处各写一份会漂移。
 func checkDoctorCatalog(in doctorChainInput) doctorCheck {
@@ -1130,7 +1130,7 @@ func checkDoctorCatalog(in doctorChainInput) doctorCheck {
 
 // doctorEndpointFindings 报出「这条渠道打的那条端点服务不了这个模型」的组合。
 //
-// 判据是 channels 那一份（EndpointFitFor / Mismatch），与写入侧同源。
+// 判据是 channels 那一份（EndpointFitForProtocols / Mismatch），与写入侧同源。
 //
 // 单位是「渠道 × 模型」而不是名字：同一个模型挂在不同 type 的渠道上，结论可能
 // 不同。只报**明确**对不上的——目录里没有这个模型、那一项没配过、或渠道类型
