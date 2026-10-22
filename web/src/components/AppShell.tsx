@@ -246,8 +246,9 @@ export function AppShell() {
     reportedTitle && reportedTitle.path === location.pathname
       ? reportedTitle.title
       : t(current)
-  // 顶栏与标签页标题同源：都从这一个值来。
-  useDocumentTitle(pageTitle)
+  // 顶栏只写页面名；标签页标题补上站点后缀，窗口切换器里才分得清是哪个站。
+  // 两处同源，后缀只在写标题这一步加。
+  useDocumentTitle(`${pageTitle} · ${t('common.appName')} ${t('common.console')}`)
 
   const signOut = async () => {
     await logout()

@@ -172,11 +172,29 @@ function expectNoRepeatedName() {
   expect(document.title).not.toMatch(/^(.+) · \1$/)
 }
 
+/** 控制台标题的站点后缀；顶栏那一行不带它。 */
+const CONSOLE_SUFFIX = ' · larkax 控制台'
+const CONSOLE_SUFFIX_EN = ' · larkax Console'
+
+/**
+ * 标签页标题 = 顶栏那一行 + 站点后缀。
+ *
+ * 顶栏文字从 DOM 读，后缀只在这里拼；再断后缀只出现在末尾一次，
+ * 页名自己含后缀时上面那条就红，`expectNoRepeatedName` 才有牙齿。
+ */
+function expectConsoleTitle(suffix = CONSOLE_SUFFIX) {
+  const expected = `${topbarTitle()}${suffix}`
+  expect(document.title).toBe(expected)
+  expect(document.title.indexOf(suffix)).toBe(expected.length - suffix.length)
+  expect(document.title.lastIndexOf(suffix)).toBe(expected.length - suffix.length)
+  expectNoRepeatedName()
+}
+
 describe('控制台标题', () => {
   beforeEach(() => {
     Object.values(mocks).forEach((mock) => mock.mockReset())
     // `index.html` 里的静态标题；页面的钩子必须把它覆盖掉。
-    document.title = 'larkax'
+    document.title = 'larkax 控制台'
     mocks.session.mockResolvedValue({
       user: USER,
       csrf_token: 'csrf',
@@ -203,8 +221,7 @@ describe('控制台标题', () => {
     for (const [path, expected] of CONSOLE_ROUTES) {
       fireEvent.click(screen.getByRole('button', { name: `去 ${path}` }))
       await waitFor(() => expect(topbarTitle()).toBe(expected))
-      expect(document.title).toBe(topbarTitle())
-      expectNoRepeatedName()
+      expectConsoleTitle()
       titles.add(document.title)
     }
 
@@ -216,17 +233,16 @@ describe('控制台标题', () => {
     await screen.findAllByText('user-account')
 
     await waitFor(() => expect(topbarTitle()).toBe('Model X'))
-    expect(document.title).toBe('Model X')
-    expect(document.title).toBe(topbarTitle())
+    expectConsoleTitle()
     // 展示名之外的两条岔路：父级页面名、地址段，都不能是它。
-    expect(document.title).not.toBe('模型')
+    expect(document.title).not.toBe(`模型${CONSOLE_SUFFIX}`)
     expect(document.title).not.toContain('vendor/model-x')
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Model X')
 
     // 回到列表页：详情页的报告撤掉，标题退回导航反推的名字。
     fireEvent.click(screen.getByRole('button', { name: '去 /app/models' }))
     await waitFor(() => expect(topbarTitle()).toBe('模型'))
-    expect(document.title).toBe('模型')
+    expectConsoleTitle()
   })
 
   it('详情页数据没到时标题先写「模型」，到货后换成展示名', async () => {
@@ -239,13 +255,13 @@ describe('控制台标题', () => {
     await renderConsole('/app/models/vendor/model-x')
     await screen.findAllByText('user-account')
     await waitFor(() => expect(topbarTitle()).toBe('模型'))
-    expect(document.title).toBe('模型')
+    expectConsoleTitle()
 
     await act(async () => {
       resolveDetail(DETAIL)
     })
     await waitFor(() => expect(topbarTitle()).toBe('Model X'))
-    expect(document.title).toBe('Model X')
+    expectConsoleTitle()
   })
 
   it('详情页 404 时标题回落到「模型」', async () => {
@@ -254,26 +270,27 @@ describe('控制台标题', () => {
     await screen.findAllByText('user-account')
     await screen.findByText(/找不到这个模型/)
     expect(topbarTitle()).toBe('模型')
-    expect(document.title).toBe('模型')
+    expectConsoleTitle()
   })
 
   it('切换语言后标题跟着变，并等于切换后的顶栏文字', async () => {
     await renderConsole('/app/settings')
     await screen.findAllByText('user-account')
     await waitFor(() => expect(topbarTitle()).toBe('设置'))
-    expect(document.title).toBe('设置')
+    expectConsoleTitle()
 
     fireEvent.click(screen.getByRole('button', { name: 'switch-language' }))
     await waitFor(() => expect(topbarTitle()).toBe('Settings'))
-    expect(document.title).toBe('Settings')
+    // 后缀跟着语言走：英文下是「larkax Console」。
+    expectConsoleTitle(CONSOLE_SUFFIX_EN)
   })
 })
 
 describe('公开页标题', () => {
   beforeEach(() => {
     Object.values(mocks).forEach((mock) => mock.mockReset())
-    // `index.html` 里的静态标题；页面的钩子必须把它覆盖掉。
-    document.title = 'larkax'
+    // `index.html` 里的静态标题；公开页的钩子必须把它覆盖掉。
+    document.title = 'larkax 控制台'
     mocks.session.mockResolvedValue(null)
     mocks.models.mockResolvedValue([])
     mocks.meta.mockResolvedValue({
@@ -296,7 +313,7 @@ describe('公开页标题', () => {
     const heading = await screen.findByRole('heading', { level: 1 })
     await waitFor(() => expect(document.title).toBe(heading.textContent))
     // 不是 `index.html` 那个静态兜底，也不是页内大标题里带「控制台」的那句。
-    expect(document.title).not.toBe('larkax')
+    expect(document.title).not.toBe('larkax 控制台')
     expect(document.title).not.toContain('控制台')
     expectNoRepeatedName()
   })
@@ -310,7 +327,7 @@ describe('公开页标题', () => {
 
     await screen.findByRole('heading', { name: '登录控制台' })
     await waitFor(() => expect(document.title).toBe('登录'))
-    expect(document.title).not.toBe('larkax')
+    expect(document.title).not.toBe('larkax 控制台')
     expect(document.title).not.toContain('控制台')
     expectNoRepeatedName()
   })

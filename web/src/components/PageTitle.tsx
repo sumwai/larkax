@@ -40,11 +40,11 @@ export function useReportPageTitle(title: string | null) {
 /**
  * 写浏览器标签页的标题。
  *
- * 控制台由外壳统一写，公开页各自写自己那一句；其余地方不要再碰
- * `document.title`，否则又多了一份映射。
+ * 控制台由外壳统一写（含站点后缀），公开页各自写自己那一句；其余地方不要
+ * 再碰 `document.title`，否则又多了一份映射。
  */
-export function useDocumentTitle(title: string | null) {
+export function useDocumentTitle(title: string) {
   useLayoutEffect(() => {
-    if (title) document.title = title
+    document.title = title
   }, [title])
 }
