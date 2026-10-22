@@ -513,7 +513,7 @@ func fetchConsoleUsageSummary(t *testing.T, db *sql.DB, userID int64,
 	query := url.Values{}
 	query.Set("from", from.UTC().Format(time.RFC3339))
 	query.Set("to", to.UTC().Format(time.RFC3339))
-	req := httptest.NewRequest(http.MethodGet,
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet,
 		consoleapi.PathPrefix+"usage/summary?"+query.Encode(), nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
 	rec := httptest.NewRecorder()
