@@ -220,7 +220,7 @@ func runAPIKeyCreate(args []string) error {
 		return usageErr(err)
 	}
 
-	expires, err := optionalExpiry(providedFlags(fs),
+	expiresAtValue, hasExpiry, err := optionalExpiry(providedFlags(fs),
 		expiryFlags{expiresAt: *expiresAt, ttl: *ttl, forever: *forever}, expiryNow(),
 		func(v string) (time.Time, error) {
 			// 已过去的时刻直接拒绝，而不是建一把立刻不可用的 key：那种情况几乎
@@ -232,6 +232,10 @@ func runAPIKeyCreate(args []string) error {
 		})
 	if err != nil {
 		return usageErr(err)
+	}
+	var expires *time.Time
+	if hasExpiry {
+		expires = &expiresAtValue
 	}
 
 	limits, err := parseLimits(fs, *rpm, *quota)

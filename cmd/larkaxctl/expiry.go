@@ -97,20 +97,22 @@ func foreverFlagName(seen map[string]bool) string {
 	return "--clear-expires-at"
 }
 
-// optionalExpiry 收一条「可以不给」的过期时间：三个旗标都没给时返回 nil。
+// optionalExpiry 收一条「可以不给」的过期时间：三个旗标都没给时 given 为 false。
 //
 // apikey create 用它：不设过期是合法的，而设了一个不合法的时间要报错。
+// 「没给」用第二个返回值说出来，而不是拿 nil 指针 + nil 错误表示——后者是
+// 两件事挤在一个值里，调用方漏判一次就成了「悄悄不设过期」。
 func optionalExpiry(seen map[string]bool, f expiryFlags, now time.Time,
 	parseAbsolute func(string) (time.Time, error),
-) (*time.Time, error) {
+) (time.Time, bool, error) {
 	at, err := resolveExpiry(seen, f, now, parseAbsolute)
 	if errors.Is(err, errExpiryNotGiven) {
-		return nil, nil
+		return time.Time{}, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return time.Time{}, false, err
 	}
-	return &at, nil
+	return at, true, nil
 }
 
 // ttlExpiry 把 --ttl 的相对时长换算成绝对时刻。

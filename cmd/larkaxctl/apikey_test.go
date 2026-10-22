@@ -1409,10 +1409,15 @@ func TestAPIKeyForeverAndClearExpiresWriteTheSameValue(t *testing.T) {
 	setupEnv(t)
 	ctx := context.Background()
 
-	createKey := func() int64 {
+	// 造用户在闭包外面：createTestUser 走的是 `user create` 那条命令，
+	// 命令自己取 context（CLI 命令的签名不收 ctx），放在闭包里会让
+	// contextcheck 认为这里该把 ctx 传下去。
+	userForever := createTestUser(t)
+	userClear := createTestUser(t)
+	createKey := func(userID int64) int64 {
 		t.Helper()
 		created, err := auth.New(db).Create(ctx, auth.CreateParams{
-			UserID: createTestUser(t), Name: uniqueName("forever"),
+			UserID: userID, Name: uniqueName("forever"),
 		})
 		if err != nil {
 			t.Fatalf("建一把 key 失败: %v", err)
@@ -1429,8 +1434,8 @@ func TestAPIKeyForeverAndClearExpiresWriteTheSameValue(t *testing.T) {
 		return at
 	}
 
-	idForever := createKey()
-	idClear := createKey()
+	idForever := createKey(userForever)
+	idClear := createKey(userClear)
 	if err := runCaptured(t, func() error {
 		return runAPIKeyUpdate([]string{"--id", strconv.FormatInt(idForever, 10), "--forever"})
 	}); err != nil {
@@ -1542,10 +1547,13 @@ func TestAPIKeyNullAndForeverRenderAlike(t *testing.T) {
 	setupEnv(t)
 	ctx := context.Background()
 
-	createKey := func(name string) int64 {
+	// 与上一条同理：造用户放在闭包外，命令自己取 context。
+	userNull := createTestUser(t)
+	userForever := createTestUser(t)
+	createKey := func(userID int64, name string) int64 {
 		t.Helper()
 		k, err := auth.New(db).Create(ctx, auth.CreateParams{
-			UserID: createTestUser(t), Name: uniqueName(name),
+			UserID: userID, Name: uniqueName(name),
 		})
 		if err != nil {
 			t.Fatalf("建一把 key 失败: %v", err)
@@ -1562,8 +1570,8 @@ func TestAPIKeyNullAndForeverRenderAlike(t *testing.T) {
 		return at
 	}
 
-	idNull := createKey("null-expiry")
-	idForever := createKey("forever-expiry")
+	idNull := createKey(userNull, "null-expiry")
+	idForever := createKey(userForever, "forever-expiry")
 	if err := runCaptured(t, func() error {
 		return runAPIKeyUpdate([]string{"--id", strconv.FormatInt(idForever, 10), "--forever"})
 	}); err != nil {
