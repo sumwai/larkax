@@ -436,10 +436,17 @@ describe('四处弹窗表单与整页表单接的是同一层', () => {
     expect(router.state.location.pathname).toBe('/elsewhere')
   })
 
-  it('设置页保存的是去掉空格后的值：之后跳转与刷新都不拦', async () => {
-    // 提交的是 trim 过的值，服务端也回传 trim 过的；本地那两格若还留着空格，
-    // 就会一直被算成「改过」——提示已保存，随后每次跳转仍弹框。
-    mocks.updateMe.mockResolvedValue({ ...USER, display_name: '换了个名字' })
+  it('设置页保存后两格都换成服务端回传的值：之后跳转与刷新都不拦', async () => {
+    // 两格都要跟着回传值复位，否则会被一直算成「改过」——提示已保存，随后每次
+    // 跳转仍弹框。这里钉的是「表单以服务端回传值为准」这条契约，不假设服务端
+    // 会不会改写，两格各造一种「回传值与输入不同」的形状，删掉任何一格的复位
+    // 这一条都会红：显示名靠首尾空格造差异；`type="email"` 自己会吃掉首尾空白，
+    // 所以邮箱直接给一个与回传值写法不同的值。
+    mocks.updateMe.mockResolvedValue({
+      ...USER,
+      display_name: '换了个名字',
+      email: 'user@example.com',
+    })
     const router = mountPage(
       <Gate>
         <Settings />
@@ -447,6 +454,7 @@ describe('四处弹窗表单与整页表单接的是同一层', () => {
       '/app/settings',
     )
     fireEvent.change(await screen.findByLabelText('显示名'), { target: { value: ' 换了个名字 ' } })
+    fireEvent.change(screen.getByLabelText('邮箱'), { target: { value: ' User@Example.COM ' } })
     fireEvent.click(screen.getByRole('button', { name: '保存账户信息' }))
     expect(await screen.findByText('账户信息已保存。')).toBeInTheDocument()
 
