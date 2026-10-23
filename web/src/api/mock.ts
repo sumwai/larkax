@@ -45,6 +45,7 @@ import type {
   UsagePath,
   UsageQuery,
   UsageRequest,
+  UsageRequestPage,
   UsageRequestsQuery,
   UsageSeries,
   UsageSeriesQuery,
@@ -522,6 +523,7 @@ function requests(): UsageRequest[] {
       protocol: i % 2 === 0 ? 'openai' : 'anthropic',
       duration_ms: pending ? null : 640 + ((i * 173) % 3_200),
       first_token_ms: 120 + ((i * 97) % 900),
+      tool_result_tail: i % 3 === 1,
       user_agent: i % 2 === 0 ? 'claude-cli/2.1.304 (external, sdk-cli)' : 'opencode/1.2',
       started_at: startedAt.toISOString(),
       settled_at: pending ? null : new Date(now - i * 36 * 60_000).toISOString(),
@@ -1857,7 +1859,7 @@ export class MockApiClient implements ApiClient {
     return { group_by: 'model', items, other: totals(0, 0, tokens(0, 0)) }
   }
 
-  async usageRequests(query: UsageRequestsQuery = {}): Promise<ListResponse<UsageRequest>> {
+  async usageRequests(query: UsageRequestsQuery = {}): Promise<UsageRequestPage> {
     await delay()
     requireSession()
     const { from, to } = resolveWindow(query)
@@ -1866,11 +1868,13 @@ export class MockApiClient implements ApiClient {
     if (query.key_id !== undefined) items = items.filter((row) => row.key?.id === query.key_id)
     if (query.model) items = items.filter((row) => row.model === query.model)
     items = items.filter((row) => inWindow(dayOf(row.started_at), from, to))
-    const offset = Number.parseInt(query.cursor ?? '0', 10) || 0
     const limit = query.limit ?? 20
+    const page = Math.max(1, query.page ?? 1)
     return {
-      items: items.slice(offset, offset + limit),
-      next_cursor: offset + limit < items.length ? String(offset + limit) : null,
+      items: items.slice((page - 1) * limit, page * limit),
+      page,
+      limit,
+      count: items.length,
     }
   }
 

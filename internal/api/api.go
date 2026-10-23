@@ -654,6 +654,10 @@ func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol cha
 	// 调用方标识原样落账单（见 pipeline.Request.UserAgent）：截断会丢版本号，
 	// 而排查兼容性问题要看的正是那一段。
 	req.UserAgent = r.UserAgent()
+	// 最后一句是不是工具结果回填，由归一化后的消息序列判定（见
+	// channel.Request.EndsWithToolResult）。upstream 的 Messages 此时
+	// 已经是统一形状，入口只负责把结论带上账单。
+	req.ToolResultTail = upstream.EndsWithToolResult()
 
 	if upstream.Stream {
 		// 流式与非流式的差别只在拿到结果之后怎么写出：前面的检查顺序

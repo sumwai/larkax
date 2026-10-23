@@ -475,9 +475,9 @@ func (s *Store) reserveFromWallet(ctx context.Context, tx *sql.Tx, req pipeline.
 		INSERT INTO billing_requests
 			(request_id, user_id, api_key_id, channel_id, canonical_model, protocol,
 			 streamed, reserved_amount, reserved_asset, status, user_agent,
-			 pricing_rule_id, pricing_expr_snapshot, started_at)
+			 tool_result_tail, pricing_rule_id, pricing_expr_snapshot, started_at)
 		VALUES ($1, $2, $12, NULLIF($3, 0::bigint), $4, $5, $11, $6::numeric, $7, 'pending',
-		        NULLIF($13, ''), NULLIF($8, 0::bigint), NULLIF($9, ''), $10)
+		        NULLIF($13, ''), $14, NULLIF($8, 0::bigint), NULLIF($9, ''), $10)
 		RETURNING id`,
 		// 协议由入口设置（见 pipeline.Request.Protocol）。这里**不填默认值**：
 		// 写死一个会让另一条入口的账单全部记错，而这张表正是事后按协议统计的
@@ -494,6 +494,8 @@ func (s *Store) reserveFromWallet(ctx context.Context, tx *sql.Tx, req pipeline.
 		req.APIKeyID,
 		// 调用方标识由入口原样带来（见 pipeline.Request.UserAgent）。
 		req.UserAgent,
+		// 最后一句是不是工具结果回填，由入口判定（见 pipeline.Request.ToolResultTail）。
+		req.ToolResultTail,
 	).Scan(&id)
 	if err != nil {
 		// 这条 INSERT 有四条外键（users / api_keys / channels / pricing_rules）

@@ -69,8 +69,15 @@ type UsageRequestQuery struct {
 	// Model 与 Status 为空表示不筛。
 	Model  string
 	Status string
-	Cursor *RequestCursor
-	Limit  int
+	// Page 是页码，从 1 起；0 与负数视作 1。
+	//
+	// 这条读用的是**页码偏移**而不是 keyset：控制台要给「共 N 条、共几页」，
+	// 就得先数总数，keyset 答不了这个。代价是翻页时插进来的新行会把后面
+	// 的页整体推移——请求日志按时间倒序，新的请求排最前，恰好是调用方
+	// 要先看的那部分，推移可接受。命令行那条路（BillingRequestFilter）
+	// 仍是 keyset，两边不共用一个类型正是为此（见 usage_read.go 的注释）。
+	Page  int
+	Limit int
 }
 
 // UsageRequestRow 是请求日志里的一行。
@@ -112,14 +119,18 @@ type UsageRequestRow struct {
 	// 失败都是 NULL。UserAgent 是调用方请求头原文，没带这个头时是 NULL。
 	FirstTokenMS *int64
 	UserAgent    *string
-	StartedAt    time.Time
-	SettledAt    *time.Time
+	// ToolResultTail 是「这次提交的最后一句是工具结果回填」，由入口判定。
+	ToolResultTail bool
+	StartedAt      time.Time
+	SettledAt      *time.Time
 }
 
 // UsageRequestPage 是一页请求日志。
 type UsageRequestPage struct {
 	Requests []UsageRequestRow
-	More     bool
+	// Total 是筛选命中的总行数，与当页为不为空无关：页码翻过头时本页
+	// 没有行，Total 仍是那个总数。
+	Total int64
 }
 
 // UsageRequests 读一页请求日志。
@@ -154,6 +165,7 @@ func (s *Store) UsageRequests(ctx context.Context, q UsageRequestQuery) (UsageRe
 	if limit > RequestPageMaxLimit {
 		limit = RequestPageMaxLimit
 	}
+	page := max(q.Page, 1)
 
 	var (
 		args  []any
@@ -176,11 +188,15 @@ func (s *Store) UsageRequests(ctx context.Context, q UsageRequestQuery) (UsageRe
 	if q.Status != "" {
 		cond = append(cond, "b.status = "+param(q.Status))
 	}
-	if q.Cursor != nil {
-		// 与 ORDER BY 同序的两列行值比较；拆开写成 `started_at < X OR id < Y`
-		// 会把同一时刻的行整批漏掉。
-		cond = append(cond, "(b.started_at, b.id) < ("+
-			param(q.Cursor.StartedAt)+", "+param(q.Cursor.ID)+")")
+
+	// 总数先数一遍：响应里要给「共 N 条」，调用方才知道一共几页。
+	// 筛选条件只落在 b 自己的列上，count 不必带三个 LEFT JOIN。
+	var total int64
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT count(*)
+		  FROM billing_requests b
+		 WHERE `+strings.Join(cond, " AND "), args...).Scan(&total); err != nil {
+		return UsageRequestPage{}, fmt.Errorf("统计请求日志条数失败: %w", err)
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
@@ -189,7 +205,7 @@ func (s *Store) UsageRequests(ctx context.Context, q UsageRequestQuery) (UsageRe
 		       b.status, b.reserved_amount::text,
 		       b.plan_reserved_amount::text,
 		       b.final_amount::text, b.reserved_asset, b.streamed, b.protocol,
-		       b.first_token_ms, b.user_agent,
+		       b.first_token_ms, b.user_agent, b.tool_result_tail,
 		       b.started_at, b.settled_at,
 		       e.prompt_tokens, e.completion_tokens, e.cache_read_tokens,
 		       e.cache_write_tokens, e.reasoning_tokens, e.billing_path,
@@ -208,13 +224,14 @@ func (s *Store) UsageRequests(ctx context.Context, q UsageRequestQuery) (UsageRe
 		       ) e ON true
 		 WHERE `+strings.Join(cond, " AND ")+`
 		 ORDER BY b.started_at DESC, b.id DESC
-		 LIMIT `+strconv.Itoa(limit+1), args...)
+		 LIMIT `+strconv.Itoa(limit)+` OFFSET `+strconv.Itoa((page-1)*limit), args...)
 	if err != nil {
 		return UsageRequestPage{}, fmt.Errorf("查询请求日志失败: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var page UsageRequestPage
+	var result UsageRequestPage
+	result.Total = total
 	for rows.Next() {
 		var (
 			row          UsageRequestRow
@@ -233,10 +250,11 @@ func (s *Store) UsageRequests(ctx context.Context, q UsageRequestQuery) (UsageRe
 			provider     string
 			firstToken   sql.NullInt64
 			userAgent    sql.NullString
+			toolTail     bool
 		)
 		if err := rows.Scan(&row.ID, &row.RequestID, &row.Model, &keyID,
 			&row.KeyName, &provider, &row.Status, &reserved, &planReserved, &final, &row.Asset,
-			&row.Streamed, &row.Protocol, &firstToken, &userAgent,
+			&row.Streamed, &row.Protocol, &firstToken, &userAgent, &toolTail,
 			&row.StartedAt, &settledAt,
 			&prompt, &completion, &cacheRead, &cacheWrite, &reasoning,
 			&path, &duration); err != nil {
@@ -251,6 +269,7 @@ func (s *Store) UsageRequests(ctx context.Context, q UsageRequestQuery) (UsageRe
 			ua := userAgent.String
 			row.UserAgent = &ua
 		}
+		row.ToolResultTail = toolTail
 		if keyID.Valid {
 			id := keyID.Int64
 			row.KeyID = &id
@@ -309,14 +328,10 @@ func (s *Store) UsageRequests(ctx context.Context, q UsageRequestQuery) (UsageRe
 		if settledAt.Valid {
 			row.SettledAt = &settledAt.Time
 		}
-		page.Requests = append(page.Requests, row)
+		result.Requests = append(result.Requests, row)
 	}
 	if err := rows.Err(); err != nil {
 		return UsageRequestPage{}, fmt.Errorf("遍历请求日志失败: %w", err)
 	}
-	if len(page.Requests) > limit {
-		page.Requests = page.Requests[:limit]
-		page.More = true
-	}
-	return page, nil
+	return result, nil
 }

@@ -208,6 +208,28 @@ func (r *Request) PromptText() string {
 	return b.String()
 }
 
+// EndsWithToolResult 判断这次提交的最后一句是不是工具结果的回填。
+//
+// 口径：**最后一条消息的最后一个内容块**是 tool_result。块后面还跟着正文
+// 的不算——那已经是调用方对结果的补充说明，不是纯粹的结果回填；多条
+// tool_result 合并在一条消息里是常态（并行工具调用），按最后一个块判
+// 正好把它们盖住。
+//
+// 三条 chat 形状的入口在 relay.ParseRequest 里都归一化成这个块类型
+// （OpenAI 的 role=tool 与 Responses 的 function_call_output 都改写为
+// tool_result），所以这里只看归一化形状，不认协议。消息为空（内部调用）
+// 或最后一块不是 tool_result 时为否。
+func (r *Request) EndsWithToolResult() bool {
+	if len(r.Messages) == 0 {
+		return false
+	}
+	last := r.Messages[len(r.Messages)-1]
+	if len(last.Content) == 0 {
+		return false
+	}
+	return last.Content[len(last.Content)-1].Type == "tool_result"
+}
+
 // Request 是统一格式的请求。
 //
 // 它刻意贴近 OpenAI 的 chat completions 形状：那是这个领域事实上的公共语汇，

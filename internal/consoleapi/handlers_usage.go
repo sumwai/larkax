@@ -3,6 +3,7 @@ package consoleapi
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ledger/store"
@@ -305,14 +306,23 @@ type usageRequestJSON struct {
 	FirstTokenMS *int64 `json:"first_token_ms"`
 	// UserAgent 是调用方请求头原文；调用方没带这个头时为 null。
 	UserAgent *string `json:"user_agent"`
-	StartedAt string  `json:"started_at"`
-	SettledAt *string `json:"settled_at"`
+	// ToolResultTail 是「这次提交的最后一句是工具结果回填」，由入口判定。
+	ToolResultTail bool    `json:"tool_result_tail"`
+	StartedAt      string  `json:"started_at"`
+	SettledAt      *string `json:"settled_at"`
 }
 
 // usageRequestsResponse 是请求日志的一页。
+//
+// 分页是页码偏移：count 给出筛选命中的总数，调用方据此算总页数。
+// 翻页期间有新请求进来时，后面的页会整体后移——请求日志按时间倒序，
+// 新请求排最前，恰好是调用方要先看的那部分，推移可接受。
 type usageRequestsResponse struct {
-	Items      []usageRequestJSON `json:"items"`
-	NextCursor *string            `json:"next_cursor"`
+	Items []usageRequestJSON `json:"items"`
+	// Page 是这一页的页码（1 起），Limit 是页大小，Count 是筛选命中的总行数。
+	Page  int   `json:"page"`
+	Limit int   `json:"limit"`
+	Count int64 `json:"count"`
 }
 
 // usageError 把 store 的两种失败分开：参数问题 400，库故障 503。
@@ -341,24 +351,24 @@ func (a *API) handleUsageRequests(w http.ResponseWriter, r *http.Request, sessio
 		return
 	}
 
-	var cursor *store.RequestCursor
-	if raw := r.URL.Query().Get("cursor"); raw != "" {
-		at, id, cursorErr := decodeCursor(raw)
-		if cursorErr != nil {
-			a.invalid(w, r, cursorErr)
+	page := 1
+	if raw := r.URL.Query().Get("page"); raw != "" {
+		n, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || n < 1 {
+			a.invalid(w, r, errors.New("page 必须是正整数"))
 			return
 		}
-		cursor = &store.RequestCursor{StartedAt: at, ID: id}
+		page = n
 	}
 
-	page, err := a.deps.usage.UsageRequests(r.Context(), store.UsageRequestQuery{
+	result, err := a.deps.usage.UsageRequests(r.Context(), store.UsageRequestQuery{
 		UserID:   window.UserID,
 		From:     window.From,
 		To:       window.To,
 		APIKeyID: window.APIKeyID,
 		Model:    window.Model,
 		Status:   r.URL.Query().Get("status"),
-		Cursor:   cursor,
+		Page:     page,
 		Limit:    limit,
 	})
 	if err != nil {
@@ -366,8 +376,8 @@ func (a *API) handleUsageRequests(w http.ResponseWriter, r *http.Request, sessio
 		return
 	}
 
-	items := make([]usageRequestJSON, 0, len(page.Requests))
-	for _, req := range page.Requests {
+	items := make([]usageRequestJSON, 0, len(result.Requests))
+	for _, req := range result.Requests {
 		item := usageRequestJSON{
 			ID:                 req.ID,
 			RequestID:          req.RequestID,
@@ -384,14 +394,15 @@ func (a *API) handleUsageRequests(w http.ResponseWriter, r *http.Request, sessio
 				CacheWriteTokens: req.CacheWriteTokens,
 				ReasoningTokens:  req.ReasoningTokens,
 			}),
-			BillingPath:  req.BillingPath,
-			Streamed:     req.Streamed,
-			Protocol:     req.Protocol,
-			DurationMS:   req.DurationMS,
-			FirstTokenMS: req.FirstTokenMS,
-			UserAgent:    req.UserAgent,
-			StartedAt:    formatTime(req.StartedAt),
-			SettledAt:    optionalTime(req.SettledAt),
+			BillingPath:    req.BillingPath,
+			Streamed:       req.Streamed,
+			Protocol:       req.Protocol,
+			DurationMS:     req.DurationMS,
+			FirstTokenMS:   req.FirstTokenMS,
+			UserAgent:      req.UserAgent,
+			ToolResultTail: req.ToolResultTail,
+			StartedAt:      formatTime(req.StartedAt),
+			SettledAt:      optionalTime(req.SettledAt),
 		}
 		if req.KeyID != nil {
 			item.Key = &requestKeyJSON{ID: *req.KeyID, Name: req.KeyName}
@@ -399,11 +410,11 @@ func (a *API) handleUsageRequests(w http.ResponseWriter, r *http.Request, sessio
 		items = append(items, item)
 	}
 
-	out := usageRequestsResponse{Items: items}
-	if page.More && len(page.Requests) > 0 {
-		last := page.Requests[len(page.Requests)-1]
-		next := encodeCursor(last.StartedAt, last.ID)
-		out.NextCursor = &next
+	out := usageRequestsResponse{
+		Items: items,
+		Page:  page,
+		Limit: limit,
+		Count: result.Total,
 	}
 	a.ok(w, http.StatusOK, out)
 }

@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { api } from '../api'
 import type { RequestStatus, UsageRequest } from '../api/types'
 import { addDays, exclusiveEnd, formatCompact, formatDateTime, todayInZone } from '../lib/format'
@@ -17,6 +16,7 @@ import {
   CardBody,
   Input,
   PageHead,
+  Pagination,
   Segmented,
   Select,
   Skeleton,
@@ -131,8 +131,15 @@ function RequestRow({ request, timezone }: { request: UsageRequest; timezone: st
           </span>
         </span>
       </span>
-      <span className="w-20 shrink-0 truncate text-xs text-muted-foreground">
-        {protocolLabel(request.protocol)}
+      <span className="w-20 shrink-0 text-right">
+        <span className="block truncate text-xs text-muted-foreground">
+          {protocolLabel(request.protocol)}
+        </span>
+        {request.tool_result_tail ? (
+          <span className="block truncate text-2xs text-faint" title={t('requests.toolResult')}>
+            {t('requests.toolResult')}
+          </span>
+        ) : null}
       </span>
       {/* 两组 token 各占两行：主量在上（输入 / 输出），从量在下（缓存 / 推理）。
           大数换 K/M/B：万级往上的四五个零在列宽里读不出差别。 */}
@@ -200,9 +207,8 @@ export function Requests() {
   const [model, setModel] = useState('all')
   const [search, setSearch] = useState('')
 
-  // 游标栈：cursors[n] 是第 n+1 页的起点，第一页永远是 null。
-  const [pageIndex, setPageIndex] = useState(0)
-  const [cursors, setCursors] = useState<(string | null)[]>([null])
+  // 页码从 1 起：响应里带 count，总页数由此可得。
+  const [pageIndex, setPageIndex] = useState(1)
 
   useDocumentTitle(`${t('requests.title')} · ${meta.site_name}`)
 
@@ -212,44 +218,25 @@ export function Requests() {
   const from = addDays(today, -days)
   const to = exclusiveEnd(today)
 
-  // 换筛选条件就回到第一页：旧的游标属于另一套条件，接着用会跳行。
-  const lastFilters = useRef(`${range}|${status}|${keyId}|${model}`)
-  useEffect(() => {
-    const next = `${range}|${status}|${keyId}|${model}`
-    if (lastFilters.current !== next) {
-      lastFilters.current = next
-      setPageIndex(0)
-      setCursors([null])
-    }
-  }, [range, status, keyId, model])
+  // 换筛选条件就回到第一页：总数是按条件算的，旧页码属于另一套条件。
+  const setPage = (next: number) => {
+    setPageIndex(next)
+  }
 
-  const cursor = cursors[pageIndex] ?? null
   const requests = useQuery({
-    queryKey: ['requests', range, status, keyId, model, meta.timezone, cursor],
+    queryKey: ['requests', range, status, keyId, model, meta.timezone, pageIndex],
     queryFn: () =>
       api.usageRequests({
         from,
         to,
+        page: pageIndex,
         limit: PAGE_SIZE,
-        cursor,
         ...(status === 'all' ? {} : { status }),
         ...(keyId === 'all' ? {} : { key_id: Number(keyId) }),
         ...(model === 'all' ? {} : { model }),
       }),
     placeholderData: (previous) => previous,
   })
-
-  // 下一页的起点只能是这一页给的：拿回来记进栈里，翻页时直接取。
-  const nextCursor = requests.data?.next_cursor ?? null
-  useEffect(() => {
-    if (!nextCursor) return
-    setCursors((prev) => {
-      if (prev[pageIndex + 1] === nextCursor) return prev
-      const next = [...prev]
-      next[pageIndex + 1] = nextCursor
-      return next
-    })
-  }, [nextCursor, pageIndex])
 
   const keys = useQuery({ queryKey: ['keys', 'requests-filter'], queryFn: () => api.listKeys() })
   const models = useQuery({ queryKey: ['models', 'requests-filter'], queryFn: () => api.models() })
@@ -268,7 +255,7 @@ export function Requests() {
             (item.key?.name ?? '').toLowerCase().includes(needle),
         )
   const timezone = meta.timezone
-  const hasNext = nextCursor !== null
+  const total = requests.data?.count ?? 0
 
   return (
     <>
@@ -284,15 +271,17 @@ export function Requests() {
           value={search}
           onChange={(event) => {
             setSearch(event.target.value)
-            setPageIndex(0)
-            setCursors([null])
+            setPageIndex(1)
           }}
         />
         <Select
           className="w-44"
           ariaLabel={t('requests.filterModel')}
           value={model}
-          onValueChange={setModel}
+          onValueChange={(next) => {
+            setModel(next)
+            setPageIndex(1)
+          }}
           options={[
             { value: 'all', label: t('requests.allModels') },
             ...(models.data?.items ?? []).map((item) => ({
@@ -305,7 +294,10 @@ export function Requests() {
           className="w-44"
           ariaLabel={t('requests.filterKey')}
           value={keyId}
-          onValueChange={setKeyId}
+          onValueChange={(next) => {
+            setKeyId(next)
+            setPageIndex(1)
+          }}
           options={[
             { value: 'all', label: t('requests.allKeys') },
             ...(keys.data?.items ?? [])
@@ -319,7 +311,10 @@ export function Requests() {
             size="md"
             ariaLabel={t('requests.status')}
             value={status}
-            onValueChange={setStatus}
+            onValueChange={(next) => {
+              setStatus(next)
+              setPageIndex(1)
+            }}
             options={[
               { value: 'all', label: t('common.all') },
               { value: 'settled', label: t('status.settled') },
@@ -330,7 +325,10 @@ export function Requests() {
             size="md"
             ariaLabel={t('requests.range')}
             value={range}
-            onValueChange={setRange}
+            onValueChange={(next) => {
+              setRange(next)
+              setPageIndex(1)
+            }}
             options={[
               { value: 'today', label: t('common.today') },
               { value: '7d', label: t('requests.range7d') },
@@ -383,40 +381,21 @@ export function Requests() {
                 <RequestRow key={request.id} request={request} timezone={timezone} />
               ))}
             </div>
-            {/* 没有总数：只标当前页与本页条数，翻页靠游标栈。 */}
-            <nav
-              aria-label={t('requests.pager')}
-              className="flex items-center justify-between gap-3 border-t border-border px-4 py-2 text-sm text-muted-foreground"
-            >
-              <span className="num text-xs">
-                {t('requests.pageRows').replace('{n}', String(items.length))}
-              </span>
-              <div className="flex items-center gap-1">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="size-8"
-                  aria-label={t('requests.prevPage')}
-                  disabled={pageIndex === 0 || requests.isFetching}
-                  onClick={() => setPageIndex((current) => Math.max(0, current - 1))}
-                >
-                  <ChevronLeft className="size-4" />
-                </Button>
-                <span className="num min-w-14 text-center text-xs">
-                  {t('requests.pageLabel').replace('{n}', String(pageIndex + 1))}
+            <Pagination
+              className="border-t border-border"
+              page={pageIndex}
+              pageSize={PAGE_SIZE}
+              total={total}
+              onPageChange={setPage}
+              ariaLabel={t('requests.pager')}
+              prevLabel={t('requests.prevPage')}
+              nextLabel={t('requests.nextPage')}
+              summary={
+                <span className="num text-xs">
+                  {t('requests.pageRows').replace('{n}', String(items.length))}
                 </span>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="size-8"
-                  aria-label={t('requests.nextPage')}
-                  disabled={!hasNext || requests.isFetching}
-                  onClick={() => setPageIndex((current) => current + 1)}
-                >
-                  <ChevronRight className="size-4" />
-                </Button>
-              </div>
-            </nav>
+              }
+            />
           </>
         )}
       </Card>

@@ -373,6 +373,15 @@ type Request struct {
 	// 出的兼容性问题」要看的正是版本号那一段。空串表示调用方没带这个头，
 	// 落库层写 NULL。
 	UserAgent string
+
+	// ToolResultTail 是「这次提交的最后一句是工具结果回填」：由入口按
+	// channel.Request.EndsWithToolResult 判定，落进
+	// billing_requests.tool_result_tail。
+	//
+	// 它把「用户在对话」与「agent 在跑工具循环」分开——请求日志上同一行
+	// 两种读法，而预留侧（工具回填的请求几乎必然命中同一前缀）将来压
+	// 上界也要用它。systemone 的决策表面没有消息序列，恒为否。
+	ToolResultTail bool
 }
 
 // Reservation 是预留的结果，调用方需要把它落库。
@@ -1184,7 +1193,7 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 		// TTFT 同样与金额无关，落的是 billing_requests 那一列：它是
 		// 「一次请求」的形状，不是一次用量。非流式是零值，落库层写 NULL。
 		FirstToken: out.FirstToken,
-		Tier:     val.Tier,
+		Tier:       val.Tier,
 		// val.At 是这次求值用的时刻，也就是受理时刻（见 env）。
 		PricedAt: val.At,
 		// 当地那两个值同样从这次求值原样搬过来：写进 usage_events 的两格

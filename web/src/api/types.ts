@@ -327,6 +327,8 @@ export interface UsageRequest {
   streamed: boolean
   protocol: string
   duration_ms: number | null
+  /** 这次提交的最后一句是工具结果回填（agent 工具循环的特征）。 */
+  tool_result_tail: boolean
   /** 受理到第一个内容块的毫秒数；非流式与没吐过字的失败是 null。 */
   first_token_ms: number | null
   /** 调用方请求头原文；没带这个头时是 null。 */
@@ -334,8 +336,6 @@ export interface UsageRequest {
   started_at: string
   settled_at: string | null
 }
-
-export type UsageRequestPage = ListResponse<UsageRequest>
 
 export interface Wallet {
   asset: string
@@ -384,8 +384,17 @@ export interface KeyListQuery extends ListQuery {
 
 export interface UsageRequestsQuery extends UsageQuery {
   status?: RequestStatus
+  /** 页码，从 1 起。 */
+  page?: number
   limit?: number
-  cursor?: string | null
+}
+
+/** 请求日志的一页：count 是筛选命中的总行数，与当页多少行无关。 */
+export interface UsageRequestPage {
+  items: UsageRequest[]
+  page: number
+  limit: number
+  count: number
 }
 
 export interface UsageSeriesQuery extends UsageQuery {
@@ -905,7 +914,7 @@ export interface ApiClient {
   usageSummary(query?: UsageQuery): Promise<UsageSummary>
   usageSeries(query?: UsageSeriesQuery): Promise<UsageSeries>
   usageBreakdown(query: UsageBreakdownQuery): Promise<UsageBreakdown>
-  usageRequests(query?: UsageRequestsQuery): Promise<ListResponse<UsageRequest>>
+  usageRequests(query?: UsageRequestsQuery): Promise<UsageRequestPage>
   wallet(): Promise<Wallet>
   walletEntries(query?: WalletEntriesQuery): Promise<ListResponse<WalletEntry>>
   /** `/api/v1/admin/*` 下的运营资源；账号没有 admin 角色时服务端一律 403。 */

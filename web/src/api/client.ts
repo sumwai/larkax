@@ -42,7 +42,7 @@ import type {
   UsageBreakdown,
   UsageBreakdownQuery,
   UsageQuery,
-  UsageRequest,
+  UsageRequestPage,
   UsageRequestsQuery,
   UsageSeries,
   UsageSeriesQuery,
@@ -439,8 +439,8 @@ export class HttpApiClient implements ApiClient {
     return this.request<UsageBreakdown>('/usage/breakdown', { query: { ...query } })
   }
 
-  usageRequests(query: UsageRequestsQuery = {}): Promise<ListResponse<UsageRequest>> {
-    return this.request<ListResponse<UsageRequest>>('/usage/requests', { query: { ...query } })
+  usageRequests(query: UsageRequestsQuery = {}): Promise<UsageRequestPage> {
+    return this.request<UsageRequestPage>('/usage/requests', { query: { ...query } })
   }
 
   wallet(): Promise<Wallet> {

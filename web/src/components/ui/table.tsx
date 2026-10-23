@@ -33,13 +33,7 @@ export function Table({
 
 const rowCols = { gridTemplateColumns: 'var(--table-cols)' }
 
-export function TableHead({
-  className,
-  children,
-}: {
-  className?: string
-  children: ReactNode
-}) {
+export function TableHead({ className, children }: { className?: string; children: ReactNode }) {
   return (
     <div
       role="row"
@@ -81,7 +75,11 @@ export function Th({
     <div
       role="columnheader"
       className={cn('flex items-center gap-1 px-3 py-2', right && 'justify-end', className)}
-      {...(sortDir !== undefined ? { 'aria-sort': sortDir ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none' } as const : {})}
+      {...(sortDir !== undefined
+        ? ({
+            'aria-sort': sortDir ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none',
+          } as const)
+        : {})}
     >
       {onSort ? (
         <button
@@ -164,30 +162,44 @@ export function Pagination({
   total,
   onPageChange,
   className,
+  summary,
+  ariaLabel = '分页',
+  prevLabel = '上一页',
+  nextLabel = '下一页',
 }: {
   page: number
   pageSize: number
   total: number
   onPageChange: (page: number) => void
   className?: string
+  /** 左侧的说明文字；不给用内置的「第 X–Y 条，共 Z 条」。 */
+  summary?: ReactNode
+  ariaLabel?: string
+  prevLabel?: string
+  nextLabel?: string
 }) {
   const pages = Math.max(1, Math.ceil(total / pageSize))
   const from = total === 0 ? 0 : (page - 1) * pageSize + 1
   const to = Math.min(total, page * pageSize)
   return (
     <nav
-      aria-label="分页"
-      className={cn('flex items-center justify-between gap-3 pt-3 text-sm text-muted-foreground', className)}
+      aria-label={ariaLabel}
+      className={cn(
+        'flex items-center justify-between gap-3 pt-3 text-sm text-muted-foreground',
+        className,
+      )}
     >
-      <span className="num text-xs">
-        第 {from}–{to} 条，共 {total} 条
-      </span>
+      {summary ?? (
+        <span className="num text-xs">
+          第 {from}–{to} 条，共 {total} 条
+        </span>
+      )}
       <div className="flex items-center gap-1">
         <Button
           variant="ghost"
           size="icon"
           className="size-8"
-          aria-label="上一页"
+          aria-label={prevLabel}
           disabled={page <= 1}
           onClick={() => onPageChange(page - 1)}
         >
@@ -200,7 +212,7 @@ export function Pagination({
           variant="ghost"
           size="icon"
           className="size-8"
-          aria-label="下一页"
+          aria-label={nextLabel}
           disabled={page >= pages}
           onClick={() => onPageChange(page + 1)}
         >
