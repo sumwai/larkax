@@ -35,7 +35,8 @@ const priceShortUsage = `larkaxctl price 管理计价规则。
   larkaxctl price calendar import <文件> | price calendar list
 
 作用域决定哪两栏 id 有效；五个计价项（prompt、completion、cache_read、
-cache_write、reasoning）在规则里缺一个，用到它的请求就会整个失败。
+cache_write、reasoning）缺一个，用到它的那一笔结算就失败：非流式请求调用方
+拿到 500，流式请求只在服务端日志里留一条。
 --by 必填：create 记下这条价是谁定的，update 记下是谁改的。
 
 更细的边界：larkaxctl help price。
@@ -100,9 +101,9 @@ weekdays / window / day_kind / holidays / min_context_tokens 分行改写单价�
 出来的那一份，直接换源码会让表与实际价格分家。
 
 计价项一共五个：prompt、completion、cache_read、cache_write、reasoning。
-上游报了哪一项，规则里就必须有哪一项的单价——少一项不是少收，是这次请求整个
-失败（结算报「用量里有规则未定价的计量项」）。新规则把这五项都写上、用不到的
-填 0，比漏掉再被拦住省事。
+上游报了哪一项，规则里就必须有哪一项的单价——少一项不是少收，是这一笔的结算
+失败：非流式请求调用方拿到 500，流式请求只把「用量里有规则未定价的计量项」
+写进服务端日志。新规则把这五项都写上、用不到的填 0，比漏掉再被拦住省事。
 
 create 与 update 写成功之后还会提示这条规则漏了哪几项。提示看的是规则实际
 定过价的键，与漏掉时结算报的那一项对得上。它只是提示：写入已经完成，命令
