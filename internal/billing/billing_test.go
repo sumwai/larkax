@@ -1137,13 +1137,13 @@ func TestNonCachedExactlyZero(t *testing.T) {
 
 // 缓存总量恰好不超过输入时，不该触发压回。
 //
-// 这个 if 头里其实有三个 `>`：守卫 `u.PromptTokens > 0` 那一处由
-// TestCacheCompressionGuardWhenPromptIsZero 杀着，不在本段两条之列。下面两条
-// `>` 改成 `>=`，只在各自的边界格（`total == u.PromptTokens` / `over == 0`）
-// 上可能分岔，而那一格是否零增量，取决于**被切的那一项**是不是负数：前者切
-// 的是 `cacheWrite`，后者切的是 `cacheRead`。被切项非负时
-// `min64(0, x) == 0`，减掉的是零；为负时 `min64` 返回负数，`-= cut` 把那一项
-// 抹成 0。
+// 这段 if 语句里有三个 `>`：头里的守卫 `u.PromptTokens > 0` 由
+// TestCacheCompressionGuardWhenPromptIsZero 杀着；头里的
+// `total > u.PromptTokens` 与体内的 `over > 0` 两处改成 `>=`，只在各自的
+// 边界格（`total == u.PromptTokens` / `over == 0`）上可能分岔，而那一格是否
+// 零增量，取决于**被切的那一项**是不是负数：前者切的是 `cacheWrite`，后者切
+// 的是 `cacheRead`。被切项非负时 `min64(0, x) == 0`，减掉的是零；为负时
+// `min64` 返回负数，`-= cut` 把那一项抹成 0。
 //
 // 反例说明为什么不能说「缓存量非负」：
 // `{PromptTokens:10, CacheReadTokens:-5, CacheWriteTokens:15}` 在
