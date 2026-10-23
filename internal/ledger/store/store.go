@@ -474,10 +474,10 @@ func (s *Store) reserveFromWallet(ctx context.Context, tx *sql.Tx, req pipeline.
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO billing_requests
 			(request_id, user_id, api_key_id, channel_id, canonical_model, protocol,
-			 streamed, reserved_amount, reserved_asset, status,
-			 pricing_rule_id, pricing_expr_snapshot, started_at)
+			 streamed, reserved_amount, reserved_asset, status, user_agent,
+			 tool_result_tail, pricing_rule_id, pricing_expr_snapshot, started_at)
 		VALUES ($1, $2, $12, NULLIF($3, 0::bigint), $4, $5, $11, $6::numeric, $7, 'pending',
-		        NULLIF($8, 0::bigint), NULLIF($9, ''), $10)
+		        NULLIF($13, ''), $14, NULLIF($8, 0::bigint), NULLIF($9, ''), $10)
 		RETURNING id`,
 		// 协议由入口设置（见 pipeline.Request.Protocol）。这里**不填默认值**：
 		// 写死一个会让另一条入口的账单全部记错，而这张表正是事后按协议统计的
@@ -492,6 +492,10 @@ func (s *Store) reserveFromWallet(ctx context.Context, tx *sql.Tx, req pipeline.
 		// 这里**不加 NULLIF**：checkAPIKey 已经挡下了 0，真放一个 0 进来会撞
 		// 上 api_keys 的外键——两层都出声，好过一层静默写 NULL。
 		req.APIKeyID,
+		// 调用方标识由入口原样带来（见 pipeline.Request.UserAgent）。
+		req.UserAgent,
+		// 最后一句是不是工具结果回填，由入口判定（见 pipeline.Request.ToolResultTail）。
+		req.ToolResultTail,
 	).Scan(&id)
 	if err != nil {
 		// 这条 INSERT 有四条外键（users / api_keys / channels / pricing_rules）
@@ -1144,11 +1148,15 @@ func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *
 		       upstream_model = NULLIF($6, ''),
 		       upstream_status = NULLIF($7, 0),
 		       error_code = NULLIF($8, ''),
+		       first_token_ms = NULLIF($9, 0),
 		       client_canceled_at = CASE WHEN $4 THEN now() END
 		 WHERE request_id = $1 AND status = 'pending'`,
 		req.RequestID, charge.Settlement.Actual.String(), req.ChannelID,
 		charge.ClientCanceled, charge.Settlement.Breakdown.Total.String(),
-		req.UpstreamModel, charge.UpstreamStatus, charge.ErrorCode)
+		req.UpstreamModel, charge.UpstreamStatus, charge.ErrorCode,
+		// TTFT 只在流式且真的吐过字时有值，零值折成 NULL（见
+		// pipeline.Charge.FirstToken 的注释）。
+		int64(charge.FirstToken/time.Millisecond))
 	if err != nil {
 		// 与 Release 同一条外键：channel_id → channels(id)。
 		return false, constraintFailure(fmt.Errorf("标记结算失败: %w", err))

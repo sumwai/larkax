@@ -318,6 +318,10 @@ func (g *Gateway) pumpStream(ctx context.Context, canonicalModel string, h *hand
 		// ——那一位在循环之前就注册了。与 upstreamStatus / clientGone 同一个
 		// 形状：defer 读的是返回那一刻的值。
 		ours bool
+		// firstTokenAt 是第一个内容块到达的时刻。它与 started 在同一条
+		// 判据上（delta / tool_use / annotation 三种 Kind），只在从否到真
+		// 的那一次取钟——之后的事件不再覆盖它。
+		firstTokenAt time.Time
 	)
 
 	// 开始泵流的时刻。它只是延迟的**兜底起点**：真正发出去的时刻取自
@@ -430,6 +434,12 @@ func (g *Gateway) pumpStream(ctx context.Context, canonicalModel string, h *hand
 				// ev 是值拷贝，改写它只影响下面转发的这一份。
 				ev.Err = fmt.Errorf("%w: %w", route.ErrOutputStarted, ev.Err)
 			}
+		}
+
+		// TTFT 取「从否到真」的那一次：started 刚被翻真，此刻就是第一个
+		// 内容块到达的时刻。之后的事件不再覆盖——口径是**第一个**块。
+		if started && firstTokenAt.IsZero() {
+			firstTokenAt = g.now()
 		}
 
 		if !forward(ctx, out, ev) {
@@ -609,17 +619,21 @@ func (g *Gateway) pumpStream(ctx context.Context, canonicalModel string, h *hand
 	// 「上游出过什么事」，账单要的是「这条已经计费的行上该不该留一条说明」
 	// （见 billedStreamEvidence）。
 	billStatus, billCode := billedStreamEvidence(upstreamStatus, streamErr, started, done, ours)
-	g.billStream(settleCtx, h, placed, res, pipeline.Outcome{
+	outcome := pipeline.Outcome{
 		Usage:       usage,
 		UsageSource: source,
 		Duration:    elapsed,
+		// 只在真的吐过字时才有 TTFT：上游一个字没吐就断掉的那次，
+		// 「第一个内容块」不存在，零值由落库层写成 NULL。
+		FirstToken: firstTokenAt.Sub(start),
 		// ClientCanceled 只描述「客户端中途断开」这一种结局，别拿它当
 		// 「用量是估的」用：上游中途报错时用量同样是估的，但那不是客户端
 		// 断的——两者在对账与告警上是两回事（见 pipeline.Outcome 的注释）。
 		ClientCanceled: clientGone,
 		UpstreamStatus: billStatus,
 		ErrorCode:      billCode,
-	})
+	}
+	g.billStream(settleCtx, h, placed, res, outcome)
 
 	// 用量照记，即便这次算「不是渠道的失败」：客户端断开时上游已经为
 	// 输入计了费，额度自记账要跟着扣。

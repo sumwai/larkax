@@ -316,6 +316,8 @@ export interface UsageRequest {
   model: string
   /** 没有关联密钥（旧数据或内部调用）时为 null。 */
   key: UsageRequestKey | null
+  /** 这次请求落到哪个渠道（渠道名）；渠道被删掉时是空串。 */
+  provider: string
   status: RequestStatus
   cost: Money
   currency: string
@@ -325,11 +327,15 @@ export interface UsageRequest {
   streamed: boolean
   protocol: string
   duration_ms: number | null
+  /** 这次提交的最后一句是工具结果回填（agent 工具循环的特征）。 */
+  tool_result_tail: boolean
+  /** 受理到第一个内容块的毫秒数；非流式与没吐过字的失败是 null。 */
+  first_token_ms: number | null
+  /** 调用方请求头原文；没带这个头时是 null。 */
+  user_agent: string | null
   started_at: string
   settled_at: string | null
 }
-
-export type UsageRequestPage = ListResponse<UsageRequest>
 
 export interface Wallet {
   asset: string
@@ -378,8 +384,17 @@ export interface KeyListQuery extends ListQuery {
 
 export interface UsageRequestsQuery extends UsageQuery {
   status?: RequestStatus
+  /** 页码，从 1 起。 */
+  page?: number
   limit?: number
-  cursor?: string | null
+}
+
+/** 请求日志的一页：count 是筛选命中的总行数，与当页多少行无关。 */
+export interface UsageRequestPage {
+  items: UsageRequest[]
+  page: number
+  limit: number
+  count: number
 }
 
 export interface UsageSeriesQuery extends UsageQuery {
@@ -633,11 +648,7 @@ export type ChannelHealth = 'healthy' | 'unknown' | 'degraded' | 'drained'
 
 /** 异常渠道的理由。多条同时成立时全部出现。 */
 export type UnhealthyReason =
-  | 'failure_rate'
-  | 'quota_state'
-  | 'probe_failed'
-  | 'consecutive_failures'
-  | 'no_requests_24h'
+  'failure_rate' | 'quota_state' | 'probe_failed' | 'consecutive_failures' | 'no_requests_24h'
 
 export interface MerchantOverview {
   /** 名下未软删的渠道数（含停用的）；管理员会话下是全站。 */
@@ -871,7 +882,6 @@ export interface OpsClient extends ChannelOpsClient {
   updateUser(id: number, input: AdminUserUpdateInput): Promise<AdminUserDetail>
 }
 
-
 /**
  * 控制台用到的全部读写出入口。HTTP 实现见 `client.ts`，开发期替身见 `mock.ts`；
  * 页面只依赖这个接口，替换实现只改 `api/index.ts` 一处。
@@ -904,7 +914,7 @@ export interface ApiClient {
   usageSummary(query?: UsageQuery): Promise<UsageSummary>
   usageSeries(query?: UsageSeriesQuery): Promise<UsageSeries>
   usageBreakdown(query: UsageBreakdownQuery): Promise<UsageBreakdown>
-  usageRequests(query?: UsageRequestsQuery): Promise<ListResponse<UsageRequest>>
+  usageRequests(query?: UsageRequestsQuery): Promise<UsageRequestPage>
   wallet(): Promise<Wallet>
   walletEntries(query?: WalletEntriesQuery): Promise<ListResponse<WalletEntry>>
   /** `/api/v1/admin/*` 下的运营资源；账号没有 admin 角色时服务端一律 403。 */

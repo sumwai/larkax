@@ -365,6 +365,23 @@ type Request struct {
 	// 它和 RequestID 一样属于「一次请求在持久化那一侧的身份」，
 	// 不是计费口径：它不参与任何金额的计算。
 	Idempotency *idempotency.Claim
+
+	// UserAgent 是调用方请求头里的 User-Agent，由**入口**原样带来，
+	// 落进 billing_requests.user_agent。
+	//
+	// 不截断、不归一化：客户端标识符五花八门，而排查「哪个版本的客户端
+	// 出的兼容性问题」要看的正是版本号那一段。空串表示调用方没带这个头，
+	// 落库层写 NULL。
+	UserAgent string
+
+	// ToolResultTail 是「这次提交的最后一句是工具结果回填」：由入口按
+	// channel.Request.EndsWithToolResult 判定，落进
+	// billing_requests.tool_result_tail。
+	//
+	// 它把「用户在对话」与「agent 在跑工具循环」分开——请求日志上同一行
+	// 两种读法，而预留侧（工具回填的请求几乎必然命中同一前缀）将来压
+	// 上界也要用它。systemone 的决策表面没有消息序列，恒为否。
+	ToolResultTail bool
 }
 
 // Reservation 是预留的结果，调用方需要把它落库。
@@ -499,6 +516,15 @@ type Outcome struct {
 	// 与 charge.Usage 的零值一样，落库层要靠这一条把它写成 NULL——
 	// 0 毫秒的样本会把聚合出来的分位数拉低，而那个数看起来完全正常。
 	Duration time.Duration
+
+	// FirstToken 是从受理到**第一个内容块**到达网关的时长，只有流式请求
+	// 量得出：非流式的响应整份一次到达，TTFT 没有意义。
+	//
+	// 它由网关在流式循环里量（第一个让「已向客户端吐字」成立的事件），
+	// 随结算落进 billing_requests.first_token_ms。零值表示没测到
+	// （非流式、上游一个字没吐就失败），落库层写 NULL——与 Duration
+	// 同一个口径：0 毫秒是「快得看不见」，不是「没量」。
+	FirstToken time.Duration
 }
 
 // Outcome.ErrorCode 的取值。它们是**我们自己归一化过的分类**，不是上游错误
@@ -662,6 +688,11 @@ type Charge struct {
 	// 于是「一次请求花了多久」只在账本的用量底稿上留一份。零值表示没测到，
 	// 落库层写 NULL——理由见 Outcome.Duration。
 	Duration time.Duration
+
+	// FirstToken 是「受理到第一个内容块」的时长，由 Settle 从 Outcome
+	// 原样搬过来，落进 billing_requests.first_token_ms。只有流式请求
+	// 有值；零值表示没测到，落库层写 NULL——理由见 Outcome.FirstToken。
+	FirstToken time.Duration
 
 	// Tier 是规则记下的档位名，供账单解释「为什么按这一档算」。
 	Tier string
@@ -1159,7 +1190,10 @@ func (p *Pipeline) Settle(ctx context.Context, req Request, reserved *Reservatio
 		// 耗时与金额无关，原样带过去：它只在落库时变成 usage_events 的一列，
 		// 延迟那一维的输入就从那里按桶聚出来。
 		Duration: out.Duration,
-		Tier:     val.Tier,
+		// TTFT 同样与金额无关，落的是 billing_requests 那一列：它是
+		// 「一次请求」的形状，不是一次用量。非流式是零值，落库层写 NULL。
+		FirstToken: out.FirstToken,
+		Tier:       val.Tier,
 		// val.At 是这次求值用的时刻，也就是受理时刻（见 env）。
 		PricedAt: val.At,
 		// 当地那两个值同样从这次求值原样搬过来：写进 usage_events 的两格

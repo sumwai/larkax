@@ -1,562 +1,803 @@
-import { useState, type FormEvent } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api'
-import type { ApiKey, CreatedKey, KeyCreateInput } from '../api/types'
+import { ApiError } from '../api/client'
+import type { ApiKey, KeyStatus } from '../api/types'
+import { addDays, formatDate, formatDateTime, moneySymbol, todayInZone } from '../lib/format'
+import { keySnippets } from '../lib/keyExport'
+import { MagpieIcon } from '../assets/import-targets/MagpieIcon'
+import ccSwitchIcon from '../assets/import-targets/cc-switch.png'
+import lodyIcon from '../assets/import-targets/lody.png'
 import { useI18n } from '../i18n'
 import type { MessageKey } from '../i18n/zh'
 import { useSite } from '../site/SiteProvider'
-import { useAsync } from '../hooks/useAsync'
-import { formatDate, formatDateTime, formatMoney, formatSpend, moneySymbol } from '../lib/format'
+import { useDocumentTitle } from '../components/PageTitle'
 import {
   Alert,
+  Badge,
   Button,
-  CopyButton,
-  Empty,
-  Modal,
-  MoneyText,
+  Card,
+  CardBody,
+  DialogContent,
+  Field,
+  Input,
+  Money,
   PageHead,
+  Pagination,
+  CopyButton,
+  Segmented,
   Skeleton,
-  StatusPill,
-  useToast,
+  toast,
 } from '../components/ui'
-import { IconChevronRight, IconKey, IconPlus, IconPower, IconTrash } from '../components/icons'
-import { useConfirm } from './ops/common-helpers'
-import { isDirty, useCloseGuard, useUnsavedGuard } from './ops/guard'
+import { ChevronDown } from 'lucide-react'
 
-interface CreateForm {
+/** 每页行数：一屏能放下，翻页也不必太长。 */
+const PAGE_SIZE = 10
+
+const STATUS_TONE: Record<KeyStatus, 'success' | 'neutral' | 'danger'> = {
+  active: 'success',
+  disabled: 'neutral',
+  revoked: 'danger',
+}
+
+/** 三个限制各占一列：额度（累计 / 上限）、速率、过期。 */
+function QuotaCell({ item }: { item: ApiKey }) {
+  const { t } = useI18n()
+  return (
+    <span className="w-32 shrink-0 text-right text-xs text-muted-foreground">
+      <Money value={item.quota_used} variant="spend" />
+      <span className="text-faint"> / </span>
+      {item.quota_limit === null ? (
+        <span className="text-faint">{t('status.unlimited')}</span>
+      ) : (
+        <Money value={item.quota_limit} />
+      )}
+    </span>
+  )
+}
+
+/** 速率：null 表示不限。 */
+function RateCell({ item }: { item: ApiKey }) {
+  const { t } = useI18n()
+  return (
+    <span className="w-20 shrink-0 text-right text-xs text-faint">
+      {item.rate_limit_rpm === null
+        ? t('status.unlimited')
+        : `${item.rate_limit_rpm} ${t('keys.perMinute')}`}
+    </span>
+  )
+}
+
+/** 过期：按站点时区显示日期；`never_expires` 是服务端算好的。 */
+function ExpiryCell({ item }: { item: ApiKey }) {
+  const { t } = useI18n()
+  const { meta } = useSite()
+  return (
+    <span className="hidden w-24 shrink-0 text-right text-xs text-faint md:block">
+      {item.never_expires || !item.expires_at
+        ? t('keys.noExpiry')
+        : formatDate(item.expires_at, meta.timezone)}
+    </span>
+  )
+}
+
+/** 创建表单的状态：额度与速率用预设值，空串表示不限；过期用档位名。 */
+interface Draft {
   name: string
   quota: string
   rate: string
-  expires: string
+  expiry: string
 }
 
-const EMPTY_FORM: CreateForm = { name: '', quota: '', rate: '', expires: '' }
+const EMPTY_DRAFT: Draft = { name: '', quota: '', rate: '', expiry: '' }
 
-interface ExpiryPreset {
-  key: MessageKey
-  /** 相对今天的天数；`years` 与 `days` 都不给表示永不过期（清空字段）。 */
-  days?: number
-  years?: number
+/** 额度预设（按站点币种显示）；空串是不限。 */
+const QUOTA_PRESETS = ['', '10', '50', '100', '500'] as const
+
+/** 速率预设，次/分；空串是不限。 */
+const RATE_PRESETS = ['', '20', '60', '120', '600'] as const
+
+/** 过期档位：值与天数，空串是不过期。 */
+const EXPIRY_PRESETS = [
+  { value: '', days: 0, label: 'keys.expiryNever' },
+  { value: '7d', days: 7, label: 'keys.expiry7d' },
+  { value: '30d', days: 30, label: 'keys.expiry30d' },
+  { value: '90d', days: 90, label: 'keys.expiry90d' },
+  { value: '1y', days: 365, label: 'keys.expiry1y' },
+] as const
+
+/** 一排可点的预设值：选中的那个用底色标出来，不再让人手填。 */
+function Presets<T extends string>({
+  value,
+  options,
+  onChange,
+  ariaLabel,
+  className,
+}: {
+  value: T
+  options: { value: T; label: ReactNode }[]
+  onChange: (value: T) => void
+  ariaLabel: string
+  className?: string
+}) {
+  return (
+    <div
+      role="group"
+      aria-label={ariaLabel}
+      className={`inline-flex flex-wrap gap-1.5 ${className ?? ''}`}
+    >
+      {options.map((option) => {
+        const active = option.value === value
+        return (
+          <button
+            key={option.value}
+            type="button"
+            aria-pressed={active}
+            onClick={() => onChange(option.value)}
+            className={`rounded-full border px-2 py-0.5 text-xs transition-colors ${
+              active
+                ? 'border-ring bg-primary-soft font-medium text-foreground'
+                : 'border-border text-muted-foreground hover:bg-muted hover:text-foreground'
+            }`}
+          >
+            {option.label}
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
-const EXPIRY_PRESETS: ExpiryPreset[] = [
-  { key: 'keys.expiryNever' },
-  { key: 'keys.expiry7d', days: 7 },
-  { key: 'keys.expiry30d', days: 30 },
-  { key: 'keys.expiry90d', days: 90 },
-  { key: 'keys.expiry1y', years: 1 },
-]
-
-const RATE_PRESETS = [60, 300, 600, 1200]
-
-/** `datetime-local` 认的本地时间串，精确到分钟；快捷档位与手输写的是同一个值。 */
-function toLocalInputValue(date: Date): string {
-  const pad = (value: number) => String(value).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
-}
-
-export function Keys() {
+/**
+ * 整把密钥只在创建响应里出现一次，所以拿它单独晒一屏：
+ * 复制走统一的 `copyText`（非安全上下文下会失败），关掉就再也拿不回来。
+ */
+function CreatedKeyDialog({ secret, onClose }: { secret: string; onClose: () => void }) {
   const { t } = useI18n()
   const { meta } = useSite()
-  const { show: toast } = useToast()
-  const { data, error, loading, reload } = useAsync(() => api.listKeys({ limit: 100 }), [])
-  const confirm = useConfirm()
-
-  const [creating, setCreating] = useState(false)
-  const [form, setForm] = useState<CreateForm>(EMPTY_FORM)
-  // 打开弹窗时的那份值：关窗前拿它判断这一页有没有被改过。
-  const [initialForm, setInitialForm] = useState<CreateForm>(EMPTY_FORM)
-  // 手输过期时间后档位高亮要撤掉；拿「现在 + N 天」在渲染期重算会随分钟漂移。
-  const [expiryPreset, setExpiryPreset] = useState<string | null>(null)
-  const [formError, setFormError] = useState<string | null>(null)
-  const [submitting, setSubmitting] = useState(false)
-  const [created, setCreated] = useState<CreatedKey | null>(null)
-  const [revoking, setRevoking] = useState<ApiKey | null>(null)
-  const [revokePending, setRevokePending] = useState(false)
-  const [detail, setDetail] = useState<ApiKey | null>(null)
-  const [busyId, setBusyId] = useState<number | null>(null)
-  const [actionError, setActionError] = useState<string | null>(null)
-
-  const keys = data?.items ?? []
-  // 与列表里的 MoneyText 同源：站点币种由 SiteProvider 从 /api/meta 取。
-  const currencySymbol = moneySymbol(meta.currency)
-
-  const openCreate = () => {
-    setForm(EMPTY_FORM)
-    setInitialForm(EMPTY_FORM)
-    setExpiryPreset(null)
-    setFormError(null)
-    setCreating(true)
-  }
-
-  const closeCreateForm = () => {
-    setCreating(false)
-    setFormError(null)
-  }
-
-  // 表单真的打开着才算脏：`closeCreateForm` 只收起弹窗、不复位 form，
-  // 少了 `creating` 这一条，「放弃」一次之后这一页会永远算改过，
-  // 后续每次刷新与站内跳转都会被拦。
-  //
-  // 只比 form、不比 expiryPreset：写过时刻的档位（7 天、30 天……）会同时改
-  // 输入框，差额已经落在 form 里；唯一只动高亮不动输入框的，是「永不过期」
-  // 点在本来就为空的字段上——那一刻关窗没有任何会提交的内容丢失，不必再问。
-  const dirty = creating && isDirty(form, initialForm)
-  // 取消、Esc、点遮罩、右上角关闭钮都从这里走。
-  const requestClose = useCloseGuard(confirm, dirty, closeCreateForm)
-  const unsavedGuard = useUnsavedGuard(dirty)
-
-  const applyExpiryPreset = (preset: ExpiryPreset) => {
-    let value = ''
-    if (preset.days) {
-      const next = new Date()
-      next.setDate(next.getDate() + preset.days)
-      value = toLocalInputValue(next)
-    } else if (preset.years) {
-      const next = new Date()
-      next.setFullYear(next.getFullYear() + preset.years)
-      value = toLocalInputValue(next)
-    }
-    setExpiryPreset(preset.key)
-    setForm((previous) => ({ ...previous, expires: value }))
-  }
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault()
-    const quota = form.quota.trim()
-    const rate = form.rate.trim()
-    if (quota && (!/^\d+(\.\d{1,8})?$/.test(quota) || !(Number.parseFloat(quota) > 0))) {
-      setFormError(t('keys.invalidQuota'))
-      return
-    }
-    if (rate && !/^\d+$/.test(rate)) {
-      setFormError(t('keys.invalidRate'))
-      return
-    }
-    let expiresAt: string | null = null
-    if (form.expires) {
-      const parsed = new Date(form.expires)
-      if (Number.isNaN(parsed.getTime())) {
-        setFormError(t('keys.invalidExpiry'))
-        return
+  const [showing, setShowing] = useState<'secret' | 'export'>('secret')
+  const snippets = useMemo(
+    () => keySnippets(secret, meta.api_base_url, meta.site_name),
+    [secret, meta.api_base_url, meta.site_name],
+  )
+  const targets = [
+    {
+      id: 'magpie',
+      name: 'magpie',
+      icon: <MagpieIcon className="size-7" />,
+      link: snippets.magpie,
+    },
+    {
+      id: 'ccswitch',
+      name: 'CC Switch',
+      icon: <img src={ccSwitchIcon} alt="" className="size-8" />,
+      link: snippets.ccSwitch,
+    },
+    {
+      id: 'lody',
+      name: 'Lody',
+      icon: <img src={lodyIcon} alt="" className="size-8" />,
+      link: snippets.lody,
+    },
+  ]
+  return (
+    <DialogContent
+      open
+      size={showing === 'export' ? 'lg' : 'md'}
+      dismissOnOutsideClick={false}
+      onOpenChange={(open) => {
+        if (open) return
+        // 导出屏上的关闭（X、Esc）退回密钥那一屏：整把密钥只出现这一次。
+        if (showing === 'export') setShowing('secret')
+        else onClose()
+      }}
+      title={showing === 'export' ? t('keys.exportTitle') : t('keys.createdTitle')}
+      description={showing === 'export' ? t('keys.exportBody') : t('keys.createdBody')}
+      footer={
+        <div className="flex items-center gap-2">
+          {showing === 'export' ? (
+            <Button variant="secondary" onClick={() => setShowing('secret')}>
+              {t('common.back')}
+            </Button>
+          ) : (
+            <Button variant="secondary" onClick={() => setShowing('export')}>
+              {t('keys.export')}
+            </Button>
+          )}
+          <Button onClick={onClose}>{t('keys.savedIt')}</Button>
+        </div>
       }
-      expiresAt = parsed.toISOString()
-    }
+    >
+      {showing === 'secret' ? (
+        /* 密钥与复制按钮同处一条：分两行时复制按钮会读成一个输入框。 */
+        <div className="flex items-center gap-2 rounded-md border border-input bg-muted py-1.5 pl-3 pr-1.5">
+          <code className="mono min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-sm">
+            {secret}
+          </code>
+          <CopyButton
+            className="shrink-0"
+            value={secret}
+            label={t('keys.copyKey')}
+            copiedLabel={t('common.copied')}
+          />
+        </div>
+      ) : (
+        /* 链接本身不铺在页面上：点图标交给系统的 scheme 处理器，各客户端自己弹确认框。 */
+        <div className="grid grid-cols-3 gap-3">
+          {targets.map((target) => (
+            <a
+              key={target.id}
+              href={target.link}
+              className="flex flex-col items-center gap-2 rounded-md border border-border px-3 py-5 text-center transition-colors duration-(--dur) hover:bg-muted focus-visible:bg-muted focus-visible:outline-none"
+            >
+              <span className="flex size-10 items-center justify-center rounded-md border border-border">
+                {target.icon}
+              </span>
+              <span className="text-sm font-medium">{target.name}</span>
+            </a>
+          ))}
+        </div>
+      )}
+    </DialogContent>
+  )
+}
 
-    // 创建接口里「不限」是不给这个字段，不是给 null；额度为 0 也会被拒。
-    const input: KeyCreateInput = {}
-    if (form.name.trim()) input.name = form.name.trim()
-    if (quota) input.quota_limit = quota
-    if (rate) input.rate_limit_rpm = Number(rate)
-    if (expiresAt) input.expires_at = expiresAt
+/** 创建表单：名称、额度上限、速率上限、过期时间，后三个留空即不限。 */
+/**
+ * 创建与编辑共用的表单：名称 + 三组限制。
+ *
+ * 两个对话框的字段、预设、校验都从这里出；分开写两份的那一天，
+ * 就是两处开始对不上的那一天。
+ */
+function KeyFormFields({
+  draft,
+  setDraft,
+  advanced,
+  setAdvanced,
+  error,
+  expiryOptions,
+}: {
+  draft: Draft
+  setDraft: (draft: Draft) => void
+  advanced: boolean
+  setAdvanced: (open: boolean) => void
+  error: MessageKey | null
+  /** 编辑时多一个「保持现状」档，创建时只有那五个。 */
+  expiryOptions?: { value: string; label: string }[]
+}) {
+  const { t } = useI18n()
+  const { meta } = useSite()
+  const symbol = moneySymbol(meta.currency)
 
-    setSubmitting(true)
-    setFormError(null)
-    try {
-      const result = await api.createKey(input)
-      setCreated(result)
-      setCreating(false)
-      reload()
-    } catch {
-      setFormError(t('keys.createFailed'))
-    } finally {
-      setSubmitting(false)
+  return (
+    <div className="flex flex-col gap-4">
+      {error ? <Alert tone="danger" title={t(error)} /> : null}
+
+      <Field label={t('keys.name')} hint={t('keys.nameOptional')}>
+        {({ inputId, describedBy }) => (
+          <Input
+            id={inputId}
+            aria-describedby={describedBy}
+            placeholder={t('keys.namePlaceholder')}
+            value={draft.name}
+            onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+          />
+        )}
+      </Field>
+
+      <div className="rounded-sm border border-border">
+        <button
+          type="button"
+          aria-expanded={advanced}
+          onClick={() => setAdvanced(!advanced)}
+          className="flex w-full cursor-pointer items-center justify-between gap-2 px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
+        >
+          {t('keys.advanced')}
+          <ChevronDown
+            className={`size-4 transition-transform duration-(--dur) ${advanced ? 'rotate-180' : ''}`}
+            aria-hidden="true"
+          />
+        </button>
+
+        {/* 0fr → 1fr：高度靠网格行跑过渡，对话框的 auto 高度跟着长。 */}
+        <div
+          className={`grid transition-[grid-template-rows] duration-(--dur) ${advanced ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}
+        >
+          <div className="overflow-hidden">
+            <div className="flex flex-col gap-3 border-t border-border px-3 py-3">
+              <div className="flex flex-col gap-1.5">
+                <span className="text-sm font-medium">{t('keys.quotaLimit')}</span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    aria-label={t('keys.quotaLimit')}
+                    className="h-7 w-24 text-sm"
+                    inputMode="decimal"
+                    placeholder={`${symbol}0.00`}
+                    value={draft.quota}
+                    onChange={(event) => setDraft({ ...draft, quota: event.target.value })}
+                  />
+                  <div className="flex min-w-0 flex-wrap gap-1.5">
+                    <Presets
+                      ariaLabel={t('keys.quotaLimit')}
+                      value={draft.quota}
+                      onChange={(quota) => setDraft({ ...draft, quota })}
+                      options={QUOTA_PRESETS.map((quota) => ({
+                        value: quota,
+                        label:
+                          quota === '' ? (
+                            t('status.unlimited')
+                          ) : (
+                            <span className="num">
+                              {symbol}
+                              {quota}
+                            </span>
+                          ),
+                      }))}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <span className="text-sm font-medium">
+                  {t('keys.rateLimit')}
+                  <span className="ml-1 text-xs font-normal text-faint">{t('keys.perMinute')}</span>
+                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    aria-label={t('keys.rateLimit')}
+                    className="h-7 w-24 text-sm"
+                    inputMode="numeric"
+                    placeholder="0"
+                    value={draft.rate}
+                    onChange={(event) => setDraft({ ...draft, rate: event.target.value })}
+                  />
+                  <div className="flex min-w-0 flex-wrap gap-1.5">
+                    <Presets
+                      ariaLabel={t('keys.rateLimit')}
+                      value={draft.rate}
+                      onChange={(rate) => setDraft({ ...draft, rate })}
+                      options={RATE_PRESETS.map((rate) => ({
+                        value: rate,
+                        label:
+                          rate === '' ? t('status.unlimited') : <span className="num">{rate}</span>,
+                      }))}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <span className="text-sm font-medium">{t('keys.expiresAt')}</span>
+                <Presets
+                  ariaLabel={t('keys.expiresAt')}
+                  value={draft.expiry}
+                  onChange={(expiry) => setDraft({ ...draft, expiry })}
+                  options={
+                    expiryOptions ??
+                    EXPIRY_PRESETS.map((item) => ({ value: item.value, label: t(item.label) }))
+                  }
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CreateKeyDialog({ onCreated }: { onCreated: (secret: string) => void }) {
+  const { t } = useI18n()
+  const { meta } = useSite()
+  const [open, setOpen] = useState(false)
+  const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT)
+  const [error, setError] = useState<MessageKey | null>(null)
+  const [advanced, setAdvanced] = useState(false)
+
+  const expiryDays = EXPIRY_PRESETS.find((item) => item.value === draft.expiry)?.days ?? 0
+
+  const create = useMutation({
+    mutationFn: () =>
+      api.createKey({
+        name: draft.name.trim() || undefined,
+        quota_limit: draft.quota.trim() || undefined,
+        rate_limit_rpm: draft.rate.trim() === '' ? undefined : Number(draft.rate.trim()),
+        // 档位换成一个具体时刻：站点时区当天 23:59:59，比「当天零点」少一天歧义。
+        expires_at:
+          expiryDays === 0
+            ? undefined
+            : new Date(`${addDays(todayInZone(meta.timezone), expiryDays)}T23:59:59`).toISOString(),
+      }),
+    onSuccess: (created) => {
+      close()
+      onCreated(created.secret)
+    },
+    onError: (err) => {
+      // 400 是我们填的字段不对，其余（网络、5xx）不该让人去改表单。
+      setError(
+        err instanceof ApiError && err.status === 400 ? 'keys.createFailed' : 'errors.generic',
+      )
+    },
+  })
+
+  function submit() {
+    setError(null)
+    const quota = draft.quota.trim()
+    if (quota !== '' && !/^\d+(\.\d{1,8})?$/.test(quota)) {
+      setError('keys.invalidQuota')
+      return
     }
+    const rate = draft.rate.trim()
+    if (rate !== '' && !/^\d+$/.test(rate)) {
+      setError('keys.invalidRate')
+      return
+    }
+    create.mutate()
   }
 
-  const toggle = async (key: ApiKey) => {
-    const nextStatus = key.status === 'active' ? 'disabled' : 'active'
-    setBusyId(key.id)
-    setActionError(null)
-    try {
-      await api.updateKey(key.id, { status: nextStatus })
-      toast(nextStatus === 'active' ? t('keys.enabledOk') : t('keys.disabledOk'))
-      setDetail(null)
-      reload()
-    } catch {
-      setActionError(t('keys.updateFailed'))
-    } finally {
-      setBusyId(null)
-    }
+  /**
+   * 关闭时把表单清干净：名称、预设、展开状态、上次的错误都不留给下一次。
+   * 取消、Esc、点遮罩都走这里，不只靠「创建成功」那一条路。
+   */
+  function close() {
+    setOpen(false)
+    setDraft(EMPTY_DRAFT)
+    setAdvanced(false)
+    setError(null)
   }
 
-  const revoke = async () => {
-    if (!revoking) return
-    setRevokePending(true)
-    setActionError(null)
-    try {
-      await api.revokeKey(revoking.id)
-      toast(t('keys.revokedOk'))
-      setRevoking(null)
-      setDetail(null)
-      reload()
-    } catch {
-      setActionError(t('keys.revokeFailed'))
-    } finally {
-      setRevokePending(false)
-    }
-  }
-
-  const quotaText = (key: ApiKey) => (
+  return (
     <>
-      <b className="num">
-        <MoneyText value={key.quota_used} currency={meta.currency} variant="spend" />
-      </b>
-      <span>
-        {t('keys.quotaUsed')} ·{' '}
-        {key.quota_limit ? formatMoney(key.quota_limit) : t('keys.unlimitedQuota')}
-      </span>
+      <Button onClick={() => setOpen(true)}>{t('keys.create')}</Button>
+      <DialogContent
+        open={open}
+        onOpenChange={(next) => {
+          if (next) setOpen(true)
+          else close()
+        }}
+        title={t('keys.createTitle')}
+        description={t('keys.createBody')}
+        footer={
+          <>
+            <Button variant="secondary" onClick={close}>
+              {t('common.cancel')}
+            </Button>
+            <Button busy={create.isPending} onClick={submit}>
+              {t('keys.create')}
+            </Button>
+          </>
+        }
+      >
+        <KeyFormFields
+          draft={draft}
+          setDraft={setDraft}
+          advanced={advanced}
+          setAdvanced={setAdvanced}
+          error={error}
+        />
+      </DialogContent>
     </>
   )
+}
 
-  // 「不过期」只读服务端给的布尔：NULL 与远期值两种落库表示在页面收成一个答案。
-  const expiresText = (key: ApiKey) =>
-    key.never_expires ? t('keys.noExpiry') : formatDateTime(key.expires_at, meta.timezone)
+/**
+ * 编辑一把密钥：名称与三组限制。
+ *
+ * 过期时间这一个字段有三种意图：不动（空档）、改成「不过期」（`null`）、
+ * 或换成新的档位。三者不能混成一个 `expires_at`，否则「不改」会变成
+ * 「清空」。
+ */
+function EditKeyDialog({ item }: { item: ApiKey }) {
+  const { t } = useI18n()
+  const { meta } = useSite()
+  const queryClient = useQueryClient()
+  const [open, setOpen] = useState(false)
+  const [advanced, setAdvanced] = useState(false)
+  const [error, setError] = useState<MessageKey | null>(null)
+  const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT)
 
-  const rateText = (key: ApiKey) =>
-    key.rate_limit_rpm === null
-      ? t('status.unlimited')
-      : `${key.rate_limit_rpm} ${t('keys.perMinute')}`
+  const update = useMutation({
+    mutationFn: () => {
+      const quota = draft.quota.trim()
+      const rate = draft.rate.trim()
+      const days = EXPIRY_PRESETS.find((preset) => preset.value === draft.expiry)?.days
+      return api.updateKey(item.id, {
+        name: draft.name.trim(),
+        quota_limit: quota === '' ? null : quota,
+        rate_limit_rpm: rate === '' ? null : Number(rate),
+        // 空档不传：保持原来的到期时间；选了就换算成站点时区的当天 23:59:59。
+        ...(draft.expiry === ''
+          ? {}
+          : days === undefined
+            ? { expires_at: null }
+            : {
+                expires_at: new Date(
+                  `${addDays(todayInZone(meta.timezone), days)}T23:59:59`,
+                ).toISOString(),
+              }),
+      })
+    },
+    onSuccess: () => {
+      close()
+      toast.success(t('keys.updatedOk'))
+      void queryClient.invalidateQueries({ queryKey: ['keys'] })
+    },
+    onError: (err) => {
+      setError(
+        err instanceof ApiError && err.status === 400 ? 'keys.createFailed' : 'errors.generic',
+      )
+    },
+  })
 
-  const actions = (key: ApiKey, compact = false) => {
-    if (key.status === 'revoked') return <span className="tiny">{t('keys.revokedHint')}</span>
-    return (
-      <>
-        <Button
-          variant="ghost"
-          size="sm"
-          loading={busyId === key.id}
-          icon={compact ? undefined : <IconPower size={14} />}
-          onClick={() => toggle(key)}
-        >
-          {key.status === 'active' ? t('keys.disable') : t('keys.enable')}
-        </Button>
-        <Button
-          variant="danger"
-          size="sm"
-          icon={compact ? undefined : <IconTrash size={14} />}
-          onClick={() => {
-            setRevoking(key)
-            setDetail(null)
-          }}
-        >
-          {t('keys.revoke')}
-        </Button>
-      </>
-    )
+  function openDialog() {
+    setDraft({
+      name: item.name ?? '',
+      quota: item.quota_limit ?? '',
+      rate: item.rate_limit_rpm === null ? '' : String(item.rate_limit_rpm),
+      expiry: '',
+    })
+    setAdvanced(false)
+    setError(null)
+    setOpen(true)
   }
+
+  function close() {
+    setOpen(false)
+    setDraft(EMPTY_DRAFT)
+    setAdvanced(false)
+    setError(null)
+  }
+
+  function submit() {
+    setError(null)
+    const quota = draft.quota.trim()
+    if (quota !== '' && !/^\d+(\.\d{1,8})?$/.test(quota)) {
+      setError('keys.invalidQuota')
+      return
+    }
+    const rate = draft.rate.trim()
+    if (rate !== '' && !/^\d+$/.test(rate)) {
+      setError('keys.invalidRate')
+      return
+    }
+    update.mutate()
+  }
+
+  return (
+    <>
+      <Button variant="ghost" size="sm" onClick={openDialog}>
+        {t('keys.edit')}
+      </Button>
+      <DialogContent
+        open={open}
+        onOpenChange={(next) => {
+          if (next) setOpen(true)
+          else close()
+        }}
+        title={t('keys.editTitle')}
+        description={t('keys.editBody')}
+        footer={
+          <>
+            <Button variant="secondary" onClick={close}>
+              {t('common.cancel')}
+            </Button>
+            <Button busy={update.isPending} onClick={submit}>
+              {t('common.save')}
+            </Button>
+          </>
+        }
+      >
+        <KeyFormFields
+          draft={draft}
+          setDraft={setDraft}
+          advanced={advanced}
+          setAdvanced={setAdvanced}
+          error={error}
+          expiryOptions={[
+            { value: '', label: t('keys.expiryKeep') },
+            ...EXPIRY_PRESETS.map((preset) => ({
+              value: preset.value === '' ? 'never' : preset.value,
+              label: t(preset.label),
+            })),
+          ]}
+        />
+      </DialogContent>
+    </>
+  )
+}
+
+/** 一行密钥：状态、额度、最近使用与操作。 */
+function KeyRow({ item }: { item: ApiKey }) {
+  const { t } = useI18n()
+  const queryClient = useQueryClient()
+  const [lastError, setLastError] = useState<MessageKey | null>(null)
+
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ['keys'] })
+
+  const toggle = useMutation({
+    mutationFn: () =>
+      api.updateKey(item.id, { status: item.status === 'active' ? 'disabled' : 'active' }),
+    onSuccess: () => {
+      setLastError(null)
+      toast.success(t(item.status === 'active' ? 'keys.disabledOk' : 'keys.enabledOk'))
+      void refresh()
+    },
+    onError: () => setLastError('keys.updateFailed'),
+  })
+
+  return (
+    <div className="flex flex-wrap items-center gap-3 px-4 py-3">
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium" title={item.name || undefined}>
+          {item.name || t('common.none')}
+        </span>
+        <span className="mono block truncate text-xs text-faint">{item.masked}</span>
+        {lastError ? (
+          <span className="mt-1 block text-xs text-danger-strong">{t(lastError)}</span>
+        ) : null}
+      </span>
+
+      <QuotaCell item={item} />
+      <RateCell item={item} />
+      <ExpiryCell item={item} />
+
+      <span className="hidden w-32 shrink-0 text-xs text-faint sm:block">
+        {item.last_used_at ? formatDateTime(item.last_used_at) : t('common.none')}
+      </span>
+
+      <span className="w-20 shrink-0">
+        <Badge tone={STATUS_TONE[item.status]} dot>
+          {t(`status.${item.status}` as MessageKey)}
+        </Badge>
+      </span>
+
+      <span className="flex w-28 shrink-0 items-center justify-end gap-1">
+        <EditKeyDialog item={item} />
+        <Button variant="ghost" size="sm" busy={toggle.isPending} onClick={() => toggle.mutate()}>
+          {t(item.status === 'active' ? 'keys.disable' : 'keys.enable')}
+        </Button>
+      </span>
+    </div>
+  )
+}
+
+/**
+ * API 密钥页：建一把密钥就能调 `/v1`。
+ *
+ * 创建后整把密钥只出现一次，所以创建对话框关掉之后立刻换成「已创建」那张，
+ * 不给第二次机会。
+ */
+export function Keys() {
+  const { t } = useI18n()
+  const queryClient = useQueryClient()
+  const [secret, setSecret] = useState<string | null>(null)
+  const [search, setSearch] = useState('')
+  const [status, setStatus] = useState<'all' | 'active' | 'disabled'>('all')
+  const [page, setPage] = useState(1)
+
+  useDocumentTitle(`${t('keys.title')} · ${t('common.appName')}`)
+
+  const keys = useQuery({ queryKey: ['keys'], queryFn: () => api.listKeys() })
+  // 已吊销的密钥不出现在用户的列表里：吊销不可逆，留着只会让人以为它还能用。
+  // 服务端的列表接口仍会带上它们，筛选放在这一层。
+  const visible = (keys.data?.items ?? [])
+    .filter((item) => item.status !== 'revoked')
+    .filter((item) => status === 'all' || item.status === status)
+  // 名称与密钥前缀都参与匹配：手上只有一串前缀时也能定位到具体那把。
+  const needle = search.trim().toLowerCase()
+  const matched =
+    needle === ''
+      ? visible
+      : visible.filter(
+          (item) =>
+            item.name.toLowerCase().includes(needle) ||
+            item.masked.toLowerCase().includes(needle) ||
+            item.prefix.toLowerCase().includes(needle),
+        )
+  // 服务端一次给全量，分页在客户端切；页数随筛选结果收缩，页码越界时夹回最后一页。
+  const pageCount = Math.max(1, Math.ceil(matched.length / PAGE_SIZE))
+  const current = Math.min(page, pageCount)
+  const paged = matched.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE)
 
   return (
     <>
       <PageHead
         title={t('keys.title')}
-        subtitle={t('keys.subtitle')}
+        description={t('keys.subtitle')}
         actions={
-          <Button icon={<IconPlus size={15} />} onClick={openCreate}>
-            {t('keys.create')}
-          </Button>
+          <CreateKeyDialog
+            onCreated={(createdSecret) => {
+              setSecret(createdSecret)
+              void queryClient.invalidateQueries({ queryKey: ['keys'] })
+            }}
+          />
         }
       />
 
-      {(error || actionError) && (
-        <Alert tone="bad" title={error ? t('keys.loadFailed') : actionError}>
-          {error && (
-            <Button variant="secondary" size="sm" onClick={reload} style={{ marginTop: 8 }}>
-              {t('common.retry')}
-            </Button>
-          )}
-        </Alert>
-      )}
+      <div className="flex flex-wrap items-center gap-3">
+        <Input
+          className="h-8 w-full max-w-xs text-sm"
+          type="search"
+          aria-label={t('common.search')}
+          placeholder={t('common.search')}
+          value={search}
+          onChange={(event) => {
+            setSearch(event.target.value)
+            setPage(1)
+          }}
+        />
+        <Segmented
+          className="ml-auto"
+          size="sm"
+          ariaLabel={t('keys.colStatus')}
+          value={status}
+          onValueChange={(next) => {
+            setStatus(next)
+            setPage(1)
+          }}
+          options={[
+            { value: 'all', label: t('common.all') },
+            { value: 'active', label: t('status.active') },
+            { value: 'disabled', label: t('status.disabled') },
+          ]}
+        />
+      </div>
 
-      {loading && !data && (
-        <div className="card panel">
-          {[0, 1, 2].map((row) => (
-            <Skeleton key={row} height={18} />
-          ))}
-        </div>
-      )}
-
-      {data && keys.length === 0 && (
-        <div className="card">
-          <Empty
-            icon={<IconKey size={20} />}
-            title={t('keys.emptyTitle')}
-            body={t('keys.emptyBody')}
-            action={
-              <Button icon={<IconPlus size={15} />} onClick={openCreate}>
-                {t('keys.emptyAction')}
+      <Card>
+        {keys.isPending ? (
+          <CardBody className="flex flex-col gap-2">
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-full" />
+          </CardBody>
+        ) : keys.isError ? (
+          <CardBody>
+            <Alert tone="danger" title={t('keys.loadFailed')}>
+              <Button variant="secondary" size="sm" onClick={() => void keys.refetch()}>
+                {t('common.retry')}
               </Button>
-            }
+            </Alert>
+          </CardBody>
+        ) : matched.length === 0 ? (
+          <CardBody className="flex flex-col items-start gap-3 py-8">
+            <div>
+              <p className="text-md font-semibold">{t('keys.emptyTitle')}</p>
+              <p className="mt-1 text-sm text-muted-foreground">{t('keys.emptyBody')}</p>
+            </div>
+          </CardBody>
+        ) : (
+          <>
+            {/* 表头：列宽与下面的行一致，三列限制才不会读成一段文字。 */}
+            <div className="sticky top-0 z-sticky flex items-center gap-3 border-b border-border bg-card px-4 py-2 text-2xs font-semibold text-muted-foreground">
+              <span className="min-w-0 flex-1">{t('keys.colName')}</span>
+              <span className="w-32 shrink-0 text-right">{t('keys.colQuota')}</span>
+              <span className="w-20 shrink-0 text-right">{t('keys.colRate')}</span>
+              <span className="hidden w-24 shrink-0 text-right md:block">
+                {t('keys.expiresAt')}
+              </span>
+              <span className="hidden w-32 shrink-0 sm:block">{t('keys.lastUsed')}</span>
+              <span className="w-20 shrink-0">{t('keys.colStatus')}</span>
+              <span className="w-28 shrink-0" />
+            </div>
+            <div className="divide-y divide-border">
+              {paged.map((item) => (
+                <KeyRow key={item.id} item={item} />
+              ))}
+            </div>
+          </>
+        )}
+        {matched.length > PAGE_SIZE ? (
+          <Pagination
+            className="border-t border-border px-4 py-2"
+            page={current}
+            pageSize={PAGE_SIZE}
+            total={matched.length}
+            onPageChange={setPage}
           />
-        </div>
-      )}
+        ) : null}
+      </Card>
 
-      {keys.length > 0 && (
-        <>
-          <section className="card table table-desktop" aria-label={t('keys.title')}>
-            <div className="thead keys-head">
-              <span>{t('keys.colName')}</span>
-              <span>{t('keys.colKey')}</span>
-              <span>{t('keys.colQuota')}</span>
-              <span>{t('keys.colRate')}</span>
-              <span>{t('keys.colStatus')}</span>
-              <span className="amount">{t('keys.colActions')}</span>
-            </div>
-            {keys.map((key) => (
-              <div className="trow keys-row" key={key.id}>
-                <div className="keyname">
-                  <b>{key.name || t('common.none')}</b>
-                  <span className="num">{formatDate(key.created_at, meta.timezone)}</span>
-                </div>
-                <span className="keyval mono">{key.masked}</span>
-                <div className="keyname">{quotaText(key)}</div>
-                <span className="muted-cell num">{rateText(key)}</span>
-                <span>
-                  <StatusPill status={key.status} />
-                </span>
-                <div className="actions">{actions(key)}</div>
-              </div>
-            ))}
-          </section>
-
-          <section className="cards-mobile" aria-label={t('keys.title')}>
-            {keys.map((key) => (
-              <button
-                key={key.id}
-                className="mcard"
-                onClick={() => setDetail(key)}
-                aria-label={t('keys.actionsFor', { name: key.name || key.masked })}
-              >
-                <div className="nm">{key.name || t('common.none')}</div>
-                <span className="st">
-                  <StatusPill status={key.status} />
-                </span>
-                <div className="kv mono">{key.masked}</div>
-                <IconChevronRight className="chev" size={18} />
-              </button>
-            ))}
-          </section>
-        </>
-      )}
-
-      {creating && (
-        <Modal
-          title={t('keys.createTitle')}
-          description={t('keys.createBody')}
-          onClose={requestClose}
-          footer={
-            <>
-              <Button variant="secondary" onClick={requestClose}>
-                {t('common.cancel')}
-              </Button>
-              <Button type="submit" form="create-key-form" loading={submitting}>
-                {t('keys.create')}
-              </Button>
-            </>
-          }
-        >
-          <form id="create-key-form" className="stack" onSubmit={submit}>
-            {formError && <Alert tone="bad">{formError}</Alert>}
-            <div className="field">
-              <label htmlFor="key-name">{t('keys.name')}</label>
-              <input
-                id="key-name"
-                className="input"
-                value={form.name}
-                placeholder={t('keys.namePlaceholder')}
-                onChange={(event) => setForm({ ...form, name: event.target.value })}
-              />
-              <span className="hint">{t('keys.nameOptional')}</span>
-            </div>
-            <div className="form-grid">
-              <div className="field">
-                <label htmlFor="key-quota">{t('keys.quotaLimit')}</label>
-                <div className="input-affix">
-                  {currencySymbol && <span className="affix">{currencySymbol}</span>}
-                  <input
-                    id="key-quota"
-                    className="input"
-                    inputMode="decimal"
-                    value={form.quota}
-                    placeholder="0.00000000"
-                    onChange={(event) => setForm({ ...form, quota: event.target.value })}
-                  />
-                </div>
-                <span className="hint">{t('keys.quotaHint')}</span>
-              </div>
-              <div className="field">
-                <label htmlFor="key-rate">{t('keys.rateLimit')}</label>
-                <input
-                  id="key-rate"
-                  className="input"
-                  inputMode="numeric"
-                  value={form.rate}
-                  placeholder="60"
-                  onChange={(event) => setForm({ ...form, rate: event.target.value })}
-                />
-                <div className="preset-row" role="group" aria-label={t('keys.ratePresets')}>
-                  {RATE_PRESETS.map((value) => (
-                    <Button
-                      key={value}
-                      type="button"
-                      variant="secondary"
-                      size="sm"
-                      className="preset-btn"
-                      aria-pressed={form.rate === String(value)}
-                      aria-label={`${value} ${t('keys.perMinute')}`}
-                      onClick={() => setForm((previous) => ({ ...previous, rate: String(value) }))}
-                    >
-                      {value}
-                    </Button>
-                  ))}
-                </div>
-                <span className="hint">{t('keys.rateHint')}</span>
-              </div>
-            </div>
-            <div className="field">
-              <label htmlFor="key-expires">{t('keys.expiresAt')}</label>
-              <input
-                id="key-expires"
-                type="datetime-local"
-                className="input"
-                value={form.expires}
-                onChange={(event) => {
-                  setExpiryPreset(null)
-                  setForm((previous) => ({ ...previous, expires: event.target.value }))
-                }}
-              />
-              <div className="preset-row" role="group" aria-label={t('keys.expiryPresets')}>
-                {EXPIRY_PRESETS.map((preset) => (
-                  <Button
-                    key={preset.key}
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    className="preset-btn"
-                    aria-pressed={expiryPreset === preset.key}
-                    onClick={() => applyExpiryPreset(preset)}
-                  >
-                    {t(preset.key)}
-                  </Button>
-                ))}
-              </div>
-              <span className="hint">{t('keys.expiresHint')}</span>
-            </div>
-          </form>
-        </Modal>
-      )}
-
-      {created && (
-        <Modal
-          title={t('keys.createdTitle')}
-          description={t('keys.createdBody')}
-          onClose={() => setCreated(null)}
-          footer={
-            <>
-              <CopyButton
-                text={created.secret}
-                label={t('keys.copyKey')}
-                className="btn secondary"
-              />
-              <Button onClick={() => setCreated(null)}>{t('keys.savedIt')}</Button>
-            </>
-          }
-        >
-          <div className="secret mono">{created.secret}</div>
-          <div className="sheet-rows">
-            <div>
-              <span>{t('keys.name')}</span>
-              <b>{created.key.name || t('common.none')}</b>
-            </div>
-            <div>
-              <span>{t('keys.colQuota')}</span>
-              <b>
-                {created.key.quota_limit
-                  ? formatMoney(created.key.quota_limit)
-                  : t('keys.unlimitedQuota')}
-              </b>
-            </div>
-            <div>
-              <span>{t('keys.colRate')}</span>
-              <b>{rateText(created.key)}</b>
-            </div>
-          </div>
-        </Modal>
-      )}
-
-      {revoking && (
-        <Modal
-          sheetSize="sm"
-          title={t('keys.revokeTitle')}
-          description={`${revoking.name || ''} · ${revoking.masked}`}
-          onClose={() => setRevoking(null)}
-          footer={
-            <>
-              <Button variant="secondary" onClick={() => setRevoking(null)}>
-                {t('common.cancel')}
-              </Button>
-              <Button variant="danger" loading={revokePending} onClick={revoke}>
-                {t('keys.revokeConfirm')}
-              </Button>
-            </>
-          }
-        >
-          <p className="sub">{t('keys.revokeBody')}</p>
-        </Modal>
-      )}
-
-      {detail && (
-        <Modal
-          sheet
-          title={t('keys.detailTitle')}
-          description={detail.name || detail.masked}
-          onClose={() => setDetail(null)}
-          footer={
-            <Button variant="secondary" onClick={() => setDetail(null)}>
-              {t('common.close')}
-            </Button>
-          }
-        >
-          <div className="sheet-rows">
-            <div>
-              <span>{t('keys.colKey')}</span>
-              <b className="mono">{detail.masked}</b>
-            </div>
-            <div>
-              <span>{t('keys.colQuota')}</span>
-              <b>
-                {formatSpend(detail.quota_used)} /{' '}
-                {detail.quota_limit ? formatMoney(detail.quota_limit) : t('status.unlimited')}
-              </b>
-            </div>
-            <div>
-              <span>{t('keys.colRate')}</span>
-              <b>{rateText(detail)}</b>
-            </div>
-            <div>
-              <span>{t('keys.colStatus')}</span>
-              <b>
-                <StatusPill status={detail.status} />
-              </b>
-            </div>
-            <div>
-              <span>{t('keys.createdAt')}</span>
-              <b className="num">{formatDateTime(detail.created_at, meta.timezone)}</b>
-            </div>
-            <div>
-              <span>{t('keys.lastUsed')}</span>
-              <b className="num">{formatDateTime(detail.last_used_at, meta.timezone)}</b>
-            </div>
-            <div>
-              <span>{t('keys.expiresAt')}</span>
-              <b className="num">{expiresText(detail)}</b>
-            </div>
-          </div>
-          <div className="form-actions">{actions(detail, true)}</div>
-        </Modal>
-      )}
-
-      {confirm.dialog}
-      {unsavedGuard}
+      {secret ? <CreatedKeyDialog secret={secret} onClose={() => setSecret(null)} /> : null}
     </>
   )
 }

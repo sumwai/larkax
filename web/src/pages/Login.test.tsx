@@ -1,104 +1,97 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { Login } from './Login'
 import { AuthProvider } from '../auth/AuthProvider'
 import { I18nProvider } from '../i18n'
-import { ThemeProvider } from '../theme/ThemeProvider'
-import { ToastProvider } from '../components/ui'
+import { SiteProvider } from '../site/SiteProvider'
+import { Login } from './Login'
 
 const mocks = vi.hoisted(() => ({
   session: vi.fn(),
   login: vi.fn(),
-  setCsrfToken: vi.fn(),
   meta: vi.fn(),
+  setCsrfToken: vi.fn(),
+  setUnauthorizedHandler: vi.fn(),
 }))
 
-vi.mock('../api', () => ({
-  api: {
-    mode: 'http',
-    session: mocks.session,
-    login: mocks.login,
-    setCsrfToken: mocks.setCsrfToken,
-    setUnauthorizedHandler: vi.fn(),
-    meta: mocks.meta,
-  },
-}))
+vi.mock('../api', () => ({ api: mocks }))
+
+const META = {
+  site_name: 'larkax',
+  api_base_url: 'https://api.example.com/v1',
+  currency: 'USD',
+  timezone: 'UTC',
+  locales: ['zh', 'en'],
+  features: { registration: false, password_reset: 'admin', topup: false },
+}
 
 function renderLogin() {
   return render(
     <I18nProvider>
-      <ThemeProvider>
-        <ToastProvider>
+      <MemoryRouter initialEntries={['/login']}>
+        <SiteProvider>
           <AuthProvider>
-            <MemoryRouter initialEntries={['/login']}>
-              <Routes>
-                <Route path="/login" element={<Login />} />
-                <Route path="/app" element={<div>app home</div>} />
-              </Routes>
-            </MemoryRouter>
+            <Login />
           </AuthProvider>
-        </ToastProvider>
-      </ThemeProvider>
+        </SiteProvider>
+      </MemoryRouter>
     </I18nProvider>,
   )
 }
 
-describe('Login', () => {
-  beforeEach(() => {
-    mocks.session.mockResolvedValue(null)
-    mocks.login.mockResolvedValue({
-      user: {
-        id: 1,
-        username: 'demo',
-        display_name: '演示',
-        email: null,
-        status: 'active',
-        created_at: '',
-      },
-      csrf_token: 'csrf-1',
-      expires_at: '2026-10-28T00:00:00Z',
-    })
-    mocks.setCsrfToken.mockReset()
+beforeEach(() => {
+  localStorage.setItem('larkax.lang', 'zh')
+  mocks.session.mockResolvedValue(null)
+  mocks.meta.mockResolvedValue(META)
+})
+
+describe('登录页', () => {
+  it('匿名进来渲染出用户名、口令与提交按钮', async () => {
+    renderLogin()
+
+    expect(await screen.findByRole('heading', { name: '登录控制台' })).toBeInTheDocument()
+    expect(screen.getByLabelText('用户名')).toBeInTheDocument()
+    expect(screen.getByLabelText('口令')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '登录' })).toBeInTheDocument()
   })
 
-  it('空表单提交时两个字段各给一条错误，不发请求', async () => {
+  it('空表单提交时两条必填提示都出来，且不发请求', async () => {
     const user = userEvent.setup()
     renderLogin()
 
-    await screen.findByLabelText('用户名')
-    await user.click(screen.getByRole('button', { name: '登录' }))
+    await user.click(await screen.findByRole('button', { name: '登录' }))
 
     expect(await screen.findByText('请输入用户名')).toBeInTheDocument()
     expect(screen.getByText('请输入口令')).toBeInTheDocument()
     expect(mocks.login).not.toHaveBeenCalled()
   })
 
-  it('填好用户名与口令后登录，并把 csrf_token 交给客户端', async () => {
+  it('401 时说口令不对，而不是笼统的出错', async () => {
+    mocks.login.mockRejectedValue(Object.assign(new Error('bad credentials'), { status: 401 }))
     const user = userEvent.setup()
     renderLogin()
 
-    await user.type(await screen.findByLabelText('用户名'), 'demo')
-    await user.type(screen.getByLabelText('口令'), 'a-long-password')
+    await user.type(await screen.findByLabelText('用户名'), 'alice')
+    await user.type(screen.getByLabelText('口令'), 'wrong')
     await user.click(screen.getByRole('button', { name: '登录' }))
 
-    expect(await screen.findByText('app home')).toBeInTheDocument()
-    expect(mocks.login).toHaveBeenCalledWith('demo', 'a-long-password')
-    expect(mocks.setCsrfToken).toHaveBeenCalledWith('csrf-1')
+    expect(await screen.findByText('用户名或口令不对。')).toBeInTheDocument()
+    expect(mocks.login).toHaveBeenCalledWith('alice', 'wrong')
+    // 失败后表单还在原地，不是白屏，也不是「正在登录…」卡住。
+    expect(screen.getByRole('button', { name: '登录' })).toBeEnabled()
   })
 
-  it('口令不对时留在登录页，并说明下一步', async () => {
-    mocks.login.mockRejectedValueOnce(new Error('invalid credentials'))
+  it('网络或服务端出错时走通用错误文案', async () => {
+    mocks.login.mockRejectedValue(new Error('offline'))
     const user = userEvent.setup()
     renderLogin()
 
-    await user.type(await screen.findByLabelText('用户名'), 'demo')
-    await user.type(screen.getByLabelText('口令'), 'wrong-password')
+    await user.type(await screen.findByLabelText('用户名'), 'alice')
+    await user.type(screen.getByLabelText('口令'), 'secret')
     await user.click(screen.getByRole('button', { name: '登录' }))
 
-    expect(
-      await screen.findByText('用户名或口令不对。检查一下输入，或者联系运营确认账号。'),
-    ).toBeInTheDocument()
+    expect(await screen.findByText('出了点问题，请稍后重试。')).toBeInTheDocument()
+    expect(screen.queryByText('用户名或口令不对。')).toBeNull()
   })
 })

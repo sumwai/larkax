@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { isMockMode } from '../api'
 import { useI18n } from '../i18n'
-import { IconInfo, IconX } from './icons'
+import { Banner, Button } from './ui'
+import { X } from 'lucide-react'
 
 /**
  * 演示数据横幅。
@@ -16,17 +17,17 @@ export function MockBanner() {
   if (!isMockMode || dismissed) return null
 
   return (
-    <div className="alert warn mock-banner" role="status">
-      <IconInfo className="ico" size={18} />
-      <span className="mock-banner-text">{t('mock.banner')}</span>
-      <button
-        type="button"
-        className="mock-banner-close"
+    <Banner tone="warning" role="status">
+      <span className="min-w-0 flex-1 truncate">{t('mock.banner')}</span>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="size-6 text-warning-strong hover:bg-warning-border"
         aria-label={t('common.close')}
         onClick={() => setDismissed(true)}
       >
-        <IconX size={15} />
-      </button>
-    </div>
+        <X size={15} />
+      </Button>
+    </Banner>
   )
 }

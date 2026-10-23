@@ -1212,7 +1212,7 @@ func TestUsageShapes(t *testing.T) {
 	}
 }
 
-func TestUsageRequestCursor(t *testing.T) {
+func TestUsageRequestPageMeta(t *testing.T) {
 	f := newFixture(t)
 	f.usage.requests = store.UsageRequestPage{
 		Requests: []store.UsageRequestRow{{
@@ -1223,7 +1223,7 @@ func TestUsageRequestCursor(t *testing.T) {
 			PromptTokens: 1200, CompletionTokens: 300,
 			BillingPath: ptrString("measured"), StartedAt: testNow.Add(-time.Minute),
 		}},
-		More: true,
+		Total: 42,
 	}
 	rec := f.authed(t, http.MethodGet, PathPrefix+"usage/requests", "")
 	if rec.Code != http.StatusOK {
@@ -1244,8 +1244,11 @@ func TestUsageRequestCursor(t *testing.T) {
 	if item.Tokens.Input != 1200 || item.Tokens.Output != 300 {
 		t.Errorf("tokens = %+v", item.Tokens)
 	}
-	if body.NextCursor == nil {
-		t.Error("More=true 时应当给 next_cursor")
+	if body.Page != 1 || body.Limit == 0 {
+		t.Errorf("page/limit = %d/%d，期望回显请求值", body.Page, body.Limit)
+	}
+	if body.Count != 42 {
+		t.Errorf("count = %d，期望 42（Total 原样透出）", body.Count)
 	}
 }
 

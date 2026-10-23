@@ -25,6 +25,9 @@ export default tseslint.config(
           allowConstantExport: true,
           allowExportNames: [
             'APP_NAV',
+            'alertVariants',
+            'badgeVariants',
+            'buttonVariants',
             'copyText',
             'exprPerMillion',
             'isDirty',
@@ -45,13 +48,14 @@ export default tseslint.config(
             'useUnsavedChanges',
             'useUnsavedGuard',
             'useUnsavedLeaveRef',
+            'toast',
           ],
         },
       ],
     },
   },
   {
-    files: ['vite.config.ts', 'playwright.config.ts', 'eslint.config.js', 'e2e/**/*.ts'],
+    files: ['vite.config.ts', 'eslint.config.js'],
     languageOptions: { globals: globals.node },
   },
 )

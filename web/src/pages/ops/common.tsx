@@ -6,9 +6,9 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react'
+import { Search, X } from 'lucide-react'
 import { useI18n } from '../../i18n'
 import { Alert, Button } from '../../components/ui'
-import { IconSearch, IconX } from '../../components/icons'
 import { exprPerMillion } from '../../components/ExprEditor'
 import { describeError } from './common-helpers'
 
@@ -36,10 +36,12 @@ export function Field({
       : children
 
   return (
-    <div className="field">
-      <label htmlFor={isValidElement(children) ? id : undefined}>{label}</label>
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={isValidElement(children) ? id : undefined} className="text-sm font-medium">
+        {label}
+      </label>
       {control}
-      {hint && <span className="hint">{hint}</span>}
+      {hint && <span className="text-xs text-faint">{hint}</span>}
     </div>
   )
 }
@@ -48,12 +50,9 @@ export function Field({
  * 列表的搜索框：只负责输入与回调，查不查、什么时候查由调用方决定。
  *
  * 清空是自绘的 `×`，不用 `type="search"` 的原生清除控件：那个控件在 Chromium
- * 与 Safari 上外观、位置都不一样，也没法写样式。原生那个在 CSS 里关掉
- * （`.search-box` 那段），否则会出现两个清除钮。
- *
- * 清空只把值设为空串，再额外触发一次查询是调用方的事（配上防抖的页面自己
- * 会去发请求）。焦点跟回输入框：点完按钮它自己会被卸载，焦点落到 `<body>`
- * 上，接着打字就落空了。
+ * 与 Safari 上外观、位置都不一样，也没法写样式。清空只把值设为空串，再额外
+ * 触发一次查询是调用方的事（配上防抖的页面自己会去发请求）。
+ * 焦点跟回输入框：点完按钮它自己会被卸载，焦点落到 `<body>` 上，接着打字就落空了。
  */
 export function SearchBox({
   value,
@@ -78,37 +77,43 @@ export function SearchBox({
   const label = placeholder ?? t('ops.search')
   return (
     <div
-      className={['wrap-rel search-box', icon ? 'has-icon' : '', className ?? '']
-        .filter(Boolean)
-        .join(' ')}
+      className={['relative', className ?? ''].filter(Boolean).join(' ')}
       data-testid="search-box"
     >
       {icon && (
-        <span className="search-box-icon" aria-hidden="true">
-          <IconSearch size={15} />
+        <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-faint" aria-hidden="true">
+          <Search size={15} />
         </span>
       )}
       <input
         ref={inputRef}
         id={id}
-        className="input"
         type="search"
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={label}
         aria-label={label}
+        className={[
+          'h-9 w-full rounded-sm border border-input bg-card px-3 text-base outline-none placeholder:text-faint',
+          'focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-ring',
+          '[&::-webkit-search-cancel-button]:hidden',
+          icon ? 'pl-9' : '',
+          value !== '' ? 'pr-8' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
       />
       {value !== '' && (
         <button
           type="button"
-          className="search-clear"
+          className="absolute top-1/2 right-1.5 -translate-y-1/2 rounded-xs p-1 text-faint transition-colors hover:bg-muted hover:text-foreground"
           aria-label={t('ops.searchClear')}
           onClick={() => {
             onChange('')
             inputRef.current?.focus()
           }}
         >
-          <IconX size={14} />
+          <X size={14} />
         </button>
       )}
     </div>
@@ -121,8 +126,8 @@ export function OpsLoadError({ error, onRetry }: { error: unknown; onRetry: () =
   // 越权与「不是你的」由 describeError 换成本地文案；其余 4xx 仍原样显示。
   const { message } = describeError(error, t, 'ops.loadFailed')
   return (
-    <Alert tone="bad" title={message}>
-      <Button variant="secondary" size="sm" onClick={onRetry} style={{ marginTop: 8 }}>
+    <Alert tone="danger" title={message}>
+      <Button variant="secondary" size="sm" onClick={onRetry} className="mt-2">
         {t('common.retry')}
       </Button>
     </Alert>
@@ -134,12 +139,12 @@ export function OpsLoadError({ error, onRetry }: { error: unknown; onRetry: () =
  *
  * 容器一直在、只换文本，而不是「有错才插进来」：`role="alert"` 的播报发生在
  * 已经挂载的元素内容变化时，随内容一起插入的元素在部分读屏软件里会被漏掉。
- * 没有句子时容器是空的，靠 `components.css` 里的 `.hint.error:empty` 把它从
- * 布局里摘出去——父容器多用 `gap` 排版，空元素也会多占一档间距。
+ * 没有句子时容器是空的，靠 `empty:hidden` 把它从布局里摘出去——父容器多用
+ * `gap` 排版，空元素也会多占一档间距。
  */
 export function InputError({ message }: { message: string | null }) {
   return (
-    <span className="hint error" role="alert">
+    <span className="text-xs font-medium text-danger-strong empty:hidden" role="alert">
       {message}
     </span>
   )
@@ -152,7 +157,7 @@ export function InputError({ message }: { message: string | null }) {
  * 换算不出来，按原文显示，并在旁边挂一个「原文」角标。两种行同处一列，数字差六个
  * 数量级，不标出来读者会以为原文那一行也是每百万的金额。
  *
- * 角标放在截断之外：`cell-ellipsis` 会把长表达式截掉，角标若跟着一起被截，
+ * 角标放在截断之外：截断会把长表达式截掉，角标若跟着一起被截，
  * 越是长到需要标记的行越看不见标记。整段表达式挂在 `title` 上。
  */
 export function PriceCell({ expr }: { expr: string }) {
@@ -160,17 +165,20 @@ export function PriceCell({ expr }: { expr: string }) {
   const perMillion = exprPerMillion(expr)
   if (perMillion !== null) {
     return (
-      <span className="mono tiny cell-ellipsis" title={perMillion}>
+      <span className="block truncate font-mono text-xs" title={perMillion}>
         {perMillion}
       </span>
     )
   }
   return (
-    <span className="expr-cell">
-      <span className="mono tiny cell-ellipsis" title={expr}>
+    <span className="flex min-w-0 items-center gap-1.5">
+      <span className="min-w-0 truncate font-mono text-xs" title={expr}>
         {expr}
       </span>
-      <span className="tag" title={t('ops.pricing.exprVerbatimHint')}>
+      <span
+        className="shrink-0 rounded-full bg-muted px-1.5 py-px text-2xs text-muted-foreground"
+        title={t('ops.pricing.exprVerbatimHint')}
+      >
         {t('ops.pricing.exprVerbatim')}
       </span>
     </span>
