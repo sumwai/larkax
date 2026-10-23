@@ -248,8 +248,13 @@ func TestPrefixAuthorizerAndChannelOnly(t *testing.T) {
 		t.Errorf("新前缀下的渠道路由状态码 = %d，期望 400（路径参数）；正文：%s", rec.Code, rec.Body)
 	}
 
-	// 只注册渠道：模型、别名与计价都不在。
-	absent := []string{prefix + "models", prefix + "aliases", prefix + "pricing/rules"}
+	// 只注册渠道：两组模型路由（目录组的 `models` 与商家组的 `my-models`）、
+	// 别名与计价都不在。改名之后 `models` 只指目录组那一条，商家视图在
+	// `my-models`——两条各判一次，缺哪一条都说明这一组的边界变了。
+	absent := []string{
+		prefix + "models", prefix + "my-models",
+		prefix + "aliases", prefix + "pricing/rules",
+	}
 	for _, path := range absent {
 		if rec := call(t, h, http.MethodGet, path, "", nil); rec.Code != http.StatusNotFound {
 			t.Errorf("%s 的状态码 = %d，期望 404（这一组不该有它）", path, rec.Code)
@@ -423,9 +428,12 @@ func TestGroupSelectionControlsRoutes(t *testing.T) {
 			t.Errorf("%s 的状态码 = %d，期望 400", path, rec.Code)
 		}
 	}
-	// 成本价是渠道侧的成本口径，没有商家归属可过滤，merchant 组不注册它。
+	// 两个模型组都不在这份装配里：目录组的 `models` 与商家组的 `my-models`
+	// 各判一次。成本价是渠道侧的成本口径，没有商家归属可过滤，merchant 组
+	// 不注册它。
 	for _, path := range []string{
-		prefix + "models", prefix + "aliases", prefix + "pricing/costs",
+		prefix + "models", prefix + "my-models",
+		prefix + "aliases", prefix + "pricing/costs",
 		// 用户管理只挂在控制台的 admin 组：它的判据依赖会话里的操作者。
 		prefix + "users",
 	} {
