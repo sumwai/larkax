@@ -282,10 +282,15 @@ func TestWorstCaseIsNotJustOneBranch(t *testing.T) {
 // 一支给了 units 而另一支没有时，上界必须带上 units——
 // 否则结算时按另一支算出了这笔费用，预留里却没有，就撞 Capped。
 //
-// 变异：`worstTable` 建那张合并表时写的是 `len(a)+len(b)`，它的 `+` 改成 `-`
-// 只动 map 的容量提示（负的提示由运行时按 0 处理，不会 panic），
-// 键的并集与取值一个都不变——没有哪一组输入能让两版不同，所以那一条是
-// 等价变异，抓不到。
+// `worstTable` 建那张合并表时写的是 `len(a)+len(b)`，它的 `+` 改成 `-`
+// 只动 map 的容量提示：
+//
+//	| 表达式 | 具体输入 | 哪个用例杀掉它 |
+//	| `len(a)+len(b)` 改 `-` | `a = {"prompt": 0.0000015, "units": {"img": 0.02}}`、`b = {"prompt": 0.0000015}`：提示从 3 变成 1，而合并表的键仍是 `[prompt units]`，逐键取值不变（两边都有的键取较大者，只在一边出现的键直接带过来） | 杀不掉（容量提示不参与语义） |
+//
+// 出口只有键的并集与逐键较大者，两个循环都不看容量提示。本例 `2 - 1 = 1`，
+// 提示仍是正数；即使为负，运行时也按 0 处理、不 panic（负值只能用运行时
+// 算出的变量实测，字面量 `-2` 是编译错误）。调用方拿不到区分信息。
 func TestWorstCaseCoversUnitsOnEitherBranch(t *testing.T) {
 	p := mustCompile(t, `units["img"] > 0
 		? {"prompt": 0.0000015, "units": {"img": 0.02}}
