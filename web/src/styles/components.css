@@ -1163,14 +1163,16 @@ textarea.input {
 }
 /*
  * 会话过期的常驻提示（见 `SessionExpiredNotice`）：与 `.app-shell` 并列，占一行。
- * 与演示横幅同形——贴在页面最顶端的一条窄带，不参与卡片之间的间距节奏。
+ * 这一层只负责两侧留白；里面是普通的 `.alert` 卡片（带圆角与描边），不是演示
+ * 横幅那种通栏窄带。
  */
 .session-expired-bar {
   padding: 10px clamp(12px, 3vw, 24px);
   flex: none;
 }
 /* 演示数据横幅：贴在页面最顶端的一条窄带，不参与卡片之间的间距节奏。 */
-.alert.mock-banner {  align-items: center;
+.alert.mock-banner {
+  align-items: center;
   gap: 8px;
   padding: 8px clamp(12px, 3vw, 24px);
   border: 0;

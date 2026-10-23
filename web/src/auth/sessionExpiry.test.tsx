@@ -54,9 +54,12 @@ const expired = () => respond(401, { error: { code: 'unauthenticated' } })
  *
  * 走的是真的 HTTP 客户端：401 由 `request` 判定、`AuthProvider` 降级、门槛与
  * 确认框接力，中间任何一环断了这一组都会红，不是直接改 provider 的状态。
+ *
+ * `path` 用来换到 `RequireView` 之下的同一张表单：`/app/settings` 不在角色门槛里，
+ * 只测它会漏掉 admin / merchant 那整条页面路。
  */
-async function dirtySettings(saveResponds: () => Response) {
-  window.history.pushState({}, '', '/app/settings')
+async function dirtySettings(saveResponds: () => Response, path = '/app/settings') {
+  window.history.pushState({}, '', path)
   state.fetchImpl.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     if (url.endsWith('/auth/session')) return respond(200, SESSION)
@@ -134,11 +137,22 @@ describe('会话失效的端到端路径', () => {
     await dirtySettings(expired)
     fireEvent.click(screen.getByRole('button', { name: '保存账户信息' }))
 
-    const dialog = await screen.findByRole('dialog', { name: '会话已过期' })
+    // 先等 401 的结局落到界面上（弹出确认，或直接被送去登录页），再断表单。
+    // 若先 find 弹框，页面被卸载的那类缺陷会红在「找不到弹框」，表单那几行永远
+    // 轮不到——红在别处与假绿是同一类问题，都会让人以为钉住了。
+    await waitFor(() => {
+      const asked = screen.queryByRole('dialog', { name: '会话已过期' })
+      const gone = screen.queryByText('登录控制台')
+      expect(asked ?? gone).not.toBeNull()
+    })
+    // 表单先断：页面若被卸载重挂，这一行会红在「找不到显示名」——那才是这条用例
+    // 真正要钉的东西。地址放在它后面，同样会红，但不该抢在表单前面把红引到别处。
+    expect(screen.getByLabelText('显示名')).toHaveValue('换了个名字')
+    expect(window.location.pathname).toBe('/app/settings')
+
+    const dialog = screen.getByRole('dialog', { name: '会话已过期' })
     // 只说「未保存的修改」不够：用户得先知道为什么突然要走。
     expect(dialog).toHaveTextContent('登录状态已经失效，留在这页也保存不了。')
-    expect(window.location.pathname).toBe('/app/settings')
-    expect(screen.getByLabelText('显示名')).toHaveValue('换了个名字')
 
     fireEvent.click(within(dialog).getByRole('button', { name: '取消' }))
 
@@ -147,6 +161,32 @@ describe('会话失效的端到端路径', () => {
     expect(screen.getByLabelText('显示名')).toHaveValue('换了个名字')
     // 留下之后不是什么都不说：一条非模态横幅一直挂着，随时能去登录。
     expect(screen.getByRole('button', { name: '去登录' })).toBeInTheDocument()
+  })
+
+  it('角色门槛下的页面（admin）同样留在原地：没权限提示不会顶掉还有改动的页', async () => {
+    await dirtySettings(expired, '/app/admin/settings')
+    fireEvent.click(screen.getByRole('button', { name: '保存账户信息' }))
+
+    // 与上面那条设置页的用例同一个形状：先等 401 的结局落到界面上，再断页面还在，
+    // 最后才去找弹框。先 find 弹框的话，角色门槛把页面卸掉的那类缺陷会红在「找不到
+    // 弹框」，而这条用例要钉的「页面还活着」永远不会被轮到。
+    await waitFor(() => {
+      const asked = screen.queryByRole('dialog', { name: '会话已过期' })
+      const gone = screen.queryByText('登录控制台')
+      expect(asked ?? gone).not.toBeNull()
+    })
+    // 三条一起才说明「这一页还活着」：值还在、地址没变、侧栏仍是管理视图。
+    // 少了任何一条，都可能只是页面被换成别的、恰好又换回来了。
+    expect(screen.getByLabelText('显示名')).toHaveValue('换了个名字')
+    expect(window.location.pathname).toBe('/app/admin/settings')
+    expect(screen.getAllByRole('link', { name: '渠道' }).length).toBeGreaterThan(0)
+
+    const dialog = screen.getByRole('dialog', { name: '会话已过期' })
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    expect(window.location.pathname).toBe('/app/admin/settings')
+    expect(screen.getByLabelText('显示名')).toHaveValue('换了个名字')
   })
 
   it('留下之后再发一次 401：不再弹框，填的内容还在', async () => {

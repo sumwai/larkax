@@ -18,10 +18,11 @@ interface AuthValue {
   /**
    * 是不是「会话过期」掉下来的匿名，而不是用户自己点了退出登录。
    *
-   * 只有 401 把它置 true，`login` / `logout` 都置 false。两者的去向不同：退出
-   * 登录是用户的决定，页面直接换掉；会话过期时表单里可能还有没保存的东西，得先
-   * 问一句。若把退出登录也算成过期，界面上会冒出「会话已过期」，还会与
-   * `AppShell` 自己那句 `navigate('/login')` 抢同一次导航。
+   * 只有 401 把它置 true，`login` / `logout` 都置 false。两条路的去向不同：退出
+   * 登录是用户的决定，既有的行为是直接换页，没保存的改动会丢（页面连阻止器一起
+   * 先卸载）；会话过期时表单里可能还有没保存的东西，得先问一句。若把退出登录也
+   * 算成过期，界面上会冒出「会话已过期」，还会与 `AppShell` 自己那句
+   * `navigate('/login')` 抢同一次导航。
    *
    * 门槛（`RequireAuth`）的判据是 **`sessionExpired` 且这一页有未保存的改动**，
    * 两个条件缺一不可——只读过期标志就当成「凡过期都留下」，干净页面会被无故留在
@@ -96,7 +97,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } finally {
       api.setCsrfToken(null)
       setUser(null)
-      // 主动退出不是过期：脏页面的去向由原来的那条路（未保存改动）决定。
+      // 主动退出不是过期：这条路上页面的去向是「直接换页」（既有行为），
+      // 未保存的改动会丢。别让它冒充过期，否则会弹出「会话已过期」。
       setSessionExpired(false)
       setStatus('anonymous')
     }

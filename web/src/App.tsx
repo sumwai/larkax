@@ -85,8 +85,9 @@ function RequireAuth({ children }: { children: ReactNode }) {
   const { status, sessionExpired } = useAuth()
   const location = useLocation()
   const dirty = useUnsavedChanges()
-  // 只有「会话过期」才在原地问一句。用户自己点退出登录是另一回事：那是他的决定，
-  // 照旧直接换页（未保存的改动由站内跳转那一层拦）。
+  // 只有「会话过期」才在原地问一句。用户自己点退出登录是另一回事：既有行为是
+  // 直接换页——门槛返回 `<Navigate>`，页面连阻止器一起先卸载，没保存的改动会丢。
+  // 这一单不改那条路，只是别把它说成「会被拦住」。
   const defer = sessionExpired && dirty
   if (status === 'loading') return <LoadingScreen />
   if (status === 'anonymous' && !defer) {
@@ -110,14 +111,22 @@ function RequireAuth({ children }: { children: ReactNode }) {
  *
  * 它只决定「这个页面画不画」；真正的越权判定在服务端——这里放行了，
  * 请求照样可能拿到 403，而页面显示的就是服务端给的那句话。
+ *
+ * 会话过期期间一律放行：那一刻 `user` 已经变成 null，按角色判会换成「没有权限」，
+ * 页面先被卸掉，脏状态跟着归零，`RequireAuth` 与 `RouteBlocker` 就再没机会问那
+ * 一句了（admin / merchant 的页面整条路都会这样断掉）。放过这段只影响「画不画」，
+ * 不多给任何权限——服务端该拒的照样拒。
  */
 function RequireView({ view, children }: { view: View; children: ReactNode }) {
-  const { user } = useAuth()
+  const { user, sessionExpired } = useAuth()
   const { t } = useI18n()
   const { pathname } = useLocation()
   // 判定按地址走：商家视图里那三页是「同一批页面、两种主语」，管理员也进得去；
   // 渠道与计价仍然只对商家开放，所以不能只看传进来的视图名。
-  if (viewOfPath(pathname) !== view || !viewAllowed(user?.role, pathname)) {
+  if (
+    !sessionExpired &&
+    (viewOfPath(pathname) !== view || !viewAllowed(user?.role, pathname))
+  ) {
     return (
       <Alert tone="bad" title={t('ops.noAccess')}>
         {t('ops.noAccessNext')}{' '}
