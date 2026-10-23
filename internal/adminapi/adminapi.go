@@ -248,7 +248,10 @@ func New(cfg Config) http.Handler {
 	if groups[GroupOverview] {
 		mux.HandleFunc("GET "+prefix+"overview", a.merchantOverview)
 		mux.HandleFunc("GET "+prefix+"upstreams", a.merchantUpstreams)
-		mux.HandleFunc("GET "+prefix+"models", a.merchantModels)
+		// 商家视图走 `my-models` 而不是 `models`：`models` 是目录组
+		// （GroupModels）的全局目录，两组同时列时同名会让注册期 panic
+		// （见 TestModelsAndOverviewGroupsCoexist）。
+		mux.HandleFunc("GET "+prefix+"my-models", a.merchantModels)
 	}
 	if groups[GroupUsers] {
 		mux.HandleFunc("GET "+prefix+"users", a.listUsers)
