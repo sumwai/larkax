@@ -395,6 +395,10 @@ export const en: Record<MessageKey, string> = {
   'ops.discardTitle': 'Discard unsaved changes?',
   'ops.discardBody': 'What you typed will be lost if you close or leave this page.',
   'ops.discardConfirm': 'Discard',
+  'ops.sessionExpiredTitle': 'Session expired',
+  'ops.sessionExpiredBody':
+    'Your session has expired, so this page can no longer save anything. If you leave, what you typed will be lost.',
+  'ops.sessionExpiredSignIn': 'Sign in again',
   'ops.search': 'Search',
   'ops.searchClear': 'Clear search',
   'ops.searchEmpty': 'Nothing matches this search.',

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from '../App'
 import type { HttpApiClient } from '../api/client'
@@ -49,6 +49,26 @@ const SESSION = {
 
 const expired = () => respond(401, { error: { code: 'unauthenticated' } })
 
+/**
+ * 打开设置页、改一格显示名，再让下一次「保存账户信息」拿到 401。
+ *
+ * 走的是真的 HTTP 客户端：401 由 `request` 判定、`AuthProvider` 降级、门槛与
+ * 确认框接力，中间任何一环断了这一组都会红，不是直接改 provider 的状态。
+ */
+async function dirtySettings(saveResponds: () => Response) {
+  window.history.pushState({}, '', '/app/settings')
+  state.fetchImpl.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/auth/session')) return respond(200, SESSION)
+    if (url.endsWith('/me') && init?.method === 'PATCH') return saveResponds()
+    return respond(200, [])
+  })
+  render(<App />)
+  const name = await screen.findByLabelText('显示名')
+  fireEvent.change(name, { target: { value: '换了个名字' } })
+  return name
+}
+
 describe('会话失效的端到端路径', () => {
   beforeEach(async () => {
     state.fetchImpl.mockReset()
@@ -80,6 +100,8 @@ describe('会话失效的端到端路径', () => {
 
     await waitFor(() => expect(window.location.pathname).toBe('/login'))
     expect(new URLSearchParams(window.location.search).get('next')).toBe('/app/admin/channels')
+    // 没有未保存的改动就直接跳，不该多问一句。
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 
     fireEvent.change(await screen.findByLabelText('用户名'), {
       target: { value: 'admin-account' },
@@ -106,5 +128,127 @@ describe('会话失效的端到端路径', () => {
 
     expect(await screen.findByText('没有权限访问这个资源。')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/app/admin/channels')
+  })
+
+  it('有未保存的改动时 401 先问一句：选「留下」，地址与填的内容都在', async () => {
+    await dirtySettings(expired)
+    fireEvent.click(screen.getByRole('button', { name: '保存账户信息' }))
+
+    const dialog = await screen.findByRole('dialog', { name: '会话已过期' })
+    // 只说「未保存的修改」不够：用户得先知道为什么突然要走。
+    expect(dialog).toHaveTextContent('登录状态已经失效，留在这页也保存不了。')
+    expect(window.location.pathname).toBe('/app/settings')
+    expect(screen.getByLabelText('显示名')).toHaveValue('换了个名字')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(window.location.pathname).toBe('/app/settings')
+    expect(screen.getByLabelText('显示名')).toHaveValue('换了个名字')
+    // 留下之后不是什么都不说：一条非模态横幅一直挂着，随时能去登录。
+    expect(screen.getByRole('button', { name: '去登录' })).toBeInTheDocument()
+  })
+
+  it('留下之后再发一次 401：不再弹框，填的内容还在', async () => {
+    await dirtySettings(expired)
+    fireEvent.click(screen.getByRole('button', { name: '保存账户信息' }))
+    const dialog = await screen.findByRole('dialog', { name: '会话已过期' })
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    // 改一下邮箱把上一次的失败提示清掉，这样下面等到的提示只能来自第二次请求。
+    fireEvent.change(screen.getByLabelText('邮箱'), { target: { value: 'user@example.com' } })
+    expect(screen.queryByText('保存失败，请重试。')).not.toBeInTheDocument()
+
+    // 过期状态下再保存一次：必然还是 401。同一段过期会话里不能再弹框。
+    fireEvent.click(screen.getByRole('button', { name: '保存账户信息' }))
+    expect(await screen.findByText('保存失败，请重试。')).toBeInTheDocument()
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(window.location.pathname).toBe('/app/settings')
+    expect(screen.getByLabelText('显示名')).toHaveValue('换了个名字')
+    expect(screen.getByLabelText('邮箱')).toHaveValue('user@example.com')
+  })
+
+  it('留下之后点横幅上的「去登录」：走同一条出口留在登录页', async () => {
+    await dirtySettings(expired)
+    fireEvent.click(screen.getByRole('button', { name: '保存账户信息' }))
+    const dialog = await screen.findByRole('dialog', { name: '会话已过期' })
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: '去登录' }))
+
+    await waitFor(() => expect(window.location.pathname).toBe('/login'))
+    expect(new URLSearchParams(window.location.search).get('next')).toBe('/app/settings')
+  })
+
+  it('留下之后点站内跳转：仍然被拦，没被静默放行', async () => {
+    await dirtySettings(expired)
+    fireEvent.click(screen.getByRole('button', { name: '保存账户信息' }))
+    const dialog = await screen.findByRole('dialog', { name: '会话已过期' })
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    // 「去登录」让开阻止器那一下必须已经复位：少了复位，这一次跳转会静默成功，
+    // 用户填的东西就这么没了，没有弹框也没有报错。
+    fireEvent.click(screen.getAllByRole('link', { name: '概览' })[0])
+    const discard = await screen.findByRole('dialog', { name: '放弃未保存的修改？' })
+    expect(window.location.pathname).toBe('/app/settings')
+
+    // 取消这一次跳转：会话那一句不能再冒出来。一次失效只问一次，否则每点一下
+    // 都会先弹「会话已过期」再弹「放弃未保存的修改」。
+    fireEvent.click(within(discard).getByRole('button', { name: '取消' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(window.location.pathname).toBe('/app/settings')
+    expect(screen.getByRole('button', { name: '去登录' })).toBeInTheDocument()
+  })
+
+  it('有未保存的改动时 401：选「放弃修改」才去登录页，next 是原地址', async () => {
+    await dirtySettings(expired)
+    fireEvent.click(screen.getByRole('button', { name: '保存账户信息' }))
+
+    const dialog = await screen.findByRole('dialog', { name: '会话已过期' })
+    fireEvent.click(within(dialog).getByRole('button', { name: '放弃修改' }))
+
+    await waitFor(() => expect(window.location.pathname).toBe('/login'))
+    expect(new URLSearchParams(window.location.search).get('next')).toBe('/app/settings')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('失效恰好赶在被拦下的站内跳转上：只有一个框，确认后只去一次登录页', async () => {
+    window.history.pushState({}, '', '/app/settings')
+    let failSave!: (response: Response) => void
+    const pendingSave = new Promise<Response>((resolve) => {
+      failSave = resolve
+    })
+    state.fetchImpl.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/auth/session')) return respond(200, SESSION)
+      if (url.endsWith('/me') && init?.method === 'PATCH') return pendingSave
+      return respond(200, [])
+    })
+    render(<App />)
+    fireEvent.change(await screen.findByLabelText('显示名'), { target: { value: '换了个名字' } })
+
+    // 保存请求先悬着，页面上先点一次别的入口：这一次被未保存的改动拦下。
+    fireEvent.click(screen.getByRole('button', { name: '保存账户信息' }))
+    // 侧栏与窄屏底栏各有一个「概览」，点哪一个都是同一次站内跳转。
+    fireEvent.click(screen.getAllByRole('link', { name: '概览' })[0])
+    expect(await screen.findByRole('dialog', { name: '放弃未保存的修改？' })).toBeInTheDocument()
+
+    // 悬着的那个请求这时才拿到 401：会话失效的说明要顶掉刚才那句，而不是叠一个框。
+    await act(async () => failSave(expired()))
+
+    const dialogs = screen.getAllByRole('dialog')
+    expect(dialogs).toHaveLength(1)
+    expect(dialogs[0]).toHaveAccessibleName('会话已过期')
+    expect(window.location.pathname).toBe('/app/settings')
+
+    fireEvent.click(within(dialogs[0]).getByRole('button', { name: '放弃修改' }))
+
+    await waitFor(() => expect(window.location.pathname).toBe('/login'))
+    expect(new URLSearchParams(window.location.search).get('next')).toBe('/app/settings')
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
   })
 })
