@@ -161,10 +161,15 @@ func TestModelAliasAddThenList(t *testing.T) {
 		runOnce(t, runModelAlias, []string{"remove", alias})
 	})
 
+	alias2 := uniqueName("short2")
 	stdout, stderr := captureStreams(t, func() {
-		if err := runModelAlias([]string{"add", uniqueName("short2"), canonical}); err != nil {
+		if err := runModelAlias([]string{"add", alias2, canonical}); err != nil {
 			t.Fatalf("model alias add 失败: %v", err)
 		}
+	})
+	// 这条别名同样要收走：别名的表是全局的，留下来会把别的用例的清单弄脏。
+	t.Cleanup(func() {
+		runOnce(t, runModelAlias, []string{"remove", alias2})
 	})
 	if got := strings.TrimSpace(stdout); !strings.HasPrefix(got, "short2-") {
 		t.Errorf("stdout = %q，期望只有新别名本身", got)
@@ -330,37 +335,64 @@ func TestModelTraceCompleteChain(t *testing.T) {
 	}
 }
 
-// 三个断点各一条：模型不在目录、渠道没有上游名、没有生效规则。
+// 五个断点各一条：模型不在目录、没有渠道在供、目标渠道不在供、渠道没有上游名、
+// 没有生效规则。
 func TestModelTraceBrokenSegments(t *testing.T) {
 	cases := []struct {
-		name   string
-		mutate func(*fakeTraceSource)
-		at     string
-		want   string
+		name    string
+		channel int64
+		mutate  func(*fakeTraceSource)
+		at      string
+		want    string
 	}{
 		{
-			name:   "规范模型不在目录",
-			mutate: func(f *fakeTraceSource) { f.models = map[string]bool{} },
-			at:     traceSegmentModel,
-			want:   "m-1",
+			name:    "规范模型不在目录",
+			channel: 3,
+			mutate:  func(f *fakeTraceSource) { f.models = map[string]bool{} },
+			at:      traceSegmentModel,
+			want:    "m-1",
 		},
 		{
-			name:   "渠道不存在",
-			mutate: func(f *fakeTraceSource) { f.channelOK = false },
-			at:     traceSegmentUpstream,
-			want:   "渠道 3 不存在",
+			name:    "没有启用的渠道在供",
+			channel: 0,
+			// 平台兜底规则留着：没有供给判断时，链路会一路走到这条规则，
+			// 报成一条完整的链路——那正是这条用例要拦下的结论。
+			mutate: func(f *fakeTraceSource) {
+				f.supplies = nil
+				f.rules = map[int64]pricingRule{0: {id: 12, scope: "platform", name: "兜底价"}}
+			},
+			at:   traceSegmentUpstream,
+			want: "没有启用的渠道在供模型",
 		},
 		{
-			name:   "该渠道没有上游名",
-			mutate: func(f *fakeTraceSource) { f.aliasFor = map[int64]string{} },
-			at:     traceSegmentUpstream,
-			want:   "没有",
+			name:    "目标渠道不在供",
+			channel: 3,
+			mutate: func(f *fakeTraceSource) {
+				f.supplies = []channels.Supply{{Model: "m-1", ChannelID: 4}}
+			},
+			at:   traceSegmentUpstream,
+			want: "没有在供模型",
 		},
 		{
-			name:   "没有生效的计价规则",
-			mutate: func(f *fakeTraceSource) { f.noRuleOn = map[int64]bool{3: true} },
-			at:     traceSegmentPricing,
-			want:   "没有生效的计价规则",
+			name:    "渠道不存在",
+			channel: 3,
+			mutate:  func(f *fakeTraceSource) { f.channelOK = false },
+			at:      traceSegmentUpstream,
+			want:    "渠道 3 不存在",
+		},
+		{
+			name:    "该渠道没有上游名",
+			channel: 3,
+			mutate:  func(f *fakeTraceSource) { f.aliasFor = map[int64]string{} },
+			at:      traceSegmentUpstream,
+			want:    "没有",
+		},
+		{
+			name:    "没有生效的计价规则",
+			channel: 3,
+			mutate:  func(f *fakeTraceSource) { f.noRuleOn = map[int64]bool{3: true} },
+			at:      traceSegmentPricing,
+			want:    "没有生效的计价规则",
 		},
 	}
 
@@ -369,7 +401,7 @@ func TestModelTraceBrokenSegments(t *testing.T) {
 			src := happyTrace()
 			tc.mutate(src)
 
-			tr, err := evaluateModelTrace(context.Background(), src.source(), "fast", 3)
+			tr, err := evaluateModelTrace(context.Background(), src.source(), "fast", tc.channel)
 			if err != nil {
 				t.Fatalf("断链不是读取失败，不该返回 error: %v", err)
 			}

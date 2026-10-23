@@ -291,8 +291,8 @@ func TestDeleteModelRefusesWhenInboundAliased(t *testing.T) {
 	if !errors.Is(err, ErrModelInUse) {
 		t.Fatalf("err = %v，期望 ErrModelInUse", err)
 	}
-	// 报错要能指出被什么挡住了。这一句里的「1 条入站别名」是本单补的那一路：
-	// 只数出站别名与计价规则时，这里的数字会是 0 与 0，而删除仍然成功。
+	// 报错要能指出被什么挡住了。这一句里的「1 条入站别名」数的是入站别名那张
+	// 表：只数出站别名与计价规则时，这里的数字会是 0 与 0，而删除仍然成功。
 	if !strings.Contains(err.Error(), "1 条入站别名") {
 		t.Errorf("报错没有点名入站别名的条数：%s", err)
 	}

@@ -463,10 +463,10 @@ func modelUpdateSets(req UpdateModelRequest) ([]string, []any, error) {
 // 建不了外键——所以那里的检查就是全部：刚查完、还没删的窗口里新配一条，
 // 是拦不住的。说清这一点，好过假装挡住了。
 //
-// 入站别名这一路是本单补的：漏了它，先建入站别名再删规范模型就能删掉，
-// 别名于是悬空——而它悬空之后每个用它的请求都会在选路处报「查无此模型」，
-// 那条消息不会提到别名。补上之后 inbound_model_aliases 里不该再出现悬空行，
-// 所以 model trace 的「断在规范模型」那一段是防御性诊断，不是常态。
+// 入站别名也要数：漏了它，先建入站别名再删规范模型就能删掉，别名于是悬空
+// ——而它悬空之后每个用它的请求都会在选路处报「查无此模型」，那条消息不会
+// 提到别名。数上之后 inbound_model_aliases 里不该再出现悬空行，所以 model
+// trace 的「断在规范模型」那一段是防御性诊断，不是常态。
 func (a *Admin) Delete(ctx context.Context, canonicalName string) error {
 	// 宽松规整，不判路径段：这里要认出的是库里已有的那一行，而不是判断
 	// 这个名字现在还能不能写进去。理由见 normalizeExistingCanonicalName。

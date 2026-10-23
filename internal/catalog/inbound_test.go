@@ -71,7 +71,7 @@ func TestInboundReadPathsRejectEmptyName(t *testing.T) {
 	}
 }
 
-// 写入侧的空名字与非法形状在碰库之前就被拒（命令行退出码 2）。
+// 写入侧的空名字与非法形状在碰库之前就被拒（命令行退出码 1）。
 func TestCreateInboundAliasValidatesBeforeDB(t *testing.T) {
 	ctx := context.Background()
 	admin := NewAdmin(brokenDB(t))

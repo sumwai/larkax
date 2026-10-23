@@ -259,33 +259,46 @@ func TestInboundResolveFailureFailsClosed(t *testing.T) {
 //
 // 解析若挪到 serveIdempotent 之后，两条请求会算出两个指纹，第二次拿到 409
 // ——而两次请求的内容逐字相同，调用方看不出为什么。
+//
+// # 指纹要取落库的那一份
+//
+// 断言的对象是 SaveReservation 收到的 claim.Hash，也就是入口交给下游的那份
+// 请求算出来的值。拿解析之后的对象（chatter.upstream）自己再算一遍不行：
+// 那是解析的产物，解析排在指纹前还是后，它都一样——于是这条判据恒真。
 func TestInboundAliasSharesIdempotencyFingerprint(t *testing.T) {
-	h, _, _, inbound := inboundHarness()
-	chatter := &fakeChatter{result: fakeResult()}
-	h.Chatter = chatter
+	// 两个候选都造出来：少了别名那个，解析排在指纹之后时请求会先在选路处
+	// 失败（502 没有可用渠道），红在状态码上——那证明的是「请求发不出去」，
+	// 而不是这条要钉的「落库的指纹是哪一个」。两个候选都在时，两种顺序都能
+	// 发出请求，差别只落在落库的那份指纹上。
+	h := newPluginHarness(t, nil, pluginCandidate(1, "m-1"), pluginCandidate(2, "fast"))
+	inbound := &fakeInbound{aliases: map[string]string{"fast": "m-1"}}
+	h.handler.Inbound = inbound
+	h.handler.Idempotency = &fakeIdem{}
 
-	// 走一次真实的入口，让 handler 把解析做完，再拿它交出去的那份请求算指纹
-	// ——自己解析一份再算，那条断言与入口无关，证明不了「入口先解析」。
 	aliasBody := `{"model":"fast","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`
-	rec := post(h, PathChatCompletions, aliasBody)
+	rec := postIdem(t, h.handler, PathChatCompletions, aliasBody, "key-inbound-fingerprint")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
 	}
-	if inbound.calls != 1 {
-		t.Fatalf("解析被调用 %d 次，期望 1 次", inbound.calls)
+	// 这里不断言解析被调用几次：那条性质由撞键重试那条用例钉住
+	// （TestInboundAliasSurvivesIdempotencyRetry）。放在这一条里的话，解析
+	// 一旦排到指纹之后，红会先落在「调用 0 次」上，而这条要证明的是指纹
+	// 本身算错了——两句话指的不是同一个缺陷。
+	if len(h.reservations.idemClaims) != 1 {
+		t.Fatalf("落库的预留有 %d 笔，期望 1 笔——没有这一笔，下面的指纹断言就没有对象",
+			len(h.reservations.idemClaims))
+	}
+	claim := h.reservations.idemClaims[0]
+	if claim == nil {
+		t.Fatal("落库的预留没有带幂等 claim：带了 Idempotency-Key 的请求应当带上它")
 	}
 
-	fromAlias, err := idempotency.HashRequest(channel.ProtocolOpenAI, chatter.upstream)
-	if err != nil {
-		t.Fatalf("计算指纹失败: %v", err)
-	}
 	// 对照组：同一份请求体、把 model 换成规范名。
-	fromCanonical := hashOf(t, channel.ProtocolOpenAI,
+	want := hashOf(t, channel.ProtocolOpenAI,
 		`{"model":"m-1","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`)
-
-	if fromAlias != fromCanonical {
-		t.Errorf("别名与规范名两种写法算出的指纹不同：\n  别名 %x\n  规范名 %x\n"+
-			"解析排在幂等指纹之后时就是这个样子——同一个逻辑请求会被当成两个", fromAlias, fromCanonical)
+	if got := claim.Hash; got != want {
+		t.Errorf("两个指纹不相等：\n  落库的（别名写法）%x\n  规范名写法        %x\n"+
+			"解析排在幂等指纹之后时就是这个样子——同一个逻辑请求会被当成两个", got, want)
 	}
 }
 

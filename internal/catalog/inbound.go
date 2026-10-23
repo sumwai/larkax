@@ -147,7 +147,8 @@ func (c *Catalog) InboundAliases(ctx context.Context) ([]InboundAlias, error) {
 //
 // # 三条拒绝
 //
-//   - 两个名字都不能为空（命令行退出 2）；
+//   - 两个名字都不能为空（命令行退出 1；与 model create 同一处置——裸
+//     errors.New，不在 usageErr / conflictErr 里）；
 //   - 别名不能是一个已存在的规范名（退出 4，点名冲突的名字）——否则解析时
 //     规范名赢、别名被遮蔽，「这个名字指谁」没有唯一答案；
 //   - 规范名必须存在（退出 4，点名名字）——别名指向一个不存在的模型时，

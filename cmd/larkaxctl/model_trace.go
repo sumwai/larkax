@@ -168,6 +168,14 @@ func evaluateModelTrace(ctx context.Context, src traceSource, requested string, 
 	if err != nil {
 		return tr, err
 	}
+	// 供给是后两段的前提：一条启用的渠道都不在供时，上游名与计价规则都答不出
+	// 「这条请求真会怎么走」。不在这里判的话，supplies 为空会让 traceTargets
+	// 去问渠道 0，碰巧有一条平台兜底规则时报出来的就是一条完整的链路。
+	if channelID == 0 && len(supplies) == 0 {
+		tr.BrokenAt = traceSegmentUpstream
+		tr.BrokenReason = fmt.Sprintf("没有启用的渠道在供模型 %q", canonical)
+		return tr, nil
+	}
 	merchantOf := make(map[int64]string, len(supplies))
 	ownerOf := make(map[int64]int64, len(supplies))
 	for _, s := range supplies {
@@ -184,6 +192,13 @@ func evaluateModelTrace(ctx context.Context, src traceSource, requested string, 
 		}
 		if refErr != nil {
 			return tr, refErr
+		}
+		// 渠道存在，但不在供这个模型：它不会成为一条候选，这里问到的上游名
+		// 与计价规则都不是任何一条真会发出去的请求的答案。
+		if !suppliesChannel(supplies, channelID) {
+			tr.BrokenAt = traceSegmentUpstream
+			tr.BrokenReason = fmt.Sprintf("渠道 %d 没有在供模型 %q", channelID, canonical)
+			return tr, nil
 		}
 
 		upstream, upstreamErr := src.aliasFor(ctx, channelID, canonical)
@@ -296,6 +311,20 @@ func hasChannelRow(rows []catalog.Alias, channelID int64, upstream string) bool 
 func hasPlatformRow(rows []catalog.Alias, upstream string) bool {
 	for _, row := range rows {
 		if row.ChannelID == 0 && row.UpstreamModel == upstream {
+			return true
+		}
+	}
+	return false
+}
+
+// suppliesChannel 判断这条渠道在不在供给清单里。
+//
+// 判据只用 supplies 本身，不另查一次库：供给的答案（有没有启用、有没有被软删、
+// models 白名单里有没有这个名字）由 channels.SuppliesFor 一处给出，这里再写
+// 一套条件就等于有了第二份口径。
+func suppliesChannel(supplies []channels.Supply, channelID int64) bool {
+	for _, s := range supplies {
+		if s.ChannelID == channelID {
 			return true
 		}
 	}

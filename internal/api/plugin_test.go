@@ -86,14 +86,21 @@ type pluginReservations struct {
 	// 撞键那条路要它：只断言「最终那一份请求是对的」的话，重试根本没发生
 	// 时用例照样绿——而「没重试」正是这条用例要防的另一半。
 	calls int
+
+	// idemClaims 记下落库的每一笔预留里带的幂等 claim（请求没带 key 时是 nil）。
+	//
+	// 指纹那条判据要的是**入口交给下游的那一份**：解析排在指纹之前还是之后，
+	// 只有在落库的这条记录上分得清（见 TestInboundAliasSharesIdempotencyFingerprint）。
+	idemClaims []*idempotency.Claim
 }
 
-func (f *pluginReservations) SaveReservation(_ context.Context, _ pipeline.Request, r *pipeline.Reservation) (int64, error) {
+func (f *pluginReservations) SaveReservation(_ context.Context, req pipeline.Request, r *pipeline.Reservation) (int64, error) {
 	f.calls++
 	if f.claims < f.claimTimes {
 		f.claims++
 		return 0, f.claimErr
 	}
+	f.idemClaims = append(f.idemClaims, req.Idempotency)
 	f.saved = append(f.saved, r)
 	return int64(len(f.saved)), nil
 }
