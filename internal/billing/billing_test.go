@@ -3,6 +3,7 @@ package billing
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/sumwai/larkax/internal/channel"
@@ -1135,16 +1136,18 @@ func TestNonCachedExactlyZero(t *testing.T) {
 
 // 缓存总量恰好不超过输入时，不该触发压回。
 //
-// 这段压回逻辑里有三处边界，都是**等价变异**，理由各不相同，分开判：
+// 这段压回逻辑里有两处 `>` 改成 `>=`，**只在缓存量非负时**才是零增量：
+// 恰好相等那一格 over 是 0，而 `cut = min64(0, cacheWrite)`（以及下面
+// `cut = min64(0, cacheRead)`）只有在被切的那一项非负时才等于 0；缓存量为负
+// 时它返回负数，`-= cut` 会把那一项抹成 0。负缓存量由
+// TestFromChannelUsageNegativeCacheIsNotCompressed 钉着，所以那两条不是等价
+// 变异——它们的前提是「缓存量非负」，而 FromChannelUsage 的输入不保证这一点。
 //
-//   - `total > u.PromptTokens` 改成 `>=`：恰好相等那一格算出的 over 是 0，
-//     接着 cut = min64(0, cacheWrite) = 0，减掉的是一个零，结果一个数不变。
-//   - `over > 0` 改成 `over >= 0`：进分支时 over 也已经是 0（缓存写正好把
-//     超出的量吃完那一格），cut = min64(0, cacheRead) = 0，同样是零增量。
-//   - `min64` 与 `max64` 自身的边界见 TestMin64AndMax64AtEqualArguments。
+// `min64` 与 `max64` 自身的边界见 TestMin64AndMax64AtEqualArguments：那两条
+// 与符号无关，是真等价。
 //
-// 说不出「加上哪一组输入会让两版不同」，所以它们是等价变异；下面第二段照样
-// 把 over 归零那一格的具体数固定下来——它是上面第二条变异的边界。
+// 下面第二段照样把 over 归零那一格的具体数固定下来——它是第二条变异在
+// 非负输入上的边界。
 func TestCacheCompressionBoundary(t *testing.T) {
 	// 100 输入 = 60 缓存读 + 40 缓存写，恰好相等
 	got := FromChannelUsage(channel.Usage{
@@ -1175,6 +1178,74 @@ func TestCacheCompressionBoundary(t *testing.T) {
 	total := got.PromptTokens + got.CacheReadTokens + got.CacheWriteTokens
 	if total != 100 {
 		t.Errorf("压回后合计 = %d，应当恰好是 100（只抹掉超出的 20）", total)
+	}
+}
+
+// 缓存量为负（上游报数错）时，压回这一步不能把它顺手抹平。
+//
+// 这不是「明细里一个数不同」：抹平之后这份用量全非负，Validate 会放行，
+// 于是上游报错的一次调用被照单计费；不抹平则 Validate 逐项判负、整次结算
+// 被拒。负缓存量能从 relay 那条路进来（UsageFromRelaykit 不过滤负数），
+// 而 FromChannelUsage 是它之后的第一道拆分，所以这一格要钉住。
+//
+// 两个变异都只在缓存量为负时与原始版本不同（非负输入上的论证见
+// TestCacheCompressionBoundary）：
+//
+//   - `total > u.PromptTokens` 改成 `>=`：恰好相等那一格 over = 0，而
+//     `cut = min64(0, cacheWrite)` 在 cacheWrite 为负时返回负数，
+//     `cacheWrite -= cut` 把它抹成 0（over 还被抬成正数，接着再砍 cacheRead）。
+//   - `over > 0` 改成 `over >= 0`：缓存写正好吃完超出量时 over = 0，而
+//     `cut = min64(0, cacheRead)` 在 cacheRead 为负时返回负数，把它抹成 0。
+func TestFromChannelUsageNegativeCacheIsNotCompressed(t *testing.T) {
+	cases := []struct {
+		name string
+		in   channel.Usage
+		want Usage
+	}{
+		{
+			// 非缓存 = 5-10+5 = 0；合计 = 0+10-5 = 5，恰好等于输入 5。
+			name: "缓存写为负、合计恰好相等",
+			in:   channel.Usage{PromptTokens: 5, CacheReadTokens: 10, CacheWriteTokens: -5},
+			want: Usage{PromptTokens: 0, CacheReadTokens: 10, CacheWriteTokens: -5},
+		},
+		{
+			// 非缓存 = 10-20+15 = 5；合计 = 5+20-15 = 10，恰好等于输入 10。
+			name: "缓存写为负、非缓存输入不为零",
+			in:   channel.Usage{PromptTokens: 10, CacheReadTokens: 20, CacheWriteTokens: -15},
+			want: Usage{PromptTokens: 5, CacheReadTokens: 20, CacheWriteTokens: -15},
+		},
+		{
+			// 非缓存 = 10+5-20 < 0，钳到 0；合计 = 0-5+20 = 15 > 10，
+			// 超出的 5 正好由缓存写吃完，over 归 0。
+			name: "缓存读为负、缓存写吃完超出量",
+			in:   channel.Usage{PromptTokens: 10, CacheReadTokens: -5, CacheWriteTokens: 20},
+			want: Usage{PromptTokens: 0, CacheReadTokens: -5, CacheWriteTokens: 15},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FromChannelUsage(tc.in)
+			// 逐字段等：只断「负数没漏出去」之类的话，另一处仍被抹平时照样绿。
+			if got.PromptTokens != tc.want.PromptTokens ||
+				got.CompletionTokens != tc.want.CompletionTokens ||
+				got.CacheReadTokens != tc.want.CacheReadTokens ||
+				got.CacheWriteTokens != tc.want.CacheWriteTokens {
+				t.Errorf("FromChannelUsage(%+v) = {prompt:%d completion:%d cacheRead:%d cacheWrite:%d}，期望 {prompt:%d completion:%d cacheRead:%d cacheWrite:%d}",
+					tc.in, got.PromptTokens, got.CompletionTokens, got.CacheReadTokens, got.CacheWriteTokens,
+					tc.want.PromptTokens, tc.want.CompletionTokens, tc.want.CacheReadTokens, tc.want.CacheWriteTokens)
+			}
+
+			// 抹平之后这份用量是全非负的，会照单计费；原始版本把负数留给
+			// Validate 逐项判负、整次结算被拒。这条断言钉的是后一种行为。
+			err := Validate(got, prices())
+			if err == nil {
+				t.Error("负缓存量应当被 Validate 拒掉，实际放行")
+			} else if !strings.Contains(err.Error(), "用量为负") {
+				t.Errorf("错误里应当逐字出现「用量为负」，实际 %q", err.Error())
+			} else {
+				t.Logf("Validate 拒掉: %v", err)
+			}
+		})
 	}
 }
 
