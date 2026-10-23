@@ -63,6 +63,9 @@ var ErrNoChanges = errors.New("没有要改的字段")
 type Admin struct {
 	db *sql.DB
 
+	// tx 非 nil 时所有读写走它（见 NewAdminInTx）。
+	tx *sql.Tx
+
 	// calendar 是这个实例配到的日历，用来在保存结构化定价表时回答
 	// 「这条规则以后算不算得出价」。
 	//
@@ -79,6 +82,53 @@ type Admin struct {
 // 有没有日历」与「计价时能不能算」看的是同一个东西。
 func NewAdmin(db *sql.DB) *Admin {
 	return &Admin{db: db, calendar: calendarOf(db)}
+}
+
+// NewAdminInTx 构造一个读写都走 tx 的 Admin。
+//
+// 它服务「几处写入必须一起成功或一起回滚」的命令（例如 model onboard）。
+// 有 tx 时 Create / Update 不再自己 BeginTx / Commit / Rollback——
+// database/sql 的事务不能嵌套，内层提交会把外层的边界拆掉。
+//
+// calendar 由调用方给（见 CalendarOf）：它要一个 *sql.DB 才造得出来，而这里
+// 只有 tx。丢掉它会让带结构化定价表的写入在事务里被误报成「没接日历」。
+func NewAdminInTx(tx *sql.Tx, calendar expr.Calendar) *Admin {
+	return &Admin{tx: tx, calendar: calendar}
+}
+
+// CalendarOf 返回这个数据库上配置的日历；没接上时为 nil。
+//
+// 它是 NewAdmin 用的那个构造函数的外露，给「按 tx 另造一个 Admin」的调用方
+// 用（见 NewAdminInTx）。
+func CalendarOf(db *sql.DB) expr.Calendar { return calendarOf(db) }
+
+// dbHandle 是写路径要用的三件事。
+type dbHandle interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// handle 返回这次调用要用的句柄：有事务就用事务。
+func (a *Admin) handle() dbHandle {
+	if a.tx != nil {
+		return a.tx
+	}
+	return a.db
+}
+
+// begin 返回一个事务，并报告它是不是**这次调用新开的**。
+//
+// 已经在事务上时返回那个事务、own 为 false：提交与回滚归开它的那一层。
+func (a *Admin) begin(ctx context.Context) (*sql.Tx, bool, error) {
+	if a.tx != nil {
+		return a.tx, false, nil
+	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	return tx, true, nil
 }
 
 // calendarOf 用数据库构造计价引擎要的日历。
@@ -183,12 +233,14 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 		return 0, err
 	}
 
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, ownTx, err := a.begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("开始事务失败: %w", err)
 	}
-	// 提交之后这里的 Rollback 返回 ErrTxDone，无害。
-	defer func() { _ = tx.Rollback() }()
+	if ownTx {
+		// 提交之后这里的 Rollback 返回 ErrTxDone，无害。
+		defer func() { _ = tx.Rollback() }()
+	}
 
 	var id int64
 	err = tx.QueryRowContext(ctx, `
@@ -212,8 +264,10 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 		return 0, err
 	}
 
-	if err = tx.Commit(); err != nil {
-		return 0, fmt.Errorf("提交创建失败: %w", err)
+	if ownTx {
+		if err = tx.Commit(); err != nil {
+			return 0, fmt.Errorf("提交创建失败: %w", err)
+		}
 	}
 	return id, nil
 }
@@ -414,12 +468,14 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 		return ErrNoChanges
 	}
 
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, ownTx, err := a.begin(ctx)
 	if err != nil {
 		return fmt.Errorf("开始事务失败: %w", err)
 	}
-	// 提交之后这里的 Rollback 返回 ErrTxDone，无害。
-	defer func() { _ = tx.Rollback() }()
+	if ownTx {
+		// 提交之后这里的 Rollback 返回 ErrTxDone，无害。
+		defer func() { _ = tx.Rollback() }()
+	}
 
 	current, err := loadRuleForUpdate(ctx, tx, req.ID, ownerID)
 	if err != nil {
@@ -488,8 +544,10 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 		}
 	}
 
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("提交修改失败: %w", err)
+	if ownTx {
+		if err = tx.Commit(); err != nil {
+			return fmt.Errorf("提交修改失败: %w", err)
+		}
 	}
 	return nil
 }
@@ -722,7 +780,7 @@ type RulePatterns struct {
 // List 也只是把编译失败写进那一行的 ExprErr、不丢行。两条路径对「哪些规则
 // 算数」的回答因此一致。
 func (a *Admin) MerchantRulePatterns(ctx context.Context) ([]RulePatterns, error) {
-	rows, err := a.db.QueryContext(ctx, merchantPatternsQuery)
+	rows, err := a.handle().QueryContext(ctx, merchantPatternsQuery)
 	if err != nil {
 		return nil, fmt.Errorf("查询商家计价规则的模型名单失败: %w", err)
 	}
@@ -771,7 +829,7 @@ func (a *Admin) GetOwned(ctx context.Context, ownerID, id int64) (RuleInfo, erro
 
 // rule 跑一条返回单行的查询并填好派生字段。
 func (a *Admin) rule(ctx context.Context, query string, args ...any) (RuleInfo, error) {
-	info, err := scanRuleInfo(a.db.QueryRowContext(ctx, query, args...))
+	info, err := scanRuleInfo(a.handle().QueryRowContext(ctx, query, args...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return RuleInfo{}, ErrRuleNotFound
 	}
@@ -786,7 +844,7 @@ func (a *Admin) rule(ctx context.Context, query string, args ...any) (RuleInfo, 
 
 // queryRules 跑一条返回多行的查询，按裁决次序扫成 RuleInfo。
 func (a *Admin) queryRules(ctx context.Context, query string, args ...any) ([]RuleInfo, error) {
-	rows, err := a.db.QueryContext(ctx, query, args...)
+	rows, err := a.handle().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("查询计价规则失败: %w", err)
 	}
@@ -845,7 +903,7 @@ func (a *Admin) Explain(ctx context.Context, q ExplainQuery) ([]RuleInfo, error)
 		at = time.Now()
 	}
 
-	rows, err := a.db.QueryContext(ctx, explainQuery, at, q.CanonicalModel, q.OwnerUserID, q.ChannelID)
+	rows, err := a.handle().QueryContext(ctx, explainQuery, at, q.CanonicalModel, q.OwnerUserID, q.ChannelID)
 	if err != nil {
 		return nil, fmt.Errorf("查询适用计价规则失败: %w", err)
 	}

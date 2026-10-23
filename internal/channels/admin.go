@@ -76,6 +76,9 @@ type Admin struct {
 	sealer   *credential.Sealer
 	registry *channel.Registry
 
+	// tx 非 nil 时所有读写走它（见 NewAdminInTx）。
+	tx *sql.Tx
+
 	// catalog 读模型目录里那条端点的声明（见 checkModelEndpoints）。
 	//
 	// 由 NewAdmin 现建一个，与 Source 上那个是**同一个包的同一个读取面**，
@@ -91,6 +94,47 @@ type Admin struct {
 // 管理面调用不该把进程带走。
 func NewAdmin(db *sql.DB, sealer *credential.Sealer, registry *channel.Registry) *Admin {
 	return &Admin{db: db, sealer: sealer, registry: registry, catalog: catalog.New(db)}
+}
+
+// NewAdminInTx 构造一个读写都走 tx 的 Admin。
+//
+// 它服务「几处写入必须一起成功或一起回滚」的命令（例如 model onboard）。
+// 有 tx 时这些方法不再自己 BeginTx / Commit / Rollback——database/sql 的
+// 事务不能嵌套，内层提交会把外层的边界拆掉。
+//
+// 内嵌的目录读取面也指向同一个 tx：端点校验读的是模型目录，判据读若在
+// 另一条连接上，就看不到本事务刚建的模型。
+func NewAdminInTx(tx *sql.Tx, sealer *credential.Sealer, registry *channel.Registry) *Admin {
+	return &Admin{tx: tx, sealer: sealer, registry: registry, catalog: catalog.NewInTx(tx)}
+}
+
+// dbHandle 是写路径要用的三件事。
+type dbHandle interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// handle 返回这次调用要用的句柄：有事务就用事务。
+func (a *Admin) handle() dbHandle {
+	if a.tx != nil {
+		return a.tx
+	}
+	return a.db
+}
+
+// begin 返回一个事务，并报告它是不是**这次调用新开的**。
+//
+// 已经在事务上时返回那个事务、own 为 false：提交与回滚归开它的那一层。
+func (a *Admin) begin(ctx context.Context) (*sql.Tx, bool, error) {
+	if a.tx != nil {
+		return a.tx, false, nil
+	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	return tx, true, nil
 }
 
 // CreateRequest 是新建一条渠道所需的全部字段。
@@ -180,11 +224,13 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 	// 渠道行与协议声明在一个事务里写：只落一半的表现是「渠道建出来了、
 	// 却一条协议都没声明」，而读取侧会把那种行按 type 一种协议处理——它看起来
 	// 完全正常，于是这条渠道的多协议声明静默失效。
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, ownTx, err := a.begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("创建渠道失败: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	if ownTx {
+		defer func() { _ = tx.Rollback() }()
+	}
 
 	var id int64
 	err = tx.QueryRowContext(ctx, `
@@ -205,8 +251,10 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 	if err := insertProtocols(ctx, tx, id, protocols); err != nil {
 		return 0, err
 	}
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("创建渠道失败: %w", err)
+	if ownTx {
+		if err := tx.Commit(); err != nil {
+			return 0, fmt.Errorf("创建渠道失败: %w", err)
+		}
 	}
 	return id, nil
 }
@@ -407,7 +455,7 @@ const ownerCheckQuery = `SELECT COALESCE(owner_user_id = $2, false) FROM channel
 // 与「修改成功」都不是该给别人的信息。
 func (a *Admin) checkOwner(ctx context.Context, ownerID, id int64) error {
 	var owned bool
-	err := a.db.QueryRowContext(ctx, ownerCheckQuery, id, ownerID).Scan(&owned)
+	err := a.handle().QueryRowContext(ctx, ownerCheckQuery, id, ownerID).Scan(&owned)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && !owned) {
 		return fmt.Errorf("%w：id %d", ErrChannelNotFound, id)
 	}
@@ -564,11 +612,13 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 	// 渠道行与协议声明在一个事务里改：只落一半的表现是「type 改了、
 	// 协议集合还是旧的」，而读取侧按协议集合分派——那条渠道会继续把请求
 	// 发给旧协议，而 channels.type 已经说它是另一套。
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, ownTx, err := a.begin(ctx)
 	if err != nil {
 		return fmt.Errorf("修改渠道失败: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	if ownTx {
+		defer func() { _ = tx.Rollback() }()
+	}
 
 	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
@@ -595,8 +645,10 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("修改渠道失败: %w", err)
+	if ownTx {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("修改渠道失败: %w", err)
+		}
 	}
 	return nil
 }
@@ -608,7 +660,7 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 // 只是删了」，而那正是 404 要挡住的信息。
 func (a *Admin) explainNoRowOwned(ctx context.Context, id, ownerID int64) error {
 	var owned, deleted bool
-	err := a.db.QueryRowContext(ctx,
+	err := a.handle().QueryRowContext(ctx,
 		`SELECT COALESCE(owner_user_id = $2, false), deleted_at IS NOT NULL FROM channels WHERE id = $1`,
 		id, ownerID).Scan(&owned, &deleted)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && !owned) {
@@ -634,7 +686,7 @@ func (a *Admin) explainNoRowOwned(ctx context.Context, id, ownerID int64) error 
 // 只在 0 行时才多一条查询：正常路径一次往返，与不带这个条件时一样。
 func (a *Admin) explainNoRow(ctx context.Context, id int64) error {
 	var deleted bool
-	err := a.db.QueryRowContext(ctx,
+	err := a.handle().QueryRowContext(ctx,
 		`SELECT deleted_at IS NOT NULL FROM channels WHERE id = $1`, id).Scan(&deleted)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w：id %d", ErrChannelNotFound, id)
@@ -674,7 +726,7 @@ func (a *Admin) SetStatus(ctx context.Context, id int64, status string) error {
 		return err
 	}
 
-	res, err := a.db.ExecContext(ctx,
+	res, err := a.handle().ExecContext(ctx,
 		`UPDATE channels SET status = $2, updated_at = now() WHERE id = $1 AND `+channelAlive, id, status)
 	if err != nil {
 		return fmt.Errorf("设置渠道状态失败: %w", err)
@@ -720,7 +772,7 @@ func (a *Admin) SoftDelete(ctx context.Context, id int64) (bool, error) {
 		return false, errors.New("渠道 id 无效")
 	}
 
-	res, err := a.db.ExecContext(ctx, `
+	res, err := a.handle().ExecContext(ctx, `
 		UPDATE channels
 		   SET deleted_at = now(), status = $2, updated_at = now()
 		 WHERE id = $1 AND `+channelAlive,
@@ -739,7 +791,7 @@ func (a *Admin) SoftDelete(ctx context.Context, id int64) (bool, error) {
 	// 0 行：要么没有这个 id，要么它已经删了。两者要分开报——前者是打错了
 	// id，后者是幂等。
 	var exists bool
-	err = a.db.QueryRowContext(ctx, `SELECT deleted_at IS NOT NULL FROM channels WHERE id = $1`, id).
+	err = a.handle().QueryRowContext(ctx, `SELECT deleted_at IS NOT NULL FROM channels WHERE id = $1`, id).
 		Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("%w：id %d", ErrChannelNotFound, id)
@@ -768,7 +820,7 @@ func (a *Admin) Get(ctx context.Context, id int64) (ChannelInfo, error) {
 	if id <= 0 {
 		return ChannelInfo{}, errors.New("渠道 id 无效")
 	}
-	row := a.db.QueryRowContext(ctx, listQuery+"\n WHERE c.id = $1", id)
+	row := a.handle().QueryRowContext(ctx, listQuery+"\n WHERE c.id = $1", id)
 	info, err := scanInfo(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		// 与「改不动」分开：这里要答的是「有没有这一行」，没有就是 id 写错了。
@@ -791,7 +843,7 @@ func (a *Admin) GetOwned(ctx context.Context, ownerID, id int64) (ChannelInfo, e
 	if id <= 0 {
 		return ChannelInfo{}, errors.New("渠道 id 无效")
 	}
-	row := a.db.QueryRowContext(ctx,
+	row := a.handle().QueryRowContext(ctx,
 		listQuery+"\n WHERE c.id = $1 AND c.owner_user_id = $2", id, ownerID)
 	info, err := scanInfo(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -834,11 +886,13 @@ func (a *Admin) Restore(ctx context.Context, id int64) (bool, error) {
 	// 两处写在一个事务里：恢复一半（渠道回来了、健康结论还是软删前那个
 	// drained）留下的正是这条改动要消除的那种状态——库上看起来恢复了，
 	// 而选路会照旧摘掉它。
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, ownTx, err := a.begin(ctx)
 	if err != nil {
 		return false, fmt.Errorf("开启恢复渠道事务失败: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	if ownTx {
+		defer func() { _ = tx.Rollback() }()
+	}
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE channels
@@ -853,9 +907,12 @@ func (a *Admin) Restore(ctx context.Context, id int64) (bool, error) {
 		return false, fmt.Errorf("确认恢复结果失败: %w", err)
 	}
 	if affected == 0 {
-		// 0 行：要么没有这个 id，要么它本来就没删。先回滚，再分开报——两次
-		// 查询报的是同一件事，而这里分得出「id 打错了」与「本来就是可用的」。
-		_ = tx.Rollback()
+		// 0 行：要么没有这个 id，要么它本来就没删。先回滚自己开的那个事务，
+		// 再分开报——两次查询报的是同一件事，而这里分得出「id 打错了」与
+		// 「本来就是可用的」。外层事务不能在这里回滚：它还要继续用。
+		if ownTx {
+			_ = tx.Rollback()
+		}
 		return false, a.explainNotDeleted(ctx, id)
 	}
 
@@ -864,8 +921,10 @@ func (a *Admin) Restore(ctx context.Context, id int64) (bool, error) {
 		id, HealthUnknown); err != nil {
 		return false, fmt.Errorf("把渠道 %d 的健康结论置回 %s 失败: %w", id, HealthUnknown, err)
 	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("提交恢复渠道失败: %w", err)
+	if ownTx {
+		if err := tx.Commit(); err != nil {
+			return false, fmt.Errorf("提交恢复渠道失败: %w", err)
+		}
 	}
 	return true, nil
 }
@@ -877,7 +936,7 @@ func (a *Admin) Restore(ctx context.Context, id int64) (bool, error) {
 // 「没删」。两种都不该统一报一个错——前者要重新拿 id，后者是一条正常的幂等调用。
 func (a *Admin) explainNotDeleted(ctx context.Context, id int64) error {
 	var deleted bool
-	err := a.db.QueryRowContext(ctx,
+	err := a.handle().QueryRowContext(ctx,
 		`SELECT deleted_at IS NOT NULL FROM channels WHERE id = $1`, id).Scan(&deleted)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w：id %d", ErrChannelNotFound, id)
@@ -1032,7 +1091,7 @@ func (a *Admin) CountAlive(ctx context.Context, ownerID *int64) (int64, error) {
 		query += ` AND c.owner_user_id = $1`
 	}
 	var n int64
-	if err := a.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+	if err := a.handle().QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("统计渠道数失败: %w", err)
 	}
 	return n, nil
@@ -1043,7 +1102,7 @@ func (a *Admin) CountAlive(ctx context.Context, ownerID *int64) (int64, error) {
 // List / ListOwned 共用它：两处各扫一遍时，漏一列的表现是后面所有列都串位，
 // 而那只会体现在某一个清单上。
 func (a *Admin) queryInfos(ctx context.Context, query string, args ...any) ([]ChannelInfo, error) {
-	rows, err := a.db.QueryContext(ctx, query, args...)
+	rows, err := a.handle().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("查询渠道失败: %w", err)
 	}
@@ -1185,7 +1244,7 @@ func (a *Admin) attachmentAfter(ctx context.Context, req UpdateRequest, newModel
 		channelType string
 		modelsJSON  string
 	)
-	err := a.db.QueryRowContext(ctx,
+	err := a.handle().QueryRowContext(ctx,
 		`SELECT type, array_to_json(models)::text FROM channels WHERE id = $1 AND `+channelAlive,
 		req.ID).Scan(&channelType, &modelsJSON)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1220,7 +1279,7 @@ func (a *Admin) attachmentAfter(ctx context.Context, req UpdateRequest, newModel
 
 // storedProtocols 读一条渠道当前声明的协议（没有行时返回空切片）。
 func (a *Admin) storedProtocols(ctx context.Context, channelID int64) ([]string, error) {
-	rows, err := a.db.QueryContext(ctx,
+	rows, err := a.handle().QueryContext(ctx,
 		`SELECT protocol FROM channel_protocols WHERE channel_id = $1 ORDER BY protocol`, channelID)
 	if err != nil {
 		return nil, fmt.Errorf("查渠道 %d 的协议失败: %w", channelID, err)

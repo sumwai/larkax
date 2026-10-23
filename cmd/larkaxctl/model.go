@@ -28,6 +28,8 @@ const modelShortUsage = `larkaxctl model 管理模型目录里的规范模型。
   larkaxctl model get --model <规范名>
   larkaxctl model update --model <规范名> [与 create 相同的字段]
   larkaxctl model delete --model <规范名>
+  larkaxctl model onboard <规范名> --channel <ID> --upstream <上游名>
+                           --price-expr <表达式> --cost-expr <表达式> [--update] [--dry-run]
   larkaxctl model alias add|remove|list（入站别名）
   larkaxctl model trace <名字> [--channel <渠道 ID>]
 
@@ -35,7 +37,6 @@ create / update 的字段：--vendor、--family、三个 limit、六个能力标
 （--reasoning … --batch，各有三态）、--input-modalities 等。
 
 规范名是选路与计费共用的键，建了就不能改；delete 只在无人引用时允许。
-
 更细的边界：larkaxctl help model。
 `
 
@@ -68,6 +69,9 @@ var modelUsage = `larkaxctl model 管理模型目录里的规范模型。
                          [--input-modalities <模态,...>] [--output-modalities <模态,...>]
                          [--knowledge-cutoff <YYYY-MM-DD>] [--release-date <YYYY-MM-DD>]
   larkaxctl model delete --model <规范名>
+  larkaxctl model onboard <规范名> --channel <渠道 ID> --upstream <上游名>
+                           --price-expr <表达式> --cost-expr <表达式>
+                           [--display <展示名>] [--update] [--dry-run]
   larkaxctl model alias add <别名> <规范名>
   larkaxctl model alias remove <别名>
   larkaxctl model alias list
@@ -115,6 +119,21 @@ delete 只在**无人引用**时允许：还有出站别名、入站别名或计
 get 打印一条规范模型：ID、命令能写的那些字段、采集源那边的 ID 与更新时间。
 reasoning_options 与 raw 是采集来的原始元信息，命令行不写它们，也不在这里打。
 
+**onboard 把常见的上架顺序收成一条命令**：模型目录、渠道 models 白名单、出站
+映射、计价规则、成本规则五处，在**一个事务**里写完，任一步失败整笔回滚。它**不是
+唯一的上架方式**——五条独立命令仍然可用，向导只是替你把顺序与事务接好，一次只
+上架一个模型，不做交互问答，也不做批量。
+
+五处任一处已经存在时默认报错停下（文案点名是哪一处、哪个名字），加 --update 才
+覆盖：模型只改展示名（没给 --display 就保留），渠道白名单只补不缺，出站映射已
+存在时改成这次给的上游名，计价与成本规则按「渠道 + 模型名单含这个规范名」定位
+唯一一条再改表达式；匹配到多条时报错列出候选 ID，不猜。没给 --display 时模型的
+展示名取规范名。
+
+--dry-run 走同一条写路径（同一份校验、同一份判重），全部成功后回滚，打印每一步
+本来会做什么，末尾写「干跑，未写入」，退出码 0。参数错与业务拒绝在干跑下同样
+报错、同样退出码。
+
 **旧名仍可用**：model add 与 model show 分别等同于 model create 与
 model get，--canonical 等同于 --model。它们保留是为了不让已经在跑的脚本与
 部署流程坏掉，行为与新名字逐字相同；新写的命令请用新名字。
@@ -154,7 +173,7 @@ model get，--canonical 等同于 --model。它们保留是为了不让已经在
 
 // modelActions 是 model 的动作清单，补全从这里取。
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
-var modelActions = []string{"create", "list", "get", "update", "delete", "alias", "trace"}
+var modelActions = []string{"create", "list", "get", "update", "delete", "onboard", "alias", "trace"}
 
 func runModel(args []string) error {
 	if len(args) == 0 {
@@ -174,6 +193,8 @@ func runModel(args []string) error {
 		return runModelUpdate(rest)
 	case "delete":
 		return runModelDelete(rest)
+	case "onboard":
+		return runModelOnboard(rest)
 	case "alias":
 		return runModelAlias(rest)
 	case "trace":

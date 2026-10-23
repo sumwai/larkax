@@ -224,6 +224,11 @@ var conflictErrors = []error{
 	pipeline.ErrNoRule,
 
 	pluginstore.ErrPluginNotFound,
+	// model onboard 的五步判重：某一步发现目标已经在库里，而这次没给
+	// --update。它与撞唯一键同一档——下一步都是先看库里现在是什么，再决定
+	// 要不要覆盖。
+	errOnboardExists,
+
 	// 要看的那个配置项在 settings 表里没有行。**不能**改用它旁边那个
 	// settings.ErrUnknownKey：那是写入路径的哨兵，`settings set` 撞上它给的
 	// 退出码是 1（见 docs/cli-reference.md 的退出码一节），登记到这里会把那条

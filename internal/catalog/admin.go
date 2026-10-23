@@ -110,10 +110,43 @@ const (
 //   - 删除只在无人引用时允许，见 Delete。
 type Admin struct {
 	db *sql.DB
+	// tx 非 nil 时所有读写走它（见 NewAdminInTx）。
+	//
+	// 它与 db 只会有一个被用到；两个都为空是构造错误，调用会当场 panic。
+	tx *sql.Tx
 }
 
 // NewAdmin 包装数据库句柄。
 func NewAdmin(db *sql.DB) *Admin { return &Admin{db: db} }
+
+// NewAdminInTx 构造一个读写句柄指向 tx 的 Admin。
+//
+// 它服务「几处写入必须一起成功或一起回滚」的命令（例如 model onboard）。
+// 这些方法原本各开各的事务；在 tx 上时它们**不再自己 BeginTx / Commit /
+// Rollback**——database/sql 的事务不能嵌套，内层那一次提交会把外层的边界
+// 拆掉，于是「任一步失败就整笔回滚」不成立。
+//
+// 判据读也要走同一个 tx：同名判重、模型存在性这些读如果在别处查，看不到
+// 本事务刚写入的行，等于把判据落在事务外。
+func NewAdminInTx(tx *sql.Tx) *Admin { return &Admin{tx: tx} }
+
+// dbHandle 是写路径要用的三件事。
+//
+// *sql.DB 与 *sql.Tx 都满足它；分开声明是为了让「取句柄」只有一处，
+// 不会出现某个方法忘了走 tx。
+type dbHandle interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// handle 返回这次调用要用的句柄：有事务就用事务。
+func (a *Admin) handle() dbHandle {
+	if a.tx != nil {
+		return a.tx
+	}
+	return a.db
+}
 
 // CreateModelRequest 是新建一条规范模型所需的字段。
 //
@@ -209,7 +242,7 @@ func (a *Admin) Create(ctx context.Context, req CreateModelRequest) (int64, erro
 	}
 
 	var id int64
-	err = a.db.QueryRowContext(ctx, `
+	err = a.handle().QueryRowContext(ctx, `
 		INSERT INTO model_catalog
 			(canonical_name, display_name, vendor, family,
 			 context_limit, input_limit, output_limit,
@@ -297,7 +330,7 @@ func (a *Admin) Update(ctx context.Context, req UpdateModelRequest) error {
 
 	query := "UPDATE model_catalog SET " + strings.Join(sets, ", ") +
 		" WHERE canonical_name = $" + strconv.Itoa(len(args))
-	res, err := a.db.ExecContext(ctx, query, args...)
+	res, err := a.handle().ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("修改规范模型失败: %w", err)
 	}
@@ -486,7 +519,7 @@ func (a *Admin) Delete(ctx context.Context, canonicalName string) error {
 			ErrModelInUse, name, refs.outboundAliases, refs.inboundAliases, refs.rules)
 	}
 
-	res, err := a.db.ExecContext(ctx, `DELETE FROM model_catalog WHERE canonical_name = $1`, name)
+	res, err := a.handle().ExecContext(ctx, `DELETE FROM model_catalog WHERE canonical_name = $1`, name)
 	if err != nil {
 		return deleteModelError(name, err)
 	}
@@ -533,19 +566,19 @@ func (r modelReferences) any() bool {
 func (a *Admin) countReferences(ctx context.Context, canonicalName string) (modelReferences, error) {
 	var refs modelReferences
 
-	err := a.db.QueryRowContext(ctx,
+	err := a.handle().QueryRowContext(ctx,
 		`SELECT count(*) FROM model_aliases WHERE canonical_name = $1`, canonicalName).Scan(&refs.outboundAliases)
 	if err != nil {
 		return modelReferences{}, fmt.Errorf("统计出站别名的引用失败: %w", err)
 	}
 
-	err = a.db.QueryRowContext(ctx,
+	err = a.handle().QueryRowContext(ctx,
 		`SELECT count(*) FROM inbound_model_aliases WHERE canonical_name = $1`, canonicalName).Scan(&refs.inboundAliases)
 	if err != nil {
 		return modelReferences{}, fmt.Errorf("统计入站别名的引用失败: %w", err)
 	}
 
-	err = a.db.QueryRowContext(ctx,
+	err = a.handle().QueryRowContext(ctx,
 		`SELECT count(*) FROM pricing_rules WHERE model_patterns ? $1`, canonicalName).Scan(&refs.rules)
 	if err != nil {
 		return modelReferences{}, fmt.Errorf("统计计价规则的引用失败: %w", err)
@@ -605,7 +638,7 @@ func (a *Admin) CreateAlias(ctx context.Context, req CreateAliasRequest) (int64,
 	}
 
 	var id int64
-	err = a.db.QueryRowContext(ctx, `
+	err = a.handle().QueryRowContext(ctx, `
 		INSERT INTO model_aliases (channel_id, upstream_model, canonical_name, overrides)
 		VALUES ($1, $2, $3, $4::jsonb)
 		RETURNING id`,
@@ -680,7 +713,7 @@ func (a *Admin) UpdateAlias(ctx context.Context, req UpdateAliasRequest) error {
 
 	query := "UPDATE model_aliases SET " + strings.Join(sets, ", ") +
 		" WHERE id = $" + strconv.Itoa(len(args))
-	res, err := a.db.ExecContext(ctx, query, args...)
+	res, err := a.handle().ExecContext(ctx, query, args...)
 	if err != nil {
 		return aliasUpdateError(err)
 	}
@@ -700,7 +733,7 @@ func (a *Admin) DeleteAlias(ctx context.Context, id int64) error {
 		return fmt.Errorf("别名 id %d 无效", id)
 	}
 
-	res, err := a.db.ExecContext(ctx, `DELETE FROM model_aliases WHERE id = $1`, id)
+	res, err := a.handle().ExecContext(ctx, `DELETE FROM model_aliases WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("删除别名失败: %w", err)
 	}
