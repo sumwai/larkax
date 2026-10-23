@@ -35,6 +35,10 @@ vi.mock('../../api', async (importOriginal) => {
   }
 })
 
+// 与商家页共用这一句（同一个 i18n 键）；两边的用例断的是同一串字。
+const PRICE_NOTE =
+  '清单里的单价是每 100 万 token 的金额，币种 USD。换算不出单价的表达式按原文显示，并标上「原文」。'
+
 const RULE = {
   id: 1,
   scope: 'platform',
@@ -50,6 +54,18 @@ const RULE = {
   created_by: 0,
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
+  declared_keys: [],
+}
+
+const COST = {
+  id: 7,
+  channel_id: 0,
+  model_patterns: ['claude-*'],
+  expr: '{"prompt": 0.000003}',
+  priority: 0,
+  effective_from: '2026-01-01T00:00:00Z',
+  effective_to: null,
+  created_at: '2026-01-01T00:00:00Z',
   declared_keys: [],
 }
 
@@ -222,5 +238,54 @@ describe('计价页', () => {
     expect(search.value).toBe('')
     expect(screen.getByText('standard')).toBeInTheDocument()
     expect(document.activeElement).toBe(search)
+  })
+
+  it('规则行按每 100 万 token 显示，换算不出来的按原文并带「原文」角标', async () => {
+    const tiered = 'len <= 32000 ? {"prompt": 0.0000035} : {"prompt": 0.00001}'
+    mocks.listRules.mockResolvedValue([
+      { ...RULE, expr: '{"prompt": 0.0000035}' },
+      { ...RULE, id: 2, name: 'tiny', expr: '{"prompt": 0.0000001}' },
+      { ...RULE, id: 3, name: 'tiered', expr: tiered },
+    ])
+    renderPricing()
+
+    // 1e-7 乘 1e6 是 0.1；3.5 那档乘出来恰好干净，证明不了没走浮点。
+    expect(await screen.findByText('{"prompt": 0.1}')).toBeInTheDocument()
+    expect(screen.getByText('{"prompt": 3.5}')).toBeInTheDocument()
+    expect(screen.queryByText('{"prompt": 0.0000001}')).not.toBeInTheDocument()
+    // `cell-ellipsis` 会截断，完整的一段挂在 title 上。
+    expect(screen.getByText('{"prompt": 0.1}')).toHaveAttribute('title', '{"prompt": 0.1}')
+    // 带条件的表达式不是一张单价表：显示原文，旁边挂可见的「原文」角标。
+    expect(screen.getByText(tiered)).toBeInTheDocument()
+    expect(screen.getByText(tiered)).toHaveAttribute('title', tiered)
+    // 换算成功的那两行没有角标，只有换算不出来的这一行有。
+    expect(screen.getAllByText('原文')).toHaveLength(1)
+    // 角标自己带一句解释：它只说「原文」，为什么这么显示要挂在 title 上。
+    expect(screen.getByText('原文')).toHaveAttribute(
+      'title',
+      '这段表达式换算不出每 100 万 token 的单价，按原文显示。',
+    )
+    // 单位与币种写在页面上，与商家页同一句。
+    expect(screen.getByText(PRICE_NOTE)).toBeInTheDocument()
+  })
+
+  it('成本行与规则行同口径：每 100 万 token、同一句提示、换算不了带角标', async () => {
+    const tiered = 'len <= 32000 ? {"prompt": 0.00002} : {"prompt": 0.00006}'
+    mocks.listCosts.mockResolvedValue([
+      { ...COST, expr: '{"prompt": 0.0000001}' },
+      { ...COST, id: 8, expr: '{"prompt": 0.00002, "completion": 0.00006}' },
+      { ...COST, id: 9, expr: tiered },
+    ])
+    renderPricing()
+
+    fireEvent.click(await screen.findByRole('button', { name: '成本规则' }))
+
+    // 1e-7 这一档：十进制换算得 0.1，浮点乘是 0.09999999999999999。
+    expect(await screen.findByText('{"prompt": 0.1}')).toBeInTheDocument()
+    expect(screen.getByText('{"prompt": 20, "completion": 60}')).toBeInTheDocument()
+    expect(screen.queryByText('{"prompt": 0.0000001}')).not.toBeInTheDocument()
+    expect(screen.getByText(tiered)).toHaveAttribute('title', tiered)
+    expect(screen.getAllByText('原文')).toHaveLength(1)
+    expect(screen.getByText(PRICE_NOTE)).toBeInTheDocument()
   })
 })

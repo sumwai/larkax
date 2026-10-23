@@ -740,6 +740,21 @@ textarea.input {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 计价清单里「原文 + 角标」那一格：表达式按可用宽度截断，角标留在截断之外。
+   角标若跟着表达式一起被截掉，越是长到需要标记的行越看不见标记。 */
+.expr-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.expr-cell > .cell-ellipsis {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.expr-cell > .tag {
+  flex: none;
+}
 
 /* 3.6 空态 / 骨架 */
 .empty {

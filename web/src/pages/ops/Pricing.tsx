@@ -8,7 +8,7 @@ import { formatDateTime } from '../../lib/format'
 import { Alert, Button, Empty, Modal, PageHead, Skeleton, useToast } from '../../components/ui'
 import { IconPlus } from '../../components/icons'
 import { ExprEditor } from '../../components/ExprEditor'
-import { Field, InputError, OpsLoadError, SearchBox } from './common'
+import { Field, InputError, OpsLoadError, PriceCell, SearchBox } from './common'
 import { linesToList, listToLines, useConfirm } from './common-helpers'
 import { isDirty, useCloseGuard, useUnsavedGuard } from './guard'
 
@@ -333,6 +333,7 @@ export function OpsPricing() {
           )}
           {ruleRows.length > 0 && (
             <section className="card panel" aria-label={t('ops.pricing.rules')}>
+              <p className="hint">{t('ops.pricing.priceNote', { currency: meta.currency })}</p>
               {ruleRows.map((rule) => (
                 <div key={rule.id} className="ops-row">
                   <div className="keyname">
@@ -342,7 +343,7 @@ export function OpsPricing() {
                       {rule.priority}
                     </span>
                   </div>
-                  <span className="mono tiny cell-ellipsis">{rule.expr}</span>
+                  <PriceCell expr={rule.expr} />
                   <span className="tiny">
                     {rule.enabled ? t('ops.pricing.on') : t('ops.pricing.off')} ·{' '}
                     {formatDateTime(rule.updated_at, meta.timezone)}
@@ -385,6 +386,10 @@ export function OpsPricing() {
           )}
           {costRows.length > 0 && (
             <section className="card panel" aria-label={t('ops.pricing.costs')}>
+              {/* 成本与售价共用同一句提示：两栏都是每 100 万 token 的金额，单位与币种
+                  没有区别，差别只在归属（售价规则给请求定价，成本规则记渠道进价）。
+                  分成两句，两条口径就有机会走岔。 */}
+              <p className="hint">{t('ops.pricing.priceNote', { currency: meta.currency })}</p>
               {costRows.map((cost) => (
                 <div key={cost.id} className="ops-row">
                   <div className="keyname">
@@ -393,7 +398,7 @@ export function OpsPricing() {
                       {cost.model_patterns.join(', ')} · {t('ops.pricing.priority')} {cost.priority}
                     </span>
                   </div>
-                  <span className="mono tiny cell-ellipsis">{cost.expr}</span>
+                  <PriceCell expr={cost.expr} />
                   <span className="tiny">{formatDateTime(cost.created_at, meta.timezone)}</span>
                   {cost.expr_error && <Alert tone="bad" title={cost.expr_error} />}
                   <div className="actions">

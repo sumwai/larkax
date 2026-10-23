@@ -683,8 +683,8 @@ export const zh = {
   'ops.pricing.merchantEmpty': '还没有自己的计价规则',
   'ops.pricing.merchantEmptyBody': '新建一条，给你供的模型定价。',
   'ops.pricing.merchantPatternsHint': '命中这些模型的请求按这条规则计价。',
-  'ops.pricing.merchantPriceNote':
-    '清单里的单价是每 100 万 token 的金额（带条件的表达式按原文显示），币种 {currency}。',
+  'ops.pricing.priceNote':
+    '清单里的单价是每 100 万 token 的金额，币种 {currency}。换算不出单价的表达式按原文显示，并标上「原文」。',
   'ops.pricing.createRule': '新建规则',
   'ops.pricing.createCost': '新建成本规则',
   'ops.pricing.editRule': '编辑规则',
@@ -703,6 +703,8 @@ export const zh = {
   'ops.pricing.channelHint': '成本规则必须挂在一条渠道上。',
   'ops.pricing.patterns': '模型匹配式（每行一个）',
   'ops.pricing.expr': '表达式',
+  'ops.pricing.exprVerbatim': '原文',
+  'ops.pricing.exprVerbatimHint': '这段表达式换算不出每 100 万 token 的单价，按原文显示。',
   'ops.pricing.priority': '优先级',
   'ops.pricing.enabled': '启用',
   'ops.pricing.on': '启用中',

@@ -32,6 +32,10 @@ vi.mock('../../api', async (importOriginal) => {
 
 const { ApiError } = await import('../../api')
 
+// 两页共用这一句（同一个 i18n 键）；整句断下来，页面文案改动时用例才会红。
+const PRICE_NOTE =
+  '清单里的单价是每 100 万 token 的金额，币种 USD。换算不出单价的表达式按原文显示，并标上「原文」。'
+
 const RULE = {
   id: 11,
   scope: 'merchant',
@@ -283,9 +287,15 @@ describe('商家计价页', () => {
     // 而 `0.0000035 * 1e6` 恰好是干净的 3.5，拿它证明不了没走浮点。
     expect(screen.getByText('{"prompt": 0.1}')).toBeInTheDocument()
     expect(screen.queryByText('{"prompt": 0.0000001}')).not.toBeInTheDocument()
-    // 带条件的不是一张单价表，不硬乘。
+    // 带条件的不是一张单价表，不硬乘：显示原文，旁边挂「原文」角标。
     expect(screen.getByText(tiered)).toBeInTheDocument()
-    // 币种在页面里出现（每百万那句话带上它）。
-    expect(screen.getByText(/USD/)).toBeInTheDocument()
+    expect(screen.getByText(tiered)).toHaveAttribute('title', tiered)
+    // 换算成功的那两行没有角标，只有换算不出来的这一行有。
+    expect(screen.getAllByText('原文')).toHaveLength(1)
+    expect(
+      within(screen.getByText(tiered).parentElement as HTMLElement).getByText('原文'),
+    ).toBeInTheDocument()
+    // 单位与币种在同一句里；平台页的用例断的是同一串字，两页的措辞不许分叉。
+    expect(screen.getByText(PRICE_NOTE)).toBeInTheDocument()
   })
 })
