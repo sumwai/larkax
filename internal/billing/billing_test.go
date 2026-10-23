@@ -1137,7 +1137,7 @@ func TestNonCachedExactlyZero(t *testing.T) {
 
 // 缓存总量恰好不超过输入时，不该触发压回。
 //
-// 压回这一步里有两处 `>` 改成 `>=` 会分岔：`total > u.PromptTokens` 与
+// 压回这一步里，改成 `>=` 会分岔的是 `total > u.PromptTokens` 与
 // `over > 0`。同一个 if 语句里的守卫 `u.PromptTokens > 0` 由
 // TestCacheCompressionGuardWhenPromptIsZero 杀着，不在其中。这两处在各自的
 // 边界格（`total == u.PromptTokens` / `over == 0`）上才可能分岔，而那一格是否
@@ -1267,8 +1267,9 @@ func TestFromChannelUsageNegativeCacheIsNotCompressed(t *testing.T) {
 // int64。调用方只能看到返回值，拿不到「走的是哪一支」这条信息，所以两版对
 // 任何调用方都不可区分。`max64`（billing.go:478，判据在 :479）对称。
 //
-// 这一格在计费里真的会出现：缓存量恰好不超过输入量时，压回那一步的
-// `min64(over, cacheWrite)` 两侧就相等（见 TestCacheCompressionBoundary）。
+// 这一格在计费里真的会出现：`{PromptTokens:100, CacheReadTokens:100,
+// CacheWriteTokens:20}` 把非缓存输入钳到 0 之后合计是 120，超出的 20 正好
+// 由缓存写承担，于是压回那一步调用的是 `min64(20, 20)`——两侧相等。
 // 顺手把两侧不等的方向也固定住：`<` 改成 `>=`（方向反了）在这里现形。
 func TestMin64AndMax64AtEqualArguments(t *testing.T) {
 	if got := min64(5, 5); got != 5 {
