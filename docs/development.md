@@ -2130,10 +2130,10 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/plugin/store` | 78 | 0 | 0 | 15 | 83.87% | 100.00% | 72.4% |
 | `internal/calendar` | 150 | 2 | 0 | 14 | 91.57% | 98.68% | 97.8% |
 | `internal/ledger` | 576 | 8 | 0 | 92 | 86.39% | 98.63% | 96.3% |
-| `internal/ledger/store` | 433 | 6 | 0 | 60 | 87.98% | 98.63% | 79.9% |
 | `internal/plans` | 140 | 2 | 0 | 15 | 90.45% | 98.59% | 75.2% |
 | `internal/api` | 197 | 3 | 0 | 19 | 91.32% | 98.50% | 90.2% |
 | `internal/pipeline` | 62 | 1 | 0 | 0 | 100.00% | 98.41% | 90.1% |
+| `internal/ledger/store` | 728 | 12 | 0 | 48 | 93.91% | 98.38% | 82.6% |
 | `internal/auth` | 221 | 4 | 1 | 8 | 96.57% | 98.22% | 86.6% |
 | `internal/relay` | 112 | 3 | 0 | 7 | 94.26% | 97.39% | 87.7% |
 | `internal/channel` | 313 | 9 | 0 | 22 | 93.60% | 97.20% | 88.5% |
@@ -2147,10 +2147,19 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 | `internal/credential` | 96 | 4 | 0 | 1 | 99.01% | 96.00% | 92.1% |
 | `internal/quota` | 45 | 2 | 0 | 0 | 100.00% | 95.74% | 95.2% |
 | `internal/billing/expr` | 168 | 8 | 0 | 12 | 93.62% | 95.45% | 85.9% |
-| `internal/billing` | 243 | 14 | 0 | 12 | 95.54% | 94.55% | 98.3% |
 | `internal/ratelimit` | 33 | 2 | 0 | 3 | 92.11% | 94.29% | 92.0% |
+| `internal/billing` | 282 | 18 | 0 | 13 | 95.85% | 94.00% | 98.2% |
 | `internal/tokens` | 89 | 14 | 0 | 51 | 66.88% | 86.41% | 97.2% |
 | `internal/money` | 92 | 15 | 0 | 4 | 96.40% | 85.98% | 96.9% |
+
+**`internal/billing` 与 `internal/ledger/store` 这两行是 2026-10-24 单独重跑的**，
+其余各行仍然是最初那一轮整跑的记录。重跑的条件与上面「这把尺子」那段一致：
+gremlins v0.6.0、开着 `--invert-logical`、workers=1、超时系数 10，两行的超时
+都是 0。
+所以**父子行之间不再能互相核对**：`internal/ledger` 那一行的变异范围含 `store/`，
+但它记的是旧数，killed 反而比 `internal/ledger/store` 自己那一行小；
+`internal/billing` 与 `internal/billing/expr` 同理。各行读各行的，别拿父行的数
+去核子行。
 
 **最后两栏的范围不一样，别混着读。** `Test efficacy（递归）` 说的是 `./<pkg>/`
 这一条命令：包路径递归，子包的变异体一起算进来；`覆盖率（包内）` 另取一条命令
@@ -2159,9 +2168,10 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 
 **有两对行的范围是重叠的。** `internal/ledger` 那一行的变异范围含
 `internal/ledger/store`，`internal/billing` 那一行含 `internal/billing/expr`——
-这张表来自**不带参数的整轮跑**，所以子包的变异体在父包那一条命令里跑一次、又在
-子包自己那一行跑一次，脚本会打一行注记点明。**显式把这样一对一起传会被拒绝**
-（见上文）；**这不是「父包会把子包选中」**：递归管的是「变异哪些文件」，选包管
+表里的数来自**整包跑**（不是 `--changed-files` 那种收窄跑），所以子包的变异体
+在父包那一条命令里跑一次、又在子包自己那一行跑一次，脚本会打一行注记点明。
+**显式把这样一对一起传会被拒绝**（见上文）；**这不是「父包会把子包选中」**：
+递归管的是「变异哪些文件」，选包管
 的是「跑清单里哪一行」，两件事，规则见上文。
 
 **超时列不为 0 的行不与别的轮次比较**——见上文。改动过某个包的测试之后重跑并在
