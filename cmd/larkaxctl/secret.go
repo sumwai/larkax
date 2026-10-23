@@ -40,6 +40,10 @@ const secretUsage = `larkaxctl secret 维护安全凭证的主密钥。
 更细的约定见 docs/cli-reference.md 的「secret」一节。
 `
 
+// secretActions 是 secret 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var secretActions = []string{"rotate"}
+
 // runSecret 处理 secret 子命令。
 func runSecret(args []string) error {
 	if len(args) == 0 {

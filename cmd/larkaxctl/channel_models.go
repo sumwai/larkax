@@ -76,7 +76,7 @@ func runChannelUpstreamModels(args []string) error {
 //
 // 校验放在连库之前：id 写错是命令错（退出码 2），不该先连一次库再报。
 func parseChannelModelSyncID(action string, args []string) (int64, error) {
-	fs := flag.NewFlagSet("channel "+action, flag.ContinueOnError)
+	fs := newFlagSet("channel "+action, flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "渠道 ID")
 	if err := fs.Parse(args); err != nil {

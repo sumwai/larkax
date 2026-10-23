@@ -96,8 +96,12 @@ const consentTimeout = 30 * time.Second
 // `larkaxctl settings list` 上那一行「未接线」的说法跟着它一起消失。
 const consentMaxWindowKey = "capture.consent_max_window_hours"
 
+// consentActions 是 consent 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var consentActions = []string{"grant", "list", "revoke"}
+
 func runConsent(args []string) error {
-	fs := flag.NewFlagSet("consent", flag.ContinueOnError)
+	fs := newFlagSet("consent", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, consentShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -133,7 +137,7 @@ func runConsentGrant(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("consent grant", flag.ContinueOnError)
+	fs := newFlagSet("consent grant", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, consentShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -251,7 +255,7 @@ func runConsentGrant(args []string) error {
 }
 
 func runConsentList(args []string) error {
-	fs := flag.NewFlagSet("consent list", flag.ContinueOnError)
+	fs := newFlagSet("consent list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, consentShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -292,7 +296,7 @@ func runConsentRevoke(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("consent revoke", flag.ContinueOnError)
+	fs := newFlagSet("consent revoke", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, consentShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)

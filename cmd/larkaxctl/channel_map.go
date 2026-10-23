@@ -74,6 +74,10 @@ messages、tools、stream），要么根本不是这个请求的参数。与调�
 更细的约定见 docs/cli-reference.md 的「channel map」一节。
 `
 
+// channelMapActions 是 channel map 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var channelMapActions = []string{"add", "list", "remove"}
+
 func runChannelMap(args []string) error {
 	if len(args) == 0 {
 		printUsage(os.Stderr, channelMapShortUsage)
@@ -156,7 +160,7 @@ func parseChannelMapAdd(args []string) (catalog.CreateAliasRequest, error) {
 		}
 	}
 
-	fs := flag.NewFlagSet("channel map add", flag.ContinueOnError)
+	fs := newFlagSet("channel map add", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelMapShortUsage) }
 	overrides := fs.String("overrides", "", "")
 	if parseErr := fs.Parse(args); parseErr != nil {
@@ -249,7 +253,7 @@ func parseChannelMapList(args []string) (int64, string, error) {
 		}
 	}
 
-	fs := flag.NewFlagSet("channel map list", flag.ContinueOnError)
+	fs := newFlagSet("channel map list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelMapShortUsage) }
 	canonical := fs.String("model", "", "")
 	if err := fs.Parse(args); err != nil {

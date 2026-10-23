@@ -112,7 +112,7 @@ func runUserPassword(args []string) error {
 // `user password <user>`，而本仓其余命令一律用 `--user`。两种都收、两边
 // 都给时报错——静默挑一个会让「我明明写了另一个」无从解释。
 func parseUserPassword(args []string) (user string, generate, readStdin bool, err error) {
-	fs := flag.NewFlagSet("user password", flag.ContinueOnError)
+	fs := newFlagSet("user password", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
 	userFlag := fs.String("user", "", "")
 	stringAlias(fs, userFlag, "u")
@@ -200,7 +200,7 @@ func runUserUnlock(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("user unlock", flag.ContinueOnError)
+	fs := newFlagSet("user unlock", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")

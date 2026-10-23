@@ -1349,6 +1349,7 @@ ingress 规则下。同一个端口上还有管理面 `/admin/v1/*`，用单独�
 | `maintenance` | 运行期数据的留存清理：`idempotency` / `session`（两条都支持 `--dry-run`，只数不删） |
 | `migrate` | 迁移：`up` / `down` / `down-to` / `up-to` / `status` / `version` / `create` |
 | `version` | 打印版本号 |
+| `completion` | 打印 bash / zsh / fish 的补全脚本 |
 
 每个子命令的用法见 `go run ./cmd/larkaxctl <子命令> --help`，
 或直接 `go run ./cmd/larkaxctl` 看总览。对账的开关、口径与运行记录见

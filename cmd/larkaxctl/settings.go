@@ -73,8 +73,12 @@ set 的值按明文给，不用写成 JSON：
 // 「碰巧现在一样」的耦合。
 const settingsTimeout = 30 * time.Second
 
+// settingsActions 是 settings 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var settingsActions = []string{"list", "get", "set"}
+
 func runSettings(args []string) error {
-	fs := flag.NewFlagSet("settings", flag.ContinueOnError)
+	fs := newFlagSet("settings", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, settingsShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -111,7 +115,7 @@ func runSettings(args []string) error {
 var errSettingsNotFound = errors.New("settings 里没有这一行")
 
 func runSettingsList(args []string) error {
-	fs := flag.NewFlagSet("settings list", flag.ContinueOnError)
+	fs := newFlagSet("settings list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, settingsShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -162,7 +166,7 @@ func runSettingsList(args []string) error {
 //
 // 只读，不要主密钥：它不改任何东西，与 list 同一条。
 func runSettingsGet(args []string) error {
-	fs := flag.NewFlagSet("settings get", flag.ContinueOnError)
+	fs := newFlagSet("settings get", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, settingsShortUsage) }
 	key := fs.String("key", "", "")
 	if err := fs.Parse(args); err != nil {
@@ -293,7 +297,7 @@ func runSettingsSet(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("settings set", flag.ContinueOnError)
+	fs := newFlagSet("settings set", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, settingsShortUsage) }
 	keyFlag := fs.String("key", "", "")
 	valueFlag := fs.String("value", "", "")

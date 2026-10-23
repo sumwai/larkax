@@ -335,6 +335,10 @@ const walletTimeout = 30 * time.Second
 // 这笔钱是外部进来的，不是平台挣的。
 const manualGateway = "manual"
 
+// walletActions 是 wallet 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var walletActions = []string{"create", "credit", "adjust", "refund", "payout", "payment", "list"}
+
 // runWallet 处理 wallet 子命令。
 func runWallet(args []string) error {
 	if len(args) == 0 {
@@ -380,7 +384,7 @@ func runWalletCreate(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("wallet create", flag.ContinueOnError)
+	fs := newFlagSet("wallet create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -433,7 +437,7 @@ func runWalletCredit(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("wallet credit", flag.ContinueOnError)
+	fs := newFlagSet("wallet credit", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -533,7 +537,7 @@ func runWalletAdjust(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("wallet adjust", flag.ContinueOnError)
+	fs := newFlagSet("wallet adjust", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -738,7 +742,7 @@ func adjustPostError(owner auth.User, assetValue ledger.Asset, postErr error) er
 // 显式给的资产在连库之前校验（与 user create / apikey create 同一条约定：
 // 一个写错的命令不该先连上生产库再报错）。留空时只能连库之后读 settings，
 // 那时再校验（见 resolveWalletAsset）。
-func parseAssetFlag(fs *flag.FlagSet, asset string) (ledger.Asset, error) {
+func parseAssetFlag(fs *flagSet, asset string) (ledger.Asset, error) {
 	if providedFlags(fs)["asset"] && strings.TrimSpace(asset) == "" {
 		return "", usageErr(errors.New(
 			"--asset 不能为空：不给这个旗标才表示取 settings 的 billing.default_asset"))
@@ -909,7 +913,7 @@ func parseNamedAmountFlag(flagName, plain string) (money.Amount, error) {
 // **拼错的那一半不在这里挡**（`manul` 照样会开出新科目）：来源名是自由取值，
 // 没有一份已知来源的清单可以比。真接上支付通道时它应当换成枚举（那时通道由
 // 系统而不是操作者决定），在那之前靠的是 `--help` 里那句「来源是操作者说的」。
-func parseGatewayFlag(fs *flag.FlagSet, gateway string) (string, error) {
+func parseGatewayFlag(fs *flagSet, gateway string) (string, error) {
 	if providedFlags(fs)["gateway"] && strings.TrimSpace(gateway) == "" {
 		return "", usageErr(errors.New(
 			"--gateway 不能为空：不给这个旗标才表示 manual（线下到账）"))
@@ -1248,7 +1252,7 @@ func walletUnreadableCause(rows []walletRow) error {
 
 // runWalletList 列出钱包与余额快照。
 func runWalletList(args []string) error {
-	fs := flag.NewFlagSet("wallet list", flag.ContinueOnError)
+	fs := newFlagSet("wallet list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")

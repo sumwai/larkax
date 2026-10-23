@@ -104,6 +104,10 @@ larkaxctl price calendar import <文件> 逐字相同。list 只挂在 price 下
 更细的约定见 docs/cli-reference.md 的「price calendar」一节。
 `
 
+// priceCalendarActions 是 price calendar 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var priceCalendarActions = []string{"import", "list"}
+
 // runPriceCalendar 处理 price 下的 calendar 子命令。
 func runPriceCalendar(args []string) error {
 	if len(args) == 0 {
@@ -134,6 +138,11 @@ func runPriceCalendar(args []string) error {
 // 这是一个旧路径：这一组已经搬进 price 域（#475），这里只为已经在跑的脚本与
 // 部署流程留着，不列进根帮助页。它把 import 与 help 原样接给搬过去的那一套，
 // 所以新旧两条路径的输出逐字相同。
+
+// calendarActions 是 calendar 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var calendarActions = []string{"import"}
+
 func runCalendar(args []string) error {
 	if len(args) == 0 {
 		printUsage(os.Stderr, priceCalendarShortUsage)
@@ -167,7 +176,7 @@ func runCalendarImport(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("price calendar import", flag.ContinueOnError)
+	fs := newFlagSet("price calendar import", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, priceCalendarShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		// -h / --help 不是失败：flag 在返回 ErrHelp 之前已经把用法打印过了，
@@ -254,7 +263,7 @@ const calendarListTimeout = 30 * time.Second
 //
 // 只读，不要主密钥：与 list 那几组同一条。
 func runCalendarList(args []string) error {
-	fs := flag.NewFlagSet("price calendar list", flag.ContinueOnError)
+	fs := newFlagSet("price calendar list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, priceCalendarShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)

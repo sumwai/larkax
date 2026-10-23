@@ -230,6 +230,10 @@ const channelTimeout = 30 * time.Second
 // 在测试里能走通——那条路径本身就是这条命令的一条契约，不能只靠人工敲一次。
 var credentialInput io.Reader = os.Stdin
 
+// channelActions 是 channel 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var channelActions = []string{"create", "list", "get", "health", "update", "enable", "disable", "delete", "restore", "sync-models", "upstream-models", "map"}
+
 func runChannel(args []string) error {
 	if len(args) == 0 {
 		printUsage(os.Stderr, channelShortUsage)
@@ -325,7 +329,7 @@ func runChannelCreate(args []string) error {
 // 它多带一个 ownerRef 返回值：--user 要连库才能解析成用户 ID，而参数解析
 // 必须在连库之前完成。所以这里只做「有没有给、给了什么」，解析留给调用方。
 func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
-	fs := flag.NewFlagSet("channel create", flag.ContinueOnError)
+	fs := newFlagSet("channel create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	name := fs.String("name", "", "")
 	channelType := fs.String("type", "", "")
@@ -421,7 +425,7 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 // 没有 --user：归属（平台自营 / 某个商家）不在写入路径能改的字段里，
 // 见 channels.UpdateRequest。要换归属是另一件事，不该混在一次「改配置」里。
 func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
-	fs := flag.NewFlagSet("channel update", flag.ContinueOnError)
+	fs := newFlagSet("channel update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "要改的渠道 ID")
 	name := fs.String("name", "", "")
@@ -603,7 +607,7 @@ func printSettingUnreadNote(w io.Writer, channelType string, setting map[string]
 }
 
 func runChannelList(args []string) error {
-	fs := flag.NewFlagSet("channel list", flag.ContinueOnError)
+	fs := newFlagSet("channel list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	all := fs.Bool("all", false, "")
 	if err := fs.Parse(args); err != nil {
@@ -655,7 +659,7 @@ func runChannelSetStatus(args []string, status string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("channel "+verb, flag.ContinueOnError)
+	fs := newFlagSet("channel "+verb, flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "渠道 ID")
 	if err := fs.Parse(args); err != nil {
@@ -704,7 +708,7 @@ func runChannelDelete(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("channel delete", flag.ContinueOnError)
+	fs := newFlagSet("channel delete", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "要删的渠道 ID")
 	if err := fs.Parse(args); err != nil {
@@ -746,7 +750,7 @@ func runChannelDelete(args []string) error {
 // 它与 list 的差别只在形状：list 一张表，get 一栏一行。**已软删的渠道也打得出来**
 // 并由那一栏标出——行还在库里，单条读取的目的是核对配置，藏起来反而让人打不开。
 func runChannelGet(args []string) error {
-	fs := flag.NewFlagSet("channel get", flag.ContinueOnError)
+	fs := newFlagSet("channel get", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "要看的渠道 ID")
 	if err := fs.Parse(args); err != nil {
@@ -824,7 +828,7 @@ func parseSince(raw string) (time.Time, error) {
 
 // runChannelHealth 打窗口内的渠道健康。
 func runChannelHealth(args []string) error {
-	fs := flag.NewFlagSet("channel health", flag.ContinueOnError)
+	fs := newFlagSet("channel health", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "只看这一条渠道（渠道 ID）")
 	since := fs.String("since", "", "窗口起点：一段时长或一个 RFC3339 时刻")
@@ -894,7 +898,7 @@ func runChannelRestore(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("channel restore", flag.ContinueOnError)
+	fs := newFlagSet("channel restore", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "要恢复的渠道 ID")
 	if err := fs.Parse(args); err != nil {

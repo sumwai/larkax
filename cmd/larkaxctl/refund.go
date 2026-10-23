@@ -119,7 +119,7 @@ func runWalletRefund(args []string) error {
 		return nil
 	}
 
-	fs := flag.NewFlagSet("wallet refund", flag.ContinueOnError)
+	fs := newFlagSet("wallet refund", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, walletRefundShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")

@@ -202,6 +202,11 @@ func txnIDForPayoutPaid(payoutID int64) ledger.TxnID {
 // 每个动作一条命令而不是一个「把单子推到下一步」的入口：每一步都有自己的输入（清算
 // 要收款信息、批准要审批人、打款要通道与凭据），而且谁在哪一步做了什么要能在输出与
 // 审计里分开看。
+
+// walletPayoutActions 是 wallet payout 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var walletPayoutActions = []string{"request", "settle", "approve", "reject", "paid"}
+
 func runWalletPayout(args []string) error {
 	if len(args) == 0 {
 		printUsage(os.Stderr, walletPayoutShortUsage)
@@ -250,7 +255,7 @@ func runPayoutRequest(args []string) error {
 		return nil
 	}
 
-	fs := flag.NewFlagSet("wallet payout request", flag.ContinueOnError)
+	fs := newFlagSet("wallet payout request", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, walletPayoutShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -388,7 +393,7 @@ func runPayoutSettle(args []string) error {
 		return nil
 	}
 
-	fs := flag.NewFlagSet("wallet payout settle", flag.ContinueOnError)
+	fs := newFlagSet("wallet payout settle", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, walletPayoutShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -559,7 +564,7 @@ func runPayoutReview(action string, args []string) error {
 		return nil
 	}
 
-	fs := flag.NewFlagSet(command, flag.ContinueOnError)
+	fs := newFlagSet(command, flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, walletPayoutShortUsage) }
 	id := fs.Int64("id", 0, "")
 	by := fs.String("by", "", "")
@@ -684,7 +689,7 @@ func runPayoutPaid(args []string) error {
 		return nil
 	}
 
-	fs := flag.NewFlagSet("wallet payout paid", flag.ContinueOnError)
+	fs := newFlagSet("wallet payout paid", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, walletPayoutShortUsage) }
 	id := fs.Int64("id", 0, "")
 	gateway := fs.String("gateway", "", "")

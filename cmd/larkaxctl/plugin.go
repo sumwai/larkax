@@ -194,6 +194,10 @@ var pluginKVHelp = helpText{short: pluginKVShortUsage, long: pluginKVUsage}
 // 「干实事」的插件要跑一次它的顶层。
 const pluginTimeout = 60 * time.Second
 
+// pluginActions 是 plugin 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var pluginActions = []string{"list", "get", "publish", "enable", "disable", "delete", "kv"}
+
 func runPlugin(args []string) error {
 	if len(args) == 0 {
 		printUsage(os.Stderr, pluginShortUsage)
@@ -226,7 +230,7 @@ func runPlugin(args []string) error {
 }
 
 func runPluginList(args []string) error {
-	fs := flag.NewFlagSet("plugin list", flag.ContinueOnError)
+	fs := newFlagSet("plugin list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -506,7 +510,7 @@ func loadAttemptOrNull(a *pluginstore.LoadAttempt) any {
 // 只读，所以**不要主密钥**（与 list 同一条）：它不改任何东西，而多要一份密钥
 // 材料只会让查看这一个动作在只有库口令的机器上跑不起来。
 func runPluginGet(args []string) error {
-	fs := flag.NewFlagSet("plugin get", flag.ContinueOnError)
+	fs := newFlagSet("plugin get", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -658,7 +662,7 @@ func runPluginPublish(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("plugin publish", flag.ContinueOnError)
+	fs := newFlagSet("plugin publish", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
 	key := fs.String("key", "", "")
 	priority := fs.Int("priority", 0, "")
@@ -796,7 +800,7 @@ func compileErrorKind(err error) string {
 //
 // 判断一个开关吃不吃值靠 IsBoolFlag：不吃值的开关后面那个词是位置参数，
 // 跟着一起挪会把文件名当成开关的值。
-func parseFlagsAnywhere(fs *flag.FlagSet, args []string) error {
+func parseFlagsAnywhere(fs *flagSet, args []string) error {
 	flags := make([]string, 0, len(args))
 	rest := make([]string, 0, len(args))
 
@@ -840,7 +844,7 @@ func flagName(arg string) (string, bool) {
 //
 // 未声明的名字按「取值」处理：多挪一个词进去会让 flag 报一句「flag provided
 // but not defined」，比把文件名吃掉更容易看懂。
-func isBoolFlag(fs *flag.FlagSet, name string) bool {
+func isBoolFlag(fs *flagSet, name string) bool {
 	f := fs.Lookup(name)
 	if f == nil {
 		return false
@@ -889,7 +893,7 @@ func runPluginDelete(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("plugin delete", flag.ContinueOnError)
+	fs := newFlagSet("plugin delete", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -929,6 +933,10 @@ func printPluginDeleteResult(w io.Writer, r pluginstore.Deleted) {
 }
 
 // ── plugin kv：插件私有的键值存储 ──────────────────────────────────────
+
+// pluginKVActions 是 plugin kv 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var pluginKVActions = []string{"get", "set", "delete"}
 
 // runPluginKV 处理 plugin 下的 kv 子命令。
 func runPluginKV(args []string) error {
@@ -976,7 +984,7 @@ type kvTarget struct {
 // 值都是旗标，形状就统一了；另外键名与用户名都可能以减号开头（排障时插一个
 // `-1` 进去），走旗标才不会被当成另一个开关。
 func parseKVTarget(verb string, args []string) (kvTarget, error) {
-	fs := flag.NewFlagSet("plugin kv "+verb, flag.ContinueOnError)
+	fs := newFlagSet("plugin kv "+verb, flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, pluginKVShortUsage) }
 	plugin := fs.String("plugin", "", "")
 	user := fs.String("user", "", "")
@@ -1108,7 +1116,7 @@ func runPluginKVSet(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("plugin kv set", flag.ContinueOnError)
+	fs := newFlagSet("plugin kv set", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, pluginKVShortUsage) }
 	plugin := fs.String("plugin", "", "")
 	user := fs.String("user", "", "")
@@ -1232,7 +1240,7 @@ func runPluginSetEnabled(args []string, enable bool) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("plugin "+verb, flag.ContinueOnError)
+	fs := newFlagSet("plugin "+verb, flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)

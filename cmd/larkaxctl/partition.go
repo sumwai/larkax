@@ -71,6 +71,10 @@ const partitionMonthsDefault = 3
 // 要拿父表的 ACCESS EXCLUSIVE 锁，排队等一个长事务是正常的。
 const partitionTimeout = 2 * time.Minute
 
+// partitionActions 是 partition 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var partitionActions = []string{"check", "ensure"}
+
 // runPartition 处理 partition 子命令。
 func runPartition(args []string) error {
 	if len(args) == 0 {
@@ -99,7 +103,7 @@ func runPartition(args []string) error {
 // （调度器里的变量没填上），脚本对它的处置是「去改命令」，与「库里出了状况」
 // 不是同一件事，退出码也该不同（见 exit.go）。
 func parsePartitionMonths(args []string, name string) (int, error) {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs := newFlagSet(name, flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, partitionShortUsage) }
 	months := fs.Int("months", partitionMonthsDefault, "")
 	if err := fs.Parse(args); err != nil {

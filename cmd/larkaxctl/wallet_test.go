@@ -385,7 +385,7 @@ func TestParseCreditAmountTrailingZeros(t *testing.T) {
 // 来源名归一成小写：科目按字符串比对，MANUAL 与 manual 不能是两个科目。
 func TestParseGatewayFlagLowercases(t *testing.T) {
 	for _, given := range []string{"manual", "MANUAL", "Manual", "  MANUAL  "} {
-		fs := flag.NewFlagSet("wallet credit", flag.ContinueOnError)
+		fs := newFlagSet("wallet credit", flag.ContinueOnError)
 		gateway := fs.String("gateway", manualGateway, "")
 		if err := fs.Parse([]string{"--gateway", given}); err != nil {
 			t.Fatalf("解析 %q 失败: %v", given, err)

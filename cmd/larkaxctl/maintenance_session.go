@@ -69,7 +69,7 @@ func runMaintenanceSession(args []string) error {
 		return nil
 	}
 
-	fs := flag.NewFlagSet("maintenance session", flag.ContinueOnError)
+	fs := newFlagSet("maintenance session", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, maintenanceSessionHelp.short) }
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {

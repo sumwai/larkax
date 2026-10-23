@@ -86,8 +86,12 @@ grant 与 void 接受 --dry-run：走与真跑同一条写路径（同一份校�
 // planTimeout 是这条命令连库与写库的时间上限（理由同 apiKeyTimeout）。
 const planTimeout = 30 * time.Second
 
+// planActions 是 plan 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var planActions = []string{"create", "list", "get", "enable", "disable", "grant", "void", "subscriptions", "key", "order"}
+
 func runPlan(args []string) error {
-	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
+	fs := newFlagSet("plan", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -137,7 +141,7 @@ func runPlanCreate(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("plan create", flag.ContinueOnError)
+	fs := newFlagSet("plan create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
 	key := fs.String("key", "", "")
 	name := fs.String("name", "", "")
@@ -217,7 +221,7 @@ func runPlanCreate(args []string) error {
 }
 
 func runPlanList(args []string) error {
-	fs := flag.NewFlagSet("plan list", flag.ContinueOnError)
+	fs := newFlagSet("plan list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -240,7 +244,7 @@ func runPlanList(args []string) error {
 }
 
 func runPlanGet(args []string) error {
-	fs := flag.NewFlagSet("plan get", flag.ContinueOnError)
+	fs := newFlagSet("plan get", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
 	key := fs.String("key", "", "")
 	if err := fs.Parse(args); err != nil {
@@ -276,7 +280,7 @@ func runPlanEnable(args []string, enabled bool) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet(command, flag.ContinueOnError)
+	fs := newFlagSet(command, flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
 	key := fs.String("key", "", "")
 	if err := fs.Parse(args); err != nil {
@@ -307,7 +311,7 @@ func runPlanGrant(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("plan grant", flag.ContinueOnError)
+	fs := newFlagSet("plan grant", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -395,7 +399,7 @@ func runPlanVoid(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("plan void", flag.ContinueOnError)
+	fs := newFlagSet("plan void", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
 	id := fs.Int64("id", 0, "")
 	ref := fs.String("ref", "", "")
@@ -461,7 +465,7 @@ func runPlanVoid(args []string) error {
 }
 
 func runPlanSubscriptions(args []string) error {
-	fs := flag.NewFlagSet("plan subscriptions", flag.ContinueOnError)
+	fs := newFlagSet("plan subscriptions", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -492,6 +496,10 @@ func runPlanSubscriptions(args []string) error {
 	})
 }
 
+// planKeyActions 是 plan key 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var planKeyActions = []string{"show", "set"}
+
 func runPlanKey(args []string) error {
 	rest := args
 	if len(rest) == 0 {
@@ -510,7 +518,7 @@ func runPlanKey(args []string) error {
 }
 
 func runPlanKeyShow(args []string) error {
-	fs := flag.NewFlagSet("plan key show", flag.ContinueOnError)
+	fs := newFlagSet("plan key show", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
 	id := fs.Int64("id", 0, "")
 	if err := fs.Parse(args); err != nil {
@@ -546,7 +554,7 @@ func runPlanKeySet(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("plan key set", flag.ContinueOnError)
+	fs := newFlagSet("plan key set", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
 	id := fs.Int64("id", 0, "")
 	raw := fs.String("plans", "", "")
@@ -589,6 +597,10 @@ func runPlanKeySet(args []string) error {
 	})
 }
 
+// planOrderActions 是 plan order 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var planOrderActions = []string{"show", "set"}
+
 func runPlanOrder(args []string) error {
 	rest := args
 	if len(rest) == 0 {
@@ -607,7 +619,7 @@ func runPlanOrder(args []string) error {
 }
 
 func runPlanOrderShow(args []string) error {
-	fs := flag.NewFlagSet("plan order show", flag.ContinueOnError)
+	fs := newFlagSet("plan order show", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -643,7 +655,7 @@ func runPlanOrderSet(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("plan order set", flag.ContinueOnError)
+	fs := newFlagSet("plan order set", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")

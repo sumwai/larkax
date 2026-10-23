@@ -188,6 +188,10 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 			run: func() error { return runDoctor(nil) }},
 		{command: "version", what: "version",
 			run: func() error { return runVersion(nil) }},
+		{command: "completion", what: "bash",
+			// 补全脚本只打到 stdout，不连库；走注册表里那个转发函数，
+			// 顺带证明它接得上。
+			run: func() error { return runCompletionCommand([]string{"bash"}) }},
 
 		{command: "settings", what: "list",
 			run: func() error { return runSettingsList(nil) }},

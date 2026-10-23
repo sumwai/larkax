@@ -152,6 +152,10 @@ explain 回答「这次请求按哪条规则计价」：它把**全部适用**�
 更细的约定见 docs/cli-reference.md 的「price」一节。
 `
 
+// priceActions 是 price 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var priceActions = []string{"create", "list", "show", "update", "enable", "disable", "explain", "calendar"}
+
 func runPrice(args []string) error {
 	if len(args) == 0 {
 		printUsage(os.Stderr, priceShortUsage)
@@ -262,7 +266,7 @@ type priceRefs struct {
 // 而参数解析必须在连库之前完成。所以这里只做「有没有给、给了什么」，
 // 解析留给调用方。
 func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
-	fs := flag.NewFlagSet("price create", flag.ContinueOnError)
+	fs := newFlagSet("price create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
 	scope := fs.String("scope", "", "")
 	name := fs.String("name", "", "")
@@ -429,7 +433,7 @@ func runPriceSetEnabled(args []string, enable bool) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("price "+verb, flag.ContinueOnError)
+	fs := newFlagSet("price "+verb, flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -471,7 +475,7 @@ var (
 // --user 与 --by 都要连库才能解析成用户 ID，而参数解析必须在连库之前完成。
 // 这里只做「有没有给、给了什么」。
 func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
-	fs := flag.NewFlagSet("price update", flag.ContinueOnError)
+	fs := newFlagSet("price update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
 	id := fs.Int64("id", 0, "要改的规则 ID")
 	scope := fs.String("scope", "", "")
@@ -654,7 +658,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 
 // runPriceExplain 回答「这次请求按哪条规则计价」。
 func runPriceExplain(args []string) error {
-	fs := flag.NewFlagSet("price explain", flag.ContinueOnError)
+	fs := newFlagSet("price explain", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
 	model := fs.String("model", "", "")
 	stringAlias(fs, model, "m")
@@ -720,7 +724,7 @@ func runPriceExplain(args []string) error {
 }
 
 func runPriceList(args []string) error {
-	fs := flag.NewFlagSet("price list", flag.ContinueOnError)
+	fs := newFlagSet("price list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -778,7 +782,7 @@ func readScheduleFile(path string) (*pricing.Schedule, error) {
 // 带结构化定价表的规则打那张表：它是可枚举的那一份，也是运维要改的那一份。
 // 手写表达式的规则打源码——没有表可打，源码就是全部。
 func runPriceShow(args []string) error {
-	fs := flag.NewFlagSet("price show", flag.ContinueOnError)
+	fs := newFlagSet("price show", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)

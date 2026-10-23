@@ -108,7 +108,7 @@ func runRotate(args []string) error {
 		return nil
 	}
 
-	fs := flag.NewFlagSet("secret rotate", flag.ContinueOnError)
+	fs := newFlagSet("secret rotate", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, rotateShortUsage) }
 	apply := fs.Bool("apply", false, "")
 	verify := fs.Bool("verify", false, "")

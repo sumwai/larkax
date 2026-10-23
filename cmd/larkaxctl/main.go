@@ -156,6 +156,7 @@ var commandGroups = []commandGroup{
 			{name: "settings", summary: "运行期动态配置项管理（settings 表）", help: settingsHelp, run: runSettings},
 			{name: "admin", summary: "内部监听上 admin API 的令牌（create、revoke）", help: adminHelp, run: runAdmin},
 			{name: "version", summary: "打印版本号与编译元数据", help: versionHelp, run: runVersion},
+			{name: "completion", summary: "打印 bash / zsh / fish 的补全脚本", help: completionHelp, run: runCompletionCommand},
 		},
 	},
 	{
@@ -289,8 +290,7 @@ const usageNotes = `
 短选项：-u --user、-m --model、-o --format、-v --verbose、-q --quiet、-V --version（其余写全名）
 退出码：0 成功，1 其他失败，2 命令行参数错，3 连不上数据库，4 约束冲突。
 每条命令的详细用法：larkaxctl help <命令>。
-全局约定、.env 查找规则与退出码边界见 docs/cli-reference.md。
-机器可读输出（--format json）的契约见 docs/cli-output.md。
+全局约定、.env 查找与退出码见 docs/cli-reference.md；机器可读输出见 docs/cli-output.md。
 `
 
 // migrateHelp 是 migrate 的两版帮助文本（见 helpText）。
@@ -567,7 +567,7 @@ func runReconcile(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("ledger reconcile", flag.ContinueOnError)
+	fs := newFlagSet("ledger reconcile", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, ledgerShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -777,6 +777,10 @@ func takeAllowMissingFlag(args []string) (bool, bool, []string, error) {
 	return takeBoolFlag(args, allowMissingFlagNames, "--allow-missing")
 }
 
+// migrateActions 是 migrate 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var migrateActions = []string{"up", "down", "down-to", "up-to", "status", "version", "create"}
+
 func runMigrate(args []string) error {
 	// 开关在 fs.Parse 之前摘掉：flag 包在第一个非选项参数（子命令）处停下，
 	// 所以 `migrate up --allow-missing` 里的它根本到不了 fs。
@@ -785,7 +789,7 @@ func runMigrate(args []string) error {
 		return flagErr
 	}
 
-	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
+	fs := newFlagSet("migrate", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, migrateShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
