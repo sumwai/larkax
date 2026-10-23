@@ -138,7 +138,7 @@ func (s *Store) Wallets(ctx context.Context, userID *int64) ([]Wallet, error) {
 		 WHERE $1::bigint IS NULL OR user_id = $1
 		 ORDER BY user_id, asset`
 
-	rows, err := s.db.QueryContext(ctx, query, userID)
+	rows, err := s.read().QueryContext(ctx, query, userID)
 	if err != nil {
 		return nil, fmt.Errorf("查询钱包清单失败: %w", err)
 	}

@@ -64,10 +64,27 @@ type Service struct {
 	// log 是读侧回落时的日志出口（库里出现认不出的取值）。为 nil 时用
 	// slog.Default()，测试可以换成一个收得到的句柄。
 	log *slog.Logger
+	// reader 非 nil 时读路径改走它（见 NewInTx），db 与 ledger 同时为 nil。
+	reader queryer
 }
 
 // New 构造一个额度包服务。
 func New(db *sql.DB) *Service { return &Service{db: db, ledger: store.New(db), log: slog.Default()} }
+
+// NewInTx 构造一个读句柄指向 tx 的 Service。
+//
+// 它只服务「在一个事务里取齐多份数据」的读命令。**写方法在它上面没有句柄**
+// （db 与 ledger 都为 nil），调用会当场 panic——宁可炸在错误的地方，也不要
+// 让一次发放落到一条与调用方以为的事务无关的连接上。
+func NewInTx(tx *sql.Tx) *Service { return &Service{reader: tx, log: slog.Default()} }
+
+// read 返回读路径要用的句柄。
+func (s *Service) read() queryer {
+	if s.reader != nil {
+		return s.reader
+	}
+	return s.db
+}
 
 // PlanUnit 是额度包的计量单位，取值与 `plans.unit` 的 CHECK 约束一致。
 type PlanUnit string
@@ -586,7 +603,7 @@ func (s *Service) UserPlans(ctx context.Context, userID int64) ([]UserPlan, erro
 	if userID <= 0 {
 		return nil, fmt.Errorf("用户 id 非法: %d", userID)
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.read().QueryContext(ctx,
 		userPlanQuery+` WHERE up.user_id = $1 ORDER BY up.id`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("读用户 %d 的额度包订阅失败: %w", userID, err)

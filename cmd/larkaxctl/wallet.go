@@ -1404,24 +1404,10 @@ func walletListDoc(rows []walletRow, cause error) map[string]any {
 	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
-		cells := make([]string, 0, 2)
-		if r.BalanceErr != nil {
-			cells = append(cells, "balance")
-		}
-		if r.FrozenErr != nil {
-			cells = append(cells, "frozen")
-		}
-		if len(cells) > 0 {
+		if len(walletUnreadableCells(r)) > 0 {
 			unreadableRows++
 		}
-		entries = append(entries, map[string]any{
-			"user_id":    r.UserID,
-			"username":   nullableString(r.Username),
-			"asset":      string(r.Asset),
-			"balance":    walletAmountJSON(r.Balance, r.BalanceErr),
-			"frozen":     walletAmountJSON(r.Frozen, r.FrozenErr),
-			"unreadable": cells,
-		})
+		entries = append(entries, walletEntry(r))
 	}
 	doc["summary"] = map[string]any{
 		"total":           len(rows),
@@ -1429,4 +1415,34 @@ func walletListDoc(rows []walletRow, cause error) map[string]any {
 	}
 	doc["wallets"] = entries
 	return doc
+}
+
+// walletUnreadableCells 列出这一行里读不出来的那几栏。
+//
+// 名字取 JSON 那一档里的字段名（balance / frozen）：同一个事实在报告、JSON
+// 与错误那句话里都用这两个词，读的人才不必在脑里做一次对照。
+func walletUnreadableCells(r walletRow) []string {
+	cells := make([]string, 0, 2)
+	if r.BalanceErr != nil {
+		cells = append(cells, "balance")
+	}
+	if r.FrozenErr != nil {
+		cells = append(cells, "frozen")
+	}
+	return cells
+}
+
+// walletEntry 打钱包清单里的一行。
+//
+// wallet list 与 user inspect 共用它：两条路给的字段必须逐字相同，各写一份
+// 的话，加一栏只改一处就会让同一份数据有两个形状。
+func walletEntry(r walletRow) map[string]any {
+	return map[string]any{
+		"user_id":    r.UserID,
+		"username":   nullableString(r.Username),
+		"asset":      string(r.Asset),
+		"balance":    walletAmountJSON(r.Balance, r.BalanceErr),
+		"frozen":     walletAmountJSON(r.Frozen, r.FrozenErr),
+		"unreadable": walletUnreadableCells(r),
+	}
 }

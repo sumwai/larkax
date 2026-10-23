@@ -811,7 +811,7 @@ func (s *Store) UserByRef(ctx context.Context, ref string) (UserInfo, error) {
 	}
 
 	where, arg := userRefWhere(ref, 1)
-	info, err := scanUserInfo(s.db.QueryRowContext(ctx,
+	info, err := scanUserInfo(s.read().QueryRowContext(ctx,
 		`SELECT `+userInfoColumns+` FROM users WHERE `+where, arg).Scan)
 
 	if errors.Is(err, sql.ErrNoRows) {
