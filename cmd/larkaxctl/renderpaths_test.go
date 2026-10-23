@@ -72,8 +72,10 @@ var tableRenderPaths = []string{
 	"printKeyList",
 	"printLedgerBalances", // ledger balance --all
 	"printLedgerRuns",     // ledger runs
+	"printModelAliasList", // model alias list
 	"printModelDetail",
 	"printModelList",
+	"printModelTrace",    // model trace
 	"printPayment",       // wallet payment 的回显：一栏一行，与 wallet payout 同一个形状
 	"printPayout",        // wallet payout 的回显：一栏一行，与 wallet adjust 同一个形状
 	"printPlanDetail",    // plan get
@@ -109,6 +111,7 @@ var emptyListPaths = []string{
 	"printConsentList",           // consent list
 	"printCostList",
 	"printKeyList",
+	"printModelAliasList", // model alias list
 	"printModelList",
 	"printPlanList",
 	"printPluginList",

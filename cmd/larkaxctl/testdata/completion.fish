@@ -80,6 +80,8 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from model' -a 'list'
 complete -c larkaxctl -n '__fish_seen_subcommand_from model' -a 'get'
 complete -c larkaxctl -n '__fish_seen_subcommand_from model' -a 'update'
 complete -c larkaxctl -n '__fish_seen_subcommand_from model' -a 'delete'
+complete -c larkaxctl -n '__fish_seen_subcommand_from model' -a 'alias'
+complete -c larkaxctl -n '__fish_seen_subcommand_from model' -a 'trace'
 complete -c larkaxctl -n '__fish_seen_subcommand_from partition' -a 'check'
 complete -c larkaxctl -n '__fish_seen_subcommand_from partition' -a 'ensure'
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan' -a 'create'
@@ -297,6 +299,7 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subc
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l vision
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from delete' -l model
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from get' -l model
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from trace' -l channel
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l audio
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l batch
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l cache

@@ -591,3 +591,130 @@ func TestUsageEventsPlanReservedMigration(t *testing.T) {
 	assertColumn(true, "第二次前进之后")
 	assertBackfilled("第二次前进之后")
 }
+
+// inboundAliasesMigration 是建入站别名表的那条迁移。
+const inboundAliasesMigration = "00060_inbound_model_aliases.sql"
+
+// TestInboundModelAliasesMigration 钉住这张表的形状与回滚方向。
+//
+// 判据：
+//
+//   - up 之后表在，主键是 alias，canonical_name 非空；
+//   - 同一个 alias 插两次被主键拒（唯一性靠主键，不靠另建的索引）；
+//   - **没有**指向 model_catalog 的外键——有外键时「别名指向一个已删掉的规范名」
+//     这种数据进不来，而 model trace 要报的正是这种断链；
+//   - down 之后表消失，再 up 之后表与约束一起回来。
+func TestInboundModelAliasesMigration(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	version, err := goose.NumericComponent(inboundAliasesMigration)
+	if err != nil {
+		t.Fatalf("从迁移文件名读版本号失败: %v", err)
+	}
+	previous := version - 1
+
+	goose.SetBaseFS(migrate.FS())
+	if err := migrate.SetDialect("postgres"); err != nil {
+		t.Fatalf("设置方言失败: %v", err)
+	}
+	up := func() {
+		t.Helper()
+		if err := goose.UpContext(ctx, db, "."); err != nil {
+			t.Fatalf("前进到最新失败: %v", err)
+		}
+	}
+	down := func() {
+		t.Helper()
+		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
+			t.Fatalf("回滚到 %d 失败: %v", previous, err)
+		}
+	}
+
+	exists := func() bool {
+		t.Helper()
+		var n int
+		if err := db.QueryRowContext(ctx, `
+			SELECT count(*) FROM information_schema.tables
+			 WHERE table_schema = current_schema() AND table_name = 'inbound_model_aliases'`,
+		).Scan(&n); err != nil {
+			t.Fatalf("查表是否存在失败: %v", err)
+		}
+		return n > 0
+	}
+	// 外键数：这张表按设计一条都没有（见 00060 迁移的注释）。
+	foreignKeys := func() int {
+		t.Helper()
+		var n int
+		if err := db.QueryRowContext(ctx, `
+			SELECT count(*) FROM information_schema.table_constraints
+			 WHERE table_schema = current_schema()
+			   AND table_name = 'inbound_model_aliases'
+			   AND constraint_type = 'FOREIGN KEY'`).Scan(&n); err != nil {
+			t.Fatalf("数外键失败: %v", err)
+		}
+		return n
+	}
+
+	// 收尾：把库推回最新。中途红掉时，本包别的用例不该被留在旧结构上。
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		if err := goose.UpContext(cleanupCtx, db, "."); err != nil {
+			t.Logf("收尾时前进失败（库可能已经不在旧版本上）：%v", err)
+		}
+	})
+
+	// 1. down 之后表不存在。
+	down()
+	if exists() {
+		t.Fatal("回滚之后 inbound_model_aliases 还在")
+	}
+
+	// 2. up 之后表回来，外键为零。
+	up()
+	if !exists() {
+		t.Fatal("前进之后 inbound_model_aliases 不存在")
+	}
+	if got := foreignKeys(); got != 0 {
+		t.Errorf("这张表有 %d 条外键，期望 0：有外键时「别名指向一个已删掉的规范名」这种数据进不来，"+
+			"而 model trace 要报的正是那种断链", got)
+	}
+
+	// 3. 别名是主键：同一个 alias 插两次被拒。
+	alias := "migr-00060-" + time.Now().Format("150405.000000000")
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(),
+			`DELETE FROM inbound_model_aliases WHERE alias = $1`, alias)
+	})
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO inbound_model_aliases (alias, canonical_name) VALUES ($1, $2)`,
+		alias, "canonical-a"); err != nil {
+		t.Fatalf("第一次插入失败: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO inbound_model_aliases (alias, canonical_name) VALUES ($1, $2)`,
+		alias, "canonical-b"); err == nil {
+		t.Error("同一个别名插了两次却没被拒：alias 应当唯一")
+	}
+
+	// 4. 断链允许存在：规范名不在目录里也能插进去（这正是 trace 要报的状态）。
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO inbound_model_aliases (alias, canonical_name) VALUES ($1, $2)`,
+		alias+"-dangling", "no-such-model"); err != nil {
+		t.Errorf("指向不存在规范名的别名插不进去（%v）：那会把一个可诊断的断链变成不可表达的数据", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(),
+			`DELETE FROM inbound_model_aliases WHERE alias = $1`, alias+"-dangling")
+	})
+
+	// 5. 再 down 一次、再 up 一次：表与约束一起回来。
+	down()
+	if exists() {
+		t.Fatal("第二次回滚之后表还在")
+	}
+	up()
+	if !exists() {
+		t.Fatal("第二次前进之后表不存在")
+	}
+}

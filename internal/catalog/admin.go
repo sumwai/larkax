@@ -456,11 +456,17 @@ func modelUpdateSets(req UpdateModelRequest) ([]string, []any, error) {
 //
 // # 这个检查是尽力而为的，真正的保证在外键上
 //
-// 别名那一边的保证来自 model_aliases 那条外键：检查通过之后、DELETE 之前
-// 有人插了一条别名，DELETE 会被外键拒掉（并发下会拿到 ErrModelInUse 而不是
-// 「删成功」）。计价规则那一边**没有任何外键**——jsonb 数组建不了外键——所以
-// 那里的检查就是全部：刚查完、还没删的窗口里新配一条规则，是拦不住的。
-// 说清这一点，好过假装挡住了。
+// 出站别名那一边的保证来自 model_aliases 那条外键：检查通过之后、DELETE
+// 之前有人插了一条别名，DELETE 会被外键拒掉（并发下会拿到 ErrModelInUse 而
+// 不是「删成功」）。入站别名（inbound_model_aliases）与计价规则那一边**没有
+// 任何外键**——前者的表按设计不挂外键（见 00060 迁移），后者是 jsonb 数组
+// 建不了外键——所以那里的检查就是全部：刚查完、还没删的窗口里新配一条，
+// 是拦不住的。说清这一点，好过假装挡住了。
+//
+// 入站别名这一路是本单补的：漏了它，先建入站别名再删规范模型就能删掉，
+// 别名于是悬空——而它悬空之后每个用它的请求都会在选路处报「查无此模型」，
+// 那条消息不会提到别名。补上之后 inbound_model_aliases 里不该再出现悬空行，
+// 所以 model trace 的「断在规范模型」那一段是防御性诊断，不是常态。
 func (a *Admin) Delete(ctx context.Context, canonicalName string) error {
 	// 宽松规整，不判路径段：这里要认出的是库里已有的那一行，而不是判断
 	// 这个名字现在还能不能写进去。理由见 normalizeExistingCanonicalName。
@@ -469,15 +475,15 @@ func (a *Admin) Delete(ctx context.Context, canonicalName string) error {
 		return err
 	}
 
-	aliasCount, ruleCount, err := a.countReferences(ctx, name)
+	refs, err := a.countReferences(ctx, name)
 	if err != nil {
 		return err
 	}
-	if aliasCount > 0 || ruleCount > 0 {
-		return fmt.Errorf("%w：%q 还被 %d 条别名与 %d 条计价规则引用。"+
-			"别名要先删（渠道的 models 白名单里还留着这个名字，删别名不等于删那条配置），"+
+	if refs.any() {
+		return fmt.Errorf("%w：%q 还被 %d 条出站别名、%d 条入站别名与 %d 条计价规则引用。"+
+			"出站别名与入站别名都要先删（渠道的 models 白名单里还留着这个名字，删别名不等于删那条配置），"+
 			"计价规则要先改掉 model_patterns——直接删规则不会报错，只会让请求落到别的规则上",
-			ErrModelInUse, name, aliasCount, ruleCount)
+			ErrModelInUse, name, refs.outboundAliases, refs.inboundAliases, refs.rules)
 	}
 
 	res, err := a.db.ExecContext(ctx, `DELETE FROM model_catalog WHERE canonical_name = $1`, name)
@@ -494,26 +500,57 @@ func (a *Admin) Delete(ctx context.Context, canonicalName string) error {
 	return nil
 }
 
-// countReferences 数出这个规范名被多少条别名与多少条计价规则引用。
+// modelReferences 是一个规范名被引用的三处计数。
+type modelReferences struct {
+	// outboundAliases 是 model_aliases 的行数：这些行有外键，删模型时会被
+	// 数据库再挡一次。
+	outboundAliases int
+	// inboundAliases 是 inbound_model_aliases 的行数：这张表**没有**外键
+	// （理由见 00060 迁移），所以这里的检查就是全部。
+	inboundAliases int
+	// rules 是 model_patterns 里写着这个名字的计价规则数。jsonb 数组建不了
+	// 外键，同样只有这一道检查。
+	rules int
+}
+
+func (r modelReferences) any() bool {
+	return r.outboundAliases > 0 || r.inboundAliases > 0 || r.rules > 0
+}
+
+// countReferences 数出这个规范名被哪几处引用。
 //
-// 计价规则那一侧是精确匹配：pricing 的查询是 `model_patterns ? $2`，
-// 也就是「数组里有这个元素」。所以这里用同一个判据，而不是去猜通配符——
-// 匹配口径要是两处不一致，删掉的就会是一条其实还在被用的名字。
-func (a *Admin) countReferences(ctx context.Context, canonicalName string) (int, int, error) {
-	var aliases int
+// # 三处都要数
+//
+// 少了任何一处，那条路径上的引用就会在删模型时消失：先建一条入站别名、
+// 再删掉规范模型，别名就悬空指向一个不存在的名字——而它悬空之后每个用它的
+// 请求都会在选路处报「查无此模型」，那条消息不会提到别名。
+//
+// # 计价规则那一侧是精确匹配
+//
+// pricing 的查询是 `model_patterns ? $2`，也就是「数组里有这个元素」。所以
+// 这里用同一个判据，而不是去猜通配符——匹配口径要是两处不一致，删掉的就会是
+// 一条其实还在被用的名字。
+func (a *Admin) countReferences(ctx context.Context, canonicalName string) (modelReferences, error) {
+	var refs modelReferences
+
 	err := a.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM model_aliases WHERE canonical_name = $1`, canonicalName).Scan(&aliases)
+		`SELECT count(*) FROM model_aliases WHERE canonical_name = $1`, canonicalName).Scan(&refs.outboundAliases)
 	if err != nil {
-		return 0, 0, fmt.Errorf("统计别名的引用失败: %w", err)
+		return modelReferences{}, fmt.Errorf("统计出站别名的引用失败: %w", err)
 	}
 
-	var rules int
 	err = a.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM pricing_rules WHERE model_patterns ? $1`, canonicalName).Scan(&rules)
+		`SELECT count(*) FROM inbound_model_aliases WHERE canonical_name = $1`, canonicalName).Scan(&refs.inboundAliases)
 	if err != nil {
-		return 0, 0, fmt.Errorf("统计计价规则的引用失败: %w", err)
+		return modelReferences{}, fmt.Errorf("统计入站别名的引用失败: %w", err)
 	}
-	return aliases, rules, nil
+
+	err = a.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pricing_rules WHERE model_patterns ? $1`, canonicalName).Scan(&refs.rules)
+	if err != nil {
+		return modelReferences{}, fmt.Errorf("统计计价规则的引用失败: %w", err)
+	}
+	return refs, nil
 }
 
 // CreateAliasRequest 是新建一条别名所需的字段。

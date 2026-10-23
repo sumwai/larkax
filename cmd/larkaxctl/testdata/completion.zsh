@@ -83,6 +83,7 @@ _larkaxctl() {
 			"model create") compadd -- --audio --batch --cache --context-limit --display --endpoints --env-file --family --format --input-limit --input-modalities --knowledge-cutoff --model --output-limit --output-modalities --quiet --reasoning --release-date --tools --vendor --verbose --vision ;;
 			"model delete") compadd -- --env-file --format --model --quiet --verbose ;;
 			"model get") compadd -- --env-file --format --model --quiet --verbose ;;
+			"model trace") compadd -- --channel --env-file --format --quiet --verbose ;;
 			"model update") compadd -- --audio --batch --cache --context-limit --display --endpoints --env-file --family --format --input-limit --input-modalities --knowledge-cutoff --model --output-limit --output-modalities --quiet --reasoning --release-date --tools --vendor --verbose --vision ;;
 			"partition check") compadd -- --env-file --format --months --quiet --verbose ;;
 			"partition ensure") compadd -- --env-file --format --months --quiet --verbose ;;
@@ -175,7 +176,7 @@ _larkaxctl() {
 		"ledger") compadd -- balance verify reconcile runs ;;
 		"maintenance") compadd -- idempotency session ;;
 		"migrate") compadd -- up down down-to up-to status version create ;;
-		"model") compadd -- create list get update delete ;;
+		"model") compadd -- create list get update delete alias trace ;;
 		"partition") compadd -- check ensure ;;
 		"plan") compadd -- create list get enable disable grant void subscriptions key order ;;
 		"plan key") compadd -- show set ;;

@@ -28,6 +28,8 @@ const modelShortUsage = `larkaxctl model 管理模型目录里的规范模型。
   larkaxctl model get --model <规范名>
   larkaxctl model update --model <规范名> [与 create 相同的字段]
   larkaxctl model delete --model <规范名>
+  larkaxctl model alias add|remove|list（入站别名）
+  larkaxctl model trace <名字> [--channel <渠道 ID>]
 
 create / update 的字段：--vendor、--family、三个 limit、六个能力标志
 （--reasoning … --batch，各有三态）、--input-modalities 等。
@@ -66,6 +68,10 @@ var modelUsage = `larkaxctl model 管理模型目录里的规范模型。
                          [--input-modalities <模态,...>] [--output-modalities <模态,...>]
                          [--knowledge-cutoff <YYYY-MM-DD>] [--release-date <YYYY-MM-DD>]
   larkaxctl model delete --model <规范名>
+  larkaxctl model alias add <别名> <规范名>
+  larkaxctl model alias remove <别名>
+  larkaxctl model alias list
+  larkaxctl model trace <名字> [--channel <渠道 ID>]
 
 **规范名是选路与计费共用的键**：请求里的模型名按它匹配，别名与计价规则也挂在
 它上面。所以它不能带空白字符，也不能改（要换名字就建新名、把别名与规则挪过去、
@@ -132,12 +138,25 @@ model get，--canonical 等同于 --model。它们保留是为了不让已经在
 更容易看混，而这两件事在选路上的处置相反。--ctx / --in / --out / --im / --om
 是纯粹的两三个词缩成一节，没有第二种读法。
 
+**入站别名**（model alias）是「调用方请求里写的名字 → 规范名」的映射，
+方向与 channel map 相反：那张表回答「发给上游时叫什么」，这张回答「客户端
+写这个名字时指的是哪个模型」。解析只在 API 入口发生一次，之后选路、计价、
+记账都按规范名走，所以同一份用量不会随客户端写短名还是全名而分成两行。
+每解析一次是一次主键查询，没有缓存；规范名优先于别名（同名时别名被遮蔽、
+不报错）。响应体里的 model 仍回显调用方写的名字。
+
+delete 现在也数入站别名：建了入站别名的规范模型删不掉，要先把别名 remove 掉。
+
+**model trace** 把一条请求的名字链路一次打出来：入站别名 → 规范名 →
+该渠道上的上游名 → 命中的计价规则。任何一段断掉时打出「断在 X」，退出码
+非零。它只读、不要主密钥。
+
 更细的约定见 docs/cli-reference.md 的「model」一节。
 `
 
 // modelActions 是 model 的动作清单，补全从这里取。
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
-var modelActions = []string{"create", "list", "get", "update", "delete"}
+var modelActions = []string{"create", "list", "get", "update", "delete", "alias", "trace"}
 
 func runModel(args []string) error {
 	if len(args) == 0 {
@@ -157,6 +176,10 @@ func runModel(args []string) error {
 		return runModelUpdate(rest)
 	case "delete":
 		return runModelDelete(rest)
+	case "alias":
+		return runModelAlias(rest)
+	case "trace":
+		return runModelTrace(rest)
 	case "-h", "--help":
 		printUsage(os.Stdout, modelShortUsage)
 		return nil

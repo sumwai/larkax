@@ -423,6 +423,7 @@ type subGroupHelpCase struct {
 
 var subGroupHelpCases = []subGroupHelpCase{
 	{"channel map", channelMapShortUsage, channelMapUsage, []string{"channel", "map", "help"}},
+	{"model alias", modelAliasShortUsage, modelAliasUsage, []string{"model", "alias", "help"}},
 	{"secret rotate", rotateShortUsage, rotateUsage, []string{"secret", "rotate", "help"}},
 	{"price calendar", priceCalendarShortUsage, priceCalendarUsage, []string{"price", "calendar", "help"}},
 	{"maintenance idempotency", maintenanceIdempotencyShortUsage, maintenanceIdempotencyUsage,
