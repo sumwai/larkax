@@ -62,9 +62,9 @@ func TestSettingKeysMatchAdapterReaders(t *testing.T) {
 	}
 
 	for protocol, dirs := range settingReaderDirs {
-		// 表里漏了这一行时 keys 为 nil，反方向那一格会红——这正是「漏写
+		// 表里漏了这一行时 declared 是零值，反方向那一格会红——这正是「漏写
 		// 一行表就能被发现」的那条路。
-		keys := settingKeysByType[protocol]
+		declared := settingKeysByType[protocol]
 		var adapterFiles []*ast.File
 		var adapterKeys []string
 		var sharedFiles []*ast.File
@@ -99,12 +99,23 @@ func TestSettingKeysMatchAdapterReaders(t *testing.T) {
 				referenced = append(referenced, sharedKeyList...)
 			}
 		}
+		// declaredPaths 是表里两层键摊平后的名单，形状与读者扫出来的键一样：
+		// 顶层是 usage，内层是 usage.completion_includes_reasoning。
+		declaredPaths := map[string]bool{}
+		for _, key := range declared.top {
+			declaredPaths[string(key)] = true
+		}
+		for outer, inners := range declared.inner {
+			for _, inner := range inners {
+				declaredPaths[string(outer)+"."+string(inner)] = true
+			}
+		}
 
 		// 一、表里声明的每个键都得有人按它取过值，而且取它的那条路要能
 		// 从本类型的适配器走到：适配器自己取，或者调用本包里取它的函数。
 		// 只看「本包里有人读了」不够——共用函数留在那里、适配器不再调它时，
 		// 声明会继续替一条已经断掉的配置作保。
-		for _, key := range keys {
+		for _, key := range declared.top {
 			if _, ok := constNameOf(channelConsts, string(key)); !ok {
 				t.Errorf("表里声明了 %q，但本包没有这个取值的 SettingKey 常量："+
 					"代码无法引用它，两个值也就无法被证明是同一个", key)
@@ -120,9 +131,36 @@ func TestSettingKeysMatchAdapterReaders(t *testing.T) {
 				"它的读法：适配器既没按它取值，也没调用本包里取它的函数",
 				protocol, key, dirs)
 		}
+		// 内层键走同一条判据，只是键名按点号路径对账——读者是在外层那一块
+		// 的值上下标，扫出来就是 usage.completion_includes_reasoning。
+		for outer, inners := range declared.inner {
+			if !slices.Contains(declared.top, outer) {
+				t.Errorf("类型 %q 给 %q 声明了内层键，却没把 %q 本身声明成"+
+					"它有读者的顶层键：管理面会先把它当成不认识的顶层键点掉",
+					protocol, outer, outer)
+			}
+			for _, inner := range inners {
+				path := string(outer) + "." + string(inner)
+				if _, ok := constNameOf(channelConsts, string(inner)); !ok {
+					t.Errorf("表里给 %q 声明了内层键 %q，但本包没有这个取值的"+
+						" SettingKey 常量：代码无法引用它，两个值也就无法被证明是同一个",
+						outer, inner)
+					continue
+				}
+				if slices.Contains(adapterKeys, path) {
+					continue
+				}
+				if callsSharedReader(adapterFiles, sharedFuncs, path) {
+					continue
+				}
+				t.Errorf("表里声明类型 %q 认内层键 %q，但读者目录 %v 里没有一条"+
+					"从适配器走到它的读法：适配器既没按它取值，也没调用本包里取它的函数",
+					protocol, path, dirs)
+			}
+		}
 		// 二、反方向：读者目录里按 setting 取的每个键都得是这张表为它声明的。
 		for _, key := range referenced {
-			if !slices.Contains(keys, SettingKey(key)) {
+			if !declaredPaths[key] {
 				t.Errorf("读者目录 %v 里的代码读了 setting 键 %q，但表里没有把它"+
 					"声明给类型 %q：管理面会提示使用者这个键没有读者，而它其实生效",
 					dirs, key, protocol)
@@ -152,19 +190,8 @@ func sharedReaderFuncs(
 			if !ok || fn.Body == nil {
 				continue
 			}
-			ast.Inspect(fn.Body, func(node ast.Node) bool {
-				index, ok := node.(*ast.IndexExpr)
-				if !ok || !indexesSetting(index.X) {
-					return true
-				}
-				key, ok := resolveKeyExpr(t, index.Index, consts, channelConsts, 0)
-				if !ok {
-					pos := fset.Position(index.Pos())
-					t.Fatalf("%s:%d 按 setting 取了键，但用例追不出它是什么键："+
-						"请写成字符串字面量或引用 SettingKey* 常量", pos.Filename, pos.Line)
-				}
+			settingIndexKeys(t, fn.Body, fset, consts, channelConsts, func(key string) {
 				out[fn.Name.Name] = append(out[fn.Name.Name], key)
-				return true
 			})
 		}
 	}
@@ -237,9 +264,14 @@ func TestSettingKeysMissingFromTable(t *testing.T) {
 		t.Fatal("本包一个 SettingKey 常量都没扫到：这条判据等于没跑")
 	}
 	declared := map[string]bool{}
-	for _, keys := range settingKeysByType {
-		for _, key := range keys {
+	for _, set := range settingKeysByType {
+		for _, key := range set.top {
 			declared[string(key)] = true
+		}
+		for _, inners := range set.inner {
+			for _, key := range inners {
+				declared[string(key)] = true
+			}
 		}
 	}
 	for name, value := range consts {
@@ -318,7 +350,8 @@ func TestRouteDoesNotReadSetting(t *testing.T) {
 //   - 这个 type 认的键：不打提示；
 //   - 别的 type 的键：打，并点名；
 //   - 拼错的键：打，并点名；
-//   - 多个键里有一个不认识：照样打，且不能因为「有别的键被认」而沉默。
+//   - 多个键里有一个不认识：照样打，且不能因为「有别的键被认」而沉默；
+//   - 内层键按点号路径判：写对的静默，拼错的点名，开放映射不点名。
 func TestSettingUnreadNotePerType(t *testing.T) {
 	const known = string(SettingKeyReasoningEffortMap)
 	cases := []struct {
@@ -326,6 +359,7 @@ func TestSettingUnreadNotePerType(t *testing.T) {
 		typ     string
 		setting map[string]any
 		want    []string // 提示里必须逐个点名的键；nil 表示不该有提示
+		absent  []string // 提示里不能出现的键
 	}{
 		{
 			name:    "openai 认的键",
@@ -375,11 +409,73 @@ func TestSettingUnreadNotePerType(t *testing.T) {
 			typ:     "no-such-type",
 			setting: map[string]any{"whatever": 1},
 		},
+		{
+			// 内层键写对时零提示。这一条与「拼错要打」同样重要：正确的配置上
+			// 也冒一句，这句话很快就会变成没人读的背景音。
+			name:    "usage 的内层键写对",
+			typ:     "openai",
+			setting: map[string]any{"usage": map[string]any{"completion_includes_reasoning": false}},
+		},
+		{
+			name:    "usage 的内层键写对时 anthropic 也静默",
+			typ:     "anthropic",
+			setting: map[string]any{"usage": map[string]any{"completion_includes_reasoning": true}},
+		},
+		{
+			name:    "usage 的内层键拼错",
+			typ:     "openai",
+			setting: map[string]any{"usage": map[string]any{"completion_include_reasoning": false}},
+			want:    []string{"usage.completion_include_reasoning"},
+		},
+		{
+			// 三个适配器读的是同一位，点名也要落在各自的 type 上。
+			name:    "anthropic 的内层键拼错",
+			typ:     "anthropic",
+			setting: map[string]any{"usage": map[string]any{"completion_includes_reasonings": false}},
+			want:    []string{"usage.completion_includes_reasonings"},
+		},
+		{
+			// reasoning_effort_map 的值是开放映射：那一层的键由上游决定，
+			// 没有读者名单可对，不点名。
+			name:    "开放映射的内层键不点名",
+			typ:     "openai",
+			setting: map[string]any{"reasoning_effort_map": map[string]any{"minimal": "low"}},
+		},
+		{
+			// 整块不是对象时按「没声明」处理：值的形状没有判据，也就不点名。
+			name:    "usage 是字符串",
+			typ:     "openai",
+			setting: map[string]any{"usage": "completion_includes_reasoning=false"},
+		},
+		{
+			name:    "usage 是数组",
+			typ:     "openai",
+			setting: map[string]any{"usage": []any{false}},
+		},
+		{
+			name:    "usage 是数字",
+			typ:     "openai",
+			setting: map[string]any{"usage": 0},
+		},
+		{
+			// 整块没有读者时只点这一块的名字：内层键的「读者」是挂在外层
+			// 上的，逐个点开只会把同一处错说三遍。
+			name:    "整块没有读者时不点它的内层",
+			typ:     "anthropic",
+			setting: map[string]any{"future_block": map[string]any{"anything": 1}},
+			want:    []string{"future_block"},
+			absent:  []string{"future_block.anything"},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			note := SettingUnreadNote(tc.typ, tc.setting)
+			for _, key := range tc.absent {
+				if strings.Contains(note, "「"+key+"」") {
+					t.Errorf("提示里不该点名 %q：%s", key, note)
+				}
+			}
 			if len(tc.want) == 0 {
 				if note != "" {
 					t.Fatalf("不该有提示，得到 %q", note)
@@ -524,9 +620,10 @@ func dirDeclaresType(t *testing.T, files []*ast.File, protocol Protocol) bool {
 // adapterSettingIndexKeys 找出代码里按 setting 取值的那些键。
 //
 // 认的形状：`setting[...]`、`Setting[...]` 与 `x.Setting[...]` 三种下标
-// 表达式。下标必须是字符串字面量，或者能追到底的包级常量——追不到就判失败，
-// 而不是放过：换成变量之后这条用例什么都看不出来，表现为「加了一个没人读的
-// 声明也不会红」，而那正是它要挡的那类错。
+// 表达式，以及先从 setting 取出一块、再从那一块按下标取的内层键（见
+// settingIndexKeys）。下标必须是字符串字面量，或者能追到底的包级常量——
+// 追不到就判失败，而不是放过：换成变量之后这条用例什么都看不出来，表现为
+// 「加了一个没人读的声明也不会红」，而那正是它要挡的那类错。
 func adapterSettingIndexKeys(
 	t *testing.T, files []*ast.File, fset *token.FileSet, channelConsts map[string]string,
 ) []string {
@@ -534,23 +631,141 @@ func adapterSettingIndexKeys(
 	consts := dirConsts(t, files)
 	var keys []string
 	for _, file := range files {
-		ast.Inspect(file, func(node ast.Node) bool {
-			index, ok := node.(*ast.IndexExpr)
-			if !ok || !indexesSetting(index.X) {
-				return true
+		for _, decl := range file.Decls {
+			// 函数体单独扫：内层键靠局部变量认，变量名只在它自己那个函数
+			// 里有效，跨函数借用会把别的 map 下标也算进来。
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				if fn.Body != nil {
+					settingIndexKeys(t, fn.Body, fset, consts, channelConsts, func(key string) {
+						keys = append(keys, key)
+					})
+				}
+				continue
 			}
-			key, ok := resolveKeyExpr(t, index.Index, consts, channelConsts, 0)
-			if !ok {
-				pos := fset.Position(index.Pos())
-				t.Fatalf("%s:%d 按 setting 取了键，但用例追不出它是什么键："+
-					"请写成字符串字面量或引用 channel.SettingKey* 常量，否则"+
-					"「声明与读者一致」这条判据对它等于不存在", pos.Filename, pos.Line)
-			}
-			keys = append(keys, key)
-			return true
-		})
+			settingIndexKeys(t, decl, fset, consts, channelConsts, func(key string) {
+				keys = append(keys, key)
+			})
+		}
 	}
 	return keys
+}
+
+// settingIndexKeys 把一段代码里「按下标取 setting 的键」逐个交给 emit。
+//
+// 两层都认：
+//
+//   - 直接取：`setting[<键>]`、`x.Setting[<键>]`，交出去的是键名本身；
+//   - 取一块再取：`t, ok := setting[<键>].(map[string]any)` 之后
+//     `t[<内层键>]`，交出去的是 `外层.内层`。
+//
+// 第二层不能省：内层键的读取处把块先收进局部变量（见
+// UsageCompletionIncludesReasoning），只认直接下标的话，内层键对「声明与
+// 读者一致」这条判据是隐形的——表里给一个谁都不读的内层键作保也照样绿。
+func settingIndexKeys(
+	t *testing.T, body ast.Node, fset *token.FileSet,
+	consts map[string]ast.Expr, channelConsts map[string]string, emit func(string),
+) {
+	t.Helper()
+	tables := settingTables(t, body, fset, consts, channelConsts)
+	ast.Inspect(body, func(node ast.Node) bool {
+		index, ok := node.(*ast.IndexExpr)
+		if !ok {
+			return true
+		}
+		if indexesSetting(index.X) {
+			emit(resolveSettingKey(t, index, fset, consts, channelConsts))
+			return true
+		}
+		ident, ok := index.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		outer, ok := tables[ident.Name]
+		if !ok {
+			return true
+		}
+		// 内层键可以是变量：开放映射按请求里的取值查表（见
+		// ReasoningEffortDialect 的 table[effort]）。追不出来的越过了就算
+		// 没读——它不是声明里的某个键，反方向判不出东西来；而声明了却没人
+		// 按常量读的键，正方向那一格仍然会红。
+		key, ok := resolveKeyExpr(t, index.Index, consts, channelConsts, 0)
+		if !ok {
+			return true
+		}
+		emit(outer + "." + key)
+		return true
+	})
+}
+
+// settingTables 找出「从 setting 的某一层断言出来的 map」的局部变量 → 它对应
+// 的外层键。
+//
+// 认的形状：`t, ok := setting[<键>].(map[string]any)`（含不带 ok 的直接赋值）。
+// 断言成别的类型不算：把一个值断言成字符串之后不会再按 setting 的键取。
+func settingTables(
+	t *testing.T, body ast.Node, fset *token.FileSet,
+	consts map[string]ast.Expr, channelConsts map[string]string,
+) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	ast.Inspect(body, func(node ast.Node) bool {
+		assign, ok := node.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, rhs := range assign.Rhs {
+			assert, ok := rhs.(*ast.TypeAssertExpr)
+			if !ok || !settingTableType(assert.Type) || i >= len(assign.Lhs) {
+				continue
+			}
+			index, ok := assert.X.(*ast.IndexExpr)
+			if !ok || !indexesSetting(index.X) {
+				continue
+			}
+			name, ok := assign.Lhs[i].(*ast.Ident)
+			if !ok {
+				continue
+			}
+			out[name.Name] = resolveSettingKey(t, index, fset, consts, channelConsts)
+		}
+		return true
+	})
+	return out
+}
+
+// settingTableType 判断一个类型表达式是不是 setting 那一块的值类型。
+func settingTableType(expr ast.Expr) bool {
+	mapType, ok := expr.(*ast.MapType)
+	if !ok {
+		return false
+	}
+	key, ok := mapType.Key.(*ast.Ident)
+	if !ok || key.Name != "string" {
+		return false
+	}
+	switch value := mapType.Value.(type) {
+	case *ast.Ident:
+		return value.Name == "any"
+	case *ast.InterfaceType:
+		return len(value.Methods.List) == 0
+	}
+	return false
+}
+
+// resolveSettingKey 追出下标表达式里的键，追不出就判失败。
+func resolveSettingKey(
+	t *testing.T, index *ast.IndexExpr, fset *token.FileSet,
+	consts map[string]ast.Expr, channelConsts map[string]string,
+) string {
+	t.Helper()
+	key, ok := resolveKeyExpr(t, index.Index, consts, channelConsts, 0)
+	if !ok {
+		pos := fset.Position(index.Pos())
+		t.Fatalf("%s:%d 按 setting 取了键，但用例追不出它是什么键："+
+			"请写成字符串字面量或引用 channel.SettingKey* 常量，否则"+
+			"「声明与读者一致」这条判据对它等于不存在", pos.Filename, pos.Line)
+	}
+	return key
 }
 
 // indexesSetting 判断下标表达式取的是不是渠道的 setting。
