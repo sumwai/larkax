@@ -1,144 +1,126 @@
 import { useState, type FormEvent } from 'react'
-import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
-import { api } from '../api'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../auth/AuthProvider'
 import { useI18n } from '../i18n'
-import { Alert, Button } from '../components/ui'
+import { useSite } from '../site/SiteProvider'
 import { useDocumentTitle } from '../components/PageTitle'
-import { BrandMark } from '../components/icons'
-
-interface Errors {
-  username?: string
-  password?: string
-  form?: string
-}
+import { Alert, Button, Card, CardBody, Field, Input } from '../components/ui'
 
 /**
- * 登录后要回的地址，来自门槛给的 `?next=`。
+ * 登录页：用户名 + 口令。
  *
- * 只认站内路径：`//evil.example` 与 `/\evil.example` 在浏览器眼里都是别的主机，
- * 而这里是登录成功后直接 navigate 的目标。指回登录页自己的也丢掉——
- * 登录成功后落在登录页，它又会把已登录的人再往 `/login` 送，来回打转。
+ * 失败文案分两种：服务端明确说口令不对（401）时用 `login.failed`，
+ * 其余（网络、5xx）走 `errors.generic`——断言错了原因会把用户引向
+ * 改口令，而问题可能在自己这一侧。
+ *
+ * 登录后的去向读 `?next=`：地址带在查询串上而不是路由 state 里，
+ * 刷新一次不会丢。
  */
-function nextPath(search: string): string {
-  const next = new URLSearchParams(search).get('next')
-  if (!next || !next.startsWith('/')) return '/app'
-  if (next.startsWith('//') || next.startsWith('/\\')) return '/app'
-  const path = next.split(/[?#]/, 1)[0]
-  if (path === '/login' || path === '/login/') return '/app'
-  return next
-}
-
 export function Login() {
   const { t } = useI18n()
-  // 页内大标题是「登录控制台」，标签页标题不带「控制台」：这一页不属于控制台。
-  useDocumentTitle(t('login.documentTitle'))
-  const { status, login } = useAuth()
+  const { meta } = useSite()
+  const { login } = useAuth()
   const navigate = useNavigate()
-  const location = useLocation()
-  const from = nextPath(location.search)
+  const [params] = useSearchParams()
 
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [errors, setErrors] = useState<Errors>({})
-  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<'failed' | 'generic' | null>(null)
+  const [missing, setMissing] = useState<{ username?: boolean; password?: boolean }>({})
+  const [busy, setBusy] = useState(false)
 
-  if (status === 'authenticated') {
-    return <Navigate to={from} replace />
-  }
+  useDocumentTitle(`${t('login.documentTitle')} · ${meta.site_name}`)
 
-  const submit = async (event: FormEvent) => {
+  const next = params.get('next') || '/app'
+
+  async function onSubmit(event: FormEvent) {
     event.preventDefault()
-    const next: Errors = {}
-    if (!username.trim()) next.username = t('login.usernameRequired')
-    if (!password) next.password = t('login.passwordRequired')
-    setErrors(next)
-    if (next.username || next.password) return
+    const empty = {
+      username: username.trim() === '' || undefined,
+      password: password === '' || undefined,
+    }
+    setMissing(empty)
+    if (empty.username || empty.password) return
 
-    setPending(true)
+    setBusy(true)
+    setError(null)
     try {
       await login(username.trim(), password)
-      navigate(from, { replace: true })
-    } catch {
-      setErrors({ form: t('login.failed') })
+      navigate(next, { replace: true })
+    } catch (err) {
+      const status = (err as { status?: number }).status
+      setError(status === 401 ? 'failed' : 'generic')
     } finally {
-      setPending(false)
+      setBusy(false)
     }
   }
 
   return (
-    <div className="auth-page">
-      <div className="card auth-card">
-        <div className="auth-head">
-          <Link to="/" className="brand" style={{ padding: 0 }} aria-label={t('common.appName')}>
-            <span className="brand-mark">
-              <BrandMark />
-            </span>
-            <span className="word">{t('common.appName')}</span>
-          </Link>
-          <h1 style={{ fontSize: 22 }}>{t('login.title')}</h1>
-          <p className="sub">{t('login.subtitle')}</p>
-        </div>
+    <div className="grid min-h-dvh place-items-center bg-background px-4">
+      <div className="w-full max-w-sm">
+        <Card>
+          <CardBody className="flex flex-col gap-5 p-6">
+            <div>
+              <h1 className="text-lg font-semibold tracking-tight">{t('login.title')}</h1>
+              <p className="mt-1 text-sm text-muted-foreground">{t('login.subtitle')}</p>
+            </div>
 
-        {errors.form && <Alert tone="bad">{errors.form}</Alert>}
+            {error ? (
+              <Alert
+                tone="danger"
+                title={t(error === 'failed' ? 'login.failed' : 'errors.generic')}
+              />
+            ) : null}
 
-        <form className="stack" onSubmit={submit} noValidate>
-          <div className="field">
-            <label htmlFor="login-username">{t('login.username')}</label>
-            <input
-              id="login-username"
-              className={errors.username ? 'input invalid' : 'input'}
-              value={username}
-              autoComplete="username"
-              placeholder={t('login.usernamePlaceholder')}
-              aria-invalid={Boolean(errors.username)}
-              aria-describedby={errors.username ? 'login-username-error' : undefined}
-              onChange={(event) => {
-                setUsername(event.target.value)
-                if (errors.username) setErrors((previous) => ({ ...previous, username: undefined }))
-              }}
-            />
-            {errors.username && (
-              <span className="hint error" id="login-username-error">
-                {errors.username}
-              </span>
-            )}
-          </div>
+            <form className="flex flex-col gap-4" onSubmit={onSubmit} noValidate>
+              <Field
+                label={t('login.username')}
+                error={missing.username ? t('login.usernameRequired') : undefined}
+              >
+                {({ inputId, describedBy }) => (
+                  <Input
+                    id={inputId}
+                    aria-describedby={describedBy}
+                    invalid={Boolean(missing.username)}
+                    autoComplete="username"
+                    placeholder={t('login.usernamePlaceholder')}
+                    value={username}
+                    onChange={(event) => setUsername(event.target.value)}
+                  />
+                )}
+              </Field>
 
-          <div className="field">
-            <label htmlFor="login-password">{t('login.password')}</label>
-            <input
-              id="login-password"
-              type="password"
-              className={errors.password ? 'input invalid' : 'input'}
-              value={password}
-              autoComplete="current-password"
-              placeholder={t('login.passwordPlaceholder')}
-              aria-invalid={Boolean(errors.password)}
-              aria-describedby={errors.password ? 'login-password-error' : undefined}
-              onChange={(event) => {
-                setPassword(event.target.value)
-                if (errors.password) setErrors((previous) => ({ ...previous, password: undefined }))
-              }}
-            />
-            {errors.password && (
-              <span className="hint error" id="login-password-error">
-                {errors.password}
-              </span>
-            )}
-          </div>
+              <Field
+                label={t('login.password')}
+                error={missing.password ? t('login.passwordRequired') : undefined}
+              >
+                {({ inputId, describedBy }) => (
+                  <Input
+                    id={inputId}
+                    type="password"
+                    aria-describedby={describedBy}
+                    invalid={Boolean(missing.password)}
+                    autoComplete="current-password"
+                    placeholder={t('login.passwordPlaceholder')}
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
+                  />
+                )}
+              </Field>
 
-          <Button type="submit" loading={pending} style={{ width: '100%' }}>
-            {pending ? t('login.submitting') : t('login.submit')}
-          </Button>
-        </form>
+              <Button type="submit" busy={busy}>
+                {busy ? t('login.submitting') : t('login.submit')}
+              </Button>
+            </form>
 
-        {api.mode === 'mock' && <Alert tone="info">{t('login.mockHint')}</Alert>}
-
-        <p className="auth-foot">{t('login.noRegistration')}</p>
-        <p className="auth-foot">
-          <Link to="/">{t('login.backHome')}</Link>
-        </p>
+            <div className="flex flex-col gap-1 text-xs text-faint">
+              <p>{t('login.noRegistration')}</p>
+              <Link to="/" className="underline underline-offset-2">
+                {t('login.backHome')}
+              </Link>
+            </div>
+          </CardBody>
+        </Card>
       </div>
     </div>
   )

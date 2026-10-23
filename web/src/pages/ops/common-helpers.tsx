@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { ApiError } from '../../api'
 import { useI18n } from '../../i18n'
 import type { MessageKey } from '../../i18n/zh'
-import { Alert, Button, Modal } from '../../components/ui'
+import { Alert, Button, DialogContent } from '../../components/ui'
 
 /** 这几个状态码的正文是给调用方看的英文短句，换成我们自己的话。 */
 const LOCALIZED_WORDS: Partial<Record<number, MessageKey>> = {
@@ -95,23 +95,31 @@ export function useConfirm() {
   }
 
   const dialog = config ? (
-    <Modal
+    <DialogContent
+      open
+      onOpenChange={(open) => {
+        if (!open) close()
+      }}
+      size="sm"
       title={config.title}
-      onClose={close}
       footer={
         <>
           <Button variant="secondary" onClick={close} disabled={pending}>
             {t('common.cancel')}
           </Button>
-          <Button onClick={confirm} loading={pending} variant={config.danger ? 'danger' : 'primary'}>
+          <Button onClick={confirm} busy={pending} variant={config.danger ? 'danger' : 'primary'}>
             {config.label}
           </Button>
         </>
       }
     >
-      <p style={{ margin: '0 0 12px', color: 'var(--muted)' }}>{config.body}</p>
-      {error && <Alert tone="bad" title={error} />}
-    </Modal>
+      <div className="flex flex-col gap-3">
+        <p className="text-sm text-muted-foreground">{config.body}</p>
+        {error && (
+          <Alert tone="danger" title={error} />
+        )}
+      </div>
+    </DialogContent>
   ) : null
 
   return { request, dialog, pending }

@@ -15,7 +15,10 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "paths": {
+      "@lobehub-icons/*": ["./node_modules/@lobehub/icons/es/*"]
+    }
   },
   "include": ["src"]
 }

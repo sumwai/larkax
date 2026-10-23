@@ -114,15 +114,14 @@ func TestUsageRequestsLatestEventAndCostByStatus(t *testing.T) {
 				i, page.Requests[i].RequestID, want)
 		}
 	}
-	if page.More {
-		t.Error("恰好读完时 More 应当为 false")
+	if page.Total != int64(len(wantOrder)) {
+		t.Errorf("Total = %d，期望 %d", page.Total, len(wantOrder))
 	}
 
 	// 分页的两格都必须在真库上钉住：
 	//   - 给了 limit 就不能把整页都给回来。变异：`if limit > RequestPageMaxLimit`
 	//     的 `>` 改成 `<=`，小 limit 会被抬到上限 200，第一页就把 5 行全返回。
-	//   - 行数正好等于 limit 时 More 是 false。变异：`len(page.Requests) > limit`
-	//     的 `>` 改成 `>=`，那一格会误报「还有下一页」。
+	//   - Total 与当页多少行无关：limit 截断了行，总数仍是全量。
 	// 上界判据 `if limit > RequestPageMaxLimit` 的 `>` 改成 `>=` 是等价变异：
 	// limit 正好等于 RequestPageMaxLimit 时两版赋的是同一个常量。
 	half, err := s.UsageRequests(ctx, UsageRequestQuery{
@@ -131,9 +130,12 @@ func TestUsageRequestsLatestEventAndCostByStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("带 limit 的查询失败: %v", err)
 	}
-	if len(half.Requests) != 2 || !half.More {
-		t.Errorf("limit=2 时得到 %d 行、More=%v，期望 2 行且还有下一页",
-			len(half.Requests), half.More)
+	if len(half.Requests) != 2 {
+		t.Errorf("limit=2 时得到 %d 行，期望 2", len(half.Requests))
+	}
+	if half.Total != int64(len(wantOrder)) {
+		t.Errorf("half.Total = %d，期望 %d：Total 不随 limit 截断",
+			half.Total, len(wantOrder))
 	}
 	exact, err := s.UsageRequests(ctx, UsageRequestQuery{
 		UserID: userID, From: window.From, To: window.To, Limit: len(wantOrder),
@@ -141,9 +143,9 @@ func TestUsageRequestsLatestEventAndCostByStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("limit 等于行数时查询失败: %v", err)
 	}
-	if len(exact.Requests) != len(wantOrder) || exact.More {
-		t.Errorf("limit=%d 时得到 %d 行、More=%v，期望正好读完且没有下一页",
-			len(wantOrder), len(exact.Requests), exact.More)
+	if len(exact.Requests) != len(wantOrder) || exact.Total != int64(len(wantOrder)) {
+		t.Errorf("limit=%d 时得到 %d 行、Total=%d，期望正好读完",
+			len(wantOrder), len(exact.Requests), exact.Total)
 	}
 
 	settled := page.Requests[4]
@@ -262,27 +264,27 @@ func TestUsageRequestsCursorWalksAllRows(t *testing.T) {
 	}
 
 	window := usageWindow(t, userID)
-	query := UsageRequestQuery{
+	base := UsageRequestQuery{
 		UserID: userID, From: window.From, To: window.To, Limit: 2,
 	}
 
 	var walked []string
-	for page := 0; ; page++ {
-		if page > 5 {
+	for pageNum := 1; ; pageNum++ {
+		if pageNum > 5 {
 			t.Fatal("翻页没有终止")
 		}
+		query := base
+		query.Page = pageNum
 		result, err := s.UsageRequests(ctx, query)
 		if err != nil {
-			t.Fatalf("第 %d 页失败: %v", page, err)
+			t.Fatalf("第 %d 页失败: %v", pageNum, err)
 		}
 		for _, row := range result.Requests {
 			walked = append(walked, row.RequestID)
 		}
-		if !result.More {
+		if int64(pageNum*2) >= result.Total {
 			break
 		}
-		last := result.Requests[len(result.Requests)-1]
-		query.Cursor = &RequestCursor{StartedAt: last.StartedAt, ID: last.ID}
 	}
 
 	if len(walked) != len(ids) {

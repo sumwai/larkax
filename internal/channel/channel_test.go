@@ -382,3 +382,42 @@ func TestIsEmbeddedErrorRetryable(t *testing.T) {
 		})
 	}
 }
+
+func TestEndsWithToolResult(t *testing.T) {
+	t.Parallel()
+	toolResult := func() []ContentBlock {
+		return []ContentBlock{{Type: "tool_result", ToolUseID: "tu_1", Text: "42"}}
+	}
+	cases := []struct {
+		name string
+		req  Request
+		want bool
+	}{
+		{"no messages", Request{}, false},
+		{"plain user text", Request{Messages: []Message{
+			{Role: "user", Content: []ContentBlock{{Type: "text", Text: "hi"}}},
+		}}, false},
+		{"pure tool result tail", Request{Messages: []Message{
+			{Role: "assistant", Content: []ContentBlock{{Type: "tool_use", ToolUseID: "tu_1"}}},
+			{Role: "tool", Content: toolResult()},
+		}}, true},
+		// 块后面跟了正文的：那已经是调用方的补充说明，不算结果回填。
+		{"tool result followed by text", Request{Messages: []Message{
+			{Role: "tool", Content: append(toolResult(), ContentBlock{Type: "text", Text: "我认为"})},
+		}}, false},
+		{"parallel results merged", Request{Messages: []Message{
+			{Role: "tool", Content: append(toolResult(), ContentBlock{
+				Type: "tool_result", ToolUseID: "tu_2", Text: "43",
+			})},
+		}}, true},
+		{"empty content", Request{Messages: []Message{{Role: "tool"}}}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := c.req.EndsWithToolResult(); got != c.want {
+				t.Fatalf("EndsWithToolResult() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}

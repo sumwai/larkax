@@ -1,122 +1,86 @@
 import { Link } from 'react-router-dom'
-import { api } from '../api'
-import { useAuth } from '../auth/AuthProvider'
-import { useSite } from '../site/SiteProvider'
 import { useI18n } from '../i18n'
-import type { MessageKey } from '../i18n/zh'
-import { useAsync } from '../hooks/useAsync'
-import { formatMoney, moneySymbol } from '../lib/format'
-import { BrandMark } from '../components/icons'
+import { useSite } from '../site/SiteProvider'
 import { useDocumentTitle } from '../components/PageTitle'
-import { CopyButton } from '../components/ui'
+import { Badge, Card, CardBody, CopyButton, buttonVariants } from '../components/ui'
 
+/**
+ * 单页落地页：没有路由、没有数据依赖，只读 token。
+ * 三块内容——标题与入口、API base URL、三条能力说明。
+ */
 export function Landing() {
   const { t } = useI18n()
-  useDocumentTitle(t('landing.title'))
   const { meta } = useSite()
-  const { status } = useAuth()
-  const signedIn = status === 'authenticated'
-  const { data: models } = useAsync(() => api.models(), [])
-  const preview = (models?.items ?? []).filter((model) => model.pricing).slice(0, 4)
-  const symbol = moneySymbol(meta.currency)
+
+  useDocumentTitle(`${t('landing.title')} · ${t('common.appName')}`)
 
   return (
-    <div className="landing">
-      <header className="landing-nav">
-        <Link to="/" className="brand" aria-label={t('common.appName')}>
-          <span className="brand-mark">
-            <BrandMark />
-          </span>
-          <span className="word">{t('common.appName')}</span>
-        </Link>
-        <nav className="links" aria-label={t('common.console')}>
-          <a href="#features">{t('landing.navFeatures')}</a>
-          <a href="#pricing">{t('landing.navModels')}</a>
-          <a href="https://docs.larkax.com" target="_blank" rel="noreferrer">
-            {t('landing.navDocs')}
-          </a>
+    <div className="flex min-h-dvh flex-col bg-background">
+      <header className="mx-auto flex w-full max-w-(--content-max) items-center gap-2 px-4 py-4">
+        <span
+          aria-hidden="true"
+          className="flex size-7 items-center justify-center rounded-xs bg-primary font-mono text-xs font-semibold text-primary-foreground"
+        >
+          lx
+        </span>
+        <span className="text-md font-semibold tracking-tight">{t('common.appName')}</span>
+        <nav className="ml-auto flex items-center gap-2">
+          <Link to="/login" className={buttonVariants({ variant: 'ghost' })}>
+            {t('landing.ctaLogin')}
+          </Link>
         </nav>
-        <div className="spacer" />
-        <Link className={signedIn ? 'btn' : 'btn secondary'} to={signedIn ? '/app' : '/login'}>
-          {signedIn ? t('common.console') : t('login.submit')}
-        </Link>
       </header>
 
-      <main className="landing-main">
-        <section className="hero">
-          <span className="eyebrow">{t('landing.eyebrow')}</span>
-          <h1>{t('landing.title')}</h1>
-          <p className="sub">{t('landing.subtitle')}</p>
-          <div className="hero-actions">
-            <Link className="btn" to={signedIn ? '/app' : '/login'}>
-              {signedIn ? t('common.console') : t('landing.ctaLogin')}
+      <main className="mx-auto flex w-full max-w-(--content-max) flex-1 flex-col items-center justify-center px-4 pb-16">
+        <section className="max-w-xl py-10 text-center">
+          <Badge>{t('landing.eyebrow')}</Badge>
+          <h1 className="mt-4 text-2xl font-semibold tracking-tight text-balance">
+            {t('landing.title')}
+          </h1>
+          <p className="mt-3 text-base text-muted-foreground">{t('landing.subtitle')}</p>
+          <div className="mt-6 flex justify-center">
+            <Link to="/login" className={buttonVariants({ size: 'lg' })}>
+              {t('landing.ctaLogin')}
             </Link>
-            <Link className="btn secondary" to="/app/models">
-              {t('landing.ctaModels')}
-            </Link>
-          </div>
-          <div className="base-url-box">
-            <span className="tiny">{t('landing.baseUrlLabel')}</span>
-            <div className="copyrow">
-              <span className="copyfield mono">{meta.api_base_url}</span>
-              <CopyButton text={meta.api_base_url} />
-            </div>
-            <span className="hint">{t('landing.baseUrlHint')}</span>
           </div>
         </section>
 
-        <section id="features" className="feature-grid">
+        <Card className="w-full max-w-md">
+          <CardBody className="flex flex-col gap-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-caps text-muted-foreground">{t('landing.baseUrlLabel')}</span>
+              <CopyButton
+                value={meta.api_base_url}
+                label={t('common.copy')}
+                copiedLabel={t('common.copied')}
+              />
+            </div>
+            <span className="mono truncate text-sm">{meta.api_base_url}</span>
+            <p className="text-xs text-faint">{t('landing.baseUrlHint')}</p>
+          </CardBody>
+        </Card>
+
+        <section className="mt-8 grid w-full gap-4 sm:grid-cols-3">
           {(
             [
               ['landing.feature1Title', 'landing.feature1Body'],
               ['landing.feature2Title', 'landing.feature2Body'],
               ['landing.feature3Title', 'landing.feature3Body'],
-            ] as Array<[MessageKey, MessageKey]>
-          ).map(([title, body]) => (
-            <article key={title} className="card feature">
-              <h3>{t(title)}</h3>
-              <p>{t(body)}</p>
-            </article>
+            ] as const
+          ).map(([titleKey, bodyKey]) => (
+            <Card key={titleKey}>
+              <CardBody className="flex flex-col gap-1.5">
+                <h2 className="text-md font-semibold tracking-tight">{t(titleKey)}</h2>
+                <p className="text-sm text-muted-foreground">{t(bodyKey)}</p>
+              </CardBody>
+            </Card>
           ))}
-        </section>
-
-        <section id="pricing" className="card panel">
-          <div className="head">
-            <div>
-              <h2>{t('landing.navModels')}</h2>
-              <p>{t('models.subtitle')}</p>
-            </div>
-            <Link className="btn secondary sm" to="/app/models">
-              {t('landing.ctaModels')}
-            </Link>
-          </div>
-          {preview.length > 0 && (
-            <div className="price-strip">
-              {preview.map((model) => (
-                <div key={model.name} className="price-item">
-                  <span className="mono tiny">{model.name}</span>
-                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                    <span className="tiny">{t('models.inputPrice')}</span>
-                    <b className="num">
-                      {symbol}
-                      {formatMoney(model.pricing?.input_per_mtok)}
-                    </b>
-                  </div>
-                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                    <span className="tiny">{t('models.outputPrice')}</span>
-                    <b className="num">
-                      {symbol}
-                      {formatMoney(model.pricing?.output_per_mtok)}
-                    </b>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
         </section>
       </main>
 
-      <footer className="site-footer">{t('landing.footer')}</footer>
+      <footer className="border-t border-border px-4 py-6 text-center text-xs text-faint">
+        {t('landing.footer')}
+      </footer>
     </div>
   )
 }
