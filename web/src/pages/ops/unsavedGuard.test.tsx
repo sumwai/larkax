@@ -269,6 +269,23 @@ describe('未保存改动的两个出口', () => {
     fireEvent.change(screen.getByLabelText('字段'), { target: { value: '改了' } })
     expect(dispatchBeforeUnload().defaultPrevented).toBe(true)
   })
+
+  it('测试环境之外没有 provider 要抛错：静默退化成「永不脏」会丢表单', () => {
+    // 裸渲染时少一层 provider 是一种便利；但在开发与生产里，缺了它等于每一页
+    // 都「没改过」——会话失效时表单被直接丢掉，而界面上看不出任何异常。
+    vi.stubEnv('MODE', 'production')
+    try {
+      expect(() =>
+        render(
+          <I18nProvider>
+            <TestForm />
+          </I18nProvider>,
+        ),
+      ).toThrow(/UnsavedGuardProvider/)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
 })
 
 /**

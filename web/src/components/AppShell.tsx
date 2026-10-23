@@ -152,7 +152,7 @@ function initials(name: string | null | undefined): string {
 
 export function AppShell() {
   const { t } = useI18n()
-  const { user, logout } = useAuth()
+  const { user, logout, sessionExpired } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
   const narrow = useIsNarrow()
@@ -170,15 +170,22 @@ export function AppShell() {
   const mainRef = useRef<HTMLElement | null>(null)
   const collapsed = narrow || (short ? !shortExpanded : manualCollapsed)
 
-  const views = viewsFor(user?.role)
+  // 会话过期那一刻 `user` 先变成 null。门槛故意把页面留在原地（见 `RequireAuth`），
+  // 侧栏不能反过来切回「用户」视图——那看起来就像被踢到了另一个页面，管理员还会
+  // 丢掉自己那一组导航。记住最后一次非空角色，过期期间沿用它。
+  const lastRoleRef = useRef(user?.role)
+  if (user?.role) lastRoleRef.current = user.role
+  const role = user?.role ?? (sessionExpired ? lastRoleRef.current : undefined)
+
+  const views = viewsFor(role)
   const routeView = viewOfPath(location.pathname)
   // 地址栏可以直接敲进账号没有的视图：那一页画的是无权限，侧栏也不该把那一组
   // 入口列出来。可用的视图与切换器同源，不另写一份角色判断。
-  const allowed = viewAllowed(user?.role, location.pathname)
+  const allowed = viewAllowed(role, location.pathname)
   const view = allowed ? routeView : views[views.length - 1]
   // 管理员的商家视图只有「两种主语」的那三页；渠道与计价写的是「你名下」，
   // 管理员进那一组只会看到错的主语，所以不列链接（直接敲地址仍落到无权限）。
-  const siteWide = subjectOf(user?.role) === 'site'
+  const siteWide = subjectOf(role) === 'site'
   const merchantItems = siteWide
     ? OPS_NAV.merchant.filter((item) => isSharedMerchantPath(item.to))
     : OPS_NAV.merchant
