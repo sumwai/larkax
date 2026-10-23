@@ -98,6 +98,35 @@ func (h *Handler) serveDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 入站别名在**这里**解析一次，之后选路、计费与回显各取自己那一侧的名字。
+	//
+	// # 位置的两侧约束
+	//
+	//   - **不能更早**：Validate 与 rejectDecision 报的是**请求本身**的问题
+	//     （字段名指向调用方写的那个字段，回的是 400），而解析失败回的是 500。
+	//     解析排在前面时，一个 model 为空的请求会先撞上「模型名为空」拿到 500，
+	//     而不是「model is required」拿到 400——调用方于是以为是我们坏了。
+	//     另外，字段都不全的请求也不值得为它多一次查询。
+	//   - **不能更晚**：decideBillingRequest 与 Decider.Decide 都要规范名。
+	//
+	// 这条表面没有幂等（见本函数注释），所以不存在 chat 那条路上「解析必须
+	// 排在幂等指纹之前」的约束——这里没有指纹。
+	//
+	// requested 是不可变的值：decision.Model 在下面被改成规范名，而回显要的
+	// 是调用方原来写的那个。
+	requested := decision.Model
+	if h.Inbound != nil {
+		canonical, err := h.Inbound.ResolveInbound(r.Context(), requested)
+		if err != nil {
+			// 与 chat 那条同一个处置：**不吞成原样放行**。那会把别名当成一个
+			// 不存在的模型去选路，症状是「查无此模型」，排查方向整个指向另一边。
+			observe.FromContext(r.Context()).Error("解析入站别名失败", "err", err)
+			writeError(w, systemoneErrorProtocol, http.StatusInternalServerError, "internal error")
+			return
+		}
+		decision.Model = canonical
+	}
+
 	requestID := requestIDOf(r)
 	req := h.decideBillingRequest(user, decision, requestID)
 
@@ -120,7 +149,8 @@ func (h *Handler) serveDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rendered, err := renderDecision(decision.Model, res.Response)
+	// 回显调用方写的名字，不是 decision.Model（那已经是规范名了）。
+	rendered, err := renderDecision(requested, res.Response)
 	if err != nil {
 		observe.FromContext(r.Context()).Error("渲染决策响应失败", "err", err)
 		writeError(w, systemoneErrorProtocol, http.StatusInternalServerError, "internal error")
@@ -161,8 +191,10 @@ func (h *Handler) decideBillingRequest(user User, decision *systemone.Request, r
 		APIKeyID:  user.KeyID,
 		Asset:     h.DefaultAsset,
 
-		// CanonicalModel 是**调用方要的那个**名字。上游名由选路层按选中的
-		// 渠道翻出来，与 chat 那条路逐字相同。
+		// CanonicalModel 是**入站解析之后的规范名**：别名已经翻成它指向的
+		// 那个模型。上游名由选路层按选中的渠道翻出来，与 chat 那条路逐字
+		// 相同。它与响应体里回显的名字是两件事——那里回显的是调用方写的
+		// 原名，两者只在请求用了入站别名时不同（见 renderDecision）。
 		CanonicalModel: decision.Model,
 		InputTokens:    systemone.MaxInputTokens,
 		MaxTokens:      systemone.MaxOutputTokens,
@@ -177,10 +209,11 @@ func (h *Handler) decideBillingRequest(user User, decision *systemone.Request, r
 
 // renderDecision 把决策响应渲染成回给调用方的 JSON。
 //
-// 报给调用方的模型名是**他要的那个**，不是上游回报的那个：上游名是我们与
-// 上游之间的事（见 internal/gateway 的 DecideResult.UpstreamModel，它记的是
-// 实际用了哪个），而调用方按自己请求里的名字理解响应。与 chat 那条路
-// （renderSuccess）同一个取舍。
+// 报给调用方的模型名是**他要的那个**（入站解析之前的原名），不是上游回报的
+// 那个，也不是解析之后的规范名：上游名是我们与上游之间的事（见
+// internal/gateway 的 DecideResult.UpstreamModel，它记的是实际用了哪个），
+// 而规范名是我们内部的名字。调用方按自己请求里的名字理解响应。与 chat 那条
+// 路（renderSuccess）同一个取舍。
 func renderDecision(model string, resp *systemone.Response) ([]byte, error) {
 	if model == "" {
 		return nil, errors.New("缺少要回给调用方的模型名")

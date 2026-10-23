@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -42,6 +43,12 @@ func (f *fakeInbound) ResolveInbound(_ context.Context, name string) (string, er
 	f.seen = append(f.seen, name)
 	if f.err != nil {
 		return "", f.err
+	}
+	// 与 catalog.ResolveInbound 同一个契约：空名字是错误，不是「没命中」。
+	// 少了这一条，下面那条位置用例就没有对手——真实实现拒空名、桩却放行，
+	// 桩上的位置判据于是什么都证明不了。
+	if name == "" {
+		return "", errors.New("模型名为空")
 	}
 	if canonical, ok := f.aliases[name]; ok {
 		return canonical, nil
@@ -258,5 +265,128 @@ func TestInboundAliasSurvivesIdempotencyRetry(t *testing.T) {
 	}
 	if resp.Model != "fast" {
 		t.Errorf("响应体的 model = %q，期望 fast", resp.Model)
+	}
+}
+
+// ── /v1/systemone ──────────────────────────────────────────────────────
+//
+// 决策表面是**第四条**按模型名选路并计费的入口，但它不走 serve 而是走
+// serveDecision，所以解析要在那里单独接一次。少了这一处，同一个别名在三条
+// chat 路径上能解析、在这条上不能——配了却不生效，而且只在一条表面上现形。
+
+// decisionBodyFor 造一条决策请求体，只让调用方改模型名。
+func decisionBodyFor(model string) string {
+	return `{"model":` + strconv.Quote(model) + `,
+		"state": "工单: 用户说付款后没到账",
+		"questions": {"q": {"type": "noul", "instructions": "这是账单问题吗"}}}`
+}
+
+// 别名请求在决策表面上：选路与计费拿规范名，响应回显调用方写的名字。
+//
+// 两半一起断言，与 chat 那条同一个理由：只断上游收到规范名，会放过「响应
+// 也回了规范名」；只断回显，会放过「选路还按别名走」。
+func TestSystemOneResolvesInboundAlias(t *testing.T) {
+	h, d := newDecisionHandler()
+	h.Inbound = &fakeInbound{aliases: map[string]string{"fast": "m-1"}}
+
+	rec := post(h, PathSystemOne, decisionBodyFor("fast"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
+	}
+	if d.calls != 1 {
+		t.Fatalf("决策执行器被调了 %d 次，期望 1", d.calls)
+	}
+
+	// 选路用的就是 CanonicalModel（见 gateway.Decide），所以它必须是规范名。
+	if got := d.req.CanonicalModel; got != "m-1" {
+		t.Errorf("计费与选路用的规范名 = %q，期望 m-1：拿到 fast 说明这条表面没解析别名",
+			got)
+	}
+	// 上游收到的决策请求里的模型名同样是规范名。
+	if got := d.decision.Model; got != "m-1" {
+		t.Errorf("发给上游的模型名 = %q，期望规范名 m-1", got)
+	}
+
+	var resp struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("响应体不是合法 JSON: %v\n%s", err, rec.Body)
+	}
+	if resp.Model != "fast" {
+		t.Errorf("响应体的 model = %q，期望调用方写的 %q：别名存在的意义就是客户端有一个稳定的名字",
+			resp.Model, "fast")
+	}
+}
+
+// 没装解析器时这条表面的行为与别名出现之前逐字相同。
+func TestSystemOneWithoutInboundKeepsRequestName(t *testing.T) {
+	h, d := newDecisionHandler()
+
+	rec := post(h, PathSystemOne, decisionBodyFor("decision-model"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
+	}
+	if got := d.req.CanonicalModel; got != "decision-model" {
+		t.Errorf("规范名 = %q，期望请求里那个 decision-model", got)
+	}
+	if got := d.decision.Model; got != "decision-model" {
+		t.Errorf("发给上游的模型名 = %q，期望 decision-model", got)
+	}
+
+	var resp struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("响应体不是合法 JSON: %v\n%s", err, rec.Body)
+	}
+	if resp.Model != "decision-model" {
+		t.Errorf("响应体的 model = %q，期望 decision-model", resp.Model)
+	}
+}
+
+// 解析失败在决策表面上同样 fail closed：500、不调上游、不回退成原样。
+func TestSystemOneResolveFailureFailsClosed(t *testing.T) {
+	h, d := newDecisionHandler()
+	inbound := &fakeInbound{aliases: map[string]string{"fast": "m-1"}}
+	inbound.err = errors.New("库连不上")
+	h.Inbound = inbound
+
+	rec := post(h, PathSystemOne, decisionBodyFor("fast"))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("状态码 = %d，期望 500（响应体 %s）", rec.Code, rec.Body)
+	}
+	if d.calls != 0 {
+		t.Error("解析失败时上游不该被调到：那意味着请求被原样放行了")
+	}
+	if strings.Contains(rec.Body.String(), "库连不上") {
+		t.Errorf("响应体带上了内部细节: %s", rec.Body)
+	}
+}
+
+// 解析排在 Validate **之后**：缺 model 的请求拿 400，不是解析层的 500。
+//
+// 挪到前面时，一个 `model: ""` 的请求会先被解析层拒成 500（空名字是错误），
+// 调用方看到的是「网关坏了」，而真正的原因是它自己少写了一个字段——两种结论
+// 的下一步完全不同。
+func TestSystemOneValidatesBeforeResolving(t *testing.T) {
+	h, d := newDecisionHandler()
+	inbound := &fakeInbound{aliases: map[string]string{"fast": "m-1"}}
+	h.Inbound = inbound
+
+	body := `{"state":"s","questions":{"q":{"type":"noul","instructions":"i"}}}`
+	rec := post(h, PathSystemOne, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("状态码 = %d，期望 400「model is required」（响应体 %s）——500 说明解析"+
+			"排在了 Validate 前面", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "model is required") {
+		t.Errorf("响应体 = %s，期望点名 model 这个字段", rec.Body)
+	}
+	if inbound.calls != 0 {
+		t.Errorf("解析被调用 %d 次，期望 0 次：字段都不全的请求不该为它多一次查询", inbound.calls)
+	}
+	if d.calls != 0 {
+		t.Error("校验没过的请求调到了上游")
 	}
 }

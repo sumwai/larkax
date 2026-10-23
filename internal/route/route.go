@@ -1512,8 +1512,9 @@ func (r *Router) Chat(ctx context.Context, exec Executor, req *channel.Request, 
 // # 规范名在这里翻成上游名
 //
 // 每个候选在被执行**之前**按它自己的渠道翻一次（见 upstreamRequest），
-// 所以决策者看到的是规范名（那是调用方要的名字），上游收到的是上游名。
-// 翻不出来时这次请求失败，不换下一个候选——见 chatWithPlan。
+// 所以决策者看到的是规范名（入站解析之后的名字，不是调用方写的原名），
+// 上游收到的是上游名。翻不出来时这次请求失败，不换下一个候选——见
+// chatWithPlan。
 func (r *Router) ChatPlan(ctx context.Context, exec Executor, req *channel.Request, plan Plan, pinChannelID int64) (*Result, error) {
 	return r.chatWithPlan(ctx, exec, req, plan.pinFirst(pinChannelID))
 }

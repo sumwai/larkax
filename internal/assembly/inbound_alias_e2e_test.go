@@ -102,6 +102,113 @@ func TestInboundAliasEndToEnd(t *testing.T) {
 	if !bill.upstreamModel.Valid || bill.upstreamModel.String != upstreamName {
 		t.Errorf("账单的 upstream_model = %+v，期望 %q", bill.upstreamModel, upstreamName)
 	}
+
+	// 四、用量事件那一列与账单同源，也要一起看：它是按模型归因的对外口径，
+	// 而两张表分两处写（见 insertUsageEventSQL），只断言其中一张时另一张
+	// 写错名字不会有任何用例变红。
+	var usageModel string
+	if err := db.QueryRowContext(ctx, `
+		SELECT canonical_model FROM usage_events WHERE request_id = $1`,
+		bill.requestID).Scan(&usageModel); err != nil {
+		t.Fatalf("读用量事件失败: %v", err)
+	}
+	if usageModel != model {
+		t.Errorf("usage_events.canonical_model = %q，期望规范名 %q", usageModel, model)
+	}
+}
+
+// 决策表面（/v1/systemone）同样解析入站别名，一对断言钉住两侧。
+//
+// # 为什么这条必须单独有
+//
+// 解析接在 serve 与 serveDecision 两处，而 chat 那条路径的端到端用例
+// （TestInboundAliasEndToEnd）只覆盖前一处。少了这条，`/v1/systemone` 上
+// 「配了别名却不生效」不会有任何用例变红——那是四条入口里唯一一条会
+// 静默退化的。
+//
+// # 判据落在两侧，缺一不可
+//
+// 一、回显：响应体的 model 是**调用方写的别名**；
+// 二、记账：usage_events 的 canonical_model 是**规范名**。
+//
+// 只断回显，会放过「选路与计费还按别名走」；只断记账，会放过「响应回了
+// 规范名」——两边都要，与 chat 那条同一个理由。
+func TestInboundAliasOnDecisionSurface(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+
+	model := unique("e2e-inbound-decision")
+	alias := "short-" + model
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, "100")
+	key := issueKey(t, db, user)
+
+	fake := &systemoneUpstream{
+		db: db, userID: user, model: model,
+		inputTokens: 387, outputTokens: 72,
+	}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	// 渠道与计价规则都挂在**规范名**上：别名只是入口那一层的翻译。
+	seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL, model, "systemone", 0)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+	seedCatalogModel(t, db, model)
+	seedInboundAlias(t, db, alias, model)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	status, body := postChat(ctx, t, public.URL+"/v1/systemone", key, decisionBody(alias))
+	if status != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200。响应体：%s", status, body)
+	}
+
+	// 一、回显调用方写的别名。
+	var got struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v\n%s", err, body)
+	}
+	if got.Model != alias {
+		t.Errorf("响应里的 model = %q，期望调用方写的 %q：拿到规范名说明这条表面回显了"+
+			"内部的名字", got.Model, alias)
+	}
+
+	// 二、记账按规范名。
+	bill := waitForBillingStatus(t, db, user, "settled")
+	if bill.canonicalModel != model {
+		t.Errorf("账单的 canonical_model = %q，期望规范名 %q：用量按规范名记，"+
+			"否则同一份用量会因为客户端写短名还是全名分成两行", bill.canonicalModel, model)
+	}
+
+	// 用量事件那一列与账单同源，也要一起看：它是按模型归因的对外口径。
+	var usageModel string
+	if err := db.QueryRowContext(ctx, `
+		SELECT canonical_model FROM usage_events WHERE request_id = $1`,
+		bill.requestID).Scan(&usageModel); err != nil {
+		t.Fatalf("读用量事件失败: %v", err)
+	}
+	if usageModel != model {
+		t.Errorf("usage_events.canonical_model = %q，期望规范名 %q", usageModel, model)
+	}
+
+	// 上游收到的是规范名：这条表面没有出站映射，所以规范名就是发出去的名字。
+	// 拿到别名说明解析没生效，请求是按一个不存在的模型发出去的。
+	_, _, _, bodies, _ := fake.snapshot()
+	var sent struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(bodies[0], &sent); err != nil {
+		t.Fatalf("上游收到的请求体不是合法 JSON: %v\n%s", err, bodies[0])
+	}
+	if sent.Model != model {
+		t.Errorf("上游收到的 model = %q，期望规范名 %q", sent.Model, model)
+	}
 }
 
 // 别名表为空时网关行为与今天完全一致。
