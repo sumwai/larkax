@@ -289,8 +289,10 @@ func TestModelOnboardDryRunWritesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("干跑失败: %v", err)
 	}
-	if !strings.Contains(out, "干跑，未写入") {
-		t.Fatalf("干跑输出没有写「干跑，未写入」：%q", out)
+	// 断共用常量而不是抄一句字面量：尾注只有 dryrun.go 那一份，抄一遍会在
+	// 改文案时静默失配。
+	if !strings.Contains(out, dryRunNote) {
+		t.Fatalf("干跑输出没有写尾注 %q：%q", dryRunNote, out)
 	}
 	if after := onboardSnapshot(t, db, canonical, channelID); before != after {
 		t.Fatalf("干跑改动了库：\n之前 %s\n之后 %s", before, after)

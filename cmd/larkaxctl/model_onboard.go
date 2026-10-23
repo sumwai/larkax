@@ -220,6 +220,10 @@ func onboardInTx(ctx context.Context, db *sql.DB, tx *sql.Tx, opts onboardOption
 	// 不另写一条 UPDATE channels 的原因：白名单的归一化、端点校验（新挂进来的
 	// 模型是否服务得了这条渠道的协议）都在 channels.Admin.Update 里，绕过去
 	// 等于把那些判据漏掉。
+	// sealer 与 registry 传 nil：本命令只改 models，channels.Update 只会走
+	// 白名单那一支——type / protocols 与凭证才需要它们，而 checkModelEndpoints
+	// 读的是内嵌的 catalog（已指向同一个 tx）。以后给 onboard 加 --type 或
+	// --credential-* 时，这里要按那一支补齐，否则会撞上 nil。
 	chAdmin := channels.NewAdminInTx(tx, nil, nil)
 	channel, err := chAdmin.Get(ctx, opts.ChannelID)
 	if err != nil {
@@ -405,8 +409,9 @@ func costRuleIDs(rules []pricing.CostInfo) string {
 
 // printOnboardReport 打印每一步实际做了什么。
 //
-// 干跑与真跑打同一份报告，只在末尾多一句「干跑，未写入」：两者走的是同一条
-// 写路径，报告若长得不一样，读的人就分不清「这次会这么改」与「已经这么改了」。
+// 干跑与真跑打同一份报告，只在末尾多一句共用的干跑尾注（printDryRunNote）：
+// 两者走的是同一条写路径，报告若长得不一样，读的人就分不清「这次会这么改」与
+// 「已经这么改了」。
 func printOnboardReport(w io.Writer, opts onboardOptions, report onboardReport) {
 	_, _ = fmt.Fprintf(w, "模型目录：%s\n", report.Model)
 	_, _ = fmt.Fprintf(w, "渠道 %d 的 models：%s\n", opts.ChannelID, report.Channel)
@@ -414,6 +419,7 @@ func printOnboardReport(w io.Writer, opts onboardOptions, report onboardReport) 
 	_, _ = fmt.Fprintf(w, "计价规则：%s\n", report.Price)
 	_, _ = fmt.Fprintf(w, "成本规则：%s\n", report.Cost)
 	if opts.DryRun {
-		_, _ = fmt.Fprintln(w, "干跑，未写入。")
+		// 尾注只有 dryrun.go 那一份：同一句话写两遍，改的时候就会漏掉一处。
+		printDryRunNote(w)
 	}
 }
