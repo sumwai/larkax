@@ -123,10 +123,7 @@ function RequireView({ view, children }: { view: View; children: ReactNode }) {
   const { pathname } = useLocation()
   // 判定按地址走：商家视图里那三页是「同一批页面、两种主语」，管理员也进得去；
   // 渠道与计价仍然只对商家开放，所以不能只看传进来的视图名。
-  if (
-    !sessionExpired &&
-    (viewOfPath(pathname) !== view || !viewAllowed(user?.role, pathname))
-  ) {
+  if (!sessionExpired && (viewOfPath(pathname) !== view || !viewAllowed(user?.role, pathname))) {
     return (
       <Alert tone="bad" title={t('ops.noAccess')}>
         {t('ops.noAccessNext')}{' '}

@@ -49,6 +49,18 @@ const SESSION = {
 
 const expired = () => respond(401, { error: { code: 'unauthenticated' } })
 
+/** 同一个地址、换一个低权限账号登录：用来验「过期期间放行的那段门槛能收回来」。 */
+const MERCHANT_SESSION = {
+  ...SESSION,
+  user: {
+    ...SESSION.user,
+    id: 2,
+    username: 'merchant-account',
+    display_name: 'merchant-account',
+    role: 'merchant',
+  },
+}
+
 /**
  * 打开设置页、改一格显示名，再让下一次「保存账户信息」拿到 401。
  *
@@ -187,6 +199,38 @@ describe('会话失效的端到端路径', () => {
 
     expect(window.location.pathname).toBe('/app/admin/settings')
     expect(screen.getByLabelText('显示名')).toHaveValue('换了个名字')
+  })
+
+  it('过期期间留在 admin 页，再登录成低权限账号：admin 页重新被角色门槛挡住', async () => {
+    await dirtySettings(expired, '/app/admin/settings')
+    fireEvent.click(screen.getByRole('button', { name: '保存账户信息' }))
+    const dialog = await screen.findByRole('dialog', { name: '会话已过期' })
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    // 走用户真会走的那条路：横幅上的「去登录」，再在登录页填表。这里不再给
+    // 保存请求造 401——这一段要验的是登录之后的角色判定。
+    state.fetchImpl.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/auth/session')) return respond(200, SESSION)
+      if (url.endsWith('/auth/login')) return respond(200, MERCHANT_SESSION)
+      return respond(200, [])
+    })
+    fireEvent.click(screen.getByRole('button', { name: '去登录' }))
+    await waitFor(() => expect(window.location.pathname).toBe('/login'))
+
+    fireEvent.change(await screen.findByLabelText('用户名'), {
+      target: { value: 'merchant-account' },
+    })
+    fireEvent.change(screen.getByLabelText('口令'), { target: { value: 'a-long-password' } })
+    fireEvent.click(screen.getByRole('button', { name: '登录' }))
+
+    // 登录后的回跳地址仍是原来的 admin 页；这里断的是「那一页没有被画出来」，
+    // 不是某一句文案：表单不在、门槛的无权限提示在。过期期间那段放行必须随
+    // 登录一起收回——它靠的是 `sessionExpired`，不是「这个人进过一次就永远放行」。
+    await waitFor(() => expect(window.location.pathname).toBe('/app/admin/settings'))
+    expect(screen.queryByLabelText('显示名')).not.toBeInTheDocument()
+    expect(screen.getByText('这个视图不在你的权限范围内。')).toBeInTheDocument()
   })
 
   it('留下之后再发一次 401：不再弹框，填的内容还在', async () => {
