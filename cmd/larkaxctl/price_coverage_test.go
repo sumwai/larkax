@@ -39,7 +39,8 @@ func TestPriceCoverageHintNamesMissingItems(t *testing.T) {
 		t.Errorf("提示里没有逐字写出缺的三个计价项：\n%s", hint)
 	}
 	const want = `提示：这条规则没有覆盖 3 个计价项的单价：cache_read、cache_write、reasoning。
-上游报了这几项用量时，那一笔请求会整笔失败（调用方拿到 500，服务端日志里是「用量里有规则未定价的计量项」）。
+上游报了这几项用量时，这一笔的结算会失败：非流式请求，调用方拿到 500；
+流式请求的流已经推出去，失败只落在服务端日志里（「用量里有规则未定价的计量项」）。
 用不到就把单价显式写成 0——写 0 是「免费」，与「没写」不是一回事。
 `
 	if hint != want {

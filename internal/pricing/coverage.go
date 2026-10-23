@@ -43,9 +43,11 @@ func UncoveredScheduleTokenItems(s *Schedule) ([]string, error) {
 
 // missingTokenItems 从已声明的键里找出漏掉的 token 计价项。
 //
-// 顺序由 billing.TokenSlots 决定，调用方不必再排一次。
+// 顺序由 billing.TokenSlots 决定，调用方不必再排一次。全部覆盖时返回
+// 长度为零的切片（而不是 nil）：调用方只管看长度，两种形态的意义相同，
+// 但「空切片」与注释里说的那件事一致。
 func missingTokenItems(declared map[string]struct{}) []string {
-	var missing []string
+	missing := make([]string, 0, len(billing.TokenSlots))
 	for _, slot := range billing.TokenSlots {
 		if _, ok := declared[slot.Name]; !ok {
 			missing = append(missing, slot.Name)
