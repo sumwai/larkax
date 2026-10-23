@@ -81,10 +81,10 @@ func runModelAlias(args []string) error {
 	case "list":
 		return runModelAliasList(rest)
 	case "help":
-		printUsage(os.Stdout, modelAliasUsage)
+		printUsage(os.Stdout, modelAliasHelp.long)
 		return nil
 	case "-h", "--help":
-		printUsage(os.Stdout, modelAliasShortUsage)
+		printUsage(os.Stdout, modelAliasHelp.short)
 		return nil
 	default:
 		printUsage(os.Stderr, modelAliasShortUsage)

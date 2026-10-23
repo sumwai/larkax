@@ -177,6 +177,7 @@ _larkaxctl() {
 		"maintenance") compadd -- idempotency session ;;
 		"migrate") compadd -- up down down-to up-to status version create ;;
 		"model") compadd -- create list get update delete alias trace ;;
+		"model alias") compadd -- add remove list ;;
 		"partition") compadd -- check ensure ;;
 		"plan") compadd -- create list get enable disable grant void subscriptions key order ;;
 		"plan key") compadd -- show set ;;

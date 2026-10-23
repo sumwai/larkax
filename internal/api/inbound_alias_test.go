@@ -69,64 +69,151 @@ func inboundHarness() (*Handler, *fakeAuth, *fakeChatter, *fakeInbound) {
 // 两半必须一起断言。只断上游收到规范名，会把「响应也回了规范名」放过；
 // 只断响应回显别名，会把「选路还按别名走」放过——而后者在一条真别名配好
 // 之前根本发不出去请求。
+//
+// # 三条协议各跑一遍
+//
+// 回显那条路是共享的（serve → newStreamRenderer 收的是同一个 names.requested），
+// 但那是结构证据，不是断言。三条入口里只有 chat 被钉住的话，下一笔改这条
+// 路径的人不会碰到另外两条的用例——messages 或 responses 单独回错了名字，
+// 没有任何东西会红。
 func TestInboundAliasResolvesToCanonicalButEchoesRequested(t *testing.T) {
-	h, _, chatter, inbound := inboundHarness()
-
-	body := `{"model":"fast","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`
-	rec := post(h, PathChatCompletions, body)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
+	cases := []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "chat", path: PathChatCompletions, body: validBody},
+		{name: "messages", path: PathMessages, body: validBody},
+		{name: "responses", path: PathResponses, body: responsesBody},
 	}
 
-	if got := chatter.upstream.Model; got != "m-1" {
-		t.Errorf("发往上游的 Model = %q，期望规范名 m-1", got)
-	}
-	if got := chatter.req.CanonicalModel; got != "m-1" {
-		t.Errorf("计费请求的 CanonicalModel = %q，期望规范名 m-1", got)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Replace(tc.body, `"m-1"`, `"fast"`, 1)
+			h, _, chatter, inbound := inboundHarness()
 
-	var resp struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("响应体不是合法 JSON: %v\n%s", err, rec.Body)
-	}
-	if resp.Model != "fast" {
-		t.Errorf("响应体的 model = %q，期望调用方写的 %q：别名存在的意义就是客户端有一个稳定的名字",
-			resp.Model, "fast")
-	}
+			rec := post(h, tc.path, body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
+			}
 
-	if inbound.calls != 1 {
-		t.Errorf("解析被调用 %d 次，期望 1 次（一次请求只解析一次）", inbound.calls)
+			if got := chatter.upstream.Model; got != "m-1" {
+				t.Errorf("发往上游的 Model = %q，期望规范名 m-1", got)
+			}
+			if got := chatter.req.CanonicalModel; got != "m-1" {
+				t.Errorf("计费请求的 CanonicalModel = %q，期望规范名 m-1", got)
+			}
+
+			var resp struct {
+				Model string `json:"model"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("响应体不是合法 JSON: %v\n%s", err, rec.Body)
+			}
+			if resp.Model != "fast" {
+				t.Errorf("响应体的 model = %q，期望调用方写的 %q：别名存在的意义就是客户端有一个稳定的名字",
+					resp.Model, "fast")
+			}
+
+			if inbound.calls != 1 {
+				t.Errorf("解析被调用 %d 次，期望 1 次（一次请求只解析一次）", inbound.calls)
+			}
+		})
 	}
 }
 
 // 流式那条路与非流式同一个口径：帧里的 model 也是调用方写的名字。
 //
 // 两处分叉时的现场最难查——非流式绿、流式红，而两边渲染器收的是同一个
-// 参数名，改了一处很容易漏另一处。
+// 参数名，改了一处很容易漏另一处。三条协议同样各跑一遍，理由与非流式那张
+// 表相同：共享路径不等于被钉住。
 func TestInboundAliasEchoedInStreamFrames(t *testing.T) {
-	h, _, chatter, _ := inboundHarness()
-	chatter.streamResult = &gateway.Result{Events: streamOf()}
-
-	body := `{"model":"fast","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":16}`
-	rec := post(h, PathChatCompletions, body)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
+	cases := []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "chat", path: PathChatCompletions, body: streamBody},
+		{name: "messages", path: PathMessages, body: streamBody},
+		{name: "responses", path: PathResponses, body: responsesStreamBody},
 	}
 
-	if got := chatter.upstream.Model; got != "m-1" {
-		t.Errorf("发往上游的 Model = %q，期望规范名 m-1", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Replace(tc.body, `"m-1"`, `"fast"`, 1)
+			h, _, chatter, _ := inboundHarness()
+			// 三类协议都要有一条**会产出首帧**的事件流：Anthropic 的
+			// message_start 挂在第一个事件上（空流一帧都不写），用空流时
+			// 那一格会以「一帧都没有 model」的样子假红。
+			usage := channel.Usage{PromptTokens: 12, CompletionTokens: 7}
+			chatter.streamResult = &gateway.Result{Events: streamOf(
+				channel.StreamEvent{Kind: "delta", Text: "你好"},
+				channel.StreamEvent{Kind: "usage", Usage: &usage},
+				channel.StreamEvent{Kind: "done", FinishReason: "end_turn"},
+			)}
+
+			rec := post(h, tc.path, body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("状态码 = %d，期望 200（响应体 %s）", rec.Code, rec.Body)
+			}
+
+			if got := chatter.upstream.Model; got != "m-1" {
+				t.Errorf("发往上游的 Model = %q，期望规范名 m-1", got)
+			}
+			if got := chatter.streamReq.CanonicalModel; got != "m-1" {
+				t.Errorf("计费请求的 CanonicalModel = %q，期望规范名 m-1", got)
+			}
+
+			// 逐帧看：三条协议的帧形状不同（chat 每块带 model，responses 只在
+			// 首帧的 response 对象里带一次），所以按「这一帧里出现的每一个 model
+			// 取值」判，而不是写死它在第几层。至少出现一次也要断——一帧都没有
+			// model 时上面那两条字符串判据仍然可能命中别处。
+			seen := 0
+			for _, frame := range parseFrames(t, rec.Body.String()) {
+				var payload map[string]any
+				if err := json.Unmarshal([]byte(frame.data), &payload); err != nil {
+					continue
+				}
+				for _, got := range collectModels(payload) {
+					seen++
+					if got != "fast" {
+						t.Errorf("流里出现 model = %q，期望调用方写的 fast（整帧 %s）", got, frame.data)
+					}
+				}
+			}
+			if seen == 0 {
+				t.Errorf("流里一帧都没有 model，期望回显调用方写的 fast：\n%s", rec.Body)
+			}
+			if strings.Contains(rec.Body.String(), `"model":"m-1"`) {
+				t.Errorf("流里出现了规范名 m-1，期望回显调用方写的 fast:\n%s", rec.Body)
+			}
+		})
 	}
-	if got := chatter.streamReq.CanonicalModel; got != "m-1" {
-		t.Errorf("计费请求的 CanonicalModel = %q，期望规范名 m-1", got)
+}
+
+// collectModels 把一帧 JSON 里所有名为 model 的取值收集出来，不论在第几层。
+//
+// 按名字递归而不是写死路径：三条协议的帧层级不同，写死一条路径时另外两条
+// 会以「一帧都没收到」的形式静默通过。
+func collectModels(v any) []string {
+	var out []string
+	switch obj := v.(type) {
+	case map[string]any:
+		for key, val := range obj {
+			if key == "model" {
+				if name, ok := val.(string); ok {
+					out = append(out, name)
+				}
+				continue
+			}
+			out = append(out, collectModels(val)...)
+		}
+	case []any:
+		for _, item := range obj {
+			out = append(out, collectModels(item)...)
+		}
 	}
-	if strings.Contains(rec.Body.String(), `"model":"m-1"`) {
-		t.Errorf("流里出现了规范名 m-1，期望回显调用方写的 fast:\n%s", rec.Body)
-	}
-	if !strings.Contains(rec.Body.String(), `"model":"fast"`) {
-		t.Errorf("流里没有调用方写的 fast:\n%s", rec.Body)
-	}
+	return out
 }
 
 // 没装解析器时行为与别名出现之前完全一致：请求里的名字原样往下走。

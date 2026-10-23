@@ -141,6 +141,7 @@ var completionActionTable = map[string][]string{
 	"channel":         channelActions,
 	"channel map":     channelMapActions,
 	"model":           modelActions,
+	"model alias":     modelAliasActions,
 	"alias":           aliasActions,
 	"price":           priceActions,
 	"price calendar":  priceCalendarActions,

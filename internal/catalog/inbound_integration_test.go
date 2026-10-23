@@ -212,11 +212,11 @@ func TestDeleteInboundAlias(t *testing.T) {
 		t.Errorf("错误文案 %q 没有点名别名 %q", err, alias)
 	}
 
-	if err := NewAdmin(db).CreateInboundAlias(context.Background(), alias, canonical); err != nil {
-		t.Fatalf("建入站别名失败: %v", err)
+	if createErr := NewAdmin(db).CreateInboundAlias(context.Background(), alias, canonical); createErr != nil {
+		t.Fatalf("建入站别名失败: %v", createErr)
 	}
-	if err := NewAdmin(db).DeleteInboundAlias(context.Background(), alias); err != nil {
-		t.Fatalf("删除入站别名失败: %v", err)
+	if deleteErr := NewAdmin(db).DeleteInboundAlias(context.Background(), alias); deleteErr != nil {
+		t.Fatalf("删除入站别名失败: %v", deleteErr)
 	}
 	got, err := New(db).ResolveInbound(context.Background(), alias)
 	if err != nil {

@@ -116,11 +116,11 @@ func (h *Handler) serveDecision(w http.ResponseWriter, r *http.Request) {
 	// 是调用方原来写的那个。
 	requested := decision.Model
 	if h.Inbound != nil {
-		canonical, err := h.Inbound.ResolveInbound(r.Context(), requested)
-		if err != nil {
+		canonical, resolveErr := h.Inbound.ResolveInbound(r.Context(), requested)
+		if resolveErr != nil {
 			// 与 chat 那条同一个处置：**不吞成原样放行**。那会把别名当成一个
 			// 不存在的模型去选路，症状是「查无此模型」，排查方向整个指向另一边。
-			observe.FromContext(r.Context()).Error("解析入站别名失败", "err", err)
+			observe.FromContext(r.Context()).Error("解析入站别名失败", "err", resolveErr)
 			writeError(w, systemoneErrorProtocol, http.StatusInternalServerError, "internal error")
 			return
 		}

@@ -144,8 +144,8 @@ func evaluateModelTrace(ctx context.Context, src traceSource, requested string, 
 		tr.ShadowedAlias = shadowed
 	}
 
-	if _, err := src.model(ctx, canonical); err != nil {
-		if errors.Is(err, catalog.ErrModelNotFound) {
+	if _, modelErr := src.model(ctx, canonical); modelErr != nil {
+		if errors.Is(modelErr, catalog.ErrModelNotFound) {
 			// 这一段在正常部署里**不该断**：写入侧校验规范名存在，删模型那一侧
 			// 也数入了入站别名（见 catalog.Admin.countReferences），所以别名
 			// 悬空只可能来自绕过写入路径的数据。它仍然是必须报的一段——不报的话
@@ -154,7 +154,7 @@ func evaluateModelTrace(ctx context.Context, src traceSource, requested string, 
 			tr.BrokenReason = fmt.Sprintf("规范名 %q 不在模型目录里", canonical)
 			return tr, nil
 		}
-		return tr, err
+		return tr, modelErr
 	}
 	tr.CanonicalExists = true
 
