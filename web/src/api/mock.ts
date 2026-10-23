@@ -120,8 +120,20 @@ function mask(secret: string): { prefix: string; suffix: string; masked: string 
   return { prefix, suffix, masked: `${prefix}${'*'.repeat(18)}${suffix}` }
 }
 
-function tokens(prompt: number, completion: number, cacheRead = 0, cacheWrite = 0, reasoning = 0): Tokens {
-  return { input: prompt, output: completion, cache_read: cacheRead, cache_write: cacheWrite, reasoning }
+function tokens(
+  prompt: number,
+  completion: number,
+  cacheRead = 0,
+  cacheWrite = 0,
+  reasoning = 0,
+): Tokens {
+  return {
+    input: prompt,
+    output: completion,
+    cache_read: cacheRead,
+    cache_write: cacheWrite,
+    reasoning,
+  }
 }
 
 function totals(cost: number, requests: number, tokensValue: Tokens): UsageTotals {
@@ -500,6 +512,7 @@ function requests(): UsageRequest[] {
       request_id: `req_${String(20251_000 + i)}`,
       model,
       key: { id: key.id, name: key.name },
+      provider: i % 3 === 0 ? 'primary' : i % 3 === 1 ? 'backup' : '',
       status: failed ? 'failed' : pending ? 'pending' : 'settled',
       cost: pending ? money(0) : money(prompt * 0.000003 + completion * 0.000015),
       currency: 'USD',
@@ -508,6 +521,8 @@ function requests(): UsageRequest[] {
       streamed: i % 3 === 0,
       protocol: i % 2 === 0 ? 'openai' : 'anthropic',
       duration_ms: pending ? null : 640 + ((i * 173) % 3_200),
+      first_token_ms: 120 + ((i * 97) % 900),
+      user_agent: i % 2 === 0 ? 'claude-cli/2.1.304 (external, sdk-cli)' : 'opencode/1.2',
       started_at: startedAt.toISOString(),
       settled_at: pending ? null : new Date(now - i * 36 * 60_000).toISOString(),
     })
@@ -954,13 +969,10 @@ function channelHealthOf(channel: Channel): ChannelHealth {
 
 /** 组健康取最差一档。 */
 function worstHealthOf(channels: Channel[]): ChannelHealth {
-  return channels.reduce<ChannelHealth>(
-    (worst, channel) => {
-      const health = channelHealthOf(channel)
-      return HEALTH_ORDER.indexOf(health) > HEALTH_ORDER.indexOf(worst) ? health : worst
-    },
-    'healthy',
-  )
+  return channels.reduce<ChannelHealth>((worst, channel) => {
+    const health = channelHealthOf(channel)
+    return HEALTH_ORDER.indexOf(health) > HEALTH_ORDER.indexOf(worst) ? health : worst
+  }, 'healthy')
 }
 
 /** 分页参数照真接口校验：缺省 50，范围 [1, 200]；越界回 400，不夹住。 */
@@ -1003,8 +1015,7 @@ function mockOpsClient(
 
   const visibleChannels = () =>
     OPS_CHANNELS.filter(
-      (channel) =>
-        channel.deleted_at === null && (isAdmin || channel.owner_user_id === user.id),
+      (channel) => channel.deleted_at === null && (isAdmin || channel.owner_user_id === user.id),
     )
 
   const ownChannel = (id: number): Channel => {
@@ -1163,9 +1174,7 @@ function mockOpsClient(
       if (!model) throw new ApiError(404, 'not_found', 'model not found')
       const { capabilities, ...rest } = input
       Object.assign(model, rest, {
-        ...(capabilities
-          ? { capabilities: { ...model.capabilities, ...capabilities } }
-          : {}),
+        ...(capabilities ? { capabilities: { ...model.capabilities, ...capabilities } } : {}),
         updated_at: new Date().toISOString(),
       })
       if (input.knowledge_cutoff === '') model.knowledge_cutoff = null
@@ -1288,8 +1297,17 @@ function mockOpsClient(
       if (!rule || (!isAdmin && rule.owner_user_id !== user.id)) {
         throw new ApiError(404, 'not_found', 'not found')
       }
-      if (!isAdmin && (input.scope !== undefined || input.owner_user_id !== undefined || input.channel_id !== undefined)) {
-        throw new ApiError(400, 'invalid_request', 'scope, owner_user_id and channel_id are set by the server')
+      if (
+        !isAdmin &&
+        (input.scope !== undefined ||
+          input.owner_user_id !== undefined ||
+          input.channel_id !== undefined)
+      ) {
+        throw new ApiError(
+          400,
+          'invalid_request',
+          'scope, owner_user_id and channel_id are set by the server',
+        )
       }
       if (input.expr !== undefined && !input.expr.trim()) {
         throw new ApiError(400, 'invalid_request', 'expr is required')
@@ -1355,8 +1373,11 @@ function mockOpsClient(
       requireAdmin()
       const needle = (query.query ?? '').trim().toLowerCase()
       const rows = MOCK_USERS.filter((row) => {
-        if (needle && !row.username.toLowerCase().includes(needle) &&
-          !(row.email_full ?? '').toLowerCase().includes(needle)) {
+        if (
+          needle &&
+          !row.username.toLowerCase().includes(needle) &&
+          !(row.email_full ?? '').toLowerCase().includes(needle)
+        ) {
           return false
         }
         if (query.role && row.role !== query.role) return false
@@ -1419,11 +1440,17 @@ function mockOpsClient(
         throw new ApiError(400, 'invalid_request', 'an administrator cannot change their own role')
       }
       if (id === user.id && input.status) {
-        throw new ApiError(400, 'invalid_request', 'an administrator cannot change their own status')
+        throw new ApiError(
+          400,
+          'invalid_request',
+          'an administrator cannot change their own status',
+        )
       }
-      const demoting = found.role === 'admin' && found.status === 'active' &&
-        (input.role !== undefined && input.role !== 'admin' ||
-          input.status !== undefined && input.status !== 'active')
+      const demoting =
+        found.role === 'admin' &&
+        found.status === 'active' &&
+        ((input.role !== undefined && input.role !== 'admin') ||
+          (input.status !== undefined && input.status !== 'active'))
       if (demoting) {
         const others = MOCK_USERS.filter(
           (row) => row.id !== id && row.role === 'admin' && row.status === 'active',
@@ -1697,7 +1724,11 @@ export class MockApiClient implements ApiClient {
     const key = keys.find((candidate) => candidate.id === id)
     if (!key) throw new ApiError(404, 'not_found', 'Not found.')
     if (key.status === 'revoked') {
-      throw new ApiError(409, 'conflict', 'This key has been revoked and can no longer be modified.')
+      throw new ApiError(
+        409,
+        'conflict',
+        'This key has been revoked and can no longer be modified.',
+      )
     }
     if (input.name !== undefined) key.name = input.name
     if (input.quota_limit !== undefined) key.quota_limit = input.quota_limit
@@ -1752,12 +1783,23 @@ export class MockApiClient implements ApiClient {
     const rows = filterRange(dailyRows(), from, to)
     const summary = summarize(rows)
     const paths: UsagePath[] = [
-      { path: 'measured', cost: money(Number.parseFloat(summary.cost) * 0.74), requests: Math.round(summary.requests * 0.72) },
-      { path: 'estimated', cost: money(Number.parseFloat(summary.cost) * 0.23), requests: Math.round(summary.requests * 0.24) },
+      {
+        path: 'measured',
+        cost: money(Number.parseFloat(summary.cost) * 0.74),
+        requests: Math.round(summary.requests * 0.72),
+      },
+      {
+        path: 'estimated',
+        cost: money(Number.parseFloat(summary.cost) * 0.23),
+        requests: Math.round(summary.requests * 0.24),
+      },
       {
         path: 'fallback',
         cost: money(Number.parseFloat(summary.cost) * 0.03),
-        requests: summary.requests - Math.round(summary.requests * 0.72) - Math.round(summary.requests * 0.24),
+        requests:
+          summary.requests -
+          Math.round(summary.requests * 0.72) -
+          Math.round(summary.requests * 0.24),
       },
     ]
     return { from, to, currency: 'USD', totals: summary, billing_paths: paths }

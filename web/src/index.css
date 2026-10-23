@@ -67,14 +67,15 @@
   --faint-foreground: #66718a;
   --border: var(--gray-200);
   --border-strong: var(--gray-300);
-  --input: var(--gray-300);
+  /* 输入框的描边比 border-strong 轻一档：它是常驻的，太重会压过内容 */
+  --input: var(--gray-200);
 
   /* 强调色用中性：浅色黑底白字，深色白底黑字。彩色只留给状态与图表 */
   --primary: var(--gray-900);
   --primary-hover: var(--gray-800);
   --primary-foreground: #ffffff;
   --primary-soft: var(--gray-100);
-  --ring: var(--gray-700);
+  --ring: var(--border-strong);
 
   --secondary: var(--gray-100);
   --secondary-hover: var(--gray-200);
@@ -176,8 +177,9 @@
   --z-skip: 90;
 
   /* ── 1g. 键盘与焦点、控件细节 ────────────────────────────────── */
-  --focus-width: 2px;
-  --focus-offset: 2px;
+  /* 1px、不外扩：焦点环贴着控件画成一条细线，而不是在外面再套一圈 */
+  --focus-width: 1px;
+  --focus-offset: 0;
   --focus-color: var(--ring);
   --kbd-h: 20px;
   --kbd-bg: var(--gray-100);
@@ -208,13 +210,13 @@
   --faint-foreground: #7a8598;
   --border: #232b3b;
   --border-strong: #303b50;
-  --input: #303b50;
+  --input: #1f2836;
 
   --primary: var(--gray-100);
   --primary-hover: var(--gray-300);
   --primary-foreground: #0b0e14;
   --primary-soft: #202a3d;
-  --ring: var(--gray-300);
+  --ring: var(--border-strong);
 
   --secondary: #182030;
   --secondary-hover: #202a3d;
@@ -279,12 +281,12 @@
     --faint-foreground: #7a8598;
     --border: #232b3b;
     --border-strong: #303b50;
-    --input: #303b50;
+    --input: #1f2836;
     --primary: var(--gray-100);
     --primary-hover: var(--gray-300);
     --primary-foreground: #0b0e14;
     --primary-soft: #202a3d;
-    --ring: var(--gray-300);
+    --ring: var(--border-strong);
     --secondary: #182030;
     --secondary-hover: #202a3d;
     --secondary-foreground: #d5dbe7;

@@ -284,8 +284,10 @@ type usageRequestJSON struct {
 	RequestID string          `json:"request_id"`
 	Model     string          `json:"model"`
 	Key       *requestKeyJSON `json:"key"`
-	Status    string          `json:"status"`
-	Cost      string          `json:"cost"`
+	// Provider 是这次请求落到的渠道名；渠道被删掉时为空串。
+	Provider string `json:"provider"`
+	Status   string `json:"status"`
+	Cost     string `json:"cost"`
 	// PlanReservedAmount 是这笔请求占着的额度包面值，与 Cost 并列。
 	//
 	// Cost 在这笔请求上是钱包口径的预留额（pending）或最终实收（settled）；
@@ -299,8 +301,12 @@ type usageRequestJSON struct {
 	Streamed           bool       `json:"streamed"`
 	Protocol           string     `json:"protocol"`
 	DurationMS         *int64     `json:"duration_ms"`
-	StartedAt          string     `json:"started_at"`
-	SettledAt          *string    `json:"settled_at"`
+	// FirstTokenMS 是「受理到第一个内容块」的毫秒数；非流式为 null。
+	FirstTokenMS *int64 `json:"first_token_ms"`
+	// UserAgent 是调用方请求头原文；调用方没带这个头时为 null。
+	UserAgent *string `json:"user_agent"`
+	StartedAt string  `json:"started_at"`
+	SettledAt *string `json:"settled_at"`
 }
 
 // usageRequestsResponse 是请求日志的一页。
@@ -366,6 +372,7 @@ func (a *API) handleUsageRequests(w http.ResponseWriter, r *http.Request, sessio
 			ID:                 req.ID,
 			RequestID:          req.RequestID,
 			Model:              req.Model,
+			Provider:           req.Provider,
 			Status:             req.Status,
 			Cost:               req.Cost.String(),
 			PlanReservedAmount: req.PlanReservedAmount.String(),
@@ -377,12 +384,14 @@ func (a *API) handleUsageRequests(w http.ResponseWriter, r *http.Request, sessio
 				CacheWriteTokens: req.CacheWriteTokens,
 				ReasoningTokens:  req.ReasoningTokens,
 			}),
-			BillingPath: req.BillingPath,
-			Streamed:    req.Streamed,
-			Protocol:    req.Protocol,
-			DurationMS:  req.DurationMS,
-			StartedAt:   formatTime(req.StartedAt),
-			SettledAt:   optionalTime(req.SettledAt),
+			BillingPath:  req.BillingPath,
+			Streamed:     req.Streamed,
+			Protocol:     req.Protocol,
+			DurationMS:   req.DurationMS,
+			FirstTokenMS: req.FirstTokenMS,
+			UserAgent:    req.UserAgent,
+			StartedAt:    formatTime(req.StartedAt),
+			SettledAt:    optionalTime(req.SettledAt),
 		}
 		if req.KeyID != nil {
 			item.Key = &requestKeyJSON{ID: *req.KeyID, Name: req.KeyName}

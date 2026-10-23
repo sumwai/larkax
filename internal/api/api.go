@@ -651,6 +651,9 @@ func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol cha
 
 	req := h.billingRequest(user, upstream, requestID, protocol)
 	req.Idempotency = claim
+	// 调用方标识原样落账单（见 pipeline.Request.UserAgent）：截断会丢版本号，
+	// 而排查兼容性问题要看的正是那一段。
+	req.UserAgent = r.UserAgent()
 
 	if upstream.Stream {
 		// 流式与非流式的差别只在拿到结果之后怎么写出：前面的检查顺序

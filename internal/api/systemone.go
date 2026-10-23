@@ -100,6 +100,8 @@ func (h *Handler) serveDecision(w http.ResponseWriter, r *http.Request) {
 
 	requestID := requestIDOf(r)
 	req := h.decideBillingRequest(user, decision, requestID)
+	// 与 chat 那几条路同一个口径：调用方标识原样落账单（见 pipeline.Request.UserAgent）。
+	req.UserAgent = r.UserAgent()
 
 	res, err := h.Decider.Decide(r.Context(), req, decision)
 	if err != nil {

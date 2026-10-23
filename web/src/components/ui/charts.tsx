@@ -15,30 +15,37 @@ export interface SeriesPoint {
 export function LineChart({
   series,
   formatValue,
+  formatAxis,
   className,
 }: {
   /** 每条序列：名字、颜色 token 下标、数据点。 */
   series: { name: string; color: 1 | 2 | 3 | 4 | 5 | 6; points: SeriesPoint[] }[]
   formatValue?: (value: number) => string
+  /** Y 轴刻度文字；不给就退回 formatValue。 */
+  formatAxis?: (value: number) => string
   className?: string
 }) {
   const [active, setActive] = useState<string | null>(null)
   const n = series[0]?.points.length ?? 0
-  const max = useMemo(
-    () => Math.max(1, ...series.flatMap((s) => s.points.map((p) => p.value))),
-    [series],
-  )
+  /* 量级由数据决定：留 15% 余量，全零时上界就是 0（刻度只标底部的 0）。 */
+  const max = useMemo(() => {
+    const peak = Math.max(0, ...series.flatMap((s) => s.points.map((p) => p.value)))
+    return peak > 0 ? peak * 1.15 : 0
+  }, [series])
   const w = 100
   const h = 100
   const x = (i: number) => (n <= 1 ? w / 2 : (i / (n - 1)) * w)
-  const y = (v: number) => h - (v / max) * (h - 8) - 4
+  const y = (v: number) => (max > 0 ? h - (v / max) * (h - 8) - 4 : h - 4)
   const first = series[0]?.points ?? []
 
   return (
     <div className={cn('w-full', className)}>
       <div className="mb-2 flex flex-wrap items-center gap-3">
         {series.map((s) => (
-          <span key={s.name} className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+          <span
+            key={s.name}
+            className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
+          >
             <span
               aria-hidden="true"
               className={cn(
@@ -55,83 +62,103 @@ export function LineChart({
           </span>
         ))}
       </div>
-      <div className="relative h-40">
-        <svg
-          viewBox={`0 0 ${w} ${h}`}
-          preserveAspectRatio="none"
-          className="absolute inset-0 h-full w-full overflow-visible"
-          aria-hidden="true"
-        >
-          {[0, 0.5, 1].map((t) => (
-            <line
-              key={t}
-              x1={0}
-              x2={w}
-              y1={4 + t * (h - 8)}
-              y2={4 + t * (h - 8)}
-              stroke="var(--border)"
-              strokeWidth={0.5}
-              vectorEffect="non-scaling-stroke"
-            />
+      <div className="flex gap-2">
+        {/* Y 轴：刻度是 HTML 文字，不跟着 SVG 的 preserveAspectRatio 变形。 */}
+        <div className="relative h-40 w-14 shrink-0" aria-hidden="true">
+          {[max, max / 2, 0].map((tick, index) => (
+            <span
+              key={index}
+              className="absolute right-0 -translate-y-1/2 text-2xs tabular-nums text-faint"
+              style={{ top: `${4 + index * 46}%` }}
+            >
+              {index < 2 && max === 0 ? '' : (formatAxis ?? formatValue ?? String)(tick)}
+            </span>
           ))}
-          {series.map((s) => (
-            <polyline
-              key={s.name}
-              points={s.points.map((p, i) => `${x(i)},${y(p.value)}`).join(' ')}
-              fill="none"
-              stroke={`var(--chart-${s.color})`}
-              strokeWidth={1.5}
-              vectorEffect="non-scaling-stroke"
-              strokeLinejoin="round"
-            />
-          ))}
-        </svg>
-        {/* 数据点：真按钮，可悬停可聚焦。 */}
-        <div className="absolute inset-0">
-          {first.map((p, i) => {
-            const values = series.map((s) => s.points[i]?.value ?? 0)
-            const tip = `${p.label}：${series
-              .map((s, si) => `${s.name} ${formatValue ? formatValue(values[si]) : values[si]}`)
-              .join('，')}`
-            return (
-              <button
-                key={p.label + i}
-                type="button"
-                aria-label={tip}
-                onMouseEnter={() => setActive(p.label + i)}
-                onMouseLeave={() => setActive(null)}
-                onFocus={() => setActive(p.label + i)}
-                onBlur={() => setActive(null)}
-                className="absolute size-4 -translate-x-1/2 -translate-y-1/2 rounded-full outline-none focus-visible:ring-2 focus-visible:outline-ring"
-                style={{ left: `${x(i)}%`, top: `${(y(p.value) / h) * 100}%` }}
-              >
-                <span
-                  aria-hidden="true"
-                  className={cn(
-                    'absolute top-1/2 left-1/2 size-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-chart-4 transition-transform',
-                    active === p.label + i && 'scale-150',
-                  )}
-                />
-              </button>
-            )
-          })}
         </div>
-        {active ? (
-          <div className="pointer-events-none absolute top-0 right-0 rounded-xs bg-gray-900 px-2 py-1 text-2xs whitespace-nowrap text-white">
-            {(() => {
-              const idx = first.findIndex((p, j) => p.label + j === active)
-              const point = first[idx]
-              if (!point) return null
-              return `${point.label}：${series
-                .map((s) => `${s.name} ${formatValue ? formatValue(s.points[idx]?.value ?? 0) : s.points[idx]?.value}`)
-                .join('，')}`
-            })()}
+        <div className="min-w-0 flex-1">
+          <div className="relative h-40">
+            <svg
+              viewBox={`0 0 ${w} ${h}`}
+              preserveAspectRatio="none"
+              className="absolute inset-0 h-full w-full overflow-visible"
+              aria-hidden="true"
+            >
+              {[0, 0.5, 1].map((t) => (
+                <line
+                  key={t}
+                  x1={0}
+                  x2={w}
+                  y1={4 + t * (h - 8)}
+                  y2={4 + t * (h - 8)}
+                  stroke="var(--border)"
+                  strokeWidth={0.5}
+                  vectorEffect="non-scaling-stroke"
+                />
+              ))}
+              {series.map((s) => (
+                <polyline
+                  key={s.name}
+                  points={s.points.map((p, i) => `${x(i)},${y(p.value)}`).join(' ')}
+                  fill="none"
+                  stroke={`var(--chart-${s.color})`}
+                  strokeWidth={1.5}
+                  vectorEffect="non-scaling-stroke"
+                  strokeLinejoin="round"
+                />
+              ))}
+            </svg>
+            {/* 数据点：真按钮，可悬停可聚焦。 */}
+            <div className="absolute inset-0">
+              {first.map((p, i) => {
+                const values = series.map((s) => s.points[i]?.value ?? 0)
+                const tip = `${p.label}：${series
+                  .map((s, si) => `${s.name} ${formatValue ? formatValue(values[si]) : values[si]}`)
+                  .join('，')}`
+                return (
+                  <button
+                    key={p.label + i}
+                    type="button"
+                    aria-label={tip}
+                    onMouseEnter={() => setActive(p.label + i)}
+                    onMouseLeave={() => setActive(null)}
+                    onFocus={() => setActive(p.label + i)}
+                    onBlur={() => setActive(null)}
+                    className="absolute size-4 -translate-x-1/2 -translate-y-1/2 rounded-full outline-none focus-visible:ring-2 focus-visible:outline-ring"
+                    style={{ left: `${x(i)}%`, top: `${(y(p.value) / h) * 100}%` }}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        'absolute top-1/2 left-1/2 size-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-chart-4 transition-transform',
+                        active === p.label + i && 'scale-150',
+                      )}
+                    />
+                  </button>
+                )
+              })}
+            </div>
+            {active ? (
+              <div className="pointer-events-none absolute top-0 right-0 rounded-xs bg-gray-900 px-2 py-1 text-2xs whitespace-nowrap text-white">
+                {(() => {
+                  const idx = first.findIndex((p, j) => p.label + j === active)
+                  const point = first[idx]
+                  if (!point) return null
+                  return `${point.label}：${series
+                    .map(
+                      (s) =>
+                        `${s.name} ${formatValue ? formatValue(s.points[idx]?.value ?? 0) : s.points[idx]?.value}`,
+                    )
+                    .join('，')}`
+                })()}
+              </div>
+            ) : null}
           </div>
-        ) : null}
-      </div>
-      <div className="mt-1 flex justify-between text-2xs text-faint">
-        <span>{first[0]?.label}</span>
-        <span>{first[first.length - 1]?.label}</span>
+          {/* X 轴：只标首尾，跟着绘图区一起让出刻度的宽度。 */}
+          <div className="mt-1 flex justify-between text-2xs text-faint">
+            <span>{first[0]?.label}</span>
+            <span>{first[first.length - 1]?.label}</span>
+          </div>
+        </div>
       </div>
     </div>
   )

@@ -159,25 +159,29 @@ export async function copyText(text: string): Promise<boolean> {
   }
 }
 
-/** 复制按钮：成功打勾自复位。 */
+/** 复制按钮：成功打勾自复位。文案由调用方给，默认沿用中文。 */
 export function CopyButton({
   value,
   className,
   label,
+  copiedLabel,
 }: {
   value: string
   className?: string
   label?: string
+  copiedLabel?: string
 }) {
   const [copied, setCopied] = useState(false)
   const timer = useRef<number | undefined>(undefined)
   useEffect(() => () => window.clearTimeout(timer.current), [])
+  const idle = label ?? '复制'
+  const done = copiedLabel ?? '已复制'
   return (
     <Button
       variant="ghost"
       size="sm"
       className={className}
-      aria-label={label ?? '复制'}
+      aria-label={idle}
       onClick={async () => {
         if (await copyText(value)) {
           setCopied(true)
@@ -186,7 +190,7 @@ export function CopyButton({
       }}
     >
       {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-      {copied ? '已复制' : '复制'}
+      {copied ? done : idle}
     </Button>
   )
 }

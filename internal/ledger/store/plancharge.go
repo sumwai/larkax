@@ -318,16 +318,18 @@ func insertPlanReservationRow(ctx context.Context, tx *sql.Tx, req pipeline.Requ
 	err := tx.QueryRowContext(ctx, `
 		INSERT INTO billing_requests
 			(request_id, user_id, api_key_id, channel_id, canonical_model, protocol,
-			 streamed, reserved_amount, reserved_asset, status,
+			 streamed, reserved_amount, reserved_asset, status, user_agent,
 			 pricing_rule_id, pricing_expr_snapshot, started_at,
 			 user_plan_id, reserved_quota, plan_reserved_amount)
 		VALUES ($1, $2, $12, NULLIF($3, 0::bigint), $4, $5, $11, 0, $7, 'pending',
-		        NULLIF($8, 0::bigint), NULLIF($9, ''), $10,
+		        NULLIF($15, ''), NULLIF($8, 0::bigint), NULLIF($9, ''), $10,
 		        $13, $14::numeric, $6::numeric)
 		RETURNING id`,
 		req.RequestID, r.UserID, req.ChannelID, req.CanonicalModel, string(req.Protocol),
 		r.Amount.String(), r.Asset, r.RuleID, r.PricingExprSnap, r.RuleMatchedAt,
-		req.Streamed, req.APIKeyID, planID, quota.String()).Scan(&id)
+		req.Streamed, req.APIKeyID, planID, quota.String(),
+		// 调用方标识由入口原样带来（见 pipeline.Request.UserAgent）。
+		req.UserAgent).Scan(&id)
 	if err != nil {
 		return 0, constraintFailure(fmt.Errorf("写额度包预留记录失败: %w", err))
 	}

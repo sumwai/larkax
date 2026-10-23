@@ -49,8 +49,9 @@ export function Field({
   )
 }
 
+/* 聚焦不画环：输入框自带一条描边就够，聚焦时只保留光标。 */
 const controlBase =
-  'w-full rounded-sm border bg-card px-3 text-base text-foreground transition-colors placeholder:text-faint focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-ring disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground'
+  'w-full rounded-sm border bg-card px-3 text-base text-foreground transition-colors placeholder:text-faint focus-visible:outline-none disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground'
 
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement> & { invalid?: boolean }>(
   function Input({ className, invalid, ...props }, ref) {
@@ -98,7 +99,7 @@ export function MoneyInput({
     <div className="relative">
       <input
         inputMode="decimal"
-        className={cn(controlBase, 'h-9 pr-14 text-right font-mono', className)}
+        className={cn(controlBase, 'h-9 border-input pr-14 text-right font-mono', className)}
         {...props}
       />
       {suffix ? (

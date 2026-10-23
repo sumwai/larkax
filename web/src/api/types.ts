@@ -316,6 +316,8 @@ export interface UsageRequest {
   model: string
   /** 没有关联密钥（旧数据或内部调用）时为 null。 */
   key: UsageRequestKey | null
+  /** 这次请求落到哪个渠道（渠道名）；渠道被删掉时是空串。 */
+  provider: string
   status: RequestStatus
   cost: Money
   currency: string
@@ -325,6 +327,10 @@ export interface UsageRequest {
   streamed: boolean
   protocol: string
   duration_ms: number | null
+  /** 受理到第一个内容块的毫秒数；非流式与没吐过字的失败是 null。 */
+  first_token_ms: number | null
+  /** 调用方请求头原文；没带这个头时是 null。 */
+  user_agent: string | null
   started_at: string
   settled_at: string | null
 }
@@ -633,11 +639,7 @@ export type ChannelHealth = 'healthy' | 'unknown' | 'degraded' | 'drained'
 
 /** 异常渠道的理由。多条同时成立时全部出现。 */
 export type UnhealthyReason =
-  | 'failure_rate'
-  | 'quota_state'
-  | 'probe_failed'
-  | 'consecutive_failures'
-  | 'no_requests_24h'
+  'failure_rate' | 'quota_state' | 'probe_failed' | 'consecutive_failures' | 'no_requests_24h'
 
 export interface MerchantOverview {
   /** 名下未软删的渠道数（含停用的）；管理员会话下是全站。 */
@@ -870,7 +872,6 @@ export interface OpsClient extends ChannelOpsClient {
   getUser(id: number): Promise<AdminUserDetail>
   updateUser(id: number, input: AdminUserUpdateInput): Promise<AdminUserDetail>
 }
-
 
 /**
  * 控制台用到的全部读写出入口。HTTP 实现见 `client.ts`，开发期替身见 `mock.ts`；

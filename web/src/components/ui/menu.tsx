@@ -41,7 +41,7 @@ export function DropdownMenuItem({
   return (
     <DropdownPrimitive.Item
       className={cn(
-        'flex cursor-default select-none items-center gap-2 rounded-xs px-2.5 py-1.5 text-sm outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-muted',
+        'flex cursor-default select-none items-center gap-2 rounded-xs px-2.5 py-1.5 text-sm outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-secondary-hover',
         danger && 'text-danger-strong',
         className,
       )}

@@ -102,6 +102,19 @@ export function formatSpend(value: Money | null | undefined): string {
   return renderUnits(parsed.units, 3, parsed.negative)
 }
 
+/**
+ * 坐标轴刻度：随量级换精度。
+ *
+ * 消费常在 1e-4 量级，固定 3 位会让 0.00004 与 0.0003 都写成 `0.000`——
+ * 折线贴底、刻度全是同一个数。这里按数值大小决定小数位，去掉末尾的 0。
+ */
+export function formatSpendTick(value: number): string {
+  if (!Number.isFinite(value) || value === 0) return '0'
+  const abs = Math.abs(value)
+  const digits = abs >= 1 ? 2 : abs >= 0.01 ? 3 : abs >= 0.0001 ? 5 : 7
+  return value.toFixed(digits).replace(/\.?0+$/, '')
+}
+
 export function moneySymbol(currency: string | undefined): string {
   switch ((currency ?? '').toUpperCase()) {
     case 'USD':
@@ -130,7 +143,9 @@ export function formatCount(value: number | null | undefined, lang: 'zh' | 'en' 
 export function formatCompact(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(value)) return '—'
   if (Math.abs(value) < 10_000) return formatCount(value)
-  return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(value)
+  return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(
+    value,
+  )
 }
 
 function partsInZone(iso: string, timeZone: string): Intl.DateTimeFormatPart[] | null {
@@ -162,6 +177,29 @@ export function formatDateTime(iso: string | null | undefined, timeZone = 'UTC')
   if (!parts) return '—'
   const hour = pick(parts, 'hour') === '24' ? '00' : pick(parts, 'hour')
   return `${pick(parts, 'year')}-${pick(parts, 'month')}-${pick(parts, 'day')} ${hour}:${pick(parts, 'minute')}`
+}
+
+/**
+ * 相对时间：卡片上的「刚刚 / 7 分钟前 / 3 小时前 / 5 天前」。
+ *
+ * 超过一周就退回绝对日期——「23 天前」对排查没用。返回值已含语气词，
+ * 调用方不用再拼；解析不了的时刻返回 '—'。
+ */
+export function formatRelative(
+  iso: string | null | undefined,
+  lang: 'zh' | 'en' = 'zh',
+): string {
+  if (!iso) return '—'
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return '—'
+  const rtf = new Intl.RelativeTimeFormat(lang === 'zh' ? 'zh-CN' : 'en-US', { numeric: 'auto' })
+  const seconds = Math.round((then - Date.now()) / 1000)
+  const abs = Math.abs(seconds)
+  if (abs < 60) return rtf.format(Math.round(seconds), 'second')
+  if (abs < 3600) return rtf.format(Math.round(seconds / 60), 'minute')
+  if (abs < 86_400) return rtf.format(Math.round(seconds / 3600), 'hour')
+  if (abs < 7 * 86_400) return rtf.format(Math.round(seconds / 86_400), 'day')
+  return formatDate(iso)
 }
 
 export function formatDate(iso: string | null | undefined, timeZone = 'UTC'): string {

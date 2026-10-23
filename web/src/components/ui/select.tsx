@@ -37,7 +37,8 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
         id={id}
         aria-label={ariaLabel}
         className={cn(
-          'flex w-full items-center justify-between gap-2 rounded-sm border border-input bg-card px-3 text-left text-foreground transition-colors outline-none data-[placeholder]:text-faint focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-ring disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground',
+          // 长标签（比如没起名字的密钥）只占一行：触发器与值都允许收缩并省略。
+          'flex w-full min-w-0 items-center justify-between gap-2 rounded-sm border border-input bg-card px-3 text-left text-foreground transition-colors outline-none [&>span]:truncate data-[placeholder]:text-faint focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-ring disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground',
           size === 'sm' ? 'h-7 text-sm' : 'h-9 text-base',
           className,
         )}
@@ -51,7 +52,7 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
         <SelectPrimitive.Content
           position="popper"
           sideOffset={4}
-          className="z-dropdown max-h-72 min-w-(--radix-select-trigger-width) overflow-hidden rounded-sm border border-border bg-popover text-popover-foreground shadow-md"
+          className="z-dropdown max-h-72 max-w-[min(24rem,calc(100vw-32px))] min-w-(--radix-select-trigger-width) overflow-hidden rounded-sm border border-border bg-popover text-popover-foreground shadow-md"
         >
           <SelectPrimitive.Viewport className="p-1">
             {options.map((option) => (
@@ -60,13 +61,18 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
                 value={option.value}
                 disabled={option.disabled}
                 className={cn(
-                  'flex cursor-default items-center justify-between gap-2 rounded-xs px-2.5 py-1.5 text-sm outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-muted',
+                  // 选中项靠左边一个勾加加粗认出来，勾与标签一起从左侧对齐；
+                  // 标签过长时收成一行省略号（ItemText 是 Radix 自己渲染的 span，
+                  // 它的 className 不生效，只能从条目上选到它）。
+                  'flex cursor-default items-center gap-2 overflow-hidden rounded-xs px-2.5 py-1.5 text-sm outline-none data-[state=checked]:font-medium [&>span:last-child]:min-w-0 [&>span:last-child]:flex-1 [&>span:last-child]:truncate data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-secondary-hover',
                 )}
               >
+                <span className="flex size-3.5 shrink-0 items-center justify-center">
+                  <SelectPrimitive.ItemIndicator>
+                    <Check className="size-3.5 text-foreground" aria-hidden="true" />
+                  </SelectPrimitive.ItemIndicator>
+                </span>
                 <SelectPrimitive.ItemText>{option.label}</SelectPrimitive.ItemText>
-                <SelectPrimitive.ItemIndicator>
-                  <Check className="size-3.5 text-foreground" aria-hidden="true" />
-                </SelectPrimitive.ItemIndicator>
               </SelectPrimitive.Item>
             ))}
           </SelectPrimitive.Viewport>

@@ -81,7 +81,10 @@ type UsageRequestRow struct {
 	// KeyID 为 nil 表示这次请求没有关联到 key（历史行）。
 	KeyID   *int64
 	KeyName string
-	Status  string
+	// Provider 是这次请求打到哪个渠道（channels.name）；渠道已被删掉时为
+	// 空串——快照不级联删除，读侧必须接受查不到。
+	Provider string
+	Status   string
 	// Cost 在 pending 时是钱包预留额，结算后是最终额，其余状态为 0。
 	// 额度包覆盖的请求在 pending 时这里是 0（钱包一分没冻）；它占着的面值
 	// 不在这个字段里，见 PlanReservedAmount。
@@ -105,8 +108,12 @@ type UsageRequestRow struct {
 	ReasoningTokens  int64
 	BillingPath      *string
 	DurationMS       *int64
-	StartedAt        time.Time
-	SettledAt        *time.Time
+	// FirstTokenMS 是「受理到第一个内容块」的毫秒数；非流式与没吐过字的
+	// 失败都是 NULL。UserAgent 是调用方请求头原文，没带这个头时是 NULL。
+	FirstTokenMS *int64
+	UserAgent    *string
+	StartedAt    time.Time
+	SettledAt    *time.Time
 }
 
 // UsageRequestPage 是一页请求日志。
@@ -178,15 +185,18 @@ func (s *Store) UsageRequests(ctx context.Context, q UsageRequestQuery) (UsageRe
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT b.id, b.request_id, b.canonical_model, b.api_key_id,
-		       COALESCE(k.name, ''), b.status, b.reserved_amount::text,
+		       COALESCE(k.name, ''), COALESCE(c.name, ''),
+		       b.status, b.reserved_amount::text,
 		       b.plan_reserved_amount::text,
 		       b.final_amount::text, b.reserved_asset, b.streamed, b.protocol,
+		       b.first_token_ms, b.user_agent,
 		       b.started_at, b.settled_at,
 		       e.prompt_tokens, e.completion_tokens, e.cache_read_tokens,
 		       e.cache_write_tokens, e.reasoning_tokens, e.billing_path,
 		       e.duration_ms
 		  FROM billing_requests b
 		  LEFT JOIN api_keys k ON k.id = b.api_key_id
+		  LEFT JOIN channels c ON c.id = b.channel_id
 		  LEFT JOIN LATERAL (
 		        SELECT ue.prompt_tokens, ue.completion_tokens,
 		               ue.cache_read_tokens, ue.cache_write_tokens,
@@ -220,13 +230,26 @@ func (s *Store) UsageRequests(ctx context.Context, q UsageRequestQuery) (UsageRe
 			path         sql.NullString
 			duration     sql.NullInt64
 			settledAt    sql.NullTime
+			provider     string
+			firstToken   sql.NullInt64
+			userAgent    sql.NullString
 		)
 		if err := rows.Scan(&row.ID, &row.RequestID, &row.Model, &keyID,
-			&row.KeyName, &row.Status, &reserved, &planReserved, &final, &row.Asset,
-			&row.Streamed, &row.Protocol, &row.StartedAt, &settledAt,
+			&row.KeyName, &provider, &row.Status, &reserved, &planReserved, &final, &row.Asset,
+			&row.Streamed, &row.Protocol, &firstToken, &userAgent,
+			&row.StartedAt, &settledAt,
 			&prompt, &completion, &cacheRead, &cacheWrite, &reasoning,
 			&path, &duration); err != nil {
 			return UsageRequestPage{}, fmt.Errorf("读请求日志失败: %w", err)
+		}
+		row.Provider = provider
+		if firstToken.Valid {
+			ms := firstToken.Int64
+			row.FirstTokenMS = &ms
+		}
+		if userAgent.Valid {
+			ua := userAgent.String
+			row.UserAgent = &ua
 		}
 		if keyID.Valid {
 			id := keyID.Int64
