@@ -184,10 +184,33 @@ type Alias struct {
 // 热路径拿到的那个对象**没有**写入能力——这是编译期的事实，不是一句约定。
 type Catalog struct {
 	db *sql.DB
+	// tx 非 nil 时所有读走它（见 NewInTx）。
+	tx *sql.Tx
 }
 
 // New 包装数据库句柄。
 func New(db *sql.DB) *Catalog { return &Catalog{db: db} }
+
+// NewInTx 构造一个读句柄指向 tx 的 Catalog。
+//
+// 它给「在一个事务里做几处写入、其间要读回刚写入的行」的命令用（例如
+// model onboard 的判重）。用 *sql.DB 读看不到未提交的写入，于是判据会落在
+// 事务外——同名模型刚建出来，判重却报「不存在」。
+func NewInTx(tx *sql.Tx) *Catalog { return &Catalog{tx: tx} }
+
+// readHandle 是读路径要用的两件事。
+type readHandle interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// handle 返回这次调用要用的句柄：有事务就用事务。
+func (c *Catalog) handle() readHandle {
+	if c.tx != nil {
+		return c.tx
+	}
+	return c.db
+}
 
 // Alias 解析这个渠道上这个规范名对应的上游名，连同这条别名上配的参数覆盖。
 //
@@ -290,7 +313,7 @@ func (c *Catalog) Alias(ctx context.Context, channelID int64, canonicalModel str
 // 用 aliasQuery 整行取（而不是只取用得上的几列）：列清单与 scanAlias 的假设
 // 只该有一份，而多带几列的代价是几十个字节。
 func (c *Catalog) aliasRows(ctx context.Context, canonicalModel string) ([]Alias, error) {
-	rows, err := c.db.QueryContext(ctx, aliasQueryLive+`
+	rows, err := c.handle().QueryContext(ctx, aliasQueryLive+`
  WHERE a.canonical_name = $1
    AND (a.channel_id IS NULL OR c.deleted_at IS NULL)`, canonicalModel)
 	if err != nil {
@@ -418,7 +441,7 @@ func (c *Catalog) Constraints(ctx context.Context, canonicalName string) (Constr
 		return Constraints{}, errors.New("规范模型名为空")
 	}
 
-	rows, err := c.db.QueryContext(ctx, constraintsQuery, canonicalName)
+	rows, err := c.handle().QueryContext(ctx, constraintsQuery, canonicalName)
 	if err != nil {
 		return Constraints{}, fmt.Errorf("查询规范模型失败: %w", err)
 	}
@@ -462,7 +485,7 @@ func (c *Catalog) Model(ctx context.Context, canonicalName string) (Model, error
 		return Model{}, errors.New("规范模型名为空")
 	}
 
-	rows, err := c.db.QueryContext(ctx, modelQuery+` WHERE m.canonical_name = $1`, canonicalName)
+	rows, err := c.handle().QueryContext(ctx, modelQuery+` WHERE m.canonical_name = $1`, canonicalName)
 	if err != nil {
 		return Model{}, fmt.Errorf("查询规范模型失败: %w", err)
 	}
@@ -490,7 +513,7 @@ func (c *Catalog) Model(ctx context.Context, canonicalName string) (Model, error
 //
 // 从空切片开始而不是 nil：目录是空的（还没采集过）是正常结果，不是「没有值」。
 func (c *Catalog) Models(ctx context.Context) ([]Model, error) {
-	rows, err := c.db.QueryContext(ctx, modelQuery+` ORDER BY m.canonical_name`)
+	rows, err := c.handle().QueryContext(ctx, modelQuery+` ORDER BY m.canonical_name`)
 	if err != nil {
 		return nil, fmt.Errorf("查询规范模型失败: %w", err)
 	}
@@ -528,7 +551,7 @@ func (c *Catalog) Aliases(ctx context.Context, channelID int64) ([]Alias, error)
 		args = nil
 	}
 
-	rows, err := c.db.QueryContext(ctx, query, args...)
+	rows, err := c.handle().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("查询模型别名失败: %w", err)
 	}
@@ -560,7 +583,7 @@ func (c *Catalog) UpstreamModels(ctx context.Context, canonicalName string) ([]A
 		return nil, errors.New("规范模型名为空")
 	}
 
-	rows, err := c.db.QueryContext(ctx, aliasQuery+`
+	rows, err := c.handle().QueryContext(ctx, aliasQuery+`
 		 WHERE a.canonical_name = $1
 		 ORDER BY (a.channel_id IS NOT NULL), a.channel_id, a.upstream_model`, canonicalName)
 	if err != nil {

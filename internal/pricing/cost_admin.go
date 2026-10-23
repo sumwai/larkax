@@ -38,10 +38,41 @@ var ErrCostNoChanges = errors.New("没有要改的字段")
 // 可以拒掉的输入错误，而不是留给消费方的一次故障。
 type CostAdmin struct {
 	db *sql.DB
+	// tx 非 nil 时所有读写走它（见 NewCostAdminInTx）。
+	tx *sql.Tx
 }
 
 // NewCostAdmin 包装一个已打开的数据库句柄。
 func NewCostAdmin(db *sql.DB) *CostAdmin { return &CostAdmin{db: db} }
+
+// NewCostAdminInTx 构造一个读写都走 tx 的 CostAdmin。
+//
+// 它服务「几处写入必须一起成功或一起回滚」的命令（例如 model onboard）。
+// 有 tx 时 Update / Disable 不再自己 BeginTx / Commit / Rollback——
+// database/sql 的事务不能嵌套，内层提交会把外层的边界拆掉。
+func NewCostAdminInTx(tx *sql.Tx) *CostAdmin { return &CostAdmin{tx: tx} }
+
+// handle 返回这次调用要用的句柄：有事务就用事务（dbHandle 见 admin.go）。
+func (a *CostAdmin) handle() dbHandle {
+	if a.tx != nil {
+		return a.tx
+	}
+	return a.db
+}
+
+// begin 返回一个事务，并报告它是不是**这次调用新开的**。
+//
+// 已经在事务上时返回那个事务、own 为 false：提交与回滚归开它的那一层。
+func (a *CostAdmin) begin(ctx context.Context) (*sql.Tx, bool, error) {
+	if a.tx != nil {
+		return a.tx, false, nil
+	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	return tx, true, nil
+}
 
 // CostCreateRequest 是新建一条成本规则所需的全部字段。
 //
@@ -168,7 +199,7 @@ func (a *CostAdmin) Create(ctx context.Context, req CostCreateRequest) (int64, e
 	}
 
 	var id int64
-	err = a.db.QueryRowContext(ctx, `
+	err = a.handle().QueryRowContext(ctx, `
 		INSERT INTO upstream_costs
 			(channel_id, model_patterns, expr, priority, effective_from, effective_to)
 		VALUES ($1, to_jsonb($2::text[]), $3, $4, $5, $6)
@@ -225,12 +256,14 @@ func (a *CostAdmin) Update(ctx context.Context, req CostUpdateRequest) error {
 		return ErrCostNoChanges
 	}
 
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, ownTx, err := a.begin(ctx)
 	if err != nil {
 		return fmt.Errorf("开始事务失败: %w", err)
 	}
-	// 提交之后这里的 Rollback 返回 ErrTxDone，无害。
-	defer func() { _ = tx.Rollback() }()
+	if ownTx {
+		// 提交之后这里的 Rollback 返回 ErrTxDone，无害。
+		defer func() { _ = tx.Rollback() }()
+	}
 
 	current, err := loadCostForUpdate(ctx, tx, req.ID)
 	if err != nil {
@@ -261,8 +294,10 @@ func (a *CostAdmin) Update(ctx context.Context, req CostUpdateRequest) error {
 		return dberr.ConstraintFailure(fmt.Errorf("修改成本规则失败: %w", err))
 	}
 
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("提交修改失败: %w", err)
+	if ownTx {
+		if err = tx.Commit(); err != nil {
+			return fmt.Errorf("提交修改失败: %w", err)
+		}
 	}
 	return nil
 }
@@ -335,11 +370,13 @@ func (a *CostAdmin) Disable(ctx context.Context, id int64) error {
 		return errors.New("成本规则 id 无效")
 	}
 
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, ownTx, err := a.begin(ctx)
 	if err != nil {
 		return fmt.Errorf("开始事务失败: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	if ownTx {
+		defer func() { _ = tx.Rollback() }()
+	}
 
 	current, err := loadCostForUpdate(ctx, tx, id)
 	if err != nil {
@@ -363,8 +400,10 @@ func (a *CostAdmin) Disable(ctx context.Context, id int64) error {
 		 WHERE id = $2`, now, id); err != nil {
 		return dberr.ConstraintFailure(fmt.Errorf("停用成本规则失败: %w", err))
 	}
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("提交停用失败: %w", err)
+	if ownTx {
+		if err = tx.Commit(); err != nil {
+			return fmt.Errorf("提交停用失败: %w", err)
+		}
 	}
 	return nil
 }
@@ -394,7 +433,7 @@ func (a *CostAdmin) Disable(ctx context.Context, id int64) error {
 func (a *CostAdmin) List(ctx context.Context, q CostListQuery) ([]CostInfo, error) {
 	query, args := listCostQuery(q)
 
-	rows, err := a.db.QueryContext(ctx, query, args...)
+	rows, err := a.handle().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("查询成本规则失败: %w", err)
 	}

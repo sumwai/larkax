@@ -80,6 +80,7 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from model' -a 'list'
 complete -c larkaxctl -n '__fish_seen_subcommand_from model' -a 'get'
 complete -c larkaxctl -n '__fish_seen_subcommand_from model' -a 'update'
 complete -c larkaxctl -n '__fish_seen_subcommand_from model' -a 'delete'
+complete -c larkaxctl -n '__fish_seen_subcommand_from model' -a 'onboard'
 complete -c larkaxctl -n '__fish_seen_subcommand_from model' -a 'alias'
 complete -c larkaxctl -n '__fish_seen_subcommand_from model' -a 'trace'
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from alias' -a 'add'
@@ -303,6 +304,13 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subc
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l vision
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from delete' -l model
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from get' -l model
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l channel
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l cost-expr
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l display
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l dry-run
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l price-expr
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l update
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l upstream
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from trace' -l channel
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l audio
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l batch
