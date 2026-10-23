@@ -1720,7 +1720,8 @@ func checkDoctorInboundDangling(in doctorChainInput) doctorCheck {
 		c.findings = append(c.findings, doctorProblem{
 			headline: fmt.Sprintf("入站别名 %q 指向的规范名 %q 不在目录里", a.Alias, a.CanonicalName),
 			detail: "写入侧正常会拦这件事（model alias add 校验规范名存在），这类行来自迁移、导入或绕过命令行的写入。" +
-				"用这个别名的请求会在选路处报「查无此模型」，而那句话不会提到别名。" +
+				"用这个别名的请求会在选路处失败：调用方拿到 503「no available upstream for the requested model」" +
+				"（错误码 no_candidate_channel），那句话不会提到别名。" +
 				"处置：把模型建出来（larkaxctl model create --model " + a.CanonicalName +
 				" --display <展示名>），或者删掉这条别名（larkaxctl model alias remove " + a.Alias + "）",
 		})
