@@ -849,7 +849,11 @@ Cookie）与 `merchant` 角色；`admin` 也能进，且**不限定归属**（�
 
 ### 我的模型
 
-`GET /api/v1/merchant/models?limit=`
+`GET /api/v1/merchant/my-models?limit=`
+
+与全局的模型目录（`GET /admin/v1/models`，控制台上是 `GET /api/v1/admin/models`）
+不是同一份清单：那一条列目录里的全部规范名，不按归属过滤；这一条只列**自己
+名下渠道正在供**的模型。
 
 ```json
 {

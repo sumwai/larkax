@@ -211,3 +211,38 @@ func TestCacheStoreCopiesBlocks(t *testing.T) {
 		t.Errorf("记录被调用方后续的写改到了：命中量 = %d，期望 900", got)
 	}
 }
+
+// 过期清理与命中判据用的是同一个门槛，两处必须同向：`Resolve` 在「距上次结算
+// 正好 1 小时」时仍然认这条记录（见 TestCacheStoreRejectsTooOld 的「正好 1 小时」
+// 那一格），所以清理也不能在这一刻把它扫掉。
+//
+// 变异：`dropExpired` 的 `now.Sub(rec.SettledAt) > cacheSettleGapMax` 改成 `>=`，
+// 正好 1 小时那一刻会被删掉，而 Resolve 仍然认它——同一个时刻、同一条记录，
+// 两个判据给出相反答案，表现为「本该命中的请求下一次突然按全价估」。
+//
+// 清理挂在写入上，所以这里必须**先写一条别的记录**把 dropExpired 触起来：
+// 只写一条再查的话，清理那一步跑的时候 map 还是空的（那条记录还没进去）。
+func TestCacheStoreKeepsRecordAtExactExpiry(t *testing.T) {
+	var store CacheStore
+	p := blocks("a")
+	store.Record(1, 2, "m", CacheRecord{Blocks: p, CachedTokens: 900, SettledAt: cacheNow}, cacheNow)
+
+	// 距上次结算正好 1 小时的那一刻写入另一条：这次写入会把 dropExpired 触起来。
+	at := cacheNow.Add(cacheSettleGapMax)
+	store.Record(7, 8, "other", CacheRecord{Blocks: p, CachedTokens: 500, SettledAt: at}, at)
+
+	// 第一条此刻距结算正好 1 小时：Resolve 认它，清理也不能先把它删掉。
+	if got := store.Resolve(1, 2, "m", p, at); got != 900 {
+		t.Errorf("正好 1 小时时命中量 = %d，期望 900（Resolve 与 dropExpired 用的是同一个门槛）", got)
+	}
+
+	// 再晚 1 纳秒就过了门槛：清理该删、Resolve 也该判 0。
+	justOver := at.Add(time.Nanosecond)
+	store.Record(7, 8, "other", CacheRecord{Blocks: p, CachedTokens: 500, SettledAt: justOver}, justOver)
+	if _, ok := store.records[cacheRecordKey{APIKeyID: 1, ChannelID: 2, Model: "m"}]; ok {
+		t.Error("超过门槛 1 纳秒后过期记录还在")
+	}
+	if got := store.Resolve(1, 2, "m", p, justOver); got != 0 {
+		t.Errorf("超过 1 小时 1 纳秒时命中量 = %d，期望 0", got)
+	}
+}

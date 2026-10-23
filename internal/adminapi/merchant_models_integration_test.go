@@ -12,7 +12,7 @@ import (
 	"github.com/sumwai/larkax/internal/pricing"
 )
 
-// 本文件是 /api/v1/merchant/models 的真库用例。
+// 本文件是 /api/v1/merchant/my-models 的真库用例。
 //
 // 单测只能钉住规则计数的折行（见 merchant_models_test.go）；「归属真的进了
 // SQL」「渠道数按渠道条数算」「停用 / 软删 / 不含该名的渠道不算」这三件事
@@ -31,7 +31,7 @@ type merchantModelsResponse struct {
 
 func getModels(t *testing.T, h http.Handler, owner int64, query string) merchantModelsResponse {
 	t.Helper()
-	rec := merchantCall(t, h, owner, http.MethodGet, "/api/v1/merchant/models"+query, nil)
+	rec := merchantCall(t, h, owner, http.MethodGet, "/api/v1/merchant/my-models"+query, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("模型清单状态码 = %d；正文：%s", rec.Code, rec.Body)
 	}
@@ -106,7 +106,7 @@ func TestMerchantModelsEmptyMerchant(t *testing.T) {
 	db := testDB(t)
 	owner := seedUser(t, db, "m-models-empty-")
 
-	rec := merchantCall(t, h, owner, http.MethodGet, "/api/v1/merchant/models", nil)
+	rec := merchantCall(t, h, owner, http.MethodGet, "/api/v1/merchant/my-models", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("状态码 = %d；正文：%s", rec.Code, rec.Body)
 	}
@@ -213,7 +213,7 @@ func TestMerchantModelsOrdersAndLimits(t *testing.T) {
 	}
 	for _, bad := range []string{"?limit=0", "?limit=201", "?limit=abc"} {
 		rec := merchantCall(t, h, owner, http.MethodGet,
-			"/api/v1/merchant/models"+bad, nil)
+			"/api/v1/merchant/my-models"+bad, nil)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("%s 状态码 = %d，期望 400", bad, rec.Code)
 		}
@@ -284,7 +284,7 @@ func TestMerchantModelsPriced(t *testing.T) {
 	}
 
 	// 这一列是布尔而不是 null：页面直接读 true/false。
-	rec := merchantCall(t, h, ownerA, http.MethodGet, "/api/v1/merchant/models", nil)
+	rec := merchantCall(t, h, ownerA, http.MethodGet, "/api/v1/merchant/my-models", nil)
 	var raw struct {
 		Items []map[string]any `json:"items"`
 	}
