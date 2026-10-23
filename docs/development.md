@@ -804,7 +804,9 @@ stdout 只有新渠道的 ID，其余信息走 stderr。
 等人去查代码。所以管理面在**写入成功之后**（`channel create`，以及给了
 `--setting` 或 `--type` 的 `channel update`）与 `channel list` 上，按这条渠道的
 `type` 逐键点名：键名拼错的、别的 `type` 的、这个 `type` 还没接的，都在这句话
-里。判据是 `internal/channel` 的 `settingKeysByType`（类型 → 它认的键），它由
+里；内层键跟着外层一起点，写成 `usage.completion_includes_reasoning` 这样的
+点号路径。判据是 `internal/channel` 的 `settingKeysByType`（类型 → 它认的键，
+分顶层与内层两层），它由
 同包的用例与实际读键的代码双向核对（见 `internal/channel/setting_test.go`）：
 表里声明了却没人在读、或者有人读了而表里没写，两种都会让用例失败。读者按
 **目录集合**算：`openai`、`anthropic` 与 `openai-responses` 除了各自的适配器

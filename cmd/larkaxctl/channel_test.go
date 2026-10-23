@@ -504,12 +504,14 @@ func without(args []string, name string) []string {
 // 从命令行看，「配了但不生效」与「配了就生效」长得一模一样——两边都成功、
 // 清单里都有那一行。所以不生效这件事必须在**写入的那一刻**说出来。
 //
-// 四条判据，缺一条这句话都会以某种方式失效：
+// 五条判据，缺一条这句话都会以某种方式失效：
 //
 //  1. 给了 --setting 且键没有读者时提示出现（create 与 update 两条写入路径都要）；
 //  2. 它走 stderr——stdout 上那一行（create 是 ID）要能被脚本直接接走；
 //  3. 没碰 setting 也不碰 type 的 update 不打，否则它很快变成背景音；
-//  4. list 把这样的行点出来——否则事后核对配置时完全看不出来。
+//  4. list 把这样的行点出来——否则事后核对配置时完全看不出来；
+//  5. 内层键同样点名，且配置照原样落库——它写错时命令返回 0、输出与写对时
+//     一样，这句话是唯一能看见的信号。
 //
 // 「有没有读者」按渠道类型判（见 TestChannelSettingNoteJudgesByType），所以
 // 这里刻意用 openai 渠道配一个它不认识的键：这条用例不依赖某个键今天恰好
@@ -573,6 +575,64 @@ func TestChannelSettingPrintsUnreadNote(t *testing.T) {
 	if !strings.Contains(listOut, "「"+unknownKey+"」") {
 		t.Errorf("list 只说了这条渠道配过 setting，没点名是哪个键没有读者：\n%s", listOut)
 	}
+
+	// 五、内层键同样要在写入成功之后被点出来，而配置照原样落库——提示说的
+	// 是「没有读者」，不是「不存」。内层键写错时，命令返回 0、输出与写对时
+	// 没有区别，所以这句话是唯一能看见的信号。
+	innerID, _, innerStderr := createChannelWithSetting(t, "openai",
+		`{"usage":{"completion_include_reasoning":false}}`)
+	const innerUnknown = "usage.completion_include_reasoning"
+	if !strings.Contains(innerStderr, "「"+innerUnknown+"」") {
+		t.Errorf("create 没有点出拼错的内层键：\n%s", innerStderr)
+	}
+	block, ok := findChannel(t, db, innerID).Setting["usage"].(map[string]any)
+	if !ok || block["completion_include_reasoning"] != false {
+		t.Errorf("内层配置没有原样落库：%v", findChannel(t, db, innerID).Setting)
+	}
+}
+
+// TestChannelListNamesUnreadInnerSettingKey 检查清单对**内层**键的记号。
+//
+// 单开一条用例是为了让红证落在这一格上：写入路径与清单用的是同一句话
+// （见 channel.SettingUnreadNote），但那句话被内层覆盖之前，清单这一侧
+// 只会说出顶层的键——一条内层键拼错的渠道在库里、在清单上都与一条配对了
+// 的一模一样。
+//
+// 两个方向各建一条渠道、各自断言：拼错的内层键要点名，写对的内层键不能被
+// 误报。只钉正向的话，「把所有内层键都当成没声明」的实现在清单这一侧照样
+// 绿，而写对的内层键被点名比不说更坏——读的人会照着把生效的配置删掉。
+func TestChannelListNamesUnreadInnerSettingKey(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	badID, _, _ := createChannelWithSetting(t, "openai",
+		`{"usage":{"completion_include_reasoning":false}}`)
+	goodID, _, _ := createChannelWithSetting(t, "openai",
+		`{"usage":{"completion_includes_reasoning":false}}`)
+	badArg := strconv.FormatInt(badID, 10)
+	goodArg := strconv.FormatInt(goodID, 10)
+	listOut, _ := captureStreams(t, func() {
+		if listErr := runChannelList(nil); listErr != nil {
+			t.Fatalf("list 失败: %v", listErr)
+		}
+	})
+	// 正向：拼错的那条渠道被点出来，点名的是点号路径。
+	const badKey = "usage.completion_include_reasoning"
+	if !strings.Contains(listOut, "渠道 "+badArg+" 配了 setting") {
+		t.Errorf("list 没有点出内层键拼错的渠道 %s：\n%s", badArg, listOut)
+	}
+	if !strings.Contains(listOut, "「"+badKey+"」") {
+		t.Errorf("list 没有点名拼错的内层键 %s：\n%s", badKey, listOut)
+	}
+	// 反向：写对的那条渠道不该有记号，整份清单里也不该出现它那个键名。
+	// 名字只差一个 s，所以这两句不会互相顶替（见 badKey）。
+	const goodKey = "usage.completion_includes_reasoning"
+	if strings.Contains(listOut, "渠道 "+goodArg+" 配了 setting") {
+		t.Errorf("写对的内层键被误报成没有读者（渠道 %s）：\n%s", goodArg, listOut)
+	}
+	if strings.Contains(listOut, "「"+goodKey+"」") {
+		t.Errorf("清单里对合法的内层键 %s 打了点名：\n%s", goodKey, listOut)
+	}
 }
 
 // TestChannelSettingNoteJudgesByType 检查判据落在这条渠道的 type 上。
@@ -622,6 +682,27 @@ func TestChannelSettingNoteJudgesByType(t *testing.T) {
 			typ:      "openai",
 			setting:  `{"reasoning_effort_map":{"none":"off"},"future_key":true}`,
 			wantKeys: []string{"future_key"},
+		},
+		{
+			// 内层键写对时零提示：这句话在生效的配置上也冒出来，用户很快
+			// 就会学会无视它。
+			name:    "usage 的内层键写对",
+			typ:     "openai",
+			setting: `{"usage":{"completion_includes_reasoning":false}}`,
+		},
+		{
+			// 少一个 s：命令照样成功，但要当场点名，点的是点号路径。
+			name:     "usage 的内层键拼错",
+			typ:      "openai",
+			setting:  `{"usage":{"completion_include_reasoning":false}}`,
+			wantKeys: []string{"usage.completion_include_reasoning"},
+		},
+		{
+			// 值的形状没有判据：整块不是对象时按「没声明」处理，不新增
+			// 报错，也不点名。
+			name:    "usage 整块不是对象",
+			typ:     "openai",
+			setting: `{"usage":"completion_includes_reasoning=false"}`,
 		},
 	}
 
