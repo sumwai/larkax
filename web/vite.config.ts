@@ -1,6 +1,7 @@
 import { loadEnv } from 'vite'
-import { defineConfig } from 'vitest/config'
+import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 
 /**
  * 从网关的监听地址里取端口。
@@ -30,7 +31,7 @@ export default defineConfig(({ mode, command }) => {
   }
 
   return {
-    plugins: [react()],
+    plugins: [react(), tailwindcss()],
     server: {
       port: 5173,
       proxy: {
@@ -39,16 +40,22 @@ export default defineConfig(({ mode, command }) => {
           changeOrigin: false,
         },
       },
+      "allowedHosts": ["larkax.dev"]
     },
     build: {
       outDir: 'dist',
       emptyOutDir: true,
-    },
-    test: {
-      environment: 'jsdom',
-      setupFiles: './src/test/setup.ts',
-      css: false,
-      include: ['src/**/*.test.{ts,tsx}'],
+      rollupOptions: {
+        output: {
+          // 路由分包：consumer / merchant / admin 三块各自成 chunk，
+          // 避免单个入口把 19 个页面全部装进一个文件。
+          manualChunks(id: string) {
+            if (!id.includes('/src/pages/')) return undefined
+            if (id.includes('/pages/ops/') || id.includes('/pages/admin/')) return 'ops'
+            return 'app'
+          },
+        },
+      },
     },
   }
 })

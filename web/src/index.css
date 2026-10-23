@@ -1,0 +1,563 @@
+/* ══════════════════════════════════════════════════════════════════
+   设计 token 的唯一手写处（基准：p.larkax.com/shadcn.html 第 1 节）。
+
+   分两层：
+   1. 基础色阶与语义 token —— 只在这里出现色值，组件不写色值；
+   2. @theme inline —— 把语义 token 映射成 Tailwind 工具类
+      （bg-primary、text-muted-foreground、border-border…）。
+
+   语义值随 [data-theme] 切换，工具类不用写 dark: 前缀。
+   ══════════════════════════════════════════════════════════════════ */
+
+@import 'tailwindcss';
+
+/* 主题切换由 ThemeProvider 写 data-theme；跟随系统时不写属性。 */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/* ── 1a. 基础色阶 ──────────────────────────────────────────────── */
+:root {
+  color-scheme: light;
+
+  --gray-25: #fbfcfd;
+  --gray-50: #f7f8fa;
+  --gray-100: #f1f3f7;
+  --gray-200: #e4e8ef;
+  --gray-300: #d3d9e3;
+  --gray-400: #b3bccd;
+  --gray-500: #8b93a5;
+  --gray-600: #5b6577;
+  --gray-700: #414b5c;
+  --gray-800: #2a3341;
+  --gray-900: #171e2b;
+  --gray-950: #0b0e14;
+
+  --green-50: #e7f6f1;
+  --green-100: #c9ebdf;
+  --green-500: #0e9f6e;
+  --green-600: #0b8a5f;
+  --green-700: #096f4d;
+
+  --amber-50: #fff7ed;
+  --amber-100: #ffedd5;
+  --amber-500: #f59e0b;
+  --amber-600: #b45309;
+  --amber-700: #92400e;
+
+  --red-50: #feeceb;
+  --red-100: #fdd8d5;
+  --red-500: #e0392b;
+  --red-600: #d92d20;
+  --red-700: #b42318;
+
+  --blue-50: #eff6ff;
+  --blue-500: #2563eb;
+  --blue-600: #1d4ed8;
+
+  /* ── 1b. 语义色：组件只读这一层 ──────────────────────────────── */
+  --background: var(--gray-50);
+  --foreground: var(--gray-900);
+  --card: var(--gray-25);
+  --card-foreground: var(--gray-900);
+  --popover: #ffffff;
+  --popover-foreground: var(--gray-900);
+  --muted: var(--gray-100);
+  --muted-surface: var(--gray-100);
+  --muted-foreground: var(--gray-600);
+  /* gray-500 只有 3.0 的对比度，这一档承载 12px 时间戳与轴标 */
+  --faint-foreground: #66718a;
+  --border: var(--gray-200);
+  --border-strong: var(--gray-300);
+  --input: var(--gray-300);
+
+  /* 强调色用中性：浅色黑底白字，深色白底黑字。彩色只留给状态与图表 */
+  --primary: var(--gray-900);
+  --primary-hover: var(--gray-800);
+  --primary-foreground: #ffffff;
+  --primary-soft: var(--gray-100);
+  --ring: var(--gray-700);
+
+  --secondary: var(--gray-100);
+  --secondary-hover: var(--gray-200);
+  --secondary-foreground: var(--gray-800);
+
+  --success: var(--green-600);
+  --success-soft: var(--green-50);
+  --success-border: var(--green-100);
+  --success-strong: #096f4d;
+  --warning: var(--amber-600);
+  --warning-soft: var(--amber-50);
+  --warning-border: var(--amber-100);
+  --warning-strong: #92400e;
+  --danger: var(--red-600);
+  --danger-hover: var(--red-700);
+  --danger-soft: var(--red-50);
+  --danger-border: var(--red-100);
+  --danger-strong: #b42318;
+  --info: var(--blue-600);
+  --info-soft: var(--blue-50);
+  --info-strong: #1d4ed8;
+
+  --overlay: rgb(14 21 37 / 0.45);
+  --code-bg: #0f172a;
+  --code-fg: #e2e8f0;
+  --code-muted: #94a3b8;
+
+  --chart-1: #6b7689;
+  --chart-2: #8b93a5;
+  --chart-3: #b3bccd;
+  --chart-4: var(--blue-600);
+  --chart-5: var(--amber-500);
+  --chart-6: var(--green-600);
+
+  /* ── 1c. 间距与尺寸 ──────────────────────────────────────────── */
+  --sp-0h: 2px;
+  --sp-1: 4px;
+  --sp-1h: 6px;
+  --sp-2: 8px;
+  --sp-2h: 10px;
+  --sp-3: 12px;
+  --sp-3h: 14px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-7: 28px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+  --sp-16: 64px;
+
+  --shell-side: 232px;
+  --shell-rail: 64px;
+  --topbar-h: 56px;
+  --bottomnav-h: 64px;
+  --content-max: 1240px;
+  --touch: 44px;
+  --control-h: 36px;
+  --control-h-sm: 30px;
+  --control-h-lg: 40px;
+
+  /* ── 1d. 圆角、阴影、动效 ────────────────────────────────────── */
+  --r-xs: 6px;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+  --r-full: 999px;
+  --r-control: var(--r-sm);
+  --r-card: var(--r-lg);
+  --r-overlay: var(--r-md);
+  --shadow-xs: 0 1px 2px rgb(16 24 40 / 0.05);
+  --shadow-sm: 0 1px 3px rgb(16 24 40 / 0.07), 0 1px 2px rgb(16 24 40 / 0.04);
+  --shadow-md: 0 6px 18px rgb(16 24 40 / 0.09);
+  --shadow-lg: 0 18px 44px rgb(16 24 40 / 0.16);
+  --shadow-sheet: 0 -12px 40px rgb(16 24 40 / 0.16);
+
+  --dur-fast: 120ms;
+  --dur: 180ms;
+  --dur-slow: 240ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* ── 1e. 字体 ────────────────────────────────────────────────── */
+  --font-sans:
+    Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* ── 1f. 层级：数字只出现在这里 ──────────────────────────────── */
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-chrome: 20;
+  --z-dropdown: 30;
+  --z-drawer: 40;
+  --z-sheet: 50;
+  --z-modal: 60;
+  --z-toast: 70;
+  --z-tooltip: 80;
+  --z-skip: 90;
+
+  /* ── 1g. 键盘与焦点、控件细节 ────────────────────────────────── */
+  --focus-width: 2px;
+  --focus-offset: 2px;
+  --focus-color: var(--ring);
+  --kbd-h: 20px;
+  --kbd-bg: var(--gray-100);
+  --kbd-border: var(--gray-300);
+  --kbd-fg: var(--gray-700);
+  --kbd-radius: 5px;
+  --switch-thumb: #ffffff;
+  --tint-blue: color-mix(in oklab, var(--blue-500) 22%, var(--card));
+  --tint-green: color-mix(in oklab, var(--green-500) 24%, var(--card));
+  --tint-amber: color-mix(in oklab, var(--amber-500) 26%, var(--card));
+  --control-active-bg: var(--gray-900);
+  --control-active-fg: #ffffff;
+  --progress-fill: var(--gray-900);
+}
+
+/* ── 1h. 深色：显式选择 ────────────────────────────────────────── */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --background: #0b0e14;
+  --foreground: #e8ebf2;
+  --card: #121722;
+  --card-foreground: #e8ebf2;
+  --popover: #182030;
+  --popover-foreground: #e8ebf2;
+  --muted: #182030;
+  --muted-surface: #182030;
+  --muted-foreground: #9aa4b8;
+  --faint-foreground: #7a8598;
+  --border: #232b3b;
+  --border-strong: #303b50;
+  --input: #303b50;
+
+  --primary: var(--gray-100);
+  --primary-hover: var(--gray-300);
+  --primary-foreground: #0b0e14;
+  --primary-soft: #202a3d;
+  --ring: var(--gray-300);
+
+  --secondary: #182030;
+  --secondary-hover: #202a3d;
+  --secondary-foreground: #d5dbe7;
+
+  --success: #34d399;
+  --success-soft: #10281f;
+  --success-border: #14402f;
+  --success-strong: #34d399;
+  --warning: #fbbf24;
+  --warning-soft: #2a1f0d;
+  --warning-border: #3d2c10;
+  --warning-strong: #fbbf24;
+  --danger: #f87171;
+  --danger-hover: #fca5a5;
+  --danger-soft: #2a1414;
+  --danger-border: #401c1c;
+  --danger-strong: #f87171;
+  --info: #60a5fa;
+  --info-soft: #0f1c33;
+  --info-strong: #60a5fa;
+
+  --overlay: rgb(4 7 12 / 0.66);
+  --code-bg: #070a11;
+  --code-fg: #e2e8f0;
+
+  --chart-1: #6a7486;
+  --chart-2: #7a8598;
+  --chart-3: #5b6577;
+  --chart-4: #60a5fa;
+  --chart-5: #fbbf24;
+  --chart-6: #34d399;
+
+  --kbd-bg: #182030;
+  --kbd-border: #303b50;
+  --kbd-fg: #cbd5e1;
+  --switch-thumb: #9aa4b8;
+  --control-active-bg: var(--gray-600);
+  --control-active-fg: #ffffff;
+  --progress-fill: #6b7689;
+
+  --shadow-xs: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-sm: 0 1px 3px rgb(0 0 0 / 0.45);
+  --shadow-md: 0 6px 18px rgb(0 0 0 / 0.45);
+  --shadow-lg: 0 18px 44px rgb(0 0 0 / 0.55);
+  --shadow-sheet: 0 -12px 40px rgb(0 0 0 / 0.5);
+}
+
+/* ── 1i. 深色：跟随系统（未显式选择时） ────────────────────────── */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --background: #0b0e14;
+    --foreground: #e8ebf2;
+    --card: #121722;
+    --card-foreground: #e8ebf2;
+    --popover: #182030;
+    --popover-foreground: #e8ebf2;
+    --muted: #182030;
+    --muted-surface: #182030;
+    --muted-foreground: #9aa4b8;
+    --faint-foreground: #7a8598;
+    --border: #232b3b;
+    --border-strong: #303b50;
+    --input: #303b50;
+    --primary: var(--gray-100);
+    --primary-hover: var(--gray-300);
+    --primary-foreground: #0b0e14;
+    --primary-soft: #202a3d;
+    --ring: var(--gray-300);
+    --secondary: #182030;
+    --secondary-hover: #202a3d;
+    --secondary-foreground: #d5dbe7;
+    --success: #34d399;
+    --success-soft: #10281f;
+    --success-border: #14402f;
+    --success-strong: #34d399;
+    --warning: #fbbf24;
+    --warning-soft: #2a1f0d;
+    --warning-border: #3d2c10;
+    --warning-strong: #fbbf24;
+    --danger: #f87171;
+    --danger-hover: #fca5a5;
+    --danger-soft: #2a1414;
+    --danger-border: #401c1c;
+    --danger-strong: #f87171;
+    --info: #60a5fa;
+    --info-soft: #0f1c33;
+    --info-strong: #60a5fa;
+    --overlay: rgb(4 7 12 / 0.66);
+    --code-bg: #070a11;
+    --code-fg: #e2e8f0;
+    --chart-1: #6a7486;
+    --chart-2: #7a8598;
+    --chart-3: #5b6577;
+    --chart-4: #60a5fa;
+    --chart-5: #fbbf24;
+    --chart-6: #34d399;
+    --kbd-bg: #182030;
+    --kbd-border: #303b50;
+    --kbd-fg: #cbd5e1;
+    --switch-thumb: #9aa4b8;
+    --control-active-bg: var(--gray-600);
+    --control-active-fg: #ffffff;
+    --progress-fill: #6b7689;
+    --shadow-xs: 0 1px 2px rgb(0 0 0 / 0.4);
+    --shadow-sm: 0 1px 3px rgb(0 0 0 / 0.45);
+    --shadow-md: 0 6px 18px rgb(0 0 0 / 0.45);
+    --shadow-lg: 0 18px 44px rgb(0 0 0 / 0.55);
+    --shadow-sheet: 0 -12px 40px rgb(0 0 0 / 0.5);
+  }
+}
+
+/* ── 2. Tailwind 映射：语义 token → 工具类 ─────────────────────── */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-muted: var(--muted);
+  --color-muted-surface: var(--muted-surface);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-faint: var(--faint-foreground);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-input: var(--input);
+
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-soft: var(--primary-soft);
+  --color-ring: var(--ring);
+
+  --color-secondary: var(--secondary);
+  --color-secondary-hover: var(--secondary-hover);
+  --color-secondary-foreground: var(--secondary-foreground);
+
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-success-border: var(--success-border);
+  --color-success-strong: var(--success-strong);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-border: var(--warning-border);
+  --color-warning-strong: var(--warning-strong);
+  --color-danger: var(--danger);
+  --color-danger-hover: var(--danger-hover);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-border: var(--danger-border);
+  --color-danger-strong: var(--danger-strong);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-info-strong: var(--info-strong);
+
+  --color-overlay: var(--overlay);
+  --color-code-bg: var(--code-bg);
+  --color-code-fg: var(--code-fg);
+  --color-code-muted: var(--code-muted);
+
+  --color-control-active-bg: var(--control-active-bg);
+  --color-control-active-fg: var(--control-active-fg);
+
+  --color-kbd-bg: var(--kbd-bg);
+  --color-kbd-border: var(--kbd-border);
+  --color-kbd-fg: var(--kbd-fg);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+
+  /* 基础色阶也进映射，图表与插画之外的用途先过评审 */
+  --color-gray-25: var(--gray-25);
+  --color-gray-50: var(--gray-50);
+  --color-gray-100: var(--gray-100);
+  --color-gray-200: var(--gray-200);
+  --color-gray-300: var(--gray-300);
+  --color-gray-400: var(--gray-400);
+  --color-gray-500: var(--gray-500);
+  --color-gray-600: var(--gray-600);
+  --color-gray-700: var(--gray-700);
+  --color-gray-800: var(--gray-800);
+  --color-gray-900: var(--gray-900);
+  --color-gray-950: var(--gray-950);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  /* 字号：与行高成对给，不单独指定行高 */
+  --text-2xs: 11px;
+  --text-2xs--line-height: 16px;
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 13px;
+  --text-sm--line-height: 20px;
+  --text-base: 14px;
+  --text-base--line-height: 22px;
+  --text-md: 16px;
+  --text-md--line-height: 24px;
+  --text-lg: 20px;
+  --text-lg--line-height: 28px;
+  --text-xl: 24px;
+  --text-xl--line-height: 32px;
+  --text-2xl: 30px;
+  --text-2xl--line-height: 38px;
+
+  --spacing: 4px;
+
+  --radius-xs: var(--r-xs);
+  --radius-sm: var(--r-sm);
+  --radius-md: var(--r-md);
+  --radius-lg: var(--r-lg);
+  --radius-xl: var(--r-xl);
+
+  --breakpoint-sm: 520px;
+  --breakpoint-md: 760px;
+  --breakpoint-lg: 980px;
+  --breakpoint-xl: 1240px;
+
+  --shadow-xs: var(--shadow-xs);
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-sheet: var(--shadow-sheet);
+
+  --ease-out-soft: var(--ease);
+
+  --animate-spin-slow: spin 0.7s linear infinite;
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+}
+
+/* ── 3. 层级与少量全局工具 ─────────────────────────────────────── */
+@utility z-sticky {
+  z-index: var(--z-sticky);
+}
+@utility z-chrome {
+  z-index: var(--z-chrome);
+}
+@utility z-dropdown {
+  z-index: var(--z-dropdown);
+}
+@utility z-drawer {
+  z-index: var(--z-drawer);
+}
+@utility z-sheet {
+  z-index: var(--z-sheet);
+}
+@utility z-modal {
+  z-index: var(--z-modal);
+}
+@utility z-toast {
+  z-index: var(--z-toast);
+}
+@utility z-tooltip {
+  z-index: var(--z-tooltip);
+}
+@utility z-skip {
+  z-index: var(--z-skip);
+}
+
+@utility tracking-caps {
+  letter-spacing: 0.04em;
+}
+
+@utility mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+@utility num {
+  font-variant-numeric: tabular-nums;
+}
+
+@utility text-caps {
+  font-size: var(--text-2xs);
+  font-weight: var(--fw-semibold, 600);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* ── 4. Base ───────────────────────────────────────────────────── */
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: 22px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background: var(--primary-soft);
+  }
+
+  :focus-visible {
+    outline: var(--focus-width) solid var(--focus-color);
+    outline-offset: var(--focus-offset);
+    border-radius: var(--r-xs);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  p {
+    margin: 0;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+
+  [hidden] {
+    display: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -4,7 +4,7 @@ import { useI18n } from '../i18n'
 import { detectLang } from '../i18n/lang'
 import { en } from '../i18n/en'
 import { zh } from '../i18n/zh'
-import { CopyButton } from './ui'
+import { Button, Card, CopyButton } from './ui'
 
 export interface BoundaryDetail {
   /** 被抛出的原值。`throw` 不要求是 Error，所以类型是 unknown。 */
@@ -28,9 +28,6 @@ interface BoundaryState {
  * 只接 React 渲染、生命周期与构造函数里抛出的异常。事件处理器里的异常、
  * Promise 的 rejection、以及这个边界自己渲染 fallback 时抛的错都不在它的
  * 范围内——最后一种要靠更外层的边界接。
- *
- * React 18 会把懒加载 chunk 的下载失败当作渲染期异常抛回来，所以这一类
- * 会被它接住；本项目目前没有懒路由，这条只是说明适用范围。
  */
 export class ErrorBoundary extends Component<BoundaryProps, BoundaryState> {
   state: BoundaryState = { caught: null }
@@ -96,22 +93,22 @@ function RouteErrorPage({ detail, pathname }: { detail: BoundaryDetail; pathname
   })
 
   return (
-    <div className="card panel error-page" role="alert">
+    <Card role="alert" className="flex flex-col gap-4 p-6">
       <div>
-        <h1 className="error-page-title">{t('errors.renderTitle')}</h1>
-        <p className="error-page-body">{t('errors.renderBody')}</p>
+        <h1 className="text-lg font-semibold tracking-tight">{t('errors.renderTitle')}</h1>
+        <p className="mt-1 text-sm text-muted-foreground">{t('errors.renderBody')}</p>
       </div>
-      <div className="error-page-actions">
-        <button type="button" className="btn" onClick={() => window.location.reload()}>
-          {t('errors.reload')}
-        </button>
-        <CopyButton text={diagnostics} label={t('errors.copyDiagnostics')} />
+      <div className="flex items-center gap-2">
+        <Button onClick={() => window.location.reload()}>{t('errors.reload')}</Button>
+        <CopyButton value={diagnostics} label={t('errors.copyDiagnostics')} />
       </div>
       <div>
-        <div className="error-page-label">{t('errors.diagnostics')}</div>
-        <pre className="error-page-diagnostics">{diagnostics}</pre>
+        <div className="pb-1 text-caps text-faint">{t('errors.diagnostics')}</div>
+        <pre className="overflow-x-auto rounded-sm bg-muted p-3 font-mono text-xs leading-5">
+          {diagnostics}
+        </pre>
       </div>
-    </div>
+    </Card>
   )
 }
 
@@ -140,22 +137,22 @@ function FatalErrorPage({ detail }: { detail: BoundaryDetail }) {
   })
 
   return (
-    <div className="auth-page">
-      <div className="card auth-card" role="alert">
-        <div className="auth-head">
-          <h1 className="error-page-title">{text['errors.fatalTitle']}</h1>
-          <p className="error-page-body">{text['errors.fatalBody']}</p>
-        </div>
-        <div className="error-page-actions">
-          <button type="button" className="btn" onClick={() => window.location.reload()}>
-            {text['errors.reload']}
-          </button>
-        </div>
+    <div className="grid min-h-dvh place-items-center bg-background px-4">
+      <Card role="alert" className="w-full max-w-md p-6">
         <div>
-          <div className="error-page-label">{text['errors.diagnostics']}</div>
-          <pre className="error-page-diagnostics">{diagnostics}</pre>
+          <h1 className="text-lg font-semibold tracking-tight">{text['errors.fatalTitle']}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">{text['errors.fatalBody']}</p>
         </div>
-      </div>
+        <div className="mt-4">
+          <Button onClick={() => window.location.reload()}>{text['errors.reload']}</Button>
+        </div>
+        <div className="mt-4">
+          <div className="pb-1 text-caps text-faint">{text['errors.diagnostics']}</div>
+          <pre className="overflow-x-auto rounded-sm bg-muted p-3 font-mono text-xs leading-5">
+            {diagnostics}
+          </pre>
+        </div>
+      </Card>
     </div>
   )
 }

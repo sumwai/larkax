@@ -14,7 +14,7 @@ import { ThemeProvider } from './theme/ThemeProvider'
 import { AppShell } from './components/AppShell'
 import { FatalErrorBoundary, RootRouteError } from './components/ErrorBoundary'
 import { MockBanner } from './components/MockBanner'
-import { Alert, Button, ToastProvider } from './components/ui'
+import { Alert, AppToaster, Banner, Button, Card, Spinner } from './components/ui'
 import { viewAllowed, viewOfPath, type View } from './ops/views'
 import { OpsChannels } from './pages/ops/Channels'
 import { OpsModels } from './pages/ops/Catalog'
@@ -40,9 +40,9 @@ import { MerchantAccount } from './pages/MerchantAccount'
 function LoadingScreen() {
   const { t } = useI18n()
   return (
-    <div className="auth-page">
-      <div className="loading">
-        <span className="spin" aria-hidden="true" />
+    <div className="grid min-h-dvh place-items-center bg-background">
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <Spinner />
         {t('common.loading')}
       </div>
     </div>
@@ -60,14 +60,15 @@ function SessionExpiredNotice() {
   const { t } = useI18n()
   const leaveRef = useUnsavedLeaveRef()
   return (
-    <div className="session-expired-bar">
-      <Alert tone="warn" title={t('ops.sessionExpiredTitle')}>
+    <Banner tone="danger">
+      <span className="min-w-0 flex-1">
+        <b className="font-semibold">{t('ops.sessionExpiredTitle')}</b>{' '}
         {t('ops.sessionExpiredBody')}{' '}
-        <Button variant="secondary" onClick={() => leaveRef.current?.()}>
+        <Button variant="secondary" size="sm" onClick={() => leaveRef.current?.()}>
           {t('ops.sessionExpiredSignIn')}
         </Button>
-      </Alert>
-    </div>
+      </span>
+    </Banner>
   )
 }
 
@@ -87,17 +88,14 @@ function RequireAuth({ children }: { children: ReactNode }) {
   const dirty = useUnsavedChanges()
   // 只有「会话过期」才在原地问一句。用户自己点退出登录是另一回事：既有行为是
   // 直接换页——门槛返回 `<Navigate>`，页面连阻止器一起先卸载，没保存的改动会丢。
-  // 这一单不改那条路，只是别把它说成「会被拦住」。
   const defer = sessionExpired && dirty
   if (status === 'loading') return <LoadingScreen />
   if (status === 'anonymous' && !defer) {
     return <Navigate to={loginPath(location)} replace />
   }
   // 这个形状必须是固定的：第一个位置永远是横幅（没有就是 null），第二个位置永远
-  // 是页面子树。若把横幅按条件插在前面（第一版就是这么写的），React 按位置对账
-  // 会把原来的页面换成横幅、再在下一个位置挂一棵**新的**页面子树——表单内容和
-  // 脏状态全丢，正是这里要避免的那种「先卸载再问」。这个错是「选留下，表单还在」
-  // 那条用例抓到的（当时 dump 里 RequireAuth 连着渲染了 anonymous true / false 两次）。
+  // 是页面子树。若把横幅按条件插在前面，React 按位置对账会把原来的页面换成
+  // 横幅、再在下一个位置挂一棵新的页面子树——表单内容和脏状态全丢。
   return (
     <>
       {defer ? <SessionExpiredNotice /> : null}
@@ -114,8 +112,7 @@ function RequireAuth({ children }: { children: ReactNode }) {
  *
  * 会话过期期间一律放行：那一刻 `user` 已经变成 null，按角色判会换成「没有权限」，
  * 页面先被卸掉，脏状态跟着归零，`RequireAuth` 与 `RouteBlocker` 就再没机会问那
- * 一句了（admin / merchant 的页面整条路都会这样断掉）。放过这段只影响「画不画」，
- * 不多给任何权限——服务端该拒的照样拒。
+ * 一句了。放过这段只影响「画不画」，不多给任何权限——服务端该拒的照样拒。
  */
 function RequireView({ view, children }: { view: View; children: ReactNode }) {
   const { user, sessionExpired } = useAuth()
@@ -125,9 +122,9 @@ function RequireView({ view, children }: { view: View; children: ReactNode }) {
   // 渠道与计价仍然只对商家开放，所以不能只看传进来的视图名。
   if (!sessionExpired && (viewOfPath(pathname) !== view || !viewAllowed(user?.role, pathname))) {
     return (
-      <Alert tone="bad" title={t('ops.noAccess')}>
+      <Alert tone="danger" title={t('ops.noAccess')}>
         {t('ops.noAccessNext')}{' '}
-        <Link className="btn secondary sm" to="/app">
+        <Link to="/app" className="font-medium underline underline-offset-2">
           {t('ops.backToOverview')}
         </Link>
       </Alert>
@@ -139,13 +136,15 @@ function RequireView({ view, children }: { view: View; children: ReactNode }) {
 function NotFound() {
   const { t } = useI18n()
   return (
-    <div className="auth-page">
-      <div className="card auth-card" style={{ textAlign: 'center' }}>
-        <h1 style={{ fontSize: 22 }}>{t('errors.notFound')}</h1>
-        <Link className="btn secondary" to="/">
-          {t('login.backHome')}
-        </Link>
-      </div>
+    <div className="grid min-h-dvh place-items-center bg-background px-4">
+      <Card className="w-full max-w-sm p-6 text-center">
+        <h1 className="text-lg font-semibold tracking-tight">{t('errors.notFound')}</h1>
+        <div className="mt-4">
+          <Link to="/" className="text-sm underline underline-offset-2">
+            {t('login.backHome')}
+          </Link>
+        </div>
+      </Card>
     </div>
   )
 }
@@ -156,8 +155,7 @@ function NotFound() {
  * 根上那一条不带路径，只做两件事：包住所有页面、给整棵树一个错误页。
  * 路由级异常先落到 `/app` 里的 `RouteErrorBoundary`（外壳还在，用户能切走）；
  * 根级页面（落地页、登录页、404）没有内层边界，由这里的 `errorElement` 接住，
- * 显示与最外层 `FatalErrorBoundary` 同一个「致命错误页」——当初挂在
- * `<BrowserRouter>` 外面时就是这个行为，转 data router 不该把它丢掉。
+ * 显示与最外层 `FatalErrorBoundary` 同一个「致命错误页」。
  */
 const ROUTES: RouteObject[] = [
   {
@@ -310,18 +308,17 @@ export function App() {
     <FatalErrorBoundary>
       <I18nProvider>
         <ThemeProvider>
-          <ToastProvider>
-            <SiteProvider>
-              <AuthProvider>
-                {/* 脏状态登记处：页面登记、门槛读（见 `RequireAuth`）。 */}
-                <UnsavedGuardProvider>
-                  {/* 演示横幅不读路由，放在 RouterProvider 外面，位置与原来一致。 */}
-                  <MockBanner />
-                  <RouterProvider router={router} />
-                </UnsavedGuardProvider>
-              </AuthProvider>
-            </SiteProvider>
-          </ToastProvider>
+          <SiteProvider>
+            <AuthProvider>
+              {/* 脏状态登记处：页面登记、门槛读（见 `RequireAuth`）。 */}
+              <UnsavedGuardProvider>
+                {/* 演示横幅与轻提示不读路由，放在 RouterProvider 外面。 */}
+                <MockBanner />
+                <AppToaster />
+                <RouterProvider router={router} />
+              </UnsavedGuardProvider>
+            </AuthProvider>
+          </SiteProvider>
         </ThemeProvider>
       </I18nProvider>
     </FatalErrorBoundary>
