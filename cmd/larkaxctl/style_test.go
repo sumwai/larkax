@@ -273,12 +273,18 @@ func helpTextRounding(s string) string {
 	return strings.ReplaceAll(s, "\x1b[0m", "«/»")
 }
 
-// helpTextsForStyling 收齐包内全部帮助文本：根帮助页，加上每个 `*Usage` 常量。
+// helpTextsForStyling 收齐包内全部帮助文本：根帮助页，加上每个 `*Usage` 常量，
+// 以及带占位符的 `*UsageTemplate`（见下）。
 //
 // 按**常量名**扫而不是逐条罗列：帮助文本有四十来份，罗列的那一份与新加一条命令
 // 时漏掉的那一份都看不出来（与 renderpaths_test.go 里那张豁免表同一个口径）。
 // 扫常量而不是扫今天能走到的那几处调用点，比后者严：文本是包级的，将来多一条
 // 打印路径不会绕过这几条用例。
+//
+// `*UsageTemplate` 也收：usage 的帮助要引用别处的清单（--status 的合法取值），
+// 正文因此写成带上 `%s` 的模板常量、由 `fmt.Sprintf` 在包初始化时渲染。这不
+// 是顺手的整理——只认 `*Usage` 的话，那两份正文会静默从这道门里消失（实测：
+// 子用例少了两条，`ok` 上却一样）。扫描口径只多了这一个后缀，其余判据不动。
 //
 // 顺带扫进来几个不像帮助正文的 `…Usage`（例如某个 flag 的用法说明那一行）：
 // 判据对它们同样成立，留着不影响什么。
@@ -294,7 +300,8 @@ func helpTextsForStyling(t *testing.T) []struct{ what, text string } {
 			}
 			for _, spec := range gen.Specs {
 				values, ok := spec.(*ast.ValueSpec)
-				if !ok || !namesEndWith(values.Names, "Usage") {
+				if !ok || (!namesEndWith(values.Names, "Usage") &&
+					!namesEndWith(values.Names, "UsageTemplate")) {
 					continue
 				}
 				name := values.Names[0].Name

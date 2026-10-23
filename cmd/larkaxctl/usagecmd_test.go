@@ -4,11 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sumwai/larkax/internal/ledger/store"
 )
 
 // 本文件是 usage 命令的用例。**根帮助页那一组不在里**：它们在 usage_test.go
@@ -941,5 +945,492 @@ func TestUsageRequestsShowsPlanReserved(t *testing.T) {
 	if pair := got[walletReq]; pair.wallet != "1.50000000" || pair.plan != "0.00000000" {
 		t.Errorf("%s 读到 wallet=%q plan=%q，期望 1.50000000 与 0：\n%s",
 			walletReq, pair.wallet, pair.plan, r.stdout)
+	}
+}
+
+// usageRequestJSONRow 是 usage requests 机器可读档里这一组用例要看的那几栏。
+type usageRequestJSONRow struct {
+	RequestID string `json:"request_id"`
+	Status    string `json:"status"`
+	Model     string `json:"canonical_model"`
+}
+
+// usageRequestsJSON 跑一次 usage requests -o json，交出 summary 与请求清单。
+func usageRequestsJSON(t *testing.T, args ...string) (map[string]any, []usageRequestJSONRow) {
+	t.Helper()
+
+	r := runOnce(t, runUsage, append([]string{"requests"}, args...))
+	if r.err != nil {
+		t.Fatalf("usage requests %v 失败: %v\nstderr:\n%s", args, r.err, r.stderr)
+	}
+	assertOnlyJSON(t, r.stdout)
+
+	var doc struct {
+		Summary  map[string]any        `json:"summary"`
+		Requests []usageRequestJSONRow `json:"requests"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+		t.Fatalf("解不回来: %v\n%s", err, r.stdout)
+	}
+	return doc.Summary, doc.Requests
+}
+
+// requestIDs 取出满足 keep 的那些 request_id，按字典序排好；keep 为 nil 表示全要。
+//
+// 排序是判据的一部分：两张清单的排序只由 started_at 决定，夹具在同一分钟里时
+// 谁先谁后不该让「两份是同一批」这件事变成一次掷骰子。
+func requestIDs(rows []usageRequestJSONRow, keep func(usageRequestJSONRow) bool) []string {
+	var ids []string
+	for _, r := range rows {
+		if keep == nil || keep(r) {
+			ids = append(ids, r.RequestID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// TestUsageRequestsFiltersByStatusAndModel 钉住 --status 与 --model 真的进了 WHERE。
+//
+// 判据是**对拍**：同一批数据跑两次，一次带筛选项、一次全量后在用例里按同一条件
+// 过滤，两份 request_id 必须逐条相同。只断言「筛出来的每一行都符合条件」不够——
+// 一个把整张表都返回的实现在那条断言下也是绿的。
+func TestUsageRequestsFiltersByStatusAndModel(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+
+	userID := createTestUser(t)
+	window := []string{"--user", itoa64(userID),
+		"--from", usageWindowOctFrom.Format(time.RFC3339),
+		"--to", usageWindowOctTo.Format(time.RFC3339)}
+	m1, m2 := uniqueName("model"), uniqueName("model")
+	startedAt := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	insertBillingRequest(t, db, uniqueName("req"), userID, m1, startedAt, "failed")
+	insertBillingRequest(t, db, uniqueName("req"), userID, m1, startedAt.Add(time.Minute), "failed")
+	insertBillingRequest(t, db, uniqueName("req"), userID, m1, startedAt.Add(2*time.Minute), "pending")
+	insertBillingRequest(t, db, uniqueName("req"), userID, m2, startedAt.Add(3*time.Minute), "failed")
+
+	// 夹具都在切到 json 之前建好（见 format.go 的 jsonUnsupported）。
+	withFormat(t, formatJSON)
+
+	_, all := usageRequestsJSON(t, window...)
+	if len(all) != 4 {
+		t.Fatalf("全量读到 %d 行，想要 4 行：%v", len(all), all)
+	}
+
+	cases := []struct {
+		name  string
+		args  []string
+		where func(usageRequestJSONRow) bool
+	}{
+		{"按状态筛", []string{"--status", "failed"},
+			func(r usageRequestJSONRow) bool { return r.Status == "failed" }},
+		{"按模型筛", []string{"--model", m2},
+			func(r usageRequestJSONRow) bool { return r.Model == m2 }},
+		{"两个一起筛", []string{"--status", "failed", "--model", m1},
+			func(r usageRequestJSONRow) bool { return r.Status == "failed" && r.Model == m1 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, got := usageRequestsJSON(t, append(append([]string{}, window...), tc.args...)...)
+			want := requestIDs(all, tc.where)
+			if strings.Join(requestIDs(got, nil), ",") != strings.Join(want, ",") {
+				t.Errorf("%v 筛出 %v，全量按同一条件过筛是 %v", tc.args, requestIDs(got, nil), want)
+			}
+		})
+	}
+}
+
+// TestUsageRequestsSinceWindow 钉住 --since 的起点与筛出来的行。
+//
+// 时间源替成固定时刻再还原：--since 落成「现在减一段」，不钉住现在的话，
+// 结论会随用例跑在哪一分钟而变。判据逐秒比 summary 里的 from，而不是「比现在早
+// 就行」——后者在起点算反、或者少减了一个单位时也是绿的。
+func TestUsageRequestsSinceWindow(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	saved := usageNow
+	usageNow = func() time.Time { return now }
+	t.Cleanup(func() { usageNow = saved })
+
+	userID := createTestUser(t)
+	recent := uniqueName("req-recent")
+	older := uniqueName("req-older")
+	oldest := uniqueName("req-oldest")
+	insertBillingRequest(t, db, recent, userID, uniqueName("model"),
+		now.Add(-5*time.Minute), "pending")
+	insertBillingRequest(t, db, older, userID, uniqueName("model"),
+		now.Add(-30*time.Minute), "pending")
+	insertBillingRequest(t, db, oldest, userID, uniqueName("model"),
+		now.Add(-3*24*time.Hour), "pending")
+
+	withFormat(t, formatJSON)
+
+	summary, rows := usageRequestsJSON(t, "--user", itoa64(userID), "--since", "15m")
+	if got := requestIDs(rows, nil); len(got) != 1 || got[0] != recent {
+		t.Errorf("--since 15m 筛出 %v，想要只有 %s", got, recent)
+	}
+	if got, want := summary["from"], now.Add(-15*time.Minute).Format(time.RFC3339Nano); got != want {
+		t.Errorf("--since 15m 的 summary.from = %v，想要 %v（现在减 15 分钟）", got, want)
+	}
+	// summary 保留原始写法：只留一个算出来的起点，读者看不出这次是按相对窗口筛的。
+	if got := summary["since"]; got != "15m" {
+		t.Errorf("summary.since = %v，想要原始写法 15m", got)
+	}
+
+	_, rows = usageRequestsJSON(t, "--user", itoa64(userID), "--since", "2h")
+	if got := requestIDs(rows, nil); len(got) != 2 {
+		t.Errorf("--since 2h 筛出 %d 行，想要 2 行：%v", len(got), got)
+	}
+
+	_, rows = usageRequestsJSON(t, "--user", itoa64(userID), "--since", "7d")
+	if got := requestIDs(rows, nil); len(got) != 3 {
+		t.Errorf("--since 7d 筛出 %d 行，想要 3 行：%v", len(got), got)
+	}
+}
+
+// TestUsageRequestsEmptyResultWithFilters 钉住「筛完一条都没有」仍是正常结果。
+func TestUsageRequestsEmptyResultWithFilters(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+
+	userID := createTestUser(t)
+	insertBillingRequest(t, db, uniqueName("req"), userID, uniqueName("model"),
+		time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC), "pending")
+
+	r := runOnce(t, runUsage, []string{"requests", "--user", itoa64(userID),
+		"--status", "failed",
+		"--from", usageWindowOctFrom.Format(time.RFC3339),
+		"--to", usageWindowOctTo.Format(time.RFC3339)})
+	if r.err != nil {
+		t.Fatalf("筛不到行不该算失败：%v\nstderr:\n%s", r.err, r.stderr)
+	}
+	if !strings.Contains(r.stdout, "这个范围内没有计费请求。") {
+		t.Errorf("空清单没有说出那句话：\n%s", r.stdout)
+	}
+	if strings.Contains(r.stdout, "时刻") {
+		t.Errorf("空清单打出了表头：\n%s", r.stdout)
+	}
+}
+
+// TestUsageRequestsSummaryCarriesFilters 钉住 summary 复述这次给的筛选项。
+//
+// 三个键与 from / to 平级放在 summary 里，只在给过时出现：没给却写成空串的话，
+// 下游会把它当成「筛了空值」。--since 留原始写法（见 usageFilters.summary）。
+func TestUsageRequestsSummaryCarriesFilters(t *testing.T) {
+	setupEnv(t)
+	db := testDB(t)
+
+	userID := createTestUser(t)
+	model := uniqueName("model")
+	insertBillingRequest(t, db, uniqueName("req"), userID, model,
+		time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC), "pending")
+
+	withFormat(t, formatJSON)
+
+	window := []string{"--user", itoa64(userID),
+		"--from", usageWindowOctFrom.Format(time.RFC3339),
+		"--to", usageWindowOctTo.Format(time.RFC3339)}
+	summary, _ := usageRequestsJSON(t, window...)
+	for _, key := range []string{"status", "model", "since"} {
+		if _, ok := summary[key]; ok {
+			t.Errorf("没给 %s，summary 里却有这一栏：%v", key, summary)
+		}
+	}
+
+	summary, _ = usageRequestsJSON(t, append(append([]string{}, window...),
+		"--status", "pending", "--model", model)...)
+	if summary["status"] != "pending" || summary["model"] != model {
+		t.Errorf("summary 没有复述 --status / --model：%v", summary)
+	}
+
+	summary, _ = usageRequestsJSON(t, "--user", itoa64(userID), "--since", "2h")
+	if summary["since"] != "2h" {
+		t.Errorf("summary.since = %v，想要 2h", summary["since"])
+	}
+	if summary["from"] == nil {
+		t.Errorf("--since 算出来的起点没有进 summary：%v", summary)
+	}
+}
+
+// TestUsageFiltersSummaryOmitsUnsetFilters 钉住 events 的 summary 没有被新字段带歪。
+//
+// events 也用 usageFilters，只是三个新字段恒为零值。它们要是无条件落进 summary，
+// events 的机器可读档会多出三个空串字段——下游会把它读成「筛了空值」。
+func TestUsageFiltersSummaryOmitsUnsetFilters(t *testing.T) {
+	summary := usageFilters{limit: 50}.summary()
+	for _, key := range []string{"status", "model", "since"} {
+		if _, ok := summary[key]; ok {
+			t.Errorf("没给 %s，summary 里却有这一栏：%v", key, summary)
+		}
+	}
+}
+
+// TestUsageRequestsSelectionCarriesStoreFilters 不连库地钉住筛选项到了 store 那一层。
+//
+// 连库那一条（TestUsageRequestsFiltersByStatusAndModel）缺 DSN 时整包跳过，而
+// 「解析出来的条件有没有填进 store.BillingRequestFilter」是纯接线：把 --status
+// 丢在这一层时，命令照常成功、只是把整张表打出来，屏幕上看不出它没筛。
+func TestUsageRequestsSelectionCarriesStoreFilters(t *testing.T) {
+	fs := newFlagSet("usage requests", flag.ContinueOnError)
+	flags := newUsageRequestFlags(fs)
+	if err := fs.Parse([]string{"--status", "failed", "--model", "placeholder-model",
+		"--from", "2026-10-01", "--to", "2026-11-01", "--limit", "7"}); err != nil {
+		t.Fatalf("解析参数失败: %v", err)
+	}
+	sel, err := flags.resolve("usage requests")
+	if err != nil {
+		t.Fatalf("解析筛选项失败: %v", err)
+	}
+
+	userID := int64(42)
+	f := sel.filter(&userID)
+	if f.Status != "failed" {
+		t.Errorf("filter.Status = %q，想要 failed", f.Status)
+	}
+	if f.Model != "placeholder-model" {
+		t.Errorf("filter.Model = %q，想要 placeholder-model", f.Model)
+	}
+	if f.UserID == nil || *f.UserID != userID {
+		t.Errorf("filter.UserID = %v，想要 %d", f.UserID, userID)
+	}
+	if f.Limit != 7 {
+		t.Errorf("filter.Limit = %d，想要 7", f.Limit)
+	}
+	if !f.From.Equal(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)) ||
+		!f.To.Equal(time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("filter 的窗口 = %s 至 %s，想要 10-01 至 11-01",
+			f.From.Format(time.RFC3339), f.To.Format(time.RFC3339))
+	}
+}
+
+// TestUsageRequestsResolveSinceStartsInThePast 不连库地钉住 --since 的方向。
+//
+// 连库那一条（TestUsageRequestsSinceWindow）在缺 DSN 时整包跳过，而这里判的是
+// 纯计算：起点必须是「现在减一段」。算成加法时，这条在没库的机器上也会红。
+func TestUsageRequestsResolveSinceStartsInThePast(t *testing.T) {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	saved := usageNow
+	usageNow = func() time.Time { return now }
+	t.Cleanup(func() { usageNow = saved })
+
+	fs := newFlagSet("usage requests", flag.ContinueOnError)
+	flags := newUsageRequestFlags(fs)
+	if err := fs.Parse([]string{"--since", "15m"}); err != nil {
+		t.Fatalf("解析参数失败: %v", err)
+	}
+	sel, err := flags.resolve("usage requests")
+	if err != nil {
+		t.Fatalf("解析 --since 15m 失败: %v", err)
+	}
+	if !sel.from.Equal(now.Add(-15 * time.Minute)) {
+		t.Errorf("起点 = %s，想要 %s（现在减 15 分钟）",
+			sel.from.Format(time.RFC3339), now.Add(-15*time.Minute).Format(time.RFC3339))
+	}
+	if sel.since != "15m" {
+		t.Errorf("summary 要留的原始写法是 %q，想要 15m", sel.since)
+	}
+}
+
+// TestUsageRequestsRejectsBadFilters 钉住新筛选项的参数错。
+//
+// 与 TestUsageRejectsBadFlags 同一条：不连库。判据是参数错（退出码 2）必须在
+// 连库之前报出来——先连库再报的话，一台连不上库的机器上这些都看不出来。
+func TestUsageRequestsRejectsBadFilters(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"--since 为零", []string{"requests", "--since", "0m"}, []string{"--since", "正整数"}},
+		{"--since 为负", []string{"requests", "--since", "-5m"}, []string{"--since", "正整数"}},
+		{"--since 未知单位", []string{"requests", "--since", "3w"}, []string{"--since", "m、h 或 d"}},
+		{"--since 缺单位", []string{"requests", "--since", "15"}, []string{"--since", "m、h 或 d"}},
+		{"--since 与 --from 同给", []string{"requests", "--since", "15m", "--from", "2026-10-01"},
+			[]string{"--since", "--from", "只能给一个"}},
+		{"--since 与 --to 说不通", []string{"requests", "--since", "7d", "--to", "2026-01-01"},
+			[]string{"--since", "不早于 --to"}},
+		{"--since 大到溢出", []string{"requests", "--since", "200000d"}, []string{"--since", "过大"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := runOnce(t, runUsage, tc.args)
+			if r.err == nil {
+				t.Fatalf("这一次应当报错，却成功返回了：stdout=%q", r.stdout)
+			}
+			if got := exitCode(r.err); got != exitUsage {
+				t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, exitUsage, r.err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(r.err.Error(), want) {
+					t.Errorf("错误里没有 %q：%v", want, r.err)
+				}
+			}
+		})
+	}
+
+	t.Run("未知状态", func(t *testing.T) {
+		r := runOnce(t, runUsage, []string{"requests", "--status", "bogus"})
+		if r.err == nil {
+			t.Fatalf("未知状态应当报错，却成功返回了：stdout=%q", r.stdout)
+		}
+		if got := exitCode(r.err); got != exitUsage {
+			t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, exitUsage, r.err)
+		}
+		if !strings.Contains(r.err.Error(), `"bogus"`) {
+			t.Errorf("错误里没有点出写错的那个取值：%v", r.err)
+		}
+		// 合法取值从 store 现场取：把它抄成字面量的话，库里加一个状态而这里没跟上
+		// 时，报错少列一个值也没人发现。
+		for _, status := range store.BillingRequestStatuses() {
+			if !strings.Contains(r.err.Error(), status) {
+				t.Errorf("错误里没有列出合法取值 %q：%v", status, r.err)
+			}
+		}
+	})
+}
+
+// TestUsageEventsRejectsRequestOnlyFlags 钉住这三个参数只挂在 requests 上。
+//
+// 反向判据：把新参数顺手加进共享的 newUsageReadFlags 时，events 会安静地接受
+// 它们——那是一个它用不上的参数（events 走 UsageEventFilter，没有状态与模型这两
+// 列），用上它的人会得到一个空清单而不是一句「这条命令没有这个参数」。
+func TestUsageEventsRejectsRequestOnlyFlags(t *testing.T) {
+	for _, arg := range []string{"--status=failed", "--model=gpt", "--since=15m"} {
+		t.Run(arg, func(t *testing.T) {
+			r := runOnce(t, runUsage, []string{"events", arg})
+			if r.err == nil {
+				t.Fatalf("usage events 不该认 %s，却成功返回了：stdout=%q", arg, r.stdout)
+			}
+			if got := exitCode(r.err); got != exitUsage {
+				t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, exitUsage, r.err)
+			}
+			if !strings.Contains(r.err.Error(), "flag provided but not defined") {
+				t.Errorf("错误不是「这条命令没有这个参数」：%v", r.err)
+			}
+		})
+	}
+}
+
+// usageEntry 取出一份帮助文本里某条子命令那一块（用法行、续行与说明行）。
+//
+// 判据「这三个参数只挂在 requests 上」要落在**那一块**里：整份帮助是三条命令
+// 共用的，拿整份做断言的话，requests 那一行加上参数会让「events 也有」与
+// 「events 没有」同时成立。
+func usageEntry(t *testing.T, text, entry string) string {
+	t.Helper()
+
+	var out []string
+	in := false
+	for _, line := range strings.Split(text, "\n") {
+		// 下一条子命令的用法行同样缩进两个空格，靠它收住上一块：不然一块会一路
+		// 吃到文本末尾，两条命令的断言就混成同一条。
+		if strings.HasPrefix(line, "  larkaxctl ") {
+			if in {
+				break
+			}
+			if strings.HasPrefix(line, "  larkaxctl "+entry) {
+				in = true
+				out = append(out, line)
+			}
+			continue
+		}
+		if !in {
+			continue
+		}
+		// 这一块的续行与说明行都缩进；空行或顶格的行就是下一段了。
+		if line == "" || !strings.HasPrefix(line, "  ") {
+			break
+		}
+		out = append(out, line)
+	}
+	if len(out) == 0 {
+		t.Fatalf("帮助文本里没有 %q 那一块", entry)
+	}
+	return strings.Join(out, "\n")
+}
+
+// usageEntryUsageLines 只取某一条子命令那一块的**用法行**：入口那一行，加上
+// 以 `[--` 开头的续行。
+//
+// 与 usageEntry 分开：说明行里也会出现参数名（`--status 只认 …` 那一段），
+// 而这里要把「参数挂在哪条命令的用法上」单独钉住——将来拆帮助页、或者把某个
+// 参数搬到另一条命令上时，红的是这一条。
+func usageEntryUsageLines(t *testing.T, text, entry string) string {
+	t.Helper()
+
+	var out []string
+	for _, line := range strings.Split(usageEntry(t, text, entry), "\n") {
+		if strings.HasPrefix(line, "  larkaxctl ") || strings.HasPrefix(line, "        [--") {
+			out = append(out, line)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("%q 那一块里没有用法行", entry)
+	}
+	return strings.Join(out, "\n")
+}
+
+// TestUsageRequestsUsageLineListsNewFilters 把 requests 用法行的现状固定住。
+//
+// 判据落在**用法行**上而不是整块：说明行里出现参数名证明不了它在哪条命令的用法
+// 里。反向的一半（events 那一块没有）见下一条，两条各自断言——一条绿不能替另一
+// 条担保。
+func TestUsageRequestsUsageLineListsNewFilters(t *testing.T) {
+	for name, text := range map[string]string{
+		"usageShortUsage": usageShortUsage,
+		"usageUsage":      usageUsage,
+	} {
+		lines := usageEntryUsageLines(t, text, "usage requests")
+		for _, flag := range []string{"--status", "--model", "--since"} {
+			if !strings.Contains(lines, flag) {
+				t.Errorf("%s 的 usage requests 用法行里没有 %s：\n%s", name, flag, lines)
+			}
+		}
+		// 互斥写在用法行上（`--from <时刻> | --since <时长>`），读的人不用去翻
+		// 长版才知道这两个不能一起给。
+		if !strings.Contains(lines, "--from <时刻> | --since <时长>") {
+			t.Errorf("%s 的 usage requests 用法行没有写出 --from 与 --since 二选一：\n%s",
+				name, lines)
+		}
+	}
+}
+
+// TestUsageEventsUsageLineOmitsRequestFilters 是上一条的反向：events 那一块不许
+// 出现只属于 requests 的参数。
+func TestUsageEventsUsageLineOmitsRequestFilters(t *testing.T) {
+	for name, text := range map[string]string{
+		"usageShortUsage": usageShortUsage,
+		"usageUsage":      usageUsage,
+	} {
+		events := usageEntry(t, text, "usage events")
+		for _, flag := range []string{"--status", "--model", "--since"} {
+			if strings.Contains(events, flag) {
+				t.Errorf("%s 的 usage events 那一块里出现了只属于 requests 的 %s：\n%s",
+					name, flag, events)
+			}
+		}
+	}
+}
+
+// TestUsageRequestsHelpListsLegalStatuses 钉住帮助里列全了 --status 的合法取值。
+//
+// 与 TestUsageSummaryHelpMentionsTheNewAction 同一条：只加进长版时，`-h` 上就
+// 看不到它们，而那正是使用者先看的那一版。取值逐个对一遍 store 的清单——帮助
+// 里抄一份会分岔，这份清单只该有一个来源。
+func TestUsageRequestsHelpListsLegalStatuses(t *testing.T) {
+	for name, text := range map[string]string{
+		"usageShortUsage": usageShortUsage,
+		"usageUsage":      usageUsage,
+	} {
+		requests := usageEntry(t, text, "usage requests")
+		for _, status := range store.BillingRequestStatuses() {
+			if !strings.Contains(requests, status) {
+				t.Errorf("%s 的帮助里没有列出合法状态 %q", name, status)
+			}
+		}
 	}
 }

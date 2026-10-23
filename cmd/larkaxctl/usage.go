@@ -23,15 +23,29 @@ import (
 var usageHelp = helpText{short: usageShortUsage, long: usageUsage}
 
 // usageShortUsage 是 usage 的短版：`-h` / `--help` 与参数写错时打的那一份。
-const usageShortUsage = `larkaxctl usage 读用量与计费：这段时间用了多少、各自结成了什么。
+//
+// 由 usageShortUsageTemplate 填上 --status 的合法取值得到，而不是把五个值抄在
+// 帮助里：那份清单只在 store.BillingRequestStatuses 里有一份，抄下来的那一天
+// 就是两份开始分岔的那一天。
+var usageShortUsage = fmt.Sprintf(usageShortUsageTemplate, billingRequestStatusesText())
+
+// usageShortUsageTemplate 是短版的模板，唯一的 %s 是 --status 的合法取值。
+//
+// 名字以 UsageTemplate 结尾（不是 Usage）：帮助文本的样式门按名字扫这类常量
+// （见 style_test.go 的 helpTextsForStyling），带上占位符的那一份也要被它扫到。
+//
+// 本页已经正好是短版的上限 18 行（见 usage_test.go 的 shortUsageMaxLines）：
+// 再加内容之前先腾掉一行，否则先撞 CI 再回头查。
+const usageShortUsageTemplate = `larkaxctl usage 读用量与计费：这段时间用了多少、各自结成了什么。
 
 用法：
   larkaxctl usage events [--user <用户 ID 或用户名>] [--from <时刻>] [--to <时刻>]
         [--limit <条数>]
         列出用量事件：每次请求用了多少 token、按哪条口径算的、收了多少钱
-  larkaxctl usage requests [--user <用户 ID 或用户名>] [--from <时刻>] [--to <时刻>]
-        [--limit <条数>]
+  larkaxctl usage requests [--user <用户 ID 或用户名>] [--from <时刻> | --since <时长>]
+        [--to <时刻>] [--limit <条数>] [--status <状态>] [--model <模型>]
         列出计费请求：每次请求的钱包预留与额度包面值、状态与结算金额
+        只属于这条命令的筛选项：--status 只认 %s；--since 认 15m、2h、7d
   larkaxctl usage summary --user <用户> [--today | --this-month]
         [--from <时刻>] [--to <时刻>]
         汇总某个用户在一段时间里的用量与金额，按计费口径分档
@@ -43,15 +57,19 @@ const usageShortUsage = `larkaxctl usage 读用量与计费：这段时间用了
 `
 
 // usageUsage 是 usage 的长版：`larkaxctl help usage` 与 `usage help`。
-const usageUsage = `larkaxctl usage 读用量与计费：这段时间用了多少、各自结成了什么。
+var usageUsage = fmt.Sprintf(usageUsageTemplate, billingRequestStatusesText())
+
+// usageUsageTemplate 是长版的模板，唯一的 %s 是 --status 的合法取值。
+const usageUsageTemplate = `larkaxctl usage 读用量与计费：这段时间用了多少、各自结成了什么。
 
 用法：
   larkaxctl usage events [--user <用户 ID 或用户名>] [--from <时刻>] [--to <时刻>]
         [--limit <条数>]
         列出用量事件：每次请求用了多少 token、按哪条口径算的、收了多少钱
-  larkaxctl usage requests [--user <用户 ID 或用户名>] [--from <时刻>] [--to <时刻>]
-        [--limit <条数>]
+  larkaxctl usage requests [--user <用户 ID 或用户名>] [--from <时刻> | --since <时长>]
+        [--to <时刻>] [--limit <条数>] [--status <状态>] [--model <模型>]
         列出计费请求：每次请求的钱包预留与额度包面值、状态与结算金额
+        只属于这条命令的筛选项：--status 只认 %s；--since 认 15m、2h、7d
   larkaxctl usage summary --user <用户> [--today | --this-month]
         [--from <时刻>] [--to <时刻>]
         汇总某个用户在一段时间里的用量与金额，按计费口径分档
@@ -75,6 +93,13 @@ estimated 是按估算给的、fallback 是算不出来时按退路口径给的�
 billing_requests，是**每次请求**的预留与结算（一笔请求从预扣到结清的状态与金额）。
 预留分两栏看：钱包预留是钱从账户余额冻住的那部分，包预留是额度包占着的面值——
 额度包覆盖的请求在钱包那一栏是 0，两个数并列、不合并。
+
+requests 另可按 --status 与 --model 筛，也可以用 --since 给一个相对窗口。--status
+只认上面那一行列出的取值；--model 按规范模型名精确匹配，不查库里有没有这个模型
+（筛不到就是空清单）。--since 收「正整数 + 单位」，单位认 m、h、d（15m、2h、7d），
+起点是现在减去这段时长；它与 --from 互斥，两个一起给按参数错处理（退出 2）。
+--since 与 --to 一起给时，算出来的起点仍要早于 --to。机器可读档的 summary 原样
+带上给过的 --status / --model / --since。
 
 summary 是这段时间的合计，不是清单：一行合计，下面按计费口径分三档
 （measured / estimated / fallback，没有数据的那一档金额与请求数是 0）。
@@ -286,11 +311,161 @@ func runUsageEvents(args []string) error {
 	})
 }
 
+// usageRequestFlags 是 usage requests 独有的筛选项：状态、模型与相对窗口。
+//
+// 这三项**不挂进 newUsageReadFlags**：那个构造函数是 events 与 requests 共用的，
+// 而 events 走 UsageEventFilter，库里没有状态与模型这两列。挂进去等于给 events
+// 开一个它用不上的参数，而用不上的参数总有一天会被照着用错。
+type usageRequestFlags struct {
+	usageReadFlags
+	status *string
+	model  *string
+	since  *string
+}
+
+// newUsageRequestFlags 注册这组筛选项。
+//
+// 说明串一律留空：本包的帮助只有手写的 *Usage 常量一个出口，flag 自己的
+// PrintDefaults 没有调用点，传进去的说明一个字都不会被打印（见 main.go 的包注释）。
+// 「这三个参数只属于 usage requests」这句话因此写在帮助正文里。
+func newUsageRequestFlags(fs *flagSet) usageRequestFlags {
+	return usageRequestFlags{
+		usageReadFlags: newUsageReadFlags(fs),
+		status:         fs.String("status", "", ""),
+		model:          fs.String("model", "", ""),
+		since:          fs.String("since", "", ""),
+	}
+}
+
+// usageRequestSelection 是 usage requests 一次查询的全部筛选条件。
+type usageRequestSelection struct {
+	from   time.Time
+	to     time.Time
+	limit  int
+	status string
+	model  string
+	// since 是 --since 的原始写法（15m / 2h / 7d）：summary 里留原文，读的人才
+	// 知道这次是按「15m」筛的，而不是只看到一个由它算出来的起点。
+	since string
+}
+
+// resolve 把 requests 的全部筛选项翻成查询要的形状，参数错在这里全部报出来。
+//
+// 参数错必须先于「连不上库」被报出来：一台连不上库的机器上，把 --since 写错的
+// 人也要能看到那句话（与 window 同一个位置）。
+func (f usageRequestFlags) resolve(what string) (usageRequestSelection, error) {
+	// 先收掉两头的空白再判有没有给：`--since " "` 与没给是同一件事，不能因为
+	// 原文非空就让它和 --from 撞成「两个都给」。
+	since := strings.TrimSpace(*f.since)
+	// --since 与 --from 说的是同一件事（这段从哪里开始），同时给时说不清该听谁的。
+	if since != "" && strings.TrimSpace(*f.from) != "" {
+		return usageRequestSelection{}, usageErr(fmt.Errorf(
+			"%s 的 --since 与 --from 只能给一个：--since 是相对现在的一段，--from 是绝对起点", what))
+	}
+
+	from, to, limit, err := f.window(what)
+	if err != nil {
+		return usageRequestSelection{}, err
+	}
+
+	if since != "" {
+		d, err := parseUsageSince(since, what)
+		if err != nil {
+			return usageRequestSelection{}, usageErr(err)
+		}
+		from = usageNow().Add(-d)
+		if !to.IsZero() && !from.Before(to) {
+			return usageRequestSelection{}, usageErr(fmt.Errorf(
+				"%s 的 --since 太长，起点 %s 不早于 --to %s（区间左闭右开）",
+				what, from.Format(time.RFC3339), to.Format(time.RFC3339)))
+		}
+	}
+
+	status := strings.TrimSpace(*f.status)
+	if err := validateUsageStatus(status, what); err != nil {
+		return usageRequestSelection{}, usageErr(err)
+	}
+
+	return usageRequestSelection{
+		from: from, to: to, limit: limit,
+		status: status, model: strings.TrimSpace(*f.model), since: since,
+	}, nil
+}
+
+// filter 把这次选择翻成 store 的筛选结构。
+//
+// 收成一处的理由：store.BillingRequestFilter 早就有 Status 与 Model（非空就进
+// WHERE），命令行这一侧只该把它们填进去。字段名对不上时筛选项会在这一层静默
+// 丢掉——命令照常成功，只是把整张表打了出来。
+func (s usageRequestSelection) filter(userID *int64) store.BillingRequestFilter {
+	return store.BillingRequestFilter{
+		UserID: userID, From: s.from, To: s.to, Limit: s.limit,
+		Status: s.status, Model: s.model,
+	}
+}
+
+// usageSinceUnits 是 --since 认的三个单位。
+//
+// 不直接用 time.ParseDuration：它不认 d，而「最近 7 天」是这一栏最常写的一次；
+// 它也不收「正整数 + 单位」以外的写法，而这一栏要的正是那个形状。
+var usageSinceUnits = map[string]time.Duration{
+	"m": time.Minute,
+	"h": time.Hour,
+	"d": 24 * time.Hour,
+}
+
+// maxDurationNanos 是 time.Duration 能表示的上界（int64 纳秒）。
+const maxDurationNanos = int64(1<<63 - 1)
+
+// parseUsageSince 把 --since 的写法（15m / 2h / 7d）翻成一段时长。
+//
+// 只收「正整数 + 单位」：0m 与 -5m 落到查询里要么是空窗口、要么起点在未来，
+// 两种都不是使用者想说的，所以与写错的单位一样按参数错处理。
+func parseUsageSince(raw, what string) (time.Duration, error) {
+	unit, digits := raw[len(raw)-1:], raw[:len(raw)-1]
+	scale, known := usageSinceUnits[unit]
+	if !known {
+		return 0, fmt.Errorf(
+			"%s 的 --since 要以 m、h 或 d 结尾（例如 15m、2h、7d），得到 %q", what, raw)
+	}
+	n, err := strconv.Atoi(digits)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf(
+			"%s 的 --since 要写成「正整数 + 单位」（例如 15m、2h、7d），得到 %q", what, raw)
+	}
+	// 换算后会溢出的写法按参数错处理：让它回绕成一个负数或一段小得离谱的时长，
+	// 查询会安静地换一个窗口，而屏幕上看不出这一点。
+	if int64(n) > maxDurationNanos/int64(scale) {
+		return 0, fmt.Errorf("%s 的 --since 过大：%q 超出了能表示的时长", what, raw)
+	}
+	return time.Duration(n) * scale, nil
+}
+
+// billingRequestStatusesText 是帮助与报错共用的那一串合法状态。
+//
+// 唯一的来源是 store.BillingRequestStatuses（迁移里那条 CHECK 与它一致）。
+func billingRequestStatusesText() string {
+	return strings.Join(store.BillingRequestStatuses(), "、")
+}
+
+// validateUsageStatus 校验 --status 的取值。空串表示不筛。
+func validateUsageStatus(status, what string) error {
+	if status == "" {
+		return nil
+	}
+	for _, known := range store.BillingRequestStatuses() {
+		if status == known {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s 的 --status 只认 %s，得到 %q", what, billingRequestStatusesText(), status)
+}
+
 // runUsageRequests 列出计费请求。
 func runUsageRequests(args []string) error {
 	fs := newFlagSet("usage requests", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, usageShortUsage) }
-	flags := newUsageReadFlags(fs)
+	flags := newUsageRequestFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -298,7 +473,7 @@ func runUsageRequests(args []string) error {
 		return usageErr(fmt.Errorf("usage requests 不接受位置参数，得到 %q：按用户筛用 --user", fs.Arg(0)))
 	}
 
-	from, to, limit, err := flags.window("usage requests")
+	sel, err := flags.resolve("usage requests")
 	if err != nil {
 		return err
 	}
@@ -310,9 +485,7 @@ func runUsageRequests(args []string) error {
 			return err
 		}
 
-		page, err := store.New(db).BillingRequests(ctx, store.BillingRequestFilter{
-			UserID: userID, From: from, To: to, Limit: limit,
-		})
+		page, err := store.New(db).BillingRequests(ctx, sel.filter(userID))
 		if err != nil {
 			return err
 		}
@@ -344,7 +517,10 @@ func runUsageRequests(args []string) error {
 			})
 		}
 
-		filters := usageFilters{userID: userID, from: from, to: to, limit: limit}
+		filters := usageFilters{
+			userID: userID, from: sel.from, to: sel.to, limit: sel.limit,
+			status: sel.status, model: sel.model, since: sel.since,
+		}
 		if jsonOutput() {
 			return emitJSON(os.Stdout, usageRequestsDoc(rows, page.More, filters), nil)
 		}
@@ -780,11 +956,17 @@ func (r usageRequestRow) pricingRuleCell() string {
 }
 
 // usageFilters 是这次查询用的那几个筛选条件，供机器可读输出复述。
+//
+// status / model / since 只有 usage requests 会给：events 走另一张表，没有这两列，
+// 也就没有相对窗口这一档。
 type usageFilters struct {
 	userID *int64
 	from   time.Time
 	to     time.Time
 	limit  int
+	status string
+	model  string
+	since  string
 }
 
 // summary 把筛选条件折进 summary。
@@ -792,6 +974,10 @@ type usageFilters struct {
 // 一份只有 `{"total": 12}` 的清单说不清这 12 条是哪一段：两张表的行都随时间增长，
 // 而看 JSON 的一方要能不看命令行就知道这次筛的是什么（与 channel health 把 since
 // 放进 summary 是同一条）。
+//
+// status / model / since 只在给过时才出现：没给就是「这一栏没筛」，写成空串的
+// 字段会让下游把它当成「筛了空值」。since 保留原始写法（15m / 2h / 7d），
+// 只留一个算出来的 from 的话，读者看不出这次是按一段相对窗口筛的。
 func (f usageFilters) summary() map[string]any {
 	summary := map[string]any{
 		"limit": f.limit,
@@ -802,6 +988,15 @@ func (f usageFilters) summary() map[string]any {
 		summary["user_id"] = *f.userID
 	} else {
 		summary["user_id"] = nil
+	}
+	if f.status != "" {
+		summary["status"] = f.status
+	}
+	if f.model != "" {
+		summary["model"] = f.model
+	}
+	if f.since != "" {
+		summary["since"] = f.since
 	}
 	return summary
 }

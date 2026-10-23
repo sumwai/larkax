@@ -117,7 +117,7 @@ _larkaxctl() {
 			"upstream-cost list") compadd -- --at --channel --env-file --format --model --quiet --verbose ;;
 			"upstream-cost update") compadd -- --channel --clear-effective-to --effective-from --effective-to --env-file --expr --format --id --models --priority --quiet --verbose ;;
 			"usage events") compadd -- --env-file --format --from --limit --quiet --to --user --verbose ;;
-			"usage requests") compadd -- --env-file --format --from --limit --quiet --to --user --verbose ;;
+			"usage requests") compadd -- --env-file --format --from --limit --model --quiet --since --status --to --user --verbose ;;
 			"usage summary") compadd -- --env-file --format --from --quiet --this-month --to --today --user --verbose ;;
 			"user create") compadd -- --email --env-file --format --generate-password --name --quiet --role --verbose ;;
 			"user delete purge") compadd -- --confirm --env-file --format --quiet --user --verbose ;;
@@ -138,7 +138,7 @@ _larkaxctl() {
 			"user unlock") compadd -- --env-file --format --quiet --user --verbose ;;
 			"user update") compadd -- --admin --display-name --email --env-file --format --merchant --no-admin --no-merchant --quiet --status --user --verbose ;;
 			"user usage events") compadd -- --env-file --format --from --limit --quiet --to --user --verbose ;;
-			"user usage requests") compadd -- --env-file --format --from --limit --quiet --to --user --verbose ;;
+			"user usage requests") compadd -- --env-file --format --from --limit --model --quiet --since --status --to --user --verbose ;;
 			"user wallet adjust") compadd -- --amount --auto-ref --by --dry-run --env-file --format --memo --quiet --ref --user --verbose ;;
 			"user wallet credit") compadd -- --amount --asset --auto-ref --dry-run --env-file --format --gateway --quiet --ref --user --verbose ;;
 			"user wallet refund") compadd -- --amount --asset --auto-ref --dry-run --env-file --format --memo --merchant --merchant-share --quiet --ref --upstream-cost --user --verbose ;;
