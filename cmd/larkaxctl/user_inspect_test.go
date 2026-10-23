@@ -230,7 +230,7 @@ func TestUserInspectMatchesSeparateCommands(t *testing.T) {
 	user := strconv.FormatInt(userID, 10)
 
 	// 钱包：一个零余额之外的真余额，让金额那两栏不是占位。
-	mustStream(t, func() error { return runUser([]string{"wallet", "create", user}) })
+	mustStream(t, func() error { return runWallet([]string{"create", "--user", user}) })
 	mustStream(t, func() error {
 		return runUser([]string{"wallet", "credit", user, "--amount", "12.5", "--ref", uniqueName("inspect-credit")})
 	})
@@ -372,7 +372,7 @@ func TestUserInspectUnknownUserMatchesUserGet(t *testing.T) {
 func TestUserInspectJSONStableOnEmptyStates(t *testing.T) {
 	_, userID, _ := newUserOpsFixture(t)
 	user := strconv.FormatInt(userID, 10)
-	mustStream(t, func() error { return runUser([]string{"wallet", "create", user}) })
+	mustStream(t, func() error { return runWallet([]string{"create", "--user", user}) })
 
 	doc := runJSONDoc(t, func() error { return runUser([]string{"inspect", user}) })
 
