@@ -70,10 +70,15 @@ func TestCompileAcceptsExactlyAtSourceLimit(t *testing.T) {
 //
 // 这一格对应的是 `maxDepth > maxNesting` 那条判据；同一段里还有一处
 // `if depth > maxDepth { maxDepth = depth }`（记运行中的最大深度）——
-// 它的 `>` 改成 `>=` 是等价变异，判据一行、证明四步：
+// 它的 `>` 改成 `>=` 之后没有可达输入能把两版分开；判据一行、证明四步：
 //
 //	| 表达式 | 具体输入 | 哪个用例杀掉它 |
-//	| `depth > maxDepth` 改 `>=` | `strings.Repeat("(", 24) + "1" + strings.Repeat(")", 24)`：最后一个 `(` 让 `depth` 正好等于 `maxDepth`，变异版进分支把 `depth` 赋回 `maxDepth`，赋值前后是同一个数；小于、大于两格两版同路 | 杀不掉；结构证明见下 |
+//	| `depth > maxDepth` 改 `>=` | `{"prompt": (1)+(2)}`：`{` 与第一个 `(` 把 `maxDepth` 推到 2；关掉第一个括号后，第二个 `(` 又开到第 2 层，`depth` 正好等于 `maxDepth`，变异版进分支把 `depth` 赋回 `maxDepth`，赋值前后是同一个数 | 杀不掉；结构证明见下 |
+//
+// 相等格只在「先关回去、再开到同一层」时出现：连续开括号时每一步 `depth`
+// 都超过当前的 `maxDepth`，走不到相等格。实测三条输入（overlay 在 `depth++`
+// 之后插 `if depth == maxDepth { println("EQ_HIT") }`）：24 层 0 次、
+// 23 层 0 次、`{"prompt": (1)+(2)}` 1 次。
 //
 // 结构证明：
 //
@@ -457,12 +462,14 @@ func TestCacheIsBounded(t *testing.T) {
 // ——淘汰方向写反、热点被丢掉，它都看不出来。只有同键命中的**同一个指针**
 // 才说明那一份还在缓存里。
 //
-// `moveToFront` 的 `if e == nil || l.head == e` 改成 `&&` 时有两只分支，
-// 理由不同，**整条不是「等价」**，分开写：
+// `moveToFront` 的 `if e == nil || l.head == e` 改成 `&&` 时有两只分支。
+// **在可达输入上两版都杀不掉**，只是两条腿的理由不同，所以分开写。
+// 会分岔的情况只有一种：将来多出一处构造 `cacheEntry` 却漏设 `elem`，
+// `e == nil` 那一支就变成可达——那条路上变异版是 panic（见下表）。
 //
 //	| 表达式 | 具体输入 | 哪个用例杀掉它 |
 //	| `e == nil` 那一支 | `moveToFront(nil)`，且链表非空：变异版 `e == nil && l.head == e` 为假，不进守卫，执行 `remove(nil)`（当前 compile.go:981-984 直接返回）之后是 `e.prev, e.next = nil, l.head`（当前 compile.go:971），解引用 nil 而 panic。生产路径上不存在这个入参，见下面的四条链 | 杀不掉（结构性不可达）；探针里 `moveToFront(nil)` 在变异版上 panic 于 `e.prev, e.next = nil, l.head`，原版正常返回 |
-//	| `l.head == e` 那一支 | 命中的正好是队首（例如 `TestCacheKeepsHotEntries` 里反复命中的 `hot@v1`）：两版都进守卫直接返回 | 杀不掉（重插恒等，见下） |
+//	| `l.head == e` 那一支 | 命中的正好是队首（例如 `TestCacheKeepsHotEntries` 里反复命中的 `hot@v1`）：原版进守卫直接返回；变异版 `e == nil` 为假，不进守卫，把队首摘下来再插回队首 | 杀不掉（重插恒等，见下） |
 //
 // `e == nil` 不可达的四条链：
 //
@@ -477,9 +484,10 @@ func TestCacheIsBounded(t *testing.T) {
 //     `e.elem`；
 //   - 于是链表里被移动的元素恒非 nil。
 //
-// 口径要注意：`e == nil` 那一支**若可达，两版不是无差异而是 panic**——
-// 所以这一条不能靠「看起来一样」来判等价。将来若有第三处构造 `cacheEntry`
-// 却漏设 `elem`，这条就翻了。
+// 口径要注意：`e == nil` 那一支**能区分**（见上表：原版返回、变异版 panic），
+// 只是那条路不可达；而且「若可达」的前提是**链表非空**——空链表加 nil 时
+// `l.head` 也等于 nil，变异版照样进守卫直接返回。所以这一半不能写成
+// 「两版一样」，只能写成「结构性不可达」。
 //
 // `l.head == e` 那一支是恒等操作：把队首摘下来再推回队首，元素、顺序、
 // head 与 tail 全不变；只有一个元素那一格也一样（`remove` 之后 head/tail

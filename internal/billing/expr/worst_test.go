@@ -288,9 +288,9 @@ func TestWorstCaseIsNotJustOneBranch(t *testing.T) {
 //	| 表达式 | 具体输入 | 哪个用例杀掉它 |
 //	| `len(a)+len(b)` 改 `-` | `a = {"prompt": 0.0000015, "units": {"img": 0.02}}`、`b = {"prompt": 0.0000015}`：提示从 3 变成 1，而合并表的键仍是 `[prompt units]`，逐键取值不变（两边都有的键取较大者，只在一边出现的键直接带过来） | 杀不掉（容量提示不参与语义） |
 //
-// 出口只有键的并集与逐键较大者，两个循环都不看容量提示；负提示不 panic
-// （实测运行时算出的 `make(map[string]any, -5)` 返回空 map，与提示 0 同）。
-// 调用方拿不到区分信息。
+// 出口只有键的并集与逐键较大者，两个循环都不看容量提示。本例 `2 - 1 = 1`，
+// 提示仍是正数；即使为负，运行时也按 0 处理、不 panic（负值只能用运行时
+// 算出的变量实测，字面量 `-2` 是编译错误）。调用方拿不到区分信息。
 func TestWorstCaseCoversUnitsOnEitherBranch(t *testing.T) {
 	p := mustCompile(t, `units["img"] > 0
 		? {"prompt": 0.0000015, "units": {"img": 0.02}}

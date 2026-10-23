@@ -208,9 +208,10 @@ func TestEvalRecordsExplicitZeroAsDeclared(t *testing.T) {
 //	| `len(billing.TokenSlots)+len(nonTokenPriceSlots)` 改 `-` | `billing.TokenSlots` 5 项、`nonTokenPriceSlots` 3 项：容量提示从 8 变成 2，而下面两个循环照旧写入同样的 8 个键（`cache_read`、`cache_write`、`completion`、`fixed`、`minimum`、`prompt`、`reasoning`、`units`） | 杀不掉（容量提示不参与语义） |
 //
 // 容量提示只是给运行时的预分配建议：写入哪些键、键的个数、`priceSlots`
-// 的成员全由那两个循环决定，与提示无关；`len(...)-len(...)` 为负时运行时
-// 也不 panic（实测运行时算出的负提示 `make(map[string]struct{}, -2)` 返回
-// 空 map，与提示 0 同）。调用方拿不到区分信息。
+// 的成员全由那两个循环决定，与提示无关。本例 `5 - 3 = 2`，提示仍是正数；
+// 即使算出来是负的，运行时也按 0 处理、不 panic（负值只能拿运行时算出的
+// 变量实测：字面量 `-2` 作容量提示是编译错误；`n := len(x) - 2` 再
+// `make(map[string]struct{}, n)` 实测返回空 map）。调用方拿不到区分信息。
 func TestEveryTokenSlotComesFromBilling(t *testing.T) {
 	parts := make([]string, 0, len(billing.TokenSlots))
 	want := make(map[string]money.Amount, len(billing.TokenSlots))
@@ -1065,9 +1066,9 @@ func TestEvalTierOnWholeTable(t *testing.T) {
 //	| `len(p.keys)+len(table)` 改 `-` | `p.keys = {prompt, completion}`、`table = {prompt}`：提示从 3 变成 1，而 `seen` 的成员与 `sort.Strings` 之后的输出两版都是 `[completion prompt]` | 杀不掉（容量提示不参与语义） |
 //
 // 出口只有键的并集与排序：两个循环照旧把 `p.keys` 与 `table` 的键都写进
-// `seen`，`out` 的容量按 `len(seen)` 算，与提示无关；负提示不 panic
-// （实测运行时算出的 `make(map[string]struct{}, -2)` 返回空 map）。
-// 调用方拿不到区分信息。
+// `seen`，`out` 的容量按 `len(seen)` 算，与提示无关。本例 `2 - 1 = 1`，
+// 提示仍是正数；即使为负，运行时也按 0 处理、不 panic（负值只能用运行时
+// 算出的变量实测，字面量 `-2` 是编译错误）。调用方拿不到区分信息。
 func TestEvalProgramMetadata(t *testing.T) {
 	source := `len <= 32000 ? {"prompt": 1.0} : {"prompt": 2.0, "completion": 3.0}`
 	p := mustCompile(t, source)
@@ -1184,17 +1185,21 @@ func TestEvalMoneyAmountsAreExact(t *testing.T) {
 //   - eval.go:250、251：`chargeOf` 的返回值。表里那一支的值来自 `floats`
 //     （已在 eval.go:197 过 `asPrice`），`fromCall` 那一支在 eval.go:320-325
 //     判了有限与负；
-//   - eval.go:266：`floats[slot.Name]`，`floats` 的值同上过了 `asPrice`；
+//   - eval.go:262 读出 `floats[slot.Name]`、eval.go:266 交给 `amountFrom`，
+//     `floats` 的值同上过了 `asPrice`；
 //   - eval.go:273：`units` 的值在 eval.go:215 过了 `asPrice`。
 //
 // `asPrice` 自己拒绝非数值、NaN、Inf 与负数（eval.go:357-371）。所以生产
 // 路径上参数恒有限且非负，守卫在那里不可达。但下面几处断言直接调
 // `amountFrom`，守卫在测试里可达——因此 `&&` 那个变异体是靠**第一条断言**
-// 杀掉的，不是靠「走不到」；非有限那一格与 `v <= 0` 那一格才是等价。
+// 杀掉的，不是靠「走不到」；非有限那一格与 `v <= 0` 那一格才是分不开的两格。
 //
 // 末尾那段 Inf / NaN 断言钉的是**行为**（非有限值一律折成零），不是杀变异体
 // 的证据：把 `!finite(v)` 那一半整个删掉，它们照样绿，因为解析失败那一支
 // 自己也 `return money.Zero`。
+//
+// 非有限那一格与 `v <= 0` 那一格调用方拿不到区分信息：两版都是同一个零值，
+// `String()` 也都是 `0.00000000`。
 func TestAmountFromRejectsNegativePrice(t *testing.T) {
 	if got := amountFrom(-1.5); got.Cmp(money.Zero) != 0 {
 		t.Errorf("负数单价应当折成零，得到 %s", got)
