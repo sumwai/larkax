@@ -75,10 +75,11 @@ func TestCompileAcceptsExactlyAtSourceLimit(t *testing.T) {
 //	| 表达式 | 具体输入 | 哪个用例杀掉它 |
 //	| `depth > maxDepth` 改 `>=` | `{"prompt": (1)+(2)}`：`{` 与第一个 `(` 把 `maxDepth` 推到 2；关掉第一个括号后，第二个 `(` 又开到第 2 层，`depth` 正好等于 `maxDepth`，变异版进分支把 `depth` 赋回 `maxDepth`，赋值前后是同一个数 | 杀不掉；结构证明见下 |
 //
-// 相等格只在「先关回去、再开到同一层」时出现：连续开括号时每一步 `depth`
-// 都超过当前的 `maxDepth`，走不到相等格。实测三条输入（overlay 在 `depth++`
-// 之后插 `if depth == maxDepth { println("EQ_HIT") }`）：24 层 0 次、
-// 23 层 0 次、`{"prompt": (1)+(2)}` 1 次。
+// 相等格只在「先关回去、再开到同一层」时出现：从历史最高层往下连开两枚以上
+// 括号时，只有第一枚命中相等格，第二枚起就超过了；而从起点一路开到顶的一串
+// （例如 `((((1))))`）每一步都超过当前最大值，一次相等格都走不到。实测三条
+// 输入（overlay 在 `depth++` 之后插 `if depth == maxDepth { println("EQ_HIT") }`）：
+// 24 层 0 次、23 层 0 次、`{"prompt": (1)+(2)}` 1 次。
 //
 // 结构证明：
 //
@@ -463,9 +464,9 @@ func TestCacheIsBounded(t *testing.T) {
 // 才说明那一份还在缓存里。
 //
 // `moveToFront` 的 `if e == nil || l.head == e` 改成 `&&` 时有两只分支。
-// **在可达输入上两版都杀不掉**，只是两条腿的理由不同，所以分开写。
-// 会分岔的情况只有一种：将来多出一处构造 `cacheEntry` 却漏设 `elem`，
-// `e == nil` 那一支就变成可达——那条路上变异版是 panic（见下表）。
+// 两版在可达输入上分不开，只是两条腿的理由不同，所以分开写。能观察到差异
+// 的情况只有一种：将来多出一处构造 `cacheEntry` 却漏设 `elem`，`e == nil`
+// 那一支就变成可达——那条路上变异版是 panic（见下表）。
 //
 //	| 表达式 | 具体输入 | 哪个用例杀掉它 |
 //	| `e == nil` 那一支 | `moveToFront(nil)`，且链表非空：变异版 `e == nil && l.head == e` 为假，不进守卫，执行 `remove(nil)`（当前 compile.go:981-984 直接返回）之后是 `e.prev, e.next = nil, l.head`（当前 compile.go:971），解引用 nil 而 panic。生产路径上不存在这个入参，见下面的四条链 | 杀不掉（结构性不可达）；探针里 `moveToFront(nil)` 在变异版上 panic 于 `e.prev, e.next = nil, l.head`，原版正常返回 |
