@@ -1157,6 +1157,17 @@ func markSettled(ctx context.Context, tx *sql.Tx, req pipeline.Request, charge *
 	if err != nil {
 		return false, fmt.Errorf("读取影响行数失败: %w", err)
 	}
+	// 这一格是第二道守卫，现在走不到：本函数唯一的调用点是 store.go:831 的
+	// `settled, err := markSettled(ctx, tx, req, charge)`，调用之前同一个事务
+	// 已经执行过
+	// `SELECT … FROM billing_requests WHERE request_id = $1 AND status = 'pending' FOR UPDATE`
+	// （store.go:815-819），取不到行就在 :820-821 直接返回 ErrAlreadySettled。
+	// 这里的 UPDATE（store.go:1137-1148）用的是同一谓词、同一事务、同一把
+	// 行锁，所以在唯一调用方这条路上，affected 恒为 1——`> 0` 与 `>= 0` 在
+	// 这一格分不出高低。
+	//
+	// 哪天多一个不先 FOR UPDATE 的调用方，这里就从「走不到的兜底」变成承重的
+	// 那一道：affected 可能是 0，返回值不能再被忽略。
 	return affected > 0, nil
 }
 

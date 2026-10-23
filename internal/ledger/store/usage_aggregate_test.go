@@ -545,8 +545,9 @@ func TestUsageBreakdownGroupsAndFoldsTheRest(t *testing.T) {
 	if len(defaulted.Items) != 3 {
 		t.Errorf("limit 为 0 时 Items = %d 组，期望默认值下的 3 组", len(defaulted.Items))
 	}
-	// 上界那一处的 `>` 改成 `>=` 是等价变异：limit 正好等于上限时，两版
-	// 都把它赋成同一个常量，用哪一版都一样。
+	// 上界判据 `if limit > UsageBreakdownMaxLimit` 的 `>` 改成 `>=` 是等价变异：
+	// limit 正好等于 UsageBreakdownMaxLimit 时，两版都把它赋成这个常量，用哪一版
+	// 都一样。
 
 	// 按 key：pending 的 req-B 没有事件，所以不出现；名字从 api_keys 左连回来。
 	byKey, err := s.UsageBreakdown(ctx, window, "key", 10)
