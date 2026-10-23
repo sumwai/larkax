@@ -3,6 +3,7 @@ package billing
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1136,18 +1137,26 @@ func TestNonCachedExactlyZero(t *testing.T) {
 
 // 缓存总量恰好不超过输入时，不该触发压回。
 //
-// 这段压回逻辑里有两处 `>` 改成 `>=`，**只在缓存量非负时**才是零增量：
-// 恰好相等那一格 over 是 0，而 `cut = min64(0, cacheWrite)`（以及下面
-// `cut = min64(0, cacheRead)`）只有在被切的那一项非负时才等于 0；缓存量为负
-// 时它返回负数，`-= cut` 会把那一项抹成 0。负缓存量由
-// TestFromChannelUsageNegativeCacheIsNotCompressed 钉着，所以那两条不是等价
-// 变异——它们的前提是「缓存量非负」，而 FromChannelUsage 的输入不保证这一点。
+// 这个 if 头里其实有三个 `>`：守卫 `u.PromptTokens > 0` 那一处由
+// TestCacheCompressionGuardWhenPromptIsZero 杀着，不在本段两条之列。下面两条
+// `>` 改成 `>=`，只在各自的边界格（`total == u.PromptTokens` / `over == 0`）
+// 上可能分岔，而那一格是否零增量，取决于**被切的那一项**是不是负数：前者切
+// 的是 `cacheWrite`，后者切的是 `cacheRead`。被切项非负时
+// `min64(0, x) == 0`，减掉的是零；为负时 `min64` 返回负数，`-= cut` 把那一项
+// 抹成 0。
+//
+// 反例说明为什么不能说「缓存量非负」：
+// `{PromptTokens:10, CacheReadTokens:-5, CacheWriteTokens:15}` 在
+// `total == u.PromptTokens` 那一格上是零增量，而 `cacheRead` 是负的。
+//
+// 负缓存量由 TestFromChannelUsageNegativeCacheIsNotCompressed 钉着，所以那
+// 两条不是等价变异——FromChannelUsage 的输入不保证非负。
 //
 // `min64` 与 `max64` 自身的边界见 TestMin64AndMax64AtEqualArguments：那两条
 // 与符号无关，是真等价。
 //
-// 下面第二段照样把 over 归零那一格的具体数固定下来——它是第二条变异在
-// 非负输入上的边界。
+// 下面第二段照样把 over 归零那一格的具体数固定下来——它是第二条变异在被切项
+// 非负时的边界。
 func TestCacheCompressionBoundary(t *testing.T) {
 	// 100 输入 = 60 缓存读 + 40 缓存写，恰好相等
 	got := FromChannelUsage(channel.Usage{
@@ -1225,14 +1234,12 @@ func TestFromChannelUsageNegativeCacheIsNotCompressed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := FromChannelUsage(tc.in)
-			// 逐字段等：只断「负数没漏出去」之类的话，另一处仍被抹平时照样绿。
-			if got.PromptTokens != tc.want.PromptTokens ||
-				got.CompletionTokens != tc.want.CompletionTokens ||
-				got.CacheReadTokens != tc.want.CacheReadTokens ||
-				got.CacheWriteTokens != tc.want.CacheWriteTokens {
-				t.Errorf("FromChannelUsage(%+v) = {prompt:%d completion:%d cacheRead:%d cacheWrite:%d}，期望 {prompt:%d completion:%d cacheRead:%d cacheWrite:%d}",
-					tc.in, got.PromptTokens, got.CompletionTokens, got.CacheReadTokens, got.CacheWriteTokens,
-					tc.want.PromptTokens, tc.want.CompletionTokens, tc.want.CacheReadTokens, tc.want.CacheWriteTokens)
+			// 整结构相等：逐个枚举字段时，漏掉一个字段（ReasoningTokens、
+			// UnitCounts 就是这样漏的）的表现是永远绿。Usage 全是 int64 与一个
+			// map，没有指针或非确定内容，DeepEqual 够用，也因此不必为一条断言
+			// 引入 go-cmp。
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("FromChannelUsage(%+v) = %+v，期望 %+v", tc.in, got, tc.want)
 			}
 
 			// 抹平之后这份用量是全非负的，会照单计费；原始版本把负数留给
@@ -1251,10 +1258,13 @@ func TestFromChannelUsageNegativeCacheIsNotCompressed(t *testing.T) {
 
 // min64 与 max64 在两侧相等那一格上是等价变异：两个分支返回的是同一个值。
 //
-// 变异：min64 的 `a < b` 改成 `a <= b`、max64 的 `a > b` 改成 `a >= b`——
-// 边界那一格（a == b）换了个分支走，而两支返回的数是同一个。要说「加上哪一组
-// 输入会让两版不同」：得造一组「a == b 而两支返回不同」的输入，这组输入不存在，
-// 所以抓不到。
+// 变异：min64 的 `a < b` 改成 `a <= b`、max64 的 `a > b` 改成 `a >= b`。
+//
+// 结构证明：`min64`（billing.go:471，判据在 :472）是纯函数——两个分支各返回
+// 一个入参，没有别的状态。`a < b` 时两版都返回 `a`；`a > b` 时都返回 `b`；
+// `a == b` 时原始版本返回 `b`、变异版本返回 `a`，而这两个表达式是同一个
+// int64。调用方只能看到返回值，拿不到「走的是哪一支」这条信息，所以两版对
+// 任何调用方都不可区分。`max64`（billing.go:478，判据在 :479）对称。
 //
 // 这一格在计费里真的会出现：缓存量恰好不超过输入量时，压回那一步的
 // `min64(over, cacheWrite)` 两侧就相等（见 TestCacheCompressionBoundary）。
@@ -1278,9 +1288,11 @@ func TestMin64AndMax64AtEqualArguments(t *testing.T) {
 //
 // 变异：`subtotal.Cmp(minimum) >= 0` 改成 `>` 是**等价变异**：恰好相等那一格
 // 补出来的差是 `minimum.Sub(subtotal)`，也就是 money.Amount{units: 0}——
-// 那个类型只有 units 一个字段，零只有一种表示，写进去与不写是同一个值。
-// 校验用的求和里 MinimumAdjustment 本来就在（它不看是不是零），所以也不会
-// 因此多出一项。说不出「加上哪一组输入会让两版不同」，所以抓不到。
+// 那个类型只有 units 一个字段（money.go:32-35），零只有一种表示；而写进去
+// 之前那里本来就是零：`applyMinimum`（charges.go:47，判据在 :49）只有一个
+// 调用点 `ComputeWithCharges`，它用的是开头新建的 `var b Breakdown`
+// （billing.go:156）。所以写进去与不写是同一个值；校验用的求和里
+// MinimumAdjustment 本来就在（它不看是不是零），也不会因此多出一项。
 //
 // 这条断言杀得掉方向写反的那些：`>=` 改成 `<` 时，按量金额**高于**最低消费的
 // 那一格反而会补出一笔负数（`minimum.Sub(subtotal)` 为负），那一格由
