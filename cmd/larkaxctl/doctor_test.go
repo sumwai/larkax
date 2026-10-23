@@ -463,24 +463,104 @@ func TestDoctorWalletsFlagsEachCondition(t *testing.T) {
 	}
 }
 
+// ── 第 8、9 项：入站别名（纯函数） ──────────────────────────────────────
+
+// TestDoctorInboundShadowedNamesTheAlias 是第 8 项的现场：别名与目录里的
+// 规范名同名时，解析走规范名，这条别名永远不会被用到。
+func TestDoctorInboundShadowedNamesTheAlias(t *testing.T) {
+	in := doctorChainInput{
+		catalogEndpoints: map[string][]channel.Endpoint{"model-a": nil, "same": nil},
+		inboundAliases: []catalog.InboundAlias{
+			{Alias: "same", CanonicalName: "model-a"},
+			{Alias: "fast", CanonicalName: "model-a"},
+		},
+	}
+
+	got := checkDoctorInboundShadowed(in)
+
+	assertContainsFragments(t, got.findings, `"same"`, "规范名优先", "这条别名不会被用到")
+	if got.status() != doctorFailed {
+		t.Errorf("有被遮蔽的别名时应当不通过，得到 %s", got.status().label())
+	}
+	// 只点名真正被遮蔽的那条：另一条指向 model-a、名字不与规范名冲突，不该报。
+	if strings.Contains(findingsText(got.findings), `"fast"`) {
+		t.Errorf("不该报没有被遮蔽的别名：%s", findingsText(got.findings))
+	}
+}
+
+// TestDoctorInboundDanglingNamesBothNames 是第 9 项的现场：要点名那条别名，
+// 也要点名它指向的不存在的规范名——只给其中一个，下一步不知道该改哪边。
+func TestDoctorInboundDanglingNamesBothNames(t *testing.T) {
+	in := doctorChainInput{
+		catalogEndpoints: map[string][]channel.Endpoint{"model-a": nil},
+		inboundAliases: []catalog.InboundAlias{
+			{Alias: "fast", CanonicalName: "model-gone"},
+			{Alias: "ok", CanonicalName: "model-a"},
+		},
+	}
+
+	got := checkDoctorInboundDangling(in)
+
+	assertContainsFragments(t, got.findings, `"fast"`, `"model-gone"`, "不在目录里")
+	if got.status() != doctorFailed {
+		t.Errorf("有悬空别名时应当不通过，得到 %s", got.status().label())
+	}
+	if strings.Contains(findingsText(got.findings), `"ok"`) {
+		t.Errorf("指向存在的规范名的别名不该被报：%s", findingsText(got.findings))
+	}
+}
+
+// TestDoctorInboundChecksPassWhenNothingIsWrong 钉住「干净就通过」：一条别名
+// 都没配、以及别名都指得通，两种都算通过而不是「没跑成」。
+func TestDoctorInboundChecksPassWhenNothingIsWrong(t *testing.T) {
+	cases := []struct {
+		name    string
+		aliases []catalog.InboundAlias
+	}{
+		{"一条都没配", nil},
+		{"别名都指得通", []catalog.InboundAlias{{Alias: "fast", CanonicalName: "model-a"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := doctorChainInput{
+				catalogEndpoints: map[string][]channel.Endpoint{"model-a": nil},
+				inboundAliases:   tc.aliases,
+			}
+			for name, got := range map[string]doctorCheck{
+				"遮蔽": checkDoctorInboundShadowed(in),
+				"悬空": checkDoctorInboundDangling(in),
+			} {
+				if got.status() != doctorPassed {
+					t.Errorf("%s项在干净输入上应当通过，得到 %s", name, got.status().label())
+				}
+				if strings.TrimSpace(got.ok) == "" {
+					t.Errorf("%s项通过时也要有一句结论（通过不能是空话）", name)
+				}
+			}
+		})
+	}
+}
+
 // ── 结论与退出码 ────────────────────────────────────────────────────────
 
 // TestDoctorSkippedIsNotPassed 钉住这一条命令最要紧的判据：
 // 「没跑成」与「通过」在输出与退出码上都必须分得开。
 func TestDoctorSkippedIsNotPassed(t *testing.T) {
 	rep := doctorReport{
-		database:   doctorCheck{title: "数据库"},
-		channel:    doctorCheck{title: "渠道"},
-		catalog:    doctorCheck{title: "模型目录", skip: "没有可查的对象"},
-		alias:      doctorCheck{title: "别名"},
-		pricing:    doctorCheck{title: "计价规则"},
-		ruleModels: doctorCheck{title: "规则模型名"},
-		wallet:     doctorCheck{title: "钱包"},
+		database:        doctorCheck{title: "数据库"},
+		channel:         doctorCheck{title: "渠道"},
+		catalog:         doctorCheck{title: "模型目录", skip: "没有可查的对象"},
+		alias:           doctorCheck{title: "别名"},
+		pricing:         doctorCheck{title: "计价规则"},
+		ruleModels:      doctorCheck{title: "规则模型名"},
+		wallet:          doctorCheck{title: "钱包"},
+		inboundShadowed: doctorCheck{title: "入站别名遮蔽"},
+		inboundDangling: doctorCheck{title: "入站别名悬空"},
 	}
 
 	passed, failed, skipped := rep.counts()
-	if passed != 6 || failed != 0 || skipped != 1 {
-		t.Fatalf("计数 = 通过 %d / 不通过 %d / 没跑成 %d，期望 6 / 0 / 1", passed, failed, skipped)
+	if passed != 8 || failed != 0 || skipped != 1 {
+		t.Fatalf("计数 = 通过 %d / 不通过 %d / 没跑成 %d，期望 8 / 0 / 1", passed, failed, skipped)
 	}
 	if rep.exitErr(nil) == nil {
 		t.Fatal("有一项「没跑成」时退出码必须非 0")
@@ -490,13 +570,13 @@ func TestDoctorSkippedIsNotPassed(t *testing.T) {
 	printDoctorReport(&buf, rep, false)
 	out := buf.String()
 	// 默认输出里这一项就是那一行：状态符说明「没跑成」，结论是原因本身。
-	if !strings.Contains(out, "  ! 模型目录    没有可查的对象\n") {
+	if !strings.Contains(out, "  ! 模型目录      没有可查的对象\n") {
 		t.Errorf("「没跑成」那一项的默认行不对：\n%s", out)
 	}
-	if !strings.Contains(out, "  ✓ 数据库      通过\n") {
+	if !strings.Contains(out, "  ✓ 数据库        通过\n") {
 		t.Errorf("通过项的默认行该跟着标题对齐：\n%s", out)
 	}
-	if !strings.Contains(out, "doctor: 0 项异常, 1 项跳过, 6 项通过 (运行 -v 查看细节)") {
+	if !strings.Contains(out, "doctor: 0 项异常, 1 项跳过, 8 项通过 (运行 -v 查看细节)") {
 		t.Errorf("汇总行不对：\n%s", out)
 	}
 
@@ -515,15 +595,18 @@ func TestDoctorSkippedIsNotPassed(t *testing.T) {
 // TestDoctorPassesWhenEveryCheckPasses 是上一条的对照：全通过时退出码是 0。
 func TestDoctorPassesWhenEveryCheckPasses(t *testing.T) {
 	rep := doctorReport{
-		database: doctorCheck{title: "数据库"},
-		channel:  doctorCheck{title: "渠道"},
-		catalog:  doctorCheck{title: "模型目录"},
-		alias:    doctorCheck{title: "别名"},
-		pricing:  doctorCheck{title: "计价规则"},
-		wallet:   doctorCheck{title: "钱包"},
+		database:        doctorCheck{title: "数据库"},
+		channel:         doctorCheck{title: "渠道"},
+		catalog:         doctorCheck{title: "模型目录"},
+		alias:           doctorCheck{title: "别名"},
+		pricing:         doctorCheck{title: "计价规则"},
+		ruleModels:      doctorCheck{title: "规则模型名"},
+		wallet:          doctorCheck{title: "钱包"},
+		inboundShadowed: doctorCheck{title: "入站别名遮蔽"},
+		inboundDangling: doctorCheck{title: "入站别名悬空"},
 	}
 	if err := rep.exitErr(nil); err != nil {
-		t.Fatalf("七项全通过时不该报错，得到 %v", err)
+		t.Fatalf("九项全通过时不该报错，得到 %v", err)
 	}
 }
 
@@ -540,16 +623,16 @@ func TestDoctorKeepsDBUnreachExitCode(t *testing.T) {
 	var buf bytes.Buffer
 	printDoctorReport(&buf, rep, false)
 	out := buf.String()
-	if !strings.Contains(out, "doctor: 0 项异常, 7 项跳过, 0 项通过 (运行 -v 查看细节)") {
-		t.Errorf("连不上库时七项都该报「没跑成」：\n%s", out)
+	if !strings.Contains(out, "doctor: 0 项异常, 9 项跳过, 0 项通过 (运行 -v 查看细节)") {
+		t.Errorf("连不上库时九项都该报「没跑成」：\n%s", out)
 	}
-	// 那一句错误原文只出现一次：七项各抄一遍会把报告撑成四十行，
-	// 其中七行一模一样，而「哪一项跟别的不一样」正是读者要看的。
+	// 那一句错误原文只出现一次：九项各抄一遍会把报告撑成五十行，
+	// 其中九行一模一样，而「哪一项跟别的不一样」正是读者要看的。
 	if n := strings.Count(out, "连不上数据库：连不上"); n != 1 {
 		t.Errorf("错误原文该只出现在第 1 项里，实际出现 %d 次：\n%s", n, out)
 	}
 	if !strings.Contains(out, "连不上数据库（同第 1 项）") {
-		t.Errorf("后面六项该指向第 1 项：\n%s", out)
+		t.Errorf("后面八项该指向第 1 项：\n%s", out)
 	}
 }
 
@@ -582,6 +665,10 @@ func doctorRep(checks ...doctorCheck) doctorReport {
 			rep.ruleModels = c
 		case "wallet":
 			rep.wallet = c
+		case "inboundshadowed":
+			rep.inboundShadowed = c
+		case "inbounddangling":
+			rep.inboundDangling = c
 		}
 	}
 	return rep
@@ -645,11 +732,11 @@ func TestDoctorJSONStatusAndExitCodeAgree(t *testing.T) {
 		wantStatus string
 		wantCode   int
 	}{
-		{"七项全通过", doctorRep(pass, pass, pass, pass, pass, pass, pass), nil, jsonOK, exitOK},
-		{"一项不通过", doctorRep(pass, pass, fail, pass, pass, pass, pass), nil, jsonFailed, exitFailure},
-		{"一项没跑成", doctorRep(pass, pass, pass, skip, pass, pass, pass), nil, jsonSkipped, exitFailure},
+		{"九项全通过", doctorRep(pass, pass, pass, pass, pass, pass, pass, pass, pass), nil, jsonOK, exitOK},
+		{"一项不通过", doctorRep(pass, pass, fail, pass, pass, pass, pass, pass, pass), nil, jsonFailed, exitFailure},
+		{"一项没跑成", doctorRep(pass, pass, pass, skip, pass, pass, pass, pass, pass), nil, jsonSkipped, exitFailure},
 		{
-			// 连不上库：七项都「没跑成」，退出码 3。这是 doctor 最要紧的一次
+			// 连不上库：九项都「没跑成」，退出码 3。这是 doctor 最要紧的一次
 			// 输出，json 模式下它同样要认得出来——探针不能因为库挂了就拿到
 			// 一份空的 stdout。
 			"连不上库",
@@ -716,7 +803,7 @@ func TestDoctorJSONSkippedIsNotPassed(t *testing.T) {
 	if !ok {
 		t.Fatalf("summary 不是对象：%#v", doc["summary"])
 	}
-	for key, want := range map[string]float64{"total": 7, "passed": 6, "failed": 0, "skipped": 1} {
+	for key, want := range map[string]float64{"total": 9, "passed": 8, "failed": 0, "skipped": 1} {
 		if summary[key] != want {
 			t.Errorf("summary[%q] = %v，想要 %v", key, summary[key], want)
 		}
@@ -787,7 +874,10 @@ func TestDoctorJSONCheckFields(t *testing.T) {
 	checks := docChecks(t, doc)
 
 	// 名字是英文、稳定、不随排版改：脚本按它认项目，人看到的是 title。
-	wantNames := []string{"database", "channel", "catalog", "alias", "pricing", "rulemodels", "wallet"}
+	wantNames := []string{
+		"database", "channel", "catalog", "alias", "pricing", "rulemodels", "wallet",
+		"inboundshadowed", "inbounddangling",
+	}
 	for i, want := range wantNames {
 		if checks[i]["name"] != want {
 			t.Errorf("第 %d 项的名字 = %v，想要 %q", i, checks[i]["name"], want)
@@ -796,8 +886,8 @@ func TestDoctorJSONCheckFields(t *testing.T) {
 
 	// total 是从报告结构上数出来的：加一项就该自动跟着变，不该有第二个地方
 	// 再写一遍「一共几项」。
-	if summary, _ := doc["summary"].(map[string]any); summary["total"] != float64(7) {
-		t.Errorf("summary.total = %v，想要 7", summary["total"])
+	if summary, _ := doc["summary"].(map[string]any); summary["total"] != float64(9) {
+		t.Errorf("summary.total = %v，想要 9", summary["total"])
 	}
 
 	db := checks[0]
@@ -934,7 +1024,7 @@ func TestDoctorJSONNeverCarriesCredential(t *testing.T) {
 	}
 }
 
-// ── 第 8 项：真打一次上游 ───────────────────────────────────────────────
+// ── 第 10 项：真打一次上游 ──────────────────────────────────────────────
 
 // TestDoctorEndpointPathsMatchAPI 钉住路径与 internal/api 是同一份值。
 //
@@ -1886,7 +1976,7 @@ func TestDoctorLiveBaseURLFlagBeatsListenAddr(t *testing.T) {
 //
 // 退出码是 1 而不是 2：错的是环境里的那份配置，不是这次敲的命令。
 //
-// 没开 --live 时它一点都不该受影响：那七项只读检查不碰网络，地址用不上（第三条
+// 没开 --live 时它一点都不该受影响：那九项只读检查不碰网络，地址用不上（第三条
 // 子用例）。
 func TestDoctorUnusableListenAddr(t *testing.T) {
 	const unusable = "8080"
@@ -1931,7 +2021,7 @@ func TestDoctorUnusableListenAddr(t *testing.T) {
 	t.Run("没开 --live 时不受影响", func(t *testing.T) {
 		out, err := runDoctorCaptured(t)
 
-		// 退出码是「连不上库」那一档：报错走的是七项检查那条路，而不是地址
+		// 退出码是「连不上库」那一档：报错走的是九项检查那条路，而不是地址
 		// 拼不出来——那件事只在 --live 时才有意义。
 		if got := exitCode(err); got != exitDBUnreach {
 			t.Errorf("退出码 = %d，期望 %d（库连不上）:\n%s", got, exitDBUnreach, out)
@@ -2080,6 +2170,112 @@ func TestDoctorIntegrationFlagsUserWithoutWallet(t *testing.T) {
 	}
 }
 
+// ── 第 8、9 项：入站别名（需要数据库） ──────────────────────────────────
+
+// TestDoctorIntegrationFlagsShadowedInboundAlias 是「先写别名、后建同名模型」
+// 的现场：这是正常顺序，写入侧不会拒绝，只有体检能把这条永远不会生效的别名
+// 说出来。
+func TestDoctorIntegrationFlagsShadowedInboundAlias(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	alias := uniqueName("doctor-shadowed")
+	target := uniqueName("doctor-shadow-target")
+	createDoctorModel(t, target)
+	if err := runCaptured(t, func() error {
+		return runModelAlias([]string{"add", alias, target})
+	}); err != nil {
+		t.Fatalf("建入站别名失败: %v", err)
+	}
+	// 别名先落地，再建同名的规范模型。
+	createDoctorModel(t, alias)
+
+	rep := collectDoctorReport(context.Background(), db, doctorOptions{})
+
+	assertContainsFragments(t, rep.inboundShadowed.findings,
+		alias, "规范名优先", "这条别名不会被用到")
+}
+
+// TestDoctorIntegrationFlagsDanglingInboundAlias 绕过写入口造一条悬空别名：
+// 迁移、导入或直接写库都会留下这种行，而它只有体检看得见。
+func TestDoctorIntegrationFlagsDanglingInboundAlias(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	alias := uniqueName("doctor-dangling")
+	gone := uniqueName("doctor-gone")
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO inbound_model_aliases (alias, canonical_name) VALUES ($1, $2)`,
+		alias, gone); err != nil {
+		t.Fatalf("直接写入悬空别名失败: %v", err)
+	}
+
+	rep := collectDoctorReport(ctx, db, doctorOptions{})
+
+	assertContainsFragments(t, rep.inboundDangling.findings, alias, gone, "不在目录里")
+}
+
+// TestDoctorIntegrationInboundAliasChecksPassForHealthyAlias 是反方向：别名
+// 与规范名都对得上时，两项都不报这条别名。
+func TestDoctorIntegrationInboundAliasChecksPassForHealthyAlias(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	canonical := uniqueName("doctor-inbound-ok")
+	createDoctorModel(t, canonical)
+	alias := uniqueName("doctor-inbound-alias")
+	if err := runCaptured(t, func() error {
+		return runModelAlias([]string{"add", alias, canonical})
+	}); err != nil {
+		t.Fatalf("建入站别名失败: %v", err)
+	}
+
+	rep := collectDoctorReport(context.Background(), db, doctorOptions{})
+
+	for name, findings := range map[string][]doctorProblem{
+		"遮蔽": rep.inboundShadowed.findings,
+		"悬空": rep.inboundDangling.findings,
+	} {
+		if strings.Contains(findingsText(findings), alias) {
+			t.Errorf("%s项不该报这条别名（它指向存在的 %s）：%s",
+				name, canonical, findingsText(findings))
+		}
+	}
+}
+
+// TestDoctorIntegrationRemovingDanglingAliasClearsTheFinding 走一遍处置：
+// 体检点的名就是 remove 用的名字，删掉之后这一项不再报它。
+func TestDoctorIntegrationRemovingDanglingAliasClearsTheFinding(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	alias := uniqueName("doctor-dangling-remove")
+	gone := uniqueName("doctor-gone-remove")
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO inbound_model_aliases (alias, canonical_name) VALUES ($1, $2)`,
+		alias, gone); err != nil {
+		t.Fatalf("直接写入悬空别名失败: %v", err)
+	}
+
+	rep := collectDoctorReport(ctx, db, doctorOptions{})
+	if !strings.Contains(findingsText(rep.inboundDangling.findings), alias) {
+		t.Fatalf("前提不成立：体检没有报出刚写入的悬空别名 %s", alias)
+	}
+
+	if err := runCaptured(t, func() error {
+		return runModelAlias([]string{"remove", alias})
+	}); err != nil {
+		t.Fatalf("删除入站别名失败: %v", err)
+	}
+
+	rep = collectDoctorReport(ctx, db, doctorOptions{})
+	if strings.Contains(findingsText(rep.inboundDangling.findings), alias) {
+		t.Errorf("删掉之后不该再报这条别名：%s", findingsText(rep.inboundDangling.findings))
+	}
+}
+
 // ── 第 6 项：规则里的模型名 ──────────────────────────────────────────────────
 
 // TestDoctorIntegrationFlagsCostRuleModelNotInCatalog 是 issue 第一半的现场：
@@ -2196,15 +2392,16 @@ func TestDoctorIntegrationPrintsEverySection(t *testing.T) {
 
 	out, err := runDoctorCaptured(t)
 	if err == nil {
-		t.Fatalf("这个库不可能七项全通过（用例自己就会造出没有钱包行的用户）：\n%s", out)
+		t.Fatalf("这个库不可能九项全通过（用例自己就会造出没有钱包行的用户）：\n%s", out)
 	}
 	if got := exitCode(err); got != exitFailure {
 		t.Errorf("退出码 = %d，期望 %d", got, exitFailure)
 	}
-	// 七项的标题都在，加最后那一项「上游连通」：默认输出里每项就一行，
+	// 九项的标题都在，加最后那一项「上游连通」：默认输出里每项就一行，
 	// 所以标题是唯一的定位手段。
 	for _, title := range []string{
-		"数据库", "渠道", "模型目录", "别名", "计价规则", "规则模型名", "钱包", "上游连通",
+		"数据库", "渠道", "模型目录", "别名", "计价规则", "规则模型名", "钱包",
+		"入站别名遮蔽", "入站别名悬空", "上游连通",
 	} {
 		if !strings.Contains(out, title) {
 			t.Errorf("报告里没有 %q：\n%s", title, out)
@@ -2213,7 +2410,7 @@ func TestDoctorIntegrationPrintsEverySection(t *testing.T) {
 	if !strings.Contains(out, "doctor: ") {
 		t.Errorf("报告里没有汇总行：\n%s", out)
 	}
-	if !strings.Contains(out, "- 上游连通    没跑：加 --live") {
+	if !strings.Contains(out, "- 上游连通      没跑：加 --live") {
 		t.Errorf("没开 --live 时该打一行「没跑」：\n%s", out)
 	}
 	// 默认输出里不该出现 -v 的细节：`检查：` 是每一段细节的第一行。

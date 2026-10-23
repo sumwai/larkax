@@ -84,7 +84,9 @@ func styledDoctorReport() doctorReport {
 		pricing: doctorCheck{title: "计价规则", subject: doctorSubjectPricing, skip: "没有可服务的规范名"},
 		ruleModels: doctorCheck{title: "规则模型名", subject: doctorSubjectRuleModels,
 			ok: "2 条规则、3 个模型名都在目录里"},
-		wallet: doctorCheck{title: "钱包", subject: doctorSubjectWallet, ok: "用户 1 个都有钱包行"},
+		wallet:          doctorCheck{title: "钱包", subject: doctorSubjectWallet, ok: "用户 1 个都有钱包行"},
+		inboundShadowed: doctorCheck{title: "入站别名遮蔽", subject: doctorSubjectInboundShadowed, ok: "1 条入站别名里没有被同名规范模型遮蔽的"},
+		inboundDangling: doctorCheck{title: "入站别名悬空", subject: doctorSubjectInboundDangling, ok: "1 条入站别名的规范名都在目录里"},
 	}
 }
 

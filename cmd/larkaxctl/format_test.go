@@ -429,16 +429,16 @@ func TestDoctorJSONWithoutDatabaseStillEmitsReport(t *testing.T) {
 	if got.ExitCode != exitDBUnreach {
 		t.Errorf("报告里的 exit_code = %d，与进程的退出码对不上", got.ExitCode)
 	}
-	// 七项都「没跑成」——这个 Status 不是 ok，也不是 failed：它说的是
+	// 九项都「没跑成」——这个 Status 不是 ok，也不是 failed：它说的是
 	// 「一项都没查成」，与「查了、都没问题」是两件事（见 LESSONS 第 16 条）。
 	if got.Status != jsonSkipped {
 		t.Errorf("status = %q，想要 %q", got.Status, jsonSkipped)
 	}
-	if got.Summary["total"] != 7 || got.Summary["skipped"] != 7 {
-		t.Errorf("summary 应当是七项全跳过，得到 %v", got.Summary)
+	if got.Summary["total"] != 9 || got.Summary["skipped"] != 9 {
+		t.Errorf("summary 应当是九项全跳过，得到 %v", got.Summary)
 	}
-	if len(got.Checks) != 7 {
-		t.Fatalf("checks 应当有七项，得到 %d", len(got.Checks))
+	if len(got.Checks) != 9 {
+		t.Fatalf("checks 应当有九项，得到 %d", len(got.Checks))
 	}
 	if got.Checks[0].Name != "database" {
 		t.Errorf("第一项的名字 = %q，想要 database", got.Checks[0].Name)
