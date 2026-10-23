@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { Suspense, lazy, useState, type ReactNode } from 'react'
 import {
   createBrowserRouter,
   Link,
@@ -7,6 +7,7 @@ import {
   useLocation,
   type RouteObject,
 } from 'react-router-dom'
+import { QueryClientProvider } from '@tanstack/react-query'
 import { AuthProvider, loginPath, useAuth } from './auth/AuthProvider'
 import { I18nProvider, useI18n } from './i18n'
 import { SiteProvider } from './site/SiteProvider'
@@ -15,27 +16,51 @@ import { AppShell } from './components/AppShell'
 import { FatalErrorBoundary, RootRouteError } from './components/ErrorBoundary'
 import { MockBanner } from './components/MockBanner'
 import { Alert, AppToaster, Banner, Button, Card, Spinner } from './components/ui'
+import { queryClient } from './api/queries/client'
 import { viewAllowed, viewOfPath, type View } from './ops/views'
-import { OpsChannels } from './pages/ops/Channels'
-import { OpsModels } from './pages/ops/Catalog'
-import { OpsAliases } from './pages/ops/Aliases'
-import { AdminUserDetailPage, AdminUsers } from './pages/admin/Users'
-import { MerchantPricing } from './pages/ops/MerchantPricing'
-import { MerchantOverview } from './pages/ops/MerchantOverview'
-import { MerchantModels } from './pages/ops/MerchantModels'
-import { MerchantUpstreams } from './pages/ops/MerchantUpstreams'
-import { OpsPricing } from './pages/ops/Pricing'
 import { UnsavedGuardProvider, useUnsavedChanges, useUnsavedLeaveRef } from './pages/ops/guard'
-import { Landing } from './pages/Landing'
-import { Login } from './pages/Login'
-import { Overview } from './pages/Overview'
-import { Keys } from './pages/Keys'
-import { Usage } from './pages/Usage'
-import { Models } from './pages/Models'
-import { ModelDetail } from './pages/ModelDetail'
-import { Quickstart } from './pages/Quickstart'
-import { MerchantSettings, Settings } from './pages/Settings'
-import { MerchantAccount } from './pages/MerchantAccount'
+
+/* 路由分包：每个页面一个 chunk，进哪页下哪页。多导出的模块按导出各自 lazy，
+   模块本体只取一次（ESM 缓存），映射是纯 Promise 变换。 */
+const Landing = lazy(() => import('./pages/Landing').then((m) => ({ default: m.Landing })))
+const Login = lazy(() => import('./pages/Login').then((m) => ({ default: m.Login })))
+const Overview = lazy(() => import('./pages/Overview').then((m) => ({ default: m.Overview })))
+const Keys = lazy(() => import('./pages/Keys').then((m) => ({ default: m.Keys })))
+const Usage = lazy(() => import('./pages/Usage').then((m) => ({ default: m.Usage })))
+const Models = lazy(() => import('./pages/Models').then((m) => ({ default: m.Models })))
+const ModelDetail = lazy(() =>
+  import('./pages/ModelDetail').then((m) => ({ default: m.ModelDetail })),
+)
+const Quickstart = lazy(() => import('./pages/Quickstart').then((m) => ({ default: m.Quickstart })))
+const Settings = lazy(() => import('./pages/Settings').then((m) => ({ default: m.Settings })))
+const MerchantSettings = lazy(() =>
+  import('./pages/Settings').then((m) => ({ default: m.MerchantSettings })),
+)
+const MerchantAccount = lazy(() =>
+  import('./pages/MerchantAccount').then((m) => ({ default: m.MerchantAccount })),
+)
+const OpsChannels = lazy(() =>
+  import('./pages/ops/Channels').then((m) => ({ default: m.OpsChannels })),
+)
+const OpsModels = lazy(() => import('./pages/ops/Catalog').then((m) => ({ default: m.OpsModels })))
+const OpsAliases = lazy(() => import('./pages/ops/Aliases').then((m) => ({ default: m.OpsAliases })))
+const OpsPricing = lazy(() => import('./pages/ops/Pricing').then((m) => ({ default: m.OpsPricing })))
+const AdminUsers = lazy(() => import('./pages/admin/Users').then((m) => ({ default: m.AdminUsers })))
+const AdminUserDetailPage = lazy(() =>
+  import('./pages/admin/Users').then((m) => ({ default: m.AdminUserDetailPage })),
+)
+const MerchantOverview = lazy(() =>
+  import('./pages/ops/MerchantOverview').then((m) => ({ default: m.MerchantOverview })),
+)
+const MerchantModels = lazy(() =>
+  import('./pages/ops/MerchantModels').then((m) => ({ default: m.MerchantModels })),
+)
+const MerchantUpstreams = lazy(() =>
+  import('./pages/ops/MerchantUpstreams').then((m) => ({ default: m.MerchantUpstreams })),
+)
+const MerchantPricing = lazy(() =>
+  import('./pages/ops/MerchantPricing').then((m) => ({ default: m.MerchantPricing })),
+)
 
 function LoadingScreen() {
   const { t } = useI18n()
@@ -47,6 +72,18 @@ function LoadingScreen() {
       </div>
     </div>
   )
+}
+
+function Chunk() {
+  return (
+    <div className="grid min-h-40 place-items-center">
+      <Spinner className="text-faint" />
+    </div>
+  )
+}
+
+function withChunk(node: ReactNode): ReactNode {
+  return <Suspense fallback={<Chunk />}>{node}</Suspense>
 }
 
 /**
@@ -161,8 +198,8 @@ const ROUTES: RouteObject[] = [
   {
     errorElement: <RootRouteError />,
     children: [
-      { path: '/', element: <Landing /> },
-      { path: '/login', element: <Login /> },
+      { path: '/', element: withChunk(<Landing />) },
+      { path: '/login', element: withChunk(<Login />) },
       {
         path: '/app',
         element: (
@@ -171,138 +208,88 @@ const ROUTES: RouteObject[] = [
           </RequireAuth>
         ),
         children: [
-          { index: true, element: <Overview /> },
-          { path: 'keys', element: <Keys /> },
-          { path: 'usage', element: <Usage /> },
-          { path: 'models', element: <Models /> },
+          { index: true, element: withChunk(<Overview />) },
+          { path: 'keys', element: withChunk(<Keys />) },
+          { path: 'usage', element: withChunk(<Usage />) },
+          { path: 'models', element: withChunk(<Models />) },
           // 规范名可能带 `/`（`vendor/model`），所以用 splat 接住整段。
-          { path: 'models/*', element: <ModelDetail /> },
-          { path: 'quickstart', element: <Quickstart /> },
-          { path: 'settings', element: <Settings /> },
+          { path: 'models/*', element: withChunk(<ModelDetail />) },
+          { path: 'quickstart', element: withChunk(<Quickstart />) },
+          { path: 'settings', element: withChunk(<Settings />) },
           { path: 'merchant', element: <Navigate to="/app/merchant/overview" replace /> },
           {
             path: 'merchant/overview',
-            element: (
-              <RequireView view="merchant">
-                <MerchantOverview />
-              </RequireView>
-            ),
+            element: <RequireView view="merchant">{withChunk(<MerchantOverview />)}</RequireView>,
           },
           {
             path: 'merchant/models',
-            element: (
-              <RequireView view="merchant">
-                <MerchantModels />
-              </RequireView>
-            ),
+            element: <RequireView view="merchant">{withChunk(<MerchantModels />)}</RequireView>,
           },
           {
             path: 'merchant/upstreams',
-            element: (
-              <RequireView view="merchant">
-                <MerchantUpstreams />
-              </RequireView>
-            ),
+            element: <RequireView view="merchant">{withChunk(<MerchantUpstreams />)}</RequireView>,
           },
           {
             path: 'merchant/account',
-            element: (
-              <RequireView view="merchant">
-                <MerchantAccount />
-              </RequireView>
-            ),
+            element: <RequireView view="merchant">{withChunk(<MerchantAccount />)}</RequireView>,
           },
           {
             path: 'merchant/settings',
-            element: (
-              <RequireView view="merchant">
-                <MerchantSettings />
-              </RequireView>
-            ),
+            element: <RequireView view="merchant">{withChunk(<MerchantSettings />)}</RequireView>,
           },
           {
             path: 'merchant/channels',
             element: (
               <RequireView view="merchant">
-                <OpsChannels scope="merchant" />
+                {withChunk(<OpsChannels scope="merchant" />)}
               </RequireView>
             ),
           },
           {
             path: 'merchant/pricing',
-            element: (
-              <RequireView view="merchant">
-                <MerchantPricing />
-              </RequireView>
-            ),
+            element: <RequireView view="merchant">{withChunk(<MerchantPricing />)}</RequireView>,
           },
           {
             path: 'admin/settings',
-            element: (
-              <RequireView view="admin">
-                <Settings />
-              </RequireView>
-            ),
+            element: <RequireView view="admin">{withChunk(<Settings />)}</RequireView>,
           },
           { path: 'admin', element: <Navigate to="/app/admin/channels" replace /> },
           {
             path: 'admin/channels',
             element: (
-              <RequireView view="admin">
-                <OpsChannels scope="admin" />
-              </RequireView>
+              <RequireView view="admin">{withChunk(<OpsChannels scope="admin" />)}</RequireView>
             ),
           },
           {
             path: 'admin/models',
-            element: (
-              <RequireView view="admin">
-                <OpsModels />
-              </RequireView>
-            ),
+            element: <RequireView view="admin">{withChunk(<OpsModels />)}</RequireView>,
           },
           {
             path: 'admin/users',
-            element: (
-              <RequireView view="admin">
-                <AdminUsers />
-              </RequireView>
-            ),
+            element: <RequireView view="admin">{withChunk(<AdminUsers />)}</RequireView>,
           },
           {
             path: 'admin/users/:id',
-            element: (
-              <RequireView view="admin">
-                <AdminUserDetailPage />
-              </RequireView>
-            ),
+            element: <RequireView view="admin">{withChunk(<AdminUserDetailPage />)}</RequireView>,
           },
           {
             path: 'admin/aliases',
-            element: (
-              <RequireView view="admin">
-                <OpsAliases />
-              </RequireView>
-            ),
+            element: <RequireView view="admin">{withChunk(<OpsAliases />)}</RequireView>,
           },
           {
             path: 'admin/pricing',
-            element: (
-              <RequireView view="admin">
-                <OpsPricing />
-              </RequireView>
-            ),
+            element: <RequireView view="admin">{withChunk(<OpsPricing />)}</RequireView>,
           },
         ],
       },
-      { path: '*', element: <NotFound /> },
+      { path: '*', element: withChunk(<NotFound />) },
     ],
   },
 ]
 
 export function App() {
   // 只建一次：`createBrowserRouter` 会订阅地址变化，每次渲染换一个实例等于把
-  // 订阅原地换掉。测试里每次 `render(<App />)` 都是新的一份，互不影响。
+  // 订阅原地换掉。
   const [router] = useState(() => createBrowserRouter(ROUTES))
   return (
     <FatalErrorBoundary>
@@ -312,10 +299,12 @@ export function App() {
             <AuthProvider>
               {/* 脏状态登记处：页面登记、门槛读（见 `RequireAuth`）。 */}
               <UnsavedGuardProvider>
-                {/* 演示横幅与轻提示不读路由，放在 RouterProvider 外面。 */}
-                <MockBanner />
-                <AppToaster />
-                <RouterProvider router={router} />
+                <QueryClientProvider client={queryClient}>
+                  {/* 演示横幅与轻提示不读路由，放在 RouterProvider 外面。 */}
+                  <MockBanner />
+                  <AppToaster />
+                  <RouterProvider router={router} />
+                </QueryClientProvider>
               </UnsavedGuardProvider>
             </AuthProvider>
           </SiteProvider>

@@ -27,10 +27,10 @@ import { useMediaQuery, useIsMobile, useIsNarrow } from '../hooks/useMediaQuery'
 import { RouteErrorBoundary } from './ErrorBoundary'
 import { PageTitleReporter, useDocumentTitle, type ReportedTitle } from './PageTitle'
 import { homeOf, isSharedMerchantPath, settingsOf, subjectOf, viewAllowed, viewOfPath, viewsFor, type View } from '../ops/views'
-import { ActionSheet } from './ui'
-import { Segmented } from './ui'
+import { ActionSheet, CommandPalette, Segmented, Kbd } from './ui'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from './ui'
 import { Button } from './ui'
+import { Search } from 'lucide-react'
 import { cn } from './ui/lib'
 
 type IconType = LucideIcon
@@ -144,6 +144,7 @@ export function AppShell() {
   const [manualCollapsed, setManualCollapsed] = useState(false)
   const [drawer, setDrawer] = useState(false)
   const [opsSheet, setOpsSheet] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   const mainRef = useRef<HTMLElement | null>(null)
   const collapsed = narrow || (short ? !shortExpanded : manualCollapsed)
 
@@ -194,6 +195,39 @@ export function AppShell() {
   const [reportedTitle, setReportedTitle] = useState<ReportedTitle | null>(null)
   const pageTitle = reportedTitle && reportedTitle.path === location.pathname ? reportedTitle.title : t(current)
   useDocumentTitle(`${pageTitle} · ${t('common.appName')} ${t('common.console')}`)
+
+  const paletteGroups = [
+    {
+      label: t('nav.sectionAccount'),
+      items: [
+        ...(view === 'user' ? navItems : []),
+        ...(account ? [{ to: account, key: 'nav.account' as MessageKey }] : []),
+        { to: settings, key: 'nav.settings' as MessageKey },
+      ]
+        .filter((item): item is { to: string; key: MessageKey } => 'to' in item)
+        .map((item) => ({
+          id: item.to,
+          label: t(item.key),
+          onSelect: () => navigate(item.to),
+        })),
+    },
+    ...(view !== 'user'
+      ? [
+          {
+            label: t(view === 'admin' ? 'ops.sectionAdmin' : 'ops.sectionMerchant'),
+            items: navItems.map((item) => ({
+              id: item.to,
+              label: t(item.key),
+              onSelect: () => navigate(item.to),
+            })),
+          },
+        ]
+      : []),
+    {
+      label: t('nav.logout'),
+      items: [{ id: 'logout', label: t('nav.logout'), onSelect: () => void signOut() }],
+    },
+  ]
 
   const signOut = async () => {
     await logout()
@@ -343,6 +377,17 @@ export function AppShell() {
           </Button>
           <b className="min-w-0 truncate text-md font-semibold tracking-tight">{pageTitle}</b>
           <div className="ml-auto flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="hidden gap-1.5 text-faint md:inline-flex"
+              onClick={() => setPaletteOpen(true)}
+              aria-label={t('nav.menu')}
+            >
+              <Search className="size-3.5" />
+              <Kbd>⌘</Kbd>
+              <Kbd>K</Kbd>
+            </Button>
             <div className="hidden md:block">{switcher}</div>
             {mobile ? (
               <Link
@@ -439,6 +484,8 @@ export function AppShell() {
             onSelect: () => navigate(item.to),
           }))}
       />
+
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} groups={paletteGroups} />
 
       <DialogPrimitive.Root open={drawer} onOpenChange={setDrawer}>
         <DialogPrimitive.Portal>
