@@ -19,6 +19,8 @@ import {
   useToast,
 } from '../components/ui'
 import { IconChevronRight, IconKey, IconPlus, IconPower, IconTrash } from '../components/icons'
+import { useConfirm } from './ops/common-helpers'
+import { isDirty, useCloseGuard, useUnsavedGuard } from './ops/guard'
 
 interface CreateForm {
   name: string
@@ -57,9 +59,12 @@ export function Keys() {
   const { meta } = useSite()
   const { show: toast } = useToast()
   const { data, error, loading, reload } = useAsync(() => api.listKeys({ limit: 100 }), [])
+  const confirm = useConfirm()
 
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState<CreateForm>(EMPTY_FORM)
+  // 打开弹窗时的那份值：关窗前拿它判断这一页有没有被改过。
+  const [initialForm, setInitialForm] = useState<CreateForm>(EMPTY_FORM)
   // 手输过期时间后档位高亮要撤掉；拿「现在 + N 天」在渲染期重算会随分钟漂移。
   const [expiryPreset, setExpiryPreset] = useState<string | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
@@ -77,10 +82,28 @@ export function Keys() {
 
   const openCreate = () => {
     setForm(EMPTY_FORM)
+    setInitialForm(EMPTY_FORM)
     setExpiryPreset(null)
     setFormError(null)
     setCreating(true)
   }
+
+  const closeCreateForm = () => {
+    setCreating(false)
+    setFormError(null)
+  }
+
+  // 表单真的打开着才算脏：`closeCreateForm` 只收起弹窗、不复位 form，
+  // 少了 `creating` 这一条，「放弃」一次之后这一页会永远算改过，
+  // 后续每次刷新与站内跳转都会被拦。
+  //
+  // 只比 form、不比 expiryPreset：写过时刻的档位（7 天、30 天……）会同时改
+  // 输入框，差额已经落在 form 里；唯一只动高亮不动输入框的，是「永不过期」
+  // 点在本来就为空的字段上——那一刻关窗没有任何会提交的内容丢失，不必再问。
+  const dirty = creating && isDirty(form, initialForm)
+  // 取消、Esc、点遮罩、右上角关闭钮都从这里走。
+  const requestClose = useCloseGuard(confirm, dirty, closeCreateForm)
+  const unsavedGuard = useUnsavedGuard(dirty)
 
   const applyExpiryPreset = (preset: ExpiryPreset) => {
     let value = ''
@@ -319,10 +342,10 @@ export function Keys() {
         <Modal
           title={t('keys.createTitle')}
           description={t('keys.createBody')}
-          onClose={() => setCreating(false)}
+          onClose={requestClose}
           footer={
             <>
-              <Button variant="secondary" onClick={() => setCreating(false)}>
+              <Button variant="secondary" onClick={requestClose}>
                 {t('common.cancel')}
               </Button>
               <Button type="submit" form="create-key-form" loading={submitting}>
@@ -531,6 +554,9 @@ export function Keys() {
           <div className="form-actions">{actions(detail, true)}</div>
         </Modal>
       )}
+
+      {confirm.dialog}
+      {unsavedGuard}
     </>
   )
 }
