@@ -7,8 +7,8 @@ import { useAsync } from '../../hooks/useAsync'
 import { formatDateTime } from '../../lib/format'
 import { Alert, Button, Empty, Modal, PageHead, Skeleton, useToast } from '../../components/ui'
 import { IconPlus } from '../../components/icons'
-import { ExprEditor, exprPerMillion } from '../../components/ExprEditor'
-import { Field, InputError, OpsLoadError } from './common'
+import { ExprEditor } from '../../components/ExprEditor'
+import { Field, InputError, OpsLoadError, PriceCell } from './common'
 import { linesToList, listToLines, useConfirm } from './common-helpers'
 import { isDirty, useCloseGuard, useUnsavedGuard } from './guard'
 
@@ -193,41 +193,32 @@ export function MerchantPricing() {
 
       {all.length > 0 && (
         <section className="card panel" aria-label={t('ops.pricing.merchantTitle')}>
-          <p className="hint">
-            {t('ops.pricing.merchantPriceNote', { currency: meta.currency })}
-          </p>
-          {all.map((rule) => {
-            // 表单按「每 100 万 token」填，库里存的是每 token，直接渲染会差六个数量级。
-            // 带条件的表达式不是一张单价表，原样显示。
-            const price = exprPerMillion(rule.expr) ?? rule.expr
-            return (
-              <div key={rule.id} className="ops-row">
-                <div className="keyname">
-                  <b>{rule.name}</b>
-                  <span className="tiny">
-                    {rule.model_patterns.join(', ')} · {t('ops.pricing.priority')} {rule.priority}
-                  </span>
-                </div>
-                {/* `cell-ellipsis` 会截断，`title` 给完整的一段。 */}
-                <span className="mono tiny cell-ellipsis" title={price}>
-                  {price}
-                </span>
+          <p className="hint">{t('ops.pricing.priceNote', { currency: meta.currency })}</p>
+          {all.map((rule) => (
+            <div key={rule.id} className="ops-row">
+              <div className="keyname">
+                <b>{rule.name}</b>
                 <span className="tiny">
-                  {rule.enabled ? t('ops.pricing.on') : t('ops.pricing.off')} ·{' '}
-                  {formatDateTime(rule.updated_at, meta.timezone)}
+                  {rule.model_patterns.join(', ')} · {t('ops.pricing.priority')} {rule.priority}
                 </span>
-                {rule.expr_error && <Alert tone="bad" title={rule.expr_error} />}
-                <div className="actions">
-                  <Button variant="ghost" size="sm" onClick={() => openEdit(rule)}>
-                    {t('ops.edit')}
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => toggleRule(rule)}>
-                    {t(rule.enabled ? 'ops.pricing.disable' : 'ops.pricing.enable')}
-                  </Button>
-                </div>
               </div>
-            )
-          })}
+              {/* 能换算的显示每百万，换算不出来的显示原文并带角标。 */}
+              <PriceCell expr={rule.expr} />
+              <span className="tiny">
+                {rule.enabled ? t('ops.pricing.on') : t('ops.pricing.off')} ·{' '}
+                {formatDateTime(rule.updated_at, meta.timezone)}
+              </span>
+              {rule.expr_error && <Alert tone="bad" title={rule.expr_error} />}
+              <div className="actions">
+                <Button variant="ghost" size="sm" onClick={() => openEdit(rule)}>
+                  {t('ops.edit')}
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => toggleRule(rule)}>
+                  {t(rule.enabled ? 'ops.pricing.disable' : 'ops.pricing.enable')}
+                </Button>
+              </div>
+            </div>
+          ))}
         </section>
       )}
 

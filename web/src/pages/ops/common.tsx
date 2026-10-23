@@ -9,6 +9,7 @@ import {
 import { useI18n } from '../../i18n'
 import { Alert, Button } from '../../components/ui'
 import { IconSearch, IconX } from '../../components/icons'
+import { exprPerMillion } from '../../components/ExprEditor'
 import { describeError } from './common-helpers'
 
 /**
@@ -140,6 +141,38 @@ export function InputError({ message }: { message: string | null }) {
   return (
     <span className="hint error" role="alert">
       {message}
+    </span>
+  )
+}
+
+/**
+ * 计价规则与成本规则清单里 `expr` 那一列。
+ *
+ * 能换算成一份固定单价表时显示每 100 万 token 的金额；带条件、带别的键的表达式
+ * 换算不出来，按原文显示，并在旁边挂一个「原文」角标。两种行同处一列，数字差六个
+ * 数量级，不标出来读者会以为原文那一行也是每百万的金额。
+ *
+ * 角标放在截断之外：`cell-ellipsis` 会把长表达式截掉，角标若跟着一起被截，
+ * 越是长到需要标记的行越看不见标记。整段表达式挂在 `title` 上。
+ */
+export function PriceCell({ expr }: { expr: string }) {
+  const { t } = useI18n()
+  const perMillion = exprPerMillion(expr)
+  if (perMillion !== null) {
+    return (
+      <span className="mono tiny cell-ellipsis" title={perMillion}>
+        {perMillion}
+      </span>
+    )
+  }
+  return (
+    <span className="expr-cell">
+      <span className="mono tiny cell-ellipsis" title={expr}>
+        {expr}
+      </span>
+      <span className="tag" title={t('ops.pricing.exprVerbatimHint')}>
+        {t('ops.pricing.exprVerbatim')}
+      </span>
     </span>
   )
 }

@@ -713,8 +713,8 @@ export const en: Record<MessageKey, string> = {
   'ops.pricing.merchantEmpty': 'No pricing rules yet',
   'ops.pricing.merchantEmptyBody': 'Create one to price the models you offer.',
   'ops.pricing.merchantPatternsHint': 'Requests hitting these models are priced by this rule.',
-  'ops.pricing.merchantPriceNote':
-    'Prices are shown per 1M tokens (conditional expressions are shown verbatim), in {currency}.',
+  'ops.pricing.priceNote':
+    'Prices are per 1M tokens, in {currency}. Expressions that cannot be converted are shown as written and tagged "verbatim".',
   'ops.pricing.createRule': 'New rule',
   'ops.pricing.createCost': 'New cost rule',
   'ops.pricing.editRule': 'Edit rule',
@@ -733,6 +733,9 @@ export const en: Record<MessageKey, string> = {
   'ops.pricing.channelHint': 'Cost rules must belong to a channel.',
   'ops.pricing.patterns': 'Model patterns (one per line)',
   'ops.pricing.expr': 'Expression',
+  'ops.pricing.exprVerbatim': 'verbatim',
+  'ops.pricing.exprVerbatimHint':
+    'This expression cannot be converted to a per-1M-token price; it is shown as written.',
   'ops.pricing.priority': 'Priority',
   'ops.pricing.enabled': 'Enabled',
   'ops.pricing.on': 'Enabled',
