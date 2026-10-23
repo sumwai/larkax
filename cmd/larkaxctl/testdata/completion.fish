@@ -446,6 +446,9 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subc
 complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l user
 complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l from
 complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l limit
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l model
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l since
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l status
 complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l to
 complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l user
 complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from summary' -l from
@@ -512,6 +515,9 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subco
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l user
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l from
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l limit
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l model
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l since
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l status
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l to
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l user
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l amount
