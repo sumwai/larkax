@@ -278,4 +278,119 @@ describe('Keys', () => {
       expect(mocks.createKey.mock.calls.at(-1)?.[0]).toEqual({})
     })
   })
+
+  /* ── 离开确认 ─────────────────────────────────────────────────── */
+
+  const createDialog = () => screen.getByRole('dialog', { name: '创建密钥' })
+  const discardDialog = () => screen.queryByRole('dialog', { name: '放弃未保存的修改？' })
+
+  /** 创建密钥弹窗的三个关闭出口：底部取消钮、Esc、点遮罩。 */
+  type Exit = '取消' | 'Esc' | '遮罩'
+
+  function closeCreate(exit: Exit) {
+    const dialog = createDialog()
+    if (exit === '取消') fireEvent.click(within(dialog).getByRole('button', { name: '取消' }))
+    else if (exit === 'Esc') fireEvent.keyDown(document, { key: 'Escape' })
+    else fireEvent.mouseDown(dialog.parentElement as Element)
+  }
+
+  async function openFilledForm(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByRole('button', { name: '创建第一把密钥' }))
+    const dialog = await screen.findByRole('dialog', { name: '创建密钥' })
+    await user.type(within(dialog).getByLabelText('名称'), 'CI')
+    return dialog
+  }
+
+  function discard() {
+    return within(screen.getByRole('dialog', { name: '放弃未保存的修改？' }))
+  }
+
+  it.each(['取消', 'Esc', '遮罩'] as const)(
+    '填过内容后从「%s」关闭，先问一句；选「留下」时弹窗与输入都还在',
+    async (exit) => {
+      const user = userEvent.setup()
+      renderKeys()
+      await openFilledForm(user)
+
+      closeCreate(exit)
+      // 「留下」就是取消这一问，不是放弃。
+      fireEvent.click(discard().getByRole('button', { name: '取消' }))
+      expect(discardDialog()).not.toBeInTheDocument()
+      expect(createDialog()).toBeInTheDocument()
+      expect(screen.getByLabelText('名称')).toHaveValue('CI')
+
+      // 同一个出口再走一次，这次点「放弃修改」才真的收起表单。
+      closeCreate(exit)
+      fireEvent.click(discard().getByRole('button', { name: '放弃修改' }))
+      expect(screen.queryByRole('dialog', { name: '创建密钥' })).not.toBeInTheDocument()
+    },
+  )
+
+  it('表单没填过任何东西时关闭不问', async () => {
+    const user = userEvent.setup()
+    renderKeys()
+    await user.click(await screen.findByRole('button', { name: '创建第一把密钥' }))
+    await screen.findByRole('dialog', { name: '创建密钥' })
+
+    fireEvent.click(within(createDialog()).getByRole('button', { name: '取消' }))
+    expect(discardDialog()).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: '创建密钥' })).not.toBeInTheDocument()
+  })
+
+  it('提交成功后的关闭不是放弃，不再问一句', async () => {
+    mocks.createKey.mockResolvedValue({ key: { ...KEY }, secret: 'sk-' + 'f'.repeat(32) })
+    const user = userEvent.setup()
+    renderKeys()
+    await openFilledForm(user)
+
+    await user.click(within(createDialog()).getByRole('button', { name: '创建密钥' }))
+    expect(await screen.findByText('密钥已创建')).toBeInTheDocument()
+    expect(discardDialog()).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: '创建密钥' })).not.toBeInTheDocument()
+  })
+
+  it('放弃关窗之后这一页不再算改过：刷新与再打开都不拦', async () => {
+    const user = userEvent.setup()
+    renderKeys()
+    await openFilledForm(user)
+    closeCreate('取消')
+    fireEvent.click(discard().getByRole('button', { name: '放弃修改' }))
+    expect(screen.queryByRole('dialog', { name: '创建密钥' })).not.toBeInTheDocument()
+
+    // 表单内容还留在内存里，但弹窗已经收起——脏判据里少了「弹窗开着」这一条的话，
+    // 这里仍会拦下刷新。
+    const cleanEvent = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(cleanEvent)
+    expect(cleanEvent.defaultPrevented).toBe(false)
+
+    // 换个入口再打开、直接关：还是不问。
+    fireEvent.click(await screen.findByRole('button', { name: '创建第一把密钥' }))
+    fireEvent.click(within(createDialog()).getByRole('button', { name: '取消' }))
+    expect(discardDialog()).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: '创建密钥' })).not.toBeInTheDocument()
+  })
+
+  // `expiryPreset` 本身不进脏判据：写时刻的档位会同时改输入框，差额落在 form 里。
+  it('点了写时刻的过期档位算改过，关闭要问一句', async () => {
+    const user = userEvent.setup()
+    renderKeys()
+    await user.click(await screen.findByRole('button', { name: '创建第一把密钥' }))
+    const dialog = await screen.findByRole('dialog', { name: '创建密钥' })
+
+    await user.click(within(dialog).getByRole('button', { name: '7 天' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }))
+    expect(discardDialog()).toBeInTheDocument()
+  })
+
+  it('只点「永不过期」不算改过：字段本来就空，关窗不问', async () => {
+    const user = userEvent.setup()
+    renderKeys()
+    await user.click(await screen.findByRole('button', { name: '创建第一把密钥' }))
+    const dialog = await screen.findByRole('dialog', { name: '创建密钥' })
+
+    await user.click(within(dialog).getByRole('button', { name: '永不过期' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }))
+    expect(discardDialog()).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: '创建密钥' })).not.toBeInTheDocument()
+  })
 })
