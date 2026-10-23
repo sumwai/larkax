@@ -390,3 +390,64 @@ func TestSystemOneValidatesBeforeResolving(t *testing.T) {
 		t.Error("校验没过的请求调到了上游")
 	}
 }
+
+// 插件看到的是**入站解析之后**的规范名，不是调用方写的名字。
+//
+// # 这条防的是什么
+//
+// 插件在 onRequest 拿到的三个模型名（ctx.canonicalModel / ctx.upstreamModel /
+// ctx.body.model）都由入口那份 upstream.Model 派生。入口先解析别名、再进
+// serveOnce，所以三个都该是规范名。解析挪到插件之后（或者在 hook 那一路改回
+// 传调用方原名）时，注册表的 meta.models 匹配、插件按模型名写的判断、以及它
+// 从 body.model 读到的东西会一起落到别名上——而请求照样成功、账单照样按规范名
+// 记，只有插件的判断是错的。这类错在响应上完全看不出来。
+//
+// # 为什么用请求头带出来
+//
+// 三个值要一起看。用 log() 带出来要另接一个宿主能力，而请求头那条路是现成的
+// （插件加的 x-larkax-* 头会落进 channel.Request.Headers），并且顺带证明了
+// 「插件读到的那份 body 就是它会改的那份请求」。
+func TestInboundAliasVisibleToPluginAsCanonical(t *testing.T) {
+	h := newPluginHarness(t, pluginRegistry(t, "", `onRequest(ctx){
+		return { headers: {
+			"x-larkax-canonical": String(ctx.canonicalModel),
+			"x-larkax-upstream": String(ctx.upstreamModel),
+			"x-larkax-body": String(ctx.body.model),
+		} };
+	}`))
+	inbound := &fakeInbound{aliases: map[string]string{"fast": "m-1"}}
+	h.handler.Inbound = inbound
+
+	body := `{"model":"fast","messages":[{"role":"user","content":"hi"}],"max_tokens":1000}`
+	rec := post(h.handler, PathChatCompletions, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，响应体 %s", rec.Code, rec.Body)
+	}
+	if len(h.executor.reqs) != 1 {
+		t.Fatalf("上游被调用 %d 次，期望 1 次", len(h.executor.reqs))
+	}
+
+	headers := h.executor.reqs[0].Headers
+	for _, tc := range []struct{ name, key string }{
+		{"ctx.canonicalModel", "x-larkax-canonical"},
+		{"ctx.upstreamModel", "x-larkax-upstream"},
+		{"ctx.body.model", "x-larkax-body"},
+	} {
+		if got := headers[tc.key]; got != "m-1" {
+			t.Errorf("插件拿到的 %s = %q，期望入站解析之后的规范名 m-1："+
+				"拿到 fast 说明入口在插件之后才解析别名，插件按模型名做的判断全部落在别名上",
+				tc.name, got)
+		}
+	}
+
+	// 回显仍是调用方写的名字：插件那一侧用规范名，不等于响应也换成规范名。
+	var resp struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("响应体不是合法 JSON: %v\n%s", err, rec.Body)
+	}
+	if resp.Model != "fast" {
+		t.Errorf("响应体的 model = %q，期望调用方写的 fast", resp.Model)
+	}
+}
