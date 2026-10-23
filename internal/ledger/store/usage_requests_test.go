@@ -123,8 +123,8 @@ func TestUsageRequestsLatestEventAndCostByStatus(t *testing.T) {
 	//     的 `>` 改成 `<=`，小 limit 会被抬到上限 200，第一页就把 5 行全返回。
 	//   - 行数正好等于 limit 时 More 是 false。变异：`len(page.Requests) > limit`
 	//     的 `>` 改成 `>=`，那一格会误报「还有下一页」。
-	// 上界那一处的 `>` 改成 `>=` 是等价变异：limit 正好等于上限时两版赋的
-	// 是同一个常量。
+	// 上界判据 `if limit > RequestPageMaxLimit` 的 `>` 改成 `>=` 是等价变异：
+	// limit 正好等于 RequestPageMaxLimit 时两版赋的是同一个常量。
 	half, err := s.UsageRequests(ctx, UsageRequestQuery{
 		UserID: userID, From: window.From, To: window.To, Limit: 2,
 	})

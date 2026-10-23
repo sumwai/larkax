@@ -177,8 +177,8 @@ func TestUserEntriesWindowAndCursor(t *testing.T) {
 	// false。变异分别是 `if limit > EntryPageMaxLimit` 的 `>` 改成 `<=`
 	// （小 limit 被抬到上限，第一页把 4 行全给回来）与 `len(page.Entries) >
 	// limit` 的 `>` 改成 `>=`（正好读完时误报还有下一页）。
-	// 上界那一处的 `>` 改成 `>=` 是等价变异：limit 正好等于上限时两版赋的
-	// 是同一个常量。
+	// 上界判据 `if limit > EntryPageMaxLimit` 的 `>` 改成 `>=` 是等价变异：
+	// limit 正好等于 EntryPageMaxLimit 时两版赋的是同一个常量。
 	paged := UserEntryQuery{
 		UserID: userID,
 		From:   usageTestTime(t, "2026-10-01T00:00:00Z"),
