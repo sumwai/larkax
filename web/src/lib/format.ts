@@ -148,6 +148,27 @@ export function formatCompact(value: number | null | undefined): string {
   )
 }
 
+/**
+ * 第一个内容块之后的生成速度 =（输出 + 推理）÷（耗时 − TTFT），单位 token/秒。
+ *
+ * 推理 token 也是从模型流出来的输出，只算正文会把推理占比高的模型算得偏慢。
+ * 分母不含排队与 TTFT：总耗时里它们占的是等待，不是生成。三个前提缺一不可
+ * ——产出为正、耗时与 TTFT 都有值、且耗时确实大于 TTFT——否则算不出来，返回
+ * null 由调用方显示「—」，不拿一个必然为负或无穷的数去凑。
+ */
+export function formatTps(
+  output: number,
+  reasoning: number,
+  durationMs: number | null,
+  firstTokenMs: number | null,
+): string | null {
+  const produced = output + reasoning
+  if (produced <= 0 || durationMs === null || firstTokenMs === null) return null
+  const window = durationMs - firstTokenMs
+  if (window <= 0) return null
+  return (produced / (window / 1000)).toFixed(1)
+}
+
 function partsInZone(iso: string, timeZone: string): Intl.DateTimeFormatPart[] | null {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return null

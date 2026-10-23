@@ -1,6 +1,8 @@
 import { fileURLToPath } from 'node:url'
 import { loadEnv, type ProxyOptions } from 'vite'
-import { defineConfig } from 'vite'
+// `vitest/config` 的 `defineConfig` 是 vite 那份的超集：多出 `test` 一段，
+// 其余配置的形状不变。
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
@@ -76,6 +78,12 @@ export default defineConfig(({ mode, command }) => {
         '/v1': proxyOptions(target),
       },
       allowedHosts: ['larkax.dev'],
+    },
+    test: {
+      // 组件用例要真实的 DOM；setup 里挂上 jest-dom 的匹配器与每个用例的清理。
+      environment: 'jsdom',
+      setupFiles: ['./src/test/setup.ts'],
+      include: ['src/**/*.test.{ts,tsx}'],
     },
     build: {
       outDir: 'dist',

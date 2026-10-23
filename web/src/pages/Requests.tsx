@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import type { RequestStatus, UsageRequest } from '../api/types'
-import { addDays, exclusiveEnd, formatCompact, formatDateTime, todayInZone } from '../lib/format'
+import { addDays, exclusiveEnd, formatCompact, formatDateTime, formatTps, todayInZone } from '../lib/format'
 import { modelIcon } from '../lib/modelIcon'
 import { useI18n } from '../i18n'
 import type { MessageKey } from '../i18n/zh'
@@ -63,10 +63,7 @@ function Ttft({ ms }: { ms: number | null }) {
 /**
  * TPS：第一个内容块之后的生成速度 =（输出 + 推理）÷（耗时 − TTFT）。
  *
- * 推理 token 也是从模型流出来的输出，只算正文会把推理占比高的模型算得
- * 偏慢（deepseek 那次正文 8、推理 40，速度差了六倍）。分母不含排队与
- * TTFT：总耗时里它们占的是等待，不是生成。缺 TTFT（非流式）、缺耗时，
- * 或耗时没超过 TTFT 时算不出来，显示「—」。
+ * 口径与边界在 `formatTps` 里，这里只决定「算得出来」与「算不出来」两种外观。
  */
 function Tps({
   output,
@@ -79,14 +76,9 @@ function Tps({
   durationMs: number | null
   firstTokenMs: number | null
 }) {
-  const produced = output + reasoning
-  if (produced <= 0 || durationMs === null || firstTokenMs === null) {
-    return <span className="text-faint">—</span>
-  }
-  const window = durationMs - firstTokenMs
-  if (window <= 0) return <span className="text-faint">—</span>
-  const tps = produced / (window / 1000)
-  return <span className="num">{tps.toFixed(1)}</span>
+  const value = formatTps(output, reasoning, durationMs, firstTokenMs)
+  if (value === null) return <span className="text-faint">—</span>
+  return <span className="num">{value}</span>
 }
 
 /**
@@ -109,7 +101,7 @@ function RequestRow({ request, timezone }: { request: UsageRequest; timezone: st
   const tokens = request.tokens
   const missing = t('requests.notRecorded')
   return (
-    <div className="flex items-center gap-3 px-4 py-2.5">
+    <div data-request-id={request.request_id} className="flex items-center gap-3 px-4 py-2.5">
       <span className="w-40 shrink-0">
         <span
           className="mono block truncate text-2xs text-muted-foreground"
