@@ -794,6 +794,12 @@ type cacheEntry struct {
 	key  string
 	prog *Program
 	// elem 是它在 order 里的位置，淘汰时用来摘掉自己。
+	//
+	// 它恒非 nil：条目只在 Get 与 GetWithGlobals 里构造，`elem` 取的是
+	// `order.pushFront` 的返回值（恒非 nil），而 items 里的条目删除时
+	// 链表上那一节一并摘掉。`moveToFront` 里 `e == nil` 那一支因此走不到；
+	// 若哪天多出一处构造 `cacheEntry` 却漏设 `elem`，那一支会从「返回」
+	// 变成解引用 nil。
 	elem *listElement
 }
 

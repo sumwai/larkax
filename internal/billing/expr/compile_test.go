@@ -68,10 +68,28 @@ func TestCompileAcceptsExactlyAtSourceLimit(t *testing.T) {
 // maxNesting-1 对时正好压在上限上。上限之内与上限之上只差一层，
 // 也就是一对括号——比较符挪一格，一条本来合法的规则会开始报「嵌套过深」。
 //
-// 变异：这一格对应的是 `maxDepth > maxNesting` 那条判据；同一段里还有一处
-// `if depth > maxDepth { maxDepth = depth }`（记运行中的最大深度），
-// 它的 `>` 改成 `>=` 是**等价变异**：边界那一格（depth 正好等于 maxDepth）
-// 赋的还是同一个数，没有哪一组输入能让两版不同，抓不到。
+// 这一格对应的是 `maxDepth > maxNesting` 那条判据；同一段里还有一处
+// `if depth > maxDepth { maxDepth = depth }`（记运行中的最大深度）——
+// 它的 `>` 改成 `>=` 是等价变异，判据一行、证明四步：
+//
+//	| 表达式 | 具体输入 | 哪个用例杀掉它 |
+//	| `depth > maxDepth` 改 `>=` | `strings.Repeat("(", 24) + "1" + strings.Repeat(")", 24)`：最后一个 `(` 让 `depth` 正好等于 `maxDepth`，变异版进分支把 `depth` 赋回 `maxDepth`，赋值前后是同一个数；小于、大于两格两版同路 | 杀不掉；结构证明见下 |
+//
+// 结构证明：
+//
+//  1. `maxDepth` 的第一个写点是 `checkNesting` 开头的
+//     `depth, maxDepth := 0, 0`（compile.go:745），第二个是
+//     `if depth > maxDepth { maxDepth = depth }` 的赋值（compile.go:751）；
+//  2. 它只有两个读点：`depth > maxDepth` 的比较（compile.go:750，就是本变异
+//     所在的那一处）与循环体末尾的 `if maxDepth > maxNesting`（compile.go:759）；
+//  3. 两版只在 `depth == maxDepth` 这一格分岔：原版不进分支，变异版进分支
+//     赋 `maxDepth = depth`，而这一格 `depth` 正好等于 `maxDepth`，
+//     写进去的是同一个数，所以 compile.go:751 之后 `maxDepth` 的值逐位相同；
+//  4. 于是 compile.go:750 之后的比较与 compile.go:759 的判定读到的都是同一个
+//     值，`maxNesting` 的判定与错误文案都不变。调用方拿不到区分信息——
+//     `checkNesting` 只回 error，而这个守卫不改变它返回的那个 error。
+//
+// 将来若 `maxDepth` 多出第三个写点（例如把它回传给调用方做监控），这条要重判。
 func TestCompileAcceptsExactlyAtNestingLimit(t *testing.T) {
 	at := `{"prompt": ` + strings.Repeat("(", maxNesting-1) + "1.0" +
 		strings.Repeat(")", maxNesting-1) + `}`
@@ -439,17 +457,33 @@ func TestCacheIsBounded(t *testing.T) {
 // ——淘汰方向写反、热点被丢掉，它都看不出来。只有同键命中的**同一个指针**
 // 才说明那一份还在缓存里。
 //
-// 变异：命中缓存那条路上会调 `moveToFront`，它的 `if e == nil || l.head == e`
-// 改成 `&&` 是等价变异，而两支的理由不一样，分开判：
+// `moveToFront` 的 `if e == nil || l.head == e` 改成 `&&` 时有两只分支，
+// 理由不同，**整条不是「等价」**，分开写：
 //
-//   - `e == nil` 那一支**没有可到达的输入**：全仓只有 Get 与 GetWithGlobals
-//     命中缓存的那几处调它（传进去的都是刚从 `c.items[…]` 里取出来的元素），
-//     不会是 nil。
-//   - `l.head == e` 那一支（命中的正好是队首）把队首摘下来、再推回队首，
-//     得到的还是同一条链表：元素、顺序、head 与 tail 全都不变——只有一个
-//     元素那一格也一样（`remove` 之后 head/tail 都空，再推回去又都指向它）。
+//	| 表达式 | 具体输入 | 哪个用例杀掉它 |
+//	| `e == nil` 那一支 | `moveToFront(nil)`，且链表非空：变异版 `e == nil && l.head == e` 为假，不进守卫，执行 `remove(nil)`（当前 compile.go:981-984 直接返回）之后是 `e.prev, e.next = nil, l.head`（当前 compile.go:971），解引用 nil 而 panic。生产路径上不存在这个入参，见下面的四条链 | 杀不掉（结构性不可达）；探针里 `moveToFront(nil)` 在变异版上 panic 于 `e.prev, e.next = nil, l.head`，原版正常返回 |
+//	| `l.head == e` 那一支 | 命中的正好是队首（例如 `TestCacheKeepsHotEntries` 里反复命中的 `hot@v1`）：两版都进守卫直接返回 | 杀不掉（重插恒等，见下） |
 //
-// 所以这一条与 `e == nil` 那一半都不能靠「它不一样」来杀。
+// `e == nil` 不可达的四条链：
+//
+//   - `cacheEntry.elem` 只在 `Get` 与 `GetWithGlobals` 构造条目时赋值
+//     （当前 compile.go:879、compile.go:916），值是 `c.order.pushFront(...)` 的
+//     返回值，而 `pushFront` 恒构造并返回非 nil（当前 compile.go:954-964）；
+//   - `c.items` 的条目只在 `evictLocked` 里删除，且删除紧跟在
+//     `c.order.remove(oldest)` 之后（当前 compile.go:949-950），不会留下
+//     「在表里、不在链上」的条目；
+//   - `moveToFront` 只在 `Get` 与 `GetWithGlobals` 命中缓存时调用
+//     （当前 compile.go:854、874、897、911），传的都是刚从 `c.items[...]` 取出的
+//     `e.elem`；
+//   - 于是链表里被移动的元素恒非 nil。
+//
+// 口径要注意：`e == nil` 那一支**若可达，两版不是无差异而是 panic**——
+// 所以这一条不能靠「看起来一样」来判等价。将来若有第三处构造 `cacheEntry`
+// 却漏设 `elem`，这条就翻了。
+//
+// `l.head == e` 那一支是恒等操作：把队首摘下来再推回队首，元素、顺序、
+// head 与 tail 全不变；只有一个元素那一格也一样（`remove` 之后 head/tail
+// 都空，再推回去又都指向它）。调用方只看得到命中与淘汰行为，两者都不变。
 func TestCacheKeepsHotEntries(t *testing.T) {
 	c := NewCache(16)
 	const src = `{"prompt": 0.0000015}`
@@ -536,16 +570,16 @@ func TestCacheDropsTheOldestBatch(t *testing.T) {
 // ——两处都钳住，缓存才有上限：不钳的话容量 0 的缓存一条都不淘汰，
 // 商家改一万次规则就攒一万条。
 //
-// 两处的**边界那一格都是等价变异**，抓不到，而理由各自成立：
+// 两处边界判据各有一条变异，按同一张表判：
 //
-//   - `max < 1` 改成 `max <= 1`：max 正好是 1 时进分支把 max 赋成 1，
-//     写的还是同一个数（容量提示 `make(map, 1)` 也一模一样）。
-//   - `drop < 1` 改成 `drop <= 1`：max 是 8 时 `8/8` 正好是 1，进分支赋 1，
-//     同一个数。
+//	| 表达式 | 具体输入 | 哪个用例杀掉它 |
+//	| `max < 1` 改 `max <= 1` | `NewCache(1)`：变异版进分支把 `max` 赋成 1，原版不进分支；两种走法结束时 `max` 都是 1。`NewCache(0)` 与 `NewCache(-2)`：两版都进分支赋 1 | 杀不掉（分支体赋的就是边界那一个值） |
+//	| `drop < 1` 改 `drop <= 1` | `NewCache(8)`：`drop = 8/8 = 1`，变异版进分支赋 1，原版不进分支；两种走法结束时 `drop` 都是 1。`NewCache(7)`：`drop = 0`，两版都赋 1 | 杀不掉（同上） |
 //
-// 要说「加上哪一组输入会让两版不同」——没有：两处赋值都写在「算出来的正好
-// 就是要赋的那个值」那一格上，换分支不改值。下面两条仍然把这一格的具体数
-// 固定下来（容量 8 时一次淘汰 1 条正是 max/8 的那一格），改写法时它会红。
+// 两处都是「分支体赋的就是边界那一个值」：进不进分支，写进去的都是同一个数，
+// 调用方拿不到区分信息——容量与一次淘汰的条数都不变（`make(map, max)` 的
+// 容量提示也一样）。下面两条断言钉的是这一格的具体数（容量 8 时一次淘汰
+// 1 条正是 `max/8` 那一格），改写法时它们会红。
 func TestCacheBoundsTinyCapacity(t *testing.T) {
 	// 容量 0 被钳到 1：放一批不同的规则之后只剩一条，不随插入次数增长。
 	c := NewCache(0)
