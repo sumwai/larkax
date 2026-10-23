@@ -275,7 +275,7 @@ func (s *Store) GetKey(ctx context.Context, keyID int64) (Key, error) {
 // 用户，所以这里收的是已经解析好的 ID——两处各解析一遍的话，将来「按用户名
 // 查不到时要不要回落到 ID」这类改动就得改两遍，而漏掉一处不会报错。
 func (s *Store) ListKeys(ctx context.Context, userID *int64) ([]Key, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.read().QueryContext(ctx, `
 		SELECT `+keyColumns+`
 		  FROM api_keys k
 		  JOIN users u ON u.id = k.user_id

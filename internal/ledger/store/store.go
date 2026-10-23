@@ -71,6 +71,12 @@ import (
 type Store struct {
 	db *sql.DB
 
+	// reader 非 nil 时读路径改走它（见 NewInTx），db 同时为 nil。
+	//
+	// 读路径调用 read()，写路径仍然碰 db。这样「构造的是哪一种」就不会在
+	// 读侧静默退化成另一条连接。
+	reader queryer
+
 	// logger 是结算路径上「不值得让结算失败、但必须有人看见」的出口。
 	// nil 表示用 slog.Default()。
 	logger *slog.Logger
@@ -98,6 +104,30 @@ type Store struct {
 
 // New 包装一个已打开的数据库句柄。
 func New(db *sql.DB) *Store { return &Store{db: db} }
+
+// queryer 是 *sql.DB 与 *sql.Tx 共有的读能力。
+//
+// 与 partition.go 里那个 Querier 分开：那一个要 ExecContext（补建分区要用），
+// 而这里只要读，多声明一个方法会把只想传事务的调用方挡在外面。
+type queryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// NewInTx 构造一个读句柄指向 tx 的 Store。
+//
+// 它只服务「在一个事务里取齐多份数据」的读命令。**写方法在它上面没有句柄**
+// （db 为 nil），调用会当场 panic——宁可炸在错误的地方，也不要让一次记账
+// 落到一条与调用方以为的事务无关的连接上。
+func NewInTx(tx *sql.Tx) *Store { return &Store{reader: tx} }
+
+// read 返回读路径要用的句柄。
+func (s *Store) read() queryer {
+	if s.reader != nil {
+		return s.reader
+	}
+	return s.db
+}
 
 // log 返回本实例的日志出口，没设过就用进程的默认 logger。
 func (s *Store) log() *slog.Logger {

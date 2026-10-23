@@ -25,6 +25,7 @@ const userShortUsage = `larkaxctl user 管理用户，以及用户手里的订�
   larkaxctl user create --name <用户名> [--email <邮箱>] [--role <角色>] [--generate-password]
   larkaxctl user list [--status <状态>] [--role <角色>]
   larkaxctl user get --user <ID 或用户名>
+  larkaxctl user inspect <用户>                      账号、钱包、订阅、扣费顺序与 Key（只读）
   larkaxctl user update --user <ID 或用户名> [--status <状态>] [--email <邮箱>]
                         [--display-name <展示名>] [--merchant|--no-merchant] [--admin|--no-admin]
   larkaxctl user password <ID 或用户名> --generate|--stdin
@@ -47,6 +48,7 @@ const userUsage = `larkaxctl user 管理用户。
                         [--generate-password]
   larkaxctl user list [--status <状态>] [--role <角色>]
   larkaxctl user get --user <ID 或用户名>
+  larkaxctl user inspect <用户>
   larkaxctl user update --user <ID 或用户名> [--status <状态>] [--email <邮箱>]
                         [--display-name <展示名>] [--merchant|--no-merchant]
                         [--admin|--no-admin]
@@ -120,6 +122,20 @@ list 按 id 从小到大列出用户，一栏一个字段：ID、用户名、状
 
 get 按 ID 或用户名读一个用户的全部字段：除上面那几栏，还有展示名、删除时间、
 创建时间与更新时间。标识怎么解释与别的命令一致：纯数字按 ID，否则按用户名。
+
+inspect 一次取齐一个用户的全景，只读。五样取自同一个只读事务（可重复读），
+所以是同一时刻的状态：
+
+  账号      同 get 的字段
+  钱包      同 user wallet show
+  订阅      同 user plan list
+  扣费顺序  同 user plan order show
+  API Key   同 user key list
+
+列表**不按状态过滤**：已到期、已作废的订阅与已失效的 Key 都在，由各自的状态那一栏
+区分——少看一条正是这条命令要解决的问题。每一段的字段与对应的子命令逐字相同；
+用户不存在时的报错与退出码也与 user get 相同。--format json 的字段名沿用那几条
+命令的，空集合是 []、缺值是 null。
 
 update 只改**显式给出**的字段，一个都没给就报参数错（不做静默空操作）：
 
@@ -223,7 +239,7 @@ const userTimeout = 30 * time.Second
 
 // userActions 是 user 的动作清单，补全从这里取。
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
-var userActions = []string{"create", "list", "get", "update", "password", "unlock", "delete", "plan", "wallet", "key", "usage"}
+var userActions = []string{"create", "list", "get", "inspect", "update", "password", "unlock", "delete", "plan", "wallet", "key", "usage"}
 
 func runUser(args []string) error {
 	fs := newFlagSet("user", flag.ContinueOnError)
@@ -246,6 +262,8 @@ func runUser(args []string) error {
 		return runUserList(rest)
 	case "get":
 		return runUserGet(rest)
+	case "inspect":
+		return runUserInspect(rest)
 	case "update":
 		return runUserUpdate(rest)
 	case "password":

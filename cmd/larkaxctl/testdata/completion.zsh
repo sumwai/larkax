@@ -191,7 +191,7 @@ _larkaxctl() {
 		"snapshot") compadd -- cleanup allowlist get access-log redact ;;
 		"upstream-cost") compadd -- create list update disable ;;
 		"usage") compadd -- events requests summary ;;
-		"user") compadd -- create list get update password unlock delete plan wallet key usage ;;
+		"user") compadd -- create list get inspect update password unlock delete plan wallet key usage ;;
 		"user delete") compadd -- request revert purge ;;
 		"user key") compadd -- list create plans ;;
 		"user key plans") compadd -- show set ;;

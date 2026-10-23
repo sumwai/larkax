@@ -88,10 +88,40 @@ type Authenticator interface {
 // 这种只在对端才暴露的错配。
 type Store struct {
 	db *sql.DB
+
+	// reader 非 nil 时读路径改走它（见 NewInTx），db 同时为 nil。
+	//
+	// 两个句柄只留一个：读路径调用 read()，写路径仍然碰 db。这样
+	// 「构造的是哪一种」就不会在读侧静默退化成另一条连接。
+	reader readHandle
 }
 
 // New 包装一个已打开的数据库句柄。
 func New(db *sql.DB) *Store { return &Store{db: db} }
+
+// readHandle 是 *sql.DB 与 *sql.Tx 共有的读能力。
+//
+// 只声明这两个方法：本包要在只读事务里取齐一次全景时（见 NewInTx），
+// 事务满足它，而它挡得住把写能力误传进来的调用方。
+type readHandle interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// NewInTx 构造一个读句柄指向 tx 的 Store。
+//
+// 它只服务「在一个事务里取齐多份数据」的读命令。**写方法在它上面没有句柄**
+// （db 为 nil），调用会当场 panic——宁可炸在错误的地方，也不要让一次写入
+// 落到一条与调用方以为的事务无关的连接上。
+func NewInTx(tx *sql.Tx) *Store { return &Store{reader: tx} }
+
+// read 返回读路径要用的句柄。
+func (s *Store) read() readHandle {
+	if s.reader != nil {
+		return s.reader
+	}
+	return s.db
+}
 
 // 编译期断言：Store 满足公共入口要的那份接口。
 var _ Authenticator = (*Store)(nil)

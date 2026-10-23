@@ -92,7 +92,7 @@ func (s *Service) EffectiveChargeOrder(ctx context.Context, userID int64) (Charg
 	}
 
 	var raw sql.NullString
-	err := s.db.QueryRowContext(ctx,
+	err := s.read().QueryRowContext(ctx,
 		`SELECT charge_order FROM users WHERE id = $1`, userID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", fmt.Errorf("用户 %d 不存在", userID)
@@ -123,7 +123,7 @@ func (s *Service) EffectiveChargeOrder(ctx context.Context, userID int64) (Charg
 // 写错，而是这一层现在读不了库。
 func (s *Service) platformChargeOrder(ctx context.Context) (ChargeOrder, error) {
 	var raw []byte
-	err := s.db.QueryRowContext(ctx,
+	err := s.read().QueryRowContext(ctx,
 		`SELECT value FROM settings WHERE key = $1`, PlatformChargeOrderKey).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		s.logger().Warn("settings 里没有平台默认的扣费顺序，按兜底值走",
