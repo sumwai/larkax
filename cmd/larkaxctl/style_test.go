@@ -24,6 +24,7 @@ import (
 	"github.com/sumwai/larkax/internal/pricing"
 	"github.com/sumwai/larkax/internal/settings"
 	"github.com/sumwai/larkax/internal/snapshot"
+	"github.com/sumwai/larkax/internal/upstream"
 )
 
 // 上色与不上色是同一份代码的两条路，而**默认那条是不上色**：命令的输出多数
@@ -711,6 +712,13 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		DeclaredKeys: []string{"completion", "prompt"},
 	}}
 
+	// 适配器清单用真实的探测注册表：它由内置清单装配，内容固定，
+	// 而这条用例要比的是排版（表头加粗、剥掉样式码后逐字相同），不是数据。
+	adapterRegistry, regErr := upstream.ProbeRegistry()
+	if regErr != nil {
+		t.Fatalf("ProbeRegistry 出错: %v", regErr)
+	}
+
 	cases := []struct {
 		name  string
 		print func(w io.Writer)
@@ -742,6 +750,7 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 				}},
 			})
 		}},
+		{"适配器清单", func(w io.Writer) { printChannelAdapters(w, adapterRegistry) }},
 		{"模型清单", func(w io.Writer) {
 			printModelList(w, []catalog.Model{{
 				ID: 7, CanonicalName: "claude-x", DisplayName: "示例模型",
@@ -965,8 +974,8 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		}},
 	}
 
-	if len(cases) != 34 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 34 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 35 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 35 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {
