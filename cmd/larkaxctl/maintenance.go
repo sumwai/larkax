@@ -48,6 +48,10 @@ const maintenanceUsage = `larkaxctl maintenance 维护运行期数据的留存�
 更细的约定见 docs/cli-reference.md 的「maintenance」一节。
 `
 
+// maintenanceActions 是 maintenance 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var maintenanceActions = []string{"idempotency", "session"}
+
 // runMaintenance 处理 maintenance 子命令。
 func runMaintenance(args []string) error {
 	if len(args) == 0 {

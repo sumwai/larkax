@@ -99,6 +99,10 @@ const ledgerReadTimeout = time.Minute
 // 「没跑完」看起来像「跑完了什么都没发现」（LESSONS 第 16 条）。
 const ledgerVerifyTimeout = 30 * time.Minute
 
+// ledgerActions 是 ledger 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var ledgerActions = []string{"balance", "verify", "reconcile", "runs"}
+
 // runLedger 处理 ledger 子命令。
 func runLedger(args []string) error {
 	if len(args) == 0 {
@@ -133,7 +137,7 @@ func runLedger(args []string) error {
 // 一个，会让「我写了 --account」与「我忘了写」在输出上分不出来——而后者会
 // 打出一份全库汇总，看起来像一次成功的查询。
 func runLedgerBalance(args []string) error {
-	fs := flag.NewFlagSet("ledger balance", flag.ContinueOnError)
+	fs := newFlagSet("ledger balance", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, ledgerShortUsage) }
 	account := fs.String("account", "", "")
 	all := fs.Bool("all", false, "")
@@ -245,7 +249,7 @@ func printLedgerBalances(w io.Writer, asset ledger.Asset, report *store.AccountB
 
 // runLedgerVerify 校验账本完整性。
 func runLedgerVerify(args []string) error {
-	fs := flag.NewFlagSet("ledger verify", flag.ContinueOnError)
+	fs := newFlagSet("ledger verify", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, ledgerShortUsage) }
 	from := fs.String("from", "", "")
 	to := fs.String("to", "", "")
@@ -589,7 +593,7 @@ const ledgerRunsDefaultLimit = 20
 // 一写一读的两半：只跑不读的话，「跑过几次、上次扫到哪、差额怎么处理的」只能连库看，
 // 而那张表同时还是下一轮增量扫描的起点。
 func runLedgerRuns(args []string) error {
-	fs := flag.NewFlagSet("ledger runs", flag.ContinueOnError)
+	fs := newFlagSet("ledger runs", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, ledgerShortUsage) }
 	limit := fs.Int("limit", ledgerRunsDefaultLimit, "")
 	if err := fs.Parse(args); err != nil {

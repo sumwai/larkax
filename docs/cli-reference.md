@@ -222,6 +222,26 @@ DEL，换行、制表符、ESC 都在其中）：换行会把一栏折成两行�
 打印版本号与编译元数据。版本号在构建时注入（见 `Makefile`），从源码直接编译出来
 的是 `dev`。
 
+#### `completion`
+
+打印某个 shell 的补全脚本。脚本只写到 stdout，装到哪里由使用者决定：
+
+- 当前会话生效：`source <(larkaxctl completion bash)`。
+- bash 写进配置：`larkaxctl completion bash > ~/.local/share/bash-completion/completions/larkaxctl`。
+- zsh 写进配置：`larkaxctl completion zsh > ~/.zfunc/_larkaxctl`。
+- fish 写进配置：`larkaxctl completion fish > ~/.config/fish/completions/larkaxctl.fish`。
+
+补的内容由命令行自己的注册表生成，不是一份手写的文本：一级命令与根帮助页同源，
+二级动作取自各命令分发表旁边的那份动作清单，长选项取自各命令自己注册的 flag 集。
+所以新增一条命令、一个动作或一个选项时，补全跟着变，不必另改一份名单。
+
+补全只列长选项的正式写法，短选项与旧名仍能敲，只是不占 Tab 的位置。选项的合法
+取值（渠道类型、`--role`、`--status`、`--asset` 等）同样取自校验那一侧已有的来源；
+没有这样一份来源的取值不补。
+
+shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 2），报错里会
+列出这三个。
+
 ### 路由与模型配置 (Routing & Models)
 
 #### `channel`

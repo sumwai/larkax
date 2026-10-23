@@ -127,6 +127,10 @@ allowlist 与 get 不填时两个方向都处理。
 更细的约定见 docs/cli-reference.md 的「snapshot」一节。
 `
 
+// snapshotActions 是 snapshot 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var snapshotActions = []string{"cleanup", "allowlist", "get", "access-log", "redact"}
+
 // runSnapshot 处理 snapshot 子命令。
 func runSnapshot(args []string) error {
 	if len(args) == 0 {
@@ -209,7 +213,7 @@ func surfaceFor(name string, fallback snapshot.Surface) (snapshot.Surface, error
 // 它不连库、不读配置：允许表是代码里的数据，而这条命令的用途正是
 // 在一个连不上库的地方回答「你们存了我请求里的哪些字段」。
 func runSnapshotAllowlist(args []string) error {
-	fs := flag.NewFlagSet("snapshot allowlist", flag.ContinueOnError)
+	fs := newFlagSet("snapshot allowlist", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
 	direction := fs.String("direction", "", "")
 	surfaceName := fs.String("surface", "", "")
@@ -348,7 +352,7 @@ func runSnapshotRedact(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("snapshot redact", flag.ContinueOnError)
+	fs := newFlagSet("snapshot redact", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
 	direction := fs.String("direction", "", "")
 	surfaceName := fs.String("surface", "", "")
@@ -576,7 +580,7 @@ type snapshotRow struct {
 // 于是 `get <id> --actor X` 与 `get --actor X <id>` 两种写法都能用，
 // 而多余的位置参数照样会被拒——它们落在第二趟的 fs.Args() 里。
 func runSnapshotGet(args []string) error {
-	fs := flag.NewFlagSet("snapshot get", flag.ContinueOnError)
+	fs := newFlagSet("snapshot get", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
 	actor := fs.String("actor", "", "")
 	reason := fs.String("reason", "", "")
@@ -1134,7 +1138,7 @@ type snapshotAccessRow struct {
 // （读快照与记日志在同一个事务里，所以日志里的每一行都对应一次真的读过）。
 // 只写不读的话，「谁把快照读走了」这个问题在命令行上回答不了。
 func runSnapshotAccessLog(args []string) error {
-	fs := flag.NewFlagSet("snapshot access-log", flag.ContinueOnError)
+	fs := newFlagSet("snapshot access-log", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
 	requestID := fs.String("request-id", "", "")
 	user := fs.String("user", "", "")
@@ -1371,7 +1375,7 @@ func runSnapshotCleanup(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("snapshot cleanup", flag.ContinueOnError)
+	fs := newFlagSet("snapshot cleanup", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {

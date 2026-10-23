@@ -84,6 +84,10 @@ disable <规则 ID> 把生效区间收在当下：它从现在起不再适用。
 更细的约定见 docs/cli-reference.md 的「upstream-cost」一节。
 `
 
+// upstreamCostActions 是 upstream-cost 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var upstreamCostActions = []string{"create", "list", "update", "disable"}
+
 func runUpstreamCost(args []string) error {
 	if len(args) == 0 {
 		printUsage(os.Stderr, upstreamCostShortUsage)
@@ -134,7 +138,7 @@ func runUpstreamCostCreate(args []string) error {
 // 它只做「有没有给、给了什么」，校验放在包那一侧（validateCost）：读路径按
 // 渠道与生效区间匹配，那条判据只有一份。
 func parseUpstreamCostCreate(args []string) (pricing.CostCreateRequest, error) {
-	fs := flag.NewFlagSet("upstream-cost create", flag.ContinueOnError)
+	fs := newFlagSet("upstream-cost create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, upstreamCostShortUsage) }
 	channelID := fs.Int64("channel", 0, "这条规则挂在哪个渠道上")
 	models := fs.String("models", "", "")
@@ -211,7 +215,7 @@ func runUpstreamCostUpdate(args []string) error {
 // 这一组旗标没有别名（与 price 那几条不同：那里留着的 --from / --to / --owner
 // 是改名前就在跑的写法），所以判「给没给」看 flag 自己的名字就够。
 func parseUpstreamCostUpdate(args []string) (pricing.CostUpdateRequest, error) {
-	fs := flag.NewFlagSet("upstream-cost update", flag.ContinueOnError)
+	fs := newFlagSet("upstream-cost update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, upstreamCostShortUsage) }
 	id := fs.Int64("id", 0, "要改的成本规则 ID")
 	channelID := fs.Int64("channel", 0, "改挂到哪条渠道上")
@@ -325,7 +329,7 @@ func runUpstreamCostDisable(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("upstream-cost disable", flag.ContinueOnError)
+	fs := newFlagSet("upstream-cost disable", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, upstreamCostShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -358,7 +362,7 @@ func runUpstreamCostDisable(args []string) error {
 // 就是裁决依据。分成两条命令会让「有哪些规则」与「用哪条」各排一次序，那两次
 // 排序分岔时的表现是「清单里第一条不是它」，而清单正是用来回答这个问题的。
 func runUpstreamCostList(args []string) error {
-	fs := flag.NewFlagSet("upstream-cost list", flag.ContinueOnError)
+	fs := newFlagSet("upstream-cost list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, upstreamCostShortUsage) }
 	channelID := fs.Int64("channel", 0, "只看这条渠道的规则")
 	model := fs.String("model", "", "这条渠道上的哪个模型（规范模型名）")

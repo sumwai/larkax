@@ -224,6 +224,10 @@ const userUsageUsage = `larkaxctl user usage 读一个用户的用量与计费�
 更细的约定见 docs/cli-reference.md 的「user」一节。
 `
 
+// userPlanActions 是 user plan 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var userPlanActions = []string{"grant", "list", "void", "order"}
+
 // runUserPlan 分发 user plan 的子命令。
 func runUserPlan(args []string) error {
 	if len(args) == 0 {
@@ -281,6 +285,10 @@ func runUserPlanVoid(args []string) error {
 	return runPlanVoid(append([]string{"--id", id}, rest...))
 }
 
+// userPlanOrderActions 是 user plan order 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var userPlanOrderActions = []string{"show", "set"}
+
 func runUserPlanOrder(args []string) error {
 	if len(args) == 0 {
 		printUsage(os.Stderr, userPlanHelp.short)
@@ -318,6 +326,10 @@ func runUserPlanOrderSet(args []string) error {
 	}
 	return runPlanOrderSet(append([]string{"--user", user}, rest...))
 }
+
+// userWalletActions 是 user wallet 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var userWalletActions = []string{"show", "credit", "adjust", "refund"}
 
 // runUserWallet 分发 user wallet 的子命令。
 func runUserWallet(args []string) error {
@@ -380,6 +392,10 @@ func runUserWalletRefund(args []string) error {
 	return runWalletRefund(append([]string{"--user", user}, rest...))
 }
 
+// userKeyActions 是 user key 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var userKeyActions = []string{"list", "create", "plans"}
+
 // runUserKey 分发 user key 的子命令。
 func runUserKey(args []string) error {
 	if len(args) == 0 {
@@ -423,6 +439,10 @@ func runUserKeyCreate(args []string) error {
 	return runAPIKeyCreate(append([]string{"--user", user}, rest...))
 }
 
+// userKeyPlansActions 是 user key plans 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var userKeyPlansActions = []string{"show", "set"}
+
 // runUserKeyPlans 分发 user key plans 的子命令（一把 Key 能用哪些订阅）。
 func runUserKeyPlans(args []string) error {
 	if len(args) == 0 {
@@ -461,6 +481,10 @@ func runUserKeyPlansSet(args []string) error {
 	}
 	return runPlanKeySet(append([]string{"--id", id}, rest...))
 }
+
+// userUsageActions 是 user usage 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var userUsageActions = []string{"events", "requests"}
 
 // runUserUsage 分发 user usage 的子命令。
 func runUserUsage(args []string) error {
@@ -508,6 +532,15 @@ func runUserUsageRequests(args []string) error {
 // 以 - 开头的不当位置参数：那样报出来的是「不认识这个旗标」，而人写的是少了一个
 // 宾语；把两件事混成一句，读的人会去查旗标名。
 func takeOperand(args []string, name string) (string, []string, error) {
+	// 收集补全数据时（见 completion.go 的 collectCommandFlags）不判缺参数：
+	// 那时走的是 `<命令> -h`，位置参数本来就不会给。让它照常往下走，
+	// 后面的 flag 集才注册得出来；真正的解析在 fs.Parse 里遇到 -h 就停了。
+	if collectingCommandFlags {
+		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+			return args[0], args[1:], nil
+		}
+		return "", args, nil
+	}
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") || strings.TrimSpace(args[0]) == "" {
 		return "", nil, usageErr(fmt.Errorf("缺少 %s：把它写成位置参数", name))
 	}

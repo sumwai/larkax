@@ -54,6 +54,38 @@ func TestParseRole(t *testing.T) {
 	}
 }
 
+// TestRolesParseAsThemselves 让 ParseRole 把 Roles() 的每一条都走一遍。
+//
+// 清单与判据读的是同一份数据，所以这条用例不证明「两边一致」；它证明的是
+// 清单里每个条目拼写正确、能被解析回自己——报错与补全都按这份清单念给用户。
+func TestRolesParseAsThemselves(t *testing.T) {
+	for _, role := range Roles() {
+		got, err := ParseRole(role)
+		if err != nil {
+			t.Errorf("ParseRole(%q) 报错：%v", role, err)
+			continue
+		}
+		if string(got) != role {
+			t.Errorf("ParseRole(%q) = %q", role, got)
+		}
+	}
+}
+
+// TestParseRoleErrorNamesEveryRole 钉住报错文本。
+//
+// 期望串写成字面量，不从 Roles() 拼：拼接出来的期望等于自己比自己——删掉一个
+// 条目时两边同时少一个，没有任何用例会红。这一条同时钉住顺序与「一个都不少」。
+func TestParseRoleErrorNamesEveryRole(t *testing.T) {
+	_, err := ParseRole("nope")
+	if err == nil {
+		t.Fatal(`ParseRole("nope") 应当报错`)
+	}
+	const want = `未知的角色 "nope"：可取 user、merchant、admin`
+	if got := err.Error(); got != want {
+		t.Errorf("报错 = %q，期望 %q", got, want)
+	}
+}
+
 // TestCreateUserRejectsEmptyInput 走的是不碰库的校验分支。
 //
 // CreateUser 是导出方法，别的调用方（将来的 HTTP 管理接口、导入脚本）

@@ -3,10 +3,19 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/sumwai/larkax/internal/config"
 )
+
+// errFlagIntrospection 是收集 flag 名期间 openDB 的返回值。
+//
+// 生成补全要把每条命令路径按 `-h` 走一遍（见 completion.go 的
+// collectCommandFlags）。正常路径在解析参数时就停了，走不到这里；这一道是
+// 兜底：万一哪条命令在解析之前就要连库，那次遍历也只拿到一个错误，
+// 不会真的碰到数据库。
+var errFlagIntrospection = errors.New("收集补全数据期间不连库")
 
 // openDB 打开一条到 larkax 数据库的连接，并确认它真的能用。
 //
@@ -17,6 +26,9 @@ import (
 //
 // 失败时自己关掉句柄，调用方不必为「没拿到连接」再去关一次。
 func openDB(ctx context.Context, cfg *config.OpsConfig) (*sql.DB, error) {
+	if collectingCommandFlags {
+		return nil, errFlagIntrospection
+	}
 	db, err := sql.Open("pgx", cfg.DBDSN)
 	if err != nil {
 		return nil, dbErr(fmt.Errorf("打开数据库连接失败: %w", err))

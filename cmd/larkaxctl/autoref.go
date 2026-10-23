@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"flag"
 	"fmt"
 	"strings"
 	"time"
@@ -41,7 +40,7 @@ const (
 //
 // 说明文字留空，与包内其余旗标一致：帮助文案的唯一来源是各文件里的 *Usage 常量
 // （见包注释）。
-func autoRefFlag(fs *flag.FlagSet) *bool {
+func autoRefFlag(fs *flagSet) *bool {
 	return fs.Bool(autoRefFlagName, false, "")
 }
 

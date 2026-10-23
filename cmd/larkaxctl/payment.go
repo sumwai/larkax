@@ -103,6 +103,10 @@ func paymentLookup(orders *payment.Store) fakechannel.Lookup {
 	}
 }
 
+// walletPaymentActions 是 wallet payment 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var walletPaymentActions = []string{"create", "status"}
+
 // runWalletPayment 处理 wallet 下的 payment 子命令。
 func runWalletPayment(args []string) error {
 	if len(args) == 0 {
@@ -138,7 +142,7 @@ func runPaymentCreate(args []string) error {
 		return nil
 	}
 
-	fs := flag.NewFlagSet("wallet payment create", flag.ContinueOnError)
+	fs := newFlagSet("wallet payment create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, walletPaymentShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -251,7 +255,7 @@ func runPaymentStatus(args []string) error {
 		return nil
 	}
 
-	fs := flag.NewFlagSet("wallet payment status", flag.ContinueOnError)
+	fs := newFlagSet("wallet payment status", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, walletPaymentShortUsage) }
 	orderNo := fs.String("order", "", "")
 	if err := fs.Parse(args); err != nil {

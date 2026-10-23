@@ -406,11 +406,23 @@ const (
 	RoleAdmin Role = "admin"
 )
 
+// Roles 是三个角色的清单，按 user → merchant → admin 排。
+//
+// 单开一个函数而不是在判据与报错信息里各写三遍：漏掉一处时，报错会说
+// 「可取 user、merchant」，而 admin 其实也认——一句说错了自己边界的错误
+// 信息比没有更坏（与 UserStatuses 同一条理由）。
+func Roles() []string {
+	return []string{string(RoleUser), string(RoleMerchant), string(RoleAdmin)}
+}
+
 // valid 判断 r 是不是三个已知角色之一。
+//
+// 判据读 Roles()：加第四个角色时改那一处就够了，判据与报错不会各自少一个。
 func (r Role) valid() bool {
-	switch r {
-	case RoleUser, RoleMerchant, RoleAdmin:
-		return true
+	for _, known := range Roles() {
+		if string(r) == known {
+			return true
+		}
 	}
 	return false
 }
@@ -422,8 +434,7 @@ func (r Role) valid() bool {
 func ParseRole(s string) (Role, error) {
 	r := Role(strings.TrimSpace(s))
 	if !r.valid() {
-		return "", fmt.Errorf("未知的角色 %q：可取 %s、%s、%s",
-			s, RoleUser, RoleMerchant, RoleAdmin)
+		return "", fmt.Errorf("未知的角色 %q：可取 %s", s, strings.Join(Roles(), "、"))
 	}
 	return r, nil
 }

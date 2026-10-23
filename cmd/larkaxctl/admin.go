@@ -63,6 +63,10 @@ create 生成 32 字节随机令牌（base64url），**只在这一次打印明�
 // 的耦合。
 const adminTimeout = 30 * time.Second
 
+// adminActions 是 admin 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var adminActions = []string{"token"}
+
 func runAdmin(args []string) error {
 	if len(args) == 0 {
 		// 缺子命令才打整段用法：这时人还没开始用，用法正是他要的。
@@ -82,6 +86,10 @@ func runAdmin(args []string) error {
 		return usageErr(fmt.Errorf("未知的 admin 子命令 %q", action))
 	}
 }
+
+// adminTokenActions 是 admin token 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var adminTokenActions = []string{"create", "revoke"}
 
 func runAdminToken(args []string) error {
 	if len(args) == 0 {
@@ -108,7 +116,7 @@ func runAdminTokenCreate(args []string) error {
 	if err := jsonUnsupported("admin token create"); err != nil {
 		return err
 	}
-	fs := flag.NewFlagSet("admin token create", flag.ContinueOnError)
+	fs := newFlagSet("admin token create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, adminShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -137,7 +145,7 @@ func runAdminTokenRevoke(args []string) error {
 	if err := jsonUnsupported("admin token revoke"); err != nil {
 		return err
 	}
-	fs := flag.NewFlagSet("admin token revoke", flag.ContinueOnError)
+	fs := newFlagSet("admin token revoke", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, adminShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)

@@ -60,6 +60,11 @@ const maintenanceIdempotencyUsage = `larkaxctl maintenance idempotency 按留存
 // 这是一个旧路径：这一组已经搬进 maintenance 域（#475），这里只为已经在跑的
 // 脚本与部署流程留着，不列进根帮助页。它把 cleanup 与 help 原样接给搬过去
 // 的那一套，所以新旧两条路径的输出逐字相同。
+
+// idempotencyActions 是 idempotency 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var idempotencyActions = []string{"cleanup"}
+
 func runIdempotency(args []string) error {
 	if len(args) == 0 {
 		printUsage(os.Stderr, maintenanceIdempotencyShortUsage)
@@ -111,7 +116,7 @@ func runIdempotencyCleanup(args []string) error {
 		return nil
 	}
 
-	fs := flag.NewFlagSet("maintenance idempotency", flag.ContinueOnError)
+	fs := newFlagSet("maintenance idempotency", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, maintenanceIdempotencyShortUsage) }
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {

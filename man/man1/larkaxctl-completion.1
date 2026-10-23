@@ -1,0 +1,29 @@
+.TH LARKAXCTL\-COMPLETION 1 "" "larkax" "larkaxctl\-completion"
+.ds AD l
+.ad l
+.nh
+.SH NAME
+larkaxctl\-completion \- 打\:印 bash / zsh / fish 的\:补\:全\:脚\:本
+.SH SYNOPSIS
+.B larkaxctl completion
+.RI [ 选\:项 ]
+.br
+二\:级\:动\:作\:与\:参\:数\:见 \fBlarkaxctl completion \-\-help\fR（短\:版）\:与 \fBlarkaxctl help completion\fR（长\:版）。
+.PP
+打\:印\:某\:个 shell 的\:补\:全\:脚\:本。\:脚\:本\:只\:写\:到 stdout，\:装\:到\:哪\:里\:由\:使\:用\:者\:决\:定：
+.IP \(bu 2
+当\:前\:会\:话\:生\:效：\fBsource <(larkaxctl completion bash)\fR。
+.IP \(bu 2
+bash 写\:进\:配\:置：\fBlarkaxctl completion bash > ~/\&.local/share/bash\-completion/completions/larkaxctl\fR。
+.IP \(bu 2
+zsh 写\:进\:配\:置：\fBlarkaxctl completion zsh > ~/\&.zfunc/_larkaxctl\fR。
+.IP \(bu 2
+fish 写\:进\:配\:置：\fBlarkaxctl completion fish > ~/\&.config/fish/completions/larkaxctl\&.fish\fR。
+.PP
+补\:的\:内\:容\:由\:命\:令\:行\:自\:己\:的\:注\:册\:表\:生\:成，\:不\:是\:一\:份\:手\:写\:的\:文\:本：\:一\:级\:命\:令\:与\:根\:帮\:助\:页\:同\:源，\:二\:级\:动\:作\:取\:自\:各\:命\:令\:分\:发\:表\:旁\:边\:的\:那\:份\:动\:作\:清\:单，\:长\:选\:项\:取\:自\:各\:命\:令\:自\:己\:注\:册\:的 flag 集。\:所\:以\:新\:增\:一\:条\:命\:令、\:一\:个\:动\:作\:或\:一\:个\:选\:项\:时，\:补\:全\:跟\:着\:变，\:不\:必\:另\:改\:一\:份\:名\:单。
+.PP
+补\:全\:只\:列\:长\:选\:项\:的\:正\:式\:写\:法，\:短\:选\:项\:与\:旧\:名\:仍\:能\:敲，\:只\:是\:不\:占 Tab 的\:位\:置。\:选\:项\:的\:合\:法\:取\:值\:（渠\:道\:类\:型、\fB\-\-role\fR、\fB\-\-status\fR、\fB\-\-asset\fR 等）\:同\:样\:取\:自\:校\:验\:那\:一\:侧\:已\:有\:的\:来\:源；\:没\:有\:这\:样\:一\:份\:来\:源\:的\:取\:值\:不\:补。
+.PP
+shell 名\:只\:认 \fBbash\fR、\fBzsh\fR、\fBfish\fR 三\:个，\:写\:错\:是\:参\:数\:错\:（退\:出\:码 2），\:报\:错\:里\:会\:列\:出\:这\:三\:个。
+.SH SEE ALSO
+.BR larkaxctl (1)

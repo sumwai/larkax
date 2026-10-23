@@ -153,8 +153,12 @@ apikey 下唯一的简写是 -u（--user 的别名，create 与 list 认它）�
 // 有个终点，而不是把等待当成正常。
 const apiKeyTimeout = 30 * time.Second
 
+// apiKeyActions 是 apikey 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var apiKeyActions = []string{"create", "update", "get", "list"}
+
 func runAPIKey(args []string) error {
-	fs := flag.NewFlagSet("apikey", flag.ContinueOnError)
+	fs := newFlagSet("apikey", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -194,7 +198,7 @@ func runAPIKeyCreate(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("apikey create", flag.ContinueOnError)
+	fs := newFlagSet("apikey create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -275,7 +279,7 @@ func runAPIKeyUpdate(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("apikey update", flag.ContinueOnError)
+	fs := newFlagSet("apikey update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
 	id := fs.Int64("id", 0, "要改的 API Key 的 id（apikey list 里能看到）")
 	status := fs.String("status", "", "")
@@ -339,7 +343,7 @@ func runAPIKeyUpdate(args []string) error {
 }
 
 func runAPIKeyGet(args []string) error {
-	fs := flag.NewFlagSet("apikey get", flag.ContinueOnError)
+	fs := newFlagSet("apikey get", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
 	id := fs.Int64("id", 0, "要看的 API Key 的 id（apikey list 里能看到）")
 	if err := fs.Parse(args); err != nil {
@@ -368,7 +372,7 @@ func runAPIKeyGet(args []string) error {
 }
 
 func runAPIKeyList(args []string) error {
-	fs := flag.NewFlagSet("apikey list", flag.ContinueOnError)
+	fs := newFlagSet("apikey list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -580,7 +584,7 @@ type keyLimits struct {
 // 也没有值），update 不填是「不改这一项」。所以这里只处理前者，后者的
 // 三态判断留在 runAPIKeyUpdate 里——把两套语义塞进同一个函数，读的人
 // 就得先想清楚自己在看哪一套。
-func parseLimits(fs *flag.FlagSet, rpm, quota string) (keyLimits, error) {
+func parseLimits(fs *flagSet, rpm, quota string) (keyLimits, error) {
 	var out keyLimits
 	seen := providedFlags(fs)
 
@@ -609,7 +613,7 @@ func parseLimits(fs *flag.FlagSet, rpm, quota string) (keyLimits, error) {
 // （一个都不放行），它与「没给这个旗标」必须分得开，而两者的字符串表示
 // 分别是 "0" 与 ""——后者又与「给了空串」撞在一起。flag 包自己记着谁
 // 出现过，问它比猜可靠。
-func providedFlags(fs *flag.FlagSet) map[string]bool {
+func providedFlags(fs *flagSet) map[string]bool {
 	seen := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { seen[f.Name] = true })
 	return seen

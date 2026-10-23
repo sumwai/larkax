@@ -101,6 +101,10 @@ count，而这条命令上挑错渠道范围的后果是别名挂到另一个渠
 更细的约定见 docs/cli-reference.md 的「alias」一节。
 `
 
+// aliasActions 是 alias 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var aliasActions = []string{"create", "list", "update", "delete", "resolve"}
+
 func runAlias(args []string) error {
 	if len(args) == 0 {
 		printUsage(os.Stderr, aliasShortUsage)
@@ -162,7 +166,7 @@ func runAliasCreate(args []string) error {
 }
 
 func parseAliasCreate(args []string) (catalog.CreateAliasRequest, error) {
-	fs := flag.NewFlagSet("alias create", flag.ContinueOnError)
+	fs := newFlagSet("alias create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "")
 	stringAlias(fs, canonical, "m")
@@ -206,7 +210,7 @@ func parseAliasCreate(args []string) (catalog.CreateAliasRequest, error) {
 }
 
 func runAliasList(args []string) error {
-	fs := flag.NewFlagSet("alias list", flag.ContinueOnError)
+	fs := newFlagSet("alias list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示平台级别名")
 	canonical := legacyStringFlag(fs, "model", "canonical", "")
@@ -292,7 +296,7 @@ func runAliasUpdate(args []string) error {
 // 没有 --channel 与 --model：那两栏不可改，见 catalog.UpdateAliasRequest。
 // 把它们做成标志再拒绝，比根本没有这两个标志更容易让人以为改得动。
 func parseAliasUpdate(args []string) (catalog.UpdateAliasRequest, error) {
-	fs := flag.NewFlagSet("alias update", flag.ContinueOnError)
+	fs := newFlagSet("alias update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
 	id := fs.Int64("id", 0, "要改的别名 ID")
 	upstream := fs.String("upstream", "", "")
@@ -343,7 +347,7 @@ func runAliasDelete(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("alias delete", flag.ContinueOnError)
+	fs := newFlagSet("alias delete", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
 	id := fs.Int64("id", 0, "要删的别名 ID")
 	if err := fs.Parse(args); err != nil {
@@ -382,7 +386,7 @@ func runAliasDelete(args []string) error {
 // 「渠道级优先于平台级」这条判据只有一处，两处各写一份时，漂移的表现是
 // 「同一次请求，选路与计费用了两个上游名」，而账单看上去完全正常。
 func runAliasResolve(args []string) error {
-	fs := flag.NewFlagSet("alias resolve", flag.ContinueOnError)
+	fs := newFlagSet("alias resolve", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "")
 	stringAlias(fs, canonical, "m")

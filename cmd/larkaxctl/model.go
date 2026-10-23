@@ -135,6 +135,10 @@ model get，--canonical 等同于 --model。它们保留是为了不让已经在
 更细的约定见 docs/cli-reference.md 的「model」一节。
 `
 
+// modelActions 是 model 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var modelActions = []string{"create", "list", "get", "update", "delete"}
+
 func runModel(args []string) error {
 	if len(args) == 0 {
 		printUsage(os.Stderr, modelShortUsage)
@@ -193,7 +197,7 @@ func runModelCreate(args []string) error {
 }
 
 func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
-	fs := flag.NewFlagSet("model create", flag.ContinueOnError)
+	fs := newFlagSet("model create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "")
 	stringAlias(fs, canonical, "m")
@@ -314,7 +318,7 @@ type modelCapabilityFlag struct {
 // 名字只写一次：它同时是 flag 包里的标志名与下面用来查「给没给」的键。
 // 两处各写一个字符串时，写歪的那一处不会报错——那个标志会静默地永远算
 // 「没给」，而它的表现是「关不掉一个能力」。
-func newCapabilityFlags(fs *flag.FlagSet) []modelCapabilityFlag {
+func newCapabilityFlags(fs *flagSet) []modelCapabilityFlag {
 	return []modelCapabilityFlag{
 		newCapabilityFlag(fs, "reasoning",
 			func(c *catalog.Capabilities, v *bool) { c.Reasoning = v }),
@@ -331,7 +335,7 @@ func newCapabilityFlags(fs *flag.FlagSet) []modelCapabilityFlag {
 	}
 }
 
-func newCapabilityFlag(fs *flag.FlagSet, name string,
+func newCapabilityFlag(fs *flagSet, name string,
 	set func(*catalog.Capabilities, *bool)) modelCapabilityFlag {
 	return modelCapabilityFlag{name: name, value: fs.Bool(name, false, ""), set: set}
 }
@@ -340,7 +344,7 @@ func newCapabilityFlag(fs *flag.FlagSet, name string,
 // 在这里分得开，而 flag 包的零值分不出它们。
 //
 // 必须在 Parse 之后调用：Visit 只遍历**被设置过**的标志。
-func visitedFlags(fs *flag.FlagSet) map[string]bool {
+func visitedFlags(fs *flagSet) map[string]bool {
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 	return given
@@ -496,7 +500,7 @@ var (
 )
 
 func parseModelUpdate(args []string) (catalog.UpdateModelRequest, capabilityEdit, error) {
-	fs := flag.NewFlagSet("model update", flag.ContinueOnError)
+	fs := newFlagSet("model update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "")
 	stringAlias(fs, canonical, "m")
@@ -646,7 +650,7 @@ func runModelDelete(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("model delete", flag.ContinueOnError)
+	fs := newFlagSet("model delete", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "")
 	stringAlias(fs, canonical, "m")
@@ -686,7 +690,7 @@ func runModelDelete(args []string) error {
 // 另写一条 SQL：写入与读取对同一套列的假设是否一致，只有「写进去再读出来」
 // 能证明，而这里正是那个读回来的一端。
 func runModelGet(args []string) error {
-	fs := flag.NewFlagSet("model get", flag.ContinueOnError)
+	fs := newFlagSet("model get", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "")
 	stringAlias(fs, canonical, "m")
@@ -725,7 +729,7 @@ func runModelGet(args []string) error {
 }
 
 func runModelList(args []string) error {
-	fs := flag.NewFlagSet("model list", flag.ContinueOnError)
+	fs := newFlagSet("model list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)

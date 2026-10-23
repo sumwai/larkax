@@ -119,6 +119,10 @@ const usageReadTimeout = time.Minute
 // 不会让人把一份截过的清单当成完整的。
 const usageDefaultLimit = 50
 
+// usageActions 是 usage 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var usageActions = []string{"events", "requests", "summary"}
+
 // runUsage 处理 usage 子命令。
 func runUsage(args []string) error {
 	if len(args) == 0 {
@@ -163,7 +167,7 @@ type usageReadFlags struct {
 }
 
 // newUsageReadFlags 注册这组筛选项。
-func newUsageReadFlags(fs *flag.FlagSet) usageReadFlags {
+func newUsageReadFlags(fs *flagSet) usageReadFlags {
 	f := usageReadFlags{
 		user:  fs.String("user", "", ""),
 		from:  fs.String("from", "", ""),
@@ -219,7 +223,7 @@ func (f usageReadFlags) resolveUser(ctx context.Context, authStore *auth.Store) 
 
 // runUsageEvents 列出用量事件。
 func runUsageEvents(args []string) error {
-	fs := flag.NewFlagSet("usage events", flag.ContinueOnError)
+	fs := newFlagSet("usage events", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, usageShortUsage) }
 	flags := newUsageReadFlags(fs)
 	if err := fs.Parse(args); err != nil {
@@ -284,7 +288,7 @@ func runUsageEvents(args []string) error {
 
 // runUsageRequests 列出计费请求。
 func runUsageRequests(args []string) error {
-	fs := flag.NewFlagSet("usage requests", flag.ContinueOnError)
+	fs := newFlagSet("usage requests", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, usageShortUsage) }
 	flags := newUsageReadFlags(fs)
 	if err := fs.Parse(args); err != nil {
@@ -382,7 +386,7 @@ type usageSummaryFlags struct {
 }
 
 // newUsageSummaryFlags 注册这组筛选项。
-func newUsageSummaryFlags(fs *flag.FlagSet) usageSummaryFlags {
+func newUsageSummaryFlags(fs *flagSet) usageSummaryFlags {
 	f := usageSummaryFlags{
 		user:      fs.String("user", "", ""),
 		today:     fs.Bool("today", false, ""),
@@ -497,7 +501,7 @@ func usageSiteTimezone(ctx context.Context, db *sql.DB) (*time.Location, error) 
 
 // runUsageSummary 汇总一个用户在一段时间里的用量与金额。
 func runUsageSummary(args []string) error {
-	fs := flag.NewFlagSet("usage summary", flag.ContinueOnError)
+	fs := newFlagSet("usage summary", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, usageShortUsage) }
 	flags := newUsageSummaryFlags(fs)
 	if err := fs.Parse(args); err != nil {

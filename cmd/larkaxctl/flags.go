@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"strings"
 
@@ -41,8 +40,8 @@ func (s *stringStorage) Set(v string) error {
 }
 
 // stringAlias 给一个**已经注册过**的字符串选项再挂一个写法。
-func stringAlias(fs *flag.FlagSet, holder *string, alias string) {
-	fs.Var(&stringStorage{holder}, alias, "")
+func stringAlias(fs *flagSet, holder *string, alias string) {
+	fs.aliasVar(&stringStorage{holder}, alias)
 }
 
 // checkDisplayText 拒绝一个会原样进终端的旗标值里的控制字符。
@@ -76,18 +75,18 @@ func checkDisplayList(field string, values []string) error {
 
 // boolAlias 给一个**已经注册过**的布尔选项再挂一个写法。
 //
-// fs.BoolVar 会把指向的格子先赋成它给的默认值，所以这里的 false 顺带是一次
+// 底下的 flag.BoolVar 会把指向的格子先赋成它给的默认值，所以这里的 false 顺带是一次
 // 赋值：调用点必须在注册那一段（fs.Parse 之前）调用它，别在解析之后补挂——
 // 那时它会把使用者刚写上的 true 抹回 false。
-func boolAlias(fs *flag.FlagSet, holder *bool, alias string) {
-	fs.BoolVar(holder, alias, false, "")
+func boolAlias(fs *flagSet, holder *bool, alias string) {
+	fs.aliasBool(holder, alias)
 }
 
 // intAlias 给一个**已经注册过**的整数选项再挂一个写法。
 //
-// 与 boolAlias 是同一条注意事项：fs.IntVar 会先给指向的格子赋一次默认值。
-func intAlias(fs *flag.FlagSet, holder *int, alias string) {
-	fs.IntVar(holder, alias, 0, "")
+// 与 boolAlias 是同一条注意事项：底下的 flag.IntVar 会先给指向的格子赋一次默认值。
+func intAlias(fs *flagSet, holder *int, alias string) {
+	fs.aliasInt(holder, alias)
 }
 
 // legacyStringFlag 注册一个选项与它的旧名，两个名字写同一个变量，返回那个变量。
@@ -97,7 +96,7 @@ func intAlias(fs *flag.FlagSet, holder *int, alias string) {
 // 另发明一条规则。
 //
 // 要再挂一个简写，就在它后面接一句 stringAlias（见 model.go 的 --model）。
-func legacyStringFlag(fs *flag.FlagSet, name, legacy, value string) *string {
+func legacyStringFlag(fs *flagSet, name, legacy, value string) *string {
 	holder := new(string)
 	*holder = value
 	fs.Var(&stringStorage{holder}, name, "")

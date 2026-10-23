@@ -221,8 +221,12 @@ unlock 清掉一个账号的失败计数与锁定（连续失败 5 次后按指�
 // 共用一个是「碰巧现在一样」的耦合。
 const userTimeout = 30 * time.Second
 
+// userActions 是 user 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var userActions = []string{"create", "list", "get", "update", "password", "unlock", "delete", "plan", "wallet", "key", "usage"}
+
 func runUser(args []string) error {
-	fs := flag.NewFlagSet("user", flag.ContinueOnError)
+	fs := newFlagSet("user", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -268,7 +272,7 @@ func runUserCreate(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("user create", flag.ContinueOnError)
+	fs := newFlagSet("user create", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
 	name := fs.String("name", "", "")
 	email := fs.String("email", "", "")
@@ -386,7 +390,7 @@ func printCreatedUserWithPassword(stdout, stderr io.Writer, u auth.User, passwor
 
 // runUserList 列出用户。
 func runUserList(args []string) error {
-	fs := flag.NewFlagSet("user list", flag.ContinueOnError)
+	fs := newFlagSet("user list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
 	status := fs.String("status", "", "")
 	role := fs.String("role", "", "")
@@ -432,7 +436,7 @@ func runUserList(args []string) error {
 
 // runUserGet 读一个用户的全部字段。
 func runUserGet(args []string) error {
-	fs := flag.NewFlagSet("user get", flag.ContinueOnError)
+	fs := newFlagSet("user get", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -468,7 +472,7 @@ func runUserUpdate(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("user update", flag.ContinueOnError)
+	fs := newFlagSet("user update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -542,6 +546,11 @@ func runUserUpdate(args []string) error {
 // 三个动作各自一条命令，不合成一条带 --step 的命令：它们要的东西不一样
 // （purge 要 --confirm），而「同一个入口按旗标决定做哪一步」会让一次少写一个
 // 旗标的调用落到另一档上——那一步可能是不可逆的那一步。
+
+// userDeleteActions 是 user delete 的动作清单，补全从这里取。
+// 分派仍是下面 switch 的 case——新增动作时两处都要加。
+var userDeleteActions = []string{"request", "revert", "purge"}
+
 func runUserDelete(args []string) error {
 	if len(args) == 0 {
 		return usageErr(errors.New("delete 需要子命令：request、revert 或 purge"))
@@ -565,7 +574,7 @@ func runUserDeleteRequest(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("user delete request", flag.ContinueOnError)
+	fs := newFlagSet("user delete request", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -596,7 +605,7 @@ func runUserDeleteRevert(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("user delete revert", flag.ContinueOnError)
+	fs := newFlagSet("user delete revert", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
@@ -627,7 +636,7 @@ func runUserDeletePurge(args []string) error {
 		return err
 	}
 
-	fs := flag.NewFlagSet("user delete purge", flag.ContinueOnError)
+	fs := newFlagSet("user delete purge", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")

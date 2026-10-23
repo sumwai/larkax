@@ -399,7 +399,7 @@ func emitDoctorReport(w io.Writer, rep doctorReport, dbErr error, verbose bool) 
 // 全部检查发生在连库之前（与其余子命令同一条约定）：一个写错的命令不该先
 // 连上生产库再报错。
 func parseDoctorOptions(args []string) (doctorOptions, error) {
-	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs := newFlagSet("doctor", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, doctorShortUsage) }
 	live := fs.Bool("live", false, "")
 	model := fs.String("model", "", "")
