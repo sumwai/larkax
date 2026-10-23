@@ -25,7 +25,6 @@ var channelHelp = helpText{short: channelShortUsage, long: channelUsage}
 
 // channelShortUsage 是 channel 的短版：`-h` / `--help` 与参数写错时打的那一份。
 const channelShortUsage = `larkaxctl channel 管理上游渠道。
-
 用法：
   larkaxctl channel create --name <名称> --base-url <URL> --models <模型名,...>
                            (--type <类型> | --protocols <协议名,...>)
@@ -34,11 +33,12 @@ const channelShortUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel get --id <渠道 ID>
   larkaxctl channel health [--id <渠道 ID>] [--since <时长或时刻>] [--all]
   larkaxctl channel update --id <渠道 ID> [字段与 create 相同，另可换凭证]
-  larkaxctl channel enable|disable --id <渠道 ID>
-  larkaxctl channel delete|restore --id <渠道 ID>
+  larkaxctl channel enable|disable|delete|restore --id <渠道 ID>
   larkaxctl channel sync-models|upstream-models --id <渠道 ID>
+  larkaxctl channel adapters
+  larkaxctl channel probe --type <类型> --base-url <URL>
+                          [--credential-stdin | --credential-env <变量名>]
   larkaxctl channel map add|list|remove（出站映射，见 larkaxctl channel map help）
-
 明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。
 create 的 stdout 只有新渠道的 ID；delete 是软删，restore 是它的逆操作。
 更细的边界：larkaxctl help channel。
@@ -68,6 +68,9 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel restore --id <渠道 ID>
   larkaxctl channel sync-models --id <渠道 ID>
   larkaxctl channel upstream-models --id <渠道 ID>
+  larkaxctl channel adapters
+  larkaxctl channel probe --type <类型> --base-url <URL>
+                          [--credential-stdin | --credential-env <变量名>]
   larkaxctl channel map add <渠道> <规范名> <上游模型名> [--overrides <JSON 对象>]
   larkaxctl channel map add --all-channels <规范名> <上游模型名>
   larkaxctl channel map list [<渠道>] [--all-channels] [--model <规范名>]
@@ -143,6 +146,19 @@ sync-models 从上游拉一次这条渠道的模型清单并落库，需要主�
 （退出码 0），只把状态记成 unsupported，**已有清单一行不动**。同一个渠道连续
 同步两次是幂等的：模型名按渠道唯一，第二次不会多出行，只把每行的「最近见到」
 刷新到这一次；上游下线了某个模型时，再同步一次会把它从清单里删掉。
+
+adapters 打印已注册的适配器类型，以及每种类型对应的协议与端点。它与控制台的
+GET /admin/v1/adapters 读同一份注册表：--type 认得哪些类型，这里就列哪些。
+
+probe 在落库之前向上游问一次模型清单：给 --type 与 --base-url，凭证可选
+（无鉴权的自建上游不传）。它不连库、不需要主密钥，凭证只能从标准输入或环境
+变量读。拿到清单时 stdout 第一行是条数，下面一行一个模型名（升序、不编号）；
+清单超过上限时只列前一部分，首行写明一共有多少个。
+
+上游不提供模型列表接口时 probe 退出 0，只打一句「这家上游（<类型>）不提供
+模型列表」，不打空清单——「没有这个接口」与「清单是空的」不是同一件事。
+探测失败时退出非零，错误里带上游的状态码与响应体摘要，摘要里的凭证已换成
+<redacted>。
 
 渠道类型必须是已注册的适配器类型；类型写错时错误信息会列出已知的类型。
 --protocols 是这条渠道声明支持的协议集合，至少一个，取值同样是已注册的适配器
@@ -232,7 +248,7 @@ var credentialInput io.Reader = os.Stdin
 
 // channelActions 是 channel 的动作清单，补全从这里取。
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
-var channelActions = []string{"create", "list", "get", "health", "update", "enable", "disable", "delete", "restore", "sync-models", "upstream-models", "map"}
+var channelActions = []string{"create", "list", "get", "health", "update", "enable", "disable", "delete", "restore", "sync-models", "upstream-models", "adapters", "probe", "map"}
 
 func runChannel(args []string) error {
 	if len(args) == 0 {
@@ -264,6 +280,10 @@ func runChannel(args []string) error {
 		return runChannelSyncModels(rest)
 	case "upstream-models":
 		return runChannelUpstreamModels(rest)
+	case "adapters":
+		return runChannelAdapters(rest)
+	case "probe":
+		return runChannelProbe(rest)
 	case "map":
 		return runChannelMap(rest)
 	case "-h", "--help":
@@ -1604,4 +1624,200 @@ func parseJSONObject(name, raw string) (map[string]any, error) {
 // 按序号指出来），在这一层再做一遍就成了两处判据，改了一处另一处还在。
 func splitList(raw string) []string {
 	return strings.Split(raw, ",")
+}
+
+// ── adapters 与 probe ───────────────────────────────────────────────────
+//
+// 这两条是**落库之前**的读侧：一条列「有哪些适配器类型」，一条拿一份还没保存
+// 的地址与凭证去问上游。它们都不连库、不需要主密钥——凭证直接从标准输入或
+// 环境变量读，地址来自命令行。
+
+// probeChannelRegistry 取探测用的适配器注册表。
+//
+// 做成变量只为用例能注入一张空表（空表在正常构建里造不出来）；生产路径永远
+// 走 upstream.ProbeRegistry。与 credentialInput 同一类注入点。
+var probeChannelRegistry = upstream.ProbeRegistry
+
+// runChannelAdapters 打印已注册的适配器类型、协议与端点。
+//
+// 读的是 ProbeRegistry 而不是 Registry：控制台的 GET /admin/v1/adapters 用的
+// 就是那一份（见 internal/adminapi/probe.go 的 listAdapters），两处同源，
+// 「控制台列得出的类型」与「命令行列得出的类型」不会各说各的。
+func runChannelAdapters(args []string) error {
+	if err := jsonUnsupported("channel adapters"); err != nil {
+		return err
+	}
+
+	fs := newFlagSet("channel adapters", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("adapters 不接受位置参数，得到 %q", fs.Arg(0)))
+	}
+
+	registry, err := probeChannelRegistry()
+	if err != nil {
+		return fmt.Errorf("装配渠道适配器注册表失败: %w", err)
+	}
+	if len(registry.Types()) == 0 {
+		// 注册表由内置清单装配，正常构建下不可能是空的。空表说的是「这个
+		// 二进制不完整」，而不是「今天一个适配器都没有」——后者会被读成
+		// 一次正常的查询结果，所以这里报内部错误（internalErr 在人读的那句
+		// 前面另加「内部错误: 」）。也没有任何添加适配器的命令可指。
+		return internalErr(errors.New("内置适配器注册表为空：这个二进制的装配不完整"))
+	}
+	printChannelAdapters(humanStdout(), registry)
+	return nil
+}
+
+// printChannelAdapters 打一张「类型 / 协议 / 端点」的表。
+//
+// 三栏与控制台 adapterJSON 的三个字段一一对应（type / protocol / endpoint）。
+// 顺序直接用 registry.Types()：它已经排好序，调用点不再排第二遍。
+func printChannelAdapters(w io.Writer, registry *channel.Registry) {
+	tw := newTableWriter(w)
+	p := newPalette(w)
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n",
+		p.bold("类型"), p.bold("协议"), p.bold("端点"))
+	for _, name := range registry.Types() {
+		adapter, err := registry.Lookup(name)
+		if err != nil {
+			// Types 与 Lookup 读的是同一张表，这里不可能落空；落空也不该让
+			// 整张清单消失——少一行比一条都没有好（与控制台那一侧同一条）。
+			continue
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n",
+			p.bold(adapter.Type()), adapter.Protocol(), adapter.Endpoint())
+	}
+	_ = tw.Flush()
+}
+
+// channelProbeArgs 是 channel probe 校验过的输入。
+type channelProbeArgs struct {
+	channelType string
+	baseURL     string
+	credential  string
+}
+
+// parseChannelProbe 解析并校验 channel probe 的参数。
+//
+// 校验全部发生在发请求之前：写错的命令不该先打一次上游再报错，而这些错误
+// 都是参数错（退出码 2）。
+func parseChannelProbe(args []string) (channelProbeArgs, error) {
+	fs := newFlagSet("channel probe", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	channelType := fs.String("type", "", "")
+	baseURL := fs.String("base-url", "", "")
+	credentialStdin := fs.Bool("credential-stdin", false, "")
+	boolAlias(fs, credentialStdin, "stdin")
+	credentialEnv := fs.String("credential-env", "", "")
+	stringAlias(fs, credentialEnv, "env")
+	if err := fs.Parse(args); err != nil {
+		return channelProbeArgs{}, err
+	}
+	if fs.NArg() > 0 {
+		return channelProbeArgs{}, fmt.Errorf(
+			"probe 不接受位置参数，得到 %q：上游地址用 --base-url 指定", fs.Arg(0))
+	}
+	if strings.TrimSpace(*channelType) == "" {
+		return channelProbeArgs{}, errors.New(
+			"缺少 --type（渠道类型，可用 larkaxctl channel adapters 查看）")
+	}
+	if strings.TrimSpace(*baseURL) == "" {
+		return channelProbeArgs{}, errors.New("缺少 --base-url")
+	}
+	// 地址与写入路径共用同一个校验：原文（「base_url 不能带 query……」）直接
+	// 往上报，包上 ErrInvalidBaseURL 这一层是为了让分类认得出这是地址不合法。
+	normalized, err := channels.NormalizeBaseURL(*baseURL)
+	if err != nil {
+		return channelProbeArgs{}, fmt.Errorf("%w：%w", channels.ErrInvalidBaseURL, err)
+	}
+	plaintext, err := readCredential(*credentialStdin, *credentialEnv, false)
+	if err != nil {
+		return channelProbeArgs{}, err
+	}
+	out := channelProbeArgs{channelType: strings.TrimSpace(*channelType), baseURL: normalized}
+	if plaintext != nil {
+		out.credential = *plaintext
+	}
+	return out, nil
+}
+
+// runChannelProbe 拿一份还没落库的地址与凭证向上游问一次模型清单。
+func runChannelProbe(args []string) error {
+	if err := jsonUnsupported("channel probe"); err != nil {
+		return err
+	}
+
+	parsed, err := parseChannelProbe(args)
+	if err != nil {
+		return usageErr(err)
+	}
+
+	registry, err := probeChannelRegistry()
+	if err != nil {
+		return fmt.Errorf("装配渠道适配器注册表失败: %w", err)
+	}
+	// 类型写错是命令错：在发请求之前判，按退出码 2 报。Lookup 的报错里带着
+	// 注册表现有的类型（从 Types() 取，不在这里抄第二份）。
+	if _, lookupErr := registry.Lookup(parsed.channelType); lookupErr != nil {
+		return usageErr(fmt.Errorf("渠道类型无效: %w", lookupErr))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
+	defer cancel()
+	result, err := channels.NewModelProbe(nil, nil, registry).Probe(ctx, channels.ProbeRequest{
+		Type:       parsed.channelType,
+		BaseURL:    parsed.baseURL,
+		Credential: parsed.credential,
+	})
+	if err != nil {
+		return probeFailure(err)
+	}
+	if !result.Supported {
+		// 「没有这个接口」不是失败，也不等于「清单是空的」：打一句说明、退出
+		// 码 0，并且不打任何清单行——空清单与一次失败的输出在屏幕上分不开。
+		_, _ = fmt.Fprintf(humanStdout(),
+			"这家上游（%s）不提供模型列表，这不算错误。\n", parsed.channelType)
+		return nil
+	}
+	printProbeModels(humanStdout(), result)
+	return nil
+}
+
+// probeFailure 给上游的失败补上状态码与响应体摘要。
+//
+// ErrUpstream 的 Error() 只说「上游返回 401」，而探测要回答的正是「这把钥匙
+// 为什么不行」——上游那句原文往往就是答案。摘要已经由 channels.ModelProbe
+// 把这次用的凭证换成了 <redacted>（见 redactUpstream），这一层不再碰正文，
+// 也不该在别处另拼一份原始 Body。
+func probeFailure(err error) error {
+	var upstreamErr *channel.ErrUpstream
+	if !errors.As(err, &upstreamErr) || !upstreamErr.GotResponse {
+		return err
+	}
+	body := doctorPreview([]byte(upstreamErr.Body))
+	if body == "" {
+		return err
+	}
+	return fmt.Errorf("%w：%s", err, body)
+}
+
+// printProbeModels 打一次探测拿到的清单。
+//
+// 第一行是条数，下面一行一个模型名：不编号（名字已经由 ModelProbe 去重并按
+// 升序排好），这样 `| grep` 与 `| wc -l` 都直接可用。截断时首行写出上游
+// 一共给了多少——Total 是截断前的条数，不能拿打出来的行数当总数。
+func printProbeModels(w io.Writer, result channels.ProbeResult) {
+	if result.Truncated {
+		_, _ = fmt.Fprintf(w, "上游提供 %d 个模型，以下只列出前 %d 个。\n",
+			result.Total, len(result.Models))
+	} else {
+		_, _ = fmt.Fprintf(w, "上游提供 %d 个模型。\n", result.Total)
+	}
+	for _, model := range result.Models {
+		_, _ = fmt.Fprintln(w, model)
+	}
 }

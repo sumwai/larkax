@@ -52,6 +52,8 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from channel' -a 'delete'
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel' -a 'restore'
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel' -a 'sync-models'
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel' -a 'upstream-models'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel' -a 'adapters'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel' -a 'probe'
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel' -a 'map'
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from map' -a 'add'
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from map' -a 'list'
@@ -231,6 +233,10 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_su
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from list' -l all
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from map and __fish_seen_subcommand_from add' -l overrides
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from map and __fish_seen_subcommand_from list' -l model
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from probe' -l base-url
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from probe' -l credential-env
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from probe' -l credential-stdin
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from probe' -l type
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from restore' -l id
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from sync-models' -l id
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l base-url

@@ -339,6 +339,7 @@ larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled
 | `migrate status` / `migrate version` | 输出是 goose 自己往 stdout 打的，要接 JSON 得先把它那份 logger 收住 |
 | `secret rotate --verify` | 与 `secret rotate --apply` 共用同一条命令，先按整条命令拒掉 |
 | `snapshot redact` | 它的 stdout 本来就是产物本身（脱敏后那段骨架的 JSON），套不上一层信封 |
+| `channel adapters` / `channel probe` | 只读，但这轮没接机器可读输出；给了 `-o json` 是参数错（退出码 2），不静默回落成表格 |
 
 `usage summary` 的 `totals` 与 `billing_paths` 跟控制台 `GET /usage/summary` 同名：
 `totals.cost` 与 `totals.plan_reserved_amount` 是两个独立字段，永不相加；

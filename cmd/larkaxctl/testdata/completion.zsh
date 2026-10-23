@@ -66,6 +66,7 @@ _larkaxctl() {
 			"channel list") compadd -- --all --env-file --format --quiet --verbose ;;
 			"channel map add") compadd -- --env-file --format --overrides --quiet --verbose ;;
 			"channel map list") compadd -- --env-file --format --model --quiet --verbose ;;
+			"channel probe") compadd -- --base-url --credential-env --credential-stdin --env-file --format --quiet --type --verbose ;;
 			"channel restore") compadd -- --env-file --format --id --quiet --verbose ;;
 			"channel sync-models") compadd -- --env-file --format --id --quiet --verbose ;;
 			"channel update") compadd -- --base-url --credential-env --credential-stdin --env-file --format --id --models --name --priority --protocols --quiet --setting --type --verbose --weight ;;
@@ -167,7 +168,7 @@ _larkaxctl() {
 		"alias") compadd -- create list update delete resolve ;;
 		"apikey") compadd -- create update get list ;;
 		"calendar") compadd -- import ;;
-		"channel") compadd -- create list get health update enable disable delete restore sync-models upstream-models map ;;
+		"channel") compadd -- create list get health update enable disable delete restore sync-models upstream-models adapters probe map ;;
 		"channel map") compadd -- add list remove ;;
 		"consent") compadd -- grant list revoke ;;
 		"idempotency") compadd -- cleanup ;;

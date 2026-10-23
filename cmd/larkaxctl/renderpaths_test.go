@@ -58,6 +58,7 @@ var tableRenderPaths = []string{
 	"printAliasList",
 	"printAllowlists", // snapshot allowlist
 	"printCalendarList",
+	"printChannelAdapters",     // channel adapters
 	"printChannelDetail",       // channel get
 	"printChannelHealthDetail", // channel health --id 的读数
 	"printChannelHealthHours",  // channel health --id 的逐小时明细
