@@ -1139,7 +1139,7 @@ func TestNonCachedExactlyZero(t *testing.T) {
 //
 // 压回这一步上的边界变异各自只在某一格上与原始版本不同，按行写：
 //
-//   - `total > u.PromptTokens` → `>=`：缓存写为负且恰好抵消超出量
+//   - `total > u.PromptTokens` → `>=`：缓存读超出输入的量正好被负的缓存写吃掉
 //     （`{PromptTokens:5, CacheReadTokens:10, CacheWriteTokens:-5}`）
 //     → TestFromChannelUsageNegativeCacheIsNotCompressed
 //   - `over > 0` → `>=`：缓存读为负、被切后归零
@@ -1149,11 +1149,11 @@ func TestNonCachedExactlyZero(t *testing.T) {
 //     （`{PromptTokens:0, CacheReadTokens:100}`）
 //     → TestCacheCompressionGuardWhenPromptIsZero
 //
-// 共同点是压回这一步的取舍全看**被切的那一项**是不是负数：`total >
-// u.PromptTokens` 切的是 `cacheWrite`，`over > 0` 切的是 `cacheRead`；被切项
-// 非负时 `min64(0, x) == 0`，减掉的是零。所以前提不能写成「缓存量非负」——
-// `{PromptTokens:10, CacheReadTokens:-5, CacheWriteTokens:15}` 在
-// `total == u.PromptTokens` 那一格上零增量，而 `cacheRead` 是负的。
+// 前两条变异的共同点是压回这一步的取舍全看**被切的那一项**是不是负数：
+// `total > u.PromptTokens` 切的是 `cacheWrite`，`over > 0` 切的是
+// `cacheRead`；被切项非负时 `min64(0, x) == 0`，减掉的是零。所以前提不能写成
+// 「缓存量非负」——`{PromptTokens:10, CacheReadTokens:-5, CacheWriteTokens:15}`
+// 在 `total == u.PromptTokens` 那一格上零增量，而 `cacheRead` 是负的。
 //
 // `min64` 与 `max64` 自身的边界见 TestMin64AndMax64AtEqualArguments：那两条
 // 与符号无关，是真等价。
