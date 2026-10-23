@@ -1137,26 +1137,27 @@ func TestNonCachedExactlyZero(t *testing.T) {
 
 // 缓存总量恰好不超过输入时，不该触发压回。
 //
-// 这段 if 语句里有三个 `>`：头里的守卫 `u.PromptTokens > 0` 由
-// TestCacheCompressionGuardWhenPromptIsZero 杀着；头里的
-// `total > u.PromptTokens` 与体内的 `over > 0` 两处改成 `>=`，只在各自的
-// 边界格（`total == u.PromptTokens` / `over == 0`）上可能分岔，而那一格是否
-// 零增量，取决于**被切的那一项**是不是负数：前者切的是 `cacheWrite`，后者切
-// 的是 `cacheRead`。被切项非负时 `min64(0, x) == 0`，减掉的是零；为负时
-// `min64` 返回负数，`-= cut` 把那一项抹成 0。
+// 压回这一步里有两处 `>` 改成 `>=` 会分岔：`total > u.PromptTokens` 与
+// `over > 0`。同一个 if 语句里的守卫 `u.PromptTokens > 0` 由
+// TestCacheCompressionGuardWhenPromptIsZero 杀着，不在其中。这两处在各自的
+// 边界格（`total == u.PromptTokens` / `over == 0`）上才可能分岔，而那一格是否
+// 零增量，取决于**被切的那一项**是不是负数：`total > u.PromptTokens` 切的是
+// `cacheWrite`，`over > 0` 切的是 `cacheRead`。被切项非负时 `min64(0, x) == 0`，
+// 减掉的是零；为负时 `min64` 返回负数，`-= cut` 把那一项抹成 0。
 //
 // 反例说明为什么不能说「缓存量非负」：
 // `{PromptTokens:10, CacheReadTokens:-5, CacheWriteTokens:15}` 在
 // `total == u.PromptTokens` 那一格上是零增量，而 `cacheRead` 是负的。
 //
-// 负缓存量由 TestFromChannelUsageNegativeCacheIsNotCompressed 钉着，所以那
-// 两条不是等价变异——FromChannelUsage 的输入不保证非负。
+// 负缓存量由 TestFromChannelUsageNegativeCacheIsNotCompressed 钉着，所以
+// `total > u.PromptTokens` 与 `over > 0` 这两条不是等价变异——FromChannelUsage
+// 的输入不保证非负。
 //
 // `min64` 与 `max64` 自身的边界见 TestMin64AndMax64AtEqualArguments：那两条
 // 与符号无关，是真等价。
 //
-// 下面第二段照样把 over 归零那一格的具体数固定下来——它是第二条变异在被切项
-// 非负时的边界。
+// 这个用例下面那段照样把 `over == 0` 那一格的具体数固定下来——它是
+// `over > 0` 那条变异在被切项非负时的边界。
 func TestCacheCompressionBoundary(t *testing.T) {
 	// 100 输入 = 60 缓存读 + 40 缓存写，恰好相等
 	got := FromChannelUsage(channel.Usage{
