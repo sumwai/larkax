@@ -913,10 +913,11 @@ go run ./cmd/larkaxctl price create --scope platform --name example-price --by a
 缺少 `--by` 时它报参数错（退出码 2），不会按「不记名」落库。
 
 计价项一共五个：`prompt`、`completion`、`cache_read`、`cache_write`、`reasoning`。
-**上游报了哪一项，规则里就必须有哪一项的单价**——少一项不是少收，是这次请求
-**整个失败**（`500`），因为上游报了我们没定价的用量，宁可报错也不要静默少收。
-调用方拿到的是 `500` 与一句 `internal error`（`500` 这一档不点名原因，见
-[api.md](api.md) 的状态码表）；点得出原因的那一句只在**服务端日志**里：
+**上游报了哪一项，规则里就必须有哪一项的单价**——少一项不是少收，是这一笔的
+**结算失败**，因为上游报了我们没定价的用量，宁可报错也不要静默少收。
+非流式请求里，调用方拿到的是 `500` 与一句 `internal error`（`500` 这一档不点名
+原因，见 [api.md](api.md) 的状态码表）；流式请求的流已经推出去，那次失败只落在
+**服务端日志**里，调用方不会再收到错误码。日志里点得出原因的那一句是：
 
 ```text
 结算失败: 用量里有规则未定价的计量项: "cache_read"（规则里没写这个单价；要免费就显式写 0）
@@ -924,7 +925,7 @@ go run ./cmd/larkaxctl price create --scope platform --name example-price --by a
 
 会报缓存的上游很常见（Anthropic 的 `cache_read_input_tokens` /
 `cache_creation_input_tokens`，OpenAI 的 `prompt_tokens_details.cached_tokens`），
-所以**新规则把这五项都写上**、用不到的填 `0`，比漏掉再被 500 拦住省事。
+所以**新规则把这五项都写上**、用不到的填 `0`，比漏掉再被结算拦住省事。
 
 `--models` 留空表示适用于全部模型（兜底规则）。表达式在写入前会编译一次，
 编译不过的命令直接失败。作用域决定哪两栏 id 有效：`platform` 两栏都留空、

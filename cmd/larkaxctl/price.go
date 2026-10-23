@@ -35,7 +35,8 @@ const priceShortUsage = `larkaxctl price 管理计价规则。
   larkaxctl price calendar import <文件> | price calendar list
 
 作用域决定哪两栏 id 有效；五个计价项（prompt、completion、cache_read、
-cache_write、reasoning）在规则里缺一个，用到它的请求就会整个失败。
+cache_write、reasoning）缺一个，用到它的那一笔结算就失败：非流式请求调用方
+拿到 500，流式请求只在服务端日志里留一条。
 --by 必填：create 记下这条价是谁定的，update 记下是谁改的。
 
 更细的边界：larkaxctl help price。
@@ -100,9 +101,16 @@ weekdays / window / day_kind / holidays / min_context_tokens 分行改写单价�
 出来的那一份，直接换源码会让表与实际价格分家。
 
 计价项一共五个：prompt、completion、cache_read、cache_write、reasoning。
-上游报了哪一项，规则里就必须有哪一项的单价——少一项不是少收，是这次请求整个
-失败（结算报「用量里有规则未定价的计量项」）。新规则把这五项都写上、用不到的
-填 0，比漏掉再被拦住省事。
+上游报了哪一项，规则里就必须有哪一项的单价——少一项不是少收，是这一笔的结算
+失败：非流式请求调用方拿到 500，流式请求只把「用量里有规则未定价的计量项」
+写进服务端日志。新规则把这五项都写上、用不到的填 0，比漏掉再被拦住省事。
+
+create 与 update 写成功之后还会提示这条规则漏了哪几项。提示看的是规则实际
+定过价的键，与漏掉时结算报的那一项对得上。它只是提示：写入已经完成，命令
+照样成功退出，-q 会连同它一起压掉。
+
+少一项的后果分两条路：非流式请求结算失败时调用方拿到 500；流式请求的流
+已经推出去，那次失败只落在服务端日志里。
 
 list 按**裁决次序**排列：适用于某次请求的第一条就是会被选中的那条。
 裁决次序是作用域（channel > merchant > platform）→ priority 大的优先 →
@@ -241,6 +249,7 @@ func runPriceCreate(args []string) error {
 		return err
 	}
 	printCreatedRule(humanStdout(), humanStderr(), id, req)
+	printPriceCoverageHint(humanStderr(), req.Expr, req.Schedule)
 	return nil
 }
 
@@ -402,6 +411,13 @@ func runPriceUpdate(args []string) error {
 		return err
 	}
 	_, _ = fmt.Fprintf(humanStderr(), "已更新计价规则 %d。\n", req.ID)
+	// 只在这次真的写了计价时提示：只改优先级、名字或只清表的那次更新没有
+	// 新的单价可看，提示会变成一句与本次操作无关的话。
+	expression := ""
+	if req.Expr != nil {
+		expression = *req.Expr
+	}
+	printPriceCoverageHint(humanStderr(), expression, req.Schedule)
 	return nil
 }
 
@@ -932,6 +948,53 @@ func ruleVerdict(index int) string {
 func printCreatedRule(stdout, stderr io.Writer, id int64, req pricing.CreateRequest) {
 	_, _ = fmt.Fprintf(stderr, "已加入计价规则 id=%d：%s（作用域=%s）。\n", id, req.Name, req.Scope)
 	_, _ = fmt.Fprintln(stdout, id)
+}
+
+// priceCoverageHint 拼出「这条规则漏了哪几个计价项」的提示。
+//
+// subject 说的是被提示的是哪一份单价（一条表达式规则，还是一张定价表的
+// base）；missing 是漏掉的计价项，调用方拿到的顺序已经按 billing.TokenSlots
+// 排好。一个都不缺时返回空串：没有可提示的事，就不该有这一行。
+func priceCoverageHint(subject string, missing []string) string {
+	if len(missing) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("提示：%s没有覆盖 %d 个计价项的单价：%s。\n"+
+		"上游报了这几项用量时，这一笔的结算会失败：非流式请求，调用方拿到 500；\n"+
+		"流式请求的流已经推出去，失败只落在服务端日志里（「用量里有规则未定价的计量项」）。\n"+
+		"用不到就把单价显式写成 0——写 0 是「免费」，与「没写」不是一回事。\n",
+		subject, len(missing), strings.Join(missing, "、"))
+}
+
+// printPriceCoverageHint 在写成功之后提示这条规则漏了哪几个 token 计价项。
+//
+// 只提示，不拦写入：调用时写入已经完成，这里出任何问题都只是少打一段字。
+// w 由调用方传 humanStderr()，所以 -q 下自动静默。
+//
+// expression 与 schedule 至多一个非空；都为空表示这次没有写入新的计价
+// （例如 price update 只改了优先级），不提示。
+func printPriceCoverageHint(w io.Writer, expression string, schedule *pricing.Schedule) {
+	if schedule != nil {
+		missing, err := pricing.UncoveredScheduleTokenItems(schedule)
+		if err != nil {
+			// 表在写入前校验过；走到这里说明两次校验之间出现了不一致。
+			// 写入本身成功了，不能因为一句提示把它变成失败。
+			return
+		}
+		// subject 末尾的空格落在 base 与「没有覆盖」之间：拉丁词挨着汉字
+		// 挤在一起不好读，也过不了手页那条中英间距的判据。
+		_, _ = io.WriteString(w, priceCoverageHint("这张定价表的 base ", missing))
+		return
+	}
+	if expression == "" {
+		return
+	}
+	missing, err := pricing.UncoveredTokenItems(expression)
+	if err != nil {
+		// 同一条边界：写入路径已经编译过一次，这里再编译失败不该改变结果。
+		return
+	}
+	_, _ = io.WriteString(w, priceCoverageHint("这条规则", missing))
 }
 
 // printRuleList 打印规则清单。
