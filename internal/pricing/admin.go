@@ -32,7 +32,11 @@ const (
 
 // Scopes 是三个作用域的取值，按 平台 → 商家 → 渠道 排。
 //
-// 单开一个函数，而不是在判据与报错里各写一遍：新增一个作用域时只改这里。
+// 单开一个函数，而不是在判据与报错里各写一遍：取值门禁与报错都读这里。
+// 加一个作用域时，除了这里，validateRule 里按作用域判两栏 id 的那个 switch
+// 也要补一条 case——取值门禁只判「认不认」，认了却没写 case 等于跳过那一段
+// 组合校验。
+//
 // 漏改报错那一处的表现是它说「只接受 platform、merchant」，而第三个其实
 // 也认——一句说错了自己边界的错误信息比没有更坏（与 auth.UserStatuses 同因）。
 func Scopes() []string {
@@ -1155,6 +1159,8 @@ func validateRule(r RuleInfo) error {
 	if !slices.Contains(Scopes(), r.Scope) {
 		return fmt.Errorf("作用域 %q 不是有效取值（只接受 %s）", r.Scope, scopeChoices())
 	}
+	// 取值门禁已经挡住了不在 Scopes() 里的串；下面按作用域判两栏 id 的组合。
+	// 新增一个作用域时这里要补一条 case，否则它会通过门禁却跳过组合校验。
 	switch r.Scope {
 	case ScopePlatform:
 		if r.OwnerUserID != 0 || r.ChannelID != 0 {
