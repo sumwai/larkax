@@ -331,8 +331,7 @@ var longOptionRE = regexp.MustCompile(`--[a-z][a-z0-9-]*`)
 //
 // 取值一律取自校验那一侧已有的来源（常量或清单函数），这里不抄字面量：
 // 抄一份的表现是库里加了一种取值，而 Tab 补出来的还是旧的那几项。
-// 找不到单一来源的枚举（例如 price 的 --scope，合法值写在三个常量里而没有
-// 一份清单）不补——留白比补错安全。
+// 有来源不等于已经接线：没接上的那几格留白——留白比补错安全，接线另算。
 func completionEnumValues() map[string][]string {
 	values := map[string][]string{}
 	put := func(path, flag string, vals []string) {

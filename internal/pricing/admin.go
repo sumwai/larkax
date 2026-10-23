@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +29,30 @@ const (
 	ScopeMerchant = "merchant"
 	ScopeChannel  = "channel"
 )
+
+// Scopes 是三个作用域的取值，按 平台 → 商家 → 渠道 排。
+//
+// 单开一个函数，而不是在判据与报错里各写一遍：新增一个作用域时只改这里。
+// 漏改报错那一处的表现是它说「只接受 platform、merchant」，而第三个其实
+// 也认——一句说错了自己边界的错误信息比没有更坏（与 auth.UserStatuses 同因）。
+func Scopes() []string {
+	return []string{ScopePlatform, ScopeMerchant, ScopeChannel}
+}
+
+// scopeChoices 把作用域取值渲染成报错里那一串：每项带双引号、顿号分隔，
+// 最后一项前用「与」。
+//
+// 由 Scopes() 算出来而不是另写一份字面量：手写的那一份在清单变动之后不会
+// 跟着变，而「报错里列的还是老的那几条」没有任何东西会报出来——它看起来
+// 完全正常。
+func scopeChoices() string {
+	scopes := Scopes()
+	quoted := make([]string, len(scopes))
+	for i, s := range scopes {
+		quoted[i] = strconv.Quote(s)
+	}
+	return strings.Join(quoted[:len(quoted)-1], "、") + " 与 " + quoted[len(quoted)-1]
+}
 
 // ErrRuleNotFound 表示要改的那条规则不在库里。
 //
@@ -1126,6 +1152,9 @@ func loadRuleForUpdate(ctx context.Context, tx *sql.Tx, id, ownerID int64) (Rule
 // 它**不判**「这条规则现在能不能匹配上某个具体模型」：一条按计划将来才生效
 // 的规则是正常配置，见 Create 的注释。
 func validateRule(r RuleInfo) error {
+	if !slices.Contains(Scopes(), r.Scope) {
+		return fmt.Errorf("作用域 %q 不是有效取值（只接受 %s）", r.Scope, scopeChoices())
+	}
 	switch r.Scope {
 	case ScopePlatform:
 		if r.OwnerUserID != 0 || r.ChannelID != 0 {
@@ -1150,9 +1179,6 @@ func validateRule(r RuleInfo) error {
 			return errors.New("channel 作用域的规则不挂 owner_user_id：" +
 				"读取路径按 channel_id 匹配，owner 那一栏写了不生效（渠道的归属由渠道那一侧记着）")
 		}
-	default:
-		return fmt.Errorf("作用域 %q 不是有效取值（只接受 %q、%q 与 %q）",
-			r.Scope, ScopePlatform, ScopeMerchant, ScopeChannel)
 	}
 
 	if r.Name == "" {
