@@ -202,6 +202,14 @@ var conflictErrors = []error{
 	catalog.ErrAliasIDNotFound,
 	catalog.ErrAliasNotFound,
 	catalog.ErrChannelNotFound,
+	// 入站别名那三条：别名已占用、要删的别名不在、别名与规范名同名。
+	//
+	// 三个都不是「命令写错了」，而是库里现在是什么（前者要先 remove 再 add，
+	// 中者要先 list 看有没有这条，后者要换一个名字或改那条规范名），所以与上面
+	// 那些同归 4。不登记时它们悄悄退回 1，而 1 与 4 在脚本里是两种处置。
+	catalog.ErrInboundAliasExists,
+	catalog.ErrInboundAliasNotFound,
+	catalog.ErrAliasIsCanonical,
 
 	pricing.ErrRuleNotFound,
 	// 成本规则那一侧的同一个形状：要改的那一行不在 upstream_costs 里。

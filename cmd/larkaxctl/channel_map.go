@@ -36,7 +36,7 @@ const channelMapShortUsage = `larkaxctl channel map 管理出站映射：某个�
 // `channel map help`。
 const channelMapUsage = `larkaxctl channel map 管理出站映射。
 
-映射的键是规范名（调用方请求里那个名字），值是这家上游对同一个模型的叫法。
+映射的键是规范名（入站解析之后的规范名），值是这家上游对同一个模型的叫法。
 请求进来时按渠道查一条：渠道级映射盖过平台级那条；两者都没有时，规范名原样
 发给上游。
 

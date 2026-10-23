@@ -109,7 +109,7 @@ func TestAliasReachesUpstreamAndBillingRow(t *testing.T) {
 	t.Cleanup(upstreamSrv.Close)
 
 	channelID := seedChannel(t, db, sealer, merchant, upstreamSrv.URL, model)
-	// 计价规则按**规范名**匹配：售价挂在调用方要的那个名字上，
+	// 计价规则按**规范名**匹配：售价挂在入站解析之后的规范名上，
 	// 上游名只是我们与上游之间的叫法（别名换一次不该改价）。
 	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
 	seedCatalogModel(t, db, model)

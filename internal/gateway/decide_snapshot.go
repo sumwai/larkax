@@ -43,8 +43,8 @@ type DecisionRedactor interface {
 // 新增字段时的判据因此是「它是判据还是内容」，而不是「它该配哪一档脱敏」——
 // 后者的默认是写进表里就会落库，前者默认不写。
 type DecisionTrace struct {
-	// Model 是调用方要的那个规范模型名（入口那一侧的 CanonicalModel），
-	// 不是选路之后翻出来的上游名。
+	// Model 是**入站解析之后的规范名**（入口那一侧的 CanonicalModel），
+	// 不是选路之后翻出来的上游名，也不是调用方写的原名。
 	Model string
 	// Candidates 是预留之前取到的候选集合，与 begin 交给选路的是同一份。
 	//

@@ -689,8 +689,17 @@ func TestModelDeleteRefusesWhenReferenced(t *testing.T) {
 	if !errors.Is(delErr, catalog.ErrModelInUse) {
 		t.Errorf("期望 catalog.ErrModelInUse，得到 %v", delErr)
 	}
-	if !strings.Contains(delErr.Error(), "1 条别名") {
-		t.Errorf("错误里应当报出被多少条别名引用：%v", delErr)
+	// 三类引用各断一次：夹具里是 1 / 0 / 0（只建了一条出站别名），所以第一条
+	// 用非零值钉住「数字与标签的配对」，后两条各钉住标签本身在不在——旧文案
+	// 「N 条别名」若只改了措辞、把入站或计价那一段写丢，后两条会红。
+	// 入站与计价在这里同为 0，彼此换位看不出来；它们的非零计数由
+	// internal/catalog 的用例钉住（TestDeleteModelRefusesWhenInboundAliased
+	// 与 TestDeleteModelRefusesWhenPriced）。
+	// 消息的形状是「N 条出站别名、M 条入站别名与 K 条计价规则」。
+	for _, want := range []string{"1 条出站别名", "0 条入站别名", "0 条计价规则"} {
+		if !strings.Contains(delErr.Error(), want) {
+			t.Errorf("错误里应当报出 %q：%v", want, delErr)
+		}
 	}
 	if got := exitCode(delErr); got != exitConflict {
 		t.Errorf("退出码应当是 %d，得到 %d", exitConflict, got)

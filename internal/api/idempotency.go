@@ -64,7 +64,11 @@ const idempotencyWriteTimeout = 5 * time.Second
 // 记录 → 一条 409；没有记录 → 走原路径，并把这次响应留一份供后续重放。
 // body 是这次请求的原始字节。撞键重试时要拿它**重新解析**一份请求出来
 // （理由见循环里 attempt 那段注释），所以它得一路传进来。
-func (h *Handler) serveIdempotent(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, body []byte, user User, requestID, key string) {
+//
+// names 是入口解析好的两个模型名。重试那一路要拿 canonical 补回规范名；
+// 命中已有记录的那一路（resolveExisting）直接重放存量响应、不重新选路，
+// 所以那边用不到它——那不是漏了：重放的就是第一次请求当时写出的字节。
+func (h *Handler) serveIdempotent(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, body []byte, user User, requestID, key string, names modelNames) {
 	if err := idempotency.ValidateKey(key); err != nil {
 		// 键本身不合法是调用方的错，当场可诊断。放过去的话，一个超长的键
 		// 会进唯一索引，而代价由别人的库承担。
@@ -111,7 +115,7 @@ func (h *Handler) serveIdempotent(w http.ResponseWriter, r *http.Request, protoc
 			sink = held
 		}
 
-		res := h.serveOnce(sink, r, protocol, attempt, user, requestID, claim)
+		res := h.serveOnce(sink, r, protocol, attempt, user, requestID, claim, names)
 
 		if res.claimed {
 			// 在「查完」与「建立记录」之间被另一个并发请求抢走了。这不是
@@ -127,6 +131,14 @@ func (h *Handler) serveIdempotent(w http.ResponseWriter, r *http.Request, protoc
 				writeError(w, protocol, http.StatusInternalServerError, "internal error")
 				return
 			}
+			// 重解析出来的是**调用方写的名字**，入站解析不会跟着过来：那一
+			// 步只发生在 serve 入口一次。这里补回规范名，否则这一轮会拿别名
+			// 去选路——两次尝试于是落在两个不同的模型上。
+			//
+			// 用 names.canonical 而不是 attempt.Model：attempt 已经被插件就地
+			// 改过（见上），而 names 是入口存下的不可变值。也不在这里再解析
+			// 一次：解析只该发生一次，第二份答案会与第一份漂移。
+			fresh.Model = names.canonical
 			attempt = fresh
 
 			// 等一小会儿再查一次——下一次循环会按那条记录的状态处置。

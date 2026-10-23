@@ -100,10 +100,14 @@ func (h *Handler) billingRequest(user User, upstream *channel.Request, requestID
 		// 而单看任何一层都像是写了的。
 		APIKeyID: user.KeyID,
 		Asset:    h.DefaultAsset,
-		// CanonicalModel 是**调用方要的那个**名字。上游名由选路层按选中的
-		// 渠道翻出来（见 internal/route 的 upstreamRequest），落进
-		// billing_requests.upstream_model；两者在这一层分开，是因为入口
-		// 还不知道会走哪个渠道，而别名是逐渠道配的。
+		// CanonicalModel 是**入站解析之后的规范名**（见 serve 里的
+		// InboundResolver）：别名已经翻成它指向的那个模型。它与响应体里
+		// 回显的名字是两件事——那里回显的是调用方写的原名，两者只在
+		// 请求用了入站别名时不同。
+		//
+		// 上游名由选路层按选中的渠道翻出来（见 internal/route 的
+		// upstreamRequest），落进 billing_requests.upstream_model；两者在
+		// 这一层分开，是因为入口还不知道会走哪个渠道，而出站映射是逐渠道配的。
 		CanonicalModel: upstream.Model,
 		MaxTokens:      int64(upstream.MaxTokens),
 		InputTokens:    inputTokensOf(upstream),

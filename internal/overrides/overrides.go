@@ -63,7 +63,7 @@ var allowedKeys = []string{keyTemperature, keyTopP, keyMaxTokens}
 // 「不在允许的字段里」与「它是请求形状的一部分，改了等于让商家改写调用方的
 // 请求」是两句不同的话，而配这个键的人需要知道的是后一句。
 var forbidden = map[string]string{
-	"model":    "它决定这次请求发给哪个模型，而选路要按调用方要的那个名字计价",
+	"model":    "它决定这次请求发给哪个模型，而选路与计价都按入站解析之后的规范名走",
 	"messages": "它是调用方发来的正文",
 	"tools":    "它是调用方声明的工具集",
 	"stream":   "它决定这条响应是不是流式的，而流式与非流式的失败边界不同",

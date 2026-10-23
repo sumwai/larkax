@@ -131,7 +131,7 @@ larkaxctl consent revoke 7
 
 ```text
 surface                        这一行是哪条表面产出的：chat 还是 decision
-model                          调用方要的那个规范模型名
+model                          入站解析之后的规范模型名（不是调用方写的原名，也不是上游名）
 candidates_count               候选数
 candidates                     候选集合
 candidates[].channel_id        候选渠道的 id，也是与账单对上的那个数
