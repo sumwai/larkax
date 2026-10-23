@@ -44,7 +44,7 @@ var decisionCommonRules = []fieldRule{
 	{Path: "surface", Kind: allowEnumWord,
 		Note: "这一行是哪条表面产出的。request_snapshots.direction 只有 request / response 两个取值，决策与 chat 落在一起，靠它区分"},
 	{Path: "model", Kind: allowEnumWord, UpstreamValue: true,
-		Note: "调用方要的那个规范模型名。与 chat 那条路的同名字段**取值不同**——chat 的请求方向记的是发出去的那份请求上的**上游名**（见 docs/development.md 的快照一节），所以两者不要混着 join；两条路共有的性质是「选错模型、别名写错都靠它复现」，取值来自客户端，所以自带枚举词检查"},
+		Note: "入站解析之后的规范模型名（不是调用方写的原名，也不是上游名）。与 chat 那条路的同名字段**取值不同**——chat 的请求方向记的是发出去的那份请求上的**上游名**（见 docs/development.md 的快照一节），所以两者不要混着 join；两条路共有的性质是「选错模型、别名写错都靠它复现」，取值来自客户端，所以自带枚举词检查"},
 	{Path: "candidates_count", Kind: allowUint,
 		Note: "候选数。它是「当时有几个可选」这句话本身，也是骨架被截断后唯一还留下的判据"},
 }

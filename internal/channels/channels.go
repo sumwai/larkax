@@ -195,6 +195,45 @@ func (s *Source) SuppliesFor(ctx context.Context, model string) ([]Supply, error
 	return s.querySupplies(ctx, ` WHERE m.canonical_name = $1 ORDER BY c.id`, model)
 }
 
+// ChannelRef 是一条渠道的身份信息，**不含凭证**。
+//
+// 它只给只读诊断用（`larkaxctl model trace`）：要把渠道 ID 换成名字与归属，
+// 而那条路不该因为「想显示一个名字」就要求进程拿到主密钥——channels.Admin
+// 的读取面带着 sealer，只读路径构造它会把诊断变成一次需要密钥的操作。
+type ChannelRef struct {
+	ID   int64
+	Name string
+	// OwnerUserID 是渠道所属商家。0 表示平台自营（库里的 NULL）。
+	OwnerUserID int64
+	Merchant    string
+}
+
+// ChannelRef 按 id 读一条渠道的身份。
+//
+// 软删的渠道也算存在：诊断要回答的是「这个 id 有没有一行」，而不是「它现在
+// 能不能用」——后者由 Supply 与状态列回答。找不到时返回 ErrChannelNotFound，
+// 与写入路径同一个哨兵。
+func (s *Source) ChannelRef(ctx context.Context, id int64) (ChannelRef, error) {
+	if id <= 0 {
+		return ChannelRef{}, errors.New("渠道 id 无效")
+	}
+
+	var ref ChannelRef
+	err := s.db.QueryRowContext(ctx, `
+		SELECT c.id, c.name, COALESCE(c.owner_user_id, 0), COALESCE(u.username, '')
+		  FROM channels c
+		  LEFT JOIN users u ON u.id = c.owner_user_id
+		 WHERE c.id = $1`, id).
+		Scan(&ref.ID, &ref.Name, &ref.OwnerUserID, &ref.Merchant)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ChannelRef{}, fmt.Errorf("%w：id %d", ErrChannelNotFound, id)
+	}
+	if err != nil {
+		return ChannelRef{}, fmt.Errorf("查询渠道失败: %w", err)
+	}
+	return ref, nil
+}
+
 // querySupplies 执行供给查询并逐行扫描。
 //
 // 列清单与判据只写这一遍；两个调用方只提供各自的 WHERE / ORDER BY 尾巴。

@@ -53,8 +53,11 @@ const (
 // 悄悄扩大插件的可见范围。
 type RequestContext struct {
 	RequestID string `json:"requestId"`
-	// CanonicalModel 是调用方请求里的规范模型名：注册表的模型匹配
+	// CanonicalModel 是**入站解析之后的**规范模型名：注册表的模型匹配
 	// （meta.models）与 onRoute 的上下文用的都是它。
+	//
+	// 它不是调用方在请求体里写的那个名字：请求用了入站别名时，入口已经把
+	// 别名翻成了它指向的模型（见 internal/api 的 serve）。
 	CanonicalModel string `json:"canonicalModel"`
 	// UpstreamModel 是**别名翻译之前**的模型名。
 	//

@@ -235,6 +235,17 @@ type QuotaChecker interface {
 	CheckQuota(ctx context.Context, keyID int64, limit *money.Amount) error
 }
 
+// InboundResolver 把调用方给的名字解析成规范名。
+//
+// 为 nil 时不做解析（行为与别名出现之前完全一致，与 Idempotency 同一取舍）。
+// 生产装配填的是 *catalog.Catalog：每次解析是**一次**主键查询，没有缓存
+// （见 catalog.Catalog.ResolveInbound 的注释）。
+type InboundResolver interface {
+	// ResolveInbound 命中别名时返回规范名；没命中时原样返回。名字同时是
+	// 规范模型与别名时，规范名优先、别名被遮蔽，同样原样返回。
+	ResolveInbound(ctx context.Context, name string) (string, error)
+}
+
 // Handler 是公共入口的 HTTP handler。
 type Handler struct {
 	Auth    Authenticator
@@ -295,6 +306,15 @@ type Handler struct {
 	// 出现之前完全一样。反过来（nil 时回 501）会让一次装配疏漏表现为
 	// 「所有带这个头的请求都失败」，而那比不做幂等更糟。
 	Idempotency IdempotencyStore
+
+	// Inbound 把调用方写的模型名解析成规范名。为 nil 时不做解析，行为与
+	// 别名出现之前完全一致——与 Idempotency 同一个取舍：没接上这条链路时
+	// 不该让请求失败，而反过来（nil 时回 501）会让一次装配疏漏表现为
+	// 「所有请求都失败」。
+	//
+	// 它只在入口被调用一次（serve 里），解析之后 upstream.Model 一路是规范名。
+	// 装在诊断路径上的同理：见 internal/catalog 的 ResolveInbound。
+	Inbound InboundResolver
 
 	// DefaultAsset 是结算用的资产品种，由装配层从 settings 的
 	// billing.default_asset 读出来填上。
@@ -408,6 +428,29 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 		return
 	}
 
+	// 入站别名在**这里**解析一次，之后全链路按规范名走。位置有两个约束：
+	//
+	//  1. 在 checkRequest 之后：必要字段都不全的请求不值得多一次查询；
+	//  2. 在幂等指纹之前：别名与规范名两种写法要算出同一个指纹，否则同一个
+	//     逻辑请求会被当成两个，第二次拿到 409（见 serveIdempotent）。
+	//
+	// names 是不可变的值，一路往下传。不要从 upstream.Model 反读：那份请求
+	// 会被插件就地改，而重试分支拿到的是重新解析的新对象。
+	names := modelNames{requested: upstream.Model, canonical: upstream.Model}
+	if h.Inbound != nil {
+		canonical, err := h.Inbound.ResolveInbound(r.Context(), names.requested)
+		if err != nil {
+			// 解析失败就失败，**不吞成原样放行**：那会把别名当成一个不存在
+			// 的模型去选路，症状是「查无此模型」，排查方向整个指向另一边。
+			// 细节不回给调用方，与上面解析请求体失败同一个理由。
+			observe.FromContext(r.Context()).Error("解析入站别名失败", "err", err)
+			writeError(w, protocol, http.StatusInternalServerError, "internal error")
+			return
+		}
+		names.canonical = canonical
+		upstream.Model = canonical
+	}
+
 	requestID := requestIDOf(r)
 
 	// 幂等键接在**解析成功之后**：指纹算的是解析后的请求（见
@@ -415,10 +458,23 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, protocol channel
 	// 「一次请求」可言，那时也没有任何东西需要幂等——把它们记下来只会让
 	// 一个写错请求体的客户端在改正之后还拿到 409。
 	if key := r.Header.Get(idempotency.HeaderName); key != "" && h.Idempotency != nil {
-		h.serveIdempotent(w, r, protocol, upstream, body, user, requestID, key)
+		h.serveIdempotent(w, r, protocol, upstream, body, user, requestID, key, names)
 		return
 	}
-	h.serveOnce(w, r, protocol, upstream, user, requestID, nil)
+	h.serveOnce(w, r, protocol, upstream, user, requestID, nil, names)
+}
+
+// modelNames 是一次请求的两个模型名。
+//
+// requested 是调用方在请求体里写的那个名字，响应里回显它——别名存在的意义
+// 就是客户端有一个稳定的名字，回显被换成规范名会让按响应判断模型的 SDK
+// 出问题。canonical 是入站解析之后的名字，选路、计价、记账、插件都用它。
+//
+// 两个名字只在入口这一处分得清：往下传的是这个值，而不是从 upstream.Model
+// 反读——那份请求会被插件就地改，重试分支拿到的又是重新解析出来的新对象。
+type modelNames struct {
+	requested string
+	canonical string
 }
 
 // admit 跑一次请求在**解析请求体之前**的全部检查，返回调用者与请求体。
@@ -630,7 +686,7 @@ type served struct {
 //
 // 它返回的是**结局**而不是错误：各个失败分支已经自己把响应写出去了
 // （或者判断出没人在听），调用方需要的只是「能不能重放」。
-func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, user User, requestID string, claim *idempotency.Claim) served {
+func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, user User, requestID string, claim *idempotency.Claim, names modelNames) served {
 	// 插件在**构造计费请求之前**跑，位置是有约束的而不是随手放的：
 	// 补丁能改 max_tokens，而它是预留上界的关键（见 billingRequest 的
 	// MaxTokens 与 pipeline.Reserve）。排在 billingRequest 之后的话，那份
@@ -662,7 +718,7 @@ func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol cha
 		// 「整份响应」这个时刻），onStream 在非流式那边不会被调到（没有
 		// 「块」可言）。传下去的那个闭包本来就不会被调，所以这里不额外判断
 		// （见 docs/plugin-contract.md）。
-		return h.serveStream(w, r, protocol, upstream, req, h.pluginHooks(sess, requestID, upstream.Model, protocol))
+		return h.serveStream(w, r, protocol, upstream, req, h.pluginHooks(sess, requestID, upstream.Model, protocol), names)
 	}
 
 	res, err := h.Chatter.Chat(r.Context(), req, upstream, h.pluginHooks(sess, requestID, upstream.Model, protocol))
@@ -691,8 +747,9 @@ func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol cha
 
 	// 报给调用方的模型名是**他要的那个**，不是上游回报的那个：
 	// 上游名是我们与上游之间的事，而调用方按自己请求里的名字理解响应。
-	// 上游实际用了什么记在 channel.Response.UpstreamModel 里，供计费与排查。
-	rendered, err := renderSuccess(protocol, requestID, upstream.Model, h.now(), res.Response)
+	// 请求里写的是别名时，回显的也是别名（见 modelNames）。上游实际用了
+	// 什么记在 channel.Response.UpstreamModel 里，供计费与排查。
+	rendered, err := renderSuccess(protocol, requestID, names.requested, h.now(), res.Response)
 	if err != nil {
 		observe.FromContext(r.Context()).Error("渲染响应失败", "err", err)
 		writeError(w, protocol, http.StatusInternalServerError, "internal error")
@@ -883,10 +940,14 @@ func (h *Handler) logPluginFailures(ctx context.Context, sess *plugin.Session, r
 // 只有**完整走完**（收到 done 且结束帧真的写出去了）才返回 complete。
 // 截断的流不能重放：重放一段半截的回答比不重放更坏，调用方会把它当成
 // 一次成功的完整回答。
-func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, req pipeline.Request, hooks gateway.Hooks) served {
+func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, protocol channel.Protocol, upstream *channel.Request, req pipeline.Request, hooks gateway.Hooks, names modelNames) served {
 	// 渲染器要在写响应头**之前**建好：协议认不出来时还能回一个 500，
 	// 而头一旦发出去就只剩下截断一条路。
-	renderer, err := newStreamRenderer(protocol, req.RequestID, upstream.Model, h.now(), inputTokensOf(upstream))
+	//
+	// 帧里的 model 用调用方写的名字，与非流式同一个口径（见 modelNames）：
+	// 两处若一个回显别名、一个回显规范名，按流式响应对模型的客户端就会
+	// 看到另一个名字。
+	renderer, err := newStreamRenderer(protocol, req.RequestID, names.requested, h.now(), inputTokensOf(upstream))
 	if err != nil {
 		observe.FromContext(r.Context()).Error("流式入口收到未知协议", "err", err)
 		writeError(w, protocol, http.StatusInternalServerError, "internal error")

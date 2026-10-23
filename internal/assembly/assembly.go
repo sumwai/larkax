@@ -617,6 +617,10 @@ func Build(cfg Config) (*App, error) {
 	// 两份都必填——缺一份时那两条路径回 501（见 api.Handler 的 Models 字段）。
 	handler.Models = channelSource
 	handler.Catalog = aliasCatalog
+	// 入站别名解析与目录读取是同一个对象：两者读的都是模型目录那一族表，
+	// 而「哪个名字是规范名」的判据只该有一份。漏接这里的症状是「配了入站
+	// 别名却不生效」——没有任何报错，请求照样按别名去选路，然后查无此模型。
+	handler.Inbound = aliasCatalog
 	// 报价与结算共用同一份日历、地区与判据（见 internal/pricing/offers.go）。
 	// 这里传的是装配期读好的那几项，不是每请求现读——与参考价同一个口径。
 	handler.Offers = pricing.NewOffers(cfg.DB, region, calendarEnv)

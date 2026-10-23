@@ -104,7 +104,7 @@ var ErrNoOutputCap = errors.New("未配置单次输出上限：目录里没登�
 // 用它的是一个具体的类型而不是哨兵错误，因为给调用方的那句话需要这几个数，
 // 而错误信息本身是中文的内部措辞（与仓库里其余错误一致）。
 type OutputCapExceeded struct {
-	// Model 是调用方要的那个规范模型名。
+	// Model 是入站解析之后的规范模型名（不是调用方写的原名，也不是上游名）。
 	Model string
 	// Declared 是调用方在请求体里声明的 max_tokens。
 	Declared int64

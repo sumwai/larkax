@@ -43,8 +43,16 @@ type opsRegistryEntry struct {
 
 // opsClause 是分发分支里的一个 case：一组标签共用一个分支。多标签的那几个
 // case 里，除了正式动词还挂着一个旧写法（见 legacyOpsVerbs）。
+//
+// depth 是这个分支离顶层处理函数有多远：0 是命令自己的动作，1 起是二级命令
+// 的动作（`model alias` → runModelAlias、`price calendar` → runPriceCalendar）。
+// 旧写法只在 depth 0 上判——legacyOpsVerbs 说的是「`model add` 是 `model
+// create` 的旧名」，而不是「任何一级叫 add 的动词都是 create 的旧名」。不分开
+// 的话，`model alias add` 会被当成旧写法从表里抹掉，而它是一条要写进文档的
+// 正式动作。
 type opsClause struct {
 	labels []string
+	depth  int
 }
 
 // legacyOpsVerbs 是分发分支里保留的**旧写法**：同一个 case 上挂着两个名字，
@@ -323,7 +331,7 @@ func opsCommandVerbs(t *testing.T, funcs map[string]*ast.FuncDecl, entry opsRegi
 	if _, ok := funcs[entry.handler]; !ok {
 		t.Fatalf("%s 的处理函数 %s 不在源码里：注册表与实现分家了", entry.name, entry.handler)
 	}
-	clauses := opsClausesOf(funcs, entry.handler, map[string]bool{})
+	clauses := opsClausesOf(funcs, entry.handler, map[string]bool{}, 0)
 	if len(clauses) == 0 {
 		// 一条子命令都没有的命令（doctor / version）：表里那一行也不该有动词。
 		return nil
@@ -335,13 +343,15 @@ func opsCommandVerbs(t *testing.T, funcs map[string]*ast.FuncDecl, entry opsRegi
 	var verbs []string
 	for _, clause := range clauses {
 		for _, label := range clause.labels {
+			// 旧写法只在顶层判：见 opsClause.depth 的注释。它不算进 seen——
+			// 同一个词在更深一层是正式动作时（`model alias add`）要能进来。
+			if _, isOldName := aliases[label]; isOldName && clause.depth == 0 {
+				continue
+			}
 			if seen[label] {
 				continue
 			}
 			seen[label] = true
-			if _, isOldName := aliases[label]; isOldName {
-				continue
-			}
 			verbs = append(verbs, label)
 		}
 	}
@@ -356,7 +366,7 @@ func opsCommandVerbs(t *testing.T, funcs map[string]*ast.FuncDecl, entry opsRegi
 // 「子命令的动作一个都没收进来」，而那看起来就像「这条命令本来就没有子命令」。
 // 调用的不是包里的顶层函数（方法、变量里的函数值）时停下——只有注册表里那个
 // 处理函数找不到才算分家，那一条由调用方判。
-func opsClausesOf(funcs map[string]*ast.FuncDecl, handler string, seen map[string]bool) []opsClause {
+func opsClausesOf(funcs map[string]*ast.FuncDecl, handler string, seen map[string]bool, depth int) []opsClause {
 	if seen[handler] {
 		return nil
 	}
@@ -389,10 +399,10 @@ func opsClausesOf(funcs map[string]*ast.FuncDecl, handler string, seen map[strin
 		if len(labels) == 0 {
 			continue
 		}
-		clauses = append(clauses, opsClause{labels: labels})
+		clauses = append(clauses, opsClause{labels: labels, depth: depth})
 
 		for _, called := range opsRunCalls(clause) {
-			clauses = append(clauses, opsClausesOf(funcs, called, seen)...)
+			clauses = append(clauses, opsClausesOf(funcs, called, seen, depth+1)...)
 		}
 	}
 	return clauses
@@ -486,6 +496,9 @@ func verifyLegacyOpsVerbs(t *testing.T, command string, clauses []opsClause) {
 	for oldName, canonical := range legacyOpsVerbs[command] {
 		sameClause := false
 		for _, clause := range clauses {
+			if clause.depth != 0 {
+				continue
+			}
 			if slices.Contains(clause.labels, oldName) && slices.Contains(clause.labels, canonical) {
 				sameClause = true
 				break

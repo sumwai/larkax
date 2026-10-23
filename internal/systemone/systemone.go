@@ -105,7 +105,7 @@ const MaxOutputTokens = 4096
 
 // Request 是一次决策请求。
 //
-// Model 在入口那一侧是**规范名**（调用方要的那个），到了适配器那一侧是
+// Model 在入口那一侧是**入站解析之后的规范名**，到了适配器那一侧是
 // **上游名**（路由层按选中的渠道翻出来的）——与 chat 那条路同一个约定，
 // 见 pipeline.Request.CanonicalModel 的注释。
 type Request struct {

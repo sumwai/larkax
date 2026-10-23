@@ -202,8 +202,8 @@ JSON 解码器的行为，不是契约的一部分——把名字写准仍然是
 之后——每个候选按自己的渠道翻一次，因为同一个规范名在不同渠道下可以叫不同的
 名字。所以 `onRequest` 的上下文里：
 
-- `ctx.canonicalModel` 与 `ctx.upstreamModel` 是**同一个值**，都是调用方请求里
-  的规范名；
+- `ctx.canonicalModel` 与 `ctx.upstreamModel` 是**同一个值**，都是**入站解析
+  之后**的规范名（请求写了入站别名时，它不是客户端请求体里那个名字）；
 - `ctx.body.model` 也是它。
 
 **不要拿 `ctx.upstreamModel` 拼上游特有的请求体**：它不是实际发给上游的名字。

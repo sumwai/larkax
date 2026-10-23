@@ -1330,7 +1330,7 @@ ingress 规则下。同一个端口上还有管理面 `/admin/v1/*`，用单独�
 | 子命令 | 做什么 |
 |---|---|
 | `channel` | 上游渠道：`create` / `list`（`--all` 含已删）/ `get`（单条详情）/ `health`（健康与窗口内的用量）/ `update` / `enable` / `disable` / `delete`（软删）/ `restore`（`delete` 的逆操作）/ `sync-models`（从上游拉一次模型清单并落库）/ `upstream-models`（读库里那一份清单与同步状态）/ `adapters`（列出适配器类型）/ `probe`（落库之前探一次上游模型清单）；出站映射：`map`（`add` / `list` / `remove`） |
-| `model` | 模型目录：`create` / `list` / `get` / `update` / `delete` |
+| `model` | 模型目录：`create` / `list` / `get` / `update` / `delete`；入站别名（调用方写的名字 → 规范名）：`alias`（`add` / `remove` / `list`）；名字链路诊断：`trace` |
 | `alias` | 规范模型名到上游模型名的映射（旧入口，配置改用 `channel map`）：`create` / `list` / `update` / `delete` / `resolve` |
 | `price` | 计价规则：`create` / `list` / `show` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `list`） |
 | `upstream-cost` | 上游成本规则（每条渠道每个模型按生效窗口与优先级挑一条）：`create` / `list` / `update` / `disable` |
@@ -1369,7 +1369,9 @@ ingress 规则下。同一个端口上还有管理面 `/admin/v1/*`，用单独�
 **状态**（一段自由文本，比如一张工单）与一组**带类型的判定问题**，回一组答案。
 与另外三条推理路径一样：协议由路径决定，计费走同一条两阶段流水线，上游由
 选路层按渠道挑。它的错误体用 OpenAI 形状、不支持流式，两条都在
-[api.md](api.md) 里。
+[api.md](api.md) 里。入站别名在这条路径上同样解析，但位置与 chat 那条不同：
+这条表面没有幂等，所以不存在「解析要排在指纹之前」的约束，解析排在请求校验
+之后、组装计费请求之前（见 `serveDecision` 的注释）。
 
 请求体是一个 JSON 对象：
 
