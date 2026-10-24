@@ -94,6 +94,18 @@ const (
 	// 后缀是**订阅** id（user_plans.id），不是额度包 id（plans.id）：同一个包
 	// 可以发给多个用户，面值分别记在各自的订阅上，余额也要各算各的。
 	AccountPrepaid AccountType = "prepaid"
+	// AccountCarryover 是某个额度包订阅期末结转到用户身上的面值，正数是平台
+	// 还欠用户、等他下次领包时并入的额度。
+	//
+	// 后缀是**源订阅** id（user_plans.id），不是用户 id：分录只有 asset、没有
+	// unit，同一个用户可能同时挂着金额包与 token 包的结转余额，合到一个科目里
+	// 就分不出哪一笔该并进哪一种新包。按源订阅记，并入时 join 回 user_plans
+	// 与 plans 才读得到单位。
+	//
+	// 它与 prepaid 的分工：prepaid 是「这份订阅现在能花的面值」，carryover 是
+	// 「这份订阅到期后留给用户、还没找到新订阅落账的面值」。后者不影响请求
+	// 路径的选源，只有发放新包时才被并入。
+	AccountCarryover AccountType = "carryover"
 	// AccountReconcileDifference 是对账差额的归集科目（单例）。
 	//
 	// 对账修正与人工调账的区别正在于「谁认下这笔差额」：人工调账的对家是
@@ -114,7 +126,7 @@ func (t AccountType) valid() bool {
 	switch t {
 	case AccountUser, AccountMerchantPayable, AccountPlatformRevenue,
 		AccountUpstreamCost, AccountPaymentGateway, AccountPayout,
-		AccountReconcileDifference, AccountPrepaid:
+		AccountReconcileDifference, AccountPrepaid, AccountCarryover:
 		return true
 	}
 	return false
@@ -146,6 +158,7 @@ func (t AccountType) needsID() bool {
 //	user                    正 = 平台欠用户的钱，负 = 用户欠平台
 //	merchant_payable        正 = 平台欠商户的分成
 //	prepaid                正 = 平台欠用户的预存额度（这个订阅还剩多少面值）
+//	carryover              正 = 平台欠用户的结转额度（等下次领包时并入）
 //	platform_revenue        正 = 平台收到的钱，负 = 平台付出的钱
 //	                        （收入、退款、以及由平台承担的通道手续费都走它）
 //	upstream_cost           正 = 上游成本
@@ -368,6 +381,16 @@ func PrepaidAccount(subscriptionID int64) Account {
 	return Account{raw: buildAccount(AccountPrepaid, strconv.FormatInt(subscriptionID, 10))}
 }
 
+// CarryoverAccount 是某个额度包订阅期末结转出的科目：平台欠用户、待并入的额度。
+//
+// 传入的是**源订阅** id（结转出这笔额度的那个 user_plans.id），不是新订阅、
+// 也不是用户——见 AccountCarryover 的注释。
+//
+// 命名与 PrepaidAccount 同构：调用点要一眼看出拿到的是科目而不是金额。
+func CarryoverAccount(subscriptionID int64) Account {
+	return Account{raw: buildAccount(AccountCarryover, strconv.FormatInt(subscriptionID, 10))}
+}
+
 // buildAccount 拼出科目字符串。空 id 退回单例写法：这是构造期的笔误，
 // 而构造期 panic 会把一个「拼错字符串」升级成「服务起不来」，
 // 非法形态留给 Verify 统一报出来。
@@ -423,8 +446,9 @@ func ParseAccount(s string) (Account, error) {
 		// 比，把一个**正确的**余额改小。收窄在这里等于堵住新的写入；库里已经
 		// 存在的那种写法由对账按同一个 id 归位（见 UserIDFromAccount）。
 		//
-		// 只收窄 user 与 prepaid：它们是仅有的两个会被按字符串比对归属的
-		// 大类——user 对钱包快照与对账汇总，prepaid 对面值余额（见下面那段）。
+		// 只收窄 user、prepaid 与 carryover：它们是仅有的三个会被按字符串比对
+		// 归属的大类——user 对钱包快照与对账汇总，prepaid / carryover 对面值
+		// 余额（见下面那段）。
 		// merchant_payable、payout 与 payment_gateway 的后缀不参与这样的比对，
 		// 一起收窄是另一件事。
 		//
@@ -437,14 +461,15 @@ func ParseAccount(s string) (Account, error) {
 				"科目 %q 的用户 id 不是规范写法：应为 user:<正整数>，十进制、无前导零、无正号", s)
 		}
 	}
-	if t == AccountPrepaid && !isCanonicalAccountID(id) {
+	if (t == AccountPrepaid || t == AccountCarryover) && !isCanonicalAccountID(id) {
 		// 与 user 同一个理由，但这里没有宽松的余地：prepaid 的余额就是「这个
-		// 订阅还剩多少面值」，而余额查询按科目原文精确汇总
+		// 订阅还剩多少面值」，carryover 的余额是「这份订阅结转出去、待并入的
+		// 面值」，两者都按科目原文精确汇总
 		//（store 的 accountBalanceInTx、以及任何按 account = ? 取的 SQL）。
 		// 同一订阅写成 `prepaid:007` 与 `prepaid:7` 会把余额拆成两笔，
 		// 两边看起来都像「还剩一点」，而合起来才是真的剩多少。
 		return Account{}, fmt.Errorf(
-			"科目 %q 的订阅 id 不是规范写法：应为 prepaid:<正整数>，十进制、无前导零、无正号", s)
+			"科目 %q 的订阅 id 不是规范写法：应为 %s:<正整数>，十进制、无前导零、无正号", s, t)
 	}
 	return Account{raw: s}, nil
 }

@@ -150,12 +150,18 @@ func lockTxn(ctx context.Context, tx *sql.Tx, txnID ledger.TxnID) error {
 }
 
 // lockReadThenWriteAccounts 给分录里出现的、会被「先读余额再决定写不写」的
-// 科目各上一把事务级锁：merchant_payable 与 prepaid。
+// 科目各上一把事务级锁：merchant_payable、prepaid 与 carryover。
 //
 // merchant_payable：提现申请要读分成余额再判断够不够，退款与消费都能改动它。
 // prepaid（额度包订阅的面值）：作废要读剩余面值再写核销分录，消费会让它变小。
-// 只锁「判断并写入」的那一侧是不够的——另一侧能在读完余额之后把它改掉。所以
-// 写分录这一层统一拿锁，让两条路落在同一条串行线上。
+// carryover（期末结转、待并入的额度）：发放并入时要读余额再决定并多少，而期末
+// 结转会让它变大。只锁「判断并写入」的那一侧是不够的——另一侧能在读完余额之后
+// 把它改掉。所以写分录这一层统一拿锁，让两条路落在同一条串行线上。
+//
+// carryover 与 prepaid 是同一份面值的两个状态。期末做结转的那条路按
+// 「carryover:<源> 再 prepaid:<源>」的全局字典序取锁，并入那条路按科目名排序
+// 取锁——两者合起来意味着任何同时碰这两个科目的事务都从 carryover 开始，
+// 不会一个先拿 prepaid 另一个先拿 carryover 而互等。
 //
 // 只锁真的出现在分录里的科目：user、platform_revenue 那些科目没有「先读余额再
 // 决定写不写」的路径，给它们加锁只是拖慢并发。消费的分成也会经过这里，方向上是
@@ -169,7 +175,7 @@ func lockReadThenWriteAccounts(ctx context.Context, tx *sql.Tx, entries []ledger
 	uniq := map[string]ledger.Account{}
 	for _, e := range entries {
 		switch e.Account.Type() {
-		case ledger.AccountMerchantPayable, ledger.AccountPrepaid:
+		case ledger.AccountMerchantPayable, ledger.AccountPrepaid, ledger.AccountCarryover:
 			uniq[e.Account.String()] = e.Account
 		}
 	}

@@ -52,6 +52,20 @@ const (
 	// 到期与人工作废共用一档：在账上它们是同一个事件（剩下的额度不再可用、
 	// 归平台），区别记在订阅的状态上（到期 / 人工作废）。
 	EntryPlanVoid EntryType = "plan_void"
+	// EntryPlanCarry 是额度包订阅**期末结转**：到期时按比例留下的那部分面值，
+	// 从 prepaid:<源订阅 id> 转到 carryover:<源订阅 id>，等用户下次领包时并入。
+	//
+	// 它与 plan_void 是同一次期末处置的两半：结转出去的那一份继续欠着用户，
+	// 没结转的（比例之外的、以及向下取整的余数）由 plan_void 归平台。两笔各自
+	// 是一档类型，账面上才分得清「这份额度为什么还留着」与「为什么没了」。
+	EntryPlanCarry EntryType = "plan_carry"
+	// EntryPlanCarryMerge 是结转额度**并入新订阅**：用户领到新包时，把
+	// carryover:<源订阅 id> 上的余额转到 prepaid:<新订阅 id>。
+	//
+	// 它不改变平台欠用户的总数，只是把「待并入」变成「这个新订阅能花的」。
+	// 与 plan_carry 分开记，是因为两者的触发时机与对家都不同：前者在到期，
+	// 对家是 prepaid；后者在发放，对家是另一个 prepaid。
+	EntryPlanCarryMerge EntryType = "plan_carry_merge"
 	// EntryAdjustment 是人工调账。它不参与任何业务推导，
 	// 只在必须手工修正账目时使用，且强制要求写备注。
 	EntryAdjustment EntryType = "adjustment"
@@ -75,7 +89,8 @@ func EntryTypes() []EntryType {
 	return []EntryType{
 		EntryTopup, EntryConsume, EntryRefund, EntrySettle,
 		EntryPayoutRequest, EntryPayoutPaid, EntryPayoutReject,
-		EntryPlanGrant, EntryPlanVoid, EntryAdjustment,
+		EntryPlanGrant, EntryPlanVoid, EntryPlanCarry, EntryPlanCarryMerge,
+		EntryAdjustment,
 	}
 }
 
@@ -185,6 +200,19 @@ var entryDirections = map[EntryType]map[AccountType]signMask{
 	EntryPlanVoid: {
 		AccountPrepaid:         signCredit, // 剩下的面值不再可用
 		AccountPlatformRevenue: signDebit,  // 未用完的部分归平台
+	},
+	// 结转：prepaid 变小、carryover 变大，两边是同一个源订阅。carryover 只在
+	// 这一档里变正、只在并入那一档里变负，所以「它现在是正的」就等于「还有
+	// 额度没并进任何新包」——这个判据就是并入的闸门（见 internal/plans）。
+	EntryPlanCarry: {
+		AccountPrepaid:   signCredit, // 源订阅的面值少了这一份
+		AccountCarryover: signDebit,  // 平台欠用户、待并入的额度多了这一份
+	},
+	// 并入：carryover 清零，prepaid:<新订阅> 变大。可以有多个源（每个源一条
+	// 贷方分录），目标只有一条借方——它们之和为零，由 Verify 对账。
+	EntryPlanCarryMerge: {
+		AccountCarryover: signCredit, // 待并入的额度转出去了
+		AccountPrepaid:   signDebit,  // 新订阅的面值多了这一份
 	},
 	// 人工调账是唯一的开口：它本就是要修正别处算错的余额，
 	// 所以科目与方向都不设限。代价是它不能被自动推导，

@@ -171,6 +171,15 @@ func (s *Service) GrantTx(ctx context.Context, tx *sql.Tx, in GrantInput) (UserP
 				"同一个交易号不能对应两条订阅", in.TxnID, userPlanID)
 	}
 
+	// 新订阅建好之后、读回整行之前，把该用户手上待并入的结转额度并进来：
+	// 同一事务、同一条订阅，于是「发放」与「并入」要么都落、要么都不落。
+	// 并入的闸门是各源 carryover 科目的账本余额（见 mergeCarryovers）。
+	//
+	// 重放走的是上面那条早返回，压根到不了这里——同一个发放单号不会二次并入。
+	if _, _, mergeErr := mergeCarryovers(ctx, s, tx, userPlanID, in.UserID, plan.Asset, plan.Unit, ref); mergeErr != nil {
+		return UserPlan{}, false, mergeErr
+	}
+
 	row, err := userPlanByIDIn(ctx, tx, userPlanID, false)
 	if err != nil {
 		return UserPlan{}, false, err
@@ -223,17 +232,26 @@ type VoidInput struct {
 	// Ref 是作废单号，库上 user_plans.void_ref 的唯一值。
 	Ref string
 	// Status 是作废之后的终态：UserPlanExpired（到期）或 UserPlanCancelled
-	//（运营提前作废）。它只改订阅的状态与备注里的说法——两种作废在账上是同一个
-	// 事件（剩下的面值归平台）。
+	//（运营提前作废）。
+	//
+	// 两者的账面处置**不一样**：真的到期（expired 且库里的时间已经过了
+	// period_end）时，剩余面值按 settings.plans.carryover_bp 留下一部分到
+	// carryover:<订阅 id>，其余归平台；canceled、以及还没到期就手工标成
+	// expired 的，整笔归平台。
 	Status UserPlanStatus
 }
 
-// Void 作废一条订阅：把剩余面值从 prepaid:<订阅 id> 转回平台收入，并改状态。
+// Void 作废一条订阅：把剩余面值处置掉（到期时按比例结转，其余归平台），并改状态。
 //
-// 分录（见 ledger.PlanVoid）：
+// 分录：
 //
-//	贷 prepaid:<订阅 id>      剩余面值    这个订阅的剩余额度核销
-//	借 platform_revenue       剩余面值    未用完的部分成为平台的收入
+//	真的到期且比例大于零：
+//	  贷 prepaid:<订阅 id>   结转量    这部分面值转成待并入的额度
+//	  借 carryover:<订阅 id> 结转量
+//	贷 prepaid:<订阅 id>     归平台量  其余不再可用
+//	借 platform_revenue      归平台量
+//
+// 两笔分录的金额之和严格等于处置前的剩余面值（见 carrySplit）。
 //
 // 剩余面值从**账本**现算（prepaid 科目的余额），不由调用方给：那是权威值，
 // 也是「这个订阅还剩多少」的唯一答案。余额为零时只改状态、不写分录——
@@ -317,14 +335,40 @@ func (s *Service) VoidTx(ctx context.Context, tx *sql.Tx, in VoidInput) (UserPla
 		return UserPlan{}, false, fmt.Errorf("核对作废单号失败: %w", err)
 	}
 
+	// 这次作废适不适用期末结转：只有真的到期（expired 且库里的时间已经过了
+	// period_end）才结转；canceled 与「还没到期就手工标 expired」整笔归平台。
+	carryable, err := periodEndedIn(ctx, tx, row, in.Status)
+	if err != nil {
+		return UserPlan{}, false, err
+	}
+	var bp int64
+	if carryable {
+		// 比例在动任何一笔之前读。读不出来就整次作废失败——事务回滚后订阅仍是
+		// active、面值一分没动、也没有任何分录（见 carryoverBasisPoints）。
+		bp, err = carryoverBasisPoints(ctx, tx)
+		if err != nil {
+			return UserPlan{}, false, err
+		}
+	}
+
 	prepaid := ledger.PrepaidAccount(row.ID)
+	// 加锁顺序固定为全局字典序：carryover:<id> 在 prepaid:<id> 之前（"c" < "p"）。
+	// 这与 store 写分录前那一组锁（lockReadThenWriteAccounts 按科目名排序）是同一个
+	// 次序，于是任何同时碰这两个科目的事务都从 carryover 开始，不会互相等成环。
+	// 结转量为零时也照拿：次序由路径决定，不由这一次算出来的金额决定。
+	if carryable {
+		carryover := ledger.CarryoverAccount(row.ID)
+		if lockErr := lockPlanAccount(ctx, tx, carryover); lockErr != nil {
+			return UserPlan{}, false, lockErr
+		}
+	}
 	// 作废要把余额读出来再写分录，读的那一刻就得在锁里，所以这里显式拿一次。
-	// 这把锁与账本层的是同一个（store 写分录之前会给分录里的 merchant_payable
-	// 与 prepaid 科目上同一把事务级锁，见 lockReadThenWriteAccounts）：任何能让 prepaid
-	// 变小的写入都先拿它，否则余额会在「读出来」与「写进去」之间被扣走。
-	if _, lockErr := tx.ExecContext(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, prepaid.String()); lockErr != nil {
-		return UserPlan{}, false, fmt.Errorf("锁定额度包科目 %s 失败: %w", prepaid, lockErr)
+	// 这把锁与账本层的是同一个（store 写分录之前会给分录里的 merchant_payable、
+	// prepaid 与 carryover 科目上同一把事务级锁，见 lockReadThenWriteAccounts）：
+	// 任何能让 prepaid 变小的写入都先拿它，否则余额会在「读出来」与「写进去」之间
+	// 被扣走。
+	if lockErr := lockPlanAccount(ctx, tx, prepaid); lockErr != nil {
+		return UserPlan{}, false, lockErr
 	}
 	remaining, err := accountBalanceInTx(ctx, tx, prepaid, row.Asset)
 	if err != nil {
@@ -350,11 +394,48 @@ func (s *Service) VoidTx(ctx context.Context, tx *sql.Tx, in VoidInput) (UserPla
 			row.ID, pending)
 	}
 
-	if remaining.IsPositive() {
+	// 两维各自算、各自向下取整（见 carrySplit）：面值这一维 R 会被切成
+	// 「结转」与「归平台」两段，两者之和严格等于 R——向下取整的零头留给平台，
+	// 不会凭空多出额度。量那一维的结转量写在 carryout_quota 上，等并入时用。
+	var carryAmount, carryQuota money.Amount
+	if carryable {
+		basisQuota, quotaErr := store.PlanQuotaUsage(ctx, tx, row.ID)
+		if quotaErr != nil {
+			return UserPlan{}, false, quotaErr
+		}
+		carryAmount, carryQuota = carrySplit(row.Unit, remaining, basisQuota,
+			row.CarriedAmount, row.CarriedQuota, bp)
+	}
+	voidAmount := remaining.Sub(carryAmount)
+
+	if carryAmount.IsPositive() {
+		carryTxn, carryErr := ledger.PlanCarry(ledger.PlanCarryParams{
+			TxnID:          carryTxnID(carryTxnDomain, ref),
+			SubscriptionID: row.ID,
+			Amount:         carryAmount,
+			Asset:          row.Asset,
+			Reason:         voidReason(in.Status),
+			Ref:            ref,
+		})
+		if carryErr != nil {
+			return UserPlan{}, false, carryErr
+		}
+		applied, postErr := s.ledger.PostTransactionTx(ctx, tx, carryTxn)
+		if postErr != nil {
+			return UserPlan{}, false, postErr
+		}
+		if !applied {
+			return UserPlan{}, false, fmt.Errorf(
+				"交易号 %s 已经存在一笔内容相同的结转分录，而订阅 %d 还是 %s；"+
+					"同一个作废单号不能对应两次结转", carryTxn.TxnID, row.ID, row.Status)
+		}
+	}
+
+	if voidAmount.IsPositive() {
 		voidTxn, voidErr := ledger.PlanVoid(ledger.PlanVoidParams{
 			TxnID:          in.TxnID,
 			SubscriptionID: row.ID,
-			Amount:         remaining,
+			Amount:         voidAmount,
 			Asset:          row.Asset,
 			Reason:         voidReason(in.Status),
 			Ref:            ref,
@@ -373,13 +454,16 @@ func (s *Service) VoidTx(ctx context.Context, tx *sql.Tx, in VoidInput) (UserPla
 		}
 	}
 
-	// 先改状态再读回整行：状态、作废单号与作废时刻要一次写上，而读回的那一行带
-	// JOIN（单位、可用量、面值长在包上），UPDATE ... RETURNING 里取不到那些列。
+	// 先改状态再读回整行：状态、作废单号、作废时刻与结转出去的两维要一次写上，
+	// 而读回的那一行带 JOIN（单位、可用量、面值长在包上），UPDATE ... RETURNING
+	// 里取不到那些列。
 	var updatedID int64
 	err = tx.QueryRowContext(ctx, `
-		UPDATE user_plans SET status = $2, void_ref = $3, voided_at = now()
+		UPDATE user_plans SET status = $2, void_ref = $3, voided_at = now(),
+		                     carryout_quota = $4::numeric, carryout_amount = $5::numeric
 		 WHERE id = $1
-		RETURNING id`, row.ID, string(in.Status), ref).Scan(&updatedID)
+		RETURNING id`, row.ID, string(in.Status), ref,
+		carryQuota.String(), carryAmount.String()).Scan(&updatedID)
 	if err != nil {
 		return UserPlan{}, false, dberr.ConstraintFailure(fmt.Errorf("标记订阅 %d 已作废失败: %w", row.ID, err))
 	}

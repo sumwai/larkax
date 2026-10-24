@@ -165,6 +165,26 @@ type UserPlan struct {
 	// VoidedAt 是作废发生的时刻；未作废时为零值。剩余面值为零的作废不写分录，
 	// 状态也只有一个终态值，对账要靠这个时间戳定位。
 	VoidedAt *time.Time
+
+	// 下面四列是期末按比例结转的两个方向。它们分成两组而不是共用两列，是因为
+	// 任何不带状态过滤的查询都会把两边的数加到一起，而它们的含义正好相反。
+	//
+	// CarriedQuota / CarriedAmount 是**领到这条订阅时并进来的**结转量：来自用户
+	// 之前那几条订阅的期末结转，进的是这条订阅的面值与可用量。它们只在一个
+	// 活跃订阅上有意义，也是期末再结转时基数公式的减数——并进来的量不再结转
+	// 第二次。
+	CarriedQuota  money.Amount
+	CarriedAmount money.Amount
+	// CarryoutQuota / CarryoutAmount 是**这条订阅期末结转出去的**、等下次领包
+	// 时并入新订阅的量。它们只在这条订阅已经终态（expired）且确实结转了的时候
+	// 非零。
+	//
+	// 金额那一维的权威值是 carryover:<ID> 的**账本余额**，CarryoutAmount 只是
+	// 那一刻的镜像：并入以余额为准，镜像只给读侧与对账看。
+	// 量那一维没有账本可查（分录只有 asset，没有 unit），所以并入时**必须**从
+	// CarryoutQuota 读——它在这里不是审计字段，是唯一来源。
+	CarryoutQuota  money.Amount
+	CarryoutAmount money.Amount
 }
 
 // ErrNoPlan 表示按 key 找不到那个额度包。
@@ -540,19 +560,24 @@ const userPlanColumns = `up.id, up.user_id, up.plan_id, p.key, p.asset, p.unit,
 	COALESCE((SELECT SUM(le.amount) FROM ledger_entries le
 	           WHERE le.account = 'prepaid:' || up.id::text AND le.asset = p.asset),
 	         0)::numeric(20, 8)::text,
-	up.ref, COALESCE(up.void_ref, ''), up.voided_at`
+	up.ref, COALESCE(up.void_ref, ''), up.voided_at,
+	up.carried_quota::text, up.carried_amount::text,
+	up.carryout_quota::text, up.carryout_amount::text`
 
 // scanUserPlan 把一行订阅读成 UserPlan。
 func scanUserPlan(scan func(dest ...any) error) (UserPlan, error) {
 	var (
-		up                  UserPlan
-		asset, unit, status string
-		periodEnd, voidedAt sql.NullTime
-		total, face, remain string
+		up                         UserPlan
+		asset, unit, status        string
+		periodEnd, voidedAt        sql.NullTime
+		total, face, remain        string
+		carriedQuota, carriedAmt   string
+		carryoutQuota, carryoutAmt string
 	)
 	if err := scan(&up.ID, &up.UserID, &up.PlanID, &up.PlanKey, &asset, &unit,
 		&status, &up.StartsAt, &periodEnd, &total, &face, &remain,
-		&up.Ref, &up.VoidRef, &voidedAt); err != nil {
+		&up.Ref, &up.VoidRef, &voidedAt,
+		&carriedQuota, &carriedAmt, &carryoutQuota, &carryoutAmt); err != nil {
 		return UserPlan{}, err
 	}
 	up.Asset = ledger.Asset(asset)
@@ -585,6 +610,18 @@ func scanUserPlan(scan func(dest ...any) error) (UserPlan, error) {
 		return UserPlan{}, err
 	}
 	if up.FaceValueRemaining, err = parseMoney(remain, fmt.Sprintf("订阅 %d 的剩余面值", up.ID)); err != nil {
+		return UserPlan{}, err
+	}
+	if up.CarriedQuota, err = parseMoney(carriedQuota, fmt.Sprintf("订阅 %d 的结转进来量", up.ID)); err != nil {
+		return UserPlan{}, err
+	}
+	if up.CarriedAmount, err = parseMoney(carriedAmt, fmt.Sprintf("订阅 %d 的结转进来面值", up.ID)); err != nil {
+		return UserPlan{}, err
+	}
+	if up.CarryoutQuota, err = parseMoney(carryoutQuota, fmt.Sprintf("订阅 %d 的结转出去量", up.ID)); err != nil {
+		return UserPlan{}, err
+	}
+	if up.CarryoutAmount, err = parseMoney(carryoutAmt, fmt.Sprintf("订阅 %d 的结转出去面值", up.ID)); err != nil {
 		return UserPlan{}, err
 	}
 	return up, nil

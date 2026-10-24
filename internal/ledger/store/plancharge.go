@@ -190,6 +190,19 @@ func quotaFromCount(n int64) (money.Amount, error) {
 	return amt, nil
 }
 
+// planQuotaAvailable 是「这份订阅现在还能用多少单位」的唯一表达式。
+//
+// 选源与流式补冻都调它，于是两处不会对「可用量」各有一套算法——补冻那处漏掉
+// 一项的后果是流式请求在结转额度上用不了，而初次选源那处漏掉一项的后果相反
+// （选了一个其实不够的订阅），两种都只在真流量上现形。
+//
+// carried_quota 是领到新包时从旧订阅并进来的结转量（见 00065 与
+// plans 的 Carryover）。它加在总量这一侧，不是减在已用量那一侧：结转来的量
+// 从来没被「用过」，把它记进 quota_used 会让「已用量」这个数谎报。
+func planQuotaAvailable(total, carried, used, pending money.Amount) money.Amount {
+	return total.Add(carried).Sub(used).Sub(pending)
+}
+
 // reserveFromPlan 依次检查候选，把第一条覆盖得住的记成这次预留的来源。
 //
 // 返回 ok=false 表示一条都不够（调用方按扣费顺序决定是否回落到余额）。
@@ -203,7 +216,7 @@ func reserveFromPlan(ctx context.Context, tx *sql.Tx, req pipeline.Request, r *p
 		var (
 			status, asset, unit                           string
 			alive                                         bool
-			quotaTotalStr, quotaUsedStr                   string
+			quotaTotalStr, carriedQuotaStr, quotaUsedStr  string
 			pendingQuotaStr, pendingAmountStr, balanceStr string
 		)
 		// 锁与读是**两条语句**，不能合并成一条。
@@ -237,7 +250,7 @@ func reserveFromPlan(ctx context.Context, tx *sql.Tx, req pipeline.Request, r *p
 		err = tx.QueryRowContext(ctx, `
 			SELECT up.status, p.asset, p.unit,
 			       (up.period_end IS NULL OR up.period_end > now()) AS alive,
-			       p.quota_total::text, up.quota_used::text,
+			       p.quota_total::text, up.carried_quota::text, up.quota_used::text,
 			       COALESCE(pend.q, 0)::text,
 			       COALESCE(pend.m, 0)::text,
 			       COALESCE(bal.s, 0)::numeric(20, 8)::text
@@ -256,7 +269,7 @@ func reserveFromPlan(ctx context.Context, tx *sql.Tx, req pipeline.Request, r *p
 			 WHERE up.id = $1`,
 			candID).Scan(
 			&status, &asset, &unit, &alive,
-			&quotaTotalStr, &quotaUsedStr,
+			&quotaTotalStr, &carriedQuotaStr, &quotaUsedStr,
 			&pendingQuotaStr, &pendingAmountStr, &balanceStr)
 		if err != nil {
 			return 0, false, fmt.Errorf("读额度包订阅 %d 的余额与在途预留失败: %w", candID, err)
@@ -272,6 +285,10 @@ func reserveFromPlan(ctx context.Context, tx *sql.Tx, req pipeline.Request, r *p
 		quotaUsed, err := money.Parse(quotaUsedStr)
 		if err != nil {
 			return 0, false, fmt.Errorf("额度包订阅 %d 的已用量读不出来（原文 %q）: %w", candID, quotaUsedStr, err)
+		}
+		carriedQuota, err := money.Parse(carriedQuotaStr)
+		if err != nil {
+			return 0, false, fmt.Errorf("额度包订阅 %d 的结转量读不出来（原文 %q）: %w", candID, carriedQuotaStr, err)
 		}
 		pendingQuota, err := money.Parse(pendingQuotaStr)
 		if err != nil {
@@ -290,7 +307,7 @@ func reserveFromPlan(ctx context.Context, tx *sql.Tx, req pipeline.Request, r *p
 		if err != nil {
 			return 0, false, err
 		}
-		quotaAvail := quotaTotal.Sub(quotaUsed).Sub(pendingQuota)
+		quotaAvail := planQuotaAvailable(quotaTotal, carriedQuota, quotaUsed, pendingQuota)
 		faceAvail := balance.Sub(pendingAmount)
 		if !planCovers(unit, r.Amount, faceAvail, need, quotaAvail) {
 			continue
@@ -353,7 +370,7 @@ func insertPlanReservationRow(ctx context.Context, tx *sql.Tx, req pipeline.Requ
 func growPlanReservation(ctx context.Context, tx *sql.Tx, requestID string, planID int64, delta money.Amount, outputTokens int64) error {
 	var (
 		unit                                          string
-		quotaTotalStr, quotaUsedStr                   string
+		quotaTotalStr, carriedQuotaStr, quotaUsedStr  string
 		pendingQuotaStr, pendingAmountStr, balanceStr string
 	)
 	// 锁与读分开，理由与 reserveFromPlan 同：同一条语句里等锁时，语句快照
@@ -366,7 +383,7 @@ func growPlanReservation(ctx context.Context, tx *sql.Tx, requestID string, plan
 	}
 
 	err := tx.QueryRowContext(ctx, `
-		SELECT p.unit, p.quota_total::text, up.quota_used::text,
+		SELECT p.unit, p.quota_total::text, up.carried_quota::text, up.quota_used::text,
 		       COALESCE(pend.q, 0)::text,
 		       COALESCE(pend.m, 0)::numeric(20, 8)::text,
 		       COALESCE(bal.s, 0)::numeric(20, 8)::text
@@ -383,7 +400,7 @@ func growPlanReservation(ctx context.Context, tx *sql.Tx, requestID string, plan
 		       WHERE account = 'prepaid:' || up.id AND asset = p.asset
 		  ) bal ON true
 		 WHERE up.id = $1`, planID).Scan(
-		&unit, &quotaTotalStr, &quotaUsedStr,
+		&unit, &quotaTotalStr, &carriedQuotaStr, &quotaUsedStr,
 		&pendingQuotaStr, &pendingAmountStr, &balanceStr)
 	if err != nil {
 		return fmt.Errorf("读额度包订阅 %d 的余额与在途预留失败: %w", planID, err)
@@ -398,6 +415,10 @@ func growPlanReservation(ctx context.Context, tx *sql.Tx, requestID string, plan
 	quotaUsed, err := money.Parse(quotaUsedStr)
 	if err != nil {
 		return fmt.Errorf("额度包订阅 %d 的已用量读不出来: %w", planID, err)
+	}
+	carriedQuota, err := money.Parse(carriedQuotaStr)
+	if err != nil {
+		return fmt.Errorf("额度包订阅 %d 的结转量读不出来: %w", planID, err)
 	}
 	pendingQuota, err := money.Parse(pendingQuotaStr)
 	if err != nil {
@@ -419,7 +440,7 @@ func growPlanReservation(ctx context.Context, tx *sql.Tx, requestID string, plan
 			return err
 		}
 	}
-	quotaAvail := quotaTotal.Sub(quotaUsed).Sub(pendingQuota)
+	quotaAvail := planQuotaAvailable(quotaTotal, carriedQuota, quotaUsed, pendingQuota)
 	faceAvail := balance.Sub(pendingAmount)
 	if !planCovers(unit, delta, faceAvail, quotaDelta, quotaAvail) {
 		return fmt.Errorf("%w: 额度包订阅 %d 的剩余量不够继续冻结这一段（面值余 %s，可用量余 %s）",
@@ -491,6 +512,41 @@ func (s *Store) applyPlanQuota(ctx context.Context, tx *sql.Tx, planID int64, us
 		return constraintFailure(fmt.Errorf("记额度包已用量失败: %w", err))
 	}
 	return nil
+}
+
+// PlanQuotaUsage 读一份订阅按包自身总量算出的可用量余量：
+// quota_total − quota_used − 在途预留。
+//
+// 它是期末结转那一侧要的**基数**，与请求路径共用同一个口径（见 plancharge.go
+// 顶部「两个维度」那一节；两处的表达式本可以合成一个，但这里要的是可读的
+// 余量而不是判断够不够，共用一个函数会让两边的 SQL 互相牵制）。不含
+// carried_quota：领包时并进来的结转量不该再结转第二次，那个减数由调用方按
+// 行上的 carried_quota 给。
+//
+// 可能为负（结算截断与预留之间有过不一致），调用方要在乘比例之前夹到 0。
+// 这里不夹，是因为「负多少」在排查不一致时有用——夹掉会让它看起来只是「用完了」。
+//
+// 调用方要持有订阅行锁：它要读作废与结算都改的那几个数。
+func PlanQuotaUsage(ctx context.Context, tx *sql.Tx, planID int64) (money.Amount, error) {
+	var raw string
+	err := tx.QueryRowContext(ctx, `
+		SELECT (p.quota_total - up.quota_used - COALESCE(pend.q, 0))::numeric(20, 8)::text
+		  FROM user_plans up
+		  JOIN plans p ON p.id = up.plan_id
+		  LEFT JOIN LATERAL (
+		      SELECT SUM(reserved_quota) AS q
+		        FROM billing_requests
+		       WHERE user_plan_id = up.id AND status = 'pending'
+		  ) pend ON true
+		 WHERE up.id = $1`, planID).Scan(&raw)
+	if err != nil {
+		return money.Zero, fmt.Errorf("读额度包订阅 %d 的可用量余量失败: %w", planID, err)
+	}
+	amt, err := money.Parse(raw)
+	if err != nil {
+		return money.Zero, fmt.Errorf("额度包订阅 %d 的可用量余量读不出来（原文 %q）: %w", planID, raw, err)
+	}
+	return amt, nil
 }
 
 // PendingPlanReservation 读一个订阅**在途预留**占着的面值之和。

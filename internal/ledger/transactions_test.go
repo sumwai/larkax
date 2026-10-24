@@ -1352,3 +1352,139 @@ func TestPlanConstructorsRejectBadInput(t *testing.T) {
 		t.Error("负金额的作废应当被拒")
 	}
 }
+
+// 期末结转把面值从 prepaid 挪到 carryover，两边是同一个订阅；并入把
+// carryover 挪进新订阅的 prepaid。两段合起来之后，平台欠用户的总数不变
+// ——只是「这个订阅还能花」变成了「待并入」再变成「新订阅能花」。
+func TestPlanCarryMovesFaceValueToCarryover(t *testing.T) {
+	grantTxn := newTxnID(t, txnA)
+	grant, err := PlanGrant(PlanGrantParams{
+		TxnID: grantTxn, SubscriptionID: 11, Amount: amount(t, "100"),
+		Asset: AssetCNY, Ref: "grant-1",
+	})
+	if err != nil {
+		t.Fatalf("PlanGrant: %v", err)
+	}
+
+	carryTxn := newTxnID(t, txnB)
+	carry, err := PlanCarry(PlanCarryParams{
+		TxnID: carryTxn, SubscriptionID: 11, Amount: amount(t, "40"),
+		Asset: AssetCNY, Reason: "到期", Ref: "void-1",
+	})
+	if err != nil {
+		t.Fatalf("PlanCarry: %v", err)
+	}
+
+	voidTxn := newTxnID(t, txnC)
+	void, err := PlanVoid(PlanVoidParams{
+		TxnID: voidTxn, SubscriptionID: 11, Amount: amount(t, "60"),
+		Asset: AssetCNY, Reason: "到期", Ref: "void-1",
+	})
+	if err != nil {
+		t.Fatalf("PlanVoid: %v", err)
+	}
+
+	// 期末处置的两笔合起来：prepaid 归零、carryover = 40、平台收回 60。
+	disposal := append(append([]Entry{}, carry.Entries...), void.Entries...)
+	if got := balanceOf(t, append(grant.Entries, disposal...), PrepaidAccount(11), AssetCNY); !got.IsZero() {
+		t.Errorf("期末处置之后 prepaid 余额 = %s，期望 0", got)
+	}
+	if got := balanceOf(t, disposal, CarryoverAccount(11), AssetCNY); got.Cmp(amount(t, "40")) != 0 {
+		t.Errorf("结转之后 carryover 余额 = %s，期望 40", got)
+	}
+	if got := balanceOf(t, disposal, PlatformRevenueAccount(), AssetCNY); got.Cmp(amount(t, "60")) != 0 {
+		t.Errorf("期末归平台 = %s，期望 60（100 − 40）", got)
+	}
+
+	// 并入新订阅 12：carryover 清零，新订阅拿到 40。
+	mergeTxn := newTxnID(t, "44444444-4444-4444-8444-444444444444")
+	merge, err := PlanCarryMerge(PlanCarryMergeParams{
+		TxnID: mergeTxn, TargetSubscriptionID: 12,
+		Moves: []PlanCarryMove{{SourceSubscriptionID: 11, Amount: amount(t, "40")}},
+		Asset: AssetCNY, Ref: "grant-2",
+	})
+	if err != nil {
+		t.Fatalf("PlanCarryMerge: %v", err)
+	}
+	all := append(append([]Entry{}, grant.Entries...), disposal...)
+	all = append(all, merge.Entries...)
+	if got := balanceOf(t, all, CarryoverAccount(11), AssetCNY); !got.IsZero() {
+		t.Errorf("并入之后 carryover 余额 = %s，期望 0", got)
+	}
+	if got := balanceOf(t, all, PrepaidAccount(12), AssetCNY); got.Cmp(amount(t, "40")) != 0 {
+		t.Errorf("并入之后新订阅 prepaid = %s，期望 40", got)
+	}
+	// 平台欠用户的总数（prepaid + carryover）在整个链条里不变：40。
+	sum := balanceOf(t, all, PrepaidAccount(11), AssetCNY).
+		Add(balanceOf(t, all, PrepaidAccount(12), AssetCNY)).
+		Add(balanceOf(t, all, CarryoverAccount(11), AssetCNY))
+	if sum.Cmp(amount(t, "40")) != 0 {
+		t.Errorf("结转出来那部分的总数 = %s，期望 40（只换了科目，没有增减）", sum)
+	}
+}
+
+// 一次并入可以带多个源：每个源一条贷方，目标一条借方，和为零。
+func TestPlanCarryMergeMultipleSources(t *testing.T) {
+	txn, err := PlanCarryMerge(PlanCarryMergeParams{
+		TxnID: newTxnID(t, txnA), TargetSubscriptionID: 20,
+		Moves: []PlanCarryMove{
+			{SourceSubscriptionID: 11, Amount: amount(t, "30")},
+			{SourceSubscriptionID: 12, Amount: amount(t, "70")},
+		},
+		Asset: AssetCNY, Ref: "grant-9",
+	})
+	if err != nil {
+		t.Fatalf("PlanCarryMerge: %v", err)
+	}
+	if got := balanceOf(t, txn.Entries, PrepaidAccount(20), AssetCNY); got.Cmp(amount(t, "100")) != 0 {
+		t.Errorf("并入之后新订阅 prepaid = %s，期望 100", got)
+	}
+	for _, id := range []int64{11, 12} {
+		if got := balanceOf(t, txn.Entries, CarryoverAccount(id), AssetCNY); !got.IsNegative() {
+			t.Errorf("源订阅 %d 的 carryover 分录 = %s，期望为负（转出去）", id, got)
+		}
+	}
+}
+
+// 结转与并入的构造函数挡住不自洽的输入：零金额、重复源、空的并入、
+// 非法的订阅 id。
+func TestPlanCarryConstructorsRejectBadInput(t *testing.T) {
+	txn := newTxnID(t, txnA)
+
+	if _, err := PlanCarry(PlanCarryParams{
+		TxnID: txn, SubscriptionID: 0, Amount: amount(t, "10"), Asset: AssetCNY,
+	}); err == nil {
+		t.Error("订阅 id 为 0 的结转应当被拒")
+	}
+	if _, err := PlanCarry(PlanCarryParams{
+		TxnID: txn, SubscriptionID: 11, Amount: money.Zero, Asset: AssetCNY,
+	}); err == nil {
+		t.Error("零金额的结转应当被拒")
+	}
+
+	base := PlanCarryMergeParams{
+		TxnID: txn, TargetSubscriptionID: 20,
+		Moves: []PlanCarryMove{{SourceSubscriptionID: 11, Amount: amount(t, "10")}},
+		Asset: AssetCNY,
+	}
+	bad := map[string]func(*PlanCarryMergeParams){
+		"没有源": func(p *PlanCarryMergeParams) { p.Moves = nil },
+		"源 id 为 0": func(p *PlanCarryMergeParams) {
+			p.Moves = []PlanCarryMove{{SourceSubscriptionID: 0, Amount: amount(t, "10")}}
+		},
+		"金额为负": func(p *PlanCarryMergeParams) {
+			p.Moves = []PlanCarryMove{{SourceSubscriptionID: 11, Amount: amount(t, "-1")}}
+		},
+		"源重复": func(p *PlanCarryMergeParams) {
+			p.Moves = append(p.Moves, PlanCarryMove{SourceSubscriptionID: 11, Amount: amount(t, "5")})
+		},
+		"没有目标": func(p *PlanCarryMergeParams) { p.TargetSubscriptionID = 0 },
+	}
+	for name, mutate := range bad {
+		p := base
+		mutate(&p)
+		if _, err := PlanCarryMerge(p); err == nil {
+			t.Errorf("%s 的并入应当被拒", name)
+		}
+	}
+}

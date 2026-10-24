@@ -54,6 +54,7 @@ func settingsRows(overrides map[string]string) []settings.Row {
 		"reconcile.full_scan_interval_hours": `168`,
 		"payment.fake_enabled":               `false`,
 		"plans.charge_order":                 `"plan_first"`,
+		"plans.carryover_bp":                 `4000`,
 		"admin.token_sha256":                 `""`,
 	}
 	for k, v := range overrides {

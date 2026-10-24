@@ -27,6 +27,7 @@ func TestAccountConstructors(t *testing.T) {
 		{PaymentGatewayAccount("stripe"), "payment_gateway:stripe", AccountPaymentGateway, "stripe"},
 		{PayoutAccount(9), "payout:9", AccountPayout, "9"},
 		{PrepaidAccount(11), "prepaid:11", AccountPrepaid, "11"},
+		{CarryoverAccount(11), "carryover:11", AccountCarryover, "11"},
 		{ReconcileDifferenceAccount(), "reconcile_difference", AccountReconcileDifference, ""},
 	}
 	for _, tc := range cases {
@@ -56,6 +57,8 @@ func TestParseAccountRejects(t *testing.T) {
 		"payment_gateway",        //
 		"payout",                 //
 		"prepaid",                // 同上：缺订阅 id
+		"carryover",              // 同上
+		"carryover:007",          // 前导零：同一订阅会被拆成两个科目
 		"user:",                  // 后缀为空
 		"user:1:2",               // 多余分隔符：后缀含义无法确定
 		"prepaid:1:2",            // 同上
@@ -147,19 +150,23 @@ func TestParseAccountRejectsNonCanonicalPrepaidID(t *testing.T) {
 		}
 	}
 
-	good := []string{
-		"prepaid:1",
-		"prepaid:11",
-		"prepaid:123456789012345678", // 十八位：上限之内
+	good := []struct {
+		s    string
+		want AccountType
+	}{
+		{"prepaid:1", AccountPrepaid},
+		{"prepaid:11", AccountPrepaid},
+		{"prepaid:123456789012345678", AccountPrepaid}, // 十八位：上限之内
+		{"carryover:1", AccountCarryover},
 	}
-	for _, s := range good {
-		acct, err := ParseAccount(s)
+	for _, tc := range good {
+		acct, err := ParseAccount(tc.s)
 		if err != nil {
-			t.Errorf("ParseAccount(%q) 不该报错: %v", s, err)
+			t.Errorf("ParseAccount(%q) 不该报错: %v", tc.s, err)
 			continue
 		}
-		if acct.Type() != AccountPrepaid {
-			t.Errorf("ParseAccount(%q) 的大类 = %q，期望 %q", s, acct.Type(), AccountPrepaid)
+		if acct.Type() != tc.want {
+			t.Errorf("ParseAccount(%q) 的大类 = %q，期望 %q", tc.s, acct.Type(), tc.want)
 		}
 	}
 }

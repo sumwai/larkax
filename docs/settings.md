@@ -124,6 +124,7 @@ larkaxctl settings set --key plugin.enabled --value true --by alice
 | 键 | 类型 | 默认值 | 取值 | 影响 |
 |---|---|---|---|---|
 | `plans.charge_order` | string | `"plan_first"` | `plan_first` / `balance_first` / `balance_only` | 平台默认的扣费顺序：先额度包后余额、先余额后额度包、只走余额。用户可以用 `larkaxctl plan order set` 覆盖，用户上那一行是 NULL 时跟随这里，用户那一行认不出时也回落到这里。这一行本身缺失、不是 JSON 或取值认不出时，读侧才回落到兜底值 `plan_first`；两种回落都记一条日志 |
+| `plans.carryover_bp` | int | `4000` | `0`–`10000` | 额度包到期时按比例结转的万分点：`0` 不结转，`10000` 全部结转。只在**真的到期**时生效——`canceled`、以及还没到期就手工标成 `expired` 的订阅整笔归平台。结转出去的部分留在 `carryover:<订阅 ID>` 上，用户下次领到同币种、同计量单位的新包时并进去。每次期末作废**现读一次**，改完下一次生效，不需要重启。这一行缺失、不是整数或超出范围时那次作废直接失败（不回落到 0）：订阅仍是 `active`，面值与分录都没有改动 |
 
 ## 插件
 

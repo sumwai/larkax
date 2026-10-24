@@ -98,6 +98,7 @@ var Registry = []Spec{
 	{Key: "reconcile.full_scan_interval_hours", Kind: KindInt},
 	{Key: "payment.fake_enabled", Kind: KindBool},
 	{Key: "plans.charge_order", Kind: KindString},
+	{Key: "plans.carryover_bp", Kind: KindInt},
 	{Key: KeyAdminToken, Kind: KindString},
 }
 
