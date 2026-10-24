@@ -197,7 +197,7 @@ tag——二进制自称 `dev` 这件事，只有用户报问题时才会被发�
 ## 从源码树安装
 
 `make install` 把两个二进制装进 `~/.local/bin`，同时建两个短名链接，把
-`man/man1/` 下的手页装进去，并按各 shell 的约定装好三个补全文件：
+`man/man1/` 下的手册装进去，并按各 shell 的约定装好三个补全文件：
 
 ```sh
 make install                       # 默认装到 ~/.local，版本号是 dev
@@ -238,7 +238,7 @@ CLI 的帮助文本里写死了 `larkaxctl`，不读 `argv[0]`，所以改名不
 
 与 tarball 的分工：tarball 是发布物，带 `SHA256SUMS`，装到哪台机器上属于使用方
 的事；`make install` 面向从源码树直接用的场景——版本号默认是 `dev`，没有校验和，
-也没有 `LICENSE` 与 `README.md`。手页装了之后 `man larkaxctl-channel` 才有内容，
+也没有 `LICENSE` 与 `README.md`。手册装了之后 `man larkaxctl-channel` 才有内容，
 `man` 不认 `~/.local/share/man` 时用 `MANPATH=~/.local/share/man` 指过去。
 
 ## 版本号出现在哪里
