@@ -145,8 +145,8 @@ func runPricePeakAdd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := checkScheduleTZ(info.Schedule, req.tz); err != nil {
-			return usageErr(err)
+		if tzErr := checkScheduleTZ(info.Schedule, req.tz); tzErr != nil {
+			return usageErr(tzErr)
 		}
 		actor, err := auth.New(db).ResolveUser(ctx, req.by)
 		if err != nil {
@@ -214,8 +214,8 @@ func parsePricePeakAdd(args []string) (pricePeakRequest, error) {
 	above := fs.Int64("above", 0, "")
 	by := fs.String("by", "", "")
 	slots := newPriceSlotFlags(fs)
-	if err := fs.Parse(rest); err != nil {
-		return pricePeakRequest{}, err
+	if parseErr := fs.Parse(rest); parseErr != nil {
+		return pricePeakRequest{}, parseErr
 	}
 	if fs.NArg() > 0 {
 		return pricePeakRequest{}, fmt.Errorf(
