@@ -602,13 +602,13 @@ func TestFishMultiSegmentConditions(t *testing.T) {
 		{"model"}, {"model", "alias"},
 		{"price"}, {"price", "calendar"},
 		{"admin"}, {"admin", "token"},
-		{"user"}, {"user", "plan"},
+		{"user"}, {"user", "plan"}, {"user", "plan", "order"},
 		{"wallet"}, {"wallet", "payout"},
 	}
 	for _, words := range cells {
-		name := "顶层"
+		name := "动作: 顶层"
 		if len(words) > 0 {
-			name = strings.Join(words, " ") + " "
+			name = "动作: " + strings.Join(words, " ") + " "
 		}
 		t.Run(name, func(t *testing.T) {
 			got := runFishCompletion(t, fish, script, words, "")
@@ -683,7 +683,7 @@ func TestFishOptionPositionConditions(t *testing.T) {
 		{"price", "calendar"},
 	}
 	for _, words := range cells {
-		t.Run(strings.Join(words, " ")+" -", func(t *testing.T) {
+		t.Run("选项: "+strings.Join(words, " ")+" -", func(t *testing.T) {
 			got := runFishCompletion(t, fish, script, words, "-")
 			gotCmp := slices.Clone(got)
 			slices.Sort(gotCmp)
