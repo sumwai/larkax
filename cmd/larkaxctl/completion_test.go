@@ -434,22 +434,10 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 		check func(t *testing.T, shell string, got []string)
 	}{
 		{"--format 补取值", []string{"--format"}, func(t *testing.T, shell string, got []string) {
-			want := []string{"table", "json"}
-			gotCmp, wantCmp := got, want
-			if shell == "fish" {
-				// fish 的 `complete -C` 会把候选按字典序排过再返回：顺序不归我们
-				// 定，也不钉成契约，所以这一格按排序后的副本比较。生成物里
-				// `-a 'table json'` 的书写顺序仍由 TestCompletionWiresEnums 的
-				// 字面串钉住，bash 与 zsh 照旧按顺序比。比较用副本，报错仍按
-				// 契约顺序打期望值——否则失败信息会把 `[json table]` 说成期望。
-				gotCmp = slices.Clone(got)
-				slices.Sort(gotCmp)
-				wantCmp = slices.Clone(want)
-				slices.Sort(wantCmp)
-			}
-			if !slices.Equal(gotCmp, wantCmp) {
-				t.Errorf("候选 = %v，期望 %v", got, want)
-			}
+			requireEnumCandidates(t, shell, got, []string{"table", "json"})
+		}},
+		{"--scope 补取值", []string{"price", "create", "--scope"}, func(t *testing.T, shell string, got []string) {
+			requireEnumCandidates(t, shell, got, []string{"platform", "merchant", "channel"})
 		}},
 		{"顶层补命令", nil, func(t *testing.T, _ string, got []string) {
 			requireNoFormatValues(t, got)
@@ -463,10 +451,17 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 				t.Errorf("候选 = %v，缺动作 get", got)
 			}
 		}},
-		{"--id 后面不补取值", []string{"channel", "get", "--id"}, func(t *testing.T, _ string, got []string) {
-			if len(got) != 0 {
-				t.Errorf("候选 = %v，期望空", got)
-			}
+		// 三个取值位各一格：顶层全局选项（路径是空串，最容易落到「空路径 ⇒ 列
+		// 一级命令」那条）、子命令里的文件路径选项、子命令里的非路径参数。
+		{"顶层 --env-file 取值位", []string{"--env-file"}, func(t *testing.T, shell string, got []string) {
+			requireFileFallback(t, shell, got)
+		}},
+		{"子命令 --schedule-file 取值位", []string{"price", "create", "--schedule-file"},
+			func(t *testing.T, shell string, got []string) {
+				requireFileFallback(t, shell, got)
+			}},
+		{"--id 后面不补取值", []string{"channel", "get", "--id"}, func(t *testing.T, shell string, got []string) {
+			requireFileFallback(t, shell, got)
 		}},
 		{"-o 不补取值", []string{"-o"}, func(t *testing.T, _ string, got []string) {
 			requireNoFormatValues(t, got)
@@ -511,6 +506,104 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 			})
 		}
 	})
+}
+
+// requireEnumCandidates 断言候选恰是枚举的取值。
+//
+// fish 的 `complete -C` 会把候选按字典序排过再返回：顺序不归我们定，也不钉成
+// 契约，所以这一格按排序后的副本比较。生成物里 `-a '…'` 的书写顺序仍由
+// TestCompletionWiresEnums 的字面串钉住，bash 与 zsh 照旧按顺序比。比较用副本，
+// 报错仍按契约顺序打期望值——否则失败信息会把 `[json table]` 说成期望。
+func requireEnumCandidates(t *testing.T, shell string, got, want []string) {
+	t.Helper()
+	gotCmp, wantCmp := got, want
+	if shell == "fish" {
+		gotCmp = slices.Clone(got)
+		slices.Sort(gotCmp)
+		wantCmp = slices.Clone(want)
+		slices.Sort(wantCmp)
+	}
+	if !slices.Equal(gotCmp, wantCmp) {
+		t.Errorf("候选 = %v，期望 %v", got, want)
+	}
+}
+
+// requireFileFallback 断言取值位把补全交回给了 shell。
+//
+// 两个壳的「交回去」长得不一样：
+//   - bash 是 `COMPREPLY` 保持为空——这是末尾 `complete -o default` 接手补文件的
+//     **前提**，也是驱动里能看到的唯一一半（回落本身发生在函数之外）；
+//   - zsh 没有回落，生成脚本自己调 `_files`，替身把它记成 filesStubCandidate。
+//
+// fish 走 `-r`，在空目录里同样没有候选。文件补全真的开着这件事由
+// TestFishCompletionValueFlagOffersFiles 在有文件的目录里钉。
+func requireFileFallback(t *testing.T, shell string, got []string) {
+	t.Helper()
+	if shell == "zsh" {
+		if !slices.Equal(got, []string{filesStubCandidate}) {
+			t.Errorf("候选 = %v，期望恰好 [%s]：取值位应当调 _files，把候选交给它",
+				got, filesStubCandidate)
+		}
+		return
+	}
+	if len(got) != 0 {
+		t.Errorf("候选 = %v，期望空：取值位不产出候选，「交回 shell」才成立", got)
+	}
+}
+
+// TestCompletionValueFallbackPlacement 钉住取值位那一段在生成物里的位置。
+//
+// 行为用例抓不到一种放法：把这段挪进 `case "$cur" in -*` 的嵌套分支。那一支只在
+// 当前词以 `-` 开头时执行，而取值位上的 `$cur` 是空串或文件名，于是它与「没插
+// 这一段」逐字等价——真 shell 里两版输出相同（#1178 里实测过）。等价变异只能靠
+// 位置本身钉，所以这里按生成物断：段必须在 `case "$cur"` 之前。挪进去、挪到动词
+// 分派之后都会红。
+func TestCompletionValueFallbackPlacement(t *testing.T) {
+	data := buildCompletionData()
+	// 同一个位置有两条分支会抢：枚举位不该进这份取值位清单。
+	for _, key := range valueOptionKeys(data) {
+		if _, wired := data.enums[key]; wired {
+			t.Errorf("取值位 %q 同时也是枚举位：两段 case 会抢同一个键", key)
+		}
+	}
+
+	cases := []struct {
+		shell  string
+		script string
+		want   []string
+	}{
+		{"bash", bashCompletionScript(data), []string{
+			`"price create|--schedule-file") return 0 ;;`,
+			`*"|--env-file") return 0 ;;`,
+		}},
+		{"zsh", zshCompletionScript(data), []string{
+			`"price create|--schedule-file") _files; return ;;`,
+			`*"|--env-file") _files; return ;;`,
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.shell, func(t *testing.T) {
+			cur := strings.Index(tc.script, `case "$cur" in`)
+			if cur < 0 {
+				t.Fatalf("生成物里没有 `case \"$cur\" in`：生成器结构变了，这条位置断言要重写")
+			}
+			for _, line := range tc.want {
+				at := strings.Index(tc.script, line)
+				if at < 0 {
+					t.Errorf("生成物里没有这一段：%s", line)
+					continue
+				}
+				if at > cur {
+					t.Errorf("取值位分支挪到了 `case \"$cur\"` 之后（在空 $cur 下等价于没插）：%s", line)
+				}
+			}
+		})
+	}
+	// bash 的回落靠这一行：分支只把 `COMPREPLY` 留空，接手补文件的是它。
+	if !strings.HasSuffix(cases[0].script, "complete -o default -F _larkaxctl larkaxctl\n") {
+		t.Errorf("bash 生成物末尾不再是 `complete -o default -F _larkaxctl larkaxctl`：" +
+			"取值位留空的回落依赖它")
+	}
 }
 
 // TestFishCompletionValueFlagOffersFiles 断言 `-r` 在取值位置保留文件补全，
@@ -604,6 +697,11 @@ func runBashCompletion(t *testing.T, bash, script string, words []string) []stri
 	return strings.Fields(string(out))
 }
 
+// filesStubCandidate 是 zsh 驱动里 `_files` 替身写出的标记，不是候选的名字：
+// 它只表示生成脚本在这一格要求了文件补全。真 `_files` 会不会列出文件、列出哪些，
+// 只能在真交互式 shell 里看，而那种用例带固定等待，不进 CI（见 #1178 的判据）。
+const filesStubCandidate = "__files__"
+
 // runZshCompletion 在真 zsh 里 source 生成的脚本，跑一次 _larkaxctl，
 // 返回 compadd 收到的候选。
 //
@@ -629,6 +727,9 @@ func runZshCompletion(t *testing.T, zsh, script string, words []string) []string
 	// 与「通过」在输出里长得一样。
 	const done = "__completion_driver_done__"
 	driver := "compadd() { print -r -- \"$@\" }\n" +
+		// `_files` 与 `compadd` 同理：真 `_files` 只能在补全上下文里调。替身写出的
+		// 标记不是候选的名字，只表示「生成脚本在这一格要求了文件补全」。
+		"_files() { print -r -- \"-- " + filesStubCandidate + "\" }\n" +
 		"compdef() { : }\n" +
 		"source \"$1\"\n" +
 		"words=(" + strings.Join(quoted, " ") + ")\n" +

@@ -51,6 +51,10 @@ func bashCompletionScript(data completionData) string {
 	}
 	b.WriteString("\tesac\n\n")
 
+	// 取值位只 return，不碰 COMPREPLY：末尾 `complete -o default` 在函数产出为空
+	// 时才接手补文件名，这里的「空」就是那次回落的前提。
+	writeValuePositionFallback(&b, data, "return 0")
+
 	b.WriteString("\tcase \"$cur\" in\n")
 	b.WriteString("\t-*)\n")
 	b.WriteString("\t\tcase \"$path\" in\n")
@@ -108,6 +112,10 @@ func zshCompletionScript(data completionData) string {
 			shellCasePattern("|"+flag), strings.Join(data.globalEnums[flag], " "))
 	}
 	b.WriteString("\tesac\n\n")
+
+	// zsh 没有 bash 的 `-o default`：函数不产出候选时它不会自己去补文件，
+	// 取值位要显式调 `_files`。
+	writeValuePositionFallback(&b, data, "_files; return")
 
 	b.WriteString("\tcase \"$cur\" in\n")
 	b.WriteString("\t-*)\n")
@@ -236,6 +244,31 @@ func fishQuote(text string) string {
 // 不含 shell 的元字符，所以直接用双引号包住即可。
 func shellCasePattern(key string) string {
 	return `"` + key + `"`
+}
+
+// writeValuePositionFallback 写出「取值位」那一段：`$prev` 是吃取值的选项时，
+// 把补全交回给 shell 自己（bash 传 `return 0`，zsh 传 `_files; return`）。
+//
+// 位置**不能挪**，这是本段唯一的坑：
+//   - 挪进下面 `case "$cur" in -*` 的嵌套分支：那一支只处理以 `-` 开头的当前词，
+//     而取值位上的 `$cur` 是空串或文件名，于是这一段与「没写」逐字等价——真 shell
+//     里两版输出相同，行为用例抓不到，只有生成物里那段必须在 `case "$cur"` 之前
+//     的位置断言能钉住（见 completion_test.go）。
+//   - 挪到 `case "$path"` 的动词分派之后：候选已经填进去了，再交回 shell 就变成
+//     「文件与动词并列」，顶层 `-o default` 的回落照样被压掉。
+func writeValuePositionFallback(b *strings.Builder, data completionData, action string) {
+	b.WriteString("\tcase \"$path|$prev\" in\n")
+	for _, key := range valueOptionKeys(data) {
+		fmt.Fprintf(b, "\t\t%s) %s ;;\n", shellCasePattern(key), action)
+	}
+	// 全局选项对每条命令都生效，路径用 `*` 通配，写法与全局枚举那一支相同：
+	// `*` 不引号才是通配符，`|--env-file` 必须引号（否则 `|` 是多模式分隔符）。
+	names := slices.Clone(globalValueFlags)
+	slices.Sort(names)
+	for _, name := range names {
+		fmt.Fprintf(b, "\t\t%s) %s ;;\n", "*"+shellCasePattern("|"+name), action)
+	}
+	b.WriteString("\tesac\n\n")
 }
 
 // wordPaths 是 words 的键，按字典序且空路径排在最前面（它是顶层那一支）。
