@@ -213,6 +213,11 @@ func TestDoctorCarriesTheOldSentencesIntoVerbose(t *testing.T) {
 // 而它们是同一件事。文案里带上下一步的命令：空清单是「还没配」，读者接下来
 // 要做什么就写在那一句里。
 //
+// **提示语指向的是那条命令的正式动词。** price 那一格的正式动词是 add（create 是
+// 它的旧名，不进补全），所以这里写 price add。其余几格仍写 create——add 作为全仓
+// 正式动词是另一轮的事，那一轮会把这张表里凡是「建记录」的几格一起改；在那之前
+// 两种写法并存是已知的中间态，不是漏改。
+//
 // doctor 的钱包体检是这张表之外的一处调用点（一个用户都没有），它的期望值在
 // doctor_test.go 里——它打的是整份报告，不是单独一句清单。表外那几处的存在由
 // renderpaths_test.go 按调用点计数钉住。
@@ -231,7 +236,7 @@ func TestEmptyListMessages(t *testing.T) {
 			func(w io.Writer) { printPluginList(w, nil) }},
 		{"模型", "暂无模型。可使用 larkaxctl model create 添加。",
 			func(w io.Writer) { printModelList(w, nil) }},
-		{"计价规则", "暂无计价规则。可使用 larkaxctl price create 添加。",
+		{"计价规则", "暂无计价规则。可使用 larkaxctl price add 添加。",
 			func(w io.Writer) { printRuleList(w, nil) }},
 		{"API Key", "暂无 API Key。可使用 larkaxctl apikey create 添加。",
 			func(w io.Writer) { printKeyList(w, nil) }},

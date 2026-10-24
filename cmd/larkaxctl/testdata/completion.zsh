@@ -24,6 +24,8 @@ _larkaxctl() {
 		"ledger balance|--asset") compadd -- CNY; return ;;
 		"plan create|--asset") compadd -- CNY; return ;;
 		"plan void|--status") compadd -- expired canceled; return ;;
+		"price add|--scope") compadd -- platform merchant channel; return ;;
+		"price add|--unit") compadd -- mtok token; return ;;
 		"price create|--scope") compadd -- platform merchant channel; return ;;
 		"price create|--unit") compadd -- mtok token; return ;;
 		"price update|--scope") compadd -- platform merchant channel; return ;;
@@ -910,97 +912,97 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
+		"price add|--by")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price add|--channel")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price add|--cr")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price add|--cw")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price add|--effective-from")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price add|--effective-to")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price add|--expr")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price add|--in")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price add|--models")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price add|--name")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price add|--out")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price add|--priority")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price add|--reasoning")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price add|--schedule-file")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price add|--user")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"price calendar sync|--year")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price create|--by")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price create|--cache-read")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price create|--cache-write")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price create|--channel")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price create|--completion")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price create|--effective-from")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price create|--effective-to")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price create|--expr")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price create|--models")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price create|--name")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price create|--priority")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price create|--prompt")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price create|--reasoning")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price create|--schedule-file")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price create|--user")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -1036,25 +1038,19 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
-		"price update|--cache-read")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
-		"price update|--cache-write")
-			case "$cur" in
-			-*) ;;
-			*) _files; return ;;
-			esac
-			;;
 		"price update|--channel")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"price update|--completion")
+		"price update|--cr")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price update|--cw")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -1084,6 +1080,12 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
+		"price update|--in")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"price update|--models")
 			case "$cur" in
 			-*) ;;
@@ -1096,13 +1098,13 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
-		"price update|--priority")
+		"price update|--out")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"price update|--prompt")
+		"price update|--priority")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -2080,10 +2082,10 @@ _larkaxctl() {
 			"plugin kv get") compadd -- --env-file --format --key --plugin --quiet --user --verbose ;;
 			"plugin kv set") compadd -- --env-file --format --key --plugin --quiet --ttl --user --value --verbose ;;
 			"plugin publish") compadd -- --by --env-file --format --key --priority --quiet --verbose ;;
+			"price add") compadd -- --by --channel --cr --cw --disabled --effective-from --effective-to --env-file --expr --format --in --models --name --out --priority --quiet --reasoning --schedule-file --scope --unit --user --verbose ;;
 			"price calendar sync") compadd -- --env-file --format --quiet --verbose --year ;;
-			"price create") compadd -- --by --cache-read --cache-write --channel --completion --disabled --effective-from --effective-to --env-file --expr --format --models --name --priority --prompt --quiet --reasoning --schedule-file --scope --unit --user --verbose ;;
 			"price explain") compadd -- --at --channel --env-file --format --model --quiet --user --verbose ;;
-			"price update") compadd -- --by --cache-read --cache-write --channel --clear-effective-to --clear-schedule --completion --disable --effective-from --effective-to --enable --env-file --expr --format --id --models --name --priority --prompt --quiet --reasoning --schedule-file --scope --unit --user --verbose ;;
+			"price update") compadd -- --by --channel --clear-effective-to --clear-schedule --cr --cw --disable --effective-from --effective-to --enable --env-file --expr --format --id --in --models --name --out --priority --quiet --reasoning --schedule-file --scope --unit --user --verbose ;;
 			"rotate") compadd -- --apply --batch-size --env-file --format --quiet --verbose --verify ;;
 			"secret rotate") compadd -- --apply --batch-size --env-file --format --quiet --verbose --verify ;;
 			"settings get") compadd -- --env-file --format --key --quiet --verbose ;;
@@ -2163,7 +2165,7 @@ _larkaxctl() {
 		"plan order") compadd -- show set ;;
 		"plugin") compadd -- list get publish enable disable delete kv ;;
 		"plugin kv") compadd -- get set delete ;;
-		"price") compadd -- create list show update enable disable explain calendar ;;
+		"price") compadd -- add list show update enable disable explain calendar ;;
 		"price calendar") compadd -- import sync list ;;
 		"secret") compadd -- rotate ;;
 		"settings") compadd -- list get set ;;

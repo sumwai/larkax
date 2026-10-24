@@ -83,10 +83,13 @@ func slotExpr(t *testing.T, args ...string) (string, error) {
 
 // TestPriceSlotExpressionDefaultsToPerMillion 钉住默认单位：旗标里的数是每百万
 // token 的价，拼进表达式时换成每 token。
+//
+// 期望值写死在断言里，不从被测函数算：`* 1e-6` 那种写法在换算被改成 1e-3 时
+// 会跟着一起变，用例照样绿，而库里存的价差了一千倍。
 func TestPriceSlotExpressionDefaultsToPerMillion(t *testing.T) {
 	got, err := slotExpr(t,
-		"--prompt", "1.5", "--completion", "7.5",
-		"--cache-read", "0.2", "--cache-write", "1.9", "--reasoning", "9")
+		"--in", "1.5", "--out", "7.5",
+		"--cr", "0.2", "--cw", "1.9", "--reasoning", "9")
 	if err != nil {
 		t.Fatalf("拼表达式出错：%v", err)
 	}
@@ -97,14 +100,46 @@ func TestPriceSlotExpressionDefaultsToPerMillion(t *testing.T) {
 	}
 }
 
-// TestPriceSlotExpressionKeepsPerTokenUnit 钉住 --unit token：给的就是每 token
-// 的价，不再移位。
-func TestPriceSlotExpressionKeepsPerTokenUnit(t *testing.T) {
-	got, err := slotExpr(t, "--unit", "token", "--prompt", "0.0000015")
+// TestPriceSlotExpressionWritesEveryKey 钉住「缺省写 0」：只给主价时，其余四项
+// 也要进表达式，而且是 0。
+//
+// 逐字比整条表达式而不是只断言 `prompt` 那一项：漏写一个键与写对了在
+// 「prompt 是 0.0000015」这条断言下长得一样，而漏写的那一项正是让结算失败的那一项。
+func TestPriceSlotExpressionWritesEveryKey(t *testing.T) {
+	got, err := slotExpr(t, "--in", "0.15")
 	if err != nil {
 		t.Fatalf("拼表达式出错：%v", err)
 	}
-	if want := `{"prompt": 0.0000015}`; got != want {
+	want := `{"prompt": 0.00000015, "completion": 0, "cache_read": 0, ` +
+		`"cache_write": 0, "reasoning": 0}`
+	if got != want {
+		t.Errorf("表达式 = %s\n期望 %s", got, want)
+	}
+}
+
+// TestPriceSlotExpressionWritesEveryKeyPerToken 钉住「缺省写 0」与单位换算两条
+// 路互不影响：--unit token 之下同样五项齐全，给了的那项不再移位。
+func TestPriceSlotExpressionWritesEveryKeyPerToken(t *testing.T) {
+	got, err := slotExpr(t, "--unit", "token", "--in", "0.0000015")
+	if err != nil {
+		t.Fatalf("拼表达式出错：%v", err)
+	}
+	want := `{"prompt": 0.0000015, "completion": 0, "cache_read": 0, ` +
+		`"cache_write": 0, "reasoning": 0}`
+	if got != want {
+		t.Errorf("表达式 = %s\n期望 %s", got, want)
+	}
+}
+
+// TestPriceSlotExpressionKeepsPerTokenUnit 钉住 --unit token：给的就是每 token
+// 的价，不再移位。
+func TestPriceSlotExpressionKeepsPerTokenUnit(t *testing.T) {
+	got, err := slotExpr(t, "--unit", "token", "--in", "0.0000015")
+	if err != nil {
+		t.Fatalf("拼表达式出错：%v", err)
+	}
+	if want := `{"prompt": 0.0000015, "completion": 0, "cache_read": 0, ` +
+		`"cache_write": 0, "reasoning": 0}`; got != want {
 		t.Errorf("表达式 = %s，期望 %s", got, want)
 	}
 }
@@ -116,10 +151,13 @@ func TestPriceSlotExpressionRejects(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"未知单位", []string{"--unit", "usd", "--prompt", "1"}, "--unit"},
-		{"单价是空串", []string{"--prompt", ""}, "空串"},
-		{"单价是指数", []string{"--prompt", "1e-6"}, "指数"},
-		{"单价是负数", []string{"--prompt", "-1"}, "负数"},
+		{"未知单位", []string{"--unit", "usd", "--in", "1"}, "--unit"},
+		{"单价是空串", []string{"--in", ""}, "空串"},
+		{"单价是指数", []string{"--in", "1e-6"}, "指数"},
+		{"单价是负数", []string{"--in", "-1"}, "负数"},
+		// 主价一项都没给：只给缓存价时其余各项按 0 算，那条规则在正常请求上白送。
+		{"只给缓存价", []string{"--cr", "0.2"}, "--in 与 --out 至少给一项"},
+		{"只给推理价", []string{"--reasoning", "9"}, "--in 与 --out 至少给一项"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -136,12 +174,13 @@ func TestPriceSlotExpressionRejects(t *testing.T) {
 func TestPriceCreateFromSlotFlags(t *testing.T) {
 	req, _, err := parsePriceCreate([]string{
 		"--scope", "platform", "--name", "n1", "--by", "ops",
-		"--prompt", "1.5", "--completion", "7.5",
+		"--in", "1.5", "--out", "7.5",
 	})
 	if err != nil {
 		t.Fatalf("parsePriceCreate 出错：%v", err)
 	}
-	if want := `{"prompt": 0.0000015, "completion": 0.0000075}`; req.Expr != want {
+	if want := `{"prompt": 0.0000015, "completion": 0.0000075, "cache_read": 0, ` +
+		`"cache_write": 0, "reasoning": 0}`; req.Expr != want {
 		t.Errorf("Expr = %s，期望 %s", req.Expr, want)
 	}
 	if req.Name != "n1" {
@@ -153,9 +192,9 @@ func TestPriceCreateFromSlotFlags(t *testing.T) {
 func TestPriceCreateRejectsMixedPriceForms(t *testing.T) {
 	if _, _, err := parsePriceCreate([]string{
 		"--scope", "platform", "--name", "n1", "--by", "ops",
-		"--expr", testExpr, "--prompt", "1.5",
+		"--expr", testExpr, "--in", "1.5",
 	}); err == nil || !strings.Contains(err.Error(), "只能给一种") {
-		t.Fatalf("--expr 与 --prompt 同时给应当报错，得到 %v", err)
+		t.Fatalf("--expr 与 --in 同时给应当报错，得到 %v", err)
 	}
 }
 
