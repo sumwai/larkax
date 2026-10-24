@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,79 @@ const (
 	ScopeMerchant = "merchant"
 	ScopeChannel  = "channel"
 )
+
+// scopeRule 是作用域表的一行：一个取值，与它自己那两栏 id 的组合校验。
+//
+// 未导出。合成一张表而不是让「认不认这个取值」与「按作用域判组合」各写一份：
+// 分成两处时，加一个作用域只要漏写一处，它就会通过取值检查却跳过组合校验——
+// 一条挂错栏的规则被存下来，而读取路径只看 scope 指的那一栏。
+type scopeRule struct {
+	Name  string
+	Check func(RuleInfo) error
+}
+
+// scopeRules 是作用域表，按 平台 → 商家 → 渠道 排。
+var scopeRules = []scopeRule{
+	{ScopePlatform, func(r RuleInfo) error {
+		if r.OwnerUserID != 0 || r.ChannelID != 0 {
+			return errors.New("platform 作用域的规则不挂商家也不挂渠道：" +
+				"读取路径只按 owner_user_id IS NULL 匹配，另两栏写了不生效")
+		}
+		return nil
+	}},
+	{ScopeMerchant, func(r RuleInfo) error {
+		if r.OwnerUserID == 0 {
+			return errors.New("merchant 作用域的规则必须给 owner_user_id：" +
+				"读取路径按它匹配，没有它这条规则一条都匹配不上")
+		}
+		if r.ChannelID != 0 {
+			return errors.New("merchant 作用域的规则不挂渠道：" +
+				"读取路径按 owner_user_id 匹配，channel_id 写了不生效（要按渠道定价就用 channel 作用域）")
+		}
+		return nil
+	}},
+	{ScopeChannel, func(r RuleInfo) error {
+		if r.ChannelID == 0 {
+			return errors.New("channel 作用域的规则必须给 channel_id：" +
+				"读取路径按它匹配，没有它这条规则一条都匹配不上")
+		}
+		if r.OwnerUserID != 0 {
+			return errors.New("channel 作用域的规则不挂 owner_user_id：" +
+				"读取路径按 channel_id 匹配，owner 那一栏写了不生效（渠道的归属由渠道那一侧记着）")
+		}
+		return nil
+	}},
+}
+
+// Scopes 是三个作用域的取值，按 平台 → 商家 → 渠道 排。
+//
+// 由 scopeRules 算出来，不另写一份：合法取值与按作用域判两栏 id 是同一张表
+// 的两栏，分家时的表现是报错说「只接受 platform、merchant」，而第三个其实
+// 也认——一句说错了自己边界的错误信息比没有更坏。
+//
+// 新增一个作用域 = 加一条 scopeRules 表项，别处零改动。
+func Scopes() []string {
+	scopes := make([]string, 0, len(scopeRules))
+	for _, rule := range scopeRules {
+		scopes = append(scopes, rule.Name)
+	}
+	return scopes
+}
+
+// scopeChoices 把作用域取值渲染成报错里那一串：每项带双引号、顿号分隔，
+// 最后一项前用「与」。
+//
+// 由 Scopes() 算出来而不是另写一份字面量：手写的那一份在清单变动之后不会
+// 跟着变，而「报错里列的还是老的那几条」没有任何东西会报出来——它看起来
+// 完全正常。
+func scopeChoices() string {
+	scopes := Scopes()
+	quoted := make([]string, len(scopes))
+	for i, s := range scopes {
+		quoted[i] = strconv.Quote(s)
+	}
+	return strings.Join(quoted[:len(quoted)-1], "、") + " 与 " + quoted[len(quoted)-1]
+}
 
 // ErrRuleNotFound 表示要改的那条规则不在库里。
 //
@@ -1126,33 +1200,18 @@ func loadRuleForUpdate(ctx context.Context, tx *sql.Tx, id, ownerID int64) (Rule
 // 它**不判**「这条规则现在能不能匹配上某个具体模型」：一条按计划将来才生效
 // 的规则是正常配置，见 Create 的注释。
 func validateRule(r RuleInfo) error {
-	switch r.Scope {
-	case ScopePlatform:
-		if r.OwnerUserID != 0 || r.ChannelID != 0 {
-			return errors.New("platform 作用域的规则不挂商家也不挂渠道：" +
-				"读取路径只按 owner_user_id IS NULL 匹配，另两栏写了不生效")
+	var check func(RuleInfo) error
+	for _, rule := range scopeRules {
+		if rule.Name == r.Scope {
+			check = rule.Check
+			break
 		}
-	case ScopeMerchant:
-		if r.OwnerUserID == 0 {
-			return errors.New("merchant 作用域的规则必须给 owner_user_id：" +
-				"读取路径按它匹配，没有它这条规则一条都匹配不上")
-		}
-		if r.ChannelID != 0 {
-			return errors.New("merchant 作用域的规则不挂渠道：" +
-				"读取路径按 owner_user_id 匹配，channel_id 写了不生效（要按渠道定价就用 channel 作用域）")
-		}
-	case ScopeChannel:
-		if r.ChannelID == 0 {
-			return errors.New("channel 作用域的规则必须给 channel_id：" +
-				"读取路径按它匹配，没有它这条规则一条都匹配不上")
-		}
-		if r.OwnerUserID != 0 {
-			return errors.New("channel 作用域的规则不挂 owner_user_id：" +
-				"读取路径按 channel_id 匹配，owner 那一栏写了不生效（渠道的归属由渠道那一侧记着）")
-		}
-	default:
-		return fmt.Errorf("作用域 %q 不是有效取值（只接受 %q、%q 与 %q）",
-			r.Scope, ScopePlatform, ScopeMerchant, ScopeChannel)
+	}
+	if check == nil {
+		return fmt.Errorf("作用域 %q 不是有效取值（只接受 %s）", r.Scope, scopeChoices())
+	}
+	if err := check(r); err != nil {
+		return err
 	}
 
 	if r.Name == "" {
