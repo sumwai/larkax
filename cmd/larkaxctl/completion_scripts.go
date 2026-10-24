@@ -161,14 +161,14 @@ func fishCompletionScript(data completionData) string {
 	//
 	// 改成「已出现的词里没有一级命令名」后，`--env-file x `、`--format json `
 	// 与空命令行一样给全部一级命令。代价是取值恰好等于某个命令名时
-	// （`--env-file channel `）那个词被当成子命令，真 fish 3.7.0 上实测给 16 条
-	// 动词、27 条一级命令一条都没有；这一格的候选不对，取值本身照常生效，
-	// 照着候选敲下去是参数错。
+	// （`--env-file channel `）那个词被当成子命令，真 fish 3.7.0 上实测补的是
+	// channel 那一级的动作、27 条一级命令一条都没有；这一格的候选不对，取值本身
+	// 照常生效，照着候选敲下去是参数错。
 	//
 	// 也考虑过生成一段跳过取值位的 shell 判定（`commandline -poc` 时遇到
 	// `--env-file` / `--format` 就吞掉下一个词）。两格的方向相反，真 fish 3.7.0
-	// 上实测：`--env-file channel ` 上这一版更糟——只给 16 条候选，一条一级命令
-	// 都没有；判定版给 43 条（27 条一级命令 + 那 16 条），集合严格包含这一版。
+	// 上实测：`--env-file channel ` 上这一版更糟——一条一级命令都没有；判定版把
+	// 一级命令与 channel 的动作一起给出，集合严格包含这一版。
 	// `larkaxctl foo `（拼错的命令）上判定版更糟——给 0 条，这一版给 27 条。
 	// 不选判定版，是因为要在生成物里多写一段依赖 `commandline -poc` 语义的 shell
 	// 代码：`--opt=value` 是一个词元，得自己拆；`-o` / `-format` / `--o` 这些等价
@@ -259,12 +259,18 @@ func fishTopLevelCondition(commands []completionCommand) string {
 }
 
 // fishSeenCondition 把一条路径翻成 fish 的条件。
+//
+// 多段之间用 `; and ` 连接，不能只写 ` and `：fish 只在命令分隔位置把 `and`
+// 当连接符，空格隔开时整串是 `__fish_seen_subcommand_from` 的参数，而它内部
+// 是 `contains -- $i $argv`，于是「任一段出现过」即为真——深层路径的条件在
+// 父层恒真（`channel map` 的 `add` / `remove` 会漏到 `channel ` 那一级）。
+// 分号把前一句截成一个完整命令，`and` 才回到运算符的位置。
 func fishSeenCondition(path []string) string {
 	parts := make([]string, 0, len(path))
 	for _, token := range path {
 		parts = append(parts, fmt.Sprintf("__fish_seen_subcommand_from %s", token))
 	}
-	return strings.Join(parts, " and ")
+	return strings.Join(parts, "; and ")
 }
 
 // fishQuote 把一段文本放进 fish 的单引号里。
