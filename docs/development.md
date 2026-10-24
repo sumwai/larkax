@@ -139,7 +139,7 @@ LARKAX_INTERNAL_ADDR="127.0.0.1:8082"
 | `make check-ports` | 只查那两个监听地址有没有被占（`make run` 起服务之前会跑它） |
 | `make web` | 构建控制台并打成 `dist/larkax-web_<版本>.tar.gz`（要 Node） |
 | `make release` | `dist` + `web` + `SHA256SUMS`，发布用的全部资产 |
-| `make install` | 装两个二进制、短名链接、手页与 bash/zsh/fish 补全到 `~/.local`（`PREFIX` 可改，详见 [versioning.md](versioning.md)） |
+| `make install` | 装两个二进制、短名链接、手册与 bash/zsh/fish 补全到 `~/.local`（`PREFIX` 可改，详见 [versioning.md](versioning.md)） |
 | `make uninstall` | 移除 `make install` 装进去的那些名字 |
 | `make help` | 把常用的那几条打出来（不含本表里的 `init` 与 `check-ports`） |
 
