@@ -8,8 +8,10 @@ import (
 // UncoveredTokenItems 返回一条表达式规则没有定价的 token 计价项。
 //
 // 判据是「规则的结果表里有没有这个键」，不是「源码里有没有出现这个名字」：
-// 键的语义见 expr.Program.Keys（所有三元分支的键并集），而结算侧
-// billing.Prices.Declared 记的也是同一批键。写成
+// 键的语义见 expr.Program.Keys（所有三元分支的键并集）。结算侧的
+// billing.Prices.Declared 只记命中的那一支，而根位置三元两支的 token 计价项
+// 由编译期要求一致（见 expr 的 checkBranchTokenKeys），所以 token 这一侧
+// 两者不会因为走了哪一支而分岔。写成
 // {"prompt": 0.0000015} 这种常量表时源码里一个用量变量都没有，而 prompt
 // 确实定了价；反过来 {"prompt": c > 100 ? 1.5 : 0} 里的 c 只是条件，
 // 不代表 completion 被定价。
