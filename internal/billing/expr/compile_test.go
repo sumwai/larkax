@@ -739,3 +739,40 @@ func itoa(n int) string {
 	}
 	return string(buf[i:])
 }
+
+// TestCompileRejectsNonTierCallAtRoot 验证根位置的普通函数调用报的是
+// 「结果必须是一张单价表」，而不是一条指错方向的键集提示。
+//
+// fixed/minimum/hour/isWorkday/isHoliday/isPeak 返回数值或布尔，落在根位置
+// 就不是一张表。这类写法历来是编译放行、求值才炸；根位置的三元比较先看到了
+// 它，若报「键 X 只在某支出现」，作者会照着去补一个键，而真正的问题在这里。
+func TestCompileRejectsNonTierCallAtRoot(t *testing.T) {
+	for _, tc := range []struct {
+		source string
+		fn     string
+	}{
+		{`c > 100 ? {"prompt": 1.0} : fixed(0.5)`, "fixed"},
+		{`c > 100 ? {"prompt": 1.0} : minimum(0.5)`, "minimum"},
+		// hour 与 isHoliday 走的是通用函数那条出口；isPeak 自己有一条（它要先
+		// 解析时段字面量）。两类都要有用例，否则一条出口上的报错坏了另一条看不出来。
+		{`c > 100 ? {"prompt": 1.0} : hour("Asia/Shanghai")`, "hour"},
+		{`c > 100 ? {"prompt": 1.0} : isHoliday()`, "isHoliday"},
+		{`c > 100 ? {"prompt": 1.0} : isWorkday()`, "isWorkday"},
+		{`c > 100 ? {"prompt": 1.0} : isPeak("08:00-22:00")`, "isPeak"},
+	} {
+		err := compileErr(t, tc.source)
+		if err.Reason != ReasonShape {
+			t.Errorf("%q 的原因 = %s，期望 %s（%v）", tc.source, err.Reason, ReasonShape, err.Err)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "结果必须是一张单价表") {
+			t.Errorf("%q 的错误应当说清那一支不是表，得到 %q", tc.source, msg)
+		}
+		if !strings.Contains(msg, fmt.Sprintf("函数 %q", tc.fn)) {
+			t.Errorf("%q 的错误应当点名函数 %q，得到 %q", tc.source, tc.fn, msg)
+		}
+		if strings.Contains(msg, "只在") {
+			t.Errorf("%q 不该给键集提示：真正的问题是那一支不是表，得到 %q", tc.source, msg)
+		}
+	}
+}

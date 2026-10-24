@@ -1063,20 +1063,25 @@ func TestEvalTierOnWholeTable(t *testing.T) {
 // 改成 `-` 同样只动容量提示：
 //
 //	| 表达式 | 具体输入 | 哪个用例杀掉它 |
-//	| `len(p.keys)+len(table)` 改 `-` | `p.keys = {prompt, completion}`、`table = {prompt}`：提示从 3 变成 1，而 `seen` 的成员与 `sort.Strings` 之后的输出两版都是 `[completion prompt]` | 杀不掉（容量提示不参与语义） |
+//	| `len(p.keys)+len(table)` 改 `-` | `p.keys = {completion, prompt, units}`、`table = {completion, prompt}`：提示从 5 变成 1，而 `seen` 的成员与 `sort.Strings` 之后的输出两版都是 `[completion prompt units]` | 杀不掉（容量提示不参与语义） |
 //
 // 出口只有键的并集与排序：两个循环照旧把 `p.keys` 与 `table` 的键都写进
-// `seen`，`out` 的容量按 `len(seen)` 算，与提示无关。本例 `2 - 1 = 1`，
+// `seen`，`out` 的容量按 `len(seen)` 算，与提示无关。本例 `3 - 2 = 1`，
 // 提示仍是正数；即使为负，运行时也按 0 处理、不 panic（负值只能用运行时
 // 算出的变量实测，字面量 `-2` 是编译错误）。调用方拿不到区分信息。
 func TestEvalProgramMetadata(t *testing.T) {
-	source := `len <= 32000 ? {"prompt": 1.0} : {"prompt": 2.0, "completion": 3.0}`
+	// token 计价项两支必须一致（见 TestCompileRejectsBranchTokenKeyMismatch），
+	// 所以这里用 units 造出「只在一边出现」的键：并集的口径要看的是
+	// 「未命中的那支写了什么」，单位是 token 还是计量项都一样。
+	source := `units["img"] > 0
+		? {"prompt": 1.0, "completion": 2.0, "units": {"img": 0.02}}
+		: {"prompt": 1.0, "completion": 2.0}`
 	p := mustCompile(t, source)
 
 	// 键取并集：未命中的分支写了什么也要看到，
 	// 否则「未命中的那支写错键」会一直躲过检查。
 	keys := p.Keys()
-	if len(keys) != 2 || keys[0] != "completion" || keys[1] != "prompt" {
+	if len(keys) != 3 || keys[0] != "completion" || keys[1] != "prompt" || keys[2] != "units" {
 		t.Errorf("键应当是两个分支的并集，得到 %v", keys)
 	}
 }

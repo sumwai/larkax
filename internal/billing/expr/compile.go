@@ -82,6 +82,11 @@ type Program struct {
 	// 并集而不是按分支分别校验，是有意的：预留与结算可能走不同的分支，
 	// 若只看实际命中的那一支，「未命中的分支写错了键」会一直躲过校验，
 	// 直到某天订单真的走进那一支才炸。按并集校验把这个错误提前到编译期。
+	//
+	// 并集里 token 计价项在根位置三元的**两支之间**是一致的（见
+	// checkBranchTokenKeys），所以这些键不会因为命中了哪一支而少。
+	// units / fixed / minimum 可以只在某些分支出现，它们的并集比单次结算宽
+	// ——那是有意的，见 worstTable。
 	keys map[string]struct{}
 }
 
@@ -332,6 +337,9 @@ type shape struct {
 //	{"prompt": 1.5 + (isHoliday() ? 0.5 : 0.0)}                      价格位置上的数值运算
 //	let price = {...}; price                                         let 绑定整张表
 //
+// 根位置的三元还要求两支的 token 计价项键集一致：见 walkShape 的
+// ConditionalNode 分支。`units` / `fixed` / `minimum` 不在这条判据内。
+//
 // 检查顺带把用量变量限制在条件位置上（见 pos.cond 与 usageInArithmetic）。
 func inspectShape(root ast.Node) (shape, error) {
 	sh := shape{
@@ -437,7 +445,37 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 		if err := walkShape(n.Exp1, sh, at); err != nil {
 			return err
 		}
-		return walkShape(n.Exp2, sh, at)
+		// 走完一支就取一次键，别等两支都走完再回头解析。
+		//
+		// 两支可以各写一个同名 let，而 binds 是一张平表：第二支登记的绑定
+		// 会盖掉第一支的。等到最后统一解析时，两支都会被解析成后登记的那个
+		// 绑定，键集看起来就一致了——「两支各写一张不同的表」正是要拦的写法。
+		var thenKeys map[string]struct{}
+		if at.root {
+			thenKeys = sh.rootTokenKeys(n.Exp1)
+		}
+		if err := walkShape(n.Exp2, sh, at); err != nil {
+			return err
+		}
+		// 根位置选出的是**整张**单价表，而结算只认命中那一支的键
+		// （billing.Prices.Declared）；Program.Keys 却是所有分支的并集。
+		// 两支的 token 计价项不同时，两处口径就分岔：
+		//
+		//	c > 100 ? {"prompt": 1.5, "completion": 7.5} : {"prompt": 1.5}
+		//
+		// 按并集看两项都定了价（price list、写入提示都这么看），而用量含
+		// completion 又走进假分支时，整笔结算 ErrMissingPrice。所以两支必须
+		// 给同一组 token 计价项——单价可以不同，不用的那一项写 0。
+		//
+		// 嵌套三元由下面的递归逐层管：每层只比较自己两支，各层都一致
+		// 就等价于所有叶子分支的键集一致。
+		//
+		// 只比 token 计价项：units 与一次性费用不在 ErrMissingPrice 的判据里，
+		// 一支给 units 而另一支不给是正常写法（见 worstTable）。
+		if at.root {
+			return checkBranchTokenKeys(thenKeys, sh.rootTokenKeys(n.Exp2))
+		}
+		return nil
 
 	case *ast.CallNode:
 		if ident, ok := n.Callee.(*ast.IdentifierNode); ok && ident.Value == "tier" {
@@ -473,6 +511,10 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 				// 第一句是「日历不可用」，矛头指向了数据那一侧。
 				return err
 			}
+			// isPeak 的返回值是布尔，落在根位置就不是一张单价表。
+			if at.root {
+				return fmt.Errorf("结果必须是一张单价表，当前是函数 %q 的结果", calleeName(n))
+			}
 			return nil
 		}
 		// fixed/minimum/hour/isWorkday/isHoliday/isPeak 返回数值或布尔，
@@ -487,6 +529,13 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 			if err := walkShape(arg, sh, pos{slot: "函数参数"}); err != nil {
 				return err
 			}
+		}
+		// fixed/minimum/hour/isWorkday/isHoliday 返回数值或布尔。落在根位置
+		// 时结果不是一张单价表——这种写法历来能编过、到求值才炸，而现在
+		// 根位置的三元比较会先看到它，不在这里说清楚，作者照着
+		// 「键 X 只在某支出现」那条去改是补不出来的。
+		if at.root {
+			return fmt.Errorf("结果必须是一张单价表，当前是函数 %q 的结果", calleeName(n))
 		}
 		return nil
 
@@ -619,6 +668,125 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 		}
 		return nil
 	}
+}
+
+// checkBranchTokenKeys 比较根位置三元两支里出现的 token 计价项。
+//
+// 键集由调用方在走完各自那一支时就取好：let 的绑定是同一张表按名字覆盖的，
+// 两支都走完再回头解析，两边会解析成同一个绑定（见 walkShape 的
+// ConditionalNode 分支）。
+//
+// 报错点名**哪个键只在部分分支里出现**、以及它在哪一支里缺席：只写一句
+// 「两支键集不一致」，写规则的人还得自己逐字比对两张表。
+func checkBranchTokenKeys(thenKeys, elseKeys map[string]struct{}) error {
+	onlyThen := keysOnlyIn(thenKeys, elseKeys)
+	onlyElse := keysOnlyIn(elseKeys, thenKeys)
+	if len(onlyThen) == 0 && len(onlyElse) == 0 {
+		return nil
+	}
+
+	parts := make([]string, 0, 2)
+	if len(onlyThen) > 0 {
+		parts = append(parts, fmt.Sprintf("键 %s 只在真分支里出现，假分支里缺席", quoteKeys(onlyThen)))
+	}
+	if len(onlyElse) > 0 {
+		parts = append(parts, fmt.Sprintf("键 %s 只在假分支里出现，真分支里缺席", quoteKeys(onlyElse)))
+	}
+	// 只说「要一致」不说怎么改，作者会把它当成一条无理由的限制：
+	// 结算只认命中那一支的键，另一支没写的项等于没定价。
+	return fmt.Errorf("根位置的三元两支必须给同一组 token 计价项（结算只认命中那一支的键）：%s；"+
+		"不用那一项的分支请显式写 0", strings.Join(parts, "；"))
+}
+
+// rootTokenKeys 取出一个**根位置**子树最终求值出的那张单价表里的 token 计价项。
+//
+// 调用前提是该子树已经通过 walkShape：根位置只可能是单价表、三元、
+// tier(...)、语句序列、let 绑定，或以单价表收尾的 let 表达式。三元在这里
+// 只取真分支——两支已由递归校验成同一组键（见 walkShape 的 ConditionalNode
+// 分支）。
+//
+// 只看 token 计价项，键名以 billing.TokenSlots 为唯一来源（见 tokenPriceSlots
+// 与 dsl.go 的 priceSlots）。
+//
+// 绑定按调用那一刻的 sh.binds 解析，所以要在自己那一支走完、另一支**还没走**
+// 的时候调用。
+func (sh *shape) rootTokenKeys(node ast.Node) map[string]struct{} {
+	return sh.tokenKeysIn(node, map[string]bool{})
+}
+
+// tokenKeysIn 是 rootTokenKeys 的递归实现；seen 记着已经顺着绑定走过的名字，
+// 挡住 `let a = a; …` 这类自引用。
+func (sh *shape) tokenKeysIn(node ast.Node, seen map[string]bool) map[string]struct{} {
+	out := map[string]struct{}{}
+	switch n := node.(type) {
+	case *ast.MapNode:
+		for _, p := range n.Pairs {
+			pair, ok := p.(*ast.PairNode)
+			if !ok {
+				continue
+			}
+			name, err := stringKey(pair.Key)
+			if err != nil {
+				continue
+			}
+			if _, token := tokenPriceSlots[name]; token {
+				out[name] = struct{}{}
+			}
+		}
+	case *ast.ConditionalNode:
+		return sh.tokenKeysIn(n.Exp1, seen)
+	case *ast.CallNode:
+		if ident, ok := n.Callee.(*ast.IdentifierNode); ok &&
+			ident.Value == "tier" && len(n.Arguments) == 2 {
+			return sh.tokenKeysIn(n.Arguments[1], seen)
+		}
+	case *ast.VariableDeclaratorNode:
+		// let 的结果挂在 Expr 上（与 walkShape 那一支同一件事）；嵌套 let
+		// 是层层套着的 VariableDeclaratorNode，递归自然剥到最后的表。
+		return sh.tokenKeysIn(n.Expr, seen)
+	case *ast.IdentifierNode:
+		// 分支是一个 let 绑定的名字（`let t = {…}; c > 100 ? t : {…}`）：
+		// 按绑定的值取键，否则这一支会被当成空集、判成键集不一致。
+		if bound, ok := sh.binds[n.Value]; ok && !seen[n.Value] {
+			seen[n.Value] = true
+			return sh.tokenKeysIn(bound, seen)
+		}
+	case *ast.SequenceNode:
+		if len(n.Nodes) > 0 {
+			return sh.tokenKeysIn(n.Nodes[len(n.Nodes)-1], seen)
+		}
+	}
+	return out
+}
+
+// calleeName 是调用节点的名字，用于报错。规则里的函数都是标识符，
+// 其余形态只是兜底。
+func calleeName(n *ast.CallNode) string {
+	if ident, ok := n.Callee.(*ast.IdentifierNode); ok {
+		return ident.Value
+	}
+	return fmt.Sprintf("%T", n.Callee)
+}
+
+// keysOnlyIn 返回在 a 里、不在 b 里的键，已排序。
+func keysOnlyIn(a, b map[string]struct{}) []string {
+	var out []string
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// quoteKeys 把键名排成 `"a"、"b"` 的形状，让报错里的键名能直接照抄。
+func quoteKeys(keys []string) string {
+	quoted := make([]string, len(keys))
+	for i, k := range keys {
+		quoted[i] = fmt.Sprintf("%q", k)
+	}
+	return strings.Join(quoted, "、")
 }
 
 // walkUnits 检查计量项表。

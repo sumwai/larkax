@@ -185,6 +185,19 @@ var priceSlots = func() map[string]struct{} {
 	return out
 }()
 
+// tokenPriceSlots 是 priceSlots 里属于 token 计价项的那一部分。
+//
+// 它只由 billing.TokenSlots 派生，用途是根位置三元的「两支键集一致」判据
+// （见 checkBranchTokenKeys）——那条判据只该管 token 计价项，
+// units 与 fixed/minimum 有意不在里面。
+var tokenPriceSlots = func() map[string]struct{} {
+	out := make(map[string]struct{}, len(billing.TokenSlots))
+	for _, slot := range billing.TokenSlots {
+		out[slot.Name] = struct{}{}
+	}
+	return out
+}()
+
 // --- 运行时 ---
 
 // runtime 是一次求值期间的可变状态。
