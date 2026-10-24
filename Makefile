@@ -225,7 +225,7 @@ test: init up
 # 那五个选项交给 tar。顶层再套一个以包名命名的目录：解到同一个位置的两个版本
 # 不会互相覆盖。
 #
-# 包里除两个二进制之外还有 LICENSE、README.md 与 man/man1/ 下的手页。手页是
+# 包里除两个二进制之外还有 LICENSE、README.md、QUICKSTART.md 与 man/man1/ 下的手页。手页是
 # **用户面文档**的一部分：只躺在源码树里的话，装了发布版的人
 # `man larkaxctl-channel` 翻不到，而那多半会被他当成「自己没装对」。
 #
@@ -292,7 +292,7 @@ dist:
 	  cp "dist/larkax_linux_$${arch}" "$$stage/larkax"; \
 	  cp "dist/larkaxctl_linux_$${arch}" "$$stage/larkaxctl"; \
 	  chmod 0755 "$$stage/larkax" "$$stage/larkaxctl"; \
-	  cp LICENSE README.md "$$stage/"; \
+	  cp LICENSE README.md QUICKSTART.md "$$stage/"; \
 	  cp man/man1/*.1 "$$stage/man/man1/"; \
 	  tar -czf "dist/larkax_$(VERSION)_linux_$${arch}.tar.gz" \
 	    --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
