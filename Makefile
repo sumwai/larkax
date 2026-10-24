@@ -63,7 +63,7 @@ help:
 	@echo "make dist     打发布用的 tar.gz（默认只打 amd64，可 ARCHS=\"amd64 arm64\"）"
 	@echo "make web      构建控制台并打成 dist/larkax-web_<版本>.tar.gz（要 Node）"
 	@echo "make release  dist + web + SHA256SUMS，发布用的全部资产"
-	@echo "make install  装两个二进制、短名链接、手页与 bash/zsh/fish 补全到 ~/.local（PREFIX 可改）"
+	@echo "make install  装两个二进制、短名链接、手册与 bash/zsh/fish 补全到 ~/.local（PREFIX 可改）"
 	@echo "make uninstall 移除 make install 装进去的那些文件"
 	@echo "make clean    清容器、数据卷与生成的 .env"
 	@echo ""
@@ -355,7 +355,7 @@ release: dist web
 print-ldflags:
 	@echo '$(LDFLAGS)'
 
-# 从源码树装一份到本机：两个二进制、两个短名、手页，以及三个 shell 的补全。
+# 从源码树装一份到本机：两个二进制、两个短名、手册，以及三个 shell 的补全。
 #
 # 落点都由 PREFIX 派生，换到 /usr/local 时只需 `make install PREFIX=/usr/local`。
 # 短名写成「链接名:目标名」，与 dist 里那把「二进制名:包路径」同一种写法。
@@ -434,7 +434,7 @@ install:
 	  *) echo "注意：$(BINDIR) 不在 PATH 里，larkax 这些命令要写全路径，或先把它加进 PATH" ;; \
 	esac; \
 	echo "已安装到 $(BINDIR)：larkax larkaxctl$${links}"; \
-	echo "手页已装到 $(MANDIR)；man 不认这个目录时用 MANPATH=$(SHAREDIR)/man man larkaxctl-channel"; \
+	echo "手册已装到 $(MANDIR)；man 不认这个目录时用 MANPATH=$(SHAREDIR)/man man larkaxctl-channel"; \
 	echo "补全已装：bash $(BASHCOMPDIR) / zsh $(ZSHCOMPDIR) / fish $(FISHCOMPDIR)"; \
 	echo "zsh 的 fpath 里没有 $(ZSHCOMPDIR) 时，在 compinit 之前加：fpath=($(ZSHCOMPDIR) \$$fpath)"
 
@@ -445,7 +445,7 @@ uninstall:
 	@rm -f "$(BINDIR)/larkax" "$(BINDIR)/larkaxctl"
 	@rm -f "$(BASHCOMPDIR)/larkaxctl" "$(ZSHCOMPDIR)/_larkaxctl" "$(FISHCOMPDIR)/larkaxctl.fish"
 	@for f in man/man1/*.1; do rm -f "$(MANDIR)/$${f##*/}"; done
-	@echo "已从 $(BINDIR) 移除 larkax 与 larkaxctl，手页与三个 shell 的补全一并移除"
+	@echo "已从 $(BINDIR) 移除 larkax 与 larkaxctl，手册与三个 shell 的补全一并移除"
 
 clean:
 	@docker compose down --volumes --remove-orphans
