@@ -628,10 +628,38 @@ func TestCarryoverRateFailureLeavesStateUntouched(t *testing.T) {
 	}
 }
 
+// TestWholeUnitUnitsIsOneHundredMillion 按值钉住「一个整单位」。
+//
+// 期望值写字面量，不从 money.Scale 推：从被测来源算期望，等于把同一个错误抄两遍。
+//
+// 这条断言之前**不能**调 carryShare——wholeUnitUnits 在那里是除数，变异成
+// `u /= 10` 之后它是 0，先调就会除零 panic，而这样的红落在 panic 上，不算证据。
+// 让它作为一个值被读到，`u *= 10` 上的算术变异才有可杀它的断言。
+func TestWholeUnitUnitsIsOneHundredMillion(t *testing.T) {
+	if wholeUnitUnits != 100_000_000 {
+		t.Errorf("一个整单位在定点数里的值 = %d，期望 100000000（10^8，即 money.Scale=8）", wholeUnitUnits)
+	}
+}
+
 // 结转 → 并入 → 二次期末，一条链走完；顺带钉住两件事：
 //
 //   - 上期结转进来的钱不再结转第二次（剩余正好等于结转进来的量时，结转恰好为 0）；
 //   - 发放重放不二次并入，源余额已清零时第二次发放也不并。
+//
+// # 为什么 mergeCarryovers 开头那条 `err != nil || len(ids) == 0` 上的
+// # `||` → `&&` 是等价变异
+//
+// 两半都要成立，缺一不可：
+//
+//   - ① 「`err != nil` 且 `ids` 非空」这一格不存在：pendingCarryoverIDs 的错误
+//     路径全部 `return nil, err`——查询失败、逐行 Scan 失败，以及收完行之后
+//     `rows.Err()` 那条；最后一条返回的也是 `nil`，而不是已经攒了一半的 `out`。
+//   - ② 「`err == nil && len(ids) == 0`」这一格，`&&` 版会继续往下走，但
+//     `ordered` 与 `sources` 都是空的，两段循环一次都不进（一个 DB 也不碰），
+//     最后被 `len(sources) == 0` 那道返回接住，给出同一对零值与 nil 错误。
+//
+// **② 那道守卫是这条等价的前提**：把它删掉，变异体立刻变成真缺陷——空的 moves
+// 会一路走到 PlanCarryMerge，构造出一笔没有分录的交易。
 func TestCarryoverFullCycleAndIdempotency(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)

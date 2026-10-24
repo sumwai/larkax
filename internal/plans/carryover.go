@@ -82,7 +82,7 @@ func carryoverBasisPoints(ctx context.Context, tx *sql.Tx) (int64, error) {
 // 精度一旦变化，这里会在没有人改动的地方悄悄错一位。
 var wholeUnitUnits = func() int64 {
 	u := int64(1)
-	for i := 0; i < money.Scale; i++ {
+	for range money.Scale {
 		u *= 10
 	}
 	return u
