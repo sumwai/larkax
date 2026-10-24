@@ -20,7 +20,7 @@ import (
 // 而不是先把表格转成 JSON——那样金额会变成字符串、nil 会变成占位符，
 // 而这两件事正是机器可读输出最不能有的（见 docs/cli-output.md）。
 
-// formatKind 是 `--format` 的取值。
+// formatKind 是 `--format` 选中的那一档渲染路径。
 //
 // 只有两档：面向终端的那一档与机器可读的那一档。不给 `--format` 就是前者，
 // 所以脚本要多写一个参数、人什么都不用改。
@@ -31,8 +31,25 @@ const (
 	formatJSON                    // 机器可读：stdout 只有一份 JSON
 )
 
-// 这一档**不给 formatKind 写 String()**：`--format` 在命令行上的两个取值
-// 由 takeFormatFlag 直接与字面量比，没有任何地方要把 formatKind 打成字符串。
+// formatSpec 是 `--format` 认的一个取值：命令行上写的名字与它对应的那一档。
+type formatSpec struct {
+	name string
+	kind formatKind
+}
+
+// formatSpecs 是 `--format` 认的全部取值，顺序就是报错里列出的顺序。
+//
+// 命令行取值、查表解析与报错里那一串读的都是这一份：分成两处时，加第三档
+// 要改好几处，而漏改报错那一处没有任何东西会报出来——它看起来完全正常，
+// 只是说了「明明支持却说没有」的一句。
+var formatSpecs = []formatSpec{
+	{"table", formatTable},
+	{"json", formatJSON},
+}
+
+// 这一档**不给 formatKind 写 String()**：`--format` 在命令行上的取值由
+// parseFormat 查 formatSpecs 来认，报错里列出的那一串由 formatChoices 从同一张
+// 表渲染，没有任何地方要把 formatKind 打成字符串。
 // 先前有过一个 String()，check-deadcode 报它不可达（`format.go|formatKind.String`）
 // ——它与 fmt 的 Stringer 接口一样只在 AST 上看不到调用点，所以这里选择删掉，
 // 而不是去把白名单的 MAX_ENTRIES 往上调：留一个没人调的方法只换来测试失败
@@ -113,9 +130,19 @@ func takeFormatFlag(args []string) (formatKind, []string, error) {
 
 // formatChoices 是给错误信息用的取值清单。
 //
-// 单独一个函数而不是在字符串里写死：下面那条错误信息里两处提到它，各写一遍
-// 就会在加第三档时只改一处，而错误信息里少一档的表现是「明明支持却说没有」。
-func formatChoices() string { return "取值 table 或 json" }
+// 取值清单的唯一来源是 formatSpecs，这里只负责把它渲染成给人看的形态
+// （分隔规则与 --endpoint 那一串共用，见 joinChoiceNames）。在字符串里写死
+// 一份副本的话，加第三档时改表不会改到它，而表现是「明明支持却说没有」。
+func formatChoices() string { return "取值 " + joinChoiceNames(formatNames()) }
+
+// formatNames 是 `--format` 认的全部取值名，按 formatSpecs 的顺序。
+func formatNames() []string {
+	names := make([]string, 0, len(formatSpecs))
+	for _, spec := range formatSpecs {
+		names = append(names, spec.name)
+	}
+	return names
+}
 
 // parseFormat 解析 --format 的取值。
 //
@@ -123,14 +150,12 @@ func formatChoices() string { return "取值 table 或 json" }
 // `--format=jsn` 的脚本，回落的表现是 stdout 上出现一段表格文本，
 // 而报错的是下游的 jq——看起来像 jq 的问题（见 docs/cli-output.md）。
 func parseFormat(raw string) (formatKind, error) {
-	switch raw {
-	case "table":
-		return formatTable, nil
-	case "json":
-		return formatJSON, nil
-	default:
-		return formatTable, fmt.Errorf("--format 的取值 %q 不认识：%s", raw, formatChoices())
+	for _, spec := range formatSpecs {
+		if spec.name == raw {
+			return spec.kind, nil
+		}
 	}
+	return formatTable, fmt.Errorf("--format 的取值 %q 不认识：%s", raw, formatChoices())
 }
 
 // ── 文档的顶层形状 ──────────────────────────────────────────────────────
