@@ -25,8 +25,8 @@ var priceHelp = helpText{short: priceShortUsage, long: priceUsage}
 const priceShortUsage = `larkaxctl price 管理计价规则。
 
 用法：
-  larkaxctl price create --scope <platform|merchant|channel> --name <规则名>
-                         (--expr '<表达式>' | --schedule-file <文件>) --by <ID 或用户名>
+  larkaxctl price create --scope <…> --name <规则名> --by <ID 或用户名>
+                         (--expr '<表达式>' | --schedule-file <文件> | --prompt <单价> …)
   larkaxctl price list
   larkaxctl price show <规则 ID>
   larkaxctl price update --id <规则 ID> --by <ID 或用户名> [与 create 相同的字段]
@@ -34,10 +34,8 @@ const priceShortUsage = `larkaxctl price 管理计价规则。
   larkaxctl price explain --model <规范模型名> [--user <ID 或用户名>] [--at <…>]
   larkaxctl price calendar import <文件> | price calendar list
 
-作用域决定哪两栏 id 有效；五个计价项（prompt、completion、cache_read、
-cache_write、reasoning）缺一个，用到它的那一笔结算就失败：非流式请求调用方
-拿到 500，流式请求只在服务端日志里留一条。
---by 必填：create 记下这条价是谁定的，update 记下是谁改的。
+作用域决定哪两栏 id 有效；五个计价项缺一个，用到它的结算就失败；--by 必填。
+单价旗标默认按每百万 token 给（--prompt 1.5 即每百万 1.5），--unit token 可改。
 
 更细的边界：larkaxctl help price。
 `
@@ -47,7 +45,8 @@ const priceUsage = `larkaxctl price 管理计价规则。
 
 用法：
   larkaxctl price create --scope <platform|merchant|channel> --name <规则名>
-                         (--expr '<表达式>' | --schedule-file <文件>)
+                         (--expr '<表达式>' | --schedule-file <文件> |
+                          --prompt <单价> [--completion <单价>] [...] [--unit mtok|token])
                          --by <用户 ID 或用户名>
                          [--user <用户 ID 或用户名>] [--channel <渠道 ID>]
                          [--models <规范模型名,...>] [--priority <优先级>]
@@ -59,7 +58,8 @@ const priceUsage = `larkaxctl price 管理计价规则。
                          [--scope <platform|merchant|channel>] [--name <规则名>]
                          [--user <用户 ID 或用户名>] [--channel <渠道 ID>]
                          [--models <规范模型名,...>]
-                         [--expr '<表达式>' | --schedule-file <文件>]
+                         (--expr '<表达式>' | --schedule-file <文件> |
+                          --prompt <单价> [...] [--unit mtok|token])
                          [--clear-schedule]
                          [--priority <优先级>] [--effective-from <RFC3339>]
                          [--effective-to <RFC3339>] [--clear-effective-to]
@@ -85,6 +85,15 @@ changed_by（这一版是谁改的，只在表达式真的变了、留了一版�
 
 --models 留空表示适用于全部模型（兜底规则）；给了就按元素逐字匹配，
 不支持通配符——带 * 或 ? 的名字会被拒绝。
+
+单价可以直接按项给，单位默认是**每百万 token**（供应商报价单就是这么写的）：
+
+  larkaxctl price create --scope platform --name example --by alice \
+    --prompt 1.5 --completion 7.5 --cache-read 0.2 --cache-write 1.9 --reasoning 9
+
+存库前换成每 token 的价（1.5 → 0.0000015），库里存的仍是表达式；
+--unit token 表示给的就是每 token 的价。--expr、--schedule-file 与这组单价
+旗标三选一：手写表达式、结构化定价表、逐项单价。
 
 表达式在写入前会编译一次，编译不过的命令直接失败。
 
@@ -292,6 +301,7 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 	stringAlias(fs, effectiveTo, "to")
 	disabled := fs.Bool("disabled", false, "")
 	by := fs.String("by", "", "")
+	slots := newPriceSlotFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return pricing.CreateRequest{}, priceRefs{}, err
 	}
@@ -316,13 +326,36 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 	}
 	exprGiven := strings.TrimSpace(*expression) != ""
 	scheduleGiven := strings.TrimSpace(*scheduleFile) != ""
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	slotsGiven := slots.anyGiven(given)
 	if exprGiven && scheduleGiven {
 		return pricing.CreateRequest{}, priceRefs{}, errors.New(
-			"--expr 与 --schedule-file 只能给一个：给了定价表时表达式由它编译得出")
+			"--expr 与 --schedule-file 只能给一种：给了定价表时表达式由它编译得出")
 	}
-	if !exprGiven && !scheduleGiven {
+	if slotsGiven && (exprGiven || scheduleGiven) {
 		return pricing.CreateRequest{}, priceRefs{}, errors.New(
-			"缺少 --expr 或 --schedule-file：表达式与结构化定价表二选一")
+			"--expr、--schedule-file 与单价旗标（--prompt 等）只能给一种：" +
+				"手写表达式、结构化定价表、逐项单价三者选一")
+	}
+	if slots.unitGiven(given) && !slotsGiven {
+		return pricing.CreateRequest{}, priceRefs{}, errors.New(
+			"--unit 只与单价旗标一起用：--expr 与 --schedule-file 自带单位")
+	}
+	if !exprGiven && !scheduleGiven && !slotsGiven {
+		return pricing.CreateRequest{}, priceRefs{}, errors.New(
+			"缺少 --expr、--schedule-file 或单价旗标：手写表达式、结构化定价表、" +
+				"逐项单价三者选一")
+	}
+
+	// 三种给法在这里收拢成一条表达式：下面的写入路径只认 Expr 这一栏。
+	expressionText := *expression
+	if slotsGiven {
+		built, buildErr := slots.expression(given)
+		if buildErr != nil {
+			return pricing.CreateRequest{}, priceRefs{}, buildErr
+		}
+		expressionText = built
 	}
 	if strings.TrimSpace(*by) == "" {
 		return pricing.CreateRequest{}, priceRefs{}, errors.New("缺少 --by：这条命令要记下这条价是谁定的")
@@ -344,7 +377,7 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 		ChannelID:     *channelID,
 		Name:          *name,
 		ModelPatterns: splitOptionalList(*models),
-		Expr:          *expression,
+		Expr:          expressionText,
 		Priority:      *priority,
 		EffectiveTo:   to,
 	}
@@ -516,6 +549,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 	// price enable / price disable。它们不出现在用法行里。
 	enable := fs.Bool("enable", false, "")
 	disable := fs.Bool("disable", false, "")
+	slots := newPriceSlotFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return pricing.UpdateRequest{}, priceRefs{}, err
 	}
@@ -551,7 +585,17 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 	if given["expr"] && given["schedule-file"] {
 		return pricing.UpdateRequest{}, priceRefs{}, errors.New(
-			"--expr 与 --schedule-file 只能给一个：给了定价表时表达式由它编译得出")
+			"--expr 与 --schedule-file 只能给一种：给了定价表时表达式由它编译得出")
+	}
+	slotsGiven := slots.anyGiven(given)
+	if slotsGiven && (given["expr"] || given["schedule-file"]) {
+		return pricing.UpdateRequest{}, priceRefs{}, errors.New(
+			"--expr、--schedule-file 与单价旗标（--prompt 等）只能给一种：" +
+				"手写表达式、结构化定价表、逐项单价三者选一")
+	}
+	if slots.unitGiven(given) && !slotsGiven {
+		return pricing.UpdateRequest{}, priceRefs{}, errors.New(
+			"--unit 只与单价旗标一起用：--expr 与 --schedule-file 自带单位")
 	}
 
 	// --user 给了空串就拒，而不是当成 0：它多半是一个没展开的 shell 变量，
@@ -605,6 +649,14 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 			return pricing.UpdateRequest{}, priceRefs{}, errors.New(
 				"--schedule-file 不能为空：要给定价表就写文件路径")
 		}
+		changes++
+	}
+	if slotsGiven {
+		built, buildErr := slots.expression(given)
+		if buildErr != nil {
+			return pricing.UpdateRequest{}, priceRefs{}, buildErr
+		}
+		req.Expr = &built
 		changes++
 	}
 	// 清表只动结构化那一栏，表达式留在库里（它本来就是表编译出来的结果）。
@@ -665,8 +717,9 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 	if changes == 0 {
 		return pricing.UpdateRequest{}, priceRefs{}, errors.New(
 			"update 至少要改一项：给出 --scope / --name / --user / --channel / " +
-				"--models / --expr / --priority / --effective-from / --effective-to / " +
-				"--clear-effective-to 之一（启用或停用规则用 price enable / price disable）")
+				"--models / --expr / --prompt 等单价旗标 / --priority / --effective-from / " +
+				"--effective-to / --clear-effective-to 之一" +
+				"（启用或停用规则用 price enable / price disable）")
 	}
 
 	return req, priceRefs{owner: ownerRef, by: *by, scheduleFile: *scheduleFile}, nil

@@ -905,10 +905,13 @@ overrides 不允许覆盖 "messages"：它是调用方发来的正文（允许�
 go run ./cmd/larkaxctl user create --name alice
 
 go run ./cmd/larkaxctl price create --scope platform --name example-price --by alice \
-  --expr '{"prompt": 0.0000015, "completion": 0.0000075,
-           "cache_read": 0.0000002, "cache_write": 0.0000019,
-           "reasoning": 0.0000090}'
+  --prompt 1.5 --completion 7.5 --cache-read 0.2 --cache-write 1.9 --reasoning 9
 ```
+
+五个单价旗标的单位是**每百万 token**，与供应商报价单一致（`--prompt 1.5` 就是
+每百万输入 token 1.5）；存库前换成每 token（`0.0000015`），库里存的仍是表达式。
+要直接按 token 给价时加 `--unit token`。带阶梯、分时或门槛的规则仍用 `--expr`
+或 `--schedule-file`：三种给法三选一。
 
 缺少 `--by` 时它报参数错（退出码 2），不会按「不记名」落库。
 

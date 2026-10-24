@@ -25,7 +25,9 @@ _larkaxctl() {
 		"plan create|--asset") compadd -- CNY; return ;;
 		"plan void|--status") compadd -- expired canceled; return ;;
 		"price create|--scope") compadd -- platform merchant channel; return ;;
+		"price create|--unit") compadd -- mtok token; return ;;
 		"price update|--scope") compadd -- platform merchant channel; return ;;
+		"price update|--unit") compadd -- mtok token; return ;;
 		"snapshot allowlist|--direction") compadd -- request response; return ;;
 		"snapshot allowlist|--surface") compadd -- chat decision; return ;;
 		"snapshot get|--direction") compadd -- request response; return ;;
@@ -914,7 +916,25 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
+		"price create|--cache-read")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price create|--cache-write")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"price create|--channel")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price create|--completion")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -951,6 +971,18 @@ _larkaxctl() {
 			esac
 			;;
 		"price create|--priority")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price create|--prompt")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price create|--reasoning")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -998,7 +1030,25 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
+		"price update|--cache-read")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price update|--cache-write")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"price update|--channel")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price update|--completion")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -1041,6 +1091,18 @@ _larkaxctl() {
 			esac
 			;;
 		"price update|--priority")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price update|--prompt")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price update|--reasoning")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -2012,9 +2074,9 @@ _larkaxctl() {
 			"plugin kv get") compadd -- --env-file --format --key --plugin --quiet --user --verbose ;;
 			"plugin kv set") compadd -- --env-file --format --key --plugin --quiet --ttl --user --value --verbose ;;
 			"plugin publish") compadd -- --by --env-file --format --key --priority --quiet --verbose ;;
-			"price create") compadd -- --by --channel --disabled --effective-from --effective-to --env-file --expr --format --models --name --priority --quiet --schedule-file --scope --user --verbose ;;
+			"price create") compadd -- --by --cache-read --cache-write --channel --completion --disabled --effective-from --effective-to --env-file --expr --format --models --name --priority --prompt --quiet --reasoning --schedule-file --scope --unit --user --verbose ;;
 			"price explain") compadd -- --at --channel --env-file --format --model --quiet --user --verbose ;;
-			"price update") compadd -- --by --channel --clear-effective-to --clear-schedule --disable --effective-from --effective-to --enable --env-file --expr --format --id --models --name --priority --quiet --schedule-file --scope --user --verbose ;;
+			"price update") compadd -- --by --cache-read --cache-write --channel --clear-effective-to --clear-schedule --completion --disable --effective-from --effective-to --enable --env-file --expr --format --id --models --name --priority --prompt --quiet --reasoning --schedule-file --scope --unit --user --verbose ;;
 			"rotate") compadd -- --apply --batch-size --env-file --format --quiet --verbose --verify ;;
 			"secret rotate") compadd -- --apply --batch-size --env-file --format --quiet --verbose --verify ;;
 			"settings get") compadd -- --env-file --format --key --quiet --verbose ;;
