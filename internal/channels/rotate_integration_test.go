@@ -44,15 +44,30 @@ func newRotateSealer(t *testing.T, keys ...config.MasterKey) *credential.Sealer 
 	return sealer
 }
 
-// readEnvelope 读一行的凭证密文。
+// readEnvelope 读一个**账号**的凭证密文。
+//
+// 轮换扫的是 accounts（见 00067），所以本文件里的 id 一律是账号 id；
+// 渠道与账号的对应关系由 accountOfChannel 取。
 func readEnvelope(t *testing.T, db *sql.DB, id int64) []byte {
 	t.Helper()
 	var envelope []byte
 	if err := db.QueryRowContext(context.Background(),
-		`SELECT credential_enc FROM channels WHERE id = $1`, id).Scan(&envelope); err != nil {
-		t.Fatalf("读渠道 %d 的密文失败: %v", id, err)
+		`SELECT credential_enc FROM accounts WHERE id = $1`, id).Scan(&envelope); err != nil {
+		t.Fatalf("读账号 %d 的密文失败: %v", id, err)
 	}
 	return envelope
+}
+
+// accountOfChannel 读一条渠道的主账号 id（账号 id 最小的那一个）。
+func accountOfChannel(t *testing.T, db *sql.DB, channelID int64) int64 {
+	t.Helper()
+	var id int64
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT account_id FROM channel_accounts
+		 WHERE channel_id = $1 ORDER BY account_id LIMIT 1`, channelID).Scan(&id); err != nil {
+		t.Fatalf("读渠道 %d 的主账号失败: %v", channelID, err)
+	}
+	return id
 }
 
 // mustHaveKeys 断言这一行的密文恰好挂在给定的主密钥下（顺序不计）。
@@ -82,12 +97,15 @@ func findRow(rows []RotateRow, id int64) (RotateRow, bool) {
 	return RotateRow{}, false
 }
 
-// insertRotateRows 插入 n 行渠道，凭证用 sealer 封。
+// insertRotateRows 插入 n 条渠道（每条挂一个账号），凭证用 sealer 封。
+//
+// 返回的是**账号 id**：轮换的报告与扫描都以账号为单位。
 func insertRotateRows(t *testing.T, db *sql.DB, sealer *credential.Sealer, n int) []int64 {
 	t.Helper()
 	ids := make([]int64, 0, n)
 	for i := 0; i < n; i++ {
-		ids = append(ids, insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()}))
+		channelID := insertChannel(t.Context(), t, db, sealer, channelSpec{model: uniqueModel()})
+		ids = append(ids, accountOfChannel(t, db, channelID))
 	}
 	return ids
 }
@@ -101,10 +119,10 @@ func TestRotatePlanDoesNotWrite(t *testing.T) {
 	rotator := NewRotator(db, newRotateSealer(t, newKey, oldKey))
 
 	ids := insertRotateRows(t, db, oldSealer, 3)
-	badID := insertChannel(ctx, t, db, oldSealer, channelSpec{
+	badID := accountOfChannel(t, db, insertChannel(ctx, t, db, oldSealer, channelSpec{
 		model:      uniqueModel(),
 		credential: []byte("not-an-envelope"),
-	})
+	}))
 
 	before := make(map[int64][]byte, len(ids))
 	for _, id := range ids {
@@ -247,10 +265,10 @@ func TestRotateApplyReportsBadEnvelopePerRow(t *testing.T) {
 	rotator := NewRotator(db, newRotateSealer(t, newKey, oldKey))
 
 	ids := insertRotateRows(t, db, oldSealer, 2)
-	badID := insertChannel(ctx, t, db, oldSealer, channelSpec{
+	badID := accountOfChannel(t, db, insertChannel(ctx, t, db, oldSealer, channelSpec{
 		model:      uniqueModel(),
 		credential: []byte("not-an-envelope"),
-	})
+	}))
 	badBefore := readEnvelope(t, db, badID)
 
 	report, err := rotator.Apply(ctx, nil)

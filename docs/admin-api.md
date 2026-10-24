@@ -109,6 +109,10 @@ Authorization: Bearer <令牌>
   见 `resources.go` 里各更新结构的注释（例如模型的 `knowledge_cutoff` 给空串）。
 - 渠道的凭证**只写不读**：`credential` 是写入字段，读回的是 `credential_keys`
   与 `credential_hint`（打了码的提示），任何路径都不回明文。
+- 凭证存在**账号**上（见迁移 00067），渠道通过 `channel_accounts` 挂零个或多个
+  账号。写 `credential` 改的是这条渠道的主账号（账号 id 最小那一个），它可能
+  同时挂在别的渠道上；零账号的渠道是合法的，选路会跳过它。账号自己的增、列、
+  换 key 目前只在 `larkaxctl account` 上，管理面还没有对应端点。
 
 ## 渠道表单的输入
 

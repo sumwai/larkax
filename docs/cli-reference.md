@@ -27,7 +27,7 @@
 | `LARKAX_DB_DSN` | 数据库连接串 |
 | `LARKAX_ENV` | 环境名 |
 | `LARKAX_LOG_LEVEL` | 日志级别 |
-| `LARKAX_MASTER_KEYS` | 主密钥。只有这几组命令读它：`channel create` / `update`（写凭证）、`channel sync-models`（解出凭证去拉上游模型清单）、`secret rotate`、`plugin delete` / `kv set` / `kv delete`（删插件、或动它的私有存储） |
+| `LARKAX_MASTER_KEYS` | 主密钥。只有这几组命令读它：`channel create` / `update`（写凭证）、`account add` / `update`（建账号、换 key）、`channel sync-models`（解出凭证去拉上游模型清单）、`secret rotate`、`plugin delete` / `kv set` / `kv delete`（删插件、或动它的私有存储） |
 
 `LARKAX_ROLE` 与运维命令无关。命令行自身的配置加载见 `internal/config` 的 `LoadOps`。
 
@@ -294,6 +294,15 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
 文**，只打印它挂在哪些主密钥下（那不需要任何密钥材料）；默认不列已删的渠道，
 `--all` 才列，并在「已删」那一栏标出删除时刻。
 
+**凭证存在账号实体上（见 `account`）。**`create` 给了凭证时会建一个匿名账号并
+挂上；**不给也是合法的**——渠道建出来但一个账号都不挂（零账号），`list` 看得见
+它，选路跳过它，之后用 `account add --channel <渠道>` 接上。`list` / `get` 的
+「凭证」那一栏是这条渠道主账号（挂池里账号 id 最小的那个）的信封信息；挂了多个
+账号时列出主密钥的并集并标出账号数，`get` 另有一栏「账号」列名字与权重。
+
+`update --credential-*` 换的是主账号的 key（零账号时补一个匿名账号）：同一条账号
+还挂在别的渠道上时，那些渠道一起生效。
+
 `get --id` 读一条渠道的明细：状态、关联模型、凭证挂在哪些主密钥下。
 与 `list` 不同，**它读得到已删的渠道**——`list` 挑的是「现在能用哪些」，
 按 ID 问一条记录时答「没有这一条」，会把「已经删了」与「ID 写错了」
@@ -477,6 +486,36 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
 
 **旧写法仍可用**：`alias create` / `alias add`、`alias list`、`alias delete` 保留一个
 发布周期，行为与这里逐字相同，命中时在 stderr 上提示这里的新路径。
+
+#### `account`
+
+上游凭证账号。一份凭证是一个独立实体，一条渠道通过关联挂零个、一个或多个账号：
+同一家上游开多条渠道、用的又是同一把 key 时，改一次账号，所有挂着它的渠道一起
+生效。渠道零账号是合法的中间态（选路跳过），见 `channel` 一节。
+
+**明文凭证只能从标准输入或环境变量读，不能写在命令行参数里**，与 `channel`
+同一套规矩。
+
+- `account add [<名称>] [--channel <渠道>] [--credential-env <变量名>]`
+  - 不给 `<名称>` 时生成 `account-` 加六位随机 `[a-z0-9]`，撞名自动重试。
+  - 不给 `--credential-env` 时从标准输入读到文件结束，末尾换行去掉；在终端里
+    跑会先提示「粘贴凭证，Ctrl-D 结束」。
+  - **stdout 只有账号名**，其余信息走 stderr，可以接进下一段脚本。
+  - `--channel` 收渠道 ID 或未删除渠道的名字；同名渠道多于一条时报错并要求
+    改用 ID。它把新账号一步挂进那条渠道的凭证池。
+  - 没有 `--format json` 这一档：stdout 只放账号名。
+- `account list`
+  - 名称、末四位提示、主密钥、挂着的渠道、更新时刻。**不打印凭证密文**，
+    只打印它挂在哪些主密钥下（不需要任何密钥材料）。
+  - 账号没有软删状态：删除渠道只删关联，账号本身留着等挂新渠道。
+  - 支持 `--format json`。
+- `account update <名称> [--credential-env <变量名>]`
+  - 只换凭证：挂在同一条账号上的渠道一个都不用动，下一次请求就用到新 key。
+    账号名与关联不变，`updated_at` 记下换 key 的时刻。
+  - 没有 `--format json` 这一档：stdout 不放回显。
+
+`channel create --credential-env X` 是兼容捷径：建一个匿名账号并立即挂到新渠道上，
+与 `account add --channel` 的结果相同。
 
 #### `model`
 

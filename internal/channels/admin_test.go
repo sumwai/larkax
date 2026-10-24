@@ -120,23 +120,36 @@ func baseRequest(name string) CreateRequest {
 	}
 }
 
-// rawCredentialEnc 直接读库里的密文列，用来断言「写入侧到底存了什么」。
+// rawCredentialEnc 直接读库里渠道主账号的密文，用来断言「写入侧到底存了什么」。
+//
+// 00067 之后渠道行没有凭证列：一条渠道的凭证挂在它挂着的账号上，主账号是
+// 账号 id 最小的那一个（与选路同一条判据）。
 func rawCredentialEnc(t *testing.T, db *sql.DB, id int64) []byte {
 	t.Helper()
 	var enc []byte
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT credential_enc FROM channels WHERE id = $1`, id).Scan(&enc); err != nil {
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT a.credential_enc
+		  FROM channel_accounts ca
+		  JOIN accounts a ON a.id = ca.account_id
+		 WHERE ca.channel_id = $1
+		 ORDER BY a.id
+		 LIMIT 1`, id).Scan(&enc); err != nil {
 		t.Fatalf("读 credential_enc 失败: %v", err)
 	}
 	return enc
 }
 
-// rawCredentialHint 直接读库里的提示列，用来断言「写入侧到底存了什么」。
+// rawCredentialHint 直接读库里渠道主账号的提示，用来断言「写入侧到底存了什么」。
 func rawCredentialHint(t *testing.T, db *sql.DB, id int64) string {
 	t.Helper()
 	var hint sql.NullString
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT credential_hint FROM channels WHERE id = $1`, id).Scan(&hint); err != nil {
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT a.credential_hint
+		  FROM channel_accounts ca
+		  JOIN accounts a ON a.id = ca.account_id
+		 WHERE ca.channel_id = $1
+		 ORDER BY a.id
+		 LIMIT 1`, id).Scan(&hint); err != nil {
 		t.Fatalf("读 credential_hint 失败: %v", err)
 	}
 	return hint.String
@@ -611,7 +624,8 @@ func TestCreateRejectsInvalidFields(t *testing.T) {
 		mutate func(*CreateRequest)
 	}{
 		{"渠道名为空", func(r *CreateRequest) { r.Name = "   " }},
-		{"凭证为空", func(r *CreateRequest) { r.Credential = "" }},
+		// 凭证不在这张表里：空表示「这次不建账号」，是合法的中间态
+		// （见 CreateRequest.Credential 与迁移 00067）。
 		{"models 为空", func(r *CreateRequest) { r.Models = nil }},
 		{"models 里有空项", func(r *CreateRequest) { r.Models = []string{"a", " "} }},
 		{"base_url 为空", func(r *CreateRequest) { r.BaseURL = "" }},
@@ -806,7 +820,7 @@ func TestListReturnsNoCiphertext(t *testing.T) {
 	want := []string{
 		"ID", "OwnerUserID", "Name", "Type", "Protocols", "BaseURL", "Status", "Models",
 		"Weight", "Priority", "Setting", "CreatedAt", "UpdatedAt",
-		"CredentialKeys", "Hint", "CredentialErr", "DeletedAt",
+		"Accounts", "CredentialKeys", "Hint", "CredentialErr", "DeletedAt",
 	}
 	typ := reflect.TypeOf(ChannelInfo{})
 	names := make([]string, 0, typ.NumField())
@@ -1432,7 +1446,13 @@ func readChannelRaw(t *testing.T, db *sql.DB, id int64) channelRaw {
 		set []byte
 	)
 	err := db.QueryRowContext(context.Background(), `
-		SELECT name, status, priority, weight, setting, updated_at, deleted_at, credential_enc
+		SELECT name, status, priority, weight, setting, updated_at, deleted_at,
+		       (SELECT a.credential_enc
+		          FROM channel_accounts ca
+		          JOIN accounts a ON a.id = ca.account_id
+		         WHERE ca.channel_id = channels.id
+		         ORDER BY a.id
+		         LIMIT 1)
 		  FROM channels WHERE id = $1`, id).
 		Scan(&row.Name, &row.Status, &row.Priority, &row.Weight, &set,
 			&row.UpdatedAt, &row.DeletedAt, &enc)

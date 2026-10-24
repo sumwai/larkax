@@ -163,6 +163,7 @@ var commandGroups = []commandGroup{
 		title: "路由与模型配置 (Routing & Models)",
 		commands: []command{
 			{name: "channel", summary: "上游渠道管理（网关、凭证、关联模型与出站映射）", help: channelHelp, run: runChannel},
+			{name: "account", summary: "上游凭证账号（建、列、换 key）", help: accountHelp, run: runAccount},
 			{name: "model", summary: "规范模型目录（catalog 基础定义）", help: modelHelp, run: runModel},
 			{name: "alias", summary: "出站映射的旧入口（配置命令在 channel map）", help: aliasHelp, run: runAlias},
 			{name: "price", summary: "模型计价规则与日历管理（含 calendar 子命令）", help: priceHelp, run: runPrice},
@@ -289,8 +290,7 @@ const usageNotes = `
 
 短选项：-u --user、-m --model、-o --format、-v --verbose、-q --quiet、-V --version（其余写全名）
 退出码：0 成功，1 其他失败，2 命令行参数错，3 连不上数据库，4 约束冲突。
-每条命令的详细用法：larkaxctl help <命令>。
-全局约定、.env 查找与退出码见 docs/cli-reference.md；机器可读输出见 docs/cli-output.md。
+每条命令的详细用法：larkaxctl help <命令>；全局约定与 .env 查找见 docs/cli-reference.md。
 `
 
 // migrateHelp 是 migrate 的两版帮助文本（见 helpText）。

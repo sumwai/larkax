@@ -71,14 +71,15 @@ func uniqueName(prefix string) string { return prefix + "-" + itoa(nextID()) }
 //
 // 不走 channels.Admin：这里要的只是 model_aliases 那条外键指向的一行，
 // 而那个管理面需要主密钥与适配器注册表——它们与本包要测的东西无关。
-// 凭证密文用 `'\x00'::bytea` 占位：本包从不读它。
+// 凭证在 accounts 里，本包从不读它；所以这里不建账号，得到的就是一条
+// 零账号渠道（合法中间态，见 00067）。
 func insertChannel(t *testing.T, db *sql.DB, model string) int64 {
 	t.Helper()
 
 	var id int64
 	err := db.QueryRowContext(context.Background(), `
-		INSERT INTO channels (name, type, base_url, credential_enc, models)
-		VALUES ($1, 'openai-compatible', 'https://api.example.com/v1', '\x00'::bytea, ARRAY[$2])
+		INSERT INTO channels (name, type, base_url, models)
+		VALUES ($1, 'openai-compatible', 'https://api.example.com/v1', ARRAY[$2])
 		RETURNING id`, "ch-"+itoa(nextID()), model).Scan(&id)
 	if err != nil {
 		t.Fatalf("插入渠道失败: %v", err)

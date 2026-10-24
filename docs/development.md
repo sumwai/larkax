@@ -467,7 +467,8 @@ go run ./cmd/larkaxctl --env-file .env.staging wallet create --user alice
 它只读 `LARKAX_DB_DSN`、`LARKAX_LOG_LEVEL` 与 `LARKAX_ENV`，缺 DSN 才失败。
 `LARKAX_ROLE` 决定不了任何一条运维命令的成败——命令不属于任何角色——所以
 `larkaxctl migrate up` 在没有配角色的机器上照样能跑。读这个变量的是这几组命令：
-`channel create` / `channel update`（写凭证）、`secret rotate`、以及
+`channel create` / `channel update`（写凭证）、`account add` / `account update`
+（建账号、换 key）、`secret rotate`、以及
 `plugin delete` / `plugin kv set` / `plugin kv delete`（删插件、或动它的私有存储）
 ——它们自己读 `LARKAX_MASTER_KEYS`。两个入口见 `internal/config` 的 `Load` 与
 `LoadOps`。
@@ -975,7 +976,8 @@ go run ./cmd/larkaxctl channel delete --id 7
 
 - 那个渠道不再进候选集，也不再出现在 `channel list` 的默认输出里（`--all` 才看得见）；
 - `channel update` / `enable` / `disable` 对它会**明确报错**，而不是改一行你看不见的数据；
-- 凭证密文与从属的行都不动，所以 `secret rotate` 与健康度统计都会跳过它。
+- 凭证与账号都不动：删除只动渠道本身，账号是独立实体（可能还挂着别的渠道），
+  `secret rotate` 照样轮换它的密文；健康度统计不再记这条渠道。
 
 删除是幂等的：重复删同一条不是错误，第二次打印「已经是删除状态」。
 
@@ -985,9 +987,9 @@ go run ./cmd/larkaxctl channel delete --id 7
 「要查的那一行」指解析一个标识时它不在库里（例如 `--user` 给了一个不存在的
 用户名），它的下一步与撞唯一键一样：先去看数据里现在是什么。
 
-需要主密钥（`LARKAX_MASTER_KEYS`）的是这几组命令：渠道的**写入**
-（`channel create` / `update`）、`plugin delete` / `plugin kv set` /
-`plugin kv delete`、以及 `secret rotate`。它们要它的缘由不是同一个：渠道那几条与
+需要主密钥（`LARKAX_MASTER_KEYS`）的是这几组命令：凭证的**写入**
+（`channel create` / `update`、`account add` / `update`）、`plugin delete` /
+`plugin kv set` / `plugin kv delete`、以及 `secret rotate`。它们要它的缘由不是同一个：渠道那几条与
 `secret rotate` 都要**写凭证**——凭证是信封加密的，只有 `credential.Sealer` 能产出
 可解开的密文，直接往库里写一行 `bytea` 补不上；`plugin` 那三条不对任何东西解密，
 要的是「跑它的机器带着运维凭证」——把一条删数据的入口开在只有库口令的机器上，
@@ -1348,6 +1350,7 @@ ingress 规则下。同一个端口上还有管理面 `/admin/v1/*`，用单独�
 | 子命令 | 做什么 |
 |---|---|
 | `channel` | 上游渠道：`create` / `list`（`--all` 含已删）/ `get`（单条详情）/ `health`（健康与窗口内的用量）/ `update` / `enable` / `disable` / `delete`（软删）/ `restore`（`delete` 的逆操作）/ `sync-models`（从上游拉一次模型清单并落库）/ `upstream-models`（读库里那一份清单与同步状态）/ `adapters`（列出适配器类型）/ `probe`（落库之前探一次上游模型清单）；出站映射：`map`（`add` / `list` / `remove`） |
+| `account` | 上游凭证账号（一条渠道可挂零个或多个，凭证存在账号上）：`add`（新建；`--channel` 一步挂到那条渠道的池子里）/ `list`（含它挂在哪些渠道上）/ `update`（换 key，同池渠道一起生效） |
 | `model` | 模型目录：`create` / `list` / `get` / `update` / `delete` / `onboard`（一个事务里写完目录、渠道白名单、出站映射与两条价格规则）；入站别名（调用方写的名字 → 规范名）：`alias`（`add` / `remove` / `list`）；名字链路诊断：`trace` |
 | `alias` | 规范模型名到上游模型名的映射（旧入口，配置改用 `channel map`）：`create` / `list` / `update` / `delete` / `resolve` |
 | `price` | 计价规则：`add` / `list` / `show` / `update` / `enable` / `disable` / `explain`；阶梯档位：`tier`（`add` / `list` / `remove`）；兼管分时计价的日历数据：`calendar`（`import` / `sync` / `list`） |

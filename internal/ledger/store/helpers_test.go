@@ -140,8 +140,8 @@ func seedChannel(t *testing.T, ctx context.Context, db *sql.DB) int64 {
 	t.Helper()
 	var id int64
 	if err := db.QueryRowContext(ctx, `
-		INSERT INTO channels (name, type, base_url, credential_enc, status, models)
-		VALUES ($1, 'openai', 'https://api.example.com', '\x00'::bytea, 'enabled', ARRAY['gpt-4o'])
+		INSERT INTO channels (name, type, base_url, status, models)
+		VALUES ($1, 'openai', 'https://api.example.com', 'enabled', ARRAY['gpt-4o'])
 		RETURNING id`, "ch"+itoa(nextID())).Scan(&id); err != nil {
 		t.Fatalf("建渠道失败: %v", err)
 	}

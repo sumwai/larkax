@@ -54,6 +54,7 @@ var statusRenderPaths = []string{
 // 只是外壳是诊断报告。
 var tableRenderPaths = []string{
 	"doctorTable.lines",   // doctor -v 的逐项明细
+	"printAccountList",    // account list
 	"printAdjustedWallet", // wallet adjust 的回显：一栏一行，与 user update 同一个形状
 	"printAliasList",
 	"printAllowlists", // snapshot allowlist
@@ -104,6 +105,7 @@ var tableRenderPaths = []string{
 // 命令名，比留一句「现在是空的」更坏（ledger balance --all 就是这一类）。
 var emptyListPaths = []string{
 	"checkDoctorWallets", // doctor 的钱包体检：一个用户都没有
+	"printAccountList",   // account list：一个账号都没有
 	"printAliasList",
 	"printCalendarList",
 	"printChannelHealthList", // channel health：一条渠道都没有

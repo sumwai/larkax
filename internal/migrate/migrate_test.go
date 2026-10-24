@@ -17,10 +17,12 @@ package migrate_test
 // 撤的就是别人了，这条用例会以为自己验过回滚（见 LESSONS.md 第 37 条）。
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +30,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pressly/goose/v3"
 
+	"github.com/sumwai/larkax/internal/config"
+	"github.com/sumwai/larkax/internal/credential"
 	"github.com/sumwai/larkax/internal/migrate"
 	"github.com/sumwai/larkax/internal/testdb"
 )
@@ -313,9 +317,8 @@ func TestChannelHealthRollupModelMigration(t *testing.T) {
 	// 列名按**当前最新结构**写：channels.protocol 已在 00005 删掉，这里
 	// 不能再带它（带上时用例在第一步就红，后面几条断言一条都跑不到）。
 	if err := db.QueryRowContext(ctx, `
-		INSERT INTO channels (name, type, base_url, credential_enc, models)
-		VALUES ('migr-00057', 'openai-compatible', 'https://api.example.com/v1',
-		        '\x00'::bytea, ARRAY['m'])
+		INSERT INTO channels (name, type, base_url, models)
+		VALUES ('migr-00057', 'openai-compatible', 'https://api.example.com/v1', ARRAY['m'])
 		RETURNING id`).Scan(&testChannelID); err != nil {
 		t.Fatalf("插入测试渠道失败: %v", err)
 	}
@@ -1212,4 +1215,292 @@ func TestAccountBelowFloorMigrationRoundtrip(t *testing.T) {
 		t.Errorf("再次前进之后 account_below_floor 应被放行: %v", err)
 	}
 	deleteFindings()
+}
+
+// accountsMigration 是把凭证从渠道行拆成账号实体的那条迁移。版本号由文件名
+// 算出来，重编号时两处不会分叉。
+const accountsMigration = "00067_accounts.sql"
+
+// TestAccountsEntityMigration 钉住 00067 的两头：前进时存量凭证原样搬进账号、
+// 回滚时搬回渠道行且两张表**真的消失**、再前进时重新搬一遍。
+//
+// # 为什么回滚要断言「表不在了」而不是「语句没报错」
+//
+// 只调用一次 Down 再看到退出码是 0，证明不了它清掉了自己建的东西：漏写
+// DROP 也能跑完。所以这里查 to_regclass 为 NULL，再前进一次确认库还能用。
+//
+// # 回滚态的门槛比 00001 松一格
+//
+// Down 把 credential_enc 加回来时是可空的：零账号渠道在旧模型里没法表示，
+// 伪造一份密文或删掉这一行都比留 NULL 更坏（见迁移里的注释）。所以本用例
+// 在回滚态插入的渠道自己带凭证，走的是与存量数据完全相同的那条搬移路径。
+func TestAccountsEntityMigration(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	// 这一层不声明函数级 err：下面每个查询都用 `if err := ...` 自己收口，
+	// 外层留一个 err 只会被逐条遮蔽（shadow），而遮蔽之后它仍被读到。
+	version, versionErr := goose.NumericComponent(accountsMigration)
+	if versionErr != nil {
+		t.Fatalf("从迁移文件名读版本号失败: %v", versionErr)
+	}
+	previous := version - 1
+
+	goose.SetBaseFS(migrate.FS())
+	if err := migrate.SetDialect("postgres"); err != nil {
+		t.Fatalf("设置方言失败: %v", err)
+	}
+
+	up := func() {
+		t.Helper()
+		if err := goose.UpContext(ctx, db, "."); err != nil {
+			t.Fatalf("前进到最新失败: %v", err)
+		}
+	}
+	down := func() {
+		t.Helper()
+		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
+			t.Fatalf("回滚到 %d 失败: %v", previous, err)
+		}
+	}
+
+	// 用例中途红掉会把库停在回滚态，本包之后的所有用例都会跟着红——收尾
+	// 必须把版本推回最新，并清掉夹具。
+	const (
+		channelName = "migr-00067"
+		probeName   = "migr-00067-probe"
+	)
+	// 迁移给存量渠道建的账号名是 `channel-<渠道 id>`。名字在 Go 侧拼好再
+	// 传成 text：把 int64 参数直接丢给 `'channel-' || $1::text` 时 pgx 编不过。
+	channelAccountName := func(id int64) string {
+		return "channel-" + strconv.FormatInt(id, 10)
+	}
+	var channelID int64
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		if err := goose.UpContext(cleanupCtx, db, "."); err != nil {
+			t.Errorf("收尾时把库推回最新失败: %v", err)
+		}
+		if channelID != 0 {
+			// 账号先删：channel_accounts 对两张表都是 CASCADE，谁先都行，
+			// 但渠道删掉之后按名字找账号就只剩这一条路了。
+			if _, err := db.ExecContext(cleanupCtx,
+				`DELETE FROM accounts WHERE name = $1 OR name = $2`,
+				channelAccountName(channelID), probeName); err != nil {
+				t.Errorf("收尾时删测试账号失败: %v", err)
+			}
+			if _, err := db.ExecContext(cleanupCtx,
+				`DELETE FROM channels WHERE id = $1`, channelID); err != nil {
+				t.Errorf("收尾时删测试渠道失败: %v", err)
+			}
+		}
+	})
+
+	tableExists := func(name string) bool {
+		t.Helper()
+		var reg sql.NullString
+		if err := db.QueryRowContext(ctx,
+			`SELECT to_regclass($1)::text`, name).Scan(&reg); err != nil {
+			t.Fatalf("查表 %s 是否存在失败: %v", name, err)
+		}
+		return reg.Valid
+	}
+	columnExists := func(table, column string) bool {
+		t.Helper()
+		var n int
+		if err := db.QueryRowContext(ctx, `
+			SELECT count(*) FROM information_schema.columns
+			 WHERE table_schema = current_schema()
+			   AND table_name = $1 AND column_name = $2`,
+			table, column).Scan(&n); err != nil {
+			t.Fatalf("查列 %s.%s 是否存在失败: %v", table, column, err)
+		}
+		return n > 0
+	}
+
+	// 一份**真能被解开**的凭证：迁移只搬字节，所以迁过去的密文必须仍由
+	// 原来的主密钥解得开。用随机字节当密文的话，这一步证明不了任何事。
+	key := bytes.Repeat([]byte{0x5a}, config.KeySize)
+	sealer, sealerErr := credential.NewSealer([]config.MasterKey{{ID: "mig-00067", Key: key}})
+	if sealerErr != nil {
+		t.Fatalf("构造封装器失败: %v", sealerErr)
+	}
+	const plaintext = "migration-fixture-credential-00067"
+	envelope, envelopeErr := sealer.Seal([]byte(plaintext))
+	if envelopeErr != nil {
+		t.Fatalf("封装凭证失败: %v", envelopeErr)
+	}
+	hint := credential.Hint(plaintext)
+	if hint != "0067" {
+		t.Fatalf("提示 = %q，期望 0067（用例自己的前提就不成立）", hint)
+	}
+
+	// 1. 退回旧结构，按旧结构写一条带凭证的渠道。
+	down()
+	if tableExists("accounts") || tableExists("channel_accounts") {
+		t.Fatal("回滚态仍有账号表：用例的前提不成立")
+	}
+	if !columnExists("channels", "credential_enc") {
+		t.Fatal("回滚态 channels 缺 credential_enc 列：用例的前提不成立")
+	}
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO channels (name, type, base_url, credential_enc, credential_hint, models)
+		VALUES ($1, 'openai-compatible', 'https://api.example.com/v1', $2, $3, ARRAY['m'])
+		RETURNING id`, channelName, envelope, hint).Scan(&channelID); err != nil {
+		t.Fatalf("按旧结构插入渠道失败: %v", err)
+	}
+
+	// 2. 前进：凭证搬进账号、关联建好、渠道行不再有凭证列。
+	up()
+	for _, table := range []string{"accounts", "channel_accounts"} {
+		if !tableExists(table) {
+			t.Fatalf("前进之后缺表 %s", table)
+		}
+	}
+	if columnExists("channels", "credential_enc") || columnExists("channels", "credential_hint") {
+		t.Error("前进之后 channels 仍有凭证列：两条写路径会各自写一份")
+	}
+
+	migratedName := channelAccountName(channelID)
+	var (
+		migratedAccountID int64
+		migratedEnc       []byte
+		migratedHint      sql.NullString
+	)
+	if err := db.QueryRowContext(ctx, `
+		SELECT id, credential_enc, credential_hint FROM accounts
+		 WHERE name = $1`, migratedName,
+	).Scan(&migratedAccountID, &migratedEnc, &migratedHint); err != nil {
+		t.Fatalf("前进之后找不到账号 %s: %v", migratedName, err)
+	}
+	if !bytes.Equal(migratedEnc, envelope) {
+		t.Error("搬进账号的密文与渠道行里那份不一致：迁移应当是原样复制")
+	}
+	if !migratedHint.Valid || migratedHint.String != hint {
+		t.Errorf("账号提示 = %+v，期望 %q", migratedHint, hint)
+	}
+	opened, openErr := sealer.Open(migratedEnc)
+	if openErr != nil {
+		t.Fatalf("迁移后的密文解不开：%v", openErr)
+	}
+	if string(opened) != plaintext {
+		t.Errorf("迁移后的明文 = %q，期望 %q", opened, plaintext)
+	}
+
+	var weight int
+	if err := db.QueryRowContext(ctx, `
+		SELECT weight FROM channel_accounts
+		 WHERE channel_id = $1 AND account_id = $2`, channelID, migratedAccountID,
+	).Scan(&weight); err != nil {
+		t.Fatalf("前进之后没有渠道与账号的关联: %v", err)
+	}
+	if weight != 1 {
+		t.Errorf("迁移建出来的关联权重 = %d，期望 1", weight)
+	}
+
+	// 两张表都能写：表在而不可写的话，前进态一样是坏的。
+	var probeID int64
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO accounts (name, credential_enc) VALUES ($1, $2) RETURNING id`,
+		probeName, envelope).Scan(&probeID); err != nil {
+		t.Fatalf("前进之后写 accounts 失败: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO channel_accounts (channel_id, account_id) VALUES ($1, $2)`,
+		channelID, probeID); err != nil {
+		t.Fatalf("前进之后写 channel_accounts 失败: %v", err)
+	}
+
+	// 3. 回滚：两张表**从库里消失**，凭证回到渠道行且仍能解开。
+	//
+	//    探针账号此时还挂在渠道上：回滚按账号 id 最小者搬回，探针的 id 比
+	//    迁移建出来的那个大，所以取到的是迁移那一份。
+	down()
+	for _, table := range []string{"accounts", "channel_accounts"} {
+		if tableExists(table) {
+			t.Errorf("回滚之后表 %s 仍然存在", table)
+		}
+	}
+	if columnExists("accounts", "credential_enc") {
+		t.Error("回滚之后 accounts 仍在 information_schema 里")
+	}
+	var restoredEnc []byte
+	var restoredHint sql.NullString
+	if err := db.QueryRowContext(ctx, `
+		SELECT credential_enc, credential_hint FROM channels WHERE id = $1`, channelID,
+	).Scan(&restoredEnc, &restoredHint); err != nil {
+		t.Fatalf("回滚之后读渠道凭证失败: %v", err)
+	}
+	if !bytes.Equal(restoredEnc, envelope) {
+		t.Error("回滚之后渠道里的密文与写入时不一致")
+	}
+	if !restoredHint.Valid || restoredHint.String != hint {
+		t.Errorf("回滚之后渠道提示 = %+v，期望 %q", restoredHint, hint)
+	}
+	opened, openErr = sealer.Open(restoredEnc)
+	if openErr != nil {
+		t.Fatalf("回滚之后渠道密文解不开：%v", openErr)
+	}
+	if string(opened) != plaintext {
+		t.Errorf("回滚之后的明文 = %q，期望 %q", opened, plaintext)
+	}
+
+	// 4. 再前进：表与迁移生成的账号都回来，且两张表仍可写。
+	up()
+	for _, table := range []string{"accounts", "channel_accounts"} {
+		if !tableExists(table) {
+			t.Fatalf("再次前进之后缺表 %s", table)
+		}
+	}
+	var (
+		againID  int64
+		againEnc []byte
+	)
+	if err := db.QueryRowContext(ctx, `
+		SELECT id, credential_enc FROM accounts
+		 WHERE name = $1`, channelAccountName(channelID),
+	).Scan(&againID, &againEnc); err != nil {
+		t.Fatalf("再次前进之后找不到迁移生成的账号: %v", err)
+	}
+	if !bytes.Equal(againEnc, envelope) {
+		t.Error("再次前进之后搬过来的密文与渠道行里那份不一致")
+	}
+	opened, openErr = sealer.Open(againEnc)
+	if openErr != nil {
+		t.Fatalf("再次前进之后的密文解不开：%v", openErr)
+	}
+	if string(opened) != plaintext {
+		t.Errorf("再次前进之后的明文 = %q，期望 %q", opened, plaintext)
+	}
+	var againChannelID int64
+	if err := db.QueryRowContext(ctx, `
+		SELECT channel_id FROM channel_accounts WHERE account_id = $1`, againID,
+	).Scan(&againChannelID); err != nil {
+		t.Fatalf("再次前进之后没有重建关联: %v", err)
+	}
+	if againChannelID != channelID {
+		t.Errorf("再次建出来的关联指向渠道 %d，期望 %d", againChannelID, channelID)
+	}
+	// Down 丢掉的表内容不会跟着回来：探针账号是新表里从未存在过的那一行，
+	// 再前进之后它仍然是「不存在」。
+	var probeLeft int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM accounts WHERE name = $1`, probeName).Scan(&probeLeft); err != nil {
+		t.Fatalf("数探针账号失败: %v", err)
+	}
+	if probeLeft != 0 {
+		t.Errorf("再次前进之后探针账号还在（%d 行）：Down 没有真的清掉表", probeLeft)
+	}
+	// 可写：表在、关联能建。
+	var recheckID int64
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO accounts (name, credential_enc) VALUES ($1, $2) RETURNING id`,
+		probeName, envelope).Scan(&recheckID); err != nil {
+		t.Fatalf("再次前进之后写 accounts 失败: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO channel_accounts (channel_id, account_id) VALUES ($1, $2)`,
+		channelID, recheckID); err != nil {
+		t.Fatalf("再次前进之后写 channel_accounts 失败: %v", err)
+	}
 }

@@ -32,12 +32,25 @@ func insertProbeChannel(t *testing.T, db *sql.DB, sealer *credential.Sealer,
 	}
 	var id int64
 	err = db.QueryRowContext(context.Background(), `
-		INSERT INTO channels (owner_user_id, name, type, base_url, credential_enc, status, models)
-		VALUES ($1, $2, $3, $4, $5, 'enabled', ARRAY['probe-model'])
+		INSERT INTO channels (owner_user_id, name, type, base_url, status, models)
+		VALUES ($1, $2, $3, $4, 'enabled', ARRAY['probe-model'])
 		RETURNING id`,
-		ownerID, "probe-"+itoa(nextID()), chanType, baseURL, envelope).Scan(&id)
+		ownerID, "probe-"+itoa(nextID()), chanType, baseURL).Scan(&id)
 	if err != nil {
 		t.Fatalf("插入探测渠道失败: %v", err)
+	}
+	// 凭证在账号上（见 00067），探测必须先把它取出来再打上游。
+	var accountID int64
+	if err := db.QueryRowContext(context.Background(), `
+		INSERT INTO accounts (name, credential_enc, credential_hint)
+		VALUES ($1, $2, $3) RETURNING id`,
+		"probe-acc-"+itoa(nextID()), envelope, credential.Hint(plaintext)).Scan(&accountID); err != nil {
+		t.Fatalf("插入探测账号失败: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO channel_accounts (channel_id, account_id) VALUES ($1, $2)`,
+		id, accountID); err != nil {
+		t.Fatalf("把探测账号挂到渠道上失败: %v", err)
 	}
 	return id
 }

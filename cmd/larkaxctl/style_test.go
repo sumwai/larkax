@@ -415,12 +415,12 @@ func TestHelpColoursStructureOnly(t *testing.T) {
 	printUsage(&root, usage)
 	for _, want := range []string{
 		"\x1b[1m核心与诊断 (Core & Diagnostics)：\x1b[0m", // 组标题
-		"\x1b[1mdoctor\x1b[0m",                         // 清单里的命令名
-		"\x1b[2m系统健康与链路连通性体检\x1b[0m",                   // 它后面那一句话
-		"\x1b[1m用法：\x1b[0m",                            // 段标题：整行加粗
-		"\x1b[1m全局选项（写在子命令前后都认）：\x1b[0m",               // usageNotes 里的段标题
-		"\x1b[1m--env-file <路径>\x1b[0m",                // 全局选项的名字栏
-		"\x1b[2m每条命令的详细用法：larkaxctl help <命令>。\x1b[0m", // 指针行
+		"\x1b[1mdoctor\x1b[0m",           // 清单里的命令名
+		"\x1b[2m系统健康与链路连通性体检\x1b[0m",     // 它后面那一句话
+		"\x1b[1m用法：\x1b[0m",              // 段标题：整行加粗
+		"\x1b[1m全局选项（写在子命令前后都认）：\x1b[0m", // usageNotes 里的段标题
+		"\x1b[1m--env-file <路径>\x1b[0m",  // 全局选项的名字栏
+		"\x1b[2m每条命令的详细用法：larkaxctl help <命令>；全局约定与 .env 查找见 docs/cli-reference.md。\x1b[0m", // 指针行
 	} {
 		if !strings.Contains(root.String(), want) {
 			t.Errorf("根帮助页里没有 %q：\n%s", want, helpTextRounding(root.String()))
@@ -742,6 +742,16 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		{"渠道清单", func(w io.Writer) {
 			printChannelList(w, []channels.ChannelInfo{channel}, false)
 		}},
+		{"账号清单", func(w io.Writer) {
+			printAccountList(w, []channels.AccountInfo{{
+				ID: 2, Name: "account-abc123", Hint: "abcd",
+				CredentialKeys: []string{"k1"},
+				Channels: []channels.AccountChannel{
+					{ID: 1, Name: "示例渠道", Weight: 1},
+				},
+				CreatedAt: at, UpdatedAt: at,
+			}})
+		}},
 		{"渠道清单 --all", func(w io.Writer) {
 			printChannelList(w, []channels.ChannelInfo{channel}, true)
 		}},
@@ -996,8 +1006,8 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		}},
 	}
 
-	if len(cases) != 36 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 36 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 37 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 37 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {

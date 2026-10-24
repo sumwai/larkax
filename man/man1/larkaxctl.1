@@ -34,7 +34,7 @@ larkaxctl \- larkax 的\:运\:维\:命\:令\:行
 日\:志\:级\:别
 .TP
 .B LARKAX_MASTER_KEYS
-主\:密\:钥。\:只\:有\:这\:几\:组\:命\:令\:读\:它：\fBchannel create\fR / \fBupdate\fR（写\:凭\:证）、\fBchannel sync\-models\fR（解\:出\:凭\:证\:去\:拉\:上\:游\:模\:型\:清\:单）、\fBsecret rotate\fR、\fBplugin delete\fR / \fBkv set\fR / \fBkv delete\fR（删\:插\:件、\:或\:动\:它\:的\:私\:有\:存\:储）
+主\:密\:钥。\:只\:有\:这\:几\:组\:命\:令\:读\:它：\fBchannel create\fR / \fBupdate\fR（写\:凭\:证）、\fBaccount add\fR / \fBupdate\fR（建\:账\:号、\:换 key）、\fBchannel sync\-models\fR（解\:出\:凭\:证\:去\:拉\:上\:游\:模\:型\:清\:单）、\fBsecret rotate\fR、\fBplugin delete\fR / \fBkv set\fR / \fBkv delete\fR（删\:插\:件、\:或\:动\:它\:的\:私\:有\:存\:储）
 .PP
 \fBLARKAX_ROLE\fR 与\:运\:维\:命\:令\:无\:关。\:命\:令\:行\:自\:身\:的\:配\:置\:加\:载\:见 \fBinternal/config\fR 的 \fBLoadOps\fR。
 .SS 展\:示\:文\:本\:里\:的\:控\:制\:字\:符
@@ -161,6 +161,12 @@ larkaxctl \- larkax 的\:运\:维\:命\:令\:行
 上\:游\:渠\:道\:管\:理\:（网\:关、\:凭\:证、\:关\:联\:模\:型\:与\:出\:站\:映\:射）
 .br
 .BR larkaxctl\-channel (1)
+.TP
+.B account
+.br
+上\:游\:凭\:证\:账\:号\:（建、\:列、\:换 key）
+.br
+.BR larkaxctl\-account (1)
 .TP
 .B model
 .br
@@ -290,6 +296,7 @@ API Key 访\:问\:密\:钥、\:状\:态\:与\:额\:度\:管\:理
 .BR larkaxctl\-version (1),
 .BR larkaxctl\-completion (1),
 .BR larkaxctl\-channel (1),
+.BR larkaxctl\-account (1),
 .BR larkaxctl\-model (1),
 .BR larkaxctl\-alias (1),
 .BR larkaxctl\-price (1),

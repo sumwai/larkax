@@ -3,6 +3,7 @@ package channels
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -158,6 +159,10 @@ type CreateRequest struct {
 
 	// Credential 是**明文**凭证。它只用于封装，不落日志、不进错误信息、
 	// 不进返回值。
+	//
+	// 为空表示**这次不建账号**：渠道先建出来、一个账号都不挂。零账号是
+	// 合法的中间态（`channel list` 看得见，选路跳过它），之后再用
+	// `account add --channel` 或 `channel update --credential-*` 接上。
 	Credential string
 
 	// Models 是该渠道支持的规范模型名，至少要有一个。
@@ -208,9 +213,13 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 		return 0, err
 	}
 	// 封凭证放在所有校验之后：校验失败时这次调用根本没碰到明文。
-	envelope, err := a.sealCredential(req.Credential)
-	if err != nil {
-		return 0, err
+	// 没给凭证就不封：零账号的渠道是合法中间态（见 CreateRequest.Credential）。
+	var envelope []byte
+	if req.Credential != "" {
+		envelope, err = a.sealCredential(req.Credential)
+		if err != nil {
+			return 0, err
+		}
 	}
 
 	// owner_user_id 是外键且可空。用 any 传值而不是传 0：
@@ -235,11 +244,11 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 	var id int64
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO channels
-			(owner_user_id, name, type, base_url, credential_enc, credential_hint,
+			(owner_user_id, name, type, base_url,
 			 status, models, weight, priority, setting)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
 		RETURNING id`,
-		owner, name, primaryType, baseURL, envelope, credential.Hint(req.Credential),
+		owner, name, primaryType, baseURL,
 		StatusEnabled, models, weight, req.Priority, string(setting)).Scan(&id)
 	if err != nil {
 		// owner_user_id 上有一条指向 users 的外键：解析完归属用户、插入之前
@@ -250,6 +259,19 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 	}
 	if err := insertProtocols(ctx, tx, id, protocols); err != nil {
 		return 0, err
+	}
+	// 给了凭证就顺手建一个匿名账号并挂上（`channel create --credential-env`
+	// 的兼容捷径，见迁移 00067）。账号与渠道在同一个事务里落库：只落一半的
+	// 表现是「渠道建出来了、凭证不知道去哪了」，而那看起来完全正常。
+	if envelope != nil {
+		accountID, _, _, _, err := insertAccount(ctx, tx, "", credential.Hint(req.Credential),
+			envelope, true)
+		if err != nil {
+			return 0, err
+		}
+		if err := attachAccountInTx(ctx, tx, id, accountID); err != nil {
+			return 0, err
+		}
 	}
 	if ownTx {
 		if err := tx.Commit(); err != nil {
@@ -412,11 +434,14 @@ type UpdateRequest struct {
 	// 记录伪造成配置。软删的渠道仍然拒绝（WHERE 带 channelAlive）。
 	Status *string
 
-	// Credential 非 nil 时重新封装并替换密文。
+	// Credential 非 nil 时重新封装并替换**这条渠道主账号**的密文
+	// （挂池里账号 id 最小的那一个；零账号时新建一个匿名账号再挂上）。
 	//
-	// **为 nil 时生成的 SQL 里根本不出现 credential_enc**，密文一个字节都不动。
-	// 这一条是有意的：重封一次会换掉 DEK，密文变了而凭证没变，事后审计时
-	// 「这条渠道的凭证什么时候换过」就再也答不出来。
+	// **为 nil 时账号行一个字节都不动**：重封一次会换掉 DEK，密文变了而
+	// 凭证没变，事后审计时「这条渠道的凭证什么时候换过」就再也答不出来。
+	//
+	// 主账号可能同时挂在别的渠道上。那时换 key 会一起生效——这正是账号
+	// 实体要的效果（同池渠道无感切换），不是越界。
 	Credential *string
 }
 
@@ -577,22 +602,28 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 		}
 		add("setting", string(setting))
 	}
+	// 凭证不再落在 channels 上（见迁移 00067），所以它不进 SET，也不让
+	// 「只换 key」被当成 ErrNoChanges：换 key 是一次真实的修改，只是改的是
+	// 账号行。信封在这里封好，等渠道行确认存在之后再写账号。
+	var newEnvelope []byte
+	var newHint string
 	if req.Credential != nil {
 		envelope, err := a.sealCredential(*req.Credential)
 		if err != nil {
 			return err
 		}
-		add("credential_enc", envelope)
+		newEnvelope = envelope
 		// 提示与密文一起换：留着旧提示会让清单上的「末四位」指向
 		// 一把已经不在这条渠道上的凭证——界面拿它做辨识，而它认错了人。
-		add("credential_hint", credential.Hint(*req.Credential))
+		newHint = credential.Hint(*req.Credential)
 	}
 
-	if len(sets) == 0 {
+	if len(sets) == 0 && newEnvelope == nil {
 		return ErrNoChanges
 	}
 	// updated_at 每次都动，于是「改了几个字段」不影响这条语句的行为，
-	// 下面也就能用影响行数判断这条渠道在不在。
+	// 下面也就能用影响行数判断这条渠道在不在。只换 key 时这条语句不改
+	// 任何渠道字段，但它仍要跑一遍：渠道是否存在、是否已删的判据在这里。
 	sets = append(sets, "updated_at = now()")
 	args = append(args, req.ID)
 
@@ -642,6 +673,11 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 			return fmt.Errorf("修改渠道协议失败: %w", err)
 		}
 		if err := insertProtocols(ctx, tx, req.ID, newProtocols); err != nil {
+			return err
+		}
+	}
+	if newEnvelope != nil {
+		if err := replaceChannelCredential(ctx, tx, req.ID, newEnvelope, newHint); err != nil {
 			return err
 		}
 	}
@@ -975,26 +1011,35 @@ type ChannelInfo struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 
-	// CredentialKeys 是这份密文被哪些主密钥包过，见 credential.WrappedWith。
+	// Accounts 是挂在这条渠道上的账号（见迁移 00067），按账号 id 升序。
+	//
+	// 零个是合法的中间态：渠道建得出来、在清单里看得见，但选路会跳过它。
+	// 多个时选路只用第一个（主账号），池内调度是后续工作的事。
+	Accounts []ChannelAccount
+
+	// CredentialKeys 是**主账号**（Accounts 的第一个）那份密文被哪些主密钥
+	// 包过，见 credential.WrappedWith。
 	//
 	// 它回答的是运维真正会问的问题：「这条渠道挂在哪把钥匙下、轮换补到哪一步了」。
-	// 列出它不需要任何密钥材料，也不需要解密。
+	// 列出它不需要任何密钥材料，也不需要解密。零账号时为空——空的含义是
+	// 「没有凭证」，与「凭证挂在没有的钥匙下」由 Accounts 的长度区分。
 	CredentialKeys []string
 
-	// Hint 是凭证的末四位（见 credential.Hint），供界面辨识。
+	// Hint 是主账号凭证的末四位（见 credential.Hint），供界面辨识。
 	//
 	// 它与 CredentialKeys 回答的是两个不同的问题：那一栏说「挂在哪把钥匙下」，
 	// 这一栏说「挂的是我刚发的那个凭证吗」。空表示这一行没有提示——建渠道时
-	// 没写、或凭证短到没有末四位可辨。
+	// 没写、或凭证短到没有末四位可辨，或渠道零账号。
 	//
 	// 它**不是**凭证的一部分：库里存的仍然只有密文，这一列是明文尾部几个字符，
 	// 由写入路径在封装之前顺手取下来（密文一旦生成就再也取不到了）。
 	Hint string
 
-	// CredentialErr 说明 CredentialKeys 为什么是空的。为 nil 表示信封头部解析正常。
+	// CredentialErr 说明主账号的 CredentialKeys 为什么是空的。为 nil 表示
+	// 信封头部解析正常（或这条渠道没有账号）。
 	//
 	// 它记的是**结构**问题：密文被截断、被手工改过。列举不碰钥匙，
-	// 所以「解不开」在这里根本不会发生。
+	// 所以「解不开」在这里根本不会发生。每个账号各自的问题在 Accounts 里。
 	CredentialErr error
 
 	// DeletedAt 是这条渠道被软删的时刻，零值表示没删。
@@ -1125,8 +1170,9 @@ func (a *Admin) queryInfos(ctx context.Context, query string, args ...any) ([]Ch
 
 // listQuery 取回管理面要看的全部列。
 //
-// credential_enc 也在里面，但只用来算 CredentialKeys，不会离开本包：
-// 解码之后它变成一串主密钥标识，密文本体到此为止。
+// 凭证在账号上（见迁移 00067）：这条查询把挂在这条渠道上的账号连同密文
+// 一起带出来，密文只用来算 CredentialKeys，不会离开本包——解码之后它变成
+// 一串主密钥标识，密文本体到此为止。
 //
 // credential_hint 是唯一一列**明文**的凭证信息（末四位），它本来就是给界面
 // 看的，所以照原样带出去。这一条与「只存密文」不矛盾：密文仍然是唯一的
@@ -1150,8 +1196,6 @@ SELECT
     c.weight,
     c.priority,
     c.setting,
-    c.credential_enc,
-    c.credential_hint,
     c.created_at,
     c.updated_at,
     c.deleted_at,
@@ -1159,7 +1203,18 @@ SELECT
     -- 但 doctor 的端点评据要读它（见 DeclaredProtocols）。
     (SELECT COALESCE(json_agg(p.protocol ORDER BY p.protocol), '[]'::json)::text
        FROM channel_protocols p
-      WHERE p.channel_id = c.id) AS protocols
+      WHERE p.channel_id = c.id) AS protocols,
+    -- 挂在这条渠道上的账号（见迁移 00067）。密文以 base64 带出来，只用来
+    -- 算「挂在哪些主密钥下」，不会离开本包；bytea 不能直接进 JSON，
+    -- 所以显式编码，解回来在 scanInfo 里。
+    (SELECT COALESCE(json_agg(json_build_object(
+                    'id', a.id, 'name', a.name, 'weight', ca.weight,
+                    'hint', a.credential_hint,
+                    'enc', encode(a.credential_enc, 'base64')
+                ) ORDER BY a.id), '[]'::json)::text
+       FROM channel_accounts ca
+       JOIN accounts a ON a.id = ca.account_id
+      WHERE ca.channel_id = c.id) AS accounts
   FROM channels c`
 
 // rowScanner 是 *sql.Rows 与 *sql.Row 共用的那一小段：两者都只有一个 Scan，
@@ -1173,26 +1228,21 @@ func scanInfo(rows rowScanner) (ChannelInfo, error) {
 		info         ChannelInfo
 		modelsJSON   string
 		settingRaw   []byte
-		envelope     []byte
-		hint         sql.NullString
 		deletedAt    sql.NullTime
 		protocolsRaw string
+		accountsRaw  string
 	)
 	err := rows.Scan(
 		&info.ID, &info.OwnerUserID, &info.Name, &info.Type, &info.BaseURL,
 		&info.Status, &modelsJSON, &info.Weight, &info.Priority, &settingRaw,
-		&envelope, &hint, &info.CreatedAt, &info.UpdatedAt, &deletedAt,
-		&protocolsRaw,
+		&info.CreatedAt, &info.UpdatedAt, &deletedAt,
+		&protocolsRaw, &accountsRaw,
 	)
 	if err != nil {
 		return ChannelInfo{}, fmt.Errorf("读取渠道行失败: %w", err)
 	}
 	// NULL 折成零值时间：Go 侧只问「删了没」，见 ChannelInfo.DeletedAt。
 	info.DeletedAt = deletedAt.Time
-	// NULL 与空串在这里合并成同一个值：这一列没有「空提示」与「没有提示」
-	// 的区分——凭证短到不足四位时 credential.Hint 原样返回，那种串也不会是
-	// 空的（写入路径拒绝空凭证）。
-	info.Hint = hint.String
 
 	models, err := decodeModels(info.ID, modelsJSON)
 	if err != nil {
@@ -1212,14 +1262,66 @@ func scanInfo(rows rowScanner) (ChannelInfo, error) {
 	}
 	info.Setting = setting
 
-	keys, err := credential.WrappedWith(envelope)
+	accounts, err := decodeChannelAccounts(info.ID, accountsRaw)
 	if err != nil {
-		info.CredentialErr = fmt.Errorf("凭证密文不合法: %w", err)
-	} else {
-		info.CredentialKeys = keys
+		return ChannelInfo{}, err
+	}
+	info.Accounts = accounts
+	// 三个平铺字段描述**主账号**（Accounts 的第一个，也是选路会用的那一个）。
+	// 它们留着是为了不破坏既有调用方（管理面 JSON 与 channel list 的
+	// credential_keys / credential_hint）；完整的池子在 Accounts 里。
+	if len(accounts) > 0 {
+		primary := accounts[0]
+		info.Hint = primary.Hint
+		info.CredentialKeys = primary.CredentialKeys
+		info.CredentialErr = primary.CredentialErr
 	}
 
 	return info, nil
+}
+
+// channelAccountJSON 是 listQuery 里一个账号的形状。
+//
+// Hint 用指针接：列可空，而「没有提示」与「提示是空串」在界面上同义，
+// 但在 JSON 解码这一步必须能区分 null 与 ""，否则 *string 之外的写法
+// 会在 null 上报错。
+type channelAccountJSON struct {
+	ID     int64   `json:"id"`
+	Name   string  `json:"name"`
+	Weight int     `json:"weight"`
+	Hint   *string `json:"hint"`
+	Enc    string  `json:"enc"`
+}
+
+// decodeChannelAccounts 解开 listQuery 带出来的账号 JSON 数组。
+//
+// 一行密文坏了（base64 解不开、信封头不合法）只影响它自己那一栏：与
+// scanInfo 对单条渠道的处置一致——不跳过整条渠道，也不让整次清单失败。
+func decodeChannelAccounts(channelID int64, raw string) ([]ChannelAccount, error) {
+	var rows []channelAccountJSON
+	if err := json.Unmarshal([]byte(raw), &rows); err != nil {
+		return nil, fmt.Errorf("渠道 %d 的账号清单不是合法的 JSON 数组: %w", channelID, err)
+	}
+	out := make([]ChannelAccount, 0, len(rows))
+	for _, row := range rows {
+		account := ChannelAccount{
+			ID:     row.ID,
+			Name:   row.Name,
+			Weight: row.Weight,
+		}
+		if row.Hint != nil {
+			account.Hint = *row.Hint
+		}
+		envelope, err := base64.StdEncoding.DecodeString(row.Enc)
+		if err != nil {
+			account.CredentialErr = fmt.Errorf("凭证密文不是合法的 base64: %w", err)
+			out = append(out, account)
+			continue
+		}
+		account.CredentialKeys, account.CredentialErr = envelopeKeys(envelope)
+		out = append(out, account)
+	}
+	return out, nil
 }
 
 // ── 校验与归一化 ────────────────────────────────────────────────────────

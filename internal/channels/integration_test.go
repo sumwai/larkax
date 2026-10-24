@@ -135,17 +135,38 @@ func insertChannel(ctx context.Context, t *testing.T, db *sql.DB, sealer *creden
 	var id int64
 	err := db.QueryRowContext(ctx, `
 		INSERT INTO channels
-			(owner_user_id, name, type, base_url, credential_enc,
-			 status, models, weight, priority, setting)
-		VALUES ($1, $2, 'openai-compatible', 'https://api.example.com/v1', $3,
-		        $4, $5, $6, $7, '{"supports_tools":true}'::jsonb)
+			(owner_user_id, name, type, base_url, status, models, weight, priority, setting)
+		VALUES ($1, $2, 'openai-compatible', 'https://api.example.com/v1',
+		        $3, $4, $5, $6, '{"supports_tools":true}'::jsonb)
 		RETURNING id`,
-		owner, "ch-"+itoa(nextID()), spec.credential, spec.status,
+		owner, "ch-"+itoa(nextID()), spec.status,
 		models, spec.weight, spec.priority).Scan(&id)
 	if err != nil {
 		t.Fatalf("插入渠道失败: %v", err)
 	}
+	// 00067 之后凭证在账号上：渠道行只有关联，选路取账号 id 最小的那一个。
+	attachAccount(ctx, t, db, id, spec.credential)
 	return id
+}
+
+// attachAccount 给一条渠道挂一个账号并返回账号 id。
+//
+// 密文原样写入，提示留空：本包的夹具不关心末四位，而竖一个假的提示会让
+// 「提示来自写入路径」那条断言无从分辨。凭证存活与否一律用密文能否解开判断。
+func attachAccount(ctx context.Context, t *testing.T, db *sql.DB, channelID int64, envelope []byte) int64 {
+	t.Helper()
+	var accountID int64
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO accounts (name, credential_enc) VALUES ($1, $2) RETURNING id`,
+		"acc-"+itoa(nextID()), envelope).Scan(&accountID); err != nil {
+		t.Fatalf("插入账号失败: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO channel_accounts (channel_id, account_id) VALUES ($1, $2)`,
+		channelID, accountID); err != nil {
+		t.Fatalf("把账号挂到渠道上失败: %v", err)
+	}
+	return accountID
 }
 
 // hourBucket 返回距今最近的那个整点桶，n 为回退的小时数。
@@ -1581,15 +1602,27 @@ func insertChannelB(b *testing.B, db *sql.DB, sealer *credential.Sealer, model s
 	if err != nil {
 		b.Fatalf("封装凭证失败: %v", err)
 	}
-	_, err = db.ExecContext(context.Background(), `
+	var channelID int64
+	err = db.QueryRowContext(context.Background(), `
 		INSERT INTO channels
-			(owner_user_id, name, type, base_url, credential_enc,
-			 status, models, weight, priority, setting)
-		VALUES (NULL, $1, 'openai-compatible', 'https://api.example.com/v1', $2,
-		        'enabled', $3, 1, 0, '{}'::jsonb)`,
-		"bench-"+itoa(nextID()), sealed, []string{model})
+			(owner_user_id, name, type, base_url, status, models, weight, priority, setting)
+		VALUES (NULL, $1, 'openai-compatible', 'https://api.example.com/v1',
+		        'enabled', $2, 1, 0, '{}'::jsonb)
+		RETURNING id`,
+		"bench-"+itoa(nextID()), []string{model}).Scan(&channelID)
 	if err != nil {
 		b.Fatalf("插入渠道失败: %v", err)
+	}
+	var accountID int64
+	if err := db.QueryRowContext(context.Background(), `
+		INSERT INTO accounts (name, credential_enc) VALUES ($1, $2) RETURNING id`,
+		"bench-acc-"+itoa(nextID()), sealed).Scan(&accountID); err != nil {
+		b.Fatalf("插入账号失败: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO channel_accounts (channel_id, account_id) VALUES ($1, $2)`,
+		channelID, accountID); err != nil {
+		b.Fatalf("把账号挂到渠道上失败: %v", err)
 	}
 }
 
@@ -2059,12 +2092,17 @@ func TestRestoreBringsChannelBack(t *testing.T) {
 	}
 }
 
-// channelEnvelopeOf 直接读出一行的凭证密文（清单里没有这一栏）。
+// channelEnvelopeOf 直接读出渠道主账号的凭证密文（清单里没有这一栏）。
 func channelEnvelopeOf(t *testing.T, db *sql.DB, id int64) []byte {
 	t.Helper()
 	var envelope []byte
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT credential_enc FROM channels WHERE id = $1`, id).Scan(&envelope); err != nil {
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT a.credential_enc
+		  FROM channel_accounts ca
+		  JOIN accounts a ON a.id = ca.account_id
+		 WHERE ca.channel_id = $1
+		 ORDER BY a.id
+		 LIMIT 1`, id).Scan(&envelope); err != nil {
 		t.Fatalf("读渠道 %d 的密文失败: %v", id, err)
 	}
 	return envelope

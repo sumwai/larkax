@@ -32,7 +32,7 @@ var ErrRotateRunning = errors.New("另一处轮换正在运行")
 
 // RotateRow 是逐行报告里的一行。
 type RotateRow struct {
-	// ID 是 channels.id。
+	// ID 是 accounts.id。
 	ID int64
 
 	// Keys 是这一行当前挂着的主密钥标识，见 credential.WrappedWith。
@@ -116,12 +116,15 @@ type RotateProgress struct {
 	Failed     int
 
 	// Done 是累计处理过的行数，Total 是开始时数到的总行数。
-	// 两者只用于显示：轮换期间有人新建渠道时，它们对不上是正常的。
+	// 两者只用于显示：轮换期间有人新建账号时，它们对不上是正常的。
 	Done  int64
 	Total int64
 }
 
-// Rotator 对 channels.credential_enc 做主密钥轮换。
+// Rotator 对 accounts.credential_enc 做主密钥轮换。
+//
+// 凭证在账号实体上（见迁移 00067），渠道只是引用它；轮换因此扫的是账号表，
+// 同一条账号被几条渠道共用都只算一行。
 //
 // # 它只重包数据密钥，不解密凭证正文
 //
@@ -237,7 +240,7 @@ func (r *Rotator) Apply(ctx context.Context, progress func(RotateProgress)) (*Ro
 	}
 	defer lock.release(ctx)
 
-	total, countErr := countChannels(ctx, lock.conn)
+	total, countErr := countAccounts(ctx, lock.conn)
 	if countErr != nil {
 		return nil, countErr
 	}
@@ -380,11 +383,11 @@ func (r *Rotator) applyBatch(ctx context.Context, conn *sql.Conn, afterID int64)
 
 		res, execErr := tx.ExecContext(ctx, rotateUpdateQuery, item.id, rewrapped, item.envelope)
 		if execErr != nil {
-			return nil, fmt.Errorf("改写渠道 %d 的凭证失败: %w", item.id, execErr)
+			return nil, fmt.Errorf("改写账号 %d 的凭证失败: %w", item.id, execErr)
 		}
 		affected, affectedErr := res.RowsAffected()
 		if affectedErr != nil {
-			return nil, fmt.Errorf("确认渠道 %d 的改写结果失败: %w", item.id, affectedErr)
+			return nil, fmt.Errorf("确认账号 %d 的改写结果失败: %w", item.id, affectedErr)
 		}
 		if affected == 0 {
 			// 读取与写回之间这一行被别的写入改掉了。带条件的 UPDATE 让它落不
@@ -403,9 +406,9 @@ func (r *Rotator) applyBatch(ctx context.Context, conn *sql.Conn, afterID int64)
 	return result, nil
 }
 
-// eachRow 按 id 顺序分批遍历 channels 表，对每一行调用 fn。
+// eachRow 按 id 顺序分批遍历 accounts 表，对每一行调用 fn。
 //
-// 分批而不是一次把全表读进内存：凭证密文一行几百字节，渠道数通常不大，
+// 分批而不是一次把全表读进内存：凭证密文一行几百字节，账号数通常不大，
 // 但「现在不大」不是不留余量的理由，而按 id 前进的分页写法并不更复杂。
 func (r *Rotator) eachRow(ctx context.Context, fn func(id int64, envelope []byte) error) error {
 	var afterID int64
@@ -434,7 +437,7 @@ type queryer interface {
 func scanBatch(ctx context.Context, q queryer, afterID int64, limit int, fn func(id int64, envelope []byte) error) (int64, int, error) {
 	rows, queryErr := q.QueryContext(ctx, rotateBatchQuery, afterID, limit)
 	if queryErr != nil {
-		return 0, 0, fmt.Errorf("查询渠道失败: %w", queryErr)
+		return 0, 0, fmt.Errorf("查询账号失败: %w", queryErr)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -448,7 +451,7 @@ func scanBatch(ctx context.Context, q queryer, afterID int64, limit int, fn func
 			envelope []byte
 		)
 		if scanErr := rows.Scan(&id, &envelope); scanErr != nil {
-			return 0, 0, fmt.Errorf("读取渠道行失败: %w", scanErr)
+			return 0, 0, fmt.Errorf("读取账号行失败: %w", scanErr)
 		}
 		if fnErr := fn(id, envelope); fnErr != nil {
 			return 0, 0, fnErr
@@ -457,7 +460,7 @@ func scanBatch(ctx context.Context, q queryer, afterID int64, limit int, fn func
 		scanned++
 	}
 	if rowsErr := rows.Err(); rowsErr != nil {
-		return 0, 0, fmt.Errorf("遍历渠道失败: %w", rowsErr)
+		return 0, 0, fmt.Errorf("遍历账号失败: %w", rowsErr)
 	}
 	return lastID, scanned, nil
 }
@@ -527,18 +530,15 @@ func rotateLockHeld(ctx context.Context, db *sql.DB) bool {
 	return false
 }
 
-// countChannels 数一下全表有多少行，只用来给进度一个分母。
+// countAccounts 数一下全表有多少行，只用来给进度一个分母。
 //
-// 数出来的值与实际扫过的行数可能差一点（轮换期间有人新建渠道），
+// 数出来的值与实际扫过的行数可能差一点（轮换期间有人新建账号），
 // 所以它只出现在进度里，不参与任何判断。
-//
-// 已软删的行不计入：扫描（rotateBatchQuery）也跳过它们，两处必须同一个口径，
-// 否则进度会在 100% 之前停住——一个看起来像卡死的正常状态。
-func countChannels(ctx context.Context, conn *sql.Conn) (int64, error) {
+func countAccounts(ctx context.Context, conn *sql.Conn) (int64, error) {
 	var total int64
 	if countErr := conn.QueryRowContext(ctx,
-		`SELECT count(*) FROM channels WHERE `+channelAlive).Scan(&total); countErr != nil {
-		return 0, fmt.Errorf("统计渠道数失败: %w", countErr)
+		`SELECT count(*) FROM accounts`).Scan(&total); countErr != nil {
+		return 0, fmt.Errorf("统计账号数失败: %w", countErr)
 	}
 	return total, nil
 }
@@ -602,26 +602,23 @@ func keysOf(envelope []byte) []string {
 	return keys
 }
 
-// rotateBatchQuery 按 id 顺序取一批渠道。
+// rotateBatchQuery 按 id 顺序取一批账号。
 //
 // 用 keyset 分页（id > 上一批的最后一个）而不是 OFFSET：轮换会改写前面的行，
 // OFFSET 的分页边界随写而漂移，会漏掉或重复某些行。按 id 前进则不会——
 // 每一行要么在本批被处理，要么在更早的批次里处理过。
 //
-// 跳过已软删的行：那些渠道不再使用，给它们的密文补新主密钥没有意义，而
-// Verify 的判据是「全库每一行都含当前主密钥」——两边口径不一致时，一份已经
-// 干净的库会永远 Verify 不通过。这与删除动作不清空密文不矛盾：密文留着是为了
-// 查历史，不是为了「还有一天会用到」。
-const rotateBatchQuery = `SELECT id, credential_enc FROM channels WHERE id > $1 AND ` +
-	channelAlive + ` ORDER BY id LIMIT $2`
+// 账号没有软删状态：删除渠道只删关联，账号本身留着等挂新渠道，所以它的
+// 凭证也必须跟着轮换。
+const rotateBatchQuery = `SELECT id, credential_enc FROM accounts WHERE id > $1 ORDER BY id LIMIT $2`
 
 // rotateUpdateQuery 写回补过副本的密文。
 //
 // 带 credential_enc = $3 这个条件是有意的（乐观并发）：本命令读到写回之间
-// 若有人改了这一行的凭证，这次 UPDATE 会匹配不到行，而不是把对方的改动盖掉。
-// 被跳过的那一行进 Concurrent 清单，最终由 Verify 判它到底补上没有。
+// 若有人换了这个账号的凭证，这次 UPDATE 会匹配不到行，而不是把对方的改动
+// 盖掉。被跳过的那一行进 Concurrent 清单，最终由 Verify 判它到底补上没有。
 //
-// 不动 updated_at：这一列的含义是「这条渠道的配置什么时候改过」，而轮换
-// 既没有改配置也没有改凭证——它只是让同一份密文多挂一把钥匙。轮换一次就把
-// 全库渠道的 updated_at 推到同一天，会把这一列上「谁改了什么」的信息冲掉。
-const rotateUpdateQuery = `UPDATE channels SET credential_enc = $2 WHERE id = $1 AND credential_enc = $3`
+// 不动 updated_at：这一列的含义是「这个账号的凭证什么时候换过」，而轮换
+// 既没有改凭证也没有换 key——它只是让同一份密文多挂一把钥匙。轮换一次就把
+// 全库账号的 updated_at 推到同一天，会把这一列上「谁换了 key」的信息冲掉。
+const rotateUpdateQuery = `UPDATE accounts SET credential_enc = $2 WHERE id = $1 AND credential_enc = $3`

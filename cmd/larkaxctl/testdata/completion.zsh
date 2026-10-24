@@ -54,6 +54,24 @@ _larkaxctl() {
 	esac
 
 	case "$path|$prev" in
+		"account add|--channel")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"account add|--credential-env")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"account update|--credential-env")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"alias create|--channel")
 			case "$cur" in
 			-*) ;;
@@ -2081,6 +2099,8 @@ _larkaxctl() {
 	case "$cur" in
 	-*)
 		case "$path" in
+			"account add") compadd -- --channel --credential-env --env-file --format --quiet --verbose ;;
+			"account update") compadd -- --credential-env --env-file --format --quiet --verbose ;;
 			"alias create") compadd -- --channel --env-file --format --model --overrides --quiet --upstream --verbose ;;
 			"alias delete") compadd -- --env-file --format --id --quiet --verbose ;;
 			"alias list") compadd -- --channel --env-file --format --model --quiet --verbose ;;
@@ -2200,7 +2220,8 @@ _larkaxctl() {
 	esac
 
 	case "$path" in
-		"") compadd -- doctor settings admin version completion channel model alias price upstream-cost user apikey wallet plan usage ledger migrate partition secret maintenance snapshot consent plugin reconcile rotate idempotency calendar ;;
+		"") compadd -- doctor settings admin version completion channel account model alias price upstream-cost user apikey wallet plan usage ledger migrate partition secret maintenance snapshot consent plugin reconcile rotate idempotency calendar ;;
+		"account") compadd -- add list update ;;
 		"admin") compadd -- token ;;
 		"admin token") compadd -- create revoke ;;
 		"alias") compadd -- create list update delete resolve ;;

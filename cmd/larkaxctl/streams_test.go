@@ -213,6 +213,8 @@ func successPathCases(t *testing.T, fx *streamFixture) []successPathCase {
 			}},
 		{command: "channel", what: "list",
 			run: func() error { return runChannel([]string{"list"}) }},
+		{command: "account", what: "list",
+			run: func() error { return runAccount([]string{"list"}) }},
 
 		{command: "model", what: "update",
 			run: func() error {

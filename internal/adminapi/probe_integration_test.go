@@ -358,8 +358,11 @@ func TestProbeModelsCorruptCredential(t *testing.T) {
 	id := merchantChannel(t, h, owner, uniqueName("probe-corrupt-ch"), "openai",
 		"https://api.example.com/v1", []string{uniqueName("probe-corrupt-model")})
 	// 头部版本号对不上，Sealer 会报 ErrMalformed → ErrCredentialCorrupt。
-	if _, err := db.ExecContext(t.Context(),
-		`UPDATE channels SET credential_enc = $1 WHERE id = $2`,
+	// 凭证在渠道的主账号上（见 00067），所以坏的是那一行。
+	if _, err := db.ExecContext(t.Context(), `
+		UPDATE accounts SET credential_enc = $1
+		 WHERE id = (SELECT account_id FROM channel_accounts
+		              WHERE channel_id = $2 ORDER BY account_id LIMIT 1)`,
 		[]byte("not-a-credential-envelope"), id); err != nil {
 		t.Fatalf("写坏密文失败: %v", err)
 	}
