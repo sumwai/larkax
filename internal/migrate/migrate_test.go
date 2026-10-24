@@ -19,6 +19,7 @@ package migrate_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -716,5 +717,107 @@ func TestInboundModelAliasesMigration(t *testing.T) {
 	up()
 	if !exists() {
 		t.Fatal("第二次前进之后表不存在")
+	}
+}
+
+// channelsModelsGINMigration 是给渠道模型清单加 GIN 索引的那条迁移。
+const channelsModelsGINMigration = "00063_channels_models_gin.sql"
+
+// TestChannelsModelsGINMigration 钉住这把索引的形状与往返：up 之后它在、
+// 方法为 GIN、建在 channels.models 上；down 之后它消失；再 up 又回来。
+//
+// # 为什么非要在真库上跑
+//
+// `CREATE INDEX … USING gin` 是 PostgreSQL 的语法与实现，单测里没有任何东西
+// 能替它回答「插进去的是不是一把 GIN 索引」。判据是 pg_index 里那一行：
+// 写成默认的 btree 或者建到别的列上，迁移照样跑完、版本号照样前进，而
+// SuppliesFor 的 `models @> ARRAY[…]` 仍然整表扫。
+//
+// 没有 LARKAX_DB_DSN 时跳过（见 testdb.Open），CI 的集成测试门禁里会跑。
+func TestChannelsModelsGINMigration(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	version, err := goose.NumericComponent(channelsModelsGINMigration)
+	if err != nil {
+		t.Fatalf("从迁移文件名读版本号失败: %v", err)
+	}
+	previous := version - 1
+
+	goose.SetBaseFS(migrate.FS())
+	if err := migrate.SetDialect("postgres"); err != nil {
+		t.Fatalf("设置方言失败: %v", err)
+	}
+	up := func() {
+		t.Helper()
+		if err := goose.UpContext(ctx, db, "."); err != nil {
+			t.Fatalf("前进到最新失败: %v", err)
+		}
+	}
+	down := func() {
+		t.Helper()
+		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
+			t.Fatalf("回滚到 %d 失败: %v", previous, err)
+		}
+	}
+
+	// indexState 返回索引的访问方法、所在表与第一列；索引不存在时 ok 为 false。
+	// 三样一起取，是为了让「存在但形状不对」也能被同一条断言报出来。
+	indexState := func() (method, table, column string, ok bool) {
+		t.Helper()
+		err := db.QueryRowContext(ctx, `
+			SELECT am.amname, tbl.relname, att.attname
+			  FROM pg_class idx
+			  JOIN pg_index i ON i.indexrelid = idx.oid
+			  JOIN pg_class tbl ON tbl.oid = i.indrelid
+			  JOIN pg_am am ON am.oid = idx.relam
+			  JOIN pg_attribute att ON att.attrelid = tbl.oid AND att.attnum = i.indkey[0]
+			 WHERE idx.relname = 'channels_models_gin_idx'`).
+			Scan(&method, &table, &column)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", "", "", false
+		}
+		if err != nil {
+			t.Fatalf("读索引定义失败: %v", err)
+		}
+		return method, table, column, true
+	}
+
+	// 收尾：把库推回最新。中途红掉时，本包别的用例不该被留在旧结构上。
+	t.Cleanup(func() {
+		if err := goose.UpContext(context.Background(), db, "."); err != nil {
+			t.Logf("收尾时前进失败（库可能已经不在旧版本上）：%v", err)
+		}
+	})
+
+	// 1. 全量 up 之后索引在，是 GIN，建在 channels.models 上。
+	up()
+	method, table, column, ok := indexState()
+	if !ok {
+		t.Fatal("全量迁移之后 channels_models_gin_idx 不存在")
+	}
+	if method != "gin" {
+		t.Errorf("channels_models_gin_idx 的访问方法 = %q，期望 gin（btree 索引支撑不了"+
+			"`models @> ARRAY[…]`）", method)
+	}
+	if table != "channels" || column != "models" {
+		t.Errorf("channels_models_gin_idx 建在 %s(%s) 上，期望 channels(models)", table, column)
+	}
+
+	// 2. 退到本迁移的前一条：索引随之消失。
+	down()
+	if _, _, _, stillThere := indexState(); stillThere {
+		t.Fatal("回滚之后 channels_models_gin_idx 还在")
+	}
+
+	// 3. 再 up 一次：索引与它的形状一起回来。
+	up()
+	method, table, column, ok = indexState()
+	if !ok {
+		t.Fatal("第二次前进之后 channels_models_gin_idx 不存在")
+	}
+	if method != "gin" || table != "channels" || column != "models" {
+		t.Errorf("第二次前进之后索引 = %s on %s(%s)，期望 gin on channels(models)",
+			method, table, column)
 	}
 }

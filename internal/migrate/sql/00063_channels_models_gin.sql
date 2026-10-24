@@ -1,0 +1,34 @@
+-- +goose Up
+-- 一条渠道供哪些模型记在 channels.models（text[]）里，判断「这条渠道供不供
+-- 某个模型」用的是 `models @> ARRAY[名]`（见 channels.suppliesModel）。没有
+-- 索引时这条判据要把整张渠道表扫一遍，于是单模型页的供给查询随渠道总数增长。
+--
+-- # 为什么不用 CREATE INDEX CONCURRENTLY
+--
+-- CONCURRENTLY 不阻塞写入，但它不能跑在事务里；而迁移器（goose）默认把每条
+-- 迁移包在事务里，绕开这一点要写它的 NO TRANSACTION 注解，那是本仓库从未
+-- 用过的迁移写法。
+--
+-- 要看清建索引那一秒锁住的是谁：CREATE INDEX 拿的是 ShareLock，只挡写、
+-- 不挡读——迁移期间读渠道的请求（目录页、报价、选路）不受影响。被挡住的是
+-- 写，而且都是单行写（INSERT 一行、UPDATE 按主键一行）：其中 streak 更新
+-- 在请求路径上、每次调用一次（RecordCall 同步跑一遍 streakSQL，改
+-- consecutive_failures 与 last_failure_at，见 internal/channels/record.go
+-- 与 gateway.recordCall），它排队超过写健康度的 5 秒上限（recordTimeout）
+-- 才失败，失败只记日志，不影响调用方拿到的结论；其余是管理面的偶发操作
+-- （建渠道、改配置、切换状态、软删/恢复、轮换凭证），它们排队超过各自请求的
+-- 期限才报错，错误返回给操作者。而实测建索引约 1 秒（#1113），所以正常
+-- 情况下这些写只是晚到，不会丢。
+--
+-- 结论：为这 1 秒的写锁引入本仓从未用过的迁移形态不划算。普通写法跟着既有
+-- 的事务包装走，往返由 internal/migrate 的集成用例
+-- TestChannelsModelsGINMigration 钉住。索引约 9.6 MB（#1113 实测）。
+--
+-- # fastupdate 保持默认
+--
+-- 不写 `WITH (fastupdate = off)`：关掉它写入代价大约翻倍（#1113 实测插入
+-- +120%、改 models +112%），而默认值下的代价已经够低（+5.4% / +11.5%）。
+CREATE INDEX channels_models_gin_idx ON channels USING gin (models);
+
+-- +goose Down
+DROP INDEX channels_models_gin_idx;
