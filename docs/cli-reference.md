@@ -653,7 +653,7 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
 覆盖必须显式给 `position`。
 
 分档不必手改整张表：`price tier` 往 `overrides` 里增删带门槛的那几段（见
-[`price tier`](#price-tier)）。
+[`price tier`](#price-tier)）；峰段同理用 `price peak`（见 [`price peak`](#price-peak)）。
 
 `day_kind` 与 `holidays` 读日历数据：那一年没有导入、或当天查不到记录时求值失败，
 不会退回某一档价（见 [calendar-data.md](calendar-data.md)）。
@@ -765,6 +765,51 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
 `add` 与 `remove` 都要 `--by`：这几次写入会重新编译表达式、留一版
 `pricing_rule_versions`，`changed_by` 记的就是它。`list` 的 `-o json` 每段给
 `segment`、`above` 与 `prices`（每 token）。
+
+#### `price peak`
+
+管理一条计价规则的峰段：往结构化定价表的 `overrides` 里增删带 `window` 的那几
+段。规则必须先有一张表（`price add --schedule-file`），手写表达式改不出可枚举的
+段，命令直接报错。
+
+`larkaxctl price peak add gemini-flash --tz Asia/Shanghai --window "01:00-04:00,06:00-10:00" --weekdays mon-fri --in 0.3 --out 1.2 --by alice`
+追加一段，stdout 打出新段号；`price peak list <规则名 或 ID>` 列出全部峰段，每段
+的段号、时段、星期、其余条件与它改写的单价；`price peak remove <规则名 或 ID> <段号> --by alice` 删掉一段。
+定位符与 `price update` 同一套：纯数字按 ID，其余按名字查，命中多条时报错并列出候选。
+
+`--tz` 必填，写 IANA 时区名（例如 `Asia/Shanghai`）。一张表只有一个时区：它与这
+张表已有的 `tz` 不一致时报参数错，表里没有时区时以这次给的为准。`--window` 写
+`HH:MM-HH:MM`，多段用逗号，两端必须是整点，可以跨零点（`22:00-08:00`）；整串写进
+同一条覆盖的 `window`，求值时各段分别命中。
+
+`--weekdays` 收逗号分隔的缩写（`mon,tue`）或闭区间（`mon-fri`，按
+`sun/mon/tue/wed/thu/fri/sat` 的次序展开，不跨周），缺省表示每天。七个都给时按每
+天处理。`--exclude-holidays` 编译成 `day_kind: "work"`，只在工作日命中；它要读日历
+数据，那一年没有数据时求值失败（见 [calendar-data.md](calendar-data.md)）。
+
+**组合档**：`--above <tokens>` 给了就把 `min_context_tokens` 写进同一条覆盖，与
+`window` 并排。命中条件是「峰段**且**输入上下文达到门槛」，两个维度是且不是或。这
+一条在 `price peak list` 与 `price tier list` 里是**同一个段号**——它们是同一条
+`overrides` 条目，只是两张清单各按自己认得的那一维筛选。
+
+单价旗标与 `price add` 是同一组，单位默认每百万 token，`--unit token` 表示给的
+就是每 token 的价。**只写要改的键**：没写的键沿用 `base`，不是写成 0。给了 `base`
+里没有的键会被拒——那一段没有兜底价可沿用。
+
+段号从 1 开始，是这条规则 `overrides` 数组里的位置；`price peak list` 打出来的
+段号可以直接给 `remove`，打印次序与段号一致。`list` 只列 `window` 非空的覆盖：没
+有时段的阶梯只在 `price tier list` 里，组合档两个清单都出现。单价按落库口径（每
+token）打印，与 `price show` 看到的是同一份。
+`remove` 只删峰段：选中的那段没有 `window` 时报错，其余覆盖用
+`price update --schedule-file` 改写整张表。
+
+`add` 与 `remove` 都要 `--by`：这几次写入会重新编译表达式、留一版
+`pricing_rule_versions`，`changed_by` 记的就是它。`list` 的 `-o json` 每段给
+`segment`、`window` 与 `prices`（每 token），有星期、`day_kind`、`holidays` 与
+`above` 时一并给出。
+
+退出码与 `price` 那一节一致：缺参数、`--tz` 与表不一致、规则名或 ID 认不出给 `2`；
+窗口重叠、`overrides` 校验不过给 `1`；`--by` 认不出给 `4`。
 
 #### `price calendar`
 
