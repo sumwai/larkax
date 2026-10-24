@@ -982,7 +982,7 @@ func printPriceCoverageHint(w io.Writer, expression string, schedule *pricing.Sc
 			return
 		}
 		// subject 末尾的空格落在 base 与「没有覆盖」之间：拉丁词挨着汉字
-		// 挤在一起不好读，也过不了手页那条中英间距的判据。
+		// 挤在一起不好读，也过不了手册那条中英间距的判据。
 		_, _ = io.WriteString(w, priceCoverageHint("这张定价表的 base ", missing))
 		return
 	}

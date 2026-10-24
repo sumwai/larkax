@@ -1760,7 +1760,7 @@ type doctorEndpointSpec struct {
 // 这张表是校验与报错的唯一来源。帮助文本里另有两处手写的枚举，都由用例钉住：
 // 短版与长版用法里的 `[--endpoint …]` 串（TestDoctorUsageMatchesEndpointTable），
 // 以及 doctorUsage 说明段里「<名字> 是 POST <path>」的逐条描述
-// （TestDoctorUsageDescribesEveryEndpoint）。手页由 usage 生成，
+// （TestDoctorUsageDescribesEveryEndpoint）。手册由 usage 生成，
 // check-man-pages.sh 逐字节比对产物与来源，改完帮助要重生成；docs/ 里的那几处
 // 清单（散文段落与表格）随文档一起人工维护，不在用例覆盖内。
 //

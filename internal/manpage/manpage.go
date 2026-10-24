@@ -1,10 +1,10 @@
-// Package manpage 把命令注册表与 docs/cli-reference.md 渲染成 roff 手页。
+// Package manpage 把命令注册表与 docs/cli-reference.md 渲染成 roff 手册。
 //
 // # 单源
 //
 // 名字、分组与一句话来自命令注册表（cmd/larkaxctl 的 commandGroups），长文本来自
-// docs/cli-reference.md。两边不各抄一份：改了注册表而没同步手页时，
-// scripts/check-man-pages.sh 会红——没有那道门，手页会在第一次改动之后就开始撒谎。
+// docs/cli-reference.md。两边不各抄一份：改了注册表而没同步手册时，
+// scripts/check-man-pages.sh 会红——没有那道门，手册会在第一次改动之后就开始撒谎。
 //
 // 生成器本身只认这两份输入，不知道仓库长什么样：输入是文本，输出是文件内容，
 // 路径由调用方给（见 cmd/larkaxctl 的 man_test.go）。于是它可以用夹具测透，
@@ -18,7 +18,7 @@
 // # 标题文字取自源文件
 //
 // 首页那几个分节的标题（全局约定、按命令、搬过家的命令）是从源文件读回来的，
-// 不是在这里另写一遍：另写一遍的话，源文件里改了标题，手页上还是旧的那一个，
+// 不是在这里另写一遍：另写一遍的话，源文件里改了标题，手册上还是旧的那一个，
 // 而两处都是中文短句，看的人不会觉得哪里不对。
 //
 // # 不认识的结构要报错
@@ -110,7 +110,7 @@ const (
 // ParseReference 读 docs/cli-reference.md。
 //
 // 认得的顶层分节只有三个：全局约定、按命令、搬过家的命令。多出一个就报错——
-// 不报的话，新加的那一节会从手页上消失，而删除与「本来就没写」长得一样。
+// 不报的话，新加的那一节会从手册上消失，而删除与「本来就没写」长得一样。
 func ParseReference(md string) (*Reference, error) {
 	blocks, err := parseBlocks(md)
 	if err != nil {
@@ -528,7 +528,7 @@ func renderCommand(ref *Reference, c Command) ([]byte, error) {
 // header 写 roff 的文件头。
 //
 // **不写生成日期**：日期一变，每次生成的产物都与上一次不同，同步门就再也分不出
-// 「内容变了」与「今天又生成了一次」。手页的版本信息由包本身带着，不在这一行。
+// 「内容变了」与「今天又生成了一次」。手册的版本信息由包本身带着，不在这一行。
 //
 // 后面两行关掉默认的排版行为，因为本页的正文是中文：
 //
