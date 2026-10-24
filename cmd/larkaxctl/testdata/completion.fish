@@ -184,7 +184,7 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_sub
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout' -a 'approve'
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout' -a 'reject'
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout' -a 'paid'
-complete -c larkaxctl -l env-file
+complete -c larkaxctl -l env-file -r
 complete -c larkaxctl -l format
 complete -c larkaxctl -l quiet
 complete -c larkaxctl -l verbose

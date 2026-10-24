@@ -231,6 +231,19 @@ func completionGlobalEnumValues() map[string][]string {
 	}
 }
 
+// globalValueFlags 是全局选项里「吃取值、但取值不是枚举」的那几条：fish 生成物
+// 给它们加 `-r`，让 fish 停下来等取值并保留文件名补全。
+//
+// 不并进 globalEnums：那张表生成的是 `-x -a '取值…'`，`-x` 会把文件补全一起关掉。
+// 给 `--env-file` 写成 `-x -a` 等于告诉 fish「它只认这几个词、别补文件」，而它要的
+// 恰恰是文件名；反过来把 `--format` 挪进这里，`table` / `json` 就补不出来、只剩
+// 文件名。`-x` 与 `-r` 是两种语义，混一张表两头都会错。
+//
+// 这份清单必须与 usageNotes 的「全局选项」一节对得上（取值位置写成 `<…>` 的都算
+// 吃取值）：由 TestGlobalValueFlagsMatchUsage 交叉检查。漏掉一条的表现是那个选项
+// 在 fish 里按 Tab 补出动词——本 issue 修的就是这个症状。
+var globalValueFlags = []string{"--env-file"}
+
 // completionPaths 列出要遍历的命令路径。
 //
 // migrate 只走一级：它的动作不吃自己的 flag 集，而 `-h` 落在动作之后会被当成
@@ -339,24 +352,17 @@ type completionFlag struct {
 // 字母，写在 Tab 里反而把真正要选的那几个挤走；旧名不占 Tab 的位置（见帮助
 // 文本末段）。所以只列正式的长选项。
 //
-// 同一个名字注册两次时，两次判出的「吃不吃取值」理应一致。不一致说明两条注册
-// 路径对同一个选项的认识分叉了——这里把它写进 stderr，不静默挑一边。
+// 同名只留第一次。现有注册路径到不了第二次：同一条命令里重名注册，flag 包在
+// `Var` 那一步就 panic 了，而采集发生在注册之后。留着去重是为了将来真出现两条
+// 注册路径时，生成物仍有确定形状。
 func ownOptions(data completionData, path string) []completionFlag {
-	index := map[string]int{}
+	index := map[string]bool{}
 	out := make([]completionFlag, 0, len(data.flags[path]))
 	for _, entry := range data.flags[path] {
-		if len(entry.name) < 2 || strings.HasPrefix(entry.name, "-") {
+		if len(entry.name) < 2 || strings.HasPrefix(entry.name, "-") || index[entry.name] {
 			continue
 		}
-		if i, seen := index[entry.name]; seen {
-			if out[i].takesValue != entry.takesValue {
-				fmt.Fprintf(os.Stderr,
-					"补全：%s 的 --%s 注册了两次，一次吃取值一次不吃，按第一次的算\n",
-					path, entry.name)
-			}
-			continue
-		}
-		index[entry.name] = len(out)
+		index[entry.name] = true
 		out = append(out, completionFlag{name: "--" + entry.name, takesValue: entry.takesValue})
 	}
 	slices.SortFunc(out, func(a, b completionFlag) int { return strings.Compare(a.name, b.name) })

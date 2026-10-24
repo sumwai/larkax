@@ -243,8 +243,8 @@ func TestCompletionWiresEnums(t *testing.T) {
 	}
 }
 
-// TestFishCompletionMarksValueFlags 断言 fish 生成物给吃取值的自有选项加了 `-r`，
-// 布尔开关与有枚举的选项没加。
+// TestFishCompletionMarksValueFlags 断言 fish 生成物给吃取值的选项加了 `-r`（自有的
+// 与全局的），布尔开关与有枚举的选项没加。
 //
 // 逐行比字面串，不比「包含某个选项名」：`-r` 在行尾，只查名字的话加了没加都能过。
 func TestFishCompletionMarksValueFlags(t *testing.T) {
@@ -293,6 +293,18 @@ func TestFishCompletionMarksValueFlags(t *testing.T) {
 			want: true,
 		},
 		{
+			// 全局选项里吃取值的那一条：与枚举不同，它加的是 `-r`——取值是
+			// 任意路径，`-x` 会把文件名补全关掉。
+			name: "全局取值选项 --env-file 带 -r",
+			line: "complete -c larkaxctl -l env-file -r",
+			want: true,
+		},
+		{
+			name: "全局取值选项不带 -x（文件补全要留着）",
+			line: "complete -c larkaxctl -l env-file -x",
+			want: false,
+		},
+		{
 			name: "布尔开关带上 -r 的那一行不存在",
 			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l credential-stdin -r",
 			want: false,
@@ -307,25 +319,93 @@ func TestFishCompletionMarksValueFlags(t *testing.T) {
 	}
 }
 
-// TestOwnOptionsReportsConflictingRegistrations 钉住同一个名字两次判得不一样时的处理：
-// 取第一次的判定，并把分歧写到 stderr。
+// boolFlagValue 是只实现标准库约定的假 flag.Value：IsBoolFlag 的值由它自己决定。
+type boolFlagValue bool
+
+func (b boolFlagValue) String() string   { return "false" }
+func (b boolFlagValue) Set(string) error { return nil }
+func (b boolFlagValue) IsBoolFlag() bool { return bool(b) }
+
+// plainFlagValue 不实现 IsBoolFlag，与 String / Int 这类一样吃取值。
+type plainFlagValue struct{}
+
+func (plainFlagValue) String() string   { return "" }
+func (plainFlagValue) Set(string) error { return nil }
+
+// TestTakesValue 逐格钉住「一种 flag.Value 吃不吃取值」的判定。
 //
-// 静默挑一边会让这类数据错误一直藏着——生成物看起来正常，只有某个选项的补全
-// 行为与预期不同；而那种现象很难反查到是注册处写重了。
-func TestOwnOptionsReportsConflictingRegistrations(t *testing.T) {
-	data := completionData{flags: map[string][]collectedFlag{
-		"demo": {
-			{name: "id", takesValue: true},
-			{name: "id", takesValue: false},
-		},
-	}}
-	var options []completionFlag
-	_, stderr := captureStreams(t, func() { options = ownOptions(data, "demo") })
-	if len(options) != 1 || options[0].name != "--id" || !options[0].takesValue {
-		t.Fatalf("ownOptions = %+v，期望只留第一次那条 --id（吃取值）", options)
+// 三个方向各一格。生产里 `fs.Var` 目前只注册不实现 IsBoolFlag 的值，
+// 「IsBoolFlag 返回 true」那一支没有别的用例经过——把它删掉（`return !ok`）
+// 在整包里不会红，这一格就是为它留的。
+func TestTakesValue(t *testing.T) {
+	cases := []struct {
+		name  string
+		value flag.Value
+		want  bool
+	}{
+		{"IsBoolFlag 返回 true 的按开关处理", boolFlagValue(true), false},
+		{"IsBoolFlag 返回 false 的吃取值", boolFlagValue(false), true},
+		{"没实现 IsBoolFlag 的吃取值", plainFlagValue{}, true},
 	}
-	if !strings.Contains(stderr, "demo 的 --id 注册了两次") {
-		t.Errorf("stderr = %q，期望点出重复注册处的分歧", stderr)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := takesValue(tc.value); got != tc.want {
+				t.Errorf("takesValue(%T) = %v，期望 %v", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGlobalValueFlagsMatchUsage 交叉检查两份清单：usageNotes 的「全局选项」一节里
+// 凡是带取值占位的（`--xxx <…>`），必须已经接上——枚举进 globalEnums，其余进
+// globalValueFlags；反过来 globalValueFlags 的每一条都必须真在那节里、且带占位。
+//
+// 两份清单分不开：usageNotes 是给人看的，生成器要的是按语义分好的那一张。漏接的
+// 表现是那个选项在 fish 里按 Tab 补出动词，而根帮助页看着一切正常——#1171 修的就是
+// 这个症状，所以这条护栏值一条用例。
+func TestGlobalValueFlagsMatchUsage(t *testing.T) {
+	section := usageNotes
+	if i := strings.Index(section, "全局选项"); i >= 0 {
+		section = section[i:]
+	}
+	if i := strings.Index(section, "\n\n"); i >= 0 {
+		section = section[:i]
+	}
+	// 一行一个全局选项：`  --name <占位>  说明` 或 `  --name  说明`。
+	lineRE := regexp.MustCompile(`(?m)^\s*(--[a-z][a-z0-9-]*)(\s+<[^>]*>)?`)
+	declared := map[string]bool{} // 名字 → 是否带取值占位
+	for _, m := range lineRE.FindAllStringSubmatch(section, -1) {
+		declared[m[1]] = m[2] != ""
+	}
+	if len(declared) == 0 {
+		t.Fatalf("没从 usageNotes 里解析出全局选项：解析规则与帮助文本的格式脱节了")
+	}
+
+	enums := completionGlobalEnumValues()
+	for name, takesValue := range declared {
+		if !takesValue {
+			continue
+		}
+		_, wiredEnum := enums[name]
+		wiredValue := slices.Contains(globalValueFlags, name)
+		switch {
+		case wiredEnum && wiredValue:
+			t.Errorf("全局选项 %s 同时出现在 globalEnums 与 globalValueFlags："+
+				"`-x -a` 与 `-r` 是两种语义，只能选一种", name)
+		case !wiredEnum && !wiredValue:
+			t.Errorf("全局选项 %s 在帮助文本里有取值占位，却没接上补全："+
+				"枚举加进 globalEnums，自由取值加进 globalValueFlags", name)
+		}
+	}
+	for _, name := range globalValueFlags {
+		takesValue, ok := declared[name]
+		if !ok {
+			t.Errorf("globalValueFlags 里的 %s 不在 usageNotes 的全局选项一节里：两份清单分岔了", name)
+			continue
+		}
+		if !takesValue {
+			t.Errorf("globalValueFlags 里的 %s 在帮助文本里没有取值占位：它不该按吃取值处理", name)
+		}
 	}
 }
 
@@ -437,20 +517,33 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 // 而不是像 `-x` 那样把取值补全整个关掉。
 //
 // 别处的行为用例都在空目录里跑（见 runFishCompletion）。在空目录里 `-r` 与 `-x`
-// 给出的候选都是空，只有这一格能把两者分开。
+// 给出的候选都是空，只有这一格能把两者分开。自有选项与全局选项各一格：两者的
+// `-r` 由不同分支生成（`ownOptions` 与 `globalValueFlags`），只钉一处时另一处
+// 漏掉不会红。
 func TestFishCompletionValueFlagOffersFiles(t *testing.T) {
 	fish, ok := requireCompletionShell(t, "fish")
 	if !ok {
 		return
 	}
+	script := fishCompletionScript(buildCompletionData())
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "schedule.json"), []byte("{}"), 0o600); err != nil {
 		t.Fatalf("写候选文件失败：%v", err)
 	}
-	got := runFishCompletionIn(t, fish, fishCompletionScript(buildCompletionData()),
-		[]string{"price", "create", "--schedule-file"}, dir)
-	if !slices.Contains(got, "schedule.json") {
-		t.Errorf("候选 = %v，期望有 schedule.json：`-r` 应当保留文件补全", got)
+	cases := []struct {
+		name  string
+		words []string
+	}{
+		{"自有选项 --schedule-file", []string{"price", "create", "--schedule-file"}},
+		{"全局选项 --env-file", []string{"--env-file"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runFishCompletionIn(t, fish, script, tc.words, dir)
+			if !slices.Contains(got, "schedule.json") {
+				t.Errorf("候选 = %v，期望有 schedule.json：`-r` 应当保留文件补全", got)
+			}
+		})
 	}
 }
 

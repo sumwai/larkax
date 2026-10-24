@@ -167,7 +167,14 @@ func fishCompletionScript(data completionData) string {
 	}
 
 	for _, name := range globalOptionNames() {
-		fmt.Fprintf(&b, "complete -c larkaxctl -l %s\n", strings.TrimPrefix(name, "--"))
+		suffix := ""
+		if slices.Contains(globalValueFlags, name) {
+			// 与自有选项同一条判据：`-r` 声明吃取值，文件补全仍开着。
+			// 枚举类的全局选项走下面那条 `-x -a`，这里不加。
+			suffix = " -r"
+		}
+		fmt.Fprintf(&b, "complete -c larkaxctl -l %s%s\n",
+			strings.TrimPrefix(name, "--"), suffix)
 	}
 	// 全局选项的取值挂无条件的那一条：fish 的选项在子命令前后都认，不加
 	// `__fish_seen_subcommand_from` 条件；加了反而只在某几条路径下补得出来。
