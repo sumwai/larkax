@@ -51,6 +51,10 @@ func bashCompletionScript(data completionData) string {
 	}
 	b.WriteString("\tesac\n\n")
 
+	// 取值位只 return，不碰 COMPREPLY：末尾 `complete -o default` 在函数产出为空
+	// 时才接手补文件名，这里的「空」就是那次回落的前提。
+	writeValuePositionFallback(&b, data, "return 0")
+
 	b.WriteString("\tcase \"$cur\" in\n")
 	b.WriteString("\t-*)\n")
 	b.WriteString("\t\tcase \"$path\" in\n")
@@ -108,6 +112,10 @@ func zshCompletionScript(data completionData) string {
 			shellCasePattern("|"+flag), strings.Join(data.globalEnums[flag], " "))
 	}
 	b.WriteString("\tesac\n\n")
+
+	// zsh 没有 bash 的 `-o default`：函数不产出候选时它不会自己去补文件，
+	// 取值位要显式调 `_files`。
+	writeValuePositionFallback(&b, data, "_files; return")
 
 	b.WriteString("\tcase \"$cur\" in\n")
 	b.WriteString("\t-*)\n")
@@ -236,6 +244,52 @@ func fishQuote(text string) string {
 // 不含 shell 的元字符，所以直接用双引号包住即可。
 func shellCasePattern(key string) string {
 	return `"` + key + `"`
+}
+
+// writeValuePositionFallback 写出「取值位」那一段：`$prev` 是吃取值的选项时，
+// 把补全交回给 shell 自己（bash 传 `return 0`，zsh 传 `_files; return`）。
+//
+// 每条分支里的内层 `case "$cur" in -*` 是守卫：当前词以 `-` 开头时什么都不做，
+// 落回下面那段的选项名补全。没有它，`larkaxctl --env-file -<TAB>` 一个候选都不给
+// ——敲到这里的人下一步想要的是另一个选项，不是文件名。
+//
+// 位置**不能挪**，这是本段唯一的坑：
+//   - 挪到下面动词分派（`case "$path"`）之后：顶层那几格（路径是空串）会先被填上
+//     一级命令，再交回 shell 已经晚了，顶层 `-o default` 的回落被压掉。叶子路径上
+//     挪晚一步看不出来——那里没有下一级词表可填。
+//   - 挪进 `case "$cur" in -*` 的嵌套分支：那一支只处理以 `-` 开头的当前词，空
+//     `$cur` 时它根本不执行，这一段等于没写；`$cur` 以 `-` 开头时守卫让两版一样，
+//     那一格分不出来。
+//
+// 行为用例只覆盖少数几格（`--env-file`、`--schedule-file`、`--id`），漏掉一条自有
+// 键它看不见：那些键都在叶子路径上，bash 那一段本来就没有词表可填、候选仍是空，
+// zsh 只是从 `_files` 变成空。只有全局 `--env-file` 漏了才明显（顶层有词表，补
+// 出来的是一级命令）。所以 completion_test.go 另有一条位置断言：期望清单在测试里
+// 从注册表独立走一遍，逐条钉住对应那一段「在顶层 `case "$cur"` 之前、恰好一份」；
+// 生成器用的 valueOptionKeys 与这份清单相等，由同一条用例里另一处断言负责。
+func writeValuePositionFallback(b *strings.Builder, data completionData, action string) {
+	b.WriteString("\tcase \"$path|$prev\" in\n")
+	for _, key := range valueOptionKeys(data) {
+		writeValuePositionBranch(b, shellCasePattern(key), action)
+	}
+	// 全局选项对每条命令都生效，路径用 `*` 通配，写法与全局枚举那一支相同：
+	// `*` 不引号才是通配符，`|--env-file` 必须引号（否则 `|` 是多模式分隔符）。
+	names := slices.Clone(globalValueFlags)
+	slices.Sort(names)
+	for _, name := range names {
+		writeValuePositionBranch(b, "*"+shellCasePattern("|"+name), action)
+	}
+	b.WriteString("\tesac\n\n")
+}
+
+// writeValuePositionBranch 写出一条取值位分支：守卫 + 两壳各自的动作。
+func writeValuePositionBranch(b *strings.Builder, pattern, action string) {
+	fmt.Fprintf(b, "\t\t%s)\n", pattern)
+	b.WriteString("\t\t\tcase \"$cur\" in\n")
+	b.WriteString("\t\t\t-*) ;;\n")
+	fmt.Fprintf(b, "\t\t\t*) %s ;;\n", action)
+	b.WriteString("\t\t\tesac\n")
+	b.WriteString("\t\t\t;;\n")
 }
 
 // wordPaths 是 words 的键，按字典序且空路径排在最前面（它是顶层那一支）。

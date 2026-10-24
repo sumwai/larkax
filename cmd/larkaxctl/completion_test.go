@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"go/ast"
 	"go/token"
 	"os"
@@ -432,45 +433,53 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 		name  string
 		words []string // `larkaxctl` 之后、正在输入的那个词之前的部分
 		check func(t *testing.T, shell string, got []string)
+		cur   string // 正在输入的那个词；空串是「还没敲」
 	}{
 		{"--format 补取值", []string{"--format"}, func(t *testing.T, shell string, got []string) {
-			want := []string{"table", "json"}
-			gotCmp, wantCmp := got, want
-			if shell == "fish" {
-				// fish 的 `complete -C` 会把候选按字典序排过再返回：顺序不归我们
-				// 定，也不钉成契约，所以这一格按排序后的副本比较。生成物里
-				// `-a 'table json'` 的书写顺序仍由 TestCompletionWiresEnums 的
-				// 字面串钉住，bash 与 zsh 照旧按顺序比。比较用副本，报错仍按
-				// 契约顺序打期望值——否则失败信息会把 `[json table]` 说成期望。
-				gotCmp = slices.Clone(got)
-				slices.Sort(gotCmp)
-				wantCmp = slices.Clone(want)
-				slices.Sort(wantCmp)
-			}
-			if !slices.Equal(gotCmp, wantCmp) {
-				t.Errorf("候选 = %v，期望 %v", got, want)
-			}
-		}},
+			requireEnumCandidates(t, shell, got, []string{"table", "json"})
+		}, ""},
+		{"--scope 补取值", []string{"price", "create", "--scope"}, func(t *testing.T, shell string, got []string) {
+			requireEnumCandidates(t, shell, got, []string{"platform", "merchant", "channel"})
+		}, ""},
 		{"顶层补命令", nil, func(t *testing.T, _ string, got []string) {
 			requireNoFormatValues(t, got)
 			if !slices.Contains(got, "channel") {
 				t.Errorf("候选 = %v，缺一级命令 channel", got)
 			}
-		}},
+		}, ""},
 		{"channel 补动作", []string{"channel"}, func(t *testing.T, _ string, got []string) {
 			requireNoFormatValues(t, got)
 			if !slices.Contains(got, "get") {
 				t.Errorf("候选 = %v，缺动作 get", got)
 			}
-		}},
-		{"--id 后面不补取值", []string{"channel", "get", "--id"}, func(t *testing.T, _ string, got []string) {
-			if len(got) != 0 {
-				t.Errorf("候选 = %v，期望空", got)
-			}
-		}},
+		}, ""},
+		// 三个取值位各一格：顶层全局选项（路径是空串，最容易落到「空路径 ⇒ 列
+		// 一级命令」那条）、子命令里的文件路径选项、子命令里的非路径参数。
+		{"顶层 --env-file 取值位", []string{"--env-file"}, func(t *testing.T, shell string, got []string) {
+			requireFileFallback(t, shell, got)
+		}, ""},
+		{"子命令 --schedule-file 取值位", []string{"price", "create", "--schedule-file"},
+			func(t *testing.T, shell string, got []string) {
+				requireFileFallback(t, shell, got)
+			}, ""},
+		{"--id 后面不补取值", []string{"channel", "get", "--id"}, func(t *testing.T, shell string, got []string) {
+			requireFileFallback(t, shell, got)
+		}, ""},
 		{"-o 不补取值", []string{"-o"}, func(t *testing.T, _ string, got []string) {
 			requireNoFormatValues(t, got)
-		}},
+		}, ""},
+		// 取值位上已经敲了一个 `-`：敲到这里的人下一步想要的是另一个选项，不是
+		// 文件名，所以这一格要落回选项名。三壳的候选同为全局长选项（已按字典序），
+		// fish 那边的排序在这里本来就是有序的，不必分叉。
+		//
+		// fish 这一格不是本次改动的证据：fish 生成器没动、也没有这道守卫，改前改后
+		// 都给选项名。守卫只由 bash 与 zsh 两格在验。
+		{"--env-file 后跟 - 仍补选项名", []string{"--env-file"}, func(t *testing.T, _ string, got []string) {
+			want := []string{"--env-file", "--format", "--quiet", "--verbose"}
+			if !slices.Equal(got, want) {
+				t.Errorf("候选 = %v，期望 %v：取值位上的 `-` 应当落回选项名", got, want)
+			}
+		}, "-"},
 	}
 
 	t.Run("bash", func(t *testing.T) {
@@ -481,7 +490,7 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 		script := bashCompletionScript(data)
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				tc.check(t, "bash", runBashCompletion(t, bash, script, tc.words))
+				tc.check(t, "bash", runBashCompletion(t, bash, script, tc.words, tc.cur))
 			})
 		}
 	})
@@ -494,7 +503,7 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 		script := zshCompletionScript(data)
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				tc.check(t, "zsh", runZshCompletion(t, zsh, script, tc.words))
+				tc.check(t, "zsh", runZshCompletion(t, zsh, script, tc.words, tc.cur))
 			})
 		}
 	})
@@ -507,10 +516,188 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 		script := fishCompletionScript(data)
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				tc.check(t, "fish", runFishCompletion(t, fish, script, tc.words))
+				tc.check(t, "fish", runFishCompletion(t, fish, script, tc.words, tc.cur))
 			})
 		}
 	})
+}
+
+// requireEnumCandidates 断言候选恰是枚举的取值。
+//
+// fish 的 `complete -C` 会把候选按字典序排过再返回：顺序不归我们定，也不钉成
+// 契约，所以这一格按排序后的副本比较。生成物里 `-a '…'` 的书写顺序仍由
+// TestCompletionWiresEnums 的字面串钉住，bash 与 zsh 照旧按顺序比。比较用副本，
+// 报错仍按契约顺序打期望值——否则失败信息会把 `[json table]` 说成期望。
+func requireEnumCandidates(t *testing.T, shell string, got, want []string) {
+	t.Helper()
+	gotCmp, wantCmp := got, want
+	if shell == "fish" {
+		gotCmp = slices.Clone(got)
+		slices.Sort(gotCmp)
+		wantCmp = slices.Clone(want)
+		slices.Sort(wantCmp)
+	}
+	if !slices.Equal(gotCmp, wantCmp) {
+		t.Errorf("候选 = %v，期望 %v", got, want)
+	}
+}
+
+// requireFileFallback 断言取值位把补全交回给了 shell。
+//
+// 两个壳的「交回去」长得不一样：
+//   - bash 是 `COMPREPLY` 保持为空——这是末尾 `complete -o default` 接手补文件的
+//     **前提**，也是驱动里能看到的唯一一半（回落本身发生在函数之外）；
+//   - zsh 没有回落，生成脚本自己调 `_files`，替身把它记成 filesStubCandidate。
+//
+// fish 走 `-r`，在空目录里同样没有候选。文件补全真的开着这件事由
+// TestFishCompletionValueFlagOffersFiles 在有文件的目录里钉。
+func requireFileFallback(t *testing.T, shell string, got []string) {
+	t.Helper()
+	if shell == "zsh" {
+		if !slices.Equal(got, []string{filesStubCandidate}) {
+			t.Errorf("候选 = %v，期望恰好 [%s]：取值位应当调 _files，把候选交给它",
+				got, filesStubCandidate)
+		}
+		return
+	}
+	if len(got) != 0 {
+		t.Errorf("候选 = %v，期望空：取值位不产出候选，「交回 shell」才成立", got)
+	}
+}
+
+// TestCompletionValueFallbackPlacement 钉住取值位那一段的位置与份数，
+// 每一条键都断（三百多条）。
+//
+// 行为用例只覆盖三格（`--env-file`、`--schedule-file`、`--id`，见
+// requireFileFallback），漏掉一条自有键它看不见：那些键都在叶子路径上，没有下一级
+// 词表可填，bash 的候选仍是空、zsh 只是从 `_files` 变成空。只有全局 `--env-file`
+// 漏掉时才明显（顶层有词表，补出来的是一级命令）。
+//
+// 这一条按生成物逐键断：每条键那一份必须在顶层 `case "$cur"` 之前，且生成物里恰好
+// 一份。挪到动词分派之后、挪进 `case "$cur" in -*` 的嵌套分支、漏掉某条键，都会红。
+//
+// 期望清单在测试里自己从注册表走一遍（见 fallbackKeysFromFlags），不调
+// valueOptionKeys：两头同源的话，「函数漏了一条键」期望值跟着漏，这条断言与行为
+// 用例会一起绿——金文件只覆盖 zsh / fish，bash 没有第二条守卫。
+func TestCompletionValueFallbackPlacement(t *testing.T) {
+	data := buildCompletionData()
+	keys := fallbackKeysFromFlags(data)
+	if len(keys) == 0 {
+		t.Fatalf("注册表里一条取值位都没有：下面遍历它的循环会一条都不断言")
+	}
+	if got := valueOptionKeys(data); !slices.Equal(got, keys) {
+		t.Errorf("valueOptionKeys 与注册表对不上——两份清单只改了一边：%s", keyDiff(got, keys))
+	}
+	// 枚举位的排除由上面那条相等断言与生成物本身覆盖（fallbackKeysFromFlags 与
+	// valueOptionKeys 都跳过 data.enums，在这里再遍历一遍永远不成立）。
+
+	globals := slices.Clone(globalValueFlags)
+	slices.Sort(globals)
+	// 每条分支的抬头：自有键带路径，全局键的路径是 `*` 通配。
+	patterns := make([]string, 0, len(keys)+len(globals))
+	for _, key := range keys {
+		patterns = append(patterns, shellCasePattern(key)+")")
+	}
+	for _, name := range globals {
+		patterns = append(patterns, "*"+shellCasePattern("|"+name)+")")
+	}
+
+	cases := []struct {
+		shell  string
+		script string
+	}{
+		{"bash", bashCompletionScript(data)},
+		{"zsh", zshCompletionScript(data)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.shell, func(t *testing.T) {
+			// 锚必须带上行首的那个制表符：守卫自己也是 `case "$cur" in`，只是缩进
+			// 深一层；不带缩进的锚会落在第一段守卫上，位置断言恒假绿。
+			at := strings.Index(tc.script, "\n\tcase \"$cur\" in\n")
+			if at < 0 {
+				t.Fatalf("生成物里没有顶层的 `case \"$cur\" in`：生成器结构变了，这条位置断言要重写")
+			}
+			var missing, moved []string
+			for _, pattern := range patterns {
+				switch n := strings.Count(tc.script, pattern+"\n"); n {
+				case 0:
+					missing = append(missing, pattern)
+					continue
+				case 1:
+				default:
+					t.Errorf("生成物里 %q 出现 %d 次：每条键应当恰好一份", pattern, n)
+					continue
+				}
+				if strings.Index(tc.script, pattern+"\n") > at {
+					moved = append(moved, pattern)
+				}
+			}
+			// 整段被删或被挪会牵动几百条，逐条报会把结论淹掉，所以只摘前几条。
+			if len(missing) > 0 {
+				t.Errorf("生成物里没有这一段（%d 条）：%s", len(missing), samplePatterns(missing))
+			}
+			if len(moved) > 0 {
+				t.Errorf("取值位分支挪到了顶层 `case \"$cur\"` 之后（%d 条）：%s",
+					len(moved), samplePatterns(moved))
+			}
+		})
+	}
+	// bash 的回落靠这一行：分支只把 `COMPREPLY` 留空，接手补文件的是它。
+	if !strings.HasSuffix(cases[0].script, "complete -o default -F _larkaxctl larkaxctl\n") {
+		t.Errorf("bash 生成物末尾不再是 `complete -o default -F _larkaxctl larkaxctl`：" +
+			"取值位留空的回落依赖它")
+	}
+}
+
+// fallbackKeysFromFlags 在测试里自己走一遍注册表，得出取值位应当有的键。
+//
+// 与被测的 valueOptionKeys 是两份实现，这是故意的：两边同源时，函数漏一条键
+// 期望值跟着漏，断言照样绿。
+func fallbackKeysFromFlags(data completionData) []string {
+	var keys []string
+	for path := range data.flags {
+		for _, option := range ownOptions(data, path) {
+			if !option.takesValue {
+				continue
+			}
+			if _, wired := data.enums[path+"|"+option.name]; wired {
+				continue
+			}
+			keys = append(keys, path+"|"+option.name)
+		}
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// samplePatterns 把一长串模式摘成前几条，截断时以「…」收尾。条数由调用方报，
+// 这里不再写一遍——同一句里出现两个同样的数字，读的人会以为是两件事。
+func samplePatterns(patterns []string) string {
+	if len(patterns) == 0 {
+		return "（无）"
+	}
+	sample := patterns[:min(5, len(patterns))]
+	if len(patterns) == len(sample) {
+		return strings.Join(sample, " ")
+	}
+	return strings.Join(sample, " ") + " …"
+}
+
+// keyDiff 列出两份清单各自独有的键。只摘前几条：整份清单一打出来，报错就没法读了。
+func keyDiff(got, want []string) string {
+	var extra, missing []string
+	for _, key := range got {
+		if !slices.Contains(want, key) {
+			extra = append(extra, key)
+		}
+	}
+	for _, key := range want {
+		if !slices.Contains(got, key) {
+			missing = append(missing, key)
+		}
+	}
+	return fmt.Sprintf("函数多出 %d 条：%s；函数缺少 %d 条：%s",
+		len(extra), samplePatterns(extra), len(missing), samplePatterns(missing))
 }
 
 // TestFishCompletionValueFlagOffersFiles 断言 `-r` 在取值位置保留文件补全，
@@ -539,7 +726,7 @@ func TestFishCompletionValueFlagOffersFiles(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := runFishCompletionIn(t, fish, script, tc.words, dir)
+			got := runFishCompletionIn(t, fish, script, tc.words, "", dir)
 			if !slices.Contains(got, "schedule.json") {
 				t.Errorf("候选 = %v，期望有 schedule.json：`-r` 应当保留文件补全", got)
 			}
@@ -580,14 +767,15 @@ func requireNoFormatValues(t *testing.T, got []string) {
 }
 
 // runBashCompletion 在真 bash 里 source 生成的脚本，跑一次 _larkaxctl，
-// 返回 COMPREPLY。words 是 `larkaxctl` 之后的部分，正在输入的那个词按空串补。
-func runBashCompletion(t *testing.T, bash, script string, words []string) []string {
+// 返回 COMPREPLY。words 是 `larkaxctl` 之后的部分，正在输入的那个词由 cur 给出
+// （多数格子传空串；要验「已经敲了一个 `-`」就传它）。
+func runBashCompletion(t *testing.T, bash, script string, words []string, cur string) []string {
 	t.Helper()
 	file := filepath.Join(t.TempDir(), "completion.bash")
 	if writeErr := os.WriteFile(file, []byte(script), 0o600); writeErr != nil {
 		t.Fatalf("写补全脚本失败：%v", writeErr)
 	}
-	argv := append(append([]string{"larkaxctl"}, words...), "")
+	argv := append(append([]string{"larkaxctl"}, words...), cur)
 	quoted := make([]string, 0, len(argv))
 	for _, word := range argv {
 		quoted = append(quoted, "'"+strings.ReplaceAll(word, "'", `'\''`)+"'")
@@ -604,19 +792,24 @@ func runBashCompletion(t *testing.T, bash, script string, words []string) []stri
 	return strings.Fields(string(out))
 }
 
+// filesStubCandidate 是 zsh 驱动里 `_files` 替身写出的标记，不是候选的名字：
+// 它只表示生成脚本在这一格要求了文件补全。真 `_files` 会不会列出文件、列出哪些，
+// 只能在真交互式 shell 里看，而那种用例带固定等待，不进 CI（见 #1178 的判据）。
+const filesStubCandidate = "__files__"
+
 // runZshCompletion 在真 zsh 里 source 生成的脚本，跑一次 _larkaxctl，
 // 返回 compadd 收到的候选。
 //
 // 生成脚本里的 `compadd -- a b c` 换成把参数打到 stdout 的替身：真 compadd
 // 只能在补全上下文里调，直接调用会报错。替身只接手「候选给了谁」，case 的
 // 匹配语义仍由生成脚本自己决定。一行一次 compadd，去掉打头的 `--` 就是候选。
-func runZshCompletion(t *testing.T, zsh, script string, words []string) []string {
+func runZshCompletion(t *testing.T, zsh, script string, words []string, cur string) []string {
 	t.Helper()
 	file := filepath.Join(t.TempDir(), "completion.zsh")
 	if writeErr := os.WriteFile(file, []byte(script), 0o600); writeErr != nil {
 		t.Fatalf("写补全脚本失败：%v", writeErr)
 	}
-	argv := append(append([]string{"larkaxctl"}, words...), "")
+	argv := append(append([]string{"larkaxctl"}, words...), cur)
 	quoted := make([]string, 0, len(argv))
 	for _, word := range argv {
 		quoted = append(quoted, "'"+strings.ReplaceAll(word, "'", `'\''`)+"'")
@@ -629,6 +822,9 @@ func runZshCompletion(t *testing.T, zsh, script string, words []string) []string
 	// 与「通过」在输出里长得一样。
 	const done = "__completion_driver_done__"
 	driver := "compadd() { print -r -- \"$@\" }\n" +
+		// `_files` 与 `compadd` 同理：真 `_files` 只能在补全上下文里调。替身写出的
+		// 标记不是候选的名字，只表示「生成脚本在这一格要求了文件补全」。
+		"_files() { print -r -- \"-- " + filesStubCandidate + "\" }\n" +
 		"compdef() { : }\n" +
 		"source \"$1\"\n" +
 		"words=(" + strings.Join(quoted, " ") + ")\n" +
@@ -671,19 +867,20 @@ func runZshCompletion(t *testing.T, zsh, script string, words []string) []string
 // 那一格自己指定目录（见 runFishCompletionIn）。
 //
 // 每条候选可能带一段描述（制表符分隔），这里只要名字。
-func runFishCompletion(t *testing.T, fish, script string, words []string) []string {
+func runFishCompletion(t *testing.T, fish, script string, words []string, cur string) []string {
 	t.Helper()
-	return runFishCompletionIn(t, fish, script, words, t.TempDir())
+	return runFishCompletionIn(t, fish, script, words, cur, t.TempDir())
 }
 
 // runFishCompletionIn 与 runFishCompletion 相同，但把 fish 的工作目录设成 dir。
-func runFishCompletionIn(t *testing.T, fish, script string, words []string, dir string) []string {
+func runFishCompletionIn(t *testing.T, fish, script string, words []string, cur string, dir string) []string {
 	t.Helper()
 	file := filepath.Join(t.TempDir(), "completion.fish")
 	if writeErr := os.WriteFile(file, []byte(script), 0o600); writeErr != nil {
 		t.Fatalf("写补全脚本失败：%v", writeErr)
 	}
-	line := "larkaxctl " + strings.Join(words, " ") + " "
+	// 末尾那个空格是「当前词还没敲」：cur 为空的格子靠它，别省。
+	line := "larkaxctl " + strings.Join(words, " ") + " " + cur
 	driver := "source " + fishQuote(file) + "; complete -C " + fishQuote(line)
 	cmd := exec.CommandContext(t.Context(), fish, "--no-config", "-c", driver)
 	cmd.Dir = dir

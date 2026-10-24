@@ -244,6 +244,32 @@ func completionGlobalEnumValues() map[string][]string {
 // 在 fish 里按 Tab 补出动词——本 issue 修的就是这个症状。
 var globalValueFlags = []string{"--env-file"}
 
+// valueOptionKeys 是「取值位」的键：选项后面跟的是自由取值、没有枚举可补的位置。
+//
+// 键的形状与 completionEnumValues 相同（`<命令路径>|--<选项名>`），生成器据此在
+// 取值位上把补全交回给 shell（bash 靠末尾的 `-o default`，zsh 自己调 `_files`）。
+// 哪些选项吃取值只从注册时记下的 takesValue 派生（见 flagset.go 的 record），
+// 不另抄清单：手写第二份表的下一站就是两份分岔（LESSONS.md 第 29 条）。
+//
+// 已接枚举的位置不在这里：它们的取值由 completionEnumValues 补，生成物里不能
+// 同时出现「补枚举」与「补文件」两条分支。
+func valueOptionKeys(data completionData) []string {
+	var keys []string
+	for path := range data.flags {
+		for _, option := range ownOptions(data, path) {
+			if !option.takesValue {
+				continue
+			}
+			if _, wired := data.enums[path+"|"+option.name]; wired {
+				continue
+			}
+			keys = append(keys, path+"|"+option.name)
+		}
+	}
+	slices.Sort(keys)
+	return keys
+}
+
 // completionPaths 列出要遍历的命令路径。
 //
 // migrate 只走一级：它的动作不吃自己的 flag 集，而 `-h` 落在动作之后会被当成
