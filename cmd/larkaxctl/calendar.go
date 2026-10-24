@@ -35,8 +35,9 @@ const priceCalendarShortUsage = `larkaxctl price calendar 维护分时计价用�
   larkaxctl price calendar list            列出导入过的年份与状态
 
 文件是一个 JSON 对象，字段写错会直接报错；只有 synced 状态才带 days，而 days
-必须覆盖本年的每一天。同一年再灌一次是覆盖，不是追加。sync 拉到的数据源如果
-还没发布这一年，写的是 pending，退出码是 0。
+必须覆盖本年的每一天。带 days 的文件同一年再灌一次是覆盖，不是追加；只记年份
+状态的文件不碰已有数据行，该年已有定论时整条不写。sync 拉到的数据源如果还没
+发布这一年，写的是 pending，退出码是 0。
 
 更细的边界：larkaxctl price calendar help。
 `
@@ -93,7 +94,9 @@ pending（公告尚未发布）、conflict、degraded 三种状态只记年份�
 days 也不带 source——那一年还没有定论，写进去的数据行会被当成确定的判定
 使用，而 source 只用于数据行。
 
-同一年再灌一次是覆盖而不是追加：导入会先清掉这一年上一次导入写下的行。
+带 days 的文件同一年再灌一次是覆盖而不是追加：导入会先清掉这一年上一次导入
+写下的行，再写新的。不带 days 的文件只写年份状态，不碰已有数据行；该年已经
+有定论（synced / conflict）时整条不写，命令打一行说明并以 0 退出。
 跨年边界上的日子（例如元旦安排里把去年 12 月 31 日挪成休息）可以写进相邻
 年份的文件里，同一天以最后一次导入为准。
 
