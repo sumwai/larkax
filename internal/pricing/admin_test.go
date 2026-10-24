@@ -1474,6 +1474,61 @@ func TestOwnedRuleScope(t *testing.T) {
 
 func ptrID(v int64) *int64 { return &v }
 
+// TestOwnedMethodsRejectZeroOwner 钉住三处 owner 零值守卫：0 是非法值，
+// 不是「不限制」。
+//
+// 仓库里原有两个只判「有没有报错」的断言（`GetOwned(0)` 与 `ListOwned(0)`）。
+// 把 `ownerID <= 0` 放宽成 `ownerID < 0` 之后，两处的回答立刻分道：GetOwned
+// 走到查询、给的是 `ErrRuleNotFound`，非 nil，旧断言照样绿；ListOwned 给空
+// 清单加 nil 错误，旧断言才拦住它。也就是说旧断言只挡得住 ListOwned 那一格，
+// GetOwned 与原本没有零值用例的 UpdateOwned 都漏着。
+//
+// 所以这三格连错误原文一起按整串比：既要分清「守卫在」与「失守后往下跑」，
+// 也要让每一格各自红在自己那一格——ListOwned 那一格只能红在 nil 判断上。
+func TestOwnedMethodsRejectZeroOwner(t *testing.T) {
+	admin := NewAdmin(testDB(t))
+	ctx := context.Background()
+	// 用一个不存在的 id：守卫一旦失守，UpdateOwned 会往下跑到 SQL，回答才是
+	// 确定的 `ErrRuleNotFound`，而不是改到某条真实规则上。
+	const missingID int64 = 999999999
+	priority := 5
+	req := UpdateRequest{ID: missingID, Priority: &priority}
+
+	cases := []struct {
+		name string
+		call func() error
+		want string
+	}{
+		{
+			name: "UpdateOwned 归属为 0",
+			call: func() error { return admin.UpdateOwned(ctx, 0, req) },
+			want: "用户 id 无效",
+		},
+		{
+			name: "GetOwned 归属为 0",
+			call: func() error { _, err := admin.GetOwned(ctx, 0, missingID); return err },
+			want: "用户 id 无效",
+		},
+		{
+			name: "ListOwned 归属为 0",
+			call: func() error { _, err := admin.ListOwned(ctx, 0); return err },
+			want: "用户 id 无效",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil {
+				t.Fatalf("错误为 nil，期望 %q", tc.want)
+			}
+			if err.Error() != tc.want {
+				t.Errorf("错误 = %q，期望 %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
 // insertChannelScopedRule 直接写库造一条 channel 作用域、owner_user_id 也填上
 // 的规则，并登记用完删掉。
 //
