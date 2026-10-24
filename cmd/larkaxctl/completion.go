@@ -352,9 +352,10 @@ type completionFlag struct {
 // 字母，写在 Tab 里反而把真正要选的那几个挤走；旧名不占 Tab 的位置（见帮助
 // 文本末段）。所以只列正式的长选项。
 //
-// 同名只留第一次。现有注册路径到不了第二次：同一条命令里重名注册，flag 包在
-// `Var` 那一步就 panic 了，而采集发生在注册之后。留着去重是为了将来真出现两条
-// 注册路径时，生成物仍有确定形状。
+// 同名只留第一次。现有注册路径到不了第二次：同一条命令里重名注册时，`record`
+// 先把第二个名字写进 map，紧接着的 `Var` 就 panic（flag 包不允许重定义），整轮
+// 采集中止——生成阶段跑不到这里。留着去重是为了将来真出现两条注册路径时，生成物
+// 仍有确定形状。
 func ownOptions(data completionData, path string) []completionFlag {
 	index := map[string]bool{}
 	out := make([]completionFlag, 0, len(data.flags[path]))
