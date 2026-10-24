@@ -119,5 +119,5 @@ larkax builds on other people's work:
 - [expr-lang/expr](https://github.com/expr-lang/expr) — the expression engine for
   pricing rules.
 - [holiday-cn](https://github.com/NateScarlet/holiday-cn) — mainland China holiday
-  calendar data (planned).
+  calendar data.
 - [models.dev](https://github.com/sst/models.dev) — model metadata (planned).

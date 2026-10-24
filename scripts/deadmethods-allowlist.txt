@@ -210,7 +210,6 @@
 # 见脚本开头）。
 internal/billing/billing.go    | Usage.IsEmpty                     | lib | 公开类型的判断方法，本包用例拿它当断言助手；#267 的修法落在网关侧的 usageSourceOf（tokens.SourceUnreported）上，没有用它——「修的时候用它兑现」那个前提已经作废，语义与理由见 billing.go 上它的注释
 internal/billing/expr/compile.go | Cache.GetWithGlobals            | lib | #278 的处置就是「显式标注为未接线」，注释写在 compile.go 的 GetWithGlobals 上；它是 CompileWithGlobals 唯一的调用点，掩蔽沿调用链传到了那个自由函数，所以两条的处境一起记在理由里
-internal/calendar/calendar.go  | Date.IsWeekend                    | lib | 日历库的纯星期规则，给调用方做回退策略用；目前只有测试在调它（本包不把它当判定结果）
 internal/calendar/memory.go    | MemorySource.AddDay               | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.SetDefaultRange      | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接
 internal/calendar/memory.go    | MemorySource.SetYearState         | lib | 测试夹具：内存数据源，只有测试在构造它，不是漏接

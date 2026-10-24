@@ -10,11 +10,23 @@
 | `calendar_years` | 某地区某一年的同步状态：已同步 / 公告未发布 / 双源不一致 / 同步失败 |
 
 ```sh
+go run ./cmd/larkaxctl price calendar sync --year 2026
+```
+
+`sync` 从公开数据源 [holiday-cn](https://github.com/NateScarlet/holiday-cn) 拉取
+一年的放假安排，补成全年每一天的判定，再走与 `import` 相同的导入路径写库。
+`--year` 缺省取当前年份（按 CN 时区），只接受单个年份。数据源还没发布这一年时
+（404，或返回的 `days` 为空）写 `pending` 并以 0 退出；真正的失败（网络、解析、
+校验）以非零退出，已经 `synced` 的年份一行都不动。
+
+手工维护的文件同样可以导入，用于数据源之外的情形与修正单日：
+
+```sh
 go run ./cmd/larkaxctl price calendar import <文件>
 ```
 
-**数据从哪来不在本命令的范围内。** 它只负责「读文件 → 写库」，文件由公开的
-节假日数据源转换而来，或者由运维手工维护。仓库里不带任何真实数据集。
+**仓库里不带任何真实数据集**：数据由 `sync` 从公开数据源拉取，或者由运维手工
+维护成文件，命令本身只负责转换与写库。
 
 服务启动时把这两张表接到计价环境上（`internal/assembly`），规则里的
 `isWorkday()`、`isHoliday()`、`holidayName()`、`isMakeupWorkday()` 查的就是它。
@@ -111,6 +123,12 @@ isPeak("08:00-12:00,14:00-18:00") ? {"prompt": 2.0} : {"prompt": 1.0}
 | `off_day` | 是 | 这一天是否放假。**漏写与写 `false` 在 JSON 里长得一样**，而漏写会让那一天按工作日算，所以这里要求显式写出来 |
 | `name` | 否 | 节假日名称（「春节」「国庆节」），普通日子留空 |
 | `makeup_workday` | 否 | 调休补班日。默认 `false`；与 `off_day: true` 同时出现会被拒绝 |
+
+`sync` 的转换口径：数据源只给每一天「放不放假」。`makeup_workday` 按「不是假期、
+且该日是周六或周日」推断；`isOffDay=false` 却不在周末的日子照样收下，`off_day` 与
+`makeup_workday` 都记 `false`、`name` 保留——它对「这天是不是上班」没有影响，
+只影响 `isMakeupWorkday()`。落在周末的法定节日照常写 `off_day: true` 并保留名称：
+名称是账单解释「为什么这天算高峰」的依据。
 
 ### `status` 的四个取值
 
