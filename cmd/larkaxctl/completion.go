@@ -122,6 +122,20 @@ type completionData struct {
 	flags map[string][]string
 	// enums 以「命令路径|--选项名」为键，值是那个选项的合法取值。
 	enums map[string][]string
+	// globalEnums 以选项名（如 `--format`）为键，值是全局选项的合法取值。
+	//
+	// 全局选项对每一条命令都生效，逐条写进 enums 会让生成物长出上百条内容
+	// 相同的分支，而它们说的是同一件事。所以单独一张表：生成器给 bash 与 zsh
+	// 多出一条 `*"|<选项名>"` 的通配分支（`$path` 任意、`$prev` 恰是这个选项；
+	// `*` 不引号才是通配符，`|<选项名>` 必须引号——case 里 `|` 是多模式分隔符），
+	// fish 则是无条件的 `complete -c larkaxctl -l <选项名> -x -a …`（fish 的选项
+	// 在子命令前后都认）。
+	//
+	// 只接长选项的正式写法。短拼法（`-o`）**不进这张表**：docs/cli-reference.md
+	// 写着补全只列长选项的正式写法，短选项与旧名仍能敲、只是不占 Tab 的位置。
+	// `-o` 在这里留白是那条口径，不是漏接——加它进来会让同一条契约在两种拼法上
+	// 给出不同的 Tab 行为。
+	globalEnums map[string][]string
 }
 
 // completionCommand 是一条一级命令在补全里的样子。
@@ -198,10 +212,21 @@ func buildCompletionData() completionData {
 	}
 
 	return completionData{
-		commands: commands,
-		words:    words,
-		flags:    collectCommandFlags(completionPaths(commands)),
-		enums:    completionEnumValues(),
+		commands:    commands,
+		words:       words,
+		flags:       collectCommandFlags(completionPaths(commands)),
+		enums:       completionEnumValues(),
+		globalEnums: completionGlobalEnumValues(),
+	}
+}
+
+// completionGlobalEnumValues 是全局选项的合法取值，键是选项名。
+//
+// 与 completionEnumValues 分开：那边的键带命令路径，这里的选项对每条命令都
+// 生效。取值同样取自校验那一侧已有的来源，不抄字面量。
+func completionGlobalEnumValues() map[string][]string {
+	return map[string][]string{
+		"--format": formatNames(),
 	}
 }
 
@@ -332,6 +357,7 @@ var longOptionRE = regexp.MustCompile(`--[a-z][a-z0-9-]*`)
 //
 // 取值一律取自校验那一侧已有的来源（常量或清单函数），这里不抄字面量：
 // 抄一份的表现是库里加了一种取值，而 Tab 补出来的还是旧的那几项。
+// 全局选项的取值不在这张表里——它们的键不带命令路径，见 completionGlobalEnumValues。
 // 还没接线的几格留白——留白比补错安全；接线是单独的一步，与来源归并不在一处。
 func completionEnumValues() map[string][]string {
 	values := map[string][]string{}
@@ -379,6 +405,8 @@ func completionEnumValues() map[string][]string {
 	put("plan void", "status", []string{
 		string(plans.UserPlanExpired), string(plans.UserPlanCancelled),
 	})
+
+	put("doctor", "endpoint", doctorEndpointNames())
 
 	scopes := pricing.Scopes()
 	for _, path := range []string{"price create", "price update"} {
