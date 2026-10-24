@@ -271,12 +271,14 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 			want := []string{"table", "json"}
 			gotCmp, wantCmp := got, want
 			if shell == "fish" {
-				// fish 的 `complete -C` 自己按字典序排候选，顺序在 fish 这侧
-				// 不可观测。排序是 fish 的 UI 行为，不是我们的契约，所以不拿
-				// 它当断言口径。只有这一格放宽：生成物里 `-a 'table json'` 的
-				// 书写顺序仍由 TestCompletionWiresEnums 的字面串钉住，bash 与
-				// zsh 也照旧按顺序比。比较用排序后的副本，报错仍按契约顺序
-				// 打期望值——否则失败信息会把 `[json table]` 说成期望。
+				// fish 的 `complete -C` 会把候选按字典序排过再返回：顺序不归我们
+				// 定，也不钉成契约，所以这一格按排序后的副本比较。生成物里
+				// `-a 'table json'` 的书写顺序仍由 TestCompletionWiresEnums 的
+				// 字面串钉住，bash 与 zsh 照旧按顺序比。
+				//
+				// 本例有两格在 fish 上放宽，原因不同：这一格是候选顺序；
+				// `--id` 那格是生成物缺 `-r`（见 #1171）。比较用副本，报错仍按
+				// 契约顺序打期望值——否则失败信息会把 `[json table]` 说成期望。
 				gotCmp = slices.Clone(got)
 				slices.Sort(gotCmp)
 				wantCmp = slices.Clone(want)
@@ -360,9 +362,9 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 
 // completionShellsRequiredEnv 设上之后，缺壳不再是「记一行日志就过」，而是失败。
 //
-// CI 的 Go 门禁 job 装了 bash / zsh / fish 三个壳再跑单元测试。装壳那一步失败时
-// 用例仍然会走到这里——没有这个变量，它就退化成两行日志，整条链全绿，正是本仓
-// 反复踩的「跳过与通过长得一样」（LESSONS.md 第 16 条）。
+// CI 的 Go 门禁 job 装了 fish 与 zsh 再跑单元测试（bash 由 runner 镜像自带）。
+// 装壳那一步失败时用例仍然会走到这里——没有这个变量，它就退化成两行日志，
+// 整条链全绿，正是本仓反复踩的「跳过与通过长得一样」（LESSONS.md 第 16 条）。
 const completionShellsRequiredEnv = "LARKAX_REQUIRE_COMPLETION_SHELLS"
 
 // requireCompletionShell 返回 shell 的可执行路径；没有时按上面那条口径处理。
@@ -432,8 +434,12 @@ func runZshCompletion(t *testing.T, zsh, script string, words []string) []string
 	for _, word := range argv {
 		quoted = append(quoted, "'"+strings.ReplaceAll(word, "'", `'\''`)+"'")
 	}
-	// 结尾那行标记让「_larkaxctl 中途报错退出」变红：生成脚本在 --id 那种
-	// 该给空候选的格子里本来就没有输出，没有标记的话静默失败也长得一样。
+	// 中途出错有两类，分别由两样东西兜住：
+	//   - 进程提前终止（`exit`、整段没跑到最后一行）：结尾那行标记不见了；
+	//   - 生成脚本里某条命令失败：只往 stderr 写，驱动照旧往下走、标记照旧打印。
+	//     所以成功路径上再断言 stderr 为空（见下面的检查）。
+	// --id 那种该给空候选的格子本来就没有 stdout 输出，没有这两样，「静默失败」
+	// 与「通过」在输出里长得一样。
 	const done = "__completion_driver_done__"
 	driver := "compadd() { print -r -- \"$@\" }\n" +
 		"compdef() { : }\n" +
@@ -452,6 +458,11 @@ func runZshCompletion(t *testing.T, zsh, script string, words []string) []string
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	if lines[len(lines)-1] != done {
 		t.Fatalf("zsh 没跑到结尾（补全函数中途出错？）\nstdout=%q\nstderr=%s", out, stderr.String())
+	}
+	// 生成脚本在成功路径上不该往 stderr 写东西：一条失败的命令不会中止驱动，
+	// 标记照样会打印，只有这一条能把那种情况分出来。
+	if stderr.Len() > 0 {
+		t.Fatalf("zsh 补全往 stderr 写了东西（生成脚本里有命令失败？）\nstdout=%q\nstderr=%s", out, stderr.String())
 	}
 	var candidates []string
 	for _, line := range lines[:len(lines)-1] {
