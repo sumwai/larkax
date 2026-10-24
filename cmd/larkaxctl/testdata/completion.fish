@@ -188,6 +188,7 @@ complete -c larkaxctl -l env-file
 complete -c larkaxctl -l format
 complete -c larkaxctl -l quiet
 complete -c larkaxctl -l verbose
+complete -c larkaxctl -l format -x -a 'table json'
 complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from create' -l channel
 complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from create' -l model
 complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from create' -l overrides
@@ -623,6 +624,7 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_su
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l protocols -x -a 'anthropic openai openai-responses systemone'
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l type -x -a 'anthropic openai openai-responses systemone'
 complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l scope -x -a 'single_request time_window'
+complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l endpoint -x -a 'chat messages responses'
 complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from balance' -l asset -x -a 'CNY'
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l asset -x -a 'CNY'
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l status -x -a 'expired canceled'

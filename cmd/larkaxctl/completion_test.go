@@ -207,6 +207,50 @@ func TestCompletionOptionsComeFromFlagSets(t *testing.T) {
 	}
 }
 
+// TestCompletionWiresEnums 断言已接线的枚举真的出现在生成物里，取值按来源顺序。
+//
+// 期望值一律写字面量，不从 doctorEndpointNames() / formatNames() 拼：拼出来的
+// 期望值会跟着来源一起变，钉不住「生成物里出现的是这一串」。取值顺序也钉住——
+// 三种 shell 都按给的顺序补，只比「两个词都在」等于没钉。
+func TestCompletionWiresEnums(t *testing.T) {
+	cases := map[string][]string{
+		"bash": {
+			"\t\t\"doctor|--endpoint\")\n\t\t\tCOMPREPLY=( $(compgen -W \"chat messages responses\" -- \"$cur\") )",
+			"\t\t*|--format)\n\t\t\tCOMPREPLY=( $(compgen -W \"table json\" -- \"$cur\") )",
+		},
+		"zsh": {
+			"\t\t\"doctor|--endpoint\") compadd -- chat messages responses; return ;;",
+			"\t\t*|--format) compadd -- table json; return ;;",
+		},
+		"fish": {
+			"complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l endpoint -x -a 'chat messages responses'",
+			"complete -c larkaxctl -l format -x -a 'table json'",
+		},
+	}
+	data := buildCompletionData()
+	for _, shell := range completionShells {
+		want := cases[shell]
+		if len(want) == 0 {
+			t.Fatalf("没有 %q 的期望片段", shell)
+		}
+		script := generateCompletionScript(t, data, shell)
+		for _, fragment := range want {
+			if !strings.Contains(script, fragment) {
+				t.Errorf("%s 脚本里没有这一段：%q", shell, fragment)
+			}
+		}
+		// 短拼法不占 Tab 的位置：`-o` / `--o` 不该有取值分支。
+		for _, short := range []string{"|-o)", "|--o)"} {
+			if strings.Contains(script, short) {
+				t.Errorf("%s 脚本里出现了短拼法的取值分支 %q：短选项不占 Tab 的位置", shell, short)
+			}
+		}
+		if regexp.MustCompile(`(?m)^complete -c larkaxctl .*-l o .*-x`).MatchString(script) {
+			t.Errorf("%s 脚本里给短拼法 -o 挂了取值：短选项不占 Tab 的位置", shell)
+		}
+	}
+}
+
 // ── 参数错、帮助 ──────────────────────────────────────────────────────
 
 // TestCompletionRejectsUnknownShell 断言非法 shell 名按参数错处理（退出码 2），

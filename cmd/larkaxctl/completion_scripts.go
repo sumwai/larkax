@@ -31,10 +31,19 @@ func bashCompletionScript(data completionData) string {
 	b.WriteString("\tdone\n\n")
 
 	// 枚举取值：前一个词是某个枚举选项时，补它的合法值。
+	//
+	// 具体键之后是全局选项的通配分支：`$path` 任意、`$prev` 恰是那个选项。
+	// case 里「第一个匹配的赢」，而具体键的 `$prev` 与通配键不同，两者不冲突；
+	// 模式不引号，`*` 才会被当成通配符。`larkaxctl --format <TAB>` 时 path 是
+	// 空串、键是 `|--format`，`*|--format` 的 `*` 匹配空串，一样命中。
 	b.WriteString("\tcase \"$path|$prev\" in\n")
 	for _, key := range sortedEnumKeys(data.enums) {
 		fmt.Fprintf(&b, "\t\t%s)\n\t\t\tCOMPREPLY=( $(compgen -W %q -- \"$cur\") )\n\t\t\treturn 0\n\t\t\t;;\n",
 			shellCasePattern(key), strings.Join(data.enums[key], " "))
+	}
+	for _, flag := range sortedEnumKeys(data.globalEnums) {
+		fmt.Fprintf(&b, "\t\t*|%s)\n\t\t\tCOMPREPLY=( $(compgen -W %q -- \"$cur\") )\n\t\t\treturn 0\n\t\t\t;;\n",
+			flag, strings.Join(data.globalEnums[flag], " "))
 	}
 	b.WriteString("\tesac\n\n")
 
@@ -87,6 +96,11 @@ func zshCompletionScript(data completionData) string {
 	for _, key := range sortedEnumKeys(data.enums) {
 		fmt.Fprintf(&b, "\t\t%s) compadd -- %s; return ;;\n",
 			shellCasePattern(key), strings.Join(data.enums[key], " "))
+	}
+	// 全局选项的通配分支，形状与 bash 那一份相同（理由见该处注释）。
+	for _, flag := range sortedEnumKeys(data.globalEnums) {
+		fmt.Fprintf(&b, "\t\t*|%s) compadd -- %s; return ;;\n",
+			flag, strings.Join(data.globalEnums[flag], " "))
 	}
 	b.WriteString("\tesac\n\n")
 
@@ -149,6 +163,13 @@ func fishCompletionScript(data completionData) string {
 
 	for _, name := range globalOptionNames() {
 		fmt.Fprintf(&b, "complete -c larkaxctl -l %s\n", strings.TrimPrefix(name, "--"))
+	}
+	// 全局选项的取值挂无条件的那一条：fish 的选项在子命令前后都认，不加
+	// `__fish_seen_subcommand_from` 条件；加了反而只在某几条路径下补得出来。
+	for _, flag := range sortedEnumKeys(data.globalEnums) {
+		fmt.Fprintf(&b, "complete -c larkaxctl -l %s -x -a %s\n",
+			strings.TrimPrefix(flag, "--"),
+			fishQuote(strings.Join(data.globalEnums[flag], " ")))
 	}
 	for _, path := range flaggedPaths(data) {
 		cond := fishSeenCondition(strings.Split(path, " "))

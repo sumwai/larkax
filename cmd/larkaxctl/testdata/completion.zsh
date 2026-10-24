@@ -20,6 +20,7 @@ _larkaxctl() {
 		"channel update|--protocols") compadd -- anthropic openai openai-responses systemone; return ;;
 		"channel update|--type") compadd -- anthropic openai openai-responses systemone; return ;;
 		"consent grant|--scope") compadd -- single_request time_window; return ;;
+		"doctor|--endpoint") compadd -- chat messages responses; return ;;
 		"ledger balance|--asset") compadd -- CNY; return ;;
 		"plan create|--asset") compadd -- CNY; return ;;
 		"plan void|--status") compadd -- expired canceled; return ;;
@@ -45,6 +46,7 @@ _larkaxctl() {
 		"wallet payment create|--asset") compadd -- CNY; return ;;
 		"wallet payout request|--asset") compadd -- CNY; return ;;
 		"wallet refund|--asset") compadd -- CNY; return ;;
+		*|--format) compadd -- table json; return ;;
 	esac
 
 	case "$cur" in
