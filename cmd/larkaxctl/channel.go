@@ -137,6 +137,10 @@ delete 是**软删**：置 deleted_at 并把状态改成 disabled，行与它的
 已删的渠道不能再 update / enable / disable，再删一次不报错（打印「已经是删除
 状态」）。
 
+update 的 --credential-* 改的是这条渠道**池里 id 最小的主账号**（选路读的那
+一个）；账号是凭证的单位，同一账号若还挂在别的渠道上，改一次那些渠道一起生效
+（见 larkaxctl help account）。零账号的渠道走这条路会补一个匿名账号。
+
 restore 是 delete 的逆操作：清掉 deleted_at、把状态置回 enabled，并把这条渠道的
 健康结论置回 unknown——它上一次的结论是**软删之前**的，不能直接沿用，恢复之后
 报 unknown 的意思是「现在好不好还没人说得出来」。没有处于删除状态的渠道再
