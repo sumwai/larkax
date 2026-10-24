@@ -39,15 +39,18 @@ larkaxctl channel map add --all-channels claude-x <upstream-model-id>
 # 4. A user, then a price rule. A rule records who defined it, so the user comes first.
 larkaxctl user create --name alice
 larkaxctl price create --scope platform --name example-price --by alice \
-  --expr '{"prompt": 0.0000015, "completion": 0.0000075,
-           "cache_read": 0.0000002, "cache_write": 0.0000019,
-           "reasoning": 0.0000090}'
+  --prompt 1.5 --completion 7.5 --cache-read 0.2 --cache-write 1.9 --reasoning 9
 
 # 5. A funded wallet, then a key.
 larkaxctl wallet create --user alice
 larkaxctl wallet credit --user alice --amount 100 --ref ORD-1
 KEY=$(larkaxctl apikey create --user alice)
 ```
+
+The five price flags are prices **per million tokens**, the way provider price sheets
+state them: `--prompt 1.5` means 1.5 per million input tokens. The rule stores the
+per-token rate. `--unit token` takes per-token rates directly, and `--expr` remains for
+rules with tiers or time-of-day rates.
 
 A fresh wallet holds 0, and the reservation step rejects requests until it does not.
 
