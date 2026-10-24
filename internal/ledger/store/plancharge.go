@@ -199,6 +199,9 @@ func quotaFromCount(n int64) (money.Amount, error) {
 // carried_quota 是领到新包时从旧订阅并进来的结转量（见 00065 与
 // plans 的 Carryover）。它加在总量这一侧，不是减在已用量那一侧：结转来的量
 // 从来没被「用过」，把它记进 quota_used 会让「已用量」这个数谎报。
+//
+// 期末结转的基数复用这个表达式（见 PlanQuotaUsage 的那条 SQL），再在调用方
+// 减掉 carried_quota。两边因此只有「减不减那一项」的差别，不会各算一个可用量。
 func planQuotaAvailable(total, carried, used, pending money.Amount) money.Amount {
 	return total.Add(carried).Sub(used).Sub(pending)
 }
@@ -514,14 +517,16 @@ func (s *Store) applyPlanQuota(ctx context.Context, tx *sql.Tx, planID int64, us
 	return nil
 }
 
-// PlanQuotaUsage 读一份订阅按包自身总量算出的可用量余量：
-// quota_total − quota_used − 在途预留。
+// PlanQuotaUsage 读一份订阅**现在还能用多少单位**：
+// quota_total + carried_quota − quota_used − 在途预留。
 //
-// 它是期末结转那一侧要的**基数**，与请求路径共用同一个口径（见 plancharge.go
-// 顶部「两个维度」那一节；两处的表达式本可以合成一个，但这里要的是可读的
-// 余量而不是判断够不够，共用一个函数会让两边的 SQL 互相牵制）。不含
-// carried_quota：领包时并进来的结转量不该再结转第二次，那个减数由调用方按
-// 行上的 carried_quota 给。
+// 与请求路径的可用量是同一个表达式（见 planQuotaAvailable）：领包时并进来的
+// carried_quota 计在总量这一侧，因为它是可用量的一部分。
+//
+// 期末结转那一侧要的**基数**比它少一项：本期发放的量里，结转进来的那部分不该
+// 再结转第二次，所以调用方（plans.carrySplit）再减掉一次行上的 carried_quota。
+// 那个减数只能放在调用方，不能写进这条 SQL——写进来的话，请求路径与期末路径
+// 会各自算一个「可用量」，而两者不一致时先坏的是选源。
 //
 // 可能为负（结算截断与预留之间有过不一致），调用方要在乘比例之前夹到 0。
 // 这里不夹，是因为「负多少」在排查不一致时有用——夹掉会让它看起来只是「用完了」。
@@ -530,7 +535,7 @@ func (s *Store) applyPlanQuota(ctx context.Context, tx *sql.Tx, planID int64, us
 func PlanQuotaUsage(ctx context.Context, tx *sql.Tx, planID int64) (money.Amount, error) {
 	var raw string
 	err := tx.QueryRowContext(ctx, `
-		SELECT (p.quota_total - up.quota_used - COALESCE(pend.q, 0))::numeric(20, 8)::text
+		SELECT (p.quota_total + up.carried_quota - up.quota_used - COALESCE(pend.q, 0))::numeric(20, 8)::text
 		  FROM user_plans up
 		  JOIN plans p ON p.id = up.plan_id
 		  LEFT JOIN LATERAL (

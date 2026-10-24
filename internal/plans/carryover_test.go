@@ -101,6 +101,20 @@ func newTokenPlan(t *testing.T, ctx context.Context, svc *Service, quota, face s
 	return p
 }
 
+// newRequestPlan 建一个次数包（与 token 包一样必须有模型范围）。
+func newRequestPlan(t *testing.T, ctx context.Context, svc *Service, quota, face string) Plan {
+	t.Helper()
+	p, err := svc.CreatePlan(ctx, CreatePlanInput{
+		Key: "plan-" + itoa(nextID()), Name: "测试次数包", Asset: ledger.AssetCNY,
+		Unit: UnitRequest, QuotaTotal: amount(t, quota), FaceValue: amount(t, face),
+		Models: []string{"gpt-4o"},
+	})
+	if err != nil {
+		t.Fatalf("建次数包失败: %v", err)
+	}
+	return p
+}
+
 // consumePrepaid 从一条订阅的面值里扣掉 amt（走账本，不经过请求路径）。
 func consumePrepaid(t *testing.T, ctx context.Context, svc *Service, userID, userPlanID int64, amt money.Amount) {
 	t.Helper()
@@ -176,7 +190,7 @@ func TestCarryoverRatios(t *testing.T) {
 			// 守恒：结转 + 归平台 = 处置前的剩余面值。三个数都从账本读，
 			// 期望值不取自被测代码算出的结转账面。
 			stayed := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID))
-			voided := planVoidedFrom(t, db, upID)
+			voided := planVoidedFrom(t, ctx, db, upID)
 			if sum := stayed.Add(voided); sum.Cmp(before) != 0 {
 				t.Errorf("结转 %s + 归平台 %s = %s，期望处置前的面值余额 %s",
 					stayed, voided, sum, before)
@@ -213,7 +227,7 @@ func TestCarryoverFloors(t *testing.T) {
 	if got := up.CarryoutQuota; got.Cmp(amount(t, "2")) != 0 {
 		t.Errorf("订阅记的结转出去量 = %s，期望 2（7 个 token × 0.4，不是 2.8）", got)
 	}
-	if got := planVoidedFrom(t, db, upID); got.Cmp(amount(t, "5")) != 0 {
+	if got := planVoidedFrom(t, ctx, db, upID); got.Cmp(amount(t, "5")) != 0 {
 		t.Errorf("面值归平台 = %s，期望 5（7 − 2）", got)
 	}
 }
@@ -249,10 +263,10 @@ func TestCarryoverAmountKeepsSubYuanPrecision(t *testing.T) {
 	if got := up.CarryoutQuota; got.Cmp(amount(t, "0.00000001")) != 0 {
 		t.Errorf("金额包的结转出去量 = %s，期望与面值同值 0.00000001", got)
 	}
-	if got := planVoidedFrom(t, db, upID); got.Cmp(amount(t, "0.00000002")) != 0 {
+	if got := planVoidedFrom(t, ctx, db, upID); got.Cmp(amount(t, "0.00000002")) != 0 {
 		t.Errorf("面值归平台 = %s，期望 0.00000002（3 − 1）", got)
 	}
-	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)).Add(planVoidedFrom(t, db, upID)); got.Cmp(before) != 0 {
+	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)).Add(planVoidedFrom(t, ctx, db, upID)); got.Cmp(before) != 0 {
 		t.Errorf("结转 + 归平台 = %s，期望处置前的面值余额 %s", got, before)
 	}
 }
@@ -282,10 +296,10 @@ func TestCarryoverAmountRoundsDownNotHalfUp(t *testing.T) {
 	if got := up.CarryoutQuota; got.Cmp(amount(t, "0.00000002")) != 0 {
 		t.Errorf("金额包的结转出去量 = %s，期望与面值同值 0.00000002", got)
 	}
-	if got := planVoidedFrom(t, db, upID); got.Cmp(amount(t, "0.00000003")) != 0 {
+	if got := planVoidedFrom(t, ctx, db, upID); got.Cmp(amount(t, "0.00000003")) != 0 {
 		t.Errorf("面值归平台 = %s，期望 0.00000003（5 − 2）", got)
 	}
-	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)).Add(planVoidedFrom(t, db, upID)); got.Cmp(before) != 0 {
+	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)).Add(planVoidedFrom(t, ctx, db, upID)); got.Cmp(before) != 0 {
 		t.Errorf("结转 + 归平台 = %s，期望处置前的面值余额 %s", got, before)
 	}
 }
@@ -318,11 +332,11 @@ func TestCarryoverAmountKeepsSubYuan(t *testing.T) {
 	if got := up.CarryoutQuota; got.Cmp(amount(t, "2.94")) != 0 {
 		t.Errorf("金额包的结转出去量 = %s，期望与面值同值 2.94", got)
 	}
-	if got := planVoidedFrom(t, db, upID); got.Cmp(amount(t, "4.41")) != 0 {
+	if got := planVoidedFrom(t, ctx, db, upID); got.Cmp(amount(t, "4.41")) != 0 {
 		t.Errorf("面值归平台 = %s，期望 4.41（7.35 − 2.94）", got)
 	}
 	// 守恒：两笔分录之和 = 处置前的剩余面值，零头没有被吞掉。
-	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)).Add(planVoidedFrom(t, db, upID)); got.Cmp(before) != 0 {
+	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)).Add(planVoidedFrom(t, ctx, db, upID)); got.Cmp(before) != 0 {
 		t.Errorf("结转 + 归平台 = %s，期望处置前的面值余额 %s", got, before)
 	}
 }
@@ -391,8 +405,9 @@ func TestCarryoverTwoDimensionsIndependent(t *testing.T) {
 
 	up := voidPlan(t, ctx, svc, upID, UserPlanExpired, "void-"+itoa(nextID()))
 
-	// 面值：80 × 0.4 = 32；可用量：500 × 0.4 = 200。两个比例不同（0.4 vs 0.5），
-	// 从一维推另一维会得到 32 或 200 以外的数。
+	// 面值：80 × 0.4 = 32；可用量：500 × 0.4 = 200。比例是同一个 0.4，不同的是
+	// 两维各自的**基数**（R = 80、Q = 500）——从一维按比例推另一维会得到 32 或
+	// 200 以外的数，因为那等于假设「1 元面值 = 固定多少 token」。
 	if got := up.CarryoutAmount; got.Cmp(amount(t, "32")) != 0 {
 		t.Errorf("结转出去的面值 = %s，期望 32（80 × 0.4）", got)
 	}
@@ -418,6 +433,101 @@ func TestCarryoverTwoDimensionsIndependent(t *testing.T) {
 	}
 	if got := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(newID)); got.Cmp(amount(t, "132")) != 0 {
 		t.Errorf("新订阅面值 = %s，期望 132（发放 100 + 并入 32）", got)
+	}
+}
+
+// 次数包（UnitRequest）与 token 包走同一档取整：剩余 1 次、比例 0.4 → 0.4 次，
+// 向下取整到整次得 0。于是这一次也不结转，整份面值归平台。
+//
+// 全仓此前没有一条结转用例落在 request 上（`carryShare` 里它和 token 同分支，
+// 但没人钉过这个边界）。取整到 0 的代价见 carrySplit 的注释：量跟着没了，
+// 账上看不出来。
+func TestCarryoverRequestUnitRoundsToZero(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	svc := New(db)
+	setCarryoverBP(t, ctx, db, 4000)
+
+	userID := seedUser(t, ctx, db)
+	plan := newRequestPlan(t, ctx, svc, "1", "1")
+	upID := grantFresh(t, ctx, svc, userID, plan.Key, "grant-"+itoa(nextID()))
+	expireSubscription(t, ctx, db, upID)
+
+	up := voidPlan(t, ctx, svc, upID, UserPlanExpired, "void-"+itoa(nextID()))
+
+	if got := up.CarryoutQuota; !got.IsZero() {
+		t.Errorf("结转出去的量 = %s，期望 0（1 次 × 0.4 = 0.4，向下取整到整次）", got)
+	}
+	if got := up.CarryoutAmount; !got.IsZero() {
+		t.Errorf("结转出去的面值 = %s，期望 0（量落零时面值也不结转）", got)
+	}
+	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)); !got.IsZero() {
+		t.Errorf("结转余额 = %s，期望 0", got)
+	}
+	if got := planVoidedFrom(t, ctx, db, upID); got.Cmp(amount(t, "1")) != 0 {
+		t.Errorf("面值归平台 = %s，期望 1（整份，没有结转）", got)
+	}
+}
+
+// token 包的结转基数：上期结转进来 100、本期发放 100、本期用掉 50 →
+// 量那一维结转 20，不是 0。
+//
+// 这一格钉的是「结转进来的量不计入本期可结转的基数」：可用量 = 总量 100 +
+// 结转 100 − 已用 50 = 150，减掉结转进来的 100 得 50，× 0.4 = 20。基数若把
+// carried_quota 多减一次（= 100 − 50 − 100 < 0），结转会落成 0，而它正是
+// issue 举的那组数。
+//
+// 金额包走不到这一格（carrySplit 对 UnitAmount 提前返回），所以这里必须是
+// token 包；现有其它用例的 carried 都是 0。
+func TestCarryoverTokenQuotaBaseExcludesCarried(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	svc := New(db)
+
+	userID := seedUser(t, ctx, db)
+
+	// 第一期末：全部结转（比例 1），留下量 100、面值 100。
+	setCarryoverBP(t, ctx, db, 10000)
+	source := newTokenPlan(t, ctx, svc, "100", "100")
+	sourceID := grantFresh(t, ctx, svc, userID, source.Key, "grant-"+itoa(nextID()))
+	expireSubscription(t, ctx, db, sourceID)
+	voidPlan(t, ctx, svc, sourceID, UserPlanExpired, "void-"+itoa(nextID()))
+
+	// 本期：领一个新包，100 的量与 100 的面值并进来。
+	setCarryoverBP(t, ctx, db, 4000)
+	fresh := newTokenPlan(t, ctx, svc, "100", "100")
+	upID := grantFresh(t, ctx, svc, userID, fresh.Key, "grant-"+itoa(nextID()))
+	var carriedQuota, carriedAmount string
+	if err := db.QueryRowContext(ctx,
+		`SELECT carried_quota::text, carried_amount::text FROM user_plans WHERE id = $1`,
+		upID).Scan(&carriedQuota, &carriedAmount); err != nil {
+		t.Fatalf("读新订阅的 carried 两列失败: %v", err)
+	}
+	if carriedQuota != "100.00000000" || carriedAmount != "100.00000000" {
+		t.Fatalf("前置条件不成立：新订阅的 carried = (%s, %s)，期望 (100, 100)",
+			carriedQuota, carriedAmount)
+	}
+
+	// 本期用掉 50：面值扣 50，已用量记 50。
+	consumePrepaid(t, ctx, svc, userID, upID, amount(t, "50"))
+	if _, err := db.ExecContext(ctx,
+		`UPDATE user_plans SET quota_used = 50 WHERE id = $1`, upID); err != nil {
+		t.Fatalf("写已用量失败: %v", err)
+	}
+	expireSubscription(t, ctx, db, upID)
+
+	up := voidPlan(t, ctx, svc, upID, UserPlanExpired, "void-"+itoa(nextID()))
+
+	// 面值：200 − 50 = 150，减掉结转进来的 100 得 50，× 0.4 = 20。
+	if got := up.CarryoutAmount; got.Cmp(amount(t, "20")) != 0 {
+		t.Errorf("结转出去的面值 = %s，期望 20（(150 − 100) × 0.4）", got)
+	}
+	// 量：100 + 100 − 50 = 150，减掉结转进来的 100 得 50，× 0.4 = 20。
+	if got := up.CarryoutQuota; got.Cmp(amount(t, "20")) != 0 {
+		t.Errorf("结转出去的量 = %s，期望 20（(100 + 100 − 50 − 100) × 0.4）", got)
+	}
+	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)); got.Cmp(amount(t, "20")) != 0 {
+		t.Errorf("账上结转余额 = %s，期望 20", got)
 	}
 }
 
@@ -655,10 +765,11 @@ func TestCarryoverVisibleInAccountBalances(t *testing.T) {
 // planVoidedFrom 读一条订阅的 prepaid 上由 plan_void 核销掉的金额之和。
 //
 // 按订阅而不是按平台科目：平台科目是全局的，同一个包里别的用例也会往里写。
-func planVoidedFrom(t *testing.T, db *sql.DB, userPlanID int64) money.Amount {
+// ctx 由调用方传进来（理由见 seedUser）。
+func planVoidedFrom(t *testing.T, ctx context.Context, db *sql.DB, userPlanID int64) money.Amount {
 	t.Helper()
 	var raw string
-	if err := db.QueryRowContext(context.Background(), `
+	if err := db.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(amount), 0)::numeric(20, 8)::text
 		  FROM ledger_entries
 		 WHERE account = $1 AND asset = 'CNY' AND entry_type = 'plan_void'`,

@@ -47,10 +47,11 @@ const (
 	// 既有的 consume（只差用户侧科目，见 Consume）。
 	EntryPlanGrant EntryType = "plan_grant"
 	// EntryPlanVoid 是额度包订阅作废——到期未用完，或运营提前作废。
-	// 剩余面值从 prepaid:<订阅 id> 转回平台收入。
+	// 剩余面值里没结转的那一部分，从 prepaid:<订阅 id> 转回平台收入。
 	//
-	// 到期与人工作废共用一档：在账上它们是同一个事件（剩下的额度不再可用、
-	// 归平台），区别记在订阅的状态上（到期 / 人工作废）。
+	// 到期与人工作废共用一档，但两者在账上不再完全等同：只有真的到期才会多出
+	// 一笔 plan_carry（按比例留下的那部分），人工作废整笔走这里。区别记在订阅
+	// 的状态上（到期 / 人工作废），金额上的差别由有没有 plan_carry 那一档体现。
 	EntryPlanVoid EntryType = "plan_void"
 	// EntryPlanCarry 是额度包订阅**期末结转**：到期时按比例留下的那部分面值，
 	// 从 prepaid:<源订阅 id> 转到 carryover:<源订阅 id>，等用户下次领包时并入。

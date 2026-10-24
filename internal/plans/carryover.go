@@ -124,10 +124,12 @@ func carryShare(unit PlanUnit, base money.Amount, bp int64) money.Amount {
 //	carry_amount = floor(max(0, R − carried_amount) × bp / 10000)
 //	carry_quota  = floor(max(0, Q − carried_quota)  × bp / 10000)   （token / 次数包）
 //
-// R 是扣掉在途预留之后的面值余额；Q 是 quota_total − quota_used − 在途预留
-// （见 store.PlanQuotaUsage）。两维各自减掉「领这条订阅时并进来的量」，所以结转
-// 进来的额度不会被结转第二次——那是本功能最容易做错的一格，也是「上期结转 100、
-// 本期发放 100、用掉 50 → 结转 0」那条用例钉住的性质。
+// R 是扣掉在途预留之后的面值余额；Q 是 quota_total + carried_quota −
+// quota_used − 在途预留，也就是这份订阅现在还能用多少单位（见
+// store.PlanQuotaUsage，与请求路径的可用量同一个表达式）。两维各自再减掉
+// 「领这条订阅时并进来的量」，所以结转进来的额度不会被结转第二次——那是本功能
+// 最容易做错的一格，也是「上期结转 100、本期发放 100、用掉 50 → 结转 20」
+// 那条用例钉住的性质。
 //
 // 两维**各算各的**、各自向下取整：从一维推另一维会在 token 与面值的比例偏离
 // 标价时把量算错，而那种偏离正是 token 包存在的理由（1 万 token 在贵模型与
@@ -141,10 +143,17 @@ func carryShare(unit PlanUnit, base money.Amount, bp int64) money.Amount {
 //
 // # 取整到 0 时的代价
 //
-// 量那一维算出 0 时，carry_amount 也必须为 0：账本上没有一分钱对应这份量，
-// 而并入的闸门是账本余额（见 mergeCarryover）。于是可能出现「量还剩一些、
-// 面值已经归零」，那份量就跟着订阅一起没了。这是诚实写出来的代价——不是
-// 「什么都没损失」，而是「这一格损失的是量，且账上看不出来」。
+// 两个方向不对称：
+//
+//   - 面值算出 0 时，量也一并置 0。账本上没有一分钱对应这份量，而并入的闸门
+//     是账本余额（见 mergeCarryovers）——留一个量为正、余额为零的源，它永远
+//     并不过去，只会让「待并入」这份名单里多一条读不懂的行。
+//   - 量算出 0 而面值不为 0 时，面值照转。钱是账上的钱，把有理由留下的钱
+//     强行归零没有依据；量为 0 的那份代价则是实实在在的。
+//
+// 于是可能出现「量还剩一些、面值已经归零」，那份量就跟着订阅一起没了。这是
+// 诚实写出来的代价——不是「什么都没损失」，而是「这一格损失的是量，且账上
+// 看不出来」。
 func carrySplit(unit PlanUnit, basisAmount, basisQuota, carriedAmount, carriedQuota money.Amount, bp int64) (amount, quota money.Amount) {
 	amount = carryShare(unit, basisAmount.Sub(carriedAmount), bp)
 	if !amount.IsPositive() {
