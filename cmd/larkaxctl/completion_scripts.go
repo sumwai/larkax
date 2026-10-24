@@ -33,17 +33,21 @@ func bashCompletionScript(data completionData) string {
 	// 枚举取值：前一个词是某个枚举选项时，补它的合法值。
 	//
 	// 具体键之后是全局选项的通配分支：`$path` 任意、`$prev` 恰是那个选项。
+	// 模式由两段拼成——`*` **不引号**才是通配符，`|--format` 则**必须引号**：
+	// case 里 `|` 是多模式分隔符，`*|--format` 会被拆成 `*` 与 `--format` 两条
+	// 模式，`*` 匹配任意键，这一分支就会对所有键命中并 `return`，把后面的补全
+	// 全部截断。引起来的 `"|--format"` 才是字面量。
 	// case 里「第一个匹配的赢」，而具体键的 `$prev` 与通配键不同，两者不冲突；
-	// 模式不引号，`*` 才会被当成通配符。`larkaxctl --format <TAB>` 时 path 是
-	// 空串、键是 `|--format`，`*|--format` 的 `*` 匹配空串，一样命中。
+	// `larkaxctl --format <TAB>` 时 path 是空串、键是 `|--format`，
+	// `*"|--format"` 的 `*` 匹配空串，一样命中。
 	b.WriteString("\tcase \"$path|$prev\" in\n")
 	for _, key := range sortedEnumKeys(data.enums) {
 		fmt.Fprintf(&b, "\t\t%s)\n\t\t\tCOMPREPLY=( $(compgen -W %q -- \"$cur\") )\n\t\t\treturn 0\n\t\t\t;;\n",
 			shellCasePattern(key), strings.Join(data.enums[key], " "))
 	}
 	for _, flag := range sortedEnumKeys(data.globalEnums) {
-		fmt.Fprintf(&b, "\t\t*|%s)\n\t\t\tCOMPREPLY=( $(compgen -W %q -- \"$cur\") )\n\t\t\treturn 0\n\t\t\t;;\n",
-			flag, strings.Join(data.globalEnums[flag], " "))
+		fmt.Fprintf(&b, "\t\t*%s)\n\t\t\tCOMPREPLY=( $(compgen -W %q -- \"$cur\") )\n\t\t\treturn 0\n\t\t\t;;\n",
+			shellCasePattern("|"+flag), strings.Join(data.globalEnums[flag], " "))
 	}
 	b.WriteString("\tesac\n\n")
 
@@ -97,10 +101,11 @@ func zshCompletionScript(data completionData) string {
 		fmt.Fprintf(&b, "\t\t%s) compadd -- %s; return ;;\n",
 			shellCasePattern(key), strings.Join(data.enums[key], " "))
 	}
-	// 全局选项的通配分支，形状与 bash 那一份相同（理由见该处注释）。
+	// 全局选项的通配分支，形状与 bash 那一份相同：`*` 不引号才是通配符，
+	// `"|--format"` 必须引号，否则 `|` 被当成多模式分隔符（理由见 bash 处注释）。
 	for _, flag := range sortedEnumKeys(data.globalEnums) {
-		fmt.Fprintf(&b, "\t\t*|%s) compadd -- %s; return ;;\n",
-			flag, strings.Join(data.globalEnums[flag], " "))
+		fmt.Fprintf(&b, "\t\t*%s) compadd -- %s; return ;;\n",
+			shellCasePattern("|"+flag), strings.Join(data.globalEnums[flag], " "))
 	}
 	b.WriteString("\tesac\n\n")
 

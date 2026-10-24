@@ -46,7 +46,7 @@ _larkaxctl() {
 		"wallet payment create|--asset") compadd -- CNY; return ;;
 		"wallet payout request|--asset") compadd -- CNY; return ;;
 		"wallet refund|--asset") compadd -- CNY; return ;;
-		*|--format) compadd -- table json; return ;;
+		*"|--format") compadd -- table json; return ;;
 	esac
 
 	case "$cur" in

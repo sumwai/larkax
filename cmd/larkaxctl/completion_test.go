@@ -216,11 +216,11 @@ func TestCompletionWiresEnums(t *testing.T) {
 	cases := map[string][]string{
 		"bash": {
 			"\t\t\"doctor|--endpoint\")\n\t\t\tCOMPREPLY=( $(compgen -W \"chat messages responses\" -- \"$cur\") )",
-			"\t\t*|--format)\n\t\t\tCOMPREPLY=( $(compgen -W \"table json\" -- \"$cur\") )",
+			"\t\t*\"|--format\")\n\t\t\tCOMPREPLY=( $(compgen -W \"table json\" -- \"$cur\") )",
 		},
 		"zsh": {
 			"\t\t\"doctor|--endpoint\") compadd -- chat messages responses; return ;;",
-			"\t\t*|--format) compadd -- table json; return ;;",
+			"\t\t*\"|--format\") compadd -- table json; return ;;",
 		},
 		"fish": {
 			"complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l endpoint -x -a 'chat messages responses'",
@@ -249,6 +249,78 @@ func TestCompletionWiresEnums(t *testing.T) {
 			t.Errorf("%s 脚本里给短拼法 -o 挂了取值：短选项不占 Tab 的位置", shell)
 		}
 	}
+}
+
+// TestBashCompletionBehavior 在真 bash 里跑一遍生成出来的补全函数。
+//
+// 只比生成物里的字面串挡不住 case 模式里的元字符：`|` 在 case 里是多模式
+// 分隔符，`*|--format` 实际是 `*` 与 `--format` 两条模式，而 `*` 匹配任意键，
+// 于是每个 Tab 都返回 format 的取值、后面的分支全被截断。这一条按行为钉：
+// source 之后直接调 _larkaxctl，看 COMPREPLY 里到底是什么。
+func TestBashCompletionBehavior(t *testing.T) {
+	script := bashCompletionScript(buildCompletionData())
+
+	t.Run("--format 补取值", func(t *testing.T) {
+		got := runBashCompletion(t, script, []string{"larkaxctl", "--format", ""})
+		if want := []string{"table", "json"}; !slices.Equal(got, want) {
+			t.Errorf("COMPREPLY = %v，期望 %v", got, want)
+		}
+	})
+
+	// 下面三格只要不是 format 的取值：顶层补的是命令、--id 与 -o 后面没有
+	// 枚举可取。旧生成器在这里全返回 table / json。
+	noFormatValues := func(t *testing.T, got []string) {
+		t.Helper()
+		for _, unwanted := range []string{"table", "json"} {
+			if slices.Contains(got, unwanted) {
+				t.Errorf("COMPREPLY = %v，不该出现 %q：通配分支把别的键也截断了", got, unwanted)
+			}
+		}
+	}
+
+	t.Run("顶层补命令", func(t *testing.T) {
+		got := runBashCompletion(t, script, []string{"larkaxctl", ""})
+		noFormatValues(t, got)
+		if !slices.Contains(got, "channel") {
+			t.Errorf("COMPREPLY = %v，缺一级命令 channel", got)
+		}
+	})
+
+	t.Run("--id 后面不补取值", func(t *testing.T) {
+		noFormatValues(t, runBashCompletion(t, script, []string{"larkaxctl", "channel", "get", "--id", ""}))
+	})
+
+	t.Run("-o 不补取值", func(t *testing.T) {
+		noFormatValues(t, runBashCompletion(t, script, []string{"larkaxctl", "-o", ""}))
+	})
+}
+
+// runBashCompletion 在真 bash 里 source 生成的脚本，跑一次 _larkaxctl，
+// 返回 COMPREPLY。words 的最后一项是正在输入的那个词（与 COMP_WORDS 的约定一致）。
+func runBashCompletion(t *testing.T, script string, words []string) []string {
+	t.Helper()
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatalf("找不到 bash：%v", err)
+	}
+	file := filepath.Join(t.TempDir(), "completion.bash")
+	if writeErr := os.WriteFile(file, []byte(script), 0o600); writeErr != nil {
+		t.Fatalf("写补全脚本失败：%v", writeErr)
+	}
+	quoted := make([]string, 0, len(words))
+	for _, word := range words {
+		quoted = append(quoted, "'"+strings.ReplaceAll(word, "'", `'\''`)+"'")
+	}
+	driver := "source \"$1\"\n" +
+		"COMP_WORDS=(" + strings.Join(quoted, " ") + ")\n" +
+		"COMP_CWORD=" + strconv.Itoa(len(words)-1) + "\n" +
+		"_larkaxctl\n" +
+		"printf '%s\\n' \"${COMPREPLY[@]}\"\n"
+	out, runErr := exec.CommandContext(t.Context(), bash, "-c", driver, "larkaxctl-test", file).CombinedOutput()
+	if runErr != nil {
+		t.Fatalf("bash 跑补全失败：%v\n%s", runErr, out)
+	}
+	return strings.Fields(string(out))
 }
 
 // ── 参数错、帮助 ──────────────────────────────────────────────────────
