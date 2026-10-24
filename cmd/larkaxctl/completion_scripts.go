@@ -147,16 +147,32 @@ func zshCompletionScript(data completionData) string {
 
 // fishCompletionScript 生成 fish 补全。
 //
-// fish 的补全按条件挂：一条命令路径用 `__fish_seen_subcommand_from` 把它那几段
-// 连起来。选项按路径各挂一次，全局选项挂一次（它们写在子命令前后都认）。
+// fish 的补全按条件挂：一级命令挂「命令行里还没出现一级命令名」，其余路径用
+// `__fish_seen_subcommand_from` 把它那几段连起来。选项按路径各挂一次，全局选项
+// 挂一次（它们写在子命令前后都认）。
 func fishCompletionScript(data completionData) string {
 	var b strings.Builder
 	b.WriteString("# larkaxctl 的 fish 补全。由 `larkaxctl completion fish` 生成，不要手工修改。\n")
 	b.WriteString("complete -c larkaxctl -f\n\n")
 
+	// 一级命令不能挂 `__fish_use_subcommand`：fish 3.7 的实现只判「命令行里还
+	// 没有非 `-*` 的词」，它不知道哪个词是选项的取值。于是 `--env-file x ` 里的
+	// `x` 被当成已经敲了位置参数，一级命令从此不再补。
+	//
+	// 改成「已出现的词里没有一级命令名」后，`--env-file x `、`--format json `
+	// 与空命令行一样给全部一级命令。代价是取值恰好等于某个命令名时
+	// （`--env-file channel `）那个词被当成子命令，真 fish 3.7.0 上实测给 16 条
+	// channel 动词而不是 27 条一级命令——冤枉但无害。
+	//
+	// 也考虑过生成一个跳过取值位的判定函数（`commandline -poc` 时遇到
+	// `--env-file` / `--format` 就吞掉下一个词）。正格上它同样对，但
+	// `--env-file channel ` 会给两堆候选：顶层条件与 channel 路径条件同时为真，
+	// 真 fish 3.7.0 上实测 43 条（27 条一级命令 + 16 条动词）。除了这一格更糟，
+	// 还要往生成物里塞一个函数、多维护一份「哪些全局选项吃取值」的清单。
+	topCondition := fishTopLevelCondition(data.commands)
 	for _, command := range data.commands {
-		fmt.Fprintf(&b, "complete -c larkaxctl -n '__fish_use_subcommand' -a %s",
-			fishQuote(command.name))
+		fmt.Fprintf(&b, "complete -c larkaxctl -n %s -a %s",
+			fishQuote(topCondition), fishQuote(command.name))
 		if command.summary != "" {
 			fmt.Fprintf(&b, " -d %s", fishQuote(command.summary))
 		}
@@ -222,6 +238,20 @@ func fishCompletionScript(data completionData) string {
 			fishQuote(strings.Join(data.enums[key], " ")))
 	}
 	return b.String()
+}
+
+// fishTopLevelCondition 是一级命令共享的 `-n` 条件：命令行里还没出现一级命令名
+// 时补一级命令。
+//
+// 命令名从 data.commands 取，与 `-a` 行同一来源，不另抄一份清单——两处分家时，
+// 漏掉的那条命令会被别的命令名的存在「掩护」掉，表现是 Tab 里少一条而敲下去
+// 仍能跑。
+func fishTopLevelCondition(commands []completionCommand) string {
+	names := make([]string, 0, len(commands))
+	for _, command := range commands {
+		names = append(names, command.name)
+	}
+	return "not __fish_seen_subcommand_from " + strings.Join(names, " ")
 }
 
 // fishSeenCondition 把一条路径翻成 fish 的条件。
