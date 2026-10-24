@@ -318,8 +318,8 @@ func mergeCarryovers(ctx context.Context, s *Service, tx *sql.Tx, newSubscriptio
 	}
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].acct.String() < ordered[j].acct.String() })
 	for _, src := range ordered {
-		if err := lockPlanAccount(ctx, tx, src.acct); err != nil {
-			return money.Zero, money.Zero, err
+		if lockErr := lockPlanAccount(ctx, tx, src.acct); lockErr != nil {
+			return money.Zero, money.Zero, lockErr
 		}
 	}
 
@@ -330,22 +330,22 @@ func mergeCarryovers(ctx context.Context, s *Service, tx *sql.Tx, newSubscriptio
 		quotas  []money.Amount
 	)
 	for _, src := range ordered {
-		balance, err := accountBalanceInTx(ctx, tx, src.acct, asset)
-		if err != nil {
-			return money.Zero, money.Zero, err
+		balance, readErr := accountBalanceInTx(ctx, tx, src.acct, asset)
+		if readErr != nil {
+			return money.Zero, money.Zero, readErr
 		}
 		if !balance.IsPositive() {
 			// 见「闸门只有一条」：零或负的源整个跳过，量也不并。
 			continue
 		}
 		var rawQuota string
-		if err := tx.QueryRowContext(ctx,
-			`SELECT carryout_quota::text FROM user_plans WHERE id = $1`, src.id).Scan(&rawQuota); err != nil {
-			return money.Zero, money.Zero, fmt.Errorf("读源订阅 %d 的结转量失败: %w", src.id, err)
+		if quotaErr := tx.QueryRowContext(ctx,
+			`SELECT carryout_quota::text FROM user_plans WHERE id = $1`, src.id).Scan(&rawQuota); quotaErr != nil {
+			return money.Zero, money.Zero, fmt.Errorf("读源订阅 %d 的结转量失败: %w", src.id, quotaErr)
 		}
-		quota, err := parseMoney(rawQuota, fmt.Sprintf("源订阅 %d 的结转出去量", src.id))
-		if err != nil {
-			return money.Zero, money.Zero, err
+		quota, parseErr := parseMoney(rawQuota, fmt.Sprintf("源订阅 %d 的结转出去量", src.id))
+		if parseErr != nil {
+			return money.Zero, money.Zero, parseErr
 		}
 		sources = append(sources, carryoverSource{SubscriptionID: src.id, Amount: balance, Quota: quota})
 		amounts = append(amounts, balance)

@@ -26,9 +26,11 @@ import (
 // 用 UPDATE 而不是 INSERT：迁移 00065 已经写进这一行过，缺了它说明库里状态
 // 本身不对，用例该红。还原走 upsert，因为「比例读不出来」那条用例会把它删掉，
 // 而删掉之后 UPDATE 救不回来。
-func setCarryoverBP(t *testing.T, db *sql.DB, bp int64) {
+//
+// ctx 由调用方传进来（理由见 seedUser）；收尾那个闭包用的也是它——自己再造一个
+// context.Background() 就是 contextcheck 报的那个形状。
+func setCarryoverBP(t *testing.T, ctx context.Context, db *sql.DB, bp int64) {
 	t.Helper()
-	ctx := context.Background()
 
 	var (
 		value       string
@@ -41,7 +43,7 @@ func setCarryoverBP(t *testing.T, db *sql.DB, bp int64) {
 		t.Fatalf("读 %s 失败：迁移 00065 没跑到这个库上？%v", carryoverBpKey, err)
 	}
 	t.Cleanup(func() {
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 			INSERT INTO settings (key, value, description, editable)
 			VALUES ($1, $2::jsonb, $3, $4)
 			ON CONFLICT (key) DO UPDATE
@@ -63,9 +65,9 @@ func setCarryoverBP(t *testing.T, db *sql.DB, bp int64) {
 // 发放要求到期时刻在将来，所以到期态只能事后改出来。走 UPDATE 而不是把
 // 库里的时间伪造掉：判据用的是库的 now()，而用例要验证的正是「period_end
 // 已经过去」这件事。
-func expireSubscription(t *testing.T, db *sql.DB, userPlanID int64) {
+func expireSubscription(t *testing.T, ctx context.Context, db *sql.DB, userPlanID int64) {
 	t.Helper()
-	if _, err := db.ExecContext(context.Background(),
+	if _, err := db.ExecContext(ctx,
 		`UPDATE user_plans SET period_end = now() - interval '1 minute' WHERE id = $1`,
 		userPlanID); err != nil {
 		t.Fatalf("把订阅 %d 改成已到期失败: %v", userPlanID, err)
@@ -144,21 +146,21 @@ func TestCarryoverRatios(t *testing.T) {
 			ctx := context.Background()
 			db := testDB(t)
 			svc := New(db)
-			setCarryoverBP(t, db, tc.bp)
+			setCarryoverBP(t, ctx, db, tc.bp)
 
-			userID := seedUser(t, db)
+			userID := seedUser(t, ctx, db)
 			plan := newPlan(t, ctx, svc, "100")
 			upID := grantFresh(t, ctx, svc, userID, plan.Key, "grant-"+itoa(nextID()))
-			before := ledgerBalance(t, db, ledger.PrepaidAccount(upID))
-			expireSubscription(t, db, upID)
+			before := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(upID))
+			expireSubscription(t, ctx, db, upID)
 
 			up := voidPlan(t, ctx, svc, upID, UserPlanExpired, "void-"+itoa(nextID()))
 
 			carry := amount(t, tc.carry)
-			if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)); got.Cmp(carry) != 0 {
+			if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)); got.Cmp(carry) != 0 {
 				t.Errorf("结转余额 = %s，期望 %s", got, carry)
 			}
-			if got := ledgerBalance(t, db, ledger.PrepaidAccount(upID)); !got.IsZero() {
+			if got := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(upID)); !got.IsZero() {
 				t.Errorf("作废后面值余额 = %s，期望 0", got)
 			}
 			if got := up.CarryoutAmount; got.Cmp(carry) != 0 {
@@ -173,7 +175,7 @@ func TestCarryoverRatios(t *testing.T) {
 
 			// 守恒：结转 + 归平台 = 处置前的剩余面值。三个数都从账本读，
 			// 期望值不取自被测代码算出的结转账面。
-			stayed := ledgerBalance(t, db, ledger.CarryoverAccount(upID))
+			stayed := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID))
 			voided := planVoidedFrom(t, db, upID)
 			if sum := stayed.Add(voided); sum.Cmp(before) != 0 {
 				t.Errorf("结转 %s + 归平台 %s = %s，期望处置前的面值余额 %s",
@@ -193,16 +195,16 @@ func TestCarryoverFloors(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	svc := New(db)
-	setCarryoverBP(t, db, 4000)
+	setCarryoverBP(t, ctx, db, 4000)
 
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newTokenPlan(t, ctx, svc, "7", "7")
 	upID := grantFresh(t, ctx, svc, userID, plan.Key, "grant-"+itoa(nextID()))
-	expireSubscription(t, db, upID)
+	expireSubscription(t, ctx, db, upID)
 
 	up := voidPlan(t, ctx, svc, upID, UserPlanExpired, "void-"+itoa(nextID()))
 
-	if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)); got.Cmp(amount(t, "2")) != 0 {
+	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)); got.Cmp(amount(t, "2")) != 0 {
 		t.Errorf("结转余额 = %s，期望 2（7 × 0.4 向下取整到整单位）", got)
 	}
 	if got := up.CarryoutAmount; got.Cmp(amount(t, "2")) != 0 {
@@ -228,17 +230,17 @@ func TestCarryoverAmountKeepsSubYuanPrecision(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	svc := New(db)
-	setCarryoverBP(t, db, 4000)
+	setCarryoverBP(t, ctx, db, 4000)
 
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "0.00000003")
 	upID := grantFresh(t, ctx, svc, userID, plan.Key, "grant-"+itoa(nextID()))
-	before := ledgerBalance(t, db, ledger.PrepaidAccount(upID))
-	expireSubscription(t, db, upID)
+	before := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(upID))
+	expireSubscription(t, ctx, db, upID)
 
 	up := voidPlan(t, ctx, svc, upID, UserPlanExpired, "void-"+itoa(nextID()))
 
-	if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)); got.Cmp(amount(t, "0.00000001")) != 0 {
+	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)); got.Cmp(amount(t, "0.00000001")) != 0 {
 		t.Errorf("结转余额 = %s，期望 0.00000001（3 个单位 × 0.4 = 1.2，向下取整到 1）", got)
 	}
 	if got := up.CarryoutAmount; got.Cmp(amount(t, "0.00000001")) != 0 {
@@ -250,7 +252,7 @@ func TestCarryoverAmountKeepsSubYuanPrecision(t *testing.T) {
 	if got := planVoidedFrom(t, db, upID); got.Cmp(amount(t, "0.00000002")) != 0 {
 		t.Errorf("面值归平台 = %s，期望 0.00000002（3 − 1）", got)
 	}
-	if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)).Add(planVoidedFrom(t, db, upID)); got.Cmp(before) != 0 {
+	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)).Add(planVoidedFrom(t, db, upID)); got.Cmp(before) != 0 {
 		t.Errorf("结转 + 归平台 = %s，期望处置前的面值余额 %s", got, before)
 	}
 }
@@ -261,17 +263,17 @@ func TestCarryoverAmountRoundsDownNotHalfUp(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	svc := New(db)
-	setCarryoverBP(t, db, 5000)
+	setCarryoverBP(t, ctx, db, 5000)
 
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "0.00000005")
 	upID := grantFresh(t, ctx, svc, userID, plan.Key, "grant-"+itoa(nextID()))
-	before := ledgerBalance(t, db, ledger.PrepaidAccount(upID))
-	expireSubscription(t, db, upID)
+	before := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(upID))
+	expireSubscription(t, ctx, db, upID)
 
 	up := voidPlan(t, ctx, svc, upID, UserPlanExpired, "void-"+itoa(nextID()))
 
-	if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)); got.Cmp(amount(t, "0.00000002")) != 0 {
+	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)); got.Cmp(amount(t, "0.00000002")) != 0 {
 		t.Errorf("结转余额 = %s，期望 0.00000002（5 个单位 × 0.5 = 2.5，向下取整；四舍五入会得 3）", got)
 	}
 	if got := up.CarryoutAmount; got.Cmp(amount(t, "0.00000002")) != 0 {
@@ -283,7 +285,7 @@ func TestCarryoverAmountRoundsDownNotHalfUp(t *testing.T) {
 	if got := planVoidedFrom(t, db, upID); got.Cmp(amount(t, "0.00000003")) != 0 {
 		t.Errorf("面值归平台 = %s，期望 0.00000003（5 − 2）", got)
 	}
-	if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)).Add(planVoidedFrom(t, db, upID)); got.Cmp(before) != 0 {
+	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)).Add(planVoidedFrom(t, db, upID)); got.Cmp(before) != 0 {
 		t.Errorf("结转 + 归平台 = %s，期望处置前的面值余额 %s", got, before)
 	}
 }
@@ -297,17 +299,17 @@ func TestCarryoverAmountKeepsSubYuan(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	svc := New(db)
-	setCarryoverBP(t, db, 4000)
+	setCarryoverBP(t, ctx, db, 4000)
 
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "7.35")
 	upID := grantFresh(t, ctx, svc, userID, plan.Key, "grant-"+itoa(nextID()))
-	before := ledgerBalance(t, db, ledger.PrepaidAccount(upID))
-	expireSubscription(t, db, upID)
+	before := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(upID))
+	expireSubscription(t, ctx, db, upID)
 
 	up := voidPlan(t, ctx, svc, upID, UserPlanExpired, "void-"+itoa(nextID()))
 
-	if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)); got.Cmp(amount(t, "2.94")) != 0 {
+	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)); got.Cmp(amount(t, "2.94")) != 0 {
 		t.Errorf("结转余额 = %s，期望 2.94（7.35 × 0.4，不是整元 2）", got)
 	}
 	if got := up.CarryoutAmount; got.Cmp(amount(t, "2.94")) != 0 {
@@ -320,7 +322,7 @@ func TestCarryoverAmountKeepsSubYuan(t *testing.T) {
 		t.Errorf("面值归平台 = %s，期望 4.41（7.35 − 2.94）", got)
 	}
 	// 守恒：两笔分录之和 = 处置前的剩余面值，零头没有被吞掉。
-	if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)).Add(planVoidedFrom(t, db, upID)); got.Cmp(before) != 0 {
+	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)).Add(planVoidedFrom(t, db, upID)); got.Cmp(before) != 0 {
 		t.Errorf("结转 + 归平台 = %s，期望处置前的面值余额 %s", got, before)
 	}
 }
@@ -331,9 +333,9 @@ func TestCarryoverRequiresRealExpiry(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	svc := New(db)
-	setCarryoverBP(t, db, 10000)
+	setCarryoverBP(t, ctx, db, 10000)
 
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 
 	grant := func() int64 {
@@ -342,7 +344,7 @@ func TestCarryoverRequiresRealExpiry(t *testing.T) {
 
 	// 1. 运营提前收回：canceled 不结转，即使 period_end 已经过去。
 	canceledID := grant()
-	expireSubscription(t, db, canceledID)
+	expireSubscription(t, ctx, db, canceledID)
 	voidPlan(t, ctx, svc, canceledID, UserPlanCancelled, "void-"+itoa(nextID()))
 
 	// 2. 还没到期就手工标 expired：到期是时间到了的事实，提前标是运营收回。
@@ -358,10 +360,10 @@ func TestCarryoverRequiresRealExpiry(t *testing.T) {
 	voidPlan(t, ctx, svc, noEndID, UserPlanExpired, "void-"+itoa(nextID()))
 
 	for _, id := range []int64{canceledID, earlyID, noEndID} {
-		if got := ledgerBalance(t, db, ledger.CarryoverAccount(id)); !got.IsZero() {
+		if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(id)); !got.IsZero() {
 			t.Errorf("订阅 %d 不该结转，carryover 余额 = %s", id, got)
 		}
-		if got := ledgerBalance(t, db, ledger.PrepaidAccount(id)); !got.IsZero() {
+		if got := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(id)); !got.IsZero() {
 			t.Errorf("订阅 %d 的面值应整笔归平台，余额 = %s", id, got)
 		}
 	}
@@ -373,9 +375,9 @@ func TestCarryoverTwoDimensionsIndependent(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	svc := New(db)
-	setCarryoverBP(t, db, 4000)
+	setCarryoverBP(t, ctx, db, 4000)
 
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newTokenPlan(t, ctx, svc, "1000", "100")
 	upID := grantFresh(t, ctx, svc, userID, plan.Key, "grant-"+itoa(nextID()))
 
@@ -385,7 +387,7 @@ func TestCarryoverTwoDimensionsIndependent(t *testing.T) {
 		`UPDATE user_plans SET quota_used = 500 WHERE id = $1`, upID); err != nil {
 		t.Fatalf("写已用量失败: %v", err)
 	}
-	expireSubscription(t, db, upID)
+	expireSubscription(t, ctx, db, upID)
 
 	up := voidPlan(t, ctx, svc, upID, UserPlanExpired, "void-"+itoa(nextID()))
 
@@ -397,7 +399,7 @@ func TestCarryoverTwoDimensionsIndependent(t *testing.T) {
 	if got := up.CarryoutQuota; got.Cmp(amount(t, "200")) != 0 {
 		t.Errorf("结转出去的量 = %s，期望 200（500 × 0.4）", got)
 	}
-	if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)); got.Cmp(amount(t, "32")) != 0 {
+	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)); got.Cmp(amount(t, "32")) != 0 {
 		t.Errorf("账上结转余额 = %s，期望 32（量那一维不进账本）", got)
 	}
 
@@ -414,7 +416,7 @@ func TestCarryoverTwoDimensionsIndependent(t *testing.T) {
 	if carriedQuota != "200.00000000" || carriedAmount != "32.00000000" {
 		t.Errorf("新订阅的 carried = (%s, %s)，期望 (200, 32)", carriedQuota, carriedAmount)
 	}
-	if got := ledgerBalance(t, db, ledger.PrepaidAccount(newID)); got.Cmp(amount(t, "132")) != 0 {
+	if got := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(newID)); got.Cmp(amount(t, "132")) != 0 {
 		t.Errorf("新订阅面值 = %s，期望 132（发放 100 + 并入 32）", got)
 	}
 }
@@ -457,12 +459,12 @@ func TestCarryoverRateFailureLeavesStateUntouched(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			// 每个子用例都从 4000 出发，结束时由 setCarryoverBP 的收尾还原。
-			setCarryoverBP(t, db, 4000)
+			setCarryoverBP(t, ctx, db, 4000)
 			svc := New(db)
-			userID := seedUser(t, db)
+			userID := seedUser(t, ctx, db)
 			plan := newPlan(t, ctx, svc, "100")
 			upID := grantFresh(t, ctx, svc, userID, plan.Key, "grant-"+itoa(nextID()))
-			expireSubscription(t, db, upID)
+			expireSubscription(t, ctx, db, upID)
 
 			tc.corrupt(t, db)
 
@@ -496,10 +498,10 @@ func TestCarryoverRateFailureLeavesStateUntouched(t *testing.T) {
 				t.Errorf("订阅状态 = %s、void_ref = %v；期望仍是 active 且没有作废单号",
 					status, voidRef)
 			}
-			if got := ledgerBalance(t, db, ledger.PrepaidAccount(upID)); got.Cmp(amount(t, "100")) != 0 {
+			if got := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(upID)); got.Cmp(amount(t, "100")) != 0 {
 				t.Errorf("面值余额 = %s，期望原样 100", got)
 			}
-			if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)); !got.IsZero() {
+			if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(upID)); !got.IsZero() {
 				t.Errorf("失败时不该写结转余额，实际 %s", got)
 			}
 			var n int
@@ -524,20 +526,20 @@ func TestCarryoverFullCycleAndIdempotency(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	svc := New(db)
-	setCarryoverBP(t, db, 10000)
+	setCarryoverBP(t, ctx, db, 10000)
 
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 
 	// 第一次期末：100 全部结转。
 	ref1 := "grant-" + itoa(nextID())
 	sub1 := grantFresh(t, ctx, svc, userID, plan.Key, ref1)
-	expireSubscription(t, db, sub1)
+	expireSubscription(t, ctx, db, sub1)
 	void1 := voidPlan(t, ctx, svc, sub1, UserPlanExpired, "void-"+itoa(nextID()))
 	if void1.CarryoutAmount.Cmp(amount(t, "100")) != 0 {
 		t.Fatalf("第一次期末结转 = %s，期望 100", void1.CarryoutAmount)
 	}
-	if got := ledgerBalance(t, db, ledger.PrepaidAccount(sub1)); !got.IsZero() {
+	if got := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(sub1)); !got.IsZero() {
 		t.Fatalf("第一次期末之后源订阅面值 = %s，期望 0", got)
 	}
 
@@ -551,10 +553,10 @@ func TestCarryoverFullCycleAndIdempotency(t *testing.T) {
 		t.Fatalf("第二次发放失败: applied=%v err=%v", applied2, err)
 	}
 	sub2 := up2.ID
-	if got := ledgerBalance(t, db, ledger.PrepaidAccount(sub2)); got.Cmp(amount(t, "200")) != 0 {
+	if got := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(sub2)); got.Cmp(amount(t, "200")) != 0 {
 		t.Fatalf("新订阅面值 = %s，期望 200（发放 100 + 并入 100）", got)
 	}
-	if got := ledgerBalance(t, db, ledger.CarryoverAccount(sub1)); !got.IsZero() {
+	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(sub1)); !got.IsZero() {
 		t.Fatalf("并入之后源结转余额 = %s，期望 0", got)
 	}
 	mergeTxn := carryTxnID(carryMergeTxnDomain, ref2)
@@ -565,12 +567,12 @@ func TestCarryoverFullCycleAndIdempotency(t *testing.T) {
 
 	// 把上期结转 100 对应的那份额度用掉：剩余 100，正好等于 carried_amount。
 	consumePrepaid(t, ctx, svc, userID, sub2, amount(t, "100"))
-	if got := ledgerBalance(t, db, ledger.PrepaidAccount(sub2)); got.Cmp(amount(t, "100")) != 0 {
+	if got := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(sub2)); got.Cmp(amount(t, "100")) != 0 {
 		t.Fatalf("用掉 100 后面值 = %s，期望 100", got)
 	}
 
 	// 发放重放：早返回，面值、carried 与分录都不变。
-	before := ledgerBalance(t, db, ledger.PrepaidAccount(sub2))
+	before := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(sub2))
 	up, applied, err := svc.Grant(ctx, GrantInput{
 		TxnID: newTxnID(), Ref: ref2, UserID: userID, PlanKey: plan.Key, ExpiresAt: expires2,
 	})
@@ -580,7 +582,7 @@ func TestCarryoverFullCycleAndIdempotency(t *testing.T) {
 	if up.CarriedAmount.Cmp(amount(t, "100")) != 0 {
 		t.Errorf("重放之后 carried_amount = %s，期望仍是 100（没有二次并入）", up.CarriedAmount)
 	}
-	if got := ledgerBalance(t, db, ledger.PrepaidAccount(sub2)); got.Cmp(before) != 0 {
+	if got := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(sub2)); got.Cmp(before) != 0 {
 		t.Errorf("重放改动面值：%s → %s", before, got)
 	}
 	if n := countEntries(t, db, mergeTxn); n != 2 {
@@ -588,7 +590,7 @@ func TestCarryoverFullCycleAndIdempotency(t *testing.T) {
 	}
 
 	// 第二次期末：结转恰好为 0——那 100 是结转进来的，不再结转第二次。
-	expireSubscription(t, db, sub2)
+	expireSubscription(t, ctx, db, sub2)
 	void2 := voidPlan(t, ctx, svc, sub2, UserPlanExpired, "void-"+itoa(nextID()))
 	if !void2.CarryoutAmount.IsZero() {
 		t.Errorf("第二次期末结转出去的面值 = %s，期望恰好 0", void2.CarryoutAmount)
@@ -596,7 +598,7 @@ func TestCarryoverFullCycleAndIdempotency(t *testing.T) {
 	if !void2.CarryoutQuota.IsZero() {
 		t.Errorf("第二次期末结转出去的量 = %s，期望恰好 0", void2.CarryoutQuota)
 	}
-	if got := ledgerBalance(t, db, ledger.CarryoverAccount(sub2)); !got.IsZero() {
+	if got := ledgerBalance(t, ctx, db, ledger.CarryoverAccount(sub2)); !got.IsZero() {
 		t.Errorf("第二次期末之后结转余额 = %s，期望 0", got)
 	}
 
@@ -623,12 +625,12 @@ func TestCarryoverVisibleInAccountBalances(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	svc := New(db)
-	setCarryoverBP(t, db, 4000)
+	setCarryoverBP(t, ctx, db, 4000)
 
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 	upID := grantFresh(t, ctx, svc, userID, plan.Key, "grant-"+itoa(nextID()))
-	expireSubscription(t, db, upID)
+	expireSubscription(t, ctx, db, upID)
 	voidPlan(t, ctx, svc, upID, UserPlanExpired, "void-"+itoa(nextID()))
 
 	report, err := store.New(db).AccountBalances(ctx, ledger.AssetCNY)
