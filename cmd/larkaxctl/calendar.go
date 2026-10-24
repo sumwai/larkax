@@ -35,8 +35,9 @@ const priceCalendarShortUsage = `larkaxctl price calendar 维护分时计价用�
   larkaxctl price calendar list            列出导入过的年份与状态
 
 文件是一个 JSON 对象，字段写错会直接报错；只有 synced 状态才带 days，而 days
-必须覆盖本年的每一天。同一年再灌一次是覆盖，不是追加。sync 拉到的数据源如果
-还没发布这一年，写的是 pending，退出码是 0。
+必须覆盖本年的每一天。带 days 的文件同一年再灌一次是覆盖，不是追加；只记年份
+状态的文件不碰已有数据行，该年已有定论时整条不写。sync 拉到的数据源如果还没
+发布这一年，写的是 pending，退出码是 0。
 
 更细的边界：larkaxctl price calendar help。
 `
@@ -93,7 +94,9 @@ pending（公告尚未发布）、conflict、degraded 三种状态只记年份�
 days 也不带 source——那一年还没有定论，写进去的数据行会被当成确定的判定
 使用，而 source 只用于数据行。
 
-同一年再灌一次是覆盖而不是追加：导入会先清掉这一年上一次导入写下的行。
+带 days 的文件同一年再灌一次是覆盖而不是追加：导入会先清掉这一年上一次导入
+写下的行，再写新的。不带 days 的文件只写年份状态，不碰已有数据行；该年已经
+有定论（synced / conflict）时整条不写，命令打一行说明并以 0 退出。
 跨年边界上的日子（例如元旦安排里把去年 12 月 31 日挪成休息）可以写进相邻
 年份的文件里，同一天以最后一次导入为准。
 
@@ -254,6 +257,12 @@ func runCalendarImport(args []string) error {
 	if err != nil {
 		return err
 	}
+	if !result.Written {
+		// 文件不带 days，而这一年已经有定论：Import 把它转给了只写年份状态的
+		// 那条路，那条路见到定论就不写。**这不是失败**，退 0。
+		printCalendarSettled(humanStdout(), result, "这份文件只记年份状态")
+		return nil
+	}
 	printCalendarImport(humanStdout(), result)
 	return nil
 }
@@ -277,6 +286,15 @@ func printCalendarImport(w io.Writer, r calendarstore.Result) {
 		// 预期结果，而不是数据被吞了。
 		_, _ = fmt.Fprintf(w, "（status=%s 的年份不带数据行，只记录年份状态）\n", r.Status)
 	}
+}
+
+// printCalendarSettled 打「库里已有定论、这次的内容一个字节都没写」那一行。
+//
+// 两条路径共用：sync 拿到的是数据源说的「还没发布」，手工 import 拿到的是一份
+// 不带 days 的文件。两处各写一遍字面量的话，改一处忘一处是迟早的事。
+func printCalendarSettled(w io.Writer, r calendarstore.Result, cause string) {
+	_, _ = fmt.Fprintf(w, "%s %d 年库里已有定论（%s），%s，未改动。\n",
+		r.Region, r.Year, r.Status, cause)
 }
 
 // ── price calendar sync ──────────────────────────────────────────────
@@ -328,10 +346,14 @@ type holidayCNDaySource struct {
 //	synced          | 覆盖，0          | 不写，0，打一行说明      | 不写，非 0
 //	conflict        | 覆盖，0          | 不写，0                  | 不写，非 0
 //
-// 每一格都由下面的代码显式回答。「有定论」指 synced 与 conflict——两者都是
-// 这一年已经有结果；无记录、pending、degraded 则还没有结果，它们之间可以互相
-// 覆盖。synced 与 conflict 那两格「不写」是同一个理由：Import 会先删掉这一年
-// 原有的行，而单源的 pending 或一次拉取失败，都不该把一份已经有结果的数据降级。
+// 每一格都由下面的代码回答。「有定论」指 synced 与 conflict——两者都是这一年
+// 已经有结果；无记录、pending、degraded 则还没有结果，它们之间可以互相覆盖。
+// synced 与 conflict 那两格「不写」是同一个理由：单源的 pending 或一次拉取失败，
+// 都不该把一份已经有结果的数据降级（旧路径上那等于整年数据被清空）。
+//
+// 判「有没有定论」的不是下面的 if，而是写年份状态那条 SQL 的 WHERE：先读状态
+// 再写会让并发的两条 sync 读到旧状态，把先写好的定论降级。所以那两格由
+// Admin.SetYearStatus 的返回值回答，这条规则只在这里定义一次。
 //
 // conflict 与 synced 同等保护：两源对不上也是一条结论，把它降成单源的 pending
 // 等于丢掉「两源不一致」这个事实，而那正是下一次人工核对该找的东西。反方向是
@@ -383,50 +405,47 @@ func runPriceCalendarSync(args []string) error {
 	}
 	defer func() { _ = db.Close() }()
 
-	// 先读一次这一年的当前状态，三条路（写入数据、数据源说未发布、拉取失败）共用
-	// 同一个判断。Import 会在事务里先删掉这一年上一次写下的所有行，所以「已经
-	// synced 就不许降级」不能只写在失败那条路上：数据源返回 404 或空 days 时，
-	// 拿回来的是一份 pending 文档，把它写进去同样会清掉整年的判定，而状态看上
-	// 去还是正常的 pending——list 看不出异常，计价规则却从那一天起整年失败。
-	state, err := calendarstore.NewSource(db).YearState(dbCtx, calendar.RegionCN, year)
-	if err != nil {
-		return err
-	}
+	admin := calendarstore.NewAdmin(db)
 
 	if syncErr == nil {
-		if doc.Status == string(calendar.YearPending) && calendarYearHasVerdict(state) {
-			_, _ = fmt.Fprintf(humanStdout(),
-				"%d 年库里已有定论（%s），数据源这次表示未发布，未改动。\n", year, state)
+		// 带 days 的文档是整年覆盖：Import 先删后写，这是它的语义。
+		// 不带 days 的只写年份状态，从不碰数据行——「库里有没有定论」由那条
+		// SQL 自己判，不在这里先读一次状态（两条 sync 并发时，先读再判会让
+		// 后来者读到旧状态，把先写好的定论降级）。
+		var result calendarstore.Result
+		if doc.Status == string(calendar.YearSynced) {
+			result, err = admin.Import(dbCtx, doc)
+			if err != nil {
+				return err
+			}
+			printCalendarImport(humanStdout(), result)
 			return nil
 		}
-		result, err := calendarstore.NewAdmin(db).Import(dbCtx, doc)
+		// sync 不带 days 的文档只有 pending 一种（见 fetchCalendarDocument）。
+		result, err = admin.SetYearStatus(dbCtx, doc)
 		if err != nil {
 			return err
+		}
+		if !result.Written {
+			printCalendarSettled(humanStdout(), result, "数据源这次表示未发布")
+			return nil
 		}
 		printCalendarImport(humanStdout(), result)
 		return nil
 	}
 
-	// 真正的失败。库里那一年已经有定论就只报错——写一份不带 days 的文档进去
-	// 会把那一年的好数据清空；否则记下 degraded。
-	if calendarYearHasVerdict(state) {
-		return fmt.Errorf("%w（%d 年库里已经有定论：%s，数据没有改动）", syncErr, year, state)
-	}
-	if _, err := calendarstore.NewAdmin(db).Import(dbCtx, degradedCalendarDocument(year, syncErr)); err != nil {
+	// 真正的失败。库里那一年已经有定论就只报错、一个字节都不写：一次拉取失败
+	// 不该把那一年的结论降级。这一格由 SetYearStatus 的返回值回答。
+	result, err := admin.SetYearStatus(dbCtx, degradedCalendarDocument(year, syncErr))
+	if err != nil {
 		// 两个错误都用 %w 包上：命令失败的主因是同步失败，而「连记录失败都失败了」
 		// 也是一条要能分类的错误（例如库连不上）。
 		return fmt.Errorf("%w；另外，把这次失败记进日历也失败了: %w", syncErr, err)
 	}
+	if !result.Written {
+		return fmt.Errorf("%w（%d 年库里已经有定论：%s，数据没有改动）", syncErr, year, result.Status)
+	}
 	return fmt.Errorf("%w（这次失败已记进 %d 年的日历状态：degraded）", syncErr, year)
-}
-
-// calendarYearHasVerdict 报告库里这一年是不是已经有定论。
-//
-// 有定论的年份不允许被单源的 pending 或一次拉取失败降级——那两条路都会先删掉
-// 这一年原有的行。「有定论」的取值见 runPriceCalendarSync 上面的状态机表：synced
-// 与 conflict 都算，无记录 / pending / degraded 不算。
-func calendarYearHasVerdict(state calendar.YearState) bool {
-	return state == calendar.YearSynced || state == calendar.YearConflict
 }
 
 // syncTargetYear 是命令行实际走的那个入口：它把注入的「现在」接给 syncYear。
