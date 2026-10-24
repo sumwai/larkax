@@ -104,16 +104,13 @@ func checkCompletionGolden(t *testing.T, shell, script string) {
 
 // TestCompletionListsExactlyRegisteredCommands 断言三种脚本补出来的一级命令
 // 就是注册表里的那一份（分组顺序 + 旧路径），不手抄名单。
+//
+// fish 还多断一条：一级命令那条 `-n` 条件里列的命令名也要与注册表逐字相等。
+// 这一条与上面那条各取各的来源——`topLevelWords` 抠的是 `-a` 行，条件名直读
+// `-n`，两句期望都从注册表独立派生。两边同源时，「条件漏一条」与「`-a` 行
+// 漏一条」会一起漏一起绿。
 func TestCompletionListsExactlyRegisteredCommands(t *testing.T) {
-	want := make([]string, 0, 32)
-	for _, g := range commandGroups {
-		for _, c := range g.commands {
-			want = append(want, c.name)
-		}
-	}
-	for _, c := range legacyCommands {
-		want = append(want, c.name)
-	}
+	want := registeredTopLevelNames()
 
 	data := buildCompletionData()
 	for _, shell := range completionShells {
@@ -123,8 +120,27 @@ func TestCompletionListsExactlyRegisteredCommands(t *testing.T) {
 			if !slices.Equal(got, want) {
 				t.Errorf("脚本里的一级命令 = %v，注册表里的是 %v", got, want)
 			}
+			if shell == "fish" {
+				if cond := fishTopLevelConditionNames(t, script); !slices.Equal(cond, want) {
+					t.Errorf("fish 顶层条件里列的命令名 = %v，注册表里的是 %v", cond, want)
+				}
+			}
 		})
 	}
+}
+
+// registeredTopLevelNames 从注册表独立派生一级命令清单（分组顺序 + 旧路径）。
+func registeredTopLevelNames() []string {
+	want := make([]string, 0, 32)
+	for _, g := range commandGroups {
+		for _, c := range g.commands {
+			want = append(want, c.name)
+		}
+	}
+	for _, c := range legacyCommands {
+		want = append(want, c.name)
+	}
+	return want
 }
 
 // topLevelWords 从生成出来的脚本里抠出一级命令。
@@ -140,7 +156,9 @@ func topLevelWords(t *testing.T, shell, script string) []string {
 	case "zsh":
 		re = regexp.MustCompile(`(?m)^\t\t""\) compadd -- ([^;]*);`)
 	case "fish":
-		re = regexp.MustCompile(`(?m)^complete -c larkaxctl -n '__fish_use_subcommand' -a '([^']*)'`)
+		// 一级命令那一行的条件来自 fishTopLevelCondition；只认这种条件，
+		// 才不会把子命令动词、选项取值那些 `-a` 行一起抠进来。
+		re = regexp.MustCompile(`(?m)^complete -c larkaxctl -n 'not __fish_seen_subcommand_from [^']*' -a '([^']*)'`)
 	}
 	matches := re.FindAllStringSubmatch(script, -1)
 	if len(matches) == 0 {
@@ -153,6 +171,20 @@ func topLevelWords(t *testing.T, shell, script string) []string {
 			names = append(names, m[1])
 		}
 		return names
+	}
+	return strings.Fields(matches[0][1])
+}
+
+// fishTopLevelConditionNames 从生成物的一级命令 `-n` 条件里抠出命令名。
+//
+// 与 topLevelWords 读的不是同一处：那个读 `-a` 行的值，这个读条件串。两条断言
+// 各取各的来源，才能分别红在「`-a` 行漏一条」与「条件漏一条」上。
+func fishTopLevelConditionNames(t *testing.T, script string) []string {
+	t.Helper()
+	re := regexp.MustCompile(`(?m)^complete -c larkaxctl -n 'not __fish_seen_subcommand_from ([^']*)' -a '[^']*'`)
+	matches := re.FindAllStringSubmatch(script, -1)
+	if len(matches) == 0 {
+		t.Fatalf("fish 脚本里找不到一级命令那一行：生成器的格式变了，或者脚本坏了")
 	}
 	return strings.Fields(matches[0][1])
 }
@@ -446,6 +478,30 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 			if !slices.Contains(got, "channel") {
 				t.Errorf("候选 = %v，缺一级命令 channel", got)
 			}
+		}, ""},
+		// 全局选项的取值吃掉一个词之后，一级命令仍要补。这两格是本次 fish 改动的
+		// 证据：`__fish_use_subcommand` 把取值当成位置词，改前一条候选都没有；
+		// bash 与 zsh 的路径取到第一个 `-` 就停，改前改后都是这一批。
+		{"--env-file 取值后仍补一级命令", []string{"--env-file", "x"}, func(t *testing.T, shell string, got []string) {
+			requireRegisteredTopLevel(t, shell, got)
+		}, ""},
+		{"--format 取值后仍补一级命令", []string{"--format", "json"}, func(t *testing.T, shell string, got []string) {
+			requireRegisteredTopLevel(t, shell, got)
+		}, ""},
+		// 取值恰好等于一级命令名，也就是 docs/cli-reference.md 的 completion 一节
+		// 写明的边界，按 shell 分行断：
+		//   - fish 按「词里有没有一级命令名」判断，那个词被当成子命令，候选退成
+		//     channel 那一级的 16 条，一条一级命令都没有；
+		//   - bash 与 zsh 的路径在第一个以 `-` 开头的词处停，路径是空的，给的还是
+		//     那 27 条一级命令。
+		// 两种结果都来自既有规则，不是本次改动引入的。fish 这一格是已知边界，
+		// 判定方式一变，这里与文档要一起更新。
+		{"取值恰好是命令名", []string{"--env-file", "channel"}, func(t *testing.T, shell string, got []string) {
+			if shell == "fish" {
+				requireFishNamedValueBoundary(t, got)
+				return
+			}
+			requireRegisteredTopLevel(t, shell, got)
 		}, ""},
 		{"channel 补动作", []string{"channel"}, func(t *testing.T, _ string, got []string) {
 			requireNoFormatValues(t, got)
@@ -754,6 +810,55 @@ func requireCompletionShell(t *testing.T, shell string) (string, bool) {
 	}
 	t.Logf("这一格不做真执行：环境里没有 %s", shell)
 	return "", false
+}
+
+// requireRegisteredTopLevel 断言候选就是注册表里的一级命令。
+//
+// 期望值从注册表独立派生（不读生成物）：读生成物等于把同一个错误抄两遍。
+// fish 的 `complete -C` 会把候选按字典序排过再返回，比较用排好序的副本。
+func requireRegisteredTopLevel(t *testing.T, shell string, got []string) {
+	t.Helper()
+	want := registeredTopLevelNames()
+	gotCmp, wantCmp := got, want
+	if shell == "fish" {
+		gotCmp = slices.Clone(got)
+		slices.Sort(gotCmp)
+		wantCmp = slices.Clone(want)
+		slices.Sort(wantCmp)
+	}
+	if !slices.Equal(gotCmp, wantCmp) {
+		t.Errorf("候选 = %v，期望注册表里的一级命令 %v", got, want)
+	}
+}
+
+// requireFishNamedValueBoundary 钉住 fish 在「取值恰好是命令名」那一格的边界。
+//
+// 断两件事：候选恰好 16 条，且其中没有一条是注册表里的一级命令名。动词本身不
+// 写死，也不从 `larkaxctl channel ` 那格的输出取期望——那是拿被测物自己当期望，
+// 生成器多补一条错候选时两边一起变。16 这个数随注册表走：新增一个 channel 动作
+// 时这条会红，提醒把文档里的边界一起改。
+//
+// 16 而不是 14：`add` / `remove` 来自 `channel map` 那条路径。fishSeenCondition
+// 把多段条件拼成 `A and B`，而 fish 把 `and` 当参数而不是关键字，一条
+// `__fish_seen_subcommand_from a and __fish_seen_subcommand_from b` 实际是「a 与 b
+// 里出现任意一个」，深层路径的条件在父层恒真。这是既有缺陷，不属本次改动。
+func requireFishNamedValueBoundary(t *testing.T, got []string) {
+	t.Helper()
+	if len(got) != 16 {
+		t.Errorf("候选 %d 条（%s），期望 16 条：取值被当成子命令，应当只剩 channel 那一级的候选",
+			len(got), samplePatterns(got))
+	}
+	// 命中的名字收齐了打一条：逐个打会把整份候选清单重复二十多遍，结论淹掉。
+	var named []string
+	for _, name := range registeredTopLevelNames() {
+		if slices.Contains(got, name) {
+			named = append(named, name)
+		}
+	}
+	if len(named) > 0 {
+		t.Errorf("候选里出现了 %d 条一级命令名：%s；这一格不该给一级命令",
+			len(named), samplePatterns(named))
+	}
 }
 
 // requireNoFormatValues 断言候选里没有 --format 的取值。

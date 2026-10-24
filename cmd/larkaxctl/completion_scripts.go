@@ -147,16 +147,37 @@ func zshCompletionScript(data completionData) string {
 
 // fishCompletionScript 生成 fish 补全。
 //
-// fish 的补全按条件挂：一条命令路径用 `__fish_seen_subcommand_from` 把它那几段
-// 连起来。选项按路径各挂一次，全局选项挂一次（它们写在子命令前后都认）。
+// fish 的补全按条件挂：一级命令挂「命令行里还没出现一级命令名」，其余路径用
+// `__fish_seen_subcommand_from` 把它那几段连起来。选项按路径各挂一次，全局选项
+// 挂一次（它们写在子命令前后都认）。
 func fishCompletionScript(data completionData) string {
 	var b strings.Builder
 	b.WriteString("# larkaxctl 的 fish 补全。由 `larkaxctl completion fish` 生成，不要手工修改。\n")
 	b.WriteString("complete -c larkaxctl -f\n\n")
 
+	// 一级命令不能挂 `__fish_use_subcommand`：fish 3.7 的实现只判「命令行里还
+	// 没有非选项的词」，它不知道哪个词是选项的取值。于是 `--env-file x ` 里的
+	// `x` 被当成已经敲了位置参数，一级命令从此不再补。
+	//
+	// 改成「已出现的词里没有一级命令名」后，`--env-file x `、`--format json `
+	// 与空命令行一样给全部一级命令。代价是取值恰好等于某个命令名时
+	// （`--env-file channel `）那个词被当成子命令，真 fish 3.7.0 上实测给 16 条
+	// 动词、27 条一级命令一条都没有；这一格的候选不对，取值本身照常生效，
+	// 照着候选敲下去是参数错。
+	//
+	// 也考虑过生成一段跳过取值位的 shell 判定（`commandline -poc` 时遇到
+	// `--env-file` / `--format` 就吞掉下一个词）。两格的方向相反，真 fish 3.7.0
+	// 上实测：`--env-file channel ` 上这一版更糟——只给 16 条候选，一条一级命令
+	// 都没有；判定版给 43 条（27 条一级命令 + 那 16 条），集合严格包含这一版。
+	// `larkaxctl foo `（拼错的命令）上判定版更糟——给 0 条，这一版给 27 条。
+	// 不选判定版，是因为要在生成物里多写一段依赖 `commandline -poc` 语义的 shell
+	// 代码：`--opt=value` 是一个词元，得自己拆；`-o` / `-format` / `--o` 这些等价
+	// 写法也得认得（见 format.go 的 isFormatFlag）。而这两格都是边缘输入，一行
+	// 条件换那一段，划得来。
+	topCondition := fishTopLevelCondition(data.commands)
 	for _, command := range data.commands {
-		fmt.Fprintf(&b, "complete -c larkaxctl -n '__fish_use_subcommand' -a %s",
-			fishQuote(command.name))
+		fmt.Fprintf(&b, "complete -c larkaxctl -n %s -a %s",
+			fishQuote(topCondition), fishQuote(command.name))
 		if command.summary != "" {
 			fmt.Fprintf(&b, " -d %s", fishQuote(command.summary))
 		}
@@ -222,6 +243,19 @@ func fishCompletionScript(data completionData) string {
 			fishQuote(strings.Join(data.enums[key], " ")))
 	}
 	return b.String()
+}
+
+// fishTopLevelCondition 是一级命令共享的 `-n` 条件：命令行里还没出现一级命令名
+// 时补一级命令。
+//
+// 命令名从 data.commands 取，与 `-a` 行同一来源，不另抄一份清单——两者分家时，
+// 用户侧的表现是 Tab 里少一条，或者敲了那条命令之后还在补一级命令。
+func fishTopLevelCondition(commands []completionCommand) string {
+	names := make([]string, 0, len(commands))
+	for _, command := range commands {
+		names = append(names, command.name)
+	}
+	return "not __fish_seen_subcommand_from " + strings.Join(names, " ")
 }
 
 // fishSeenCondition 把一条路径翻成 fish 的条件。
