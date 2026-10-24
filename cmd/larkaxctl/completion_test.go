@@ -588,12 +588,8 @@ func TestCompletionValueFallbackPlacement(t *testing.T) {
 	if got := valueOptionKeys(data); !slices.Equal(got, keys) {
 		t.Errorf("valueOptionKeys 与注册表对不上——两份清单只改了一边：%s", keyDiff(got, keys))
 	}
-	// 同一个位置有两条分支会抢：枚举位不该进这份取值位清单。
-	for _, key := range keys {
-		if _, wired := data.enums[key]; wired {
-			t.Errorf("取值位 %q 同时也是枚举位：两段 case 会抢同一个键", key)
-		}
-	}
+	// 枚举位的排除由上面那条相等断言与生成物本身覆盖（fallbackKeysFromFlags 与
+	// valueOptionKeys 都跳过 data.enums，在这里再遍历一遍永远不成立）。
 
 	globals := slices.Clone(globalValueFlags)
 	slices.Sort(globals)
@@ -674,7 +670,8 @@ func fallbackKeysFromFlags(data completionData) []string {
 	return keys
 }
 
-// samplePatterns 把一长串模式摘成前几条，后面跟总条数。
+// samplePatterns 把一长串模式摘成前几条，截断时以「…」收尾。条数由调用方报，
+// 这里不再写一遍——同一句里出现两个同样的数字，读的人会以为是两件事。
 func samplePatterns(patterns []string) string {
 	if len(patterns) == 0 {
 		return "（无）"
@@ -683,7 +680,7 @@ func samplePatterns(patterns []string) string {
 	if len(patterns) == len(sample) {
 		return strings.Join(sample, " ")
 	}
-	return fmt.Sprintf("%s 等 %d 条", strings.Join(sample, " "), len(patterns))
+	return strings.Join(sample, " ") + " …"
 }
 
 // keyDiff 列出两份清单各自独有的键。只摘前几条：整份清单一打出来，报错就没法读了。
@@ -699,7 +696,8 @@ func keyDiff(got, want []string) string {
 			missing = append(missing, key)
 		}
 	}
-	return fmt.Sprintf("函数多出：%s；函数缺少：%s", samplePatterns(extra), samplePatterns(missing))
+	return fmt.Sprintf("函数多出 %d 条：%s；函数缺少 %d 条：%s",
+		len(extra), samplePatterns(extra), len(missing), samplePatterns(missing))
 }
 
 // TestFishCompletionValueFlagOffersFiles 断言 `-r` 在取值位置保留文件补全，

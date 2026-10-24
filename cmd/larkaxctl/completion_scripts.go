@@ -264,9 +264,9 @@ func shellCasePattern(key string) string {
 // 行为用例只覆盖少数几格（`--env-file`、`--schedule-file`、`--id`），漏掉一条自有
 // 键它看不见：那些键都在叶子路径上，bash 那一段本来就没有词表可填、候选仍是空，
 // zsh 只是从 `_files` 变成空。只有全局 `--env-file` 漏了才明显（顶层有词表，补
-// 出来的是一级命令）。所以 completion_test.go 另有一条位置断言，按 valueOptionKeys
-// 逐条钉住「在顶层 `case "$cur"` 之前、恰好一份」；它还在测试里独立走一遍注册表，
-// 函数自己漏键时直接红。
+// 出来的是一级命令）。所以 completion_test.go 另有一条位置断言：期望清单在测试里
+// 从注册表独立走一遍，逐条钉住对应那一段「在顶层 `case "$cur"` 之前、恰好一份」；
+// 生成器用的 valueOptionKeys 与这份清单相等，由同一条用例里另一处断言负责。
 func writeValuePositionFallback(b *strings.Builder, data completionData, action string) {
 	b.WriteString("\tcase \"$path|$prev\" in\n")
 	for _, key := range valueOptionKeys(data) {
