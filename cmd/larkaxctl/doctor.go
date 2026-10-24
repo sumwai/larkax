@@ -1750,55 +1750,96 @@ type doctorEndpointSpec struct {
 	setAuth func(h http.Header, key string)
 }
 
+// doctorEndpoints 是本命令认的三个入口，按 chat → messages → responses 排。
+//
+// 合法取值、路径、请求体与凭证头放在同一张表里：查表、报错里列出的那一串、
+// 以及需要逐个拿到取值的地方，读的都是这一份。分成两处时，加第四个入口要改
+// 好几处，而漏改报错那一处没有任何东西会报出来——它看起来完全正常，只是说了
+// 一句错在自己边界上的话。
+//
+// 新增一个入口 = 加一条表项，别处零改动。
+var doctorEndpoints = []doctorEndpointSpec{
+	{
+		name: doctorEndpointChat,
+		path: doctorPathChat,
+		payload: func(model string) any {
+			return doctorChatRequest{
+				Model:     model,
+				MaxTokens: doctorLiveMaxTokens,
+				Messages:  []doctorChatMessage{{Role: "user", Content: doctorLivePrompt}},
+			}
+		},
+		setAuth: func(h http.Header, key string) { h.Set("Authorization", "Bearer "+key) },
+	},
+	{
+		name: doctorEndpointMessages,
+		path: doctorPathMessages,
+		payload: func(model string) any {
+			return doctorMessagesRequest{
+				Model:     model,
+				MaxTokens: doctorLiveMaxTokens,
+				Messages:  []doctorChatMessage{{Role: "user", Content: doctorLivePrompt}},
+			}
+		},
+		setAuth: func(h http.Header, key string) { h.Set("x-api-key", key) },
+	},
+	{
+		name: doctorEndpointResponses,
+		path: doctorPathResponses,
+		payload: func(model string) any {
+			return doctorResponsesRequest{
+				Model:           model,
+				Instructions:    doctorLiveInstructions,
+				Input:           []doctorResponsesInput{{Role: "user", Content: doctorLivePrompt}},
+				MaxOutputTokens: doctorLiveMaxTokens,
+			}
+		},
+		// Responses 是 OpenAI 那一套，凭证按它的习惯走 Bearer。
+		setAuth: func(h http.Header, key string) { h.Set("Authorization", "Bearer "+key) },
+	},
+}
+
+// doctorEndpointNames 是三个入口的名字，顺序与 doctorEndpoints 一致。
+//
+// 由表算出来，不另写一份：名字清单被报错与需要列取值的调用方共用，手写的
+// 第二份不会跟着表变。
+func doctorEndpointNames() []string {
+	names := make([]string, 0, len(doctorEndpoints))
+	for _, spec := range doctorEndpoints {
+		names = append(names, spec.name)
+	}
+	return names
+}
+
+// doctorEndpointChoices 把入口名字渲染成报错里那一串：顿号分隔，最后一项前用「或」。
+//
+// 由 doctorEndpointNames() 算出来而不是另写一份字面量：手写的那一份在清单变动
+// 之后不会跟着变，而「报错里列的还是老的那几条」没有任何东西会报出来。
+func doctorEndpointChoices() string {
+	names := doctorEndpointNames()
+	var b strings.Builder
+	for i, name := range names {
+		if i > 0 {
+			if i == len(names)-1 {
+				b.WriteString(" 或 ")
+			} else {
+				b.WriteString("、")
+			}
+		}
+		b.WriteString(name)
+	}
+	return b.String()
+}
+
 func lookupDoctorEndpoint(name string) (doctorEndpointSpec, error) {
-	switch name {
-	case doctorEndpointChat:
-		return doctorEndpointSpec{
-			name: doctorEndpointChat,
-			path: doctorPathChat,
-			payload: func(model string) any {
-				return doctorChatRequest{
-					Model:     model,
-					MaxTokens: doctorLiveMaxTokens,
-					Messages:  []doctorChatMessage{{Role: "user", Content: doctorLivePrompt}},
-				}
-			},
-			setAuth: func(h http.Header, key string) { h.Set("Authorization", "Bearer "+key) },
-		}, nil
-
-	case doctorEndpointMessages:
-		return doctorEndpointSpec{
-			name: doctorEndpointMessages,
-			path: doctorPathMessages,
-			payload: func(model string) any {
-				return doctorMessagesRequest{
-					Model:     model,
-					MaxTokens: doctorLiveMaxTokens,
-					Messages:  []doctorChatMessage{{Role: "user", Content: doctorLivePrompt}},
-				}
-			},
-			setAuth: func(h http.Header, key string) { h.Set("x-api-key", key) },
-		}, nil
-
-	case doctorEndpointResponses:
-		return doctorEndpointSpec{
-			name: doctorEndpointResponses,
-			path: doctorPathResponses,
-			payload: func(model string) any {
-				return doctorResponsesRequest{
-					Model:           model,
-					Instructions:    doctorLiveInstructions,
-					Input:           []doctorResponsesInput{{Role: "user", Content: doctorLivePrompt}},
-					MaxOutputTokens: doctorLiveMaxTokens,
-				}
-			},
-			// Responses 是 OpenAI 那一套，凭证按它的习惯走 Bearer。
-			setAuth: func(h http.Header, key string) { h.Set("Authorization", "Bearer "+key) },
-		}, nil
+	for _, spec := range doctorEndpoints {
+		if spec.name == name {
+			return spec, nil
+		}
 	}
 
-	return doctorEndpointSpec{}, fmt.Errorf("--endpoint 只能是 %s、%s 或 %s，当前为 %q",
-		doctorEndpointChat, doctorEndpointMessages, doctorEndpointResponses, name)
+	return doctorEndpointSpec{}, fmt.Errorf("--endpoint 只能是 %s，当前为 %q",
+		doctorEndpointChoices(), name)
 }
 
 // doctorChatRequest 是 chat 入口的请求体（OpenAI 形状）。
