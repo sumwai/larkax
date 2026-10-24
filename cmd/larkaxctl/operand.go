@@ -13,7 +13,8 @@ import (
 type operandSpec struct {
 	// what 是这一项在报错里的称呼，例如「规则名」「用户名」。
 	what string
-	// flag 是兼容旗标的名字，不带 --。它同时用在「或者改用 --x」这句话里。
+	// flag 是兼容旗标的名字，不带 --。它同时用在「或者改用 --x」这句话里；
+	// 空表示这条命令没有同名旗标，位置参数是唯一写法（见 price tier）。
 	flag string
 	// usage 是没给时该怎么说：把位置参数该排在哪写清，形状是
 	// 「写成第一个位置参数（larkaxctl price add <规则名> …）」。
@@ -40,6 +41,9 @@ func takeLeadingOperand(args []string, spec operandSpec) (string, []string, erro
 	}
 	operand := args[0]
 	if strings.TrimSpace(operand) == "" {
+		if spec.flag == "" {
+			return "", nil, usageErr(fmt.Errorf("%s是空串：换成非空的值", spec.what))
+		}
 		return "", nil, usageErr(fmt.Errorf("%s是空串：换成非空的值，或改用 --%s",
 			spec.what, spec.flag))
 	}

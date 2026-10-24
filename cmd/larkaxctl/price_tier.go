@@ -71,6 +71,14 @@ price tier list 打出来的单价是**每 token**，与 price show 看到的是
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
 var priceTierActions = []string{"add", "list", "remove"}
 
+// priceTierLocatorOperand 是 price tier 的位置参数：规则名或规则 ID。
+//
+// 这三条命令没有同名的旗标，定位符只能写成位置参数，所以 flag 留空；称呼沿用
+// price update 那一份（见 priceLocatorOperand），两条命令的定位符是同一件事。
+var priceTierLocatorOperand = operandSpec{
+	what: "定位符",
+}
+
 // runPriceTier 处理 price 下的 tier 子命令。
 func runPriceTier(args []string) error {
 	if len(args) == 0 {
@@ -155,7 +163,7 @@ func runPriceTierAdd(args []string) error {
 }
 
 func parsePriceTierAdd(args []string) (priceTierRequest, error) {
-	locator, rest, err := takeLeadingOperand(args)
+	locator, rest, err := takeLeadingOperand(args, priceTierLocatorOperand)
 	if err != nil {
 		return priceTierRequest{}, err
 	}
@@ -279,7 +287,7 @@ func runPriceTierRemove(args []string) error {
 // flag 包遇到第一个非旗标词就停，只认后一种写法时，`remove r1 2 --by alice`
 // 里的 --by 会整段落进多余参数。两种写法都收，多给的一律报错。
 func parsePriceTierRemove(args []string) (locator string, segment int, by string, err error) {
-	locator, rest, err := takeLeadingOperand(args)
+	locator, rest, err := takeLeadingOperand(args, priceTierLocatorOperand)
 	if err != nil {
 		return "", 0, "", err
 	}
