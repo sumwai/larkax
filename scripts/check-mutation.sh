@@ -199,7 +199,8 @@
 #
 # 环境变量：GREMLINS（可执行文件，默认 gremlins）、COEF、WORKERS、
 # PROGRESS_EVERY（每完成多少个变异体打一行进度，默认 20；0 表示不打）、
-# LOCK_FILE（锁文件路径，默认 <仓库根>/tmp/check-mutation.lock）、
+# LOCK_FILE（锁文件路径，默认 <克隆的 git 公共目录>/tmp/check-mutation.lock；
+# 不在 git 仓库里时退回 <工作树根>/tmp/check-mutation.lock）、
 # GREMLINS_VERSION（自测注入用，见下；CI 与本地都不该设）。
 #
 # # 变异器集合与工具版本：每次运行都要说清「这把尺子是什么」
@@ -502,9 +503,57 @@ fi
 
 # ── 排他锁 ────────────────────────────────────────────────────────────────
 #
-# 锁文件放在仓库根的 tmp/ 下：.gitignore 的 /tmp/ 规则覆盖它，所以它既不进
-# 版本库，也不会被红线自查的 --all 扫到（那里用了 --exclude-standard）。
-LOCK_FILE="${LOCK_FILE:-$PWD/tmp/check-mutation.lock}"
+# 锁按**克隆**一级，不是按工作树：一个 issue 一棵树是本仓库的常规开发方式，而
+# 同一克隆的各棵树共用同一份代码、同一批集成测试库和同一台机器——两棵树同时跑
+# 变异，与两个人在同一棵树里跑没有区别，超时判据一样失真、集成测试一样互相
+# 删表。所以默认路径由 `git rev-parse --git-common-dir` 派生：同一克隆的任意
+# 工作树解析到同一个目录，不同克隆之间仍然互不影响。
+#
+# 那条命令在主树里可能给出相对路径（就是 `.git`），在第二棵树里给出绝对路径，
+# 所以先补成绝对路径；再用 `pwd -P` 归一化，免得两棵树经由不同写法（`..`、
+# 符号链接）拼出两个不同的字符串——那看起来像两把锁，实际指着同一个文件，而
+# `flock` 与「是不是同一把锁」的判据都在路径本身上。
+#
+# 主路径落在 `<公共目录>/tmp/` 下，也就是通常的 `.git/tmp/`。可以放在那里：
+# 它在工作树之外，`git status`、`git clean` 与红线自查的 --all 都不会碰到；
+# 锁文件只是被 `flock` 打开的那个 inode，进程退出后留下的空文件无害，下一次
+# 打开就是覆盖。前提是 `.git` 可写——不可写时下面的 `mkdir -p` 会失败并在
+# 拿锁时报出来，不会静默。
+#
+# 读不出公共目录时退回工作树下的 tmp/：那里被 .gitignore 的 /tmp/ 规则覆盖，
+# 既不进版本库，也不会被红线自查的 --all 扫到（那里用了 --exclude-standard）。
+default_lock_file() {
+  local common fallback
+  fallback="$PWD/tmp/check-mutation.lock"
+  if ! common=$(git rev-parse --git-common-dir 2>/dev/null) || [ -z "$common" ]; then
+    lock_fallback_notice "$fallback"
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  case "$common" in
+    /*) ;;
+    *) common="$PWD/$common" ;;
+  esac
+  if ! common=$(cd "$common" 2>/dev/null && pwd -P); then
+    lock_fallback_notice "$fallback"
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  printf '%s\n' "$common/tmp/check-mutation.lock"
+}
+
+# 退回工作树级的锁时要出个声。
+#
+# 「读不出 git 公共目录」（dubious ownership、`.git` 损坏）与「本来就不在
+# git 仓库里」走的是同一条退路，而两者都让**跨工作树互斥失效**——那正是这把
+# 克隆级锁要挡的事。静默退回的话，坏掉的正是「看起来一切正常」的那一半。
+#
+# 打到 stderr：stdout 与退出码一律不变，按 stdout 判结果的调用方不受影响。
+lock_fallback_notice() {
+  printf '锁退回工作树级：%s（读不出 git 公共目录）\n' "$1" >&2
+}
+
+LOCK_FILE="${LOCK_FILE:-$(default_lock_file)}"
 mkdir -p "$(dirname "$LOCK_FILE")"
 
 # 已经有实例在跑时的统一出口。
