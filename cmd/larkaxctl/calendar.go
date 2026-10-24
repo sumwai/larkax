@@ -394,7 +394,7 @@ func runPriceCalendarSync(args []string) error {
 
 	if syncErr == nil {
 		if doc.Status == string(calendar.YearPending) && calendarYearHasVerdict(state) {
-			fmt.Fprintf(humanStdout(),
+			_, _ = fmt.Fprintf(humanStdout(),
 				"%d 年库里已有定论（%s），数据源这次表示未发布，未改动。\n", year, state)
 			return nil
 		}
