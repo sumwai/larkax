@@ -123,7 +123,7 @@ func TestParseReferenceReadsTheFourSections(t *testing.T) {
 // TestParseReferenceRejects 钉住「不认识的形状要报错」。
 //
 // 这一条是这份生成器的立场：跳过看不懂的结构时，少掉的那一段与「本来就没写」
-// 在产物里长得一样，而手页是给人照着的（LESSONS.md 第 2 条）。所以每种形状都要
+// 在产物里长得一样，而手册是给人照着的（LESSONS.md 第 2 条）。所以每种形状都要
 // 有一个用例——少一个，下一个写文档的人就能悄悄把它写进去。
 func TestParseReferenceRejects(t *testing.T) {
 	cases := []struct {

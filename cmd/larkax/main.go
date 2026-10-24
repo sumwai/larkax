@@ -376,6 +376,9 @@ func publicHandler(ctx context.Context, cfg *config.Config, handle *sql.DB, valu
 		// 共享计数（限流）用的 Redis。留空表示这个部署不启用它，那时限流
 		// 只在单实例下正确——装配层会打一条 warn 把这件事说出来。
 		RedisDSN: cfg.RedisDSN,
+		// 控制台静态产物。留空时公开监听照旧只提供 API；非空时由内部 webui
+		// 包挂在 "/" 上，并把 /v1/ 交回推理入口。
+		WebDir: cfg.WebDir,
 	})
 	if err != nil {
 		return nil, err

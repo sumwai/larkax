@@ -96,8 +96,9 @@ PR 描述按 [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md
 
 新增配置项前先问：**它是不是必须在连上数据库之前拿到？**
 
-- 是 → 环境变量，目前只有八个（数据库 DSN、主密钥、角色、日志级别、环境名、
-  Redis 连接串、两个监听地址）。完整清单以 `internal/config` 的 `Load` 为准。
+- 是 → 环境变量，目前只有九个（数据库 DSN、主密钥、角色、日志级别、环境名、
+  Redis 连接串、两个监听地址、控制台静态目录）。完整清单以 `internal/config` 的
+  `Load` 为准。
 - 否 → 数据库的 `settings` 表；密钥类配置也不进 `settings`——那里的值会明文落盘
   并进入备份，它们走 `channels` 表的信封加密。
 

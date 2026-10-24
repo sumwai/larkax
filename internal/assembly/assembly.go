@@ -73,6 +73,7 @@ import (
 	"github.com/sumwai/larkax/internal/snapshotwire"
 	"github.com/sumwai/larkax/internal/tokens"
 	"github.com/sumwai/larkax/internal/upstream"
+	"github.com/sumwai/larkax/internal/webui"
 )
 
 // Config 是装配一次服务所需的全部输入。
@@ -117,6 +118,13 @@ type Config struct {
 
 	// Now 可注入，便于测试时间相关的逻辑。为 nil 时用 time.Now。
 	Now func() time.Time
+
+	// WebDir 是控制台静态产物的目录（Vite 的 dist），来自 LARKAX_WEB_DIR。
+	//
+	// 空表示不托管控制台，公开监听对推理入口之外的路径照旧回 501。非空时
+	// 目录里必须有 index.html，否则 Build 失败：起得来但每个页面 404 的状态
+	// 最难查——服务正常、日志正常，只有前端白屏。
+	WebDir string
 }
 
 // App 是装配结果。
@@ -761,7 +769,22 @@ func buildPublicHandler(cfg Config, inference *api.Handler, ledgerStore *store.S
 			payment.NewHandler(service, fakechannel.Name, cfg.Version))
 	}
 
-	mux.Handle("/", inference)
+	if cfg.WebDir == "" {
+		mux.Handle("/", inference)
+		return mux, nil
+	}
+
+	// 控制台静态目录也挂在 "/"：前端路由是个全捕获，没有更窄的前缀可用。
+	// 推理入口因此不再自己占 "/"，而是由静态处理器按 /v1/ 分流交回去
+	//（见 internal/webui）。两边都挂在 "/" 时，ServeMux 取先注册的那个，
+	// 而静态目录先注册会把 /v1/chat/completions 一起吃掉——症状是一份 HTML
+	// 顶替了推理响应。
+	web, err := webui.Handler(cfg.WebDir, inference)
+	if err != nil {
+		return nil, err
+	}
+	mux.Handle("/", web)
+	logger.Info("控制台静态目录已挂上", "dir", cfg.WebDir)
 	return mux, nil
 }
 

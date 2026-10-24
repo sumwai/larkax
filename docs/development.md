@@ -137,6 +137,10 @@ LARKAX_INTERNAL_ADDR="127.0.0.1:8082"
 | `make clean` | 清容器、数据卷与生成的 `.env`，回到刚克隆的状态 |
 | `make init` | 只生成或同步 `.env`，不碰容器 |
 | `make check-ports` | 只查那两个监听地址有没有被占（`make run` 起服务之前会跑它） |
+| `make web` | 构建控制台并打成 `dist/larkax-web_<版本>.tar.gz`（要 Node） |
+| `make release` | `dist` + `web` + `SHA256SUMS`，发布用的全部资产 |
+| `make install` | 装两个二进制、短名链接、手页与 bash/zsh/fish 补全到 `~/.local`（`PREFIX` 可改，详见 [versioning.md](versioning.md)） |
+| `make uninstall` | 移除 `make install` 装进去的那些名字 |
 | `make help` | 把常用的那几条打出来（不含本表里的 `init` 与 `check-ports`） |
 
 `make migrate` 与 `make test` 都会先跑 `make init`——它们都要那份 DSN。
@@ -178,7 +182,7 @@ internal/idempotency/             Idempotency-Key 请求头：重发的请求只
 internal/keyquota/                一把 key 的累计花费有没有超过限额
 internal/ledger/                  复式记账：构造与校验分录
 internal/ledger/store/            分录、钱包与预留的落库
-internal/manpage/                 从命令行注册表与 docs/cli-reference.md 渲染手页
+internal/manpage/                 从命令行注册表与 docs/cli-reference.md 渲染手册
 internal/migrate/                 内嵌的迁移（internal/migrate/sql/）
 internal/money/                   定点金额；全仓只有这里做舍入
 internal/observe/                 日志、请求 ID、健康与就绪端点
@@ -415,7 +419,7 @@ go run ./cmd/larkaxctl price calendar import ./cn-2031.json
 
 ## 环境变量
 
-一共八个，全部有明确理由：
+一共九个，全部有明确理由：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
@@ -427,6 +431,7 @@ go run ./cmd/larkaxctl price calendar import ./cn-2031.json
 | `LARKAX_LOG_LEVEL` | `info` | `debug` / `info` / `warn`（`warning` 也认）/ `error` |
 | `LARKAX_ENV` | `development` | 只有 `production` 特殊：它把日志格式切成 JSON。**其余任何取值都等同 `development`**，写成 `prod` 既不会报错也不会切过去 |
 | `LARKAX_REDIS_DSN` | 空 | 限流的共享计数（`redis://` / `rediss://` / `unix://`）。留空时计数在进程内，单实例正确、多实例下额度按实例数放大 |
+| `LARKAX_WEB_DIR` | 空 | 控制台静态产物目录（Vite 的 `dist`）。留空时公开监听只提供 API；镜像里指向 `/srv/web` |
 
 两个监听地址默认只绑回环（`127.0.0.1`），服务因此默认只在本机可达。容器里端口
 映射不进来、或要让别的机器直接连时，显式写宽即可，例如 `LARKAX_HTTP_ADDR=":8080"`。
@@ -1481,7 +1486,7 @@ bash scripts/check-deadmethods.sh   # 导出方法有没有调用点（上面两
 bash scripts/check-test-names.sh    # Go 顶层函数声明的名字必须是 ASCII
 bash scripts/check-lessons-index.sh # LESSONS.md 的索引与 lessons/ 下的正文对得上
 bash scripts/check-docs-index.sh    # docs/README.md 的分组表、development.md 的 TOC 与正文对得上
-bash scripts/check-man-pages.sh     # man/man1 下的手页与命令注册表、cli-reference.md 对得上
+bash scripts/check-man-pages.sh     # man/man1 下的手册与命令注册表、cli-reference.md 对得上
 bash scripts/check-mutation-table.sh # 「各包的现状」那张表与 PKGS 的包名集合一致
 bash scripts/check-migration-order.sh # 分支新增的迁移编号必须大于 base 上的最大号
 scripts/check-mutation.sh           # 变异测试（改动计费/账本时），见下文
@@ -1565,11 +1570,11 @@ TOC 的每个锚点在文中都有对应标题。前两条是一对，只留一�
 测试失败，所以单独一道门。顺序不参与比较——表按 efficacy 排、清单按优先级排。
 两边任一解析出 0 条时退出 2（「没跑成」），不报通过；每次运行都打印解析出的条数。
 
-`scripts/check-man-pages.sh` 管的是 `man/man1/` 下的手页与它们的来源是否同一次生成
-的。手页是**产物**：名字、分组与一句话来自命令注册表（`cmd/larkaxctl` 的
+`scripts/check-man-pages.sh` 管的是 `man/man1/` 下的手册与它们的来源是否同一次生成
+的。手册是**产物**：名字、分组与一句话来自命令注册表（`cmd/larkaxctl` 的
 `commandGroups`），长文本来自 `docs/cli-reference.md`，由 `internal/manpage` 渲染成
 roff，生成一次提交进库。产物与来源分家的样子是安静的——改了注册表里的一句话或
-文档的某一节却没重新生成，库里的手页仍然说着旧话，而 CI 里不会有任何一步失败，
+文档的某一节却没重新生成，库里的手册仍然说着旧话，而 CI 里不会有任何一步失败，
 只有照着 `man larkaxctl-channel` 敲的人才会撞上。形状照抄 cargo 的 `validate-man.sh`：
 重新生成一遍，与提交的那一份逐页比对，对不上就红。
 
@@ -1579,17 +1584,17 @@ roff，生成一次提交进库。产物与来源分家的样子是安静的—�
 scripts/check-man-pages.sh --update
 ```
 
-翻一份源码树里的手页（`man` 只认 `MANPATH` 下的 `man1/` 这类子目录，所以指到 `man/` 那一层）：
+翻一份源码树里的手册（`man` 只认 `MANPATH` 下的 `man1/` 这类子目录，所以指到 `man/` 那一层）：
 
 ```sh
 MANPATH="$PWD/man" man larkaxctl-channel
 ```
 
 它判四件事：生成器产出的每一页在 `man/man1/` 下都有一份逐字节相同的；库里这一族
-的每一页都由生成器产出；每页非空且以 `.TH` 开头；手页里汉字与拉丁字母之间没有被
+的每一页都由生成器产出；每页非空且以 `.TH` 开头；手册里汉字与拉丁字母之间没有被
 吃掉的空格（那一格几乎总是接硬换行时丢的，判据在 `internal/manpage` 的
 `needsSpace`，数字与全角标点相邻不算）。最后一条是唯一一条判「对不对」的：
-前三条判「同不同」，产物与来源一致时它们永远绿，而少一个空格的手页正好是一致的。
+前三条判「同不同」，产物与来源一致时它们永远绿，而少一个空格的手册正好是一致的。
 确实该紧贴的写法进 `scripts/man-pages-allowlist.txt`，条目只许减不许增。
 
 它的成功信号也是沉默，所以脚本每次都打印证据行：比对路径两行（逐页比对几次、
@@ -1704,13 +1709,17 @@ CI 包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`�
 （`check-unimported.sh`）、导出方法调用点门禁及其自测（`check-deadmethods.sh`）、
 测试函数名门禁及其自测（`check-test-names.sh`）、索引与正文一致性门禁及其自测
 （`check-lessons-index.sh`）、文档索引与正文一致性门禁及其自测
-（`check-docs-index.sh`）、手页同步门禁及其自测（`check-man-pages.sh`）、
+（`check-docs-index.sh`）、手册同步门禁及其自测（`check-man-pages.sh`）、
 非 UTC 时区下的时刻门禁（`TZ=Asia/Shanghai` 再跑一遍
 受影响的包，见 [cli-output.md](cli-output.md) 的「时刻与时区」）、契约测试（见下）。
 
-`Go` job 在单测之前装 `fish` 与 `zsh`：`sudo apt-get install -y` 之后再各打一次
-`--version` 自证装上，`set -euo pipefail` 让 apt 失败当场红；bash 不用装，
-runner 镜像自带。单测那一步设 `LARKAX_REQUIRE_COMPLETION_SHELLS=1`——补全的行为用例
+`Go` job 在单测之前装 `fish`、`zsh` 与 `bash-completion`：`sudo apt-get install -y`
+之后再各打一次 `--version` 自证装上，`set -euo pipefail` 让 apt 失败当场红；bash 自身不用装，
+runner 镜像自带。bash-completion 是 `make install` 用例要的：它靠那份脚本的按需加载证明
+「文件放在用户目录下就会被认」，没有它就只能退化到 source 装好的那一份。单测那一步设
+`LARKAX_REQUIRE_COMPLETION_SHELLS=1`——补全的行为用例
+与 `make install` 的端到端用例（`TestMakeInstallWritesShellCompletions`，它会跑一次
+真的 `make install` 再从装好的目录取候选）
 要在真 shell 里取候选，本地没装壳时可以只记一行日志放行，CI 装了壳还找不到就必须
 硬失败：装壳那一步没生效时，放行会让整条链全绿（见 [LESSONS.md](../LESSONS.md) 第 16 条）。
 
@@ -1790,14 +1799,25 @@ gremlins 版本、`workers=1`、系数 10、`--invert-logical`、每个包之前
 而那时没人知道哪一份算数。
 
 **本仓库不做部署**：`main` 合入即是流水线的终点。发布由 tag 触发 `release.yml`——
-门禁 → `make dist` → 把制品传到 GitHub Release。制品放到哪台机器上属于使用方的事，
-不在本仓库范围内。
+门禁 → `make release`（二进制包 + 控制台包）与镜像推送 → 把资产传到 GitHub Release。
+制品（二进制、控制台包、镜像）放到哪台机器上属于使用方的事，不在本仓库范围内。
+
+镜像由仓库根的 `Dockerfile` 定义：两个构建阶段（Go 与 Node）都跑在构建机架构上，
+二进制按 `$TARGETARCH` 交叉编译，所以一个 amd64 的 runner 就能同时出 amd64 与 arm64
+两个镜像，不需要 qemu。镜像里的二进制与页面分别来自 `make print-ldflags` 和
+`make web-build`，不另写一份。本地试构建：
+
+```sh
+docker build -t larkax:dev .
+docker run --rm -p 8080:8080 -e LARKAX_DB_DSN=... -e LARKAX_MASTER_KEYS=... larkax:dev
+```
 
 另有一个**手动触发**的构建工作流 [.github/workflows/dist.yml](../.github/workflows/dist.yml)：
-它只把某一棵树打成产物——`make dist` 出的二进制，加一份 `npm run build` 出来的控制台
-静态包——通过 workflow artifact 取，**不进 Release，也不部署**。它**不跑门禁**：门禁在
+它只把某一棵树打成产物——`make dist` 出的二进制包与 `make web` 出的控制台包——
+通过 workflow artifact 取，**不进 Release，也不部署**。它**不跑门禁**：门禁在
 push 与 PR 上已经跑过，触发前先确认那个提交是绿的。要「门禁 + 构建 + 发布」一条龙，走
-tag 与 `release.yml`。
+tag 与 `release.yml`。控制台那一格调的也是 `make web`（与发布同一个目标），
+`VITE_API_MODE` 只是它的一个参数。
 
 控制台那份产物的 `VITE_API_MODE` 由工作流的 `api_mode` 输入决定，**默认 `http`**（连真实
 API）；`mock` 只用来出演示包。这一格默认值反了会很隐蔽：演示界面上有横幅，但登录页、菜单

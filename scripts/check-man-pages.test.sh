@@ -196,9 +196,9 @@ mk_committed "$man5"
 printf '.TH LARKAXD 1\n' >"$man5/larkaxd.1"
 run "$man5"
 rc=$?
-if [ "$rc" -eq 0 ]; then ok; else bad "手工补的别族手页 —— 应通过（退出码 0），实际 $rc"; fi
+if [ "$rc" -eq 0 ]; then ok; else bad "手工补的别族手册 —— 应通过（退出码 0），实际 $rc"; fi
 if grep -q '别的 .1 文件 1 个' "$last_out"; then ok; else
-  bad "手工补的别族手页 —— 证据行里没报出「别的 .1 文件 1 个」（不说出来的话，边界与没扫到长得一样）"
+  bad "手工补的别族手册 —— 证据行里没报出「别的 .1 文件 1 个」（不说出来的话，边界与没扫到长得一样）"
 fi
 
 # ── 6~8. 三个「生成器坏了」的出口：都走退出码 2 ───────────────────────────
@@ -228,7 +228,7 @@ if [ "$rc" -eq 2 ]; then ok; else bad "没有 .TH 的页 —— 应「没跑成�
 
 run "$tmp/根本没有这个目录"
 rc=$?
-if [ "$rc" -eq 2 ]; then ok; else bad "手页目录不在 —— 应「没跑成」（退出码 2），实际 $rc"; fi
+if [ "$rc" -eq 2 ]; then ok; else bad "手册目录不在 —— 应「没跑成」（退出码 2），实际 $rc"; fi
 
 # ── 10. 参数写错 ──────────────────────────────────────────────────────────
 
@@ -264,7 +264,7 @@ if cmp -s "$man11/larkaxctl-doctor.1" "$fresh/larkaxctl-doctor.1"; then ok; else
   bad "--update —— 没有把重新生成的页写进库"
 fi
 if [ -f "$man11/larkaxd.1" ]; then ok; else
-  bad "--update —— 把别族的手页（larkaxd.1）删掉了"
+  bad "--update —— 把别族的手册（larkaxd.1）删掉了"
 fi
 
 # ── 12. 真仓库：这道门在它自己身上是干净的 ────────────────────────────────
@@ -409,7 +409,7 @@ fi
 
 # ── 17. --update 遇到判据 4 红：不写库 ────────────────────────────────────
 #
-# 一份少空格的手页不该因为「跑一次 --update」就进库：那会把判据 4 变成一句
+# 一份少空格的手册不该因为「跑一次 --update」就进库：那会把判据 4 变成一句
 # 建议而不是门。
 
 man17="$tmp/man17"

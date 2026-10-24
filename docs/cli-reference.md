@@ -238,6 +238,10 @@ DEL，换行、制表符、ESC 都在其中）：换行会把一栏折成两行�
 - zsh 写进配置：`larkaxctl completion zsh > ~/.zfunc/_larkaxctl`。
 - fish 写进配置：`larkaxctl completion fish > ~/.config/fish/completions/larkaxctl.fish`。
 
+从源码树里用的是 `make install`：它按上表的位置把三份都装好，把这三条手工放置的
+步骤省掉；布局与 zsh 的 `fpath` 那一句见 [versioning.md](versioning.md) 的「从源码树
+安装」一节。发布包（tarball）里没有 `make install`，装补全走上面这几条。
+
 补的内容由命令行自己的注册表生成，不是一份手写的文本：一级命令与根帮助页同源，
 二级动作取自各命令分发表旁边的那份动作清单，长选项取自各命令自己注册的 flag 集。
 所以新增一条命令、一个动作或一个选项时，补全跟着变，不必另改一份名单。

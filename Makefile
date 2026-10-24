@@ -52,7 +52,7 @@ MASTER_KEYS_PLACEHOLDER := current:$(MASTER_KEY_PLACEHOLDER),previous:$(MASTER_K
 # 跟着改成双引号。
 ESCAPED_DB_PASSWORD := $(subst ','\'',$(subst |,\|,$(subst &,\&,$(subst \,\\,$(DB_PASSWORD)))))
 
-.PHONY: help init up down migrate run check-ports test dist clean
+.PHONY: help init up down migrate run check-ports test dist install uninstall clean web web-build release print-ldflags
 
 help:
 	@echo "make run      准备 .env → 起依赖 → 迁移 → 前台跑服务"
@@ -61,6 +61,10 @@ help:
 	@echo "make migrate  只跑迁移"
 	@echo "make test     跑测试（先确保依赖起着）"
 	@echo "make dist     打发布用的 tar.gz（默认只打 amd64，可 ARCHS=\"amd64 arm64\"）"
+	@echo "make web      构建控制台并打成 dist/larkax-web_<版本>.tar.gz（要 Node）"
+	@echo "make release  dist + web + SHA256SUMS，发布用的全部资产"
+	@echo "make install  装两个二进制、短名链接、手页与 bash/zsh/fish 补全到 ~/.local（PREFIX 可改）"
+	@echo "make uninstall 移除 make install 装进去的那些文件"
 	@echo "make clean    清容器、数据卷与生成的 .env"
 	@echo ""
 	@echo "端口被占用时：make run PG_PORT=55432"
@@ -221,11 +225,11 @@ test: init up
 # 那五个选项交给 tar。顶层再套一个以包名命名的目录：解到同一个位置的两个版本
 # 不会互相覆盖。
 #
-# 包里除两个二进制之外还有 LICENSE、README.md 与 man/man1/ 下的手页。手页是
+# 包里除两个二进制之外还有 LICENSE、README.md 与 man/man1/ 下的手册。手册是
 # **用户面文档**的一部分：只躺在源码树里的话，装了发布版的人
 # `man larkaxctl-channel` 翻不到，而那多半会被他当成「自己没装对」。
 #
-# 手页取仓库里**已提交**的那一份（`man/man1/*.1`），不在这里跑生成器：手页是
+# 手册取仓库里**已提交**的那一份（`man/man1/*.1`），不在这里跑生成器：手册是
 # 产物，它与源文件是不是同一次生成由 scripts/check-man-pages.sh 保证。发布时再
 # 生成一次，等于给要发出去的那一包多一个变量，而这一次生成后面没有第二道门。
 #
@@ -248,6 +252,11 @@ VERSION     ?= dev
 ARCHS       ?= amd64
 VERIFY_EXEC ?= 1
 
+# 版本注入只有这一行。dist、install 与 Dockerfile 都用它（最后那个经
+# `print-ldflags` 取）：三处各写一份的话，漂移的症状是「二进制自称 dev」，
+# 而它只在对着版本号排查时才现形。
+LDFLAGS := -s -w -X main.version=$(VERSION)
+
 # 本机是什么，决定哪个架构能真执行。取 GOHOSTARCH / GOHOSTOS 而不是 GOARCH /
 # GOOS：后两者会被环境里的交叉编译设置改掉，那就正好把「能不能跑」判断反了
 # ——判断反了不会报错，只会少校验一次而看起来一切正常。
@@ -265,7 +274,7 @@ dist:
 	  for pair in "larkax:./cmd/larkax" "larkaxctl:./cmd/larkaxctl"; do \
 	    name=$${pair%%:*}; pkg=$${pair#*:}; \
 	    GOOS=linux GOARCH=$$arch CGO_ENABLED=0 go build -trimpath \
-	      -ldflags "-s -w -X main.version=$(VERSION)" \
+	      -ldflags "$(LDFLAGS)" \
 	      -o "dist/$${name}_linux_$${arch}" "$$pkg"; \
 	  done; \
 	  if [ "$(VERIFY_EXEC)" = 0 ]; then \
@@ -293,6 +302,150 @@ dist:
 	cd dist && sha256sum *.tar.gz > SHA256SUMS; \
 	echo "已打出："; \
 	ls -1 *.tar.gz
+
+# 控制台的发布产物：`npm ci` → Vite 构建 → 打成与 dist 同形状的 tar.gz。
+#
+# 与 dist 分开成一个目标，是因为它要 Node，而 `make dist` 只要能跑 Go 的环境。
+# 只想练二进制时不必先把 node_modules 装上。
+#
+# VITE_API_MODE 默认 http：控制台不显式给 http 就用 mock 客户端，而那份产物
+# 照样能跑、只是数字是演示数据。所以构建完立刻查一次产物里有没有只有 mock
+# 才有的固定用户名（`演示账号`），比看构建日志可靠。
+#
+# 打包参数与 dist 同一个理由：同一个版本打两次要得到同一个包。
+VITE_API_MODE ?= http
+NPM           ?= npm
+
+# 只构建控制台，不打包。Dockerfile 的控制台阶段调这一条：镜像里的页面
+# 与 `make web` 出的包必须来自同一份配方，否则「镜像里是旧前端」这种问题
+# 只能靠用户报。
+web-build:
+	@cd web && $(NPM) ci && VITE_API_MODE=$(VITE_API_MODE) $(NPM) run build
+	@if [ "$(VITE_API_MODE)" = http ] && grep -rqs '演示账号' web/dist/assets; then \
+	  echo "产物里带着演示数据（MockApiClient），VITE_API_MODE 没生效"; \
+	  exit 1; \
+	fi
+
+web: web-build
+	@mkdir -p dist
+	@set -e; \
+	umask 022; \
+	root=$$(mktemp -d); \
+	trap 'rm -rf "$$root"' EXIT; \
+	stage="$$root/larkax-web_$(VERSION)"; \
+	mkdir -p "$$stage"; \
+	cp -R web/dist "$$stage/dist"; \
+	cp LICENSE "$$stage/"; \
+	tar -czf "dist/larkax-web_$(VERSION).tar.gz" \
+	  --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+	  -C "$$root" "larkax-web_$(VERSION)"; \
+	echo "已打出：dist/larkax-web_$(VERSION).tar.gz"
+
+# 发布用的全部资产：两个二进制与控制台，外加覆盖两者的校验和。
+#
+# 顺序有意义：dist 开头会 `rm -rf dist`，所以它必须先跑完；web 之后才补上
+# 第三个 tarball，然后一次重算校验和。反过来先 web 再 dist，那份控制台包会
+# 被删掉，而日志里没有任何一步失败。
+release: dist web
+	@cd dist && sha256sum *.tar.gz > SHA256SUMS && echo "已打出：" && ls -1 *.tar.gz
+
+# 打印 ldflags，给 Dockerfile 用。版本注入点只有一处（见 LDFLAGS）：镜像里的
+# 二进制与 `make dist` 出的那一份必须自称同一个版本，而 Dockerfile 里再写一份
+# `-X main.version=` 就是第二个注入点。
+print-ldflags:
+	@echo '$(LDFLAGS)'
+
+# 从源码树装一份到本机：两个二进制、两个短名、手页，以及三个 shell 的补全。
+#
+# 落点都由 PREFIX 派生，换到 /usr/local 时只需 `make install PREFIX=/usr/local`。
+# 短名写成「链接名:目标名」，与 dist 里那把「二进制名:包路径」同一种写法。
+# ALIASES 置空即不建链接：make install ALIASES=""。
+#
+# 三个补全目录各自是那个 shell 认的位置，不是随便挑的：
+#   bash  bash-completion 2 会读 $XDG_DATA_HOME/bash-completion/completions/<命令名>
+#   fish  会在 $XDG_DATA_HOME/fish/vendor_completions.d/ 里找 *.fish
+#   zsh   没有这种约定，用发行版也装的 site-functions；这个目录不在默认 fpath 里，
+#         装完要在 compinit 之前把它加进去（下面最后一行会提示）
+PREFIX      ?= $(HOME)/.local
+BINDIR      ?= $(PREFIX)/bin
+SHAREDIR    ?= $(PREFIX)/share
+MANDIR      ?= $(SHAREDIR)/man/man1
+BASHCOMPDIR ?= $(SHAREDIR)/bash-completion/completions
+ZSHCOMPDIR  ?= $(SHAREDIR)/zsh/site-functions
+FISHCOMPDIR ?= $(SHAREDIR)/fish/vendor_completions.d
+ALIASES     ?= laxctl:larkaxctl lax:larkax
+
+# 构建先落到同目录的临时文件，再用 mv 覆盖：直接 go build -o 覆盖一个正在运行的
+# 二进制会拿到 ETXTBSY（install(1) 用 O_TRUNC 打开，同样会撞）。mv 是 rename，
+# 旧进程继续用旧 inode，下一次调用就是新版本。
+#
+# 装完就把两个二进制各执行一次 --version 比对，**比对在它落到目标名之前**：版本
+# 注入失手时二进制照样能跑，唯一的差别是自称 dev。校验放在 mv 之后的话，坏掉的
+# 那一个已经顶替了原来好的，失败退出也不说明哪一步错了。这里不按架构跳过
+# ——install 构建的就是本机架构。
+#
+# 补全从刚装好的那个二进制生成，不在仓库里存静态副本：静态副本会与注册表分叉，
+# 分叉的样子是 Tab 出来的命令敲下去说不存在。生成物为空同样算失败——空脚本能被
+# 三个 shell 无错加载，而它一条候选也不给（LESSONS.md 第 16 条）。
+#
+# BINDIR 不在 PATH 里时只说一句：装成功了而命令找不到，这个错要当场给出来，
+# 否则「装了但没生效」会在下次调用时才暴露。
+install:
+	@set -e; \
+	mkdir -p "$(BINDIR)" "$(MANDIR)"; \
+	built=""; \
+	trap 'rm -f $$built' EXIT; \
+	for pair in "larkax:./cmd/larkax" "larkaxctl:./cmd/larkaxctl"; do \
+	  name=$${pair%%:*}; pkg=$${pair#*:}; \
+	  tmp=$$(mktemp "$(BINDIR)/.$${name}.XXXXXX"); \
+	  built="$$built $$tmp"; \
+	  go build -trimpath -ldflags "$(LDFLAGS)" -o "$$tmp" "$$pkg"; \
+	  chmod 0755 "$$tmp"; \
+	  got=$$("$$tmp" --version); \
+	  if [ "$$got" != "$(VERSION)" ]; then \
+	    echo "版本注入失败：$${name} 自称 $$got，期望 $(VERSION)，没有装入 $(BINDIR)"; \
+	    exit 1; \
+	  fi; \
+	  mv -f "$$tmp" "$(BINDIR)/$${name}"; \
+	done; \
+	links=""; \
+	for pair in $(ALIASES); do \
+	  ln -sfn "$${pair#*:}" "$(BINDIR)/$${pair%%:*}"; \
+	  links="$${links} $${pair%%:*}"; \
+	done; \
+	install -m 0644 man/man1/*.1 "$(MANDIR)/"; \
+	for pair in "bash:$(BASHCOMPDIR)/larkaxctl" \
+	            "zsh:$(ZSHCOMPDIR)/_larkaxctl" \
+	            "fish:$(FISHCOMPDIR)/larkaxctl.fish"; do \
+	  shell=$${pair%%:*}; dest=$${pair#*:}; dir=$${dest%/*}; \
+	  mkdir -p "$$dir"; \
+	  tmp=$$(mktemp "$$dir/.$${dest##*/}.XXXXXX"); \
+	  built="$$built $$tmp"; \
+	  "$(BINDIR)/larkaxctl" completion "$$shell" > "$$tmp"; \
+	  if [ ! -s "$$tmp" ]; then \
+	    echo "$${shell} 补全生成物为空：\"$(BINDIR)/larkaxctl completion $${shell}\" 什么都没输出，没有装入 $$dir"; \
+	    exit 1; \
+	  fi; \
+	  chmod 0644 "$$tmp"; \
+	  mv -f "$$tmp" "$$dest"; \
+	done; \
+	case ":$$PATH:" in \
+	  *":$(BINDIR):"*) ;; \
+	  *) echo "注意：$(BINDIR) 不在 PATH 里，larkax 这些命令要写全路径，或先把它加进 PATH" ;; \
+	esac; \
+	echo "已安装到 $(BINDIR)：larkax larkaxctl$${links}"; \
+	echo "手页已装到 $(MANDIR)；man 不认这个目录时用 MANPATH=$(SHAREDIR)/man man larkaxctl-channel"; \
+	echo "补全已装：bash $(BASHCOMPDIR) / zsh $(ZSHCOMPDIR) / fish $(FISHCOMPDIR)"; \
+	echo "zsh 的 fpath 里没有 $(ZSHCOMPDIR) 时，在 compinit 之前加：fpath=($(ZSHCOMPDIR) \$$fpath)"
+
+# 只删 install 装进去的那些名字：两个二进制、ALIASES 里的链接、三个补全文件，
+# 以及 man/man1 下与源码树同名的那几页。目录本身留着——空目录不是本次安装的产物。
+uninstall:
+	@for pair in $(ALIASES); do rm -f "$(BINDIR)/$${pair%%:*}"; done
+	@rm -f "$(BINDIR)/larkax" "$(BINDIR)/larkaxctl"
+	@rm -f "$(BASHCOMPDIR)/larkaxctl" "$(ZSHCOMPDIR)/_larkaxctl" "$(FISHCOMPDIR)/larkaxctl.fish"
+	@for f in man/man1/*.1; do rm -f "$(MANDIR)/$${f##*/}"; done
+	@echo "已从 $(BINDIR) 移除 larkax 与 larkaxctl，手页与三个 shell 的补全一并移除"
 
 clean:
 	@docker compose down --volumes --remove-orphans

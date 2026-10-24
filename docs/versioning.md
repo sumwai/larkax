@@ -117,14 +117,18 @@ Anthropic 格式同理。这条不能混。
 
 ## 发布包里有什么
 
+一次 tag 发布（`v*`）带三样东西：每个平台一个二进制包、一份控制台包、一份镜像。
+
+### 二进制包
+
 每个平台一个 tar.gz，名字形如 `larkax_v0.1.0_linux_amd64.tar.gz`。解开是一个与包同名
 的目录，里面是：
 
 - `larkax` 与 `larkaxctl`：两个二进制，可执行位保留
 - `LICENSE`、`README.md`
-- `man/man1/` 下的手页
+- `man/man1/` 下的手册
 
-顶层那个目录是必要的：解到同一个位置的两个版本不会互相覆盖。翻手页要把 `MANPATH`
+顶层那个目录是必要的：解到同一个位置的两个版本不会互相覆盖。翻手册要把 `MANPATH`
 指到解出来的那份 `man/` 上（`man` 只认它下面的 `man1/` 这类子目录）：
 
 ```sh
@@ -134,16 +138,48 @@ MANPATH=larkax_v0.1.0_linux_amd64/man man larkaxctl-channel
 
 在源码树里翻的写法见 [cli-reference.md](cli-reference.md)。
 
-`SHA256SUMS` 与这些 tarball 一起挂在 Release 上，核对用
-`sha256sum -c --ignore-missing SHA256SUMS`：只下自己那个架构时，`--ignore-missing`
-跳过另一行，不会因为一个「No such file or directory」而以非零退出。
+### 控制台包
 
-**打包只有一份配方**：`Makefile` 的 `dist` 目标。CI 调的也是它，发布那一步只留
-CI 自己的东西（`setup-go`、`gh release create`）：
+`larkax-web_v0.1.0.tar.gz` 里是一个与包同名的目录，里面是 `dist/`（Vite 产物：
+`index.html`、`assets/` 与其它静态文件）和 `LICENSE`。把这个目录指给服务的
+`LARKAX_WEB_DIR`，公开监听就同时提供 API 与页面；前端路由（例如
+`/console/channels`）由 `index.html` 接管，而 `/v1/` 仍走推理入口。
+
+`LARKAX_WEB_DIR` 留空时公开监听只提供 API，其余路径照旧回 `501`。
+
+### 镜像
 
 ```sh
-make dist VERSION=v0.1.0 ARCHS="amd64 arm64"   # 发布时走的就是这一条
-make dist VERSION=v0.1.0                       # 本地演练：默认只打 amd64
+docker pull ghcr.io/sumwai/larkax:v0.1.0
+docker run --rm -p 8080:8080 \
+  -e LARKAX_DB_DSN='postgres://user:password@db:5432/larkax' \
+  -e LARKAX_MASTER_KEYS="k1:<base64>" \
+  ghcr.io/sumwai/larkax:v0.1.0
+```
+
+- 标签是 tag 本身，另有一个 `latest`；架构 `linux/amd64` 与 `linux/arm64`。
+- 镜像里已经带着控制台，`LARKAX_WEB_DIR=/srv/web`，两个监听地址也写成了 `:8080`
+  与 `:9090`（不写宽则只绑容器自己的回环，端口映射接不进来）。
+- 以 uid 10001 运行；`larkaxctl` 也在镜像里（`docker run --entrypoint larkaxctl`），
+  迁移可以在部署里跑。
+- 数据库与 Redis 都是外部依赖，镜像不带数据目录。
+- **不需要单独的镜像仓库账号**：推送用工作流自带的 `GITHUB_TOKEN`（`packages: write`）。
+  第一次发布后这个包默认是私有的，要在包的设置里手动改成公开；否则拉取要 `docker login`。
+
+### 校验和
+
+`SHA256SUMS` 与所有 tarball 一起挂在 Release 上，核对用
+`sha256sum -c --ignore-missing SHA256SUMS`：只下自己那几份时，`--ignore-missing`
+跳过其它行，不会因为一个「No such file or directory」而以非零退出。镜像不在校验和
+里：它的完整性由 registry 的 digest 保证，`docker pull` 拿到的就是那个 digest。
+
+**打包只有一份配方**：`Makefile` 的 `release` 目标（`dist` + `web` + 校验和）。
+CI 调的也是它，发布那一步只留 CI 自己的东西（`setup-go`、`setup-node`、
+`gh release create`）：
+
+```sh
+make release VERSION=v0.1.0 ARCHS="amd64 arm64"   # 发布时走的就是这一条
+make release VERSION=v0.1.0                       # 本地演练：默认只打 amd64
 ```
 
 `make dist` 会把刚构建出来的二进制**真执行**一次，比对它自称的版本是否就是那个
@@ -152,7 +188,58 @@ tag——二进制自称 `dev` 这件事，只有用户报问题时才会被发�
 与「校验通过」在日志里长得一样（`LESSONS.md` 第 16 条）。本机架构按
 `go env GOHOSTARCH` 判定，所以在 amd64 主机上发布时，验的是 amd64 那一份。
 
-配方用的是 GNU tar 的那几个选项，macOS 自带的 bsdtar 不认。
+`make web` 构建完会查一次产物里有没有只有 mock 客户端才有的固定用户名
+（`演示账号`）：`VITE_API_MODE` 没生效时构建照样成功、页面照样能开，只是数字全是
+演示数据——那一查是唯一会响的地方。
+
+两个目标配方用的是 GNU tar 的那几个选项，macOS 自带的 bsdtar 不认。
+
+## 从源码树安装
+
+`make install` 把两个二进制装进 `~/.local/bin`，同时建两个短名链接，把
+`man/man1/` 下的手页装进去，并按各 shell 的约定装好三个补全文件：
+
+```sh
+make install                       # 默认装到 ~/.local，版本号是 dev
+make install PREFIX=/usr/local      # 换落点
+make install VERSION=v0.1.0         # 打上版本号，与 make dist 同一份注入规则
+make install ALIASES=""             # 只要两个二进制，不建短名链接
+make uninstall                      # 删掉上面装进去的那些名字
+```
+
+落点由 `PREFIX` 派生：`BINDIR` 是 `$(PREFIX)/bin`，`MANDIR` 是
+`$(PREFIX)/share/man/man1`。补全各自走那个 shell 认的目录：
+
+| shell | 文件 | 那个 shell 怎么找到它 |
+|---|---|---|
+| bash | `$(PREFIX)/share/bash-completion/completions/larkaxctl` | bash-completion 2 读 `$XDG_DATA_HOME/bash-completion/completions/`，`PREFIX=~/.local` 正好对应 |
+| fish | `$(PREFIX)/share/fish/vendor_completions.d/larkaxctl.fish` | fish 读 `$XDG_DATA_HOME/fish/vendor_completions.d/`，同上 |
+| zsh | `$(PREFIX)/share/zsh/site-functions/_larkaxctl` | zsh 没有这种目录约定，这个路径不在默认 `fpath` 里 |
+
+zsh 那一行要在 `compinit` 之前把目录加进 `fpath`，否则补全不会生效：
+
+```sh
+fpath=(~/.local/share/zsh/site-functions $fpath)   # 写进 zsh 的启动文件（zshrc），在 compinit 之前
+```
+
+三个补全文件由刚装好的二进制现场生成（`larkaxctl completion <shell>`），仓库里
+不存静态副本：副本会与命令注册表分叉。生成物为空时 `make install` 直接失败——
+空脚本能被所有 shell 无错加载，而它一条候选也不给。
+
+短名链接是 `laxctl` → `larkaxctl`、`lax` → `larkax`。用符号链接而不是 shell
+`alias`：一份覆盖所有 shell 与非交互脚本，也不必往任何 rc 文件里写字。两个
+CLI 的帮助文本里写死了 `larkaxctl`，不读 `argv[0]`，所以改名不会把用法说明改坏。
+补全只针对 `larkaxctl`：`laxctl` 是同一个二进制的另一个名字，但 shell 的补全按
+命令名登记，别名下按 Tab 不会命中那一份。
+
+装进去之前会先执行一次 `--version` 比对，与 `make dist` 的 `VERIFY_EXEC` 同一个
+思路：版本注入失手时二进制照样能跑，唯一的差别是自称 `dev`。`install` 构建的是
+本机架构，所以这里没有「架构不同，跳过校验」那一支。
+
+与 tarball 的分工：tarball 是发布物，带 `SHA256SUMS`，装到哪台机器上属于使用方
+的事；`make install` 面向从源码树直接用的场景——版本号默认是 `dev`，没有校验和，
+也没有 `LICENSE` 与 `README.md`。手页装了之后 `man larkaxctl-channel` 才有内容，
+`man` 不认 `~/.local/share/man` 时用 `MANPATH=~/.local/share/man` 指过去。
 
 ## 版本号出现在哪里
 
