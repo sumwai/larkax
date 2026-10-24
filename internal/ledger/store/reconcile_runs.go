@@ -52,6 +52,10 @@ type ReconcileRun struct {
 	// 数的两处记录对不上」，而是「一条不等式的两边不成立」（见
 	// FindingPlanFaceShortfall）。
 	PlanFaceShortfalls int
+	// AccountBelowFloors 是余额低于所属大类下界的科目条数。它与其余几档都
+	// 分开：前几档比的是「两处记录」或「同一笔钱的两种记录」，这一档问的是
+	// 单个科目的余额有没有越过表里给它的下界（见 FindingAccountBelowFloor）。
+	AccountBelowFloors int
 	Status             string
 	Error              sql.NullString
 }
@@ -66,7 +70,8 @@ type ReconcileRunPage struct {
 // reconcileRunColumns 是读一行运行记录要选的列，顺序与下面的 Scan 一致。
 const reconcileRunColumns = `id, started_at, finished_at, watermark, full_scan,
 	checked_wallets, balance_mismatches, frozen_mismatches, repaired,
-	malformed_accounts, stale_reservations, plan_face_shortfalls, status, error`
+	malformed_accounts, stale_reservations, plan_face_shortfalls,
+	account_below_floors, status, error`
 
 // ReconcileRuns 读最近的对账运行记录，新的在前。
 //
@@ -94,7 +99,8 @@ func (s *Store) ReconcileRuns(ctx context.Context, limit int) (ReconcileRunPage,
 		if err := rows.Scan(&run.ID, &run.StartedAt, &run.FinishedAt, &run.Watermark,
 			&run.FullScan, &run.CheckedWallets, &run.BalanceMismatches,
 			&run.FrozenMismatches, &run.Repaired, &run.MalformedAccounts,
-			&run.StaleReservations, &run.PlanFaceShortfalls, &run.Status, &run.Error); err != nil {
+			&run.StaleReservations, &run.PlanFaceShortfalls, &run.AccountBelowFloors,
+			&run.Status, &run.Error); err != nil {
 			return ReconcileRunPage{}, fmt.Errorf("读对账运行记录失败: %w", err)
 		}
 		page.Runs = append(page.Runs, run)

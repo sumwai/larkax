@@ -696,9 +696,10 @@ func printReconcileReport(w io.Writer, r *store.Report, runErr error) {
 
 // printReconcileFindings 把这一轮发现的不一致逐条打出来。
 func printReconcileFindings(w io.Writer, r *store.Report) {
-	_, _ = fmt.Fprintf(w, "不一致 %d 条（余额 %d、冻结 %d、畸形科目 %d、陈旧预留 %d、面值 %d）：\n",
+	_, _ = fmt.Fprintf(w, "不一致 %d 条（余额 %d、冻结 %d、畸形科目 %d、陈旧预留 %d、面值 %d、低于下界 %d）：\n",
 		len(r.Findings), r.BalanceMismatches(), r.FrozenMismatches(),
-		r.MalformedAccounts(), r.StaleReservations(), r.PlanFaceShortfalls())
+		r.MalformedAccounts(), r.StaleReservations(), r.PlanFaceShortfalls(),
+		r.AccountBelowFloors())
 	for _, f := range r.Findings {
 		printFinding(w, f)
 	}
@@ -715,6 +716,11 @@ func printReconcileFindings(w io.Writer, r *store.Report) {
 // 是该订阅的在途预留之和，按通用格式打出来会写成「快照=… 账本=…」——那是把
 // 一条不等式的两边说成同一笔钱的两种记录。所以两栏各有自己的名字，「差」是
 // **缺口**（在途减余额），订阅单独打出来，因为这一类是按订阅区分的。
+//
+// 科目余额下界只有「余额」一个数，另一边是表里给的下界（Snapshot）。按通用
+// 格式打出来会写成「快照=0 账本=-5 差=-5」——那个「差」不是差额，而是比下界
+// 低了多少。科目原文也要打出来：这一类报的就是「这个科目越界了」，不点名科目
+// 的话读的人无从下手。
 func printFinding(w io.Writer, f store.Finding) {
 	switch f.Kind {
 	case store.FindingStaleReservation:
@@ -723,6 +729,9 @@ func printFinding(w io.Writer, f store.Finding) {
 	case store.FindingPlanFaceShortfall:
 		_, _ = fmt.Fprintf(w, "  %-18s user=%d asset=%s 订阅=%s 余额=%s 在途=%s 缺口=%s 已修=%v\n",
 			f.Kind, f.UserID, f.Asset, f.Key, f.Snapshot, f.Ledger, f.Diff(), f.Repaired)
+	case store.FindingAccountBelowFloor:
+		_, _ = fmt.Fprintf(w, "  %-18s asset=%s 科目=%s 余额=%s 下界=%s 已修=%v\n",
+			f.Kind, f.Asset, f.Key, f.Ledger, f.Snapshot, f.Repaired)
 	default:
 		_, _ = fmt.Fprintf(w, "  %-18s user=%d asset=%s 快照=%s 账本=%s 差=%s 已修=%v\n",
 			f.Kind, f.UserID, f.Asset, f.Snapshot, f.Ledger, f.Diff(), f.Repaired)

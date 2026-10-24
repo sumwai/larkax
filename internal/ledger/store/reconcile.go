@@ -314,6 +314,18 @@ const (
 	// 两边都没有记错的可能：余额与在途分别由两条写入路径在同一次提交里改动，
 	// 对不上就说明有第三条路径绕过了它们。
 	FindingPlanFaceShortfall FindingKind = "plan_face_shortfall"
+	// FindingAccountBelowFloor 是某个科目的余额低于它所属大类的下界。
+	//
+	// 它与上面几类报的东西又不一样：余额、冻结那两类比的是同一个数的两处记录，
+	// 面值那类比的是一条不等式的两边，这一类只问「这个科目的余额有没有掉到
+	// 它不该到的位置」。判据与下界表在 reconcile_floor.go，目前表里只有
+	// `carryover:<订阅 id>` 一行（下界 0）。
+	//
+	// 为什么这一类单独立一条判据：`carryover` 科目的后缀是订阅 id，既有那几类
+	// 检查一条都看不见它——余额类只比 `user%` 科目与钱包，畸形科目只扫
+	// `user%`，面值类只比 `prepaid`。它被扣成负数时账本上没有任何一处会报，
+	// 而那意味着有一份额度被凭空多并了出去。
+	FindingAccountBelowFloor FindingKind = "account_below_floor"
 )
 
 // Finding 是一条不一致。
@@ -336,6 +348,10 @@ type Finding struct {
 	// 科目的余额**（分录之和，不是钱包快照），Ledger 那一列是该订阅的
 	// 在途预留之和。两列不是「同一笔钱的两种记录」，而是一条不等式的两边
 	// （见 FindingPlanFaceShortfall 的注释）。
+	//
+	// 例外：Kind 为 FindingAccountBelowFloor 时它是**那条不等式的下界**
+	// （取自 reconcile_floor.go 的表，目前是 0）。Ledger 那一列是科目的
+	// 账本余额，Diff 因此是「比下界低了多少」，不是差额。
 	Snapshot money.Amount
 	// Ledger 是推导出来的权威值（账本汇总或未结算预留之和）。
 	//
@@ -353,6 +369,9 @@ type Finding struct {
 	// 例外：Kind 为 FindingPlanFaceShortfall 时它是**在途预留之和**，与
 	// Snapshot 那一列的余额构成那条不等式；同样不是「权威值」，两列之间
 	// 没有哪一边更算数。
+	//
+	// 例外：Kind 为 FindingAccountBelowFloor 时它是**科目的账本余额**，
+	// 与 Snapshot 那一列的下界构成那条不等式。
 	Ledger money.Amount
 	// Unrepairable 非空时说明**为什么不能自动修**。
 	//
@@ -385,6 +404,9 @@ type Finding struct {
 // Kind 为 FindingPlanFaceShortfall 时方向要照着那一条读：Snapshot 是余额、
 // Ledger 是在途预留，两者相减得到的是**缺口**（正数），不是「账本比快照多
 // 出多少」。两类差额在符号上恰好会被人读反，所以这里写明。
+//
+// Kind 为 FindingAccountBelowFloor 时它也不是差额：Snapshot 是下界、Ledger
+// 是科目的账本余额，相减得到的是**比下界低了多少**（负数）。
 func (f Finding) Diff() money.Amount { return f.Ledger.Sub(f.Snapshot) }
 
 // Scope 是这条不一致在 reconcile_findings 里的标识。
@@ -404,6 +426,11 @@ func (f Finding) Diff() money.Amount { return f.Ledger.Sub(f.Snapshot) }
 // 用户的两条订阅各有各的余额与在途，按 (user, asset) 合并会让一条订阅的
 // finding 覆盖掉另一条——而它们要补的是两笔不同的面值。
 //
+// 科目余额下界那一类用**科目原文**写成 `floor:<科目>`：它报的就是「这个科目
+// 越界了」，一条科目一条。与畸形科目一样，同一个科目在两种资产上都不足时
+// 共用这一个 scope——那两行在每一轮里总是一起出现，分开反而会让清单里多出
+// 两条读起来一样的条目。
+//
 // 各类的形态用一个前缀区分开，而不是靠「user: 开头的是钱包类」这种判断：
 // 畸形科目的原文也可能以 `user:` 开头（`user:abc` 就是）。
 func (f Finding) Scope() string {
@@ -414,6 +441,8 @@ func (f Finding) Scope() string {
 		return reservationScopePrefix + f.Key
 	case FindingPlanFaceShortfall:
 		return prepaidScopePrefix + f.Key
+	case FindingAccountBelowFloor:
+		return floorScopePrefix + f.Key
 	}
 	return fmt.Sprintf("user:%d@%s", f.UserID, f.Asset)
 }
@@ -444,7 +473,10 @@ func LogAlerts(logger *slog.Logger) Alert {
 		// 陈旧预留没有「快照 / 权威值」这一对（见 Finding 的字段注释），
 		// 所以不给它打 snapshot 与 diff：一个叫 diff 而其实是金额本身的数
 		// 会被读成一条差额，而这一类恰恰一条差额都没有。
-		if f.Kind == FindingStaleReservation {
+		//
+		// 科目余额下界同理：它只有「余额」一个数，下界是表里的常量，
+		// 两列相减得到的「比下界低了多少」也不是差额。
+		if f.Kind == FindingStaleReservation || f.Kind == FindingAccountBelowFloor {
 			attrs = append(attrs, "ledger", f.Ledger.String())
 		} else {
 			attrs = append(attrs,
@@ -476,11 +508,12 @@ type Report struct {
 	CheckedWallets int
 	// Findings 是这一轮发现的全部不一致。
 	//
-	// 顺序：畸形科目、陈旧预留、然后才是按 (user_id, asset) 稳定排序的钱包类
-	// 不一致，最后是按订阅 id 排序的额度包面值类。前两类各有各的查询（它们
-	// 不属于任何一个分片），按查询自己的顺序追加在前面；钱包类那一段的排序
-	// 是稳定的，那一条不变；面值类在每个分片比完之后追加，跨分片的次序因此
-	// 跟着分片走（同一个订阅只属于一个用户，一个用户只在一个分片里）。
+	// 顺序：畸形科目、陈旧预留、科目余额下界，然后才是按 (user_id, asset)
+	// 稳定排序的钱包类不一致，最后是按订阅 id 排序的额度包面值类。前三类
+	// 各有各的查询（它们不属于任何一个分片），按查询自己的顺序追加在前面；
+	// 钱包类那一段的排序是稳定的，那一条不变；面值类在每个分片比完之后追加，
+	// 跨分片的次序因此跟着分片走（同一个订阅只属于一个用户，一个用户只在
+	// 一个分片里）。
 	Findings []Finding
 
 	// malformed 是畸形科目的条数。
@@ -514,6 +547,12 @@ func (r *Report) StaleReservations() int { return r.countOf(FindingStaleReservat
 // 它与余额、冻结两类都分开计数：那两类比的是同一个数的两处记录，这一类比的是
 // 同一条不等式的两边（见 FindingPlanFaceShortfall）。
 func (r *Report) PlanFaceShortfalls() int { return r.countOf(FindingPlanFaceShortfall) }
+
+// AccountBelowFloors 数出余额低于所属大类下界的科目条数。
+//
+// 与面值类一样单独计数：它不是同一个数的两处记录对不上，而是「这个科目越界了」
+// （见 FindingAccountBelowFloor）。
+func (r *Report) AccountBelowFloors() int { return r.countOf(FindingAccountBelowFloor) }
 
 // Repaired 数出被修正的不一致条数。
 func (r *Report) Repaired() int {
@@ -738,8 +777,8 @@ func (s *Store) finishReconcileRun(ctx context.Context, r *Report, cause error) 
 	}
 	// 这几个条数是运行记录上那几列的全部来源（balance_mismatches /
 	// frozen_mismatches / repaired / malformed_accounts / stale_reservations /
-	// plan_face_shortfalls）：它们由 Report 上那几个方法算出来（见 Repaired 与
-	// countOf）。
+	// plan_face_shortfalls / account_below_floors）：它们由 Report 上那几个方法
+	// 算出来（见 Repaired 与 countOf）。
 	//
 	// 所以判定「落库的条数对不对」时期望值不能取同一个方法：方法被改坏时两边
 	// 一起变，恒等，而这一列在报表上就是错的，却没有任何一处会红。用例那边
@@ -750,11 +789,12 @@ func (s *Store) finishReconcileRun(ctx context.Context, r *Report, cause error) 
 		       balance_mismatches = $3, frozen_mismatches = $4,
 		       repaired = $5, malformed_accounts = $6,
 		       stale_reservations = $7, plan_face_shortfalls = $8,
-		       status = $9, error = NULLIF($10, '')
+		       account_below_floors = $9,
+		       status = $10, error = NULLIF($11, '')
 		 WHERE id = $1`,
 		r.RunID, r.CheckedWallets, r.BalanceMismatches(), r.FrozenMismatches(),
 		r.Repaired(), r.MalformedAccounts(), r.StaleReservations(),
-		r.PlanFaceShortfalls(), status, msg)
+		r.PlanFaceShortfalls(), r.AccountBelowFloors(), status, msg)
 	if err != nil {
 		return constraintFailure(fmt.Errorf("写对账结果失败: %w", err))
 	}
@@ -785,6 +825,13 @@ func (s *Store) reconcileAll(ctx context.Context, cfg ReconcileConfig, alert Ale
 	// 与钱包、账本都无关。放在分片循环之前是为了让「不属于分片的那两类」
 	// 在报告里连着，读的人一眼能看出它们是另一回事。
 	if err := s.reconcileStaleReservations(ctx, report, alert); err != nil {
+		return err
+	}
+
+	// 科目余额下界与上面两类一样不属于任何一个分片：判据只看那一个科目的
+	// 分录，与钱包无关。它同样需要在已记未消除的那些上重新报一遍，理由见
+	// reconcileAccountFloors。
+	if err := s.reconcileAccountFloors(ctx, report, alert, open); err != nil {
 		return err
 	}
 
@@ -998,10 +1045,13 @@ func (s *Store) reconcileCandidates(
 	// 钱包比对无关。它虽然也带用户 id，但**不能**靠这一侧进候选集——那些
 	// 用户的 pending 行恰恰因为 started_at 很旧，落在增量窗口之外，而这一轮
 	// 不需要替他们比对钱包（冻结与预留本来就是相等的，否则报的就是另一类了）。
+	//
+	// 科目余额下界也一样：它由 reconcileAccountFloors 按科目原文捞回来，
+	// 判据与用户钱包无关，带进来的用户没有任何用处。
 	carried := make([]int64, 0, len(open))
 	for _, f := range open {
 		switch f.kind {
-		case FindingMalformedAccount, FindingStaleReservation:
+		case FindingMalformedAccount, FindingStaleReservation, FindingAccountBelowFloor:
 			continue
 		}
 		carried = append(carried, f.userID)
@@ -1305,3 +1355,10 @@ const reservationScopePrefix = "request:"
 //
 // 同样只写一处，理由与上面两个前缀相同。
 const prepaidScopePrefix = "prepaid:"
+
+// floorScopePrefix 是科目余额下界类不一致的标识前缀，键是科目原文。
+//
+// 与前面几个不同，它后面接的不是 id 而是一整个科目（`floor:carryover:11`）：
+// 这一类报的就是那个科目，前缀只是为了与别类的标识分开。同样只写一处，
+// 理由与上面两个前缀相同。
+const floorScopePrefix = "floor:"
