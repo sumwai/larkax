@@ -142,6 +142,7 @@ func TestParseAccountRejectsNonCanonicalPrepaidID(t *testing.T) {
 		"prepaid:+11",                 // 正号
 		"prepaid:-1",                  // 负 id 不可能存在
 		"prepaid:abc",                 // 后缀不是整数
+		"prepaid:1a",                  // 首字符是数字，后面混了非数字
 		"prepaid:1234567890123456789", // 十九位：超出上限
 	}
 	for _, s := range bad {
@@ -155,6 +156,7 @@ func TestParseAccountRejectsNonCanonicalPrepaidID(t *testing.T) {
 		want AccountType
 	}{
 		{"prepaid:1", AccountPrepaid},
+		{"prepaid:9", AccountPrepaid}, // 首字符取上界那一格
 		{"prepaid:11", AccountPrepaid},
 		{"prepaid:123456789012345678", AccountPrepaid}, // 十八位：上限之内
 		{"carryover:1", AccountCarryover},

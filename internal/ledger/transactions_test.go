@@ -1331,15 +1331,23 @@ func TestPlanMemosCarryReference(t *testing.T) {
 func TestPlanConstructorsRejectBadInput(t *testing.T) {
 	txn := newTxnID(t, txnA)
 
+	// 断言到错误信息，不只是 err != nil：订阅 id 为 0 时，构造之后还有 Verify
+	// 的规范写法校验兜着（`prepaid:0` 会被它以另一句话拒掉），只判非空的话，
+	// 构造函数里这道 id 校验整个删掉也照样是绿的。
 	if _, err := PlanGrant(PlanGrantParams{
 		TxnID: txn, SubscriptionID: 0, Amount: amount(t, "100"), Asset: AssetCNY,
-	}); err == nil {
-		t.Error("订阅 id 为 0 的发放应当被拒")
+	}); err == nil || !strings.Contains(err.Error(), "订阅 id 非法") {
+		t.Errorf("订阅 id 为 0 的发放应由构造函数拒掉（错误里点名「订阅 id 非法」），实际: %v", err)
 	}
 	if _, err := PlanGrant(PlanGrantParams{
 		TxnID: txn, SubscriptionID: 11, Amount: money.Zero, Asset: AssetCNY,
 	}); err == nil {
 		t.Error("零金额的发放应当被拒")
+	}
+	if _, err := PlanVoid(PlanVoidParams{
+		TxnID: txn, SubscriptionID: 0, Amount: amount(t, "1"), Asset: AssetCNY,
+	}); err == nil || !strings.Contains(err.Error(), "订阅 id 非法") {
+		t.Errorf("订阅 id 为 0 的作废应由构造函数拒掉（错误里点名「订阅 id 非法」），实际: %v", err)
 	}
 	if _, err := PlanVoid(PlanVoidParams{
 		TxnID: txn, SubscriptionID: -1, Amount: amount(t, "1"), Asset: AssetCNY,
@@ -1453,8 +1461,8 @@ func TestPlanCarryConstructorsRejectBadInput(t *testing.T) {
 
 	if _, err := PlanCarry(PlanCarryParams{
 		TxnID: txn, SubscriptionID: 0, Amount: amount(t, "10"), Asset: AssetCNY,
-	}); err == nil {
-		t.Error("订阅 id 为 0 的结转应当被拒")
+	}); err == nil || !strings.Contains(err.Error(), "订阅 id 非法") {
+		t.Errorf("订阅 id 为 0 的结转应由构造函数拒掉（错误里点名「订阅 id 非法」），实际: %v", err)
 	}
 	if _, err := PlanCarry(PlanCarryParams{
 		TxnID: txn, SubscriptionID: 11, Amount: money.Zero, Asset: AssetCNY,
@@ -1462,29 +1470,81 @@ func TestPlanCarryConstructorsRejectBadInput(t *testing.T) {
 		t.Error("零金额的结转应当被拒")
 	}
 
+	// 每格都断言到错误信息：id 为 0 的格子里，后面还有 Verify 的规范写法校验
+	// 兜着，只判 err != nil 会把「构造函数这一道被删掉」放过去。
 	base := PlanCarryMergeParams{
 		TxnID: txn, TargetSubscriptionID: 20,
 		Moves: []PlanCarryMove{{SourceSubscriptionID: 11, Amount: amount(t, "10")}},
 		Asset: AssetCNY,
 	}
-	bad := map[string]func(*PlanCarryMergeParams){
-		"没有源": func(p *PlanCarryMergeParams) { p.Moves = nil },
-		"源 id 为 0": func(p *PlanCarryMergeParams) {
-			p.Moves = []PlanCarryMove{{SourceSubscriptionID: 0, Amount: amount(t, "10")}}
+	bad := map[string]struct {
+		mutate func(*PlanCarryMergeParams)
+		want   string
+	}{
+		"没有源": {
+			mutate: func(p *PlanCarryMergeParams) { p.Moves = nil },
+			want:   "没有要并入的结转额度",
 		},
-		"金额为负": func(p *PlanCarryMergeParams) {
-			p.Moves = []PlanCarryMove{{SourceSubscriptionID: 11, Amount: amount(t, "-1")}}
+		"源 id 为 0": {
+			mutate: func(p *PlanCarryMergeParams) {
+				p.Moves = []PlanCarryMove{{SourceSubscriptionID: 0, Amount: amount(t, "10")}}
+			},
+			want: "源订阅 id 非法",
 		},
-		"源重复": func(p *PlanCarryMergeParams) {
-			p.Moves = append(p.Moves, PlanCarryMove{SourceSubscriptionID: 11, Amount: amount(t, "5")})
+		"金额为负": {
+			mutate: func(p *PlanCarryMergeParams) {
+				p.Moves = []PlanCarryMove{{SourceSubscriptionID: 11, Amount: amount(t, "-1")}}
+			},
+			want: "并入金额必须为正数",
 		},
-		"没有目标": func(p *PlanCarryMergeParams) { p.TargetSubscriptionID = 0 },
+		"源重复": {
+			mutate: func(p *PlanCarryMergeParams) {
+				p.Moves = append(p.Moves, PlanCarryMove{SourceSubscriptionID: 11, Amount: amount(t, "5")})
+			},
+			want: "出现了两次",
+		},
+		"没有目标": {
+			mutate: func(p *PlanCarryMergeParams) { p.TargetSubscriptionID = 0 },
+			want:   "新订阅 id 非法",
+		},
 	}
-	for name, mutate := range bad {
+	for name, tc := range bad {
 		p := base
-		mutate(&p)
-		if _, err := PlanCarryMerge(p); err == nil {
-			t.Errorf("%s 的并入应当被拒", name)
+		tc.mutate(&p)
+		if _, err := PlanCarryMerge(p); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s 的并入应当被拒，且错误里应含 %q，实际: %v", name, tc.want, err)
+		}
+	}
+}
+
+// 结转备注带处置原因，且只在该带的时候带分隔符。
+//
+// 两个方向各断言一次：`reason != ""` 被取反之后，「带原因」那条会少掉
+// 「：到期」，「不带原因」那条会多出一个孤零零的全角冒号——只断言一边的话，
+// 另一个方向仍然绿。备注只有这两段拼成（见 PlanCarry），期望值直接写字面量，
+// 不从被测函数算。
+func TestPlanCarryMemoIncludesReasonOnlyWhenSet(t *testing.T) {
+	withReason, err := PlanCarry(PlanCarryParams{
+		TxnID: newTxnID(t, txnA), SubscriptionID: 11, Amount: amount(t, "40"),
+		Asset: AssetCNY, Reason: "到期",
+	})
+	if err != nil {
+		t.Fatalf("PlanCarry: %v", err)
+	}
+	if got := withReason.Entries[0].Memo; got != "额度包结转：到期" {
+		t.Errorf("带原因时结转备注 = %q，期望 %q", got, "额度包结转：到期")
+	}
+
+	for _, reason := range []string{"", "   "} {
+		plain, err := PlanCarry(PlanCarryParams{
+			TxnID: newTxnID(t, txnA), SubscriptionID: 11, Amount: amount(t, "40"),
+			Asset: AssetCNY, Reason: reason,
+		})
+		if err != nil {
+			t.Fatalf("PlanCarry(reason=%q): %v", reason, err)
+		}
+		if got := plain.Entries[0].Memo; got != "额度包结转" {
+			t.Errorf("原因为 %q 时结转备注 = %q，期望 %q（不带全角冒号）", reason, got, "额度包结转")
 		}
 	}
 }
