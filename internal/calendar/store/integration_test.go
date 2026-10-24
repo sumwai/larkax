@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -469,6 +471,9 @@ func TestYearStateComesFromTheRow(t *testing.T) {
 	cal := newCalendar(t, db)
 	day := calendar.Date{Year: year, Month: 6, Day: 15}
 
+	// 顺序按「谁能覆盖谁」排：conflict 与 synced 一样是有定论（见
+	// runPriceCalendarSync 上的状态机表），所以它必须排在 pending / degraded
+	// 之后——排在前面的话，后面那一步会被守卫挡住，用例测的就不是它了。
 	steps := []struct {
 		name   string
 		doc    *Document
@@ -477,8 +482,8 @@ func TestYearStateComesFromTheRow(t *testing.T) {
 	}{
 		{"从没同步过", nil, calendar.YearUnknown, calendar.ReasonYearUnknown},
 		{"公告未发布", &Document{Region: "CN", Year: year, Status: "pending"}, calendar.YearPending, calendar.ReasonYearPending},
-		{"双源不一致", &Document{Region: "CN", Year: year, Status: "conflict", SourcesAgree: boolPtr(false)}, calendar.YearConflict, calendar.ReasonYearConflict},
 		{"同步失败", &Document{Region: "CN", Year: year, Status: "degraded", LastError: "拉取超时"}, calendar.YearDegraded, calendar.ReasonYearDegraded},
+		{"双源不一致", &Document{Region: "CN", Year: year, Status: "conflict", SourcesAgree: boolPtr(false)}, calendar.YearConflict, calendar.ReasonYearConflict},
 	}
 	for _, step := range steps {
 		if step.doc != nil {
@@ -507,41 +512,62 @@ func TestYearStateComesFromTheRow(t *testing.T) {
 	}
 }
 
-// 一个已经灌过完整数据的年份，被改标成 pending 时，那些行要被清掉——
-// 否则「这一年还没定下来」会被那些行压过去，判定照旧给出确定值。
-func TestPendingImportClearsEarlierData(t *testing.T) {
+// 一份不带 days 的文件 import 到一个已经灌过完整数据的年份：年份行与数据行
+// 都不许动，返回值报告「没写」。
+//
+// 旧路径上 Import 不看 days 就直接清掉整年、再写一份 pending——那一年看起来
+// 还是正常状态，判定却从每一天变成了「公告未发布」。
+func TestImportWithPendingDocKeepsSettledYear(t *testing.T) {
 	db := testDB(t)
 	year := newYear(t, db)
 	day := calendar.Date{Year: year, Month: 4, Day: 1}
 
-	doc := syncedDoc(year)
-	importDoc(t, db, doc)
+	importDoc(t, db, syncedDoc(year))
 	cal := newCalendar(t, db)
 	if status := lookup(t, cal, day); !status.Kind.Known() {
 		t.Fatalf("先灌完整数据后 %s 应当有判定，实际是 %q", day, status.Kind)
 	}
+	beforeRow := yearRowSnapshot(t, db, year)
+	beforeDays := dayRowSnapshot(t, db, year)
 
-	importDoc(t, db, Document{Region: "CN", Year: year, Status: "pending"})
-
-	if got := countYearRows(t, db, year); got != 0 {
-		t.Errorf("改标 pending 之后还剩 %d 行，期望 0 行", got)
+	res, err := NewAdmin(db).Import(context.Background(),
+		Document{Region: "CN", Year: year, Status: "pending"})
+	if err != nil {
+		t.Fatalf("import 一份 pending 文档不该失败: %v", err)
 	}
-	status := lookup(t, cal, day)
-	if status.Kind != calendar.DayUnknown || status.Reason != calendar.ReasonYearPending {
-		t.Errorf("%s 判定 = %q（成因 %q），期望 unknown / %q",
-			day, status.Kind, status.Reason, calendar.ReasonYearPending)
+	if res.Written {
+		t.Error("已有定论的年份被 pending 文档写进去了（RowsAffected 不是 0）")
+	}
+	if res.Status != calendar.YearSynced {
+		t.Errorf("返回的状态 = %q，期望库里实际的状态 synced", res.Status)
+	}
+
+	if got := yearRowSnapshot(t, db, year); got != beforeRow {
+		t.Errorf("年份行被改动了：\nbefore=%s\nafter =%s", beforeRow, got)
+	}
+	afterDays := dayRowSnapshot(t, db, year)
+	if strings.Join(afterDays, "\n") != strings.Join(beforeDays, "\n") {
+		t.Errorf("数据行被改动了：%d 行 → %d 行", len(beforeDays), len(afterDays))
+	}
+	if got := countYearRows(t, db, year); got != 365 {
+		t.Errorf("数据行数 = %d，期望 365", got)
+	}
+	if status := lookup(t, cal, day); !status.Kind.Known() {
+		t.Errorf("%s 判定 = %q，期望仍有确定判定", day, status.Kind)
 	}
 }
 
-// 上一年写下的那一行不会被本年的 pending 导入清掉——删除按 source_year 走，
-// 而那一行的来源是**上一年**。
+// 上一年写下的那一行不会被本年的 pending 导入清掉。
 //
-// 这不是漏网，是「跨年安排本来就是确定判定」的直接后果：元旦的安排出自上一年
-// 的数据集，那一天的判定是确定的，与本年的公告发没发无关。于是本年标成 pending
-// 之后，那一天仍然按行给出确定值，本年其余各天才落到「公告未发布」。
+// pending 文档现在走只 upsert 年份状态那条路，从不碰数据行；即便走的是删除
+// 那一套，删除也按 source_year 走，而那一行的来源是**上一年**。
 //
-// 写出来是因为这条路径没有别的地方钉住：TestPendingImportClearsEarlierData
-// 覆盖的是 source_year 等于本年那种情况，两者的结局相反。
+// 「跨年安排本来就是确定判定」：元旦的安排出自上一年的数据集，那一天的判定是
+// 确定的，与本年的公告发没发无关。于是本年标成 pending 之后，那一天仍然按行
+// 给出确定值，本年其余各天才落到「公告未发布」。
+//
+// 写出来是因为这条路径没有别的地方钉住：TestImportWithPendingDocKeepsSettledYear
+// 覆盖的是「本年已有定论」那一格，两者的结局不同。
 func TestPendingImportKeepsAdjacentYearRows(t *testing.T) {
 	db := testDB(t)
 	year := newYear(t, db)
@@ -627,5 +653,267 @@ func TestRejectedImportLeavesNothingBehind(t *testing.T) {
 	}
 	if years != 0 {
 		t.Errorf("被拒绝的导入留下了 %d 行年份状态", years)
+	}
+}
+
+// ── 年份状态：只 upsert，从不删行 ────────────────────────────────────────
+
+// yearRowSnapshot 把 calendar_years 那一行拼成一份可逐字比较的快照。
+//
+// 连 synced_at 一起比：它只在真的写过那一行时才刷新，所以「快照没变」证明的不
+// 只是值恰好相同，而是这一次一个字节都没写。
+func yearRowSnapshot(t *testing.T, db *sql.DB, year int) string {
+	t.Helper()
+	var (
+		status   string
+		dayCount int
+		papers   string
+		agree    sql.NullBool
+		lastErr  sql.NullString
+		syncedAt time.Time
+	)
+	err := db.QueryRowContext(context.Background(), `
+		SELECT status, day_count, array_to_json(source_paper_urls)::text,
+		       sources_agree, last_error, synced_at
+		  FROM calendar_years WHERE region = 'CN' AND year = $1`, year).
+		Scan(&status, &dayCount, &papers, &agree, &lastErr, &syncedAt)
+	if err != nil {
+		t.Fatalf("读 %d 年的年份行失败: %v", year, err)
+	}
+	return fmt.Sprintf("%s|%d|%s|%v|%v|%s", status, dayCount, papers,
+		agree, lastErr, syncedAt.UTC().Format(time.RFC3339Nano))
+}
+
+// dayRowSnapshot 把某年来源写下的数据行按日期排好，拼成逐字可比的快照。
+func dayRowSnapshot(t *testing.T, db *sql.DB, year int) []string {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(), `
+		SELECT day::text, coalesce(holiday_name, ''), is_off_day, is_makeup_workday,
+		       source, synced_at::text
+		  FROM calendar_days WHERE region = 'CN' AND source_year = $1
+		 ORDER BY day`, year)
+	if err != nil {
+		t.Fatalf("读 %d 年的数据行失败: %v", year, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []string
+	for rows.Next() {
+		var (
+			day      string
+			name     string
+			off      bool
+			makeup   bool
+			source   string
+			syncedAt string
+		)
+		if err := rows.Scan(&day, &name, &off, &makeup, &source, &syncedAt); err != nil {
+			t.Fatalf("扫 %d 年的数据行失败: %v", year, err)
+		}
+		out = append(out, fmt.Sprintf("%s|%s|%t|%t|%s|%s", day, name, off, makeup, source, syncedAt))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("遍历 %d 年的数据行失败: %v", year, err)
+	}
+	return out
+}
+
+// SetYearStatus 写 pending / degraded 时，已有的年份行与数据行一个字节都不许动。
+//
+// 这正是这条 issue 的修法：旧路径上「降级」= 先删掉全年数据行再写状态，而一次
+// 并发让后写入者读到旧状态时，整年判定就被清空了。
+func TestSetYearStatusNeverTouchesSettledYear(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	year := newYear(t, db)
+
+	importDoc(t, db, syncedDoc(year))
+	beforeRow := yearRowSnapshot(t, db, year)
+	beforeDays := dayRowSnapshot(t, db, year)
+	if len(beforeDays) != 365 {
+		t.Fatalf("前置条件不成立：%d 行数据，期望 365", len(beforeDays))
+	}
+
+	// 另一侧：年份本来没有记录 → 正常写入（RowsAffected 是 1）。
+	fresh := newYear(t, db)
+	res, err := NewAdmin(db).SetYearStatus(ctx, Document{Region: "CN", Year: fresh, Status: "pending"})
+	if err != nil {
+		t.Fatalf("给没有记录的年份写 pending 失败: %v", err)
+	}
+	if !res.Written {
+		t.Error("没有记录的年份应当被写入（RowsAffected 不是 1）")
+	}
+	if res.Status != calendar.YearPending {
+		t.Errorf("返回的状态 = %q，期望 pending", res.Status)
+	}
+
+	for _, status := range []string{"pending", "degraded"} {
+		t.Run(status, func(t *testing.T) {
+			doc := Document{Region: "CN", Year: year, Status: status}
+			if status == "degraded" {
+				doc.LastError = "拉取超时"
+			}
+			res, err := NewAdmin(db).SetYearStatus(ctx, doc)
+			if err != nil {
+				t.Fatalf("写 %s 状态失败: %v", status, err)
+			}
+			if res.Written {
+				t.Errorf("已有定论的年份被 %s 写进去了（RowsAffected 不是 0）", status)
+			}
+			if res.Status != calendar.YearSynced {
+				t.Errorf("返回的状态 = %q，期望库里实际的状态 synced", res.Status)
+			}
+
+			if got := yearRowSnapshot(t, db, year); got != beforeRow {
+				t.Errorf("年份行被改动了：\nbefore=%s\nafter =%s", beforeRow, got)
+			}
+			afterDays := dayRowSnapshot(t, db, year)
+			if strings.Join(afterDays, "\n") != strings.Join(beforeDays, "\n") {
+				t.Errorf("数据行被改动了：%d 行 → %d 行", len(beforeDays), len(afterDays))
+			}
+			if got := countYearRows(t, db, year); got != 365 {
+				t.Errorf("数据行数 = %d，期望 365", got)
+			}
+		})
+	}
+}
+
+// 带 days 的文档不该走只写年份状态的入口：数据行会被丢掉，而年份状态却翻成
+// 了 synced——那一年看起来有数据，实际每一天都缺。
+func TestSetYearStatusRejectsDocumentWithDays(t *testing.T) {
+	// nil 句柄：校验不过时必须在碰库之前返回，否则这里会 panic。
+	_, err := NewAdmin(nil).SetYearStatus(context.Background(), syncedDoc(2031))
+	if err == nil {
+		t.Fatal("带 days 的文档应当被拒绝，实际通过了")
+	}
+	if !strings.Contains(err.Error(), "Import") {
+		t.Errorf("报错里应当指明该走 Import，实际为 %v", err)
+	}
+}
+
+// installYearGate 在 calendar_years 上装一个测试闸门：某年 synced 的年份行插进去
+// 之后，先推进一次序列，再睡一会儿。
+//
+// 序列是非事务的——别的连接立刻就能看见它被推进。于是用例知道「先写入者已经进
+// 到事务中间」，而不是靠 sleep 猜一个时间差。
+//
+// **必须是 AFTER 触发器**：BEFORE 时冲突的元组还没进索引，后一条不会等锁，窗口
+// 就没撑开，把 WHERE 删掉也照样绿。
+func installYearGate(t *testing.T, db *sql.DB, year int) string {
+	t.Helper()
+	const (
+		sequence = "calendar_year_gate_test"
+		fn       = "calendar_year_gate_test_fn"
+		trg      = "calendar_year_gate_test_trg"
+	)
+	dropGate := func() {
+		for _, stmt := range []string{
+			`DROP TRIGGER IF EXISTS ` + trg + ` ON calendar_years`,
+			`DROP FUNCTION IF EXISTS ` + fn + `()`,
+			`DROP SEQUENCE IF EXISTS ` + sequence,
+		} {
+			if _, err := db.ExecContext(context.Background(), stmt); err != nil {
+				t.Errorf("清理测试闸门失败（%s）: %v", stmt, err)
+			}
+		}
+	}
+	dropGate()
+	t.Cleanup(dropGate)
+
+	for _, stmt := range []string{
+		`CREATE SEQUENCE ` + sequence,
+		`CREATE FUNCTION ` + fn + `() RETURNS trigger AS $$
+		 BEGIN
+		   PERFORM nextval('` + sequence + `');
+		   PERFORM pg_sleep(1);
+		   RETURN NULL;
+		 END
+		 $$ LANGUAGE plpgsql`,
+		fmt.Sprintf(`CREATE TRIGGER %s AFTER INSERT ON calendar_years
+			FOR EACH ROW WHEN (NEW.year = %d AND NEW.status = 'synced')
+			EXECUTE FUNCTION %s()`, trg, year, fn),
+	} {
+		if _, err := db.ExecContext(context.Background(), stmt); err != nil {
+			t.Fatalf("安装测试闸门失败（%s）: %v", stmt, err)
+		}
+	}
+	return sequence
+}
+
+// waitForGate 等到先写入者推进过闸门序列。
+func waitForGate(t *testing.T, db *sql.DB, sequence string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		var called bool
+		if err := db.QueryRowContext(context.Background(),
+			`SELECT is_called FROM `+sequence).Scan(&called); err != nil {
+			t.Fatalf("读测试闸门失败: %v", err)
+		}
+		if called {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%v 内没等到先写入者走到闸门", timeout)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// 并发两条 sync：一条成功（写 synced）、一条失败（要写 degraded）。
+//
+// 后者必须等前者的锁，然后按 SQL 里的 WHERE 重新判断——它拿不到定论，一格都
+// 不写；如果 WHERE 被删掉，它就把刚写好的年份降级、day_count 归零。
+//
+// 两个 goroutine 对应 sync 的两条写路径：成功那条走 Import，失败那条走
+// SetYearStatus。窗口由 installYearGate 撑开，见那里的注释。
+func TestConcurrentDegradedWriteDoesNotDowngradeSynced(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	year := newYear(t, db)
+
+	sequence := installYearGate(t, db, year)
+
+	imported := make(chan Result, 1)
+	importErr := make(chan error, 1)
+	go func() {
+		res, err := NewAdmin(db).Import(context.Background(), syncedDoc(year))
+		if err != nil {
+			importErr <- err
+			return
+		}
+		imported <- res
+	}()
+
+	waitForGate(t, db, sequence, 10*time.Second)
+
+	// 失败那条：它此刻撞上的是一条未提交的 synced 行。
+	res, err := NewAdmin(db).SetYearStatus(ctx, Document{
+		Region: "CN", Year: year, Status: "degraded", LastError: "拉取超时",
+	})
+	if err != nil {
+		t.Fatalf("写 degraded 状态失败: %v", err)
+	}
+	if res.Written {
+		t.Error("已有定论的年份被降级写入了（RowsAffected 不是 0）")
+	}
+	if res.Status != calendar.YearSynced {
+		t.Errorf("返回的状态 = %q，期望先写入者留下的 synced", res.Status)
+	}
+
+	select {
+	case err := <-importErr:
+		t.Fatalf("成功那条导入失败: %v", err)
+	case res := <-imported:
+		if !res.Written || res.Status != calendar.YearSynced {
+			t.Errorf("成功那条的结果 = Written %v / Status %q，期望 true / synced", res.Written, res.Status)
+		}
+	}
+
+	if got := yearState(t, db, year); got != calendar.YearSynced {
+		t.Errorf("年份状态 = %q，期望 synced（先写入者的结论不被降级）", got)
+	}
+	if got := countYearRows(t, db, year); got != 365 {
+		t.Errorf("数据行数 = %d，期望 365（整年数据没被清空）", got)
 	}
 }

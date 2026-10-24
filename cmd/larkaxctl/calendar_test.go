@@ -1211,6 +1211,9 @@ func TestPriceCalendarSyncKeepsSyncedYearWhenSourceSaysUnpublished(t *testing.T)
 			if syncErr != nil {
 				t.Fatalf("数据源说未发布不该让命令失败: %v", syncErr)
 			}
+			if got := exitCode(syncErr); got != exitOK {
+				t.Errorf("退出码 = %d，期望 %d（「没写」不是失败）", got, exitOK)
+			}
 			if !strings.Contains(stdout, "未发布") || !strings.Contains(stdout, strconv.Itoa(tc.year)) {
 				t.Errorf("stdout 里没有说明这一格: %q", stdout)
 			}
@@ -1285,5 +1288,65 @@ func TestPriceCalendarSyncOverwritesSyncedYearWithNewData(t *testing.T) {
 	name, off, _, _ = readCalendarDay(t, fmt.Sprintf("%d-10-01", year))
 	if name != "国庆节" || !off {
 		t.Errorf("10 月 1 日 = (%q,off=%v)，期望 国庆节 / 放假", name, off)
+	}
+}
+
+// 手工 import 一份不带 days 的文件到一个已 synced 的年份：一个字节都不写，
+// 打一行说明，退出码 0。
+//
+// 这条路以前会把全年数据行清空再写 pending——人工触发，坏法与并发那条一样。
+// 现在 Import 把不带 days 的文档转给只 upsert 年份状态的那条路，它见到定论
+// 就不写；「没写」不是失败。
+func TestPriceCalendarImportPendingKeepsSyncedYear(t *testing.T) {
+	requireDB(t)
+	setupEnv(t)
+	const year = 2455
+	resetCalendarYear(t, year)
+
+	// 先同步成功，造出一份有定论的数据。
+	body := holidayCNTestBody(t, year, []string{"https://example.com/notice"},
+		holidayCNDayJSON("元旦", fmt.Sprintf("%d-01-01", year), true))
+	withHolidayCNServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	})
+	if err := runCaptured(t, func() error {
+		return runPriceCalendar([]string{"sync", "--year", strconv.Itoa(year)})
+	}); err != nil {
+		t.Fatalf("造前置数据失败: %v", err)
+	}
+	before := readCalendarYear(t, year)
+	beforeDays := countCalendarYearDays(t, year)
+	if before.status != "synced" || beforeDays != 365 {
+		t.Fatalf("前置条件不成立：status=%q 天数=%d", before.status, beforeDays)
+	}
+
+	path := filepath.Join(t.TempDir(), "calendar.json")
+	if err := os.WriteFile(path,
+		[]byte(fmt.Sprintf(`{"region":"CN","year":%d,"status":"pending"}`, year)), 0o600); err != nil {
+		t.Fatalf("写测试文件失败: %v", err)
+	}
+
+	var importErr error
+	stdout, _ := captureStreams(t, func() { importErr = runCalendarImport([]string{path}) })
+	if importErr != nil {
+		t.Fatalf("不带 days 的文件在已有定论的年份上不该失败: %v", importErr)
+	}
+	if got := exitCode(importErr); got != exitOK {
+		t.Errorf("退出码 = %d，期望 %d（「没写」不是失败）", got, exitOK)
+	}
+	if !strings.Contains(stdout, "已有定论") || !strings.Contains(stdout, strconv.Itoa(year)) {
+		t.Errorf("stdout 里没有说明这一格: %q", stdout)
+	}
+
+	after := readCalendarYear(t, year)
+	if after.status != before.status || after.dayCount != before.dayCount ||
+		after.lastError != before.lastError || len(after.papers) != len(before.papers) {
+		t.Errorf("年份行被改动了：before=%+v after=%+v", before, after)
+	}
+	if !after.syncedAt.Equal(before.syncedAt) {
+		t.Errorf("年份行被重写了一次：synced_at %v → %v", before.syncedAt, after.syncedAt)
+	}
+	if n := countCalendarYearDays(t, year); n != beforeDays {
+		t.Errorf("数据行数从 %d 变成了 %d", beforeDays, n)
 	}
 }
