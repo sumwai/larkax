@@ -447,7 +447,7 @@ func completionEnumValues() map[string][]string {
 	}
 
 	roles := auth.Roles()
-	for _, path := range []string{"user create", "user list", "user update"} {
+	for _, path := range []string{"user add", "user create", "user list", "user update"} {
 		put(path, "role", roles)
 	}
 	for _, path := range []string{"user list", "user update"} {
@@ -498,7 +498,7 @@ func completionEnumValues() map[string][]string {
 	for _, path := range []string{
 		"wallet create", "wallet credit", "wallet adjust", "wallet refund",
 		"wallet payment create", "wallet payout request",
-		"plan create", "ledger balance",
+		"plan add", "plan create", "ledger balance",
 		"user wallet credit", "user wallet adjust", "user wallet refund",
 	} {
 		put(path, "asset", asset)

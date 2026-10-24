@@ -531,7 +531,7 @@ func TestPlanHelpKeepsOnlyProductDefinitions(t *testing.T) {
 			}
 		}
 	}
-	for _, kept := range []string{"plan create", "plan list", "plan get", "plan enable"} {
+	for _, kept := range []string{"plan add", "plan list", "plan get", "plan enable"} {
 		if !strings.Contains(planShortUsage, kept) {
 			t.Errorf("plan 的短版里没有商品定义 %q", kept)
 		}

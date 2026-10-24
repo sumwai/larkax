@@ -200,7 +200,7 @@ func peakExtraCondition(excludeHolidays bool, above *int64) string {
 }
 
 func parsePricePeakAdd(args []string) (pricePeakRequest, error) {
-	locator, rest, err := takeLeadingOperand(args)
+	locator, rest, err := takeLeadingOperand(args, priceSegmentLocatorOperand)
 	if err != nil {
 		return pricePeakRequest{}, err
 	}

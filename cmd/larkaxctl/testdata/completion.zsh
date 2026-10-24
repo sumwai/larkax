@@ -22,6 +22,7 @@ _larkaxctl() {
 		"consent grant|--scope") compadd -- single_request time_window; return ;;
 		"doctor|--endpoint") compadd -- chat messages responses; return ;;
 		"ledger balance|--asset") compadd -- CNY; return ;;
+		"plan add|--asset") compadd -- CNY; return ;;
 		"plan create|--asset") compadd -- CNY; return ;;
 		"plan void|--status") compadd -- expired canceled; return ;;
 		"price add|--scope") compadd -- platform merchant channel; return ;;
@@ -36,6 +37,7 @@ _larkaxctl() {
 		"snapshot get|--surface") compadd -- chat decision; return ;;
 		"snapshot redact|--direction") compadd -- request response; return ;;
 		"snapshot redact|--surface") compadd -- chat decision; return ;;
+		"user add|--role") compadd -- user merchant admin; return ;;
 		"user create|--role") compadd -- user merchant admin; return ;;
 		"user list|--role") compadd -- user merchant admin; return ;;
 		"user list|--status") compadd -- active suspended banned; return ;;
@@ -498,73 +500,73 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
-		"model create|--context-limit")
+		"model add|--context-limit")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"model create|--display")
+		"model add|--display")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"model create|--endpoints")
+		"model add|--endpoints")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"model create|--family")
+		"model add|--family")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"model create|--input-limit")
+		"model add|--input-limit")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"model create|--input-modalities")
+		"model add|--input-modalities")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"model create|--knowledge-cutoff")
+		"model add|--knowledge-cutoff")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"model create|--model")
+		"model add|--model")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"model create|--output-limit")
+		"model add|--output-limit")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"model create|--output-modalities")
+		"model add|--output-modalities")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"model create|--release-date")
+		"model add|--release-date")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"model create|--vendor")
+		"model add|--vendor")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -702,43 +704,43 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
-		"plan create|--description")
+		"plan add|--description")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"plan create|--face-value")
+		"plan add|--face-value")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"plan create|--key")
+		"plan add|--key")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"plan create|--models")
+		"plan add|--models")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"plan create|--name")
+		"plan add|--name")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"plan create|--quota")
+		"plan add|--quota")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"plan create|--unit")
+		"plan add|--unit")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -1536,13 +1538,13 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
-		"user create|--email")
+		"user add|--email")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
-		"user create|--name")
+		"user add|--name")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -2205,7 +2207,7 @@ _larkaxctl() {
 			"ledger verify") compadd -- --env-file --format --from --max-txns --quiet --to --verbose ;;
 			"maintenance idempotency") compadd -- --dry-run --env-file --format --quiet --verbose ;;
 			"maintenance session") compadd -- --dry-run --env-file --format --quiet --verbose ;;
-			"model create") compadd -- --audio --batch --cache --context-limit --display --endpoints --env-file --family --format --input-limit --input-modalities --knowledge-cutoff --model --output-limit --output-modalities --quiet --reasoning --release-date --tools --vendor --verbose --vision ;;
+			"model add") compadd -- --audio --batch --cache --context-limit --display --endpoints --env-file --family --format --input-limit --input-modalities --knowledge-cutoff --model --output-limit --output-modalities --quiet --reasoning --release-date --tools --vendor --verbose --vision ;;
 			"model delete") compadd -- --env-file --format --model --quiet --verbose ;;
 			"model get") compadd -- --env-file --format --model --quiet --verbose ;;
 			"model onboard") compadd -- --channel --cost-expr --display --dry-run --env-file --format --price-expr --quiet --update --upstream --verbose ;;
@@ -2213,7 +2215,7 @@ _larkaxctl() {
 			"model update") compadd -- --audio --batch --cache --context-limit --display --endpoints --env-file --family --format --input-limit --input-modalities --knowledge-cutoff --model --output-limit --output-modalities --quiet --reasoning --release-date --tools --vendor --verbose --vision ;;
 			"partition check") compadd -- --env-file --format --months --quiet --verbose ;;
 			"partition ensure") compadd -- --env-file --format --months --quiet --verbose ;;
-			"plan create") compadd -- --asset --description --env-file --face-value --format --key --models --name --quiet --quota --unit --verbose ;;
+			"plan add") compadd -- --asset --description --env-file --face-value --format --key --models --name --quiet --quota --unit --verbose ;;
 			"plan disable") compadd -- --env-file --format --key --quiet --verbose ;;
 			"plan enable") compadd -- --env-file --format --key --quiet --verbose ;;
 			"plan get") compadd -- --env-file --format --key --quiet --verbose ;;
@@ -2251,7 +2253,7 @@ _larkaxctl() {
 			"usage events") compadd -- --env-file --format --from --limit --quiet --to --user --verbose ;;
 			"usage requests") compadd -- --env-file --format --from --limit --model --quiet --since --status --to --user --verbose ;;
 			"usage summary") compadd -- --env-file --format --from --quiet --this-month --to --today --user --verbose ;;
-			"user create") compadd -- --email --env-file --format --generate-password --name --quiet --role --verbose ;;
+			"user add") compadd -- --email --env-file --format --generate-password --name --quiet --role --verbose ;;
 			"user delete purge") compadd -- --confirm --env-file --format --quiet --user --verbose ;;
 			"user delete request") compadd -- --env-file --format --quiet --user --verbose ;;
 			"user delete revert") compadd -- --env-file --format --quiet --user --verbose ;;
@@ -2308,10 +2310,10 @@ _larkaxctl() {
 		"ledger") compadd -- balance verify reconcile runs ;;
 		"maintenance") compadd -- idempotency session ;;
 		"migrate") compadd -- up down down-to up-to status version create ;;
-		"model") compadd -- create list get update delete onboard alias trace ;;
+		"model") compadd -- add list get update delete onboard alias trace ;;
 		"model alias") compadd -- add remove list ;;
 		"partition") compadd -- check ensure ;;
-		"plan") compadd -- create list get enable disable grant void subscriptions key order ;;
+		"plan") compadd -- add list get enable disable grant void subscriptions key order ;;
 		"plan key") compadd -- show set ;;
 		"plan order") compadd -- show set ;;
 		"plugin") compadd -- list get publish enable disable delete kv ;;
@@ -2325,7 +2327,7 @@ _larkaxctl() {
 		"snapshot") compadd -- cleanup allowlist get access-log redact ;;
 		"upstream-cost") compadd -- create list update disable ;;
 		"usage") compadd -- events requests summary ;;
-		"user") compadd -- create list get inspect update password unlock delete plan wallet key usage ;;
+		"user") compadd -- add list get inspect update password unlock delete plan wallet key usage ;;
 		"user delete") compadd -- request revert purge ;;
 		"user key") compadd -- list create plans ;;
 		"user key plans") compadd -- show set ;;

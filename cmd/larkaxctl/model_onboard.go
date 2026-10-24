@@ -181,8 +181,7 @@ func onboardInTx(ctx context.Context, db *sql.DB, tx *sql.Tx, opts onboardOption
 			return report, err
 		}
 		// 没给 --display 时取规范名：向导的参数要一次给全能跑，而展示名在
-		// 这条命令里是可选的。model create 不回落是因为那里 --display 必填；
-		// 这里回落是明确写进帮助的约定。
+		// 这条命令里是可选的。model add 同一条约定（缺省取规范名）。
 		display := opts.Canonical
 		if opts.Display != "" {
 			display = opts.Display

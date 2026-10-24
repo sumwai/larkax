@@ -132,16 +132,16 @@ func TestLegacyModelVerbAndFlagAliases(t *testing.T) {
 	setupEnv(t)
 
 	name := uniqueName("model")
-	// 用旧写法建出来：这一步证明 `model add` 真的能建东西。
-	if r := runOnce(t, runModel, []string{"add", "--model", name, "--display", "展示名"}); r.err != nil {
+	// 用正式写法建出来：这一步证明 `model add <规范名>` 真的能建东西。
+	if r := runOnce(t, runModel, []string{"add", name}); r.err != nil {
 		t.Fatalf("model add 失败: %v", r.err)
 	}
 
-	t.Run("add 等同于 create", func(t *testing.T) {
+	t.Run("create 等同于 add", func(t *testing.T) {
 		// 两支都落在「这个名字已经有了」那一档。
 		assertIdentical(t,
-			runOnce(t, runModel, []string{"add", "--model", name, "--display", "展示名"}),
-			runOnce(t, runModel, []string{"create", "--model", name, "--display", "展示名"}))
+			runOnce(t, runModel, []string{"create", "--model", name}),
+			runOnce(t, runModel, []string{"add", name}))
 	})
 
 	t.Run("show 等同于 get", func(t *testing.T) {
@@ -173,6 +173,45 @@ func TestLegacyModelVerbAndFlagAliases(t *testing.T) {
 		assertIdentical(t,
 			runOnce(t, runModel, []string{"delete", "--canonical", name}),
 			runOnce(t, runModel, []string{"delete", "--model", name}))
+	})
+}
+
+// TestLegacyUserVerbAndFlagAliases 钉住 user 的旧动词与旧选项名。
+func TestLegacyUserVerbAndFlagAliases(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	name := uniqueName("user")
+	// 用正式写法建出来：这一步证明 `user add <用户名>` 真的能建东西。
+	if r := runOnce(t, runUser, []string{"add", name}); r.err != nil {
+		t.Fatalf("user add 失败: %v", r.err)
+	}
+
+	t.Run("create --name 等同于 add", func(t *testing.T) {
+		// 两支都落在「这个名字已经有了」那一档。
+		assertIdentical(t,
+			runOnce(t, runUser, []string{"create", "--name", name}),
+			runOnce(t, runUser, []string{"add", name}))
+	})
+}
+
+// TestLegacyPlanVerbAndFlagAliases 钉住 plan 的旧动词与旧选项名。
+func TestLegacyPlanVerbAndFlagAliases(t *testing.T) {
+	testDB(t)
+	setupEnv(t)
+
+	key := uniqueName("plan")
+	fields := []string{"--name", "旧名对照包", "--unit", "amount", "--quota", "5"}
+	// 用正式写法建出来：这一步证明 `plan add <key>` 真的能建东西。
+	if r := runOnce(t, runPlan, append([]string{"add", key}, fields...)); r.err != nil {
+		t.Fatalf("plan add 失败: %v", r.err)
+	}
+
+	t.Run("create --key 等同于 add", func(t *testing.T) {
+		// 两支都落在「这个 key 已经有了」那一档。
+		assertIdentical(t,
+			runOnce(t, runPlan, append([]string{"create", "--key", key}, fields...)),
+			runOnce(t, runPlan, append([]string{"add", key}, fields...)))
 	})
 }
 

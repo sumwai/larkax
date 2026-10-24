@@ -1631,7 +1631,7 @@ func checkDoctorWallets(in doctorChainInput) doctorCheck {
 			// 这一条就是「用户清单是空的」那件事，所以它说清单空状态那一句
 			// （style.go 的 emptyListNote）：同一个状态在两处各说各的措辞时，
 			// 读的人分不清它们是同一件事还是两个不同的状态。
-			headline: emptyListNote("用户", "user create"),
+			headline: emptyListNote("用户", "user add"),
 			detail:   "没有任何一把 API Key 能挂上去，请求会回 401",
 		})
 		return c
@@ -1722,8 +1722,8 @@ func checkDoctorInboundDangling(in doctorChainInput) doctorCheck {
 			detail: "写入侧正常会拦这件事（model alias add 校验规范名存在），这类行来自迁移、导入或绕过命令行的写入。" +
 				"用这个别名的请求会在选路处失败：调用方拿到 503「no available upstream for the requested model」" +
 				"（错误码 no_candidate_channel），那句话不会提到别名。" +
-				"处置：把模型建出来（larkaxctl model create --model " + a.CanonicalName +
-				" --display <展示名>），或者删掉这条别名（larkaxctl model alias remove " + a.Alias + "）",
+				"处置：把模型建出来（larkaxctl model add " + a.CanonicalName +
+				"），或者删掉这条别名（larkaxctl model alias remove " + a.Alias + "）",
 		})
 	}
 

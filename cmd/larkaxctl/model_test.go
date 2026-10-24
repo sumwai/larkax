@@ -21,13 +21,13 @@ func TestModelCreateRejectsBadFlags(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"没有 --model", []string{"--display", "展示名"}, "缺少 --model"},
-		{"没有 --display", []string{"--model", "m1"}, "缺少 --display"},
+		{"没有规范名", []string{"--display", "展示名"}, "缺少规范名"},
+		{"位置参数与 --model 不一致", []string{"m1", "--model", "m2"}, "两个不同的值"},
 		{"日期不是 YYYY-MM-DD", []string{
 			"--model", "m1", "--display", "展示名",
 			"--knowledge-cutoff", "2026/01/31",
 		}, "YYYY-MM-DD"},
-		{"多出位置参数", []string{"--model", "m1", "--display", "展示名", "extra"}, "不接受位置参数"},
+		{"多出位置参数", []string{"--model", "m1", "--display", "展示名", "extra"}, "不接受多余的参数"},
 	}
 
 	for _, tc := range cases {
@@ -106,6 +106,23 @@ func TestModelCreateThenList(t *testing.T) {
 	}
 	if got.KnowledgeCutoff == nil || got.KnowledgeCutoff.Format("2006-01-02") != "2026-01-31" {
 		t.Errorf("知识截止日期 = %v", got.KnowledgeCutoff)
+	}
+
+	// --display 可以不给：展示名取规范名。写入路径不替调用方回落（那里判的
+	// 是「展示名必须非空」），补这一格是命令行的事。
+	fallback := uniqueName("model")
+	_, _ = captureStreams(t, func() {
+		if runErr := runModelCreate([]string{fallback, "--vendor", "example-vendor"}); runErr != nil {
+			t.Fatalf("add 不给 --display 失败: %v", runErr)
+		}
+	})
+	fallbackModel, err := catalog.New(db).Model(context.Background(), fallback)
+	if err != nil {
+		t.Fatalf("读回不给 --display 的模型失败: %v", err)
+	}
+	if fallbackModel.DisplayName != fallback {
+		t.Errorf("没给 --display 时展示名 = %q，期望取规范名 %q",
+			fallbackModel.DisplayName, fallback)
 	}
 
 	listOut, _ := captureStreams(t, func() {
@@ -955,7 +972,7 @@ func TestModelWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
 		command string
 		run     func() error
 	}{
-		{"model create", func() error { return runModelCreate(nil) }},
+		{"model add", func() error { return runModelCreate(nil) }},
 		{"model update", func() error { return runModelUpdate(nil) }},
 		{"model delete", func() error { return runModelDelete(nil) }},
 	}
