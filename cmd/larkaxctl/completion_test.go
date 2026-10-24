@@ -471,6 +471,9 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 		// 取值位上已经敲了一个 `-`：敲到这里的人下一步想要的是另一个选项，不是
 		// 文件名，所以这一格要落回选项名。三壳的候选同为全局长选项（已按字典序），
 		// fish 那边的排序在这里本来就是有序的，不必分叉。
+		//
+		// fish 这一格不是本次改动的证据：fish 生成器没动、也没有这道守卫，改前改后
+		// 都给选项名。守卫只由 bash 与 zsh 两格在验。
 		{"--env-file 后跟 - 仍补选项名", []string{"--env-file"}, func(t *testing.T, _ string, got []string) {
 			want := []string{"--env-file", "--format", "--quiet", "--verbose"}
 			if !slices.Equal(got, want) {
@@ -563,18 +566,27 @@ func requireFileFallback(t *testing.T, shell string, got []string) {
 }
 
 // TestCompletionValueFallbackPlacement 钉住取值位那一段的位置与份数，
-// 每一条键都断（清单由 valueOptionKeys 派生，三百多条）。
+// 每一条键都断（三百多条）。
 //
-// 行为用例只覆盖 `--env-file`、`--schedule-file` 那几格（requireFileFallback）。
-// 生成器漏掉某一条键时，那一格静默退回动词分派、补出来是一级命令，而行为用例
-// 全绿——它只顾得上自己那几条键。这一条按生成物逐键断：每条键那一份必须在顶层
-// `case "$cur"` 之前，且生成物里恰好一份。挪到动词分派之后、挪进
-// `case "$cur" in -*` 的嵌套分支、漏掉某条键，都会红。
+// 行为用例只覆盖三格（`--env-file`、`--schedule-file`、`--id`，见
+// requireFileFallback），漏掉一条自有键它看不见：那些键都在叶子路径上，没有下一级
+// 词表可填，bash 的候选仍是空、zsh 只是从 `_files` 变成空。只有全局 `--env-file`
+// 漏掉时才明显（顶层有词表，补出来的是一级命令）。
+//
+// 这一条按生成物逐键断：每条键那一份必须在顶层 `case "$cur"` 之前，且生成物里恰好
+// 一份。挪到动词分派之后、挪进 `case "$cur" in -*` 的嵌套分支、漏掉某条键，都会红。
+//
+// 期望清单在测试里自己从注册表走一遍（见 fallbackKeysFromFlags），不调
+// valueOptionKeys：两头同源的话，「函数漏了一条键」期望值跟着漏，这条断言与行为
+// 用例会一起绿——金文件只覆盖 zsh / fish，bash 没有第二条守卫。
 func TestCompletionValueFallbackPlacement(t *testing.T) {
 	data := buildCompletionData()
-	keys := valueOptionKeys(data)
+	keys := fallbackKeysFromFlags(data)
 	if len(keys) == 0 {
-		t.Fatalf("valueOptionKeys 返回空：下面遍历它的循环会一条都不断言")
+		t.Fatalf("注册表里一条取值位都没有：下面遍历它的循环会一条都不断言")
+	}
+	if got := valueOptionKeys(data); !slices.Equal(got, keys) {
+		t.Errorf("valueOptionKeys 与注册表对不上——两份清单只改了一边：%s", keyDiff(got, keys))
 	}
 	// 同一个位置有两条分支会抢：枚举位不该进这份取值位清单。
 	for _, key := range keys {
@@ -609,11 +621,11 @@ func TestCompletionValueFallbackPlacement(t *testing.T) {
 			if at < 0 {
 				t.Fatalf("生成物里没有顶层的 `case \"$cur\" in`：生成器结构变了，这条位置断言要重写")
 			}
-			var moved []string
+			var missing, moved []string
 			for _, pattern := range patterns {
 				switch n := strings.Count(tc.script, pattern+"\n"); n {
 				case 0:
-					t.Errorf("生成物里没有这一段：%s", pattern)
+					missing = append(missing, pattern)
 					continue
 				case 1:
 				default:
@@ -624,15 +636,13 @@ func TestCompletionValueFallbackPlacement(t *testing.T) {
 					moved = append(moved, pattern)
 				}
 			}
-			// 挪动会牵动几百条，逐条报会把真正的结论淹掉，所以只摘前几条。
+			// 整段被删或被挪会牵动几百条，逐条报会把结论淹掉，所以只摘前几条。
+			if len(missing) > 0 {
+				t.Errorf("生成物里没有这一段（%d 条）：%s", len(missing), samplePatterns(missing))
+			}
 			if len(moved) > 0 {
-				sample := moved[:min(5, len(moved))]
-				more := ""
-				if len(moved) > len(sample) {
-					more = fmt.Sprintf(" 等 %d 条", len(moved))
-				}
-				t.Errorf("取值位分支挪到了顶层 `case \"$cur\"` 之后：%s%s",
-					strings.Join(sample, " "), more)
+				t.Errorf("取值位分支挪到了顶层 `case \"$cur\"` 之后（%d 条）：%s",
+					len(moved), samplePatterns(moved))
 			}
 		})
 	}
@@ -641,6 +651,55 @@ func TestCompletionValueFallbackPlacement(t *testing.T) {
 		t.Errorf("bash 生成物末尾不再是 `complete -o default -F _larkaxctl larkaxctl`：" +
 			"取值位留空的回落依赖它")
 	}
+}
+
+// fallbackKeysFromFlags 在测试里自己走一遍注册表，得出取值位应当有的键。
+//
+// 与被测的 valueOptionKeys 是两份实现，这是故意的：两边同源时，函数漏一条键
+// 期望值跟着漏，断言照样绿。
+func fallbackKeysFromFlags(data completionData) []string {
+	var keys []string
+	for path := range data.flags {
+		for _, option := range ownOptions(data, path) {
+			if !option.takesValue {
+				continue
+			}
+			if _, wired := data.enums[path+"|"+option.name]; wired {
+				continue
+			}
+			keys = append(keys, path+"|"+option.name)
+		}
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// samplePatterns 把一长串模式摘成前几条，后面跟总条数。
+func samplePatterns(patterns []string) string {
+	if len(patterns) == 0 {
+		return "（无）"
+	}
+	sample := patterns[:min(5, len(patterns))]
+	if len(patterns) == len(sample) {
+		return strings.Join(sample, " ")
+	}
+	return fmt.Sprintf("%s 等 %d 条", strings.Join(sample, " "), len(patterns))
+}
+
+// keyDiff 列出两份清单各自独有的键。只摘前几条：整份清单一打出来，报错就没法读了。
+func keyDiff(got, want []string) string {
+	var extra, missing []string
+	for _, key := range got {
+		if !slices.Contains(want, key) {
+			extra = append(extra, key)
+		}
+	}
+	for _, key := range want {
+		if !slices.Contains(got, key) {
+			missing = append(missing, key)
+		}
+	}
+	return fmt.Sprintf("函数多出：%s；函数缺少：%s", samplePatterns(extra), samplePatterns(missing))
 }
 
 // TestFishCompletionValueFlagOffersFiles 断言 `-r` 在取值位置保留文件补全，
