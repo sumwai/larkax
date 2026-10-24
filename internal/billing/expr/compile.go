@@ -95,8 +95,8 @@ type Program struct {
 	// MapNode 分支与 checkBranchTokenKeys）。形状校验不受影响——那些表照旧
 	// 走完全部检查，收窄的只是收集。
 	//
-	// 并集里 token 计价项在根位置三元的**两支之间**是一致的（见
-	// checkBranchTokenKeys），所以这些键不会因为命中了哪一支而少。
+	// 并集里 token 计价项在根位置分叉（三元两支、`??` 两侧）之间是一致的（见
+	// checkBranchTokenKeys），所以这些键不会因为求值落到哪一侧而少。
 	// units / fixed / minimum 可以只在某些分支出现，它们的并集比单次结算宽
 	// ——那是有意的，见 worstTable。
 	//
@@ -353,12 +353,13 @@ type shape struct {
 //
 //	{"prompt": 1.5, "completion": 7.5, "units": {"search": 0.01}}   单价表
 //	len <= 32000 ? {...} : {...}                                     按条件选一组单价
+//	{"prompt": 1.0} ?? {...}                                         取非空的那一侧
 //	tier("peak", {...})                                              带档位追踪的单价表
 //	{"prompt": 1.5 + (isHoliday() ? 0.5 : 0.0)}                      价格位置上的数值运算
 //	let price = {...}; price                                         let 绑定整张表
 //
-// 根位置的三元还要求两支的 token 计价项键集一致：见 walkShape 的
-// ConditionalNode 分支。`units` / `fixed` / `minimum` 不在这条判据内。
+// 根位置的三元与 `??` 还要求两侧的 token 计价项键集一致：见 walkShape 的
+// ConditionalNode 与 BinaryNode 分支。`units` / `fixed` / `minimum` 不在这条判据内。
 //
 // 检查顺带把用量变量限制在条件位置上（见 pos.cond 与 usageInArithmetic）。
 func inspectShape(root ast.Node) (shape, error) {
@@ -515,7 +516,7 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 		// 只比 token 计价项：units 与一次性费用不在 ErrMissingPrice 的判据里，
 		// 一支给 units 而另一支不给是正常写法（见 worstTable）。
 		if at.root {
-			return checkBranchTokenKeys(thenKeys, sh.rootTokenKeys(n.Exp2))
+			return checkBranchTokenKeys(thenKeys, sh.rootTokenKeys(n.Exp2), ternaryBranchSides)
 		}
 		return nil
 
@@ -593,6 +594,9 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 		}
 		if err := walkShape(n.Left, sh, sub); err != nil {
 			return err
+		}
+		if n.Operator == "??" {
+			return walkCoalesceRight(n, sh, sub)
 		}
 		return walkShape(n.Right, sh, sub)
 
@@ -712,40 +716,96 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 	}
 }
 
-// checkBranchTokenKeys 比较根位置三元两支里出现的 token 计价项。
+// walkCoalesceRight 走完 `??` 的右侧，并在根位置比较两侧的 token 计价项。
 //
-// 键集由调用方在走完各自那一支时就取好：let 的绑定是同一张表按名字覆盖的，
-// 两支都走完再回头解析，两边会解析成同一个绑定（见 walkShape 的
-// ConditionalNode 分支）。
+// 调用时左侧已经走完，所以这里只负责右侧与收尾。
 //
-// 报错点名**哪个键只在部分分支里出现**、以及它在哪一支里缺席：只写一句
-// 「两支键集不一致」，写规则的人还得自己逐字比对两张表。
-func checkBranchTokenKeys(thenKeys, elseKeys map[string]struct{}) error {
-	onlyThen := keysOnlyIn(thenKeys, elseKeys)
-	onlyElse := keysOnlyIn(elseKeys, thenKeys)
-	if len(onlyThen) == 0 && len(onlyElse) == 0 {
+// 非根位置的 `??` 与别的二元运算符没有区别：它选出来的是一个数值，两侧没有
+// 键集可比，照常往下走。
+//
+// 落在根位置时，它与根位置的三元是同一件事：选出的是整张单价表，而
+// Program.Keys 取两侧的并集（见 Program.keys 与 MapNode 分支），结算只认
+// 求值到的那一侧的 Declared（billing.Prices）：
+//
+//	{"prompt": 1.0} ?? {"completion": 2.0}
+//
+// 按并集看两项都定了价，而求值落到哪一侧，另一侧独有的项就没价。所以两侧
+// 必须给同一组 token 计价项——与三元同一条判据、同一套报错。
+func walkCoalesceRight(n *ast.BinaryNode, sh *shape, sub pos) error {
+	if !sub.root {
+		return walkShape(n.Right, sh, sub)
+	}
+	// 键要在走完左侧、右侧**还没走**的时候取：binds 是一张平表，两侧各写
+	// 同名 let 时后者会盖掉前者（同 ConditionalNode 分支）。
+	leftKeys := sh.rootTokenKeys(n.Left)
+	if err := walkShape(n.Right, sh, sub); err != nil {
+		return err
+	}
+	return checkBranchTokenKeys(leftKeys, sh.rootTokenKeys(n.Right), coalesceBranchSides)
+}
+
+// branchSides 是一条分叉规则的两侧在报错里的叫法。
+//
+// 三元说「真分支/假分支」，`??` 说「左侧/右侧」——同一件事在两种写法里的
+// 通常叫法不同。这几个词**只影响报错措辞，不影响判据**：比较的仍然是两侧的
+// token 计价项键集，谁先走、谁后走只决定键集传给函数参数的顺序。
+type branchSides struct {
+	lead   string // 开头那句（到冒号为止），点名规则与「结算只认哪一侧」
+	first  string // 源码里先写的那一侧：三元的真分支 / ?? 的左侧
+	second string // 源码里后写的那一侧：三元的假分支 / ?? 的右侧
+	tail   string // 「不用的那一项怎么写」那半句
+}
+
+// 三元的措辞是既有报错原文，逐字保留——branch_keys_test.go 按字面钉着它。
+var ternaryBranchSides = branchSides{
+	lead:   "根位置的三元两支必须给同一组 token 计价项（结算只认命中那一支的键）：",
+	first:  "真分支",
+	second: "假分支",
+	tail:   "；不用那一项的分支请显式写 0",
+}
+
+var coalesceBranchSides = branchSides{
+	lead:   "根位置的 ?? 两侧必须给同一组 token 计价项（结算只认求值到的那一侧的键）：",
+	first:  "左侧",
+	second: "右侧",
+	tail:   "；不用那一项的一侧请显式写 0",
+}
+
+// checkBranchTokenKeys 比较根位置分叉（三元两支、`??` 两侧）里出现的 token 计价项。
+//
+// 键集由调用方在走完各自那一侧时就取好：let 的绑定是同一张表按名字覆盖的，
+// 两侧都走完再回头解析，两边会解析成同一个绑定（见 walkShape 的
+// ConditionalNode 与 BinaryNode 分支）。
+//
+// 报错点名**哪个键只在部分分支里出现**、以及它在哪一侧里缺席：只写一句
+// 「键集不一致」，写规则的人还得自己逐字比对两张表。
+func checkBranchTokenKeys(firstKeys, secondKeys map[string]struct{}, sides branchSides) error {
+	onlyFirst := keysOnlyIn(firstKeys, secondKeys)
+	onlySecond := keysOnlyIn(secondKeys, firstKeys)
+	if len(onlyFirst) == 0 && len(onlySecond) == 0 {
 		return nil
 	}
 
 	parts := make([]string, 0, 2)
-	if len(onlyThen) > 0 {
-		parts = append(parts, fmt.Sprintf("键 %s 只在真分支里出现，假分支里缺席", quoteKeys(onlyThen)))
+	if len(onlyFirst) > 0 {
+		parts = append(parts, fmt.Sprintf("键 %s 只在%s里出现，%s里缺席",
+			quoteKeys(onlyFirst), sides.first, sides.second))
 	}
-	if len(onlyElse) > 0 {
-		parts = append(parts, fmt.Sprintf("键 %s 只在假分支里出现，真分支里缺席", quoteKeys(onlyElse)))
+	if len(onlySecond) > 0 {
+		parts = append(parts, fmt.Sprintf("键 %s 只在%s里出现，%s里缺席",
+			quoteKeys(onlySecond), sides.second, sides.first))
 	}
 	// 只说「要一致」不说怎么改，作者会把它当成一条无理由的限制：
-	// 结算只认命中那一支的键，另一支没写的项等于没定价。
-	return fmt.Errorf("根位置的三元两支必须给同一组 token 计价项（结算只认命中那一支的键）：%s；"+
-		"不用那一项的分支请显式写 0", strings.Join(parts, "；"))
+	// 结算只认命中那一侧的键，另一侧没写的项等于没定价。
+	return fmt.Errorf("%s%s%s", sides.lead, strings.Join(parts, "；"), sides.tail)
 }
 
 // rootTokenKeys 取出一个**根位置**子树最终求值出的那张单价表里的 token 计价项。
 //
-// 调用前提是该子树已经通过 walkShape：根位置只可能是单价表、三元、
-// tier(...)、语句序列、let 绑定，或以单价表收尾的 let 表达式。三元在这里
-// 只取真分支——两支已由递归校验成同一组键（见 walkShape 的 ConditionalNode
-// 分支）。
+// 调用前提是该子树已经通过 walkShape：根位置只可能是单价表、三元、`??`、
+// tier(...)、语句序列、let 绑定，或以单价表收尾的 let 表达式。三元与 `??` 在这里
+// 只取先走的那一侧——两侧已由递归校验成同一组键（见 walkShape 的 ConditionalNode
+// 与 BinaryNode 分支）。
 //
 // 只看 token 计价项，键名以 billing.TokenSlots 为唯一来源（见 tokenPriceSlots
 // 与 dsl.go 的 priceSlots）。
@@ -777,6 +837,13 @@ func (sh *shape) tokenKeysIn(node ast.Node, seen map[string]bool) map[string]str
 		}
 	case *ast.ConditionalNode:
 		return sh.tokenKeysIn(n.Exp1, seen)
+	case *ast.BinaryNode:
+		// `??` 连着写（`a ?? b ?? c`）解析成左结合的 BinaryNode，外侧取键时会
+		// 走到这里。两侧的键集已经由 walkShape 的 BinaryNode 分支校验成一致，
+		// 所以按左侧取即可——与三元取真分支同一条理由。
+		if n.Operator == "??" {
+			return sh.tokenKeysIn(n.Left, seen)
+		}
 	case *ast.CallNode:
 		if ident, ok := n.Callee.(*ast.IdentifierNode); ok &&
 			ident.Value == "tier" && len(n.Arguments) == 2 {

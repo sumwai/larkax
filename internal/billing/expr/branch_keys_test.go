@@ -9,11 +9,12 @@ import (
 	"github.com/sumwai/larkax/internal/billing"
 )
 
-// 这一组用例检查「根位置三元两支的 token 计价项必须一致」。
+// 这一组用例检查「根位置三元两支、`??` 两侧的 token 计价项必须一致」。
 //
 // 理由见 compile.go 的 checkBranchTokenKeys：Program.Keys 取所有分支的并集，
-// 而结算只认命中那一支的 Declared。两支键集不同时，price list 与写入提示会
-// 显示「覆盖齐全」，用量带上了只在另一支出现的项就整笔 ErrMissingPrice。
+// 而结算只认求值到的那一侧的 Declared。两侧键集不同时，price list 与写入提示会
+// 显示「覆盖齐全」，用量带上了只在另一侧出现的项就整笔 ErrMissingPrice。
+// 两种写法同一条判据，只有报错里的叫法不同（三元：真分支/假分支；`??`：左侧/右侧）。
 
 // TestCompileRejectsBranchTokenKeyMismatch 验证两支键集不同时编译失败，
 // 且报错逐句点明哪个键、在哪一支里缺席。
@@ -174,6 +175,192 @@ func TestCompileRejectsBranchTokenKeyMismatch(t *testing.T) {
 			// 只说「不一致」没法照着改。
 			if !strings.Contains(msg, "显式写 0") {
 				t.Errorf("错误里应当说清不用的那一项怎么写，得到 %q", msg)
+			}
+		})
+	}
+}
+
+// TestCompileRejectsCoalesceTokenKeyMismatch 验证根位置 `??` 两侧键集不同时
+// 编译失败，且报错按「左侧/右侧」点名，不借用三元那套「真分支/假分支」。
+func TestCompileRejectsCoalesceTokenKeyMismatch(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		// sentences 是必须**逐字**出现的那几句。
+		sentences []string
+		// onlyOnLeft / onlyOnRight 表示有键只在那一侧出现（另一侧缺席）。
+		// 为 false 时那一侧的句子一个字都不许出现。
+		onlyOnLeft  bool
+		onlyOnRight bool
+	}{
+		{
+			// 最典型的一条：右侧写了输出单价，左侧没写。
+			name:        "只在右侧出现的输出单价",
+			source:      `{"prompt": 1.0} ?? {"prompt": 1.0, "completion": 2.0}`,
+			sentences:   []string{`键 "completion" 只在右侧里出现，左侧里缺席`},
+			onlyOnRight: true,
+		},
+		{
+			// 方向反过来也拦。
+			name:       "只在左侧出现的输出单价",
+			source:     `{"prompt": 1.0, "completion": 2.0} ?? {"prompt": 1.0}`,
+			sentences:  []string{`键 "completion" 只在左侧里出现，右侧里缺席`},
+			onlyOnLeft: true,
+		},
+		{
+			// 两侧各缺一个：两个方向的句子都要出现。
+			name:   "两侧各有对方没有的键",
+			source: `{"prompt": 1.0, "completion": 7.5} ?? {"prompt": 1.5, "reasoning": 9.0}`,
+			sentences: []string{
+				`键 "completion" 只在左侧里出现，右侧里缺席`,
+				`键 "reasoning" 只在右侧里出现，左侧里缺席`,
+			},
+			onlyOnLeft:  true,
+			onlyOnRight: true,
+		},
+		{
+			// let 只是包了一层：绑定在一侧的表照样参与比较。
+			name:       "左侧是 let 绑定的表",
+			source:     `let t = {"prompt": 1.0, "completion": 2.0}; t ?? {"prompt": 3.0}`,
+			sentences:  []string{`键 "completion" 只在左侧里出现，右侧里缺席`},
+			onlyOnLeft: true,
+		},
+		{
+			// 两侧各写一个同名 let：取键的时点必须在右侧还没登记的时候，
+			// 否则两侧都会被解析成后登记的那张表（见 compile.go 的注释）。
+			name: "两侧各写同名的 let 但表不同",
+			source: `(let price = {"prompt": 1.5, "completion": 7.5}; price)
+				?? (let price = {"prompt": 3.0}; price)`,
+			sentences:  []string{`键 "completion" 只在左侧里出现，右侧里缺席`},
+			onlyOnLeft: true,
+		},
+		{
+			// 连着写解析成左结合的嵌套 `??`：最外层比较的是 `(a ?? b)` 与 c，
+			// 左侧取键要走得进内层那个 BinaryNode。
+			name:   "链式 ?? 的末段键集不同",
+			source: `{"prompt": 1.0} ?? {"prompt": 2.0} ?? {"completion": 3.0}`,
+			sentences: []string{
+				`键 "prompt" 只在左侧里出现，右侧里缺席`,
+				`键 "completion" 只在右侧里出现，左侧里缺席`,
+			},
+			onlyOnLeft:  true,
+			onlyOnRight: true,
+		},
+		{
+			// 三元的一支里再分 `??`：遗漏落在内层那一对上，报错也用它那一套叫法。
+			name:   "三元分支里的 ??",
+			source: `c > 100 ? {"prompt": 1.0} : ({"prompt": 2.0} ?? {"completion": 3.0})`,
+			sentences: []string{
+				`键 "prompt" 只在左侧里出现，右侧里缺席`,
+				`键 "completion" 只在右侧里出现，左侧里缺席`,
+			},
+			onlyOnLeft:  true,
+			onlyOnRight: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := compileErr(t, tc.source)
+			if err.Reason != ReasonShape {
+				t.Errorf("原因 = %s，期望 %s（%v）", err.Reason, ReasonShape, err.Err)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "根位置的 ?? 两侧必须给同一组 token 计价项") {
+				t.Errorf("错误里应当点明这是 ?? 两侧的判据，得到 %q", msg)
+			}
+			for _, sentence := range tc.sentences {
+				if !strings.Contains(msg, sentence) {
+					t.Errorf("错误里应当逐字出现 %q，得到 %q", sentence, msg)
+				}
+			}
+			// 有独有键的那一侧既要点名「只在…里出现」，也要说清另一侧缺席；
+			// 没有独有键的那一侧，这两句一个字都不许出现。
+			if tc.onlyOnLeft != strings.Contains(msg, "只在左侧里出现") {
+				t.Errorf("onlyOnLeft = %v，但错误里「只在左侧里出现」的出现与否不符，得到 %q",
+					tc.onlyOnLeft, msg)
+			}
+			if tc.onlyOnLeft != strings.Contains(msg, "右侧里缺席") {
+				t.Errorf("onlyOnLeft = %v，但错误里「右侧里缺席」的出现与否不符，得到 %q",
+					tc.onlyOnLeft, msg)
+			}
+			if tc.onlyOnRight != strings.Contains(msg, "只在右侧里出现") {
+				t.Errorf("onlyOnRight = %v，但错误里「只在右侧里出现」的出现与否不符，得到 %q",
+					tc.onlyOnRight, msg)
+			}
+			if tc.onlyOnRight != strings.Contains(msg, "左侧里缺席") {
+				t.Errorf("onlyOnRight = %v，但错误里「左侧里缺席」的出现与否不符，得到 %q",
+					tc.onlyOnRight, msg)
+			}
+			// `??` 的报错不借用三元的叫法：两个词都不该出现。
+			if strings.Contains(msg, "真分支") || strings.Contains(msg, "假分支") {
+				t.Errorf("?? 的报错不该出现三元的「真分支/假分支」，得到 %q", msg)
+			}
+			// 只说「不一致」没法照着改。
+			if !strings.Contains(msg, "显式写 0") {
+				t.Errorf("错误里应当说清不用的那一项怎么写，得到 %q", msg)
+			}
+		})
+	}
+}
+
+// TestCoalesceBranchKeepsTernaryWording 验证三元嵌在 `??` 一侧时，
+// 报错仍是三元那一套叫法：两种判据共用同一个比较函数，但措辞要各说各的。
+func TestCoalesceBranchKeepsTernaryWording(t *testing.T) {
+	err := compileErr(t, `(c > 100 ? {"prompt": 1.0} : {"prompt": 2.0, "completion": 3.0})
+		?? {"prompt": 4.0}`)
+	if err.Reason != ReasonShape {
+		t.Errorf("原因 = %s，期望 %s（%v）", err.Reason, ReasonShape, err.Err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `键 "completion" 只在假分支里出现，真分支里缺席`) {
+		t.Errorf("错误里应当逐字出现三元那一句，得到 %q", msg)
+	}
+	if !strings.Contains(msg, "根位置的三元两支必须给同一组 token 计价项") {
+		t.Errorf("错误里应当点明这是三元两支的判据，得到 %q", msg)
+	}
+	if strings.Contains(msg, "?? 两侧") {
+		t.Errorf("三元自己的报错不该出现 ?? 那一套措辞，得到 %q", msg)
+	}
+}
+
+// TestCompileAcceptsCoalesceTokenKeyUniformity 验证 `??` 两侧键集一致时照常
+// 编译，并且与三元同一条边界：units 与一次性费用可以只在一侧。
+func TestCompileAcceptsCoalesceTokenKeyUniformity(t *testing.T) {
+	for name, source := range map[string]string{
+		"键集一致的对照规则":   `{"prompt": 1.5, "completion": 7.5} ?? {"prompt": 3.0, "completion": 15.0}`,
+		"两侧单价完全相同":    `{"prompt": 1.5, "completion": 7.5} ?? {"prompt": 1.5, "completion": 7.5}`,
+		"显式写 0 也算写了":  `{"prompt": 1.5, "completion": 0} ?? {"prompt": 1.5, "completion": 7.5}`,
+		"链式 ?? 每段都一致": `{"prompt": 1.0} ?? {"prompt": 2.0} ?? {"prompt": 3.0}`,
+		"两侧各写同名的 let": `(let price = {"prompt": 1.5, "completion": 0}; price)
+			?? (let price = {"prompt": 3.0, "completion": 15.0}; price)`,
+		"三元与 ?? 嵌套且键集一致": `c > 100
+			? ({"prompt": 1.0, "completion": 2.0} ?? {"prompt": 3.0, "completion": 4.0})
+			: {"prompt": 4.0, "completion": 5.0}`,
+		// 边界：与三元一样，units 与 fixed/minimum 不在判据内。这条用例守着
+		// 「不要顺手收紧」——真收紧了，这里会红。
+		"计量项与固定费只在一侧": `{"prompt": 1.0, "units": {"img": 0.02}, "fixed": fixed(0.01)}
+			?? {"prompt": 2.0}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Compile(source); err != nil {
+				t.Errorf("%q 应当编得过: %v", source, err)
+			}
+		})
+	}
+}
+
+// TestNonRootCoalesceUnchanged 守着「判据只针对根位置」：槽里的 `??` 选的是
+// 一个数值，两侧没有键集可比，形状检查不该多出任何约束。
+func TestNonRootCoalesceUnchanged(t *testing.T) {
+	for name, source := range map[string]string{
+		"槽里的 ??":      `{"prompt": (1.0 ?? 2.0)}`,
+		"算术里的 ??":     `{"prompt": (1.0 ?? 2.0) + 1.0}`,
+		"槽里的 ?? 包着条件": `{"prompt": isPeak("08:00-22:00") ? (1.0 ?? 2.0) : 1.0}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Compile(source); err != nil {
+				t.Errorf("%q 应当编得过: %v", source, err)
 			}
 		})
 	}
