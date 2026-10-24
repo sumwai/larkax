@@ -80,29 +80,38 @@ func seedLedgerPair(ctx context.Context, t *testing.T, db *sql.DB, userID int64)
 	return txnID
 }
 
-// TestDeletionRequestBlocksKeysAndRevertRestoresThem 证明「打标可撤」这件事的
-// 两端：打标之后同一个 key 用不了，撤销之后它还是那一把、还能用。
+// TestDeletionMarkLeavesKeysAloneAndRevertDoesNotUnrevoke 证明两件事：
+// 打标本身不改任何一把 key 的状态；撤销也不会把吊销改回来。
 //
-// 只断言 status 是不够的：一个顺手把 key 也作废了的实现，status 会照常回到
-// active，而用户手里的 key 已经永久失效——那正是「可撤」要避免的。
-func TestDeletionRequestBlocksKeysAndRevertRestoresThem(t *testing.T) {
+// 打标的前置条件要求 key 已全部吊销，所以「撤销之后 key 又能用」这句话不再
+// 对一把被操作者吊销过的 key 成立——吊销是那个动作，不属于撤销的范围。用例
+// 分两段证明：
+//
+//   - 打标之前就存在的 key，吊销之后再打标，行仍是 revoked；
+//   - 打标之后新建的 key（命令不挡这种建法）是 active，它因为 users.status
+//     不是 active 而鉴权失败，撤销之后又能用——这是「鉴权只认 status = active」
+//     那一半，也是撤销真的回到原样的证据。
+func TestDeletionMarkLeavesKeysAloneAndRevertDoesNotUnrevoke(t *testing.T) {
 	ctx := t.Context()
 	db := testDB(ctx, t)
 	store := New(db)
 	u := newUser(ctx, t, db, UserStatusActive)
 
-	created, err := store.Create(ctx, CreateParams{UserID: u.ID})
+	// 第一把：打标之前就必须吊销的那一类。
+	revoked, err := store.Create(ctx, CreateParams{UserID: u.ID})
 	if err != nil {
 		t.Fatalf("创建 key 失败: %v", err)
 	}
-	authOK := func() error {
-		_, authErr := store.Authenticate(ctx, request(ctx, "x-api-key", created.Plaintext))
+	if _, err = db.ExecContext(ctx,
+		`UPDATE api_keys SET status = 'revoked' WHERE id = $1`, revoked.ID); err != nil {
+		t.Fatalf("吊销 key 失败: %v", err)
+	}
+	authRevoked := func() error {
+		_, authErr := store.Authenticate(ctx, request(ctx, "x-api-key", revoked.Plaintext))
 		return authErr
 	}
-
-	err = authOK()
-	if err != nil {
-		t.Fatalf("刚创建的 key 就认证失败: %v", err)
+	if err = authRevoked(); err == nil {
+		t.Fatal("吊销的 key 还能认证")
 	}
 
 	mark, err := store.RequestDeletion(ctx, u.Username)
@@ -114,21 +123,31 @@ func TestDeletionRequestBlocksKeysAndRevertRestoresThem(t *testing.T) {
 			mark.FromStatus, mark.ToStatus)
 	}
 
-	err = authOK()
-	if err == nil {
-		t.Fatal("打标之后 key 还能用")
-	} else if !errors.Is(err, ErrUnauthenticated) {
-		t.Fatalf("打标之后的失败不是「凭证无效」那一类: %v", err)
-	}
-
 	var keyStatus string
-	err = db.QueryRowContext(ctx,
-		`SELECT status FROM api_keys WHERE id = $1`, created.ID).Scan(&keyStatus)
-	if err != nil {
+	if err = db.QueryRowContext(ctx,
+		`SELECT status FROM api_keys WHERE id = $1`, revoked.ID).Scan(&keyStatus); err != nil {
 		t.Fatalf("读 key 状态失败: %v", err)
 	}
-	if keyStatus != keyStatusActive {
-		t.Errorf("打标把 key 的状态改成了 %q：撤销之后它就回不来了", keyStatus)
+	if keyStatus != "revoked" {
+		t.Errorf("打标把 key 的状态改成了 %q；它停在哪一档就该留在哪一档", keyStatus)
+	}
+	if err = authRevoked(); err == nil {
+		t.Fatal("打标之后吊销的 key 又能用了")
+	}
+
+	// 第二把：打标之后才建。它证明鉴权侧的效果，以及撤销能不能还回去。
+	late, err := store.Create(ctx, CreateParams{UserID: u.ID})
+	if err != nil {
+		t.Fatalf("打标之后建 key 失败: %v", err)
+	}
+	authLate := func() error {
+		_, authErr := store.Authenticate(ctx, request(ctx, "x-api-key", late.Plaintext))
+		return authErr
+	}
+	if err = authLate(); err == nil {
+		t.Fatal("打标之后新建的 key 还能通过鉴权")
+	} else if !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("打标之后的失败不是「凭证无效」那一类: %v", err)
 	}
 
 	mark, err = store.RevertDeletion(ctx, u.Username)
@@ -139,8 +158,12 @@ func TestDeletionRequestBlocksKeysAndRevertRestoresThem(t *testing.T) {
 		t.Errorf("撤销的两个状态是 %s → %s，想要 deletion_requested → active",
 			mark.FromStatus, mark.ToStatus)
 	}
-	if err := authOK(); err != nil {
-		t.Fatalf("撤销之后原来的 key 不能用: %v", err)
+	if err := authLate(); err != nil {
+		t.Fatalf("撤销之后打标之后建的那把 key 不能用: %v", err)
+	}
+	// 吊销是操作者做的，撤销不替谁解除它。
+	if err := authRevoked(); err == nil {
+		t.Fatal("撤销把操作者吊销的 key 改回来了")
 	}
 }
 
@@ -266,24 +289,8 @@ func TestPurgeAnonymizesAndKeepsFinancialRows(t *testing.T) {
 	seedLedgerPair(ctx, t, db, u.ID)
 	seedLedgerPair(ctx, t, db, u.ID)
 
-	// 两把 key：一把 active、一把此前就 disabled。前者要被作废，后者保留它
-	// 原来的状态——「此前停用过」也是一条该留下的记录。
-	active, err := store.Create(ctx, CreateParams{UserID: u.ID})
-	if err != nil {
-		t.Fatalf("创建 active key 失败: %v", err)
-	}
-	disabled, err := store.Create(ctx, CreateParams{UserID: u.ID})
-	if err != nil {
-		t.Fatalf("创建 disabled key 失败: %v", err)
-	}
-	_, err = db.ExecContext(ctx, `
-		UPDATE api_keys SET status = 'disabled' WHERE id = $1`, disabled.ID)
-	if err != nil {
-		t.Fatalf("停用 key 失败: %v", err)
-	}
-
 	// 两条用户态插件 KV、两条采集授权（一条有效、一条早就撤销过）。
-	_, err = db.ExecContext(ctx, `
+	_, err := db.ExecContext(ctx, `
 		INSERT INTO plugin_kv (plugin_key, user_id, key, value) VALUES
 			('demo', $1, 'a', '1'), ('demo', $1, 'b', '2')`, u.ID)
 	if err != nil {
@@ -326,6 +333,24 @@ func TestPurgeAnonymizesAndKeepsFinancialRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("打标失败: %v", err)
 	}
+
+	// 两把 key 建在**打标之后**：打标的前置条件要求此刻名下没有非 revoked 的
+	// key，所以这两把只能后建。它们证明匿名化那一侧仍会作废「打标之后冒出来的
+	// key」：一把 active 要被置为 revoked，一把此前就 disabled 的保留原状态
+	// ——「此前停用过」也是一条该留下的记录。
+	active, err := store.Create(ctx, CreateParams{UserID: u.ID})
+	if err != nil {
+		t.Fatalf("创建 active key 失败: %v", err)
+	}
+	disabled, err := store.Create(ctx, CreateParams{UserID: u.ID})
+	if err != nil {
+		t.Fatalf("创建 disabled key 失败: %v", err)
+	}
+	if _, err = db.ExecContext(ctx,
+		`UPDATE api_keys SET status = 'disabled' WHERE id = $1`, disabled.ID); err != nil {
+		t.Fatalf("停用 key 失败: %v", err)
+	}
+
 	result, err := store.PurgeDeletion(ctx, u.Username, u.Username)
 	if err != nil {
 		t.Fatalf("匿名化失败: %v", err)
@@ -755,6 +780,14 @@ func TestPurgeWaitsForTheWalletLockAndThenRefuses(t *testing.T) {
 // 的顺序没有发生，必须红。
 func waitForWalletLock(ctx context.Context, t *testing.T, db *sql.DB, tx *sql.Tx) {
 	t.Helper()
+	waitForBlockedBy(ctx, t, db, tx, "匿名化停在钱包锁上：它没有按预期的顺序走到钱包")
+}
+
+// waitForBlockedBy 等到有别的后端被 tx 这一笔事务挡住；what 是超时时要说的那一句。
+//
+// pg_blocking_pids 对 advisory lock 同样有效：事务级咨询锁也是锁管理器里的锁。
+func waitForBlockedBy(ctx context.Context, t *testing.T, db *sql.DB, tx *sql.Tx, what string) {
+	t.Helper()
 	var blocker int32
 	if err := tx.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&blocker); err != nil {
 		t.Fatalf("读本事务的后端号失败: %v", err)
@@ -774,7 +807,7 @@ func waitForWalletLock(ctx context.Context, t *testing.T, db *sql.DB, tx *sql.Tx
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("10 秒内没看到匿名化停在钱包锁上：它没有按预期的顺序走到钱包")
+			t.Fatalf("10 秒内没看到%s", what)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

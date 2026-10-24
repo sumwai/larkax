@@ -19,11 +19,12 @@ import (
 //
 // 它与 user.go 服务同一张 users 表，所以放在同一个包里；不同的是销户要在一个
 // 事务里动到另外几张表（api_keys、user_wallets、ledger_entries、plugin_kv、
-// capture_consents）。这些表的**日常读写**各有归属：key 在 store.go，钱包与
-// 账本在 internal/ledger/store，插件 KV 在 internal/plugin/store。销户不经过
-// 它们，直接在这里写 SQL——那几张表的所有者都没有开放「传一个事务进来」的口子，
-// 而销户必须是**一个事务**：删了一半的账号（key 作废了、users 行还 active）在
-// 输出上不报错，事后也分不出它停在哪一步。
+// capture_consents），还要读 channels 与 merchant_payable 这个账本科目。这些表的
+// **日常读写**各有归属：key 在 store.go，钱包与账本在 internal/ledger/store，插件
+// KV 在 internal/plugin/store，渠道在 internal/channels。销户不经过它们，直接
+// 在这里写 SQL——那几张表的所有者都没有开放「传一个事务进来」的口子，而销户必须
+// 是**一个事务**：删了一半的账号（key 作废了、users 行还 active）在输出上不报错，
+// 事后也分不出它停在哪一步。
 //
 // 三处边界要说清：
 //
@@ -32,12 +33,15 @@ import (
 //     里属于这个用户的行——它们随匿名化删掉。账单是财务记录，不随账号删除清除
 //     （见 docs/request-retention.md）。
 //   - 鉴权不需要为这一档加判断：lookup 只认 status = active，而两个新状态都不是
-//     active，所以打标之后用户手里的 key 立刻失效；撤销之后同一个 key 又可以用。
-//     key 本身在打标这一步**一条都不动**，正是为了让撤销真的能回到原样。
-//   - 销户这一族的锁序是 api_keys → users → user_wallets。计费那一侧的顺序不同：
-//     出处是 internal/ledger/store 的 SaveReservation，keyquota 先锁那把 key，再
-//     锁钱包改冻结额，最后 INSERT billing_requests，经外键在 users 上取 KEY SHARE
-//     （store.go 里那句「没有任何路径按先钱包后 key 拿锁」说的就是它）。
+//     active，所以打标之后用户手里的 key 立刻失效；撤销之后用户身份回到 active，
+//     打标之后才建的那几把 key 又能用。打标要求 key 已经全部吊销（吊销是操作者
+//     在打标之前做的清理动作），所以撤销不会把谁吊销的 key 改回来——它只把状态
+//     还回去；key 本身在打标这一步**一条都不动**。
+//   - 销户这一族的锁序是 api_keys → merchant_payable 科目 → users → user_wallets。
+//     计费那一侧的顺序不同：出处是 internal/ledger/store 的 SaveReservation，
+//     keyquota 先锁那把 key，再锁钱包改冻结额，最后 INSERT billing_requests，
+//     经外键在 users 上取 KEY SHARE（store.go 里那句「没有任何路径按先钱包后 key
+//     拿锁」说的就是它）。
 //
 //     两条路都把 api_keys 放在最前面，所以不会成环：一条是 key → users → 钱包，
 //     另一条是 key → 钱包 → users（KEY SHARE）。方向相反的只有后两段，而两段都
@@ -48,6 +52,26 @@ import (
 //     为什么 users 在钱包之前：user_wallets 的新行经外键在 users 上取 KEY SHARE，
 //     而 FOR UPDATE 与它冲突。先锁 users 就堵死了「余额查完、事务提交前插进一个
 //     新钱包行」这个窗口。
+//
+//     商户应付那颗科目锁（merchant_payable:<用户 ID>）排在 api_keys 与 users 之间：
+//     打标要读这个科目的分录之和，而账本自己的写路径（提现申请、平台清算、退款
+//     冲回分成）都先取同一把事务级科目锁再动它。键必须与那边算出来的完全一样——
+//     hashtextextended(科目名, 0)，见 ledger/store 的 lockAccount；自己另拼一个
+//     键不会报错，只会悄悄不与账本写入排队，表现成「余额读到一个马上被退款改掉的
+//     数」。用同一把锁就落在同一条串行线上，判据因此一直成立到本事务提交。
+//
+//     它必须在 users 之前：wallet payout request 的顺序是「科目 → users」——建
+//     payout_requests 那一行要经外键在 users 上取 KEY SHARE。倒过来放（users →
+//     科目）会让持科目锁等 users 的提现事务与持 users 等科目锁的销户撞 40P01。
+//     相对顺序与账本那边的「交易键 → 科目 → 钱包」一致。
+//
+//     channels 只在这一族里**读**、不加任何锁，位置在 users 之后。它既不成环、
+//     也不会读到过时的数，依据是外键而不是「我们没锁它」：channels.owner_user_id
+//     指向 users(id)，任何一条把这个用户写进 owner_user_id 的新写入（包括管理面
+//     建渠道）都要在 users 那一行上取 KEY SHARE，而它和本事务握着的 FOR UPDATE
+//     冲突；软删只把行从「名下渠道」这个集合里拿走。反过来也没有路径先锁
+//     channels 再锁 users / api_keys：建渠道只做一次 INSERT，改与软删都只动
+//     channels 自己的列，不反过来取这两张表的行锁。
 //
 //     下面每一次「先无锁读一行」都只是快速失败：拿到锁之后会重新读、重新校验。
 //     锁序之外还剩一个窗口——定位之后新建的 key 不在我们锁住的集合里——所以
@@ -69,10 +93,10 @@ const (
 
 // 销户路径上的哨兵错误。
 //
-// 与 user.go 里那几个分开放：它们的下一步动作不同。这里的前四个是**数据不在
-// 可执行那个动作的状态上**（先看库里现在是什么、先处理余额、先打标），命令行
-// 把它们归到约束冲突（退出码 4）；最后一个是命令本身写错了（--confirm 与当前
-// 用户名对不上），归参数错（退出码 2）。
+// 与 user.go 里那几个分开放：它们的下一步动作不同。这里绝大多数是**数据不在
+// 可执行那个动作的状态上**（先看库里现在是什么、先处理余额、先打标、先清理
+// 名下资源），命令行把它们归到约束冲突（退出码 4）；最后一个是命令本身写错了
+// （--confirm 与当前用户名对不上），归参数错（退出码 2）。
 var (
 	// ErrDeletionNotRequested 表示这个账号不在「要求删除」状态，purge 或 revert
 	// 走不到。
@@ -86,6 +110,22 @@ var (
 	// 说的不只是 balance：冻结额也在判据里。冻结额是还没结算的请求预扣住的那部分，
 	// 匿名化之后它们会照常结算，而那时账号已经认不出原来的主人——钱不能这样落地。
 	ErrDeletionBalanceNotZero = errors.New("可用余额必须为 0，才能销户")
+	// ErrDeletionKeysNotRevoked 表示这个用户名下还有没吊销的 API Key。
+	//
+	// 判据是 status <> 'revoked'，不只是 active：停用（disabled）的行也拦。
+	// 行要留着，所以下一步是逐把改成 revoked，而不是删掉它们。
+	ErrDeletionKeysNotRevoked = errors.New("用户名下的 API Key 必须全部吊销，才能销户")
+	// ErrDeletionMerchantPayableNotZero 表示商户应付科目上还有没结清的分成。
+	//
+	// 与 ErrDeletionBalanceNotZero 分开：那个是用户钱包（平台欠用户的钱），
+	// 这个是商户分成（平台欠商户的钱），下一步动作也不同——一个走 wallet
+	// adjust 或等退款结算，一个走提现或等平台清算。
+	ErrDeletionMerchantPayableNotZero = errors.New("商户应付科目的余额必须为 0，才能销户")
+	// ErrDeletionChannelsNotCleared 表示这个用户名下还有没删的渠道。
+	//
+	// 渠道带着上游凭证与流量。账号销了而渠道还认着它，等于那些调用再也说不清
+	// 属于谁，所以先让操作者把渠道删掉，而不是替他把归属改掉。
+	ErrDeletionChannelsNotCleared = errors.New("用户名下的渠道必须全部删除，才能销户")
 	// ErrDeletionConfirmMismatch 表示 --confirm 给的串与账号当前的用户名不一致。
 	//
 	// 它挡的是「照着上一次的输出又敲了一遍」这类误操作：销户不可逆，确认要落在
@@ -345,10 +385,138 @@ func checkDeletionBalance(ctx context.Context, tx *sql.Tx, userID int64, usernam
 	return sumB, sumF, walletRows, nil
 }
 
+// lockDeletionMerchantPayable 按账本那把科目锁锁住这个用户的商户应付科目。
+//
+// 键必须与 ledger/store 的 lockAccount 算出来的完全一样：那边是
+// pg_advisory_xact_lock(hashtextextended(科目名, 0))，科目名取
+// MerchantPayableAccount。自己另拼一个键不会报错，只会悄悄不与账本写入排队，
+// 而那时的表现是「余额读到了一个马上被退款改掉的数」（见文件头的锁序说明）。
+func lockDeletionMerchantPayable(ctx context.Context, tx *sql.Tx, userID int64) error {
+	acct := ledger.MerchantPayableAccount(userID)
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, acct.String()); err != nil {
+		return fmt.Errorf("锁定科目 %s 失败: %w", acct, err)
+	}
+	return nil
+}
+
+// checkDeletionPreconditions 在销户事务里核对打标的三条前置条件，缺一条就拒绝。
+//
+// 三条都只读：销户**不替谁清理**——不吊销 key、不结转分成、不删渠道。缺什么就
+// 让操作者先做，这条命令只负责拒绝并点名是哪一条。
+//
+// 调用点在 api_keys 锁、商户应付科目锁、users 锁与钱包锁之后，所以三条读到的
+// 都是本事务提交前不会再变的那一版：两条计数靠行锁与 FOR UPDATE，渠道那条靠
+// owner_user_id 外键上的 KEY SHARE（依据见文件头的锁序说明）。
+func checkDeletionPreconditions(ctx context.Context, tx *sql.Tx, userID int64, username string) error {
+	if err := checkDeletionKeysRevoked(ctx, tx, userID, username); err != nil {
+		return err
+	}
+	if err := checkDeletionMerchantPayableZero(ctx, tx, userID, username); err != nil {
+		return err
+	}
+	return checkDeletionChannelsCleared(ctx, tx, userID, username)
+}
+
+// checkDeletionKeysRevoked 要求用户名下 status <> 'revoked' 的 key 为 0。
+//
+// 只看 active 不够：停用（disabled）的行也还认得出这个人，而 purge 只作废
+// active 的行，停用的那几把会原样留到终态之后。
+func checkDeletionKeysRevoked(ctx context.Context, tx *sql.Tx, userID int64, username string) error {
+	var remaining int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT count(*) FROM api_keys
+		 WHERE user_id = $1 AND status <> 'revoked'`, userID).Scan(&remaining)
+	if err != nil {
+		return fmt.Errorf("统计用户 %s 的 API Key 失败: %w", username, err)
+	}
+	if remaining == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w（账号 %s：还有 %d 把的状态不是 revoked。行要留着，先用 "+
+			"larkaxctl apikey update --id <ID> --status revoked 逐把改成 revoked；"+
+			"此前停用（disabled）的也算在内）",
+		ErrDeletionKeysNotRevoked, username, remaining)
+}
+
+// checkDeletionMerchantPayableZero 要求 merchant_payable:<用户> 在每种资产上的
+// 余额都是 0。
+//
+// 余额从分录现算，不读任何快照（这个科目本来就没有快照行）。按资产分开判：
+// 金额不能跨资产相加，而「合计看起来是 0」也可能是一边正、一边负。
+func checkDeletionMerchantPayableZero(ctx context.Context, tx *sql.Tx, userID int64, username string) error {
+	acct := ledger.MerchantPayableAccount(userID)
+	rows, err := tx.QueryContext(ctx, `
+		SELECT asset, SUM(amount)::numeric(20, 8)::text
+		  FROM ledger_entries
+		 WHERE account = $1
+		 GROUP BY asset
+		 ORDER BY asset`, acct.String())
+	if err != nil {
+		return fmt.Errorf("查询科目 %s 的余额失败: %w", acct, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var details []string
+	for rows.Next() {
+		var asset, raw string
+		if scanErr := rows.Scan(&asset, &raw); scanErr != nil {
+			return fmt.Errorf("读科目 %s 的余额失败: %w", acct, scanErr)
+		}
+		// 与钱包那一侧同一个口径：numeric 比 money 宽，放不进 int64 时报错，
+		// 不折成一个夹住的 0——那会让一次本该被拒绝的销户通过。
+		balance, parseErr := money.Parse(raw)
+		if parseErr != nil {
+			return fmt.Errorf("科目 %s 在 %s 上的余额读不出来（库里是 %q）：%w",
+				acct, asset, raw, parseErr)
+		}
+		if !balance.IsZero() {
+			details = append(details, fmt.Sprintf("%s %s", asset, balance))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("遍历科目 %s 的余额失败: %w", acct, err)
+	}
+	if len(details) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w（账号 %s：科目 %s 还欠着 %s。先用 larkaxctl wallet payout request 或 settle "+
+			"把分成结清，或等平台清算把它挪进 payout 科目——账本分录不随销户删除）",
+		ErrDeletionMerchantPayableNotZero, username, acct, strings.Join(details, "；"))
+}
+
+// checkDeletionChannelsCleared 要求用户名下没有未软删的渠道。
+//
+// 判据与 channel list 同一个口径：deleted_at IS NULL 才算「名下」。软删的行与
+// 凭证密文留着，历史账单照样按 channel_id 引用它。
+func checkDeletionChannelsCleared(ctx context.Context, tx *sql.Tx, userID int64, username string) error {
+	var remaining int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT count(*) FROM channels
+		 WHERE owner_user_id = $1 AND deleted_at IS NULL`, userID).Scan(&remaining)
+	if err != nil {
+		return fmt.Errorf("统计用户 %s 的渠道失败: %w", username, err)
+	}
+	if remaining == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w（账号 %s：还有 %d 条渠道没删。先用 larkaxctl channel delete --id <ID> "+
+			"软删它们：行与凭证密文留在库里，只是不再计入这个账号的名下）",
+		ErrDeletionChannelsNotCleared, username, remaining)
+}
+
 // RequestDeletion 打标：账号进入「要求删除」态，可撤销。
 //
-// 它**不动 api_keys**：鉴权只认 status = active，所以打标之后那些 key 已经全部
-// 失效；而它们一条都没被改过，撤销之后原样还能用。真正的作废在匿名化那一步。
+// 打标之前要求这个账号名下的东西已经清理干净：API Key 全部吊销、商户应付科目
+// 余额为 0、名下渠道都已删（判据与动作指引见三个哨兵）。缺一条就拒绝，不替谁
+// 清理——吊销 key、结转分成、删渠道都是要人先做的动作。
+//
+// 它**不动 api_keys**：打标不改任何一把 key 的状态，撤销之后它们停在打标之前的
+// 那一档（吊销是操作者自己做的，撤销不会把它改回来）。真正的作废在匿名化那一步，
+// 那一侧还会把还没作废的行一并置为 revoked，兜住打标之后才建出来的 key。
 func (s *Store) RequestDeletion(ctx context.Context, ref string) (DeletionMark, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -384,10 +552,16 @@ func (s *Store) requestDeletionOnce(ctx context.Context, ref string) (DeletionMa
 		return DeletionMark{}, err
 	}
 
-	// 锁序：api_keys → users → user_wallets（见文件头）。打标不动 key，
-	// 但这里仍要先锁它：不锁的话本事务会握着 users 去等钱包，而计费事务
-	// 可能正握着钱包等 users。
+	// 锁序：api_keys → merchant_payable 科目 → users → user_wallets（见文件头）。
+	// 打标不动 key，但这里仍要先锁它：不锁的话本事务会握着 users 去等钱包，而
+	// 计费事务可能正握着钱包等 users。
 	err = lockUserAPIKeys(ctx, tx, row.id)
+	if err != nil {
+		return DeletionMark{}, err
+	}
+	// 科目锁在 users 之前：提现那条路是「科目 → users（建单的外键）」，倒过来
+	// 放会与它撞死锁。打标要读这个科目，读完到提交之间不能有人改动它。
+	err = lockDeletionMerchantPayable(ctx, tx, row.id)
 	if err != nil {
 		return DeletionMark{}, err
 	}
@@ -413,6 +587,9 @@ func (s *Store) requestDeletionOnce(ctx context.Context, ref string) (DeletionMa
 	}
 
 	if _, _, _, err := checkDeletionBalance(ctx, tx, row.id, row.username); err != nil {
+		return DeletionMark{}, err
+	}
+	if err := checkDeletionPreconditions(ctx, tx, row.id, row.username); err != nil {
 		return DeletionMark{}, err
 	}
 
@@ -528,8 +705,9 @@ func (s *Store) RevertDeletion(ctx context.Context, ref string) (DeletionMark, e
 //
 // # 一个事务里做五件事
 //
-// 作废 key、删插件 KV、撤销采集授权、换掉身份信息、写下终态。少做一件都会留下
-// 一个「说已经销户了，而某处还认得出这人」的状态；而它们各自都不会报错。
+// 作废 key（并把备注一并清空）、删插件 KV、撤销采集授权、换掉身份信息、写下终态。
+// 少做一件都会留下一个「说已经销户了，而某处还认得出这人」的状态；而它们各自
+// 都不会报错。
 //
 // 钱包与账本**不在**这五件事里：那是财务记录，按留存规则保留
 // （见 docs/request-retention.md）。快照同样不动，它按自己的留存期由
@@ -648,6 +826,14 @@ func (s *Store) purgeDeletionOnce(ctx context.Context, ref, confirm string) (Del
 	).Scan(&result.KeysTotal)
 	if err != nil {
 		return DeletionResult{}, fmt.Errorf("统计用户 %s 的 API Key 失败: %w", row.username, err)
+	}
+
+	// 备注是用户自己写的文本，常常写成「某某的 key」。匿名化之后账号认不出来，
+	// 这一列留着就等于把身份留在库里；空串是这一列约定的「没有备注」。
+	// 已经吊销的行也要清：行都留着，备注也一样会留。
+	if _, err = tx.ExecContext(ctx,
+		`UPDATE api_keys SET name = '' WHERE user_id = $1 AND name <> ''`, row.id); err != nil {
+		return DeletionResult{}, fmt.Errorf("清空用户 %s 的 API Key 备注失败: %w", row.username, err)
 	}
 
 	res, err = tx.ExecContext(ctx, `DELETE FROM plugin_kv WHERE user_id = $1`, row.id)

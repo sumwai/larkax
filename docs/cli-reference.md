@@ -964,14 +964,27 @@ stdout 恰好一行，就是新口令，只显示这一次；其余说明走 std
 （`plugin_kv` 里属于这个用户的行随匿名化删掉）。
 
 `delete request` 打标（可撤）：把账号置为 `deletion_requested`，并记下它原来的
-状态。从这个时刻起，用户手里的 API Key 全部失效——鉴权只认 `status = active`，
-打标之后这些 key 在任何一条路上都过不去。key 一行都不改，所以 `delete revert` 之后
-原本有效的 key 恢复有效（此前停用的仍然是停用）。
+状态。打标之前要求这个账号名下已经清理干净，三条缺一条就拒绝，报错点名是哪一条、
+下一步敲什么：
 
-打标之前先看钱包：**余额与冻结额都必须是 0**。不是 0 时报「可用余额必须为 0」
-并给出当前的两个数，退出 4。冻结额也在判据里，因为它是还没结算的请求预扣住的那部分，匿名化之后
-它们仍会结算。下一步是先用 `wallet adjust` 调账，或等退款与还没结算完的请求
-处理完。
+- **API Key 全部吊销**：`api_keys` 里属于该用户、`status <> 'revoked'` 的行数为
+  0。停用（`disabled`）的也算——行要留着，用 `apikey update --id <ID> --status
+  revoked` 逐把改成 `revoked`。
+- **商户应付已结清**：`merchant_payable:<用户 ID>` 科目的余额在**每种资产上**都是
+  0，从 `ledger_entries` 的分录现算（账本是权威，不读任何快照）。下一步用
+  `wallet payout request` 或 `wallet payout settle` 把分成挪进 `payout` 科目，
+  或者等平台清算。
+- **名下渠道已清理**：`channels` 里 `owner_user_id` 是该用户且 `deleted_at IS
+  NULL` 的行数为 0。用 `channel delete --id <ID>` 软删：行与凭证密文留在库里，
+  历史账单照样按 `channel_id` 引用它。
+
+打标与匿名化还各查一次钱包：**余额与冻结额都必须是 0**。不是 0 时报「可用余额
+必须为 0」并给出当前的两个数，退出 4。冻结额也在判据里，因为它是还没结算的请求
+预扣住的那部分，匿名化之后它们仍会结算。下一步是先用 `wallet adjust` 调账，或等
+退款与还没结算完的请求处理完。
+
+打标之后账号不能再鉴权——鉴权只认 `status = active`——而 key 一行都不改：吊销是
+打标之前就要做的动作，`delete revert` 不会把已经吊销的 key 改回来。
 
 打标与匿名化还各有一道判据：**不能因此让平台失去最后一个能进管理组的账号**。
 `delete request` 打在仍为 `active` 的管理员上、`delete purge` 打在
@@ -988,8 +1001,9 @@ stdout 恰好一行，就是新口令，只显示这一次；其余说明走 std
 要 `--confirm` 逐字写出当前用户名。没有 `--confirm`、写错、或者账号还没打标时
 什么都不写。它在**一个事务里**做这几件事：
 
-- `api_keys` 里状态还是 `active` 的全部置为 `revoked`，行保留；此前已经
-  `disabled` 的保留原来的状态（「之前停用过」也是一条要留下的记录）。
+- `api_keys` 里状态还是 `active` 的全部置为 `revoked`，并把 `name` 备注清空
+  （那一列常有真名），行保留；此前已经 `disabled` 的保留原来的状态（「之前停用过」
+  也是一条要留下的记录）。
 - `plugin_kv` 里属于这个用户的键全部删除（按插件与用户隔离的那一份）。
 - `capture_consents` 里还没撤销的授权全部撤销（写 `revoked_at`），行保留；到期
   仍按各自的 `expires_at`，早已撤销的那一条不会被改写时刻。
@@ -1008,14 +1022,14 @@ stdout 恰好一行，就是新口令，只显示这一次；其余说明走 std
 
 **哪些一致性在库层、哪些只在应用层。** 库上有两条 CHECK 钉住状态与列的配套：
 `status = deleted` 必有 `deleted_at`，`status = deletion_requested` 必有
-`deletion_prior_status`。剩下的几件——终态账号的 API Key 已作废、插件 KV 已清、
-采集授权已撤销——**没有触发器**，只由 `purge` 的同一个事务保证；绕过 `purge`
-直接 `UPDATE users` 不会连带动那几张表。
+`deletion_prior_status`。剩下的几件——终态账号的 API Key 已作废且备注已清空、
+插件 KV 已清、采集授权已撤销——**没有触发器**，只由 `purge` 的同一个事务保证；
+绕过 `purge` 直接 `UPDATE users` 不会连带动那几张表。
 
 `create` / `list` / `get` / `update` 只碰 `users` 表（不碰渠道凭证）；`delete`
-那一族会写到 `api_keys`、`plugin_kv` 与 `capture_consents`，钱包只读加锁。
-除了 `plugin_kv` 里属于这个用户的行，别的行都不删。它们都不需要
-`LARKAX_MASTER_KEYS`。
+那一族会写到 `api_keys`、`plugin_kv` 与 `capture_consents`，并读钱包、`channels`
+与账本的 `merchant_payable` 科目。除了 `plugin_kv` 里属于这个用户的行，别的行都
+不删。它们都不需要 `LARKAX_MASTER_KEYS`。
 
 **用户级履约操作也挂在 `user` 下**：`user plan`、`user wallet`、`user key`、
 `user usage`。核心宾语——哪个用户、哪个套餐——写成**位置参数**，修饰项（`--ref`、
