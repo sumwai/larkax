@@ -1750,55 +1750,104 @@ type doctorEndpointSpec struct {
 	setAuth func(h http.Header, key string)
 }
 
+// doctorEndpoints 是本命令认的三个入口，按 chat → messages → responses 排。
+//
+// 合法取值、路径、请求体与凭证头放在同一张表里：查表、报错里列出的那一串、
+// 以及需要逐个拿到取值的地方，读的都是这一份。分成两处时，加第四个入口要改
+// 好几处，而漏改报错那一处没有任何东西会报出来——它看起来完全正常，只是说了
+// 一句错在自己边界上的话。
+//
+// 这张表是校验与报错的唯一来源。帮助文本里另有两处手写的枚举，都由用例钉住：
+// 短版与长版用法里的 `[--endpoint …]` 串（TestDoctorUsageMatchesEndpointTable），
+// 以及 doctorUsage 说明段里「<名字> 是 POST <path>」的逐条描述
+// （TestDoctorUsageDescribesEveryEndpoint）。手页由 usage 生成，
+// check-man-pages.sh 逐字节比对产物与来源，改完帮助要重生成；docs/ 里的那几处
+// 清单（散文段落与表格）随文档一起人工维护，不在用例覆盖内。
+//
+// 新增一个入口 = 加一条表项，并同步帮助文本里那两处；漏改时上面两条用例会红，
+// 测试里的字面量（清单、整句报错、渲染串、路径表）也会跟着红。
+var doctorEndpoints = []doctorEndpointSpec{
+	{
+		name: doctorEndpointChat,
+		path: doctorPathChat,
+		payload: func(model string) any {
+			return doctorChatRequest{
+				Model:     model,
+				MaxTokens: doctorLiveMaxTokens,
+				Messages:  []doctorChatMessage{{Role: "user", Content: doctorLivePrompt}},
+			}
+		},
+		setAuth: func(h http.Header, key string) { h.Set("Authorization", "Bearer "+key) },
+	},
+	{
+		name: doctorEndpointMessages,
+		path: doctorPathMessages,
+		payload: func(model string) any {
+			return doctorMessagesRequest{
+				Model:     model,
+				MaxTokens: doctorLiveMaxTokens,
+				Messages:  []doctorChatMessage{{Role: "user", Content: doctorLivePrompt}},
+			}
+		},
+		setAuth: func(h http.Header, key string) { h.Set("x-api-key", key) },
+	},
+	{
+		name: doctorEndpointResponses,
+		path: doctorPathResponses,
+		payload: func(model string) any {
+			return doctorResponsesRequest{
+				Model:           model,
+				Instructions:    doctorLiveInstructions,
+				Input:           []doctorResponsesInput{{Role: "user", Content: doctorLivePrompt}},
+				MaxOutputTokens: doctorLiveMaxTokens,
+			}
+		},
+		// Responses 是 OpenAI 那一套，凭证按它的习惯走 Bearer。
+		setAuth: func(h http.Header, key string) { h.Set("Authorization", "Bearer "+key) },
+	},
+}
+
+// doctorEndpointNames 是三个入口的名字，顺序与 doctorEndpoints 一致。
+//
+// 由表算出来，不另写一份：报错里那一串由 doctorEndpointChoices 取用，手写的
+// 第二份不会跟着表变。
+func doctorEndpointNames() []string {
+	names := make([]string, 0, len(doctorEndpoints))
+	for _, spec := range doctorEndpoints {
+		names = append(names, spec.name)
+	}
+	return names
+}
+
+// doctorEndpointChoices 把入口名字渲染成报错里那一串：顿号分隔，最后一项前用「或」。
+//
+// 由 doctorEndpointNames() 算出来而不是另写一份字面量：手写的那一份在清单变动
+// 之后不会跟着变，而「报错里列的还是老的那几条」没有任何东西会报出来。
+func doctorEndpointChoices() string {
+	names := doctorEndpointNames()
+	var b strings.Builder
+	for i, name := range names {
+		if i > 0 {
+			if i == len(names)-1 {
+				b.WriteString(" 或 ")
+			} else {
+				b.WriteString("、")
+			}
+		}
+		b.WriteString(name)
+	}
+	return b.String()
+}
+
 func lookupDoctorEndpoint(name string) (doctorEndpointSpec, error) {
-	switch name {
-	case doctorEndpointChat:
-		return doctorEndpointSpec{
-			name: doctorEndpointChat,
-			path: doctorPathChat,
-			payload: func(model string) any {
-				return doctorChatRequest{
-					Model:     model,
-					MaxTokens: doctorLiveMaxTokens,
-					Messages:  []doctorChatMessage{{Role: "user", Content: doctorLivePrompt}},
-				}
-			},
-			setAuth: func(h http.Header, key string) { h.Set("Authorization", "Bearer "+key) },
-		}, nil
-
-	case doctorEndpointMessages:
-		return doctorEndpointSpec{
-			name: doctorEndpointMessages,
-			path: doctorPathMessages,
-			payload: func(model string) any {
-				return doctorMessagesRequest{
-					Model:     model,
-					MaxTokens: doctorLiveMaxTokens,
-					Messages:  []doctorChatMessage{{Role: "user", Content: doctorLivePrompt}},
-				}
-			},
-			setAuth: func(h http.Header, key string) { h.Set("x-api-key", key) },
-		}, nil
-
-	case doctorEndpointResponses:
-		return doctorEndpointSpec{
-			name: doctorEndpointResponses,
-			path: doctorPathResponses,
-			payload: func(model string) any {
-				return doctorResponsesRequest{
-					Model:           model,
-					Instructions:    doctorLiveInstructions,
-					Input:           []doctorResponsesInput{{Role: "user", Content: doctorLivePrompt}},
-					MaxOutputTokens: doctorLiveMaxTokens,
-				}
-			},
-			// Responses 是 OpenAI 那一套，凭证按它的习惯走 Bearer。
-			setAuth: func(h http.Header, key string) { h.Set("Authorization", "Bearer "+key) },
-		}, nil
+	for _, spec := range doctorEndpoints {
+		if spec.name == name {
+			return spec, nil
+		}
 	}
 
-	return doctorEndpointSpec{}, fmt.Errorf("--endpoint 只能是 %s、%s 或 %s，当前为 %q",
-		doctorEndpointChat, doctorEndpointMessages, doctorEndpointResponses, name)
+	return doctorEndpointSpec{}, fmt.Errorf("--endpoint 只能是 %s，当前为 %q",
+		doctorEndpointChoices(), name)
 }
 
 // doctorChatRequest 是 chat 入口的请求体（OpenAI 形状）。
