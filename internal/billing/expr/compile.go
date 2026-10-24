@@ -306,6 +306,16 @@ var blockedBuiltins = map[string]struct{}{
 type shape struct {
 	// keys 是所有三元分支里出现过的键的并集。
 	keys map[string]struct{}
+	// binds 是 let 绑定：名字 → 绑定值所在的 AST 节点。
+	//
+	// 根位置出现一个绑定的名字（`let price = {…}; price`）时，要按它绑定的
+	// 值继续检查，否则结果是个标识符，会被误判成「不是一张单价表」。
+	// 表达式已经过类型检查，所以这里不做作用域管理：越界的名字在那一步
+	// 就是 unknown name，走不到形状检查。
+	binds map[string]ast.Node
+	// visiting 记着正在按绑定解析的名字，挡住自引用（`let a = a; a`）
+	// 把递归转成环。类型检查通常先拒掉这类写法，但不指望它。
+	visiting map[string]bool
 }
 
 // inspectShape 检查求值结果是不是「一组单价」，并收集键。
@@ -320,10 +330,15 @@ type shape struct {
 //	len <= 32000 ? {...} : {...}                                     按条件选一组单价
 //	tier("peak", {...})                                              带档位追踪的单价表
 //	{"prompt": 1.5 + (isHoliday() ? 0.5 : 0.0)}                      价格位置上的数值运算
+//	let price = {...}; price                                         let 绑定整张表
 //
 // 检查顺带把用量变量限制在条件位置上（见 pos.cond 与 usageInArithmetic）。
 func inspectShape(root ast.Node) (shape, error) {
-	sh := shape{keys: map[string]struct{}{}}
+	sh := shape{
+		keys:     map[string]struct{}{},
+		binds:    map[string]ast.Node{},
+		visiting: map[string]bool{},
+	}
 	// 从根位置开始：整条表达式的结果必须是一张单价表（或按条件选出的一张）。
 	if err := walkShape(root, &sh, pos{root: true}); err != nil {
 		return shape{}, err
@@ -531,10 +546,22 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 		// （要看出它得做一遍数据流分析）。规则作者真要绕过，直接写
 		// `let x = p * 1.5` 就行，所以拦这里的价值有限，写下来是为了让
 		// 「为什么 let 单独一个分支」有答案。
-		return walkShape(n.Value, sh, pos{})
+		if err := walkShape(n.Value, sh, pos{}); err != nil {
+			return err
+		}
+		// 先走值再登记：自引用（`let a = a; a`）在登记前就按普通标识符处理，
+		// 不会一上来就顺着绑定绕回自己。登记之后，根位置引用这个名字
+		// （`let price = {…}; price`）就按绑定的值继续检查。
+		sh.binds[n.Name] = n.Value
+		// 结果本身挂在 Expr 上（`let x = ...; <结果>`），与 SequenceNode 的
+		// 最后一项同一含义：它继承当前位置，包括 root。漏掉这一支时，
+		// `let x = 1.0; c > 100 ? {...} : {...}` 整段不过形状检查——
+		// 根位置的三元判据、用量变量的位置判据都能被一个 let 前缀绕过。
+		return walkShape(n.Expr, sh, at)
 
 	case *ast.SequenceNode:
-		// 形如 `let x = ...; {…}`。最后一个节点是结果，其余是声明与中间式。
+		// 形如 `(1.0; {…})`：最后一个节点是结果，其余是中间式。
+		// `let` 不走这里——它解析成 VariableDeclaratorNode，结果挂在 Expr 上。
 		if len(n.Nodes) == 0 {
 			return nil
 		}
@@ -564,7 +591,17 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 		// 但在**根位置**意味着结果不是一张表：
 		// `len <= 1 ? {"prompt": 1.0} : x` 的假分支正是这一形态，
 		// 而它在运行期会让最坏情况求值在 __worst 里撞上「两支形状不一致」。
+		//
+		// 例外是 let 绑定的名字：`let price = {…}; price` 的结果就是那张表，
+		// 改动之前一直是合法写法。按绑定的值、在同一个位置继续检查；
+		// visiting 挡住 `let a = a; a` 这类把递归转成环的写法。
 		if at.root {
+			if bound, ok := sh.binds[n.Value]; ok && !sh.visiting[n.Value] {
+				sh.visiting[n.Value] = true
+				err := walkShape(bound, sh, at)
+				delete(sh.visiting, n.Value)
+				return err
+			}
 			return fmt.Errorf("结果必须是一张单价表，当前是 %s", n.Value)
 		}
 		return nil
