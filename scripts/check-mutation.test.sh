@@ -646,8 +646,8 @@ else
   clone_setup=""
   if ! clone_setup=$(git -C "$clone" "${git_cfg[@]}" -c init.defaultBranch=main init -q 2>&1); then
     bad "默认锁路径 —— 临时仓库 git init 失败：$clone_setup"
-  elif ! git -C "$clone" "${git_cfg[@]}" add -A 2>/dev/null; then
-    bad "默认锁路径 —— 临时仓库 git add 失败"
+  elif ! clone_setup=$(git -C "$clone" "${git_cfg[@]}" add -A 2>&1); then
+    bad "默认锁路径 —— 临时仓库 git add 失败：$clone_setup"
   elif ! clone_setup=$(git -C "$clone" "${git_cfg[@]}" -c commit.gpgsign=false commit -q -m fixture 2>&1); then
     bad "默认锁路径 —— 临时仓库首次提交失败：$clone_setup"
   elif ! git -C "$clone" worktree add -q "$clone_wt" -b second >/dev/null 2>&1; then
@@ -759,35 +759,44 @@ fi
 #     不受影响。所以这里分开收两个流，两边都断言。
 #
 #     不在真仓库里跑，也不设 LOCK_FILE：测的正是默认值的退回路径。
+#
+#     **前提要自己钉住**：`$tmp` 必须不落在任何仓库里。TMPDIR 指到仓库内时
+#     这条会假红——更糟的是它会把外层仓库当成「工作树」，拿默认锁去碰**真实
+#     那把锁**，而那正是本单要杜绝的事。所以先探一次公共目录：探得出来就记
+#     ⊘（没测成），不判红。
 plain="$tmp/plain"
 mkdir -p "$plain/scripts" "$plain/internal/money"
-cp "$SCRIPT" "$plain/scripts/check-mutation.sh"
-printf 'package money\n' >"$plain/internal/money/money.go"
-out_plain="$tmp/plain-out.txt"
-err_plain="$tmp/plain-err.txt"
-(
-  cd "$plain" || exit 1
-  LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_ok" GREMLINS_VERSION="$PINNED" \
-    bash "$plain/scripts/check-mutation.sh" internal/money >"$out_plain" 2>"$err_plain"
-)
-rc=$?
-if [ "$rc" -eq 0 ]; then
-  ok
+if git -C "$plain" rev-parse --git-common-dir >/dev/null 2>&1; then
+  not_tested "退回工作树级 —— 临时目录落在某个仓库里（TMPDIR 指到了仓库内？），这条没测成：跑它会去碰外层仓库的那把锁"
 else
-  bad "退回工作树级 —— 应当照常跑完，实际退出码 $rc"
-  sed 's/^/    | /' "$err_plain" | tail -4
+  cp "$SCRIPT" "$plain/scripts/check-mutation.sh"
+  printf 'package money\n' >"$plain/internal/money/money.go"
+  out_plain="$tmp/plain-out.txt"
+  err_plain="$tmp/plain-err.txt"
+  (
+    cd "$plain" || exit 1
+    LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_ok" GREMLINS_VERSION="$PINNED" \
+      bash "$plain/scripts/check-mutation.sh" internal/money >"$out_plain" 2>"$err_plain"
+  )
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    ok
+  else
+    bad "退回工作树级 —— 应当照常跑完，实际退出码 $rc"
+    sed 's/^/    | /' "$err_plain" | tail -4
+  fi
+  grep -qF "锁退回工作树级：$plain/tmp/check-mutation.lock（读不出 git 公共目录）" "$err_plain" \
+    || bad "退回工作树级 —— 要在 stderr 上说清锁退到了哪一个路径"
+  if grep -q '锁退回工作树级' "$out_plain"; then
+    bad "退回工作树级 —— 这行不能出现在 stdout 上"
+  else
+    ok
+  fi
+  # 退回之后仍然是工作树级，所以这把锁照旧在 <工作树>/tmp 下——这里顺带确认
+  # 路径没被别的逻辑改掉（换机器、换 git 版本时最先悄悄变的正是它）。
+  grep -qxF "已拿到锁：$plain/tmp/check-mutation.lock" "$out_plain" \
+    || bad "退回工作树级 —— stdout 上的拿锁行应指向工作树下的 tmp/（期望「已拿到锁：$plain/tmp/check-mutation.lock」）"
 fi
-grep -qF "锁退回工作树级：$plain/tmp/check-mutation.lock（读不出 git 公共目录）" "$err_plain" \
-  || bad "退回工作树级 —— 要在 stderr 上说清锁退到了哪一个路径"
-if grep -q '锁退回工作树级' "$out_plain"; then
-  bad "退回工作树级 —— 这行不能出现在 stdout 上"
-else
-  ok
-fi
-# 退回之后仍然是工作树级，所以这把锁照旧在 <工作树>/tmp 下——这里顺带确认
-# 路径没被别的逻辑改掉（换机器、换 git 版本时最先悄悄变的正是它）。
-grep -qxF "已拿到锁：$plain/tmp/check-mutation.lock" "$out_plain" \
-  || bad "退回工作树级 —— stdout 上的拿锁行应指向工作树下的 tmp/（期望「已拿到锁：$plain/tmp/check-mutation.lock」）"
 
 # 10. gremlins 不在 PATH：要给出安装提示，而不是别的错误。
 #     用一个确定不存在的名字，避免依赖运行环境里有没有装 gremlins。
