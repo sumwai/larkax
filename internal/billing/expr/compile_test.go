@@ -227,6 +227,14 @@ func TestCompileShapeErrorsByPosition(t *testing.T) {
 		// 按条件选出的 units：两支都得是计量项表，一支是数就是量纲错。
 		{"units 条件式的真支", `{"prompt": 1.0, "units": len > 0 ? 1.5 : {"img": 0.01}}`, nil},
 		{"units 条件式的假支", `{"prompt": 1.0, "units": len > 0 ? {"img": 0.01} : 1.5}`, nil},
+		// 语句序列的中间式：只有最后一项是结果，前面的丢弃，但它们照样是
+		// 表达式，写在这个位置上的用量与写在单价里的用量是同一件事。
+		{"语句序列的中间式", `(p * 2.0; {"prompt": 1.0})`, nil},
+		{"语句序列的第二条中间式", `(1.0; p * 2.0; {"prompt": 1.0})`, nil},
+		// 两支都不含 token 项时，键集判据两边都是空集、不发声，根位置的
+		// 「结果不是一张表」只剩标识符那一段拦得住——它得自己站住。
+		{"根位置三元假支是注入常量", `len <= 1 ? {"units": {"img": 0.01}} : plan`, map[string]any{"plan": 1.0}},
+		{"根位置三元假支是 let 绑定的数", `let x = 1.0; len <= 1 ? {"units": {"img": 0.01}} : x`, nil},
 	}
 	for _, tc := range cases {
 		var err error
