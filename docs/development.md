@@ -137,6 +137,8 @@ LARKAX_INTERNAL_ADDR="127.0.0.1:8082"
 | `make clean` | 清容器、数据卷与生成的 `.env`，回到刚克隆的状态 |
 | `make init` | 只生成或同步 `.env`，不碰容器 |
 | `make check-ports` | 只查那两个监听地址有没有被占（`make run` 起服务之前会跑它） |
+| `make install` | 装两个二进制、短名链接、手页与 bash/zsh/fish 补全到 `~/.local`（`PREFIX` 可改，详见 [versioning.md](versioning.md)） |
+| `make uninstall` | 移除 `make install` 装进去的那些名字 |
 | `make help` | 把常用的那几条打出来（不含本表里的 `init` 与 `check-ports`） |
 
 `make migrate` 与 `make test` 都会先跑 `make init`——它们都要那份 DSN。
@@ -1708,9 +1710,13 @@ CI 包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`�
 非 UTC 时区下的时刻门禁（`TZ=Asia/Shanghai` 再跑一遍
 受影响的包，见 [cli-output.md](cli-output.md) 的「时刻与时区」）、契约测试（见下）。
 
-`Go` job 在单测之前装 `fish` 与 `zsh`：`sudo apt-get install -y` 之后再各打一次
-`--version` 自证装上，`set -euo pipefail` 让 apt 失败当场红；bash 不用装，
-runner 镜像自带。单测那一步设 `LARKAX_REQUIRE_COMPLETION_SHELLS=1`——补全的行为用例
+`Go` job 在单测之前装 `fish`、`zsh` 与 `bash-completion`：`sudo apt-get install -y`
+之后再各打一次 `--version` 自证装上，`set -euo pipefail` 让 apt 失败当场红；bash 自身不用装，
+runner 镜像自带。bash-completion 是 `make install` 用例要的：它靠那份脚本的按需加载证明
+「文件放在用户目录下就会被认」，没有它就只能退化到 source 装好的那一份。单测那一步设
+`LARKAX_REQUIRE_COMPLETION_SHELLS=1`——补全的行为用例
+与 `make install` 的端到端用例（`TestMakeInstallWritesShellCompletions`，它会跑一次
+真的 `make install` 再从装好的目录取候选）
 要在真 shell 里取候选，本地没装壳时可以只记一行日志放行，CI 装了壳还找不到就必须
 硬失败：装壳那一步没生效时，放行会让整条链全绿（见 [LESSONS.md](../LESSONS.md) 第 16 条）。
 

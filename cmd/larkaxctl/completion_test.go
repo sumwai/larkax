@@ -1013,12 +1013,8 @@ func runBashCompletion(t *testing.T, bash, script string, words []string, cur st
 		t.Fatalf("写补全脚本失败：%v", writeErr)
 	}
 	argv := append(append([]string{"larkaxctl"}, words...), cur)
-	quoted := make([]string, 0, len(argv))
-	for _, word := range argv {
-		quoted = append(quoted, "'"+strings.ReplaceAll(word, "'", `'\''`)+"'")
-	}
 	driver := "source \"$1\"\n" +
-		"COMP_WORDS=(" + strings.Join(quoted, " ") + ")\n" +
+		"COMP_WORDS=(" + shellQuoteAll(argv) + ")\n" +
 		"COMP_CWORD=" + strconv.Itoa(len(argv)-1) + "\n" +
 		"_larkaxctl\n" +
 		"printf '%s\\n' \"${COMPREPLY[@]}\"\n"
@@ -1047,10 +1043,6 @@ func runZshCompletion(t *testing.T, zsh, script string, words []string, cur stri
 		t.Fatalf("写补全脚本失败：%v", writeErr)
 	}
 	argv := append(append([]string{"larkaxctl"}, words...), cur)
-	quoted := make([]string, 0, len(argv))
-	for _, word := range argv {
-		quoted = append(quoted, "'"+strings.ReplaceAll(word, "'", `'\''`)+"'")
-	}
 	// 中途出错有两类，分别由两样东西兜住：
 	//   - 进程提前终止（`exit`、整段没跑到最后一行）：结尾那行标记不见了；
 	//   - 生成脚本里某条命令失败：只往 stderr 写，驱动照旧往下走、标记照旧打印。
@@ -1064,7 +1056,7 @@ func runZshCompletion(t *testing.T, zsh, script string, words []string, cur stri
 		"_files() { print -r -- \"-- " + filesStubCandidate + "\" }\n" +
 		"compdef() { : }\n" +
 		"source \"$1\"\n" +
-		"words=(" + strings.Join(quoted, " ") + ")\n" +
+		"words=(" + shellQuoteAll(argv) + ")\n" +
 		"CURRENT=" + strconv.Itoa(len(argv)) + "\n" +
 		"_larkaxctl\n" +
 		"print -r -- " + done + "\n"
