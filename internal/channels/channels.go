@@ -188,9 +188,9 @@ func (s *Source) Supplies(ctx context.Context) ([]Supply, error) {
 // 渠道编号，与整表查询按模型过滤之后的行序相同。
 //
 // 单模型页走这一条：它是公开、无会话的读点。`WHERE` 去掉了目录那一维
-// （`canonical_name` 上有唯一索引），所以成本不再随目录规模增长；渠道侧
-// 由 `channels_models_gin_idx` 支撑 `c.models @> ARRAY[…]`——命中渠道少时
-// 走位图索引扫描，模型由大量渠道在供时计划器仍可能选整表扫描。
+// （`canonical_name` 上有唯一索引），所以成本不再随目录规模增长；渠道侧的
+// `c.models @> ARRAY[…]` 由 `channels_models_gin_idx` 支撑；走不走它由计划器
+// 按成本决定——表小（开发库）或命中渠道多时可能整表扫描。
 func (s *Source) SuppliesFor(ctx context.Context, model string) ([]Supply, error) {
 	return s.querySupplies(ctx, ` WHERE m.canonical_name = $1 ORDER BY c.id`, model)
 }

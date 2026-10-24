@@ -182,8 +182,8 @@ type modelSource interface {
 //
 // Supplies 给清单，SuppliesFor 给单条模型页：后者只读这一个模型的供给行，
 // 成本不随目录规模增长；渠道侧的 `c.models @> ARRAY[…]` 由
-// `channels_models_gin_idx` 支撑——命中渠道少时走位图索引扫描，模型由大量
-// 渠道在供时计划器仍可能选整表扫描。
+// `channels_models_gin_idx` 支撑；走不走它由计划器按成本决定——表小（开发库）
+// 或命中渠道多时可能整表扫描。
 type modelSupply interface {
 	Supplies(ctx context.Context) ([]channels.Supply, error)
 	SuppliesFor(ctx context.Context, model string) ([]channels.Supply, error)
