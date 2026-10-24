@@ -32,7 +32,7 @@ const priceShortUsage = `larkaxctl price 管理计价规则。
   larkaxctl price update --id <规则 ID> --by <ID 或用户名> [与 create 相同的字段]
   larkaxctl price enable <规则 ID> | price disable <规则 ID>
   larkaxctl price explain --model <规范模型名> [--user <ID 或用户名>] [--at <…>]
-  larkaxctl price calendar import <文件> | price calendar list
+  larkaxctl price calendar import <文件> | price calendar sync [--year <年>] | price calendar list
 
 作用域决定哪两栏 id 有效；五个计价项缺一个，用到它的结算就失败；--by 必填。
 单价旗标默认按每百万 token 给（--prompt 1.5 即每百万 1.5），--unit token 可改。
@@ -71,6 +71,9 @@ const priceUsage = `larkaxctl price 管理计价规则。
   larkaxctl price calendar import <文件>
         导入某一年的日历数据（分时计价要用它判断哪天是休息日，
         文件格式见 larkaxctl price calendar --help）
+  larkaxctl price calendar sync [--year <年>]
+        从 holiday-cn 拉取一年的放假安排并写库（缺省当年；还没发布就记
+        pending，退出码 0）
   larkaxctl price calendar list
         列出导入过的年份、状态与天数
 

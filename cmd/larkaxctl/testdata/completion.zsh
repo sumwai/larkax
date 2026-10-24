@@ -910,6 +910,12 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
+		"price calendar sync|--year")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"price create|--by")
 			case "$cur" in
 			-*) ;;
@@ -2074,6 +2080,7 @@ _larkaxctl() {
 			"plugin kv get") compadd -- --env-file --format --key --plugin --quiet --user --verbose ;;
 			"plugin kv set") compadd -- --env-file --format --key --plugin --quiet --ttl --user --value --verbose ;;
 			"plugin publish") compadd -- --by --env-file --format --key --priority --quiet --verbose ;;
+			"price calendar sync") compadd -- --env-file --format --quiet --verbose --year ;;
 			"price create") compadd -- --by --cache-read --cache-write --channel --completion --disabled --effective-from --effective-to --env-file --expr --format --models --name --priority --prompt --quiet --reasoning --schedule-file --scope --unit --user --verbose ;;
 			"price explain") compadd -- --at --channel --env-file --format --model --quiet --user --verbose ;;
 			"price update") compadd -- --by --cache-read --cache-write --channel --clear-effective-to --clear-schedule --completion --disable --effective-from --effective-to --enable --env-file --expr --format --id --models --name --priority --prompt --quiet --reasoning --schedule-file --scope --unit --user --verbose ;;
@@ -2157,7 +2164,7 @@ _larkaxctl() {
 		"plugin") compadd -- list get publish enable disable delete kv ;;
 		"plugin kv") compadd -- get set delete ;;
 		"price") compadd -- create list show update enable disable explain calendar ;;
-		"price calendar") compadd -- import list ;;
+		"price calendar") compadd -- import sync list ;;
 		"secret") compadd -- rotate ;;
 		"settings") compadd -- list get set ;;
 		"snapshot") compadd -- cleanup allowlist get access-log redact ;;

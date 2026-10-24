@@ -120,8 +120,9 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from calendar create disable enable explain list show update' -a 'disable'
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from calendar create disable enable explain list show update' -a 'explain'
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from calendar create disable enable explain list show update' -a 'calendar'
-complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from calendar; and not __fish_seen_subcommand_from import list' -a 'import'
-complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from calendar; and not __fish_seen_subcommand_from import list' -a 'list'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from calendar; and not __fish_seen_subcommand_from import list sync' -a 'import'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from calendar; and not __fish_seen_subcommand_from import list sync' -a 'sync'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from calendar; and not __fish_seen_subcommand_from import list sync' -a 'list'
 complete -c larkaxctl -n '__fish_seen_subcommand_from secret; and not __fish_seen_subcommand_from rotate' -a 'rotate'
 complete -c larkaxctl -n '__fish_seen_subcommand_from settings; and not __fish_seen_subcommand_from get list set' -a 'list'
 complete -c larkaxctl -n '__fish_seen_subcommand_from settings; and not __fish_seen_subcommand_from get list set' -a 'get'
@@ -380,6 +381,7 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from plugin; and __fish_seen_su
 complete -c larkaxctl -n '__fish_seen_subcommand_from plugin; and __fish_seen_subcommand_from publish' -l by -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plugin; and __fish_seen_subcommand_from publish' -l key -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plugin; and __fish_seen_subcommand_from publish' -l priority -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from calendar; and __fish_seen_subcommand_from sync' -l year -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l by -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l cache-read -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l cache-write -r
