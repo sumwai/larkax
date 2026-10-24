@@ -249,26 +249,44 @@ func shellCasePattern(key string) string {
 // writeValuePositionFallback 写出「取值位」那一段：`$prev` 是吃取值的选项时，
 // 把补全交回给 shell 自己（bash 传 `return 0`，zsh 传 `_files; return`）。
 //
+// 每条分支里的内层 `case "$cur" in -*` 是守卫：当前词以 `-` 开头时什么都不做，
+// 落回下面那段的选项名补全。没有它，`larkaxctl --env-file -<TAB>` 一个候选都不给
+// ——敲到这里的人下一步想要的是另一个选项，不是文件名。
+//
 // 位置**不能挪**，这是本段唯一的坑：
-//   - 挪进下面 `case "$cur" in -*` 的嵌套分支：那一支只处理以 `-` 开头的当前词，
-//     而取值位上的 `$cur` 是空串或文件名，于是这一段与「没写」逐字等价——真 shell
-//     里两版输出相同，行为用例抓不到，只有生成物里那段必须在 `case "$cur"` 之前
-//     的位置断言能钉住（见 completion_test.go）。
-//   - 挪到 `case "$path"` 的动词分派之后：候选已经填进去了，再交回 shell 就变成
-//     「文件与动词并列」，顶层 `-o default` 的回落照样被压掉。
+//   - 挪到下面 `case "$cur"` 的动词分派之后：空 `$cur` 会先被填上一级命令，再交回
+//     shell 已经晚了，顶层 `-o default` 的回落照样被压掉。
+//   - 挪进 `case "$cur" in -*` 的嵌套分支：那一支只处理以 `-` 开头的当前词，空
+//     `$cur` 时它根本不执行，这一段等于没写；`$cur` 以 `-` 开头时守卫让两版一样，
+//     那一格分不出来。
+//
+// 两种放法在行为用例覆盖的那几格（`--env-file`、`--schedule-file`）上真 shell 里都
+// 看得见，但行为用例只覆盖那几格：生成器漏掉某一条键时，别的位置静默退回动词分派，
+// 补出来的是一级命令。所以 completion_test.go 另有一条位置断言，按 valueOptionKeys
+// 逐条钉住「在顶层 `case "$cur"` 之前、恰好一份」。
 func writeValuePositionFallback(b *strings.Builder, data completionData, action string) {
 	b.WriteString("\tcase \"$path|$prev\" in\n")
 	for _, key := range valueOptionKeys(data) {
-		fmt.Fprintf(b, "\t\t%s) %s ;;\n", shellCasePattern(key), action)
+		writeValuePositionBranch(b, shellCasePattern(key), action)
 	}
 	// 全局选项对每条命令都生效，路径用 `*` 通配，写法与全局枚举那一支相同：
 	// `*` 不引号才是通配符，`|--env-file` 必须引号（否则 `|` 是多模式分隔符）。
 	names := slices.Clone(globalValueFlags)
 	slices.Sort(names)
 	for _, name := range names {
-		fmt.Fprintf(b, "\t\t%s) %s ;;\n", "*"+shellCasePattern("|"+name), action)
+		writeValuePositionBranch(b, "*"+shellCasePattern("|"+name), action)
 	}
 	b.WriteString("\tesac\n\n")
+}
+
+// writeValuePositionBranch 写出一条取值位分支：守卫 + 两壳各自的动作。
+func writeValuePositionBranch(b *strings.Builder, pattern, action string) {
+	fmt.Fprintf(b, "\t\t%s)\n", pattern)
+	b.WriteString("\t\t\tcase \"$cur\" in\n")
+	b.WriteString("\t\t\t-*) ;;\n")
+	fmt.Fprintf(b, "\t\t\t*) %s ;;\n", action)
+	b.WriteString("\t\t\tesac\n")
+	b.WriteString("\t\t\t;;\n")
 }
 
 // wordPaths 是 words 的键，按字典序且空路径排在最前面（它是顶层那一支）。
