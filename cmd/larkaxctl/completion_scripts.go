@@ -171,8 +171,9 @@ func fishCompletionScript(data completionData) string {
 	// 都没有；判定版给 43 条（27 条一级命令 + 那 16 条），集合严格包含这一版。
 	// `larkaxctl foo `（拼错的命令）上判定版更糟——给 0 条，这一版给 27 条。
 	// 不选判定版，是因为要在生成物里多写一段依赖 `commandline -poc` 语义的 shell
-	// 代码（引号、`--opt=value`、短选项都得自己处理），而这两格都是边缘输入；
-	// 一行条件换那一段，划得来。
+	// 代码：`--opt=value` 是一个词元，得自己拆；`-o` / `-format` / `--o` 这些等价
+	// 写法也得认得（见 format.go 的 isFormatFlag）。而这两格都是边缘输入，一行
+	// 条件换那一段，划得来。
 	topCondition := fishTopLevelCondition(data.commands)
 	for _, command := range data.commands {
 		fmt.Fprintf(&b, "complete -c larkaxctl -n %s -a %s",
@@ -247,9 +248,8 @@ func fishCompletionScript(data completionData) string {
 // fishTopLevelCondition 是一级命令共享的 `-n` 条件：命令行里还没出现一级命令名
 // 时补一级命令。
 //
-// 命令名从 data.commands 取，与 `-a` 行同一来源，不另抄一份清单——两处分家时，
-// Tab 里的一级命令与条件认的一级命令会对不上，而两种错法都只在真 shell 里
-// 看得出来。
+// 命令名从 data.commands 取，与 `-a` 行同一来源，不另抄一份清单——两者分家时，
+// 用户侧的表现是 Tab 里少一条，或者敲了那条命令之后还在补一级命令。
 func fishTopLevelCondition(commands []completionCommand) string {
 	names := make([]string, 0, len(commands))
 	for _, command := range commands {

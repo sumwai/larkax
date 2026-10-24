@@ -845,13 +845,19 @@ func requireRegisteredTopLevel(t *testing.T, shell string, got []string) {
 func requireFishNamedValueBoundary(t *testing.T, got []string) {
 	t.Helper()
 	if len(got) != 16 {
-		t.Errorf("候选 %d 条（%v），期望 16 条：取值被当成子命令，应当只剩 channel 那一级的候选",
-			len(got), got)
+		t.Errorf("候选 %d 条（%s），期望 16 条：取值被当成子命令，应当只剩 channel 那一级的候选",
+			len(got), samplePatterns(got))
 	}
+	// 命中的名字收齐了打一条：逐个打会把整份候选清单重复二十多遍，结论淹掉。
+	var named []string
 	for _, name := range registeredTopLevelNames() {
 		if slices.Contains(got, name) {
-			t.Errorf("候选 = %v，出现了注册表里的一级命令名 %q：这一格不该给一级命令", got, name)
+			named = append(named, name)
 		}
+	}
+	if len(named) > 0 {
+		t.Errorf("候选里出现了 %d 条一级命令名：%s；这一格不该给一级命令",
+			len(named), samplePatterns(named))
 	}
 }
 
