@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pressly/goose/v3"
 
 	"github.com/sumwai/larkax/internal/migrate"
@@ -819,5 +820,170 @@ func TestChannelsModelsGINMigration(t *testing.T) {
 	if method != "gin" || table != "channels" || column != "models" {
 		t.Errorf("第二次前进之后索引 = %s on %s(%s)，期望 gin on channels(models)",
 			method, table, column)
+	}
+}
+
+// paymentOrdersGatewayTxnMigration 是给通道流水号加部分唯一索引的那条迁移。
+const paymentOrdersGatewayTxnMigration = "00064_payment_orders_gateway_txn_unique.sql"
+
+// paymentOrdersGatewayTxnIndex 是那条迁移建出来的索引名。
+//
+// 这里写的是字面量而不是从别处引用：这是迁移文件里那一行的期望值，从被测代码
+// 取就等于把同一个错误抄两遍。internal/payment 的翻译逻辑认的也是这个名字，
+// 两边分叉时那一边的用例会红。
+const paymentOrdersGatewayTxnIndex = "payment_orders_gateway_txn_uniq_idx"
+
+// TestPaymentOrdersGatewayTxnUniqueMigration 钉住这条迁移的四件事：
+// 同一通道的重复流水号插不进第二行、两行空流水号能并存、索引的形状与
+// 被删掉的那条普通索引、以及 down / up 往返。
+//
+// # 为什么要断言约束名而不是只断 23505
+//
+// 23505 只说明「某个唯一约束被违反」：`order_no` 上那条唯一键也回 23505。
+// 只断错误码的话，把唯一性建到别的列上、或者那条索引压根没建，用例照样可能
+// 因为单号撞上而变绿（见 internal/catalog/admin.go 里对同一件事的说明）。
+//
+// 没有 LARKAX_DB_DSN 时跳过（见 testdb.Open），CI 的集成测试门禁里会跑。
+func TestPaymentOrdersGatewayTxnUniqueMigration(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	version, versionErr := goose.NumericComponent(paymentOrdersGatewayTxnMigration)
+	if versionErr != nil {
+		t.Fatalf("从迁移文件名读版本号失败: %v", versionErr)
+	}
+	previous := version - 1
+
+	goose.SetBaseFS(migrate.FS())
+	if err := migrate.SetDialect("postgres"); err != nil {
+		t.Fatalf("设置方言失败: %v", err)
+	}
+	up := func() {
+		t.Helper()
+		if err := goose.UpContext(ctx, db, "."); err != nil {
+			t.Fatalf("前进到最新失败: %v", err)
+		}
+	}
+	// down 退到本迁移的前一条。号再往后加时，它会把后面那些迁移一并撤掉；
+	// 收尾那次 up 会把库推回最新，所以用例仍然成立。
+	down := func() {
+		t.Helper()
+		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
+			t.Fatalf("回滚到 %d 失败: %v", previous, err)
+		}
+	}
+
+	// 收尾：先清掉本用例插的行，再把库推回最新。中途红掉时若留着重复行，
+	// 收尾那一步重建唯一索引会失败，本包别的用例就被留在旧结构上了。
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(),
+			`DELETE FROM payment_orders WHERE order_no LIKE 'ORD-797-%'`)
+		if err := goose.UpContext(context.Background(), db, "."); err != nil {
+			t.Logf("收尾时前进失败（库可能已经不在旧版本上）：%v", err)
+		}
+	})
+
+	const userID = int64(797001)
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO users (id, username, email) VALUES ($1, $2, $3)`,
+		userID, "migrate797", "migrate797@example.com"); err != nil {
+		t.Fatalf("建用户失败: %v", err)
+	}
+	// insert 落一行支付单。txn 为 nil 表示这一列写 NULL。
+	insert := func(orderNo string, txn any) error {
+		t.Helper()
+		_, err := db.ExecContext(ctx, `
+			INSERT INTO payment_orders (order_no, user_id, gateway, amount, gateway_txn_id)
+			VALUES ($1, $2, 'stub', 66, $3)`, orderNo, userID, txn)
+		return err
+	}
+
+	up()
+
+	// 1. 同一个 (gateway, gateway_txn_id) 插不进第二行，且撞的是这条索引。
+	if err := insert("ORD-797-DUP-1", "TXN-797-DUP"); err != nil {
+		t.Fatalf("第一行重复流水号的支付单写不进去: %v", err)
+	}
+	dupErr := insert("ORD-797-DUP-2", "TXN-797-DUP")
+	var pgErr *pgconn.PgError
+	if !errors.As(dupErr, &pgErr) {
+		t.Fatalf("第二行同流水号的插入错误 = %v，期望一个 PostgreSQL 错误（23505）", dupErr)
+	}
+	if pgErr.Code != "23505" {
+		t.Errorf("第二行同流水号的插入错误码 = %q，期望 23505", pgErr.Code)
+	}
+	if pgErr.ConstraintName != paymentOrdersGatewayTxnIndex {
+		t.Errorf("撞的约束 = %q，期望 %q", pgErr.ConstraintName, paymentOrdersGatewayTxnIndex)
+	}
+
+	// 2. 两行空流水号能并存：部分索引不覆盖 gateway_txn_id IS NULL 的行。
+	if err := insert("ORD-797-NULL-1", nil); err != nil {
+		t.Fatalf("第一行空流水号写不进去: %v", err)
+	}
+	if err := insert("ORD-797-NULL-2", nil); err != nil {
+		t.Errorf("第二行空流水号应当能与第一行并存，实际写不进去: %v", err)
+	}
+
+	// 3. 索引的形状：唯一、带条件、列顺序是 (gateway, gateway_txn_id)；
+	// 同时确认 00001 里那条同列的普通索引已经被删掉。
+	var unique, hasPredicate bool
+	var first, second string
+	if err := db.QueryRowContext(ctx, `
+		SELECT i.indisunique, i.indpred IS NOT NULL,
+		       (SELECT attname FROM pg_attribute
+		         WHERE attrelid = i.indrelid AND attnum = i.indkey[0]),
+		       (SELECT attname FROM pg_attribute
+		         WHERE attrelid = i.indrelid AND attnum = i.indkey[1])
+		  FROM pg_index i
+		  JOIN pg_class c ON c.oid = i.indexrelid
+		 WHERE c.relname = $1`, paymentOrdersGatewayTxnIndex).
+		Scan(&unique, &hasPredicate, &first, &second); err != nil {
+		t.Fatalf("读索引 %s 的定义失败: %v", paymentOrdersGatewayTxnIndex, err)
+	}
+	if !unique {
+		t.Errorf("%s 不是唯一索引", paymentOrdersGatewayTxnIndex)
+	}
+	if !hasPredicate {
+		t.Errorf("%s 没有 WHERE 条件——那样空流水号的行会互相排斥", paymentOrdersGatewayTxnIndex)
+	}
+	if first != "gateway" || second != "gateway_txn_id" {
+		t.Errorf("%s 的列 = (%s, %s)，期望 (gateway, gateway_txn_id)",
+			paymentOrdersGatewayTxnIndex, first, second)
+	}
+	var oldIndex sql.NullString
+	if err := db.QueryRowContext(ctx,
+		`SELECT to_regclass('payment_orders_gateway_idx')::text`).Scan(&oldIndex); err != nil {
+		t.Fatalf("查旧索引是否存在失败: %v", err)
+	}
+	if oldIndex.Valid {
+		t.Errorf("payment_orders_gateway_idx 还在：同列的普通索引应当随这条迁移删掉")
+	}
+
+	// 4. 退到前一条：新索引消失，旧索引回来；再前进一次，两者对调。
+	down()
+	var newIndex sql.NullString
+	if err := db.QueryRowContext(ctx,
+		`SELECT to_regclass($1)::text`, paymentOrdersGatewayTxnIndex).Scan(&newIndex); err != nil {
+		t.Fatalf("查新索引是否存在失败: %v", err)
+	}
+	if newIndex.Valid {
+		t.Errorf("回滚之后 %s 还在", paymentOrdersGatewayTxnIndex)
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT to_regclass('payment_orders_gateway_idx')::text`).Scan(&oldIndex); err != nil {
+		t.Fatalf("查旧索引是否存在失败: %v", err)
+	}
+	if !oldIndex.Valid {
+		t.Errorf("回滚之后 payment_orders_gateway_idx 没有回来")
+	}
+
+	// 两行空流水号在回滚之后仍然并存，前进时不会挡住重建唯一的索引。
+	up()
+	if err := db.QueryRowContext(ctx,
+		`SELECT to_regclass($1)::text`, paymentOrdersGatewayTxnIndex).Scan(&newIndex); err != nil {
+		t.Fatalf("查新索引是否存在失败: %v", err)
+	}
+	if !newIndex.Valid {
+		t.Errorf("第二次前进之后 %s 不存在", paymentOrdersGatewayTxnIndex)
 	}
 }
