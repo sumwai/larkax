@@ -90,6 +90,9 @@ func TestCallbackErrorMapping(t *testing.T) {
 		{"通知不合法", fmt.Errorf("%w：缺少 sign", ErrInvalidNotification), http.StatusBadRequest},
 		{"没有这张支付单", fmt.Errorf("%w: ORD-X", ErrOrderNotFound), http.StatusNotFound},
 		{"单号内容不同", fmt.Errorf("%w: ORD-X", ErrOrderConflict), http.StatusConflict},
+		{"流水号已被另一张单占用", &GatewayTxnConflictError{
+			OrderNo: "ORD-B", Gateway: stubName, GatewayTxnID: "TRADE-X", OtherOrderNo: "ORD-A",
+		}, http.StatusConflict},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,6 +107,30 @@ func TestCallbackErrorMapping(t *testing.T) {
 				t.Errorf("响应体不是错误体: %s", rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestCallbackGatewayTxnConflictBody 验 409 的说明里点得出两张单。
+//
+// 状态码对只说明「拒了」，而这条冲突要人去核两张单：响应体里得写出当前单号、
+// 流水号与对方单号，否则通道那一侧的运营只看到一句「冲突」。
+func TestCallbackGatewayTxnConflictBody(t *testing.T) {
+	h := NewHandler(nil, stubName, "")
+	err := &GatewayTxnConflictError{
+		OrderNo: "ORD-B", Gateway: stubName, GatewayTxnID: "TRADE-X", OtherOrderNo: "ORD-A",
+	}
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+		CallbackPath(stubName), nil)
+	rec := httptest.NewRecorder()
+	h.writeServiceError(rec, req, err)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("状态码 = %d，期望 409（响应体 %s）", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{"ORD-A", "ORD-B", "TRADE-X"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("响应体里应当出现 %q：%s", want, rec.Body.String())
+		}
 	}
 }
 

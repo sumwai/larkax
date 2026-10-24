@@ -169,6 +169,10 @@ type NotificationResult struct {
 //
 // 早先的写法在持有支付单事务时另开一个事务写账本，一条通知占两条连接；并发
 // 通知数超过连接池容量时，所有连接都握着第一条去等第二条，整池停摆。
+//
+// 两张不同的单争同一个通道流水号时，撞的是 payment_orders 上的部分唯一索引
+// （00064）。错误返回会让整个事务回滚，所以两张单的状态与流水号都不变；那
+// 一层约束是必须的——单号上的锁只把同一张单的通知串起来，挡不住两张单并发。
 func (s *Service) Notify(ctx context.Context, channelName string, n Notification) (NotificationResult, error) {
 	channel, err := s.channel(channelName)
 	if err != nil {
@@ -192,7 +196,7 @@ func (s *Service) Notify(ctx context.Context, channelName string, n Notification
 		return notifyErr
 	})
 	if err != nil {
-		return NotificationResult{}, err
+		return NotificationResult{}, s.orders.annotateGatewayTxnConflict(ctx, err)
 	}
 	return result, nil
 }
@@ -266,7 +270,7 @@ func (s *Service) notifyLocked(ctx context.Context, channel Channel, n Notificat
 	}
 
 	if order.Status == StatusCreated {
-		changed, markErr := locked.MarkPaid(ctx, order.OrderNo, n.GatewayTxnID, n.Raw, n.PaidAt, n.Fee)
+		changed, markErr := locked.MarkPaid(ctx, order.OrderNo, order.Gateway, n.GatewayTxnID, n.Raw, n.PaidAt, n.Fee)
 		if markErr != nil {
 			return NotificationResult{}, markErr
 		}

@@ -197,6 +197,43 @@ var ErrOrderNotFound = errors.New("没有这张支付单")
 // 下一步也不同——前者先看下单那条命令，后者先看库里这一单原来是什么。
 var ErrOrderConflict = errors.New("支付单已存在且内容不同")
 
+// ErrGatewayTxnConflict 表示这笔通道流水号已经记在另一张支付单上。
+//
+// 与 ErrOrderConflict 分开：那一条说的是同一个单号下内容对不上，这一条说的是
+// 两张不同的单争同一个流水号。两者都回 409，但下一步不同——前者先看下单参数，
+// 后者要人工核这两张单：多半是通道重号，或者通知发错了单号。
+var ErrGatewayTxnConflict = errors.New("通道流水号已经记在另一张支付单上")
+
+// GatewayTxnConflictError 是 ErrGatewayTxnConflict 的落库形态，带上争用的
+// 流水号与两张单的单号：排障的人第一眼就该知道要看哪两行。
+type GatewayTxnConflictError struct {
+	// OrderNo 是这次要入账、被拒的那张单。
+	OrderNo string
+	// Gateway 是这张单所属的通道。流水号只在同一个通道内判重，所以光有号码
+	// 分不出是同一条通道重号还是两家通道各给了同一个号。
+	Gateway string
+	// GatewayTxnID 是两张单争的那个流水号。
+	GatewayTxnID string
+	// OtherOrderNo 是已经记下这个流水号的那张单。撞约束之后那一次补读没读到时
+	// 为空（见 Store.annotateGatewayTxnConflict）。
+	OtherOrderNo string
+}
+
+// Error 把两张单、通道与流水号连成一句。
+//
+// 认不出另一张单时只说「另一张」，不猜一个单号：猜错比说得含糊更坏。
+func (e *GatewayTxnConflictError) Error() string {
+	if e.OtherOrderNo != "" {
+		return fmt.Sprintf("%v：通道 %s 上支付单 %s 的流水号 %s 已经记在支付单 %s 上",
+			ErrGatewayTxnConflict, e.Gateway, e.OrderNo, e.GatewayTxnID, e.OtherOrderNo)
+	}
+	return fmt.Sprintf("%v：通道 %s 上支付单 %s 的流水号 %s 已经记在另一张支付单上",
+		ErrGatewayTxnConflict, e.Gateway, e.OrderNo, e.GatewayTxnID)
+}
+
+// Unwrap 让 errors.Is(err, ErrGatewayTxnConflict) 成立。
+func (e *GatewayTxnConflictError) Unwrap() error { return ErrGatewayTxnConflict }
+
 // ErrBadSignature 表示通知的签名对不上。
 //
 // 它是**拒绝**，不是「再试一次」：签名不对说明这份通知不是通道发的，重试
@@ -265,6 +302,11 @@ func validateCreateOrder(req CreateOrderRequest) error {
 }
 
 // validateNotification 检查通知里本包自己要用到的那几项。
+//
+// 已支付通知**不要求**带 GatewayTxnID：空串经 nullString 落成 NULL，而
+// (gateway, gateway_txn_id) 那条部分唯一索引不含 NULL 行。也就是说，真实通道
+// 在已支付通知里漏给流水号时，这条唯一性不会生效（也不会报错）。这是当前取舍
+// 的边界，不是缺陷：有的通道付完款也不给号。
 func validateNotification(n Notification) error {
 	if n.OrderNo == "" {
 		return fmt.Errorf("%w：缺少商户单号", ErrInvalidNotification)

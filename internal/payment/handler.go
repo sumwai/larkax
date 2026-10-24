@@ -116,6 +116,13 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, r *http.Request, err 
 		writeCallbackError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, ErrOrderConflict):
 		writeCallbackError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrGatewayTxnConflict):
+		// 也是 409：两份通知本身都合法，只是这一笔流水号已经记在另一张单上，
+		// 重发不会让它变得可处理。与上一条分开，是因为下一步不同——那一条看
+		// 下单参数，这一条要人工核这两张单。记一条日志：它不该出现，通道正常
+		// 不会把同一个流水号发给两张单。
+		observe.FromContext(r.Context()).Error("支付回调的通道流水号冲突", "err", err)
+		writeCallbackError(w, http.StatusConflict, err.Error())
 	default:
 		observe.FromContext(r.Context()).Error("处理支付通知失败", "err", err)
 		writeCallbackError(w, http.StatusInternalServerError, "failed to process payment notification")
