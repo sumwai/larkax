@@ -39,8 +39,8 @@ curl -sS 127.0.0.1:8080/v1/models -H "Authorization: Bearer $KEY"
 
 A fresh instance has no models, channels, prices or keys, so that call answers `401`
 until a key exists. The walkthrough that creates all five — model, channel, outbound
-mapping, price, wallet, key — lives in
-[docs/development.md](docs/development.md#一次跑通) and is the only copy of those steps.
+mapping, price, wallet, key — is in [QUICKSTART.md](QUICKSTART.md); the long form with
+the reasoning behind each step is [docs/development.md](docs/development.md) (Chinese).
 
 The command output is Chinese today. Commands, exit codes and printed values are stable;
 the prose around them is not translated yet.

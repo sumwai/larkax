@@ -30,7 +30,7 @@ docker run --rm -p 8080:8080 \
 curl -sS 127.0.0.1:8080/v1/models -H "Authorization: Bearer $KEY"
 ```
 
-全新实例尚未配置模型、渠道、价格和 key，因此上述请求会返回 `401`。配置模型、渠道、出站映射、价格、钱包和 key 的完整步骤记录在 [docs/development.md](docs/development.md#一次跑通)，仓库内仅维护这一处说明。
+全新实例尚未配置模型、渠道、价格和 key，因此上述请求会返回 `401`。配置模型、渠道、出站映射、价格、钱包和 key 的完整步骤记录在 [docs/development.md](docs/development.md#一次跑通)，仓库内仅维护这一处说明；英文版步骤见 [QUICKSTART.md](QUICKSTART.md)。
 
 命令行提示信息目前为中文。命令、退出码与打印的值均已稳定，但周边的说明文字尚未翻译为英文。
 
