@@ -328,13 +328,14 @@ type holidayCNDaySource struct {
 //	synced          | 覆盖，0          | 不写，0，打一行说明      | 不写，非 0
 //	conflict        | 覆盖，0          | 不写，0                  | 不写，非 0
 //
-// 每一格都由下面的代码显式回答。synced 与 conflict 那两格「不写」是同一个
-// 理由：Import 会先删掉这一年原有的行，而单源的 pending 或一次拉取失败，都
-// 不该把一份已经有定论的数据降级。
+// 每一格都由下面的代码显式回答。「有定论」指 synced 与 conflict——两者都是
+// 这一年已经有结果；无记录、pending、degraded 则还没有结果，它们之间可以互相
+// 覆盖。synced 与 conflict 那两格「不写」是同一个理由：Import 会先删掉这一年
+// 原有的行，而单源的 pending 或一次拉取失败，都不该把一份已经有结果的数据降级。
 //
-// conflict 按 synced 同样处理是**暂定**：conflict 表示两个源对不上、这一年
-// 还没有定论，严格说它不像 synced 那样该被保护；但把它降成单源的 pending
-// 等于丢掉「两源不一致」这个事实。这一格等评审结论，定下来之前维持现状。
+// conflict 与 synced 同等保护：两源对不上也是一条结论，把它降成单源的 pending
+// 等于丢掉「两源不一致」这个事实，而那正是下一次人工核对该找的东西。反方向是
+// 允许的：一次成功且一致的拉取可以把 conflict 改写成 synced（「覆盖」那一列）。
 func runPriceCalendarSync(args []string) error {
 	if err := jsonUnsupported("price calendar sync"); err != nil {
 		return err
@@ -422,7 +423,8 @@ func runPriceCalendarSync(args []string) error {
 // calendarYearHasVerdict 报告库里这一年是不是已经有定论。
 //
 // 有定论的年份不允许被单源的 pending 或一次拉取失败降级——那两条路都会先删掉
-// 这一年原有的行。conflict 一并算作有定论是暂定，见状态机表下的注释。
+// 这一年原有的行。「有定论」的取值见 runPriceCalendarSync 上面的状态机表：synced
+// 与 conflict 都算，无记录 / pending / degraded 不算。
 func calendarYearHasVerdict(state calendar.YearState) bool {
 	return state == calendar.YearSynced || state == calendar.YearConflict
 }
