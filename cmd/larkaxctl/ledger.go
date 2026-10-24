@@ -637,19 +637,19 @@ func printLedgerRuns(w io.Writer, runs []store.ReconcileRun, more bool) {
 
 	tw := newTableWriter(w)
 	p := newPalette(w)
-	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 		p.bold("run_id"), p.bold("开始"), p.bold("状态"), p.bold("范围"), p.bold("起点"),
 		p.bold("比对"), p.bold("余额差"), p.bold("冻结差"), p.bold("畸形科目"),
-		p.bold("陈旧预留"), p.bold("面值差"), p.bold("修复"))
+		p.bold("陈旧预留"), p.bold("面值差"), p.bold("低于下界"), p.bold("修复"))
 	for _, r := range runs {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
 			p.bold(strconv.FormatInt(r.ID, 10)),
 			p.dim(r.StartedAt.Format(longStampLayout)),
 			r.Status, scanScopeCell(r.FullScan),
 			p.dim(r.Watermark.Format(longStampLayout)),
 			r.CheckedWallets, r.BalanceMismatches, r.FrozenMismatches,
 			r.MalformedAccounts, r.StaleReservations, r.PlanFaceShortfalls,
-			r.Repaired)
+			r.AccountBelowFloors, r.Repaired)
 	}
 	_ = tw.Flush()
 	printTruncatedListNote(w, more, len(runs))
@@ -685,6 +685,7 @@ func ledgerRunsDoc(runs []store.ReconcileRun, more bool, limit int) map[string]a
 			"malformed_accounts":   r.MalformedAccounts,
 			"stale_reservations":   r.StaleReservations,
 			"plan_face_shortfalls": r.PlanFaceShortfalls,
+			"account_below_floors": r.AccountBelowFloors,
 			"status":               r.Status,
 			"error":                nullableString(r.Error.String),
 		})

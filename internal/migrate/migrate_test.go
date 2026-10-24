@@ -1105,3 +1105,111 @@ func TestPlanCarryoverMigrationRoundtrip(t *testing.T) {
 		t.Error("再次前进之后四列应当回来")
 	}
 }
+
+// accountBelowFloorMigration 是科目余额下界那条迁移。
+const accountBelowFloorMigration = "00066_account_below_floor.sql"
+
+// 00066 的上下往返：kind 取值与运行记录上的计数列跟着走。
+//
+// 回滚那一侧有一条**守卫**要一起验：down 先把用了新 kind 的 findings 删掉，
+// 再把旧约束加回去。少了那个 DELETE，约束加不回去（库里的行不满足新的取值
+// 集合），down 直接失败——而「回滚失败」与「回滚成功」在只看版本号的时候
+// 长得一模一样。
+func TestAccountBelowFloorMigrationRoundtrip(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	version, err := goose.NumericComponent(accountBelowFloorMigration)
+	if err != nil {
+		t.Fatalf("从迁移文件名读版本号失败: %v", err)
+	}
+	previous := version - 1
+
+	goose.SetBaseFS(migrate.FS())
+	if err := migrate.SetDialect("postgres"); err != nil {
+		t.Fatalf("设置方言失败: %v", err)
+	}
+
+	up := func() {
+		t.Helper()
+		if err := goose.UpContext(ctx, db, "."); err != nil {
+			t.Fatalf("前进到最新失败: %v", err)
+		}
+	}
+	down := func() {
+		t.Helper()
+		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
+			t.Fatalf("回滚到 %d 失败: %v", previous, err)
+		}
+	}
+
+	// 用例中途红掉会把库停在回滚态，本包之后的所有用例都会跟着红——收尾必须
+	// 把版本推回最新。
+	t.Cleanup(func() {
+		if err := goose.UpContext(context.Background(), db, "."); err != nil {
+			t.Errorf("收尾时把库推回最新失败: %v", err)
+		}
+	})
+
+	hasColumn := func() bool {
+		t.Helper()
+		var exists bool
+		if err := db.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				 WHERE table_name = 'reconcile_runs'
+				   AND column_name = 'account_below_floors')`).Scan(&exists); err != nil {
+			t.Fatalf("查列是否存在失败: %v", err)
+		}
+		return exists
+	}
+
+	// findings 的 last_run_id 有外键指向 reconcile_runs，先写一行当目标。
+	var runID int64
+	if err := db.QueryRowContext(ctx,
+		`INSERT INTO reconcile_runs (watermark) VALUES (now()) RETURNING id`).Scan(&runID); err != nil {
+		t.Fatalf("写运行记录失败: %v", err)
+	}
+	// 写一条新 kind 的 finding：约束放行就成功，不放行就报错。
+	insertFinding := func() error {
+		_, insertErr := db.ExecContext(ctx, `
+			INSERT INTO reconcile_findings (scope, kind, last_run_id)
+			VALUES ('floor:carryover:1', 'account_below_floor', $1)`, runID)
+		return insertErr
+	}
+	deleteFindings := func() {
+		t.Helper()
+		if _, err := db.ExecContext(ctx,
+			`DELETE FROM reconcile_findings WHERE kind = 'account_below_floor'`); err != nil {
+			t.Fatalf("清理试写的 finding 失败: %v", err)
+		}
+	}
+
+	// 1. 前进态：列在、新 kind 放行。
+	if !hasColumn() {
+		t.Error("迁移之后 reconcile_runs 缺列 account_below_floors")
+	}
+	if err := insertFinding(); err != nil {
+		t.Errorf("迁移之后 account_below_floor 应被约束放行: %v", err)
+	}
+
+	// 2. 回滚态：down 把这一类 finding 删掉，列没了，旧约束拒绝新 kind。
+	down()
+	if hasColumn() {
+		t.Error("回滚之后 reconcile_runs 仍有列 account_below_floors")
+	}
+	if err := insertFinding(); err == nil {
+		t.Error("回滚之后 account_below_floor 应被旧约束拒绝")
+		deleteFindings()
+	}
+
+	// 3. 再前进：列与取值都回来。
+	up()
+	if !hasColumn() {
+		t.Error("再次前进之后 account_below_floors 应当回来")
+	}
+	if err := insertFinding(); err != nil {
+		t.Errorf("再次前进之后 account_below_floor 应被放行: %v", err)
+	}
+	deleteFindings()
+}
