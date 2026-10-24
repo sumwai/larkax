@@ -950,16 +950,16 @@ func TestPriceCalendarSyncWritesSyncedYear(t *testing.T) {
 // --year 缺省走 calendarSyncNow：命令层也要钉住这条接线，而不只是测 syncYear
 // 那个纯函数——把 run 里的 syncTargetYear 换回 time.Now() 时，纯函数用例照绿。
 //
-// 时刻取 UTC 的 12-31 16:00：按机器本地时区是 2025 年，按 CN 时区已经是次年
-// 1 月 1 日 00:00。所以请求的路径是 /2026.json，不是 /2025.json。
+// 时刻取 UTC 的 12-31 16:00：按机器本地时区是 2030 年，按 CN 时区已经是次年
+// 1 月 1 日 00:00。所以请求的路径是 /2031.json，不是 /2030.json。
 func TestPriceCalendarSyncDefaultsToRegionCurrentYear(t *testing.T) {
 	requireDB(t)
 	setupEnv(t)
-	const year = 2026
+	const year = 2031
 	resetCalendarYear(t, year)
 
 	saved := calendarSyncNow
-	calendarSyncNow = func() time.Time { return time.Date(2025, 12, 31, 16, 0, 0, 0, time.UTC) }
+	calendarSyncNow = func() time.Time { return time.Date(2030, 12, 31, 16, 0, 0, 0, time.UTC) }
 	t.Cleanup(func() { calendarSyncNow = saved })
 
 	var requested string
@@ -973,8 +973,8 @@ func TestPriceCalendarSyncDefaultsToRegionCurrentYear(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("缺省年份同步失败: %v", err)
 	}
-	if requested != "/2026.json" {
-		t.Errorf("请求的路径 = %q，期望 /2026.json（按 CN 时区跨年）", requested)
+	if requested != "/2031.json" {
+		t.Errorf("请求的路径 = %q，期望 /2031.json（按 CN 时区跨年）", requested)
 	}
 	if row := readCalendarYear(t, year); row.status != "pending" {
 		t.Errorf("status = %q，期望 pending", row.status)
@@ -1147,5 +1147,143 @@ func TestPriceCalendarSyncLeavesSyncedYearUntouched(t *testing.T) {
 	}
 	if n := countCalendarYearDays(t, year); n != beforeDays {
 		t.Errorf("数据行数从 %d 变成了 %d", beforeDays, n)
+	}
+}
+
+// 数据源说「这一年还没发布」时，已经有定论的年份必须原样留着。
+//
+// 404 与 200 空 days 走到的是同一条路：fetchCalendarDocument 都返回一份 pending
+// 文档，而 Import 会先删掉这一年原有的行。漏判这两格，整年的判定会被清空，状态
+// 却变成看上去完全正常的 pending——list 看不出异常，计价规则从那一天起整年失败。
+func TestPriceCalendarSyncKeepsSyncedYearWhenSourceSaysUnpublished(t *testing.T) {
+	requireDB(t)
+	setupEnv(t)
+
+	cases := []struct {
+		name   string
+		year   int
+		second http.HandlerFunc
+	}{
+		{
+			name: "404",
+			year: 2451,
+			second: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+			},
+		},
+		{
+			name: "空 days",
+			year: 2453,
+			second: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(holidayCNTestBody(t, 2453, nil)))
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetCalendarYear(t, tc.year)
+
+			// 先同步成功，造出一份有定论的数据。
+			body := holidayCNTestBody(t, tc.year, []string{"https://example.com/notice"},
+				holidayCNDayJSON("元旦", fmt.Sprintf("%d-01-01", tc.year), true))
+			withHolidayCNServer(t, func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(body))
+			})
+			if err := runCaptured(t, func() error {
+				return runPriceCalendar([]string{"sync", "--year", strconv.Itoa(tc.year)})
+			}); err != nil {
+				t.Fatalf("造前置数据失败: %v", err)
+			}
+			firstOfYear := fmt.Sprintf("%d-01-01", tc.year)
+			before := readCalendarYear(t, tc.year)
+			beforeDays := countCalendarYearDays(t, tc.year)
+			beforeName, beforeOff, beforeMakeup, beforeSource := readCalendarDay(t, firstOfYear)
+			if before.status != "synced" || beforeDays != 365 {
+				t.Fatalf("前置条件不成立：status=%q 天数=%d", before.status, beforeDays)
+			}
+
+			// 第二次：数据源表示这一年还没发布。
+			withHolidayCNServer(t, tc.second)
+			var syncErr error
+			stdout, _ := captureStreams(t, func() {
+				syncErr = runPriceCalendar([]string{"sync", "--year", strconv.Itoa(tc.year)})
+			})
+			if syncErr != nil {
+				t.Fatalf("数据源说未发布不该让命令失败: %v", syncErr)
+			}
+			if !strings.Contains(stdout, "未发布") || !strings.Contains(stdout, strconv.Itoa(tc.year)) {
+				t.Errorf("stdout 里没有说明这一格: %q", stdout)
+			}
+
+			after := readCalendarYear(t, tc.year)
+			if after.status != before.status || after.dayCount != before.dayCount ||
+				after.lastError != before.lastError || len(after.papers) != len(before.papers) {
+				t.Errorf("已有定论的年份被改动了：before=%+v after=%+v", before, after)
+			}
+			if !after.syncedAt.Equal(before.syncedAt) {
+				t.Errorf("已有定论的年份被重写了一次：synced_at %v → %v", before.syncedAt, after.syncedAt)
+			}
+			if n := countCalendarYearDays(t, tc.year); n != beforeDays {
+				t.Errorf("数据行数从 %d 变成了 %d", beforeDays, n)
+			}
+			afterName, afterOff, afterMakeup, afterSource := readCalendarDay(t, firstOfYear)
+			if afterName != beforeName || afterOff != beforeOff ||
+				afterMakeup != beforeMakeup || afterSource != beforeSource {
+				t.Errorf("1 月 1 日的行被改动了：before=(%q,%v,%v,%q) after=(%q,%v,%v,%q)",
+					beforeName, beforeOff, beforeMakeup, beforeSource,
+					afterName, afterOff, afterMakeup, afterSource)
+			}
+		})
+	}
+}
+
+// 拉回来的是数据时照常覆盖：修「已有定论不许降级」不能把同步本身也挡掉。
+//
+// 期望值写成字面量（365 天、普通工作日、国庆节），不调判定器从喂进去的数据反推。
+func TestPriceCalendarSyncOverwritesSyncedYearWithNewData(t *testing.T) {
+	requireDB(t)
+	setupEnv(t)
+	const year = 2454
+	resetCalendarYear(t, year)
+
+	first := holidayCNTestBody(t, year, []string{"https://example.com/old"},
+		holidayCNDayJSON("元旦", fmt.Sprintf("%d-01-01", year), true))
+	withHolidayCNServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(first))
+	})
+	if err := runCaptured(t, func() error {
+		return runPriceCalendar([]string{"sync", "--year", strconv.Itoa(year)})
+	}); err != nil {
+		t.Fatalf("第一次同步失败: %v", err)
+	}
+
+	second := holidayCNTestBody(t, year, []string{"https://example.com/new"},
+		holidayCNDayJSON("国庆节", fmt.Sprintf("%d-10-01", year), true))
+	withHolidayCNServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(second))
+	})
+	if err := runCaptured(t, func() error {
+		return runPriceCalendar([]string{"sync", "--year", strconv.Itoa(year)})
+	}); err != nil {
+		t.Fatalf("第二次同步失败: %v", err)
+	}
+
+	row := readCalendarYear(t, year)
+	if row.status != "synced" || row.dayCount != 365 {
+		t.Errorf("年份状态 = %+v，期望 synced / 365 天", row)
+	}
+	if len(row.papers) != 1 || row.papers[0] != "https://example.com/new" {
+		t.Errorf("公告地址 = %v，期望只留第二份的 new", row.papers)
+	}
+	if n := countCalendarYearDays(t, year); n != 365 {
+		t.Errorf("数据行数 = %d，期望 365", n)
+	}
+	name, off, makeup, _ := readCalendarDay(t, fmt.Sprintf("%d-01-01", year))
+	if name != "" || off || makeup {
+		t.Errorf("1 月 1 日 = (%q,off=%v,makeup=%v)，期望普通工作日（覆盖没发生）", name, off, makeup)
+	}
+	name, off, _, _ = readCalendarDay(t, fmt.Sprintf("%d-10-01", year))
+	if name != "国庆节" || !off {
+		t.Errorf("10 月 1 日 = (%q,off=%v)，期望 国庆节 / 放假", name, off)
 	}
 }
