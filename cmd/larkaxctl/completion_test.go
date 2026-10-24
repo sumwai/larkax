@@ -293,7 +293,7 @@ func TestFishCompletionMarksValueFlags(t *testing.T) {
 	}{
 		{
 			name: "吃取值的选项带 -r",
-			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l schedule-file -r",
+			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l schedule-file -r",
 			want: true,
 		},
 		{
@@ -302,7 +302,7 @@ func TestFishCompletionMarksValueFlags(t *testing.T) {
 			// `--schedule-file` 走 fs.String。两个入口各钉一格，否则把
 			// takesValue 改坏时只有走 fs.String 的那一格会红。
 			name: "经 flag.Value 注册的选项也带 -r",
-			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from create' -l model -r",
+			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from alias; and __fish_seen_subcommand_from create' -l model -r",
 			want: true,
 		},
 		{
@@ -312,7 +312,7 @@ func TestFishCompletionMarksValueFlags(t *testing.T) {
 		},
 		{
 			name: "布尔开关（--all）也不带 -r",
-			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from balance' -l all",
+			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from ledger; and __fish_seen_subcommand_from balance' -l all",
 			want: true,
 		},
 		{
@@ -491,7 +491,7 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 		// 取值恰好等于一级命令名，也就是 docs/cli-reference.md 的 completion 一节
 		// 写明的边界，按 shell 分行断：
 		//   - fish 按「词里有没有一级命令名」判断，那个词被当成子命令，候选退成
-		//     channel 那一级的 16 条，一条一级命令都没有；
+		//     channel 那一级的动作，一条一级命令都没有；
 		//   - bash 与 zsh 的路径在第一个以 `-` 开头的词处停，路径是空的，给的还是
 		//     那 27 条一级命令。
 		// 两种结果都来自既有规则，不是本次改动引入的。fish 这一格是已知边界，
@@ -576,6 +576,151 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestFishMultiSegmentConditions 钉住 fish 多段路径的条件：每一段都出现过才成立。
+//
+// fishSeenCondition 曾把各段用空格隔开的 `and` 连起来，而 fish 只在命令分隔位置
+// 把 `and` 当连接符；整串于是成了 `__fish_seen_subcommand_from` 的参数，判定退化
+// 成「任一段出现过」，深层路径的动作漏到父层——`channel map` 的 `add` / `remove`
+// 出现在 `channel ` 那一级（见 #1182）。分隔符改成 `; and ` 后，父层只剩自己的
+// 动作；子层不变，仍然带着父层动作——父层动作留在子层见 #1183：本单不改它，
+// 这里的断言钉的是修完后的现状，不是意图。
+//
+// 期望从 completionActionTable 与注册表独立派生（见 fishExpectedCandidates），
+// 不读生成物：从生成物取期望等于把同一个错误抄两遍。fish 的 `complete -C` 按
+// 字典序返回候选，比较前两边都排序。
+func TestFishMultiSegmentConditions(t *testing.T) {
+	fish, ok := requireCompletionShell(t, "fish")
+	if !ok {
+		return
+	}
+	script := fishCompletionScript(buildCompletionData())
+	cells := [][]string{
+		nil, // 一级命令：改前改后同为注册表那一份，作为对照
+		{"channel"}, {"channel", "map"},
+		{"model"}, {"model", "alias"},
+		{"price"}, {"price", "calendar"},
+		{"admin"}, {"admin", "token"},
+		{"user"}, {"user", "plan"}, {"user", "plan", "order"},
+		{"wallet"}, {"wallet", "payout"},
+	}
+	for _, words := range cells {
+		name := "动作: 顶层"
+		if len(words) > 0 {
+			name = "动作: " + strings.Join(words, " ") + " "
+		}
+		t.Run(name, func(t *testing.T) {
+			got := runFishCompletion(t, fish, script, words, "")
+			gotCmp := slices.Clone(got)
+			slices.Sort(gotCmp)
+			want := fishExpectedCandidates(words)
+			if !slices.Equal(gotCmp, want) {
+				t.Errorf("`larkaxctl %s` 的候选 = %v，期望 %v（按动作表派生）",
+					strings.Join(words, " "), got, want)
+			}
+		})
+	}
+}
+
+// fishExpectedCandidates 按动作表独立派生某一格应当出现的候选。
+//
+// fish 的路径条件是「每一段都在命令行里出现过」，所以期望是动作表里所有「每一段
+// 都已出现」的路径的动作并集；一级命令那一格没有路径，条件是「还没出现过一级
+// 命令名」，另算。只从 completionActionTable 与注册表取，不读生成物。
+func fishExpectedCandidates(words []string) []string {
+	seen := make(map[string]bool, len(words))
+	for _, word := range words {
+		seen[word] = true
+	}
+	var want []string
+	for path, verbs := range completionActionTable {
+		matched := true
+		for _, token := range strings.Fields(path) {
+			if !seen[token] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			want = append(want, verbs...)
+		}
+	}
+	topLevelSeen := false
+	for _, name := range registeredTopLevelNames() {
+		if seen[name] {
+			topLevelSeen = true
+			break
+		}
+	}
+	if !topLevelSeen {
+		want = append(want, registeredTopLevelNames()...)
+	}
+	slices.Sort(want)
+	return slices.Compact(want)
+}
+
+// TestFishOptionPositionConditions 钉住同一处条件在选项位上的表现。
+//
+// 选项行与动作行用的是同一个 fishSeenCondition，所以那条「任一段出现过」的退化
+// 在选项位更明显：`model alias -` 修前有 30 条候选，`model create`、`model alias
+// create` 这些路径的选项全漏了进来；修后只剩全局选项（这条路径自己没有选项）。
+// `alias resolve -` 修前 9 条、修后 6 条，其中 `--channel` / `--model` 是 alias
+// resolve 自己注册的，必须还在——少了就说明修过了头。
+//
+// 期望同样从注册表派生（见 fishExpectedOptions），不读生成物。
+func TestFishOptionPositionConditions(t *testing.T) {
+	fish, ok := requireCompletionShell(t, "fish")
+	if !ok {
+		return
+	}
+	data := buildCompletionData()
+	script := fishCompletionScript(data)
+	cells := [][]string{
+		{"model", "alias"},
+		{"alias", "resolve"},
+		{"channel"},
+		{"price", "calendar"},
+	}
+	for _, words := range cells {
+		t.Run("选项: "+strings.Join(words, " ")+" -", func(t *testing.T) {
+			got := runFishCompletion(t, fish, script, words, "-")
+			gotCmp := slices.Clone(got)
+			slices.Sort(gotCmp)
+			want := fishExpectedOptions(data, words)
+			if !slices.Equal(gotCmp, want) {
+				t.Errorf("`larkaxctl %s -` 的候选 = %v，期望 %v（按注册表派生）",
+					strings.Join(words, " "), got, want)
+			}
+		})
+	}
+}
+
+// fishExpectedOptions 按注册表独立派生选项位上应当出现的候选。
+//
+// 与 fishExpectedCandidates 同一条规则：每段都出现过的路径，它的自有选项都算数；
+// 全局选项无条件补，与路径无关。只从 data.flags 与 usageNotes 的全局选项一节取。
+func fishExpectedOptions(data completionData, words []string) []string {
+	seen := make(map[string]bool, len(words))
+	for _, word := range words {
+		seen[word] = true
+	}
+	var want []string
+	for _, path := range flaggedPaths(data) {
+		matched := true
+		for _, token := range strings.Fields(path) {
+			if !seen[token] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			want = append(want, ownOptionNames(data, path)...)
+		}
+	}
+	want = append(want, globalOptionNames()...)
+	slices.Sort(want)
+	return slices.Compact(want)
 }
 
 // requireEnumCandidates 断言候选恰是枚举的取值。
@@ -833,31 +978,18 @@ func requireRegisteredTopLevel(t *testing.T, shell string, got []string) {
 
 // requireFishNamedValueBoundary 钉住 fish 在「取值恰好是命令名」那一格的边界。
 //
-// 断两件事：候选恰好 16 条，且其中没有一条是注册表里的一级命令名。动词本身不
-// 写死，也不从 `larkaxctl channel ` 那格的输出取期望——那是拿被测物自己当期望，
-// 生成器多补一条错候选时两边一起变。16 这个数随注册表走：新增一个 channel 动作
-// 时这条会红，提醒把文档里的边界一起改。
-//
-// 16 而不是 14：`add` / `remove` 来自 `channel map` 那条路径。fishSeenCondition
-// 把多段条件拼成 `A and B`，而 fish 把 `and` 当参数而不是关键字，一条
-// `__fish_seen_subcommand_from a and __fish_seen_subcommand_from b` 实际是「a 与 b
-// 里出现任意一个」，深层路径的条件在父层恒真。这是既有缺陷，不属本次改动。
+// `--env-file channel ` 里的 `channel` 被 fish 当成子命令，一级命令「还没出现过
+// 命令名」的条件因此不成立，候选退成 channel 那一级的动作；取值本身照常生效。
+// 期望从动作表独立派生（见 fishExpectedCandidates），不写死条数：新增一个
+// channel 动作时期望跟着变，不会出现「数字对、动词错」这种假绿。
 func requireFishNamedValueBoundary(t *testing.T, got []string) {
 	t.Helper()
-	if len(got) != 16 {
-		t.Errorf("候选 %d 条（%s），期望 16 条：取值被当成子命令，应当只剩 channel 那一级的候选",
-			len(got), samplePatterns(got))
-	}
-	// 命中的名字收齐了打一条：逐个打会把整份候选清单重复二十多遍，结论淹掉。
-	var named []string
-	for _, name := range registeredTopLevelNames() {
-		if slices.Contains(got, name) {
-			named = append(named, name)
-		}
-	}
-	if len(named) > 0 {
-		t.Errorf("候选里出现了 %d 条一级命令名：%s；这一格不该给一级命令",
-			len(named), samplePatterns(named))
+	want := fishExpectedCandidates([]string{"--env-file", "channel"})
+	gotCmp := slices.Clone(got)
+	slices.Sort(gotCmp)
+	if !slices.Equal(gotCmp, want) {
+		t.Errorf("候选 = %v，期望 channel 那一级的动作 %v：取值被当成子命令，应当只剩 channel 的动作",
+			got, want)
 	}
 }
 
