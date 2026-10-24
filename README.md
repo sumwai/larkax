@@ -23,6 +23,13 @@ Prerequisites: Go 1.26 or newer, Docker with `docker compose` v2.1 or newer, `ma
 **The command output is Chinese today.** The commands, exit codes and printed values are
 stable; the prose around them is not translated yet.
 
+To use the two CLIs without `go run`, `make install` puts `larkax` and `larkaxctl` under
+`~/.local/bin`, with `lax` / `laxctl` as short names, the man pages under
+`~/.local/share/man`, and the bash / zsh / fish completions in the directories each shell
+looks in; `PREFIX` moves all of it. The quickstart below keeps `go run` so it works
+without changing `PATH` — see [docs/versioning.md](docs/versioning.md) for the install
+layout.
+
 ```sh
 git clone https://github.com/sumwai/larkax
 cd larkax

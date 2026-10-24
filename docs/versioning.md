@@ -119,7 +119,7 @@ Anthropic 格式同理。这条不能混。
 
 一次 tag 发布（`v*`）带三样东西：每个平台一个二进制包、一份控制台包、一份镜像。
 
-## 二进制包
+### 二进制包
 
 每个平台一个 tar.gz，名字形如 `larkax_v0.1.0_linux_amd64.tar.gz`。解开是一个与包同名
 的目录，里面是：
@@ -138,7 +138,7 @@ MANPATH=larkax_v0.1.0_linux_amd64/man man larkaxctl-channel
 
 在源码树里翻的写法见 [cli-reference.md](cli-reference.md)。
 
-## 控制台包
+### 控制台包
 
 `larkax-web_v0.1.0.tar.gz` 里是一个与包同名的目录，里面是 `dist/`（Vite 产物：
 `index.html`、`assets/` 与其它静态文件）和 `LICENSE`。把这个目录指给服务的
@@ -147,7 +147,7 @@ MANPATH=larkax_v0.1.0_linux_amd64/man man larkaxctl-channel
 
 `LARKAX_WEB_DIR` 留空时公开监听只提供 API，其余路径照旧回 `501`。
 
-## 镜像
+### 镜像
 
 ```sh
 docker pull ghcr.io/sumwai/larkax:v0.1.0
@@ -166,7 +166,7 @@ docker run --rm -p 8080:8080 \
 - **不需要单独的镜像仓库账号**：推送用工作流自带的 `GITHUB_TOKEN`（`packages: write`）。
   第一次发布后这个包默认是私有的，要在包的设置里手动改成公开；否则拉取要 `docker login`。
 
-## 校验和
+### 校验和
 
 `SHA256SUMS` 与所有 tarball 一起挂在 Release 上，核对用
 `sha256sum -c --ignore-missing SHA256SUMS`：只下自己那几份时，`--ignore-missing`
@@ -193,6 +193,53 @@ tag——二进制自称 `dev` 这件事，只有用户报问题时才会被发�
 演示数据——那一查是唯一会响的地方。
 
 两个目标配方用的是 GNU tar 的那几个选项，macOS 自带的 bsdtar 不认。
+
+## 从源码树安装
+
+`make install` 把两个二进制装进 `~/.local/bin`，同时建两个短名链接，把
+`man/man1/` 下的手页装进去，并按各 shell 的约定装好三个补全文件：
+
+```sh
+make install                       # 默认装到 ~/.local，版本号是 dev
+make install PREFIX=/usr/local      # 换落点
+make install VERSION=v0.1.0         # 打上版本号，与 make dist 同一份注入规则
+make install ALIASES=""             # 只要两个二进制，不建短名链接
+make uninstall                      # 删掉上面装进去的那些名字
+```
+
+落点由 `PREFIX` 派生：`BINDIR` 是 `$(PREFIX)/bin`，`MANDIR` 是
+`$(PREFIX)/share/man/man1`。补全各自走那个 shell 认的目录：
+
+| shell | 文件 | 那个 shell 怎么找到它 |
+|---|---|---|
+| bash | `$(PREFIX)/share/bash-completion/completions/larkaxctl` | bash-completion 2 读 `$XDG_DATA_HOME/bash-completion/completions/`，`PREFIX=~/.local` 正好对应 |
+| fish | `$(PREFIX)/share/fish/vendor_completions.d/larkaxctl.fish` | fish 读 `$XDG_DATA_HOME/fish/vendor_completions.d/`，同上 |
+| zsh | `$(PREFIX)/share/zsh/site-functions/_larkaxctl` | zsh 没有这种目录约定，这个路径不在默认 `fpath` 里 |
+
+zsh 那一行要在 `compinit` 之前把目录加进 `fpath`，否则补全不会生效：
+
+```sh
+fpath=(~/.local/share/zsh/site-functions $fpath)   # 写进 zsh 的启动文件（zshrc），在 compinit 之前
+```
+
+三个补全文件由刚装好的二进制现场生成（`larkaxctl completion <shell>`），仓库里
+不存静态副本：副本会与命令注册表分叉。生成物为空时 `make install` 直接失败——
+空脚本能被所有 shell 无错加载，而它一条候选也不给。
+
+短名链接是 `laxctl` → `larkaxctl`、`lax` → `larkax`。用符号链接而不是 shell
+`alias`：一份覆盖所有 shell 与非交互脚本，也不必往任何 rc 文件里写字。两个
+CLI 的帮助文本里写死了 `larkaxctl`，不读 `argv[0]`，所以改名不会把用法说明改坏。
+补全只针对 `larkaxctl`：`laxctl` 是同一个二进制的另一个名字，但 shell 的补全按
+命令名登记，别名下按 Tab 不会命中那一份。
+
+装进去之前会先执行一次 `--version` 比对，与 `make dist` 的 `VERIFY_EXEC` 同一个
+思路：版本注入失手时二进制照样能跑，唯一的差别是自称 `dev`。`install` 构建的是
+本机架构，所以这里没有「架构不同，跳过校验」那一支。
+
+与 tarball 的分工：tarball 是发布物，带 `SHA256SUMS`，装到哪台机器上属于使用方
+的事；`make install` 面向从源码树直接用的场景——版本号默认是 `dev`，没有校验和，
+也没有 `LICENSE` 与 `README.md`。手页装了之后 `man larkaxctl-channel` 才有内容，
+`man` 不认 `~/.local/share/man` 时用 `MANPATH=~/.local/share/man` 指过去。
 
 ## 版本号出现在哪里
 
