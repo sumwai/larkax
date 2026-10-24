@@ -614,6 +614,134 @@ else
 fi
 wait "$dead" 2>/dev/null
 
+# 9c. 默认锁路径是**克隆级**的（#1152）：同一克隆的两棵工作树要解析出同一个路径。
+#
+#     原先默认值取 `$PWD`，而每棵树各有自己的 `$PWD`，于是同一克隆里两个变异实例
+#     各拿各的锁、并行跑同一批集成用例：包级固定库名时不只是慢，而是互相删表；
+#     超时也会凭空变多，而超时与「这一轮真的受了干扰」在输出里长得一样。
+#
+#     断言两边**逐字相等**，且等于 `git rev-parse --git-common-dir` 推出来的那个
+#     路径。只断言「两边相等」不够：两个都落回 `$PWD/tmp/…`（即旧的坏值）时也相等，
+#     而那正是这条用例要挡住的回归。
+#
+#     自建临时仓库加 `git worktree`，不依赖调用自测的这棵树有没有 `.git`：门禁镜像
+#     用 rsync 同步、排除 `.git`，在真仓库里跑这条会变成「没测成」（理由同第 34 条）。
+#
+#     **不设 LOCK_FILE**：覆盖路径会绕开这里要测的默认值逻辑。
+clone_ready=0
+clone="$tmp/clone"
+clone_wt="$tmp/clone-wt"
+if ! command -v git >/dev/null 2>&1; then
+  bad "默认锁路径 —— 找不到 git，这条用例无法验证"
+else
+  # 临时仓库里的身份与 gpg 签名都用 -c 显式给：这台机器上没有全局 git 身份，
+  # 而 commit 失败会变成另一种「没测成」。
+  git_cfg=(-c user.name=larkax-test -c user.email=user@example.com)
+  mkdir -p "$clone/scripts" "$clone/internal/money"
+  cp "$SCRIPT" "$clone/scripts/check-mutation.sh"
+  printf 'package money\n' >"$clone/internal/money/money.go"
+  git -C "$clone" "${git_cfg[@]}" -c init.defaultBranch=main init -q
+  git -C "$clone" "${git_cfg[@]}" add -A
+  git -C "$clone" "${git_cfg[@]}" -c commit.gpgsign=false commit -q -m fixture
+  if ! git -C "$clone" worktree add -q "$clone_wt" -b second >/dev/null 2>&1; then
+    bad "默认锁路径 —— 建不出第二个工作树（git worktree add 失败）"
+  else
+    clone_ready=1
+    out_lock_main="$tmp/default-lock-main.txt"
+    out_lock_wt="$tmp/default-lock-wt.txt"
+    LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_ok" GREMLINS_VERSION="$PINNED" \
+      bash "$clone/scripts/check-mutation.sh" internal/money >"$out_lock_main" 2>&1
+    rc_main=$?
+    LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_ok" GREMLINS_VERSION="$PINNED" \
+      bash "$clone_wt/scripts/check-mutation.sh" internal/money >"$out_lock_wt" 2>&1
+    rc_wt=$?
+    lock_main=$(sed -n 's/^已拿到锁：//p' "$out_lock_main" | head -n 1)
+    lock_wt=$(sed -n 's/^已拿到锁：//p' "$out_lock_wt" | head -n 1)
+    if [ "$rc_main" -eq 0 ] && [ "$rc_wt" -eq 0 ]; then
+      ok
+    else
+      bad "默认锁路径 —— 两棵树里都应正常跑完，实际主树 $rc_main、第二棵树 $rc_wt"
+      sed 's/^/    | /' "$out_lock_main" | tail -4
+      sed 's/^/    | /' "$out_lock_wt" | tail -4
+    fi
+    if [ "$lock_main" = "$lock_wt" ] && [ -n "$lock_main" ]; then
+      ok
+    else
+      bad "默认锁路径 —— 两棵树应解析出同一个路径：主树「$lock_main」，第二棵树「$lock_wt」"
+    fi
+    # 与 `git rev-parse --git-common-dir` 逐字对齐：上面那一条只保证「两边一样」，
+    # 两边一起落在工作树下的 tmp/（旧的坏值）也同样「一样」。
+    common_dir=$(git -C "$clone" rev-parse --git-common-dir 2>/dev/null)
+    case "$common_dir" in
+      /*) ;;
+      *) common_dir="$clone/$common_dir" ;;
+    esac
+    common_dir=$(cd "$common_dir" && pwd -P)
+    lock_expected="$common_dir/tmp/check-mutation.lock"
+    if [ "$lock_main" = "$lock_expected" ]; then
+      ok
+    else
+      bad "默认锁路径 —— 应等于 git rev-parse --git-common-dir 推出来的那个：期望「$lock_expected」，实际「$lock_main」"
+    fi
+  fi
+fi
+
+# 9d. 默认路径下同一克隆的两棵树互斥（#1152）：第一个持锁时第二个必须被挡。
+#
+#     与第 9 条的差别只在锁从哪来：这一条**不设 LOCK_FILE**，测的正是默认路径
+#     落到同一把锁上。第二个实例用快桩件——锁若真的坏了，它跑完就退出，用例不会
+#     卡在慢桩件上；再断言它一次都没调到 gremlins，「没有并行跑」于是有两层证据
+#     （退得出来，且没干活）。
+#
+#     失败文案在这里逐字比对，且期望值里带的是**克隆一级**的路径：文案原先只是
+#     「另一个实例正在跑（锁：…）」，改默认值后路径会变成公共目录下的那一个，
+#     读者据此就能找到那把锁。
+if [ "$clone_ready" -ne 1 ]; then
+  not_tested "同一克隆的两棵树互斥 —— 临时仓库没建起来，这条没测成"
+else
+  stub_clone_slow="$tmp/gremlins-clone-slow"
+  stub_clone_fast="$tmp/gremlins-clone-fast"
+  make_gremlins_blocking "$stub_clone_slow"
+  make_gremlins "$stub_clone_fast" 5 2 0 "71.43%"
+  release_clone="$tmp/clone-release"
+  rm -f "$release_clone"
+  out_clone1="$tmp/clone1.txt"
+  out_clone2="$tmp/clone2.txt"
+  args_clone2="$tmp/clone2-args.txt"
+  : >"$args_clone2"
+  (
+    RELEASE_FILE="$release_clone" LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_clone_slow" \
+      GREMLINS_VERSION="$PINNED" bash "$clone/scripts/check-mutation.sh" internal/money >"$out_clone1" 2>&1
+  ) &
+  bg=$!
+  if wait_lock_held "$out_clone1" "$bg" 60; then
+    GREMLINS_ARGS_LOG="$args_clone2" LARKAX_DB_DSN="$testdsn" GREMLINS="$stub_clone_fast" \
+      GREMLINS_VERSION="$PINNED" bash "$clone_wt/scripts/check-mutation.sh" internal/money >"$out_clone2" 2>&1
+    rc2=$?
+    : >"$release_clone"        # 放行第一个实例
+    wait "$bg"
+    rc1=$?
+    if [ "$rc2" -eq 3 ]; then ok; else bad "另一棵树里的第二个实例 —— 应拒绝执行（退出码 3），实际 $rc2"; sed 's/^/    | /' "$out_clone2" | tail -6; fi
+    if [ "$rc1" -eq 0 ]; then ok; else bad "先发的那棵树 —— 应正常跑完，实际 $rc1"; sed 's/^/    | /' "$out_clone1" | tail -6; fi
+    if [ -s "$args_clone2" ]; then
+      bad "另一棵树里的第二个实例 —— 被挡住就不该调用 gremlins（收到：$(cat "$args_clone2")）"
+    else
+      ok
+    fi
+    grep -qxF "另一个实例正在跑（锁：$lock_expected），本次未执行。" "$out_clone2" \
+      || bad "第二个实例 —— 失败文案第一行要逐字不变，且写的是克隆级锁路径（期望「另一个实例正在跑（锁：$lock_expected），本次未执行。」）"
+    grep -qxF '并行会让超时判据失真：gremlins 的超时按墙钟算，而基准是串行测出来的，' "$out_clone2" \
+      || bad "第二个实例 —— 失败文案第二行要逐字不变"
+    grep -qxF '两个实例一起跑时被判超时的变异会凭空变多（见本文件开头与 LESSONS 第 15 条）。' "$out_clone2" \
+      || bad "第二个实例 —— 失败文案第三行要逐字不变"
+  else
+    : >"$release_clone"
+    wait "$bg"
+    rc1=$?
+    not_tested "同一克隆的两棵树互斥 —— 没能观察到锁被持有（第一个实例退出码 $rc1）。这次没测成，不能据此判断锁是好是坏。"
+  fi
+fi
+
 # 10. gremlins 不在 PATH：要给出安装提示，而不是别的错误。
 #     用一个确定不存在的名字，避免依赖运行环境里有没有装 gremlins。
 GREMLINS="gremlins-not-installed-$$" LOCK_FILE="$tmp/lock10" \
@@ -1432,12 +1560,11 @@ else
   printf 'package money\n' >"$gitroot/internal/money/rate.go"
   printf 'package money\n' >"$gitroot/internal/money/money_test.go"
 
-  # 身份与 gpg 签名都用 -c 显式给：这台机器上没有全局 git 身份，
-  # 而 commit 失败会变成另一种「没测成」。
-  git_user=(-c user.name=larkax-test -c user.email=user@example.com)
-  git -C "$gitroot" "${git_user[@]}" -c init.defaultBranch=main init -q
-  git -C "$gitroot" "${git_user[@]}" add -A
-  git -C "$gitroot" "${git_user[@]}" -c commit.gpgsign=false commit -q -m fixture
+  # 身份与 gpg 签名都用 -c 显式给（与第 9c 条共用同一份 git_cfg）：这台机器上
+  # 没有全局 git 身份，而 commit 失败会变成另一种「没测成」。
+  git -C "$gitroot" "${git_cfg[@]}" -c init.defaultBranch=main init -q
+  git -C "$gitroot" "${git_cfg[@]}" add -A
+  git -C "$gitroot" "${git_cfg[@]}" -c commit.gpgsign=false commit -q -m fixture
 
   # 已跟踪的改动与未跟踪的新文件各一个，两条都要进清单。
   printf 'package money\n\n// changed\n' >"$gitroot/internal/money/money.go"

@@ -199,7 +199,8 @@
 #
 # 环境变量：GREMLINS（可执行文件，默认 gremlins）、COEF、WORKERS、
 # PROGRESS_EVERY（每完成多少个变异体打一行进度，默认 20；0 表示不打）、
-# LOCK_FILE（锁文件路径，默认 <仓库根>/tmp/check-mutation.lock）、
+# LOCK_FILE（锁文件路径，默认 <克隆的 git 公共目录>/tmp/check-mutation.lock；
+# 不在 git 仓库里时退回 <工作树根>/tmp/check-mutation.lock）、
 # GREMLINS_VERSION（自测注入用，见下；CI 与本地都不该设）。
 #
 # # 变异器集合与工具版本：每次运行都要说清「这把尺子是什么」
@@ -502,9 +503,37 @@ fi
 
 # ── 排他锁 ────────────────────────────────────────────────────────────────
 #
-# 锁文件放在仓库根的 tmp/ 下：.gitignore 的 /tmp/ 规则覆盖它，所以它既不进
-# 版本库，也不会被红线自查的 --all 扫到（那里用了 --exclude-standard）。
-LOCK_FILE="${LOCK_FILE:-$PWD/tmp/check-mutation.lock}"
+# 锁按**克隆**一级，不是按工作树：一个 issue 一棵树是本仓库的常规开发方式，而
+# 同一克隆的各棵树共用同一份代码、同一批集成测试库和同一台机器——两棵树同时跑
+# 变异，与两个人在同一棵树里跑没有区别，超时判据一样失真、集成测试一样互相
+# 删表。所以默认路径由 `git rev-parse --git-common-dir` 派生：同一克隆的任意
+# 工作树解析到同一个目录，不同克隆之间仍然互不影响。
+#
+# 那条命令在主树里可能给出相对路径（就是 `.git`），在第二棵树里给出绝对路径，
+# 所以先补成绝对路径；再用 `pwd -P` 归一化，免得两棵树经由不同写法（`..`、
+# 符号链接）拼出两个不同的字符串——那看起来像两把锁，实际指着同一个文件，而
+# `flock` 与「是不是同一把锁」的判据都在路径本身上。
+#
+# 不在 git 仓库里时退回工作树下的 tmp/：那里被 .gitignore 的 /tmp/ 规则覆盖，
+# 既不进版本库，也不会被红线自查的 --all 扫到（那里用了 --exclude-standard）。
+default_lock_file() {
+  local common
+  if ! common=$(git rev-parse --git-common-dir 2>/dev/null) || [ -z "$common" ]; then
+    printf '%s\n' "$PWD/tmp/check-mutation.lock"
+    return 0
+  fi
+  case "$common" in
+    /*) ;;
+    *) common="$PWD/$common" ;;
+  esac
+  if ! common=$(cd "$common" 2>/dev/null && pwd -P); then
+    printf '%s\n' "$PWD/tmp/check-mutation.lock"
+    return 0
+  fi
+  printf '%s\n' "$common/tmp/check-mutation.lock"
+}
+
+LOCK_FILE="${LOCK_FILE:-$(default_lock_file)}"
 mkdir -p "$(dirname "$LOCK_FILE")"
 
 # 已经有实例在跑时的统一出口。
