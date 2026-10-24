@@ -307,6 +307,28 @@ func TestFishCompletionMarksValueFlags(t *testing.T) {
 	}
 }
 
+// TestOwnOptionsReportsConflictingRegistrations 钉住同一个名字两次判得不一样时的处理：
+// 取第一次的判定，并把分歧写到 stderr。
+//
+// 静默挑一边会让这类数据错误一直藏着——生成物看起来正常，只有某个选项的补全
+// 行为与预期不同；而那种现象很难反查到是注册处写重了。
+func TestOwnOptionsReportsConflictingRegistrations(t *testing.T) {
+	data := completionData{flags: map[string][]collectedFlag{
+		"demo": {
+			{name: "id", takesValue: true},
+			{name: "id", takesValue: false},
+		},
+	}}
+	var options []completionFlag
+	_, stderr := captureStreams(t, func() { options = ownOptions(data, "demo") })
+	if len(options) != 1 || options[0].name != "--id" || !options[0].takesValue {
+		t.Fatalf("ownOptions = %+v，期望只留第一次那条 --id（吃取值）", options)
+	}
+	if !strings.Contains(stderr, "demo 的 --id 注册了两次") {
+		t.Errorf("stderr = %q，期望点出重复注册处的分歧", stderr)
+	}
+}
+
 // TestCompletionBehaviorInRealShells 在真 shell 里跑一遍生成出来的补全。
 //
 // 只比生成物里的字面串挡不住 case 模式里的元字符：`|` 在 case 里是多模式
