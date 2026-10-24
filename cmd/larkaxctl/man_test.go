@@ -9,7 +9,7 @@ import (
 	"github.com/sumwai/larkax/internal/manpage"
 )
 
-// 本文件是手页生成器的**驱动**：把命令注册表交给 internal/manpage，再把产物写出去。
+// 本文件是手册生成器的**驱动**：把命令注册表交给 internal/manpage，再把产物写出去。
 //
 // # 为什么是「一条测试」而不是一个 main 包
 //
@@ -42,7 +42,7 @@ var referenceDoc = filepath.Join("..", "..", "docs", "cli-reference.md")
 
 // manGroups 把命令注册表翻成生成器认的形状。
 //
-// 这一段是「手页的名字与一句话来自注册表」的落点，也是全仓唯一一处看得见
+// 这一段是「手册的名字与一句话来自注册表」的落点，也是全仓唯一一处看得见
 // commandGroups 又看得见 manpage 的代码。
 func manGroups() []manpage.Group {
 	groups := make([]manpage.Group, 0, len(commandGroups))
@@ -56,7 +56,7 @@ func manGroups() []manpage.Group {
 	return groups
 }
 
-// TestGenerateManPages 渲染全部手页，核对几条渲染不出来就看不见的性质，
+// TestGenerateManPages 渲染全部手册，核对几条渲染不出来就看不见的性质，
 // 并按 LARKAX_MAN_OUT 决定要不要落盘。
 func TestGenerateManPages(t *testing.T) {
 	raw, err := os.ReadFile(referenceDoc)
@@ -97,7 +97,7 @@ func TestGenerateManPages(t *testing.T) {
 		}
 		seen[f.Name] = true
 		if !strings.HasSuffix(f.Name, ".1") {
-			t.Errorf("%q 不是一页手页（手页的文件名以 .1 结尾）", f.Name)
+			t.Errorf("%q 不是一页手册（手册的文件名以 .1 结尾）", f.Name)
 		}
 		if len(f.Content) == 0 {
 			t.Errorf("%q 是空的", f.Name)
@@ -111,7 +111,7 @@ func TestGenerateManPages(t *testing.T) {
 	}
 
 	// 一句话来自注册表：把 CJK 断点（roffText 插的 \:）去掉之后，注册表里
-	// 那一句话要原样出现在它那一页上。手页里另抄一句话时，改注册表不会有
+	// 那一句话要原样出现在它那一页上。手册里另抄一句话时，改注册表不会有
 	// 任何一步失败，而两句不一样的话只在有人对着敲命令时才暴露。
 	for _, g := range groups {
 		for _, c := range g.Commands {

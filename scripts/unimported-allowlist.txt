@@ -32,7 +32,7 @@
 # 关掉一批缺口之后，把这些行删掉、并把 MAX_ENTRIES 往下调。
 # 忘了删不会失败：脚本只会提示「这一条已经可以删了」。
 
-internal/manpage | lib | 只被测试 import 的手页生成器：命令注册表在 cmd/larkaxctl 的 package main 里，别的包引不到，所以由那个包的 man_test.go 驱动；它不会被生产代码 import（终态），产物提交在 man/man1/
+internal/manpage | lib | 只被测试 import 的手册生成器：命令注册表在 cmd/larkaxctl 的 package main 里，别的包引不到，所以由那个包的 man_test.go 驱动；它不会被生产代码 import（终态），产物提交在 man/man1/
 internal/testdb | lib | 只被测试 import 的夹具包：给每个连库的测试包建一个独立的库
 
 # 清单里的 `internal/manpage` 与 `internal/testdb` 是常驻的两条：**不可能接线、
@@ -40,7 +40,7 @@ internal/testdb | lib | 只被测试 import 的夹具包：给每个连库的测
 #
 #   - 测试夹具包（internal/testdb）永远不会被生产代码 import，把它从清单里删掉
 #     只有一种做法：让生产代码去 import 测试夹具，那是更坏的事。
-#   - 手页生成器（internal/manpage）只被 cmd/larkaxctl 的一条测试驱动，因为
+#   - 手册生成器（internal/manpage）只被 cmd/larkaxctl 的一条测试驱动，因为
 #     命令注册表住在那个包的 package main 里（它同时带着分派用的 run 字段），
 #     别的包引不到；把它搬成可导入的包要连注册表与分派一起搬，代价远大于收益。
 #
