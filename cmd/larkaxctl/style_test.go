@@ -238,6 +238,8 @@ func TestEmptyListMessages(t *testing.T) {
 			func(w io.Writer) { printModelList(w, nil) }},
 		{"计价规则", "暂无计价规则。可使用 larkaxctl price add 添加。",
 			func(w io.Writer) { printRuleList(w, nil) }},
+		{"阶梯档位", "暂无阶梯档位。可使用 larkaxctl price tier add 添加。",
+			func(w io.Writer) { printTierList(w, nil) }},
 		{"API Key", "暂无 API Key。可使用 larkaxctl apikey create 添加。",
 			func(w io.Writer) { printKeyList(w, nil) }},
 		{"别名", "暂无别名。可使用 larkaxctl alias create 添加。",
@@ -254,8 +256,8 @@ func TestEmptyListMessages(t *testing.T) {
 
 	// 与另一张样式表同一个做法：条数写死。少了一条就等于那条没人看，而
 	// 「用例还在跑、只是不覆盖那条命令」在输出里和通过长得一样。
-	if len(cases) != 10 {
-		t.Fatalf("这张表里 %d 条清单命令，期望 10 条", len(cases))
+	if len(cases) != 11 {
+		t.Fatalf("这张表里 %d 条清单命令，期望 11 条", len(cases))
 	}
 
 	for _, tc := range cases {
@@ -790,6 +792,12 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		{"计价规则带裁决", func(w io.Writer) {
 			printRuleTable(w, rules, func(int) string { return "选中" })
 		}},
+		{"阶梯清单", func(w io.Writer) {
+			printTierList(w, []priceTierInfo{{
+				segment: 2, above: 200000,
+				prices: map[string]float64{"prompt": 2e-7, "completion": 8e-7},
+			}})
+		}},
 		// 成本规则那两条与上面两条同形：同一张表的两档（不带裁决的清单、
 		// 带裁决的说明），只是数据源换成 upstream_costs。
 		{"成本规则", func(w io.Writer) { printCostTable(w, costRules, nil) }},
@@ -988,8 +996,8 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		}},
 	}
 
-	if len(cases) != 35 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 35 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 36 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 36 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {

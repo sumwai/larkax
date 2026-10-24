@@ -86,6 +86,7 @@ var tableRenderPaths = []string{
 	"printRuleTable",
 	"printSettingsDetail",    // settings get
 	"printSnapshotAccessLog", // snapshot access-log
+	"printTierList",          // price tier list
 	"printUsageEvents",       // usage events
 	"printUsageRequests",     // usage requests
 	"printUsageSummary",      // usage summary
@@ -116,6 +117,7 @@ var emptyListPaths = []string{
 	"printPlanList",
 	"printPluginList",
 	"printRuleList",
+	"printTierList",   // price tier list
 	"printUserList",   // user list
 	"printUserPlans",  // plan subscriptions 与 plan key show
 	"printWalletList", // wallet list

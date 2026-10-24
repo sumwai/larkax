@@ -1034,6 +1034,60 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
+		"price tier add|--above")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price tier add|--by")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price tier add|--cr")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price tier add|--cw")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price tier add|--in")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price tier add|--out")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price tier add|--reasoning")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price tier add|--unit")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price tier remove|--by")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"price update|--by")
 			case "$cur" in
 			-*) ;;
@@ -2087,6 +2141,8 @@ _larkaxctl() {
 			"price add") compadd -- --by --channel --cr --cw --disabled --effective-from --effective-to --env-file --expr --format --in --models --name --out --priority --quiet --reasoning --schedule-file --scope --unit --user --verbose ;;
 			"price calendar sync") compadd -- --env-file --format --quiet --verbose --year ;;
 			"price explain") compadd -- --at --channel --env-file --format --model --quiet --user --verbose ;;
+			"price tier add") compadd -- --above --by --cr --cw --env-file --format --in --out --quiet --reasoning --unit --verbose ;;
+			"price tier remove") compadd -- --by --env-file --format --quiet --verbose ;;
 			"price update") compadd -- --by --channel --clear-effective-to --clear-schedule --cr --cw --disable --effective-from --effective-to --enable --env-file --expr --format --id --in --models --name --out --priority --quiet --reasoning --schedule-file --scope --unit --user --verbose ;;
 			"rotate") compadd -- --apply --batch-size --env-file --format --quiet --verbose --verify ;;
 			"secret rotate") compadd -- --apply --batch-size --env-file --format --quiet --verbose --verify ;;
@@ -2167,8 +2223,9 @@ _larkaxctl() {
 		"plan order") compadd -- show set ;;
 		"plugin") compadd -- list get publish enable disable delete kv ;;
 		"plugin kv") compadd -- get set delete ;;
-		"price") compadd -- add list show update enable disable explain calendar ;;
+		"price") compadd -- add list show update enable disable explain tier calendar ;;
 		"price calendar") compadd -- import sync list ;;
+		"price tier") compadd -- add list remove ;;
 		"secret") compadd -- rotate ;;
 		"settings") compadd -- list get set ;;
 		"snapshot") compadd -- cleanup allowlist get access-log redact ;;

@@ -68,7 +68,7 @@ type ScheduleOverride struct {
 	// 编译出来的条件因此还要 `!isWorkday()`。
 	Holidays []string `json:"holidays,omitempty"`
 
-	// MinContextTokens 是输入侧上下文长度的下界（len > 该值才命中）。
+	// MinContextTokens 是输入侧上下文长度的下界（len >= 该值即命中）。
 	// len 含缓存读写，所以名字用 context 而不是 prompt。
 	MinContextTokens *int64 `json:"min_context_tokens,omitempty"`
 
@@ -804,7 +804,7 @@ func (r scheduleRule) condition(tz string) string {
 			"(holidayName() in [%s] && !isWorkday())", strings.Join(quoted, ", ")))
 	}
 	if r.minTok != nil {
-		parts = append(parts, fmt.Sprintf("len > %d", *r.minTok))
+		parts = append(parts, fmt.Sprintf("len >= %d", *r.minTok))
 	}
 	if len(parts) == 1 {
 		return parts[0]

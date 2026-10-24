@@ -68,7 +68,7 @@ func runLine(t *testing.T, out string, runID int64) string {
 
 	id := itoa64(runID)
 	for _, line := range strings.Split(out, "\n") {
-		if fields := strings.Fields(line); len(fields) == 14 && fields[0] == id {
+		if fields := strings.Fields(line); len(fields) == 15 && fields[0] == id {
 			return line
 		}
 	}
@@ -78,12 +78,12 @@ func runLine(t *testing.T, out string, runID int64) string {
 
 // countRunRows 数一张对账运行清单里打了几行数据。
 //
-// 表头是 12 栏（`run_id`、`开始`、`状态`、…），数据行多出来的两栏是那两个时刻里的
-// 空格：`2026-10-19 12:00` 按空白切开是两个字段。按 14 个数数据行，不必解析列宽。
+// 表头是 13 栏（`run_id`、`开始`、`状态`、…），数据行多出来的两栏是那两个时刻里的
+// 空格：`2026-10-19 12:00` 按空白切开是两个字段。按 15 个数数据行，不必解析列宽。
 func countRunRows(out string) int {
 	n := 0
 	for _, line := range strings.Split(out, "\n") {
-		if len(strings.Fields(line)) == 14 {
+		if len(strings.Fields(line)) == 15 {
 			n++
 		}
 	}
@@ -144,11 +144,11 @@ func TestLedgerRunsListsFullAndIncremental(t *testing.T) {
 	}
 }
 
-// TestLedgerRunsShowsEveryCountColumn 钉住六个计数各落在哪一栏。
+// TestLedgerRunsShowsEveryCountColumn 钉住七个计数各落在哪一栏。
 //
 // 加一栏时最容易犯的错是把它插进格式串里、表头或 JSON 键只改了一处：屏幕上
 // 的数与它上面的标题差一格，而每个数单独看都合理；JSON 那边则是键名对不上，
-// 解进结构体只会得到零值。所以这一行把六个计数写成互不相同、且都不为零的
+// 解进结构体只会得到零值。所以这一行把七个计数写成互不相同、且都不为零的
 // 值，再**按位置**逐个核表格、**按键名**逐个核 JSON。
 //
 // 直接写一行运行记录而不是真跑一轮对账：这一条要判的是读侧怎么摆这几栏，
@@ -164,18 +164,18 @@ func TestLedgerRunsShowsEveryCountColumn(t *testing.T) {
 		INSERT INTO reconcile_runs (started_at, watermark, full_scan, status, finished_at,
 		                            checked_wallets, balance_mismatches, frozen_mismatches,
 		                            repaired, malformed_accounts, stale_reservations,
-		                            plan_face_shortfalls)
-		VALUES ($1, $1, true, 'done', $1, 3, 4, 5, 6, 7, 8, 9)
+		                            plan_face_shortfalls, account_below_floors)
+		VALUES ($1, $1, true, 'done', $1, 3, 4, 5, 6, 7, 8, 9, 10)
 		RETURNING id`, started).Scan(&runID); err != nil {
 		t.Fatalf("写运行记录失败: %v", err)
 	}
 
 	// 表格：前七栏是 id、开始（两段）、状态、范围、起点（两段），之后才是计数。
-	// 六个数互不相同，差一格就会顶到别的数上。
+	// 七个数互不相同，差一格就会顶到别的数上。
 	line := runLine(t, ledgerRunsOut(t, "--limit", "0"), runID)
-	want := []string{"3", "4", "5", "7", "8", "9", "6"}
+	want := []string{"3", "4", "5", "7", "8", "9", "10", "6"}
 	if got := strings.Fields(line)[7:]; !slices.Equal(got, want) {
-		t.Errorf("计数栏 = %v，期望 %v（比对、余额差、冻结差、畸形科目、陈旧预留、面值差、修复）：\n%s",
+		t.Errorf("计数栏 = %v，期望 %v（比对、余额差、冻结差、畸形科目、陈旧预留、面值差、低于下界、修复）：\n%s",
 			got, want, line)
 	}
 
@@ -216,6 +216,7 @@ func TestLedgerRunsShowsEveryCountColumn(t *testing.T) {
 		"malformed_accounts":   "7",
 		"stale_reservations":   "8",
 		"plan_face_shortfalls": "9",
+		"account_below_floors": "10",
 		"repaired":             "6",
 	} {
 		if got := string(row[key]); got != want {
