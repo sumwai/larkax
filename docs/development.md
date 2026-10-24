@@ -1708,6 +1708,12 @@ CI 包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`�
 非 UTC 时区下的时刻门禁（`TZ=Asia/Shanghai` 再跑一遍
 受影响的包，见 [cli-output.md](cli-output.md) 的「时刻与时区」）、契约测试（见下）。
 
+`Go` job 在单测之前装 `fish` 与 `zsh`：`sudo apt-get install -y` 之后再各打一次
+`--version` 自证装上，`set -euo pipefail` 让 apt 失败当场红；bash 不用装，
+runner 镜像自带。单测那一步设 `LARKAX_REQUIRE_COMPLETION_SHELLS=1`——补全的行为用例
+要在真 shell 里取候选，本地没装壳时可以只记一行日志放行，CI 装了壳还找不到就必须
+硬失败：装壳那一步没生效时，放行会让整条链全绿（见 [LESSONS.md](../LESSONS.md) 第 16 条）。
+
 前端另有一个 `Web` job，与 `Go`、`契约` 并列，在 `web/` 下依次跑：
 `npm ci` → `npx tsc -b` → `npx vitest run` → `npx eslint src --max-warnings 0`。
 

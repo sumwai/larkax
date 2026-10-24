@@ -187,7 +187,20 @@ jobs:
           go run ./cmd/larkaxctl migrate down
           go run ./cmd/larkaxctl migrate up
 
+      # 补全行为用例要在真 shell 里跑：fish 走 `complete -C`，zsh 走替身
+      # `compadd`。装壳失败时这一步当场红，别把判断留给用例——用例找不到壳
+      # 只记一行日志，与「通过」在输出里长得一样（LESSONS.md 第 16 条）。
+      - name: 装补全行为用例要用的壳
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y fish zsh
+          fish --version
+          zsh --version
+
       - name: 单元测试
+        env:
+          LARKAX_REQUIRE_COMPLETION_SHELLS: "1"
         run: go test -race -coverprofile=coverage.out ./...
 
       - name: 覆盖率摘要
