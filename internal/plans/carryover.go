@@ -76,7 +76,7 @@ func carryoverBasisPoints(ctx context.Context, tx *sql.Tx) (int64, error) {
 	return bp, nil
 }
 
-// wholeUnitUnits 是「一个整单位」在 money 定点数里的值：元 / token / 次。
+// wholeUnitUnits 是 token / 次数包「一个整单位」在 money 定点数里的值。
 //
 // 由 money.Scale 算出来而不是写死 1e8：两者是同一个定义的两种写法，写死之后
 // 精度一旦变化，这里会在没有人改动的地方悄悄错一位。
@@ -90,20 +90,31 @@ var wholeUnitUnits = func() int64 {
 
 // carryShare 取 base 的 bp/10000，向下取整；base 非正时为零。
 //
-// 取整到**整单位**（整元、整 token、整次），不是到金额类型的 1e-8 精度：
-// 「剩余 7、比例 0.4 → 2」是这条规则的定义（见 #1193）。零头归平台，于是
-// 「结转 + 归平台」严格等于取整前的那份剩余，不会多出一点没有来路的额度；
-// 两维各自至多差一个整单位。
+// 取整精度按单位分两档：
 //
-// 向下取整而不是四舍五入，与商户分成的口径一致（见 money.MulBasisPoints）：
-// 零头不能记到用户名下。
-func carryShare(base money.Amount, bp int64) money.Amount {
+//   - 金额包（UnitAmount）：按 money 的最小单位（10^-8）向下截断。金额这一维
+//     本来就有这个精度可用，再往「元」上截等于把分与厘送进「归平台」——那是
+//     用户确实剩下的钱，账上对得上，没有理由扣掉。MulBasisPoints 内部对正数
+//     是向零截断到 1e-8，所以这一档直接取它的结果。
+//   - token / 次数包（UnitToken / UnitRequest）：截到整单位，即整 token、整次。
+//     量本来就是整数，「剩余 7、比例 0.4 → 2」是这条规则的定义（见 #1193）。
+//
+// 两档都是向下取整：面值那一维被截掉的零头随 plan_void 归平台，量那一维被
+// 截掉的部分留在终态订阅上、随订阅一起不可用（不进平台科目）。于是「结转 +
+// 归平台」严格等于取整前的那份剩余面值，不会多出一点没有来路的额度；每一维
+// 各自至多差一个**自己的**取整单位（金额包 10^-8，token / 次数包 1）。向下
+// 取整而不是四舍五入，与商户分成的口径一致（见 money.MulBasisPoints）：零头
+// 不能记到用户名下。
+func carryShare(unit PlanUnit, base money.Amount, bp int64) money.Amount {
 	if !base.IsPositive() {
 		return money.Zero
 	}
 	share := base.MulBasisPoints(bp)
 	if !share.IsPositive() {
 		return money.Zero
+	}
+	if unit == UnitAmount {
+		return share
 	}
 	return money.FromUnits(share.Units() / wholeUnitUnits * wholeUnitUnits)
 }
@@ -124,7 +135,9 @@ func carryShare(base money.Amount, bp int64) money.Amount {
 //
 // 向下取整的差额留给平台：plan_void 记 R − carry_amount，plan_carry 记
 // carry_amount，两者之和严格等于 R——面值这一维在账上严格守恒。量那一维的
-// 差额留在订阅上，随订阅终态一起不再可用。
+// 差额留在订阅上，随订阅终态一起不再可用。取整精度按单位分档（见 carryShare）：
+// 金额包以 10^-8 为单位，token / 次数包以整单位为单位，两维各自至多差一个
+// 自己的取整单位。
 //
 // # 取整到 0 时的代价
 //
@@ -133,7 +146,7 @@ func carryShare(base money.Amount, bp int64) money.Amount {
 // 面值已经归零」，那份量就跟着订阅一起没了。这是诚实写出来的代价——不是
 // 「什么都没损失」，而是「这一格损失的是量，且账上看不出来」。
 func carrySplit(unit PlanUnit, basisAmount, basisQuota, carriedAmount, carriedQuota money.Amount, bp int64) (amount, quota money.Amount) {
-	amount = carryShare(basisAmount.Sub(carriedAmount), bp)
+	amount = carryShare(unit, basisAmount.Sub(carriedAmount), bp)
 	if !amount.IsPositive() {
 		// 见「取整到 0 时的代价」：金额落零时量也不结转，否则量会挂在一笔
 		// 没有对面分录的余额上，而并入永远读不到它。
@@ -143,7 +156,7 @@ func carrySplit(unit PlanUnit, basisAmount, basisQuota, carriedAmount, carriedQu
 		// 金额包的量与面值是同一个数（见 plans 包的注释），不必各算一次。
 		return amount, amount
 	}
-	quota = carryShare(basisQuota.Sub(carriedQuota), bp)
+	quota = carryShare(unit, basisQuota.Sub(carriedQuota), bp)
 	if !quota.IsPositive() {
 		// 金额结转了但量没结转（例如 Q 已经被别的维度用掉）：金额照转——它是
 		// 账上的钱，把有理由留下的钱强行归零没有依据；量则为 0，代价同上。

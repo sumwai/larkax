@@ -183,8 +183,12 @@ func TestCarryoverRatios(t *testing.T) {
 	}
 }
 
-// 向下取整：剩余 7、比例 0.4 → 结转 2，其余 5 归平台。两维各自取整，
-// 取整的零头都归平台，不凭空变成用户的额度。
+// 向下取整（token / 次数那一档）：剩余 7 个 token、比例 0.4 → 结转 2，
+// 不是 2.8。这一维没结转的 5 留在终态订阅上、随订阅一起不可用，**不进平台
+// 科目**——所以下面只断言面值那一维的归平台金额，别把两维的处置混在一起。
+//
+// 面值那一维在 token 包上也按整单位截断（与量同一档，见 carryShare）：7 元面值
+// × 0.4 = 2.8 → 2，被截掉的 0.8 与没结转的 4 元一起归平台（共 5）。
 func TestCarryoverFloors(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
@@ -205,10 +209,119 @@ func TestCarryoverFloors(t *testing.T) {
 		t.Errorf("订阅记的结转出去面值 = %s，期望 2", got)
 	}
 	if got := up.CarryoutQuota; got.Cmp(amount(t, "2")) != 0 {
-		t.Errorf("订阅记的结转出去量 = %s，期望 2（7 个 token × 0.4）", got)
+		t.Errorf("订阅记的结转出去量 = %s，期望 2（7 个 token × 0.4，不是 2.8）", got)
 	}
 	if got := planVoidedFrom(t, db, upID); got.Cmp(amount(t, "5")) != 0 {
-		t.Errorf("归平台 = %s，期望 5（7 − 2）", got)
+		t.Errorf("面值归平台 = %s，期望 5（7 − 2）", got)
+	}
+}
+
+// 金额包按 money 的最小单位（10^-8）取整，不是按整元。
+//
+// 取剩余 3 个最小单位（0.00000003）、比例 4000 bp：3 × 4000 / 10000 = 1.2，
+// 向下取整得 1，平台侧得 2，三个数逐字断言。把这一档改回整元截断时，结转
+// 会变成 0、平台拿走全部 3——这一格红。
+//
+// 它**不**区分向下与四舍五入：1.2 两种口径都得 1。正好落在半格上的那一格见
+// TestCarryoverAmountRoundsDownNotHalfUp。
+func TestCarryoverAmountKeepsSubYuanPrecision(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	svc := New(db)
+	setCarryoverBP(t, db, 4000)
+
+	userID := seedUser(t, db)
+	plan := newPlan(t, ctx, svc, "0.00000003")
+	upID := grantFresh(t, ctx, svc, userID, plan.Key, "grant-"+itoa(nextID()))
+	before := ledgerBalance(t, db, ledger.PrepaidAccount(upID))
+	expireSubscription(t, db, upID)
+
+	up := voidPlan(t, ctx, svc, upID, UserPlanExpired, "void-"+itoa(nextID()))
+
+	if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)); got.Cmp(amount(t, "0.00000001")) != 0 {
+		t.Errorf("结转余额 = %s，期望 0.00000001（3 个单位 × 0.4 = 1.2，向下取整到 1）", got)
+	}
+	if got := up.CarryoutAmount; got.Cmp(amount(t, "0.00000001")) != 0 {
+		t.Errorf("订阅记的结转出去面值 = %s，期望 0.00000001", got)
+	}
+	if got := up.CarryoutQuota; got.Cmp(amount(t, "0.00000001")) != 0 {
+		t.Errorf("金额包的结转出去量 = %s，期望与面值同值 0.00000001", got)
+	}
+	if got := planVoidedFrom(t, db, upID); got.Cmp(amount(t, "0.00000002")) != 0 {
+		t.Errorf("面值归平台 = %s，期望 0.00000002（3 − 1）", got)
+	}
+	if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)).Add(planVoidedFrom(t, db, upID)); got.Cmp(before) != 0 {
+		t.Errorf("结转 + 归平台 = %s，期望处置前的面值余额 %s", got, before)
+	}
+}
+
+// 金额包的取整方向落在正好半格上时见分晓：剩余 5 个最小单位、比例 5000 bp，
+// 应得 2.5 个单位。向下取整得 2，四舍五入会得 3。这条是「向下」的那格判据。
+func TestCarryoverAmountRoundsDownNotHalfUp(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	svc := New(db)
+	setCarryoverBP(t, db, 5000)
+
+	userID := seedUser(t, db)
+	plan := newPlan(t, ctx, svc, "0.00000005")
+	upID := grantFresh(t, ctx, svc, userID, plan.Key, "grant-"+itoa(nextID()))
+	before := ledgerBalance(t, db, ledger.PrepaidAccount(upID))
+	expireSubscription(t, db, upID)
+
+	up := voidPlan(t, ctx, svc, upID, UserPlanExpired, "void-"+itoa(nextID()))
+
+	if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)); got.Cmp(amount(t, "0.00000002")) != 0 {
+		t.Errorf("结转余额 = %s，期望 0.00000002（5 个单位 × 0.5 = 2.5，向下取整；四舍五入会得 3）", got)
+	}
+	if got := up.CarryoutAmount; got.Cmp(amount(t, "0.00000002")) != 0 {
+		t.Errorf("订阅记的结转出去面值 = %s，期望 0.00000002", got)
+	}
+	if got := up.CarryoutQuota; got.Cmp(amount(t, "0.00000002")) != 0 {
+		t.Errorf("金额包的结转出去量 = %s，期望与面值同值 0.00000002", got)
+	}
+	if got := planVoidedFrom(t, db, upID); got.Cmp(amount(t, "0.00000003")) != 0 {
+		t.Errorf("面值归平台 = %s，期望 0.00000003（5 − 2）", got)
+	}
+	if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)).Add(planVoidedFrom(t, db, upID)); got.Cmp(before) != 0 {
+		t.Errorf("结转 + 归平台 = %s，期望处置前的面值余额 %s", got, before)
+	}
+}
+
+// 金额包的非整元余额按 1e-8 结转，不往整元截：7.35 × 0.4 = 2.94，结转 2.94
+// （不是 2），归平台 4.41。
+//
+// **这条用例只钉守恒，不钉取整方向**：2.94 是精确可表示的，一次都没有截到
+// 东西，四舍五入与向下在这里给出同一个数。钉「向下」的是上面两条。
+func TestCarryoverAmountKeepsSubYuan(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	svc := New(db)
+	setCarryoverBP(t, db, 4000)
+
+	userID := seedUser(t, db)
+	plan := newPlan(t, ctx, svc, "7.35")
+	upID := grantFresh(t, ctx, svc, userID, plan.Key, "grant-"+itoa(nextID()))
+	before := ledgerBalance(t, db, ledger.PrepaidAccount(upID))
+	expireSubscription(t, db, upID)
+
+	up := voidPlan(t, ctx, svc, upID, UserPlanExpired, "void-"+itoa(nextID()))
+
+	if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)); got.Cmp(amount(t, "2.94")) != 0 {
+		t.Errorf("结转余额 = %s，期望 2.94（7.35 × 0.4，不是整元 2）", got)
+	}
+	if got := up.CarryoutAmount; got.Cmp(amount(t, "2.94")) != 0 {
+		t.Errorf("订阅记的结转出去面值 = %s，期望 2.94", got)
+	}
+	if got := up.CarryoutQuota; got.Cmp(amount(t, "2.94")) != 0 {
+		t.Errorf("金额包的结转出去量 = %s，期望与面值同值 2.94", got)
+	}
+	if got := planVoidedFrom(t, db, upID); got.Cmp(amount(t, "4.41")) != 0 {
+		t.Errorf("面值归平台 = %s，期望 4.41（7.35 − 2.94）", got)
+	}
+	// 守恒：两笔分录之和 = 处置前的剩余面值，零头没有被吞掉。
+	if got := ledgerBalance(t, db, ledger.CarryoverAccount(upID)).Add(planVoidedFrom(t, db, upID)); got.Cmp(before) != 0 {
+		t.Errorf("结转 + 归平台 = %s，期望处置前的面值余额 %s", got, before)
 	}
 }
 
