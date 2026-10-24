@@ -115,16 +115,24 @@ func TestPriceCoverageHintIgnoresNonTokenKeys(t *testing.T) {
 	}
 }
 
-// G：键取所有分支的并集，分支各自返回不同的表时两项都算覆盖。
-func TestPriceCoverageHintKeyUnionAcrossBranches(t *testing.T) {
+// G：分支键集不一致的规则在编译期就被拒，覆盖提示不会按并集给出一份
+// 看起来齐全的结论。
+//
+// 这条原先钉的是「键取所有分支的并集，分支各自返回不同的表时两项都算覆盖」。
+// 现在那种写法编不过了（结算只认命中那一支的键，按并集看覆盖齐全正是要消灭
+// 的假象），所以这里改成钉住新的分界：提示路径拿到的是编译错误，错误里点名
+// 那个只在部分分支出现的键。
+func TestPriceCoverageHintRejectsMismatchedBranchKeys(t *testing.T) {
 	missing, err := pricing.UncoveredTokenItems(
 		`c > 100 ? {"prompt": 1.5, "completion": 7.5} : {"prompt": 1.5}`)
-	if err != nil {
-		t.Fatalf("表达式应当能编译：%v", err)
+	if err == nil {
+		t.Fatalf("分支键集不一致的规则应当编译失败，得到缺项 %v", missing)
 	}
-	want := []string{"cache_read", "cache_write", "reasoning"}
-	if strings.Join(missing, ",") != strings.Join(want, ",") {
-		t.Errorf("缺项 = %v，期望 %v", missing, want)
+	if missing != nil {
+		t.Fatalf("报错时不该给出缺项，得到 %v", missing)
+	}
+	if !strings.Contains(err.Error(), `"completion"`) {
+		t.Errorf("错误里应当点名那个只在部分分支出现的键：%v", err)
 	}
 }
 
