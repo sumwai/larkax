@@ -1,12 +1,13 @@
 name: 变异测试
 
-# 变异测试（gremlins）只在**搬钱的代码**上跑。自动触发只认五棵树：
+# 变异测试（gremlins）只在**搬钱的代码**上跑。自动触发只认哪些目录，由
+# `scripts/check-mutation.sh` 里的 `MONEY_PKGS` 回答——这里不另列一份：
 #
-#   internal/ledger/    账本
-#   internal/billing/   计费
-#   internal/money/     金额
-#   internal/pipeline/  算出结算额
-#   internal/pricing/   给出单价
+#   bash scripts/check-mutation.sh --list-packages --money
+#
+# 抄第二份的那一天，就是「CI 自动跑的范围」与「脚本认为该量的范围」开始分岔的
+# 那一天：动了搬钱代码的 PR 会照报「变异通过」，而那个包连分母都没进，界面上
+# 也看不出来（它只对「在前缀里、但没有 PKGS 条目覆盖」的目录告警）。
 #
 # 其余改动不自动跑：一轮变异以小时计，而 `scripts/check-mutation.sh` 的 PKGS
 # 有三十多个包。让每个 PR 都自动跑全清单会把公开仓库的 runner 队列占住，而
@@ -139,15 +140,21 @@ jobs:
               exit 1
             fi
 
-            # PR：只看这五棵树里改动的 .go 文件（理由见文件开头）。
+            # PR：只看搬钱的那些包里改动的 .go 文件（理由见文件开头）。
+            # 前缀从脚本读，不在这里再列一份。
             changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA" -- '*.go')
             changed_all="$changed"
-            auto_prefixes=(internal/ledger/ internal/billing/ internal/money/ internal/pipeline/ internal/pricing/)
+            mapfile -t money_prefixes < <(bash scripts/check-mutation.sh --list-packages --money)
+            if [ "${#money_prefixes[@]}" -eq 0 ]; then
+              echo "::error::scripts/check-mutation.sh --list-packages --money 没打出任何前缀。"
+              echo "::error::退回「这一轮不跑」会把「脚本读不出范围」藏成「不需要跑」——停下来，先修脚本。"
+              exit 1
+            fi
 
             while IFS= read -r f; do
               [ -n "$f" ] || continue
               allowed=0
-              for pre in "${auto_prefixes[@]}"; do
+              for pre in "${money_prefixes[@]}"; do
                 case "$f" in "$pre"*) allowed=1; break ;; esac
               done
               if [ "$allowed" -eq 0 ]; then
@@ -167,7 +174,7 @@ jobs:
 
             if [ "${#dropped[@]}" -gt 0 ]; then
               mapfile -t dropped < <(printf '%s\n' "${dropped[@]}" | sort -u)
-              echo "::warning::这些目录在自动触发的五棵树里，但没有任何 PKGS 条目覆盖它们（找不到在清单里的祖先）：${dropped[*]}。"
+              echo "::warning::这些目录在自动触发的范围内（脚本里的 MONEY_PKGS），但没有任何 PKGS 条目覆盖它们（找不到在清单里的祖先）：${dropped[*]}。"
               echo "::warning::本轮不会为它们跑变异。要量它们，先把覆盖它们的包加进 scripts/check-mutation.sh 的 PKGS。"
             fi
           fi
@@ -199,7 +206,7 @@ jobs:
               if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
                 echo "手工触发没有给 packages。"
               elif [ "${#dropped[@]}" -gt 0 ]; then
-                echo "改动落在这五棵树里，但下面这些目录没有任何 PKGS 条目覆盖："
+                echo "改动落在自动触发的范围里（脚本里的 MONEY_PKGS），但下面这些目录没有任何 PKGS 条目覆盖："
                 echo
                 echo '```'
                 printf '%s\n' "${dropped[@]}"
@@ -208,7 +215,7 @@ jobs:
                 echo "所以本轮没有可跑的变异包。要量它们，先把覆盖它们的包加进 PKGS——"
                 echo "否则这里会一直显示 skipped，而「只改了计费代码」与「不需要跑」看起来一样。"
               else
-                echo "改动不涉及那五棵树（账本 / 计费 / 金额 / 结算额 / 单价）。"
+                echo "改动不涉及自动触发的范围（见脚本里的 MONEY_PKGS：账本、计费、金额、结算额、单价、额度包结转）。"
               fi
               echo
               echo "下面的变异 job 显示为 **skipped**——这不是「跑了且通过」。"
