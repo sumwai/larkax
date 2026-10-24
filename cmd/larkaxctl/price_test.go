@@ -865,7 +865,7 @@ func TestPriceAddNameAndOperandMustAgree(t *testing.T) {
 	}
 
 	r := runOnce(t, runPrice, []string{
-		uniqueName("rule"), "--scope", "platform", "--name", uniqueName("rule"),
+		"add", uniqueName("rule"), "--scope", "platform", "--name", uniqueName("rule"),
 		"--models", model, "--in", "1", "--by", by,
 	})
 	if r.err == nil {
@@ -931,7 +931,7 @@ func TestPriceUpdateLocatorAmbiguityListsCandidates(t *testing.T) {
 		"--models", uniqueName("model"), "--expr", testExpr, "--by", by,
 	})
 
-	r := runOnce(t, runPrice, []string{name, "--priority", "5", "--by", by})
+	r := runOnce(t, runPrice, []string{"update", name, "--priority", "5", "--by", by})
 	if r.err == nil {
 		t.Fatalf("同名三条时按名字定位应当报错，实际通过")
 	}
@@ -983,7 +983,7 @@ func TestPriceUpdateIDAndLocatorMustAgree(t *testing.T) {
 	requireDB(t)
 	setupEnv(t)
 
-	r := runOnce(t, runPrice, []string{"7", "--id", "9", "--priority", "3", "--by", "ops"})
+	r := runOnce(t, runPrice, []string{"update", "7", "--id", "9", "--priority", "3", "--by", "ops"})
 	if r.err == nil {
 		t.Fatalf("位置参数与 --id 给两个不同的 ID 应当报错，实际通过")
 	}
