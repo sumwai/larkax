@@ -1050,6 +1050,78 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
+		"price peak add|--above")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price peak add|--by")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price peak add|--cr")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price peak add|--cw")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price peak add|--in")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price peak add|--out")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price peak add|--reasoning")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price peak add|--tz")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price peak add|--unit")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price peak add|--weekdays")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price peak add|--window")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"price peak remove|--by")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"price tier add|--above")
 			case "$cur" in
 			-*) ;;
@@ -2159,6 +2231,8 @@ _larkaxctl() {
 			"price add") compadd -- --by --channel --cr --cw --disabled --effective-from --effective-to --env-file --expr --format --in --models --name --out --priority --quiet --reasoning --schedule-file --scope --unit --user --verbose ;;
 			"price calendar sync") compadd -- --env-file --format --quiet --verbose --year ;;
 			"price explain") compadd -- --at --channel --env-file --format --model --quiet --user --verbose ;;
+			"price peak add") compadd -- --above --by --cr --cw --env-file --exclude-holidays --format --in --out --quiet --reasoning --tz --unit --verbose --weekdays --window ;;
+			"price peak remove") compadd -- --by --env-file --format --quiet --verbose ;;
 			"price tier add") compadd -- --above --by --cr --cw --env-file --format --in --out --quiet --reasoning --unit --verbose ;;
 			"price tier remove") compadd -- --by --env-file --format --quiet --verbose ;;
 			"price update") compadd -- --by --channel --clear-effective-to --clear-schedule --cr --cw --disable --effective-from --effective-to --enable --env-file --expr --format --id --in --models --name --out --priority --quiet --reasoning --schedule-file --scope --unit --user --verbose ;;
@@ -2242,8 +2316,9 @@ _larkaxctl() {
 		"plan order") compadd -- show set ;;
 		"plugin") compadd -- list get publish enable disable delete kv ;;
 		"plugin kv") compadd -- get set delete ;;
-		"price") compadd -- add list show update enable disable explain tier calendar ;;
+		"price") compadd -- add list show update enable disable explain tier peak calendar ;;
 		"price calendar") compadd -- import sync list ;;
+		"price peak") compadd -- add list remove ;;
 		"price tier") compadd -- add list remove ;;
 		"secret") compadd -- rotate ;;
 		"settings") compadd -- list get set ;;

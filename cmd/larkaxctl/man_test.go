@@ -170,8 +170,8 @@ func TestGenerateManPages(t *testing.T) {
 		return
 	}
 	// 相对路径按**仓库根**算，不按本包目录：人写 LARKAX_MAN_OUT=man/man1 时想的是
-	// 仓库根下那个 man/man1，而 go test 跑测试用的当前目录是包目录（cmd/larkaxctl），
-	// 那样会凭空多出一个 cmd/larkaxctl/man/man1。
+	// 仓库根下那个 man/man1/，而 go test 跑测试用的当前目录是包目录
+	// （cmd/larkaxctl），那样会凭空多出一个 cmd/larkaxctl/man/man1/。
 	if !filepath.IsAbs(out) {
 		out = filepath.Join(moduleRoot(t), out)
 	}
