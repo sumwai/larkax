@@ -428,6 +428,136 @@ func PlanVoid(p PlanVoidParams) (Transaction, error) {
 	return newTxn(EntryPlanVoid, p.TxnID, p.At, entries...)
 }
 
+// PlanCarryParams 是一次额度包期末结转的输入。
+type PlanCarryParams struct {
+	TxnID TxnID
+	// SubscriptionID 是到期的那条订阅（user_plans.id）；prepaid 与 carryover
+	// 两个科目都用它作后缀——结转的额度记在「从哪份订阅来的」名下。
+	SubscriptionID int64
+	// Amount 是结转出去的面值，由调用方按订阅的剩余面值与结转比例算好。
+	// 本包不查库，也算不出比例；给错会直接写进账本。
+	Amount money.Amount
+	Asset  Asset
+	// Reason 说明这次结转的依据（到期）。它进备注，与作废那一档同形。
+	Reason string
+	// Ref 是作废单号（结转与作废是同一次期末处置），进备注供人工对账。
+	Ref string
+	At  time.Time
+}
+
+// PlanCarry 构造一次额度包期末结转：到期时留下的那部分面值转成待并入额度。
+//
+// 分录：
+//
+//	贷 prepaid:<订阅 id>      A    源订阅的面值少了这一份
+//	借 carryover:<订阅 id>    A    平台还欠用户、等他下次领包时并入
+//
+// 它与 PlanVoid 是一对：同一次期末处置里，结转的部分走这里，剩下的走 PlanVoid。
+// 两边金额之和必须等于处置前的可用面值——守恒由调用方保证，本包只保证各自成笔。
+func PlanCarry(p PlanCarryParams) (Transaction, error) {
+	if err := validateCommon(EntryPlanCarry, p.TxnID, p.Asset, p.Amount); err != nil {
+		return Transaction{}, err
+	}
+	if p.SubscriptionID <= 0 {
+		return Transaction{}, fmt.Errorf("订阅 id 非法: %d", p.SubscriptionID)
+	}
+
+	memo := "额度包结转"
+	if reason := strings.TrimSpace(p.Reason); reason != "" {
+		memo += "：" + reason
+	}
+	entries := []Entry{
+		credit(p.TxnID, PrepaidAccount(p.SubscriptionID), p.Asset, p.Amount, EntryPlanCarry).
+			withMemo(sanitizeMemo(memoWithOrder(memo, p.Ref))),
+		debit(p.TxnID, CarryoverAccount(p.SubscriptionID), p.Asset, p.Amount, EntryPlanCarry),
+	}
+	return newTxn(EntryPlanCarry, p.TxnID, p.At, entries...)
+}
+
+// PlanCarryMove 是一个源订阅并进新订阅的额度。
+type PlanCarryMove struct {
+	// SourceSubscriptionID 是当初结转出这份额度的订阅（carryover 科目的后缀）。
+	SourceSubscriptionID int64
+	// Amount 是从这个源并过去的金额，必须为正。
+	Amount money.Amount
+}
+
+// PlanCarryMergeParams 是一次结转额度并入新订阅的输入。
+type PlanCarryMergeParams struct {
+	TxnID TxnID
+	// TargetSubscriptionID 是刚发出的新订阅，carryover 的额度并进它的 prepaid。
+	TargetSubscriptionID int64
+	// Moves 是这次要并的几个源。可以为多个：用户手上可能同时挂着几笔没并的
+	// 结转（来自不同订阅），一次发放把它们一起并入。
+	Moves []PlanCarryMove
+	Asset Asset
+	// Ref 是这次发放的单号，进备注：并入没有自己的外部单号，它随发放发生，
+	// 能对上的是那张发放单。
+	Ref string
+	At  time.Time
+}
+
+// PlanCarryMerge 构造一次结转额度并入。
+//
+// 分录（源 S1、S2，合计 T = A1 + A2）：
+//
+//	贷 carryover:<S1>   A1    这个源待并入的额度转出去了
+//	贷 carryover:<S2>   A2
+//	借 prepaid:<新订阅>  T     新订阅的面值多了这些
+//
+// 源的余额并不在这里校验：本包不查库。调用方在锁内读出余额，并按余额决定
+// 每一笔的金额——传进来的 A 必须等于调用方读到的余额，否则账上会留下正数的
+// carryover，而那笔钱会一直挂在「待并入」上。
+func PlanCarryMerge(p PlanCarryMergeParams) (Transaction, error) {
+	if p.TxnID == "" {
+		return Transaction{}, errors.New("缺少 txn_id")
+	}
+	if !p.Asset.Valid() {
+		return Transaction{}, fmt.Errorf("资产 %q 未知", p.Asset)
+	}
+	if p.TargetSubscriptionID <= 0 {
+		return Transaction{}, fmt.Errorf("新订阅 id 非法: %d", p.TargetSubscriptionID)
+	}
+	if len(p.Moves) == 0 {
+		// 空并入不该被构造成一笔交易：零金额分录会被 Verify 拒掉，而「什么都没
+		// 并」本来就该由调用方跳过，不是写一笔空账。
+		return Transaction{}, errors.New("没有要并入的结转额度")
+	}
+	seen := make(map[int64]struct{}, len(p.Moves))
+	amounts := make([]money.Amount, 0, len(p.Moves))
+	for _, m := range p.Moves {
+		if m.SourceSubscriptionID <= 0 {
+			return Transaction{}, fmt.Errorf("源订阅 id 非法: %d", m.SourceSubscriptionID)
+		}
+		if !m.Amount.IsPositive() {
+			return Transaction{}, fmt.Errorf("源订阅 %d 的并入金额必须为正数，当前为 %s",
+				m.SourceSubscriptionID, m.Amount)
+		}
+		if _, dup := seen[m.SourceSubscriptionID]; dup {
+			// 同一个源出现两次时，两条金额相同的分录会被 Verify 当成重复写入
+			// 拒掉；金额不同则会各写一条，而「一次并入把同一个源拆成两笔」没有
+			// 任何好处。在构造时直接拒，报错点更近。
+			return Transaction{}, fmt.Errorf("源订阅 %d 在一次并入里出现了两次", m.SourceSubscriptionID)
+		}
+		seen[m.SourceSubscriptionID] = struct{}{}
+		amounts = append(amounts, m.Amount)
+	}
+	total, ok := money.SumChecked(amounts...)
+	if !ok {
+		return Transaction{}, errors.New("并入金额之和超出金额类型能表示的范围")
+	}
+
+	memo := sanitizeMemo(memoWithOrder("结转额度并入", p.Ref))
+	entries := make([]Entry, 0, len(p.Moves)+1)
+	for _, m := range p.Moves {
+		entries = append(entries, credit(p.TxnID, CarryoverAccount(m.SourceSubscriptionID),
+			p.Asset, m.Amount, EntryPlanCarryMerge))
+	}
+	entries = append(entries, debit(p.TxnID, PrepaidAccount(p.TargetSubscriptionID),
+		p.Asset, total, EntryPlanCarryMerge).withMemo(memo))
+	return newTxn(EntryPlanCarryMerge, p.TxnID, p.At, entries...)
+}
+
 // SettleParams 是一次商户结算的输入。
 type SettleParams struct {
 	TxnID  TxnID

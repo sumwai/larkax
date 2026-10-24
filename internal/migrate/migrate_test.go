@@ -987,3 +987,121 @@ func TestPaymentOrdersGatewayTxnUniqueMigration(t *testing.T) {
 		t.Errorf("第二次前进之后 %s 不存在", paymentOrdersGatewayTxnIndex)
 	}
 }
+
+// carryoverMigration 是期末结转那条迁移。
+const carryoverMigration = "00065_plan_carryover.sql"
+
+// 00065 的上下往返：四个列与配置键跟着走，分录类型的约束在两侧都对。
+func TestPlanCarryoverMigrationRoundtrip(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	version, err := goose.NumericComponent(carryoverMigration)
+	if err != nil {
+		t.Fatalf("从迁移文件名读版本号失败: %v", err)
+	}
+	previous := version - 1
+
+	goose.SetBaseFS(migrate.FS())
+	if err := migrate.SetDialect("postgres"); err != nil {
+		t.Fatalf("设置方言失败: %v", err)
+	}
+
+	up := func() {
+		t.Helper()
+		if err := goose.UpContext(ctx, db, "."); err != nil {
+			t.Fatalf("前进到最新失败: %v", err)
+		}
+	}
+	down := func() {
+		t.Helper()
+		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
+			t.Fatalf("回滚到 %d 失败: %v", previous, err)
+		}
+	}
+
+	// 用例中途红掉会把库停在回滚态，本包之后的所有用例都会跟着红——收尾必须
+	// 把版本推回最新。
+	t.Cleanup(func() {
+		if err := goose.UpContext(context.Background(), db, "."); err != nil {
+			t.Errorf("收尾时把库推回最新失败: %v", err)
+		}
+	})
+
+	columns := func() map[string]bool {
+		t.Helper()
+		rows, err := db.QueryContext(ctx, `
+			SELECT column_name FROM information_schema.columns
+			 WHERE table_name = 'user_plans'`)
+		if err != nil {
+			t.Fatalf("读列清单失败: %v", err)
+		}
+		defer func() { _ = rows.Close() }()
+		out := map[string]bool{}
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatalf("读列名失败: %v", err)
+			}
+			out[name] = true
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("遍历列清单失败: %v", err)
+		}
+		return out
+	}
+	settingValue := func() (string, error) {
+		var raw string
+		err := db.QueryRowContext(ctx,
+			`SELECT value::text FROM settings WHERE key = 'plans.carryover_bp'`).Scan(&raw)
+		return raw, err
+	}
+	// 试着写一条 plan_carry 分录：约束放行就成功，不放行就报错。写完删掉，
+	// 否则 down 的守卫会拒绝回滚。
+	canInsertCarryEntry := func() error {
+		_, err := db.ExecContext(ctx, `
+			INSERT INTO ledger_entries (txn_id, account, asset, amount, entry_type)
+			VALUES (gen_random_uuid(), 'carryover:1', 'CNY', 1, 'plan_carry')`)
+		return err
+	}
+
+	// 1. 前进态：四列在、配置键在、新分录类型放行。
+	cols := columns()
+	for _, name := range []string{"carried_quota", "carried_amount", "carryout_quota", "carryout_amount"} {
+		if !cols[name] {
+			t.Errorf("迁移之后 user_plans 缺列 %s", name)
+		}
+	}
+	if got, err := settingValue(); err != nil || got != "4000" {
+		t.Errorf("plans.carryover_bp = %q, %v；期望 4000", got, err)
+	}
+	if err := canInsertCarryEntry(); err != nil {
+		t.Errorf("迁移之后 plan_carry 分录应被约束放行: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM ledger_entries WHERE entry_type = 'plan_carry'`); err != nil {
+		t.Fatalf("清理试写的分录失败: %v", err)
+	}
+
+	// 2. 回滚态：四列与配置键都没了，旧约束拒绝新类型。
+	down()
+	cols = columns()
+	for _, name := range []string{"carried_quota", "carried_amount", "carryout_quota", "carryout_amount"} {
+		if cols[name] {
+			t.Errorf("回滚之后 user_plans 仍有列 %s", name)
+		}
+	}
+	if _, err := settingValue(); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("回滚之后 plans.carryover_bp 应不存在，实际 err=%v", err)
+	}
+	if err := canInsertCarryEntry(); err == nil {
+		t.Error("回滚之后 plan_carry 分录应被旧约束拒绝")
+	}
+
+	// 3. 再前进：恢复原样。
+	up()
+	cols = columns()
+	if !cols["carried_quota"] || !cols["carryout_amount"] {
+		t.Error("再次前进之后四列应当回来")
+	}
+}

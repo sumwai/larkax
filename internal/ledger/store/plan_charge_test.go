@@ -1530,3 +1530,51 @@ func TestSettleRecordsPlanReservedInUsageEventsAndAggregates(t *testing.T) {
 		t.Errorf("分组 = %+v，期望 gpt-4o / 面值 10", breakdown.Items)
 	}
 }
+
+// 领包时并进来的结转量算进可用量：选源与流式补冻两处都必须加上它。
+//
+// 这一条同时钉住两条 SQL：可用量 4500/5000 已用、结转 2000，能用的只有
+// 剩下的 500 加上结转的 2000 = 2500。
+//
+//   - 选源那处漏掉 carried_quota → 只剩 500，这次 1500 的预留在额度包上
+//     选不中，回落到钱包（user_plan_id 为空）；
+//   - 补冻那处漏掉 carried_quota → 1500 + 500 = 2000 > 500，当场中断。
+func TestReserveAndGrowCountCarriedQuota(t *testing.T) {
+	db := testDB(t)
+	s := New(db)
+	ctx := context.Background()
+
+	userID := seed(t, db, "100")
+	planID := seedPlan(t, ctx, db, "token", "5000", "50", "gpt-4o")
+	upID := seedUserPlan(t, ctx, db, userID, planID, "50", time.Now().Add(time.Hour))
+	if _, err := db.ExecContext(ctx,
+		`UPDATE user_plans SET quota_used = 4500, carried_quota = 2000 WHERE id = $1`,
+		upID); err != nil {
+		t.Fatalf("写已用量与结转量失败: %v", err)
+	}
+
+	requestID := reqID(t)
+	req := testRequest(ctx, t, db, userID, requestID) // 输入 1000
+	r := reservation(t, userID, requestID, "10", "CNY")
+	r.OutputTokens = 500
+	if _, err := s.SaveReservation(ctx, req, r); err != nil {
+		t.Fatalf("预留失败: %v", err)
+	}
+	row := readBillingPlanRow(t, db, requestID)
+	if !row.userPlanID.Valid || row.userPlanID.Int64 != upID {
+		t.Fatalf("选源应选中带结转量的订阅 %d，实际 user_plan_id=%+v", upID, row.userPlanID)
+	}
+
+	// 已占 1500，还剩 1000（含结转）。再要 500 可以。
+	if err := s.AddReservation(ctx, req, mustMoney(t, "2"), 500); err != nil {
+		t.Fatalf("补冻 500 失败（结转量没算进可用量？）: %v", err)
+	}
+	if got := readBillingPlanRow(t, db, requestID).reservedQuota; got != "2000.00000000" {
+		t.Errorf("补冻之后占用 = %s，期望 2000", got)
+	}
+
+	// 再要 1000 就超过 2500 了。
+	if err := s.AddReservation(ctx, req, mustMoney(t, "1"), 1000); !errors.Is(err, pipeline.ErrInsufficientAvailable) {
+		t.Fatalf("超出结转量之后应返回 ErrInsufficientAvailable，实际 %v", err)
+	}
+}

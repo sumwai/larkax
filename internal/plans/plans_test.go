@@ -47,10 +47,15 @@ func nextID() int64 {
 func itoa(v int64) string { return fmt.Sprintf("%d", v) }
 
 // seedUser 建一个用户，返回 id。发放的 user_id 有外键指向 users。
-func seedUser(t *testing.T, db *sql.DB) int64 {
+//
+// ctx 由调用方传进来，不在这里自己造：contextcheck 咬的正是「辅助函数自己
+// 造 context.Background()」，而测试里每一条用例手上都有一个（见用例开头的
+// `ctx := context.Background()`）。造一个的话，那个 ctx 上的超时与取消
+// 传不进这条 SQL，取消测试也会以为自己在测取消。
+func seedUser(t *testing.T, ctx context.Context, db *sql.DB) int64 {
 	t.Helper()
 	id := 100000 + nextID()
-	if _, err := db.ExecContext(context.Background(),
+	if _, err := db.ExecContext(ctx,
 		`INSERT INTO users (id, username, email) VALUES ($1, $2, $3)`,
 		id, "u"+itoa(id), "u"+itoa(id)+"@example.com"); err != nil {
 		t.Fatalf("建用户失败: %v", err)
@@ -72,10 +77,12 @@ func amount(t *testing.T, s string) money.Amount {
 //
 // 直接查库而不是走 store.AccountBalance：用例要断言的是「账本里写进去的那个和」，
 // 用被测的读路径去验被测的写路径，读错与写错会互相抵消。
-func ledgerBalance(t *testing.T, db *sql.DB, acct ledger.Account) money.Amount {
+//
+// ctx 由调用方传进来，理由同 seedUser。
+func ledgerBalance(t *testing.T, ctx context.Context, db *sql.DB, acct ledger.Account) money.Amount {
 	t.Helper()
 	var raw string
-	if err := db.QueryRowContext(context.Background(),
+	if err := db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(amount), 0)::numeric(20, 8)::text
 		   FROM ledger_entries WHERE account = $1 AND asset = 'CNY'`,
 		acct.String()).Scan(&raw); err != nil {
@@ -257,14 +264,14 @@ func TestGrantBooksFaceValue(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 
 	ref := "grant-" + itoa(nextID())
 	txn := newTxnID()
 	// 平台收入是全局科目，同包的别的用例也往上面记；判据只能看这一条用例
 	// 写进去的变化，不能看整库的余额。
-	before := ledgerBalance(t, db, ledger.PlatformRevenueAccount())
+	before := ledgerBalance(t, ctx, db, ledger.PlatformRevenueAccount())
 	up, applied, err := svc.Grant(ctx, GrantInput{
 		TxnID: txn, Ref: ref, UserID: userID, PlanKey: plan.Key,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
@@ -278,10 +285,10 @@ func TestGrantBooksFaceValue(t *testing.T) {
 	if up.Status != UserPlanActive || up.Ref != ref || up.UserID != userID || up.PlanID != plan.ID {
 		t.Errorf("订阅行不对: %+v", up)
 	}
-	if bal := ledgerBalance(t, db, ledger.PrepaidAccount(up.ID)); bal.Cmp(amount(t, "100")) != 0 {
+	if bal := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(up.ID)); bal.Cmp(amount(t, "100")) != 0 {
 		t.Errorf("prepaid:%d 余额 = %s，期望 100", up.ID, bal)
 	}
-	after := ledgerBalance(t, db, ledger.PlatformRevenueAccount())
+	after := ledgerBalance(t, ctx, db, ledger.PlatformRevenueAccount())
 	if delta := after.Sub(before); delta.Cmp(amount(t, "-100")) != 0 {
 		t.Errorf("发放让平台收入变化 %s，期望 -100（让出去的额度）", delta)
 	}
@@ -298,7 +305,7 @@ func TestGrantIsIdempotentByRef(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 
 	ref := "grant-" + itoa(nextID())
@@ -330,7 +337,7 @@ func TestGrantIsIdempotentByRef(t *testing.T) {
 	if got := countEntries(t, db, txn); got != 2 {
 		t.Errorf("重放后授予分录 %d 条，期望仍是 2", got)
 	}
-	if bal := ledgerBalance(t, db, ledger.PrepaidAccount(first.ID)); bal.Cmp(amount(t, "100")) != 0 {
+	if bal := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(first.ID)); bal.Cmp(amount(t, "100")) != 0 {
 		t.Errorf("重放后 prepaid 余额 = %s，期望仍为 100", bal)
 	}
 
@@ -350,8 +357,8 @@ func TestGrantRejectsSameRefDifferentUserOrPlan(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
-	otherUser := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
+	otherUser := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 	otherPlan := newPlan(t, ctx, svc, "50")
 
@@ -385,7 +392,7 @@ func TestGrantReplayAfterExpirySucceeds(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 
 	ref := "grant-" + itoa(nextID())
@@ -422,7 +429,7 @@ func TestGrantRejectsScopeViolationAtWriteTime(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 
 	key := "plan-" + itoa(nextID())
 	if _, err := db.ExecContext(ctx, `
@@ -445,7 +452,7 @@ func TestGrantRejectsDisabledPlan(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 
 	if _, err := svc.SetPlanEnabled(ctx, SetPlanEnabledInput{Key: plan.Key, Enabled: false}); err != nil {
@@ -493,11 +500,11 @@ func TestLifecycleBalances(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 
 	// 平台收入是全局科目：只判这三条分录让它的净变化为零。
-	before := ledgerBalance(t, db, ledger.PlatformRevenueAccount())
+	before := ledgerBalance(t, ctx, db, ledger.PlatformRevenueAccount())
 
 	up, _, err := svc.Grant(ctx, GrantInput{
 		TxnID: newTxnID(), Ref: "grant-" + itoa(nextID()), UserID: userID,
@@ -518,7 +525,7 @@ func TestLifecycleBalances(t *testing.T) {
 	if _, postErr := store.New(db).PostTransaction(ctx, consumeTxn); postErr != nil {
 		t.Fatalf("记额度包消费失败: %v", postErr)
 	}
-	if bal := ledgerBalance(t, db, prepaid); bal.Cmp(amount(t, "70")) != 0 {
+	if bal := ledgerBalance(t, ctx, db, prepaid); bal.Cmp(amount(t, "70")) != 0 {
 		t.Fatalf("消费后 prepaid 余额 = %s，期望 70", bal)
 	}
 
@@ -535,10 +542,10 @@ func TestLifecycleBalances(t *testing.T) {
 	if voided.Status != UserPlanExpired || voided.VoidRef != voidRef {
 		t.Errorf("作废后的订阅不对: %+v", voided)
 	}
-	if bal := ledgerBalance(t, db, prepaid); !bal.IsZero() {
+	if bal := ledgerBalance(t, ctx, db, prepaid); !bal.IsZero() {
 		t.Errorf("作废后 prepaid 余额 = %s，期望 0", bal)
 	}
-	if bal := ledgerBalance(t, db, ledger.PlatformRevenueAccount()); bal.Sub(before) != money.Zero {
+	if bal := ledgerBalance(t, ctx, db, ledger.PlatformRevenueAccount()); bal.Sub(before) != money.Zero {
 		t.Errorf("走完一轮后平台收入变化 %s，期望 0（消费记了 30、作废收回 70）",
 			bal.Sub(before))
 	}
@@ -556,7 +563,7 @@ func TestVoidWaitsForConcurrentPrepaidWriter(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 
 	up, _, err := svc.Grant(ctx, GrantInput{
@@ -623,7 +630,7 @@ func TestVoidWaitsForConcurrentPrepaidWriter(t *testing.T) {
 	}
 
 	// 作废应当核销消费之后剩下的 70，而不是它读到的 100：余额归零，不为负。
-	if bal := ledgerBalance(t, db, prepaid); !bal.IsZero() {
+	if bal := ledgerBalance(t, ctx, db, prepaid); !bal.IsZero() {
 		t.Errorf("prepaid 余额 = %s，期望 0", bal)
 	}
 	rows, err := svc.UserPlans(ctx, userID)
@@ -640,7 +647,7 @@ func TestVoidIsIdempotentByRef(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 
 	up, _, err := svc.Grant(ctx, GrantInput{
@@ -675,7 +682,7 @@ func TestVoidIsIdempotentByRef(t *testing.T) {
 	if got := countEntries(t, db, txn); got != before {
 		t.Errorf("重放后分录 %d 条，期望仍是 %d", got, before)
 	}
-	if bal := ledgerBalance(t, db, ledger.PrepaidAccount(up.ID)); !bal.IsZero() {
+	if bal := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(up.ID)); !bal.IsZero() {
 		t.Errorf("重放后 prepaid 余额 = %s，期望 0", bal)
 	}
 
@@ -693,7 +700,7 @@ func TestVoidRejectsAlreadyVoided(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 
 	up, _, err := svc.Grant(ctx, GrantInput{
@@ -725,7 +732,7 @@ func TestVoidRejectsRefUsedByAnotherSubscription(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 
 	grant := func() UserPlan {
@@ -751,7 +758,7 @@ func TestVoidRejectsRefUsedByAnotherSubscription(t *testing.T) {
 	}); !errors.Is(err, store.ErrTxnConflict) {
 		t.Errorf("同一个作废单号用在第二条订阅上应当是冲突，得到: %v", err)
 	}
-	if bal := ledgerBalance(t, db, ledger.PrepaidAccount(second.ID)); bal.Cmp(amount(t, "100")) != 0 {
+	if bal := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(second.ID)); bal.Cmp(amount(t, "100")) != 0 {
 		t.Errorf("冲突之后第二条订阅的面值余额 = %s，期望仍是 100", bal)
 	}
 }
@@ -762,7 +769,7 @@ func TestVoidRecordsVoidedAt(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 
 	up, _, err := svc.Grant(ctx, GrantInput{
@@ -806,7 +813,7 @@ func TestVoidWithZeroRemainingWritesNoEntries(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 
 	up, _, err := svc.Grant(ctx, GrantInput{
@@ -847,7 +854,7 @@ func TestVoidWithZeroRemainingWritesNoEntries(t *testing.T) {
 	if got := countEntries(t, db, voidTxn); got != 0 {
 		t.Errorf("零剩余面值的作废写了 %d 条分录，期望 0", got)
 	}
-	if bal := ledgerBalance(t, db, ledger.PrepaidAccount(up.ID)); !bal.IsZero() {
+	if bal := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(up.ID)); !bal.IsZero() {
 		t.Errorf("prepaid 余额 = %s，期望 0", bal)
 	}
 }
@@ -858,7 +865,7 @@ func TestUserPlansReportsRemaining(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	plan := newPlan(t, ctx, svc, "100")
 
 	up, _, err := svc.Grant(ctx, GrantInput{

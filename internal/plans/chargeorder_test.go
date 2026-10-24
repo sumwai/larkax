@@ -37,7 +37,7 @@ func TestEffectiveChargeOrderFollowsPlatformDefault(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 
 	order, source, err := svc.EffectiveChargeOrder(ctx, userID)
 	if err != nil {
@@ -56,7 +56,7 @@ func TestEffectiveChargeOrderUsesUserOverride(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 
 	if err := svc.SetUserChargeOrder(ctx, userID, ChargeOrderBalanceFirst); err != nil {
 		t.Fatalf("设用户扣费顺序失败: %v", err)
@@ -90,7 +90,7 @@ func TestEffectiveChargeOrderFollowsChangedPlatformDefault(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 
 	before := platformChargeOrderRow(t, svc)
 	setPlatformChargeOrder(t, svc, `"balance_only"`)
@@ -114,7 +114,7 @@ func TestEffectiveChargeOrderFallsBackOnUnknownPlatformValue(t *testing.T) {
 	ctx := context.Background()
 	svc := New(db)
 	logs := captureLogs(t, svc)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 
 	before := platformChargeOrderRow(t, svc)
 	setPlatformChargeOrder(t, svc, `"future_only"`)
@@ -149,7 +149,7 @@ func TestEffectiveChargeOrderFallsBackOnUnknownUserValue(t *testing.T) {
 	ctx := context.Background()
 	svc := New(db)
 	logs := captureLogs(t, svc)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 
 	before := platformChargeOrderRow(t, svc)
 	setPlatformChargeOrder(t, svc, `"balance_first"`)
@@ -181,7 +181,7 @@ func TestSetUserChargeOrderRejectsUnknownValue(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 
 	err := svc.SetUserChargeOrder(ctx, userID, ChargeOrder("tokens_first"))
 	if err == nil {

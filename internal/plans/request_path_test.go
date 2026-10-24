@@ -59,7 +59,7 @@ func TestRequestChargeOrderFallsBackInsteadOfFailing(t *testing.T) {
 		`DELETE FROM settings WHERE key = $1`, PlatformChargeOrderKey); err != nil {
 		t.Fatalf("删平台默认失败: %v", err)
 	}
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 	if got := svc.RequestChargeOrder(ctx, userID); got != DefaultChargeOrder.String() {
 		t.Errorf("两级都读不到时应落到兜底值 %q，得到 %q", DefaultChargeOrder, got)
 	}
@@ -104,7 +104,7 @@ func TestVoidLeavesPendingReservationOnPrepaid(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	svc := New(db)
-	userID := seedUser(t, db)
+	userID := seedUser(t, ctx, db)
 
 	plan := newPlan(t, ctx, svc, "50")
 	up, applied, err := svc.Grant(ctx, GrantInput{
@@ -117,7 +117,7 @@ func TestVoidLeavesPendingReservationOnPrepaid(t *testing.T) {
 
 	seedPendingPlanReservation(t, ctx, db, userID, up.ID, "30")
 
-	before := ledgerBalance(t, db, ledger.PrepaidAccount(up.ID))
+	before := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(up.ID))
 	if before.Cmp(amount(t, "50")) != 0 {
 		t.Fatalf("作废前面值余额 = %s，期望 50", before)
 	}
@@ -133,7 +133,7 @@ func TestVoidLeavesPendingReservationOnPrepaid(t *testing.T) {
 		t.Errorf("状态 = %s，期望 %s", voided.Status, UserPlanExpired)
 	}
 
-	after := ledgerBalance(t, db, ledger.PrepaidAccount(up.ID))
+	after := ledgerBalance(t, ctx, db, ledger.PrepaidAccount(up.ID))
 	if after.Cmp(amount(t, "30")) != 0 {
 		t.Errorf("作废后面值余额 = %s，期望 30（在途占用留给那几笔请求）", after)
 	}
