@@ -264,6 +264,15 @@ func TestFishCompletionMarksValueFlags(t *testing.T) {
 			want: true,
 		},
 		{
+			// 这一格走的是另一个注册入口：`--model` 经 legacyStringFlag 用
+			// fs.Var 注册，吃不吃取值由标准库的 IsBoolFlag 约定判；上一格的
+			// `--schedule-file` 走 fs.String。两个入口各钉一格，否则把
+			// takesValue 改坏时只有走 fs.String 的那一格会红。
+			name: "经 flag.Value 注册的选项也带 -r",
+			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from create' -l model -r",
+			want: true,
+		},
+		{
 			name: "布尔开关不带 -r",
 			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l credential-stdin",
 			want: true,
