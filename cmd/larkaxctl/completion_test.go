@@ -737,13 +737,17 @@ func fishExpectedChildren(data completionData, path string) []string {
 	return names
 }
 
-// TestFishOptionPositionConditions 钉住同一处条件在选项位上的表现。
+// TestFishOptionPositionConditions 钉住条件在选项位上的两件事。
 //
-// 选项行与动作行用的是同一个 fishSeenCondition，所以两条规则在选项位同样生效：
-// `model alias -` 修 #1182 前有 30 条候选，`model create`、`model alias create`
-// 这些路径的选项全漏了进来；`channel map -` 只该剩全局选项（这条路径自己没有
-// 选项），`channel map add -` 该有它自己的 `--overrides` 加全局选项——少了
-// `--overrides` 就说明否定用过了头，把子层自己的选项也否掉了。
+// 一是 #1182 那条分隔符规则：`model alias -` 修前有 30 条候选，`model create`、
+// `model alias create` 这些路径的选项全漏了进来。二是否定**用过了头**：
+// `channel map add -` 该有它自己的 `--overrides` 加全局选项，少了它就说明把子层
+// 自己的选项也一起否掉了。
+//
+// 它不是「否定本身有效」的反向证据：选项只从自己那条路径补，而带自有选项的
+// 路径里没有一对是父子关系（按 data.flags 的键逐对核过），今天没有父层选项能漏
+// 到子层——把生成器里那段否定删掉，这六格照样全绿。那份证据在动作位，见
+// TestFishMultiSegmentConditions 与 TestFishChildLevelActionsEqualTheirOwnTable。
 //
 // 期望同样从注册表派生（见 fishExpectedOptions），不读生成物。
 func TestFishOptionPositionConditions(t *testing.T) {
