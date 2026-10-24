@@ -498,7 +498,7 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 		// 判定方式一变，这里与文档要一起更新。
 		{"取值恰好是命令名", []string{"--env-file", "channel"}, func(t *testing.T, shell string, got []string) {
 			if shell == "fish" {
-				requireFishNamedValueBoundary(t, got)
+				requireFishNamedValueBoundary(t, data, got)
 				return
 			}
 			requireRegisteredTopLevel(t, shell, got)
@@ -578,14 +578,16 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 	})
 }
 
-// TestFishMultiSegmentConditions 钉住 fish 多段路径的条件：每一段都出现过才成立。
+// TestFishMultiSegmentConditions 钉住 fish 多段路径的条件：路径上每一段都出现过、
+// 且它的直接子命令名一个都没出现时才成立。
 //
-// fishSeenCondition 曾把各段用空格隔开的 `and` 连起来，而 fish 只在命令分隔位置
-// 把 `and` 当连接符；整串于是成了 `__fish_seen_subcommand_from` 的参数，判定退化
-// 成「任一段出现过」，深层路径的动作漏到父层——`channel map` 的 `add` / `remove`
-// 出现在 `channel ` 那一级（见 #1182）。分隔符改成 `; and ` 后，父层只剩自己的
-// 动作；子层不变，仍然带着父层动作——父层动作留在子层见 #1183：本单不改它，
-// 这里的断言钉的是修完后的现状，不是意图。
+// 两条规则各修过一次。先是 `and` 的连接位置：fishSeenCondition 曾把各段用空格
+// 隔开的 `and` 连起来，而 fish 只在命令分隔位置把 `and` 当连接符；整串于是成了
+// `__fish_seen_subcommand_from` 的参数，判定退化成「任一段出现过」，深层路径的
+// 动作漏到父层——`channel map` 的 `add` / `remove` 出现在 `channel ` 那一级
+// （见 #1182）。再是父层条件在子层仍为真：只判「这一段出现过」时，`channel map `
+// 里 `channel` 出现过，父层动作全留在子层（见 #1183）。现在的条件多了 `not
+// __fish_seen_subcommand_from <直接子命令名>`；子命令一敲出来，父层那条就不再成立。
 //
 // 期望从 completionActionTable 与注册表独立派生（见 fishExpectedCandidates），
 // 不读生成物：从生成物取期望等于把同一个错误抄两遍。fish 的 `complete -C` 按
@@ -595,10 +597,11 @@ func TestFishMultiSegmentConditions(t *testing.T) {
 	if !ok {
 		return
 	}
-	script := fishCompletionScript(buildCompletionData())
+	data := buildCompletionData()
+	script := fishCompletionScript(data)
 	cells := [][]string{
-		nil, // 一级命令：改前改后同为注册表那一份，作为对照
-		{"channel"}, {"channel", "map"},
+		nil, // 一级命令：不受这两条规则影响，作为对照
+		{"channel"}, {"channel", "map"}, {"channel", "map", "add"},
 		{"model"}, {"model", "alias"},
 		{"price"}, {"price", "calendar"},
 		{"admin"}, {"admin", "token"},
@@ -614,7 +617,7 @@ func TestFishMultiSegmentConditions(t *testing.T) {
 			got := runFishCompletion(t, fish, script, words, "")
 			gotCmp := slices.Clone(got)
 			slices.Sort(gotCmp)
-			want := fishExpectedCandidates(words)
+			want := fishExpectedCandidates(data, words)
 			if !slices.Equal(gotCmp, want) {
 				t.Errorf("`larkaxctl %s` 的候选 = %v，期望 %v（按动作表派生）",
 					strings.Join(words, " "), got, want)
@@ -623,26 +626,50 @@ func TestFishMultiSegmentConditions(t *testing.T) {
 	}
 }
 
+// TestFishChildLevelActionsEqualTheirOwnTable 是对上面那条规则的反向等式：在这几
+// 格里，候选恰好是**那条路径自己的动作表**，一条父层动词都不许有。
+//
+// 与 TestFishMultiSegmentConditions 的期望算法不同：那边算的是「所有成立路径的
+// 并集」，这里只认这一条路径的常量。两者同时成立，才说明子层的候选既没有多
+// （父层漏下来）也没有少（自己的被父层那条否定误伤）。
+//
+// `model alias ` 不在这张表里：一级命令 `alias` 的动作会因为同名词串扰一起补出来
+// （见 #1183 的「不做的事」），那格的期望由上面的并集那条负责。`user plan order `
+// 同名的 `plan order` 也成立，只是两边的动作恰好是同一份（`show` / `set`）。
+func TestFishChildLevelActionsEqualTheirOwnTable(t *testing.T) {
+	fish, ok := requireCompletionShell(t, "fish")
+	if !ok {
+		return
+	}
+	script := fishCompletionScript(buildCompletionData())
+	// `channel map add` 在动作表里没有条目：它是吃位置的叶子，动作数为 0。
+	for _, path := range []string{"channel map", "channel map add", "user plan order", "wallet payout"} {
+		t.Run(path+" ", func(t *testing.T) {
+			got := runFishCompletion(t, fish, script, strings.Fields(path), "")
+			want := slices.Clone(completionActionTable[path])
+			slices.Sort(want)
+			if !slices.Equal(got, want) {
+				t.Errorf("`larkaxctl %s ` 的候选 = %v，期望这条路径自己的动作表 %v：子层不该再有父层动词",
+					path, got, want)
+			}
+		})
+	}
+}
+
 // fishExpectedCandidates 按动作表独立派生某一格应当出现的候选。
 //
-// fish 的路径条件是「每一段都在命令行里出现过」，所以期望是动作表里所有「每一段
-// 都已出现」的路径的动作并集；一级命令那一格没有路径，条件是「还没出现过一级
-// 命令名」，另算。只从 completionActionTable 与注册表取，不读生成物。
-func fishExpectedCandidates(words []string) []string {
+// fish 的路径条件是「路径上每段都出现过、且直接子命令名一个都没出现」
+// （见 fishPathHolds），所以期望是动作表里所有成立路径的动作并集；一级命令那一
+// 格没有路径，条件是「还没出现过一级命令名」，另算。只从 completionActionTable
+// 与注册表取，不读生成物。
+func fishExpectedCandidates(data completionData, words []string) []string {
 	seen := make(map[string]bool, len(words))
 	for _, word := range words {
 		seen[word] = true
 	}
 	var want []string
 	for path, verbs := range completionActionTable {
-		matched := true
-		for _, token := range strings.Fields(path) {
-			if !seen[token] {
-				matched = false
-				break
-			}
-		}
-		if matched {
+		if fishPathHolds(data, path, seen) {
 			want = append(want, verbs...)
 		}
 	}
@@ -660,13 +687,63 @@ func fishExpectedCandidates(words []string) []string {
 	return slices.Compact(want)
 }
 
+// fishPathHolds 判断一条路径在给定的词序列下是否成立：路径上每段都出现过，
+// 且它的直接子命令名一个都没出现。
+//
+// 两条都从注册表取：路径本身来自 completionActionTable / data.flags，子命令名
+// 来自 fishExpectedChildren。
+func fishPathHolds(data completionData, path string, seen map[string]bool) bool {
+	for _, token := range strings.Fields(path) {
+		if !seen[token] {
+			return false
+		}
+	}
+	for _, child := range fishExpectedChildren(data, path) {
+		if seen[child] {
+			return false
+		}
+	}
+	return true
+}
+
+// fishExpectedChildren 按注册表独立派生一条路径的直接子命令名：前缀相同、只多
+// 一段的那些路径的最后一段，按字典序。
+//
+// 路径集合取 data.words 与 data.flags 的键，与生成器同一个来源（生成动词行与
+// 选项行读的就是这两张表）。只多一段这一条不能省：`channel map add` 是 `channel`
+// 的后代但不是它的直接子命令。
+func fishExpectedChildren(data completionData, path string) []string {
+	tokens := strings.Fields(path)
+	keys := make([]string, 0, len(data.words)+len(data.flags))
+	for key := range data.words {
+		keys = append(keys, key)
+	}
+	for key := range data.flags {
+		keys = append(keys, key)
+	}
+	seen := make(map[string]bool, len(keys))
+	var names []string
+	for _, key := range keys {
+		fields := strings.Fields(key)
+		if len(fields) != len(tokens)+1 || strings.Join(fields[:len(tokens)], " ") != path {
+			continue
+		}
+		if name := fields[len(tokens)]; !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
 // TestFishOptionPositionConditions 钉住同一处条件在选项位上的表现。
 //
-// 选项行与动作行用的是同一个 fishSeenCondition，所以那条「任一段出现过」的退化
-// 在选项位更明显：`model alias -` 修前有 30 条候选，`model create`、`model alias
-// create` 这些路径的选项全漏了进来；修后只剩全局选项（这条路径自己没有选项）。
-// `alias resolve -` 修前 9 条、修后 6 条，其中 `--channel` / `--model` 是 alias
-// resolve 自己注册的，必须还在——少了就说明修过了头。
+// 选项行与动作行用的是同一个 fishSeenCondition，所以两条规则在选项位同样生效：
+// `model alias -` 修 #1182 前有 30 条候选，`model create`、`model alias create`
+// 这些路径的选项全漏了进来；`channel map -` 只该剩全局选项（这条路径自己没有
+// 选项），`channel map add -` 该有它自己的 `--overrides` 加全局选项——少了
+// `--overrides` 就说明否定用过了头，把子层自己的选项也否掉了。
 //
 // 期望同样从注册表派生（见 fishExpectedOptions），不读生成物。
 func TestFishOptionPositionConditions(t *testing.T) {
@@ -680,6 +757,8 @@ func TestFishOptionPositionConditions(t *testing.T) {
 		{"model", "alias"},
 		{"alias", "resolve"},
 		{"channel"},
+		{"channel", "map"},
+		{"channel", "map", "add"},
 		{"price", "calendar"},
 	}
 	for _, words := range cells {
@@ -698,8 +777,9 @@ func TestFishOptionPositionConditions(t *testing.T) {
 
 // fishExpectedOptions 按注册表独立派生选项位上应当出现的候选。
 //
-// 与 fishExpectedCandidates 同一条规则：每段都出现过的路径，它的自有选项都算数；
-// 全局选项无条件补，与路径无关。只从 data.flags 与 usageNotes 的全局选项一节取。
+// 与 fishExpectedCandidates 同一条规则（见 fishPathHolds）：成立的路径，它的自有
+// 选项都算数；全局选项无条件补，与路径无关。只从 data.flags 与 usageNotes 的
+// 全局选项一节取。
 func fishExpectedOptions(data completionData, words []string) []string {
 	seen := make(map[string]bool, len(words))
 	for _, word := range words {
@@ -707,14 +787,7 @@ func fishExpectedOptions(data completionData, words []string) []string {
 	}
 	var want []string
 	for _, path := range flaggedPaths(data) {
-		matched := true
-		for _, token := range strings.Fields(path) {
-			if !seen[token] {
-				matched = false
-				break
-			}
-		}
-		if matched {
+		if fishPathHolds(data, path, seen) {
 			want = append(want, ownOptionNames(data, path)...)
 		}
 	}
@@ -982,9 +1055,9 @@ func requireRegisteredTopLevel(t *testing.T, shell string, got []string) {
 // 命令名」的条件因此不成立，候选退成 channel 那一级的动作；取值本身照常生效。
 // 期望从动作表独立派生（见 fishExpectedCandidates），不写死条数：新增一个
 // channel 动作时期望跟着变，不会出现「数字对、动词错」这种假绿。
-func requireFishNamedValueBoundary(t *testing.T, got []string) {
+func requireFishNamedValueBoundary(t *testing.T, data completionData, got []string) {
 	t.Helper()
-	want := fishExpectedCandidates([]string{"--env-file", "channel"})
+	want := fishExpectedCandidates(data, []string{"--env-file", "channel"})
 	gotCmp := slices.Clone(got)
 	slices.Sort(gotCmp)
 	if !slices.Equal(gotCmp, want) {

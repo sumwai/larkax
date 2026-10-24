@@ -148,7 +148,8 @@ func zshCompletionScript(data completionData) string {
 // fishCompletionScript 生成 fish 补全。
 //
 // fish 的补全按条件挂：一级命令挂「命令行里还没出现一级命令名」，其余路径用
-// `__fish_seen_subcommand_from` 把它那几段连起来。选项按路径各挂一次，全局选项
+// `__fish_seen_subcommand_from` 把它那几段连起来，再加一段否定把它自己的直接
+// 子命令名排除在外（见 fishSeenCondition）。选项按路径各挂一次，全局选项
 // 挂一次（它们写在子命令前后都认）。
 func fishCompletionScript(data completionData) string {
 	var b strings.Builder
@@ -188,7 +189,7 @@ func fishCompletionScript(data completionData) string {
 		if path == "" {
 			continue
 		}
-		cond := fishSeenCondition(strings.Split(path, " "))
+		cond := fishSeenCondition(data, strings.Split(path, " "))
 		for _, word := range data.words[path] {
 			fmt.Fprintf(&b, "complete -c larkaxctl -n %s -a %s\n",
 				fishQuote(cond), fishQuote(word))
@@ -213,7 +214,7 @@ func fishCompletionScript(data completionData) string {
 			fishQuote(strings.Join(data.globalEnums[flag], " ")))
 	}
 	for _, path := range flaggedPaths(data) {
-		cond := fishSeenCondition(strings.Split(path, " "))
+		cond := fishSeenCondition(data, strings.Split(path, " "))
 		for _, option := range ownOptions(data, path) {
 			// 吃取值的选项要声明 `-r`，fish 才会停下来等取值；不声明的话它把
 			// 选项当开关，敲完按 Tab 会按位置接着补动词。
@@ -237,7 +238,7 @@ func fishCompletionScript(data completionData) string {
 		if !ok {
 			continue
 		}
-		cond := fishSeenCondition(strings.Split(path, " "))
+		cond := fishSeenCondition(data, strings.Split(path, " "))
 		fmt.Fprintf(&b, "complete -c larkaxctl -n %s -l %s -x -a %s\n",
 			fishQuote(cond), strings.TrimPrefix(flag, "--"),
 			fishQuote(strings.Join(data.enums[key], " ")))
@@ -258,19 +259,62 @@ func fishTopLevelCondition(commands []completionCommand) string {
 	return "not __fish_seen_subcommand_from " + strings.Join(names, " ")
 }
 
-// fishSeenCondition 把一条路径翻成 fish 的条件。
+// fishSeenCondition 把一条路径翻成 fish 的条件：路径上的每一段都出现过，
+// 并且它的直接子命令名一个都还没出现。
 //
 // 多段之间用 `; and ` 连接，不能只写 ` and `：fish 只在命令分隔位置把 `and`
 // 当连接符，空格隔开时整串是 `__fish_seen_subcommand_from` 的参数，而它内部
 // 是 `contains -- $i $argv`，于是「任一段出现过」即为真——深层路径的条件在
 // 父层恒真（`channel map` 的 `add` / `remove` 会漏到 `channel ` 那一级）。
 // 分号把前一句截成一个完整命令，`and` 才回到运算符的位置。
-func fishSeenCondition(path []string) string {
-	parts := make([]string, 0, len(path))
+//
+// 只有前半段的话，父层路径的条件在子层仍然为真：`larkaxctl channel map ` 里
+// `channel` 出现过，channel 的十几个动作就全留在 map 这一级（见 #1183）。否定
+// 用的是同一类判据——直接子命令名从注册表派生（见 fishChildNames），子命令一敲
+// 出来，父层那一条就不再成立。
+func fishSeenCondition(data completionData, path []string) string {
+	parts := make([]string, 0, len(path)+1)
 	for _, token := range path {
 		parts = append(parts, fmt.Sprintf("__fish_seen_subcommand_from %s", token))
 	}
+	if children := fishChildNames(data, path); len(children) > 0 {
+		parts = append(parts, "not __fish_seen_subcommand_from "+strings.Join(children, " "))
+	}
 	return strings.Join(parts, "; and ")
+}
+
+// fishChildNames 返回一条路径的直接子命令名，按字典序：注册表里前缀相同、只多
+// 一段的那些路径的最后一段。
+//
+// 路径集合取 data.words 与 data.flags 的键——生成动词行与选项行读的是同一份
+// completionData，不另抄清单。只多一段这一条很关键：`channel map add` 是
+// `channel` 的后代，但不是它的直接子命令，不该进它的否定表。
+func fishChildNames(data completionData, path []string) []string {
+	if len(path) == 0 {
+		return nil
+	}
+	prefix := strings.Join(path, " ")
+	keys := make([]string, 0, len(data.words)+len(data.flags))
+	for key := range data.words {
+		keys = append(keys, key)
+	}
+	for key := range data.flags {
+		keys = append(keys, key)
+	}
+	seen := make(map[string]bool, len(keys))
+	var names []string
+	for _, key := range keys {
+		fields := strings.Fields(key)
+		if len(fields) != len(path)+1 || strings.Join(fields[:len(path)], " ") != prefix {
+			continue
+		}
+		if name := fields[len(path)]; !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
 }
 
 // fishQuote 把一段文本放进 fish 的单引号里。
