@@ -628,14 +628,15 @@ func TestCarryoverRateFailureLeavesStateUntouched(t *testing.T) {
 	}
 }
 
-// TestWholeUnitUnitsIsOneHundredMillion 按值钉住「一个整单位」。
+// TestWholeUnitUnits 按值钉住「一个整单位」。
 //
 // 期望值写字面量，不从 money.Scale 推：从被测来源算期望，等于把同一个错误抄两遍。
 //
-// 这条断言之前**不能**调 carryShare——wholeUnitUnits 在那里是除数，变异成
-// `u /= 10` 之后它是 0，先调就会除零 panic，而这样的红落在 panic 上，不算证据。
-// 让它作为一个值被读到，`u *= 10` 上的算术变异才有可杀它的断言。
-func TestWholeUnitUnitsIsOneHundredMillion(t *testing.T) {
+// 循环改成 `for range money.Scale` 之后，原先 `i < money.Scale` 上那两条边界变异
+// （`<=` 会多乘一次得 1e9，`>=` 一次不乘得 1）连同那句死循环形态一起消失，而它们
+// 此前是被用例杀掉的。这条值断言就是把那两格证据补回来。单独成一个用例，是为了
+// 它能单跑、不连库，红证好贴。
+func TestWholeUnitUnits(t *testing.T) {
 	if wholeUnitUnits != 100_000_000 {
 		t.Errorf("一个整单位在定点数里的值 = %d，期望 100000000（10^8，即 money.Scale=8）", wholeUnitUnits)
 	}
