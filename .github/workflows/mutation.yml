@@ -144,8 +144,8 @@ jobs:
             # 前缀从脚本读，不在这里再列一份。
             changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA" -- '*.go')
             changed_all="$changed"
-            mapfile -t auto_prefixes < <(bash scripts/check-mutation.sh --list-packages --money)
-            if [ "${#auto_prefixes[@]}" -eq 0 ]; then
+            mapfile -t money_prefixes < <(bash scripts/check-mutation.sh --list-packages --money)
+            if [ "${#money_prefixes[@]}" -eq 0 ]; then
               echo "::error::scripts/check-mutation.sh --list-packages --money 没打出任何前缀。"
               echo "::error::退回「这一轮不跑」会把「脚本读不出范围」藏成「不需要跑」——停下来，先修脚本。"
               exit 1
@@ -154,7 +154,7 @@ jobs:
             while IFS= read -r f; do
               [ -n "$f" ] || continue
               allowed=0
-              for pre in "${auto_prefixes[@]}"; do
+              for pre in "${money_prefixes[@]}"; do
                 case "$f" in "$pre"*) allowed=1; break ;; esac
               done
               if [ "$allowed" -eq 0 ]; then

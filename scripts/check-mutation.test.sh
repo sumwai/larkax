@@ -1347,7 +1347,9 @@ fi
 #        b) 去掉结尾 `/` 后 `--list-packages --match` 必须成功——这个前缀确实有
 #           PKGS 条目覆盖，否则「触发了却没有包可跑」会显示成跳过；
 #        c) 负控：把前缀换成 PKGS 里不存在的目录，**同一条检查必须红**。没有
-#           (c)，(b) 就分不清「检查通过」与「检查压根没看数据」（LESSONS 第 2、7 条）；
+#           (c)，(b) 就分不清「检查通过」与「检查压根没看数据」（LESSONS 第 2、7 条）。
+#           负控另配两道前置：副本里真的换上了坏前缀、且副本的裸 `--list-packages`
+#           与原件逐字相同——分别挡「替换没生效」与「替换改到了 PKGS」两种假绿；
 #        d) `internal/plans` 在清单里——今天分叉的那一格，钉住它。
 money_out=$(GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
   LOCK_FILE="$tmp/notadir/lock" bash "$SCRIPT" --list-packages --money 2>&1)
@@ -1391,8 +1393,11 @@ if [ "$?" -eq 0 ]; then ok; else
 fi
 
 # 负控：把 MONEY_PKGS 里的 internal/plans 换成不存在的目录，同一条检查必须红。
-# 副本放在 $tmp 下，不动工作树；先确认副本里真的换掉了，否则「没红」可能只是
-# 因为 sed 没生效——那时这组负控自己是假的。
+# 副本放在 $tmp 下，不动工作树。两道前置各自挡一种「负控假绿」：
+#   - 副本里真的换上了坏前缀：挡「替换压根没生效」；
+#   - 副本的裸 `--list-packages` 与原件逐字相同：挡「替换改到了 PKGS」。
+# 后者不是假想：不带地址的 sed 会把两份清单里的 `internal/plans` 一起换掉，
+# 于是 `--match` 反而成功、负控看起来全绿，诊断还会指向判据而不是替换。
 neg_script="$tmp/check-mutation-neg.sh"
 awk '
   /^MONEY_PKGS=\(/ { inmoney = 1 }
@@ -1402,6 +1407,11 @@ awk '
 ' "$SCRIPT" > "$neg_script"
 if bash "$neg_script" --list-packages --money 2>/dev/null | grep -qx 'internal/no-such-money-pkg/'; then ok; else
   bad "--money 负控 —— 临时副本里没换上那个不存在的目录，下面的负控不成立"
+fi
+neg_bare=$(GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+  LOCK_FILE="$tmp/notadir/lock" bash "$neg_script" --list-packages 2>&1)
+if [ "$neg_bare" = "$list_out" ]; then ok; else
+  bad "--money 负控 —— 副本的 --list-packages 与原件不一致：替换改到了 PKGS，不只是 MONEY_PKGS"
 fi
 neg_out=$(check_money_prefixes "$neg_script")
 neg_rc=$?
