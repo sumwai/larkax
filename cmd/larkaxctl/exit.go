@@ -173,6 +173,12 @@ var conflictErrors = []error{
 	auth.ErrDeletionAlreadyRequested,
 	auth.ErrDeletionAlreadyDeleted,
 	auth.ErrDeletionBalanceNotZero,
+	// 打标之前的三条前置条件：还有没吊销的 key、商户应付没结清、名下还有渠道。
+	// 与上面那一族同一个形状——命令没写错，是库里那些行现在还不是「清理干净」的
+	// 状态；下一步是按报错点出的那一条去清理，再重发。
+	auth.ErrDeletionKeysNotRevoked,
+	auth.ErrDeletionMerchantPayableNotZero,
+	auth.ErrDeletionChannelsNotCleared,
 	// `user update --no-admin` 打在最后一个 active 管理员上：命令没写错，
 	// 是库里那个账号现在不能撤（撤了控制台就没人进得去管理组）。与上面
 	// 销户那一族同一个形状——先动数据（给另一个账号 admin），再重发。

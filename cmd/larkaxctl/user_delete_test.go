@@ -124,6 +124,13 @@ func TestUserDeleteLifecycle(t *testing.T) {
 		_, err := auth.New(db).Authenticate(ctx, requestWithKey(ctx, key.Plaintext))
 		return err
 	}
+	// 打标的前置条件要求 key 已经吊销：先用文档里那条清理命令做掉。
+	revoked := runOnce(t, runAPIKey, []string{
+		"update", "--id", strconv.FormatInt(key.ID, 10), "--status", "revoked",
+	})
+	if revoked.err != nil {
+		t.Fatalf("apikey update --status revoked 失败: %v\nstderr=%s", revoked.err, revoked.stderr)
+	}
 
 	// ── 第一步：打标（可撤） ───────────────────────────────────────
 	r := runOnce(t, runUser, []string{"delete", "request", "--user", name})
@@ -159,7 +166,7 @@ func TestUserDeleteLifecycle(t *testing.T) {
 		t.Errorf("被拒的 update 改了状态:\n%s", r.stdout)
 	}
 
-	// ── 撤销：原来的 key 还能用 ───────────────────────────────────
+	// ── 撤销：状态回到 active，但吊销过的那把 key 不会被放开 ───────
 	r = runOnce(t, runUser, []string{"delete", "revert", "-u", name})
 	if r.err != nil {
 		t.Fatalf("delete revert 失败: %v\nstderr=%s", r.err, r.stderr)
@@ -167,8 +174,9 @@ func TestUserDeleteLifecycle(t *testing.T) {
 	if !strings.Contains(r.stdout, "deletion_requested → active") {
 		t.Errorf("撤销回执里没有状态变化:\n%s", r.stdout)
 	}
-	if err := authOK(); err != nil {
-		t.Fatalf("撤销之后原来的 key 不能用: %v", err)
+	// 吊销是操作者自己做的动作（打标的前置条件之一），撤销只把状态还回去。
+	if err := authOK(); err == nil {
+		t.Fatal("撤销把操作者吊销的 key 又放开了")
 	}
 
 	// ── 再打标；--confirm 写错时什么都不写 ─────────────────────────
@@ -211,7 +219,7 @@ func TestUserDeleteLifecycle(t *testing.T) {
 		email + " → " + newName + "@example.com",
 		"要销户的人 → 已注销用户 #" + strconv.FormatInt(id, 10),
 		"deletion_requested → deleted",
-		"1 把置为 revoked（共 1 把，行都保留）",
+		"0 把置为 revoked（共 1 把，行都保留）",
 		"1 个键已删除",
 		"1 条分录保留",
 	} {
