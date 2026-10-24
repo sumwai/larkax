@@ -105,9 +105,9 @@ func newCalendar(t *testing.T, db *sql.DB) *calendar.Calendar {
 	return cal
 }
 
-func lookup(t *testing.T, cal *calendar.Calendar, date calendar.Date) calendar.DayStatus {
+func lookup(t *testing.T, ctx context.Context, cal *calendar.Calendar, date calendar.Date) calendar.DayStatus {
 	t.Helper()
-	status, err := cal.Lookup(context.Background(), calendar.RegionCN, date)
+	status, err := cal.Lookup(ctx, calendar.RegionCN, date)
 	if err != nil {
 		t.Fatalf("Lookup(%s) 出错: %v", date, err)
 	}
@@ -115,10 +115,10 @@ func lookup(t *testing.T, cal *calendar.Calendar, date calendar.Date) calendar.D
 }
 
 // countYearRows 数出某个年份来源写下的行数。
-func countYearRows(t *testing.T, db *sql.DB, year int) int {
+func countYearRows(t *testing.T, ctx context.Context, db *sql.DB, year int) int {
 	t.Helper()
 	var n int
-	err := db.QueryRowContext(context.Background(),
+	err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM calendar_days WHERE region = 'CN' AND source_year = $1`, year).Scan(&n)
 	if err != nil {
 		t.Fatalf("统计 %d 年的行数失败: %v", year, err)
@@ -139,9 +139,9 @@ func countDayRow(t *testing.T, db *sql.DB, date calendar.Date) int {
 }
 
 // yearState 读某年的状态，出错就失败。
-func yearState(t *testing.T, db *sql.DB, year int) calendar.YearState {
+func yearState(t *testing.T, ctx context.Context, db *sql.DB, year int) calendar.YearState {
 	t.Helper()
-	state, err := NewSource(db).YearState(context.Background(), calendar.RegionCN, year)
+	state, err := NewSource(db).YearState(ctx, calendar.RegionCN, year)
 	if err != nil {
 		t.Fatalf("YearState(%d) 出错: %v", year, err)
 	}
@@ -213,7 +213,7 @@ func TestImportedJudgmentsMatchMemorySource(t *testing.T) {
 		{calendar.Date{Year: year, Month: 12, Day: 31}, weekendKind(year, 12, 31), "", false},
 	}
 	for _, tc := range cases {
-		status := lookup(t, cal, tc.date)
+		status := lookup(t, ctx, cal, tc.date)
 		if status.Kind != tc.kind {
 			t.Errorf("%s 判定 = %q，期望 %q", tc.date, status.Kind, tc.kind)
 		}
@@ -252,7 +252,7 @@ func TestImportedJudgmentsMatchMemorySource(t *testing.T) {
 
 	compared := 0
 	for _, date := range yearDays(year) {
-		fromDB := lookup(t, cal, date)
+		fromDB := lookup(t, ctx, cal, date)
 		fromMemory, err := memCal.Lookup(ctx, calendar.RegionCN, date)
 		if err != nil {
 			t.Fatalf("内存数据源判定 %s 出错: %v", date, err)
@@ -268,7 +268,7 @@ func TestImportedJudgmentsMatchMemorySource(t *testing.T) {
 	if compared != 365 {
 		t.Fatalf("只比了 %d 天，期望 365", compared)
 	}
-	if got := yearState(t, db, year); got != calendar.YearSynced {
+	if got := yearState(t, ctx, db, year); got != calendar.YearSynced {
 		t.Errorf("年份状态 = %q，期望 synced", got)
 	}
 }
@@ -288,15 +288,16 @@ func weekendKind(year, month, day int) calendar.DayKind {
 // 静默按工作日算会在节假日按工作日计价，而账单看上去完全正常——这正是
 // internal/calendar 把判定做成三态要防的事。这里把它钉住。
 func TestYearWithNoRowIsUnknownNotWorkday(t *testing.T) {
+	ctx := t.Context()
 	db := testDB(t)
 	year := newYear(t, db) // 什么都不导入
 
-	if got := yearState(t, db, year); got != calendar.YearUnknown {
+	if got := yearState(t, ctx, db, year); got != calendar.YearUnknown {
 		t.Errorf("年份状态 = %q，期望 unknown（库里没有这一年的记录）", got)
 	}
 
 	cal := newCalendar(t, db)
-	status := lookup(t, cal, calendar.Date{Year: year, Month: 1, Day: 1})
+	status := lookup(t, ctx, cal, calendar.Date{Year: year, Month: 1, Day: 1})
 	if status.Kind != calendar.DayUnknown {
 		t.Fatalf("判定 = %q，期望 unknown", status.Kind)
 	}
@@ -313,20 +314,21 @@ func TestYearWithNoRowIsUnknownNotWorkday(t *testing.T) {
 
 // pending 是未来年份的**正常状态**（公告还没发布），但它同样不能变成工作日。
 func TestPendingYearIsUnknownNotWorkday(t *testing.T) {
+	ctx := t.Context()
 	db := testDB(t)
 	year := newYear(t, db)
 
 	importDoc(t, db, Document{Region: "CN", Year: year, Status: "pending"})
 
-	if got := countYearRows(t, db, year); got != 0 {
+	if got := countYearRows(t, ctx, db, year); got != 0 {
 		t.Errorf("pending 的年份写了 %d 行数据，期望 0 行", got)
 	}
-	if got := yearState(t, db, year); got != calendar.YearPending {
+	if got := yearState(t, ctx, db, year); got != calendar.YearPending {
 		t.Errorf("年份状态 = %q，期望 pending", got)
 	}
 
 	cal := newCalendar(t, db)
-	status := lookup(t, cal, calendar.Date{Year: year, Month: 5, Day: 1})
+	status := lookup(t, ctx, cal, calendar.Date{Year: year, Month: 5, Day: 1})
 	if status.Kind != calendar.DayUnknown {
 		t.Fatalf("判定 = %q，期望 unknown", status.Kind)
 	}
@@ -353,10 +355,10 @@ func TestSyncedYearWithMissingRowIsUnknown(t *testing.T) {
 		t.Fatalf("直接写年份行失败: %v", err)
 	}
 
-	if got := yearState(t, db, year); got != calendar.YearSynced {
+	if got := yearState(t, ctx, db, year); got != calendar.YearSynced {
 		t.Errorf("年份状态 = %q，期望 synced", got)
 	}
-	status := lookup(t, newCalendar(t, db), calendar.Date{Year: year, Month: 3, Day: 1})
+	status := lookup(t, ctx, newCalendar(t, db), calendar.Date{Year: year, Month: 3, Day: 1})
 	if status.Kind != calendar.DayUnknown {
 		t.Fatalf("判定 = %q，期望 unknown", status.Kind)
 	}
@@ -370,6 +372,7 @@ func TestSyncedYearWithMissingRowIsUnknown(t *testing.T) {
 // 元旦的安排可能把去年 12 月 31 日挪成休息，而那条记录出自后一年的数据集。
 // 判定按**行**优先，所以它必须压过「上一年没有任何记录」这件事。
 func TestCrossYearDayIsUsedAndNeighbourStaysUnknown(t *testing.T) {
+	ctx := t.Context()
 	db := testDB(t)
 	year := newYear(t, db)
 	prevYear := year - 1
@@ -384,7 +387,7 @@ func TestCrossYearDayIsUsedAndNeighbourStaysUnknown(t *testing.T) {
 	}
 
 	cal := newCalendar(t, db)
-	status := lookup(t, cal, borrowed)
+	status := lookup(t, ctx, cal, borrowed)
 	if status.Kind != calendar.DayRestDay {
 		t.Errorf("%s 判定 = %q，期望 rest_day（行优先于年份状态）", borrowed, status.Kind)
 	}
@@ -393,7 +396,7 @@ func TestCrossYearDayIsUsedAndNeighbourStaysUnknown(t *testing.T) {
 	}
 
 	// 上一年没有年份记录，紧挨着的那一天仍然是未知——借来的那一天只借那一天。
-	status = lookup(t, cal, untouched)
+	status = lookup(t, ctx, cal, untouched)
 	if status.Kind != calendar.DayUnknown || status.Reason != calendar.ReasonYearUnknown {
 		t.Errorf("%s 判定 = %q（成因 %q），期望 unknown / %q",
 			untouched, status.Kind, status.Reason, calendar.ReasonYearUnknown)
@@ -404,6 +407,7 @@ func TestCrossYearDayIsUsedAndNeighbourStaysUnknown(t *testing.T) {
 
 // 同一年再灌一次是覆盖而不是追加：行数不变，改过的判定要生效。
 func TestReimportOverwritesInsteadOfAppending(t *testing.T) {
+	ctx := t.Context()
 	db := testDB(t)
 	year := newYear(t, db)
 	newYear := calendar.Date{Year: year, Month: 1, Day: 1}
@@ -414,7 +418,7 @@ func TestReimportOverwritesInsteadOfAppending(t *testing.T) {
 	if res.Replaced != 0 {
 		t.Errorf("首次导入替换了 %d 行，期望 0", res.Replaced)
 	}
-	if got := countYearRows(t, db, year); got != 365 {
+	if got := countYearRows(t, ctx, db, year); got != 365 {
 		t.Fatalf("首次导入后有 %d 行，期望 365", got)
 	}
 
@@ -425,11 +429,11 @@ func TestReimportOverwritesInsteadOfAppending(t *testing.T) {
 	if res.Replaced != 365 {
 		t.Errorf("重灌替换了 %d 行，期望 365（先清掉上一次写下的）", res.Replaced)
 	}
-	if got := countYearRows(t, db, year); got != 365 {
+	if got := countYearRows(t, ctx, db, year); got != 365 {
 		t.Errorf("重灌后有 %d 行，期望仍是 365（不是 730）", got)
 	}
 
-	status := lookup(t, newCalendar(t, db), newYear)
+	status := lookup(t, ctx, newCalendar(t, db), newYear)
 	if status.Kind != calendar.DayWorkday || !status.MakeupWorkday {
 		t.Errorf("%s 判定 = %q（补班 %v），期望重灌后的工作日", newYear, status.Kind, status.MakeupWorkday)
 	}
@@ -443,6 +447,7 @@ func TestReimportOverwritesInsteadOfAppending(t *testing.T) {
 // 这正是「按 source_year 删」而不是「按文件里的日期删」的理由：按日期删的话，
 // 文件里没有的那几天恰好一条都不会被碰到。
 func TestReimportDropsDaysTheNewFileNoLongerHas(t *testing.T) {
+	ctx := t.Context()
 	db := testDB(t)
 	year := newYear(t, db)
 	extra := calendar.Date{Year: year + 1, Month: 1, Day: 1}
@@ -458,7 +463,7 @@ func TestReimportDropsDaysTheNewFileNoLongerHas(t *testing.T) {
 	if got := countDayRow(t, db, extra); got != 0 {
 		t.Errorf("%s 还有 %d 行，期望被清掉", extra, got)
 	}
-	if got := countYearRows(t, db, year); got != 365 {
+	if got := countYearRows(t, ctx, db, year); got != 365 {
 		t.Errorf("重灌后有 %d 行，期望 365", got)
 	}
 }
@@ -476,7 +481,7 @@ func TestYearStateComesFromTheRow(t *testing.T) {
 	cal := newCalendar(t, db)
 	day := calendar.Date{Year: year, Month: 6, Day: 15}
 
-	if got := yearState(t, db, year); got != calendar.YearUnknown {
+	if got := yearState(t, ctx, db, year); got != calendar.YearUnknown {
 		t.Errorf("库里没有这一年时状态 = %q，期望 unknown", got)
 	}
 
@@ -500,10 +505,10 @@ func TestYearStateComesFromTheRow(t *testing.T) {
 				t.Fatalf("直接改写年份行失败: %v", err)
 			}
 
-			if got := yearState(t, db, year); got != tc.state {
+			if got := yearState(t, ctx, db, year); got != tc.state {
 				t.Errorf("年份状态 = %q，期望 %q", got, tc.state)
 			}
-			status := lookup(t, cal, day)
+			status := lookup(t, ctx, cal, day)
 			if status.Kind != calendar.DayUnknown {
 				t.Errorf("判定 = %q，期望 unknown", status.Kind)
 			}
@@ -511,7 +516,7 @@ func TestYearStateComesFromTheRow(t *testing.T) {
 				t.Errorf("成因 = %q，期望 %q", status.Reason, tc.reason)
 			}
 			// 数据行一直是空的：状态只能来自 calendar_years 那一行。
-			if got := countYearRows(t, db, year); got != 0 {
+			if got := countYearRows(t, ctx, db, year); got != 0 {
 				t.Errorf("这一年名下有 %d 行数据，用例的前提（状态不能从数据行推出）不成立", got)
 			}
 		})
@@ -519,10 +524,10 @@ func TestYearStateComesFromTheRow(t *testing.T) {
 
 	// 最后灌一份完整数据：状态翻成 synced，那一天也就有判定了。
 	importDoc(t, db, syncedDoc(year))
-	if got := yearState(t, db, year); got != calendar.YearSynced {
+	if got := yearState(t, ctx, db, year); got != calendar.YearSynced {
 		t.Errorf("导入完整数据后年份状态 = %q，期望 synced", got)
 	}
-	if status := lookup(t, cal, day); !status.Kind.Known() {
+	if status := lookup(t, ctx, cal, day); !status.Kind.Known() {
 		t.Errorf("导入完整数据后 %s 仍然是 %q", day, status.Kind)
 	}
 }
@@ -533,17 +538,18 @@ func TestYearStateComesFromTheRow(t *testing.T) {
 // 旧路径上 Import 不看 days 就直接清掉整年、再写一份 pending——那一年看起来
 // 还是正常状态，判定却从每一天变成了「公告未发布」。
 func TestImportWithPendingDocKeepsSettledYear(t *testing.T) {
+	ctx := t.Context()
 	db := testDB(t)
 	year := newYear(t, db)
 	day := calendar.Date{Year: year, Month: 4, Day: 1}
 
 	importDoc(t, db, syncedDoc(year))
 	cal := newCalendar(t, db)
-	if status := lookup(t, cal, day); !status.Kind.Known() {
+	if status := lookup(t, ctx, cal, day); !status.Kind.Known() {
 		t.Fatalf("先灌完整数据后 %s 应当有判定，实际是 %q", day, status.Kind)
 	}
-	beforeRow := yearRowSnapshot(t, db, year)
-	beforeDays := dayRowSnapshot(t, db, year)
+	beforeRow := yearRowSnapshot(t, ctx, db, year)
+	beforeDays := dayRowSnapshot(t, ctx, db, year)
 
 	res, err := NewAdmin(db).Import(context.Background(),
 		Document{Region: "CN", Year: year, Status: "pending"})
@@ -557,17 +563,17 @@ func TestImportWithPendingDocKeepsSettledYear(t *testing.T) {
 		t.Errorf("返回的状态 = %q，期望库里实际的状态 synced", res.Status)
 	}
 
-	if got := yearRowSnapshot(t, db, year); got != beforeRow {
+	if got := yearRowSnapshot(t, ctx, db, year); got != beforeRow {
 		t.Errorf("年份行被改动了：\nbefore=%s\nafter =%s", beforeRow, got)
 	}
-	afterDays := dayRowSnapshot(t, db, year)
+	afterDays := dayRowSnapshot(t, ctx, db, year)
 	if strings.Join(afterDays, "\n") != strings.Join(beforeDays, "\n") {
 		t.Errorf("数据行被改动了：%d 行 → %d 行", len(beforeDays), len(afterDays))
 	}
-	if got := countYearRows(t, db, year); got != 365 {
+	if got := countYearRows(t, ctx, db, year); got != 365 {
 		t.Errorf("数据行数 = %d，期望 365", got)
 	}
-	if status := lookup(t, cal, day); !status.Kind.Known() {
+	if status := lookup(t, ctx, cal, day); !status.Kind.Known() {
 		t.Errorf("%s 判定 = %q，期望仍有确定判定", day, status.Kind)
 	}
 }
@@ -584,6 +590,7 @@ func TestImportWithPendingDocKeepsSettledYear(t *testing.T) {
 // 写出来是因为这条路径没有别的地方钉住：TestImportWithPendingDocKeepsSettledYear
 // 覆盖的是「本年已有定论」那一格，两者的结局不同。
 func TestPendingImportKeepsAdjacentYearRows(t *testing.T) {
+	ctx := t.Context()
 	db := testDB(t)
 	year := newYear(t, db)
 	prev := year - 1
@@ -605,7 +612,7 @@ func TestPendingImportKeepsAdjacentYearRows(t *testing.T) {
 	if sourceYear != prev {
 		t.Fatalf("%s 的 source_year = %d，期望 %d", carried, sourceYear, prev)
 	}
-	if got := countYearRows(t, db, year); got != 0 {
+	if got := countYearRows(t, ctx, db, year); got != 0 {
 		t.Fatalf("本年名下已经有 %d 行，期望 0——用例的前提是那一行挂在上一年的来源下", got)
 	}
 
@@ -617,12 +624,12 @@ func TestPendingImportKeepsAdjacentYearRows(t *testing.T) {
 	}
 	// 行在，判定就按行走——这是「某一天只要有行就以行为准」的直接体现。
 	cal := newCalendar(t, db)
-	if status := lookup(t, cal, carried); status.Kind != calendar.DayRestDay {
+	if status := lookup(t, ctx, cal, carried); status.Kind != calendar.DayRestDay {
 		t.Errorf("%s 判定 = %q，期望 %q", carried, status.Kind, calendar.DayRestDay)
 	}
 	// 本年其余各天没有行，落到「公告未发布」。
 	other := calendar.Date{Year: year, Month: 6, Day: 15}
-	status := lookup(t, cal, other)
+	status := lookup(t, ctx, cal, other)
 	if status.Kind != calendar.DayUnknown || status.Reason != calendar.ReasonYearPending {
 		t.Errorf("%s 判定 = %q（成因 %q），期望 %q / %q",
 			other, status.Kind, status.Reason, calendar.DayUnknown, calendar.ReasonYearPending)
@@ -657,7 +664,7 @@ func TestRejectedImportLeavesNothingBehind(t *testing.T) {
 	if _, err := NewAdmin(db).Import(ctx, bad); err == nil {
 		t.Fatal("缺行的文档应当被拒绝")
 	}
-	if got := countYearRows(t, db, year); got != 0 {
+	if got := countYearRows(t, ctx, db, year); got != 0 {
 		t.Errorf("被拒绝的导入留下了 %d 行数据", got)
 	}
 
@@ -677,7 +684,7 @@ func TestRejectedImportLeavesNothingBehind(t *testing.T) {
 //
 // 连 synced_at 一起比：它只在真的写过那一行时才刷新，所以「快照没变」证明的不
 // 只是值恰好相同，而是这一次一个字节都没写。
-func yearRowSnapshot(t *testing.T, db *sql.DB, year int) string {
+func yearRowSnapshot(t *testing.T, ctx context.Context, db *sql.DB, year int) string {
 	t.Helper()
 	var (
 		status   string
@@ -687,7 +694,7 @@ func yearRowSnapshot(t *testing.T, db *sql.DB, year int) string {
 		lastErr  sql.NullString
 		syncedAt time.Time
 	)
-	err := db.QueryRowContext(context.Background(), `
+	err := db.QueryRowContext(ctx, `
 		SELECT status, day_count, array_to_json(source_paper_urls)::text,
 		       sources_agree, last_error, synced_at
 		  FROM calendar_years WHERE region = 'CN' AND year = $1`, year).
@@ -700,9 +707,9 @@ func yearRowSnapshot(t *testing.T, db *sql.DB, year int) string {
 }
 
 // dayRowSnapshot 把某年来源写下的数据行按日期排好，拼成逐字可比的快照。
-func dayRowSnapshot(t *testing.T, db *sql.DB, year int) []string {
+func dayRowSnapshot(t *testing.T, ctx context.Context, db *sql.DB, year int) []string {
 	t.Helper()
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 		SELECT day::text, coalesce(holiday_name, ''), is_off_day, is_makeup_workday,
 		       source, synced_at::text
 		  FROM calendar_days WHERE region = 'CN' AND source_year = $1
@@ -743,8 +750,8 @@ func TestSetYearStatusNeverTouchesSettledYear(t *testing.T) {
 	year := newYear(t, db)
 
 	importDoc(t, db, syncedDoc(year))
-	beforeRow := yearRowSnapshot(t, db, year)
-	beforeDays := dayRowSnapshot(t, db, year)
+	beforeRow := yearRowSnapshot(t, ctx, db, year)
+	beforeDays := dayRowSnapshot(t, ctx, db, year)
 	if len(beforeDays) != 365 {
 		t.Fatalf("前置条件不成立：%d 行数据，期望 365", len(beforeDays))
 	}
@@ -779,14 +786,14 @@ func TestSetYearStatusNeverTouchesSettledYear(t *testing.T) {
 				t.Errorf("返回的状态 = %q，期望库里实际的状态 synced", res.Status)
 			}
 
-			if got := yearRowSnapshot(t, db, year); got != beforeRow {
+			if got := yearRowSnapshot(t, ctx, db, year); got != beforeRow {
 				t.Errorf("年份行被改动了：\nbefore=%s\nafter =%s", beforeRow, got)
 			}
-			afterDays := dayRowSnapshot(t, db, year)
+			afterDays := dayRowSnapshot(t, ctx, db, year)
 			if strings.Join(afterDays, "\n") != strings.Join(beforeDays, "\n") {
 				t.Errorf("数据行被改动了：%d 行 → %d 行", len(beforeDays), len(afterDays))
 			}
-			if got := countYearRows(t, db, year); got != 365 {
+			if got := countYearRows(t, ctx, db, year); got != 365 {
 				t.Errorf("数据行数 = %d，期望 365", got)
 			}
 		})
@@ -925,10 +932,10 @@ func TestConcurrentDegradedWriteDoesNotDowngradeSynced(t *testing.T) {
 		}
 	}
 
-	if got := yearState(t, db, year); got != calendar.YearSynced {
+	if got := yearState(t, ctx, db, year); got != calendar.YearSynced {
 		t.Errorf("年份状态 = %q，期望 synced（先写入者的结论不被降级）", got)
 	}
-	if got := countYearRows(t, db, year); got != 365 {
+	if got := countYearRows(t, ctx, db, year); got != 365 {
 		t.Errorf("数据行数 = %d，期望 365（整年数据没被清空）", got)
 	}
 }

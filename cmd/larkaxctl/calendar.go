@@ -412,8 +412,9 @@ func runPriceCalendarSync(args []string) error {
 		// 不带 days 的只写年份状态，从不碰数据行——「库里有没有定论」由那条
 		// SQL 自己判，不在这里先读一次状态（两条 sync 并发时，先读再判会让
 		// 后来者读到旧状态，把先写好的定论降级）。
+		var result calendarstore.Result
 		if doc.Status == string(calendar.YearSynced) {
-			result, err := admin.Import(dbCtx, doc)
+			result, err = admin.Import(dbCtx, doc)
 			if err != nil {
 				return err
 			}
@@ -421,7 +422,7 @@ func runPriceCalendarSync(args []string) error {
 			return nil
 		}
 		// sync 不带 days 的文档只有 pending 一种（见 fetchCalendarDocument）。
-		result, err := admin.SetYearStatus(dbCtx, doc)
+		result, err = admin.SetYearStatus(dbCtx, doc)
 		if err != nil {
 			return err
 		}
