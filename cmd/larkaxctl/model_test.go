@@ -112,8 +112,8 @@ func TestModelCreateThenList(t *testing.T) {
 	// 是「展示名必须非空」），补这一格是命令行的事。
 	fallback := uniqueName("model")
 	_, _ = captureStreams(t, func() {
-		if err := runModelCreate([]string{fallback, "--vendor", "example-vendor"}); err != nil {
-			t.Fatalf("add 不给 --display 失败: %v", err)
+		if runErr := runModelCreate([]string{fallback, "--vendor", "example-vendor"}); runErr != nil {
+			t.Fatalf("add 不给 --display 失败: %v", runErr)
 		}
 	})
 	fallbackModel, err := catalog.New(db).Model(context.Background(), fallback)

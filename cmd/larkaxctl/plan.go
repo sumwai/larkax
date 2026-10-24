@@ -200,16 +200,16 @@ func runPlanCreate(args []string) error {
 	if strings.TrimSpace(*unit) == "" {
 		return usageErr(errors.New("缺少 --unit"))
 	}
-	if err := checkDisplayText("--key", planKey); err != nil {
+	if err = checkDisplayText("--key", planKey); err != nil {
 		return err
 	}
-	if err := checkDisplayText("--name", strings.TrimSpace(*name)); err != nil {
+	if err = checkDisplayText("--name", strings.TrimSpace(*name)); err != nil {
 		return err
 	}
-	if err := checkDisplayText("--description", strings.TrimSpace(*description)); err != nil {
+	if err = checkDisplayText("--description", strings.TrimSpace(*description)); err != nil {
 		return err
 	}
-	if err := checkDisplayList("--models", splitOptionalList(*models)); err != nil {
+	if err = checkDisplayList("--models", splitOptionalList(*models)); err != nil {
 		return err
 	}
 
