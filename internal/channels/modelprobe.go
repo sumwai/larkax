@@ -178,9 +178,17 @@ func (p *ModelProbe) target(ctx context.Context, req ProbeRequest) (probeTarget,
 		ownerUserID sql.NullInt64
 	)
 	err := p.db.QueryRowContext(ctx, `
-		SELECT type, base_url, credential_enc, owner_user_id
-		FROM channels
-		WHERE id = $1 AND `+channelAlive, req.ChannelID).
+		SELECT c.type, c.base_url, a.credential_enc, c.owner_user_id
+		FROM channels c
+		LEFT JOIN LATERAL (
+		      SELECT ac.credential_enc
+		        FROM channel_accounts ca
+		        JOIN accounts ac ON ac.id = ca.account_id
+		       WHERE ca.channel_id = c.id
+		       ORDER BY ac.id
+		       LIMIT 1
+		     ) a ON true
+		WHERE c.id = $1 AND c.`+channelAlive, req.ChannelID).
 		Scan(&chanType, &storedURL, &envelope, &ownerUserID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return probeTarget{}, fmt.Errorf("%w：id %d", ErrChannelNotFound, req.ChannelID)
@@ -208,6 +216,12 @@ func (p *ModelProbe) target(ctx context.Context, req ProbeRequest) (probeTarget,
 	case req.Credential != "":
 		out.credential = req.Credential
 	default:
+		// 零账号是合法的中间态，但它没有可用来探测的凭证。单独一句，
+		// 而不是把空密文丢给信封解析——后者的报错会指向「密文格式」，
+		// 而真正要处置的是「这条渠道还没接账号」。
+		if len(envelope) == 0 {
+			return probeTarget{}, fmt.Errorf("%w：渠道 %d", ErrNoAccount, req.ChannelID)
+		}
 		plaintext, err := openCredential(p.sealer, envelope)
 		if err != nil {
 			return probeTarget{}, fmt.Errorf("渠道 %d: %w", req.ChannelID, err)

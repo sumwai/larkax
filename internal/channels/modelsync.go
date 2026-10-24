@@ -126,9 +126,17 @@ func (m *ModelSync) Sync(ctx context.Context, channelID int64) (ModelSyncResult,
 		deletedAt sql.NullTime
 	)
 	err := m.db.QueryRowContext(ctx, `
-		SELECT name, type, base_url, credential_enc, deleted_at
-		FROM channels
-		WHERE id = $1`, channelID).
+		SELECT c.name, c.type, c.base_url, a.credential_enc, c.deleted_at
+		FROM channels c
+		LEFT JOIN LATERAL (
+		      SELECT ac.credential_enc
+		        FROM channel_accounts ca
+		        JOIN accounts ac ON ac.id = ca.account_id
+		       WHERE ca.channel_id = c.id
+		       ORDER BY ac.id
+		       LIMIT 1
+		     ) a ON true
+		WHERE c.id = $1`, channelID).
 		Scan(&name, &chanType, &baseURL, &envelope, &deletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ModelSyncResult{}, fmt.Errorf("%w：id %d", ErrChannelNotFound, channelID)
@@ -139,6 +147,9 @@ func (m *ModelSync) Sync(ctx context.Context, channelID int64) (ModelSyncResult,
 	if deletedAt.Valid {
 		// 与 update / enable / disable 同一条口径：软删的渠道不再接受写入。
 		return ModelSyncResult{}, fmt.Errorf("%w：渠道 %d", ErrChannelDeleted, channelID)
+	}
+	if len(envelope) == 0 {
+		return ModelSyncResult{}, fmt.Errorf("%w：渠道 %d", ErrNoAccount, channelID)
 	}
 
 	adapter, err := m.registry.Lookup(chanType)

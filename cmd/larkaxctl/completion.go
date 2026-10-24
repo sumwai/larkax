@@ -155,6 +155,7 @@ var completionActionTable = map[string][]string{
 	"admin token":     adminTokenActions,
 	"settings":        settingsActions,
 	"channel":         channelActions,
+	"account":         accountActions,
 	"channel map":     channelMapActions,
 	"model":           modelActions,
 	"model alias":     modelAliasActions,

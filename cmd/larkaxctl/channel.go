@@ -28,7 +28,7 @@ const channelShortUsage = `larkaxctl channel 管理上游渠道。
 用法：
   larkaxctl channel create --name <名称> --base-url <URL> --models <模型名,...>
                            (--type <类型> | --protocols <协议名,...>)
-                           (--credential-stdin | --credential-env <变量名>)
+                           [--credential-stdin | --credential-env <变量名>]
   larkaxctl channel list [--all]
   larkaxctl channel get --id <渠道 ID>
   larkaxctl channel health [--id <渠道 ID>] [--since <时长或时刻>] [--all]
@@ -50,7 +50,7 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
 用法：
   larkaxctl channel create --name <名称> --base-url <URL> --models <模型名,...>
                            (--type <类型> | --protocols <协议名,...>)
-                           (--credential-stdin | --credential-env <变量名>)
+                           [--credential-stdin | --credential-env <变量名>]
                            [--user <用户 ID 或用户名>] [--weight <权重>]
                            [--priority <优先级>] [--setting <JSON 对象>]
   larkaxctl channel list [--all]
@@ -82,6 +82,11 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
 
   --credential-stdin        从标准输入读到文件结束（末尾的换行会被去掉）
   --credential-env <变量名> 从名为 <变量名> 的环境变量读
+
+**create 不给凭证是合法的**：渠道建出来但一个账号都不挂（零账号），
+channel list 看得见它，选路会跳过。之后用 account add --channel <渠道>
+接上，或者 channel update --credential-* 直接补一把。给了凭证时 create 会
+建一个匿名账号并挂上——账号是凭证的单位（见 larkaxctl help account）。
 
 例（凭证从标准输入读）：
 
@@ -131,6 +136,10 @@ delete 是**软删**：置 deleted_at 并把状态改成 disabled，行与它的
 库里。历史账单（billing_requests / usage_events）仍然按 channel_id 引用它。
 已删的渠道不能再 update / enable / disable，再删一次不报错（打印「已经是删除
 状态」）。
+
+update 的 --credential-* 改的是这条渠道**池里 id 最小的主账号**（选路读的那
+一个）；账号是凭证的单位，同一账号若还挂在别的渠道上，改一次那些渠道一起生效
+（见 larkaxctl help account）。零账号的渠道走这条路会补一个匿名账号。
 
 restore 是 delete 的逆操作：清掉 deleted_at、把状态置回 enabled，并把这条渠道的
 健康结论置回 unknown——它上一次的结论是**软删之前**的，不能直接沿用，恢复之后
@@ -317,10 +326,21 @@ func runChannelCreate(args []string) error {
 	}
 	defer func() { _ = db.Close() }()
 
-	admin, sealer, err := channelWriteAdmin(db)
+	// 给了凭证才需要主密钥：零账号渠道不封装任何东西，一台没有
+	// LARKAX_MASTER_KEYS 的机器也该建得出来（见 CreateRequest.Credential）。
+	registry, err := upstream.Registry()
 	if err != nil {
-		return err
+		return fmt.Errorf("装配渠道适配器注册表失败: %w", err)
 	}
+	var sealer *credential.Sealer
+	if req.Credential != "" {
+		sealer, err = masterKeySealer()
+		if err != nil {
+			return err
+		}
+	}
+	admin := channels.NewAdmin(db, sealer, registry)
+
 	if ownerRef != "" {
 		ownerID, resolveErr := resolveOwnerID(ctx, db, ownerRef)
 		if resolveErr != nil {
@@ -339,7 +359,11 @@ func runChannelCreate(args []string) error {
 	if primaryType == "" && len(req.Protocols) > 0 {
 		primaryType = req.Protocols[0]
 	}
-	printCreatedChannel(humanStdout(), humanStderr(), id, sealer.PrimaryKeyID(),
+	primaryKeyID := ""
+	if sealer != nil {
+		primaryKeyID = sealer.PrimaryKeyID()
+	}
+	printCreatedChannel(humanStdout(), humanStderr(), id, primaryKeyID,
 		channel.SettingUnreadNote(primaryType, req.Setting))
 	return nil
 }
@@ -418,9 +442,15 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 			return channels.CreateRequest{}, "", shapeErr
 		}
 	}
-	plaintext, err := readCredential(*credentialStdin, *credentialEnv, true)
+	// 凭证是可选的：不给就建一条零账号渠道（合法中间态，见
+	// channels.CreateRequest.Credential）。给了才建匿名账号并挂上。
+	plaintext, err := readCredential(*credentialStdin, *credentialEnv, false)
 	if err != nil {
 		return channels.CreateRequest{}, "", err
+	}
+	credentialValue := ""
+	if plaintext != nil {
+		credentialValue = *plaintext
 	}
 	parsedSetting, err := parseJSONObject("--setting", *setting)
 	if err != nil {
@@ -432,7 +462,7 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 		Type:       *channelType,
 		Protocols:  protocolList,
 		BaseURL:    normalizedBaseURL,
-		Credential: *plaintext,
+		Credential: credentialValue,
 		Models:     splitList(*models),
 		Weight:     *weight,
 		Priority:   *priority,
@@ -1068,7 +1098,14 @@ func readCredential(fromStdin bool, envName string, required bool) (*string, err
 // create 都打一遍的话，它很快会变成所有输出里的一行背景音，而真正配了没人
 // 读的键的人反而不会看见。
 func printCreatedChannel(stdout, stderr io.Writer, id int64, primaryKeyID, settingNote string) {
-	_, _ = fmt.Fprintf(stderr, "已创建渠道 id=%d，凭证挂在主密钥 %s 下。\n", id, primaryKeyID)
+	if primaryKeyID == "" {
+		// 零账号是合法中间态：说清楚这条渠道还选不中，读者才知道下一步
+		// 该接一个账号（而不是以为凭证已经存进去了）。
+		_, _ = fmt.Fprintf(stderr,
+			"已创建渠道 id=%d，尚未挂账号（零账号渠道不参与选路）。\n", id)
+	} else {
+		_, _ = fmt.Fprintf(stderr, "已创建渠道 id=%d，凭证挂在主密钥 %s 下。\n", id, primaryKeyID)
+	}
 	if settingNote != "" {
 		_, _ = fmt.Fprintf(stderr, "注意：%s。\n", settingNote)
 	}
@@ -1126,8 +1163,11 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo, withDeleted boo
 	// 密文坏掉的行单独说明，不跳过也不整次报错（见 channels.Admin.List）：
 	// 库里有一行坏数据时整个清单一条都看不到，而那正是最需要看清单的时候。
 	for _, info := range infos {
-		if info.CredentialErr != nil {
-			_, _ = fmt.Fprintf(w, "渠道 %d 的凭证密文不合法：%v\n", info.ID, info.CredentialErr)
+		for _, acc := range info.Accounts {
+			if acc.CredentialErr != nil {
+				_, _ = fmt.Fprintf(w, "渠道 %d 的账号 %s 凭证密文不合法：%v\n",
+					info.ID, acc.Name, acc.CredentialErr)
+			}
 		}
 	}
 
@@ -1207,12 +1247,35 @@ func channelEntry(info channels.ChannelInfo) map[string]any {
 		"priority":      info.Priority,
 		// 密文与凭证明文都不在这里：这两栏一个是主密钥标识、一个是末四位提示，
 		// 二者都不需要密钥材料就能算出来（见 credentialKeysLabel）。
+		//
+		// 三个平铺字段描述**主账号**（选路会用的那一个）；完整的池子在
+		// accounts 里，同样只有名字、权重与信封头部的解析结果。
 		"credential_keys":  jsonList(info.CredentialKeys),
 		"credential_hint":  nullableString(info.Hint),
 		"credential_error": nullableError(info.CredentialErr),
+		"accounts":         accountRefsJSON(info.Accounts),
 		"setting":          jsonObject(info.Setting),
 		"deleted_at":       jsonTimeOrNull(info.DeletedAt),
 	}
+}
+
+// accountRefsJSON 打一条渠道挂着的账号。
+//
+// 每个账号给的是名字、权重与「挂在哪些主密钥下」——与账号清单那一档同一套
+// 口径，没有密文，也没有明文。
+func accountRefsJSON(accounts []channels.ChannelAccount) []map[string]any {
+	out := make([]map[string]any, 0, len(accounts))
+	for _, acc := range accounts {
+		out = append(out, map[string]any{
+			"id":               acc.ID,
+			"name":             acc.Name,
+			"weight":           acc.Weight,
+			"credential_keys":  jsonList(acc.CredentialKeys),
+			"credential_hint":  nullableString(acc.Hint),
+			"credential_error": nullableError(acc.CredentialErr),
+		})
+	}
+	return out
 }
 
 // printChannelDetail 打一条渠道的详情：一栏一行。
@@ -1235,6 +1298,7 @@ func printChannelDetail(w io.Writer, info channels.ChannelInfo) {
 	row("权重", strconv.Itoa(info.Weight))
 	row("优先级", strconv.Itoa(info.Priority))
 	row("凭证", credentialKeysLabel(info))
+	row("账号", accountRefsLabel(info))
 	row("setting", settingLabel(info.Setting))
 	row("创建时间", p.dim(info.CreatedAt.Format(time.RFC3339)))
 	row("更新时间", p.dim(info.UpdatedAt.Format(time.RFC3339)))
@@ -1249,6 +1313,31 @@ func printChannelDetail(w io.Writer, info channels.ChannelInfo) {
 	if info.CredentialErr != nil {
 		_, _ = fmt.Fprintf(w, "渠道 %d 的凭证密文不合法：%v\n", info.ID, info.CredentialErr)
 	}
+	for _, acc := range info.Accounts {
+		if acc.CredentialErr != nil {
+			_, _ = fmt.Fprintf(w, "渠道 %d 的账号 %s 凭证密文不合法：%v\n",
+				info.ID, acc.Name, acc.CredentialErr)
+		}
+	}
+}
+
+// accountRefsLabel 打这条渠道挂着的账号名与权重。
+//
+// 权重为 1 时不写出来：那是默认值，铺在每一行只是噪音；改过权重才值得
+// 在详情里看见。
+func accountRefsLabel(info channels.ChannelInfo) string {
+	if len(info.Accounts) == 0 {
+		return "无账号"
+	}
+	parts := make([]string, 0, len(info.Accounts))
+	for _, acc := range info.Accounts {
+		if acc.Weight == 1 {
+			parts = append(parts, acc.Name)
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s（权重 %d）", acc.Name, acc.Weight))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // settingLabel 打渠道私有配置。
@@ -1565,27 +1654,54 @@ func deletedAtLabel(at time.Time) string {
 	return at.UTC().Format(time.RFC3339)
 }
 
-// credentialKeysLabel 是清单里的「凭证」那一栏。
+// credentialKeysLabel 打清单里的「凭证」那一栏。
+//
+// 它是**账号侧**的一栏（见迁移 00067）：零账号时说「无账号」，而不是留空
+// 或打 `-`——「没有凭证」与「凭证挂在没有的钥匙下」是两件事。
 //
 // 两样一起给：主密钥标识回答「挂在哪把钥匙下、轮换补到哪一步」，
 // 末四位提示回答「挂的是我刚发的那个凭证吗」。它们是两个不同的问题，
 // 只给其中一个都会让运维去别处再查一次。
+//
+// 多个账号时列主密钥的并集并标出账号数：轮换要问的是「还有没有哪一把 key
+// 没补上新主密钥」，并集正好回答这个；末四位只在一个账号时才有意义，
+// 多了就分不清是哪一个的尾巴。
 func credentialKeysLabel(info channels.ChannelInfo) string {
-	if info.CredentialErr != nil {
-		// 上面会另起一行说明原因，这里只留一个显眼的标记。
-		return "密文不合法"
+	if len(info.Accounts) == 0 {
+		return "无账号"
 	}
-	keys := "-"
-	if len(info.CredentialKeys) > 0 {
-		keys = strings.Join(info.CredentialKeys, ",")
+	for _, acc := range info.Accounts {
+		if acc.CredentialErr != nil {
+			// 上面会另起一行说明原因，这里只留一个显眼的标记。
+			return "密文不合法"
+		}
 	}
-	if info.Hint == "" {
-		// 空提示只可能来自「这一列接上之前建的渠道」——接上之后每一次写入
+
+	var keys []string
+	seen := make(map[string]bool, len(info.CredentialKeys))
+	for _, acc := range info.Accounts {
+		for _, key := range acc.CredentialKeys {
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			keys = append(keys, key)
+		}
+	}
+	label := "-"
+	if len(keys) > 0 {
+		label = strings.Join(keys, ",")
+	}
+	if len(info.Accounts) > 1 {
+		return fmt.Sprintf("%d 个账号 %s", len(info.Accounts), label)
+	}
+	if info.Accounts[0].Hint == "" {
+		// 空提示只可能来自「这一列接上之前建的账号」——接上之后每一次写入
 		// 都会带上它。这里不补一个占位符，让「没有提示」与「提示是某几个
-		// 字符」在清单上分得开：补一个 `…-` 会让两种情形长得一样。
-		return keys
+		// 字符」在清单上分得开。
+		return label
 	}
-	return keys + " …" + info.Hint
+	return label + " …" + info.Accounts[0].Hint
 }
 
 // ownerLabel 把归属打成「平台」或用户 ID。

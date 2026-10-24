@@ -14,7 +14,7 @@ const secretShortUsage = `larkaxctl secret 维护安全凭证的主密钥。
 
 用法：
   larkaxctl secret rotate [--apply|--verify] [--batch-size <N>]
-        轮换渠道凭证的主密钥（默认干跑）
+        轮换凭证账号的主密钥（默认干跑）
 
 密钥从环境变量 LARKAX_MASTER_KEYS 来，这里没有「设置密钥」这个动作。
 
@@ -29,7 +29,7 @@ const secretUsage = `larkaxctl secret 维护安全凭证的主密钥。
 
 用法：
   larkaxctl secret rotate [--apply|--verify] [--batch-size <N>]
-        轮换渠道凭证的主密钥（默认干跑，逐条说明见 --help）
+        轮换凭证账号的主密钥（默认干跑，逐条说明见 --help）
 
 密钥本身从环境变量（LARKAX_MASTER_KEYS）来，这里没有「设置密钥」这个动作：
 写进命令行或库里的密钥会跟着 shell 历史与备份一起流传出去。这一组做的是

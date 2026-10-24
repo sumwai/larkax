@@ -129,7 +129,14 @@ func sampleSingleProtocolChannel(withProtocols bool) channels.ChannelInfo {
 	info := channels.ChannelInfo{
 		ID: 7, Name: "c1", Type: testChanType, BaseURL: testBaseURL,
 		Status: channels.StatusEnabled, Models: []string{"m1"}, Weight: 1,
+		// 凭证在账号上（见 00067）：平铺的三个字段描述主账号，与 List 读出来
+		// 的那份保持一致，否则夹具本身就是一个库里到不了的状态。
+		Accounts: []channels.ChannelAccount{{
+			ID: 1, Name: "acc-1", Weight: 1, Hint: "cdef",
+			CredentialKeys: []string{"test"},
+		}},
 		CredentialKeys: []string{"test"},
+		Hint:           "cdef",
 		CreatedAt:      time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC),
 		UpdatedAt:      time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC),
 	}
@@ -168,7 +175,8 @@ func TestChannelSingleProtocolTextOutputUnchanged(t *testing.T) {
 		{"归属", "平台"},
 		{"权重", "1"},
 		{"优先级", "0"},
-		{"凭证", "test"},
+		{"凭证", "test …cdef"},
+		{"账号", "acc-1"},
 		{"setting", "{}"},
 		{"创建时间", "2026-10-01T00:00:00Z"},
 		{"更新时间", "2026-10-02T00:00:00Z"},
@@ -222,7 +230,7 @@ func TestChannelSingleProtocolJSONOutputUnchanged(t *testing.T) {
 
 	entry := jsonObjectField(t, jsonRoundTrip(t, withDoc), "channel")
 	want := []string{
-		"base_url", "created_at", "credential_error", "credential_hint",
+		"accounts", "base_url", "created_at", "credential_error", "credential_hint",
 		"credential_keys", "deleted_at", "id", "models", "name",
 		"owner_user_id", "priority", "setting", "status", "type", "updated_at",
 		"weight",

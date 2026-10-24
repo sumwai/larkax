@@ -96,10 +96,10 @@ func seedUserChannel(ctx context.Context, t *testing.T, db *sql.DB, ownerID int6
 	var id int64
 	err := db.QueryRowContext(ctx, `
 		INSERT INTO channels
-			(owner_user_id, name, type, base_url, credential_enc, models, deleted_at)
-		VALUES ($1, $2, 'openai', 'https://upstream.example.com/v1', $3, '{}', $4)
+			(owner_user_id, name, type, base_url, models, deleted_at)
+		VALUES ($1, $2, 'openai', 'https://upstream.example.com/v1', '{}', $3)
 		RETURNING id`,
-		ownerID, uniqueUsername(), []byte{0}, deletedAt).Scan(&id)
+		ownerID, uniqueUsername(), deletedAt).Scan(&id)
 	if err != nil {
 		t.Fatalf("建渠道失败: %v", err)
 	}

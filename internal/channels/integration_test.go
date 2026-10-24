@@ -135,17 +135,38 @@ func insertChannel(ctx context.Context, t *testing.T, db *sql.DB, sealer *creden
 	var id int64
 	err := db.QueryRowContext(ctx, `
 		INSERT INTO channels
-			(owner_user_id, name, type, base_url, credential_enc,
-			 status, models, weight, priority, setting)
-		VALUES ($1, $2, 'openai-compatible', 'https://api.example.com/v1', $3,
-		        $4, $5, $6, $7, '{"supports_tools":true}'::jsonb)
+			(owner_user_id, name, type, base_url, status, models, weight, priority, setting)
+		VALUES ($1, $2, 'openai-compatible', 'https://api.example.com/v1',
+		        $3, $4, $5, $6, '{"supports_tools":true}'::jsonb)
 		RETURNING id`,
-		owner, "ch-"+itoa(nextID()), spec.credential, spec.status,
+		owner, "ch-"+itoa(nextID()), spec.status,
 		models, spec.weight, spec.priority).Scan(&id)
 	if err != nil {
 		t.Fatalf("插入渠道失败: %v", err)
 	}
+	// 00067 之后凭证在账号上：渠道行只有关联，选路取账号 id 最小的那一个。
+	attachAccount(ctx, t, db, id, spec.credential)
 	return id
+}
+
+// attachAccount 给一条渠道挂一个账号并返回账号 id。
+//
+// 密文原样写入，提示留空：本包的夹具不关心末四位，而竖一个假的提示会让
+// 「提示来自写入路径」那条断言无从分辨。凭证存活与否一律用密文能否解开判断。
+func attachAccount(ctx context.Context, t *testing.T, db *sql.DB, channelID int64, envelope []byte) int64 {
+	t.Helper()
+	var accountID int64
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO accounts (name, credential_enc) VALUES ($1, $2) RETURNING id`,
+		"acc-"+itoa(nextID()), envelope).Scan(&accountID); err != nil {
+		t.Fatalf("插入账号失败: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO channel_accounts (channel_id, account_id) VALUES ($1, $2)`,
+		channelID, accountID); err != nil {
+		t.Fatalf("把账号挂到渠道上失败: %v", err)
+	}
+	return accountID
 }
 
 // hourBucket 返回距今最近的那个整点桶，n 为回退的小时数。
@@ -1105,40 +1126,69 @@ func TestListHidesDeletedChannelUnlessAll(t *testing.T) {
 	}
 }
 
-// 读点三：凭证轮换。已删的行不扫、也不要求它含当前主密钥。
-func TestRotateSkipsDeletedChannels(t *testing.T) {
+// 读点三：凭证轮换。账号不随渠道软删消失，所以已删渠道的账号照样扫、照样要
+// 能重包——渠道 restore 之后要能直接接着用。
+//
+// # 这里比的是账号 id，不是渠道 id
+//
+// Problem.ID / Missing[].ID 是 accounts.id（轮换扫的是 accounts 表）。渠道 id 与
+// 账号 id 在新库上都从 1 开始，拿 insertChannel 的返回值去比，撞上的是别人的行：
+// 整包跑时 id 已经被别的用例推高、撞不上，单跑或换个顺序就红。所以账号 id 一律
+// 经 accountOfChannel 从关联里取。
+func TestRotateCoversAccountsOfDeletedChannels(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
 
-	deleted := insertChannel(t.Context(), t, db, sealer, channelSpec{
+	deletedChannel := insertChannel(t.Context(), t, db, sealer, channelSpec{
 		model: model, credential: []byte{0x99}, // 解析不了的信封
 	})
-	live := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
-	softDeleteRow(t, db, deleted)
+	liveChannel := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
+	softDeleteRow(t, db, deletedChannel)
+
+	deletedAccount := accountOfChannel(t, db, deletedChannel)
+	liveAccount := accountOfChannel(t, db, liveChannel)
 
 	rot := NewRotator(db, sealer)
 	plan, err := rot.Plan(context.Background())
 	if err != nil {
 		t.Fatalf("Plan 出错: %v", err)
 	}
+	var deletedReported bool
 	for _, p := range plan.Problems {
-		if p.ID == deleted {
-			t.Errorf("已删的渠道 %d 不该出现在轮换问题清单里：%v", deleted, p.Err)
+		if p.ID == liveAccount {
+			t.Errorf("在用渠道的账号 %d 不该出现在轮换问题清单里：%v", liveAccount, p.Err)
 		}
+		if p.ID == deletedAccount {
+			deletedReported = true
+			if !errors.Is(p.Err, credential.ErrMalformed) {
+				t.Errorf("已删渠道的账号 %d 报的是 %v，期望密文格式不合法", deletedAccount, p.Err)
+			}
+		}
+	}
+	if !deletedReported {
+		t.Errorf("已删渠道 %d 的账号 %d 不在轮换问题清单里：账号不随渠道软删消失，凭证仍要能重包",
+			deletedChannel, deletedAccount)
 	}
 
 	verify, err := rot.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("Verify 出错: %v", err)
 	}
+	var deletedMissing bool
 	for _, m := range verify.Missing {
-		if m.ID == deleted {
-			t.Errorf("已删的渠道 %d 不该让 Verify 判成「漏网」", deleted)
+		if m.ID == liveAccount {
+			t.Errorf("在用渠道的账号 %d 不该缺席：%v", liveAccount, m.Err)
 		}
-		if m.ID == live {
-			t.Errorf("在用的渠道 %d 不该缺席：%v", live, m.Err)
+		if m.ID == deletedAccount {
+			deletedMissing = true
 		}
+	}
+	// 解析不了的信封证明不了它含当前主密钥，所以它进 Missing 是对的：已删渠道的
+	// 账号被**如实报出来**，而不是被静默跳过。
+	if !deletedMissing {
+		t.Errorf("已删渠道的账号 %d 既没进 Missing 也没在 Problems 里被处理：它被静默跳过了",
+			deletedAccount)
 	}
 }
 
@@ -1581,15 +1631,27 @@ func insertChannelB(b *testing.B, db *sql.DB, sealer *credential.Sealer, model s
 	if err != nil {
 		b.Fatalf("封装凭证失败: %v", err)
 	}
-	_, err = db.ExecContext(context.Background(), `
+	var channelID int64
+	err = db.QueryRowContext(context.Background(), `
 		INSERT INTO channels
-			(owner_user_id, name, type, base_url, credential_enc,
-			 status, models, weight, priority, setting)
-		VALUES (NULL, $1, 'openai-compatible', 'https://api.example.com/v1', $2,
-		        'enabled', $3, 1, 0, '{}'::jsonb)`,
-		"bench-"+itoa(nextID()), sealed, []string{model})
+			(owner_user_id, name, type, base_url, status, models, weight, priority, setting)
+		VALUES (NULL, $1, 'openai-compatible', 'https://api.example.com/v1',
+		        'enabled', $2, 1, 0, '{}'::jsonb)
+		RETURNING id`,
+		"bench-"+itoa(nextID()), []string{model}).Scan(&channelID)
 	if err != nil {
 		b.Fatalf("插入渠道失败: %v", err)
+	}
+	var accountID int64
+	if err := db.QueryRowContext(context.Background(), `
+		INSERT INTO accounts (name, credential_enc) VALUES ($1, $2) RETURNING id`,
+		"bench-acc-"+itoa(nextID()), sealed).Scan(&accountID); err != nil {
+		b.Fatalf("插入账号失败: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO channel_accounts (channel_id, account_id) VALUES ($1, $2)`,
+		channelID, accountID); err != nil {
+		b.Fatalf("把账号挂到渠道上失败: %v", err)
 	}
 }
 
@@ -2059,12 +2121,17 @@ func TestRestoreBringsChannelBack(t *testing.T) {
 	}
 }
 
-// channelEnvelopeOf 直接读出一行的凭证密文（清单里没有这一栏）。
+// channelEnvelopeOf 直接读出渠道主账号的凭证密文（清单里没有这一栏）。
 func channelEnvelopeOf(t *testing.T, db *sql.DB, id int64) []byte {
 	t.Helper()
 	var envelope []byte
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT credential_enc FROM channels WHERE id = $1`, id).Scan(&envelope); err != nil {
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT a.credential_enc
+		  FROM channel_accounts ca
+		  JOIN accounts a ON a.id = ca.account_id
+		 WHERE ca.channel_id = $1
+		 ORDER BY a.id
+		 LIMIT 1`, id).Scan(&envelope); err != nil {
 		t.Fatalf("读渠道 %d 的密文失败: %v", id, err)
 	}
 	return envelope

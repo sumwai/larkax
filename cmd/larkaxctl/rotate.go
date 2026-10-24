@@ -18,7 +18,7 @@ import (
 var rotateHelp = helpText{short: rotateShortUsage, long: rotateUsage}
 
 // rotateShortUsage 是 secret rotate 的短版：`-h` / `--help` 与参数写错时打的那一份。
-const rotateShortUsage = `larkaxctl secret rotate 轮换渠道凭证的主密钥。
+const rotateShortUsage = `larkaxctl secret rotate 轮换凭证账号的主密钥。
 
 用法：
   larkaxctl secret rotate                     干跑：列出会被改动的行，不写库（默认）
@@ -27,7 +27,7 @@ const rotateShortUsage = `larkaxctl secret rotate 轮换渠道凭证的主密钥
   larkaxctl secret rotate --batch-size <N>    每批处理的行数（默认 500）
 
 顺序：先把新主密钥放进 LARKAX_MASTER_KEYS 的首位、重启服务，再干跑、--apply、
---verify 各走一遍，**最后**才去掉旧主密钥。跑 --apply 之前先备份 channels 表。
+--verify 各走一遍，**最后**才去掉旧主密钥。跑 --apply 之前先备份 accounts 表。
 
 更细的边界：larkaxctl secret rotate help。
 `
@@ -38,7 +38,7 @@ const rotateShortUsage = `larkaxctl secret rotate 轮换渠道凭证的主密钥
 // 它原先是一个顶层命令（larkaxctl rotate）的帮助，#475 把这个动词收进
 // secret 域：轮换的是渠道凭证的主密钥，与渠道管理是两件事，所以不挂在
 // channel 下面。旧路径留着，见末尾那一行。
-const rotateUsage = `larkaxctl secret rotate 轮换渠道凭证的主密钥。
+const rotateUsage = `larkaxctl secret rotate 轮换凭证账号的主密钥。
 
 用法：
   larkaxctl secret rotate                     干跑：列出会被改动的行，不写库（默认）
@@ -59,7 +59,7 @@ const rotateUsage = `larkaxctl secret rotate 轮换渠道凭证的主密钥。
 
 第 4 步之前去掉旧主密钥，那些还没轮换到的行就再也解不开了。
 
-跑 --apply 之前先备份 channels 表（至少备份 credential_enc 这一列）：轮换改的
+跑 --apply 之前先备份 accounts 表（至少备份 credential_enc 这一列）：轮换改的
 就是这一列。中断不会让数据不可用——每一行要么是旧的（仍被旧主密钥包着），
 要么是新的（新旧都能开），不存在解不开的中间态；没跑完的部分 --verify 看得见。
 
@@ -181,11 +181,11 @@ func runRotatePlan(ctx context.Context, rotator *channels.Rotator) error {
 // 「先备份」是这条命令唯一一个出了事还能回头的动作，但**每一次 --apply 都会
 // 出现**——而一句每次成功运行都在的话，读的人第二遍就不再读它了。真正需要它
 // 的时刻是第一次跑，而那时用法文本（rotateUsage 的「跑 --apply 之前先备份
-// channels 表」那一节）正摆在眼前。所以它跟着 -v 走：要动手的人按需多问一句。
+// accounts 表」那一节）正摆在眼前。所以它跟着 -v 走：要动手的人按需多问一句。
 func runRotateApply(ctx context.Context, rotator *channels.Rotator) error {
 	if verboseOutput {
 		_, _ = fmt.Fprintln(humanStderr(),
-			"提示：本命令会改写 channels.credential_enc，开始前请确认已经备份。")
+			"提示：本命令会改写 accounts.credential_enc，开始前请确认已经备份。")
 	}
 
 	report, err := rotator.Apply(ctx, rotateProgressPrinter(humanStdout()))

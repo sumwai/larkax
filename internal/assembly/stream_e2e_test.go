@@ -321,12 +321,25 @@ func seedChannelOfType(t *testing.T, db *sql.DB, sealer *credential.Sealer, owne
 	var id int64
 	if err := db.QueryRowContext(context.Background(), `
 		INSERT INTO channels
-			(owner_user_id, name, type, base_url, credential_enc, status, models, priority)
-		VALUES ($1, $2, $3, $4, $5, 'enabled', ARRAY[$6], $7)
+			(owner_user_id, name, type, base_url, status, models, priority)
+		VALUES ($1, $2, $3, $4, 'enabled', ARRAY[$5], $6)
 		RETURNING id`,
-		owner, unique("e2e-channel"), chType, baseURL, sealed, model, priority,
+		owner, unique("e2e-channel"), chType, baseURL, model, priority,
 	).Scan(&id); err != nil {
 		t.Fatalf("插渠道失败: %v", err)
+	}
+	// 凭证在账号上（见 00067）：选路取账号 id 最小的那一个，端到端要它
+	// 能解出明文才打得到上游。
+	var accountID int64
+	if err := db.QueryRowContext(context.Background(), `
+		INSERT INTO accounts (name, credential_enc) VALUES ($1, $2) RETURNING id`,
+		unique("e2e-account"), sealed).Scan(&accountID); err != nil {
+		t.Fatalf("插账号失败: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO channel_accounts (channel_id, account_id) VALUES ($1, $2)`,
+		id, accountID); err != nil {
+		t.Fatalf("把账号挂到渠道上失败: %v", err)
 	}
 	return id
 }

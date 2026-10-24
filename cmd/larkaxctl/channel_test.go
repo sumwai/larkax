@@ -45,7 +45,6 @@ func TestChannelCreateRejectsBadFlags(t *testing.T) {
 		{"没有 --type", without(base, "--type"), "缺少 --type"},
 		{"没有 --base-url", without(base, "--base-url"), "缺少 --base-url"},
 		{"没有 --models", without(base, "--models"), "缺少 --models"},
-		{"没有凭证", without(base, "--credential-stdin"), "缺少凭证"},
 		{"两个凭证来源都给", append(base, "--credential-env", "SOME_VAR"), "只能给一个"},
 		{"多出位置参数", append(base, "extra"), "不接受位置参数"},
 	}
@@ -467,15 +466,21 @@ func findChannel(t *testing.T, db *sql.DB, id int64) channels.ChannelInfo {
 	return channels.ChannelInfo{}
 }
 
-// channelEnvelope 直接读出某一行的凭证密文。
+// channelEnvelope 直接读出渠道主账号的凭证密文。
 //
 // 清单里没有这一栏（也不该有），所以只能自己查——用例要证明的正是
-// 「密文能被解开」，而不是「清单里没打印密文」。
+// 「密文能被解开」，而不是「清单里没打印密文」。凭证在账号上（见 00067），
+// 主账号是账号 id 最小的那一个，与选路同一条判据。
 func channelEnvelope(t *testing.T, db *sql.DB, id int64) []byte {
 	t.Helper()
 	var envelope []byte
-	err := db.QueryRowContext(context.Background(),
-		`SELECT credential_enc FROM channels WHERE id = $1`, id).Scan(&envelope)
+	err := db.QueryRowContext(context.Background(), `
+		SELECT a.credential_enc
+		  FROM channel_accounts ca
+		  JOIN accounts a ON a.id = ca.account_id
+		 WHERE ca.channel_id = $1
+		 ORDER BY a.id
+		 LIMIT 1`, id).Scan(&envelope)
 	if err != nil {
 		t.Fatalf("读渠道 %d 的密文失败: %v", id, err)
 	}

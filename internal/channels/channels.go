@@ -378,6 +378,9 @@ func (s *Source) Candidates(ctx context.Context, canonicalModel string) ([]route
 
 		plaintext, err := s.decrypt(row.credentialEnc)
 		if err != nil {
+			// 把账号标进错误：一条渠道可以挂多把 key，只说渠道等于没说
+			// 是哪一行数据要处理。errors.Is 仍然穿得过去（%w）。
+			err = fmt.Errorf("账号 %d: %w", row.accountID, err)
 			// 一个渠道的密文坏了不该让同一模型下别人的渠道一起不可用，
 			// 所以跳过它继续。跳过不是静默：下面要么记日志，要么整次调用报错。
 			failures = append(failures, DecryptFailure{ChannelID: row.id, Name: row.name, Err: err})
@@ -661,7 +664,8 @@ SELECT
     c.weight,
     c.priority,
     COALESCE(c.owner_user_id, 0),
-    c.credential_enc,
+    ac.id,
+    ac.credential_enc,
     c.consecutive_failures,
     c.last_failure_at,
     h.requests,
@@ -689,6 +693,22 @@ SELECT
        FROM channel_protocols p
       WHERE p.channel_id = c.id) AS protocols
   FROM channels c
+  -- 凭证在账号上（见迁移 00067）。这条渠道一个账号都没挂时不产生行，
+  -- INNER JOIN 于是把它整个排除出候选集——零账号是合法的中间态，
+  -- 「建得出、list 可见」，但选路要跳过它。
+  --
+  -- 一条渠道挂多个账号时取 id 最小的那一个：本命令只负责把凭证交到执行器，
+  -- 池内调度（权重、健康、换 key 的轮转）是后续工作的事。按 id 固定取一条
+  -- 让同一份配置每次选到同一把 key——随机挑会让「这条渠道用的是哪把 key」
+  -- 在排查时无法复现。
+  JOIN LATERAL (
+        SELECT a.id, a.credential_enc
+          FROM channel_accounts ca
+          JOIN accounts a ON a.id = ca.account_id
+         WHERE ca.channel_id = c.id
+         ORDER BY a.id
+         LIMIT 1
+       ) ac ON true
   LEFT JOIN LATERAL (
         SELECT
             -- 健康列只读渠道级合并行（model = ''）：它把本渠道所有模型合在一起，
@@ -754,6 +774,9 @@ type candidateRow struct {
 	weight        int
 	priority      int
 	ownerUserID   int64
+	// accountID 是这份候选实际会用的账号（挂池里 id 最小的那一个）。
+	// 它只用于把解密失败指到具体哪把 key 上，不进 route.Candidate。
+	accountID     int64
 	credentialEnc []byte
 
 	streak        int
@@ -800,7 +823,7 @@ func scanCandidate(rows *sql.Rows) (candidateRow, error) {
 	err := rows.Scan(
 		&row.id, &row.name, &row.channelType, &row.baseURL,
 		&row.modelsJSON, &row.setting, &row.weight, &row.priority, &row.ownerUserID,
-		&row.credentialEnc,
+		&row.accountID, &row.credentialEnc,
 		&row.streak, &row.lastFailureAt,
 		&row.requests, &row.successes, &row.latencyP95,
 		&row.cost, &row.costEvents, &row.cacheHit, &row.cacheMiss,

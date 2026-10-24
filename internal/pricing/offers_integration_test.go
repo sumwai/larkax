@@ -192,8 +192,8 @@ func seedPlatformChannel(t *testing.T, db *sql.DB) int64 {
 
 	var id int64
 	err := db.QueryRowContext(context.Background(), `
-		INSERT INTO channels (owner_user_id, name, type, base_url, credential_enc)
-		VALUES (NULL, $1, 'openai', 'http://127.0.0.1:1/v1', '\x00'::bytea)
+		INSERT INTO channels (owner_user_id, name, type, base_url)
+		VALUES (NULL, $1, 'openai', 'http://127.0.0.1:1/v1')
 		RETURNING id`, unique("offers-platform-channel")).Scan(&id)
 	if err != nil {
 		t.Fatalf("插平台渠道失败: %v", err)

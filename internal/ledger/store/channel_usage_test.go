@@ -26,8 +26,8 @@ func seedOwnedChannel(t *testing.T, ctx context.Context, db *sql.DB, owner int64
 	var id int64
 	if err := db.QueryRowContext(ctx, `
 		INSERT INTO channels
-		       (name, type, base_url, credential_enc, status, models, owner_user_id)
-		VALUES ($1, 'openai', 'https://owner.example.com', '\x00'::bytea,
+		       (name, type, base_url, status, models, owner_user_id)
+		VALUES ($1, 'openai', 'https://owner.example.com',
 		        'enabled', ARRAY['gpt-4o'], $2)
 		RETURNING id`, "chown"+itoa(nextID()), owner).Scan(&id); err != nil {
 		t.Fatalf("建带归属的渠道失败: %v", err)
