@@ -30,7 +30,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 var allEnvVars = []string{
 	"LARKAX_ENV", "LARKAX_ROLE", "LARKAX_HTTP_ADDR", "LARKAX_INTERNAL_ADDR",
 	"LARKAX_LOG_LEVEL",
-	"LARKAX_DB_DSN", "LARKAX_REDIS_DSN", "LARKAX_MASTER_KEYS",
+	"LARKAX_DB_DSN", "LARKAX_REDIS_DSN", "LARKAX_MASTER_KEYS", "LARKAX_WEB_DIR",
 }
 
 // baseEnv 是让 Load 成功的最小变量集合。
@@ -75,6 +75,23 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.IsProduction() {
 		t.Error("development 环境下 IsProduction() 应为 false")
+	}
+	if cfg.WebDir != "" {
+		t.Errorf("WebDir = %q，默认应当是空：不配就不托管控制台", cfg.WebDir)
+	}
+}
+
+// LARKAX_WEB_DIR 原样传进 Config。目录存不存在不在这一层判——那一步要报出
+// index.html 缺没缺，由装配那一层做（见 internal/webui）。
+func TestLoadWebDir(t *testing.T) {
+	setEnv(t, baseEnv(map[string]string{"LARKAX_WEB_DIR": "/srv/web"}))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() 出错: %v", err)
+	}
+	if cfg.WebDir != "/srv/web" {
+		t.Errorf("WebDir = %q，期望 /srv/web", cfg.WebDir)
 	}
 }
 

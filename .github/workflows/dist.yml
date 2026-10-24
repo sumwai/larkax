@@ -71,14 +71,13 @@ jobs:
             dist/SHA256SUMS
           if-no-files-found: error
 
-  # 控制台：`npm run build` 自己就会先跑 `tsc -b`（见 web/package.json），
-  # 所以这里不再单列一次类型检查——那一道在 Web 门禁里已经跑过，这里要的是产物。
+  # 控制台：调 `make web`，不在工作流里把 `npm ci` 与 `npm run build` 再列
+  # 一遍。列一遍就是第二份配方：`release.yml` 也调同一个目标，而两份之间
+  # 漂移时没有任何门禁会响。打包参数、演示数据检查（`VITE_API_MODE` 写错时
+  # 产物里会带着 MockApiClient）都在那个目标里。
   web-dist:
     name: 控制台
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
     steps:
       - uses: actions/checkout@v4
 
@@ -91,32 +90,23 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      # 用 ci 而不是 install：按 lock 精确装，lock 与 package.json 对不上时直接失败。
-      - name: 安装依赖
-        run: npm ci
-
+      # 版本号与 go-dist 同一个规则：input，或者由提交 sha 派生。
+      # `api_mode` 直接传给目标：控制台不显式给 http 就用 mock 客户端，而那份
+      # 产物照样能跑、只是数字是演示数据。
       - name: 构建
         env:
-          # 控制台默认是演示数据（`web/src/api/index.ts`：不显式给 http 就用 mock
-          # 客户端）。演示界面上有横幅，但登录页、菜单、数字都长得像真的，
-          # 打错了在部署之后才发现。所以这份产物显式钉住 http。
+          INPUT_VERSION: ${{ inputs.version }}
           VITE_API_MODE: ${{ inputs.api_mode }}
-        run: npm run build
-
-      # 上面那个变量写错时，构建照样成功、产物照样能跑——只是跑在演示数据上。
-      # 检查产物里有没有只有 mock 才有的字段，比看日志可靠：`演示账号` 是
-      # MockApiClient 的固定用户名，真实构建会被 tree-shake 掉。
-      - name: 确认不是演示数据
-        if: inputs.api_mode == 'http'
         run: |
-          if grep -rqs '演示账号' dist/assets; then
-            echo "::error::产物里带着演示数据（MockApiClient），VITE_API_MODE 没生效。"
-            exit 1
+          version="$INPUT_VERSION"
+          if [ -z "$version" ]; then
+            version="dev-$(git rev-parse --short HEAD)"
           fi
-          echo "产物里没有演示数据。"
+          echo "版本号：$version"
+          make web VERSION="$version" VITE_API_MODE="$VITE_API_MODE"
 
       - uses: actions/upload-artifact@v4
         with:
           name: larkax-web
-          path: web/dist
+          path: dist/larkax-web_*.tar.gz
           if-no-files-found: error

@@ -188,15 +188,18 @@ jobs:
           go run ./cmd/larkaxctl migrate up
 
       # 补全行为用例要在真 shell 里跑：fish 走 `complete -C`，zsh 走替身
-      # `compadd`。装壳失败时这一步当场红，别把判断留给用例——用例找不到壳
+      # `compadd`。`make install` 的端到端用例还要 bash-completion：它靠那份
+      # 脚本的按需加载证明「文件放在用户目录下就会被认」，而直接 source 装好的
+      # 那一份只证明内容可用。装壳失败时这一步当场红，别把判断留给用例——用例找不到壳
       # 只记一行日志，与「通过」在输出里长得一样（LESSONS.md 第 16 条）。
       - name: 装补全行为用例要用的壳
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y fish zsh
+          sudo apt-get install -y fish zsh bash-completion
           fish --version
           zsh --version
+          test -f /usr/share/bash-completion/bash_completion
 
       - name: 单元测试
         env:
