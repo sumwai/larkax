@@ -82,6 +82,13 @@ type Config struct {
 	DBDSN    string
 	RedisDSN string // 空表示不启用 Redis
 
+	// WebDir 是控制台静态产物的目录（Vite 的 dist），空表示不托管控制台。
+	//
+	// 必须在连库前就知道：它决定公开监听上挂不挂静态处理器。目录本身是否存在
+	// 由装配那一层校验（见 internal/webui）——那一步要报出 index.html 缺没缺，
+	// 而这不是「配置合法不合法」的问题。
+	WebDir string
+
 	MasterKeys []MasterKey
 }
 
@@ -145,6 +152,7 @@ func Load() (*Config, error) {
 		LogLevel:     env("LARKAX_LOG_LEVEL", "info"),
 		DBDSN:        os.Getenv("LARKAX_DB_DSN"),
 		RedisDSN:     os.Getenv("LARKAX_REDIS_DSN"),
+		WebDir:       os.Getenv("LARKAX_WEB_DIR"),
 	}
 
 	if !cfg.Role.valid() {

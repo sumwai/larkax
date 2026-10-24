@@ -151,9 +151,38 @@ larkax builds on other people's work:
   calendar data (planned).
 - [models.dev](https://github.com/sst/models.dev) — model metadata (planned).
 
+## Releases
+
+Every `v*` tag publishes prebuilt artifacts, so running larkax does not require a Go
+toolchain:
+
+- `larkax_<tag>_linux_{amd64,arm64}.tar.gz` — `larkax`, `larkaxctl`, the man pages,
+  `LICENSE` and `README.md`. Check it with
+  `sha256sum -c --ignore-missing SHA256SUMS`.
+- `larkax-web_<tag>.tar.gz` — the console as static files. Point `LARKAX_WEB_DIR` at the
+  unpacked directory and the public listener serves the UI next to the API; `index.html`
+  takes over client-side routes while `/v1/` still goes to inference. With no
+  `LARKAX_WEB_DIR` the public listener answers `501` outside `/v1/`, as documented.
+- `ghcr.io/sumwai/larkax:<tag>` (and `:latest`) — both binaries plus the console, for
+  `linux/amd64` and `linux/arm64`, running as uid 10001.
+
+```sh
+docker run --rm -p 8080:8080 \
+  -e LARKAX_DB_DSN='postgres://user:password@db:5432/larkax' \
+  -e LARKAX_MASTER_KEYS="k1:<base64>" \
+  ghcr.io/sumwai/larkax:latest
+```
+
+The image sets `LARKAX_WEB_DIR=/srv/web` and binds both listeners on all interfaces;
+`docker run --entrypoint larkaxctl` runs migrations from the same image. PostgreSQL and
+Redis stay external — the image carries no data directory. The full asset list, the
+checksum file and the GHCR note about the first publish are in
+[docs/versioning.md](docs/versioning.md).
+
 ## Building and running
 
-Requires Go 1.26 or newer (inside the module, `go` downloads the toolchain `go.mod` asks
+Everything below is the from-source path; the release artifacts above need none of it.
+It requires Go 1.26 or newer (inside the module, `go` downloads the toolchain `go.mod` asks
 for), plus Docker with `docker compose` v2.1 or newer. `go build ./...` builds every
 package, and `make run` brings up PostgreSQL, the migrations and the service. `go test
 ./...` on its own silently skips the integration tests when `LARKAX_DB_DSN` is unset —

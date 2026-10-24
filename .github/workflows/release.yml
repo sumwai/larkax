@@ -14,12 +14,8 @@ jobs:
   #（例如从别的分支合的、或本地直接推的 tag），所以这里重跑一遍。
   #
   # 重跑的是**与 ci.yml 同一份工作流**（.github/workflows/gates.yml），
-  # 而不是把那些步骤在这里再列一遍。列一遍的写法原先就在这个文件里，代价是：
-  # 这里只有 `go test` 与集成测试门禁，`gofmt`、`go vet`、`golangci-lint`、
-  # 分层自查、红线扫描、三道死代码门、函数名门禁、索引一致性门禁、契约测试
-  # 一道都没跑——这道门比常规 CI **弱**，而它是唯一挡在发布前面的一道。
-  # 再列一遍也不会自己变好：`ci.yml` 日后多一道门，这里不会跟着多，
-  # 而「少跑了一道」与「全都跑过了」在日志里长得一样（LESSONS.md 第 16 条）。
+  # 而不是把那些步骤在这里再列一遍。列一遍的代价是：这里只有一部分门，而
+  # 「少跑了一道」与「全都跑过了」在日志里长得一样（LESSONS.md 第 16 条）。
   #
   # 引用是同一仓库内的相对路径（`./.github/workflows/...`），取的是**调用方
   # 那个 commit** 里的那一份：tag 触发时就是 tag 指向的 commit，所以发布验的
@@ -28,45 +24,110 @@ jobs:
     name: 门禁
     uses: ./.github/workflows/gates.yml
 
-  release:
-    name: 构建并发布
+  # 发布资产：二进制与两份 tarball 由 `make release` 出（一条配方，本地演练
+  # 调的是同一条）。它要 Go 与 Node：一个编二进制，一个编控制台。
+  assets:
+    name: 构建发布资产
     runs-on: ubuntu-latest
-    # 门禁挂了，这个 job 根本不启动——不是「先构建再发现门禁是红的」。
-    # 也正因为测试在 gates 里跑，这里的日志只剩构建与发布，
-    # 「门禁挂了」与「构建挂了」不会混在同一份输出里（ci.yml 把 Go 与契约
-    # 拆成两个 job 也是这个理由）。
     needs: gates
     steps:
       - uses: actions/checkout@v4
-        with:
-          # 生成 release notes 要读 tag 之间的提交历史
-          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      # 构建、打包、算校验和是**一条配方**，写在 Makefile 的 `dist` 目标里。
-      # 这里只调它，不把这些步骤再列一遍——列一遍就是第二份，改一处要记得改
-      # 另一处，而漂移之后没有任何门禁会响（LESSONS.md 第 16 条：少做了一步
-      # 与全做过了，在日志里长得一样）。
-      #
+      # Node 版本跟着仓库里的 .nvmrc 走，与 Web 门禁同一个来源。
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
       # ARCHS 两个架构都给：CI 跑在 linux/amd64 上，于是 amd64 会被真执行一次，
       # 校验版本注入确实进去了；arm64 执行不起来，会打印一句「跳过执行校验
-      # （架构不同）」。后者是预期内的，而那行字是故意打出来的。
+      # （架构不同）」——那行字是故意打出来的，不是失败。
       #
       # 版本号只有一处来源：tag。代码里不写死，构建时注入；两个二进制注入同一个
       # 变量名，它们的版本必须能对上。
       - name: 构建并打包
         env:
           VERSION: ${{ github.ref_name }}
-        run: make dist VERSION="$VERSION" ARCHS="amd64 arm64"
+        run: make release VERSION="$VERSION" ARCHS="amd64 arm64"
 
+      # `if-no-files-found: error`：产物没打出来时 upload 默认只是警告，于是
+      # 「构建成功但没有产物」与「产物好好的」在日志里长得一样。
+      - uses: actions/upload-artifact@v4
+        with:
+          name: larkax-release
+          path: dist/*
+          if-no-files-found: error
+
+  # 镜像：Dockerfile 里两个构建阶段都跑在构建机架构上，二进制按 $TARGETARCH
+  # 交叉编译，所以这条路不需要 qemu 模拟。推 ghcr 用的是 GITHUB_TOKEN，
+  # 不需要单独的账号或 PAT——只要这个 job 有 packages: write。
+  image:
+    name: 构建并推送镜像
+    runs-on: ubuntu-latest
+    needs: gates
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 版本号与资产那条路同一个来源：tag。
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            VITE_API_MODE=http
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # 发布：把资产挂到 Release 上。镜像已经推好了，这里不再碰它——
+  # 镜像的「发布」是 push，不是这里的资产清单。
+  publish:
+    name: 发布
+    runs-on: ubuntu-latest
+    needs: [assets, image]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 生成 release notes 要读 tag 之间的提交历史
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: larkax-release
+          path: dist
+
+      # 资产清单只有一份：dist/*。tarball 与 SHA256SUMS 都由 `make release`
+      # 生成，这里只负责传上去——再列一遍文件名就会在加一种产物时漏掉。
       - name: 发布
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          ls -1 dist
           gh release create "${{ github.ref_name }}" \
             --title "${{ github.ref_name }}" \
             --generate-notes \

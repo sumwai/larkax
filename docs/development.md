@@ -137,6 +137,8 @@ LARKAX_INTERNAL_ADDR="127.0.0.1:8082"
 | `make clean` | 清容器、数据卷与生成的 `.env`，回到刚克隆的状态 |
 | `make init` | 只生成或同步 `.env`，不碰容器 |
 | `make check-ports` | 只查那两个监听地址有没有被占（`make run` 起服务之前会跑它） |
+| `make web` | 构建控制台并打成 `dist/larkax-web_<版本>.tar.gz`（要 Node） |
+| `make release` | `dist` + `web` + `SHA256SUMS`，发布用的全部资产 |
 | `make help` | 把常用的那几条打出来（不含本表里的 `init` 与 `check-ports`） |
 
 `make migrate` 与 `make test` 都会先跑 `make init`——它们都要那份 DSN。
@@ -415,7 +417,7 @@ go run ./cmd/larkaxctl price calendar import ./cn-2031.json
 
 ## 环境变量
 
-一共八个，全部有明确理由：
+一共九个，全部有明确理由：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
@@ -427,6 +429,7 @@ go run ./cmd/larkaxctl price calendar import ./cn-2031.json
 | `LARKAX_LOG_LEVEL` | `info` | `debug` / `info` / `warn`（`warning` 也认）/ `error` |
 | `LARKAX_ENV` | `development` | 只有 `production` 特殊：它把日志格式切成 JSON。**其余任何取值都等同 `development`**，写成 `prod` 既不会报错也不会切过去 |
 | `LARKAX_REDIS_DSN` | 空 | 限流的共享计数（`redis://` / `rediss://` / `unix://`）。留空时计数在进程内，单实例正确、多实例下额度按实例数放大 |
+| `LARKAX_WEB_DIR` | 空 | 控制台静态产物目录（Vite 的 `dist`）。留空时公开监听只提供 API；镜像里指向 `/srv/web` |
 
 两个监听地址默认只绑回环（`127.0.0.1`），服务因此默认只在本机可达。容器里端口
 映射不进来、或要让别的机器直接连时，显式写宽即可，例如 `LARKAX_HTTP_ADDR=":8080"`。
@@ -1790,14 +1793,25 @@ gremlins 版本、`workers=1`、系数 10、`--invert-logical`、每个包之前
 而那时没人知道哪一份算数。
 
 **本仓库不做部署**：`main` 合入即是流水线的终点。发布由 tag 触发 `release.yml`——
-门禁 → `make dist` → 把制品传到 GitHub Release。制品放到哪台机器上属于使用方的事，
-不在本仓库范围内。
+门禁 → `make release`（二进制包 + 控制台包）与镜像推送 → 把资产传到 GitHub Release。
+制品（二进制、控制台包、镜像）放到哪台机器上属于使用方的事，不在本仓库范围内。
+
+镜像由仓库根的 `Dockerfile` 定义：两个构建阶段（Go 与 Node）都跑在构建机架构上，
+二进制按 `$TARGETARCH` 交叉编译，所以一个 amd64 的 runner 就能同时出 amd64 与 arm64
+两个镜像，不需要 qemu。镜像里的二进制与页面分别来自 `make print-ldflags` 和
+`make web-build`，不另写一份。本地试构建：
+
+```sh
+docker build -t larkax:dev .
+docker run --rm -p 8080:8080 -e LARKAX_DB_DSN=... -e LARKAX_MASTER_KEYS=... larkax:dev
+```
 
 另有一个**手动触发**的构建工作流 [.github/workflows/dist.yml](../.github/workflows/dist.yml)：
-它只把某一棵树打成产物——`make dist` 出的二进制，加一份 `npm run build` 出来的控制台
-静态包——通过 workflow artifact 取，**不进 Release，也不部署**。它**不跑门禁**：门禁在
+它只把某一棵树打成产物——`make dist` 出的二进制包与 `make web` 出的控制台包——
+通过 workflow artifact 取，**不进 Release，也不部署**。它**不跑门禁**：门禁在
 push 与 PR 上已经跑过，触发前先确认那个提交是绿的。要「门禁 + 构建 + 发布」一条龙，走
-tag 与 `release.yml`。
+tag 与 `release.yml`。控制台那一格调的也是 `make web`（与发布同一个目标），
+`VITE_API_MODE` 只是它的一参数。
 
 控制台那份产物的 `VITE_API_MODE` 由工作流的 `api_mode` 输入决定，**默认 `http`**（连真实
 API）；`mock` 只用来出演示包。这一格默认值反了会很隐蔽：演示界面上有横幅，但登录页、菜单

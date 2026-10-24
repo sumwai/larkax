@@ -52,7 +52,7 @@ MASTER_KEYS_PLACEHOLDER := current:$(MASTER_KEY_PLACEHOLDER),previous:$(MASTER_K
 # 跟着改成双引号。
 ESCAPED_DB_PASSWORD := $(subst ','\'',$(subst |,\|,$(subst &,\&,$(subst \,\\,$(DB_PASSWORD)))))
 
-.PHONY: help init up down migrate run check-ports test dist clean
+.PHONY: help init up down migrate run check-ports test dist clean web web-build release print-ldflags
 
 help:
 	@echo "make run      准备 .env → 起依赖 → 迁移 → 前台跑服务"
@@ -61,6 +61,8 @@ help:
 	@echo "make migrate  只跑迁移"
 	@echo "make test     跑测试（先确保依赖起着）"
 	@echo "make dist     打发布用的 tar.gz（默认只打 amd64，可 ARCHS=\"amd64 arm64\"）"
+	@echo "make web      构建控制台并打成 dist/larkax-web_<版本>.tar.gz（要 Node）"
+	@echo "make release  dist + web + SHA256SUMS，发布用的全部资产"
 	@echo "make clean    清容器、数据卷与生成的 .env"
 	@echo ""
 	@echo "端口被占用时：make run PG_PORT=55432"
@@ -248,6 +250,11 @@ VERSION     ?= dev
 ARCHS       ?= amd64
 VERIFY_EXEC ?= 1
 
+# 版本注入只有这一行。dist、install 与 Dockerfile 都用它（最后那个经
+# `print-ldflags` 取）：三处各写一份的话，漂移的症状是「二进制自称 dev」，
+# 而它只在对着版本号排查时才现形。
+LDFLAGS := -s -w -X main.version=$(VERSION)
+
 # 本机是什么，决定哪个架构能真执行。取 GOHOSTARCH / GOHOSTOS 而不是 GOARCH /
 # GOOS：后两者会被环境里的交叉编译设置改掉，那就正好把「能不能跑」判断反了
 # ——判断反了不会报错，只会少校验一次而看起来一切正常。
@@ -265,7 +272,7 @@ dist:
 	  for pair in "larkax:./cmd/larkax" "larkaxctl:./cmd/larkaxctl"; do \
 	    name=$${pair%%:*}; pkg=$${pair#*:}; \
 	    GOOS=linux GOARCH=$$arch CGO_ENABLED=0 go build -trimpath \
-	      -ldflags "-s -w -X main.version=$(VERSION)" \
+	      -ldflags "$(LDFLAGS)" \
 	      -o "dist/$${name}_linux_$${arch}" "$$pkg"; \
 	  done; \
 	  if [ "$(VERIFY_EXEC)" = 0 ]; then \
@@ -293,6 +300,58 @@ dist:
 	cd dist && sha256sum *.tar.gz > SHA256SUMS; \
 	echo "已打出："; \
 	ls -1 *.tar.gz
+
+# 控制台的发布产物：`npm ci` → Vite 构建 → 打成与 dist 同形状的 tar.gz。
+#
+# 与 dist 分开成一个目标，是因为它要 Node，而 `make dist` 只要能跑 Go 的环境。
+# 只想练二进制时不必先把 node_modules 装上。
+#
+# VITE_API_MODE 默认 http：控制台不显式给 http 就用 mock 客户端，而那份产物
+# 照样能跑、只是数字是演示数据。所以构建完立刻查一次产物里有没有只有 mock
+# 才有的固定用户名（`演示账号`），比看构建日志可靠。
+#
+# 打包参数与 dist 同一个理由：同一个版本打两次要得到同一个包。
+VITE_API_MODE ?= http
+NPM           ?= npm
+
+# 只构建控制台，不打包。Dockerfile 的控制台阶段调这一条：镜像里的页面
+# 与 `make web` 出的包必须来自同一份配方，否则「镜像里是旧前端」这种问题
+# 只能靠用户报。
+web-build:
+	@cd web && $(NPM) ci && VITE_API_MODE=$(VITE_API_MODE) $(NPM) run build
+	@if [ "$(VITE_API_MODE)" = http ] && grep -rqs '演示账号' web/dist/assets; then \
+	  echo "产物里带着演示数据（MockApiClient），VITE_API_MODE 没生效"; \
+	  exit 1; \
+	fi
+
+web: web-build
+	@mkdir -p dist
+	@set -e; \
+	umask 022; \
+	root=$$(mktemp -d); \
+	trap 'rm -rf "$$root"' EXIT; \
+	stage="$$root/larkax-web_$(VERSION)"; \
+	mkdir -p "$$stage"; \
+	cp -R web/dist "$$stage/dist"; \
+	cp LICENSE "$$stage/"; \
+	tar -czf "dist/larkax-web_$(VERSION).tar.gz" \
+	  --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+	  -C "$$root" "larkax-web_$(VERSION)"; \
+	echo "已打出：dist/larkax-web_$(VERSION).tar.gz"
+
+# 发布用的全部资产：两个二进制与控制台，外加覆盖两者的校验和。
+#
+# 顺序有意义：dist 开头会 `rm -rf dist`，所以它必须先跑完；web 之后才补上
+# 第三个 tarball，然后一次重算校验和。反过来先 web 再 dist，那份控制台包会
+# 被删掉，而日志里没有任何一步失败。
+release: dist web
+	@cd dist && sha256sum *.tar.gz > SHA256SUMS && echo "已打出：" && ls -1 *.tar.gz
+
+# 打印 ldflags，给 Dockerfile 用。版本注入点只有一处（见 LDFLAGS）：镜像里的
+# 二进制与 `make dist` 出的那一份必须自称同一个版本，而 Dockerfile 里再写一份
+# `-X main.version=` 就是第二个注入点。
+print-ldflags:
+	@echo '$(LDFLAGS)'
 
 clean:
 	@docker compose down --volumes --remove-orphans

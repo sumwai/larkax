@@ -1,0 +1,9 @@
+.git
+.gitignore
+.env
+.env.*
+.pi
+dist
+web/node_modules
+web/dist
+*.log

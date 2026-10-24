@@ -117,6 +117,10 @@ Anthropic 格式同理。这条不能混。
 
 ## 发布包里有什么
 
+一次 tag 发布（`v*`）带三样东西：每个平台一个二进制包、一份控制台包、一份镜像。
+
+## 二进制包
+
 每个平台一个 tar.gz，名字形如 `larkax_v0.1.0_linux_amd64.tar.gz`。解开是一个与包同名
 的目录，里面是：
 
@@ -134,16 +138,48 @@ MANPATH=larkax_v0.1.0_linux_amd64/man man larkaxctl-channel
 
 在源码树里翻的写法见 [cli-reference.md](cli-reference.md)。
 
-`SHA256SUMS` 与这些 tarball 一起挂在 Release 上，核对用
-`sha256sum -c --ignore-missing SHA256SUMS`：只下自己那个架构时，`--ignore-missing`
-跳过另一行，不会因为一个「No such file or directory」而以非零退出。
+## 控制台包
 
-**打包只有一份配方**：`Makefile` 的 `dist` 目标。CI 调的也是它，发布那一步只留
-CI 自己的东西（`setup-go`、`gh release create`）：
+`larkax-web_v0.1.0.tar.gz` 里是一个与包同名的目录，里面是 `dist/`（Vite 产物：
+`index.html`、`assets/` 与其它静态文件）和 `LICENSE`。把这个目录指给服务的
+`LARKAX_WEB_DIR`，公开监听就同时提供 API 与页面；前端路由（例如
+`/console/channels`）由 `index.html` 接管，而 `/v1/` 仍走推理入口。
+
+`LARKAX_WEB_DIR` 留空时公开监听只提供 API，其余路径照旧回 `501`。
+
+## 镜像
 
 ```sh
-make dist VERSION=v0.1.0 ARCHS="amd64 arm64"   # 发布时走的就是这一条
-make dist VERSION=v0.1.0                       # 本地演练：默认只打 amd64
+docker pull ghcr.io/sumwai/larkax:v0.1.0
+docker run --rm -p 8080:8080 \
+  -e LARKAX_DB_DSN='postgres://user:password@db:5432/larkax' \
+  -e LARKAX_MASTER_KEYS="k1:<base64>" \
+  ghcr.io/sumwai/larkax:v0.1.0
+```
+
+- 标签是 tag 本身，另有一个 `latest`；架构 `linux/amd64` 与 `linux/arm64`。
+- 镜像里已经带着控制台，`LARKAX_WEB_DIR=/srv/web`，两个监听地址也写成了 `:8080`
+  与 `:9090`（不写宽则只绑容器自己的回环，端口映射接不进来）。
+- 以 uid 10001 运行；`larkaxctl` 也在镜像里（`docker run --entrypoint larkaxctl`），
+  迁移可以在部署里跑。
+- 数据库与 Redis 都是外部依赖，镜像不带数据目录。
+- **不需要单独的镜像仓库账号**：推送用工作流自带的 `GITHUB_TOKEN`（`packages: write`）。
+  第一次发布后这个包默认是私有的，要在包的设置里手动改成公开；否则拉取要 `docker login`。
+
+## 校验和
+
+`SHA256SUMS` 与所有 tarball 一起挂在 Release 上，核对用
+`sha256sum -c --ignore-missing SHA256SUMS`：只下自己那几份时，`--ignore-missing`
+跳过其它行，不会因为一个「No such file or directory」而以非零退出。镜像不在校验和
+里：它的完整性由 registry 的 digest 保证，`docker pull` 拿到的就是那个 digest。
+
+**打包只有一份配方**：`Makefile` 的 `release` 目标（`dist` + `web` + 校验和）。
+CI 调的也是它，发布那一步只留 CI 自己的东西（`setup-go`、`setup-node`、
+`gh release create`）：
+
+```sh
+make release VERSION=v0.1.0 ARCHS="amd64 arm64"   # 发布时走的就是这一条
+make release VERSION=v0.1.0                       # 本地演练：默认只打 amd64
 ```
 
 `make dist` 会把刚构建出来的二进制**真执行**一次，比对它自称的版本是否就是那个
@@ -152,7 +188,11 @@ tag——二进制自称 `dev` 这件事，只有用户报问题时才会被发�
 与「校验通过」在日志里长得一样（`LESSONS.md` 第 16 条）。本机架构按
 `go env GOHOSTARCH` 判定，所以在 amd64 主机上发布时，验的是 amd64 那一份。
 
-配方用的是 GNU tar 的那几个选项，macOS 自带的 bsdtar 不认。
+`make web` 构建完会查一次产物里有没有只有 mock 客户端才有的固定用户名
+（`演示账号`）：`VITE_API_MODE` 没生效时构建照样成功、页面照样能开，只是数字全是
+演示数据——那一查是唯一会响的地方。
+
+两个目标配方用的是 GNU tar 的那几个选项，macOS 自带的 bsdtar 不认。
 
 ## 版本号出现在哪里
 
