@@ -604,6 +604,21 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
 `--expr` 与它**二选一**：写入时表会编译成表达式存进同一栏，`price list` 与求值用
 的都是编译结果。
 
+不需要分时、分段的规则，五个计价项可以直接按项给，不用写表达式：
+`larkaxctl price create --scope platform --name example-price --by alice
+--prompt 1.5 --completion 7.5 --cache-read 0.2 --cache-write 1.9 --reasoning 9`。
+
+这组旗标的单位默认是**每百万 token**（供应商报价单就是这么写的）：`--prompt 1.5`
+就是每百万输入 token 1.5。存库前换成每 token 的价（`0.0000015`），库里存的仍是
+表达式，`price show` 打出来的也是表达式；`--unit token` 表示给的就是每 token 的价。
+换算是十进制移位，不经过浮点，`0.2` 不会被写成 `0.0000002` 之外的近似值。
+只写用得到的项也可以，但缺的那一项会在用到它的请求上让结算失败，所以五个
+全写上（用不到的填 `0`）比漏掉再被拦住省事。
+
+`--expr`、`--schedule-file` 与这组单价旗标**三选一**：手写表达式、结构化定价表、
+逐项单价。最后一种留给「一张单价表就够」的规则；带阶梯、分时、门槛的规则仍写
+表达式或表。
+
 - `tz`：判定用的 IANA 时区名，必填。
 - `base`：兜底单价。键与表达式相同（`prompt`、`completion`、`cache_read`、
   `cache_write`、`reasoning`、`fixed`、`minimum`），不能为空。

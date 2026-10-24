@@ -484,6 +484,8 @@ func completionEnumValues() map[string][]string {
 	scopes := pricing.Scopes()
 	for _, path := range []string{"price create", "price update"} {
 		put(path, "scope", scopes)
+		// 单价旗标的单位：默认每百万 token，也可以直接给每 token。
+		put(path, "unit", []string{"mtok", "token"})
 	}
 
 	asset := []string{string(ledger.AssetCNY)}

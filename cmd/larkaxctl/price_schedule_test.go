@@ -49,12 +49,12 @@ func TestPriceScheduleRejectsBadFlags(t *testing.T) {
 				"--scope", "platform", "--name", "n1",
 				"--expr", testExpr, "--schedule-file", path, "--by", "ops",
 			},
-			"只能给一个",
+			"只能给一种",
 		},
 		{
 			"create：两份都没给",
 			[]string{"--scope", "platform", "--name", "n1", "--by", "ops"},
-			"缺少 --expr 或 --schedule-file",
+			"缺少 --expr、--schedule-file 或单价旗标",
 		},
 		{
 			"create：文件不存在",
@@ -90,7 +90,7 @@ func TestPriceScheduleRejectsBadFlags(t *testing.T) {
 			[]string{
 				"--id", "1", "--expr", testExpr, "--schedule-file", path, "--by", "ops",
 			},
-			"只能给一个",
+			"只能给一种",
 		},
 	}
 
