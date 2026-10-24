@@ -1126,40 +1126,69 @@ func TestListHidesDeletedChannelUnlessAll(t *testing.T) {
 	}
 }
 
-// 读点三：凭证轮换。已删的行不扫、也不要求它含当前主密钥。
-func TestRotateSkipsDeletedChannels(t *testing.T) {
+// 读点三：凭证轮换。账号不随渠道软删消失，所以已删渠道的账号照样扫、照样要
+// 能重包——渠道 restore 之后要能直接接着用。
+//
+// # 这里比的是账号 id，不是渠道 id
+//
+// Problem.ID / Missing[].ID 是 accounts.id（轮换扫的是 accounts 表）。渠道 id 与
+// 账号 id 在新库上都从 1 开始，拿 insertChannel 的返回值去比，撞上的是别人的行：
+// 整包跑时 id 已经被别的用例推高、撞不上，单跑或换个顺序就红。所以账号 id 一律
+// 经 accountOfChannel 从关联里取。
+func TestRotateCoversAccountsOfDeletedChannels(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
 	model := uniqueModel()
 
-	deleted := insertChannel(t.Context(), t, db, sealer, channelSpec{
+	deletedChannel := insertChannel(t.Context(), t, db, sealer, channelSpec{
 		model: model, credential: []byte{0x99}, // 解析不了的信封
 	})
-	live := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
-	softDeleteRow(t, db, deleted)
+	liveChannel := insertChannel(t.Context(), t, db, sealer, channelSpec{model: model})
+	softDeleteRow(t, db, deletedChannel)
+
+	deletedAccount := accountOfChannel(t, db, deletedChannel)
+	liveAccount := accountOfChannel(t, db, liveChannel)
 
 	rot := NewRotator(db, sealer)
 	plan, err := rot.Plan(context.Background())
 	if err != nil {
 		t.Fatalf("Plan 出错: %v", err)
 	}
+	var deletedReported bool
 	for _, p := range plan.Problems {
-		if p.ID == deleted {
-			t.Errorf("已删的渠道 %d 不该出现在轮换问题清单里：%v", deleted, p.Err)
+		if p.ID == liveAccount {
+			t.Errorf("在用渠道的账号 %d 不该出现在轮换问题清单里：%v", liveAccount, p.Err)
 		}
+		if p.ID == deletedAccount {
+			deletedReported = true
+			if !errors.Is(p.Err, credential.ErrMalformed) {
+				t.Errorf("已删渠道的账号 %d 报的是 %v，期望密文格式不合法", deletedAccount, p.Err)
+			}
+		}
+	}
+	if !deletedReported {
+		t.Errorf("已删渠道 %d 的账号 %d 不在轮换问题清单里：账号不随渠道软删消失，凭证仍要能重包",
+			deletedChannel, deletedAccount)
 	}
 
 	verify, err := rot.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("Verify 出错: %v", err)
 	}
+	var deletedMissing bool
 	for _, m := range verify.Missing {
-		if m.ID == deleted {
-			t.Errorf("已删的渠道 %d 不该让 Verify 判成「漏网」", deleted)
+		if m.ID == liveAccount {
+			t.Errorf("在用渠道的账号 %d 不该缺席：%v", liveAccount, m.Err)
 		}
-		if m.ID == live {
-			t.Errorf("在用的渠道 %d 不该缺席：%v", live, m.Err)
+		if m.ID == deletedAccount {
+			deletedMissing = true
 		}
+	}
+	// 解析不了的信封证明不了它含当前主密钥，所以它进 Missing 是对的：已删渠道的
+	// 账号被**如实报出来**，而不是被静默跳过。
+	if !deletedMissing {
+		t.Errorf("已删渠道的账号 %d 既没进 Missing 也没在 Problems 里被处理：它被静默跳过了",
+			deletedAccount)
 	}
 }
 
