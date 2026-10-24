@@ -32,6 +32,8 @@ const priceShortUsage = `larkaxctl price 管理计价规则。
   larkaxctl price update <规则名 或 ID> --by <ID 或用户名> [与 add 相同的字段]
   larkaxctl price enable <规则 ID> | price disable <规则 ID>
   larkaxctl price explain --model <规范模型名> [--user <ID 或用户名>] [--at <…>]
+  larkaxctl price tier add <规则名> --above <tokens> [单价旗标] --by <用户>
+  larkaxctl price tier list <规则名> | price tier remove <规则名> <段号>
   larkaxctl price calendar import <文件> | price calendar sync [--year <年>] | price calendar list
 
 作用域决定哪两栏 id 有效；--by 必填。单价按项给，默认每百万 token（--in 1.5 即
@@ -68,6 +70,12 @@ const priceUsage = `larkaxctl price 管理计价规则。
   larkaxctl price explain --model <规范模型名>
                           [--user <用户 ID 或用户名>] [--channel <渠道 ID>]
                           [--at <RFC3339>]
+  larkaxctl price tier add <规则名 或 ID> --above <tokens>
+                           [--in <单价>] [--out <单价>] [--cr <单价>]
+                           [--cw <单价>] [--reasoning <单价>]
+                           [--unit mtok|token] --by <用户 ID 或用户名>
+  larkaxctl price tier list <规则名 或 ID>
+  larkaxctl price tier remove <规则名 或 ID> <段号> --by <用户 ID 或用户名>
   larkaxctl price calendar import <文件>
         导入某一年的日历数据（分时计价要用它判断哪天是休息日，
         文件格式见 larkaxctl price calendar --help）
@@ -120,6 +128,11 @@ changed_by（这一版是谁改的，只在表达式真的变了、留了一版�
 weekdays / window / day_kind / holidays / min_context_tokens 分行改写单价，
 跨维度的两条用 position 裁决（大的优先）。--expr 与 --schedule-file 二选一：
 给了表时表达式由它编译得出，读取与求值仍然走表达式那一份。
+
+门槛（min_context_tokens）的口径是**达到即命中**（>=）：输入上下文（含缓存
+读写）等于该值时就走那一档。带阶梯的规则不必手改整张表，用 price tier 增删
+档位即可；多档逐条 add，门槛高的自动先命中，不用给 position，细节见
+larkaxctl price tier help。
 
 表里有 day_kind 或 holidays 时，实例必须接着日历，否则保存会被拒绝：日历
 没有数据时整笔计价失败，不回落到底价。price show 对带表的规则打那张表，
@@ -199,7 +212,7 @@ explain 回答「这次请求按哪条规则计价」：它把**全部适用**�
 
 // priceActions 是 price 的动作清单，补全从这里取。
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
-var priceActions = []string{"add", "list", "show", "update", "enable", "disable", "explain", "calendar"}
+var priceActions = []string{"add", "list", "show", "update", "enable", "disable", "explain", "tier", "calendar"}
 
 func runPrice(args []string) error {
 	if len(args) == 0 {
@@ -225,6 +238,10 @@ func runPrice(args []string) error {
 		return runPriceSetEnabled(rest, false)
 	case "explain":
 		return runPriceExplain(rest)
+	case "tier":
+		// 阶梯档位（按输入上下文分档）是定价表里的一行覆盖，增删走独立的
+		// 二级命令组：手改整张 JSON 才能调一档价，改错一处就是整表不成立。
+		return runPriceTier(rest)
 	case "calendar":
 		// 分时计价的日历原先是一个顶层命令组（larkaxctl calendar），#475 把它
 		// 收进 price：这些数据是计价规则的输入，离开规则没有别的用处。

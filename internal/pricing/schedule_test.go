@@ -179,7 +179,7 @@ func TestScheduleCompilesToPerKeyChain(t *testing.T) {
 
 	// 次序：position 大的先命中。按出现位置从前到后核对。
 	order := []string{
-		"len > 200000",
+		"len >= 200000",
 		`hour("Asia/Shanghai")`,
 		`weekday("Asia/Shanghai") in [5]`,
 		"!isWorkday()",
@@ -362,8 +362,8 @@ func TestScheduleMinThresholdOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("校验失败: %v", err)
 	}
-	high := strings.Index(src, "len > 200")
-	low := strings.Index(src, "len > 100")
+	high := strings.Index(src, "len >= 200")
+	low := strings.Index(src, "len >= 100")
 	if high < 0 || low < 0 || high > low {
 		t.Errorf("门槛高的应当先命中（200 在 100 之前）：%s", src)
 	}

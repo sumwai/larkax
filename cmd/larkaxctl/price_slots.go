@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -145,6 +146,38 @@ func (f priceSlotFlags) expression(given map[string]bool) (string, error) {
 		parts = append(parts, fmt.Sprintf("%q: %s", slot.key, rate))
 	}
 	return "{" + strings.Join(parts, ", ") + "}", nil
+}
+
+// prices 把给出来的那几项折成「键 → 每 token 单价」。
+//
+// 与 expression 的差别只有一处：**只收给了的键**。expression 写的是整条规则的
+// 五个计价项，没给的显式写 0；这里写的是定价表里的一条覆盖，没给的键沿用 base
+// ——把它们写成 0 会把「沿用 base」变成「免费」。
+func (f priceSlotFlags) prices(given map[string]bool) (map[string]float64, error) {
+	places, err := priceUnitPlaces(*f.unit)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]float64, len(priceSlots))
+	for _, slot := range priceSlots {
+		if !f.slotGiven(given, slot) {
+			continue
+		}
+		raw := strings.TrimSpace(*f.values[slot.key])
+		if raw == "" {
+			return nil, fmt.Errorf("--%s 是空串（多半是一个没展开的变量）", slot.flag)
+		}
+		shifted, shiftErr := decimalShift(raw, places)
+		if shiftErr != nil {
+			return nil, fmt.Errorf("--%s %q 无法解析：%w", slot.flag, raw, shiftErr)
+		}
+		value, parseErr := strconv.ParseFloat(shifted, 64)
+		if parseErr != nil {
+			return nil, fmt.Errorf("--%s %q 换算成每 token 的价之后无法解析：%w", slot.flag, raw, parseErr)
+		}
+		out[slot.key] = value
+	}
+	return out, nil
 }
 
 // priceUnitPlaces 把 --unit 的取值换成「小数点左移几位」。
