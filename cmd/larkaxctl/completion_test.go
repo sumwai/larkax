@@ -251,52 +251,98 @@ func TestCompletionWiresEnums(t *testing.T) {
 	}
 }
 
-// TestBashCompletionBehavior 在真 bash 里跑一遍生成出来的补全函数。
+// TestCompletionBehaviorInRealShells 在真 shell 里跑一遍生成出来的补全。
 //
 // 只比生成物里的字面串挡不住 case 模式里的元字符：`|` 在 case 里是多模式
 // 分隔符，`*|--format` 实际是 `*` 与 `--format` 两条模式，而 `*` 匹配任意键，
-// 于是每个 Tab 都返回 format 的取值、后面的分支全被截断。这一条按行为钉：
-// source 之后直接调 _larkaxctl，看 COMPREPLY 里到底是什么。
-func TestBashCompletionBehavior(t *testing.T) {
-	script := bashCompletionScript(buildCompletionData())
-
-	t.Run("--format 补取值", func(t *testing.T) {
-		got := runBashCompletion(t, script, []string{"larkaxctl", "--format", ""})
-		if want := []string{"table", "json"}; !slices.Equal(got, want) {
-			t.Errorf("COMPREPLY = %v，期望 %v", got, want)
-		}
-	})
-
-	// 下面三格只要不是 format 的取值：顶层补的是命令、--id 与 -o 后面没有
-	// 枚举可取。旧生成器在这里全返回 table / json。
-	noFormatValues := func(t *testing.T, got []string) {
-		t.Helper()
-		for _, unwanted := range []string{"table", "json"} {
-			if slices.Contains(got, unwanted) {
-				t.Errorf("COMPREPLY = %v，不该出现 %q：通配分支把别的键也截断了", got, unwanted)
+// 于是每个 Tab 都返回 format 的取值、后面的分支全被截断。这一条按行为钉。
+//
+// bash 与 fish 都能非交互地取候选；zsh 的 `compadd` 只能在真正的补全上下文里
+// 调，直接调用会报错，所以那一格只说明它没跑，不写成 Skip（跳过与通过在输出里
+// 长得一样，见 LESSONS.md 第 16 条）。
+func TestCompletionBehaviorInRealShells(t *testing.T) {
+	data := buildCompletionData()
+	cases := []struct {
+		name  string
+		words []string // `larkaxctl` 之后、正在输入的那个词之前的部分
+		check func(t *testing.T, got []string)
+	}{
+		{"--format 补取值", []string{"--format"}, func(t *testing.T, got []string) {
+			if want := []string{"table", "json"}; !slices.Equal(got, want) {
+				t.Errorf("候选 = %v，期望 %v", got, want)
 			}
-		}
+		}},
+		{"顶层补命令", nil, func(t *testing.T, got []string) {
+			requireNoFormatValues(t, got)
+			if !slices.Contains(got, "channel") {
+				t.Errorf("候选 = %v，缺一级命令 channel", got)
+			}
+		}},
+		{"channel 补动作", []string{"channel"}, func(t *testing.T, got []string) {
+			requireNoFormatValues(t, got)
+			if !slices.Contains(got, "get") {
+				t.Errorf("候选 = %v，缺动作 get", got)
+			}
+		}},
+		{"--id 后面不补取值", []string{"channel", "get", "--id"}, func(t *testing.T, got []string) {
+			if len(got) != 0 {
+				t.Errorf("候选 = %v，期望空", got)
+			}
+		}},
+		{"-o 不补取值", []string{"-o"}, func(t *testing.T, got []string) {
+			requireNoFormatValues(t, got)
+		}},
 	}
 
-	t.Run("顶层补命令", func(t *testing.T) {
-		got := runBashCompletion(t, script, []string{"larkaxctl", ""})
-		noFormatValues(t, got)
-		if !slices.Contains(got, "channel") {
-			t.Errorf("COMPREPLY = %v，缺一级命令 channel", got)
+	t.Run("bash", func(t *testing.T) {
+		if _, err := exec.LookPath("bash"); err != nil {
+			t.Logf("这一格没被真 shell 执行：环境里没有 bash")
+			return
+		}
+		script := bashCompletionScript(data)
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				tc.check(t, runBashCompletion(t, script, tc.words))
+			})
 		}
 	})
 
-	t.Run("--id 后面不补取值", func(t *testing.T) {
-		noFormatValues(t, runBashCompletion(t, script, []string{"larkaxctl", "channel", "get", "--id", ""}))
+	t.Run("zsh", func(t *testing.T) {
+		if _, err := exec.LookPath("zsh"); err != nil {
+			t.Logf("这一格没被真 shell 执行：环境里没有 zsh")
+			return
+		}
+		t.Logf("这一格没被真 shell 执行：zsh 的 compadd 只能在补全上下文里调，" +
+			"直接调用会报错；生成物由 TestCompletionScriptsParse 的金文件逐字比对")
 	})
 
-	t.Run("-o 不补取值", func(t *testing.T) {
-		noFormatValues(t, runBashCompletion(t, script, []string{"larkaxctl", "-o", ""}))
+	t.Run("fish", func(t *testing.T) {
+		fish, err := exec.LookPath("fish")
+		if err != nil {
+			t.Logf("这一格没被真 shell 执行：环境里没有 fish")
+			return
+		}
+		script := fishCompletionScript(data)
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				tc.check(t, runFishCompletion(t, fish, script, tc.words))
+			})
+		}
 	})
 }
 
+// requireNoFormatValues 断言候选里没有 --format 的取值。
+func requireNoFormatValues(t *testing.T, got []string) {
+	t.Helper()
+	for _, unwanted := range []string{"table", "json"} {
+		if slices.Contains(got, unwanted) {
+			t.Errorf("候选 = %v，不该出现 %q：通配分支把别的键也截断了", got, unwanted)
+		}
+	}
+}
+
 // runBashCompletion 在真 bash 里 source 生成的脚本，跑一次 _larkaxctl，
-// 返回 COMPREPLY。words 的最后一项是正在输入的那个词（与 COMP_WORDS 的约定一致）。
+// 返回 COMPREPLY。words 是 `larkaxctl` 之后的部分，正在输入的那个词按空串补。
 func runBashCompletion(t *testing.T, script string, words []string) []string {
 	t.Helper()
 	bash, err := exec.LookPath("bash")
@@ -307,13 +353,14 @@ func runBashCompletion(t *testing.T, script string, words []string) []string {
 	if writeErr := os.WriteFile(file, []byte(script), 0o600); writeErr != nil {
 		t.Fatalf("写补全脚本失败：%v", writeErr)
 	}
-	quoted := make([]string, 0, len(words))
-	for _, word := range words {
+	argv := append(append([]string{"larkaxctl"}, words...), "")
+	quoted := make([]string, 0, len(argv))
+	for _, word := range argv {
 		quoted = append(quoted, "'"+strings.ReplaceAll(word, "'", `'\''`)+"'")
 	}
 	driver := "source \"$1\"\n" +
 		"COMP_WORDS=(" + strings.Join(quoted, " ") + ")\n" +
-		"COMP_CWORD=" + strconv.Itoa(len(words)-1) + "\n" +
+		"COMP_CWORD=" + strconv.Itoa(len(argv)-1) + "\n" +
 		"_larkaxctl\n" +
 		"printf '%s\\n' \"${COMPREPLY[@]}\"\n"
 	out, runErr := exec.CommandContext(t.Context(), bash, "-c", driver, "larkaxctl-test", file).CombinedOutput()
@@ -321,6 +368,34 @@ func runBashCompletion(t *testing.T, script string, words []string) []string {
 		t.Fatalf("bash 跑补全失败：%v\n%s", runErr, out)
 	}
 	return strings.Fields(string(out))
+}
+
+// runFishCompletion 用 fish 的 `complete -C` 非交互地取候选。
+//
+// 每条候选可能带一段描述（制表符分隔），这里只要名字。
+func runFishCompletion(t *testing.T, fish, script string, words []string) []string {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "completion.fish")
+	if writeErr := os.WriteFile(file, []byte(script), 0o600); writeErr != nil {
+		t.Fatalf("写补全脚本失败：%v", writeErr)
+	}
+	line := "larkaxctl " + strings.Join(words, " ") + " "
+	driver := "source " + fishQuote(file) + "; complete -C " + fishQuote(line)
+	out, runErr := exec.CommandContext(t.Context(), fish, "--no-config", "-c", driver).CombinedOutput()
+	if runErr != nil {
+		t.Fatalf("fish 取候选失败：%v\n%s", runErr, out)
+	}
+	var candidates []string
+	for _, raw := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if raw == "" {
+			continue
+		}
+		if i := strings.IndexByte(raw, '\t'); i >= 0 {
+			raw = raw[:i]
+		}
+		candidates = append(candidates, raw)
+	}
+	return candidates
 }
 
 // ── 参数错、帮助 ──────────────────────────────────────────────────────
