@@ -39,11 +39,13 @@ func TestFormatChoicesRendering(t *testing.T) {
 	}
 }
 
-// TestFormatFlagErrorMessages 钉住两句报错，四个拼法各来一遍。
+// TestFormatFlagErrorMessages 钉住两句报错：取值缺失时四个拼法各来一遍；
+// 取值不认识时两个拼法代表，那句文案不含拼法。
 //
 // 取值清单是同一份，但「哪个名字被漏接」只有分别断言才看得出来：
-// isFormatFlag 认 --format、-format、--o、-o，少接一个时
-// 这里对应的那条会红，而不是等使用者踩到「未知子命令」。
+// isFormatFlag 认 --format、-format、--o、-o，少接一个时这里对应的那条会红，
+// 而不是等使用者踩到「未知子命令」。取值不认识那句不一样——文案里写死的是
+// `--format`，与调用时写的拼法无关，所以两个拼法已经代表得了。
 func TestFormatFlagErrorMessages(t *testing.T) {
 	t.Run("取值不认识", func(t *testing.T) {
 		cases := []struct {
