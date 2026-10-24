@@ -842,15 +842,12 @@ func flagName(arg string) (string, bool) {
 
 // isBoolFlag 问一个开关是不是布尔开关（即不取值）。
 //
+// 判据与补全那边共用一份：takesValue 认的是标准库的 IsBoolFlag 约定。
 // 未声明的名字按「取值」处理：多挪一个词进去会让 flag 报一句「flag provided
 // but not defined」，比把文件名吃掉更容易看懂。
 func isBoolFlag(fs *flagSet, name string) bool {
 	f := fs.Lookup(name)
-	if f == nil {
-		return false
-	}
-	b, ok := f.Value.(interface{ IsBoolFlag() bool })
-	return ok && b.IsBoolFlag()
+	return f != nil && !takesValue(f.Value)
 }
 
 // errPluginKVKeyNotFound 表示要读或要删的那个键不在。

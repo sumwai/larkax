@@ -167,7 +167,14 @@ func fishCompletionScript(data completionData) string {
 	}
 
 	for _, name := range globalOptionNames() {
-		fmt.Fprintf(&b, "complete -c larkaxctl -l %s\n", strings.TrimPrefix(name, "--"))
+		suffix := ""
+		if slices.Contains(globalValueFlags, name) {
+			// 与自有选项同一条判据：`-r` 声明吃取值，文件补全仍开着。
+			// 枚举类的全局选项走下面那条 `-x -a`，这里不加。
+			suffix = " -r"
+		}
+		fmt.Fprintf(&b, "complete -c larkaxctl -l %s%s\n",
+			strings.TrimPrefix(name, "--"), suffix)
 	}
 	// 全局选项的取值挂无条件的那一条：fish 的选项在子命令前后都认，不加
 	// `__fish_seen_subcommand_from` 条件；加了反而只在某几条路径下补得出来。
@@ -178,9 +185,22 @@ func fishCompletionScript(data completionData) string {
 	}
 	for _, path := range flaggedPaths(data) {
 		cond := fishSeenCondition(strings.Split(path, " "))
-		for _, name := range ownOptionNames(data, path) {
-			fmt.Fprintf(&b, "complete -c larkaxctl -n %s -l %s\n",
-				fishQuote(cond), strings.TrimPrefix(name, "--"))
+		for _, option := range ownOptions(data, path) {
+			// 吃取值的选项要声明 `-r`，fish 才会停下来等取值；不声明的话它把
+			// 选项当开关，敲完按 Tab 会按位置接着补动词。
+			//
+			// 有枚举的选项不加：取值由下面那条 `-x -a` 补。`-r` 与 `-x` 也不是
+			// 同一件事——`-r` 只说明后面跟一个取值，文件补全仍然开着；`-x` 才
+			// 连文件一起关掉。补文件路径的选项（如 `--schedule-file`）要的正是
+			// 前者。
+			suffix := ""
+			if option.takesValue {
+				if _, wired := data.enums[path+"|"+option.name]; !wired {
+					suffix = " -r"
+				}
+			}
+			fmt.Fprintf(&b, "complete -c larkaxctl -n %s -l %s%s\n",
+				fishQuote(cond), strings.TrimPrefix(option.name, "--"), suffix)
 		}
 	}
 	for _, key := range sortedEnumKeys(data.enums) {

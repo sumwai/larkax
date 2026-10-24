@@ -118,8 +118,9 @@ type completionData struct {
 	// words 按路径列出下一层能接哪些词：键 "" 是全部一级命令，
 	// `channel` 是它的动作，`channel map` 是三级动词。
 	words map[string][]string
-	// flags 以命令路径为键，值是该路径注册过的选项名（含旧名与别名）。
-	flags map[string][]string
+	// flags 以命令路径为键，值是该路径注册过的选项（名字，以及它吃不吃取值；
+	// 含旧名与别名）。吃不吃取值只有 fish 用得上，见 fishCompletionScript。
+	flags map[string][]collectedFlag
 	// enums 以「命令路径|--选项名」为键，值是那个选项的合法取值。
 	enums map[string][]string
 	// globalEnums 以选项名（如 `--format`）为键，值是全局选项的合法取值。
@@ -230,6 +231,19 @@ func completionGlobalEnumValues() map[string][]string {
 	}
 }
 
+// globalValueFlags 是全局选项里「吃取值、但取值不是枚举」的那几条：fish 生成物
+// 给它们加 `-r`，让 fish 停下来等取值并保留文件名补全。
+//
+// 不并进 globalEnums：那张表生成的是 `-x -a '取值…'`，`-x` 会把文件补全一起关掉。
+// 给 `--env-file` 写成 `-x -a` 等于告诉 fish「它只认这几个词、别补文件」，而它要的
+// 恰恰是文件名；反过来把 `--format` 挪进这里，`table` / `json` 就补不出来、只剩
+// 文件名。`-x` 与 `-r` 是两种语义，混一张表两头都会错。
+//
+// 这份清单必须与 usageNotes 的「全局选项」一节对得上（取值位置写成 `<…>` 的都算
+// 吃取值）：由 TestGlobalValueFlagsMatchUsage 交叉检查。漏掉一条的表现是那个选项
+// 在 fish 里按 Tab 补出动词——本 issue 修的就是这个症状。
+var globalValueFlags = []string{"--env-file"}
+
 // completionPaths 列出要遍历的命令路径。
 //
 // migrate 只走一级：它的动作不吃自己的 flag 集，而 `-h` 落在动作之后会被当成
@@ -268,16 +282,22 @@ func completionPaths(commands []completionCommand) [][]string {
 var (
 	collectingCommandFlags bool
 	currentCommandPath     string
-	collectedFlags         map[string][]string
+	collectedFlags         map[string][]collectedFlag
 )
+
+// collectedFlag 是收集到的一个选项：名字，以及它注册时判出来的「吃不吃取值」。
+type collectedFlag struct {
+	name       string
+	takesValue bool
+}
 
 // collectCommandFlags 把每条命令路径按 `<路径> -h` 走一遍，记下它注册的选项。
 //
 // `-h` 让 flag 在解析阶段返回 ErrHelp，命令走不到连库与写库；万一有哪条路径
 // 在解析之前就要连库，openDB 在收集期间直接失败（见 db.go），
 // 不会真的碰到数据库。输出一律丢掉：这里要的只是 flag 注册这件副作用。
-func collectCommandFlags(paths [][]string) map[string][]string {
-	collectedFlags = make(map[string][]string, len(paths))
+func collectCommandFlags(paths [][]string) map[string][]collectedFlag {
+	collectedFlags = make(map[string][]collectedFlag, len(paths))
 	collectingCommandFlags = true
 
 	savedOut, savedErr := os.Stdout, os.Stderr
@@ -318,18 +338,45 @@ func completionOptionNames(data completionData, path string) []string {
 	return slices.Compact(out)
 }
 
-// ownOptionNames 是这条路径自己注册的正式长选项（不含全局选项），按字典序。
-func ownOptionNames(data completionData, path string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, name := range data.flags[path] {
-		if len(name) < 2 || strings.HasPrefix(name, "-") || seen[name] {
+// completionFlag 是一条路径自己的一个正式长选项在补全里的样子。
+type completionFlag struct {
+	// name 带前导 `--`，例如 `--schedule-file`。
+	name string
+	// takesValue 为 true 时选项后面跟一个取值，fish 要用 `-r` 声明它。
+	takesValue bool
+}
+
+// ownOptions 是这条路径自己注册的正式长选项（不含全局选项），按名字字典序。
+//
+// 注册过的名字里混着短选项与旧名（`u`、`m`、`owner` 这类）。短名字只有一两个
+// 字母，写在 Tab 里反而把真正要选的那几个挤走；旧名不占 Tab 的位置（见帮助
+// 文本末段）。所以只列正式的长选项。
+//
+// 同名只留第一次。现有注册路径到不了第二次：同一条命令里重名注册时，`record`
+// 先把第二个名字写进 map，紧接着的 `Var` 就 panic（flag 包不允许重定义），整轮
+// 采集中止——生成阶段跑不到这里。留着去重是为了将来真出现两条注册路径时，生成物
+// 仍有确定形状。
+func ownOptions(data completionData, path string) []completionFlag {
+	index := map[string]bool{}
+	out := make([]completionFlag, 0, len(data.flags[path]))
+	for _, entry := range data.flags[path] {
+		if len(entry.name) < 2 || strings.HasPrefix(entry.name, "-") || index[entry.name] {
 			continue
 		}
-		seen[name] = true
-		out = append(out, "--"+name)
+		index[entry.name] = true
+		out = append(out, completionFlag{name: "--" + entry.name, takesValue: entry.takesValue})
 	}
-	slices.Sort(out)
+	slices.SortFunc(out, func(a, b completionFlag) int { return strings.Compare(a.name, b.name) })
+	return out
+}
+
+// ownOptionNames 是这条路径自己注册的正式长选项（不含全局选项），按字典序。
+func ownOptionNames(data completionData, path string) []string {
+	options := ownOptions(data, path)
+	out := make([]string, len(options))
+	for i, option := range options {
+		out[i] = option.name
+	}
 	return out
 }
 
