@@ -427,6 +427,7 @@ var subGroupHelpCases = []subGroupHelpCase{
 	{"secret rotate", rotateShortUsage, rotateUsage, []string{"secret", "rotate", "help"}},
 	{"price calendar", priceCalendarShortUsage, priceCalendarUsage, []string{"price", "calendar", "help"}},
 	{"price tier", priceTierShortUsage, priceTierUsage, []string{"price", "tier", "help"}},
+	{"price peak", pricePeakShortUsage, pricePeakUsage, []string{"price", "peak", "help"}},
 	{"maintenance idempotency", maintenanceIdempotencyShortUsage, maintenanceIdempotencyUsage,
 		[]string{"maintenance", "idempotency", "help"}},
 	{"maintenance session", maintenanceSessionShortUsage, maintenanceSessionUsage,

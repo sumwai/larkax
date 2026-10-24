@@ -78,6 +78,7 @@ var tableRenderPaths = []string{
 	"printModelTrace",    // model trace
 	"printPayment",       // wallet payment 的回显：一栏一行，与 wallet payout 同一个形状
 	"printPayout",        // wallet payout 的回显：一栏一行，与 wallet adjust 同一个形状
+	"printPeakList",      // price peak list
 	"printPlanDetail",    // plan get
 	"printPlanList",      // plan list
 	"printPluginDetail",  // plugin get
@@ -114,6 +115,7 @@ var emptyListPaths = []string{
 	"printKeyList",
 	"printModelAliasList", // model alias list
 	"printModelList",
+	"printPeakList", // price peak list
 	"printPlanList",
 	"printPluginList",
 	"printRuleList",
