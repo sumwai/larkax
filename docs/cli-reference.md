@@ -486,9 +486,13 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
 上面。所以它不能带空白字符，也不能改——要换名字就建新名、把映射与规则挪过去、
 再删旧名。`update` 与 `delete` 都按 `--model` 定位，它本身不可改。
 
+`add` 的规范名是第一个位置参数（`larkaxctl model add <规范名> …`），`--model`
+仍然认；`--display` 可以不给，不给时展示名取规范名。旧动词 `create` 是 `add`
+的别名，行为逐字相同。
+
 **六个能力标志各有三态**：不给 = 未知（库里是 `NULL`）、给 = 支持、
 `--tools=false` = 明确声明不支持。三者在选路时处置不同：未知与支持放行，不支持
-会让用到那一项的请求选不到这个模型。所以 `create` 时没给的开关落库是 `NULL` 而不
+会让用到那一项的请求选不到这个模型。所以 `add` 时没给的开关落库是 `NULL` 而不
 是 `false`——那是「还没配过」，不是「配了说不支持」。
 
 判断一条记录配没配过，看 `list` / `get` 的那一栏：没配过的项在 `list` 里不列
@@ -567,7 +571,7 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
 同一份判重），全部成功后回滚，逐行打出本来会做什么，末尾写「干跑：以上内容没有
 写进数据库。」，退出码 `0`。
 
-它**不是唯一的上架方式**：`model create`、`channel update --models`、
+它**不是唯一的上架方式**：`model add`、`channel update --models`、
 `channel map add`、`price add`、`upstream-cost create` 五条独立命令仍然可用，
 向导只是把常见顺序与事务接好。一次只上架一个模型，不做交互问答（参数一次给全，
 供脚本调用），也不做批量。
@@ -835,7 +839,11 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
 
 #### `user`
 
-系统用户管理（创建、查询、修改与销户）。`create` 只把新用户的 ID 打到 stdout。
+系统用户管理（创建、查询、修改与销户）。`add` 只把新用户的 ID 打到 stdout。
+
+`add` 的用户名是第一个位置参数（`larkaxctl user add <用户名> …`），`--name`
+仍然认；两处同值时取位置参数，写的不是同一个名字时报错。旧动词 `create` 是
+`add` 的别名，行为逐字相同。
 
 角色取 `user`、`merchant`、`admin` 之一，默认 `user`。三者都是用户，
 `merchant` 与 `admin` 只是 `users` 表上的标记（`admin` 同时也是 `merchant`）。
@@ -846,7 +854,7 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
 
 **不做幂等**：用户名已被占用时直接报错，不会改到已有的那个用户。
 
-用户名的形状有两条限制，都在 `create` 上当场判、报参数错并退出 2。
+用户名的形状有两条限制，都在 `add` 上当场判、报参数错并退出 2。
 
 **一、整串是一个十进制整数的名字建不出来**（`--name 123`、`--name 007` 都是，
 带一个正负号的 `+7` 也算；`1a`、`a1`、`1.0`、`1e3` 不是）。`--user` 把这样一个
@@ -880,13 +888,13 @@ ESC 序列则原样进执行者的终端。它进账本分录的备注时还会�
 值**，唯一约束分得开，会并存成两条。长度不设上限（标准里本地部分到 64、整串到
 254）：300 字的本地部分照收，这是这一版有意留的边界。
 
-**空邮箱不是格式错**：`create` 的 `--email` 给空串是不填这一列（库里是 `NULL`），
+**空邮箱不是格式错**：`add` 的 `--email` 给空串是不填这一列（库里是 `NULL`），
 `update` 的 `--email` 给空串是把它清回 `NULL`（见下面 `update`）。
 
 `list` 按 id 从小到大列出用户，一栏一个字段：ID、用户名、状态、角色、邮箱。
 `--status` 取 `active`、`suspended`、`banned` 之一，`--role` 取三个角色之一，
 两个都可以给、也都可以不给（不给就是列全部）。`--role` 按**称呼**逐字匹配，
-与 `create` 写进去的那一个对应：`--role merchant` 列出的是称呼为 `merchant`
+与 `add` 写进去的那一个对应：`--role merchant` 列出的是称呼为 `merchant`
 的用户，`--role admin` 列的是 `admin`。取值不认识时报参数错并退出 2，不回落成
 「不筛」。
 
@@ -906,7 +914,7 @@ ESC 序列则原样进执行者的终端。它进账本分录的备注时还会�
 `get` 按 ID 或用户名读一个用户的全部字段：除清单那五栏，还有展示名、删除时间、
 创建时间与更新时间。标识怎么解释与别的命令一致：纯数字按 ID，否则按用户名。
 找不到时退出 4。
-所以纯数字的用户名按名字读不出来，`create` 不让这样的名字进库（见上面），而库里
+所以纯数字的用户名按名字读不出来，`add` 不让这样的名字进库（见上面），而库里
 已经有的那些不动。
 
 `inspect <用户>` 一次取齐一个用户的全景，只读。五样取自**同一个可重复读的只读事务**，
@@ -936,9 +944,9 @@ ESC 序列则原样进执行者的终端。它进账本分录的备注时还会�
 还要过上面那条格式校验）；`--merchant`
 与 `--no-merchant` 把 `is_merchant` 置真 / 置假（`--no-merchant` 不能单独打在
 `admin` 上，见下）；`--admin` 把 `is_admin` 置真**并且**把 `is_merchant` 一起置真
-（`admin` 天然也是 `merchant`，与 `create --role admin` 落的是同一种数据），
+（`admin` 天然也是 `merchant`，与 `add --role admin` 落的是同一种数据），
 `--no-admin` 只把 `is_admin` 置假、`merchant` 不动。
-两个文本列的取值两头空白会被去掉（`create` 的 `--email` 同一口径），去掉之后是空串
+两个文本列的取值两头空白会被去掉（`add` 的 `--email` 同一口径），去掉之后是空串
 就清回 `NULL`；`--status` 也是先去两头空白再比对，但空串仍然不认。
 
 `--display-name` 与用户名同一条控制字符判据：换行、制表符、ESC 这些会让
@@ -979,7 +987,7 @@ stdout 恰好一行，就是新口令，只显示这一次；其余说明走 std
 指数增长，上限 15 分钟）。它只把「现在能不能试」恢复成默认，不动口令、不动
 会话：解锁不会让一个已经失效的会话重新可用，也不会改掉任何人的凭证。
 
-`create --generate-password` 在建号的同时设一个随机初始口令：stdout 那一行
+`add --generate-password` 在建号的同时设一个随机初始口令：stdout 那一行
 因此是**口令**而不是用户 ID，ID 与用户名走 stderr。要接走 ID 的脚本不要带
 这个旗标。
 
@@ -1050,7 +1058,7 @@ stdout 恰好一行，就是新口令，只显示这一次；其余说明走 std
 插件 KV 已清、采集授权已撤销——**没有触发器**，只由 `purge` 的同一个事务保证；
 绕过 `purge` 直接 `UPDATE users` 不会连带动那几张表。
 
-`create` / `list` / `get` / `update` 只碰 `users` 表（不碰渠道凭证）；`delete`
+`add` / `list` / `get` / `update` 只碰 `users` 表（不碰渠道凭证）；`delete`
 那一族会写到 `api_keys`、`plugin_kv` 与 `capture_consents`，并读钱包、`channels`
 与账本的 `merchant_payable` 科目。除了 `plugin_kv` 里属于这个用户的行，别的行都
 不删。它们都不需要 `LARKAX_MASTER_KEYS`。
@@ -1090,7 +1098,7 @@ stdout 恰好一行，就是新口令，只显示这一次；其余说明走 std
 新路径，因此不提示。
 
 新路径**不新增业务能力**：`user plan grant` 与 `plan grant` 走的是同一段代码，
-幂等键、退出码与两种输出契约都一样。`plan` 剩下的只有商品定义（`create` /
+幂等键、退出码与两种输出契约都一样。`plan` 剩下的只有商品定义（`add` /
 `list` / `get` / `enable` / `disable`）；开通钱包（`wallet create`）、商户提现
 （`wallet payout`）与支付通道（`wallet payment`）不在这一组里，仍在 `wallet` 下。
 
@@ -1460,6 +1468,10 @@ UTC 算，同一笔操作在哪台机器、哪个时区敲都是同一个日期�
 `user plan` 与 `user key plans` 下（见「user」一节），核心宾语写成位置参数。
 旧路径 `plan grant` / `plan void` / `plan subscriptions` / `plan key` / `plan order`
 仍然可用，命中时在 stderr 提示新路径。下面几节讲的语义在两条路径上相同。
+
+建包是 `plan add <key>`：`key` 写成第一个位置参数，`--key` 仍然认，`--name` 是展示名。
+旧动词 `create` 是 `add` 的别名，行为逐字相同；`get` / `enable` / `disable` 仍用
+`--key` 定位。
 
 **三种计量单位**：`--unit amount` 的包按标价扣，`--quota` 与 `--face-value` 是同一个数
 （只填一个即可）；`token` 包按输入加输出的 token 数扣；`request` 包每次扣 1。后两种包

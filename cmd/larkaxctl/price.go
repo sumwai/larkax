@@ -323,7 +323,7 @@ type priceRefs struct {
 func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 	// 规则名是第一个位置参数，且必须写在旗标前面：flag 包遇到第一个非旗标词就
 	// 停止解析，写在后面的一整段都会落进 NArg（下面按「多给了参数」报）。
-	operand, rest, takeErr := takeLeadingOperand(args)
+	operand, rest, takeErr := takeLeadingOperand(args, priceRuleNameOperand)
 	if takeErr != nil {
 		return pricing.CreateRequest{}, priceRefs{}, takeErr
 	}
@@ -360,7 +360,7 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 	if strings.TrimSpace(*scope) == "" {
 		return pricing.CreateRequest{}, priceRefs{}, errors.New("缺少 --scope（platform / merchant / channel）")
 	}
-	ruleName, nameErr := resolveRuleName(operand, *name, given["name"])
+	ruleName, nameErr := resolveOperand(operand, *name, given["name"], priceRuleNameOperand)
 	if nameErr != nil {
 		return pricing.CreateRequest{}, priceRefs{}, nameErr
 	}
@@ -440,57 +440,21 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 	return req, priceRefs{owner: *owner, by: *by, scheduleFile: *scheduleFile}, nil
 }
 
-// takeLeadingOperand 从参数最前面摘掉一个位置参数。
-//
-// 与 user_ops.go 的 takeOperand 差一处：那个把「没有位置参数」当成缺参数报错，
-// 这个允许它缺席——add 上的规则名既可以写成位置参数，也可以走旧写法 --name，
-// 而旧写法前面直接就是旗标。
-//
-// 只认**最前面**那一个词，因为 flag 包遇到第一个非旗标词就停止解析：写成
-// `add --scope platform n1` 时 n1 之后的一整段都落进 NArg，由调用方按「多给了
-// 参数」报出来，那句话会点明位置参数要写在旗标前面。
-//
-// 收集补全数据时（见 completion.go 的 collectCommandFlags）不摘：那时走的是
-// `price add -h`，参数里没有位置参数，而摘错一个会把 -h 吃掉。
-func takeLeadingOperand(args []string) (string, []string, error) {
-	if collectingCommandFlags {
-		return "", args, nil
-	}
-	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		return "", args, nil
-	}
-	operand := args[0]
-	if strings.TrimSpace(operand) == "" {
-		return "", nil, usageErr(errors.New("规则名是空串：写成第一个位置参数，或改用 --name"))
-	}
-	return operand, args[1:], nil
+// priceLocatorOperand 是 price update 的位置参数：规则名或规则 ID。
+var priceLocatorOperand = operandSpec{
+	what:  "定位符",
+	flag:  "id",
+	usage: "写成第一个位置参数（larkaxctl price update <规则名 或 ID> …）",
 }
 
-// resolveRuleName 把「位置参数」与「--name」收拢成一个规则名。
+// priceRuleNameOperand 是 price add 的位置参数：规则名。
 //
-// 两条都给时**同值取位置参数、异值报错**：静默取其中一个的表现是「我明明改了
-// 名字，落库的还是旧的」，而那是一次成功的写入。
-//
-// nameGiven 传的是 --name 这次有没有**出现在命令行上**（fs.Visit 记的），不是
-// 它的值非不非空：`--name ""` 是一个明确的错误输入，静默当成没给会让它一路
-// 走到「缺少规则名」或更远处。
-func resolveRuleName(operand, flagValue string, nameGiven bool) (string, error) {
-	operand = strings.TrimSpace(operand)
-	flagName := strings.TrimSpace(flagValue)
-	switch {
-	case operand != "" && nameGiven && flagName != operand:
-		return "", fmt.Errorf(
-			"规则名给了两个不同的值：位置参数 %q，--name %q；只能写一处，或者两处写成同一个名字",
-			operand, flagName)
-	case operand != "":
-		return operand, nil
-	case nameGiven:
-		if flagName == "" {
-			return "", errors.New("--name 是空串：规则名不能为空")
-		}
-		return flagName, nil
-	}
-	return "", errors.New("缺少规则名：写成第一个位置参数（larkaxctl price add <规则名> …）")
+// 与 user / plan / model 的 add 同一个形状（见 operand.go）：第一个位置参数是
+// 正式写法，--name 是旧写法。
+var priceRuleNameOperand = operandSpec{
+	what:  "规则名",
+	flag:  "name",
+	usage: "写成第一个位置参数（larkaxctl price add <规则名> …）",
 }
 
 func runPriceUpdate(args []string) error {
@@ -636,7 +600,7 @@ var (
 func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 	// 定位符是第一个位置参数，规则名或规则 ID。与 add 的规则名同一个形状：
 	// flag 包遇到第一个非旗标词就停，所以它必须写在旗标前面。
-	operand, rest, takeErr := takeLeadingOperand(args)
+	operand, rest, takeErr := takeLeadingOperand(args, priceLocatorOperand)
 	if takeErr != nil {
 		return pricing.UpdateRequest{}, priceRefs{}, takeErr
 	}

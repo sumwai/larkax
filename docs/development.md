@@ -689,12 +689,15 @@ curl -s https://api.example.com/v1/models -H "Authorization: Bearer $UPSTREAM_KE
 这些命令直接用 `go run` 即可：`larkaxctl` 自己会读 `.env`（见上文
 「环境变量」），不必先手工导出。
 
-**动词与选项名是全仓统一的**：建一条记录是 `create`、读一条是 `get`、改属性是
-`update`、删是 `delete`、启停是 `enable` / `disable`（`price enable <规则 ID>`，
-不是在 `update` 上给 `--enable`）；模型规范名一律 `--model`、归属用户一律
-`--user`。改名之前的旧写法**仍然可用**（`model add`、`wallet open`、
-`--canonical`、`--owner`、`price update --enable`、`wallet credit --order`），
-已经在跑的脚本不必改；它们写在每条子命令 `--help` 的末尾。
+**动词与选项名是全仓统一的**：建一条记录是 `add`（`price` / `model` / `user` /
+`plan` 四条；`channel`、`apikey`、`wallet` 等仍是 `create`）、读一条是 `get`、
+改属性是 `update`、删是 `delete`、启停是 `enable` / `disable`（`price enable
+<规则 ID>`，不是在 `update` 上给 `--enable`）；模型规范名一律 `--model`、归属
+用户一律 `--user`。`add` 上那条记录的键也能写成第一个位置参数（`model add
+<规范名>`、`user add <用户名>`），同名旗标仍然认。改名之前的旧写法**仍然可用**（`model create`、`user create`、
+`plan create`、`wallet open`、`--canonical`、`--owner`、`price update --enable`、
+`wallet credit --order`），已经在跑的脚本不必改；它们写在每条子命令 `--help`
+的末尾。
 
 同一批还搬了几条命令的位置：对账 `reconcile` → `ledger reconcile`、主密钥轮换
 `rotate` → `secret rotate`、幂等记录清理 `idempotency cleanup` →
@@ -714,7 +717,7 @@ curl -s https://api.example.com/v1/models -H "Authorization: Bearer $UPSTREAM_KE
 **一、把规范模型加进目录。** 规范名是选路与计费共用的键，不能带空白字符：
 
 ```sh
-go run ./cmd/larkaxctl model create --model claude-x --display '示例模型' \
+go run ./cmd/larkaxctl model add claude-x --display '示例模型' \
   --vendor example --context-limit 200000 --tools --vision
 ```
 
@@ -909,7 +912,7 @@ overrides 不允许覆盖 "messages"：它是调用方发来的正文（允许�
 且它填的那个用户**得已经存在于库里**——先建一个：
 
 ```sh
-go run ./cmd/larkaxctl user create --name alice
+go run ./cmd/larkaxctl user add alice
 
 go run ./cmd/larkaxctl price add example-price --scope platform --by alice \
   --in 1.5 --out 7.5 --cr 0.2 --cw 1.9 --reasoning 9
@@ -992,7 +995,7 @@ go run ./cmd/larkaxctl channel delete --id 7
 可解开的密文，直接往库里写一行 `bytea` 补不上；`plugin` 那三条不对任何东西解密，
 要的是「跑它的机器带着运维凭证」——把一条删数据的入口开在只有库口令的机器上，
 等于把「能不能删」交给连接串。**别把它读成「凡改库都要」**：`settings set`、
-`apikey create`、`user create`、`wallet credit` 都改库，都不读它。
+`apikey create`、`user add`、`wallet credit` 都改库，都不读它。
 它们读的是这个环境变量本身，与 `LARKAX_ROLE` 无关——运维命令不属于任何角色，
 把命令的成败绑到角色上，会让 `LARKAX_ROLE=worker` 时明明设好了主密钥却报
 「没有读到主密钥」。其余命令没有主密钥也能跑，其中
@@ -1007,7 +1010,7 @@ go run ./cmd/larkaxctl channel delete --id 7
 推理请求要带一把 API Key，而 key 必须挂在某个用户上，所以这条链的起点是建用户：
 
 ```sh
-go run ./cmd/larkaxctl user create --name alice      # stdout 是新用户的 ID
+go run ./cmd/larkaxctl user add alice                # stdout 是新用户的 ID
 go run ./cmd/larkaxctl apikey create --user alice    # stdout 是 key 的明文
 ```
 
@@ -1015,10 +1018,10 @@ go run ./cmd/larkaxctl apikey create --user alice    # stdout 是 key 的明文
 其余信息走 stderr。所以它们能直接串起来：
 
 ```sh
-KEY=$(go run ./cmd/larkaxctl apikey create --user "$(go run ./cmd/larkaxctl user create --name alice)")
+KEY=$(go run ./cmd/larkaxctl apikey create --user "$(go run ./cmd/larkaxctl user add alice)")
 ```
 
-`user create` 还有 `--email` 与 `--role`（`user`、`merchant`、`admin`，默认 `user`）。
+`user add` 还有 `--email` 与 `--role`（`user`、`merchant`、`admin`，默认 `user`）。
 用户名唯一且大小写不敏感，重名会直接报错——**它不会改到已有的那个用户**，
 所以这条命令不能拿来「给已有用户补点什么」；那件事走 `user update`（只改显式给出
 的字段，改了什么按「旧值 → 新值」打到 stdout）。
@@ -1038,14 +1041,14 @@ KEY=$(go run ./cmd/larkaxctl apikey create --user "$(go run ./cmd/larkaxctl user
   `--admin` / `--no-admin`（`--admin` 同时打上两个，`--no-admin` 不动 `merchant`）。
   `--no-merchant` 不能单独打在 `admin` 上——那样会留下一行「读出来是 admin、`merchant`
   却是假」的数据，当场报参数错；先 `--no-admin`，或者两个一起给，一步落到普通用户。
-  `user create` 仍然只建新用户，重名直接报错。
+  `user add` 仍然只建新用户，重名直接报错。
 
 这两个标记今天仍然只是备注，不是访问控制：管理面的令牌**不对应任何用户**，
 也不读这两个标记（#158）。把 `--role` 当成一条记录，而不是一条授权。
 
 ### 开户：新用户需要一行钱包
 
-`user create` 只写 `users` 表，不建钱包行；而每一次推理请求在预留那一步都要
+`user add` 只写 `users` 表，不建钱包行；而每一次推理请求在预留那一步都要
 锁住用户的钱包，锁不到就报「没有对应的钱包」。所以新用户在打请求之前要开一次户：
 
 ```sh
@@ -1348,15 +1351,15 @@ ingress 规则下。同一个端口上还有管理面 `/admin/v1/*`，用单独�
 | 子命令 | 做什么 |
 |---|---|
 | `channel` | 上游渠道：`create` / `list`（`--all` 含已删）/ `get`（单条详情）/ `health`（健康与窗口内的用量）/ `update` / `enable` / `disable` / `delete`（软删）/ `restore`（`delete` 的逆操作）/ `sync-models`（从上游拉一次模型清单并落库）/ `upstream-models`（读库里那一份清单与同步状态）/ `adapters`（列出适配器类型）/ `probe`（落库之前探一次上游模型清单）；出站映射：`map`（`add` / `list` / `remove`） |
-| `model` | 模型目录：`create` / `list` / `get` / `update` / `delete` / `onboard`（一个事务里写完目录、渠道白名单、出站映射与两条价格规则）；入站别名（调用方写的名字 → 规范名）：`alias`（`add` / `remove` / `list`）；名字链路诊断：`trace` |
+| `model` | 模型目录：`add` / `list` / `get` / `update` / `delete` / `onboard`（一个事务里写完目录、渠道白名单、出站映射与两条价格规则）；入站别名（调用方写的名字 → 规范名）：`alias`（`add` / `remove` / `list`）；名字链路诊断：`trace` |
 | `alias` | 规范模型名到上游模型名的映射（旧入口，配置改用 `channel map`）：`create` / `list` / `update` / `delete` / `resolve` |
 | `price` | 计价规则：`add` / `list` / `show` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `sync` / `list`） |
 | `upstream-cost` | 上游成本规则（每条渠道每个模型按生效窗口与优先级挑一条）：`create` / `list` / `update` / `disable` |
-| `user` | 用户：`create` / `list` / `get` / `update`；全景：`inspect`（一个只读事务取齐账号、钱包、订阅、扣费顺序与 Key）；口令：`password` / `unlock`；销户：`delete`（`request` 打标可撤 / `revert` 撤回 / `purge` 匿名化，不可逆）；用户级履约操作：`plan`（`grant` 发放 / `list` 订阅 / `void` 作废 / `order` 扣费顺序的 `show` / `set`）、`wallet`（`show` / `credit` / `adjust` / `refund`）、`key`（`list` / `create` / `plans` 的 `show` / `set`）、`usage`（`events` / `requests`） |
+| `user` | 用户：`add` / `list` / `get` / `update`；全景：`inspect`（一个只读事务取齐账号、钱包、订阅、扣费顺序与 Key）；口令：`password` / `unlock`；销户：`delete`（`request` 打标可撤 / `revert` 撤回 / `purge` 匿名化，不可逆）；用户级履约操作：`plan`（`grant` 发放 / `list` 订阅 / `void` 作废 / `order` 扣费顺序的 `show` / `set`）、`wallet`（`show` / `credit` / `adjust` / `refund`）、`key`（`list` / `create` / `plans` 的 `show` / `set`）、`usage`（`events` / `requests`） |
 | `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录）/ `adjust`（手工调账，走账本写分录）/ `refund`（退款，走账本写分录）/ `list`；商户提现：`payout`（`request` 申请并冻住待付 / `settle` 平台主动清算，一步建单并记账，直接落已批准 / `approve` 批准 / `reject` 驳回并解除冻结 / `paid` 打款，只放行已批准的单子）；支付通道：`payment`（`create` 下单 / `status` 查单，通道确认收款后才入账） |
 | `usage` | 用量与计费（只读）：`events`（用量事件）/ `requests`（每次请求的预留与结算）/ `summary`（按用户汇总） |
 | `apikey` | API Key：`create` / `update` / `get` / `list`；`update` 兼改状态、备注与过期时间 |
-| `plan` | 额度包（商品定义）：`create` / `list` / `get`（单个包的详情）/ `enable` / `disable`（只挡新的发放）。用户持有的订阅、Key 的额度包名单与扣费顺序搬到了 user 子命令那一组；旧写法 `grant` / `void` / `subscriptions` / `key`（`show` / `set`）/ `order`（`show` / `set`）仍可用，命中时在 stderr 提示新路径 |
+| `plan` | 额度包（商品定义）：`add` / `list` / `get`（单个包的详情）/ `enable` / `disable`（只挡新的发放）。用户持有的订阅、Key 的额度包名单与扣费顺序搬到了 user 子命令那一组；旧写法 `grant` / `void` / `subscriptions` / `key`（`show` / `set`）/ `order`（`show` / `set`）仍可用，命中时在 stderr 提示新路径 |
 | `ledger` | 账本：`balance` / `verify` / `runs`（三条都只读：余额、逐笔校验、对账的历史运行）与 `reconcile`（对账，会写运行记录） |
 | `settings` | 运行期配置：`list` / `get` / `set` |
 | `admin` | 内部监听上 admin API 的令牌：`token`（`create` / `revoke`） |

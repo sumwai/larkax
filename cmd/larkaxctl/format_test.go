@@ -273,7 +273,7 @@ func TestUnsupportedCommandsRefuseJSONBeforeDoingAnything(t *testing.T) {
 		run     func([]string) error
 		args    []string
 	}{
-		{"user create", runUserCreate, nil},
+		{"user add", runUserCreate, nil},
 		{"user delete request", runUserDeleteRequest, nil},
 		{"user delete revert", runUserDeleteRevert, nil},
 		{"user delete purge", runUserDeletePurge, nil},

@@ -24,7 +24,7 @@ curl -s https://api.example.com/v1/models \
 
 ```sh
 # 1. A canonical model. This name is the key shared by routing and billing.
-larkaxctl model create --model claude-x --display 'Example model' \
+larkaxctl model add claude-x --display 'Example model' \
   --vendor example --context-limit 200000 --tools --vision
 
 # 2. A channel. The credential comes from stdin or an environment variable, never
@@ -37,7 +37,7 @@ cat ~/upstream-key.txt | larkaxctl channel create \
 larkaxctl channel map add --all-channels claude-x <upstream-model-id>
 
 # 4. A user, then a price rule. A rule records who defined it, so the user comes first.
-larkaxctl user create --name alice
+larkaxctl user add alice
 larkaxctl price add example-price --scope platform --by alice \
   --in 1.5 --out 7.5 --cr 0.2 --cw 1.9 --reasoning 9
 

@@ -26,12 +26,14 @@ var planHelp = helpText{short: planShortUsage, long: planUsage}
 // 与 Key 的额度包名单已经搬到 user 那一组，旧路径仍然可用，但不在这份用法里占行。
 const planShortUsage = `larkaxctl plan 管理额度包（商品定义）。
 用法：
-  larkaxctl plan create --key <key> --name <名称> --unit <amount|token|request>
-                        [--quota <可用量>] [--face-value <面值>] [--models <模型,...>]
+  larkaxctl plan add <key> --name <名称> --unit <amount|token|request>
+                           [--quota <可用量>] [--face-value <面值>]
+                           [--models <模型,...>]
   larkaxctl plan list
   larkaxctl plan get --key <key>
   larkaxctl plan enable|disable --key <key>
 
+key 也可写成 --key，旧动词 create 照旧可用；--name 是展示名。
 用户持有的订阅、扣费顺序与 Key 的额度包名单：larkaxctl user plan、larkaxctl user key。
 更细的边界：larkaxctl help plan。
 `
@@ -40,12 +42,17 @@ const planShortUsage = `larkaxctl plan 管理额度包（商品定义）。
 const planUsage = `larkaxctl plan 管理额度包（商品定义）。
 
 用法：
-  larkaxctl plan create --key <key> --name <名称> --unit <amount|token|request>
-                        [--quota <可用量>] [--face-value <面值>]
-                        [--models <模型,...>] [--description <说明>]
+  larkaxctl plan add <key> --name <名称> --unit <amount|token|request>
+                           [--quota <可用量>] [--face-value <面值>]
+                           [--models <模型,...>] [--description <说明>]
   larkaxctl plan list
   larkaxctl plan get --key <key>
   larkaxctl plan enable|disable --key <key>
+
+**key 是 add 的第一个位置参数**，位置参数必须写在旗标前面：
+  larkaxctl plan add pro-monthly --name 「专业版月付」 --unit amount --quota 100
+--key 仍然认，与位置参数同值时取位置参数，两处写的不是同一个 key 时报错。
+--name 是**展示名**，不是键；键建了就不能改。
 
 # 三种计量单位
 
@@ -80,6 +87,11 @@ grant 与 void 接受 --dry-run：走与真跑同一条写路径（同一份校�
 
 一把 API Key 能用哪些订阅在 larkaxctl user key plans 下；旧路径 plan key 仍可用。
 
+# 旧名仍可用
+
+create 是 add 的旧名，行为逐字相同；--key 是第一个位置参数的旧写法。
+两者都留着是为了不让已经在跑的脚本与部署流程坏掉，新写的命令请用新名字。
+
 更细的约定见 docs/cli-reference.md 的「plan」一节。
 `
 
@@ -88,7 +100,10 @@ const planTimeout = 30 * time.Second
 
 // planActions 是 plan 的动作清单，补全从这里取。
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
-var planActions = []string{"create", "list", "get", "enable", "disable", "grant", "void", "subscriptions", "key", "order"}
+//
+// 建记录只写正式名 add：create 是它的旧名（见 planUsage 的「旧名仍可用」），
+// 旧名不占 Tab 的位置（与 price 同一条口径）。
+var planActions = []string{"add", "list", "get", "enable", "disable", "grant", "void", "subscriptions", "key", "order"}
 
 func runPlan(args []string) error {
 	fs := newFlagSet("plan", flag.ContinueOnError)
@@ -105,7 +120,9 @@ func runPlan(args []string) error {
 	action, rest := rest[0], rest[1:]
 
 	switch action {
-	case "create":
+	case "add", "create":
+		// create 是 add 的旧名（见 planUsage 的「旧名仍可用」）。两个名字走同
+		// 一条路径，命令自己的名字按 add 报，免得在不支持 json 时说出旧名字。
 		return runPlanCreate(rest)
 	case "list":
 		return runPlanList(rest)
@@ -135,13 +152,27 @@ func runPlan(args []string) error {
 	}
 }
 
+// planKeyOperand 是 plan add 的位置参数：额度包的键。
+var planKeyOperand = operandSpec{
+	what:  "额度包的键",
+	flag:  "key",
+	usage: "写成第一个位置参数（larkaxctl plan add <key> …）",
+}
+
 func runPlanCreate(args []string) error {
 	// 写类命令在 json 模式下必须在做任何事之前拦下来（见 format.go）。
-	if err := jsonUnsupported("plan create"); err != nil {
+	// 命令名写正式名 add：那句会把命令名打给人看，而 create 是旧写法
+	// （见 planUsage 的「旧名仍可用」）。
+	if err := jsonUnsupported("plan add"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("plan create", flag.ContinueOnError)
+	operand, rest, takeErr := takeLeadingOperand(args, planKeyOperand)
+	if takeErr != nil {
+		return takeErr
+	}
+
+	fs := newFlagSet("plan add", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
 	key := fs.String("key", "", "")
 	name := fs.String("name", "", "")
@@ -151,22 +182,25 @@ func runPlanCreate(args []string) error {
 	faceValue := fs.String("face-value", "", "")
 	models := fs.String("models", "", "")
 	asset := fs.String("asset", string(ledger.AssetCNY), "")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(rest); err != nil {
 		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("create 不接受位置参数，得到 %q", fs.Arg(0)))
+		return usageErr(fmt.Errorf(
+			"add 不接受多余的参数，得到 %q：key 要写成第一个位置参数，排在旗标前面", fs.Arg(0)))
 	}
-	if strings.TrimSpace(*key) == "" {
-		return usageErr(errors.New("缺少 --key"))
+	given := visitedFlags(fs)
+	planKey, err := resolveOperand(operand, *key, given["key"], planKeyOperand)
+	if err != nil {
+		return usageErr(err)
 	}
 	if strings.TrimSpace(*name) == "" {
-		return usageErr(errors.New("缺少 --name"))
+		return usageErr(errors.New("缺少 --name（展示名）"))
 	}
 	if strings.TrimSpace(*unit) == "" {
 		return usageErr(errors.New("缺少 --unit"))
 	}
-	if err := checkDisplayText("--key", strings.TrimSpace(*key)); err != nil {
+	if err := checkDisplayText("--key", planKey); err != nil {
 		return err
 	}
 	if err := checkDisplayText("--name", strings.TrimSpace(*name)); err != nil {
@@ -185,7 +219,7 @@ func runPlanCreate(args []string) error {
 	}
 
 	in := plans.CreatePlanInput{
-		Key:         strings.TrimSpace(*key),
+		Key:         planKey,
 		Name:        strings.TrimSpace(*name),
 		Description: strings.TrimSpace(*description),
 		Asset:       assetValue,
@@ -198,7 +232,6 @@ func runPlanCreate(args []string) error {
 		return usageErr(fmt.Errorf("--unit 只能是 %s、%s 或 %s，得到 %q",
 			plans.UnitAmount, plans.UnitToken, plans.UnitRequest, *unit))
 	}
-	var err error
 	if strings.TrimSpace(*quota) != "" {
 		if in.QuotaTotal, err = parseNamedAmountFlag("--quota", *quota); err != nil {
 			return err
@@ -790,7 +823,7 @@ func printPlanEnabled(w io.Writer, p plans.Plan) {
 // printPlanList 打印额度包清单。
 func printPlanList(w io.Writer, list []plans.Plan) {
 	if len(list) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("额度包", "plan create"))
+		_, _ = fmt.Fprintln(w, emptyListNote("额度包", "plan add"))
 		return
 	}
 
