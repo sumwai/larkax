@@ -1757,12 +1757,14 @@ type doctorEndpointSpec struct {
 // 好几处，而漏改报错那一处没有任何东西会报出来——它看起来完全正常，只是说了
 // 一句错在自己边界上的话。
 //
-// 这张表是校验与报错的唯一来源；帮助文本（doctorShortUsage 与 doctorUsage 里的
-// `[--endpoint chat|messages|responses]`）另有一份手写的枚举，由
-// TestDoctorUsageMatchesEndpointTable 保证两者一致。docs/ 与手页里的说明不在这条
-// 保证之内，它们随帮助文本一起人工维护。
+// 这张表是校验与报错的唯一来源。帮助文本里另有两处手写的枚举，都由用例钉住：
+// 短版与长版用法里的 `[--endpoint …]` 串（TestDoctorUsageMatchesEndpointTable），
+// 以及 doctorUsage 说明段里「<名字> 是 POST /v1/…」的逐条描述
+// （TestDoctorUsageDescribesEveryEndpoint）。手页由 usage 生成，
+// check-man-pages.sh 逐字节比对产物与来源，改完帮助要重生成；docs/ 里的表随文档
+// 一起人工维护，不在用例覆盖内。
 //
-// 新增一个入口 = 加一条表项，并同步帮助文本里那串枚举；漏改时上面那条用例会红。
+// 新增一个入口 = 加一条表项，并同步帮助文本里那两处；漏改时上面两条用例会红。
 var doctorEndpoints = []doctorEndpointSpec{
 	{
 		name: doctorEndpointChat,

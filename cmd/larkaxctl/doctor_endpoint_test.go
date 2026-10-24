@@ -79,7 +79,7 @@ func TestDoctorLookupEndpointChoices(t *testing.T) {
 }
 
 // doctorEndpointEnumRE 认帮助文本里那串手写的枚举：`[--endpoint chat|messages|responses]`。
-var doctorEndpointEnumRE = regexp.MustCompile(`\[--endpoint ([a-z|]+)\]`)
+var doctorEndpointEnumRE = regexp.MustCompile(`\[--endpoint ([^\]]+)\]`)
 
 // TestDoctorUsageMatchesEndpointTable 让帮助文本与入口表互相钉住。
 //
@@ -103,6 +103,19 @@ func TestDoctorUsageMatchesEndpointTable(t *testing.T) {
 		if got := matches[0][1]; got != want {
 			t.Errorf("%s帮助里 --endpoint 的取值 = %q，入口表是 %q：只改一处时这里必须红",
 				usage.name, got, want)
+		}
+	}
+}
+
+// TestDoctorUsageDescribesEveryEndpoint 让 doctorUsage 说明段与入口表对上。
+//
+// 说明段里每个入口都写成「<名字> 是 POST /v1/…」。只给表加一条、两处方括号串也
+// 同步了、却没改说明段时，TestDoctorUsageMatchesEndpointTable 是绿的；这条会红。
+func TestDoctorUsageDescribesEveryEndpoint(t *testing.T) {
+	for _, name := range doctorEndpointNames() {
+		pattern := regexp.MustCompile(regexp.QuoteMeta(name) + `\s+是\s+POST\s+/v1/`)
+		if !pattern.MatchString(doctorUsage) {
+			t.Errorf("doctorUsage 的说明段里没有 %q 的「%s 是 POST /v1/…」描述：加入口时说明段漏改了", name, name)
 		}
 	}
 }
