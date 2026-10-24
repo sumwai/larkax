@@ -4,6 +4,10 @@
 `LARKAX_INTERNAL_ADDR` 那个端口上，**不**出现在公共监听，也不属于任何调用协议。
 装配与挂载点见 [development.md](development.md) 的「当前能做什么」一节。
 
+**用户销户不在这个面上**：它只有命令行入口（`larkaxctl user delete`），三条前置
+条件与各自的清理命令见 [cli-reference.md](cli-reference.md) 的 `user` 一节，
+留存口径见 [request-retention.md](request-retention.md) 的「账号销户」。
+
 公共监听的鉴权是用户 API Key，那一把 Key 的语义是「以某个用户的名义发推理请求」。
 管理面改的是全局数据，所以它用**单独一套管理令牌**，不复用 API Key。
 

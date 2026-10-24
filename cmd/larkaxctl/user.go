@@ -170,18 +170,26 @@ merchant 的用户再 --merchant），那一行不会出现。用户不存在时
 --status 也是先去两头空白再比对，但空串不认。
 
 create、list、get 与 update 只碰 users 表（不碰渠道凭证）；delete 那一族会写到
-api_keys、plugin_kv 与 capture_consents，钱包只读加锁。除了 plugin_kv 里属于
-这个用户的行，别的行都不删。它们都不需要 LARKAX_MASTER_KEYS。
+api_keys、plugin_kv 与 capture_consents，并读钱包、channels 与账本的
+merchant_payable 科目。除了 plugin_kv 里属于这个用户的行，
+别的行都不删。它们都不需要 LARKAX_MASTER_KEYS。
 
 delete 这一族把账号从「要求删除」走到终态，分两步，中间可以撤回。
 
-request 打标：把账号置为 deletion_requested，并记下它原来的状态。从这个时刻起，
-用户手里的 API Key 全部失效——鉴权只认 status = active，打标之后这些
-key 在任何一条路上都过不去。key 一行都不改，撤销之后原本有效的 key 恢复有效
-（此前停用的仍然是停用）。
+request 打标：把账号置为 deletion_requested，并记下它原来的状态。打标之前要求
+这个账号名下已经清理干净，三条缺一条就拒绝，报错点名是哪一条、下一步敲什么：
 
-打标之前先看钱包：余额与冻结额都必须是 0。不是 0 时拒绝，并给出当前的两个数与
-下一步（先用 wallet adjust 调账，或等退款与还没结算完的请求处理完）。
+  - API Key 全部是 revoked（停用的也算；行要留着，用 apikey update --status
+    revoked 逐把改）；
+  - 商户应付科目 merchant_payable:<用户> 的余额为 0（从账本分录现算；用
+    wallet payout request 或 settle 结清，或等平台清算）；
+  - 名下没有未删的渠道（用 channel delete 软删）。
+
+钱包也要看：余额与冻结额都必须是 0。不是 0 时拒绝，并给出当前的两个数与下一步
+（先用 wallet adjust 调账，或等退款与还没结算完的请求处理完）。
+
+打标之后账号不能再鉴权——鉴权只认 status = active——而 key 一行都不改：吊销是
+打标之前就要做的动作，revert 不会把已经吊销的 key 改回来。
 
 revert 撤掉打标：状态回到 request 之前的那一个——原来 active 就回 active，原来
 suspended 就回 suspended，不会被顺手放回 active。key 仍然一行都不动。
@@ -190,7 +198,8 @@ purge 匿名化（不可逆）：只接已经处于 deletion_requested 的账号
 逐字写出当前用户名。没有 --confirm 或写错时什么都不写。它在**一个事务里**做这几
 件事：
 
-  - API Key 里状态还是 active 的全部置为 revoked，行保留；
+  - API Key 里状态还是 active 的全部置为 revoked，并把 name 备注清空（那一列
+    常有真名），行保留；
   - plugin_kv 里属于这个用户的键全部删除（按插件与用户隔离的那一份）；
   - capture_consents 里还没撤销的授权全部撤销（写 revoked_at），行保留，到期仍按
     各自的 expires_at；
@@ -713,7 +722,7 @@ func deletionRevertReceipt(m auth.DeletionMark) deletionReceipt {
 		headline: fmt.Sprintf("已撤销用户 %s 的删除要求。", m.Username),
 		rows: [][2]string{
 			{"状态", m.FromStatus + " → " + m.ToStatus},
-			{"API Key", "未改动，原本有效的 key 恢复有效"},
+			{"API Key", "未改动：吊销是打标之前做的动作，这里不会解除"},
 		},
 	}
 }
