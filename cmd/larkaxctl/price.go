@@ -25,17 +25,17 @@ var priceHelp = helpText{short: priceShortUsage, long: priceUsage}
 const priceShortUsage = `larkaxctl price 管理计价规则。
 
 用法：
-  larkaxctl price create --scope <…> --name <规则名> --by <ID 或用户名>
-                         (--expr '<表达式>' | --schedule-file <文件> | --prompt <单价> …)
+  larkaxctl price add <规则名> --scope <…> --by <ID 或用户名>
+                        (--expr '<表达式>' | --schedule-file <文件> | --in <单价> …)
   larkaxctl price list
   larkaxctl price show <规则 ID>
-  larkaxctl price update --id <规则 ID> --by <ID 或用户名> [与 create 相同的字段]
+  larkaxctl price update <规则名 或 ID> --by <ID 或用户名> [与 add 相同的字段]
   larkaxctl price enable <规则 ID> | price disable <规则 ID>
   larkaxctl price explain --model <规范模型名> [--user <ID 或用户名>] [--at <…>]
   larkaxctl price calendar import <文件> | price calendar sync [--year <年>] | price calendar list
 
-作用域决定哪两栏 id 有效；五个计价项缺一个，用到它的结算就失败；--by 必填。
-单价旗标默认按每百万 token 给（--prompt 1.5 即每百万 1.5），--unit token 可改。
+作用域决定哪两栏 id 有效；--by 必填。单价按项给，默认每百万 token（--in 1.5 即
+每百万 1.5）：五个计价项都会写进表达式，没给的项显式写 0。--unit token 可改单位。
 
 更细的边界：larkaxctl help price。
 `
@@ -44,25 +44,25 @@ const priceShortUsage = `larkaxctl price 管理计价规则。
 const priceUsage = `larkaxctl price 管理计价规则。
 
 用法：
-  larkaxctl price create --scope <platform|merchant|channel> --name <规则名>
-                         (--expr '<表达式>' | --schedule-file <文件> |
-                          --prompt <单价> [--completion <单价>] [...] [--unit mtok|token])
-                         --by <用户 ID 或用户名>
-                         [--user <用户 ID 或用户名>] [--channel <渠道 ID>]
-                         [--models <规范模型名,...>] [--priority <优先级>]
-                         [--effective-from <RFC3339>] [--effective-to <RFC3339>]
-                         [--disabled]
+  larkaxctl price add <规则名> --scope <platform|merchant|channel>
+                        (--expr '<表达式>' | --schedule-file <文件> |
+                         --in <单价> [--out <单价>] [...] [--unit mtok|token])
+                        --by <用户 ID 或用户名>
+                        [--user <用户 ID 或用户名>] [--channel <渠道 ID>]
+                        [--models <规范模型名,...>] [--priority <优先级>]
+                        [--effective-from <RFC3339>] [--effective-to <RFC3339>]
+                        [--disabled]
   larkaxctl price list
   larkaxctl price show <规则 ID>
-  larkaxctl price update --id <规则 ID> --by <用户 ID 或用户名>
-                         [--scope <platform|merchant|channel>] [--name <规则名>]
-                         [--user <用户 ID 或用户名>] [--channel <渠道 ID>]
-                         [--models <规范模型名,...>]
-                         (--expr '<表达式>' | --schedule-file <文件> |
-                          --prompt <单价> [...] [--unit mtok|token])
-                         [--clear-schedule]
-                         [--priority <优先级>] [--effective-from <RFC3339>]
-                         [--effective-to <RFC3339>] [--clear-effective-to]
+  larkaxctl price update <规则名 或 ID> --by <用户 ID 或用户名>
+                        [--scope <platform|merchant|channel>] [--name <规则名>]
+                        [--user <用户 ID 或用户名>] [--channel <渠道 ID>]
+                        [--models <规范模型名,...>]
+                        (--expr '<表达式>' | --schedule-file <文件> |
+                         --in <单价> [...] [--unit mtok|token])
+                        [--clear-schedule]
+                        [--priority <优先级>] [--effective-from <RFC3339>]
+                        [--effective-to <RFC3339>] [--clear-effective-to]
   larkaxctl price enable <规则 ID>
   larkaxctl price disable <规则 ID>
   larkaxctl price explain --model <规范模型名>
@@ -80,7 +80,15 @@ const priceUsage = `larkaxctl price 管理计价规则。
 作用域决定哪两栏 id 有效：platform 两栏都留空；merchant 必须给 --user；
 channel 必须给 --channel。写了读取路径不看的那一栏会被拒绝。
 
---by 必填：它记的是这一次是谁做的，落库记的是那个 users.id。create 把它写进
+**规则名是 add 的第一个位置参数**，位置参数必须写在旗标前面：
+  larkaxctl price add example --scope platform --by alice --in 1.5
+--name 仍然认，与位置参数同值时取位置参数，两处写的不是同一个名字时报错。
+
+update 的定位符也是位置参数，收规则名或规则 ID：纯数字按 ID，其余按名字查。
+按名字查命中多条时报错并列出候选（ID、作用域、商家、渠道、优先级），此时改用 ID
+或加 --scope 收窄。--id 仍然认，与位置参数只能给一个。
+
+--by 必填：它记的是这一次是谁做的，落库记的是那个 users.id。add 把它写进
 pricing_rules.created_by（这条价是谁定的），update 把它写进版本历史的
 changed_by（这一版是谁改的，只在表达式真的变了、留了一版时才有这一行）。
 两个都收 users.id 或用户名，与其余命令同一个解析路径。它**不算**一次修改：只给
@@ -89,14 +97,22 @@ changed_by（这一版是谁改的，只在表达式真的变了、留了一版�
 --models 留空表示适用于全部模型（兜底规则）；给了就按元素逐字匹配，
 不支持通配符——带 * 或 ? 的名字会被拒绝。
 
-单价可以直接按项给，单位默认是**每百万 token**（供应商报价单就是这么写的）：
+单价按项给，单位默认是**每百万 token**（供应商报价单就是这么写的）：
 
-  larkaxctl price create --scope platform --name example --by alice \
-    --prompt 1.5 --completion 7.5 --cache-read 0.2 --cache-write 1.9 --reasoning 9
+  larkaxctl price add example --scope platform --by alice \
+    --in 0.15 --out 0.6 --cr 0.003
+
+五个旗标与五个计价项一一对应：--in 是输入（未命中缓存）、--out 是输出、
+--cr 是输入·命中缓存、--cw 是输入·缓存写、--reasoning 是推理。
 
 存库前换成每 token 的价（1.5 → 0.0000015），库里存的仍是表达式；
 --unit token 表示给的就是每 token 的价。--expr、--schedule-file 与这组单价
 旗标三选一：手写表达式、结构化定价表、逐项单价。
+
+**这组旗标会把五个计价项全写进表达式**，没给的项显式写 0。写 0 是「免费」，
+与「没写」不是一回事：上游报了哪一项，规则里就必须有哪一项的单价，少一项不是
+少收，是这一笔的结算失败。--in 与 --out 至少要给一项——只给缓存价或推理价时
+主价会按 0 算，那条规则在正常请求上白送。
 
 表达式在写入前会编译一次，编译不过的命令直接失败。
 
@@ -115,9 +131,10 @@ weekdays / window / day_kind / holidays / min_context_tokens 分行改写单价�
 计价项一共五个：prompt、completion、cache_read、cache_write、reasoning。
 上游报了哪一项，规则里就必须有哪一项的单价——少一项不是少收，是这一笔的结算
 失败：非流式请求调用方拿到 500，流式请求只把「用量里有规则未定价的计量项」
-写进服务端日志。新规则把这五项都写上、用不到的填 0，比漏掉再被拦住省事。
+写进服务端日志。用单价旗标写的规则五项齐全，不受这一条影响；手写表达式与
+定价表仍可能漏项，写完会提示漏了哪几项。
 
-create 与 update 写成功之后还会提示这条规则漏了哪几项。提示看的是规则实际
+create 与 update 写成功之后会提示这条规则漏了哪几项。提示看的是规则实际
 定过价的键，与漏掉时结算报的那一项对得上。它只是提示：写入已经完成，命令
 照样成功退出，-q 会连同它一起压掉。
 
@@ -140,9 +157,11 @@ update **只改真的给了的那几项**，其余保持库里的值。校验的
 **启停是独立的二级动词**：price enable <规则 ID> / price disable <规则 ID>。
 改属性的命令不带状态开关。
 
-**旧名仍可用**：price update 上的 --enable 与 --disable 是这次改名的旧形态，
---owner 等同于 --user，price add 等同于 price create。它们保留是为了不让已经
-在跑的脚本与部署流程坏掉，行为与新名字逐字相同；新写的命令请用新名字。
+**旧名仍可用**：price create 等同于 price add，--name 与 --id 仍可作为规则名与
+定位符，--prompt / --completion / --cache-read / --cache-write 分别是
+--in / --out / --cr / --cw 的旧写法，--enable 与 --disable 是启停的旧形态，
+--owner 等同于 --user。它们保留是为了不让已经在跑的脚本与部署流程坏掉，行为与
+新名字逐字相同；新写的命令请用新名字。
 
 explain 回答「这次请求按哪条规则计价」：它把**全部适用**的规则按裁决次序
 列出来，第一条就是会被选中的那条，排在它后面的每一条都在说明它落选的原因。
@@ -155,11 +174,17 @@ explain 回答「这次请求按哪条规则计价」：它把**全部适用**�
 
 下面几个写法仍然可用，只是不再是正式写法（用法行里只写规范名）：
 
-  -u <用户 ID 或用户名>   同 --user，create / update / explain 都认
+  -u <用户 ID 或用户名>   同 --user，add / update / explain 都认
   --owner                 同 --user
   --from <RFC3339>        同 --effective-from
   --to <RFC3339>          同 --effective-to
   --no-expire             同 --clear-effective-to
+  --prompt <单价>         同 --in
+  --completion <单价>     同 --out
+  --cache-read <单价>     同 --cr
+  --cache-write <单价>    同 --cw
+  --name <规则名>         同第一个位置参数
+  --id <规则 ID>          同 update 的位置参数
 
 **--channel 与 --effective-to 不开简写**：-c 在别的命令行里既可能是 channel
 也可能是 config、count，挑错作用域会把一条规则挂到另一个渠道上；--effective-to
@@ -174,7 +199,7 @@ explain 回答「这次请求按哪条规则计价」：它把**全部适用**�
 
 // priceActions 是 price 的动作清单，补全从这里取。
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
-var priceActions = []string{"create", "list", "show", "update", "enable", "disable", "explain", "calendar"}
+var priceActions = []string{"add", "list", "show", "update", "enable", "disable", "explain", "calendar"}
 
 func runPrice(args []string) error {
 	if len(args) == 0 {
@@ -184,7 +209,9 @@ func runPrice(args []string) error {
 	action, rest := args[0], args[1:]
 
 	switch action {
-	case "create", "add":
+	case "add", "create":
+		// create 是 add 的旧名（见 priceUsage 的「旧名仍可用」）。两个名字走同一条
+		// 路径，命令自己的名字按 add 报，免得在不支持 json 时说出旧名字。
 		return runPriceCreate(rest)
 	case "list":
 		return runPriceList(rest)
@@ -212,7 +239,9 @@ func runPrice(args []string) error {
 }
 
 func runPriceCreate(args []string) error {
-	if err := jsonUnsupported("price create"); err != nil {
+	// 命令名写正式名 add：jsonUnsupported 那句会把命令名打给人看，而 create
+	// 是旧写法（见 priceUsage 的「旧名仍可用」）。
+	if err := jsonUnsupported("price add"); err != nil {
 		return err
 	}
 
@@ -265,7 +294,7 @@ func runPriceCreate(args []string) error {
 	return nil
 }
 
-// priceRefs 是 price create / update 上那两个「用户 ID 或用户名」旗标的原文。
+// priceRefs 是 price add / update 上那几个「连库才解析得成」的旗标原文。
 //
 // 两个都要连库才解析得成 users.id，而参数解析必须在连库之前完成，所以这里
 // 只收原文，解析留给命令那一层（见 runPriceCreate / runPriceUpdate）。
@@ -279,15 +308,28 @@ type priceRefs struct {
 	// 文件在连库之前读：读不出来时不该先建立一次连接，而失败信息里要带
 	// 文件路径，留给命令那一层拼。
 	scheduleFile string
+	// locator 是 update 上「改哪一条」的原文：位置参数或 --id，空串表示没给。
+	//
+	// 两条路都要连库才定得下来——纯数字按 ID，其余要读规则表按名字查（见
+	// resolvePriceRuleLocator）。参数解析那一层只判「给没给、给了几个」。
+	locator string
 }
 
-// parsePriceCreate 解析 create 的参数。
+// parsePriceCreate 解析 add 的参数。
 //
 // 它多带一个 priceRefs 返回值：--user 与 --by 都要连库才能解析成用户 ID，
 // 而参数解析必须在连库之前完成。所以这里只做「有没有给、给了什么」，
 // 解析留给调用方。
 func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
-	fs := newFlagSet("price create", flag.ContinueOnError)
+	// 规则名是第一个位置参数，且必须写在旗标前面：flag 包遇到第一个非旗标词就
+	// 停止解析，写在后面的一整段都会落进 NArg（下面按「多给了参数」报）。
+	operand, rest, takeErr := takeLeadingOperand(args)
+	if takeErr != nil {
+		return pricing.CreateRequest{}, priceRefs{}, takeErr
+	}
+	args = rest
+
+	fs := newFlagSet("price add", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
 	scope := fs.String("scope", "", "")
 	name := fs.String("name", "", "")
@@ -310,18 +352,21 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 	}
 	if fs.NArg() > 0 {
 		return pricing.CreateRequest{}, priceRefs{}, fmt.Errorf(
-			"create 不接受位置参数，得到 %q：表达式用 --expr 指定（记得给 shell 加引号）", fs.Arg(0))
+			"add 不接受多余的参数，得到 %q：规则名要写成第一个位置参数，排在旗标前面", fs.Arg(0))
 	}
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 
 	if strings.TrimSpace(*scope) == "" {
 		return pricing.CreateRequest{}, priceRefs{}, errors.New("缺少 --scope（platform / merchant / channel）")
 	}
-	if strings.TrimSpace(*name) == "" {
-		return pricing.CreateRequest{}, priceRefs{}, errors.New("缺少 --name")
+	ruleName, nameErr := resolveRuleName(operand, *name, given["name"])
+	if nameErr != nil {
+		return pricing.CreateRequest{}, priceRefs{}, nameErr
 	}
 	// 规则名与模型名单进 price list / explain 的表格：控制字符在连库之前
 	// 拒掉（判据在 pricing 的写入路径，见 normalizeName / normalizePatterns）。
-	if err := checkDisplayText("--name（规则名）", strings.TrimSpace(*name)); err != nil {
+	if err := checkDisplayText("--name（规则名）", ruleName); err != nil {
 		return pricing.CreateRequest{}, priceRefs{}, err
 	}
 	if err := checkDisplayList("--models", splitOptionalList(*models)); err != nil {
@@ -329,8 +374,6 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 	}
 	exprGiven := strings.TrimSpace(*expression) != ""
 	scheduleGiven := strings.TrimSpace(*scheduleFile) != ""
-	given := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 	slotsGiven := slots.anyGiven(given)
 	if exprGiven && scheduleGiven {
 		return pricing.CreateRequest{}, priceRefs{}, errors.New(
@@ -338,7 +381,7 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 	}
 	if slotsGiven && (exprGiven || scheduleGiven) {
 		return pricing.CreateRequest{}, priceRefs{}, errors.New(
-			"--expr、--schedule-file 与单价旗标（--prompt 等）只能给一种：" +
+			"--expr、--schedule-file 与单价旗标（--in 等）只能给一种：" +
 				"手写表达式、结构化定价表、逐项单价三者选一")
 	}
 	if slots.unitGiven(given) && !slotsGiven {
@@ -378,7 +421,7 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 	req := pricing.CreateRequest{
 		Scope:         *scope,
 		ChannelID:     *channelID,
-		Name:          *name,
+		Name:          ruleName,
 		ModelPatterns: splitOptionalList(*models),
 		Expr:          expressionText,
 		Priority:      *priority,
@@ -395,6 +438,59 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 		req.Enabled = &enabled
 	}
 	return req, priceRefs{owner: *owner, by: *by, scheduleFile: *scheduleFile}, nil
+}
+
+// takeLeadingOperand 从参数最前面摘掉一个位置参数。
+//
+// 与 user_ops.go 的 takeOperand 差一处：那个把「没有位置参数」当成缺参数报错，
+// 这个允许它缺席——add 上的规则名既可以写成位置参数，也可以走旧写法 --name，
+// 而旧写法前面直接就是旗标。
+//
+// 只认**最前面**那一个词，因为 flag 包遇到第一个非旗标词就停止解析：写成
+// `add --scope platform n1` 时 n1 之后的一整段都落进 NArg，由调用方按「多给了
+// 参数」报出来，那句话会点明位置参数要写在旗标前面。
+//
+// 收集补全数据时（见 completion.go 的 collectCommandFlags）不摘：那时走的是
+// `price add -h`，参数里没有位置参数，而摘错一个会把 -h 吃掉。
+func takeLeadingOperand(args []string) (string, []string, error) {
+	if collectingCommandFlags {
+		return "", args, nil
+	}
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return "", args, nil
+	}
+	operand := args[0]
+	if strings.TrimSpace(operand) == "" {
+		return "", nil, usageErr(errors.New("规则名是空串：写成第一个位置参数，或改用 --name"))
+	}
+	return operand, args[1:], nil
+}
+
+// resolveRuleName 把「位置参数」与「--name」收拢成一个规则名。
+//
+// 两条都给时**同值取位置参数、异值报错**：静默取其中一个的表现是「我明明改了
+// 名字，落库的还是旧的」，而那是一次成功的写入。
+//
+// nameGiven 传的是 --name 这次有没有**出现在命令行上**（fs.Visit 记的），不是
+// 它的值非不非空：`--name ""` 是一个明确的错误输入，静默当成没给会让它一路
+// 走到「缺少规则名」或更远处。
+func resolveRuleName(operand, flagValue string, nameGiven bool) (string, error) {
+	operand = strings.TrimSpace(operand)
+	flagName := strings.TrimSpace(flagValue)
+	switch {
+	case operand != "" && nameGiven && flagName != operand:
+		return "", fmt.Errorf(
+			"规则名给了两个不同的值：位置参数 %q，--name %q；只能写一处，或者两处写成同一个名字",
+			operand, flagName)
+	case operand != "":
+		return operand, nil
+	case nameGiven:
+		if flagName == "" {
+			return "", errors.New("--name 是空串：规则名不能为空")
+		}
+		return flagName, nil
+	}
+	return "", errors.New("缺少规则名：写成第一个位置参数（larkaxctl price add <规则名> …）")
 }
 
 func runPriceUpdate(args []string) error {
@@ -441,6 +537,17 @@ func runPriceUpdate(args []string) error {
 			return resolveErr
 		}
 		req.OwnerUserID = &ownerID
+	}
+
+	// 定位符要连库才解析得成 ID（按名字查那一路要读规则表），所以留到这里。
+	// 放在 --by 之后：写错的操作人要报在「改哪一条」之前，那是同一类错误里更
+	// 基本的一件。
+	if refs.locator != "" {
+		id, resolveErr := resolvePriceRuleLocator(ctx, db, refs.locator, req.Scope)
+		if resolveErr != nil {
+			return usageErr(resolveErr)
+		}
+		req.ID = id
 	}
 
 	if err := pricing.NewAdmin(db).Update(ctx, req); err != nil {
@@ -527,9 +634,17 @@ var (
 // --user 与 --by 都要连库才能解析成用户 ID，而参数解析必须在连库之前完成。
 // 这里只做「有没有给、给了什么」。
 func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
+	// 定位符是第一个位置参数，规则名或规则 ID。与 add 的规则名同一个形状：
+	// flag 包遇到第一个非旗标词就停，所以它必须写在旗标前面。
+	operand, rest, takeErr := takeLeadingOperand(args)
+	if takeErr != nil {
+		return pricing.UpdateRequest{}, priceRefs{}, takeErr
+	}
+	args = rest
+
 	fs := newFlagSet("price update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
-	id := fs.Int64("id", 0, "要改的规则 ID")
+	id := fs.Int64("id", 0, "要改的规则 ID（与位置参数只能给一个）")
 	scope := fs.String("scope", "", "")
 	name := fs.String("name", "", "")
 	owner := legacyStringFlag(fs, "user", "owner", "")
@@ -558,10 +673,40 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 	}
 	if fs.NArg() > 0 {
 		return pricing.UpdateRequest{}, priceRefs{}, fmt.Errorf(
-			"update 不接受位置参数，得到 %q：要改的规则用 --id 指定", fs.Arg(0))
+			"update 不接受多余的参数，得到 %q：要改的规则写成第一个位置参数（规则名或 ID），排在旗标前面",
+			fs.Arg(0))
 	}
-	if *id <= 0 {
-		return pricing.UpdateRequest{}, priceRefs{}, errors.New("缺少 --id（要改的规则 ID）")
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+
+	// 定位符只能给一处：位置参数与 --id 同时给时，两个值不同就是一次
+	// 「改错了规则」的风险，而静默取其中一个会把它变成一次成功的写入。
+	//
+	// 定位符**不在这里解析成 ID**：按名字查那一路要读规则表（见
+	// resolvePriceRuleLocator），而参数解析不连库。req.ID 因此留空，由
+	// runPriceUpdate 填——这里只保证它非空，并把 --id 与位置参数的冲突判掉。
+	locator := operand
+	if given["id"] {
+		if *id <= 0 {
+			return pricing.UpdateRequest{}, priceRefs{}, fmt.Errorf(
+				"--id %d 无效：规则 ID 是正整数；按名字定位就把它写成位置参数", *id)
+		}
+		if locator != "" && locator != strconv.FormatInt(*id, 10) {
+			return pricing.UpdateRequest{}, priceRefs{}, fmt.Errorf(
+				"要改的规则给了两个不同的值：位置参数 %q，--id %d；只能写一处", locator, *id)
+		}
+		locator = strconv.FormatInt(*id, 10)
+	}
+	if locator == "" {
+		return pricing.UpdateRequest{}, priceRefs{}, errors.New(
+			"缺少要改的规则：写成第一个位置参数（规则名或 ID），或改用 --id")
+	}
+	// 纯数字按 ID 在这里就定下来：它不需要连库，而 short_flags_test 那一组比的是
+	// 「两种写法解析出同一个请求」，ID 留在 refs 里会让两条解析结果都是零值 ID。
+	// 名字那一路仍留给 runPriceUpdate。
+	numericID := int64(0)
+	if parsed, parseErr := strconv.ParseInt(strings.TrimSpace(locator), 10, 64); parseErr == nil && parsed > 0 {
+		numericID = parsed
 	}
 	if strings.TrimSpace(*by) == "" {
 		return pricing.UpdateRequest{}, priceRefs{}, errors.New("缺少 --by：这条命令要记下是谁改的这条价")
@@ -584,7 +729,6 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 			"--channel %d 无效：渠道 ID 从 1 开始，0 表示不挂渠道", *channelID)
 	}
 
-	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 	if given["expr"] && given["schedule-file"] {
 		return pricing.UpdateRequest{}, priceRefs{}, errors.New(
@@ -593,7 +737,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 	slotsGiven := slots.anyGiven(given)
 	if slotsGiven && (given["expr"] || given["schedule-file"]) {
 		return pricing.UpdateRequest{}, priceRefs{}, errors.New(
-			"--expr、--schedule-file 与单价旗标（--prompt 等）只能给一种：" +
+			"--expr、--schedule-file 与单价旗标（--in 等）只能给一种：" +
 				"手写表达式、结构化定价表、逐项单价三者选一")
 	}
 	if slots.unitGiven(given) && !slotsGiven {
@@ -609,7 +753,9 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 			"--user 不能是空串（多半是变量没展开）：要改成不挂商家写 --user 0")
 	}
 
-	req := pricing.UpdateRequest{ID: *id}
+	// ID 只在定位符是纯数字时定得下来；按名字那一路要读规则表（见
+	// resolvePriceRuleLocator），留给 runPriceUpdate。
+	req := pricing.UpdateRequest{ID: numericID}
 	changes := 0
 	ownerRef := ""
 	if given["scope"] {
@@ -720,12 +866,77 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 	if changes == 0 {
 		return pricing.UpdateRequest{}, priceRefs{}, errors.New(
 			"update 至少要改一项：给出 --scope / --name / --user / --channel / " +
-				"--models / --expr / --prompt 等单价旗标 / --priority / --effective-from / " +
+				"--models / --expr / --in 等单价旗标 / --priority / --effective-from / " +
 				"--effective-to / --clear-effective-to 之一" +
 				"（启用或停用规则用 price enable / price disable）")
 	}
 
-	return req, priceRefs{owner: ownerRef, by: *by, scheduleFile: *scheduleFile}, nil
+	return req, priceRefs{
+		owner: ownerRef, by: *by, scheduleFile: *scheduleFile, locator: locator,
+	}, nil
+}
+
+// resolvePriceRuleLocator 把 update 的定位符解析成规则 ID。
+//
+// 纯数字按 ID，其余按名字查：规则名是给人看的（`ds-flash-2026q4`），而 ID 是
+// 列表里第一栏，两种写法在日常里都顺手，所以两种都认。判据是「整串是正整数」，
+// 不按「像不像名字」猜——名字允许是纯数字，那种名字要定位就得写 --id。
+//
+// # 按名字查命中多条时报错，不猜
+//
+// 规则名在库里不唯一（pricing_rules 上没有唯一约束：同一个名字可以出现在不同
+// 作用域、不同商家、不同优先级上）。挑一条改等于在三条同名规则里随便选一条
+// 改价，而命令照样成功退出。所以命中多条时列出候选并要求改用 ID。
+//
+// scope 是这次给了 --scope 的取值（没给是空串）：给了就只在那一个作用域里找，
+// 因为「把 merchant 的那条改成 platform」正是同时给 --scope 与名字的用法。
+func resolvePriceRuleLocator(ctx context.Context, db *sql.DB, locator string, scope *string) (int64, error) {
+	locator = strings.TrimSpace(locator)
+	if id, err := strconv.ParseInt(locator, 10, 64); err == nil {
+		if id <= 0 {
+			return 0, fmt.Errorf("规则 ID 必须是正整数，当前为 %q", locator)
+		}
+		return id, nil
+	}
+
+	rules, err := pricing.NewAdmin(db).List(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("按名字查计价规则失败: %w", err)
+	}
+	wantScope := ""
+	if scope != nil {
+		wantScope = strings.TrimSpace(*scope)
+	}
+	matches := make([]pricing.RuleInfo, 0, 1)
+	for _, rule := range rules {
+		if rule.Name != locator {
+			continue
+		}
+		if wantScope != "" && rule.Scope != wantScope {
+			continue
+		}
+		matches = append(matches, rule)
+	}
+
+	switch len(matches) {
+	case 1:
+		return matches[0].ID, nil
+	case 0:
+		if wantScope != "" {
+			return 0, fmt.Errorf("作用域 %s 里没有叫 %q 的计价规则", wantScope, locator)
+		}
+		return 0, fmt.Errorf("没有叫 %q 的计价规则：用 price list 看现有的规则名", locator)
+	}
+
+	lines := make([]string, 0, len(matches))
+	for _, rule := range matches {
+		lines = append(lines, fmt.Sprintf("  ID=%d 作用域=%s 商家=%s 渠道=%s 优先级=%d",
+			rule.ID, rule.Scope, priceOwnerLabel(rule.OwnerUserID),
+			priceChannelLabel(rule.ChannelID), rule.Priority))
+	}
+	return 0, fmt.Errorf(
+		"有 %d 条计价规则叫 %q，改用 ID 指定要改哪一条（或加 --scope 收窄）：\n%s",
+		len(matches), locator, strings.Join(lines, "\n"))
 }
 
 // runPriceExplain 回答「这次请求按哪条规则计价」。
@@ -1061,7 +1272,7 @@ func printPriceCoverageHint(w io.Writer, expression string, schedule *pricing.Sc
 // 声明了哪几项单价由最后一栏给出。
 func printRuleList(w io.Writer, rules []pricing.RuleInfo) {
 	if len(rules) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("计价规则", "price create"))
+		_, _ = fmt.Fprintln(w, emptyListNote("计价规则", "price add"))
 		return
 	}
 	printRuleTable(w, rules, nil)

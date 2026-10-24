@@ -482,7 +482,10 @@ func completionEnumValues() map[string][]string {
 	put("doctor", "endpoint", doctorEndpointNames())
 
 	scopes := pricing.Scopes()
-	for _, path := range []string{"price create", "price update"} {
+	// 键的判据是「用户敲这个路径时 Tab 有没有东西」，不是「补全里列不列它」：
+	// create 是 add 的旧名，不进 priceActions（别名不占 Tab 的位置），但用户
+	// 照旧会敲 `price create --scope <Tab>`，那一路必须补得出取值。
+	for _, path := range []string{"price add", "price create", "price update"} {
 		put(path, "scope", scopes)
 		// 单价旗标的单位：默认每百万 token，也可以直接给每 token。
 		put(path, "unit", []string{"mtok", "token"})
