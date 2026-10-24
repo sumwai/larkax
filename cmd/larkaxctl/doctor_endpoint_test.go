@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"regexp"
+	"strings"
+	"testing"
+)
 
 // TestDoctorLookupEndpointNames 用字面量整张断言 --endpoint 的取值清单。
 //
@@ -71,5 +75,34 @@ func TestDoctorLookupEndpointChoices(t *testing.T) {
 	const want = "chat、messages 或 responses"
 	if got := doctorEndpointChoices(); got != want {
 		t.Errorf("doctorEndpointChoices() = %q，期望 %q", got, want)
+	}
+}
+
+// doctorEndpointEnumRE 认帮助文本里那串手写的枚举：`[--endpoint chat|messages|responses]`。
+var doctorEndpointEnumRE = regexp.MustCompile(`\[--endpoint ([a-z|]+)\]`)
+
+// TestDoctorUsageMatchesEndpointTable 让帮助文本与入口表互相钉住。
+//
+// 帮助里那串枚举是手写的第二份（表不是它的来源，改 usage 要顺手改表，反之亦然），
+// 没有这条用例时「给表加了一条、帮助没改」不会红任何东西；这里把两处逐字对上：
+// 期望值由表拼出来，实际值必须原样出现在短版与长版 usage 里。
+func TestDoctorUsageMatchesEndpointTable(t *testing.T) {
+	want := strings.Join(doctorEndpointNames(), "|")
+	usages := []struct {
+		name string
+		text string
+	}{
+		{"短版", doctorShortUsage},
+		{"长版", doctorUsage},
+	}
+	for _, usage := range usages {
+		matches := doctorEndpointEnumRE.FindAllStringSubmatch(usage.text, -1)
+		if len(matches) != 1 {
+			t.Fatalf("%s帮助里 --endpoint 的枚举写法应恰好一处，找到 %d 处", usage.name, len(matches))
+		}
+		if got := matches[0][1]; got != want {
+			t.Errorf("%s帮助里 --endpoint 的取值 = %q，入口表是 %q：只改一处时这里必须红",
+				usage.name, got, want)
+		}
 	}
 }

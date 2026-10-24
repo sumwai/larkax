@@ -1757,7 +1757,12 @@ type doctorEndpointSpec struct {
 // 好几处，而漏改报错那一处没有任何东西会报出来——它看起来完全正常，只是说了
 // 一句错在自己边界上的话。
 //
-// 新增一个入口 = 加一条表项，别处零改动。
+// 这张表是校验与报错的唯一来源；帮助文本（doctorShortUsage 与 doctorUsage 里的
+// `[--endpoint chat|messages|responses]`）另有一份手写的枚举，由
+// TestDoctorUsageMatchesEndpointTable 保证两者一致。docs/ 与手页里的说明不在这条
+// 保证之内，它们随帮助文本一起人工维护。
+//
+// 新增一个入口 = 加一条表项，并同步帮助文本里那串枚举；漏改时上面那条用例会红。
 var doctorEndpoints = []doctorEndpointSpec{
 	{
 		name: doctorEndpointChat,
@@ -1801,7 +1806,7 @@ var doctorEndpoints = []doctorEndpointSpec{
 
 // doctorEndpointNames 是三个入口的名字，顺序与 doctorEndpoints 一致。
 //
-// 由表算出来，不另写一份：名字清单被报错与需要列取值的调用方共用，手写的
+// 由表算出来，不另写一份：报错里那一串由 doctorEndpointChoices 取用，手写的
 // 第二份不会跟着表变。
 func doctorEndpointNames() []string {
 	names := make([]string, 0, len(doctorEndpoints))
