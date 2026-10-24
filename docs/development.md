@@ -909,14 +909,16 @@ overrides 不允许覆盖 "messages"：它是调用方发来的正文（允许�
 ```sh
 go run ./cmd/larkaxctl user create --name alice
 
-go run ./cmd/larkaxctl price create --scope platform --name example-price --by alice \
-  --prompt 1.5 --completion 7.5 --cache-read 0.2 --cache-write 1.9 --reasoning 9
+go run ./cmd/larkaxctl price add example-price --scope platform --by alice \
+  --in 1.5 --out 7.5 --cr 0.2 --cw 1.9 --reasoning 9
 ```
 
-五个单价旗标的单位是**每百万 token**，与供应商报价单一致（`--prompt 1.5` 就是
-每百万输入 token 1.5）；存库前换成每 token（`0.0000015`），库里存的仍是表达式。
-要直接按 token 给价时加 `--unit token`。带阶梯、分时或门槛的规则仍用 `--expr`
-或 `--schedule-file`：三种给法三选一。
+规则名是 `price add` 的第一个位置参数，写在旗标前面；`--name` 仍然认，`create` 是
+`add` 的旧名。五个单价旗标的单位是**每百万 token**，与供应商报价单一致
+（`--in 1.5` 就是每百万输入 token 1.5）；存库前换成每 token（`0.0000015`），库里
+存的仍是表达式。要直接按 token 给价时加 `--unit token`。这组旗标把五个计价项全写进
+表达式，没给的项写 0，`--in` 与 `--out` 至少给一项。带阶梯、分时或门槛的规则仍用
+`--expr` 或 `--schedule-file`：三种给法三选一。
 
 缺少 `--by` 时它报参数错（退出码 2），不会按「不记名」落库。
 
@@ -1346,7 +1348,7 @@ ingress 规则下。同一个端口上还有管理面 `/admin/v1/*`，用单独�
 | `channel` | 上游渠道：`create` / `list`（`--all` 含已删）/ `get`（单条详情）/ `health`（健康与窗口内的用量）/ `update` / `enable` / `disable` / `delete`（软删）/ `restore`（`delete` 的逆操作）/ `sync-models`（从上游拉一次模型清单并落库）/ `upstream-models`（读库里那一份清单与同步状态）/ `adapters`（列出适配器类型）/ `probe`（落库之前探一次上游模型清单）；出站映射：`map`（`add` / `list` / `remove`） |
 | `model` | 模型目录：`create` / `list` / `get` / `update` / `delete` / `onboard`（一个事务里写完目录、渠道白名单、出站映射与两条价格规则）；入站别名（调用方写的名字 → 规范名）：`alias`（`add` / `remove` / `list`）；名字链路诊断：`trace` |
 | `alias` | 规范模型名到上游模型名的映射（旧入口，配置改用 `channel map`）：`create` / `list` / `update` / `delete` / `resolve` |
-| `price` | 计价规则：`create` / `list` / `show` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `list`） |
+| `price` | 计价规则：`add` / `list` / `show` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `list`） |
 | `upstream-cost` | 上游成本规则（每条渠道每个模型按生效窗口与优先级挑一条）：`create` / `list` / `update` / `disable` |
 | `user` | 用户：`create` / `list` / `get` / `update`；全景：`inspect`（一个只读事务取齐账号、钱包、订阅、扣费顺序与 Key）；口令：`password` / `unlock`；销户：`delete`（`request` 打标可撤 / `revert` 撤回 / `purge` 匿名化，不可逆）；用户级履约操作：`plan`（`grant` 发放 / `list` 订阅 / `void` 作废 / `order` 扣费顺序的 `show` / `set`）、`wallet`（`show` / `credit` / `adjust` / `refund`）、`key`（`list` / `create` / `plans` 的 `show` / `set`）、`usage`（`events` / `requests`） |
 | `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录）/ `adjust`（手工调账，走账本写分录）/ `refund`（退款，走账本写分录）/ `list`；商户提现：`payout`（`request` 申请并冻住待付 / `settle` 平台主动清算，一步建单并记账，直接落已批准 / `approve` 批准 / `reject` 驳回并解除冻结 / `paid` 打款，只放行已批准的单子）；支付通道：`payment`（`create` 下单 / `status` 查单，通道确认收款后才入账） |

@@ -293,7 +293,7 @@ func TestFishCompletionMarksValueFlags(t *testing.T) {
 	}{
 		{
 			name: "吃取值的选项带 -r",
-			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l schedule-file -r",
+			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from add' -l schedule-file -r",
 			want: true,
 		},
 		{
@@ -470,7 +470,7 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 		{"--format 补取值", []string{"--format"}, func(t *testing.T, shell string, got []string) {
 			requireEnumCandidates(t, shell, got, []string{"table", "json"})
 		}, ""},
-		{"--scope 补取值", []string{"price", "create", "--scope"}, func(t *testing.T, shell string, got []string) {
+		{"--scope 补取值", []string{"price", "add", "--scope"}, func(t *testing.T, shell string, got []string) {
 			requireEnumCandidates(t, shell, got, []string{"platform", "merchant", "channel"})
 		}, ""},
 		{"顶层补命令", nil, func(t *testing.T, _ string, got []string) {
@@ -514,7 +514,7 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 		{"顶层 --env-file 取值位", []string{"--env-file"}, func(t *testing.T, shell string, got []string) {
 			requireFileFallback(t, shell, got)
 		}, ""},
-		{"子命令 --schedule-file 取值位", []string{"price", "create", "--schedule-file"},
+		{"子命令 --schedule-file 取值位", []string{"price", "add", "--schedule-file"},
 			func(t *testing.T, shell string, got []string) {
 				requireFileFallback(t, shell, got)
 			}, ""},
@@ -1026,7 +1026,7 @@ func TestFishCompletionValueFlagOffersFiles(t *testing.T) {
 		name  string
 		words []string
 	}{
-		{"自有选项 --schedule-file", []string{"price", "create", "--schedule-file"}},
+		{"自有选项 --schedule-file", []string{"price", "add", "--schedule-file"}},
 		{"全局选项 --env-file", []string{"--env-file"}},
 	}
 	for _, tc := range cases {

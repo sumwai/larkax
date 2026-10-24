@@ -28,7 +28,7 @@ func TestPriceCreateRejectsBadFlags(t *testing.T) {
 		want string
 	}{
 		{"没有 --scope", []string{"--name", "n1", "--expr", testExpr}, "缺少 --scope"},
-		{"没有 --name", []string{"--scope", "platform", "--expr", testExpr}, "缺少 --name"},
+		{"没有规则名", []string{"--scope", "platform", "--expr", testExpr}, "缺少规则名"},
 		{"没有 --expr", []string{"--scope", "platform", "--name", "n1"}, "缺少 --expr"},
 		// --by 必填：它记的是这条价是谁定的，而一条不记名的写入等于没有审计。
 		// 判据取「缺了」与「给了空串」两种写法——空串多半是一个没展开的变量，
@@ -47,9 +47,9 @@ func TestPriceCreateRejectsBadFlags(t *testing.T) {
 			"--scope", "platform", "--name", "n1", "--expr", testExpr, "--by", "ops",
 			"--effective-from", "2026-01-01",
 		}, "RFC3339"},
-		{"多出位置参数", []string{
+		{"规则名写在旗标后面", []string{
 			"--scope", "platform", "--name", "n1", "--expr", testExpr, "extra",
-		}, "不接受位置参数"},
+		}, "不接受多余的参数"},
 	}
 
 	for _, tc := range cases {
@@ -195,7 +195,7 @@ func TestPriceUpdateRejectsBadFlags(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"没有 --id", []string{"--priority", "3"}, "缺少 --id"},
+		{"没有定位符", []string{"--priority", "3"}, "缺少要改的规则"},
 		{"没有 --by", []string{"--id", "1", "--priority", "3"}, "缺少 --by"},
 		{"--by 是空串", []string{"--id", "1", "--priority", "3", "--by", "  "}, "缺少 --by"},
 		{"没有要改的字段", []string{"--id", "1", "--by", "ops"}, "至少要改一项"},
@@ -218,7 +218,7 @@ func TestPriceUpdateRejectsBadFlags(t *testing.T) {
 		{"--effective-from 不是 RFC3339", []string{
 			"--id", "1", "--by", "ops", "--effective-from", "2026-01-01",
 		}, "RFC3339"},
-		{"多出位置参数", []string{"--id", "1", "--priority", "3", "extra"}, "不接受位置参数"},
+		{"多出位置参数", []string{"--id", "1", "--priority", "3", "extra"}, "不接受多余的参数"},
 	}
 
 	for _, tc := range cases {
@@ -778,7 +778,7 @@ func TestPriceWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
 		command string
 		run     func() error
 	}{
-		{"price create", func() error { return runPriceCreate(nil) }},
+		{"price add", func() error { return runPriceCreate(nil) }},
 		{"price update", func() error { return runPriceUpdate(nil) }},
 	}
 
@@ -795,5 +795,199 @@ func TestPriceWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
 				t.Errorf("退出码 = %d，期望参数错的 %d", got, exitUsage)
 			}
 		})
+	}
+}
+
+// ── 位置参数、缺省写 0、按名字定位 ────────────────────────────────────────
+
+// TestPriceAddPositionalNameLandsTheSameExpression 钉住「规则名走位置参数」与
+// 「单价缺省写 0」两件事落到库里的结果是同一份。
+//
+// 两种写法建两条规则，逐字比库里的表达式：
+//
+//	<规则名> --in 1.5                 位置参数 + 短旗标
+//	--name <规则名> --prompt 1.5      旧写法：--name + 旧长名
+//
+// 期望值是写死的字面量。**这条用例不叫「旧写法行为不变」**：库里那一栏本来就
+// 会变——旧写法以前落的是只有 prompt 一项的表，现在五项齐全、其余写 0。变的是
+// 「漏项」这件事的处理方式（见 priceUsage 里那段），不是单位换算。
+func TestPriceAddPositionalNameLandsTheSameExpression(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	by := createTestUserID(t)
+	model := uniqueName("model")
+
+	positionalName := uniqueName("rule")
+	positionalID := addPriceRule(t, []string{
+		positionalName, "--scope", "platform",
+		"--models", model, "--in", "1.5", "--by", by,
+	})
+	legacyName := uniqueName("rule")
+	legacyID := addPriceRule(t, []string{
+		"--scope", "platform", "--name", legacyName,
+		"--models", model, "--prompt", "1.5", "--by", by,
+	})
+
+	const want = `{"prompt": 0.0000015, "completion": 0, "cache_read": 0, ` +
+		`"cache_write": 0, "reasoning": 0}`
+	rules := listRules(t, db)
+	if got := findRule(t, rules, positionalID).Expr; got != want {
+		t.Errorf("位置参数写法落库的表达式 = %s\n期望 %s", got, want)
+	}
+	if got := findRule(t, rules, legacyID).Expr; got != want {
+		t.Errorf("--name + --prompt 写法落库的表达式 = %s\n期望 %s", got, want)
+	}
+	if got := findRule(t, rules, positionalID).Name; got != positionalName {
+		t.Errorf("规则名 = %q，期望 %q", got, positionalName)
+	}
+}
+
+// TestPriceAddNameAndOperandMustAgree 钉住位置参数与 --name 的两种给法：
+// 同值取位置参数，异值报错。
+//
+// 异值时静默取其中一个的表现是「我明明改了名字，落库的还是旧的」，而那是一次
+// 成功退出、库里没有那条新名字的写入。
+func TestPriceAddNameAndOperandMustAgree(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	by := createTestUserID(t)
+	model := uniqueName("model")
+
+	same := uniqueName("rule")
+	id := addPriceRule(t, []string{
+		same, "--scope", "platform", "--name", same,
+		"--models", model, "--in", "1", "--by", by,
+	})
+	if got := findRule(t, listRules(t, db), id).Name; got != same {
+		t.Errorf("同值两处给时规则名 = %q，期望 %q", got, same)
+	}
+
+	r := runOnce(t, runPrice, []string{
+		uniqueName("rule"), "--scope", "platform", "--name", uniqueName("rule"),
+		"--models", model, "--in", "1", "--by", by,
+	})
+	if r.err == nil {
+		t.Fatalf("位置参数与 --name 给两个不同的名字应当报错，实际通过")
+	}
+	if !strings.Contains(r.err.Error(), "两个不同的值") {
+		t.Errorf("错误信息里该点出两处给了不同的值：%v", r.err)
+	}
+	if got := exitCode(r.err); got != exitUsage {
+		t.Errorf("退出码 = %d，期望参数错的 %d", got, exitUsage)
+	}
+}
+
+// TestPriceUpdateLocatesByName 钉住 update 按名字定位。
+//
+// 只改一条自己的规则：别的用例建的规则名与它不同，命中唯一。
+func TestPriceUpdateLocatesByName(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	by := createTestUserID(t)
+	name := uniqueName("rule")
+	id := addPriceRule(t, []string{
+		name, "--scope", "platform", "--models", uniqueName("model"),
+		"--expr", testExpr, "--by", by,
+	})
+
+	_, _ = captureStreams(t, func() {
+		if err := runPriceUpdate([]string{name, "--priority", "7", "--by", by}); err != nil {
+			t.Fatalf("按名字 update 失败: %v", err)
+		}
+	})
+	if got := findRule(t, listRules(t, db), id).Priority; got != 7 {
+		t.Errorf("按名字定位之后优先级 = %d，期望 7", got)
+	}
+}
+
+// TestPriceUpdateLocatorAmbiguityListsCandidates 钉住重名时列候选、不猜。
+//
+// 三条同名规则分别落在两个作用域上：挑一条改等于在三条里随便选一条改价，
+// 而命令照样成功退出。所以命中多条时必须报错，并把作用域、商家、渠道、
+// 优先级一起打出来——运营看到三条同名的要能挑。
+func TestPriceUpdateLocatorAmbiguityListsCandidates(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	by := createTestUserID(t)
+	ownerA := createTestUser(t)
+	ownerB := createTestUser(t)
+	// 名字带上 base 与序号：同一个库上跑第二次也不会撞上上一次留下的同名规则。
+	name := uniqueName("dup")
+
+	platformID := addPriceRule(t, []string{
+		name, "--scope", "platform", "--models", uniqueName("model"), "--expr", testExpr,
+		"--priority", "3", "--by", by,
+	})
+	merchantA := addPriceRule(t, []string{
+		name, "--scope", "merchant", "--user", strconv.FormatInt(ownerA, 10),
+		"--models", uniqueName("model"), "--expr", testExpr, "--by", by,
+	})
+	merchantB := addPriceRule(t, []string{
+		name, "--scope", "merchant", "--user", strconv.FormatInt(ownerB, 10),
+		"--models", uniqueName("model"), "--expr", testExpr, "--by", by,
+	})
+
+	r := runOnce(t, runPrice, []string{name, "--priority", "5", "--by", by})
+	if r.err == nil {
+		t.Fatalf("同名三条时按名字定位应当报错，实际通过")
+	}
+	msg := r.err.Error()
+	for _, want := range []string{
+		"3 条", name,
+		// 候选里要能看到作用域与商家：只有 ID 时运营还得自己去 list 里找。
+		"platform", "merchant",
+		strconv.FormatInt(ownerA, 10), strconv.FormatInt(ownerB, 10),
+		// 优先级那一栏：三条同名规则里要挑一条，光有 ID 不够。
+		"优先级",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("候选清单里该有 %q：%v", want, r.err)
+		}
+	}
+	for _, id := range []int64{platformID, merchantA, merchantB} {
+		if !strings.Contains(msg, "ID="+strconv.FormatInt(id, 10)) {
+			t.Errorf("候选清单里该有规则 %d：%v", id, r.err)
+		}
+	}
+	// 一条都没被改：报错发生在写入之前。
+	for _, id := range []int64{platformID, merchantA, merchantB} {
+		if got := findRule(t, listRules(t, db), id).Priority; got == 5 {
+			t.Errorf("规则 %d 的优先级被改成了 5：重名时不该改任何一条", id)
+		}
+	}
+
+	// 给 --scope 收窄到唯一一条之后能改：那正是「同名跨作用域」的处置办法。
+	_, _ = captureStreams(t, func() {
+		if err := runPriceUpdate([]string{
+			name, "--scope", "platform", "--priority", "5", "--by", by,
+		}); err != nil {
+			t.Fatalf("带 --scope 收窄之后 update 失败: %v", err)
+		}
+	})
+	if got := findRule(t, listRules(t, db), platformID).Priority; got != 5 {
+		t.Errorf("平台那条的优先级 = %d，期望 5", got)
+	}
+	for _, id := range []int64{merchantA, merchantB} {
+		if got := findRule(t, listRules(t, db), id).Priority; got == 5 {
+			t.Errorf("商家规则 %d 也被改了：--scope 没起到收窄的作用", id)
+		}
+	}
+}
+
+// TestPriceUpdateIDAndLocatorMustAgree 钉住 --id 与位置参数只能给一处。
+func TestPriceUpdateIDAndLocatorMustAgree(t *testing.T) {
+	requireDB(t)
+	setupEnv(t)
+
+	r := runOnce(t, runPrice, []string{"7", "--id", "9", "--priority", "3", "--by", "ops"})
+	if r.err == nil {
+		t.Fatalf("位置参数与 --id 给两个不同的 ID 应当报错，实际通过")
+	}
+	if !strings.Contains(r.err.Error(), "两个不同的值") {
+		t.Errorf("错误信息里该点出两处给了不同的值：%v", r.err)
 	}
 }

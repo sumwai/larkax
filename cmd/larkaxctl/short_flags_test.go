@@ -200,6 +200,49 @@ func TestShortAndLegacyFlagAliasesParseIdentically(t *testing.T) {
 			canonical: []string{"--id", "5", "--by", "9", "--clear-effective-to"},
 			alias:     []string{"--id", "5", "--by", "9", "--no-expire"},
 		},
+		// ── price：五个单价项的短名与旧长名 ────────────────────────────────
+		//
+		// 每一对都带着另外四项给同样的值，比的是「这一项的两种写法落在同一个
+		// 格子上」。只给一项的话，两个请求会因为「另一项缺省写 0」而看上去相同
+		// 却来自不同的解析路径，那条用例就钉不住别名本身。
+		{
+			name:  "price add 的 --in 同 --prompt",
+			parse: any2(parsePriceCreate),
+			canonical: []string{"n", "--scope", "platform", "--by", "9",
+				"--in", "1.5", "--out", "7.5"},
+			alias: []string{"n", "--scope", "platform", "--by", "9",
+				"--prompt", "1.5", "--out", "7.5"},
+		},
+		{
+			name:  "price add 的 --out 同 --completion",
+			parse: any2(parsePriceCreate),
+			canonical: []string{"n", "--scope", "platform", "--by", "9",
+				"--in", "1.5", "--out", "7.5"},
+			alias: []string{"n", "--scope", "platform", "--by", "9",
+				"--in", "1.5", "--completion", "7.5"},
+		},
+		{
+			name:  "price add 的 --cr 同 --cache-read",
+			parse: any2(parsePriceCreate),
+			canonical: []string{"n", "--scope", "platform", "--by", "9",
+				"--in", "1.5", "--cr", "0.2"},
+			alias: []string{"n", "--scope", "platform", "--by", "9",
+				"--in", "1.5", "--cache-read", "0.2"},
+		},
+		{
+			name:  "price add 的 --cw 同 --cache-write",
+			parse: any2(parsePriceCreate),
+			canonical: []string{"n", "--scope", "platform", "--by", "9",
+				"--in", "1.5", "--cw", "1.9"},
+			alias: []string{"n", "--scope", "platform", "--by", "9",
+				"--in", "1.5", "--cache-write", "1.9"},
+		},
+		{
+			name:      "price update 的 --in 同 --prompt",
+			parse:     any2(parsePriceUpdate),
+			canonical: []string{"5", "--by", "9", "--in", "1.5"},
+			alias:     []string{"5", "--by", "9", "--prompt", "1.5"},
+		},
 
 		// ── alias：-m / --canonical ────────────────────────────────────────
 		{

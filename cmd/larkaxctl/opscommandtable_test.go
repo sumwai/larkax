@@ -66,7 +66,7 @@ type opsClause struct {
 var legacyOpsVerbs = map[string]map[string]string{
 	"model":    {"add": "create", "show": "get"},
 	"alias":    {"add": "create"},
-	"price":    {"add": "create"},
+	"price":    {"create": "add"},
 	"wallet":   {"open": "create"},
 	"snapshot": {"show": "get"},
 }
