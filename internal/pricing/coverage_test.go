@@ -86,3 +86,37 @@ func TestUncoveredScheduleTokenItemsNamesMissing(t *testing.T) {
 		}
 	}
 }
+
+// TestUncoveredTokenItemsIgnoresUnreferencedLetTable 检查 #1153：提示读的是
+// 结果位置能到达的键，不是「遍历到的每张表」。
+//
+// m 里没被结果引用的 completion 没有单价，结算真的会失败，所以提示必须把
+// 它算成缺项——#1153 之前它被算作已覆盖，于是提示说「齐全」，事故只在数据面出现。
+func TestUncoveredTokenItemsIgnoresUnreferencedLetTable(t *testing.T) {
+	missing, err := UncoveredTokenItems(
+		`let m = {"prompt": 0.0000015, "completion": 0.0000075}; {"prompt": m["prompt"]}`)
+	if err != nil {
+		t.Fatalf("规则应当能编译：%v", err)
+	}
+	want := []string{"completion", "cache_read", "cache_write", "reasoning"}
+	if strings.Join(missing, ",") != strings.Join(want, ",") {
+		t.Fatalf("缺项 = %v，期望 %v（prompt 被引用了，completion 只躺在绑定里）", missing, want)
+	}
+}
+
+// TestUncoveredTokenItemsFollowsReferencedBinding 是上一条的另一半。
+//
+// 绑定的表被结果**整张引用**时，里面的键照样算覆盖——收窄的是「没人引用的
+// 表」，不是「所有 let 里的表」。只检查收窄那一半的话，一个「见 let 就跳过」
+// 的实现也能通过。
+func TestUncoveredTokenItemsFollowsReferencedBinding(t *testing.T) {
+	missing, err := UncoveredTokenItems(
+		`let m = {"prompt": 0.0000015, "completion": 0.0000075}; m`)
+	if err != nil {
+		t.Fatalf("规则应当能编译：%v", err)
+	}
+	want := []string{"cache_read", "cache_write", "reasoning"}
+	if strings.Join(missing, ",") != strings.Join(want, ",") {
+		t.Fatalf("缺项 = %v，期望 %v（绑定的表就是结果，两项都写了）", missing, want)
+	}
+}

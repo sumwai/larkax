@@ -764,7 +764,8 @@ type RuleInfo struct {
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 
-	// DeclaredKeys 是表达式里写过的键（见 expr.Program.Keys），已排序。
+	// DeclaredKeys 是结果位置上写过的键（见 expr.Program.Keys），已排序。
+	// 就是说：能成为结果的那几张表里的键；let 绑定里没被结果引用的表不算。
 	//
 	// 它回答的是运维真正会问的那个问题：「这条规则收了哪几项的钱」。
 	// 空数组意味着这条规则一项单价都没写——那时每一笔都按 0 元计，而结算

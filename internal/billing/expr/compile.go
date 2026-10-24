@@ -77,20 +77,39 @@ type Program struct {
 	prog *vm.Program
 	// worst 是「所有分支取最高价」版本的字节码（见 EvalWorstCase）。
 	worst *vm.Program
-	// keys 是结果里出现过的键的并集（所有三元分支一起看）。
+	// keys 是**结果位置**上出现过的键的并集（所有三元分支一起看）。
 	//
 	// 并集而不是按分支分别校验，是有意的：预留与结算可能走不同的分支，
 	// 若只看实际命中的那一支，「未命中的分支写错了键」会一直躲过校验，
 	// 直到某天订单真的走进那一支才炸。按并集校验把这个错误提前到编译期。
 	//
+	// 收的是「结果位置能到达的表」，不是「遍历到的每张表」。区别在两处：
+	//
+	//	let m = {"prompt": 1.5, "completion": 2.0}; {"prompt": m["prompt"]}
+	//	({"prompt": 9.9}; {"completion": 2.0})
+	//
+	// 前者 m 里没用到的 completion、后者被丢弃的中间式里的 prompt，都不进
+	// 并集——它们成不了任何一次结算的 Declared，进了并集只会让 price list 的
+	// declared_keys 与写入提示说「覆盖齐全」，而结算按命中那张表的声明报缺价。
+	// 没命中的**分支**仍然进并集：那是并集要防的另一件事（见 walkShape 的
+	// MapNode 分支与 checkBranchTokenKeys）。形状校验不受影响——那些表照旧
+	// 走完全部检查，收窄的只是收集。
+	//
 	// 并集里 token 计价项在根位置三元的**两支之间**是一致的（见
 	// checkBranchTokenKeys），所以这些键不会因为命中了哪一支而少。
 	// units / fixed / minimum 可以只在某些分支出现，它们的并集比单次结算宽
 	// ——那是有意的，见 worstTable。
+	//
+	// EvalWorstCase 不读这份键集：最坏情况走另一份字节码，由 worstTable 自己
+	// 按键取并集（见 worst.go）。所以这份并集收窄只动展示与诊断，不动上界。
 	keys map[string]struct{}
 }
 
-// Keys 返回结果里出现过的键，已排序。用于展示与诊断。
+// Keys 返回结果位置上出现过的键，已排序。用于展示与诊断。
+//
+// 它可能比某一次结算的 Declared 宽：units / fixed / minimum 只在部分分支写，
+// 没命中的分支也算在内。但它不会宽在「结果引用不到的表」上——那些表不会成为
+// 任何一次结算的 Declared，见 Program.keys。
 func (p *Program) Keys() []string {
 	out := make([]string, 0, len(p.keys))
 	for k := range p.keys {
@@ -309,7 +328,8 @@ var blockedBuiltins = map[string]struct{}{
 
 // shape 是规则结果的形状检查结果。
 type shape struct {
-	// keys 是所有三元分支里出现过的键的并集。
+	// keys 是结果位置上出现过的键的并集（所有三元分支一起看）。
+	// 只有能成为结果的那张表才贡献键，见 Program.keys。
 	keys map[string]struct{}
 	// binds 是 let 绑定：名字 → 绑定值所在的 AST 节点。
 	//
@@ -362,6 +382,11 @@ func inspectShape(root ast.Node) (shape, error) {
 type pos struct {
 	// root 为 true 表示这个节点**本身**必须是单价表或条件，
 	// 不能是一个裸的数值——`len <= 1 ? {...} : 2.0` 这种写法要在这里被拦住。
+	//
+	// 它同时是「这个子树能不能成为结果」的标记，键只从置了它的表里收
+	// （见 walkShape 的 MapNode 分支）。两件事共用一个字段是有意的：它们
+	// 问的是同一个问题，分成两个字段就得在每个入口同时传对，漏一个不会报错，
+	// 只会让「校验看到了、收集没收到」，那正是 #1153 要消灭的分叉。
 	root bool
 	// slot 非空表示它在单价表的一个具名槽里（键名，或计量项名）。
 	// 这种位置允许数值运算，但不允许再出现一张表。
@@ -412,7 +437,24 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 			if _, known := priceSlots[name]; !known {
 				return fmt.Errorf("未知的键 %q；可用的键是 %s", name, slotList())
 			}
-			sh.keys[name] = struct{}{}
+			// 只有**结果位置**的表才贡献键（at.root 就是那个标记，见 pos）。
+			//
+			//	let m = {"prompt": 1.5, "completion": 2.0}; {"prompt": m["prompt"]}
+			//
+			// 结果表只引用了 prompt，m 里没用到的 completion 不该进 Keys()：
+			// 它成不了任何一次结算的 Declared，进了并集只会让 price list 与
+			// 写入提示说「覆盖齐全」，而结算按命中那张表的声明报缺价。
+			// 语句序列里被丢弃的中间式同理。
+			//
+			// 这条判据**只收窄收集，不放松校验**：下面这些检查（未知键、
+			// 槽位、units 的形状、用量变量的位置）对每一张表照旧全跑，
+			// 无论它最终成不成得了结果。
+			//
+			// 三元的两个分支仍走在 root 位置，所以没命中的分支照样进并集：
+			// 「未走到的分支里写错键要在编译期暴露」那条原意不变。
+			if at.root {
+				sh.keys[name] = struct{}{}
+			}
 			if name == "units" {
 				if err := walkUnits(pair.Value, sh); err != nil {
 					return err
@@ -458,8 +500,8 @@ func walkShape(node ast.Node, sh *shape, at pos) error {
 			return err
 		}
 		// 根位置选出的是**整张**单价表，而结算只认命中那一支的键
-		// （billing.Prices.Declared）；Program.Keys 却是所有分支的并集。
-		// 两支的 token 计价项不同时，两处口径就分岔：
+		// （billing.Prices.Declared）；Program.Keys 却是结果位置上所有分支的
+		// 并集（见 Program.keys）。两支的 token 计价项不同时，两处口径就分岔：
 		//
 		//	c > 100 ? {"prompt": 1.5, "completion": 7.5} : {"prompt": 1.5}
 		//

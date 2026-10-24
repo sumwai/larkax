@@ -163,7 +163,8 @@ type CostInfo struct {
 	EffectiveTo *time.Time
 	CreatedAt   time.Time
 
-	// DeclaredKeys 是表达式里写过的键（见 expr.Program.Keys），已排序。
+	// DeclaredKeys 是结果位置上写过的键（见 expr.Program.Keys），已排序。
+	// 就是说：能成为结果的那几张表里的键；let 绑定里没被结果引用的表不算。
 	//
 	// 它回答的是「这条成本规则算了哪几项」。空数组意味着它一项都没写——
 	// 那种规则在结算时覆盖不了这次用量的计价项，billing.ValidateCharges 会
