@@ -76,11 +76,17 @@ func TestNormalizeCanonicalName(t *testing.T) {
 	}
 }
 
-// 严格版建在宽松版之上：同一个输入在两处得到**逐字相同**的规整结果。
+// Delete 认的名字与写入侧存的名字是同一个：同一个输入交给严格版与宽松版，
+// 两处得到**逐字相同**的规整结果。
+//
+// 它证明的是两个入口对**两版都接受的**输入给出同一个答案，不是严格版
+// 在实现上建在宽松版之上——共用底座看的是 normalizeCanonicalName 里
+// 调用 normalizeExistingCanonicalName 的那一句；把那一句换成一份会分岔的
+// 内联实现、而两版仍给出同样答案，这条用例不会红。
 //
 // 两份各自 trim 时返回值一样只是碰巧，没有东西挡得住它们以后分岔；这条
 // 用例红，说明 Delete 认的名字与写入侧存的名字已经不是同一个。
-func TestNormalizeCanonicalNameSharesLenientBase(t *testing.T) {
+func TestNormalizeCanonicalNameAgreesWithLenient(t *testing.T) {
 	for _, input := range []string{"  alpha ", "vendor/alpha", "\talpha\n"} {
 		strict, err := normalizeCanonicalName(input)
 		if err != nil {
