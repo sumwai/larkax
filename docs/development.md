@@ -2115,6 +2115,38 @@ if got := score(selfAccountingStaleAfter); got != baseScore { ... }
 用例照样通过——测的是「相对关系」而不是这个数。要钉住一个数就用字面量：
 `score(14 * time.Minute)`。
 
+### 报一个变异体数量时带上三样
+
+汇总表里每一列的意义都取决于它是怎么跑出来的。报任何一个变异体数量——写进 issue、
+PR 描述或提交信息里时——同时给出下面三样，否则读的人会把同一个量当成另一个量：
+
+1. **列名**：`killed`、存活、超时、`Not covered` 里的哪一列，照表头抄。
+   改写成「杀掉的比例」「覆盖数」这类近义说法，就失去了对账的锚点。
+2. **口径**：整包，还是只变异改动涉及的生产文件（`LARKAX_MUTATION_SCOPE=narrow`，
+   由 `--changed-from` / `--changed-files` 触发；CI 的 PR 自动轮是后者）。
+   收窄时四个计数列都只覆盖参与变异的那些文件。
+3. **变异器集合**：是否打开了 `--invert-logical`（gremlins 默认关闭，
+   `scripts/check-mutation.sh` 在 `EXTRA_MUTATOR_FLAGS` 里显式打开），
+   以及 gremlins 的版本——两者共同决定变异体总数，也就是 efficacy 的分母。
+   脚本每次运行打的那行「这把尺子」写的就是后两样，报数时一并贴上。
+
+四种读法都出自「同一个量被当成另一个量」，不是算术错：
+
+- **`killed` 不是候选总数。** 候选是 `killed`、存活、超时与 `Not covered`
+  四个数之和，`killed` 只是其中被杀掉的那一列。
+- **整包口径的候选总数不能与窄口径的 `killed` 相减。** 两个数覆盖的文件集合不同，
+  相减得到的「缺口」不是任何一轮的产出。
+- **一个位置可以挂多条变异体。** 同一个 `行:列` 上可能同时有
+  `CONDITIONALS_BOUNDARY` 与 `CONDITIONALS_NEGATION` 两条（`<` 改 `<=` 与改 `>=`），
+  所以数位置不等于数变异体；汇总表的数字是变异体数。
+- **两个变异器集合下的数不能并排比较。** 不开 `--invert-logical` 时 `a || b`
+  一个变异体都不生成，两边的分母不同，不是同一个包的两个样本。
+
+三样写全的样子（数见上文「一个分数要连着它的条件一起读」）：
+
+> 整包口径、gremlins v0.6.0、`--invert-logical` 已开：`internal/keyquota` 的
+> `killed` 是 2，存活 0，`Not covered` 6。
+
 ### 各包的现状
 
 由 `scripts/check-mutation.sh` 跑出。**下面每个数都连着这一轮的条件**——它们不是
