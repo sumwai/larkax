@@ -64,4 +64,5 @@
 | [46](lessons/46-filtered-aggregate-empty-is-null.md) | 带 `FILTER` 的聚合在空集上返回 NULL，不是 0——扫进非空 Go 类型会让整条查询失败 | 写带 `FILTER` 的聚合、给读侧加聚合列时 | 活 |
 | [47](lessons/47-insert-select-param-typed-as-text.md) | `INSERT ... SELECT` 的 select 列表里，参数推不出类型，按 text 处理 | 把 SQL 从 `VALUES` 改写成 `SELECT`、往 CTE 里搬参数时 | 活 |
 | [48](lessons/48-failing-test-uses-incidental-id.md) | 失败路径的用例用了「碰巧存在」的 id，被同包别的用例命中：整包绿、单跑红，且没有 SKIP | 写失败路径的用例、复核别人的「整包 ok」时 | 活 |
+| [49](lessons/49-help-text-not-man-page-gated.md) | `--help` 不进手页：帮助文案与 `docs/cli-reference.md` 是两份文本，没有一道门比对内容 | 改任何 `usage` 常量 / 帮助文案，或评审这类改动时 | 活 |
 | [49](lessons/49-mutant-count-needs-column-scope-mutators.md) | 报变异体数量不带列名、口径与变异器集合，同一个量会被当成另一个量 | 报或读变异分数之前 | 活 |
