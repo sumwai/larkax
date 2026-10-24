@@ -22,7 +22,7 @@ var userHelp = helpText{short: userShortUsage, long: userUsage}
 // userShortUsage 是 user 的短版：`-h` / `--help` 与参数写错时打的那一份。
 const userShortUsage = `larkaxctl user 管理用户，以及用户手里的订阅、钱包、Key 与用量。
 用法：
-  larkaxctl user create --name <用户名> [--email <邮箱>] [--role <角色>] [--generate-password]
+  larkaxctl user add <用户名> [--email <邮箱>] [--role <角色>] [--generate-password]
   larkaxctl user list [--status <状态>] [--role <角色>]
   larkaxctl user get --user <ID 或用户名>
   larkaxctl user inspect <用户>                      账号、钱包、订阅、扣费顺序与 Key（只读）
@@ -35,7 +35,7 @@ const userShortUsage = `larkaxctl user 管理用户，以及用户手里的订�
   larkaxctl user wallet {show|credit|adjust|refund}  该用户的钱包
   larkaxctl user key    {list|create|plans}          该用户的 API Key
   larkaxctl user usage  {events|requests}            该用户的用量与计费
-create 只把新用户的 ID 打到 stdout；用户名与邮箱在连库之前判形状，不合格报参数错。
+add 只把新用户的 ID 打到 stdout；用户名也可写成 --name，旧动词 create 照旧可用。
 update 只改显式给出的字段；delete request 打标（可撤），revert 撤回，purge 匿名化（要 --confirm）。
 plan / wallet / key / usage 的核心宾语写成位置参数，其余边界见 larkaxctl help user。
 `
@@ -44,8 +44,8 @@ plan / wallet / key / usage 的核心宾语写成位置参数，其余边界见 
 const userUsage = `larkaxctl user 管理用户。
 
 用法：
-  larkaxctl user create --name <用户名> [--email <邮箱>] [--role <角色>]
-                        [--generate-password]
+  larkaxctl user add <用户名> [--email <邮箱>] [--role <角色>]
+                     [--generate-password]
   larkaxctl user list [--status <状态>] [--role <角色>]
   larkaxctl user get --user <ID 或用户名>
   larkaxctl user inspect <用户>
@@ -64,7 +64,13 @@ const userUsage = `larkaxctl user 管理用户。
 
 四个子组各自的动作与参数见 larkaxctl user <子组> help。
 
-create 建一个新用户，只把新用户的 ID 打到 stdout。
+add 建一个新用户，只把新用户的 ID 打到 stdout。
+
+**用户名是 add 的第一个位置参数**，位置参数必须写在旗标前面：
+  larkaxctl user add alice --email user@example.com --role merchant
+--name 仍然认，与位置参数同值时取位置参数，两处写的不是同一个名字时报错。
+旧动词 create 是 add 的别名，行为逐字相同（见下面的「旧名仍可用」）。
+用户名与邮箱在连库之前判形状，不合格报参数错。
 
 角色取 user、merchant、admin 之一，默认 user。三者都是用户，merchant 与 admin
 只是 users 表上的标记（admin 同时也是 merchant）。
@@ -102,7 +108,7 @@ a@example.com.、a@example（域名没有点）、a@-b.example.com 都报参数�
 半角的 A、西里尔文的同形字与拉丁字母都是**两个不同的值**，同一个人写两遍会并存成
 两条。
 
-**空邮箱不是格式错**：create 的 --email 给空串是不填这一列（库里是 NULL），
+**空邮箱不是格式错**：add 的 --email 给空串是不填这一列（库里是 NULL），
 update 的 --email 给空串是把它清回 NULL（见下面 update）。
 
 list 按 id 从小到大列出用户，一栏一个字段：ID、用户名、状态、角色、邮箱。
@@ -110,7 +116,7 @@ list 按 id 从小到大列出用户，一栏一个字段：ID、用户名、状
 两个筛选项都可以同时给，也可以都不给（不给就是列全部）：
 
   --status  取 active、suspended、banned 之一。
-  --role    取 user、merchant、admin 之一，按**称呼**逐字匹配，与 create 写进去的
+  --role    取 user、merchant、admin 之一，按**称呼**逐字匹配，与 add 写进去的
             那一个对应：--role merchant 列出的是称呼为 merchant 的用户，
             --role admin 列的是 admin（admin 同时也是 merchant，但两者在这里
             是两个不同的取值）。
@@ -169,7 +175,7 @@ merchant 的用户再 --merchant），那一行不会出现。用户不存在时
 --email 与 --display-name 的取值两头空白会被去掉，去掉之后是空串就清回 NULL；
 --status 也是先去两头空白再比对，但空串不认。
 
-create、list、get 与 update 只碰 users 表（不碰渠道凭证）；delete 那一族会写到
+add、list、get 与 update 只碰 users 表（不碰渠道凭证）；delete 那一族会写到
 api_keys、plugin_kv 与 capture_consents，并读钱包、channels 与账本的
 merchant_payable 科目。除了 plugin_kv 里属于这个用户的行，
 别的行都不删。它们都不需要 LARKAX_MASTER_KEYS。
@@ -230,11 +236,16 @@ stderr。口令从不作为命令行参数出现（进程列表可见），也�
 口令策略与登录侧同一份判据：12–128 个字符、不能等于用户名、不能有控制字符。
 从标准输入读时行尾的换行会被去掉（echo 管道最自然的写法就是带一个）。
 
-create --generate-password 在建号的同时设一个随机初始口令：stdout 那一行因此是
+add --generate-password 在建号的同时设一个随机初始口令：stdout 那一行因此是
 **口令**而不是用户 ID，ID 与用户名走 stderr。要接走 ID 的脚本不要带这个旗标。
 
 unlock 清掉一个账号的失败计数与锁定（连续失败 5 次后按指数锁定，上限 15 分钟）。
 它不动口令、不动会话：解锁只把「现在能不能试」恢复成默认，不改变谁能登录。
+
+# 旧名仍可用
+
+create 是 add 的旧名，行为逐字相同；--name 是第一个位置参数的旧写法。
+两者都留着是为了不让已经在跑的脚本与部署流程坏掉，新写的命令请用新名字。
 
 更细的约定见 docs/cli-reference.md 的「user」一节。
 `
@@ -248,7 +259,10 @@ const userTimeout = 30 * time.Second
 
 // userActions 是 user 的动作清单，补全从这里取。
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
-var userActions = []string{"create", "list", "get", "inspect", "update", "password", "unlock", "delete", "plan", "wallet", "key", "usage"}
+//
+// 建记录只写正式名 add：create 是它的旧名（见 userUsage 的「旧名仍可用」），
+// 旧名不占 Tab 的位置（与 price 同一条口径）。
+var userActions = []string{"add", "list", "get", "inspect", "update", "password", "unlock", "delete", "plan", "wallet", "key", "usage"}
 
 func runUser(args []string) error {
 	fs := newFlagSet("user", flag.ContinueOnError)
@@ -265,7 +279,9 @@ func runUser(args []string) error {
 	action, rest := rest[0], rest[1:]
 
 	switch action {
-	case "create":
+	case "add", "create":
+		// create 是 add 的旧名（见 userUsage 的「旧名仍可用」）。两个名字走同一
+		// 条路径，命令自己的名字按 add 报，免得在不支持 json 时说出旧名字。
 		return runUserCreate(rest)
 	case "list":
 		return runUserList(rest)
@@ -294,35 +310,52 @@ func runUser(args []string) error {
 	}
 }
 
+// userNameOperand 是 user add 的位置参数：用户名。
+var userNameOperand = operandSpec{
+	what:  "用户名",
+	flag:  "name",
+	usage: "写成第一个位置参数（larkaxctl user add <用户名> …）",
+}
+
 func runUserCreate(args []string) error {
-	if err := jsonUnsupported("user create"); err != nil {
+	// 命令名写正式名 add：jsonUnsupported 那句会把命令名打给人看，而 create
+	// 是旧写法（见 userUsage 的「旧名仍可用」）。
+	if err := jsonUnsupported("user add"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("user create", flag.ContinueOnError)
+	operand, rest, takeErr := takeLeadingOperand(args, userNameOperand)
+	if takeErr != nil {
+		return takeErr
+	}
+
+	fs := newFlagSet("user add", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
 	name := fs.String("name", "", "")
 	email := fs.String("email", "", "")
 	role := fs.String("role", string(auth.RoleUser), "")
 	generateInitialPassword := fs.Bool("generate-password", false, "")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(rest); err != nil {
 		return usageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("create 不接受位置参数，得到 %q：用户名用 --name 指定", fs.Arg(0)))
+		return usageErr(fmt.Errorf(
+			"add 不接受多余的参数，得到 %q：用户名要写成第一个位置参数，排在旗标前面", fs.Arg(0)))
+	}
+	given := visitedFlags(fs)
+	username, err := resolveOperand(operand, *name, given["name"], userNameOperand)
+	if err != nil {
+		return usageErr(err)
 	}
 
 	// 参数检查全部发生在连库之前（与 apikey create 同一条约定）：
 	// 一个写错的命令不该先连上生产库再报错，而「连上库之后才发现参数不对」
 	// 还有一个更坏的可能——它没报错。
-	if strings.TrimSpace(*name) == "" {
-		// 不打整段用法：人已经会用这条命令了，只是漏了一个必填项。
-		return usageErr(errors.New("缺少 --name"))
-	}
+	//
 	// 名字的形状也在这里判（判据在 auth，命令行与包认的是同一处，见
 	// auth.ValidateNewUsername）：纯数字的名字建得出来、读不回来，而这一条
 	// 不必连库就知道。放在连库之前还有一层：它挡的是一次注定要回滚的写入。
-	if err := auth.ValidateNewUsername(*name); err != nil {
+	if err = auth.ValidateNewUsername(username); err != nil {
 		return usageErr(err)
 	}
 	parsedRole, err := auth.ParseRole(*role)
@@ -331,8 +364,6 @@ func runUserCreate(args []string) error {
 	}
 	// 邮箱的形状同样在连库之前判（判据在 auth，见 auth.ValidateEmail）。空串是
 	// 「不填这一列」，不是格式错——判据放行它，这里也就不必分两种写法。
-	// 复用上面那个 err（这里不 `:=`）：新起一个会把外层这个名字遮掉，而外层那个
-	// 紧接着还要读（下面 cfg 那一处），遮出的是同一个名字的两个作用域。
 	if err = auth.ValidateEmail(*email); err != nil {
 		return usageErr(err)
 	}
@@ -361,7 +392,7 @@ func runUserCreate(args []string) error {
 
 	store := auth.New(db)
 	created, err := store.CreateUser(ctx, auth.CreateUserParams{
-		Username: *name,
+		Username: username,
 		Email:    *email,
 		Role:     parsedRole,
 	})
@@ -392,7 +423,7 @@ func runUserCreate(args []string) error {
 // 与 printCreatedKey 同一条契约：**stdout 恰好一行，只放能被直接接走的那个值**，
 // 其余信息走 stderr。这里要接走的是 ID——
 //
-//	larkaxctl apikey create --user "$(larkaxctl user create --name alice)"
+//	larkaxctl apikey create --user "$(larkaxctl user add alice)"
 //
 // 是造完用户之后最自然的下一步。那一行里多一个前缀或一句提示语，这条链就断了，
 // 而断了的表现是 apikey create 收到一个不是用户标识的字符串，报「找不到用户」。
@@ -915,7 +946,7 @@ func userUpdateResultMarkers(before auth.Role, p auth.UpdateUserParams) (isMerch
 // 而一个只在这一处出现的译文会让照着帮助写命令的人对不上。
 func printUserList(w io.Writer, users []auth.UserInfo) {
 	if len(users) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("用户", "user create"))
+		_, _ = fmt.Fprintln(w, emptyListNote("用户", "user add"))
 		return
 	}
 

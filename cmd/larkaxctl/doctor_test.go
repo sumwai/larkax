@@ -423,7 +423,7 @@ func TestDoctorWalletsFlagsEachCondition(t *testing.T) {
 			users: nil,
 			// 清单空状态那一句（style.go 的 emptyListNote）：用户清单是空的
 			// 与「用户清单没查」不能长得一样，而这一条正是前者。
-			want: []string{"暂无用户。可使用 larkaxctl user create 添加。"},
+			want: []string{"暂无用户。可使用 larkaxctl user add 添加。"},
 		},
 		{
 			name:  "用户没有钱包行",

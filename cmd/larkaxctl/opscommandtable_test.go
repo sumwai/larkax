@@ -64,9 +64,11 @@ type opsClause struct {
 // 这里挡的是同一件事在表这一侧的样子（表里不该出现旧写法，也不该因为旧写法
 // 消失而整行对不上）。
 var legacyOpsVerbs = map[string]map[string]string{
-	"model":    {"add": "create", "show": "get"},
+	"model":    {"create": "add", "show": "get"},
 	"alias":    {"add": "create"},
 	"price":    {"create": "add"},
+	"user":     {"create": "add"},
+	"plan":     {"create": "add"},
 	"wallet":   {"open": "create"},
 	"snapshot": {"show": "get"},
 }

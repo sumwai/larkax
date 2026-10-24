@@ -30,7 +30,7 @@
 
 | 顺序 | 取哪个 | 在哪儿配 | 什么时候生效 |
 |---|---|---|---|
-| 1 | 模型目录里登记的 `output_limit` | `larkaxctl model create` / `model update --output-limit` | 下一个请求 |
+| 1 | 模型目录里登记的 `output_limit` | `larkaxctl model add` / `model update --output-limit` | 下一个请求 |
 | 2 | 全局默认值（出厂 `65536`） | `larkaxctl settings set --key billing.max_output_tokens --value <token 数> --by <用户 ID 或用户名>` | 重启服务 |
 
 两条要说清楚：

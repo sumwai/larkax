@@ -75,29 +75,29 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from migrate; and not __fish_se
 complete -c larkaxctl -n '__fish_seen_subcommand_from migrate; and not __fish_seen_subcommand_from create down down-to status up up-to version' -a 'status'
 complete -c larkaxctl -n '__fish_seen_subcommand_from migrate; and not __fish_seen_subcommand_from create down down-to status up up-to version' -a 'version'
 complete -c larkaxctl -n '__fish_seen_subcommand_from migrate; and not __fish_seen_subcommand_from create down down-to status up up-to version' -a 'create'
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from alias create delete get list onboard trace update' -a 'create'
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from alias create delete get list onboard trace update' -a 'list'
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from alias create delete get list onboard trace update' -a 'get'
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from alias create delete get list onboard trace update' -a 'update'
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from alias create delete get list onboard trace update' -a 'delete'
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from alias create delete get list onboard trace update' -a 'onboard'
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from alias create delete get list onboard trace update' -a 'alias'
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from alias create delete get list onboard trace update' -a 'trace'
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from add alias delete get list onboard trace update' -a 'add'
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from add alias delete get list onboard trace update' -a 'list'
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from add alias delete get list onboard trace update' -a 'get'
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from add alias delete get list onboard trace update' -a 'update'
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from add alias delete get list onboard trace update' -a 'delete'
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from add alias delete get list onboard trace update' -a 'onboard'
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from add alias delete get list onboard trace update' -a 'alias'
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from add alias delete get list onboard trace update' -a 'trace'
 complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from alias; and not __fish_seen_subcommand_from add list remove' -a 'add'
 complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from alias; and not __fish_seen_subcommand_from add list remove' -a 'remove'
 complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from alias; and not __fish_seen_subcommand_from add list remove' -a 'list'
 complete -c larkaxctl -n '__fish_seen_subcommand_from partition; and not __fish_seen_subcommand_from check ensure' -a 'check'
 complete -c larkaxctl -n '__fish_seen_subcommand_from partition; and not __fish_seen_subcommand_from check ensure' -a 'ensure'
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from create disable enable get grant key list order subscriptions void' -a 'create'
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from create disable enable get grant key list order subscriptions void' -a 'list'
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from create disable enable get grant key list order subscriptions void' -a 'get'
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from create disable enable get grant key list order subscriptions void' -a 'enable'
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from create disable enable get grant key list order subscriptions void' -a 'disable'
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from create disable enable get grant key list order subscriptions void' -a 'grant'
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from create disable enable get grant key list order subscriptions void' -a 'void'
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from create disable enable get grant key list order subscriptions void' -a 'subscriptions'
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from create disable enable get grant key list order subscriptions void' -a 'key'
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from create disable enable get grant key list order subscriptions void' -a 'order'
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from add disable enable get grant key list order subscriptions void' -a 'add'
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from add disable enable get grant key list order subscriptions void' -a 'list'
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from add disable enable get grant key list order subscriptions void' -a 'get'
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from add disable enable get grant key list order subscriptions void' -a 'enable'
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from add disable enable get grant key list order subscriptions void' -a 'disable'
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from add disable enable get grant key list order subscriptions void' -a 'grant'
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from add disable enable get grant key list order subscriptions void' -a 'void'
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from add disable enable get grant key list order subscriptions void' -a 'subscriptions'
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from add disable enable get grant key list order subscriptions void' -a 'key'
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and not __fish_seen_subcommand_from add disable enable get grant key list order subscriptions void' -a 'order'
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from key; and not __fish_seen_subcommand_from set show' -a 'show'
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from key; and not __fish_seen_subcommand_from set show' -a 'set'
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from order; and not __fish_seen_subcommand_from set show' -a 'show'
@@ -147,18 +147,18 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost; and not __f
 complete -c larkaxctl -n '__fish_seen_subcommand_from usage; and not __fish_seen_subcommand_from events requests summary' -a 'events'
 complete -c larkaxctl -n '__fish_seen_subcommand_from usage; and not __fish_seen_subcommand_from events requests summary' -a 'requests'
 complete -c larkaxctl -n '__fish_seen_subcommand_from usage; and not __fish_seen_subcommand_from events requests summary' -a 'summary'
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from create delete get inspect key list password plan unlock update usage wallet' -a 'create'
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from create delete get inspect key list password plan unlock update usage wallet' -a 'list'
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from create delete get inspect key list password plan unlock update usage wallet' -a 'get'
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from create delete get inspect key list password plan unlock update usage wallet' -a 'inspect'
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from create delete get inspect key list password plan unlock update usage wallet' -a 'update'
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from create delete get inspect key list password plan unlock update usage wallet' -a 'password'
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from create delete get inspect key list password plan unlock update usage wallet' -a 'unlock'
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from create delete get inspect key list password plan unlock update usage wallet' -a 'delete'
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from create delete get inspect key list password plan unlock update usage wallet' -a 'plan'
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from create delete get inspect key list password plan unlock update usage wallet' -a 'wallet'
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from create delete get inspect key list password plan unlock update usage wallet' -a 'key'
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from create delete get inspect key list password plan unlock update usage wallet' -a 'usage'
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from add delete get inspect key list password plan unlock update usage wallet' -a 'add'
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from add delete get inspect key list password plan unlock update usage wallet' -a 'list'
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from add delete get inspect key list password plan unlock update usage wallet' -a 'get'
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from add delete get inspect key list password plan unlock update usage wallet' -a 'inspect'
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from add delete get inspect key list password plan unlock update usage wallet' -a 'update'
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from add delete get inspect key list password plan unlock update usage wallet' -a 'password'
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from add delete get inspect key list password plan unlock update usage wallet' -a 'unlock'
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from add delete get inspect key list password plan unlock update usage wallet' -a 'delete'
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from add delete get inspect key list password plan unlock update usage wallet' -a 'plan'
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from add delete get inspect key list password plan unlock update usage wallet' -a 'wallet'
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from add delete get inspect key list password plan unlock update usage wallet' -a 'key'
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and not __fish_seen_subcommand_from add delete get inspect key list password plan unlock update usage wallet' -a 'usage'
 complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from delete; and not __fish_seen_subcommand_from purge request revert' -a 'request'
 complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from delete; and not __fish_seen_subcommand_from purge request revert' -a 'revert'
 complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from delete; and not __fish_seen_subcommand_from purge request revert' -a 'purge'
@@ -294,24 +294,24 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from ledger; and __fish_seen_su
 complete -c larkaxctl -n '__fish_seen_subcommand_from ledger; and __fish_seen_subcommand_from verify' -l to -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from maintenance; and __fish_seen_subcommand_from idempotency' -l dry-run
 complete -c larkaxctl -n '__fish_seen_subcommand_from maintenance; and __fish_seen_subcommand_from session' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l audio
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l batch
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l cache
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l context-limit -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l display -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l endpoints -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l family -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l input-limit -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l input-modalities -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l knowledge-cutoff -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l model -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l output-limit -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l output-modalities -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l reasoning
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l release-date -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l tools
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l vendor -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from create' -l vision
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l audio
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l batch
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l cache
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l context-limit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l display -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l endpoints -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l family -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l input-limit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l input-modalities -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l knowledge-cutoff -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l model -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l output-limit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l output-modalities -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l reasoning
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l release-date -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l tools
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l vendor -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from add' -l vision
 complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from delete' -l model -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from get' -l model -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from onboard' -l channel -r
@@ -342,14 +342,14 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_sub
 complete -c larkaxctl -n '__fish_seen_subcommand_from model; and __fish_seen_subcommand_from update' -l vision
 complete -c larkaxctl -n '__fish_seen_subcommand_from partition; and __fish_seen_subcommand_from check' -l months -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from partition; and __fish_seen_subcommand_from ensure' -l months -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from create' -l asset
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from create' -l description -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from create' -l face-value -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from create' -l key -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from create' -l models -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from create' -l name -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from create' -l quota -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from create' -l unit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from add' -l asset
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from add' -l description -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from add' -l face-value -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from add' -l key -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from add' -l models -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from add' -l name -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from add' -l quota -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from add' -l unit -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from disable' -l key -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from enable' -l key -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from get' -l key -r
@@ -513,10 +513,10 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from usage; and __fish_seen_sub
 complete -c larkaxctl -n '__fish_seen_subcommand_from usage; and __fish_seen_subcommand_from summary' -l to -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from usage; and __fish_seen_subcommand_from summary' -l today
 complete -c larkaxctl -n '__fish_seen_subcommand_from usage; and __fish_seen_subcommand_from summary' -l user -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from create' -l email -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from create' -l generate-password
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from create' -l name -r
-complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from create' -l role
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from add' -l email -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from add' -l generate-password
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from add' -l name -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from add' -l role
 complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from delete; and __fish_seen_subcommand_from purge' -l confirm -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from delete; and __fish_seen_subcommand_from purge' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from delete; and __fish_seen_subcommand_from request' -l user -r
@@ -670,6 +670,7 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_s
 complete -c larkaxctl -n '__fish_seen_subcommand_from consent; and __fish_seen_subcommand_from grant' -l scope -x -a 'single_request time_window'
 complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l endpoint -x -a 'chat messages responses'
 complete -c larkaxctl -n '__fish_seen_subcommand_from ledger; and __fish_seen_subcommand_from balance' -l asset -x -a 'CNY'
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from add' -l asset -x -a 'CNY'
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from create' -l asset -x -a 'CNY'
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from void' -l status -x -a 'expired canceled'
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from add' -l scope -x -a 'platform merchant channel'
@@ -684,6 +685,7 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot; and __fish_seen_
 complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot; and __fish_seen_subcommand_from get' -l surface -x -a 'chat decision'
 complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot; and __fish_seen_subcommand_from redact' -l direction -x -a 'request response'
 complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot; and __fish_seen_subcommand_from redact' -l surface -x -a 'chat decision'
+complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from add' -l role -x -a 'user merchant admin'
 complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from create' -l role -x -a 'user merchant admin'
 complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from list' -l role -x -a 'user merchant admin'
 complete -c larkaxctl -n '__fish_seen_subcommand_from user; and __fish_seen_subcommand_from list' -l status -x -a 'active suspended banned'

@@ -23,18 +23,18 @@ var modelHelp = helpText{short: modelShortUsage, long: modelUsage}
 const modelShortUsage = `larkaxctl model 管理模型目录里的规范模型。
 
 用法：
-  larkaxctl model create --model <规范名> --display <展示名> [字段见下]
+  larkaxctl model add <规范名> [--display <展示名>] [字段见下]
   larkaxctl model list
   larkaxctl model get --model <规范名>
-  larkaxctl model update --model <规范名> [与 create 相同的字段]
+  larkaxctl model update --model <规范名> [与 add 相同的字段]
   larkaxctl model delete --model <规范名>
   larkaxctl model onboard <规范名> --channel <ID> --upstream <上游名>
                            --price-expr <表达式> --cost-expr <表达式> [--update] [--dry-run]
   larkaxctl model alias add|remove|list（入站别名）
   larkaxctl model trace <名字> [--channel <渠道 ID>]
 
-create / update 的字段：--vendor、--family、三个 limit、六个能力标志
-（--reasoning … --batch，各有三态）、--input-modalities 等。
+add / update 的字段：--vendor、--family、三个 limit、六个能力标志（各有三态）、--input-modalities 等。
+规范名也可写成 --model，旧动词 create 照旧可用；--display 缺省取规范名。
 
 规范名是选路与计费共用的键，建了就不能改；delete 只在无人引用时允许。
 更细的边界：larkaxctl help model。
@@ -48,15 +48,15 @@ create / update 的字段：--vendor、--family、三个 limit、六个能力标
 var modelUsage = `larkaxctl model 管理模型目录里的规范模型。
 
 用法：
-  larkaxctl model create --model <规范名> --display <展示名>
-                         [--vendor <厂商>] [--family <家族>]
-                         [--context-limit <tokens>] [--input-limit <tokens>]
-                         [--output-limit <tokens>]
-                         [--reasoning[=false]] [--tools[=false]] [--vision[=false]]
-                         [--audio[=false]] [--cache[=false]] [--batch[=false]]
-                         [--endpoints <端点路径,...>]
-                         [--input-modalities <模态,...>] [--output-modalities <模态,...>]
-                         [--knowledge-cutoff <YYYY-MM-DD>] [--release-date <YYYY-MM-DD>]
+  larkaxctl model add <规范名> [--display <展示名>]
+                      [--vendor <厂商>] [--family <家族>]
+                      [--context-limit <tokens>] [--input-limit <tokens>]
+                      [--output-limit <tokens>]
+                      [--reasoning[=false]] [--tools[=false]] [--vision[=false]]
+                      [--audio[=false]] [--cache[=false]] [--batch[=false]]
+                      [--endpoints <端点路径,...>]
+                      [--input-modalities <模态,...>] [--output-modalities <模态,...>]
+                      [--knowledge-cutoff <YYYY-MM-DD>] [--release-date <YYYY-MM-DD>]
   larkaxctl model list
   larkaxctl model get --model <规范名>
   larkaxctl model update --model <规范名>
@@ -81,8 +81,13 @@ var modelUsage = `larkaxctl model 管理模型目录里的规范模型。
 它上面。所以它不能带空白字符，也不能改（要换名字就建新名、把别名与规则挪过去、
 再删旧名）。update 与 delete 都按 --model 定位，它本身不可改。
 
-create 的 stdout 只有新模型的 ID，其余信息走 stderr。
-三个 limit 留空表示未知，负数会被拒绝。--display 必填，不会回落到规范名。
+add 的 stdout 只有新模型的 ID，其余信息走 stderr。
+三个 limit 留空表示未知，负数会被拒绝。--display 可省略，省略时展示名取规范名。
+
+**规范名是 add 的第一个位置参数**，位置参数必须写在旗标前面：
+  larkaxctl model add deepseek-v4.1-flash --vendor deepseek --tools --vision
+--model 仍然认（--canonical 与 -m 是它的旧写法与简写），与位置参数同值时取位置
+参数，两处写的不是同一个名字时报错。
 
 **六个能力标志各有三态**：不给 = 未知（库里是 NULL）、给 = 支持、
 --tools=false = 明确声明不支持。三者在选路时处置不同：未知与支持放行，
@@ -136,7 +141,7 @@ reasoning_options 与 raw 是采集来的原始元信息，命令行不写它们
 本来会做什么，末尾写「干跑：以上内容没有写进数据库。」，退出码 0。参数错与业务
 拒绝在干跑下同样报错、同样退出码。
 
-**旧名仍可用**：model add 与 model show 分别等同于 model create 与
+**旧名仍可用**：model create 与 model show 分别等同于 model add 与
 model get，--canonical 等同于 --model。它们保留是为了不让已经在跑的脚本与
 部署流程坏掉，行为与新名字逐字相同；新写的命令请用新名字。
 
@@ -144,7 +149,7 @@ model get，--canonical 等同于 --model。它们保留是为了不让已经在
 
 下面几个写法仍然可用，只是不再是正式写法（用法行里只写规范名）：
 
-  -m <规范名>              同 --model，create / get / update / delete 都认
+  -m <规范名>              同 --model，add / get / update / delete 都认
   --canonical <规范名>     同 --model
   --ctx <tokens>           同 --context-limit
   --in <tokens>            同 --input-limit
@@ -175,7 +180,10 @@ model get，--canonical 等同于 --model。它们保留是为了不让已经在
 
 // modelActions 是 model 的动作清单，补全从这里取。
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
-var modelActions = []string{"create", "list", "get", "update", "delete", "onboard", "alias", "trace"}
+//
+// 建记录只写正式名 add：create 是它的旧名（见 modelUsage 的「旧名仍可用」），
+// 旧名不占 Tab 的位置（与 price 同一条口径）。
+var modelActions = []string{"add", "list", "get", "update", "delete", "onboard", "alias", "trace"}
 
 func runModel(args []string) error {
 	if len(args) == 0 {
@@ -185,7 +193,9 @@ func runModel(args []string) error {
 	action, rest := args[0], args[1:]
 
 	switch action {
-	case "create", "add":
+	case "add", "create":
+		// create 是 add 的旧名（见 modelUsage 的「旧名仍可用」）。两个名字走同
+		// 一条路径，命令自己的名字按 add 报，免得在不支持 json 时说出旧名字。
 		return runModelCreate(rest)
 	case "list":
 		return runModelList(rest)
@@ -211,7 +221,9 @@ func runModel(args []string) error {
 }
 
 func runModelCreate(args []string) error {
-	if err := jsonUnsupported("model create"); err != nil {
+	// 命令名写正式名 add：jsonUnsupported 那句会把命令名打给人看，而 create
+	// 是旧写法（见 modelUsage 的「旧名仍可用」）。
+	if err := jsonUnsupported("model add"); err != nil {
 		return err
 	}
 
@@ -240,8 +252,22 @@ func runModelCreate(args []string) error {
 	return nil
 }
 
+// modelCanonicalOperand 是 model add 的位置参数：规范模型名。
+var modelCanonicalOperand = operandSpec{
+	what:  "规范名",
+	flag:  "model",
+	usage: "写成第一个位置参数（larkaxctl model add <规范名> …）",
+}
+
 func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
-	fs := newFlagSet("model create", flag.ContinueOnError)
+	// 规范名是第一个位置参数，且必须写在旗标前面：flag 包遇到第一个非旗标词就
+	// 停止解析，写在后面的一整段都会落进 NArg（下面按「多给了参数」报）。
+	operand, rest, takeErr := takeLeadingOperand(args, modelCanonicalOperand)
+	if takeErr != nil {
+		return catalog.CreateModelRequest{}, takeErr
+	}
+
+	fs := newFlagSet("model add", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
 	canonical := legacyStringFlag(fs, "model", "canonical", "")
 	stringAlias(fs, canonical, "m")
@@ -262,26 +288,31 @@ func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
 	stringAlias(fs, modalitiesOut, "om")
 	knowledgeCutoff := fs.String("knowledge-cutoff", "", "")
 	releaseDate := fs.String("release-date", "", "")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(rest); err != nil {
 		return catalog.CreateModelRequest{}, err
 	}
 	if fs.NArg() > 0 {
 		return catalog.CreateModelRequest{}, fmt.Errorf(
-			"create 不接受位置参数，得到 %q：规范名用 --model 指定", fs.Arg(0))
+			"add 不接受多余的参数，得到 %q：规范名要写成第一个位置参数，排在旗标前面", fs.Arg(0))
 	}
-
-	if strings.TrimSpace(*canonical) == "" {
-		return catalog.CreateModelRequest{}, errors.New("缺少 --model")
+	given := visitedFlags(fs)
+	canonicalName, nameErr := resolveOperand(
+		operand, *canonical, flagGiven(given, "model", "canonical", "m"), modelCanonicalOperand)
+	if nameErr != nil {
+		return catalog.CreateModelRequest{}, nameErr
 	}
-	if strings.TrimSpace(*display) == "" {
-		return catalog.CreateModelRequest{}, errors.New("缺少 --display")
+	// --display 不给（或给空串）时取规范名：catalog 的写入路径不替调用方回落
+	// （那里的判据是「展示名必须非空」），补这一格是命令行的事。
+	displayName := strings.TrimSpace(*display)
+	if displayName == "" {
+		displayName = canonicalName
 	}
 	// 这些值都会进 model list / get 的表格：控制字符在连库之前拒掉（判据在
 	// catalog 的写入路径，见 normalizeCanonicalName 一组）。
-	if err := checkDisplayText("--model（规范模型名）", strings.TrimSpace(*canonical)); err != nil {
+	if err := checkDisplayText("--model（规范模型名）", canonicalName); err != nil {
 		return catalog.CreateModelRequest{}, err
 	}
-	if err := checkDisplayText("--display（展示名）", strings.TrimSpace(*display)); err != nil {
+	if err := checkDisplayText("--display（展示名）", displayName); err != nil {
 		return catalog.CreateModelRequest{}, err
 	}
 	if err := checkDisplayText("--vendor（厂商）", strings.TrimSpace(*vendor)); err != nil {
@@ -315,7 +346,6 @@ func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
 	// = 未知——不是 false。「没配过」与「配了说不支持」的区分就从这一行开始，
 	// 判据是 fs.Visit 记下的清单（见 modelCapabilityFlag）。端点清单与那六项
 	// 同一组、同一套三态，所以一起收（见 capabilityEdit）。
-	given := visitedFlags(fs)
 	markGivenCapabilityFlags(given, capFlags)
 	edit, err := newCapabilityEdit(given, capFlags, *endpoints)
 	if err != nil {
@@ -323,8 +353,8 @@ func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
 	}
 
 	return catalog.CreateModelRequest{
-		CanonicalName:    *canonical,
-		DisplayName:      *display,
+		CanonicalName:    canonicalName,
+		DisplayName:      displayName,
 		Vendor:           *vendor,
 		Family:           *family,
 		ContextLimit:     *contextLimit,
@@ -903,7 +933,7 @@ func capabilityEntry(c catalog.Capabilities) map[string]any {
 // printModelList 打印目录里的规范模型。
 func printModelList(w io.Writer, models []catalog.Model) {
 	if len(models) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("模型", "model create"))
+		_, _ = fmt.Fprintln(w, emptyListNote("模型", "model add"))
 		return
 	}
 

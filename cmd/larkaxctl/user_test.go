@@ -31,10 +31,11 @@ func TestUserCreateRejectsBadFlags(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"没有 --name", []string{}, "缺少 --name"},
-		{"--name 为空", []string{"--name", ""}, "缺少 --name"},
-		{"--name 只有空白", []string{"--name", "   "}, "缺少 --name"},
-		{"多出位置参数", []string{"--name", "alice", "extra"}, "不接受位置参数"},
+		{"没有用户名", []string{}, "缺少用户名"},
+		{"--name 为空", []string{"--name", ""}, "用户名不能为空"},
+		{"--name 只有空白", []string{"--name", "   "}, "用户名不能为空"},
+		{"位置参数与 --name 不一致", []string{"alice", "--name", "bob"}, "两个不同的值"},
+		{"多出位置参数", []string{"--name", "alice", "extra"}, "不接受多余的参数"},
 		{"--role 不认识", []string{"--name", "alice", "--role", "root"}, "未知的角色"},
 		// 纯数字的名字建得出来、读不回来（`--user` 按 ID 解释它），所以在
 		// 连库之前就挡下来。两个都拦：不带空白的，与去掉空白之后是纯数字的。
