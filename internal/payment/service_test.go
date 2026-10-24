@@ -667,7 +667,7 @@ func TestMarkMethodsMoveCreatedOnlyOnce(t *testing.T) {
 	paidRows := make([]bool, 2)
 	if err := h.store.WithOrderLock(ctx, "ORD-MARK-PAID-1", func(ctx context.Context, locked *LockedOrder) error {
 		for i := range paidRows {
-			changed, markErr := locked.MarkPaid(ctx, "ORD-MARK-PAID-1", "TRADE-1", nil, paidAt, money.Zero)
+			changed, markErr := locked.MarkPaid(ctx, "ORD-MARK-PAID-1", stubName, "TRADE-1", nil, paidAt, money.Zero)
 			if markErr != nil {
 				return markErr
 			}

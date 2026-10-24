@@ -5,19 +5,56 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
 )
 
+// PostgreSQL 的唯一约束冲突错误码，与 00064 迁移里那条部分唯一索引的名字。
+//
+// 只认错误码不够——23505 只说明「某个唯一约束被违反」，分不出撞的是单号
+// （payment_orders_order_no_key）还是这条流水号索引。两者给人的下一步动作
+// 也不同：前者看下单参数，后者要人工核两张单。
+//
+// 名字硬编码自 internal/migrate/sql/00064_payment_orders_gateway_txn_unique.sql。
+// **改那条迁移就要同步改这里**，否则识别失效；失效的方向是安全的——认不出来
+// 就按原错误上抛，不会静默当成功，只是少一层分类。
+//
+// 下单那条路撞不上这条索引：INSERT 不写 gateway_txn_id（orderForCreate 也不设
+// 它），落库时这一列是 NULL，而索引只覆盖非空行。
+const (
+	pgUniqueViolation = "23505"
+	// paymentOrdersGatewayTxnUnique 是 (gateway, gateway_txn_id) 的部分唯一索引。
+	paymentOrdersGatewayTxnUnique = "payment_orders_gateway_txn_uniq_idx"
+)
+
 // Store 读写 payment_orders。它是这张表在 Go 侧唯一的入口。
 type Store struct {
 	db *sql.DB
+	// lookupConflict 按 (gateway, gateway_txn_id) 找出已经记下这个流水号的那张单。
+	//
+	// 默认查库（NewStore 里装上）。抽成字段是为了让「补查失败」那一格能只让这
+	// 一处失败：关掉共享的连接池会让同包后面的用例跟着报连接错误，而那种红看
+	// 起来像被测代码坏了。
+	//
+	// **必须经 NewStore 构造**：直接写 `Store{db: db}` 字面量时这个字段是 nil，
+	// 撞约束那一刻会 nil func panic——而那正是最需要说清楚原因的时刻。
+	lookupConflict conflictLookup
 }
 
+// conflictLookup 是补查对方单号的能力，签名与 Store.conflictingOrderNo 一致。
+type conflictLookup func(ctx context.Context, orderNo, gatewayTxnID string) (string, error)
+
 // NewStore 包装一个已打开的数据库句柄。
-func NewStore(db *sql.DB) *Store { return &Store{db: db} }
+func NewStore(db *sql.DB) *Store {
+	s := &Store{db: db}
+	s.lookupConflict = s.conflictingOrderNo
+	return s
+}
 
 // orderDB 是 *sql.DB 与 *sql.Tx 共有的读写能力。
 //
@@ -236,13 +273,26 @@ func (l *LockedOrder) Get(ctx context.Context, orderNo string) (Order, error) {
 //
 // 只改 `created` 那一行（WHERE 里带着状态）：两张通知并发到达时，后一张不会
 // 覆盖前一张记下的流水号。返回 false 表示这一行已经不在 `created` 上了。
-func (l *LockedOrder) MarkPaid(ctx context.Context, orderNo, gatewayTxnID string, raw []byte, paidAt time.Time, fee money.Amount) (bool, error) {
+//
+// 撞上「同一个通道流水号只能记在一张单上」那条约束时返回
+// *GatewayTxnConflictError，不把 SQLSTATE 抛给调用方。这里不自己补读对方单号：
+// 23505 已经让整个事务中止，同一条连接上再查什么都只会得到「current
+// transaction is aborted」——那一步在事务回滚之后做（见
+// Store.annotateGatewayTxnConflict）。
+func (l *LockedOrder) MarkPaid(ctx context.Context, orderNo, gateway, gatewayTxnID string, raw []byte, paidAt time.Time, fee money.Amount) (bool, error) {
 	res, err := l.tx.ExecContext(ctx, `
 		UPDATE payment_orders
 		SET status = 'paid', gateway_txn_id = $2, gateway_raw = $3::jsonb, paid_at = $4, fee = $5::numeric
 		WHERE order_no = $1 AND status = 'created'`,
 		orderNo, nullString(gatewayTxnID), rawOrDefault(raw), paidAt, fee.String())
 	if err != nil {
+		if gatewayTxnUniqueViolated(err) {
+			return false, &GatewayTxnConflictError{
+				OrderNo:      orderNo,
+				Gateway:      gateway,
+				GatewayTxnID: gatewayTxnID,
+			}
+		}
 		return false, fmt.Errorf("更新支付单 %s 为已支付失败: %w", orderNo, err)
 	}
 	n, err := res.RowsAffected()
@@ -250,6 +300,59 @@ func (l *LockedOrder) MarkPaid(ctx context.Context, orderNo, gatewayTxnID string
 		return false, fmt.Errorf("读取支付单 %s 的更新行数失败: %w", orderNo, err)
 	}
 	return n > 0, nil
+}
+
+// gatewayTxnUniqueViolated 报告 err 是不是撞在 (gateway, gateway_txn_id) 那条
+// 部分唯一索引上。
+//
+// 只判 23505 会把任何唯一约束冲突都翻译成「流水号被占用」；这一条要求错误码
+// 与索引名同时对上，与 internal/auth、internal/catalog 判各自唯一约束的做法
+// 一致。
+func gatewayTxnUniqueViolated(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == pgUniqueViolation &&
+		pgErr.ConstraintName == paymentOrdersGatewayTxnUnique
+}
+
+// annotateGatewayTxnConflict 给流水号冲突补上「撞的是哪一张单」。
+//
+// 读放在事务回滚之后：23505 中止了整个事务，唯一能查的时候是 WithOrderLock
+// 交还连接之后。这次读只为了让报错更好认，**不能因为它的失败把原始冲突吞掉**，
+// 也不能把它升级成 5xx——5xx 会让通道以为可以无限重试。读不到（或这次读本身
+// 报错）时保留原错误、只少一个对方单号，并记一条日志说明补查没成。
+func (s *Store) annotateGatewayTxnConflict(ctx context.Context, err error) error {
+	var conflict *GatewayTxnConflictError
+	if !errors.As(err, &conflict) || conflict.OtherOrderNo != "" {
+		return err
+	}
+	other, lookupErr := s.lookupConflict(ctx, conflict.OrderNo, conflict.GatewayTxnID)
+	if lookupErr != nil {
+		slog.Default().Warn("支付单的通道流水号冲突，但补查对方单号失败",
+			"err", lookupErr, "order_no", conflict.OrderNo,
+			"gateway", conflict.Gateway, "gateway_txn_id", conflict.GatewayTxnID)
+		return err
+	}
+	conflict.OtherOrderNo = other
+	return err
+}
+
+// conflictingOrderNo 是默认的补查：按当前那张单的通道，找记下同一个流水号的
+// 另一行。
+//
+// 这不是判据，是诊断信息：钱与状态那一侧的守卫是唯一索引本身。
+func (s *Store) conflictingOrderNo(ctx context.Context, orderNo, gatewayTxnID string) (string, error) {
+	var other string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT other.order_no
+		  FROM payment_orders AS mine
+		  JOIN payment_orders AS other
+		    ON other.gateway = mine.gateway
+		   AND other.gateway_txn_id = $2
+		 WHERE mine.order_no = $1
+		   AND other.order_no <> mine.order_no
+		 LIMIT 1`, orderNo, gatewayTxnID).Scan(&other)
+	return other, err
 }
 
 // MarkTerminal 把一张 `created` 的支付单转成失败或过期。
