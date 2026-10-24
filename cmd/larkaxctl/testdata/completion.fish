@@ -626,6 +626,8 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_su
 complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from balance' -l asset -x -a 'CNY'
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l asset -x -a 'CNY'
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l status -x -a 'expired canceled'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l scope -x -a 'platform merchant channel'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l scope -x -a 'platform merchant channel'
 complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from allowlist' -l direction -x -a 'request response'
 complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from allowlist' -l surface -x -a 'chat decision'
 complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from get' -l direction -x -a 'request response'

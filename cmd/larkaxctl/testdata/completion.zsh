@@ -23,6 +23,8 @@ _larkaxctl() {
 		"ledger balance|--asset") compadd -- CNY; return ;;
 		"plan create|--asset") compadd -- CNY; return ;;
 		"plan void|--status") compadd -- expired canceled; return ;;
+		"price create|--scope") compadd -- platform merchant channel; return ;;
+		"price update|--scope") compadd -- platform merchant channel; return ;;
 		"snapshot allowlist|--direction") compadd -- request response; return ;;
 		"snapshot allowlist|--surface") compadd -- chat decision; return ;;
 		"snapshot get|--direction") compadd -- request response; return ;;

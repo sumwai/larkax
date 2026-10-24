@@ -11,6 +11,7 @@ import (
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/plans"
+	"github.com/sumwai/larkax/internal/pricing"
 	"github.com/sumwai/larkax/internal/snapshot"
 	"github.com/sumwai/larkax/internal/snapshotwire"
 	"github.com/sumwai/larkax/internal/upstream"
@@ -331,7 +332,7 @@ var longOptionRE = regexp.MustCompile(`--[a-z][a-z0-9-]*`)
 //
 // 取值一律取自校验那一侧已有的来源（常量或清单函数），这里不抄字面量：
 // 抄一份的表现是库里加了一种取值，而 Tab 补出来的还是旧的那几项。
-// 有来源不等于已经接线：没接上的那几格留白——留白比补错安全，接线另算。
+// 还没接线的几格留白——留白比补错安全；接线是单独的一步，与来源归并不在一处。
 func completionEnumValues() map[string][]string {
 	values := map[string][]string{}
 	put := func(path, flag string, vals []string) {
@@ -378,6 +379,11 @@ func completionEnumValues() map[string][]string {
 	put("plan void", "status", []string{
 		string(plans.UserPlanExpired), string(plans.UserPlanCancelled),
 	})
+
+	scopes := pricing.Scopes()
+	for _, path := range []string{"price create", "price update"} {
+		put(path, "scope", scopes)
+	}
 
 	asset := []string{string(ledger.AssetCNY)}
 	for _, path := range []string{
