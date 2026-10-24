@@ -71,11 +71,12 @@ price tier list 打出来的单价是**每 token**，与 price show 看到的是
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
 var priceTierActions = []string{"add", "list", "remove"}
 
-// priceTierLocatorOperand 是 price tier 的位置参数：规则名或规则 ID。
+// priceSegmentLocatorOperand 是 price tier / price peak 的位置参数：规则名或
+// 规则 ID。
 //
-// 这三条命令没有同名的旗标，定位符只能写成位置参数，所以 flag 留空；称呼沿用
-// price update 那一份（见 priceLocatorOperand），两条命令的定位符是同一件事。
-var priceTierLocatorOperand = operandSpec{
+// 这些命令没有同名的旗标，定位符只能写成位置参数，所以 flag 留空；称呼沿用
+// price update 那一份（见 priceLocatorOperand），几处定位的是同一件事。
+var priceSegmentLocatorOperand = operandSpec{
 	what: "定位符",
 }
 
@@ -128,7 +129,7 @@ func runPriceTierAdd(args []string) error {
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
-		info, err := loadTierRule(ctx, db, req.locator)
+		info, err := loadScheduleRule(ctx, db, req.locator, "阶梯档位")
 		if err != nil {
 			return err
 		}
@@ -156,14 +157,14 @@ func runPriceTierAdd(args []string) error {
 		}
 		_, _ = fmt.Fprintf(humanStderr(),
 			"已为计价规则 %d 加上第 %d 段阶梯：输入上下文达到 %d token 起，改写 %s。\n",
-			info.ID, segment, above, tierPricesLabel(req.prices))
+			info.ID, segment, above, slotPricesLabel(req.prices))
 		_, _ = fmt.Fprintln(humanStdout(), segment)
 		return nil
 	})
 }
 
 func parsePriceTierAdd(args []string) (priceTierRequest, error) {
-	locator, rest, err := takeLeadingOperand(args, priceTierLocatorOperand)
+	locator, rest, err := takeLeadingOperand(args, priceSegmentLocatorOperand)
 	if err != nil {
 		return priceTierRequest{}, err
 	}
@@ -223,7 +224,7 @@ func runPriceTierList(args []string) error {
 	locator := fs.Arg(0)
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
-		info, err := loadTierRule(ctx, db, locator)
+		info, err := loadScheduleRule(ctx, db, locator, "阶梯档位")
 		if err != nil {
 			return err
 		}
@@ -240,13 +241,13 @@ func runPriceTierRemove(args []string) error {
 	if err := jsonUnsupported("price tier remove"); err != nil {
 		return err
 	}
-	locator, segment, by, err := parsePriceTierRemove(args)
+	locator, segment, by, err := parsePriceSegmentRemove("price tier", priceTierShortUsage, args)
 	if err != nil {
 		return usageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
-		info, err := loadTierRule(ctx, db, locator)
+		info, err := loadScheduleRule(ctx, db, locator, "阶梯档位")
 		if err != nil {
 			return err
 		}
@@ -281,13 +282,17 @@ func runPriceTierRemove(args []string) error {
 	})
 }
 
-// parsePriceTierRemove 解析 remove 的两个位置参数与 --by。
+// parsePriceSegmentRemove 解析 remove 的两个位置参数与 --by，price tier 与
+// price peak 共用：两者的段号是同一套（overrides 数组里的位置）。
+//
+// group 是命令组名（"price tier" / "price peak"），用在补全之外的三处：flag 集
+// 的名字、那句「用法」与「段号见 … list」。short 是参数写错时要打的那一版帮助。
 //
 // 段号可以写在规则名后面，也可以写在旗标后面（`remove r1 --by alice 2`）：
 // flag 包遇到第一个非旗标词就停，只认后一种写法时，`remove r1 2 --by alice`
 // 里的 --by 会整段落进多余参数。两种写法都收，多给的一律报错。
-func parsePriceTierRemove(args []string) (locator string, segment int, by string, err error) {
-	locator, rest, err := takeLeadingOperand(args, priceTierLocatorOperand)
+func parsePriceSegmentRemove(group, short string, args []string) (locator string, segment int, by string, err error) {
+	locator, rest, err := takeLeadingOperand(args, priceSegmentLocatorOperand)
 	if err != nil {
 		return "", 0, "", err
 	}
@@ -297,8 +302,8 @@ func parsePriceTierRemove(args []string) (locator string, segment int, by string
 		rest = rest[1:]
 	}
 
-	fs := newFlagSet("price tier remove", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, priceTierShortUsage) }
+	fs := newFlagSet(group+" remove", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, short) }
 	byFlag := fs.String("by", "", "")
 	if err := fs.Parse(rest); err != nil {
 		return "", 0, "", err
@@ -313,28 +318,29 @@ func parsePriceTierRemove(args []string) (locator string, segment int, by string
 		segmentRaw = fs.Arg(0)
 	}
 	if strings.TrimSpace(locator) == "" {
-		return "", 0, "", errors.New(
-			"缺少规则名或规则 ID：写成第一个位置参数（larkaxctl price tier remove <规则名> <段号> …）")
+		return "", 0, "", fmt.Errorf(
+			"缺少规则名或规则 ID：写成第一个位置参数（larkaxctl %s remove <规则名> <段号> …）", group)
 	}
 	if strings.TrimSpace(segmentRaw) == "" {
-		return "", 0, "", errors.New(
-			"缺少段号：用法 larkaxctl price tier remove <规则名 或 ID> <段号>（段号见 price tier list）")
+		return "", 0, "", fmt.Errorf(
+			"缺少段号：用法 larkaxctl %s remove <规则名 或 ID> <段号>（段号见 %s list）", group, group)
 	}
 	parsed, parseErr := strconv.Atoi(strings.TrimSpace(segmentRaw))
 	if parseErr != nil || parsed <= 0 {
 		return "", 0, "", fmt.Errorf("段号必须是正整数，当前为 %q", segmentRaw)
 	}
 	if strings.TrimSpace(*byFlag) == "" {
-		return "", 0, "", errors.New("缺少 --by：这条命令要记下删掉这一档是谁做的")
+		return "", 0, "", errors.New("缺少 --by：这条命令要记下删掉这一段的是谁")
 	}
 	return locator, parsed, *byFlag, nil
 }
 
-// loadTierRule 按规则名或 ID 读一条**带结构化定价表**的规则。
+// loadScheduleRule 按规则名或 ID 读一条**带结构化定价表**的规则。
 //
-// 阶梯档位是表里的一行覆盖，手写表达式改不出可枚举的档，所以没有表时直接
-// 拒绝，并指出该往哪条路走。
-func loadTierRule(ctx context.Context, db *sql.DB, locator string) (pricing.RuleInfo, error) {
+// 阶梯档位与峰段都是表里的一行覆盖，手写表达式改不出可枚举的段，所以没有表时
+// 直接拒绝，并指出该往哪条路走。thing 是那类段的名字（"阶梯档位" / "峰段"），
+// 用在报错里。
+func loadScheduleRule(ctx context.Context, db *sql.DB, locator, thing string) (pricing.RuleInfo, error) {
 	id, err := resolvePriceRuleLocator(ctx, db, locator, nil)
 	if err != nil {
 		return pricing.RuleInfo{}, usageErr(err)
@@ -345,8 +351,8 @@ func loadTierRule(ctx context.Context, db *sql.DB, locator string) (pricing.Rule
 	}
 	if info.Schedule == nil {
 		return pricing.RuleInfo{}, fmt.Errorf(
-			"计价规则 %d 没有结构化定价表：阶梯档位写在表的 overrides 里，手写表达式改不出档位；"+
-				"先用 --schedule-file 建一条带表的规则", info.ID)
+			"计价规则 %d 没有结构化定价表：%s写在表的 overrides 里，手写表达式改不出来；"+
+				"先用 --schedule-file 建一条带表的规则", info.ID, thing)
 	}
 	return info, nil
 }
@@ -396,16 +402,16 @@ func printTierList(w io.Writer, tiers []priceTierInfo) {
 	_, _ = fmt.Fprintln(tw, strings.Join(bolded, "\t"))
 	for _, tier := range tiers {
 		_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\n",
-			p.bold(strconv.Itoa(tier.segment)), tier.above, tierPricesLabel(tier.prices))
+			p.bold(strconv.Itoa(tier.segment)), tier.above, slotPricesLabel(tier.prices))
 	}
 	_ = tw.Flush()
 }
 
-// tierPricesLabel 打一段阶梯改写了哪几项单价。
+// slotPricesLabel 打一段覆盖改写了哪几项单价。
 //
 // 按键名字典序拼接，同一份表两次打出来是同一串；数值用最短可回读形式，
 // 与 price show 里那一份逐字相同。
-func tierPricesLabel(prices map[string]float64) string {
+func slotPricesLabel(prices map[string]float64) string {
 	keys := make([]string, 0, len(prices))
 	for key := range prices {
 		keys = append(keys, key)

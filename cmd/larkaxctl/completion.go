@@ -162,6 +162,7 @@ var completionActionTable = map[string][]string{
 	"price":           priceActions,
 	"price calendar":  priceCalendarActions,
 	"price tier":      priceTierActions,
+	"price peak":      pricePeakActions,
 	"upstream-cost":   upstreamCostActions,
 	"user":            userActions,
 	"user delete":     userDeleteActions,

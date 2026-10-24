@@ -27,17 +27,17 @@ const priceShortUsage = `larkaxctl price 管理计价规则。
 用法：
   larkaxctl price add <规则名> --scope <…> --by <ID 或用户名>
                         (--expr '<表达式>' | --schedule-file <文件> | --in <单价> …)
-  larkaxctl price list
-  larkaxctl price show <规则 ID>
+  larkaxctl price list | price show <规则 ID>
   larkaxctl price update <规则名 或 ID> --by <ID 或用户名> [与 add 相同的字段]
   larkaxctl price enable <规则 ID> | price disable <规则 ID>
   larkaxctl price explain --model <规范模型名> [--user <ID 或用户名>] [--at <…>]
   larkaxctl price tier add <规则名> --above <tokens> [单价旗标] --by <用户>
   larkaxctl price tier list <规则名> | price tier remove <规则名> <段号>
+  larkaxctl price peak add <规则名> --tz <时区> --window <时段> [单价旗标] --by <用户>
+  larkaxctl price peak list <规则名> | price peak remove <规则名> <段号>
   larkaxctl price calendar import <文件> | price calendar sync [--year <年>] | price calendar list
 
-作用域决定哪两栏 id 有效；--by 必填。单价按项给，默认每百万 token（--in 1.5 即
-每百万 1.5）：五个计价项都会写进表达式，没给的项显式写 0。--unit token 可改单位。
+作用域决定哪两栏 id 有效；--by 必填。单价按项给，默认每百万 token；--unit token 可改单位。
 
 更细的边界：larkaxctl help price。
 `
@@ -76,6 +76,11 @@ const priceUsage = `larkaxctl price 管理计价规则。
                            [--unit mtok|token] --by <用户 ID 或用户名>
   larkaxctl price tier list <规则名 或 ID>
   larkaxctl price tier remove <规则名 或 ID> <段号> --by <用户 ID 或用户名>
+  larkaxctl price peak add <规则名 或 ID> --tz <时区> --window <时段>
+                           [--weekdays <星期>] [--exclude-holidays]
+                           [--above <tokens>] [单价旗标] --by <用户 ID 或用户名>
+  larkaxctl price peak list <规则名 或 ID>
+  larkaxctl price peak remove <规则名 或 ID> <段号> --by <用户 ID 或用户名>
   larkaxctl price calendar import <文件>
         导入某一年的日历数据（分时计价要用它判断哪天是休息日，
         文件格式见 larkaxctl price calendar --help）
@@ -133,6 +138,11 @@ weekdays / window / day_kind / holidays / min_context_tokens 分行改写单价�
 读写）等于该值时就走那一档。带阶梯的规则不必手改整张表，用 price tier 增删
 档位即可；多档逐条 add，门槛高的自动先命中，不用给 position，细节见
 larkaxctl price tier help。
+
+峰段用 price peak 增删：--tz 与 --window 必填，可选 --weekdays 与
+--exclude-holidays。--above 给了就与阶梯落在同一条覆盖上（window 与
+min_context_tokens 同时出现），命中条件是「峰段且达到门槛」。细节见
+larkaxctl price peak help。
 
 表里有 day_kind 或 holidays 时，实例必须接着日历，否则保存会被拒绝：日历
 没有数据时整笔计价失败，不回落到底价。price show 对带表的规则打那张表，
@@ -212,7 +222,7 @@ explain 回答「这次请求按哪条规则计价」：它把**全部适用**�
 
 // priceActions 是 price 的动作清单，补全从这里取。
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
-var priceActions = []string{"add", "list", "show", "update", "enable", "disable", "explain", "tier", "calendar"}
+var priceActions = []string{"add", "list", "show", "update", "enable", "disable", "explain", "tier", "peak", "calendar"}
 
 func runPrice(args []string) error {
 	if len(args) == 0 {
@@ -242,6 +252,10 @@ func runPrice(args []string) error {
 		// 阶梯档位（按输入上下文分档）是定价表里的一行覆盖，增删走独立的
 		// 二级命令组：手改整张 JSON 才能调一档价，改错一处就是整表不成立。
 		return runPriceTier(rest)
+	case "peak":
+		// 峰段（按时段分档）与阶梯同一张表、同一套段号：组合档是「峰段且
+		// 超过门槛」的同一条覆盖，两组命令各自只增删自己认得的那种。
+		return runPricePeak(rest)
 	case "calendar":
 		// 分时计价的日历原先是一个顶层命令组（larkaxctl calendar），#475 把它
 		// 收进 price：这些数据是计价规则的输入，离开规则没有别的用处。
