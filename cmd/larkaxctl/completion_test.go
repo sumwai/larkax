@@ -498,7 +498,7 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 		// 判定方式一变，这里与文档要一起更新。
 		{"取值恰好是命令名", []string{"--env-file", "channel"}, func(t *testing.T, shell string, got []string) {
 			if shell == "fish" {
-				requireFishNamedValueBoundary(t, data, got)
+				requireFishNamedValueBoundary(t, got)
 				return
 			}
 			requireRegisteredTopLevel(t, shell, got)
@@ -601,12 +601,16 @@ func TestFishMultiSegmentConditions(t *testing.T) {
 	script := fishCompletionScript(data)
 	cells := [][]string{
 		nil, // 一级命令：不受这两条规则影响，作为对照
-		{"channel"}, {"channel", "map"}, {"channel", "map", "add"},
+		{"channel"}, {"channel", "map"}, {"channel", "map", "add"}, {"channel", "map", "remove"},
+		{"channel", "adapters"},
 		{"model"}, {"model", "alias"},
-		{"price"}, {"price", "calendar"},
+		{"price"}, {"price", "calendar"}, {"price", "show"},
 		{"admin"}, {"admin", "token"},
-		{"user"}, {"user", "plan"}, {"user", "plan", "order"},
+		{"user"}, {"user", "plan"}, {"user", "plan", "order"}, {"user", "inspect"},
 		{"wallet"}, {"wallet", "payout"},
+		{"migrate"}, {"migrate", "up"},
+		{"plugin", "delete"}, {"settings", "list"},
+		{"consent", "revoke"}, {"ledger", "reconcile"},
 	}
 	for _, words := range cells {
 		name := "动作: 顶层"
@@ -617,7 +621,7 @@ func TestFishMultiSegmentConditions(t *testing.T) {
 			got := runFishCompletion(t, fish, script, words, "")
 			gotCmp := slices.Clone(got)
 			slices.Sort(gotCmp)
-			want := fishExpectedCandidates(data, words)
+			want := fishExpectedCandidates(words)
 			if !slices.Equal(gotCmp, want) {
 				t.Errorf("`larkaxctl %s` 的候选 = %v，期望 %v（按动作表派生）",
 					strings.Join(words, " "), got, want)
@@ -642,8 +646,13 @@ func TestFishChildLevelActionsEqualTheirOwnTable(t *testing.T) {
 		return
 	}
 	script := fishCompletionScript(buildCompletionData())
-	// `channel map add` 在动作表里没有条目：它是吃位置的叶子，动作数为 0。
-	for _, path := range []string{"channel map", "channel map add", "user plan order", "wallet payout"} {
+	// 下面几条路径在动作表里都没有条目：它们是吃位置的叶子，动作数为 0。
+	// `migrate up` 与 `channel map remove` 是不同类型的叶子——前者属于整组不遍历
+	// 选项的 `migrate`，后者是三级动词；两种都曾在否定名单里缺位（见 #1183）。
+	for _, path := range []string{
+		"channel map", "channel map add", "channel map remove", "channel adapters",
+		"migrate up", "price show", "user inspect", "user plan order", "wallet payout",
+	} {
 		t.Run(path+" ", func(t *testing.T) {
 			got := runFishCompletion(t, fish, script, strings.Fields(path), "")
 			want := slices.Clone(completionActionTable[path])
@@ -656,20 +665,50 @@ func TestFishChildLevelActionsEqualTheirOwnTable(t *testing.T) {
 	}
 }
 
+// TestCompletionPathSegmentsExistInParentWords 断言注册表里的每条路径都能沿
+// 「父路径的词表」逐段走通。
+//
+// 否定名单取的是 data.words[路径] 的值，所以一条路径在父层词表里缺席，就等于
+// 那条子命令不会被否定——父层动作会漏到它后面（#1183 评审 P1）。这条从另一头
+// 守同一件事：路径枚举（动作表的路径、data.flags 的键）里只要长出一段父层词表
+// 没有的名字，这里先红。
+func TestCompletionPathSegmentsExistInParentWords(t *testing.T) {
+	data := buildCompletionData()
+	paths := make([]string, 0, len(data.flags)+len(completionActionTable))
+	for key := range data.flags {
+		paths = append(paths, key)
+	}
+	for path := range completionActionTable {
+		paths = append(paths, path)
+	}
+	slices.Sort(paths)
+	paths = slices.Compact(paths)
+	for _, path := range paths {
+		fields := strings.Fields(path)
+		for i := 1; i < len(fields); i++ {
+			parent := strings.Join(fields[:i], " ")
+			if !slices.Contains(data.words[parent], fields[i]) {
+				t.Errorf("路径 %q 的第 %d 段 %q 不在父路径 %q 的词表里（data.words[%q] = %v）：否定名单会漏掉它",
+					path, i+1, fields[i], parent, parent, data.words[parent])
+			}
+		}
+	}
+}
+
 // fishExpectedCandidates 按动作表独立派生某一格应当出现的候选。
 //
 // fish 的路径条件是「路径上每段都出现过、且直接子命令名一个都没出现」
 // （见 fishPathHolds），所以期望是动作表里所有成立路径的动作并集；一级命令那一
 // 格没有路径，条件是「还没出现过一级命令名」，另算。只从 completionActionTable
 // 与注册表取，不读生成物。
-func fishExpectedCandidates(data completionData, words []string) []string {
+func fishExpectedCandidates(words []string) []string {
 	seen := make(map[string]bool, len(words))
 	for _, word := range words {
 		seen[word] = true
 	}
 	var want []string
 	for path, verbs := range completionActionTable {
-		if fishPathHolds(data, path, seen) {
+		if fishPathHolds(path, seen) {
 			want = append(want, verbs...)
 		}
 	}
@@ -692,13 +731,13 @@ func fishExpectedCandidates(data completionData, words []string) []string {
 //
 // 两条都从注册表取：路径本身来自 completionActionTable / data.flags，子命令名
 // 来自 fishExpectedChildren。
-func fishPathHolds(data completionData, path string, seen map[string]bool) bool {
+func fishPathHolds(path string, seen map[string]bool) bool {
 	for _, token := range strings.Fields(path) {
 		if !seen[token] {
 			return false
 		}
 	}
-	for _, child := range fishExpectedChildren(data, path) {
+	for _, child := range fishExpectedChildren(path) {
 		if seen[child] {
 			return false
 		}
@@ -706,35 +745,23 @@ func fishPathHolds(data completionData, path string, seen map[string]bool) bool 
 	return true
 }
 
-// fishExpectedChildren 按注册表独立派生一条路径的直接子命令名：前缀相同、只多
-// 一段的那些路径的最后一段，按字典序。
+// fishExpectedChildren 按注册表独立派生一条路径的直接子命令名：**这条路径的
+// 动作表**（completionActionTable），空路径取一级命令清单。
 //
-// 路径集合取 data.words 与 data.flags 的键，与生成器同一个来源（生成动词行与
-// 选项行读的就是这两张表）。只多一段这一条不能省：`channel map add` 是 `channel`
-// 的后代但不是它的直接子命令。
-func fishExpectedChildren(data completionData, path string) []string {
-	tokens := strings.Fields(path)
-	keys := make([]string, 0, len(data.words)+len(data.flags))
-	for key := range data.words {
-		keys = append(keys, key)
+// 与生成器不共用来源是这条用例的关键：生成器读 data.words，这里读动作常量，
+// 两处只要有一处对「下一级有哪些词」的定义不全，这条就会红。曾经两边都从
+// data.flags 的键派生，同一个缺口被抄了两遍、一起绿——没注册选项的叶子动词
+// （`channel adapters`、`migrate up`）不在键里，否定名单漏掉它们（见 #1183
+// 的评审 P1）。动作表是这些名字的源头，它不依赖某个动词有没有注册选项。
+func fishExpectedChildren(path string) []string {
+	var children []string
+	if path == "" {
+		children = registeredTopLevelNames()
+	} else {
+		children = slices.Clone(completionActionTable[path])
 	}
-	for key := range data.flags {
-		keys = append(keys, key)
-	}
-	seen := make(map[string]bool, len(keys))
-	var names []string
-	for _, key := range keys {
-		fields := strings.Fields(key)
-		if len(fields) != len(tokens)+1 || strings.Join(fields[:len(tokens)], " ") != path {
-			continue
-		}
-		if name := fields[len(tokens)]; !seen[name] {
-			seen[name] = true
-			names = append(names, name)
-		}
-	}
-	slices.Sort(names)
-	return names
+	slices.Sort(children)
+	return slices.Compact(children)
 }
 
 // TestFishOptionPositionConditions 钉住条件在选项位上的两件事。
@@ -791,7 +818,7 @@ func fishExpectedOptions(data completionData, words []string) []string {
 	}
 	var want []string
 	for _, path := range flaggedPaths(data) {
-		if fishPathHolds(data, path, seen) {
+		if fishPathHolds(path, seen) {
 			want = append(want, ownOptionNames(data, path)...)
 		}
 	}
@@ -1059,9 +1086,9 @@ func requireRegisteredTopLevel(t *testing.T, shell string, got []string) {
 // 命令名」的条件因此不成立，候选退成 channel 那一级的动作；取值本身照常生效。
 // 期望从动作表独立派生（见 fishExpectedCandidates），不写死条数：新增一个
 // channel 动作时期望跟着变，不会出现「数字对、动词错」这种假绿。
-func requireFishNamedValueBoundary(t *testing.T, data completionData, got []string) {
+func requireFishNamedValueBoundary(t *testing.T, got []string) {
 	t.Helper()
-	want := fishExpectedCandidates(data, []string{"--env-file", "channel"})
+	want := fishExpectedCandidates([]string{"--env-file", "channel"})
 	gotCmp := slices.Clone(got)
 	slices.Sort(gotCmp)
 	if !slices.Equal(gotCmp, want) {
