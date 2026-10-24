@@ -109,13 +109,15 @@ func TestDoctorUsageMatchesEndpointTable(t *testing.T) {
 
 // TestDoctorUsageDescribesEveryEndpoint 让 doctorUsage 说明段与入口表对上。
 //
-// 说明段里每个入口都写成「<名字> 是 POST /v1/…」。只给表加一条、两处方括号串也
-// 同步了、却没改说明段时，TestDoctorUsageMatchesEndpointTable 是绿的；这条会红。
+// 说明段里每个入口都写成「<名字> 是 POST <path>」，路径也逐字比：只给表加一条、
+// 两处方括号串也同步了、却没改说明段时，TestDoctorUsageMatchesEndpointTable 是绿的；
+// 说明段里的路径写成别的（表改了 path、说明段没跟）也只有这条会红。
 func TestDoctorUsageDescribesEveryEndpoint(t *testing.T) {
-	for _, name := range doctorEndpointNames() {
-		pattern := regexp.MustCompile(regexp.QuoteMeta(name) + `\s+是\s+POST\s+/v1/`)
+	for _, spec := range doctorEndpoints {
+		pattern := regexp.MustCompile(regexp.QuoteMeta(spec.name) + `\s+是\s+POST\s+` + regexp.QuoteMeta(spec.path))
 		if !pattern.MatchString(doctorUsage) {
-			t.Errorf("doctorUsage 的说明段里没有 %q 的「%s 是 POST /v1/…」描述：加入口时说明段漏改了", name, name)
+			t.Errorf("doctorUsage 的说明段里没有 %q 的「%s 是 POST %s」描述：加入口或改路径时说明段漏改了",
+				spec.name, spec.name, spec.path)
 		}
 	}
 }
