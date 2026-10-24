@@ -290,9 +290,9 @@ type DayRow struct {
 	// OffDay 对应 is_off_day：这一天是否放假。
 	OffDay bool
 	// MakeupWorkday 对应 is_makeup_workday：这一天是调休补班日，
-	// 即把周末挪来上班。它必然与 OffDay 为 false 的日子配对。该列的取值
-	// 是数据源按该日是不是周末决定的（holiday-cn 就是这么给的），
-	// 本包不替上游推断这条规则。
+	// 即把周末挪来上班。它必然与 OffDay 为 false 的日子配对。
+	// 数据源不一定直接给这一列（holiday-cn 只给「放不放假」），由导入方按
+	// 「不是假期、且该日是周六或周日」推断；本包的判定不替调用方推断。
 	MakeupWorkday bool
 }
 
@@ -389,7 +389,7 @@ func (st DayStatus) withRow(row DayRow) DayStatus {
 		st.Kind = DayRestDay
 	default:
 		// 非休息日一律是工作日。调休补班的周末正是走这一支：
-		// 数据源（holiday-cn）用 isOffDay=false 表达它们，
+		// 导入方把「不是假期、又落在周末」的日子记成 isOffDay=false，
 		// 所以「周末就算休息日」这条纯星期规则在这里必须被数据压过。
 		st.Kind = DayWorkday
 	}

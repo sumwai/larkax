@@ -86,5 +86,5 @@ make release   # 发布资产：二进制包 + 控制台包 + SHA256SUMS
 - [new-api](https://github.com/QuantumNous/new-api)：`relaykit` 提供协议 DTO 与 OpenAI ↔ Anthropic 转换；采用 AGPL-3.0 许可证，附加条款保留在 [NOTICE](NOTICE)。
 - [moejs](https://github.com/Calcium-Ion/moejs)：提供插件沙箱运行的 JavaScript 运行时。
 - [expr-lang/expr](https://github.com/expr-lang/expr)：提供计价规则的表达式引擎。
-- [holiday-cn](https://github.com/NateScarlet/holiday-cn)：提供中国大陆节假日数据（计划中）。
+- [holiday-cn](https://github.com/NateScarlet/holiday-cn)：提供中国大陆节假日数据。
 - [models.dev](https://github.com/sst/models.dev)：提供模型元数据（计划中）。

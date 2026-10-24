@@ -1,17 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/internal/calendar"
 	calendarstore "github.com/sumwai/larkax/internal/calendar/store"
 	"github.com/sumwai/larkax/internal/config"
 )
@@ -25,10 +30,13 @@ const priceCalendarShortUsage = `larkaxctl price calendar 维护分时计价用�
 
 用法：
   larkaxctl price calendar import <文件>   把一份日历数据文件灌进库里
+  larkaxctl price calendar sync [--year <年>]
+                                           从公开数据源拉取一年并写进库里
   larkaxctl price calendar list            列出导入过的年份与状态
 
 文件是一个 JSON 对象，字段写错会直接报错；只有 synced 状态才带 days，而 days
-必须覆盖本年的每一天。同一年再灌一次是覆盖，不是追加。
+必须覆盖本年的每一天。同一年再灌一次是覆盖，不是追加。sync 拉到的数据源如果
+还没发布这一年，写的是 pending，退出码是 0。
 
 更细的边界：larkaxctl price calendar help。
 `
@@ -45,6 +53,8 @@ const priceCalendarUsage = `larkaxctl price calendar 维护分时计价用的日
 
 用法：
   larkaxctl price calendar import <文件>   把一份日历数据文件灌进库里
+  larkaxctl price calendar sync [--year <年>]
+                                           从公开数据源拉取一年并写进库里
   larkaxctl price calendar list            列出导入过的年份与状态
 
 文件是一个 JSON 对象，只认下面这些字段（键名写错会直接报错）：
@@ -87,7 +97,21 @@ days 也不带 source——那一年还没有定论，写进去的数据行会�
 跨年边界上的日子（例如元旦安排里把去年 12 月 31 日挪成休息）可以写进相邻
 年份的文件里，同一天以最后一次导入为准。
 
-数据从哪来不在本命令的范围内：它只负责「读文件 → 写库」。
+import 只管「读文件 → 写库」：文件可以由 sync 拉取，也可以由运维手工准备，
+手工那份用于兜底与修正。
+
+sync 从公开数据源 holiday-cn 拉取一年的放假安排，转换成上面这份格式，再走
+同一条导入路径写库。--year 缺省取当前年份（按 CN 时区判定），只接受单个年份；
+写成 --year 2025,2026 会报参数错。
+
+  数据源明确表示「这一年还没发布」（404，或者返回的 days 为空）时写
+  pending，并以 0 退出——那是日历的一个状态，不是命令失败。
+  真正的失败（网络、解析、校验）以非零退出：那一年已经是 synced 时库里
+  一行都不动，否则记下 degraded 与失败原因。
+
+数据源只给每一天「放不放假」。调休补班日（makeup_workday）按「不是假期、
+且该日是周六或周日」推断；isOffDay 为 false 却不在周末的日子照样收下，
+off_day 记 false、makeup_workday 也记 false，名称保留。
 
 list 列出库里导入过的年份：地区、年份、状态、天数、双源校验的结果，以及这一行
 写下的时刻；同地区内按年份从新到旧（最近灌的那一年在最上面）。**没有导入过的
@@ -99,14 +123,14 @@ list 列出库里导入过的年份：地区、年份、状态、天数、双源
 却同步失败）需要人去看那一年发生了什么，失败的原因单独打在一行里。
 
 旧路径：larkaxctl calendar import <文件> 仍然可用，与
-larkaxctl price calendar import <文件> 逐字相同。list 只挂在 price 下面。
+larkaxctl price calendar import <文件> 逐字相同。list 与 sync 只挂在 price 下面。
 
 更细的约定见 docs/cli-reference.md 的「price calendar」一节。
 `
 
 // priceCalendarActions 是 price calendar 的动作清单，补全从这里取。
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
-var priceCalendarActions = []string{"import", "list"}
+var priceCalendarActions = []string{"import", "sync", "list"}
 
 // runPriceCalendar 处理 price 下的 calendar 子命令。
 func runPriceCalendar(args []string) error {
@@ -119,6 +143,8 @@ func runPriceCalendar(args []string) error {
 	switch action {
 	case "import":
 		return runCalendarImport(rest)
+	case "sync":
+		return runPriceCalendarSync(rest)
 	case "list":
 		return runCalendarList(rest)
 	case "help":
@@ -251,6 +277,361 @@ func printCalendarImport(w io.Writer, r calendarstore.Result) {
 		// 预期结果，而不是数据被吞了。
 		_, _ = fmt.Fprintf(w, "（status=%s 的年份不带数据行，只记录年份状态）\n", r.Status)
 	}
+}
+
+// ── price calendar sync ──────────────────────────────────────────────
+
+// calendarSyncTimeout 是拉取一次数据源的时间上限。
+//
+// 一份数据文件只有几十条记录，正常在一秒内回来。给到一分钟是为了让「上游慢」
+// 与「连不上」区分得开：连不上时连接本身很快就失败，等不到这个上限的。
+const calendarSyncTimeout = 60 * time.Second
+
+// holidayCNBaseURL 是 holiday-cn 数据文件所在的目录，一年一个文件（<年>.json），
+// 没有索引文件。
+//
+// 包级变量而不是常量：用例把它指向 httptest.Server，不打真网。
+var holidayCNBaseURL = "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master"
+
+// calendarSyncHTTPClient 是拉数据源用的客户端，与 doctor 那一份分开。
+var calendarSyncHTTPClient = &http.Client{Timeout: calendarSyncTimeout}
+
+// calendarSyncNow 是「现在」的注入点：--year 缺省时取它的年份。
+var calendarSyncNow = time.Now
+
+// holidayCNFile 是 holiday-cn 的一份数据文件。
+//
+// 只认用得上的三个字段，**不像 Document 那样拒绝未知键**：这份文件由外部维护，
+// 里面还有 $schema、$id 这类字段，多出一个字段不该让整年同步失败。仓库自己的
+// 文件格式是另一回事——那边认错键名的代价是那一天的判定被悄悄用错。
+type holidayCNFile struct {
+	Year   int                  `json:"year"`
+	Papers []string             `json:"papers"`
+	Days   []holidayCNDaySource `json:"days"`
+}
+
+// holidayCNDaySource 是数据源里的一天。它只给「放不放假」，调休补班要靠推断。
+type holidayCNDaySource struct {
+	Name     string `json:"name"`
+	Date     string `json:"date"`
+	IsOffDay bool   `json:"isOffDay"`
+}
+
+// runPriceCalendarSync 从 holiday-cn 拉取一年的数据并写库。
+// price calendar sync 的状态机：行是库里这一年的状态，列是这次拉回来的东西。
+//
+//	前态 \ 这次拉回 | 数据             | pending（404 / 空 days） | 错误
+//	----------------+------------------+--------------------------+----------------------
+//	无记录          | 写 synced，0     | 写 pending，0            | 写 degraded，非 0
+//	pending         | 写 synced，0     | 写 pending，0（幂等）    | 写 degraded，非 0
+//	degraded        | 写 synced，0     | 写 pending，0            | 覆盖 degraded，非 0
+//	synced          | 覆盖，0          | 不写，0，打一行说明      | 不写，非 0
+//	conflict        | 覆盖，0          | 不写，0                  | 不写，非 0
+//
+// 每一格都由下面的代码显式回答。「有定论」指 synced 与 conflict——两者都是
+// 这一年已经有结果；无记录、pending、degraded 则还没有结果，它们之间可以互相
+// 覆盖。synced 与 conflict 那两格「不写」是同一个理由：Import 会先删掉这一年
+// 原有的行，而单源的 pending 或一次拉取失败，都不该把一份已经有结果的数据降级。
+//
+// conflict 与 synced 同等保护：两源对不上也是一条结论，把它降成单源的 pending
+// 等于丢掉「两源不一致」这个事实，而那正是下一次人工核对该找的东西。反方向是
+// 允许的：一次成功且一致的拉取可以把 conflict 改写成 synced（「覆盖」那一列）。
+func runPriceCalendarSync(args []string) error {
+	if err := jsonUnsupported("price calendar sync"); err != nil {
+		return err
+	}
+
+	fs := newFlagSet("price calendar sync", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, priceCalendarShortUsage) }
+	rawYear := fs.String("year", "", "要同步的年份；缺省取 CN 时区的当年")
+	if err := fs.Parse(args); err != nil {
+		// -h / --help 不是失败：flag 在返回 ErrHelp 之前已经把用法打印过了，
+		// 再把它当错误返回会让 `larkaxctl price calendar sync --help` 以退出码 1
+		// 结束。理由与 runCalendarImport 那一处相同。
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return usageErr(err)
+	}
+	if fs.NArg() > 0 {
+		return usageErr(fmt.Errorf("price calendar sync 不接受位置参数，得到 %q", fs.Arg(0)))
+	}
+	year, err := syncTargetYear(*rawYear)
+	if err != nil {
+		return err
+	}
+
+	cfg, err := config.LoadOps()
+	if err != nil {
+		return err
+	}
+
+	// 拉取、解析、转换、校验全在内存里完成，一步不碰数据库：校验不过的数据
+	// 不能走进 Import——它会先在事务里删掉这一年上一次导入写下的行。
+	syncCtx, cancelSync := context.WithTimeout(context.Background(), calendarSyncTimeout)
+	defer cancelSync()
+	doc, syncErr := fetchCalendarDocument(syncCtx, year)
+
+	dbCtx, cancelDB := context.WithTimeout(context.Background(), calendarImportTimeout)
+	defer cancelDB()
+	// 走 openDB 而不是自己 sql.Open + Ping：打开与探活失败时的处置与 import
+	// 相同（都归 exitDBUnreach），各写一遍的表现是同一类失败在两条命令上给出
+	// 不同的退出码。
+	db, err := openDB(dbCtx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+
+	// 先读一次这一年的当前状态，三条路（写入数据、数据源说未发布、拉取失败）共用
+	// 同一个判断。Import 会在事务里先删掉这一年上一次写下的所有行，所以「已经
+	// synced 就不许降级」不能只写在失败那条路上：数据源返回 404 或空 days 时，
+	// 拿回来的是一份 pending 文档，把它写进去同样会清掉整年的判定，而状态看上
+	// 去还是正常的 pending——list 看不出异常，计价规则却从那一天起整年失败。
+	state, err := calendarstore.NewSource(db).YearState(dbCtx, calendar.RegionCN, year)
+	if err != nil {
+		return err
+	}
+
+	if syncErr == nil {
+		if doc.Status == string(calendar.YearPending) && calendarYearHasVerdict(state) {
+			_, _ = fmt.Fprintf(humanStdout(),
+				"%d 年库里已有定论（%s），数据源这次表示未发布，未改动。\n", year, state)
+			return nil
+		}
+		result, err := calendarstore.NewAdmin(db).Import(dbCtx, doc)
+		if err != nil {
+			return err
+		}
+		printCalendarImport(humanStdout(), result)
+		return nil
+	}
+
+	// 真正的失败。库里那一年已经有定论就只报错——写一份不带 days 的文档进去
+	// 会把那一年的好数据清空；否则记下 degraded。
+	if calendarYearHasVerdict(state) {
+		return fmt.Errorf("%w（%d 年库里已经有定论：%s，数据没有改动）", syncErr, year, state)
+	}
+	if _, err := calendarstore.NewAdmin(db).Import(dbCtx, degradedCalendarDocument(year, syncErr)); err != nil {
+		// 两个错误都用 %w 包上：命令失败的主因是同步失败，而「连记录失败都失败了」
+		// 也是一条要能分类的错误（例如库连不上）。
+		return fmt.Errorf("%w；另外，把这次失败记进日历也失败了: %w", syncErr, err)
+	}
+	return fmt.Errorf("%w（这次失败已记进 %d 年的日历状态：degraded）", syncErr, year)
+}
+
+// calendarYearHasVerdict 报告库里这一年是不是已经有定论。
+//
+// 有定论的年份不允许被单源的 pending 或一次拉取失败降级——那两条路都会先删掉
+// 这一年原有的行。「有定论」的取值见 runPriceCalendarSync 上面的状态机表：synced
+// 与 conflict 都算，无记录 / pending / degraded 不算。
+func calendarYearHasVerdict(state calendar.YearState) bool {
+	return state == calendar.YearSynced || state == calendar.YearConflict
+}
+
+// syncTargetYear 是命令行实际走的那个入口：它把注入的「现在」接给 syncYear。
+func syncTargetYear(raw string) (int, error) {
+	return syncYear(raw, calendarSyncNow())
+}
+
+// syncYear 决定这一次同步哪一年。
+//
+// 缺省取「此刻在地区时区里是哪一年」，不是机器本地时区：一台跑在 UTC 的
+// 服务器在元旦当天用本地时区算，会去拉上一年。
+//
+// 只接受一个年份：`--year 2025,2026` 报参数错，而不是悄悄只取第一个——
+// 「想要两年，实际只写了一半」在库里看不出来。
+func syncYear(raw string, now time.Time) (int, error) {
+	if raw == "" {
+		loc, err := calendar.Timezone(calendar.RegionCN)
+		if err != nil {
+			return 0, fmt.Errorf("取 %s 的时区失败: %w", calendar.RegionCN, err)
+		}
+		return now.In(loc).Year(), nil
+	}
+	year, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, usageErr(fmt.Errorf("--year 只接受一个年份（例如 2026），得到 %q", raw))
+	}
+	// 上界与 Document 的年份校验同一个范围：超出它，本年最后一天也构造不出来。
+	if year < 1 || year > 9999 {
+		return 0, usageErr(fmt.Errorf("--year %d 不在 [1, 9999] 内", year))
+	}
+	return year, nil
+}
+
+// fetchCalendarDocument 拉取并转换一年的日历数据。它不碰数据库。
+//
+// 返回的文档已经走过 ParseDocument 的校验：写库那一步拿到的必然是一份能通过
+// validate 的数据，网络与数据本身的问题都留在这一侧。
+func fetchCalendarDocument(ctx context.Context, year int) (calendarstore.Document, error) {
+	url := fmt.Sprintf("%s/%d.json", holidayCNBaseURL, year)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return calendarstore.Document{}, fmt.Errorf("构造拉取 %d 年日历数据的请求失败: %w", year, err)
+	}
+	resp, err := calendarSyncHTTPClient.Do(req)
+	if err != nil {
+		return calendarstore.Document{}, fmt.Errorf("拉取 %d 年日历数据失败: %w", year, err)
+	}
+	// 关闭错误无处可报：响应体已经读完，而读完之后的关闭失败不会改变同步结果。
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		// 数据源连这一年这一份文件都还没有。它与 days 为空是同一件事：
+		// 这一年还没发布，不是失败。
+		return validateCalendarDocument(pendingCalendarDocument(year))
+	default:
+		return calendarstore.Document{}, fmt.Errorf("拉取 %d 年日历数据失败: HTTP %d", year, resp.StatusCode)
+	}
+
+	var file holidayCNFile
+	if err = json.NewDecoder(resp.Body).Decode(&file); err != nil {
+		return calendarstore.Document{}, fmt.Errorf("解析 %d 年的 holiday-cn 数据失败: %w", year, err)
+	}
+	doc, err := holidayCNDocument(year, file)
+	if err != nil {
+		return calendarstore.Document{}, err
+	}
+	return validateCalendarDocument(doc)
+}
+
+// validateCalendarDocument 用导入那条路自己的校验器验一遍要写库的文档。
+//
+// 绕一圈 JSON 是刻意的：Import 吃的就是这份格式，用同一个 ParseDocument 校验，
+// 才不会出现「转换认为合法、导入时才发现不合法」——那时 Import 已经在事务里
+// 删掉了这一年的原有行。
+func validateCalendarDocument(doc calendarstore.Document) (calendarstore.Document, error) {
+	body, err := json.Marshal(doc)
+	if err != nil {
+		return calendarstore.Document{}, fmt.Errorf("序列化 %d 年的日历数据失败: %w", doc.Year, err)
+	}
+	valid, err := calendarstore.ParseDocument(bytes.NewReader(body))
+	if err != nil {
+		return calendarstore.Document{}, err
+	}
+	return valid, nil
+}
+
+// holidayCNDocument 把 holiday-cn 的一份文件换成要写库的文档（纯函数）。
+//
+// 数据源只给每一天「放不放假」（isOffDay），调休补班日要自己推：不是假期、又
+// 落在周六或周日，就是被挪来上班的那一天。落在周末的法定节日照常写
+// off_day: true 并保留名称——「这一天本来就休息」不能成为跳过它的理由，
+// 名称是账单解释「为什么这天算高峰」的依据。
+//
+// isOffDay 为 false 却不在周末的日子照样收下（off_day: false、
+// makeup_workday: false、name 保留）：它对「这天是不是上班」的判定没有影响，
+// 只影响 isMakeupWorkday()。数据源将来多出这样一天就整年导不进去，代价远大于
+// 收益。
+func holidayCNDocument(year int, file holidayCNFile) (calendarstore.Document, error) {
+	if file.Year != year {
+		return calendarstore.Document{}, fmt.Errorf(
+			"数据源返回的 year 是 %d，与要同步的 %d 年不一致：拉错了文件就不能拿它当这一年的判定", file.Year, year)
+	}
+	if len(file.Days) == 0 {
+		// 文件在、days 却是空的：数据源用这个形状表示「这一年还没发布」
+		// （未发布年份是 200 + 空数组，不是 404）。两个形状业务上是同一件事。
+		return pendingCalendarDocument(year), nil
+	}
+
+	sources := make(map[calendar.Date]holidayCNDaySource, len(file.Days))
+	outside := make([]calendar.Date, 0, len(file.Days))
+	for i, src := range file.Days {
+		date, err := parseHolidayCNDate(src.Date)
+		if err != nil {
+			return calendarstore.Document{}, fmt.Errorf("数据源第 %d 天: %w", i+1, err)
+		}
+		if _, dup := sources[date]; dup {
+			return calendarstore.Document{}, fmt.Errorf("数据源里 %s 出现了两次", date)
+		}
+		sources[date] = src
+		if date.Year != year {
+			outside = append(outside, date)
+		}
+	}
+	// 年外的日子排在最后，且按日期排序：输出与数据源里的先后无关，同一份输入
+	// 永远产出同一份文件。
+	sort.Slice(outside, func(i, j int) bool { return outside[i].String() < outside[j].String() })
+
+	days := make([]calendarstore.Day, 0, 366+len(outside))
+	// 这条路必须与覆盖检查（validateDays）用同一份日期列表：两处各算一遍的
+	// 话，闰年这类边界会在一边对、一边错。
+	for _, date := range calendarstore.DaysOfYear(year) {
+		src, ok := sources[date]
+		days = append(days, holidayCNDay(date, src, ok))
+	}
+	for _, date := range outside {
+		days = append(days, holidayCNDay(date, sources[date], true))
+	}
+
+	return calendarstore.Document{
+		Region: string(calendar.RegionCN),
+		Year:   year,
+		Status: string(calendar.YearSynced),
+		Source: "holiday-cn",
+		// 双源交叉校验不写：只有第二个源出现时它才有意义，现在写等于写一个
+		// 恒为 true 的字段。
+		SourcePaperURLs: file.Papers,
+		Days:            days,
+	}, nil
+}
+
+// holidayCNDay 把「数据源里有没有这一天」折成导入文件里的一天。
+func holidayCNDay(date calendar.Date, src holidayCNDaySource, inSource bool) calendarstore.Day {
+	if !inSource {
+		// 数据源没有这一天：周末按休息、平日按上班。两档都是「这一天没有
+		// 特殊安排」的意思，名称留空。
+		offDay := date.IsWeekend()
+		return calendarstore.Day{Date: date.String(), OffDay: &offDay}
+	}
+	offDay := src.IsOffDay
+	// 补班日是「不是假期、又落在周末」的那一天；其余日子都不补班。
+	makeup := !offDay && date.IsWeekend()
+	return calendarstore.Day{
+		Date:          date.String(),
+		Name:          src.Name,
+		OffDay:        &offDay,
+		MakeupWorkday: makeup,
+	}
+}
+
+// pendingCalendarDocument 是一份「这一年还没发布」的文档：只记年份状态，
+// 不带 days 与 source（那两种字段只用于已定论的年份）。
+func pendingCalendarDocument(year int) calendarstore.Document {
+	return calendarstore.Document{
+		Region: string(calendar.RegionCN),
+		Year:   year,
+		Status: string(calendar.YearPending),
+	}
+}
+
+// degradedCalendarDocument 是一份同步失败的记录。
+func degradedCalendarDocument(year int, cause error) calendarstore.Document {
+	return calendarstore.Document{
+		Region:    string(calendar.RegionCN),
+		Year:      year,
+		Status:    string(calendar.YearDegraded),
+		LastError: cause.Error(),
+	}
+}
+
+// parseHolidayCNDate 按 YYYY-MM-DD 解数据源里的一个日期。
+//
+// 与 store 里那份同一个判据：time.Parse 同时挡住格式不对（"2026-1-5"）与日期
+// 不成立（"2026-02-30"）两类输入，而这两类都不该被规范化成另一天。
+func parseHolidayCNDate(raw string) (calendar.Date, error) {
+	parsed, err := time.Parse("2006-01-02", raw)
+	if err != nil {
+		return calendar.Date{}, fmt.Errorf("日期 %q 不是 YYYY-MM-DD 格式: %w", raw, err)
+	}
+	date := calendar.Date{Year: parsed.Year(), Month: parsed.Month(), Day: parsed.Day()}
+	if !date.Valid() {
+		return calendar.Date{}, fmt.Errorf("%w: %s", calendar.ErrInvalidDate, date)
+	}
+	return date, nil
 }
 
 // calendarListTimeout 是列日历的时间上限。

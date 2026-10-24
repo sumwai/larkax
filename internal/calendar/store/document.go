@@ -62,8 +62,9 @@ type Day struct {
 	OffDay *bool `json:"off_day"`
 
 	// MakeupWorkday 是调休补班日（把周末挪来上班），它必然与 OffDay 为
-	// false 的日子配对。该列的取值由数据源按那一天是不是周末决定，
-	// 本包不替上游推断这条规则。
+	// false 的日子配对。该列的取值由数据源按那一天是不是周末决定；
+	// holiday-cn 只给「放不放假」，推断补班日那一步在
+	// `larkaxctl price calendar sync` 的转换里。
 	MakeupWorkday bool `json:"makeup_workday,omitempty"`
 }
 
@@ -176,7 +177,7 @@ func (d Document) validateDays() error {
 		}
 	}
 
-	for _, date := range daysOfYear(d.Year) {
+	for _, date := range DaysOfYear(d.Year) {
 		if !seen[date] {
 			missing = append(missing, date)
 		}
@@ -240,8 +241,13 @@ func parseDayDate(raw string) (calendar.Date, error) {
 	return date, nil
 }
 
-// daysOfYear 列出某一年公历上的每一天。
-func daysOfYear(year int) []calendar.Date {
+// DaysOfYear 列出某一年公历上的每一天。
+//
+// 导出是因为导入方（`larkaxctl price calendar sync`）补齐「数据源没有这一天」
+// 时也要生成同一条列表：那一份必须与覆盖检查用的是同一段循环，否则两处各算一
+// 遍，闰年这类边界会在一边对、一边错。用例另有自己的一份（见 document_test.go
+// 的 yearDays），那是刻意的交叉校验，不走这里。
+func DaysOfYear(year int) []calendar.Date {
 	start := time.Date(year, time.January, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(year+1, time.January, 1, 0, 0, 0, 0, time.UTC)
 

@@ -408,14 +408,16 @@ go run ./cmd/larkaxctl partition check  --months 3   # 只读体检，有问题�
 ## 分时计价的日历数据
 
 分时计价要判断某一天是不是工作日，而这件事不能靠星期推——调休把周末挪成了
-上班日。数据从文件导入：
+上班日。数据从公开数据源拉取，或者从文件导入：
 
 ```sh
+go run ./cmd/larkaxctl price calendar sync --year 2026
 go run ./cmd/larkaxctl price calendar import ./cn-2031.json
 ```
 
-文件格式、状态取值与落库语义见 [calendar-data.md](calendar-data.md)。
-**仓库里不带任何真实数据集**：数据从哪来由运维决定，这条命令只负责读文件写库。
+`sync` 从 holiday-cn 拉取一年并补成全年每一天的判定；`import` 用于手工维护与
+修正单日。文件格式、状态取值与落库语义见 [calendar-data.md](calendar-data.md)。
+**仓库里不带任何真实数据集。**
 
 ## 环境变量
 
@@ -1348,7 +1350,7 @@ ingress 规则下。同一个端口上还有管理面 `/admin/v1/*`，用单独�
 | `channel` | 上游渠道：`create` / `list`（`--all` 含已删）/ `get`（单条详情）/ `health`（健康与窗口内的用量）/ `update` / `enable` / `disable` / `delete`（软删）/ `restore`（`delete` 的逆操作）/ `sync-models`（从上游拉一次模型清单并落库）/ `upstream-models`（读库里那一份清单与同步状态）/ `adapters`（列出适配器类型）/ `probe`（落库之前探一次上游模型清单）；出站映射：`map`（`add` / `list` / `remove`） |
 | `model` | 模型目录：`create` / `list` / `get` / `update` / `delete` / `onboard`（一个事务里写完目录、渠道白名单、出站映射与两条价格规则）；入站别名（调用方写的名字 → 规范名）：`alias`（`add` / `remove` / `list`）；名字链路诊断：`trace` |
 | `alias` | 规范模型名到上游模型名的映射（旧入口，配置改用 `channel map`）：`create` / `list` / `update` / `delete` / `resolve` |
-| `price` | 计价规则：`add` / `list` / `show` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `list`） |
+| `price` | 计价规则：`add` / `list` / `show` / `update` / `enable` / `disable` / `explain`；兼管分时计价的日历数据：`calendar`（`import` / `sync` / `list`） |
 | `upstream-cost` | 上游成本规则（每条渠道每个模型按生效窗口与优先级挑一条）：`create` / `list` / `update` / `disable` |
 | `user` | 用户：`create` / `list` / `get` / `update`；全景：`inspect`（一个只读事务取齐账号、钱包、订阅、扣费顺序与 Key）；口令：`password` / `unlock`；销户：`delete`（`request` 打标可撤 / `revert` 撤回 / `purge` 匿名化，不可逆）；用户级履约操作：`plan`（`grant` 发放 / `list` 订阅 / `void` 作废 / `order` 扣费顺序的 `show` / `set`）、`wallet`（`show` / `credit` / `adjust` / `refund`）、`key`（`list` / `create` / `plans` 的 `show` / `set`）、`usage`（`events` / `requests`） |
 | `wallet` | 用户钱包：`create`（余额 0）/ `credit`（手工入账，走账本写分录）/ `adjust`（手工调账，走账本写分录）/ `refund`（退款，走账本写分录）/ `list`；商户提现：`payout`（`request` 申请并冻住待付 / `settle` 平台主动清算，一步建单并记账，直接落已批准 / `approve` 批准 / `reject` 驳回并解除冻结 / `paid` 打款，只放行已批准的单子）；支付通道：`payment`（`create` 下单 / `status` 查单，通道确认收款后才入账） |
@@ -1749,10 +1751,12 @@ runner 镜像自带。bash-completion 是 `make install` 用例要的：它靠�
 `vitest run` 约 40–75 秒、`eslint src` 约 10 秒。
 
 **变异测试另有一个独立的工作流**（`.github/workflows/mutation.yml`），它跑的是
-真的 gremlins，不是脚本自测。**它只对搬钱的代码自动跑**：`internal/ledger/`、
-`internal/billing/`、`internal/money/` 这三棵树（账本、计费、金额），加上
-`internal/pricing/`（给出单价）与 `internal/pipeline/`（算出结算额）。
-这五棵树之外的改动不自动跑：全清单一轮以小时计，而 `PKGS` 有三十多个包；
+真的 gremlins，不是脚本自测。**它只对搬钱的代码自动跑**：哪些目录算搬钱，由
+`scripts/check-mutation.sh` 里的 `MONEY_PKGS` 回答——账本、计费、金额、算出结算额、
+给出单价，以及 `internal/plans` 的结转算式。工作流用
+`scripts/check-mutation.sh --list-packages --money` 读这份清单，自己不另列前缀：
+两处各写一份，就会有一个包「改了钱却不量」，而界面上与「不需要跑」长得一样。
+这个范围之外的改动不自动跑：全清单一轮以小时计，而 `PKGS` 有三十多个包；
 让每个 PR 都自动跑一遍会把公开仓库的 runner 队列占住，而大多数改动与钱无关。
 要量别的包时，用 `workflow_dispatch` 手工给 `packages`。PR 自动轮还**按改动
 收窄**：只变异 PR 改到的那些生产文件，口径与分数怎么读见「变异测试」一节。
@@ -1767,12 +1771,13 @@ gremlins 版本、`workers=1`、系数 10、`--invert-logical`、每个包之前
 两处各写一份，刚出生就会漂成一个包都没量到。
 
 选包那一步在**每个 PR** 上都跑（几秒钟，不装工具、不起数据库），为的是让「这一轮
-不跑」看得见，并且**说清是哪一种不跑**：改动不涉及那五棵树；或者改动在树里、但
-没有任何 `PKGS` 条目覆盖。后者是兜底而不是常态——五棵树的根都在 `PKGS` 里，
-只有将来某棵树在清单里失去覆盖时才会出现；那时 summary 会列出那些目录，并提示
-把覆盖它们的包加进 `PKGS`。两种情形下变异 job 都显示为 **skipped**，不是「跑了且
-通过」。草稿 PR 不跑——还在改的代码不该占着 runner 跑几小时；工作流订阅了
-`ready_for_review`，标成 ready 的那一刻就会触发一轮。
+不跑」看得见，并且**说清是哪一种不跑**：改动不涉及 `MONEY_PKGS` 里的目录；或者
+改动在那些目录里、但没有任何 `PKGS` 条目覆盖。后者是兜底而不是常态——`MONEY_PKGS`
+的每一条都有 `PKGS` 条目覆盖，这一点由 `scripts/check-mutation.test.sh` 的结构断言
+核着（前缀没有覆盖时必须变红）；只有将来某条前缀在清单里失去覆盖时才会出现，那时
+summary 会列出那些目录，并提示把覆盖它们的包加进 `PKGS`。两种情形下变异 job 都显示
+为 **skipped**，不是「跑了且通过」。草稿 PR 不跑——还在改的代码不该占着 runner 跑
+几小时；工作流订阅了 `ready_for_review`，标成 ready 的那一刻就会触发一轮。
 
 **变异在 CI 上跑是常态，本地变异只作保底。** CI 在独立的 runner 工作区里跑，
 它的锁与本地不是同一个文件。本地那把锁按**克隆**一级：同一克隆的各棵工作树共享
@@ -1922,13 +1927,14 @@ v0.6.0 正常运行不报总数，所以实际看到的是「已完成 + 已用 
 一次「0.00% efficacy」看起来像真实结论。
 
 `scripts/check-mutation.sh` 因此固定 `workers=1`、系数 10，**不要自己拼
-`gremlins` 命令**：串行慢，但变异只对搬钱的改动跑（CI 里也只在那五棵树变动时
-自动跑），**慢而可信比快而误导好**。
+`gremlins` 命令**：串行慢，但变异只对搬钱的改动跑（CI 里也只在 `MONEY_PKGS`
+里的包变动时自动跑），**慢而可信比快而误导好**。
 
 ### CI 里怎么跑
 
-`.github/workflows/mutation.yml` 在 PR 上自动跑，触发范围是那五棵树（账本、
-计费、金额，加上 `internal/pricing` 与 `internal/pipeline`，理由见「CI 跑什么」）。
+`.github/workflows/mutation.yml` 在 PR 上自动跑，触发范围由脚本里的 `MONEY_PKGS`
+决定（账本、计费、金额、结算额、单价，加上 `internal/plans` 的结转算式；理由见
+「CI 跑什么」）。
 工作流从脚本的 `PINNED_GREMLINS_VERSION` 读版本再安装，脚本装完自己校验一遍；
 它调用同一个 `scripts/check-mutation.sh`——所以「CI 与本地是同一把尺子」不是
 靠两边记得同步，而是只有一份实现。
@@ -2314,11 +2320,11 @@ schema 替它做的。`TestGenerationOrNil` 补了「只有版本」与「只有
   `-`，overlay 实测连编译都过不去（`operator - not defined on "…" (untyped string
   constant)`）。就算它进了覆盖范围也只会记 `NOT VIABLE`，不存在能杀掉它的用例。
 
-**这四个包不在自动变异那五棵树里。** `.github/workflows/mutation.yml` 的
-`auto_prefixes` 只列了 ledger、billing、money、pipeline、pricing，PR 的自动轮
-不会选到它们；要量只能手工触发（`workflow_dispatch` 的 `packages` 填包名）或
-本地跑。所以表里这四行会停在入库的这一轮，改了它们不会自动更新——动这几个包时
-记得手工重跑并在表里更新。
+**上面这几个包不在自动变异的触发范围里。** `.github/workflows/mutation.yml` 的
+触发范围由 `scripts/check-mutation.sh` 的 `MONEY_PKGS` 决定（账本、计费、金额、
+结算额、单价、额度包结转），这几个包不在其中，PR 的自动轮不会选到它们；要量只能
+手工触发（`workflow_dispatch` 的 `packages` 填包名）或本地跑。所以表里这几行会
+停在入库的这一轮，改了它们不会自动更新——动这几个包时记得手工重跑并在表里更新。
 
 **`internal/config` 的三条存活都是真实缺口，这一包没有等价变异。** 两条是
 `RedactDSN` 里判断「这串是不是 URL 形式」的 `&&` 链（`config.go:309` 的两个运算符

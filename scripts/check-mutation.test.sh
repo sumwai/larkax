@@ -1271,7 +1271,7 @@ fi
 #         internal/billing）。这一条正是 #866 评审里的失败形态：精确相等会把
 #         「只改了计费代码」的 PR 判成「没有可跑的包」；
 #       - 整棵树里没有覆盖它的条目 → 什么都不打印、退出 1，选包步骤据此报出
-#         「在树里但没有可跑的包」，而不是混进「改动不涉及这五棵树」。
+#         「在树里但没有可跑的包」，而不是混进「改动不涉及 MONEY_PKGS」。
 match_one() {
   match_out=$(GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
     LOCK_FILE="$tmp/notadir/lock" bash "$SCRIPT" --list-packages --match "$1" 2>&1)
@@ -1335,6 +1335,88 @@ if [ "$suffix_rc" -eq 1 ] && [ -z "$suffix_out" ]; then
   ok
 else
   bad "--suffix —— 没有匹配时应空输出且退出 1，实际 rc=$suffix_rc 输出=<$suffix_out>"
+fi
+
+# 27b. `--list-packages --money`：PR 自动轮的**触发范围**也只从脚本读一份。
+#
+#      这一节防的是一次已经发生过的分叉：`internal/plans` 在 `PKGS` 里，却不在
+#      工作流自己列的前缀里——于是动了结转算式的 PR 照报「变异通过」，而那个包
+#      连分母都没进，也不告警（告警只覆盖「在前缀里、但没有 PKGS 条目」那一种）。
+#      判据四条：
+#        a) 每一行以 `/` 结尾，工作流直接拿它做 `case "$f" in "$pre"*)`；
+#        b) 去掉结尾 `/` 后 `--list-packages --match` 必须成功——这个前缀确实有
+#           PKGS 条目覆盖，否则「触发了却没有包可跑」会显示成跳过；
+#        c) 负控：把前缀换成 PKGS 里不存在的目录，**同一条检查必须红**。没有
+#           (c)，(b) 就分不清「检查通过」与「检查压根没看数据」（LESSONS 第 2、7 条）。
+#           负控另配两道前置：副本里真的换上了坏前缀、且副本的裸 `--list-packages`
+#           与原件逐字相同——分别挡「替换没生效」与「替换改到了 PKGS」两种假绿；
+#        d) `internal/plans` 在清单里——今天分叉的那一格，钉住它。
+money_out=$(GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+  LOCK_FILE="$tmp/notadir/lock" bash "$SCRIPT" --list-packages --money 2>&1)
+money_rc=$?
+if [ "$money_rc" -eq 0 ] && [ -n "$money_out" ]; then ok; else
+  bad "--money —— 应不依赖 gremlins/DSN/锁就跑成并打出前缀，实际 rc=$money_rc 输出=<$money_out>"
+fi
+malformed=$(printf '%s\n' "$money_out" | grep -v '/$' | grep .)
+if [ -z "$malformed" ]; then ok; else
+  bad "--money —— 这些行不以 / 结尾（工作流要用它做前缀匹配）：$(printf '%s' "$malformed" | tr '\n' ' ')"
+fi
+if printf '%s\n' "$money_out" | grep -qx 'internal/plans/'; then ok; else
+  bad "--money —— 清单里缺了 internal/plans：结转算式在那里，缺了就又会「改了钱却不量」"
+fi
+
+# check_money_prefixes <脚本>：对 `--money` 的每一行核 (b)。全部有覆盖返回 0；
+# 有前缀没有 PKGS 条目时打印它并返回 1。正控与负控调同一个函数——负控要红的
+# 就是这条判据本身，不是另写一段。
+check_money_prefixes() {
+  local script="$1" line pre rc=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      */) ;;
+      *) echo "前缀不以 / 结尾：$line"; rc=1; continue ;;
+    esac
+    pre="${line%/}"
+    if ! GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+      LOCK_FILE="$tmp/notadir/lock" bash "$script" --list-packages --match "$pre" >/dev/null 2>&1; then
+      echo "前缀 $line 没有任何 PKGS 条目覆盖"
+      rc=1
+    fi
+  done < <(GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+    LOCK_FILE="$tmp/notadir/lock" bash "$script" --list-packages --money 2>/dev/null)
+  return "$rc"
+}
+
+money_check=$(check_money_prefixes "$SCRIPT")
+if [ "$?" -eq 0 ]; then ok; else
+  bad "--money —— 有前缀没有 PKGS 条目覆盖：$(printf '%s' "$money_check" | tr '\n' ' ')"
+fi
+
+# 负控：把 MONEY_PKGS 里的 internal/plans 换成不存在的目录，同一条检查必须红。
+# 副本放在 $tmp 下，不动工作树。两道前置各自挡一种「负控假绿」：
+#   - 副本里真的换上了坏前缀：挡「替换压根没生效」；
+#   - 副本的裸 `--list-packages` 与原件逐字相同：挡「替换改到了 PKGS」。
+# 后者不是假想：不带地址的 sed 会把两份清单里的 `internal/plans` 一起换掉，
+# 于是 `--match` 反而成功、负控看起来全绿，诊断还会指向判据而不是替换。
+neg_script="$tmp/check-mutation-neg.sh"
+awk '
+  /^MONEY_PKGS=\(/ { inmoney = 1 }
+  inmoney && /^  internal\/plans$/ { print "  internal/no-such-money-pkg"; next }
+  inmoney && /^\)$/ { inmoney = 0 }
+  { print }
+' "$SCRIPT" > "$neg_script"
+if bash "$neg_script" --list-packages --money 2>/dev/null | grep -qx 'internal/no-such-money-pkg/'; then ok; else
+  bad "--money 负控 —— 临时副本里没换上那个不存在的目录，下面的负控不成立"
+fi
+neg_bare=$(GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+  LOCK_FILE="$tmp/notadir/lock" bash "$neg_script" --list-packages 2>&1)
+if [ "$neg_bare" = "$list_out" ]; then ok; else
+  bad "--money 负控 —— 副本的 --list-packages 与原件不一致：替换改到了 PKGS，不只是 MONEY_PKGS"
+fi
+neg_out=$(check_money_prefixes "$neg_script")
+neg_rc=$?
+if [ "$neg_rc" -ne 0 ] && printf '%s' "$neg_out" | grep -q 'internal/no-such-money-pkg/'; then ok; else
+  bad "--money 负控 —— 前缀不在 PKGS 里时结构断言应报出它并失败，实际 rc=$neg_rc 输出=<$neg_out>"
 fi
 
 # ── 按改动收窄（#883）────────────────────────────────────────────────────
