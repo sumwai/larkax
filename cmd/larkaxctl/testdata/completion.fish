@@ -112,17 +112,21 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from plugin; and not __fish_see
 complete -c larkaxctl -n '__fish_seen_subcommand_from plugin; and __fish_seen_subcommand_from kv; and not __fish_seen_subcommand_from delete get set' -a 'get'
 complete -c larkaxctl -n '__fish_seen_subcommand_from plugin; and __fish_seen_subcommand_from kv; and not __fish_seen_subcommand_from delete get set' -a 'set'
 complete -c larkaxctl -n '__fish_seen_subcommand_from plugin; and __fish_seen_subcommand_from kv; and not __fish_seen_subcommand_from delete get set' -a 'delete'
-complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show update' -a 'add'
-complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show update' -a 'list'
-complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show update' -a 'show'
-complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show update' -a 'update'
-complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show update' -a 'enable'
-complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show update' -a 'disable'
-complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show update' -a 'explain'
-complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show update' -a 'calendar'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show tier update' -a 'add'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show tier update' -a 'list'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show tier update' -a 'show'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show tier update' -a 'update'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show tier update' -a 'enable'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show tier update' -a 'disable'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show tier update' -a 'explain'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show tier update' -a 'tier'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and not __fish_seen_subcommand_from add calendar disable enable explain list show tier update' -a 'calendar'
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from calendar; and not __fish_seen_subcommand_from import list sync' -a 'import'
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from calendar; and not __fish_seen_subcommand_from import list sync' -a 'sync'
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from calendar; and not __fish_seen_subcommand_from import list sync' -a 'list'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from tier; and not __fish_seen_subcommand_from add list remove' -a 'add'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from tier; and not __fish_seen_subcommand_from add list remove' -a 'list'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from tier; and not __fish_seen_subcommand_from add list remove' -a 'remove'
 complete -c larkaxctl -n '__fish_seen_subcommand_from secret; and not __fish_seen_subcommand_from rotate' -a 'rotate'
 complete -c larkaxctl -n '__fish_seen_subcommand_from settings; and not __fish_seen_subcommand_from get list set' -a 'list'
 complete -c larkaxctl -n '__fish_seen_subcommand_from settings; and not __fish_seen_subcommand_from get list set' -a 'get'
@@ -404,6 +408,15 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_sub
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from explain' -l channel -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from explain' -l model -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from explain' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from tier; and __fish_seen_subcommand_from add' -l above -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from tier; and __fish_seen_subcommand_from add' -l by -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from tier; and __fish_seen_subcommand_from add' -l cr -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from tier; and __fish_seen_subcommand_from add' -l cw -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from tier; and __fish_seen_subcommand_from add' -l in -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from tier; and __fish_seen_subcommand_from add' -l out -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from tier; and __fish_seen_subcommand_from add' -l reasoning -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from tier; and __fish_seen_subcommand_from add' -l unit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from tier; and __fish_seen_subcommand_from remove' -l by -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l by -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l channel -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l clear-effective-to

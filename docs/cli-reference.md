@@ -645,12 +645,15 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
   维度表示「且」：`weekdays`（`mon` … `sun`，可写多个）、`window`
   （`HH:MM-HH:MM`，整点边界，可跨零点）、`day_kind`（`work` / `rest`）、
   `holidays`（节假日名，与 `holidayName()` 的返回值逐字比较，且不是补班日）、
-  `min_context_tokens`（输入上下文 token 门槛，含缓存读写）。单价只写要改的
-  键，没写的键沿用 `base`。
+  `min_context_tokens`（输入上下文 token 门槛，含缓存读写，口径是达到即命中
+  `>=`）。单价只写要改的键，没写的键沿用 `base`。
 
 **同一维度上两条覆盖重叠会被拒**（门槛之间例外：门槛高的自动先命中，
 不必给 `position`）。不同维度同时成立时用 `position` 裁决，大的优先；跨维度的
 覆盖必须显式给 `position`。
+
+分档不必手改整张表：`price tier` 往 `overrides` 里增删带门槛的那几段（见
+[`price tier`](#price-tier)）。
 
 `day_kind` 与 `holidays` 读日历数据：那一年没有导入、或当天查不到记录时求值失败，
 不会退回某一档价（见 [calendar-data.md](calendar-data.md)）。
@@ -730,6 +733,38 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
 `--effective-to` 不开简写：`-c` 在别的命令行里既可能是 `channel` 也可能是
 `config`、`count`，挑错作用域会把一条规则挂到另一个渠道上；`--effective-to` 是边界
 参数，写短了容易看错。
+
+#### `price tier`
+
+管理一条计价规则的阶梯档位：往结构化定价表的 `overrides` 里增删带
+`min_context_tokens` 的那几段。规则必须先有一张表（`price add --schedule-file`），
+手写表达式改不出可枚举的档，命令直接报错。
+
+`larkaxctl price tier add gemini-flash --above 200000 --in 0.2 --out 0.8 --by alice`
+追加一段，stdout 打出新段号；`price tier list <规则名 或 ID>` 列出全部阶梯档，
+每段的段号、门槛与它改写的单价；`price tier remove <规则名 或 ID> <段号> --by alice`
+删掉一段。定位符与 `price update` 同一套：纯数字按 ID，其余按名字查，命中多条时报错
+并列出候选。
+
+`--above` 的口径是**达到即命中**：这次请求的输入上下文（`prompt` + 缓存读 +
+缓存写）等于该值时就走这一档。门槛高的自动先命中，不必按顺序录入，也不用给
+`position`——按 100000、200000 先后 add，200000 那一档排在前面。同一门槛写两次
+会被拒：两条同时命中时谁赢没有唯一答案。
+
+单价旗标与 `price add` 是同一组，单位默认每百万 token，`--unit token` 表示给的
+就是每 token 的价。**只写要改的键**：没写的键沿用 `base`，不是写成 0。给了 `base`
+里没有的键会被拒——那一档没有兜底价可沿用。
+
+段号从 1 开始，是这条规则 `overrides` 数组里的位置，`price tier list` 打出来的
+段号可以直接给 `remove`。`list` 按命中次序（门槛从高到低）排列，单价按落库口径
+（每 token）打印，与 `price show` 看到的是同一份。带门槛的覆盖都会列在这里——
+包括同时带时段或星期条件的组合档（峰段 + 门槛），`remove` 删的是整段覆盖。
+`remove` 只删阶梯档：选中的那段没有门槛时报错，其余覆盖用
+`price update --schedule-file` 改写整张表。
+
+`add` 与 `remove` 都要 `--by`：这几次写入会重新编译表达式、留一版
+`pricing_rule_versions`，`changed_by` 记的就是它。`list` 的 `-o json` 每段给
+`segment`、`above` 与 `prices`（每 token）。
 
 #### `price calendar`
 
