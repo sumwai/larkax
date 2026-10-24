@@ -96,13 +96,26 @@ func ownID(r commandRun) int64 {
 	return id
 }
 
-// maskID 把 id 作为一个**独立的数**从 s 里抹掉：`id=7` 与单独一行的 `7` 都要
-// 抹，而 `70` 里的那个 7 不能动——不然抹出来的两份文本会「碰巧一样」。
+// maskID 把 id 抹成 `<ID>`：stdout 整个就是一个数时抹整行，其余只抹标了
+// 「这是 id」的位置（`id=7`）。
+//
+// # 为什么不是「所有独立的数」
+//
+// 同一个数也可能出现在别的字段里：「这条规则没有覆盖 3 个计价项」。一条用例
+// 自己建出来的 id 恰好是 3 时，把那句里的 3 也抹掉，两次运行的输出就会一处
+// 抹、一处不抹，于是**假红**——整包跑时 id 大、撞不上，只用 `-run` 过滤跑
+// 就现形（见 LESSONS.md 第 16 条：整包绿不等于这条用例在干活）。
+//
+// 带标签的位置不会被别的字段借用，所以只认它们。
 func maskID(s string, id int64) string {
 	if id == 0 {
 		return s
 	}
-	return regexp.MustCompile(`\b`+strconv.FormatInt(id, 10)+`\b`).ReplaceAllString(s, "<ID>")
+	num := strconv.FormatInt(id, 10)
+	if strings.TrimSpace(s) == num {
+		return strings.Replace(s, num, "<ID>", 1)
+	}
+	return regexp.MustCompile(`(?i)\bid\s*[=:]\s*`+num+`\b`).ReplaceAllString(s, "id=<ID>")
 }
 
 // errorText 把「没有错误」也变成一个可比较的值。

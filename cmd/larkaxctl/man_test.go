@@ -22,7 +22,7 @@ import (
 // 于是产物由 `go test` 生成，落盘的去向由环境变量 LARKAX_MAN_OUT 给：
 //
 //	go test -count=1 -run '^TestGenerateManPages$' ./cmd/larkaxctl/   # 只核对，不落盘
-//	LARKAX_MAN_OUT=man go test -count=1 -run '^TestGenerateManPages$' ./cmd/larkaxctl/
+//	LARKAX_MAN_OUT=man/man1 go test -count=1 -run '^TestGenerateManPages$' ./cmd/larkaxctl/
 //
 // 同步由 scripts/check-man-pages.sh 管（重新生成 → 与 man/ 比对 → 变了就红），
 // 与 cargo 的 validate-man.sh 是同一个形状。LARKAX_MAN_OUT 给相对路径时按**仓库根**
@@ -169,9 +169,9 @@ func TestGenerateManPages(t *testing.T) {
 		t.Logf("已渲染 %d 页；%s 没设，没有落盘（只核对了源文件与注册表）", len(files), manOutEnv)
 		return
 	}
-	// 相对路径按**仓库根**算，不按本包目录：人写 LARKAX_MAN_OUT=man 时想的是
-	// 仓库根下那个 man/，而 go test 跑测试用的当前目录是包目录（cmd/larkaxctl），
-	// 那样会凭空多出一个 cmd/larkaxctl/man/。
+	// 相对路径按**仓库根**算，不按本包目录：人写 LARKAX_MAN_OUT=man/man1 时想的是
+	// 仓库根下那个 man/man1，而 go test 跑测试用的当前目录是包目录（cmd/larkaxctl），
+	// 那样会凭空多出一个 cmd/larkaxctl/man/man1。
 	if !filepath.IsAbs(out) {
 		out = filepath.Join(moduleRoot(t), out)
 	}
