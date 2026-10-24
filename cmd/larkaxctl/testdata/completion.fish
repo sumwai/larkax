@@ -381,7 +381,10 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from plugin; and __fish_seen_su
 complete -c larkaxctl -n '__fish_seen_subcommand_from plugin; and __fish_seen_subcommand_from publish' -l key -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plugin; and __fish_seen_subcommand_from publish' -l priority -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l by -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l cache-read -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l cache-write -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l channel -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l completion -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l disabled
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l effective-from -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l effective-to -r
@@ -389,17 +392,23 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_sub
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l models -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l name -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l priority -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l prompt -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l reasoning -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l schedule-file -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l scope
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l unit
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from explain' -l at -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from explain' -l channel -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from explain' -l model -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from explain' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l by -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l cache-read -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l cache-write -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l channel -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l clear-effective-to
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l clear-schedule
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l completion -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l disable
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l effective-from -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l effective-to -r
@@ -409,8 +418,11 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_sub
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l models -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l name -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l priority -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l prompt -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l reasoning -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l schedule-file -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l scope
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l unit
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from rotate' -l apply
 complete -c larkaxctl -n '__fish_seen_subcommand_from rotate' -l batch-size -r
@@ -629,7 +641,9 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from ledger; and __fish_seen_su
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from create' -l asset -x -a 'CNY'
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from void' -l status -x -a 'expired canceled'
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l scope -x -a 'platform merchant channel'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from create' -l unit -x -a 'mtok token'
 complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l scope -x -a 'platform merchant channel'
+complete -c larkaxctl -n '__fish_seen_subcommand_from price; and __fish_seen_subcommand_from update' -l unit -x -a 'mtok token'
 complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot; and __fish_seen_subcommand_from allowlist' -l direction -x -a 'request response'
 complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot; and __fish_seen_subcommand_from allowlist' -l surface -x -a 'chat decision'
 complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot; and __fish_seen_subcommand_from get' -l direction -x -a 'request response'
