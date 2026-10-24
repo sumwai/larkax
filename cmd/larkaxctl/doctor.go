@@ -1823,20 +1823,9 @@ func doctorEndpointNames() []string {
 //
 // 由 doctorEndpointNames() 算出来而不是另写一份字面量：手写的那一份在清单变动
 // 之后不会跟着变，而「报错里列的还是老的那几条」没有任何东西会报出来。
+// 分隔规则在 joinChoiceNames，与 --format 那份共用。
 func doctorEndpointChoices() string {
-	names := doctorEndpointNames()
-	var b strings.Builder
-	for i, name := range names {
-		if i > 0 {
-			if i == len(names)-1 {
-				b.WriteString(" 或 ")
-			} else {
-				b.WriteString("、")
-			}
-		}
-		b.WriteString(name)
-	}
-	return b.String()
+	return joinChoiceNames(doctorEndpointNames())
 }
 
 func lookupDoctorEndpoint(name string) (doctorEndpointSpec, error) {
