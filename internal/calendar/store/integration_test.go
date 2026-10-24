@@ -465,45 +465,60 @@ func TestReimportDropsDaysTheNewFileNoLongerHas(t *testing.T) {
 
 // ── 年份状态的四个取值各自怎么来 ────────────────────────────────────────
 
+// 年份状态取自 calendar_years 那一行，而不是从数据行推出来的。
+//
+// 做法是直接改那一行（原生 SQL，不经写入路径），而数据行一直是空的：三种非
+// synced 取值挨个写一遍，读回来的状态与那一天落到的 unknown 成因都跟着变。
 func TestYearStateComesFromTheRow(t *testing.T) {
 	db := testDB(t)
+	ctx := context.Background()
 	year := newYear(t, db)
 	cal := newCalendar(t, db)
 	day := calendar.Date{Year: year, Month: 6, Day: 15}
 
-	// 顺序按「谁能覆盖谁」排：conflict 与 synced 一样是有定论（见
-	// runPriceCalendarSync 上的状态机表），所以它必须排在 pending / degraded
-	// 之后——排在前面的话，后面那一步会被守卫挡住，用例测的就不是它了。
-	steps := []struct {
-		name   string
-		doc    *Document
+	if got := yearState(t, db, year); got != calendar.YearUnknown {
+		t.Errorf("库里没有这一年时状态 = %q，期望 unknown", got)
+	}
+
+	cases := []struct {
+		status string
 		state  calendar.YearState
 		reason calendar.UnknownReason
 	}{
-		{"从没同步过", nil, calendar.YearUnknown, calendar.ReasonYearUnknown},
-		{"公告未发布", &Document{Region: "CN", Year: year, Status: "pending"}, calendar.YearPending, calendar.ReasonYearPending},
-		{"同步失败", &Document{Region: "CN", Year: year, Status: "degraded", LastError: "拉取超时"}, calendar.YearDegraded, calendar.ReasonYearDegraded},
-		{"双源不一致", &Document{Region: "CN", Year: year, Status: "conflict", SourcesAgree: boolPtr(false)}, calendar.YearConflict, calendar.ReasonYearConflict},
+		{"pending", calendar.YearPending, calendar.ReasonYearPending},
+		{"degraded", calendar.YearDegraded, calendar.ReasonYearDegraded},
+		{"conflict", calendar.YearConflict, calendar.ReasonYearConflict},
 	}
-	for _, step := range steps {
-		if step.doc != nil {
-			importDoc(t, db, *step.doc)
-		}
-		if got := yearState(t, db, year); got != step.state {
-			t.Errorf("%s：年份状态 = %q，期望 %q", step.name, got, step.state)
-		}
-		status := lookup(t, cal, day)
-		if status.Kind != calendar.DayUnknown {
-			t.Errorf("%s：判定 = %q，期望 unknown", step.name, status.Kind)
-		}
-		if status.Reason != step.reason {
-			t.Errorf("%s：成因 = %q，期望 %q", step.name, status.Reason, step.reason)
-		}
+	for _, tc := range cases {
+		t.Run(tc.status, func(t *testing.T) {
+			if _, err := db.ExecContext(ctx, `
+				INSERT INTO calendar_years (region, year, status, day_count)
+				VALUES ('CN', $1, $2, 0)
+				ON CONFLICT (region, year) DO UPDATE
+					SET status = EXCLUDED.status, day_count = EXCLUDED.day_count`,
+				year, tc.status); err != nil {
+				t.Fatalf("直接改写年份行失败: %v", err)
+			}
+
+			if got := yearState(t, db, year); got != tc.state {
+				t.Errorf("年份状态 = %q，期望 %q", got, tc.state)
+			}
+			status := lookup(t, cal, day)
+			if status.Kind != calendar.DayUnknown {
+				t.Errorf("判定 = %q，期望 unknown", status.Kind)
+			}
+			if status.Reason != tc.reason {
+				t.Errorf("成因 = %q，期望 %q", status.Reason, tc.reason)
+			}
+			// 数据行一直是空的：状态只能来自 calendar_years 那一行。
+			if got := countYearRows(t, db, year); got != 0 {
+				t.Errorf("这一年名下有 %d 行数据，用例的前提（状态不能从数据行推出）不成立", got)
+			}
+		})
 	}
 
 	// 最后灌一份完整数据：状态翻成 synced，那一天也就有判定了。
-	doc := syncedDoc(year)
-	importDoc(t, db, doc)
+	importDoc(t, db, syncedDoc(year))
 	if got := yearState(t, db, year); got != calendar.YearSynced {
 		t.Errorf("导入完整数据后年份状态 = %q，期望 synced", got)
 	}

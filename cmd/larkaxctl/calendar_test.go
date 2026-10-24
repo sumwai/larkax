@@ -1214,8 +1214,10 @@ func TestPriceCalendarSyncKeepsSyncedYearWhenSourceSaysUnpublished(t *testing.T)
 			if got := exitCode(syncErr); got != exitOK {
 				t.Errorf("退出码 = %d，期望 %d（「没写」不是失败）", got, exitOK)
 			}
-			if !strings.Contains(stdout, "未发布") || !strings.Contains(stdout, strconv.Itoa(tc.year)) {
-				t.Errorf("stdout 里没有说明这一格: %q", stdout)
+			// 整行逐字断言：措辞是给用户看的，改一个字都要在这里体现。
+			want := fmt.Sprintf("CN %d 年库里已有定论（synced），数据源这次表示未发布，未改动。\n", tc.year)
+			if !strings.Contains(stdout, want) {
+				t.Errorf("stdout 里应当有 %q，实际为 %q", want, stdout)
 			}
 
 			after := readCalendarYear(t, tc.year)
@@ -1334,8 +1336,10 @@ func TestPriceCalendarImportPendingKeepsSyncedYear(t *testing.T) {
 	if got := exitCode(importErr); got != exitOK {
 		t.Errorf("退出码 = %d，期望 %d（「没写」不是失败）", got, exitOK)
 	}
-	if !strings.Contains(stdout, "已有定论") || !strings.Contains(stdout, strconv.Itoa(year)) {
-		t.Errorf("stdout 里没有说明这一格: %q", stdout)
+	// 整行逐字断言：措辞是给用户看的，改一个字都要在这里体现。
+	want := fmt.Sprintf("CN %d 年库里已有定论（synced），这份文件只记年份状态，未改动。\n", year)
+	if !strings.Contains(stdout, want) {
+		t.Errorf("stdout 里应当有 %q，实际为 %q", want, stdout)
 	}
 
 	after := readCalendarYear(t, year)
