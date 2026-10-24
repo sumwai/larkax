@@ -80,7 +80,7 @@ func (f priceSlotFlags) expression(given map[string]bool) (string, error) {
 		}
 		rate, shiftErr := decimalShift(raw, places)
 		if shiftErr != nil {
-			return "", fmt.Errorf("--%s %q 无法解析：%v", slot.flag, raw, shiftErr)
+			return "", fmt.Errorf("--%s %q 无法解析：%w", slot.flag, raw, shiftErr)
 		}
 		parts = append(parts, fmt.Sprintf("%q: %s", slot.key, rate))
 	}
