@@ -156,19 +156,23 @@ func fishCompletionScript(data completionData) string {
 	b.WriteString("complete -c larkaxctl -f\n\n")
 
 	// 一级命令不能挂 `__fish_use_subcommand`：fish 3.7 的实现只判「命令行里还
-	// 没有非 `-*` 的词」，它不知道哪个词是选项的取值。于是 `--env-file x ` 里的
+	// 没有非选项的词」，它不知道哪个词是选项的取值。于是 `--env-file x ` 里的
 	// `x` 被当成已经敲了位置参数，一级命令从此不再补。
 	//
 	// 改成「已出现的词里没有一级命令名」后，`--env-file x `、`--format json `
 	// 与空命令行一样给全部一级命令。代价是取值恰好等于某个命令名时
 	// （`--env-file channel `）那个词被当成子命令，真 fish 3.7.0 上实测给 16 条
-	// channel 动词而不是 27 条一级命令——冤枉但无害。
+	// 动词、27 条一级命令一条都没有；这一格的候选不对，取值本身照常生效，
+	// 照着候选敲下去是参数错。
 	//
-	// 也考虑过生成一个跳过取值位的判定函数（`commandline -poc` 时遇到
-	// `--env-file` / `--format` 就吞掉下一个词）。正格上它同样对，但
-	// `--env-file channel ` 会给两堆候选：顶层条件与 channel 路径条件同时为真，
-	// 真 fish 3.7.0 上实测 43 条（27 条一级命令 + 16 条动词）。除了这一格更糟，
-	// 还要往生成物里塞一个函数、多维护一份「哪些全局选项吃取值」的清单。
+	// 也考虑过生成一段跳过取值位的 shell 判定（`commandline -poc` 时遇到
+	// `--env-file` / `--format` 就吞掉下一个词）。两格的方向相反，真 fish 3.7.0
+	// 上实测：`--env-file channel ` 上这一版更糟——只给 16 条候选，一条一级命令
+	// 都没有；判定版给 43 条（27 条一级命令 + 那 16 条），集合严格包含这一版。
+	// `larkaxctl foo `（拼错的命令）上判定版更糟——给 0 条，这一版给 27 条。
+	// 不选判定版，是因为要在生成物里多写一段依赖 `commandline -poc` 语义的 shell
+	// 代码（引号、`--opt=value`、短选项都得自己处理），而这两格都是边缘输入；
+	// 一行条件换那一段，划得来。
 	topCondition := fishTopLevelCondition(data.commands)
 	for _, command := range data.commands {
 		fmt.Fprintf(&b, "complete -c larkaxctl -n %s -a %s",
@@ -244,8 +248,8 @@ func fishCompletionScript(data completionData) string {
 // 时补一级命令。
 //
 // 命令名从 data.commands 取，与 `-a` 行同一来源，不另抄一份清单——两处分家时，
-// 漏掉的那条命令会被别的命令名的存在「掩护」掉，表现是 Tab 里少一条而敲下去
-// 仍能跑。
+// Tab 里的一级命令与条件认的一级命令会对不上，而两种错法都只在真 shell 里
+// 看得出来。
 func fishTopLevelCondition(commands []completionCommand) string {
 	names := make([]string, 0, len(commands))
 	for _, command := range commands {

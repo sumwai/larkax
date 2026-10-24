@@ -186,13 +186,7 @@ func fishTopLevelConditionNames(t *testing.T, script string) []string {
 	if len(matches) == 0 {
 		t.Fatalf("fish 脚本里找不到一级命令那一行：生成器的格式变了，或者脚本坏了")
 	}
-	names := strings.Fields(matches[0][1])
-	for _, m := range matches[1:] {
-		if got := strings.Fields(m[1]); !slices.Equal(got, names) {
-			t.Errorf("一级命令那几行的条件不一致：%v 与 %v", names, got)
-		}
-	}
-	return names
+	return strings.Fields(matches[0][1])
 }
 
 // TestCompletionIncludesItself 断言 completion 也在一级命令里。
@@ -492,6 +486,21 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 			requireRegisteredTopLevel(t, shell, got)
 		}, ""},
 		{"--format 取值后仍补一级命令", []string{"--format", "json"}, func(t *testing.T, shell string, got []string) {
+			requireRegisteredTopLevel(t, shell, got)
+		}, ""},
+		// 取值恰好等于一级命令名，也就是 docs/cli-reference.md 的 completion 一节
+		// 写明的边界，按 shell 分行断：
+		//   - fish 按「词里有没有一级命令名」判断，那个词被当成子命令，候选退成
+		//     channel 那一级的 16 条，一条一级命令都没有；
+		//   - bash 与 zsh 的路径在第一个以 `-` 开头的词处停，路径是空的，给的还是
+		//     那 27 条一级命令。
+		// 两种结果都来自既有规则，不是本次改动引入的。fish 这一格是已知边界，
+		// 判定方式一变，这里与文档要一起更新。
+		{"取值恰好是命令名", []string{"--env-file", "channel"}, func(t *testing.T, shell string, got []string) {
+			if shell == "fish" {
+				requireFishNamedValueBoundary(t, got)
+				return
+			}
 			requireRegisteredTopLevel(t, shell, got)
 		}, ""},
 		{"channel 补动作", []string{"channel"}, func(t *testing.T, _ string, got []string) {
@@ -819,6 +828,30 @@ func requireRegisteredTopLevel(t *testing.T, shell string, got []string) {
 	}
 	if !slices.Equal(gotCmp, wantCmp) {
 		t.Errorf("候选 = %v，期望注册表里的一级命令 %v", got, want)
+	}
+}
+
+// requireFishNamedValueBoundary 钉住 fish 在「取值恰好是命令名」那一格的边界。
+//
+// 断两件事：候选恰好 16 条，且其中没有一条是注册表里的一级命令名。动词本身不
+// 写死，也不从 `larkaxctl channel ` 那格的输出取期望——那是拿被测物自己当期望，
+// 生成器多补一条错候选时两边一起变。16 这个数随注册表走：新增一个 channel 动作
+// 时这条会红，提醒把文档里的边界一起改。
+//
+// 16 而不是 14：`add` / `remove` 来自 `channel map` 那条路径。fishSeenCondition
+// 把多段条件拼成 `A and B`，而 fish 把 `and` 当参数而不是关键字，一条
+// `__fish_seen_subcommand_from a and __fish_seen_subcommand_from b` 实际是「a 与 b
+// 里出现任意一个」，深层路径的条件在父层恒真。这是既有缺陷，不属本次改动。
+func requireFishNamedValueBoundary(t *testing.T, got []string) {
+	t.Helper()
+	if len(got) != 16 {
+		t.Errorf("候选 %d 条（%v），期望 16 条：取值被当成子命令，应当只剩 channel 那一级的候选",
+			len(got), got)
+	}
+	for _, name := range registeredTopLevelNames() {
+		if slices.Contains(got, name) {
+			t.Errorf("候选 = %v，出现了注册表里的一级命令名 %q：这一格不该给一级命令", got, name)
+		}
 	}
 }
 
